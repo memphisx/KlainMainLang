@@ -32,16 +32,22 @@
 extern void *__kml_map_str_create(void);
 extern void __kml_map_str_set(void *m, const char *k, int64_t v);
 // The shared handler-invocation core: builds the HttpRequest, calls the user
-// handler, returns the response object pointer. Reads of its fields go through
-// the typed getters below (specialized to the handler's return type).
-extern void *__kml_h2_dispatch(const char *method, const char *path,
-                               void *headers, const char *body, int64_t body_len);
-extern int64_t __kml_h2_resp_status(void *resp);
-extern const char *__kml_h2_resp_body(void *resp);
-extern int64_t __kml_h2_resp_bodylen(void *resp);
-extern int64_t __kml_h2_resp_hdr_count(void *resp);
-extern const char *__kml_h2_resp_hdr_name(void *resp, int64_t i);
-extern const char *__kml_h2_resp_hdr_val(void *resp, int64_t i);
+// handler, returns the response object pointer, and reads its fields through the
+// typed getters — all specialized per-server to the handler's return type. To
+// let more than one h2 server (TDD-00191 Stage 4) route to its own handler, the
+// IR emits a suffixed set per server and passes a vtable of their addresses into
+// __kml_h2_session_server_new; on_frame_recv calls through the connection's
+// vtable rather than fixed global symbols.
+typedef struct {
+	void *(*dispatch)(const char *method, const char *path, void *headers,
+	                  const char *body, int64_t body_len);
+	int64_t (*resp_status)(void *resp);
+	const char *(*resp_body)(void *resp);
+	int64_t (*resp_bodylen)(void *resp);
+	int64_t (*resp_hdr_count)(void *resp);
+	const char *(*resp_hdr_name)(void *resp, int64_t i);
+	const char *(*resp_hdr_val)(void *resp, int64_t i);
+} h2_disp_vtbl;
 
 // --- per-stream request accumulation ----------------------------------------
 typedef struct {
@@ -59,6 +65,7 @@ typedef struct {
 	int64_t (*rd)(void *io, void *buf, size_t n);  // transport read  (NULL => raw fd)
 	int64_t (*wr)(void *io, const void *buf, size_t n); // transport write
 	void *io;                                    // transport handle (SSL*) or NULL
+	const h2_disp_vtbl *disp;                    // per-server handler bridge (TDD-00191 Stage 4)
 } h2_conn;
 
 static char *dupn(const char *s, size_t n) {
@@ -175,7 +182,7 @@ static void submit_number_header(nghttp2_nv *nv, const char *name, char *valbuf)
 
 static int on_frame_recv(nghttp2_session *session, const nghttp2_frame *frame,
                          void *user_data) {
-	(void)user_data;
+	h2_conn *c = (h2_conn *)user_data;
 	if (!(frame->hd.flags & NGHTTP2_FLAG_END_STREAM)) return 0;
 	if (frame->hd.type != NGHTTP2_HEADERS && frame->hd.type != NGHTTP2_DATA) {
 		return 0;
@@ -184,27 +191,29 @@ static int on_frame_recv(nghttp2_session *session, const nghttp2_frame *frame,
 	h2_req *r = nghttp2_session_get_stream_user_data(session, sid);
 	if (!r) return 0;
 
-	// Run the shared handler core inline (V1: synchronous handlers).
-	void *resp = __kml_h2_dispatch(r->method ? r->method : "GET",
-	                               r->path ? r->path : "/",
-	                               r->headers,
-	                               r->body ? r->body : "",
-	                               (int64_t)r->body_len);
-	int64_t status = __kml_h2_resp_status(resp);
-	const char *body = __kml_h2_resp_body(resp);
-	int64_t blen = __kml_h2_resp_bodylen(resp);
+	// Run the shared handler core inline (V1: synchronous handlers), routed
+	// through this connection's per-server bridge vtable (TDD-00191 Stage 4).
+	const h2_disp_vtbl *d = c->disp;
+	void *resp = d->dispatch(r->method ? r->method : "GET",
+	                         r->path ? r->path : "/",
+	                         r->headers,
+	                         r->body ? r->body : "",
+	                         (int64_t)r->body_len);
+	int64_t status = d->resp_status(resp);
+	const char *body = d->resp_body(resp);
+	int64_t blen = d->resp_bodylen(resp);
 
 	char statusbuf[16];
 	snprintf(statusbuf, sizeof(statusbuf), "%lld", (long long)status);
 	/* :status plus any response headers the handler set (TDD-00139 Stage 2). */
-	int64_t hn = __kml_h2_resp_hdr_count(resp);
+	int64_t hn = d->resp_hdr_count(resp);
 	size_t nvn = (size_t)(1 + (hn > 0 ? hn : 0));
 	nghttp2_nv *nva = calloc(nvn, sizeof(nghttp2_nv));
 	if (!nva) return 0;
 	submit_number_header(&nva[0], ":status", statusbuf);
 	for (int64_t i = 0; i < hn; i++) {
-		const char *hname = __kml_h2_resp_hdr_name(resp, i);
-		const char *hval = __kml_h2_resp_hdr_val(resp, i);
+		const char *hname = d->resp_hdr_name(resp, i);
+		const char *hval = d->resp_hdr_val(resp, i);
 		if (!hname || !hval) { hname = ""; hval = ""; }
 		nva[1 + i].name = (uint8_t *)hname;
 		nva[1 + i].namelen = strlen(hname);
@@ -251,13 +260,15 @@ static int on_stream_close(nghttp2_session *session, int32_t stream_id,
 // SETTINGS frame. Returns the h2_conn* or NULL.
 void *__kml_h2_session_server_new(int fd, void *io,
                                   int64_t (*rd)(void *, void *, size_t),
-                                  int64_t (*wr)(void *, const void *, size_t)) {
+                                  int64_t (*wr)(void *, const void *, size_t),
+                                  const h2_disp_vtbl *disp) {
 	h2_conn *c = calloc(1, sizeof(h2_conn));
 	if (!c) return NULL;
 	c->fd = fd;
 	c->io = io;
 	c->rd = rd;
 	c->wr = wr;
+	c->disp = disp;
 
 	nghttp2_session_callbacks *cbs;
 	nghttp2_session_callbacks_new(&cbs);

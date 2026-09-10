@@ -1,7 +1,5 @@
 package llvm
 
-import "runtime"
-
 // runtime_ffi.go — libdl decls for node:ffi (TDD-00164). dlopen/dlsym/dlclose
 // are the exact ensure*()-declared-libc-primitive shape os/fs already use. On
 // Linux the historical -ldl is still requested (a no-op stub archive on glibc
@@ -14,7 +12,7 @@ import "runtime"
 // Linux and 0x4 on macOS (both are the default there anyway — passed
 // explicitly so the emitted IR states the intended semantics).
 func ffiRTLDFlags() int {
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 0x2 | 0x4
 	}
 	return 0x2
@@ -26,7 +24,7 @@ func (e *Emitter) ensureFFIDl() {
 		return
 	}
 	e.usedFFIDl = true
-	if runtime.GOOS == "linux" {
+	if targetGOOS() == "linux" {
 		e.requireLink("dl")
 	}
 	e.ensureStrHeaderRuntime() // __kml_str_from_cstr for dlerror()/string returns

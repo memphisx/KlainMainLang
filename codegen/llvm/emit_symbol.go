@@ -65,7 +65,6 @@ func (e *Emitter) emitSymbolToString(val Value) (Value, error) {
 	return e.emitStringConcat(acc, suffix)
 }
 
-
 // ensureSymbolRegistry emits the global Symbol.for registry (ADR-00488):
 // a lazily-created string-keyed map from key to the shared Symbol pointer.
 func (e *Emitter) ensureSymbolRegistry() {

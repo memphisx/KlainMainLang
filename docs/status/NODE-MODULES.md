@@ -33,7 +33,7 @@ Format: [Status page format](README.md#status-page-format). ✅ = the module wor
 | `diagnostics_channel` | ✅ | • → [Other Node core modules](NODE-CORE-MODULES.md) |
 | `crypto` / `node:crypto` | ✅ | • WebCrypto global + node crypto hashes/HMAC/keygen → [Web Crypto](WEB-CRYPTO.md) |
 | `worker_threads` | ✅ | • → [Concurrency & workers](CONCURRENCY-WORKERS.md) |
-| `events` (`EventEmitter`) | ✅ | • `EventEmitter` is an ambient global; `import EventEmitter from 'events'` / `{ EventEmitter }` work, and the static helpers **`events.once`** ([ADR-00675](../adr/ADR-00675.md)) and **`events.on`** (async iterator, [ADR-00677](../adr/ADR-00677.md)) work too → [EventEmitter](EVENT-EMITTER.md) |
+| `events` (`EventEmitter`) | ✅ | • `EventEmitter` is an ambient global; `import EventEmitter from 'events'` / `{ EventEmitter }` work, and the static helpers `events.once` and `events.on` (async iterator) work too → [EventEmitter](EVENT-EMITTER.md) |
 | `stream` | ✅ | • → [Streams](STREAMS.md) |
 | `stream/promises` | ✅ | • → [Streams](STREAMS.md) |
 | `stream/web` | ✅ | • → [Streams](STREAMS.md) |
@@ -49,8 +49,8 @@ The primary export of each is a spec-identical re-export of an ambient global, a
 |---|---|---|
 | `buffer` (`Buffer`) | ✅ | • A Node-specific global; `import { Buffer } from 'buffer'`/`'node:buffer'` works, same-name and aliased (`Buffer.from` member call → Stage 2 rename). `Blob`/`atob`/`btoa` importable too → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md) |
 | `timers` | ✅ | • `import { setTimeout }`/`setInterval`/`setImmediate`/`clear*` from 'timers'/'node:timers' works, same-name and aliased; the Web globals also work without import → [Timers](TIMERS.md). Pending: `timers/promises` |
-| `url` | ✅ | • `import { URL, URLSearchParams } from 'url'` works (same-name + aliased); the **legacy `url`-module functions are complete** — `parse`/`format`/`fileURLToPath`/`pathToFileURL`/`resolve`/`urlToHttpOptions`/`domainToASCII`/`domainToUnicode` ([ADR-00669](../adr/ADR-00669.md)–[ADR-00672](../adr/ADR-00672.md)) → [URL](URL.md). (IDN conversion is libcurl-backend-gated; lenient relative parsing deferred) |
-| `perf_hooks` | ✅ | • `import { performance } from 'perf_hooks'` works, same-name and aliased; **`PerformanceObserver` now works too** (synchronous V1 — [ADR-00673](../adr/ADR-00673.md)) → [Performance & Timing](PERFORMANCE-TIMING.md). Pending: `monitorEventLoopDelay`/`createHistogram` and async-batched observer delivery |
+| `url` | ✅ | • `import { URL, URLSearchParams } from 'url'` works (same-name + aliased); the legacy `url`-module functions (`parse`/`format`/`fileURLToPath`/`pathToFileURL`/`resolve`/…) work too → [URL](URL.md). Remaining: IDN conversion is libcurl-backend-gated; lenient relative parsing deferred |
+| `perf_hooks` | ✅ | • `import { performance } from 'perf_hooks'` works, same-name and aliased; `PerformanceObserver` works (synchronous V1) → [Performance & Timing](PERFORMANCE-TIMING.md). Pending: `monitorEventLoopDelay`/`createHistogram` and async-batched observer delivery |
 
 ## Not started (in scope)
 
@@ -68,7 +68,7 @@ Modules that fit the compiler's model and would add value — ranked and pulled 
 | `node:tty` | ❌ | • The `tty` module surface (`tty.isatty`, `ReadStream`/`WriteStream`); the primitives exist as `process.stdin.isTTY`/`setRawMode`/`columns` and the bespoke [`klain:tty`](../guides) reads, but the Node `tty` module is not exposed |
 | `constants` | ❌ | • Legacy aggregate of `os`/`fs`/`crypto` constants (superseded by per-module `.constants`) — not started |
 | `test/reporters` | ❌ | • Pluggable test reporters (`spec`/`tap`/`dot`) — the runner ships; reporter modules are not started |
-| `node:ffi` | ✅ | • Foreign function interface (Node v26.1.0, experimental) — all stages shipped ([FFI.md](FFI.md)): `dlopen`/typed calls/`bigint` pointers, raw-memory helpers, `registerCallback` trampolines; POSIX only ([TDD-00164](../tdd/TDD-00164.md)) |
+| `node:ffi` | ✅ | • Foreign function interface (Node v26.1.0, experimental); POSIX only → [FFI.md](FFI.md) ([TDD-00164](../tdd/TDD-00164.md)) |
 | `vm` | ❌ | • Sandboxed `eval`-like execution — the **largest** unimplemented-module gap (~77 conformance files, [NODE-GAP-ANALYSIS](../testing/NODE-GAP-ANALYSIS.md)); gated on an opt-in embedded JS engine (no runtime evaluator today) |
 | `sea` (single executable apps) | ❌ | • `klainmain` already emits a standalone native binary, so the *outcome* is native; the Node SEA blob/asset API shape is not implemented |
 | `domain` | ❌ | • Deprecated in Node (superseded by `AsyncLocalStorage`) — ~35 conformance files reference it, but it is the lowest-priority module gap ([NODE-GAP-ANALYSIS](../testing/NODE-GAP-ANALYSIS.md)) |

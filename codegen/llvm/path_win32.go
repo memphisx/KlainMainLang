@@ -3,7 +3,6 @@ package llvm
 import (
 	_ "embed"
 	"fmt"
-	"runtime"
 
 	"KlainMainLang/ast"
 )
@@ -37,7 +36,7 @@ const (
 // `path.win32` on Windows and `path.posix` everywhere else. A compile-time
 // switch, like nodePlatformName() — this compiler builds for the host only.
 func hostPathFlavor() pathFlavor {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		return pathWin32
 	}
 	return pathPosix
@@ -90,7 +89,7 @@ func (e *Emitter) ensurePathWin32() {
 
 // hostIsWindowsI32 is Node's `isWindows` as the sidecar's i32 argument.
 func hostIsWindowsI32() int {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		return 1
 	}
 	return 0
@@ -223,7 +222,7 @@ func (e *Emitter) emitPathWin32Variadic(which string, args []ast.Expression, pos
 	cwd := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_process_cwd()", cwd))
 	hostWin := 0
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		hostWin = 1
 	}
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_resolve(i64 %d, ptr %s, ptr %s, i32 %d)", r, n, arr, cwd, hostWin))

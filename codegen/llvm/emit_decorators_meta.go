@@ -34,8 +34,8 @@ func demangleModuleName(name string) string {
 // consumers that read `.name` work; that limit is documented.
 
 const (
-	metaRootKey = "\x01meta"      // reserved property on target holding the metadata root bag
-	metaCtorKey = "\x01ctor"      // per-property key standing in for the constructor (no propertyKey)
+	metaRootKey = "\x01meta" // reserved property on target holding the metadata root bag
+	metaCtorKey = "\x01ctor" // per-property key standing in for the constructor (no propertyKey)
 )
 
 // designTypeName maps a static type to TypeScript's design-type constructor

@@ -20,7 +20,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 )
 
 // netServerIR: 0 i64 listenfd (-1 before listen / after close) · 1 ptr
@@ -240,7 +239,7 @@ failnull:
 	// NB: famStore is spliced in via %s below, so its LLVM locals use a single
 	// `%` (they are not run back through Sprintf's %%-reduction).
 	famStore := "  store i16 1, ptr %addr, align 2\n" // Linux: sa_family_t = AF_UNIX(1)
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		// macOS: sun_len (offset 0) = the address length, sun_family (offset 1) = AF_UNIX.
 		famStore = "  %lenb = trunc i64 %alen64 to i8\n" +
 			"  store i8 %lenb, ptr %addr, align 1\n" +
@@ -856,7 +855,7 @@ ret0:
 // netAFInet6 is the platform's AF_INET6 value (macOS 30, Linux 10) — host-only,
 // since this compiler doesn't cross-compile.
 func netAFInet6() int {
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 30
 	}
 	return 10
@@ -866,7 +865,7 @@ func netAFInet6() int {
 // setsockopt (macOS 0xffff/0x0008, Linux 1/9).
 func netKeepAliveConst() (solSocket, soKeepAlive int) {
 	sol, _ := httpSockConstants()
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return sol, 0x0008
 	}
 	return sol, 9
@@ -879,7 +878,7 @@ func netKeepAliveConst() (solSocket, soKeepAlive int) {
 // remaps to SIO_KEEPALIVE_VALS — a bare setsockopt(4) there is TCP_MAXSEG,
 // not a keepalive control (ADR-00760).
 func netKeepIdleConst() (ipprotoTCP, tcpKeepIdle int) {
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 6, 0x10
 	}
 	return 6, 4

@@ -26,9 +26,25 @@ import (
 //go:embed webviewsrc/webview.h
 var webviewSource string
 
-// WebviewSource returns the amalgamated webview/webview C++ source (the header,
-// compiled directly as the translation unit — see the file comment).
-func WebviewSource() string {
+// WebviewSource returns the C/C++ translation unit implementing the webview_*
+// ABI for the selected backend (TDD-00144). "system"/"" is the amalgamated
+// webview/webview binding (the header, compiled directly as the translation
+// unit — see the file comment); cef/qt/sailfish are the opt-in shims, not yet
+// built. LocateWebview is the gate that rejects an unbuilt backend, so this is
+// only reached for system.
+func WebviewSource(backend string) string {
+	if backend == "sailfish" {
+		// The Sailfish Gecko/embedlite shim (TDD-00146 Stage 3). Compiles+links
+		// against a Sailfish -devel sysroot (verified); needs a moc pre-step,
+		// so LocateWebview still gates end-to-end builds until that lands.
+		return SailfishWebviewShimSource()
+	}
+	if backend != "" && backend != "system" {
+		// Unreachable in practice — main.go and LocateWebview reject a
+		// non-system backend before any source is requested. Return a stub so
+		// the plumbing stays total.
+		return fmt.Sprintf("// webview backend %q not yet implemented (TDD-00144).\n", backend)
+	}
 	if runtime.GOOS == "windows" {
 		return webviewSource + webviewWin32Deferral
 	}
@@ -55,7 +71,27 @@ func WebviewSource() string {
 //     WebView2Loader.dll beside the binary. The link line is the system
 //     libraries the header names for MSVC via #pragma comment, which the
 //     mingw driver does not honour, plus -lstdc++ for the C++ runtime.
-func LocateWebview() (cflags, libs []string, err error) {
+//   - the backend argument selects which engine's shim is compiled+linked
+//     (TDD-00144): "system"/"" is the per-platform system engine below; cef
+//     (Chromium Embedded Framework), qt (QtWebEngine), and sailfish
+//     (Gecko/embedlite, TDD-00146 Stage 3) are recognized opt-in backends
+//     whose shims are not yet built, so they return a clean "not yet
+//     implemented" error naming the flag rather than a broken link line.
+func LocateWebview(backend string) (cflags, libs []string, err error) {
+	switch backend {
+	case "", "system":
+		// fall through to the per-platform system engine below.
+	case "sailfish":
+		// The Sailfish Gecko/embedlite shim (TDD-00146 Stage 3): compile+link
+		// flags come from the target sysroot's pkg-config, and the build runs the
+		// target moc over the shim (NeedsMoc, see EmbeddedCSources). Requires a
+		// --sysroot; LocateWebviewSailfish returns a clean error without one.
+		return LocateWebviewSailfish(CrossTargetSysroot())
+	case "cef", "qt":
+		return nil, nil, fmt.Errorf("-webview=%s is not yet implemented — only -webview=system (the default) is currently built (TDD-00144)", backend)
+	default:
+		return nil, nil, fmt.Errorf("unrecognized webview backend %q — must be one of: system (default), cef, qt, sailfish", backend)
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		return nil, []string{"-framework", "WebKit", "-framework", "CoreGraphics", "-lc++"}, nil

@@ -73,6 +73,130 @@ func SetStaticLink(v bool) { staticLinkMode = v }
 // StaticLink reports the current --static mode.
 func StaticLink() bool { return staticLinkMode }
 
+// crossTarget holds the --target/--sysroot cross-compilation request (TDD-00146
+// Stage 1). Empty triple = no cross target: build for the host, exactly as
+// before. When set, every clang invocation (the main compile, the embedded-C
+// runtime, the GC shim) is retargeted through HostClangArgs, and the emitted IR
+// carries a matching `target triple` line — the two must agree or clang warns
+// and mis-lowers. A package var, not an Emitter field, for the same reason as
+// staticLinkMode: the clang-argv helpers are package functions shared by the
+// driver, the test helpers, and the conformance runner, and it is written once
+// at startup and read-only thereafter.
+var crossTarget struct {
+	triple  string
+	sysroot string
+	goos    string // OS parsed from the triple, in Go GOOS spelling; "" if unrecognized
+	goarch  string // arch parsed from the triple, in Go GOARCH spelling; "" if unrecognized
+}
+
+// SetCrossTarget records the requested cross-compilation triple + sysroot
+// (main.go, once at startup, after the preset has been resolved to a real
+// triple). An empty triple leaves host targeting untouched. The triple's OS and
+// arch are parsed and cached here so the ~hundred codegen sites that choose a C
+// API, struct layout, or libcall can read the *target* platform via
+// targetGOOS()/targetGOARCH() instead of the build host's runtime.GOOS/GOARCH
+// (TDD-00146 Stage 1 completion).
+func SetCrossTarget(triple, sysroot string) {
+	crossTarget.triple = triple
+	crossTarget.sysroot = sysroot
+	crossTarget.goos = tripleGOOS(triple)
+	crossTarget.goarch = tripleGOARCH(triple)
+}
+
+// CrossTargetTriple returns the active cross-compilation triple, or "" when
+// building for the host. The emitter reads it to decide whether to stamp an
+// explicit `target triple` into the IR.
+func CrossTargetTriple() string { return crossTarget.triple }
+
+// CrossTargetGOOS / CrossTargetGOARCH expose the parsed target OS/arch (Go
+// spellings), or "" when building for the host or when the triple's field was
+// unrecognized. Read by main.go's cross-OS gate to reason about the target.
+func CrossTargetGOOS() string   { return crossTarget.goos }
+func CrossTargetGOARCH() string { return crossTarget.goarch }
+
+// CrossTargetSysroot returns the active --sysroot, or "" when building for the
+// host. Read by the Sailfish webview backend to resolve pkg-config metadata and
+// the target moc from inside the sysroot.
+func CrossTargetSysroot() string { return crossTarget.sysroot }
+
+// targetGOOS / targetGOARCH are the OS/arch every codegen site that emits code
+// *for the compiled program* must consult, instead of runtime.GOOS/GOARCH: they
+// return the cross-target's parsed value when a --target is active and its field
+// was recognized, else the build host's own value (the pre-cross behavior). The
+// clang-driver and host-toolchain link-flag helpers deliberately keep reading
+// runtime.GOOS — they describe the machine running clang, not the target.
+func targetGOOS() string {
+	if crossTarget.goos != "" {
+		return crossTarget.goos
+	}
+	return runtime.GOOS
+}
+
+func targetGOARCH() string {
+	if crossTarget.goarch != "" {
+		return crossTarget.goarch
+	}
+	return runtime.GOARCH
+}
+
+// tripleGOOS extracts the OS a clang triple names, normalized to the Go GOOS
+// spelling, or "" if unrecognized. Triples are arch[-vendor]-os[-abi]; a
+// substring match on the OS token tolerates the vendor field being present or
+// absent (e.g. aarch64-meego-linux-gnu → "linux"). Mirrors main.go's
+// targetOSFromTriple, kept here so the llvm package is self-contained.
+func tripleGOOS(triple string) string {
+	t := strings.ToLower(triple)
+	switch {
+	case strings.Contains(t, "linux"):
+		return "linux"
+	case strings.Contains(t, "darwin"), strings.Contains(t, "macos"), strings.Contains(t, "apple"):
+		return "darwin"
+	case strings.Contains(t, "windows"), strings.Contains(t, "mingw"), strings.Contains(t, "w64"):
+		return "windows"
+	default:
+		return ""
+	}
+}
+
+// tripleGOARCH extracts the CPU architecture from a clang triple's first field,
+// normalized to the Go GOARCH spelling, or "" if unrecognized. The arch is
+// always the leading token before the first '-'.
+func tripleGOARCH(triple string) string {
+	arch := triple
+	if i := strings.Index(arch, "-"); i >= 0 {
+		arch = arch[:i]
+	}
+	switch strings.ToLower(arch) {
+	case "aarch64", "arm64":
+		return "arm64"
+	case "x86_64", "amd64":
+		return "amd64"
+	case "i386", "i486", "i586", "i686":
+		return "386"
+	case "riscv64":
+		return "riscv64"
+	case "armv7", "armv7l", "armv7hl", "arm":
+		return "arm"
+	default:
+		return ""
+	}
+}
+
+// lldAvailable reports whether an LLVM `lld` is on PATH. For a genuine
+// cross-arch link the host's system `ld` cannot emit the target's object
+// format, so lld is preferred (`-fuse-ld=lld`, the TDD-00146 Stage 1 linking
+// note); when the target arch matches the host (e.g. aarch64-linux from an
+// arm64 Linux container) the default linker already works, so lld is optional
+// and only used if present.
+func lldAvailable() bool {
+	for _, name := range []string{"ld.lld", "lld"} {
+		if _, err := exec.LookPath(name); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // winStaticFeatureLibs are the feature libraries linked as a *static* archive on
 // Windows (the `-l:lib<name>.a` colon form) instead of the DLL import lib, so a
 // program that uses them is still a single self-contained .exe — the point of a
@@ -140,10 +264,47 @@ func WorkerPthreadLinkFlags() []string {
 	return []string{"-pthread"}
 }
 
+// FFILinkFlags returns the link-phase flags for a program that uses node:ffi
+// (TDD-00164). node:ffi's `dlopen(null)` resolves symbols against the running
+// process's global scope, so the executable must (1) export its own dynamic
+// symbol table (-rdynamic → --export-dynamic) and (2) actually load the common
+// system libraries a program FFIs into. libm is the important one: `pow` and the
+// other math symbols live there, and on Linux the linker drops an unreferenced
+// `-lm` under the distro-default --as-needed — so it is force-kept with a
+// --no-as-needed island. (macOS bundles libm/libdl in libSystem, always linked,
+// which is why this only bites Linux — see runtime_ffi.go.) Skipped for a fully
+// static build, where dlopen(null) can't grow the symbol scope at runtime anyway.
+func FFILinkFlags() []string {
+	if runtime.GOOS != "linux" || staticLinkMode {
+		return nil
+	}
+	return []string{"-rdynamic", "-Wl,--no-as-needed", "-lm", "-Wl,--as-needed"}
+}
+
 // HostClangArgs returns the host-specific arguments ClangCommand prepends.
 // Exposed so a caller that must build its own argv (e.g. for logging) can
 // still stay in sync.
 func HostClangArgs() []string {
+	// An explicit --target/--sysroot (TDD-00146 Stage 1) takes precedence over
+	// host defaults, including the Windows-host mingw preset below: the whole
+	// point is to retarget away from the host. The embedded-C runtime is
+	// compiled through this same argv, so it follows the sysroot automatically.
+	if crossTarget.triple != "" {
+		// -Wno-override-module: the IR stamps the requested triple, and clang
+		// normalizes --target to its own canonical 4-field form (aarch64-linux-gnu
+		// → aarch64-unknown-linux-gnu), so the two differ textually and clang
+		// would warn that it is overriding the module triple with the --target
+		// one. That override is exactly the intended behavior — the --target value
+		// wins — so the warning is pure noise here.
+		args := []string{"--target=" + crossTarget.triple, "-Wno-override-module"}
+		if crossTarget.sysroot != "" {
+			args = append(args, "--sysroot="+crossTarget.sysroot)
+		}
+		if lldAvailable() {
+			args = append(args, "-fuse-ld=lld")
+		}
+		return args
+	}
 	if runtime.GOOS != "windows" {
 		return nil
 	}

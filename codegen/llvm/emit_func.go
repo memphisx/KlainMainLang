@@ -3439,7 +3439,6 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 	return Value{}, fmt.Errorf("unknown callback kind")
 }
 
-
 // lexicalThisIn reports whether n's subtree contains a `this` expression
 // that would bind lexically — the walk recurses through nested arrows (they
 // share the enclosing `this`) but stops at function expressions and

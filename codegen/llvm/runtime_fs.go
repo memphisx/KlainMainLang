@@ -2,7 +2,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 	"syscall"
 )
@@ -37,7 +36,7 @@ func (e *Emitter) ensureErrnoCode() {
 		{int(syscall.EFBIG), "EFBIG"}, {int(syscall.ENODEV), "ENODEV"},
 		{int(syscall.ESPIPE), "ESPIPE"}, {int(syscall.EMLINK), "EMLINK"},
 	}
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		pairs = pairs[:0]
 		for _, p := range linuxErrnoPairs {
 			pairs = append(pairs, ec{p[0].(int), p[1].(string)})
@@ -156,7 +155,7 @@ func (e *Emitter) ensureStatDecl() {
 // hardware as of writing — the macOS x64 CI lane is its test.
 func (e *Emitter) emitFSDecl(name, ret string, params []string) {
 	sig := strings.Join(params, " noundef, ") + " noundef"
-	if !(runtime.GOOS == "darwin" && runtime.GOARCH == "amd64") {
+	if !(targetGOOS() == "darwin" && targetGOARCH() == "amd64") {
 		e.emitGlobal(fmt.Sprintf("declare %s @%s(%s)", ret, name, sig))
 		return
 	}
@@ -264,6 +263,7 @@ func (e *Emitter) ensureFsReadFileRaw() {
 	e.emitGlobal("declare i32 @fseek(ptr noundef, i64 noundef, i32 noundef)")
 	e.emitGlobal("declare i64 @ftell(ptr noundef)")
 	e.ensureFread()
+	e.ensureRealloc()
 	modePtr := e.internString("rb")
 	opDescPtr := e.internString("cannot open file for reading")
 	// EISDIR guard (ADR-00692): fopen(2) happily opens a directory on both Linux
@@ -319,6 +319,15 @@ ok:
   %%seekend = call i32 @fseek(ptr %%f, i64 0, i32 2)
   %%size = call i64 @ftell(ptr %%f)
   %%seekset = call i32 @fseek(ptr %%f, i64 0, i32 0)
+  ; A reported size of 0 (or a seek/ftell failure, size < 0) means the size is
+  ; not known up front — the case for /proc and /sys pseudo-files, which report
+  ; st_size 0 yet read real bytes. fread-by-known-size would return "". Fall
+  ; back to a grow-until-EOF loop (which also handles a genuinely empty file:
+  ; the first fread returns 0 and we terminate at length 0). ADR-00811.
+  %%nonpos = icmp sle i64 %%size, 0
+  br i1 %%nonpos, label %%grow, label %%sized
+
+sized:
   %%sizep1 = add i64 %%size, 1
   %%buf = call ptr @malloc(i64 %%sizep1)
   %%nread = call i64 @fread(ptr %%buf, i64 1, i64 %%size, ptr %%f)
@@ -328,6 +337,52 @@ ok:
   %%r0 = insertvalue { ptr, i64 } undef, ptr %%buf, 0
   %%r1 = insertvalue { ptr, i64 } %%r0, i64 %%size, 1
   ret { ptr, i64 } %%r1
+
+grow:
+  %%capslot = alloca i64, align 8
+  %%bufslot = alloca ptr, align 8
+  %%totslot = alloca i64, align 8
+  store i64 8192, ptr %%capslot, align 8
+  %%gb0 = call ptr @malloc(i64 8192)
+  store ptr %%gb0, ptr %%bufslot, align 8
+  store i64 0, ptr %%totslot, align 8
+  br label %%growloop
+
+growloop:
+  %%gcap = load i64, ptr %%capslot, align 8
+  %%gtot = load i64, ptr %%totslot, align 8
+  %%gneed = add i64 %%gtot, 4097
+  %%gtight = icmp ugt i64 %%gneed, %%gcap
+  br i1 %%gtight, label %%growbuf, label %%doread
+
+growbuf:
+  %%gcap1 = load i64, ptr %%capslot, align 8
+  %%gbuf1 = load ptr, ptr %%bufslot, align 8
+  %%ncap = shl i64 %%gcap1, 1
+  %%nbuf = call ptr @realloc(ptr %%gbuf1, i64 %%ncap)
+  store i64 %%ncap, ptr %%capslot, align 8
+  store ptr %%nbuf, ptr %%bufslot, align 8
+  br label %%doread
+
+doread:
+  %%dbuf = load ptr, ptr %%bufslot, align 8
+  %%dtot = load i64, ptr %%totslot, align 8
+  %%dst = getelementptr i8, ptr %%dbuf, i64 %%dtot
+  %%dread = call i64 @fread(ptr %%dst, i64 1, i64 4096, ptr %%f)
+  %%dtot2 = add i64 %%dtot, %%dread
+  store i64 %%dtot2, ptr %%totslot, align 8
+  %%deof = icmp ult i64 %%dread, 4096
+  br i1 %%deof, label %%growdone, label %%growloop
+
+growdone:
+  %%fbuf = load ptr, ptr %%bufslot, align 8
+  %%ftot = load i64, ptr %%totslot, align 8
+  %%fterm = getelementptr i8, ptr %%fbuf, i64 %%ftot
+  store i8 0, ptr %%fterm, align 1
+  call i32 @fclose(ptr %%f)
+  %%fr0 = insertvalue { ptr, i64 } undef, ptr %%fbuf, 0
+  %%fr1 = insertvalue { ptr, i64 } %%fr0, i64 %%ftot, 1
+  ret { ptr, i64 } %%fr1
 }`, L.modeOff, modeLoadTy, modeExtLL, modeReg, errnoAccessor(), errnoEISDIR(), eisdirOpDescPtr, scRead, modePtr, opDescPtr, scOpen))
 }
 
@@ -636,10 +691,10 @@ ok:
 // Both numbers assume a 64-bit build, which is this project's only target
 // per its own stated scope.
 func direntNameOffset() int {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		return 9 // kml_dirent: d_ino u32, d_reclen u16, d_namlen u16, d_type u8, d_name
 	}
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 21
 	}
 	return 19
@@ -652,10 +707,10 @@ func direntNameOffset() int {
 // right after d_namlen, at offset 8 (win32fs.c), populated from the Win32
 // FindFirstFile attributes since mingw's own dirent has no d_type.
 func direntTypeOffset() int {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		return 8
 	}
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 20
 	}
 	return 18
@@ -979,7 +1034,7 @@ type statFieldLayout struct {
 }
 
 func statLayout() statFieldLayout {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		// win32fs.c writes the glibc x86-64 layout and puts birthtime (real on
 		// Windows, as in Node) in the struct's reserved tail.
 		return statFieldLayout{
@@ -997,7 +1052,7 @@ func statLayout() statFieldLayout {
 			birthSec: 120, birthNsec: 128,
 		}
 	}
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return statFieldLayout{
 			devOff: 0, devBits: 32,
 			modeOff: 4, modeBits: 16,
@@ -1013,7 +1068,7 @@ func statLayout() statFieldLayout {
 			birthSec: 80, birthNsec: 88,
 		}
 	}
-	if runtime.GOARCH == "arm64" {
+	if targetGOARCH() == "arm64" {
 		return statFieldLayout{
 			devOff: 0, devBits: 64,
 			inoOff: 8, inoBits: 64,
@@ -1455,7 +1510,7 @@ done:
 // (ADR-00498).
 func openFlagBits(flags string) (int, bool) {
 	creat, trunc, appnd, excl := 0x200, 0x400, 0x8, 0x800
-	if runtime.GOOS != "darwin" {
+	if targetGOOS() != "darwin" {
 		creat, trunc, appnd, excl = 0x40, 0x200, 0x400, 0x80
 	}
 	m := map[string]int{
@@ -1669,7 +1724,7 @@ var linuxErrnoPairs = [][2]interface{}{
 // Windows (Go's syscall.EISDIR there is synthetic; the shim speaks Linux
 // errno — TDD-00177).
 func errnoEISDIR() int {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		return 21
 	}
 	return int(syscall.EISDIR)

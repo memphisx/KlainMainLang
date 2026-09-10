@@ -17,7 +17,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 )
 
@@ -373,7 +372,7 @@ endinf:
 // 112 to 88 bytes (measured against the mingw-w64 zlib.h, ADR-00719). The
 // LP64 numbers stay in the templates as written.
 func zsFix(ir string) string {
-	if runtime.GOOS != "windows" {
+	if targetGOOS() != "windows" {
 		return ir
 	}
 	r := strings.NewReplacer(

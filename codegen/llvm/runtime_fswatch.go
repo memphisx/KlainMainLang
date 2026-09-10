@@ -10,7 +10,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 )
 
 // fsWatcherStructIR: { i64 wd, ptr changeCb, ptr renameCb, i64 open, ptr name }.
@@ -34,15 +33,15 @@ func (e *Emitter) ensureFsWatchRuntime() {
 @__kml_fswatch_reg_cap = internal global i64 0, align 8
 @__kml_fswatch_open = internal global i64 0, align 8`)
 
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		e.emitFsWatchWindows()
 		return
 	}
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		e.emitFsWatchDarwin()
 		return
 	}
-	if runtime.GOOS != "linux" {
+	if targetGOOS() != "linux" {
 		// Other BSDs etc.: no backend — watch throws, hooks inert.
 		notYet := e.internString("cannot watch path")
 		e.emitGlobal(fmt.Sprintf(`

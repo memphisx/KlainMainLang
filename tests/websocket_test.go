@@ -163,6 +163,68 @@ server.listen(8975)
 	}
 }
 
+func TestE2EWSOnAdditionalServer(t *testing.T) {
+	// TDD-00191 Stage 3: a WebSocketServer attached to an *additional* (non-primary)
+	// HTTP server. The primary is a plain server; the klain:ws connection handler
+	// routes to the additional server's own suffixed ws global and echoes frames.
+	pa, pb := freePort(t), freePort(t)
+	src := `
+import http from 'http'
+import { WebSocketServer } from 'klain:ws'
+const primary = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("plain primary")
+})
+const wsServer = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("not a websocket request")
+})
+const wss = new WebSocketServer({ server: wsServer })
+wss.on('connection', (socket: WSConnection) => {
+    socket.onmessage = (ev) => {
+      socket.send("echo: " + ev.data)
+    }
+})
+primary.listen(19701, () => { wsServer.listen(19702, () => { console.log("ready") }) })
+`
+	src = strings.ReplaceAll(src, "19701", fmt.Sprintf("%d", pa))
+	src = strings.ReplaceAll(src, "19702", fmt.Sprintf("%d", pb))
+	binFile := buildBinaryImports(t, src)
+	cmd := exec.Command(binFile)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	waitListening(t, pa)
+	waitListening(t, pb)
+
+	// Primary answers plain HTTP.
+	c := &http.Client{Timeout: 3 * time.Second}
+	resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/", pa))
+	if err != nil {
+		t.Fatalf("GET primary: %v", err)
+	}
+	pbody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(pbody) != "plain primary" {
+		t.Errorf("primary: got %q, want %q", string(pbody), "plain primary")
+	}
+
+	// The additional server speaks WebSocket.
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", pb), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial ws server: %v", err)
+	}
+	defer conn.Close()
+	wsHandshake(t, conn, "/")
+	wsSendText(t, conn, "hello world")
+	opcode, payload := wsRecvFrame(t, conn)
+	if opcode != 1 {
+		t.Errorf("opcode: got %d, want 1 (text)", opcode)
+	}
+	if string(payload) != "echo: hello world" {
+		t.Errorf("payload: got %q, want %q", payload, "echo: hello world")
+	}
+}
+
 func TestE2EWSExtendedLength(t *testing.T) {
 	src := `
 import http from 'http'

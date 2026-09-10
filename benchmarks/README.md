@@ -20,6 +20,7 @@ benchmarks/
     klain/          home-grown allocator-shape stressors
     clbg/           ports from the Computer Language Benchmarks Game (nbody, binary_trees)
     perceus/        ports of Perceus/Koka benchmarks (rbtree)
+    octane/         typed ports of Octane/JetStream GC kernels (splay), self-timing disabled
     perry/          fetched verbatim from PerryTS's own benchmarks/suite (MIT), self-timing print disabled
   build/            compiled binaries + intermediates (gitignored)
   results/          every run's raw output auto-appends to results/YYYY-MM-DD.txt (gitignored)
@@ -36,6 +37,7 @@ with `./run.sh map`.
 |---|---|
 | `binary_trees` | many small, short-lived heap objects (tree nodes) built and discarded in waves — the classic GC stressor |
 | `rbtree` | red-black-tree insertion — the canonical Perceus benchmark; every insert rebuilds the path nodes, the textbook reuse-in-place target |
+| `splay` | splay-tree churn — the canonical Octane/JetStream GC stressor: a ~8000-node tree is held live while a long insert/remove stream churns it, each insert allocating a deep `Payload` garbage tree. A large scanned live set + short-lived garbage — the shape that separates a pause-free collector from a stop-the-world one |
 | `list_churn` | functional array pipelines (`map`/`filter`/`reduce`) — a fresh backing buffer per stage, per iteration; the workload a Perceus reuse pass targets most directly |
 | `map_churn` | hash-table (`Map`) backing storage built up and thrown away each round |
 | `string_churn` | string concatenation — quadratic allocate-and-copy pressure |
@@ -173,6 +175,19 @@ else Linux `DISPLAY`/`WAYLAND_DISPLAY` (macOS: logged-in session) → GUI, else 
 4. **Webview live feed** — native `bind` pushing samples into the page vs. the
    page polling, without stalling the GUI thread (servers/fd-loops under a
    webview still need a Worker — the sampler likely lives there).
+5. **Latency axis** — the current runner reports wall time + peak RSS; it can't
+   yet show a collector's *worst-case pause*. Octane/JetStream's real novelty is
+   exactly that (its `splay-latency` variant times each operation and reports the
+   tail). The `octane/splay` kernel here is already the right live-set-vs-garbage
+   shape to expose it; what's missing is per-operation timing captured inside the
+   program and reported as a p95/p99 distribution across `-mm` modes — a genuinely
+   new axis (and the "consumption over time" this file's intro anticipates). This
+   is out of scope for the `bash` bootstrap (it can't see inside the child's
+   op-loop); it belongs to the self-hosted engine, either as a self-reported
+   sample series the presenters chart or as a `splay-latency`-style program that
+   prints its own tail. Additional Octane GC kernels (`richards`, `deltablue`)
+   can join `octane/` the same way `splay` did if the latency axis wants more
+   shapes to exercise.
 
 ### Windows portability (design gaps to close before/while building)
 

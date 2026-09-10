@@ -21,7 +21,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 )
 
 // workerCtrlIR is the control block's LLVM struct type. Field indices:
@@ -54,7 +53,7 @@ func (e *Emitter) gcSBStore(val string) string {
 // sigBlockFlag returns SIG_BLOCK's numeric value — glibc defines it as 0,
 // Darwin as 1. Same per-OS-constant pattern as httpNonblockFlag.
 func sigBlockFlag() int {
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 1
 	}
 	return 0

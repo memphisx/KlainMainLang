@@ -7,7 +7,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 
 	"KlainMainLang/ast"
 )
@@ -163,7 +162,7 @@ func (e *Emitter) emitDgramSetBroadcast(objVal Value, args []ast.Expression, pos
 // setsockopt (macOS 0xffff/0x0020, Linux 1/6) — host-only, no cross-compile.
 func dgramBroadcastConst() (solSocket, soBroadcast int) {
 	sol, _ := httpSockConstants()
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return sol, 0x0020
 	}
 	return sol, 6

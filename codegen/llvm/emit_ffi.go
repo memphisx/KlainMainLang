@@ -3,7 +3,6 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
-	"runtime"
 	"strings"
 )
 
@@ -175,7 +174,7 @@ func ffiReturnKmlType(canonical string) Type {
 
 // ffiSuffix is the host's shared-library filename suffix (ffi.suffix).
 func ffiSuffix() string {
-	switch runtime.GOOS {
+	switch targetGOOS() {
 	case "darwin":
 		return "dylib"
 	case "windows":
@@ -186,7 +185,7 @@ func ffiSuffix() string {
 
 // ffiRejectWindows returns the clean rejection for the not-yet-shimmed host.
 func ffiRejectWindows(pos ast.Pos) error {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		return fmt.Errorf("%d:%d: node:ffi is not supported on Windows yet (dlopen has no LoadLibrary shim)", pos.Line, pos.Col)
 	}
 	return nil

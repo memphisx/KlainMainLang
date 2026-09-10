@@ -253,7 +253,12 @@ func (e *Emitter) emitHTTP2CreateSecureServer(args []ast.Expression, pos ast.Pos
 	e.emitLabel(failL)
 	e.emitInternalThrow(e.internString("http2.createSecureServer: invalid certificate or private key"))
 	e.emitLabel(okL)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_http_tls_ctx, align 8", ctx))
+	// TDD-00191 Stage 4: hand the ctx to the handle builder (primary → also the
+	// @__kml_http_tls_ctx global + reactor h2 drive; additional → handle slot 4 +
+	// slot 5 h2 vtable, driven by the extra-listener ALPN h2 path). pendingServerH2
+	// marks this as an h2-over-TLS server so the builder records its vtable.
+	e.pendingServerTLSCtx = ctx
+	e.pendingServerH2 = true
 
 	// The handler (if any) drives the shared http server core, which already
 	// wires the h2 dispatch bridge the TLS drive path reuses.
@@ -266,14 +271,25 @@ func (e *Emitter) emitHTTP2CreateSecureServer(args []ast.Expression, pos ast.Pos
 // libssl (usedTLS) so tls.c is compiled/linked. The @__kml_http_tls_ctx slot is
 // shared with the h2 secure server — emit it only when that path hasn't already.
 func (e *Emitter) ensureHTTPS1Server() {
-	if e.usedHTTPS1Server {
+	if e.httpS1Wired {
 		return
 	}
+	e.httpS1Wired = true
 	e.usedHTTPS1Server = true
 	e.usedTLS = true
-	if !e.usedH2TLSServer {
-		e.emitGlobal(`@__kml_http_tls_ctx = global ptr null`)
+	e.ensureHTTPTLSCtxGlobal()
+}
+
+// ensureHTTPTLSCtxGlobal emits the @__kml_http_tls_ctx global once — it is shared
+// by the HTTPS/1.1 and the h2-over-TLS server paths, either of which may be
+// wired first (including via a TDD-00191 pre-scan), so a single dedup flag keeps
+// it from being emitted twice.
+func (e *Emitter) ensureHTTPTLSCtxGlobal() {
+	if e.httpTLSCtxEmitted {
+		return
 	}
+	e.httpTLSCtxEmitted = true
+	e.emitGlobal(`@__kml_http_tls_ctx = global ptr null`)
 }
 
 // objLiteralBoolOption reports whether an inline options object literal sets
@@ -324,7 +340,10 @@ func (e *Emitter) emitHTTPSCreateServer(args []ast.Expression, pos ast.Pos) (Val
 	e.emitLabel(failL)
 	e.emitInternalThrow(e.internString("https.createServer: invalid certificate or private key"))
 	e.emitLabel(okL)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_http_tls_ctx, align 8", ctx))
-
+	// TDD-00191 Stage 3: hand the SSL_CTX* to the handle builder, which stores it
+	// in the handle (slot 4) and — for the primary only — into the reactor's
+	// @__kml_http_tls_ctx global. An additional HTTPS server carries its ctx in
+	// the handle and hands it to the extra-listener table at listen().
+	e.pendingServerTLSCtx = ctx
 	return e.emitHTTPCreateServer(args[1:], pos)
 }

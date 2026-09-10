@@ -2,7 +2,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 )
 
@@ -18,7 +17,7 @@ func (e *Emitter) ensureCryptoRandomBytes() {
 		return
 	}
 	e.usedCryptoRandomBytes = true
-	switch runtime.GOOS {
+	switch targetGOOS() {
 	case "darwin", "freebsd", "openbsd", "netbsd", "dragonfly":
 		e.emitGlobal("declare void @arc4random_buf(ptr noundef, i64 noundef)")
 		e.emitGlobal(`

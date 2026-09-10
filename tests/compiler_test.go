@@ -77,6 +77,9 @@ func buildBinary(t *testing.T, src string) string {
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -333,13 +336,19 @@ func appendWebview(t *testing.T, em *llvm.Emitter, dir string, clangArgs []strin
 	if !em.UsesWebview() {
 		return clangArgs, false, nil
 	}
-	cflags, libs, err := llvm.LocateWebview()
+	cflags, libs, err := llvm.LocateWebview(em.WebviewBackend())
 	if err != nil {
 		return clangArgs, true, err
 	}
 	wvFile := filepath.Join(dir, "webview.cc")
-	if err := os.WriteFile(wvFile, []byte(llvm.WebviewSource()), 0644); err != nil {
+	if err := os.WriteFile(wvFile, []byte(llvm.WebviewSource(em.WebviewBackend())), 0644); err != nil {
 		t.Fatalf("write webview source: %v", err)
+	}
+	if em.WebviewBackend() == "sailfish" {
+		moc := llvm.SailfishMocPath(llvm.CrossTargetSysroot())
+		if err := llvm.RunSailfishMoc(moc, wvFile, llvm.CrossTargetSysroot()); err != nil {
+			return clangArgs, true, err
+		}
 	}
 	clangArgs = append(clangArgs, wvFile)
 	clangArgs = append(clangArgs, cflags...)
@@ -480,6 +489,9 @@ func buildBinaryGC(t *testing.T, src string) string {
 	clangArgs := []string{"-O2", llFile, shimFile, "-o", binFile}
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -558,6 +570,9 @@ func buildBinaryFromFile(t *testing.T, srcFile string) string {
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
+	}
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
 	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
@@ -679,6 +694,9 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 	clangArgs := []string{"-O2", llFile, shimFile, "-o", binFile}
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -857,6 +875,9 @@ func buildBinaryASan(t *testing.T, src string) string {
 		"-fsanitize=address", "-fsanitize=undefined",
 		llFile, asanOptFile, "-o", binFile,
 	}
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -943,6 +964,9 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	}
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1041,6 +1065,9 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1109,6 +1136,9 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
+	}
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
 	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
@@ -1209,6 +1239,9 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1271,6 +1304,9 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1329,6 +1365,9 @@ func assertOutputWithDecoratorMetadata(t *testing.T, src, want string) {
 		t.Fatalf("write IR: %v", err)
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1368,6 +1407,9 @@ func assertOutputStandardDecorators(t *testing.T, src, want string) {
 		t.Fatalf("write IR: %v", err)
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1439,6 +1481,9 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
+	}
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
 	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)

@@ -3,7 +3,6 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
-	"runtime"
 )
 
 func (e *Emitter) emitMathCall(property string, args []ast.Expression, pos ast.Pos) (Value, error) {
@@ -457,7 +456,7 @@ func (e *Emitter) emitMathSign(args []ast.Expression, pos ast.Pos) (Value, error
 }
 
 func (e *Emitter) emitMathRandom(_ ast.Pos) (Value, error) {
-	switch runtime.GOOS {
+	switch targetGOOS() {
 	case "windows":
 		// rand_s() — UCRT, backed by the system CSPRNG (RtlGenRandom), no seeding.
 		// The C89 fallback below is unusable here: UCRT RAND_MAX is 32767, so

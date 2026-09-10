@@ -17,9 +17,11 @@ function padRight(s: string, w: number): string {
   return s + " ".repeat(w - s.length);
 }
 
-// One process → a fixed-width row: "  PID   CPU   MEM  COMMAND".
-function procRow(p: Proc): string {
-  return pad(p.pid, 6, 0) + " " + pad(p.cpu, 5, 1) + " " + pad(p.mem, 5, 1) + "  " + padRight(p.comm, 22);
+// One process → a row: "  PID   CPU   MEM  COMMAND". The fixed columns are 20
+// chars ("  PID   CPU   MEM  "); `commW` is however much width is left for the
+// command, so the row grows with the terminal.
+function procRow(p: Proc, commW: number): string {
+  return pad(p.pid, 6, 0) + " " + pad(p.cpu, 5, 1) + " " + pad(p.mem, 5, 1) + "  " + padRight(p.comm, commW);
 }
 
 function cpuBar(frac: number) {
@@ -42,10 +44,21 @@ export function view(s: State, cpuFrac: number) {
   const usedMB = Math.round((totalmem() - freemem()) / 1048576);
   const cores = cpus().length;
 
+  // Fill the terminal. process.stdout.columns/rows report the live size (and
+  // update on resize); fall back to 80x24 when there's no TTY (a piped run).
+  let cols: number = process.stdout.columns ?? 80;
+  if (cols < 20) cols = 80;
+  let termRows: number = process.stdout.rows ?? 24;
+  if (termRows < 6) termRows = 24;
+  // Width left for the command column: inner width (minus border+padding) minus
+  // the 20-char fixed columns and the list's 1-char scrollbar gutter.
+  let commW: number = cols - 4 - 20 - 1;
+  if (commW < 10) commW = 10;
+
   const killing = s.confirming && s.procs.length > 0;
   const killPid: number = killing ? s.procs[s.cursor].pid : 0;
   const killComm: string = killing ? s.procs[s.cursor].comm : "";
-  const rows = s.procs.map((p) => procRow(p));
+  const rows = s.procs.map((p) => procRow(p, commW));
 
   const children = [
     Box({ flexDirection: "row", justifyContent: "space-between" }, [
@@ -75,7 +88,7 @@ export function view(s: State, cpuFrac: number) {
   }
 
   return Box(
-    { flexDirection: "column", width: 48, height: 20, border: "round", borderColor: "cyan", padding: 1 },
+    { flexDirection: "column", width: cols, height: termRows, border: "round", borderColor: "cyan", padding: 1 },
     children,
   );
 }

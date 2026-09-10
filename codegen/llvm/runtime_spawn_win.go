@@ -2,7 +2,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 )
 
 // Windows process model (TDD-00177 Stage 4). The three fork+exec sites in
@@ -16,7 +15,7 @@ import (
 
 // ensureWinSpawnDecl declares __kml_win_spawn once (Windows only).
 func (e *Emitter) ensureWinSpawnDecl() {
-	if runtime.GOOS != "windows" || e.usedWinSpawn {
+	if targetGOOS() != "windows" || e.usedWinSpawn {
 		return
 	}
 	e.usedWinSpawn = true
@@ -26,7 +25,7 @@ func (e *Emitter) ensureWinSpawnDecl() {
 // cpSpawnForkIR is the region of __kml_cp_spawn between the pipe setup and
 // the `parent:` label.
 func (e *Emitter) cpSpawnForkIR() string {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		e.ensureWinSpawnDecl()
 		return `  %kmlverb64 = lshr i64 %mode, 1
   %kmlverb = trunc i64 %kmlverb64 to i32
@@ -160,7 +159,7 @@ doexec:
 // it (ADR-00754). Windows has no fork/exec, so nothing is set up here — the
 // detection reads __kml_win_spawn's failure flag instead.
 func (e *Emitter) cpSpawnStatusSetupIR() string {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		return ""
 	}
 	// F_SETFD = 2, FD_CLOEXEC = 1.
@@ -181,7 +180,7 @@ func (e *Emitter) cpSpawnStatusSetupIR() string {
 // __kml_win_spawn_failed, which returns the errno a failed CreateProcessW
 // mapped to (0 on success). cp is the struct-type string.
 func (e *Emitter) cpSpawnFailDetectIR(cp string) string {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		return `  %sf_e = call i32 @__kml_win_spawn_failed(i32 %pid)
   %sf_e64 = sext i32 %sf_e to i64
   %sf20_p = getelementptr ` + cp + `, ptr %cp, i32 0, i32 20
@@ -205,7 +204,7 @@ func (e *Emitter) cpSpawnFailDetectIR(cp string) string {
 // execSyncForkIR is the same region of __kml_exec_file_sync (one pipe, the
 // child's stdout).
 func (e *Emitter) execSyncForkIR() string {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		e.ensureWinSpawnDecl()
 		return `  %pid = call i32 @__kml_win_spawn(ptr %file, ptr %argv, ptr %cwd, i32 -1, i32 %writefd, i32 -1, i32 -1, i32 0, ptr null)
   br label %parent
@@ -239,7 +238,7 @@ doexec:
 // fmtFD/envFD are the interned-constant references the template already
 // holds for the "%d" formats and the two variable names.
 func (e *Emitter) clusterForkIR(fmtID, envID, fmtFD, envFD string) string {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		e.ensureWinSpawnDecl()
 		return `  %idbuf = call ptr @malloc(i64 24)
   call i32 (ptr, ptr, ...) @sprintf(ptr %idbuf, ptr ` + fmtID + `, i64 %id)
@@ -280,7 +279,7 @@ child:
 // clusterForkIR but with a single channel-fd variable and argv0 as the
 // program.
 func (e *Emitter) cpForkIR(fmtFD, envFD string) string {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		e.ensureWinSpawnDecl()
 		e.ensureUnsetenv()
 		return `  %numbuf = alloca [16 x i8], align 1
@@ -324,7 +323,7 @@ child:
 
 // httpClusterEntryIR is inserted at the top of __kml_http_cluster_fork.
 func (e *Emitter) httpClusterEntryIR() string {
-	if runtime.GOOS != "windows" {
+	if targetGOOS() != "windows" {
 		return ""
 	}
 	return `  %wid0 = load i64, ptr @__kml_cluster_worker_id, align 8
@@ -337,7 +336,7 @@ primary:
 // httpClusterForkIR replaces the per-worker fork block (doforkw: … up to
 // parentnext:) of __kml_http_cluster_fork.
 func (e *Emitter) httpClusterForkIR() string {
-	if runtime.GOOS != "windows" {
+	if targetGOOS() != "windows" {
 		return `  ; fflush(NULL) before fork() is required, not optional: fork() copies
   ; libc's stdio buffers verbatim, so any console.log output still sitting
   ; unflushed in stdout's buffer (the common case once stdout isn't a TTY)
@@ -381,7 +380,7 @@ child:
 // httpListenInheritIR is inserted at the top of __kml_http_bind_and_listen:
 // a spawned worker returns the inherited listening fd instead of binding.
 func (e *Emitter) httpListenInheritIR() string {
-	if runtime.GOOS != "windows" {
+	if targetGOOS() != "windows" {
 		return ""
 	}
 	e.ensureGetenv()
@@ -402,7 +401,7 @@ fresh:
 // re-spawned worker reads its id from KML_CLUSTER_WORKER_ID at startup, the
 // value the fork model would have inherited in memory.
 func (e *Emitter) ensureHTTPClusterSeed() {
-	if runtime.GOOS != "windows" || e.usedHTTPClusterSeed {
+	if targetGOOS() != "windows" || e.usedHTTPClusterSeed {
 		return
 	}
 	e.usedHTTPClusterSeed = true
@@ -432,7 +431,7 @@ done:
 func (e *Emitter) emitShellArgv(cmdRef string) (fileRef, argvPtr, argsLen string) {
 	e.ensureMalloc()
 	argvPtr = e.freshReg()
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 32)", argvPtr))
 		for i, a := range []string{"/d", "/s", "/c"} {
 			s := e.freshReg()

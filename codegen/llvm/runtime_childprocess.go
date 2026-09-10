@@ -17,7 +17,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 )
 
@@ -83,7 +82,7 @@ func (e *Emitter) ensureChildProcRuntime() {
 	e.ensureWaitpidDecl()
 	e.ensureFcntlDecl()
 	e.ensureErrnoAccessor() // the spawn-fail status pipe reports the child's errno
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		// win32proc.c exposes CreateProcessW's failure as a Linux-ABI errno
 		// (0 on success) so the spawn 'error' event fires (ADR-00754).
 		e.emitGlobal("declare i32 @__kml_win_spawn_failed(i32 noundef)")
@@ -348,7 +347,7 @@ callcb:
 ret:
   ret void
 }`, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, errName)
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		// Windows exit codes are full 32-bit; recover the wide value the POSIX
 		// 8-bit wait status dropped, falling back for foreign pids (ADR-00759).
 		finalizeIR = strings.Replace(finalizeIR,
@@ -894,7 +893,7 @@ ret:
 // Returned as a register aggregate { i1 present, i32 signum } — present=true and
 // signum=0 for a normal exit, present=false and signum=<sig> for a signalled one.
 func (e *Emitter) emitCPEventFlags() {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		e.emitGlobal(`
 define { i1, i32 } @__kml_cp_event_flags(i32 %status, i64 %killsig) {
 entry:
@@ -929,7 +928,8 @@ func (e *Emitter) emitCPSignalName() {
 	for _, s := range cpSignalTable() {
 		lbl := fmt.Sprintf("s%d", s.num)
 		cases.WriteString(fmt.Sprintf("    i64 %d, label %%%s\n", s.num, lbl))
-		arms.WriteString(fmt.Sprintf("%s:\n  ret ptr %s\n", lbl, e.internString(s.name)))	}
+		arms.WriteString(fmt.Sprintf("%s:\n  ret ptr %s\n", lbl, e.internString(s.name)))
+	}
 	e.emitGlobal(fmt.Sprintf(`
 define ptr @__kml_cp_signal_name(i64 %%n) {
 entry:
@@ -959,7 +959,7 @@ func cpSignalTable() []cpSignalEntry {
 		{5, "SIGTRAP"}, {6, "SIGABRT"}, {8, "SIGFPE"}, {9, "SIGKILL"},
 		{11, "SIGSEGV"}, {13, "SIGPIPE"}, {14, "SIGALRM"}, {15, "SIGTERM"},
 	}
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		t = append(t, cpSignalEntry{10, "SIGBUS"}, cpSignalEntry{30, "SIGUSR1"}, cpSignalEntry{31, "SIGUSR2"})
 	} else {
 		t = append(t, cpSignalEntry{7, "SIGBUS"}, cpSignalEntry{10, "SIGUSR1"}, cpSignalEntry{12, "SIGUSR2"})

@@ -67,7 +67,7 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 276 | COMPILE_ERROR: a number has no method '%s' |
+| 277 | COMPILE_ERROR: a number has no method '%s' |
 | 123 | COMPILE_ERROR: undefined variable '%s' |
 | 97 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 87 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
@@ -82,8 +82,8 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
 | 32 | COMPILE_ERROR: fs has no method '%s' |
 | 30 | COMPILE_ERROR: process has no method '%s' |
-| 26 | RUN_TIMEOUT |
 | 25 | COMPILE_ERROR: expected ), got => |
+| 25 | RUN_TIMEOUT |
 | 24 | COMPILE_ERROR: child_process.fork supports self-fork only — the path must be __filename or process… |
 | 23 | COMPILE_ERROR: a Request has no method '%s' |
 | 23 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s'|'%s', listener) (got '%s') |
@@ -97,8 +97,8 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
 | 17 | COMPILE_ERROR: a ChildProcess stream supports only .on('%s'|'%s', cb) |
 | 17 | COMPILE_ERROR: unexpected token + in expression |
+| 17 | RUNTIME_NONZERO_EXIT:  |
 | 16 | COMPILE_ERROR: a destructured parameter requires an explicit type annotation |
-| 16 | RUNTIME_NONZERO_EXIT:  |
 | 15 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
 | 15 | COMPILE_ERROR: array elements must share one type — element 2 does not match the array's element t… |
 | 15 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |

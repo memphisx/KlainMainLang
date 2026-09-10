@@ -170,7 +170,8 @@ const nav = [
       { to: '/docs/guides/tui/input-state', text: 'TUI · Input & state' },
       { to: '/docs/guides/tui/live-dashboard', text: 'TUI · Live dashboards' },
       { to: '/docs/guides/webview', text: 'Desktop · File explorer' },
-      { to: '/docs/guides/concurrent-load-tester', text: 'Concurrency · Load tester' }
+      { to: '/docs/guides/concurrent-load-tester', text: 'Concurrency · Load tester' },
+      { to: '/docs/guides/sailfish', text: 'Mobile · Sailfish OS' }
     ]
   },
   {

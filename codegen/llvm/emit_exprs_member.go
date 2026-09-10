@@ -3,7 +3,6 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
-	"runtime"
 	"sort"
 	"strings"
 )
@@ -884,11 +883,11 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 		// compile host; hasCrypto/hasIntl reflect the built-in surface.
 		switch ex.Property {
 		case "isWindows":
-			return Value{Ref: testHostBool(runtime.GOOS == "windows"), Ty: TypeBool}, nil
+			return Value{Ref: testHostBool(targetGOOS() == "windows"), Ty: TypeBool}, nil
 		case "isLinux":
-			return Value{Ref: testHostBool(runtime.GOOS == "linux"), Ty: TypeBool}, nil
+			return Value{Ref: testHostBool(targetGOOS() == "linux"), Ty: TypeBool}, nil
 		case "isMacOS":
-			return Value{Ref: testHostBool(runtime.GOOS == "darwin"), Ty: TypeBool}, nil
+			return Value{Ref: testHostBool(targetGOOS() == "darwin"), Ty: TypeBool}, nil
 		case "hasCrypto":
 			return Value{Ref: "1", Ty: TypeBool}, nil
 		case "hasIntl":
@@ -902,7 +901,7 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 		case "EOL":
 			// "\r\n" on Windows, "\n" elsewhere — a compile-time constant like
 			// process.platform (TDD-00177 Stage 1).
-			if runtime.GOOS == "windows" {
+			if targetGOOS() == "windows" {
 				return Value{Ref: e.internString("\r\n"), Ty: TypePtr}, nil
 			}
 			return Value{Ref: e.internString("\n"), Ty: TypePtr}, nil

@@ -1,239 +1,151 @@
-# Remaining-Work Backlog
+# Backlog
 
-A reconciled, whole-project audit of what is actually left, distinct from the
-per-feature status pages (`docs/status/`, generated from `docs/status/data/*.json`)
-and the design docs (`docs/tdd/`). This is a hand-maintained planning doc: when an
-item ships, delete it here and update the status JSON / ADR / TDD in the same
-commit. Snapshot date: **2026-09-08**.
+A prioritised list of what's **left to be done** — nothing else. Not a changelog,
+not a status page, not a trophy cabinet for finished work.
 
-Reconciled against the status JSON (authoritative for *current* shipped state),
-the TDD index, and a code-level sweep — items an older design doc still lists
-as "to do" but which have since shipped are excluded here.
+**House rules — please keep them. Ignoring them has cost us real bugs:**
 
-Legend: **[X-plat]** cross-platform · **[Win]** Windows-specific ·
-**Enabler** (unblocks a cluster) · **Cluster** (broad) · **Leaf** (isolated).
+- **Done? Delete the line.** Don't rewrite it as "shipped ✅", don't keep it "for
+  context". Finished work lives in git history and the ADRs — never here, and not
+  narrated in `docs/status/` either (those are delivery checks + caveats, not a
+  changelog).
+- **Finishing something spawned more work?** Add one short line for the new work,
+  delete the old one. A sentence is plenty.
+- **Don't take a line here at face value.** These are terse reminders written in a
+  hurry and they drift out of date. Before you act on one, open the code and the
+  linked TDD/status page and confirm what's actually true. People have shipped
+  bugs by trusting a stale backlog line — read first.
+- **Keep the prose out.** The "why" and the design live in `docs/tdd/`; the
+  current state lives in `docs/status/`. Here, just say what's open, in as few
+  words as it takes to find it.
 
-Completeness: the *mechanically exhaustive* list of every not-yet-done TDD is
-the generated table in [docs/status/README.md](status/README.md)'s Design
-Documents section; this file is the **prioritized** view, and every unfinished
-TDD is placed in one of the sections below. Guiding principle (carried from the
-old status-README roadmap): most caveats here are deferred shortcuts, not
-permanent design decisions — where a divergence from real JS/TS is fixable and
-moves conformance, fix it on sight rather than documenting it as intentional;
-only genuine scope narrowings get to stay.
-
----
-
-## 1. Highest-leverage clusters (attack these first)
-
-1. **Remaining `T | undefined` adopters** — [X-plat] Leaf cluster
-   (TDD-00187's last per-site adoption):
-   - `ReadableStream.read()` after close — needs the discriminated
-     `{done:false, value:T} | {done:true, value:undefined}` record design
-     (plus `desiredSize` `0`-vs-`null`), not a plain field flip.
-   Deliberate non-goal: a generator's `.next().value` stays bare — tsc types
-   it `any` there, so the current typed `T` is already stricter than TS;
-   flipping it would be less faithful, not more (ADR-00781).
-
-2. **Real async streaming leftovers** — [X-plat]. TDD-00186 (+ TDD-00185,
-   the thread-pool substrate it rides on). Left: the fetch body promises
-   buffer eagerly at the accessor call rather than lazily off the fetch
-   reactor (so intervening work doesn't overlap the download, and a `.json()`
-   parse error surfaces at the call, not as a rejection); consumer
-   backpressure on the pooled read streams; the legacy `fs.readFile(path, cb)`
-   callback form and binary-data async writes still inline on the loop thread;
-   the pool itself Windows-pending (folds into the reactor work, §2); and
-   `http` request/response bodies as first-class Node `Readable`/`Writable`.
-   Core to the microservice / REST-server target.
-
-3. **`http.createServer(...).listen()` is single-instance, once-per-program** —
-   [X-plat] Cluster. TDD-00131 Stage 1. `http.close()` doesn't lift it; options
-   object mostly rejected; keep-alive only on buffered `res.end` (chunked /
-   streaming forces `Connection: close`); HTTP/2 has no request bodies
-   (`req.end()` is a no-op). A real limit for the server-side priority.
-
-4. **D1 dynamic object model** — [X-plat] Cluster/Enabler. TDD-00155.
-   ~30% of all documented caveats: runtime property add/delete on
-   statically-typed structs, the full `Proxy` trap set, well-known symbols as
-   runtime dispatch (only `Symbol.iterator`/`asyncIterator` honored today).
-   Adjacent design decisions: the static-vs-dynamic object-model axes
-   (TDD-00068, direction decided) and general `as T` on dynamic values
-   (TDD-00176, open).
-
-5. **General C FFI (AOT `node:ffi`)** — [X-plat] Enabler. TDD-00164.
-   Foundational pivot: unblocks `node:sqlite` (TDD-00151), the `opentui` TUI
-   backend, GTK/Qt/SDL/imgui GUI, ncurses, native DB clients.
-   All three stages shipped (ADR-00797/ADR-00798/ADR-00799):
-   `dlopen`/`DynamicLibrary`/typed C-ABI calls/`bigint` pointers, the
-   raw-memory helpers, and `registerCallback` (closure→C-function-pointer
-   via static per-signature trampoline families, 16 live per shape), POSIX.
-   The `functions`/`symbols` accumulators also ship (ADR-00800).
-   Remaining: `using`/`[Symbol.dispose]` disposal, Windows `LoadLibrary`
-   shim, `close()`-invalidates-callbacks; beyond-Node capabilities are
-   TDD-00190 (`klain:ffi`), now unblocked.
+The exhaustive list of every unfinished TDD is the generated table in
+[docs/status/README.md](status/README.md); this file is the prioritized shortlist.
 
 ---
+
+## 1. Highest leverage — do these first
+
+- **`T | undefined` last adopters** (TDD-00187) — `ReadableStream.read()` after
+  close needs the `{done, value}` discriminated-record design (+ `desiredSize`
+  0-vs-`null`). Leave the generator's `.next().value` bare — that's deliberate,
+  not a gap (ADR-00781).
+- **Real async streaming** (TDD-00186/00185) — fetch body promises still buffer
+  eagerly instead of lazily off the reactor; no consumer backpressure on the
+  pooled read streams; `fs.readFile(path, cb)` callback form + binary async
+  writes still inline on the loop thread; `http` req/res bodies not yet Node
+  `Readable`/`Writable`.
+- **`http.createServer` edges** — `createServer` options object mostly rejected;
+  `Connection: close` on the union-body string branch and HTTPS/1.1 streaming;
+  HTTP/2 has no request bodies; multi-server can't combine with cluster.
+- **D1 dynamic object model** (TDD-00155) — runtime property add/delete on typed
+  structs, full `Proxy` trap set, well-known symbols as dispatch. Adjacent:
+  TDD-00068, TDD-00176.
+- **C FFI residue** (TDD-00164) — `using`/`[Symbol.dispose]` disposal, the Windows
+  `LoadLibrary` shim, `close()`-invalidates-callbacks. Beyond-Node: TDD-00190.
 
 ## 2. Windows port
 
-The **incremental** port is effectively complete — the remaining leaves are
-either untestable from a dev box or deliberate divergences. The only substantial
-Windows work is structural, and by policy is built **from Mac/Linux** (Docker +
-CI), never from the Windows box.
+Built from Mac/Linux (Docker + CI), never the Windows box.
 
-### Structural (the real remaining Windows debt)
-- **Event-loop reactor / owned handle table** — TDD-00182 (Option A, 6 stages)
-  → TDD-00183 (IOCP, Option B, committed follow-on). Dissolves the whole §1
-  cluster: blocking `stdin`/pipe reads, ~10 ms idle poll-spin, 384-socket
-  `select()` cap, `dup2` socket aliasing, synchronous `CreatePipe` child stdio —
-  and is where the fs thread pool (POSIX-only today) folds in for Windows.
-- **`cluster` round-robin** — 3 skipped tests. TDD-00177 OQ7 / TDD-00105.
-  Workers share one listening socket; `http.close()` from a worker doesn't reach
-  siblings. Reactor-adjacent.
+- **Structural (the real debt):** the event-loop reactor / owned-handle table
+  (TDD-00182 → TDD-00183) — unblocks blocking stdin/pipe reads, the ~10 ms idle
+  poll-spin, the 384-socket `select()` cap, `dup2` socket aliasing, synchronous
+  `CreatePipe` child stdio, and is where the fs thread pool folds in. Plus
+  `cluster` round-robin (TDD-00177/00105, 3 skipped tests).
+- **Deferred edges (low value / untestable from a dev box):** broken-pipe write
+  codes + the TLS-BIO error on long-lived pub/sub, named pipes for `net`,
+  non-ASCII console *input*, `readlink` UNC / `chdir` drive vars (all TDD-00180).
+- **Waiting on the CI runner:** `lstat(symlink).size` (ADR-00769 — the dev box
+  lacks symlink privilege).
+- **Out of scope:** `--static` full-static, `-crypto=commoncrypto`, ASan/UBSan.
 
-### Deferred edges (low value / untestable from a dev box)
-- Broken-pipe write nuances: `WSAESHUTDOWN`→`EPIPE` (not observably reachable —
-  the JS `Writable` layer intercepts write-after-`end()`); and the TLS-via-BIO
-  error code on long-lived pub/sub connections (gRPC/HTTP2/`wss`), unverified vs
-  Node. A persistent-connection probe would settle the latter. TDD-00180 §5.
-- Named pipes `\\.\pipe\…` for `net.connect({path})`/`listen(path)`. TDD-00180 §5.
-- Non-ASCII console **input** — the fully-reliable wide `ReadConsoleW`→UTF-8
-  path. TDD-00180 §2.
-- `readlink` UNC / junction PrintName edge; `chdir` hidden `=X:` drive vars.
-  TDD-00180 §4.
+## 3. Node / runtime surface (mostly small, incremental)
 
-### CI-lane-pending verification (implemented, needs the runner)
-- `lstat(symlink).size` on Windows (ADR-00769) — the dev box lacks symlink
-  privilege (Developer Mode), so the shim compiles but the symlink assertion
-  skips; the CI runner creates symlinks.
+- **fs options residue** — no write `mode`; no non-`utf8` encodings;
+  `readFileSync` with no encoding returns a string, not a `Buffer`; no
+  `readdirSync` `recursive`+`withFileTypes` together nor `encoding:'buffer'`; no
+  `Dirent.path`; `COPYFILE_FICLONE` a no-op; `fs.constants` lacks `O_*`.
+  Genuinely-open edges with a reason: `rmSync` retries, `birthtimeMs` on Linux,
+  the `fdatasync` distinction.
+- **Streams** (TDD-00132) — no BYOB/byte controllers; string chunks default; no
+  options-form `transform`; 3-arg `write` rejected; `extends Transform<In,Out>`
+  parse error; `ReadableStream.from()` arrays only.
+- **WebSocket** — no binary `.send()`; binary `ev.data` NUL-truncates (use
+  `ev.dataBytes()`); `.close()` doesn't await the peer echo.
+- **net / dgram / dns** — `net.Socket` `setEncoding`/`ref`/`unref`/`pause`/
+  `resume`/`setTimeout` are no-ops; `dgram` udp4-only + `.on('message')` only;
+  `dns` absent.
+- **child_process** — sync listener dispatch, one listener per event, arrow-only,
+  no `removeListener`; `fork` self-fork only; narrow `env`/`timeout`/`stdio`.
+- **process / os / console** — no `'unhandledRejection'`;
+  `memoryUsage().external`/`arrayBuffers` stay 0; `process.stdin` is flowing-mode
+  + string-chunk only (no `.pause`/`.resume`/`.read`/`'readable'`);
+  `console.trace()` / `Error.stack` need a runtime call-stack (TDD-00188);
+  `node:tty` module surface absent.
+- **Partially-done modules** — `perf_hooks` `PerformanceObserver` entry types
+  (TDD-00166); `async_hooks` `.then`/listener propagation, `snapshot()`,
+  exception-safe `run` (TDD-00168); the remaining Web-global module specifiers
+  (TDD-00165); `node:sqlite` dynamic-row `SELECT *`, `db.aggregate()`, error
+  `.code`, lazy `iterate()` (TDD-00151); `klain:webview` multi-window
+  (TDD-00142, see §6).
+- **Not started** — `vm` (TDD-00046, gated on an embedded JS engine), `domain`,
+  `string_decoder`, `util/types`, `assert/strict`, `dns/promises`,
+  `readline/promises`, `timers/promises`, `stream/consumers`.
 
-### Out of scope by design
-`--static` full-static on Windows, `-crypto=commoncrypto` (macOS-only), ASan/UBSan
-(no mingw runtime). `-mm=gc` works (the fork path is skipped).
+## 4. Core language / TypeScript (mostly small)
 
----
+- `eval` / `Function(string)` / `vm` / `repl` — embedded engine, TDD-00046.
+  Nothing built.
+- Lazy Iterator/AsyncIterator protocol — everything materializes (ADR-00057);
+  most "not lazy" caveats trace back here.
+- RegExp `u`/`v`/`y`/`d` accepted-not-implemented; no `\u{…}`/`\p{…}`; `.exec`/
+  `.match` missing `index`/`input`/`groups`; eager `.matchAll`.
+- `Intl.*` (no ICU); `Temporal`; `String.normalize()`; `Reflect.apply`/`construct`.
+- Spread into fixed-arity / variadic builtins (TDD-00106); `setImmediate` ==
+  `setTimeout(0)`.
+- Faithful async rejection values (TDD-00169); nested-fn hoisting / generator
+  capture (TDD-00129); generalized destructuring (TDD-00065); decorator
+  class-replacement + static-field (TDD-00161).
+- Dynamic `import()` beyond the eager V1 (TDD-00055); the `-compat`
+  per-divergence flags (TDD-00075); `any` residues (TDD-00162).
+- `libbf` (MIT) as a third selectable `-bigint` backend alongside
+  libtommath/gmp.
+- **WebCrypto `crypto.subtle`** — ~7 algorithm ops still "not implemented"; heavy
+  format/curve restrictions.
+- **Cross-cutting roots (high leverage):** array length-mutation doesn't
+  propagate through object-field / element / HOF-callback arrays (TDD-00127);
+  nested-array element rejection in `.sort`/`.indexOf`/`.includes`/
+  `Object.groupBy` (ADR-00152); `.buffer` absent on TypedArrays, views don't
+  track `resize` (ADR-00494/00564).
 
-## 3. Node / runtime surface (mostly leaf, incremental)
+## 5. Perf / GC / infra
 
-- **`fs` options-argument residue**: no write `mode` arg; no non-`'utf8'`
-  encodings; `readFileSync` with no encoding returns a string, not a `Buffer`;
-  no `readdirSync` `recursive`+`withFileTypes` together, nor
-  `encoding:'buffer'`; no `Dirent.path` alias; the `COPYFILE_FICLONE` bits are
-  a best-effort no-op; `fs.constants` lacks the host-specific `O_*` open flags
-  (no API consumes them yet). Still genuinely open,
-  each for a stated reason: `rmSync` `maxRetries`/`retryDelay` (Windows-centric
-  retry; needs a catchable recursive `rm`), `birthtimeMs`=0 on Linux (glibc;
-  needs `statx`; Linux-only), and `fdatasyncSync`==`fsyncSync` (already faithful
-  on macOS, which has no `fdatasync`; the Linux data-only distinction is
-  non-observable).
-- **Streams (WHATWG + Node)** — TDD-00132. No BYOB/byte controllers; string
-  chunks default; no options-form `transform`; `write(chunk,enc,cb)` 3-arg
-  rejected; `extends Transform<In,Out>` parse error; `ReadableStream.from()`
-  arrays only. Enabler for binary/fetch-body streaming.
-- **WebSocket**: no binary `.send()`; binary `ev.data` NUL-truncates (use
-  `ev.dataBytes()`); `.close()` doesn't await the peer echo. Blocks binary
-  pub/sub use.
-- **`net.Socket`** `setEncoding`/`ref`/`unref`/`pause`/`resume`/`setTimeout` are
-  no-ops. **`dgram`** udp4-only, `.on('message')` only. **`dns`** absent.
-- **child_process**: listeners fire synchronously from dispatch (not microtask),
-  one listener per event, arrow-literal only, no `removeListener`; `fork` is
-  self-fork only; `env`/`timeout`/`stdio`-array override breadth.
-- **process/os/console**: no `'unhandledRejection'`; `memoryUsage()`'s
-  `external`/`arrayBuffers` stay 0 (no native off-heap accounting);
-  `process.stdin`
-  flowing-mode only (no `.pause()`/`.resume()`/`.read()`/`'readable'`) and
-  string-chunk only (`setEncoding('utf8')` is a no-op, non-utf8 rejected —
-  ADR-00793); `console.trace()` prints no
-  stack and `Error.stack` is absent — both blocked on a runtime call-frame
-  representation (a per-fiber shadow call stack), scoped in TDD-00188 (distinct
-  from TDD-00073's DWARF-for-debuggers); `node:tty` module surface absent.
-- **Partially-implemented module residues**: `perf_hooks` `PerformanceObserver`
-  beyond the shipped entry types (TDD-00166); `async_hooks` context propagation
-  into `.then`/`.catch` reactions and EventEmitter listeners, `snapshot()`,
-  exception-safe `run` restore (TDD-00168); the remaining importable specifiers
-  for Web-global-backed modules (TDD-00165); `klain:webview` multi-window
-  (TDD-00142, deferred with the alt backends in §6).
-- **Not started modules**: `vm` (~77 conformance files, gated on an embedded JS
-  engine — TDD-00046; only a compile-time string-literal subset is in reach
-  without it), `domain`, `string_decoder`, `util/types`, `assert/strict`,
-  `dns/promises`, `readline/promises`, `timers/promises`, `stream/consumers`,
-  `node:sqlite` (TDD-00151), `node:ffi` (TDD-00164, see item 6).
-
----
-
-## 4. Core language / TypeScript (mostly leaf)
-
-- Dynamic `eval` / `Function(string)` / `vm` / `repl` — opt-in embedded engine
-  (quickjs-ng), TDD-00046. Nothing built.
-- General lazy Iterator/AsyncIterator protocol (`Iterator.prototype.map/filter/…`,
-  `Array.keys/values/entries`, `matchAll`, Map/Set iterators all materialize) —
-  ADR-00057. Pervasive "materialized not lazy" caveats trace here.
-- RegExp `u`/`v`/`y`/`d` flags accepted but not implemented; no `\u{…}`/`\p{…}`;
-  `.exec`/`.match` missing `index`/`input`/`groups`; `.matchAll` eager.
-- `Intl.*` (no ICU — bare `Intl` is a compile error; blocks `localeCompare`/
-  `toLocaleString` fidelity); `Temporal` absent; `String.prototype.normalize()`;
-  `Reflect.apply`/`construct`.
-- Spread into fixed-arity fn / variadic builtins (`f(...arr)`, `Math.hypot(...a)`)
-  — TDD-00106. `setImmediate` == `setTimeout(0)` (flat timer queue, no phases).
-- Faithful async rejection values (`allSettled` `.reason`, `throw <non-Error>`) —
-  TDD-00169. Closure capture for nested fn decls hoisting/generators — TDD-00129.
-  Generalized destructuring (object rest + assignment-form) — TDD-00065.
-  Decorators class-replacement + static-field — TDD-00161.
-- Dynamic `import(...)` beyond the eager V1 (real lazy loading needs a module
-  runtime the whole-program merge doesn't have) — TDD-00055. The `-compat`
-  axis's third bucket (per-divergence flags) — TDD-00075. `any`/implicit-`any`
-  residues — TDD-00162 (Partially Implemented) carries the buckets the D1 work
-  didn't close.
-- **WebCrypto `crypto.subtle`** — the largest half-built subsystem: ~7 algorithm
-  ops (`importKey`/`generateKey`/`deriveBits`/`deriveKey`/`sign`/`verify`) return
-  "not implemented yet"; heavy format/curve restrictions.
-
-### Cross-cutting root causes (high leverage, like item 1)
-- Array reference semantics: length-mutation propagates for plain-variable params
-  but not object-field/array-element/HOF-callback arrays. TDD-00127 / ADR-00517.
-- Nested-array element rejection in `.sort()`/`.indexOf()`/`.includes()`/
-  `Object.groupBy()`. ADR-00152.
-- `.buffer` absent on all TypedArrays; views don't length-track `resize`.
-  ADR-00494 / ADR-00564. Binary interop.
-
----
-
-## 5. Perf / GC / infra (enablers; mostly multi-stage plans with Stage 1 shipped)
-
-- Stack-allocation escape analysis (`-optimize-memory`, Stage 1 shipped) —
-  TDD-00134; maturity gate to make it default — TDD-00174. **The dominant native
-  perf gap** (every object literal is heap-allocated today — ADR-00702).
-- Deep reclamation under `-mm=auto` (Stage 1 shipped) — TDD-00175.
-  Precise/moving GC (Immix) — TDD-00135. Array amortized-growth (`cap`) —
-  ADR-00517.
-- DWARF debug symbols (TDD-00073); enriched diagnostics / strict error-matching
+- Escape analysis / stack allocation (TDD-00134; default-gate TDD-00174) — **the
+  dominant native perf gap**: every object literal heap-allocates today.
+- Deep reclamation under `-mm=auto` (TDD-00175); precise/moving Immix GC
+  (TDD-00135); array amortized-growth `cap` (ADR-00517).
+- DWARF debug symbols (TDD-00073); richer diagnostics / strict error-matching
   (TDD-00072); `@readonly`/`@pure` enforcement (TDD-00126/00128).
-- Conformance infra: the WPT slice (TDD-00082's remaining bucket).
-  statusgen's last phase — deriving the website reference badges/differences
-  from the status source instead of hand-mirroring them (TDD-00145's
-  Reconciliation section).
+- Conformance infra: the WPT slice (TDD-00082); statusgen deriving the website
+  reference badges from the status source instead of hand-mirroring (TDD-00145).
 
----
+## 6. Deliberately deprioritized (later)
 
-## 6. Deliberately deprioritized (Later tier)
+- Leaf pseudo-APIs as end-game conformance-unblockers: IndexedDB (TDD-00011);
+  Notifications / `localStorage` / Clipboard / Geolocation (TDD-00171); Gamepad
+  (TDD-00170); Canvas-2D; the File API family (TDD-00172).
+- The TDD-00147 Android port.
+- Native desktop GUI — Qt/QML for KDE-Linux + Sailfish Silica (TDD-00192,
+  superseding the TDD-00032 placeholder).
+- The alt-webview CEF/Qt shims (TDD-00144 — the `-webview=<backend>` selection
+  flag exists; those shims don't) + multi-window from TDD-00142.
+- The TUI-framework roadmap (TDD-00150).
+- `TextDecoder` non-UTF-8 (TDD-00034).
+- The `klmpm` package manager (TDD-00054); npm/`node_modules` interop (TDD-00053).
+- An alt Go `fetch` backend (TDD-00003).
+- Self-hosting (TDD-00124) with its `klain:` module set (TDD-00189).
+- `klain:ffi` beyond-Node FFI (TDD-00190).
 
-Per the project's priority ranking, intrinsically-useless leaf APIs are end-game
-conformance-unblockers: IndexedDB (TDD-00011), Notifications / `localStorage` /
-Clipboard / Geolocation (TDD-00171) / Gamepad (TDD-00170) / Canvas-2D as
-native-reinterpreted APIs, the File API family (TDD-00172), mobile targets
-(Sailfish TDD-00146, Android TDD-00147), alternative webview backends
-(TDD-00144, plus `klain:webview` multi-window from TDD-00142),
-the TUI-framework roadmap (TDD-00150), `TextDecoder` non-UTF-8 (TDD-00034),
-the `klmpm` package manager (TDD-00054), npm/`node_modules` interop
-(TDD-00053, bottlenecked on TDD-00022's scope), an alternative Go-helper
-`fetch` backend (TDD-00003), self-hosting (TDD-00124) with its Go-fidelity
-`klain:` module set (TDD-00189: `klain:embed`/`klain:flag`/`klain:fmt` —
-`klain:embed` also carries standalone value and may be pulled forward), and
-`klain:ffi` beyond-Node FFI extensions (TDD-00190, gated on TDD-00164
-Stages B–C closing).
-
-Feasibility/reference documents, not queued work: the WebAssembly target
-(TDD-00048), the freestanding Pico (TDD-00036) and Raspberry Pi (TDD-00045)
-targets, Immix (TDD-00135, listed in §5). TDD-00032/TDD-00033 are bootstrapping
-placeholders superseded in practice by `klain:webview` (TDD-00142) and the FFI
-plan (TDD-00164).
+Reference docs, not queued work: the WASM target (TDD-00048), the Pico (TDD-00036)
+and Raspberry Pi (TDD-00045) targets, Immix (TDD-00135).

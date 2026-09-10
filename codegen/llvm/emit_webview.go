@@ -18,7 +18,7 @@ import (
 // One window per process in V1: a second `new Webview` is a clean compile-time
 // rejection (webviewConstructed guard on the emitter).
 
-const webviewHandleIR = "{ ptr, ptr }"    // { webview_t, boundListHead }
+const webviewHandleIR = "{ ptr, ptr }"        // { webview_t, boundListHead }
 const webviewBindNodeIR = "{ ptr, ptr, ptr }" // { w, closureHdr, next }
 
 // emitNewWebview implements `new Webview({ title, width, height, debug })`.

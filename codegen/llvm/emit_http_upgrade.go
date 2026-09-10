@@ -93,7 +93,8 @@ func (e *Emitter) emitHTTPUpgradeBlock(headersMapFinal, methodPtr, pathOnly, que
 
 	// Runtime guard: only bother detecting an upgrade when a handler exists.
 	upH := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_listen_upgrade_handler, align 8", upH))
+	// TDD-00191 Stage 3: read this dispatcher's own upgrade handler global.
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_listen_upgrade_handler%s, align 8", upH, e.curDispatchSfx))
 	hasUpH := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasUpH, upH))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasUpH, detectL, handlerNullL))
@@ -331,14 +332,58 @@ func (e *Emitter) emitFireSocketVoidListener(sockPtr string, idx int) {
 // registration site (emitHTTPServerMethod) carries a compile-error safety net
 // for the theoretical case this walk misses a container type.
 func programUsesHTTPUpgrade(prog *ast.Program) bool {
+	return programContainsCall(prog, isUpgradeOnCall)
+}
+
+// programContainsCall reports whether the program contains, anywhere, a call
+// expression matching pred — the shared whole-program pre-scan behind
+// programUsesHTTPUpgrade and programUsesHTTPS1Server (TDD-00191 Stage 3). The
+// recursive walk (rather than a shallow top-level scan) matters because the call
+// can sit inside any function body, block, or expression emitted before the
+// top-level statement that needs the pre-scan's result.
+func programContainsCall(prog *ast.Program, pred func(*ast.CallExpression) bool) bool {
 	found := false
 	for _, s := range prog.Body {
-		walkStmtForUpgrade(s, &found)
+		walkStmtForCall(pred, s, &found)
 		if found {
 			return true
 		}
 	}
 	return false
+}
+
+// isHTTPSCreateServerCall reports whether ex is `https.createServer(...)` — the
+// HTTPS/1.1 server the multi-instance TLS accept path must know about ahead of
+// Pass 2, so ensureHTTPRuntime emits the TLS-aware extra-listener accept even
+// when a plain primary server triggers it first (TDD-00191 Stage 3).
+func isHTTPSCreateServerCall(ex *ast.CallExpression) bool {
+	mem, ok := ex.Callee.(*ast.MemberExpression)
+	if !ok || mem.Property != "createServer" {
+		return false
+	}
+	id, ok := mem.Object.(*ast.Identifier)
+	return ok && id.Name == "https__kml_builtin"
+}
+
+func programUsesHTTPS1Server(prog *ast.Program) bool {
+	return programContainsCall(prog, isHTTPSCreateServerCall)
+}
+
+// isHTTP2SecureServerCall reports whether ex is `http2.createSecureServer(...)` —
+// the h2-over-TLS server whose per-listener drive (TDD-00191 Stage 4) the event
+// loop's extra-accept path must know about ahead of Pass 2, same ordering reason
+// as isHTTPSCreateServerCall.
+func isHTTP2SecureServerCall(ex *ast.CallExpression) bool {
+	mem, ok := ex.Callee.(*ast.MemberExpression)
+	if !ok || mem.Property != "createSecureServer" {
+		return false
+	}
+	id, ok := mem.Object.(*ast.Identifier)
+	return ok && id.Name == "http2__kml_builtin"
+}
+
+func programUsesH2TLSServer(prog *ast.Program) bool {
+	return programContainsCall(prog, isHTTP2SecureServerCall)
 }
 
 // isUpgradeOnCall reports whether ex is `<obj>.on("upgrade", …)` or
@@ -358,148 +403,148 @@ func isUpgradeOnCall(ex *ast.CallExpression) bool {
 	return ok && lit.Value == "upgrade"
 }
 
-func walkStmtForUpgrade(s ast.Statement, found *bool) {
+func walkStmtForCall(pred func(*ast.CallExpression) bool, s ast.Statement, found *bool) {
 	if *found || s == nil {
 		return
 	}
 	switch n := s.(type) {
 	case *ast.BlockStatement:
-		walkBlockForUpgrade(n, found)
+		walkBlockForCall(pred, n, found)
 	case *ast.ExpressionStatement:
-		walkExprForUpgrade(n.Expr, found)
+		walkExprForCall(pred, n.Expr, found)
 	case *ast.VarDeclaration:
-		walkExprForUpgrade(n.Init, found)
+		walkExprForCall(pred, n.Init, found)
 	case *ast.VarDeclarationList:
 		for _, d := range n.Decls {
-			walkStmtForUpgrade(d, found)
+			walkStmtForCall(pred, d, found)
 		}
 	case *ast.ReturnStatement:
-		walkExprForUpgrade(n.Value, found)
+		walkExprForCall(pred, n.Value, found)
 	case *ast.ThrowStatement:
-		walkExprForUpgrade(n.Argument, found)
+		walkExprForCall(pred, n.Argument, found)
 	case *ast.IfStatement:
-		walkExprForUpgrade(n.Test, found)
-		walkStmtForUpgrade(n.Consequent, found)
-		walkStmtForUpgrade(n.Alternate, found)
+		walkExprForCall(pred, n.Test, found)
+		walkStmtForCall(pred, n.Consequent, found)
+		walkStmtForCall(pred, n.Alternate, found)
 	case *ast.ForStatement:
-		walkStmtForUpgrade(n.Init, found)
-		walkExprForUpgrade(n.Test, found)
+		walkStmtForCall(pred, n.Init, found)
+		walkExprForCall(pred, n.Test, found)
 		for _, u := range n.Update {
-			walkExprForUpgrade(u, found)
+			walkExprForCall(pred, u, found)
 		}
-		walkStmtForUpgrade(n.Body, found)
+		walkStmtForCall(pred, n.Body, found)
 	case *ast.ForOfStatement:
-		walkExprForUpgrade(n.Iterable, found)
-		walkStmtForUpgrade(n.Body, found)
+		walkExprForCall(pred, n.Iterable, found)
+		walkStmtForCall(pred, n.Body, found)
 	case *ast.ForInStatement:
-		walkStmtForUpgrade(n.Body, found)
+		walkStmtForCall(pred, n.Body, found)
 	case *ast.WhileStatement:
-		walkExprForUpgrade(n.Test, found)
-		walkStmtForUpgrade(n.Body, found)
+		walkExprForCall(pred, n.Test, found)
+		walkStmtForCall(pred, n.Body, found)
 	case *ast.DoWhileStatement:
-		walkStmtForUpgrade(n.Body, found)
-		walkExprForUpgrade(n.Test, found)
+		walkStmtForCall(pred, n.Body, found)
+		walkExprForCall(pred, n.Test, found)
 	case *ast.SwitchStatement:
-		walkExprForUpgrade(n.Discriminant, found)
+		walkExprForCall(pred, n.Discriminant, found)
 		for _, c := range n.Cases {
-			walkExprForUpgrade(c.Test, found)
+			walkExprForCall(pred, c.Test, found)
 			for _, cs := range c.Body {
-				walkStmtForUpgrade(cs, found)
+				walkStmtForCall(pred, cs, found)
 			}
 		}
 	case *ast.TryStatement:
-		walkBlockForUpgrade(n.Body, found)
+		walkBlockForCall(pred, n.Body, found)
 		if n.Catch != nil {
-			walkBlockForUpgrade(n.Catch.Body, found)
+			walkBlockForCall(pred, n.Catch.Body, found)
 		}
-		walkBlockForUpgrade(n.Finally, found)
+		walkBlockForCall(pred, n.Finally, found)
 	case *ast.LabeledStatement:
-		walkStmtForUpgrade(n.Body, found)
+		walkStmtForCall(pred, n.Body, found)
 	case *ast.FunctionDeclaration:
-		walkBlockForUpgrade(n.Body, found)
+		walkBlockForCall(pred, n.Body, found)
 	case *ast.ExportDeclaration:
-		walkStmtForUpgrade(n.Decl, found)
+		walkStmtForCall(pred, n.Decl, found)
 	}
 }
 
-func walkBlockForUpgrade(b *ast.BlockStatement, found *bool) {
+func walkBlockForCall(pred func(*ast.CallExpression) bool, b *ast.BlockStatement, found *bool) {
 	if b == nil || *found {
 		return
 	}
 	for _, s := range b.Body {
-		walkStmtForUpgrade(s, found)
+		walkStmtForCall(pred, s, found)
 		if *found {
 			return
 		}
 	}
 }
 
-func walkExprForUpgrade(ex ast.Expression, found *bool) {
+func walkExprForCall(pred func(*ast.CallExpression) bool, ex ast.Expression, found *bool) {
 	if *found || ex == nil {
 		return
 	}
 	switch n := ex.(type) {
 	case *ast.CallExpression:
-		if isUpgradeOnCall(n) {
+		if pred(n) {
 			*found = true
 			return
 		}
-		walkExprForUpgrade(n.Callee, found)
+		walkExprForCall(pred, n.Callee, found)
 		for _, a := range n.Args {
-			walkExprForUpgrade(a, found)
+			walkExprForCall(pred, a, found)
 		}
 	case *ast.MemberExpression:
-		walkExprForUpgrade(n.Object, found)
+		walkExprForCall(pred, n.Object, found)
 	case *ast.IndexExpression:
-		walkExprForUpgrade(n.Object, found)
-		walkExprForUpgrade(n.Index, found)
+		walkExprForCall(pred, n.Object, found)
+		walkExprForCall(pred, n.Index, found)
 	case *ast.BinaryExpression:
-		walkExprForUpgrade(n.Left, found)
-		walkExprForUpgrade(n.Right, found)
+		walkExprForCall(pred, n.Left, found)
+		walkExprForCall(pred, n.Right, found)
 	case *ast.AssignmentExpression:
-		walkExprForUpgrade(n.Left, found)
-		walkExprForUpgrade(n.Right, found)
+		walkExprForCall(pred, n.Left, found)
+		walkExprForCall(pred, n.Right, found)
 	case *ast.ConditionalExpression:
-		walkExprForUpgrade(n.Test, found)
-		walkExprForUpgrade(n.Consequent, found)
-		walkExprForUpgrade(n.Alternate, found)
+		walkExprForCall(pred, n.Test, found)
+		walkExprForCall(pred, n.Consequent, found)
+		walkExprForCall(pred, n.Alternate, found)
 	case *ast.SequenceExpression:
 		for _, e := range n.Exprs {
-			walkExprForUpgrade(e, found)
+			walkExprForCall(pred, e, found)
 		}
 	case *ast.NonNullExpression:
-		walkExprForUpgrade(n.Arg, found)
+		walkExprForCall(pred, n.Arg, found)
 	case *ast.UnaryExpression:
-		walkExprForUpgrade(n.Arg, found)
+		walkExprForCall(pred, n.Arg, found)
 	case *ast.UpdateExpression:
-		walkExprForUpgrade(n.Arg, found)
+		walkExprForCall(pred, n.Arg, found)
 	case *ast.SpreadElement:
-		walkExprForUpgrade(n.Arg, found)
+		walkExprForCall(pred, n.Arg, found)
 	case *ast.AwaitExpression:
-		walkExprForUpgrade(n.Argument, found)
+		walkExprForCall(pred, n.Argument, found)
 	case *ast.YieldExpression:
-		walkExprForUpgrade(n.Argument, found)
+		walkExprForCall(pred, n.Argument, found)
 	case *ast.ArrayLiteral:
 		for _, e := range n.Elements {
-			walkExprForUpgrade(e, found)
+			walkExprForCall(pred, e, found)
 		}
 	case *ast.ObjectLiteral:
 		for _, p := range n.Properties {
-			walkExprForUpgrade(p.KeyExpr, found)
-			walkExprForUpgrade(p.Value, found)
+			walkExprForCall(pred, p.KeyExpr, found)
+			walkExprForCall(pred, p.Value, found)
 		}
 	case *ast.TemplateLiteral:
 		for _, e := range n.Exprs {
-			walkExprForUpgrade(e, found)
+			walkExprForCall(pred, e, found)
 		}
 	case *ast.NewExpression:
 		for _, a := range n.Args {
-			walkExprForUpgrade(a, found)
+			walkExprForCall(pred, a, found)
 		}
 	case *ast.ArrowFunction:
-		walkExprForUpgrade(n.Body, found)
-		walkBlockForUpgrade(n.Block, found)
+		walkExprForCall(pred, n.Body, found)
+		walkBlockForCall(pred, n.Block, found)
 	case *ast.FunctionExpression:
-		walkBlockForUpgrade(n.Body, found)
+		walkBlockForCall(pred, n.Body, found)
 	}
 }

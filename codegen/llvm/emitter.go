@@ -129,6 +129,7 @@ type Emitter struct {
 	bigintBackend         string          // "" (== "libtommath", the default) or "gmp" — the __kml_bigint_* ABI implementation to link. See SetBigIntBackend / TDD-00074
 	compatMode            string          // "" (== "strict", the default) or "js" — the whole-program compatibility axis. See SetCompatMode / TDD-00075
 	cryptoBackend         string          // "" (== "openssl", the default) or "commoncrypto" — the __kml_crypto_* ABI implementation to compile+link. See SetCryptoBackend / TDD-00104
+	webviewBackend        string          // "" (== "system", the default) or cef/qt/sailfish — which webview_* shim to compile+link. See SetWebviewBackend / TDD-00144
 	usesCrypto            bool            // set the first time any crypto.subtle operation is emitted (drives backend compile+link in main.go)
 	usesBigInt            bool            // set the first time any bigint operation is emitted (drives backend compile+link in main.go)
 	declaredBigInt        bool            // the __kml_bigint_* declares have been emitted once
@@ -448,6 +449,16 @@ type Emitter struct {
 	// served by the normal connection fiber, whose I/O is routed through the
 	// SSL-aware conn_recv/conn_send/conn_close shims.
 	usedHTTPS1Server bool
+	// httpS1Wired dedups ensureHTTPS1Server's one-time wiring (usedTLS etc.).
+	// Split from usedHTTPS1Server so a whole-program pre-scan
+	// (programUsesHTTPS1Server, TDD-00191 Stage 3) can set usedHTTPS1Server early —
+	// before ensureHTTPRuntime emits the TLS-aware extra-listener accept — while
+	// the actual https.createServer emit still runs the wiring exactly once.
+	// h2TLSWired is the same split for ensureH2TLSServer (TDD-00191 Stage 4), and
+	// httpTLSCtxEmitted dedups the @__kml_http_tls_ctx global both paths share.
+	httpS1Wired       bool
+	h2TLSWired        bool
+	httpTLSCtxEmitted bool
 	// usedHTTPUpgrade marks that the program uses the Node-faithful HTTP
 	// `'upgrade'` event (`server.on('upgrade', …)`) or the `klain:ws`
 	// WebSocket-server convenience built on it (TDD-00158). Set by a
@@ -468,19 +479,19 @@ type Emitter struct {
 	// usedDiagChRuntime: diagnostics_channel pub/sub core.
 	usedDiagChRuntime bool
 	// nodeTestPrefix is the compile-time describe/suite name stack.
-	nodeTestPrefix               []string // the generic __kml_h2c_on_* IR callbacks http2.c references
-	usedAtomicsRuntime           bool
-	usedChanRuntime              bool
-	usedPipeDecl                 bool
-	usedPthreadMutex             bool
-	usedWorkerFdSetbit           bool
-	bcChannels                   map[string]*bcChannelInfo
-	usedPromiseCombinators       bool
-	usedPendingFinishSettled     bool
-	usedFetchAwaitSettled        bool
-	usedCurlSlist                bool
-	usedCurlURL                  bool
-	usedSQLite3                  bool
+	nodeTestPrefix           []string // the generic __kml_h2c_on_* IR callbacks http2.c references
+	usedAtomicsRuntime       bool
+	usedChanRuntime          bool
+	usedPipeDecl             bool
+	usedPthreadMutex         bool
+	usedWorkerFdSetbit       bool
+	bcChannels               map[string]*bcChannelInfo
+	usedPromiseCombinators   bool
+	usedPendingFinishSettled bool
+	usedFetchAwaitSettled    bool
+	usedCurlSlist            bool
+	usedCurlURL              bool
+	usedSQLite3              bool
 	// usedFFIDl guards the one-time libdl decls (TDD-00164, runtime_ffi.go).
 	usedFFIDl bool
 	// FFI callback trampolines (TDD-00164 Stage C, emit_ffi_callback.go):
@@ -491,7 +502,7 @@ type Emitter struct {
 	ffiCbUnregUsed bool
 	// usedNodeFFI marks a program that imports node:ffi (TDD-00164) — gates
 	// recognizing `new DynamicLibrary(...)` as the builtin constructor.
-	usedNodeFFI bool
+	usedNodeFFI                  bool
 	sqliteUDFCtr                 int
 	usedFopen                    bool
 	usedFclose                   bool
@@ -688,10 +699,54 @@ type Emitter struct {
 	// duplicate @__kml_http_dispatch definition the LLVM backend would
 	// reject with a confusing symbol-collision error.
 	httpListenCallSeen bool
+	// httpServerCount counts Node http.createServer sites (TDD-00191 Stage 1):
+	// server 0 is the primary (keeps the @__kml_listen_* scalars + full
+	// capability); each additional server gets a suffixed dispatcher
+	// (@__kml_http_dispatch_N) and registers in the extra-listener table.
+	// curServerSfx/curServerDispatchSym/curServerIsPrimary carry the current
+	// site's derived values from emitHTTPCreateServerCore to the handle builder.
+	httpServerCount      int
+	curServerDispatchSym string
+	curServerIsPrimary   bool
+	// curDispatchSfx is the "" / "_N" suffix of the dispatcher currently being
+	// built, read by the dispatcher's handler load / streaming-writer hand-off /
+	// function name so an additional server reads its own globals.
+	curDispatchSfx string
 	// httpServerHandlerPending marks a zero-arg http.createServer() handle
 	// still waiting for its request handler via server.on('request', cb);
 	// server.listen rejects until one is registered.
-	httpServerHandlerPending  bool
+	httpServerHandlerPending bool
+	// httpPrimaryGuardMsgEmitted dedups the non-primary ws/upgrade guard's error
+	// string constant (TDD-00191 Stage 3, emitHTTPRequirePrimaryHandle).
+	httpPrimaryGuardMsgEmitted bool
+	// TDD-00191 Stage 3: per-server ws/upgrade routing. httpServerVarSfx maps a
+	// `const x = http.createServer(...)` binding name to its dispatcher suffix
+	// ("" primary, "_N" additional); httpWSVarSfx maps a
+	// `const wss = new WebSocketServer({ server: x })` binding to the same suffix
+	// (carried so a later wss.on('connection', …) targets x's ws handler global).
+	// The pending* fields hand the just-created suffix from the createServer /
+	// WebSocketServer emit up to the enclosing var declaration, which records it.
+	// extraWSUpGlobalsEmitted dedups the suffixed @__kml_listen_{ws,upgrade}_handler_N
+	// global declarations.
+	httpServerVarSfx        map[string]string
+	httpWSVarSfx            map[string]string
+	pendingServerSfx        string
+	pendingServerCreated    bool
+	pendingWSSfx            string
+	pendingWSCreated        bool
+	extraWSUpGlobalsEmitted map[string]bool
+	// pendingServerTLSCtx carries an https.createServer's SSL_CTX* register from
+	// emitHTTPSCreateServer down into the handle builder (TDD-00191 Stage 3): the
+	// primary server also stores it into @__kml_http_tls_ctx (the reactor's TLS
+	// accept branch reads that), while an additional server keeps it only in its
+	// handle (slot 4), passed to the extra-listener table at listen() so that
+	// listener's accepts do their own SSL handshake. "" for a plain server.
+	pendingServerTLSCtx string
+	// pendingServerH2 marks the just-created server as an h2-over-TLS server
+	// (http2.createSecureServer) so the handle builder records its @__kml_h2_vtbl
+	// in the handle (slot 5) for the extra-listener table's ALPN h2 drive
+	// (TDD-00191 Stage 4). Reset with pendingServerTLSCtx.
+	pendingServerH2           bool
 	usedHTTPThrow             bool
 	usedSplitFirst            bool
 	usedHTTPParseHeaders      bool
@@ -717,19 +772,19 @@ type Emitter struct {
 	namespaces                map[string]map[string]bool
 	// nsAliases maps a fully-resolved alias name (dotted for a namespace-
 	// scoped `export import`) to the dotted namespace it targets (ADR-00456).
-	nsAliases               map[string]string
-	usedTaskRuntime         bool
-	usedPromiseRuntime      bool // the promise struct + __kml_task_alloc_promise, without the fiber scheduler (TDD-00084 Part A)
-	usedPromiseSettle       bool // @__kml_promise_settle — bare-promise settle+wake+drain for new Promise(executor) (TDD-00087)
-	usedFetchDriveRunner    bool // @__kml_fetch_drive_run — deferred raw-fetch drive microtask for .then on a fetch
-	usedPromiseAdoptRunner  bool // @__kml_promise_adopt_runner — thenable adoption for resolve(aPromise) (TDD-00091)
-	usedAwaitTimerDrive     bool // a lightweight await references @__kml_timer_fire_next (TDD-00087)
-	usedMicrotasks          bool
-	thenCtr                 int // unique-name counter for .then/.catch/.finally reaction runners
-	newPromiseCtr           int // unique-name counter for new Promise(executor) resolve/reject thunks (TDD-00087)
-	usedCurrentTaskGlobal   bool
-	usedAsyncLocalStorage   bool
-	usedAsyncCtxAccessors   bool
+	nsAliases              map[string]string
+	usedTaskRuntime        bool
+	usedPromiseRuntime     bool // the promise struct + __kml_task_alloc_promise, without the fiber scheduler (TDD-00084 Part A)
+	usedPromiseSettle      bool // @__kml_promise_settle — bare-promise settle+wake+drain for new Promise(executor) (TDD-00087)
+	usedFetchDriveRunner   bool // @__kml_fetch_drive_run — deferred raw-fetch drive microtask for .then on a fetch
+	usedPromiseAdoptRunner bool // @__kml_promise_adopt_runner — thenable adoption for resolve(aPromise) (TDD-00091)
+	usedAwaitTimerDrive    bool // a lightweight await references @__kml_timer_fire_next (TDD-00087)
+	usedMicrotasks         bool
+	thenCtr                int // unique-name counter for .then/.catch/.finally reaction runners
+	newPromiseCtr          int // unique-name counter for new Promise(executor) resolve/reject thunks (TDD-00087)
+	usedCurrentTaskGlobal  bool
+	usedAsyncLocalStorage  bool
+	usedAsyncCtxAccessors  bool
 	// programUsesALS is a whole-program pre-scan result (set in EmitProgram
 	// before Pass 2): true when the program constructs an AsyncLocalStorage
 	// anywhere, so timer callbacks are wrapped to carry the async context across
@@ -740,13 +795,13 @@ type Emitter struct {
 	// before Pass 2): true when the program constructs a FinalizationRegistry
 	// anywhere, so Memory.free sites — possibly emitted before the construction
 	// — include the finalizer-lookup hook (TDD-00163 Stage 2).
-	programUsesFinReg bool
-	usedFinRegHelpers bool   // ensureFinalizationHelpers emit-once guard
-	finregCount       int    // unique-name counter for per-site trampoline/report fns
-	finalizersMode    string // -finalizers: "off" (default) or "report" (leak lines at exit)
-	declaredAtexit    bool   // `declare i32 @atexit(ptr)` emitted (shared with the h2 flush hook)
-	declaredGCInvokeFin bool // `declare i32 @GC_invoke_finalizers()` emitted
-	hasMaySuspend           bool // any async fn classified may-suspend (TDD-00083 Stage 2)
+	programUsesFinReg       bool
+	usedFinRegHelpers       bool   // ensureFinalizationHelpers emit-once guard
+	finregCount             int    // unique-name counter for per-site trampoline/report fns
+	finalizersMode          string // -finalizers: "off" (default) or "report" (leak lines at exit)
+	declaredAtexit          bool   // `declare i32 @atexit(ptr)` emitted (shared with the h2 flush hook)
+	declaredGCInvokeFin     bool   // `declare i32 @GC_invoke_finalizers()` emitted
+	hasMaySuspend           bool   // any async fn classified may-suspend (TDD-00083 Stage 2)
 	usedCbrt                bool
 	usedCtlz32              bool
 	usedArc4Random          bool
@@ -832,8 +887,8 @@ type Emitter struct {
 	// breakFreeScope/continueFreeScope record len(e.scopes) at loop/switch
 	// entry (lockstep with breakStack/continueStack) so break/continue free
 	// exactly the obligations of the scopes they exit.
-	autoFreePlan      map[*ast.VarDeclaration]bool
-	autoFreeRebind    map[*ast.VarDeclaration]bool
+	autoFreePlan   map[*ast.VarDeclaration]bool
+	autoFreeRebind map[*ast.VarDeclaration]bool
 	// TDD-00175 Stage 1: bindings the interior-alias analysis additionally
 	// proved transitively owned (deep-free candidates), and the memo table /
 	// counter for the synthesized per-type recursive frees
@@ -846,19 +901,19 @@ type Emitter struct {
 	// pendingStackAllocLit marks the exact literal node while its declaration
 	// is being emitted; stackAllocatedLits records the literals actually
 	// stack-emitted (so maybeRegisterAutoFree never frees an alloca).
-	optimizeMemory      bool
+	optimizeMemory bool
 	// wantTupleAggregate is the one-shot handshake between the tuple
 	// destructuring fast path and emitCallToFuncSig (TDD-00134 Stage 3):
 	// set right before emitting a direct call to a TupleByVal function,
 	// grab-and-cleared at the call's entry so nested argument calls never
 	// see it; the call then returns the raw aggregate instead of spilling.
-	wantTupleAggregate  bool
-	stackAllocPlan      map[*ast.VarDeclaration]bool
+	wantTupleAggregate   bool
+	stackAllocPlan       map[*ast.VarDeclaration]bool
 	pendingStackAllocLit ast.Expression
-	stackAllocatedLits  map[ast.Expression]bool
+	stackAllocatedLits   map[ast.Expression]bool
 	// classStackAudit memoizes classStackEligible per class name (may a
 	// non-escaping instance of it be stack-allocated?).
-	classStackAudit map[string]bool
+	classStackAudit   map[string]bool
 	pendingFrees      []pendingFree
 	breakFreeScope    []int
 	continueFreeScope []int
@@ -1024,6 +1079,21 @@ func (e *Emitter) CryptoBackend() string {
 	return e.cryptoBackend
 }
 
+// SetWebviewBackend selects the compile-wide webview backend (TDD-00144),
+// called by main.go from the -webview flag. "" resolves to the default,
+// system (WebKitGTK/WKWebView/WebView2, per-platform); cef/qt/sailfish are
+// the opt-in Chromium/Gecko backends. Only system is built today; the others
+// are recognized so the flag validates, and rejected cleanly at link time.
+func (e *Emitter) SetWebviewBackend(mode string) { e.webviewBackend = mode }
+
+// WebviewBackend returns the resolved backend name ("" → the system default).
+func (e *Emitter) WebviewBackend() string {
+	if e.webviewBackend == "" {
+		return "system"
+	}
+	return e.webviewBackend
+}
+
 // UsesCrypto reports whether the emitted program actually used crypto.subtle,
 // so main.go only compiles+links a crypto backend for programs that need one.
 func (e *Emitter) UsesCrypto() bool { return e.usesCrypto }
@@ -1039,6 +1109,10 @@ func (e *Emitter) UsesBigInt() bool { return e.usesBigInt }
 // UsesWorkers reports whether the program spawns Worker threads (TDD-00098)
 // — main.go adds -pthread to the clang invocation when it does.
 func (e *Emitter) UsesWorkers() bool { return e.usedWorkerRuntime }
+
+// UsesFFIDl reports whether the program uses node:ffi (dlopen/dlsym, TDD-00164).
+// main.go adds the FFI link flags (see FFILinkFlags) when it does.
+func (e *Emitter) UsesFFIDl() bool { return e.usedFFIDl }
 
 // SetCompatMode selects the whole-program compatibility axis (TDD-00075):
 // "" / "strict" (default — the compiler's opinionated, safer-than-JS
@@ -1861,6 +1935,21 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// dispatcher emits at its header-parse seam.
 	e.usedHTTPUpgrade = programUsesHTTPUpgrade(prog)
 
+	// TDD-00191 Stage 3: does the program create an HTTPS/1.1 server anywhere?
+	// A pre-scan (before Pass 2) so the event loop's extra-listener accept is
+	// emitted TLS-aware even when a *plain* primary server triggers
+	// ensureHTTPRuntime first — an additional https.createServer would otherwise
+	// find the accept path already emitted without its SSL handshake. Wiring the
+	// server path here also emits the @__kml_http_tls_ctx global up front.
+	if programUsesHTTPS1Server(prog) {
+		e.ensureHTTPS1Server()
+	}
+	// TDD-00191 Stage 4: same pre-scan for an h2-over-TLS server, so the
+	// extra-listener accept path is emitted with its ALPN h2 drive.
+	if programUsesH2TLSServer(prog) {
+		e.ensureH2TLSServer()
+	}
+
 	// TDD-00168 Stage 3: does the program construct an AsyncLocalStorage
 	// anywhere? A pre-scan (before Pass 2) so a timer callback scheduled inside
 	// an `als.run(...)` — possibly from a function body emitted before the
@@ -2073,7 +2162,7 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	argc64 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = zext i32 %%argc to i64", argc64))
 	argvSrc := "%argv"
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		// The CRT's argv is ANSI-code-page decoded, so a non-ASCII argument
 		// arrives as '?'. Reconstruct it as UTF-8 from GetCommandLineW at
 		// startup, as Node does (ADR-00745). Falls back to the CRT argv/argc
@@ -2314,7 +2403,14 @@ done:
 
 	var out strings.Builder
 	out.WriteString("; Generated by KlainMainLang\n\n")
-	if runtime.GOOS == "windows" {
+	if ct := CrossTargetTriple(); ct != "" {
+		// A cross-compilation target (TDD-00146 Stage 1) stamps its own triple
+		// so the IR and the clang --target agree; LLVM derives the data layout
+		// from the triple, matching the Windows precedent below (triple only,
+		// no explicit datalayout line). Explicit --target wins over the
+		// Windows-host default.
+		out.WriteString("target triple = \"" + ct + "\"\n\n")
+	} else if runtime.GOOS == "windows" {
 		// The mingw-w64 target (TDD-00177 Stage 0) — without it clang assumes
 		// its default MSVC triple and warns on every compile. Linux/macOS keep
 		// relying on clang's host default, so their output is unchanged.
@@ -2331,7 +2427,7 @@ done:
 	}
 	out.WriteString("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n")
 	out.WriteString(e.allocas.String())
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		// The UCRT opens stdin/stdout/stderr in text mode, translating every
 		// "\n" to "\r\n" on write (and back on read). Node on Windows does no
 		// such translation: console.log("a") writes the bytes "a\n". Switch

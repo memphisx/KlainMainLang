@@ -14,8 +14,6 @@
 // (emit_strings.go); hand-written runtime IR calls @__kml_str_alloc directly.
 package llvm
 
-import "runtime"
-
 func (e *Emitter) ensureStrHeaderRuntime() {
 	if e.usedStrHeaderRuntime {
 		return
@@ -151,7 +149,7 @@ func (e *Emitter) ensureMemmem() {
 		return
 	}
 	e.usedMemmem = true
-	if runtime.GOOS != "windows" {
+	if targetGOOS() != "windows" {
 		e.emitGlobal("declare ptr @memmem(ptr noundef, i64 noundef, ptr noundef, i64 noundef)")
 		return
 	}

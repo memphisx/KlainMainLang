@@ -73,7 +73,7 @@
       "exampleKey": "arrays/array_methods",
       "snippet": "let arr = new Array<number>(0)\narr.push(10)\nlet len: number = arr.push(20)   // 2",
       "differences": [
-        "A length change inside a callee now grows the caller's array when it is passed as a plain **variable** (full JS reference semantics); an array passed as an **object field** or **array element** (`obj.items`, `grid[i]`) still crosses as a copy, so a length change through those is not seen."
+        "A length change inside a callee is seen by the caller when the array is passed as a plain **variable** (full JS reference semantics); an array passed as an **object field** or **array element** (`obj.items`, `grid[i]`) crosses as a copy, so a length change through those is not seen."
       ],
       "seeAlso": [
         "array.pop",

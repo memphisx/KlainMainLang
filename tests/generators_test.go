@@ -83,6 +83,25 @@ console.log(g.next().value);
 `, "10\n15\n20\n25")
 }
 
+func TestE2EGeneratorWrapperReturnAnnotation(t *testing.T) {
+	// Idiomatic-TS wrapper return annotations (Generator<T>, IterableIterator<T>,
+	// Generator<T, TReturn, TNext>) unwrap to the element type T, alongside this
+	// codebase's own bare-element convention. Regression for the bug where a
+	// wrapped annotation fell through to the generic Array<T> path and was read
+	// as number[], so a scalar yield emitted a double into an array {ptr,i64}
+	// slot (invalid IR). ADR-00814.
+	assertOutput(t, `
+function* a(): Generator<number> { yield 1; yield 2; }
+function* b(): IterableIterator<number> { yield 3; yield 4; }
+function* c(): Generator<number, void, unknown> { yield 5; }
+let s = 0;
+for (const n of a()) s += n;
+for (const n of b()) s += n;
+for (const n of c()) s += n;
+console.log(s);
+`, "15")
+}
+
 func TestE2EGeneratorStringElementType(t *testing.T) {
 	assertOutput(t, `
 function* names(): string {

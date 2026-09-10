@@ -34,6 +34,7 @@
               "Reads the whole file into a string",
               "The optional encoding argument accepts `'utf8'`/`'utf-8'` (a bare string or `{ encoding: 'utf8' }`) — a faithful no-op since strings are UTF-8, so the everyday `readFileSync(path, 'utf8')` idiom compiles ([ADR-00785](../adr/ADR-00785.md))",
               "Throws a catchable `Error` (built from `strerror(errno)`) if the file can't be opened",
+              "Pseudo-files under `/proc` and `/sys` (which report `st_size` 0 yet stream real bytes) read correctly — the read grows to EOF rather than trusting the stat size ([ADR-00811](../adr/ADR-00811.md))",
               "See [ADR-00023](../adr/ADR-00023.md)"
             ]
           },
@@ -46,7 +47,7 @@
               "See [ADR-00094](../adr/ADR-00094.md)"
             ],
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
+              "Only the error message text differs from Node's `ENOENT: …, <syscall> '<path>'` format — `err.code`/`syscall`/`path`/`errno` all match Node ([ADR-00768](../adr/ADR-00768.md))."
             ]
           },
           {
@@ -58,7 +59,7 @@
               "Optional third argument: `'utf8'` (or `{ encoding: 'utf8', flag }`); `{ flag: 'a' }` appends instead of truncating, `{ flag: 'w' }` (default) truncates ([ADR-00785](../adr/ADR-00785.md))"
             ],
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
+              "Only the error message text differs from Node's `ENOENT: …, <syscall> '<path>'` format — `err.code`/`syscall`/`path`/`errno` all match Node ([ADR-00768](../adr/ADR-00768.md)).",
               "The options argument supports only `{ encoding: 'utf8', flag }` — `mode` and non-`'utf8'` encodings are clean rejections ([ADR-00785](../adr/ADR-00785.md))."
             ]
           },
@@ -71,7 +72,7 @@
               "Optional third argument `'utf8'` / `{ encoding: 'utf8', flag }` accepted (the flag is a no-op — it always appends) ([ADR-00785](../adr/ADR-00785.md))"
             ],
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
+              "Only the error message text differs from Node's `ENOENT: …, <syscall> '<path>'` format — `err.code`/`syscall`/`path`/`errno` all match Node ([ADR-00768](../adr/ADR-00768.md)).",
               "The options argument supports only `{ encoding: 'utf8', flag }` — `mode` and non-`'utf8'` encodings are clean rejections ([ADR-00785](../adr/ADR-00785.md))."
             ]
           },
@@ -145,7 +146,7 @@
               "A directory throws as Node does per host (`EISDIR` on Linux, `EPERM` on macOS/Windows) instead of being silently removed ([ADR-00736](../adr/ADR-00736.md))"
             ],
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
+              "Only the error message text differs from Node's `ENOENT: …, <syscall> '<path>'` format — `err.code`/`syscall`/`path`/`errno` all match Node ([ADR-00768](../adr/ADR-00768.md))."
             ]
           },
           {
@@ -179,7 +180,7 @@
               "See [ADR-00027](../adr/ADR-00027.md)"
             ],
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
+              "Only the error message text differs from Node's `ENOENT: …, <syscall> '<path>'` format — `err.code`/`syscall`/`path`/`errno` all match Node ([ADR-00768](../adr/ADR-00768.md)).",
               "`Dirent` exposes `.name`/`.parentPath` and all seven kind predicates ([ADR-00787](../adr/ADR-00787.md)); the `.path` alias for `.parentPath` is absent, and a filesystem returning `DT_UNKNOWN` (rare) reports all kinds `false` rather than falling back to `lstat`",
               "`{ recursive: true, withFileTypes: true }` together is a clean rejection (recursive Dirents need `parentPath`); a `DT_UNKNOWN` filesystem is not descended; `encoding: 'buffer'` remains unsupported; recursive paths join with `'/'` (Node uses the platform separator)."
             ]
@@ -192,14 +193,14 @@
               "See [ADR-00027](../adr/ADR-00027.md)"
             ],
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
+              "Only the error message text differs from Node's `ENOENT: …, <syscall> '<path>'` format — `err.code`/`syscall`/`path`/`errno` all match Node ([ADR-00768](../adr/ADR-00768.md))."
             ]
           },
           {
             "feature": "`fs.copyFileSync(src, dest[, mode])`",
             "status": "implemented",
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
+              "Only the error message text differs from Node's `ENOENT: …, <syscall> '<path>'` format — `err.code`/`syscall`/`path`/`errno` all match Node ([ADR-00768](../adr/ADR-00768.md)).",
               "`COPYFILE_FICLONE`/`FICLONE_FORCE` mode bits are accepted but a best-effort no-op (no reflink); `fs.constants.COPYFILE_EXCL`/`COPYFILE_FICLONE`/`COPYFILE_FICLONE_FORCE` name all three ([ADR-00795](../adr/ADR-00795.md))"
             ],
             "notes": [
@@ -212,7 +213,7 @@
             "feature": "Async variants — callback (`fs.readFile(path, cb)`) + Promise (`fs.promises.readFile` / `import from 'fs/promises'`)",
             "status": "implemented",
             "caveats": [
-              "The `fs.promises` ops are genuinely non-blocking — `readFile`/`writeFile`/`appendFile`/`unlink`/`mkdir`/`rmdir`/`rename`/`copyFile`/`readdir` run on a background thread pool (default 4, `UV_THREADPOOL_SIZE`) and return a pending Promise the loop settles on completion, so other connections/timers keep running during the I/O ([TDD-00185](../tdd/TDD-00185.md)/[ADR-00773](../adr/ADR-00773.md)/[ADR-00774](../adr/ADR-00774.md)). Two cases stay on the inline (delivery-only async, no concurrency gain — [TDD-00107](../tdd/TDD-00107.md)/[ADR-00340](../adr/ADR-00340.md)) path: the legacy **callback** form (`fs.readFile(path, cb)`), and a `writeFile`/`appendFile` whose data is an `ArrayBuffer`/`TypedArray` (its byte-length write). The pool is POSIX-first — Windows keeps the inline path pending the reactor work",
+              "Two cases stay on the inline (delivery-only async, no concurrency gain) path rather than the background thread pool: the legacy **callback** form (`fs.readFile(path, cb)`), and a `writeFile`/`appendFile` whose data is an `ArrayBuffer`/`TypedArray` (its byte-length write). The pool is POSIX-first — Windows keeps the inline path pending the reactor work ([TDD-00185](../tdd/TDD-00185.md))",
               "`readFile` delivers a string (text) — inherits `readFileSync`'s text-only caveat; no async binary (`Buffer`) form",
               "No `options`/`encoding` argument; no *async* `stat` (the sync `fs.statSync`/`lstatSync` exist — see the row above — but have no callback/Promise form yet)"
             ],
@@ -226,7 +227,7 @@
             "status": "implemented",
             "caveats": [
               "Chunks are **strings**, not `Buffer`s — text-first, like `readFileSync` (an embedded NUL truncates a chunk); binary (`Uint8Array`) streaming is a follow-on",
-              "`createReadStream` reads on the background thread pool ([TDD-00186](../tdd/TDD-00186.md)/[ADR-00775](../adr/ADR-00775.md)) — the file is opened synchronously (a missing file still throws) then read off the loop thread, each highWaterMark chunk enqueued into the `Readable` in order, so the read no longer freezes the reactor. Consumer backpressure is not yet honored (the worker reads ahead and chunks queue in the readable — the same memory profile the eager path had); true highWaterMark backpressure is a follow-on. On Windows the pre-pool eager read-to-EOF fill is kept (the pool runtime is POSIX-only) pending the reactor work",
+              "Consumer backpressure is not yet honored — the background-pool worker reads ahead and chunks queue in the `Readable` (the eager path's memory profile); true highWaterMark backpressure is a follow-on. On Windows the pre-pool eager read-to-EOF fill is kept (the pool runtime is POSIX-only) pending the reactor work ([TDD-00186](../tdd/TDD-00186.md))",
               "Options: `createReadStream` takes `{ highWaterMark }`, `createWriteStream` `{ flags: \"w\"\\|\"a\" }` — both compile-time literals; `start`/`end`/`fd`/`encoding` are clean errors"
             ],
             "notes": [
@@ -246,7 +247,7 @@
             "notes": [
               "The faithful, event-driven watch — a native OS change source folded into the `select()` loop via the standard hook trio (keepalive/fdset/dispatch), no `stat`-poll. Linux `inotify` and macOS `kqueue`/`EVFILT_VNODE` are readable fds (no thread); Windows `ReadDirectoryChangesW` runs on a watcher thread that signals a loopback wakeup socket",
               "`.close()` removes the wait fd and drops the keepalive so a watch-only program can exit; `{ persistent }` maps to the keepalive",
-              "All three backends verified on their platforms (Linux/Windows/macOS). See [TDD-00181](../tdd/TDD-00181.md) / [ADR-00756](../adr/ADR-00756.md)–[ADR-00758](../adr/ADR-00758.md)"
+              "See [TDD-00181](../tdd/TDD-00181.md)"
             ]
           },
           {

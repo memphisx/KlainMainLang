@@ -73,8 +73,7 @@
               "All frees route through the single `freeSymbol` chokepoint `Memory.free` uses (shallow, per-type) — the seam the FinalizationRegistry death-signal hook ([TDD-00163](../tdd/TDD-00163.md)/[ADR-00701](../adr/ADR-00701.md)) plugs into, so compiler-inserted frees fire cleanup callbacks exactly like explicit ones",
               "A registered FinalizationRegistry target's auto-free at scope exit fires its cleanup callback deterministically — register's target position is a free-notified retention, not a disqualifying escape ([ADR-00703](../adr/ADR-00703.md))",
               "Transitively-owned typed `JSON.parse`/`res.json()` trees are freed **deep** — a synthesized per-type recursive routine releases the row structs, their strings, and nested array buffers at block exit ([TDD-00175](../tdd/TDD-00175.md) Stage 1, [ADR-00716](../adr/ADR-00716.md)); interior-safe reads (`.length`, compound-op consumption like `total += x[0].n`) keep eligibility",
-              "Verified by an RSS-bounded churn E2E (~160MB churned, peak RSS asserted <30MB with zero annotations)",
-              "Exercised as a mode-differential dev lane ([TDD-00174](../tdd/TDD-00174.md) Stage A: `make examples MM=auto OPTMEM=1`, `KLAIN_TEST_MM`/`KLAIN_TEST_OPTMEM` E2E). See [ADR-00708](../adr/ADR-00708.md)"
+              "See [ADR-00708](../adr/ADR-00708.md)"
             ]
           },
           {
@@ -91,8 +90,7 @@
               "Escape analysis → entry-block `alloca` instead of the heap, no semantic change ([ADR-00702](../adr/ADR-00702.md)); an object literal's zero store happens at the literal site so a loop iteration reusing the slot re-zeroes it (preserving the absent-optional-field guarantee); composes with `-mm=auto` (a stack value is never auto-freed) and with FinalizationRegistry (registered targets stay heap so the free death-signal keeps firing)",
               "A non-escaping closure's 16-byte `{fn,env}` header and env struct stack-allocate too ([ADR-00704](../adr/ADR-00704.md)); the captured variables' shared cells stay heap regardless, since another capturer may escape",
               "Tuple-annotated literals and this-clean class instances stack-allocate too ([ADR-00705](../adr/ADR-00705.md)) — vtable dispatch, overrides, and `instanceof` all work on stack instances; Stage 1 covers every fixed-size allocation-site kind the TDD named",
-              "Value-returned small tuples ([ADR-00707](../adr/ADR-00707.md), Stage 3 — TDD-00134 complete): an eligible function returns its tuple as a register-passable struct aggregate; `return [a, b]` builds it with insertvalue and `const [v, err] = f()` destructures with extractvalue — the idiomatic Go-style error pattern is allocation-free end to end. One authoritative ABI record (the registered signature) drives definition, calls, and returns; a function referenced as a value keeps the pointer ABI program-wide (an indirect call knows nothing of the flag)",
-              "Measured on a case clang -O2 cannot elide itself: 2M 32-byte literals printed via `console.log(p)` — peak RSS 542MB → 459MB, the delta being exactly the object allocations"
+              "Value-returned small tuples ([ADR-00707](../adr/ADR-00707.md), Stage 3): an eligible function returns its tuple as a register-passable struct aggregate; `return [a, b]` builds it with insertvalue and `const [v, err] = f()` destructures with extractvalue — the idiomatic Go-style error pattern is allocation-free end to end. One authoritative ABI record (the registered signature) drives definition, calls, and returns; a function referenced as a value keeps the pointer ABI program-wide (an indirect call knows nothing of the flag)"
             ]
           },
           {

@@ -105,7 +105,7 @@
             "feature": "Optional catch binding (`try {} catch {}`, no bound param) — ES2019",
             "status": "implemented",
             "notes": [
-              "The `(e)` clause is optional — `emit_exceptions.go` already handled an empty `Param` correctly, so this was a parser-only change. See [ADR-00086](../adr/ADR-00086.md)"
+              "The `(e)` clause is optional. See [ADR-00086](../adr/ADR-00086.md)"
             ]
           },
           {
@@ -321,7 +321,7 @@
             "feature": "Array destructuring `const [a, b] = arr`",
             "status": "implemented",
             "caveats": [
-              "*Assignment* to already-declared targets (`[a, b] = expr`, not a fresh declaration) now reaches declaration-form parity for nesting ([ADR-00595](../adr/ADR-00595.md)): nested array/object patterns (`[[a, b], c] = e`), a trailing `...rest`, and a per-element `= default` (out-of-bounds is the presence signal) all work; a compound operator (`[a, b] += …`) stays rejected, and a member target (`[obj.x, arr[i]] = e`) isn't wired yet"
+              "In the *assignment* form (`[a, b] = expr`, not a fresh declaration), a compound operator (`[a, b] += …`) and a member target (`[obj.x, arr[i]] = e`) stay rejected ([ADR-00595](../adr/ADR-00595.md))"
             ],
             "notes": [
               "Holes are supported (`const [, b] = arr` skips index 0)",
@@ -338,7 +338,7 @@
             "status": "implemented",
             "caveats": [
               "Default values (`{ x = 1 }`) require a nullable/optional field (`T \\| null`, `T \\| undefined`, or `key?: T`) — a nullable *scalar* field now carries a real `{ i1, T }` presence bit ([TDD-00064](../tdd/TDD-00064.md)/[TDD-00187](../tdd/TDD-00187.md)), so its default fires on genuine absence only (a stored 0 survives); a default on a non-nullable field stays a clean compile-time rejection ([ADR-00158](../adr/ADR-00158.md)/[ADR-00779](../adr/ADR-00779.md))",
-              "*Assignment* to already-declared targets now supports nested patterns (`({ p, q: { r, s } } = obj)`, `({ arr: [x, y] } = obj)`) and object-property defaults, shorthand `{ x = default }` and keyed `{ k: x = default }`, on a nullable-reference field, at declaration-form parity ([ADR-00595](../adr/ADR-00595.md)/[ADR-00597](../adr/ADR-00597.md)); a `= default` on a nested position stays rejected — matching the declaration form",
+              "In the *assignment* form (`({ x, y } = expr)`), a `= default` on a nested position stays rejected — matching the declaration form ([ADR-00597](../adr/ADR-00597.md))",
               "`{ ...rest }` over an `any`/union/generic source (Stage 3c) and in the *assignment* form (`({ a, ...rest } = e)`) stay clean rejections",
               "A computed key (`{ [k]: v }`) is supported only for a **constant** string/number literal key (`{ [\"a\"]: v }`, `{ [0]: v }` — resolves to that field); a runtime-valued key on a fixed object is a clean rejection ([ADR-00609](../adr/ADR-00609.md))"
             ],
@@ -413,7 +413,7 @@
             "feature": "Default parameter values",
             "status": "implemented",
             "caveats": [
-              "A default expression may reference an earlier *scalar/string* parameter — `function f(a: number, b: number = a * 2)`, including chaining (`c = b + 1`) — for a free function, an instance method, a static method, and a constructor (including a parameter-property ctor `constructor(public x = 1, public y = x)`) ([ADR-00598](../adr/ADR-00598.md)/[ADR-00599](../adr/ADR-00599.md)); the earlier param's passed value (or its own default) is bound only while the default is evaluated, so an argument still sees the caller's scope. An earlier param of **any** supported kind is referenceable — scalar/string, *array* (`b = a.length`, `a[i]` — [ADR-00610](../adr/ADR-00610.md)), and *nullable-scalar* (`b = (a ?? 0) + 1` — [ADR-00611](../adr/ADR-00611.md)) — across free functions, instance/static methods, and constructors; a rest-parameter constructor is unsupported"
+              "A default expression referencing an earlier parameter works across free functions, instance/static methods, and constructors ([ADR-00598](../adr/ADR-00598.md)); a rest-parameter constructor is unsupported"
             ]
           },
           {
@@ -488,6 +488,7 @@
             "caveats": [
               "A free `function*` may be top-level **or nested** (a nested `function*` captures enclosing state by reference — an enclosing `let` mutated after the generator is created is seen by a later `.next()` — reusing the closure-boxing on the instance's `__env`; an *array* capture stays a clean rejection); a generator *expression* is supported only as a top-level `const/let/var G = function* ...` binding (rewritten to a named declaration, [TDD-00096](../tdd/TDD-00096.md)/[ADR-00293](../adr/ADR-00293.md)) — an argument/nested/IIFE use is a clean rejection. Instance generator methods — sync and `async *m()` — are supported separately (rows below), but `static`/`abstract` generator methods stay clean rejections ([TDD-00094](../tdd/TDD-00094.md))",
               "The return-type annotation is optional — the element type is inferred from the body's yields (numeric join, `yield*` delegation, return fallback; only a genuinely non-joinable mix still requires the annotation — [ADR-00293](../adr/ADR-00293.md)); still requires a plain non-destructured parameter list and a non-array parameter type (an array *element* type is supported — yielded/sent arrays round-trip through every generator slot, `for...of`/`.next()`/`yield*`/`for await` alike, [ADR-00676](../adr/ADR-00676.md); a tuple/object element type also works)",
+              "When present, the annotation may be the element type written directly (`function* f(): number`) or the idiomatic-TS wrapper around it — `Generator<T>`, `IterableIterator<T>`, `Iterator<T>`, `Iterable<T>` and their `Async` forms, plus the three-arg `Generator<T, TReturn, TNext>` (TReturn/TNext ignored in V1) — which unwraps to `T` ([ADR-00814](../adr/ADR-00814.md))",
               "Calling `.next()` again after completion returns `{value: <T's zero value>, done: true}`, not `undefined` ([TDD-00061](../tdd/TDD-00061.md)/[ADR-00173](../adr/ADR-00173.md)) — deliberately kept bare even with the `T \\| undefined` sentinel available: tsc types the result's `value` as `any`, so the typed `T` here is already stricter than TS, and flipping it would break every `.next().value` consumer for no faithfulness gain ([ADR-00781](../adr/ADR-00781.md))"
             ],
             "notes": [
@@ -803,7 +804,7 @@
               "`emitDecoratorMetadata` design types are name-carrying descriptor objects (`{ name: \"Number\" }`, the class name for a class type) — correct for `.name` inspection, but not the real runtime constructors (no first-class class-constructor value), so identity checks fail; `Reflect.metadata` used manually as a decorator factory is rejected; a metadata target must be a real dynamic object (a boxed static class instance is rejected at runtime)"
             ],
             "notes": [
-              "[TDD-00161](../tdd/TDD-00161.md) Stages 1-5 / [ADR-00641](../adr/ADR-00641.md)–[ADR-00645](../adr/ADR-00645.md) — the **experimental** dialect (default) runs property (`(target, key)`) and parameter (`(target, key, index)`; `key` is `undefined` for a constructor parameter) decorators at the class's source position, method decorators `(target, key, descriptor)` with a live property descriptor whose `value` is the method as a callable, and class decorators `(constructor)` last (after member decorators). A method decorator that mutates `descriptor.value` or returns a new descriptor re-routes that method's calls through a per-method runtime slot; an observe-only one leaves the original static dispatch. Multiple decorators on one element apply bottom-up; return values are threaded per the experimental `__decorate` semantics. The **standard** (TC39) dialect (`-decorators=standard`) runs class, method, instance-field, getter/setter, and `accessor` auto-field decorators `(value, context)` — every member placement; method/accessor replacement via a per-member slot, field initializers + `context.addInitializer` callbacks run per-instance in a constructor tail; dynamic functions bind declared parameter types and capture enclosing locals ([ADR-00647](../adr/ADR-00647.md)–[ADR-00649](../adr/ADR-00649.md))",
+              "The **experimental** dialect (default) runs property (`(target, key)`) and parameter (`(target, key, index)`; `key` is `undefined` for a constructor parameter) decorators at the class's source position, method decorators `(target, key, descriptor)` with a live property descriptor whose `value` is the method as a callable, and class decorators `(constructor)` last (after member decorators). A method decorator that mutates `descriptor.value` or returns a new descriptor re-routes that method's calls through a per-method runtime slot; an observe-only one leaves the original static dispatch. Multiple decorators on one element apply bottom-up; return values are threaded per the experimental `__decorate` semantics. The **standard** (TC39) dialect (`-decorators=standard`) runs class, method, instance-field, getter/setter, and `accessor` auto-field decorators `(value, context)` — every member placement; method/accessor replacement via a per-member slot, field initializers + `context.addInitializer` callbacks run per-instance in a constructor tail; dynamic functions bind declared parameter types and capture enclosing locals",
               "With `-emit-decorator-metadata`, a decorated member gets `design:type`/`design:paramtypes`/`design:returntype` metadata (defined before user decorators run) readable through `Reflect.getMetadata`/`getOwnMetadata`/`hasMetadata`; `Reflect.defineMetadata` writes user metadata directly"
             ]
           }

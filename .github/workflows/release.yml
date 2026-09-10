@@ -51,9 +51,9 @@ jobs:
           cache: false # stdlib-only project, no go.sum to key the module cache on
 
       # --- Linux (x64 and arm64): clang + the optional libraries the suite links against ---
-      - name: Install clang + libcurl (fetch examples link against it) + libgc (-mm=gc tests link against it) + libtommath (default bigint backend links against it) + libpcre2 (RegExp tests link -lpcre2-8) + libssl (default crypto.subtle backend links -lcrypto) + libnghttp2 (HTTP/2 server path links -lnghttp2) + gtk3/webkit2gtk-4.1 (klain:webview compile-tier tests link against it; headless so the window never opens)
+      - name: Install clang + libcurl (fetch examples link against it) + libgc (-mm=gc tests link against it) + libtommath (default bigint backend links against it) + libpcre2 (RegExp tests link -lpcre2-8) + libssl (default crypto.subtle backend links -lcrypto) + libnghttp2 (HTTP/2 server path links -lnghttp2) + libsqlite3 (node:sqlite links -lsqlite3) + gtk3/webkit2gtk-4.1 (klain:webview compile-tier tests link against it; headless so the window never opens)
         if: matrix.goos == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev libgtk-3-dev libwebkit2gtk-4.1-dev
+        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev libsqlite3-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 
       # --- macOS (Intel and Apple Silicon): Apple's clang is the compiler; curl and WebKit ship with the OS ---
       - name: Install the optional libraries via Homebrew (pcre2, libtommath, openssl@3, nghttp2, bdw-gc) and expose keg-only openssl@3 to clang

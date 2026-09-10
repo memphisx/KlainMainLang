@@ -32,8 +32,8 @@
             "status": "implemented",
             "caveats": [
               "V1 subset ([TDD-00131](../tdd/TDD-00131.md) Stage 1): `res.writeHead(status[, headersObject])`/`setHeader`/`write`/`end`, the `res.statusCode` getter/setter ([ADR-00513](../adr/ADR-00513.md)), `res.write` returning Node's boolean and `res.cork()`/`uncork()` no-op hints ([ADR-00514](../adr/ADR-00514.md)), and `req.method`/`url`/`headers`. The response is **buffered** (flushed after the handler returns, [ADR-00300](../adr/ADR-00300.md)), so there is no incremental flow control: `res.write` always returns `true` and no `'drain'` is ever emitted (a large streamed response uses a `ReadableStream` `body` field instead)",
-              "One server per program, shared with the bespoke `http.listen`",
-              "Keep-alive covers the buffered `res.end(…)` path; a chunked/streaming or union-body response still sends `Connection: close` (it does carry `Date`). No HTTP pipelining, and `Keep-Alive: timeout=5` is advertised but not independently enforced by an idle timer"
+              "Multiple concurrent servers per program are supported (plain HTTP/1.1, HTTPS/1.1, h2c, h2-over-TLS), each with `close()`/relisten and `ws`/`upgrade` ([TDD-00191](../tdd/TDD-00191.md)); the remaining limits: an additional server cannot combine with Worker/cluster (`http.listen(..., { workers })` stays single/blocking), its listener must be inline (no `createServer()`+`.on('request')` split), and routing a non-primary `ws`/`upgrade` handler needs a simple `const x = http.createServer(...)` binding. The bespoke `klain:http` `http.listen` stays single-instance",
+              "Keep-alive covers the buffered `res.end(…)` path and chunked/streaming (`ReadableStream` body) responses, which re-arm the connection at stream end ([ADR-00802](../adr/ADR-00802.md)); still `Connection: close`: the union-body (`string | ReadableStream`) *string* branch and HTTPS/1.1 streaming (all carry `Date`). No HTTP pipelining, and `Keep-Alive: timeout=5` is advertised but not independently enforced by an idle timer"
             ],
             "notes": [
               "Node's `(req, res)` model, portable to Node.js — reuses the same fiber-per-connection accept loop and response writer as the bespoke path; `res` is a `ServerResponse` object whose `{status, body, headers}` the dispatcher reads after the handler ([ADR-00391](../adr/ADR-00391.md))",
@@ -51,7 +51,8 @@
             ],
             "notes": [
               "The standard Node idiom: bind to a variable, `.listen(0)` for an ephemeral port, read `.address().port`, `.close()` from inside the loop; named import `import { createServer } from 'http'` works; untyped `(req, res)` handler params are contextually typed ([ADR-00406](../adr/ADR-00406.md))",
-              "The chained-binding idiom too: `const server = http.createServer(cb).listen(0, readyCb)` — `listen()` returns the server and the handle is stored before the ready callback runs, so `server.address().port` works inside it ([ADR-00423](../adr/ADR-00423.md))"
+              "The chained-binding idiom too: `const server = http.createServer(cb).listen(0, readyCb)` — `listen()` returns the server and the handle is stored before the ready callback runs, so `server.address().port` works inside it ([ADR-00423](../adr/ADR-00423.md))",
+              "`.listen` also takes Node's options-object form `listen({ port, host, backlog, exclusive }[, cb])` ([ADR-00801](../adr/ADR-00801.md)): `host` binds a specific interface — a numeric IPv4 literal (or `localhost`), which `address().address` reflects; a hostname needing DNS is a clean rejection. The options must be an inline object literal; `backlog` sets the `listen(2)` depth; `exclusive` states the existing single-bind behavior"
             ]
           },
           {

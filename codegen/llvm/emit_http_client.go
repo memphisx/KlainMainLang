@@ -388,8 +388,8 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 	e.ensureStrHeaderRuntime()
 	e.ensureCalloc()
 	e.ensureMalloc()
-	e.ensureHTTPRuntime()           // @__kml_listen_fd + event loop that drives the reaction
-	e.ensureHTTPClientReactions()   // registry + fire + drive
+	e.ensureHTTPRuntime()         // @__kml_listen_fd + event loop that drives the reaction
+	e.ensureHTTPClientReactions() // registry + fire + drive
 
 	// Resolve the response callback (hinted so res.statusCode/res.on(...) inside
 	// it resolve). V1 requires an arrow/function-expression literal.

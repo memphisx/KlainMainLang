@@ -45,6 +45,7 @@ const PAGES = [
   { name: 'TUI · Live dashboards', title: 'Guides', route: '/docs/guides/tui/live-dashboard', desc: 'A repainting live dashboard with timers and resize handling.', keywords: 'tui dashboard live repaint sigwinch resize timers terminal' },
   { name: 'Desktop · File explorer', title: 'Guides', route: '/docs/guides/webview', desc: 'Build a desktop app with klain:webview.', keywords: 'webview desktop gui file explorer klain:webview gtk cocoa app' },
   { name: 'Concurrency · Load tester', title: 'Guides', route: '/docs/guides/concurrent-load-tester', desc: 'A concurrent HTTP load tester with klain:sync goroutines and channels.', keywords: 'concurrency load tester klain:sync goroutines channels select http klainload' },
+  { name: 'Mobile · Sailfish OS', title: 'Guides', route: '/docs/guides/sailfish', desc: 'Cross-compile and RPM-package a CLI app for Sailfish OS (aarch64).', keywords: 'sailfish jolla mobile aarch64 cross-compile rpm harbour target sysroot xperia meego cli' },
   { name: 'klain: overview', title: 'klain:', route: '/docs/klain', desc: 'The klain: namespace — bespoke, Go-powered reinterpretations of Node modules.', keywords: 'klain namespace bespoke go power opt-in reimagined' },
   { name: 'klain:webview', title: 'klain:', route: '/docs/klain/webview', desc: 'Native desktop webview windows.', keywords: 'klain:webview desktop gui window native app' },
   { name: 'klain:http', title: 'klain:', route: '/docs/klain/http', desc: 'The bespoke HTTP server surface.', keywords: 'klain:http server listen createServer routing' },

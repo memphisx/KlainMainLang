@@ -8,7 +8,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 
 	"KlainMainLang/ast"
 )
@@ -39,7 +38,7 @@ func (e *Emitter) emitFsCreateReadStream(args []ast.Expression, pos ast.Pos) (Va
 
 	// The pool runtime is POSIX-only (see emitFsPromisePooled): Windows keeps
 	// the pre-TDD-00186 eager read-to-EOF fill until the reactor work lands.
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		e.ensureFsReadStream()
 		fulfillFn := e.emitStreamFulfillThunk(chunkTy)
 		rs := e.freshReg()

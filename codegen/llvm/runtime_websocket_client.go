@@ -2,7 +2,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 )
 
 // runtime_websocket_client.go — `new WebSocket(url)` C-runtime helpers
@@ -104,7 +103,7 @@ func (e *Emitter) ensureWSClientRuntime() {
 
 	e.emitGlobal("declare i32 @inet_pton(i32 noundef, ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @connect(i32 noundef, ptr noundef, i32 noundef)")
-	if runtime.GOOS != "darwin" {
+	if targetGOOS() != "darwin" {
 		e.ensureGetaddrinfo()
 	}
 
@@ -139,7 +138,7 @@ func (e *Emitter) emitWSClientConnect() {
   br i1 %ptonok, label %haveaddr, label %tryresolve
 
 tryresolve:`
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		// Hostname resolution (getaddrinfo) is deliberately not attempted
 		// on Darwin yet: struct addrinfo's own layout (as opposed to
 		// sockaddr_in's, which IS POSIX-stable and already used elsewhere

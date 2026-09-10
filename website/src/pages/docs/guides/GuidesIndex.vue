@@ -43,12 +43,22 @@
         </p>
         <span class="km-guidecard__go">Start the walkthrough →</span>
       </router-link>
+
+      <router-link to="/docs/guides/sailfish" class="km-guidecard">
+        <span class="km-guidecard__tag">Mobile</span>
+        <h3>Cross-compile a CLI app for Sailfish&nbsp;OS</h3>
+        <p>
+          Sailfish is glibc/aarch64 Linux: cross-compile a normal command-line program to a
+          64-bit-ARM binary and package it as an installable RPM — including Harbour naming and
+          automatic private-library bundling. Verified on an Xperia&nbsp;10&nbsp;II.
+        </p>
+        <span class="km-guidecard__go">Start the walkthrough →</span>
+      </router-link>
     </div>
 
     <p class="km-note">
-      More guides will land here over time — desktop apps, HTTP microservices, and other
-      end-to-end patterns. Each is a standalone page; the sidebar lists them under
-      <strong>Guides</strong>.
+      More guides will land here over time — HTTP microservices and other end-to-end patterns.
+      Each is a standalone page; the sidebar lists them under <strong>Guides</strong>.
     </p>
   </article>
 </template>

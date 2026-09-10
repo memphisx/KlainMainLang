@@ -9,7 +9,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 
 	"KlainMainLang/ast"
 )
@@ -27,7 +26,7 @@ func (e *Emitter) emitOSHomedir(args []ast.Expression, pos ast.Pos) (Value, erro
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: os.homedir() takes no arguments", pos.Line, pos.Col)
 	}
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		val := e.emitGetenvCall(e.internString("USERPROFILE"))
 		isNull := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
@@ -114,7 +113,7 @@ func (e *Emitter) emitOSTmpdir(args []ast.Expression, pos ast.Pos) (Value, error
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: os.tmpdir() takes no arguments", pos.Line, pos.Col)
 	}
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		// Node on Windows: TEMP, then TMP, then <SystemRoot|windir>\temp,
 		// with one trailing backslash stripped unless it names a drive root
 		// — the shim helper implements lib/os.js's algorithm exactly
@@ -221,7 +220,7 @@ func (e *Emitter) emitOSTotalmem(args []ast.Expression, pos ast.Pos) (Value, err
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: os.totalmem() takes no arguments", pos.Line, pos.Col)
 	}
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return e.emitOSSysctlbynameU64("hw.memsize"), nil
 	}
 	e.ensureSysconf()
@@ -244,7 +243,7 @@ func (e *Emitter) emitOSFreemem(args []ast.Expression, pos ast.Pos) (Value, erro
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: os.freemem() takes no arguments", pos.Line, pos.Col)
 	}
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		e.ensureMachVM()
 		host := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i32 @mach_host_self()", host))
@@ -305,10 +304,10 @@ func (e *Emitter) emitOSCpus(args []ast.Expression, pos ast.Pos) (Value, error) 
 		return Value{}, fmt.Errorf("%d:%d: os.cpus() takes no arguments", pos.Line, pos.Col)
 	}
 	result := e.freshReg()
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		e.ensureOSCpusWin()
 		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_os_cpus_win()", result))
-	} else if runtime.GOOS == "darwin" {
+	} else if targetGOOS() == "darwin" {
 		e.ensureOSCpusDarwin()
 		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_os_cpus_darwin()", result))
 	} else {

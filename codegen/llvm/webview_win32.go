@@ -45,7 +45,7 @@ func locateWebviewWindows() (cflags, libs []string, err error) {
 // WebView2.h resolves without a -I). Returns the object path; the caller carries
 // it as a link input instead of compiling WebviewSource() on the shared clang line.
 func windowsWebviewObject() (string, error) {
-	src := WebviewSource()
+	src := WebviewSource("system") // Windows uses the system engine (WebView2); non-system backends are rejected upstream.
 	sum := sha256.Sum256([]byte("kml-webview-" + src))
 	dir := filepath.Join(os.TempDir(), "kml-webview-"+hex.EncodeToString(sum[:6]))
 	if err := os.MkdirAll(dir, 0755); err != nil {

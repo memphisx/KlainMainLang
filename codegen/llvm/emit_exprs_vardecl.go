@@ -552,7 +552,65 @@ func (e *Emitter) storePtrHandleVarDecl(v *ast.VarDeclaration, val Value) {
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
 }
 
+// isDirectCreateServerInit reports whether a declaration's initializer is
+// directly an `http.createServer(...)` call (or the chained `.listen(...)` form)
+// — i.e. this binding *is* the server handle, so a suffix handed up by the
+// createServer emit (TDD-00191 Stage 3) belongs to this name and isn't leaking
+// from a createServer buried in a nested function body.
+func isDirectCreateServerInit(init ast.Expression) bool {
+	call, ok := init.(*ast.CallExpression)
+	if !ok {
+		return false
+	}
+	if _, _, isChain := chainedCreateServerListen(call); isChain {
+		return true
+	}
+	if mem, ok := call.Callee.(*ast.MemberExpression); ok {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "http__kml_builtin" && mem.Property == "createServer" {
+			return true
+		}
+	}
+	return false
+}
+
+// isDirectNewWebSocketServer mirrors isDirectCreateServerInit for
+// `new WebSocketServer({ server })`.
+func isDirectNewWebSocketServer(init ast.Expression) bool {
+	ne, ok := init.(*ast.NewExpression)
+	return ok && ne.ClassName == "WebSocketServer"
+}
+
 func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
+	// TDD-00191 Stage 3: record the dispatcher suffix of a server / WebSocketServer
+	// binding so a later `x.on('upgrade', …)` / `wss.on('connection', …)` routes
+	// to the right per-server ws/upgrade global. The createServer / new
+	// WebSocketServer emit sets the pending* scratch fields; capture them here for
+	// this binding's name once the initializer has been emitted. Save/restore
+	// across the (possibly recursive) body so a nested declaration can't corrupt
+	// an outer one's state.
+	savedPSC, savedPSS := e.pendingServerCreated, e.pendingServerSfx
+	savedPWC, savedPWS := e.pendingWSCreated, e.pendingWSSfx
+	e.pendingServerCreated, e.pendingWSCreated = false, false
+	defer func() {
+		if e.pendingServerCreated && isDirectCreateServerInit(v.Init) {
+			if e.httpServerVarSfx == nil {
+				e.httpServerVarSfx = map[string]string{}
+			}
+			e.httpServerVarSfx[v.Name] = e.pendingServerSfx
+		}
+		if e.pendingWSCreated && isDirectNewWebSocketServer(v.Init) {
+			if e.httpWSVarSfx == nil {
+				e.httpWSVarSfx = map[string]string{}
+			}
+			e.httpWSVarSfx[v.Name] = e.pendingWSSfx
+		}
+		e.pendingServerCreated, e.pendingServerSfx = savedPSC, savedPSS
+		e.pendingWSCreated, e.pendingWSSfx = savedPWC, savedPWS
+	}()
+	return e.emitVarDeclBody(v)
+}
+
+func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 	// TDD-00134 Stage 1 (-optimize-memory): a planned declaration's object
 	// literal is emitted into an entry-block alloca. The marker names the
 	// exact literal node so nested literals inside it stay heap-allocated;

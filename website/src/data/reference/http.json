@@ -20,7 +20,7 @@
       "differences": [
         "V1 `res` subset: `res.writeHead(status[, headersObject])`/`setHeader`/`write`/`end`, the `res.statusCode` getter/setter, `res.write` returning Node's boolean and `res.cork()`/`uncork()` no-op hints, and `req.method`/`url`/`headers`. The response is buffered (flushed after the handler returns), so there is no incremental flow control: `res.write` always returns `true` and no `'drain'` fires — a large streamed response uses a `ReadableStream` `body` field instead.",
         "The status reason phrase is hardcoded `OK` (`writeHead(201)` → `201 OK`, not `201 Created`).",
-        "One server per program, shared with the bespoke `http.listen`."
+        "Multiple HTTP servers run concurrently on different ports in one program (TDD-00191): an additional server may be plain HTTP/1.1, HTTPS/1.1, h2c (`http2.createServer`), or h2-over-TLS (`http2.createSecureServer`) — each with its own dispatcher, TLS context, and h2 handler-bridge. Each additional server can `close()` and `listen()` again (relisten), and WebSocket/upgrade handling works on any server. The one exclusion is Worker/cluster — `http.listen(..., { workers })` is klain:http's single blocking model, a clean rejection. The bespoke klain:http `http.listen` stays single-instance."
       ],
       "seeAlso": ["http.server", "http.listen"],
       "spec": { "mdn": "https://nodejs.org/api/http.html#httpcreateserveroptions-requestlistener" }
@@ -29,14 +29,15 @@
       "id": "http.server",
       "name": "const server = http.createServer(cb?)",
       "statusRow": "`const server = http.createServer(cb?)` handle — `.listen(port?, cb?)`/`.close(cb?)`/`.closeAllConnections()`/`.address()`/`.on('request'/'upgrade', cb)`",
-      "signature": "server.listen(port?, cb?); server.close(cb?); server.address(); server.on('request'/'upgrade', cb)",
+      "signature": "server.listen(port?|{ port, host, backlog }?, cb?); server.close(cb?); server.address(); server.on('request'/'upgrade', cb)",
       "badge": "caveats",
-      "description": "The standard Node idiom: bind to a variable, .listen(0) for an ephemeral port, read .address().port, .close() from inside the loop. The chained form const server = http.createServer(cb).listen(0, readyCb) also works — the handle is stored before the ready callback runs, so server.address().port is valid inside it.",
+      "description": "The standard Node idiom: bind to a variable, .listen(0) for an ephemeral port, read .address().port, .close() from inside the loop. The chained form const server = http.createServer(cb).listen(0, readyCb) also works — the handle is stored before the ready callback runs, so server.address().port is valid inside it. listen() also takes Node's options object, listen({ port, host, backlog, exclusive }), where host binds a specific interface (a numeric IPv4 literal or localhost) reflected by address().address.",
       "exampleKey": "http/create_server_handle",
       "snippet": "const server = http.createServer((req, res) => {\n  res.writeHead(200); res.end(\"hi\")\n})\nserver.listen(0, () => {\n  const port: number = server.address().port\n  setTimeout(() => server.close(), 100)\n})",
       "differences": [
         "`server.listen` is **non-blocking** — it registers the listener and returns, so top-level code after it runs before requests are served (Node's listen-then-continue); the event loop drives requests from the end-of-`main` tail. The ready callback fires synchronously at `listen()` time rather than on a later tick. (The bespoke `http.listen` below stays blocking.)",
-        "`.on` supports `'request'` (one listener), `'stream'`, `'listening'`, and the Node-faithful `'upgrade'` event (`(req, socket, head)` — `socket` is a `net.Socket`, TLS-backed on an `https` server so `wss://` falls out); no `'close'`/`'error'`/`'connection'`/`'clientError'` events."
+        "`.on` supports `'request'` (one listener), `'stream'`, `'listening'`, and the Node-faithful `'upgrade'` event (`(req, socket, head)` — `socket` is a `net.Socket`, TLS-backed on an `https` server so `wss://` falls out); no `'close'`/`'error'`/`'connection'`/`'clientError'` events.",
+        "`listen(options)` must be an inline object literal; a `host` that needs DNS resolution (a real hostname) is a clean rejection, and unknown option keys are rejected rather than ignored."
       ],
       "seeAlso": ["http.createServer", "http.close"],
       "spec": { "mdn": "https://nodejs.org/api/http.html#class-httpserver" }
@@ -162,11 +163,12 @@
       "statusRow": "Streaming response body (`body: ReadableStream<string \\| Uint8Array>` field)",
       "signature": "return { status, body: ReadableStream<string | Uint8Array> }",
       "badge": "exact",
-      "description": "When the returned object's body field is statically a ReadableStream, the response goes out Transfer-Encoding: chunked, written chunk-at-a-time by a promise-reaction-driven writer — the handler returns immediately and a slow producer holds only its own connection open. http.close() still waits for in-flight streams.",
+      "description": "When the returned object's body field is statically a ReadableStream, the response goes out Transfer-Encoding: chunked, written chunk-at-a-time by a promise-reaction-driven writer — the handler returns immediately and a slow producer holds only its own connection open. The response is persistent: it advertises Connection: keep-alive and re-arms the connection for the next request at stream end (unless the client or handler asked to close). http.close() still waits for in-flight streams.",
       "returns": { "type": "ReadableStream", "desc": "The streamed response body." },
       "exampleKey": "streams/http_chunked",
       "differences": [
-        "A stream error mid-response closes the connection without the chunked terminator — nothing else is signallable mid-stream."
+        "A stream error mid-response closes the connection without the chunked terminator — nothing else is signallable mid-stream.",
+        "HTTPS/1.1 streaming and the union-body (string | ReadableStream) string branch still send Connection: close."
       ],
       "seeAlso": ["http.req.stream", "http.res.bodyBytes"],
       "spec": { "mdn": "https://nodejs.org/api/http.html#responsewritechunk-encoding-callback" }

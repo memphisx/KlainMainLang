@@ -217,7 +217,8 @@ func (e *Emitter) emitWSHandshakeAndLoop(headersMapFinal, fd32, fd64, fdPtr, noR
 	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", onmsgGep))
 
 	wsHandlerPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_listen_ws_handler, align 8", wsHandlerPtr))
+	// TDD-00191 Stage 3: read this dispatcher's own ws handler global.
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_listen_ws_handler%s, align 8", wsHandlerPtr, e.curDispatchSfx))
 	cb := Callback{kind: cbClosure, hdrPtr: wsHandlerPtr, ty: FuncType([]Type{wsTy}, TypeVoid)}
 	if _, err := e.emitCBCall(cb, []Value{{Ref: wsConnReg, Ty: wsTy}}); err != nil {
 		return err

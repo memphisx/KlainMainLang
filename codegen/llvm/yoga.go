@@ -201,6 +201,7 @@ func yogaCSources() ([]CSource, error) {
 //   - -Wl,--allow-multiple-definition lets the win32 shim's `strerror`/etc. win
 //     over the static CRT copies (first-definition-wins, as the shim ordering
 //     already relies on).
+//
 // The C++ objects that reference this archive must be g++-built (Yoga here, the
 // webview amalgamation in webview_win32.go): clang RTTI COMDATs differ in size
 // from the gcc-built libstdc++.a and ld.bfd rejects the mix.

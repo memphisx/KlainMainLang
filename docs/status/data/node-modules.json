@@ -185,7 +185,7 @@
             "feature": "`events` (`EventEmitter`)",
             "status": "implemented",
             "notes": [
-              "`EventEmitter` is an ambient global; `import EventEmitter from 'events'` / `{ EventEmitter }` work, and the static helpers **`events.once`** ([ADR-00675](../adr/ADR-00675.md)) and **`events.on`** (async iterator, [ADR-00677](../adr/ADR-00677.md)) work too → [EventEmitter](EVENT-EMITTER.md)"
+              "`EventEmitter` is an ambient global; `import EventEmitter from 'events'` / `{ EventEmitter }` work, and the static helpers `events.once` and `events.on` (async iterator) work too → [EventEmitter](EVENT-EMITTER.md)"
             ]
           },
           {
@@ -264,14 +264,14 @@
             "feature": "`url`",
             "status": "implemented",
             "caveats": [
-              "`import { URL, URLSearchParams } from 'url'` works (same-name + aliased); the **legacy `url`-module functions are complete** — `parse`/`format`/`fileURLToPath`/`pathToFileURL`/`resolve`/`urlToHttpOptions`/`domainToASCII`/`domainToUnicode` ([ADR-00669](../adr/ADR-00669.md)–[ADR-00672](../adr/ADR-00672.md)) → [URL](URL.md). (IDN conversion is libcurl-backend-gated; lenient relative parsing deferred)"
+              "`import { URL, URLSearchParams } from 'url'` works (same-name + aliased); the legacy `url`-module functions (`parse`/`format`/`fileURLToPath`/`pathToFileURL`/`resolve`/…) work too → [URL](URL.md). Remaining: IDN conversion is libcurl-backend-gated; lenient relative parsing deferred"
             ]
           },
           {
             "feature": "`perf_hooks`",
             "status": "implemented",
             "caveats": [
-              "`import { performance } from 'perf_hooks'` works, same-name and aliased; **`PerformanceObserver` now works too** (synchronous V1 — [ADR-00673](../adr/ADR-00673.md)) → [Performance & Timing](PERFORMANCE-TIMING.md). Pending: `monitorEventLoopDelay`/`createHistogram` and async-batched observer delivery"
+              "`import { performance } from 'perf_hooks'` works, same-name and aliased; `PerformanceObserver` works (synchronous V1) → [Performance & Timing](PERFORMANCE-TIMING.md). Pending: `monitorEventLoopDelay`/`createHistogram` and async-batched observer delivery"
             ]
           }
         ]
@@ -364,7 +364,7 @@
             "feature": "`node:ffi`",
             "status": "implemented",
             "notes": [
-              "Foreign function interface (Node v26.1.0, experimental) — all stages shipped ([FFI.md](FFI.md)): `dlopen`/typed calls/`bigint` pointers, raw-memory helpers, `registerCallback` trampolines; POSIX only ([TDD-00164](../tdd/TDD-00164.md))"
+              "Foreign function interface (Node v26.1.0, experimental); POSIX only → [FFI.md](FFI.md) ([TDD-00164](../tdd/TDD-00164.md))"
             ]
           },
           {

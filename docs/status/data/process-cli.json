@@ -108,7 +108,7 @@
             "feature": "`process.platform`",
             "status": "implemented",
             "notes": [
-              "A pure compile-time constant (`\"darwin\"`/`\"linux\"`/`\"win32\"`/...) baked in from the Go compiler's own `runtime.GOOS` — no runtime code at all, since this compiler doesn't cross-compile. See [ADR-00026](../adr/ADR-00026.md)."
+              "A pure compile-time constant (`\"darwin\"`/`\"linux\"`/`\"win32\"`/...) baked in — no runtime code at all. See [ADR-00026](../adr/ADR-00026.md). Under the cross-compile flag it follows the `--target`: the codegen sites read the target OS/arch via a target abstraction ([ADR-00813](../adr/ADR-00813.md)), so an OS-aligned or macOS→Linux cross build bakes the target's `platform`/`arch`, not the host's ([ADR-00809](../adr/ADR-00809.md), [TDD-00146](../tdd/TDD-00146.md))."
             ],
             "caveats": []
           },
@@ -181,7 +181,7 @@
             "notes": [
               "Raw mode disables signal generation (`ISIG`), so Ctrl-C stops delivering `SIGINT` and arrives as the raw byte `3` for the program to handle — matching Node/libuv `UV_TTY_MODE_RAW` exactly",
               "Auto-restore on a crash/uncaught exception is the application's responsibility (same footgun as Node); `setRawMode(false)` restores the state captured on the first enable",
-              "Routes through an embedded C shim compiled against the platform's own `<termios.h>`, so the glibc/Darwin `struct termios` layout difference is sidestepped by construction ([ADR-00518](../adr/ADR-00518.md)); on Windows the same shim uses the console-mode API (line input/echo/processed input off, VT input on, so arrow keys arrive as ESC `[` A there too) — verified in the suite under a ConPTY pseudo-console ([ADR-00727](../adr/ADR-00727.md))",
+              "Routes through an embedded C shim compiled against the platform's own `<termios.h>`, so the glibc/Darwin `struct termios` layout difference is sidestepped by construction ([ADR-00518](../adr/ADR-00518.md)); on Windows the same shim uses the console-mode API (line input/echo/processed input off, VT input on, so arrow keys arrive as ESC `[` A there too) ([ADR-00727](../adr/ADR-00727.md))",
               "Pair with `process.stdin.on('data')` (event-driven, the Node-idiomatic raw loop) or with `klain:tty` `readByte`/`readKey` (synchronous)"
             ]
           },
@@ -280,7 +280,7 @@
             "status": "implemented",
             "caveats": [
               "`versions` reports only honest values — `node`/`v8` (the pinned Node compatibility baseline, v22.11.0) and `klain` (this compiler's version); it deliberately omits bundled-lib keys this compiler doesn't ship (`uv`/`undici`/`icu`/…) rather than fabricate them",
-              "The real linked-library versions we *can* report truthfully (`openssl` under the OpenSSL backend, `zlib` when linked) are a follow-on — they need a runtime lib query + backend-aware linking",
+              "The linked-library versions that could be reported truthfully (`openssl` under the OpenSSL backend, `zlib` when linked) are not surfaced — they need a runtime lib query + backend-aware linking",
               "`node`/`v8` track the compatibility *ceiling* (the pinned test-corpus release); a `--node-compat` floor is deferred ([TDD-00136](../tdd/TDD-00136.md))"
             ],
             "notes": [

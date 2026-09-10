@@ -1,7 +1,5 @@
 package llvm
 
-import "runtime"
-
 // ensureExceptionHelpers hand-writes @__kml_throw's uncaught-error path
 // against errorObjType's layout directly ({ i64 kind, ptr message, ptr name
 // } — emit_exceptions.go) rather than through the generic FieldIndex/
@@ -33,7 +31,7 @@ func (e *Emitter) ensureExceptionHelpers() {
 	// resolve null to @__kml_jmp_stk at load time instead.
 	e.emitGlobal(`@__kml_cur_jmp_stk = internal thread_local global ptr null, align 8`)
 	e.emitGlobal(`@.kml_unc_fmt  = private unnamed_addr constant [14 x i8] c"Uncaught: %s\0A\00", align 1`)
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		e.emitGlobal(`declare i32 @_setjmp(ptr, ptr) returns_twice`)
 	} else {
 		e.emitGlobal(`declare i32 @setjmp(ptr) returns_twice`)
@@ -117,7 +115,7 @@ jump:
 // STATUS_BAD_STACK (0xC0000028) — every throw/catch test on Windows
 // (TDD-00177 Stage 0). Elsewhere it is the libc symbol as before.
 func setjmpCall(buf string) string {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		return "call i32 @_setjmp(ptr " + buf + ", ptr null)"
 	}
 	return "call i32 @setjmp(ptr " + buf + ")"

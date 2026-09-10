@@ -697,7 +697,6 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		return Value{Ty: TypeVoid}, nil
 	}
 
-
 	// Scalar variable assignment
 	ident, ok := ex.Left.(*ast.Identifier)
 	if !ok {

@@ -16,6 +16,7 @@ Broad strokes:
 - **You can write a real server.** Both the bespoke `http.listen` and a real `http.createServer` speak HTTP/1.1 and HTTP/2 (h2c) out of the same port, `fs` reads and writes, `worker_threads` and `cluster` give you actual OS threads and processes, and there's TLS on both ends. The networking stack — `net`, `dns`, `dgram`, `tls`, `http2` — is in. `vm` is the notable no.
 - **The browser-shaped APIs that make sense off the browser all work.** `fetch`, `URL`, `WebSocket`, Web Crypto, Streams, `AbortController`, timers. The actually-browser-only stuff (DOM, Canvas, WebGL) is out, on purpose.
 - **You can ship a desktop app, too.** `import { Webview } from 'klain:webview'` opens a real window over the system browser engine and calls straight into typed native code; `new Webview({ serve: './dist' })` embeds a built SPA/SSG (React/Vue/Svelte/Quasar) into the binary and serves it from an in-binary server — a single-file desktop app, packaged to a `.app`/`.desktop`/GUI `.exe` with `-package`. macOS- and Windows-verified; Linux is compile-tier.
+- **You can cross-compile to a phone.** `--target sfos-aarch64 --sysroot …` builds a CLI app for **Sailfish OS** (glibc Linux; aarch64 devices) and `-package=rpm:harbour` wraps it as an installable Harbour RPM (non-allowlisted libs like `pcre2` bundled automatically) — verified running on a real Xperia 10 II. CLI-only for now; a native webview/GUI backend is planned. See "Cross-compiling for Sailfish OS" below.
 - **It fuzzes itself.** The lexer, the parser, and the whole parse-to-binary pipeline all have fuzz targets (`make fuzz` / `fuzz-codegen` / `fuzz-all`) — the codegen one drives real source all the way through `clang` and runs the result.
 - **What'll bite you.** A bare `: number` is a JS-faithful IEEE-754 double (`0.1 + 0.2` → `0.30000000000000004`, just like JS) — reach for a JSDoc `int8…uint64` width when you mean exact machine integers. Concurrency is cooperative (one fiber at a time per thread, no preemption). The object model is two-tier: a statically-typed object is a fixed-shape struct (you can't bolt a new property onto it at runtime), while an `any`-typed value — or anything under `-compat=js` — gets the full dynamic bag (runtime property add/delete, prototype chain, `Proxy`). All deliberate. `docs/status/` has the honest corner-cases for everything above.
 
@@ -161,6 +162,13 @@ klainmain [flags] <file.ts>
                 dependency). Both give identical Web Crypto semantics.
                 See docs/tdd/TDD-00104.md.
   
+  -webview <b>  klain:webview engine backend, selected only when a program
+                opens a webview window: system (default — the per-platform
+                system engine: WebKitGTK/WKWebView/WebView2) or cef / qt /
+                sailfish (opt-in Chromium/Gecko backends, not yet built —
+                selecting one rejects cleanly). The bind/eval/serve contract
+                is identical across backends. See docs/tdd/TDD-00144.md.
+  
   -compat <m>   Compatibility mode (see docs/tdd/TDD-00075.md): strict
                 (default — the compiler's opinionated, safer-than-JS
                 semantics; e.g. a declaration colliding with an ambient
@@ -193,15 +201,29 @@ klainmain [flags] <file.ts>
                 and typechecking on them (and a machine-checkable record of
                 the frontend<->backend contract).
 
-  --package     After compiling, also build a double-clickable desktop app
-                around the binary: a .app bundle on macOS, a .desktop launcher
-                on Linux, a GUI-subsystem <name>\<name>.exe with icon and
-                version resources on Windows (no console window beside the
-                webview). For klain:webview GUI programs. The standalone binary
+  --package     After compiling, also build a package around the binary. Bare
+                --package builds a double-clickable host bundle (.app on macOS,
+                .desktop on Linux, a GUI-subsystem <name>\<name>.exe on Windows)
+                for klain:webview GUI programs. --package=rpm builds an RPM (for
+                Sailfish OS / RPM Linux) and --package=rpm:harbour applies
+                Sailfish Harbour naming (harbour-<name>) and bundles non-
+                allowlisted libraries (pcre2) app-privately; the .spec + build
+                tree are always written and rpmbuild is run when present, so an
+                RPM cross-package rides a --target build. The standalone binary
                 is still produced too. Metadata via --app-name / --app-id /
-                --app-version / --app-icon (a .icns or .png on macOS; .png/.svg
-                on Linux; .ico or a .png up to 256x256 on Windows). Targets the
-                host platform (no cross-packaging).
+                --app-version / --app-license / --app-icon.
+
+  --target <t>  Cross-compile for another platform instead of the host: a clang
+                triple (e.g. aarch64-linux-gnu) or a preset — sfos-aarch64
+                (Sailfish OS on 64-bit ARM). Requires --sysroot. Cross-arch on
+                the same OS works, as does macOS -> Linux (the target's OS/arch
+                is threaded through codegen); other cross-OS pairs are rejected.
+                A cross-arch link needs lld on PATH. See "Cross-compiling for
+                Sailfish OS" below.
+
+  --sysroot <p> For --target: path to the target's root filesystem (its headers
+                and libraries), passed to clang as --sysroot. Required with
+                --target.
 ```
 
 Run `klainmain` with no file (or `klainmain --help`) to print this list with
@@ -227,6 +249,71 @@ self-contained `.exe` that runs on a box with no MSYS2 install (ADR-00771/00772)
 Without `--static` the build is dynamic, like Mac/Linux: the program needs those
 DLLs bundled beside it or on `PATH` (a Windows app ships them; on Mac/Linux you
 declare the dependency instead). Showcase apps are built `--static` (`make apps`).
+
+## Cross-compiling for Sailfish OS
+
+Sailfish OS (Jolla) is glibc Linux; its modern devices are aarch64 (which we
+target), so **command-line apps cross-compile and package cleanly** — verified building *and running* on a physical Xperia 10 II
+(Sailfish 5.1.0.11): a plain CLI binary, a `fetch`/`RegExp` binary, and a Harbour
+RPM the device's own `rpm` installs.
+
+```bash
+# On a Linux host (an arm64 Linux container runs natively on Apple Silicon).
+# 1. Get a target sysroot (export the community builder image's rootfs — no emulation):
+IMG=ghcr.io/sailfishos-open/docker-sailfishos-builder-aarch64:5.1.0.11
+CID=$(docker create --platform=linux/arm64 "$IMG")
+mkdir sfos && docker export "$CID" | tar -C sfos -xf - && docker rm "$CID"
+
+# 2. Cross-compile + package as a Harbour RPM in one step:
+klainmain --target sfos-aarch64 --sysroot ./sfos -package=rpm:harbour \
+  -app-name greet -app-license BSD-3-Clause -o greet greet.ts
+```
+
+The `sfos-aarch64` preset uses Sailfish's native `aarch64-meego-linux-gnu` triple
+(needed so `clang` finds the target's `gcc`/crt and RPM `/usr/lib64` layout);
+non-Harbour-allowlisted libraries like `pcre2` are bundled under
+`/usr/share/harbour-<name>/lib` with an rpath automatically. Full walkthrough:
+the **Cross-compile for Sailfish OS** guide on the docs site.
+
+The exported runtime rootfs above is enough for a libc-only or `-lcurl`/`-lpcre2`
+CLI build. Linking a C++ shim that needs *headers* (Qt5 / qtmozembed /
+sailfish-webengine, for a future `-webview=sailfish` GUI build) needs a `-devel`
+sysroot instead — `docker/Dockerfile.sfos-sysroot` adds those packages to the
+same builder image; build it and export its rootfs the same way (its header
+comment has the exact commands).
+
+A **webview/GUI** app cross-builds too, over Sailfish's Gecko engine
+(`sailfish-components-webview`), with `-webview=sailfish` against a `-devel`
+sysroot (build one with `docker/Dockerfile.sfos-sysroot`):
+
+```bash
+klainmain -webview=sailfish --target sfos-aarch64 --sysroot ./sfos-devel \
+  -o app app.ts   # any klain:webview program — the bind/eval/serve API is unchanged
+```
+
+This produces an aarch64 binary linking the device's `libsailfishwebengine` /
+`libqt5embedwidget`; the on-device windowed run is still being brought up.
+
+**Scope.** The
+`klain:tui` framework renders correctly on-device; the shipped `klaintop` example
+runs on Sailfish by branching on `process.platform` — reading `/proc` on Linux
+(portable across glibc/BusyBox) and BSD `ps` on macOS — the "write once, run
+everywhere, no runtime" pattern the docs-site guide walks through. **aarch64
+first** — it's what current devices ship, so it's where the initial support and
+the on-device verification went. Sailfish also runs on 32-bit ARM (`armv7hl`, the
+earlier hardware) and on x86/x86_64 (the Jolla Tablet and the community Intel
+ports); the `--target` machinery is generic, so those are a natural next step
+rather than a boundary — happy to prioritize one if you're building for it.
+
+**Build host.** A Linux host is the simplest — an arm64 Linux container runs
+natively on Apple Silicon, and `rpmbuild` for `-package=rpm` is available there.
+**macOS → Linux** cross builds also work directly (the target's OS/arch is threaded
+through codegen, so `process.platform`, the fiber scheduler's context layout, `fs`
+stat layouts, clocks, etc. all follow the target): the compiled binary links on the
+Mac with `lld` on `PATH` (`brew install lld`) against the target `--sysroot`. Other
+cross-OS pairs (a Windows target, or a macOS target from a non-macOS host) are
+rejected; a `klain:webview`/`klain:tui` program is rejected cross-OS too (those C++
+subsystems still build for the host — compile them natively on the target OS).
 
 ## Test262 conformance
 

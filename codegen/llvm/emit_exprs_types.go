@@ -2077,9 +2077,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			// res.write(chunk) on a ServerResponse returns Node's boolean
 			// backpressure signal (TDD-00131) — always true here, since the
-			// buffered response sink never fills. Other res methods are void.
-			if mem.Property == "write" && e.inferExprType(mem.Object).IsServerResponse {
-				return TypeBool
+			// buffered response sink never fills. Every other res method
+			// (writeHead/setHeader/end/cork/uncork) is void — matching
+			// emitServerResponseMethod's own returns, so an expression-bodied
+			// handler `(req, res) => res.end(body)` infers a void return type
+			// and emits `ret void` instead of a value-less `ret i64`.
+			if e.inferExprType(mem.Object).IsServerResponse {
+				if mem.Property == "write" {
+					return TypeBool
+				}
+				return TypeVoid
 			}
 			// res.on(...)/setEncoding(...) on an http IncomingMessage chain back
 			// to the same object (TDD-00138).

@@ -2,7 +2,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 )
 
 func (e *Emitter) ensureFree() {
@@ -162,12 +161,12 @@ func (e *Emitter) ensureCurrentRSS() {
 		return
 	}
 	e.usedCurrentRSS = true
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		// Defined by win32shim.c over GetProcessMemoryInfo (WorkingSetSize).
 		e.emitGlobal("declare i64 @__kml_current_rss_bytes()")
 		return
 	}
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		e.emitGlobal("@mach_task_self_ = external global i32")
 		e.emitGlobal("declare i32 @task_info(i32, i32, ptr, ptr)")
 		e.emitGlobal(`
@@ -924,7 +923,7 @@ func (e *Emitter) ensureQsort() {
 // symbol — the same class of platform check emitMathRandom already makes
 // for arc4random vs a portable fallback.
 func errnoAccessor() string {
-	switch runtime.GOOS {
+	switch targetGOOS() {
 	case "darwin", "freebsd", "openbsd", "netbsd", "dragonfly":
 		return "__error"
 	case "windows":

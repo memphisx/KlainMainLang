@@ -28,7 +28,8 @@ func (e *Emitter) UsesHTTP2() bool { return e.usedHTTP2 }
 // (buildHTTP2Bridge) and called from C, so it isn't declared here.
 func (e *Emitter) emitHTTP2ServerDecls() {
 	e.ensureH2ClientBridge()
-	e.emitGlobal("declare ptr @__kml_h2_session_server_new(i32, ptr, ptr, ptr)")
+	// The 5th ptr is the per-server dispatch vtable (TDD-00191 Stage 4).
+	e.emitGlobal("declare ptr @__kml_h2_session_server_new(i32, ptr, ptr, ptr, ptr)")
 	e.emitGlobal("declare void @__kml_h2_session_feed(ptr, ptr, i64)")
 	e.emitGlobal("declare i32 @__kml_h2_session_recv(ptr)")
 	e.emitGlobal("declare i32 @__kml_h2_session_send(ptr)")
@@ -50,16 +51,17 @@ func (e *Emitter) emitHTTP2ServerDecls() {
 // Must run before ensureHTTPRuntime emits the event loop, so the flag is set in
 // time; the createSecureServer emitter calls it first for that reason.
 func (e *Emitter) ensureH2TLSServer() {
-	if e.usedH2TLSServer {
+	if e.h2TLSWired {
 		return
 	}
+	e.h2TLSWired = true
 	e.usedH2TLSServer = true
-	e.usedTLS = true    // link libssl + compile tlssrc/tls.c (main.go UsesTLS gate)
-	e.usedHTTP2 = true  // link nghttp2 + compile http2src/http2.c
+	e.usedTLS = true   // link libssl + compile tlssrc/tls.c (main.go UsesTLS gate)
+	e.usedHTTP2 = true // link nghttp2 + compile http2src/http2.c
 	e.ensureMemcmp()
 	// The __kml_tls_* server ABI (server_ctx/server_accept/alpn_selected/read/
 	// write/free) is declared once by emitTLSNetSymbols, gated on usedH2TLSServer.
-	e.emitGlobal(`@__kml_http_tls_ctx = global ptr null`)
+	e.ensureHTTPTLSCtxGlobal()
 	e.emitGlobal(`@__kml_h2_alpn = private unnamed_addr constant [3 x i8] c"h2\00"`)
 	// The __kml_h2_session_* ABI the TLS drive loop calls is declared by the
 	// shared http server core (emitHTTPCreateServer always wires the h2c path),

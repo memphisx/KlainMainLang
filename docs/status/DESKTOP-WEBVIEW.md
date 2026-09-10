@@ -22,6 +22,8 @@ WebView2 backend, GUI-subsystem `-package`).
 
 `import { Webview } from 'klain:webview'`
 
+The engine is selectable via `-webview=<backend>` ([TDD-00144](../tdd/TDD-00144.md), Stage 1 — [ADR-00815](../adr/ADR-00815.md)): `system` (default — the per-platform system engine above) plus `sailfish` (Sailfish OS's Gecko/embedlite, [TDD-00146](../tdd/TDD-00146.md) Stage 3 — [ADR-00816](../adr/ADR-00816.md)–[ADR-00819](../adr/ADR-00819.md)), which cross-compiles against a Sailfish `-devel` sysroot and is **verified running on a physical Xperia 10 II** — renders a page, round-trips `bind`, drives klain timers via a native `QTimer` pump, exits cleanly. `cef` / `qt` validate at the flag but reject cleanly until their shims land. The `bind`/`eval`/`serve` contract is backend-agnostic.
+
 **Coverage: 20/20 surface, 100%. Strict: 0/20** — the module-wide V1 caveats
 below exclude every row from Strict.
 
@@ -48,7 +50,7 @@ below exclude every row from Strict.
 | `--emit-window-dts` | ✅ | Writes `<output>.window.d.ts` declaring `interface Window { … }` from the typed bindings — page-side autocomplete + the audit surface for the allowlist ([ADR-00442](../adr/ADR-00442.md)) |
 | `new Webview({ serve: "./dist" })` | ✅ | Embeds a built SPA/SSG directory into the binary at compile time (`.incbin`) and serves it from an in-binary static server on an ephemeral loopback port, then navigates — a **single-file** desktop app, no external `dist/` ([ADR-00443](../adr/ADR-00443.md)) |
 | `klain:assets` `embedDir(path)` + `.get(path)` | ✅ | Embed a directory at compile time; `.get(path): ArrayBuffer` reads an embedded file byte-exact (binary-safe) over the static blob, no copy ([ADR-00443](../adr/ADR-00443.md)) |
-| `klainmain -package` → `.app` / `.desktop` | ✅ | Wraps the binary into a double-clickable macOS `.app` bundle (Info.plist + optional `.icns` icon) or a Linux `.desktop` launcher, or re-links it on Windows as a GUI-subsystem `<name>\<name>.exe` with icon + `VERSIONINFO` resources; `-app-name`/`-app-id`/`-app-version`/`-app-icon` ([ADR-00440](../adr/ADR-00440.md), [ADR-00726](../adr/ADR-00726.md)) |
+| `klainmain -package` → `.app` / `.desktop` | ✅ | Wraps the binary into a double-clickable macOS `.app` bundle (Info.plist + optional `.icns` icon) or a Linux `.desktop` launcher, or re-links it on Windows as a GUI-subsystem `<name>\<name>.exe` with icon + `VERSIONINFO` resources; `-app-name`/`-app-id`/`-app-version`/`-app-icon` ([ADR-00440](../adr/ADR-00440.md), [ADR-00726](../adr/ADR-00726.md)). `-package=rpm` / `-package=rpm:harbour` instead emit an RPM (Sailfish OS / RPM Linux) — a prebuilt-binary `.spec` + rpmbuild tree, `rpmbuild` run when present so an RPM cross-package rides a `--target` build, Harbour mode applying `harbour-<name>` naming and shipping non-allowlisted link libraries app-privately under `/usr/share/harbour-<name>/lib` with an rpath — `pcre2` (RegExp), and `bdw-gc` under `-mm=gc` ([ADR-00810](../adr/ADR-00810.md), [ADR-00812](../adr/ADR-00812.md), [TDD-00146](../tdd/TDD-00146.md)) |
 
 ## Loading patterns
 

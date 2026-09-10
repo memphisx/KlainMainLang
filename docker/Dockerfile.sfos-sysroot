@@ -1,0 +1,44 @@
+# Reproducible Sailfish OS aarch64 **-devel** sysroot for cross-compiling
+# klain:webview (`-webview=sailfish`, TDD-00146 Stage 3) and any other program
+# that links a target library needing its headers.
+#
+# The community builder image (sailfishos-open/docker-sailfishos-builder) lays
+# the Sailfish target rootfs at container `/` and ships a working `zypper` wired
+# to the Jolla repos. Its *runtime* tree has the shared libraries but no `-devel`
+# packages, so it has no headers and no `.so` dev symlinks — enough for a
+# libc-only or `-lcurl`/`-lpcre2` cross-build, but not for compiling a C++ shim
+# against Qt5 / qtmozembed / sailfish-webengine. This image adds exactly those
+# `-devel` packages, so the exported rootfs carries the headers, the `libQt5*.so`
+# / `libqt5embedwidget.so` / `libsailfishwebengine.so` dev symlinks, and the
+# `.pc` files clang needs.
+#
+# Build the image and export its rootfs to a sysroot directory (run from the repo
+# root; an arm64 Linux container runs natively on Apple Silicon — no emulation):
+#
+#   docker build --platform=linux/arm64 -f docker/Dockerfile.sfos-sysroot \
+#     -t klain-sfos-sysroot:5.1.0.11 .
+#   CID=$(docker create --platform=linux/arm64 klain-sfos-sysroot:5.1.0.11)
+#   mkdir sfos && docker export "$CID" | tar -C sfos -xf - && docker rm "$CID"
+#
+# Then point the compiler at it:
+#
+#   klainmain --target sfos-aarch64 --sysroot ./sfos -webview=sailfish ...
+#
+# Pin the release tag to the device's OS version so the emitted binary does not
+# reference newer-than-target symbol versions (the device probed was 5.1.0.11).
+ARG SFOS_RELEASE=5.1.0.11
+FROM ghcr.io/sailfishos-open/docker-sailfishos-builder-aarch64:${SFOS_RELEASE}
+
+# qt5-qtcore/gui/declarative + the split-out qtquick module (Sailfish packages
+# QtQuick separately from QtQml), plus the Gecko/embedlite webview stack. These
+# pull their runtime counterparts as dependencies, so the exported tree has both
+# headers and the matching shared libraries.
+RUN zypper --non-interactive --gpg-auto-import-keys refresh \
+ && zypper --non-interactive install -y \
+      qt5-qtcore-devel \
+      qt5-qtgui-devel \
+      qt5-qtdeclarative-devel \
+      qt5-qtdeclarative-qtquick-devel \
+      qtmozembed-qt5-devel \
+      sailfish-components-webview-qt5-devel \
+ && zypper clean --all

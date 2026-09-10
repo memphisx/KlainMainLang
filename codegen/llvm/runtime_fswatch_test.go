@@ -6,7 +6,9 @@ import (
 )
 
 // The darwin kqueue fs.watch dispatch emits
-//   %evstr = select i1 %isrename, ptr <"rename">, ptr <"change">
+//
+//	%evstr = select i1 %isrename, ptr <"rename">, ptr <"change">
+//
 // where both operands must be interned-string pointers. A Sprintf arg-order slip
 // (all the FSWatcher-struct GEPs listed before the two strings, when one GEP
 // actually follows the select in the template) put fsWatcherStructIR into the

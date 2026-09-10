@@ -207,8 +207,8 @@ func joinComma(parts []string) string {
 
 // eventsOnHelperSource is the TypeScript source of one setup + iterator pair.
 func eventsOnHelperSource(setupName, iterName, elemName string, arity int) string {
-	lp := make([]string, arity)  // listener params (untyped — hinted from the payload)
-	el := make([]string, arity)  // items packed into the args array
+	lp := make([]string, arity) // listener params (untyped — hinted from the payload)
+	el := make([]string, arity) // items packed into the args array
 	for i := 0; i < arity; i++ {
 		lp[i] = fmt.Sprintf("__on_v%d", i)
 		el[i] = fmt.Sprintf("__on_v%d", i)

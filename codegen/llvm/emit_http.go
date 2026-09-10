@@ -14,6 +14,7 @@ package llvm
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"KlainMainLang/ast"
@@ -182,7 +183,10 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	port32 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", port32, portVal.Ref))
 	listenfd := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_http_bind_and_listen(i32 %s)", listenfd, port32))
+	// klain:http's http.listen binds INADDR_ANY (0) with the default listen
+	// backlog (128); host/backlog selection is a Node server.listen(options)
+	// feature, not part of this bespoke shape.
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_http_bind_and_listen(i32 %s, i32 0, i32 128)", listenfd, port32))
 
 	// Fork right here — after bind+listen succeeds, before any
 	// connection-fiber state exists (@__kml_conn_data/len/cap, set up by
@@ -199,7 +203,7 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	e.usedHTTP2 = true
 	e.emitHTTP2ServerDecls()
 
-	if err := e.buildHTTPDispatcher(paramTy, retTy, isAsyncHandler); err != nil {
+	if err := e.buildHTTPDispatcher(paramTy, retTy, isAsyncHandler, "", true); err != nil {
 		return Value{}, err
 	}
 
@@ -330,7 +334,7 @@ func contextTypeArrowParams(expr ast.Expression, names ...string) {
 // expression and the variable-bound handle form (`const server =
 // http.createServer(cb)`); neither binds a port here — that stays in the
 // respective listen path.
-func (e *Emitter) emitHTTPCreateServerCore(cbExpr ast.Expression, pos ast.Pos) error {
+func (e *Emitter) emitHTTPCreateServerCore(cbExpr ast.Expression, pos ast.Pos, sfx string, isPrimary bool) error {
 	// Contextual typing: Node handlers are written untyped — `(req, res) =>
 	// …` — because real Node infers both from the createServer signature. An
 	// inline arrow with two un-annotated params gets the same treatment here,
@@ -374,18 +378,33 @@ func (e *Emitter) emitHTTPCreateServerCore(cbExpr ast.Expression, pos ast.Pos) e
 	retTy := ServerResponseType()
 
 	e.ensureHTTPRuntime()
-	e.usedHTTP2 = true
-	e.emitHTTP2ServerDecls()
+	// h2c prior-knowledge upgrade lives in the primary accept path only; an
+	// additional server (TDD-00191 Stage 1) is plain HTTP/1.1.
+	if isPrimary {
+		e.usedHTTP2 = true
+		e.emitHTTP2ServerDecls()
+	}
+
+	// An additional server's handler lives in its own suffixed global, read by
+	// its own suffixed dispatcher; the primary keeps the bare @__kml_listen_*
+	// scalars the whole reactor is already wired to.
+	if !isPrimary {
+		e.emitGlobal(fmt.Sprintf("@__kml_listen_handler%s = internal thread_local global ptr null, align 8", sfx))
+	}
 
 	e.httpResMode = true
-	dispErr := e.buildHTTPDispatcher(paramTy, retTy, false)
+	dispErr := e.buildHTTPDispatcher(paramTy, retTy, false, sfx, isPrimary)
 	e.httpResMode = false
 	if dispErr != nil {
 		return dispErr
 	}
 
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_handler, align 8", handlerVal.Ref))
-	e.emitInstr("store ptr @__kml_http_dispatch, ptr @__kml_listen_dispatch, align 8")
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_handler%s, align 8", handlerVal.Ref, sfx))
+	if isPrimary {
+		e.emitInstr("store ptr @__kml_http_dispatch, ptr @__kml_listen_dispatch, align 8")
+	}
+	e.curServerDispatchSym = "@__kml_http_dispatch" + sfx
+	e.curServerIsPrimary = isPrimary
 	return nil
 }
 
@@ -420,23 +439,96 @@ func (e *Emitter) emitHTTPCreateServer(args []ast.Expression, pos ast.Pos) (Valu
 	if len(args) > 1 {
 		return Value{}, fmt.Errorf("%d:%d: http.createServer takes one listener (req, res) => void (or none, with a later server.on('request', listener))", pos.Line, pos.Col)
 	}
-	if e.httpListenCallSeen {
-		return Value{}, fmt.Errorf("%d:%d: only one HTTP server (http.listen or http.createServer) is supported per program (V1)", pos.Line, pos.Col)
+	// TDD-00191 Stage 1: server 0 is the primary (full capability); each
+	// additional http.createServer gets its own suffixed dispatcher and an
+	// extra-listener-table entry. The klain:http blocking `http.listen` path
+	// still sets httpListenCallSeen — a program can't mix that single-blocking
+	// model with a Node multi-server setup.
+	idx := e.httpServerCount
+	e.httpServerCount++
+	isPrimary := idx == 0
+	sfx := ""
+	if !isPrimary {
+		sfx = fmt.Sprintf("_%d", idx)
 	}
-	e.httpListenCallSeen = true
+	if isPrimary {
+		if e.httpListenCallSeen {
+			return Value{}, fmt.Errorf("%d:%d: only one HTTP server (http.listen or http.createServer) is supported per program (V1)", pos.Line, pos.Col)
+		}
+		e.httpListenCallSeen = true
+	} else {
+		// TDD-00191 Stages 3–4: an additional server may be plain HTTP/1.1,
+		// HTTPS/1.1, h2c (http2.createServer), or h2-over-TLS
+		// (http2.createSecureServer) — each with its own dispatcher, TLS ctx, and
+		// h2 vtable. WebSocket/`upgrade` works on any server (ADR-00805). The one
+		// remaining exclusion is Worker/cluster: `http.listen(..., { workers })` is
+		// klain:http's single blocking model, which stays incompatible with the
+		// Node multi-server reactor (a decision, TDD-00191 Stage 4 Open questions).
+		if e.usedWorkerRuntime {
+			return Value{}, fmt.Errorf("%d:%d: multiple HTTP servers cannot be combined with Worker threads / cluster — cluster uses klain:http's single blocking model (TDD-00191)", pos.Line, pos.Col)
+		}
+		if len(args) == 0 {
+			return Value{}, fmt.Errorf("%d:%d: an additional HTTP server needs its listener inline — `http.createServer((req, res) => …)`; the createServer()+on('request') split stays single-server (TDD-00191 Stage 1)", pos.Line, pos.Col)
+		}
+	}
 	if len(args) == 0 {
 		// Node's `const s = http.createServer(); s.on('request', cb)` split —
 		// the handler arrives via .on('request', …) before .listen().
 		e.httpServerHandlerPending = true
-	} else if err := e.emitHTTPCreateServerCore(args[0], pos); err != nil {
+		e.curServerDispatchSym = "@__kml_http_dispatch"
+		e.curServerIsPrimary = true
+	} else if err := e.emitHTTPCreateServerCore(args[0], pos, sfx, isPrimary); err != nil {
 		return Value{}, err
 	}
 	e.ensureCalloc()
-	// 16 bytes: slot 0 = listen fd (-1 until .listen()), slot 1 = a
-	// pending 'listening' listener closure (ADR-00502).
+	// 48 bytes: slot 0 = listen fd (-1 until .listen()); slot 1 = a pending
+	// 'listening' closure (ADR-00502); slot 2 = this server's dispatcher symbol;
+	// slot 3 = 1 for the primary server, 0 for an extra one (TDD-00191 Stage 1),
+	// read by server.listen to route to the primary scalars vs the extra table;
+	// slot 4 (offset 32) = this server's TLS SSL_CTX* or null (TDD-00191 Stage 3);
+	// slot 5 (offset 40) = this server's h2 dispatch vtable or null (Stage 4),
+	// so an additional h2-over-TLS server's ALPN-h2 accepts route to its handler.
 	srv := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 16)", srv))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 48)", srv))
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", srv))
+	dispSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", dispSlot, srv))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.curServerDispatchSym, dispSlot))
+	primSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 24", primSlot, srv))
+	primFlag := "0"
+	if e.curServerIsPrimary {
+		primFlag = "1"
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", primFlag, primSlot))
+	// TDD-00191 Stage 3: record this server's TLS context in slot 4. The primary
+	// also stores it into the reactor's @__kml_http_tls_ctx global (its accept
+	// branch reads that); an additional server keeps it only in the handle, to be
+	// handed to the extra-listener table at listen().
+	if e.pendingServerTLSCtx != "" {
+		tlsSlot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 32", tlsSlot, srv))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.pendingServerTLSCtx, tlsSlot))
+		if e.curServerIsPrimary {
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_http_tls_ctx, align 8", e.pendingServerTLSCtx))
+		}
+		// TDD-00191 Stage 4: an h2-over-TLS server records its h2 vtable in slot 5,
+		// so the extra-listener table can ALPN-drive h2 to this server's handler.
+		// (The primary drives h2 via the reactor branch + @__kml_h2_vtbl, so it
+		// needs no slot-5 value — but storing it is harmless and uniform.)
+		if e.pendingServerH2 {
+			h2Slot := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 40", h2Slot, srv))
+			e.emitInstr(fmt.Sprintf("store ptr @__kml_h2_vtbl%s, ptr %s, align 8", sfx, h2Slot))
+		}
+		e.pendingServerTLSCtx = ""
+		e.pendingServerH2 = false
+	}
+	// TDD-00191 Stage 3: hand this server's dispatcher suffix up to the enclosing
+	// `const x = …` declaration so a later `x.on('upgrade', …)` /
+	// `new WebSocketServer({ server: x })` routes to x's own ws/upgrade globals.
+	e.pendingServerCreated = true
+	e.pendingServerSfx = sfx
 	return Value{Ref: srv, Ty: HTTPServerType()}, nil
 }
 
@@ -495,7 +587,7 @@ func (e *Emitter) emitHTTPStreamHandlerCore(cbExpr ast.Expression, pos ast.Pos) 
 	e.emitHTTP2ServerDecls()
 
 	e.httpStreamMode = true
-	dispErr := e.buildHTTPDispatcher(paramTy, retTy, false)
+	dispErr := e.buildHTTPDispatcher(paramTy, retTy, false, "", true)
 	e.httpStreamMode = false
 	if dispErr != nil {
 		return dispErr
@@ -660,7 +752,7 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 					{Name: "res", Type: &ast.TypeAnnotation{Name: "ServerResponse", Source: "ts"}},
 				},
 				nil, nil, ast.NewBlockStatement(nil, pos), pos)
-			if err := e.emitHTTPCreateServerCore(empty, pos); err != nil {
+			if err := e.emitHTTPCreateServerCore(empty, pos, "", true); err != nil {
 				return Value{}, err
 			}
 			e.httpServerHandlerPending = false
@@ -725,7 +817,17 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 				return Value{}, fmt.Errorf("%d:%d: an 'upgrade' listener must be a function literal", pos.Line, pos.Col)
 			}
 			e.ensureHTTPRuntime()
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_upgrade_handler, align 8", cb.hdrPtr))
+			// TDD-00191 Stage 3: route the upgrade handler to the target server's
+			// own global. A tracked binding gives its suffix (primary "" or an
+			// additional "_N"); an untracked handle falls back to the runtime
+			// primary guard.
+			upSfx, tracked := e.httpServerSfxForExpr(objExpr)
+			if tracked {
+				e.ensureExtraWSUpGlobals(upSfx)
+			} else {
+				e.emitHTTPRequirePrimaryHandle(objVal.Ref, "upgrade")
+			}
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_upgrade_handler%s, align 8", cb.hdrPtr, upSfx))
 			return Value{Ty: TypeVoid}, nil
 		}
 		if evt != "request" && evt != "stream" {
@@ -742,7 +844,7 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 			if err := e.emitHTTPStreamHandlerCore(args[1], pos); err != nil {
 				return Value{}, err
 			}
-		} else if err := e.emitHTTPCreateServerCore(args[1], pos); err != nil {
+		} else if err := e.emitHTTPCreateServerCore(args[1], pos, "", true); err != nil {
 			return Value{}, err
 		}
 		e.httpServerHandlerPending = false
@@ -753,7 +855,30 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 		}
 		e.ensureHTTPRuntime()
 		e.ensureHTTPClose()
+		// TDD-00191 Stage 1: the primary server clears @__kml_listen_fd; an
+		// additional one clears its extra-listener-table entry by fd. Branch on
+		// the handle's primary flag (slot 3).
+		clPrimSlot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 24", clPrimSlot, objVal.Ref))
+		clPrimV := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", clPrimV, clPrimSlot))
+		clIsPrim := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", clIsPrim, clPrimV))
+		clPrimL := e.freshLabel("http.close.primary")
+		clExtraL := e.freshLabel("http.close.extra")
+		clContL := e.freshLabel("http.close.cont")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", clIsPrim, clPrimL, clExtraL))
+		e.emitLabel(clPrimL)
 		e.emitInstr("call void @__kml_http_close()")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", clContL))
+		e.emitLabel(clExtraL)
+		clFd := e.freshReg()
+		clFd32 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", clFd, objVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", clFd32, clFd))
+		e.emitInstr(fmt.Sprintf("call void @__kml_http_close_extra_listener(i32 %s)", clFd32))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", clContL))
+		e.emitLabel(clContL)
 		if len(args) == 1 {
 			cb, err := e.resolveCallback(args[0])
 			if err != nil {
@@ -787,28 +912,186 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 }
 
 // emitHTTPServerListen implements server.listen(port?, callback?) on a
+// parseHTTPListenOptions reads a `server.listen({ port, host, backlog,
+// exclusive })` options literal (ADR-00801). It returns the port expression (nil
+// ⇒ default ephemeral 0), the host as a network-order IPv4 word rendered as an
+// i32 literal string ("0" ⇒ INADDR_ANY), and the listen backlog as an i32
+// literal string. `host` must be a numeric IPv4 literal (or "localhost"):
+// hostname resolution isn't supported, so a name is a clean rejection rather
+// than a silent bind to the wrong interface. `exclusive` is accepted as a
+// statement of the existing single-bind behavior (no SO_REUSEPORT). Unknown
+// keys — and `path` (Unix-socket listen) — are rejected.
+func (e *Emitter) parseHTTPListenOptions(lit *ast.ObjectLiteral, pos ast.Pos) (ast.Expression, string, string, error) {
+	var portExpr ast.Expression
+	hostAddr, backlog := "0", "128"
+	for _, prop := range lit.Properties {
+		switch prop.Key {
+		case "port":
+			portExpr = prop.Value
+		case "host":
+			sl, ok := prop.Value.(*ast.StringLiteral)
+			if !ok {
+				return nil, "", "", fmt.Errorf("%d:%d: server.listen's host option must be a string literal (a numeric IPv4 address)", pos.Line, pos.Col)
+			}
+			word, ok := parseIPv4ToNetworkWord(sl.Value)
+			if !ok {
+				return nil, "", "", fmt.Errorf("%d:%d: server.listen host %q is not a numeric IPv4 address (hostname resolution is not supported)", pos.Line, pos.Col, sl.Value)
+			}
+			hostAddr = fmt.Sprintf("%d", word)
+		case "backlog":
+			nl, ok := prop.Value.(*ast.NumberLiteral)
+			if !ok || nl.IsBigInt {
+				return nil, "", "", fmt.Errorf("%d:%d: server.listen's backlog option must be an integer literal", pos.Line, pos.Col)
+			}
+			n, err := strconv.Atoi(nl.Value)
+			if err != nil || n < 0 {
+				return nil, "", "", fmt.Errorf("%d:%d: server.listen's backlog option must be a non-negative integer literal", pos.Line, pos.Col)
+			}
+			backlog = fmt.Sprintf("%d", n)
+		case "exclusive":
+			// Accepted: this server always binds exclusively (no SO_REUSEPORT
+			// outside cluster workers), so the flag states existing behavior.
+		default:
+			return nil, "", "", fmt.Errorf("%d:%d: server.listen option %q is not supported (only port, host, backlog, exclusive)", pos.Line, pos.Col, prop.Key)
+		}
+	}
+	return portExpr, hostAddr, backlog, nil
+}
+
+// parseIPv4ToNetworkWord maps a host string to its 32-bit network-order IPv4
+// s_addr value (as stored in sockaddr_in on a little-endian host: octet 0 in the
+// low byte). "" / "0.0.0.0" / "::" ⇒ 0 (INADDR_ANY); "localhost" ⇒ 127.0.0.1.
+// Returns false for anything that isn't a dotted-quad IPv4 (i.e. needs DNS).
+func parseIPv4ToNetworkWord(host string) (uint32, bool) {
+	switch host {
+	case "", "0.0.0.0", "::":
+		return 0, true
+	case "localhost":
+		host = "127.0.0.1"
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) != 4 {
+		return 0, false
+	}
+	var word uint32
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 || n > 255 || (len(p) > 1 && p[0] == '0') {
+			return 0, false
+		}
+		word |= uint32(n) << (8 * uint(i))
+	}
+	return word, true
+}
+
 // variable-bound handle: binds (port 0 — an ephemeral port — when omitted or
 // when the only argument is the callback), fires the callback, and enters the
 // event loop. Like the chained form (and http.listen), this call blocks until
 // the loop stops (server.close() + connections drained) — Node's non-blocking
 // listen-then-continue top-level flow is not modeled.
+//
+// Two arg shapes: the positional `(port?, callback?)`, and Node's options-object
+// `(options, callback?)` where options is `{ port?, host?, backlog?, exclusive? }`
+// (ADR-00801). The object form must be an object literal — a non-literal options
+// value is a clean rejection, since `host` has to be read at compile time to a
+// bound address.
+// emitHTTPRequirePrimaryHandle guards a WebSocket/`upgrade` handler registration
+// (TDD-00191 Stage 3): those handlers live in the primary server's fixed globals
+// and are only read by the primary dispatcher, so registering one on an
+// *additional* server would silently mis-attach it to the primary. Rather than
+// track the handle→server association at compile time (the remaining Stage-3
+// slice), emit a runtime check on the handle's primary flag (slot 3) and abort
+// with a clear message when it is not the primary. The check runs once, at
+// registration, not per request. `handleRef` is the server handle pointer.
+// ensureExtraWSUpGlobals declares the suffixed ws/upgrade handler globals for an
+// additional server (TDD-00191 Stage 3), once per suffix. The primary's ""
+// globals come from ensureHTTPRuntime; a non-primary server that is itself the
+// ws/upgrade server needs its own @__kml_listen_ws_handler_N /
+// _upgrade_handler_N, read by its dispatcher (curDispatchSfx) and written by the
+// registration site. emitGlobal buffers into the module preamble, so declaring
+// lazily at first use — even mid-Pass-2 — is fine.
+func (e *Emitter) ensureExtraWSUpGlobals(sfx string) {
+	if sfx == "" {
+		return
+	}
+	if e.extraWSUpGlobalsEmitted == nil {
+		e.extraWSUpGlobalsEmitted = map[string]bool{}
+	}
+	if e.extraWSUpGlobalsEmitted[sfx] {
+		return
+	}
+	e.extraWSUpGlobalsEmitted[sfx] = true
+	e.emitGlobal(fmt.Sprintf("@__kml_listen_ws_handler%s = internal thread_local global ptr null, align 8", sfx))
+	e.emitGlobal(fmt.Sprintf("@__kml_listen_upgrade_handler%s = internal thread_local global ptr null, align 8", sfx))
+}
+
+// httpServerSfxForExpr resolves a server-handle expression to its dispatcher
+// suffix at compile time (TDD-00191 Stage 3), for routing a ws/upgrade handler
+// registration to the right per-server global. Only simple identifier bindings
+// created by `const x = http.createServer(...)` are tracked; ok is false for any
+// other handle shape, where the caller falls back to the runtime primary guard.
+func (e *Emitter) httpServerSfxForExpr(objExpr ast.Expression) (string, bool) {
+	id, ok := objExpr.(*ast.Identifier)
+	if !ok || e.httpServerVarSfx == nil {
+		return "", false
+	}
+	sfx, ok := e.httpServerVarSfx[id.Name]
+	return sfx, ok
+}
+
+func (e *Emitter) emitHTTPRequirePrimaryHandle(handleRef, feature string) {
+	e.ensurePrintf()
+	e.ensureExit()
+	if !e.httpPrimaryGuardMsgEmitted {
+		e.httpPrimaryGuardMsgEmitted = true
+		e.emitGlobal(llvmCStrConst("@.kml_http_nonprimary_ws",
+			"error: WebSocket/upgrade handling is only supported on the primary (first) HTTP server; attach it to the first http.createServer()\n"))
+	}
+	primSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 24", primSlot, handleRef))
+	primV := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", primV, primSlot))
+	isPrim := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isPrim, primV))
+	okL := e.freshLabel("http.wsguard.ok")
+	badL := e.freshLabel("http.wsguard.bad")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isPrim, okL, badL))
+	e.emitLabel(badL)
+	e.emitInstr("call i32 (ptr, ...) @printf(ptr @.kml_http_nonprimary_ws)")
+	e.emitInstr("call void @exit(i32 1)")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", okL))
+	e.emitLabel(okL)
+}
+
 func (e *Emitter) emitHTTPServerListen(objVal Value, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: server.listen takes (port?, callback?)", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: server.listen takes (port?, callback?) or (options, callback?)", pos.Line, pos.Col)
 	}
 	var portExpr, cbExpr ast.Expression
+	hostAddr, backlog := "0", "128" // INADDR_ANY network-order word, default backlog
 	if len(args) >= 1 {
-		if e.inferExprType(args[0]).IsFunc {
+		if lit, ok := args[0].(*ast.ObjectLiteral); ok {
+			pe, ha, bl, err := e.parseHTTPListenOptions(lit, pos)
+			if err != nil {
+				return Value{}, err
+			}
+			portExpr, hostAddr, backlog = pe, ha, bl
+			if len(args) == 2 {
+				cbExpr = args[1]
+			}
+		} else if e.inferExprType(args[0]).IsObject {
+			return Value{}, fmt.Errorf("%d:%d: server.listen's options must be an inline object literal `{ port, host?, backlog? }`, not a variable", pos.Line, pos.Col)
+		} else if e.inferExprType(args[0]).IsFunc {
 			cbExpr = args[0]
+			if len(args) == 2 {
+				return Value{}, fmt.Errorf("%d:%d: server.listen takes (port?, callback?) or (options, callback?)", pos.Line, pos.Col)
+			}
 		} else {
 			portExpr = args[0]
+			if len(args) == 2 {
+				cbExpr = args[1]
+			}
 		}
-	}
-	if len(args) == 2 {
-		if cbExpr != nil {
-			return Value{}, fmt.Errorf("%d:%d: server.listen takes (port?, callback?)", pos.Line, pos.Col)
-		}
-		cbExpr = args[1]
 	}
 
 	port := "0"
@@ -824,9 +1107,45 @@ func (e *Emitter) emitHTTPServerListen(objVal Value, args []ast.Expression, pos 
 	port32 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", port32, port))
 	listenfd := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_http_bind_and_listen(i32 %s)", listenfd, port32))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_http_bind_and_listen(i32 %s, i32 %s, i32 %s)", listenfd, port32, hostAddr, backlog))
 	e.emitInstr("call void @__kml_http_cluster_fork(i64 0)")
+	// TDD-00191 Stage 1: route by the handle's primary flag (slot 3). The
+	// primary server keeps the @__kml_listen_fd scalar the reactor is wired to;
+	// an additional server registers `{fd, its dispatcher}` in the extra-listener
+	// table the event loop also accepts from.
+	primFlagSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 24", primFlagSlot, objVal.Ref))
+	primFlagV := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", primFlagV, primFlagSlot))
+	isPrim := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isPrim, primFlagV))
+	primL := e.freshLabel("http.listen.primary")
+	extraL := e.freshLabel("http.listen.extra")
+	contL := e.freshLabel("http.listen.cont")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isPrim, primL, extraL))
+	e.emitLabel(primL)
 	e.emitInstr(fmt.Sprintf("store i32 %s, ptr @__kml_listen_fd, align 4", listenfd))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+	e.emitLabel(extraL)
+	dispVSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", dispVSlot, objVal.Ref))
+	dispV := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dispV, dispVSlot))
+	// TDD-00191 Stage 3/4: pass this server's TLS ctx (handle slot 4; null for a
+	// plain server) and its h2 dispatch vtable (slot 5; null unless it's an
+	// h2-over-TLS server) so its accepts do their own SSL handshake and, on an
+	// ALPN-negotiated h2 connection, drive nghttp2 to this server's handler.
+	tlsCtxSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 32", tlsCtxSlot, objVal.Ref))
+	tlsCtxV := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", tlsCtxV, tlsCtxSlot))
+	h2vtSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 40", h2vtSlot, objVal.Ref))
+	h2vtV := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h2vtV, h2vtSlot))
+	e.emitInstr(fmt.Sprintf("call void @__kml_http_register_extra_listener(i32 %s, ptr %s, ptr %s, ptr %s)", listenfd, dispV, tlsCtxV, h2vtV))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+	e.emitLabel(contL)
 	fd64 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", fd64, listenfd))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", fd64, objVal.Ref))
@@ -1211,7 +1530,7 @@ func (e *Emitter) emitHTTPCallHandler(paramTy, retTy Type, isAsyncHandler bool, 
 	reqVal := e.coerce(Value{Ref: reqReg, Ty: reqTy}, paramTy)
 
 	handlerPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_listen_handler, align 8", handlerPtr))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_listen_handler%s, align 8", handlerPtr, e.curDispatchSfx))
 	fpSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 0", fpSlot, handlerPtr))
 	fp := e.freshReg()
@@ -1280,7 +1599,7 @@ func (e *Emitter) emitHTTPCallHandler(paramTy, retTy Type, isAsyncHandler bool, 
 	return respReg
 }
 
-func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) error {
+func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, sfx string, isPrimary bool) error {
 	savedAllocas := e.allocas
 	savedBody := e.body
 	savedRegCtr := e.regCtr
@@ -1288,6 +1607,9 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	savedScopes := e.scopes
 	savedRetType := e.currentRetType
 	savedBlockDone := e.blockDone
+	savedDispatchSfx := e.curDispatchSfx
+	e.curDispatchSfx = sfx
+	defer func() { e.curDispatchSfx = savedDispatchSfx }()
 
 	e.allocas = strings.Builder{}
 	e.body = strings.Builder{}
@@ -1666,12 +1988,17 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	// through to normal handling rather than calling a null closure. wss://
 	// falls out: emitWSHandshakeAndLoop routes its I/O through the TLS-aware
 	// conn shims when usedHTTPS1Server.
+	// TDD-00191 Stage 3: each dispatcher reads *its own* server's ws/upgrade
+	// handler global (curDispatchSfx — "" primary, "_N" additional), so an
+	// additional server can itself be the ws/upgrade server. A server with no
+	// such handler has a null global and falls through to normal handling.
 	if e.usedKlainWS {
+		e.ensureExtraWSUpGlobals(e.curDispatchSfx)
 		wsUpgradeL := e.freshLabel("http.wsupgrade")
 		wsNormalL := e.freshLabel("http.wsnormal")
 		wsHaveHandlerL := e.freshLabel("http.wshavehandler")
 		wsH := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_listen_ws_handler, align 8", wsH))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_listen_ws_handler%s, align 8", wsH, e.curDispatchSfx))
 		wsHasH := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", wsHasH, wsH))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", wsHasH, wsHaveHandlerL, wsNormalL))
@@ -1689,6 +2016,7 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	// e.usedHTTPUpgrade). Diverts an upgrade request into the (req, socket,
 	// head) handler + generic read loop; every other request continues below.
 	if e.usedHTTPUpgrade {
+		e.ensureExtraWSUpGlobals(e.curDispatchSfx)
 		e.emitHTTPUpgradeBlock(headersMapFinal, methodPtr, pathOnly, queryMapFinal, fd32, fd64, bufFinal, headerEndA, totalReadA, noReqL)
 	}
 
@@ -1897,6 +2225,22 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__kml_conn_active, align 8", activeNew))
 	}
 
+	// Keep-alive flag for the chunked/streaming tails (TDD-00131 follow-on): a
+	// streamed body is now persistent like the buffered path — on keep-alive the
+	// %kml.hws writer re-arms the connection at stream end instead of closing.
+	// HTTPS/1.1 streaming stays close-only for now (the re-arm path is not yet
+	// validated against the TLS-wrapped read loop), so force the flag off there.
+	// i1 for send_stream_head, zero-extended to i64 for hws_start's ctx field.
+	streamKA, streamKA64 := "0", "0"
+	if (streamingBody || unionBody) && !e.usedHTTPS1Server {
+		e.ensureHTTPKeepAliveDecision()
+		kaR := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_http_keepalive_decision(ptr %s, ptr %s)", kaR, headersMapFinal, extraHeadersRef))
+		kaR64 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", kaR64, kaR))
+		streamKA, streamKA64 = kaR, kaR64
+	}
+
 	if unionBody {
 		// TDD-00119: the body box's tag picks the tail at runtime — kmlTagStream
 		// → chunked writer (unbox the stream pointer), otherwise → buffered writer
@@ -1924,10 +2268,10 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 		}
 		e.ensureHTTPStreamRuntime()
 		decode := e.emitStreamDecodeThunk(chunkTy)
-		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_stream_head(i32 %s, i64 %s, ptr %s)", fd32, statusVal.Ref, extraHeadersRef))
+		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_stream_head(i32 %s, i64 %s, ptr %s, i1 %s)", fd32, statusVal.Ref, extraHeadersRef, streamKA))
 		ufd64 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", ufd64, fd32))
-		e.emitInstr(fmt.Sprintf("call void @__kml_hws_start(i64 %s, ptr %s, ptr %s, i64 %s)", ufd64, streamPtr, decode, isText))
+		e.emitInstr(fmt.Sprintf("call void @__kml_hws_start(i64 %s, ptr %s, ptr %s, i64 %s, i64 %s, ptr @__kml_http_dispatch%s)", ufd64, streamPtr, decode, isText, streamKA64, e.curDispatchSfx))
 		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
 		e.emitTerminator("ret void")
 
@@ -1961,10 +2305,10 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 		}
 		e.ensureHTTPStreamRuntime()
 		decode := e.emitStreamDecodeThunk(chunkTy)
-		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_stream_head(i32 %s, i64 %s, ptr %s)", fd32, statusVal.Ref, extraHeadersRef))
+		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_stream_head(i32 %s, i64 %s, ptr %s, i1 %s)", fd32, statusVal.Ref, extraHeadersRef, streamKA))
 		fd64 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", fd64, fd32))
-		e.emitInstr(fmt.Sprintf("call void @__kml_hws_start(i64 %s, ptr %s, ptr %s, i64 %s)", fd64, bodyReg, decode, isText))
+		e.emitInstr(fmt.Sprintf("call void @__kml_hws_start(i64 %s, ptr %s, ptr %s, i64 %s, i64 %s, ptr @__kml_http_dispatch%s)", fd64, bodyReg, decode, isText, streamKA64, e.curDispatchSfx))
 		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
 		e.emitTerminator("ret void")
 	} else {
@@ -2008,7 +2352,7 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	emitConnActiveDecrement()
 	e.emitTerminator("ret void")
 
-	e.functions.WriteString("\ndefine void @__kml_http_dispatch() {\nentry:\n")
+	e.functions.WriteString(fmt.Sprintf("\ndefine void @__kml_http_dispatch%s() {\nentry:\n", sfx))
 	e.functions.WriteString(e.allocas.String())
 	e.functions.WriteString(e.body.String())
 	e.functions.WriteString("}\n")
@@ -2021,11 +2365,13 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	e.currentRetType = savedRetType
 	e.blockDone = savedBlockDone
 
-	// HTTP/2 server bridge (TDD-00111 Stage 3): the C nghttp2 driver calls these
-	// to run the shared handler core and read the response. Emitted only when the
-	// h2 server path is used.
+	// HTTP/2 server bridge (TDD-00111 Stage 3; per-server TDD-00191 Stage 4): the
+	// C nghttp2 driver calls these to run the shared handler core and read the
+	// response. Each dispatcher emits its OWN suffixed bridge + vtable, so an
+	// additional h2 server routes to its own handler; the accept site passes the
+	// matching @__kml_h2_vtbl{sfx} into __kml_h2_session_server_new.
 	if e.usedHTTP2 {
-		e.buildHTTP2Bridge(paramTy, retTy, isAsyncHandler)
+		e.buildHTTP2Bridge(paramTy, retTy, isAsyncHandler, sfx)
 	}
 	return nil
 }
@@ -2083,7 +2429,7 @@ func (e *Emitter) emitHTTP2PrefaceDivert(fd32, fdPtr, bufReg, totalReadA string)
 	e.emitLabel(h2driveL)
 	e.emitInstr(fmt.Sprintf("call void @__kml_h2_set_blocking(i32 %s)", fd32))
 	sess := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_h2_session_server_new(i32 %s, ptr null, ptr null, ptr null)", sess, fd32))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_h2_session_server_new(i32 %s, ptr null, ptr null, ptr null, ptr @__kml_h2_vtbl%s)", sess, fd32, e.curDispatchSfx))
 	e.emitInstr(fmt.Sprintf("call void @__kml_h2_session_feed(ptr %s, ptr %s, i64 %s)", sess, bufReg, trReg))
 	loopL := e.freshLabel("http.h2loop")
 	recvL := e.freshLabel("http.h2recv")
@@ -2135,12 +2481,19 @@ func (e *Emitter) emitHTTP2PrefaceDivert(fd32, fdPtr, bufReg, totalReadA string)
 // the nghttp2-parsed parts and runs the handler (reusing emitHTTPCallHandler),
 // and three getters read the response object's status/body. Specialized to the
 // handler's paramTy/retTy, like the 1.1 dispatcher.
-func (e *Emitter) buildHTTP2Bridge(paramTy, retTy Type, isAsyncHandler bool) {
+func (e *Emitter) buildHTTP2Bridge(paramTy, retTy Type, isAsyncHandler bool, sfx string) {
 	e.ensureMapStrHelpers()
 	e.ensureStrlen()
 
+	// TDD-00191 Stage 4: a per-server suffixed bridge set, plus a vtable global of
+	// their addresses that the accept site passes to __kml_h2_session_server_new;
+	// the C driver's on_frame_recv calls through the connection's vtable so more
+	// than one h2 server can route to its own handler.
+	e.emitGlobal(fmt.Sprintf(`@__kml_h2_vtbl%s = internal constant { ptr, ptr, ptr, ptr, ptr, ptr, ptr } { ptr @__kml_h2_dispatch%s, ptr @__kml_h2_resp_status%s, ptr @__kml_h2_resp_body%s, ptr @__kml_h2_resp_bodylen%s, ptr @__kml_h2_resp_hdr_count%s, ptr @__kml_h2_resp_hdr_name%s, ptr @__kml_h2_resp_hdr_val%s }`,
+		sfx, sfx, sfx, sfx, sfx, sfx, sfx, sfx))
+
 	// ptr @__kml_h2_dispatch(ptr %method, ptr %path, ptr %headers, ptr %body, i64 %bodyLen)
-	e.emitStandaloneFunc("ptr @__kml_h2_dispatch(ptr %method, ptr %path, ptr %headers, ptr %body, i64 %bodyLen)", func() string {
+	e.emitStandaloneFunc("ptr @__kml_h2_dispatch"+sfx+"(ptr %method, ptr %path, ptr %headers, ptr %body, i64 %bodyLen)", func() string {
 		// h2's :path carries any query string; V1 hands the handler an empty
 		// query map (query parsing off the h2 path is a follow-on).
 		emptyQuery := e.freshReg()
@@ -2170,7 +2523,7 @@ func (e *Emitter) buildHTTP2Bridge(paramTy, retTy Type, isAsyncHandler bool) {
 
 	// i64 @__kml_h2_resp_status(ptr %resp)
 	statusIdx, statusTy, _ := retTy.FieldIndex("status")
-	e.emitStandaloneFunc("i64 @__kml_h2_resp_status(ptr %resp)", func() string {
+	e.emitStandaloneFunc("i64 @__kml_h2_resp_status"+sfx+"(ptr %resp)", func() string {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%resp, i32 0, i32 %d", gep, retTy.StructIR(), statusIdx))
 		v := e.freshReg()
@@ -2181,7 +2534,7 @@ func (e *Emitter) buildHTTP2Bridge(paramTy, retTy Type, isAsyncHandler bool) {
 
 	// ptr @__kml_h2_resp_body(ptr %resp)
 	bodyIdx, bodyFieldTy, _ := retTy.FieldIndex("body")
-	e.emitStandaloneFunc("ptr @__kml_h2_resp_body(ptr %resp)", func() string {
+	e.emitStandaloneFunc("ptr @__kml_h2_resp_body"+sfx+"(ptr %resp)", func() string {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%resp, i32 0, i32 %d", gep, retTy.StructIR(), bodyIdx))
 		v := e.freshReg()
@@ -2191,7 +2544,7 @@ func (e *Emitter) buildHTTP2Bridge(paramTy, retTy Type, isAsyncHandler bool) {
 
 	// i64 @__kml_h2_resp_bodylen(ptr %resp) — strlen of the body string (V1;
 	// binary bodyBytes is a follow-on, matching the 1.1 path's own default).
-	e.emitStandaloneFunc("i64 @__kml_h2_resp_bodylen(ptr %resp)", func() string {
+	e.emitStandaloneFunc("i64 @__kml_h2_resp_bodylen"+sfx+"(ptr %resp)", func() string {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%resp, i32 0, i32 %d", gep, retTy.StructIR(), bodyIdx))
 		bp := e.freshReg()
@@ -2213,7 +2566,7 @@ func (e *Emitter) buildHTTP2Bridge(paramTy, retTy Type, isAsyncHandler bool) {
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align %d", m, gep, hdrFieldTy.Align()))
 		return m
 	}
-	e.emitStandaloneFunc("i64 @__kml_h2_resp_hdr_count(ptr %resp)", func() string {
+	e.emitStandaloneFunc("i64 @__kml_h2_resp_hdr_count"+sfx+"(ptr %resp)", func() string {
 		if !hasHdrs {
 			return "ret i64 0"
 		}
@@ -2249,8 +2602,8 @@ func (e *Emitter) buildHTTP2Bridge(paramTy, retTy Type, isAsyncHandler bool) {
 			return "ret ptr " + out
 		}
 	}
-	e.emitStandaloneFunc("ptr @__kml_h2_resp_hdr_name(ptr %resp, i64 %i)", hdrSlot(16))
-	e.emitStandaloneFunc("ptr @__kml_h2_resp_hdr_val(ptr %resp, i64 %i)", hdrSlot(24))
+	e.emitStandaloneFunc("ptr @__kml_h2_resp_hdr_name"+sfx+"(ptr %resp, i64 %i)", hdrSlot(16))
+	e.emitStandaloneFunc("ptr @__kml_h2_resp_hdr_val"+sfx+"(ptr %resp, i64 %i)", hdrSlot(24))
 }
 
 // emitH2Connect implements http2.connect(authority[, listener]) — TDD-00139

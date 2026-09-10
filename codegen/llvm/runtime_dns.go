@@ -13,7 +13,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 )
 
 // dnsAiAddrOffset returns the byte offset of struct addrinfo's ai_addr pointer.
@@ -21,10 +20,10 @@ import (
 // Darwin order: ...,addrlen,ai_canonname,ai_addr,... (swapped) → 32. Both
 // verified via a compiled offsetof probe.
 func dnsAiAddrOffset() int {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		return 32 // ws2tcpip.h: ai_canonname precedes ai_addr, like Darwin
 	}
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 32
 	}
 	return 24

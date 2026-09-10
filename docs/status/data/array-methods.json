@@ -48,7 +48,7 @@
             "feature": "`.push(...items)`",
             "status": "implemented",
             "caveats": [
-              "A length-mutating method inside a callee now grows the caller's array when it is passed as a plain **variable** — full JS reference semantics ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md)). Residual: an array passed as an **object field** or **array element** (`obj.items`, `grid[i]`), or as a higher-order-callback element, still crosses as a copy, so a length change through those is not seen by the caller"
+              "An array passed as an **object field** or **array element** (`obj.items`, `grid[i]`), or as a higher-order-callback element, still crosses as a copy, so a length change through those is not seen by the caller ([TDD-00127](../tdd/TDD-00127.md))"
             ],
             "notes": [
               "Variadic (incl. the zero-argument call), and works on any mutable receiver — a variable, an object/class array field (`this.items.push(x)`), or a nested-array element (`matrix[0].push(x)`) — see [ADR-00284](../adr/ADR-00284.md)"
@@ -59,7 +59,7 @@
             "status": "implemented",
             "caveats": [
               "A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md))",
-              "A length change propagates from a callee to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md))"
+              "When the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element, a length change in a callee is not seen by the caller — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md))"
             ],
             "notes": [
               "Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens",
@@ -71,7 +71,7 @@
             "status": "implemented",
             "caveats": [
               "A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md))",
-              "A length change propagates from a callee to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md))"
+              "When the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element, a length change in a callee is not seen by the caller — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md))"
             ],
             "notes": [
               "Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens",
@@ -82,7 +82,7 @@
             "feature": "`.unshift(...items)`",
             "status": "implemented",
             "caveats": [
-              "A length change propagates from a callee to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md))"
+              "When the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element, a length change in a callee is not seen by the caller — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md))"
             ],
             "notes": [
               "Variadic (incl. the zero-argument call), any mutable receiver ([ADR-00284](../adr/ADR-00284.md))"
@@ -92,7 +92,7 @@
             "feature": "`.splice(start, delete?, ...items)`",
             "status": "implemented",
             "caveats": [
-              "A length change propagates from a callee to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md))"
+              "When the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element, a length change in a callee is not seen by the caller — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md))"
             ],
             "notes": [
               "Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md))",

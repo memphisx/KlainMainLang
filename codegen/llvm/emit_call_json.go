@@ -745,7 +745,6 @@ func (e *Emitter) emitJSONParseValue(val Value, targetTy Type, pos ast.Pos) (Val
 	return result, nil
 }
 
-
 // emitJSONStringifyMapDict serializes a map-backed dynamic object / string-
 // keyed Map to a JSON object by iterating its runtime key list (ADR-00482):
 // the same accumulator-loop shape emitJSONStringifyArrayData uses, with each

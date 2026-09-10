@@ -15,7 +15,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 )
 
 // clusterWorkerIR: a Worker handle returned by cluster.fork() — { i64 id,
@@ -31,7 +30,7 @@ func (e *Emitter) ensureClusterRuntime() {
 	e.usedClusterRuntime = true
 	e.ensureHTTPClusterFork() // declares @__kml_cluster_worker_id + fork()
 	e.ensureCPForkRuntime()   // socketpair + __kml_cp_wrap_ipc (worker IPC channel)
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		e.ensureUnsetenv() // clusterForkIR clears the worker env vars after spawning
 	}
 	e.ensureMalloc()
@@ -46,7 +45,7 @@ func (e *Emitter) ensureClusterRuntime() {
 	e.ensureExecvDecl()
 	e.ensureExitRawDecl()
 	e.ensureWaitpidDecl()
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		e.emitGlobal("declare i32 @_NSGetExecutablePath(ptr noundef, ptr noundef)")
 	} else {
 		e.ensureReadlinkDecl()
@@ -80,7 +79,7 @@ done:
 }`, envName))
 
 	// __kml_cluster_self_exe(): path to the running executable, for re-exec.
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		e.emitGlobal(`
 define ptr @__kml_cluster_self_exe() {
 entry:

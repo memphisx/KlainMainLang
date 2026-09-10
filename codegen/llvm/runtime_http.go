@@ -2,7 +2,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 )
 
@@ -36,7 +35,7 @@ const fiberStackBytes = 1024 * 1024
 // host, so a compile-time Go-side branch is sufficient, no IR-level
 // conditional needed.
 func httpSockConstants() (solSocket, soReuseAddr int) {
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 0xffff, 4
 	}
 	return 1, 2
@@ -52,7 +51,7 @@ func httpSockConstants() (solSocket, soReuseAddr int) {
 // let it succeed). The shared-fd `http.listen({workers})` model doesn't need it
 // either (it binds once and inherits the fd).
 func httpReusePortConst() int {
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 0x200
 	}
 	return 15
@@ -67,7 +66,7 @@ func httpReusePortConst() int {
 // size) followed by a 1-byte sin_family. Port and address fields (offset
 // 2 and 4) are identical on both, so only these two bytes need branching.
 func httpSockaddrFamilyBytes() (byte0, byte1 int) {
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 16, 2 // sin_len=16, sin_family=AF_INET
 	}
 	return 2, 0 // sin_family=AF_INET as a little-endian i16
@@ -81,7 +80,7 @@ func httpSockaddrFamilyBytes() (byte0, byte1 int) {
 // by the event loop's accept path to make a freshly-accepted connection's
 // fd non-blocking before handing it to its own fiber.
 func httpNonblockFlag() int {
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 0x4
 	}
 	return 0x800
@@ -92,7 +91,7 @@ func httpNonblockFlag() int {
 // close-flag page (TDD-00117) is mmap'd with these before the worker fork so all
 // forked processes share one physical word.
 func mmapSharedAnonFlags() int {
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 0x1001
 	}
 	return 0x21
@@ -105,7 +104,7 @@ func mmapSharedAnonFlags() int {
 // read to distinguish "no data yet, yield and retry later" from a real
 // error.
 func httpEagainErrno() int {
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 35
 	}
 	return 11
@@ -135,15 +134,15 @@ func httpEagainErrno() int {
 // laid out next in memory (which is exactly what the observed symptoms —
 // connection resets, hangs — looked like).
 func ucontextLayout() (size, ssSpOff, ssSizeOff, ucLinkOff int64) {
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		// win32io.c's kml_ucontext: {fiber, ss_sp, ss_size, uc_link, fn, argc}.
 		return 64, 8, 16, 24
 	}
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return 880, 8, 16, 32
 	}
 	// Linux (glibc): offsets are identical across architectures; size isn't.
-	if runtime.GOARCH == "arm64" {
+	if targetGOARCH() == "arm64" {
 		return 4560, 16, 32, 8
 	}
 	return 968, 16, 32, 8 // amd64 and other 64-bit Linux targets
@@ -468,7 +467,11 @@ ret:
 // headers, query string, request body, response headers beyond
 // status/body — see buildHTTPDispatcher in emit_http.go) are both real now.
 //
-//	__kml_http_bind_and_listen(i32 port) -> i32
+//	__kml_http_bind_and_listen(i32 port, i32 hostaddr, i32 backlog) -> i32
+//	  hostaddr is a network-order IPv4 s_addr word (0 = INADDR_ANY, the
+//	  default); backlog is the listen(2) queue depth (128 by default). Both
+//	  come from a Node server.listen({ host, backlog }) options literal
+//	  (ADR-00801); klain:http's http.listen always passes 0/128.
 //	  socket()+setsockopt(SO_REUSEADDR)+bind()+listen(); throws a catchable
 //	  Error (via __kml_http_throw) on any failure instead of returning -1,
 //	  so the Go-emitted call site never needs its own error check.
@@ -825,7 +828,7 @@ define void @__kml_reactor_thread_lock() {
 	fam0, fam1 := httpSockaddrFamilyBytes()
 
 	e.emitGlobal(fmt.Sprintf(`
-define i32 @__kml_http_bind_and_listen(i32 %%port) {
+define i32 @__kml_http_bind_and_listen(i32 %%port, i32 %%hostaddr, i32 %%backlog) {
 entry:
 %s  %%fd = call i32 @socket(i32 2, i32 1, i32 0)
   %%fdok = icmp sge i32 %%fd, 0
@@ -855,13 +858,18 @@ afteropt:
   %%portn = call i16 @htons(i16 %%portu16)
   %%portp = getelementptr i8, ptr %%addr, i64 2
   store i16 %%portn, ptr %%portp, align 1
+  ; sin_addr.s_addr (bytes 4..7): the requested host as a network-order IPv4
+  ; word (0 = INADDR_ANY, the default when host is omitted). server.address()'s
+  ; getsockname() reflects it back, so binding 127.0.0.1 reports 127.0.0.1.
+  %%saddrp = getelementptr i8, ptr %%addr, i64 4
+  store i32 %%hostaddr, ptr %%saddrp, align 1
 
   %%bindrc = call i32 @bind(i32 %%fd, ptr %%addr, i32 16)
   %%bindok = icmp eq i32 %%bindrc, 0
   br i1 %%bindok, label %%dolisten, label %%failwithfd
 
 dolisten:
-  %%listenrc = call i32 @listen(i32 %%fd, i32 128)
+  %%listenrc = call i32 @listen(i32 %%fd, i32 %%backlog)
   %%listenok = icmp eq i32 %%listenrc, 0
   br i1 %%listenok, label %%setnonblocklistener, label %%failwithfd
 
@@ -956,7 +964,7 @@ failnofd:
 	}
 
 	e.emitGlobal(`
-define void @__kml_http_append_conn(i32 %fd) {
+define void @__kml_http_append_conn(i32 %fd, ptr %dispatch) {
 entry:
   %len = load i64, ptr @__kml_conn_len, align 8
   %cap = load i64, ptr @__kml_conn_cap, align 8
@@ -992,8 +1000,10 @@ doappend:
   store i64 ` + fmt.Sprintf("%d", fiberStackBytes) + `, ptr %ss_size_p, align 8
   %uc_link_p = getelementptr i8, ptr %ctx, i64 ` + fmt.Sprintf("%d", ucLinkOff) + `
   store ptr @__kml_main_ctx, ptr %uc_link_p, align 8
-  %dfp = load ptr, ptr @__kml_listen_dispatch, align 8
-  call void (ptr, ptr, i32, ...) @makecontext(ptr %ctx, ptr %dfp, i32 0)
+  ; The connection-fiber entry point is the owning server's dispatcher, passed
+  ; in by the accept site (the primary listener loads @__kml_listen_dispatch; an
+  ; extra listener passes its own @__kml_http_dispatch_N — TDD-00191 Stage 1).
+  call void (ptr, ptr, i32, ...) @makecontext(ptr %ctx, ptr %dispatch, i32 0)
 
   %ctx_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %slot, i32 0, i32 1
   store ptr %ctx, ptr %ctx_p, align 8
@@ -1012,6 +1022,327 @@ doappend:
 
   store i64 %len, ptr @__kml_current_conn_idx, align 8` + gcSetStackbottom + `
   %swaprc = call i32 @swapcontext(ptr @__kml_main_ctx, ptr %ctx)` + gcRestoreStackbottom + `
+  ret void
+}`)
+
+	// Extra-listener table (TDD-00191 Stage 1/3/4): the primary server keeps the
+	// @__kml_listen_* scalars; every ADDITIONAL http/https/http2 listener appends a
+	// { i64 fd, ptr dispatch, ptr tlsctx, ptr h2vtbl } entry here (32 B) and the
+	// event loop drives it as another accept source. Entry layout matches the
+	// connection/timer tables (realloc-doubling). Always defined (the loop calls
+	// the fdset/keepalive/accept hooks unconditionally, like the worker/net
+	// stubs) — a single-server program just leaves the table empty. tlsctx is an
+	// SSL_CTX* for a TLS server (null for plain); h2vtbl is the per-server h2
+	// dispatch vtable for an h2-over-TLS server (null otherwise).
+	//
+	// xl_accept's per-listener TLS accept is emitted only when the program uses a
+	// TLS server (usedHTTPS1Server / usedH2TLSServer, both set by a whole-program
+	// pre-scan so they're known here even if a plain primary triggered
+	// ensureHTTPRuntime first) — else the fd is always plain and the __kml_tls_*
+	// symbols aren't linked. When an h2-over-TLS server is present, a TLS accept
+	// whose ALPN selects "h2" is driven as an nghttp2 session (with the listener's
+	// vtable) inline, exactly like the primary secure-h2 branch; otherwise it is
+	// served as HTTP/1.1 over the SSL shims (or dropped if there is no HTTP/1.1
+	// path, matching Node's allowHTTP1:false default).
+	has1, hasH2 := e.usedHTTPS1Server, e.usedH2TLSServer
+	// xltlsreg / non-h2 target: 1.1-over-TLS when available, else drop the conn.
+	notH2 := `xltlsdrop`
+	if has1 {
+		notH2 = `xltlsreg`
+	}
+	xlTLSAccept := `
+  br label %setup`
+	if has1 || hasH2 {
+		var b strings.Builder
+		b.WriteString(`
+  %tp = getelementptr { i64, ptr, ptr, ptr }, ptr %slot, i32 0, i32 2
+  %xltlsctx = load ptr, ptr %tp, align 8
+  %xlhastls = icmp ne ptr %xltlsctx, null
+  br i1 %xlhastls, label %xltls, label %setup
+xltls:
+  %xlssl = call ptr @__kml_tls_server_accept(ptr %xltlsctx, i32 %newfd)
+  %xlsslok = icmp ne ptr %xlssl, null
+  br i1 %xlsslok, label %xlalpn, label %xltlsfail
+`)
+		if hasH2 {
+			// Inspect ALPN; "h2" drives nghttp2 with this listener's vtable, else
+			// fall to the 1.1 (or drop) target.
+			b.WriteString(`xlalpn:
+  %xlhp = getelementptr { i64, ptr, ptr, ptr }, ptr %slot, i32 0, i32 3
+  %xlh2v = load ptr, ptr %xlhp, align 8
+  %xlhash2 = icmp ne ptr %xlh2v, null
+  br i1 %xlhash2, label %xlh2check, label %` + notH2 + `
+xlh2check:
+  %xlproto = call ptr @__kml_tls_alpn_selected(ptr %xlssl)
+  %xlprotook = icmp ne ptr %xlproto, null
+  br i1 %xlprotook, label %xlh2cmp, label %` + notH2 + `
+xlh2cmp:
+  %xlcmp = call i32 @memcmp(ptr %xlproto, ptr @__kml_h2_alpn, i64 3)
+  call void @free(ptr %xlproto)
+  %xlish2 = icmp eq i32 %xlcmp, 0
+  br i1 %xlish2, label %xlh2drive, label %` + notH2 + `
+xlh2drive:
+  %xlsess = call ptr @__kml_h2_session_server_new(i32 %newfd, ptr %xlssl, ptr @__kml_tls_read, ptr @__kml_tls_write, ptr %xlh2v)
+  br label %xlh2loop
+xlh2loop:
+  %xlsr = call i32 @__kml_h2_session_send(ptr %xlsess)
+  %xlsbad = icmp slt i32 %xlsr, 0
+  br i1 %xlsbad, label %xlh2done, label %xlh2more
+xlh2more:
+  %xlwr = call i32 @__kml_h2_session_want_read(ptr %xlsess)
+  %xlww = call i32 @__kml_h2_session_want_write(ptr %xlsess)
+  %xlwsum = or i32 %xlwr, %xlww
+  %xlmore = icmp ne i32 %xlwsum, 0
+  br i1 %xlmore, label %xlh2recv, label %xlh2done
+xlh2recv:
+  %xlrr = call i32 @__kml_h2_session_recv(ptr %xlsess)
+  %xlrbad = icmp slt i32 %xlrr, 0
+  br i1 %xlrbad, label %xlh2done, label %xlh2loop
+xlh2done:
+  call void @__kml_h2_session_del(ptr %xlsess)
+  call void @__kml_tls_free(ptr %xlssl)
+  %xlh2cf = call i32 @close(i32 %newfd)
+  br label %cont
+`)
+		} else {
+			// No h2 server in the program: every TLS accept is HTTP/1.1.
+			b.WriteString(`xlalpn:
+  br label %` + notH2 + `
+`)
+		}
+		if has1 {
+			b.WriteString(`xltlsreg:
+  call void @__kml_http_conn_ssl_set(i32 %newfd, ptr %xlssl)
+  br label %setup
+`)
+		} else {
+			// h2-only secure server (no allowHTTP1): a non-h2 client is dropped
+			// after the handshake, matching Node's default.
+			b.WriteString(`xltlsdrop:
+  call void @__kml_tls_free(ptr %xlssl)
+  %xldcf = call i32 @close(i32 %newfd)
+  br label %cont
+`)
+		}
+		b.WriteString(`xltlsfail:
+  %xlcf = call i32 @close(i32 %newfd)
+  br label %cont`)
+		xlTLSAccept = b.String()
+	}
+	e.emitGlobal(`@__kml_http_xl_data = internal thread_local global ptr null, align 8
+@__kml_http_xl_len = internal thread_local global i64 0, align 8
+@__kml_http_xl_cap = internal thread_local global i64 0, align 8
+
+define void @__kml_http_register_extra_listener(i32 %fd, ptr %dispatch, ptr %tlsctx, ptr %h2vtbl) {
+entry:
+  %len = load i64, ptr @__kml_http_xl_len, align 8
+  ; TDD-00191 Stage 2 (relisten): reuse a slot freed by a prior close() (fd = -1)
+  ; before appending, so a close()/listen() cycle keeps the table bounded rather
+  ; than leaking a dead entry per relisten.
+  %rdata = load ptr, ptr @__kml_http_xl_data, align 8
+  br label %rloop
+rloop:
+  %ri = phi i64 [ 0, %entry ], [ %rinext, %rcont ]
+  %rdone = icmp sge i64 %ri, %len
+  br i1 %rdone, label %grow.check, label %rbody
+rbody:
+  %rslot = getelementptr { i64, ptr, ptr, ptr }, ptr %rdata, i64 %ri
+  %rfdp = getelementptr { i64, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 0
+  %rfd = load i64, ptr %rfdp, align 8
+  %rfree = icmp slt i64 %rfd, 0
+  br i1 %rfree, label %reuse, label %rcont
+reuse:
+  %rfd64 = sext i32 %fd to i64
+  store i64 %rfd64, ptr %rfdp, align 8
+  %rdp = getelementptr { i64, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 1
+  store ptr %dispatch, ptr %rdp, align 8
+  %rtp = getelementptr { i64, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 2
+  store ptr %tlsctx, ptr %rtp, align 8
+  %rhp = getelementptr { i64, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 3
+  store ptr %h2vtbl, ptr %rhp, align 8
+  ret void
+rcont:
+  %rinext = add i64 %ri, 1
+  br label %rloop
+grow.check:
+  %cap = load i64, ptr @__kml_http_xl_cap, align 8
+  %np1 = add i64 %len, 1
+  %needgrow = icmp sgt i64 %np1, %cap
+  br i1 %needgrow, label %grow, label %app
+grow:
+  %cap2 = mul i64 %cap, 2
+  %ge4 = icmp sgt i64 %cap2, 4
+  %newcap = select i1 %ge4, i64 %cap2, i64 4
+  %bytes = mul i64 %newcap, 32
+  %old = load ptr, ptr @__kml_http_xl_data, align 8
+  %new = call ptr @realloc(ptr %old, i64 %bytes)
+  store ptr %new, ptr @__kml_http_xl_data, align 8
+  store i64 %newcap, ptr @__kml_http_xl_cap, align 8
+  br label %app
+app:
+  %data = load ptr, ptr @__kml_http_xl_data, align 8
+  %slot = getelementptr { i64, ptr, ptr, ptr }, ptr %data, i64 %len
+  %fd64 = sext i32 %fd to i64
+  %fdp = getelementptr { i64, ptr, ptr, ptr }, ptr %slot, i32 0, i32 0
+  store i64 %fd64, ptr %fdp, align 8
+  %dp = getelementptr { i64, ptr, ptr, ptr }, ptr %slot, i32 0, i32 1
+  store ptr %dispatch, ptr %dp, align 8
+  %tp = getelementptr { i64, ptr, ptr, ptr }, ptr %slot, i32 0, i32 2
+  store ptr %tlsctx, ptr %tp, align 8
+  %hp = getelementptr { i64, ptr, ptr, ptr }, ptr %slot, i32 0, i32 3
+  store ptr %h2vtbl, ptr %hp, align 8
+  %newlen = add i64 %len, 1
+  store i64 %newlen, ptr @__kml_http_xl_len, align 8
+  ret void
+}
+
+; true while any extra listener is still open (fd >= 0) — keeps the loop alive.
+define i1 @__kml_http_xl_keepalive() {
+entry:
+  %len = load i64, ptr @__kml_http_xl_len, align 8
+  %data = load ptr, ptr @__kml_http_xl_data, align 8
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %inext, %cont ]
+  %done = icmp sge i64 %i, %len
+  br i1 %done, label %no, label %body
+body:
+  %slot = getelementptr { i64, ptr, ptr, ptr }, ptr %data, i64 %i
+  %fdp = getelementptr { i64, ptr, ptr, ptr }, ptr %slot, i32 0, i32 0
+  %fd = load i64, ptr %fdp, align 8
+  %open = icmp sge i64 %fd, 0
+  br i1 %open, label %yes, label %cont
+cont:
+  %inext = add i64 %i, 1
+  br label %loop
+yes:
+  ret i1 1
+no:
+  ret i1 0
+}
+
+; add every open extra-listener fd to the read fd_set, tracking *maxfd.
+define i1 @__kml_http_xl_fdset_add(ptr %fdset, ptr %maxfd) {
+entry:
+  %len = load i64, ptr @__kml_http_xl_len, align 8
+  %data = load ptr, ptr @__kml_http_xl_data, align 8
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %inext, %cont ]
+  %done = icmp sge i64 %i, %len
+  br i1 %done, label %ret, label %body
+body:
+  %slot = getelementptr { i64, ptr, ptr, ptr }, ptr %data, i64 %i
+  %fdp = getelementptr { i64, ptr, ptr, ptr }, ptr %slot, i32 0, i32 0
+  %fd64 = load i64, ptr %fdp, align 8
+  %open = icmp sge i64 %fd64, 0
+  br i1 %open, label %setbit, label %cont
+setbit:
+  %fd32 = trunc i64 %fd64 to i32
+  %div8 = sdiv i32 %fd32, 8
+  %mod8 = srem i32 %fd32, 8
+  %div8_64 = sext i32 %div8 to i64
+  %bp = getelementptr i8, ptr %fdset, i64 %div8_64
+  %bitpos = trunc i32 %mod8 to i8
+  %mask = shl i8 1, %bitpos
+  %cur = load i8, ptr %bp, align 1
+  %or = or i8 %cur, %mask
+  store i8 %or, ptr %bp, align 1
+  %curmax = load i32, ptr %maxfd, align 4
+  %bigger = icmp sgt i32 %fd32, %curmax
+  br i1 %bigger, label %newmax, label %cont
+newmax:
+  store i32 %fd32, ptr %maxfd, align 4
+  br label %cont
+cont:
+  %inext = add i64 %i, 1
+  br label %loop
+ret:
+  ret i1 0
+}
+
+; accept a connection on each ready extra listener and hand it to that server's
+; dispatcher (append_conn bakes the entry point into the fiber's ucontext). For a
+; TLS listener (field 2 = its SSL_CTX*, TDD-00191 Stage 3) the accepted fd is
+; SSL_accept'd on the still-blocking socket and registered in the fd→SSL table
+; before being set non-blocking, so the connection fiber's conn_recv/conn_send
+; shims route its I/O through SSL — exactly like the primary HTTPS accept branch.
+define void @__kml_http_xl_accept(ptr %fdset) {
+entry:
+  %len = load i64, ptr @__kml_http_xl_len, align 8
+  %data = load ptr, ptr @__kml_http_xl_data, align 8
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %inext, %cont ]
+  %done = icmp sge i64 %i, %len
+  br i1 %done, label %ret, label %body
+body:
+  %slot = getelementptr { i64, ptr, ptr, ptr }, ptr %data, i64 %i
+  %fdp = getelementptr { i64, ptr, ptr, ptr }, ptr %slot, i32 0, i32 0
+  %fd64 = load i64, ptr %fdp, align 8
+  %open = icmp sge i64 %fd64, 0
+  br i1 %open, label %chk, label %cont
+chk:
+  %fd32 = trunc i64 %fd64 to i32
+  %div8 = sdiv i32 %fd32, 8
+  %mod8 = srem i32 %fd32, 8
+  %div8_64 = sext i32 %div8 to i64
+  %bp = getelementptr i8, ptr %fdset, i64 %div8_64
+  %bitpos = trunc i32 %mod8 to i8
+  %mask = shl i8 1, %bitpos
+  %cur = load i8, ptr %bp, align 1
+  %masked = and i8 %cur, %mask
+  %ready = icmp ne i8 %masked, 0
+  br i1 %ready, label %acc, label %cont
+acc:
+  %newfd = call i32 @accept(i32 %fd32, ptr null, ptr null)
+  %ok = icmp sge i32 %newfd, 0
+  br i1 %ok, label %tlschk, label %cont
+tlschk:` + xlTLSAccept + `
+setup:
+  call i32 @setsockopt(i32 %newfd, i32 6, i32 1, ptr @__kml_http_nodelay_one, i32 4)
+  %curflags = call i32 (i32, i32, ...) @fcntl(i32 %newfd, i32 3)
+  %newflags = or i32 %curflags, ` + fmt.Sprintf("%d", httpNonblockFlag()) + `
+  call i32 (i32, i32, ...) @fcntl(i32 %newfd, i32 4, i32 %newflags)
+  %dp = getelementptr { i64, ptr, ptr, ptr }, ptr %slot, i32 0, i32 1
+  %dispatch = load ptr, ptr %dp, align 8
+  call void @__kml_http_append_conn(i32 %newfd, ptr %dispatch)
+  br label %cont
+cont:
+  %inext = add i64 %i, 1
+  br label %loop
+ret:
+  ret void
+}
+
+; server.close() on an additional server: stop accepting on that listener by
+; clearing its table entry (fd = -1) and closing the socket. Already-accepted
+; connections finish naturally via the same %hasactiveconns drain the primary
+; http.close() relies on. Idempotent (a missing/closed fd is a no-op).
+define void @__kml_http_close_extra_listener(i32 %fd) {
+entry:
+  %len = load i64, ptr @__kml_http_xl_len, align 8
+  %data = load ptr, ptr @__kml_http_xl_data, align 8
+  %fd64 = sext i32 %fd to i64
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %inext, %cont ]
+  %done = icmp sge i64 %i, %len
+  br i1 %done, label %ret, label %body
+body:
+  %slot = getelementptr { i64, ptr, ptr, ptr }, ptr %data, i64 %i
+  %fdp = getelementptr { i64, ptr, ptr, ptr }, ptr %slot, i32 0, i32 0
+  %efd = load i64, ptr %fdp, align 8
+  %match = icmp eq i64 %efd, %fd64
+  br i1 %match, label %hit, label %cont
+hit:
+  %ign = call i32 @close(i32 %fd)
+  store i64 -1, ptr %fdp, align 8
+  br label %ret
+cont:
+  %inext = add i64 %i, 1
+  br label %loop
+ret:
   ret void
 }`)
 
@@ -1192,7 +1523,7 @@ tlsalpncmp:
   br i1 %tlsish2, label %tlsdrive, label %` + notH2Target + `
 
 tlsdrive:
-  %tlssess = call ptr @__kml_h2_session_server_new(i32 %newfd, ptr %tlsssl, ptr @__kml_tls_read, ptr @__kml_tls_write)
+  %tlssess = call ptr @__kml_h2_session_server_new(i32 %newfd, ptr %tlsssl, ptr @__kml_tls_read, ptr @__kml_tls_write, ptr @__kml_h2_vtbl)
   br label %tlsh2loop
 
 tlsh2loop:
@@ -1543,6 +1874,8 @@ ccdone:
   ; async-I/O thread pool: an outstanding fs read/write keeps this loop alive
   ; so it doesn't exit before the completion settles its Promise (TDD-00185).
   %plkeep = call i1 @__kml_pool_keepalive()
+  ; TDD-00191 Stage 1: any open additional http server keeps the loop alive.
+  %xlkeep = call i1 @__kml_http_xl_keepalive()
   %anywork0 = or i1 %havetimer, %haslistener
   %anywork1 = or i1 %anywork0, %hasactiveconns
   %anywork2 = or i1 %anywork1, %hasopenes
@@ -1556,7 +1889,8 @@ ccdone:
   %anywork6e = or i1 %anywork6d, %sdkeep
   %anywork6f = or i1 %anywork6e, %ipcckeep
   %anywork6g = or i1 %anywork6f, %fwkeep
-  %anywork = or i1 %anywork6g, %plkeep
+  %anywork6h = or i1 %anywork6g, %plkeep
+  %anywork = or i1 %anywork6h, %xlkeep
   ; TDD-00084 Part B: an active coroutine task keeps the loop alive too.
   %hasactivetasks_aw = load i1, ptr %hasactivetasks_slot, align 1
   %anyworkt = or i1 %anywork, %hasactivetasks_aw
@@ -1742,6 +2076,8 @@ wscsetdone:
   %dgfz0 = load i1, ptr %forcezero, align 1
   %dgfz1 = or i1 %dgfz0, %dgfdforce
   store i1 %dgfz1, ptr %forcezero, align 1
+  ; TDD-00191 Stage 1: add every additional http server's listening fd.
+  %xlfdadd = call i1 @__kml_http_xl_fdset_add(ptr %fdset, ptr %maxfd)
   ; Merge libcurl's own fd_sets (its in-flight transfers' sockets) into the
   ; same read/write/exc sets, if any await fetch(...) has ever created the
   ; multi handle — curl_multi_fdset ORs its bits in rather than clearing
@@ -2026,6 +2362,8 @@ afterselectok:
   call void @__kml_net_dispatch()
   ; dgram: drain readable UDP sockets and fire 'message' listeners.
   call void @__kml_dgram_dispatch()
+  ; TDD-00191 Stage 1: accept new connections on every additional http server.
+  call void @__kml_http_xl_accept(ptr %fdset)
   br i1 %hascurl, label %docurlperform, label %checklistener
 
 docurlperform:
@@ -2073,7 +2411,8 @@ setnonblock:
   %curflags = call i32 (i32, i32, ...) @fcntl(i32 %newfd, i32 3)
   %newflags = or i32 %curflags, ` + fmt.Sprintf("%d", httpNonblockFlag()) + `
   call i32 (i32, i32, ...) @fcntl(i32 %newfd, i32 4, i32 %newflags)
-  call void @__kml_http_append_conn(i32 %newfd)
+  %primdispatch = load ptr, ptr @__kml_listen_dispatch, align 8
+  call void @__kml_http_append_conn(i32 %newfd, ptr %primdispatch)
   br label %scanconn
 
 scanconn:

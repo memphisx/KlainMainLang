@@ -2,7 +2,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 )
 
@@ -21,7 +20,7 @@ func (e *Emitter) ensureClockGettime() {
 // (confirmed in <_time.h>); glibc's is the well-known, decades-stable
 // kernel UAPI value 1. The same class of platform check as errnoAccessor.
 func monotonicClockID() string {
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return "6"
 	}
 	return "1"

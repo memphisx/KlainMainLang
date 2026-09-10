@@ -87,7 +87,7 @@
             "feature": "Async / iterators (`async`/`await`, the `Promise.*` combinators, generators + async generators, `for await…of`)",
             "status": "implemented",
             "notes": [
-              "Near-spec fidelity incl. V8-matching microtask ordering — a differentiator → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
+              "Near-spec fidelity incl. V8-matching microtask ordering → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
             ]
           },
           {
@@ -222,7 +222,7 @@
             "feature": "Decorators",
             "status": "implemented",
             "caveats": [
-              "Both dialects, all placements, factory, captures, metadata; class-decorator **replacement** is a documented static-model divergence (refused at runtime) and standard static-field decorators are rejected → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
+              "Class-decorator **replacement** is a documented static-model divergence (refused at runtime), and standard static-field decorators are rejected → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
             ]
           },
           {

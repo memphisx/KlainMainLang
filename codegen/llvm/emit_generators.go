@@ -54,6 +54,40 @@ type generatorEmitCtx struct {
 // emitScalarZero's own scope), and an explicit return-type annotation (the
 // element type yield/return produce) — no yield-based inference exists yet,
 // unlike an ordinary unannotated function's own best-effort inference.
+// generatorWrapperNames are the standard-library generic types a TypeScript
+// author writes as a generator/iterator return annotation. This codebase's own
+// convention writes the *element* type directly (`function* f(): number`), but
+// idiomatic TS wraps it (`Generator<number>`, `IterableIterator<string>`), and
+// the wrapper's first type argument is that element type (`Generator<T, TReturn,
+// TNext>` — TReturn/TNext are ignored in V1). Without this, a wrapped annotation
+// fell through resolveType's generic-name path and was silently misread as an
+// array (`Generator<number>` → `number[]`), so a scalar `yield` produced invalid
+// IR (a double stored into an array `{ptr,i64}` slot).
+var generatorWrapperNames = map[string]bool{
+	"Generator": true, "AsyncGenerator": true,
+	"Iterator": true, "AsyncIterator": true,
+	"IterableIterator": true, "AsyncIterableIterator": true,
+	"Iterable": true, "AsyncIterable": true,
+}
+
+// generatorElemAnnotation returns the type annotation to resolve as a
+// generator's element type, or nil to infer it from the body. For a wrapper
+// return type (see generatorWrapperNames) it unwraps to the first type argument
+// (nil when the wrapper carries none, e.g. a bare `Generator`); otherwise the
+// annotation is the element type written directly.
+func generatorElemAnnotation(rt *ast.TypeAnnotation) *ast.TypeAnnotation {
+	if rt == nil {
+		return nil
+	}
+	if generatorWrapperNames[rt.Name] {
+		if len(rt.TypeArgs) > 0 {
+			return rt.TypeArgs[0]
+		}
+		return rt.ElemType // single type arg arrives here (as Promise<T>/Array<T> do); nil ⇒ infer
+	}
+	return rt
+}
+
 func (e *Emitter) buildGeneratorSig(fd *ast.FunctionDeclaration) (*GeneratorInfo, error) {
 	var paramTypes []Type
 	var paramNames []string
@@ -81,12 +115,17 @@ func (e *Emitter) buildGeneratorSig(fd *ast.FunctionDeclaration) (*GeneratorInfo
 		paramNames = append(paramNames, p.Name)
 	}
 	var elemTy Type
-	if fd.ReturnType != nil {
-		elemTy = e.resolveType(fd.ReturnType)
+	if elemAnn := generatorElemAnnotation(fd.ReturnType); elemAnn != nil {
+		// The element type: written directly (this codebase's convention,
+		// `function* f(): number` / `: number[]`), or unwrapped from an
+		// idiomatic-TS wrapper (`Generator<number>` → number). See
+		// generatorElemAnnotation.
+		elemTy = e.resolveType(elemAnn)
 	} else {
-		// No annotation: infer the element type from the body's own yield
-		// expressions (TDD-00096 Part 2) — real-JS sources never carry the
-		// annotation. Only the genuinely ambiguous case still rejects.
+		// No usable annotation (none at all, or a bare `Generator` with no type
+		// argument): infer the element type from the body's own yield expressions
+		// (TDD-00096 Part 2) — real-JS sources never carry the annotation. Only
+		// the genuinely ambiguous case still rejects.
 		inferred, ok := e.inferGeneratorElemType(fd, paramNames, paramTypes)
 		if !ok {
 			return nil, fmt.Errorf("%d:%d: generator function '%s' requires an explicit return type annotation — its yield expressions produce conflicting element types that don't join", fd.GetPos().Line, fd.GetPos().Col, fd.Name)

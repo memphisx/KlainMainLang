@@ -14,7 +14,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 
 	"KlainMainLang/ast"
 )
@@ -170,7 +169,7 @@ func (e *Emitter) emitFsPromisePooled(op string, args []ast.Expression, pos ast.
 	// The pool runtime (klainpool.c) is POSIX-only — pthread condvars plus a
 	// socketpair/select() wakeup with no Win32 build. Windows keeps the inline
 	// settled-Promise path until the reactor work (TDD-00182/00183) subsumes it.
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		return Value{}, false, nil
 	}
 	opid, ok := fsPoolOpID[op]

@@ -402,7 +402,7 @@ func TestWebviewWindowsMissingSDKMessage(t *testing.T) {
 		t.Skip("Windows-only: the WebView2 SDK probe")
 	}
 	t.Setenv("KLAIN_SYSROOT", t.TempDir())
-	_, _, err := llvm.LocateWebview()
+	_, _, err := llvm.LocateWebview("system")
 	if err == nil || !strings.Contains(err.Error(), "webview2-loader") {
 		t.Fatalf("expected an error naming the webview2-loader package, got: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestE2EPackageWindowsGUIExe(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-only: the GUI-subsystem packager")
 	}
-	if _, _, err := llvm.LocateWebview(); err != nil {
+	if _, _, err := llvm.LocateWebview("system"); err != nil {
 		t.Skipf("webview: %v", err)
 	}
 	cli := buildCLI(t)
@@ -499,4 +499,72 @@ w.terminate()
 			t.Errorf("sidecar %s left behind", side)
 		}
 	}
+}
+
+// TestE2EWebviewBackendFlag exercises TDD-00144 Stage 1: the -webview=<backend>
+// selection flag. Values validate at parse time; the opt-in backends (cef/qt/
+// sailfish) are recognized but not yet built, so a program that opens a webview
+// is rejected cleanly at compile time — while -webview=system (the default) is
+// unaffected. Driven through the real CLI so it covers the flag wiring end to
+// end. Portable: none of the rejection cases reach the linker, so no webview
+// dev packages are needed.
+func TestE2EWebviewBackendFlag(t *testing.T) {
+	cli := buildCLI(t)
+	dir := tempDir(t)
+
+	// A program that actually opens a webview — used for the backend-rejection
+	// cases (the not-yet-implemented check fires only when UsesWebview()).
+	wvSrc := filepath.Join(dir, "wv.ts")
+	writeFile(t, wvSrc,
+		"import { Webview } from 'klain:webview'\n"+
+			"const w = new Webview({ title: \"T\" })\n"+
+			"w.terminate()\n")
+	out := filepath.Join(dir, "out"+llvm.HostExeSuffix())
+
+	// An unknown backend name is rejected at flag-validation time, before any
+	// program shape matters (a plain CLI program is enough).
+	plainSrc := filepath.Join(dir, "plain.ts")
+	writeFile(t, plainSrc, "console.log(\"hi\")\n")
+
+	cases := []struct {
+		name    string
+		backend string
+		src     string
+		wantErr string // "" ⇒ expect success
+	}{
+		{"unknown-value", "bogus", plainSrc, "unrecognized -webview value"},
+		{"cef-not-built", "cef", wvSrc, "-webview=cef is not yet implemented"},
+		{"qt-not-built", "qt", wvSrc, "-webview=qt is not yet implemented"},
+		// sailfish is wired but needs a --sysroot; without one it rejects cleanly.
+		{"sailfish-needs-sysroot", "sailfish", wvSrc, "requires --sysroot"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(cli, "-webview="+tc.backend, "-o", out, tc.src)
+			b, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected failure, got success:\n%s", b)
+			}
+			if !strings.Contains(string(b), tc.wantErr) {
+				t.Fatalf("error message %q does not contain %q", b, tc.wantErr)
+			}
+		})
+	}
+
+	// The default (system) backend still compiles a webview program. Skip
+	// cleanly when the system engine's dev packages are absent (headless CI):
+	// the failure text names them, matching appendWebview's Skip posture.
+	t.Run("system-compiles", func(t *testing.T) {
+		cmd := exec.Command(cli, "-webview=system", "-o", out, wvSrc)
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			if strings.Contains(string(b), "no supported WebKitGTK found") {
+				t.Skipf("system webview dev packages absent: %s", b)
+			}
+			t.Fatalf("system backend failed to compile: %v\n%s", err, b)
+		}
+		if _, err := os.Stat(out); err != nil {
+			t.Fatalf("system webview binary not produced: %v", err)
+		}
+	})
 }

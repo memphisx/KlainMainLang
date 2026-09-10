@@ -844,3 +844,22 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00798](ADR-00798.md) | node:ffi Stage B — raw memory helpers (peek/poke, to/export buffers, getRawPointer) | Extends [ADR-00797](ADR-00797.md); Implements [TDD-00164](../tdd/TDD-00164.md) (Stage B) |
 | [00799](ADR-00799.md) | node:ffi Stage C — registerCallback via static per-signature trampoline families | Extends [ADR-00797](ADR-00797.md), [ADR-00798](ADR-00798.md); Implements [TDD-00164](../tdd/TDD-00164.md) (Stage C) |
 | [00800](ADR-00800.md) | node:ffi symbol accumulators — library.functions/.symbols, no-arg getFunctions()/getSymbols() | Extends [ADR-00797](ADR-00797.md), [ADR-00799](ADR-00799.md); Implements [TDD-00164](../tdd/TDD-00164.md) (residual surface) |
+| [00801](ADR-00801.md) | `server.listen(options)` object form with host/backlog | `Implements [TDD-00131](../tdd/TDD-00131.md)`, `Extends [ADR-00503](ADR-00503.md)`, `Extends [ADR-00514](ADR-00514.md)` |
+| [00802](ADR-00802.md) | chunked/streaming HTTP responses keep the connection alive | `Implements [TDD-00131](../tdd/TDD-00131.md)`, `Extends [TDD-00097](../tdd/TDD-00097.md)`, `Extends [ADR-00300](ADR-00300.md)` |
+| [00803](ADR-00803.md) | Multiple concurrent HTTP servers — TDD-00191 Stage 1 | `Implements [TDD-00191](../tdd/TDD-00191.md)`, `Extends [TDD-00131](../tdd/TDD-00131.md)`, `Extends [ADR-00802](ADR-00802.md)` |
+| [00804](ADR-00804.md) | Multi-server relisten + WebSocket/upgrade on the primary — TDD-00191 Stages 2–3 (in part) | `Implements [TDD-00191](../tdd/TDD-00191.md)`, `Extends [ADR-00803](ADR-00803.md)` |
+| [00805](ADR-00805.md) | Non-primary WebSocket/upgrade server — TDD-00191 Stage 3 | `Implements [TDD-00191](../tdd/TDD-00191.md)`, `Extends [ADR-00804](ADR-00804.md)` |
+| [00806](ADR-00806.md) | HTTPS/1.1 multi-instance — TDD-00191 Stage 3 | `Implements [TDD-00191](../tdd/TDD-00191.md)`, `Extends [ADR-00803](ADR-00803.md)`, `Extends [ADR-00805](ADR-00805.md)`, `Extends [ADR-00802](ADR-00802.md)` |
+| [00807](ADR-00807.md) | Per-listener HTTP/2 + coexistence edges — TDD-00191 Stage 4 | `Implements [TDD-00191](../tdd/TDD-00191.md)`, `Extends [ADR-00803](ADR-00803.md)`, `Extends [ADR-00805](ADR-00805.md)`, `Extends [ADR-00806](ADR-00806.md)` |
+| [00808](ADR-00808.md) | node:ffi dlopen(null) resolves libm symbols on Linux | `Extends [TDD-00164](../tdd/TDD-00164.md)`, `Extends [ADR-00799](ADR-00799.md)` |
+| [00809](ADR-00809.md) | `--target`/`--sysroot` cross-compilation flag (TDD-00146 Stage 1) | `Implements [TDD-00146](../tdd/TDD-00146.md)` |
+| [00810](ADR-00810.md) | `-package=rpm` / `rpm:harbour` — RPM package emitter (TDD-00146 Stage 2) | `Implements [TDD-00146](../tdd/TDD-00146.md)`, `Extends [ADR-00809](ADR-00809.md)` |
+| [00811](ADR-00811.md) | `fs.readFileSync` reads zero-stat-size `/proc` and `/sys` files | |
+| [00812](ADR-00812.md) | Harbour private-lib bundling for bdw-gc (`-mm=gc`) | `Extends [ADR-00810](ADR-00810.md)`, `Implements [TDD-00146](../tdd/TDD-00146.md)` |
+| [00813](ADR-00813.md) | Target OS/arch abstraction — macOS→Linux cross-OS builds (TDD-00146 Stage 1 completion) | `Extends [ADR-00809](ADR-00809.md)`, `Implements [TDD-00146](../tdd/TDD-00146.md)` |
+| [00814](ADR-00814.md) | Generator/iterator wrapper return annotations (`Generator<T>`) | `Extends [ADR-00293](ADR-00293.md)` |
+| [00815](ADR-00815.md) | `-webview=<backend>` selection flag (Stage 1 — plumbing) | `Implements [TDD-00144](../tdd/TDD-00144.md)` |
+| [00816](ADR-00816.md) | `-webview=sailfish` shim — Gecko/embedlite backend (Stage 3 start) | `Implements [TDD-00146](../tdd/TDD-00146.md)`, `Extends [ADR-00815](ADR-00815.md)` |
+| [00817](ADR-00817.md) | `-webview=sailfish` moc build integration + un-gating | `Extends [ADR-00816](ADR-00816.md)`, `Implements [TDD-00146](../tdd/TDD-00146.md)` |
+| [00818](ADR-00818.md) | `-webview=sailfish` on-device bring-up — the shim runs on real hardware | `Extends [ADR-00816](ADR-00816.md), [ADR-00817](ADR-00817.md)`, `Implements [TDD-00146](../tdd/TDD-00146.md)` |
+| [00819](ADR-00819.md) | `-webview=sailfish` native QTimer loop-fusion pump | `Extends [ADR-00818](ADR-00818.md)`, `Implements [TDD-00146](../tdd/TDD-00146.md)` |

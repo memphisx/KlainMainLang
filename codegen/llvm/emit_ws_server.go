@@ -53,10 +53,23 @@ func (e *Emitter) emitNewWebSocketServer(ex *ast.NewExpression) (Value, error) {
 	for _, p := range lit.Properties {
 		if p.Key == "server" {
 			hasServer = true
-			// Evaluate for side effects / binding validity; the singleton
-			// server needs nothing stored from it.
-			if _, err := e.emitExpr(p.Value); err != nil {
+			// Evaluate for side effects / binding validity, and route the ws
+			// connection handler to the named server's own ws global
+			// (TDD-00191 Stage 3). If the server handle resolves to a tracked
+			// binding, hand its dispatcher suffix up to this WebSocketServer's
+			// declaration (so a later wss.on('connection', …) targets the right
+			// per-server global); otherwise fall back to the runtime primary
+			// guard, which rejects a non-primary handle we can't route.
+			srvVal, err := e.emitExpr(p.Value)
+			if err != nil {
 				return Value{}, err
+			}
+			if sfx, ok := e.httpServerSfxForExpr(p.Value); ok {
+				e.ensureExtraWSUpGlobals(sfx)
+				e.pendingWSCreated = true
+				e.pendingWSSfx = sfx
+			} else if srvVal.Ty.IsHTTPServer && srvVal.Ref != "null" {
+				e.emitHTTPRequirePrimaryHandle(srvVal.Ref, "websocket")
 			}
 		}
 	}
@@ -75,6 +88,14 @@ func (e *Emitter) emitWebSocketServerMethod(objExpr ast.Expression, method strin
 	if _, err := e.emitExpr(objExpr); err != nil {
 		return Value{}, err
 	}
+	// TDD-00191 Stage 3: route the connection handler to the attached server's
+	// own ws global. The suffix was recorded on this WebSocketServer binding at
+	// `new WebSocketServer({ server })`; default to the primary ("") global.
+	wsSfx := ""
+	if id, ok := objExpr.(*ast.Identifier); ok && e.httpWSVarSfx != nil {
+		wsSfx = e.httpWSVarSfx[id.Name]
+	}
+	e.ensureExtraWSUpGlobals(wsSfx)
 	switch method {
 	case "on":
 		evt, err := stringLiteralArg(args, 0, "WebSocketServer.on", pos)
@@ -96,7 +117,7 @@ func (e *Emitter) emitWebSocketServerMethod(objExpr ast.Expression, method strin
 		if cb.kind != cbClosure {
 			return Value{}, fmt.Errorf("%d:%d: a 'connection' listener must be a function literal", pos.Line, pos.Col)
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_ws_handler, align 8", cb.hdrPtr))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_ws_handler%s, align 8", cb.hdrPtr, wsSfx))
 		return Value{Ty: TypeVoid}, nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: a WebSocketServer supports .on('connection', listener) (got '%s')", pos.Line, pos.Col, method)

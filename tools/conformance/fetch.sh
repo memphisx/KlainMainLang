@@ -46,8 +46,15 @@ NODE_TAG="v22.11.0"
 NODE_URL="https://github.com/nodejs/node.git"
 NODE_DEST="$SCRIPT_DIR/../../.node-tests"
 
+# Readiness is tracked by a version marker written after a *complete* fetch, not
+# by `git describe`: a `--depth 1 refs/tags/<tag>` fetch checks out FETCH_HEAD
+# without creating a local tag, so `git describe --exact-match` always reported
+# "none" and re-fetched on every run — under Docker-as-root on a mounted volume
+# that `rm -rf`'d the host corpus. The marker lives in `.git/` so a checkout
+# never touches it, and a partial/failed fetch leaves none → the next run refetches.
+NODE_MARKER="$NODE_DEST/.git/kml-corpus-version"
 if [ -d "$NODE_DEST/.git" ]; then
-  current_tag="$(git -C "$NODE_DEST" describe --tags --exact-match 2>/dev/null || echo none)"
+  current_tag="$(cat "$NODE_MARKER" 2>/dev/null || echo none)"
   if [ "$current_tag" = "$NODE_TAG" ]; then
     echo "node tests already at pinned tag $NODE_TAG — nothing to do."
   else
@@ -73,6 +80,7 @@ if [ ! -d "$NODE_DEST/.git" ]; then
     > "$NODE_DEST/.git/info/sparse-checkout"
   git -C "$NODE_DEST" fetch --depth 1 --filter=blob:none origin "refs/tags/$NODE_TAG"
   git -C "$NODE_DEST" checkout -q FETCH_HEAD
+  echo "$NODE_TAG" > "$NODE_MARKER"
   echo "Fetched node tests @ $NODE_TAG into $NODE_DEST"
 fi
 
@@ -87,8 +95,11 @@ TS_TAG="v5.6.3"
 TS_URL="https://github.com/microsoft/TypeScript.git"
 TS_DEST="$SCRIPT_DIR/../../.ts-tests"
 
+# Same version-marker readiness as the node corpus above (git describe can't see
+# the pinned tag after a shallow tag fetch).
+TS_MARKER="$TS_DEST/.git/kml-corpus-version"
 if [ -d "$TS_DEST/.git" ]; then
-  current_tag="$(git -C "$TS_DEST" describe --tags --exact-match 2>/dev/null || echo none)"
+  current_tag="$(cat "$TS_MARKER" 2>/dev/null || echo none)"
   if [ "$current_tag" = "$TS_TAG" ]; then
     echo "TypeScript tests already at pinned tag $TS_TAG — nothing to do."
   else
@@ -109,5 +120,6 @@ if [ ! -d "$TS_DEST/.git" ]; then
     > "$TS_DEST/.git/info/sparse-checkout"
   git -C "$TS_DEST" fetch --depth 1 --filter=blob:none origin "refs/tags/$TS_TAG"
   git -C "$TS_DEST" checkout -q FETCH_HEAD
+  echo "$TS_TAG" > "$TS_MARKER"
   echo "Fetched TypeScript tests @ $TS_TAG into $TS_DEST"
 fi

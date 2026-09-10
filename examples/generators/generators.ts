@@ -185,3 +185,26 @@ for (const x of naturals()) {
     if (x >= 3) break;         // triggers the finally
 }
 console.log("consumer done");
+
+// --- Idiomatic-TS wrapper return annotations ---
+// This codebase writes a generator's element type directly (`: number` above),
+// but the standard-library wrappers TypeScript authors reach for also work and
+// unwrap to their element type: Generator<T>, IterableIterator<T>, and the
+// three-arg Generator<T, TReturn, TNext> (TReturn/TNext are ignored in V1).
+function* wrapped(): Generator<number> {
+    yield 100;
+    yield 200;
+}
+let wrappedTotal = 0;
+for (const v of wrapped()) {
+    wrappedTotal += v;
+}
+console.log("wrapped total " + wrappedTotal);   // 300
+
+function* labelled(): IterableIterator<string> {
+    yield "x";
+    yield "y";
+}
+for (const s of labelled()) {
+    console.log(s);                              // x, y
+}

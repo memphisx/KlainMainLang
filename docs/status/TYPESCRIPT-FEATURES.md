@@ -19,7 +19,7 @@ Format: [Status page format](README.md#status-page-format). ✅ = the feature wo
 | Enums (numeric & string, incl. `declare [const] enum`) | ✅ | • → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | Interfaces (structural), type aliases, object literals | ✅ | • → [Type system](TYPE-SYSTEM.md) |
 | Core type constructs (`T | null`, `T[]`, function types, `Map`/`Set`/`Promise<T>`, tuple types, index signatures, `typeof` queries) | ✅ | • → [Type system](TYPE-SYSTEM.md) |
-| Async / iterators (`async`/`await`, the `Promise.*` combinators, generators + async generators, `for await…of`) | ✅ | • Near-spec fidelity incl. V8-matching microtask ordering — a differentiator → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
+| Async / iterators (`async`/`await`, the `Promise.*` combinators, generators + async generators, `for await…of`) | ✅ | • Near-spec fidelity incl. V8-matching microtask ordering → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | Modules (all import/export forms, namespace imports, re-exports, circular graphs, CommonJS `require`, `import.meta.url`, `node:` prefix) | ✅ | • → [Modules](MODULES.md) |
 | JSDoc type-carrying tags (`@type`/`@param`/`@returns`/`@typedef`/`@callback`/`@template` + full type-expression grammar) | ✅ | • Plus compiler extensions `intN`/`floatN`/`@erased`/`@pure` → [JSDoc](JSDOC.md) |
 
@@ -43,7 +43,7 @@ The honest middle column: each of these compiles and runs for its core case but 
 | Namespaces | ✅ | • Top-level only; no `declare namespace`; members desugar to bare-name top-level decls (cross-namespace same-name class collides) → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | Function overloads | ✅ | • Signatures parsed and **erased**; call sites check the implementation only (no per-signature narrowing) → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | `Function.prototype.call`/`apply`/`bind` | ✅ | • `thisArg` evaluated then ignored (no rebindable `this`, so no method-borrowing); first-class function values only, not builtins → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
-| Decorators | ✅ | • Both dialects, all placements, factory, captures, metadata; class-decorator **replacement** is a documented static-model divergence (refused at runtime) and standard static-field decorators are rejected → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
+| Decorators | ✅ | • Class-decorator **replacement** is a documented static-model divergence (refused at runtime), and standard static-field decorators are rejected → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | Symbols | ✅ | • V1 opaque unique values (`Symbol()`, `===`, `typeof`, `.description`, `Symbol.for`/`keyFor`); no dynamic property keys; only `[Symbol.iterator]`/`[Symbol.asyncIterator]` recognized as computed keys → [Type system](TYPE-SYSTEM.md) |
 
 ## Not started (in scope)

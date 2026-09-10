@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -372,6 +373,435 @@ console.log("after loop")
 	}
 	if !strings.Contains(out, "after loop") {
 		t.Errorf("control never continued past server.close(): %q", out)
+	}
+}
+
+func TestE2EHTTPServerListenOptionsObject(t *testing.T) {
+	// server.listen({ port, host, backlog }, cb) — Node's options-object form
+	// (ADR-00801). host: "127.0.0.1" actually binds loopback, which
+	// server.address().address reflects via getsockname; backlog is accepted.
+	src := `
+import http from 'http'
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.end("unused")
+})
+server.listen({ port: 0, host: "127.0.0.1", backlog: 64 }, () => {
+  const a = server.address()
+  if (a.port > 0) { console.log("addr=" + a.address) }
+  server.close()
+})
+console.log("after loop")
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "addr=127.0.0.1") {
+		t.Errorf("host option did not bind loopback: %q", out)
+	}
+	if !strings.Contains(out, "after loop") {
+		t.Errorf("control never continued: %q", out)
+	}
+}
+
+func TestE2EHTTPServerListenOptionsDefaultHost(t *testing.T) {
+	// An options literal with no host binds INADDR_ANY (0.0.0.0), same as the
+	// positional listen(0) form.
+	src := `
+import http from 'http'
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.end("unused")
+})
+server.listen({ port: 0 }, () => {
+  console.log("addr=" + server.address().address)
+  server.close()
+})
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "addr=0.0.0.0") {
+		t.Errorf("default host was not 0.0.0.0: %q", out)
+	}
+}
+
+func TestE2EHTTPMultipleServers(t *testing.T) {
+	// TDD-00191 Stage 1: two http.createServer instances listen on different
+	// ports in one program, each serving its own handler concurrently.
+	pa, pb := freePort(t), freePort(t)
+	src := `
+import http from 'http'
+const a = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("A:" + req.url)
+})
+const b = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("B:" + req.url)
+})
+a.listen(19301, () => { b.listen(19302, () => { console.log("ready") }) })
+`
+	src = strings.ReplaceAll(src, "19301", fmt.Sprintf("%d", pa))
+	src = strings.ReplaceAll(src, "19302", fmt.Sprintf("%d", pb))
+	binFile := buildBinaryImports(t, src)
+	cmd := exec.Command(binFile)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	waitListening(t, pa)
+	waitListening(t, pb)
+
+	get := func(port int, path string) string {
+		c := &http.Client{Timeout: 3 * time.Second}
+		resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d%s", port, path))
+		if err != nil {
+			t.Fatalf("GET %d%s: %v", port, path, err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return string(body)
+	}
+	// Interleave requests across both servers — each must answer with its own
+	// handler, not the other's.
+	if got := get(pa, "/one"); got != "A:/one" {
+		t.Errorf("server A: got %q, want %q", got, "A:/one")
+	}
+	if got := get(pb, "/two"); got != "B:/two" {
+		t.Errorf("server B: got %q, want %q", got, "B:/two")
+	}
+	if got := get(pa, "/three"); got != "A:/three" {
+		t.Errorf("server A (2nd request): got %q, want %q", got, "A:/three")
+	}
+	if got := get(pb, "/four"); got != "B:/four" {
+		t.Errorf("server B (2nd request): got %q, want %q", got, "B:/four")
+	}
+}
+
+func TestE2EHTTPMultipleServersCloseExits(t *testing.T) {
+	// TDD-00191 Stage 1: closing every server (primary + additional) lets the
+	// event loop exit — an additional server's close() must clear its
+	// extra-listener-table entry, or the loop would spin forever.
+	src := `
+import http from 'http'
+const a = http.createServer((req: IncomingMessage, res: ServerResponse) => { res.end("a") })
+const b = http.createServer((req: IncomingMessage, res: ServerResponse) => { res.end("b") })
+a.listen(0, () => {
+  b.listen(0, () => {
+    console.log("up")
+    a.close()
+    b.close()
+  })
+})
+`
+	binFile := buildBinaryImports(t, src)
+	cmd := exec.Command(binFile)
+	out, _ := cmd.StdoutPipe()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	_ = out
+	select {
+	case <-done:
+		// exited — good.
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("program did not exit after closing both servers (extra-listener close leak)")
+	}
+}
+
+func TestE2EHTTPMultipleServersRelisten(t *testing.T) {
+	// TDD-00191 Stage 2: an additional server can listen() again after close().
+	// Primary server `a` stays up; a request to `/move` closes extra server `b`
+	// and relistens it on a fresh port. The new port must then serve b's handler
+	// (a fresh extra-listener-table entry appended after the -1'd one).
+	pa, pb1, pb2 := freePort(t), freePort(t), freePort(t)
+	src := `
+import http from 'http'
+const b = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("B:" + req.url)
+})
+const a = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  if (req.url === "/move") { b.close(); b.listen(19402, () => {}) }
+  res.writeHead(200); res.end("A:" + req.url)
+})
+a.listen(19400, () => { b.listen(19401, () => { console.log("ready") }) })
+`
+	src = strings.ReplaceAll(src, "19400", fmt.Sprintf("%d", pa))
+	src = strings.ReplaceAll(src, "19401", fmt.Sprintf("%d", pb1))
+	src = strings.ReplaceAll(src, "19402", fmt.Sprintf("%d", pb2))
+	binFile := buildBinaryImports(t, src)
+	cmd := exec.Command(binFile)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	waitListening(t, pa)
+	waitListening(t, pb1)
+
+	get := func(port int, path string) string {
+		c := &http.Client{Timeout: 3 * time.Second}
+		resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d%s", port, path))
+		if err != nil {
+			t.Fatalf("GET %d%s: %v", port, path, err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return string(body)
+	}
+	// b serves on its first port.
+	if got := get(pb1, "/x"); got != "B:/x" {
+		t.Errorf("server B (first port): got %q, want %q", got, "B:/x")
+	}
+	// Trigger the close+relisten via a request to the primary server.
+	if got := get(pa, "/move"); got != "A:/move" {
+		t.Errorf("server A /move: got %q, want %q", got, "A:/move")
+	}
+	// b now serves on the new port.
+	waitListening(t, pb2)
+	if got := get(pb2, "/y"); got != "B:/y" {
+		t.Errorf("server B (relisten port): got %q, want %q", got, "B:/y")
+	}
+}
+
+func TestE2EHTTPMultipleServersUpgradeOnPrimary(t *testing.T) {
+	// TDD-00191 Stage 3: an 'upgrade' handler on the PRIMARY server coexists
+	// with a plain additional server. The upgrade divert runs on the primary
+	// dispatcher; the extra server is plain HTTP/1.1.
+	pa, pb := freePort(t), freePort(t)
+	src := `
+import http from 'http'
+const a = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end('plain http')
+})
+a.on('upgrade', (req, socket, head) => {
+  socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n')
+  socket.on('data', (chunk) => { socket.write('echo:' + chunk.toString()) })
+})
+const b = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end('B:' + req.url)
+})
+a.listen(19501, () => { b.listen(19502, () => { console.log('ready') }) })
+`
+	src = strings.ReplaceAll(src, "19501", fmt.Sprintf("%d", pa))
+	src = strings.ReplaceAll(src, "19502", fmt.Sprintf("%d", pb))
+	binFile := buildBinaryImports(t, src)
+	cmd := exec.Command(binFile)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	waitListening(t, pa)
+	waitListening(t, pb)
+
+	// The additional server serves plain HTTP.
+	c := &http.Client{Timeout: 3 * time.Second}
+	resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/x", pb))
+	if err != nil {
+		t.Fatalf("GET extra: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if got := string(body); got != "B:/x" {
+		t.Errorf("extra server: got %q, want %q", got, "B:/x")
+	}
+
+	// The primary server upgrades and echoes.
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", pa), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial primary: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET /chat HTTP/1.1\r\nHost: x\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n")); err != nil {
+		t.Fatalf("write upgrade req: %v", err)
+	}
+	r := bufio.NewReader(conn)
+	readUpgradeHandshake(t, r)
+	if _, err := conn.Write([]byte("hello")); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 64)
+	n, err := r.Read(buf)
+	if err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if got, want := string(buf[:n]), "echo:hello"; got != want {
+		t.Errorf("primary echo: got %q, want %q", got, want)
+	}
+}
+
+func TestE2EHTTPMultipleServersUpgradeOnExtra(t *testing.T) {
+	// TDD-00191 Stage 3: an 'upgrade' handler on a NON-primary (additional)
+	// server routes to that server's own suffixed handler global — the primary
+	// is a plain server, the additional server does the upgrade echo. Proves the
+	// handle→suffix association and per-server ws/upgrade dispatch.
+	pa, pb := freePort(t), freePort(t)
+	src := `
+import http from 'http'
+const a = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end('A:' + req.url)
+})
+const b = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end('B:' + req.url)
+})
+b.on('upgrade', (req, socket, head) => {
+  socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n')
+  socket.on('data', (chunk) => { socket.write('bECHO:' + chunk.toString()) })
+})
+a.listen(19601, () => { b.listen(19602, () => { console.log('ready') }) })
+`
+	src = strings.ReplaceAll(src, "19601", fmt.Sprintf("%d", pa))
+	src = strings.ReplaceAll(src, "19602", fmt.Sprintf("%d", pb))
+	binFile := buildBinaryImports(t, src)
+	cmd := exec.Command(binFile)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	waitListening(t, pa)
+	waitListening(t, pb)
+
+	// The primary server serves plain HTTP.
+	c := &http.Client{Timeout: 3 * time.Second}
+	resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/x", pa))
+	if err != nil {
+		t.Fatalf("GET primary: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if got := string(body); got != "A:/x" {
+		t.Errorf("primary server: got %q, want %q", got, "A:/x")
+	}
+
+	// The additional server upgrades and echoes.
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", pb), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial additional: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET /chat HTTP/1.1\r\nHost: x\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n")); err != nil {
+		t.Fatalf("write upgrade req: %v", err)
+	}
+	r := bufio.NewReader(conn)
+	readUpgradeHandshake(t, r)
+	if _, err := conn.Write([]byte("hi")); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 64)
+	n, err := r.Read(buf)
+	if err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if got, want := string(buf[:n]), "bECHO:hi"; got != want {
+		t.Errorf("additional-server echo: got %q, want %q", got, want)
+	}
+}
+
+func TestE2EHTTPChunkedKeepAlive(t *testing.T) {
+	// A chunked/streaming (ReadableStream) response is now persistent: it
+	// advertises Connection: keep-alive and the writer re-arms the connection at
+	// stream end, so a second request on the same socket is served (ADR-00802).
+	src := `
+import http from 'klain:http'
+http.listen(8199, (req: HttpRequest) => {
+  let n = 0
+  const body = new ReadableStream<string>({
+    pull: (c) => {
+      n = n + 1
+      if (n > 2) { c.close(); return }
+      c.enqueue("chunk" + n + " ")
+    }
+  })
+  return { status: 200, body: body }
+})
+`
+	port := startHTTPServer(t, src, 8199)
+
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// First request: keep-alive (no Connection header). Second: Connection: close.
+	if _, err := conn.Write([]byte("GET /a HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+		t.Fatalf("write req1: %v", err)
+	}
+	// Read the first full chunked response (ends at the "0\r\n\r\n" terminator).
+	br := bufio.NewReader(conn)
+	conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+	first := readChunkedResponse(t, br)
+	if !strings.Contains(first, "Connection: keep-alive") {
+		t.Fatalf("first streamed response did not advertise keep-alive:\n%q", first)
+	}
+	if !strings.Contains(first, "Transfer-Encoding: chunked") || (!strings.Contains(first, "chunk1 ") || !strings.Contains(first, "chunk2 ")) {
+		t.Fatalf("first response body malformed:\n%q", first)
+	}
+
+	// Same socket, second request — only served if the connection was re-armed.
+	if _, err := conn.Write([]byte("GET /b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")); err != nil {
+		t.Fatalf("write req2: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+	second := readChunkedResponse(t, br)
+	if !strings.Contains(second, "chunk1 ") || !strings.Contains(second, "chunk2 ") {
+		t.Fatalf("second request on the re-armed connection was not served:\n%q", second)
+	}
+	if !strings.Contains(second, "Connection: close") {
+		t.Fatalf("second response should honor the client's Connection: close:\n%q", second)
+	}
+}
+
+// readChunkedResponse reads one HTTP/1.1 chunked response: the header block, then
+// chunk bodies until the zero-length terminator chunk.
+func readChunkedResponse(t *testing.T, br *bufio.Reader) string {
+	t.Helper()
+	var sb strings.Builder
+	// Headers up to the blank line.
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read header: %v", err)
+		}
+		sb.WriteString(line)
+		if line == "\r\n" {
+			break
+		}
+	}
+	// Chunks: "<hexlen>\r\n<data>\r\n", ending at a 0-length chunk.
+	for {
+		sizeLine, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read chunk size: %v", err)
+		}
+		sb.WriteString(sizeLine)
+		var size int
+		fmt.Sscanf(strings.TrimSpace(sizeLine), "%x", &size)
+		body := make([]byte, size+2) // data + trailing CRLF
+		if _, err := io.ReadFull(br, body); err != nil {
+			t.Fatalf("read chunk body: %v", err)
+		}
+		sb.Write(body)
+		if size == 0 {
+			break
+		}
+	}
+	return sb.String()
+}
+
+func TestE2EHTTPExpressionBodiedHandler(t *testing.T) {
+	// An expression-bodied handler arrow whose body is a void-returning res
+	// method — `(req, res) => res.end(body)` — must infer a void return type and
+	// emit `ret void`, not a value-less `ret i64` (invalid IR). Regression for
+	// the ServerResponse-method return-type inference gap (ADR-00801).
+	src := `
+import http from 'http'
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => res.end("hi"))
+server.listen(0, () => {
+  console.log("bound:" + (server.address().port > 0))
+  server.close()
+})
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "bound:true") {
+		t.Errorf("expression-bodied res.end handler did not run: %q", out)
 	}
 }
 
@@ -1692,6 +2122,107 @@ server.listen(8983)
 	}
 }
 
+func TestE2EHTTP2MultiInstanceH2C(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
+	// TDD-00191 Stage 4: two http2.createServer instances (h2c prior-knowledge)
+	// on different ports, each routing to its OWN handler via its per-server h2
+	// bridge vtable (the C nghttp2 driver calls through the connection's vtable).
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not found in PATH")
+	}
+	pa, pb := freePort(t), freePort(t)
+	src := `
+import http2 from 'http2'
+const a = http2.createServer((req, res) => { res.writeHead(200); res.end("A:" + req.path) })
+const b = http2.createServer((req, res) => { res.writeHead(200); res.end("B:" + req.path) })
+a.listen(19901, () => { b.listen(19902, () => { console.log("ready") }) })
+`
+	src = strings.ReplaceAll(src, "19901", fmt.Sprintf("%d", pa))
+	src = strings.ReplaceAll(src, "19902", fmt.Sprintf("%d", pb))
+	binFile := buildBinaryImports(t, src)
+	cmd := exec.Command(binFile)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	waitListening(t, pa)
+	waitListening(t, pb)
+
+	for _, tc := range []struct {
+		port int
+		path string
+		want string
+	}{{pa, "/x", "A:/x|2"}, {pb, "/y", "B:/y|2"}} {
+		out, err := exec.Command(nativeCurl(), "-s", "--http2-prior-knowledge",
+			fmt.Sprintf("http://127.0.0.1:%d%s", tc.port, tc.path), "-w", "|%{http_version}").CombinedOutput()
+		if err != nil {
+			t.Fatalf("curl h2c %d: %v\n%s", tc.port, err, out)
+		}
+		if got := string(out); got != tc.want {
+			t.Errorf("h2c on %d: got %q, want %q", tc.port, got, tc.want)
+		}
+	}
+}
+
+func TestE2EHTTP2MultiInstanceSecure(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
+	// TDD-00191 Stage 4: a plain HTTP primary plus an additional
+	// http2.createSecureServer (h2 over TLS) on a second port. The additional
+	// listener carries its SSL_CTX and its h2 vtable in the extra-listener table;
+	// an ALPN-"h2" accept is driven as an nghttp2 session routed to its own
+	// handler, while the primary stays plain.
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not found in PATH")
+	}
+	certLit, keyLit := genSelfSignedPEM(t)
+	pa, pb := freePort(t), freePort(t)
+	src := fmt.Sprintf(`
+import http from 'http'
+import http2 from 'http2'
+const cert = "%s"
+const key = "%s"
+const plain = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("plain:" + req.url)
+})
+const secure = http2.createSecureServer({ cert: cert, key: key }, (req, res) => {
+  res.writeHead(200); res.end("h2:" + req.path)
+})
+plain.listen(19911, () => { secure.listen(19912, () => { console.log("ready") }) })
+`, certLit, keyLit)
+	src = strings.ReplaceAll(src, "19911", fmt.Sprintf("%d", pa))
+	src = strings.ReplaceAll(src, "19912", fmt.Sprintf("%d", pb))
+	binFile := buildBinaryImports(t, src)
+	cmd := exec.Command(binFile)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	waitListening(t, pa)
+	waitListening(t, pb)
+
+	// Plain HTTP on the primary.
+	c := &http.Client{Timeout: 3 * time.Second}
+	resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/p", pa))
+	if err != nil {
+		t.Fatalf("GET plain: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if got := string(body); got != "plain:/p" {
+		t.Errorf("plain server: got %q, want %q", got, "plain:/p")
+	}
+
+	// h2 over TLS on the additional server (curl --http2 negotiates h2 via ALPN).
+	out, err := exec.Command(nativeCurl(), "-sk", "--http2",
+		fmt.Sprintf("https://127.0.0.1:%d/h", pb), "-w", "|%{http_version}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl h2: %v\n%s", err, out)
+	}
+	if got := string(out); got != "h2:/h|2" {
+		t.Errorf("secure h2 server: got %q, want %q", got, "h2:/h|2")
+	}
+}
+
 func TestE2EHTTP2SecureServer(t *testing.T) {
 	skipIfLoopbackTrafficFiltered(t)
 	// TDD-00111 Stage 3b: http2.createSecureServer — h2 over TLS. The accepted
@@ -1781,6 +2312,119 @@ server.listen(8987)
 	}
 	if got := string(out); got != "https:POST:/echo:payload|1.1" {
 		t.Errorf("https POST: got %q, want %q", got, "https:POST:/echo:payload|1.1")
+	}
+}
+
+func TestE2EHTTPSMultiInstancePlainPrimary(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
+	// TDD-00191 Stage 3: a plain HTTP primary server plus an additional HTTPS
+	// server on a second port. The additional listener carries its own SSL_CTX in
+	// the extra-listener table, so its accepts do their own TLS handshake while
+	// the primary stays plain. Also exercises the pre-scan ordering: the plain
+	// primary triggers ensureHTTPRuntime first, yet the extra-accept path is still
+	// emitted TLS-aware.
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not found in PATH")
+	}
+	certLit, keyLit := genSelfSignedPEM(t)
+	pa, pb := freePort(t), freePort(t)
+	src := fmt.Sprintf(`
+import http from 'http'
+import https from 'https'
+const cert = "%s"
+const key = "%s"
+const plain = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("plain:" + req.url)
+})
+const secure = https.createServer({ cert: cert, key: key }, (req, res) => {
+  res.writeHead(200); res.end("secure:" + req.method + ":" + req.path)
+})
+plain.listen(19801, () => { secure.listen(19802, () => { console.log("ready") }) })
+`, certLit, keyLit)
+	src = strings.ReplaceAll(src, "19801", fmt.Sprintf("%d", pa))
+	src = strings.ReplaceAll(src, "19802", fmt.Sprintf("%d", pb))
+	binFile := buildBinaryImports(t, src)
+	cmd := exec.Command(binFile)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	waitListening(t, pa)
+	waitListening(t, pb)
+
+	// Plain HTTP on the primary.
+	c := &http.Client{Timeout: 3 * time.Second}
+	resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/a", pa))
+	if err != nil {
+		t.Fatalf("GET plain: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if got := string(body); got != "plain:/a" {
+		t.Errorf("plain server: got %q, want %q", got, "plain:/a")
+	}
+
+	// HTTPS on the additional server (curl -k for the self-signed cert).
+	out, err := exec.Command(nativeCurl(), "-sk",
+		fmt.Sprintf("https://127.0.0.1:%d/b", pb)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl https: %v\n%s", err, out)
+	}
+	if got := string(out); got != "secure:GET:/b" {
+		t.Errorf("secure server: got %q, want %q", got, "secure:GET:/b")
+	}
+}
+
+func TestE2EHTTPSMultiInstanceTwoSecure(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
+	// TDD-00191 Stage 3: two HTTPS servers in one program — the primary (via the
+	// @__kml_http_tls_ctx global + reactor TLS branch) and an additional one (via
+	// its own SSL_CTX in the extra-listener table). Each does its own TLS
+	// handshake on its own port.
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not found in PATH")
+	}
+	certLit, keyLit := genSelfSignedPEM(t)
+	pa, pb := freePort(t), freePort(t)
+	src := fmt.Sprintf(`
+import https from 'https'
+const cert = "%s"
+const key = "%s"
+const a = https.createServer({ cert: cert, key: key }, (req, res) => {
+  res.writeHead(200); res.end("A:" + req.path)
+})
+const b = https.createServer({ cert: cert, key: key }, (req, res) => {
+  res.writeHead(200); res.end("B:" + req.path)
+})
+a.listen(19811, () => { b.listen(19812, () => { console.log("ready") }) })
+`, certLit, keyLit)
+	src = strings.ReplaceAll(src, "19811", fmt.Sprintf("%d", pa))
+	src = strings.ReplaceAll(src, "19812", fmt.Sprintf("%d", pb))
+	binFile := buildBinaryImports(t, src)
+	cmd := exec.Command(binFile)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	waitListening(t, pa)
+	waitListening(t, pb)
+
+	for _, tc := range []struct {
+		port int
+		want string
+	}{{pa, "A:/x"}, {pb, "B:/y"}} {
+		path := "/x"
+		if tc.port == pb {
+			path = "/y"
+		}
+		out, err := exec.Command(nativeCurl(), "-sk",
+			fmt.Sprintf("https://127.0.0.1:%d%s", tc.port, path)).CombinedOutput()
+		if err != nil {
+			t.Fatalf("curl https %d: %v\n%s", tc.port, err, out)
+		}
+		if got := string(out); got != tc.want {
+			t.Errorf("server on %d: got %q, want %q", tc.port, got, tc.want)
+		}
 	}
 }
 

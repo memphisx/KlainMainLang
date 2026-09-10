@@ -1467,7 +1467,6 @@ func (e *Emitter) registerCryptoSubtleAliases(prog *ast.Program) {
 	}
 }
 
-
 // dynObjectKeyExpr normalizes a computed-key expression for the map-backed
 // dynamic object: string keys pass through; a numeric key is wrapped in a
 // synthetic String(...) conversion — JS object keys are strings, and a

@@ -606,7 +606,6 @@ func (e *Emitter) emitClassDeclAs(decl *ast.ClassDeclaration, llvmName string, i
 	return nil
 }
 
-
 // explicitGenericSubs builds the type-parameter substitution map from
 // explicit call-site type arguments (`id<string>(x)` — ADR-00473),
 // positionally against decl's parameter list. ok is false when no explicit

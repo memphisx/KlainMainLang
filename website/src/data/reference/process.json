@@ -203,7 +203,7 @@
       "statusRow": "process.platform",
       "signature": "process.platform: string",
       "badge": "exact",
-      "description": "A pure compile-time constant (\"darwin\"/\"linux\"/\"win32\"/…) baked in from the Go compiler's runtime.GOOS — no runtime code, since this compiler doesn't cross-compile.",
+      "description": "A pure compile-time constant (\"darwin\"/\"linux\"/\"win32\"/…) baked in at codegen — no runtime code. Under the --target cross-compile flag it follows the target: codegen reads the target OS/arch through a target abstraction, so an OS-aligned (e.g. Linux→Linux) or macOS→Linux cross build bakes the target's platform, not the build host's.",
       "returns": {
         "type": "string",
         "desc": "The OS platform."

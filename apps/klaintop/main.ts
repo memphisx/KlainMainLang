@@ -24,11 +24,16 @@ import { view } from "./view";
 let prev = sample();
 const state: State = { procs: listProcs("cpu"), cursor: 0, sort: "cpu", confirming: false, tick: 0 };
 
+// The most recently computed CPU fraction, so a resize repaint (SIGWINCH) can
+// redraw without consuming a fresh jiffy sample (which would read ~0%).
+let lastCpu = 0;
+
 // CPU utilisation since the previous sample; updates `prev` as a side effect.
 function cpuFrac(): number {
   const cur = sample();
   const frac = cpuUtilization(prev, cur);
   prev = cur;
+  lastCpu = frac;
   return frac;
 }
 
@@ -51,6 +56,11 @@ if (!process.stdin.isTTY) {
   leave();
 } else {
   process.stdin.setRawMode(true);
+  // Repaint immediately on a terminal resize; the view reads the new
+  // columns/rows each render, so the box refits the window.
+  process.on("SIGWINCH", () => {
+    render(view(state, lastCpu));
+  });
   let running = true;
   while (running) {
     const key: string = readKey(1500); // wake on a key OR after ~1.5s

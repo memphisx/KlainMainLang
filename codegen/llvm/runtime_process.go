@@ -2,7 +2,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 	"sort"
 	"strings"
 )
@@ -16,10 +15,10 @@ import (
 // itself, a long-stable convention. The same class of platform check as
 // errnoAccessor/monotonicClockID.
 func stdinGlobalName() string {
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		return "__stdinp"
 	}
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		return "__kml_win_stdin" // defined by win32shim.c
 	}
 	return "stdin"
@@ -300,11 +299,11 @@ done:
 // errnoAccessor/monotonicClockID/stdinGlobalName.
 
 func nodePlatformName() string {
-	switch runtime.GOOS {
+	switch targetGOOS() {
 	case "windows":
 		return "win32"
 	default:
-		return runtime.GOOS // "darwin", "linux", "freebsd", etc. already match Node's own strings
+		return targetGOOS() // "darwin", "linux", "freebsd", etc. already match Node's own strings
 	}
 }
 
@@ -312,13 +311,13 @@ func nodePlatformName() string {
 // 386 → ia32); arm64/arm/ppc64/s390x already match. This compiler builds for
 // the host arch, so the value is a compile-time constant.
 func nodeArchName() string {
-	switch runtime.GOARCH {
+	switch targetGOARCH() {
 	case "amd64":
 		return "x64"
 	case "386":
 		return "ia32"
 	default:
-		return runtime.GOARCH // "arm64", "arm", "ppc64", "s390x", ... already match Node
+		return targetGOARCH() // "arm64", "arm", "ppc64", "s390x", ... already match Node
 	}
 }
 
@@ -539,7 +538,7 @@ func (e *Emitter) ensureExecPath() {
 	}
 	e.usedExecPath = true
 	e.ensureMalloc()
-	if runtime.GOOS == "darwin" {
+	if targetGOOS() == "darwin" {
 		e.emitGlobal("declare i32 @_NSGetExecutablePath(ptr, ptr)")
 		e.emitGlobal("declare ptr @realpath(ptr, ptr)")
 		e.emitGlobal(`
@@ -683,7 +682,7 @@ ok:
 // Darwin's on macOS. Node rejects a name outside the host's table with
 // ERR_UNKNOWN_SIGNAL, which the compile-time rejection / runtime -1 mirror.
 var signalNumbers = func() map[string]int {
-	switch runtime.GOOS {
+	switch targetGOOS() {
 	case "windows":
 		return map[string]int{"SIGHUP": 1, "SIGINT": 2, "SIGILL": 4, "SIGABRT": 6, "SIGFPE": 8, "SIGKILL": 9, "SIGSEGV": 11, "SIGTERM": 15, "SIGBREAK": 21, "SIGWINCH": 28}
 	case "darwin":
@@ -786,7 +785,7 @@ func (e *Emitter) ensureSignalRegisteredSigbreak() {
 	}
 	e.usedSignalSigbreak = true
 	e.ensureSignalHandlerRuntime()
-	if runtime.GOOS == "windows" {
+	if targetGOOS() == "windows" {
 		e.emitInstr("call ptr @signal(i32 21, ptr @__kml_sig_handler)")
 	}
 }

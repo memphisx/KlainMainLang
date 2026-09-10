@@ -90,7 +90,6 @@
             "notes": [
               "**Single-word NaN-boxed value** ([TDD-00156](../tdd/TDD-00156.md)/[ADR-00628](../adr/ADR-00628.md)): numbers are offset-encoded doubles (int/float merged — >2^53 rounds exactly as JS), undefined/null/true/false small immediates, heap references low-3-bit-kind-tagged raw pointers (Boehm-safe interior pointers). The logical tag model of [TDD-00062](../tdd/TDD-00062.md) decodes from it unchanged",
               "Under `-compat=js`: real operator semantics — number fast path, string-concat `+`, ToNumber coercion of numeric strings/booleans/null (`\"6\"*7===42`, `null+1===1`, `undefined+1→NaN`), string/numeric relational, ToBoolean truthiness (`if (x)`, `!x` — both modes), compound assignment incl. dynamic members, and **implicit-`any`**: an unannotated parameter no call site can type (or with disagreeing sites — genuinely polymorphic) boxes and dispatches; an untyped uninitialized `let` is a dynamic `undefined`",
-              "Supports declare/assign/reassign/print/`typeof`/`===` + bare `any` param/return on every function shape",
               "Objects and arrays box by reference — `===` is reference identity, `typeof` is `\"object\"` ([ADR-00008](../adr/ADR-00008.md), [ADR-00176](../adr/ADR-00176.md), [ADR-00177](../adr/ADR-00177.md))",
               "An `any`-boxed array keeps its `(ptr, len)` pair via a heap header — it unboxes back into a real array; `===` identity and `typeof` are unchanged, and the element type is still not carried (toString stays `[object Array]`) ([ADR-00478](../adr/ADR-00478.md))",
               "An object literal bound to a bare `any` becomes a **D1 dynamic object** ([TDD-00155](../tdd/TDD-00155.md) Stage 1, [ADR-00621](../adr/ADR-00621.md)): a real runtime property bag with member/bracket get/set (runtime-computed keys included), dynamic add, `delete`, `in`, `Object.keys`, `for...in` (insertion order), shallow spread merge, nesting, reference `===`, and Node-matching TypeErrors (`Cannot read properties of null (reading 'x')`) on null/undefined access",
@@ -143,8 +142,7 @@
               "`BigInt.asIntN(bits, x)` / `BigInt.asUintN(bits, x)` clamp to the low `bits` bits (two's-complement signed / non-negative), implemented in both bigint backends ([ADR-00584](../adr/ADR-00584.md))",
               "`Number(bigint)` converts to the nearest `double` (Infinity when out of range), matching JS ([ADR-00586](../adr/ADR-00586.md))",
               "Mixing a bigint and a number in **arithmetic** is a clean compile error (matches JS's `TypeError`); comparing a bigint with a **float** is a `-compat`-governed behavior ([TDD-00075](../tdd/TDD-00075.md)/[ADR-00217](../adr/ADR-00217.md)): default `strict` rejects it (a likely bug), and `-compat=js` does JS's exact real-number comparison (exact even past 2^53) — a design choice, not a caveat",
-              "`>>>`, unary `+`, and `JSON.stringify` on a bigint are clean compile errors (all TypeErrors in JS)",
-              "libbf (MIT) backend deferred to a follow-on stage"
+              "`>>>`, unary `+`, and `JSON.stringify` on a bigint are clean compile errors (all TypeErrors in JS)"
             ]
           }
         ]

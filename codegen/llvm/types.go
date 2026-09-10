@@ -566,7 +566,7 @@ type Type struct {
 	// planTupleByValReturns — never on a variable's or field's type — and
 	// cleared on the Value a call site hands downstream (the aggregate is
 	// spilled back to a pointer there unless destructured directly).
-	TupleByVal bool
+	TupleByVal  bool
 	IsNetSocket bool
 	// IsWebSocketServer marks a klain:ws `new WebSocketServer({server})` handle
 	// (TDD-00158 Stage 2). The http server is a process-singleton, so the

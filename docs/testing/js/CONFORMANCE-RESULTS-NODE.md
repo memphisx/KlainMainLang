@@ -68,7 +68,7 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | Count | Reason |
 |---|---|
 | 206 | COMPILE_ERROR: slice is only supported on strings |
-| 204 | COMPILE_ERROR: a number has no method '%s' |
+| 205 | COMPILE_ERROR: a number has no method '%s' |
 | 126 | COMPILE_ERROR: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method |
 | 124 | COMPILE_ERROR: undefined variable '%s' |
 | 97 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |

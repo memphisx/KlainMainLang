@@ -22,6 +22,15 @@ type CSource struct {
 	Ext string
 }
 
+// NeedsMoc reports whether this source must have Qt's moc run over it (producing
+// the webview_sailfish.moc it #includes) before clang compiles it — true only for
+// the Sailfish webview shim (TDD-00146 Stage 3). Every writer of CSources
+// (main.go's two loops, the test build path) consults this so the moc pass can
+// never be forgotten in one place. Keyed off the well-known member name + the C++
+// extension so it stays a pure function of the CSource, without widening the
+// struct's many positional literals.
+func (c CSource) NeedsMoc() bool { return c.Name == "webview_sailfish" }
+
 // SrcExt returns the source-file extension for this member (without the dot),
 // defaulting to "c" when unset — the single point every writer (main.go, the
 // conformance runner, the test build path) consults so a .cc member can never
@@ -84,9 +93,9 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		// The dlopen island loader (TDD-00056). Linux resolves dlopen from
 		// libdl (-ldl); macOS ships it in libSystem, so no extra lib there.
 		var libs []string
-		if runtime.GOOS != "darwin" {
+		if targetGOOS() != "darwin" {
 			libs = []string{"-ldl"}
-			if runtime.GOOS == "windows" {
+			if targetGOOS() == "windows" {
 				libs = nil // LoadLibrary lives in kernel32; there is no libdl
 			}
 		}
@@ -108,7 +117,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"dtoa", DtoaSource(), nil, nil, ""})
 	}
 	if e.UsesWebview() {
-		cflags, libs, err := LocateWebview()
+		cflags, libs, err := LocateWebview(e.WebviewBackend())
 		if err != nil {
 			return nil, err
 		}
@@ -124,8 +133,14 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 			out = append(out, CSource{"webview", "// webview linked as a prebuilt g++ object (see webview_win32.go).\n", nil, winLibs, "cc"})
 		} else {
 			// Default / POSIX: the amalgamation compiles on the shared clang line and
-			// links the dynamic C++ runtime.
-			out = append(out, CSource{"webview", WebviewSource(), cflags, libs, "cc"})
+			// links the dynamic C++ runtime. The Sailfish backend is a Qt source
+			// under a distinct member name so CSource.NeedsMoc() flags the moc pass
+			// the shim needs before clang (TDD-00146 Stage 3).
+			name := "webview"
+			if e.WebviewBackend() == "sailfish" {
+				name = "webview_sailfish"
+			}
+			out = append(out, CSource{name, WebviewSource(e.WebviewBackend()), cflags, libs, "cc"})
 		}
 	}
 	if e.UsesHeapStats() {
