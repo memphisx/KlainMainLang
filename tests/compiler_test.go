@@ -1658,6 +1658,19 @@ func skipSanitizersOnWindows(t *testing.T) {
 	}
 }
 
+// skipInlineFsPoolOnWindows: the libuv-style blocking-work thread pool
+// (klainpool.c, TDD-00185/00186) is POSIX-first; on Windows fs ops keep the
+// inline (blocking) path until the event-loop reactor lands (TDD-00182/00183,
+// BACKLOG §2). Tests that assert the pool's non-blocking loop ordering — a
+// concurrently-due timer firing before an awaited read settles — cannot hold on
+// the inline path and are skipped there; the functional pooled tests still run.
+func skipInlineFsPoolOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fs runs on the inline blocking path on Windows (no thread pool yet, TDD-00182/00183); loop-ordering assertion is POSIX-only")
+	}
+}
+
 // skipClusterDistributionOnWindows: on Windows a cluster's workers are
 // re-spawned processes sharing one inherited listening socket, and the
 // kernel hands connections to whichever worker is in accept() — in practice

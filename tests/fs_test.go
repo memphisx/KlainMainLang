@@ -938,6 +938,23 @@ try { fs.openSync("%s/absent/f", 'r') } catch (e) { console.log("caught:", e.mes
 	assertOutputImports(t, src, "11\n11\ntrue\n5\n104\n5\n119\ncaught: true")
 }
 
+// fstatSync on a non-file fd — here stdin, a pipe (the test harness feeds it
+// through an OS pipe) — reports the handle kind without error. On Windows this
+// exercises TDD-00182 Stage 1's kind dispatch: fd 0's handle answers
+// GetFileInformationByHandle with a failure, which used to surface as an error;
+// fstat now synthesizes the mode from the handle kind (FILE_TYPE_PIPE →
+// S_IFIFO), matching POSIX fstat on a pipe.
+func TestE2EFsFstatPipeFd(t *testing.T) {
+	src := `
+import * as fs from 'fs'
+const s = fs.fstatSync(0)
+console.log(s.isFIFO())
+console.log(s.isFile())
+`
+	got := runImportsStdin(t, src, "ignored")
+	compareLines(t, got, "true\nfalse")
+}
+
 // fs.utimesSync(path, atime, mtime) sets the access/modification times from
 // a number (seconds, as Node) or a Date (its epoch). On Windows it is a
 // SetFileTime shim; on POSIX, utimes(2). statSync reads them back in ms.

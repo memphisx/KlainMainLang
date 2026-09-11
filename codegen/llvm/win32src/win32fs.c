@@ -83,9 +83,10 @@ enum {
 #undef S_IFLNK
 #undef S_IFCHR
 #undef S_IFIFO
+#undef S_IFSOCK
 enum {
 	S_IFMT = 0170000, S_IFDIR = 0040000, S_IFREG = 0100000, S_IFLNK = 0120000,
-	S_IFCHR = 0020000, S_IFIFO = 0010000,
+	S_IFCHR = 0020000, S_IFIFO = 0010000, S_IFSOCK = 0140000,
 };
 #define WIN_O_RDONLY 0x0000
 #define WIN_O_WRONLY 0x0001
@@ -339,10 +340,33 @@ static int stat_path(const char *path, kml_stat *st, int follow) {
 int kml_win_stat(const char *path, kml_stat *st) __asm__("stat");
 int kml_win_stat(const char *path, kml_stat *st) { return stat_path(path, st, 1); }
 int lstat(const char *path, kml_stat *st) { return stat_path(path, st, 0); }
+// From win32io.c's owned fd table (TDD-00182 Stage 1). fstat dispatches on the
+// slot's kind so it works on the fds stat_handle can't: a socket fd (whose OS
+// handle is not a CRT fd — _get_osfhandle would return INVALID and yield EBADF)
+// and a pipe/console handle (on which GetFileInformationByHandle fails, which
+// used to surface as an error). libuv's uv_fs_fstat synthesizes those the same
+// way — a mode from the handle kind, remaining fields zeroed.
+int kfd_kind_of(int fd);
+HANDLE kfd_handle(int fd);
+enum { KFD_PLAIN = 0, KFD_SOCKET = 1, KFD_PIPE = 2, KFD_FOREIGN = 3 };
+
+static int fstat_synth(kml_stat *st, uint32_t mode) {
+	memset(st, 0, sizeof *st);
+	st->st_mode = mode;
+	st->st_nlink = 1;
+	st->st_blksize = 4096;
+	return 0;
+}
+
 int kml_win_fstat(int fd, kml_stat *st) __asm__("fstat");
 int kml_win_fstat(int fd, kml_stat *st) {
-	HANDLE h = (HANDLE)_get_osfhandle(fd);
+	int kind = kfd_kind_of(fd);
+	if (kind == KFD_SOCKET || kind == KFD_FOREIGN) return fstat_synth(st, S_IFSOCK | 0666);
+	HANDLE h = kfd_handle(fd);
 	if (h == INVALID_HANDLE_VALUE) { errno = L_EBADF; return -1; }
+	DWORD type = GetFileType(h);
+	if (type == FILE_TYPE_CHAR) return fstat_synth(st, S_IFCHR | 0666);
+	if (type == FILE_TYPE_PIPE) return fstat_synth(st, S_IFIFO | 0666);
 	return stat_handle(h, st, 0);
 }
 

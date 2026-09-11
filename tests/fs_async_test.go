@@ -109,6 +109,7 @@ main()
 // the reactor. A timer set before the await fires (its callback runs), and the
 // awaited read still resolves afterward.
 func TestE2EFsPromisesPooledReadDoesNotFreezeLoop(t *testing.T) {
+	skipInlineFsPoolOnWindows(t)
 	dir := tempDir(t)
 	p := filepath.Join(dir, "big.txt")
 	src := fmt.Sprintf(`
@@ -298,6 +299,7 @@ fs.readdir(%q, (err, entries: string[]) => {
 // loop — an inline read would run to completion first and settle its callback
 // microtask ahead of the timer.
 func TestE2EFsAsyncCallbackPooledNonBlocking(t *testing.T) {
+	skipInlineFsPoolOnWindows(t)
 	dir := tempDir(t)
 	path := filepath.Join(dir, "nb.dat")
 	src := fmt.Sprintf(`

@@ -86,6 +86,10 @@ func (e *Emitter) ensureChildProcRuntime() {
 		// win32proc.c exposes CreateProcessW's failure as a Linux-ABI errno
 		// (0 on success) so the spawn 'error' event fires (ADR-00754).
 		e.emitGlobal("declare i32 @__kml_win_spawn_failed(i32 noundef)")
+		// The child-stdin pipe pair (TDD-00183 Stage 1): the child's read end
+		// must be a synchronous handle while the parent's write end is the
+		// overlapped, write-queued server — the reverse of pipe()'s layout.
+		e.emitGlobal("declare i32 @__kml_win_pipe_pw(ptr noundef)")
 		// Full 32-bit exit code; the POSIX wait word carries only 8 (ADR-00759).
 		e.emitGlobal("declare i32 @__kml_win_exit_code(i32 noundef)")
 	} else {
@@ -748,7 +752,7 @@ setnull:
   %%inpipe = alloca [2 x i32], align 4
   %%outpipe = alloca [2 x i32], align 4
   %%errpipe = alloca [2 x i32], align 4
-  call i32 @pipe(ptr %%inpipe)
+  ` + cpStdinPipeCallIR() + `
   call i32 @pipe(ptr %%outpipe)
   call i32 @pipe(ptr %%errpipe)
   %%inr_p = getelementptr [2 x i32], ptr %%inpipe, i32 0, i32 0

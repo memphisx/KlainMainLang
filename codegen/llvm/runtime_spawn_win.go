@@ -201,6 +201,19 @@ func (e *Emitter) cpSpawnFailDetectIR(cp string) string {
 `
 }
 
+// cpStdinPipeCallIR creates the child-stdin pipe. On Windows the direction
+// matters (TDD-00183 Stage 1): the child's read end must be a synchronous
+// handle (an arbitrary child's CRT reads it with no OVERLAPPED), while the
+// parent's write end is the overlapped, write-queued server — the reverse of
+// pipe()'s reader-side-server layout, so a dedicated pair creator is used.
+// POSIX pipes have no such asymmetry.
+func cpStdinPipeCallIR() string {
+	if targetGOOS() == "windows" {
+		return "call i32 @__kml_win_pipe_pw(ptr %%inpipe)"
+	}
+	return "call i32 @pipe(ptr %%inpipe)"
+}
+
 // execSyncForkIR is the same region of __kml_exec_file_sync (one pipe, the
 // child's stdout).
 func (e *Emitter) execSyncForkIR() string {

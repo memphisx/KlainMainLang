@@ -26,10 +26,11 @@ enum { L_EACCES = 13, L_ENOENT = 2, L_EINVAL = 22, L_ENOSYS = 38, L_ECHILD = 10,
 enum { KFD_PLAIN = 0, KFD_SOCKET = 1 };
 #define KFD_MAX 1024
 
-// From win32io.c.
-extern unsigned char kfd_kind[KFD_MAX];
-extern unsigned char kfd_nonblock[KFD_MAX];
-extern unsigned char kfd_inherited[KFD_MAX];
+// From win32io.c. The fd descriptor table (kind/inherited/…) is owned there
+// and reached through accessors, so this object never binds to its layout
+// (TDD-00182 Stage 1).
+int kfd_kind_of(int fd);
+void kfd_set_inherited(int fd);
 int kfd_register(HANDLE h, int kind);
 int kfd_adopt_socket(HANDLE s, int fd);
 HANDLE kfd_handle(int fd);
@@ -306,7 +307,7 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 	if (pr) pr->h = pi.hProcess; else CloseHandle(pi.hProcess);
 	// The child now shares the socket object behind inherit_fd; the parent's
 	// close() of that fd must release only its own handle (win32io.c).
-	if (inherit_fd >= 0 && inherit_fd < KFD_MAX && kfd_kind[inherit_fd] == KFD_SOCKET) kfd_inherited[inherit_fd] = 1;
+	if (inherit_fd >= 0 && inherit_fd < KFD_MAX && kfd_kind_of(inherit_fd) == KFD_SOCKET) kfd_set_inherited(inherit_fd);
 	return (int)pi.dwProcessId;
 }
 
@@ -487,11 +488,16 @@ static DWORD kml_sig_thread; // the thread that installed the handlers: the main
 // flag would land in the wrong TLS; so the event is only queued here and
 // delivered — the handler actually called — on the installing thread the
 // next time it waits (__kml_win_sig_deliver from select()/nanosleep()).
+// The reactor's wake packet (win32io.c): a blocked GetQueuedCompletionStatusEx
+// wait ends immediately instead of noticing the raised flag on its next slice.
+void __kml_win_loop_wake(void);
+
 static BOOL WINAPI kml_ctrl_handler(DWORD ev) {
 	int sig = ev == CTRL_C_EVENT ? 2 : ev == CTRL_BREAK_EVENT ? 21 : (ev == CTRL_CLOSE_EVENT || ev == CTRL_LOGOFF_EVENT || ev == CTRL_SHUTDOWN_EVENT) ? 1 : 0;
 	if (!sig || !kml_sig_handlers[sig]) return FALSE;
 	InterlockedExchange(&kml_sig_queued[sig], 1);
 	InterlockedExchange(&__kml_win_sig_wake, 1);
+	__kml_win_loop_wake();
 	if (sig == 1) Sleep(3000); // give the program's SIGHUP listener its chance before the system ends the process
 	return TRUE;
 }
@@ -534,6 +540,7 @@ static DWORD WINAPI kml_winch_watcher(LPVOID arg) {
 			if (kml_sig_handlers[28]) {
 				InterlockedExchange(&kml_sig_queued[28], 1);
 				InterlockedExchange(&__kml_win_sig_wake, 1);
+				__kml_win_loop_wake();
 			}
 		}
 	}

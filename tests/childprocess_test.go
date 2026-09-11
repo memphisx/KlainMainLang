@@ -75,6 +75,30 @@ cat.stdin.end()
 `, "piped input")
 }
 
+// Large bidirectional child stdio must not deadlock: the parent writes far
+// more than a pipe buffer to the child's stdin while the child echoes an
+// equally large stream back on stdout. On the pre-reactor Windows path
+// (TDD-00180 §1) child stdio were synchronous 4 KB anonymous pipes and the
+// parent's `write` blocked once the child's unread stdout filled its buffer —
+// a classic pipe deadlock. The IOCP reactor (TDD-00183 Stage 1) makes the
+// parent's stdin write end an overlapped, write-queued pipe (writes are
+// accepted and drained asynchronously) and the read ends non-blocking, so the
+// round trip completes.
+func TestE2EChildProcessLargeBidirectionalStdio(t *testing.T) {
+	// 64 KiB of 'x' — well past any single pipe buffer in both directions.
+	assertOutputImports(t, `
+import { spawn } from 'child_process'
+const dec = new TextDecoder()
+const big = "x".repeat(65536)
+const cat = spawn("cat", [])
+let n = 0
+cat.stdout.on('data', (c: Uint8Array) => { n = n + dec.decode(c).length })
+cat.on('close', (code: number) => { console.log("echoed " + n) })
+cat.stdin.write(big)
+cat.stdin.end()
+`, "echoed 65536")
+}
+
 func TestE2EChildProcessSpawnExitCode(t *testing.T) {
 	assertOutputImports(t, `
 import { spawn } from 'child_process'

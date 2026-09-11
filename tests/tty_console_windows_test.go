@@ -73,6 +73,38 @@ console.log("alen=" + a.length + " b=" + b)
 	}
 }
 
+// process.stdin as a flowing Readable over a REAL console (not a pipe): the
+// IOCP reactor's console reader thread (TDD-00183 Stage 1) does ReadConsoleW
+// in cooked mode and decodes UTF-16→UTF-8, so a typed line — including its
+// non-ASCII characters — is delivered to the 'data' listener intact, and the
+// event loop is never blocked waiting for it. The piped E2E stdin tests can't
+// reach this path (a pipe fd is KFD_PIPE, never KFD_CONSOLE); only a
+// pseudo-console exercises the console reader. Fixes TDD-00180 §2 (non-ASCII
+// console input via the CRT code page) in the same move.
+func TestE2EStdinConsoleReaderUTF8(t *testing.T) {
+	bin := buildBinary(t, `
+process.stdin.on('data', (chunk: string) => {
+  const s = chunk.trim()
+  if (s.length > 0) console.log("got[" + s + "]")
+})
+process.stdin.on('end', () => { console.log("end") })
+`)
+	res := runInConPTY(t, bin, 80, 24, 20*time.Second, func(write func(string)) {
+		time.Sleep(700 * time.Millisecond)
+		write("café\r") // "café" + Enter — the é must survive as one char
+		time.Sleep(300 * time.Millisecond)
+		write("\x1a\r") // Ctrl+Z at line start = console EOF, so the loop ends
+	})
+	// The é must survive as UTF-8 (cooked ReadConsoleW → UTF-16 → UTF-8), and
+	// EOF must arrive so the flowing stream ends and the program exits.
+	if !strings.Contains(res.Output, "got[café]") {
+		t.Fatalf("console stdin did not deliver a UTF-8 line intact; output:\n%q", res.Output)
+	}
+	if !strings.Contains(res.Output, "end") {
+		t.Fatalf("console stdin EOF (Ctrl+Z) did not end the stream; output:\n%q", res.Output)
+	}
+}
+
 // A klain:tui program at a console: the frame is laid out to the console's
 // width, painted on the alternate screen with VT processing enabled, and the
 // update loop reacts to keys — an arrow moves the selection, 'q' quits and

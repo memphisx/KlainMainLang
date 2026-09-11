@@ -43,13 +43,20 @@ The exhaustive list of every unfinished TDD is the generated table in
 
 ## 2. Windows port
 
-Built from Mac/Linux (Docker + CI), never the Windows box.
+MacOS/Ubuntu are the main dev machines; the aim is to minimize return trips to the Windows
+laptop. Cross-platform work is driven from Mac/Linux (Docker + CI), but anything
+that genuinely needs a native Windows box to complete or verify should be
+finished while on it — don't defer such work into another comeback.
 
-- **Structural (the real debt):** the event-loop reactor / owned-handle table
-  (TDD-00182 → TDD-00183) — unblocks blocking stdin/pipe reads, the ~10 ms idle
-  poll-spin, the 384-socket `select()` cap, `dup2` socket aliasing, synchronous
-  `CreatePipe` child stdio, and is where the fs thread pool folds in. Plus
-  `cluster` round-robin (TDD-00177/00105, 3 skipped tests).
+- **Structural (the real debt):** the IOCP event-loop reactor (TDD-00183),
+  built on the owned handle table (TDD-00182 Stage 1). **Stage 1 shipped**
+  (ADR-00865): completion port + overlapped/buffered pipes + console reader —
+  stdin/child-pipe reads no longer block, child stdio no longer deadlocks, the
+  idle poll-spin is gone for pipe/console programs. **Left:** Stage 2 moves
+  sockets to overlapped `WSARecv`/`AcceptEx` (kills the last poll slice, the
+  384-socket `select()` cap, `dup2` socket aliasing); Stage 3 refcounted
+  descriptions; Stage 4 hi-res timers; the fs thread pool folds onto the port.
+  Plus `cluster` round-robin (TDD-00177/00105, 3 skipped tests).
 - **Deferred edges (low value / untestable from a dev box):** broken-pipe write
   codes + the TLS-BIO error on long-lived pub/sub, named pipes for `net`,
   non-ASCII console *input*, `readlink` UNC / `chdir` drive vars (all TDD-00180).

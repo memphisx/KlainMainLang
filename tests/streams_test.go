@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1454,7 +1455,7 @@ http.listen(18662, async (req: HttpRequest) => {
 // req.pipe(writable) — the request body pipes into a Node Writable (here a file
 // write stream), and the handler awaits the pipe's 'finish' before responding.
 func TestE2EReqPipeToWriteStream(t *testing.T) {
-	out := "/tmp/klain_reqpipe_test_out.bin"
+	out := filepath.ToSlash(filepath.Join(tempDir(t), "klain_reqpipe_test_out.bin"))
 	src := fmt.Sprintf(`
 import http from 'klain:http';
 import fs from 'fs';

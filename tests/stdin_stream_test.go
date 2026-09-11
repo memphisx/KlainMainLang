@@ -1,9 +1,12 @@
 package tests
 
 import (
+	"bufio"
+	"io"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- Streaming process.stdin (ADR-00339) ---
@@ -68,6 +71,66 @@ process.stdin.on('end', () => { console.log(bytes) })
 `, strings.Repeat("x", 100000))
 	if got != "100000" {
 		t.Fatalf("got: %q, want 100000", got)
+	}
+}
+
+// A slow producer on stdin must not block the event loop: a setInterval keeps
+// firing while the program waits for the next chunk. On the pre-reactor
+// Windows path (TDD-00180 §1) the loop fell into a blocking CRT `_read` and
+// the timer starved until the next line arrived; the IOCP reactor
+// (TDD-00183 Stage 1) makes stdin non-blocking and blocks the loop only in
+// the completion-port wait, so ticks interleave with the chunks. Driven from
+// Go with real delays between writes — a strings.NewReader would present all
+// input at once and never exercise the wait.
+func TestE2EStdinDoesNotBlockLoop(t *testing.T) {
+	bin := buildBinary(t, `
+let ticks = 0
+const iv = setInterval(() => { ticks = ticks + 1 }, 15)
+process.stdin.on('data', (c: string) => {
+  const s = c.trim()
+  if (s.length > 0) console.log("chunk " + s + " ticks>0:" + (ticks > 0))
+})
+process.stdin.on('end', () => { clearInterval(iv); console.log("end ticks>0:" + (ticks > 0)) })
+`)
+	cmd := exec.Command(bin)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	go func() {
+		for _, s := range []string{"one", "two", "three"} {
+			time.Sleep(80 * time.Millisecond) // longer than the 15ms tick
+			io.WriteString(stdin, s+"\n")
+		}
+		stdin.Close()
+	}()
+	var lines []string
+	sc := bufio.NewScanner(stdout)
+	for sc.Scan() {
+		lines = append(lines, sc.Text())
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	got := strings.Join(lines, "\n")
+	// Every chunk must arrive, each having seen the timer tick at least once
+	// (proof the loop kept running while stdin was quiet), and 'end' too.
+	for _, want := range []string{
+		"chunk one ticks>0:true",
+		"chunk two ticks>0:true",
+		"chunk three ticks>0:true",
+		"end ticks>0:true",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in output:\n%s", want, got)
+		}
 	}
 }
 
