@@ -231,8 +231,11 @@ func (e *Emitter) emitURLSearchParamsCall(objExpr ast.Expression, method string,
 		if err != nil {
 			return Value{}, true, err
 		}
+		out := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca {ptr, i64}, align 8", out))
+		e.emitInstr(fmt.Sprintf("call void @__kml_usp_get_all(ptr %s, ptr %s, ptr %s)", out, handle, k))
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_usp_get_all(ptr %s, ptr %s)", r, handle, k))
+		e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", r, out))
 		return Value{Ref: r, Ty: ArrayOf(TypePtr)}, true, nil
 	case "has":
 		// WHATWG has(name[, value]) — the optional value narrows the match.
@@ -305,8 +308,13 @@ func (e *Emitter) emitURLSearchParamsCall(objExpr ast.Expression, method string,
 // uspArray calls a {ptr,i64}-returning __kml_usp_* accessor and wraps it as the
 // given array type.
 func (e *Emitter) uspArray(handle, cfunc string, ty Type) Value {
+	// The C writes the {ptr,i64} result through an out-parameter (ABI-safe on
+	// Windows x64; see ensureURLSearchParams' declares) — alloca, call, load.
+	out := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca {ptr, i64}, align 8", out))
+	e.emitInstr(fmt.Sprintf("call void @%s(ptr %s, ptr %s)", cfunc, out, handle))
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @%s(ptr %s)", r, cfunc, handle))
+	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", r, out))
 	return Value{Ref: r, Ty: ty}
 }
 

@@ -1427,3 +1427,17 @@ async function main2() {
 main2();
 `, "2 1,2\n3 3,4,5")
 }
+
+// A mismatched generator `.next(x)` value (its type not the generator's yield
+// element type) is a clean COMPILE_ERROR, not invalid IR — the Test262
+// `yield-spread-arr-single` family (`yield [...yield]` driven by
+// `iter.next(false)`) previously emitted `store {ptr, i64} 0` into the
+// array-typed sent-value slot (ADR-00892). Backstopped by the emitter's
+// scalar-const-into-aggregate store guard.
+func TestE2EGeneratorMismatchedNextValueRejected(t *testing.T) {
+	mustCompileError(t, `
+const gen = function* () { yield [...yield]; };
+const iter = gen();
+iter.next(false);
+`, "aggregate")
+}

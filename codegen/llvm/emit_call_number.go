@@ -214,6 +214,12 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 	if err != nil {
 		return Value{}, err
 	}
+	// parseInt ToStrings its input (`parseInt(true)` parses "true" → NaN); a
+	// non-string arg otherwise left a non-ptr word where strtoll wants a `ptr`
+	// (invalid IR). A string passes through unchanged, then null-safed below.
+	if strVal, err = e.emitArgToString(strVal); err != nil {
+		return Value{}, err
+	}
 	strVal = e.nullSafeParseInput(strVal)
 	radixRef := ""
 	autoRadixReg := "" // non-empty only in the omitted-radix (auto-detect) path
@@ -283,6 +289,10 @@ func (e *Emitter) emitParseFloat(args []ast.Expression, pos ast.Pos) (Value, err
 	e.ensureStrtodParseFloat()
 	strVal, err := e.emitExpr(args[0])
 	if err != nil {
+		return Value{}, err
+	}
+	// parseFloat ToStrings its input, like parseInt (see there).
+	if strVal, err = e.emitArgToString(strVal); err != nil {
 		return Value{}, err
 	}
 	strVal = e.nullSafeParseInput(strVal)

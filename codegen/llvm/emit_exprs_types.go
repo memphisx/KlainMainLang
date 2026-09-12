@@ -31,6 +31,24 @@ func (e *Emitter) emitTemplateLiteral(tl *ast.TemplateLiteral) (Value, error) {
 	return acc, nil
 }
 
+// emitArgToString normalizes a builtin argument that JS ToStrings — a RegExp
+// subject, parseInt/parseFloat input, padStart/padEnd fill, indexOf search — to
+// a plain null-terminated string ptr: an already-string value coerces
+// unchanged; undefined / a value-less `void` result becomes "undefined";
+// anything else (number, boolean, object) runs through ToString. Faithful to JS
+// (`parseInt(true)` parses "true"→NaN; `"abc".padEnd(10, false)` fills with
+// "false"; `s.indexOf(123)` searches for "123"). Without it a non-string arg
+// left a non-`ptr` word where a `ptr` is required — invalid IR.
+func (e *Emitter) emitArgToString(v Value) (Value, error) {
+	if isStringTy(v.Ty) {
+		return e.coerce(v, TypePtr), nil
+	}
+	if v.Ty.IsUndefined || v.Ty.IR == "void" {
+		return Value{Ref: e.internString("undefined"), Ty: TypePtr}, nil
+	}
+	return e.emitValueToString(v)
+}
+
 // emitValueToString converts any value to a null-terminated string ptr.
 // Strings pass through; numbers and bools are formatted via sprintf into a 32-byte scratch buffer.
 func (e *Emitter) emitValueToString(v Value) (Value, error) {
@@ -3314,6 +3332,14 @@ func isPlainStringTy(ty Type) bool {
 func (e *Emitter) toBool(v Value) Value {
 	if v.Ty.IR == "i1" {
 		return v
+	}
+	// A caught value (the unpacked catch-value record, TDD-00202) is a { i8, i64 }
+	// aggregate; its truthiness is that of the underlying value — reuse the
+	// dynamic ToBoolean by widening the record to a NaN-boxed `any` first, rather
+	// than emitting `icmp ne { i8, i64 }, 0` on the aggregate (invalid IR). Fixes
+	// `Boolean(e)` / `if (e)` in a catch block.
+	if v.Ty.IsCaught {
+		return e.toBool(e.emitCaughtToAny(v))
 	}
 	// A void/undefined/null value is falsy (JS ToBoolean(undefined)===false,
 	// ToBoolean(null)===false). This reaches here from a void-returning

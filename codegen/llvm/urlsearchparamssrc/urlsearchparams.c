@@ -122,43 +122,43 @@ char *__kml_usp_val_at(kml_usp *u, int64_t i) {
     return u->items[i].val;
 }
 
-kml_arr __kml_usp_get_all(kml_usp *u, char *k) {
-    kml_arr r; r.len = 0;
-    int64_t n = 0;
+// getAll/keys/values/entries write their `{ptr,i64}` result through an
+// out-parameter rather than returning the aggregate by value. A by-value return
+// of a 16-byte struct is ABI-divergent across x86-64 targets — System V returns
+// it in two registers (matching the IR `{ptr,i64}` return), but the Windows x64
+// ABI returns it via a hidden sret pointer, so an IR caller expecting the
+// register form crashed (0xc0000005) against clang's Windows lowering of the C
+// definition. An explicit out-parameter has one ABI everywhere.
+void __kml_usp_get_all(kml_arr *out, kml_usp *u, char *k) {
+    int64_t got = 0, n = 0;
     for (int64_t i = 0; i < u->len; i++) if (key_eq(u->items[i].key, k)) n++;
     char **data = (char **)malloc((size_t)(n ? n : 1) * sizeof(char *));
     for (int64_t i = 0; i < u->len; i++)
-        if (key_eq(u->items[i].key, k)) data[r.len++] = u->items[i].val;
-    r.ptr = data;
-    return r;
+        if (key_eq(u->items[i].key, k)) data[got++] = u->items[i].val;
+    out->ptr = data;
+    out->len = got;
 }
 
-kml_arr __kml_usp_keys(kml_usp *u) {
-    kml_arr r;
+void __kml_usp_keys(kml_arr *out, kml_usp *u) {
     char **data = (char **)malloc((size_t)(u->len ? u->len : 1) * sizeof(char *));
     for (int64_t i = 0; i < u->len; i++) data[i] = u->items[i].key;
-    r.ptr = data; r.len = u->len;
-    return r;
+    out->ptr = data; out->len = u->len;
 }
-kml_arr __kml_usp_values(kml_usp *u) {
-    kml_arr r;
+void __kml_usp_values(kml_arr *out, kml_usp *u) {
     char **data = (char **)malloc((size_t)(u->len ? u->len : 1) * sizeof(char *));
     for (int64_t i = 0; i < u->len; i++) data[i] = u->items[i].val;
-    r.ptr = data; r.len = u->len;
-    return r;
+    out->ptr = data; out->len = u->len;
 }
 // entries(): an array of [key, value] tuples. A tuple value [string,string] is a
 // POINTER to a heap {ptr,ptr} struct (tuples are objects), so the array holds one
 // pointer per pair — each pointing at a kml_usp_pair, whose {key,val} layout is
 // exactly the {ptr,ptr} tuple. Codegen types it ArrayOf(TupleType([string,string])),
 // matching Map.entries()'s own shape.
-kml_arr __kml_usp_entries(kml_usp *u) {
-    kml_arr r;
+void __kml_usp_entries(kml_arr *out, kml_usp *u) {
     void **ptrs = (void **)malloc((size_t)(u->len ? u->len : 1) * sizeof(void *));
     for (int64_t i = 0; i < u->len; i++) ptrs[i] = &u->items[i];
-    r.ptr = ptrs;
-    r.len = u->len;
-    return r;
+    out->ptr = ptrs;
+    out->len = u->len;
 }
 
 // Stable sort by key. WHATWG sorts by UTF-16 code units; this compares UTF-8

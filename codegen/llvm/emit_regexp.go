@@ -429,16 +429,10 @@ func (e *Emitter) emitRegexLoadField(objVal Value, name, ir string, align int) s
 // `var s;`) left a non-`ptr` word where pcre2_match_8 wants a `ptr`, emitting
 // invalid IR (the RegExp A1 invalid-IR files).
 func (e *Emitter) regexSubjectToString(v Value) (Value, error) {
-	if isStringTy(v.Ty) {
-		return e.coerce(v, TypePtr), nil
-	}
-	// A `void` value (a no-return function call, e.g. `(function(){})()`) is
-	// `undefined` in JS — ToString it to the literal "undefined" rather than
-	// asking emitValueToString to stringify a value-less type.
-	if v.Ty.IsUndefined || v.Ty.IR == "void" {
-		return Value{Ref: e.internString("undefined"), Ty: TypePtr}, nil
-	}
-	return e.emitValueToString(v)
+	// The general builtin-argument ToString (emit_exprs_types.go) — a subject
+	// that is already a string coerces unchanged, undefined/void becomes
+	// "undefined", anything else is ToString'd (`re.test(123)` matches "123").
+	return e.emitArgToString(v)
 }
 
 func (e *Emitter) emitRegexTest(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {

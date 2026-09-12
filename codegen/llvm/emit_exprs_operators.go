@@ -1034,8 +1034,14 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 	case "-":
 		if arg.Ty.Float {
 			e.emitInstr(fmt.Sprintf("%s = fneg %s %s", reg, arg.Ty.IR, arg.Ref))
-		} else {
+		} else if arg.Ty.IsInteger() {
 			e.emitInstr(fmt.Sprintf("%s = sub %s 0, %s", reg, arg.Ty.IR, arg.Ref))
+		} else {
+			// Unary `-` does ToNumber(operand); a non-numeric operand (a string
+			// or object — IR "ptr", or an aggregate) has no numeric value, so
+			// strict rejects it cleanly rather than emitting `sub ptr 0, …`
+			// (invalid IR). BigInt/dynamic operands are handled above.
+			return Value{}, fmt.Errorf("%d:%d: unary '-' requires a number or bigint operand", ex.GetPos().Line, ex.GetPos().Col)
 		}
 		return Value{Ref: reg, Ty: arg.Ty}, nil
 	case "!":
@@ -1093,6 +1099,16 @@ func (e *Emitter) emitUpdate(ex *ast.UpdateExpression) (Value, error) {
 			return Value{Ref: nr, Ty: sym.Ty}, nil
 		}
 		return Value{Ref: oldReg, Ty: sym.Ty}, nil
+	}
+
+	// `++`/`--` do ToNumber(operand) then step; a non-numeric operand
+	// (a string or object — IR "ptr", or an aggregate) has no numeric value,
+	// so strict rejects it cleanly (matching tsc: "an arithmetic operand must
+	// be of type number/bigint") rather than emitting `add ptr, 1` (invalid
+	// IR). BigInt and nullable-scalar operands are handled above; `-compat=js`
+	// ToNumber semantics on a dynamic operand are a separate gap.
+	if !sym.Ty.Float && !sym.Ty.IsInteger() {
+		return Value{}, fmt.Errorf("%d:%d: operator '%s' requires a number or bigint operand", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
 	}
 
 	newReg := e.freshReg()

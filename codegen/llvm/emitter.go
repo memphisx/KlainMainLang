@@ -1304,6 +1304,33 @@ func malformedStoreValueOperand(line string) bool {
 	return rest == "" || rest[0] == ','
 }
 
+// scalarConstIntoAggregateStore reports whether a store line writes a bare
+// scalar constant into an aggregate-typed ("{ … }") slot — e.g.
+// `store {ptr, i64} 0, ptr %p` — which is invalid IR (an aggregate has no scalar
+// zero; its constant is `zeroinitializer` or an aggregate literal). A store of a
+// register (`%r`), `zeroinitializer`, or an aggregate literal (`{ … }`) into the
+// same slot is well-formed and passes. Only a `{`-prefixed store type is
+// considered, so scalar stores are untouched.
+func scalarConstIntoAggregateStore(line string) bool {
+	rest := strings.TrimLeft(strings.TrimPrefix(line, "store "), " ")
+	if len(rest) == 0 || rest[0] != '{' {
+		return false // not an aggregate-typed store
+	}
+	close := strings.IndexByte(rest, '}')
+	if close < 0 {
+		return false
+	}
+	val := strings.TrimLeft(rest[close+1:], " ")
+	if val == "" {
+		return false
+	}
+	// A bare numeric constant operand (`0`, `-1`, `1.5`, `0x…`) is the invalid
+	// shape; a register (`%…`), `zeroinitializer`, `null`, `getelementptr(…)`,
+	// or a nested aggregate literal (`{…`) are all well-formed.
+	c := val[0]
+	return c == '-' || (c >= '0' && c <= '9')
+}
+
 func (e *Emitter) emitInstr(line string) {
 	if e.blockDone {
 		return // skip dead code after a terminator
@@ -1313,6 +1340,15 @@ func (e *Emitter) emitInstr(line string) {
 		// permanent rail so no unimplemented expression can ship a malformed store
 		// past codegen into clang. See "Invalid-IR backlog" cluster B.
 		panic(emitGuardPanic{msg: "unsupported operation: an expression produced no value and cannot be stored — this construct is not yet implemented"})
+	}
+	if strings.HasPrefix(line, "store ") && scalarConstIntoAggregateStore(line) {
+		// A scalar constant stored into an aggregate slot (`store {ptr, i64} 0`)
+		// is invalid IR — it arises when a value is coerced to an aggregate-typed
+		// target (an array/tuple/nullable slot) but the source register (a bare
+		// scalar zero/constant) is kept, e.g. a mismatched generator `.next(x)`
+		// value whose element type is a union the coerce mis-represents. A clean
+		// rejection at the emitter rather than shipping the bad store to clang.
+		panic(emitGuardPanic{msg: "unsupported operation: a non-matching value was coerced to an aggregate-typed slot (array/tuple/union) — this construct is not yet supported"})
 	}
 	e.body.WriteString("  " + line + "\n")
 }

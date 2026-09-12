@@ -497,6 +497,24 @@ console.log('ab'.padEnd(5, ''))
 `, "ab\nab")
 }
 
+// A non-string argument to a string-coercing builtin (padStart/padEnd fill,
+// indexOf search, parseInt/parseFloat input) is ToString'd — faithful to JS —
+// rather than left as a non-ptr word where a `ptr` is required (invalid IR).
+// Test262 parseInt/parseFloat A1 + padStart/padEnd fill-string-non-strings +
+// indexOf/searchstring-tostring (ADR-00891).
+func TestE2EStringToStringArgs(t *testing.T) {
+	assertOutputCompatJS(t, `
+console.log('abc'.padEnd(10, false))
+console.log('abc'.padEnd(10, 0))
+console.log('abc'.padStart(6, 1))
+console.log('a1b1'.indexOf(1))
+console.log('abcabc'.indexOf(9))
+console.log(parseInt(true))
+console.log(parseInt('42'), parseInt('0x1F'))
+console.log(parseFloat(3.14))
+`, "abcfalsefa\nabc0000000\n111abc\n1\n-1\nNaN\n42 31\n3.14")
+}
+
 func TestE2EStringSplitEmptySeparator(t *testing.T) {
 	assertOutput(t, `
 const chars: string[] = "abc".split("")

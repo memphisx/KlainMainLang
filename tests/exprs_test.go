@@ -1356,6 +1356,25 @@ console.log(c.count);
 `, "12n")
 }
 
+// `++`/`--` and unary `-` do ToNumber(operand); on a non-numeric operand (a
+// string or object) strict mode rejects cleanly — matching tsc — instead of
+// emitting `add ptr, 1` / `sub ptr 0, …` (invalid IR). The Test262
+// `prefix/postfix-{increment,decrement}` and `unary-minus` operand-type
+// families (ADR-00890).
+func TestE2EUpdateNonNumericOperandRejected(t *testing.T) {
+	mustCompileError(t, `
+let x = {};
+++x;
+`, "requires a number or bigint operand")
+	mustCompileError(t, `
+let s = "x";
+s++;
+`, "requires a number or bigint operand")
+	mustCompileError(t, `
+const y = -"";
+`, "requires a number or bigint operand")
+}
+
 // --- TDD-00123 Stage 1: `number` is an IEEE-754 double (JS-faithful) ---
 
 func TestE2ENumberIsDouble(t *testing.T) {
@@ -1552,10 +1571,10 @@ func TestE2EIncompatibleReassignmentRejectedInStrict(t *testing.T) {
 	// IR (the pre-existing bug this closes). The escape hatch is an explicit
 	// `: any` annotation (or -compat=js), both exercised as the passing case.
 	reject := []string{
-		`let x = 5; x = 'hi';`,          // inferred number, string assigned
-		`let x; x = 1; x = 's';`,        // untyped, first-assignment number, then string
-		`let s = 'a'; s = 3;`,           // inferred string, number assigned
-		`let b = true; b = 'no';`,       // inferred boolean, string assigned
+		`let x = 5; x = 'hi';`,    // inferred number, string assigned
+		`let x; x = 1; x = 's';`,  // untyped, first-assignment number, then string
+		`let s = 'a'; s = 3;`,     // inferred string, number assigned
+		`let b = true; b = 'no';`, // inferred boolean, string assigned
 	}
 	for _, src := range reject {
 		if _, err := parseAndCompile(src); err == nil {

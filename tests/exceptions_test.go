@@ -457,3 +457,37 @@ try {
 }
 `, "rethrown: inner true")
 }
+
+// A caught value's truthiness (`Boolean(e)` / `if (e)`) works: the { i8, i64 }
+// catch record is widened to a dynamic value for the JS ToBoolean rather than
+// comparing the aggregate to 0 (invalid IR). Regression from TDD-00202 that
+// broke examples/basics/namespaces.ts (ADR-00893).
+func TestE2ECaughtValueTruthiness(t *testing.T) {
+	assertOutput(t, `
+try { throw new TypeError("x"); } catch (e) {
+  console.log(Boolean(e));
+  if (e) { console.log("truthy"); }
+}
+`, "true\ntruthy")
+}
+
+// A caught Error subclass narrowed by `instanceof` reads its own declared
+// fields (`e.status`), not just the base Error fields — the caught record's
+// payload is re-bound as the subclass instance in the narrowed branch.
+// Regression from TDD-00202 that broke examples/classes/error_subclass.ts
+// (ADR-00893).
+func TestE2ECaughtErrorSubclassFieldAfterNarrowing(t *testing.T) {
+	assertOutput(t, `
+class HttpError extends Error {
+  status: number;
+  constructor(status: number, msg: string) { super(msg); this.name = "HttpError"; this.status = status; }
+}
+function req(): string { throw new HttpError(404, "no forecast"); }
+try { req(); } catch (e) {
+  if (e instanceof HttpError) {
+    console.log(e.name + " " + e.status + ": " + e.message);
+  }
+  console.log(e instanceof Error);
+}
+`, "HttpError 404: no forecast\ntrue")
+}

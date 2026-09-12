@@ -1258,7 +1258,15 @@ func (e *Emitter) emitGeneratorNextByValue(genObj string, genTy Type, args []ast
 		if err != nil {
 			return Value{}, err
 		}
-		sentVal = e.coerce(v, elemTy)
+		// The sent value flows into the generator's yield-result slot (typed as
+		// the element type here); a mismatched `.next(x)` argument is a clean
+		// COMPILE_ERROR (matching tsc's generator TNext checking) rather than a
+		// raw store of the wrong shape — e.g. `iter.next(false)` into an
+		// array-typed slot emitted `store {ptr, i64} 0` (invalid IR).
+		sentVal, err = e.coerceChecked(v, elemTy, args[0].GetPos(), "generator .next() value")
+		if err != nil {
+			return Value{}, err
+		}
 	} else {
 		sentVal = e.genZeroElem(elemTy)
 	}
@@ -1420,7 +1428,12 @@ func (e *Emitter) emitGeneratorReturnMethod(receiver ast.Expression, genTy Type,
 		if err != nil {
 			return Value{}, err
 		}
-		rv = e.coerce(v, elemTy)
+		// A mismatched `.return(x)` argument is a clean COMPILE_ERROR, not a raw
+		// store of the wrong shape (invalid IR) — see the `.next()` path.
+		rv, err = e.coerceChecked(v, elemTy, args[0].GetPos(), "generator .return() value")
+		if err != nil {
+			return Value{}, err
+		}
 	} else {
 		rv = e.genZeroElem(elemTy)
 	}
@@ -1771,7 +1784,12 @@ func (e *Emitter) emitAsyncGeneratorNextByValue(genObj string, genTy Type, args 
 		if err != nil {
 			return Value{}, err
 		}
-		sentVal = e.coerce(v, elemTy)
+		// A mismatched `.next(x)` argument is a clean COMPILE_ERROR, not a raw
+		// store of the wrong shape (invalid IR) — see the sync path.
+		sentVal, err = e.coerceChecked(v, elemTy, args[0].GetPos(), "generator .next() value")
+		if err != nil {
+			return Value{}, err
+		}
 	} else {
 		sentVal = e.genZeroElem(elemTy)
 	}

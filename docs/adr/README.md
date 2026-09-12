@@ -933,3 +933,8 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00887](ADR-00887.md) | Boxed-element arrays — `any[]` and heterogeneous arrays under `-compat=js` (TDD-00205 Stage 2) | `Implements [TDD-00205](../tdd/TDD-00205.md)`, `Extends [ADR-00886](ADR-00886.md)`, `Implements [TDD-00200](../tdd/TDD-00200.md)` |
 | [00888](ADR-00888.md) | `Promise.resolve(v)` boxes its value when widened to `Promise<any>` | |
 | [00889](ADR-00889.md) | Array-destructuring default applies on an `undefined` element (fixes invalid IR + semantics) | |
+| [00890](ADR-00890.md) | `++`/`--` and unary `-` reject a non-numeric operand cleanly (invalid-IR sweep) | |
+| [00891](ADR-00891.md) | String-coercing builtins ToString a non-string argument (invalid-IR sweep) | `Extends [ADR-00885](ADR-00885.md)` |
+| [00892](ADR-00892.md) | Generator `.next()`/`.return()` value coercion + emitter guard against a scalar-into-aggregate store | |
+| [00893](ADR-00893.md) | Caught-value truthiness and Error-subclass field narrowing (TDD-00202 regressions) | `Extends [ADR-00870](ADR-00870.md)` |
+| [00894](ADR-00894.md) | URLSearchParams array accessors return via out-parameter (Windows x64 struct-return ABI) | `Extends [ADR-00873](ADR-00873.md)` |

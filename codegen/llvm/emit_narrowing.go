@@ -225,12 +225,40 @@ func (e *Emitter) applyUnionBranchNarrowing(test ast.Expression, branchIsTrue bo
 		if bin, isBin := test.(*ast.BinaryExpression); isBin && bin.Op == "instanceof" {
 			if id, isID := bin.Left.(*ast.Identifier); isID {
 				if rid, isRID := bin.Right.(*ast.Identifier); isRID {
-					if sym, found := e.lookup(id.Name); found && sym.Ty.IsError {
+					if sym, found := e.lookup(id.Name); found {
 						if info, isClass := e.classes[rid.Name]; isClass && info.IsErrorSubclass {
-							nt := info.Ty
-							sym.NarrowedTo = &nt
-							e.define(id.Name, sym)
-							return
+							// A caught value (TDD-00202) narrowed by `e instanceof
+							// HttpError`: the caught record's payload is the thrown
+							// Error-subclass instance pointer, so re-bind the branch's
+							// `e` to that pointer typed as the subclass — its own
+							// fields/methods (`e.status`) then read through the static
+							// class path instead of the dynamic member fallback (which
+							// throws). Without this the record's built-in Error fields
+							// still read, but a subclass-declared field did not.
+							if sym.Ty.IsCaught {
+								agg := e.freshReg()
+								e.emitInstr(fmt.Sprintf("%s = load { i8, i64 }, ptr %s, align 8", agg, sym.Ptr))
+								_, pay := e.caughtParts(Value{Ref: agg, Ty: TypeCaught})
+								objPtr := e.freshReg()
+								e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", objPtr, pay))
+								// A class binding's Ptr is a slot holding the object
+								// pointer (like any object local), so back the narrowed
+								// `e` with a fresh slot pointing at the unpacked payload.
+								slot := e.freshReg()
+								e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+								e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", objPtr, slot))
+								e.define(id.Name, Symbol{Ptr: slot, Ty: info.Ty})
+								return
+							}
+							// The legacy errorObjType-typed catch binding: the symbol
+							// already holds the object pointer, so narrowing is a pure
+							// retype (subclass instances are prefix-compatible).
+							if sym.Ty.IsError {
+								nt := info.Ty
+								sym.NarrowedTo = &nt
+								e.define(id.Name, sym)
+								return
+							}
 						}
 					}
 				}

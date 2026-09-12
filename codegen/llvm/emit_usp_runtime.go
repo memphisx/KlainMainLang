@@ -39,10 +39,14 @@ func (e *Emitter) ensureURLSearchParams() {
 	e.emitGlobal(`declare i64 @__kml_usp_size(ptr)`)
 	e.emitGlobal(`declare ptr @__kml_usp_key_at(ptr, i64)`)
 	e.emitGlobal(`declare ptr @__kml_usp_val_at(ptr, i64)`)
-	e.emitGlobal(`declare {ptr, i64} @__kml_usp_get_all(ptr, ptr)`)
-	e.emitGlobal(`declare {ptr, i64} @__kml_usp_keys(ptr)`)
-	e.emitGlobal(`declare {ptr, i64} @__kml_usp_values(ptr)`)
-	e.emitGlobal(`declare {ptr, i64} @__kml_usp_entries(ptr)`)
+	// These four write their {ptr,i64} array result through a caller-provided
+	// out-parameter (first arg) instead of returning the aggregate by value: a
+	// by-value 16-byte struct return is ABI-divergent (System V two-register vs
+	// Windows x64 hidden-sret), which crashed on Windows (0xc0000005). See the C.
+	e.emitGlobal(`declare void @__kml_usp_get_all(ptr, ptr, ptr)`)
+	e.emitGlobal(`declare void @__kml_usp_keys(ptr, ptr)`)
+	e.emitGlobal(`declare void @__kml_usp_values(ptr, ptr)`)
+	e.emitGlobal(`declare void @__kml_usp_entries(ptr, ptr)`)
 	e.emitGlobal(`declare void @__kml_usp_sort(ptr)`)
 	e.emitGlobal(`declare ptr @__kml_usp_to_string(ptr)`)
 	e.emitGlobal(`declare ptr @__kml_usp_inspect(ptr)`)

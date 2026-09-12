@@ -498,9 +498,11 @@ func (e *Emitter) emitStringIndexOf(mem *ast.MemberExpression, args []ast.Expres
 	if err != nil {
 		return Value{}, err
 	}
-	// ToString(searchString) for an object argument (TDD-00201): `s.indexOf(obj)`
-	// searches for obj's toString/@@toPrimitive value, not its pointer.
-	if needleVal, err = e.coerceStringArg(needleVal); err != nil {
+	// ToString(searchString): `s.indexOf(obj)` searches for obj's toString/
+	// @@toPrimitive value (TDD-00201), and a number/boolean search likewise
+	// searches its string form (`s.indexOf(123)` → "123") rather than leaving a
+	// non-ptr word where a `ptr` is required (invalid IR).
+	if needleVal, err = e.emitArgToString(needleVal); err != nil {
 		return Value{}, err
 	}
 	// Binary-safe: __kml_str_indexof searches via memmem over the header lengths,
@@ -1399,7 +1401,13 @@ func (e *Emitter) emitStringPad(mem *ast.MemberExpression, args []ast.Expression
 		if err != nil {
 			return Value{}, err
 		}
-		fillPtr = fv.Ref
+		// A non-string fill is ToString'd (`"abc".padEnd(10, false)` fills with
+		// "false", `padEnd(10, 0)` with "0") rather than used as a raw ptr.
+		fvs, err := e.emitArgToString(fv)
+		if err != nil {
+			return Value{}, err
+		}
+		fillPtr = fvs.Ref
 		fLen := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", fLen, fillPtr))
 		fillPLen = fLen
