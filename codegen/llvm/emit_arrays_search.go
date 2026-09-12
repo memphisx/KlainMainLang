@@ -35,7 +35,11 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 		if ferr != nil {
 			return Value{}, ferr
 		}
-		from := e.coerce(fromVal, TypeI64).Ref
+		fromIdx, ferr := e.coerceChecked(fromVal, TypeI64, args[1].GetPos(), "indexOf fromIndex")
+		if ferr != nil {
+			return Value{}, ferr
+		}
+		from := fromIdx.Ref
 		neg := e.freshReg()
 		plusLen := e.freshReg()
 		adj := e.freshReg()

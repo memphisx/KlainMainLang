@@ -75,31 +75,53 @@ var (
 // the in-scope number, never inflate it) — and grouped by the reason it's out.
 // Intl.* and Temporal.* are matched by prefix in inScope, not enumerated here.
 var outOfScopeFeature = map[string]bool{
-	// Dynamic code / dynamic module loading — eval and dynamic import() are an
-	// opt-in embedded-engine path (TDD-00046), not started.
-	"dynamic-import":    true,
-	"import-assertions": true,
-	"import-attributes": true,
-	"IsHTMLDDA":         true, // the [[IsHTMLDDA]] document.all sentinel — legacy web-compat
-	// Dynamic object model — no Proxy / Reflect / prototype mutation
-	// (fixed-shape struct object model; TDD-00068 deferred).
-	"Proxy":                  true,
-	"proxy-missing-checks":   true,
-	"Reflect":                true,
-	"Reflect.construct":      true,
-	"Reflect.set":            true,
-	"Reflect.setPrototypeOf": true,
-	"__proto__":              true,
-	"__getter__":             true,
-	"__setter__":             true,
+	"IsHTMLDDA": true, // the [[IsHTMLDDA]] document.all sentinel — legacy web-compat
 	// Realms / cross-realm evaluation — no ShadowRealm.
 	"ShadowRealm": true,
-	// Resource management (`using` / `await using`) — not targeted.
-	"explicit-resource-management": true,
 	// Engine-internal optimizations with no observable typed-subset surface.
 	"tail-call-optimization": true,
-	// Runtime decorators / decorator metadata — not targeted at runtime.
-	"decorators": true,
+}
+
+// pendingFeature maps Test262 `features` tags to the *named capability* whose
+// planned-but-unshipped state is why their files fail today (TDD-00204).
+// Unlike outOfScopeFeature these files stay IN the in-scope denominator —
+// failing them is a pending capability, not a scope decision — and the report
+// breaks them out under that capability's name so the number is defensible.
+// A tag moves OUT of this map (to nothing) in the same delivery that ships
+// its capability; it moves to outOfScopeFeature only if the capability is
+// formally abandoned.
+var pendingFeature = map[string]string{
+	// Dynamic code / dynamic module loading — the opt-in embedded-engine path
+	// (TDD-00046), planned, not started.
+	"dynamic-import":    "opt-in embedded engine (dynamic code)",
+	"import-assertions": "opt-in embedded engine (dynamic code)",
+	"import-attributes": "opt-in embedded engine (dynamic code)",
+	// Dynamic object model — Proxy traps / full Reflect / prototype mutation
+	// ride the D1 dynamic-object work (TDD-00155/TDD-00068).
+	"Proxy":                  "D1 dynamic object model",
+	"proxy-missing-checks":   "D1 dynamic object model",
+	"Reflect":                "D1 dynamic object model",
+	"Reflect.construct":      "D1 dynamic object model",
+	"Reflect.set":            "D1 dynamic object model",
+	"Reflect.setPrototypeOf": "D1 dynamic object model",
+	"__proto__":              "D1 dynamic object model",
+	"__getter__":             "D1 dynamic object model",
+	"__setter__":             "D1 dynamic object model",
+	// Resource management (`using` / `await using`) — disposal is planned on
+	// the FFI side (TDD-00164) and generalizes from there.
+	"explicit-resource-management": "using/Symbol.dispose resource management",
+}
+
+// pendingOf returns the pending-capability label for a file, or "" when none
+// of its feature tags is pending. First matching tag wins (files rarely carry
+// two pending tags; when they do, either capability would unblock counting).
+func pendingOf(fm frontmatter) string {
+	for _, ft := range fm.Features {
+		if why, ok := pendingFeature[ft]; ok {
+			return why
+		}
+	}
+	return ""
 }
 
 // inScope decides whether a Test262 file belongs to this compiler's target
@@ -112,14 +134,10 @@ func inScope(fm frontmatter, category string) bool {
 	case "intl402", "annexB", "staging":
 		return false // internationalization / legacy web-compat / not-yet-standard proposals
 	}
-	for _, fl := range fm.Flags {
-		switch fl {
-		case "raw", // no harness at all — usually an engine/parse detail
-			"async",  // async harness path deferred until measured (not that it can't run)
-			"module": // module-graph negative/semantics tests beyond the single-entry model
-			return false
-		}
-	}
+	// No flag exclusions (TDD-00204): `async` runs via the doneprintHandle
+	// protocol, `raw` runs harness-free, and `module`-flagged files are
+	// attempted through the normal pipeline (multi-file graphs fail with a
+	// counted reason rather than being pre-excluded).
 	for _, ft := range fm.Features {
 		if strings.HasPrefix(ft, "Intl") || strings.HasPrefix(ft, "Temporal") {
 			return false
@@ -211,7 +229,30 @@ type result struct {
 	InScope  bool   // this file is in this compiler's target subset (see inScope) — drives the in-scope counter
 	Reason   string // empty when Pass
 	Blocker  string // compile-phase failures only: the concrete identifier/API the file died on (see blockerOf)
+	Pending  string // non-empty: the named planned-but-unshipped capability this file waits on (see pendingFeature)
 }
+
+// hasFlag reports whether the frontmatter carries the given `flags:` entry.
+func hasFlag(fm frontmatter, flag string) bool {
+	for _, fl := range fm.Flags {
+		if fl == flag {
+			return true
+		}
+	}
+	return false
+}
+
+// asyncDoneShim is the compiler-compatible `doneprintHandle.js` equivalent
+// (loaded in main from harness-shim/), prepended to `async`-flagged files: the
+// Test262 async protocol is that the test calls `$DONE()` (or `$DONE(err)`)
+// and the host checks stdout for the completion/failure marker after the
+// event loop drains (TDD-00204).
+var asyncDoneShim string
+
+const (
+	asyncCompleteMarker = "Test262:AsyncTestComplete"
+	asyncFailureMarker  = "Test262:AsyncTestFailure:"
+)
 
 // blockerOf extracts the concrete missing identifier/API from a raw (still
 // position-prefixed, still identifier-carrying) compile error — the exact
@@ -272,7 +313,7 @@ func main() {
 	failList := flag.String("faillist", "", "optional path: write the sorted list of failing files as `path\\treason` (one per line) — for finding near-miss clusters (e.g. RUNTIME_NONZERO_EXIT, which already compiled and ran)")
 	regexMode := flag.String("regex", "", "RegExp dialect for compiled tests (TDD-00067): ecmascript (default), es-unicode, es-utf16, es-ascii, or pcre — for measuring a specific dialect's conformance")
 	compatFlag := flag.String("compat", "strict", "emitter compat lane: strict (default), js, or both (node suite only) — TDD-00022; the corpora are untyped JS, so the js lane measures the vanilla-JS-compat surface")
-	suite := flag.String("suite", "test262", "which conformance suite to run: test262 (default), node (Node-core pure modules, TDD-00121 Track B), or ts (TypeScript acceptance oracle, Track C)")
+	suite := flag.String("suite", "test262", "which conformance suite to run: test262 (default), node (Node-core pure modules, TDD-00121 Track B), wpt (Web Platform Tests headless slice, TDD-00082 Track 2), or ts (TypeScript acceptance oracle, Track C)")
 	flag.Parse()
 	regexModeFlag = *regexMode
 
@@ -306,11 +347,14 @@ func main() {
 	case "node":
 		runNodeSuite(*workDir, *perFileTimeout, *workers, *compatFlag)
 		return
+	case "wpt":
+		runWPTSuite(*workDir, *perFileTimeout, *workers, *compatFlag)
+		return
 	case "ts":
 		runTSSuite(*workDir, *perFileTimeout, *compatFlag)
 		return
 	default:
-		fatal("unknown -suite %q (want test262, node, or ts)", *suite)
+		fatal("unknown -suite %q (want test262, node, wpt, or ts)", *suite)
 	}
 
 	testDir := filepath.Join(*corpus, "test")
@@ -327,6 +371,10 @@ func main() {
 	defaultHarness, err := loadHarness(shimDir, []string{"sta.js", "assert.js"})
 	if err != nil {
 		fatal("loading harness shim: %v", err)
+	}
+	asyncDoneShim, err = loadHarness(shimDir, []string{"doneprintHandle.js"})
+	if err != nil {
+		fatal("loading async harness shim: %v", err)
 	}
 
 	if err := os.MkdirAll(*workDir, 0755); err != nil {
@@ -443,8 +491,14 @@ func runTest262Lane(files []string, testDir, harnessDir, defaultHarness, workDir
 	var all []result
 	done := 0
 	start := time.Now()
+	prog := newProgressTracker("test262", laneLabel(), len(files), workDir)
 	for r := range results {
 		all = append(all, r)
+		if r.Pass {
+			prog.tick("PASS", "")
+		} else {
+			prog.tick("FAIL", r.Reason)
+		}
 		done++
 		// Report often (every 250) with elapsed time and throughput, so a stall
 		// (e.g. a codegen infinite loop, which runs in-process and so isn't
@@ -470,21 +524,41 @@ func laneLabel() string {
 	return "strict"
 }
 
-// reportPath is the per-compat-lane report location: docs/testing/<lane>/<file>.
-// Each lane writes an *identically structured* report into its own folder,
-// rather than both lanes sharing one file — so each flag's history is a clean,
-// independently diffable git delta (spotting a regression, or an error that
-// only appears in one lane, is a per-file diff), and the layout extends to a
-// future flag by adding a folder, not a column.
+// platformLabel names the host this run measured, using the user-facing OS
+// names (macos-arm64, linux-x64, windows-x64, …). Conformance numbers are a
+// property of a (platform, compat-lane) pair — the runtime has real
+// per-platform code paths (reactor, fs, signals, libcurl backend) — so each
+// platform keeps its own report folder and drifts independently.
+func platformLabel() string {
+	goos := runtime.GOOS
+	switch goos {
+	case "darwin":
+		goos = "macos"
+	}
+	arch := runtime.GOARCH
+	switch arch {
+	case "amd64":
+		arch = "x64"
+	}
+	return goos + "-" + arch
+}
+
+// reportPath is the per-platform, per-compat-lane report location:
+// docs/testing/<platform>/<lane>/<file>. Each (platform, lane) pair writes an
+// *identically structured* report into its own folder, rather than sharing
+// one file — so each pair's history is a clean, independently diffable git
+// delta (spotting a regression, or an error that only appears on one
+// platform or in one lane, is a per-file diff), and the layout extends to a
+// new platform or flag by adding a folder, not a column (TDD-00204).
 func reportPath(filename string) string {
-	return filepath.Join("docs", "testing", laneLabel(), filename)
+	return filepath.Join("docs", "testing", platformLabel(), laneLabel(), filename)
 }
 
 // reportLaneHeader is the one-line banner every per-lane report opens with,
 // naming its compat lane and the sibling-folder layout so a reader knows the
 // number is one flag's, and where the others live.
 func reportLaneHeader() string {
-	return fmt.Sprintf("> **Compat lane: `-compat=%s`.** This report covers the `%s` lane only. Each compat flag is generated into its own `docs/testing/<flag>/` folder — identical structure per flag — so its history is independently diffable and an error that surfaces in only one lane is obvious. Sibling lanes live in the neighbouring folders.\n\n", laneLabel(), laneLabel())
+	return fmt.Sprintf("> **Platform: `%s` · compat lane: `-compat=%s`.** This report covers one (platform, lane) pair. Each pair is generated into its own `docs/testing/<platform>/<flag>/` folder — identical structure everywhere — so its history is independently diffable and a regression that surfaces on only one platform or in only one lane is obvious. Siblings live in the neighbouring folders.\n\n", platformLabel(), laneLabel())
 }
 
 func loadHarness(dir string, names []string) (string, error) {
@@ -549,8 +623,20 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	}
 	fm := parseFrontmatter(string(src))
 	res.InScope = inScope(fm, res.Category)
+	res.Pending = pendingOf(fm)
+	isAsync := hasFlag(fm, "async")
 
+	// `raw` files run with no harness at all — that is the flag's definition
+	// (they carry no includes and assert nothing via the harness).
 	full := defaultHarness
+	if hasFlag(fm, "raw") {
+		full = ""
+	}
+	if isAsync {
+		// The async protocol's $DONE reporter (doneprintHandle.js equivalent);
+		// upstream hosts inject it for every `async`-flagged file.
+		full += asyncDoneShim
+	}
 	for _, inc := range fm.Includes {
 		content, err := os.ReadFile(filepath.Join(harnessDir, inc))
 		if err != nil {
@@ -716,11 +802,39 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		}
 		return res
 	}
+	if isAsync {
+		// Async protocol: exit 0 alone is not success — the test must have
+		// reported completion via $DONE() before the event loop drained, and
+		// must not have reported a failure.
+		out := stdout.String()
+		switch {
+		case strings.Contains(out, asyncFailureMarker):
+			res.Reason = normalizeReason("ASYNC_TEST_FAILURE", lineWith(out, asyncFailureMarker))
+		case !exitedZero:
+			res.Reason = normalizeReason("RUNTIME_NONZERO_EXIT", firstLine(stderr.String()))
+		case !strings.Contains(out, asyncCompleteMarker):
+			res.Reason = "ASYNC_NO_COMPLETION: event loop drained without $DONE()"
+		default:
+			res.Pass = true
+		}
+		return res
+	}
 	res.Pass = exitedZero
 	if !res.Pass {
 		res.Reason = normalizeReason("RUNTIME_NONZERO_EXIT", firstLine(stderr.String()))
 	}
 	return res
+}
+
+// lineWith returns the first line of s containing the marker (the whole
+// string when absent) — used to surface the async failure message itself.
+func lineWith(s, marker string) string {
+	for _, ln := range strings.Split(s, "\n") {
+		if strings.Contains(ln, marker) {
+			return ln
+		}
+	}
+	return firstLine(s)
 }
 
 func firstLine(s string) string {
@@ -833,6 +947,8 @@ func writeReport(path string, all []result) error {
 	total := len(all)
 	passed := 0
 	inTotal, inPassed := 0, 0
+	pendTotal, pendPassed := 0, 0
+	byPending := map[string]*struct{ total, pass int }{}
 	byCat := map[string]*struct{ total, pass, inTotal, inPass int }{}
 	byReason := map[string]int{}
 	byPhase := map[string]int{}
@@ -852,6 +968,19 @@ func writeReport(path string, all []result) error {
 			if r.Pass {
 				inPassed++
 				c.inPass++
+			}
+			if r.Pending != "" {
+				pendTotal++
+				p, ok := byPending[r.Pending]
+				if !ok {
+					p = &struct{ total, pass int }{}
+					byPending[r.Pending] = p
+				}
+				p.total++
+				if r.Pass {
+					pendPassed++
+					p.pass++
+				}
 			}
 		}
 		if r.Pass {
@@ -890,7 +1019,25 @@ func writeReport(path string, all []result) error {
 		inPct = 100 * float64(inPassed) / float64(inTotal)
 	}
 	outTotal := total - inTotal
-	fmt.Fprintf(&b, "## In-scope subset\n\n**%d / %d passed (%.1f%%)** over the in-scope subset — the files this compiler targets, selected mechanically by frontmatter (excluding `intl402`/`annexB`/`staging`, the `raw`/`async`/`module` flags, and out-of-scope `features` like `Temporal`/`Intl.*`/`dynamic-import`/`Proxy`/`Reflect`/`explicit-resource-management`). The remaining %d files are out of scope by design and are excluded here but still counted in the raw **Overall** number above. This is not a curated pass-list: it is a reproducible filter over the corpus's own tags.\n\n", inPassed, inTotal, inPct, outTotal)
+	fmt.Fprintf(&b, "## In-scope subset\n\n**%d / %d passed (%.1f%%)** over the in-scope subset — everything except the mechanically-excluded genuinely-never set (`intl402`/`annexB`/`staging` categories and the `Intl.*`/`Temporal`/`IsHTMLDDA`/`ShadowRealm`/`tail-call-optimization` feature tags). The remaining %d files are out of scope by design and are excluded here but still counted in the raw **Overall** number above. `async`-flagged files run under the real `$DONE` doneprintHandle protocol, `raw` files run harness-free, and `module`-flagged files are attempted through the normal pipeline — none of those are excluded (TDD-00204). This is not a curated pass-list: it is a reproducible filter over the corpus's own tags.\n\n", inPassed, inTotal, inPct, outTotal)
+
+	// Pending-capability breakdown — files that stay in the denominator but
+	// wait on a named, planned capability (never silently excluded).
+	attTotal, attPassed := inTotal-pendTotal, inPassed-pendPassed
+	attPct := 0.0
+	if attTotal > 0 {
+		attPct = 100 * float64(attPassed) / float64(attTotal)
+	}
+	fmt.Fprintf(&b, "## Pending capabilities (counted in-scope, not excluded)\n\n%d in-scope files carry a feature tag whose implementation is planned but unshipped — they stay in the in-scope denominator above and fail until their capability lands; each is attributed to that capability by name. Excluding only these, the attemptable-now figure is **%d / %d (%.1f%%)**.\n\n| Files | Of which pass | Pending capability |\n|---|---|---|\n", pendTotal, attPassed, attTotal, attPct)
+	pendNames := make([]string, 0, len(byPending))
+	for n := range byPending {
+		pendNames = append(pendNames, n)
+	}
+	sort.Slice(pendNames, func(i, j int) bool { return byPending[pendNames[i]].total > byPending[pendNames[j]].total })
+	for _, n := range pendNames {
+		fmt.Fprintf(&b, "| %d | %d | %s |\n", byPending[n].total, byPending[n].pass, n)
+	}
+	b.WriteString("\n")
 
 	b.WriteString("## By top-level category\n\n| Category | Passed | Total | % | In-scope pass | In-scope total | In-scope % | What it covers |\n|---|---|---|---|---|---|---|---|\n")
 	cats := make([]string, 0, len(byCat))
@@ -988,6 +1135,7 @@ func writeReport(path string, all []result) error {
 	if err := updateConformanceSummary("test262", laneLabel(), test262SummaryLane{
 		Overall: passTotal{Pass: passed, Total: total},
 		InScope: passTotal{Pass: inPassed, Total: inTotal},
+		Pending: passTotal{Pass: pendPassed, Total: pendTotal},
 		ByPhase: phaseCounts,
 	}, ""); err != nil {
 		return err

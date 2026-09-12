@@ -6,6 +6,34 @@ import (
 
 // --- Strings ---
 
+// A non-numeric argument to a string/number method that expects a numeric
+// index/count/position (e.g. a Symbol, as the Test262 `*-symbol` files pass) is
+// a clean compile-time type error — the typed-subset equivalent of the runtime
+// TypeError real JS throws from ToNumber(symbol), and what tsc itself reports —
+// not invalid IR emitted at the arithmetic/compare site (the String A1
+// invalid-IR cluster; same fix as ADR-00882's DataView).
+func TestE2EStringNonNumericArgRejected(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`"hello".charAt(Symbol("x"))`, "charAt index"},
+		{`"hello".charCodeAt(Symbol("x"))`, "charCodeAt index"},
+		{`"hello".codePointAt(Symbol("x"))`, "codePointAt index"},
+		{`"hello".slice(Symbol("x"))`, "slice index"},
+		{`"hello".substring(Symbol("x"))`, "substring index"},
+		{`"hello".substr(Symbol("x"))`, "substr start"},
+		{`"hello".indexOf("l", Symbol("x"))`, "indexOf fromIndex"},
+		{`"hello".includes("l", Symbol("x"))`, "includes position"},
+		{`"hello".startsWith("h", Symbol("x"))`, "startsWith position"},
+		{`"hello".repeat(Symbol("x"))`, "repeat count"},
+		{`"hello".at(Symbol("x"))`, "at index"},
+		{`"5".padStart(Symbol("x"))`, "pad target length"},
+		{`(3.14).toFixed(Symbol("x"))`, "toFixed digits"},
+		{`(255).toString(Symbol("x"))`, "toString radix"},
+	}
+	for _, c := range cases {
+		mustCompileError(t, c.src, c.want)
+	}
+}
+
 func TestE2EStringConcat(t *testing.T) {
 	assertOutput(t, `
 const a: string = 'hello'
@@ -168,11 +196,11 @@ func TestE2EStringifyAbsentScalar(t *testing.T) {
 	assertOutput(t, `
 const miss = [1, 2, 3].find(x => x > 9)
 console.log(String(miss))
-console.log(` + "`" + `val=${miss}` + "`" + `)
+console.log(`+"`"+`val=${miss}`+"`"+`)
 console.log("x" + miss)
 const hit = [1, 2, 3].find(x => x > 1)
 console.log(String(hit))
-console.log(` + "`" + `val=${hit}` + "`" + `)
+console.log(`+"`"+`val=${hit}`+"`"+`)
 `, "undefined\nval=undefined\nxundefined\n2\nval=2")
 }
 

@@ -335,6 +335,40 @@ func (e *Emitter) storeArrayElem(gepReg string, elemTy Type, val Value) {
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
 }
 
+// emitBoxCopyLoop copies srcLen elements from srcPtr (a buffer of srcElemTy
+// scalars) into dst (a boxed-element `any[]` i64 buffer), boxing each source
+// value to `any` on the way. Used where a concrete-element array's contents
+// flow into a boxed-element array (concat into `any[]`, TDD-00200) and a raw
+// byte-copy would leave the source scalars un-tagged in the box slots.
+func (e *Emitter) emitBoxCopyLoop(dst, srcPtr, srcLen string, srcElemTy Type) {
+	idxAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	condL := e.freshLabel("boxcopy.cond")
+	bodyL := e.freshLabel("boxcopy.body")
+	doneL := e.freshLabel("boxcopy.done")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	idxVal := e.freshReg()
+	at := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", at, idxVal, srcLen))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", at, doneL, bodyL))
+	e.emitLabel(bodyL)
+	srcGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", srcGep, srcElemTy.IR, srcPtr, idxVal))
+	srcElem := e.loadArrayElem(srcGep, srcElemTy)
+	boxed := e.coerce(srcElem, TypeAny)
+	dstGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", dstGep, dst, idxVal))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, dstGep))
+	idxNext := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(doneL)
+}
+
 // emitScalarZero emits a zero constant of the given scalar type as a Value.
 // For an aggregate type (array {ptr,i64}) the caller should emit the two-part
 // insertvalue {ptr,i64} undef, ptr null, 0 / insertvalue {ptr,i64} ..., i64 0, 1
@@ -614,7 +648,10 @@ func (e *Emitter) emitNewArraySizedAggregate(na *ast.NewArrayExpression, elemTy 
 	if err != nil {
 		return Value{}, err
 	}
-	sizeVal = e.coerce(sizeVal, TypeI64)
+	sizeVal, err = e.coerceChecked(sizeVal, TypeI64, na.Size.GetPos(), "new Array size")
+	if err != nil {
+		return Value{}, err
+	}
 	e.ensureCalloc()
 	dataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 %d)", dataReg, sizeVal.Ref, elemTy.Align()))
@@ -724,6 +761,35 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 
 			slot := e.newArrayHeaderSlot(newPtr, restLen)
 			e.define(elem.Name, Symbol{Ptr: slot, Ty: ArrayOf(elemTy)})
+			continue
+		}
+
+		// A statically-`undefined` element (`[undefined]`, or an elision hole
+		// `[,]`) with a default: the element is always `undefined`, so the
+		// default always applies — JS applies a destructuring default whenever
+		// the matched value is `undefined`, not only when the position is out
+		// of bounds. Bind directly to the default. This is both the correct
+		// value (loading the element would yield `undefined`, `const [x = 23] =
+		// [undefined]` must be `23`) and avoids invalid IR — a differently-
+		// represented default (a number's double bits) stored into the
+		// `undefined`-typed ptr slot emitted `store ptr <fpconst>`.
+		if elem.Default != nil && elemTy.IsUndefined && elem.SubArray == nil && elem.SubObject == nil {
+			defVal, derr := e.emitExpr(elem.Default)
+			if derr != nil {
+				return derr
+			}
+			if defVal.Ty.IsArray {
+				hdr := e.boxArrayValue(defVal)
+				slot := e.freshReg()
+				e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, slot))
+				e.define(elem.Name, Symbol{Ptr: slot, Ty: defVal.Ty})
+			} else {
+				slot := e.freshReg()
+				e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, defVal.Ty.IR, defVal.Ty.Align()))
+				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", defVal.Ty.IR, defVal.Ref, slot, defVal.Ty.Align()))
+				e.define(elem.Name, Symbol{Ptr: slot, Ty: defVal.Ty})
+			}
 			continue
 		}
 
@@ -1050,6 +1116,18 @@ func (e *Emitter) emitArrayCopy(ptrReg, lenReg string, elemTy Type) string {
 // Negative indices count from the end; both are clamped to [0, len].
 
 func (e *Emitter) emitElemEq(elemTy Type, aReg, bReg string) string {
+	// A boxed-element array (`any[]`, TDD-00200): both operands are NaN-boxed
+	// words, so element equality is __kml_any_eq (=== / SameValueZero over
+	// dynamic values) — content equality for strings, double equality for
+	// numbers — not the raw i64 identity the default arm would give (which
+	// would fail for two equal-but-distinct string boxes). Used by indexOf /
+	// lastIndexOf / includes.
+	if elemTy.IsDynamic {
+		e.ensureAnyEq()
+		eq := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_any_eq(i64 %s, i64 %s)", eq, aReg, bReg))
+		return eq
+	}
 	if elemTy.IR == "ptr" && !elemTy.IsArray && !elemTy.IsObject {
 		e.ensureStrcmp()
 		cmp := e.freshReg()
@@ -1078,14 +1156,19 @@ func (e *Emitter) emitElemEq(elemTy Type, aReg, bReg string) string {
 // consumes the leading integer run (matching the canonical decimal array-index
 // spelling); a non-index string such as "1.1" or "4294967296" resolves to an
 // out-of-range slot and is caught by the same bounds check, never a crash.
-func (e *Emitter) arrayIndexToI64(idxVal Value) Value {
+func (e *Emitter) arrayIndexToI64(idxVal Value, pos ast.Pos) (Value, error) {
 	if isStringTy(idxVal.Ty) && !idxVal.Ty.IsClass && !idxVal.Ty.IsObject {
 		e.ensureStrtoll()
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @strtoll(ptr %s, ptr null, i32 10)", r, idxVal.Ref))
-		return Value{Ref: r, Ty: TypeI64}
+		return Value{Ref: r, Ty: TypeI64}, nil
 	}
-	return e.coerce(idxVal, TypeI64)
+	// A non-numeric, non-string index (e.g. an object or Symbol) has no sound
+	// conversion to an integer slot — coerceChecked rejects it cleanly rather
+	// than letting the bare coerce fall through and leave a `ptr` where an i64
+	// is required (the A1 invalid-IR cluster; matches tsc, which rejects a
+	// non-number index type). ADR-00882/00883 did the same for DataView/String.
+	return e.coerceChecked(idxVal, TypeI64, pos, "array index")
 }
 
 // emitArrayIndexOf implements arr.indexOf(val): returns the index of the first

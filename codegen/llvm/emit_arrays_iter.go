@@ -414,7 +414,11 @@ func (e *Emitter) emitArrayCopyWithin(mem *ast.MemberExpression, args []ast.Expr
 	if err != nil {
 		return Value{}, err
 	}
-	targetN := e.emitNormalizeSliceIdx(e.arrayIndexToI64(targetRaw).Ref, lenReg)
+	targetIdx, err := e.arrayIndexToI64(targetRaw, args[0].GetPos())
+	if err != nil {
+		return Value{}, err
+	}
+	targetN := e.emitNormalizeSliceIdx(targetIdx.Ref, lenReg)
 
 	startN := "0"
 	if len(args) >= 2 {
@@ -422,7 +426,11 @@ func (e *Emitter) emitArrayCopyWithin(mem *ast.MemberExpression, args []ast.Expr
 		if err != nil {
 			return Value{}, err
 		}
-		startN = e.emitNormalizeSliceIdx(e.arrayIndexToI64(startRaw).Ref, lenReg)
+		startIdx, err := e.arrayIndexToI64(startRaw, args[1].GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		startN = e.emitNormalizeSliceIdx(startIdx.Ref, lenReg)
 	}
 
 	endN := lenReg
@@ -431,7 +439,11 @@ func (e *Emitter) emitArrayCopyWithin(mem *ast.MemberExpression, args []ast.Expr
 		if err != nil {
 			return Value{}, err
 		}
-		endN = e.emitNormalizeSliceIdx(e.arrayIndexToI64(endRaw).Ref, lenReg)
+		endIdx, err := e.arrayIndexToI64(endRaw, args[2].GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		endN = e.emitNormalizeSliceIdx(endIdx.Ref, lenReg)
 	}
 
 	// count = min(max(end - start, 0), len - target) — never reads past

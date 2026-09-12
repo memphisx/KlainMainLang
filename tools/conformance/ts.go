@@ -24,12 +24,41 @@ import (
 )
 
 // reTSMultiFile detects the `// @filename: x.ts` directive that marks a
-// multi-file case — out of scope for the single-entry V1 oracle.
-var reTSMultiFile = regexp.MustCompile(`(?mi)^//\s*@filename:`)
+// multi-file case. Such cases are MATERIALIZED — each virtual file written to
+// a per-case scratch dir and the last implementation file compiled as the
+// entry (TypeScript's own convention: later files consume earlier ones) — so
+// they are classified like any other case instead of skipped (TDD-00204
+// Track 4). Cases whose files interact only via script-mode global merging
+// (no imports) reject honestly and are counted, not hidden.
+var (
+	reTSMultiFile     = regexp.MustCompile(`(?mi)^//\s*@filename:`)
+	reTSFilenameSplit = regexp.MustCompile(`(?mi)^//\s*@filename:[ \t]*(\S+)[ \t]*\r?\n`)
+)
+
+type tsVirtualFile struct{ name, content string }
+
+// splitTSMultiFile splits a `@filename:`-directive case into its virtual
+// files, dropping the pre-first-directive prelude (per-case compiler options,
+// which this oracle doesn't model).
+func splitTSMultiFile(src string) []tsVirtualFile {
+	locs := reTSFilenameSplit.FindAllStringSubmatchIndex(src, -1)
+	var files []tsVirtualFile
+	for i, m := range locs {
+		end := len(src)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		files = append(files, tsVirtualFile{
+			name:    src[m[2]:m[3]],
+			content: src[m[1]:end],
+		})
+	}
+	return files
+}
 
 type tsResult struct {
-	Case   string
-	Group  string // compiler | conformance
+	Case    string
+	Group   string // compiler | conformance
 	Status  string // MATCH_ACCEPT | MATCH_REJECT | MISMATCH_FALSE_REJECT | MISMATCH_FALSE_ACCEPT | SKIP_OUT_OF_SCOPE
 	Reason  string
 	Blocker string // false-reject only: concrete identifier/character the case died on (see blockerOf)
@@ -95,19 +124,35 @@ func runTSSuite(workDir string, timeout time.Duration, compat string) {
 // runTSLane runs every case once under the current laneCompat and returns the
 // accept/reject results. Called once per compat lane.
 func runTSLane(casesRoot string, hasErrorsBaseline map[string]bool, workDir string) []tsResult {
-	var results []tsResult
+	// Collect first so the progress tracker knows the real total up front.
+	type tsCase struct{ path, group string }
+	var cases []tsCase
 	for _, group := range []string{"compiler", "conformance"} {
 		root := filepath.Join(casesRoot, group)
 		_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() || !strings.HasSuffix(p, ".ts") || strings.HasSuffix(p, ".d.ts") {
 				return nil
 			}
-			if os.Getenv("TS_VERBOSE") != "" {
-				fmt.Fprintf(os.Stderr, "case: %s\n", p)
-			}
-			results = append(results, runOneTS(p, group, hasErrorsBaseline, workDir))
+			cases = append(cases, tsCase{p, group})
 			return nil
 		})
+	}
+	var results []tsResult
+	prog := newProgressTracker("ts", laneLabel(), len(cases), workDir)
+	for _, c := range cases {
+		if os.Getenv("TS_VERBOSE") != "" {
+			fmt.Fprintf(os.Stderr, "case: %s\n", c.path)
+		}
+		r := runOneTS(c.path, c.group, hasErrorsBaseline, workDir)
+		results = append(results, r)
+		switch r.Status {
+		case "MATCH_ACCEPT", "MATCH_REJECT":
+			prog.tick("PASS", "") // agreement with TypeScript
+		case "MISMATCH_FALSE_ACCEPT", "MISMATCH_FALSE_REJECT":
+			prog.tick("FAIL", r.Reason) // disagreement
+		default:
+			prog.tick("SKIP", r.Reason)
+		}
 	}
 	return results
 }
@@ -124,14 +169,42 @@ func runOneTS(path, group string, hasErrorsBaseline map[string]bool, workDir str
 		return res
 	}
 	src := string(raw)
-	if reTSMultiFile.MatchString(src) {
-		res.Status = "SKIP_OUT_OF_SCOPE"
-		res.Reason = "multi-file case (@filename directives)"
-		return res
-	}
-
 	expectReject := hasErrorsBaseline[base]
-	_, cerr := frontEndSource(src, workDir, "ts")
+	var cerr error
+	if reTSMultiFile.MatchString(src) {
+		// Materialize the virtual files and compile the last implementation
+		// file as the entry (TDD-00204 Track 4). The TS lane is single-
+		// threaded, so one scratch dir, wiped per case, suffices.
+		caseDir := filepath.Join(workDir, "tscase")
+		_ = os.RemoveAll(caseDir)
+		entry := ""
+		for _, vf := range splitTSMultiFile(src) {
+			// Normalize the occasional absolute-style virtual path ("/a.ts").
+			name := strings.TrimPrefix(filepath.ToSlash(vf.name), "/")
+			p := filepath.Join(caseDir, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+				res.Status = "SKIP_OUT_OF_SCOPE"
+				res.Reason = "scratch write error"
+				return res
+			}
+			if err := os.WriteFile(p, []byte(vf.content), 0644); err != nil {
+				res.Status = "SKIP_OUT_OF_SCOPE"
+				res.Reason = "scratch write error"
+				return res
+			}
+			if (strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".tsx")) && !strings.HasSuffix(name, ".d.ts") {
+				entry = p
+			}
+		}
+		if entry == "" {
+			res.Status = "SKIP_OUT_OF_SCOPE"
+			res.Reason = "multi-file case with no implementation file (declaration-only)"
+			return res
+		}
+		_, cerr = frontEnd(entry)
+	} else {
+		_, cerr = frontEndSource(src, workDir, "ts")
+	}
 	accepted := cerr == nil
 
 	switch {
@@ -157,7 +230,7 @@ func writeTSReport(path string, all []tsResult) error {
 	b.WriteString("# TypeScript acceptance-oracle results\n\n")
 	b.WriteString(reportLaneHeader())
 	b.WriteString("Generated by `tools/conformance -suite=ts` (TDD-00121 Track C) against Microsoft's `tests/cases/{compiler,conformance}` corpus, using each case's `tests/baselines/reference/*.errors.txt` baseline as an **accept/reject oracle**: a case with an errors baseline should be rejected; one without should compile clean. This measures this compiler's **front-end** (parse + resolve + codegen, no run) against TypeScript's own accept/reject verdict. Regenerate with `make conformance-ts`. Do not hand-edit; re-run instead.\n\n")
-	b.WriteString("V1 measures accept/reject **agreement** only — not error-message text or position. A **false-reject** is usually a scope gap (a valid-TS feature this narrow typed subset doesn't implement), and those dominate the disagreements by design; a **false-accept** (TypeScript rejects but this compiler accepts) is the more interesting signal — a soundness gap in what this compiler should have caught. Multi-file cases are skipped as out of scope for this single-entry V1.\n\n")
+	b.WriteString("V1 measures accept/reject **agreement** only — not error-message text or position. A **false-reject** is usually a scope gap (a valid-TS feature this narrow typed subset doesn't implement), and those dominate the disagreements by design; a **false-accept** (TypeScript rejects but this compiler accepts) is the more interesting signal — a soundness gap in what this compiler should have caught. Multi-file cases (`// @filename:` directives) are **materialized** — each virtual file written to disk, the last implementation file compiled as the entry — and classified like any other case (TDD-00204 Track 4); a case whose files interact only via script-mode global merging (no imports) rejects and is counted, not hidden.\n\n")
 
 	var mAcc, mRej, fAcc, fRej, skip int
 	byGroup := map[string]*struct{ mAcc, mRej, fAcc, fRej, skip int }{}

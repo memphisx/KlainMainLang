@@ -106,6 +106,19 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 	if na, ok := expr.(*ast.NewArrayExpression); ok && na.ElemType == nil && hint.IsArray {
 		return e.emitNewArraySizedAggregate(na, *hint.ElemType)
 	}
+	// `Promise.resolve(v)` into a declared `Promise<any>` slot must box the
+	// value at the store so a later `.then`/`await` reads it back correctly
+	// (see emitPromiseResolve). The hint reaches here from a typed var-init,
+	// argument, or array element; without it the call self-types
+	// `Promise<typeof v>` and stores the raw scalar bits.
+	if ce, ok := expr.(*ast.CallExpression); ok && hint.IsPromise {
+		if mem, ok := ce.Callee.(*ast.MemberExpression); ok {
+			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Promise" &&
+				mem.Property == "resolve" && !e.isShadowedByLocal(id.Name) {
+				return e.emitPromiseResolve(ce.Args, ce.GetPos(), hint)
+			}
+		}
+	}
 	// An arrow function assigned/passed into a declared function-typed slot
 	// (`let cb: (b: Box) => void = (b) => b.value`, or `es.onmessage = (ev)
 	// => console.log(ev.data)`) gets its own unannotated parameters typed
@@ -430,6 +443,30 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 	var ptrName string
 	if e.promotedGlobalDecls[v] {
 		ptrName = e.moduleGlobals[v.Name].Ptr
+	} else if e.hoistedCaptures[v.Name] {
+		// Captured by a nested closure: heap-box eagerly here at the declaration
+		// point (which dominates the whole lexical scope) rather than lazily at
+		// the capturing closure's construction site — that site may sit inside a
+		// conditional/`try` block that doesn't dominate a later read of the box
+		// (e.g. the same object read in the `catch`), which clang rejects as
+		// "instruction does not dominate all uses" (ADR-00619 / hoistedCaptures).
+		// The scalar path in emitVarDecl does this via boxHoistedCapture; object
+		// bindings are a uniform ptr slot, so the cell holds one ptr seeded null,
+		// and the initializer's storeObj re-resolves through this Boxed symbol.
+		// This boxes exactly the set promoteCaptureToCell would have (Boxed is set,
+		// so the lazy path is skipped), only earlier. A function-scoped `var` boxes
+		// in the entry block (dominates unconditionally); a `let`/`const` at its
+		// declaration point (dominates its block scope, and re-mallocs per loop
+		// iteration for fresh per-iteration `let` cells).
+		e.ensureMalloc()
+		ptrName = e.freshReg()
+		emit := e.emitInstr
+		if v.Kind == "var" {
+			emit = e.emitAlloca
+		}
+		emit(fmt.Sprintf("%s = call ptr @malloc(i64 8)", ptrName))
+		emit(fmt.Sprintf("store ptr null, ptr %s, align 8", ptrName))
+		e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, Boxed: true, IsConst: v.Kind == "const"})
 	} else {
 		ptrName = e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))

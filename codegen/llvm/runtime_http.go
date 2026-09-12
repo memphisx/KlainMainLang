@@ -86,6 +86,17 @@ func httpNonblockFlag() int {
 	return 0x800
 }
 
+// stdoutGlobalSymbol names the libc extern `FILE *stdout` global for the target.
+// macOS exposes it as `__stdoutp` (with `stdout` a macro over it); glibc and the
+// other Linux libcs export `stdout` directly. Used to setvbuf() stdout at startup
+// (ADR-00867). Not meaningful on Windows, which this is never called for.
+func stdoutGlobalSymbol() string {
+	if targetGOOS() == "darwin" {
+		return "__stdoutp"
+	}
+	return "stdout"
+}
+
 // mmapSharedAnonFlags returns MAP_SHARED|MAP_ANONYMOUS for the host. MAP_SHARED
 // is 0x1 on both; MAP_ANONYMOUS is 0x1000 on Darwin, 0x20 on Linux — the cluster
 // close-flag page (TDD-00117) is mmap'd with these before the worker fork so all

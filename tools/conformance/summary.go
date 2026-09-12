@@ -2,7 +2,7 @@ package main
 
 // summary.go — a machine-readable projection of the headline conformance
 // numbers, emitted beside the human Markdown reports as
-// docs/testing/conformance-summary.json. It exists so downstream consumers (the
+// docs/testing/<platform>/conformance-summary.json. It exists so downstream consumers (the
 // website landing/docs) can source exact, per-lane figures from data instead of
 // hand-copying them from prose — the same "data is the source, Markdown is
 // generated" discipline docs/status/data/*.json already follows.
@@ -21,7 +21,12 @@ import (
 	"sync"
 )
 
-const summaryPath = "docs/testing/conformance-summary.json"
+// summaryPath resolves per platform (docs/testing/<platform>/…): the numbers
+// are a property of the (platform, lane) pair, so each platform's summary
+// file drifts independently, like the per-platform report folders.
+func summaryPath() string {
+	return filepath.Join("docs", "testing", platformLabel(), "conformance-summary.json")
+}
 
 var summaryMu sync.Mutex
 
@@ -44,6 +49,7 @@ type passTotal struct {
 type test262SummaryLane struct {
 	Overall passTotal      `json:"overall"`
 	InScope passTotal      `json:"inScope"`
+	Pending passTotal      `json:"pending"` // in-scope files waiting on a named planned capability (subset of inScope)
 	ByPhase map[string]int `json:"byPhase,omitempty"`
 }
 
@@ -54,6 +60,21 @@ type nodeSummaryLane struct {
 	Skip     int `json:"skip"`
 	Runnable int `json:"runnable"`
 	Total    int `json:"total"`
+}
+
+// wptSummaryLane is one compat lane's Web Platform Tests figures — both the
+// file-level pass/fail and the finer subtest-level counts (the metric WPT itself
+// reports; each test/promise_test/async_test is one subtest).
+type wptSummaryLane struct {
+	Pass         int `json:"pass"`
+	Fail         int `json:"fail"`
+	Skip         int `json:"skip"`
+	Runnable     int `json:"runnable"`
+	Total        int `json:"total"`
+	Documents    int `json:"documents"` // wpt.fyi-unit expansion of Total (META: global= variants)
+	HTML         int `json:"html"`      // .html documents in the FULL pinned tree (DOM tier, not run)
+	SubtestPass  int `json:"subtestPass"`
+	SubtestTotal int `json:"subtestTotal"`
 }
 
 // tsSummaryLane is one compat lane's TypeScript-oracle figures.
@@ -74,7 +95,7 @@ func updateConformanceSummary(suite, lane string, laneStats any, corpusCommit st
 	defer summaryMu.Unlock()
 
 	doc := &summaryFile{SchemaVersion: 1, Suites: map[string]*summarySuite{}}
-	if b, err := os.ReadFile(summaryPath); err == nil {
+	if b, err := os.ReadFile(summaryPath()); err == nil {
 		_ = json.Unmarshal(b, doc) // tolerate an old/corrupt file
 		if doc.Suites == nil {
 			doc.Suites = map[string]*summarySuite{}
@@ -104,8 +125,8 @@ func updateConformanceSummary(suite, lane string, laneStats any, corpusCommit st
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(summaryPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(summaryPath()), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(summaryPath, append(out, '\n'), 0644)
+	return os.WriteFile(summaryPath(), append(out, '\n'), 0644)
 }

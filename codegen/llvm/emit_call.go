@@ -405,6 +405,22 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	}
 	// Special-case: console.log(...) and array.push(...)
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+		// URLSearchParams: the ordered pair-list backs the whole method surface
+		// (TDD-00203). Checked first so a shared name (sort/keys/values/entries/
+		// forEach) routes to the __kml_usp_* ABI rather than the array/Map paths
+		// below, which would reject the non-array/non-Map receiver.
+		if objTy := e.inferExprType(mem.Object); objTy.IsURLSearchParams {
+			if v, handled, err := e.emitURLSearchParamsCall(mem.Object, mem.Property, ex.Args, ex.GetPos()); handled {
+				return v, err
+			}
+			return Value{}, fmt.Errorf("%d:%d: URLSearchParams has no method '%s'", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "URL" && !e.isShadowedByLocal(id.Name) &&
+			(mem.Property == "canParse" || mem.Property == "parse") {
+			// WHATWG statics URL.canParse / URL.parse (TDD-00203) — distinct from
+			// the legacy `url.parse()` module function (a lowercase `url` import).
+			return e.emitURLStaticCall(mem.Property, ex.Args, ex.GetPos())
+		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "String" && !e.isShadowedByLocal(id.Name) {
 			return e.emitStringStaticCall(mem.Property, ex.Args, ex.GetPos())
 		}
@@ -862,7 +878,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			case "any":
 				return e.emitPromiseAny(ex.Args, ex.GetPos())
 			case "resolve":
-				return e.emitPromiseResolve(ex.Args, ex.GetPos())
+				return e.emitPromiseResolve(ex.Args, ex.GetPos(), Type{})
 			case "reject":
 				return e.emitPromiseReject(ex.Args, ex.GetPos())
 			}
@@ -1607,19 +1623,6 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitTypedArraySet(mem, ex.Args, ex.GetPos())
 			case "subarray":
 				return e.emitTypedArraySubarray(mem, ex.Args, ex.GetPos())
-			}
-		}
-		// URLSearchParams-only methods, checked before the generic Map
-		// dispatch right below (URLSearchParams IS a Map<string,string> —
-		// see IsURLSearchParams's doc comment — so get/set/has/delete/etc.
-		// all fall through to that generic path unchanged; only these two
-		// names need URLSearchParams-specific behavior).
-		if objTy := e.inferExprType(mem.Object); objTy.IsURLSearchParams {
-			switch mem.Property {
-			case "toString":
-				return e.emitURLSearchParamsToString(mem.Object, ex.GetPos())
-			case "getAll":
-				return e.emitURLSearchParamsGetAll(mem, ex.Args, ex.GetPos())
 			}
 		}
 		// XMLHttpRequest-only methods (TDD-00040).

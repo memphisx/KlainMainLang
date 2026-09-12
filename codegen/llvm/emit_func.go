@@ -113,6 +113,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// locals/params captured by some nested closure, boxed at declaration.
 	savedHoistedCaptures := e.hoistedCaptures
 	savedWidened := e.widenedBindings
+	savedEmptyArrayElems := e.emptyArrayElems
 	if decl.Body != nil {
 		paramNames := make([]string, len(decl.Params))
 		for i, p := range decl.Params {
@@ -120,9 +121,11 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		}
 		e.hoistedCaptures = capturedLocalNames(decl.Body.Body, paramNames)
 		e.widenedBindings = e.crossTypeWidenedBindings(decl.Body.Body)
+		e.emptyArrayElems = e.inferEmptyArrayElemTypes(decl.Body.Body)
 	} else {
 		e.hoistedCaptures = nil
 		e.widenedBindings = nil
+		e.emptyArrayElems = nil
 	}
 	defer func() {
 		e.breakStack = savedBreakStack
@@ -133,6 +136,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		e.currentCtorClass = savedCurrentCtorClass
 		e.hoistedCaptures = savedHoistedCaptures
 		e.widenedBindings = savedWidened
+		e.emptyArrayElems = savedEmptyArrayElems
 	}()
 	e.allocas = strings.Builder{}
 	e.body = strings.Builder{}
@@ -162,16 +166,16 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// param/return types independently here, so this function's own emitted
 	// signature always matches what every caller already expects it to be.
 	retType := sig.RetType
-	// TDD-00062 (Staged V2): a bare `any`/`unknown` return type is now
-	// allowed — the { i8, i64 } box round-trips through a return position
-	// exactly as TDD-00010 V2's `@erased` bare-T return already did. Only a
-	// *nested* dynamic shape (T[], an object field typed T, etc.) is still
-	// rejected: containsDynamicElement deliberately skips the top level, so
-	// this catches those without catching bare any/unknown. (Rejecting
-	// nested dynamics also subsumes the old erased-only carve-out — an
-	// erased T[] is IsArray, not top-level IsDynamic, so it still fails.)
+	// TDD-00062 (Staged V2): a bare `any`/`unknown` return type is allowed —
+	// the box round-trips through a return position exactly as TDD-00010 V2's
+	// `@erased` bare-T return already did. A dynamic *array* return (`any[]` /
+	// erased `T[]`) is now also allowed — it is the boxed-element array
+	// (TDD-00200/ADR-00887), which erased generics ride: `first<T>(arr: T[]):
+	// T` and `tail<T>(arr: T[]): T[]` work end to end. containsDynamicElement
+	// still rejects an `any`/union nested as an *object field* (that shape is
+	// unwired), which is what this catches.
 	if containsDynamicElement(retType) {
-		return fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object return type", decl.GetPos().Line, decl.GetPos().Col)
+		return fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an object field return type", decl.GetPos().Line, decl.GetPos().Col)
 	}
 	if err := validateCompositeType(retType, decl.GetPos().Line, decl.GetPos().Col); err != nil {
 		return err
@@ -1659,6 +1663,270 @@ func (e *Emitter) crossTypeWidenedBindings(body []ast.Statement) map[string]bool
 	return result
 }
 
+// inferEmptyArrayElemTypes scans one scope's body for untyped bindings whose
+// initializer is an empty array literal (`const a = []`) and infers each one's
+// element type from its later element-contributing usages: `a.push(v…)` /
+// `a.unshift(v…)`, `a.splice(i, d, v…)` inserts, `a[i] = v` (grow), and
+// whole-array reassignment `a = <array>`. When every contribution unifies to a
+// single element kind, that type replaces the blind `number[]` default
+// (`inferArrayType`'s empty case) so e.g. `const a = []; a.push("x")` is
+// `string[]` — TDD-00205 Stage 1. A binding with no contributor keeps the
+// default (its element type is unobservable); a heterogeneous one is left out
+// (Stage 2 / the Stage 0 clean rejection applies). Unlike crossTypeWidened-
+// Bindings this includes `const` (a const array's *contents* still mutate), and
+// it runs in both lanes (invalid IR is lane-independent). Nested function/arrow
+// bodies are separate scopes scanned by their own pass — a binding pushed to
+// only from inside a capturing closure keeps the default (a documented V1 edge,
+// same boundary crossTypeWidenedBindings draws).
+func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type {
+	candidates := map[string]bool{}
+	contrib := map[string][]Type{}
+	// The pre-pass runs before the body's symbols are defined, so a bare
+	// e.inferExprType of a pushed local (`const s = …; a.push(s)`, or the RegExp
+	// idiom `const e = re.exec(s); a.push(e[0])`) can't resolve it. Register the
+	// body's bindings in a throwaway scratch scope in source order as they are
+	// walked — so e.inferExprType resolves identifiers, index-into-local, and
+	// method calls on local receivers naturally — then discard the scope. Only
+	// the type matters here, so the dummy symbols carry no register (no codegen;
+	// inferExprType reads .Ty only). popScope restores the emitter's real scope
+	// stack so the actual body emission is unaffected.
+	e.pushScope()
+	defer e.popScope()
+	add := func(name string, t Type) {
+		if candidates[name] {
+			contrib[name] = append(contrib[name], t)
+		}
+	}
+	declare := func(v *ast.VarDeclaration) {
+		var t Type
+		if v.TypeAnnot != nil {
+			t = e.resolveType(v.TypeAnnot)
+		} else if v.Init != nil {
+			t = e.inferExprType(v.Init)
+		}
+		e.define(v.Name, Symbol{Ty: t})
+		if v.TypeAnnot != nil {
+			return
+		}
+		if lit, ok := v.Init.(*ast.ArrayLiteral); ok && len(lit.Elements) == 0 {
+			candidates[v.Name] = true
+		}
+	}
+	var walkExpr func(ast.Expression)
+	walkExpr = func(expr ast.Expression) {
+		switch ex := expr.(type) {
+		case *ast.CallExpression:
+			if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+				if id, ok := mem.Object.(*ast.Identifier); ok {
+					switch mem.Property {
+					case "push", "unshift":
+						for _, a := range ex.Args {
+							add(id.Name, e.inferExprType(a))
+						}
+					case "splice":
+						for i := 2; i < len(ex.Args); i++ {
+							add(id.Name, e.inferExprType(ex.Args[i]))
+						}
+					}
+				}
+			}
+			for _, a := range ex.Args {
+				walkExpr(a)
+			}
+		case *ast.AssignmentExpression:
+			if ex.Op == "=" {
+				switch lhs := ex.Left.(type) {
+				case *ast.IndexExpression:
+					if id, ok := lhs.Object.(*ast.Identifier); ok {
+						add(id.Name, e.inferExprType(ex.Right))
+					}
+				case *ast.Identifier:
+					if rt := e.inferExprType(ex.Right); rt.IsArray && rt.ElemType != nil {
+						add(lhs.Name, *rt.ElemType)
+					}
+				}
+			}
+			walkExpr(ex.Right)
+		}
+	}
+	var walkStmts func([]ast.Statement)
+	walkStmts = func(stmts []ast.Statement) {
+		for _, stmt := range stmts {
+			switch s := stmt.(type) {
+			case *ast.VarDeclaration:
+				declare(s)
+				if s.Init != nil {
+					walkExpr(s.Init)
+				}
+			case *ast.VarDeclarationList:
+				for _, d := range s.Decls {
+					declare(d)
+					if d.Init != nil {
+						walkExpr(d.Init)
+					}
+				}
+			case *ast.ExpressionStatement:
+				walkExpr(s.Expr)
+			case *ast.IfStatement:
+				if s.Consequent != nil {
+					walkStmts(s.Consequent.Body)
+				}
+				if s.Alternate != nil {
+					walkStmts([]ast.Statement{s.Alternate})
+				}
+			case *ast.ForStatement:
+				if es, ok := s.Init.(*ast.ExpressionStatement); ok {
+					walkExpr(es.Expr)
+				}
+				for _, upd := range s.Update {
+					walkExpr(upd)
+				}
+				if s.Body != nil {
+					walkStmts(s.Body.Body)
+				}
+			case *ast.WhileStatement:
+				if s.Body != nil {
+					walkStmts(s.Body.Body)
+				}
+			case *ast.DoWhileStatement:
+				if s.Body != nil {
+					walkStmts(s.Body.Body)
+				}
+			case *ast.BlockStatement:
+				walkStmts(s.Body)
+			case *ast.ForOfStatement:
+				if s.Body != nil {
+					walkStmts(s.Body.Body)
+				}
+			case *ast.SwitchStatement:
+				for _, c := range s.Cases {
+					walkStmts(c.Body)
+				}
+			case *ast.TryStatement:
+				if s.Body != nil {
+					walkStmts(s.Body.Body)
+				}
+				if s.Catch != nil && s.Catch.Body != nil {
+					walkStmts(s.Catch.Body.Body)
+				}
+				if s.Finally != nil {
+					walkStmts(s.Finally.Body)
+				}
+			}
+		}
+	}
+	walkStmts(body)
+	result := map[string]Type{}
+	for name := range candidates {
+		cs := contrib[name]
+		if unified, ok := unifyElemTypes(cs); ok {
+			result[name] = unified
+			continue
+		}
+		// Genuinely heterogeneous usage (≥2 distinct element kinds, e.g.
+		// `a.push(1); a.push("x")`) → a boxed-element array (`any[]`,
+		// TDD-00205 Stage 2 / TDD-00200): one NaN box per slot. The
+		// -compat lane split (accept-and-box vs clean rejection) is applied
+		// at the var-decl site, not here — the emitted element type is the
+		// same. A single non-Stage-1 kind (e.g. all-objects) is left out
+		// (not this pass's job; the Stage 0 backstop rejects a mismatch).
+		if isHeterogeneousElems(cs) {
+			result[name] = TypeAny
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// elemKindKeyBroad classifies an inferred element type into a coarse kind for
+// heterogeneity detection (TDD-00205 Stage 2). Unlike elemKindKey (which
+// returns "" outside Stage 1's scalar scope), it names every kind so two
+// differing non-scalar kinds — or a scalar and an object — count as distinct.
+func elemKindKeyBroad(t Type) string {
+	switch {
+	case t.IsArray:
+		return "array"
+	case t.IsObject || t.IsClass:
+		return "object"
+	case t.IR == "i1":
+		return "bool"
+	case t.Float:
+		return "number"
+	case isForOfStringTy(t):
+		return "string"
+	case t.IsBigInt:
+		return "bigint"
+	default:
+		return "other"
+	}
+}
+
+// isHeterogeneousElems reports whether a set of inferred element-contribution
+// types spans two or more distinct kinds — the trigger for lowering an untyped
+// empty-array binding to a boxed-element `any[]` (TDD-00205 Stage 2).
+func isHeterogeneousElems(cs []Type) bool {
+	seen := map[string]bool{}
+	for _, c := range cs {
+		seen[elemKindKeyBroad(c)] = true
+		if len(seen) >= 2 {
+			return true
+		}
+	}
+	return false
+}
+
+// unifyElemTypes returns the common element type of an untyped empty array's
+// inferred usage contributions, and whether they unify (TDD-00205 Stage 1). All
+// contributions must share one element *kind*; an empty or heterogeneous list
+// does not unify (it keeps the default / falls to the Stage 0 clean rejection).
+// Stage 1 deliberately scopes the safe, high-value kinds — number, string,
+// boolean — and blocks everything else (object shapes, bigint, Date, nested
+// arrays, symbols, dynamic) so it can never mis-merge two shapes into a wrong
+// element representation; those are Stage 2 (heterogeneous / boxed `any[]`).
+func unifyElemTypes(cs []Type) (Type, bool) {
+	if len(cs) == 0 {
+		return Type{}, false
+	}
+	key := elemKindKey(cs[0])
+	if key == "" {
+		return Type{}, false
+	}
+	for _, c := range cs[1:] {
+		if elemKindKey(c) != key {
+			return Type{}, false
+		}
+	}
+	switch key {
+	case "number":
+		// number is IEEE-754 double (TDD-00123); normalize any width to float64.
+		return TypeF64, true
+	case "bool":
+		return TypeBool, true
+	default: // "string" — keep the first contribution's concrete string type.
+		return cs[0], true
+	}
+}
+
+// elemKindKey is unifyElemTypes' same-kind discriminator: two element types are
+// mergeable iff their keys match. Returns "" for any type outside Stage 1's safe
+// scope, which blocks unification (the binding keeps the default element type).
+func elemKindKey(t Type) string {
+	switch {
+	case t.IR == "i1":
+		return "bool"
+	case t.Float:
+		return "number"
+	case isForOfStringTy(t):
+		// The strict "really a plain string" test — excludes Symbol/Date/RegExp/
+		// Map/Set/… which are also `ptr`- or `i64`-shaped (see isForOfStringTy).
+		return "string"
+	default:
+		return ""
+	}
+}
+
 // boxHoistedCapture allocates a heap cell for a captured local/param at its
 // dominating declaration point, seeds it (with the given already-materialized
 // initReg IR value of type ty, or the type's deterministic default when initReg
@@ -1849,6 +2117,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	// Eager-boxing capture set for this closure body (see hoistedCaptures).
 	savedHoistedCaptures := e.hoistedCaptures
 	savedWidened := e.widenedBindings
+	savedEmptyArrayElems := e.emptyArrayElems
 	{
 		paramNames := make([]string, len(af.Params))
 		for i, p := range af.Params {
@@ -1857,12 +2126,15 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 		if af.Block != nil {
 			e.hoistedCaptures = capturedLocalNames(af.Block.Body, paramNames)
 			e.widenedBindings = e.crossTypeWidenedBindings(af.Block.Body)
+			e.emptyArrayElems = e.inferEmptyArrayElemTypes(af.Block.Body)
 		} else if af.Body != nil {
 			e.hoistedCaptures = capturedLocalNames([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}}, paramNames)
 			e.widenedBindings = e.crossTypeWidenedBindings([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}})
+			e.emptyArrayElems = e.inferEmptyArrayElemTypes([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}})
 		} else {
 			e.hoistedCaptures = nil
 			e.widenedBindings = nil
+			e.emptyArrayElems = nil
 		}
 	}
 	defer func() {
@@ -1874,6 +2146,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 		e.currentCtorClass = savedCurrentCtorClass
 		e.hoistedCaptures = savedHoistedCaptures
 		e.widenedBindings = savedWidened
+		e.emptyArrayElems = savedEmptyArrayElems
 	}()
 
 	e.allocas = strings.Builder{}
@@ -2233,6 +2506,42 @@ func firstReturnExprInBlock(block *ast.BlockStatement) ast.Expression {
 		}
 	}
 	return nil
+}
+
+// blockAlwaysDiverges reports whether every path through the block ends without
+// returning normally — i.e. always throws. Used to infer a `never` return type
+// for an unannotated function whose body only throws (TS types such a function
+// `never`, assignable to any operand position), so `alwaysThrows() & 1` coerces
+// the never result to a dead zero instead of emitting an empty operand (invalid
+// IR). Deliberately conservative: only `throw`, a block containing a diverging
+// statement, and an `if` whose both branches diverge count. Infinite loops
+// (`while(true)` with no break) also produce `never` in TS but are not detected
+// here — erring toward `void` (the prior behavior) when unsure is always safe,
+// since a false positive would emit an unreachable the body never reaches.
+func blockAlwaysDiverges(block *ast.BlockStatement) bool {
+	if block == nil {
+		return false
+	}
+	for _, stmt := range block.Body {
+		if stmtAlwaysDiverges(stmt) {
+			return true // a diverging statement means control never passes it
+		}
+	}
+	return false
+}
+
+func stmtAlwaysDiverges(stmt ast.Statement) bool {
+	switch s := stmt.(type) {
+	case *ast.ThrowStatement:
+		return true
+	case *ast.BlockStatement:
+		return blockAlwaysDiverges(s)
+	case *ast.IfStatement:
+		// Both arms must diverge, and an `else` must exist (a bare `if` can fall
+		// through when the test is false).
+		return s.Alternate != nil && blockAlwaysDiverges(s.Consequent) && stmtAlwaysDiverges(s.Alternate)
+	}
+	return false
 }
 
 func firstReturnExprInStmt(stmt ast.Statement) ast.Expression {
@@ -2721,6 +3030,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	// Eager-boxing capture set for this function-expression body.
 	savedHoistedCaptures := e.hoistedCaptures
 	savedWidened := e.widenedBindings
+	savedEmptyArrayElems := e.emptyArrayElems
 	{
 		paramNames := make([]string, len(fe.Params))
 		for i, p := range fe.Params {
@@ -2729,9 +3039,11 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		if fe.Body != nil {
 			e.hoistedCaptures = capturedLocalNames(fe.Body.Body, paramNames)
 			e.widenedBindings = e.crossTypeWidenedBindings(fe.Body.Body)
+			e.emptyArrayElems = e.inferEmptyArrayElemTypes(fe.Body.Body)
 		} else {
 			e.hoistedCaptures = nil
 			e.widenedBindings = nil
+			e.emptyArrayElems = nil
 		}
 	}
 	defer func() {
@@ -2743,6 +3055,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		e.currentCtorClass = savedCurrentCtorClass
 		e.hoistedCaptures = savedHoistedCaptures
 		e.widenedBindings = savedWidened
+		e.emptyArrayElems = savedEmptyArrayElems
 	}()
 
 	e.allocas = strings.Builder{}
@@ -3310,8 +3623,8 @@ type cbKind int
 
 const (
 	cbClosure     cbKind = iota // closure header {funcPtr, envPtr} on heap
-	cbNamed                      // top-level named function, called directly
-	cbBuiltinConv                // a builtin conversion used as a fn reference: String/Number/Boolean
+	cbNamed                     // top-level named function, called directly
+	cbBuiltinConv               // a builtin conversion used as a fn reference: String/Number/Boolean
 )
 
 // builtinConvRetType is the element type a `String`/`Number`/`Boolean` used as

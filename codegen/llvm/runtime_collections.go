@@ -1,6 +1,9 @@
 package llvm
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ensureGroupMapHelpers backs Object.groupBy's runtime map (emit_objects.go).
 // Unrelated to the "group" tracking used by the Promise combinators
@@ -297,6 +300,115 @@ func (e *Emitter) ensureSortCmpStr() {
   %b = load ptr, ptr %pb, align 8
   %r = call i32 @strcmp(ptr %a, ptr %b)
   ret i32 %r
+}`)
+}
+
+// ensureAnyToCStr emits `ptr @__kml_any_to_cstr(i64 %v)` — the callable
+// runtime counterpart of the inline emitDynamicToString: it converts one
+// NaN-boxed `any` value to its JS String() form as a null-terminated heap
+// string. A callable function (not the inline emitter helper) is needed by
+// runtime comparators that qsort invokes — the default-comparator sort of a
+// boxed-element array (`any[]`, TDD-00200), which is lexicographic over each
+// element's string form, exactly like the concrete-typed default sort. Built
+// with the builder-swap idiom (cf. emitClassStaticInit) so it can reuse the
+// full tag-dispatch of emitDynamicToString rather than duplicating it as raw
+// IR.
+func (e *Emitter) ensureAnyToCStr() {
+	if e.usedAnyToCStr {
+		return
+	}
+	e.usedAnyToCStr = true
+
+	savedAllocas := e.allocas
+	savedBody := e.body
+	savedRegCtr := e.regCtr
+	savedLabelCtr := e.labelCtr
+	savedScopes := e.scopes
+	savedRetType := e.currentRetType
+	savedBlockDone := e.blockDone
+
+	e.allocas = strings.Builder{}
+	e.body = strings.Builder{}
+	e.regCtr = 0
+	e.labelCtr = 0
+	e.scopes = nil
+	e.blockDone = false
+	e.currentRetType = TypePtr
+
+	// %v is the incoming boxed value; the first fresh reg is %1, so reserve
+	// the parameter name explicitly in the signature below.
+	sv, err := e.emitDynamicToString(Value{Ref: "%v", Ty: TypeAny})
+	if err != nil {
+		// emitDynamicToString only errors on unsupported shapes it never hits
+		// for a bare any; treat as unreachable but keep the builder consistent.
+		panic(err)
+	}
+	e.emitTerminator(fmt.Sprintf("ret ptr %s", sv.Ref))
+
+	e.functions.WriteString("\ndefine ptr @__kml_any_to_cstr(i64 %v) {\nentry:\n")
+	e.functions.WriteString(e.allocas.String())
+	e.functions.WriteString(e.body.String())
+	e.functions.WriteString("}\n")
+
+	e.allocas = savedAllocas
+	e.body = savedBody
+	e.regCtr = savedRegCtr
+	e.labelCtr = savedLabelCtr
+	e.scopes = savedScopes
+	e.currentRetType = savedRetType
+	e.blockDone = savedBlockDone
+}
+
+// ensureSortCmpAnyLex emits the default (no-comparator) sort comparator for a
+// boxed-element array (`any[]`): each slot is a NaN box, converted to its JS
+// String() form and compared lexicographically — matching JS's default sort,
+// which ToString's every element regardless of type.
+func (e *Emitter) ensureSortCmpAnyLex() {
+	if e.usedSortCmpAnyLex {
+		return
+	}
+	e.usedSortCmpAnyLex = true
+	e.ensureStrcmp()
+	e.ensureAnyToCStr()
+	e.emitGlobal(`define i32 @__kml_cmp_any_lex(ptr %pa, ptr %pb) {
+  %a = load i64, ptr %pa, align 8
+  %b = load i64, ptr %pb, align 8
+  %as = call ptr @__kml_any_to_cstr(i64 %a)
+  %bs = call ptr @__kml_any_to_cstr(i64 %b)
+  %r = call i32 @strcmp(ptr %as, ptr %bs)
+  ret i32 %r
+}`)
+}
+
+// ensureSortTrampolineAny is the custom-comparator trampoline for a boxed-
+// element array (`any[]`): elements are NaN boxes (i64 slots) passed straight
+// to the closure (whose params are `any`), and the closure returns a boxed
+// `any` number (e.g. `(x, y) => x - y` under -compat=js any-arithmetic). The
+// i64 result is a NaN box, so it is reduced to a double via __kml_any_tonum
+// before taking qsort's -1/0/1 sign — reading the box bits as an integer
+// (the i64 trampoline) made the sort a silent no-op.
+func (e *Emitter) ensureSortTrampolineAny() {
+	if e.usedSortTrampolineAny {
+		return
+	}
+	e.usedSortTrampolineAny = true
+	e.ensureSortClosGlobal()
+	e.ensureAnyOps() // __kml_any_tonum
+	e.emitGlobal(`define i32 @__kml_sort_tramp_any(ptr %pa, ptr %pb) {
+  %clos = load ptr, ptr @__kml_sort_clos, align 8
+  %a = load i64, ptr %pa, align 8
+  %b = load i64, ptr %pb, align 8
+  %fp_slot = getelementptr {ptr, ptr}, ptr %clos, i32 0, i32 0
+  %fp = load ptr, ptr %fp_slot, align 8
+  %ep_slot = getelementptr {ptr, ptr}, ptr %clos, i32 0, i32 1
+  %ep = load ptr, ptr %ep_slot, align 8
+  %r = call i64 (ptr, i64, i64) %fp(ptr %ep, i64 %a, i64 %b)
+  %rd = call double @__kml_any_tonum(i64 %r)
+  %neg = fcmp olt double %rd, 0.0
+  %pos = fcmp ogt double %rd, 0.0
+  %s1 = select i1 %pos, i32 1, i32 0
+  %ri = select i1 %neg, i32 -1, i32 %s1
+  ret i32 %ri
 }`)
 }
 

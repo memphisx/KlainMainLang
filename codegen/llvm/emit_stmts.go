@@ -557,6 +557,17 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	incL := e.freshLabel("forof.inc")
 	endL := e.freshLabel("forof.end")
 
+	// A URLSearchParams' default iterator is its entries() ([name, value] tuples)
+	// — TDD-00203. Rewrite `for (… of params)` to `for (… of params.entries())`
+	// so the tuple-array loop below handles it, matching WHATWG (and Map, whose
+	// default iterator is likewise entries).
+	if objTy := e.inferExprType(s.Iterable); objTy.IsURLSearchParams {
+		sCopy := *s
+		sCopy.Iterable = ast.NewCallExpression(
+			ast.NewMemberExpression(s.Iterable, "entries", s.GetPos()), nil, s.GetPos())
+		s = &sCopy
+	}
+
 	e.pushScope()
 	defer e.popScope()
 

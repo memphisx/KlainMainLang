@@ -6,6 +6,14 @@ import (
 
 // --- Date (UTC only, not local time — see docs/adr/ADR-00014.md) ---
 
+// A non-numeric argument to a Date calendar constructor or setter (e.g. a
+// Symbol) is a clean compile-time type error, not invalid IR at the component
+// arithmetic (the A1 invalid-IR cluster; same fix as ADR-00882/00883).
+func TestE2EDateNonNumericArgRejected(t *testing.T) {
+	mustCompileError(t, `const d = new Date(2020, Symbol("x"))`, "Date component")
+	mustCompileError(t, `const d = new Date(0); d.setFullYear(Symbol("x"))`, "Date setter argument")
+}
+
 func TestE2EDateEpoch(t *testing.T) {
 	assertOutput(t, `
 const d: Date = new Date(0)

@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "suites": {
+    "node": {
+      "lanes": {
+        "js": {
+          "pass": 50,
+          "fail": 2536,
+          "skip": 1371,
+          "runnable": 2586,
+          "total": 3957
+        },
+        "strict": {
+          "pass": 51,
+          "fail": 2535,
+          "skip": 1371,
+          "runnable": 2586,
+          "total": 3957
+        }
+      }
+    },
+    "test262": {
+      "lanes": {
+        "js": {
+          "overall": {
+            "pass": 6881,
+            "total": 53578
+          },
+          "inScope": {
+            "pass": 6726,
+            "total": 42942
+          },
+          "pending": {
+            "pass": 489,
+            "total": 2860
+          },
+          "byPhase": {
+            "clang": 307,
+            "codegen-hang": 3,
+            "compile": 43763,
+            "neg-accepted": 852,
+            "other": 64,
+            "run-timeout": 11,
+            "runtime": 1599,
+            "strict-reject": 98
+          }
+        },
+        "strict": {
+          "overall": {
+            "pass": 6482,
+            "total": 53578
+          },
+          "inScope": {
+            "pass": 6347,
+            "total": 42942
+          },
+          "pending": {
+            "pass": 453,
+            "total": 2860
+          },
+          "byPhase": {
+            "clang": 210,
+            "codegen-hang": 3,
+            "compile": 44378,
+            "neg-accepted": 837,
+            "other": 54,
+            "run-timeout": 5,
+            "runtime": 1017,
+            "strict-reject": 592
+          }
+        }
+      }
+    },
+    "ts": {
+      "lanes": {
+        "js": {
+          "agree": 6186,
+          "classified": 11034,
+          "falseAccept": 1164,
+          "falseReject": 3684,
+          "skipped": 800
+        },
+        "strict": {
+          "agree": 6163,
+          "classified": 11034,
+          "falseAccept": 1120,
+          "falseReject": 3751,
+          "skipped": 800
+        }
+      }
+    },
+    "wpt": {
+      "lanes": {
+        "js": {
+          "pass": 11,
+          "fail": 1955,
+          "skip": 2241,
+          "runnable": 1966,
+          "total": 4207,
+          "documents": 7077,
+          "html": 66781,
+          "subtestPass": 32,
+          "subtestTotal": 86
+        },
+        "strict": {
+          "pass": 11,
+          "fail": 1955,
+          "skip": 2241,
+          "runnable": 1966,
+          "total": 4207,
+          "documents": 7077,
+          "html": 66781,
+          "subtestPass": 38,
+          "subtestTotal": 100
+        }
+      }
+    }
+  }
+}

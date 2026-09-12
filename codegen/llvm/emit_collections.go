@@ -362,6 +362,16 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 		if err != nil {
 			return Value{}, err
 		}
+		// An `any`-valued map boxes the stored value into a NaN-box word so it
+		// round-trips by tag through get/===/etc. Without this a `null` literal
+		// (a `ptr`-shaped value) reached valueToMapVal as `ptrtoint null` = 0,
+		// not `nbNull`, so `m.get(k) === null` was false (TDD-00155 any-eq).
+		if valTy.IsDynamic && !vVal.Ty.IsDynamic {
+			vVal, err = e.emitBoxValue(vVal)
+			if err != nil {
+				return Value{}, err
+			}
+		}
 		kRef := e.valueToMapKey(kVal, keyTy)
 		vRef := e.valueToMapVal(vVal, valTy)
 		if strKey {

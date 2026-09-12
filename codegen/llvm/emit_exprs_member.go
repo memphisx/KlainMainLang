@@ -268,7 +268,10 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 	if err != nil {
 		return "", TypeVoid, err
 	}
-	idxVal = e.arrayIndexToI64(idxVal)
+	idxVal, err = e.arrayIndexToI64(idxVal, ex.Index.GetPos())
+	if err != nil {
+		return "", TypeVoid, err
+	}
 
 	oobReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, %s", oobReg, idxVal.Ref, lenReg))
@@ -1040,6 +1043,11 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 		}
 	}
 	if ex.Property == "size" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsURLSearchParams {
+			// The ordered pair-list's count (TDD-00203) — a number, not the Map
+			// header read below.
+			return e.emitURLSearchParamsSize(ex.Object)
+		}
 		if id, ok := ex.Object.(*ast.Identifier); ok {
 			if sym, found := e.lookup(id.Name); found && (sym.Ty.IsMap || sym.Ty.IsSet) {
 				mapPtr := e.freshReg()
@@ -1219,6 +1227,12 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: val, Ty: dTy}, nil
 		}
 		return Value{}, fmt.Errorf("%d:%d: '%s' can't be read on an un-narrowed union — narrow it first (e.g. `if (x.%s === ...)` or `typeof`)", ex.GetPos().Line, ex.GetPos().Col, ex.Property, ex.Property)
+	}
+	// A property read on a caught value (TypeCaught ≈ `unknown`, TDD-00202):
+	// a caught Error yields its field; anything else goes through the dynamic
+	// member path (primitives → undefined).
+	if objVal.Ty.IsCaught {
+		return e.emitCaughtMemberGet(objVal, ex.Property, ex.GetPos())
 	}
 	// A property read on a bare any/unknown value is a runtime tag dispatch
 	// into the D1 dynamic object model (TDD-00155 Stage 1).

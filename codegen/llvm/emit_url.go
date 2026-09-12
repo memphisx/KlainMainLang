@@ -64,11 +64,21 @@ func (e *Emitter) emitStrBranch(condReg string, thenFn, elseFn func() (string, e
 // throw-worthy sense; only curl_url_set's own result (checked once, in
 // emitNewURLExpression) can produce a KML-visible Error.
 func (e *Emitter) curlURLGetPart(handle string, part int) (ptrReg, present string) {
+	return e.curlURLGetPartFlag(handle, part, 0)
+}
+
+// curluNoDefaultPort is CURLU_NO_DEFAULT_PORT (curl/urlapi.h, verified =2 on the
+// build): omit a port equal to the scheme's default when reading the port or the
+// full URL — the WHATWG normalization curl doesn't do by default (TDD-00203).
+const curluNoDefaultPort = 1 << 1
+
+// curlURLGetPartFlag is curlURLGetPart with an explicit curl_url_get flag.
+func (e *Emitter) curlURLGetPartFlag(handle string, part, flag int) (ptrReg, present string) {
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
 	code := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_get(ptr %s, i32 %d, ptr %s, i32 0)", code, handle, part, slot))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_get(ptr %s, i32 %d, ptr %s, i32 %d)", code, handle, part, slot, flag))
 	present = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", present, code))
 	raw := e.freshReg()
@@ -146,6 +156,102 @@ func (e *Emitter) emitNewURLExpression(ex *ast.NewURLExpression) (Value, error) 
 		return Value{}, err
 	}
 	return Value{Ref: objReg, Ty: urlTy}, nil
+}
+
+// emitURLStaticParse parses input (with an optional base) into a curl handle
+// WITHOUT throwing — the shared core of the WHATWG statics URL.canParse/URL.parse
+// (TDD-00203). Returns (handle, okReg) where okReg is an i1: true iff every
+// curl_url_set succeeded. On failure the handle is left cleaned up.
+func (e *Emitter) emitURLStaticParse(args []ast.Expression, pos ast.Pos) (handle, okReg string, err error) {
+	e.ensureCurlURL()
+	e.ensureMalloc()
+	e.ensureMapStrHelpers()
+	e.ensureHTTPParseQuery()
+	if len(args) < 1 {
+		return "", "", fmt.Errorf("%d:%d: URL static takes at least 1 argument", pos.Line, pos.Col)
+	}
+	rawVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return "", "", err
+	}
+	rawVal = e.coerce(rawVal, TypePtr)
+	var baseVal Value
+	if len(args) >= 2 {
+		baseVal, err = e.emitExpr(args[1])
+		if err != nil {
+			return "", "", err
+		}
+		baseVal = e.coerce(baseVal, TypePtr)
+	}
+	handle = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @curl_url()", handle))
+	okAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", okAlloca))
+	e.emitInstr(fmt.Sprintf("store i1 true, ptr %s, align 1", okAlloca))
+	setPart := func(ref string) {
+		code := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", code, handle, curluPartURL, ref))
+		bad := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", bad, code))
+		badL := e.freshLabel("url.static.bad")
+		contL := e.freshLabel("url.static.cont")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, contL))
+		e.emitLabel(badL)
+		e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", okAlloca))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+		e.emitLabel(contL)
+	}
+	if len(args) >= 2 {
+		setPart(baseVal.Ref)
+	}
+	setPart(rawVal.Ref)
+	okReg = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", okReg, okAlloca))
+	return handle, okReg, nil
+}
+
+// emitURLStaticCall dispatches the WHATWG static methods URL.canParse(input[,
+// base]) → boolean and URL.parse(input[, base]) → URL | null. Both are
+// non-throwing (unlike `new URL(...)`), matching the spec (TDD-00203).
+func (e *Emitter) emitURLStaticCall(property string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	switch property {
+	case "canParse":
+		handle, okReg, err := e.emitURLStaticParse(args, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
+		return Value{Ref: okReg, Ty: TypeBool}, nil
+	case "parse":
+		handle, okReg, err := e.emitURLStaticParse(args, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		urlTy := URLType()
+		resAlloca := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resAlloca))
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", resAlloca))
+		okL := e.freshLabel("url.parse.ok")
+		doneL := e.freshLabel("url.parse.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", okReg, okL, doneL))
+		e.emitLabel(okL)
+		objReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", objReg, urlTy.StructSize()))
+		if err := e.deriveURLFieldsIntoObject(handle, objReg); err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", objReg, resAlloca))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		// On the failure path the handle is still live; clean it up once merged.
+		res := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", res, resAlloca))
+		// A URL | null result: the object type, nullable.
+		rt := urlTy
+		rt.Nullable = true
+		return Value{Ref: res, Ty: rt}, nil
+	}
+	return Value{}, fmt.Errorf("%d:%d: URL has no static method '%s'", pos.Line, pos.Col, property)
 }
 
 // emitUrlParse implements the legacy `url.parse(urlString)` (TDD-00165 Stage 4).
@@ -838,6 +944,25 @@ func (e *Emitter) emitStrNonEmpty(ptr string) string {
 // (ADR-00572), which re-derive every field after mutating one part so the
 // object never desyncs.
 func (e *Emitter) deriveURLFieldsIntoObject(handle, objReg string) error {
+	// WHATWG host normalization curl doesn't do: lowercase the host and write it
+	// back into the handle, so every derived field (host/hostname/href/origin)
+	// reads the normalized form (TDD-00203). curl already lowercases the scheme.
+	// ASCII lowercasing via __kml_tolower; guarded on the host being present.
+	if hRaw, hPresent := e.curlURLGetPart(handle, curluPartHost); true {
+		// Lowercase + set-back ONLY when the host is present: __kml_tolower(null)
+		// would crash, and a file:// URL (no host) reaches here with a null hRaw.
+		setL := e.freshLabel("url.host.lower")
+		doneL := e.freshLabel("url.host.lowerdone")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hPresent, setL, doneL))
+		e.emitLabel(setL)
+		e.ensureStringToLower()
+		lower := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_tolower(ptr %s)", lower, hRaw))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartHost, lower))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+	}
+
 	schemeRaw, _ := e.curlURLGetPart(handle, curluPartScheme) // always present after a successful set
 	protocol, err := e.emitStringConcat(Value{Ref: schemeRaw, Ty: TypePtr}, Value{Ref: e.internString(":"), Ty: TypePtr})
 	if err != nil {
@@ -859,7 +984,9 @@ func (e *Emitter) deriveURLFieldsIntoObject(handle, objReg string) error {
 		return err
 	}
 
-	portRaw, portPresent := e.curlURLGetPart(handle, curluPartPort)
+	// NO_DEFAULT_PORT: an explicit port equal to the scheme's default (http:80,
+	// https:443, ws:80, wss:443, ftp:21) reads as absent — WHATWG strips it.
+	portRaw, portPresent := e.curlURLGetPartFlag(handle, curluPartPort, curluNoDefaultPort)
 	port, err := e.emitStrBranch(portPresent,
 		func() (string, error) {
 			v, err := e.emitStringConcat(Value{Ref: portRaw, Ty: TypePtr}, Value{Ref: e.internString(""), Ty: TypePtr})
@@ -967,7 +1094,7 @@ func (e *Emitter) deriveURLFieldsIntoObject(handle, objReg string) error {
 		return err
 	}
 
-	hrefRaw, _ := e.curlURLGetPart(handle, curluPartURL) // always present after a successful set
+	hrefRaw, _ := e.curlURLGetPartFlag(handle, curluPartURL, curluNoDefaultPort) // default port stripped, always present
 	href, err := e.emitStringConcat(Value{Ref: hrefRaw, Ty: TypePtr}, Value{Ref: e.internString(""), Ty: TypePtr})
 	if err != nil {
 		return err
@@ -982,18 +1109,10 @@ func (e *Emitter) deriveURLFieldsIntoObject(handle, objReg string) error {
 		return err
 	}
 
-	// searchParams: an ordinary Map<string,string>, populated from the raw
-	// query text via the same __kml_http_parse_query helper req.query
-	// already uses (percent-decodes both key and value).
-	mapPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", mapPtr))
-	qParseL := e.freshLabel("url.query.parse")
-	qDoneL := e.freshLabel("url.query.done")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", queryPresent, qParseL, qDoneL))
-	e.emitLabel(qParseL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_http_parse_query(ptr %s, ptr %s)", queryRaw, mapPtr))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", qDoneL))
-	e.emitLabel(qDoneL)
+	// searchParams: the ordered pair-list (TDD-00203), parsed from the raw query
+	// text preserving cross-key order and duplicate keys (percent-decoding both
+	// name and value). Replaces the former Map<string,string> fill.
+	mapPtr := e.buildURLSearchParamsFromQuery(queryRaw, queryPresent)
 
 	e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
 
@@ -1215,42 +1334,6 @@ func (e *Emitter) emitURLComponentSet(objVal Value, property string, rhsExpr ast
 	return rhsVal, nil
 }
 
-// emitNewURLSearchParamsExpression implements `new URLSearchParams()`
-// (empty) and `new URLSearchParams(init)` (parses init as a query string,
-// tolerating a leading '?'). See URLSearchParamsType's doc comment for the
-// single-value-per-key scope narrowing.
-func (e *Emitter) emitNewURLSearchParamsExpression(ex *ast.NewURLSearchParamsExpression) (Value, error) {
-	e.ensureMapStrHelpers()
-	mapPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", mapPtr))
-
-	if ex.Init != nil {
-		val, err := e.emitExpr(ex.Init)
-		if err != nil {
-			return Value{}, err
-		}
-		val = e.coerce(val, TypePtr)
-		stripped, err := e.emitStripLeadingQuestionMark(val)
-		if err != nil {
-			return Value{}, err
-		}
-		e.ensureHTTPParseQuery()
-		e.emitInstr(fmt.Sprintf("call void @__kml_http_parse_query(ptr %s, ptr %s)", stripped.Ref, mapPtr))
-	}
-
-	return Value{Ref: mapPtr, Ty: URLSearchParamsType()}, nil
-}
-
-// emitURLSearchParamsToString implements urlSearchParams.toString(), by way
-// of emitMapStrToQueryString — shared with querystring.stringify
-// (emit_querystring.go), which serializes a Map<string,string> identically.
-func (e *Emitter) emitURLSearchParamsToString(objExpr ast.Expression, pos ast.Pos) (Value, error) {
-	_, mapPtr, err := e.resolveMapOrSetForCall(objExpr, pos)
-	if err != nil {
-		return Value{}, err
-	}
-	return e.emitMapStrToQueryString(mapPtr)
-}
 
 // emitMapStrToQueryString serializes the Map<string,string> at mapPtr back
 // to "k1=v1&k2=v2" (percent-encoding each key/value via the same helper
@@ -1351,52 +1434,3 @@ func (e *Emitter) emitMapStrToQueryString(mapPtr string) (Value, error) {
 	return Value{Ref: result, Ty: TypePtr}, nil
 }
 
-// emitURLSearchParamsGetAll implements urlSearchParams.getAll(name): since
-// this compiler's URLSearchParams keeps only one value per key (see
-// URLSearchParamsType's doc comment), this always returns a 0- or 1-element
-// array — present iff .has(name).
-func (e *Emitter) emitURLSearchParamsGetAll(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: getAll takes exactly 1 argument", pos.Line, pos.Col)
-	}
-	_, mapPtr, err := e.resolveMapOrSetForCall(mem.Object, pos)
-	if err != nil {
-		return Value{}, err
-	}
-	nameVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	nameVal = e.coerce(nameVal, TypePtr)
-
-	e.ensureMapStrHelpers()
-	hasReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", hasReg, mapPtr, nameVal.Ref))
-
-	e.ensureMalloc()
-	oneBytes := TypePtr.Align()
-	outPtr, err := e.emitStrBranch(hasReg,
-		func() (string, error) {
-			p := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", p, oneBytes))
-			valReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", valReg, mapPtr, nameVal.Ref))
-			valPtr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", valPtr, valReg))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align %d", valPtr, p, oneBytes))
-			return p, nil
-		},
-		func() (string, error) { return "null", nil },
-	)
-	if err != nil {
-		return Value{}, err
-	}
-	lenReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 1, i64 0", lenReg, hasReg))
-
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, outPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
-	return Value{Ref: r1, Ty: ArrayOf(TypePtr)}, nil
-}

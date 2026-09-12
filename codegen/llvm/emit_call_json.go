@@ -660,6 +660,41 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 	if val.Ty.IsBigInt {
 		return Value{}, fmt.Errorf("JSON.stringify does not support BigInt values (TypeError in JS)")
 	}
+	// A bare any/unknown value — a NaN-boxed element of a boxed-element array
+	// (`any[]`, TDD-00200) or an any-typed field — serializes through the
+	// dynamic walker, which self-describes the box tag (number/string/boolean/
+	// null → their JSON; nested bag/array recurse). Checked before the IR-i64
+	// default below, which would otherwise render the raw box payload as a
+	// number. In this value position (array element / object field) an
+	// undefined box renders as JSON `null`, matching real JSON.stringify of an
+	// array hole / present-but-undefined element.
+	if isUnconstrainedDynamic(val.Ty) {
+		dyn, err := e.emitJSONStringifyDynamic(val, ind, ast.Pos{})
+		if err != nil {
+			return Value{}, err
+		}
+		// dyn.Ref is i64: nbUndefined → `null`, else a heap string box (ptr).
+		isUndef := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isUndef, dyn.Ref, nbUndefined))
+		strPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", strPtr, dyn.Ref))
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		uL := e.freshLabel("json.dyn.undef")
+		sL := e.freshLabel("json.dyn.str")
+		mL := e.freshLabel("json.dyn.merge")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isUndef, uL, sL))
+		e.emitLabel(uL)
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+		e.emitLabel(sL)
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", strPtr, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+		e.emitLabel(mL)
+		out := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+		return Value{Ref: out, Ty: TypePtr}, nil
+	}
 	// A nullable-scalar field/value (TDD-00064 Stage 3) serializes to its
 	// value's JSON when present, the literal `null` when absent — matching real
 	// JSON.stringify, which emits null for a null-valued property.
@@ -724,6 +759,14 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 		// A tuple serializes as a JSON array, not an object — checked before
 		// the generic IsObject branch (a tuple is structurally an object).
 		return e.emitJSONStringifyTuple(val, ind)
+	}
+	if val.Ty.IsURL {
+		// JSON.stringify(url) honors URL.prototype.toJSON() === href (TDD-00203):
+		// serialize the href string, not the component struct. href is field 0 of
+		// URLType (all fields are ptr), so it loads at offset 0.
+		href := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", href, val.Ref))
+		return e.emitJSONStringifyValue(Value{Ref: href, Ty: TypePtr}, ind)
 	}
 	if val.Ty.IsObject {
 		// A null object pointer (an absent/null object-typed field — e.g. an

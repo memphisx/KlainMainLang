@@ -16,6 +16,14 @@ func (e *Emitter) ensureExceptionHelpers() {
 	e.ensureMalloc()
 
 	e.emitGlobal(`@__kml_thrown  = internal thread_local global ptr null, align 8`)
+	// TDD-00202: the thrown value is an unpacked (tag, payload) pair — the logical
+	// kmlTag* value plus its payload (a NaN-box payload for primitives; a
+	// ptrtoint'd errorObjType pointer for tag kmlTagError=13). `@__kml_thrown`
+	// (the ptr above) stays set to the Error object when tag==13, so the
+	// internal Error-only catch paths (async/fs) and the uncaught printer keep
+	// reading it directly; it is null for a non-Error throw.
+	e.emitGlobal(`@__kml_thrown_tag = internal thread_local global i8 13, align 1`)
+	e.emitGlobal(`@__kml_thrown_pay = internal thread_local global i64 0, align 8`)
 	// align 16: Win64 _setjmp saves XMM registers with aligned stores, so every
 	// 512-byte slot (a multiple of 16) must start 16-aligned; 8 faults there.
 	e.emitGlobal(`@__kml_jmp_stk = internal thread_local global [64 x [64 x i64]] zeroinitializer, align 16`)
@@ -63,32 +71,102 @@ func (e *Emitter) ensureExceptionHelpers() {
   %v = load ptr, ptr @__kml_thrown, align 8
   ret ptr %v
 }`)
+	// The unpacked thrown record accessors (TDD-00202): the catch binding loads
+	// the tag + payload to reconstruct the caught value.
+	e.emitGlobal(`define i8 @__kml_get_thrown_tag() {
+  %t = load i8, ptr @__kml_thrown_tag, align 1
+  ret i8 %t
+}`)
+	e.emitGlobal(`define i64 @__kml_get_thrown_pay() {
+  %p = load i64, ptr @__kml_thrown_pay, align 8
+  ret i64 %p
+}`)
 
+	// __kml_throw(ptr errObj) is the Error-object shim kept for the ~41 internal
+	// throw sites (assert/fs/encoding/...) and every `throw new Error(...)`:
+	// record it as a kmlTagError (13) value and delegate to the core.
 	e.emitGlobal(`define void @__kml_throw(ptr %errObj) {
 entry:
-  store ptr %errObj, ptr @__kml_thrown, align 8
+  %pay = ptrtoint ptr %errObj to i64
+  call void @__kml_throw_any(i8 13, i64 %pay)
+  unreachable
+}`)
+
+	e.emitGlobal(`@.kml_unc_thrown = private unnamed_addr constant [16 x i8] c"[thrown value]\0A\00", align 1`)
+	// __kml_caught_unc_msg renders the message an uncaught throw prints: an Error
+	// yields its .message; a string is itself; a number is dtoa'd; booleans /
+	// null / undefined their literals; any other value a generic placeholder
+	// (object stringification at the top level is a minor edge). The returned
+	// pointer is NUL-terminated (printed with the "Uncaught: %s" format).
+	e.emitGlobal(`@.kml_s_true = private unnamed_addr constant [5 x i8] c"true\00", align 1`)
+	e.emitGlobal(`@.kml_s_false = private unnamed_addr constant [6 x i8] c"false\00", align 1`)
+	e.emitGlobal(`@.kml_s_null = private unnamed_addr constant [5 x i8] c"null\00", align 1`)
+	e.emitGlobal(`@.kml_s_undef = private unnamed_addr constant [10 x i8] c"undefined\00", align 1`)
+	e.ensureDtoa()
+	e.ensureMalloc()
+	e.emitGlobal(`define ptr @__kml_caught_unc_msg(i8 %tag, i64 %pay) {
+entry:
+  switch i8 %tag, label %other [
+    i8 13, label %err
+    i8 2, label %str
+    i8 1, label %num
+    i8 3, label %bool
+    i8 4, label %null
+    i8 5, label %undef
+  ]
+err:
+  %eo = inttoptr i64 %pay to ptr
+  %mp = getelementptr { i64, ptr, ptr }, ptr %eo, i32 0, i32 1
+  %m = load ptr, ptr %mp, align 8
+  ret ptr %m
+str:
+  %sp = inttoptr i64 %pay to ptr
+  ret ptr %sp
+num:
+  %d = bitcast i64 %pay to double
+  %buf = call ptr @malloc(i64 32)
+  call void @__kml_dtoa(ptr %buf, double %d)
+  ret ptr %buf
+bool:
+  %bt = icmp ne i64 %pay, 0
+  %bs = select i1 %bt, ptr @.kml_s_true, ptr @.kml_s_false
+  ret ptr %bs
+null:
+  ret ptr @.kml_s_null
+undef:
+  ret ptr @.kml_s_undef
+other:
+  ret ptr @.kml_unc_thrown
+}`)
+
+	e.emitGlobal(`define void @__kml_throw_any(i8 %tag, i64 %pay) {
+entry:
+  store i8 %tag, ptr @__kml_thrown_tag, align 1
+  store i64 %pay, ptr @__kml_thrown_pay, align 8
+  ; Keep @__kml_thrown pointing at the Error object for tag 13 (internal
+  ; Error-only catch paths + the uncaught printer read it); null otherwise.
+  %isErr = icmp eq i8 %tag, 13
+  %errObj = inttoptr i64 %pay to ptr
+  %thrownPtr = select i1 %isErr, ptr %errObj, ptr null
+  store ptr %thrownPtr, ptr @__kml_thrown, align 8
   %top = load i32, ptr @__kml_jmp_top, align 4
   %iszero = icmp eq i32 %top, 0
   br i1 %iszero, label %uncaught, label %jump
 uncaught:
-  ; process.on('uncaughtException', ...) hook: if a listener is registered it
-  ; runs and this returns 1, and we skip the default print — but still exit
-  ; (this exception model has unwound the stack to the top-level catch-all, so
-  ; there is no in-progress computation to resume). Runs the 'exit' listener
-  ; on the way out, like Node. Returns 0 (no listener) → default behavior.
-  %prochandled = call i1 @__kml_process_uncaught(ptr %errObj)
+  ; process.on('uncaughtException', ...) hook (passed the Error object, or null
+  ; for a non-Error throw): if a listener runs it returns 1 and we skip the
+  ; default print — but still exit (the stack has unwound to the top-level
+  ; catch-all). Runs the 'exit' listener on the way out, like Node.
+  %prochandled = call i1 @__kml_process_uncaught(ptr %thrownPtr)
   br i1 %prochandled, label %procunc, label %defunc
 procunc:
   call void @__kml_run_exit_handlers(i64 1)
   call void @exit(i32 1)
   unreachable
 defunc:
-  %msgPtr = getelementptr { i64, ptr, ptr }, ptr %errObj, i32 0, i32 1
-  %msg = load ptr, ptr %msgPtr, align 8
+  %msg = call ptr @__kml_caught_unc_msg(i8 %tag, i64 %pay)
   ; TDD-00098 stage 5: on a worker thread this call does NOT return — it
-  ; reports 'error' + exit(1) to the parent and ends only that thread. On
-  ; the main thread (or without workers, via the no-op stub) it returns and
-  ; the process-fatal path below runs as always.
+  ; reports 'error' + exit(1) to the parent and ends only that thread.
   call void @__kml_worker_uncaught(ptr %msg)
   call i32 (ptr, ...) @printf(ptr @.kml_unc_fmt, ptr %msg)
   call void @exit(i32 1)

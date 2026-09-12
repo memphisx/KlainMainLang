@@ -84,9 +84,8 @@ console.log(p.toString())
 }
 
 func TestE2EURLSearchParamsSetAndDelete(t *testing.T) {
-	// delete() is a swap-with-last removal (see __kml_map_str_delete in
-	// runtime_collections.go) — order after a delete is not
-	// insertion-order-preserving, so toString()'s result reflects that.
+	// The ordered pair-list (TDD-00203): set appends a new key, delete removes in
+	// place preserving insertion order — so toString stays insertion-ordered.
 	assertOutput(t, `
 const p = new URLSearchParams("a=1&b=2")
 p.set("c", "3")
@@ -94,24 +93,30 @@ console.log(p.get("c"))
 p.delete("a")
 console.log(p.has("a"))
 console.log(p.toString())
-`, "3\nfalse\nc=3&b=2")
+`, "3\nfalse\nb=2&c=3")
 }
 
-func TestE2EURLSearchParamsDuplicateKeyLastWins(t *testing.T) {
+// TestE2EURLSearchParamsDuplicateKeys covers the faithful WHATWG multi-value
+// model (TDD-00203): duplicate keys are preserved, get() returns the FIRST value,
+// and getAll() returns every value in order — not the old Map single-value one.
+func TestE2EURLSearchParamsDuplicateKeys(t *testing.T) {
 	assertOutput(t, `
 const p = new URLSearchParams("a=1&a=2")
 console.log(p.get("a"))
 console.log(p.getAll("a").length)
+console.log(p.getAll("a").join(","))
 console.log(p.getAll("nope").length)
-`, "2\n1\n0")
+`, "1\n2\n1,2\n0")
 }
 
 func TestE2EURLSearchParamsToStringPercentEncodes(t *testing.T) {
+	// WHATWG URLSearchParams serializes application/x-www-form-urlencoded: a space
+	// is '+' (not %20, encodeURIComponent's rule) — TDD-00203.
 	assertOutput(t, `
 const p = new URLSearchParams()
 p.set("q", "hello world")
 console.log(p.toString())
-`, "q=hello%20world")
+`, "q=hello+world")
 }
 
 func TestE2EMapGetMissingKeyPrintsUndefined(t *testing.T) {
@@ -207,4 +212,113 @@ url.hash += 'x';
 	if !strings.Contains(err.Error(), "compound assignment to a URL component") {
 		t.Errorf("unexpected error message: %v", err)
 	}
+}
+
+// --- TDD-00203: WHATWG URL / URLSearchParams conformance overhaul ---
+
+func TestE2EURLSearchParamsMultiValueAndOrder(t *testing.T) {
+	// The ordered pair-list preserves duplicate keys and cross-key insertion
+	// order verbatim, and append adds without replacing (TDD-00203).
+	assertOutput(t, `
+const p = new URLSearchParams("a=1&b=2&a=3")
+console.log(p.toString())
+console.log(p.getAll("a").join(","))
+p.append("a", "4")
+console.log(p.getAll("a").join(","))
+console.log(p.toString())
+`, "a=1&b=2&a=3\n1,3\n1,3,4\na=1&b=2&a=3&a=4")
+}
+
+func TestE2EURLSearchParamsSort(t *testing.T) {
+	// Stable sort by key; equal keys keep their relative value order.
+	assertOutput(t, `
+const p = new URLSearchParams("c=3&a=1&b=2&a=0")
+p.sort()
+console.log(p.toString())
+`, "a=1&a=0&b=2&c=3")
+}
+
+func TestE2EURLSearchParamsIteration(t *testing.T) {
+	assertOutput(t, `
+const p = new URLSearchParams("a=1&b=2&a=3")
+console.log(p.keys().join(","))
+console.log(p.values().join(","))
+let out = ""
+p.forEach((v: string, k: string): void => { out = out + k + "=" + v + ";" })
+console.log(out)
+for (const [k, v] of p) { console.log(k + "->" + v) }
+`, "a,b,a\n1,2,3\na=1;b=2;a=3;\na->1\nb->2\na->3")
+}
+
+func TestE2EURLSearchParamsNumberValueStringified(t *testing.T) {
+	// A non-string value is stringified, matching JS (params.append('n', 1) → "1").
+	assertOutput(t, `
+const p = new URLSearchParams()
+p.append("n", 1 as any)
+console.log(p.get("n"))
+console.log("" + p)
+`, "1\nn=1")
+}
+
+func TestE2EURLSearchParamsSize(t *testing.T) {
+	assertOutput(t, `
+const p = new URLSearchParams("a=1&b=2&a=3")
+console.log(p.size)
+p.delete("a")
+console.log(p.size)
+`, "3\n1")
+}
+
+func TestE2EURLSearchParamsHasDeleteTwoArg(t *testing.T) {
+	// WHATWG has(name, value) / delete(name, value) narrow by value (TDD-00203).
+	assertOutput(t, `
+const p = new URLSearchParams("a=1&a=2&b=3")
+console.log(p.has("a", "2"))
+console.log(p.has("a", "9"))
+p.delete("a", "1")
+console.log(p.toString())
+`, "true\nfalse\na=2&b=3")
+}
+
+func TestE2EURLDefaultPortStripped(t *testing.T) {
+	// WHATWG normalization: a default port is stripped, the host is lowercased.
+	assertOutput(t, `
+console.log(new URL("http://example.com:80/x").href)
+console.log(new URL("https://example.com:443/y").href)
+console.log(new URL("http://example.com:8080/z").href)
+console.log(new URL("HTTP://ExAmple.COM/w").hostname)
+`, "http://example.com/x\nhttps://example.com/y\nhttp://example.com:8080/z\nexample.com")
+}
+
+func TestE2EURLStaticCanParseAndParse(t *testing.T) {
+	// WHATWG statics URL.canParse / URL.parse — non-throwing, unlike new URL().
+	assertOutput(t, `
+console.log(URL.canParse("https://example.com/"))
+console.log(URL.canParse("not a url"))
+console.log(URL.canParse("/p", "http://h.com/"))
+const p = URL.parse("https://example.com/x")
+console.log(p !== null ? p.href : "null")
+console.log(URL.parse("garbage") === null)
+`, "true\nfalse\ntrue\nhttps://example.com/x\ntrue")
+}
+
+func TestE2EURLJSONStringifyHref(t *testing.T) {
+	// JSON.stringify(url) honors URL.prototype.toJSON() === href.
+	assertOutput(t, `
+console.log(JSON.stringify(new URL("https://example.com/a?x=1")))
+`, "\"https://example.com/a?x=1\"")
+}
+
+func TestE2EURLSearchParamsConsoleLog(t *testing.T) {
+	assertOutput(t, `
+console.log(new URLSearchParams("a=1&b=2"))
+console.log(new URLSearchParams())
+`, "URLSearchParams { 'a' => '1', 'b' => '2' }\nURLSearchParams {}")
+}
+
+func TestE2EURLSearchParamsFromArrayAndObject(t *testing.T) {
+	assertOutput(t, `
+console.log(new URLSearchParams([["a", "1"], ["b", "2"], ["a", "3"]]).toString())
+console.log(new URLSearchParams({ x: "9", y: "8" }).toString())
+`, "a=1&b=2&a=3\nx=9&y=8")
 }

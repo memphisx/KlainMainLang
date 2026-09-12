@@ -225,6 +225,21 @@ main2()
 `, "42\nthen 10")
 }
 
+// A `function` expression .then/.catch callback with an unannotated parameter
+// must adopt the source promise's value type (same hint an arrow param gets),
+// not fall back to the float64 default — which reinterpreted an object's
+// pointer bits as a tiny denormal double (5e-324) and a number's bits as
+// garbage. Regression test for the function-expression callback-hint path.
+func TestE2EPromiseThenFunctionExprCallback(t *testing.T) {
+	assertOutput(t, `
+var obj = { tag: 99 }
+Promise.resolve(obj).then(function (arg) {
+  console.log("eq " + (arg === obj) + " tag " + arg.tag)
+})
+Promise.resolve(7).then(function (n) { console.log("num " + n) })
+`, "eq true tag 99\nnum 7")
+}
+
 // Promise.reject(e) is a settled rejected task promise: await re-throws, .catch recovers.
 func TestE2EPromiseReject(t *testing.T) {
 	assertOutput(t, `
@@ -750,4 +765,23 @@ async function main2(): Promise<void> {
 }
 main2()
 `, "a ccc 3")
+}
+
+// A concrete value widened into a `Promise<any>` via Promise.resolve must be
+// NaN-boxed at the store, so `.then`/`await` read it back correctly — a raw
+// scalar (a number's double bits) decoded as an `any` box otherwise produces
+// garbage (the conformance-surfaced "then handler gets 5e-324" bug). The async
+// return path already boxed to its declared Promise<any>; this brings
+// Promise.resolve to parity. A string is unaffected (its box is the pointer).
+func TestE2EPromiseResolveWidenedToAny(t *testing.T) {
+	assertOutput(t, `
+const pn: Promise<any> = Promise.resolve(42)
+pn.then((v) => { console.log(v, typeof v) })
+const pb: Promise<any> = Promise.resolve(true)
+pb.then((v) => { console.log(v, typeof v) })
+const ps: Promise<any> = Promise.resolve("hi")
+ps.then((v) => { console.log(v, typeof v) })
+function take(p: Promise<any>): void { p.then((v) => console.log("param", v)) }
+take(Promise.resolve(99))
+`, "42 number\ntrue boolean\nhi string\nparam 99")
 }

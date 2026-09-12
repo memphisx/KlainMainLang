@@ -143,7 +143,11 @@ func (e *Emitter) emitNewDateMulti(args []ast.Expression) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
-			vals[i] = e.coerce(v, TypeI64).Ref
+			cv, err := e.coerceChecked(v, TypeI64, args[i].GetPos(), "Date component")
+			if err != nil {
+				return Value{}, err
+			}
+			vals[i] = cv.Ref
 		} else {
 			vals[i] = fmt.Sprintf("%d", defaults[i])
 		}
@@ -238,7 +242,11 @@ func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, a
 		if err != nil {
 			return Value{}, err
 		}
-		argVals[i] = e.coerce(v, TypeI64).Ref
+		cv, err := e.coerceChecked(v, TypeI64, a.GetPos(), "Date setter argument")
+		if err != nil {
+			return Value{}, err
+		}
+		argVals[i] = cv.Ref
 	}
 
 	if method == "setTime" {

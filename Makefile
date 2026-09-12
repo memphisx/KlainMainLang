@@ -13,7 +13,7 @@ EXAMPLES     := $(shell find examples -name '*.ts' ! -name '*_worker.ts' ! -path
 # with a self-containment assertion on Windows. Listed by entry source; loadtest
 # lives under apps/ (multi-module), the rest still under examples/ pending the
 # apps/ relocation.
-APPS         := apps/klaintop/main.ts apps/files/main.ts apps/todo/main.ts apps/menu/main.ts apps/explorer/main.ts apps/loadtest/main.ts
+APPS         := apps/klaintop/main.ts apps/files/main.ts apps/todo/main.ts apps/menu/main.ts apps/explorer/main.ts apps/loadtest/main.ts apps/klainconf/main.ts
 HTTPBIN_LITE := .httpbin-lite
 HTTPBIN_LITE_PORT := 8765
 # TDD-00174 Stage A mode knobs: `make examples MM=auto OPTMEM=1` compiles the
@@ -27,7 +27,7 @@ OPTMEM ?=
 MODEFLAGS := $(if $(MM),-mm=$(MM)) $(if $(OPTMEM),-optimize-memory)
 MODEFLAGS_NOMM := $(if $(OPTMEM),-optimize-memory)
 
-.PHONY: all build dist install test test-par examples apps compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts status status-check status-roundtrip reference-check reference-sync help
+.PHONY: all build dist install test test-par examples apps compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts conformance-wpt status status-check status-roundtrip reference-check reference-sync help
 
 ## all: build the compiler
 all: build
@@ -235,17 +235,21 @@ fuzz-all: fuzz fuzz-codegen
 conformance-fetch:
 	./tools/conformance/fetch.sh
 
-## conformance: regenerate the Test262 reports (both compat lanes → docs/testing/strict/ and docs/testing/js/) by running the full corpus through this compiler's own pipeline (fetches first if needed; self-contained — go run, not the klainmain binary)
+## conformance: regenerate the Test262 reports (both compat lanes → docs/testing/<platform>/{strict,js}/) by running the full corpus through this compiler's own pipeline (fetches first if needed; self-contained — go run, not the klainmain binary)
 conformance: conformance-fetch
 	$(GO) run ./tools/conformance -compat=both
 
-## conformance-node: regenerate the Node-core reports (both compat lanes → docs/testing/strict|js/CONFORMANCE-RESULTS-NODE.md) — Node pure-module behavioral tests (TDD-00121 Track B, TDD-00022)
+## conformance-node: regenerate the Node-core reports (both compat lanes → docs/testing/<platform>/{strict|js}/CONFORMANCE-RESULTS-NODE.md) — Node pure-module behavioral tests (TDD-00121 Track B, TDD-00022)
 conformance-node: conformance-fetch
 	$(GO) run ./tools/conformance -suite=node -compat=both
 
-## conformance-ts: regenerate the TypeScript-oracle reports (both compat lanes → docs/testing/strict|js/CONFORMANCE-RESULTS-TS.md) — accept/reject oracle (TDD-00121 Track C)
+## conformance-ts: regenerate the TypeScript-oracle reports (both compat lanes → docs/testing/<platform>/{strict|js}/CONFORMANCE-RESULTS-TS.md) — accept/reject oracle (TDD-00121 Track C)
 conformance-ts: conformance-fetch
 	$(GO) run ./tools/conformance -suite=ts -compat=both
+
+## conformance-wpt: regenerate the Web Platform Tests reports (both compat lanes → docs/testing/<platform>/{strict|js}/CONFORMANCE-RESULTS-WPT.md) — the FULL headless multi-global corpus (every .any.js/.window.js/.worker.js repo-wide, no allowlist) through a testharness.js shim (TDD-00082 Track 2, TDD-00204)
+conformance-wpt: conformance-fetch
+	$(GO) run ./tools/conformance -suite=wpt -compat=both
 
 ## status: regenerate every docs/status page (README included) from the docs/status/data/*.json source of truth — edit the JSON, never the pages; all coverage numbers derive from the row tables. Also regenerates the docs/adr/ and docs/tdd/ index README tables (and the status TDD backlog) from the ADR/TDD record files — edit those files, never the index tables.
 status:

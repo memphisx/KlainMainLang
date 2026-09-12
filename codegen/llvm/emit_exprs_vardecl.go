@@ -256,7 +256,13 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 		}
 		return Type{}, false
 	case *ast.ArrayLiteral:
-		ty := e.inferArrayType(init)
+		// A strict-mode heterogeneous inferred empty array is rejected at the
+		// emit site (emitVarDeclBody) with an actionable message; don't promote
+		// it as a reliable global type here (that would bypass the rejection).
+		if !e.compatJS() && e.isInferredHeterogeneousEmptyArray(v, init) {
+			return Type{}, false
+		}
+		ty := e.declaredArrayType(v.Name, init)
 		if ty.IsArray && ty.ElemType != nil {
 			return ty, true
 		}
@@ -792,7 +798,10 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			// and then stored a pointer into it (invalid IR).
 			ty = e.inferExprType(init)
 		case *ast.ArrayLiteral:
-			ty = e.inferArrayType(init)
+			if !e.compatJS() && e.isInferredHeterogeneousEmptyArray(v, init) {
+				return heterogeneousArrayStrictError(v.GetPos())
+			}
+			ty = e.declaredArrayType(v.Name, init)
 		case *ast.ObjectLiteral:
 			// `-compat=js` (TDD-00022 break shape 4): an untyped object
 			// literal is a D1 dynamic object — dynamic add/delete,

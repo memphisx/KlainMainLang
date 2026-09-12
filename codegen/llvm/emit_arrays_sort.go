@@ -143,6 +143,11 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 		// — [10,1,21,2].sort() is [1,10,2,21], not the numeric [1,2,10,21]
 		// (ADR-00546). A string element is already a lexicographic strcmp.
 		switch {
+		case elemTy.IsDynamic:
+			// Boxed-element array (`any[]`): lexicographic over each element's
+			// JS String() form, like JS's type-agnostic default sort.
+			e.ensureSortCmpAnyLex()
+			cmpFnRef = "@__kml_cmp_any_lex"
 		case elemTy.Float:
 			e.ensureSortCmpF64Lex()
 			cmpFnRef = "@__kml_cmp_f64_lex"
@@ -167,6 +172,11 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sort_clos, align 8", cb.hdrPtr))
 
 		switch {
+		case elemTy.IsDynamic:
+			// Boxed-element array (`any[]`): the closure takes/returns boxed
+			// `any`; the trampoline reduces the boxed-number result to a sign.
+			e.ensureSortTrampolineAny()
+			cmpFnRef = "@__kml_sort_tramp_any"
 		case elemTy.Float:
 			e.ensureSortTrampolineF64()
 			cmpFnRef = "@__kml_sort_tramp_f64"
@@ -243,7 +253,11 @@ func (e *Emitter) emitArraySlice(mem *ast.MemberExpression, args []ast.Expressio
 	if err != nil {
 		return Value{}, err
 	}
-	startN := e.emitNormalizeSliceIdx(e.arrayIndexToI64(startRaw).Ref, lenReg)
+	startIdx, err := e.arrayIndexToI64(startRaw, args[0].GetPos())
+	if err != nil {
+		return Value{}, err
+	}
+	startN := e.emitNormalizeSliceIdx(startIdx.Ref, lenReg)
 
 	var endN string
 	if len(args) == 2 {
@@ -251,7 +265,11 @@ func (e *Emitter) emitArraySlice(mem *ast.MemberExpression, args []ast.Expressio
 		if err != nil {
 			return Value{}, err
 		}
-		endN = e.emitNormalizeSliceIdx(e.arrayIndexToI64(endRaw).Ref, lenReg)
+		endIdx, err := e.arrayIndexToI64(endRaw, args[1].GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		endN = e.emitNormalizeSliceIdx(endIdx.Ref, lenReg)
 	} else {
 		endN = lenReg
 	}

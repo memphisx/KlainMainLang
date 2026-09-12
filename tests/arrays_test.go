@@ -6,6 +6,122 @@ import (
 
 // --- Arrays ---
 
+// TDD-00205 Stage 1: an untyped empty array literal `[]` infers its element type
+// from its later push/insert/reassign usages (a whole-scope pre-pass) instead of
+// the blind number[] default — so a string/boolean-populated `[]` works, as does
+// the `const e = re.exec(s); m.push(e[0])` RegExp idiom (a pushed local resolved
+// through a scratch scope). Previously these emitted invalid IR.
+func TestE2EEmptyArrayInferredElemType(t *testing.T) {
+	assertOutput(t, `
+const strs = []
+strs.push("hi")
+strs.push("yo")
+console.log(strs.length, strs[0], strs[1])
+
+const bools = []
+bools.push(true)
+bools.push(false)
+console.log(bools[0], bools[1])
+
+const looped = []
+for (let i = 0; i < 3; i++) { looped.push("x" + i) }
+console.log(looped.join(","))
+
+const s: string = "typed"
+const fromLocal = []
+fromLocal.push(s)
+console.log(fromLocal[0])
+
+// The RegExp exec-loop shape: a pushed local (e[0], a method result on a local
+// receiver) must resolve during the inference pre-pass.
+const m = []
+const re = /a/g
+const subj = "aXaXa"
+do {
+  const e = re.exec(subj)
+  if (e !== null) { m.push(e[0]) } else { break }
+} while (true)
+console.log(m.length, m.join(","))
+`, "2 hi yo\ntrue false\nx0,x1,x2\ntyped\n3 a,a,a")
+}
+
+// TDD-00205 Stage 2 (strict lane): a genuinely heterogeneous untyped `[]` (no
+// single element type) is cleanly rejected with an actionable message naming
+// the escape hatches — a tuple, an `any[]` annotation, or -compat=js — since
+// strict mode has no boxed-element array. Never invalid IR.
+func TestE2EEmptyArrayHeterogeneousRejected(t *testing.T) {
+	mustCompileError(t, `
+const a = []
+a.push(1)
+a.push("x")
+`, "heterogeneous array")
+}
+
+// TDD-00205 Stage 2 (-compat=js lane): the same heterogeneous untyped `[]`
+// lowers to a boxed-element array (`any[]`) — push mixes element types, and
+// index / typeof / JSON.stringify all follow through the box.
+func TestE2EEmptyArrayHeterogeneousCompatJS(t *testing.T) {
+	assertOutputCompatJS(t, `
+const a = []
+a.push(1)
+a.push("two")
+a.push(true)
+console.log(a.length)
+console.log(JSON.stringify(a))
+console.log(typeof a[0], typeof a[1], typeof a[2])
+`, "3\n[1,\"two\",true]\nnumber string boolean")
+}
+
+// TDD-00205 Stage 0 backstop: pushing a mismatched element into an array whose
+// element type IS fixed (a single-kind inference / literal) stays a clean
+// compile error at the push, not invalid IR.
+func TestE2EArrayPushTypeMismatchRejected(t *testing.T) {
+	mustCompileError(t, `
+const a = ["x", "y"]
+a.push(1)
+`, "array element")
+}
+
+// TDD-00200/TDD-00205 Stage 2: the boxed-element array (`any[]`) supports the
+// full array-method surface — box-on-write / unbox-on-read over the normal
+// machinery — including the element-comparing/copying methods that need
+// dynamic handling: indexOf/includes use value equality (not box identity),
+// concat of a concrete array boxes its elements, and sort uses an any-aware
+// comparator (custom → boxed-number result; default → lexicographic String()).
+func TestE2EAnyArrayMethodParity(t *testing.T) {
+	assertOutputCompatJS(t, `
+const a: any[] = []
+a.push(1); a.push("two"); a.push(true)
+console.log(a.map((x) => x).length)
+console.log(a.filter((x) => typeof x === "string").length)
+console.log(a.join(","))
+const key = "t" + "wo"
+console.log(a.indexOf(key), a.includes(key))
+console.log(JSON.stringify(a.concat([9, 10])))
+console.log(JSON.stringify(a.slice(1)))
+console.log(a.reduce((acc, x) => acc + String(x), ""))
+const nums: any[] = []
+nums.push(3); nums.push(1); nums.push(2)
+console.log(JSON.stringify(nums.sort((x, y) => x - y)))
+const d: any[] = []
+d.push(10); d.push(2); d.push(1)
+console.log(JSON.stringify(d.sort()))
+`, "3\n1\n1,two,true\n1 true\n[1,\"two\",true,9,10]\n[\"two\",true]\n1twotrue\n[1,2,3]\n[1,10,2]")
+}
+
+// TDD-00200 Stage 2: an object literal pushed into an `any[]` lowers to a
+// self-describing dynamic object, so JSON.stringify and property access both
+// work on the element (a nested array element stays type-erased — deep JSON of
+// it is the documented boundary).
+func TestE2EAnyArrayObjectElement(t *testing.T) {
+	assertOutputCompatJS(t, `
+const a: any[] = []
+a.push(1); a.push("two"); a.push({ x: 5, y: "z" })
+console.log(JSON.stringify(a))
+console.log(a[2].x, a[2].y)
+`, "[1,\"two\",{\"x\":5,\"y\":\"z\"}]\n5 z")
+}
+
 func TestE2EArrayHOF(t *testing.T) {
 	assertOutput(t, `
 const nums: number[] = [1, 2, 3, 4, 5]
@@ -1331,6 +1447,23 @@ func TestE2EArrayDestructuringDefaultNotUsedWhenInBounds(t *testing.T) {
 let [a = 10, b = 20] = [1, 2];
 console.log(a, b);
 `, "1 2")
+}
+
+// A destructuring default applies when the matched value is `undefined`, not
+// only when the position is out of bounds — a statically-`undefined` element
+// (an explicit `[undefined]` or an elision hole `[,]`) binds the default. This
+// also fixes invalid IR: the numeric default was previously stored as a `ptr`
+// constant into the `undefined`-typed slot (the Test262
+// `ary-ptrn-elem-id-init-{undef,hole}` family, ADR-00889).
+func TestE2EArrayDestructuringDefaultUsedWhenElementUndefined(t *testing.T) {
+	assertOutput(t, `
+const [x = 23] = [undefined];
+console.log(x);
+const [y = 23] = [,];
+console.log(y);
+const [s = "def"] = [undefined];
+console.log(s);
+`, "23\n23\ndef")
 }
 
 func TestE2EArrayDestructuringDefaultReferencesEarlierElement(t *testing.T) {

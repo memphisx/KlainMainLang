@@ -909,3 +909,27 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00863](ADR-00863.md) | Windows CI green — gate the two fs-pool loop-ordering tests, portable temp path for req.pipe | Extends [ADR-00757](ADR-00757.md); relates to [TDD-00185](../tdd/TDD-00185.md), [TDD-00186](../tdd/TDD-00186.md), [TDD-00182](../tdd/TDD-00182.md)/00183 |
 | [00864](ADR-00864.md) | Windows reactor Stage 1 — owned kind-tagged fd table + fstat kind dispatch | Implements [TDD-00182](../tdd/TDD-00182.md) (Stage 1); Extends [ADR-00757](ADR-00757.md) |
 | [00865](ADR-00865.md) | Windows IOCP reactor Stage 1 — completion port, overlapped/buffered pipes, console reader | Implements [TDD-00183](../tdd/TDD-00183.md) (Stage 1); Extends [ADR-00864](ADR-00864.md) (the owned fd table), [ADR-00757](ADR-00757.md) (the loop wakeup) |
+| [00866](ADR-00866.md) | Bitwise/shift operators run the ToPrimitive number ladder on object operands (TDD-00201) | `Implements [TDD-00201](../tdd/TDD-00201.md)`, `Corrects [ADR-00859](ADR-00859.md)` |
+| [00867](ADR-00867.md) | `TestE2EStdinDoesNotBlockLoop` startup-race fix; piped-stdout buffering gap found | `Relates to [TDD-00183](../tdd/TDD-00183.md)`, `Relates to [TDD-00185](../tdd/TDD-00185.md)` |
+| [00868](ADR-00868.md) | Incremental piped stdout — line-buffer + per-write flush | `Fixes gap found in [ADR-00867](ADR-00867.md)` |
+| [00869](ADR-00869.md) | `never` return type for always-throwing functions | `Relates to [ADR-00866](ADR-00866.md)` |
+| [00870](ADR-00870.md) | Faithful thrown values — the unpacked catch-value record (TDD-00202) | `Implements [TDD-00202](../tdd/TDD-00202.md)` |
+| [00871](ADR-00871.md) | Web Platform Tests conformance track (TDD-00082 Track 2) | `Implements [TDD-00082](../tdd/TDD-00082.md)` |
+| [00872](ADR-00872.md) | Eager-box captured object/class-instance locals (try/catch dominance) | `Extends [ADR-00619](ADR-00619.md)` |
+| [00873](ADR-00873.md) | URLSearchParams as an ordered pair-list (WHATWG multi-value) | `Implements [TDD-00203](../tdd/TDD-00203.md)` |
+| [00874](ADR-00874.md) | URL WHATWG normalization, static parse/canParse, and JSON toJSON | `Implements [TDD-00203](../tdd/TDD-00203.md)`, `Extends [ADR-00076](ADR-00076.md)` |
+| [00875](ADR-00875.md) | WPT full headless corpus — allowlist removed, capability-ladder reporting | `Implements [TDD-00204](../tdd/TDD-00204.md)`, `Extends [ADR-00871](ADR-00871.md)` |
+| [00876](ADR-00876.md) | Test262 async protocol, raw/module attempts, pending-capability buckets | `Implements [TDD-00204](../tdd/TDD-00204.md)`, `Extends [ADR-00151](ADR-00151.md)` |
+| [00877](ADR-00877.md) | Per-platform conformance report folders | `Implements [TDD-00204](../tdd/TDD-00204.md)` |
+| [00878](ADR-00878.md) | Node oracle — every behavioral suite, not just test/parallel | `Implements [TDD-00204](../tdd/TDD-00204.md)`, `Extends [ADR-00453](ADR-00453.md)` |
+| [00879](ADR-00879.md) | TS oracle — multi-file cases materialized, not skipped | `Implements [TDD-00204](../tdd/TDD-00204.md)`, `Extends [ADR-00459](ADR-00459.md)` |
+| [00880](ADR-00880.md) | `.then`/`.catch` `function`-expression callbacks adopt the source promise's value type | |
+| [00881](ADR-00881.md) | `any`-valued `Map.set` boxes its value into a NaN-box word | `Implements [TDD-00155](../tdd/TDD-00155.md)` |
+| [00882](ADR-00882.md) | DataView accessors reject a non-numeric byteOffset/value cleanly | |
+| [00883](ADR-00883.md) | String/Number methods reject a non-numeric index/count argument cleanly | `Extends [ADR-00882](ADR-00882.md)` |
+| [00884](ADR-00884.md) | Date and Array methods reject a non-numeric index/count argument cleanly | `Extends [ADR-00883](ADR-00883.md)` |
+| [00885](ADR-00885.md) | RegExp exec/test subject and constructor pattern/flags ToString a non-string argument | `Extends [ADR-00884](ADR-00884.md)` |
+| [00886](ADR-00886.md) | Empty-array element-type inference from usage (TDD-00205 Stages 0+1) | `Implements [TDD-00205](../tdd/TDD-00205.md)` |
+| [00887](ADR-00887.md) | Boxed-element arrays — `any[]` and heterogeneous arrays under `-compat=js` (TDD-00205 Stage 2) | `Implements [TDD-00205](../tdd/TDD-00205.md)`, `Extends [ADR-00886](ADR-00886.md)`, `Implements [TDD-00200](../tdd/TDD-00200.md)` |
+| [00888](ADR-00888.md) | `Promise.resolve(v)` boxes its value when widened to `Promise<any>` | |
+| [00889](ADR-00889.md) | Array-destructuring default applies on an `undefined` element (fixes invalid IR + semantics) | |

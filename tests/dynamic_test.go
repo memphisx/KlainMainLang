@@ -139,16 +139,16 @@ f("hi");
 `, "number\nstring")
 }
 
-// A nested dynamic (any as an array element) stays rejected in parameter
-// position — only the bare top-level any/unknown was lifted.
-func TestE2EAnyArrayParamRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-function f(xs: any[]): void { console.log(xs.length) }
+// `any[]` is a supported boxed-element array (TDD-00200): a NaN box per slot,
+// box-on-write / unbox-on-read over the normal array machinery. As a function
+// parameter it accepts a concrete-element argument, boxing each element at the
+// call boundary — length and JSON both follow through.
+func TestE2EAnyArrayParam(t *testing.T) {
+	assertOutput(t, `
+function f(xs: any[]): void { console.log(xs.length); console.log(JSON.stringify(xs)); }
 f([1, 2, 3])
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for any[] as a function parameter type, got none")
-	}
+f(["a", "b"])
+`, "3\n[1,2,3]\n2\n[\"a\",\"b\"]")
 }
 
 // An array argument to an `any` parameter is boxed by its data pointer, so
@@ -180,14 +180,18 @@ show({ a: 1 });
 `, "[object Object]")
 }
 
-func TestE2EAnyArrayElementRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// A boxed-element array (`any[]`, TDD-00200) accepts a mix of element types,
+// boxing each on write and unboxing on read: push, index, typeof and JSON all
+// work over the heterogeneous contents.
+func TestE2EAnyArrayElement(t *testing.T) {
+	assertOutput(t, `
 let arr: any[] = [1, 2, 3]
 console.log(arr.length)
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for any as an array element type, got none")
-	}
+arr.push("four")
+arr.push(true)
+console.log(JSON.stringify(arr))
+console.log(typeof arr[3], typeof arr[4])
+`, "3\n[1,2,3,\"four\",true]\nstring boolean")
 }
 
 // --- General union types beyond T | null (TDD-00043) ---

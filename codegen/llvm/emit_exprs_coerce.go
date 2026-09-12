@@ -7,6 +7,23 @@ import (
 
 // coerce inserts a type conversion instruction if necessary.
 func (e *Emitter) coerce(v Value, target Type) Value {
+	// A caught value (TypeCaught, TDD-00202) flowing out of catch-local scope:
+	// to itself it passes through; to `any` it packs to a NaN-box (Error →
+	// object); to a concrete Error it unwraps the payload (valid after an
+	// `instanceof Error` narrowing); to anything else it packs then re-coerces.
+	if v.Ty.IsCaught && !target.IsCaught {
+		if target.IsError {
+			p := e.freshReg()
+			_, pay := e.caughtParts(v)
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, pay))
+			return Value{Ref: p, Ty: target}
+		}
+		anyVal := e.emitCaughtToAny(v)
+		if target.IsDynamic {
+			return anyVal
+		}
+		return e.coerce(anyVal, target)
+	}
 	// A dynamic (NaN-boxed, TDD-00156) source coerced into a concrete
 	// numeric/boolean target goes through the real JS conversion — never a
 	// raw reinterpretation of the encoded word (which is what the generic

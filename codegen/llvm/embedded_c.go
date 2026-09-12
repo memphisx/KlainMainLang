@@ -113,6 +113,9 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if e.UsesURLPattern() {
 		out = append(out, CSource{"urlpattern", URLPatternSource(), nil, nil, ""})
 	}
+	if e.UsesURLSearchParams() {
+		out = append(out, CSource{"urlsearchparams", URLSearchParamsSource(), nil, nil, ""})
+	}
 	if e.UsesFloatFmt() {
 		out = append(out, CSource{"dtoa", DtoaSource(), nil, nil, ""})
 	}

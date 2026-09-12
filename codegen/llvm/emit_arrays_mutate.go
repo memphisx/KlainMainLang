@@ -182,7 +182,11 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 	if err != nil {
 		return Value{}, err
 	}
-	startN := e.emitNormalizeSliceIdx(e.arrayIndexToI64(startRaw).Ref, curLen)
+	startIdx, err := e.arrayIndexToI64(startRaw, args[0].GetPos())
+	if err != nil {
+		return Value{}, err
+	}
+	startN := e.emitNormalizeSliceIdx(startIdx.Ref, curLen)
 
 	// deleteCount defaults to "everything from start to the end", matching
 	// real JS when the argument is omitted; when given, clamp to what's
@@ -196,7 +200,10 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 		if err != nil {
 			return Value{}, err
 		}
-		delRaw = e.coerce(delRaw, TypeI64)
+		delRaw, err = e.coerceChecked(delRaw, TypeI64, args[1].GetPos(), "splice deleteCount")
+		if err != nil {
+			return Value{}, err
+		}
 		negClamped := e.freshReg()
 		isNeg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, delRaw.Ref))
@@ -284,7 +291,10 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 		if err != nil {
 			return Value{}, err
 		}
-		itemVal = e.coerce(itemVal, elemTy)
+		itemVal, err = e.coerceChecked(itemVal, elemTy, itemExpr.GetPos(), "array element")
+		if err != nil {
+			return Value{}, err
+		}
 		slotIdx := e.freshReg()
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", slotIdx, startN, i))
@@ -324,7 +334,11 @@ func (e *Emitter) emitArrayToSpliced(mem *ast.MemberExpression, args []ast.Expre
 	if err != nil {
 		return Value{}, err
 	}
-	startN := e.emitNormalizeSliceIdx(e.arrayIndexToI64(startRaw).Ref, lenReg)
+	startIdx, err := e.arrayIndexToI64(startRaw, args[0].GetPos())
+	if err != nil {
+		return Value{}, err
+	}
+	startN := e.emitNormalizeSliceIdx(startIdx.Ref, lenReg)
 	avail := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", avail, lenReg, startN))
 	delCount := avail
@@ -333,7 +347,10 @@ func (e *Emitter) emitArrayToSpliced(mem *ast.MemberExpression, args []ast.Expre
 		if err != nil {
 			return Value{}, err
 		}
-		delRaw := e.coerce(delRaw0, TypeI64)
+		delRaw, err := e.coerceChecked(delRaw0, TypeI64, args[1].GetPos(), "splice deleteCount")
+		if err != nil {
+			return Value{}, err
+		}
 		negClamped := e.freshReg()
 		isNeg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, delRaw.Ref))
@@ -374,7 +391,10 @@ func (e *Emitter) emitArrayToSpliced(mem *ast.MemberExpression, args []ast.Expre
 		if err != nil {
 			return Value{}, err
 		}
-		itemVal = e.coerce(itemVal, elemTy)
+		itemVal, err = e.coerceChecked(itemVal, elemTy, itemExpr.GetPos(), "array element")
+		if err != nil {
+			return Value{}, err
+		}
 		slotIdx := e.freshReg()
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", slotIdx, startN, i))
@@ -494,7 +514,14 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 		// numeric default and mis-decode when later called.
 		var v Value
 		var err error
-		if elemTy.IsFunc {
+		if elemTy.IsFunc || elemTy.IsDynamic {
+			// A boxed-element array (`any[]`, TDD-00200): route object/array
+			// literals through the object-hint path so they lower to
+			// self-describing D1 dynamic values (dynobj/dynarr) rather than a
+			// static struct boxed opaquely — then JSON.stringify / property
+			// access on the element work. (An arbitrary already-typed object
+			// value still boxes statically; deep-dynamic ops on it are the
+			// documented type-erasure boundary.)
 			v, err = e.emitExprWithObjectHint(arg, elemTy)
 		} else {
 			v, err = e.emitExpr(arg)
@@ -502,7 +529,11 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 		if err != nil {
 			return Value{}, err
 		}
-		vals = append(vals, e.coerce(v, elemTy))
+		ce, err := e.coerceChecked(v, elemTy, arg.GetPos(), "array element")
+		if err != nil {
+			return Value{}, err
+		}
+		vals = append(vals, ce)
 	}
 
 	curPtr := e.freshReg()
@@ -564,7 +595,14 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 		// numeric default and mis-decode when later called.
 		var v Value
 		var err error
-		if elemTy.IsFunc {
+		if elemTy.IsFunc || elemTy.IsDynamic {
+			// A boxed-element array (`any[]`, TDD-00200): route object/array
+			// literals through the object-hint path so they lower to
+			// self-describing D1 dynamic values (dynobj/dynarr) rather than a
+			// static struct boxed opaquely — then JSON.stringify / property
+			// access on the element work. (An arbitrary already-typed object
+			// value still boxes statically; deep-dynamic ops on it are the
+			// documented type-erasure boundary.)
 			v, err = e.emitExprWithObjectHint(arg, elemTy)
 		} else {
 			v, err = e.emitExpr(arg)
@@ -572,7 +610,11 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 		if err != nil {
 			return Value{}, err
 		}
-		vals = append(vals, e.coerce(v, elemTy))
+		ce, err := e.coerceChecked(v, elemTy, arg.GetPos(), "array element")
+		if err != nil {
+			return Value{}, err
+		}
+		vals = append(vals, ce)
 	}
 
 	curPtr := e.freshReg()
@@ -628,7 +670,10 @@ func (e *Emitter) emitArrayIndexAssignGrow(idxEx *ast.IndexExpression, rhs ast.E
 	if err != nil {
 		return Value{}, true, err
 	}
-	idxVal = e.arrayIndexToI64(idxVal)
+	idxVal, err = e.arrayIndexToI64(idxVal, idxEx.Index.GetPos())
+	if err != nil {
+		return Value{}, true, err
+	}
 
 	// Hint + coerceChecked mirror the fixed-bounds path exactly: the hint
 	// types array/object-literal RHSes against the element type

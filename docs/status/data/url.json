@@ -32,24 +32,30 @@
               "Component **setters** (`url.hash = …`, `url.protocol = …`, etc.) re-parse the URL and re-derive every field so the components never desync ([ADR-00572](../adr/ADR-00572.md)): marker normalization matches Node (`#`/`?` on hash/search, a trailing `:` on protocol are tolerated); an invalid `href` assignment throws, the other setters silently ignore an invalid value (Node's own behavior); `searchParams` re-populates from the new query",
               "Setters cover `href`/`protocol`/`host`/`hostname`/`port`/`pathname`/`search`/`hash`/`username`/`password` ([ADR-00577](../adr/ADR-00577.md)); `host` splits on the first `:` into hostname + port, and a value with no port keeps the existing port (Node's own behavior)",
               "Fields: `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`, `username`, `password`, `searchParams` — all plain reads via the ordinary object field-access path, no dispatched methods",
+              "WHATWG normalization ([ADR-00874](../adr/ADR-00874.md)/[TDD-00203](../tdd/TDD-00203.md)): a default port is stripped (`new URL('http://example.com:80/x').port` is `''`) and the host is lowercased (`new URL('HTTP://ExAmple.COM/x').hostname` is `'example.com'`)",
+              "The WHATWG **static** methods `URL.parse(input[, base])` → `URL \\| null` and `URL.canParse(input[, base])` → `boolean` are implemented (non-throwing, unlike `new URL()`) — distinct from the legacy lowercase `url.parse()` module function below",
+              "`JSON.stringify(url)` honors `URL.prototype.toJSON()` (returns `href`), so it serializes the `href` string, not the component struct",
               "A part absent from the URL (no port/query/fragment) reads as `\"\"`, matching real `URL`'s own default",
               "Throws a catchable Error (\"Invalid URL\") on a malformed URL",
+              "`URL`/`URLSearchParams` are ambient globals — no import needed, and identical in browsers and Node (Node also re-exports them from `node:url`); the legacy `url.*` helpers below are Node-only and require `import … from 'node:url'`",
               "See [ADR-00076](../adr/ADR-00076.md)"
             ],
             "caveats": [
-              "Not a WHATWG parser (libcurl passthrough) — default ports aren't stripped (`new URL('http://example.com:80/x').port` is `'80'`, Node: `''`), host case isn't normalized (`new URL('HTTP://ExAmple.COM/x').hostname` is `'ExAmple.COM'`, Node: `'example.com'`), and a non-special scheme throws (`new URL('foo:bar')` throws, Node: valid with `pathname` `'bar'`)."
+              "libcurl-backed, so a non-special scheme is rejected where WHATWG accepts it (`new URL('foo:bar')` throws; Node: valid with `pathname` `'bar'`) — faithful non-special-scheme parsing needs a hand-written WHATWG parser rather than libcurl ([TDD-00203](../tdd/TDD-00203.md)). Default-port stripping and host-case normalization are now done (see notes)."
             ]
           },
           {
             "feature": "`URLSearchParams`",
             "status": "implemented",
             "caveats": [
-              "**Single value per key**: a repeated query-string key (`?a=1&a=2`) silently keeps only its last value — `.get()`/`.getAll()` never see the first one, so `.getAll()` never returns more than one element",
-              "There is no true multi-value `.append()`, since it can't be represented faithfully on top of the `Map<string,string>` backing structure"
+              "`url.searchParams` is a **snapshot**, not live: mutating it (`url.searchParams.append(...)`) does not write back into `url.search`/`url.href`. Re-serialize and assign `url.search = params.toString()` to apply changes ([TDD-00203](../tdd/TDD-00203.md)).",
+              "Spreading a `URLSearchParams` directly (`[...params]`) yields an empty array — the same pre-existing limitation as `[...map]`; use `[...params.entries()]` (which works). Not URLSearchParams-specific."
             ],
             "notes": [
-              "`new URLSearchParams()` / `new URLSearchParams(init)` (tolerates a leading `?`)",
-              "Backed by a plain `Map<string,string>` (the same simplification `http.listen`'s own `req.query` already makes) — `get`/`set`/`has`/`delete`/`size`/`keys()`/`values()`/`entries()`/`forEach()` all come for free from the existing Map machinery, plus `toString()` (percent-encodes back into a query string) and `getAll()` (0 or 1 elements) added specifically for this type",
+              "Backed by an ordered name/value **pair list** (the WHATWG \"list of tuples\", [ADR-00873](../adr/ADR-00873.md)/[TDD-00203](../tdd/TDD-00203.md)) — replaces the former `Map<string,string>`, so duplicate keys and cross-key insertion order round-trip faithfully (`?a=1&b=2&a=3` → `getAll('a')` is `['1','3']`)",
+              "Full method surface: `append`/`set` (replace-first-drop-rest)/`get` (first match, `null` if absent)/`getAll`/`has`/`delete`/`sort` (stable, by key)/`size`, plus `keys()`/`values()`/`entries()`/`forEach()`, `for…of` iteration (default iterator = entries), and `console.log` rendering — `has`/`delete` accept the WHATWG optional 2nd `value` argument",
+              "`toString()` serializes application/x-www-form-urlencoded (a space is `+`, not `%20`); a non-string name/value is stringified (`append('n', 1)` → `\"1\"`); `params + ''` / `` `${params}` `` serialize via `toString`",
+              "`new URLSearchParams(init)`: a query string (leading `?` tolerated), an array of `[name, value]` pairs, a record object, or another `URLSearchParams` (copied)",
               "See [ADR-00076](../adr/ADR-00076.md)"
             ]
           },

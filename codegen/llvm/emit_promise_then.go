@@ -30,6 +30,9 @@ func (e *Emitter) emitRejectCallback(arg ast.Expression) (Value, error) {
 	if af, ok := arg.(*ast.ArrowFunction); ok {
 		return e.emitArrowFunctionWithHints(af, []Type{errorObjType})
 	}
+	if fe, ok := arg.(*ast.FunctionExpression); ok {
+		return e.emitFunctionExpression(fe, []Type{errorObjType})
+	}
 	return e.emitExpr(arg)
 }
 
@@ -39,8 +42,13 @@ func (e *Emitter) emitRejectCallback(arg ast.Expression) (Value, error) {
 // caller annotating `r`. An annotated param, or a non-arrow callback, is emitted
 // unchanged.
 func (e *Emitter) emitFulfillCallback(arg ast.Expression, valueTy Type) (Value, error) {
-	if af, ok := arg.(*ast.ArrowFunction); ok && valueTy.IR != "void" && valueTy.IR != "" {
-		return e.emitArrowFunctionWithHints(af, []Type{valueTy})
+	if valueTy.IR != "void" && valueTy.IR != "" {
+		if af, ok := arg.(*ast.ArrowFunction); ok {
+			return e.emitArrowFunctionWithHints(af, []Type{valueTy})
+		}
+		if fe, ok := arg.(*ast.FunctionExpression); ok {
+			return e.emitFunctionExpression(fe, []Type{valueTy})
+		}
 	}
 	return e.emitExpr(arg)
 }

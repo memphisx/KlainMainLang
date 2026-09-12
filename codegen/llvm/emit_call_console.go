@@ -186,6 +186,17 @@ func (e *Emitter) emitConsolePrintArgToken(arg ast.Expression, fd int, term stri
 // (emitConsolePrintArgToken) and a spread array's elements
 // (emitConsolePrintSpread).
 func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) error {
+	// A caught value (TypeCaught ≈ `unknown`, TDD-00202): an Error renders
+	// "Name: message", anything else via its string form — routed through the
+	// shared caught-to-string helper.
+	if val.Ty.IsCaught {
+		strVal, err := e.emitCaughtToString(val)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
 	// A nullable-scalar aggregate value (a T|null return/field) prints
 	// null-aware, same as a boxed local (TDD-00064 Stage 3).
 	if isNullableScalar(val.Ty) {
@@ -211,6 +222,16 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 			return err
 		}
 		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	// URLSearchParams inspects as `URLSearchParams { 'a' => '1', … }` (TDD-00203),
+	// via the pair-list C formatter — checked before the Map case since it is no
+	// longer a Map.
+	if val.Ty.IsURLSearchParams {
+		e.ensureURLSearchParams()
+		s := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_usp_inspect(ptr %s)", s, val.Ref))
+		e.emitConsolePrintVal(Value{Ref: s, Ty: TypePtr}, e.internString("%s"+term), fd)
 		return nil
 	}
 	// Map / Set inspect as `Map(1) { 'a' => 1 }` / `Set(2) { 1, 2 }`.

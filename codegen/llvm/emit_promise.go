@@ -218,7 +218,7 @@ func (e *Emitter) wrapResolvedPromise(val Value) Value {
 // task-shaped promise, so `.then`/`.catch`/`.finally`/`await` all work on it. An
 // already-promise argument is returned as-is (JS flattens a thenable);
 // `Promise.resolve()` with no argument is a fulfilled `Promise<void>`.
-func (e *Emitter) emitPromiseResolve(args []ast.Expression, pos ast.Pos) (Value, error) {
+func (e *Emitter) emitPromiseResolve(args []ast.Expression, pos ast.Pos, hint Type) (Value, error) {
 	e.ensurePromiseRuntime()
 	if len(args) == 0 {
 		q := e.emitAllocSettledPromise()
@@ -233,6 +233,21 @@ func (e *Emitter) emitPromiseResolve(args []ast.Expression, pos ast.Pos) (Value,
 	}
 	if val.Ty.IsPromise {
 		return val, nil
+	}
+	// Honor a contextual `Promise<any>` hint (e.g. `const p: Promise<any> =
+	// Promise.resolve(42)`): the promise's value slot is read back at `.then`/
+	// `await` as whatever the promise's *declared* element type is, so a
+	// concrete value widened into a `Promise<any>` must be NaN-boxed at the
+	// store — otherwise the raw scalar bits (e.g. a double) are later decoded
+	// as a box and produce garbage (a string value is unaffected: its box IS
+	// the pointer). The async-function return path already boxes to its
+	// declared `Promise<any>`; this brings Promise.resolve to parity.
+	if hint.IsPromise && hint.PromiseType != nil && hint.PromiseType.IsDynamic && !val.Ty.IsDynamic {
+		boxed, berr := e.emitBoxValue(val)
+		if berr != nil {
+			return Value{}, berr
+		}
+		val = boxed
 	}
 	q := e.emitAllocSettledPromise()
 	e.storePromiseValue(q, val)

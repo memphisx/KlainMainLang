@@ -71,12 +71,11 @@
           },
           {
             "feature": "`JSON.stringify(mixedTypeArray)`",
-            "status": "missing",
+            "status": "partial",
             "notes": [
-              "Array literals, and their inferred element type, are uniform-type only — a heterogeneous array has no single element type to stringify against",
-              "A fixed-length mixed sequence expressed as a **tuple** (`[number, string, boolean]`) does stringify correctly (`JSON.stringify([1, \"two\", true])` → `[1,\"two\",true]`) — the tuple, not a heterogeneous array, is how such a value is represented here",
-              "An `any`-typed heterogeneous array (a dynamic array, e.g. `const a: any = [1, \"two\", null]`) also stringifies through the dynamic walker ([ADR-00639](../adr/ADR-00639.md)); the missing case is only a *statically*-typed heterogeneous array, which has no representation",
-              "Planned as [TDD-00200](../tdd/TDD-00200.md): under `-compat=js`, a `(A | B)[]` / inferred mixed literal lowers to a NaN-boxed-element array and stringifies through this same dynamic walker; strict keeps the rejection with a recognizable error naming the tuple / `-compat=js` alternatives"
+              "Under `-compat=js` a heterogeneous array (an inferred mixed literal, a heterogeneous-usage empty `[]`, or an explicit `any[]`) is a **boxed-element array** and stringifies through the dynamic walker ([ADR-00887](../adr/ADR-00887.md)/[TDD-00205](../tdd/TDD-00205.md) Stage 2, [TDD-00200](../tdd/TDD-00200.md)): `JSON.stringify([1, \"two\", true])` → `[1,\"two\",true]`, object-literal elements included",
+              "Under `-compat=strict` a heterogeneous array is rejected with an actionable error naming the escape hatches — a fixed-length **tuple** (`[number, string, boolean]`, which stringifies correctly), an explicit `any[]` annotation, or `-compat=js`",
+              "A *statically-typed* object/array *value* (not a literal) boxed into an element is type-erased, so deep `JSON.stringify` of it throws the clean \"statically-typed value in a dynamic position\" TypeError — the [TDD-00200](../tdd/TDD-00200.md) nested-value boundary"
             ]
           },
           {

@@ -37,7 +37,10 @@
       },
       "exampleKey": "url/url",
       "snippet": "const u = new URL(\"https://example.com:8080/a/b?x=1&y=hello%20world#frag\")\nconsole.log(u.hostname)  // example.com\nconsole.log(new URL(\"/p\", \"http://h.com/a\").href)  // http://h.com/p",
-      "differences": [],
+      "differences": [
+        "A default port is stripped and the host is lowercased (WHATWG normalization); `URL.parse`/`URL.canParse` statics and `JSON.stringify(url)` → `href` (toJSON) are supported",
+        "libcurl-backed, so a non-special scheme is rejected where WHATWG accepts it (`new URL('foo:bar')` throws; Node parses it with `pathname` `'bar'`)"
+      ],
       "seeAlso": [
         "url.URLSearchParams",
         "url.URLPattern"
@@ -67,8 +70,8 @@
       "exampleKey": "url/url",
       "snippet": "const params = new URLSearchParams()\nparams.set(\"q\", \"hello world\")\nparams.set(\"page\", \"2\")\nconsole.log(params.toString())  // q=hello%20world&page=2",
       "differences": [
-        "**Single value per key**: a repeated query-string key (`?a=1&a=2`) silently keeps only its last value — `.get()`/`.getAll()` never see the first one, so `.getAll()` never returns more than one element",
-        "There is no true multi-value `.append()`, since it can't be represented faithfully on top of the `Map<string,string>` backing structure"
+        "Backed by an ordered pair list (the WHATWG multi-value model): duplicate keys and cross-key order round-trip, `getAll` returns every value, and `append`/`sort`/`has(name,value)`/`delete(name,value)` are supported",
+        "`url.searchParams` is a snapshot, not live — mutating it does not write back into `url.search`; assign `url.search = params.toString()` to apply changes"
       ],
       "seeAlso": [
         "url.URL"

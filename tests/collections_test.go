@@ -18,6 +18,25 @@ console.log(m.has('dave'))
 `, "2\n95\ntrue\nfalse")
 }
 
+// An `any`-valued map must box the stored value into a NaN-box word so it
+// round-trips by tag through get/===. Previously a `null` literal (and a bare
+// number/boolean) was stored raw, so `m.get(k) === null` / `=== 5` was false
+// (TDD-00155 any-eq).
+func TestE2EMapAnyValueEquality(t *testing.T) {
+	assertOutput(t, `
+const m = new Map<string, any>()
+m.set('z', null)
+m.set('n', 5)
+m.set('b', true)
+m.set('s', 'hi')
+console.log(m.get('z') === null)
+console.log(m.get('n') === 5)
+console.log(m.get('b') === true)
+console.log(m.get('s') === 'hi')
+console.log(typeof m.get('n'))
+`, "true\ntrue\ntrue\ntrue\nnumber")
+}
+
 func TestE2EMapDelete(t *testing.T) {
 	assertOutput(t, `
 const m = new Map<string, number>()
@@ -694,8 +713,8 @@ func TestE2EMapFromHeterogeneousEntriesRejected(t *testing.T) {
 	// compile error rather than storing the mismatched scalar raw into a ptr
 	// field (invalid IR).
 	cases := []string{
-		`const m = new Map([['a', 'b'], [1, 1]]);`,       // key string→number
-		`const m = new Map([['a', 1], ['b', 'c']]);`,     // value number→string
+		`const m = new Map([['a', 'b'], [1, 1]]);`,   // key string→number
+		`const m = new Map([['a', 1], ['b', 'c']]);`, // value number→string
 	}
 	for _, src := range cases {
 		if _, err := parseAndCompile(src); err == nil {

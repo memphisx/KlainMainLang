@@ -2501,3 +2501,41 @@ const pick = true;
 setTimeout(pick ? a : b, 5);
 `, "a")
 }
+
+// An unannotated function whose body always throws is typed `never` (TS's own
+// inference, ADR-00869), so its call is usable in an operand position: the
+// never result coerces to a dead zero instead of emitting an empty IR operand
+// (the invalid-IR bug Test262 bitwise-and/S11.10.1_A2.4_T2.js hit). The call
+// still runs and throws, so the operator never produces a value.
+func TestE2ENeverReturningFunctionInBitwiseOperand(t *testing.T) {
+	assertOutput(t, `
+function boom() { throw new Error("boom"); }
+let reached = false;
+try {
+  const r = boom() & 1;
+  reached = true;
+  console.log("r=" + r);
+} catch (e) {
+  console.log("caught");
+}
+console.log("reached:" + reached);
+`, "caught\nreached:false")
+}
+
+// Same for a throw-only function expression assigned to a variable (the exact
+// shape of S11.10.1_A2.4_T2.js's CHECK#1: `var x = function () { throw ... }`).
+func TestE2ENeverReturningFunctionExpressionInBitwiseOperand(t *testing.T) {
+	assertOutput(t, `
+const x = function () { throw new Error("x"); };
+const y = function () { throw new Error("y"); };
+let reached = false;
+try {
+  const r = x() & y();
+  reached = true;
+  console.log("r=" + r);
+} catch (e) {
+  console.log("caught");
+}
+console.log("reached:" + reached);
+`, "caught\nreached:false")
+}

@@ -152,6 +152,30 @@ try {
 	}
 }
 
+// TestE2ECapturedObjectInTryUsedInCatch is the ADR-00872 regression: an object/
+// class-instance `const` captured by a closure defined *inside* a `try` block and
+// also read in the `catch` used to emit invalid IR ("Instruction does not dominate
+// all uses") — the closure boxed the local lazily in the try body, which doesn't
+// dominate the catch. Object bindings now eager-box at their declaration point.
+func TestE2ECapturedObjectInTryUsedInCatch(t *testing.T) {
+	assertOutput(t, `
+class Box { v: number; constructor(v: number) { this.v = v } get(): number { return this.v } }
+let log: string = ""
+function run(): void {
+  const b = new Box(7)
+  const cb = (): void => { log = log + "cb" + b.get() }
+  try {
+    cb()
+    throw new Error("boom")
+  } catch (e) {
+    log = log + " catch" + b.get()
+  }
+}
+run()
+console.log(log)
+`, "cb7 catch7")
+}
+
 func TestE2ETryCatchNoThrow(t *testing.T) {
 	assertOutput(t, `
 try {
@@ -401,4 +425,35 @@ func TestE2EUntypedNewError(t *testing.T) {
 const e = new Error('oops')
 console.log(e.message)
 `, "oops")
+}
+
+// TDD-00202: a thrown value keeps its real type (catch binds `unknown`), so a
+// thrown primitive is caught as that primitive, not wrapped in an Error.
+func TestE2EThrowCatchPrimitiveValues(t *testing.T) {
+	assertOutput(t, `
+try { throw "boom"; } catch (e) { console.log(typeof e, e === "boom", String(e)); }
+try { throw 42; } catch (e) { console.log(typeof e, e === 42); }
+try { throw true; } catch (e) { console.log(typeof e, e === true); }
+`, "string true boom\nnumber true\nboolean true")
+}
+
+func TestE2EThrowCatchErrorShapePreserved(t *testing.T) {
+	assertOutput(t, `
+try { throw new Error("boom"); } catch (e) {
+  console.log(typeof e, e instanceof Error, e.message);
+}
+try { throw new TypeError("bad"); } catch (e) {
+  console.log(e instanceof TypeError, e instanceof Error, e.name, e.message, e.message.length);
+}
+`, "object true boom\ntrue true TypeError bad 3")
+}
+
+func TestE2EThrowCatchRethrow(t *testing.T) {
+	assertOutput(t, `
+try {
+  try { throw "inner"; } catch (e) { throw e; }
+} catch (e2) {
+  console.log("rethrown:", e2, e2 === "inner");
+}
+`, "rethrown: inner true")
 }

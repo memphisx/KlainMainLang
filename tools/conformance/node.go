@@ -183,17 +183,35 @@ var nodeAmbientMemberGlobal = map[string]map[string]string{
 var nodeAmbientModule = map[string]bool{
 	"buffer": true, "process": true, "console": true, "timers": true,
 	"url": true, "string_decoder": true, "punycode": true,
-	"events": true, // EventEmitter is global, not importable
+	"events":          true, // EventEmitter is global, not importable
 	"timers/promises": true,
 }
 
 type nodeResult struct {
 	File     string
+	Suite    string // parallel | sequential | es-module | message | internet | pummel | known_issues
 	Module   string // path | querystring | url
 	Status   string // PASS | FAIL | SKIP_OUT_OF_SCOPE
 	Reason   string
 	Stripped int // count of .win32/.posix statements dropped — a pass covers the default namespace only
 }
+
+// nodeSuites are the behavioral suite dirs under test/ this track measures —
+// every one of them, no allowlist (TDD-00204 Track 3). Two are counted as
+// named skip buckets rather than executed: `pummel` (multi-minute stress
+// scale, not a per-feature signal) and `known_issues` (tests upstream itself
+// documents as expected-to-fail). They stay in the denominator, visibly.
+var nodeSuites = []string{"parallel", "sequential", "es-module", "message", "internet", "pummel", "known_issues"}
+
+var nodeSuiteSkip = map[string]string{
+	"pummel":       "pummel stress suite — resource-scale runs, not executed (counted, not hidden)",
+	"known_issues": "known_issues — upstream documents these as expected failures, not executed (counted, not hidden)",
+}
+
+// seqMu serializes `sequential` suite files — upstream runs that dir one file
+// at a time (fixed ports, global process state), so racing them against the
+// worker pool would manufacture failures.
+var seqMu sync.Mutex
 
 // nodeWholeFileSkip names source patterns that put a whole Node test file out of
 // this compiler's target surface — dynamic constructs that can't be excised at
@@ -364,7 +382,29 @@ func classifyUnsupportedModule(mod, raw string) (skip, fail string) {
 // .win32/.posix statements dropped, so a pass can be reported as covering the
 // default namespace only. absPath gives __filename/__dirname concrete values so
 // path assertions over them hold.
+// ESM import forms (the es-module suite, TDD-00204 Track 3): rewritten to the
+// equivalent require form up front so the existing module classification
+// (supported / ambient / harness-internal) applies uniformly; the classifier
+// then re-emits supported ones as this compiler's typed imports.
+var (
+	reEsmDefault  = regexp.MustCompile(`(?m)^\s*import\s+([A-Za-z_$][\w$]*)\s+from\s+['"]([^'"]+)['"];?\s*$`)
+	reEsmNS       = regexp.MustCompile(`(?m)^\s*import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s+['"]([^'"]+)['"];?\s*$`)
+	reEsmDestruct = regexp.MustCompile(`(?m)^\s*import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"];?\s*$`)
+	reEsmBare     = regexp.MustCompile(`(?m)^\s*import\s+['"]([^'"]+)['"];?\s*$`)
+)
+
+func rewriteEsmImports(src string) string {
+	src = reEsmDefault.ReplaceAllString(src, "const $1 = require('$2');")
+	src = reEsmNS.ReplaceAllString(src, "const $1 = require('$2');")
+	src = reEsmDestruct.ReplaceAllString(src, "const {$1} = require('$2');")
+	src = reEsmBare.ReplaceAllString(src, "require('$1');")
+	// The common harness's ESM entry maps to the same shim as its CJS form.
+	src = strings.ReplaceAll(src, "require('../common/index.mjs');", "require('../common');")
+	return src
+}
+
 func transformNodeSource(src, absPath string) (out string, platformStripped int, skip, fail string) {
+	src = rewriteEsmImports(src)
 	// Node's `common` test harness: this shim provides only the pure environment
 	// probes (booleans). A file that reaches for a behavioral helper
 	// (`common.mustCall`, `mustNotCall`, `expectsError`, …) needs Node's actual
@@ -603,11 +643,7 @@ func normalizeNodeModule(mod string) string {
 }
 
 func runNodeSuite(workDir string, timeout time.Duration, workers int, compat string) {
-	root := ".node-tests/test/parallel"
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		fatal("reading node corpus %s (run tools/conformance/fetch.sh first): %v", root, err)
-	}
+	root := ".node-tests/test"
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		fatal("creating workdir: %v", err)
 	}
@@ -622,9 +658,21 @@ func runNodeSuite(workDir string, timeout time.Duration, workers int, compat str
 	}
 
 	var files []string
-	for _, e := range entries {
-		if name := e.Name(); strings.HasPrefix(name, "test-") && strings.HasSuffix(name, ".js") {
-			files = append(files, name)
+	for _, suite := range nodeSuites {
+		entries, err := os.ReadDir(filepath.Join(root, suite))
+		if err != nil {
+			fatal("reading node corpus %s/%s (run tools/conformance/fetch.sh first): %v", root, suite, err)
+		}
+		for _, e := range entries {
+			name := e.Name()
+			switch {
+			case strings.HasPrefix(name, "test-") && (strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".mjs")):
+				files = append(files, suite+"/"+name)
+			case suite == "message" && strings.HasSuffix(name, ".js"):
+				// message-suite files aren't all test-* prefixed; each pairs
+				// with a .out expected-output baseline.
+				files = append(files, suite+"/"+name)
+			}
 		}
 	}
 
@@ -808,13 +856,20 @@ export default tmpdir;
 
 func runOneNode(path, name, workDir string, workerID int, timeout time.Duration) (res nodeResult) {
 	res.File = name
-	res.Module = moduleOf(name)
+	res.Suite = strings.SplitN(name, "/", 2)[0]
+	res.Module = moduleOf(filepath.Base(name))
 	defer func() {
 		if r := recover(); r != nil {
 			res.Status = "FAIL"
 			res.Reason = normalizeReason("CRASH", fmt.Sprintf("%v", r))
 		}
 	}()
+
+	if why, skip := nodeSuiteSkip[res.Suite]; skip {
+		res.Status = "SKIP_OUT_OF_SCOPE"
+		res.Reason = why
+		return res
+	}
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -836,7 +891,42 @@ func runOneNode(path, name, workDir string, workerID int, timeout time.Duration)
 		return res
 	}
 
-	ok, reason := compileAndRun(src, workDir, fmt.Sprintf("node%d", workerID), timeout)
+	// `sequential` files assume they run alone (fixed ports, process-global
+	// state) — upstream runs that dir serially; racing them against the pool
+	// would manufacture failures.
+	if res.Suite == "sequential" {
+		seqMu.Lock()
+		defer seqMu.Unlock()
+	}
+
+	tag := fmt.Sprintf("node%d", workerID)
+	if res.Suite == "message" {
+		// Expected-output suite: the pass criterion is the combined output
+		// matching the sibling `.out` baseline (a nonzero exit is often the
+		// tested behavior), not the exit code.
+		ok, reason, stdout, stderr := compileAndRunInDir(src, workDir, tag, timeout, "", res.Suite)
+		if reason != "" && (strings.HasPrefix(reason, "COMPILE_ERROR") || strings.HasPrefix(reason, "CLANG_") || strings.HasPrefix(reason, "WRITE_ERROR") || reason == "RUN_TIMEOUT") {
+			res.Status = "FAIL"
+			res.Reason = reason
+			return res
+		}
+		_ = ok
+		expected, rerr := os.ReadFile(strings.TrimSuffix(path, ".js") + ".out")
+		if rerr != nil {
+			res.Status = "FAIL"
+			res.Reason = "READ_ERROR: missing .out baseline: " + rerr.Error()
+			return res
+		}
+		if matchesOutBaseline(string(expected), stdout+stderr) {
+			res.Status = "PASS"
+		} else {
+			res.Status = "FAIL"
+			res.Reason = "OUTPUT_MISMATCH: combined output does not match the .out baseline"
+		}
+		return res
+	}
+
+	ok, reason, _, _ := compileAndRunInDir(src, workDir, tag, timeout, "", res.Suite)
 	if ok {
 		res.Status = "PASS"
 	} else {
@@ -844,6 +934,29 @@ func runOneNode(path, name, workDir string, workerID int, timeout time.Duration)
 		res.Reason = reason
 	}
 	return res
+}
+
+// matchesOutBaseline compares a run's combined output against a Node
+// `message` suite `.out` baseline: line-by-line, where `*` in the baseline
+// matches any character sequence within that line (Node's own wildcard
+// convention for volatile fragments like paths and line numbers).
+func matchesOutBaseline(expected, got string) bool {
+	el := strings.Split(strings.TrimRight(expected, "\n"), "\n")
+	gl := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	if len(el) != len(gl) {
+		return false
+	}
+	for i := range el {
+		parts := strings.Split(el[i], "*")
+		for j, p := range parts {
+			parts[j] = regexp.QuoteMeta(p)
+		}
+		re, err := regexp.Compile("^" + strings.Join(parts, ".*") + "$")
+		if err != nil || !re.MatchString(gl[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // runNodeLane executes the whole corpus once under the current laneCompat
@@ -878,15 +991,16 @@ func runNodeLane(root string, files []string, workDir string, timeout time.Durat
 
 	var results []nodeResult
 	done := 0
+	prog := newProgressTracker("node", label, len(files), workDir)
 	for r := range out {
 		results = append(results, r)
+		prog.tick(r.Status, r.Reason)
 		if done++; done%500 == 0 {
 			fmt.Fprintf(os.Stderr, "  %d/%d\n", done, len(files))
 		}
 	}
 	return results
 }
-
 
 // writeNodeReport renders one lane's Node-core results into that lane's folder
 // (docs/testing/<lane>/CONFORMANCE-RESULTS-NODE.md). Each lane is a separate,
@@ -896,13 +1010,14 @@ func writeNodeReport(path string, all []nodeResult) error {
 	var b strings.Builder
 	b.WriteString("# Node-core conformance results\n\n")
 	b.WriteString(reportLaneHeader())
-	b.WriteString("Generated by `tools/conformance -suite=node` (TDD-00121 Track B) against the **full `test/parallel` behavioral suite** of a pinned `nodejs/node` checkout (every `test-*.js`), regenerate with `make conformance-node`. Do not hand-edit; re-run instead.\n\n")
+	b.WriteString("Generated by `tools/conformance -suite=node` (TDD-00121 Track B, TDD-00204 Track 3) against **every behavioral suite** of a pinned `nodejs/node` checkout — `parallel`, `sequential` (run serialized, as upstream does), `es-module` (ESM imports rewritten through the same classifier), `message` (combined output compared against the `.out` baseline, `*` wildcards honored), `internet` (real network), with `pummel` and `known_issues` counted as named skip buckets — regenerate with `make conformance-node`. Do not hand-edit; re-run instead.\n\n")
 	b.WriteString("Each file is mechanically transformed from Node's untyped CommonJS (`require`/`'use strict'`/Node globals) into this compiler's typed-ESM form, then compiled and run. **PASS** = compiled and exited 0; **FAIL** = a compile error, a nonzero exit, or a require of a real Node core module this compiler doesn't implement (`MODULE_NOT_IMPLEMENTED` — an in-scope gap); **SKIP** = only Node-repo-internal harness surface the transform can't bridge (unshimmed `../common/*` helpers, `internal/*`, dynamic `require`, `.call`/`.apply`).\n\n")
 	b.WriteString("Interpretation, misclassification history, and the ranked remaining-work list live in the hand-written companion [NODE-GAP-ANALYSIS.md](../NODE-GAP-ANALYSIS.md).\n\n")
 	b.WriteString("> **Read this honestly.** Node's tests are written in untyped, dynamic JavaScript against the *full* Node API (platform namespaces, `.call`/`.apply`, `Object.entries` test-tables, `instanceof` on builtins, live sockets/child processes). This compiler is a typed subset, so most files legitimately don't compile — the pass count is a floor on \"how much of Node's own suite runs verbatim,\" not a measure of module correctness. The per-module histogram below shows where the runnable surface actually is; hand-mined typed value-semantics cases remain the productive complement.\n\n")
 
 	type agg struct{ pass, fail, skip int }
 	byMod := map[string]*agg{}
+	bySuite := map[string]*agg{}
 	byReason := map[string]int{}
 	bySkip := map[string]int{}
 	var oPass, oFail, oSkip int
@@ -912,6 +1027,19 @@ func writeNodeReport(path string, all []nodeResult) error {
 		if !ok {
 			m = &agg{}
 			byMod[r.Module] = m
+		}
+		s, ok := bySuite[r.Suite]
+		if !ok {
+			s = &agg{}
+			bySuite[r.Suite] = s
+		}
+		switch r.Status {
+		case "PASS":
+			s.pass++
+		case "FAIL":
+			s.fail++
+		default:
+			s.skip++
 		}
 		switch r.Status {
 		case "PASS":
@@ -937,6 +1065,17 @@ func writeNodeReport(path string, all []nodeResult) error {
 		}
 		fmt.Fprintf(&b, "%d files total: **%d passed**, %d failed, %d skipped (out of scope).\n\nOf the %d files that compiled far enough to run, **%d passed (%.1f%%)**.\n\n", len(all), oPass, oFail, oSkip, ran, oPass, pct)
 	}
+
+	// Per-suite breakdown — the honest denominator per upstream suite dir.
+	b.WriteString("## By suite\n\n| Suite | Passed | Failed | Skipped | Total |\n|---|---|---|---|---|\n")
+	for _, s := range nodeSuites {
+		a, ok := bySuite[s]
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(&b, "| %s | %d | %d | %d | %d |\n", s, a.pass, a.fail, a.skip, a.pass+a.fail+a.skip)
+	}
+	b.WriteString("\n")
 
 	// Per-module histogram, most files first.
 	b.WriteString("## By module (top 40 by file count)\n\n| Module | Passed | Failed | Skipped | Total |\n|---|---|---|---|---|\n")
@@ -1060,23 +1199,38 @@ func nodeReason(kind, msg string) string {
 }
 
 func compileAndRun(src, workDir, tag string, timeout time.Duration) (bool, string) {
-	// Entry goes under parallel/ so `../common/fixtures` resolves to the
-	// generated shim (runNodeSuite writes workDir/common/fixtures.ts).
-	prog, perr := frontEndSource(src, filepath.Join(workDir, "parallel"), tag)
+	ok, reason, _, _ := compileAndRunInDir(src, workDir, tag, timeout, "", "parallel")
+	return ok, reason
+}
+
+// compileAndRunInDir is compileAndRun with an explicit working directory for the
+// *run* phase: when runDir is non-empty the compiled binary executes with its
+// cwd set there, so a program that opens a relative path (the WPT suite's
+// `fetch("resources/x.json")` → relative fs.readFileSync) resolves against the
+// test file's own directory. runDir empty ⇒ inherit the runner's cwd (Node track).
+// compileAndRunInDir returns (pass, reason, stdout, stderr). Both output
+// streams are captured on every exit path: the WPT track parses its
+// subtest-summary line (`__WPT_RESULT__ <pass> <fail>`) from stdout, and the
+// Node `message` suite compares combined output against its `.out` baseline
+// regardless of the file-level exit code. entrySub is the workDir
+// subdirectory the entry compiles under so `../common/*` resolves to the
+// generated shims — the test's own suite dir name for the Node track.
+func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir, entrySub string) (bool, string, string, string) {
+	prog, perr := frontEndSource(src, filepath.Join(workDir, entrySub), tag)
 	if perr != nil {
-		return false, nodeReason("COMPILE_ERROR", perr.Error())
+		return false, nodeReason("COMPILE_ERROR", perr.Error()), "", ""
 	}
 
 	llFile := filepath.Join(workDir, tag+".ll")
 	binFile := filepath.Join(workDir, tag+".bin")
 	if err := os.WriteFile(llFile, []byte(prog.ir), 0644); err != nil {
-		return false, "WRITE_ERROR: " + err.Error()
+		return false, "WRITE_ERROR: " + err.Error(), "", ""
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	for _, cs := range prog.cSources {
 		cFile := filepath.Join(workDir, tag+"."+cs.Name+".c")
 		if err := os.WriteFile(cFile, []byte(cs.Content), 0644); err != nil {
-			return false, "WRITE_ERROR: " + err.Error()
+			return false, "WRITE_ERROR: " + err.Error(), "", ""
 		}
 		clangArgs = append(clangArgs, cFile)
 		clangArgs = append(clangArgs, cs.CFlags...)
@@ -1095,22 +1249,34 @@ func compileAndRun(src, workDir, tag string, timeout time.Duration) (bool, strin
 	clangCmd.Stderr = &clangOut
 	if err := clangCmd.Run(); err != nil {
 		if cctx.Err() == context.DeadlineExceeded {
-			return false, "CLANG_TIMEOUT"
+			return false, "CLANG_TIMEOUT", "", ""
 		}
-		return false, nodeReason("CLANG_ERROR", firstLine(clangOut.String()))
+		return false, nodeReason("CLANG_ERROR", firstLine(clangOut.String())), "", ""
 	}
 	defer os.Remove(binFile)
 
 	rctx, rcancel := context.WithTimeout(context.Background(), timeout)
 	defer rcancel()
-	var stderr bytes.Buffer
-	runCmd := killableCommand(rctx, binFile)
+	var stdout, stderr bytes.Buffer
+	// When the run cwd is redirected (WPT), the binary path must be absolute —
+	// a workDir-relative path wouldn't resolve from runDir.
+	runBin := binFile
+	if runDir != "" {
+		if abs, err := filepath.Abs(binFile); err == nil {
+			runBin = abs
+		}
+	}
+	runCmd := killableCommand(rctx, runBin)
+	runCmd.Stdout = &stdout
 	runCmd.Stderr = &stderr
+	if runDir != "" {
+		runCmd.Dir = runDir
+	}
 	if err := runCmd.Run(); err != nil {
 		if rctx.Err() == context.DeadlineExceeded {
-			return false, "RUN_TIMEOUT"
+			return false, "RUN_TIMEOUT", stdout.String(), stderr.String()
 		}
-		return false, nodeReason("RUNTIME_NONZERO_EXIT", firstLine(stderr.String()))
+		return false, nodeReason("RUNTIME_NONZERO_EXIT", firstLine(stderr.String())), stdout.String(), stderr.String()
 	}
-	return true, ""
+	return true, "", stdout.String(), stderr.String()
 }

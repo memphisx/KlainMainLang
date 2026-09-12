@@ -93,6 +93,7 @@ func buildBinary(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
@@ -267,6 +268,18 @@ func appendURLPattern(t *testing.T, em *llvm.Emitter, dir string, clangArgs []st
 		t.Fatalf("write URLPattern runtime source: %v", err)
 	}
 	return append(clangArgs, upFile)
+}
+
+func appendURLSearchParams(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesURLSearchParams() {
+		return clangArgs
+	}
+	f := filepath.Join(dir, "urlsearchparams.c")
+	if err := os.WriteFile(f, []byte(llvm.URLSearchParamsSource()), 0644); err != nil {
+		t.Fatalf("write URLSearchParams runtime source: %v", err)
+	}
+	return append(clangArgs, f)
 }
 
 // appendPathWin32 compiles the path.win32 sidecar (__kml_path_win32_* ABI,
@@ -501,6 +514,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
@@ -587,6 +601,7 @@ func buildBinaryFromFile(t *testing.T, srcFile string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
@@ -706,6 +721,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
@@ -887,6 +903,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
@@ -976,6 +993,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
@@ -1081,6 +1099,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
@@ -1153,6 +1172,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
@@ -1255,6 +1275,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
@@ -1320,6 +1341,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
@@ -1498,6 +1520,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)

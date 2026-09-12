@@ -166,3 +166,26 @@ console.log(d & 2);
 console.log(d * 4);
 `, "2\n12")
 }
+
+func TestE2EToPrimitiveBitwiseInlineObjectLiteral(t *testing.T) {
+	// ADR-00866 / Test262 bitwise-and S11.10.1_A2.2_T1: an object literal used
+	// *inline* as a bitwise operand (not bound to a const first) previously
+	// truncated its raw pointer to i32 — invalid IR. The number-hint ToPrimitive
+	// ladder now runs on it before ToInt32, in both operand positions, including
+	// the toString-fallthrough when valueOf yields a non-primitive.
+	assertOutput(t, `
+console.log(({ valueOf: function() { return 1; } } & 1));
+console.log((1 & { toString: function() { return 1; } }));
+console.log((1 & { valueOf: function() { return {}; }, toString: function() { return 1; } }));
+console.log(({ valueOf: function() { return 12; } } << 1));
+`, "1\n1\n1\n24")
+}
+
+func TestE2EToPrimitiveBitwiseObjectNoPrimitiveRejects(t *testing.T) {
+	// An object with no primitive value (valueOf/toString both return objects)
+	// has no ToInt32 — strict rejects cleanly (TS reports the same), rather than
+	// emitting `trunc i64 <object ptr> to i32`.
+	assertCodegenError(t, `
+console.log((1 & { valueOf: function() { return {}; }, toString: function() { return {}; } }));
+`, "without a primitive value")
+}

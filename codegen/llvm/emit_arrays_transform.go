@@ -16,16 +16,17 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 	}
 	type concatPart struct {
 		ptr, length string // array part
+		srcElemTy   Type   // array part's own element type
 		scalar      *Value // scalar part (length 1)
 	}
 	var parts []concatPart
 	for _, arg := range args {
 		if e.inferExprType(arg).IsArray {
-			p, l, _, err := e.resolveArrayForHOF(arg, pos)
+			p, l, aet, err := e.resolveArrayForHOF(arg, pos)
 			if err != nil {
 				return Value{}, err
 			}
-			parts = append(parts, concatPart{ptr: p, length: l})
+			parts = append(parts, concatPart{ptr: p, length: l, srcElemTy: aet})
 			continue
 		}
 		v, err := e.emitExpr(arg)
@@ -65,6 +66,13 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 		if p.scalar != nil {
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, p.scalar.Ref, dst, elemTy.Align()))
 			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, off))
+		} else if elemTy.IsDynamic && !p.srcElemTy.IsDynamic {
+			// Concatenating a concrete-element array into a boxed-element array
+			// (`any[]`, TDD-00200): the source slots hold raw scalars, not NaN
+			// boxes, so a byte-copy would mis-tag them. Copy element-wise,
+			// boxing each source value to `any` on the way in.
+			e.emitBoxCopyLoop(dst, p.ptr, p.length, p.srcElemTy)
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", next, off, p.length))
 		} else {
 			nb := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", nb, p.length, elemTy.Align()))
@@ -185,7 +193,10 @@ func (e *Emitter) emitArrayFill(mem *ast.MemberExpression, args []ast.Expression
 			return Value{}, err
 		}
 	} else {
-		fillVal = e.coerce(fillVal, elemTy)
+		fillVal, err = e.coerceChecked(fillVal, elemTy, args[0].GetPos(), "array element")
+		if err != nil {
+			return Value{}, err
+		}
 	}
 	// Box once, outside the loop below, and store the same box pointer into
 	// every filled slot — real JS's own .fill() semantics for a reference
@@ -204,7 +215,11 @@ func (e *Emitter) emitArrayFill(mem *ast.MemberExpression, args []ast.Expression
 		if err != nil {
 			return Value{}, err
 		}
-		startN = e.emitNormalizeSliceIdx(e.arrayIndexToI64(sr).Ref, lenReg)
+		sIdx, err := e.arrayIndexToI64(sr, args[1].GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		startN = e.emitNormalizeSliceIdx(sIdx.Ref, lenReg)
 	} else {
 		startN = "0"
 	}
@@ -214,7 +229,11 @@ func (e *Emitter) emitArrayFill(mem *ast.MemberExpression, args []ast.Expression
 		if err != nil {
 			return Value{}, err
 		}
-		endN = e.emitNormalizeSliceIdx(e.arrayIndexToI64(er).Ref, lenReg)
+		eIdx, err := e.arrayIndexToI64(er, args[2].GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		endN = e.emitNormalizeSliceIdx(eIdx.Ref, lenReg)
 	} else {
 		endN = lenReg
 	}
@@ -271,7 +290,11 @@ func (e *Emitter) emitArrayAt(mem *ast.MemberExpression, args []ast.Expression, 
 	// Real JS .at() index handling: a negative index counts from the end and,
 	// unlike .slice()'s clamp, one still negative after `+ len` is simply out
 	// of range (`[10,20,30].at(-5)` is `undefined`, not the first element).
-	rawI := e.arrayIndexToI64(idxRaw).Ref
+	rawIVal, err := e.arrayIndexToI64(idxRaw, args[0].GetPos())
+	if err != nil {
+		return Value{}, err
+	}
+	rawI := rawIVal.Ref
 	isNeg := e.freshReg()
 	plusLen := e.freshReg()
 	normIdx := e.freshReg()
@@ -351,7 +374,11 @@ func (e *Emitter) emitArrayWith(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	normIdx := e.emitNormalizeSliceIdx(e.arrayIndexToI64(idxRaw).Ref, lenReg)
+	idxI, err := e.arrayIndexToI64(idxRaw, args[0].GetPos())
+	if err != nil {
+		return Value{}, err
+	}
+	normIdx := e.emitNormalizeSliceIdx(idxI.Ref, lenReg)
 
 	valRaw, err := e.emitExpr(args[1])
 	if err != nil {

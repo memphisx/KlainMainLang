@@ -44,7 +44,11 @@ func (e *Emitter) emitNewDataViewExpression(ex *ast.NewDataViewExpression) (Valu
 		if err != nil {
 			return Value{}, err
 		}
-		offRef = e.coerce(offVal, TypeI64).Ref
+		offI, err := e.coerceChecked(offVal, TypeI64, ex.ByteOffset.GetPos(), "DataView byteOffset")
+		if err != nil {
+			return Value{}, err
+		}
+		offRef = offI.Ref
 	}
 	var lenRef string
 	if ex.ByteLength != nil {
@@ -52,7 +56,11 @@ func (e *Emitter) emitNewDataViewExpression(ex *ast.NewDataViewExpression) (Valu
 		if err != nil {
 			return Value{}, err
 		}
-		lenRef = e.coerce(lenVal, TypeI64).Ref
+		lenI, err := e.coerceChecked(lenVal, TypeI64, ex.ByteLength.GetPos(), "DataView byteLength")
+		if err != nil {
+			return Value{}, err
+		}
+		lenRef = lenI.Ref
 	} else {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", r, bufLen, offRef))
@@ -194,7 +202,11 @@ func (e *Emitter) emitDataViewBoundsCheckedPtr(dvVal Value, offExpr ast.Expressi
 		e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", conv, f.Ref))
 		offVal = Value{Ref: conv, Ty: TypeI64}
 	}
-	off := e.coerce(offVal, TypeI64).Ref
+	offI, err := e.coerceChecked(offVal, TypeI64, offExpr.GetPos(), "DataView byteOffset")
+	if err != nil {
+		return "", err
+	}
+	off := offI.Ref
 	dataSlotLen := e.freshReg()
 	byteLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", dataSlotLen, dataViewStructIR, dvVal.Ref))
@@ -351,7 +363,10 @@ func (e *Emitter) emitDataViewSet(mem *ast.MemberExpression, kind string, args [
 		narrow = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %s)", narrow, unwrap, rawVal.Ref))
 	} else if spec.float {
-		f := e.coerce(rawVal, TypeF64)
+		f, err := e.coerceChecked(rawVal, TypeF64, args[1].GetPos(), "DataView value")
+		if err != nil {
+			return Value{}, err
+		}
 		if spec.width == 2 {
 			h := e.freshReg()
 			narrow = e.freshReg()
@@ -367,7 +382,10 @@ func (e *Emitter) emitDataViewSet(mem *ast.MemberExpression, kind string, args [
 			e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", narrow, f.Ref))
 		}
 	} else {
-		i := e.coerce(rawVal, TypeI64)
+		i, err := e.coerceChecked(rawVal, TypeI64, args[1].GetPos(), "DataView value")
+		if err != nil {
+			return Value{}, err
+		}
 		if spec.width == 8 {
 			narrow = i.Ref
 		} else {

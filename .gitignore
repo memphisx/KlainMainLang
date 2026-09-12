@@ -79,6 +79,10 @@ apps/**
 /.node-tests/
 /.ts-tests/
 
+# Fetched Web Platform Tests corpus (TDD-00082 Track 2, fetch.sh) — pinned by
+# commit SHA in fetch.sh, sparse/blobless, not vendored into git.
+/.wpt-tests/
+
 # Generated conformance-run artifacts (tools/conformance) — the committed
 # deliverables are the reports under docs/testing/, not these raw logs or the
 # compiled runner binary. The binary is ignored by its exact path so it does

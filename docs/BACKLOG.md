@@ -26,6 +26,14 @@ The exhaustive list of every unfinished TDD is the generated table in
 
 ## 1. Highest leverage — do these first
 
+- **Conformance denominator honesty — Track 5 residue** (TDD-00204, Tracks 1–4
+  shipped: ADR-00875–00879, per-platform report folders + live TUI dashboard
+  included). Remaining: the **headless DOM shim** (jsdom tier — element tree,
+  events, parser) that unlocks the ~20–25K WPT testharness `.html` documents;
+  own TDD before code. Adjacent follow-ups the new reports surfaced: the async
+  lane's `then`-handler `5e-324` boxed-value corruption (real bug, high value);
+  TS script-mode global merging (top multi-file false-reject shape).
+
 - **Fully-incremental `res` `Writable`** (TDD-00195 Stage 2 remainder) — server
   `req` is a Node `Readable` and the response flush is now driven by `res.end()`
   (fire-and-forget handlers work), but `res` is still buffered (one flush at
@@ -48,20 +56,14 @@ laptop. Cross-platform work is driven from Mac/Linux (Docker + CI), but anything
 that genuinely needs a native Windows box to complete or verify should be
 finished while on it — don't defer such work into another comeback.
 
-- **Structural (the real debt):** the IOCP event-loop reactor (TDD-00183),
-  built on the owned handle table (TDD-00182 Stage 1). **Stage 1 shipped**
-  (ADR-00865): completion port + overlapped/buffered pipes + console reader —
-  stdin/child-pipe reads no longer block, child stdio no longer deadlocks, the
-  idle poll-spin is gone for pipe/console programs. **Left:** Stage 2 moves
-  sockets to overlapped `WSARecv`/`AcceptEx` (kills the last poll slice, the
-  384-socket `select()` cap, `dup2` socket aliasing); Stage 3 refcounted
-  descriptions; Stage 4 hi-res timers; the fs thread pool folds onto the port.
-  Plus `cluster` round-robin (TDD-00177/00105, 3 skipped tests).
+- **IOCP reactor remaining stages** (TDD-00183, Stage 1 done): Stage 2 overlapped
+  sockets (`WSARecv`/`AcceptEx` — removes the last poll slice, the 384-socket
+  `select()` cap, `dup2` aliasing); Stage 3 refcounted descriptions; Stage 4
+  hi-res timers; fs thread pool onto the port. Plus `cluster` round-robin
+  (TDD-00177/00105, 3 skipped tests).
 - **Deferred edges (low value / untestable from a dev box):** broken-pipe write
   codes + the TLS-BIO error on long-lived pub/sub, named pipes for `net`,
   non-ASCII console *input*, `readlink` UNC / `chdir` drive vars (all TDD-00180).
-- **Waiting on the CI runner:** `lstat(symlink).size` (ADR-00769 — the dev box
-  lacks symlink privilege).
 - **Out of scope:** `--static` full-static, `-crypto=commoncrypto`, ASan/UBSan.
 
 ## 3. Node / runtime surface (mostly small, incremental)
@@ -93,6 +95,24 @@ finished while on it — don't defer such work into another comeback.
   (TDD-00165); `node:sqlite` dynamic-row `SELECT *`, `db.aggregate()`, error
   `.code`, lazy `iterate()` (TDD-00151); `klain:webview` multi-window
   (TDD-00142, see §6).
+- **URL/URLSearchParams overhaul (TDD-00203) — mostly shipped, residue:**
+  `URLSearchParams` is now a faithful ordered pair-list (ADR-00873) and `URL` got
+  default-port stripping, host lowercasing, `URL.parse`/`canParse` statics, and
+  `JSON.stringify`→`href` (ADR-00874). Remaining: (a) `url.searchParams` is a
+  **snapshot**, not live — mutations don't write back to `url.search` (needs the
+  URL object to hold the pair-list handle and re-serialize on mutation); (b)
+  **non-special-scheme** URLs (`new URL('foo:bar')`) — libcurl rejects them, needs
+  a hand-written WHATWG parser instead of libcurl; (c) IDN of a non-ASCII domain
+  on the Mac build needs libcurl+libidn2 (platform, not code).
+- **Other WPT-surfaced Web-API gaps** (`-suite wpt`, ADR-00871): `EventTarget`
+  listeners must be exactly a 1-arg function so the `.onabort`-property /
+  0-arg-listener `dom/abort` tests don't compile; `instanceof` against the ambient
+  `AbortSignal` class is unsupported.
+- **Any-equality: a null value compares unequal to `null`.** A null string boxed
+  as `any` (`URLSearchParams.get(missing)` passed to an `any` parameter) is not
+  `=== null` — surfaced by the WPT harness's `assert_equals(x, null)`, blocks a
+  couple of `url/` files. In the D1 NaN-box any-eq subsystem (TDD-00155), not
+  URL-specific.
 - **Not started** — `vm` (TDD-00046, gated on an embedded JS engine), `domain`,
   `string_decoder`, `util/types`, `assert/strict`, `dns/promises`,
   `readline/promises`, `timers/promises`, `stream/consumers`.
@@ -114,19 +134,21 @@ finished while on it — don't defer such work into another comeback.
 - `Array.from({ length: n }, fn)` / `Array.from({ length: n })` — the array-like
   overload (object `length` protocol + undefined fill) is unbuilt; the
   `(iterable, mapFn)` and string/Map/Set forms work.
-- Statically-typed heterogeneous / union-element arrays (`(A | B)[]`, inferred
-  mixed literals) — TDD-00200: `-compat=js` lowers to a NaN-boxed-element array
-  (unblocks `JSON.stringify(mixedTypeArray)`, `typeof`, `.map`, spread over mixed
-  arrays), strict keeps a recognizable rejection naming the tuple / `-compat=js`
-  escape hatches. The array half of TDD-00076's Bucket B (TDD-00062/TDD-00043).
-- Unhandled promise rejections stringify the rejection value even under
-  `--unhandled-rejections=none` (Node never touches it) — surfaced by
-  `test-promises-unhandled-proxy-rejections.js` once ToPrimitive made
-  `String(proxy)` faithfully invoke the (throwing) trap. Honor the flag / don't
-  eagerly coerce the value. (Promises/process, not ToPrimitive.)
-- Invalid-IR backlog — a full-file interaction in the bitwise A1 files
-  (`bitwise-and/S11.10.1_A2.2_T1.js`): every case compiles in isolation but not the
-  whole harness+7-cases file; predates ToPrimitive, unreproduced per-case.
+- Heterogeneous / union-element arrays (TDD-00200) — boxed-element `any[]`
+  representation + full method surface shipped (ADR-00887, `-compat=js` boxes
+  inferred mixed literals / heterogeneous `[]`, strict rejects recognizably).
+  Residue: a *constrained union* element (`(A | B)[]`) is still rejected
+  (element-level union checking unwired, TDD-00043); a statically-typed
+  object/array *value* boxed into an element is type-erased — deep
+  `JSON.stringify` of it throws (object *literals* are fine).
+- Honor `--unhandled-rejections=none`: an unhandled rejection still stringifies
+  the rejection value (Node never touches it) — don't eagerly coerce it.
+- A thrown plain object's own fields aren't readable after catch (`throw {x:1}`;
+  `e.x`) — needs D1 runtime object shape (TDD-00155 Stage 6). Primitives + Errors
+  are faithful.
+- Invalid-IR backlog — a function / non-primitive operand under `-compat=js`
+  (`{} & function(){}`, `f - 1`) truncates a raw pointer — the broad
+  operator-on-any compat=js gap, not bitwise-specific (strict rejects cleanly).
 - Dynamic `import()` beyond the eager V1 (TDD-00055); the `-compat`
   per-divergence flags (TDD-00075); `any` residues (TDD-00162).
 - `libbf` (MIT) as a third selectable `-bigint` backend alongside

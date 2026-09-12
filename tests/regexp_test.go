@@ -7,6 +7,24 @@ import (
 // --- RegExp (see docs/tdd/TDD-00035.md) — Stage 0: construction, literal
 // syntax, field reads, and catchable compile errors. Stage 1: .test(). ---
 
+// A non-string .test()/.exec() subject is ToString'd (faithful JS: `re.test(123)`
+// matches against "123"), and a non-string/undefined RegExp pattern or flags
+// argument is normalized instead of leaving a non-ptr word where a string is
+// expected — which previously emitted invalid IR (the RegExp A1 invalid-IR
+// files; a void value from a no-return `(function(){})()` reads as undefined).
+func TestE2ERegExpNonStringArgs(t *testing.T) {
+	assertOutput(t, `
+console.log(/2/.test(123))
+console.log(/9/.test(123))
+console.log(/n/.test((function(){})()))
+console.log(/x/.exec(123) === null)
+const re = new RegExp("a", (function(){})())
+console.log(re.test("bab"))
+const rp = new RegExp((function(){})())
+console.log(rp.test("anything"))
+`, "true\nfalse\ntrue\ntrue\ntrue\ntrue")
+}
+
 func TestE2ERegExpConstructorFields(t *testing.T) {
 	assertOutput(t, `
 const r = new RegExp("a+b", "gim")

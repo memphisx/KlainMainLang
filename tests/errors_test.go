@@ -112,19 +112,20 @@ try {
 `, "type: type problem\nrange: range problem")
 }
 
-func TestE2EThrownPrimitiveIsInstanceOfErrorNotSubtype(t *testing.T) {
-	// A thrown non-object value is wrapped as a base Error (kind 0), never a
-	// specific subtype — emitThrow's manual wrap path always tags kind 0.
+func TestE2EThrownPrimitiveKeepsItsType(t *testing.T) {
+	// TDD-00202: a thrown primitive is caught as that primitive (not wrapped in
+	// an Error) — matching Node: `throw 'x'` → e is the string "x", not an
+	// Error, so `e instanceof Error` is false and `typeof e` is "string".
 	assertOutput(t, `
 try {
   throw 'plain string'
 } catch (e) {
   console.log(e instanceof Error)
   console.log(e instanceof TypeError)
-  console.log(e.message)
-  console.log(e.name)
+  console.log(typeof e)
+  console.log(e === 'plain string')
 }
-`, "true\nfalse\nplain string\nError")
+`, "false\nfalse\nstring\ntrue")
 }
 
 func TestE2EUncaughtErrorSubtypePrintsMessage(t *testing.T) {

@@ -827,6 +827,17 @@ func (e *Emitter) emitProcessStreamWrite(args []ast.Expression, streamName strin
 	} else {
 		e.ensurePrintf()
 		e.emitInstr(fmt.Sprintf("call i32 (ptr, ...) @printf(ptr %s, ptr %s)", fmtPtr, val.Ref))
+		// Node delivers process.stdout.write immediately; stdout is only line-
+		// buffered (ADR-00867), so a write with no trailing newline would
+		// otherwise sit in the buffer until the next newline or exit. Flush it
+		// now to match (Windows keeps its own stdio path).
+		if targetGOOS() != "windows" {
+			e.ensureStdoutGlobal()
+			e.ensureFflushDecl()
+			so := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @%s, align 8", so, stdoutGlobalSymbol()))
+			e.emitInstr(fmt.Sprintf("call i32 @fflush(ptr %s)", so))
+		}
 	}
 	return Value{Ty: TypeVoid}, nil
 }

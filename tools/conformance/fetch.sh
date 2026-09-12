@@ -52,10 +52,14 @@ NODE_DEST="$SCRIPT_DIR/../../.node-tests"
 # "none" and re-fetched on every run — under Docker-as-root on a mounted volume
 # that `rm -rf`'d the host corpus. The marker lives in `.git/` so a checkout
 # never touches it, and a partial/failed fetch leaves none → the next run refetches.
+# Slice version: bumped when the sparse-checkout set below changes so an
+# existing checkout at the right tag but the old (narrower) slice refetches.
+# v2 = every behavioral suite dir, not just parallel (TDD-00204 Track 3).
+NODE_SLICE="suites-v2"
 NODE_MARKER="$NODE_DEST/.git/kml-corpus-version"
 if [ -d "$NODE_DEST/.git" ]; then
   current_tag="$(cat "$NODE_MARKER" 2>/dev/null || echo none)"
-  if [ "$current_tag" = "$NODE_TAG" ]; then
+  if [ "$current_tag" = "$NODE_TAG+$NODE_SLICE" ]; then
     echo "node tests already at pinned tag $NODE_TAG — nothing to do."
   else
     echo "node checkout at $current_tag, expected $NODE_TAG — removing and re-fetching."
@@ -68,21 +72,108 @@ if [ ! -d "$NODE_DEST/.git" ]; then
   git -C "$NODE_DEST" remote add origin "$NODE_URL"
   git -C "$NODE_DEST" config core.sparseCheckout true
   git -C "$NODE_DEST" sparse-checkout init --no-cone 2>/dev/null || true
-  # The full behavioral suite: every test/parallel/test-*.js (~3,500 files), the
-  # test/common harness they nearly all require, and test/fixtures (data many of
-  # them read). The runner buckets these by module and reports honestly — most
-  # will not compile (untyped-dynamic Node test code), which is the point of
-  # measuring against the real denominator rather than a hand-picked handful.
+  # EVERY behavioral suite dir (TDD-00204 Track 3), not a hand-picked one:
+  # parallel (~3,500), sequential, es-module, message (+ their .out expected-
+  # output baselines), internet (real network — available here), pummel and
+  # known_issues (fetched and counted as named skip buckets: stress-scale /
+  # documented-upstream-expected-failures), plus the test/common harness and
+  # test/fixtures data. The runner buckets by suite+module and reports
+  # honestly — most will not compile (untyped-dynamic Node test code), which
+  # is the point of measuring against the real denominator.
   printf '%s\n' \
     'test/parallel/**' \
+    'test/sequential/**' \
+    'test/es-module/**' \
+    'test/message/**' \
+    'test/internet/**' \
+    'test/pummel/**' \
+    'test/known_issues/**' \
     'test/common/**' \
     'test/fixtures/**' \
     > "$NODE_DEST/.git/info/sparse-checkout"
   git -C "$NODE_DEST" fetch --depth 1 --filter=blob:none origin "refs/tags/$NODE_TAG"
   git -C "$NODE_DEST" checkout -q FETCH_HEAD
-  echo "$NODE_TAG" > "$NODE_MARKER"
-  echo "Fetched node tests @ $NODE_TAG into $NODE_DEST"
+  echo "$NODE_TAG+$NODE_SLICE" > "$NODE_MARKER"
+  echo "Fetched node tests @ $NODE_TAG ($NODE_SLICE) into $NODE_DEST"
 fi
+
+# --- Web Platform Tests corpus (TDD-00082 Track 2) ---------------------------
+# A pinned, sparse, blobless checkout of the headless-runnable Web-Platform slice
+# (url, dom/abort, dom/events) plus the shared resources/ dir the tests' fixtures
+# and helper scripts live in — the Web-Platform-API oracle. Only the
+# `.any.js`/`.window.js` multi-global files run (the `.html` DOM-tree majority is
+# out of scope, reported not deleted); a `testharness.js`-shaped shim in the
+# runner supplies the assert vocabulary. Not vendored (.wpt-tests/ is gitignored).
+# Pinned by commit SHA: WPT ships no curated release tags (a rolling master), so
+# the SHA is the reproducibility mechanism, as with test262 above.
+WPT_SHA="85235b8e6ee3d09e14a98108a2baf612d6b47b08"
+WPT_URL="https://github.com/web-platform-tests/wpt.git"
+WPT_DEST="$SCRIPT_DIR/../../.wpt-tests"
+
+# Slice version: bumped whenever the sparse-checkout pattern set below changes,
+# so an existing checkout at the right SHA but the old (narrower) slice is
+# refetched. v2 = the full-headless slice (TDD-00204): every multi-global
+# source repo-wide, no directory allowlist.
+WPT_SLICE="full-headless-v3"
+WPT_MARKER="$WPT_DEST/.git/kml-corpus-version"
+if [ -d "$WPT_DEST/.git" ]; then
+  current="$(cat "$WPT_MARKER" 2>/dev/null || echo none)"
+  if [ "$current" = "$WPT_SHA+$WPT_SLICE" ]; then
+    echo "WPT already at pinned commit $WPT_SHA — nothing to do."
+  else
+    echo "WPT checkout at $current, expected $WPT_SHA — removing and re-fetching."
+    rm -rf "$WPT_DEST"
+  fi
+fi
+
+if [ ! -d "$WPT_DEST/.git" ]; then
+  git init -q "$WPT_DEST"
+  git -C "$WPT_DEST" remote add origin "$WPT_URL"
+  git -C "$WPT_DEST" config core.sparseCheckout true
+  git -C "$WPT_DEST" sparse-checkout init --no-cone 2>/dev/null || true
+  # The FULL headless multi-global corpus (TDD-00204): every
+  # `.any.js`/`.window.js`/`.worker.js` source anywhere in the repo — no
+  # directory allowlist; scope classification happens in the runner, where it
+  # is counted and reported, never at fetch time where it is invisible.
+  # `*.js` (not just the three source suffixes) because `// META: script=`
+  # helper includes are plain sibling .js files anywhere (`constants.sub.js`,
+  # `/wasm/jsapi/wasm-module-builder.js`, `../support/Blob.js`) — the v2
+  # suffix-only slice produced a ~500-file false-skip bucket. `*.json` + the
+  # resources/common/util dirs carry fetch-shim fixtures and non-.js helper
+  # data. Media-heavy blobs (images/video) stay unfetched; a still-missing
+  # helper surfaces as a counted "shared helper not in fetched slice" skip.
+  printf '%s\n' \
+    '*.js' \
+    '*.json' \
+    '**/resources/**' \
+    '**/common/**' \
+    '**/util/**' \
+    > "$WPT_DEST/.git/info/sparse-checkout"
+  git -C "$WPT_DEST" fetch --depth 1 --filter=blob:none origin "$WPT_SHA"
+  git -C "$WPT_DEST" checkout -q FETCH_HEAD
+  echo "$WPT_SHA+$WPT_SLICE" > "$WPT_MARKER"
+  echo "Fetched WPT @ $WPT_SHA ($WPT_SLICE) into $WPT_DEST"
+fi
+
+# Corpus-stats manifest (TDD-00204): full-tree class counts from git tree
+# metadata (the blobless clone carries the whole tree), so the runner's report
+# can open with the capability ladder — how much of WPT each capability tier
+# reaches — without needing the unfetched files on disk. Regenerated on every
+# run (cheap) so a hand-deleted manifest self-heals.
+WPT_STATS="$WPT_DEST/.git/kml-corpus-stats"
+git -C "$WPT_DEST" ls-tree -r HEAD --name-only | awk '
+  { total++ }
+  /\.(any|window|worker)\.js$/ { headless++; next }
+  /-manual\./ { manual++; next }
+  /(^|\/)crashtests\// { crash++; next }
+  /^webdriver\// { wdspec++; next }
+  /^css\/.*\.html?$/ { csshtml++; next }
+  /\.html?$/ { otherhtml++ }
+  END {
+    printf "total=%d\nheadless=%d\ncss_html=%d\nother_html=%d\nmanual=%d\ncrashtests=%d\nwdspec=%d\n",
+      total, headless, csshtml, otherhtml, manual, crash, wdspec
+  }' > "$WPT_STATS"
+echo "WPT corpus stats: $(tr '\n' ' ' < "$WPT_STATS")"
 
 # --- TypeScript acceptance-oracle corpus (TDD-00121 Track C) ------------------
 # A pinned, sparse, blobless checkout of Microsoft's compiler/conformance test

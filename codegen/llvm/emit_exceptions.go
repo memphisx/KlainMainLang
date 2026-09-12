@@ -377,11 +377,38 @@ func (e *Emitter) emitThrow(s *ast.ThrowStatement) error {
 	if err != nil {
 		return err
 	}
-	errPtr, err := e.errorPtrFromValue(val)
+	// TDD-00202: the thrown value keeps its real type. A caught value is
+	// re-thrown verbatim (record pass-through); an Error goes through the
+	// tag-13 ptr shim; everything else boxes to a NaN-box value whose (tag,
+	// payload) the catch reconstructs — so `throw "x"` is caught as the string
+	// "x", not wrapped in an Error.
+	if val.Ty.IsCaught {
+		tag, pay := e.caughtParts(val)
+		e.emitInstr(fmt.Sprintf("call void @__kml_throw_any(i8 %s, i64 %s)", tag, pay))
+		e.emitTerminator("unreachable")
+		return nil
+	}
+	// An Error, or a `class X extends Error` instance (errorObjType-compatible
+	// layout with the subclass TagID in the kind slot), records as kmlTagError
+	// so the catch reads its message and resolves `instanceof` off the kind slot.
+	isErrSubclass := false
+	if val.Ty.ClassName != "" {
+		if info, ok := e.classes[val.Ty.ClassName]; ok && info.IsErrorSubclass {
+			isErrSubclass = true
+		}
+	}
+	if val.Ty.IsError || isErrSubclass {
+		errPtr := e.coerce(val, TypePtr)
+		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errPtr.Ref))
+		e.emitTerminator("unreachable")
+		return nil
+	}
+	boxed, err := e.emitBoxValue(val)
 	if err != nil {
 		return err
 	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errPtr))
+	tag, pay := e.emitUnboxTagPayload(boxed)
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw_any(i8 %s, i64 %s)", tag, pay))
 	e.emitTerminator("unreachable")
 	return nil
 }
@@ -450,22 +477,35 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 	if s.Catch != nil {
 		e.pushScope()
 		if s.Catch.Param != "" {
-			errPtr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", errPtr))
+			// TDD-00202: bind the catch variable as the unpacked thrown-value
+			// record (TypeCaught ≈ TypeScript `unknown`) — a { i8 tag, i64
+			// payload } aggregate reconstructed from the throw. Narrowing
+			// (typeof/instanceof/===) and Error member access resolve off the tag.
+			tagR := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_get_thrown_tag()", tagR))
+			payR := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_get_thrown_pay()", payR))
+			agg := e.emitCaughtAggregate(tagR, payR)
 			varPtr := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", errPtr, varPtr))
-			e.define(s.Catch.Param, Symbol{Ptr: varPtr, Ty: errorObjType})
+			e.emitAlloca(fmt.Sprintf("%s = alloca { i8, i64 }, align 8", varPtr))
+			e.emitInstr(fmt.Sprintf("store { i8, i64 } %s, ptr %s, align 8", agg.Ref, varPtr))
+			e.define(s.Catch.Param, Symbol{Ptr: varPtr, Ty: TypeCaught})
 		} else if len(s.Catch.ObjectPattern) > 0 {
-			// Destructured catch binding (`catch ({ message, name }) {}`) —
-			// every thrown value (including a thrown non-Error primitive,
-			// see buildErrorObj's own doc comment) is force-shaped into
-			// errorObjType by the time it reaches here, so this can only
-			// ever destructure that fixed {kind, message, name} shape, not
-			// whatever arbitrary object a `throw` expression's own source
-			// literal happened to have.
+			// Destructured catch binding (`catch ({ message, name }) {}`). A
+			// caught Error is destructured by its errorObjType fields; a
+			// non-Error thrown value has no such fields, so the record's payload
+			// is not a valid errorObjType pointer — synthesize an empty Error so
+			// the destructured names read as empty rather than dereferencing a
+			// bad pointer (the bare `{ kind, message, name }` shape, TDD-00202).
+			tagR := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_get_thrown_tag()", tagR))
+			isErr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isErr, tagR, kmlTagError))
+			realPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", realPtr))
+			emptyErr := e.buildErrorObj(0, e.internString(""), e.internString("Error"))
 			errPtr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", errPtr))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", errPtr, isErr, realPtr, emptyErr))
 			if err := e.unpackObjectPatternInto(errPtr, errorObjType, s.Catch.ObjectPattern, s.Catch.Pos); err != nil {
 				e.popScope()
 				return err

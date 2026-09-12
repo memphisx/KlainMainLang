@@ -356,14 +356,24 @@ function plain(x: number): number { return x; }
 // T[] is deliberately out of V2's minimal scope (only a bare T parameter/
 // return position is substituted to TypeAny) — must be a clean compile error,
 // not a silent miscompile of a dynamic-element array.
-func TestE2EErasedGenericFunctionArrayOfTRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// An `@erased` generic over `T[]` now works: T erases to a boxed element, so
+// the parameter is the boxed-element array (TDD-00200/ADR-00887) and the whole
+// array-method surface rides it — indexing, .length, .slice, passthrough — for
+// both a number and a string instantiation. (Previously out of V2 scope, a
+// clean rejection.)
+func TestE2EErasedGenericFunctionArrayOfT(t *testing.T) {
+	assertOutput(t, `
 /** @erased */
 function first<T>(arr: T[]): T { return arr[0]; }
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for @erased with a T[] parameter (out of V2 scope), got none")
-	}
+/** @erased */
+function len<T>(arr: T[]): number { return arr.length; }
+/** @erased */
+function tail<T>(arr: T[]): T[] { return arr.slice(1); }
+console.log(first([10, 20, 30]));
+console.log(first(["a", "b"]));
+console.log(len([1, 2, 3]));
+console.log(tail([1, 2, 3]).length);
+`, "10\na\n3\n2")
 }
 
 // Arithmetic on an erased T hits the same, pre-existing "operators on any/

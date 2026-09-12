@@ -3081,6 +3081,31 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: right-hand side of instanceof must be a class name", ex.GetPos().Line, ex.GetPos().Col)
 	}
+	// A caught value (TypeCaught ≈ `unknown`, TDD-00202): resolve instanceof off
+	// the record's tag. A built-in Error kind checks the caught Error's kind;
+	// `Object` is true for any non-primitive; any other class is not verifiable
+	// from the packed record (a thrown user-class instance loses its identity).
+	if e.inferExprType(ex.Left).IsCaught {
+		lv, err := e.emitExpr(ex.Left)
+		if err != nil {
+			return Value{}, err
+		}
+		if kindID, ok := errorKindIDs[rightIdent.Name]; ok {
+			return e.emitCaughtInstanceOfError(lv, rightIdent.Name, kindID), nil
+		}
+		// A user `class X extends Error`: its TagID sits in the caught Error's
+		// kind slot (TDD-00202), so compare against it.
+		if info, ok := e.classes[rightIdent.Name]; ok && info.IsErrorSubclass {
+			return e.emitCaughtInstanceOfClassTag(lv, info.TagID), nil
+		}
+		if rightIdent.Name == "Object" {
+			tag, _ := e.caughtParts(lv)
+			nonPrim := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ugt i8 %s, %d", nonPrim, tag, kmlTagUndefined))
+			return Value{Ref: nonPrim, Ty: TypeBool}, nil
+		}
+		return Value{Ref: "0", Ty: TypeBool}, nil
+	}
 	if kindID, ok := errorKindIDs[rightIdent.Name]; ok {
 		return e.emitErrorInstanceOf(ex, rightIdent.Name, kindID)
 	}

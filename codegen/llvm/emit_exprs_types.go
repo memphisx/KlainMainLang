@@ -34,6 +34,19 @@ func (e *Emitter) emitTemplateLiteral(tl *ast.TemplateLiteral) (Value, error) {
 // emitValueToString converts any value to a null-terminated string ptr.
 // Strings pass through; numbers and bools are formatted via sprintf into a 32-byte scratch buffer.
 func (e *Emitter) emitValueToString(v Value) (Value, error) {
+	if v.Ty.IsURLSearchParams {
+		// `params + ''` / `${params}` serialize via the pair-list stringifier
+		// (TDD-00203), matching WHATWG's URLSearchParams `toString`.
+		e.ensureURLSearchParams()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_usp_to_string(ptr %s)", r, v.Ref))
+		return Value{Ref: r, Ty: TypePtr}, nil
+	}
+	if v.Ty.IsCaught {
+		// A caught value (TDD-00202): an Error renders "Name: message", anything
+		// else via the dynamic toString.
+		return e.emitCaughtToString(v)
+	}
 	if v.Ty.IsDynamic {
 		return e.emitDynamicToString(v)
 	}
@@ -223,6 +236,44 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 	return Value{Ref: scratch, Ty: TypePtr}, nil
 }
 
+// declaredArrayType is inferArrayType for a *named binding* whose initializer is
+// an array literal: an empty `[]` consults the usage pre-pass
+// (inferEmptyArrayElemTypes / TDD-00205 Stage 1) for the element type inferred
+// from `name`'s later push/insert/reassign usages, falling back to inferArrayType's
+// blind `number[]` default when the pass found nothing conclusive. A non-empty
+// literal is unaffected (its own elements decide).
+func (e *Emitter) declaredArrayType(name string, lit *ast.ArrayLiteral) Type {
+	if len(lit.Elements) == 0 {
+		if elem, ok := e.emptyArrayElems[name]; ok {
+			return ArrayOf(elem)
+		}
+	}
+	return e.inferArrayType(lit)
+}
+
+// isInferredHeterogeneousEmptyArray reports whether v is an untyped
+// (annotation-free) empty-array binding (`const a = []`) that the usage
+// pre-pass inferred to a boxed-element `any[]` because its later usage mixed
+// element kinds (TDD-00205 Stage 2). Used to apply the -compat lane split: the
+// boxed representation is accepted under -compat=js and cleanly rejected under
+// strict (which has no boxed-element array), while an *explicit* `any[]`
+// annotation stays legal in both lanes.
+func (e *Emitter) isInferredHeterogeneousEmptyArray(v *ast.VarDeclaration, init *ast.ArrayLiteral) bool {
+	if v.TypeAnnot != nil || len(init.Elements) != 0 {
+		return false
+	}
+	elem, ok := e.emptyArrayElems[v.Name]
+	return ok && elem.IsDynamic
+}
+
+// heterogeneousArrayStrictError is the recognizable strict-mode rejection for a
+// heterogeneous array (inferred empty-array usage or a mixed literal). It names
+// the escape hatches rather than failing opaquely (TDD-00200): a fixed-length
+// tuple, an explicit `any[]` annotation, or -compat=js.
+func heterogeneousArrayStrictError(pos ast.Pos) error {
+	return fmt.Errorf("%d:%d: this array holds more than one element type (a heterogeneous array), which strict mode does not store — use a fixed-length tuple (e.g. [number, string, boolean]), annotate it as `any[]`, or compile with -compat=js", pos.Line, pos.Col)
+}
+
 // inferArrayType picks an element type by looking at the first element of a literal.
 func (e *Emitter) inferArrayType(lit *ast.ArrayLiteral) Type {
 	if len(lit.Elements) == 0 {
@@ -240,6 +291,26 @@ func (e *Emitter) inferArrayType(lit *ast.ArrayLiteral) Type {
 			return ArrayOf(TypePtr) // char array: single-character strings
 		}
 		return ArrayOf(TypeF64)
+	}
+	// Under -compat=js a genuinely heterogeneous literal (`[1, "two", true]`)
+	// lowers to a boxed-element array (`any[]`, TDD-00200) rather than being
+	// rejected at element coercion — consistent with the inferred empty-array
+	// Stage 2 path (TDD-00205). The element emission boxes each value (the same
+	// path an explicit `any[]` literal already uses). Strict keeps the uniform-
+	// only behavior (its existing element-coercion rejection stands).
+	if e.compatJS() {
+		kinds := map[string]bool{}
+		allConcrete := true
+		for _, el := range lit.Elements {
+			if _, ok := el.(*ast.SpreadElement); ok {
+				allConcrete = false
+				break
+			}
+			kinds[elemKindKeyBroad(e.inferExprType(el))] = true
+		}
+		if allConcrete && len(kinds) >= 2 {
+			return ArrayOf(TypeAny)
+		}
 	}
 	return ArrayOf(e.inferExprType(first))
 }
@@ -937,6 +1008,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 		}
 		if ex.Property == "size" {
+			if objTy := e.inferExprType(ex.Object); objTy.IsURLSearchParams {
+				return TypeF64 // pair count, a JS number (TDD-00203)
+			}
 			if id, ok := ex.Object.(*ast.Identifier); ok {
 				if sym, found := e.lookup(id.Name); found && (sym.Ty.IsMap || sym.Ty.IsSet) {
 					return TypeI64
@@ -1710,6 +1784,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				// real (correctly void) evaluation never produces — a hard
 				// clang-stage type mismatch. See docs/adr/ADR-00043.md.
 				return TypeVoid
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "URL" && !e.isShadowedByLocal(id.Name) {
+				switch mem.Property {
+				case "canParse":
+					return TypeBool
+				case "parse":
+					rt := URLType() // URL | null (TDD-00203)
+					rt.Nullable = true
+					return rt
+				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "String" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
@@ -2498,6 +2582,22 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return *objTy.MapKey
 				}
 			}
+			if haveObjTy && objTy.IsURLSearchParams {
+				// The ordered pair-list method surface (TDD-00203) — no longer a
+				// Map, so its return types are inferred here directly.
+				switch mem.Property {
+				case "get", "toString":
+					return TypePtr
+				case "getAll", "keys", "values":
+					return ArrayOf(TypePtr)
+				case "entries":
+					return ArrayOf(TupleType([]Type{TypePtr, TypePtr}))
+				case "has":
+					return TypeBool
+				case "append", "set", "delete", "sort", "forEach":
+					return TypeVoid
+				}
+			}
 			if haveObjTy && objTy.IsMap {
 				switch mem.Property {
 				case "get":
@@ -3117,6 +3217,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			} else {
 				ret = TypeI64
 			}
+		} else if blockAlwaysDiverges(ex.Block) {
+			ret = TypeNever // block-body arrow that only throws (ADR-00869)
 		} else {
 			ret = TypeVoid
 		}
@@ -3155,6 +3257,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			} else {
 				ret = TypeI64
 			}
+		} else if blockAlwaysDiverges(ex.Body) {
+			ret = TypeNever // function expression that only throws (ADR-00869)
 		} else {
 			ret = TypeVoid
 		}

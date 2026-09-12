@@ -175,6 +175,13 @@ type Type struct {
 	// message/name's stored contents) differ between e.g. a TypeError and a
 	// RangeError. See emit_exceptions.go's errorKinds/errorKindIDs.
 	IsError bool
+	// IsCaught marks the catch-clause variable's type (TDD-00202): the unpacked
+	// thrown-value record `{ i8 tag, i64 payload }` — TypeScript's `unknown`.
+	// The tag is a logical kmlTag* value (kmlTagError=13 for a caught Error,
+	// whose payload is the errorObjType pointer). Operations narrow it
+	// (typeof/instanceof/===/member-after-narrow); coercing to `any` packs it to
+	// a NaN-box (Error→object). Only produced by the catch binding.
+	IsCaught bool
 	// IsRequest marks http.listen()'s request object (RequestType), spelled
 	// `HttpRequest` in source (TDD-00040 renamed the annotation from
 	// `Request` to free that name up for the real client-side Request class
@@ -265,16 +272,14 @@ type Type struct {
 	// emit_bigint.go.
 	IsBigInt bool
 	// IsURLSearchParams marks `new URLSearchParams(...)` and `URL`'s own
-	// `.searchParams` field: storage-wise it IS a real Map<string,string>
-	// (IsMap is also set, MapKey/MapVal both TypePtr) — get/set/has/delete/
-	// size/keys()/values()/entries()/forEach() all come for free from the
-	// existing Map machinery with no changes. IsURLSearchParams only
-	// additionally enables `.toString()`/`.getAll()` dispatch at emitCall,
-	// which a plain Map<string,string> (e.g. http.listen's `req.query`,
-	// built the same way) does not get. V1 scope narrowing: single value
-	// per key, like `req.query` already has — a repeated query-string key
-	// silently keeps only the last value, so `.getAll()` never returns more
-	// than one element. See emit_url.go.
+	// `.searchParams` field. Storage is a bare pointer to the ordered
+	// name/value pair-list handle (urlsearchparamssrc/urlsearchparams.c), the
+	// WHATWG "list of tuples" model — NOT a Map (a Map keeps one value per key
+	// and no cross-key order for duplicates, so it could not represent
+	// `?a=1&b=2&a=3`). The full surface — get/set/has/delete/append/getAll/sort/
+	// size/keys/values/entries/forEach/toString, plus for-of/spread iteration
+	// and console.log — is re-owned against the `__kml_usp_*` ABI; this flag is
+	// how those dispatch sites recognize the type (TDD-00203). See emit_usp.go.
 	IsURLSearchParams bool
 	// IsEventEmitter marks `new EventEmitter<T>()`'s result (TDD-00023):
 	// storage-wise it's a ptr to a Map<string,ptr> handle (event name →
@@ -816,7 +821,13 @@ func ResponseType() Type {
 // and `URL`'s own `.searchParams` field — see IsURLSearchParams's doc
 // comment for why this is just a flagged Map<string,string>.
 func URLSearchParamsType() Type {
-	ty := MapType(TypePtr, TypePtr)
+	// A bare pointer to the ordered pair-list handle (urlsearchparamssrc/
+	// urlsearchparams.c), NOT a Map — the Map backing (single value per key, no
+	// cross-key order for duplicates) could not represent the WHATWG model
+	// (TDD-00203). Method dispatch, iteration (for-of/spread), console.log and
+	// toString are re-owned explicitly against the `__kml_usp_*` ABI; the
+	// IsURLSearchParams flag is how those sites recognize the type.
+	ty := TypePtr
 	ty.IsURLSearchParams = true
 	return ty
 }
@@ -2485,6 +2496,9 @@ var (
 	// immediates. The logical kmlTag* model decodes from it via
 	// __kml_nb_tag/__kml_nb_pay (runtime_nanbox.go).
 	TypeAny = Type{IR: "i64", IsDynamic: true}
+	// TypeCaught backs a catch-clause variable (TDD-00202): the unpacked
+	// { i8 tag, i64 payload } thrown-value record (TypeScript `unknown`).
+	TypeCaught = Type{IR: "{ i8, i64 }", IsCaught: true}
 	// TypeDate backs Date: a plain i64 milliseconds-since-epoch timestamp.
 	TypeDate = Type{IR: "i64", Signed: true, IsDate: true}
 )

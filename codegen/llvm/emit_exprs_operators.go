@@ -34,13 +34,31 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		return Value{}, err
 	}
 
+	// A caught value (TypeCaught ≈ `unknown`, TDD-00202) in an equality compares
+	// by packing to `any` and reusing the any equality; the caught side may be
+	// either operand (`e === "x"` or `"x" === e`).
+	if (left.Ty.IsCaught || right.Ty.IsCaught) &&
+		(ex.Op == "==" || ex.Op == "!=" || ex.Op == "===" || ex.Op == "!==") {
+		negate := ex.Op == "!=" || ex.Op == "!=="
+		loose := ex.Op == "==" || ex.Op == "!="
+		if left.Ty.IsCaught {
+			return e.emitCaughtEquals(left, right, negate, loose)
+		}
+		return e.emitCaughtEquals(right, left, negate, loose)
+	}
+
 	// TDD-00201: an object operand coerces via the ToPrimitive ladder
 	// (@@toPrimitive/valueOf/toString) before the operator logic runs. Bitwise/
 	// shift ops already coerce operands to i64 (running the same ladder through
 	// coerce), so they are not listed here. Reference `===`/`!==` never coerces.
 	switch ex.Op {
-	case "-", "*", "/", "%", "**", "<", ">", "<=", ">=":
+	case "-", "*", "/", "%", "**", "<", ">", "<=", ">=", "&", "|", "^", "<<", ">>", ">>>":
 		// Stage 1 — number hint: the result is used numerically, coerce to double.
+		// Bitwise/shift ops (ToInt32/ToUint32) share the number hint: an object
+		// operand must run the ToPrimitive ladder before being truncated to i32,
+		// otherwise toInt32/emitBitShift would `trunc` a raw object pointer to i32
+		// (invalid IR). A method-less object falls through to the strict reject /
+		// compat=js dispatch below, exactly like arithmetic.
 		if objectMayToPrimitive(left.Ty) {
 			if r, ok, perr := e.emitObjectToPrimitive(left, "number"); perr == nil && ok {
 				left = e.coerce(r, TypeF64)
@@ -373,12 +391,12 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 						return Value{}, fmt.Errorf("%d:%d: operator '%s' between an object and a disjoint scalar type is not supported in strict mode — an object is never equal to a number/boolean, so this comparison is always %s (TypeScript reports the same no-overlap error); compile with -compat=js to evaluate it as untyped JS would", ex.GetPos().Line, ex.GetPos().Col, ex.Op, disjointEqConstResult(ex.Op))
 					}
 				}
-			case "+", "-", "*", "/", "%", "**", "<", ">", "<=", ">=":
+			case "+", "-", "*", "/", "%", "**", "<", ">", "<=", ">=", "&", "|", "^", "<<", ">>", ">>>":
 				// An object/array operand reaching here has no own numeric
 				// ToPrimitive method (one with valueOf/toString was already
 				// coerced by the pre-pass above), so it has no primitive value in
-				// an arithmetic/relational context. TypeScript reports the same
-				// error; emitting the op would combine a `ptr` with a scalar
+				// an arithmetic/relational/bitwise context. TypeScript reports the
+				// same error; emitting the op would combine a `ptr` with a scalar
 				// (invalid IR). Reject cleanly, naming the -compat=js hatch.
 				return Value{}, fmt.Errorf("%d:%d: operator '%s' on an object without a primitive value (no valueOf/toString) is not supported in strict mode — TypeScript reports the same error; compile with -compat=js to coerce it as untyped JS would (valueOf/toString, else \"[object Object]\")", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
 			}
@@ -963,6 +981,13 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 			return Value{Ref: e.internString(s), Ty: TypePtr}, nil
 		}
 		ty := e.inferExprType(ex.Arg)
+		if ty.IsCaught {
+			val, err := e.emitExpr(ex.Arg)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitCaughtTypeof(val)
+		}
 		if ty.IsDynamic {
 			val, err := e.emitExpr(ex.Arg)
 			if err != nil {

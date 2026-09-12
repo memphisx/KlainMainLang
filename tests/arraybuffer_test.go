@@ -23,6 +23,25 @@ console.log(dv.getFloat32(0));
 `, "16 0\n123456789 365779719\n44 44\n3.14159\n-2 65534 65279\n1.5")
 }
 
+// A non-numeric DataView byteOffset/value (e.g. a Symbol, as several Test262
+// `return-abrupt-from-tonumber-*` files pass) is a clean compile-time type
+// error — the typed-subset equivalent of the runtime TypeError real JS throws,
+// and what tsc itself reports — not invalid IR emitted at the arithmetic/store
+// site (the DataView A1 invalid-IR cluster).
+func TestE2EDataViewNonNumericRejected(t *testing.T) {
+	mustCompileError(t, `
+const dv = new DataView(new ArrayBuffer(8));
+dv.getInt16(Symbol("x"));
+`, "DataView byteOffset")
+	mustCompileError(t, `
+const dv = new DataView(new ArrayBuffer(8));
+dv.setInt16(0, Symbol("x"));
+`, "DataView value")
+	mustCompileError(t, `
+const dv = new DataView(new ArrayBuffer(8), Symbol("x"));
+`, "DataView byteOffset")
+}
+
 // DataView Float16 accessors (ADR-00553): half-precision reads/writes with the
 // spec's per-call endianness flag; values round-trip at float16 precision.
 func TestE2EDataViewFloat16(t *testing.T) {

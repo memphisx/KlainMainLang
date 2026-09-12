@@ -8,9 +8,26 @@ import (
 	"fmt"
 )
 
+// coerceNumArgRef coerces a string/number method's numeric argument to target,
+// returning a clean compile error (not invalid IR) when the argument is a
+// non-numeric type such as a Symbol — the A1 invalid-IR cluster fix: a bare
+// coerce silently returned the ptr register where an i64/double operand was
+// expected, which reached arithmetic/compare as `'%t' type 'ptr' but expected
+// 'i64'` (the same defect ADR-00882 fixed for DataView). `what` names the
+// method/argument for the message. The rejection matches tsc, which itself
+// refuses e.g. `"x".charAt(sym)`.
+func (e *Emitter) coerceNumArgRef(v Value, target Type, pos ast.Pos, what string) (string, error) {
+	cv, err := e.coerceChecked(v, target, pos, what)
+	if err != nil {
+		return "", err
+	}
+	return cv.Ref, nil
+}
+
 // isStringTy returns true for a plain string (ptr, not object/array/closure).
 func isStringTy(ty Type) bool {
-	return ty.IR == "ptr" && !ty.IsObject && !ty.IsArray && !ty.IsFlatArray && !ty.IsFunc && !ty.IsBigInt
+	return ty.IR == "ptr" && !ty.IsObject && !ty.IsArray && !ty.IsFlatArray && !ty.IsFunc && !ty.IsBigInt &&
+		!ty.IsURLSearchParams // a URLSearchParams is a pair-list handle, not a string (TDD-00203)
 }
 
 // isForOfStringTy is the strict "this is really a plain string" test, for
@@ -284,7 +301,11 @@ func (e *Emitter) emitStringSlice(mem *ast.MemberExpression, args []ast.Expressi
 	if err != nil {
 		return Value{}, err
 	}
-	startN := e.emitNormalizeSliceIdx(e.coerce(startRaw, TypeI64).Ref, sLen)
+	startRef, err := e.coerceNumArgRef(startRaw, TypeI64, args[0].GetPos(), "slice index")
+	if err != nil {
+		return Value{}, err
+	}
+	startN := e.emitNormalizeSliceIdx(startRef, sLen)
 
 	var endN string
 	if len(args) == 2 {
@@ -292,7 +313,11 @@ func (e *Emitter) emitStringSlice(mem *ast.MemberExpression, args []ast.Expressi
 		if err != nil {
 			return Value{}, err
 		}
-		endN = e.emitNormalizeSliceIdx(e.coerce(endRaw, TypeI64).Ref, sLen)
+		endRef, err := e.coerceNumArgRef(endRaw, TypeI64, args[1].GetPos(), "slice index")
+		if err != nil {
+			return Value{}, err
+		}
+		endN = e.emitNormalizeSliceIdx(endRef, sLen)
 	} else {
 		endN = sLen
 	}
@@ -344,7 +369,11 @@ func (e *Emitter) emitStringSubstring(mem *ast.MemberExpression, args []ast.Expr
 	if err != nil {
 		return Value{}, err
 	}
-	startC := clamp(e.coerce(startRaw, TypeI64))
+	startCV, err := e.coerceChecked(startRaw, TypeI64, args[0].GetPos(), "substring index")
+	if err != nil {
+		return Value{}, err
+	}
+	startC := clamp(startCV)
 
 	var endC string
 	if len(args) == 2 {
@@ -352,7 +381,11 @@ func (e *Emitter) emitStringSubstring(mem *ast.MemberExpression, args []ast.Expr
 		if err != nil {
 			return Value{}, err
 		}
-		endC = clamp(e.coerce(endRaw, TypeI64))
+		endCV, err := e.coerceChecked(endRaw, TypeI64, args[1].GetPos(), "substring index")
+		if err != nil {
+			return Value{}, err
+		}
+		endC = clamp(endCV)
 	} else {
 		endC = sLen
 	}
@@ -397,7 +430,10 @@ func (e *Emitter) emitStringSubstr(mem *ast.MemberExpression, args []ast.Express
 	if err != nil {
 		return Value{}, err
 	}
-	sr := e.coerce(startRaw, TypeI64).Ref
+	sr, err := e.coerceNumArgRef(startRaw, TypeI64, args[0].GetPos(), "substr start")
+	if err != nil {
+		return Value{}, err
+	}
 	// start: negative → len + start, then clamp to [0, len].
 	neg := e.freshReg()
 	fromEnd := e.freshReg()
@@ -424,7 +460,10 @@ func (e *Emitter) emitStringSubstr(mem *ast.MemberExpression, args []ast.Express
 		if lerr != nil {
 			return Value{}, lerr
 		}
-		lr := e.coerce(lenRaw, TypeI64).Ref
+		lr, lerr := e.coerceNumArgRef(lenRaw, TypeI64, args[1].GetPos(), "substr length")
+		if lerr != nil {
+			return Value{}, lerr
+		}
 		// length: <0 → 0, else min(length, avail).
 		lneg := e.freshReg()
 		l0 := e.freshReg()
@@ -475,7 +514,10 @@ func (e *Emitter) emitStringIndexOf(mem *ast.MemberExpression, args []ast.Expres
 		if err != nil {
 			return Value{}, err
 		}
-		from := e.coerce(fromVal, TypeI64).Ref
+		from, err := e.coerceNumArgRef(fromVal, TypeI64, args[1].GetPos(), "indexOf fromIndex")
+		if err != nil {
+			return Value{}, err
+		}
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_indexof_from(ptr %s, ptr %s, i64 %s)", final, objVal.Ref, needleVal.Ref, from))
 	} else {
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_indexof(ptr %s, ptr %s)", final, objVal.Ref, needleVal.Ref))
@@ -514,7 +556,10 @@ func (e *Emitter) emitStringLastIndexOf(mem *ast.MemberExpression, args []ast.Ex
 		if ferr != nil {
 			return Value{}, ferr
 		}
-		f := e.coerce(fromVal, TypeI64).Ref
+		f, ferr := e.coerceNumArgRef(fromVal, TypeI64, args[1].GetPos(), "lastIndexOf fromIndex")
+		if ferr != nil {
+			return Value{}, ferr
+		}
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_lastindexof_from(ptr %s, ptr %s, i64 %s)", final, objVal.Ref, needleVal.Ref, f))
 		return e.countToNumber(Value{Ref: final, Ty: TypeI64}), nil
 	}
@@ -551,7 +596,10 @@ func (e *Emitter) emitStringIncludes(mem *ast.MemberExpression, args []ast.Expre
 		if perr != nil {
 			return Value{}, perr
 		}
-		from := e.coerce(posVal, TypeI64).Ref
+		from, perr := e.coerceNumArgRef(posVal, TypeI64, args[1].GetPos(), "includes position")
+		if perr != nil {
+			return Value{}, perr
+		}
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_indexof_from(ptr %s, ptr %s, i64 %s)", idx, objVal.Ref, needleVal.Ref, from))
 	} else {
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_indexof(ptr %s, ptr %s)", idx, objVal.Ref, needleVal.Ref))
@@ -572,7 +620,10 @@ func (e *Emitter) emitStringCharCodeAt(mem *ast.MemberExpression, args []ast.Exp
 	if err != nil {
 		return Value{}, err
 	}
-	idxVal = e.coerce(idxVal, TypeI64)
+	idxVal, err = e.coerceChecked(idxVal, TypeI64, args[0].GetPos(), "charCodeAt index")
+	if err != nil {
+		return Value{}, err
+	}
 	// Bounds check: an out-of-range index (negative or >= length) returns
 	// NaN, as real JS — the pre-fix code loaded whatever byte happened to sit
 	// at that address. The result is a double for exactly that reason (only a
@@ -625,7 +676,10 @@ func (e *Emitter) emitStringCharAtMethod(mem *ast.MemberExpression, args []ast.E
 	if err != nil {
 		return Value{}, err
 	}
-	idxVal := e.coerce(idxRaw, TypeI64)
+	idxVal, err := e.coerceChecked(idxRaw, TypeI64, args[0].GetPos(), "charAt index")
+	if err != nil {
+		return Value{}, err
+	}
 	e.ensureStrlen()
 	e.ensureMalloc()
 	e.ensureMemcpy()
@@ -672,7 +726,10 @@ func (e *Emitter) emitStringCodePointAt(mem *ast.MemberExpression, args []ast.Ex
 	if err != nil {
 		return Value{}, err
 	}
-	idxVal := e.coerce(idxRaw, TypeI64)
+	idxVal, err := e.coerceChecked(idxRaw, TypeI64, args[0].GetPos(), "codePointAt index")
+	if err != nil {
+		return Value{}, err
+	}
 	// Bounds check: an out-of-range index (negative or >= length) is absent.
 	// The load itself is clamped to index 0 when out of range (still inside
 	// the allocation — at worst the NUL terminator) and its value discarded by
@@ -888,7 +945,10 @@ func (e *Emitter) emitStringStartsWith(mem *ast.MemberExpression, args []ast.Exp
 		if perr != nil {
 			return Value{}, perr
 		}
-		p := e.coerce(posVal, TypeI64).Ref
+		p, perr := e.coerceNumArgRef(posVal, TypeI64, args[1].GetPos(), "startsWith position")
+		if perr != nil {
+			return Value{}, perr
+		}
 		e.ensureStrHeaderRuntime()
 		e.ensureMemcmp()
 		r := e.freshReg()
@@ -930,7 +990,10 @@ func (e *Emitter) emitStringEndsWith(mem *ast.MemberExpression, args []ast.Expre
 		if eerr != nil {
 			return Value{}, eerr
 		}
-		ep := e.coerce(endVal, TypeI64).Ref
+		ep, eperr := e.coerceNumArgRef(endVal, TypeI64, args[1].GetPos(), "endsWith endPosition")
+		if eperr != nil {
+			return Value{}, eperr
+		}
 		e.ensureStrHeaderRuntime()
 		e.ensureMemcmp()
 		r := e.freshReg()
@@ -1092,7 +1155,10 @@ func (e *Emitter) emitStringSplit(mem *ast.MemberExpression, args []ast.Expressi
 		if err != nil {
 			return Value{}, err
 		}
-		lim := e.coerce(limVal, TypeI64).Ref
+		lim, err := e.coerceNumArgRef(limVal, TypeI64, args[1].GetPos(), "split limit")
+		if err != nil {
+			return Value{}, err
+		}
 		fullLen := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", fullLen, result.Ref))
 		dataPtr := e.freshReg()
@@ -1123,7 +1189,10 @@ func (e *Emitter) emitStringCharAt(strPtr string, indexExpr ast.Expression) (Val
 	if err != nil {
 		return Value{}, err
 	}
-	idxVal = e.coerce(idxVal, TypeI64)
+	idxVal, err = e.coerceChecked(idxVal, TypeI64, indexExpr.GetPos(), "string index")
+	if err != nil {
+		return Value{}, err
+	}
 
 	charPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", charPtr, strPtr, idxVal.Ref))
@@ -1196,7 +1265,10 @@ func (e *Emitter) emitStringRepeat(mem *ast.MemberExpression, args []ast.Express
 	if err != nil {
 		return Value{}, err
 	}
-	cntVal = e.coerce(cntVal, TypeI64)
+	cntVal, err = e.coerceChecked(cntVal, TypeI64, args[0].GetPos(), "repeat count")
+	if err != nil {
+		return Value{}, err
+	}
 	e.ensureStrlen()
 	e.ensureMalloc()
 	e.ensureMemcpy()
@@ -1266,7 +1338,10 @@ func (e *Emitter) emitStringAt(mem *ast.MemberExpression, args []ast.Expression,
 	// `.at` index semantics (NOT slice-clamping): a negative index adds the
 	// length once; anything still outside [0, len) is a miss → undefined. (Using
 	// slice-normalization here wrongly clamped `"hi".at(-9)` to index 0.)
-	idx := e.coerce(idxRaw, TypeI64).Ref
+	idx, err := e.coerceNumArgRef(idxRaw, TypeI64, args[0].GetPos(), "at index")
+	if err != nil {
+		return Value{}, err
+	}
 	neg := e.freshReg()
 	adjusted := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, idx))
@@ -1304,7 +1379,10 @@ func (e *Emitter) emitStringPad(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	targetLen := e.coerce(targetLenRaw, TypeI64).Ref
+	targetLen, err := e.coerceNumArgRef(targetLenRaw, TypeI64, args[0].GetPos(), "pad target length")
+	if err != nil {
+		return Value{}, err
+	}
 	e.ensureStrlen()
 	e.ensureMalloc()
 	e.ensureMemcpy()
@@ -1442,7 +1520,10 @@ func (e *Emitter) emitNumberToFixed(mem *ast.MemberExpression, args []ast.Expres
 		if err != nil {
 			return Value{}, err
 		}
-		digitsI64 := e.coerce(digitsVal, TypeI64).Ref
+		digitsI64, err := e.coerceNumArgRef(digitsVal, TypeI64, args[0].GetPos(), "toFixed digits")
+		if err != nil {
+			return Value{}, err
+		}
 		reg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", reg, digitsI64))
 		digitsI32 = reg
@@ -1515,8 +1596,12 @@ func (e *Emitter) emitNumberToExponential(mem *ast.MemberExpression, args []ast.
 	if err != nil {
 		return Value{}, err
 	}
+	digitsRef, err := e.coerceNumArgRef(digitsVal, TypeI64, args[0].GetPos(), "toExponential digits")
+	if err != nil {
+		return Value{}, err
+	}
 	digitsI32 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", digitsI32, e.coerce(digitsVal, TypeI64).Ref))
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", digitsI32, digitsRef))
 	e.ensureSprintf()
 	buf := e.emitStringScratch(64) // TDD-00120: length-prefixed, finalized below
 	fmtPtr := e.internString("%.*e")
@@ -1560,8 +1645,12 @@ func (e *Emitter) emitNumberToPrecision(mem *ast.MemberExpression, args []ast.Ex
 	if err != nil {
 		return Value{}, err
 	}
+	digitsRef, err := e.coerceNumArgRef(digitsVal, TypeI64, args[0].GetPos(), "toPrecision digits")
+	if err != nil {
+		return Value{}, err
+	}
 	digitsI32 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", digitsI32, e.coerce(digitsVal, TypeI64).Ref))
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", digitsI32, digitsRef))
 	e.ensureSprintf()
 	buf := e.emitStringScratch(64) // TDD-00120: length-prefixed, finalized below
 	fmtPtr := e.internString("%#.*g")
@@ -1630,7 +1719,10 @@ func (e *Emitter) emitNumberToStringRadix(mem *ast.MemberExpression, args []ast.
 	if err != nil {
 		return Value{}, err
 	}
-	radixRef := e.coerce(radixVal, TypeI64).Ref
+	radixRef, err := e.coerceNumArgRef(radixVal, TypeI64, args[0].GetPos(), "toString radix")
+	if err != nil {
+		return Value{}, err
+	}
 	// Real JS throws a RangeError for a radix outside 2..36 (ADR-00552).
 	e.ensureExceptionHelpers()
 	e.ensureStrHeaderRuntime()

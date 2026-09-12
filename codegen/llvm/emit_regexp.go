@@ -200,7 +200,20 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 	if err != nil {
 		return Value{}, err
 	}
-	patternVal = e.coerce(patternVal, TypePtr)
+	// `new RegExp(undefined)` is the empty pattern `/(?:)/`; a non-string,
+	// non-undefined pattern (e.g. a number) is ToString'd — faithful to JS, and
+	// avoids leaving a non-`ptr` word where the compiler expects the pattern
+	// string (the RegExp A1 invalid-IR files).
+	if patternVal.Ty.IsUndefined || patternVal.Ty.IR == "void" {
+		patternVal = Value{Ref: e.internString(""), Ty: TypePtr}
+	} else if !isStringTy(patternVal.Ty) {
+		patternVal, err = e.emitValueToString(patternVal)
+		if err != nil {
+			return Value{}, err
+		}
+	} else {
+		patternVal = e.coerce(patternVal, TypePtr)
+	}
 
 	var flagsVal Value
 	if ex.Flags != nil {
@@ -208,15 +221,28 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 		if err != nil {
 			return Value{}, err
 		}
-		flagsVal = e.coerce(flagsVal, TypePtr)
-		// `new RegExp(p, undefined)` means no flags (real JS: undefined flags
-		// is the empty string). A null pointer reaching the flag validator is
-		// undefined behaviour — a crash on Linux, a self-loop on Windows.
-		flagsNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", flagsNull, flagsVal.Ref))
-		flagsSafe := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", flagsSafe, flagsNull, e.internString(""), flagsVal.Ref))
-		flagsVal = Value{Ref: flagsSafe, Ty: TypePtr}
+		// `new RegExp(p, undefined)` / `null` means no flags (real JS: the empty
+		// string). Handled at compile time by type so an `undefined`-typed value
+		// (an i64 sentinel) never reaches the ptr flag validator as invalid IR;
+		// a non-string flags value is otherwise ToString'd.
+		switch {
+		case flagsVal.Ty.IsUndefined || flagsVal.Ty.IsNull || flagsVal.Ty.IR == "void":
+			flagsVal = Value{Ref: e.internString(""), Ty: TypePtr}
+		case !isStringTy(flagsVal.Ty):
+			flagsVal, err = e.emitValueToString(flagsVal)
+			if err != nil {
+				return Value{}, err
+			}
+		default:
+			flagsVal = e.coerce(flagsVal, TypePtr)
+			// A null pointer reaching the flag validator is undefined behaviour
+			// (a crash on Linux, a self-loop on Windows) — map it to "".
+			flagsNull := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", flagsNull, flagsVal.Ref))
+			flagsSafe := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", flagsSafe, flagsNull, e.internString(""), flagsVal.Ref))
+			flagsVal = Value{Ref: flagsSafe, Ty: TypePtr}
+		}
 	} else {
 		flagsVal = Value{Ref: e.internString(""), Ty: TypePtr}
 	}
@@ -395,6 +421,26 @@ func (e *Emitter) emitRegexLoadField(objVal Value, name, ir string, align int) s
 // within this call. Any negative pcre2_match_8 return is treated as "no
 // match" — permissive, matching this project's existing convention for
 // unusual/malformed input elsewhere (atob, decodeURI).
+// regexSubjectToString normalizes a `.test()`/`.exec()` subject argument to a
+// plain string pointer. A subject that is already a string is coerced as before;
+// any other type is run through ToString — faithful to JS, where
+// `re.test(123)` matches against `"123"` and `re.test(undefined)` against
+// `"undefined"`. Previously a non-string subject (e.g. an uninitialized
+// `var s;`) left a non-`ptr` word where pcre2_match_8 wants a `ptr`, emitting
+// invalid IR (the RegExp A1 invalid-IR files).
+func (e *Emitter) regexSubjectToString(v Value) (Value, error) {
+	if isStringTy(v.Ty) {
+		return e.coerce(v, TypePtr), nil
+	}
+	// A `void` value (a no-return function call, e.g. `(function(){})()`) is
+	// `undefined` in JS — ToString it to the literal "undefined" rather than
+	// asking emitValueToString to stringify a value-less type.
+	if v.Ty.IsUndefined || v.Ty.IR == "void" {
+		return Value{Ref: e.internString("undefined"), Ty: TypePtr}, nil
+	}
+	return e.emitValueToString(v)
+}
+
 func (e *Emitter) emitRegexTest(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: test takes exactly 1 argument", pos.Line, pos.Col)
@@ -407,7 +453,10 @@ func (e *Emitter) emitRegexTest(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	strVal = e.coerce(strVal, TypePtr)
+	strVal, err = e.regexSubjectToString(strVal)
+	if err != nil {
+		return Value{}, err
+	}
 
 	e.ensureRegexMatch()
 	handleReg := e.emitRegexHandleLoad(objVal)
@@ -504,7 +553,10 @@ func (e *Emitter) emitRegexExec(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	strVal = e.coerce(strVal, TypePtr)
+	strVal, err = e.regexSubjectToString(strVal)
+	if err != nil {
+		return Value{}, err
+	}
 	result, _, _ := e.emitRegexSingleMatchCore(objVal, strVal)
 	return result, nil
 }

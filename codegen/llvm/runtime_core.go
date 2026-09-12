@@ -26,6 +26,16 @@ func (e *Emitter) ensureDprintf() {
 	}
 }
 
+// ensureStdoutGlobal declares the libc `FILE *stdout` extern global (symbol per
+// platform, stdoutGlobalSymbol) exactly once — shared by the startup setvbuf and
+// the per-write fflush (ADR-00867). Never used on Windows.
+func (e *Emitter) ensureStdoutGlobal() {
+	if !e.usedStdoutGlobal {
+		e.emitGlobal(fmt.Sprintf("@%s = external global ptr", stdoutGlobalSymbol()))
+		e.usedStdoutGlobal = true
+	}
+}
+
 func (e *Emitter) ensureMalloc() {
 	if !e.usedMalloc {
 		e.emitGlobal("declare ptr @malloc(i64 noundef)")

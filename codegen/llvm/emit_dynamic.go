@@ -66,11 +66,19 @@ func objectFieldDynamicRejected(ty Type) bool {
 
 func containsDynamicElement(ty Type) bool {
 	if ty.IsArray && ty.ElemType != nil {
-		// Array elements reject ANY dynamic — bare any/unknown AND a constrained
-		// union — since element-level union checking/boxing isn't wired yet
-		// (array-literal element construction and HOF element passing would skip
-		// the member-set check). Still a deliberate scope cut (TDD-00043).
-		return ty.ElemType.IsDynamic || containsDynamicElement(*ty.ElemType)
+		et := *ty.ElemType
+		// A bare any/unknown element is the boxed-element array (TDD-00200): a
+		// real, supported representation (one NaN box per slot, box-on-write /
+		// unbox-on-read over the normal array machinery), legal in BOTH -compat
+		// lanes — an explicit `any[]` is the developer opting into boxing. A
+		// *constrained union* element is still rejected: element-level union
+		// member-set checking/boxing isn't wired (array-literal element
+		// construction and HOF element passing would skip the check) — a
+		// deliberate scope cut (TDD-00043).
+		if et.IsDynamic {
+			return len(et.UnionMembers) != 0
+		}
+		return containsDynamicElement(et)
 	}
 	if ty.IsObject {
 		for _, f := range ty.Fields {
@@ -340,6 +348,14 @@ const (
 	// prototype methods. `typeof` → "function"; `===` is record identity
 	// (one record per function-expression evaluation, like a JS closure).
 	kmlTagDynFunc = 12
+	// kmlTagError is the logical tag for a caught Error in the unpacked
+	// thrown-value record (TDD-00202). It has NO packed NaN-box encoding (the
+	// 3-bit pointer-kind space is full) — it exists only in the {i8 tag, i64
+	// payload} record used for the thrown slot and catch variable, where the
+	// payload is a ptrtoint'd errorObjType pointer. Packing a caught Error into a
+	// real NaN-box `any` downgrades it to kmlTagObject (it is an object); the
+	// Error shape is only available through the record, in catch-local scope.
+	kmlTagError = 13
 )
 
 // emitBoxValue converts any concrete Value into a Value{Ty: TypeAny}. Boxing
