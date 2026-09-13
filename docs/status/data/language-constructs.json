@@ -414,14 +414,16 @@
             "feature": "Default parameter values",
             "status": "implemented",
             "caveats": [
-              "A default expression referencing an earlier parameter works across free functions, instance/static methods, and constructors ([ADR-00598](../adr/ADR-00598.md)); a rest-parameter constructor is unsupported"
+              "A default expression referencing an earlier parameter works across free functions, instance/static methods, and constructors ([ADR-00598](../adr/ADR-00598.md)); a rest-parameter constructor is unsupported",
+              "Filled through a first-class function value too — a closure bound to a variable/field, an object shorthand method, an IIFE ([ADR-00914](../adr/ADR-00914.md)) — including a default that references a variable captured from the closure's defining scope, evaluated in the body prologue via an argument-presence mask ([ADR-00915](../adr/ADR-00915.md)); this also covers a scalar/string/object/array captured-default parameter, an async closure, and `.bind` (the mask threads through the bind trampoline) ([ADR-00916](../adr/ADR-00916.md)). A captured-default on a nullable-scalar or destructured (`{a}`/`[a]`) parameter stays a clean rejection (no single overwrite slot), and capturing an array *variable* into a default (vs. referencing a module-global array) hits the separate array-capture limitation"
             ]
           },
           {
             "feature": "Optional parameters (`param?`)",
             "status": "implemented",
             "notes": [
-              "An omitted `?` argument reads as a real `T | undefined` inside the body, as in TS ([ADR-00164](../adr/ADR-00164.md), [ADR-00783](../adr/ADR-00783.md), [TDD-00187](../tdd/TDD-00187.md)) — a present `0`/`\"\"` is distinguishable from an omitted argument; narrow, `?? d`, or `!` to consume it"
+              "An omitted `?` argument reads as a real `T | undefined` inside the body, as in TS ([ADR-00164](../adr/ADR-00164.md), [ADR-00783](../adr/ADR-00783.md), [TDD-00187](../tdd/TDD-00187.md)) — a present `0`/`\"\"` is distinguishable from an omitted argument; narrow, `?? d`, or `!` to consume it",
+              "Works through a first-class function value too — an arrow or function expression bound to a variable/field — not just a named function ([ADR-00914](../adr/ADR-00914.md))"
             ],
             "caveats": [
               "An array-typed optional parameter stays an empty array when omitted (an array aggregate has no spare absent state); an un-narrowed optional scalar is still lenient in arithmetic (`emitIdent` unwraps the payload before the operator, so `a + b` on an absent `b` reads `0` rather than erroring — the same residual as any un-narrowed nullable local)"

@@ -489,7 +489,8 @@
       "badge": "caveats",
       "description": "Default parameter values.",
       "differences": [
-        "A default may reference an earlier scalar/string parameter — `function f(a: number, b: number = a * 2)`, chaining included (`c = b + 1`) — for a free function, an instance/static method, and a constructor (parameter properties included, `constructor(public x = 1, public y = x)`); an earlier param of any supported kind is referenceable — scalar/string, array (`b = a.length`, `a[i]`), and nullable-scalar (`b = (a ?? 0) + 1`). A rest-parameter constructor is unsupported."
+        "A default may reference an earlier scalar/string parameter — `function f(a: number, b: number = a * 2)`, chaining included (`c = b + 1`) — for a free function, an instance/static method, and a constructor (parameter properties included, `constructor(public x = 1, public y = x)`); an earlier param of any supported kind is referenceable — scalar/string, array (`b = a.length`, `a[i]`), and nullable-scalar (`b = (a ?? 0) + 1`). A rest-parameter constructor is unsupported.",
+        "Defaults are also filled when the function is a first-class value — a closure bound to a variable or object field, an object shorthand method, an IIFE — including cross-parameter defaults (`(x, y = x) => …`) and defaults that reference a variable captured from the closure's defining scope (each returned closure keeps its own capture). This covers scalar/string/object/array captured-scope defaults, async closures, and `.bind` (the presence mask threads through the bind trampoline). A captured-default on a nullable-scalar or destructured parameter is still a clean compile error, and a default that references a captured array *variable* (rather than a module-global array) hits the separate array-capture limitation."
       ],
       "seeAlso": ["lang.optparams"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/Default_parameters" }
@@ -502,6 +503,7 @@
       "badge": "caveats",
       "description": "Optional parameters. An omitted argument reads as a real `T | undefined` inside the body (as in TS) — a present 0/\"\" is distinguishable from an omitted argument; narrow, `?? d`, or `!` to consume it.",
       "differences": [
+        "Works through a first-class function value too — an arrow or function expression bound to a variable or object field — not only a named function; an omitted optional argument is absent there as well, not a typed zero.",
         "An array-typed optional parameter stays an empty array when omitted (an array aggregate has no spare absent state).",
         "An un-narrowed optional scalar is still lenient in arithmetic — the payload is unwrapped before the operator, so `a + b` on an absent `b` reads 0 rather than erroring (the same residual as any un-narrowed nullable local)."
       ],

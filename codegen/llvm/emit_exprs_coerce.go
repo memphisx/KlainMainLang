@@ -24,6 +24,21 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 		}
 		return e.coerce(anyVal, target)
 	}
+	// The reverse: a non-caught value assigned INTO a caught slot — reassigning a
+	// catch parameter (`catch (e) { e = 4 }`, TDD-00202). Box it to `any`, then
+	// split into the caught record's (tag, payload) with the same nb_tag/nb_pay the
+	// initial catch binding uses. Without this the generic scalar path below would
+	// fptoui/fptosi the value straight into the { i8, i64 } aggregate — invalid IR
+	// (ADR-00903).
+	if target.IsCaught && !v.Ty.IsCaught {
+		// Route through emitValueToCaughtParts so an Error keeps its kmlTagError
+		// tag (message/name/instanceof survive) rather than downgrading to an
+		// object box — matters for a rejection reason and a reassigned catch var
+		// alike (TDD-00207).
+		if tag, pay, err := e.emitValueToCaughtParts(v); err == nil {
+			return e.emitCaughtAggregate(tag, pay)
+		}
+	}
 	// A dynamic (NaN-boxed, TDD-00156) source coerced into a concrete
 	// numeric/boolean target goes through the real JS conversion — never a
 	// raw reinterpretation of the encoded word (which is what the generic
@@ -150,6 +165,19 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 			return e.coerce(res, target)
 		}
 	}
+	// ToNumber(Symbol) is a TypeError in real JS ("Cannot convert a Symbol
+	// value to a number"). A Symbol-typed value flowing into a concrete numeric
+	// scalar (double / machine integer) therefore throws unconditionally rather
+	// than reinterpreting the symbol pointer as a number — which the default
+	// "return unchanged" fall-through below would have emitted as invalid IR
+	// (`ptr` where an `i64`/`double` is required). Guarded to genuine numeric
+	// machine targets so equality/dynamic/boxing paths (which route elsewhere)
+	// are untouched.
+	if v.Ty.IsSymbol && (target.Float || (target.IsInteger() && target.IR != "" && target.IR != "ptr")) {
+		e.emitThrowTypeError("Cannot convert a Symbol value to a number")
+		return Value{Ref: zeroRef(target), Ty: target}
+	}
+
 	reg := e.freshReg()
 
 	srcInt := v.Ty.IsInteger()
@@ -263,6 +291,11 @@ func coerciblePure(src, target Type) bool {
 	if src.IR == target.IR {
 		return true
 	}
+	// A caught-value target (a throw/reject reason, TDD-00202/00207) accepts any
+	// value — the coercion packs it into the { i8 tag, i64 payload } record.
+	if target.IsCaught {
+		return true
+	}
 	if target.IsArray || target.IsObject || target.IsDynamic || target.IsDynamicObject ||
 		target.IsMap || target.IsSet || target.IsFunc || target.UnionMembers != nil ||
 		isNullableScalar(target) || target.IR == "void" {
@@ -282,6 +315,14 @@ func coerciblePure(src, target Type) bool {
 // would emit invalid IR at the consuming store/op. `what` names the context for
 // the message (e.g. "assignment", "argument"). See coercionIsSound.
 func (e *Emitter) coerceChecked(v Value, target Type, pos ast.Pos, what string) (Value, error) {
+	// A statically-known Symbol in a numeric position (e.g. a string method's
+	// index argument) is rejected as a clean compile error here — the
+	// typed-subset diagnostic these call sites want — rather than falling into
+	// coerce's runtime ToNumber(Symbol) TypeError throw (which is reserved for
+	// sites that have no compile-time reject path, like the ArrayBuffer ctor).
+	if v.Ty.IsSymbol && (target.Float || (target.IsInteger() && target.IR != "" && target.IR != "ptr")) {
+		return Value{}, fmt.Errorf("%d:%d: type mismatch in %s — a Symbol cannot be converted to a number (this compiler is a typed subset)", pos.Line, pos.Col, what)
+	}
 	out := e.coerce(v, target)
 	if !coercionIsSound(out.Ty, target) {
 		return Value{}, fmt.Errorf("%d:%d: type mismatch in %s — a value of one type cannot be used where an incompatible type is expected (this compiler is a typed subset; mixing types the way untyped JS does is not supported)", pos.Line, pos.Col, what)

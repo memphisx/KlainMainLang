@@ -91,8 +91,14 @@ entry:
   store ptr null, ptr %%w_p, align 8
   %%rx_p = getelementptr %s, ptr %%p, i32 0, i32 4
   store ptr null, ptr %%rx_p, align 8
+  ; v1 (slot 3) doubles as the rejection reason's caught-value tag (TDD-00207);
+  ; default it to kmlTagError so every legacy path that rejects with just an
+  ; errorObj ptr in v0 reads back as a caught Error. A non-Error reject overrides
+  ; it (storeRejectReason); a fulfilled value reuses v1 for its own second slot.
+  %%tag_p = getelementptr %s, ptr %%p, i32 0, i32 3
+  store i64 %d, ptr %%tag_p, align 8
   ret ptr %%p
-}`, promiseStructSize, promiseStructIR, promiseStructIR, promiseStructIR))
+}`, promiseStructSize, promiseStructIR, promiseStructIR, promiseStructIR, promiseStructIR, kmlTagError))
 
 	// @__kml_promise_first_fulfilled(members, count) -> i64: the scheduler-free
 	// scan for Promise.any over already-settled task promises (TDD-00084 Part A,

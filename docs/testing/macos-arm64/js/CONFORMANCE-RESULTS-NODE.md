@@ -12,15 +12,15 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3957 files total: **49 passed**, 2537 failed, 1371 skipped (out of scope).
+3957 files total: **50 passed**, 2536 failed, 1371 skipped (out of scope).
 
-Of the 2586 files that compiled far enough to run, **49 passed (1.9%)**.
+Of the 2586 files that compiled far enough to run, **50 passed (1.9%)**.
 
 ## By suite
 
 | Suite | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|
-| parallel | 45 | 2427 | 1071 | 3543 |
+| parallel | 46 | 2426 | 1071 | 3543 |
 | sequential | 0 | 31 | 90 | 121 |
 | es-module | 2 | 57 | 116 | 175 |
 | message | 1 | 8 | 2 | 11 |
@@ -79,8 +79,8 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 219 | COMPILE_ERROR: a number has no method '%s' |
 | 219 | COMPILE_ERROR: slice is only supported on strings |
+| 218 | COMPILE_ERROR: a number has no method '%s' |
 | 135 | COMPILE_ERROR: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method |
 | 135 | COMPILE_ERROR: undefined variable '%s' |
 | 114 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
@@ -152,7 +152,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 12 | requires Node common harness (common.spawnPromisified) |
 | 11 | Node-internal harness file require('../common/dns') |
 
-## Passing files (49)
+## Passing files (50)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
@@ -191,6 +191,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-process-exit-recursive.js` | process |  |
 | `parallel/test-process-exit.js` | process |  |
 | `parallel/test-process-uptime.js` | process |  |
+| `parallel/test-promises-unhandled-proxy-rejections.js` | promises |  |
 | `parallel/test-promises-unhandled-symbol-rejections.js` | promises |  |
 | `parallel/test-runner-subtest-after-hook.js` | runner |  |
 | `parallel/test-stdin-hang.js` | stdin |  |

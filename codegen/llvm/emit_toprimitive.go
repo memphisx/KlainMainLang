@@ -45,6 +45,26 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 		if fieldTy.FuncRetType != nil {
 			retTy = *fieldTy.FuncRetType
 		}
+		// A valueOf/toString returning void/undefined still produces a VALID
+		// primitive — `undefined` — so the ladder stops on it (ADR-00912). The
+		// method must still be CALLED for its side effects (`{valueOf(){ n++ }}`),
+		// then the result is undefined: NaN in a numeric context, `undefined`
+		// otherwise. Without this the candidate was skipped as non-primitive, the
+		// object pointer reached the numeric op, and clang rejected a `ptr` where a
+		// `double` was expected.
+		if name != "@@toPrimitive" && (retTy.IR == "void" || retTy.IsUndefined) {
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, v.Ty.StructIR(), v.Ref, idx))
+			closure := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", closure, StructFieldIR(fieldTy), gep, fieldTy.Align()))
+			if _, err := e.emitClosureCallByPtr(closure, fieldTy, nil, ast.Pos{}); err != nil {
+				return Value{}, false, err
+			}
+			if hint == "number" {
+				return Value{Ref: "0x7FF8000000000000", Ty: TypeF64}, true, nil // NaN
+			}
+			return Value{Ref: "null", Ty: TypeUndefined}, true, nil
+		}
 		// The result must be usable for the hint to end the ladder; otherwise try
 		// the next candidate (mirrors the spec's "if result is an Object,
 		// continue"). @@toPrimitive is trusted to return the right kind.

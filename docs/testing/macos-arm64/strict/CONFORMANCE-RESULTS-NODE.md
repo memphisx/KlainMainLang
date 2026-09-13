@@ -12,15 +12,15 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3957 files total: **50 passed**, 2536 failed, 1371 skipped (out of scope).
+3957 files total: **51 passed**, 2535 failed, 1371 skipped (out of scope).
 
-Of the 2586 files that compiled far enough to run, **50 passed (1.9%)**.
+Of the 2586 files that compiled far enough to run, **51 passed (2.0%)**.
 
 ## By suite
 
 | Suite | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|
-| parallel | 46 | 2426 | 1071 | 3543 |
+| parallel | 47 | 2425 | 1071 | 3543 |
 | sequential | 0 | 31 | 90 | 121 |
 | es-module | 2 | 57 | 116 | 175 |
 | message | 1 | 8 | 2 | 11 |
@@ -79,12 +79,12 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 294 | COMPILE_ERROR: a number has no method '%s' |
-| 133 | COMPILE_ERROR: undefined variable '%s' |
+| 291 | COMPILE_ERROR: a number has no method '%s' |
+| 132 | COMPILE_ERROR: undefined variable '%s' |
 | 114 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 93 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 84 | MODULE_NOT_IMPLEMENTED: vm |
-| 79 | COMPILE_ERROR: field access on non-object (no field '%s') |
+| 80 | COMPILE_ERROR: field access on non-object (no field '%s') |
 | 66 | COMPILE_ERROR: no field '%s' |
 | 54 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
 | 54 | COMPILE_ERROR: unknown class '%s' |
@@ -95,7 +95,7 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 32 | COMPILE_ERROR: fs has no method '%s' |
 | 30 | COMPILE_ERROR: process has no method '%s' |
 | 25 | COMPILE_ERROR: child_process.fork supports self-fork only — the path must be __filename or process… |
-| 24 | RUN_TIMEOUT |
+| 25 | RUN_TIMEOUT |
 | 23 | MODULE_NOT_IMPLEMENTED: perf_hooks |
 | 22 | COMPILE_ERROR: '%s' is not an array |
 | 22 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
@@ -152,7 +152,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 12 | requires Node common harness (common.spawnPromisified) |
 | 11 | Node-internal harness file require('../common/dns') |
 
-## Passing files (50)
+## Passing files (51)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
@@ -193,6 +193,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-process-exit-recursive.js` | process |  |
 | `parallel/test-process-exit.js` | process |  |
 | `parallel/test-process-uptime.js` | process |  |
+| `parallel/test-promises-unhandled-proxy-rejections.js` | promises |  |
 | `parallel/test-promises-unhandled-symbol-rejections.js` | promises |  |
 | `parallel/test-runner-subtest-after-hook.js` | runner |  |
 | `parallel/test-stdin-hang.js` | stdin |  |

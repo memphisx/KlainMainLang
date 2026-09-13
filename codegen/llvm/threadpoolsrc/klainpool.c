@@ -274,7 +274,11 @@ static int run_item(kml_pool_item *it) {
     if (r.err) {                                  // threw -> reject with the Error
         it->state = 2;
         it->v0 = (int64_t)(intptr_t)r.err;
-        it->v1 = 0;
+        it->v1 = 13;                              // caught-value tag kmlTagError:
+                                                  // v0/v1 double as the rejection
+                                                  // reason's (payload, tag) so a
+                                                  // .catch/await sees a real Error
+                                                  // (TDD-00207)
     } else {                                      // fulfil with (v0, v1)
         it->state = 1;
         it->v0 = r.v0;

@@ -365,6 +365,14 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 	if v.Ty.IsDynamic {
 		return v, nil
 	}
+	// A void-typed operand reaching a value position is exactly `undefined` in JS
+	// — a call to a spec-undefined-returning method (`set.clear()`, `arr.forEach()`)
+	// used as an argument or a compared value. Box it as undefined rather than
+	// falling through to the numeric default, which would emit `sitofp i64 <no
+	// reg>` from the absent void result (ADR-00900).
+	if v.Ty.IR == "void" {
+		return Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeAny}, nil
+	}
 	// A nullable scalar (`number | null`, …) is a { i1, T } aggregate, not a bare
 	// scalar — box the payload (recursively, as its own scalar) when present, or
 	// `undefined` when absent (TDD-00123).

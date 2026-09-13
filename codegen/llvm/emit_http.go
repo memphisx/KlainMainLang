@@ -1419,6 +1419,12 @@ func (e *Emitter) emitResSetHeadersFromObject(headersGEP string, obj ast.Express
 
 // emitClosureCallByPtrVoid invokes a zero-argument void closure value.
 func (e *Emitter) emitClosureCallByPtrVoid(cbVal Value) error {
+	// This zero-argument invocation path spells `void (ptr)` and cannot supply
+	// the trailing presence mask a body-filled-default closure's ABI requires
+	// (TDD-00206 Stage 2) — reject it cleanly rather than emit a mismatched call.
+	if cbVal.Ty.FuncHasDefaultMask {
+		return fmt.Errorf("a callback whose parameter default references a captured variable is not supported in this position — pass the argument explicitly or use a constant default")
+	}
 	fpSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 0", fpSlot, cbVal.Ref))
 	fp := e.freshReg()

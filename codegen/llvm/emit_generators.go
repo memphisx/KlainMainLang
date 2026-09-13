@@ -986,6 +986,11 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 	// resume picks up mid-function with genObjReg still live as an
 	// ordinary SSA value on this generator's own never-torn-down stack,
 	// never re-reading the global).
+	// Ensure the runtime global is declared here, not only on the construction
+	// path: a generator that is declared but never constructed (`function* g(){};
+	// typeof g.prototype`) still emits this body and loads the global, so without
+	// this the global is referenced-but-undefined (invalid IR). Idempotent.
+	e.ensureGeneratorRuntime()
 	genObjReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_gen_pending_obj, align 8", genObjReg))
 
@@ -1515,10 +1520,10 @@ func (e *Emitter) emitAsyncGenRuntimeSetup() {
 // emitAsyncGenRejectPromise stores errPtr as promise q's rejection reason.
 func (e *Emitter) emitAsyncGenRejectPromise(q, errPtr string) {
 	errBits := e.freshReg()
-	v0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", errBits, errPtr))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0, promiseStructIR, q))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", errBits, v0))
+	// errPtr is an errorObj — carry it as a caught Error (tag kmlTagError) so a
+	// .then/.catch reject handler reads its message/name/instanceof (TDD-00207).
+	e.storeRejectReasonI64Tag(q, fmt.Sprintf("%d", kmlTagError), errBits)
 	// Reject through __kml_promise_settle so a parked awaiter (deferred .next())
 	// is woken; a no-op drain in the synchronous no-waiter case.
 	e.ensurePromiseSettle()

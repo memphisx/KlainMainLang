@@ -265,21 +265,27 @@ func (e *Emitter) emitPromiseResolve(args []ast.Expression, pos ast.Pos, hint Ty
 func (e *Emitter) emitPromiseReject(args []ast.Expression, pos ast.Pos) (Value, error) {
 	e.ensurePromiseRuntime()
 	e.ensureExceptionHelpers()
-	var errPtr string
+	// The reason is the real value, carried as a caught-value (tag, payload) —
+	// the async twin of `throw v` (TDD-00207). An absent reason is `undefined`,
+	// matching Node's `Promise.reject()`.
+	var tag, pay string
 	if len(args) >= 1 {
 		val, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
 		}
-		errPtr, err = e.errorPtrFromValue(val)
+		tag, pay, err = e.emitValueToCaughtParts(val)
 		if err != nil {
 			return Value{}, err
 		}
 	} else {
-		errPtr = e.buildErrorObj(0, e.internString(""), e.internString("Error"))
+		tag = fmt.Sprintf("%d", kmlTagUndefined)
+		pay = "0"
 	}
 	q := e.emitAllocSettledPromise()
-	e.emitAsyncGenRejectPromise(q, errPtr) // stores errPtr into v0, marks state 2
+	e.storeRejectReason(q, tag, pay)
+	e.ensurePromiseSettle()
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 2)", q))
 	qt := PromiseOf(TypeNever)
 	qt.PromiseTask = true
 	return Value{Ref: q, Ty: qt}, nil
@@ -769,24 +775,31 @@ func (e *Emitter) emitPromiseAllSettled(args []ast.Expression, pos ast.Pos) (Val
 			e.emitLabel(okL)
 			val := e.loadPromiseValue(ph, innerTy)
 			settleOk := e.buildSettlement(settleTy, fulfilledStr, val.Ref, "null")
+			okEndL := e.freshLabel("settled.okend")
+			e.emitTerminator(fmt.Sprintf("br label %%%s", okEndL))
+			e.emitLabel(okEndL)
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 			e.emitLabel(failL)
-			v0P := e.freshReg()
-			v0 := e.freshReg()
-			errReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0P, promiseStructIR, ph))
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", v0, v0P))
-			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errReg, v0))
-			// The rejection is stored as an Error object; real allSettled reports the
-			// raw thrown value as `reason`. The rejection model wraps every thrown
-			// value in an Error carrying its string form in `.message`, so recover
-			// that string and report it directly instead of the wrapper object.
-			reasonStr := e.loadErrorMessage(errReg)
-			settleFail := e.buildSettlement(settleTy, rejectedStr, innerTy.zeroLiteral(), reasonStr)
+			// The rejection reason is a caught value (TDD-00207) — render it to a
+			// string for `reason` via the caught toString (an Error yields its
+			// message-bearing string form; a string/number reason renders itself),
+			// rather than blindly dereferencing v0 as an errorObj (which segfaults
+			// on a non-Error reason).
+			reasonC := e.loadRejectReasonCaught(ph)
+			reasonStrVal, rerr := e.emitCaughtToString(reasonC)
+			if rerr != nil {
+				panic(rerr)
+			}
+			settleFail := e.buildSettlement(settleTy, rejectedStr, innerTy.zeroLiteral(), reasonStrVal.Ref)
+			// emitCaughtToString added blocks, so pin the phi predecessor with an
+			// explicit trailing label rather than the stale failL.
+			failEndL := e.freshLabel("settled.failend")
+			e.emitTerminator(fmt.Sprintf("br label %%%s", failEndL))
+			e.emitLabel(failEndL)
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 			e.emitLabel(mergeL)
 			merged := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", merged, settleOk, okL, settleFail, failL))
+			e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", merged, settleOk, okEndL, settleFail, failEndL))
 			// The member slot is read, not freed (a Promise is a reusable value
 			// — see emitTaskCombinatorAwaitEach).
 			e.storeArrayElement(outPtr, idxVal, merged, settleTy)

@@ -138,14 +138,17 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 	e.emitTerminator(fmt.Sprintf("ret ptr %s", prom))
 
 	// --- throw caught: reject ---
+	// Reject with the real thrown value, carried as a caught-value (tag, payload)
+	// from the throw channel — so `await`ing this rejection or a .catch handler
+	// sees the true value (number/string/Error), not an Error wrapper (TDD-00207).
 	e.emitLabel(e.asyncCatchLabel)
-	errReg := e.freshReg()
-	errBits := e.freshReg()
-	v0P := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", errReg))
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", errBits, errReg))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0P, promiseStructIR, prom))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", errBits, v0P))
+	tagR := e.freshReg()
+	tagW := e.freshReg()
+	payR := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_get_thrown_tag()", tagR))
+	e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i64", tagW, tagR))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_get_thrown_pay()", payR))
+	e.storeRejectReasonI64Tag(prom, tagW, payR)
 	setResolved(2)
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", e.coroHdl))
 	e.emitTerminator(fmt.Sprintf("ret ptr %s", prom))
@@ -408,18 +411,17 @@ func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, er
 	okL := e.freshLabel("await.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", rej, rejL, okL))
 	e.emitLabel(rejL)
-	v0P := e.freshReg()
-	v0 := e.freshReg()
-	errReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0P, promiseStructIR, hdlRef))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", v0, v0P))
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errReg, v0))
+	// Re-throw the real reason through the throw-any channel (tag, payload) so a
+	// non-Error rejection (`throw 42`, `Promise.reject("x")`) surfaces at the
+	// awaiter as the true value rather than an Error wrapper (TDD-00207).
+	reasonC := e.loadRejectReasonCaught(hdlRef)
+	rtag, rpay := e.caughtParts(reasonC)
 	// The promise slot is not freed: a Promise is a reusable value in JS,
 	// awaitable any number of times (`await p; await p`) and readable after a
 	// combinator — freeing it here made the second read a use-after-free. The
 	// 40-byte task-promise struct leaks in manual mode, the same ambient
 	// behavior every unreclaimed allocation has (collected under `-mm=gc`).
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw_any(i8 %s, i64 %s)", rtag, rpay))
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
 	if promiseTy.IR == "void" || promiseTy.IR == "" {

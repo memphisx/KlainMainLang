@@ -308,10 +308,44 @@ func accessorMethodName(kind, prop string) string {
 // (`@@asyncIterator`, TDD-00089). Both substitutes use the `__kml_` reserved
 // namespace (like accessorMethodName/ClassTagField), so they can't collide with
 // a real user-declared name; the un-substituted key stays the dispatch key in
-// MethodSigs. A no-op for any symbol with neither in it.
+// MethodSigs.
+//
+// Any *other* rune outside LLVM's bare-identifier set ([A-Za-z0-9_$.]) — a
+// non-ASCII identifier char, which JS/TS allow (`const ф = 1`, CJK names) — is
+// escaped to `__kml_u<hex>_` (ADR-00899). Without this a Cyrillic/CJK global or
+// function name emits an illegal token (`@__kml_global_а...`) that clang rejects
+// with "expected '=' in global variable". The escape is deterministic and lands
+// in the reserved namespace, so it stays injective against real identifiers.
 func llvmSafeSymbol(s string) string {
 	s = strings.ReplaceAll(s, "@@", "__kml_wks_")
-	return strings.ReplaceAll(s, "#", "__kml_priv_")
+	s = strings.ReplaceAll(s, "#", "__kml_priv_")
+	if isBareLLVMIdent(s) {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if r < 128 && (r == '_' || r == '$' || r == '.' ||
+			(r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')) {
+			b.WriteRune(r)
+		} else {
+			fmt.Fprintf(&b, "__kml_u%x_", r)
+		}
+	}
+	return b.String()
+}
+
+// isBareLLVMIdent reports whether every byte of s is legal in an unquoted LLVM
+// identifier. Fast-path guard so the common all-ASCII symbol keeps zero allocs.
+func isBareLLVMIdent(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '_' || c == '$' || c == '.' ||
+			(c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // classAccessorSigs returns the getter/setter FuncSig for property `prop`
@@ -996,6 +1030,16 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			}
 		}
 
+		// Publish the (still-being-populated) ClassInfo now, before the per-method
+		// loop that infers each unannotated return type. MethodSigs is a map, so the
+		// stored copy shares it by reference — a method whose body calls an
+		// EARLIER-declared sibling (`method() { return this.#m(); }`) can then
+		// resolve that sibling's return type during inference instead of falling back
+		// to the i64 default. Without this e.classes[cd.Name] was empty until after
+		// the loop, so `this.#m()` inferred i64 and a string-returning private method
+		// emitted `ret ptr` in an i64 function (invalid IR). ADR-00906. The final
+		// store below re-publishes the completed struct (same maps).
+		e.classes[cd.Name] = info
 		ownDeclared := make(map[string]bool, len(cd.Methods))
 		ownStaticDeclared := make(map[string]bool, len(cd.Methods))
 		for _, m := range cd.Methods {
@@ -1032,6 +1076,15 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				// since the inferred return expression may read this.field.
 				e.pushScope()
 				e.define("this", Symbol{Ty: provisionalTy})
+				// Bind "super" too (typed as the base class), so a method whose
+				// return expression is `super.method()` can resolve the base
+				// method's type during inference — mirrors emitClassMember's own
+				// super binding (ADR-00906).
+				if cd.BaseClass != "" {
+					if baseTy, ok := e.interfaces[cd.BaseClass]; ok {
+						e.define("super", Symbol{Ty: baseTy})
+					}
+				}
 				if inferred, ok := e.inferUnannotatedReturnType(m.Body, sig.ParamNames, sig.ParamTypes); ok {
 					sig.RetType = inferred
 				}

@@ -58,6 +58,15 @@ func (e *Emitter) resolveRegexReplacer(args []ast.Expression, pos ast.Pos) (rege
 	if err != nil {
 		return regexReplacer{}, err
 	}
+	// The replacement is ToString'd when it is not already a string
+	// (`"a77b".replace(/77/, 1)` → "a1b"); coercing a number straight to `ptr`
+	// reinterpreted the double bits as a pointer and passed them to strlen
+	// (invalid IR — ADR-00910).
+	if !isStringTy(templateVal.Ty) {
+		if templateVal, err = e.emitArgToString(templateVal); err != nil {
+			return regexReplacer{}, err
+		}
+	}
 	templateVal = e.coerce(templateVal, TypePtr)
 	return regexReplacer{template: templateVal}, nil
 }

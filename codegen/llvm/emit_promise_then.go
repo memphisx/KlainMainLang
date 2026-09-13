@@ -27,13 +27,35 @@ import (
 // same shape either way). A non-arrow callback (a named function reference) is
 // emitted unchanged.
 func (e *Emitter) emitRejectCallback(arg ast.Expression) (Value, error) {
-	if af, ok := arg.(*ast.ArrowFunction); ok {
-		return e.emitArrowFunctionWithHints(af, []Type{errorObjType})
+	// An `any`/`unknown`-annotated reject parameter is the same "hold anything,
+	// access leniently" role as an unannotated one — treat it as the caught-value
+	// hint (which yields undefined for a missing member rather than the stricter
+	// `any` dynamic-access throw) by clearing the annotation for the emit
+	// (TDD-00207). A concrete annotation (string/Error/object) is left to the
+	// adapter below.
+	restoreParam := e.clearDynamicRejectParam(arg)
+	var v Value
+	var err error
+	switch a := arg.(type) {
+	case *ast.ArrowFunction:
+		v, err = e.emitArrowFunctionWithHints(a, []Type{TypeCaught})
+	case *ast.FunctionExpression:
+		v, err = e.emitFunctionExpression(a, []Type{TypeCaught})
+	default:
+		v, err = e.emitExpr(arg)
 	}
-	if fe, ok := arg.(*ast.FunctionExpression); ok {
-		return e.emitFunctionExpression(fe, []Type{errorObjType})
+	restoreParam()
+	if err != nil {
+		return Value{}, err
 	}
-	return e.emitExpr(arg)
+	// The .then/.catch runner always calls onR with a { i8, i64 } caught-value
+	// reason. If the handler's parameter is annotated (string / Error / any / an
+	// object shape) the TypeCaught hint was overridden, so its closure expects a
+	// different ABI — wrap it in an adapter that coerces the reason (TDD-00207).
+	if v.Ty.IsFunc && !(len(v.Ty.FuncParams) >= 1 && v.Ty.FuncParams[0].IsCaught) {
+		return e.emitRejectAdapter(v), nil
+	}
+	return v, nil
 }
 
 // emitFulfillCallback emits a `.then` onFulfilled callback, hinting an
@@ -436,20 +458,27 @@ func (e *Emitter) emitThenRunner(runner string, argTy, retTy Type) {
 		fCall = valLoad + loadFClosure + produceF(fmt.Sprintf("call %s %%ffp(ptr %%fep, %s %%val)", thenCallRetIR(retTy), argIR))
 	}
 
-	// Rejection callback call (onR) — takes the error ptr, returns retTy.
-	rCall := "  %errp = inttoptr i64 %v0 to ptr\n" +
+	// Rejection callback call (onR) — the reason is a caught value { i8 tag, i64
+	// payload } rebuilt from v1 (tag) + v0 (payload) (TDD-00207), so the handler
+	// param `e` behaves exactly like a `catch (e)` binding.
+	rCall := "  %errtag = trunc i64 %v1 to i8\n" +
+		"  %erragg0 = insertvalue { i8, i64 } undef, i8 %errtag, 0\n" +
+		"  %erragg = insertvalue { i8, i64 } %erragg0, i64 %v0, 1\n" +
 		"  %rfp_p = getelementptr { ptr, ptr }, ptr %onR, i32 0, i32 0\n" +
 		"  %rfp = load ptr, ptr %rfp_p, align 8\n" +
 		"  %rep_p = getelementptr { ptr, ptr }, ptr %onR, i32 0, i32 1\n" +
 		"  %rep = load ptr, ptr %rep_p, align 8\n" +
-		produceR(fmt.Sprintf("call %s %%rfp(ptr %%rep, ptr %%errp)", thenCallRetIR(retTy)))
+		produceR(fmt.Sprintf("call %s %%rfp(ptr %%rep, { i8, i64 } %%erragg)", thenCallRetIR(retTy)))
 
 	// Pass-through blocks (finally, and a missing fulfillment callback).
 	passThroughD := thenPassThroughIR("d")
 	passThroughF := thenPassThroughIR("pf")
-	// Propagate a rejection (no onR): Q rejects with the same reason.
+	// Propagate a rejection (no onR): Q rejects with the same reason — both the
+	// payload (v0) and the tag (v1) carry over (TDD-00207).
 	propReject := `  %qv0_pr = getelementptr ` + promiseStructIR + `, ptr %q, i32 0, i32 2
   store i64 %v0, ptr %qv0_pr, align 8
+  %qv1_pr = getelementptr ` + promiseStructIR + `, ptr %q, i32 0, i32 3
+  store i64 %v1, ptr %qv1_pr, align 8
   %qres_pr = getelementptr ` + promiseStructIR + `, ptr %q, i32 0, i32 0
   store i64 2, ptr %qres_pr, align 8
 `
@@ -472,6 +501,8 @@ entry:
   %%res = load i64, ptr %%res_p, align 8
   %%v0_p = getelementptr %s, ptr %%p, i32 0, i32 2
   %%v0 = load i64, ptr %%v0_p, align 8
+  %%v1_p = getelementptr %s, ptr %%p, i32 0, i32 3
+  %%v1 = load i64, ptr %%v1_p, align 8
   %%hasFin = icmp ne ptr %%onFin, null
   br i1 %%hasFin, label %%dofin, label %%branch
 dofin:
@@ -498,7 +529,7 @@ callR:
 %s%s
 propR:
 %s%s
-}`, runner, promiseStructIR, promiseStructIR,
+}`, runner, promiseStructIR, promiseStructIR, promiseStructIR,
 		passThroughD, drainRet,
 		fCall, storeSettleF+drainRet,
 		passThroughF, drainRet,

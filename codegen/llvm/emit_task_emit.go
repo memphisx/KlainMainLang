@@ -217,13 +217,11 @@ func (e *Emitter) emitTaskRethrowIfRejected(promiseReg string) {
 	okL := e.freshLabel("task.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", rej, rejL, okL))
 	e.emitLabel(rejL)
-	v0P := e.freshReg()
-	v0 := e.freshReg()
-	errReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0P, promiseStructIR, promiseReg))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", v0, v0P))
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errReg, v0))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	// Re-throw the real reason via the throw-any channel (tag, payload), not an
+	// Error-wrapper assumption (TDD-00207).
+	reasonC := e.loadRejectReasonCaught(promiseReg)
+	rtag, rpay := e.caughtParts(reasonC)
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw_any(i8 %s, i64 %s)", rtag, rpay))
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
 }

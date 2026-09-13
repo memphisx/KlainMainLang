@@ -261,6 +261,47 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		return nil
 	}
 
+	// A `return <expr>` inside a constructor (ADR-00905). A constructor's LLVM
+	// result type is void — the caller holds the allocated `this` and the ctor
+	// fills it — so a naive `ret <value>` emits an IR type mismatch (`ret double`
+	// in a void function). JS semantics: returning undefined is a normal return
+	// (yields `this`); returning an object overrides the instance (return-override,
+	// not expressible under this void ABI — a documented limitation); returning a
+	// primitive is IGNORED in a base class but a TypeError in a DERIVED class.
+	if e.currentCtorClass != "" && r.Value != nil {
+		vt := e.inferExprType(r.Value)
+		// Evaluate the expression for its side effects regardless of how its value
+		// is treated (real JS runs the operand before the return-type check).
+		if _, err := e.emitExpr(r.Value); err != nil {
+			return err
+		}
+		switch {
+		case vt.IsUndefined || vt.IR == "void":
+			// `return undefined;` → ordinary constructor return (yields `this`).
+		case vt.IsSymbol:
+			// A Symbol is a primitive (it reuses the object IR representation, so
+			// it must be tested before the object branch below).
+			if e.classes[e.currentCtorClass].BaseClass != "" {
+				e.emitThrowTypeError("Derived constructors may only return object or undefined")
+				return nil
+			}
+		case vt.IsObject || vt.IsArray || vt.IsDynamic:
+			return fmt.Errorf("%d:%d: returning an object from a constructor (return-override of the instance) is not supported — the constructor yields the allocated instance directly", r.GetPos().Line, r.GetPos().Col)
+		default:
+			// A primitive value. Derived constructor: TypeError (spec step 13.c).
+			// Base constructor: the value is ignored, a normal return.
+			if e.classes[e.currentCtorClass].BaseClass != "" {
+				e.emitThrowTypeError("Derived constructors may only return object or undefined")
+				return nil
+			}
+		}
+		if err := e.emitReturnCleanups(); err != nil {
+			return err
+		}
+		e.emitTerminator("ret void")
+		return nil
+	}
+
 	if r.Value == nil {
 		if err := e.emitReturnCleanups(); err != nil {
 			return err

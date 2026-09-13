@@ -42,6 +42,25 @@ type Type struct {
 	// trailing call arguments," the same distinction FuncSig.HasRest
 	// already lets a named function's call sites make.
 	FuncHasRest bool
+	// FuncParamNames and FuncParamDefaults let a first-class function value's
+	// call site (emitClosureCallByPtr) fill an omitted trailing parameter with
+	// its default expression, the same way a named/class/IIFE call site already
+	// does from FuncSig.Defaults (TDD-00206 Stage 1). Populated when a closure
+	// *value* is built (arrow / function-expression emission); ride the same
+	// binding-preserved path FuncHasRest does. FuncParamNames keys the
+	// paramDefaultScratch scope so a default can reference an earlier parameter
+	// (`b = a`); a nil FuncParamDefaults[i] means parameter i has no default.
+	FuncParamNames    []string
+	FuncParamDefaults []ast.Expression
+	// FuncBodyDefaults holds the defaults that must be evaluated in the closure
+	// *body* prologue rather than at the call site — those referencing a variable
+	// captured from the defining scope or a module global (TDD-00206 Stage 2). A
+	// closure with any such default carries a hidden trailing `i32` argument-
+	// presence mask (FuncHasDefaultMask): the body fills param i from
+	// FuncBodyDefaults[i] when the mask's bit i is clear. A given param has at most
+	// one of FuncParamDefaults[i] / FuncBodyDefaults[i] set.
+	FuncBodyDefaults   []ast.Expression
+	FuncHasDefaultMask bool
 	// IsPromiseResolver marks the `resolve` closure `new Promise`'s executor
 	// receives (emit_promise_new.go). It carries the closure's `{fnptr, env}`
 	// shape like any callback, but a call site passing a Promise argument

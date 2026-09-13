@@ -1984,6 +1984,15 @@ func (e *Emitter) gatherCaptures(af *ast.ArrowFunction) ([]CapturedVar, error) {
 	if af.Block != nil {
 		scanStmtsFV(af.Block.Body, bound, refs)
 	}
+	// A parameter default that references a variable from the enclosing scope is
+	// evaluated in the body prologue (TDD-00206 Stage 2), so it captures that
+	// variable just like the body does — scan the defaults too, or the prologue
+	// would find the name unbound.
+	for _, p := range af.Params {
+		if p.Default != nil {
+			scanExprFV(p.Default, bound, refs)
+		}
+	}
 
 	var caps []CapturedVar
 	for name := range refs {
@@ -2264,6 +2273,11 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
 		}
 	}
+	// Hidden trailing argument-presence mask for a body-filled-default closure
+	// (TDD-00206 Stage 2) — see emitBodyDefaultPrologue.
+	if closureHasBodyDefault(af.Params) {
+		paramStr += ", i32 %__dmask"
+	}
 
 	// Set up captured-variable access: each env slot holds a pointer to a heap
 	// cell shared with the enclosing scope (and any other closure capturing the
@@ -2278,6 +2292,12 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cellPtr, slotGep))
 			e.define(cap.Name, Symbol{Ptr: cellPtr, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst, IsCapture: true})
 		}
+	}
+
+	// Fill body-default parameters (defaults referencing captures/globals) now
+	// that both parameters and captures are in scope (TDD-00206 Stage 2).
+	if err := e.emitBodyDefaultPrologue(af.Params, paramTypes, af.GetPos()); err != nil {
+		return err
 	}
 
 	// Emit the body.
@@ -2739,6 +2759,12 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 		} else {
 			paramTypes[i] = e.resolveType(p.Type)
 		}
+		// An optional `x?: T` parameter reads as `T | undefined` in the body
+		// (TDD-00187), the same widening a named function's signature gets — so an
+		// omitted argument is a genuinely-absent nullable value, not a typed zero.
+		// Closures previously skipped this, so `(a, b?: number) => a + (b ?? 9)`
+		// treated an omitted `b` as 0; now it is absent, matching Node.
+		paramTypes[i] = optionalParamType(p, paramTypes[i])
 		// TDD-00062 (Staged V2): a bare `any`/`unknown` arrow-function
 		// parameter is allowed — the closure-call path (emitClosureCallByPtr)
 		// already boxes a dynamic-typed argument. Only a nested dynamic shape
@@ -2846,7 +2872,148 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 	if len(af.Params) > 0 && af.Params[len(af.Params)-1].Rest {
 		closureTy.FuncHasRest = true
 	}
+	setFuncParamDefaults(&closureTy, af.Params)
 	return Value{Ref: hdr, Ty: closureTy}, nil
+}
+
+// setFuncParamDefaults records a closure value's parameter names and default
+// expressions on its Type so a first-class call site can fill an omitted
+// parameter. Each default is classified (TDD-00206):
+//
+//   - call-site fill (FuncParamDefaults[i]): the default is self-contained —
+//     a constant, or a reference to an earlier *sibling parameter* — so it can be
+//     evaluated at the call site (emitClosureCallByPtr), the Stage 1 mechanism.
+//   - body fill (FuncBodyDefaults[i]): the default references a free variable
+//     that is not a sibling parameter (a variable captured from the closure's
+//     defining scope, or a module global). Those are not reliably in scope at the
+//     call site, so the default is evaluated in the closure *body* prologue, where
+//     the captured environment is bound (Stage 2). Such a closure carries a hidden
+//     trailing `i32` argument-presence mask (FuncHasDefaultMask); the body fills
+//     param i from the default when bit i is clear.
+//
+// The classification is purely syntactic (free variables vs. sibling parameter
+// names) so this function produces identical results whether called from the
+// emit path or from inferExprType — the two must agree, or a `const f = …`
+// binding's type would disagree with the closure's actual ABI.
+func setFuncParamDefaults(ty *Type, params []ast.Param) {
+	if len(params) == 0 {
+		return
+	}
+	names := make([]string, len(params))
+	callSite := make([]ast.Expression, len(params))
+	body := make([]ast.Expression, len(params))
+	siblingNames := map[string]bool{}
+	for _, p := range params {
+		siblingNames[p.Name] = true
+	}
+	anyCallSite, anyBody := false, false
+	for i, p := range params {
+		names[i] = p.Name
+		if p.Default == nil {
+			continue
+		}
+		free := map[string]bool{}
+		scanExprFV(p.Default, siblingNames, free)
+		if len(free) > 0 {
+			// References something other than a sibling parameter — evaluate in
+			// the body, where captures/globals are in scope.
+			body[i] = p.Default
+			anyBody = true
+		} else {
+			callSite[i] = p.Default
+			anyCallSite = true
+		}
+	}
+	ty.FuncParamNames = names
+	if anyCallSite {
+		ty.FuncParamDefaults = callSite
+	}
+	if anyBody {
+		ty.FuncBodyDefaults = body
+		ty.FuncHasDefaultMask = true
+	}
+}
+
+// defaultIsBodyFilled reports whether a parameter default must be evaluated in
+// the closure body prologue (it references a free variable that is not a sibling
+// parameter) rather than at the call site. Shared by setFuncParamDefaults (which
+// types the closure) and the body-emit prologue (which fills it), so both agree.
+func defaultIsBodyFilled(def ast.Expression, siblingNames map[string]bool) bool {
+	if def == nil {
+		return false
+	}
+	free := map[string]bool{}
+	scanExprFV(def, siblingNames, free)
+	return len(free) > 0
+}
+
+// closureHasBodyDefault reports whether any parameter's default is body-filled —
+// i.e. whether this closure needs the hidden trailing i32 presence mask.
+func closureHasBodyDefault(params []ast.Param) bool {
+	sib := map[string]bool{}
+	for _, p := range params {
+		sib[p.Name] = true
+	}
+	for _, p := range params {
+		if defaultIsBodyFilled(p.Default, sib) {
+			return true
+		}
+	}
+	return false
+}
+
+// emitBodyDefaultPrologue fills each body-default parameter (TDD-00206 Stage 2)
+// from its default expression when the caller left that argument out. It runs
+// after the parameters and captured variables are bound (so the default sees
+// both sibling parameters and the closure's captured environment) and before the
+// body statements. The caller passes a hidden trailing `i32 %__dmask` whose bit i
+// is set when argument i was supplied; a clear bit means fill from the default.
+//
+// Scalar/string and single-pointer (object/tuple) parameters fill their one
+// `%v_<name>` alloca; an array parameter fills its object-reference header slot
+// (`%v_<name>_ptr`, the TDD-00127 model). A nullable-scalar or destructured
+// (`{a}`/`[a]`) body-default parameter has no single overwrite slot and is a
+// clean rejection. Async closures are supported — the prologue runs inside the
+// inline async body block, after captures are bound.
+func (e *Emitter) emitBodyDefaultPrologue(params []ast.Param, paramTypes []Type, pos ast.Pos) error {
+	sib := map[string]bool{}
+	for _, p := range params {
+		sib[p.Name] = true
+	}
+	for i, p := range params {
+		if !defaultIsBodyFilled(p.Default, sib) {
+			continue
+		}
+		pty := paramTypes[i]
+		if isNullableScalar(pty) || p.ArrayPattern != nil || p.ObjectPattern != nil {
+			return fmt.Errorf("%d:%d: a parameter default that references a captured variable is only supported for a scalar, string, object, or array parameter when the function is called as a value — pass the argument explicitly", pos.Line, pos.Col)
+		}
+		bit := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i32 %%__dmask, %d", bit, uint64(1)<<uint(i)))
+		absent := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", absent, bit))
+		fillL := e.freshLabel("dflt.fill")
+		contL := e.freshLabel("dflt.cont")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", absent, fillL, contL))
+		e.emitLabel(fillL)
+		val, err := e.emitExprWithObjectHint(p.Default, pty)
+		if err != nil {
+			return err
+		}
+		if pty.IsArray {
+			// Object-reference array model (TDD-00127): the parameter's stable
+			// slot holds a pointer to the {data, len} header. Store a fresh header
+			// wrapping the default array's aggregate.
+			header, _ := e.arrayArgFromAggregate(val)
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %%v_%s_ptr, align 8", header, p.Name))
+		} else {
+			val = e.coerce(val, pty)
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %%v_%s, align %d", pty.IR, val.Ref, p.Name, pty.Align()))
+		}
+		e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+		e.emitLabel(contL)
+	}
+	return nil
 }
 
 // emitFunctionExpression handles an anonymous function expression
@@ -2871,6 +3038,13 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	bound := make(map[string]bool, len(fe.Params))
 	addParamBoundNames(bound, fe.Params)
 	scanStmtsFV(fe.Body.Body, bound, refs)
+	// A parameter default referencing an enclosing variable is evaluated in the
+	// body prologue (TDD-00206 Stage 2), so it captures that variable too.
+	for _, p := range fe.Params {
+		if p.Default != nil {
+			scanExprFV(p.Default, bound, refs)
+		}
+	}
 
 	var caps []CapturedVar
 	for name := range refs {
@@ -2918,6 +3092,9 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		} else {
 			paramTypes[i] = e.resolveType(p.Type)
 		}
+		// Optional `x?: T` → `T | undefined` in the body (TDD-00187), as for
+		// arrow functions and named signatures — see the arrow loop above.
+		paramTypes[i] = optionalParamType(p, paramTypes[i])
 		// TDD-00062 (Staged V2): a bare `any`/`unknown` function-expression
 		// parameter is allowed (same closure-call boxing as arrow functions).
 		// Only a nested dynamic shape stays rejected.
@@ -2955,6 +3132,19 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		}
 	} else {
 		retTy = TypeVoid
+	}
+
+	// An async function expression always returns a promise (the inline async
+	// prologue/epilogue below returns the settled promise pointer), so wrap a
+	// non-promise inferred/annotated return type — otherwise the emitted define's
+	// return IR (ptr) mismatches a `void`/scalar signature and clang rejects it
+	// ("value doesn't match function result type 'void'"). This mirrors the arrow
+	// path (emitArrowFunctionWithHints); the function-expression path previously
+	// lacked it, so an async function expression that falls off the end — e.g.
+	// `async function () { try { await p } finally { await q } }` — emitted
+	// `ret ptr` inside `define void`.
+	if fe.IsAsync && !retTy.IsPromise {
+		retTy = PromiseOf(retTy)
 	}
 
 	// A named function expression binds its own name inside its body for
@@ -3145,6 +3335,11 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
 		}
 	}
+	// Hidden trailing argument-presence mask for a body-filled-default closure
+	// (TDD-00206 Stage 2) — see emitBodyDefaultPrologue.
+	if closureHasBodyDefault(fe.Params) {
+		paramStr += ", i32 %__dmask"
+	}
 
 	// Set up captured-variable access — same pattern emitClosureFunc uses.
 	if len(caps) > 0 {
@@ -3156,6 +3351,12 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cellPtr, slotGep))
 			e.define(cap.Name, Symbol{Ptr: cellPtr, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst, IsCapture: true})
 		}
+	}
+
+	// Fill body-default parameters now that parameters and captures are in scope
+	// (TDD-00206 Stage 2). closureParamTypes is the pre-consumed copy.
+	if err := e.emitBodyDefaultPrologue(fe.Params, closureParamTypes, fe.GetPos()); err != nil {
+		return Value{}, err
 	}
 
 	// Emit the body.
@@ -3248,6 +3449,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	if len(fe.Params) > 0 && fe.Params[len(fe.Params)-1].Rest {
 		closureTy.FuncHasRest = true
 	}
+	setFuncParamDefaults(&closureTy, fe.Params)
 	return Value{Ref: hdr, Ty: closureTy}, nil
 }
 
@@ -3285,7 +3487,11 @@ func (e *Emitter) emitFunctionCallApply(fnExpr ast.Expression, method string, ar
 
 	var callArgs []ast.Expression
 	if method == "call" {
-		callArgs = args[1:]
+		// `f.call()` with not even a thisArg — an empty forwarded argument list
+		// (guard the slice so zero args doesn't panic with [1:0]).
+		if len(args) >= 1 {
+			callArgs = args[1:]
+		}
 	} else { // apply
 		if len(args) < 2 {
 			// apply() / apply(thisArg) with no args array — an empty argument list.
@@ -3364,7 +3570,39 @@ func (e *Emitter) emitFunctionBind(fnExpr ast.Expression, args []ast.Expression,
 	if fnVal.Ty.FuncRetType != nil {
 		retTy = *fnVal.Ty.FuncRetType
 	}
-	return Value{Ref: hdr, Ty: FuncType(fnVal.Ty.FuncParams[boundCount:], retTy)}, nil
+	reduced := FuncType(fnVal.Ty.FuncParams[boundCount:], retTy)
+	// A body-filled-default closure (TDD-00206 Stage 2) keeps its presence-mask
+	// ABI after binding: the remaining parameters may still include body defaults,
+	// so callers of the bound value must pass a mask. The trampoline threads that
+	// mask (combined with the bound positions, which are always present) to the
+	// original. The default expressions and parameter names shift down by the
+	// number of bound leading parameters so the reduced value's indices line up.
+	if fnVal.Ty.FuncHasDefaultMask {
+		reduced.FuncHasDefaultMask = true
+		reduced.FuncParamNames = shiftExprOrNameSlice(fnVal.Ty.FuncParamNames, boundCount)
+		reduced.FuncParamDefaults = shiftDefaultSlice(fnVal.Ty.FuncParamDefaults, boundCount)
+		reduced.FuncBodyDefaults = shiftDefaultSlice(fnVal.Ty.FuncBodyDefaults, boundCount)
+	}
+	return Value{Ref: hdr, Ty: reduced}, nil
+}
+
+// shiftExprOrNameSlice drops the first n elements of a parameter-name slice,
+// returning nil when the slice is empty/absent so the field stays unset.
+func shiftExprOrNameSlice(s []string, n int) []string {
+	if len(s) <= n {
+		return nil
+	}
+	return s[n:]
+}
+
+// shiftDefaultSlice drops the first n elements of a per-parameter default-
+// expression slice (.bind binds the leading parameters), returning nil when
+// nothing remains.
+func shiftDefaultSlice(s []ast.Expression, n int) []ast.Expression {
+	if len(s) <= n {
+		return nil
+	}
+	return s[n:]
 }
 
 // emitBindTrampoline emits the forwarding function for a .bind result: it loads
@@ -3386,10 +3624,20 @@ func (e *Emitter) emitBindTrampoline(fnTy Type, boundCount int) string {
 	for i, p := range remaining {
 		paramDecls = append(paramDecls, fmt.Sprintf("%s %%r%d", storageIR(p), i))
 	}
-	// The original closure's function-pointer type: (ptr env, all params…).
+	// A body-filled-default original (TDD-00206 Stage 2) takes a hidden trailing
+	// i32 presence mask; the reduced bound value carries the same ABI, so the
+	// trampoline receives the caller's mask for the remaining parameters and
+	// forwards it combined with the bound positions (always present).
+	if fnTy.FuncHasDefaultMask {
+		paramDecls = append(paramDecls, "i32 %dmask")
+	}
+	// The original closure's function-pointer type: (ptr env, all params…[, mask]).
 	allIRs := []string{"ptr"}
 	for _, p := range fnTy.FuncParams {
 		allIRs = append(allIRs, storageIR(p))
+	}
+	if fnTy.FuncHasDefaultMask {
+		allIRs = append(allIRs, "i32")
 	}
 	fpTypePart := "(" + strings.Join(allIRs, ", ") + ")"
 
@@ -3416,6 +3664,16 @@ func (e *Emitter) emitBindTrampoline(fnTy Type, boundCount int) string {
 	}
 	for i, p := range remaining {
 		callArgs = append(callArgs, fmt.Sprintf("%s %%r%d", storageIR(p), i))
+	}
+	if fnTy.FuncHasDefaultMask {
+		// Combine the bound positions (low boundCount bits, always present) with
+		// the caller's mask for the remaining positions (shifted up by boundCount).
+		boundBits := (uint64(1) << uint(boundCount)) - 1
+		shifted := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = shl i32 %%dmask, %d", shifted, boundCount))
+		full := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i32 %s, %d", full, shifted, boundBits))
+		callArgs = append(callArgs, "i32 "+full)
 	}
 
 	if retTy.IR == "void" {
@@ -3478,23 +3736,60 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 		return Value{}, err
 	}
 
-	// Build arg list: env first, then actual args.
+	// Build arg list: env first, then actual args. A trailing parameter omitted
+	// at the call site is filled from its default expression if the closure
+	// value carries one (TDD-00206 Stage 1), otherwise with `undefined` (JS
+	// semantics — an omitted parameter is `undefined`, which coerces to a typed
+	// slot's zero); this is what lets `const f = function(a, b = 10) {...}; f(5)`
+	// emit a `call` whose operand count matches the callee's LLVM arity instead
+	// of "not enough parameters specified for call". A default may reference an
+	// earlier parameter (`b = a`); paramDefaultScratch materializes each earlier
+	// scalar/array/nullable parameter under its name, visible only while a
+	// default is emitted (a provided argument is still evaluated in the caller's
+	// scope and sees no sibling). A default referencing a variable captured from
+	// the closure's *defining* scope is evaluated here in the caller's scope — a
+	// documented Stage 1 limitation (TDD-00206), the same one ADR-00911's IIFE
+	// path accepts; Stage 2 (body-prologue filling) closes it.
 	argParts := []string{"ptr " + epVal}
-	for i := 0; i < regularCount && i < len(args); i++ {
-		arg := args[i]
+	scratch := e.newParamDefaultScratch(ty.FuncParamNames)
+	for i := 0; i < regularCount; i++ {
 		paramTy := ty.FuncParams[i]
+		var arg ast.Expression
+		fromDefault := false
+		switch {
+		case i < len(args):
+			arg = args[i]
+		case i < len(ty.FuncParamDefaults) && ty.FuncParamDefaults[i] != nil:
+			arg = ty.FuncParamDefaults[i]
+			fromDefault = true
+		default:
+			// Omitted with no default: JS passes `undefined`. An array slot has
+			// no `undefined` value in this ABI, so fill an empty array; every
+			// other slot takes an `undefined` literal, which the paths below
+			// coerce (scalar → zero) or box as absent (nullable-scalar).
+			if paramTy.IsArray {
+				argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
+				continue
+			}
+			arg = ast.NewNullLiteral(true, pos)
+		}
 		// A nullable-scalar closure parameter takes its boxed { i1, T }
 		// aggregate (TDD-00064 Stage 3) — handled before the generic path so a
 		// null literal boxes as absent rather than round-tripping through coerce.
 		if isNullableScalar(paramTy) {
-			argStr, err := e.emitNullableScalarArg(arg, paramTy)
+			scratch.enter(fromDefault)
+			agg, err := e.emitNullableScalarBoxedValue(arg, paramTy)
+			scratch.leave(fromDefault)
 			if err != nil {
 				return Value{}, err
 			}
-			argParts = append(argParts, argStr)
+			argParts = append(argParts, fmt.Sprintf("%s %s", nullableScalarStorageIR(paramTy), agg))
+			scratch.bindNullable(i, agg, paramTy)
 			continue
 		}
+		scratch.enter(fromDefault)
 		val, err := e.emitExprWithObjectHint(arg, paramTy)
+		scratch.leave(fromDefault)
 		if err != nil {
 			return Value{}, err
 		}
@@ -3531,9 +3826,13 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 		if paramTy.IsArray {
 			header, lenReg := e.packArrayArg(arg, val)
 			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
+			scratch.bindArray(i, header, paramTy)
 			continue
 		}
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
+		if !paramTy.IsDynamic {
+			scratch.bind(i, val)
+		}
 	}
 	// Pack rest args into a temporary heap array — identical shape to
 	// emitCallToFuncSig's own rest-packing (emit_call.go) and
@@ -3600,6 +3899,22 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 		// (TDD-00064 Stage 3), so the indirect-call function type must name that
 		// storage shape, not the bare scalar.
 		paramTyStrs = append(paramTyStrs, storageIR(p))
+	}
+	// Argument-presence mask for a body-filled-default closure (TDD-00206
+	// Stage 2): a hidden trailing i32 whose low `provided` bits are set, where
+	// `provided` is the count of regular (non-rest) arguments actually supplied.
+	// The callee body fills each body-default param whose bit is clear. Arguments
+	// are positional and contiguous in a JS call, so the provided set is exactly
+	// the low bits. Omitted body-default params were already passed their slot's
+	// zero above (the switch's default arm); the body overwrites them.
+	if ty.FuncHasDefaultMask {
+		provided := len(args)
+		if provided > regularCount {
+			provided = regularCount
+		}
+		mask := (uint64(1) << uint(provided)) - 1
+		paramTyStrs = append(paramTyStrs, "i32")
+		argParts = append(argParts, fmt.Sprintf("i32 %d", mask))
 	}
 	fnTypePart := "(" + strings.Join(paramTyStrs, ", ") + ")"
 
@@ -3742,7 +4057,92 @@ func (e *Emitter) resolveCallbackWithHints(arg ast.Expression, hints []Type) (Ca
 		}
 		return Callback{kind: cbClosure, hdrPtr: v.Ref, ty: v.Ty}, nil
 	}
+	// A named top-level function reference (`arr.reduce(callbackfn)`): its untyped
+	// parameters defaulted to `number` (i64) at registration, but a HOF over a
+	// non-number array supplies string/other element hints. Re-emit the function
+	// monomorphized against those hints (ADR-00913) so `function callbackfn(p, c)`
+	// over a string array gets string parameters, not an i64/string IR mismatch.
+	if id, ok := arg.(*ast.Identifier); ok {
+		if cb, handled, err := e.monomorphizeNamedCallback(id, hints); err != nil {
+			return Callback{}, err
+		} else if handled {
+			return cb, nil
+		}
+	}
 	return e.resolveCallback(arg)
+}
+
+// monomorphizeNamedCallback re-emits a named top-level function with its untyped
+// parameters retyped to the callback hints, when a hint would actually change a
+// parameter's type. Returns handled=false (no error) when the callback is not a
+// monomorphizable named function or no parameter type would change, so the caller
+// falls back to the ordinary resolveCallback path. Memoized by the mangled name.
+func (e *Emitter) monomorphizeNamedCallback(id *ast.Identifier, hints []Type) (Callback, bool, error) {
+	// Must be a plain top-level named function (not a closure variable, builtin
+	// conversion, generic, or async) whose declaration we can re-emit.
+	if _, found := e.lookup(id.Name); found {
+		return Callback{}, false, nil // a local closure variable shadows it
+	}
+	mangled, origSig, found := e.resolveFuncRef(id.Name)
+	if !found {
+		return Callback{}, false, nil
+	}
+	decl, ok := e.topFuncDecls[id.Name]
+	if !ok || origSig.IsAsync || origSig.MaySuspend || origSig.HasRest {
+		return Callback{}, false, nil
+	}
+	newParams := make([]Type, len(origSig.ParamTypes))
+	copy(newParams, origSig.ParamTypes)
+	changed := false
+	for i := range newParams {
+		if i >= len(hints) || i >= len(decl.Params) {
+			break
+		}
+		// Only an UNANNOTATED parameter is retyped (an explicit annotation wins);
+		// and only when the hint is a real, different type. A dynamic/void hint is
+		// ignored (no useful specialization).
+		if decl.Params[i].Type != nil || decl.Params[i].ArrayPattern != nil || decl.Params[i].ObjectPattern != nil {
+			continue
+		}
+		h := hints[i]
+		if h.IR == "" || h.IR == "void" || h.IsDynamic {
+			continue
+		}
+		if h.IR != newParams[i].IR || h.IsArray != newParams[i].IsArray || isStringTy(h) != isStringTy(newParams[i]) {
+			newParams[i] = h
+			changed = true
+		}
+	}
+	if !changed {
+		return Callback{}, false, nil
+	}
+	// Mangle a variant name from the specialized parameter types.
+	suffix := ""
+	for _, p := range newParams {
+		m, err := mangleTypeArg(p)
+		if err != nil {
+			return Callback{}, false, nil // unmanglable — fall back to the original
+		}
+		suffix += "_" + m
+	}
+	variant := mangled + "__cbm" + suffix
+	newSig := origSig
+	newSig.ParamTypes = newParams
+	// Re-infer the return type against the specialized parameters when it was
+	// itself unannotated (the body's result may now be a string, etc.).
+	if decl.ReturnType == nil {
+		if inferred, ok := e.inferUnannotatedReturnType(decl.Body, origSig.ParamNames, newParams); ok {
+			newSig.RetType = inferred
+		}
+	}
+	if _, already := e.funcs[variant]; !already {
+		e.funcs[variant] = newSig // register before body for recursion safety
+		if err := e.emitFunctionDeclAs(decl, variant, newSig); err != nil {
+			delete(e.funcs, variant)
+			return Callback{}, false, err
+		}
+	}
+	return Callback{kind: cbNamed, name: variant, sig: newSig}, true, nil
 }
 
 // emitCBCall invokes callback cb with the given pre-evaluated arguments.
@@ -3886,6 +4286,20 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 				continue
 			}
 			argParts = append(argParts, params[i].IR+" "+v.Ref)
+		}
+		// Argument-presence mask for a body-filled-default closure (TDD-00206
+		// Stage 2): the callee expects a trailing i32. The mask's low bits mark
+		// the genuinely-provided arguments (`args`, before the arity padding
+		// above), so a body-default parameter the HOF did not supply still falls
+		// back to its default rather than the zero pad.
+		if cb.ty.FuncHasDefaultMask {
+			provided := len(args)
+			if provided > len(params) {
+				provided = len(params)
+			}
+			mask := (uint64(1) << uint(provided)) - 1
+			fnType = fnType[:len(fnType)-1] + ", i32)"
+			argParts = append(argParts, fmt.Sprintf("i32 %d", mask))
 		}
 		argStr := strings.Join(argParts, ", ")
 

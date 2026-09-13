@@ -572,8 +572,17 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		case "NaN", "Infinity":
 			return TypeF64
 		}
-		if _, _, ok := e.resolveFuncRef(ex.Name); ok {
-			return Type{IR: "ptr", IsFunc: true}
+		if _, sig, ok := e.resolveFuncRef(ex.Name); ok {
+			// Carry the resolved signature's parameter and return types onto the
+			// funcref Type, so `f.call()` / `f.apply()` / `f.bind()` (inferred
+			// above) see the real return type instead of defaulting to void — a
+			// named function used as `f.apply()` in value position otherwise
+			// inferred void while emit produced the real typed call, mismatching
+			// the enclosing function's signature (invalid IR).
+			ft := Type{IR: "ptr", IsFunc: true, FuncParams: sig.ParamTypes, FuncHasRest: sig.HasRest}
+			ret := sig.RetType
+			ft.FuncRetType = &ret
+			return ft
 		}
 		if isErrorKindName(ex.Name) {
 			// Built-in error constructor in value position — a boxed funcref
@@ -677,6 +686,27 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				}
 			}
 		}
+		// Bare null/undefined in arithmetic/relational routes through the runtime
+		// dispatch under -compat=js (null→0, undefined→NaN) — see emitBinary
+		// (ADR-00901). Infer TypeAny / bool so the slot type agrees with the boxed
+		// value emitBinary stores (otherwise `var x = null + undefined` infers a
+		// string/ptr slot and the boxed result is mis-stored). A real-string side
+		// keeps the concat result (string); object/array operands keep their paths.
+		if e.compatJS() {
+			lNullish := lt.IsNull || lt.IsUndefined
+			rNullish := rt.IsNull || rt.IsUndefined
+			lRealStr := isStringTy(lt) && !lNullish
+			rRealStr := isStringTy(rt) && !rNullish
+			if (lNullish || rNullish) && !lRealStr && !rRealStr &&
+				!lt.IsObject && !rt.IsObject && !lt.IsArray && !rt.IsArray {
+				switch ex.Op {
+				case "<", ">", "<=", ">=":
+					return TypeBool
+				case "+", "-", "*", "/", "%", "**":
+					return TypeAny
+				}
+			}
+		}
 		// A bigint operand makes an arithmetic/bitwise result a bigint (a
 		// comparison stays a bool) — so `const x = 2n ** 53n + 1n` types as
 		// bigint, not the i64/string the generic cases below would infer.
@@ -768,6 +798,20 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return undefinedableElem(inner)
 			}
 			return inner
+		}
+		// A member read off a caught value (TDD-00202/00207) mirrors
+		// emitCaughtMemberGet's result type: a known Error field keeps its real
+		// type, `.errors` is an errorObj array, anything else is `any`. This must
+		// agree with the emit side or a callback's declared return type (e.g. a
+		// reject handler `(e) => (e as Error).name`) disagrees with its body's IR.
+		if e.inferExprType(ex.Object).IsCaught {
+			if ex.Property == "errors" {
+				return ArrayOf(errorObjType)
+			}
+			if _, fieldTy, ok := errorObjType.FieldIndex(ex.Property); ok && ex.Property != "kind" {
+				return fieldTy
+			}
+			return TypeAny
 		}
 		// `F.prototype` on a recognized prototype constructor is a dynamic
 		// object (TDD-00155 Stage 4).
@@ -1111,6 +1155,14 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 	case *ast.ThisExpression:
 		if sym, ok := e.lookup("this"); ok {
+			return sym.Ty
+		}
+	case *ast.SuperExpression:
+		// `super` is bound in scope typed as the base class (emitClassMember), so
+		// `super.method()` resolves against the base's method table — mirror that
+		// here so a method returning `super.method()` infers the base method's
+		// return type instead of the i64 default (ADR-00906).
+		if sym, ok := e.lookup("super"); ok {
 			return sym.Ty
 		}
 	case *ast.NewExpression:
@@ -1478,7 +1530,18 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					if objTy.FuncRetType != nil {
 						ret = *objTy.FuncRetType
 					}
-					return FuncType(objTy.FuncParams[boundCount:], ret)
+					reduced := FuncType(objTy.FuncParams[boundCount:], ret)
+					// Must agree with emitFunctionBind's returned Value type: a
+					// body-filled-default closure (TDD-00206 Stage 2) keeps its
+					// presence-mask ABI after binding, with defaults/names shifted
+					// down by the bound-parameter count.
+					if objTy.FuncHasDefaultMask {
+						reduced.FuncHasDefaultMask = true
+						reduced.FuncParamNames = shiftExprOrNameSlice(objTy.FuncParamNames, boundCount)
+						reduced.FuncParamDefaults = shiftDefaultSlice(objTy.FuncParamDefaults, boundCount)
+						reduced.FuncBodyDefaults = shiftDefaultSlice(objTy.FuncBodyDefaults, boundCount)
+					}
+					return reduced
 				}
 			}
 		}
@@ -3209,6 +3272,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			} else {
 				params[i] = e.resolveType(p.Type)
 			}
+			// Optional `x?: T` → `T | undefined`, matching the closure's actual
+			// emitted parameter ABI (emit_func.go) so a `const f = …` symbol's
+			// type agrees with the body — the same reason FuncHasRest is mirrored
+			// here (TDD-00187).
+			params[i] = optionalParamType(p, params[i])
 		}
 		var ret Type
 		if ex.RetType != nil {
@@ -3244,6 +3312,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if len(ex.Params) > 0 && ex.Params[len(ex.Params)-1].Rest {
 			fty.FuncHasRest = true
 		}
+		setFuncParamDefaults(&fty, ex.Params)
 		return fty
 	case *ast.FunctionExpression:
 		// Same type-inference as ArrowFunction above — a function expression
@@ -3261,6 +3330,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			} else {
 				params[i] = e.resolveType(p.Type)
 			}
+			// Optional `x?: T` → `T | undefined` — mirror of the arrow case above.
+			params[i] = optionalParamType(p, params[i])
 		}
 		var ret Type
 		if ex.RetType != nil {
@@ -3284,6 +3355,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if len(ex.Params) > 0 && ex.Params[len(ex.Params)-1].Rest {
 			fty.FuncHasRest = true
 		}
+		setFuncParamDefaults(&fty, ex.Params)
 		return fty
 	}
 	return TypeI64
@@ -3330,6 +3402,21 @@ func isPlainStringTy(ty Type) bool {
 // leave `if ("")` truthy, since an empty string is still a real, non-null
 // 1-byte buffer, not a null pointer.
 func (e *Emitter) toBool(v Value) Value {
+	// A nullable-scalar aggregate ({ i1 present, T }, TDD-00064) — e.g. the
+	// value of an optional chain `obj?.a` (T | undefined) used directly in a
+	// boolean context (`while (obj?.a)`, `if (obj?.b)`). Its truthiness is
+	// `present && ToBoolean(payload)`: an absent value is `undefined`, which is
+	// falsy. Checked before the `IR == "i1"` fast path below, since a nullable
+	// bool reports payload IR "i1" and would otherwise be returned as the raw
+	// { i1, i1 } aggregate where an `i1` is required — invalid IR
+	// (`'…' defined with type '{ i1, i1 }' but expected 'i1'`).
+	if isNullableScalar(v.Ty) {
+		present, payload := e.nullableScalarAggParts(v)
+		payloadBool := e.toBool(payload)
+		reg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", reg, present, payloadBool.Ref))
+		return Value{Ref: reg, Ty: TypeBool}
+	}
 	if v.Ty.IR == "i1" {
 		return v
 	}

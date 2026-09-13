@@ -176,6 +176,20 @@ func (e *Emitter) emitArrayIncludes(mem *ast.MemberExpression, args []ast.Expres
 	if err != nil {
 		return Value{}, err
 	}
+	// SameValueZero never coerces across types, so a needle whose scalar kind is
+	// disjoint from the element's can never match (`[42].includes("42")` is false).
+	// Coercing it (string→double) would emit `fcmp double, <string ptr>` — invalid
+	// IR (ADR-00908). strict reports TypeScript's argument-type error; js folds to a
+	// constant false. Only fires for two concrete, differing scalar kinds — a
+	// dynamic/object/array element array keeps the existing boxed comparison.
+	if ek := scalarTypeKind(elemTy); ek != "" && !needleVal.Ty.IsDynamic {
+		if nk := scalarTypeKind(needleVal.Ty); ek != nk {
+			if e.compatJS() {
+				return Value{Ref: "false", Ty: TypeBool}, nil
+			}
+			return Value{}, fmt.Errorf("%d:%d: Array.includes search value of a type disjoint from the element type is always false — TypeScript reports an argument-type error; compile with -compat=js to evaluate it", pos.Line, pos.Col)
+		}
+	}
 	needleVal = e.coerce(needleVal, elemTy)
 
 	foundAlloca := e.freshReg()

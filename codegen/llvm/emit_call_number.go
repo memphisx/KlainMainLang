@@ -63,7 +63,17 @@ func (e *Emitter) emitNumberIsNaN(args []ast.Expression, pos ast.Pos) (Value, er
 		return Value{}, err
 	}
 	if !val.Ty.Float {
-		return Value{Ref: "0", Ty: TypeBool}, nil
+		// An `any`-boxed operand: ToNumber it first (global isNaN semantics) so a
+		// boxed NaN — e.g. `isNaN(null + undefined)` — tests true instead of
+		// returning the non-float false. coerce(any→double) unboxes and runs the
+		// numeric conversion (ADR-00902). A boxed non-number rounds to this test's
+		// global-isNaN reading, which for a number-holding box matches Number.isNaN
+		// too. Other static non-float types keep the trivial false.
+		if val.Ty.IsDynamic {
+			val = e.coerce(val, TypeF64)
+		} else {
+			return Value{Ref: "0", Ty: TypeBool}, nil
+		}
 	}
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = fcmp uno double %s, %s", r, val.Ref, val.Ref))
@@ -79,7 +89,13 @@ func (e *Emitter) emitNumberIsFinite(args []ast.Expression, pos ast.Pos) (Value,
 		return Value{}, err
 	}
 	if !val.Ty.Float {
-		return Value{Ref: "1", Ty: TypeBool}, nil
+		// A boxed `any` operand: ToNumber then test (global isFinite), so a boxed
+		// non-finite value is detected rather than defaulting to finite (ADR-00902).
+		if val.Ty.IsDynamic {
+			val = e.coerce(val, TypeF64)
+		} else {
+			return Value{Ref: "1", Ty: TypeBool}, nil
+		}
 	}
 	// x - x == 0.0 is true only for finite values (Inf → NaN, NaN → NaN)
 	diff := e.freshReg()
@@ -228,7 +244,22 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 		if err != nil {
 			return Value{}, err
 		}
-		r32 := e.coerce(rv, TypeI32)
+		// The radix is ToNumber'd then ToInt32'd (spec): `parseInt("11", "2")` has
+		// a string radix that must parse to 2, not reach strtoll as a `ptr` (which
+		// emitted `i32 <string ptr>`, invalid IR — ADR-00907). A string/dynamic
+		// radix goes through the real ToNumber; a numeric radix coerces directly.
+		var r32 Value
+		switch {
+		case isStringTy(rv.Ty):
+			e.ensureToNumber()
+			d := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call double @__kml_to_number(ptr %s)", d, rv.Ref))
+			r32 = e.coerce(Value{Ref: d, Ty: TypeF64}, TypeI32)
+		case rv.Ty.IsDynamic:
+			r32 = e.coerce(Value{Ref: e.emitAnyToNum(rv), Ty: TypeF64}, TypeI32)
+		default:
+			r32 = e.coerce(rv, TypeI32)
+		}
 		radixRef = r32.Ref
 	} else {
 		// No radix argument: real JS auto-detects base 16 for a "0x"/"0X"

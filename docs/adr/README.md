@@ -938,3 +938,28 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00892](ADR-00892.md) | Generator `.next()`/`.return()` value coercion + emitter guard against a scalar-into-aggregate store | |
 | [00893](ADR-00893.md) | Caught-value truthiness and Error-subclass field narrowing (TDD-00202 regressions) | `Extends [ADR-00870](ADR-00870.md)` |
 | [00894](ADR-00894.md) | URLSearchParams array accessors return via out-parameter (Windows x64 struct-return ABI) | `Extends [ADR-00873](ADR-00873.md)` |
+| [00895](ADR-00895.md) | Nullable-scalar truthiness in a boolean context | |
+| [00896](ADR-00896.md) | ToNumber(Symbol) throws a TypeError | |
+| [00897](ADR-00897.md) | Mixed string/number `==` reaches the cross-type path | |
+| [00898](ADR-00898.md) | Unary `~` on a non-numeric operand | |
+| [00899](ADR-00899.md) | Non-ASCII identifiers escaped in LLVM symbol names | |
+| [00900](ADR-00900.md) | Void value in a value position boxes to undefined | |
+| [00901](ADR-00901.md) | Arithmetic/relational on bare null/undefined; real-string concat test | |
+| [00902](ADR-00902.md) | isNaN / isFinite on a dynamic (any) operand | Extends [ADR-00901](ADR-00901.md) |
+| [00903](ADR-00903.md) | Reassigning a catch parameter to a plain value | |
+| [00904](ADR-00904.md) | Generator runtime global declared on the body path | |
+| [00905](ADR-00905.md) | `return <value>` inside a constructor | |
+| [00906](ADR-00906.md) | Sibling- and super-method return-type inference | |
+| [00907](ADR-00907.md) | parseInt ToNumbers a string radix | |
+| [00908](ADR-00908.md) | Array.includes with a cross-type search value | |
+| [00909](ADR-00909.md) | null/undefined equality folds to a constant | Extends [ADR-00901](ADR-00901.md) |
+| [00910](ADR-00910.md) | str.replace() ToStrings a non-string replacement | |
+| [00911](ADR-00911.md) | Default/omitted parameter filling for IIFE closure calls | |
+| [00912](ADR-00912.md) | ToPrimitive with a void/undefined-returning valueOf | Extends [TDD-00201](../tdd/TDD-00201.md), [ADR-00859](ADR-00859.md) |
+| [00913](ADR-00913.md) | Monomorphize a named-function HOF callback against element hints | Extends [TDD-00010](../tdd/TDD-00010.md) (monomorphization), [TDD-00028](../tdd/TDD-00028.md) (callback hints) |
+| [00914](ADR-00914.md) | Default-parameter filling through first-class function values (TDD-00206 Stage 1) | |
+| [00915](ADR-00915.md) | Body-prologue default filling for captured-scope defaults (TDD-00206 Stage 2) | |
+| [00916](ADR-00916.md) | Captured-default polish — async, object/array slots, and `.bind` mask threading (TDD-00206 Stage 2) | Extends [ADR-00915](ADR-00915.md); Implements [TDD-00206](../tdd/TDD-00206.md) Stage 2 |
+| [00917](ADR-00917.md) | Async function expression returns a Promise-typed define (invalid-IR sweep) | |
+| [00918](ADR-00918.md) | Funcref identifier carries its signature for `.apply`/`.call`/`.bind` inference (invalid-IR sweep) | |
+| [00919](ADR-00919.md) | Promise rejection reasons carry the real thrown value | Implements [TDD-00207](../tdd/TDD-00207.md); Extends [ADR-00202](ADR-00202.md) (caught-value record) |

@@ -1847,6 +1847,13 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
+		// Default/omitted-parameter filling for the IIFE (originally ADR-00911's
+		// own call-site padding, now subsumed): the closure value carries its
+		// parameter defaults on its Type (setFuncParamDefaults), and
+		// emitClosureCallByPtr fills any omitted trailing parameter from them —
+		// or with `undefined` when there is no default — so `(function(f = 123)
+		// {...})()` no longer emits a `call` with fewer operands than the
+		// callee's arity (TDD-00206 Stage 1). No call-site padding needed here.
 		return e.emitClosureCallByPtr(closureVal.Ref, closureVal.Ty, ex.Args, ex.GetPos())
 	}
 

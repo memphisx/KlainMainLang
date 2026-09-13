@@ -98,7 +98,10 @@ func (e *Emitter) emitNewPromise(ex *ast.NewExpression) (Value, error) {
 	if len(resolveParams) == 1 {
 		resolveTy.IsPromiseResolver = true
 	}
-	rejectTy := FuncType([]Type{errorObjType}, TypeVoid)
+	// reject(reason) carries the real value as a caught-value record ({i8,i64}),
+	// not an Error pointer — so `rej(42)`/`rej("x")`/`rej(new Error())` all round-
+	// trip to the .catch handler (TDD-00207).
+	rejectTy := FuncType([]Type{TypeCaught}, TypeVoid)
 	// The executor may be an arrow or function-expression literal (its two params
 	// are hinted so `resolve(x)`/`reject(e)` get the right closure signatures even
 	// unannotated), or any closure-typed expression already in scope — a variable
@@ -334,14 +337,16 @@ func (e *Emitter) emitRejectThunk(fn string) {
 	restore := e.beginThunkEmit()
 	defer restore()
 	e.emitThunkAlreadySettledGuard()
-	bits := e.freshReg()
-	v0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %%err to i64", bits))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%p, i32 0, i32 2", v0, promiseStructIR))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bits, v0))
+	// %err is the caught-value record: { i8 tag, i64 payload }. Unpack and store
+	// into the rejection slots v0 (payload) + v1 (tag) (TDD-00207).
+	tag := e.freshReg()
+	pay := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %%err, 0", tag))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %%err, 1", pay))
+	e.storeRejectReason("%p", tag, pay)
 	e.emitInstr("call void @__kml_promise_settle(ptr %p, i64 2)")
 	e.emitInstr("ret void")
-	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%p, ptr %%err) {\nentry:\n", fn))
+	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%p, { i8, i64 } %%err) {\nentry:\n", fn))
 	e.functions.WriteString(e.allocas.String())
 	e.functions.WriteString(e.body.String())
 	e.functions.WriteString("}\n")

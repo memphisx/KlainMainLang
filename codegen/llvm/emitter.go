@@ -169,6 +169,13 @@ type Emitter struct {
 	// funcs/interfaces/classes, since T isn't resolvable until a real call/
 	// usage/construction site supplies a concrete type. See emit_generics.go.
 	genericFuncs      map[string]*ast.FunctionDeclaration
+	// topFuncDecls holds every non-generic top-level function declaration by name,
+	// so a named-function HOF callback (`arr.reduce(callbackfn)`) whose untyped
+	// parameters mismatch the element type can be re-emitted monomorphized against
+	// the callback hints (ADR-00913) — the same re-emit-with-a-new-sig path that
+	// instantiateGenericFunc uses, keyed here on the hint types rather than type
+	// parameters.
+	topFuncDecls      map[string]*ast.FunctionDeclaration
 	genericInterfaces map[string]*ast.InterfaceDeclaration
 	// genericTypeAliases holds `type Name<T> = ...` declarations (TDD-00079
 	// Stage 3), instantiated on demand at each use site by substituting concrete
@@ -994,6 +1001,7 @@ func NewEmitter() *Emitter {
 		enumBacking:             make(map[string]Type),
 		jsonToJSONActive:        make(map[string]bool),
 		genericFuncs:            make(map[string]*ast.FunctionDeclaration),
+		topFuncDecls:            make(map[string]*ast.FunctionDeclaration),
 		genericInterfaces:       make(map[string]*ast.InterfaceDeclaration),
 		genericTypeAliases:      make(map[string]*ast.TypeAliasDeclaration),
 		genericClasses:          make(map[string]*ast.ClassDeclaration),
@@ -2906,6 +2914,7 @@ func (e *Emitter) registerFunctions(prog *ast.Program) error {
 			continue
 		}
 		e.funcs[fd.Name] = e.buildFunctionSig(fd)
+		e.topFuncDecls[fd.Name] = fd
 		if fd.ReturnType == nil {
 			unannotated = append(unannotated, fd)
 		}
@@ -2972,6 +2981,12 @@ func (e *Emitter) buildErasedFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 		sig.RetType = inferred
 	} else {
 		sig.RetType = TypeVoid
+	}
+	// An async `@erased` generic returns a Promise just like a plain async fn
+	// (TDD-00207) — wrap an unannotated/bare inner type so call-site .then/await
+	// take the task path.
+	if fd.IsAsync && !sig.RetType.IsPromise {
+		sig.RetType = PromiseOf(sig.RetType)
 	}
 	return sig
 }
@@ -3050,6 +3065,14 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 			// (ADR-00869). The body still emits an `unreachable` fallthrough.
 			sig.RetType = TypeNever
 		}
+	}
+	// An async function always returns a Promise: wrap an unannotated/bare
+	// inferred inner type (number, void, or `never` for a body that only throws)
+	// so `f().then`/`.catch`/`await` see a promise at the call site and the
+	// emitter's currentPromiseTy is the real element type (TDD-00207). An already
+	// `Promise<T>`-annotated return is left alone.
+	if fd.IsAsync && !sig.RetType.IsPromise {
+		sig.RetType = PromiseOf(sig.RetType)
 	}
 	return sig
 }

@@ -5,6 +5,18 @@ import (
 	"fmt"
 )
 
+// isConstLiteralExpr reports whether expr is a compile-time primitive literal
+// (null/undefined, number, string, boolean) — used to gate the null/undefined
+// equality constant-fold to operands that are genuinely known at compile time,
+// never a runtime value that merely typed as nullish.
+func isConstLiteralExpr(expr ast.Expression) bool {
+	switch expr.(type) {
+	case *ast.NullLiteral, *ast.NumberLiteral, *ast.StringLiteral, *ast.BooleanLiteral:
+		return true
+	}
+	return false
+}
+
 func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// && / || must short-circuit: the right operand is only evaluated when the
 	// left doesn't already decide the result. This has to happen before the
@@ -251,6 +263,78 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		return e.emitBigIntBinary(ex.Op, left, right, ex.GetPos())
 	}
 
+	// Bare null/undefined in an arithmetic/relational operator. Both literals are
+	// `ptr`-typed, so the coerce/string paths below would either stringify them or
+	// emit `add ptr null, null` (invalid IR). JS applies ToNumber (null→0,
+	// undefined→NaN); TypeScript rejects the operator on these types (ADR-00901).
+	// Placed before the string-concat and coerce steps; equality (`== === != !==`)
+	// is excluded here and handled by the null-check/array-null paths, and a
+	// string operand (`"x" + null`) keeps its concatenation branch.
+	// `isStringTy` matches ANY bare `ptr`, so it wrongly classifies a null/
+	// undefined literal as a string. For a *real* string operand the distinction
+	// matters: `"x" + null` concatenates ("xnull"), while `null + undefined` is
+	// arithmetic. A real string is a string-typed operand that is not itself
+	// null/undefined.
+	// A void-typed operand (a call to a spec-undefined-returning method used in a
+	// value position) is `undefined` (ADR-00900), so it counts as nullish here —
+	// `set.clear() === undefined` is true, not a comparison of a concrete value.
+	// A *nullableScalar* (`T | null`) is excluded: it is a runtime aggregate with a
+	// presence bit, not a compile-time null/undefined literal, and is handled by
+	// emitNullableScalarNullCompare / the presence-aware paths — folding it here
+	// would treat a possibly-present value as constant-null (regression found in
+	// `writer.desiredSize === null`).
+	lNullish := (left.Ty.IsNull || left.Ty.IsUndefined || left.Ty.IR == "void") && !isNullableScalar(left.Ty)
+	rNullish := (right.Ty.IsNull || right.Ty.IsUndefined || right.Ty.IR == "void") && !isNullableScalar(right.Ty)
+	lRealStr := isStringTy(left.Ty) && !lNullish
+	rRealStr := isStringTy(right.Ty) && !rNullish
+	if (lNullish || rNullish) && !lRealStr && !rRealStr &&
+		!isNullableScalar(left.Ty) && !isNullableScalar(right.Ty) &&
+		!left.Ty.IsObject && !right.Ty.IsObject && !left.Ty.IsArray && !right.Ty.IsArray {
+		// Arithmetic/relational on bare null/undefined: JS applies ToNumber
+		// (null→0, undefined→NaN); TypeScript rejects the operator on these types
+		// (ADR-00901). Both are `ptr`, so the string/coerce paths below would emit
+		// `add ptr null, null` (invalid IR). Equality and logical ops fall through
+		// to the null-check paths; a real-string operand keeps its concat branch.
+		switch ex.Op {
+		case "+", "-", "*", "/", "%", "**", "<", ">", "<=", ">=":
+			if e.compatJS() {
+				return e.emitAnyBinary(ex.Op, left, right, ex.GetPos())
+			}
+			return Value{}, fmt.Errorf("%d:%d: operator '%s' on null/undefined is not supported in strict mode — TypeScript reports the same error; compile with -compat=js to apply JS ToNumber coercion (null→0, undefined→NaN)", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+		case "==", "!=", "===", "!==":
+			// null/undefined is equal (loosely or strictly) only to null/undefined.
+			// With one nullish side and a concrete non-nullish scalar (`undefined ==
+			// 0`, `null === true`) the result is a constant: false for ==/===, true
+			// for !=/!==. Both-nullish: loose == treats null and undefined as equal;
+			// strict === requires the SAME nullish kind. Folding this here avoids the
+			// generic path's `icmp eq ptr null, <number>` (invalid IR — ADR-00909).
+			//
+			// Restricted to LITERAL operands: a runtime value that merely typed as
+			// nullish (e.g. a `T|null` nullableScalar already collapsed to its bare
+			// payload by the time it reaches here) must NOT be folded to a compile-
+			// time constant — that wrongly made `writer.desiredSize === null` false.
+			// A genuine `null`/`undefined`/number/string/bool literal is safe.
+			if isConstLiteralExpr(ex.Left) && isConstLiteralExpr(ex.Right) {
+				equal := false
+				if lNullish && rNullish {
+					if ex.Op == "==" || ex.Op == "!=" {
+						equal = true // null == undefined (loose) is true
+					} else {
+						equal = left.Ty.IsNull == right.Ty.IsNull // strict: same kind
+					}
+				}
+				if ex.Op == "!=" || ex.Op == "!==" {
+					equal = !equal
+				}
+				res := "0"
+				if equal {
+					res = "1"
+				}
+				return Value{Ref: res, Ty: TypeBool}, nil
+			}
+		}
+	}
+
 	// An array compared against null/undefined (e.g. RegExp.exec()'s
 	// `T[] | null` — emitRegexExec's null-array sentinel, {ptr: null,
 	// len: 0}) needs its own path: an array value is a {ptr,i64}
@@ -293,14 +377,18 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// e.g. `"x" + 5` would try to pass the raw i64 5 to strlen() as if it
 	// were already a string pointer. Both-string and neither-string cases
 	// fall through unchanged to the existing logic below.
-	if ex.Op == "+" && isStringTy(left.Ty) != isStringTy(right.Ty) {
-		if !isStringTy(left.Ty) {
+	// Use the real-string test (not isStringTy, which matches bare null/undefined
+	// too): `"x" + null` must concatenate ("xnull"), stringifying the nullish side
+	// via emitConcatOperandString, rather than reading as string==string and
+	// falling through to the arithmetic `add ptr` (ADR-00901).
+	if ex.Op == "+" && lRealStr != rRealStr {
+		if !lRealStr {
 			left, err = e.emitConcatOperandString(ex.Left, left)
 			if err != nil {
 				return Value{}, err
 			}
 		}
-		if !isStringTy(right.Ty) {
+		if !rRealStr {
 			right, err = e.emitConcatOperandString(ex.Right, right)
 			if err != nil {
 				return Value{}, err
@@ -360,7 +448,14 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// String-specific operations: ptr that is not an object, array, closure, or null check.
 	// Null/undefined comparisons fall through to icmp eq/ne below.
 	isNullCheck := left.Ty.IsNull || right.Ty.IsNull
-	if ty.IR == "ptr" && !ty.IsObject && !ty.IsArray && !ty.IsFunc && !isNullCheck {
+	// The right operand must also be a pointer: a mixed pair such as
+	// `"-1" == -1` (string vs number) leaves `right` a bare `double` after the
+	// no-op coerce above (there is no number→string conversion), and passing it
+	// to emitStringBinary emitted an `icmp eq ptr %d, null` on that double —
+	// invalid IR. Requiring `right.Ty.IR == "ptr"` diverts such a mixed pair to
+	// the cross-type handling below (a clean strict reject — TS reports the same
+	// no-overlap error — or the -compat=js Abstract-Equality box path).
+	if ty.IR == "ptr" && right.Ty.IR == "ptr" && !ty.IsObject && !ty.IsArray && !ty.IsFunc && !isNullCheck {
 		return e.emitStringBinary(ex.Op, left, right, ex.GetPos())
 	}
 
@@ -1050,7 +1145,23 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 		return Value{Ref: reg, Ty: TypeBool}, nil
 	case "~":
 		// JS `~x` is `ToInt32(x) ^ -1`, yielding a Number (double) — see the
-		// binary bitwise ops (TDD-00123 Stage 2).
+		// binary bitwise ops (TDD-00123 Stage 2). A non-numeric operand (a
+		// string/object/array — IR "ptr" or an aggregate) has no direct integer
+		// value: toInt32 would `trunc` the pointer as an i64 (invalid IR). Real
+		// JS runs ToNumber(operand) first (`~{}` is -1: ToNumber({})→NaN→
+		// ToInt32→0→~0). strict rejects it cleanly (consistent with unary '-'
+		// and the binary object-operator rejection); -compat=js boxes and runs
+		// the real ToNumber. BigInt/dynamic operands were handled above.
+		if !arg.Ty.Float && !arg.Ty.IsInteger() && arg.Ty.IR != "i1" {
+			if !e.compatJS() {
+				return Value{}, fmt.Errorf("%d:%d: unary '~' requires a number or bigint operand", ex.GetPos().Line, ex.GetPos().Col)
+			}
+			boxed, err := e.emitBoxValue(arg)
+			if err != nil {
+				return Value{}, err
+			}
+			arg = Value{Ref: e.emitAnyToNum(boxed), Ty: TypeF64}
+		}
 		x32 := e.toInt32(arg)
 		e.emitInstr(fmt.Sprintf("%s = xor i32 %s, -1", reg, x32))
 		return e.int32ToNumber(reg), nil
