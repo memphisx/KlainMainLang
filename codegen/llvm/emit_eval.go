@@ -50,6 +50,34 @@ func (e *Emitter) emitStaticEval(args []ast.Expression, pos ast.Pos) (Value, err
 	return e.emitExpr(exprStmt.Expr)
 }
 
+// inferStaticEvalType is emitStaticEval's compile-time-type mirror: a static
+// `eval("<expr>")` produces exactly the value of the single expression the
+// string parses to, so its type is that expression's inferred type. Keeping
+// this in lockstep with emitStaticEval stops the enclosing closure's inferred
+// return type (default i64) from disagreeing with the ptr/object/regexp the
+// body actually returns — `() => eval("/re/")` emitted `ret ptr` inside a
+// `define i64` otherwise (invalid IR). Pure: parsing and inferExprType do no
+// codegen. Returns false when the argument is not a single-expression constant
+// string (emitStaticEval will then raise its own clean compile error).
+func (e *Emitter) inferStaticEvalType(args []ast.Expression) (Type, bool) {
+	if len(args) != 1 {
+		return Type{}, false
+	}
+	src, ok := staticStringValue(args[0])
+	if !ok {
+		return Type{}, false
+	}
+	prog, err := parser.Parse(src)
+	if err != nil || len(prog.Body) != 1 {
+		return Type{}, false
+	}
+	exprStmt, ok := prog.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		return Type{}, false
+	}
+	return e.inferExprType(exprStmt.Expr), true
+}
+
 // staticStringValue returns the compile-time-constant string an expression
 // denotes, if any: a plain string literal, or a template literal with no
 // interpolations (`\`abc\“). Its Value is already this compiler's decoded

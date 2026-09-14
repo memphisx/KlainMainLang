@@ -1500,6 +1500,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if info, found := e.lookupGenerator(id.Name); found {
 				return info.GenTy
 			}
+			// Static `eval("<expr>")` — its type is the parsed expression's type
+			// (matches emitStaticEval). Checked after user bindings so a
+			// user-defined `eval` still wins, mirroring emitCall's dispatch.
+			if id.Name == "eval" {
+				if _, isUser := e.lookup(id.Name); !isUser {
+					if t, ok := e.inferStaticEvalType(ex.Args); ok {
+						return t
+					}
+				}
+			}
 		}
 		// req.stream() (TDD-00097 Stage 5b) — must match emitRequestStream.
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Property == "stream" {
@@ -3039,6 +3049,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		t.Nullable = false
 		t.IsUndefined = false
 		return t
+	case *ast.AsExpression:
+		// `expr as T` (ADR-00929): a narrowing from a dynamic operand adopts the
+		// asserted concrete type (`x as number` where `x: any` → number, so the
+		// binding/operand it flows into is typed concretely); every other
+		// assertion stays erased — the operand keeps its own type (ADR-00371).
+		inner := e.inferExprType(ex.Expr)
+		if isUnconstrainedDynamic(inner) && ex.TypeAnnot != nil {
+			return e.resolveType(ex.TypeAnnot)
+		}
+		return inner
 	case *ast.UnaryExpression:
 		switch ex.Op {
 		case "typeof":
@@ -3320,9 +3340,14 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		// types and captures. Params use the same resolver; unlike arrows,
 		// function expressions never have expression bodies (Body is always
 		// a BlockStatement, never an Expression).
+		// Mirror emitFunctionExpression's implicit `arguments` rest (TDD-00210)
+		// so the inferred type's arity matches the emitted function's.
+		ex.Params = maybeAddArgumentsRestParams(ex.Params, ex.Body.Body)
 		params := make([]Type, len(ex.Params))
 		for i, p := range ex.Params {
-			if p.Rest && p.Type == nil {
+			if p.Rest && p.Name == argumentsRestParam {
+				params[i] = ArrayOf(TypeAny) // implicit `arguments` rest (TDD-00210)
+			} else if p.Rest && p.Type == nil {
 				params[i] = ArrayOf(TypeI64)
 			} else if p.Type == nil {
 				params[i] = TypeI64

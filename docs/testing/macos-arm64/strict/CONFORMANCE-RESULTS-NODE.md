@@ -80,7 +80,7 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | Count | Reason |
 |---|---|
 | 291 | COMPILE_ERROR: a number has no method '%s' |
-| 132 | COMPILE_ERROR: undefined variable '%s' |
+| 131 | COMPILE_ERROR: undefined variable '%s' |
 | 114 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 93 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 84 | MODULE_NOT_IMPLEMENTED: vm |
@@ -103,8 +103,8 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 21 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s'|'%s'|'%s'|'%s', listener) (got '%s') |
 | 21 | COMPILE_ERROR: field assignment on non-object |
 | 21 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
-| 21 | RUNTIME_NONZERO_EXIT:  |
 | 20 | MODULE_NOT_IMPLEMENTED: v8 |
+| 20 | RUNTIME_NONZERO_EXIT:  |
 | 19 | COMPILE_ERROR: unexpected token + in expression |
 | 18 | COMPILE_ERROR: a ChildProcess stream supports only .on('%s'|'%s', cb) |
 | 18 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |

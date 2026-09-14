@@ -98,10 +98,20 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 // already a string is returned unchanged. Only objects are converted here (the
 // TDD-00201 scope); a non-string, non-object argument keeps its current handling.
 func (e *Emitter) coerceStringArg(v Value) (Value, error) {
-	if objectMayToPrimitive(v.Ty) {
-		return e.emitValueToString(v)
+	if isStringTy(v.Ty) {
+		return e.coerce(v, TypePtr), nil
 	}
-	return v, nil
+	// undefined/null flow through unchanged: some callers (split's absent
+	// separator) treat these specially rather than as the literal
+	// "undefined"/"null" string, and their `ptr` slot already accepts null.
+	if v.Ty.IsUndefined || v.Ty.IsNull || v.Ty.IR == "void" {
+		return v, nil
+	}
+	// Everything else — an object (via the ToPrimitive ladder), a dynamic `any`
+	// (NaN-boxed i64), or a bare number/bool — ToStrings, so a non-`ptr` word
+	// never reaches a `ptr`-typed `str_*` helper (invalid IR): `s.replace(1, 2)`,
+	// `s.split(0)`, `s.lastIndexOf(anyVal)` (TDD-00201).
+	return e.emitValueToString(v)
 }
 
 // disjointEqConstResult names the constant result of comparing an object with a

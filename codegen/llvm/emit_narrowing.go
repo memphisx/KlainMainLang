@@ -295,8 +295,14 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 	if target.IsDynamic {
 		return Value{Ref: boxRef, Ty: target}
 	}
-	_, payload := e.emitUnboxTagPayload(Value{Ref: boxRef})
+	tagReg, payload := e.emitUnboxTagPayload(Value{Ref: boxRef})
 	switch {
+	case target.IsCaught:
+		// A TypeCaught param is the { i8, i64 } tag+payload aggregate (TDD-00202),
+		// the same (tag, payload) a NaN-box already carries — rebuild the struct
+		// rather than pass the bare i64 payload where a { i8, i64 } is expected
+		// (e.g. a boxed `reject` closure whose reason parameter is TypeCaught).
+		return e.emitCaughtAggregate(tagReg, payload)
 	case target.IsArray:
 		// The array payload is a { ptr, i64 } heap header (ADR-00478) —
 		// load the real aggregate back out. A zero payload (a box holding

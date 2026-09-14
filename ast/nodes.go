@@ -776,6 +776,28 @@ func NewNonNullExpression(arg Expression, pos Pos) *NonNullExpression {
 	return &NonNullExpression{Arg: arg, pos: pos}
 }
 
+// AsExpression — a TypeScript `expr as T` type assertion kept as a node (for
+// the shapes the parser does not fold into CallExpression.AssertedType). It is
+// erased for a concrete→concrete assertion (the operand keeps its own inferred
+// type, per ADR-00371 — a reinterpret across differing representations is not
+// modeled), but honored as a real narrowing when the operand's type is
+// dynamic (`any`/`unknown`): `x as number` on a boxed value unboxes it to the
+// asserted concrete type, which is the sound, runtime-meaningful direction of
+// the assertion (ADR-00929). `TypeAnnot` is the asserted type.
+type AsExpression struct {
+	Expr      Expression
+	TypeAnnot *TypeAnnotation
+	pos       Pos
+}
+
+func (*AsExpression) nodeMarker()   {}
+func (*AsExpression) exprMarker()   {}
+func (a *AsExpression) GetPos() Pos { return a.pos }
+
+func NewAsExpression(expr Expression, typeAnnot *TypeAnnotation, pos Pos) *AsExpression {
+	return &AsExpression{Expr: expr, TypeAnnot: typeAnnot, pos: pos}
+}
+
 // SpreadElement — ...expr inside an array literal.
 type SpreadElement struct {
 	Arg Expression

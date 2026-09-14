@@ -1292,3 +1292,395 @@ have:
   ret ptr %final
 }`)
 }
+
+// ensureMapSvz emits @__kml_map_svz — JS SameValueZero over two NaN-boxed
+// words, the equality backing an `any`-keyed Map. It differs from
+// @__kml_any_eq (strict equality) in exactly one case: NaN is SameValueZero-
+// equal to NaN. Since every encoded number is canonicalized before boxing, two
+// NaN keys are bit-identical, so a leading bit-equality check covers NaN (and
+// short-circuits identical immediates/pointers); everything else — string
+// content, -0/+0 via fcmp oeq, array/object identity — falls through to
+// @__kml_any_eq unchanged.
+func (e *Emitter) ensureMapSvz() {
+	if e.usedMapSvz {
+		return
+	}
+	e.usedMapSvz = true
+	e.ensureAnyEq()
+	e.emitGlobal(`
+define i1 @__kml_map_svz(i64 %a, i64 %b) {
+entry:
+  %biteq = icmp eq i64 %a, %b
+  br i1 %biteq, label %yes, label %chk
+yes:
+  ret i1 true
+chk:
+  %r = call i1 @__kml_any_eq(i64 %a, i64 %b)
+  ret i1 %r
+}`)
+}
+
+// ensureMapAnyHash emits @__kml_map_any_hash — a hash consistent with
+// @__kml_map_svz: string-kind boxes hash by content (so equal-content distinct
+// pointers collide), array-kind boxes hash by their inner data pointer (two
+// boxings of one array carry distinct headers but a stable inner pointer — the
+// identity @__kml_any_eq compares), the numeric-zero box is normalized (-0 ->
+// +0 bits) so map.set(-0,…)/map.get(0) agree, and every other box hashes by its
+// raw i64 bits. The final multiply-shift mix matches __kml_map_num_probe's.
+func (e *Emitter) ensureMapAnyHash() {
+	if e.usedMapAnyHash {
+		return
+	}
+	e.usedMapAnyHash = true
+	e.ensureMapStrHelpers() // __kml_map_str_hash
+	e.emitGlobal(`
+define i64 @__kml_map_any_hash(i64 %key) {
+entry:
+  ; number? (every encoded number is >= 2^49)
+  %isnum = icmp uge i64 %key, 562949953421312
+  br i1 %isnum, label %num, label %ptrchk
+num:
+  ; normalize -0 to +0: if the double value is 0.0, use the +0 box (2^49).
+  %bits = sub i64 %key, 562949953421312
+  %d = bitcast i64 %bits to double
+  %isz = fcmp oeq double %d, 0.000000e+00
+  %norm = select i1 %isz, i64 562949953421312, i64 %key
+  br label %mix
+ptrchk:
+  ; pointer-kind boxes are >= 0x10000; immediates are below.
+  %isptr = icmp uge i64 %key, 65536
+  br i1 %isptr, label %ptr, label %raw
+ptr:
+  %kind = and i64 %key, 7
+  %isstr = icmp eq i64 %kind, 0
+  br i1 %isstr, label %str, label %arrchk
+str:
+  %sp = inttoptr i64 %key to ptr
+  %sh = call i64 @__kml_map_str_hash(ptr %sp)
+  br label %mix
+arrchk:
+  %isarr = icmp eq i64 %kind, 2
+  br i1 %isarr, label %arr, label %raw
+arr:
+  %hb = and i64 %key, -8
+  %hp = inttoptr i64 %hb to ptr
+  %data = load ptr, ptr %hp, align 8
+  %dbits = ptrtoint ptr %data to i64
+  br label %mix
+raw:
+  br label %mix
+mix:
+  %k = phi i64 [ %norm, %num ], [ %sh, %str ], [ %dbits, %arr ], [ %key, %raw ]
+  %h0 = mul i64 %k, -7046029254386353131
+  %h1 = lshr i64 %h0, 33
+  %h2 = xor i64 %h0, %h1
+  ret i64 %h2
+}`)
+}
+
+// ensureMapAnyHelpers emits the __kml_map_any_* runtime: an open-addressing map
+// (the same 56-byte header and probe/rehash/tombstone machinery as
+// __kml_map_num_*) whose keys and values are NaN-boxed i64 words, hashed by
+// @__kml_map_any_hash and compared by @__kml_map_svz (SameValueZero). get
+// returns the undefined box on a miss (TDD-00211).
+func (e *Emitter) ensureMapAnyHelpers() {
+	if e.usedMapAnyHelpers {
+		return
+	}
+	e.usedMapAnyHelpers = true
+	e.ensureMalloc()
+	e.ensureRealloc()
+	e.ensureMemcpy()
+	e.ensureMemset()
+	e.ensureFree()
+	e.ensureMapSvz()
+	e.ensureMapAnyHash()
+	e.emitGlobal(`
+define ptr @__kml_map_any_create() {
+entry:
+  %h = call ptr @malloc(i64 56)
+  store i64 0, ptr %h, align 8
+  %cap_p = getelementptr i8, ptr %h, i64 8
+  store i64 8, ptr %cap_p, align 8
+  %keys = call ptr @malloc(i64 64)
+  %keys_p = getelementptr i8, ptr %h, i64 16
+  store ptr %keys, ptr %keys_p, align 8
+  %vals = call ptr @malloc(i64 64)
+  %vals_p = getelementptr i8, ptr %h, i64 24
+  store ptr %vals, ptr %vals_p, align 8
+  %idx = call ptr @malloc(i64 128)
+  call ptr @memset(ptr %idx, i32 255, i64 128)
+  %idx_p = getelementptr i8, ptr %h, i64 32
+  store ptr %idx, ptr %idx_p, align 8
+  %icap_p = getelementptr i8, ptr %h, i64 40
+  store i64 16, ptr %icap_p, align 8
+  %used_p = getelementptr i8, ptr %h, i64 48
+  store i64 0, ptr %used_p, align 8
+  ret ptr %h
+}
+
+define {i64, i64} @__kml_map_any_probe(ptr %map, i64 %key) {
+entry:
+  %idx_p = getelementptr i8, ptr %map, i64 32
+  %idx = load ptr, ptr %idx_p, align 8
+  %icap_p = getelementptr i8, ptr %map, i64 40
+  %icap = load i64, ptr %icap_p, align 8
+  %mask = sub i64 %icap, 1
+  %keys_p = getelementptr i8, ptr %map, i64 16
+  %keys = load ptr, ptr %keys_p, align 8
+  %h2 = call i64 @__kml_map_any_hash(i64 %key)
+  %start = and i64 %h2, %mask
+  br label %loop
+loop:
+  %slot = phi i64 [ %start, %entry ], [ %nslot, %next ]
+  %ins = phi i64 [ -1, %entry ], [ %ins_n, %next ]
+  %sl_p = getelementptr i64, ptr %idx, i64 %slot
+  %e = load i64, ptr %sl_p, align 8
+  %isempty = icmp eq i64 %e, -1
+  br i1 %isempty, label %empty, label %chk_tomb
+chk_tomb:
+  %istomb = icmp eq i64 %e, -2
+  br i1 %istomb, label %tomb, label %occ
+occ:
+  %k_p = getelementptr i64, ptr %keys, i64 %e
+  %k = load i64, ptr %k_p, align 8
+  %keq = call i1 @__kml_map_svz(i64 %k, i64 %key)
+  br i1 %keq, label %found, label %occ_next
+found:
+  %r0 = insertvalue {i64, i64} undef, i64 %slot, 0
+  %r1 = insertvalue {i64, i64} %r0, i64 %e, 1
+  ret {i64, i64} %r1
+tomb:
+  %noins = icmp eq i64 %ins, -1
+  %ins_t = select i1 %noins, i64 %slot, i64 %ins
+  br label %next
+occ_next:
+  br label %next
+next:
+  %ins_n = phi i64 [ %ins_t, %tomb ], [ %ins, %occ_next ]
+  %slot1 = add i64 %slot, 1
+  %nslot = and i64 %slot1, %mask
+  br label %loop
+empty:
+  %noins2 = icmp eq i64 %ins, -1
+  %fslot = select i1 %noins2, i64 %slot, i64 %ins
+  %m0 = insertvalue {i64, i64} undef, i64 %fslot, 0
+  %m1 = insertvalue {i64, i64} %m0, i64 -1, 1
+  ret {i64, i64} %m1
+}
+
+define i64 @__kml_map_any_find(ptr %map, i64 %key) {
+entry:
+  %pr = call {i64, i64} @__kml_map_any_probe(ptr %map, i64 %key)
+  %e = extractvalue {i64, i64} %pr, 1
+  ret i64 %e
+}
+
+define void @__kml_map_any_rehash(ptr %map) {
+entry:
+  %icap_p = getelementptr i8, ptr %map, i64 40
+  %icap = load i64, ptr %icap_p, align 8
+  %ncap = mul i64 %icap, 2
+  %nb = mul i64 %ncap, 8
+  %nidx = call ptr @malloc(i64 %nb)
+  call ptr @memset(ptr %nidx, i32 255, i64 %nb)
+  %idx_p = getelementptr i8, ptr %map, i64 32
+  %oidx = load ptr, ptr %idx_p, align 8
+  call void @free(ptr %oidx)
+  store ptr %nidx, ptr %idx_p, align 8
+  store i64 %ncap, ptr %icap_p, align 8
+  %mask = sub i64 %ncap, 1
+  %size = load i64, ptr %map, align 8
+  %used_p = getelementptr i8, ptr %map, i64 48
+  store i64 %size, ptr %used_p, align 8
+  %keys_p = getelementptr i8, ptr %map, i64 16
+  %keys = load ptr, ptr %keys_p, align 8
+  br label %outer
+outer:
+  %i = phi i64 [ 0, %entry ], [ %i2, %placed ]
+  %fin = icmp sge i64 %i, %size
+  br i1 %fin, label %done, label %hashk
+hashk:
+  %k_p = getelementptr i64, ptr %keys, i64 %i
+  %k = load i64, ptr %k_p, align 8
+  %h2 = call i64 @__kml_map_any_hash(i64 %k)
+  %st = and i64 %h2, %mask
+  br label %ploop
+ploop:
+  %s = phi i64 [ %st, %hashk ], [ %s2, %pnext ]
+  %sp = getelementptr i64, ptr %nidx, i64 %s
+  %ev = load i64, ptr %sp, align 8
+  %isfree = icmp eq i64 %ev, -1
+  br i1 %isfree, label %place, label %pnext
+pnext:
+  %sa = add i64 %s, 1
+  %s2 = and i64 %sa, %mask
+  br label %ploop
+place:
+  store i64 %i, ptr %sp, align 8
+  br label %placed
+placed:
+  %i2 = add i64 %i, 1
+  br label %outer
+done:
+  ret void
+}
+
+define void @__kml_map_any_set(ptr %map, i64 %key, i64 %val) {
+entry:
+  %pr = call {i64, i64} @__kml_map_any_probe(ptr %map, i64 %key)
+  %slot = extractvalue {i64, i64} %pr, 0
+  %idx = extractvalue {i64, i64} %pr, 1
+  %found = icmp sge i64 %idx, 0
+  br i1 %found, label %do_update, label %grow_chk
+do_update:
+  %vp0 = getelementptr i8, ptr %map, i64 24
+  %va0 = load ptr, ptr %vp0, align 8
+  %vs0 = getelementptr i64, ptr %va0, i64 %idx
+  store i64 %val, ptr %vs0, align 8
+  ret void
+grow_chk:
+  %size = load i64, ptr %map, align 8
+  %cap_p = getelementptr i8, ptr %map, i64 8
+  %cap = load i64, ptr %cap_p, align 8
+  %need = icmp sge i64 %size, %cap
+  br i1 %need, label %do_grow, label %do_ins
+do_grow:
+  %ncap = mul i64 %cap, 2
+  %nb = mul i64 %ncap, 8
+  %kp1 = getelementptr i8, ptr %map, i64 16
+  %ok = load ptr, ptr %kp1, align 8
+  %nk = call ptr @realloc(ptr %ok, i64 %nb)
+  store ptr %nk, ptr %kp1, align 8
+  %vp1 = getelementptr i8, ptr %map, i64 24
+  %ov = load ptr, ptr %vp1, align 8
+  %nv = call ptr @realloc(ptr %ov, i64 %nb)
+  store ptr %nv, ptr %vp1, align 8
+  store i64 %ncap, ptr %cap_p, align 8
+  br label %do_ins
+do_ins:
+  %sz2 = load i64, ptr %map, align 8
+  %kp2 = getelementptr i8, ptr %map, i64 16
+  %ka2 = load ptr, ptr %kp2, align 8
+  %ks = getelementptr i64, ptr %ka2, i64 %sz2
+  store i64 %key, ptr %ks, align 8
+  %vp2 = getelementptr i8, ptr %map, i64 24
+  %va2 = load ptr, ptr %vp2, align 8
+  %vs = getelementptr i64, ptr %va2, i64 %sz2
+  store i64 %val, ptr %vs, align 8
+  %sz3 = add i64 %sz2, 1
+  store i64 %sz3, ptr %map, align 8
+  %idxa_p = getelementptr i8, ptr %map, i64 32
+  %idxa = load ptr, ptr %idxa_p, align 8
+  %sl_p = getelementptr i64, ptr %idxa, i64 %slot
+  %olde = load i64, ptr %sl_p, align 8
+  store i64 %sz2, ptr %sl_p, align 8
+  %wasempty = icmp eq i64 %olde, -1
+  %we = zext i1 %wasempty to i64
+  %used_p = getelementptr i8, ptr %map, i64 48
+  %used = load i64, ptr %used_p, align 8
+  %used2 = add i64 %used, %we
+  store i64 %used2, ptr %used_p, align 8
+  %icap_p = getelementptr i8, ptr %map, i64 40
+  %icap = load i64, ptr %icap_p, align 8
+  %up1 = add i64 %used2, 1
+  %lhs = mul i64 %up1, 4
+  %rhs = mul i64 %icap, 3
+  %needreh = icmp sgt i64 %lhs, %rhs
+  br i1 %needreh, label %do_rehash, label %ins_done
+do_rehash:
+  call void @__kml_map_any_rehash(ptr %map)
+  br label %ins_done
+ins_done:
+  ret void
+}
+
+define i64 @__kml_map_any_get(ptr %map, i64 %key) {
+entry:
+  %idx = call i64 @__kml_map_any_find(ptr %map, i64 %key)
+  %found = icmp sge i64 %idx, 0
+  br i1 %found, label %hit, label %miss
+hit:
+  %vp = getelementptr i8, ptr %map, i64 24
+  %va = load ptr, ptr %vp, align 8
+  %vs = getelementptr i64, ptr %va, i64 %idx
+  %v = load i64, ptr %vs, align 8
+  ret i64 %v
+miss:
+  ret i64 10
+}
+
+define i1 @__kml_map_any_has(ptr %map, i64 %key) {
+entry:
+  %idx = call i64 @__kml_map_any_find(ptr %map, i64 %key)
+  %found = icmp sge i64 %idx, 0
+  ret i1 %found
+}
+
+define i1 @__kml_map_any_delete(ptr %map, i64 %key) {
+entry:
+  %pr = call {i64, i64} @__kml_map_any_probe(ptr %map, i64 %key)
+  %slot = extractvalue {i64, i64} %pr, 0
+  %idx = extractvalue {i64, i64} %pr, 1
+  %found = icmp sge i64 %idx, 0
+  br i1 %found, label %do_del, label %miss
+miss:
+  ret i1 false
+do_del:
+  %idxa_p = getelementptr i8, ptr %map, i64 32
+  %idxa = load ptr, ptr %idxa_p, align 8
+  %sl_p = getelementptr i64, ptr %idxa, i64 %slot
+  store i64 -2, ptr %sl_p, align 8
+  %size = load i64, ptr %map, align 8
+  %last = sub i64 %size, 1
+  %is_last = icmp eq i64 %idx, %last
+  br i1 %is_last, label %shrink, label %swap
+swap:
+  %kp = getelementptr i8, ptr %map, i64 16
+  %ka = load ptr, ptr %kp, align 8
+  %dst_k = getelementptr i64, ptr %ka, i64 %idx
+  %src_k = getelementptr i64, ptr %ka, i64 %last
+  %lk = load i64, ptr %src_k, align 8
+  store i64 %lk, ptr %dst_k, align 8
+  %vp = getelementptr i8, ptr %map, i64 24
+  %va = load ptr, ptr %vp, align 8
+  %dst_v = getelementptr i64, ptr %va, i64 %idx
+  %src_v = getelementptr i64, ptr %va, i64 %last
+  %lv = load i64, ptr %src_v, align 8
+  store i64 %lv, ptr %dst_v, align 8
+  %pr2 = call {i64, i64} @__kml_map_any_probe(ptr %map, i64 %lk)
+  %slot2 = extractvalue {i64, i64} %pr2, 0
+  %sl2_p = getelementptr i64, ptr %idxa, i64 %slot2
+  store i64 %idx, ptr %sl2_p, align 8
+  br label %shrink
+shrink:
+  store i64 %last, ptr %map, align 8
+  ret i1 true
+}
+
+define {ptr, i64} @__kml_map_any_keys(ptr %map) {
+entry:
+  %size = load i64, ptr %map, align 8
+  %kp = getelementptr i8, ptr %map, i64 16
+  %k = load ptr, ptr %kp, align 8
+  %bytes = mul i64 %size, 8
+  %arr = call ptr @malloc(i64 %bytes)
+  call ptr @memcpy(ptr %arr, ptr %k, i64 %bytes)
+  %r0 = insertvalue {ptr, i64} undef, ptr %arr, 0
+  %r1 = insertvalue {ptr, i64} %r0, i64 %size, 1
+  ret {ptr, i64} %r1
+}
+
+define {ptr, i64} @__kml_map_any_vals(ptr %map) {
+entry:
+  %size = load i64, ptr %map, align 8
+  %vp = getelementptr i8, ptr %map, i64 24
+  %v = load ptr, ptr %vp, align 8
+  %bytes = mul i64 %size, 8
+  %arr = call ptr @malloc(i64 %bytes)
+  call ptr @memcpy(ptr %arr, ptr %v, i64 %bytes)
+  %r0 = insertvalue {ptr, i64} undef, ptr %arr, 0
+  %r1 = insertvalue {ptr, i64} %r0, i64 %size, 1
+  ret {ptr, i64} %r1
+}`)
+}

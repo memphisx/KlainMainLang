@@ -590,18 +590,31 @@ entry:
   %arr = call ptr @malloc(i64 %bytes)
   br label %loop
 loop:
-  %i = phi i64 [ 0, %entry ], [ %inext, %body ]
+  %i = phi i64 [ 0, %entry ], [ %inext, %cont ]
+  %n = phi i64 [ 0, %entry ], [ %nnext, %cont ]
   %done = icmp sge i64 %i, %count
   br i1 %done, label %out, label %body
 body:
   %key = call ptr @__kml_dynobj_key_at(ptr %o, i64 %i)
-  %slot = getelementptr ptr, ptr %arr, i64 %i
+  ; Skip symbol-keyed properties (0x01 sentinel first byte) — getOwnPropertyNames
+  ; returns string keys only (symbols are getOwnPropertySymbols' domain).
+  %b0 = load i8, ptr %key, align 1
+  %issym = icmp eq i8 %b0, 1
+  br i1 %issym, label %skip, label %take
+take:
+  %slot = getelementptr ptr, ptr %arr, i64 %n
   store ptr %key, ptr %slot, align 8
+  br label %cont
+skip:
+  br label %cont
+cont:
+  %ninc = phi i64 [ 1, %take ], [ 0, %skip ]
+  %nnext = add i64 %n, %ninc
   %inext = add i64 %i, 1
   br label %loop
 out:
   %r0 = insertvalue { ptr, i64 } undef, ptr %arr, 0
-  %r1 = insertvalue { ptr, i64 } %r0, i64 %count, 1
+  %r1 = insertvalue { ptr, i64 } %r0, i64 %n, 1
   ret { ptr, i64 } %r1
 }
 
@@ -651,7 +664,14 @@ body:
   %attrs = call i64 @__kml_dynobj_attrs_at(ptr %o, i64 %i)
   %eb = and i64 %attrs, 2
   %isenum = icmp ne i64 %eb, 0
-  br i1 %isenum, label %take, label %skip
+  ; A symbol-keyed property (synthetic key with the 0x01 sentinel first byte) is
+  ; never returned by the string enumeration (Object.keys / for...in / JSON).
+  %kchk = call ptr @__kml_dynobj_key_at(ptr %o, i64 %i)
+  %b0 = load i8, ptr %kchk, align 1
+  %issym = icmp eq i8 %b0, 1
+  %notsym = xor i1 %issym, true
+  %keep = and i1 %isenum, %notsym
+  br i1 %keep, label %take, label %skip
 take:
   %key = call ptr @__kml_dynobj_key_at(ptr %o, i64 %i)
   %slot = getelementptr ptr, ptr %arr, i64 %n

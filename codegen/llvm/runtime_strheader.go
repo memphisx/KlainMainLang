@@ -255,6 +255,44 @@ body:
   br label %loop
 done:
   ret ptr %arr
+}
+; __kml_argv_node_shape builds the Node-shaped process.argv from the raw
+; headerized argv: [a[0], a[0], a[1], … a[argc-1], NULL]. Node (and a Node
+; single-executable app) places the executable path at BOTH argv[0] and argv[1]
+; — user arguments start at index 2 — so process.argv.slice(2) is the user
+; args. The raw @__argv_ptr keeps its OS shape for execv/fork; only the
+; process.* reads consult this one. argc is assumed >= 1 (argv[0] always exists).
+define ptr @__kml_argv_node_shape(i64 %argc, ptr %hdr) {
+entry:
+  ; result length argc+1, plus a trailing NULL slot → argc+2 pointers.
+  %len = add i64 %argc, 1
+  %slots = add i64 %argc, 2
+  %bytes = mul i64 %slots, 8
+  %arr = call ptr @malloc(i64 %bytes)
+  %endp = getelementptr ptr, ptr %arr, i64 %len
+  store ptr null, ptr %endp, align 8
+  ; a[0] → result[0] and result[1]
+  %a0 = load ptr, ptr %hdr, align 8
+  store ptr %a0, ptr %arr, align 8
+  %r1 = getelementptr ptr, ptr %arr, i64 1
+  store ptr %a0, ptr %r1, align 8
+  %ip = alloca i64, align 8
+  store i64 1, ptr %ip, align 8
+  br label %loop
+loop:
+  %i = load i64, ptr %ip, align 8
+  %cont = icmp slt i64 %i, %argc
+  br i1 %cont, label %body, label %done
+body:
+  %srcp = getelementptr ptr, ptr %hdr, i64 %i
+  %src = load ptr, ptr %srcp, align 8
+  %inext = add i64 %i, 1
+  %dstp = getelementptr ptr, ptr %arr, i64 %inext
+  store ptr %src, ptr %dstp, align 8
+  store i64 %inext, ptr %ip, align 8
+  br label %loop
+done:
+  ret ptr %arr
 }`)
 }
 

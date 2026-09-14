@@ -546,6 +546,167 @@ func topLevelSuperCallIndex(body *ast.BlockStatement) int {
 // statements are spliced into the constructor body by registerClasses (after
 // super(), or at the top for a base class) and then emitted by the ordinary
 // constructor path with no further special-casing.
+// classFieldNullEvolves reports whether a `null`/`undefined`-initialized
+// unannotated field is later reassigned to a concrete value anywhere in the
+// class — a plain `this.<field> = <non-nullish>` or a logical-compound-assign
+// (`??=`/`||=`/`&&=`) in the constructor, a method, or a static block. Such a
+// field is TypeScript's evolving-any and is widened to a boxed `any` slot
+// (TDD-00208). Mirrors the local-binding rule (ADR-00923).
+func (e *Emitter) classFieldNullEvolves(cd *ast.ClassDeclaration, fieldName string) bool {
+	found := false
+	var walkExpr func(ast.Expression)
+	assignTriggers := func(as *ast.AssignmentExpression) bool {
+		mem, ok := as.Left.(*ast.MemberExpression)
+		if !ok || mem.Property != fieldName {
+			return false
+		}
+		if _, ok := mem.Object.(*ast.ThisExpression); !ok {
+			return false
+		}
+		if as.Op == "??=" || as.Op == "||=" || as.Op == "&&=" {
+			return true
+		}
+		if as.Op == "=" {
+			rt := e.inferExprType(as.Right)
+			return !rt.IsNull && !rt.IsUndefined
+		}
+		return false
+	}
+	walkExpr = func(expr ast.Expression) {
+		if expr == nil || found {
+			return
+		}
+		switch ex := expr.(type) {
+		case *ast.AssignmentExpression:
+			if assignTriggers(ex) {
+				found = true
+				return
+			}
+			walkExpr(ex.Left)
+			walkExpr(ex.Right)
+		case *ast.BinaryExpression:
+			walkExpr(ex.Left)
+			walkExpr(ex.Right)
+		case *ast.ConditionalExpression:
+			walkExpr(ex.Test)
+			walkExpr(ex.Consequent)
+			walkExpr(ex.Alternate)
+		case *ast.SequenceExpression:
+			for _, s := range ex.Exprs {
+				walkExpr(s)
+			}
+		case *ast.UnaryExpression:
+			walkExpr(ex.Arg)
+		case *ast.SpreadElement:
+			walkExpr(ex.Arg)
+		case *ast.CallExpression:
+			walkExpr(ex.Callee)
+			for _, a := range ex.Args {
+				walkExpr(a)
+			}
+		case *ast.MemberExpression:
+			walkExpr(ex.Object)
+		case *ast.IndexExpression:
+			walkExpr(ex.Object)
+			walkExpr(ex.Index)
+		case *ast.ArrayLiteral:
+			for _, el := range ex.Elements {
+				walkExpr(el)
+			}
+		case *ast.ObjectLiteral:
+			for _, p := range ex.Properties {
+				walkExpr(p.KeyExpr)
+				walkExpr(p.Value)
+			}
+		case *ast.TemplateLiteral:
+			for _, s := range ex.Exprs {
+				walkExpr(s)
+			}
+		}
+	}
+	var walkStmts func([]ast.Statement)
+	walkStmt := func(s ast.Statement) { walkStmts([]ast.Statement{s}) }
+	walkStmts = func(stmts []ast.Statement) {
+		for _, stmt := range stmts {
+			if found {
+				return
+			}
+			switch s := stmt.(type) {
+			case *ast.ExpressionStatement:
+				walkExpr(s.Expr)
+			case *ast.VarDeclaration:
+				walkExpr(s.Init)
+			case *ast.VarDeclarationList:
+				for _, d := range s.Decls {
+					walkExpr(d.Init)
+				}
+			case *ast.ReturnStatement:
+				walkExpr(s.Value)
+			case *ast.ThrowStatement:
+				walkExpr(s.Argument)
+			case *ast.BlockStatement:
+				if s != nil {
+					walkStmts(s.Body)
+				}
+			case *ast.IfStatement:
+				walkExpr(s.Test)
+				walkStmt(s.Consequent)
+				walkStmt(s.Alternate)
+			case *ast.ForStatement:
+				walkStmt(s.Init)
+				walkExpr(s.Test)
+				for _, u := range s.Update {
+					walkExpr(u)
+				}
+				walkStmt(s.Body)
+			case *ast.ForOfStatement:
+				walkExpr(s.Iterable)
+				walkStmt(s.Body)
+			case *ast.ForInStatement:
+				walkStmt(s.Body)
+			case *ast.WhileStatement:
+				walkExpr(s.Test)
+				walkStmt(s.Body)
+			case *ast.DoWhileStatement:
+				walkStmt(s.Body)
+				walkExpr(s.Test)
+			case *ast.SwitchStatement:
+				walkExpr(s.Discriminant)
+				for _, c := range s.Cases {
+					walkExpr(c.Test)
+					walkStmts(c.Body)
+				}
+			case *ast.TryStatement:
+				if s.Body != nil {
+					walkStmts(s.Body.Body)
+				}
+				if s.Catch != nil && s.Catch.Body != nil {
+					walkStmts(s.Catch.Body.Body)
+				}
+				if s.Finally != nil {
+					walkStmts(s.Finally.Body)
+				}
+			case *ast.LabeledStatement:
+				walkStmt(s.Body)
+			}
+		}
+	}
+	if cd.Constructor != nil && cd.Constructor.Body != nil {
+		walkStmts(cd.Constructor.Body.Body)
+	}
+	for _, m := range cd.Methods {
+		if m.Body != nil {
+			walkStmts(m.Body.Body)
+		}
+	}
+	for _, sb := range cd.StaticBlocks {
+		if sb != nil {
+			walkStmts(sb.Body)
+		}
+	}
+	return found
+}
+
 func classFieldInitStmts(cd *ast.ClassDeclaration) []ast.Statement {
 	var stmts []ast.Statement
 	for _, f := range cd.Fields {
@@ -921,6 +1082,17 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				}
 			} else {
 				fty = e.inferExprType(f.Initializer)
+				// Evolving-any for a `null`/`undefined`-initialized unannotated
+				// field, the class-field counterpart of the local-binding
+				// widening (ADR-00923): if a method or the constructor later
+				// reassigns `this.<field>` to a non-nullish value (or logically
+				// compound-assigns it), the field is a boxed `any` slot
+				// (TDD-00208) rather than a `null`-typed `ptr` — so
+				// `this.#field ??= 1` stores 1 instead of a `double` into a
+				// null slot (invalid IR).
+				if (fty.IsNull || fty.IsUndefined) && !e.noAny && e.classFieldNullEvolves(cd, f.Name) {
+					fty = TypeAny
+				}
 			}
 			ownFields = append(ownFields, Field{Name: f.Name, Ty: fty})
 			fieldOrigin[f.Name] = cd.Name

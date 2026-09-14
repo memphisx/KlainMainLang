@@ -51,7 +51,7 @@
             "status": "implemented",
             "caveats": [
               "Fills only a parameter with no inline `: T` annotation and no destructuring pattern (an inline type wins)",
-              "A `{...T}` varargs type is stripped to its base `T`; binding it to a body that reads `arguments` still needs the unsupported `arguments` object — use a declared `...rest: T[]` parameter"
+              "A `{...T}` varargs type is stripped to its base `T` (the count isn't bound as a `...rest` parameter); a body reading `arguments` sees the values actually passed ([ADR-00928](../adr/ADR-00928.md)), but for a typed variadic use a declared `...rest: T[]` parameter"
             ],
             "notes": [
               "[TDD-00125](../tdd/TDD-00125.md) Stage 1; the type body uses the full grammar in the type-expression table; a `{number=}`/`[name]` optional decoration is recognized and stripped"

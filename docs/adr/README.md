@@ -963,3 +963,16 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00917](ADR-00917.md) | Async function expression returns a Promise-typed define (invalid-IR sweep) | |
 | [00918](ADR-00918.md) | Funcref identifier carries its signature for `.apply`/`.call`/`.bind` inference (invalid-IR sweep) | |
 | [00919](ADR-00919.md) | Promise rejection reasons carry the real thrown value | Implements [TDD-00207](../tdd/TDD-00207.md); Extends [ADR-00202](ADR-00202.md) (caught-value record) |
+| [00920](ADR-00920.md) | `Atomics.isLockFree` rejects a non-numeric size argument cleanly (invalid-IR sweep) | |
+| [00921](ADR-00921.md) | Non-callable `.then`/`.catch` handlers are treated as undefined (invalid-IR sweep) | |
+| [00922](ADR-00922.md) | `replace`/`replaceAll` callbacks receive capture groups (invalid-IR sweep) | |
+| [00923](ADR-00923.md) | Evolving-any for `null`-initialized bindings; `??`/`??=` on any (invalid-IR sweep) | |
+| [00924](ADR-00924.md) | `any`-typed object/class fields, and evolving-any for null fields (TDD-00208) | |
+| [00925](ADR-00925.md) | `--no-any` — ban the any/unknown escape hatch (TDD-00209 Stage 1) | |
+| [00926](ADR-00926.md) | `--run` — compile and execute immediately | |
+| [00927](ADR-00927.md) | `process.argv` is Node-shaped `[execPath, execPath, ...userArgs]` | |
+| [00928](ADR-00928.md) | Variadic `arguments` — reflect the actual call-time arguments | `Implements [TDD-00210](../tdd/TDD-00210.md)`. `Extends [ADR-00387](ADR-00387.md)` (the declared-params-only `arguments`), `[ADR-00464](ADR-00464.md)` (class-method `arguments`), `[TDD-00200](../tdd/TDD-00200.md)` (boxed-element `any[]` arrays) |
+| [00929](ADR-00929.md) | `as T` narrows a dynamic value to the asserted concrete type | `Extends [ADR-00371](ADR-00371.md)` (type-assertion erasure), `[ADR-00628](ADR-00628.md)` (NaN-boxed `any`). Follow-up to `[ADR-00928](ADR-00928.md)` (variadic `arguments`) |
+| [00930](ADR-00930.md) | Symbol-keyed dynamic-object properties | |
+| [00931](ADR-00931.md) | Invalid-IR conformance sweep — coercion, return-type & ABI fixes | |
+| [00932](ADR-00932.md) | Any-keyed `Map<any, any>` runtime and bare-`new Map()` widening | Implements [TDD-00211](../tdd/TDD-00211.md) |

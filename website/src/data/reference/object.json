@@ -7,7 +7,7 @@
   "coverage": {
     "loose": "32/32",
     "loosePct": 100,
-    "strict": "17/32",
+    "strict": "16/32",
     "strictPct": 50
   },
   "lede": "A two-tier object model. Statically-typed objects are fixed-shape heap structs — compile-time field offsets, real per-heap-identity Object.freeze, compile-time Object.hasOwn. Dynamic objects (any-typed values, untyped JSON, js-mode literals) are real property bags with prototype chains (Object.create, __proto__), property descriptors (defineProperty, accessors, enumerability, descriptor-backed freeze/seal), and runtime add/delete. Map and Set carry the full core API; where JS says Iterable, this compiler narrows to a concrete array, and a missing Map key reads back as a real undefined (as in Node).",
@@ -368,7 +368,7 @@
       "statusRow": "Map.set/get/has/delete/keys/values",
       "signature": "new Map<K, V>(); m.set(k, v); m.get(k); m.has(k); m.delete(k); m.keys()",
       "badge": "exact",
-      "description": ".get() returns V | undefined — a missing key reads as a real undefined (as in Node), distinguishable from a stored 0/false/\"\" via the presence-flagged representation; narrow, ?? d, or ! before use.",
+      "description": ".get() returns V | undefined — a missing key reads as a real undefined (as in Node), distinguishable from a stored 0/false/\"\" via the presence-flagged representation; narrow, ?? d, or ! before use. A bare new Map() with heterogeneous keys widens to an any-keyed runtime with JS SameValueZero equality (string/number/NaN/boolean/object/null keys coexist, NaN matches NaN, objects key by reference).",
       "exampleKey": "map/map",
       "snippet": "const scores = new Map<string, number>();\nscores.set(\"alice\", 95);\nconsole.log(scores.get(\"alice\"));          // 95\nconsole.log(scores.get(\"dave\") === undefined); // true",
       "seeAlso": [

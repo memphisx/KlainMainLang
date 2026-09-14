@@ -94,7 +94,11 @@ func (e *Emitter) emitLogicalCompoundAssign(op, ptr string, ty Type, rhsExpr ast
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curReg, ty.IR, ptr, ty.Align()))
 	cur := Value{Ref: curReg, Ty: ty}
 
-	if op == "??=" && ty.IR != "ptr" {
+	// `??=` can only ever fire against a location whose value may be nullish: a
+	// bare `ptr` (which may be null) or a dynamic any-box (whose tag may be
+	// null/undefined). Any other scalar type is never nullish, so the right side
+	// is never evaluated — exactly like bare `x ?? y`.
+	if op == "??=" && ty.IR != "ptr" && !ty.IsDynamic {
 		return cur, nil
 	}
 
@@ -107,6 +111,18 @@ func (e *Emitter) emitLogicalCompoundAssign(op, ptr string, ty Type, rhsExpr ast
 		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notReg, e.toBool(cur).Ref))
 		cond = Value{Ref: notReg, Ty: TypeBool}
 	case "??=":
+		if ty.IsDynamic {
+			// Nullish when the box tag is null or undefined.
+			tag, _ := e.emitUnboxTagPayload(cur)
+			isNull := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNull, tag, kmlTagNull))
+			isUndef := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
+			nullishReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", nullishReg, isNull, isUndef))
+			cond = Value{Ref: nullishReg, Ty: TypeBool}
+			break
+		}
 		nullReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", nullReg, cur.Ref))
 		cond = Value{Ref: nullReg, Ty: TypeBool}
@@ -123,7 +139,14 @@ func (e *Emitter) emitLogicalCompoundAssign(op, ptr string, ty Type, rhsExpr ast
 	if err != nil {
 		return Value{}, err
 	}
-	rhs = e.coerce(rhs, ty)
+	// coerceChecked, not coerce: a right-hand side whose type is incompatible
+	// with the location (e.g. `x ??= 1` where x is a null-typed `ptr` and the
+	// evolving-any widening is off under --no-any) is a clean compile error, not
+	// a `store ptr <double>` (invalid IR).
+	rhs, err = e.coerceChecked(rhs, ty, rhsExpr.GetPos(), "compound assignment")
+	if err != nil {
+		return Value{}, err
+	}
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, rhs.Ref, ptr, ty.Align()))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 

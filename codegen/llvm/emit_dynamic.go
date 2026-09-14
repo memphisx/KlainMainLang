@@ -60,8 +60,16 @@ func isUnconstrainedDynamic(ty Type) bool {
 // union (TDD-00119) is allowed, since its member set is checked and boxed at
 // object-literal-field construction (storeScalarOrNullableField +
 // unionAllowsAssignmentFrom) and at the return boundary.
+// objectFieldDynamicRejected reports whether a field type is a dynamic type this
+// compiler cannot yet represent in an object/class field slot. Both dynamic
+// field kinds are now supported: a constrained-union field (`string | number`,
+// TDD-00119) has long held an { i8, i64 } box, and a bare `any`/`unknown` field
+// (TDD-00208) is now a NaN-box slot too (box-on-write / unbox-on-read, the
+// field-shaped counterpart of the boxed-element array `any[]`, TDD-00200). So no
+// dynamic field type is rejected here. (A constrained-union *array element*
+// remains rejected — see containsDynamicElement — a distinct, still-open case.)
 func objectFieldDynamicRejected(ty Type) bool {
-	return ty.IsDynamic && len(ty.UnionMembers) == 0
+	return false
 }
 
 func containsDynamicElement(ty Type) bool {

@@ -12,11 +12,11 @@ import (
 // startup, as Node does (ADR-00745). Runs on every host — POSIX passes argv
 // bytes through unchanged, so the same assertion holds there.
 func TestE2EProcessArgvNonASCII(t *testing.T) {
-	// A compiled binary's argv is [exePath, ...userArgs], so the two user
-	// arguments land at argv[1] and argv[2].
+	// Node-faithful process.argv is [execPath, execPath, ...userArgs]
+	// (ADR-00927), so the two user arguments land at argv[2] and argv[3].
 	bin := buildBinary(t, `
-console.log(process.argv[1])
 console.log(process.argv[2])
+console.log(process.argv[3])
 console.log(process.argv.length)
 `)
 	arg1 := "café-Ω-日本語"
@@ -26,7 +26,7 @@ console.log(process.argv.length)
 		t.Fatalf("run: %v", err)
 	}
 	got := strings.TrimRight(string(out), "\r\n")
-	want := arg1 + "\n" + arg2 + "\n3"
+	want := arg1 + "\n" + arg2 + "\n4"
 	if got != want {
 		t.Fatalf("non-ASCII argv not preserved:\n got %q\nwant %q", got, want)
 	}

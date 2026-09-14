@@ -372,8 +372,8 @@ func (e *Emitter) emitInspectMap(val Value, depth int) (Value, error) {
 	if val.Ty.MapVal != nil {
 		valTy = *val.Ty.MapVal
 	}
-	strKey := isStringTy(keyTy)
-	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(val.Ref, strKey)
+	suffix, _ := mapRuntime(keyTy)
+	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(val.Ref, suffix)
 	render := func(idxVal string) (Value, error) {
 		kGep, kElem := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", kGep, keyTy.IR, keysPtr, idxVal))

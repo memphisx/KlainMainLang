@@ -19,12 +19,50 @@ import (
 // { i64 byteLength, ptr data }, never exposed via the generic object-field
 // path (see IsArrayBuffer's doc comment in types.go). The data buffer
 // itself is calloc'd, matching real ArrayBuffer's zero-fill guarantee.
+// coerceByteLengthArg turns a `new ArrayBuffer(len)` length argument into an
+// i64 byte count via JS ToIndex: a numeric value coerces directly; an object
+// runs the ToPrimitive("number") ladder; a string / dynamic `any` runs ToNumber
+// (`new ArrayBuffer("")` → 0, `"1"` → 1) rather than reaching calloc as a raw
+// `ptr` (invalid IR). A non-finite result (NaN/undefined) is ToIndex 0.
+func (e *Emitter) coerceByteLengthArg(v Value) (Value, error) {
+	// An object with a ToPrimitive ladder resolves to its primitive first
+	// (`new ArrayBuffer({valueOf(){return 42}})`).
+	if objectMayToPrimitive(v.Ty) {
+		if r, ok, perr := e.emitObjectToPrimitive(v, "number"); perr == nil && ok {
+			v = r
+		}
+	}
+	// A bare string ToNumbers via the JS ToNumber runtime (`new ArrayBuffer("")`
+	// → 0, `"1"` → 1) rather than reaching calloc as a raw `ptr` (invalid IR).
+	// A NaN result is ToIndex 0 (guard: fptosi of NaN is poison).
+	if isPlainStringType(v.Ty) {
+		boxed, err := e.emitBoxValue(v)
+		if err != nil {
+			return Value{}, err
+		}
+		d := e.emitAnyToNum(boxed) // double
+		isnan := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fcmp uno double %s, %s", isnan, d, d))
+		iv := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", iv, d))
+		safe := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", safe, isnan, iv))
+		return Value{Ref: safe, Ty: TypeI64}, nil
+	}
+	// Numeric, and everything else (a dynamic `any`), goes through the normal
+	// coerce — which for a dynamic value is a runtime tag-checked ToNumber that
+	// throws on a Symbol (`new ArrayBuffer(sym as any)` is a TypeError, not 0).
+	return e.coerce(v, TypeI64), nil
+}
+
 func (e *Emitter) emitNewArrayBufferExpression(ex *ast.NewArrayBufferExpression) (Value, error) {
 	sizeVal, err := e.emitExpr(ex.ByteLength)
 	if err != nil {
 		return Value{}, err
 	}
-	sizeVal = e.coerce(sizeVal, TypeI64)
+	if sizeVal, err = e.coerceByteLengthArg(sizeVal); err != nil {
+		return Value{}, err
+	}
 
 	// A SharedArrayBuffer under -mm=gc must survive the window where its
 	// only live reference is on another thread (or inside a pipe envelope)

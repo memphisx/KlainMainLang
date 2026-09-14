@@ -284,9 +284,9 @@ func (e *Emitter) emitDeepCloneMap(val Value, ty Type, pos ast.Pos) (Value, erro
 	if !cloneableCollectionElem(keyTy) || !cloneableCollectionElem(valTy) {
 		return Value{}, fmt.Errorf("%d:%d: structuredClone of a Map with an array/Map/Set key or value type is not supported", pos.Line, pos.Col)
 	}
-	strKey := isStringTy(keyTy)
+	suffix, keyIR := mapRuntime(keyTy)
 	newMap := e.emitMapOrSetCreate(keyTy)
-	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(val.Ref, strKey)
+	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(val.Ref, suffix)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -319,13 +319,12 @@ func (e *Emitter) emitDeepCloneMap(val Value, ty Type, pos ast.Pos) (Value, erro
 	if err != nil {
 		return Value{}, err
 	}
-	kRef := e.valueToMapKey(clonedKey, keyTy)
-	vRef := e.valueToMapVal(clonedVal, valTy)
-	if strKey {
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", newMap, kRef, vRef))
-	} else {
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_num_set(ptr %s, i64 %s, i64 %s)", newMap, kRef, vRef))
+	kRef, err := e.mapKeyRef(clonedKey, keyTy)
+	if err != nil {
+		return Value{}, err
 	}
+	vRef := e.valueToMapVal(clonedVal, valTy)
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set(ptr %s, %s %s, i64 %s)", suffix, newMap, keyIR, kRef, vRef))
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
@@ -342,9 +341,9 @@ func (e *Emitter) emitDeepCloneSet(val Value, ty Type, pos ast.Pos) (Value, erro
 	if !cloneableCollectionElem(elemTy) {
 		return Value{}, fmt.Errorf("%d:%d: structuredClone of a Set with an array/Map/Set element type is not supported", pos.Line, pos.Col)
 	}
-	strElem := isStringTy(elemTy)
+	setSuffix, _ := mapRuntime(elemTy)
 	newSet := e.emitMapOrSetCreate(elemTy)
-	keysPtr, keysLen, _ := e.mapKeysAndVals(val.Ref, strElem)
+	keysPtr, keysLen, _ := e.mapKeysAndVals(val.Ref, setSuffix)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -369,12 +368,12 @@ func (e *Emitter) emitDeepCloneSet(val Value, ty Type, pos ast.Pos) (Value, erro
 	if err != nil {
 		return Value{}, err
 	}
-	kRef := e.valueToMapKey(clonedElem, elemTy)
-	if strElem {
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 0)", newSet, kRef))
-	} else {
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_num_set(ptr %s, i64 %s, i64 0)", newSet, kRef))
+	_, setKeyIR := mapRuntime(elemTy)
+	kRef, err := e.mapKeyRef(clonedElem, elemTy)
+	if err != nil {
+		return Value{}, err
 	}
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set(ptr %s, %s %s, i64 0)", setSuffix, newSet, setKeyIR, kRef))
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))

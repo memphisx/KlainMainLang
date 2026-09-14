@@ -75,6 +75,13 @@ func (p *Parser) parseAssignment() (ast.Expression, error) {
 		if kw.Literal == "as" {
 			if ce := assertableCall(left); ce != nil {
 				ce.AssertedType = ta // chained `as A as B`: the outermost wins
+			} else {
+				// Every other `expr as T`: keep it as a node so a narrowing from a
+				// dynamic operand (`x as number` where `x: any`) is honored at
+				// codegen; a concrete→concrete assertion stays erased there
+				// (ADR-00929). `satisfies`/`as const` never wrap (they are pure
+				// identity — `as const` already `continue`d above).
+				left = ast.NewAsExpression(left, ta, posOf(kw))
 			}
 		}
 	}

@@ -216,7 +216,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00173](TDD-00173.md) | `-mm=auto` — @free/@owned annotations, escape check, implicit auto-free | Implemented | [ADR-00712](../adr/ADR-00712.md) | |
 | [00174](TDD-00174.md) | Maturity gate for flipping `-mm=auto` (+ `-optimize-memory`) to default | Partially Implemented | [ADR-00708](../adr/ADR-00708.md) | |
 | [00175](TDD-00175.md) | Deep reclamation — container elements and object graphs under `-mm=auto` | Partially Implemented | [ADR-00716](../adr/ADR-00716.md) | |
-| [00176](TDD-00176.md) | General `as T` on dynamic values — projection, rejection, or erasure? | Not Started | | |
+| [00176](TDD-00176.md) | General `as T` on dynamic values — projection, rejection, or erasure? | Implemented | | |
 | [00177](TDD-00177.md) | Windows support — toolchain, C runtime target, and Node-faithful platform semantics | Partially Implemented | [ADR-00718](../adr/ADR-00718.md), [ADR-00719](../adr/ADR-00719.md), [ADR-00725](../adr/ADR-00725.md), [ADR-00727](../adr/ADR-00727.md), [ADR-00728](../adr/ADR-00728.md), [ADR-00771](../adr/ADR-00771.md) | |
 | [00178](TDD-00178.md) | `path.win32` — Windows path semantics, per-host default, and explicit `path.posix`/`path.win32` | Implemented | [ADR-00722](../adr/ADR-00722.md), [ADR-00723](../adr/ADR-00723.md) | |
 | [00179](TDD-00179.md) | Multi-platform CI, per-platform release binaries, version stamping, installers | Implemented | [ADR-00732](../adr/ADR-00732.md) | |
@@ -240,7 +240,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00197](TDD-00197.md) | the server `'close'` event + drain-accurate `server.close(cb)` | Implemented | [ADR-00828](../adr/ADR-00828.md) | |
 | [00198](TDD-00198.md) | the server `'connection'` event | Implemented | [ADR-00829](../adr/ADR-00829.md) | |
 | [00199](TDD-00199.md) | Destructured callback parameters (`([k, v]) => …`) | Implemented | [ADR-00854](../adr/ADR-00854.md) | |
-| [00200](TDD-00200.md) | Statically-typed heterogeneous / union-element arrays | Partially Implemented | [ADR-00887](../adr/ADR-00887.md) | |
+| [00200](TDD-00200.md) | Statically-typed heterogeneous / union-element arrays | Partially Implemented | [ADR-00887](../adr/ADR-00887.md), [ADR-00928](../adr/ADR-00928.md) | |
 | [00201](TDD-00201.md) | ToPrimitive coercion of objects in numeric/string contexts | Implemented | [ADR-00859](../adr/ADR-00859.md), [ADR-00860](../adr/ADR-00860.md), [ADR-00861](../adr/ADR-00861.md), [ADR-00862](../adr/ADR-00862.md), [ADR-00866](../adr/ADR-00866.md), [ADR-00912](../adr/ADR-00912.md) | |
 | [00202](TDD-00202.md) | Faithful thrown values — `throw`/`catch` any value | Implemented | [ADR-00870](../adr/ADR-00870.md) | |
 | [00203](TDD-00203.md) | URL / URLSearchParams WHATWG-conformance overhaul | In Progress | [ADR-00873](../adr/ADR-00873.md), [ADR-00874](../adr/ADR-00874.md) | |
@@ -248,3 +248,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00205](TDD-00205.md) | Element-type inference for an untyped empty array literal (`[]`) | Implemented | [ADR-00886](../adr/ADR-00886.md), [ADR-00887](../adr/ADR-00887.md) | |
 | [00206](TDD-00206.md) | Default-parameter filling through first-class function values | Implemented | [ADR-00916](../adr/ADR-00916.md) | |
 | [00207](TDD-00207.md) | Promise rejection reasons carry the real thrown value | Implemented | [ADR-00919](../adr/ADR-00919.md) | |
+| [00208](TDD-00208.md) | `any`/`unknown`-typed object and class fields (boxed field slots) | Implemented | | |
+| [00209](TDD-00209.md) | `--no-any` — a strict-lane flag banning the `any`/`unknown` escape hatch | Partially Implemented | | |
+| [00210](TDD-00210.md) | Variadic `arguments` — reflect actual call-time arguments | Implemented | [ADR-00928](../adr/ADR-00928.md) | |
+| [00211](TDD-00211.md) | Any-keyed `Map<any, any>` — heterogeneous keys, SameValueZero | Implemented | [ADR-00932](../adr/ADR-00932.md) | |

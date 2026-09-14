@@ -3,6 +3,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"reflect"
 )
 
 // emit_regexp_replace.go — str.replace(regexp, replacement)/
@@ -29,6 +30,231 @@ type regexReplacer struct {
 	isCallback bool
 	cb         Callback // valid when isCallback
 	template   Value    // valid when !isCallback
+	// nCaptures is the pattern's capture-group count when it is statically
+	// known (an inline regex literal, or an identifier bound to a `const`
+	// regex literal); capturesKnown records whether it is. When known, a
+	// callback is invoked with the real JS argument shape
+	// (match, cap1..capN, offset, string); when not, it falls back to the
+	// (match, offset, string) narrowing (capture groups unavailable).
+	nCaptures     int
+	capturesKnown bool
+}
+
+// regexSourceCaptureCount counts capturing groups in a regex pattern source —
+// `(` that opens a group and is not `(?:` / `(?=` / `(?!` / `(?<=` / `(?<!`
+// (named groups `(?<name>` are capturing), skipping escaped `\(` and any `(`
+// inside a `[...]` character class (literal there).
+func regexSourceCaptureCount(src string) int {
+	n := 0
+	inClass := false
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		if c == '\\' {
+			i++ // skip the escaped character
+			continue
+		}
+		if inClass {
+			if c == ']' {
+				inClass = false
+			}
+			continue
+		}
+		switch c {
+		case '[':
+			inClass = true
+		case '(':
+			if i+1 < len(src) && src[i+1] == '?' {
+				// (?<name> is capturing; (?: (?= (?! (?<= (?<! are not.
+				if i+2 < len(src) && src[i+2] == '<' &&
+					!(i+3 < len(src) && (src[i+3] == '=' || src[i+3] == '!')) {
+					n++
+				}
+			} else {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// constRegexLiteral returns the regex literal bound to an unambiguous
+// `const <name> = /regex/` declaration, lazily scanning the program once.
+func (e *Emitter) constRegexLiteral(name string) (*ast.NewRegExpExpression, bool) {
+	if !e.constRegexScanned {
+		e.constRegexScanned = true
+		e.constRegexLits = map[string]*ast.NewRegExpExpression{}
+		e.constRegexAmbig = map[string]bool{}
+		e.constRegexNonConst = map[string]bool{}
+		e.constRegexReassigned = map[string]bool{}
+		if e.prog != nil {
+			for _, s := range e.prog.Body {
+				e.scanConstRegex(s)
+			}
+			// A `let`/`var` regex-literal binding is honored only if it is never
+			// reassigned (an assignment target or `++`/`--` arg anywhere in the
+			// program) — otherwise its capture count isn't statically known. One
+			// reflective walk collects every reassigned identifier name.
+			collectReassignedIdents(e.prog, e.constRegexReassigned)
+		}
+	}
+	if e.constRegexAmbig[name] {
+		return nil, false
+	}
+	if e.constRegexNonConst[name] && e.constRegexReassigned[name] {
+		return nil, false
+	}
+	lit, ok := e.constRegexLits[name]
+	return lit, ok
+}
+
+// collectReassignedIdents reflectively walks the whole AST and records the name
+// of every identifier used as an assignment target (`x = …`, `x += …`) or an
+// update operand (`x++`, `--x`). Used by constRegexLiteral to admit a
+// never-reassigned `let`/`var` regex-literal binding as statically capture-known.
+func collectReassignedIdents(n any, out map[string]bool) {
+	switch v := n.(type) {
+	case nil:
+		return
+	case *ast.AssignmentExpression:
+		if id, ok := v.Left.(*ast.Identifier); ok {
+			out[id.Name] = true
+		}
+	case *ast.UpdateExpression:
+		if id, ok := v.Arg.(*ast.Identifier); ok {
+			out[id.Name] = true
+		}
+	}
+	rv := reflect.ValueOf(n)
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return
+		}
+		rv = rv.Elem()
+	}
+	switch rv.Kind() {
+	case reflect.Struct:
+		for i := 0; i < rv.NumField(); i++ {
+			f := rv.Field(i)
+			if f.CanInterface() {
+				collectReassignedIdents(f.Interface(), out)
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < rv.Len(); i++ {
+			if rv.Index(i).CanInterface() {
+				collectReassignedIdents(rv.Index(i).Interface(), out)
+			}
+		}
+	}
+}
+
+// scanConstRegex records `const <name> = /regex/` bindings and blacklists any
+// name it sees declared more than once (any kind, any scope) as ambiguous, so a
+// shadowed binding is never misattributed. Recurses through the common
+// statement containers; anything it does not descend into simply falls back to
+// the (match, offset, string) narrowing, never a miscount.
+func (e *Emitter) scanConstRegex(s ast.Statement) {
+	switch n := s.(type) {
+	case *ast.VarDeclaration:
+		e.recordConstRegex(n)
+	case *ast.VarDeclarationList:
+		for _, d := range n.Decls {
+			e.scanConstRegex(d)
+		}
+	case *ast.BlockStatement:
+		if n != nil {
+			for _, st := range n.Body {
+				e.scanConstRegex(st)
+			}
+		}
+	case *ast.IfStatement:
+		e.scanConstRegex(n.Consequent)
+		e.scanConstRegex(n.Alternate)
+	case *ast.ForStatement:
+		e.scanConstRegex(n.Init)
+		e.scanConstRegex(n.Body)
+	case *ast.ForOfStatement:
+		e.scanConstRegex(n.Body)
+	case *ast.ForInStatement:
+		e.scanConstRegex(n.Body)
+	case *ast.WhileStatement:
+		e.scanConstRegex(n.Body)
+	case *ast.DoWhileStatement:
+		e.scanConstRegex(n.Body)
+	case *ast.TryStatement:
+		if n.Body != nil {
+			for _, st := range n.Body.Body {
+				e.scanConstRegex(st)
+			}
+		}
+		if n.Catch != nil && n.Catch.Body != nil {
+			for _, st := range n.Catch.Body.Body {
+				e.scanConstRegex(st)
+			}
+		}
+		if n.Finally != nil {
+			for _, st := range n.Finally.Body {
+				e.scanConstRegex(st)
+			}
+		}
+	case *ast.LabeledStatement:
+		e.scanConstRegex(n.Body)
+	case *ast.FunctionDeclaration:
+		if n.Body != nil {
+			for _, st := range n.Body.Body {
+				e.scanConstRegex(st)
+			}
+		}
+	case *ast.ExportDeclaration:
+		e.scanConstRegex(n.Decl)
+	}
+}
+
+func (e *Emitter) recordConstRegex(vd *ast.VarDeclaration) {
+	if vd == nil || vd.Name == "" {
+		return
+	}
+	// Any second sighting of a name (regardless of kind) makes it ambiguous.
+	if _, seen := e.constRegexLits[vd.Name]; seen {
+		e.constRegexAmbig[vd.Name] = true
+		return
+	}
+	if e.constRegexAmbig[vd.Name] {
+		return
+	}
+	lit, ok := vd.Init.(*ast.NewRegExpExpression)
+	if !ok {
+		e.constRegexAmbig[vd.Name] = true
+		return
+	}
+	e.constRegexLits[vd.Name] = lit
+	// A `let`/`var` binding is admitted only if the reassignment pass
+	// (collectReassignedIdents) confirms it is never written after declaration.
+	if vd.Kind != "const" {
+		e.constRegexNonConst[vd.Name] = true
+	}
+}
+
+// staticRegexCaptureCount returns the capture-group count of a replace/
+// replaceAll pattern argument when it is statically a regex literal — either
+// inline (`s.replace(/(a)(b)/, …)`) or an identifier bound to a `const` regex
+// literal (`const p = /(a)(b)/; s.replace(p, …)`). Returns ok=false for a
+// dynamic pattern (a `new RegExp(x)` over a non-literal, a reassignable binding,
+// or a plain string search value).
+func (e *Emitter) staticRegexCaptureCount(pat ast.Expression) (int, bool) {
+	switch p := pat.(type) {
+	case *ast.NewRegExpExpression:
+		if sl, ok := p.Pattern.(*ast.StringLiteral); ok {
+			return regexSourceCaptureCount(sl.Value), true
+		}
+	case *ast.Identifier:
+		if lit, ok := e.constRegexLiteral(p.Name); ok {
+			if sl, ok := lit.Pattern.(*ast.StringLiteral); ok {
+				return regexSourceCaptureCount(sl.Value), true
+			}
+		}
+	}
+	return 0, false
 }
 
 // resolveRegexReplacer evaluates replace()/replaceAll()'s second argument
@@ -38,21 +264,44 @@ type regexReplacer struct {
 // replaced).
 func (e *Emitter) resolveRegexReplacer(args []ast.Expression, pos ast.Pos) (regexReplacer, error) {
 	if e.inferExprType(args[1]).IsFunc {
-		// The replacer callback's signature is (match, offset, string): the
-		// first argument is the matched substring (a string), the middle
-		// offset argument is a number, and the last is the whole subject
-		// string. Untyped arrow-function parameters default to `number`
-		// otherwise, which mis-dispatches string methods on `match` and emits
-		// invalid IR (a ptr in a double slot). Seed those defaults with hints
-		// so an untyped `(m) => m.toUpperCase()` types `m` as a string.
-		cb, err := e.resolveCallbackWithHints(args[1], []Type{TypePtr, TypeI64, TypePtr})
+		// Real JS invokes the replacer as (match, cap1..capN, offset, string),
+		// where N is the pattern's capture-group count. When the pattern is
+		// statically a regex literal N is known, so seed the callback's
+		// parameter hints in that exact shape — match and every capture are
+		// strings (ptr), offset is a number (i64), the whole subject is a
+		// string (ptr) — and allow up to N+3 parameters. Untyped arrow
+		// parameters default to `number` otherwise, which mis-dispatches string
+		// methods and emits invalid IR (a ptr in a double slot; or, before this,
+		// a double capture value stored into a ptr slot).
+		//
+		// When N is unknown (a dynamic RegExp / reassignable binding) fall back
+		// to the (match, offset, string) narrowing: capture groups can't be
+		// supplied without their count, and at most 3 parameters are allowed.
+		nCap, known := e.staticRegexCaptureCount(args[0])
+		var hints []Type
+		maxArity := 3
+		if known {
+			hints = make([]Type, 0, nCap+3)
+			hints = append(hints, TypePtr) // match
+			for i := 0; i < nCap; i++ {
+				hints = append(hints, TypePtr) // capture group (string)
+			}
+			hints = append(hints, TypeI64, TypePtr) // offset, whole string
+			maxArity = nCap + 3
+		} else {
+			hints = []Type{TypePtr, TypeI64, TypePtr}
+		}
+		cb, err := e.resolveCallbackWithHints(args[1], hints)
 		if err != nil {
 			return regexReplacer{}, err
 		}
-		if cb.arity() > 3 {
-			return regexReplacer{}, fmt.Errorf("%d:%d: a replace()/replaceAll() callback supports at most 3 parameters (match, offset, string) — capture groups aren't passed positionally, since a callback's arity is fixed at compile time but a pattern's capture count isn't known until runtime", pos.Line, pos.Col)
+		if cb.arity() > maxArity {
+			if known {
+				return regexReplacer{}, fmt.Errorf("%d:%d: a replace()/replaceAll() callback for this pattern supports at most %d parameters (match, %d capture group(s), offset, string)", pos.Line, pos.Col, maxArity, nCap)
+			}
+			return regexReplacer{}, fmt.Errorf("%d:%d: a replace()/replaceAll() callback over a non-literal pattern supports at most 3 parameters (match, offset, string) — capture groups are passed positionally only when the pattern's capture count is statically known (an inline regex literal or a `const`-bound one)", pos.Line, pos.Col)
 		}
-		return regexReplacer{isCallback: true, cb: cb}, nil
+		return regexReplacer{isCallback: true, cb: cb, nCaptures: nCap, capturesKnown: known}, nil
 	}
 	templateVal, err := e.emitExpr(args[1])
 	if err != nil {
@@ -89,19 +338,65 @@ func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, 
 	fullMatch := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fullMatch, elem0Gep))
 
-	cbArgs := []Value{{Ref: fullMatch, Ty: TypePtr}}
-	if replacer.cb.arity() >= 2 {
-		// The `offset` argument is user-visible, so report it in the mode's
-		// index space — UTF-16 code units for es-utf16 (identity elsewhere).
-		offsetReg := e.regexByteToUTF16(strVal.Ref, matchStartReg)
-		cbArgs = append(cbArgs, Value{Ref: offsetReg, Ty: TypeI64})
+	// offset is user-visible, so reported in the mode's index space (UTF-16
+	// code units for es-utf16, identity elsewhere); built lazily since a
+	// capture-only callback never consumes it.
+	offsetArg := func() Value {
+		return Value{Ref: e.regexByteToUTF16(strVal.Ref, matchStartReg), Ty: TypeI64}
 	}
-	if replacer.cb.arity() >= 3 {
-		cbArgs = append(cbArgs, strVal)
+	arity := replacer.cb.arity()
+	// An `arguments`-reading replacer collects every argument through its
+	// implicit rest (TDD-00210), so pass the full JS sequence rather than
+	// truncating to the declared fixed arity: (match, cap1..capN, offset,
+	// string) when captures are known, else (match, offset, string).
+	if replacer.cb.hasRest() {
+		if replacer.capturesKnown {
+			arity = 1 + replacer.nCaptures + 2
+		} else {
+			arity = 3
+		}
+	}
+
+	// Build the JS argument sequence up to the callback's arity. When the
+	// pattern's capture count is known the shape is
+	// (match, cap1..capN, offset, string); otherwise the (match, offset,
+	// string) narrowing (see resolveRegexReplacer).
+	cbArgs := []Value{{Ref: fullMatch, Ty: TypePtr}}
+	if replacer.capturesKnown {
+		for i := 1; i <= replacer.nCaptures && len(cbArgs) < arity; i++ {
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", gep, matchPtr, i))
+			capReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", capReg, gep))
+			cbArgs = append(cbArgs, Value{Ref: capReg, Ty: TypePtr})
+		}
+		if len(cbArgs) < arity {
+			cbArgs = append(cbArgs, offsetArg())
+		}
+		if len(cbArgs) < arity {
+			cbArgs = append(cbArgs, strVal)
+		}
+	} else {
+		if arity >= 2 {
+			cbArgs = append(cbArgs, offsetArg())
+		}
+		if arity >= 3 {
+			cbArgs = append(cbArgs, strVal)
+		}
 	}
 	resultVal, err := e.emitCBCall(replacer.cb, cbArgs)
 	if err != nil {
 		return "", "", err
+	}
+	// A replacer that returns a non-string has its result ToString'd (JS does
+	// this — `s.replace(re, () => 1)` splices "1"). Coercing a number straight
+	// to `ptr` would reinterpret the double/integer bits as a pointer and hand
+	// them to strlen (invalid IR), the same hazard the literal-template path
+	// guards against above.
+	if !isStringTy(resultVal.Ty) {
+		if resultVal, err = e.emitArgToString(resultVal); err != nil {
+			return "", "", err
+		}
 	}
 	resultVal = e.coerce(resultVal, TypePtr)
 	e.ensureStrlen()

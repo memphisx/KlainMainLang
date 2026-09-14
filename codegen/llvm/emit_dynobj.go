@@ -22,6 +22,25 @@ import (
 	"KlainMainLang/ast"
 )
 
+// symbolKeySentinel prefixes the synthetic string key a Symbol property maps to
+// in the string-keyed dynobj bag. The leading SOH byte (0x01) never appears in a
+// real JS property key written in source, so symbol keys never collide with
+// string keys and the string enumeration (Object.keys / for-in /
+// getOwnPropertyNames) can filter them out by this prefix.
+const symbolKeySentinel = "\x01@@sym:"
+
+// emitSymbolPropertyKey builds the synthetic bag key for a Symbol value from its
+// pointer identity (see symbolKeySentinel). Two references to the same Symbol
+// share the pointer, so `obj[sym]` set/get/has/delete round-trip consistently.
+func (e *Emitter) emitSymbolPropertyKey(sym Value) string {
+	e.ensureSprintf()
+	scratch := e.emitStringScratch(40)
+	fmtStr := e.internString(symbolKeySentinel + "%p")
+	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s)", scratch, fmtStr, sym.Ref))
+	e.emitStringFinalizeLen(scratch)
+	return scratch
+}
+
 // emitDynObjBox wraps a raw __kml_dynobj bag pointer register into an any box.
 func (e *Emitter) emitDynObjBox(ptrReg string) Value {
 	return Value{Ref: e.emitNbTagPtr(ptrReg, kmlTagDynObject), Ty: TypeAny}
@@ -47,6 +66,24 @@ func (e *Emitter) dynAnyKeyRef(keyExpr ast.Expression, pos ast.Pos) (string, err
 		return "", err
 	}
 	switch {
+	case kv.Ty.IsSymbol:
+		// A Symbol is a valid, unique property key — ToPropertyKey keeps it a
+		// symbol, it does NOT ToString (which throws). The dynobj bag is
+		// string-keyed, so a symbol maps to a stable synthetic key derived from
+		// its pointer identity (two references to the same Symbol share the
+		// pointer, so `obj[sym]` round-trips). The sentinel prefix keeps symbol
+		// keys out of the string-keyed enumeration (Object.keys/for-in).
+		return e.emitSymbolPropertyKey(kv), nil
+	case kv.Ty.IsArray || kv.Ty.IsObject:
+		// A non-symbol array/object key ToStrings (ToPropertyKey → ToString):
+		// `obj[[1,2]]` is `obj["1,2"]`, `obj[{}]` is `obj["[object Object]"]`.
+		// The default `sprintf("%lld")` branch below would feed a {ptr,i64}
+		// aggregate to a `i64` format arg (invalid IR).
+		s, serr := e.emitValueToString(kv)
+		if serr != nil {
+			return "", serr
+		}
+		return s.Ref, nil
 	case kv.Ty.IsDynamic:
 		s, err := e.emitDynamicToString(kv)
 		if err != nil {

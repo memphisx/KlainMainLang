@@ -16,13 +16,16 @@ import (
 
 func TestE2EProcessArgv(t *testing.T) {
 	t.Helper()
+	// Node-faithful process.argv is [execPath, execPath, ...userArgs] (the
+	// executable path at both index 0 and 1, matching a Node single-executable
+	// app, ADR-00927) — so user arguments start at index 2.
 	got := compileAndRunWithArgs(t, `
 const args: string[] = process.argv
 console.log(args.length)
-console.log(args[1])
 console.log(args[2])
+console.log(args[3])
 `, "hello", "world")
-	want := "3\nhello\nworld"
+	want := "4\nhello\nworld"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}

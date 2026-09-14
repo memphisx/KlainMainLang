@@ -275,6 +275,26 @@ func coercionIsSound(coerced, target Type) bool {
 // before it emits invalid IR. Mirrors coerce's own handled cases: same IR,
 // composite/dynamic/nullable/union/void target (own path), a null/undefined/
 // never/dynamic/nullable source coerce specially rewrites, or numeric↔numeric.
+// objectFieldBoxingCompatible reports whether two object/class shapes agree on
+// the boxedness of every field they share by name — an `any` field (a NaN box)
+// on one side must be `any` on the other, never a concrete raw field. Reading a
+// raw field as a box (or vice versa) yields garbage, so a mismatch is not a
+// sound structural coercion (TDD-00208).
+func objectFieldBoxingCompatible(src, target Type) bool {
+	srcField := map[string]Type{}
+	for _, f := range src.Fields {
+		srcField[f.Name] = f.Ty
+	}
+	for _, tf := range target.Fields {
+		if sf, ok := srcField[tf.Name]; ok {
+			if sf.IsDynamic != tf.Ty.IsDynamic {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func coerciblePure(src, target Type) bool {
 	// TDD-00153 V1 boundary: a synthetic object-literal accessor class is a
 	// nominal type whose accessor properties are methods, not fields — it can't
@@ -287,6 +307,16 @@ func coerciblePure(src, target Type) bool {
 			(target.IsClass && target.ClassName != src.ClassName) {
 			return false
 		}
+	}
+	// A structural object/class coercion must not cross an `any`-field boundary
+	// (TDD-00208): an `any` field is a NaN box, a concrete field is its raw
+	// value, so reading one as the other yields garbage. Object/class types all
+	// share IR "ptr", so this must be checked before the IR-equality shortcut —
+	// require each shared field's boxedness to match, else reject cleanly
+	// (`{x:number}` passed where `{x:any}` was wanted).
+	if (target.IsObject || target.IsClass) && (src.IsObject || src.IsClass) &&
+		!objectFieldBoxingCompatible(src, target) {
+		return false
 	}
 	if src.IR == target.IR {
 		return true

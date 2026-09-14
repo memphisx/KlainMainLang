@@ -111,7 +111,14 @@ func (e *Emitter) emitAtomicsCall(method string, args []ast.Expression, pos ast.
 		if err != nil {
 			return Value{}, err
 		}
-		szVal = e.coerce(szVal, TypeI64)
+		// TS types isLockFree as (size: number); a non-numeric argument (e.g. a
+		// string) is a type error there. Reject it cleanly rather than letting
+		// coerce reinterpret a pointer as i64 and emit invalid IR
+		// (icmp eq i64 <ptr>, 1).
+		szVal, err = e.coerceChecked(szVal, TypeI64, args[0].GetPos(), "Atomics.isLockFree size")
+		if err != nil {
+			return Value{}, err
+		}
 		var cmps [4]string
 		for i, n := range []string{"1", "2", "4", "8"} {
 			cmps[i] = e.freshReg()

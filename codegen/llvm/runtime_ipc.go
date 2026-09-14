@@ -44,26 +44,26 @@ func (e *Emitter) ensureCPForkRuntime() {
 	e.emitGlobal(fmt.Sprintf(`
 define ptr @__kml_cp_fork(ptr %%argsdata, i64 %%argslen) {
 entry:
-  ; Node's forked-child argv layout is [exe, modulePath, ...args] — extra
-  ; args start at argv[2]. The self-fork's "module path" slot is the binary
-  ; path again, so process.argv[2]-based child branching lines up.
+  ; The child is exec'd with the NATURAL OS argv shape [exe, ...args, NULL];
+  ; the executable path is duplicated into process.argv[1] uniformly at the
+  ; child's own startup (__kml_argv_node_shape), so extra fork args land at
+  ; process.argv[2] exactly as Node's [exe, modulePath, ...args] does — without
+  ; this site pre-duplicating (which would double up under that transform).
   %%argv0data = load ptr, ptr @__argv_ptr, align 8
   %%argv0 = load ptr, ptr %%argv0data, align 8
-  %%argvlen = add i64 %%argslen, 3
+  %%argvlen = add i64 %%argslen, 2
   %%argvbytes = mul i64 %%argvlen, 8
   %%argv = call ptr @malloc(i64 %%argvbytes)
   store ptr %%argv0, ptr %%argv, align 8
-  %%slot1 = getelementptr ptr, ptr %%argv, i64 1
-  store ptr %%argv0, ptr %%slot1, align 8
-  %%argvoff2 = getelementptr ptr, ptr %%argv, i64 2
+  %%argvoff1 = getelementptr ptr, ptr %%argv, i64 1
   %%hasargs = icmp sgt i64 %%argslen, 0
   br i1 %%hasargs, label %%copyargs, label %%setnull
 copyargs:
   %%copybytes = mul i64 %%argslen, 8
-  call ptr @memcpy(ptr %%argvoff2, ptr %%argsdata, i64 %%copybytes)
+  call ptr @memcpy(ptr %%argvoff1, ptr %%argsdata, i64 %%copybytes)
   br label %%setnull
 setnull:
-  %%nullidx = add i64 %%argslen, 2
+  %%nullidx = add i64 %%argslen, 1
   %%nullslot = getelementptr ptr, ptr %%argv, i64 %%nullidx
   store ptr null, ptr %%nullslot, align 8
 

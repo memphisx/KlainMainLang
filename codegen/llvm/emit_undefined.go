@@ -196,3 +196,32 @@ func (e *Emitter) emitNonNull(ex *ast.NonNullExpression) (Value, error) {
 	v.Ty.IsUndefined = false
 	return v, nil
 }
+
+// emitAsExpression handles `expr as T` (ADR-00929). When the operand is a
+// dynamic value (`any`/`unknown`) and the assertion names a concrete type, it
+// unboxes the NaN-boxed word to that type — the sound, runtime-meaningful
+// direction (TS's `any`→`T` is an unchecked assignment; here the box actually
+// carries the value). A concrete operand keeps its own value and type — the
+// assertion is erased, matching ADR-00371 (a reinterpret across differing
+// concrete representations is not modeled).
+func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
+	v, err := e.emitExpr(ex.Expr)
+	if err != nil {
+		return Value{}, err
+	}
+	if ex.TypeAnnot == nil || !v.Ty.IsDynamic {
+		return v, nil
+	}
+	target := e.resolveType(ex.TypeAnnot)
+	if target.IsDynamic {
+		return v, nil // `any as any`/union: nothing to unbox
+	}
+	// coerce carries the correct any→concrete unbox for scalars/strings/objects
+	// (emitAnyToNum → fptosi for integers, truthiness for bool, payload-pointer
+	// extraction for string/object). Array and nullable-scalar targets need the
+	// heap-header / presence-aware decode, which emitUnboxBoxToType provides.
+	if target.IsArray || isNullableScalar(target) {
+		return e.emitUnboxBoxToType(v.Ref, target), nil
+	}
+	return e.coerce(v, target), nil
+}

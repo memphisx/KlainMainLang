@@ -37,6 +37,59 @@ console.log(typeof m.get('n'))
 `, "true\ntrue\ntrue\ntrue\nnumber")
 }
 
+// A bare `new Map()` whose keys are heterogeneous widens to the any-keyed
+// runtime (TDD-00211): string, number, NaN, boolean, object, and null keys
+// coexist, each read back by SameValueZero.
+func TestE2EMapAnyKeyHeterogeneous(t *testing.T) {
+	assertOutput(t, `
+const m = new Map()
+const obj = {}
+m.set('bar', 0)
+m.set(1, 42)
+m.set(NaN, 7)
+m.set(true, 8)
+m.set(obj, 9)
+m.set(null, 5)
+console.log(m.get('bar'))
+console.log(m.get(1))
+console.log(m.get(NaN))
+console.log(m.get(true))
+console.log(m.get(obj))
+console.log(m.get(null))
+console.log(m.size)
+`, "0\n42\n7\n8\n9\n5\n6")
+}
+
+// SameValueZero over an any-keyed map (forced heterogeneous by the string
+// key): NaN keys are equal to one another, and +0 and -0 collapse to a single
+// normalized key (TDD-00211).
+func TestE2EMapAnyKeySameValueZero(t *testing.T) {
+	assertOutput(t, `
+const m = new Map()
+m.set('s', 0)
+m.set(NaN, 1)
+m.set(NaN, 2)
+console.log(m.size)
+console.log(m.get(NaN))
+m.set(-0, 99)
+console.log(m.get(0))
+console.log(m.size)
+`, "2\n2\n99\n3")
+}
+
+// An empty `new Map()` probed with heterogeneous keys still needs the any-keyed
+// runtime even though nothing was ever set — the lookup keys widen it too.
+func TestE2EMapAnyKeyEmptyHas(t *testing.T) {
+	assertOutput(t, `
+const m = new Map()
+console.log(m.has('str'))
+console.log(m.has(1))
+console.log(m.has(NaN))
+console.log(m.has(true))
+console.log(m.has(null))
+`, "false\nfalse\nfalse\nfalse\nfalse")
+}
+
 func TestE2EMapDelete(t *testing.T) {
 	assertOutput(t, `
 const m = new Map<string, number>()

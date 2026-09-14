@@ -121,6 +121,12 @@ type Emitter struct {
 	// `string[]` instead of the blind `number[]` default. Saved/restored per body
 	// like widenedBindings.
 	emptyArrayElems       map[string]Type
+	// emptyMapKV maps an untyped bare-`new Map()` binding in the current scope to
+	// the key/value types inferred from its later `map.set(k, v)` usages
+	// (TDD-00211) — so heterogeneous keys widen to an `any`-keyed map instead of
+	// riding the blind string-key/number-value default. Saved/restored per body
+	// like emptyArrayElems.
+	emptyMapKV            map[string]mapKV
 	regCtr                int
 	labelCtr              int
 	strConsts             map[string]string // Go string value → @.s<n> name
@@ -134,6 +140,8 @@ type Emitter struct {
 	regexMode             string          // "" (== the default, resolving to the highest implemented ES stage) or "pcre"/"es-ascii"/"es-unicode" — see SetRegexMode / TDD-00067
 	bigintBackend         string          // "" (== "libtommath", the default) or "gmp" — the __kml_bigint_* ABI implementation to link. See SetBigIntBackend / TDD-00074
 	compatMode            string          // "" (== "strict", the default) or "js" — the whole-program compatibility axis. See SetCompatMode / TDD-00075
+	noAny                 bool            // --no-any (strict lane only): ban any/unknown. See SetNoAny / TDD-00209
+	noAnyErr              error           // first --no-any violation seen during type resolution; surfaced by EmitProgram
 	cryptoBackend         string          // "" (== "openssl", the default) or "commoncrypto" — the __kml_crypto_* ABI implementation to compile+link. See SetCryptoBackend / TDD-00104
 	webviewBackend        string          // "" (== "system", the default) or cef/qt/sailfish — which webview_* shim to compile+link. See SetWebviewBackend / TDD-00144
 	usesCrypto            bool            // set the first time any crypto.subtle operation is emitted (drives backend compile+link in main.go)
@@ -234,6 +242,21 @@ type Emitter struct {
 	// (finding a referenced value's top-level declaration before value scope is
 	// populated).
 	prog *ast.Program
+	// constRegexLits maps an unambiguous `const <name> = /regex/` binding to its
+	// regex literal, for resolving a replace()/replaceAll() pattern's static
+	// capture count. constRegexAmbig blacklists names declared more than once
+	// (any kind/scope), so a shadowed name is never misattributed;
+	// constRegexScanned marks the one-time lazy scan done. See
+	// staticRegexCaptureCount (emit_regexp_replace.go).
+	constRegexLits    map[string]*ast.NewRegExpExpression
+	constRegexAmbig   map[string]bool
+	constRegexScanned bool
+	// constRegexNonConst marks a recorded regex-literal binding as `let`/`var`
+	// (not `const`); it is honored only if constRegexReassigned shows the name is
+	// never written after declaration (TDD-00210 follow-up — the String.replace
+	// A4 files bind their pattern with `var`). See constRegexLiteral.
+	constRegexNonConst   map[string]bool
+	constRegexReassigned map[string]bool
 	// typeofResolving guards against infinite recursion while resolving a
 	// self- or mutually-referential `typeof value` query (ADR-00389).
 	typeofResolving map[string]bool
@@ -848,6 +871,9 @@ type Emitter struct {
 	usedSortClosGlobal      bool
 	usedMapStrHelpers       bool
 	usedMapNumHelpers       bool
+	usedMapAnyHelpers       bool
+	usedMapSvz              bool
+	usedMapAnyHash          bool
 	usedMapClear            bool
 	usedJSONConcat2         bool
 	usedEventEmitterRuntime bool
@@ -1146,6 +1172,14 @@ func (e *Emitter) UsesFFIDl() bool { return e.usedFFIDl }
 // genuine strict-vs-JS tradeoff; global-shadowing (the old -globals flag) is
 // handled resolver-side, so this drives the emitter-side inhabitants.
 func (e *Emitter) SetCompatMode(mode string) { e.compatMode = mode }
+
+// SetNoAny enables --no-any (TDD-00209): the any/unknown escape hatch is banned.
+// The CLI only sets it under the strict lane (ignored with a warning under
+// -compat=js), so noAnyMode need not re-check the mode.
+func (e *Emitter) SetNoAny(on bool) { e.noAny = on }
+
+// noAnyMode reports whether the any/unknown ban is active.
+func (e *Emitter) noAnyMode() bool { return e.noAny }
 
 // SetOptimizeMemory toggles TDD-00134's allocation optimizations (Stage 1:
 // escape analysis → stack allocation of non-escaping object literals).
@@ -1577,6 +1611,9 @@ func (e *Emitter) indexSignatureType(valAnnot *ast.TypeAnnotation) Type {
 func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	if ta == nil {
 		return TypeI64 // default for untyped numeric variables
+	}
+	if e.noAny {
+		e.checkNoAnyAnnotation(ta)
 	}
 	// Depth guard against a self-referential type (`type T = { next: T }`, a
 	// recursive generic alias, a recursive index signature) — a fixed-shape
@@ -2165,6 +2202,7 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// body in emit_func.go; this sets the module-scope set.
 	e.widenedBindings = e.crossTypeWidenedBindings(prog.Body)
 	e.emptyArrayElems = e.inferEmptyArrayElemTypes(prog.Body)
+	e.emptyMapKV = e.inferEmptyMapKVTypes(prog.Body)
 
 	// Pass 1.7: promote top-level simple `const`/`let`/`var` to module globals
 	// (TDD-00093) so the function bodies emitted next can read them (a named
@@ -2265,6 +2303,8 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// can read it later without needing to be threaded through explicitly.
 	e.emitGlobal("@__argv_ptr = internal global ptr null, align 8")
 	e.emitGlobal("@__argv_len = internal global i64 0, align 8")
+	e.emitGlobal("@__process_argv_ptr = internal global ptr null, align 8")
+	e.emitGlobal("@__process_argv_len = internal global i64 0, align 8")
 	argc64 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = zext i32 %%argc to i64", argc64))
 	argvSrc := "%argv"
@@ -2298,6 +2338,17 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_argv_headerize(i64 %s, ptr %s)", argvHdr, argc64, argvSrc))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__argv_ptr, align 8", argvHdr))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__argv_len, align 8", argc64))
+	// process.argv is Node-shaped ([execPath, execPath, ...userArgs]) — the
+	// executable path appears at index 0 AND 1, so process.argv.slice(2) is the
+	// user arguments, matching Node / a Node single-executable app. The raw
+	// @__argv_ptr above keeps its OS shape for execv/fork/IPC; only process.*
+	// reads use @__process_argv_ptr.
+	procArgv := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_argv_node_shape(i64 %s, ptr %s)", procArgv, argc64, argvHdr))
+	procArgc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", procArgc, argc64))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__process_argv_ptr, align 8", procArgv))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__process_argv_len, align 8", procArgc))
 
 	// gc mode: snapshot Boehm's GC_stackbottom (the process's real stack
 	// base, already valid here since the gcshim's constructor-attribute
@@ -2585,6 +2636,11 @@ done:
 	out.WriteString("}\n")
 	if e.islandHash != "" {
 		e.emitIslandGlue(prog, &out)
+	}
+	// --no-any (TDD-00209): surface the first any/unknown annotation seen during
+	// type resolution as a clean compile error, superseding the produced IR.
+	if e.noAnyErr != nil {
+		return "", e.noAnyErr
 	}
 	return out.String(), nil
 }
@@ -3000,6 +3056,11 @@ func (e *Emitter) buildErasedFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 // silently drift apart the way emitFunctionDecl's own once did (see the
 // comment on the return-type fallback below).
 func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
+	// A function that reads `arguments` gains an implicit trailing `any[]` rest
+	// parameter here, at the one authoritative signature computation, so the
+	// definition site and every call site agree on the variadic arity
+	// (TDD-00210 Stage 1). Idempotent — re-inference sweeps re-enter this.
+	maybeAddArgumentsRestParam(fd)
 	retType := TypeVoid
 	if fd.ReturnType != nil {
 		retType = e.resolveType(fd.ReturnType)
@@ -3011,7 +3072,11 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 		if p.Type != nil {
 			pty = e.resolveType(p.Type)
 		} else if p.Rest {
-			pty = ArrayOf(TypeI64) // default rest element type: number
+			if p.Name == argumentsRestParam {
+				pty = ArrayOf(TypeAny) // implicit `arguments` rest: boxed elements (TDD-00210)
+			} else {
+				pty = ArrayOf(TypeI64) // default rest element type: number
+			}
 		} else if i < len(jsOverride) && jsOverride[i].ty.IR != "" && !jsOverride[i].conflict {
 			// `-compat=js` call-site inference (TDD-00022 sub-problem 1 /
 			// TDD-00005 option 2): an unannotated parameter takes the type

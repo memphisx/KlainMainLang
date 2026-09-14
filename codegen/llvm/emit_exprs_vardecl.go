@@ -114,7 +114,20 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 				keyTy, valTy = *annTy.MapKey, *annTy.MapVal
 			}
 		}
-		return MapType(keyTy, valTy), true
+		// A bare `new Map()` takes its widened K/V from the pre-pass, matching
+		// emitMapVarDecl exactly so the promoted global's type agrees with the
+		// runtime family emitMapVarDecl creates (TDD-00211).
+		if init.KeyType == nil && init.ValType == nil && v.TypeAnnot == nil {
+			if kv, ok := e.emptyMapKV[v.Name]; ok {
+				if kv.keyKnown {
+					keyTy = kv.key
+				}
+				if kv.valKnown {
+					valTy = kv.val
+				}
+			}
+		}
+		return MapType(keyTy, forceAnyMapVal(keyTy, valTy)), true
 	case *ast.NewSetExpression:
 		if init.Init != nil {
 			return Type{}, false
@@ -790,6 +803,11 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			// `expr!` — the operand's type with null/undefined stripped
 			// (TDD-00187); inferExprType handles the unwrap.
 			ty = e.inferExprType(init)
+		case *ast.AsExpression:
+			// `expr as T` — a narrowing from a dynamic operand adopts T, so the
+			// binding's slot is the concrete asserted type (ADR-00929);
+			// inferExprType decides narrow-vs-erase.
+			ty = e.inferExprType(init)
 		case *ast.SequenceExpression:
 			// The comma operator's value is its last operand's — inferExprType
 			// handles that; without this case the switch's default left `ty` at
@@ -1089,6 +1107,14 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 
 	if containsDynamicElement(ty) {
 		return fmt.Errorf("%d:%d: any/unknown is not yet supported as an array element or object field type", v.GetPos().Line, v.GetPos().Col)
+	}
+	// --no-any (TDD-00209 Stage 2): an unannotated binding whose value is itself
+	// `any` — e.g. `const x = JSON.parse(s)` with no `as T` — is the value-level
+	// escape hatch. Reject it too (a constrained union has UnionMembers and is a
+	// checked type, not `any`). Explicit `: any` annotations are already caught in
+	// resolveType.
+	if e.noAny && v.TypeAnnot == nil && ty.IsDynamic && len(ty.UnionMembers) == 0 {
+		return fmt.Errorf("%d:%d: this binding is inferred as 'any' under --no-any — annotate the result with a concrete type (e.g. `JSON.parse(s) as Rec`): this compiler was asked to reject every dynamic escape hatch", v.GetPos().Line, v.GetPos().Col)
 	}
 	if err := validateCompositeType(ty, v.GetPos().Line, v.GetPos().Col); err != nil {
 		return err

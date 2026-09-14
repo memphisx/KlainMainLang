@@ -114,6 +114,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	savedHoistedCaptures := e.hoistedCaptures
 	savedWidened := e.widenedBindings
 	savedEmptyArrayElems := e.emptyArrayElems
+	savedEmptyMapKV := e.emptyMapKV
 	if decl.Body != nil {
 		paramNames := make([]string, len(decl.Params))
 		for i, p := range decl.Params {
@@ -122,10 +123,12 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		e.hoistedCaptures = capturedLocalNames(decl.Body.Body, paramNames)
 		e.widenedBindings = e.crossTypeWidenedBindings(decl.Body.Body)
 		e.emptyArrayElems = e.inferEmptyArrayElemTypes(decl.Body.Body)
+		e.emptyMapKV = e.inferEmptyMapKVTypes(decl.Body.Body)
 	} else {
 		e.hoistedCaptures = nil
 		e.widenedBindings = nil
 		e.emptyArrayElems = nil
+		e.emptyMapKV = nil
 	}
 	defer func() {
 		e.breakStack = savedBreakStack
@@ -137,6 +140,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		e.hoistedCaptures = savedHoistedCaptures
 		e.widenedBindings = savedWidened
 		e.emptyArrayElems = savedEmptyArrayElems
+		e.emptyMapKV = savedEmptyMapKV
 	}()
 	e.allocas = strings.Builder{}
 	e.body = strings.Builder{}
@@ -388,70 +392,169 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	return nil
 }
 
-// =============================================================================
-// synthesizeArgumentsObject binds a local `arguments` array, built from the
-// declared parameters, when the function body references `arguments` (ADR-00387).
-//
-// V1 scope: a regular (non-task) named function body whose parameters are all
-// the same simple (scalar/string) type, with no rest or destructured parameter.
-// Since this compiler has static arity, the synthesized `arguments` reflects
-// exactly the declared parameters — matching real JS for a call that passes
-// every declared argument. It does not grow with extra untyped arguments (there
-// is no variadic beyond an explicit `...rest`, which callers use directly), and
-// it is unavailable in an arrow function (real JS arrows have no own
-// `arguments`; here the reference simply stays an undefined-variable error).
-func (e *Emitter) synthesizeArgumentsObject(decl *ast.FunctionDeclaration, sig FuncSig) error {
-	if decl.Body == nil {
-		return nil
-	}
-	// A parameter named `arguments` shadows the object — the user binding wins.
-	for _, p := range decl.Params {
+// argumentsRestParam is the synthetic name of the implicit trailing rest
+// parameter (`...__kml_arguments_rest: any[]`) added to any function that reads
+// `arguments` (TDD-00210). The existing rest-collection call ABI packs every
+// overflow argument into it, so `arguments` can reflect the values *actually*
+// passed rather than only the declared parameters. Chosen to be unspellable in
+// source so it never collides with a real binding.
+const argumentsRestParam = "__kml_arguments_rest"
+
+// functionUsesArguments reports whether fd's body references `arguments` as a
+// free variable — i.e. no parameter named `arguments` shadows it. Reused by
+// buildFunctionSig (to add the implicit rest) and synthesizeArgumentsObject (to
+// build the object), so the two never disagree about which functions are
+// variadic.
+func paramsUseArguments(params []ast.Param, body []ast.Statement) bool {
+	for _, p := range params {
 		if p.Name == "arguments" {
-			return nil
+			return false // a user binding named `arguments` wins
 		}
 	}
-	// Only synthesize when the body actually references `arguments`, so an
-	// ordinary function pays nothing.
 	bound := map[string]bool{}
-	addParamBoundNames(bound, decl.Params)
+	addParamBoundNames(bound, params)
 	refs := map[string]bool{}
-	scanStmtsFV(decl.Body.Body, bound, refs)
-	if !refs["arguments"] {
+	scanStmtsFV(body, bound, refs)
+	return refs["arguments"]
+}
+
+func functionUsesArguments(fd *ast.FunctionDeclaration) bool {
+	return fd != nil && fd.Body != nil && paramsUseArguments(fd.Params, fd.Body.Body)
+}
+
+// hasArgumentsRestParamSlice reports whether params already ends with the
+// synthetic arguments-rest parameter (idempotency guard).
+func hasArgumentsRestParamSlice(params []ast.Param) bool {
+	n := len(params)
+	return n > 0 && params[n-1].Rest && params[n-1].Name == argumentsRestParam
+}
+
+// maybeAddArgumentsRestParams returns params with the implicit
+// `...__kml_arguments_rest` parameter appended when the body reads `arguments`
+// and there is no explicit rest yet (TDD-00210 Stage 1). Idempotent, so the
+// several sites that build a function's signature (buildFunctionSig,
+// emitFunctionExpression, inferExprType) can all call it and agree on the
+// resulting variadic arity. A function with an explicit `...rest` is left
+// untouched: synthesizeArgumentsObject keeps V1's clean rejection for that.
+func maybeAddArgumentsRestParams(params []ast.Param, body []ast.Statement) []ast.Param {
+	if body == nil || hasArgumentsRestParamSlice(params) {
+		return params
+	}
+	for _, p := range params {
+		if p.Rest {
+			return params // explicit rest — don't add a second rest
+		}
+	}
+	if !paramsUseArguments(params, body) {
+		return params
+	}
+	return append(params, ast.Param{Name: argumentsRestParam, Rest: true})
+}
+
+// maybeAddArgumentsRestParam mutates a function declaration in place — the
+// named/nested-function entry point (buildFunctionSig).
+func maybeAddArgumentsRestParam(fd *ast.FunctionDeclaration) {
+	if fd == nil || fd.Body == nil {
+		return
+	}
+	fd.Params = maybeAddArgumentsRestParams(fd.Params, fd.Body.Body)
+}
+
+// hasArgumentsRestParam reports whether fd carries the synthetic rest param.
+func hasArgumentsRestParam(fd *ast.FunctionDeclaration) bool {
+	return hasArgumentsRestParamSlice(fd.Params)
+}
+
+// =============================================================================
+// synthesizeArgumentsObject binds a local `arguments` array reflecting the
+// values actually passed to the call (TDD-00210): each declared parameter boxed
+// to `any`, followed by the overflow arguments the implicit rest parameter
+// collected. Elements are heterogeneous, so `arguments` is an `any[]` (one NaN
+// box per slot) and `arguments[i]` has type `any`. Skipped for a may-suspend
+// task body (params live in %__taskargs, not plain allocas) and unavailable in
+// an arrow function (real JS arrows have no own `arguments`; the reference stays
+// an undefined-variable error).
+func (e *Emitter) synthesizeArgumentsObject(decl *ast.FunctionDeclaration, sig FuncSig) error {
+	if !functionUsesArguments(decl) {
 		return nil
 	}
-	elemTy := TypeI64 // a zero-parameter `arguments` is an empty number[]
-	if len(decl.Params) > 0 {
-		for _, p := range decl.Params {
-			if p.Rest {
-				return fmt.Errorf("%d:%d: `arguments` is not supported in a function with a rest parameter — iterate the `...%s` parameter directly", decl.GetPos().Line, decl.GetPos().Col, p.Name)
-			}
-			if p.ArrayPattern != nil || p.ObjectPattern != nil {
-				return fmt.Errorf("%d:%d: `arguments` is not supported in a function with a destructured parameter", decl.GetPos().Line, decl.GetPos().Col)
-			}
+	// The implicit rest parameter (maybeAddArgumentsRestParam) is the last
+	// declared param; everything before it is a real declared parameter.
+	declared := decl.Params
+	restName := ""
+	if hasArgumentsRestParam(decl) {
+		declared = decl.Params[:len(decl.Params)-1]
+		restName = argumentsRestParam
+	}
+	// V1 keeps the clean rejection for an explicit `...rest` or a destructured
+	// parameter combined with `arguments` (open question in TDD-00210).
+	for _, p := range declared {
+		if p.Rest {
+			return fmt.Errorf("%d:%d: `arguments` is not supported in a function with a rest parameter — iterate the `...%s` parameter directly", decl.GetPos().Line, decl.GetPos().Col, p.Name)
 		}
-		elemTy = sig.ParamTypes[0]
-		for i := 1; i < len(sig.ParamTypes); i++ {
-			if sig.ParamTypes[i].IR != elemTy.IR || sig.ParamTypes[i].IsArray != elemTy.IsArray {
-				return fmt.Errorf("%d:%d: `arguments` is only supported when every parameter shares one type (this compiler's arrays are homogeneous) — use a `...rest` parameter for mixed argument types", decl.GetPos().Line, decl.GetPos().Col)
-			}
-		}
-		if elemTy.IsArray || isNullableScalar(elemTy) || elemTy.IsDynamic {
-			return fmt.Errorf("%d:%d: `arguments` is not yet supported for array, nullable, or any/unknown parameter types", decl.GetPos().Line, decl.GetPos().Col)
+		if p.ArrayPattern != nil || p.ObjectPattern != nil {
+			return fmt.Errorf("%d:%d: `arguments` is not supported in a function with a destructured parameter", decl.GetPos().Line, decl.GetPos().Col)
 		}
 	}
-	// Build the array from the parameter values, reusing the array-literal data
-	// path (each element loads its parameter, already in scope), then bind the
-	// two-alloca array Symbol under `arguments`.
-	elems := make([]ast.Expression, len(decl.Params))
-	for i, p := range decl.Params {
-		elems[i] = ast.NewIdentifier(p.Name, decl.GetPos())
+	numDeclared := int64(len(declared))
+
+	// Read the rest array's data pointer and length (the overflow arguments the
+	// call ABI already boxed and packed). Absent (a class method that declared
+	// no synthetic rest, or a defensive fallback) it contributes zero elements.
+	restData, restLen := "null", "0"
+	if restName != "" {
+		if sym, ok := e.lookup(restName); ok {
+			hdr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, sym.Ptr))
+			dReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dReg, hdr))
+			lenSlot := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lenSlot, arrayHeaderTy, hdr))
+			lReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lReg, lenSlot))
+			restData, restLen = dReg, lReg
+		}
 	}
-	dataReg, n, err := e.emitArrayLiteralData(ast.NewArrayLiteral(elems, decl.GetPos()), elemTy)
-	if err != nil {
-		return err
+
+	// Total length = declared params + overflow; allocate the boxed-element
+	// (i64-per-slot) backing buffer.
+	totalLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %d, %s", totalLen, numDeclared, restLen))
+	bytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, totalLen, TypeAny.Align()))
+	e.ensureMalloc()
+	dataReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", dataReg, bytes))
+
+	// Slot 0..n-1: each declared parameter, boxed to `any`. emitExpr loads the
+	// parameter's current value in whatever shape it was bound (scalar, string,
+	// array, nullable, object, any); emitBoxValue handles every one.
+	for i, p := range declared {
+		val, err := e.emitExpr(ast.NewIdentifier(p.Name, decl.GetPos()))
+		if err != nil {
+			return err
+		}
+		boxed, err := e.emitBoxValue(val)
+		if err != nil {
+			return err
+		}
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", gep, dataReg, i))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align %d", boxed.Ref, gep, TypeAny.Align()))
 	}
-	slot := e.newArrayHeaderSlot(dataReg, fmt.Sprintf("%d", n))
-	e.define("arguments", Symbol{Ptr: slot, Ty: ArrayOf(elemTy)})
+
+	// Slot n..: memcpy the already-boxed overflow elements in bulk.
+	if restName != "" {
+		dst := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", dst, dataReg, numDeclared))
+		copyBytes := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", copyBytes, restLen, TypeAny.Align()))
+		e.ensureMemcpy()
+		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", dst, restData, copyBytes))
+	}
+
+	slot := e.newArrayHeaderSlot(dataReg, totalLen)
+	e.define("arguments", Symbol{Ptr: slot, Ty: ArrayOf(TypeAny)})
 	return nil
 }
 
@@ -927,6 +1030,8 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		}
 	case *ast.NonNullExpression:
 		scanExprFV(x.Arg, bound, result)
+	case *ast.AsExpression:
+		scanExprFV(x.Expr, bound, result)
 	case *ast.NewTypedArrayExpression:
 		// `new Int32Array(buf)` inside a closure body: buf is a real free
 		// variable (was silently unscanned, later failing as "undefined
@@ -1558,13 +1663,21 @@ func capturedLocalNames(body []ast.Statement, paramNames []string) map[string]bo
 // walker does not descend into them (a rare closure-reassignment to a different
 // kind stays a clean rejection, a documented V1 edge).
 func (e *Emitter) crossTypeWidenedBindings(body []ast.Statement) map[string]bool {
-	if !e.compatJS() {
-		return nil
-	}
+	compatJS := e.compatJS()
 	untyped := map[string]bool{}
 	kinds := map[string]map[string]bool{}
+	// nullEvolve tracks untyped `let`/`var x = null` (or `= undefined`) bindings —
+	// TypeScript's "evolving any": such a binding has type `any`, and a later
+	// assignment gives it a concrete value. Both lanes widen it to the any-box
+	// when it is later reassigned (a plain `=` to a non-nullish value, or a
+	// logical-compound-assign `??=`/`||=`/`&&=`), so e.g. `let x = null; x ??= 1`
+	// stores 1 instead of a `double` into a null `ptr` slot (invalid IR). A
+	// never-reassigned null binding stays `null`-typed (unchanged behavior). This
+	// is independent of the -compat=js cross-kind widening below.
+	nullInit := map[string]bool{}
+	nullEvolve := map[string]bool{}
 	note := func(name string, t Type) {
-		if !untyped[name] {
+		if !untyped[name] || !compatJS {
 			return
 		}
 		if k := scalarTypeKind(t); k != "" {
@@ -1574,26 +1687,95 @@ func (e *Emitter) crossTypeWidenedBindings(body []ast.Statement) map[string]bool
 			kinds[name][k] = true
 		}
 	}
+	// declareWalk is set below (after walkExpr) so declare can descend into an
+	// initializer expression for nested assignments (`const o = { [x ??= 1]: 2 }`).
+	var declareWalk func(ast.Expression)
 	declare := func(v *ast.VarDeclaration) {
+		if declareWalk != nil {
+			declareWalk(v.Init) // a nested assignment in the init still counts
+		}
 		if v.Kind == "const" || v.TypeAnnot != nil {
 			return
 		}
 		untyped[v.Name] = true
+		if _, ok := v.Init.(*ast.NullLiteral); ok {
+			nullInit[v.Name] = true
+		}
 		if v.Init != nil {
 			note(v.Name, e.inferExprType(v.Init))
 		}
 	}
+	// noteAssign records a name assignment for both the cross-kind (compat=js)
+	// and the null-evolving (both-lane) widening decisions.
+	noteAssign := func(name, op string, rhs ast.Expression) {
+		if op == "=" {
+			note(name, e.inferExprType(rhs))
+		}
+		if nullInit[name] {
+			logical := op == "??=" || op == "||=" || op == "&&="
+			rhsNullish := false
+			if rhs != nil {
+				rt := e.inferExprType(rhs)
+				rhsNullish = rt.IsNull || rt.IsUndefined
+			}
+			if logical || (op == "=" && !rhsNullish) {
+				nullEvolve[name] = true
+			}
+		}
+	}
 	var walkExpr func(ast.Expression)
 	walkExpr = func(expr ast.Expression) {
-		as, ok := expr.(*ast.AssignmentExpression)
-		if !ok {
+		if expr == nil {
 			return
 		}
-		if id, ok := as.Left.(*ast.Identifier); ok && as.Op == "=" {
-			note(id.Name, e.inferExprType(as.Right))
+		switch ex := expr.(type) {
+		case *ast.AssignmentExpression:
+			if id, ok := ex.Left.(*ast.Identifier); ok {
+				noteAssign(id.Name, ex.Op, ex.Right)
+			}
+			walkExpr(ex.Left)
+			walkExpr(ex.Right)
+		case *ast.BinaryExpression:
+			walkExpr(ex.Left)
+			walkExpr(ex.Right)
+		case *ast.ConditionalExpression:
+			walkExpr(ex.Test)
+			walkExpr(ex.Consequent)
+			walkExpr(ex.Alternate)
+		case *ast.SequenceExpression:
+			for _, s := range ex.Exprs {
+				walkExpr(s)
+			}
+		case *ast.UnaryExpression:
+			walkExpr(ex.Arg)
+		case *ast.SpreadElement:
+			walkExpr(ex.Arg)
+		case *ast.CallExpression:
+			walkExpr(ex.Callee)
+			for _, a := range ex.Args {
+				walkExpr(a)
+			}
+		case *ast.MemberExpression:
+			walkExpr(ex.Object)
+		case *ast.IndexExpression:
+			walkExpr(ex.Object)
+			walkExpr(ex.Index)
+		case *ast.ArrayLiteral:
+			for _, el := range ex.Elements {
+				walkExpr(el)
+			}
+		case *ast.ObjectLiteral:
+			for _, p := range ex.Properties {
+				walkExpr(p.KeyExpr)
+				walkExpr(p.Value)
+			}
+		case *ast.TemplateLiteral:
+			for _, s := range ex.Exprs {
+				walkExpr(s)
+			}
 		}
-		walkExpr(as.Right)
 	}
+	declareWalk = walkExpr
 	var walkStmts func([]ast.Statement)
 	walkStmts = func(stmts []ast.Statement) {
 		for _, stmt := range stmts {
@@ -1652,8 +1834,18 @@ func (e *Emitter) crossTypeWidenedBindings(body []ast.Statement) map[string]bool
 	}
 	walkStmts(body)
 	result := map[string]bool{}
-	for name := range untyped {
-		if len(kinds[name]) > 1 {
+	if compatJS {
+		for name := range untyped {
+			if len(kinds[name]) > 1 {
+				result[name] = true
+			}
+		}
+	}
+	// Under --no-any the evolving-any widening is disabled: a null-initialized
+	// binding stays null-typed, so a later different-typed assignment hits the
+	// ordinary strict cross-type rejection (TDD-00209).
+	if !e.noAny {
+		for name := range nullEvolve {
 			result[name] = true
 		}
 	}
@@ -2127,6 +2319,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	savedHoistedCaptures := e.hoistedCaptures
 	savedWidened := e.widenedBindings
 	savedEmptyArrayElems := e.emptyArrayElems
+	savedEmptyMapKV := e.emptyMapKV
 	{
 		paramNames := make([]string, len(af.Params))
 		for i, p := range af.Params {
@@ -2136,14 +2329,17 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			e.hoistedCaptures = capturedLocalNames(af.Block.Body, paramNames)
 			e.widenedBindings = e.crossTypeWidenedBindings(af.Block.Body)
 			e.emptyArrayElems = e.inferEmptyArrayElemTypes(af.Block.Body)
+			e.emptyMapKV = e.inferEmptyMapKVTypes(af.Block.Body)
 		} else if af.Body != nil {
 			e.hoistedCaptures = capturedLocalNames([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}}, paramNames)
 			e.widenedBindings = e.crossTypeWidenedBindings([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}})
 			e.emptyArrayElems = e.inferEmptyArrayElemTypes([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}})
+			e.emptyMapKV = e.inferEmptyMapKVTypes([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}})
 		} else {
 			e.hoistedCaptures = nil
 			e.widenedBindings = nil
 			e.emptyArrayElems = nil
+			e.emptyMapKV = nil
 		}
 	}
 	defer func() {
@@ -2156,6 +2352,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 		e.hoistedCaptures = savedHoistedCaptures
 		e.widenedBindings = savedWidened
 		e.emptyArrayElems = savedEmptyArrayElems
+		e.emptyMapKV = savedEmptyMapKV
 	}()
 
 	e.allocas = strings.Builder{}
@@ -2635,9 +2832,26 @@ func (e *Emitter) inferUnannotatedReturnType(block *ast.BlockStatement, paramNam
 	for i, name := range paramNames {
 		e.define(name, Symbol{Ty: paramTypes[i]})
 	}
+	defineArgumentsForInference(e, paramNames)
 	inferred := e.inferBlockReturnExpr(block, retExpr)
 	e.popScope()
 	return inferred, true
+}
+
+// defineArgumentsForInference makes a bare `arguments` reference resolve to
+// `any[]` while a function's un-annotated return type is inferred (TDD-00210).
+// `arguments` isn't a real bound symbol until emit time (synthesizeArgumentsObject),
+// so without this a body like `return arguments[0] + arguments[1]` would infer
+// its element as the scalar default and pick a lossy concrete return type; the
+// implicit rest parameter's presence is the marker that the function reads
+// `arguments`.
+func defineArgumentsForInference(e *Emitter, paramNames []string) {
+	for _, n := range paramNames {
+		if n == argumentsRestParam {
+			e.define("arguments", Symbol{Ty: ArrayOf(TypeAny)})
+			return
+		}
+	}
 }
 
 // inferUnannotatedReturnTypeParams is inferUnannotatedReturnType's pattern-aware
@@ -2652,9 +2866,12 @@ func (e *Emitter) inferUnannotatedReturnTypeParams(block *ast.BlockStatement, pa
 		return Type{}, false
 	}
 	e.pushScope()
+	names := make([]string, len(params))
 	for i, p := range params {
 		e.definePatternParamForInference(p, paramTypes[i], i)
+		names[i] = p.Name
 	}
+	defineArgumentsForInference(e, names)
 	inferred := e.inferBlockReturnExpr(block, retExpr)
 	e.popScope()
 	return inferred, true
@@ -3031,6 +3248,11 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	if fe.IsGenerator {
 		return Value{}, fmt.Errorf("%d:%d: a generator expression is only supported as a top-level `const/let/var G = function* ...` binding (V1) — using it as a value (an argument, a nested binding, or an IIFE) is not yet supported", fe.GetPos().Line, fe.GetPos().Col)
 	}
+	// A function expression that reads `arguments` gains the implicit `any[]`
+	// rest parameter (TDD-00210), the same as a named function — idempotent and
+	// mirrored in inferExprType so the call site and definition agree on arity.
+	// (Arrow functions are excluded: they have no own `arguments`.)
+	fe.Params = maybeAddArgumentsRestParams(fe.Params, fe.Body.Body)
 	// Gather captured variables BEFORE resetting emitter state — the
 	// free-variable scan needs the enclosing scope's context (same
 	// ordering gatherCaptures uses for arrow functions).
@@ -3082,7 +3304,9 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	// Resolve param types.
 	paramTypes := make([]Type, len(fe.Params))
 	for i, p := range fe.Params {
-		if p.Rest && p.Type == nil {
+		if p.Rest && p.Name == argumentsRestParam {
+			paramTypes[i] = ArrayOf(TypeAny) // implicit `arguments` rest (TDD-00210)
+		} else if p.Rest && p.Type == nil {
 			paramTypes[i] = ArrayOf(TypeF64)
 		} else if p.Type == nil && i < len(hints) {
 			paramTypes[i] = hints[i]
@@ -3221,6 +3445,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	savedHoistedCaptures := e.hoistedCaptures
 	savedWidened := e.widenedBindings
 	savedEmptyArrayElems := e.emptyArrayElems
+	savedEmptyMapKV := e.emptyMapKV
 	{
 		paramNames := make([]string, len(fe.Params))
 		for i, p := range fe.Params {
@@ -3230,10 +3455,12 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			e.hoistedCaptures = capturedLocalNames(fe.Body.Body, paramNames)
 			e.widenedBindings = e.crossTypeWidenedBindings(fe.Body.Body)
 			e.emptyArrayElems = e.inferEmptyArrayElemTypes(fe.Body.Body)
+			e.emptyMapKV = e.inferEmptyMapKVTypes(fe.Body.Body)
 		} else {
 			e.hoistedCaptures = nil
 			e.widenedBindings = nil
 			e.emptyArrayElems = nil
+			e.emptyMapKV = nil
 		}
 	}
 	defer func() {
@@ -3246,6 +3473,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		e.hoistedCaptures = savedHoistedCaptures
 		e.widenedBindings = savedWidened
 		e.emptyArrayElems = savedEmptyArrayElems
+		e.emptyMapKV = savedEmptyMapKV
 	}()
 
 	e.allocas = strings.Builder{}
@@ -3356,6 +3584,14 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	// Fill body-default parameters now that parameters and captures are in scope
 	// (TDD-00206 Stage 2). closureParamTypes is the pre-consumed copy.
 	if err := e.emitBodyDefaultPrologue(fe.Params, closureParamTypes, fe.GetPos()); err != nil {
+		return Value{}, err
+	}
+
+	// A function expression that reads `arguments` binds it from the boxed
+	// declared params + the implicit rest's overflow (TDD-00210), reusing the
+	// named-function builder via a synthetic declaration (the same adapter the
+	// class-method path uses). Arrow functions never reach here.
+	if err := e.synthesizeArgumentsObject(&ast.FunctionDeclaration{Params: fe.Params, Body: fe.Body}, FuncSig{}); err != nil {
 		return Value{}, err
 	}
 
@@ -3991,6 +4227,61 @@ func (cb Callback) retType() Type {
 
 func (cb Callback) arity() int { return len(cb.paramTypes()) }
 
+// hasRest reports whether the callback's last parameter is a rest slot — an
+// explicit `...rest` or the implicit `arguments` rest (TDD-00210). A HOF that
+// builds the JS argument sequence uses this to decide it should pass *every*
+// available argument (the callback collects the overflow) rather than truncate
+// to the declared fixed arity.
+func (cb Callback) hasRest() bool {
+	switch cb.kind {
+	case cbClosure:
+		return cb.ty.FuncHasRest
+	case cbBuiltinConv:
+		return false
+	}
+	return cb.sig.HasRest
+}
+
+// acceptsArgAt reports whether the callback would receive an argument passed at
+// position i (0-based) — true for any fixed parameter slot, and for every
+// position once a rest parameter is present (the rest collects them). HOFs use
+// this in place of a bare `arity() >= n` check so an `arguments`-using callback
+// still receives the index/array extras.
+func (cb Callback) acceptsArgAt(i int) bool {
+	if cb.hasRest() {
+		return true
+	}
+	return i < cb.arity()
+}
+
+// packBoxedRestArg materializes already-evaluated callback overflow arguments
+// into a heap `any[]` backing buffer (one NaN box per slot) and returns the
+// (header, length) pair for the two-word (ptr, i64) rest ABI. Mirrors the
+// rest-packing every direct call site already does (emit_call.go), for the
+// callback path (TDD-00210 Stage 3).
+func (e *Emitter) packBoxedRestArg(vals []Value) (header, lenReg string, err error) {
+	n := int64(len(vals))
+	if n == 0 {
+		return e.emptyArrayArgHeader(), "0", nil
+	}
+	e.ensureMalloc()
+	data := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", data, n*int64(TypeAny.Align())))
+	for i, v := range vals {
+		// emitBoxValue, not coerce: a NaN box is itself an i64, so coerce's
+		// IR-equality shortcut would pass an i64-typed value (a HOF index) through
+		// unboxed, storing a raw integer where a box is expected.
+		boxed, berr := e.emitBoxValue(v)
+		if berr != nil {
+			return "", "", berr
+		}
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", gep, data, i))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align %d", boxed.Ref, gep, TypeAny.Align()))
+	}
+	return e.newArrayHeader(data, fmt.Sprintf("%d", n)), fmt.Sprintf("%d", n), nil
+}
+
 // resolveCallback evaluates a callback argument (arrow function, closure var, or
 // named function identifier) and returns a Callback descriptor.
 func (e *Emitter) resolveCallback(arg ast.Expression) (Callback, error) {
@@ -4199,6 +4490,20 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 	params := cb.paramTypes()
 	retTy := cb.retType()
 
+	// A callback with a rest parameter (an explicit `...rest` or the implicit
+	// `arguments` rest, TDD-00210) collects every trailing argument into that
+	// slot. Reconcile only the fixed parameters below; the overflow is packed
+	// into the rest array and appended as a (ptr, i64) pair in each call branch.
+	hasRest := cb.hasRest()
+	fixedCount := len(params)
+	if hasRest {
+		fixedCount--
+	}
+	var restVals []Value
+	if hasRest && len(args) > fixedCount {
+		restVals = args[fixedCount:]
+	}
+
 	// Reconcile the argument count to the callback's declared arity so the
 	// emitted call always has exactly as many operands as the callee /
 	// function-pointer type declares. A higher-order method passes a fixed
@@ -4210,8 +4515,8 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 	// zero value of its type so the call is always well-typed. Fixes the
 	// long-standing HOF-arity invalid-IR cluster (e.g. a zero-parameter
 	// predicate `[].findIndex(function () {})`, or a default-param skip).
-	coerced := make([]Value, len(params))
-	for i := range params {
+	coerced := make([]Value, fixedCount)
+	for i := 0; i < fixedCount; i++ {
 		switch {
 		case i < len(args):
 			coerced[i] = e.coerce(args[i], params[i])
@@ -4287,6 +4592,16 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 			}
 			argParts = append(argParts, params[i].IR+" "+v.Ref)
 		}
+		// Overflow arguments packed into the trailing rest slot (TDD-00210): a
+		// boxed `any[]` for the implicit `arguments` rest, or an explicit
+		// `...rest`. tyParts above already appended the (ptr, i64) rest ABI.
+		if hasRest {
+			header, lenReg, rerr := e.packBoxedRestArg(restVals)
+			if rerr != nil {
+				return Value{}, rerr
+			}
+			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
+		}
 		// Argument-presence mask for a body-filled-default closure (TDD-00206
 		// Stage 2): the callee expects a trailing i32. The mask's low bits mark
 		// the genuinely-provided arguments (`args`, before the arity padding
@@ -4294,8 +4609,8 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 		// back to its default rather than the zero pad.
 		if cb.ty.FuncHasDefaultMask {
 			provided := len(args)
-			if provided > len(params) {
-				provided = len(params)
+			if provided > fixedCount {
+				provided = fixedCount
 			}
 			mask := (uint64(1) << uint(provided)) - 1
 			fnType = fnType[:len(fnType)-1] + ", i32)"
@@ -4331,6 +4646,16 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 				continue
 			}
 			argParts = append(argParts, params[i].IR+" "+v.Ref)
+		}
+		// Overflow into the trailing rest slot (TDD-00210) — same as the
+		// cbClosure branch; a named function used as a callback packs its rest
+		// identically.
+		if hasRest {
+			header, lenReg, rerr := e.packBoxedRestArg(restVals)
+			if rerr != nil {
+				return Value{}, rerr
+			}
+			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 		}
 		argStr := strings.Join(argParts, ", ")
 		if retTy.IR == "void" {

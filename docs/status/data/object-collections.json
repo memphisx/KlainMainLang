@@ -190,8 +190,12 @@
           {
             "feature": "`Map.set/get/has/delete/keys/values`",
             "status": "implemented",
+            "caveats": [
+              "A pure-numeric bare `new Map()` uses the raw-bits numeric runtime, which doesn't yet collapse `-0`/`+0` to one key; a heterogeneous (any-keyed) map does normalize them ([TDD-00211](../tdd/TDD-00211.md))"
+            ],
             "notes": [
-              "`.get()` (`Map` and `WeakMap`) returns `V \\| undefined` — a missing key reads as a real `undefined` (as in Node), distinguishable from a stored `0`/`false`/`\"\"` via the presence-flagged nullable-scalar representation (scalar `V`) or the null-pointer miss typed `undefined` (pointer `V`); narrow / `?? d` / `!` before use ([TDD-00064](../tdd/TDD-00064.md)/[ADR-00833](../adr/ADR-00833.md)). (`URLSearchParams.get` is spec'd `string \\| null` and keeps `null`.)"
+              "`.get()` (`Map` and `WeakMap`) returns `V \\| undefined` — a missing key reads as a real `undefined` (as in Node), distinguishable from a stored `0`/`false`/`\"\"` via the presence-flagged nullable-scalar representation (scalar `V`) or the null-pointer miss typed `undefined` (pointer `V`); narrow / `?? d` / `!` before use ([TDD-00064](../tdd/TDD-00064.md)/[ADR-00833](../adr/ADR-00833.md)). (`URLSearchParams.get` is spec'd `string \\| null` and keeps `null`.)",
+              "Keys of one kind pick a specialized runtime (string keys content-hashed, numeric keys raw-i64); a bare `new Map()` whose keys are **heterogeneous** widens to an any-keyed runtime with NaN-boxed keys/values and JS **SameValueZero** equality — string/number/NaN/boolean/object/array/`null`/`undefined` keys coexist, `NaN` matches `NaN`, and objects key by reference. Its values are `any` (boxed) ([TDD-00211](../tdd/TDD-00211.md)/[ADR-00932](../adr/ADR-00932.md))"
             ]
           },
           {

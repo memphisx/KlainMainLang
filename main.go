@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -36,6 +37,8 @@ func main() {
 	finalizers := flag.String("finalizers", "off", "FinalizationRegistry exit `diagnostics`: off (default) or report — under -mm=manual, print one line per registration still live at exit (its target was never freed — a labeled leak) before running its cleanup callback")
 	target := flag.String("target", "", "cross-compile for another platform instead of the host. Either a full clang `triple` (e.g. aarch64-linux-gnu) or a preset name: sfos-aarch64 (Sailfish OS on 64-bit ARM → aarch64-linux-gnu). Requires --sysroot pointing at the target's root filesystem. The emitted IR and the whole embedded C runtime are built for the target; a genuine cross-arch link needs lld on PATH (used automatically when present). Default (empty): build for the host")
 	sysroot := flag.String("sysroot", "", "for --target: `path` to the target platform's root filesystem (its /usr/include headers and /usr/lib libraries), passed to clang as --sysroot. Required whenever --target is set")
+	noAny := flag.Bool("no-any", false, "ban the any/unknown dynamic escape hatch: every explicit any/unknown annotation (and evolving-any from an untyped null-initialized binding) becomes a compile error, so the produced binary is provably fully static — no NaN-boxing, no runtime type tags. A separate opt-in on top of strict, not a compat mode. Ignored (with a warning) under -compat=js")
+	runNow := flag.Bool("run", false, "compile and immediately run (like `go run`): build the binary into a temp directory, execute it with any arguments given after the filename, propagate its exit code, then delete it. Flags precede the filename; program arguments follow it (an optional `--` separator is skipped). Cannot combine with --target (a cross-built binary can't run here) or -emit-llvm")
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintln(out, "usage: klainmain [flags] <file.ts>")
@@ -68,6 +71,15 @@ func main() {
 	if flag.NArg() < 1 {
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	if *runNow {
+		if *target != "" {
+			fatal("--run cannot be combined with --target: a binary cross-compiled for another platform can't be executed on this host")
+		}
+		if *emitLLVM {
+			fatal("--run cannot be combined with -emit-llvm: -emit-llvm stops before producing an executable to run")
+		}
 	}
 
 	if *static && runtime.GOOS == "darwin" {
@@ -214,6 +226,13 @@ func main() {
 	em.SetCryptoBackend(*cryptoBackend)
 	em.SetWebviewBackend(*webviewBackend)
 	em.SetCompatMode(*compat)
+	if *noAny {
+		if *compat == "js" {
+			fmt.Fprintln(os.Stderr, "warning: --no-any is ignored under -compat=js (js is best-effort untyped; there is no `any` to ban)")
+		} else {
+			em.SetNoAny(true)
+		}
+	}
 	em.SetEmitDecoratorMetadata(*emitDecoratorMetadata)
 	em.SetDecoratorDialect(*decorators)
 	em.SetFinalizersMode(*finalizers)
@@ -250,7 +269,18 @@ func main() {
 	}
 
 	outBin := *output
-	if outBin == "" {
+	// --run builds into a temp directory (cleaned up after execution), so it
+	// never litters the source tree; an explicit -o is ignored in that mode.
+	var runTmpDir string
+	if *runNow {
+		d, terr := os.MkdirTemp("", "klainrun-")
+		if terr != nil {
+			fatal("cannot create temp directory for --run: %v", terr)
+		}
+		runTmpDir = d
+		base := strings.TrimSuffix(filepath.Base(inFile), filepath.Ext(inFile))
+		outBin = filepath.Join(d, base+llvm.HostExeSuffix())
+	} else if outBin == "" {
 		outBin = strings.TrimSuffix(inFile, filepath.Ext(inFile))
 		outBin += llvm.HostExeSuffix()
 	}
@@ -363,6 +393,32 @@ func main() {
 	}
 
 	fmt.Fprintf(os.Stderr, "compiled: %s\n", outBin)
+
+	// --run: execute the freshly-built binary, forwarding the arguments given
+	// after the filename (an optional leading `--` is dropped), propagate its
+	// exit code, and clean up the temp build directory. Done here — before the
+	// lazy-island / packaging / d.ts steps below, which --run does not use.
+	if *runNow {
+		progArgs := flag.Args()[1:]
+		if len(progArgs) > 0 && progArgs[0] == "--" {
+			progArgs = progArgs[1:]
+		}
+		runCmd := exec.Command(outBin, progArgs...)
+		runCmd.Stdin = os.Stdin
+		runCmd.Stdout = os.Stdout
+		runCmd.Stderr = os.Stderr
+		runErr := runCmd.Run()
+		if runTmpDir != "" {
+			os.RemoveAll(runTmpDir)
+		}
+		if runErr != nil {
+			if ee, ok := runErr.(*exec.ExitError); ok {
+				os.Exit(ee.ExitCode())
+			}
+			fatal("run: %v", runErr)
+		}
+		return
+	}
 
 	// TDD-00056 lazy backend: compile each dynamic-import target into its own
 	// shared-library island beside the binary, in a `<binary>.d/` directory, so

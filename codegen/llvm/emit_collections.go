@@ -14,14 +14,52 @@ import (
 // isStringTy branch.
 func (e *Emitter) emitMapOrSetCreate(keyTy Type) string {
 	ptr := e.freshReg()
-	if isStringTy(keyTy) {
-		e.ensureMapStrHelpers()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", ptr))
-	} else {
-		e.ensureMapNumHelpers()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_num_create()", ptr))
-	}
+	suffix, _ := mapRuntime(keyTy)
+	e.ensureMapFamily(suffix)
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_%s_create()", ptr, suffix))
 	return ptr
+}
+
+// mapRuntime returns the runtime-family suffix and the key operand's IR type
+// for a Map/Set key type: "str"/ptr for string keys (content-hashed),
+// "any"/i64 for a heterogeneous any-keyed Map (NaN-boxed keys, SameValueZero —
+// TDD-00211), "num"/i64 otherwise (raw-i64 keys).
+func mapRuntime(keyTy Type) (suffix, keyIR string) {
+	switch {
+	case keyTy.IsDynamic:
+		return "any", "i64"
+	case isStringTy(keyTy):
+		return "str", "ptr"
+	default:
+		return "num", "i64"
+	}
+}
+
+// ensureMapFamily declares the __kml_map_<suffix>_* runtime once.
+func (e *Emitter) ensureMapFamily(suffix string) {
+	switch suffix {
+	case "str":
+		e.ensureMapStrHelpers()
+	case "any":
+		e.ensureMapAnyHelpers()
+	default:
+		e.ensureMapNumHelpers()
+	}
+}
+
+// mapKeyRef lowers a key Value to the operand its map runtime expects. An
+// any-keyed map boxes the key into a NaN-box i64 (emitBoxValue, never coerce —
+// an already-evaluated NaN is an i64 box coerce's shortcut would leave
+// unboxed, the TDD-00210 gotcha); str/num keys go through valueToMapKey.
+func (e *Emitter) mapKeyRef(kVal Value, keyTy Type) (string, error) {
+	if keyTy.IsDynamic {
+		boxed, err := e.emitBoxValue(kVal)
+		if err != nil {
+			return "", err
+		}
+		return boxed.Ref, nil
+	}
+	return e.valueToMapKey(kVal, keyTy), nil
 }
 
 // emitMapVarDecl handles `const m = new Map<K, V>()`.
@@ -37,6 +75,21 @@ func (e *Emitter) emitMapVarDecl(v *ast.VarDeclaration, init *ast.NewMapExpressi
 			keyTy, valTy = *annTy.MapKey, *annTy.MapVal
 		}
 	}
+	// A bare `new Map()` (no type args, no annotation, no seed) takes its K/V
+	// from the widening pre-pass, which unified them across the binding's later
+	// `.set(k, v)` uses — so heterogeneous keys become an `any`-keyed Map
+	// instead of riding the blind string-key/number-value default (TDD-00211).
+	if init.KeyType == nil && init.ValType == nil && init.Init == nil && v.TypeAnnot == nil {
+		if kv, ok := e.emptyMapKV[v.Name]; ok {
+			if kv.keyKnown {
+				keyTy = kv.key
+			}
+			if kv.valKnown {
+				valTy = kv.val
+			}
+		}
+	}
+	valTy = forceAnyMapVal(keyTy, valTy)
 	val, err := e.emitNewMapValueTyped(init, keyTy, valTy)
 	if err != nil {
 		return err
@@ -95,7 +148,18 @@ func (e *Emitter) mapKVTypes(keyAnn, valAnn *ast.TypeAnnotation, entries ast.Exp
 	if valAnn != nil {
 		valTy = e.resolveType(valAnn)
 	}
-	return keyTy, valTy
+	return keyTy, forceAnyMapVal(keyTy, valTy)
+}
+
+// forceAnyMapVal makes an any-keyed map's value type `any` too: the any-keyed
+// runtime stores NaN-boxed values and returns the `undefined` box on a miss, so
+// its value slot must be interpreted as a box — a non-dynamic value type would
+// decode the miss sentinel as a raw pointer/scalar and crash (TDD-00211).
+func forceAnyMapVal(keyTy, valTy Type) Type {
+	if keyTy.IsDynamic {
+		return TypeAny
+	}
+	return valTy
 }
 
 // resolveMapEntriesArray normalizes the entries source to (ptr, len, elemTy),
@@ -173,7 +237,7 @@ func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, 
 	if !elemTy.IsTuple || len(elemTy.Fields) != 2 {
 		return fmt.Errorf("%d:%d: new Map(...) expects a [key, value][] array of 2-tuples", pos.Line, pos.Col)
 	}
-	strKey := isStringTy(keyTy)
+	suffix, keyIR := mapRuntime(keyTy)
 	tupleIR := elemTy.StructIR()
 
 	idxPtr := e.freshReg()
@@ -205,13 +269,17 @@ func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, 
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", vGep, tupleIR, tuplePtr.Ref))
 	vVal := e.loadScalarOrNullableField(vGep, valTy)
 
-	kRef := e.valueToMapKey(kVal, keyTy)
-	vRef := e.valueToMapVal(vVal, valTy)
-	if strKey {
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapPtr, kRef, vRef))
-	} else {
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_num_set(ptr %s, i64 %s, i64 %s)", mapPtr, kRef, vRef))
+	kRef, err := e.mapKeyRef(kVal, keyTy)
+	if err != nil {
+		return err
 	}
+	if valTy.IsDynamic && !vVal.Ty.IsDynamic {
+		if vVal, err = e.emitBoxValue(vVal); err != nil {
+			return err
+		}
+	}
+	vRef := e.valueToMapVal(vVal, valTy)
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set(ptr %s, %s %s, i64 %s)", suffix, mapPtr, keyIR, kRef, vRef))
 
 	nextIdx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nextIdx, idxReg))
@@ -339,7 +407,8 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 	if ty.MapVal != nil {
 		valTy = *ty.MapVal
 	}
-	strKey := isStringTy(keyTy)
+	suffix, keyIR := mapRuntime(keyTy)
+	e.ensureMapFamily(suffix)
 
 	switch method {
 	case "set":
@@ -372,13 +441,12 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 				return Value{}, err
 			}
 		}
-		kRef := e.valueToMapKey(kVal, keyTy)
-		vRef := e.valueToMapVal(vVal, valTy)
-		if strKey {
-			e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapPtr, kRef, vRef))
-		} else {
-			e.emitInstr(fmt.Sprintf("call void @__kml_map_num_set(ptr %s, i64 %s, i64 %s)", mapPtr, kRef, vRef))
+		kRef, err := e.mapKeyRef(kVal, keyTy)
+		if err != nil {
+			return Value{}, err
 		}
+		vRef := e.valueToMapVal(vVal, valTy)
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set(ptr %s, %s %s, i64 %s)", suffix, mapPtr, keyIR, kRef, vRef))
 		return Value{Ref: mapPtr, Ty: ty}, nil
 
 	case "get":
@@ -389,21 +457,20 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 		if err != nil {
 			return Value{}, err
 		}
-		kRef := e.valueToMapKey(kVal, keyTy)
+		kRef, err := e.mapKeyRef(kVal, keyTy)
+		if err != nil {
+			return Value{}, err
+		}
 		// A non-pointer scalar value type returns `V | null` (TDD-00064 Stage
 		// 3, bug #3): a missing key is genuinely absent — a presence-flagged
 		// { i1, V } aggregate whose bit comes from has() — rather than the
 		// value 0 the raw i64 get returns for a miss. A pointer value type
 		// keeps its null-pointer miss (no scalar collision to disambiguate).
 		if isNullableScalarMapValue(valTy) {
-			return e.emitMapGetNullable(mapPtr, kRef, strKey, valTy), nil
+			return e.emitMapGetNullable(mapPtr, kRef, suffix, keyIR, valTy), nil
 		}
 		raw := e.freshReg()
-		if strKey {
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", raw, mapPtr, kRef))
-		} else {
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_num_get(ptr %s, i64 %s)", raw, mapPtr, kRef))
-		}
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_%s_get(ptr %s, %s %s)", raw, suffix, mapPtr, keyIR, kRef))
 		v := e.mapValFromI64(raw, valTy)
 		// A pointer value type (string/object/class) reads its null-pointer miss
 		// as a real `V | undefined` — Node types `Map.get` `V | undefined`, and a
@@ -424,13 +491,12 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 		if err != nil {
 			return Value{}, err
 		}
-		kRef := e.valueToMapKey(kVal, keyTy)
-		res := e.freshReg()
-		if strKey {
-			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", res, mapPtr, kRef))
-		} else {
-			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_num_has(ptr %s, i64 %s)", res, mapPtr, kRef))
+		kRef, err := e.mapKeyRef(kVal, keyTy)
+		if err != nil {
+			return Value{}, err
 		}
+		res := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_has(ptr %s, %s %s)", res, suffix, mapPtr, keyIR, kRef))
 		return Value{Ref: res, Ty: TypeBool}, nil
 
 	case "delete":
@@ -441,38 +507,29 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 		if err != nil {
 			return Value{}, err
 		}
-		kRef := e.valueToMapKey(kVal, keyTy)
-		res := e.freshReg()
-		if strKey {
-			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_delete(ptr %s, ptr %s)", res, mapPtr, kRef))
-		} else {
-			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_num_delete(ptr %s, i64 %s)", res, mapPtr, kRef))
+		kRef, err := e.mapKeyRef(kVal, keyTy)
+		if err != nil {
+			return Value{}, err
 		}
+		res := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_delete(ptr %s, %s %s)", res, suffix, mapPtr, keyIR, kRef))
 		return Value{Ref: res, Ty: TypeBool}, nil
 
 	case "keys":
 		res := e.freshReg()
-		if strKey {
-			e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_keys(ptr %s)", res, mapPtr))
-		} else {
-			e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_num_keys(ptr %s)", res, mapPtr))
-		}
+		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", res, suffix, mapPtr))
 		return Value{Ref: res, Ty: ArrayOf(keyTy)}, nil
 
 	case "values":
 		res := e.freshReg()
-		if strKey {
-			e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_vals(ptr %s)", res, mapPtr))
-		} else {
-			e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_num_vals(ptr %s)", res, mapPtr))
-		}
+		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_vals(ptr %s)", res, suffix, mapPtr))
 		return Value{Ref: res, Ty: ArrayOf(valTy)}, nil
 
 	case "entries":
 		if len(args) != 0 {
 			return Value{}, fmt.Errorf("%d:%d: map.entries() takes no arguments", pos.Line, pos.Col)
 		}
-		return e.emitMapEntries(mapPtr, strKey, keyTy, valTy)
+		return e.emitMapEntries(mapPtr, suffix, keyTy, valTy)
 
 	case "forEach":
 		if len(args) != 1 {
@@ -483,7 +540,7 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 		if err != nil {
 			return Value{}, err
 		}
-		return e.emitMapForEach(mapPtr, strKey, keyTy, valTy, mapTy, cb)
+		return e.emitMapForEach(mapPtr, suffix, keyTy, valTy, mapTy, cb)
 
 	case "clear":
 		if len(args) != 0 {
@@ -610,12 +667,9 @@ func (e *Emitter) mapOrSetValuesArray(ty Type, ptr string) (Value, error) {
 		if ty.MapKey != nil {
 			elemTy = *ty.MapKey
 		}
+		suffix, _ := mapRuntime(elemTy)
 		res := e.freshReg()
-		if isStringTy(elemTy) {
-			e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_keys(ptr %s)", res, ptr))
-		} else {
-			e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_num_keys(ptr %s)", res, ptr))
-		}
+		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", res, suffix, ptr))
 		return Value{Ref: res, Ty: ArrayOf(elemTy)}, nil
 	}
 
@@ -627,12 +681,9 @@ func (e *Emitter) mapOrSetValuesArray(ty Type, ptr string) (Value, error) {
 	if ty.MapVal != nil {
 		valTy = *ty.MapVal
 	}
+	suffix, _ := mapRuntime(keyTy)
 	res := e.freshReg()
-	if isStringTy(keyTy) {
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_vals(ptr %s)", res, ptr))
-	} else {
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_num_vals(ptr %s)", res, ptr))
-	}
+	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_vals(ptr %s)", res, suffix, ptr))
 	return Value{Ref: res, Ty: ArrayOf(valTy)}, nil
 }
 
@@ -700,16 +751,11 @@ func (e *Emitter) valueToMapVal(v Value, valTy Type) string {
 // a map ptr already loaded from its alloca, returning the extracted
 // {dataPtr, len} pieces of each — shared by emitMapEntries and
 // emitMapForEach, both of which need to walk the same two parallel arrays.
-func (e *Emitter) mapKeysAndVals(mapPtr string, strKey bool) (keysPtr, keysLen, valsPtr string) {
+func (e *Emitter) mapKeysAndVals(mapPtr string, suffix string) (keysPtr, keysLen, valsPtr string) {
 	keysRes := e.freshReg()
 	valsRes := e.freshReg()
-	if strKey {
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_keys(ptr %s)", keysRes, mapPtr))
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_vals(ptr %s)", valsRes, mapPtr))
-	} else {
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_num_keys(ptr %s)", keysRes, mapPtr))
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_num_vals(ptr %s)", valsRes, mapPtr))
-	}
+	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", keysRes, suffix, mapPtr))
+	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_vals(ptr %s)", valsRes, suffix, mapPtr))
 	keysPtr = e.freshReg()
 	keysLen = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", keysPtr, keysRes))
@@ -727,8 +773,8 @@ func (e *Emitter) mapKeysAndVals(mapPtr string, strKey bool) (keysPtr, keysLen, 
 // Object.entries (a compile-time loop over a known field list), a Map's
 // size is only known at runtime, so this walks the same {ptr, i64} arrays
 // keys()/vals() already return via a genuine IR loop.
-func (e *Emitter) emitMapEntries(mapPtr string, strKey bool, keyTy, valTy Type) (Value, error) {
-	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, strKey)
+func (e *Emitter) emitMapEntries(mapPtr string, suffix string, keyTy, valTy Type) (Value, error) {
+	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, suffix)
 
 	// Each entry is a real [K, V] tuple (TDD-00066) — field 0 is the key, field
 	// 1 the value, the same struct layout the previous {key,value} object used,
@@ -794,8 +840,8 @@ func (e *Emitter) emitMapEntries(mapPtr string, strKey bool, keyTy, valTy Type) 
 // emitMapForEach implements map.forEach(fn): calls fn(value, key?, map?) for
 // each entry, matching real JS's (value, key, map) callback order (ADR-00573).
 // The 3rd `map` argument is the same map object being iterated.
-func (e *Emitter) emitMapForEach(mapPtr string, strKey bool, keyTy, valTy, mapTy Type, cb Callback) (Value, error) {
-	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, strKey)
+func (e *Emitter) emitMapForEach(mapPtr string, suffix string, keyTy, valTy, mapTy Type, cb Callback) (Value, error) {
+	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, suffix)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -822,10 +868,10 @@ func (e *Emitter) emitMapForEach(mapPtr string, strKey bool, keyTy, valTy, mapTy
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", vElem, valTy.IR, vGep, valTy.Align()))
 
 	cbArgs := []Value{{Ref: vElem, Ty: valTy}}
-	if cb.arity() >= 2 {
+	if cb.acceptsArgAt(1) {
 		cbArgs = append(cbArgs, Value{Ref: kElem, Ty: keyTy})
 	}
-	if cb.arity() >= 3 {
+	if cb.acceptsArgAt(2) {
 		cbArgs = append(cbArgs, Value{Ref: mapPtr, Ty: mapTy})
 	}
 	if _, err := e.emitCBCall(cb, cbArgs); err != nil {
@@ -879,10 +925,10 @@ func (e *Emitter) emitSetForEach(setPtr string, strElem bool, elemTy, setTy Type
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", eElem, elemTy.IR, eGep, elemTy.Align()))
 
 	cbArgs := []Value{{Ref: eElem, Ty: elemTy}}
-	if cb.arity() >= 2 {
+	if cb.acceptsArgAt(1) {
 		cbArgs = append(cbArgs, Value{Ref: eElem, Ty: elemTy})
 	}
-	if cb.arity() >= 3 {
+	if cb.acceptsArgAt(2) {
 		cbArgs = append(cbArgs, Value{Ref: setPtr, Ty: setTy})
 	}
 	if _, err := e.emitCBCall(cb, cbArgs); err != nil {
@@ -918,16 +964,11 @@ func mapGetUndefinedablePtr(valTy Type) bool {
 		!valTy.Nullable && !valTy.IsNull
 }
 
-func (e *Emitter) emitMapGetNullable(mapPtr, kRef string, strKey bool, valTy Type) Value {
+func (e *Emitter) emitMapGetNullable(mapPtr, kRef string, suffix, keyIR string, valTy Type) Value {
 	present := e.freshReg()
 	raw := e.freshReg()
-	if strKey {
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", present, mapPtr, kRef))
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", raw, mapPtr, kRef))
-	} else {
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_num_has(ptr %s, i64 %s)", present, mapPtr, kRef))
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_num_get(ptr %s, i64 %s)", raw, mapPtr, kRef))
-	}
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_has(ptr %s, %s %s)", present, suffix, mapPtr, keyIR, kRef))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_%s_get(ptr %s, %s %s)", raw, suffix, mapPtr, keyIR, kRef))
 	nty := valTy
 	nty.Nullable = true
 	nty.IsUndefined = true // Map.get() misses yield `undefined`, not `null` (Node)
@@ -955,4 +996,196 @@ func (e *Emitter) mapValFromI64(rawReg string, valTy Type) Value {
 	default:
 		return Value{Ref: rawReg, Ty: TypeI64}
 	}
+}
+
+// mapKV is the inferred key/value type pair for a bare `new Map()` binding,
+// produced by inferEmptyMapKVTypes (TDD-00211). keyKnown/valKnown are false
+// when no `.set()` contributed a key/value (the type stays the default).
+type mapKV struct {
+	key, val           Type
+	keyKnown, valKnown bool
+}
+
+// mapKeySig classifies a key type for unification: string keys hash by content,
+// numeric keys by raw bits, everything else (bool, object, symbol, null,
+// undefined, already-any) forces the any-keyed runtime.
+func mapKeySig(t Type) string {
+	switch {
+	case isStringTy(t):
+		return "str"
+	case !t.IsDynamic && t.IR != "i1" && (t.Float || t.IsInteger()):
+		return "num"
+	default:
+		return "any"
+	}
+}
+
+// mapValSig classifies a value type: string/number/bool store directly in the
+// str/num map's i64 value slot; anything else (object, array, undefined, null,
+// mixed) is stored NaN-boxed as `any`.
+func mapValSig(t Type) string {
+	switch {
+	case isStringTy(t):
+		return "str:" + t.IR
+	case t.IR == "i1":
+		return "bool"
+	case !t.IsDynamic && (t.Float || t.IsInteger()):
+		return "num:" + t.IR
+	default:
+		return "any"
+	}
+}
+
+// inferEmptyMapKVTypes scans one scope's body for untyped bindings initialized
+// to a bare `new Map()` (no type args, no seed entries) and unifies the key and
+// value types across every `binding.set(k, v)` call in that scope. Keys that
+// are all-string give a string-keyed map, all-one-numeric a numeric map, and
+// anything heterogeneous (or a bool/object/symbol/null/undefined key) an
+// any-keyed map; values unify likewise, widening to `any` (boxed) when mixed or
+// non-directly-storable. Mirrors inferEmptyArrayElemTypes (TDD-00205 Stage 1):
+// a throwaway scratch scope registers the body's bindings in source order so
+// e.inferExprType resolves identifiers used as set arguments. Nested function
+// bodies are separate scopes scanned by their own pass.
+func (e *Emitter) inferEmptyMapKVTypes(body []ast.Statement) map[string]mapKV {
+	candidates := map[string]bool{}
+	keyContrib := map[string][]Type{}
+	valContrib := map[string][]Type{}
+
+	e.pushScope()
+	defer e.popScope()
+
+	declare := func(v *ast.VarDeclaration) {
+		var t Type
+		if v.TypeAnnot != nil {
+			t = e.resolveType(v.TypeAnnot)
+		} else if v.Init != nil {
+			t = e.inferExprType(v.Init)
+		}
+		e.define(v.Name, Symbol{Ty: t})
+		if v.TypeAnnot != nil {
+			return
+		}
+		if nm, ok := v.Init.(*ast.NewMapExpression); ok &&
+			nm.KeyType == nil && nm.ValType == nil && nm.Init == nil {
+			candidates[v.Name] = true
+		}
+	}
+	var walkExpr func(ast.Expression)
+	walkExpr = func(expr ast.Expression) {
+		switch ex := expr.(type) {
+		case *ast.CallExpression:
+			if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+				if id, ok := mem.Object.(*ast.Identifier); ok && candidates[id.Name] {
+					switch mem.Property {
+					case "set":
+						if len(ex.Args) == 2 {
+							keyContrib[id.Name] = append(keyContrib[id.Name], e.inferExprType(ex.Args[0]))
+							valContrib[id.Name] = append(valContrib[id.Name], e.inferExprType(ex.Args[1]))
+						}
+					case "get", "has", "delete":
+						// A lookup key also constrains the runtime family: an empty
+						// `new Map()` probed with `map.has([])` still needs the
+						// any-keyed runtime even though nothing was ever set.
+						if len(ex.Args) == 1 {
+							keyContrib[id.Name] = append(keyContrib[id.Name], e.inferExprType(ex.Args[0]))
+						}
+					}
+				}
+			}
+			for _, a := range ex.Args {
+				walkExpr(a)
+			}
+		case *ast.AssignmentExpression:
+			walkExpr(ex.Right)
+		}
+	}
+	var walkStmts func([]ast.Statement)
+	walkStmts = func(stmts []ast.Statement) {
+		for _, stmt := range stmts {
+			switch s := stmt.(type) {
+			case *ast.VarDeclaration:
+				declare(s)
+				if s.Init != nil {
+					walkExpr(s.Init)
+				}
+			case *ast.VarDeclarationList:
+				for _, d := range s.Decls {
+					declare(d)
+					if d.Init != nil {
+						walkExpr(d.Init)
+					}
+				}
+			case *ast.ExpressionStatement:
+				walkExpr(s.Expr)
+			case *ast.IfStatement:
+				if s.Consequent != nil {
+					walkStmts(s.Consequent.Body)
+				}
+				if s.Alternate != nil {
+					walkStmts([]ast.Statement{s.Alternate})
+				}
+			case *ast.ForStatement:
+				if s.Body != nil {
+					walkStmts(s.Body.Body)
+				}
+			case *ast.WhileStatement:
+				if s.Body != nil {
+					walkStmts(s.Body.Body)
+				}
+			case *ast.BlockStatement:
+				walkStmts(s.Body)
+			}
+		}
+	}
+	walkStmts(body)
+
+	out := map[string]mapKV{}
+	for name := range candidates {
+		var kv mapKV
+		if keys := keyContrib[name]; len(keys) > 0 {
+			kv.key, kv.keyKnown = unifyMapKeyType(keys), true
+		}
+		if vals := valContrib[name]; len(vals) > 0 {
+			kv.val, kv.valKnown = unifyMapValType(vals), true
+		}
+		if kv.keyKnown || kv.valKnown {
+			out[name] = kv
+		}
+	}
+	return out
+}
+
+// unifyMapKeyType reduces the key types a bare Map is `.set()` with to one
+// runtime key type: all-string → string, all-numeric → number, else any.
+func unifyMapKeyType(types []Type) Type {
+	sig := mapKeySig(types[0])
+	for _, t := range types[1:] {
+		if mapKeySig(t) != sig {
+			return TypeAny
+		}
+	}
+	switch sig {
+	case "str":
+		return TypePtr
+	case "num":
+		return TypeF64
+	default:
+		return TypeAny
+	}
+}
+
+// unifyMapValType reduces the value types to one storage type: a single
+// directly-storable type is kept exactly; anything mixed or non-storable
+// widens to `any` (NaN-boxed).
+func unifyMapValType(types []Type) Type {
+	sig := mapValSig(types[0])
+	for _, t := range types[1:] {
+		if mapValSig(t) != sig {
+			return TypeAny
+		}
+	}
+	if sig == "any" {
+		return TypeAny
+	}
+	return types[0]
 }

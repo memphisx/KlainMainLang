@@ -844,11 +844,40 @@ console.log(joinAll("a", "b", "c"))
 `, "abc")
 }
 
-func TestE2EArgumentsObjectMixedTypesRejected(t *testing.T) {
-	_, err := parseAndCompile(`function f(a: number, b: string): number { return arguments.length }`)
-	if err == nil {
-		t.Fatal("expected a compile error for `arguments` with mixed-type parameters, got none")
-	}
+func TestE2EArgumentsObjectMixedTypes(t *testing.T) {
+	// TDD-00210: `arguments` is a boxed `any[]`, so mixed-type parameters (once
+	// a rejection) are now reflected — each slot holds its own value.
+	assertOutput(t, `
+function f(a: number, b: string): string {
+    return arguments.length + ":" + (arguments[0] as number) + (arguments[1] as string);
+}
+console.log(f(3, "x"))
+`, "2:3x")
+}
+
+func TestE2EArgumentsObjectVariadicOverflow(t *testing.T) {
+	// TDD-00210: `arguments` reflects the values *actually* passed, including
+	// arguments beyond the declared arity (implicit `any[]` rest).
+	assertOutput(t, `
+function count(a: number): number {
+    let s = 0;
+    for (let i = 0; i < arguments.length; i++) { s += arguments[i] as number; }
+    return s;
+}
+console.log(count(1, 2, 3, 4))
+`, "10")
+}
+
+func TestE2EArgumentsObjectInCallback(t *testing.T) {
+	// TDD-00210 Stage 3: a function-expression callback reads its variadic
+	// `arguments` through the shared callback ABI — the String.replace replacer
+	// receiving capture groups positionally is the motivating case.
+	assertOutput(t, `
+const out = "abc123".replace(/([a-z]+)(\d+)/, function() {
+    return (arguments[2] as string) + "-" + (arguments[1] as string);
+});
+console.log(out)
+`, "123-abc")
 }
 
 func TestE2EArgumentsObjectWithRestRejected(t *testing.T) {
@@ -865,6 +894,55 @@ func TestE2EArgumentsObjectInArrowRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a compile error for `arguments` in an arrow function, got none")
 	}
+}
+
+func TestE2EArgumentsReplaceCaptureGroupsCompatJS(t *testing.T) {
+	// TDD-00210 + ADR-00922: a String.replace replacer reading capture groups
+	// positionally via `arguments` (the S15.5.4.11_A4 shape). Needs operators on
+	// `any` (arguments[i] is any), so -compat=js. The pattern is bound with a
+	// never-reassigned `var`, exercising the let/var capture-count extension.
+	assertOutputCompatJS(t, `
+function replFN() { return arguments[2] + arguments[1]; }
+var pat = /([a-z]+)([0-9]+)/;
+console.log("abc12 def34".replace(pat, replFN));
+`, "12abc def34")
+}
+
+func TestE2EAsNarrowsFromAny(t *testing.T) {
+	// ADR-00929: `expr as T` narrows a dynamic operand to the concrete asserted
+	// type (unboxing the value), so an un-annotated binding takes T — the case
+	// that previously needed an explicit `: number`.
+	assertOutput(t, `
+function pick(): number {
+    let max = arguments[0] as number;
+    for (const x of arguments) {
+        const v = x as number;
+        if (v > max) max = v;
+    }
+    return max;
+}
+console.log(pick(3, 9, 2, 7));
+`, "9")
+}
+
+func TestE2EAsNarrowsAnyToStringGlobal(t *testing.T) {
+	// ADR-00929: a narrowing `as` sees through a module global (the resolver
+	// renames the operand inside the assertion) and unboxes any→string.
+	assertOutput(t, `
+const boxed = "hello" as any;
+const s = boxed as string;
+console.log(s.length);
+`, "5")
+}
+
+func TestE2EAsConcreteStaysErased(t *testing.T) {
+	// ADR-00929/ADR-00371: a concrete→concrete assertion is still erased — the
+	// operand keeps its own type/value (no reinterpret).
+	assertOutput(t, `
+const n = 42;
+const m = n as number;
+console.log(m + 1);
+`, "43")
 }
 
 func TestE2ENestedFunctionCapturesOuterLocal(t *testing.T) {

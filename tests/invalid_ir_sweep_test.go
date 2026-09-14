@@ -456,3 +456,61 @@ console.log(greet.call());
 console.log(greet.apply());
 `, "hi\nhi")
 }
+
+// Invalid-IR sweep: a non-callable `.then`/`.catch` handler (e.g. `p.then(3, 5)`,
+// `p.catch(42)`) was lowered by storing the raw argument into a callback `ptr`
+// slot — a numeric literal became a `double` constant in a `ptr` field ("floating
+// point constant invalid for type"). Per spec a non-callable handler is treated
+// as undefined (pass-through), so it now lowers to a null callback slot.
+// (built-ins/Promise/prototype/then/S25.4.5.3_A4.2_T{1,2}.js.)
+func TestE2ENonCallableThenCatchHandlers(t *testing.T) {
+	assertOutput(t, `
+async function g(): Promise<number> { return 7; }
+g().then(3, 5).then((v) => console.log("v", v));
+g().catch(42).then((v) => console.log("c", v));
+`, "v 7\nc 7")
+}
+
+// Invalid-IR sweep + evolving-any (ADR-00923): an unannotated `let`/`var`
+// initialized to `null`/`undefined` is TypeScript's "evolving any" — a later
+// assignment gives it a concrete value. It is widened to the any-box when
+// reassigned, so `x ??= 1` stores 1 instead of a `double` into a null `ptr` slot
+// (was "floating point constant invalid for type"), and `x = "s"` no longer
+// silently keeps null. A never-reassigned null binding stays null-typed.
+// (Test262 language/expressions/object/cpn-obj-lit-...-coalesce.js et al.)
+func TestE2ENullEvolvingCompoundAssign(t *testing.T) {
+	assertOutput(t, `
+let x = null;
+x ??= 1;
+console.log(x);
+`, "1")
+}
+
+func TestE2ENullEvolvingReassignString(t *testing.T) {
+	assertOutput(t, `
+let x = null;
+x = "hi";
+console.log(x);
+`, "hi")
+}
+
+func TestE2ENullEvolvingNeverReassignedStaysNull(t *testing.T) {
+	assertOutput(t, `
+let a = null;
+console.log(a);
+console.log(a === null);
+`, "null\ntrue")
+}
+
+// `??` / `??=` on an explicit any-box consult the NaN-box tag for null/undefined
+// (ADR-00923) — previously the box was returned unchanged (treated non-nullish).
+func TestE2ENullishCoalesceOnAny(t *testing.T) {
+	assertOutput(t, `
+let y: any = null;
+console.log(y ?? 7);
+y ??= 9;
+console.log(y);
+y = 3;
+console.log(y ?? 100);
+`, "7\n9\n3")
+}

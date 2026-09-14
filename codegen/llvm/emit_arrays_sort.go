@@ -22,6 +22,22 @@ func (e *Emitter) emitArrayJoin(mem *ast.MemberExpression, args []ast.Expression
 		if err != nil {
 			return Value{}, err
 		}
+		// ToString the separator so a non-string arg (an object with toString, a
+		// number, a NaN-boxed `any`) never reaches emitArrayJoinCore's `ptr`-typed
+		// separator slot as a raw word (invalid IR). `undefined` is the one value
+		// that means "use the default ','," (`[1,2].join(undefined) === "1,2"`); a
+		// bare string passes through, and `null` is left for the core's own
+		// null → "null" select.
+		switch {
+		case sepVal.Ty.IsUndefined || sepVal.Ty.IR == "void":
+			sepVal = Value{Ref: e.internString(","), Ty: TypePtr}
+		case isStringTy(sepVal.Ty):
+			// already a ptr string (incl. a null literal, handled downstream)
+		default:
+			if sepVal, err = e.emitValueToString(sepVal); err != nil {
+				return Value{}, err
+			}
+		}
 	}
 	return e.emitArrayJoinCore(ptrReg, lenReg, elemTy, sepVal)
 }

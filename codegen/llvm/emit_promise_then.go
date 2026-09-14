@@ -82,6 +82,25 @@ func isAbsentCallback(arg ast.Expression) bool {
 	return ok
 }
 
+// isNonCallableThenArg reports whether a `.then`/`.catch` handler argument is
+// not callable — a literal `null`/`undefined`, or a value whose static type is
+// a concrete non-function (e.g. `p.then(3, 5)`). Per spec (PerformPromiseThen /
+// Promise.prototype.catch) a non-callable handler is treated as undefined
+// (pass-through), so it must be lowered to a null callback slot rather than
+// storing the raw value as a callback pointer (which emits e.g. a double
+// constant into a `ptr` field — invalid IR). `any`/`unknown` arguments may hold
+// a function at runtime, so they are never statically dropped here.
+func (e *Emitter) isNonCallableThenArg(arg ast.Expression) bool {
+	if isAbsentCallback(arg) {
+		return true
+	}
+	if id, ok := arg.(*ast.Identifier); ok && id.Name == "undefined" && !e.isShadowedByLocal(id.Name) {
+		return true
+	}
+	t := e.inferExprType(arg)
+	return !t.IsFunc && !t.IsDynamic
+}
+
 // emitPromiseThen handles a `.then`/`.catch`/`.finally` call on a Promise value.
 func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	pVal, err := e.emitExpr(objExpr)
@@ -125,7 +144,7 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 		// (`p.then().then(g)` hands g the source value; `p.then(undefined, onR)`
 		// is the .catch shape) — the runner already has the pass-through block,
 		// so only the arity/argument handling lives here.
-		if len(args) >= 1 && !isAbsentCallback(args[0]) {
+		if len(args) >= 1 && !e.isNonCallableThenArg(args[0]) {
 			v, err := e.emitFulfillCallback(args[0], innerTy)
 			if err != nil {
 				return Value{}, err
@@ -137,7 +156,7 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 		} else {
 			retTy = innerTy // pass-through keeps the source value type
 		}
-		if len(args) >= 2 && !isAbsentCallback(args[1]) {
+		if len(args) >= 2 && !e.isNonCallableThenArg(args[1]) {
 			v2, err := e.emitRejectCallback(args[1])
 			if err != nil {
 				return Value{}, err
@@ -148,13 +167,19 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 		if len(args) < 1 {
 			return Value{}, fmt.Errorf("%d:%d: catch expects 1 argument", pos.Line, pos.Col)
 		}
-		v, err := e.emitRejectCallback(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		onR = v.Ref
-		if t, ok := e.callbackReturnType(args[0]); ok {
-			retTy = t
+		// A non-callable onRejected (`p.catch(undefined)`, `p.catch(3)`) is
+		// treated as undefined: the rejection propagates through unhandled.
+		if e.isNonCallableThenArg(args[0]) {
+			retTy = innerTy
+		} else {
+			v, err := e.emitRejectCallback(args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			onR = v.Ref
+			if t, ok := e.callbackReturnType(args[0]); ok {
+				retTy = t
+			}
 		}
 	case "finally":
 		if len(args) < 1 {

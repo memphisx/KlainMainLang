@@ -193,6 +193,8 @@ func walkExprForNew(cls string, ex ast.Expression, found *bool) {
 		}
 	case *ast.NonNullExpression:
 		walkExprForNew(cls, n.Arg, found)
+	case *ast.AsExpression:
+		walkExprForNew(cls, n.Expr, found)
 	case *ast.UnaryExpression:
 		walkExprForNew(cls, n.Arg, found)
 	case *ast.UpdateExpression:

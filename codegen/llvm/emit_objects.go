@@ -212,7 +212,15 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 		if !ok {
 			return fmt.Errorf("%d:%d: object has no field '%s'", lit.GetPos().Line, lit.GetPos().Col, name)
 		}
-		if !coerciblePure(e.inferExprType(expr), fieldTy) {
+		// An object/array literal value is *constructed* against fieldTy (the
+		// hint threads through storeScalarOrNullableFieldExpr → emitExprWith-
+		// ObjectHint), so its self-inferred type is irrelevant here — e.g. a
+		// nested `{a: 3}` into an `{a: any}` field builds boxed. Skip the
+		// self-inferred pre-check for those; any genuine incompatibility is
+		// caught recursively during that construction.
+		_, isObjLit := expr.(*ast.ObjectLiteral)
+		_, isArrLit := expr.(*ast.ArrayLiteral)
+		if !isObjLit && !isArrLit && !coerciblePure(e.inferExprType(expr), fieldTy) {
 			return fmt.Errorf("%d:%d: field '%s' is assigned a value of an incompatible type — this compiler is a typed subset", lit.GetPos().Line, lit.GetPos().Col, name)
 		}
 		gepReg := e.freshReg()

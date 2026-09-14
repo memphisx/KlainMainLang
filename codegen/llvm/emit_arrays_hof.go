@@ -66,7 +66,7 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	inVal := e.loadArrayElem(inGep, elemTy)
 
 	cbArgs := []Value{inVal}
-	if cb.arity() >= 2 {
+	if cb.acceptsArgAt(1) {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
 	}
 	resultVal, err := e.emitCBCall(cb, cbArgs)
@@ -152,10 +152,10 @@ func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Express
 	inVal := e.loadArrayElem(inGep, elemTy)
 
 	cbArgs := []Value{inVal}
-	if cb.arity() >= 2 {
+	if cb.acceptsArgAt(1) {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
 	}
-	if cb.arity() >= 3 {
+	if cb.acceptsArgAt(2) {
 		// The 3rd `array` argument is the source array as a {ptr,i64} value
 		// aggregate over the same data (the array value shape every HOF returns);
 		// element reads through it are live, the length a snapshot.
@@ -226,7 +226,7 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 	inVal := e.loadArrayElem(inGep, elemTy)
 
 	cbArgs := []Value{inVal}
-	if cb.arity() >= 2 {
+	if cb.acceptsArgAt(1) {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
 	}
 	predVal, err := e.emitCBCall(cb, cbArgs)

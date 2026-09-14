@@ -46,6 +46,18 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		return Value{}, err
 	}
 
+	// An operand that unconditionally terminates the block — e.g. a throwing
+	// IIFE in `(function(){throw…})() & x` (Test262 bitwise `order-of-evaluation`)
+	// — leaves e.blockDone set and its own Value empty. Everything below this
+	// point (coercion, the bitwise `trunc`, the operator dispatch) would emit
+	// into dead space; because a later statement's label reopens a live block,
+	// those dropped instructions leave dangling operands (`trunc i64  to i32`).
+	// The whole binary expression is unreachable here, so short-circuit with a
+	// placeholder rather than emit anything.
+	if e.blockDone {
+		return Value{Ref: "0", Ty: TypeI64}, nil
+	}
+
 	// A caught value (TypeCaught ≈ `unknown`, TDD-00202) in an equality compares
 	// by packing to `any` and reusing the any equality; the caught side may be
 	// either operand (`e === "x"` or `"x" === e`).
@@ -332,6 +344,23 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 				}
 				return Value{Ref: res, Ty: TypeBool}, nil
 			}
+		}
+	}
+
+	// Non-additive arithmetic with a real-string operand (`"b" * null`,
+	// `"5" - 1`): JS applies ToNumber to each operand (a non-numeric string →
+	// NaN), so the result is numeric, not a concatenation. The numeric coerce
+	// path below would emit `mul ptr <str>, …` (invalid IR) since a string is a
+	// bare `ptr`. Route through the NaN-boxed runtime ToNumber arithmetic under
+	// compat=js; strict rejects (TypeScript does too). `+` stays concatenation,
+	// and relational (`<`, `>`, …) stays a string comparison — both excluded.
+	if (lRealStr || rRealStr) && !left.Ty.IsDynamic && !right.Ty.IsDynamic {
+		switch ex.Op {
+		case "-", "*", "/", "%", "**":
+			if e.compatJS() {
+				return e.emitAnyBinary(ex.Op, left, right, ex.GetPos())
+			}
+			return Value{}, fmt.Errorf("%d:%d: arithmetic operator '%s' on a string operand is not supported in strict mode — TypeScript reports the same error; compile with -compat=js to apply JS ToNumber coercion", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
 		}
 	}
 
@@ -693,8 +722,8 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 // results are Int32, e.g. 1 << 31 === -2147483648), zero-extended for >>>
 // (JS results are always a non-negative Uint32, e.g. -1 >>> 0 === 4294967295).
 func (e *Emitter) emitBitShift(op string, left, right Value) (Value, error) {
-	li := e.coerce(left, TypeI64)
-	ri := e.coerce(right, TypeI64)
+	li := e.coerce(e.bitwiseNonNumericToZero(left), TypeI64)
+	ri := e.coerce(e.bitwiseNonNumericToZero(right), TypeI64)
 
 	l32 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", l32, li.Ref))
@@ -735,7 +764,26 @@ func (e *Emitter) emitBitShift(op string, left, right Value) (Value, error) {
 // keep the low 32 bits (trunc gives the mod-2^32 wraparound regardless of
 // sign). Returns an i32 SSA register. Shared by the bitwise operators and
 // `emitBitShift`.
+// bitwiseNonNumericToZero maps an operand whose ToInt32 is unconditionally 0
+// to a literal i64 0, so the bitwise/shift `trunc` never receives a raw pointer
+// or an empty (void) operand. ToInt32(undefined)=ToInt32(NaN)=0, ToInt32(null)=0,
+// and ToNumber(object/function/symbol-without-a-numeric-valueOf) is NaN → 0 too.
+// A method-bearing object was already run through the ToPrimitive ladder up in
+// emitBinaryExpr, so by the time we reach a bitwise op a still-object/func/void
+// operand genuinely coerces to 0 (compat=js; strict rejects these earlier).
+func (e *Emitter) bitwiseNonNumericToZero(v Value) Value {
+	// A Symbol is deliberately excluded: ToNumber(symbol) is a TypeError in JS
+	// (not NaN→0), so a symbol operand must keep whatever throw/reject path it
+	// already has, never silently coerce to 0.
+	if v.Ty.IR == "void" || v.Ty.IsUndefined || v.Ty.IsNull ||
+		((v.Ty.IsObject || v.Ty.IsFunc) && !v.Ty.IsSymbol) {
+		return Value{Ref: "0", Ty: TypeI64}
+	}
+	return v
+}
+
 func (e *Emitter) toInt32(v Value) string {
+	v = e.bitwiseNonNumericToZero(v)
 	i := e.coerce(v, TypeI64)
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", r, i.Ref))
@@ -1414,6 +1462,26 @@ func (e *Emitter) emitArith(op string, left, right Value, ty Type, pos ast.Pos) 
 		}
 		return e.emitBigIntBinary(op, left, right, pos)
 	}
+	// `+=` where an OPERAND is a string but the target type is not (e.g. an
+	// object target: `obj += ''` → "[object Object]", Test262 regress-533254)
+	// is still string concatenation — the result is a string regardless of the
+	// declared slot type. Keying only on isStringTy(ty) below missed this and
+	// fell through to numeric `add ptr` (invalid IR).
+	if op == "+" && !isStringTy(ty) && (isStringTy(left.Ty) || isStringTy(right.Ty)) {
+		l, r := left, right
+		var err error
+		if !isStringTy(l.Ty) {
+			if l, err = e.emitValueToString(l); err != nil {
+				return Value{}, err
+			}
+		}
+		if !isStringTy(r.Ty) {
+			if r, err = e.emitValueToString(r); err != nil {
+				return Value{}, err
+			}
+		}
+		return e.emitStringConcat(l, r)
+	}
 	if isStringTy(ty) {
 		l, r := left, right
 		if op == "+" {
@@ -1875,6 +1943,13 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 		present, payload := e.nullableScalarAggParts(left)
 		return e.emitNullCoalesceScalar(present, payload, ex.Right)
 	}
+	// A dynamic (any/unknown) left operand: its runtime null/undefined lives in
+	// the NaN-box tag, not a bare `ptr`. Test the tag and fall through to the
+	// right operand only when the box actually holds null or undefined; the
+	// result is itself an any-box (`let x: any = null; x ?? 7` is 7).
+	if left.Ty.IsDynamic {
+		return e.emitNullCoalesceDynamic(left, ex.Right)
+	}
 	// `null ?? x` / `undefined ?? x`: the left is statically nullish, so the
 	// whole expression *is* the right operand, with the right's own type — not
 	// the left's null (ptr) type. Without this the ptr-slot path below would
@@ -1928,4 +2003,44 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
 	return Value{Ref: result, Ty: TypePtr}, nil
+}
+
+// emitNullCoalesceDynamic implements `a ?? b` when the left operand is a dynamic
+// (any/unknown) NaN-boxed value: it is nullish only when its tag is null or
+// undefined. The result is an any-box holding the left value when present, else
+// the right operand coerced to any.
+func (e *Emitter) emitNullCoalesceDynamic(left Value, rightExpr ast.Expression) (Value, error) {
+	resSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", resSlot))
+
+	tag, _ := e.emitUnboxTagPayload(left)
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNull, tag, kmlTagNull))
+	isUndef := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
+	isNullish := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", isNullish, isNull, isUndef))
+
+	nullishL := e.freshLabel("nullc.dyn.nullish")
+	presentL := e.freshLabel("nullc.dyn.present")
+	mergeL := e.freshLabel("nullc.dyn.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNullish, nullishL, presentL))
+
+	e.emitLabel(nullishL)
+	right, err := e.emitExpr(rightExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	right = e.coerce(right, TypeAny)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", right.Ref, resSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(presentL)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", left.Ref, resSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, resSlot))
+	return Value{Ref: result, Ty: TypeAny}, nil
 }

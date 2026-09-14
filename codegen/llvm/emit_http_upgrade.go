@@ -584,6 +584,8 @@ func walkExprForCall(pred func(*ast.CallExpression) bool, ex ast.Expression, fou
 		}
 	case *ast.NonNullExpression:
 		walkExprForCall(pred, n.Arg, found)
+	case *ast.AsExpression:
+		walkExprForCall(pred, n.Expr, found)
 	case *ast.UnaryExpression:
 		walkExprForCall(pred, n.Arg, found)
 	case *ast.UpdateExpression:

@@ -22,8 +22,8 @@ func (e *Emitter) isProcessEnvExpr(expr ast.Expression) bool {
 func (e *Emitter) emitProcessArgv() (Value, error) {
 	ptrReg := e.freshReg()
 	lenReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__argv_ptr, align 8", ptrReg))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__argv_len, align 8", lenReg))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__process_argv_ptr, align 8", ptrReg))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__process_argv_len, align 8", lenReg))
 	r0 := e.freshReg()
 	r1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))

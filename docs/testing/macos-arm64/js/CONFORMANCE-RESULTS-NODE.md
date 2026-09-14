@@ -79,10 +79,10 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
+| 219 | COMPILE_ERROR: a number has no method '%s' |
 | 219 | COMPILE_ERROR: slice is only supported on strings |
-| 218 | COMPILE_ERROR: a number has no method '%s' |
 | 135 | COMPILE_ERROR: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method |
-| 135 | COMPILE_ERROR: undefined variable '%s' |
+| 134 | COMPILE_ERROR: undefined variable '%s' |
 | 114 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 93 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 84 | MODULE_NOT_IMPLEMENTED: vm |
@@ -95,7 +95,7 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 39 | COMPILE_ERROR: undefined function or closure '%s' |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
 | 26 | COMPILE_ERROR: process has no method '%s' |
-| 26 | RUNTIME_NONZERO_EXIT:  |
+| 25 | RUNTIME_NONZERO_EXIT:  |
 | 23 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
 | 23 | MODULE_NOT_IMPLEMENTED: perf_hooks |
 | 21 | COMPILE_ERROR: a net socket supports '%s', '%s', '%s', and '%s'/'%s' (got '%s') |
@@ -108,8 +108,8 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 18 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
 | 17 | MODULE_NOT_IMPLEMENTED: module |
+| 17 | RUN_TIMEOUT |
 | 16 | COMPILE_ERROR: type mismatch in array element — a value of one type cannot be used where an incomp… |
-| 16 | RUN_TIMEOUT |
 | 15 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
 | 15 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
 | 15 | COMPILE_ERROR: http.createServer's listener must be (req: IncomingMessage, res: ServerResponse) => v… |

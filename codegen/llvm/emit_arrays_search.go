@@ -278,7 +278,7 @@ func (e *Emitter) emitArrayFindIndex(mem *ast.MemberExpression, args []ast.Expre
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
 	elemVal := e.loadArrayElem(gep, elemTy)
 	cbArgs := []Value{elemVal}
-	if cb.arity() >= 2 {
+	if cb.acceptsArgAt(1) {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
 	}
 	predVal, err := e.emitCBCall(cb, cbArgs)
@@ -353,7 +353,7 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
 	elemVal := e.loadArrayElem(gep, elemTy)
 	cbArgs := []Value{elemVal}
-	if cb.arity() >= 2 {
+	if cb.acceptsArgAt(1) {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
 	}
 	predVal, err := e.emitCBCall(cb, cbArgs)
@@ -428,7 +428,7 @@ func (e *Emitter) emitArrayFindLastIndex(mem *ast.MemberExpression, args []ast.E
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
 	elemVal := e.loadArrayElem(gep, elemTy)
 	cbArgs := []Value{elemVal}
-	if cb.arity() >= 2 {
+	if cb.acceptsArgAt(1) {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
 	}
 	predVal, err := e.emitCBCall(cb, cbArgs)
