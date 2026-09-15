@@ -46,8 +46,10 @@ diff:
   %bothstr = and i1 %astr, %bstr
   br i1 %bothstr, label %cmp_string, label %not_string
 not_string:
-  ; both arrayheader-kind (kind bits 2): two boxings of one array malloc two
-  ; headers, so identity is the data pointer *inside* the header (ADR-00478)
+  ; both arrayheader-kind (kind bits 2): field 0 of the any-array box is the
+  ; shared live array header pointer (TDD-00212 Stage 3), so comparing it below
+  ; is reference identity — two aliases of one array share the header and stay
+  ; equal across a reallocating push (ADR-00478)
   %aarr0 = icmp eq i64 %ak, 2
   %barr0 = icmp eq i64 %bk, 2
   %aarr = and i1 %aptr, %aarr0

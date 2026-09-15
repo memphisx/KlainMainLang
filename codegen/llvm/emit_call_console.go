@@ -306,7 +306,9 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		return nil
 	}
 	if val.Ty.IsDynamic {
-		strVal, err := e.emitDynamicToString(val)
+		// console.log renders a boxed value in its util.inspect form (a boxed
+		// array as `[ 1, 2, 3 ]`, not the `1,2,3` String() join) — TDD-00212 S2.
+		strVal, err := e.emitDynamicInspect(val)
 		if err != nil {
 			return err
 		}

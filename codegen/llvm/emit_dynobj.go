@@ -802,10 +802,17 @@ func (e *Emitter) emitDynObjLiteral(lit *ast.ObjectLiteral) (Value, error) {
 			srcStructIR := sv.Ty.StructIR()
 			for _, f := range sv.Ty.VisibleFields() {
 				srcIdx, _, _ := sv.Ty.FieldIndex(f.Name)
-				srcGep, loadReg := e.freshReg(), e.freshReg()
+				srcGep := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", srcGep, srcStructIR, sv.Ref, srcIdx))
-				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(f.Ty), srcGep, f.Ty.Align()))
-				boxed, err := e.emitBoxValue(Value{Ref: loadReg, Ty: f.Ty})
+				var fieldForBox Value
+				if f.Ty.IsArray {
+					fieldForBox = e.loadArrayFieldValue(srcGep, f.Ty) // header-ptr slot (TDD-00213 S2)
+				} else {
+					loadReg := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(f.Ty), srcGep, f.Ty.Align()))
+					fieldForBox = Value{Ref: loadReg, Ty: f.Ty}
+				}
+				boxed, err := e.emitBoxValue(fieldForBox)
 				if err != nil {
 					return Value{}, err
 				}

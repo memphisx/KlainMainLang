@@ -107,9 +107,15 @@ func (e *Emitter) emitTaskEpilogue() {
 		ps := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", psp, taskStructIR, ct, taskPromiseSlot))
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ps, psp))
-		valReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, StructFieldIR(pty), e.coroHdl, pty.Align()))
-		e.storePromiseValue(ps, Value{Ref: valReg, Ty: pty})
+		if pty.IsArray {
+			// The coro return-value slot holds a header pointer (TDD-00213 Stage 2);
+			// deref it to the aggregate before decomposing into the promise value.
+			e.storePromiseValue(ps, e.loadArraySlotAggregate(e.coroHdl, pty))
+		} else {
+			valReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, StructFieldIR(pty), e.coroHdl, pty.Align()))
+			e.storePromiseValue(ps, Value{Ref: valReg, Ty: pty})
+		}
 		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", e.coroHdl))
 	}
 	e.emitTerminator("ret void")

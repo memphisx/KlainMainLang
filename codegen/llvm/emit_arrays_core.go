@@ -92,6 +92,16 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 	if !val.Ty.IsArray {
 		return fmt.Errorf("%d:%d: array variable must be initialized with an array expression", v.GetPos().Line, v.GetPos().Col)
 	}
+	// Reference semantics (TDD-00213 Stage 1): if the initializer is an existing
+	// header-backed array (`let a = b`, or any expression carrying a live header),
+	// point this binding's slot at the SAME header cell so the two bindings alias
+	// — a `push` through either is visible through the other, and they are `===`.
+	// The fresh header minted above is discarded; a genuinely new array
+	// expression (literal/new/slice/HOF — no ArrayHeader) keeps it and fills it.
+	if val.ArrayHeader != "" {
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.ArrayHeader, slot))
+		return nil
+	}
 	return e.storeArrayAggregateInto(val, ptrName, lenName)
 }
 
@@ -107,6 +117,90 @@ func (e *Emitter) storeArrayAggregateInto(val Value, ptrName, lenName string) er
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ptrReg, ptrName))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenReg, lenName))
 	return nil
+}
+
+// loadArrayFieldValue reads an array-typed struct field into a plain {ptr,i64}
+// array Value. Under the header-pointer field model (TDD-00213 Stage 2) a struct
+// slot for an array holds a pointer to a shared {data,len} header, so this loads
+// the header, derefs its data/len into the aggregate, and carries the header in
+// ArrayHeader — making a binding of the field value alias the same array
+// (`let x = obj.arr`) and a mutation through the field visible. A null header (a
+// calloc'd/absent field) reads as the {null,0} empty array, matching the
+// pre-migration inline behavior. fieldSlot is the field's GEP address.
+func (e *Emitter) loadArrayFieldValue(fieldSlot string, fieldTy Type) Value {
+	header := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", header, fieldSlot))
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, header))
+	nullL := e.freshLabel("arrfld.null")
+	loadL := e.freshLabel("arrfld.load")
+	doneL := e.freshLabel("arrfld.done")
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca {ptr, i64}, align 8", slot))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, loadL))
+	e.emitLabel(nullL)
+	e.emitInstr(fmt.Sprintf("store {ptr, i64} {ptr null, i64 0}, ptr %s, align 8", slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(loadL)
+	agg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, header))
+	e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", agg, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", out, slot))
+	return Value{Ref: out, Ty: fieldTy, ArrayHeader: header}
+}
+
+// loadArraySlotAggregate is the branchless sibling of loadArrayFieldValue for a
+// slot that is ALWAYS written before it is read (a generator/promise/iterator
+// state-struct slot, never a calloc'd-and-untouched object field) — it derefs the
+// header without the null guard, so it introduces no basic blocks and is safe to
+// call inside a state machine's linear control flow. The slot holds a header
+// pointer (TDD-00213 Stage 2); the returned Value carries it in ArrayHeader.
+func (e *Emitter) loadArraySlotAggregate(slot string, ty Type) Value {
+	header := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", header, slot))
+	agg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, header))
+	return Value{Ref: agg, Ty: ty, ArrayHeader: header}
+}
+
+// arrayReturnHeader produces the header pointer to return an array value across
+// the `ret ptr` array ABI (TDD-00213 Stage 3): it shares the value's live header
+// when it has one (a returned field/global/captured/named array keeps its
+// identity so the caller aliases the same array), else mints a fresh header from
+// the {data,len} aggregate (a transient/new array expression). Mirrors
+// storeArrayFieldHeader, the field-storage analogue.
+func (e *Emitter) arrayReturnHeader(val Value) string {
+	if val.ArrayHeader != "" {
+		return val.ArrayHeader
+	}
+	return e.boxArrayValue(val)
+}
+
+// arrayValueFromHeaderReg wraps an array `ret ptr` call result (a header pointer,
+// TDD-00213 Stage 3) into an ordinary {ptr,i64} array Value: it derefs the header
+// for the aggregate and carries the header in ArrayHeader, so binding the call
+// result aliases the returned array (`let x = f(); x === f()`'s source shares one
+// header). headerReg is the raw call-instruction result.
+func (e *Emitter) arrayValueFromHeaderReg(headerReg string, ty Type) Value {
+	agg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, headerReg))
+	return Value{Ref: agg, Ty: ty, ArrayHeader: headerReg}
+}
+
+// storeArrayFieldHeader stores an array Value into a header-pointer field slot
+// (TDD-00213 Stage 2): it shares the value's live header when it has one
+// (reference semantics — `obj.arr = existingArray` aliases), else mints a fresh
+// header from the {data,len} aggregate (a new array expression). fieldSlot is the
+// field's GEP address.
+func (e *Emitter) storeArrayFieldHeader(fieldSlot string, val Value) {
+	header := val.ArrayHeader
+	if header == "" {
+		header = e.boxArrayValue(val)
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, fieldSlot))
 }
 
 // boxArrayValue heap-allocates a 16-byte {ptr, i64} box and stores val's

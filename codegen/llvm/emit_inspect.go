@@ -86,10 +86,16 @@ func (e *Emitter) emitInspectObject(val Value, depth int) (Value, error) {
 		}
 		idx, _, _ := val.Ty.FieldIndex(field.Name)
 		gepReg := e.freshReg()
-		loadReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, val.Ty.StructIR(), val.Ref, idx))
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
-		fieldStr, err := e.emitInspectField(Value{Ref: loadReg, Ty: field.Ty}, depth+1)
+		var fieldForInspect Value
+		if field.Ty.IsArray {
+			fieldForInspect = e.loadArrayFieldValue(gepReg, field.Ty) // header-pointer slot (TDD-00213 S2)
+		} else {
+			loadReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
+			fieldForInspect = Value{Ref: loadReg, Ty: field.Ty}
+		}
+		fieldStr, err := e.emitInspectField(fieldForInspect, depth+1)
 		if err != nil {
 			return Value{}, err
 		}

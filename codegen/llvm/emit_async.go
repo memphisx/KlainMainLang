@@ -129,9 +129,15 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 	e.emitInstr("call void @__kml_pop_jmpbuf()")
 	pty := e.currentPromiseTy
 	if pty.IR != "void" && pty.IR != "" {
-		valReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, StructFieldIR(pty), e.coroHdl, pty.Align()))
-		e.storePromiseValue(prom, Value{Ref: valReg, Ty: pty})
+		if pty.IsArray {
+			// The return-value slot holds a header pointer (TDD-00213 Stage 2);
+			// deref it to the aggregate before decomposing into the promise value.
+			e.storePromiseValue(prom, e.loadArraySlotAggregate(e.coroHdl, pty))
+		} else {
+			valReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, StructFieldIR(pty), e.coroHdl, pty.Align()))
+			e.storePromiseValue(prom, Value{Ref: valReg, Ty: pty})
+		}
 	}
 	setResolved(1)
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", e.coroHdl))
@@ -280,6 +286,11 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 		return e.emitAwaitFetchSlot(hdlVal.Ref), nil
 	}
 
+	if promiseTy.IsArray {
+		// The resolved-value buffer holds a header pointer for an array (TDD-00213
+		// Stage 2); deref it back into the {ptr,i64} aggregate.
+		return e.loadArraySlotAggregate(hdlVal.Ref, promiseTy), nil
+	}
 	resultReg := e.freshReg()
 	align := promiseTy.Align()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",

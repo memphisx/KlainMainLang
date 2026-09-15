@@ -182,8 +182,11 @@ func (e *Emitter) emitDeepEqualObject(a, b Value, ty Type, pos ast.Pos) (Value, 
 		}
 		load := func(src string) string {
 			g := e.freshReg()
-			v := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, structIR, src, idx))
+			if fieldTy.IsArray {
+				return e.loadArrayFieldValue(g, fieldTy).Ref // header-ptr slot (TDD-00213 S2)
+			}
+			v := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", v, StructFieldIR(fieldTy), g, fieldTy.Align()))
 			return v
 		}

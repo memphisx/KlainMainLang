@@ -142,11 +142,10 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 	e.emitLabel(nullL)
 	if !isVoid {
 		if retTy.IsArray {
-			z0 := e.freshReg()
-			z1 := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", z0))
-			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", z1, z0))
-			e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align %d", z1, resPtr, undefTy.Align()))
+			// The array result slot holds a header pointer (TDD-00213 Stage 2/3);
+			// a nullish receiver yields an empty array — a fresh {null,0} header.
+			hdr := e.newArrayHeader("null", "0")
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, resPtr))
 		} else if isNullableScalar(undefTy) {
 			agg := e.makeNullableScalarAgg(undefTy, "false", zeroRef(retTy))
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, agg, resPtr, undefTy.Align()))
@@ -163,18 +162,30 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 		return Value{}, err
 	}
 	if !isVoid {
-		stored := e.coerce(callVal, retTy)
-		storeRef := stored.Ref
-		if isNullableScalar(undefTy) {
-			storeRef = e.makeNullableScalarAgg(undefTy, "true", stored.Ref)
+		if retTy.IsArray {
+			// Store the call result's shared header pointer so the merged result
+			// aliases the returned array (TDD-00213 Stage 3).
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.arrayReturnHeader(callVal), resPtr))
+		} else {
+			stored := e.coerce(callVal, retTy)
+			storeRef := stored.Ref
+			if isNullableScalar(undefTy) {
+				storeRef = e.makeNullableScalarAgg(undefTy, "true", stored.Ref)
+			}
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, storeRef, resPtr, undefTy.Align()))
 		}
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, storeRef, resPtr, undefTy.Align()))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	if isVoid {
 		return Value{Ty: TypeVoid}, nil
+	}
+	if retTy.IsArray {
+		// resPtr holds a header pointer; load it and deref into an array Value.
+		hdr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, resPtr))
+		return e.arrayValueFromHeaderReg(hdr, retTy), nil
 	}
 	out := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", out, resIR, resPtr, undefTy.Align()))
@@ -225,11 +236,8 @@ func (e *Emitter) emitOptionalCallNullableScalar(ex *ast.CallExpression, mem *as
 	e.emitLabel(absentL)
 	if !isVoid {
 		if retTy.IsArray {
-			z0 := e.freshReg()
-			z1 := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", z0))
-			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", z1, z0))
-			e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align %d", z1, resPtr, undefTy.Align()))
+			hdr := e.newArrayHeader("null", "0")
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, resPtr))
 		} else if isNullableScalar(undefTy) {
 			agg := e.makeNullableScalarAgg(undefTy, "false", zeroRef(retTy))
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, agg, resPtr, undefTy.Align()))
@@ -246,18 +254,27 @@ func (e *Emitter) emitOptionalCallNullableScalar(ex *ast.CallExpression, mem *as
 		return Value{}, err
 	}
 	if !isVoid {
-		stored := e.coerce(callVal, retTy)
-		storeRef := stored.Ref
-		if isNullableScalar(undefTy) {
-			storeRef = e.makeNullableScalarAgg(undefTy, "true", stored.Ref)
+		if retTy.IsArray {
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.arrayReturnHeader(callVal), resPtr))
+		} else {
+			stored := e.coerce(callVal, retTy)
+			storeRef := stored.Ref
+			if isNullableScalar(undefTy) {
+				storeRef = e.makeNullableScalarAgg(undefTy, "true", stored.Ref)
+			}
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, storeRef, resPtr, undefTy.Align()))
 		}
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, storeRef, resPtr, undefTy.Align()))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	if isVoid {
 		return Value{Ty: TypeVoid}, nil
+	}
+	if retTy.IsArray {
+		hdr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, resPtr))
+		return e.arrayValueFromHeaderReg(hdr, retTy), nil
 	}
 	out := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", out, resIR, resPtr, undefTy.Align()))
@@ -840,8 +857,33 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				if len(ex.Args) != 1 {
 					return Value{}, fmt.Errorf("%d:%d: Array.isArray takes exactly 1 argument", ex.GetPos().Line, ex.GetPos().Col)
 				}
-				isArr := e.inferExprType(ex.Args[0]).IsArray
-				if isArr {
+				// A dynamic (`any`) argument's array-ness is only known at
+				// runtime — a NaN-box can carry an array now and a plain object
+				// the next line. Consult the box tag (a static-array box is
+				// kmlTagArray, a D1 dynamic array kmlTagDynArray) rather than the
+				// compile-time IsArray, which is always false for `any` and made
+				// `Array.isArray(x)` wrongly return false for a genuine boxed
+				// array (ADR-00934).
+				argTy := e.inferExprType(ex.Args[0])
+				if argTy.IsDynamic {
+					v, err := e.emitExpr(ex.Args[0])
+					if err != nil {
+						return Value{}, err
+					}
+					v, err = e.emitBoxValue(v)
+					if err != nil {
+						return Value{}, err
+					}
+					tag, _ := e.emitUnboxTagPayload(v)
+					isArr := e.freshReg()
+					isDyn := e.freshReg()
+					res := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isArr, tag, kmlTagArray))
+					e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isDyn, tag, kmlTagDynArray))
+					e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", res, isArr, isDyn))
+					return Value{Ref: res, Ty: TypeBool}, nil
+				}
+				if argTy.IsArray {
 					return Value{Ref: "true", Ty: TypeBool}, nil
 				}
 				return Value{Ref: "false", Ty: TypeBool}, nil
@@ -2561,6 +2603,11 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 	// `await`/`.then` take the task path, matching the may-suspend result.
 	if sig.IsAsync && retTy.IsPromise {
 		retTy.PromiseTask = true
+	}
+	if retTy.IsArray {
+		// The array return ABI is a header pointer (TDD-00213 Stage 3): deref it
+		// into the {ptr,i64} aggregate and carry the header so the result aliases.
+		return e.arrayValueFromHeaderReg(reg, retTy), nil
 	}
 	return Value{Ref: reg, Ty: retTy}, nil
 }

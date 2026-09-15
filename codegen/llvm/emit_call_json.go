@@ -390,19 +390,21 @@ func (e *Emitter) emitJSONStringifyObject(val Value, ind jsonIndent) (Value, err
 		idx, _, _ := val.Ty.FieldIndex(field.Name)
 		// Load the field value via GEP.
 		gepReg := e.freshReg()
-		loadReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
 			gepReg, val.Ty.StructIR(), val.Ref, idx))
-		// An array-typed field's struct slot is a 16-byte {ptr,i64}
-		// aggregate (StructFieldIR, ADR-00061), not field.Ty.IR's plain
-		// "ptr" — loading with the wrong width here silently dropped the
-		// array's length (found while wiring nested-array JSON support,
-		// TDD-00029; pre-existing and independent of nesting — any
-		// array-typed object field, e.g. `{ tags: string[] }`, already hit
-		// this).
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
-			loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
-		fieldVal := Value{Ref: loadReg, Ty: field.Ty}
+		// An array-typed field's slot holds a pointer to the array's shared
+		// {data,len} header (TDD-00213 Stage 2) — deref it into the {ptr,i64}
+		// aggregate JSON serialization expects (before Stage 2 the slot was the
+		// inline aggregate, ADR-00061/TDD-00029).
+		var fieldVal Value
+		if field.Ty.IsArray {
+			fieldVal = e.loadArrayFieldValue(gepReg, field.Ty)
+		} else {
+			loadReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
+				loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
+			fieldVal = Value{Ref: loadReg, Ty: field.Ty}
+		}
 
 		// Key segment: the item prefix (compact comma, or pretty newline+indent),
 		// then `"name"` and the colon separator (":" compact, ": " pretty).
@@ -483,9 +485,14 @@ func (e *Emitter) emitJSONStringifyObjectOptional(val Value, fields []Field, acc
 		idx, _, _ := val.Ty.FieldIndex(field.Name)
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, val.Ty.StructIR(), val.Ref, idx))
-		loadReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
-		fieldVal := Value{Ref: loadReg, Ty: field.Ty}
+		var fieldVal Value
+		if field.Ty.IsArray {
+			fieldVal = e.loadArrayFieldValue(gepReg, field.Ty) // header-pointer slot (TDD-00213 S2)
+		} else {
+			loadReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
+			fieldVal = Value{Ref: loadReg, Ty: field.Ty}
+		}
 
 		if !jsonFieldSkippable(field.Ty) {
 			jsonVal, err := e.emitJSONStringifyValue(fieldVal, ind.child())
@@ -603,10 +610,16 @@ func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value,
 	}
 	vIdx, vTy, _ := val.Ty.FieldIndex("value")
 	vGep := e.freshReg()
-	vReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, structIR, val.Ref, vIdx))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", vReg, StructFieldIR(vTy), vGep, vTy.Align()))
-	vJSON, err := e.emitJSONStringifyValue(Value{Ref: vReg, Ty: vTy}, ind.child())
+	var vFieldVal Value
+	if vTy.IsArray {
+		vFieldVal = e.loadArrayFieldValue(vGep, vTy) // header-pointer slot (TDD-00213 S2)
+	} else {
+		vReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", vReg, StructFieldIR(vTy), vGep, vTy.Align()))
+		vFieldVal = Value{Ref: vReg, Ty: vTy}
+	}
+	vJSON, err := e.emitJSONStringifyValue(vFieldVal, ind.child())
 	if err != nil {
 		return Value{}, err
 	}

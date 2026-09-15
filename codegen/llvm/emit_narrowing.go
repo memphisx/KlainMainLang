@@ -304,14 +304,18 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 		// (e.g. a boxed `reject` closure whose reason parameter is TypeCaught).
 		return e.emitCaughtAggregate(tagReg, payload)
 	case target.IsArray:
-		// The array payload is a { ptr, i64 } heap header (ADR-00478) —
-		// load the real aggregate back out. A zero payload (a box holding
-		// null/undefined, or a zeroed slot) yields the {null, 0} empty-
-		// array sentinel instead of dereferencing null.
-		hdr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", hdr, payload))
+		// The array payload is the any-array box cell (anyArrayBoxTy): field 0
+		// is the live {data,len} header pointer (TDD-00212 Stage 3). Deref the box
+		// to reach the header, then load the real {data,len} aggregate back out. A
+		// zero payload (a box holding null/undefined, or a zeroed slot) yields the
+		// {null, 0} empty-array sentinel instead of dereferencing null. (Unboxing
+		// produces a value-typed aggregate snapshot; a later mutation of it does
+		// not write back through the box — matching how every any→array read
+		// materializes a plain array Value.)
+		box := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", box, payload))
 		isNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, hdr))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, box))
 		loadL := e.freshLabel("unbarr.load")
 		mergeL := e.freshLabel("unbarr.merge")
 		slot := e.freshReg()
@@ -319,6 +323,8 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 		e.emitInstr(fmt.Sprintf("store {ptr, i64} {ptr null, i64 0}, ptr %s, align 8", slot))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, mergeL, loadL))
 		e.emitLabel(loadL)
+		hdr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, box))
 		agg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, hdr))
 		e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", agg, slot))

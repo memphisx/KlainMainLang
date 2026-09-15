@@ -1025,20 +1025,74 @@ console.log(outer(1));
 	}
 }
 
-func TestE2ENestedFunctionCapturingArrayRejected(t *testing.T) {
-	// Inherited closure limitation: capturing an array-typed variable in a
-	// closure is not yet supported, so a nested function closing over one is a
-	// clean rejection.
-	_, err := parseAndCompile(`
+// TDD-00213 Stage 3: a closure that captures an array variable shares the
+// enclosing variable's shared {data,len} header cell by pointer (object-reference
+// model), so a read sees the array and a mutation through the closure is visible
+// to the enclosing scope (and vice versa) — matching JS reference semantics.
+func TestE2ENestedFunctionCapturingArray(t *testing.T) {
+	// Simple capture-and-read.
+	assertOutput(t, `
 function outer(arr: number[]): number {
     function first(): number { return arr[0]; }
     return first();
 }
 console.log(outer([9, 8, 7]));
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a nested function capturing an array variable, got none")
-	}
+`, "9")
+
+	// Capture + mutation through the closure is visible to the enclosing scope;
+	// an outer push after the closure is captured is visible to a later call.
+	assertOutput(t, `
+function make() {
+    const a = [1, 2, 3];
+    const add = (v: number) => { a.push(v); };
+    const get = () => a;
+    return { add, get };
+}
+const m = make();
+m.add(4);
+m.add(5);
+console.log(m.get().join(","));
+`, "1,2,3,4,5")
+
+	// Outer mutation visible through a captured reader.
+	assertOutput(t, `
+const base = [7, 8];
+const reader = () => base;
+base.push(9);
+console.log(reader().join(","));
+`, "7,8,9")
+}
+
+// TDD-00213 Stage 3: an array returned from a function keeps its identity — the
+// return ABI is a pointer to the shared {data,len} header, so a function that
+// returns an existing (field/global) array yields the SAME array object: the
+// caller aliases it (a mutation propagates back) and `===` against the source is
+// true. A returned fresh array literal mints its own header (a new object).
+func TestE2EArrayReturnAliasing(t *testing.T) {
+	// Returning an object's array field aliases it: the caller's push is visible
+	// on the source, and identity holds.
+	assertOutput(t, `
+const g = { arr: [1, 2, 3] };
+function get(): number[] { return g.arr; }
+const x = get();
+x.push(4);
+console.log(g.arr.join(","));
+console.log(x === g.arr);
+`, "1,2,3,4\ntrue")
+
+	// Two calls returning the same source array are identity-equal.
+	assertOutput(t, `
+const src = [10, 20];
+function id(): number[] { return src; }
+console.log(id() === id());
+`, "true")
+
+	// A returned fresh literal is a new object each call — not identity-equal.
+	assertOutput(t, `
+function fresh(): number[] { return [1, 2]; }
+console.log(fresh() === fresh());
+console.log(fresh().join(","));
+`, "false\n1,2")
 }
 
 // TDD-00152: a nested function declared inside a lexical block (one or more

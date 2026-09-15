@@ -107,8 +107,11 @@ func (e *Emitter) emitConsoleTable(args []ast.Expression, pos ast.Pos) (Value, e
 				cell: func(_ string, elem Value) (Value, error) {
 					idx, _, _ := elem.Ty.FieldIndex(f.Name)
 					gep := e.freshReg()
-					load := e.freshReg()
 					e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, elem.Ty.StructIR(), elem.Ref, idx))
+					if f.Ty.IsArray {
+						return e.emitInspectField(e.loadArrayFieldValue(gep, f.Ty), 0) // header-ptr slot (TDD-00213 S2)
+					}
+					load := e.freshReg()
 					e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", load, StructFieldIR(f.Ty), gep, f.Ty.Align()))
 					return e.emitInspectField(Value{Ref: load, Ty: f.Ty}, 0)
 				},

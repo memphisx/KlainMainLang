@@ -530,12 +530,17 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			if !val.Ty.IsArray {
 				return Value{}, fmt.Errorf("%d:%d: cannot assign a non-array value to array variable '%s'", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
 			}
-			// Object-reference model (TDD-00127): rebind the variable's slot to a
-			// fresh header holding the new value. This is a *local* rebind — for
-			// a parameter, `a = a.filter(...)` gives this frame a new array
-			// without clobbering the caller's (whereas an in-place `a.push(...)`
-			// still writes through to the caller). Whole-variable reassignment
-			// does not alias, matching the pre-header behaviour.
+			// Reference semantics (TDD-00213 Stage 1): if the RHS is an existing
+			// header-backed array (`a = b`), rebind this slot to the SAME header
+			// cell so `a` and `b` alias — a later `push` through either is visible
+			// through the other, and they are `===`. A RHS that produces a NEW array
+			// (`a = a.filter(...)`, a literal — no ArrayHeader) rebinds to a fresh
+			// header, so this frame gets its own array without clobbering a caller's
+			// (an in-place `a.push(...)` still writes through to the caller).
+			if val.ArrayHeader != "" {
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.ArrayHeader, sym.Ptr))
+				return val, nil
+			}
 			newHeader := e.boxArrayValue(val)
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newHeader, sym.Ptr))
 			return val, nil
@@ -848,8 +853,24 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		// composite/aggregate targets (array/object/dynamic/nullable) all
 		// return from their own branches above, so this scalar-store site is
 		// the only place an IR mismatch can reach the emitter.
-		if rhs.Ty.IR != sym.Ty.IR {
+		//
+		// An array Value reports Type.IR "ptr" but is really a { ptr, i64 }
+		// aggregate register (an array-typed sym takes its own store branch far
+		// above; this else branch only runs for a non-array slot). A bare `.IR`
+		// comparison therefore accepts an array RHS into a `ptr`-shaped object /
+		// string / handle slot and then emits `store ptr %agg` — the aggregate
+		// where a pointer is required, invalid IR. Reject that shape divergence
+		// too (e.g. `var x = {}; x = []` in strict, ADR-00933).
+		if rhs.Ty.IR != sym.Ty.IR || rhs.Ty.IsArray != sym.Ty.IsArray {
 			describe := func(t Type) string {
+				switch {
+				case t.IsArray:
+					return "array"
+				case t.IsSymbol:
+					return "symbol"
+				case t.IsObject:
+					return "object"
+				}
 				if k := scalarTypeKind(t); k != "" {
 					return k
 				}
@@ -984,11 +1005,9 @@ func (e *Emitter) emitDestructAssignObjectProps(objPtr string, objTy Type, props
 			if !fieldTy.IsArray || fieldTy.ElemType == nil {
 				return fmt.Errorf("%d:%d: cannot array-destructure a non-array field '%s'", pos.Line, pos.Col, prop.Key)
 			}
-			// An array-typed field is stored as the `{ptr, i64}` aggregate inline
-			// in the struct — load it directly (not via loadArrayElem, which reads
-			// an element out of an array).
-			aggReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", aggReg, gepReg))
+			// An array-typed field slot holds a header pointer (TDD-00213 Stage 2);
+			// deref it into the {ptr,i64} aggregate to destructure.
+			aggReg := e.loadArrayFieldValue(gepReg, fieldTy).Ref
 			subPtr, subLen := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", subPtr, aggReg))
 			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", subLen, aggReg))

@@ -71,7 +71,13 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 	// `Optional` member case.
 	undefTy := undefinedableElem(resultTy)
 	wrapUndef := undefTy.Nullable && !resultTy.IsArray
+	// The result buffer holds the optional's VALUE. For an array that value is the
+	// {ptr,i64} aggregate, not the header-pointer field storage StructFieldIR now
+	// reports (TDD-00213 Stage 2) — size/type the buffer for the aggregate.
 	resIR := StructFieldIR(undefTy)
+	if resultTy.IsArray {
+		resIR = "{ptr, i64}"
+	}
 
 	resPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, resIR, undefTy.Align()))
@@ -120,12 +126,16 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 	} else {
 		idx, fieldTy, _ := objVal.Ty.FieldIndex(ex.Property)
 		gepReg := e.freshReg()
-		loadReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
 			gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
-			loadReg, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
-		propVal = Value{Ref: loadReg, Ty: fieldTy}
+		if fieldTy.IsArray {
+			propVal = e.loadArrayFieldValue(gepReg, fieldTy) // header-pointer slot (TDD-00213 S2)
+		} else {
+			loadReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
+				loadReg, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
+			propVal = Value{Ref: loadReg, Ty: fieldTy}
+		}
 	}
 	propVal = e.coerce(propVal, resultTy)
 	presentRef := propVal.Ref
@@ -559,8 +569,13 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 				}
 			}
 			gepReg := e.freshReg()
-			loadReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
+			if fieldTy.IsArray {
+				fv := e.loadArrayFieldValue(gepReg, fieldTy) // header-pointer slot (TDD-00213 S2)
+				fv.Ty = e.canonicalizeClassTy(fieldTy)
+				return fv, nil
+			}
+			loadReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
 			return Value{Ref: loadReg, Ty: e.canonicalizeClassTy(fieldTy)}, nil
 		}
@@ -1272,8 +1287,14 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	}
 	fieldTy = e.canonicalizeClassTy(fieldTy)
 	gepReg := e.freshReg()
-	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
+	// An array field slot holds a shared header pointer (TDD-00213 Stage 2) — deref
+	// it into the {ptr,i64} aggregate, carrying the live header so `let x = obj.arr`
+	// aliases and a mutation through `obj.arr` is visible through x.
+	if fieldTy.IsArray {
+		return e.loadArrayFieldValue(gepReg, fieldTy), nil
+	}
+	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
 	return Value{Ref: result, Ty: fieldTy}, nil
 }

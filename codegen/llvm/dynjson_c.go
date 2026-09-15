@@ -29,4 +29,7 @@ func (e *Emitter) ensureDynJSONC() {
 	e.ensureDtoa() // dynjson.c calls __kml_dtoa for float rendering
 	e.emitGlobal(`declare ptr @__kml_dynjson_stringify(i64, i64, ptr, ptr)`)
 	e.emitGlobal(`declare ptr @__kml_dynarr_join(ptr)`)
+	e.emitGlobal(`declare ptr @__kml_array_join(ptr, i64, i8)`)    // TDD-00212
+	e.emitGlobal(`declare ptr @__kml_array_inspect(ptr, i64, i8)`) // TDD-00212 Stage 2
+	e.emitGlobal(`declare ptr @__kml_dynarr_inspect(ptr)`)         // TDD-00212 Stage 2
 }

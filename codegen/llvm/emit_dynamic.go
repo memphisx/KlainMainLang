@@ -394,20 +394,21 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", r, present, boxedVal.Ref, nbUndefined))
 		return Value{Ref: r, Ty: TypeAny}, nil
 	}
-	// An array value is a { ptr, i64 } aggregate (data pointer + length),
-	// which doesn't fit the box's single i64 payload slot. The payload is a
-	// heap *header* holding the full aggregate — the same 16-byte shape the
-	// nested-array element box already uses (boxArrayValue) — so the length
-	// survives the round trip and an `any`-boxed array can be unboxed back
-	// into a real array (ADR-00478; previously only the data pointer was
-	// boxed and the length was documented-lost). Identity semantics are
-	// preserved by comparing the *data pointers inside* the headers in
-	// __kml_any_eq (two boxings of one array malloc two headers, but the
-	// data pointer is the stable per-array identity). The element type is
-	// still not carried — `typeof` → "object" and toString stays the
-	// `[object Array]` tag string (TDD-00062).
+	// An array value is a { ptr, i64 } aggregate (data pointer + length), which
+	// doesn't fit the box's single i64 payload slot. The payload is a small box
+	// cell (anyArrayBoxTy) whose field 0 is the LIVE array header pointer and
+	// field 1 the element-kind byte the render/stringify site consults (TDD-00212).
+	// Storing the live header (Stage 3) — the same {data,len} cell the source
+	// array mutates through (TDD-00127) — rather than a snapshot makes a post-box
+	// `push` visible through the box; identity is that header, so __kml_any_eq's
+	// array arm (a field-0 compare) stays stable across a reallocating push.
+	// `typeof` stays "object". Before TDD-00212 the element type was dropped and
+	// toString fell back to `[object Array]` (TDD-00062); now a flat
+	// number/string/boolean/int array renders its contents, and an element kind
+	// not representable at box time stores the sentinel -1 and keeps the
+	// `[object Array]` stand-in.
 	if v.Ty.IsArray {
-		hdr := e.boxArrayValue(v)
+		hdr := e.boxAnyArray(v)
 		return Value{Ref: e.emitNbTagPtr(hdr, kmlTagArray), Ty: TypeAny}, nil
 	}
 
@@ -451,6 +452,93 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", d, iv.Ref))
 		return Value{Ref: e.emitNbEncodeDouble(d), Ty: TypeAny}, nil
 	}
+}
+
+// anyArrayBoxTy is the LLVM type of the any-boxed array box (TDD-00212): field 0
+// is the LIVE array header pointer (arrayHeaderTy — the shared {data,len} cell an
+// array's push/reassign writes through, object-reference model TDD-00127), field
+// 1 the element-kind byte the stringify/inspect site consults. Storing the header
+// pointer rather than a {data,len} snapshot (Stage 3) makes a post-box mutation
+// visible through the box and makes identity the shared header, so __kml_any_eq's
+// array arm — which compares field 0 — stays stable across a reallocating push.
+// Render/unbox sites deref field 0 to reach data/len (one extra load).
+const anyArrayBoxTy = "{ ptr, i8 }"
+
+// arrayElemKind maps a static array element type to the descriptor
+// __kml_array_join strides/formats by, or (-1, false) when the kind isn't a flat
+// scalar/string this stage renders — a nested array, object, boxed-any, or other
+// element, for which the box carries -1 and the render keeps `[object Array]`.
+// Keep the returned integers in sync with the KJ_* enum in dynjson.c.
+func arrayElemKind(elemTy Type) (int, bool) {
+	switch {
+	case elemTy.Float && elemTy.IR == "double":
+		return 0, true // KJ_F64
+	case elemTy.Float && elemTy.IR == "float":
+		return 1, true // KJ_F32
+	case elemTy.IR == "i1":
+		return 10, true // KJ_BOOL
+	case isForOfStringTy(elemTy):
+		return 11, true // KJ_STRING
+	}
+	if elemTy.IsInteger() {
+		signed := elemTy.Signed
+		switch elemTy.IR {
+		case "i64":
+			if signed {
+				return 2, true
+			}
+			return 3, true
+		case "i32":
+			if signed {
+				return 4, true
+			}
+			return 5, true
+		case "i16":
+			if signed {
+				return 6, true
+			}
+			return 7, true
+		case "i8":
+			if signed {
+				return 8, true
+			}
+			return 9, true
+		}
+	}
+	return -1, false
+}
+
+// boxAnyArray heap-allocates the any-array box header (anyArrayBoxTy), stores the
+// array aggregate ({ ptr, i64 }) at offset 0 and the element-kind descriptor at
+// offset 16, and returns the header pointer — the payload of a kmlTagArray box
+// (TDD-00212).
+func (e *Emitter) boxAnyArray(v Value) string {
+	e.ensureMalloc()
+	kind := -1
+	if v.Ty.ElemType != nil {
+		if k, ok := arrayElemKind(*v.Ty.ElemType); ok {
+			kind = k
+		}
+	}
+	// The box holds the LIVE array header pointer (Stage 3). When the value came
+	// from a named array, reuse its header (v.ArrayHeader) so mutations through
+	// the original array show up; a transient array expression mints a fresh
+	// header from its {data,len} aggregate (no caller-visible identity to share).
+	header := v.ArrayHeader
+	if header == "" {
+		data := e.freshReg()
+		length := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", data, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", length, v.Ref))
+		header = e.newArrayHeader(data, length)
+	}
+	box := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", box))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, box))
+	kindGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", kindGep, anyArrayBoxTy, box))
+	e.emitInstr(fmt.Sprintf("store i8 %d, ptr %s, align 1", kind, kindGep))
+	return box
 }
 
 // emitNbEncodeDouble encodes a double register as a NaN-boxed number
@@ -510,12 +598,31 @@ func (e *Emitter) emitTagCheck(tag string, want int, prefix string) (matchL, nex
 // result slot, one branch block per tag storing into it, and a merge block
 // that loads the result — generalized from 2 branches to 7 (one per tag).
 func (e *Emitter) emitDynamicToString(v Value) (Value, error) {
-	// TDD-00201 Stage 4: a dynamic object stringifies via its own toString /
-	// @@toPrimitive (string hint) rather than the "[object Object]" default —
-	// `String({toString(){return "hi"}})` is "hi". Runtime ToPrimitive returns a
-	// primitive box (or "[object Object]" when the object has no such method); a
-	// non-object box passes through, so this is a no-op for scalars.
-	v = Value{Ref: e.emitAnyToPrimitive(v.Ref, true), Ty: TypeAny}
+	return e.emitDynamicRender(v, false)
+}
+
+// emitDynamicInspect is the console.log rendering of a boxed any/unknown value:
+// the Node util.inspect form (`[ 1, 2, 3 ]`, quoted string elements) rather than
+// the flat String() join (`1,2,3`). Scalars print identically to ToString at the
+// top level (numbers/booleans bare, strings unquoted); only a boxed array differs
+// (TDD-00212 Stage 2). Everything else routes through the shared dispatch.
+func (e *Emitter) emitDynamicInspect(v Value) (Value, error) {
+	return e.emitDynamicRender(v, true)
+}
+
+// emitDynamicRender is the shared tag dispatch behind emitDynamicToString and
+// emitDynamicInspect. `inspect` selects the console.log bracket form for a boxed
+// array; every other tag renders the same in both modes.
+func (e *Emitter) emitDynamicRender(v Value, inspect bool) (Value, error) {
+	if !inspect {
+		// TDD-00201 Stage 4: a dynamic object stringifies via its own toString /
+		// @@toPrimitive (string hint) rather than the "[object Object]" default —
+		// `String({toString(){return "hi"}})` is "hi". Runtime ToPrimitive returns a
+		// primitive box (or "[object Object]" when the object has no such method); a
+		// non-object box passes through, so this is a no-op for scalars. console.log
+		// (inspect) does NOT call toString — it inspects — so this step is skipped.
+		v = Value{Ref: e.emitAnyToPrimitive(v.Ref, true), Ty: TypeAny}
+	}
 
 	tag, payload := e.emitUnboxTagPayload(v)
 
@@ -577,14 +684,40 @@ func (e *Emitter) emitDynamicToString(v Value) (Value, error) {
 	store(e.internString("undefined"))
 	e.emitLabel(nextL)
 
-	// A boxed array stringifies to the `[object Array]` tag: the box's
-	// header preserves the (ptr, len) pair (ADR-00478) but not the element
-	// type, so its contents (`1,2,3`) still can't be rendered — this fixed
-	// tag string is the honest, non-garbage stand-in (a deviation from
-	// JS's `String([1,2,3]) === "1,2,3"`, documented in TDD-00062).
+	// A boxed array stringifies via the JS Array join (`String([1,2,3]) ===
+	// "1,2,3"`): the box header carries the (ptr, len) pair plus an element-kind
+	// byte (TDD-00212), so __kml_array_join can stride the buffer and format each
+	// element. An element kind not representable at box time carries -1, for which
+	// the helper returns the honest `[object Array]` stand-in (TDD-00062).
 	matchL, nextL = e.emitTagCheck(tag, kmlTagArray, "dynstr.array")
 	e.emitLabel(matchL)
-	store(e.internString("[object Array]"))
+	e.ensureDynJSONC()
+	aBox := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", aBox, payload))
+	// Field 0 is the live array header pointer; deref it for the CURRENT data/len
+	// (so a post-box push is reflected — TDD-00212 Stage 3). Kind is box field 1.
+	aHeader := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", aHeader, aBox))
+	aData := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", aData, aHeader))
+	aLenGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", aLenGep, arrayHeaderTy, aHeader))
+	aLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", aLen, aLenGep))
+	aKindGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", aKindGep, anyArrayBoxTy, aBox))
+	aKind := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", aKind, aKindGep))
+	aStr := e.freshReg()
+	// console.log → the util.inspect bracket form (`[ 1, 2, 3 ]`); String() /
+	// interpolation → the flat Array join (`1,2,3`). Both share the element
+	// stride/format on the same box (TDD-00212 Stage 2).
+	joinFn := "__kml_array_join"
+	if inspect {
+		joinFn = "__kml_array_inspect"
+	}
+	e.emitInstr(fmt.Sprintf("%s = call ptr @%s(ptr %s, i64 %s, i8 %s)", aStr, joinFn, aData, aLen, aKind))
+	store(aStr)
 	e.emitLabel(nextL)
 
 	// A boxed built-in-constructor reference stringifies the way real JS
@@ -614,7 +747,13 @@ func (e *Emitter) emitDynamicToString(v Value) (Value, error) {
 	daHdr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", daHdr, payload))
 	daStr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynarr_join(ptr %s)", daStr, daHdr))
+	// console.log → bracket inspect form (`[ 1, 'hi', true ]`); String() → the
+	// flat comma join (`1,hi,true`). TDD-00212 Stage 2.
+	dynFn := "__kml_dynarr_join"
+	if inspect {
+		dynFn = "__kml_dynarr_inspect"
+	}
+	e.emitInstr(fmt.Sprintf("%s = call ptr @%s(ptr %s)", daStr, dynFn, daHdr))
 	store(daStr)
 	e.emitLabel(nextL)
 

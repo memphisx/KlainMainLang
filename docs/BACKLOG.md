@@ -146,9 +146,6 @@ finished while on it — don't defer such work into another comeback.
 - A thrown plain object's own fields aren't readable after catch (`throw {x:1}`;
   `e.x`) — needs D1 runtime object shape (TDD-00155 Stage 6). Primitives + Errors
   are faithful.
-- Invalid-IR backlog — a function / non-primitive operand under `-compat=js`
-  (`{} & function(){}`, `f - 1`) truncates a raw pointer — the broad
-  operator-on-any compat=js gap, not bitwise-specific (strict rejects cleanly).
 - Dynamic `import()` beyond the eager V1 (TDD-00055); the `-compat`
   per-divergence flags (TDD-00075); `any` residues (TDD-00162).
 - `libbf` (MIT) as a third selectable `-bigint` backend alongside

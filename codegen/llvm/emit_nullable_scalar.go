@@ -288,6 +288,13 @@ func (e *Emitter) storeNullableScalar(ptr string, ty Type, init ast.Expression) 
 // type coerces and stores exactly as before (StructFieldIR handles the array
 // {ptr,i64} shape).
 func (e *Emitter) storeScalarOrNullableField(gepReg string, fieldTy Type, val Value) {
+	// An array field slot holds a shared {data,len} header pointer (TDD-00213
+	// Stage 2): coerce (so a null value becomes the {null,0} aggregate), then
+	// share the value's live header (reference aliasing) or mint one.
+	if fieldTy.IsArray {
+		e.storeArrayFieldHeader(gepReg, e.coerce(val, fieldTy))
+		return
+	}
 	if isNullableScalar(fieldTy) {
 		agg := e.boxNullableScalarFromValue(val, fieldTy)
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", nullableScalarStorageIR(fieldTy), agg, gepReg, storageAlign(fieldTy)))
@@ -332,6 +339,15 @@ func (e *Emitter) storeScalarOrNullableFieldExpr(gepReg string, fieldTy Type, ex
 	if err != nil {
 		return err
 	}
+	// An array field slot holds a shared {data,len} header pointer (TDD-00213
+	// Stage 2): share the value's live header (`obj.arr = existing` aliases) or
+	// mint a fresh one for a new array expression. Coerce first so a null literal
+	// (`{ items: null }` for a `T[] | null` field) becomes the {null,0} aggregate
+	// rather than a bare `null` boxArrayValue would mis-store.
+	if fieldTy.IsArray {
+		e.storeArrayFieldHeader(gepReg, e.coerce(val, fieldTy))
+		return nil
+	}
 	// A constrained-union field (TDD-00119) holds an { i8, i64 } box: check the
 	// value's type against the member set, then box it (coerce doesn't box).
 	if fieldTy.IsDynamic && len(fieldTy.UnionMembers) > 0 {
@@ -356,6 +372,11 @@ func (e *Emitter) storeScalarOrNullableFieldExpr(gepReg string, fieldTy Type, ex
 // Value (isNullableScalar true), which downstream consumers demote or null-test
 // as needed; every other field loads exactly as before.
 func (e *Emitter) loadScalarOrNullableField(gepReg string, fieldTy Type) Value {
+	// An array field slot holds a shared {data,len} header pointer (TDD-00213
+	// Stage 2): deref it into the {ptr,i64} aggregate, carrying the live header.
+	if fieldTy.IsArray {
+		return e.loadArrayFieldValue(gepReg, fieldTy)
+	}
 	reg := e.freshReg()
 	if isNullableScalar(fieldTy) {
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, nullableScalarStorageIR(fieldTy), gepReg, storageAlign(fieldTy)))

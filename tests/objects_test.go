@@ -645,6 +645,32 @@ console.log(returned.length)
 `, "3")
 }
 
+func TestE2EArrayFieldReferenceAliasing(t *testing.T) {
+	// TDD-00213 Stage 2: an array stored in an object/class field is a reference —
+	// binding the field elsewhere shares the same array, so a mutation through the
+	// field is visible through the alias and vice-versa; `===` is object identity;
+	// structuredClone makes an independent copy.
+	assertOutput(t, `
+class Basket { items: number[] = []; }
+const b = new Basket();
+b.items.push(1);
+b.items.push(2);
+const alias = b.items;
+b.items.push(3);
+console.log(alias);
+console.log(alias === b.items);
+alias.push(4);
+console.log(b.items);
+const o = { xs: [10, 20] };
+const xs = o.xs;
+o.xs.push(30);
+console.log(xs);
+const snap = structuredClone(o);
+o.xs.push(40);
+console.log(snap.xs);
+`, "[ 1, 2, 3 ]\ntrue\n[ 1, 2, 3, 4 ]\n[ 10, 20, 30 ]\n[ 10, 20, 30 ]")
+}
+
 // --- computed property keys (docs/tdd/TDD-00012.md) ---
 
 func TestE2EComputedPropertyKeyBasic(t *testing.T) {

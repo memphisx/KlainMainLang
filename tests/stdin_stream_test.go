@@ -99,11 +99,23 @@ process.stdin.on('end', () => { console.log(bytes) })
 // *stderr* (unbuffered, unlike piped stdout which flushes only at exit) and the
 // producer waits for it — a handshake, not a fixed sleep, so the check stays a
 // real non-blocking assertion independent of startup latency.
+// The property under test: a `setInterval` timer keeps firing while `process.stdin`
+// is idle — i.e. the runtime never parks the event loop inside a blocking stdin
+// read. The proof is driven by *feedback*, not wall-clock timing: the child emits
+// a `tick` heartbeat on every interval fire, and the driver advances the protocol
+// only after it has *observed* fresh heartbeats during each idle window (bounded
+// only by a generous overall deadline). A slow or contended host simply produces
+// heartbeats more slowly — the test still passes — whereas a genuinely blocking
+// read produces *no* heartbeats during the idle window, which the per-window wait
+// catches as a timeout. This deliberately replaces the earlier fixed-80ms-gap
+// design (ADR-00867), whose strict "count advanced across an 80ms wall-clock
+// window" assertion could false-fail on an oversubscribed CI runner that starved
+// the child of CPU for the whole window (ADR-00935).
 func TestE2EStdinDoesNotBlockLoop(t *testing.T) {
 	bin := buildBinary(t, `
 console.error("READY")
 let ticks = 0
-const iv = setInterval(() => { ticks = ticks + 1 }, 15)
+const iv = setInterval(() => { ticks = ticks + 1; console.log("tick " + ticks) }, 15)
 process.stdin.on('data', (c: string) => {
   const s = c.trim()
   if (s.length > 0) console.log("chunk " + s + " ticks=" + ticks)
@@ -126,7 +138,7 @@ process.stdin.on('end', () => { clearInterval(iv); console.log("end ticks=" + ti
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	// Handshake: wait for READY on stderr (with a generous cap) before writing.
+	// Handshake: wait for READY on stderr (unbuffered) before writing.
 	readyCh := make(chan string, 1)
 	go func() {
 		esc := bufio.NewScanner(stderr)
@@ -144,47 +156,108 @@ process.stdin.on('end', () => { clearInterval(iv); console.log("end ticks=" + ti
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for READY handshake")
 	}
+
+	// One goroutine drains stdout into a channel so the child never blocks on a
+	// full pipe; the driver consumes lines as the protocol needs them.
+	lineCh := make(chan string, 4096)
 	go func() {
-		for _, s := range []string{"one", "two", "three"} {
-			time.Sleep(80 * time.Millisecond) // longer than the 15ms tick
-			io.WriteString(stdin, s+"\n")
+		sc := bufio.NewScanner(stdout)
+		for sc.Scan() {
+			lineCh <- sc.Text()
 		}
-		stdin.Close()
+		close(lineCh)
 	}()
-	var lines []string
-	sc := bufio.NewScanner(stdout)
-	for sc.Scan() {
-		lines = append(lines, sc.Text())
+
+	var transcript []string
+	tickRe := regexp.MustCompile(`^tick (\d+)$`)
+	// nextLine reads the next stdout line, failing the test on a generous timeout
+	// (a stalled loop, not a slow one, is what that timeout means).
+	nextLine := func(what string) string {
+		select {
+		case ln, ok := <-lineCh:
+			if !ok {
+				t.Fatalf("stdout closed early while waiting for %s:\n%s", what, strings.Join(transcript, "\n"))
+			}
+			transcript = append(transcript, ln)
+			return ln
+		case <-time.After(15 * time.Second):
+			t.Fatalf("timed out waiting for %s — the event loop is stalled (stdin read blocked it):\n%s", what, strings.Join(transcript, "\n"))
+			return ""
+		}
+	}
+	// awaitTicks consumes stdout until it has seen `n` fresh `tick` heartbeats,
+	// returning the last tick value observed. Any non-tick line (a `chunk`/`end`
+	// echo) encountered along the way is handed to `onOther`. This is the core
+	// proof: it returns iff the timer actually fired `n` more times, however long
+	// the host took to schedule them.
+	awaitTicks := func(n int, what string, onOther func(string)) int {
+		seen, last := 0, 0
+		for seen < n {
+			ln := nextLine(what)
+			if m := tickRe.FindStringSubmatch(ln); m != nil {
+				last, _ = strconv.Atoi(m[1])
+				seen++
+				continue
+			}
+			if onOther != nil {
+				onOther(ln)
+			}
+		}
+		return last
+	}
+
+	// Prove the loop is alive before any stdin activity.
+	awaitTicks(2, "initial heartbeats", nil)
+
+	chunkRe := regexp.MustCompile(`^chunk (\w+) ticks=(\d+)$`)
+	chunkTicks := map[string]int{}
+	for _, s := range []string{"one", "two", "three"} {
+		if _, err := io.WriteString(stdin, s+"\n"); err != nil {
+			t.Fatalf("write %q: %v", s, err)
+		}
+		// Wait for this chunk's echo, tolerating heartbeats interleaved before it.
+		var echoed bool
+		for !echoed {
+			ln := nextLine("chunk " + s + " echo")
+			if m := chunkRe.FindStringSubmatch(ln); m != nil {
+				if m[1] != s {
+					t.Fatalf("expected echo for chunk %q, got %q:\n%s", s, ln, strings.Join(transcript, "\n"))
+				}
+				chunkTicks[s], _ = strconv.Atoi(m[2])
+				echoed = true
+			}
+			// otherwise it's a heartbeat: drain and keep waiting.
+		}
+		// The idle window: stdin is quiet until the next write. Requiring fresh
+		// heartbeats here is the non-block proof — a blocking read yields none and
+		// nextLine's timeout fires.
+		awaitTicks(2, "heartbeats during idle window after chunk "+s, nil)
+	}
+
+	if err := stdin.Close(); err != nil {
+		t.Fatalf("close stdin: %v", err)
+	}
+	// Drain to the 'end' line (EOF handler), tolerating trailing heartbeats that
+	// may race ahead of it.
+	var endTicks int
+	endRe := regexp.MustCompile(`^end ticks=(\d+)$`)
+	for {
+		ln := nextLine("end line")
+		if m := endRe.FindStringSubmatch(ln); m != nil {
+			endTicks, _ = strconv.Atoi(m[1])
+			break
+		}
 	}
 	if err := cmd.Wait(); err != nil {
-		t.Fatalf("wait: %v", err)
+		t.Fatalf("wait: %v\n%s", err, strings.Join(transcript, "\n"))
 	}
-	got := strings.Join(lines, "\n")
 
-	// Parse the per-chunk tick counts in arrival order.
-	tickRe := regexp.MustCompile(`ticks=(\d+)`)
-	var counts []int
-	for _, ln := range lines {
-		if m := tickRe.FindStringSubmatch(ln); m != nil {
-			n, _ := strconv.Atoi(m[1])
-			counts = append(counts, n)
-		}
-	}
-	if len(counts) != 4 { // three chunks + end
-		t.Fatalf("expected 4 tick-count lines (3 chunks + end), got %d:\n%s", len(counts), got)
-	}
-	// The two 80ms gaps between the three chunks are the quiet windows: a count
-	// that strictly advances across each ⇒ the timer fired while stdin was idle
-	// ⇒ the read never blocked the loop. ('end' follows the last chunk with no
-	// quiet gap — stdin closes right after "three" — so it need only not regress.)
-	for i := 1; i <= 2; i++ {
-		if counts[i] <= counts[i-1] {
-			t.Fatalf("tick count did not advance across gap %d (%d ⇒ %d) — stdin read blocked the loop:\n%s",
-				i, counts[i-1], counts[i], got)
-		}
-	}
-	if counts[3] < counts[2] {
-		t.Fatalf("tick count regressed at 'end' (%d ⇒ %d):\n%s", counts[2], counts[3], got)
+	// Sanity: the per-chunk tick counts must be non-decreasing in arrival order,
+	// and 'end' must not regress. (Strict advance is already guaranteed by the
+	// awaitTicks gating between chunks; this just guards the observed values.)
+	if !(chunkTicks["one"] <= chunkTicks["two"] && chunkTicks["two"] <= chunkTicks["three"] && chunkTicks["three"] <= endTicks) {
+		t.Fatalf("tick counts not monotonic: one=%d two=%d three=%d end=%d:\n%s",
+			chunkTicks["one"], chunkTicks["two"], chunkTicks["three"], endTicks, strings.Join(transcript, "\n"))
 	}
 }
 

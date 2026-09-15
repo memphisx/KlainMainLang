@@ -99,7 +99,7 @@
             "caveats": [
               "`grow(n)` requires the `{maxByteLength}` construction option (compile-time rejection otherwise, vs the spec's runtime TypeError); the maximum is reserved upfront ([ADR-00494](../adr/ADR-00494.md))",
               "Crosses a worker boundary whole or as an object field; a TypedArray **view** doesn't cross — send the buffer, re-view on the other side",
-              "Views over it can't be captured by closures (the general array-capture limitation), so cross-thread handlers re-view inside the handler"
+              "An in-thread closure can capture a view ([TDD-00213](../tdd/TDD-00213.md) Stage 3), but a view doesn't cross a worker boundary (previous caveat), so a cross-thread handler still re-views the shared buffer inside the handler"
             ],
             "notes": [
               "`new SharedArrayBuffer(n)` — identical representation to `ArrayBuffer` (all view constructions, `.byteLength`, `.slice()` — which returns a new `SharedArrayBuffer`, per spec ([ADR-00312](../adr/ADR-00312.md)) — and `DataView` work unchanged), but `postMessage`/`workerData`/`structuredClone` **share it by reference** instead of deep-copying, the spec's semantics ([TDD-00099](../tdd/TDD-00099.md), [ADR-00308](../adr/ADR-00308.md))",

@@ -808,9 +808,13 @@ func (e *Emitter) emitSQLiteBuildRow(stmtHandle string, rowTy Type) (string, err
 		idx, fieldTy, _ := rowTy.FieldIndex(f.Name)
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, obj, idx))
-		// Array/typed-array fields (BLOB → Uint8Array) are a {ptr,i64} aggregate
-		// slot, not a bare ptr — store with the struct-field IR.
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), valRef, gep, fieldTy.Align()))
+		// Array/typed-array fields (BLOB → Uint8Array) hold a {data,len} header
+		// pointer (TDD-00213 Stage 2); mint a header from the aggregate.
+		if fieldTy.IsArray {
+			e.storeArrayFieldHeader(gep, Value{Ref: valRef, Ty: fieldTy})
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), valRef, gep, fieldTy.Align()))
+		}
 	}
 	return obj, nil
 }

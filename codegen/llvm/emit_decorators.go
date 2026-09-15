@@ -393,7 +393,13 @@ func (e *Emitter) emitMethodBoxAdapter(className, methodName string, pos ast.Pos
 	} else {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", r, retTy.LLVMRetType(), llvmName, joinArgs(argParts)))
-		b, err := e.emitBoxValue(Value{Ref: r, Ty: retTy})
+		callResult := Value{Ref: r, Ty: retTy}
+		if retTy.IsArray {
+			// Array return ABI is a header pointer (TDD-00213 Stage 3): deref
+			// before boxing so emitBoxValue sees the {ptr,i64} aggregate.
+			callResult = e.arrayValueFromHeaderReg(r, retTy)
+		}
+		b, err := e.emitBoxValue(callResult)
 		if err != nil {
 			boxFailed = true
 		} else {

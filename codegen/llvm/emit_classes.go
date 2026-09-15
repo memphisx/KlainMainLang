@@ -2695,7 +2695,11 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		}
 		reg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", reg, sig.RetType.LLVMRetType(), llvmName, argsIR))
-		return Value{Ref: reg, Ty: taskTaggedRet(sig)}, nil
+		if sig.RetType.IsArray {
+		// Array return ABI is a header pointer (TDD-00213 Stage 3): deref + alias.
+		return e.arrayValueFromHeaderReg(reg, sig.RetType), nil
+	}
+	return Value{Ref: reg, Ty: taskTaggedRet(sig)}, nil
 	}
 
 	vtGep := e.freshReg()
@@ -2722,6 +2726,10 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 	}
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", reg, sig.RetType.LLVMRetType(), fnTypePart, fnPtr, argsIR))
+	if sig.RetType.IsArray {
+		// Array return ABI is a header pointer (TDD-00213 Stage 3): deref + alias.
+		return e.arrayValueFromHeaderReg(reg, sig.RetType), nil
+	}
 	return Value{Ref: reg, Ty: taskTaggedRet(sig)}, nil
 }
 
@@ -3036,6 +3044,10 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 	}
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", reg, sig.RetType.LLVMRetType(), llvmName, argsIR))
+	if sig.RetType.IsArray {
+		// Array return ABI is a header pointer (TDD-00213 Stage 3): deref + alias.
+		return e.arrayValueFromHeaderReg(reg, sig.RetType), nil
+	}
 	return Value{Ref: reg, Ty: taskTaggedRet(sig)}, nil
 }
 

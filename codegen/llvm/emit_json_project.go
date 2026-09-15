@@ -108,11 +108,21 @@ func (e *Emitter) emitJSONProjectObject(node string, targetTy Type, pos ast.Pos)
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, foundRef, gep, f.Ty.Align()))
+		// An array field holds a header pointer (TDD-00213 Stage 2); mint a header
+		// from the projected {ptr,i64} aggregate rather than storing it inline.
+		if f.Ty.IsArray {
+			e.storeArrayFieldHeader(gep, Value{Ref: foundRef, Ty: f.Ty})
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, foundRef, gep, f.Ty.Align()))
+		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(missingL)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, e.jsonDefaultRef(f.Ty), gep, f.Ty.Align()))
+		if f.Ty.IsArray {
+			e.storeArrayFieldHeader(gep, Value{Ref: e.jsonDefaultRef(f.Ty), Ty: f.Ty})
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, e.jsonDefaultRef(f.Ty), gep, f.Ty.Align()))
+		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(mergeL)
@@ -154,11 +164,21 @@ func (e *Emitter) emitJSONProjectTuple(node string, targetTy Type, pos ast.Pos) 
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, foundRef, gep, f.Ty.Align()))
+		// An array field holds a header pointer (TDD-00213 Stage 2); mint a header
+		// from the projected {ptr,i64} aggregate rather than storing it inline.
+		if f.Ty.IsArray {
+			e.storeArrayFieldHeader(gep, Value{Ref: foundRef, Ty: f.Ty})
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, foundRef, gep, f.Ty.Align()))
+		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(missingL)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, e.jsonDefaultRef(f.Ty), gep, f.Ty.Align()))
+		if f.Ty.IsArray {
+			e.storeArrayFieldHeader(gep, Value{Ref: e.jsonDefaultRef(f.Ty), Ty: f.Ty})
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, e.jsonDefaultRef(f.Ty), gep, f.Ty.Align()))
+		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(mergeL)

@@ -78,6 +78,8 @@ func (e *Emitter) buildStreamReadRecord(resultTy, chunkTy Type, chunk Value, don
 	if isNullableScalar(valTy) {
 		agg := e.makeNullableScalarAgg(valTy, presentI1, chunk.Ref)
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", nullableScalarStorageIR(valTy), agg, vGep))
+	} else if valTy.IsArray {
+		e.storeArrayFieldHeader(vGep, chunk) // header-ptr slot (TDD-00213 S2)
 	} else {
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", StructFieldIR(valTy), chunk.Ref, vGep))
 	}
@@ -98,6 +100,10 @@ func (e *Emitter) loadStreamResultValue(recPtr string, resultTy, chunkTy Type) V
 	vIdx, valTy, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), recPtr, vIdx))
+	if valTy.IsArray {
+		v := e.loadArraySlotAggregate(vGep, chunkTy) // header-ptr slot (TDD-00213 S2)
+		return v
+	}
 	loaded := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(valTy), vGep, chunkTy.Align()))
 	if isNullableScalar(valTy) {

@@ -909,6 +909,14 @@ func (e *Emitter) promoteCaptureToCell(name string, ty Type, srcPtr string, isCo
 		// newCell is a body register — emitVarSlotDefault targets the entry block).
 		if ty.IsDynamic {
 			e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, newCell))
+		} else if ty.IsArray {
+			// An array cell holds a shared {data,len} header pointer (TDD-00213
+			// Stage 3). Seed the TDZ-misuse case with a fresh EMPTY header rather
+			// than a null pointer, so a closure that (mis)reads the array before
+			// its declaration completes sees an empty array instead of
+			// dereferencing null — the deterministic-default intent of this path.
+			hdr := e.newArrayHeader("null", "0")
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, newCell))
 		} else {
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, ty.zeroLiteral(), newCell, ty.Align()))
 		}
@@ -2200,9 +2208,13 @@ func (e *Emitter) gatherCaptures(af *ast.ArrowFunction) ([]CapturedVar, error) {
 		if !found {
 			continue // built-in, function name, etc.
 		}
-		if sym.Ty.IsArray {
-			return nil, fmt.Errorf("capturing array variable '%s' in a closure is not yet supported", name)
-		}
+		// An array capture (TDD-00213 Stage 3) shares the enclosing variable's
+		// header cell by pointer like any other capture: an array symbol's
+		// storage is already a slot holding the shared {data,len} header pointer
+		// (object-reference model, TDD-00127), and its Type.IR is "ptr", so the
+		// generic promote/bind cell path copies exactly that header pointer —
+		// making a captured `arr.push()` and an outer reassignment mutually
+		// visible, matching JS reference semantics.
 		caps = append(caps, CapturedVar{Name: name, Ty: sym.Ty, Sym: sym})
 	}
 	// An arrow shares the enclosing method's lexical `this` (ADR-00460):
@@ -2538,48 +2550,20 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			}
 			e.emitTerminator("ret void")
 		} else if retTy.IsArray {
-			// Mirrors emitReturn's own IsArray branch (emit_stmts.go) —
-			// same named-array-identifier vs. arbitrary-expression split,
-			// and the same hint-aware evaluation (emitExprWithObjectHint)
-			// so an array-literal body's element type coerces against the
-			// declared/inferred return type instead of self-inferring.
-			// Found missing while wiring .flatMap(): an arrow-function body
-			// returning an array (`(x) => [x, x*10]`) was the first thing
-			// to actually exercise an expression-bodied arrow function
-			// returning an array — its `ret` instruction used the array's
-			// scalar `ptr` IR instead of the aggregate `{ptr, i64}`
-			// LLVMRetType, a hard clang-stage type mismatch, not survivable
-			// at all (a block-bodied arrow/named function already went
-			// through emitReturn's own correct array-aware path via
-			// emitStmt — only the expression-body shortcut here missed it).
-			if id, ok := af.Body.(*ast.Identifier); ok {
-				sym, ok := e.lookup(id.Name)
-				if !ok {
-					return fmt.Errorf("%d:%d: undefined variable '%s'", af.Body.GetPos().Line, af.Body.GetPos().Col, id.Name)
-				}
-				if !sym.Ty.IsArray {
-					return fmt.Errorf("%d:%d: '%s' is not an array", af.Body.GetPos().Line, af.Body.GetPos().Col, id.Name)
-				}
-				dataSlot, lenSlot := e.arrayDataLenSlots(sym)
-				ptrReg := e.freshReg()
-				lenReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, dataSlot))
-				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
-				r0 := e.freshReg()
-				r1 := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
-				e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
-				e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", r1))
-			} else {
-				arrVal, err := e.emitExprWithObjectHint(af.Body, retTy)
-				if err != nil {
-					return err
-				}
-				if !arrVal.Ty.IsArray {
-					return fmt.Errorf("%d:%d: expression is not an array", af.Body.GetPos().Line, af.Body.GetPos().Col)
-				}
-				e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", arrVal.Ref))
+			// Mirrors emitReturn's own IsArray branch (emit_stmts.go): an array is
+			// returned as a pointer to its shared {data,len} header (TDD-00213
+			// Stage 3), sharing identity when the body value has a live header
+			// (named/field/global/captured array) and minting one otherwise. The
+			// hint-aware evaluation (emitExprWithObjectHint) still coerces an
+			// array-literal body's element type against the declared return type.
+			arrVal, err := e.emitExprWithObjectHint(af.Body, retTy)
+			if err != nil {
+				return err
 			}
+			if !arrVal.Ty.IsArray {
+				return fmt.Errorf("%d:%d: expression is not an array", af.Body.GetPos().Line, af.Body.GetPos().Col)
+			}
+			e.emitTerminator(fmt.Sprintf("ret ptr %s", e.arrayReturnHeader(arrVal)))
 		} else if isNullableScalar(retTy) {
 			// Mirrors emitReturn's own nullable-scalar branch (emit_stmts.go):
 			// the presence-aware boxing must see the AST (a null literal or a
@@ -3287,9 +3271,8 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		if !found {
 			continue
 		}
-		if sym.Ty.IsArray {
-			return Value{}, fmt.Errorf("capturing array variable '%s' in a closure is not yet supported", name)
-		}
+		// Array capture shares the header cell by pointer — see the arrow-capture
+		// path's note (TDD-00213 Stage 3).
 		caps = append(caps, CapturedVar{Name: name, Ty: sym.Ty, Sym: sym})
 	}
 	// Sort for deterministic LLVM output.
@@ -4162,6 +4145,10 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", result, retTy.LLVMRetType(), fnTypePart, fpVal, strings.Join(argParts, ", ")))
+	if retTy.IsArray {
+		// Array return ABI is a header pointer (TDD-00213 Stage 3): deref + alias.
+		return e.arrayValueFromHeaderReg(result, *retTy), nil
+	}
 	return Value{Ref: result, Ty: *retTy}, nil
 }
 
@@ -4624,6 +4611,9 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 		}
 		result := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", result, retTy.LLVMRetType(), fnType, fpVal, argStr))
+		if retTy.IsArray {
+			return e.arrayValueFromHeaderReg(result, retTy), nil
+		}
 		return Value{Ref: result, Ty: retTy}, nil
 
 	case cbNamed:
@@ -4664,6 +4654,9 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 		}
 		result := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", result, retTy.LLVMRetType(), cb.name, argStr))
+		if retTy.IsArray {
+			return e.arrayValueFromHeaderReg(result, retTy), nil
+		}
 		return Value{Ref: result, Ty: retTy}, nil
 	}
 	return Value{}, fmt.Errorf("unknown callback kind")

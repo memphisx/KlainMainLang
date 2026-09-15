@@ -391,7 +391,11 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		r1 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
-		return Value{Ref: r1, Ty: sym.Ty}, nil
+		// dataSlot is the live header pointer (arrayDataLenSlots returns the header
+		// itself as the data slot — field 0 is at offset 0). Carry it so boxing
+		// this array into `any` shares the live header rather than snapshotting the
+		// {data,len} aggregate, keeping a post-box push visible (TDD-00212 Stage 3).
+		return Value{Ref: r1, Ty: sym.Ty, ArrayHeader: dataSlot}, nil
 	}
 	if sym.isNullableScalarLocal() {
 		// A nullable scalar is stored as { i1 present, T value }. Reading the

@@ -246,9 +246,15 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 				}
 			}
 			val = e.coerce(val, e.currentPromiseTy)
-			align := e.currentPromiseTy.Align()
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
-				StructFieldIR(e.currentPromiseTy), val.Ref, e.coroHdl, align))
+			if e.currentPromiseTy.IsArray {
+				// The async return-value slot holds a header pointer (TDD-00213
+				// Stage 2, asyncSlotSize == 8); mint/share a header from the aggregate.
+				e.storeArrayFieldHeader(e.coroHdl, val)
+			} else {
+				align := e.currentPromiseTy.Align()
+				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
+					StructFieldIR(e.currentPromiseTy), val.Ref, e.coroHdl, align))
+			}
 		}
 		// Run any enclosing `finally` blocks before settling — the return value
 		// is already stored, so the finally's side effects (which may `await`)
@@ -352,36 +358,12 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	}
 
 	if e.currentRetType.IsArray {
-		// Return an array as the aggregate {ptr, i64}. A named variable
-		// reuses its existing Ptr/LenPtr allocas; any other expression
-		// (arr.slice(1), an object's array-typed field, another function's
-		// result) already evaluates to the same {ptr, i64} aggregate shape
-		// this function needs to return, so it's just returned directly —
-		// same "named variable vs. arbitrary expression" split
-		// resolveArrayForHOF/resolveMapOrSetForCall already use elsewhere.
-		if id, ok := r.Value.(*ast.Identifier); ok {
-			sym, ok := e.lookup(id.Name)
-			if !ok {
-				return fmt.Errorf("%d:%d: undefined variable '%s'", r.Value.GetPos().Line, r.Value.GetPos().Col, id.Name)
-			}
-			if !sym.Ty.IsArray {
-				return fmt.Errorf("%d:%d: '%s' is not an array", r.Value.GetPos().Line, r.Value.GetPos().Col, id.Name)
-			}
-			dataSlot, lenSlot := e.arrayDataLenSlots(sym)
-			ptrReg := e.freshReg()
-			lenReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, dataSlot))
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
-			r0 := e.freshReg()
-			r1 := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
-			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
-			if err := e.emitReturnCleanups(); err != nil {
-				return err
-			}
-			e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", r1))
-			return nil
-		}
+		// Return an array as a pointer to its shared {data,len} header (TDD-00213
+		// Stage 3). A named variable / field / global / captured array carries its
+		// live header in Value.ArrayHeader, so returning it shares identity — the
+		// caller aliases the same array; a transient/new array expression has no
+		// header, so a fresh one is minted. arrayReturnHeader encodes exactly that
+		// share-or-mint split (the return analogue of storeArrayFieldHeader).
 		arrVal, err := e.emitExpr(r.Value)
 		if err != nil {
 			return err
@@ -389,10 +371,11 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		if !arrVal.Ty.IsArray {
 			return fmt.Errorf("%d:%d: expression is not an array", r.Value.GetPos().Line, r.Value.GetPos().Col)
 		}
+		header := e.arrayReturnHeader(arrVal)
 		if err := e.emitReturnCleanups(); err != nil {
 			return err
 		}
-		e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", arrVal.Ref))
+		e.emitTerminator(fmt.Sprintf("ret ptr %s", header))
 		return nil
 	}
 

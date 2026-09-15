@@ -514,3 +514,42 @@ y = 3;
 console.log(y ?? 100);
 `, "7\n9\n3")
 }
+
+// An array aggregate ({ ptr, i64 }) assigned into a `ptr`-shaped binding (an
+// object / string / handle slot) previously slipped past the cross-type
+// rejection — both report Type.IR "ptr" — and emitted `store ptr %agg`, the
+// aggregate where a pointer is required (invalid IR: the Test262
+// Map.prototype.get "different key types" idiom `var item = {}; item = []`).
+// Strict now rejects the shape divergence cleanly; -compat=js widens the
+// binding to an any-box and runs. ADR-00933.
+func TestE2EArrayIntoObjectSlotRejectedStrict(t *testing.T) {
+	mustCompileError(t, `
+let item = {};
+item = [];
+console.log(item);
+`, "cannot assign a array value")
+}
+
+func TestE2EArrayIntoObjectSlotCompatJS(t *testing.T) {
+	assertOutputCompatJS(t, `
+let item: any = {};
+item = [];
+console.log(Array.isArray(item));
+item = "str";
+console.log(item);
+`, "true\nstr")
+}
+
+// Array.isArray on a dynamic (`any`) value consults the runtime box tag, not the
+// always-false compile-time IsArray — a genuine boxed array reports true, a boxed
+// object false, even after cross-type reassignment (ADR-00934).
+func TestE2EArrayIsArrayOnAny(t *testing.T) {
+	assertOutput(t, `
+let a: any = [1, 2, 3];
+console.log(Array.isArray(a));
+let b: any = { x: 1 };
+console.log(Array.isArray(b));
+a = "not an array";
+console.log(Array.isArray(a));
+`, "true\nfalse\nfalse")
+}

@@ -215,11 +215,14 @@ func (e *Emitter) ensureGeneratorRuntime() {
 // non-array field is unaffected (StructFieldIR == Type.IR there).
 func (e *Emitter) storeGeneratorField(genObjReg string, genTy Type, field, ir, val string) {
 	idx, fieldTy, _ := genTy.FieldIndex(field)
-	if fieldTy.IsArray {
-		ir = StructFieldIR(fieldTy)
-	}
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, genTy.StructIR(), genObjReg, idx))
+	if fieldTy.IsArray {
+		// The slot holds a pointer to the array's {data,len} header (TDD-00213
+		// Stage 2); mint/share a header from the passed aggregate register.
+		e.storeArrayFieldHeader(gep, Value{Ref: val, Ty: fieldTy})
+		return
+	}
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ir, val, gep, fieldTy.Align()))
 }
 
@@ -231,6 +234,11 @@ func (e *Emitter) loadGeneratorField(genObjReg string, genTy Type, field string)
 	idx, fieldTy, _ := genTy.FieldIndex(field)
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, genTy.StructIR(), genObjReg, idx))
+	if fieldTy.IsArray {
+		// The slot holds a header pointer (TDD-00213 Stage 2); deref it. A generator
+		// field is always written before it is read, so the branchless load is safe.
+		return e.loadArraySlotAggregate(gep, fieldTy)
+	}
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, StructFieldIR(fieldTy), gep, fieldTy.Align()))
 	return Value{Ref: reg, Ty: fieldTy}
@@ -242,6 +250,18 @@ func (e *Emitter) loadGeneratorField(genObjReg string, genTy Type, field string)
 // only builds scalar/pointer zeros, and would produce a bare null ptr where
 // the inline {ptr,i64} aggregate is required); every other type defers to
 // emitScalarZero unchanged.
+// genElemValIR is the LLVM type of a generator element VALUE as it lives in an
+// SSA register or a phi — the {ptr,i64} aggregate for an array element (its
+// natural value form), or StructFieldIR otherwise. Distinct from the element's
+// STATE-SLOT storage, which for an array is a header pointer (TDD-00213 Stage 2),
+// reached via genLoadElemAt / storeArrayFieldHeader.
+func genElemValIR(elemTy Type) string {
+	if elemTy.IsArray {
+		return "{ptr, i64}"
+	}
+	return StructFieldIR(elemTy)
+}
+
 func (e *Emitter) genZeroElem(t Type) Value {
 	if t.IsArray {
 		agg := e.freshReg()
@@ -271,9 +291,27 @@ func (e *Emitter) genUnpackArrayElemPattern(agg string, elemTy Type, elems []ast
 // from an already-GEP'd address, as the inline {ptr,i64} aggregate for an
 // array element type or a plain scalar/pointer load otherwise (ADR-00676).
 func (e *Emitter) genLoadElemAt(gepReg string, elemTy Type) string {
+	if elemTy.IsArray {
+		// The slot holds a header pointer (TDD-00213 Stage 2); deref it into the
+		// {ptr,i64} aggregate the generator machinery carries in registers. The
+		// slot is always written before read, so no null guard is needed.
+		return e.loadArraySlotAggregate(gepReg, elemTy).Ref
+	}
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, StructFieldIR(elemTy), gepReg, elemTy.Align()))
 	return reg
+}
+
+// genStoreElemAt stores a generator element VALUE register into an already-GEP'd
+// state slot — the header-pointer store for an array element (mint/share a header
+// from the {ptr,i64} aggregate, TDD-00213 Stage 2) or a plain store otherwise.
+// valRef is the element value register ({ptr,i64} for an array).
+func (e *Emitter) genStoreElemAt(gepReg string, elemTy Type, valRef string) {
+	if elemTy.IsArray {
+		e.storeArrayFieldHeader(gepReg, Value{Ref: valRef, Ty: elemTy})
+		return
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(elemTy), valRef, gepReg, elemTy.Align()))
 }
 
 // genDefineLoopVar binds a `for (const x of gen())` / `for await` loop
@@ -573,9 +611,9 @@ func (e *Emitter) emitYieldStar(ex *ast.YieldExpression) (Value, error) {
 		idx, _, _ := resultTy.FieldIndex(field)
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, resultTy.StructIR(), r, idx))
-		out := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", out, StructFieldIR(fieldTy), gep, fieldTy.Align()))
-		return out
+		// An array-typed value field holds a header pointer (TDD-00213 Stage 2) —
+		// deref it into the {ptr,i64} aggregate the caller re-yields/returns.
+		return e.genLoadElemAt(gep, fieldTy)
 	}
 
 	// r = inner.next(undefined)
@@ -778,8 +816,7 @@ func (e *Emitter) emitYieldStarAsyncIterable(gctx *generatorEmitCtx, ex *ast.Yie
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rForVal, resultAlloca))
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), rForVal, vIdx))
-	valReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, StructFieldIR(elemTy), vGep, elemTy.Align()))
+	valReg := e.genLoadElemAt(vGep, elemTy)
 	e.emitGeneratorSwapToCaller(gctx, Value{Ref: valReg, Ty: gctx.elemTy}, false)
 	// On resume, dispatch on how the outer was re-entered (the resumer set
 	// __resumeMode before swapping back in). Mode 0 loops for the next element;
@@ -825,8 +862,7 @@ func (e *Emitter) emitYieldStarAsyncIterable(gctx *generatorEmitCtx, ex *ast.Yie
 		e.emitLabel(retDoneL)
 		rvGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", rvGep, resultTy.StructIR(), rr, vIdx))
-		rvVal := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rvVal, StructFieldIR(elemTy), rvGep, elemTy.Align()))
+		rvVal := e.genLoadElemAt(rvGep, elemTy)
 		if err := e.emitPendingFinallys(); err != nil {
 			return Value{}, err
 		}
@@ -1320,7 +1356,7 @@ func (e *Emitter) emitSyncGeneratorNextCore(genObj string, genTy Type, sentVal V
 
 	e.emitLabel(mergeL)
 	yieldedReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", yieldedReg, StructFieldIR(elemTy), swapYielded.Ref, swapEndL, skipZero.Ref, skipL))
+	e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", yieldedReg, genElemValIR(elemTy), swapYielded.Ref, swapEndL, skipZero.Ref, skipL))
 	yielded := Value{Ref: yieldedReg, Ty: elemTy}
 	done := e.loadGeneratorField(genObj, genTy, GeneratorDoneField)
 	return e.buildGenNextResult(resultTy, elemTy, yielded, done)
@@ -1335,7 +1371,11 @@ func (e *Emitter) buildGenNextResult(resultTy, elemTy Type, yielded, done Value)
 	vIdx, _, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultReg, vIdx))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(elemTy), yielded.Ref, vGep, elemTy.Align()))
+	if elemTy.IsArray {
+		e.storeArrayFieldHeader(vGep, yielded) // {value} slot holds a header pointer (TDD-00213 S2)
+	} else {
+		e.genStoreElemAt(vGep, elemTy, yielded.Ref)
+	}
 	dIdx, _, _ := resultTy.FieldIndex("done")
 	dGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resultTy.StructIR(), resultReg, dIdx))
@@ -1638,7 +1678,7 @@ func (e *Emitter) emitAsyncGenSubmitRequest(genObj string, genTy Type, elemTy Ty
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 40)", node))
 	slot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", slot, StructFieldSize(elemTy)))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(elemTy), sentVal.Ref, slot, elemTy.Align()))
+	e.genStoreElemAt(slot, elemTy, sentVal.Ref)
 	storeAt := func(idx int, ir, val string) {
 		gp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gp, asyncGenReqNodeIR, node, idx))
@@ -1968,8 +2008,7 @@ func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 	pq := loadAt(3)
 	pnext := loadAt(4)
 	e.storeGeneratorField(genObj, genTy, GeneratorReqHeadField, "ptr", pnext)
-	psent := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", psent, StructFieldIR(elemTy), pslot, elemTy.Align()))
+	psent := e.genLoadElemAt(pslot, elemTy)
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", pslot))
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", head.Ref))
 	e.storeGeneratorField(genObj, genTy, GeneratorSentField, elemTy.IR, psent)
@@ -1998,7 +2037,11 @@ func (e *Emitter) settleAsyncGenResult(q, genObj string, genTy, resultTy, elemTy
 	vIdx, _, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultReg, vIdx))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(elemTy), yielded.Ref, vGep, elemTy.Align()))
+	if elemTy.IsArray {
+		e.storeArrayFieldHeader(vGep, yielded) // {value} slot holds a header pointer (TDD-00213 S2)
+	} else {
+		e.genStoreElemAt(vGep, elemTy, yielded.Ref)
+	}
 	dIdx, _, _ := resultTy.FieldIndex("done")
 	dGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resultTy.StructIR(), resultReg, dIdx))
@@ -2144,8 +2187,7 @@ func (e *Emitter) emitForAwaitOfGenerator(s *ast.ForOfStatement, genTy Type, gen
 	vIdx, _, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultForBody, vIdx))
-	loaded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(elemTy), vGep, elemTy.Align()))
+	loaded := e.genLoadElemAt(vGep, elemTy)
 	switch {
 	case s.ObjectPattern != nil:
 		// The yielded object's fields become the loop-body bindings; a
@@ -2237,8 +2279,7 @@ func (e *Emitter) emitForAwaitOfSyncGenerator(s *ast.ForOfStatement, genTy Type,
 	vIdx, _, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultForBody, vIdx))
-	loaded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(elemTy), vGep, elemTy.Align()))
+	loaded := e.genLoadElemAt(vGep, elemTy)
 
 	// Await the yielded value before binding (identity for a plain value).
 	boundVal := Value{Ref: loaded, Ty: elemTy}
@@ -2384,8 +2425,7 @@ func (e *Emitter) emitForAwaitOfAsyncIteratorInstance(s *ast.ForOfStatement, ite
 	vIdx, _, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultForBody, vIdx))
-	loaded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(elemTy), vGep, elemTy.Align()))
+	loaded := e.genLoadElemAt(vGep, elemTy)
 	switch {
 	case s.ObjectPattern != nil:
 		if err := e.unpackObjectPatternInto(loaded, elemTy, s.ObjectPattern, pos); err != nil {
@@ -2510,8 +2550,7 @@ func (e *Emitter) emitForOfSymbolIterator(s *ast.ForOfStatement, iterableTy Type
 	vIdx, _, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultForBody, vIdx))
-	loaded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(elemTy), vGep, elemTy.Align()))
+	loaded := e.genLoadElemAt(vGep, elemTy)
 
 	boundVal := Value{Ref: loaded, Ty: elemTy}
 	boundTy := elemTy
@@ -2785,8 +2824,7 @@ func (e *Emitter) emitForOfGenerator(s *ast.ForOfStatement, genTy Type, genVal V
 	vIdx, _, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultForBody, vIdx))
-	loaded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(elemTy), vGep, elemTy.Align()))
+	loaded := e.genLoadElemAt(vGep, elemTy)
 	switch {
 	case s.ObjectPattern != nil:
 		if err := e.unpackObjectPatternInto(loaded, elemTy, s.ObjectPattern, s.GetPos()); err != nil {

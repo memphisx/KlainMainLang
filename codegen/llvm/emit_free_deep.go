@@ -229,14 +229,32 @@ func (e *Emitter) ensureDeepFree(ty Type) (string, error) {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%p, i32 0, i32 %d", gep, structIR, i))
 		if f.Ty.IsArray {
-			// Inline {ptr,i64} slot (ADR-00061): pull the buffer and length
-			// out, then hand off to the element walker.
-			dGep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i32 0, i32 0", dGep, gep))
+			// The field slot now holds a pointer to the array's {data,len} header
+			// (TDD-00213 Stage 2); load the header first, then read data/len from it
+			// before handing the buffer to the element walker. A null header (an
+			// empty/untouched field) is skipped. SHARED-BUFFER FREE POLICY (TDD-00213
+			// Stage 4): freeing this field buffer is sound because a candidate is only
+			// deep-freed when the interior-alias analysis (escape_check.go, interior
+			// mode) proved NO interior pointer of its graph escapes — any binding that
+			// aliases, returns, captures, or stores an interior array (or reassigns a
+			// field to a shared array) is rejected and left un-freed. So a
+			// header-backed array buffer that could be shared is never reached here; it
+			// leaks under the non-GC modes (the documented perf tradeoff, GC mode
+			// reclaims it) rather than being double-freed. Verified ASan/UBSan-clean
+			// under -mm=auto (+ -optimize-memory) over the aliasing forms Stages 1-3
+			// introduced (return/capture/field/local aliasing).
+			hdr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, gep))
+			hdrNull := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", hdrNull, hdr))
+			doL := e.freshLabel("dfree.arr")
+			skL := e.freshLabel("dfree.arrskip")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hdrNull, skL, doL))
+			e.emitLabel(doL)
 			d := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", d, dGep))
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", d, hdr))
 			lGep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i32 0, i32 1", lGep, gep))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lGep, arrayHeaderTy, hdr))
 			l := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", l, lGep))
 			fn, err := e.ensureDeepFreeArr(*f.Ty.ElemType)
@@ -245,6 +263,8 @@ func (e *Emitter) ensureDeepFree(ty Type) (string, error) {
 				break
 			}
 			e.emitInstr(fmt.Sprintf("call void @%s(ptr %s, i64 %s)", fn, d, l))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", skL))
+			e.emitLabel(skL)
 			continue
 		}
 		p := e.freshReg()

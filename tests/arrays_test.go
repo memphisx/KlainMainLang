@@ -2024,6 +2024,35 @@ console.log(["a", "b", "a"].indexOf("a", 1))
 `, "3\n-1\n4\n2")
 }
 
+func TestE2EArrayReferenceAliasing(t *testing.T) {
+	// TDD-00213 Stage 1: arrays are reference types — binding one to another
+	// (`let a = b`, or reassignment `b = a`) shares the same array object, so a
+	// mutation through either alias is visible through the other, and identity
+	// `===`/`!==` reflects same-object vs distinct-object (not contents). A new
+	// array expression (literal, spread) is its own object.
+	assertOutput(t, `
+let b = [1, 2, 3];
+let a = b;
+b.push(4);
+console.log(a);
+console.log(a === b);
+a.push(5);
+console.log(b);
+let c = [1, 2, 3];
+console.log(a === c);
+console.log(a !== c);
+let d = [9];
+d = b;
+b.push(6);
+console.log(d);
+let t = [7, 8];
+let u = [...t];
+t.push(9);
+console.log(u);
+console.log(u === t);
+`, "[ 1, 2, 3, 4 ]\ntrue\n[ 1, 2, 3, 4, 5 ]\nfalse\ntrue\n[ 1, 2, 3, 4, 5, 6 ]\n[ 7, 8 ]\nfalse")
+}
+
 func TestE2EBuiltinConversionAsCallback(t *testing.T) {
 	// String/Number/Boolean passed as a first-class function reference to a HOF
 	// (ADR-00853) — `.map(String)`, `.map(Number)`, `.filter(Boolean)`.

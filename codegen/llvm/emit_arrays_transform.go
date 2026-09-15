@@ -302,11 +302,14 @@ func (e *Emitter) emitArrayAt(mem *ast.MemberExpression, args []ast.Expression, 
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", plusLen, rawI, lenReg))
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", normIdx, isNeg, plusLen, rawI))
 
-	// An array-typed result (nested array, TDD-00029) needs a {ptr,i64}
-	// slot, not elemTy.IR's plain "ptr" — the same StructFieldIR convention
-	// emitOptionalMember already established for an array-typed field read,
-	// including its zero-value shape ({null,0}) for the out-of-range case.
+	// An array-typed result (nested array, TDD-00029) is materialized as the
+	// {ptr,i64} value aggregate in this result buffer, not the header-pointer
+	// field storage StructFieldIR now reports (TDD-00213 Stage 2); the OOB branch
+	// stores the {null,0} zero-shape and the found branch the loaded aggregate.
 	resIR := StructFieldIR(elemTy)
+	if elemTy.IsArray {
+		resIR = "{ptr, i64}"
+	}
 	resultAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resultAlloca, resIR, elemTy.Align()))
 	if elemTy.IsArray {

@@ -8,19 +8,19 @@ V1 measures accept/reject **agreement** only — not error-message text or posit
 
 ## Overall
 
-**6186 / 11034 agree with TypeScript (56.1%)** on accept/reject over 11034 classified cases (800 multi-file/out-of-scope skipped).
+**6213 / 11034 agree with TypeScript (56.3%)** on accept/reject over 11034 classified cases (800 multi-file/out-of-scope skipped).
 
-- **2346** match-accept (both compile clean)
-- **3840** match-reject (both reject)
-- **3684** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
-- **1164** false-accept (TS rejects, we accept — a soundness gap worth investigating)
+- **2383** match-accept (both compile clean)
+- **3830** match-reject (both reject)
+- **3647** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
+- **1174** false-accept (TS rejects, we accept — a soundness gap worth investigating)
 
 ## By group
 
 | Group | Agree | Classified | % | False-accept | Skipped |
 |---|---|---|---|---|---|
-| compiler | 3210 | 5990 | 53.6% | 731 | 273 |
-| conformance | 2976 | 5044 | 59.0% | 433 | 527 |
+| compiler | 3227 | 5990 | 53.9% | 741 | 273 |
+| conformance | 2986 | 5044 | 59.2% | 433 | 527 |
 
 ## False-accepts (TypeScript rejects, this compiler accepted)
 
@@ -48,9 +48,11 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `abstractPropertyInitializer` | conformance |
 | `accessorDeclarationEmitVisibilityErrors` | compiler |
 | `addMoreOverloadsToBaseSignature` | compiler |
+| `additionOperatorWithNullValueAndInvalidOperator` | conformance |
 | `additionOperatorWithNullValueAndValidOperator` | conformance |
 | `additionOperatorWithOnlyNullValueOrUndefinedValue` | conformance |
 | `additionOperatorWithTypeParameter` | conformance |
+| `additionOperatorWithUndefinedValueAndInvalidOperands` | conformance |
 | `additionOperatorWithUndefinedValueAndValidOperator` | conformance |
 | `aliasBug` | compiler |
 | `allowJscheckJsTypeParameterNoCrash` | compiler |
@@ -73,11 +75,14 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `anyIdenticalToItself` | compiler |
 | `argumentsBindsToFunctionScopeArgumentList` | compiler |
 | `argumentsObjectIterator01_ES5` | compiler |
+| `argumentsObjectIterator03_ES5` | compiler |
 | `arithmeticOnInvalidTypes` | compiler |
 | `arithmeticOnInvalidTypes2` | compiler |
+| `arithmeticOperatorWithNullValueAndInvalidOperands` | conformance |
 | `arithmeticOperatorWithNullValueAndValidOperands` | conformance |
 | `arithmeticOperatorWithOnlyNullValueOrUndefinedValue` | conformance |
 | `arithmeticOperatorWithTypeParameter` | conformance |
+| `arithmeticOperatorWithUndefinedValueAndInvalidOperands` | conformance |
 | `arithmeticOperatorWithUndefinedValueAndValidOperands` | conformance |
 | `arrayAssignmentTest5` | compiler |
 | `arrayCast` | compiler |
@@ -85,7 +90,6 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `arrayReferenceWithoutTypeArgs` | compiler |
 | `arrowFunctionErrorSpan` | compiler |
 | `asOperator2` | conformance |
-| `asOperatorAmbiguity` | conformance |
 | `asOperatorContextualType` | conformance |
 | `asOperatorNames` | conformance |
 | `asiPreventsParsingAsInterface05` | conformance |
@@ -124,11 +128,7 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `baseTypePrivateMemberClash` | compiler |
 | `bigIntWithTargetLessThanES2016` | compiler |
 | `binaryArithmatic1` | compiler |
-| `binaryArithmatic2` | compiler |
-| `binaryArithmatic3` | compiler |
-| `binaryArithmatic4` | compiler |
-| `binaryIntegerLiteralError` | conformance |
-| … | +1064 more |
+| … | +1074 more |
 
 ## False-reject reasons (TypeScript accepts, this compiler rejected)
 
@@ -136,10 +136,10 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 
 | Count | Reason |
 |---|---|
-| 186 | REJECTED: undefined variable '%s' |
+| 187 | REJECTED: undefined variable '%s' |
 | 157 | REJECTED: import path '%s' must start with '%s' or '%s' — bare/package-style imports are not supported |
 | 113 | REJECTED: expected '%s' after export specifier list, got ; |
-| 89 | REJECTED: undefined function or closure '%s' |
+| 90 | REJECTED: undefined function or closure '%s' |
 | 88 | REJECTED: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s' to infer from, or p… |
 | 79 | REJECTED: '%s' is declared more than once in <path> |
 | 65 | REJECTED: a number has no method '%s' |
@@ -149,35 +149,34 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 50 | REJECTED: expected :, got ( |
 | 47 | REJECTED: '%s' is only valid inside a method or constructor body |
 | 47 | REJECTED: expected {, got STRING |
-| 43 | REJECTED: any/unknown is not yet supported nested inside an array or object parameter type |
 | 43 | REJECTED: unexpected token = in expression |
 | 36 | REJECTED: a union with two or more object members must be a discriminated union — every member needs a common first-position str… |
 | 36 | REJECTED: unexpected token , in expression |
 | 34 | REJECTED: a call signature combined with other interface members is not supported — a callable object value has no runtime shape… |
 | 34 | REJECTED: generic function '%s': type argument is not supported in V1 (only number, string, boolean, arrays of these, and object/c… |
-| 34 | REJECTED: getter/setter '%s' on class '%s' disagree on type |
 | 33 | REJECTED: expected type name, got this |
+| 33 | REJECTED: getter/setter '%s' on class '%s' disagree on type |
 | 32 | REJECTED: expected :, got IDENT |
+| 31 | REJECTED: field access on non-object (no field '%s') |
 | 31 | REJECTED: union member types are limited to number, string, boolean (plus null/undefined), object<path>, and ReadableStream types |
+| 30 | REJECTED: '%s' is not an array |
 | 29 | REJECTED: at most one call signature is supported per object type |
 | 29 | REJECTED: expected IDENT, got ( |
-| 28 | REJECTED: '%s' is not an array |
 | 27 | REJECTED: an object has no method '%s' |
-| 27 | REJECTED: field access on non-object (no field '%s') |
+| 27 | REJECTED: static getters/setters are not yet supported ('%s' on class '%s') |
 | 27 | REJECTED: unexpected token void in expression |
 | 26 | REJECTED: a destructured parameter requires an explicit type annotation |
 | 26 | REJECTED: dynamic import('%s') under -dynamic-import=eager — the eager result-object backend (TDD-00055 Stage 2) is not yet impl… |
-| 26 | REJECTED: static getters/setters are not yet supported ('%s' on class '%s') |
 | 26 | REJECTED: unexpected token + in expression |
 | 25 | REJECTED: expected ;, got IDENT |
 | 25 | REJECTED: only simple function calls are supported (the callee is not a named function, a function value, or a supported method) |
 | 23 | REJECTED: expected :, got . |
+| 22 | REJECTED: a class expression is only supported as a top-level `const<path> X = class {...}` binding (V1) — using it as a value (… |
 | 22 | REJECTED: expected '%s' after import specifier list, got { |
-| 22 | REJECTED: initializer'%s's type — this compiler is a typed subset |
 | 22 | REJECTED: unexpected token : in expression |
 | 21 | REJECTED: `import foo = require(...)` is not supported — use an ES import declaration instead |
-| 21 | REJECTED: a class expression is only supported as a top-level `const<path> X = class {...}` binding (V1) — using it as a value (… |
 | 21 | REJECTED: expected member name, got < |
+| 21 | REJECTED: initializer'%s's type — this compiler is a typed subset |
 | 20 | REJECTED: <path>: expected ] in array type annotation |
 | 20 | REJECTED: expected IDENT, got await |
 | 20 | REJECTED: expected type name, got \| |
@@ -191,12 +190,13 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 18 | REJECTED: class '%s' redeclares inherited field '%s' |
 | 18 | REJECTED: generic class '%s' cannot use '%s' — not yet supported |
 | 17 | REJECTED: constructor of class '%s' calls super(...) but base class '%s' has no constructor |
+| 17 | REJECTED: dynamic import() requires a string-literal specifier — this compiler resolves all imports at compile time, so a runtim… |
 | 17 | REJECTED: expected (, got ; |
 | 17 | REJECTED: expected IDENT, got ; |
 | 17 | REJECTED: expected type name, got ... |
-| 17 | REJECTED: object has no field '%s' |
+| 17 | REJECTED: object destructuring requires an object variable, function call, or object literal |
 | 17 | REJECTED: unexpected character '%s' |
-| … | +416 more distinct reasons |
+| … | +420 more distinct reasons |
 
 ## False-reject blockers (concrete identifier/character)
 
@@ -214,8 +214,7 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 36 | `x` |
 | 32 | `C__kml_mod0` |
 | 30 | `a` |
-| 22 | `s type is incompatible with the variable` |
-| 20 | `array` |
+| 21 | `s type is incompatible with the variable` |
 | 20 | `dec__kml_mod0` |
 | 19 | `b` |
 | 19 | `f__kml_mod0` |
@@ -242,20 +241,21 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 10 | `decorator__kml_mod0` |
 | 10 | `f` |
 | 10 | `get x` |
+| 10 | `y` |
 | 9 | `./test` |
-| 9 | `y` |
 | 8 | `./b` |
+| 8 | `Object` |
 | 8 | `Point` |
 | 8 | `of` |
 | 8 | `which` |
 | 7 | `M` |
-| 7 | `Object` |
 | 7 | `U` |
 | 7 | `number)` |
 | 6 | `#` |
 | 6 | `<` |
 | 6 | `C2__kml_mod0` |
 | 6 | `Derived__kml_mod0` |
+| 6 | `arguments` |
 | 6 | `m` |
 | 6 | `m__kml_mod0` |
 | 6 | `s type is not a member of ` |
@@ -264,4 +264,4 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 5 | `Bar__kml_mod0` |
 | 5 | `C1__kml_mod0` |
 | 5 | `[]` |
-| … | +518 more distinct blockers |
+| … | +524 more distinct blockers |

@@ -205,8 +205,14 @@ func (e *Emitter) wrapResolvedPromise(val Value) Value {
 	size := StructFieldSize(val.Ty)
 	slotReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", slotReg, size))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
-		StructFieldIR(val.Ty), val.Ref, slotReg, val.Ty.Align()))
+	if val.Ty.IsArray {
+		// The resolved-value buffer holds a header pointer for an array (TDD-00213
+		// Stage 2, StructFieldSize == 8); emitAwait derefs it back to the aggregate.
+		e.storeArrayFieldHeader(slotReg, val)
+	} else {
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
+			StructFieldIR(val.Ty), val.Ref, slotReg, val.Ty.Align()))
+	}
 	promiseTy := PromiseOf(val.Ty)
 	if val.Ty.IsResponse && promiseTy.PromiseType != nil {
 		promiseTy.PromiseType.PromiseResolved = true
@@ -321,6 +327,11 @@ func (e *Emitter) buildSettlement(settleTy Type, statusStr, valueRef, reasonRef 
 		idx, fieldTy, _ := settleTy.FieldIndex(name)
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, obj, idx))
+		if fieldTy.IsArray {
+			// Array-typed slot holds a header pointer (TDD-00213 Stage 2).
+			e.storeArrayFieldHeader(gep, Value{Ref: ref, Ty: fieldTy})
+			return
+		}
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), ref, gep, fieldTy.Align()))
 	}
 	storeField("status", statusStr)
@@ -442,9 +453,15 @@ func (e *Emitter) emitPromiseAll(args []ast.Expression, pos ast.Pos) (Value, err
 			promiseHandle := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotGep, ptrReg, idxVal))
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", promiseHandle, slotGep))
-			valReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
-				valReg, StructFieldIR(innerTy), promiseHandle, innerTy.Align()))
+			var valReg string
+			if innerTy.IsArray {
+				// The resolved-value buffer holds a header pointer (TDD-00213 S2).
+				valReg = e.loadArraySlotAggregate(promiseHandle, innerTy).Ref
+			} else {
+				valReg = e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
+					valReg, StructFieldIR(innerTy), promiseHandle, innerTy.Align()))
+			}
 			e.storeArrayElement(outPtr, idxVal, valReg, outTy)
 		})
 	}

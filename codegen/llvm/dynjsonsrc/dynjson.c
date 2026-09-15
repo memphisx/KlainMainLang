@@ -340,3 +340,179 @@ char *__kml_dynarr_join(char *a) {
     join_arr(&b, a, 0);
     return sb_finish(&b);
 }
+
+/* ---- Array util.inspect form (console.log) — TDD-00212 Stage 2 ---- */
+/* The console.log rendering of a dynamic (heterogeneous / empty / nested) array:
+   `[ 1, 'hi', true ]`, a space inside the brackets, `, ` between elements,
+   strings SINGLE-QUOTED, null/undefined printed literally (not the empty join
+   form), nested arrays recursing into the same bracket form. `[]` when empty.
+   Distinct from __kml_dynarr_join, which is the flat String() comma join. */
+
+static void inspect_val(Sb *b, long long tag, long long pay, int depth);
+
+static void inspect_arr(Sb *b, char *a, int depth) {
+    if (depth >= KML_DYN_MAX_DEPTH) { sb_cstr(b, "[Array]"); return; }
+    long long n = arr_len(a);
+    if (n == 0) { sb_cstr(b, "[]"); return; }
+    sb_cstr(b, "[ ");
+    for (long long i = 0; i < n; i++) {
+        if (i) sb_cstr(b, ", ");
+        inspect_val(b, arr_tag(a, i), arr_pay(a, i), depth + 1);
+    }
+    sb_cstr(b, " ]");
+}
+
+static void inspect_val(Sb *b, long long tag, long long pay, int depth) {
+    char tmp[40];
+    switch (tag) {
+    case 0:
+        snprintf(tmp, sizeof tmp, "%lld", pay);
+        sb_cstr(b, tmp);
+        break;
+    case 1: {
+        double d;
+        memcpy(&d, &pay, 8);
+        __kml_dtoa(tmp, d);
+        sb_cstr(b, tmp);
+        break;
+    }
+    case 2:
+        sb_ch(b, '\'');
+        sb_cstr(b, (const char *)pay);
+        sb_ch(b, '\'');
+        break;
+    case 3:
+        sb_cstr(b, pay ? "true" : "false");
+        break;
+    case 4:
+        sb_cstr(b, "null"); /* inspect shows null/undefined literally */
+        break;
+    case 5:
+        sb_cstr(b, "undefined");
+        break;
+    case 11:
+        inspect_arr(b, (char *)pay, depth);
+        break;
+    default:
+        sb_cstr(b, "[Object]");
+        break;
+    }
+}
+
+char *__kml_dynarr_inspect(char *a) {
+    Sb b;
+    sb_init(&b);
+    inspect_arr(&b, a, 0);
+    return sb_finish(&b);
+}
+
+/* __kml_array_join renders a STATICALLY-TYPED array boxed into `any`
+   (TDD-00212) the way JS Array.prototype.toString does — elements joined with
+   ",". Unlike the dynamic-array join above, the elements are raw (not boxed):
+   `kind` describes their storage so the walker can stride the buffer and format
+   each element as JS does. A negative `kind` means the element kind was not
+   representable at box time (nested array / object / heterogeneous), in which
+   case the honest `[object Array]` stand-in is returned unchanged — no
+   regression on cases Stage 1 does not yet render. Keep `kind` in sync with
+   arrayElemKind (emit_dynamic.go). Returns a length-prefixed heap string. */
+enum {
+    KJ_F64 = 0, KJ_F32 = 1,
+    KJ_I64 = 2, KJ_U64 = 3, KJ_I32 = 4, KJ_U32 = 5,
+    KJ_I16 = 6, KJ_U16 = 7, KJ_I8 = 8, KJ_U8 = 9,
+    KJ_BOOL = 10, KJ_STRING = 11
+};
+
+/* jsNumToStr writes d with JS Number.prototype.toString semantics — note this
+   differs from JSON (NaN/Infinity print literally, not as null). */
+static void jsNumToStr(Sb *b, double d) {
+    char tmp[40];
+    if (d != d) { sb_cstr(b, "NaN"); return; }
+    if (d > 1.7976931348623157e308) { sb_cstr(b, "Infinity"); return; }
+    if (d < -1.7976931348623157e308) { sb_cstr(b, "-Infinity"); return; }
+    __kml_dtoa(tmp, d);
+    sb_cstr(b, tmp);
+}
+
+char *__kml_array_join(void *data, long long len, signed char kind) {
+    if (kind < 0) {
+        Sb sbf;
+        sb_init(&sbf);
+        sb_cstr(&sbf, "[object Array]");
+        return sb_finish(&sbf);
+    }
+    Sb b;
+    sb_init(&b);
+    char tmp[40];
+    for (long long i = 0; i < len; i++) {
+        if (i > 0) sb_ch(&b, ',');
+        switch (kind) {
+        case KJ_F64: jsNumToStr(&b, ((double *)data)[i]); break;
+        case KJ_F32: jsNumToStr(&b, (double)((float *)data)[i]); break;
+        case KJ_I64: snprintf(tmp, sizeof tmp, "%lld", ((long long *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_U64: snprintf(tmp, sizeof tmp, "%llu", ((unsigned long long *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_I32: snprintf(tmp, sizeof tmp, "%d", ((int *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_U32: snprintf(tmp, sizeof tmp, "%u", ((unsigned int *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_I16: snprintf(tmp, sizeof tmp, "%d", (int)((short *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_U16: snprintf(tmp, sizeof tmp, "%u", (unsigned int)((unsigned short *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_I8: snprintf(tmp, sizeof tmp, "%d", (int)((signed char *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_U8: snprintf(tmp, sizeof tmp, "%u", (unsigned int)((unsigned char *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_BOOL: sb_cstr(&b, ((signed char *)data)[i] ? "true" : "false"); break;
+        case KJ_STRING: {
+            char *s = ((char **)data)[i];
+            if (s) sb_cstr(&b, s); /* a null element joins as empty */
+            break;
+        }
+        default: break;
+        }
+    }
+    return sb_finish(&b);
+}
+
+/* __kml_array_inspect renders the same STATICALLY-TYPED any-boxed array
+   (TDD-00212) the way Node's util.inspect / console.log does: `[ 1, 2, 3 ]`
+   (a space inside the brackets, `, ` between elements), with string elements
+   SINGLE-QUOTED (`[ 'x', 'y' ]`) — the top-level console.log form, distinct from
+   the comma-join String() form above. An empty array is `[]`; a negative `kind`
+   (element kind not representable at box time) yields the `[Array]` placeholder,
+   matching util.inspect's depth behaviour. Numbers/bools format exactly as the
+   join helper does. Returns a length-prefixed heap string. */
+char *__kml_array_inspect(void *data, long long len, signed char kind) {
+    Sb b;
+    sb_init(&b);
+    if (kind < 0) {
+        sb_cstr(&b, "[Array]");
+        return sb_finish(&b);
+    }
+    if (len == 0) {
+        sb_cstr(&b, "[]");
+        return sb_finish(&b);
+    }
+    char tmp[40];
+    sb_cstr(&b, "[ ");
+    for (long long i = 0; i < len; i++) {
+        if (i > 0) sb_cstr(&b, ", ");
+        switch (kind) {
+        case KJ_F64: jsNumToStr(&b, ((double *)data)[i]); break;
+        case KJ_F32: jsNumToStr(&b, (double)((float *)data)[i]); break;
+        case KJ_I64: snprintf(tmp, sizeof tmp, "%lld", ((long long *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_U64: snprintf(tmp, sizeof tmp, "%llu", ((unsigned long long *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_I32: snprintf(tmp, sizeof tmp, "%d", ((int *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_U32: snprintf(tmp, sizeof tmp, "%u", ((unsigned int *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_I16: snprintf(tmp, sizeof tmp, "%d", (int)((short *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_U16: snprintf(tmp, sizeof tmp, "%u", (unsigned int)((unsigned short *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_I8: snprintf(tmp, sizeof tmp, "%d", (int)((signed char *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_U8: snprintf(tmp, sizeof tmp, "%u", (unsigned int)((unsigned char *)data)[i]); sb_cstr(&b, tmp); break;
+        case KJ_BOOL: sb_cstr(&b, ((signed char *)data)[i] ? "true" : "false"); break;
+        case KJ_STRING: {
+            char *s = ((char **)data)[i];
+            sb_ch(&b, '\'');
+            if (s) sb_cstr(&b, s); /* a null element inspects as '' */
+            sb_ch(&b, '\'');
+            break;
+        }
+        default: break;
+        }
+    }
+    sb_cstr(&b, " ]");
+    return sb_finish(&b);
+}

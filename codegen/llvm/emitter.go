@@ -14,6 +14,17 @@ import (
 type Value struct {
 	Ref string
 	Ty  Type
+	// ArrayHeader, when non-empty, is the live heap {data,len} header pointer
+	// (arrayHeaderTy) backing an array Value that originates from a named array
+	// variable (object-reference model, TDD-00127). It is set only where the
+	// live header is in hand — the array-identifier eval (emit_exprs.go) and the
+	// dynamic-param adapter — and read only by boxAnyArray, which stores it in
+	// the `any`-array box so a post-box mutation (`a.push(x)`) is visible through
+	// the box (TDD-00212 Stage 3). Empty for a transient array expression
+	// (literal, slice, HOF result), for which boxAnyArray mints a fresh header
+	// from the {data,len} aggregate. Purely additive: every other consumer reads
+	// only Ref/Ty and ignores it.
+	ArrayHeader string
 }
 
 // Symbol represents a local variable in the symbol table.

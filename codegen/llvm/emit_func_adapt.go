@@ -220,7 +220,10 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataR, refs[0]))
 				e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", agg0, dataR))
 				e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", agg1, agg0, refs[1]))
-				concrete = Value{Ref: agg1, Ty: tp}
+				// refs[0] is the incoming array's live header pointer — carry it so
+				// boxing shares the live header (mutations visible through the box),
+				// not a snapshot (TDD-00212 Stage 3).
+				concrete = Value{Ref: agg1, Ty: tp, ArrayHeader: refs[0]}
 			} else {
 				concrete = Value{Ref: refs[0], Ty: tp}
 			}
@@ -283,7 +286,13 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 		case tr.IsDynamic: // concrete return → dynamic slot: box
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", r, sr.LLVMRetType(), fnTypePart, fp, strings.Join(argParts, ", ")))
-			b, err := e.emitBoxValue(Value{Ref: r, Ty: sr})
+			callResult := Value{Ref: r, Ty: sr}
+			if sr.IsArray {
+				// Array return ABI is a header pointer (TDD-00213 Stage 3): deref
+				// before boxing so emitBoxValue sees the {ptr,i64} aggregate.
+				callResult = e.arrayValueFromHeaderReg(r, sr)
+			}
+			b, err := e.emitBoxValue(callResult)
 			if err != nil {
 				buildOK = false
 			} else {
@@ -293,7 +302,13 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", r, sr.LLVMRetType(), fnTypePart, fp, strings.Join(argParts, ", ")))
 			v := e.emitUnboxBoxToType(r, tr)
-			e.emitInstr(fmt.Sprintf("ret %s %s", tr.LLVMRetType(), v.Ref))
+			if tr.IsArray {
+				// The target's array return ABI is a header pointer (TDD-00213
+				// Stage 3): mint/share a header from the unboxed aggregate.
+				e.emitInstr(fmt.Sprintf("ret ptr %s", e.arrayReturnHeader(v)))
+			} else {
+				e.emitInstr(fmt.Sprintf("ret %s %s", tr.LLVMRetType(), v.Ref))
+			}
 		}
 	}
 

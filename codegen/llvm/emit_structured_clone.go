@@ -250,17 +250,30 @@ func (e *Emitter) emitDeepCloneObject(val Value, ty Type, pos ast.Pos) (Value, e
 		idx, fieldTy, _ := ty.FieldIndex(f.Name)
 		srcGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", srcGep, structIR, val.Ref, idx))
-		loadReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(fieldTy), srcGep, fieldTy.Align()))
+		// An array field slot holds a header pointer (TDD-00213 Stage 2): deref for
+		// the aggregate, deep-clone it (a fresh array), and store back as a new
+		// header — the clone is a distinct object, exactly as structuredClone wants.
+		var fieldVal Value
+		if fieldTy.IsArray {
+			fieldVal = e.loadArrayFieldValue(srcGep, fieldTy)
+		} else {
+			loadReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(fieldTy), srcGep, fieldTy.Align()))
+			fieldVal = Value{Ref: loadReg, Ty: fieldTy}
+		}
 
-		cloned, err := e.emitDeepClone(Value{Ref: loadReg, Ty: fieldTy}, fieldTy, pos)
+		cloned, err := e.emitDeepClone(fieldVal, fieldTy, pos)
 		if err != nil {
 			return Value{}, err
 		}
 
 		dstGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dstGep, structIR, dataReg, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), cloned.Ref, dstGep, fieldTy.Align()))
+		if fieldTy.IsArray {
+			e.storeArrayFieldHeader(dstGep, cloned)
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), cloned.Ref, dstGep, fieldTy.Align()))
+		}
 	}
 	return Value{Ref: dataReg, Ty: ty}, nil
 }

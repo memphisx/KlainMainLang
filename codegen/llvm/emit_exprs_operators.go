@@ -397,6 +397,36 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		return Value{Ref: reg, Ty: TypeBool}, nil
 	}
 
+	// Array-vs-array identity `===`/`!==` (TDD-00213 Stage 1): arrays are
+	// reference types, so identity is the shared header cell — `let a = b`
+	// aliases and stays `===`; two distinct arrays (even equal contents) differ.
+	// The identity pointer is the value's live header (Value.ArrayHeader, the
+	// object-reference model TDD-00127) when it has one, else the transient's own
+	// data pointer. Previously this emitted `icmp eq ptr <{ptr,i64} aggregate>`
+	// (invalid IR) — a known gap; a bare register compared directly.
+	if left.Ty.IsArray && right.Ty.IsArray {
+		var cmpOp string
+		switch ex.Op {
+		case "==", "===":
+			cmpOp = "eq"
+		case "!=", "!==":
+			cmpOp = "ne"
+		default:
+			return Value{}, fmt.Errorf("%d:%d: operator '%s' is not supported between two arrays (only identity ===/!==)", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+		}
+		idPtr := func(v Value) string {
+			if v.ArrayHeader != "" {
+				return v.ArrayHeader
+			}
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", r, v.Ref))
+			return r
+		}
+		reg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp %s ptr %s, %s", reg, cmpOp, idPtr(left), idPtr(right)))
+		return Value{Ref: reg, Ty: TypeBool}, nil
+	}
+
 	// "+" with exactly one string-typed operand is string concatenation
 	// with the other operand implicitly stringified, matching real JS
 	// (e.g. `"tick " + count`, `count + " tick"`). Must be handled before

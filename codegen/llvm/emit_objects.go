@@ -241,10 +241,19 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 			for _, f := range srcVal.Ty.VisibleFields() {
 				srcIdx, _, _ := srcVal.Ty.FieldIndex(f.Name)
 				srcGep := e.freshReg()
-				loadReg := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", srcGep, srcStructIR, srcVal.Ref, srcIdx))
-				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(f.Ty), srcGep, f.Ty.Align()))
-				if err := storeField(f.Name, Value{Ref: loadReg, Ty: f.Ty}); err != nil {
+				// An array field slot holds a header pointer (TDD-00213 Stage 2):
+				// deref for the aggregate + header. Object spread is a shallow copy,
+				// so the new object shares the same array (header) — matching JS.
+				var fv Value
+				if f.Ty.IsArray {
+					fv = e.loadArrayFieldValue(srcGep, f.Ty)
+				} else {
+					loadReg := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(f.Ty), srcGep, f.Ty.Align()))
+					fv = Value{Ref: loadReg, Ty: f.Ty}
+				}
+				if err := storeField(f.Name, fv); err != nil {
 					return Value{}, err
 				}
 			}
@@ -686,10 +695,9 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 				if !fieldTy.IsArray || fieldTy.ElemType == nil {
 					return fmt.Errorf("%d:%d: cannot array-destructure non-array field '%s'", pos.Line, pos.Col, prop.Key)
 				}
-				aggReg := e.freshReg()
+				aggReg := e.loadArrayFieldValue(fieldGep, fieldTy).Ref // header-ptr slot (TDD-00213 S2)
 				dp := e.freshReg()
 				lv := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", aggReg, fieldGep))
 				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dp, aggReg))
 				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lv, aggReg))
 				if err := e.unpackArrayPatternInto(dp, lv, *fieldTy.ElemType, prop.SubArray); err != nil {
@@ -720,8 +728,7 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			// itself — otherwise later uses of this binding (e.g. .push(),
 			// which needs LenPtr to write a resized length back to) would
 			// find no LenPtr at all. See docs/adr/ADR-00061.md.
-			aggReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", aggReg, gepReg))
+			aggReg := e.loadArrayFieldValue(gepReg, fieldTy).Ref // header-ptr slot (TDD-00213 S2)
 			dataPtrReg := e.freshReg()
 			lenValReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtrReg, aggReg))
@@ -1133,9 +1140,14 @@ func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, e
 		idx, _, _ := objVal.Ty.FieldIndex(f.Name)
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
-		rawReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rawReg, StructFieldIR(f.Ty), gepReg, f.Ty.Align()))
-		elemVal := Value{Ref: rawReg, Ty: f.Ty}
+		var elemVal Value
+		if f.Ty.IsArray {
+			elemVal = e.loadArrayFieldValue(gepReg, f.Ty) // header-ptr slot (TDD-00213 S2)
+		} else {
+			rawReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rawReg, StructFieldIR(f.Ty), gepReg, f.Ty.Align()))
+			elemVal = Value{Ref: rawReg, Ty: f.Ty}
+		}
 		if !homogeneous {
 			strVal, err := e.emitValueToString(elemVal)
 			if err != nil {
@@ -1207,9 +1219,14 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 		// Read, stringify, and store the value.
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
-		rawReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rawReg, StructFieldIR(f.Ty), gepReg, f.Ty.Align()))
-		entryVal := Value{Ref: rawReg, Ty: f.Ty}
+		var entryVal Value
+		if f.Ty.IsArray {
+			entryVal = e.loadArrayFieldValue(gepReg, f.Ty) // header-ptr slot (TDD-00213 S2)
+		} else {
+			rawReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rawReg, StructFieldIR(f.Ty), gepReg, f.Ty.Align()))
+			entryVal = Value{Ref: rawReg, Ty: f.Ty}
+		}
 		if !homogeneous {
 			strVal, err := e.emitValueToString(entryVal)
 			if err != nil {

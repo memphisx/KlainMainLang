@@ -60,10 +60,15 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 		}
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slot, objVal.Ty.StructIR(), objVal.Ref, idx))
-		ptrPtr = e.freshReg()
+		// The field slot holds a POINTER to the array's shared header (TDD-00213
+		// Stage 2); load it, then take the header's data/len field addresses — so a
+		// mutator writes a new data ptr/len *through the shared header*, visible to
+		// every alias of the field's array (exactly the identifier case above).
+		header := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", header, slot))
+		ptrPtr = header // field 0 is at offset 0, so the header pointer is the data-field address
 		lenPtr = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i32 0, i32 0", ptrPtr, slot))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i32 0, i32 1", lenPtr, slot))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lenPtr, arrayHeaderTy, header))
 		return ptrPtr, lenPtr, *fieldTy.ElemType, nil
 
 	case *ast.IndexExpression:

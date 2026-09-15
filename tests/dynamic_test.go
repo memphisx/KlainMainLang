@@ -154,8 +154,8 @@ f(["a", "b"])
 // An array argument to an `any` parameter is boxed by its data pointer, so
 // `===` is reference identity (arrays are reference types in JS): the same
 // array boxed twice is equal; two distinct arrays are not. `typeof` is
-// "object". Contents/length are not preserved, so it stringifies to the
-// `[object Array]` tag (a documented deviation from JS's "1,2,3").
+// "object". Its contents now round-trip through the box's element-kind
+// descriptor, so `String()`/interpolation renders "1,2,3" (TDD-00212).
 func TestE2EArrayArgumentToAnyParamReferenceEquality(t *testing.T) {
 	assertOutput(t, `
 function eq(a: any, b: any): void { console.log(a === b ? "same" : "diff"); }
@@ -165,9 +165,9 @@ eq(a, a);
 eq(a, b);
 function kind(x: any): void { console.log(typeof x); }
 kind(a);
-function show(x: any): void { console.log(x); }
+function show(x: any): void { console.log("" + x); }
 show(a);
-`, "same\ndiff\nobject\n[object Array]")
+`, "same\ndiff\nobject\n1,2,3")
 }
 
 // A boxed object now stringifies to JS's "[object Object]" instead of
@@ -573,4 +573,80 @@ const id: (x: number | null) => number | null = (x: number | null): number | nul
 console.log(id(7));
 console.log(id(null));
 `, "7\nnull")
+}
+
+// TDD-00212 Stage 1: an array boxed into `any` renders its contents through the
+// box's element-kind descriptor in string contexts (String()/interpolation),
+// instead of the old `[object Array]` placeholder. Covers number/string/boolean/
+// float element kinds, the null-evolving widening, and the empty array.
+func TestE2EBoxedArrayStringifiesContents(t *testing.T) {
+	assertOutput(t, `
+let n: any = [1, 2, 3];
+console.log("" + n);
+let f: any = [1.5, 2, 3];
+console.log("" + f);
+let s: any = ["x", "y"];
+console.log("" + s);
+let b: any = [true, false];
+console.log("" + b);
+let ev = null;
+ev = [10, 20];
+console.log("" + ev);
+let e: any = [];
+console.log("[" + e + "]");
+`, "1,2,3\n1.5,2,3\nx,y\ntrue,false\n10,20\n[]")
+}
+
+// TDD-00212 Stage 2: console.log renders a boxed array in Node's util.inspect
+// bracket form (`[ 1, 2, 3 ]`, single-quoted string elements) rather than the
+// flat String() comma join — covering the flat any-array box (number/string/
+// boolean), the empty array, and the heterogeneous/nested D1 dynamic-array box.
+func TestE2EBoxedArrayInspectsInConsoleLog(t *testing.T) {
+	assertOutput(t, `
+let n: any = [1, 2, 3];
+console.log(n);
+let s: any = ["x", "y"];
+console.log(s);
+let b: any = [true, false];
+console.log(b);
+let e: any = [];
+console.log(e);
+let h: any = [1, "hi", true];
+console.log(h);
+let nest: any = [[1, 2], [3]];
+console.log(nest);
+// String() / interpolation keep the flat join (unchanged from Stage 1).
+console.log("" + h);
+`, "[ 1, 2, 3 ]\n[ 'x', 'y' ]\n[ true, false ]\n[]\n[ 1, 'hi', true ]\n[ [ 1, 2 ], [ 3 ] ]\n1,hi,true")
+}
+
+// TDD-00212 Stage 3: a boxed array shares the LIVE array header, so a mutation of
+// the original array after boxing is visible through the box (reference
+// semantics), in both render modes; identity stays stable across a reallocating
+// push; a mutation through a typed-parameter alias also propagates; and
+// reassigning the original binding leaves the aliased array untouched.
+func TestE2EBoxedArrayLiveMutationThroughBox(t *testing.T) {
+	assertOutput(t, `
+let a = [1, 2, 3];
+let b: any = a;
+a.push(4);
+console.log(b);
+console.log("" + b);
+console.log(a === b);
+a.push(5);
+console.log(b);
+let s = ["x", "y"];
+let d: any = s;
+s.push("z");
+console.log(d);
+function mutate(x: number[]): void { x.push(99); }
+let m = [1, 2];
+let mv: any = m;
+mutate(m);
+console.log(mv);
+let r = [10, 20];
+let rv: any = r;
+r = [99];
+console.log(rv);
+`, "[ 1, 2, 3, 4 ]\n1,2,3,4\ntrue\n[ 1, 2, 3, 4, 5 ]\n[ 'x', 'y', 'z' ]\n[ 1, 2, 99 ]\n[ 10, 20 ]")
 }

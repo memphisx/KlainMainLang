@@ -124,12 +124,14 @@ func (e *Emitter) emitArrayEntries(mem *ast.MemberExpression, args []ast.Express
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxVal, idxSlot))
 	valSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", valSlot, entryTy.StructIR(), entryReg))
-	// The entry object's "value" field is a struct field, not an array
-	// backing-buffer slot — an array-typed field already uses the {ptr,i64}
-	// aggregate convention (StructFieldIR, ADR-00061), which is exactly what
-	// loadArrayElem's unboxed elemVal already is, so no further boxing is
-	// needed here.
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(elemTy), elemVal.Ref, valSlot, elemTy.Align()))
+	// The entry object's "value" field is a struct field. An array-typed value
+	// field holds a header pointer (TDD-00213 Stage 2), so mint/share a header
+	// from the unboxed aggregate rather than storing it inline.
+	if elemTy.IsArray {
+		e.storeArrayFieldHeader(valSlot, elemVal)
+	} else {
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(elemTy), elemVal.Ref, valSlot, elemTy.Align()))
+	}
 
 	slotReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotReg, outPtr, idxVal))

@@ -526,9 +526,15 @@ func (e *Emitter) emitStandardConstructorTail(className string) error {
 		}
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, thisPtr, idx))
-		cur := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", cur, StructFieldIR(fieldTy), gep, fieldTy.Align()))
-		curBox, err := e.emitBoxValue(Value{Ref: cur, Ty: fieldTy})
+		var curField Value
+		if fieldTy.IsArray {
+			curField = e.loadArrayFieldValue(gep, fieldTy) // header-ptr slot (TDD-00213 S2)
+		} else {
+			cur := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", cur, StructFieldIR(fieldTy), gep, fieldTy.Align()))
+			curField = Value{Ref: cur, Ty: fieldTy}
+		}
+		curBox, err := e.emitBoxValue(curField)
 		if err != nil {
 			return err
 		}
@@ -556,7 +562,11 @@ func (e *Emitter) emitStandardConstructorTail(className string) error {
 		newBox := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", newBox, res))
 		newVal := e.coerce(Value{Ref: newBox, Ty: TypeAny}, fieldTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), newVal.Ref, gep, fieldTy.Align()))
+		if fieldTy.IsArray {
+			e.storeArrayFieldHeader(gep, newVal) // header-ptr slot (TDD-00213 S2)
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), newVal.Ref, gep, fieldTy.Align()))
+		}
 	}
 
 	// addInitializer callbacks: run each with `this` as receiver.

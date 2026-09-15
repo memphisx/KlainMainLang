@@ -182,11 +182,9 @@ func (e *Emitter) emitTupleIndex(ex *ast.IndexExpression, tupleTy Type) (Value, 
 	gepReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, tupleTy.StructIR(), objVal.Ref, idx))
 	if fieldTy.IsArray {
-		// An array element's slot is the 16-byte {ptr, i64} aggregate; load it
-		// as such so length survives (same as an array-typed object field).
-		reg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
-		return Value{Ref: reg, Ty: fieldTy}, nil
+		// An array element's slot holds a header pointer (TDD-00213 Stage 2); deref
+		// it into the {ptr,i64} aggregate, carrying the live header.
+		return e.loadArrayFieldValue(gepReg, fieldTy), nil
 	}
 	return e.loadScalarOrNullableField(gepReg, fieldTy), nil
 }

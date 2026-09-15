@@ -2281,7 +2281,12 @@ func FuncType(params []Type, ret Type) Type {
 // See docs/adr/ADR-00061.md.
 func StructFieldIR(ty Type) string {
 	if ty.IsArray {
-		return "{ptr, i64}"
+		// TDD-00213 Stage 2: an array field holds a POINTER to a shared {data,len}
+		// header (the object-reference model, TDD-00127), not an inline {ptr,i64}
+		// aggregate — so a field read aliases the array and a mutation through the
+		// field propagates. Load/store of an array field goes through
+		// loadArrayFieldValue / storeArrayFieldHeader, which deref/mint the header.
+		return "ptr"
 	}
 	// A nullable non-pointer scalar field carries its presence bit alongside
 	// the value (TDD-00064 Stage 3), so a null field is distinguishable from a
@@ -2298,7 +2303,9 @@ func StructFieldIR(ty Type) string {
 // size == align already holds.
 func StructFieldSize(ty Type) int64 {
 	if ty.IsArray {
-		return 16
+		// A header pointer (TDD-00213 Stage 2) — 8 bytes, not the old inline
+		// {ptr,i64} 16-byte aggregate.
+		return 8
 	}
 	// A dynamic/union field's storage is the NaN-boxed word (TDD-00156) —
 	// one 8-byte i64, same as every other scalar slot.
@@ -2446,12 +2453,18 @@ func isSafeNumericArg(t Type) bool {
 }
 
 // LLVMRetType returns the LLVM IR type string used in function definitions and
-// call instructions. Arrays are returned as an aggregate {ptr, i64}; a nullable
-// non-pointer scalar as its presence-flagged { i1, T } aggregate (TDD-00064
-// Stage 3), so `T | null` survives a function boundary with its null-ness.
+// call instructions. Arrays are returned as a pointer to their shared {data,len}
+// header (TDD-00213 Stage 3, so identity/aliasing survive the boundary); a
+// nullable non-pointer scalar as its presence-flagged { i1, T } aggregate
+// (TDD-00064 Stage 3), so `T | null` survives a function boundary with its
+// null-ness.
 func (t Type) LLVMRetType() string {
 	if t.IsArray {
-		return "{ptr, i64}"
+		// An array is returned as a pointer to its shared {data,len} header
+		// (TDD-00213 Stage 3), not the inline {ptr,i64} aggregate — so a returned
+		// field/global/captured/named array keeps its identity and the caller
+		// aliases the same array (mirrors the header-pointer param and field ABI).
+		return "ptr"
 	}
 	if isNullableScalar(t) {
 		return nullableScalarStorageIR(t)
