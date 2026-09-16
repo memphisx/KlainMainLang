@@ -716,6 +716,25 @@ func (e *Emitter) emitNodeStreamCallOn(ty Type, ptr string, method string, args 
 		if err != nil {
 			return Value{}, err
 		}
+		// TDD-00195 Stage 2: req.pipe(res) — an http server response is a Writable
+		// sink. Start chunked streaming (send the head, build the framing sink),
+		// then pipe into its WHATWG writable exactly as any other destination.
+		if dv.Ty.IsServerResponse {
+			e.ensureResStreamRuntime()
+			e.emitResBegin(dv.Ref)
+			srt := ServerResponseType()
+			wsIdx, _, _ := srt.FieldIndex("__kml_wsink")
+			wsGep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", wsGep, srt.StructIR(), dv.Ref, wsIdx))
+			resSink := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", resSink, wsGep))
+			e.ensureStreamPipeRuntime()
+			rsrc := e.nodeStreamSide(ptr, 0)
+			decode := e.emitStreamDecodeThunk(outTy)
+			ign := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_pipe_to(ptr %s, ptr %s, ptr %s, i64 0, ptr null, ptr null)", ign, rsrc, resSink, decode))
+			return dv, nil
+		}
 		dv = e.asNodeStreamValue(dv)
 		if !dv.Ty.IsNodeWritable {
 			return Value{}, fmt.Errorf("%d:%d: pipe()'s destination must be a Writable (or Transform)", pos.Line, pos.Col)

@@ -166,6 +166,7 @@ type Emitter struct {
 	declaredURLPattern    bool            // the __kml_urlpattern_* declares have been emitted once
 	usesURLSearchParams   bool            // set the first time a URLSearchParams (or URL.searchParams) is built (drives urlsearchparams.c compile — TDD-00203)
 	declaredURLSearchP    bool            // the __kml_usp_* declares have been emitted once
+	urlUSPWritebackEmit   bool            // @__kml_url_usp_writeback has been emitted once
 	usesFloatFmt          bool            // set the first time a float is printed (drives dtoa.c compile+link in main.go — TDD-00080)
 	declaredDtoa          bool            // the __kml_dtoa declare has been emitted once
 	usedSignalAborted     bool            // the __kml_signal_aborted helper has been emitted (TDD-00081 Stage 3c)
@@ -240,6 +241,14 @@ type Emitter struct {
 	// named function taken by value (`const g = f`), keyed by its mangled LLVM
 	// name — see emit_func_value.go.
 	fnValueTrampolines map[string]bool
+	// fnValueHeaders memoizes the static `{trampoline, null}` closure header
+	// emitted once per named function taken by value, keyed by its mangled LLVM
+	// name. Emitting it once (as a global constant) rather than malloc'ing a
+	// fresh header at every reference gives a named function a *stable* value
+	// identity, so `removeEventListener(f)`/`EventEmitter.off(f)`, which compare
+	// header pointers, match an earlier `addEventListener(f)` — see
+	// emit_func_value.go.
+	fnValueHeaders map[string]bool
 	// nestedFuncScopes/nestedFuncCtr — TDD-00057. One nestedFuncScope frame
 	// per enclosing function/closure body currently being emitted, pushed
 	// by pushNestedFuncScope and popped once that body finishes; searched
@@ -638,12 +647,15 @@ type Emitter struct {
 	usedProcessChdir             bool
 	usedGetpid                   bool
 	usedExecPath                 bool
+	usedNodeInterpGuard          bool
 	usedProcessWarning           bool
 	usedHTTPClientReactions      bool
 	usedHTTPCFlushHook           bool // post-event-loop client-reaction flush hook global
 	usedNtohs                    bool // shared ntohs libc declaration (net + dgram)
 	usedProcessKill              bool
 	usedSignalHandler            bool
+	usedSignalDecl               bool // shared `declare ptr @signal` (handler runtime + SIGPIPE ignore)
+	usedSigpipeIgnored           bool // TDD-00214: SIGPIPE ignored once at reactor start
 	usedSignalSigint             bool
 	usedSignalSigterm            bool
 	usedErrnoAccessor            bool
@@ -896,6 +908,7 @@ type Emitter struct {
 	usedFetchBodyProm       bool              // lazy Response body promises settled off the reactor (TDD-00186)
 	fetchBodyPromRunner     map[string]string // method (text/json/arrayBuffer) → synthesized settle-runner name
 	usedHTTPStreamRuntime   bool
+	usedResStreamRuntime    bool
 	usedReqBodyRuntime      bool
 	usedReqBodyStream       bool
 	usedReqBodyDrain        bool
@@ -1047,6 +1060,7 @@ func NewEmitter() *Emitter {
 		alsBindTramps:           make(map[string]bool),
 		asyncGenStepFns:         make(map[string]string),
 		fnValueTrampolines:      make(map[string]bool),
+		fnValueHeaders:          make(map[string]bool),
 		testTrampolines:         make(map[string]bool),
 		currentRetType:          TypeI32, // main returns i32
 	}
@@ -1717,6 +1731,19 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		}
 		ft := FuncType(params, ret)
 		ft.FuncHasRest = ta.FuncHasRest
+		if len(ta.FuncParamOptional) > 0 {
+			opt := make([]bool, len(params))
+			for i := range opt {
+				if i < len(ta.FuncParamOptional) {
+					opt[i] = ta.FuncParamOptional[i]
+				}
+			}
+			// A rest slot is always omittable.
+			if ta.FuncHasRest && len(opt) > 0 {
+				opt[len(opt)-1] = true
+			}
+			ft.FuncParamOptional = opt
+		}
 		return ft
 	}
 	// Promise<T>/Map<K,V>/Set<T> must be checked before the generic ElemType
@@ -1939,6 +1966,14 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		}
 		if backing, ok := e.enumBacking[base]; ok {
 			return ArrayOf(backing)
+		}
+		// A nested named array (`P[][]`) arrives as a single suffix-name whose base
+		// is itself suffixed (`P[]`) — strip one level and resolve the rest
+		// recursively, so every depth keeps the named element's real object type
+		// rather than falling through to the i64 unknown-name default (which made
+		// `const a: P[][] = [[{...}]]` reject its object elements as heterogeneous).
+		if strings.HasSuffix(base, "[]") {
+			return ArrayOf(e.resolveType(&ast.TypeAnnotation{Name: base}))
 		}
 	}
 	if ty, ok := e.interfaces[name]; ok {
@@ -2614,6 +2649,12 @@ done:
 	}
 	out.WriteString("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n")
 	out.WriteString(e.allocas.String())
+	// A binary that reads process.execPath can be spawned as `execPath -p <expr>`
+	// (a Node interpreter re-exec). It cannot honor that; reject such flags up
+	// front so a self-spawning program fails cleanly instead of fork-bombing.
+	if e.usedNodeInterpGuard {
+		out.WriteString("  call void @__kml_reject_node_interp_flags(i32 %argc, ptr %argv)\n")
+	}
 	if targetGOOS() != "windows" {
 		// Line-buffer stdout before any output (see the decl above).
 		fmt.Fprintf(&out, "  %%__kml_stdout_fp = load ptr, ptr @%s, align 8\n", stdoutGlobalSymbol())
@@ -2757,6 +2798,37 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 			classNames[cd.Name] = true
 		}
 	}
+	// Pass 0: seed every plain interface / object-shape type alias name with a
+	// provisional named placeholder (an empty ObjectType carrying RefName)
+	// BEFORE any field is resolved, so a self- or mutually-referential field
+	// (`interface N { next: N | null; children: N[] }`) resolves to a real
+	// ptr-shaped named type instead of the number default — mirroring
+	// registerClasses' Pass 0. The placeholder's empty Fields is re-resolved on
+	// demand at each drilling field access via canonicalizeClassTy (keyed by
+	// RefName), the same way a class's stale self-ref snapshot is. Index-signature
+	// and call-signature interfaces are non-structural and excluded.
+	for _, stmt := range prog.Body {
+		switch s := stmt.(type) {
+		case *ast.InterfaceDeclaration:
+			if classNames[s.Name] || len(s.TypeParams) > 0 || s.IndexSig != nil || s.CallSig != nil {
+				continue
+			}
+			ph := ObjectType(nil)
+			ph.RefName = s.Name
+			e.interfaces[s.Name] = ph
+		case *ast.TypeAliasDeclaration:
+			// An object-shape alias (`type N = { next: N | null }`) is a named
+			// structural type too and can self-reference; seed it the same way.
+			// A non-object alias (union, primitive, function) can't meaningfully
+			// self-reference through a field, so it's left for eager resolution.
+			if len(s.TypeParams) > 0 || s.Type == nil || len(s.Type.Fields) == 0 {
+				continue
+			}
+			ph := ObjectType(nil)
+			ph.RefName = s.Name
+			e.interfaces[s.Name] = ph
+		}
+	}
 	for _, stmt := range prog.Body {
 		switch s := stmt.(type) {
 		case *ast.InterfaceDeclaration:
@@ -2810,7 +2882,9 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 				}
 				fields = merged
 			}
-			e.interfaces[s.Name] = ObjectType(fields)
+			finalTy := ObjectType(fields)
+			finalTy.RefName = s.Name
+			e.interfaces[s.Name] = finalTy
 			if len(s.Methods) > 0 {
 				sigs := e.interfaceMethodSigs[s.Name]
 				if sigs == nil {
@@ -2833,7 +2907,14 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 			if len(s.TypeParams) > 0 {
 				e.genericTypeAliases[s.Name] = s
 			} else {
-				e.interfaces[s.Name] = e.resolveType(s.Type)
+				aliasTy := e.resolveType(s.Type)
+				// Tag a named object-shape alias for on-demand re-resolution of
+				// its self-referential field snapshots (canonicalizeClassTy),
+				// exactly as a plain interface is tagged.
+				if aliasTy.IsObject && aliasTy.RefName == "" {
+					aliasTy.RefName = s.Name
+				}
+				e.interfaces[s.Name] = aliasTy
 			}
 		}
 	}
@@ -2907,7 +2988,9 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 				merged = append(merged, f)
 			}
 			if len(merged) != len(own.Fields) {
-				e.interfaces[ie.name] = ObjectType(merged)
+				mergedTy := ObjectType(merged)
+				mergedTy.RefName = ie.name
+				e.interfaces[ie.name] = mergedTy
 				changed = true
 			}
 		}

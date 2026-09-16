@@ -173,6 +173,40 @@ int64_t __kml_tls_write_all(void *ssl, const void *buf, int64_t n) {
 	return off;
 }
 
+// __kml_tls_write_nb: the non-blocking-socket write variant used by the
+// HTTPS/1.1 server's incremental `res` writer (TDD-00195 Stage 2 backpressure).
+// Behaves like write() on a non-blocking fd — >0 = bytes accepted by the TLS
+// record layer; -1 with errno==EAGAIN when SSL_write would block
+// (SSL_ERROR_WANT_READ/WRITE), so the connection fiber's park-on-writability
+// path applies unchanged over TLS; -1 with errno==0 on a fatal error (treated
+// like an EPIPE give-up). Unlike __kml_tls_write_all it never poll()s, so a slow
+// TLS consumer parks one fiber instead of blocking the whole reactor. OpenSSL
+// requires a WANT retry to repeat the same (buf,len) — the caller's park loop
+// does not advance its offset on EAGAIN, so that contract holds. (A WANT_READ
+// mid-write only arises during renegotiation, which TLS 1.3 removed and the 1.2
+// server does not initiate; it collapses to the writability wait like read_nb's
+// symmetric WANT collapse.)
+int64_t __kml_tls_write_nb(void *ssl, const void *buf, int64_t n) {
+	errno = 0;
+	int r = SSL_write((SSL *)ssl, buf, (int)n);
+	if (r > 0) return r;
+	int e = SSL_get_error((SSL *)ssl, r);
+	if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+		errno = EAGAIN;
+		return -1;
+	}
+	// On a non-blocking socket OpenSSL can surface a full send buffer as
+	// SSL_ERROR_SYSCALL with errno==EAGAIN/EWOULDBLOCK rather than WANT_WRITE
+	// (BIO retry semantics). That is a would-block, not a fatal error, so report
+	// it as EAGAIN too — otherwise the caller drops the connection mid-stream.
+	if (e == SSL_ERROR_SYSCALL && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+		errno = EAGAIN;
+		return -1;
+	}
+	errno = 0;
+	return -1;
+}
+
 void __kml_tls_free(void *ssl) {
 	if (ssl) SSL_free((SSL *)ssl);
 }
@@ -262,6 +296,11 @@ void *__kml_tls_server_ctx(const char *cert_pem, const char *key_pem, char **err
 		return NULL;
 	}
 	SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+	// The incremental `res` writer retries a WANT_WRITE SSL_write from a queue
+	// buffer that may have been realloc'd/compacted in between (TDD-00195 Stage 2
+	// backpressure), so the retry pointer can move. The pending record is already
+	// encrypted in the write BIO — only the safety check needs relaxing.
+	SSL_CTX_set_mode(ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 	SSL_CTX_set_alpn_select_cb(ctx, offer_h2 ? alpn_select_cb : alpn_select_h1_cb, NULL);
 	BIO *cbio = BIO_new_mem_buf(cert_pem, -1);
 	X509 *cert = cbio ? PEM_read_bio_X509(cbio, NULL, NULL, NULL) : NULL;

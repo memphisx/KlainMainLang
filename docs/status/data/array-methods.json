@@ -282,7 +282,7 @@
             "feature": "`Array.from(iterable, mapFn?)`",
             "status": "implemented",
             "caveats": [
-              "Iterates arrays, Sets, Maps (entries), strings, and classes implementing `next(): T \\| null` — generators and `thisArg` are not supported ([ADR-00482](../adr/ADR-00482.md)/[ADR-00491](../adr/ADR-00491.md))"
+              "Iterates arrays, Sets, Maps (entries), strings, and classes implementing `next(): T \\| null`; the array-like `{ length: n }` overload builds an `any[]` of `undefined` ([ADR-00957](../adr/ADR-00957.md)) — generators, `thisArg`, and indexed array-like properties (`{ length: 2, 0: 'a' }`) are not supported ([ADR-00482](../adr/ADR-00482.md)/[ADR-00491](../adr/ADR-00491.md))"
             ]
           },
           {

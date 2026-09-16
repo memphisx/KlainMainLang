@@ -322,6 +322,32 @@ console.log(target.label)
 `, "2\nsecond")
 }
 
+// Object.assign merging a source whose same-named field has an incompatible
+// type (number target, string source) can't change the target field's type in
+// this typed-object subset — reject cleanly instead of emitting a store of the
+// mismatched value into the target's slot (invalid IR).
+func TestE2EObjectAssignIncompatibleFieldTypeRejected(t *testing.T) {
+	mustCompileError(t, `
+const target = { a: 1 }
+const result = Object.assign(target, { a: 2 }, { a: "c" })
+console.log(result.a)
+`, "incompatible with the target field")
+}
+
+// Object.fromEntries with a Symbol or object key (which real JS runs through
+// ToPropertyKey) isn't representable in this string-keyed dynamic-object subset
+// — reject cleanly rather than emitting an invalid store of the non-string key.
+func TestE2EObjectFromEntriesNonStringKeyRejected(t *testing.T) {
+	mustCompileError(t, `
+const key = Symbol()
+const result = Object.fromEntries([[key, 'value']])
+`, "requires string keys")
+	mustCompileError(t, `
+const key = { toString() { return 'key' } }
+const result = Object.fromEntries([[key, 'value']])
+`, "requires string keys")
+}
+
 func TestE2EObjectFreezeBlocksFieldWrite(t *testing.T) {
 	assertOutput(t, `
 interface Point { x: number; y: number }
@@ -429,6 +455,27 @@ Object.freeze(p)
 const same = Object.assign(p)
 console.log(same.x)
 `, "1")
+}
+
+func TestE2EClassFieldFreezeThisIsTypeError(t *testing.T) {
+	// Test262 language/statements/class/elements/class-field-on-frozen-objects:
+	// a `f = Object.freeze(this)` field is typed as the class instance itself (a
+	// self-reference — bound to the class's own name-placeholder during field-type
+	// inference, ADR-00955), and a later field write on the now-frozen instance
+	// throws a TypeError mid-construction (real strict-mode JS), which
+	// `instanceof TypeError` narrows.
+	assertOutput(t, `
+class Test {
+  f = Object.freeze(this);
+  g = "Test262";
+}
+try {
+  new Test();
+  console.log("no throw");
+} catch (e) {
+  console.log(e instanceof TypeError ? "TypeError" : "other");
+}
+`, "TypeError")
 }
 
 func TestE2EObjectAssignUnknownFieldRejected(t *testing.T) {

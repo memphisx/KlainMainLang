@@ -23,6 +23,20 @@ console.log(dv.getFloat32(0));
 `, "16 0\n123456789 365779719\n44 44\n3.14159\n-2 65534 65279\n1.5")
 }
 
+// A DataView setter returns undefined in JS. Binding that result to an untyped
+// variable (`var r = dv.setInt8(0, v)`) takes JS's semantics — the call runs
+// for its side effect and the binding is `undefined` — instead of emitting an
+// `alloca void` for the pre-inferred slot (the void-return-to-var invalid-IR
+// family, all of Test262's DataView `set*/set-values-return-undefined` files).
+func TestE2EDataViewSetterReturnsUndefined(t *testing.T) {
+	assertOutput(t, `
+const dv = new DataView(new ArrayBuffer(8));
+const r = dv.setInt8(0, 5);
+console.log(r);
+console.log(dv.getInt8(0));
+`, "undefined\n5")
+}
+
 // A non-numeric DataView byteOffset/value (e.g. a Symbol, as several Test262
 // `return-abrupt-from-tonumber-*` files pass) is a clean compile-time type
 // error — the typed-subset equivalent of the runtime TypeError real JS throws,

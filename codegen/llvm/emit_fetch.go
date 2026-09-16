@@ -173,7 +173,7 @@ func (e *Emitter) loadFieldValue(objVal Value, idx int, fieldTy Type) Value {
 // (the loop just runs zero iterations) — no separate empty-map case needed.
 func (e *Emitter) buildFetchHeaderList(mapPtr string) (string, error) {
 	e.ensureCurlSlist()
-	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, "str")
+	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, "str", Type{IR: "ptr"})
 
 	listAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", listAlloca))

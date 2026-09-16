@@ -712,17 +712,17 @@
     },
     {
       "id": "array.from",
-      "name": "Array.from(iterable)",
-      "signature": "Array.from(arrayLike: T[] | { next(): T | null }): T[]",
+      "name": "Array.from(iterable, mapFn?)",
+      "signature": "Array.from(source, mapFn?: (v: T, i: number) => U): T[] | U[]",
       "badge": "caveats",
-      "description": "Builds an array from an array-like — a plain array, or a class implementing next(): T | null. Static method on Array.",
+      "description": "Builds an array from a plain array, a Set, a Map (as entries), a string (its characters), a class implementing next(): T | null, or an array-like { length: n } object (filled with undefined). An optional mapFn transforms each element by value and index. Static method on Array.",
       "returns": {
-        "type": "T[]",
-        "desc": "The constructed array."
+        "type": "T[] | U[]",
+        "desc": "The constructed array (the mapped type when mapFn is given)."
       },
-      "exampleKey": "arrays/array_methods",
+      "exampleKey": "arrays/array_from_arraylike",
       "differences": [
-        "Array-like overload only — no `mapFn`/`thisArg`, no direct string/Map/Set iteration."
+        "`thisArg` is not supported; generators are not iterated; an array-like's indexed properties (`{ length: 2, 0: 'a' }`) are not read — the `{ length: n }` form fills with `undefined`."
       ],
       "seeAlso": [
         "array.of",

@@ -9,6 +9,22 @@ import "testing"
 // The child pipes fold into the same select() event loop as Worker/channel
 // message pipes; callbacks fire after the top-level code, like Node.
 
+// A compiled binary is not the Node interpreter: spawning process.execPath with
+// an interpreter/eval flag (-p/-e/--eval/-i) must be rejected up front (nonzero
+// exit + diagnostic), not silently ignored. Silently ignoring it makes a
+// self-re-executing program (spawnSync(process.execPath, ['-p', expr]), a common
+// Node-test idiom) re-run its own body and re-spawn forever — an unbounded fork
+// bomb. This guards the fix: the child exits nonzero once, so the parent gets a
+// status and does NOT recurse.
+func TestE2EChildProcessExecPathInterpFlagRejected(t *testing.T) {
+	assertOutputImports(t, `
+import { spawnSync } from 'child_process'
+const child = spawnSync(process.execPath, ['-p', '1 + 1'])
+console.log('status:', child.status)
+console.log('rejected:', child.status !== 0)
+`, "status: 9\nrejected: true")
+}
+
 func TestE2EChildProcessSpawnStreaming(t *testing.T) {
 	assertOutputImports(t, `
 import { spawn } from 'child_process'

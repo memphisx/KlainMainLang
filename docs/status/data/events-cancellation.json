@@ -28,7 +28,7 @@
             "status": "implemented",
             "caveats": [
               "Single-target dispatch — no DOM tree, so no capture/bubble/propagation (`stopPropagation` is a no-op; `stopImmediatePropagation` halts the remaining listeners)",
-              "`removeEventListener` matches by closure identity, so the listener must be a named binding (an inline arrow re-emitted at the remove site won't match); a 0-argument listener is rejected (the event parameter is required)",
+              "`removeEventListener` matches by listener identity — a const-bound closure or a *named-function* reference (`function h(){}; …removeEventListener('x', h)`) both remove correctly ([ADR-00969](../adr/ADR-00969.md)). A listener may take 0 or 1 argument ([ADR-00967](../adr/ADR-00967.md))",
               "`{ once }` honored; `capture`/`passive`/`signal` options accepted but ignored (`signal` cancellation arrives with `AbortController`)",
               "No `class X extends EventTarget` (built-in `extends` targets are rejected)"
             ],

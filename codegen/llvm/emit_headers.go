@@ -55,7 +55,7 @@ func (e *Emitter) emitHeadersFromMapValue(mapVal Value) (Value, error) {
 	mapPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", mapPtr))
 
-	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapVal.Ref, "str")
+	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapVal.Ref, "str", Type{IR: "ptr"})
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))

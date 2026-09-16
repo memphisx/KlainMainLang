@@ -99,8 +99,14 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 	if v.Ty.IsNull && target.IsArray {
 		return Value{Ref: "{ ptr null, i64 0 }", Ty: target}
 	}
-	// null/undefined assigned to a non-ptr type becomes the zero value.
-	if v.Ty.IsNull && target.IR != "ptr" {
+	// null/undefined assigned to a non-ptr type becomes the zero value —
+	// EXCEPT a dynamic (`any`) target, where they must become the NaN-boxed
+	// `null`/`undefined` sentinels (nbNull/nbUndefined via emitBoxValue below),
+	// not a raw i64 0. TypeAny's IR is "i64" (non-ptr), so without this guard
+	// `null`/`undefined` boxed into an `any` slot — e.g. an `any[]` literal
+	// element — stored 0 (the boxed integer 0), reading back as a value that
+	// renders "undefined" but is `!== undefined` and `!== null` (ADR-00958).
+	if v.Ty.IsNull && target.IR != "ptr" && !target.IsDynamic {
 		return Value{Ref: zeroRef(target), Ty: target}
 	}
 	// `never` (a Promise.reject's value type — Promise<never>) assigns to any

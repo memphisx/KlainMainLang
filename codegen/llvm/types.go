@@ -51,6 +51,13 @@ type Type struct {
 	// paramDefaultScratch scope so a default can reference an earlier parameter
 	// (`b = a`); a nil FuncParamDefaults[i] means parameter i has no default.
 	FuncParamNames    []string
+	// FuncParamOptional[i] marks parameter i as omittable at the call site — a
+	// `?`-declared parameter, a defaulted parameter, or a rest slot. A first-class
+	// call site (emitClosureCallByPtr/emitCBCall) rejects a *missing* argument for
+	// a required (non-optional, non-defaulted) parameter instead of zero-filling
+	// it, matching a named function's arity check (ADR-00963). Parallel to
+	// FuncParams; nil/short means "not optional".
+	FuncParamOptional []bool
 	FuncParamDefaults []ast.Expression
 	// FuncBodyDefaults holds the defaults that must be evaluated in the closure
 	// *body* prologue rather than at the call site — those referencing a variable
@@ -178,6 +185,19 @@ type Type struct {
 	// a plain structural object literal.
 	IsClass   bool
 	ClassName string
+	// RefName is a nominal re-resolution handle for a *named structural* type
+	// (a top-level `interface`, or a `type` alias of an object shape) — set on
+	// the ObjectType registered in e.interfaces, NOT implying IsClass. It exists
+	// solely so canonicalizeClassTy can swap a stale by-value field snapshot for
+	// the live registry entry, exactly as ClassName does for a class: a
+	// self/mutually-referential interface field (`interface N { next: N | null }`,
+	// `children: N[]`) captures the empty placeholder seeded before N's own
+	// fields exist, so drilling `n.next.val` / `r.children[0].val` needs the
+	// live N re-resolved on demand. Unlike ClassName it drives no method
+	// dispatch, instanceof, decorator-metadata, or monomorphization keying —
+	// those all gate on IsClass or read ClassName directly, which RefName never
+	// sets.
+	RefName string
 	// HasVTable marks a class whose instances carry a hidden vtable-pointer
 	// field at index 1 (right after the tag field), for TDD-00009 Stage 3
 	// dynamic dispatch. Only set for a class belonging to an inheritance
@@ -2081,6 +2101,31 @@ func ServerResponseType() Type {
 		// asynchronously (e.g. from req.on('end')) parks until this flips, rather
 		// than flushing an empty response when the handler returns.
 		{Name: "ended", Ty: TypeI64},
+		// TDD-00195 Stage 2 (incremental res Writable): the connection fd (stored
+		// by the dispatcher before the handler runs) that the first res.write
+		// takes over for chunked streaming; the lazily-built WHATWG writable whose
+		// sink frames chunks to that fd (null until streaming starts); a mode flag
+		// (0 buffered, 1 streaming started, 2 streaming ended by res.end); the
+		// keep-alive decision computed at head-send time (read by the dispatcher
+		// tail to re-arm vs close); and the request headers map (so the head-send
+		// can honour a handler-set Connection header in the keep-alive decision).
+		{Name: "__kml_fd", Ty: TypeI64},
+		{Name: "__kml_wsink", Ty: TypePtr},
+		{Name: "__kml_streaming", Ty: TypeI64},
+		{Name: "__kml_keepalive", Ty: TypeI64},
+		{Name: "__kml_reqheaders", Ty: TypePtr},
+		// TDD-00214 (observable backpressure, Layer B): the direct-res.write
+		// output queue (null until a write can't fully flush) — a heap
+		// { ptr buf, i64 head, i64 len, i64 cap, i64 needDrain } holding the
+		// unsent, already-chunk-framed byte tail; the registered 'drain'
+		// listener {fp,env} (null until res.on('drain'), fired on the
+		// connection fiber when the queue empties after a write returned
+		// false); and its once-flag (res.once('drain') unregisters after one
+		// firing). res.write returns queued<=highWaterMark; the dispatcher-tail
+		// park loop drains the queue and fires 'drain'.
+		{Name: "__kml_outq", Ty: TypePtr},
+		{Name: "__kml_drain_cb", Ty: TypePtr},
+		{Name: "__kml_drain_once", Ty: TypeI64},
 	})
 	ty.IsServerResponse = true
 	return ty

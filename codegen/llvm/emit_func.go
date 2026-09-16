@@ -2966,6 +2966,12 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 		// Closures previously skipped this, so `(a, b?: number) => a + (b ?? 9)`
 		// treated an omitted `b` as 0; now it is absent, matching Node.
 		paramTypes[i] = optionalParamType(p, paramTypes[i])
+		// A hint from an expected function type is authoritative for this
+		// parameter's optionality ABI, overriding the closure's own `?` marker
+		// so the body matches the slot it is bound into (ADR-00963).
+		if i < len(hints) {
+			paramTypes[i] = contextualParamOptionality(paramTypes[i], hints[i])
+		}
 		// TDD-00062 (Staged V2): a bare `any`/`unknown` arrow-function
 		// parameter is allowed — the closure-call path (emitClosureCallByPtr)
 		// already boxes a dynamic-typed argument. Only a nested dynamic shape
@@ -3126,6 +3132,20 @@ func setFuncParamDefaults(ty *Type, params []ast.Param) {
 		}
 	}
 	ty.FuncParamNames = names
+	// Record per-parameter omittability so a first-class call site can reject a
+	// missing required argument (ADR-00963). A parameter is omittable when it is
+	// `?`-declared, has a default, or is the rest slot.
+	optional := make([]bool, len(params))
+	anyOptional := false
+	for i, p := range params {
+		if p.Optional || p.Default != nil || p.Rest {
+			optional[i] = true
+			anyOptional = true
+		}
+	}
+	if anyOptional {
+		ty.FuncParamOptional = optional
+	}
 	if anyCallSite {
 		ty.FuncParamDefaults = callSite
 	}
@@ -3302,6 +3322,11 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		// Optional `x?: T` → `T | undefined` in the body (TDD-00187), as for
 		// arrow functions and named signatures — see the arrow loop above.
 		paramTypes[i] = optionalParamType(p, paramTypes[i])
+		// A hint from an expected function type is authoritative for the
+		// optionality ABI (ADR-00963) — mirror of the arrow loop above.
+		if i < len(hints) {
+			paramTypes[i] = contextualParamOptionality(paramTypes[i], hints[i])
+		}
 		// TDD-00062 (Staged V2): a bare `any`/`unknown` function-expression
 		// parameter is allowed (same closure-call boxing as arrow functions).
 		// Only a nested dynamic shape stays rejected.
@@ -3982,6 +4007,17 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 			arg = ty.FuncParamDefaults[i]
 			fromDefault = true
 		default:
+			// A required parameter (not `?`-optional, no default, not rest) with
+			// no argument is an arity error — the same clean rejection a named
+			// function's call site makes (ADR-00963), not a silent zero-fill.
+			// FuncParamOptional may be absent when the closure's type wasn't built
+			// with per-param info (older paths); a missing entry is treated as
+			// required only when the slot is a body-defaulted parameter, which the
+			// FuncHasDefaultMask path already fills — so gate strictly on it.
+			if i < len(ty.FuncParamOptional) && !ty.FuncParamOptional[i] &&
+				!(i < len(ty.FuncBodyDefaults) && ty.FuncBodyDefaults[i] != nil) {
+				return Value{}, fmt.Errorf("%d:%d: missing argument %d — parameter is required (no default, not optional)", pos.Line, pos.Col, i+1)
+			}
 			// Omitted with no default: JS passes `undefined`. An array slot has
 			// no `undefined` value in this ABI, so fill an empty array; every
 			// other slot takes an `undefined` literal, which the paths below

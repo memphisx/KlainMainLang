@@ -538,6 +538,9 @@ func (e *Emitter) ensureExecPath() {
 	}
 	e.usedExecPath = true
 	e.ensureMalloc()
+	// A program that reads process.execPath can spawn itself. Guard against the
+	// interpreter-flag self-fork bomb (see ensureNodeInterpFlagGuard).
+	e.ensureNodeInterpFlagGuard()
 	if targetGOOS() == "darwin" {
 		e.emitGlobal("declare i32 @_NSGetExecutablePath(ptr, ptr)")
 		e.emitGlobal("declare ptr @realpath(ptr, ptr)")
@@ -717,12 +720,42 @@ func (e *Emitter) ensureSignalFromName() {
 	e.emitGlobal(b.String())
 }
 
+// ensureSignalDecl emits the shared libc `signal` declaration exactly once —
+// both the process signal-handler runtime and the http reactor's SIGPIPE-ignore
+// (TDD-00214) reference @signal, so the decl is guarded independently of either.
+func (e *Emitter) ensureSignalDecl() {
+	if e.usedSignalDecl {
+		return
+	}
+	e.usedSignalDecl = true
+	e.emitGlobal("declare ptr @signal(i32 noundef, ptr noundef)")
+}
+
+// ensureSigpipeIgnored emits __kml_ignore_sigpipe, which sets SIGPIPE (signal 13
+// on both Linux and Darwin) to SIG_IGN so a client disconnecting mid-write
+// unwinds the connection via a write() EPIPE rather than killing the whole
+// server process (TDD-00214). Global disposition is deliberate and one-shot;
+// unlike SIGINT/SIGTERM there is no per-signal user handler to reconcile.
+func (e *Emitter) ensureSigpipeIgnored() {
+	if e.usedSigpipeIgnored {
+		return
+	}
+	e.usedSigpipeIgnored = true
+	e.ensureSignalDecl()
+	e.emitGlobal(`
+define void @__kml_ignore_sigpipe() {
+entry:
+  %ign = call ptr @signal(i32 13, ptr inttoptr(i64 1 to ptr))
+  ret void
+}`)
+}
+
 func (e *Emitter) ensureSignalHandlerRuntime() {
 	if e.usedSignalHandler {
 		return
 	}
 	e.usedSignalHandler = true
-	e.emitGlobal("declare ptr @signal(i32 noundef, ptr noundef)")
+	e.ensureSignalDecl()
 	e.emitGlobal("@__kml_sigint_pending = internal thread_local global i8 0")
 	e.emitGlobal("@__kml_sigterm_pending = internal thread_local global i8 0")
 	// TDD-00031: SIGWINCH (terminal resize) is a third literal on the same

@@ -233,6 +233,16 @@ func (e *Emitter) emitInternalThrow(msgPtr string) {
 	e.emitTerminator("unreachable")
 }
 
+// emitInternalThrowKind throws a runtime-detected error of a specific built-in
+// kind (e.g. a frozen-object write is a TypeError in strict-mode JS), so a
+// `catch (e) { e instanceof TypeError }` narrows correctly — the plain-Error
+// emitInternalThrow would tag it kmlTagError with a generic "Error" name.
+func (e *Emitter) emitInternalThrowKind(kind, msgPtr string) {
+	errReg := e.buildErrorObj(errorKindIDs[kind], msgPtr, e.internString(kind))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.emitTerminator("unreachable")
+}
+
 // emitNewError emits `new Error(msg)` / `new TypeError(msg)` / etc. —
 // allocates the 24-byte {i64, ptr, ptr} errorObjType struct, storing the
 // kind tag, message, and name, and returns a ptr Value typed as errorObjType.

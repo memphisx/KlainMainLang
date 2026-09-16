@@ -26,19 +26,10 @@ The exhaustive list of every unfinished TDD is the generated table in
 
 ## 1. Highest leverage — do these first
 
-- **Conformance denominator honesty — Track 5 residue** (TDD-00204, Tracks 1–4
-  shipped: ADR-00875–00879, per-platform report folders + live TUI dashboard
-  included). Remaining: the **headless DOM shim** (jsdom tier — element tree,
-  events, parser) that unlocks the ~20–25K WPT testharness `.html` documents;
-  own TDD before code. Adjacent follow-ups the new reports surfaced: the async
-  lane's `then`-handler `5e-324` boxed-value corruption (real bug, high value);
-  TS script-mode global merging (top multi-file false-reject shape).
+- Conformance headless DOM shim (TDD-00204 Track 5): jsdom tier — element tree,
+  events, parser — unlocks the ~20–25K WPT testharness `.html` documents; own TDD
+  before code. Plus TS script-mode global merging (top multi-file false-reject).
 
-- **Fully-incremental `res` `Writable`** (TDD-00195 Stage 2 remainder) — server
-  `req` is a Node `Readable` and the response flush is now driven by `res.end()`
-  (fire-and-forget handlers work), but `res` is still buffered (one flush at
-  `res.end`). Incremental `res.write` streaming to the socket mid-handler with
-  real backpressure/`'drain'` and `req.pipe(res)` remain.
 - **`http.createServer` edges** — `createServer` options object mostly rejected;
   `Connection: close` on HTTPS/1.1 streaming; the `'error'`/`'clientError'`
   server events (`'close'`/`'connection'` done, primary-only); HTTP/2 has no
@@ -95,24 +86,21 @@ finished while on it — don't defer such work into another comeback.
   (TDD-00165); `node:sqlite` dynamic-row `SELECT *`, `db.aggregate()`, error
   `.code`, lazy `iterate()` (TDD-00151); `klain:webview` multi-window
   (TDD-00142, see §6).
-- **URL/URLSearchParams overhaul (TDD-00203) — mostly shipped, residue:**
-  `URLSearchParams` is now a faithful ordered pair-list (ADR-00873) and `URL` got
-  default-port stripping, host lowercasing, `URL.parse`/`canParse` statics, and
-  `JSON.stringify`→`href` (ADR-00874). Remaining: (a) `url.searchParams` is a
-  **snapshot**, not live — mutations don't write back to `url.search` (needs the
-  URL object to hold the pair-list handle and re-serialize on mutation); (b)
-  **non-special-scheme** URLs (`new URL('foo:bar')`) — libcurl rejects them, needs
-  a hand-written WHATWG parser instead of libcurl; (c) IDN of a non-ASCII domain
-  on the Mac build needs libcurl+libidn2 (platform, not code).
-- **Other WPT-surfaced Web-API gaps** (`-suite wpt`, ADR-00871): `EventTarget`
-  listeners must be exactly a 1-arg function so the `.onabort`-property /
-  0-arg-listener `dom/abort` tests don't compile; `instanceof` against the ambient
+- URL/URLSearchParams (TDD-00203): (b) non-special-scheme URLs
+  (`new URL('foo:bar')`) — libcurl rejects them, needs a hand-written WHATWG
+  parser; (c) IDN of a non-ASCII domain on Mac needs libcurl+libidn2 (platform).
+- **Other WPT-surfaced Web-API gaps** (`-suite wpt`, ADR-00871): no `.onabort`
+  event-handler property on `AbortSignal`; `instanceof` against the ambient
   `AbortSignal` class is unsupported.
-- **Any-equality: a null value compares unequal to `null`.** A null string boxed
-  as `any` (`URLSearchParams.get(missing)` passed to an `any` parameter) is not
-  `=== null` — surfaced by the WPT harness's `assert_equals(x, null)`, blocks a
-  couple of `url/` files. In the D1 NaN-box any-eq subsystem (TDD-00155), not
-  URL-specific.
+- **Node interpreter re-exec** — a test that re-runs itself via
+  `spawnSync(process.execPath, ['-p'/'-e', <expr>])` (and Node-only CLI flags
+  like `--max-http-header-size`) cannot pass: a compiled binary is not the Node
+  interpreter and can't eval a runtime source string (same limit as `vm`/eval).
+  Such invocations now exit cleanly with a nonzero status + diagnostic instead
+  of re-running `main` and fork-bombing (ADR-00970). Making them *pass* would
+  need per-flag runtime support and, for literal `-p`/`-e` expressions,
+  compiling the expression as an argv-dispatched entry point — a TDD-scale
+  feature, deferred.
 - **Not started** — `vm` (TDD-00046, gated on an embedded JS engine), `domain`,
   `string_decoder`, `util/types`, `assert/strict`, `dns/promises`,
   `readline/promises`, `timers/promises`, `stream/consumers`.
@@ -131,15 +119,9 @@ finished while on it — don't defer such work into another comeback.
 - Faithful async rejection values (TDD-00169); nested-fn hoisting / generator
   capture (TDD-00129); generalized destructuring (TDD-00065); decorator
   class-replacement + static-field (TDD-00161).
-- `Array.from({ length: n }, fn)` / `Array.from({ length: n })` — the array-like
-  overload (object `length` protocol + undefined fill) is unbuilt; the
-  `(iterable, mapFn)` and string/Map/Set forms work.
-- Heterogeneous / union-element arrays (TDD-00200) — boxed-element `any[]`
-  representation + full method surface shipped (ADR-00887, `-compat=js` boxes
-  inferred mixed literals / heterogeneous `[]`, strict rejects recognizably).
-  Residue: a *constrained union* element (`(A | B)[]`) is still rejected
-  (element-level union checking unwired, TDD-00043); a statically-typed
-  object/array *value* boxed into an element is type-erased — deep
+- Union-element arrays (TDD-00200): a *constrained union* element (`(A | B)[]`)
+  is rejected (element-level union checking unwired, TDD-00043); a statically-typed
+  object/array *value* boxed into an `any[]` element is type-erased — deep
   `JSON.stringify` of it throws (object *literals* are fine).
 - Honor `--unhandled-rejections=none`: an unhandled rejection still stringifies
   the rejection value (Node never touches it) — don't eagerly coerce it.
@@ -156,7 +138,9 @@ finished while on it — don't defer such work into another comeback.
   propagate through object-field / element / HOF-callback arrays (TDD-00127);
   nested-array element rejection in `.sort`/`.indexOf`/`.includes`/
   `Object.groupBy` (ADR-00152); `.buffer` absent on TypedArrays, views don't
-  track `resize` (ADR-00494/00564).
+  track `resize` (ADR-00494/00564). Named-array identity is lost through any
+  slot: `arr[0] === namedArray`, and an array-keyed `Map`/`Set`'s
+  `keys()[i] === namedArray` (ADR-00948), read `false` (objects keep identity).
 
 ## 5. Perf / GC / infra
 

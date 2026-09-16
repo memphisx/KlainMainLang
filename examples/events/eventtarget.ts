@@ -38,3 +38,17 @@ bus.dispatchEvent(new Event("boot"))    // (nothing)
 bus.addEventListener("save", (e: Event) => e.preventDefault())
 const proceeded = bus.dispatchEvent(new Event("save", { cancelable: true }))
 console.log("proceeded: " + proceeded)  // proceeded: false
+
+// A listener may omit the event parameter — WHATWG always calls it with the
+// event, and a zero-arg handler just ignores it.
+bus.addEventListener("wake", () => console.log("woke up"))
+bus.dispatchEvent(new Event("wake"))    // woke up
+
+// removeEventListener also matches a listener passed by a named-function
+// reference (not only a const-bound arrow) — every reference to a named
+// function has the same identity.
+function onBeat(e: Event): void { console.log("beat") }
+bus.addEventListener("heartbeat", onBeat)
+bus.dispatchEvent(new Event("heartbeat"))    // beat
+bus.removeEventListener("heartbeat", onBeat)
+bus.dispatchEvent(new Event("heartbeat"))    // (nothing)

@@ -436,13 +436,37 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		// parameter types and boxes the result.
 		return e.emitDynClosureAdapter(v)
 	case v.Ty.IsObject:
-		return Value{Ref: e.emitNbTagPtr(v.Ref, kmlTagObject), Ty: TypeAny}, nil
+		tagged := e.emitNbTagPtr(v.Ref, kmlTagObject)
+		// A nullable object (`C | null`) that is null at runtime must box as the
+		// nbNull sentinel, not an object-tagged 0 payload; otherwise `x === null`
+		// reads false once the value crosses into an `any` slot (BACKLOG §3 residue,
+		// mirroring the `string | null` ptr arm below — ADR-00958).
+		if v.Ty.Nullable {
+			isNull := e.freshReg()
+			sel := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", sel, isNull, nbNull, tagged))
+			return Value{Ref: sel, Ty: TypeAny}, nil
+		}
+		return Value{Ref: tagged, Ty: TypeAny}, nil
 	case v.Ty.IsReadableStream:
 		return Value{Ref: e.emitNbTagPtr(v.Ref, kmlTagStream), Ty: TypeAny}, nil
 	case v.Ty.IR == "ptr":
 		// String: kind bits 0 — the value IS the pointer.
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", r, v.Ref))
+		// A NULLABLE pointer (a `string | null` — e.g. `URLSearchParams.get(missing)`
+		// — whose null representation is the null pointer) that is null at runtime
+		// must box as the `nbNull` sentinel, not a string-tagged box with a 0
+		// payload; otherwise `x === null` reads false once the value crosses into
+		// an `any` slot (ADR-00958, the WPT-blocking half of BACKLOG §3).
+		if v.Ty.Nullable {
+			isNull := e.freshReg()
+			sel := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", sel, isNull, nbNull, r))
+			return Value{Ref: sel, Ty: TypeAny}, nil
+		}
 		return Value{Ref: r, Ty: TypeAny}, nil
 	default:
 		// Integers become encoded doubles — a JS number IS a double

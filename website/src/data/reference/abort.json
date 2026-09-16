@@ -16,7 +16,7 @@
       "description": "A WHATWG event bus, separate from Node's EventEmitter. addEventListener registers a listener keyed by event type; dispatchEvent reads event.type, invokes each registered listener with the event object over a snapshot of the list, and returns !defaultPrevented. Backed by a bare Map<string, listener-list> reusing the EventEmitter registry.",
       "params": [
         { "name": "type", "type": "string", "desc": "Event type name to register or fire." },
-        { "name": "listener", "type": "(e: Event) => void", "desc": "A named binding (matched by closure identity on remove); must take the event parameter." },
+        { "name": "listener", "type": "(e: Event) => void", "desc": "A const-bound closure or a named-function reference (both matched by listener identity on remove); may take 0 or 1 argument." },
         { "name": "opts", "type": "{ once?, capture?, passive?, signal? }", "desc": "Only once is honored; the rest are accepted but ignored." }
       ],
       "returns": { "type": "boolean", "desc": "dispatchEvent returns false when a listener called preventDefault()." },
@@ -24,7 +24,7 @@
       "snippet": "const bus = new EventTarget()\nbus.addEventListener(\"ping\", (e: Event) => console.log(\"ping\"))\nbus.dispatchEvent(new Event(\"ping\"))",
       "differences": [
         "Single-target dispatch — no DOM tree, so no capture/bubble/propagation (`stopPropagation` is a no-op; `stopImmediatePropagation` halts the remaining listeners)",
-        "`removeEventListener` matches by closure identity, so the listener must be a named binding (an inline arrow re-emitted at the remove site won't match); a 0-argument listener is rejected (the event parameter is required)",
+        "`removeEventListener` matches by listener identity — a const-bound closure or a named-function reference both remove correctly. A listener may take 0 or 1 argument.",
         "`{ once }` honored; `capture`/`passive`/`signal` options accepted but ignored (`signal` cancellation arrives with `AbortController`)",
         "No `class X extends EventTarget` (built-in `extends` targets are rejected)"
       ],

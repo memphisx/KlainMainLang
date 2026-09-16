@@ -642,7 +642,7 @@ func normalizeNodeModule(mod string) string {
 	return mod
 }
 
-func runNodeSuite(workDir string, timeout time.Duration, workers int, compat string) {
+func runNodeSuite(workDir string, timeout time.Duration, workers int, compat string, limit int, filter string) {
 	root := ".node-tests/test"
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		fatal("creating workdir: %v", err)
@@ -674,6 +674,26 @@ func runNodeSuite(workDir string, timeout time.Duration, workers int, compat str
 				files = append(files, suite+"/"+name)
 			}
 		}
+	}
+
+	// -category acts as a substring filter on the node lane (its Test262 meaning
+	// doesn't apply here) — for targeting a family of tests, e.g. all
+	// child-process/cluster files when hunting a specific leak.
+	if filter != "" {
+		var kept []string
+		for _, f := range files {
+			if strings.Contains(f, filter) {
+				kept = append(kept, f)
+			}
+		}
+		files = kept
+	}
+
+	// -limit N truncates to the first N files (entries are alphabetical within
+	// each suite) — for smoke-testing the harness itself on a throttled machine
+	// without committing to the full ~3,957-file run.
+	if limit > 0 && limit < len(files) {
+		files = files[:limit]
 	}
 
 	// Lanes run strictly sequentially (laneCompat is a shared global). Each
@@ -1272,7 +1292,7 @@ func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir,
 	if runDir != "" {
 		runCmd.Dir = runDir
 	}
-	if err := runCmd.Run(); err != nil {
+	if err := runTracked(runCmd); err != nil {
 		if rctx.Err() == context.DeadlineExceeded {
 			return false, "RUN_TIMEOUT", stdout.String(), stderr.String()
 		}

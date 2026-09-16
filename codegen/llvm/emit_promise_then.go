@@ -413,6 +413,22 @@ func thenStoreResultIR(retTy Type, sfx string) (produce func(callExpr string) st
 `
 	v0slot := `  %qv0` + sfx + ` = getelementptr ` + promiseStructIR + `, ptr %q, i32 0, i32 2
 `
+	// An array result is checked before the IR switch: an array's IR is "ptr"
+	// (the header-pointer model), so it would otherwise fall into the `case
+	// "ptr"` scalar-pointer arm. The callback returns a header pointer (`ret ptr`,
+	// TDD-00213 Stage 3); deref it for the data pointer (→ v0 bits) and length (→
+	// v1), the two slots loadPromiseValue reads an array back from.
+	if retTy.IsArray {
+		return func(callExpr string) string { return "  %rv" + sfx + " = " + callExpr + "\n" },
+			"  %rvdp" + sfx + " = getelementptr { ptr, i64 }, ptr %rv" + sfx + ", i32 0, i32 0\n" +
+				"  %rvd" + sfx + " = load ptr, ptr %rvdp" + sfx + ", align 8\n" +
+				"  %rvpi" + sfx + " = ptrtoint ptr %rvd" + sfx + " to i64\n" +
+				"  %rvlp" + sfx + " = getelementptr { ptr, i64 }, ptr %rv" + sfx + ", i32 0, i32 1\n" +
+				"  %rvl" + sfx + " = load i64, ptr %rvlp" + sfx + ", align 8\n" + v0slot +
+				"  store i64 %rvpi" + sfx + ", ptr %qv0" + sfx + ", align 8\n" +
+				"  %qv1" + sfx + " = getelementptr " + promiseStructIR + ", ptr %q, i32 0, i32 3\n" +
+				"  store i64 %rvl" + sfx + ", ptr %qv1" + sfx + ", align 8\n" + settle
+	}
 	switch retTy.IR {
 	case "void", "":
 		return func(callExpr string) string { return "  " + callExpr + "\n" },
@@ -429,15 +445,6 @@ func thenStoreResultIR(retTy Type, sfx string) (produce func(callExpr string) st
 			"  %rvb" + sfx + " = bitcast double %rv" + sfx + " to i64\n" + v0slot +
 				"  store i64 %rvb" + sfx + ", ptr %qv0" + sfx + ", align 8\n" + settle
 	default:
-		if retTy.IsArray {
-			return func(callExpr string) string { return "  %rv" + sfx + " = " + callExpr + "\n" },
-				"  %rvp" + sfx + " = extractvalue { ptr, i64 } %rv" + sfx + ", 0\n" +
-					"  %rvl" + sfx + " = extractvalue { ptr, i64 } %rv" + sfx + ", 1\n" +
-					"  %rvpi" + sfx + " = ptrtoint ptr %rvp" + sfx + " to i64\n" + v0slot +
-					"  store i64 %rvpi" + sfx + ", ptr %qv0" + sfx + ", align 8\n" +
-					"  %qv1" + sfx + " = getelementptr " + promiseStructIR + ", ptr %q, i32 0, i32 3\n" +
-					"  store i64 %rvl" + sfx + ", ptr %qv1" + sfx + ", align 8\n" + settle
-		}
 		// small ints (i1/i8/i16/i32)
 		return func(callExpr string) string { return "  %rv" + sfx + " = " + callExpr + "\n" },
 			"  %rvb" + sfx + " = zext " + retTy.IR + " %rv" + sfx + " to i64\n" + v0slot +
@@ -477,9 +484,25 @@ func (e *Emitter) emitThenRunner(runner string, argTy, retTy Type) {
 		"  %fep_p = getelementptr { ptr, ptr }, ptr %onF, i32 0, i32 1\n" +
 		"  %fep = load ptr, ptr %fep_p, align 8\n"
 	var fCall string
-	if argIR == "" {
+	switch {
+	case argIR == "":
 		fCall = loadFClosure + produceF(fmt.Sprintf("call %s %%ffp(ptr %%fep)", thenCallRetIR(retTy)))
-	} else {
+	case argTy.IsArray:
+		// An array callback argument is passed by the two-slot array-param ABI
+		// (`ptr <header>, i64 <len>` — bindArrayParam): the source promise stores
+		// the array's data pointer in v0 and its length in v1 (loadPromiseValue),
+		// so mint a fresh {data,len} header from them and pass the header pointer
+		// plus the length. Without this `.then` passed the raw data pointer as the
+		// header, so the callback read `header->data` off the first element and
+		// crashed (silently-empty before the header model).
+		e.ensureMalloc()
+		arrValLoad := "  %adata = inttoptr i64 %v0 to ptr\n" +
+			"  %ahdr = call ptr @malloc(i64 16)\n" +
+			"  store ptr %adata, ptr %ahdr, align 8\n" +
+			"  %alenp = getelementptr { ptr, i64 }, ptr %ahdr, i32 0, i32 1\n" +
+			"  store i64 %v1, ptr %alenp, align 8\n"
+		fCall = arrValLoad + loadFClosure + produceF(fmt.Sprintf("call %s %%ffp(ptr %%fep, ptr %%ahdr, i64 %%v1)", thenCallRetIR(retTy)))
+	default:
 		fCall = valLoad + loadFClosure + produceF(fmt.Sprintf("call %s %%ffp(ptr %%fep, %s %%val)", thenCallRetIR(retTy), argIR))
 	}
 
@@ -569,7 +592,9 @@ func thenCallRetIR(retTy Type) string {
 		return "void"
 	}
 	if retTy.IsArray {
-		return "{ ptr, i64 }"
+		// An array is returned by the header-pointer ABI (`ret ptr`, TDD-00213
+		// Stage 3), not the {ptr,i64} aggregate.
+		return "ptr"
 	}
 	return retTy.IR
 }

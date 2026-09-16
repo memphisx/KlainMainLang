@@ -376,9 +376,16 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// ADR-00116. Only the ptr half of the aggregate is ever compared;
 	// general array-vs-array equality (a separate, still-unsupported gap)
 	// is untouched.
-	if (left.Ty.IsArray && right.Ty.IsNull) || (left.Ty.IsNull && right.Ty.IsArray) {
+	// The bare-nullish side is null, undefined, or a void-typed (spec-undefined)
+	// operand — an array-valued Map miss reads as `T[] | undefined` (a {null,0}
+	// aggregate), so `map.get(miss) === undefined` must test the data pointer
+	// for null exactly as `=== null` does, rather than falling through to the
+	// aggregate-hostile generic path.
+	leftArrNullish := right.Ty.IsNull || right.Ty.IsUndefined || right.Ty.IR == "void"
+	rightArrNullish := left.Ty.IsNull || left.Ty.IsUndefined || left.Ty.IR == "void"
+	if (left.Ty.IsArray && leftArrNullish) || (rightArrNullish && right.Ty.IsArray) {
 		arrVal := left
-		if left.Ty.IsNull {
+		if !left.Ty.IsArray {
 			arrVal = right
 		}
 		var cmpOp string
@@ -390,6 +397,10 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		default:
 			return Value{}, fmt.Errorf("%d:%d: operator '%s' is not supported between an array and null", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
 		}
+		// Absence is a null data pointer, consistent across the two absent-array
+		// representations (a Map miss's {null,0} and a `T[] | null` sentinel's
+		// {null,0}). A present-but-empty array is also {null,0} and so reads as
+		// absent — the shared nullable-array edge, documented.
 		ptrReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, arrVal.Ref))
 		reg := e.freshReg()

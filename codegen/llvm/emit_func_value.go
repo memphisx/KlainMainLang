@@ -85,19 +85,32 @@ func (e *Emitter) ensureFuncValueTrampoline(mangled string, sig FuncSig) string 
 	return sym
 }
 
-// emitNamedFuncValue materializes a `{ trampoline, null }` closure header for a
-// named function referenced by value, returning it as a FuncType Value that the
-// ordinary closure-call path can invoke.
+// fnValueHeaderName returns the static closure-header symbol for a named function.
+func fnValueHeaderName(mangled string) string {
+	return "@__fnval_hdr_" + llvmSafeSymbol(mangled)
+}
+
+// emitNamedFuncValue returns the `{ trampoline, null }` closure header for a
+// named function referenced by value, as a FuncType Value the ordinary
+// closure-call path can invoke.
+//
+// The header is a compile-time constant: the trampoline symbol is fixed per
+// function and the env pointer is always null (a named function captures
+// nothing, and this header is never mutated). Emitting it once as a global
+// constant — rather than malloc'ing a fresh copy at every reference — gives the
+// function a *stable* value identity across references, so a later
+// `removeEventListener(f)`/`EventEmitter.off(f)` (which compare header
+// pointers) match the `addEventListener(f)` header. As a static value it is not
+// heap-owned, so `Memory.free`-ing a bare function reference is undefined in
+// the same way freeing a string literal already is (see freeResolvedPointer).
 func (e *Emitter) emitNamedFuncValue(mangled string, sig FuncSig) Value {
 	tramp := e.ensureFuncValueTrampoline(mangled, sig)
-	e.ensureMalloc()
-	hdr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdr))
-	fpSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 0", fpSlot, hdr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", tramp, fpSlot))
-	epSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 1", epSlot, hdr))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", epSlot))
-	return Value{Ref: hdr, Ty: funcTypeFromSig(sig)}
+	sym := fnValueHeaderName(mangled)
+	if !e.fnValueHeaders[mangled] {
+		e.fnValueHeaders[mangled] = true
+		e.emitGlobal(fmt.Sprintf(
+			"%s = private unnamed_addr constant {ptr, ptr} { ptr %s, ptr null }",
+			sym, tramp))
+	}
+	return Value{Ref: sym, Ty: funcTypeFromSig(sig)}
 }

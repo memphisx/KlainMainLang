@@ -3,6 +3,7 @@ package tests
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -299,6 +300,409 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "a;wrote" {
 		t.Errorf("body: got %q, want %q", string(body), "a;wrote")
+	}
+}
+
+func TestE2EHTTPCreateServerResIncrementalStream(t *testing.T) {
+	// TDD-00195 Stage 2: the incremental `res` Writable — the first res.write
+	// takes the socket over for chunked transfer (each chunk framed to the fd
+	// mid-handler, not buffered until return), and res.end closes it. The
+	// response is Transfer-Encoding: chunked and reassembles to the joined chunks.
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200, { "Content-Type": "text/plain" })
+  res.write("one;")
+  res.write("two;")
+  res.end("three")
+}).listen(8993)
+`
+	port := startHTTPServer(t, src, 8993)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("status: got %d, want 200", resp.StatusCode)
+	}
+	// Go's client exposes chunked responses as TransferEncoding ["chunked"] and
+	// strips the header from resp.Header — assert the streamed framing that way.
+	if len(resp.TransferEncoding) != 1 || resp.TransferEncoding[0] != "chunked" {
+		t.Errorf("TransferEncoding: got %v, want [chunked]", resp.TransferEncoding)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "one;two;three" {
+		t.Errorf("body: got %q, want %q", string(body), "one;two;three")
+	}
+}
+
+func TestE2EHTTPCreateServerResWriteBinary(t *testing.T) {
+	// TDD-00195 Stage 2: a binary chunk (Uint8Array/Buffer) passed to res.write /
+	// res.end is framed as its raw bytes, not stringified. The first chunk (via
+	// res.write) streams chunked; the second (via res.end) closes it. An embedded
+	// NUL must survive — a stringified path would truncate there.
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200, { "Content-Type": "application/octet-stream" })
+  const a = new Uint8Array(3)
+  a[0] = 5; a[1] = 0; a[2] = 200
+  res.write(a)
+  const b = new Uint8Array(2)
+  b[0] = 1; b[1] = 255
+  res.end(b)
+}).listen(8994)
+`
+	port := startHTTPServer(t, src, 8994)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	want := []byte{5, 0, 200, 1, 255}
+	if !bytes.Equal(body, want) {
+		t.Errorf("body: got %v, want %v", body, want)
+	}
+}
+
+func TestE2EHTTPCreateServerResEndBinaryBuffered(t *testing.T) {
+	// TDD-00195 Stage 2: res.end(buf) with no prior res.write stays on the
+	// buffered (Content-Length) path but still frames the raw bytes, embedded NUL
+	// included, rather than stringifying the array.
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200, { "Content-Type": "application/octet-stream" })
+  const b = new Uint8Array(4)
+  b[0] = 7; b[1] = 0; b[2] = 9; b[3] = 250
+  res.end(b)
+}).listen(8998)
+`
+	port := startHTTPServer(t, src, 8998)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if len(resp.TransferEncoding) != 0 {
+		t.Errorf("TransferEncoding: got %v, want [] (Content-Length path)", resp.TransferEncoding)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	want := []byte{7, 0, 9, 250}
+	if !bytes.Equal(body, want) {
+		t.Errorf("body: got %v, want %v", body, want)
+	}
+}
+
+func TestE2EHTTPCreateServerResStreamBackpressure(t *testing.T) {
+	// TDD-00195 Stage 2 (Layer A backpressure): a slow-reading client on a large
+	// streamed response must NOT stall the whole reactor. The handler for "/big"
+	// writes ~2 MB in 1 KB chunks; a raw client reads a little then stops, so the
+	// server's send buffer fills and res.write hits EAGAIN. With park-on-writable
+	// that fiber suspends and the reactor keeps serving — a second client's quick
+	// "/" request completes promptly. A blocking write() would hang the reactor
+	// here and the quick request would never return.
+	kb := strings.Repeat("x", 1024)
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  if (req.url === "/big") {
+    res.writeHead(200)
+    let i = 0
+    while (i < 2048) {
+      res.write("` + kb + `")
+      i = i + 1
+    }
+    res.end()
+  } else {
+    res.writeHead(200)
+    res.end("quick")
+  }
+}).listen(8999)
+`
+	port := startHTTPServer(t, src, 8999)
+
+	// Client A: request /big, read a little, then hold the connection open
+	// without draining so the server parks mid-stream.
+	connA, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("dial A: %v", err)
+	}
+	defer connA.Close()
+	if _, err := connA.Write([]byte("GET /big HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+		t.Fatalf("write A: %v", err)
+	}
+	buf := make([]byte, 4096)
+	connA.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := connA.Read(buf); err != nil {
+		t.Fatalf("read A: %v", err)
+	}
+	// Give the server a moment to fill A's socket buffer and park.
+	time.Sleep(300 * time.Millisecond)
+
+	// Client B: a quick request must complete while A is parked.
+	done := make(chan string, 1)
+	go func() {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+		if err != nil {
+			done <- "ERR:" + err.Error()
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		done <- string(body)
+	}()
+	select {
+	case got := <-done:
+		if got != "quick" {
+			t.Errorf("quick request while a slow stream is parked: got %q, want %q", got, "quick")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("quick request hung — the reactor was blocked by the slow client's stream (no backpressure park)")
+	}
+}
+
+func TestE2EHTTPCreateServerResStreamLargeBodyIntact(t *testing.T) {
+	// TDD-00195 Stage 2 (Layer A backpressure): a large streamed body read fully
+	// by the client arrives byte-for-byte intact — the non-blocking write path
+	// must resume and finish every chunk on EAGAIN, never drop bytes.
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200, { "Content-Type": "text/plain" })
+  let i = 0
+  while (i < 4096) {
+    res.write("0123456789ABCDEF")
+    i = i + 1
+  }
+  res.end()
+}).listen(9001)
+`
+	port := startHTTPServer(t, src, 9001)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	want := strings.Repeat("0123456789ABCDEF", 4096)
+	if len(body) != len(want) {
+		t.Fatalf("body length: got %d, want %d", len(body), len(want))
+	}
+	if string(body) != want {
+		t.Errorf("streamed body corrupted (first mismatch matters)")
+	}
+}
+
+func TestE2EHTTPCreateServerResWriteBackpressureDrain(t *testing.T) {
+	// TDD-00214 (Layer B, observable backpressure): a Node-faithful producer that
+	// writes only while res.write() returns true and resumes on 'drain' must
+	// deliver the whole body to a slow-reading client. res.write returns false
+	// once the queued size crosses highWaterMark; the queue is drained by the
+	// reactor and 'drain' fires asynchronously to resume the producer. If either
+	// the false signal or the 'drain' event were broken, the producer would stall
+	// and the body would arrive truncated (or the read would hang).
+	const chunkBytes = 65536
+	const totalChunks = 128 // 8 MiB
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200)
+  const chunk = "0123456789ABCDEF".repeat(4096) // 64 KiB
+  let n = 0
+  const pump = () => {
+    let ok = true
+    while (n < 128 && ok) {
+      ok = res.write(chunk)
+      n = n + 1
+    }
+    if (n >= 128) { res.end(); return }
+    res.once('drain', pump)   // resume only when the buffer drains
+  }
+  pump()
+}).listen(8129)
+`
+	port := startHTTPServer(t, src, 8129)
+
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	br := bufio.NewReader(conn)
+	// Skip the status line + headers.
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read headers: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	// De-chunk the body, reading deliberately slowly at the start so the server's
+	// send buffer fills and it genuinely hits backpressure.
+	bodyLen := 0
+	reads := 0
+	for {
+		sizeLine, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read chunk size: %v", err)
+		}
+		var sz int64
+		if _, err := fmt.Sscanf(strings.TrimSpace(sizeLine), "%x", &sz); err != nil {
+			t.Fatalf("parse chunk size %q: %v", sizeLine, err)
+		}
+		if sz == 0 {
+			break
+		}
+		buf := make([]byte, sz)
+		if _, err := io.ReadFull(br, buf); err != nil {
+			t.Fatalf("read chunk body: %v", err)
+		}
+		if _, err := br.Discard(2); err != nil { // trailing CRLF
+			t.Fatalf("discard chunk CRLF: %v", err)
+		}
+		bodyLen += int(sz)
+		reads++
+		if bodyLen < 400000 {
+			time.Sleep(3 * time.Millisecond) // pace the early reads → force EAGAIN
+		}
+	}
+	want := chunkBytes * totalChunks
+	if bodyLen != want {
+		t.Fatalf("de-chunked body length: got %d, want %d (drain-gated producer stalled → false/'drain' broken)", bodyLen, want)
+	}
+}
+
+func TestE2EHTTPCreateServerResClientAbortSurvives(t *testing.T) {
+	// TDD-00214 (SIGPIPE): a client that disconnects mid-stream must not kill the
+	// server. SIGPIPE is ignored process-wide, so the write() to the dead socket
+	// returns EPIPE and the connection unwinds; a subsequent request still works.
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200)
+  let i = 0
+  while (i < 4096) {
+    res.write("0123456789ABCDEF")
+    i = i + 1
+  }
+  res.end()
+}).listen(8128)
+`
+	port := startHTTPServer(t, src, 8128)
+
+	// Client that reads a little then abruptly closes mid-stream.
+	connA, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("dial A: %v", err)
+	}
+	if _, err := connA.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+		t.Fatalf("write A: %v", err)
+	}
+	buf := make([]byte, 512)
+	connA.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := connA.Read(buf); err != nil {
+		t.Fatalf("read A: %v", err)
+	}
+	connA.Close() // abrupt disconnect → server write() gets EPIPE
+	time.Sleep(200 * time.Millisecond)
+
+	// The server must still be alive and serving.
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		t.Fatalf("follow-up GET (server died on SIGPIPE?): %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	want := strings.Repeat("0123456789ABCDEF", 4096)
+	if len(body) != len(want) {
+		t.Fatalf("follow-up body length: got %d, want %d", len(body), len(want))
+	}
+}
+
+func TestE2EHTTPCreateServerResStreamKeepAlive(t *testing.T) {
+	// TDD-00195 Stage 2: a streamed response re-arms the connection on keep-alive,
+	// so two sequential requests on one reused connection both stream correctly.
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200)
+  res.write("chunk-")
+  res.end("end")
+}).listen(8995)
+`
+	port := startHTTPServer(t, src, 8995)
+	client := &http.Client{} // default transport reuses keep-alive connections
+	for i := 0; i < 2; i++ {
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+		if err != nil {
+			t.Fatalf("GET %d: %v", i, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(body) != "chunk-end" {
+			t.Errorf("req %d body: got %q, want %q", i, string(body), "chunk-end")
+		}
+	}
+}
+
+func TestE2EHTTPCreateServerReqPipeRes(t *testing.T) {
+	// TDD-00195 Stage 2: req.pipe(res) — a server req (Node Readable) piped into a
+	// res (Node Writable) echoes the request body straight back to the client.
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200, { "Content-Type": "application/octet-stream" })
+  req.pipe(res)
+}).listen(8996)
+`
+	port := startHTTPServer(t, src, 8996)
+	payload := "the quick brown fox jumps over the lazy dog"
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "text/plain", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != payload {
+		t.Errorf("echoed body: got %q, want %q", string(body), payload)
+	}
+}
+
+func TestE2EHTTPCreateServerResWritePipeInterleave(t *testing.T) {
+	// TDD-00195 Stage 2: a raw res.write and req.pipe(res) on ONE response share a
+	// single per-response output queue, so their bytes leave the socket in call
+	// order. Here the handler writes a prefix directly, then pipes the request
+	// body; the client must see the prefix before the echoed body. Before the
+	// unification the direct write queued into res.__kml_outq while the pipe sink
+	// wrote straight to the socket, so the two could interleave out of order.
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200, { "Content-Type": "application/octet-stream" })
+  res.write("PREFIX:")
+  req.pipe(res)
+}).listen(8994)
+`
+	port := startHTTPServer(t, src, 8994)
+	payload := "the quick brown fox"
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "text/plain", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	want := "PREFIX:" + payload
+	if string(body) != want {
+		t.Errorf("interleaved res.write + req.pipe body: got %q, want %q", string(body), want)
 	}
 }
 
@@ -2497,6 +2901,154 @@ server.listen(8987)
 	}
 	if got := string(out); got != "https:POST:/echo:payload|1.1" {
 		t.Errorf("https POST: got %q, want %q", got, "https:POST:/echo:payload|1.1")
+	}
+}
+
+func TestE2EHTTPSResStreamBackpressure(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
+	// TDD-00195 Stage 2 (Layer B over TLS): a streamed HTTPS response applies real
+	// socket backpressure. The TLS chunk writes route through the non-blocking
+	// __kml_tls_write_nb (SSL WANT → EAGAIN), so a slow-reading TLS client parks
+	// one connection fiber on writability instead of blocking the reactor inside
+	// SSL_write's poll(). A blocking TLS write would hang the whole reactor here
+	// and the concurrent quick request would never return. The parked stream must
+	// also resume and deliver its whole body byte-for-byte intact.
+	certLit, keyLit := genSelfSignedPEM(t)
+	kb := strings.Repeat("x", 1024)
+	src := fmt.Sprintf(`
+import https from 'https'
+const cert = "%s"
+const key = "%s"
+https.createServer({ cert: cert, key: key }, (req, res) => {
+  if (req.url === "/big") {
+    res.writeHead(200)
+    let i = 0
+    while (i < 2048) {
+      res.write("`+kb+`")
+      i = i + 1
+    }
+    res.end()
+  } else {
+    res.writeHead(200)
+    res.end("quick")
+  }
+}).listen(8993)
+`, certLit, keyLit)
+	port := startHTTPServer(t, src, 8993)
+
+	// Client A: request /big over TLS, read a little, then stop draining so the
+	// server's send buffer fills and the streaming fiber parks on WANT/EAGAIN.
+	connA, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("tls dial A: %v", err)
+	}
+	defer connA.Close()
+	if _, err := connA.Write([]byte("GET /big HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+		t.Fatalf("write A: %v", err)
+	}
+	brA := bufio.NewReader(connA)
+	connA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := brA.ReadString('\n'); err != nil { // status line — proves streaming began
+		t.Fatalf("read A status: %v", err)
+	}
+	// Let the server fill A's socket buffer and park mid-stream.
+	time.Sleep(300 * time.Millisecond)
+
+	// Client B: a quick TLS request must complete while A is parked.
+	done := make(chan string, 1)
+	go func() {
+		out, err := exec.Command(nativeCurl(), "-sk", fmt.Sprintf("https://127.0.0.1:%d/", port)).CombinedOutput()
+		if err != nil {
+			done <- "ERR:" + err.Error()
+			return
+		}
+		done <- string(out)
+	}()
+	select {
+	case got := <-done:
+		if got != "quick" {
+			t.Errorf("quick TLS request while a slow stream is parked: got %q, want %q", got, "quick")
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("quick TLS request hung — the reactor was blocked by the slow client's TLS stream (no backpressure park)")
+	}
+
+	// Now drain A fully and de-chunk: the parked stream must resume and deliver
+	// the whole 2 MiB body intact through the WANT/EAGAIN park path.
+	for { // skip the rest of the headers
+		line, err := brA.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read A headers: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	bodyLen := 0
+	connA.SetReadDeadline(time.Now().Add(15 * time.Second))
+	for {
+		sizeLine, err := brA.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read A chunk size: %v", err)
+		}
+		var sz int64
+		if _, err := fmt.Sscanf(strings.TrimSpace(sizeLine), "%x", &sz); err != nil {
+			t.Fatalf("parse A chunk size %q: %v", sizeLine, err)
+		}
+		if sz == 0 {
+			break
+		}
+		if _, err := io.ReadFull(brA, make([]byte, sz)); err != nil {
+			t.Fatalf("read A chunk body: %v", err)
+		}
+		if _, err := brA.Discard(2); err != nil {
+			t.Fatalf("discard A chunk CRLF: %v", err)
+		}
+		bodyLen += int(sz)
+	}
+	if want := 2048 * 1024; bodyLen != want {
+		t.Fatalf("de-chunked HTTPS body length: got %d, want %d (parked TLS stream dropped bytes)", bodyLen, want)
+	}
+}
+
+func TestE2EHTTPSResStreamKeepAlive(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
+	// TDD-00195 Stage 2 (ADR-00964): a streamed HTTPS response re-arms the
+	// connection on keep-alive, so two sequential requests on ONE reused TLS
+	// connection both stream correctly. The sink restores O_NONBLOCK at stream
+	// end, so the TLS read loop picks up the next request exactly as on plain HTTP.
+	certLit, keyLit := genSelfSignedPEM(t)
+	src := fmt.Sprintf(`
+import https from 'https'
+const cert = "%s"
+const key = "%s"
+https.createServer({ cert: cert, key: key }, (req, res) => {
+  res.writeHead(200)
+  res.write("chunk-")
+  res.end("end")
+}).listen(8993)
+`, certLit, keyLit)
+	port := startHTTPServer(t, src, 8993)
+	conn, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("tls dial: %v", err)
+	}
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+	for i := 0; i < 2; i++ {
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+			t.Fatalf("write req %d: %v", i, err)
+		}
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("read resp %d (streamed TLS keep-alive re-arm failed?): %v", i, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(body) != "chunk-end" {
+			t.Errorf("req %d body: got %q, want %q", i, string(body), "chunk-end")
+		}
 	}
 }
 

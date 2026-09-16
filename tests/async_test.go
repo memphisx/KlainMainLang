@@ -170,6 +170,36 @@ for (const x of results) {
 `, "3\n2\n4\n6")
 }
 
+func TestE2EPromiseAllArrayValues(t *testing.T) {
+	// Promise.all over Promise<T[]> members (a T[][] result) previously produced
+	// invalid IR — each resolved array element is a {ptr,i64} aggregate stored
+	// into the "ptr"-shaped result slot. Each element is boxed to its header
+	// pointer instead. See ADR-00944.
+	assertOutput(t, `
+async function f(n: number): Promise<number[]> { return [n, n + 1, n + 2] }
+const rs = await Promise.all([f(1), f(10)])
+console.log(rs.length)
+console.log(rs[0][0], rs[0][2])
+console.log(rs[1][1])
+`, "2\n1 3\n11")
+}
+
+func TestE2EPromiseAllSettledArrayValues(t *testing.T) {
+	// The settlement record's array `value` field null-initialized the rejected
+	// side with `store {ptr,i64} null` (invalid IR); a null header pointer is
+	// stored instead. See ADR-00944.
+	assertOutput(t, `
+async function f(n: number): Promise<number[]> {
+    if (n < 0) throw new Error("neg")
+    return [n, n + 1]
+}
+const rs = await Promise.allSettled([f(2), f(-1)])
+console.log(rs[0].status, rs[1].status)
+if (rs[0].status === "fulfilled") console.log(rs[0].value[0], rs[0].value[1])
+if (rs[1].status === "rejected") console.log(rs[1].reason)
+`, "fulfilled rejected\n2 3\nError: neg")
+}
+
 func TestE2EPromiseRaceOrdinaryPromises(t *testing.T) {
 	assertOutput(t, `
 async function double(n: number): Promise<number> {
@@ -265,6 +295,22 @@ async function main2(): Promise<void> {
 }
 main2()
 `, "a=10\nb=20")
+}
+
+func TestE2EPromiseThenArrayValue(t *testing.T) {
+	// An array-valued .then callback (both the array ARGUMENT and an array
+	// RETURN) was broken by the header-pointer array model: the argument was
+	// passed as a raw data pointer where the two-slot array-param ABI expects a
+	// {data,len} header (a crash), and an array return went through the stale
+	// {ptr,i64} aggregate ABI instead of `ret ptr`. See ADR-00945.
+	assertOutput(t, `
+const p: Promise<number[]> = Promise.resolve([1, 2, 3])
+p.then((arr) => { console.log(arr[0], arr[2], arr.length) })
+const q: Promise<number> = Promise.resolve(5)
+q.then((n) => [n, n * 2]).then((arr) => { console.log(arr[0], arr[1]) })
+const r: Promise<number[]> = Promise.resolve([1, 2])
+r.then((arr) => arr.map((x) => x * 10)).then((a2) => { console.log(a2[0], a2[1]) })
+`, "1 3 3\n5 10\n10 20")
 }
 
 // Awaiting a rejecting-source .catch chain runs the catch (recovering the value)

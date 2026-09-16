@@ -59,6 +59,34 @@ console.log(u.searchParams.get("z"))
 `, "1\nhello world\nfalse\nnull")
 }
 
+func TestE2EURLSearchParamsLiveWriteback(t *testing.T) {
+	// TDD-00203 live link (ADR-00966): mutating `url.searchParams` writes the
+	// serialized query back into `url.search`/`url.href`. Covers append/set/delete/
+	// sort, an aliased handle, an empty-query start, and emptying the query (which
+	// drops `search` to ""). A standalone URLSearchParams (no owner) is unaffected.
+	assertOutput(t, `
+const u = new URL("http://example.com/p?a=1")
+u.searchParams.append("b", "2")
+console.log(u.search, u.href)
+u.searchParams.set("a", "9")
+console.log(u.search)
+u.searchParams.delete("b")
+console.log(u.search)
+const u2 = new URL("http://h.com/?c=3&a=1&b=2")
+u2.searchParams.sort()
+console.log(u2.search)
+const u3 = new URL("http://h.com/path")
+u3.searchParams.append("k", "v")
+console.log(u3.search, u3.href)
+const u4 = new URL("http://h.com/?only=1")
+u4.searchParams.delete("only")
+console.log(JSON.stringify(u4.search), u4.href)
+const sp = new URLSearchParams("m=1")
+sp.append("n", "2")
+console.log(sp.toString())
+`, "?a=1&b=2 http://example.com/p?a=1&b=2\n?a=9&b=2\n?a=9\n?a=1&b=2&c=3\n?k=v http://h.com/path?k=v\n\"\" http://h.com/\nm=1&n=2")
+}
+
 func TestE2EURLSearchParamsConstructor(t *testing.T) {
 	assertOutput(t, `
 const p = new URLSearchParams("a=1&b=two%20words")

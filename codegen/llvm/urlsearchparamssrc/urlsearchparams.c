@@ -32,7 +32,15 @@ static char *kml_new(const char *src, int64_t n) {
 }
 
 typedef struct { char *key; char *val; } kml_usp_pair;
-typedef struct { kml_usp_pair *items; int64_t len; int64_t cap; } kml_usp;
+// `owner` is an opaque back-pointer to the owning WHATWG URL object (null for a
+// standalone URLSearchParams), set by URL construction/derivation so a mutation
+// on `url.searchParams` can re-serialize the query back into the URL's own
+// fields (TDD-00203 live link). The C runtime never dereferences it — the
+// emitted writeback helper does (it knows the URL struct layout).
+typedef struct { kml_usp_pair *items; int64_t len; int64_t cap; void *owner; } kml_usp;
+
+void __kml_usp_set_owner(kml_usp *u, void *owner) { if (u) u->owner = owner; }
+void *__kml_usp_owner(kml_usp *u) { return u ? u->owner : (void *)0; }
 
 // A native `{ptr, i64}` string-array aggregate — the ABI getAll()/keys()/values()
 // return and codegen consumes as `string[]` (matches emit_url.go's array shape).

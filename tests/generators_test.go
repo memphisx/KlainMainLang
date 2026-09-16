@@ -1435,9 +1435,39 @@ main2();
 // array-typed sent-value slot (ADR-00892). Backstopped by the emitter's
 // scalar-const-into-aggregate store guard.
 func TestE2EGeneratorMismatchedNextValueRejected(t *testing.T) {
+	// The element type is annotated array-typed directly rather than derived from
+	// a `yield [...yield]` spread: a `yield` *expression* now evaluates to `any`
+	// (TypeScript's TNext default, ADR-00954), so `[...yield]` spreads a dynamic
+	// value and would reject at the spread ("not an array") before ever reaching
+	// this `.next()`-value store guard — the thing this test actually exercises.
 	mustCompileError(t, `
-const gen = function* () { yield [...yield]; };
+const gen = function* (): number[] { yield [1]; };
 const iter = gen();
 iter.next(false);
 `, "aggregate")
+}
+
+// A `yield` expression evaluates to TypeScript's TNext (defaults to `any`), so a
+// resume value consumed as an rvalue and stored into a differently-typed target
+// coerces through the dynamic path rather than emitting a raw element-word store
+// (ADR-00954). Test262 built-ins/GeneratorPrototype/return/
+// try-finally-set-property-within-try: `obj.foo = yield` inside a try whose
+// finally `return`s never actually runs the store, but the store site still had
+// to type-check. The finally return supersedes the value; obj.foo is untouched.
+func TestE2EGeneratorYieldValueIntoField(t *testing.T) {
+	assertOutput(t, `
+const obj = { foo: "not modified" };
+function* g() {
+  try {
+    obj.foo = yield;
+  } finally {
+    return 1;
+  }
+}
+const iter = g();
+iter.next();
+const result = iter.return(45).value;
+console.log(obj.foo);
+console.log(result);
+`, "not modified\n1")
 }

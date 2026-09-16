@@ -195,6 +195,7 @@ func (e *Emitter) emitURLSearchParamsCall(objExpr ast.Expression, method string,
 			return Value{}, true, err
 		}
 		e.emitInstr(fmt.Sprintf("call void @__kml_usp_append(ptr %s, ptr %s, ptr %s)", handle, k, v))
+		e.emitURLUSPWriteback(handle)
 		return Value{Ty: TypeVoid}, true, nil
 	case "set":
 		if len(args) != 2 {
@@ -209,6 +210,7 @@ func (e *Emitter) emitURLSearchParamsCall(objExpr ast.Expression, method string,
 			return Value{}, true, err
 		}
 		e.emitInstr(fmt.Sprintf("call void @__kml_usp_set(ptr %s, ptr %s, ptr %s)", handle, k, v))
+		e.emitURLUSPWriteback(handle)
 		return Value{Ty: TypeVoid}, true, nil
 	case "get":
 		if len(args) != 1 {
@@ -221,8 +223,13 @@ func (e *Emitter) emitURLSearchParamsCall(objExpr ast.Expression, method string,
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_usp_get(ptr %s, ptr %s)", r, handle, k))
 		// Absent → null ptr, which the string machinery treats as null (ADR-00724);
-		// a string value is a bare ptr here, so this is a `string | null`.
-		return Value{Ref: r, Ty: TypePtr}, true, nil
+		// a string value is a bare ptr here, so this is a `string | null`. Mark the
+		// type Nullable so a miss boxed into an `any` slot encodes as nbNull (not a
+		// string-tagged 0), keeping `params.get(x) === null` true across the box
+		// (emitBoxValue's nullable-ptr arm — ADR-00958, BACKLOG §3 residue).
+		nt := TypePtr
+		nt.Nullable = true
+		return Value{Ref: r, Ty: nt}, true, nil
 	case "getAll":
 		if len(args) != 1 {
 			return Value{}, true, fmt.Errorf("%d:%d: URLSearchParams.getAll(name) takes 1 argument", pos.Line, pos.Col)
@@ -277,9 +284,11 @@ func (e *Emitter) emitURLSearchParamsCall(objExpr ast.Expression, method string,
 		} else {
 			e.emitInstr(fmt.Sprintf("call void @__kml_usp_delete(ptr %s, ptr %s)", handle, k))
 		}
+		e.emitURLUSPWriteback(handle)
 		return Value{Ty: TypeVoid}, true, nil
 	case "sort":
 		e.emitInstr(fmt.Sprintf("call void @__kml_usp_sort(ptr %s)", handle))
+		e.emitURLUSPWriteback(handle)
 		return Value{Ty: TypeVoid}, true, nil
 	case "toString":
 		r := e.freshReg()

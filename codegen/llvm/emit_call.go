@@ -2492,6 +2492,18 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 			} else if isNullableScalar(paramTy) {
 				argParts = append(argParts, nullableScalarStorageIR(paramTy)+" zeroinitializer")
 				paramNullableAgg = "zeroinitializer"
+			} else if paramTy.IsDynamic {
+				// An omitted `param?: any` argument is `undefined` in JS, and an
+				// `any` slot is a NaN-boxed word — so it must be the boxed
+				// `undefined` sentinel, not a raw i64 zero. A zero word is the
+				// boxed integer 0 (read back as a double it is 5e-324), which
+				// makes `param === undefined`/`=== null` wrongly false and
+				// corrupts any downstream numeric read (ADR-00164 predates the
+				// NaN-box `any` model, TDD-00076).
+				undef := fmt.Sprintf("%d", nbUndefined)
+				argParts = append(argParts, "i64 "+undef)
+				pv := Value{Ref: undef, Ty: paramTy}
+				paramScalar = &pv
 			} else {
 				argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
 				pv := Value{Ref: paramTy.zeroLiteral(), Ty: paramTy}

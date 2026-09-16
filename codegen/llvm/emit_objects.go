@@ -94,6 +94,17 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 	if af, ok := expr.(*ast.ArrowFunction); ok && isUnconstrainedDynamic(hint) {
 		return e.emitDynArrowFunction(af, af.GetPos())
 	}
+	// A closure bound into a known function type (`const f: F = …`, a
+	// function-typed argument slot): emit it against the expected type's
+	// parameter types so its optionality ABI matches the slot (ADR-00963).
+	if hint.IsFunc {
+		if af, ok := expr.(*ast.ArrowFunction); ok {
+			return e.emitArrowFunctionWithHints(af, hint.FuncParams)
+		}
+		if fe, ok := expr.(*ast.FunctionExpression); ok {
+			return e.emitFunctionExpression(fe, hint.FuncParams)
+		}
+	}
 	if lit, ok := expr.(*ast.ObjectLiteral); ok && hint.IsObject {
 		return e.emitObjectLiteralWithHint(lit, &hint)
 	}
@@ -1272,6 +1283,25 @@ func (e *Emitter) emitObjectFromEntries(args []ast.Expression, pos ast.Pos) (Val
 		}
 		valTy = elemTy.ElemType.Fields[1].Ty
 	}
+	// A heterogeneous `[key, value]` pair (a Symbol or object key alongside a
+	// string value) doesn't infer as a 2-tuple, so the tuple-field key check
+	// above is bypassed and seeding would emit an invalid store of the key.
+	// Real JS runs ToPropertyKey on each key (a Symbol stays a symbol-keyed
+	// property; an object is ToString'd) — neither is representable in this
+	// string-keyed dynamic-object subset, so reject a non-string literal key
+	// cleanly rather than emitting invalid IR.
+	if lit, ok := args[0].(*ast.ArrayLiteral); ok {
+		for _, el := range lit.Elements {
+			pair, isArr := el.(*ast.ArrayLiteral)
+			if !isArr || len(pair.Elements) != 2 {
+				continue // shape errors are reported by the seed path below
+			}
+			if kt := e.inferExprType(pair.Elements[0]); !isStringTy(kt) || kt.IsObject {
+				return Value{}, fmt.Errorf("%d:%d: Object.fromEntries requires string keys — a Symbol or object key (ToPropertyKey) is not supported in this typed subset", pair.Elements[0].GetPos().Line, pair.Elements[0].GetPos().Col)
+			}
+		}
+	}
+
 	keyTy := TypePtr
 	ty := Type{IR: "ptr", IsMap: true, IsDynamicObject: true, MapKey: &keyTy, MapVal: &valTy}
 
@@ -1329,6 +1359,17 @@ func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, e
 			dstIdx, dstTy, ok := targetVal.Ty.FieldIndex(f.Name)
 			if !ok {
 				return Value{}, fmt.Errorf("%d:%d: Object.assign: source has field '%s' not present on target's type", pos.Line, pos.Col, f.Name)
+			}
+			// The target field keeps its own type in this typed-object subset,
+			// so a source whose same-named field has an incompatible type
+			// (`Object.assign({a:1}, {a:"c"})` — number target, string source)
+			// can't merge into it. coerce alone would keep the source register
+			// while relabeling its type to the target's, storing e.g. a string
+			// ptr into a double slot (invalid IR). Reject cleanly instead — the
+			// typed-subset equivalent of JS's last-write-wins on a differently
+			// typed property.
+			if !coerciblePure(f.Ty, dstTy) {
+				return Value{}, fmt.Errorf("%d:%d: Object.assign: source field '%s' has a type incompatible with the target field's type — a merge that changes a field's type is not supported (this compiler's objects are a typed subset)", pos.Line, pos.Col, f.Name)
 			}
 			srcIdx, _, _ := srcVal.Ty.FieldIndex(f.Name)
 			srcGep := e.freshReg()
@@ -1482,7 +1523,10 @@ func (e *Emitter) emitFrozenCheck(ptrRef string) {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isFrozen, frozenL, okL))
 
 	e.emitLabel(frozenL)
-	e.emitInternalThrow(e.internString("Cannot assign to read only property of a frozen object"))
+	// A write to a frozen object is a TypeError in strict-mode JS (matching V8's
+	// "Cannot assign to read only property" message), so `instanceof TypeError`
+	// narrows it.
+	e.emitInternalThrowKind("TypeError", e.internString("Cannot assign to read only property of a frozen object"))
 
 	e.emitLabel(okL)
 }

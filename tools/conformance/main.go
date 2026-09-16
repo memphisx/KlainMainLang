@@ -309,6 +309,14 @@ func main() {
 	// pass `-timeout`.
 	perFileTimeout := flag.Duration("timeout", 5*time.Second, "timeout for clang and for running each compiled test binary")
 	workDir := flag.String("workdir", ".conformance-out", "scratch directory for generated .ll/binaries")
+	// A compiled test that spawns a detached child (child_process detached:true →
+	// setsid, a new session that escapes the per-file kill(-pgid)) or a re-exec'd
+	// cluster worker outlives its parent and is re-parented to init, running
+	// forever. Unchecked across the corpus these piled up to ~880 processes /
+	// ~42GB and OOM-killed the machine. The reaper (reaper.go) sweeps orphaned
+	// workdir processes and hard-aborts the run if their aggregate RSS crosses
+	// this ceiling. Default is deliberately conservative for a laptop.
+	memCapMB := flag.Int("mem-cap-mb", 4096, "abort the run if workdir processes' total RSS exceeds this many MB (0 disables); the machine-safety backstop for runaway detached/cluster children")
 	passList := flag.String("passlist", "", "optional path: write the sorted list of passing file paths (one per line) for regression diffing")
 	failList := flag.String("faillist", "", "optional path: write the sorted list of failing files as `path\\treason` (one per line) — for finding near-miss clusters (e.g. RUNTIME_NONZERO_EXIT, which already compiled and ran)")
 	regexMode := flag.String("regex", "", "RegExp dialect for compiled tests (TDD-00067): ecmascript (default), es-unicode, es-utf16, es-ascii, or pcre — for measuring a specific dialect's conformance")
@@ -330,6 +338,17 @@ func main() {
 		*workDir = filepath.Join(*workDir, fmt.Sprintf("run-%d", os.Getpid()))
 	}
 
+	// Start the runaway-child reaper before any test binary runs, and sweep on
+	// the way out (normal exit or Ctrl-C). absWorkDir is what the reaper matches
+	// against a process's command line, so it must be the same absolute form the
+	// spawned binaries carry.
+	absWorkDir, err := filepath.Abs(*workDir)
+	if err != nil {
+		absWorkDir = *workDir
+	}
+	stopReaper := startReaper(absWorkDir, *memCapMB)
+	defer stopReaper()
+
 	// TDD-00121 Tracks B/C run entirely different corpora with different oracles
 	// (Node behavioral run; TS front-end accept/reject) — dispatch to their own
 	// runners, which reuse the shared helpers (killableCommand/firstLine/…) but
@@ -345,7 +364,7 @@ func main() {
 		// corpus once per lane (strict then js) and the report carries both
 		// scores plus the delta (TDD-00022).
 	case "node":
-		runNodeSuite(*workDir, *perFileTimeout, *workers, *compatFlag)
+		runNodeSuite(*workDir, *perFileTimeout, *workers, *compatFlag, *limit, *category)
 		return
 	case "wpt":
 		runWPTSuite(*workDir, *perFileTimeout, *workers, *compatFlag)
@@ -786,7 +805,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	runCmd := killableCommand(rctx, binFile)
 	runCmd.Stdout = &stdout
 	runCmd.Stderr = &stderr
-	runErr := runCmd.Run()
+	runErr := runTracked(runCmd)
 
 	negativeRuntime := fm.NegativePhase == "runtime" || fm.NegativePhase == "resolution"
 	exitedZero := runErr == nil

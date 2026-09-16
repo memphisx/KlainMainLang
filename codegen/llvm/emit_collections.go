@@ -30,9 +30,22 @@ func mapRuntime(keyTy Type) (suffix, keyIR string) {
 		return "any", "i64"
 	case isStringTy(keyTy):
 		return "str", "ptr"
+	case isReferenceKeyTy(keyTy):
+		// Object/array keys carry reference identity (two distinct
+		// arrays/objects are different keys — SameValueZero). They have no
+		// i64-storable scalar form, so they ride the any-keyed runtime as
+		// NaN-boxed header/object pointers (boxed in mapKeyRef).
+		return "any", "i64"
 	default:
 		return "num", "i64"
 	}
+}
+
+// isReferenceKeyTy reports whether a non-dynamic, non-string key type is a
+// reference type (array or object/class instance) that must be routed to the
+// any-keyed runtime as a boxed pointer rather than stored raw in an i64 slot.
+func isReferenceKeyTy(t Type) bool {
+	return t.IsArray || t.IsObject
 }
 
 // ensureMapFamily declares the __kml_map_<suffix>_* runtime once.
@@ -52,7 +65,7 @@ func (e *Emitter) ensureMapFamily(suffix string) {
 // an already-evaluated NaN is an i64 box coerce's shortcut would leave
 // unboxed, the TDD-00210 gotcha); str/num keys go through valueToMapKey.
 func (e *Emitter) mapKeyRef(kVal Value, keyTy Type) (string, error) {
-	if keyTy.IsDynamic {
+	if keyTy.IsDynamic || isReferenceKeyTy(keyTy) {
 		boxed, err := e.emitBoxValue(kVal)
 		if err != nil {
 			return "", err
@@ -326,7 +339,7 @@ func (e *Emitter) emitNewSetValue(init *ast.NewSetExpression) (Value, error) {
 	setPtr := e.emitMapOrSetCreate(elemTy)
 
 	if haveSrc {
-		strElem := isStringTy(elemTy)
+		seedSuffix, seedKeyIR := mapRuntime(elemTy)
 		idxPtr := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
 		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
@@ -346,12 +359,11 @@ func (e *Emitter) emitNewSetValue(init *ast.NewSetExpression) (Value, error) {
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, elemTy.IR, srcPtr, idxReg))
 		elemVal := e.loadArrayElem(gepReg, elemTy)
-		eRef := e.valueToMapKey(elemVal, elemTy)
-		if strElem {
-			e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 0)", setPtr, eRef))
-		} else {
-			e.emitInstr(fmt.Sprintf("call void @__kml_map_num_set(ptr %s, i64 %s, i64 0)", setPtr, eRef))
+		eRef, err := e.mapKeyRef(elemVal, elemTy)
+		if err != nil {
+			return Value{}, err
 		}
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set(ptr %s, %s %s, i64 0)", seedSuffix, setPtr, seedKeyIR, eRef))
 		nextIdx := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nextIdx, idxReg))
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nextIdx, idxPtr))
@@ -481,6 +493,16 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 			v.Ty.Nullable = true
 			v.Ty.IsUndefined = true
 		}
+		// An array-valued miss is a real `T[] | undefined`: mark the result
+		// Nullable (not IsUndefined) so its truthiness tests the array pointer
+		// via the nullable-array path in toBool — a miss ({null,0}, null header)
+		// is falsy, a present array truthy. IsUndefined is deliberately NOT set:
+		// it would fold toBool to a constant false. `=== undefined`/`=== null`
+		// on the result is handled by the operator path's array-nullish branch
+		// (emitNullableScalarNullCompare defers for array operands).
+		if valTy.IsArray {
+			v.Ty.Nullable = true
+		}
 		return v, nil
 
 	case "has":
@@ -518,6 +540,7 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 	case "keys":
 		res := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", res, suffix, mapPtr))
+		res = e.materializeKeysAggregate(res, keyTy)
 		return Value{Ref: res, Ty: ArrayOf(keyTy)}, nil
 
 	case "values":
@@ -564,6 +587,7 @@ func (e *Emitter) emitSetCall(ty Type, setPtr string, method string, args []ast.
 		elemTy = *ty.MapKey
 	}
 	strElem := isStringTy(elemTy)
+	suffix, keyIR := mapRuntime(elemTy)
 
 	switch method {
 	case "add":
@@ -574,12 +598,11 @@ func (e *Emitter) emitSetCall(ty Type, setPtr string, method string, args []ast.
 		if err != nil {
 			return Value{}, err
 		}
-		eRef := e.valueToMapKey(eVal, elemTy)
-		if strElem {
-			e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 0)", setPtr, eRef))
-		} else {
-			e.emitInstr(fmt.Sprintf("call void @__kml_map_num_set(ptr %s, i64 %s, i64 0)", setPtr, eRef))
+		eRef, err := e.mapKeyRef(eVal, elemTy)
+		if err != nil {
+			return Value{}, err
 		}
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set(ptr %s, %s %s, i64 0)", suffix, setPtr, keyIR, eRef))
 		return Value{Ref: setPtr, Ty: ty}, nil
 
 	case "has":
@@ -590,13 +613,12 @@ func (e *Emitter) emitSetCall(ty Type, setPtr string, method string, args []ast.
 		if err != nil {
 			return Value{}, err
 		}
-		eRef := e.valueToMapKey(eVal, elemTy)
-		res := e.freshReg()
-		if strElem {
-			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", res, setPtr, eRef))
-		} else {
-			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_num_has(ptr %s, i64 %s)", res, setPtr, eRef))
+		eRef, err := e.mapKeyRef(eVal, elemTy)
+		if err != nil {
+			return Value{}, err
 		}
+		res := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_has(ptr %s, %s %s)", res, suffix, setPtr, keyIR, eRef))
 		return Value{Ref: res, Ty: TypeBool}, nil
 
 	case "delete":
@@ -607,23 +629,19 @@ func (e *Emitter) emitSetCall(ty Type, setPtr string, method string, args []ast.
 		if err != nil {
 			return Value{}, err
 		}
-		eRef := e.valueToMapKey(eVal, elemTy)
-		res := e.freshReg()
-		if strElem {
-			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_delete(ptr %s, ptr %s)", res, setPtr, eRef))
-		} else {
-			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_num_delete(ptr %s, i64 %s)", res, setPtr, eRef))
+		eRef, err := e.mapKeyRef(eVal, elemTy)
+		if err != nil {
+			return Value{}, err
 		}
+		res := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_delete(ptr %s, %s %s)", res, suffix, setPtr, keyIR, eRef))
 		return Value{Ref: res, Ty: TypeBool}, nil
 
 	case "values":
 		// Set elements are stored as keys; return the keys array.
 		res := e.freshReg()
-		if strElem {
-			e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_keys(ptr %s)", res, setPtr))
-		} else {
-			e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_num_keys(ptr %s)", res, setPtr))
-		}
+		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", res, suffix, setPtr))
+		res = e.materializeKeysAggregate(res, elemTy)
 		return Value{Ref: res, Ty: ArrayOf(elemTy)}, nil
 
 	case "forEach":
@@ -670,6 +688,7 @@ func (e *Emitter) mapOrSetValuesArray(ty Type, ptr string) (Value, error) {
 		suffix, _ := mapRuntime(elemTy)
 		res := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", res, suffix, ptr))
+		res = e.materializeKeysAggregate(res, elemTy)
 		return Value{Ref: res, Ty: ArrayOf(elemTy)}, nil
 	}
 
@@ -722,6 +741,17 @@ func (e *Emitter) valueToMapKey(v Value, keyTy Type) string {
 
 // valueToMapVal converts any scalar value to i64 for uniform map storage.
 func (e *Emitter) valueToMapVal(v Value, valTy Type) string {
+	// An array value stores its shared {data,len} header pointer (not the
+	// {ptr,i64} aggregate, which doesn't fit the i64 slot). This keeps
+	// reference identity across get() the same way an array struct field does
+	// (TDD-00213 Stage 2/Bug: Map<K,T[]>); mapValFromI64 rebuilds the array
+	// from the header pointer.
+	if v.Ty.IsArray {
+		header := e.arrayReturnHeader(v)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", r, header))
+		return r
+	}
 	switch v.Ty.IR {
 	case "i64":
 		return v.Ref
@@ -751,11 +781,86 @@ func (e *Emitter) valueToMapVal(v Value, valTy Type) string {
 // a map ptr already loaded from its alloca, returning the extracted
 // {dataPtr, len} pieces of each — shared by emitMapEntries and
 // emitMapForEach, both of which need to walk the same two parallel arrays.
-func (e *Emitter) mapKeysAndVals(mapPtr string, suffix string) (keysPtr, keysLen, valsPtr string) {
+// materializeKeysAggregate normalizes an any-keyed map/set's raw keys aggregate
+// (a {ptr,i64} array of NaN-boxes) into a proper keyTy[] array when keyTy is a
+// reference type (object/array). Every keys consumer (keys(), entries(),
+// forEach, Set for-of) loads each slot at keyTy.IR ("ptr"); the raw runtime slot
+// holds an i64 box, so loading it as "ptr" would reinterpret the box bits as a
+// header/object pointer and crash. Materialization unboxes each box back to its
+// LIVE header pointer (an array key) or object pointer (an object key), so the
+// surfaced keys alias the original references (SameValueZero identity is
+// preserved through iteration, matching JS). For a scalar/string/any keyTy the
+// boxes already ARE the presentation form, so the raw aggregate passes through.
+func (e *Emitter) materializeKeysAggregate(rawAgg string, keyTy Type) string {
+	if !isReferenceKeyTy(keyTy) {
+		return rawAgg
+	}
+	dataReg := e.freshReg()
+	lenReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataReg, rawAgg))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, rawAgg))
+	outPtr := e.mallocArrayBuffer(lenReg, keyTy)
+
+	idxAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	condL := e.freshLabel("matkeys.cond")
+	bodyL := e.freshLabel("matkeys.body")
+	doneL := e.freshLabel("matkeys.done")
+
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	idxVal := e.freshReg()
+	done := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
+
+	e.emitLabel(bodyL)
+	boxGep := e.freshReg()
+	box := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", boxGep, dataReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", box, boxGep))
+	_, payload := e.emitUnboxTagPayload(Value{Ref: box})
+	var elemRef string
+	if keyTy.IsArray {
+		// An array box's payload points to the any-array box cell (anyArrayBoxTy)
+		// whose field 0 is the live array header pointer; array elements are stored
+		// as header pointers (TDD-00213), so store that header directly.
+		boxCell := e.freshReg()
+		header := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", boxCell, payload))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", header, boxCell))
+		elemRef = header
+	} else {
+		// An object key's box payload IS the object pointer.
+		objPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", objPtr, payload))
+		elemRef = objPtr
+	}
+	e.storeArrayElement(outPtr, idxVal, elemRef, keyTy)
+
+	idxNext := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	r0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, outPtr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", out, r0, lenReg))
+	return out
+}
+
+func (e *Emitter) mapKeysAndVals(mapPtr string, suffix string, keyTy Type) (keysPtr, keysLen, valsPtr string) {
 	keysRes := e.freshReg()
 	valsRes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", keysRes, suffix, mapPtr))
 	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_vals(ptr %s)", valsRes, suffix, mapPtr))
+	// Reference-type keys come back NaN-boxed; materialize them to real
+	// header/object pointers so per-slot keyTy.IR loads below are valid.
+	keysRes = e.materializeKeysAggregate(keysRes, keyTy)
 	keysPtr = e.freshReg()
 	keysLen = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", keysPtr, keysRes))
@@ -774,7 +879,7 @@ func (e *Emitter) mapKeysAndVals(mapPtr string, suffix string) (keysPtr, keysLen
 // size is only known at runtime, so this walks the same {ptr, i64} arrays
 // keys()/vals() already return via a genuine IR loop.
 func (e *Emitter) emitMapEntries(mapPtr string, suffix string, keyTy, valTy Type) (Value, error) {
-	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, suffix)
+	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, suffix, keyTy)
 
 	// Each entry is a real [K, V] tuple (TDD-00066) — field 0 is the key, field
 	// 1 the value, the same struct layout the previous {key,value} object used,
@@ -841,7 +946,7 @@ func (e *Emitter) emitMapEntries(mapPtr string, suffix string, keyTy, valTy Type
 // each entry, matching real JS's (value, key, map) callback order (ADR-00573).
 // The 3rd `map` argument is the same map object being iterated.
 func (e *Emitter) emitMapForEach(mapPtr string, suffix string, keyTy, valTy, mapTy Type, cb Callback) (Value, error) {
-	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, suffix)
+	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, suffix, keyTy)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -892,12 +997,11 @@ func (e *Emitter) emitMapForEach(mapPtr string, suffix string, keyTy, valTy, map
 // mirrors real JS's own quirky Set.prototype.forEach(value, value, set)
 // shape, where the "key" is just the value again.
 func (e *Emitter) emitSetForEach(setPtr string, strElem bool, elemTy, setTy Type, cb Callback) (Value, error) {
+	suffix, _ := mapRuntime(elemTy)
 	keysRes := e.freshReg()
-	if strElem {
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_keys(ptr %s)", keysRes, setPtr))
-	} else {
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_num_keys(ptr %s)", keysRes, setPtr))
-	}
+	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", keysRes, suffix, setPtr))
+	// Reference-type elements come back NaN-boxed; materialize to real pointers.
+	keysRes = e.materializeKeysAggregate(keysRes, elemTy)
 	keysPtr := e.freshReg()
 	keysLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", keysPtr, keysRes))
@@ -956,8 +1060,12 @@ func isNullableScalarMapValue(valTy Type) bool {
 // emitMapGetNullable returns a scalar Map value as a `V | null` aggregate: the
 // presence bit comes from has(), the payload from the raw get(). See bug #3.
 // mapGetUndefinedablePtr reports whether a pointer-typed Map/WeakMap value
-// should read its miss as `V | undefined` (string/object/class). Arrays (the
-// {ptr,i64} aggregate, no spare absent state), the dynamic box, and an
+// should read its miss as `V | undefined` (string/object/class). Arrays are
+// excluded: a miss rebuilds the {null,0} empty-array aggregate, and
+// `map.get(k) === undefined` on an array is handled directly by the operator
+// path (a null data pointer), so no `V | undefined` nullable marking is needed —
+// and marking it would expose a separate toBool bug (a possibly-undefined
+// pointer folds truthiness to constant false). The dynamic box and an
 // already-nullable type are excluded.
 func mapGetUndefinedablePtr(valTy Type) bool {
 	return valTy.IR == "ptr" && !valTy.IsArray && !valTy.IsDynamic &&
@@ -978,6 +1086,17 @@ func (e *Emitter) emitMapGetNullable(mapPtr, kRef string, suffix, keyIR string, 
 }
 
 func (e *Emitter) mapValFromI64(rawReg string, valTy Type) Value {
+	// The inverse of valueToMapVal's array case: the i64 slot holds the array's
+	// shared header pointer, so rebuild the {ptr,i64} array Value from it and
+	// carry the header so a bound get() result aliases the stored array.
+	if valTy.IsArray {
+		header := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", header, rawReg))
+		// A missing key returns 0 → a null header; guard the deref so a miss
+		// reads as the {null,0} empty array rather than crashing (same null
+		// guard loadArrayFieldValue uses for an absent object field).
+		return e.arrayValueFromHeaderSlotGuarded(header, valTy)
+	}
 	switch valTy.IR {
 	case "i64":
 		return Value{Ref: rawReg, Ty: valTy}

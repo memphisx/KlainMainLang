@@ -229,6 +229,32 @@ console.log(m.get('a') === null)
 `, "0\nundefined\n0\n99\ntrue\nfalse\nfalse")
 }
 
+func TestE2EMapArrayValue(t *testing.T) {
+	// A Map whose value type is an array (Map<K, T[]>) previously produced
+	// invalid IR (a {ptr,i64} aggregate ptrtoint'd into the i64 value slot).
+	// The array's shared header pointer is stored instead, so get() round-trips
+	// the value AND keeps reference identity: mutating the array afterward is
+	// visible through the map, and get(k) === the original array. A miss reads
+	// as undefined (falsy, === undefined). See ADR-00943.
+	assertOutput(t, `
+const m = new Map<string, number[]>()
+const a = [1, 2, 3]
+m.set('a', a)
+m.set('e', [])
+const got = m.get('a')!
+console.log(got.length, got[0], got[2])
+console.log(got === a)
+a.push(4)
+console.log(m.get('a')!.length)
+console.log(m.get('z') === undefined)
+console.log(m.get('a') === undefined)
+const miss = m.get('z')
+if (miss) { console.log('miss-truthy') } else { console.log('miss-falsy') }
+const present = m.get('a')
+if (present) { console.log('present-truthy') } else { console.log('present-falsy') }
+`, "3 1 3\ntrue\n4\ntrue\nfalse\nmiss-falsy\npresent-truthy")
+}
+
 // --- new Map(entries) — the [K, V][] initial-entries constructor overload ---
 
 func TestE2ENewMapFromEntriesStringKey(t *testing.T) {
@@ -816,4 +842,137 @@ func TestE2ESetHasNullOnEmptySet(t *testing.T) {
 const s = new Set()
 console.log(s.has(null))
 `, "false")
+}
+
+// --- Reference-type Map keys / Set elements (ADR-00948) ---
+
+// A Map keyed by an object/array carries reference identity: the same reference
+// round-trips through get/has/delete, while a distinct reference of equal
+// content is a different key (SameValueZero on the reference). Previously an
+// object/array key stored its raw ptr/{ptr,i64} into the numeric runtime's i64
+// key slot — invalid IR (the num-family default in mapRuntime never routed
+// non-scalar keys to the any-keyed runtime).
+func TestE2EMapObjectKeyIdentity(t *testing.T) {
+	assertOutput(t, `
+type P = { x: number }
+const m = new Map<P, string>()
+const a = { x: 1 }
+const b = { x: 1 }
+m.set(a, 'A')
+m.set(b, 'B')
+console.log(m.size)
+console.log(m.get(a))
+console.log(m.get(b))
+console.log(m.has(a))
+console.log(m.has({ x: 1 }))
+m.delete(a)
+console.log(m.has(a))
+console.log(m.has(b))
+`, "2\nA\nB\ntrue\nfalse\nfalse\ntrue")
+}
+
+func TestE2EMapArrayKeyIdentity(t *testing.T) {
+	assertOutput(t, `
+const m = new Map<number[], number>()
+const a = [1]
+const b = [2]
+m.set(a, 10)
+m.set(b, 20)
+console.log(m.size)
+console.log(m.get(a))
+console.log(m.get(b))
+console.log(m.has(a))
+console.log(m.has([1]))
+const miss = m.get([9])
+console.log(miss)
+`, "2\n10\n20\ntrue\nfalse\nundefined")
+}
+
+// Iterating an object-keyed Map surfaces the live object references (identity
+// preserved) and their paired values through keys()/values()/entries()/forEach.
+func TestE2EMapObjectKeyIteration(t *testing.T) {
+	assertOutput(t, `
+type P = { x: number }
+const m = new Map<P, number>()
+const a = { x: 1 }
+const b = { x: 2 }
+m.set(a, 10)
+m.set(b, 20)
+for (const k of m.keys()) { console.log('k', k.x) }
+for (const v of m.values()) { console.log('v', v) }
+for (const [k, v] of m.entries()) { console.log('e', k.x, v) }
+m.forEach((v, k) => { console.log('f', v, k.x) })
+console.log(m.keys()[0] === a)
+`, "k 1\nk 2\nv 10\nv 20\ne 1 10\ne 2 20\nf 10 1\nf 20 2\ntrue")
+}
+
+// A Set of object/array elements: reference identity for has/delete, and
+// iteration (for...of, values, forEach) surfaces the live references. Both
+// previously emitted invalid IR at .add.
+func TestE2ESetObjectElementIdentity(t *testing.T) {
+	assertOutput(t, `
+type P = { x: number }
+const s = new Set<P>()
+const a = { x: 1 }
+const b = { x: 2 }
+s.add(a)
+s.add(b)
+s.add(a)
+console.log(s.size)
+console.log(s.has(a))
+console.log(s.has({ x: 1 }))
+for (const e of s) { console.log(e.x) }
+s.forEach((e) => { console.log('f', e.x) })
+s.delete(a)
+console.log(s.has(a))
+`, "2\ntrue\nfalse\n1\n2\nf 1\nf 2\nfalse")
+}
+
+func TestE2ESetArrayElementIdentity(t *testing.T) {
+	assertOutput(t, `
+const s = new Set<number[]>()
+const a = [1]
+const b = [2]
+s.add(a)
+s.add(b)
+console.log(s.size)
+console.log(s.has(a))
+console.log(s.has([1]))
+for (const e of s) { console.log(e[0]) }
+`, "2\ntrue\nfalse\n1\n2")
+}
+
+// Constructor-seeded object-keyed Map / object Set route reference elements to
+// the any-keyed runtime rather than the hardcoded str/num seed path.
+func TestE2ECollectionSeedObjectReference(t *testing.T) {
+	assertOutput(t, `
+type P = { x: number }
+const p = { x: 1 }
+const m = new Map<P, string>([[p, 'a']])
+console.log(m.get(p), m.has(p), m.has({ x: 1 }))
+const s = new Set<P>([p])
+console.log(s.has(p), s.has({ x: 1 }))
+`, "a true false\ntrue false")
+}
+
+// A `T | undefined` map value used directly in a boolean position (`if (m.get(k))`)
+// must test the runtime value, not fold to a constant. A pointer-valued map
+// (string/object V) previously folded to `false` because the get result is
+// typed `V | undefined` (IsUndefined) — so a present key read falsy (ADR-00950).
+// A miss (null pointer) is falsy, a present value truthy, an empty string falsy.
+func TestE2EMapGetTruthiness(t *testing.T) {
+	assertOutput(t, `
+const m = new Map<string, string>()
+m.set('a', 'hello')
+m.set('e', '')
+console.log(m.get('a') ? 'present-truthy' : 'WRONG')
+console.log(m.get('z') ? 'WRONG' : 'miss-falsy')
+console.log(m.get('e') ? 'WRONG' : 'empty-falsy')
+
+type P = { x: number }
+const mo = new Map<string, P>()
+mo.set('a', { x: 1 })
+console.log(mo.get('a') ? 'obj-truthy' : 'WRONG')
+console.log(mo.get('z') ? 'WRONG' : 'obj-miss-falsy')
+`, "present-truthy\nmiss-falsy\nempty-falsy\nobj-truthy\nobj-miss-falsy")
 }

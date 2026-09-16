@@ -185,6 +185,26 @@ console.log(nextNode.value)
 `, "3\n3")
 }
 
+func TestE2ESelfReferentialClassArrayField(t *testing.T) {
+	// A self-referential ARRAY field (`children: Node[]`, the tree shape) kept a
+	// stale placeholder in the array's ElemType, so drilling through an indexed
+	// element (`root.children[0].val`) failed with "no field". canonicalizeClassTy
+	// now re-resolves a class array element too. See ADR-00946.
+	assertOutput(t, `
+class Node {
+  children: Node[] = [];
+  val: number = 0;
+}
+const root = new Node(); root.val = 1;
+const a = new Node(); a.val = 2;
+const b = new Node(); b.val = 3;
+a.children.push(b);
+root.children.push(a);
+console.log(root.children[0].val);
+console.log(root.children[0].children[0].val);
+`, "2\n3")
+}
+
 // --- TDD-00009 Stage 1a: for...of over a class-based iterator ---
 
 func TestE2EForOfClassIteratorNumeric(t *testing.T) {

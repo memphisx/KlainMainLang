@@ -70,6 +70,24 @@ console.log(e.listenerCount('x'))
 `, "two: go\n1")
 }
 
+// A listener passed by a *named-function* reference (not a const-bound closure)
+// must still match on off(): every reference to a named function now yields the
+// same static closure header, so the pointer comparison off() does succeeds.
+// Regressed when each reference malloc'd a fresh header.
+func TestE2EEventEmitterOffByNamedFunctionRef(t *testing.T) {
+	assertOutput(t, `
+let count = 0
+function onPing(msg: string): void { count = count + 1 }
+const e = new EventEmitter<string>()
+e.on('ping', onPing)
+e.emit('ping', 'a')
+e.off('ping', onPing)
+e.emit('ping', 'b')
+console.log(count)
+console.log(e.listenerCount('ping'))
+`, "1\n0")
+}
+
 func TestE2EEventEmitterRemoveListenerAlias(t *testing.T) {
 	assertOutput(t, `
 const e = new EventEmitter<string>()

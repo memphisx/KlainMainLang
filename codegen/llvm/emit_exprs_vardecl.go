@@ -1023,7 +1023,14 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 					// scalar (an `i64 | undefined` from .find()/.at(),
 					// TDD-00187) shares it too but needs the { i1, T } slot,
 					// so it is kept as well.
-					if inferred.IR != TypeI64.IR || inferred.IsArray || inferred.IsObject || inferred.IsDynamic || isNullableScalar(inferred) {
+					//
+					// A void-returning method (`var r = dv.setInt8(0, 1)`, JS's
+					// setters return undefined) must NOT adopt `void` as the slot
+					// type — that emits an `alloca void` for the pre-inference
+					// slot (invalid IR) before the void-initializer handler below
+					// can rebind the binding as `undefined`. Leaving ty at its i64
+					// default keeps a harmless dead slot; the void handler fires.
+					if inferred.IR != "void" && (inferred.IR != TypeI64.IR || inferred.IsArray || inferred.IsObject || inferred.IsDynamic || isNullableScalar(inferred)) {
 						ty = inferred
 					}
 				}

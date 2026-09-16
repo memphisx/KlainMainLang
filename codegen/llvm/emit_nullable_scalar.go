@@ -502,6 +502,17 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 	if e.inferExprType(scalarExpr).IsDynamic {
 		return Value{}, false, nil
 	}
+	// An array operand compared to the `undefined` literal is a `Map<K,T[]>` miss
+	// check: the result reads as a {null,0} aggregate whose absence is a null data
+	// pointer, and it is never statically marked IsUndefined (that would fold its
+	// truthiness to a constant false), so the strict litUndef!=valUndef fold below
+	// would wrongly make `map.get(k) === undefined` a constant false. Defer to
+	// emitBinary's array-vs-nullish branch, which tests the data pointer at
+	// runtime. Only for the `undefined` literal — a `T[] | null` field compared to
+	// `null` keeps its existing presence-bit handling below.
+	if litUndef && e.inferExprType(scalarExpr).IsArray {
+		return Value{}, false, nil
+	}
 	// Strict `===`/`!==` distinguishes `null` from `undefined` (JS: `undefined
 	// === null` is false), so an absent value only strict-equals the literal
 	// spelled its own kind. Loose `==`/`!=` treats both as nullish. When the

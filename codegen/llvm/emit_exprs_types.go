@@ -2455,6 +2455,13 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 								}
 							}
 						}
+						// Array-like `{ length: n }` → an `any[]` of `undefined`
+						// (ADR-00957), matching emitArrayFrom's undefined-fill path.
+						if argTy.IsObject && !argTy.IsArray && !argTy.IsClass && !argTy.IsTuple {
+							if _, _, ok3 := argTy.FieldIndex("length"); ok3 {
+								return ArrayOf(TypeAny)
+							}
+						}
 					}
 					return ArrayOf(TypeI64)
 				}
@@ -2950,7 +2957,13 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return recvTy
 				}
 				if len(ex.Args) == 1 {
-					if retTy, ok := e.callbackReturnType(ex.Args[0], e.hofElemHint(mem.Object)); ok {
+					// The index param (arg 1) must be hinted i64 to match
+					// emitArrayMap's own callback hints (emit_arrays_hof.go) —
+					// without it an unannotated `i` defaults to TypeF64, so
+					// `(_, i) => i * i` infers a float[] result while codegen
+					// stored i64, and every read back is a 5e-324 denormal
+					// (ADR-00957).
+					if retTy, ok := e.callbackReturnType(ex.Args[0], e.hofElemHint(mem.Object), TypeI64); ok {
 						return ArrayOf(retTy)
 					}
 				}
@@ -2998,7 +3011,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				// mirrors emitArrayFlatMap exactly.
 				objTy := e.inferExprType(mem.Object)
 				if objTy.IsArray && len(ex.Args) == 1 {
-					if retTy, ok := e.callbackReturnType(ex.Args[0], e.hofElemHint(mem.Object)); ok {
+					// Index param hinted i64 to match emitArrayFlatMap (see the
+					// map case above for the 5e-324 failure this prevents).
+					if retTy, ok := e.callbackReturnType(ex.Args[0], e.hofElemHint(mem.Object), TypeI64); ok {
 						if retTy.IsArray && retTy.ElemType != nil {
 							return ArrayOf(*retTy.ElemType)
 						}
@@ -3453,12 +3468,24 @@ func (e *Emitter) toBool(v Value) Value {
 	if v.Ty.IsCaught {
 		return e.toBool(e.emitCaughtToAny(v))
 	}
-	// A void/undefined/null value is falsy (JS ToBoolean(undefined)===false,
-	// ToBoolean(null)===false). This reaches here from a void-returning
-	// predicate used by filter/some/every/find — a callback with no `return`
-	// statement — where the result carries no value; producing `false` avoids
-	// emitting an `icmp`/`br` against a `void` operand (invalid IR). ADR-00687.
-	if v.Ty.IR == "void" || v.Ty.IR == "" || v.Ty.IsUndefined || v.Ty.IsNull {
+	// A value-less or literally-nullish value is falsy (JS
+	// ToBoolean(undefined)===false, ToBoolean(null)===false). This reaches here
+	// from a void-returning predicate used by filter/some/every/find — a callback
+	// with no `return` statement — where the result carries no value; producing
+	// `false` avoids emitting an `icmp`/`br` against a `void` operand (invalid
+	// IR). ADR-00687. A bare `null`/`undefined` literal (IsNull/IsUndefined but
+	// NOT Nullable, Ref "null") also folds here.
+	//
+	// A *possibly*-undefined/null value — a `T | undefined` / `T | null` UNION
+	// (Nullable set) — carries a real runtime representation (a `Map<K,string>`
+	// miss is a null string ptr, a present key a real one), so it must NOT fold:
+	// it falls through to the string/pointer runtime test below, where a null
+	// pointer reads falsy and a present value truthy. Folding it to a constant
+	// `false` was a pre-existing bug — `if (map.get(presentKey))` on a
+	// `string`/object-valued map was wrongly false (ADR-00950). Nullable scalars
+	// (`number | undefined`, the `{ i1, T }` presence path) are already handled
+	// above and never reach here.
+	if v.Ty.IR == "void" || v.Ty.IR == "" || ((v.Ty.IsUndefined || v.Ty.IsNull) && !v.Ty.Nullable) {
 		return Value{Ref: zeroRef(TypeBool), Ty: TypeBool}
 	}
 	// A dynamic value's truthiness is the real JS ToBoolean over the
@@ -3484,6 +3511,11 @@ func (e *Emitter) toBool(v Value) Value {
 		if !v.Ty.Nullable {
 			return Value{Ref: "1", Ty: TypeBool}
 		}
+		// A nullable array is falsy when absent. Absence is a null data pointer:
+		// a `Map<K,T[]>` miss rebuilds {null,0}, a null `T[] | null` field/sentinel
+		// (RegExp.exec) is likewise {null,0}. (An empty present array is also
+		// {null,0}, so it reads falsy — the same edge every nullable-array test in
+		// this compiler shares; documented.)
 		ptrReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, v.Ref))
 		reg := e.freshReg()

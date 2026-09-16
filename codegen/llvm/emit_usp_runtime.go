@@ -51,4 +51,8 @@ func (e *Emitter) ensureURLSearchParams() {
 	e.emitGlobal(`declare ptr @__kml_usp_to_string(ptr)`)
 	e.emitGlobal(`declare ptr @__kml_usp_inspect(ptr)`)
 	e.emitGlobal(`declare void @__kml_usp_parse(ptr, ptr)`)
+	// TDD-00203 live link: the URL back-pointer set on a URL's own searchParams
+	// handle so a mutation writes the serialized query back into the URL fields.
+	e.emitGlobal(`declare void @__kml_usp_set_owner(ptr, ptr)`)
+	e.emitGlobal(`declare ptr @__kml_usp_owner(ptr)`)
 }

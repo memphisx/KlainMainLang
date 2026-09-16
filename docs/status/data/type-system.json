@@ -172,7 +172,8 @@
             "notes": [
               "A literal's fields are coerced against the declared type wherever one is known (variable annotation, function parameter/return/default value, array element type, nested field) — not just the literal's own self-inferred type ([ADR-00077](../adr/ADR-00077.md)/[TDD-00007](../tdd/TDD-00007.md))",
               "Method signatures `name(params): R` (and `name?(…)`) in an inline `{}` type desugar to function-typed properties; a lone call signature `{ (n: number): string }` desugars to the function type itself; `field?: T` is accepted-but-required, matching interfaces ([ADR-00448](../adr/ADR-00448.md))",
-              "Constructor types `new (params) => R` parse as the equivalent function type (accept-and-erase, [ADR-00452](../adr/ADR-00452.md))"
+              "Constructor types `new (params) => R` parse as the equivalent function type (accept-and-erase, [ADR-00452](../adr/ADR-00452.md))",
+              "Self- and mutually-referential interfaces and object-shape `type` aliases work (tree/linked-list shapes: `interface N { children: N[]; next: N \\| null }`) — a self-ref field's placeholder snapshot is re-resolved on demand at each drilling access, so `root.children[0].children[0].val` and full list traversal drill correctly ([ADR-00949](../adr/ADR-00949.md))"
             ],
             "caveats": [
               "`interface C extends A, B` merges simple base names' fields/method signatures (own declarations win); a **generic or qualified base** (`extends Boxed<number>`, `extends ns.Base`) parses but does not merge — its members stay missing from the derived interface ([ADR-00452](../adr/ADR-00452.md))",

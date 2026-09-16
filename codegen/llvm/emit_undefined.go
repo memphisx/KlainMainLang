@@ -47,6 +47,35 @@ func optionalParamType(p ast.Param, pty Type) Type {
 	return undefinedableElem(pty)
 }
 
+// contextualParamOptionality reconciles a closure parameter's ABI with the
+// optionality its *contextual* type dictates (ADR-00963). When an arrow /
+// function expression is emitted into a known expected function type — a
+// `const f: F = …` binding or a function-typed argument slot — the expected
+// type is authoritative for whether each scalar parameter rides the plain or
+// the nullable-scalar { i1, T } ABI, overriding the closure's own `?` marker.
+// A `?`-param bound into a required slot is always supplied, so the plain ABI
+// loses nothing; a plain param bound into an optional slot must widen to the
+// aggregate the caller marshals. Only the nullable/undefined dimension of a
+// scalar param is adjusted — the base type stays the closure's own.
+func contextualParamOptionality(paramTy, ctx Type) Type {
+	if ctx.IR == "" || ctx.Inferred {
+		return paramTy // no authoritative context
+	}
+	ctxOptional := isNullableScalar(ctx)
+	if isNullableScalar(paramTy) == ctxOptional {
+		return paramTy
+	}
+	if ctxOptional {
+		return undefinedableElem(paramTy)
+	}
+	// Context is a required scalar: drop the closure param to the plain ABI.
+	if isNullableScalar(paramTy) {
+		paramTy.Nullable = false
+		paramTy.IsUndefined = false
+	}
+	return paramTy
+}
+
 // wrapUndefinedable converts an operation's raw result plus a presence bit
 // into its `T | undefined` value. A scalar result becomes the { i1, T }
 // aggregate; a pointer result keeps its register (the miss branch already

@@ -221,6 +221,32 @@ type ClassInfo struct {
 // where the snapshot's IR-level shape (always "ptr" for any class) was
 // already correct and sufficient.
 func (e *Emitter) canonicalizeClassTy(ty Type) Type {
+	// A self-referential array field (`class Node { children: Node[] }`) captures
+	// the same stale placeholder snapshot in its ElemType. Re-resolve the element
+	// so indexing it (`node.children[0].val`) sees the full field list, mirroring
+	// the direct-class-field case below.
+	if ty.IsArray && ty.ElemType != nil && (ty.ElemType.IsClass || ty.ElemType.RefName != "") {
+		canonElem := e.canonicalizeClassTy(*ty.ElemType)
+		out := ty
+		out.ElemType = &canonElem
+		return out
+	}
+	// A named structural type (interface / object type alias) whose field
+	// snapshot is a stale self-reference placeholder (empty Fields captured
+	// before the interface's own fields existed) re-resolves through the live
+	// e.interfaces entry — the structural sibling of the IsClass case below.
+	// Keyed by RefName, which never implies IsClass. Only swap in a richer live
+	// entry; if the registry entry is itself the empty placeholder (a genuinely
+	// field-less interface) the snapshot is already correct.
+	if !ty.IsClass && ty.RefName != "" && len(ty.Fields) == 0 {
+		if live, ok := e.interfaces[ty.RefName]; ok && live.IsObject && len(live.Fields) > 0 {
+			canon := live
+			canon.Nullable = ty.Nullable
+			canon.IsUndefined = ty.IsUndefined
+			canon.IsNull = ty.IsNull
+			return canon
+		}
+	}
 	if ty.IsClass {
 		if info, ok := e.classes[ty.ClassName]; ok {
 			// Nullable is a property of the field's own annotation (`Node |
@@ -1081,7 +1107,20 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 					fty = undefinedableElem(fty)
 				}
 			} else {
+				// A field initializer may reference `this` (`f = Object.freeze(this)`,
+				// `f = this`), whose type is the class instance itself — a
+				// self-reference. Field types are collected before any constructor
+				// scope exists, so `lookup("this")` would otherwise miss and default
+				// the field to the numeric `i64`, then store the instance pointer
+				// into that i64 slot (invalid IR). Bind `this` to the class's own
+				// name-placeholder type for the duration of inference; the field
+				// keeps a nominal (`ClassName`) class type whose fields
+				// canonicalizeClassTy re-resolves on demand at each drilling access
+				// (ADR-00946/00949, the class self-reference machinery).
+				e.pushScope()
+				e.define("this", Symbol{Ty: ClassType(cd.Name, nil, nil, false, false, false)})
 				fty = e.inferExprType(f.Initializer)
+				e.popScope()
 				// Evolving-any for a `null`/`undefined`-initialized unannotated
 				// field, the class-field counterpart of the local-binding
 				// widening (ADR-00923): if a method or the constructor later

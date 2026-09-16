@@ -650,3 +650,22 @@ r = [99];
 console.log(rv);
 `, "[ 1, 2, 3, 4 ]\n1,2,3,4\ntrue\n[ 1, 2, 3, 4, 5 ]\n[ 'x', 'y', 'z' ]\n[ 1, 2, 99 ]\n[ 10, 20 ]")
 }
+
+// null/undefined boxed into an `any` slot must be the NaN-box sentinels
+// (nbNull/nbUndefined), not a raw i64 0 — so `=== null`/`=== undefined` and
+// `typeof` are faithful across every boxing site (ADR-00958). The bug was in
+// coerce's null-to-zero shortcut running before the dynamic-box path.
+func TestE2EAnyNullUndefinedEquality(t *testing.T) {
+	assertOutput(t, `
+const b: any[] = [undefined, 5, "x", null]
+console.log(b[0] === undefined, b[0] === null, typeof b[0])
+console.log(b[3] === null, b[3] === undefined, typeof b[3])
+function g(): any { return undefined }
+function h(): any { return null }
+console.log(g() === undefined, h() === null)
+const m = new Map<string, any>()
+m.set("u", undefined)
+console.log(m.get("u") === undefined)
+console.log(JSON.stringify(b))
+`, "true false undefined\ntrue false object\ntrue true\ntrue\n[null,5,\"x\",null]")
+}

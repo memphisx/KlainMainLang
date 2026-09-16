@@ -1907,6 +1907,9 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.COLON) ||
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.RPAREN && p.peekNth(3).Type == lexer.ARROW) ||
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.COMMA) ||
+			// Optional first parameter `(x?: T) => …`, `(x?) => …`, `(x?, y) => …`.
+			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.QUESTION &&
+				(p.peekNth(3).Type == lexer.COLON || p.peekNth(3).Type == lexer.RPAREN || p.peekNth(3).Type == lexer.COMMA)) ||
 			// A parameter list starting with `...` is a rest parameter — a
 			// parenthesized expression can never begin with `...`, so this is
 			// unambiguously an arrow (`(...xs) => …`, `(a, ...xs) => …`).

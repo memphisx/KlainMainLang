@@ -360,6 +360,22 @@ console.log(greet('Alice'))
 `, "anon\nAlice")
 }
 
+func TestE2EOptionalParamAnyIsUndefined(t *testing.T) {
+	// An omitted `param?: any` argument must read as the boxed `undefined`
+	// sentinel — not a raw i64 zero. A zero word is the boxed integer 0 (read
+	// back as a double it is 5e-324), which made `x === undefined`/`=== null`
+	// wrongly false in a direct call (ADR-00956; surfaced by the Test262 async
+	// $DONE reporter, an optional-any reporter that mis-fired on success).
+	assertOutput(t, `
+function report(x?: any): void {
+  if (x !== undefined && x !== null) console.log("value", String(x))
+  else console.log("empty")
+}
+report()
+report("boom")
+`, "empty\nvalue boom")
+}
+
 func TestE2EOptionalParamMultiple(t *testing.T) {
 	assertOutput(t, `
 function box(a: number, b?: number, c?: number): number { return a + (b ?? 0) + (c ?? 0) }
@@ -399,6 +415,63 @@ class Util {
 console.log(Util.greet())
 console.log(Util.greet('Bob'))
 `, "Hi, undefined\nHi, Bob")
+}
+
+func TestE2EOptionalParamInFunctionType(t *testing.T) {
+	// A function-*type* annotation may carry an optional-parameter marker on a
+	// (documentation-only) parameter name: `(x?: T) => R`.
+	assertOutput(t, `
+type Cb = (x?: number, y?: string) => void;
+const f: Cb = (x?: number, y?: string) => { console.log(x ?? -1, y ?? "none"); };
+f(5, "hi");
+f();
+`, "5 hi\n-1 none")
+}
+
+func TestE2EOptionalParamInArrowExpression(t *testing.T) {
+	// An arrow-function *expression* whose first parameter is optional
+	// (`(x?: T): R => …`) must still be recognized as an arrow, not read as a
+	// parenthesized ternary.
+	assertOutput(t, `
+const k = (x?: number): number => x ?? -1;
+console.log(k());
+console.log(k(7));
+`, "-1\n7")
+}
+
+func TestE2EArrowMoreOptionalThanFuncType(t *testing.T) {
+	// An arrow may declare a parameter optional that its declared function type
+	// left required (`const f: (x: T) => R = (x?: T) => …`). The closure adopts
+	// the slot's plain ABI contextually, so a call through the binding marshals
+	// the right shape instead of segfaulting (ADR-00963).
+	assertOutput(t, `
+type Cb = (x: number, y: string) => void;
+const f: Cb = (x?: number, y?: string) => { console.log(x ?? -1, y ?? "none"); };
+f(5, "hi");
+`, "5 hi")
+}
+
+func TestE2EClosureMissingRequiredArgRejected(t *testing.T) {
+	// Calling a first-class function value with fewer arguments than its required
+	// parameters is an arity error — the same rejection a named function's call
+	// site makes, not a silent zero-fill (ADR-00963). The closure's own optional
+	// marker is overridden by the required slot it is bound into, so `f()` is a
+	// missing-required-argument error even though the arrow wrote `x?`.
+	assertCodegenError(t, `
+type Cb = (x: number) => void;
+const f: Cb = (x?: number) => { console.log(x ?? -1); };
+f();
+`, "missing argument 1")
+}
+
+func TestE2EArrowMoreOptionalThanParamType(t *testing.T) {
+	// The same skew through a function *argument* slot: the callback is emitted
+	// against the parameter's required type, so `fn(4)` inside `run` passes a
+	// present value the body reads correctly (104, not 100).
+	assertOutput(t, `
+function run(fn: (a: number) => number): number { return fn(4); }
+console.log(run((a?: number) => (a ?? 0) + 100));
+`, "104")
 }
 
 // --- void return type ---

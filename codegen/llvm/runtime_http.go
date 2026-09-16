@@ -562,6 +562,13 @@ func (e *Emitter) ensureFiberRuntime() {
 	e.emitGlobal("@__kml_conn_cap = internal thread_local global i64 0, align 8")
 	e.emitGlobal("@__kml_current_conn_idx = internal thread_local global i64 -1, align 8")
 	e.emitGlobal("@__kml_conn_active = internal thread_local global i64 0, align 8")
+	// TDD-00195 Stage 2 (Layer A backpressure): an fd_set-shaped bitset of the
+	// connection fds whose fiber is currently parked in __kml_res_write_all
+	// waiting for the socket to become writable (EAGAIN). The event loop ORs
+	// these into select()'s write fd_set and resumes the fiber on writability, so
+	// a slow-consuming client parks that one fiber instead of blocking the whole
+	// reactor in a synchronous write(). 1024 fds, matching the read fd_set.
+	e.emitGlobal("@__kml_conn_writepark = internal thread_local global [128 x i8] zeroinitializer, align 8")
 	// TDD-00197: the primary server's `'close'` event + deferred `close(cb)`.
 	// __kml_http_close() clears the listener immediately but lets in-flight
 	// connections drain; the real 'close' moment is when both the listener is
@@ -792,6 +799,7 @@ func (e *Emitter) ensureHTTPRuntime() {
 		return
 	}
 	e.usedHTTP = true
+	e.ensureSigpipeIgnored() // __kml_http_bind_and_listen calls it at entry (TDD-00214)
 
 	// The Node event loop / reactor is thread-affine: its ucontext connection
 	// fibers cannot legally swapcontext across OS threads, and its per-loop
@@ -918,6 +926,10 @@ define void @__kml_reactor_thread_lock() {
 	e.emitGlobal(fmt.Sprintf(`
 define i32 @__kml_http_bind_and_listen(i32 %%port, i32 %%hostaddr, i32 %%backlog) {
 entry:
+  ; TDD-00214: ignore SIGPIPE process-wide so a client disconnecting mid-write
+  ; surfaces as a write() EPIPE (handled by unwinding the connection) instead of
+  ; killing the whole server. One-shot; idempotent across multiple listeners.
+  call void @__kml_ignore_sigpipe()
 %s  %%fd = call i32 @socket(i32 2, i32 1, i32 0)
   %%fdok = icmp sge i32 %%fd, 0
   br i1 %%fdok, label %%setopt, label %%failnofd
@@ -2046,6 +2058,23 @@ fsetbit:
   %ffoldbyte = load i8, ptr %ffbyteptr, align 1
   %ffnewbyte = or i8 %ffoldbyte, %ffmask
   store i8 %ffnewbyte, ptr %ffbyteptr, align 1
+  ; TDD-00195 Stage 2 backpressure: if this connection's fiber is parked in
+  ; __kml_res_write_all awaiting writability, also add its fd to the write
+  ; fd_set so select() wakes when the socket can accept more bytes.
+  %ffwpbyteptr = getelementptr i8, ptr @__kml_conn_writepark, i64 %ffdiv8
+  %ffwpbyte = load i8, ptr %ffwpbyteptr, align 1
+  %ffwpbit = and i8 %ffwpbyte, %ffmask
+  %ffwpset = icmp ne i8 %ffwpbit, 0
+  br i1 %ffwpset, label %fsetwbit, label %fsetmax
+
+fsetwbit:
+  %ffwbyteptr = getelementptr i8, ptr %wfdset, i64 %ffdiv8
+  %ffwold = load i8, ptr %ffwbyteptr, align 1
+  %ffwnew = or i8 %ffwold, %ffmask
+  store i8 %ffwnew, ptr %ffwbyteptr, align 1
+  br label %fsetmax
+
+fsetmax:
   %ffdv32 = trunc i64 %ffdv to i32
   %fcurmax = load i32, ptr %maxfd, align 4
   %fisbigger = icmp sgt i32 %ffdv32, %fcurmax
@@ -2585,7 +2614,15 @@ rcheckready:
   %rmask = shl i8 1, %rmod8_8
   %rbyteval = load i8, ptr %rbyteptr, align 1
   %rmasked = and i8 %rbyteval, %rmask
-  %rfdready = icmp ne i8 %rmasked, 0
+  %rfdreadable = icmp ne i8 %rmasked, 0
+  ; TDD-00195 Stage 2 backpressure: a fiber parked in __kml_res_write_all is
+  ; resumed when its fd comes back WRITABLE in select()'s write fd_set (only
+  ; write-parked fds were added to it, so a non-parked fd's bit is never set).
+  %rwbyteptr = getelementptr i8, ptr %wfdset, i64 %rdiv8
+  %rwbyteval = load i8, ptr %rwbyteptr, align 1
+  %rwmasked = and i8 %rwbyteval, %rmask
+  %rfdwritable = icmp ne i8 %rwmasked, 0
+  %rfdready = or i1 %rfdreadable, %rfdwritable
   ; A completed task pokes every parked fiber once (@__kml_conn_poke, set by
   ; __kml_task_finish/__kml_task_reject): a fiber awaiting an async
   ; handler's promise is parked as resume-on-fd-readable, but when the
@@ -2928,6 +2965,27 @@ entry:
   br i1 %istls, label %tls, label %raw
 tls:
   %wt = call i64 @__kml_tls_write_all(ptr %ssl, ptr %buf, i64 %n)
+  ret i64 %wt
+raw:
+  %wr = call i64 @write(i32 %fd, ptr %buf, i64 %n)
+  ret i64 %wr
+}`)
+
+	// Non-blocking send: the incremental `res` writer's chunk-write helpers
+	// (__kml_res_write_all / _flush / _drain_try) route here so a slow TLS
+	// consumer parks the connection fiber on socket writability (EAGAIN) instead
+	// of blocking the reactor inside __kml_tls_write_all's poll() — TDD-00195
+	// Stage 2 backpressure over HTTPS. A plain fd falls through to a raw
+	// non-blocking write(); the TLS branch goes through __kml_tls_write_nb which
+	// reports SSL WANT as EAGAIN.
+	e.emitGlobal(`
+define i64 @__kml_http_conn_send_nb(i32 %fd, ptr %buf, i64 %n) {
+entry:
+  %ssl = call ptr @__kml_http_conn_ssl_get(i32 %fd)
+  %istls = icmp ne ptr %ssl, null
+  br i1 %istls, label %tls, label %raw
+tls:
+  %wt = call i64 @__kml_tls_write_nb(ptr %ssl, ptr %buf, i64 %n)
   ret i64 %wt
 raw:
   %wr = call i64 @write(i32 %fd, ptr %buf, i64 %n)

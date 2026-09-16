@@ -382,6 +382,17 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// instead, once, so every caller of emitExpr on a bare array
 		// identifier gets the same correctly-shaped Value a HOF result or
 		// a return statement already would. See docs/adr/ADR-00061.md.
+		// A nullable array binding (a `Map<K,T[]>` get that may miss, `T[] |
+		// undefined`) can hold a null header for an absent value. Rebuild it
+		// through the null-guarded loader so a miss reads as {null,0} instead of
+		// dereferencing null, and carry the header so its truthiness/`===
+		// undefined` test the header (a miss is falsy/undefined, a present array —
+		// even empty — truthy/defined).
+		if sym.Ty.Nullable {
+			header := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", header, sym.Ptr))
+			return e.arrayValueFromHeaderSlotGuarded(header, sym.Ty), nil
+		}
 		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 		ptrReg := e.freshReg()
 		lenReg := e.freshReg()

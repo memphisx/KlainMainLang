@@ -55,7 +55,7 @@
       "statusRow": "URLSearchParams",
       "signature": "new URLSearchParams(init?: string): URLSearchParams",
       "badge": "caveats",
-      "description": "Reads and builds query strings. new URLSearchParams() starts empty; new URLSearchParams(init) parses a query string and tolerates a leading '?', so passing a URL's own .search straight through just works. Backed by a plain Map<string,string>, so get/set/has/delete/size/keys()/values()/entries()/forEach() all come for free from the Map machinery, plus toString() (percent-encodes back into a query string) and getAll().",
+      "description": "Reads and builds query strings. new URLSearchParams() starts empty; new URLSearchParams(init) parses a query string and tolerates a leading '?', so passing a URL's own .search straight through just works. Backed by an ordered name/value pair list (the WHATWG multi-value model), so duplicate keys and cross-key insertion order round-trip; get/set/has/delete/size/keys()/values()/entries()/forEach()/getAll()/sort() are all supported, plus toString() (application/x-www-form-urlencoded — a space is '+').",
       "params": [
         {
           "name": "init",
@@ -68,10 +68,10 @@
         "desc": "The parameter collection."
       },
       "exampleKey": "url/url",
-      "snippet": "const params = new URLSearchParams()\nparams.set(\"q\", \"hello world\")\nparams.set(\"page\", \"2\")\nconsole.log(params.toString())  // q=hello%20world&page=2",
+      "snippet": "const params = new URLSearchParams()\nparams.set(\"q\", \"hello world\")\nparams.set(\"page\", \"2\")\nconsole.log(params.toString())  // q=hello+world&page=2",
       "differences": [
-        "Backed by an ordered pair list (the WHATWG multi-value model): duplicate keys and cross-key order round-trip, `getAll` returns every value, and `append`/`sort`/`has(name,value)`/`delete(name,value)` are supported",
-        "`url.searchParams` is a snapshot, not live — mutating it does not write back into `url.search`; assign `url.search = params.toString()` to apply changes"
+        "`url.searchParams` is live: mutating it (`append`/`set`/`delete`/`sort`) re-serializes the query back into `url.search`/`url.href`, matching the spec",
+        "Spreading a `URLSearchParams` directly (`[...params]`) yields an empty array (the same limitation as `[...map]`) — use `[...params.entries()]`"
       ],
       "seeAlso": [
         "url.URL"

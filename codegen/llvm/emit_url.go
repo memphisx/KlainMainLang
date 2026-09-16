@@ -944,6 +944,16 @@ func (e *Emitter) emitStrNonEmpty(ptr string) string {
 // (ADR-00572), which re-derive every field after mutating one part so the
 // object never desyncs.
 func (e *Emitter) deriveURLFieldsIntoObject(handle, objReg string) error {
+	return e.deriveURLFieldsIntoObjectOpt(handle, objReg, true)
+}
+
+// deriveURLFieldsIntoObjectOpt is deriveURLFieldsIntoObject with control over the
+// searchParams field: rebuildSearchParams=true (construction, component setters)
+// re-parses the query into a fresh searchParams handle and links it back to this
+// URL (TDD-00203 live link); false (the searchParams-mutation writeback) leaves
+// the existing live handle in place so its identity survives — only the string
+// fields (search/href/…) are refreshed from the mutated query.
+func (e *Emitter) deriveURLFieldsIntoObjectOpt(handle, objReg string, rebuildSearchParams bool) error {
 	// WHATWG host normalization curl doesn't do: lowercase the host and write it
 	// back into the handle, so every derived field (host/hostname/href/origin)
 	// reads the normalized form (TDD-00203). curl already lowercases the scheme.
@@ -1037,11 +1047,18 @@ func (e *Emitter) deriveURLFieldsIntoObject(handle, objReg string) error {
 	queryRaw, queryPresent := e.curlURLGetPart(handle, curluPartQuery)
 	search, err := e.emitStrBranch(queryPresent,
 		func() (string, error) {
-			v, err := e.emitStringConcat(Value{Ref: e.internString("?"), Ty: TypePtr}, Value{Ref: queryRaw, Ty: TypePtr})
-			if err != nil {
-				return "", err
-			}
-			return v.Ref, nil
+			// A present-but-empty query — a bare "?", or the result of deleting the
+			// last searchParams pair — is no query at all under WHATWG: `search` is
+			// "" (and href already drops it). Only a non-empty query gets the "?".
+			return e.emitStrBranch(e.emitStrNonEmpty(queryRaw),
+				func() (string, error) {
+					v, err := e.emitStringConcat(Value{Ref: e.internString("?"), Ty: TypePtr}, Value{Ref: queryRaw, Ty: TypePtr})
+					if err != nil {
+						return "", err
+					}
+					return v.Ref, nil
+				},
+				func() (string, error) { return e.internString(""), nil })
 		},
 		func() (string, error) { return e.internString(""), nil },
 	)
@@ -1111,8 +1128,12 @@ func (e *Emitter) deriveURLFieldsIntoObject(handle, objReg string) error {
 
 	// searchParams: the ordered pair-list (TDD-00203), parsed from the raw query
 	// text preserving cross-key order and duplicate keys (percent-decoding both
-	// name and value). Replaces the former Map<string,string> fill.
-	mapPtr := e.buildURLSearchParamsFromQuery(queryRaw, queryPresent)
+	// name and value). Replaces the former Map<string,string> fill. Skipped on the
+	// mutation-writeback path so the caller's live handle keeps its identity.
+	var mapPtr string
+	if rebuildSearchParams {
+		mapPtr = e.buildURLSearchParamsFromQuery(queryRaw, queryPresent)
+	}
 
 	e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
 
@@ -1135,9 +1156,69 @@ func (e *Emitter) deriveURLFieldsIntoObject(handle, objReg string) error {
 	storeField("origin", origin.Ref)
 	storeField("username", username)
 	storeField("password", password)
-	storeField("searchParams", mapPtr)
+	if rebuildSearchParams {
+		storeField("searchParams", mapPtr)
+		// Link the fresh handle back to this URL so a later mutation on
+		// `url.searchParams` writes the serialized query back into these fields.
+		e.emitInstr(fmt.Sprintf("call void @__kml_usp_set_owner(ptr %s, ptr %s)", mapPtr, objReg))
+	}
 
 	return nil
+}
+
+// ensureURLUSPWriteback emits (once) @__kml_url_usp_writeback(ptr %usp): the
+// searchParams→URL live-link writeback (TDD-00203). A standalone URLSearchParams
+// has a null owner and the call is a cheap no-op; a URL-owned handle re-serializes
+// its pairs, seeds a curl handle from the owner URL's current href, applies the
+// new query, and re-derives the URL's string fields (search/href/query/path/…)
+// WITHOUT rebuilding the searchParams handle — so the live handle the caller just
+// mutated keeps its identity. Called after every mutating URLSearchParams op.
+func (e *Emitter) ensureURLUSPWriteback() {
+	if e.urlUSPWritebackEmit {
+		return
+	}
+	e.urlUSPWritebackEmit = true
+	e.ensureCurlURL()
+	e.ensureURLSearchParams()
+	e.emitStandaloneFunc("void @__kml_url_usp_writeback(ptr %usp)", func() string {
+		owner := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_usp_owner(ptr %%usp)", owner))
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, owner))
+		doL := e.freshLabel("uspwb.do")
+		retL := e.freshLabel("uspwb.ret")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, retL, doL))
+
+		e.emitLabel(doL)
+		// Serialize the mutated pairs and seed a fresh curl handle from the owner
+		// URL's current href (valid by construction), then swap in the new query.
+		q := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_usp_to_string(ptr %%usp)", q))
+		handle := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @curl_url()", handle))
+		urlTy := URLType()
+		hrefIdx, hrefTy, _ := urlTy.FieldIndex("href")
+		hrefGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", hrefGep, urlTy.StructIR(), owner, hrefIdx))
+		curHref := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curHref, hrefTy.IR, hrefGep, hrefTy.Align()))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartURL, curHref))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartQuery, q))
+		// Re-derive string fields only; keep the live searchParams handle (cleans up
+		// the curl handle itself). Error is impossible here (pure IR emission).
+		_ = e.deriveURLFieldsIntoObjectOpt(handle, owner, false)
+		e.emitTerminator(fmt.Sprintf("br label %%%s", retL))
+
+		e.emitLabel(retL)
+		return "ret void"
+	})
+}
+
+// emitURLUSPWriteback calls the writeback helper for a just-mutated searchParams
+// handle. A no-op at runtime for a standalone (non-URL-owned) handle.
+func (e *Emitter) emitURLUSPWriteback(handle string) {
+	e.ensureURLUSPWriteback()
+	e.emitInstr(fmt.Sprintf("call void @__kml_url_usp_writeback(ptr %s)", handle))
 }
 
 // emitStripLeadingQuestionMark returns s unchanged, or a 1-byte-advanced

@@ -986,3 +986,31 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00940](ADR-00940.md) | Object/class array fields become header pointers — field aliasing goes live (TDD-00213 Stage 2) | Implements [TDD-00213](../tdd/TDD-00213.md) Stage 2; Relates to [ADR-00939](ADR-00939.md), [ADR-00061](ADR-00061.md), [TDD-00127](../tdd/TDD-00127.md), [TDD-00212](../tdd/TDD-00212.md) |
 | [00941](ADR-00941.md) | Array returns & closure captures share the header — reference semantics across every boundary (TDD-00213 Stage 3) | Implements [TDD-00213](../tdd/TDD-00213.md) Stage 3; Relates to [ADR-00939](ADR-00939.md), [ADR-00940](ADR-00940.md), [TDD-00127](../tdd/TDD-00127.md), [TDD-00212](../tdd/TDD-00212.md) |
 | [00942](ADR-00942.md) | Shared array buffers are never auto-freed — the reference-semantics free policy (TDD-00213 Stage 4) | Implements [TDD-00213](../tdd/TDD-00213.md) Stage 4 (completes [TDD-00213](../tdd/TDD-00213.md)); Relates to [ADR-00939](ADR-00939.md), [ADR-00940](ADR-00940.md), [ADR-00941](ADR-00941.md), [TDD-00173](../tdd/TDD-00173.md), [TDD-00175](../tdd/TDD-00175.md), [TDD-00127](../tdd/TDD-00127.md) |
+| [00943](ADR-00943.md) | Array-valued Map/WeakMap values via the shared header pointer | `Extends [ADR-00939](ADR-00939.md), [ADR-00940](ADR-00940.md)` (array reference semantics, [TDD-00213](../tdd/TDD-00213.md)) |
+| [00944](ADR-00944.md) | Array-valued Promise combinator results (Promise.all/.allSettled over Promise<T[]>) | `Extends [ADR-00940](ADR-00940.md)` (array reference semantics, [TDD-00213](../tdd/TDD-00213.md)); `Extends [ADR-00073](ADR-00073.md)` (Promise combinators) |
+| [00945](ADR-00945.md) | Array values through `.then`/`.catch` reaction callbacks | `Extends [ADR-00941](ADR-00941.md)` (array return ABI, [TDD-00213](../tdd/TDD-00213.md) Stage 3); `Extends [ADR-00073](ADR-00073.md)` (`.then`/`.catch`/`.finally`) |
+| [00946](ADR-00946.md) | Self-referential class ARRAY field element resolution | `Extends [ADR-00064](ADR-00064.md)` (canonicalizeClassTy / self-referential class fields) |
+| [00947](ADR-00947.md) | Nested named-object array types (`P[][]`) resolve their element type | none |
+| [00948](ADR-00948.md) | Reference-type Map keys and Set elements via the any-keyed runtime | `Extends [ADR-00939](ADR-00939.md), [ADR-00943](ADR-00943.md)` (array reference semantics, [TDD-00213](../tdd/TDD-00213.md); the value-side analogue for Map values) |
+| [00949](ADR-00949.md) | Self-referential interfaces and object-shape type aliases | `Extends [ADR-00946](ADR-00946.md)` (the class-side self-ref fix, [TDD-00213](../tdd/TDD-00213.md) bundle) |
+| [00950](ADR-00950.md) | Truthiness of a possibly-undefined pointer value (`if (map.get(k))`) | `Fixes` a pre-existing bug flagged in [ADR-00943](ADR-00943.md) Side effects |
+| [00951](ADR-00951.md) | Clean rejection of a mixed object / nested-array literal (`[obj, [x]]`) | `Extends [TDD-00205](../tdd/TDD-00205.md)` (Stage 2 heterogeneous-array boundary) |
+| [00952](ADR-00952.md) | A void-returning method bound to an untyped variable is `undefined` | `Extends [ADR-00882](ADR-00882.md)` (DataView A1 sweep; its noted remaining case) |
+| [00953](ADR-00953.md) | Clean rejection of type-changing `Object.assign` and non-string `Object.fromEntries` keys | |
+| [00954](ADR-00954.md) | `yield` expression is TNext (`any`), not the yield element type | |
+| [00955](ADR-00955.md) | Self-referential class field (`f = Object.freeze(this)`) + frozen-write TypeError | `Extends [ADR-00946](ADR-00946.md), [ADR-00949](ADR-00949.md)` (the class/interface self-reference machinery) |
+| [00956](ADR-00956.md) | Omitted optional `any` argument is boxed `undefined`, not raw zero | |
+| [00957](ADR-00957.md) | Array.from array-like `{ length: n }` overload (+ map/flatMap index-inference fix) | |
+| [00958](ADR-00958.md) | `null`/`undefined` boxed into an `any` slot are the NaN-box sentinels, not raw 0 | |
+| [00959](ADR-00959.md) | Incremental `res` Writable — mid-handler chunked streaming, `req.pipe(res)` | `Implements [TDD-00195](../tdd/TDD-00195.md)` (Stage 2 remainder). Extends `[ADR-00825](ADR-00825.md)` (res.end-driven flush model), `[ADR-00824](ADR-00824.md)` (req as a Node Readable). |
+| [00960](ADR-00960.md) | `res.write`/`res.end` frame a binary chunk as raw bytes | `Implements [TDD-00195](../tdd/TDD-00195.md)` (Stage 2 remainder). Closes the binary-chunk side effect noted in `[ADR-00959](ADR-00959.md)`. |
+| [00961](ADR-00961.md) | Streamed `res` write backpressure — fiber park-on-writable | `Implements [TDD-00195](../tdd/TDD-00195.md)` (Stage 2 backpressure). Extends `[ADR-00959](ADR-00959.md)` (incremental `res` Writable), `[ADR-00960](ADR-00960.md)` (binary chunk framing). |
+| [00962](ADR-00962.md) | Observable `res` backpressure — `write()===false` + async `'drain'` | `Implements [TDD-00214](../tdd/TDD-00214.md)`. Extends `[ADR-00961](ADR-00961.md)` (Layer A socket backpressure), `[ADR-00959](ADR-00959.md)` (incremental `res` Writable). |
+| [00963](ADR-00963.md) | Optional parameters in arrow / function-type annotations | |
+| [00964](ADR-00964.md) | HTTPS/1.1 streamed backpressure + unified `res.write`/`req.pipe(res)` output | `Implements [TDD-00195](../tdd/TDD-00195.md)`, `[TDD-00214](../tdd/TDD-00214.md)`. Extends `[ADR-00961](ADR-00961.md)` (Layer A socket backpressure), `[ADR-00962](ADR-00962.md)` (observable `res` backpressure), `[ADR-00959](ADR-00959.md)` (incremental `res` Writable). |
+| [00965](ADR-00965.md) | Nullable string/object boxed into `any` compares `=== null` | Extends [ADR-00958](ADR-00958.md) |
+| [00966](ADR-00966.md) | `url.searchParams` is a live link, not a snapshot | Implements [TDD-00203](../tdd/TDD-00203.md), Extends [ADR-00572](ADR-00572.md) |
+| [00967](ADR-00967.md) | EventTarget/AbortSignal accept a zero-argument listener | Implements [TDD-00081](../tdd/TDD-00081.md) |
+| [00968](ADR-00968.md) | Conformance harness reaps escaped child processes | |
+| [00969](ADR-00969.md) | Stable header identity for named-function values | |
+| [00970](ADR-00970.md) | Reject Node interpreter flags in compiled binaries | Extends [ADR-00968](ADR-00968.md) |

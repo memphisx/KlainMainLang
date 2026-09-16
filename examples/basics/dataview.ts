@@ -36,3 +36,9 @@ try {
 } catch (e) {
   console.log("out of bounds throws");
 }
+
+// A setter returns undefined (JS semantics); binding that result to an untyped
+// variable makes it `undefined`, rather than being a compile-time void error.
+const setResult = view.setInt8(0, 42);
+console.log(setResult);        // undefined
+console.log(view.getInt8(0));  // 42

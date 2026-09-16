@@ -299,7 +299,7 @@ func (e *Emitter) emitDeepCloneMap(val Value, ty Type, pos ast.Pos) (Value, erro
 	}
 	suffix, keyIR := mapRuntime(keyTy)
 	newMap := e.emitMapOrSetCreate(keyTy)
-	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(val.Ref, suffix)
+	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(val.Ref, suffix, keyTy)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -356,7 +356,7 @@ func (e *Emitter) emitDeepCloneSet(val Value, ty Type, pos ast.Pos) (Value, erro
 	}
 	setSuffix, _ := mapRuntime(elemTy)
 	newSet := e.emitMapOrSetCreate(elemTy)
-	keysPtr, keysLen, _ := e.mapKeysAndVals(val.Ref, setSuffix)
+	keysPtr, keysLen, _ := e.mapKeysAndVals(val.Ref, setSuffix, elemTy)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))

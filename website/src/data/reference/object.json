@@ -368,7 +368,7 @@
       "statusRow": "Map.set/get/has/delete/keys/values",
       "signature": "new Map<K, V>(); m.set(k, v); m.get(k); m.has(k); m.delete(k); m.keys()",
       "badge": "exact",
-      "description": ".get() returns V | undefined — a missing key reads as a real undefined (as in Node), distinguishable from a stored 0/false/\"\" via the presence-flagged representation; narrow, ?? d, or ! before use. A bare new Map() with heterogeneous keys widens to an any-keyed runtime with JS SameValueZero equality (string/number/NaN/boolean/object/null keys coexist, NaN matches NaN, objects key by reference).",
+      "description": ".get() returns V | undefined — a missing key reads as a real undefined (as in Node), distinguishable from a stored 0/false/\"\" via the presence-flagged representation; narrow, ?? d, or ! before use. A bare new Map() with heterogeneous keys widens to an any-keyed runtime with JS SameValueZero equality (string/number/NaN/boolean/object/null keys coexist, NaN matches NaN, objects key by reference). An explicitly-typed object- or array-keyed Map (Map<{…},V>, Map<T[],V>) also keys by reference identity: the same reference round-trips, a distinct reference of equal content is a different key, and keys()/entries()/forEach surface the live references.",
       "exampleKey": "map/map",
       "snippet": "const scores = new Map<string, number>();\nscores.set(\"alice\", 95);\nconsole.log(scores.get(\"alice\"));          // 95\nconsole.log(scores.get(\"dave\") === undefined); // true",
       "seeAlso": [

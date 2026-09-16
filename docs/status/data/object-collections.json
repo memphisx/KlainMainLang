@@ -195,7 +195,8 @@
             ],
             "notes": [
               "`.get()` (`Map` and `WeakMap`) returns `V \\| undefined` — a missing key reads as a real `undefined` (as in Node), distinguishable from a stored `0`/`false`/`\"\"` via the presence-flagged nullable-scalar representation (scalar `V`) or the null-pointer miss typed `undefined` (pointer `V`); narrow / `?? d` / `!` before use ([TDD-00064](../tdd/TDD-00064.md)/[ADR-00833](../adr/ADR-00833.md)). (`URLSearchParams.get` is spec'd `string \\| null` and keeps `null`.)",
-              "Keys of one kind pick a specialized runtime (string keys content-hashed, numeric keys raw-i64); a bare `new Map()` whose keys are **heterogeneous** widens to an any-keyed runtime with NaN-boxed keys/values and JS **SameValueZero** equality — string/number/NaN/boolean/object/array/`null`/`undefined` keys coexist, `NaN` matches `NaN`, and objects key by reference. Its values are `any` (boxed) ([TDD-00211](../tdd/TDD-00211.md)/[ADR-00932](../adr/ADR-00932.md))"
+              "Keys of one kind pick a specialized runtime (string keys content-hashed, numeric keys raw-i64); a bare `new Map()` whose keys are **heterogeneous** widens to an any-keyed runtime with NaN-boxed keys/values and JS **SameValueZero** equality — string/number/NaN/boolean/object/array/`null`/`undefined` keys coexist, `NaN` matches `NaN`, and objects key by reference. Its values are `any` (boxed) ([TDD-00211](../tdd/TDD-00211.md)/[ADR-00932](../adr/ADR-00932.md))",
+              "An explicitly-typed **object/array-keyed** map (`Map<{…},V>`, `Map<T[],V>`) also rides the any-keyed runtime: keys box for reference identity (same reference round-trips through get/has/delete, a distinct reference of equal content is a different key), and `keys()`/`entries()`/`forEach` surface the live references ([ADR-00948](../adr/ADR-00948.md))"
             ]
           },
           {
@@ -242,7 +243,10 @@
           },
           {
             "feature": "`Set.add/has/delete/values`",
-            "status": "implemented"
+            "status": "implemented",
+            "notes": [
+              "An **object/array-typed** Set (`Set<{…}>`, `Set<T[]>`) rides the any-keyed runtime with reference identity — the same reference is one element, a distinct reference of equal content is another; iteration (`values`/`for…of`/`forEach`) surfaces the live references ([ADR-00948](../adr/ADR-00948.md))"
+            ]
           },
           {
             "feature": "`Set.size`",

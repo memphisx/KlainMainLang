@@ -310,6 +310,74 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		return e.emitStringToCharArray(v), nil
 	}
 
+	// Array-like protocol (ADR-00957): `Array.from({ length: n })` reads the
+	// object's `length`, coerces it to a non-negative integer, and produces an
+	// array of that many `undefined` elements — the ubiquitous
+	// `Array.from({ length: n }, (_, i) => …)` idiom (via the 2-arg desugar
+	// above, whose map callback sees each `undefined` element and its index).
+	// Indexed array-like properties (`{ length: 2, 0: 'a' }`) are NOT read —
+	// this is the undefined-fill subset (documented limitation); the element
+	// universe is the NaN-boxed `any` slot, so an omitted element is the boxed
+	// `undefined` sentinel, matching a real hole read.
+	if srcTy.IsObject && !srcTy.IsArray && !srcTy.IsClass && !srcTy.IsTuple {
+		idx, lenFieldTy, ok := srcTy.FieldIndex("length")
+		if !ok {
+			return Value{}, fmt.Errorf("%d:%d: Array.from argument is not iterable (an array-like object needs a numeric 'length' property)", pos.Line, pos.Col)
+		}
+		if lenFieldTy.IsArray || lenFieldTy.IR == "ptr" || lenFieldTy.IsDynamic {
+			return Value{}, fmt.Errorf("%d:%d: Array.from array-like 'length' must be a number", pos.Line, pos.Col)
+		}
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		lenGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", lenGep, srcTy.StructIR(), v.Ref, idx))
+		lenRaw := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", lenRaw, lenFieldTy.IR, lenGep, lenFieldTy.Align()))
+		// Coerce the length to i64 (a float length truncates toward zero, per
+		// ToIntegerOrInfinity), then clamp a negative length to 0.
+		lenI64 := e.coerce(Value{Ref: lenRaw, Ty: lenFieldTy}, TypeI64).Ref
+		lenPos := e.freshReg()
+		isNeg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, lenI64))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", lenPos, isNeg, lenI64))
+
+		e.ensureMalloc()
+		bytes := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, lenPos, TypeAny.Align()))
+		data := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", data, bytes))
+
+		iSlot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", iSlot))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", iSlot))
+		condL := e.freshLabel("arrlike.cond")
+		bodyL := e.freshLabel("arrlike.body")
+		endL := e.freshLabel("arrlike.end")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(condL)
+		iCur := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", iCur, iSlot))
+		more := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, iCur, lenPos))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, endL))
+		e.emitLabel(bodyL)
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", slot, data, iCur))
+		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, slot))
+		iNext := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", iNext, iCur))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", iNext, iSlot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(endL)
+		r0 := e.freshReg()
+		r1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, data))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenPos))
+		return Value{Ref: r1, Ty: ArrayOf(TypeAny)}, nil
+	}
+
 	if srcTy.IsClass {
 		info, ok := e.classes[srcTy.ClassName]
 		if !ok {

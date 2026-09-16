@@ -177,6 +177,20 @@ func (e *Emitter) storeArrayElement(outPtr, idxVal, valRef string, elemTy Type) 
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, valRef, gep, elemTy.Align()))
 }
 
+// storeArrayElementValue stores a combinator's resolved element into the result
+// buffer. An array element (`Promise.all<Promise<T[]>[]>` → T[][]) is a header
+// pointer per the reference model (TDD-00213), so box the {ptr,i64} array
+// aggregate into a shared header and store that 8-byte pointer — storing the
+// 16-byte aggregate into the "ptr"-shaped slot is invalid IR. Every other
+// element type stores its plain value.
+func (e *Emitter) storeArrayElementValue(outPtr, idxVal string, val Value, elemTy Type) {
+	if elemTy.IsArray {
+		e.storeArrayElement(outPtr, idxVal, e.arrayReturnHeader(val), elemTy)
+		return
+	}
+	e.storeArrayElement(outPtr, idxVal, val.Ref, elemTy)
+}
+
 func (e *Emitter) wrapArrayAggregate(outPtr, lenReg string, elemTy Type) Value {
 	r0 := e.freshReg()
 	r1 := e.freshReg()
@@ -328,7 +342,15 @@ func (e *Emitter) buildSettlement(settleTy Type, statusStr, valueRef, reasonRef 
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, obj, idx))
 		if fieldTy.IsArray {
-			// Array-typed slot holds a header pointer (TDD-00213 Stage 2).
+			// Array-typed slot holds a header pointer (TDD-00213 Stage 2). The
+			// absent side of a settlement (a rejected result's `value`, a fulfilled
+			// result's array `reason`) passes the literal "null" — store a null
+			// header pointer directly rather than boxing it as a {ptr,i64}
+			// aggregate (`store {ptr,i64} null`, invalid IR).
+			if ref == "null" {
+				e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", gep))
+				return
+			}
 			e.storeArrayFieldHeader(gep, Value{Ref: ref, Ty: fieldTy})
 			return
 		}
@@ -438,7 +460,7 @@ func (e *Emitter) emitPromiseAll(args []ast.Expression, pos ast.Pos) (Value, err
 		outTy = innerTy
 		outPtr = e.mallocArrayBuffer(lenReg, outTy)
 		e.emitTaskCombinatorAwaitEach(ptrReg, lenReg, innerTy, func(idxVal string, val Value) {
-			e.storeArrayElement(outPtr, idxVal, val.Ref, outTy)
+			e.storeArrayElementValue(outPtr, idxVal, val, outTy)
 		})
 	} else {
 		// Nothing to parallelize: every element is already resolved by
@@ -453,16 +475,18 @@ func (e *Emitter) emitPromiseAll(args []ast.Expression, pos ast.Pos) (Value, err
 			promiseHandle := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotGep, ptrReg, idxVal))
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", promiseHandle, slotGep))
-			var valReg string
 			if innerTy.IsArray {
-				// The resolved-value buffer holds a header pointer (TDD-00213 S2).
-				valReg = e.loadArraySlotAggregate(promiseHandle, innerTy).Ref
+				// The resolved-value buffer holds a header pointer (TDD-00213 S2);
+				// store the array element as its header pointer, not the {ptr,i64}
+				// aggregate (which does not fit the "ptr"-shaped result slot).
+				val := e.loadArraySlotAggregate(promiseHandle, innerTy)
+				e.storeArrayElementValue(outPtr, idxVal, val, outTy)
 			} else {
-				valReg = e.freshReg()
+				valReg := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
 					valReg, StructFieldIR(innerTy), promiseHandle, innerTy.Align()))
+				e.storeArrayElement(outPtr, idxVal, valReg, outTy)
 			}
-			e.storeArrayElement(outPtr, idxVal, valReg, outTy)
 		})
 	}
 

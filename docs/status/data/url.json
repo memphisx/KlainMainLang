@@ -48,10 +48,10 @@
             "feature": "`URLSearchParams`",
             "status": "implemented",
             "caveats": [
-              "`url.searchParams` is a **snapshot**, not live: mutating it (`url.searchParams.append(...)`) does not write back into `url.search`/`url.href`. Re-serialize and assign `url.search = params.toString()` to apply changes ([TDD-00203](../tdd/TDD-00203.md)).",
               "Spreading a `URLSearchParams` directly (`[...params]`) yields an empty array — the same pre-existing limitation as `[...map]`; use `[...params.entries()]` (which works). Not URLSearchParams-specific."
             ],
             "notes": [
+              "`url.searchParams` is **live**: `append`/`set`/`delete`/`sort` on it re-serialize the query back into `url.search`/`url.href` ([ADR-00966](../adr/ADR-00966.md)); the handle keeps its identity across a mutation, and emptying the query drops `search` to `\"\"`. A standalone `new URLSearchParams(...)` has no owning URL and is unaffected",
               "Backed by an ordered name/value **pair list** (the WHATWG \"list of tuples\", [ADR-00873](../adr/ADR-00873.md)/[TDD-00203](../tdd/TDD-00203.md)) — replaces the former `Map<string,string>`, so duplicate keys and cross-key insertion order round-trip faithfully (`?a=1&b=2&a=3` → `getAll('a')` is `['1','3']`)",
               "Full method surface: `append`/`set` (replace-first-drop-rest)/`get` (first match, `null` if absent)/`getAll`/`has`/`delete`/`sort` (stable, by key)/`size`, plus `keys()`/`values()`/`entries()`/`forEach()`, `for…of` iteration (default iterator = entries), and `console.log` rendering — `has`/`delete` accept the WHATWG optional 2nd `value` argument",
               "`toString()` serializes application/x-www-form-urlencoded (a space is `+`, not `%20`); a non-string name/value is stringified (`append('n', 1)` → `\"1\"`); `params + ''` / `` `${params}` `` serialize via `toString`",

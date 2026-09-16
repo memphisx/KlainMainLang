@@ -96,3 +96,60 @@ var b = say();
 console.log(typeof b, b === undefined);
 `, "ran\nundefined true")
 }
+
+// --- Self-referential structural types (ADR-00949) ---
+
+// A self-referential interface array field (`children: N[]`) previously
+// rejected a non-empty element literal as heterogeneous — the self-ref element
+// type resolved to a placeholder before the interface's own fields existed, so
+// its IR defaulted to number and drilling `r.children[0].val` failed. A named
+// placeholder seeded pre-field-resolution plus on-demand re-resolution
+// (canonicalizeClassTy keyed by RefName) fixes both.
+func TestE2ESelfReferentialInterfaceArrayField(t *testing.T) {
+	assertOutput(t, `
+interface N { children: N[]; val: number; }
+const gc: N = { children: [], val: 3 };
+const c: N = { children: [gc], val: 2 };
+const r: N = { children: [c], val: 1 };
+console.log(r.children[0].val);
+console.log(r.children[0].children[0].val);
+`, "2\n3")
+}
+
+// A self-referential interface pointer field (`next: N | null`) previously
+// gave "no field" on the second drill — the field snapshot was the empty
+// placeholder. Traversing the whole chain must work.
+func TestE2ESelfReferentialInterfaceLinkedList(t *testing.T) {
+	assertOutput(t, `
+interface N { next: N | null; val: number; }
+const c: N = { next: null, val: 3 };
+const b: N = { next: c, val: 2 };
+const a: N = { next: b, val: 1 };
+let cur: N | null = a;
+let sum = 0;
+while (cur !== null) { sum += cur.val; cur = cur.next; }
+console.log(sum);
+`, "6")
+}
+
+// Mutually-referential interfaces resolve each other's placeholder on demand.
+func TestE2EMutuallyReferentialInterfaces(t *testing.T) {
+	assertOutput(t, `
+interface A { b: B | null; x: number; }
+interface B { a: A | null; y: number; }
+const bb: B = { a: null, y: 20 };
+const aa: A = { b: bb, x: 10 };
+console.log(aa.b!.y);
+`, "20")
+}
+
+// The same fix covers an object-shape `type` alias (also a named structural
+// type), not just `interface`.
+func TestE2ESelfReferentialTypeAlias(t *testing.T) {
+	assertOutput(t, `
+type N = { next: N | null; val: number; };
+const b: N = { next: null, val: 2 };
+const a: N = { next: b, val: 1 };
+console.log(a.next!.val);
+`, "2")
+}

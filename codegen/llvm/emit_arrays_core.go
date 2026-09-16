@@ -98,6 +98,17 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 	// — a `push` through either is visible through the other, and they are `===`.
 	// The fresh header minted above is discarded; a genuinely new array
 	// expression (literal/new/slice/HOF — no ArrayHeader) keeps it and fills it.
+	// A nullable-array initializer (a `Map<K,T[]>` get that may miss) binds a
+	// `T[] | undefined`: remember the nullability on the symbol so a later
+	// identifier load rebuilds it null-safely and its truthiness tests the
+	// header (see emitExpr's array-identifier path). Only meaningful for a named
+	// local (a promoted global keeps its declared type).
+	if val.Ty.Nullable && !e.promotedGlobalDecls[v] {
+		if sym, ok := e.lookup(v.Name); ok {
+			sym.Ty.Nullable = true
+			e.define(v.Name, sym)
+		}
+	}
 	if val.ArrayHeader != "" {
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.ArrayHeader, slot))
 		return nil
@@ -188,6 +199,34 @@ func (e *Emitter) arrayValueFromHeaderReg(headerReg string, ty Type) Value {
 	agg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, headerReg))
 	return Value{Ref: agg, Ty: ty, ArrayHeader: headerReg}
+}
+
+// arrayValueFromHeaderSlotGuarded is the null-guarded sibling of
+// arrayValueFromHeaderReg: `header` is a header pointer that may be null (e.g. a
+// Map<K,T[]> get() miss returns 0 → inttoptr null). A null header reads as the
+// {null,0} empty array instead of dereferencing null, mirroring
+// loadArrayFieldValue's absent-field guard.
+func (e *Emitter) arrayValueFromHeaderSlotGuarded(header string, ty Type) Value {
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, header))
+	nullL := e.freshLabel("arrhdr.null")
+	loadL := e.freshLabel("arrhdr.load")
+	doneL := e.freshLabel("arrhdr.done")
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca {ptr, i64}, align 8", slot))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, loadL))
+	e.emitLabel(nullL)
+	e.emitInstr(fmt.Sprintf("store {ptr, i64} {ptr null, i64 0}, ptr %s, align 8", slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(loadL)
+	agg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, header))
+	e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", agg, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", out, slot))
+	return Value{Ref: out, Ty: ty, ArrayHeader: header}
 }
 
 // storeArrayFieldHeader stores an array Value into a header-pointer field slot
@@ -652,6 +691,16 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 		// carry a different storage IR than their Type.IR, so they're exempt —
 		// storeArrayElem handles those. This compiler's arrays are homogeneous.
 		if val.Ty.IR != elemTy.IR && !elemTy.IsArray && !elemTy.IsDynamic && !isNullableScalar(elemTy) {
+			return "", 0, fmt.Errorf("%d:%d: array elements must share one type — element %d does not match the array's element type (a heterogeneous array is not supported)", elem.GetPos().Line, elem.GetPos().Col, i)
+		}
+		// The IR=="ptr" trap: an array-shaped element reports Ty.IR=="ptr" just
+		// like an object/string slot, so the IR-equality check above cannot see
+		// a nested-array element landing in a non-array slot (e.g. `[obj, [x]]`,
+		// whose element type infers to the first element's object type). Storing
+		// the array's `{ptr,i64}` aggregate into a bare ptr slot would be invalid
+		// IR — reject cleanly. A dynamic/any elemTy boxes arrays via storeArrayElem
+		// and is exempt; an array-of-arrays elemTy (both sides IsArray) matches.
+		if val.Ty.IsArray != elemTy.IsArray && !elemTy.IsDynamic {
 			return "", 0, fmt.Errorf("%d:%d: array elements must share one type — element %d does not match the array's element type (a heterogeneous array is not supported)", elem.GetPos().Line, elem.GetPos().Col, i)
 		}
 		gepReg := e.freshReg()

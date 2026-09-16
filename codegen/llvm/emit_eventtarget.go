@@ -33,8 +33,12 @@ func (e *Emitter) resolveEventTargetListenerArg(arg ast.Expression, pos ast.Pos)
 	if !val.Ty.IsFunc {
 		return "", fmt.Errorf("%d:%d: an event listener must be a function", pos.Line, pos.Col)
 	}
-	if len(val.Ty.FuncParams) != 1 || val.Ty.FuncParams[0].IR != "ptr" {
-		return "", fmt.Errorf("%d:%d: an event listener must take exactly 1 argument (the event)", pos.Line, pos.Col)
+	// WHATWG calls every listener with the event as its sole argument; a listener
+	// that declares no parameter simply ignores it (`() => …` is valid, common in
+	// tests). Accept 0 or 1 param; a declared param must be the ptr the event box
+	// arrives as. More than one param can never be satisfied by dispatch.
+	if n := len(val.Ty.FuncParams); n > 1 || (n == 1 && val.Ty.FuncParams[0].IR != "ptr") {
+		return "", fmt.Errorf("%d:%d: an event listener takes at most 1 argument (the event)", pos.Line, pos.Col)
 	}
 	return val.Ref, nil
 }

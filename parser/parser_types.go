@@ -62,6 +62,7 @@ func (p *Parser) parseIndexSignature(source string) (*ast.TypeAnnotation, error)
 func (p *Parser) parseObjectTypeSignatureTail(source string) (*ast.TypeAnnotation, error) {
 	p.advance() // consume '('
 	var funcParams []ast.TypeAnnotation
+	var funcParamOptional []bool
 	hasRest := false
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 		if p.check(lexer.ELLIPSIS) {
@@ -74,18 +75,26 @@ func (p *Parser) parseObjectTypeSignatureTail(source string) (*ast.TypeAnnotatio
 			return nil, fmt.Errorf("%d:%d: a rest parameter must be last in a method signature", p.peek().Line, p.peek().Col)
 		}
 		// Optional `name:` / `name?:` prefix (documentation-only).
+		paramOptional := false
 		if p.check(lexer.IDENT) &&
 			(p.peekNth(1).Type == lexer.COLON ||
 				(p.peekNth(1).Type == lexer.QUESTION && p.peekNth(2).Type == lexer.COLON)) {
-			p.advance() // name
-			p.match(lexer.QUESTION)
+			p.advance()                         // name
+			paramOptional = p.match(lexer.QUESTION)
 			p.advance() // ':'
 		}
 		pt, err := p.parseTypeAnnotation(source)
 		if err != nil {
 			return nil, err
 		}
+		// Optional param → `T | undefined`, matching the emitted nullable-scalar
+		// ABI (mirror of the function-type path above; TDD-00187).
+		if paramOptional {
+			pt.Nullable = true
+			pt.Undefined = true
+		}
 		funcParams = append(funcParams, *pt)
+		funcParamOptional = append(funcParamOptional, paramOptional)
 		p.match(lexer.COMMA)
 	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {
@@ -100,7 +109,7 @@ func (p *Parser) parseObjectTypeSignatureTail(source string) (*ast.TypeAnnotatio
 			return nil, err
 		}
 	}
-	return &ast.TypeAnnotation{Source: source, IsFuncType: true, FuncParams: funcParams, FuncRetType: retType, FuncHasRest: hasRest}, nil
+	return &ast.TypeAnnotation{Source: source, IsFuncType: true, FuncParams: funcParams, FuncParamOptional: funcParamOptional, FuncRetType: retType, FuncHasRest: hasRest}, nil
 }
 
 func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error) {
@@ -366,6 +375,7 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 	if tok.Type == lexer.LPAREN {
 		p.advance() // consume '('
 		var funcParams []ast.TypeAnnotation
+		var funcParamOptional []bool
 		singleUnnamed := true
 		hasRest := false
 		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
@@ -381,17 +391,34 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 			} else if hasRest {
 				return nil, fmt.Errorf("%d:%d: a rest parameter must be last in a function type", p.peek().Line, p.peek().Col)
 			}
-			// Optional param name (for documentation only)
+			// Optional param name (for documentation only). The name may carry
+			// an optional marker `?` before the colon: `(x?: T) => void`.
+			paramOptional := false
 			if p.check(lexer.IDENT) && p.peekNth(1).Type == lexer.COLON {
 				p.advance() // name
 				p.advance() // colon
 				singleUnnamed = false
+			} else if p.check(lexer.IDENT) && p.peekNth(1).Type == lexer.QUESTION && p.peekNth(2).Type == lexer.COLON {
+				p.advance() // name
+				p.advance() // '?'
+				p.advance() // colon
+				singleUnnamed = false
+				paramOptional = true
 			}
 			pt, err := p.parseTypeAnnotation(source)
 			if err != nil {
 				return nil, err
 			}
+			// An optional parameter's declared type is `T | undefined`, matching
+			// the nullable-scalar ABI an arrow body emits for a `?`-param
+			// (TDD-00187) — so a `const f: (x?: T) => R = (x?: T) => …` binding's
+			// slot type agrees with the closure it holds.
+			if paramOptional {
+				pt.Nullable = true
+				pt.Undefined = true
+			}
 			funcParams = append(funcParams, *pt)
+			funcParamOptional = append(funcParamOptional, paramOptional)
 			p.match(lexer.COMMA)
 		}
 		if _, err := p.expect(lexer.RPAREN); err != nil {
@@ -413,7 +440,7 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 			p.advance() // consume '=>' tentatively
 			retType, err := p.parseTypeAnnotation(source)
 			if err == nil {
-				ta := &ast.TypeAnnotation{Source: source, IsFuncType: true, FuncParams: funcParams, FuncRetType: retType, FuncHasRest: hasRest}
+				ta := &ast.TypeAnnotation{Source: source, IsFuncType: true, FuncParams: funcParams, FuncParamOptional: funcParamOptional, FuncRetType: retType, FuncHasRest: hasRest}
 				return parseTrailingArrayBrackets(p, source, ta)
 			}
 			if len(funcParams) == 1 && singleUnnamed {

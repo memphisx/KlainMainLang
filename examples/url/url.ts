@@ -84,3 +84,12 @@ for (const [k, v] of s) {
   console.log(k + "=" + v)  // a=1, then b=2, then c=3
 }
 console.log(s.size)  // 3
+
+// ── searchParams is LIVE: a mutation writes back to the URL (TDD-00203) ──────
+const api = new URL("https://example.com/search?q=cats")
+api.searchParams.append("page", "2")
+api.searchParams.set("q", "dogs")
+console.log(api.search)  // ?q=dogs&page=2  (reflected back into the URL)
+console.log(api.href)    // https://example.com/search?q=dogs&page=2
+api.searchParams.delete("page")
+console.log(api.href)    // https://example.com/search?q=dogs

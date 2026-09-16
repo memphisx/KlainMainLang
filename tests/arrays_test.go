@@ -122,6 +122,31 @@ console.log(a[2].x, a[2].y)
 `, "[1,\"two\",{\"x\":5,\"y\":\"z\"}]\n5 z")
 }
 
+// A literal mixing an object element with a nested-array element (`[a, [b]]`)
+// is heterogeneous: its element type infers to the first element's object type,
+// so the nested array's `{ptr,i64}` aggregate has no matching slot. An array
+// value reports Ty.IR=="ptr" just like an object, so the IR-equality element
+// guard cannot see the mismatch — the array-vs-non-array shape check catches it
+// and rejects cleanly (strict), instead of emitting an invalid aggregate store.
+func TestE2EArrayObjectNestedArrayLiteralRejected(t *testing.T) {
+	mustCompileError(t, `
+const a = {}, b = {}
+const r = [a, [b]].flat()
+console.log(r.length)
+`, "heterogeneous array")
+}
+
+// -compat=js: the same mixed object/nested-array literal lowers to a boxed
+// any[], so flat() over it works.
+func TestE2EArrayObjectNestedArrayLiteralCompatJS(t *testing.T) {
+	assertOutputCompatJS(t, `
+const a = { x: 1 }, b = { y: 2 }
+const r = [a, [b]]
+console.log(r.length)
+console.log(JSON.stringify(r))
+`, "2\n[{\"x\":1},[{\"y\":2}]]")
+}
+
 func TestE2EArrayHOF(t *testing.T) {
 	assertOutput(t, `
 const nums: number[] = [1, 2, 3, 4, 5]
@@ -1076,6 +1101,52 @@ console.log(arr.length)
 `, "0")
 }
 
+// Array.from array-like `{ length: n }` (ADR-00957): reads the object's
+// `length` and produces that many `undefined` elements; the 2-arg mapFn form
+// desugars to `.map((_, i) => …)`, so the callback sees each hole and its index.
+func TestE2EArrayFromArrayLikeWithMapFn(t *testing.T) {
+	assertOutput(t, `
+const a = Array.from({ length: 3 }, (_, i) => i * 2)
+console.log(a.length, a[0], a[1], a[2])
+const b = Array.from({ length: 4 }, (_, i) => "item" + i)
+console.log(b[0], b[3])
+`, "3 0 2 4\nitem0 item3")
+}
+
+func TestE2EArrayFromArrayLikeUndefinedFill(t *testing.T) {
+	// No mapFn: the elements are a genuine boxed `undefined` (typeof
+	// "undefined", `=== undefined` true, `=== null` false).
+	assertOutput(t, `
+const b = Array.from({ length: 2 })
+console.log(b.length)
+console.log(typeof b[0], b[0] === undefined, b[0] === null)
+`, "2\nundefined true false")
+}
+
+func TestE2EArrayFromArrayLikeLengthClampAndVar(t *testing.T) {
+	// A negative length clamps to 0; length can be a runtime variable.
+	assertOutput(t, `
+const n = 3
+console.log(Array.from({ length: n }, (_, i) => i).length)
+console.log(Array.from({ length: -5 }).length)
+console.log(Array.from({ length: 0 }).length)
+`, "3\n0\n0")
+}
+
+// A .map() whose callback uses the INDEX parameter in its returned expression
+// must infer an i64 result element type, not float (ADR-00957). The inference
+// path only hinted the element param, so an unannotated index defaulted to
+// TypeF64 and `(_, i) => i * i` produced a float[] type while codegen stored
+// i64 — every element read back a 5e-324 denormal. Only reproduces when the
+// result is bound to a variable (the inference path), not inlined.
+func TestE2EMapIndexReturnTypeIsInt(t *testing.T) {
+	assertOutput(t, `
+const arr = [5, 6, 7, 8]
+const squares = arr.map((_, i) => i * i)
+console.log(squares[0], squares[1], squares[2], squares[3])
+`, "0 1 4 9")
+}
+
 func TestE2EArrayFromNonIterableIsError(t *testing.T) {
 	if _, err := parseAndCompile(`
 const x: number = 5
@@ -1161,6 +1232,22 @@ const strs: string[][] = [["a", "b"], ["c"]];
 console.log(strs[0][1]);
 console.log(strs[1][0]);
 `, "b\nc")
+}
+
+func TestE2ENestedArrayOfNamedObjectType(t *testing.T) {
+	// A nested array of a NAMED object type (`P[][]`, interface or type alias)
+	// arrives from the parser as a single suffix-name whose base is itself
+	// suffixed (`P[]`); the resolver stripped only one level and fell through to
+	// the i64 default, so the object elements were rejected as heterogeneous.
+	// The suffix-stripping now recurses. See ADR-00947.
+	assertOutput(t, `
+interface P { x: number }
+const a: P[][] = [[{x: 1}], [{x: 2}, {x: 3}]];
+console.log(a[0][0].x, a[1][0].x, a[1][1].x);
+type Q = { n: number };
+const b: Q[][][] = [[[{n: 7}]]];
+console.log(b[0][0][0].n);
+`, "1 2 3\n7")
 }
 
 func TestE2ENestedArrayJSONStringify(t *testing.T) {

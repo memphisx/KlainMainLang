@@ -125,6 +125,28 @@ console.log(p.dist())
 // `any` type carries no undefined mark, so `(x: any) === undefined` was wrongly
 // folded to a constant false, breaking a missing-property read, getStore(), and
 // every any-typed nullish check. undefined and null stay distinct under `===`.
+func TestE2EAnyNullableBoxedEqNull(t *testing.T) {
+	// BACKLOG §3 residue (ADR-00958 follow-on): a `string | null` (URLSearchParams
+	// .get miss) and a `C | null` object, once boxed into an `any` slot, must
+	// compare `=== null` when null at runtime — the box encodes the null pointer
+	// as nbNull, not a string/object-tagged 0. A present value stays non-null and
+	// keeps its typeof; a miss is null, distinct from undefined.
+	assertOutput(t, `
+const p = new URLSearchParams("a=1")
+const miss: any = p.get("zzz")
+console.log(miss === null, miss !== null, miss === undefined)
+const hit: any = p.get("a")
+console.log(hit === null, hit === "1")
+class C { x: number = 5 }
+let nul: C | null = null
+const n: any = nul
+console.log(n === null, typeof n)
+let obj: C | null = new C()
+const w: any = obj
+console.log(w === null, typeof w)
+`, "true false false\nfalse true\ntrue object\nfalse object")
+}
+
 func TestE2EAnyOpsStrictEqNullUndefined(t *testing.T) {
 	assertOutputCompatJS(t, `
 let x: any

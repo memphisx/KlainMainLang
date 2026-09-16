@@ -40,6 +40,7 @@ func (e *Emitter) emitTLSNetSymbols() {
 		if e.usedHTTPS1Server {
 			e.emitGlobal("declare i64 @__kml_tls_read_nb(ptr, ptr, i64)")
 			e.emitGlobal("declare i64 @__kml_tls_write_all(ptr, ptr, i64)")
+			e.emitGlobal("declare i64 @__kml_tls_write_nb(ptr, ptr, i64)")
 		}
 		return
 	}

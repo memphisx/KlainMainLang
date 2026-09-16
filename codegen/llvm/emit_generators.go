@@ -915,8 +915,22 @@ func (e *Emitter) emitYieldResumeDispatch(gctx *generatorEmitCtx) (Value, error)
 	e.emitTerminator("ret void")
 
 	// mode 0: the ordinary resume — __sent is this yield expression's value.
+	// The stored slot is typed as the generator's element type (this project
+	// collapses TNext onto TYield — `.next(v)` coerce-checks v into elemTy), but
+	// a `yield` *expression* is TypeScript's `TNext`, which defaults to `any`. A
+	// resume value consumed as an rvalue (`obj.foo = yield`, `x = yield`) must
+	// therefore present as a dynamic box so its downstream store/coerce converts
+	// to whatever concrete target receives it — without this, an element type
+	// that differs from the assignment target (e.g. a bare `yield` resumed into
+	// a string field) emitted a raw store of the element word into the target's
+	// slot (invalid IR: `store ptr <i64>`).
 	e.emitLabel(nextL)
-	return e.loadGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorSentField), nil
+	sent := e.loadGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorSentField)
+	boxed, err := e.emitBoxValue(sent)
+	if err != nil {
+		return Value{}, err
+	}
+	return boxed, nil
 }
 
 // emitGeneratorReturn implements a `return expr;`/bare `return;` inside a

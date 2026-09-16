@@ -225,6 +225,10 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 // to run the send tail (rather than flushing an empty response on return). Only
 // on a connection fiber (idx >= 0); a no-op otherwise.
 func (e *Emitter) emitParkUntilResEnded(res string) {
+	// The park loop drains the direct-write output queue each pass (TDD-00214),
+	// so __kml_res_drain must be defined even for a buffered handler that never
+	// called res.write (the drain is a null-queue no-op there).
+	e.ensureResStreamRuntime()
 	srt := ServerResponseType()
 	endedIdx, _, _ := srt.FieldIndex("ended")
 	srtIR := srt.StructIR()
@@ -241,6 +245,11 @@ func (e *Emitter) emitParkUntilResEnded(res string) {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", onFiber, checkL, doneL))
 
 	e.emitLabel(checkL)
+	// TDD-00214: drain the direct-write output queue on each pass — flush queued
+	// bytes to the socket (parking on writability), and fire 'drain' once it
+	// empties after a res.write returned false. A no-op when nothing was queued
+	// (buffered responses, or a res that never wrote past the socket buffer).
+	e.emitInstr(fmt.Sprintf("call void @__kml_res_drain(ptr %s)", res))
 	endedGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", endedGep, srtIR, res, endedIdx))
 	endedVal := e.freshReg()
@@ -288,7 +297,15 @@ func (e *Emitter) emitNewServerResponse() string {
 	emptyMap := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", emptyMap))
 	store("headers", "ptr", emptyMap)
-	store("ended", "i64", "0") // TDD-00195: set by res.end()
+	store("ended", "i64", "0")            // TDD-00195: set by res.end()
+	store("__kml_fd", "i64", "-1")        // TDD-00195 Stage 2: filled by the dispatcher
+	store("__kml_wsink", "ptr", "null")   // lazily built on first res.write / pipe
+	store("__kml_streaming", "i64", "0")  // 0 buffered · 1 streaming · 2 ended
+	store("__kml_keepalive", "i64", "0")  // set at head-send
+	store("__kml_reqheaders", "ptr", "null")
+	store("__kml_outq", "ptr", "null")     // TDD-00214: lazily built on first partial write
+	store("__kml_drain_cb", "ptr", "null") // set by res.on('drain')
+	store("__kml_drain_once", "i64", "0")
 	return res
 }
 
@@ -1346,39 +1363,126 @@ func (e *Emitter) emitServerResponseMethod(resExpr ast.Expression, method string
 		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", vi, vv.Ref))
 		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", hmap, kv.Ref, vi))
 		return Value{Ty: TypeVoid}, nil
-	case "write", "end":
-		// Append the chunk (if any) to the accumulated body.
+	case "write":
+		// TDD-00195 Stage 2: the first res.write takes the socket over for
+		// chunked transfer — send the head, then frame this chunk straight to the
+		// fd via the response's WHATWG sink. Subsequent writes just frame.
+		e.ensureResStreamRuntime()
+		e.emitResBegin(resVal.Ref)
+		// Node's res.write returns a boolean backpressure signal: false once the
+		// unsent, queued size crosses highWaterMark, true otherwise (TDD-00214).
+		// A direct write frames its chunk into the response's output queue (a
+		// non-blocking enqueue that returns that boolean); the dispatcher-tail
+		// park loop drains the queue and fires 'drain'. An empty res.write() is
+		// true.
 		if len(args) >= 1 {
-			chunk, err := e.emitExpr(args[0])
+			cv, err := e.emitExpr(args[0])
 			if err != nil {
 				return Value{}, err
 			}
+			bp, err := e.emitResQWrite(resVal.Ref, cv, pos)
+			if err != nil {
+				return Value{}, err
+			}
+			return Value{Ref: bp, Ty: TypeBool}, nil
+		}
+		return Value{Ref: "1", Ty: TypeBool}, nil
+	case "end":
+		// res.end finalizes the response. Two shapes reconcile here at runtime
+		// (TDD-00195 Stage 2): if a prior res.write already began streaming, close
+		// the sink (terminal chunk, sets ended + pokes); otherwise fall back to
+		// the buffered path — append the chunk to `body` and flip `ended`, so the
+		// common `res.end('hi')` still sends a single Content-Length response.
+		e.ensureConnPokeGlobal()
+		e.ensureResStreamRuntime() // the stream branch references the sink runtime
+		var chunkVal Value
+		haveChunk := len(args) >= 1
+		if haveChunk {
+			cv, err := e.emitExpr(args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			chunkVal = cv
+		}
+		streaming := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", streaming, fieldGEP("__kml_streaming")))
+		isStreaming := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 1", isStreaming, streaming))
+		streamEndL := e.freshLabel("res.end.stream")
+		bufEndL := e.freshLabel("res.end.buffered")
+		contL := e.freshLabel("res.end.cont")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isStreaming, streamEndL, bufEndL))
+
+		e.emitLabel(streamEndL)
+		if haveChunk {
+			// Frame the final chunk into the output queue (TDD-00214), same path
+			// as a mid-handler res.write, so a single flush covers it.
+			if _, err := e.emitResQWrite(resVal.Ref, chunkVal, pos); err != nil {
+				return Value{}, err
+			}
+		}
+		// Flush the whole output queue (parking as needed) BEFORE the terminal
+		// chunk so the byte stream stays well-formed, then close the sink (writes
+		// 0\r\n\r\n, restores O_NONBLOCK, sets ended, pokes).
+		e.emitResDrainFlush(resVal.Ref)
+		sink := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", sink, fieldGEP("__kml_wsink")))
+		closeIgn := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_close(ptr %s)", closeIgn, sink))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+
+		e.emitLabel(bufEndL)
+		if haveChunk {
 			bgep := fieldGEP("body")
 			cur := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cur, bgep))
-			joined, err := e.emitStringConcat(Value{Ref: cur, Ty: TypePtr}, chunk)
+			// A binary chunk is appended as its raw bytes (a length-headered
+			// string), so the buffered flush sends the exact byte range with
+			// the right Content-Length — not a stringified array.
+			appendVal := e.binaryChunkToHeaderString(chunkVal)
+			joined, err := e.emitStringConcat(Value{Ref: cur, Ty: TypePtr}, appendVal)
 			if err != nil {
 				return Value{}, err
 			}
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", joined.Ref, bgep))
 		}
-		// Node's res.write returns a boolean backpressure signal: false when the
-		// kernel buffer is full and the caller should await 'drain'. This
-		// response sink is buffered (flushed after the handler returns), so it
-		// never applies backpressure — write always reports true, matching a sink
-		// that accepted the chunk. res.end returns void here (Node returns the
-		// stream; the chaining return value is rarely used).
-		if method == "write" {
-			return Value{Ref: "true", Ty: TypeBool}, nil
-		}
-		// res.end() marks the response complete and pokes parked fibers, so a
-		// void handler that ended the response asynchronously (its connection
-		// fiber parked after returning — TDD-00195) is resumed to run the send
-		// tail. A synchronous res.end() before the handler returns just sets the
-		// flag; the fiber never parks.
-		e.ensureConnPokeGlobal()
 		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", fieldGEP("ended")))
 		e.emitInstr("store i8 1, ptr @__kml_conn_poke, align 1")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+
+		e.emitLabel(contL)
+		return Value{Ty: TypeVoid}, nil
+	case "on", "once":
+		// TDD-00214: res is a Writable — res.on('drain', cb) registers the
+		// backpressure-relief listener, fired asynchronously on the connection
+		// fiber once the output queue empties after a res.write returned false.
+		evt, err := stringLiteralArg(args, 0, "res.on", pos)
+		if err != nil {
+			return Value{}, err
+		}
+		if len(args) != 2 {
+			return Value{}, fmt.Errorf("%d:%d: res.on takes (event, listener)", pos.Line, pos.Col)
+		}
+		if evt != "drain" {
+			// Only 'drain' is wired. Reject the rest with a clear error rather
+			// than accept a listener that would silently never fire (a handler
+			// awaiting 'finish'/'close' would otherwise hang).
+			return Value{}, fmt.Errorf("%d:%d: res.on supports 'drain' (got '%s')", pos.Line, pos.Col, evt)
+		}
+		e.ensureResStreamRuntime()
+		cb, err := e.resolveCallback(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		if cb.kind != cbClosure {
+			return Value{}, fmt.Errorf("%d:%d: a res 'drain' listener must be a function literal", pos.Line, pos.Col)
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cb.hdrPtr, fieldGEP("__kml_drain_cb")))
+		onceVal := "0"
+		if method == "once" {
+			onceVal = "1"
+		}
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", onceVal, fieldGEP("__kml_drain_once")))
 		return Value{Ty: TypeVoid}, nil
 	case "cork", "uncork":
 		// Writable hints to batch writes. For a buffered sink they are valid
@@ -1390,6 +1494,146 @@ func (e *Emitter) emitServerResponseMethod(resExpr ast.Expression, method string
 		return Value{Ty: TypeVoid}, nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: res.%s is not yet supported on a ServerResponse (V1: writeHead/setHeader/write/end)", pos.Line, pos.Col, method)
+}
+
+// emitResBegin starts chunked streaming on `res` if it hasn't already: the
+// runtime sends the chunked head (status + headers) and builds the WHATWG sink
+// that frames subsequent chunks to the connection fd (TDD-00195 Stage 2).
+// The keep-alive decision applies over TLS too: at stream end __kml_res_sink_close
+// restores O_NONBLOCK so the connection's TLS read loop re-arms for the next
+// request exactly as on plain HTTP (TDD-00195 Stage 2, ADR-00964).
+func (e *Emitter) emitResBegin(res string) {
+	e.emitInstr(fmt.Sprintf("call void @__kml_res_begin(ptr %s, i1 1)", res))
+}
+
+// emitResSinkWrite evaluates a chunk expression and frames it to the response's
+// streaming sink. emitResSinkWriteVal takes an already-evaluated chunk (so
+// res.end can evaluate its argument once, before its stream-vs-buffered branch).
+func (e *Emitter) emitResSinkWrite(res, wsinkGEP string, expr ast.Expression, pos ast.Pos) error {
+	cv, err := e.emitExpr(expr)
+	if err != nil {
+		return err
+	}
+	return e.emitResSinkWriteVal(res, wsinkGEP, cv, pos)
+}
+
+// binaryChunkToHeaderString returns chunk unchanged when it is not a binary
+// (TypedArray/Buffer) value; when it is, it copies the array's raw bytes into a
+// fresh length-headered string so the buffered response path frames the exact
+// byte range (embedded NULs included) instead of stringifying the array.
+func (e *Emitter) binaryChunkToHeaderString(chunk Value) Value {
+	if !chunk.Ty.IsTypedArray {
+		return chunk
+	}
+	e.ensureMemcpy()
+	elemTy := TypeI64
+	if chunk.Ty.ElemType != nil {
+		elemTy = *chunk.Ty.ElemType
+	}
+	dataPtr := e.freshReg()
+	count := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, chunk.Ref))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", count, chunk.Ref))
+	byteLen := count
+	if elemTy.Align() != 1 {
+		byteLen = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteLen, count, elemTy.Align()))
+	}
+	buf := e.emitStringAlloc(byteLen) // header length set to byteLen
+	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, dataPtr, byteLen))
+	nul := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", nul, buf, byteLen))
+	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", nul))
+	return Value{Ref: buf, Ty: TypePtr}
+}
+
+func (e *Emitter) emitResSinkWriteVal(res, wsinkGEP string, chunk Value, pos ast.Pos) error {
+	// A binary chunk (Buffer/Uint8Array/any TypedArray) is framed as its raw
+	// bytes, not stringified: Node's res.write(buf) sends the buffer's exact
+	// byte range. Extract {ptr,len} straight from the array aggregate and push
+	// byteLength = len * elemSize through the sink. (req.pipe(res) already
+	// carries bytes; this is the direct-write path.)
+	if chunk.Ty.IsTypedArray {
+		elemTy := TypeI64
+		if chunk.Ty.ElemType != nil {
+			elemTy = *chunk.Ty.ElemType
+		}
+		dataPtr := e.freshReg()
+		count := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, chunk.Ref))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", count, chunk.Ref))
+		byteLen := count
+		if elemTy.Align() != 1 {
+			byteLen = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteLen, count, elemTy.Align()))
+		}
+		sink := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", sink, wsinkGEP))
+		v0 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", v0, dataPtr))
+		ign := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_write(ptr %s, i64 %s, i64 %s)", ign, sink, v0, byteLen))
+		return nil
+	}
+	// Coerce the chunk to a length-prefixed, binary-safe string (matching the
+	// buffered path's handling of a non-string chunk), then push its {ptr,len}
+	// through the WHATWG writable — the same entry point req.pipe(res) drives.
+	str, err := e.emitStringConcat(Value{Ref: e.internString(""), Ty: TypePtr}, chunk)
+	if err != nil {
+		return err
+	}
+	ln := e.emitStrLenHeader(str.Ref)
+	sink := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", sink, wsinkGEP))
+	v0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", v0, str.Ref))
+	ign := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_write(ptr %s, i64 %s, i64 %s)", ign, sink, v0, ln))
+	return nil
+}
+
+// emitResQWrite frames an already-evaluated chunk into the response's direct-
+// write output queue and returns the `res.write` backpressure boolean (false
+// once the queued, unsent size crosses highWaterMark — TDD-00214). It extracts
+// {ptr,len} exactly as emitResSinkWriteVal does (raw bytes for a binary chunk,
+// a length-prefixed binary-safe string otherwise) but routes to
+// __kml_res_qwrite (non-blocking enqueue) instead of the pipe sink, so a direct
+// res.write can observe backpressure without parking inline.
+func (e *Emitter) emitResQWrite(res string, chunk Value, pos ast.Pos) (string, error) {
+	var dataPtr, byteLen string
+	if chunk.Ty.IsTypedArray {
+		elemTy := TypeI64
+		if chunk.Ty.ElemType != nil {
+			elemTy = *chunk.Ty.ElemType
+		}
+		dataPtr = e.freshReg()
+		count := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, chunk.Ref))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", count, chunk.Ref))
+		byteLen = count
+		if elemTy.Align() != 1 {
+			byteLen = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteLen, count, elemTy.Align()))
+		}
+	} else {
+		str, err := e.emitStringConcat(Value{Ref: e.internString(""), Ty: TypePtr}, chunk)
+		if err != nil {
+			return "", err
+		}
+		dataPtr = str.Ref
+		byteLen = e.emitStrLenHeader(str.Ref)
+	}
+	bp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_res_qwrite(ptr %s, ptr %s, i64 %s)", bp, res, dataPtr, byteLen))
+	return bp, nil
+}
+
+// emitResDrainFlush flushes the direct-write output queue on the connection
+// fiber, parking on socket writability until the queue empties (TDD-00214) —
+// used by res.end before the terminal chunk and by the dispatcher-tail park
+// loop so queued bytes leave the socket while a fire-and-forget handler awaits.
+func (e *Emitter) emitResDrainFlush(res string) {
+	e.emitInstr(fmt.Sprintf("call void @__kml_res_flush(ptr %s)", res))
 }
 
 // emitResSetHeadersFromObject sets each field of an object-literal headers map
@@ -1684,6 +1928,10 @@ const maxHTTPRequestBytes = 10 * 1024 * 1024
 // callbacks), then share the same handler-invocation core.
 type httpReqInputs struct {
 	method, path, query, headers, body, bodyLength, bodyctx string
+	// fd is the connection fd (i64 register), threaded into `res` so
+	// res.write / req.pipe(res) can take the socket over for chunked streaming
+	// (TDD-00195 Stage 2). "" in the http2 path, which has no such fd here.
+	fd string
 }
 
 // emitHTTPCallHandler builds the HttpRequest record from an already-parsed
@@ -1759,6 +2007,22 @@ func (e *Emitter) emitHTTPCallHandler(paramTy, retTy Type, isAsyncHandler bool, 
 	// -writing tail below reads. res.writeHead/end/etc. have mutated them.
 	if e.httpResMode {
 		res := e.emitNewServerResponse()
+		// TDD-00195 Stage 2: hand the connection fd and the request headers to
+		// `res` so a res.write / req.pipe(res) can take the socket over for
+		// chunked streaming (fd) and honour a handler-set Connection header in the
+		// head-send keep-alive decision (reqheaders).
+		if in.fd != "" {
+			srt := ServerResponseType()
+			srtIR := srt.StructIR()
+			storeRes := func(field, valIR, val string) {
+				idx, _, _ := srt.FieldIndex(field)
+				gep := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, srtIR, res, idx))
+				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", valIR, val, gep))
+			}
+			storeRes("__kml_fd", "i64", in.fd)
+			storeRes("__kml_reqheaders", "ptr", in.headers)
+		}
 		e.emitInstr(fmt.Sprintf("call void (ptr, %s, ptr) %s(ptr %s, %s %s, ptr %s)",
 			paramTy.IR, fp, ep, paramTy.IR, reqVal.Ref, res))
 		e.emitParkUntilResEnded(res)
@@ -2264,8 +2528,64 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	respReg := e.emitHTTPCallHandler(paramTy, retTy, isAsyncHandler, httpReqInputs{
 		method: methodPtr, path: pathOnly, query: queryMapFinal,
 		headers: headersMapFinal, body: bodyBuf, bodyLength: contentLenFinal,
-		bodyctx: bodyCtxRef,
+		bodyctx: bodyCtxRef, fd: fd64,
 	})
+
+	// TDD-00195 Stage 2: if the handler drove res.write / req.pipe(res), the head,
+	// chunks, and terminator already streamed to the socket — skip the buffered
+	// flush entirely and either re-arm the connection (keep-alive) or retire it,
+	// reading the streaming/keep-alive flags the response carries.
+	if e.httpResMode {
+		stIdx, _, _ := retTy.FieldIndex("__kml_streaming")
+		kaIdx, _, _ := retTy.FieldIndex("__kml_keepalive")
+		stGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", stGep, retTy.StructIR(), respReg, stIdx))
+		stVal := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", stVal, stGep))
+		streamed := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", streamed, stVal))
+		streamedDoneL := e.freshLabel("http.res.streamed")
+		bufferedContL := e.freshLabel("http.res.buffered")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", streamed, streamedDoneL, bufferedContL))
+
+		e.emitLabel(streamedDoneL)
+		kaGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", kaGep, retTy.StructIR(), respReg, kaIdx))
+		kaVal := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", kaVal, kaGep))
+		kaBool := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", kaBool, kaVal))
+		sKaContL := e.freshLabel("http.res.keepalive")
+		sKaDoneL := e.freshLabel("http.res.reqdone")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", kaBool, sKaContL, sKaDoneL))
+
+		// Keep-alive: reset the per-request parse state and loop back for the next
+		// request on the same socket (the sink restored O_NONBLOCK at stream end).
+		e.emitLabel(sKaContL)
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", totalReadA))
+		e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", headersParsedA))
+		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", headerEndA))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", contentLenA))
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", headersMapA))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", readLoopL))
+
+		// Close: the response is complete and the connection is not persistent.
+		e.emitLabel(sKaDoneL)
+		if e.usedHTTPS1Server {
+			e.emitInstr(fmt.Sprintf("call void @__kml_http_conn_close(i32 %s)", fd32))
+		} else {
+			e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))
+		}
+		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
+		sActiveNow := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_conn_active, align 8", sActiveNow))
+		sActiveNew := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", sActiveNew, sActiveNow))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__kml_conn_active, align 8", sActiveNew))
+		e.emitTerminator("ret void")
+
+		e.emitLabel(bufferedContL)
+	}
 
 	statusIdx, statusTy, _ := retTy.FieldIndex("status")
 	statusGep := e.freshReg()

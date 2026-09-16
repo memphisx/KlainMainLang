@@ -2204,6 +2204,11 @@ type TypeAnnotation struct {
 	TypeArgs    []*TypeAnnotation // N type arguments for a user-defined generic interface usage, e.g. Box<number, string> (TDD-00037); built-ins keep using ElemType/KeyType above, unrelated to this field
 	IsFuncType  bool
 	FuncParams  []TypeAnnotation // param types for function type annotations
+	// FuncParamOptional[i] is true when parameter i of a function type carried a
+	// `?` marker (`(x?: T) => R`) — omittable at the call site, distinct from an
+	// explicit `T | undefined` which still requires the argument. Parallel to
+	// FuncParams; nil (or short) means no parameter was optional.
+	FuncParamOptional []bool
 	FuncRetType *TypeAnnotation  // return type for function type annotations
 	// FuncHasRest marks the last entry of FuncParams as a rest slot, e.g.
 	// `(...xs: number[]) => T` or `(a: number, ...xs: number[]) => T`. The
