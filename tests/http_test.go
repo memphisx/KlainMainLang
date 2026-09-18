@@ -3,6 +3,7 @@ package tests
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -220,6 +221,63 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "part1;part2" {
 		t.Errorf("body: got %q, want %q", string(body), "part1;part2")
+	}
+}
+
+func TestE2EHTTPCreateServerNoopOptions(t *testing.T) {
+	// ADR-00977: createServer accepts every option whose value states this
+	// dispatcher's fixed behavior — a portable no-op. A Node app passing the
+	// disabled/default values compiles and serves normally.
+	src := `
+import http from 'http'
+http.createServer(
+  { noDelay: true, keepAlive: false, requestTimeout: 0, headersTimeout: 0,
+    maxRequestsPerSocket: 0, insecureHTTPParser: false, requireHostHeader: false },
+  (req: IncomingMessage, res: ServerResponse) => {
+    res.writeHead(200, { "Content-Type": "text/plain" })
+    res.end("ok")
+  }).listen(8971)
+`
+	port := startHTTPServer(t, src, 8971)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("status: got %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "ok" {
+		t.Errorf("body: got %q, want %q", string(body), "ok")
+	}
+}
+
+func TestE2EHTTPCreateServerOptionRejections(t *testing.T) {
+	// ADR-00977: a value that would change behavior — or an unrecognized option —
+	// is a clean rejection, never a silent ignore.
+	cases := []struct{ opt, want string }{
+		{"noDelay: false", "noDelay option supports only the literal true"},
+		{"keepAlive: true", "keepAlive option supports only the literal false"},
+		{"maxRequestsPerSocket: 5", "maxRequestsPerSocket option supports only the literal 0"},
+		{`highWaterMark: "big"`, "highWaterMark option must be a compile-time integer"},
+		{`requestTimeout: "x"`, "requestTimeout must be a compile-time integer"},
+		{`headersTimeout: "y"`, "headersTimeout must be a compile-time integer"},
+		{"maxHeaderSize: 100", "createServer option 'maxHeaderSize' is not supported"},
+	}
+	for _, tc := range cases {
+		src := fmt.Sprintf(`
+import http from 'http'
+http.createServer({ %s }, (req: IncomingMessage, res: ServerResponse) => { res.end("x") }).listen(0)
+`, tc.opt)
+		_, err := resolveAndCompile(t, src)
+		if err == nil {
+			t.Errorf("{ %s }: expected a compile error, got none", tc.opt)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("{ %s }: error %q does not contain %q", tc.opt, err.Error(), tc.want)
+		}
 	}
 }
 
@@ -578,6 +636,188 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
 	want := chunkBytes * totalChunks
 	if bodyLen != want {
 		t.Fatalf("de-chunked body length: got %d, want %d (drain-gated producer stalled → false/'drain' broken)", bodyLen, want)
+	}
+}
+
+func TestE2EHTTPCreateServerHighWaterMark(t *testing.T) {
+	// ADR-00983: createServer's `{ highWaterMark: N }` option threads a per-server
+	// backpressure threshold into every response (default 16384). Here a *tiny*
+	// non-default threshold (256 bytes) is configured: res.write returns false as
+	// soon as more than 256 unsent bytes are queued, so the drain-gated producer
+	// parks almost immediately and resumes on 'drain'. The whole 8 MiB body must
+	// still arrive intact — proving the configured value is honored by the shared
+	// __kml_res_qwrite (a broken thread-through would either not compile, or run
+	// the queue past 256 and never fire 'drain', truncating the body).
+	const chunkBytes = 65536
+	const totalChunks = 128 // 8 MiB
+	src := `
+import http from 'http'
+http.createServer({ highWaterMark: 256 }, (req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200)
+  const chunk = "0123456789ABCDEF".repeat(4096) // 64 KiB
+  let n = 0
+  const pump = () => {
+    let ok = true
+    while (n < 128 && ok) {
+      ok = res.write(chunk)
+      n = n + 1
+    }
+    if (n >= 128) { res.end(); return }
+    res.once('drain', pump)
+  }
+  pump()
+}).listen(8130)
+`
+	port := startHTTPServer(t, src, 8130)
+
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	br := bufio.NewReader(conn)
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read headers: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	bodyLen := 0
+	for {
+		sizeLine, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read chunk size: %v", err)
+		}
+		var sz int64
+		if _, err := fmt.Sscanf(strings.TrimSpace(sizeLine), "%x", &sz); err != nil {
+			t.Fatalf("parse chunk size %q: %v", sizeLine, err)
+		}
+		if sz == 0 {
+			break
+		}
+		buf := make([]byte, sz)
+		if _, err := io.ReadFull(br, buf); err != nil {
+			t.Fatalf("read chunk body: %v", err)
+		}
+		if _, err := br.Discard(2); err != nil {
+			t.Fatalf("discard chunk CRLF: %v", err)
+		}
+		bodyLen += int(sz)
+		if bodyLen < 400000 {
+			time.Sleep(3 * time.Millisecond)
+		}
+	}
+	want := chunkBytes * totalChunks
+	if bodyLen != want {
+		t.Fatalf("de-chunked body length: got %d, want %d (custom highWaterMark broke the drain loop)", bodyLen, want)
+	}
+}
+
+func TestE2EHTTPCreateServerConnectionTimeouts(t *testing.T) {
+	// TDD-00217: a positive headersTimeout/requestTimeout/keepAliveTimeout is
+	// enforced by the reactor. A slow client that never completes its request
+	// headers is closed at headersTimeout; a slow request body is closed at
+	// requestTimeout; an idle kept-alive connection is closed at keepAliveTimeout —
+	// and a normal request is unaffected, before and after each abort.
+	src := `
+import http from 'http'
+http.createServer(
+  { headersTimeout: 300, requestTimeout: 900, keepAliveTimeout: 400 },
+  (req: IncomingMessage, res: ServerResponse) => {
+    res.writeHead(200)
+    res.end("ok")
+  }).listen(8131)
+`
+	port := startHTTPServer(t, src, 8131)
+
+	// A normal request works.
+	if resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port)); err != nil {
+		t.Fatalf("initial GET: %v", err)
+	} else {
+		resp.Body.Close()
+	}
+
+	// closedWithin dials, sends `req` (no completion), and asserts the server
+	// closes the connection (recv → EOF) within [min,max] seconds.
+	closedWithin := func(name, req string, min, max float64) {
+		conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			t.Fatalf("%s dial: %v", name, err)
+		}
+		defer conn.Close()
+		if _, err := conn.Write([]byte(req)); err != nil {
+			t.Fatalf("%s write: %v", name, err)
+		}
+		conn.SetReadDeadline(time.Now().Add(time.Duration(max+1.5) * time.Second))
+		start := time.Now()
+		buf := make([]byte, 256)
+		// Drain any response bytes until EOF (the server closes on timeout).
+		for {
+			if _, err := conn.Read(buf); err != nil {
+				break // EOF / reset → connection closed
+			}
+		}
+		elapsed := time.Since(start).Seconds()
+		if elapsed < min || elapsed > max {
+			t.Errorf("%s: connection closed after %.2fs, want [%.2f, %.2f]", name, elapsed, min, max)
+		}
+	}
+
+	// Incomplete headers → headersTimeout (~0.3s).
+	closedWithin("headersTimeout", "GET /slow HTTP/1.1\r\nHost: x\r\n", 0.15, 0.7)
+	// Headers complete but body never finishes → requestTimeout (~0.9s).
+	closedWithin("requestTimeout",
+		"POST /b HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nAB", 0.6, 1.4)
+
+	// Idle keep-alive → keepAliveTimeout (~0.4s after the response is read).
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("ka dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET /k HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+		t.Fatalf("ka write: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("ka read headers: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	// The 2-byte "ok" body has no Content-Length? It does (res.end sends one), so
+	// read it, then time the idle close.
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	start := time.Now()
+	buf := make([]byte, 256)
+	for {
+		if _, err := conn.Read(buf); err != nil {
+			break
+		}
+	}
+	if elapsed := time.Since(start).Seconds(); elapsed > 1.2 {
+		t.Errorf("keepAliveTimeout: idle connection closed after %.2fs, want < ~1.2", elapsed)
+	}
+
+	// The server is still healthy after all the aborts.
+	if resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port)); err != nil {
+		t.Fatalf("final GET (server died?): %v", err)
+	} else {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(body) != "ok" {
+			t.Errorf("final body: got %q, want ok", string(body))
+		}
 	}
 }
 
@@ -1311,6 +1551,178 @@ server.listen(8303, () => { console.log('listening') })
 	}
 }
 
+func TestE2EHTTPClientErrorListenerFires(t *testing.T) {
+	// TDD-00215: the server 'clientError' event fires when a client truncates a
+	// request mid-parse (bytes buffered, then the peer closes). The listener
+	// records what it saw; a later normal request reports it back, so the test
+	// needs neither server stdout nor a socket write from the listener.
+	src := `
+import http from 'http'
+let count = 0
+let lastCode = "none"
+const server = http.createServer((req, res) => {
+  res.end("count=" + count + " code=" + lastCode)
+})
+server.on('clientError', (err: Error, socket) => {
+  count = count + 1
+  lastCode = err.code
+})
+server.listen(8310)
+`
+	port := startHTTPServer(t, src, 8310)
+	// Truncate a request: partial request, no terminator, then close.
+	c1, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial c1: %v", err)
+	}
+	if _, err := c1.Write([]byte("GET / HTTP/1.1\r\nHost: x")); err != nil {
+		t.Fatalf("write partial: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	c1.Close() // truncate mid-request → clientError(ECONNRESET)
+	time.Sleep(300 * time.Millisecond)
+
+	// A normal request on a fresh connection reports what the listener recorded.
+	c2, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial c2: %v", err)
+	}
+	defer c2.Close()
+	b2 := bufio.NewReader(c2)
+	if _, err := c2.Write([]byte("GET /r HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+	c2.SetReadDeadline(time.Now().Add(4 * time.Second))
+	resp := readContentLengthResponse(t, b2)
+	if !strings.Contains(resp, "count=1") || !strings.Contains(resp, "code=ECONNRESET") {
+		t.Fatalf("clientError did not fire as expected:\n%q", resp)
+	}
+}
+
+func TestE2EHTTPClientErrorDefault431(t *testing.T) {
+	// TDD-00215: with no 'clientError' listener, an oversized header block gets
+	// Node's default 431 response + Connection: close (before this feature the
+	// connection was closed silently).
+	src := `
+import http from 'http'
+http.createServer((req, res) => { res.end("ok") }).listen(8311)
+`
+	port := startHTTPServer(t, src, 8311)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\n")); err != nil {
+		t.Fatalf("write req line: %v", err)
+	}
+	// Overflow the 10MiB header-block cap: keep sending header bytes with no
+	// terminator until the server aborts (write fails) or we pass the cap.
+	pad := []byte("X-Pad: " + strings.Repeat("a", 65536) + "\r\n")
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	for sent := 0; sent < 11*1024*1024; {
+		n, werr := conn.Write(pad)
+		sent += n
+		if werr != nil {
+			break // server aborted + closed mid-send — expected
+		}
+	}
+	conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+	resp, _ := io.ReadAll(conn)
+	if !strings.Contains(string(resp), "431") {
+		t.Fatalf("no 431 default for header overflow:\n%q", string(resp))
+	}
+}
+
+func TestE2EHTTPClientErrorSocketWriteEnd(t *testing.T) {
+	// TDD-00215: the net.Socket handed to a 'clientError' listener now supports
+	// socket.write()/socket.end() (previously the runtime symbols weren't linked
+	// on an http-only program). The listener writes its own response on the
+	// oversized-header path, replacing Node's default 431.
+	src := `
+import http from 'http'
+const server = http.createServer((req, res) => { res.end("ok") })
+server.on('clientError', (err: Error, socket) => {
+  socket.write("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 7\r\n\r\ncustom!")
+  socket.end()
+})
+server.listen(8312)
+`
+	port := startHTTPServer(t, src, 8312)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\n")); err != nil {
+		t.Fatalf("write req line: %v", err)
+	}
+	pad := []byte("X-Pad: " + strings.Repeat("a", 65536) + "\r\n")
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	for sent := 0; sent < 11*1024*1024; {
+		n, werr := conn.Write(pad)
+		sent += n
+		if werr != nil {
+			break
+		}
+	}
+	conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+	resp, _ := io.ReadAll(conn)
+	if !strings.Contains(string(resp), "400 Bad Request") || !strings.Contains(string(resp), "custom!") {
+		t.Fatalf("listener's socket.write/end response not received:\n%q", string(resp))
+	}
+	if strings.Contains(string(resp), "431") {
+		t.Fatalf("default 431 sent despite a listener owning the response:\n%q", string(resp))
+	}
+}
+
+func TestE2EHTTPServerErrorEventEADDRINUSE(t *testing.T) {
+	// TDD-00215 Stage 2: binding a port already held by another server fires the
+	// server 'error' event with err.code === 'EADDRINUSE' instead of aborting the
+	// process. The listener runs synchronously at listen() time; exiting from it
+	// keeps the event loop (still holding s1's listener) from running.
+	src := `
+import http from 'http'
+const s1 = http.createServer((req, res) => { res.end("a") })
+s1.listen(8317)
+const s2 = http.createServer((req, res) => { res.end("b") })
+s2.on('error', (err: Error) => {
+  console.log("error code=" + err.code)
+  process.exit(0)
+})
+s2.listen(8317)
+console.log("unreachable")
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "error code=EADDRINUSE") {
+		t.Fatalf("expected EADDRINUSE error event, got:\n%q", out)
+	}
+	if strings.Contains(out, "unreachable") {
+		t.Fatalf("code after a fired-and-exited error handler ran:\n%q", out)
+	}
+}
+
+func TestE2EHTTPServerErrorEventNoListenerThrows(t *testing.T) {
+	// TDD-00215 Stage 2: with no 'error' listener registered, a bind failure still
+	// surfaces as an uncaught, process-aborting error (Node parity) — the
+	// pre-feature behavior of __kml_http_bind_and_listen is preserved.
+	src := `
+import http from 'http'
+const s1 = http.createServer((req, res) => { res.end("a") })
+s1.listen(8318)
+const s2 = http.createServer((req, res) => { res.end("b") })
+s2.listen(8318)
+console.log("unreachable")
+`
+	out, code := compileAndRunExpectExitImports(t, src)
+	if code == 0 {
+		t.Fatalf("expected nonzero exit on unhandled bind failure, got 0:\n%q", out)
+	}
+	if strings.Contains(out, "unreachable") {
+		t.Fatalf("code after an unhandled bind failure ran:\n%q", out)
+	}
+}
+
 // readContentLengthResponse reads one HTTP/1.1 response whose body length is
 // given by its Content-Length header.
 func readContentLengthResponse(t *testing.T, br *bufio.Reader) string {
@@ -1763,6 +2175,220 @@ http.listen(8952, async (req: HttpRequest): Promise<Res> => {
 	<-slowDone
 }
 
+// TestE2EHTTPCreateServerAsyncHandlerAwaitFetch is the regression for
+// ADR-00985: a Node http.createServer((req,res) => …) async handler that
+// awaits a *task-shaped* promise — a call to a may-suspend async fn (here
+// proxy(), which itself awaits fetch) — while running on a connection fiber.
+// Before the fix, __kml_task_await_ready had no fiber-aware park path: the
+// fiber fell into the top-level busy-drive (toploop), whose
+// __kml_task_sched_step clobbered @__kml_main_ctx (it swapcontexts
+// main->task but was itself run from the fiber, not the real main context).
+// The fiber then returned through its now-stale uc_link and jumped wild — the
+// heap was already trashed by the time __kml_http_send_response's malloc/free
+// ran (SIGABRT in the allocator lock; a smashed return address under ASan). An
+// instant upstream is the trigger (the fetch completes before the reactor
+// parks). Awaiting fetch *directly* in the handler never hit this — that parks
+// the fiber via __kml_await_fetch_headers' maybeconn — which is why the
+// res-path async handler rotted uncovered. The return-value http.listen path
+// (TestE2EHTTPListenAsyncHandlerAwaitFetch) was likewise fine.
+func TestE2EHTTPCreateServerAsyncHandlerAwaitFetch(t *testing.T) {
+	upstream := newDelayedUpstreamServer(t, 0) // instant upstream — the crashing timing
+	src := fmt.Sprintf(`
+import http from 'http'
+async function proxy(path: string): Promise<string> {
+  const r = await fetch("%s" + path)
+  return await r.text()
+}
+const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  const v = await proxy(req.url)
+  res.writeHead(200)
+  res.end("front:" + v)
+})
+server.listen(8196)
+`, upstream.URL)
+	port := startHTTPServer(t, src, 8196)
+
+	// A single request already crashed pre-fix; run several sequentially so a
+	// survivor after the first proves the fiber's main_ctx was not corrupted.
+	for i := 0; i < 4; i++ {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/s%d", port, i))
+		if err != nil {
+			t.Fatalf("seq GET %d: %v", i, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		want := fmt.Sprintf("front:upstream /s%d", i)
+		if string(body) != want {
+			t.Errorf("seq GET %d body: got %q, want %q", i, string(body), want)
+		}
+	}
+
+	// Concurrent connections, each awaiting the proxy fetch — the timing that
+	// most reliably crashed pre-fix.
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/c%d", port, i))
+			if err != nil {
+				t.Errorf("conc GET %d: %v", i, err)
+				return
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			want := fmt.Sprintf("front:upstream /c%d", i)
+			if string(body) != want {
+				t.Errorf("conc GET %d body: got %q, want %q", i, string(body), want)
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+// TestE2EHTTPCreateServerAsyncHandlerConcurrentTaskAwait proves ADR-00986's
+// follow-up (a): a handler that awaits a task-shaped promise (here `proxy`, an
+// async helper that itself awaits a slow upstream) parks by yielding its
+// connection fiber to the event loop instead of busy-waiting it — so several
+// such requests run concurrently. With the pre-ADR-00986 busy-wait each fiber
+// held the loop to itself and the requests serialized (N × the upstream delay);
+// concurrent, N requests finish in ≈ one upstream delay.
+func TestE2EHTTPCreateServerAsyncHandlerConcurrentTaskAwait(t *testing.T) {
+	const upstreamDelay = 300 * time.Millisecond
+	upstream := newDelayedUpstreamServer(t, upstreamDelay)
+	src := fmt.Sprintf(`
+import http from 'http'
+async function proxy(path: string): Promise<string> {
+  const r = await fetch("%s" + path)
+  return await r.text()
+}
+const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  const v = await proxy("/slow")
+  res.writeHead(200)
+  res.end("front:" + v)
+})
+server.listen(8198)
+`, upstream.URL)
+	port := startHTTPServer(t, src, 8198)
+
+	const n = 4
+	start := time.Now()
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/c%d", port, i))
+			if err != nil {
+				errs <- err
+				return
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if string(body) != "front:upstream /slow" {
+				errs <- fmt.Errorf("req %d body: got %q", i, string(body))
+			}
+		}(i)
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	// Serialized would be ≈ n×300ms = 1.2s; concurrent is ≈ 300ms. Assert well
+	// under the serialized figure with generous headroom for scheduling/CI jitter.
+	if elapsed > upstreamDelay*(n-1) {
+		t.Fatalf("%d concurrent task-await requests took %v — serialized, not concurrent (upstream delay %v)", n, elapsed, upstreamDelay)
+	}
+}
+
+// TestE2EHTTPCreateServerAsyncHandlerInProcessClient proves ADR-00986's
+// follow-up (b): a server whose async handler awaits a task-shaped promise
+// (here a setTimeout-backed delay) is driven by an in-process http.get client
+// on the same event loop. Before the fix, once the handler's fiber yielded and
+// then wrote its response the loop blocked in select() with no JS timer and an
+// idle curl deadline, so the in-process client's completion reaction never
+// fired and the process hung. The @__kml_conn_ran non-blocking-poll forces the
+// following curl drive that delivers the response. The program exits 0 on
+// success; a hang trips the context deadline.
+func TestE2EHTTPCreateServerAsyncHandlerInProcessClient(t *testing.T) {
+	bin := buildBinaryImports(t, `
+import http from 'http';
+async function delay(ms: number): Promise<void> {
+  return await new Promise<void>((r) => setTimeout(() => r(), ms));
+}
+http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  await delay(20);
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("kalimera from the server");
+}).listen(18547, () => {
+  http.get("http://127.0.0.1:18547/", (res) => {
+    let body = "";
+    res.on('data', (chunk: string) => { body = body + chunk; });
+    res.on('end', () => {
+      console.log("status:" + res.statusCode);
+      console.log("body:" + body);
+      process.exit(0);
+    });
+  });
+});
+`)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin).Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatal("timed out — the in-process client's completion reaction was never delivered (event loop blocked after the async handler yielded)")
+	}
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.TrimRight(string(out), "\n")
+	want := "status:200\nbody:kalimera from the server"
+	if got != want {
+		t.Fatalf("output: got %q, want %q", got, want)
+	}
+}
+
+// TestE2EHTTP2CreateServerAsyncHandlerAwaitFetch is the http2.createServer
+// (h2c) counterpart of the crash above (ADR-00985): the same fiber-park bug
+// detonated as a smashed return address under ASan on the h2 path. Several
+// requests in a row prove the server survives the first async-handler await.
+func TestE2EHTTP2CreateServerAsyncHandlerAwaitFetch(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not found in PATH")
+	}
+	upstream := newDelayedUpstreamServer(t, 0) // instant upstream — the crashing timing
+	src := fmt.Sprintf(`
+import http2 from 'http2'
+async function proxy(path: string): Promise<string> {
+  const r = await fetch("%s" + path)
+  return await r.text()
+}
+const server = http2.createServer(async (req, res) => {
+  const v = await proxy(req.path)
+  res.writeHead(200)
+  res.end("front:" + v)
+})
+server.listen(8197)
+`, upstream.URL)
+	port := startHTTPServer(t, src, 8197)
+
+	for i := 0; i < 3; i++ {
+		out, err := exec.Command(nativeCurl(), "-s", "--http2-prior-knowledge",
+			fmt.Sprintf("http://127.0.0.1:%d/h%d", port, i)).CombinedOutput()
+		if err != nil {
+			t.Fatalf("curl h2c #%d: %v\n%s", i, err, out)
+		}
+		want := fmt.Sprintf("front:upstream /h%d", i)
+		if got := strings.TrimSpace(string(out)); got != want {
+			t.Errorf("h2c #%d: got %q, want %q", i, got, want)
+		}
+	}
+}
+
 // --- ADR-00072: request headers, query string, request body, response headers ---
 
 func TestE2EHTTPListenRequestHeadersLowercasedLookup(t *testing.T) {
@@ -2178,6 +2804,84 @@ http.listen(8963, (req: HttpRequest): Res => {
 	}
 	if len(seen) < 2 {
 		t.Fatalf("expected %d concurrent requests to be served by more than one distinct worker PID (proves fork+shared-listener+non-blocking-accept work together, not just that the binary starts), got only %v", n, seen)
+	}
+}
+
+// TestE2EHTTPClusterCombinedWithCreateServer (ADR-00989): a klain:http
+// `http.listen(..., { workers: N })` cluster and an additional Node
+// `http.createServer(...).listen(...)` in one program — previously a clean
+// rejection. Both ports must answer, and the cluster port must be served by more
+// than one worker PID (proving the fork happened after both listeners were bound
+// and every worker inherited both).
+func TestE2EHTTPClusterCombinedWithCreateServer(t *testing.T) {
+	skipClusterDistributionOnWindows(t, "expects several worker PIDs across two servers")
+	p1 := freePort(t) // Node createServer (primary)
+	p2 := freePort(t) // klain:http cluster (additional listener)
+	src := fmt.Sprintf(`
+import http from 'http'
+import khttp from 'klain:http'
+interface Res { status: number; body: string }
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200)
+  res.end("extra")
+}).listen(%d)
+khttp.listen(%d, (req: HttpRequest): Res => {
+  return { status: 200, body: process.pid.toString() }
+}, { workers: 3 })
+`, p1, p2)
+	binFile := buildBinaryImports(t, src)
+	cmd := exec.Command(binFile)
+	setProcGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	t.Cleanup(func() {
+		killProcGroup(cmd)
+		_ = cmd.Wait()
+		waitPortFree(fmt.Sprintf("127.0.0.1:%d", p1))
+		waitPortFree(fmt.Sprintf("127.0.0.1:%d", p2))
+	})
+	waitListening(t, p1)
+	waitListening(t, p2)
+
+	get := func(port int) string {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+		if err != nil {
+			return ""
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return string(body)
+	}
+
+	// The additional Node server answers.
+	if b := get(p1); b != "extra" {
+		t.Errorf("createServer port body: got %q, want %q", b, "extra")
+	}
+
+	// The cluster port answers and is served by more than one worker PID —
+	// concurrent requests (not sequential, which a shared-accept cluster routes
+	// to whichever worker wins the race, usually the same one).
+	const n = 40
+	results := make(chan string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- get(p2)
+		}()
+	}
+	wg.Wait()
+	close(results)
+	seen := map[string]int{}
+	for r := range results {
+		if r != "" {
+			seen[r]++
+		}
+	}
+	if len(seen) < 2 {
+		t.Fatalf("expected the cluster port to be served by more than one worker PID, got %v", seen)
 	}
 }
 

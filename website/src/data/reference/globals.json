@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "20/21",
     "loosePct": 95,
-    "strict": "11/21",
-    "strictPct": 52
+    "strict": "14/21",
+    "strictPct": 67
   },
   "lede": "JavaScript's language-level globals — numeric parsing, type coercion, URI/base64 codecs, and deep cloning — compiled to plain C-stdlib calls with no runtime engine. globalThis.X works as an alias for the bare ambient global X (member access to known globals only — there's no dynamic global object). Dynamic eval is out of scope — it needs the (unstarted) embedded engine, though a compile-time-constant eval(\"<expression>\") does route through this compiler's own parser. Malformed input is rejected where JS rejects it — decodeURI/decodeURIComponent throw URIError and atob enforces forgiving-base64 with QuotaExceededError.",
   "entries": [
@@ -59,17 +59,14 @@
       "name": "String(x)",
       "statusRow": "String(x)",
       "signature": "String(x: any): string",
-      "badge": "caveats",
-      "description": "Coerces a value to its string form. Routes through the template-literal renderer; an any input dispatches on its runtime tag.",
+      "badge": "exact",
+      "description": "Coerces a value to its string form. Routes through the template-literal renderer; an any input dispatches on its runtime tag. `String()` with no argument is `\"\"` and `String(undefined)` is `\"undefined\"`, matching JS.",
       "returns": {
         "type": "string",
         "desc": "The stringified value."
       },
       "exampleKey": "basics/namespaces",
       "snippet": "return String(km * 621371 / 1000000) + \"mi\";",
-      "differences": [
-        "`String()` with no argument is `\"\"`, not real JS's `\"undefined\"` (a genuinely absent value doesn't arise in typed code)."
-      ],
       "seeAlso": [
         "globals.Number",
         "globals.Boolean"

@@ -49,6 +49,83 @@ func (e *Emitter) ensureNtohs() {
 	e.emitGlobal("declare i16 @ntohs(i16 noundef)")
 }
 
+// ensureNetSockIO emits the two low-level net.Socket byte-IO helpers
+// (__kml_net_sock_write, __kml_net_sock_close) and nothing else, so a path that
+// hands out a net.Socket without standing up a net server (the HTTP
+// 'clientError'/'connection' events) can still support socket.write/end/destroy.
+// The full net runtime calls this too; the flag keeps it single-definition.
+// __kml_tls_write/free are resolved (real extern or no-op stub) by
+// emitTLSNetSymbols in the finalize pass, whose gate includes usedNetSockIO.
+func (e *Emitter) ensureNetSockIO() {
+	if e.usedNetSockIO {
+		return
+	}
+	e.usedNetSockIO = true
+	e.ensureWriteDecl()
+	e.ensureCloseDecl()
+	sock := netSocketIR
+	// __kml_net_sock_write(sock, data, n): write n bytes to the connection fd
+	// (no-op once closed).
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_net_sock_write(ptr %%sock, ptr %%data, i64 %%n) {
+entry:
+  %%fd_p = getelementptr %s, ptr %%sock, i32 0, i32 0
+  %%fd64 = load i64, ptr %%fd_p, align 8
+  %%open = icmp sge i64 %%fd64, 0
+  br i1 %%open, label %%wr, label %%ret
+wr:
+  %%fd = trunc i64 %%fd64 to i32
+  %%ssl_p = getelementptr %s, ptr %%sock, i32 0, i32 5
+  %%ssl = load ptr, ptr %%ssl_p, align 8
+  %%istls = icmp ne ptr %%ssl, null
+  br i1 %%istls, label %%wtls, label %%wraw
+wtls:
+  call i64 @__kml_tls_write(ptr %%ssl, ptr %%data, i64 %%n)
+  br label %%ret
+wraw:
+  call i64 @write(i32 %%fd, ptr %%data, i64 %%n)
+  br label %%ret
+ret:
+  ret void
+}
+define void @__kml_net_sock_close(ptr %%sock) {
+entry:
+  %%fd_p = getelementptr %s, ptr %%sock, i32 0, i32 0
+  %%fd64 = load i64, ptr %%fd_p, align 8
+  %%open = icmp sge i64 %%fd64, 0
+  br i1 %%open, label %%cl, label %%ret
+cl:
+  %%fd = trunc i64 %%fd64 to i32
+  %%ssl_p = getelementptr %s, ptr %%sock, i32 0, i32 5
+  %%ssl = load ptr, ptr %%ssl_p, align 8
+  %%istls = icmp ne ptr %%ssl, null
+  br i1 %%istls, label %%cfree, label %%craw
+cfree:
+  call void @__kml_tls_free(ptr %%ssl)
+  store ptr null, ptr %%ssl_p, align 8
+  br label %%craw
+craw:
+  call i32 @close(i32 %%fd)
+  store i64 -1, ptr %%fd_p, align 8
+  %%st_p = getelementptr %s, ptr %%sock, i32 0, i32 1
+  store i64 1, ptr %%st_p, align 8
+  %%clsn_p = getelementptr { i64, i64, ptr, ptr, ptr, ptr, ptr, ptr }, ptr %%sock, i32 0, i32 6
+  %%clsn = load ptr, ptr %%clsn_p, align 8
+  %%hasclsn = icmp ne ptr %%clsn, null
+  br i1 %%hasclsn, label %%firecl, label %%ret
+firecl:
+  store ptr null, ptr %%clsn_p, align 8
+  %%clsnfp_p = getelementptr { ptr, ptr }, ptr %%clsn, i32 0, i32 0
+  %%clsnfp = load ptr, ptr %%clsnfp_p, align 8
+  %%clsnep_p = getelementptr { ptr, ptr }, ptr %%clsn, i32 0, i32 1
+  %%clsnep = load ptr, ptr %%clsnep_p, align 8
+  call void %%clsnfp(ptr %%clsnep)
+  br label %%ret
+ret:
+  ret void
+}`, sock, sock, sock, sock, sock))
+}
+
 func (e *Emitter) ensureNetRuntime() {
 	if e.usedNetRuntime {
 		return
@@ -282,66 +359,11 @@ failnull:
   ret ptr null
 }`, famStore, nonblock, sock))
 
-	// __kml_net_sock_write(sock, data, n): write n bytes to the connection fd
-	// (no-op once closed).
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_net_sock_write(ptr %%sock, ptr %%data, i64 %%n) {
-entry:
-  %%fd_p = getelementptr %s, ptr %%sock, i32 0, i32 0
-  %%fd64 = load i64, ptr %%fd_p, align 8
-  %%open = icmp sge i64 %%fd64, 0
-  br i1 %%open, label %%wr, label %%ret
-wr:
-  %%fd = trunc i64 %%fd64 to i32
-  %%ssl_p = getelementptr %s, ptr %%sock, i32 0, i32 5
-  %%ssl = load ptr, ptr %%ssl_p, align 8
-  %%istls = icmp ne ptr %%ssl, null
-  br i1 %%istls, label %%wtls, label %%wraw
-wtls:
-  call i64 @__kml_tls_write(ptr %%ssl, ptr %%data, i64 %%n)
-  br label %%ret
-wraw:
-  call i64 @write(i32 %%fd, ptr %%data, i64 %%n)
-  br label %%ret
-ret:
-  ret void
-}
-define void @__kml_net_sock_close(ptr %%sock) {
-entry:
-  %%fd_p = getelementptr %s, ptr %%sock, i32 0, i32 0
-  %%fd64 = load i64, ptr %%fd_p, align 8
-  %%open = icmp sge i64 %%fd64, 0
-  br i1 %%open, label %%cl, label %%ret
-cl:
-  %%fd = trunc i64 %%fd64 to i32
-  %%ssl_p = getelementptr %s, ptr %%sock, i32 0, i32 5
-  %%ssl = load ptr, ptr %%ssl_p, align 8
-  %%istls = icmp ne ptr %%ssl, null
-  br i1 %%istls, label %%cfree, label %%craw
-cfree:
-  call void @__kml_tls_free(ptr %%ssl)
-  store ptr null, ptr %%ssl_p, align 8
-  br label %%craw
-craw:
-  call i32 @close(i32 %%fd)
-  store i64 -1, ptr %%fd_p, align 8
-  %%st_p = getelementptr %s, ptr %%sock, i32 0, i32 1
-  store i64 1, ptr %%st_p, align 8
-  %%clsn_p = getelementptr { i64, i64, ptr, ptr, ptr, ptr, ptr, ptr }, ptr %%sock, i32 0, i32 6
-  %%clsn = load ptr, ptr %%clsn_p, align 8
-  %%hasclsn = icmp ne ptr %%clsn, null
-  br i1 %%hasclsn, label %%firecl, label %%ret
-firecl:
-  store ptr null, ptr %%clsn_p, align 8
-  %%clsnfp_p = getelementptr { ptr, ptr }, ptr %%clsn, i32 0, i32 0
-  %%clsnfp = load ptr, ptr %%clsnfp_p, align 8
-  %%clsnep_p = getelementptr { ptr, ptr }, ptr %%clsn, i32 0, i32 1
-  %%clsnep = load ptr, ptr %%clsnep_p, align 8
-  call void %%clsnfp(ptr %%clsnep)
-  br label %%ret
-ret:
-  ret void
-}`, sock, sock, sock, sock, sock))
+	// The two low-level byte-IO helpers (__kml_net_sock_write/close) live in
+	// ensureNetSockIO so a path that hands out a net.Socket without standing up a
+	// net server (an HTTP 'clientError' listener calling socket.end()) can pull
+	// in just those two.
+	e.ensureNetSockIO()
 
 	// __kml_net_keepalive(): true while any server is listening (fd >= 0,
 	// not closed) or any connection is still open.

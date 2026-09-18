@@ -181,8 +181,10 @@
             "feature": "`.codePointAt(i)`",
             "status": "implemented",
             "caveats": [
-              "This compiler's strings are plain byte sequences, not real UTF-16 — no surrogate-pair/multi-byte decoding, so this is exactly `.charCodeAt(i)`'s byte value under a second name; correct only for ASCII/Latin-1 text ([ADR-00028](../adr/ADR-00028.md))",
-              "An out-of-range index returns a real `undefined` (as in Node), so the result type is `number \\| undefined` — narrow, `?? n`, or `!` before use ([ADR-00782](../adr/ADR-00782.md), [TDD-00187](../tdd/TDD-00187.md)); `.charCodeAt`'s out-of-range `NaN` is a separate, already-faithful behavior"
+              "This compiler's strings are plain byte sequences, not real UTF-16 — no surrogate-pair/multi-byte decoding, so this is exactly `.charCodeAt(i)`'s byte value under a second name; correct only for ASCII/Latin-1 text ([ADR-00028](../adr/ADR-00028.md))"
+            ],
+            "notes": [
+              "An out-of-range index returns a real `undefined` (as in Node), so the result type is `number \\| undefined` — narrow, `?? n`, or `!` before use. See [ADR-00782](../adr/ADR-00782.md), [TDD-00187](../tdd/TDD-00187.md)"
             ]
           },
           {
@@ -222,7 +224,10 @@
             "feature": "`.localeCompare(other)`",
             "status": "implemented",
             "caveats": [
-              "Length-aware byte-order comparison (normalized to exactly `-1`/`0`/`1`, binary-safe past an embedded NUL — [TDD-00120](../tdd/TDD-00120.md)/[ADR-00364](../adr/ADR-00364.md)), not real Unicode collation — no locale/`Intl` infrastructure ([ADR-00028](../adr/ADR-00028.md))"
+              "Byte-order comparison, not real Unicode collation — no locale/`Intl` infrastructure"
+            ],
+            "notes": [
+              "Length-aware, normalized to exactly `-1`/`0`/`1`, binary-safe past an embedded NUL. See [TDD-00120](../tdd/TDD-00120.md), [ADR-00364](../adr/ADR-00364.md), [ADR-00028](../adr/ADR-00028.md)"
             ]
           },
           {

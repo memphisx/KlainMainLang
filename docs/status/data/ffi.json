@@ -27,7 +27,10 @@
             "feature": "`ffi.dlopen(path, definitions?)` → `{ lib, functions }`",
             "status": "implemented",
             "caveats": [
-              "`definitions` must be an object literal — signatures are resolved at compile time (a runtime-computed signature has no AOT lowering); the `path` may be any runtime string, or `null` for the current process image"
+              "`definitions` must be an object literal — signatures are resolved at compile time (a runtime-computed signature has no AOT lowering)"
+            ],
+            "notes": [
+              "The `path` may be any runtime string, or `null` for the current process image"
             ]
           },
           {
@@ -41,8 +44,11 @@
             "feature": "`lib.getFunction(name, signature)` / `lib.getFunctions(definitions)`",
             "status": "implemented",
             "caveats": [
-              "`signature` must be a compile-time object literal (same reason as `dlopen` definitions); the bound function's `.pointer` property works",
+              "`signature` must be a compile-time object literal (same reason as `dlopen` definitions)",
               "Re-resolving the same symbol with a different signature is not diagnosed (Node throws)"
+            ],
+            "notes": [
+              "The bound function's `.pointer` property works"
             ]
           },
           {
@@ -53,14 +59,19 @@
             "feature": "`library.functions` / `library.symbols` / no-arg `getFunctions()` / `getSymbols()`",
             "status": "implemented",
             "caveats": [
-              "The accumulator is compile-time: names registered through literal `getFunction`/`getSymbol` calls and `dlopen`/`getFunctions` definitions on that library value, in resolution order (a runtime-string name is resolved but not recorded); addresses are re-`dlsym`'d at the read point"
+              "The accumulator is compile-time — a runtime-string name is resolved but not recorded"
+            ],
+            "notes": [
+              "Records names registered through literal `getFunction`/`getSymbol` calls and `dlopen`/`getFunctions` definitions on that library value, in resolution order; addresses are re-`dlsym`'d at the read point"
             ]
           },
           {
             "feature": "Typed calls + marshalling (all scalar types, `string`, `pointer`, `buffer`, `arraybuffer`, 64-bit ↔ `bigint`)",
             "status": "implemented",
             "caveats": [
-              "`int64`/`uint64` parameters also accept a plain `number` (Node requires `bigint`); `bool` marshals as 0/1 numbers, matching Node",
+              "`int64`/`uint64` parameters also accept a plain `number` (Node requires `bigint`); `bool` marshals as 0/1 numbers, matching Node"
+            ],
+            "notes": [
               "A `function`-typed value can be passed through as a raw `bigint` address; to hand C a callable made from a closure, use `library.registerCallback([sig,] cb)` (its own row below), which emits a real C-ABI function pointer"
             ]
           },

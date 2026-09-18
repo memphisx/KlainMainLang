@@ -68,7 +68,7 @@ func (e *Emitter) emitInspectObject(val Value, depth int) (Value, error) {
 		// internal `__kml_objlit_N` name.
 		name = inspectClassName(val.Ty.ClassName) + " "
 	}
-	fields := val.Ty.VisibleFields()
+	fields := esOrderedFields(val.Ty.VisibleFields()) // ES key order (Node)
 	if len(fields) == 0 {
 		return Value{Ref: e.internString(name + "{}"), Ty: TypePtr}, nil
 	}
@@ -572,6 +572,25 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 	case v.Ty.IsArray:
 		if depth > e.effectiveInspectDepth() {
 			return Value{Ref: e.internString("[Array]"), Ty: TypePtr}, nil
+		}
+		// A `T[] | undefined` element (a nested-array element absence, TDD-00221)
+		// renders as its keyword on a miss (null data-ptr), not `[]`. Inspecting a
+		// null-data-ptr array is itself safe (len 0 → "[]"), so a select suffices.
+		if v.Ty.Nullable {
+			dataPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, v.Ref))
+			isAbsent := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isAbsent, dataPtr))
+			base := v.Ty
+			base.Nullable, base.IsUndefined = false, false
+			arr, err := e.emitInspectArray(Value{Ref: v.Ref, Ty: base}, depth)
+			if err != nil {
+				return Value{}, err
+			}
+			sel := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s",
+				sel, isAbsent, e.internString(absentLiteral(v.Ty)), arr.Ref))
+			return Value{Ref: sel, Ty: TypePtr}, nil
 		}
 		return e.emitInspectArray(v, depth)
 	case v.Ty.IsFunc:

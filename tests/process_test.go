@@ -240,7 +240,7 @@ try {
     process.chdir("/definitely/does/not/exist/kml-test-dir")
     console.log("should not print")
 } catch (e) {
-    console.log(e.message.startsWith("cannot change directory to '/definitely/does/not/exist/kml-test-dir': "))
+    console.log(e.message === "ENOENT: no such file or directory, chdir '/definitely/does/not/exist/kml-test-dir'" && (e as any).code === "ENOENT")
 }
 `, "true")
 }

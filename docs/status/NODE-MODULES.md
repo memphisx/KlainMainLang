@@ -45,12 +45,12 @@ Format: [Status page format](README.md#status-page-format). ✅ = the module wor
 
 The primary export of each is a spec-identical re-export of an ambient global, and as of [TDD-00165](../tdd/TDD-00165.md) (Stages 1–3, [ADR-00666](../adr/ADR-00666.md)–[ADR-00668](../adr/ADR-00668.md)) it is **fully importable in every common form** — same-name (`import { URL } from 'url'`), `node:` (`import { setTimeout } from 'node:timers'`), the `events` default (`import EventEmitter from 'events'`), and **aliased** (`import { URL as U } from 'url'`, `{ setTimeout as later }`, `{ Buffer as B }`) — validated and either erased to the global or renamed/rebuilt onto it (using the global directly still works too). What remains is **Stage 4**: the genuinely module-only *extras* with no same-named global — legacy `url.parse`/`format`/`fileURLToPath`, `perf_hooks.PerformanceObserver`, `timers/promises` — which are separate not-yet-built feature surfaces. `Buffer` is a Node-*specific* global (not a Web API).
 
-| Module | Status | Caveats |
-|---|---|---|
-| `buffer` (`Buffer`) | ✅ | • A Node-specific global; `import { Buffer } from 'buffer'`/`'node:buffer'` works, same-name and aliased (`Buffer.from` member call → Stage 2 rename). `Blob`/`atob`/`btoa` importable too → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md) |
-| `timers` | ✅ | • `import { setTimeout }`/`setInterval`/`setImmediate`/`clear*` from 'timers'/'node:timers' works, same-name and aliased; the Web globals also work without import → [Timers](TIMERS.md). Pending: `timers/promises` |
-| `url` | ✅ | • `import { URL, URLSearchParams } from 'url'` works (same-name + aliased); the legacy `url`-module functions (`parse`/`format`/`fileURLToPath`/`pathToFileURL`/`resolve`/…) work too → [URL](URL.md). Remaining: IDN conversion is libcurl-backend-gated; lenient relative parsing deferred |
-| `perf_hooks` | ✅ | • `import { performance } from 'perf_hooks'` works, same-name and aliased; `PerformanceObserver` works (synchronous V1) → [Performance & Timing](PERFORMANCE-TIMING.md). Pending: `monitorEventLoopDelay`/`createHistogram` and async-batched observer delivery |
+| Module | Status | Caveats | Notes |
+|---|---|---|---|
+| `buffer` (`Buffer`) | ✅ | | • A Node-specific global; `import { Buffer } from 'buffer'`/`'node:buffer'` works, same-name and aliased (`Buffer.from` member call → Stage 2 rename). `Blob`/`atob`/`btoa` importable too → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md) |
+| `timers` | ✅ | • Pending: `timers/promises` | • `import { setTimeout }`/`setInterval`/`setImmediate`/`clear*` from 'timers'/'node:timers' works, same-name and aliased; the Web globals also work without import → [Timers](TIMERS.md) |
+| `url` | ✅ | • IDN conversion is libcurl-backend-gated<br>• Lenient relative parsing deferred | • `import { URL, URLSearchParams } from 'url'` works (same-name + aliased); the legacy `url`-module functions (`parse`/`format`/`fileURLToPath`/`pathToFileURL`/`resolve`/…) work too → [URL](URL.md) |
+| `perf_hooks` | ✅ | • `PerformanceObserver` is synchronous V1 (no async-batched observer delivery)<br>• Pending: `monitorEventLoopDelay`/`createHistogram` | • `import { performance } from 'perf_hooks'` works, same-name and aliased; `PerformanceObserver` works → [Performance & Timing](PERFORMANCE-TIMING.md) |
 
 ## Not started (in scope)
 

@@ -1555,6 +1555,12 @@ func AbortSignalType() Type {
 		// none). The fetch await loop / event loop fold this in via
 		// __kml_signal_aborted so a slow request is cancelled at the deadline.
 		{Name: "deadlineNs", Ty: TypeI64},
+		// onabort: the event-handler-property listener slot (`signal.onabort =
+		// cb`), a closure header ptr or null. Kept LAST so aborted (field 0) and
+		// deadlineNs (field 3) keep the fixed indices __kml_signal_aborted relies
+		// on. Fired alongside the addEventListener listeners in
+		// emitAbortControllerAbort (ADR-00983).
+		{Name: "onabort", Ty: TypePtr},
 	})
 	t.IsAbortSignal = true
 	return t
@@ -2126,6 +2132,12 @@ func ServerResponseType() Type {
 		{Name: "__kml_outq", Ty: TypePtr},
 		{Name: "__kml_drain_cb", Ty: TypePtr},
 		{Name: "__kml_drain_once", Ty: TypeI64},
+		// ADR-00983: the backpressure threshold (bytes of unsent, queued output
+		// past which res.write returns false and a later empty fires 'drain').
+		// Node's default is 16384; a createServer `{ highWaterMark: N }` option
+		// threads its value here per response so the shared __kml_res_qwrite reads
+		// it at runtime instead of a baked-in constant.
+		{Name: "__kml_hwm", Ty: TypeI64},
 	})
 	ty.IsServerResponse = true
 	return ty
@@ -2274,6 +2286,17 @@ func PathParsedType() Type {
 		{Name: "base", Ty: TypePtr},
 		{Name: "ext", Ty: TypePtr},
 		{Name: "name", Ty: TypePtr},
+	})
+}
+
+// EncodeIntoResultType returns TextEncoder.encodeInto's result shape,
+// { read, written }: the number of source code units read and the number of
+// bytes written into the destination. A plain heap object read through the
+// ordinary field-access path, like PathParsedType.
+func EncodeIntoResultType() Type {
+	return ObjectType([]Field{
+		{Name: "read", Ty: TypeI64},
+		{Name: "written", Ty: TypeI64},
 	})
 }
 

@@ -62,6 +62,22 @@ console.log("false" == 0);
 `, "true\nfalse")
 }
 
+// A ternary mixing a non-pointer scalar branch (number) with a pointer/reference
+// branch (object) has a genuine union result (`number | object`) this typed-subset
+// compiler can't put in one result slot — previously it coerced the object branch
+// to the scalar's IR and emitted `store double %p, ptr %slot` (a clang-stage
+// failure). Reject cleanly instead. ADR-00975.
+func TestE2ETernaryScalarObjectMixRejectedStrict(t *testing.T) {
+	mustCompileError(t, `
+type Addr = { port: number }
+function f(addr: Addr): void {
+  const p = addr ? addr.port : addr
+  console.log(p)
+}
+f({ port: 8080 })
+`, "incompatible types")
+}
+
 // `~object` runs ToNumber(operand) in real JS (`~{}` is -1). strict rejects the
 // non-numeric operand cleanly (was invalid IR — a `trunc` of the object ptr as
 // an i64); -compat=js boxes and runs the real ToNumber. ADR-00898.

@@ -39,11 +39,12 @@
             "feature": "`.on(event, listener)` / `.once(event, listener)`",
             "status": "implemented",
             "caveats": [
-              "A **tuple** payload `[A, B, …]` is Node's multi-argument event — the listener takes one parameter per element (`(a, b) => …`), [ADR-00392](../adr/ADR-00392.md); a non-tuple payload is a single argument (or none, for `void`). No open-ended `(...args)` beyond a declared tuple",
+              "No open-ended `(...args)` beyond a declared tuple payload",
               "A map-typed emitter requires a string-literal event name at every call site"
             ],
             "notes": [
               "Chainable (`.on(...).on(...)`)",
+              "A **tuple** payload `[A, B, …]` is Node's multi-argument event — the listener takes one parameter per element (`(a, b) => …`); a non-tuple payload is a single argument (or none, for `void`) ([ADR-00392](../adr/ADR-00392.md))",
               "Per-event payload typing via an event-map type argument (`EventEmitter<{ data: string; progress: [number, number]; end: void }>`, [ADR-00303](../adr/ADR-00303.md)/[ADR-00392](../adr/ADR-00392.md)); a scalar/`Error` type argument keeps the single-payload-for-every-event form"
             ]
           },
@@ -51,11 +52,12 @@
             "feature": "`.emit(event, ...args)`",
             "status": "implemented",
             "caveats": [
-              "Multi-argument `emit(event, a, b, …)` for an event whose payload is a tuple `[A, B, …]` ([ADR-00392](../adr/ADR-00392.md)); a non-tuple payload takes one data argument. Open-ended untyped varargs (beyond a declared tuple) aren't supported",
+              "Open-ended untyped varargs beyond a declared tuple aren't supported",
               "A map-typed emitter requires a string-literal event name"
             ],
             "notes": [
-              "Synchronously invokes every registered listener for `event`, in registration order; returns whether any listener ran"
+              "Synchronously invokes every registered listener for `event`, in registration order; returns whether any listener ran",
+              "Multi-argument `emit(event, a, b, …)` for a tuple `[A, B, …]` payload; a non-tuple payload takes one data argument ([ADR-00392](../adr/ADR-00392.md))"
             ]
           },
           {

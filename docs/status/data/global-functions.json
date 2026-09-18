@@ -26,23 +26,17 @@
           {
             "feature": "`isNaN(x)`",
             "status": "implemented",
-            "caveats": [
-              "Skips the `ToNumber` coercion real JS applies — a non-number argument (reachable via `any`) is treated as already numeric, so `isNaN('hello' as any)` is `false` (Node: `true`)."
-            ]
+            "caveats": []
           },
           {
             "feature": "`isFinite(x)`",
             "status": "implemented",
-            "caveats": [
-              "Skips `ToNumber` coercion like `isNaN` — a non-number argument (via `any`) isn't coerced, diverging from Node's `isFinite('x')`."
-            ]
+            "caveats": []
           },
           {
             "feature": "`String(x)`",
             "status": "implemented",
-            "caveats": [
-              "`String()` with no argument is `\"\"`, not real JS's `\"undefined\"` (a genuinely absent value doesn't arise in typed code — [ADR-00291](../adr/ADR-00291.md))"
-            ],
+            "caveats": [],
             "notes": [
               "Routes through the template-literal renderer; an `any` input dispatches on its runtime tag"
             ]
@@ -166,10 +160,12 @@
             "feature": "`structuredClone(obj)`",
             "status": "implemented",
             "caveats": [
-              "`EventEmitter`/`URL`/`URLSearchParams`/functions/class instances/`Promise`/`any`/`unknown` are rejected at compile time rather than silently aliased (`URL` matches Node, which throws `DataCloneError` for it); a `Map`/`Set` with an **array/Map/Set** key or value element type is also rejected (only scalar/string/object elements clone — [ADR-00574](../adr/ADR-00574.md)). A plain `ArrayBuffer` is byte-copied, a `SharedArrayBuffer` passes by reference, and an `Error` (or subtype) copies its kind/message/name ([ADR-00591](../adr/ADR-00591.md)); a cloned `AggregateError`'s `.errors` degrades to empty"
+              "`EventEmitter`/`URL`/`URLSearchParams`/functions/class instances/`Promise`/`any`/`unknown` are rejected at compile time rather than silently aliased (`URL` matches Node, which throws `DataCloneError` for it); a `Map`/`Set` with an **array/Map/Set** key or value element type is also rejected (only scalar/string/object elements clone — [ADR-00574](../adr/ADR-00574.md))",
+              "A cloned `AggregateError`'s `.errors` degrades to empty"
             ],
             "notes": [
-              "Real recursive deep copy, dispatched entirely on the argument's static type (arrays, incl. nested/TypedArrays, plain objects, and `Map`/`Set` recurse, cloning every entry deeply — [ADR-00574](../adr/ADR-00574.md); scalars pass through as value types) — see [ADR-00113](../adr/ADR-00113.md)"
+              "Real recursive deep copy, dispatched entirely on the argument's static type (arrays, incl. nested/TypedArrays, plain objects, and `Map`/`Set` recurse, cloning every entry deeply — [ADR-00574](../adr/ADR-00574.md); scalars pass through as value types) — see [ADR-00113](../adr/ADR-00113.md)",
+              "A plain `ArrayBuffer` is byte-copied, a `SharedArrayBuffer` passes by reference, and an `Error` (or subtype) copies its kind/message/name ([ADR-00591](../adr/ADR-00591.md))"
             ]
           },
           {

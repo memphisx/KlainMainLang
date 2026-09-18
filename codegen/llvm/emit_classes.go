@@ -3460,22 +3460,43 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 		tag, payload := e.emitUnboxTagPayload(leftVal)
 		isObj := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+		isBag := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isBag, tag, kmlTagDynObject))
+
+		ptrReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", ptrReg, payload))
 
 		resultAlloca := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resultAlloca))
 		objL := e.freshLabel("instanceof.obj")
+		bagChkL := e.freshLabel("instanceof.bagchk")
+		bagL := e.freshLabel("instanceof.bag")
+		cmpL := e.freshLabel("instanceof.cmp")
 		notObjL := e.freshLabel("instanceof.notobj")
 		mergeL := e.freshLabel("instanceof.merge")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, objL, notObjL))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, objL, bagChkL))
 
+		// A raw class instance (tag kmlTagObject): its instanceof TagID lives at
+		// struct field 0.
 		e.emitLabel(objL)
-		ptrReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", ptrReg, payload))
 		tagGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", tagGep, info.Ty.StructIR(), ptrReg))
-		loadedTag := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedTag, tagGep))
+		loadedTagObj := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedTagObj, tagGep))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", cmpL))
 
+		// A widened bag (tag kmlTagDynObject) realized from a class instance carries
+		// its class TagID at header offset 40 (0 = not from a class → no match).
+		e.emitLabel(bagChkL)
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBag, bagL, notObjL))
+		e.emitLabel(bagL)
+		loadedTagBag := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_classtag(ptr %s)", loadedTagBag, ptrReg))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", cmpL))
+
+		e.emitLabel(cmpL)
+		loadedTag := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %s, %%%s ]", loadedTag, loadedTagObj, objL, loadedTagBag, bagL))
 		tagIDs := []int64{info.TagID}
 		for _, d := range info.Descendants {
 			tagIDs = append(tagIDs, e.classes[d].TagID)

@@ -17,6 +17,25 @@ console.log(bytes[2])
 `, "3\n72\n105\n33")
 }
 
+// encodeInto writes into a caller-supplied Uint8Array and returns { read,
+// written }, capping the write at the destination length; .encoding is
+// "utf-8" on both TextEncoder and TextDecoder (ADR-00994).
+func TestE2ETextEncoderEncodeIntoAndEncoding(t *testing.T) {
+	assertOutput(t, `
+const enc = new TextEncoder()
+console.log(enc.encoding)
+const dest = new Uint8Array(10)
+const r = enc.encodeInto("hello", dest)
+console.log(r.read, r.written)
+console.log(dest[0], dest[4])
+const small = new Uint8Array(3)
+const r2 = enc.encodeInto("hello", small)
+console.log(r2.read, r2.written)
+console.log(small[2])
+console.log(new TextDecoder().encoding)
+`, "utf-8\n5 5\n104 111\n3 3\n108\nutf-8")
+}
+
 func TestE2ETextEncoderEmptyString(t *testing.T) {
 	assertOutput(t, `
 const enc = new TextEncoder()

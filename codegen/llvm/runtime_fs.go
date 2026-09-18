@@ -11,18 +11,26 @@ import (
 // exposes, or null for an unmapped value. Building the switch from Go's
 // per-platform `syscall` constants keeps the numeric values correct on both
 // Linux and macOS (they differ for e.g. ENAMETOOLONG/ELOOP/ENOTEMPTY).
-func (e *Emitter) ensureErrnoCode() {
-	if e.usedErrnoCode {
-		return
+// errnoCodePair is one (numeric errno, Node code name) mapping. The numeric
+// value is the target platform's, so both ensureErrnoCode (errno→name) and
+// ensureErrnoDesc (errno→libuv description) switch on the same labels.
+type errnoCodePair struct {
+	v    int
+	name string
+}
+
+// errnoCodePairs is the single (errno, code-name) table both ensureErrnoCode and
+// ensureErrnoDesc build their switches from, so the two can never drift on which
+// numeric values map to which code. Windows uses the shim's Linux errno numbers.
+func errnoCodePairs() []errnoCodePair {
+	if targetGOOS() == "windows" {
+		pairs := make([]errnoCodePair, 0, len(linuxErrnoPairs))
+		for _, p := range linuxErrnoPairs {
+			pairs = append(pairs, errnoCodePair{p[0].(int), p[1].(string)})
+		}
+		return pairs
 	}
-	e.usedErrnoCode = true
-	type ec struct {
-		v    int
-		name string
-	}
-	pairs := []ec{
-		// Windows: Go's syscall.E* are synthetic values there, and the shim
-		// (win32io.c / win32fs.c) sets errno to Linux numbers — use those.
+	return []errnoCodePair{
 		{int(syscall.EPERM), "EPERM"}, {int(syscall.ENOENT), "ENOENT"},
 		{int(syscall.EIO), "EIO"}, {int(syscall.EBADF), "EBADF"},
 		{int(syscall.EACCES), "EACCES"}, {int(syscall.EEXIST), "EEXIST"},
@@ -35,13 +43,53 @@ func (e *Emitter) ensureErrnoCode() {
 		{int(syscall.EAGAIN), "EAGAIN"}, {int(syscall.EPIPE), "EPIPE"},
 		{int(syscall.EFBIG), "EFBIG"}, {int(syscall.ENODEV), "ENODEV"},
 		{int(syscall.ESPIPE), "ESPIPE"}, {int(syscall.EMLINK), "EMLINK"},
+		// Socket/bind errnos (TDD-00215 Stage 2: server 'error' event .code).
+		{int(syscall.EADDRINUSE), "EADDRINUSE"}, {int(syscall.EADDRNOTAVAIL), "EADDRNOTAVAIL"},
+		{int(syscall.ECONNRESET), "ECONNRESET"}, {int(syscall.ECONNREFUSED), "ECONNREFUSED"},
 	}
-	if targetGOOS() == "windows" {
-		pairs = pairs[:0]
-		for _, p := range linuxErrnoPairs {
-			pairs = append(pairs, ec{p[0].(int), p[1].(string)})
-		}
+}
+
+// libuvErrnoDesc is the errno-code → libuv canonical description string that
+// Node's fs error `.message` embeds (`<CODE>: <desc>, <syscall> …`). Verbatim
+// from libuv's `uv-common.c` `uv_strerror` table so the byte-exact message
+// matches Node (ADR-01000). Any code absent here falls back to `strerror`.
+var libuvErrnoDesc = map[string]string{
+	"EPERM":         "operation not permitted",
+	"ENOENT":        "no such file or directory",
+	"EIO":           "i/o error",
+	"EBADF":         "bad file descriptor",
+	"EACCES":        "permission denied",
+	"EEXIST":        "file already exists",
+	"ENOTDIR":       "not a directory",
+	"EISDIR":        "illegal operation on a directory",
+	"EINVAL":        "invalid argument",
+	"EMFILE":        "too many open files",
+	"ENFILE":        "file table overflow",
+	"ENOSPC":        "no space left on device",
+	"EROFS":         "read-only file system",
+	"EBUSY":         "resource busy or locked",
+	"ENOTEMPTY":     "directory not empty",
+	"ELOOP":         "too many symbolic links encountered",
+	"ENAMETOOLONG":  "name too long",
+	"EXDEV":         "cross-device link not permitted",
+	"EAGAIN":        "resource temporarily unavailable",
+	"EPIPE":         "broken pipe",
+	"EFBIG":         "file too large",
+	"ENODEV":        "no such device",
+	"ESPIPE":        "invalid seek",
+	"EMLINK":        "too many links",
+	"EADDRINUSE":    "address already in use",
+	"EADDRNOTAVAIL": "address not available",
+	"ECONNRESET":    "connection reset by peer",
+	"ECONNREFUSED":  "connection refused",
+}
+
+func (e *Emitter) ensureErrnoCode() {
+	if e.usedErrnoCode {
+		return
 	}
+	e.usedErrnoCode = true
+	pairs := errnoCodePairs()
 	seen := map[int]bool{}
 	var cases, blocks strings.Builder
 	for _, p := range pairs {
@@ -63,6 +111,92 @@ entry:
 }`, cases.String(), blocks.String()))
 }
 
+// ensureErrnoDesc declares __kml_errno_desc(i32 errno) -> ptr: the libuv
+// canonical description string Node's fs `.message` embeds ("no such file or
+// directory", …), or null when the code isn't in the table (the caller then
+// falls back to strerror). Built from the same (errno, code) pairs as
+// ensureErrnoCode so the numeric values stay correct on every target
+// (ADR-01000).
+func (e *Emitter) ensureErrnoDesc() {
+	if e.usedErrnoDesc {
+		return
+	}
+	e.usedErrnoDesc = true
+	seen := map[int]bool{}
+	var cases, blocks strings.Builder
+	for _, p := range errnoCodePairs() {
+		if seen[p.v] {
+			continue
+		}
+		seen[p.v] = true
+		desc, ok := libuvErrnoDesc[p.name]
+		if !ok {
+			continue // unmapped code → default (strerror) branch
+		}
+		s := e.internString(desc)
+		lbl := "ed_" + p.name
+		cases.WriteString(fmt.Sprintf("    i32 %d, label %%%s\n", p.v, lbl))
+		blocks.WriteString(fmt.Sprintf("%s:\n  ret ptr %s\n", lbl, s))
+	}
+	e.emitGlobal(fmt.Sprintf(`define ptr @__kml_errno_desc(i32 %%e) {
+entry:
+  switch i32 %%e, label %%unknown [
+%s  ]
+%sunknown:
+  ret ptr null
+}`, cases.String(), blocks.String()))
+}
+
+// ensureFsErrmsg declares __kml_fs_errmsg(code, desc, syscall, path, dest) ->
+// ptr: assembles Node's exact fs-error `.message` string
+//
+//	<code>: <desc>, <syscall>[ '<path>'[ -> '<dest>']]
+//
+// The path clause appears only when `path` is non-null and non-empty, and the
+// ` -> '<dest>'` arrow only for a two-path op (rename/copyFile). All three
+// message shapes are handled by selecting the sprintf format string, so the
+// builder stays a single branch-free block (ADR-01000). Returned buffer is a
+// headered KML string (concat/=== ready).
+func (e *Emitter) ensureFsErrmsg() {
+	if e.usedFsErrmsg {
+		return
+	}
+	e.usedFsErrmsg = true
+	e.ensureStrHeaderRuntime()
+	e.ensureStrlen()
+	e.ensureSprintf()
+	empty := e.internString("")
+	fmtBase := e.internString("%s: %s, %s")
+	fmtPath := e.internString("%s: %s, %s '%s'")
+	fmtBoth := e.internString("%s: %s, %s '%s' -> '%s'")
+	e.emitGlobal(fmt.Sprintf(`
+define ptr @__kml_fs_errmsg(ptr %%code, ptr %%desc, ptr %%sc, ptr %%path, ptr %%dest) {
+entry:
+  %%p_null = icmp eq ptr %%path, null
+  %%path2 = select i1 %%p_null, ptr %s, ptr %%path
+  %%d_null = icmp eq ptr %%dest, null
+  %%dest2 = select i1 %%d_null, ptr %s, ptr %%dest
+  %%lc = call i64 @strlen(ptr %%code)
+  %%ld = call i64 @strlen(ptr %%desc)
+  %%ls = call i64 @strlen(ptr %%sc)
+  %%lp = call i64 @strlen(ptr %%path2)
+  %%ldst = call i64 @strlen(ptr %%dest2)
+  %%s1 = add i64 %%lc, %%ld
+  %%s2 = add i64 %%s1, %%ls
+  %%s3 = add i64 %%s2, %%lp
+  %%s4 = add i64 %%s3, %%ldst
+  %%bufsize = add i64 %%s4, 32
+  %%buf = call ptr @__kml_str_alloc(i64 %%bufsize)
+  %%has_p = icmp ne i64 %%lp, 0
+  %%has_d = icmp ne i64 %%ldst, 0
+  %%f1 = select i1 %%has_d, ptr %s, ptr %s
+  %%fmt = select i1 %%has_p, ptr %%f1, ptr %s
+  call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %%fmt, ptr %%code, ptr %%desc, ptr %%sc, ptr %%path2, ptr %%dest2)
+  call void @__kml_str_finalize(ptr %%buf)
+  ret ptr %%buf
+}`, empty, empty, fmtBoth, fmtPath, fmtBase))
+}
+
 // ensureFsThrow declares __kml_fs_throw: builds "<opDesc> '<path>': <reason>"
 // from the current errno via strerror() and throws it as a KML Error via the
 // existing @__kml_throw mechanism (emit_exceptions.go) — the same "let a
@@ -82,30 +216,35 @@ func (e *Emitter) ensureFsThrow() {
 	e.ensureErrnoAccessor()
 	e.ensureStrerror()
 	e.ensureErrnoCode()
-	fmtPtr := e.internString("%s '%s': %s")
+	e.ensureErrnoDesc()
+	e.ensureFsErrmsg()
+	empty := e.internString("")
 	errNamePtr := e.internString("Error")
 	// The full 6-field errorObjType: kind/message/name PLUS the Node error-code
 	// trio code/errcode/errstr, so `err.code === 'ENOENT'`/'EISDIR' (the
 	// canonical fs idiom) matches, `.errno` carries the raw errno, and `.errstr`
 	// the strerror text. Previously this built a truncated 3-field object (and
 	// under-allocated 24 bytes for the 6-field type), leaving `.code` unset.
+	//
+	// The message is now assembled by __kml_fs_errmsg to Node's byte-exact
+	// `<CODE>: <libuv-desc>, <syscall>[ '<path>'[ -> '<dest>']]` form (ADR-01000).
+	// `opdesc` is retained in the ABI (every call site still passes its verb) but
+	// no longer appears in the message. __kml_fs_throw2 carries the two-path
+	// (rename/copyFile) `<src> -> <dest>` form; __kml_fs_throw forwards dest=null.
 	eIR := errorObjType.StructIR()
 	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_fs_throw(ptr %%opdesc, ptr %%syscall, ptr %%path) {
+define void @__kml_fs_throw2(ptr %%opdesc, ptr %%syscall, ptr %%path, ptr %%dest) {
 entry:
   %%errno_ptr = call ptr @%s()
   %%errno_val = load i32, ptr %%errno_ptr, align 4
   %%errmsg = call ptr @strerror(i32 %%errno_val)
-  %%len_op = call i64 @strlen(ptr %%opdesc)
-  %%len_path = call i64 @strlen(ptr %%path)
-  %%len_err = call i64 @strlen(ptr %%errmsg)
-  %%sum1 = add i64 %%len_op, %%len_path
-  %%sum2 = add i64 %%sum1, %%len_err
-  %%bufsize = add i64 %%sum2, 32
-  %%buf = call ptr @__kml_str_alloc(i64 %%bufsize)
-  call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, ptr %%opdesc, ptr %%path, ptr %%errmsg)
-  call void @__kml_str_finalize(ptr %%buf)
-  %%code = call ptr @__kml_errno_code(i32 %%errno_val)
+  %%code_raw = call ptr @__kml_errno_code(i32 %%errno_val)
+  %%code_null = icmp eq ptr %%code_raw, null
+  %%code = select i1 %%code_null, ptr %s, ptr %%code_raw
+  %%desc_raw = call ptr @__kml_errno_desc(i32 %%errno_val)
+  %%desc_null = icmp eq ptr %%desc_raw, null
+  %%desc = select i1 %%desc_null, ptr %%errmsg, ptr %%desc_raw
+  %%buf = call ptr @__kml_fs_errmsg(ptr %%code, ptr %%desc, ptr %%syscall, ptr %%path, ptr %%dest)
   %%errno_d = sitofp i32 %%errno_val to double
   %%errobj = call ptr @malloc(i64 %d)
   %%errobj.kind = getelementptr %s, ptr %%errobj, i32 0, i32 0
@@ -115,7 +254,7 @@ entry:
   %%errobj.name = getelementptr %s, ptr %%errobj, i32 0, i32 2
   store ptr %s, ptr %%errobj.name, align 8
   %%errobj.code = getelementptr %s, ptr %%errobj, i32 0, i32 3
-  store ptr %%code, ptr %%errobj.code, align 8
+  store ptr %%code_raw, ptr %%errobj.code, align 8
   %%errobj.errcode = getelementptr %s, ptr %%errobj, i32 0, i32 4
   store double %%errno_d, ptr %%errobj.errcode, align 8
   %%errobj.errstr = getelementptr %s, ptr %%errobj, i32 0, i32 5
@@ -128,9 +267,16 @@ entry:
   %%errno_negd = sitofp i32 %%errno_neg to double
   %%errobj.errno = getelementptr %s, ptr %%errobj, i32 0, i32 8
   store double %%errno_negd, ptr %%errobj.errno, align 8
+  %%errobj.dest = getelementptr %s, ptr %%errobj, i32 0, i32 9
+  store ptr %%dest, ptr %%errobj.dest, align 8
   call void @__kml_throw(ptr %%errobj)
   ret void
-}`, accessor, fmtPtr, errorObjType.StructSize(), eIR, eIR, eIR, errNamePtr, eIR, eIR, eIR, eIR, eIR, eIR))
+}
+define void @__kml_fs_throw(ptr %%opdesc, ptr %%syscall, ptr %%path) {
+entry:
+  call void @__kml_fs_throw2(ptr %%opdesc, ptr %%syscall, ptr %%path, ptr null)
+  ret void
+}`, accessor, empty, errorObjType.StructSize(), eIR, eIR, eIR, errNamePtr, eIR, eIR, eIR, eIR, eIR, eIR, eIR))
 }
 
 // ensureStatDecl emits the `declare i32 @stat` exactly once. Shared by
@@ -303,7 +449,7 @@ checkdir:
 eisdir:
   %%eptr = call ptr @%s()
   store i32 %d, ptr %%eptr, align 4
-  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr null)
   unreachable
 
 doopen:
@@ -481,6 +627,54 @@ ok:
   call i32 @fclose(ptr %%f)
   ret void
 }`, fnName, modePtr, opDescPtr, e.internString("open")))
+}
+
+// ensureChmodDecl declares C `chmod` exactly once — shared by ensureFsPathOps
+// (chmodSync) and ensureFsChmodCreated (writeFileSync's `{ mode }`). On Windows
+// it is the CRT `_chmod` shim (win32fs.c), which honours only the write bit;
+// callers use it best-effort. emitGlobal does not dedup, so a shared guard
+// keeps the declaration from being emitted twice.
+func (e *Emitter) ensureChmodDecl() {
+	if e.usedChmodDecl {
+		return
+	}
+	e.usedChmodDecl = true
+	e.emitGlobal("declare i32 @chmod(ptr noundef, i32 noundef)")
+}
+
+// ensureFsChmodCreated declares __kml_fs_chmod_created(path, mode, existed):
+// applies `mode` via chmod only when `existed` is false — i.e. only to a file
+// this write just created, matching Node's writeFileSync/appendFileSync `{ mode
+// }` (open(2) applies its mode arg to new files and ignores it for existing
+// ones). Best-effort: a chmod failure on a file we just created as its owner is
+// not surfaced (the write itself already succeeded), so no throw path (ADR-00988).
+func (e *Emitter) ensureFsChmodCreated() {
+	if e.usedFsChmodCreated {
+		return
+	}
+	e.usedFsChmodCreated = true
+	e.ensureChmodDecl()
+	// umask(2) has no portable read-only form: umask(0) sets it to 0 and returns
+	// the prior value, which is immediately restored. This runs only on the
+	// synchronous, main-thread writeFileSync/appendFileSync path, so the brief
+	// window carries no cross-thread race. `mode & ~umask` reproduces open(2)'s
+	// own creation masking, which Node's `{ mode }` rides on.
+	e.emitGlobal("declare i32 @umask(i32 noundef)")
+	e.emitGlobal(`
+define void @__kml_fs_chmod_created(ptr %path, i64 %mode, i1 %existed) {
+entry:
+  br i1 %existed, label %done, label %doit
+doit:
+  %m32 = trunc i64 %mode to i32
+  %old = call i32 @umask(i32 0)
+  %restore = call i32 @umask(i32 %old)
+  %keep = xor i32 %old, -1
+  %eff = and i32 %m32, %keep
+  %r = call i32 @chmod(ptr %path, i32 %eff)
+  br label %done
+done:
+  ret void
+}`)
 }
 
 // ensureFsExists declares __kml_fs_exists: a plain existence check via
@@ -663,7 +857,7 @@ entry:
   br i1 %%failed, label %%fail, label %%ok
 
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%oldpath)
+  call void @__kml_fs_throw2(ptr %s, ptr %s, ptr %%oldpath, ptr %%newpath)
   unreachable
 
 ok:
@@ -997,6 +1191,152 @@ ok:
 		opDescPtr, e.internString("scandir"), emptyPtr))
 }
 
+// ensureFsReaddirRecursiveTypes declares __kml_fs_readdir_recursive_types,
+// backing fs.readdirSync(path, { recursive: true, withFileTypes: true })
+// (ADR-00980): every entry in the tree as a Dirent[], each Dirent carrying its
+// basename `name`, the full path of its containing directory as `parentPath`,
+// and the hidden S_IFMT `mode` word (from d_type) the kind predicates read —
+// exactly the shape the non-recursive withFileTypes form produces, just walked
+// recursively. Structurally a merge of __kml_fs_readdir_rec (the recursive
+// descent) and the `mkdirent` block of __kml_fs_readdir (the Dirent builder):
+// each entry is materialised as a `{ptr name, ptr parentPath, i64 mode}` heap
+// struct, and a subdirectory (d_type == DT_DIR) is descended with its full
+// path. parentPath is a header-copied string of %full (its own copy, since the
+// caller frees the malloc'd descent path after the recursive call returns).
+func (e *Emitter) ensureFsReaddirRecursiveTypes() {
+	if e.usedFsReaddirRecursiveTypes {
+		return
+	}
+	e.usedFsReaddirRecursiveTypes = true
+	e.ensureFsReaddirRecursive() // shares every decl (opendir/readdir/… + throw + str_from_cstr)
+	opDescPtr := e.internString("cannot open directory")
+	joinFmt := e.internString("%s/%s")
+	dotPtr := e.internString(".")
+	dotdotPtr := e.internString("..")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_fs_readdir_rec_t(ptr %%full, ptr %%bufslot) {
+entry:
+  %%dir = call ptr @opendir(ptr %%full)
+  %%dnull = icmp eq ptr %%dir, null
+  br i1 %%dnull, label %%ret, label %%rl
+
+rl:
+  %%ent = call ptr @readdir(ptr %%dir)
+  %%enull = icmp eq ptr %%ent, null
+  br i1 %%enull, label %%close, label %%got
+
+got:
+  %%nameptr = getelementptr i8, ptr %%ent, i64 %d
+  %%isdot = call i32 @strcmp(ptr %%nameptr, ptr %s)
+  %%isdd = call i32 @strcmp(ptr %%nameptr, ptr %s)
+  %%d0 = icmp eq i32 %%isdot, 0
+  %%d1 = icmp eq i32 %%isdd, 0
+  %%skip = or i1 %%d0, %%d1
+  br i1 %%skip, label %%rl, label %%build
+
+build:
+  %%dtp = getelementptr i8, ptr %%ent, i64 %d
+  %%dt = load i8, ptr %%dtp, align 1
+  %%isfifot = icmp eq i8 %%dt, 1
+  %%ischrt = icmp eq i8 %%dt, 2
+  %%isdirt = icmp eq i8 %%dt, 4
+  %%isblkt = icmp eq i8 %%dt, 6
+  %%isregt = icmp eq i8 %%dt, 8
+  %%islnkt = icmp eq i8 %%dt, 10
+  %%issockt = icmp eq i8 %%dt, 12
+  %%m1 = select i1 %%isfifot, i64 4096, i64 0
+  %%m2 = select i1 %%ischrt, i64 8192, i64 %%m1
+  %%m3 = select i1 %%isdirt, i64 16384, i64 %%m2
+  %%m4 = select i1 %%isblkt, i64 24576, i64 %%m3
+  %%m5 = select i1 %%isregt, i64 32768, i64 %%m4
+  %%m6 = select i1 %%islnkt, i64 40960, i64 %%m5
+  %%mode = select i1 %%issockt, i64 49152, i64 %%m6
+  %%namecopy = call ptr @__kml_str_from_cstr(ptr %%nameptr)
+  %%parentcopy = call ptr @__kml_str_from_cstr(ptr %%full)
+  %%dirent = call ptr @malloc(i64 24)
+  %%dname_p = getelementptr { ptr, ptr, i64 }, ptr %%dirent, i32 0, i32 0
+  store ptr %%namecopy, ptr %%dname_p, align 8
+  %%dpp_p = getelementptr { ptr, ptr, i64 }, ptr %%dirent, i32 0, i32 1
+  store ptr %%parentcopy, ptr %%dpp_p, align 8
+  %%dmode_p = getelementptr { ptr, ptr, i64 }, ptr %%dirent, i32 0, i32 2
+  store i64 %%mode, ptr %%dmode_p, align 8
+  %%data_p = getelementptr { ptr, i64, i64 }, ptr %%bufslot, i32 0, i32 0
+  %%len_p = getelementptr { ptr, i64, i64 }, ptr %%bufslot, i32 0, i32 1
+  %%cap_p = getelementptr { ptr, i64, i64 }, ptr %%bufslot, i32 0, i32 2
+  %%curlen = load i64, ptr %%len_p, align 8
+  %%curcap = load i64, ptr %%cap_p, align 8
+  %%np1 = add i64 %%curlen, 1
+  %%needgrow = icmp sgt i64 %%np1, %%curcap
+  br i1 %%needgrow, label %%grow, label %%store
+
+grow:
+  %%curdata = load ptr, ptr %%data_p, align 8
+  %%cap2 = mul i64 %%curcap, 2
+  %%atleast8 = icmp sgt i64 %%cap2, 8
+  %%newcap = select i1 %%atleast8, i64 %%cap2, i64 8
+  %%newcapbytes = mul i64 %%newcap, 8
+  %%newdata = call ptr @realloc(ptr %%curdata, i64 %%newcapbytes)
+  store ptr %%newdata, ptr %%data_p, align 8
+  store i64 %%newcap, ptr %%cap_p, align 8
+  br label %%store
+
+store:
+  %%dnow = load ptr, ptr %%data_p, align 8
+  %%slot = getelementptr ptr, ptr %%dnow, i64 %%curlen
+  store ptr %%dirent, ptr %%slot, align 8
+  %%newlen = add i64 %%curlen, 1
+  store i64 %%newlen, ptr %%len_p, align 8
+  br i1 %%isdirt, label %%recurse, label %%rl
+
+recurse:
+  %%fulllen = call i64 @strlen(ptr %%full)
+  %%namelen2 = call i64 @strlen(ptr %%nameptr)
+  %%fsz1 = add i64 %%fulllen, %%namelen2
+  %%fsz2 = add i64 %%fsz1, 2
+  %%cf = call ptr @malloc(i64 %%fsz2)
+  call i32 (ptr, ptr, ...) @sprintf(ptr %%cf, ptr %s, ptr %%full, ptr %%nameptr)
+  call void @__kml_fs_readdir_rec_t(ptr %%cf, ptr %%bufslot)
+  call void @free(ptr %%cf)
+  br label %%rl
+
+close:
+  call i32 @closedir(ptr %%dir)
+  br label %%ret
+
+ret:
+  ret void
+}
+
+define {ptr, i64} @__kml_fs_readdir_recursive_types(ptr %%path) {
+entry:
+  %%probe = call ptr @opendir(ptr %%path)
+  %%pnull = icmp eq ptr %%probe, null
+  br i1 %%pnull, label %%fail, label %%ok
+
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
+  unreachable
+
+ok:
+  call i32 @closedir(ptr %%probe)
+  %%bufslot = call ptr @malloc(i64 24)
+  %%data_p = getelementptr { ptr, i64, i64 }, ptr %%bufslot, i32 0, i32 0
+  %%len_p = getelementptr { ptr, i64, i64 }, ptr %%bufslot, i32 0, i32 1
+  %%cap_p = getelementptr { ptr, i64, i64 }, ptr %%bufslot, i32 0, i32 2
+  store ptr null, ptr %%data_p, align 8
+  store i64 0, ptr %%len_p, align 8
+  store i64 0, ptr %%cap_p, align 8
+  call void @__kml_fs_readdir_rec_t(ptr %%path, ptr %%bufslot)
+  %%finaldata = load ptr, ptr %%data_p, align 8
+  %%finallen = load i64, ptr %%len_p, align 8
+  %%r0 = insertvalue {ptr, i64} undef, ptr %%finaldata, 0
+  %%r1 = insertvalue {ptr, i64} %%r0, i64 %%finallen, 1
+  ret {ptr, i64} %%r1
+}`,
+		direntNameOffset(), dotPtr, dotdotPtr, direntTypeOffset(), joinFmt,
+		opDescPtr, e.internString("scandir")))
+}
+
 // statLayout returns the host libc's struct stat field offsets and load widths
 // for the full Stats surface (ADR-00565). struct stat has no portable layout,
 // so these are per-OS/arch constants — the same approach direntNameOffset
@@ -1231,7 +1571,7 @@ func (e *Emitter) ensureFsPathOps() {
 	e.emitGlobal("declare i32 @symlink(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @link(ptr noundef, ptr noundef)")
 	e.ensureReadlinkDecl()
-	e.emitGlobal("declare i32 @chmod(ptr noundef, i32 noundef)")
+	e.ensureChmodDecl()
 	e.emitGlobal("declare i32 @truncate(ptr noundef, i64 noundef)")
 	realpathDesc := e.internString("cannot resolve path")
 	mkdtempDesc := e.internString("cannot create temp directory")
@@ -1379,39 +1719,52 @@ ok:
 		truncateDesc, e.internString("open"), accessDesc, e.internString("access")))
 }
 
-// ensureFsCopyExclGuard declares __kml_fs_copy_excl_guard(dest, excl): the
-// COPYFILE_EXCL half of fs.copyFileSync's `mode` (ADR-00788). When excl is set
-// it opens dest with O_WRONLY|O_CREAT|O_EXCL (the "wx" flag bits) — atomically
-// failing with EEXIST if dest already exists, exactly as Node's COPYFILE_EXCL —
-// and closes the freshly-created empty file, which the subsequent
-// __kml_fs_write_file_bytes then fills. When excl is clear it is a no-op (the
-// default overwrite copy). Uses the shared fd-op decls (open/close).
-func (e *Emitter) ensureFsCopyExclGuard() {
+// ensureFsCopyFileGuard declares __kml_fs_copy_file_guard(src, dest, excl): the
+// pre-flight validation for fs.copyFileSync, run before the binary-safe
+// read+write composition fills the copy. It probes both ends so any failure
+// surfaces as Node's exact two-path `copyfile` error (`ENOENT: …, copyfile
+// '<src>' -> '<dest>'`, `err.syscall === 'copyfile'`, `err.path`/`err.dest`
+// set — ADR-01000) rather than the underlying `open` on one path that the raw
+// read/write helpers would otherwise report:
+//   - opens src O_RDONLY: catches a missing/unreadable source (ENOENT/EACCES/…).
+//   - opens dest O_WRONLY|O_CREAT|O_TRUNC (+O_EXCL when `excl`, the COPYFILE_EXCL
+//     mode bit — ADR-00788): catches a missing dest parent, an unwritable dest,
+//     a directory dest, and the EEXIST of an existing dest under COPYFILE_EXCL.
+// Both descriptors are closed immediately; the subsequent
+// __kml_fs_read_file_raw/__kml_fs_write_file_bytes then do the real transfer
+// (and, under excl, fill the empty file this guard atomically created). Uses
+// the shared fd-op decls (open/close).
+func (e *Emitter) ensureFsCopyFileGuard() {
 	if e.usedFsCopyExclGuard {
 		return
 	}
 	e.usedFsCopyExclGuard = true
 	e.ensureFsThrow()
 	e.ensureFsFdOps() // shares the open/close declarations
+	rd, _ := openFlagBits("r")
+	w, _ := openFlagBits("w")
 	wx, _ := openFlagBits("wx")
-	desc := e.internString("cannot open file for writing")
+	desc := e.internString("cannot copy file")
+	sc := e.internString("copyfile")
 	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_fs_copy_excl_guard(ptr %%dest, i1 %%excl) {
+define void @__kml_fs_copy_file_guard(ptr %%src, ptr %%dest, i1 %%excl) {
 entry:
-  br i1 %%excl, label %%guard, label %%skip
-guard:
-  %%fd = call i32 (ptr, i32, ...) @open(ptr %%dest, i32 %d, i32 420)
-  %%failed = icmp slt i32 %%fd, 0
-  br i1 %%failed, label %%fail, label %%closefd
-fail:
-  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%dest)
-  unreachable
-closefd:
-  %%c = call i32 @close(i32 %%fd)
-  br label %%skip
-skip:
+  %%sfd = call i32 (ptr, i32, ...) @open(ptr %%src, i32 %d, i32 0)
+  %%sbad = icmp slt i32 %%sfd, 0
+  br i1 %%sbad, label %%fail, label %%srcok
+srcok:
+  %%sc0 = call i32 @close(i32 %%sfd)
+  %%dflags = select i1 %%excl, i32 %d, i32 %d
+  %%dfd = call i32 (ptr, i32, ...) @open(ptr %%dest, i32 %%dflags, i32 420)
+  %%dbad = icmp slt i32 %%dfd, 0
+  br i1 %%dbad, label %%fail, label %%destok
+destok:
+  %%dc0 = call i32 @close(i32 %%dfd)
   ret void
-}`, wx, desc, e.internString("open")))
+fail:
+  call void @__kml_fs_throw2(ptr %s, ptr %s, ptr %%src, ptr %%dest)
+  unreachable
+}`, rd, wx, w, desc, sc))
 }
 
 // ensureFsRm declares __kml_fs_rm (ADR-00497): fs.rmSync. remove(3) first
@@ -1666,10 +2019,11 @@ fail:
 ok:
 %s}`, openDesc, e.internString("open"), fdDesc, e.internString("read"),
 		statResultIR, fdDesc, e.internString("fstat"), statBodyLL(statLayout())))
-	// __kml_fs_throw calls strlen() on the path argument, so it must be a valid
-	// C string, never null (the fdrw fail path's `ptr null` is a latent crash
-	// never hit by a test). fd-based ops have no path in Node's message anyway.
-	emptyPath := e.internString("")
+	// fd-based ops carry no path in Node's message (and `err.path` is undefined),
+	// so pass a null path — __kml_fs_errmsg emits `<CODE>: <desc>, <syscall>` with
+	// no path clause, and the null flows through to `err.path` (ADR-01000). The
+	// message builder tolerates a null path, so the former `ptr null` latent
+	// crash on the fdrw path (above) is a crash no longer.
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_fs_fsync(i64 %%fd) {
 entry:
@@ -1678,7 +2032,7 @@ entry:
   %%failed = icmp ne i32 %%r, 0
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %s)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr null)
   unreachable
 ok:
   ret void
@@ -1690,11 +2044,11 @@ entry:
   %%failed = icmp ne i32 %%r, 0
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %s)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr null)
   unreachable
 ok:
   ret void
-}`, fdDesc, e.internString("fsync"), emptyPath, fdDesc, e.internString("ftruncate"), emptyPath))
+}`, fdDesc, e.internString("fsync"), fdDesc, e.internString("ftruncate")))
 }
 
 // linuxErrnoPairs is the errno→code table for Windows, where the shim sets

@@ -27,7 +27,7 @@ func (e *Emitter) emitFsReadFileSync(args []ast.Expression, pos ast.Pos) (Value,
 	// encoding this still returns a string, not a Buffer (documented divergence
 	// — use readFileSyncBytes for the byte form).
 	if len(args) == 2 {
-		if _, err := fsTextOption(args[1], pos, "fs.readFileSync"); err != nil {
+		if _, _, err := fsTextOption(args[1], pos, "fs.readFileSync", false); err != nil {
 			return Value{}, err
 		}
 	}
@@ -46,21 +46,24 @@ func (e *Emitter) emitFsReadFileSync(args []ast.Expression, pos ast.Pos) (Value,
 // fsTextOption parses the optional trailing encoding/options argument shared by
 // readFileSync/writeFileSync/appendFileSync: either a bare encoding string
 // literal (`'utf8'`/`'utf-8'`) or an object literal whose keys are a subset of
-// { encoding, flag }. A present encoding must be utf8 — the compiler's strings
-// are UTF-8, so it is a faithful no-op; any other encoding, an unsupported key
-// (e.g. `mode`, not yet plumbed through the write open()), or a non-literal
-// option is a clean rejection. Returns the `flag` string literal ("" if none),
-// which the write callers interpret (`'a'*` → append).
-func fsTextOption(arg ast.Expression, pos ast.Pos, what string) (flag string, err error) {
-	badEnc := func() (string, error) {
-		return "", fmt.Errorf("%d:%d: %s encoding must be the literal 'utf8' (this compiler's strings are UTF-8)", pos.Line, pos.Col, what)
+// { encoding, flag, mode }. A present encoding must be utf8 — the compiler's
+// strings are UTF-8, so it is a faithful no-op; any other encoding, an
+// unsupported key, or a non-literal encoding/flag is a clean rejection. Returns
+// the `flag` string literal ("" if none), which the write callers interpret
+// (`'a'*` → append), and the `mode` expression (nil if none) — a POSIX
+// permission bitmask the write callers apply on file creation (ADR-00988). Only
+// writeFileSync/appendFileSync accept `mode` (allowMode); readFileSync rejects
+// it, matching Node (its options are { encoding, flag } only).
+func fsTextOption(arg ast.Expression, pos ast.Pos, what string, allowMode bool) (flag string, mode ast.Expression, err error) {
+	badEnc := func() (string, ast.Expression, error) {
+		return "", nil, fmt.Errorf("%d:%d: %s encoding must be the literal 'utf8' (this compiler's strings are UTF-8)", pos.Line, pos.Col, what)
 	}
 	switch a := arg.(type) {
 	case *ast.StringLiteral:
 		if a.Value != "utf8" && a.Value != "utf-8" {
 			return badEnc()
 		}
-		return "", nil
+		return "", nil, nil
 	case *ast.ObjectLiteral:
 		for _, p := range a.Properties {
 			switch p.Key {
@@ -72,16 +75,25 @@ func fsTextOption(arg ast.Expression, pos ast.Pos, what string) (flag string, er
 			case "flag":
 				s, ok := p.Value.(*ast.StringLiteral)
 				if !ok {
-					return "", fmt.Errorf("%d:%d: %s `flag` must be a string literal", pos.Line, pos.Col, what)
+					return "", nil, fmt.Errorf("%d:%d: %s `flag` must be a string literal", pos.Line, pos.Col, what)
 				}
 				flag = s.Value
+			case "mode":
+				if !allowMode {
+					return "", nil, fmt.Errorf("%d:%d: %s options support only { encoding: 'utf8', flag } (not '%s')", pos.Line, pos.Col, what, p.Key)
+				}
+				mode = p.Value
 			default:
-				return "", fmt.Errorf("%d:%d: %s options support only { encoding: 'utf8', flag } (not '%s')", pos.Line, pos.Col, what, p.Key)
+				keys := "{ encoding: 'utf8', flag }"
+				if allowMode {
+					keys = "{ encoding: 'utf8', flag, mode }"
+				}
+				return "", nil, fmt.Errorf("%d:%d: %s options support only %s (not '%s')", pos.Line, pos.Col, what, keys, p.Key)
 			}
 		}
-		return flag, nil
+		return flag, mode, nil
 	default:
-		return "", fmt.Errorf("%d:%d: %s options must be an encoding string or an object literal", pos.Line, pos.Col, what)
+		return "", nil, fmt.Errorf("%d:%d: %s options must be an encoding string or an object literal", pos.Line, pos.Col, what)
 	}
 }
 
@@ -132,11 +144,13 @@ func (e *Emitter) emitFsWriteLikeCall(args []ast.Expression, pos ast.Pos, name, 
 	// writeFileSync into an append, matching Node — routed to the append
 	// runtime below. appendFileSync ignores the flag (it always appends).
 	isWrite := runtimeFn == "@__kml_fs_write_file"
+	var modeExpr ast.Expression
 	if len(args) == 3 {
-		flag, err := fsTextOption(args[2], pos, name)
+		flag, mode, err := fsTextOption(args[2], pos, name, true)
 		if err != nil {
 			return Value{}, err
 		}
+		modeExpr = mode
 		if isWrite && len(flag) > 0 && flag[0] == 'a' {
 			isWrite = false
 			runtimeFn = "@__kml_fs_append_file"
@@ -147,6 +161,31 @@ func (e *Emitter) emitFsWriteLikeCall(args []ast.Expression, pos ast.Pos, name, 
 		return Value{}, err
 	}
 	pathVal = e.coerce(pathVal, TypePtr)
+
+	// `{ mode }` (ADR-00988): a POSIX permission bitmask applied only when the
+	// write *creates* the file — matching Node (and open(2)'s own mode arg,
+	// which the kernel ignores for an existing file). So capture whether the
+	// file already exists before the write, then chmod it to `mode` afterwards
+	// only if it did not. Emitted around whichever write path runs below.
+	modeRef := ""
+	existedRef := ""
+	if modeExpr != nil {
+		mv, err := e.emitExpr(modeExpr)
+		if err != nil {
+			return Value{}, err
+		}
+		modeRef = e.coerce(mv, TypeI64).Ref
+		e.ensureFsExists()
+		existedRef = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_fs_exists(ptr %s)", existedRef, pathVal.Ref))
+	}
+	applyMode := func() {
+		if modeExpr == nil {
+			return
+		}
+		e.ensureFsChmodCreated()
+		e.emitInstr(fmt.Sprintf("call void @__kml_fs_chmod_created(ptr %s, i64 %s, i1 %s)", pathVal.Ref, modeRef, existedRef))
+	}
 
 	dataTy := e.inferExprType(args[1])
 
@@ -173,6 +212,7 @@ func (e *Emitter) emitFsWriteLikeCall(args []ast.Expression, pos ast.Pos, name, 
 			e.ensureFsAppendFileBytes()
 		}
 		e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s, i64 %s)", bytesFn, pathVal.Ref, dataReg, lenVal.Ref))
+		applyMode()
 		return Value{Ty: TypeVoid}, nil
 
 	case dataTy.IsTypedArray:
@@ -193,6 +233,7 @@ func (e *Emitter) emitFsWriteLikeCall(args []ast.Expression, pos ast.Pos, name, 
 			e.ensureFsAppendFileBytes()
 		}
 		e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s, i64 %s)", bytesFn, pathVal.Ref, ptrReg, byteLenVal.Ref))
+		applyMode()
 		return Value{Ty: TypeVoid}, nil
 
 	default:
@@ -208,6 +249,7 @@ func (e *Emitter) emitFsWriteLikeCall(args []ast.Expression, pos ast.Pos, name, 
 			e.ensureFsAppendFile()
 		}
 		e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s)", runtimeFn, pathVal.Ref, dataVal.Ref))
+		applyMode()
 		return Value{Ty: TypeVoid}, nil
 	}
 }
@@ -375,8 +417,8 @@ func (e *Emitter) emitFsCopyFileSync(args []ast.Expression, pos ast.Pos) (Value,
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", exclB, masked))
 		exclRef = exclB
 	}
-	e.ensureFsCopyExclGuard()
-	e.emitInstr(fmt.Sprintf("call void @__kml_fs_copy_excl_guard(ptr %s, i1 %s)", destVal.Ref, exclRef))
+	e.ensureFsCopyFileGuard()
+	e.emitInstr(fmt.Sprintf("call void @__kml_fs_copy_file_guard(ptr %s, ptr %s, i1 %s)", srcVal.Ref, destVal.Ref, exclRef))
 
 	e.ensureFsReadFileRaw()
 	e.ensureFsWriteFileBytes()
@@ -402,12 +444,6 @@ func (e *Emitter) emitFsReaddirSync(args []ast.Expression, pos ast.Pos) (Value, 
 	if err != nil {
 		return Value{}, err
 	}
-	if recursive && withTypes {
-		// Node's recursive+withFileTypes yields Dirents keyed by parentPath — a
-		// distinct object shape (this compiler's Dirent has no parentPath yet),
-		// so reject cleanly rather than return the wrong shape.
-		return Value{}, fmt.Errorf("%d:%d: fs.readdirSync `{ recursive: true, withFileTypes: true }` together is not yet supported (recursive returns a string[]; withFileTypes a Dirent[])", pos.Line, pos.Col)
-	}
 	pathVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -415,6 +451,16 @@ func (e *Emitter) emitFsReaddirSync(args []ast.Expression, pos ast.Pos) (Value, 
 	pathVal = e.coerce(pathVal, TypePtr)
 
 	r := e.freshReg()
+	if recursive && withTypes {
+		// Node's recursive+withFileTypes yields a Dirent for every entry in the
+		// tree; each Dirent's `parentPath` is the full path of the directory it
+		// was read from (ADR-00980). Reuses the recursive descent, building
+		// Dirents (name=basename, parentPath=containing dir) instead of joined
+		// relative-path strings.
+		e.ensureFsReaddirRecursiveTypes()
+		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_fs_readdir_recursive_types(ptr %s)", r, pathVal.Ref))
+		return Value{Ref: r, Ty: ArrayOf(DirentType())}, nil
+	}
 	if recursive {
 		// Every nested entry as a string[] of "/"-joined paths relative to the
 		// starting directory (ADR-00786).

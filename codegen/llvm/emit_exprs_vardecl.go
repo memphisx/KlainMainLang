@@ -1262,7 +1262,10 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			if ty.UnionMembers != nil && !unionAllowsAssignmentFrom(ty, val.Ty) {
 				return fmt.Errorf("%d:%d: value's type is not a member of the declared union type", v.GetPos().Line, v.GetPos().Col)
 			}
-			val, err = e.emitBoxValue(val)
+			// Allocation-site widening (TDD-00155 Stage 6): a fresh `new C()`
+			// flowing straight into an `any` slot is realized as a D1 bag rather
+			// than a tag-6 box, so `a.x`/`Object.keys(a)`/index access work.
+			val, err = e.emitBoxValueWidened(val, v.Init)
 			if err != nil {
 				return err
 			}

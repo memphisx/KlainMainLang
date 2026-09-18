@@ -183,10 +183,10 @@ func (e *Emitter) emitNewNodeStream(ex *ast.NewNodeStreamExpression) (Value, err
 			if err != nil {
 				return Value{}, err
 			}
-			if len(userClo.Ty.FuncParams) > 1 {
-				return Value{}, fmt.Errorf("%d:%d: a Writable write callback takes one (chunk) parameter", pos.Line, pos.Col)
+			wrap, err := e.nodeOptionsWriteWrap(userClo.Ty, inTy, "Writable", pos)
+			if err != nil {
+				return Value{}, err
 			}
-			wrap := e.emitStreamWriteWrap(userClo.Ty, inTy)
 			env := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
 			g0 := e.freshReg()
@@ -262,10 +262,10 @@ func (e *Emitter) emitNewNodeStream(ex *ast.NewNodeStreamExpression) (Value, err
 			if err != nil {
 				return Value{}, err
 			}
-			if len(userClo.Ty.FuncParams) > 1 {
-				return Value{}, fmt.Errorf("%d:%d: a Duplex write callback takes one (chunk) parameter", pos.Line, pos.Col)
+			wrap, err := e.nodeOptionsWriteWrap(userClo.Ty, inTy, "Duplex", pos)
+			if err != nil {
+				return Value{}, err
 			}
-			wrap := e.emitStreamWriteWrap(userClo.Ty, inTy)
 			env := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
 			g0 := e.freshReg()
@@ -462,6 +462,39 @@ var nodeStreamMethodNames = map[string]bool{
 
 func isNodeStreamMethodName(name string) bool { return nodeStreamMethodNames[name] }
 
+// streamWriteExtras parses the optional trailing arguments of a Node
+// writable.write(chunk[, encoding][, callback]) / end([chunk][, encoding]
+// [, callback]) call — everything after the chunk. `encoding` must be the
+// 'utf8'/'utf-8' string literal (chunks are strings already, ADR-00449/00483);
+// `callback` is a () => void resolved to a function pointer (same restriction
+// as process.nextTick, since err is null on success). Returns the callback
+// pointer, or "" when no callback was given.
+func (e *Emitter) streamWriteExtras(extras []ast.Expression, fnName string, pos ast.Pos) (string, error) {
+	if len(extras) == 0 {
+		return "", nil
+	}
+	isUtf8 := func(a ast.Expression) bool {
+		sl, ok := a.(*ast.StringLiteral)
+		return ok && (sl.Value == "utf8" || sl.Value == "utf-8")
+	}
+	// A leading string argument is the encoding (must be 'utf8'); a leading
+	// function argument is the callback.
+	if _, ok := extras[0].(*ast.StringLiteral); ok {
+		if !isUtf8(extras[0]) {
+			return "", fmt.Errorf("%d:%d: %s() supports only the 'utf8' encoding (chunks are strings already)", pos.Line, pos.Col, fnName)
+		}
+		extras = extras[1:]
+	}
+	switch len(extras) {
+	case 0:
+		return "", nil
+	case 1:
+		return e.timerCallbackPtr(extras[0], fnName+" callback", pos)
+	default:
+		return "", fmt.Errorf("%d:%d: %s() takes a chunk[, encoding][, callback]", pos.Line, pos.Col, fnName)
+	}
+}
+
 // emitNodeStreamCall dispatches node-stream method calls.
 func (e *Emitter) emitNodeStreamCall(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	ty, ptr, err := e.resolveNodeStreamForCall(objExpr, pos)
@@ -558,8 +591,18 @@ func (e *Emitter) emitNodeStreamCallOn(ty Type, ptr string, method string, args 
 		if !ty.IsNodeWritable {
 			return Value{}, fmt.Errorf("%d:%d: write() requires a Writable", pos.Line, pos.Col)
 		}
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: write() takes one chunk argument", pos.Line, pos.Col)
+		if len(args) < 1 {
+			return Value{}, fmt.Errorf("%d:%d: write() takes a chunk[, encoding][, callback]", pos.Line, pos.Col)
+		}
+		// Node: write(chunk[, encoding][, callback]). encoding must be 'utf8'
+		// (chunks are strings already, ADR-00449/00483); callback fires once the
+		// chunk is handled — scheduled onto the microtask queue like a Node write
+		// callback's next-tick delivery. () => void only (same restriction as
+		// process.nextTick / timers; err is null on success, so a zero-arg
+		// callback observes nothing lost).
+		cbPtr, err := e.streamWriteExtras(args[1:], "write", pos)
+		if err != nil {
+			return Value{}, err
 		}
 		ws := e.nodeStreamSide(ptr, 1)
 		cv, err := e.emitExprWithObjectHint(args[0], inTy)
@@ -577,6 +620,10 @@ func (e *Emitter) emitNodeStreamCallOn(ty Type, ptr string, method string, args 
 		e.streamThrowTypeError(okI, "cannot write to an ended Writable")
 		bI := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ns_write_done(ptr %s, ptr %s)", bI, ptr, ws))
+		if cbPtr != "" {
+			e.ensureMicrotasks()
+			e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", cbPtr))
+		}
 		b := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", b, bI))
 		return Value{Ref: b, Ty: TypeBool}, nil
@@ -585,12 +632,34 @@ func (e *Emitter) emitNodeStreamCallOn(ty Type, ptr string, method string, args 
 		if !ty.IsNodeWritable {
 			return Value{}, fmt.Errorf("%d:%d: end() requires a Writable", pos.Line, pos.Col)
 		}
-		if len(args) > 1 {
-			return Value{}, fmt.Errorf("%d:%d: end() takes at most one final chunk", pos.Line, pos.Col)
+		// Node: end([chunk][, encoding][, callback]). The callback is the
+		// 'finish' listener — fired after the stream flushes; scheduled onto the
+		// microtask queue after close (chunks flush synchronously here). A
+		// trailing function argument is that callback; a remaining string literal
+		// after the chunk is the encoding (utf8 only).
+		rest := args
+		var cbPtr string
+		if len(rest) > 0 && e.inferExprType(rest[len(rest)-1]).IsFunc {
+			p, err := e.timerCallbackPtr(rest[len(rest)-1], "end callback", pos)
+			if err != nil {
+				return Value{}, err
+			}
+			cbPtr = p
+			rest = rest[:len(rest)-1]
+		}
+		if len(rest) == 2 {
+			sl, ok := rest[1].(*ast.StringLiteral)
+			if !ok || (sl.Value != "utf8" && sl.Value != "utf-8") {
+				return Value{}, fmt.Errorf("%d:%d: end() supports only the 'utf8' encoding (chunks are strings already)", pos.Line, pos.Col)
+			}
+			rest = rest[:1]
+		}
+		if len(rest) > 1 {
+			return Value{}, fmt.Errorf("%d:%d: end() takes a final chunk[, encoding][, callback]", pos.Line, pos.Col)
 		}
 		ws := e.nodeStreamSide(ptr, 1)
-		if len(args) == 1 {
-			cv, err := e.emitExprWithObjectHint(args[0], inTy)
+		if len(rest) == 1 {
+			cv, err := e.emitExprWithObjectHint(rest[0], inTy)
 			if err != nil {
 				return Value{}, err
 			}
@@ -601,6 +670,10 @@ func (e *Emitter) emitNodeStreamCallOn(ty Type, ptr string, method string, args 
 		}
 		closed := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_close(ptr %s)", closed, ws))
+		if cbPtr != "" {
+			e.ensureMicrotasks()
+			e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", cbPtr))
+		}
 		return self, nil
 
 	case "destroy":

@@ -192,6 +192,63 @@ func (e *Emitter) emitTextEncoderEncode(objExpr ast.Expression, args []ast.Expre
 	return Value{Ref: r1, Ty: TypedArrayType("uint8")}, nil
 }
 
+// emitTextEncoderEncodeInto implements
+// `textEncoder.encodeInto(src, dest): { read, written }`. It writes as many of
+// src's UTF-8 bytes as fit into the destination Uint8Array and reports how many
+// source units were read and bytes written. In this compiler's byte-string
+// model strings are already raw UTF-8, so writing is a capped memcpy and, with
+// no multi-byte splitting concern surfaced here, read == written == the number
+// of bytes copied (= min(strlen(src), dest.length)). objExpr (the stateless
+// TextEncoder receiver) is evaluated for side effects only, like encode.
+func (e *Emitter) emitTextEncoderEncodeInto(objExpr ast.Expression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if _, err := e.emitExpr(objExpr); err != nil {
+		return Value{}, err
+	}
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("%d:%d: encodeInto takes exactly 2 arguments (source, destination)", pos.Line, pos.Col)
+	}
+	strVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	strVal = e.coerce(strVal, TypePtr)
+
+	destPtr, destLen, elemTy, err := e.resolveArrayForHOF(args[1], pos)
+	if err != nil {
+		return Value{}, err
+	}
+	if elemTy.IR != "i8" || elemTy.Signed {
+		return Value{}, fmt.Errorf("%d:%d: encodeInto's destination must be a Uint8Array", pos.Line, pos.Col)
+	}
+
+	e.ensureStrlen()
+	e.ensureMemcpy()
+	srcLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", srcLen, strVal.Ref))
+	// copyLen = min(srcLen, destLen)
+	fits := e.freshReg()
+	copyLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ule i64 %s, %s", fits, srcLen, destLen))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", copyLen, fits, srcLen, destLen))
+	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", destPtr, strVal.Ref, copyLen))
+
+	ty := EncodeIntoResultType()
+	structIR := ty.StructIR()
+	e.ensureMalloc()
+	objReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", objReg, ty.StructSize()))
+	storeField := func(name, ref string) {
+		idx, fieldTy, _ := ty.FieldIndex(name)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, objReg, idx))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, ref, gep, fieldTy.Align()))
+	}
+	// Byte-string model: units read == bytes written == bytes copied.
+	storeField("read", copyLen)
+	storeField("written", copyLen)
+	return Value{Ref: objReg, Ty: ty}, nil
+}
+
 // emitTextDecoderDecode implements `textDecoder.decode(bytes): string`.
 // bytes must be a Uint8Array or an ArrayBuffer (real TextDecoder accepts
 // any ArrayBufferView — narrowed here to the two shapes this compiler's

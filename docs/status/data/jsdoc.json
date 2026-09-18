@@ -39,10 +39,8 @@
           {
             "feature": "`@type`",
             "status": "implemented",
-            "caveats": [
-              "Applies to variable, class-field, and type-alias positions"
-            ],
             "notes": [
+              "Applies to variable, class-field, and type-alias positions",
               "The value string is parsed by the real type parser (Stage 4), so the full type-expression grammar in the table below is available ([TDD-00123](../tdd/TDD-00123.md) uses it for the `intN` override)"
             ]
           },
@@ -71,20 +69,18 @@
             "feature": "`@typedef`",
             "status": "implemented",
             "caveats": [
-              "Both forms work: `@typedef {Object} Name` + `@property {T} field`, and the inline `@typedef {{x: number}} Name` object literal (since Stage 4)",
               "A `@typedef {T} Name` alias to a **width keyword** (`int32`) does not propagate the integer semantics — the same pre-existing limit a TS `type X = int32` alias has"
             ],
             "notes": [
+              "Both forms work: `@typedef {Object} Name` + `@property {T} field`, and the inline `@typedef {{x: number}} Name` object literal (since Stage 4)",
               "[TDD-00125](../tdd/TDD-00125.md) Stage 2; synthesized into a `type Name = …` declaration, so it resolves anywhere a type name does (`@type`/`@param`/inline)"
             ]
           },
           {
             "feature": "`@callback`",
             "status": "implemented",
-            "caveats": [
-              "Param/return types use the full type-expression grammar (Stage 4)"
-            ],
             "notes": [
+              "Param/return types use the full type-expression grammar (Stage 4)",
               "[TDD-00125](../tdd/TDD-00125.md) Stage 2; synthesized into a function-type alias"
             ]
           },
@@ -283,7 +279,7 @@
             "feature": "Varargs/rest (`...T`)",
             "status": "implemented",
             "caveats": [
-              "Stripped to the base `T`; the varargs body needs a declared `...rest` parameter (no `arguments`)"
+              "Stripped to the base `T`; the varargs body reads its overflow through a declared `...rest` parameter or the `arguments` object ([ADR-00928](../adr/ADR-00928.md))"
             ],
             "notes": [
               "[TDD-00125](../tdd/TDD-00125.md) Stage 1"
@@ -322,10 +318,8 @@
           {
             "feature": "Object shape (`{ a: string, b: number }`)",
             "status": "implemented",
-            "caveats": [
-              "Nested braces are supported (`@param {{x: number}}`) via balanced-brace scanning"
-            ],
             "notes": [
+              "Nested braces are supported (`@param {{x: number}}`) via balanced-brace scanning",
               "[TDD-00125](../tdd/TDD-00125.md) Stage 4"
             ]
           },

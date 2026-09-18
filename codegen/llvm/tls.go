@@ -21,7 +21,7 @@ func TLSClientSource() string { return tlsClientSource }
 // the branches are dead, so cheap no-op stub definitions satisfy the linker.
 // Only emitted when the net runtime itself was (it is the sole referencer).
 func (e *Emitter) emitTLSNetSymbols() {
-	if !e.usedNetRuntime && !e.usedWSClientRuntime && !e.usedH2TLSServer && !e.usedHTTPS1Server {
+	if !e.usedNetRuntime && !e.usedNetSockIO && !e.usedWSClientRuntime && !e.usedH2TLSServer && !e.usedHTTPS1Server {
 		return
 	}
 	if e.usedTLS {

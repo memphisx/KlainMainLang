@@ -58,7 +58,6 @@
             "feature": "`.pop()`",
             "status": "implemented",
             "caveats": [
-              "A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md))",
               "When the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element, a length change in a callee is not seen by the caller — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md))"
             ],
             "notes": [
@@ -70,7 +69,6 @@
             "feature": "`.shift()`",
             "status": "implemented",
             "caveats": [
-              "A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md))",
               "When the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element, a length change in a callee is not seen by the caller — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md))"
             ],
             "notes": [
@@ -107,9 +105,6 @@
           {
             "feature": "`.at(i)`",
             "status": "implemented",
-            "caveats": [
-              "A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md))"
-            ],
             "notes": [
               "Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens. A negative index past the start is out of range (`undefined`), matching Node"
             ]
@@ -138,9 +133,6 @@
           {
             "feature": "`.find(fn)`",
             "status": "implemented",
-            "caveats": [
-              "A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md))"
-            ],
             "notes": [
               "Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens"
             ]
@@ -238,9 +230,6 @@
             "notes": [
               "Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens",
               "Genuine reverse iteration, not a forward scan keeping the last match — the callback is invoked starting from the last element, matching real JS's reverse call order, observable via side effects ([ADR-00057](../adr/ADR-00057.md))"
-            ],
-            "caveats": [
-              "A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md))"
             ]
           },
           {
@@ -281,8 +270,11 @@
           {
             "feature": "`Array.from(iterable, mapFn?)`",
             "status": "implemented",
+            "notes": [
+              "Iterates arrays, Sets, Maps (entries), strings, and classes implementing `next(): T \\| null`; the array-like `{ length: n }` overload builds an `any[]` of `undefined`. See [ADR-00957](../adr/ADR-00957.md), [ADR-00482](../adr/ADR-00482.md), [ADR-00491](../adr/ADR-00491.md)"
+            ],
             "caveats": [
-              "Iterates arrays, Sets, Maps (entries), strings, and classes implementing `next(): T \\| null`; the array-like `{ length: n }` overload builds an `any[]` of `undefined` ([ADR-00957](../adr/ADR-00957.md)) — generators, `thisArg`, and indexed array-like properties (`{ length: 2, 0: 'a' }`) are not supported ([ADR-00482](../adr/ADR-00482.md)/[ADR-00491](../adr/ADR-00491.md))"
+              "Generators, `thisArg`, and indexed array-like properties (`{ length: 2, 0: 'a' }`) are not supported"
             ]
           },
           {

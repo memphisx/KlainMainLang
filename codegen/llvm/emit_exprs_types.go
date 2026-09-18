@@ -109,7 +109,22 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, v.Ref))
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, v.Ref))
 		sepVal := Value{Ref: e.internString(","), Ty: TypePtr}
-		return e.emitArrayJoinCore(ptrReg, lenReg, *v.Ty.ElemType, sepVal)
+		joined, err := e.emitArrayJoinCore(ptrReg, lenReg, *v.Ty.ElemType, sepVal)
+		if err != nil {
+			return Value{}, err
+		}
+		// A `T[] | undefined` miss (a nested-array element absence, TDD-00221) is a
+		// null data-ptr — render "undefined", not the empty join. `absentLiteral`
+		// picks "undefined" (IsUndefined) over "null".
+		if v.Ty.Nullable {
+			isAbsent := e.freshReg()
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isAbsent, ptrReg))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s",
+				r, isAbsent, e.internString(absentLiteral(v.Ty)), joined.Ref))
+			return Value{Ref: r, Ty: TypePtr}, nil
+		}
+		return joined, nil
 	}
 	// A nullable-scalar aggregate (a T|null field/return value, TDD-00064 Stage
 	// 3) stringifies to its value's rendering when present, the literal "null"
@@ -823,6 +838,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if baseTy := e.inferExprType(ex.Object); isUnconstrainedDynamic(baseTy) {
 			return TypeAny
 		}
+		// TextEncoder/TextDecoder `.encoding` — the constant "utf-8" string.
+		if ex.Property == "encoding" {
+			if objTy := e.inferExprType(ex.Object); objTy.IsTextEncoder || objTy.IsTextDecoder {
+				return TypePtr
+			}
+		}
 		// process.stdout/.stderr/.stdin `.isTTY` — a boolean isatty probe.
 		if ex.Property == "isTTY" {
 			if inner, ok := ex.Object.(*ast.MemberExpression); ok {
@@ -1213,8 +1234,22 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			return FinalizationRegistryType(held)
 		}
-		if info, ok := e.classes[ex.ClassName]; ok {
+		if info, ok := e.classes[ex.ClassName]; ok && info.Ty.IsObject {
 			return info.Ty
+		}
+		// During class registration, a class's own unannotated-field inference
+		// (`p = new C()`) can reference a sibling class whose ClassInfo already
+		// exists in e.classes but whose `.Ty` is not finalized until a later pass
+		// (a zero Type with no fields) — and, for a sibling not yet reached in the
+		// topological pass, is absent entirely. Either way the nominal class type
+		// published into e.interfaces (registerClassNamePlaceholders, then the
+		// provisional in registerClasses) is a real `IsClass` object type that
+		// canonicalizeClassTy re-resolves to its full field shape on demand at
+		// each access. Returning it gives the field C's real object shape instead
+		// of falling through to the zero-Type default, which produced an empty
+		// struct-field IR and a "field access on non-object" on `obj.p.x`.
+		if it, ok := e.interfaces[ex.ClassName]; ok && it.IsClass {
+			return it
 		}
 		// A vanilla-JS prototype-constructor instance is a dynamic object
 		// (TDD-00155 Stage 4, `-compat=js`); a Proxy is one too (Stage 7).
@@ -2035,9 +2070,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "existsSync":
 					return TypeBool
 				case "readdirSync":
-					// Dirent[] only for withFileTypes without recursive;
-					// recursive (or the plain form) is a string[].
-					if wt, rec, err := readdirOptions(ex.Args, ex.GetPos()); err == nil && wt && !rec {
+					// Dirent[] for withFileTypes (recursive or not, ADR-00980);
+					// the plain / recursive-only form is a string[].
+					if wt, _, err := readdirOptions(ex.Args, ex.GetPos()); err == nil && wt {
 						return ArrayOf(DirentType())
 					}
 					return ArrayOf(TypePtr)
@@ -2857,6 +2892,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			case "encode":
 				if e.inferExprType(mem.Object).IsTextEncoder {
 					return TypedArrayType("uint8")
+				}
+			case "encodeInto":
+				if e.inferExprType(mem.Object).IsTextEncoder {
+					return EncodeIntoResultType()
 				}
 			case "decode":
 				if e.inferExprType(mem.Object).IsTextDecoder {

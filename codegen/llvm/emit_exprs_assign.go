@@ -205,6 +205,14 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 					}
 				}
 			}
+			// ADR-00978: `signal.onabort = cb` — the AbortSignal event-handler
+			// property. A listener slot fired alongside addEventListener('abort')
+			// listeners; `= null` clears it.
+			if memEx, ok := ex.Left.(*ast.MemberExpression); ok && memEx.Property == "onabort" {
+				if e.inferExprType(memEx.Object).IsAbortSignal {
+					return e.emitAbortSignalOnabortAssign(memEx.Object, ex.Right, ex.GetPos())
+				}
+			}
 		}
 		if id, ok := ex.Left.(*ast.Identifier); ok && id.Name == "onmessage" && e.currentWorkerMod != "" && !e.isShadowedByLocal("onmessage") {
 			if _, bound := e.lookup("onmessage"); !bound {
@@ -835,7 +843,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if sym.Ty.UnionMembers != nil && !unionAllowsAssignmentFrom(sym.Ty, rhs.Ty) {
 			return Value{}, fmt.Errorf("%d:%d: value's type is not a member of '%s's declared union type", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
 		}
-		rhs, err = e.emitBoxValue(rhs)
+		rhs, err = e.emitBoxValueWidened(rhs, ex.Right)
 		if err != nil {
 			return Value{}, err
 		}

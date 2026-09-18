@@ -136,6 +136,48 @@ func (e *Emitter) emitJSONStringifyArrayValue(val Value, ind jsonIndent) (Value,
 	return e.emitJSONStringifyArrayData(ptrReg, lenReg, *val.Ty.ElemType, ind)
 }
 
+// emitJSONStringifyNullableArray serializes a `T[] | undefined` argument
+// (TDD-00221): `JSON.stringify(undefined)` is the value `undefined`, so a miss
+// (null data-ptr) yields an IsUndefined-flagged null result (console.log renders
+// it "undefined") while a present array serializes as usual.
+func (e *Emitter) emitJSONStringifyNullableArray(val Value, ind jsonIndent) (Value, error) {
+	base := val.Ty
+	base.Nullable = false
+	base.IsUndefined = false
+
+	dataPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, val.Ref))
+	isAbsent := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isAbsent, dataPtr))
+
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	aL := e.freshLabel("json.arru.absent")
+	pL := e.freshLabel("json.arru.present")
+	mL := e.freshLabel("json.arru.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAbsent, aL, pL))
+
+	e.emitLabel(aL)
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+
+	e.emitLabel(pL)
+	j, err := e.emitJSONStringifyArrayValue(Value{Ref: val.Ref, Ty: base}, ind)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", j.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+
+	e.emitLabel(mL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	resTy := TypePtr
+	resTy.Nullable = true
+	resTy.IsUndefined = true
+	return Value{Ref: r, Ty: resTy}, nil
+}
+
 // emitJSONStringifyArrayData is emitJSONStringifyArray/
 // emitJSONStringifyArrayValue's shared core: builds a JSON array
 // "[e1,e2,...]" from any element type by looping at runtime and delegating
@@ -272,6 +314,18 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 		return e.emitJSONStringifyDynamic(val, ind, pos)
 	}
 
+	// A `T[] | undefined` argument (a nested-array element absence, TDD-00221):
+	// JSON.stringify(undefined) is the value `undefined` (console.log prints it as
+	// "undefined"); a present array serializes normally. Branch on the null
+	// data-ptr and carry an IsUndefined-flagged result on the miss.
+	if argTy.IsArray && argTy.ElemType != nil && argTy.Nullable {
+		val, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitJSONStringifyNullableArray(val, ind)
+	}
+
 	if argTy.IsArray && argTy.ElemType != nil {
 		return e.emitJSONStringifyArray(args[0], pos, ind)
 	}
@@ -376,7 +430,7 @@ func (e *Emitter) emitJSONStringifyObject(val Value, ind jsonIndent) (Value, err
 		return e.emitJSONStringifySettlement(val, ind)
 	}
 	acc := Value{Ref: e.jsonSeed("{"), Ty: TypePtr}
-	fields := val.Ty.VisibleFields()
+	fields := esOrderedFields(val.Ty.VisibleFields()) // ES key order (Node)
 	// An object with any `T | undefined` (optional) field needs the runtime path:
 	// a field that is `undefined` at runtime has its key DROPPED (real JS), which
 	// makes comma placement a runtime decision. Objects without such fields keep
@@ -509,14 +563,23 @@ func (e *Emitter) emitJSONStringifyObjectOptional(val Value, fields []Field, acc
 		// nullable-scalar aggregate's flag, or a non-null pointer.
 		var present string
 		var baseVal Value
-		if isNullableScalar(field.Ty) {
+		bt := field.Ty
+		bt.Nullable, bt.IsUndefined, bt.IsNull = false, false, false
+		switch {
+		case isNullableScalar(field.Ty):
 			p, payload := e.nullableScalarAggParts(fieldVal)
 			present, baseVal = p, payload
-		} else {
+		case field.Ty.IsArray:
+			// A `T[] | undefined` field (TDD-00221): present iff the {ptr,i64}
+			// aggregate's data-ptr is non-null.
+			dataPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, fieldVal.Ref))
+			present = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, dataPtr))
+			baseVal = Value{Ref: fieldVal.Ref, Ty: bt}
+		default:
 			present = e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, fieldVal.Ref))
-			bt := field.Ty
-			bt.Nullable, bt.IsUndefined, bt.IsNull = false, false, false
 			baseVal = Value{Ref: fieldVal.Ref, Ty: bt}
 		}
 		doL := e.freshLabel("json.opt.emit")
@@ -810,6 +873,37 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 		return Value{Ref: out, Ty: TypePtr}, nil
 	}
 	if val.Ty.IsArray {
+		// A `T[] | undefined` element (a nested-array element absence, TDD-00221):
+		// a JSON array element that is `undefined` serializes as `null`. Test the
+		// null data-ptr; serialize the array otherwise.
+		if val.Ty.Nullable {
+			dataPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, val.Ref))
+			isAbsent := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isAbsent, dataPtr))
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+			aL := e.freshLabel("json.elarru.absent")
+			pL := e.freshLabel("json.elarru.present")
+			mL := e.freshLabel("json.elarru.merge")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAbsent, aL, pL))
+			e.emitLabel(aL)
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+			e.emitLabel(pL)
+			base := val.Ty
+			base.Nullable, base.IsUndefined = false, false
+			jv, err := e.emitJSONStringifyArrayValue(Value{Ref: val.Ref, Ty: base}, ind)
+			if err != nil {
+				return Value{}, err
+			}
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", jv.Ref, slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+			e.emitLabel(mL)
+			out := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+			return Value{Ref: out, Ty: TypePtr}, nil
+		}
 		return e.emitJSONStringifyArrayValue(val, ind)
 	}
 	switch val.Ty.IR {

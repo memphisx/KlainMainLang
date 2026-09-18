@@ -248,3 +248,65 @@ console.log(s.bar)
 console.log(Object.keys(n))
 `, "undefined\nundefined\n[]")
 }
+
+// TDD-00155 Stage 6: allocation-site widening — a fresh `new C()` of a
+// data-only (method-free) class flowing straight into an `any` position is
+// realized as a D1 dynamic object, so member/index access, Object.keys, JSON,
+// and dynamic property add all work, and aliasing/`===`/mutation stay faithful
+// because the widened bag is the single representation (no box-time copy).
+func TestE2EWidenFreshClassIntoAny(t *testing.T) {
+	assertOutput(t, `
+class Point { x: number = 1; y: number = 2; }
+class Box { p: Point = new Point(); tags: string[] = ["a", "b"]; n: number = 42; s: string = "hi"; }
+const a: any = new Box();
+console.log(a.n, a.s, a.p.x, a.p.y, a.tags[0], a.tags.length);
+console.log(Object.keys(a).join(","));
+console.log(JSON.stringify(a));
+a.extra = 99;
+console.log(a.extra);
+`, "42 hi 1 2 a 2\np,tags,n,s\n{\"p\":{\"x\":1,\"y\":2},\"tags\":[\"a\",\"b\"],\"n\":42,\"s\":\"hi\"}\n99")
+}
+
+// The widened bag is a single shared representation: an alias sees mutations and
+// `===` holds, matching JS reference semantics for `const b = a`.
+func TestE2EWidenFreshClassIdentity(t *testing.T) {
+	assertOutput(t, `
+class Box { n: number = 1; }
+const a: any = new Box();
+const b = a;
+b.n = 5;
+console.log(a.n, a === b);
+`, "5 true")
+}
+
+// Widening applies uniformly at every box-to-any boundary: var-decl, return,
+// assignment, and call argument.
+func TestE2EWidenFreshClassAllBoundaries(t *testing.T) {
+	assertOutput(t, `
+class P { x: number = 10; tags: string[] = ["a"]; }
+function ret(): any { return new P(); }
+function arg(v: any): void { console.log(v.x, v.tags[0]); }
+const d: any = new P();
+let s: any = 0; s = new P();
+console.log(d.x, d.tags[0]);
+console.log((ret() as any).x);
+console.log(s.x);
+arg(new P());
+`, "10 a\n10\n10\n10 a")
+}
+
+// A data-only class widened into `any` keeps BOTH its dynamic member access
+// (the reason for widening, ADR-00990) AND its instanceof identity (ADR-00997):
+// the widened bag records the source class's TagID.
+func TestE2EWidenClassInstanceofAndMembers(t *testing.T) {
+	assertOutput(t, `
+class Animal { legs: number = 4; }
+class Dog extends Animal { }
+const d: any = new Dog();
+console.log(d.legs);
+console.log(d instanceof Dog);
+console.log(d instanceof Animal);
+const p: any = { legs: 4 };
+console.log(p instanceof Dog);
+`, "4\ntrue\ntrue\nfalse")
+}

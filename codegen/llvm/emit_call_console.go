@@ -265,6 +265,33 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 	// console.log(array) → Node-style `[ 1, 2, 3 ]` (util.inspect). Previously
 	// a hard rejection; now rendered via the inspector (TDD-00075/ADR-00218).
 	if val.Ty.IsArray {
+		// A `T[] | undefined` value (a nested-array element absence, TDD-00221)
+		// prints its keyword on a miss (null data-ptr), not `[]` — mirroring the
+		// absent-object case below.
+		if val.Ty.Nullable {
+			dataPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, val.Ref))
+			isAbsent := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isAbsent, dataPtr))
+			absentL := e.freshLabel("clog.arrnull")
+			arrL := e.freshLabel("clog.arr")
+			doneL := e.freshLabel("clog.arrdone")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAbsent, absentL, arrL))
+			e.emitLabel(absentL)
+			e.emitConsolePrintVal(Value{Ref: e.internString(absentLiteral(val.Ty)), Ty: TypePtr}, e.internString("%s"+term), fd)
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(arrL)
+			base := val.Ty
+			base.Nullable, base.IsUndefined = false, false
+			strVal, err := e.emitInspectArray(Value{Ref: val.Ref, Ty: base}, 0)
+			if err != nil {
+				return err
+			}
+			e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(doneL)
+			return nil
+		}
 		strVal, err := e.emitInspectArray(val, 0)
 		if err != nil {
 			return err

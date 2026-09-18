@@ -30,6 +30,19 @@ console.log(o.k)
 `, "caught: TypeError\n9\ncaught delete\n9")
 }
 
+// ADR-00999: the non-configurable-delete TypeError embeds the offending
+// property name, matching V8's exact wording `Cannot delete property 'x' of
+// #<Object>` (was missing the `'x'`).
+func TestE2EDescDeleteMessageHasPropertyName(t *testing.T) {
+	assertOutputCompatJS(t, `
+const o: any = {}
+Object.defineProperty(o, "x", { value: 1, configurable: false })
+try { delete o.x } catch (e) { console.log(e.message) }
+Object.defineProperty(o, "long name", { value: 2, configurable: false })
+try { delete o["long name"] } catch (e) { console.log(e.message) }
+`, "Cannot delete property 'x' of #<Object>\nCannot delete property 'long name' of #<Object>")
+}
+
 func TestE2EDescGetOwnPropertyDescriptor(t *testing.T) {
 	assertOutputCompatJS(t, `
 const o: any = { plain: 5 }

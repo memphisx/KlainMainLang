@@ -56,6 +56,17 @@ func (e *Emitter) emitThrowTypeError(msg string) {
 	e.emitTerminator("unreachable")
 }
 
+// emitThrowTypeErrorValue emits an unconditional runtime TypeError throw whose
+// message is a runtime string-pointer register (not a compile-time constant) —
+// used when the message embeds a runtime value (e.g. the offending property
+// name). Like emitThrowTypeError it ends the current block.
+func (e *Emitter) emitThrowTypeErrorValue(msgReg string) {
+	e.ensureExceptionHelpers()
+	errObj := e.buildErrorObj(errorKindIDs["TypeError"], msgReg, e.internString("TypeError"))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+	e.emitTerminator("unreachable")
+}
+
 // dynAnyKeyRef evaluates a bracket key expression for a dynamic-object access
 // and returns a string-pointer register: strings pass through, an any key is
 // stringified with the runtime tag dispatch, an integer is formatted "%lld"
@@ -302,7 +313,20 @@ func (e *Emitter) emitDynAnyDelete(objVal Value, keyRef string, pos ast.Pos) (Va
 	delErrL := e.freshLabel("dyndel.nc")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", r, delOKL, delErrL))
 	e.emitLabel(delErrL)
-	e.emitThrowTypeError("Cannot delete property of #<Object>")
+	// V8's exact wording: `Cannot delete property 'x' of #<Object>` — embed the
+	// runtime property name so the message matches Node's.
+	delMsg1, derr := e.emitStringConcat(
+		Value{Ref: e.internString("Cannot delete property '"), Ty: TypePtr},
+		Value{Ref: keyRef, Ty: TypePtr})
+	if derr != nil {
+		return Value{}, derr
+	}
+	delMsg2, derr := e.emitStringConcat(delMsg1,
+		Value{Ref: e.internString("' of #<Object>"), Ty: TypePtr})
+	if derr != nil {
+		return Value{}, derr
+	}
+	e.emitThrowTypeErrorValue(delMsg2.Ref)
 	e.emitLabel(delOKL)
 	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", r, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
@@ -766,6 +790,246 @@ func (e *Emitter) emitDynArrLiteral(lit *ast.ArrayLiteral) (Value, error) {
 		e.emitInstr(fmt.Sprintf("call void @__kml_dynarr_push(ptr %s, i64 %s)", arr, boxed.Ref))
 	}
 	return Value{Ref: e.emitNbTagPtr(arr, kmlTagDynArray), Ty: TypeAny}, nil
+}
+
+// isFreshObjectAlloc reports whether srcExpr allocates a brand-new object with
+// no prior binding — a `new C()`. Only a fresh allocation is eligible for
+// allocation-site widening: with no alias, realizing it as a D1 bag keeps the
+// single-representation invariant that makes `===`/mutation faithful. (Object
+// *literals* in an any context already widen upstream via emitDynObjLiteral.)
+func (e *Emitter) isFreshObjectAlloc(srcExpr ast.Expression) bool {
+	if srcExpr == nil {
+		return false
+	}
+	_, ok := srcExpr.(*ast.NewExpression)
+	return ok
+}
+
+// emitBoxValueWidened boxes v into `any`, applying allocation-site widening
+// (TDD-00155 Stage 6) when v is a fresh, widenable static-object allocation —
+// realizing it as a D1 bag so `a.x`/`Object.keys(a)`/index access work — and
+// otherwise boxing normally. srcExpr is the AST that produced v (nil disables
+// widening). Used at every box-to-`any` boundary (var-decl, return, argument,
+// assignment) so the behavior is uniform across them.
+func (e *Emitter) emitBoxValueWidened(v Value, srcExpr ast.Expression) (Value, error) {
+	if v.Ty.IsObject && !v.Ty.IsDynamic && e.isFreshObjectAlloc(srcExpr) &&
+		e.dynWidenable(v.Ty, map[string]bool{}) {
+		return e.emitStaticObjToBag(v)
+	}
+	return e.emitBoxValue(v)
+}
+
+// dynWidenable reports whether a static object type can be faithfully realized
+// as a D1 bag by emitStaticObjToBag (TDD-00155 Stage 6). It rejects:
+//   - a class carrying methods — a data-only bag would drop `a.method()`, a
+//     silent divergence (that case stays a clean rejection until dynamic
+//     method installation is built);
+//   - a cyclic object graph (a self- or mutually-referential object field) —
+//     the helper unrolls the shape at compile time, so a cycle would unroll
+//     forever; `seen` breaks the recursion by declaring a cycle non-widenable.
+// A plain data shape (interface/struct types, data-only classes) with
+// scalar/array/nested-data-object fields is widenable. `seen` is keyed by the
+// type's registry name; pass a fresh map at the top call.
+func (e *Emitter) dynWidenable(t Type, seen map[string]bool) bool {
+	if !t.IsObject || t.IsDynamic {
+		return false
+	}
+	key := t.ClassName
+	if key == "" {
+		key = t.RefName
+	}
+	if key != "" && seen[key] {
+		return false // cycle → not widenable (would unroll forever)
+	}
+	if t.IsClass {
+		info, ok := e.classes[t.ClassName]
+		if !ok || len(info.Methods) > 0 {
+			return false
+		}
+	}
+	if key != "" {
+		seen[key] = true
+		defer delete(seen, key)
+	}
+	for _, f := range t.VisibleFields() {
+		if f.Ty.IsObject && !e.dynWidenable(f.Ty, seen) {
+			return false
+		}
+		// An array field converts to a D1 dynamic array; that is faithful for
+		// scalar/nested-array elements and for object elements that are
+		// themselves widenable, but an array of method-carrying objects would
+		// silently drop their methods — reject so the whole binding stays a
+		// clean rejection rather than half-working.
+		if f.Ty.IsArray {
+			el := f.Ty.ElemType
+			for el != nil && el.IsArray {
+				el = el.ElemType
+			}
+			if el != nil && el.IsObject && !e.dynWidenable(*el, seen) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// emitStaticArrayToDynarr realizes a statically-typed array value as a fresh D1
+// dynamic array (tag 11), boxing each element, so dynamic index/length/push
+// (`a.tags[0]`, `a.tags.length`) work through the D1 path once the array lives
+// inside a widened bag. Used only for fresh-allocation widening, where the
+// source array has no external alias, so the element-by-element copy preserves
+// observable semantics. An object element that is itself widenable recurses to a
+// nested bag so `a.items[0].x` reaches; other elements box normally. `arr` is a
+// `{ptr,i64}` aggregate Value (data pointer + length).
+func (e *Emitter) emitStaticArrayToDynarr(arr Value) (Value, error) {
+	e.ensureDynArr()
+	if arr.Ty.ElemType == nil {
+		return Value{}, fmt.Errorf("internal: emitStaticArrayToDynarr on non-array type %s", arr.Ty.IR)
+	}
+	elemTy := *arr.Ty.ElemType
+	data := e.freshReg()
+	length := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", data, arr.Ref))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", length, arr.Ref))
+	darr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynarr_new(i64 %s)", darr, length))
+
+	iptr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", iptr))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", iptr))
+	condL := e.freshLabel("dynarr.cvt.cond")
+	bodyL := e.freshLabel("dynarr.cvt.body")
+	endL := e.freshLabel("dynarr.cvt.end")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	i := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, iptr))
+	cmp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", cmp, i, length))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cmp, bodyL, endL))
+	e.emitLabel(bodyL)
+	ep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", ep, elemTy.IR, data, i))
+	var boxed Value
+	var err error
+	switch {
+	case elemTy.IsArray:
+		boxed, err = e.emitStaticArrayToDynarr(e.loadArraySlotAggregate(ep, elemTy))
+	case elemTy.IsObject && e.dynWidenable(elemTy, map[string]bool{}):
+		load := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", load, ep))
+		boxed, err = e.emitStaticObjToBag(Value{Ref: load, Ty: elemTy})
+	default:
+		load := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", load, elemTy.IR, ep, elemTy.Align()))
+		boxed, err = e.emitBoxValue(Value{Ref: load, Ty: elemTy})
+	}
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("call void @__kml_dynarr_push(ptr %s, i64 %s)", darr, boxed.Ref))
+	inext := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", inext, i))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", inext, iptr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(endL)
+	return Value{Ref: e.emitNbTagPtr(darr, kmlTagDynArray), Ty: TypeAny}, nil
+}
+
+// emitStaticObjToBag realizes a statically-typed object value `v` as a fresh D1
+// dynamic-object bag (tag 10), field-by-field over its compile-time visible
+// shape (TDD-00155 Stage 6, allocation-site widening). Each field is boxed into
+// the bag: scalars/functions through emitBoxValue, arrays through the live
+// header-pointer slot, and a nested static-object field recurses into its own
+// nested bag so deep dynamic access (`a.inner.x`) works. The result is a
+// tag-10 `any` Value. A nullable object whose pointer is null at runtime widens
+// to the `null` sentinel rather than an empty bag, matching `x === null`.
+//
+// This is used only where widening is faithful — a fresh allocation flowing
+// straight into a dynamic position, or a binding proved to have a single
+// dynamic-compatible representation — never as a box-time copy of a value that
+// still lives on as a static struct (that would break reference identity).
+func (e *Emitter) emitStaticObjToBag(v Value) (Value, error) {
+	e.ensureDynObj()
+	if !v.Ty.IsObject {
+		return Value{}, fmt.Errorf("internal: emitStaticObjToBag on non-object type %s", v.Ty.IR)
+	}
+
+	build := func() (string, error) {
+		bag := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_new()", bag))
+		// A class instance keeps its instanceof identity across the widening: record
+		// the class's TagID in the bag so `x instanceof C` still answers correctly
+		// once x has been widened into `any` (ADR-00997). A plain object literal /
+		// interface shape has no class tag — the bag's default 0 means "no class".
+		if v.Ty.IsClass {
+			if info, ok := e.classes[v.Ty.ClassName]; ok {
+				e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_set_classtag(ptr %s, i64 %d)", bag, info.TagID))
+			}
+		}
+		structIR := v.Ty.StructIR()
+		for _, f := range v.Ty.VisibleFields() {
+			idx, _, _ := v.Ty.FieldIndex(f.Name)
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, v.Ref, idx))
+			var boxed Value
+			var err error
+			switch {
+			case f.Ty.IsArray:
+				// Convert to a D1 dynamic array so dynamic index/length/push work
+				// on the field through the bag (a fresh allocation has no alias).
+				boxed, err = e.emitStaticArrayToDynarr(e.loadArrayFieldValue(gep, f.Ty))
+			case f.Ty.IsObject:
+				// Recurse so nested static objects become nested bags; a null
+				// nested pointer widens to the null sentinel inside the recursion.
+				loadReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", loadReg, gep))
+				boxed, err = e.emitStaticObjToBag(Value{Ref: loadReg, Ty: f.Ty})
+			default:
+				loadReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(f.Ty), gep, f.Ty.Align()))
+				boxed, err = e.emitBoxValue(Value{Ref: loadReg, Ty: f.Ty})
+			}
+			if err != nil {
+				return "", err
+			}
+			e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_set(ptr %s, ptr %s, i64 %s)", bag, e.internString(f.Name), boxed.Ref))
+		}
+		return e.emitNbTagPtr(bag, kmlTagDynObject), nil
+	}
+
+	if !v.Ty.Nullable {
+		tagged, err := build()
+		if err != nil {
+			return Value{}, err
+		}
+		return Value{Ref: tagged, Ty: TypeAny}, nil
+	}
+
+	// Nullable object: guard the null pointer to the null sentinel. build() may
+	// span several blocks (nested nullable fields recurse), so a fixed trailing
+	// label pins the phi predecessor rather than guessing the current block.
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+	nullL := e.freshLabel("widen.null")
+	bagL := e.freshLabel("widen.bag")
+	bagEndL := e.freshLabel("widen.bagend")
+	joinL := e.freshLabel("widen.join")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, bagL))
+	e.emitLabel(bagL)
+	tagged, err := build()
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", bagEndL))
+	e.emitLabel(bagEndL)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(nullL)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(joinL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %d, %%%s ]", r, tagged, bagEndL, nbNull, nullL))
+	return Value{Ref: r, Ty: TypeAny}, nil
 }
 
 // emitDynObjLiteral builds a D1 dynamic object from an object literal in an

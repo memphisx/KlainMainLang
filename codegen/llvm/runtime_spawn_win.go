@@ -54,6 +54,7 @@ func (e *Emitter) cpSpawnForkIR() string {
   br label %parent
 `
 	}
+	e.ensureReexecGuardHelper() // ADR-00972: self-spawn fork-chain guard
 	return `  %pid = call i32 @fork()
   %ischild = icmp eq i32 %pid, 0
   br i1 %ischild, label %child, label %parent
@@ -140,6 +141,10 @@ setenv:
   store ptr %env, ptr @environ, align 8
   br label %doexec
 doexec:
+  ; ADR-00972: a self-spawn (target resolves to this executable) marks the child
+  ; env so its startup guard refuses to re-run this program body — otherwise the
+  ; child ignores argv and re-runs main, re-hitting this spawn (a fork chain).
+  call void @__kml_mark_child_if_self_spawn(ptr %file)
   call i32 @execvp(ptr %file, ptr %argv)
   ; execvp only returns on failure — report errno up the CLOEXEC status pipe
   ; (%spw, from cpSpawnStatusSetupIR) so the parent can fire 'error' (ADR-00754).
@@ -223,6 +228,7 @@ func (e *Emitter) execSyncForkIR() string {
   br label %parent
 `
 	}
+	e.ensureReexecGuardHelper() // ADR-00972: self-spawn fork-chain guard
 	return `  %pid = call i32 @fork()
   %ischild = icmp eq i32 %pid, 0
   br i1 %ischild, label %child, label %parent
@@ -237,6 +243,10 @@ dochdir:
   call i32 @chdir(ptr %cwd)
   br label %doexec
 doexec:
+  ; ADR-00972: a self-spawn (target resolves to this executable) marks the child
+  ; env so its startup guard refuses to re-run this program body — otherwise the
+  ; child ignores argv and re-runs main, re-hitting this spawn (a fork chain).
+  call void @__kml_mark_child_if_self_spawn(ptr %file)
   call i32 @execvp(ptr %file, ptr %argv)
   call void @_exit(i32 127)
   unreachable

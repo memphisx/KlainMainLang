@@ -7,7 +7,7 @@
   "coverage": {
     "loose": "10/10",
     "loosePct": 100,
-    "strict": "7/10",
+    "strict": "8/10",
     "strictPct": 70
   },
   "lede": "Node's `path` module for portable filesystem path manipulation, import-gated as a virtual built-in (`import path from 'path'`). Both of Node's flavours exist on every host: a bare `path` is the host's flavour (`path.win32` on Windows — backslashes, `;`, drive letters, UNC roots — and `path.posix` on Linux/macOS), while `path.posix.*` and `path.win32.*` name one explicitly. join, resolve, dirname, basename, extname, parse/format and isAbsolute follow real Node's algorithms in both flavours, including its asymmetric `basename` extension-stripping rule; the win32 flavour is a C port of Node's own `lib/path.js`.",

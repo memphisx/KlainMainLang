@@ -218,12 +218,21 @@ scandone:
   %none = icmp eq i64 %fb, -1
   br i1 %none, label %retfalse, label %havebest
 havebest:
+  ; TDD-00216: fold any background AbortSignal.timeout deadline into the wait, but
+  ; keep %tf as the timer's own deadline; after waking, fire due aborts and — if
+  ; only an abort was due — return 1 (progress) without firing the timer early, so
+  ; the caller's await loop re-checks and calls again.
   %tf = load i64, ptr %bestfire, align 8
+  %fnabso = call i64 @__kml_abort_to_soonest()
+  %fnabsnz = icmp ne i64 %fnabso, 0
+  %fnabsooner = icmp slt i64 %fnabso, %tf
+  %fnuseabs = and i1 %fnabsnz, %fnabsooner
+  %fntarget = select i1 %fnuseabs, i64 %fnabso, i64 %tf
   %now = call i64 @__kml_monotonic_ns()
-  %need = icmp sgt i64 %tf, %now
-  br i1 %need, label %dosleep, label %dofire
+  %need = icmp sgt i64 %fntarget, %now
+  br i1 %need, label %dosleep, label %fnabortcheck
 dosleep:
-  %wait = sub i64 %tf, %now
+  %wait = sub i64 %fntarget, %now
   %sec = sdiv i64 %wait, 1000000000
   %nsr = srem i64 %wait, 1000000000
   %ts_s = getelementptr { i64, i64 }, ptr %ts, i32 0, i32 0
@@ -231,7 +240,12 @@ dosleep:
   store i64 %sec, ptr %ts_s, align 8
   store i64 %nsr, ptr %ts_n, align 8
   %src = call i32 @nanosleep(ptr %ts, ptr null)
-  br label %dofire
+  br label %fnabortcheck
+fnabortcheck:
+  call void @__kml_abort_to_fire_due()
+  %fnnow = call i64 @__kml_monotonic_ns()
+  %fntdue = icmp sle i64 %tf, %fnnow
+  br i1 %fntdue, label %dofire, label %rettrue
 dofire:
   %data2 = load ptr, ptr @__kml_timer_data, align 8
   %fi = load i64, ptr %besti, align 8
@@ -279,6 +293,12 @@ func (e *Emitter) ensureTimerRuntime() {
 	// feature is used" reasoning ensureHTTPRuntime already documents for
 	// ensureFetchAsync/ensurePromiseCombinators.
 	e.ensureSignalHandlerRuntime()
+	// TDD-00216: the timer drain / fire-next loops below fold in and fire due
+	// background AbortSignal.timeout aborts via these always-present helpers
+	// (no-ops on an empty registry). Emitted here so the loop IR resolves whether
+	// or not AbortSignal.timeout is used; the event loop pulls them in the same
+	// way (it also ensures the timer runtime).
+	e.ensureAbortRegistryGlobals()
 	clockID := monotonicClockID()
 	e.emitGlobal("declare i32 @nanosleep(ptr noundef, ptr noundef)")
 	e.emitGlobal("@__kml_timer_data = internal thread_local global ptr null, align 8")
@@ -520,10 +540,26 @@ scandone:
   br i1 %nomore, label %alldone, label %havebest
 
 havebest:
-  %targetfire = load i64, ptr %bestfire, align 8
+  ; TDD-00216: wake by the soonest of the timer's deadline and any background
+  ; AbortSignal.timeout deadline (soonest()==0 ⇒ none), but keep %bestfire as the
+  ; timer's own deadline so the post-wake recheck fires the timer only when it is
+  ; actually due (not merely because we woke early for an abort).
+  %timerfire = load i64, ptr %bestfire, align 8
+  %abso = call i64 @__kml_abort_to_soonest()
+  %absnonzero = icmp ne i64 %abso, 0
+  %absooner = icmp slt i64 %abso, %timerfire
+  %useabs = and i1 %absnonzero, %absooner
+  %targetfire = select i1 %useabs, i64 %abso, i64 %timerfire
   %now1 = call i64 @__kml_monotonic_ns()
   %needwait = icmp sgt i64 %targetfire, %now1
-  br i1 %needwait, label %dosleep, label %dofire
+  br i1 %needwait, label %dosleep, label %abortcheck
+
+abortcheck:
+  call void @__kml_abort_to_fire_due()
+  %acnow = call i64 @__kml_monotonic_ns()
+  %actimer = load i64, ptr %bestfire, align 8
+  %actimerdue = icmp sle i64 %actimer, %acnow
+  br i1 %actimerdue, label %dofire, label %outerloop
 
 dosleep:
   %waitns = sub i64 %targetfire, %now1
@@ -541,7 +577,7 @@ dosleep:
   ; first and, if this wasn't actually a signal we care about, simply
   ; recomputes the (now-shorter) remaining wait and sleeps again.
   %sleepinterrupted = icmp ne i32 %sleeprc, 0
-  br i1 %sleepinterrupted, label %outerloop, label %dofire
+  br i1 %sleepinterrupted, label %outerloop, label %abortcheck
 
 dofire:
   %data2 = load ptr, ptr @__kml_timer_data, align 8

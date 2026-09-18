@@ -6,7 +6,7 @@
 //
 // LAYOUT CONTRACTS (must stay in sync with the emitting runtime):
 //   Dynamic object bag (runtime_dynobj.go):
-//     header: [0]=i64 flags  [8]=ptr proto  [16]=ptr props  [24]=i64 count  [32]=i64 cap
+//     header: [0]=i64 flags  [8]=ptr proto  [16]=ptr props  [24]=i64 count  [32]=i64 cap  [40]=i64 classtag
 //     entry (32B): [0]=char* key  [8]=i64 tag  [16]=i64 payload  [24]=i64 attrs
 //   Dynamic array (runtime_dynarr.go):
 //     header: [0]=i64 len  [8]=i64 cap  [16]=ptr data
@@ -32,6 +32,52 @@ static char *obj_key(char *o, long long i) { return *(char **)(obj_props(o) + i 
 static long long obj_tag(char *o, long long i) { return *(long long *)(obj_props(o) + i * 32 + 8); }
 static long long obj_pay(char *o, long long i) { return *(long long *)(obj_props(o) + i * 32 + 16); }
 static long long obj_attrs(char *o, long long i) { return *(long long *)(obj_props(o) + i * 32 + 24); }
+
+/* es_is_index reports whether key `k` is a canonical ES array index — the
+   decimal string of an integer in [0, 2^32-1), no leading zero — storing its
+   value in *out. Drives own-property enumeration order (JSON.stringify here,
+   mirroring __kml_dynobj_is_index in runtime_dynobj.go). */
+static int es_is_index(const char *k, unsigned long long *out) {
+    if (!k) return 0;
+    size_t len = strlen(k);
+    if (len == 0 || len > 10) return 0;
+    if (k[0] == '0' && len > 1) return 0;
+    unsigned long long v = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (k[i] < '0' || k[i] > '9') return 0;
+        v = v * 10 + (unsigned long long)(k[i] - '0');
+    }
+    if (v >= 4294967295ULL) return 0;
+    *out = v;
+    return 1;
+}
+
+/* es_order fills `out` (capacity n) with entry indices of object `o` in ES
+   own-property enumeration order: array-index keys ascending numeric first,
+   then every other key in insertion order. Returns the count written (== n).
+   O(n^2) but n is a property count; needs no scratch/taken array (each pass
+   selects the smallest index strictly greater than the last emitted). */
+static long long es_order(char *o, long long n, long long *out) {
+    long long w = 0, lastVal = -1;
+    for (;;) {
+        long long bestPos = -1;
+        unsigned long long bestVal = 0;
+        for (long long i = 0; i < n; i++) {
+            unsigned long long v;
+            if (es_is_index(obj_key(o, i), &v) && (long long)v > lastVal) {
+                if (bestPos < 0 || v < bestVal) { bestPos = i; bestVal = v; }
+            }
+        }
+        if (bestPos < 0) break;
+        out[w++] = bestPos;
+        lastVal = (long long)bestVal;
+    }
+    for (long long i = 0; i < n; i++) {
+        unsigned long long v;
+        if (!es_is_index(obj_key(o, i), &v)) out[w++] = i;
+    }
+    return w;
+}
 
 /* nb_decode mirrors __kml_nb_tag/__kml_nb_pay (runtime_nanbox.go — keep in
    sync): numbers are double_bits + 2^49 (tag 1); small immediates; else a
@@ -221,8 +267,14 @@ static int stringify_val(Sb *b, long long tag, long long pay,
     while (*(long long *)o & (1LL << 33)) o = *(char **)(o + 8);
     sb_ch(b, '{');
     long long n = obj_count(o);
+    /* Own-property keys serialize in ES enumeration order (array-index keys
+       ascending first, then insertion order) — the same order Object.keys /
+       for...in use (runtime_dynobj.go). order[] maps output position → entry. */
+    long long *order = (n > 0) ? (long long *)malloc((size_t)n * sizeof(long long)) : NULL;
+    if (order) n = es_order(o, n, order);
     int wrote = 0;
-    for (long long i = 0; i < n; i++) {
+    for (long long oi = 0; oi < n; oi++) {
+        long long i = order ? order[oi] : oi;
         /* Stage 5: skip non-ENUMERABLE entries; an ACCESSOR entry's value
            comes from its getter (JSON.stringify invokes getters), called
            through the dynamic-function record with the receiver boxed
@@ -245,6 +297,7 @@ static int stringify_val(Sb *b, long long tag, long long pay,
         int ok = stringify_val(&probe, etag, epay, indent, parents, depth + 1, err);
         if (*err) {
             free(probe.d);
+            free(order);
             return 0;
         }
         if (ok) {
@@ -257,6 +310,7 @@ static int stringify_val(Sb *b, long long tag, long long pay,
         }
         free(probe.d);
     }
+    free(order);
     if (pretty && wrote) sb_indent(b, indent, depth);
     sb_ch(b, '}');
     return 1;

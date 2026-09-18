@@ -25,6 +25,45 @@ console.log('rejected:', child.status !== 0)
 `, "status: 9\nrejected: true")
 }
 
+// The interpreter-flag guard above (ADR-00970) only caught -p/-e/-i, but a
+// self-spawned child ignores its argv entirely and re-runs main — so
+// spawnSync(process.execPath, ['anything']) with a NON-flag argument re-forked
+// just the same (a linear fork chain that piled up hundreds of processes under
+// the node conformance suite). ADR-00972 detects a spawn whose target resolves
+// to this executable and marks the child's env; the startup guard then refuses
+// to run its body regardless of argv, so the child exits 9 once and the parent
+// does not recurse.
+func TestE2EChildProcessExecPathSelfSpawnRejected(t *testing.T) {
+	assertOutputImports(t, `
+import { spawnSync } from 'child_process'
+const child = spawnSync(process.execPath, ['some-non-flag-arg'])
+console.log('status:', child.status)
+console.log('rejected:', child.status !== 0)
+`, "status: 9\nrejected: true")
+}
+
+// A spawn of a DIFFERENT executable must be unaffected — the self-spawn marker
+// is set only when the target resolves to this binary, so a normal child runs.
+func TestE2EChildProcessSpawnOtherProgramUnaffected(t *testing.T) {
+	assertOutputImports(t, `
+import { spawnSync } from 'child_process'
+const child = spawnSync("/bin/echo", ["hi"])
+console.log('status:', child.status)
+`, "status: 0")
+}
+
+// The async spawn/fork fork+exec path shares the same self-spawn marker
+// (ADR-00972): spawn(process.execPath, ['nonflag']) would otherwise re-run main
+// in the child and re-fork. The child's startup guard exits 9 once, so 'close'
+// reports code 9 and there is no fork chain.
+func TestE2EChildProcessAsyncSelfSpawnRejected(t *testing.T) {
+	assertOutputImports(t, `
+import { spawn } from 'child_process'
+const child = spawn(process.execPath, ['nonflag'])
+child.on('close', (code: number) => { console.log('code:', code) })
+`, "code: 9")
+}
+
 func TestE2EChildProcessSpawnStreaming(t *testing.T) {
 	assertOutputImports(t, `
 import { spawn } from 'child_process'

@@ -646,6 +646,24 @@ console.log(isNaN(x))
 `, "true\nfalse\ntrue\ntrue\ntrue")
 }
 
+// Global isNaN/isFinite apply ToNumber to their argument (unlike Number.isNaN),
+// so a non-numeric operand reaching them through `any` — including an erased
+// `expr as any` assertion that keeps the concrete type — is coerced, not
+// answered with a trivial false/true.
+func TestE2EGlobalIsNaNIsFiniteCoerce(t *testing.T) {
+	assertOutput(t, `
+console.log(isNaN('hello' as any))   // Number('hello') is NaN
+console.log(isFinite('x' as any))
+console.log(isNaN('42' as any))      // Number('42') is 42
+console.log(isFinite('42' as any))
+console.log(isNaN({} as any))        // Number({}) is NaN
+console.log(isNaN(true as any))      // Number(true) is 1
+const s: any = 'hello'
+console.log(isNaN(s))
+console.log(isNaN(5), isFinite(5))   // integer fast path unchanged
+`, "true\nfalse\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse true")
+}
+
 func TestE2EPerformanceNow(t *testing.T) {
 	assertOutput(t, `
 const t1: number = performance.now()

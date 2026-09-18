@@ -11,6 +11,7 @@ func (e *Emitter) ensureSpawnSyncRuntime() {
 	}
 	e.usedSpawnSync = true
 	e.emitGlobal("declare ptr @__kml_cp_spawn_sync(ptr, ptr, i64, ptr, i64)")
+	e.ensureReexecGuardHelper() // ADR-00972: self-spawn fork-chain guard
 }
 
 // SpawnSyncSource is the embedded C implementation behind
@@ -41,6 +42,11 @@ int __kml_win_exit_code(int pid);
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
+
+/* ADR-00972: mark a self-spawn so the re-executed child's startup guard refuses
+   to run its body (see runtime_reexec_guard.go). Shared with the async spawn
+   path; a no-op unless the target resolves to this executable. */
+void __kml_mark_child_if_self_spawn(const char *file);
 
 /* Length-prefixed string alloc matching __kml_str_alloc's layout. */
 static char *kmlss_str(const char *buf, int64_t n) {
@@ -106,6 +112,7 @@ void *__kml_cp_spawn_sync(const char *file, char **args, int64_t argn, const cha
     return r;
   }
   if (pid == 0) {
+    __kml_mark_child_if_self_spawn(file);
     if (cwd && chdir(cwd) != 0) _exit(127);
     dup2(outp[1], 1);
     dup2(errp[1], 2);

@@ -19,6 +19,69 @@ console.log(fired)
 `, "false\ntrue\naborted!")
 }
 
+// ADR-00978: the `signal.onabort` event-handler property fires alongside the
+// addEventListener('abort') listeners on controller.abort(), sees aborted=true,
+// clears with `= null`, and replaces on re-assignment.
+func TestE2EAbortSignalOnabort(t *testing.T) {
+	assertOutput(t, `
+const c = new AbortController()
+const sig = c.signal
+sig.onabort = (e: Event) => { console.log("onabort", e.type, sig.aborted) }
+let viaListener = false
+sig.addEventListener("abort", () => { viaListener = true })
+c.abort()
+console.log("listener", viaListener)
+`, "onabort abort true\nlistener true")
+}
+
+func TestE2EAbortSignalOnabortNullAndReplace(t *testing.T) {
+	assertOutput(t, `
+const c1 = new AbortController()
+let f1 = false
+c1.signal.onabort = () => { f1 = true }
+c1.signal.onabort = null
+c1.abort()
+console.log("cleared", f1)
+
+const c2 = new AbortController()
+let which = ""
+c2.signal.onabort = () => { which = "first" }
+c2.signal.onabort = () => { which = "second" }
+c2.abort()
+console.log("replaced", which)
+
+const c3 = new AbortController()
+let f3 = false
+c3.signal.onabort = () => { f3 = true }
+console.log("noabort", f3)
+`, "cleared false\nreplaced second\nnoabort false")
+}
+
+// TDD-00216: AbortSignal.timeout fires its abort in the background at the
+// deadline — aborted becomes true and onabort + addEventListener('abort')
+// listeners run — while the loop is alive for other work (here a later timer).
+// onabort fires before the addEventListener listeners (shared event).
+func TestE2EAbortSignalTimeoutBackgroundDispatch(t *testing.T) {
+	assertOutput(t, `
+const sig = AbortSignal.timeout(20)
+let order = ""
+sig.addEventListener("abort", () => { order += "L" })
+sig.onabort = () => { order += "O" }
+setTimeout(() => { console.log(order + " aborted=" + sig.aborted) }, 150)
+`, "OL aborted=true")
+}
+
+// TDD-00216: a lone AbortSignal.timeout keeps nothing alive (Node unref parity) —
+// with no other pending work the program exits immediately and the abort never
+// fires, rather than hanging for the timeout.
+func TestE2EAbortSignalTimeoutUnref(t *testing.T) {
+	assertOutput(t, `
+const sig = AbortSignal.timeout(10000)
+sig.onabort = () => { console.log("SHOULD NOT FIRE") }
+console.log("immediate")
+`, "immediate")
+}
+
 func TestE2EAbortWithReason(t *testing.T) {
 	assertOutput(t, `
 const c = new AbortController()

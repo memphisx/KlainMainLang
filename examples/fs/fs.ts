@@ -49,9 +49,17 @@ console.log(fs.readFileSync(path, { encoding: 'utf8' })) // text
 fs.writeFileSync(path, '!', { flag: 'a' })
 console.log(fs.readFileSync(path, 'utf8'))              // text!
 
-// A failed read/write/append/delete throws a catchable Error, built from
-// the OS's own reason (via strerror(errno)) — same approach as fetch's
-// network-failure handling.
+// { mode } sets the permission bits when the write CREATES the file (matching
+// Node/open(2) — ignored for a file that already exists), reduced by the umask.
+const secret = '/tmp/kml_fs_secret.txt'
+fs.writeFileSync(secret, 'private', { mode: 0o600 })   // owner read/write only
+console.log((fs.statSync(secret).mode & 0o777).toString(8))  // 600
+fs.unlinkSync(secret)
+
+// A failed read/write/append/delete throws a catchable Error whose message is
+// byte-exact to Node's `<CODE>: <libuv description>, <syscall> '<path>'` form
+// (e.g. "ENOENT: no such file or directory, open '/…'") — same "surface a real
+// OS-level failure as a catchable Error" approach as fetch's network handling.
 try {
     fs.readFileSync('/definitely/does/not/exist/kml-example.txt')
 } catch (e) {
@@ -108,6 +116,19 @@ const tree = fs.readdirSync(dir, { recursive: true })
 tree.sort()
 for (const rel of tree) {
     console.log(rel)   // a.txt, b.txt, nested, nested/c.txt
+}
+// { recursive: true, withFileTypes: true } walks the whole tree as Dirent[]:
+// each entry's .name is its basename and .parentPath is the full path of the
+// directory it was read from (so a nested entry reports the nested directory).
+const treeEnts = fs.readdirSync(dir, { recursive: true, withFileTypes: true })
+const treeRows: string[] = []
+for (const d of treeEnts) {
+    treeRows.push(d.name + ' in ' + d.parentPath +
+        (d.isDirectory() ? ' (dir)' : ''))
+}
+treeRows.sort()
+for (const row of treeRows) {
+    console.log(row)   // c.txt in <dir>/nested, nested in <dir> (dir), …
 }
 fs.unlinkSync(dir + '/nested/c.txt')
 fs.rmdirSync(dir + '/nested')
@@ -243,3 +264,13 @@ fs.readSync(rfd, head)
 console.log(head[0])                  // 114 ('r')
 fs.closeSync(rfd)
 fs.unlinkSync('/tmp/kml_fd_example.txt')
+
+// openSync also takes a raw numeric flag mask built from fs.constants' O_*
+// members — the same bits the 'w'/'r'/'a' string flags expand to, resolved to
+// this target's <fcntl.h>. O_WRONLY|O_CREAT|O_TRUNC is exactly what 'w' means.
+const ofd = fs.openSync('/tmp/kml_oflags.txt',
+  fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC, 0o644)
+fs.writeSync(ofd, 'opened via O_ flags')
+fs.closeSync(ofd)
+console.log(fs.readFileSync('/tmp/kml_oflags.txt', 'utf8'))  // opened via O_ flags
+fs.unlinkSync('/tmp/kml_oflags.txt')

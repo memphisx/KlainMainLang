@@ -513,14 +513,18 @@ frame:
   %head = load i64, ptr %headp, align 8
   %qlen = load i64, ptr %lenp, align 8
   %queued = sub i64 %qlen, %head
-  %over = icmp sgt i64 %queued, HWM
+  ; ADR-00983: read the per-response backpressure threshold (createServer's
+  ; { highWaterMark } option, or 16384 by default) rather than a baked constant.
+  %hwmp = getelementptr RES, ptr %res, i32 0, i32 HWMIDX
+  %hwm = load i64, ptr %hwmp, align 8
+  %over = icmp sgt i64 %queued, %hwm
   br i1 %over, label %setnd, label %retq
 setnd:
   %ndp = getelementptr QST, ptr %q, i32 0, i32 4
   store i64 1, ptr %ndp, align 8
   br label %retq
 retq:
-  %ok = icmp sle i64 %queued, HWM
+  %ok = icmp sle i64 %queued, %hwm
   ret i1 %ok
 retTrue:
   ret i1 1
@@ -552,7 +556,7 @@ retTrue:
 		"STREAMING", fmt.Sprintf("%d", idx("__kml_streaming")),
 		"OUTQ", fmt.Sprintf("%d", idx("__kml_outq")),
 		"QST", "{ ptr, i64, i64, i64, i64 }",
-		"HWM", "16384",
+		"HWMIDX", fmt.Sprintf("%d", idx("__kml_hwm")),
 		"TERMINATOR", terminator,
 		"CHUNKFMT", chunkFmt,
 		"NBCLEAR", fmt.Sprintf("%d", ^httpNonblockFlag()),

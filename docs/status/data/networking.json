@@ -42,12 +42,12 @@
             "feature": "`Response` (`.status`, `.ok`, `.headers`, `.body`, `.text()`, `.json()`, `.arrayBuffer()`)",
             "status": "implemented",
             "caveats": [
-              "`.json()` reuses `JSON.parse`'s machinery, including its full scope: it validates the body (a non-JSON body — e.g. an HTML error page — throws a catchable `SyntaxError`, [ADR-00223](../adr/ADR-00223.md)) and projects nested objects, array/object-array fields, and top-level `T[]` off the parse tree ([ADR-00224](../adr/ADR-00224.md)); an `any`/`unknown` target keeps the whole tree dynamic ([ADR-00622](../adr/ADR-00622.md))",
-              "`.text()`/`.json()` are plain null-terminated strings: a binary body with an embedded null byte truncates at the first one, by design — use `.arrayBuffer()` for a binary body",
+              "`.text()`/`.json()` are null-terminated strings — a binary body truncates at the first embedded null byte; use `.arrayBuffer()` for a binary body",
               "`.text()` after consuming `.body` returns `\"\"` instead of the spec's already-disturbed TypeError; `Object.keys`/JSON of a Response expose an internal `__kml_pending` field"
             ],
             "notes": [
               "`.text()`/`.json()`/`.arrayBuffer()` return a real `Promise<T>` you `await` — a genuine thenable, so `.then(...)` and `Promise.all([...])` work on them ([ADR-00794](../adr/ADR-00794.md)); a typed declaration `const p: T = await r.json()` still parses straight into `T` (the shared `JSON.parse`-style projection carve-out)",
+              "`.json()` reuses `JSON.parse`'s full machinery: it validates the body (a non-JSON body throws a catchable `SyntaxError`) and projects nested objects, array/object-array fields, and top-level `T[]`; an `any`/`unknown` target keeps the whole tree dynamic. See [ADR-00223](../adr/ADR-00223.md), [ADR-00224](../adr/ADR-00224.md), [ADR-00622](../adr/ADR-00622.md)",
               "The body promise settles off the fetch reactor's completion ([ADR-00823](../adr/ADR-00823.md)): a `.json()` parse error is a promise *rejection* (reachable via `.then`'s onRejected / `.catch`), and the download overlaps intervening work rather than being driven to done at the accessor call",
               "Plain object with `status`/`ok` fields plus `text()`/`json()`/`arrayBuffer()` methods; `.body` is a real `ReadableStream<Uint8Array>` fed incrementally from libcurl's write callback with backpressure via curl pause/unpause ([TDD-00097](../tdd/TDD-00097.md) Stage 4, [ADR-00299](../adr/ADR-00299.md)) — on an already-completed transfer it replays the buffered bytes as one chunk",
               "`.arrayBuffer()` ([ADR-00094](../adr/ADR-00094.md)) carries the real byte count and comes back whole regardless of content",
@@ -70,9 +70,9 @@
             "status": "implemented",
             "caveats": [
               "The client `wss://` handshake is blocking and verifies the cert (SNI on, no `rejectUnauthorized` opt-out) ([TDD-00039](../tdd/TDD-00039.md))",
-              "A binary message's `ev.data` is still the `strlen`-terminated string view (truncating at an embedded NUL); the byte-exact payload is read via `ev.dataBytes(): ArrayBuffer` instead, discriminated by `ev.isBinary` ([TDD-00160](../tdd/TDD-00160.md)). The browser-faithful `ev.data: string | ArrayBuffer` union isn't used because `ArrayBuffer` isn't yet an allowed union member — a separate type-system item, not a behavioral gap (every byte is recoverable)",
+              "A binary message's `ev.data` is the `strlen`-terminated string view (truncates at an embedded NUL) — byte-exact payload via `ev.dataBytes(): ArrayBuffer`; the spec's `ev.data: string | ArrayBuffer` union isn't used (`ArrayBuffer` not yet an allowed union member)",
               "`.close()` on either side doesn't wait for the peer's own echo back before actually closing (a deliberate simplification)",
-              "The client's connect + handshake runs *synchronously*, before the constructor returns, so `.onopen`/`.onerror` are deliberately deferred to the first event-loop pass after construction (giving assignment code a chance to run first) rather than fired inline"
+              "The client connect + handshake runs *synchronously* before the constructor returns; `.onopen`/`.onerror` are deferred to the first event-loop pass after construction rather than fired inline"
             ],
             "notes": [
               "Both server and client",
@@ -98,8 +98,8 @@
             "feature": "`XMLHttpRequest`",
             "status": "implemented",
             "caveats": [
-              "Modeled as the real spec's legacy *synchronous* mode: `.send()`/`.send(body)` runs the request to completion before returning, then fires every registered callback once, synchronously — there's no default-async, callback-interleaved mode (this compiler has no re-entrant-into-already-returned-caller callback machinery to support one)",
-              "`.open(method, url, async?, user?, password?)` accepts the optional `async` flag: `async === false` is exact (the request is already synchronous); `async === true` also blocks, since there's no main-thread event loop to defer `.onload` onto — a documented narrowing, not a fake async ([ADR-00615](../adr/ADR-00615.md))",
+              "No default-async, callback-interleaved mode — `.send()`/`.send(body)` runs to completion then fires every registered callback once, synchronously (no re-entrant-into-already-returned-caller callback machinery to support async)",
+              "`.open(..., async?)`'s `async === true` also blocks — no main-thread event loop to defer `.onload` onto (a documented narrowing, not fake async — [ADR-00615](../adr/ADR-00615.md))",
               "The optional `user`/`password` arguments to `.open()` are accepted (and evaluated) but not yet wired to HTTP auth",
               "`.setRequestHeader(name, value)` accumulates headers, but names are **not** lowercased here (unlike `Headers`' own methods) — a separate V1 narrowing",
               "`.readyState` is 0/1/4 only (UNSENT/OPENED/DONE); the real spec's HEADERS_RECEIVED/LOADING have no meaning for a transfer that always runs to completion in one call",

@@ -886,6 +886,44 @@ func typeofString(ty Type) string {
 	}
 }
 
+// emitUndefinedableTypeof answers `typeof v` at runtime for a `T | undefined`
+// value: present → the base type's typeof string, absent → "undefined". The
+// presence signal depends on the representation — a nullable-scalar's presence
+// bit, a pointer's null, or a nested array's null data-ptr (TDD-00221). Returns
+// ok=false for a shape it doesn't handle (letting the caller fall back to the
+// static answer). The base typeof is computed from the type with its
+// nullable/undefined flags cleared.
+func (e *Emitter) emitUndefinedableTypeof(arg ast.Expression, ty Type) (Value, bool, error) {
+	base := ty
+	base.Nullable = false
+	base.IsUndefined = false
+	baseStr := e.internString(typeofString(base))
+	undefStr := e.internString("undefined")
+
+	val, err := e.emitExpr(arg)
+	if err != nil {
+		return Value{}, false, err
+	}
+	var present string
+	switch {
+	case isNullableScalar(val.Ty):
+		present, _ = e.nullableScalarAggParts(val)
+	case val.Ty.IsArray:
+		dataPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, val.Ref))
+		present = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, dataPtr))
+	case val.Ty.IR == "ptr":
+		present = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, val.Ref))
+	default:
+		return Value{}, false, nil
+	}
+	sel := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, present, baseStr, undefStr))
+	return Value{Ref: sel, Ty: TypePtr}, true, nil
+}
+
 // typeofBuiltinConstructors are global names that are callable constructors in
 // JS (`typeof Promise === "function"`) and exist in this runtime, but aren't
 // first-class values here — `typeof` answers for them statically.
@@ -1178,6 +1216,16 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 				return Value{}, err
 			}
 			return e.emitDynamicTypeof(val)
+		}
+		// A `T | undefined` value (TDD-00187/TDD-00221) needs a *runtime* answer:
+		// `typeofString` would statically report "undefined" for every one, even a
+		// present element. Test the presence signal (scalar presence bit, or a null
+		// pointer / null array data-ptr) and pick the base type's typeof when
+		// present, "undefined" when absent.
+		if ty.IsUndefined && !ty.IsNull {
+			if res, ok, err := e.emitUndefinedableTypeof(ex.Arg, ty); ok || err != nil {
+				return res, err
+			}
 		}
 		ptr := e.internString(typeofString(ty))
 		return Value{Ref: ptr, Ty: TypePtr}, nil
@@ -1808,8 +1856,20 @@ func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) 
 	if ty.IsDynamic || altTy.IsDynamic {
 		return e.emitConditionalAny(ex)
 	}
-	if isStringTy(ty) != isStringTy(altTy) {
-		return Value{}, fmt.Errorf("%d:%d: ternary branches have incompatible types (%s vs %s) — a union-typed ternary (e.g. string | number) is not supported; assign each branch separately or convert both to one type", ex.GetPos().Line, ex.GetPos().Col, ternaryTypeName(ty), ternaryTypeName(altTy))
+	// A pointer/reference branch (string/object/array) and a non-pointer scalar
+	// branch (number/boolean/bigint) can't share the single result slot below:
+	// coercing the pointer branch to the scalar's IR (or vice versa) stores a ptr
+	// through a scalar slot — invalid IR at the clang stage. This subsumes the
+	// former string-vs-non-string check (string is pointer-like). Reject cleanly;
+	// the result is a genuine union (e.g. `number | Addr`) this typed-subset
+	// compiler can't put in one slot — narrow first, or assign each branch to its
+	// own binding. (The `cond ? scalar : null` nullable case is handled above, and
+	// a dynamic branch became `any` above.)
+	ptrLike := func(t Type) bool {
+		return t.IR == "ptr" || t.IsObject || t.IsArray || isStringTy(t)
+	}
+	if ptrLike(ty) != ptrLike(altTy) {
+		return Value{}, fmt.Errorf("%d:%d: ternary branches have incompatible types (%s vs %s) — a union-typed ternary (e.g. number | object) is not supported; narrow first, assign each branch separately, or convert both to one type", ex.GetPos().Line, ex.GetPos().Col, ternaryTypeName(ty), ternaryTypeName(altTy))
 	}
 
 	thenL := e.freshLabel("ternary.then")
@@ -1991,6 +2051,12 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 	if left.Ty.IsDynamic {
 		return e.emitNullCoalesceDynamic(left, ex.Right)
 	}
+	// A `T[] | undefined` array left operand (a nested-array element absence,
+	// TDD-00221): the {ptr,i64} aggregate is nullish exactly when its data-ptr is
+	// null. Fall through to the right operand then, else keep the array.
+	if left.Ty.IsArray && left.Ty.Nullable {
+		return e.emitNullCoalesceArray(left, ex.Right)
+	}
 	// `null ?? x` / `undefined ?? x`: the left is statically nullish, so the
 	// whole expression *is* the right operand, with the right's own type — not
 	// the left's null (ptr) type. Without this the ptr-slot path below would
@@ -2044,6 +2110,47 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
 	return Value{Ref: result, Ty: TypePtr}, nil
+}
+
+// emitNullCoalesceArray implements `a ?? b` when the left operand is a
+// `T[] | undefined` array value (TDD-00221): it is nullish exactly when the
+// {ptr,i64} aggregate's data-ptr is null (an absent nested-array element). When
+// present the whole expression is the left array; when absent it is the right
+// operand, coerced to the (non-nullable) array type.
+func (e *Emitter) emitNullCoalesceArray(left Value, rightExpr ast.Expression) (Value, error) {
+	resTy := left.Ty
+	resTy.Nullable = false
+	resTy.IsUndefined = false
+
+	resSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca {ptr, i64}, align 8", resSlot))
+	dataPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, left.Ref))
+	isAbsent := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isAbsent, dataPtr))
+
+	absentL := e.freshLabel("nullc.arr.absent")
+	presentL := e.freshLabel("nullc.arr.present")
+	mergeL := e.freshLabel("nullc.arr.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAbsent, absentL, presentL))
+
+	e.emitLabel(absentL)
+	right, err := e.emitExpr(rightExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	right = e.coerce(right, resTy)
+	e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", right.Ref, resSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(presentL)
+	e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", left.Ref, resSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", result, resSlot))
+	return Value{Ref: result, Ty: resTy}, nil
 }
 
 // emitNullCoalesceDynamic implements `a ?? b` when the left operand is a dynamic

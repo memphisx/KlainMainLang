@@ -41,7 +41,7 @@
               "See [ADR-00076](../adr/ADR-00076.md)"
             ],
             "caveats": [
-              "libcurl-backed, so a non-special scheme is rejected where WHATWG accepts it (`new URL('foo:bar')` throws; Node: valid with `pathname` `'bar'`) — faithful non-special-scheme parsing needs a hand-written WHATWG parser rather than libcurl ([TDD-00203](../tdd/TDD-00203.md)). Default-port stripping and host-case normalization are now done (see notes)."
+              "libcurl-backed, so a non-special scheme is rejected where WHATWG accepts it (`new URL('foo:bar')` throws; Node: valid with `pathname` `'bar'`) — faithful non-special-scheme parsing needs a hand-written WHATWG parser rather than libcurl ([TDD-00203](../tdd/TDD-00203.md))."
             ]
           },
           {

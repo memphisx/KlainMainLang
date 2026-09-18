@@ -104,7 +104,7 @@
             "feature": "`Number.prototype.toString(radix?)`",
             "status": "implemented",
             "caveats": [
-              "For a **non-power-of-two** base a repeating fractional expansion is capped at 1100 digits and the double-precision multiply can differ from V8's exact-bignum result in the trailing digits; base 10 (and any power-of-two base) are exact ([ADR-00566](../adr/ADR-00566.md))"
+              "For a **non-power-of-two** base a repeating fractional expansion is capped at 1100 digits and the double-precision multiply can differ from V8's exact-bignum result in the trailing digits"
             ],
             "notes": [
               "A fractional receiver now renders fractional digits: the default/`radix 10` form delegates to `String(x)` (shortest round-trip decimal), and any other base runs a hand-rolled integer-part digit loop plus a repeated-multiply fractional expansion — bit-exact to V8 for a power-of-two base ([ADR-00566](../adr/ADR-00566.md))",
@@ -147,16 +147,12 @@
           {
             "feature": "`isNaN(x)` (global)",
             "status": "implemented",
-            "caveats": [
-              "Skips the `ToNumber` coercion real JS applies — a non-number argument (reachable via `any`) is treated as already numeric, so `isNaN('hello' as any)` is `false` (Node: `true`)."
-            ]
+            "caveats": []
           },
           {
             "feature": "`isFinite(x)` (global)",
             "status": "implemented",
-            "caveats": [
-              "Skips `ToNumber` coercion like `isNaN` — a non-number argument (via `any`) isn't coerced, diverging from Node's `isFinite('x')`."
-            ]
+            "caveats": []
           },
           {
             "feature": "`Math.floor/ceil/round/trunc`",

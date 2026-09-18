@@ -7,7 +7,7 @@
   "coverage": {
     "loose": "35/35",
     "loosePct": 100,
-    "strict": "30/35",
+    "strict": "32/35",
     "strictPct": 86
   },
   "lede": "Number, Math, and the two global parse helpers, backed by IEEE-754 doubles with an exact-i64 fast path where the inputs are integers. The remaining divergences are narrow: toString's fractional expansion in a non-power-of-two base can differ from V8 in the trailing digits (base 10 and power-of-two bases are exact), and toPrecision picks exponential-vs-fixed notation at C `%g`'s threshold rather than JS's. Everything else — exponent formatting (now min-digit, `e+5`), the constants, parseFloat's `\"0x10\"` → `0` hex-prefix rule, parseInt's hex auto-detect, the trig/log/hyperbolic family, and the bit ops — matches real JS.",

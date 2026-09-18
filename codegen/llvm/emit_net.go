@@ -475,6 +475,7 @@ func (e *Emitter) emitNetSocketMethod(objExpr ast.Expression, method string, arg
 		}
 		return Value{Ty: TypeVoid}, nil
 	case "write":
+		e.ensureNetSockIO()
 		if len(args) != 1 {
 			return Value{}, fmt.Errorf("%d:%d: socket.write takes (data)", pos.Line, pos.Col)
 		}
@@ -485,6 +486,7 @@ func (e *Emitter) emitNetSocketMethod(objExpr ast.Expression, method string, arg
 		e.emitInstr(fmt.Sprintf("call void @__kml_net_sock_write(ptr %s, ptr %s, i64 %s)", objVal.Ref, ptrRef, lenRef))
 		return Value{Ty: TypeVoid}, nil
 	case "end":
+		e.ensureNetSockIO()
 		if len(args) == 1 {
 			ptrRef, lenRef, err := e.zlibResolveInput(args[0], pos)
 			if err != nil {
@@ -500,6 +502,7 @@ func (e *Emitter) emitNetSocketMethod(objExpr ast.Expression, method string, arg
 		return e.emitNetSocketAddress(objVal, pos)
 	case "destroy":
 		// Forcibly close the socket (no error argument threaded in V1).
+		e.ensureNetSockIO()
 		e.emitInstr(fmt.Sprintf("call void @__kml_net_sock_close(ptr %s)", objVal.Ref))
 		return objVal, nil
 	case "setNoDelay":

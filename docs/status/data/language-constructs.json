@@ -56,9 +56,7 @@
           {
             "feature": "`for…in` over object keys",
             "status": "implemented",
-            "caveats": [
-              "Enumerates keys in insertion/declaration order, not the ES order (ascending integer-index keys first, then remaining string keys) — `for (const k in {b:1,a:2,'2':3,'1':4})` visits `b,a,2,1` (Node: `1,2,b,a`); same for `Object.keys`/`values`/`entries`, spread, and `JSON.stringify` key order."
-            ]
+            "caveats": []
           },
           {
             "feature": "`switch` / `case` / `default` / `break`",
@@ -719,17 +717,11 @@
           },
           {
             "feature": "`new Map<K,V>()`",
-            "status": "implemented",
-            "caveats": [
-              "Numeric keys are compared by raw double bit-pattern, not SameValueZero — `+0` and `-0` count as distinct keys (`new Set([0,-0]).size` is `2`, JS: `1`; `m.set(0,v); m.get(-0)` misses, JS returns `v`); a `NaN` key dedups only when bit patterns match."
-            ]
+            "status": "implemented"
           },
           {
             "feature": "`new Set<T>()`",
-            "status": "implemented",
-            "caveats": [
-              "Numeric keys are compared by raw double bit-pattern, not SameValueZero — `+0` and `-0` count as distinct keys (`new Set([0,-0]).size` is `2`, JS: `1`; `m.set(0,v); m.get(-0)` misses, JS returns `v`); a `NaN` key dedups only when bit patterns match."
-            ]
+            "status": "implemented"
           },
           {
             "feature": "`class` (fields, constructor, methods, `this`, `new ClassName(args)`)",

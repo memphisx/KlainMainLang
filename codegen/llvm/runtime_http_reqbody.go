@@ -315,6 +315,46 @@ no:
   ret i1 0
 }`, rb, rb, rs, rs))
 
+	// __kml_reqbody_active_on_fd(fd) -> i1: is a request-body stream currently
+	// being consumed on this exact connection fd? Unlike __kml_reqbody_want (a
+	// momentary "wants bytes now" hint that flickers between chunks), this stays
+	// true for the whole streaming lifetime (the context's `active` flag, field
+	// 5, set at register and cleared at stream end). ADR-00986 uses it as a hard
+	// safety gate: a connection fiber whose own body is streaming must NOT be
+	// fiber-yielded from an `await` (the reactor would re-drive/re-resume it on
+	// its own readable fd — a wild-jump crash, the same one the reqbody_pull
+	// task-vs-fiber guard prevents); such an await keeps the busy-drive path.
+	e.emitGlobal(fmt.Sprintf(`
+define i1 @__kml_reqbody_active_on_fd(i64 %%fd) {
+entry:
+  %%len = load i64, ptr @__kml_reqbody_len, align 8
+  %%data = load ptr, ptr @__kml_reqbody_data, align 8
+  br label %%cond
+cond:
+  %%i = phi i64 [ 0, %%entry ], [ %%inext, %%next ]
+  %%go = icmp slt i64 %%i, %%len
+  br i1 %%go, label %%body, label %%no
+body:
+  %%slot = getelementptr ptr, ptr %%data, i64 %%i
+  %%ctx = load ptr, ptr %%slot, align 8
+  %%act_p = getelementptr %s, ptr %%ctx, i32 0, i32 5
+  %%act = load i64, ptr %%act_p, align 8
+  %%isact = icmp ne i64 %%act, 0
+  br i1 %%isact, label %%ckfd, label %%next
+ckfd:
+  %%fd_p = getelementptr %s, ptr %%ctx, i32 0, i32 0
+  %%cfd = load i64, ptr %%fd_p, align 8
+  %%same = icmp eq i64 %%cfd, %%fd
+  br i1 %%same, label %%yes, label %%next
+next:
+  %%inext = add i64 %%i, 1
+  br label %%cond
+yes:
+  ret i1 1
+no:
+  ret i1 0
+}`, rb, rb))
+
 	// __kml_reqbody_stream(ctx, s) -> ptr: activate (or return the existing)
 	// body stream: flush the already-buffered prefix as the first chunk,
 	// close immediately when nothing remains, register for the pump.

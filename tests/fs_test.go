@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -40,6 +41,62 @@ fs.writeFileSync(%q, "second")
 console.log(fs.readFileSync(%q))
 `, path, path, path)
 	assertOutputImports(t, src, "second")
+}
+
+// writeFileSync/appendFileSync `{ mode }` (ADR-00988): the permission bitmask
+// is applied only when the write CREATES the file (matching Node/open(2), whose
+// mode arg is ignored for an existing file), and is reduced by the umask.
+func TestE2EFsWriteFileSyncMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits; the Windows shim reflects only the write bit")
+	}
+	dir := tempDir(t)
+	created := filepath.Join(dir, "created.txt")   // new file, mode honoured
+	existing := filepath.Join(dir, "existing.txt") // pre-exists, mode ignored
+	appended := filepath.Join(dir, "appended.txt") // append creates with mode
+	buf := filepath.Join(dir, "buf.txt")           // Buffer data path + mode
+	// 0o600 survives common umasks unchanged, so the assertions don't depend on
+	// the test runner's umask.
+	src := fmt.Sprintf(`
+import fs from 'fs'
+fs.writeFileSync(%q, "x", { mode: 0o600 })
+fs.writeFileSync(%q, "first", { mode: 0o600 })
+fs.writeFileSync(%q, "second", { mode: 0o644 })   // ignored — file exists
+fs.appendFileSync(%q, "log", { mode: 0o600 })
+fs.writeFileSync(%q, new Uint8Array([65, 66, 67]), { mode: 0o600 })
+console.log("done")
+`, created, existing, existing, appended, buf)
+	bin := buildBinaryImports(t, src)
+	if out, err := exec.Command(bin).CombinedOutput(); err != nil {
+		t.Fatalf("run: %v (%s)", err, out)
+	}
+	for _, tc := range []struct {
+		path string
+		want os.FileMode
+	}{
+		{created, 0o600},
+		{existing, 0o600}, // stays 0o600 — the 0o644 rewrite must not re-mode it
+		{appended, 0o600},
+		{buf, 0o600},
+	} {
+		info, err := os.Stat(tc.path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", tc.path, err)
+		}
+		if got := info.Mode().Perm(); got != tc.want {
+			t.Errorf("%s perm: got %o, want %o", filepath.Base(tc.path), got, tc.want)
+		}
+	}
+}
+
+// readFileSync has no `mode` option (Node's read options are { encoding, flag });
+// passing one is a clean compile-time rejection.
+func TestE2EFsReadFileSyncModeRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+fs.readFileSync("x", { mode: 0o600 })`)
+	if err == nil {
+		t.Fatal("expected a compile error for readFileSync with a mode option, got none")
+	}
 }
 
 func TestE2EFsReadFileSyncUntypedInference(t *testing.T) {
@@ -170,11 +227,11 @@ fs.readFileSync("a", "latin1")`)
 	}
 }
 
-func TestE2EFsWriteFileSyncModeOptionRejected(t *testing.T) {
+func TestE2EFsWriteFileSyncUnsupportedOptionRejected(t *testing.T) {
 	_, err := parseAndCompileImports(t, `import fs from 'fs'
-fs.writeFileSync("a", "d", { mode: 384 })`)
+fs.writeFileSync("a", "d", { signal: null })`)
 	if err == nil {
-		t.Fatal("expected a clean rejection for the unsupported mode option, got none")
+		t.Fatal("expected a clean rejection for an unsupported writeFileSync option, got none")
 	}
 }
 
@@ -342,7 +399,7 @@ try {
     fs.mkdirSync(%q)
     console.log("should not print")
 } catch (e) {
-    console.log(e.message.startsWith("cannot create directory '%s': "))
+    console.log(e.message === "EEXIST: file already exists, mkdir '%s'")
 }
 `, sub, sub)
 	assertOutputImports(t, src, "true")
@@ -540,11 +597,46 @@ try {
 func TestE2EFsConstantsUnknownMemberRejected(t *testing.T) {
 	_, err := parseAndCompile(`
 import fs from 'fs'
-console.log(fs.constants.O_RDWR)
+console.log(fs.constants.O_BOGUS)
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for an unsupported fs.constants member, got none")
 	}
+}
+
+// The O_* open flags (ADR-00987) are exposed on fs.constants, resolved to the
+// target OS's <fcntl.h> bits. The access-mode low bits are universal; a
+// round-trip openSync(O_WRONLY|O_CREAT|O_TRUNC) proves the mask is passed
+// through to the host open(2) intact (and matches the string-flag path).
+func TestE2EFsConstantsOpenFlags(t *testing.T) {
+	dir := tempDir(t)
+	path := filepath.Join(dir, "open_flags.txt")
+	prog := fmt.Sprintf(`
+import fs from 'fs'
+const c = fs.constants
+console.log(c.O_RDONLY, c.O_WRONLY, c.O_RDWR)
+const fd = fs.openSync(%q, c.O_WRONLY | c.O_CREAT | c.O_TRUNC, 0o644)
+fs.writeSync(fd, "flagged write")
+fs.closeSync(fd)
+console.log(fs.readFileSync(%q, 'utf8'))
+`, path, path)
+	assertOutputImports(t, prog, "0 1 2\nflagged write")
+}
+
+// The O_* values must match the compilation host's own <fcntl.h> (the binary
+// runs against that same open(2)) — a few representative Darwin/Linux bits.
+func TestE2EFsConstantsOpenFlagValues(t *testing.T) {
+	var oCreat, oAppend int
+	switch runtime.GOOS {
+	case "darwin":
+		oCreat, oAppend = 0x0200, 0x0008
+	default: // linux (asm-generic)
+		oCreat, oAppend = 0x40, 0x400
+	}
+	assertOutputImports(t, `
+import { constants as c } from 'fs'
+console.log(c.O_CREAT, c.O_APPEND)
+`, fmt.Sprintf("%d %d", oCreat, oAppend))
 }
 
 func TestE2EFsCopyFileSyncWrongArgCountRejected(t *testing.T) {
@@ -726,6 +818,19 @@ fs.readdirSync('.', { encoding: 'buffer' })`)
 	}
 }
 
+// Dirent's deprecated `.path` alias was removed in Node v24 (it reads
+// `undefined` there); this compiler intentionally does not expose it, so
+// `dirent.path` is a compile-time error rather than a silent `undefined` —
+// `.parentPath` is the supported member. Locks in that parity decision.
+func TestE2EFsDirentPathNotAMember(t *testing.T) {
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+const e = fs.readdirSync('.', { withFileTypes: true })[0]
+console.log(e.path)`)
+	if err == nil {
+		t.Fatal("expected a compile error for the removed Dirent.path alias, got none")
+	}
+}
+
 // fs.readdirSync(path, { recursive: true }) — every nested entry as a string[]
 // of "/"-joined paths relative to the start dir (ADR-00786).
 func TestE2EFsReaddirSyncRecursive(t *testing.T) {
@@ -749,12 +854,37 @@ for (const e of all.sort()) console.log(e)
 	assertOutputImports(t, src, "7\na.txt\nother\nother/d.txt\nsub\nsub/b.txt\nsub/deep\nsub/deep/c.txt")
 }
 
-func TestE2EFsReaddirSyncRecursiveWithFileTypesRejected(t *testing.T) {
-	_, err := parseAndCompileImports(t, `import fs from 'fs'
-fs.readdirSync('.', { recursive: true, withFileTypes: true })`)
-	if err == nil {
-		t.Fatal("expected recursive + withFileTypes together to be a clean rejection, got none")
+// fs.readdirSync(path, { recursive: true, withFileTypes: true }) — every entry
+// in the tree as a Dirent[], each carrying its basename `name`, the full path of
+// its containing directory as `parentPath`, and working kind predicates
+// (ADR-00980).
+func TestE2EFsReaddirSyncRecursiveWithFileTypes(t *testing.T) {
+	dir := tempDir(t)
+	for _, d := range []string{"sub/deep"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
 	}
+	for _, f := range []string{"a.txt", "sub/b.txt", "sub/deep/c.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	src := fmt.Sprintf(`
+import fs from 'fs'
+const ents = fs.readdirSync(%q, { recursive: true, withFileTypes: true })
+const rows: string[] = []
+for (const e of ents) {
+  rows.push(e.parentPath + '|' + e.name + '|' + (e.isDirectory() ? 'D' : 'F'))
+}
+rows.sort()
+for (const r of rows) console.log(r)
+// parentPath + name are own-enumerable; mode stays hidden.
+console.log(JSON.stringify(ents[0]).indexOf('mode') === -1 ? 'no-mode-leak' : 'LEAK')
+`, dir)
+	want := fmt.Sprintf("%s/sub/deep|c.txt|F\n%s/sub|b.txt|F\n%s/sub|deep|D\n%s|a.txt|F\n%s|sub|D\nno-mode-leak",
+		dir, dir, dir, dir, dir)
+	assertOutputImports(t, src, want)
 }
 
 // fs.statSync (ADR-00495): size/mtimeMs fields + isFile()/isDirectory()
@@ -773,7 +903,7 @@ console.log(st.isFile())
 console.log(st.isDirectory())
 console.log(st.mtimeMs > 1500000000000)
 console.log(fs.statSync("%s").isDirectory())
-try { fs.statSync("%s/absent") } catch (e) { console.log("caught:", e.message.indexOf("cannot stat") > -1) }
+try { fs.statSync("%s/absent") } catch (e) { console.log("caught:", e.message.indexOf(", stat '") > -1 && (e as any).code === 'ENOENT') }
 `, file, file, dir, dir)
 	assertOutputImports(t, src, "6\ntrue\nfalse\ntrue\ntrue\ncaught: true")
 }
@@ -838,7 +968,7 @@ fs.rmSync(tmp, { recursive: true, force: true })
 console.log(fs.existsSync(tmp))
 fs.rmSync(os.tmpdir() + '/kml-definitely-absent-xyz', { force: true })
 console.log("force-ok")
-try { fs.rmSync(os.tmpdir() + '/kml-definitely-absent-xyz') } catch (e) { console.log("caught:", e.message.indexOf("cannot remove") > -1) }
+try { fs.rmSync(os.tmpdir() + '/kml-definitely-absent-xyz') } catch (e) { console.log("caught:", (e as any).code === 'ENOENT') }
 `, "true\ntrue\ntrue\nfalse\n4\ntrue\n2\nfalse\nforce-ok\ncaught: true")
 }
 
@@ -933,7 +1063,7 @@ console.log(buf[0])
 console.log(fs.readSync(rfd, buf, 0, 5, 6))
 console.log(buf[0])
 fs.closeSync(rfd)
-try { fs.openSync("%s/absent/f", 'r') } catch (e) { console.log("caught:", e.message.indexOf("cannot open") > -1) }
+try { fs.openSync("%s/absent/f", 'r') } catch (e) { console.log("caught:", e.message.indexOf(", open '") > -1 && (e as any).code === 'ENOENT') }
 `, p, p, dir)
 	assertOutputImports(t, src, "11\n11\ntrue\n5\n104\n5\n119\ncaught: true")
 }

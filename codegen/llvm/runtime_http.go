@@ -562,6 +562,16 @@ func (e *Emitter) ensureFiberRuntime() {
 	e.emitGlobal("@__kml_conn_cap = internal thread_local global i64 0, align 8")
 	e.emitGlobal("@__kml_current_conn_idx = internal thread_local global i64 -1, align 8")
 	e.emitGlobal("@__kml_conn_active = internal thread_local global i64 0, align 8")
+	// ADR-00986: set whenever a connection fiber was just resumed/run (append or
+	// resume-scan). A fiber that ran may have written a response an in-process
+	// http client (same curl-multi, same loop) now needs to read — so the very
+	// next select() must not block: it forces one non-blocking poll so the
+	// following docurlperform delivers those bytes. Without it, an async handler
+	// that yielded (a task-shaped await) and then wrote its response left the loop
+	// blocking in select() with no JS timer and an idle curl deadline, and the
+	// in-process client's completion reaction was never fired (the process hung).
+	// Consumed and cleared in the select-timeout decision (one poll per run).
+	e.emitGlobal("@__kml_conn_ran = internal thread_local global i8 0, align 1")
 	// TDD-00195 Stage 2 (Layer A backpressure): an fd_set-shaped bitset of the
 	// connection fds whose fiber is currently parked in __kml_res_write_all
 	// waiting for the socket to become writable (EAGAIN). The event loop ORs
@@ -569,6 +579,20 @@ func (e *Emitter) ensureFiberRuntime() {
 	// a slow-consuming client parks that one fiber instead of blocking the whole
 	// reactor in a synchronous write(). 1024 fds, matching the read fd_set.
 	e.emitGlobal("@__kml_conn_writepark = internal thread_local global [128 x i8] zeroinitializer, align 8")
+	// TDD-00217: per-connection request/keep-alive timeout deadlines, fd-indexed
+	// (same 1024-fd space as the writepark bitset). Each slot is an absolute
+	// monotonic-ns deadline (0 = no timeout). The dispatcher publishes the active
+	// deadline at each phase transition; the reactor folds the soonest into
+	// select()'s wait and shutdown()s any that expire. @__kml_http_any_timeout is
+	// set to 1 at listen() when a positive createServer timeout is configured, so
+	// a server with no timeouts skips the fold/sweep entirely.
+	e.emitGlobal("@__kml_conn_deadline = internal thread_local global [1024 x i64] zeroinitializer, align 8")
+	e.emitGlobal("@__kml_http_any_timeout = internal thread_local global i64 0, align 8")
+	// The timeout HELPERS (which call @__kml_monotonic_ns) are emitted by
+	// ensureHTTPRuntime, not here: ensureFiberRuntime is shared with async/await
+	// and generators, which don't emit the timer runtime that declares
+	// monotonic_ns. All callers (the reactor loop's fold/sweep, append_conn's
+	// deadline clear) live under ensureHTTPRuntime anyway.
 	// TDD-00197: the primary server's `'close'` event + deferred `close(cb)`.
 	// __kml_http_close() clears the listener immediately but lets in-flight
 	// connections drain; the real 'close' moment is when both the listener is
@@ -577,7 +601,77 @@ func (e *Emitter) ensureFiberRuntime() {
 	// __kml_http_fire_close() each iteration, which fires exactly once at drain.
 	e.emitGlobal("@__kml_http_close_cb = internal thread_local global ptr null, align 8")
 	e.emitGlobal("@__kml_http_close_evt = internal thread_local global ptr null, align 8")
+	// TDD-00215: the server 'clientError' listener (primary server only in V1),
+	// read by buildHTTPDispatcher's noReqL protocol-error path.
+	e.emitGlobal("@__kml_http_clienterror_evt = internal thread_local global ptr null, align 8")
+	// TDD-00215 Stage 2: the server 'error' listener (primary server only in V1),
+	// read inside __kml_http_bind_and_listen's failure edges so a bind failure
+	// (EADDRINUSE/EACCES) routes to it instead of throwing.
+	e.emitGlobal("@__kml_http_error_evt = internal thread_local global ptr null, align 8")
 	e.emitGlobal("@__kml_http_close_pending = internal thread_local global i64 0, align 8")
+}
+
+// emitHTTPBindErrorFireHelper defines @__kml_http_fire_bind_error(errno): builds
+// an Error carrying a Node-style message ("listen EADDRINUSE: <strerror>"), the
+// bucketed .code ('EADDRINUSE'/'EACCES'/…) and numeric errno, then invokes the
+// registered server 'error' listener `{fn, env}` as `fn(env, err)` (TDD-00215
+// Stage 2). Only reached from __kml_http_bind_and_listen's failure edges after
+// they confirm @__kml_http_error_evt is non-null, so no null-guard here.
+func (e *Emitter) emitHTTPBindErrorFireHelper() {
+	if e.usedHTTPBindErrorFire {
+		return
+	}
+	e.usedHTTPBindErrorFire = true
+	e.ensureStrerror()
+	e.ensureErrnoCode()
+	e.ensureStrlen()
+	e.ensureSprintf()
+	e.ensureStrHeaderRuntime()
+	e.emitStandaloneFunc("void @__kml_http_fire_bind_error(i32 %errno_val)", func() string {
+		errmsg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @strerror(i32 %%errno_val)", errmsg))
+		codeOrNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_errno_code(i32 %%errno_val)", codeOrNull))
+		codeNN := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", codeNN, codeOrNull))
+		// A bind failure is practically always EADDRINUSE/EACCES (both in the
+		// errno-code table). Fall back to a headered "UNKNOWN" only if a stray
+		// errno escapes the table — never the raw strerror() text, which has no
+		// string header and would fault the moment err.code is concatenated.
+		codeStr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", codeStr, codeNN, codeOrNull, e.internString("UNKNOWN")))
+		// message = "listen <CODE>: <strerror>" in a headered buffer.
+		mlen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", mlen, errmsg))
+		clen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", clen, codeStr))
+		sum := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", sum, mlen, clen))
+		bufsize := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 16", bufsize, sum))
+		buf := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_alloc(i64 %s)", buf, bufsize))
+		e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, ptr %s)", buf, e.internString("listen %s: %s"), codeStr, errmsg))
+		e.emitInstr(fmt.Sprintf("call void @__kml_str_finalize(ptr %s)", buf))
+		// .errno is Node's negative errno; .errcode field carries the same.
+		errnoNeg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sub i32 0, %%errno_val", errnoNeg))
+		errnoD := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sitofp i32 %s to double", errnoD, errnoNeg))
+		errobj := e.buildErrorObjWithCode(errorKindIDs["Error"], buf, e.internString("Error"), codeStr, errnoD, errmsg)
+		h := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_http_error_evt, align 8", h))
+		fpGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 0", fpGep, h))
+		fp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpGep))
+		envGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 1", envGep, h))
+		env := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", env, envGep))
+		e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s)", fp, env, errobj))
+		return "ret void"
+	})
 }
 
 // ensureHTTPFireClose declares __kml_http_fire_close(): called once per reactor
@@ -827,6 +921,9 @@ define void @__kml_reactor_thread_lock() {
 	}
 	e.ensureTimerRuntime()
 	e.ensureFiberRuntime()
+	// TDD-00217 connection-timeout helpers: emitted here (not in ensureFiberRuntime)
+	// so @__kml_monotonic_ns — from ensureTimerRuntime above — is always declared.
+	e.emitHTTPConnTimeoutHelpers()
 	e.ensureHTTPClientReactions() // defines __kml_httpc_fire_ready, called by the loop below
 	// __kml_event_loop_run below unconditionally references
 	// @__kml_curl_multi/curl_multi_fdset/curl_multi_perform/
@@ -923,6 +1020,12 @@ define void @__kml_reactor_thread_lock() {
 	solSocket, soReuseAddr := httpSockConstants()
 	fam0, fam1 := httpSockaddrFamilyBytes()
 
+	// TDD-00215 Stage 2: a bind/listen failure routes to a registered server
+	// 'error' listener (return -1) instead of throwing. errno is captured before
+	// close() (which can clobber it) and handed to the fire helper.
+	accessor := errnoAccessor()
+	e.ensureErrnoAccessor()
+
 	e.emitGlobal(fmt.Sprintf(`
 define i32 @__kml_http_bind_and_listen(i32 %%port, i32 %%hostaddr, i32 %%backlog) {
 entry:
@@ -991,16 +1094,36 @@ success:
   ret i32 %%fd
 
 failwithfd:
+  %%fwerrptr = call ptr @%s()
+  %%fwerrv = load i32, ptr %%fwerrptr, align 4
   call i32 @close(i32 %%fd)
+  %%fwh = load ptr, ptr @__kml_http_error_evt, align 8
+  %%fwhas = icmp ne ptr %%fwh, null
+  br i1 %%fwhas, label %%fwfire, label %%fwthrow
+fwfire:
+  call void @__kml_http_fire_bind_error(i32 %%fwerrv)
+  ret i32 -1
+fwthrow:
   call void @__kml_http_throw(ptr %s)
   unreachable
 
 failnofd:
+  %%nferrptr = call ptr @%s()
+  %%nferrv = load i32, ptr %%nferrptr, align 4
+  %%nfh = load ptr, ptr @__kml_http_error_evt, align 8
+  %%nfhas = icmp ne ptr %%nfh, null
+  br i1 %%nfhas, label %%nffire, label %%nfthrow
+nffire:
+  call void @__kml_http_fire_bind_error(i32 %%nferrv)
+  ret i32 -1
+nfthrow:
   call void @__kml_http_throw(ptr %s)
   unreachable
 }`, e.httpListenInheritIR(), solSocket, soReuseAddr, solSocket, httpReusePortConst(), fam0, fam1, httpNonblockFlag(),
-		e.internString("http.listen: failed to bind or listen"),
-		e.internString("http.listen: failed to create socket")))
+		accessor, e.internString("http.listen: failed to bind or listen"),
+		accessor, e.internString("http.listen: failed to create socket")))
+
+	e.emitHTTPBindErrorFireHelper()
 
 	e.ensureHTTPClusterFork()
 	// __kml_event_loop_run below unconditionally calls
@@ -1090,6 +1213,9 @@ doappend:
   %fd64 = sext i32 %fd to i64
   %fd_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %slot, i32 0, i32 0
   store i64 %fd64, ptr %fd_p, align 8
+  ; TDD-00217: clear any stale timeout deadline left on this fd number by a prior
+  ; connection that reused it, so the new connection starts un-armed.
+  call void @__kml_http_conn_set_deadline(i32 %fd, i64 0)
 
   %ctx = call ptr @malloc(i64 ` + fmt.Sprintf("%d", ctxSize) + `)
   %stack = call ptr @malloc(i64 ` + fmt.Sprintf("%d", fiberStackBytes) + `)
@@ -1122,6 +1248,9 @@ doappend:
 
   store i64 %len, ptr @__kml_current_conn_idx, align 8` + gcSetStackbottom + `
   %swaprc = call i32 @swapcontext(ptr @__kml_main_ctx, ptr %ctx)` + gcRestoreStackbottom + `
+  ; The freshly-accepted fiber ran (and may have written a response an
+  ; in-process client must now read) — forbid the next select() from blocking.
+  store i8 1, ptr @__kml_conn_ran, align 1
   ret void
 }`)
 
@@ -1710,6 +1839,16 @@ entry:
   br label %outerloop
 
 outerloop:
+  ; TDD-00216: fire any background AbortSignal.timeout abort whose deadline has
+  ; elapsed (no-op on an empty registry). Its deadline is folded into select()'s
+  ; wait below (fdfolddone), so select wakes by the deadline and this fires it on
+  ; the next spin — dispatching listeners/onabort without keeping the loop alive.
+  call void @__kml_abort_to_fire_due()
+  ; TDD-00217: shutdown() any connection whose request/keep-alive timeout has
+  ; elapsed (no-op when no server configured a timeout). Placed here, before this
+  ; iteration's fd_set is built, so an expired connection's now-EOF socket is
+  ; added to the read set and its fiber is resumed to unwind this same iteration.
+  call void @__kml_http_conn_sweep_timeouts()
   ; TDD-00019: check for a pending signal before anything else this
   ; iteration — this single check point, re-entered after every iteration,
   ; covers both a signal that arrived since the last check (seen before
@@ -2301,6 +2440,23 @@ fdfoldnext:
   br label %fdfoldloop
 
 fdfolddone:
+  ; TDD-00216: fold the soonest background AbortSignal.timeout deadline into the
+  ; select() wait so it wakes by the deadline; outerloop then fires it. This never
+  ; keeps the loop alive on its own (soonest()==0 ⇒ no constraint) — it only
+  ; bounds a wait the loop was already going to make for other pending work.
+  %atso = call i64 @__kml_abort_to_soonest()
+  %atsonz = icmp ne i64 %atso, 0
+  br i1 %atsonz, label %atfold, label %atfolddone
+atfold:
+  %atcur = load i64, ptr %cmdlabs, align 8
+  %atempty = icmp eq i64 %atcur, 0
+  %atsooner = icmp slt i64 %atso, %atcur
+  %attake = or i1 %atempty, %atsooner
+  br i1 %attake, label %attakeit, label %atfolddone
+attakeit:
+  store i64 %atso, ptr %cmdlabs, align 8
+  br label %atfolddone
+atfolddone:
   ; Fold libcurl's own internal deadline into the extra-deadline slot.
   ; During some transfer states — most notably the Expect: 100-continue
   ; wait a large POST body triggers — curl_multi_fdset returns NO fds at
@@ -2357,6 +2513,24 @@ cptostore:
   store i64 %cptons, ptr %cmdlabs, align 8
   br label %cptodone
 cptodone:
+  ; TDD-00217: fold the soonest connection request/keep-alive timeout deadline
+  ; into the extra-deadline slot so select() wakes by it and the top-of-loop sweep
+  ; then shutdown()s the expired connection. Same min-merge shape as the folds
+  ; above; returns 0 (no constraint, never keeps the loop alive) when no timeout
+  ; is configured or armed.
+  %ctons = call i64 @__kml_http_conn_next_deadline_ns()
+  %ctohas = icmp ne i64 %ctons, 0
+  br i1 %ctohas, label %ctofold, label %ctodone
+ctofold:
+  %ctocur = load i64, ptr %cmdlabs, align 8
+  %ctoempty = icmp eq i64 %ctocur, 0
+  %ctosoon = icmp slt i64 %ctons, %ctocur
+  %ctotake = or i1 %ctoempty, %ctosoon
+  br i1 %ctotake, label %ctostore, label %ctodone
+ctostore:
+  store i64 %ctons, ptr %cmdlabs, align 8
+  br label %ctodone
+ctodone:
   ; Never block in select() while microtask reactions are queued (TDD-00097
   ; Stage 5): a connection fiber that ran earlier in THIS iteration may have
   ; enqueued stream/pipe reactions — checked here, immediately before the
@@ -2372,9 +2546,17 @@ cptodone:
   ; set it may have happened after this iteration's conn scan already ran.
   %pokev = load i8, ptr @__kml_conn_poke, align 1
   %pokep = icmp ne i8 %pokev, 0
+  ; ADR-00986: a fiber that ran since the last select (append/resume) may have
+  ; written a response an in-process http client must now read — poll once
+  ; without blocking so this iteration's docurlperform delivers it. One-shot:
+  ; consumed and cleared here.
+  %ranv = load i8, ptr @__kml_conn_ran, align 1
+  %ranp = icmp ne i8 %ranv, 0
+  store i8 0, ptr @__kml_conn_ran, align 1
   %pend00 = or i1 %mtpend, %rbwant
   %pend01 = or i1 %pend00, %tres
-  %pend0 = or i1 %pend01, %pokep
+  %pend0a = or i1 %pend01, %pokep
+  %pend0 = or i1 %pend0a, %ranp
   %needimmediate0 = load i1, ptr %forcezero, align 1
   %needimmediate = or i1 %needimmediate0, %pend0
   %usetimer0 = or i1 %havetimer, %needimmediate
@@ -2639,6 +2821,9 @@ rresume:
   %rctx_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 1
   %rctxptr = load ptr, ptr %rctx_p, align 8` + gcSetRStackbottom + `
   call i32 @swapcontext(ptr @__kml_main_ctx, ptr %rctxptr)` + gcRestoreRStackbottom + `
+  ; The fiber ran (it may have written a response an in-process client must now
+  ; read) — forbid the next select() from blocking so docurlperform delivers it.
+  store i8 1, ptr @__kml_conn_ran, align 1
   br label %rscannext
 
 rscannext:
@@ -2830,6 +3015,152 @@ setflag:
 
 local:
   call void @__kml_http_shutdown_local_conns()
+  ret void
+}`)
+}
+
+// emitHTTPConnTimeoutHelpers defines the runtime side of TDD-00217's connection
+// timeouts: the fd-indexed deadline publish/clear helpers the dispatcher calls at
+// phase transitions, and the reactor's fold (soonest deadline → select() wait)
+// and sweep (shutdown expired connections). Always emitted (like the other loop
+// hooks); every path early-returns when @__kml_http_any_timeout is 0, so a server
+// with no configured timeout pays nothing beyond a load+branch.
+func (e *Emitter) emitHTTPConnTimeoutHelpers() {
+	if e.usedHTTPConnTimeouts {
+		return
+	}
+	e.usedHTTPConnTimeouts = true
+	if !e.usedShutdownDecl {
+		e.emitGlobal("declare i32 @shutdown(i32 noundef, i32 noundef)")
+		e.usedShutdownDecl = true
+	}
+	e.emitGlobal(`
+; Store an absolute deadline for %fd (0 clears). Guards fd to [0,1024).
+define void @__kml_http_conn_set_deadline(i32 %fd, i64 %deadline) {
+entry:
+  %neg = icmp slt i32 %fd, 0
+  %big = icmp sge i32 %fd, 1024
+  %oob = or i1 %neg, %big
+  br i1 %oob, label %ret, label %store
+store:
+  %fd64 = sext i32 %fd to i64
+  %p = getelementptr [1024 x i64], ptr @__kml_conn_deadline, i64 0, i64 %fd64
+  store i64 %deadline, ptr %p, align 8
+  ret void
+ret:
+  ret void
+}
+
+; Arm %fd's deadline at %base+%timeout; a non-positive %timeout clears it (0).
+define void @__kml_http_arm_from(i32 %fd, i64 %base, i64 %timeout) {
+entry:
+  %off = icmp sle i64 %timeout, 0
+  br i1 %off, label %clear, label %arm
+arm:
+  %dl = add i64 %base, %timeout
+  call void @__kml_http_conn_set_deadline(i32 %fd, i64 %dl)
+  ret void
+clear:
+  call void @__kml_http_conn_set_deadline(i32 %fd, i64 0)
+  ret void
+}
+
+; The soonest active connection deadline (0 = none / feature off), for the
+; reactor's select()-wait fold. Iterates the connection table's active fds.
+define i64 @__kml_http_conn_next_deadline_ns() {
+entry:
+  %any = load i64, ptr @__kml_http_any_timeout, align 8
+  %on = icmp ne i64 %any, 0
+  br i1 %on, label %scan, label %none
+scan:
+  %best = alloca i64, align 8
+  store i64 0, ptr %best, align 8
+  %ip = alloca i64, align 8
+  store i64 0, ptr %ip, align 8
+  %len = load i64, ptr @__kml_conn_len, align 8
+  %data = load ptr, ptr @__kml_conn_data, align 8
+  br label %loop
+loop:
+  %i = load i64, ptr %ip, align 8
+  %inb = icmp slt i64 %i, %len
+  br i1 %inb, label %body, label %done
+body:
+  %slot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %data, i64 %i
+  %fdp = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %slot, i32 0, i32 0
+  %fdv = load i64, ptr %fdp, align 8
+  %open = icmp sge i64 %fdv, 0
+  %inrange = icmp slt i64 %fdv, 1024
+  %use = and i1 %open, %inrange
+  br i1 %use, label %chk, label %next
+chk:
+  %dp = getelementptr [1024 x i64], ptr @__kml_conn_deadline, i64 0, i64 %fdv
+  %dl = load i64, ptr %dp, align 8
+  %has = icmp ne i64 %dl, 0
+  br i1 %has, label %consider, label %next
+consider:
+  %cur = load i64, ptr %best, align 8
+  %empty = icmp eq i64 %cur, 0
+  %sooner = icmp slt i64 %dl, %cur
+  %take = or i1 %empty, %sooner
+  br i1 %take, label %takeit, label %next
+takeit:
+  store i64 %dl, ptr %best, align 8
+  br label %next
+next:
+  %inext = add i64 %i, 1
+  store i64 %inext, ptr %ip, align 8
+  br label %loop
+done:
+  %r = load i64, ptr %best, align 8
+  ret i64 %r
+none:
+  ret i64 0
+}
+
+; shutdown() every connection whose deadline has passed and clear it. The fiber
+; then reads EOF and unwinds through its own finish path (see the shutdown-local
+; helper's comment). No-op when the feature is off.
+define void @__kml_http_conn_sweep_timeouts() {
+entry:
+  %any = load i64, ptr @__kml_http_any_timeout, align 8
+  %on = icmp ne i64 %any, 0
+  br i1 %on, label %scan, label %ret
+scan:
+  %now = call i64 @__kml_monotonic_ns()
+  %ip = alloca i64, align 8
+  store i64 0, ptr %ip, align 8
+  %len = load i64, ptr @__kml_conn_len, align 8
+  %data = load ptr, ptr @__kml_conn_data, align 8
+  br label %loop
+loop:
+  %i = load i64, ptr %ip, align 8
+  %inb = icmp slt i64 %i, %len
+  br i1 %inb, label %body, label %ret
+body:
+  %slot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %data, i64 %i
+  %fdp = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %slot, i32 0, i32 0
+  %fdv = load i64, ptr %fdp, align 8
+  %open = icmp sge i64 %fdv, 0
+  %inrange = icmp slt i64 %fdv, 1024
+  %use = and i1 %open, %inrange
+  br i1 %use, label %chk, label %next
+chk:
+  %dp = getelementptr [1024 x i64], ptr @__kml_conn_deadline, i64 0, i64 %fdv
+  %dl = load i64, ptr %dp, align 8
+  %has = icmp ne i64 %dl, 0
+  %past = icmp sge i64 %now, %dl
+  %expired = and i1 %has, %past
+  br i1 %expired, label %fire, label %next
+fire:
+  %fd32 = trunc i64 %fdv to i32
+  call i32 @shutdown(i32 %fd32, i32 2)
+  store i64 0, ptr %dp, align 8
+  br label %next
+next:
+  %inext = add i64 %i, 1
+  store i64 %inext, ptr %ip, align 8
+  br label %loop
+ret:
   ret void
 }`)
 }

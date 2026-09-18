@@ -2,10 +2,68 @@ package llvm
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"KlainMainLang/ast"
 )
+
+// isArrayIndexName reports whether a field/property name is a canonical ES array
+// index — the decimal string of an integer in [0, 2^32-1), no leading zero —
+// returning its numeric value. Mirrors __kml_dynobj_is_index (runtime_dynobj.go)
+// and es_is_index (dynjsonsrc/dynjson.c), the dynamic-object counterparts.
+func isArrayIndexName(s string) (uint64, bool) {
+	if len(s) == 0 || len(s) > 10 {
+		return 0, false
+	}
+	if s[0] == '0' && len(s) > 1 {
+		return 0, false
+	}
+	var v uint64
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		v = v*10 + uint64(c-'0')
+	}
+	if v >= 4294967295 {
+		return 0, false
+	}
+	return v, true
+}
+
+// esOrderedFields returns fields in ES own-property enumeration order — array-
+// index-named fields ascending numeric first, then the rest in their original
+// declaration order — so Object.keys/values/entries, for...in and JSON over a
+// static object match Node's key order. A new slice is returned only when a
+// reorder is actually needed (the common no-index-key case returns the input
+// unchanged). Field access stays keyed by name (FieldIndex), so reordering the
+// iteration order never disturbs physical layout.
+func esOrderedFields(fields []Field) []Field {
+	type indexed struct {
+		v uint64
+		f Field
+	}
+	var idx []indexed
+	var rest []Field
+	for _, f := range fields {
+		if v, ok := isArrayIndexName(f.Name); ok {
+			idx = append(idx, indexed{v, f})
+		} else {
+			rest = append(rest, f)
+		}
+	}
+	if len(idx) == 0 {
+		return fields
+	}
+	sort.SliceStable(idx, func(i, j int) bool { return idx[i].v < idx[j].v })
+	out := make([]Field, 0, len(fields))
+	for _, e := range idx {
+		out = append(out, e.f)
+	}
+	return append(out, rest...)
+}
 
 // Object variable declarations, destructuring, and Object static methods (groupBy, keys).
 
@@ -1091,7 +1149,7 @@ func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, err
 	if !val.Ty.IsObject || (!val.Ty.IsClass && len(val.Ty.VisibleFields()) == 0) {
 		return Value{}, fmt.Errorf("%d:%d: Object.keys requires an object with known fields", pos.Line, pos.Col)
 	}
-	return e.emitObjectFieldNames(val.Ty.VisibleFields(), pos)
+	return e.emitObjectFieldNames(esOrderedFields(val.Ty.VisibleFields()), pos)
 }
 
 // emitObjectFieldNames allocates a string[] of compile-time field names.
@@ -1143,6 +1201,7 @@ func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, e
 	if !homogeneous {
 		valTy = TypePtr
 	}
+	visFields = esOrderedFields(visFields) // ES enumeration order (Node key order)
 	n := int64(len(visFields))
 	e.ensureMalloc()
 	dataReg := e.freshReg()
@@ -1213,6 +1272,7 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 	}
 	entryTy := TupleType([]Type{TypePtr, valTy})
 	entrySize := int64(entryTy.StructSize())
+	visFields = esOrderedFields(visFields) // ES enumeration order (Node key order)
 	n := int64(len(visFields))
 	e.ensureMalloc()
 	dataReg := e.freshReg()

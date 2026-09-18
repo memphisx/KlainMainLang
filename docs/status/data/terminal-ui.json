@@ -35,9 +35,10 @@
             "feature": "Flexbox layout (vendored Yoga)",
             "status": "implemented",
             "caveats": [
-              "A pragmatic subset of Yoga's style surface is exposed: `flexDirection`/`flexGrow`/`flexShrink`/`flexBasis`, `justifyContent`/`alignItems`/`alignSelf`/`flexWrap`, `width`/`height`/`minWidth`/`minHeight`, `padding*`/`margin*`/`gap`. Percentage units, `position:absolute`, and `aspectRatio` are not yet surfaced"
+              "Percentage units, `position:absolute`, and `aspectRatio` are not yet surfaced"
             ],
             "notes": [
+              "A pragmatic subset of Yoga's style surface is exposed: `flexDirection`/`flexGrow`/`flexShrink`/`flexBasis`, `justifyContent`/`alignItems`/`alignSelf`/`flexWrap`, `width`/`height`/`minWidth`/`minHeight`, `padding*`/`margin*`/`gap`",
               "Yoga compiled per-`.cpp` to objects (C++20) and linked only when a program uses `klain:tui` ([ADR-00519](../adr/ADR-00519.md))"
             ]
           },
@@ -52,9 +53,10 @@
             "feature": "`Text(text, props?)` — styled, wrapped text",
             "status": "implemented",
             "caveats": [
-              "Width-aware via a standard `wcwidth` table: wide (CJK/emoji) glyphs take two columns with a continuation cell, combining marks fold onto their base — but multi-code-point grapheme clusters joined by ZWJ (flag, family, and skin-tone emoji sequences) still paint as their separate wide glyphs, not one cluster"
+              "Multi-code-point grapheme clusters joined by ZWJ (flag, family, and skin-tone emoji sequences) paint as their separate wide glyphs, not one cluster"
             ],
             "notes": [
+              "Width-aware via a standard `wcwidth` table: wide (CJK/emoji) glyphs take two columns with a continuation cell, combining marks fold onto their base",
               "Greedy word-wrap in columns on the laid-out width (`wrap: false` clips to one line); auto-sizes via a Yoga measure func"
             ]
           },
@@ -83,7 +85,10 @@
             "feature": "`TextInput(value, props?)`",
             "status": "implemented",
             "caveats": [
-              "Renders the value plus a cursor block; editing/key handling is userland (read keys via `klain:tty`, mutate state, re-render)"
+              "Editing/key handling is userland (read keys via `klain:tty`, mutate state, re-render)"
+            ],
+            "notes": [
+              "Renders the value plus a cursor block"
             ]
           },
           {

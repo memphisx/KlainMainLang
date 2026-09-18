@@ -27,6 +27,13 @@ func (e *Emitter) UsesHTTP2() bool { return e.usedHTTP2 }
 // drives. The __kml_h2_dispatch/__kml_h2_resp_* side is defined by the IR bridge
 // (buildHTTP2Bridge) and called from C, so it isn't declared here.
 func (e *Emitter) emitHTTP2ServerDecls() {
+	// Idempotent: the h2 session ABI declares are the same for every server, so a
+	// program with more than one h2-capable server (e.g. a createServer primary +
+	// a klain:http cluster-combo listener, ADR-00989) emits them once.
+	if e.usedHTTP2ServerDecls {
+		return
+	}
+	e.usedHTTP2ServerDecls = true
 	e.ensureH2ClientBridge()
 	// The 5th ptr is the per-server dispatch vtable (TDD-00191 Stage 4).
 	e.emitGlobal("declare ptr @__kml_h2_session_server_new(i32, ptr, ptr, ptr, ptr)")

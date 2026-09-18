@@ -3,7 +3,7 @@ package llvm
 // runtime_dynobj.go — the D1 dynamic object runtime (TDD-00155 Stage 1): a
 // per-instance property bag behind box tag 10 (kmlTagDynObject). Layout:
 //
-//	DynObj header (40 bytes):
+//	DynObj header (48 bytes):
 //	  offset 0:  i64 flags   — low 32 bits magic 0x444C4D4B ("KMLD"); high bits
 //	                           reserved for EXTENSIBLE/SEALED/FROZEN (Stage 5)
 //	  offset 8:  ptr proto   — prototype pointer (live since Stage 3: get and
@@ -12,6 +12,8 @@ package llvm
 //	  offset 16: ptr props   — property entry array (realloc-grown, doubling)
 //	  offset 24: i64 count
 //	  offset 32: i64 cap
+//	  offset 40: i64 classtag — instanceof TagID when this bag was widened from a
+//	                           class instance (ADR-00997), 0 otherwise
 //
 //	Property entry (32 bytes):
 //	  offset 0:  ptr key     — owned NUL-terminated UTF-8 copy
@@ -49,6 +51,7 @@ func (e *Emitter) ensureDynObj() {
 	e.ensureAnyOps() // Proxy set/has/delete traps coerce results via ToBoolean
 	e.ensureCalloc()
 	e.ensureMalloc()
+	e.ensureFree() // es_reorder frees its scratch arrays
 	e.ensureRealloc()
 	e.ensureMemcpy()
 	e.ensureMemmove()
@@ -57,9 +60,27 @@ func (e *Emitter) ensureDynObj() {
 	e.emitGlobal(`
 define ptr @__kml_dynobj_new() {
 entry:
-  %o = call ptr @calloc(i64 1, i64 40)
+  %o = call ptr @calloc(i64 1, i64 48)
   store i64 1145867595, ptr %o, align 8
   ret ptr %o
+}
+
+; A bag realized from a class instance (allocation-site widening, ADR-00990)
+; records the source class's instanceof TagID at offset 40 (0 = not from a class,
+; the calloc default) so an instanceof test still answers correctly once the
+; instance has crossed into any — see emitInstanceOf's dynamic bag arm.
+define void @__kml_dynobj_set_classtag(ptr %o, i64 %tag) {
+entry:
+  %p = getelementptr i8, ptr %o, i64 40
+  store i64 %tag, ptr %p, align 8
+  ret void
+}
+
+define i64 @__kml_dynobj_classtag(ptr %o) {
+entry:
+  %p = getelementptr i8, ptr %o, i64 40
+  %t = load i64, ptr %p, align 8
+  ret i64 %t
 }
 
 define i64 @__kml_dynobj_find(ptr %o, ptr %key) {
@@ -583,6 +604,160 @@ entry:
   ret ptr %key
 }
 
+; __kml_dynobj_is_index(key) -> the canonical array-index value the string key
+; denotes, or -1 when it is not one. A key is an array index iff it is the
+; canonical decimal string of an integer in [0, 2^32-1): no leading zero (except
+; "0" itself), digits only, and strictly below 4294967295. This is the ES
+; "integer index" test that drives own-property enumeration order.
+define i64 @__kml_dynobj_is_index(ptr %key) {
+entry:
+  %len = call i64 @strlen(ptr %key)
+  %z = icmp eq i64 %len, 0
+  br i1 %z, label %no, label %lc
+lc:
+  ; 4294967294 is the largest index; it has 10 digits, so >10 chars can't be one.
+  %toolong = icmp sgt i64 %len, 10
+  br i1 %toolong, label %no, label %ld
+ld:
+  %c0 = load i8, ptr %key, align 1
+  %isz0 = icmp eq i8 %c0, 48
+  %gt1 = icmp sgt i64 %len, 1
+  %lead0 = and i1 %isz0, %gt1
+  br i1 %lead0, label %no, label %loop
+loop:
+  %i = phi i64 [ 0, %ld ], [ %inext, %digit ]
+  %acc = phi i64 [ 0, %ld ], [ %accn, %digit ]
+  %done = icmp sge i64 %i, %len
+  br i1 %done, label %fin, label %step
+step:
+  %cp = getelementptr i8, ptr %key, i64 %i
+  %c = load i8, ptr %cp, align 1
+  %ge0 = icmp uge i8 %c, 48
+  %le9 = icmp ule i8 %c, 57
+  %isdig = and i1 %ge0, %le9
+  br i1 %isdig, label %digit, label %no
+digit:
+  %d = sub i8 %c, 48
+  %d64 = zext i8 %d to i64
+  %m = mul i64 %acc, 10
+  %accn = add i64 %m, %d64
+  %inext = add i64 %i, 1
+  br label %loop
+fin:
+  %ok = icmp ult i64 %acc, 4294967295
+  br i1 %ok, label %yes, label %no
+yes:
+  ret i64 %acc
+no:
+  ret i64 -1
+}
+
+; __kml_dynobj_es_reorder(arr, n) reorders the first n key pointers in arr into
+; ES own-property enumeration order in place: array-index keys first in ascending
+; numeric order, then every other (string) key in its original insertion order.
+; Uses a scratch key array plus a parallel i64 of each slot's index value
+; (-1 = not an index; set to -2 once emitted, so the string pass skips it).
+define void @__kml_dynobj_es_reorder(ptr %arr, i64 %n) {
+entry:
+  %le1 = icmp sle i64 %n, 1
+  br i1 %le1, label %ret, label %go
+go:
+  %pbytes = mul i64 %n, 8
+  %scratch = call ptr @malloc(i64 %pbytes)
+  %idxv = call ptr @malloc(i64 %pbytes)
+  %wpos = alloca i64, align 8
+  store i64 0, ptr %wpos, align 8
+  br label %clsf
+clsf:
+  %ci = phi i64 [ 0, %go ], [ %cinext, %clsfbody ]
+  %cdone = icmp sge i64 %ci, %n
+  br i1 %cdone, label %phase1, label %clsfbody
+clsfbody:
+  %kp = getelementptr ptr, ptr %arr, i64 %ci
+  %k = load ptr, ptr %kp, align 8
+  %iv = call i64 @__kml_dynobj_is_index(ptr %k)
+  %ivp = getelementptr i64, ptr %idxv, i64 %ci
+  store i64 %iv, ptr %ivp, align 8
+  %cinext = add i64 %ci, 1
+  br label %clsf
+phase1:
+  ; repeatedly emit the smallest not-yet-taken index key
+  %minpos = alloca i64, align 8
+  br label %p1outer
+p1outer:
+  store i64 -1, ptr %minpos, align 8
+  br label %p1scan
+p1scan:
+  %si = phi i64 [ 0, %p1outer ], [ %sinext, %p1next ]
+  %sdone = icmp sge i64 %si, %n
+  br i1 %sdone, label %p1pick, label %p1sbody
+p1sbody:
+  %sivp = getelementptr i64, ptr %idxv, i64 %si
+  %siv = load i64, ptr %sivp, align 8
+  %isidx = icmp sge i64 %siv, 0
+  br i1 %isidx, label %p1cmp, label %p1next
+p1cmp:
+  %mp = load i64, ptr %minpos, align 8
+  %nomin = icmp slt i64 %mp, 0
+  br i1 %nomin, label %p1set, label %p1cmp2
+p1cmp2:
+  %mvp = getelementptr i64, ptr %idxv, i64 %mp
+  %mv = load i64, ptr %mvp, align 8
+  %smaller = icmp slt i64 %siv, %mv
+  br i1 %smaller, label %p1set, label %p1next
+p1set:
+  store i64 %si, ptr %minpos, align 8
+  br label %p1next
+p1next:
+  %sinext = add i64 %si, 1
+  br label %p1scan
+p1pick:
+  %fp = load i64, ptr %minpos, align 8
+  %none = icmp slt i64 %fp, 0
+  br i1 %none, label %phase2, label %p1emit
+p1emit:
+  %fkp = getelementptr ptr, ptr %arr, i64 %fp
+  %fk = load ptr, ptr %fkp, align 8
+  %w0 = load i64, ptr %wpos, align 8
+  %wslot0 = getelementptr ptr, ptr %scratch, i64 %w0
+  store ptr %fk, ptr %wslot0, align 8
+  %w0n = add i64 %w0, 1
+  store i64 %w0n, ptr %wpos, align 8
+  %takenp = getelementptr i64, ptr %idxv, i64 %fp
+  store i64 -2, ptr %takenp, align 8
+  br label %p1outer
+phase2:
+  br label %p2scan
+p2scan:
+  %ti = phi i64 [ 0, %phase2 ], [ %tinext, %p2next ]
+  %tdone = icmp sge i64 %ti, %n
+  br i1 %tdone, label %copyback, label %p2body
+p2body:
+  %tivp = getelementptr i64, ptr %idxv, i64 %ti
+  %tiv = load i64, ptr %tivp, align 8
+  %isstr = icmp eq i64 %tiv, -1
+  br i1 %isstr, label %p2emit, label %p2next
+p2emit:
+  %tkp = getelementptr ptr, ptr %arr, i64 %ti
+  %tk = load ptr, ptr %tkp, align 8
+  %w1 = load i64, ptr %wpos, align 8
+  %wslot1 = getelementptr ptr, ptr %scratch, i64 %w1
+  store ptr %tk, ptr %wslot1, align 8
+  %w1n = add i64 %w1, 1
+  store i64 %w1n, ptr %wpos, align 8
+  br label %p2next
+p2next:
+  %tinext = add i64 %ti, 1
+  br label %p2scan
+copyback:
+  call ptr @memcpy(ptr %arr, ptr %scratch, i64 %pbytes)
+  call void @free(ptr %scratch)
+  call void @free(ptr %idxv)
+  br label %ret
+ret:
+  ret void
+}
+
 define { ptr, i64 } @__kml_dynobj_keys(ptr %o) {
 entry:
   %count = call i64 @__kml_dynobj_count(ptr %o)
@@ -613,6 +788,7 @@ cont:
   %inext = add i64 %i, 1
   br label %loop
 out:
+  call void @__kml_dynobj_es_reorder(ptr %arr, i64 %n)
   %r0 = insertvalue { ptr, i64 } undef, ptr %arr, 0
   %r1 = insertvalue { ptr, i64 } %r0, i64 %n, 1
   ret { ptr, i64 } %r1
@@ -685,6 +861,7 @@ cont:
   %inext = add i64 %i, 1
   br label %loop
 out:
+  call void @__kml_dynobj_es_reorder(ptr %arr, i64 %n)
   %r0 = insertvalue { ptr, i64 } undef, ptr %arr, 0
   %r1 = insertvalue { ptr, i64 } %r0, i64 %n, 1
   ret { ptr, i64 } %r1

@@ -50,9 +50,11 @@
             "feature": "`Date`",
             "status": "implemented",
             "caveats": [
-              "UTC-only everywhere (construction, getters, formatting) — a deliberate deviation from real JS's local-time default, for deterministic output regardless of the machine/CI timezone; the multi-argument constructor form is a special case of this: real JS treats its fields as *local* time, this compiler always treats them as UTC"
+              "UTC-only everywhere (construction, getters, formatting) — diverges from JS's local-time default",
+              "The multi-argument constructor treats its fields as UTC; JS treats them as *local* time"
             ],
             "notes": [
+              "UTC-only is deliberate, for deterministic output regardless of the machine/CI timezone",
               "`new Date()` / `new Date(ms)` / `new Date(isoString)` (the string form parses via the same logic as `Date.parse`, including its `-1`-on-unparseable sentinel — see [ADR-00038](../adr/ADR-00038.md)) / `new Date(year, month, day?, hours?, minutes?, seconds?, ms?)` (month 0-indexed, matching `getMonth()`; omitted trailing fields default like real JS — day to 1, everything after that to 0; see [ADR-00039](../adr/ADR-00039.md))",
               "`getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds` (+ the `set*` setters), `getTime`/`valueOf`, `toISOString`",
               "The `getUTC*`/`setUTC*` accessors alias the field getters/setters — since the stored timestamp is UTC, these are fully faithful to Node's UTC methods (unlike the local `get*`/`set*`, which carry the UTC deviation above) ([ADR-00844](../adr/ADR-00844.md))",
@@ -126,11 +128,11 @@
             "feature": "`PerformanceObserver`",
             "status": "implemented",
             "caveats": [
-              "Dispatch is **synchronous** (during `mark`/`measure`), not Node's async batched next-microtask delivery — observer output precedes later straight-line output ([ADR-00673](../adr/ADR-00673.md)/[TDD-00166](../tdd/TDD-00166.md))",
-              "Entry types `mark`/`measure` only; the `entryTypes: []` array form; `buffered`, `takeRecords()`, the single-`type` form, and `getEntriesByName`/`getEntriesByType` are deferred"
+              "Dispatch is **synchronous** (during `mark`/`measure`), not Node's async batched next-microtask delivery",
+              "Entry types `mark`/`measure` only; `buffered`, `takeRecords()`, the single-`type` form, and `getEntriesByName`/`getEntriesByType` are unsupported"
             ],
             "notes": [
-              "`new PerformanceObserver(cb)` + `observe({ entryTypes })` + `disconnect()`; the callback's list yields `PerformanceEntry` objects (`name`/`entryType`/`startTime`/`duration`) via `getEntries()`"
+              "`new PerformanceObserver(cb)` + `observe({ entryTypes })` (the `entryTypes: []` array form) + `disconnect()`; the callback's list yields `PerformanceEntry` objects (`name`/`entryType`/`startTime`/`duration`) via `getEntries()`. Synchronous observer output precedes later straight-line output. See [ADR-00673](../adr/ADR-00673.md), [TDD-00166](../tdd/TDD-00166.md)"
             ]
           }
         ]

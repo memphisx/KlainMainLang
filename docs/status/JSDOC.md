@@ -6,7 +6,7 @@
 
 **Coverage**: JSDoc tags 20/22 (~91%) · JSDoc type expressions 15/15 (100%).
 
-**Strict Coverage**: JSDoc tags 3/22 (~14%) · JSDoc type expressions 6/15 (40%). A row counts toward Strict only when its **Caveats** column is empty.
+**Strict Coverage**: JSDoc tags 5/22 (~23%) · JSDoc type expressions 7/15 (~47%). A row counts toward Strict only when its **Caveats** column is empty.
 
 > **On the low Strict figure — expected, not a backlog.** Most tags that stay
 > out of Strict do so because their Caveats read "accepted and erased, not
@@ -38,11 +38,11 @@ Staged roadmap: [TDD-00125](../tdd/TDD-00125.md).
 
 | Tag | Status | Caveats | Notes |
 |---|---|---|---|
-| `@type` | ✅ | • Applies to variable, class-field, and type-alias positions | • The value string is parsed by the real type parser (Stage 4), so the full type-expression grammar in the table below is available ([TDD-00123](../tdd/TDD-00123.md) uses it for the `intN` override) |
+| `@type` | ✅ | | • Applies to variable, class-field, and type-alias positions<br>• The value string is parsed by the real type parser (Stage 4), so the full type-expression grammar in the table below is available ([TDD-00123](../tdd/TDD-00123.md) uses it for the `intN` override) |
 | `@param` (aliases `@arg`, `@argument`) | ✅ | • Fills only a parameter with no inline `: T` annotation and no destructuring pattern (an inline type wins)<br>• A `{...T}` varargs type is stripped to its base `T` (the count isn't bound as a `...rest` parameter); a body reading `arguments` sees the values actually passed ([ADR-00928](../adr/ADR-00928.md)), but for a typed variadic use a declared `...rest: T[]` parameter | • [TDD-00125](../tdd/TDD-00125.md) Stage 1; the type body uses the full grammar in the type-expression table; a `{number=}`/`[name]` optional decoration is recognized and stripped |
 | `@returns` (alias `@return`) | ✅ | • Fills only when the function has no inline `: RetType` | • [TDD-00125](../tdd/TDD-00125.md) Stage 1 |
-| `@typedef` | ✅ | • Both forms work: `@typedef {Object} Name` + `@property {T} field`, and the inline `@typedef {{x: number}} Name` object literal (since Stage 4)<br>• A `@typedef {T} Name` alias to a **width keyword** (`int32`) does not propagate the integer semantics — the same pre-existing limit a TS `type X = int32` alias has | • [TDD-00125](../tdd/TDD-00125.md) Stage 2; synthesized into a `type Name = …` declaration, so it resolves anywhere a type name does (`@type`/`@param`/inline) |
-| `@callback` | ✅ | • Param/return types use the full type-expression grammar (Stage 4) | • [TDD-00125](../tdd/TDD-00125.md) Stage 2; synthesized into a function-type alias |
+| `@typedef` | ✅ | • A `@typedef {T} Name` alias to a **width keyword** (`int32`) does not propagate the integer semantics — the same pre-existing limit a TS `type X = int32` alias has | • Both forms work: `@typedef {Object} Name` + `@property {T} field`, and the inline `@typedef {{x: number}} Name` object literal (since Stage 4)<br>• [TDD-00125](../tdd/TDD-00125.md) Stage 2; synthesized into a `type Name = …` declaration, so it resolves anywhere a type name does (`@type`/`@param`/inline) |
+| `@callback` | ✅ | | • Param/return types use the full type-expression grammar (Stage 4)<br>• [TDD-00125](../tdd/TDD-00125.md) Stage 2; synthesized into a function-type alias |
 | `@template` | ✅ | • Inherits the TS generics scope: V1 monomorphization needs an inferable `T`/`T[]`-typed parameter, no explicit call-site type arguments ([TDD-00010](../tdd/TDD-00010.md)); a `{Base}` constraint on a multi-name tag applies to the first name (matching TS) | • [TDD-00125](../tdd/TDD-00125.md) Stage 3; sets the function's `<T>` list, so it drives the exact same monomorphization a TS `<T>` does. `@erased` (below) is the compile-once variant |
 | `@satisfies` | ✅ | • Accepted and erased — the value keeps its own type, no `satisfies`-style excess-property/conformance check (parity with the erased TS `satisfies` operator — [ADR-00371](../adr/ADR-00371.md)) | • [TDD-00125](../tdd/TDD-00125.md) Stage 5 |
 | `@enum` | ✅ | • The tagged `const` object works for value access (`Dir.Up`); it is a plain object, not a nominal enum type — no reverse mapping, no enum-member type narrowing | • [TDD-00125](../tdd/TDD-00125.md) Stage 5 |
@@ -68,11 +68,11 @@ Staged roadmap: [TDD-00125](../tdd/TDD-00125.md).
 | Bare primitive (`string`, `number`, `boolean`, …) | ✅ | | • Resolved by the same type resolver a TS annotation uses |
 | `T[]` array | ✅ | | • The `[]` suffix is handled by the resolver |
 | Optional param (`T=`, `[name]`) | ✅ | • Recognized at the `@param` name/type level and stripped; the parameter is not yet marked structurally optional beyond an inline `?` | • [TDD-00125](../tdd/TDD-00125.md) Stage 1 |
-| Varargs/rest (`...T`) | ✅ | • Stripped to the base `T`; the varargs body needs a declared `...rest` parameter (no `arguments`) | • [TDD-00125](../tdd/TDD-00125.md) Stage 1 |
+| Varargs/rest (`...T`) | ✅ | • Stripped to the base `T`; the varargs body reads its overflow through a declared `...rest` parameter or the `arguments` object ([ADR-00928](../adr/ADR-00928.md)) | • [TDD-00125](../tdd/TDD-00125.md) Stage 1 |
 | Union (`A \| B`) | ✅ | • Inherits the union V1 scope (scalar/object/`ReadableStream` members, narrowing rules — see the Type system page) | • [TDD-00125](../tdd/TDD-00125.md) Stage 4; the JSDoc string is parsed by the real type parser |
 | Nullable (`?T`) | ✅ | • The leading marker (`?number` → `number \| null`); a `?` buried mid-expression is left to the parser | • [TDD-00125](../tdd/TDD-00125.md) Stage 4 |
 | Non-null (`!T`) | ✅ | • The marker is stripped (`!number` → `number`) — TS treats non-null as no semantic change | • [TDD-00125](../tdd/TDD-00125.md) Stage 4 |
-| Object shape (`{ a: string, b: number }`) | ✅ | • Nested braces are supported (`@param {{x: number}}`) via balanced-brace scanning | • [TDD-00125](../tdd/TDD-00125.md) Stage 4 |
+| Object shape (`{ a: string, b: number }`) | ✅ | | • Nested braces are supported (`@param {{x: number}}`) via balanced-brace scanning<br>• [TDD-00125](../tdd/TDD-00125.md) Stage 4 |
 | `Array.<T>` / `Array<T>` (generic array form) | ✅ | | • [TDD-00125](../tdd/TDD-00125.md) Stage 4; the Closure dot (`Array.<T>`) is normalized to `Array<T>` |
 | `Object.<K, V>` (index map) | ✅ | | • Normalized to `Record<K, V>`, now backed by real index-signature support — per-key read/write (`d[key]`) works ([TDD-00130](../tdd/TDD-00130.md)/[ADR-00557](../adr/ADR-00557.md)) |
 | Function type (`function(A): B`) | ✅ | • Rewritten to the arrow form `(arg0: A) => B`; a nested `function(...)` inside another type is not rewritten (rare) | • [TDD-00125](../tdd/TDD-00125.md) Stage 4 |

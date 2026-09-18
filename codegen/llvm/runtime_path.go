@@ -278,6 +278,120 @@ flushfinal:
 }`)
 }
 
+// ensurePathJoinSegs declares __kml_path_join_segs(ptr arr, i64 n) -> ptr:
+// concatenates n string pointers with a single '/' between them, matching
+// Node's path.join, which *skips empty segments entirely* before joining (so
+// join('foo','') is 'foo', not 'foo/', and join('a/','') keeps the 'a/' from
+// its own trailing slash rather than manufacturing one). The joined raw string
+// is then handed to __kml_path_posix_normalize by emitPathJoin, whose
+// trailing-slash-preserving normalization completes the Node semantics. All
+// segments empty (or n == 0) yields "" — normalize turns that into ".".
+func (e *Emitter) ensurePathJoinSegs() {
+	if e.usedPathJoinSegs {
+		return
+	}
+	e.usedPathJoinSegs = true
+	e.ensureMemcpy()
+	e.ensureStrlen()
+	e.ensureStrHeaderRuntime()
+	e.emitGlobal(`
+define ptr @__kml_path_join_segs(ptr %arr, i64 %n) {
+entry:
+  %total_a = alloca i64, align 8
+  %cnt_a = alloca i64, align 8
+  %i_a = alloca i64, align 8
+  store i64 0, ptr %total_a, align 8
+  store i64 0, ptr %cnt_a, align 8
+  store i64 0, ptr %i_a, align 8
+  br label %p1chk
+
+p1chk:
+  %i1 = load i64, ptr %i_a, align 8
+  %done1 = icmp uge i64 %i1, %n
+  br i1 %done1, label %p1done, label %p1body
+
+p1body:
+  %sp1 = getelementptr ptr, ptr %arr, i64 %i1
+  %s1 = load ptr, ptr %sp1, align 8
+  %sl1 = call i64 @strlen(ptr %s1)
+  %ne1 = icmp ne i64 %sl1, 0
+  br i1 %ne1, label %p1acc, label %p1next
+
+p1acc:
+  %t0 = load i64, ptr %total_a, align 8
+  %t1 = add i64 %t0, %sl1
+  store i64 %t1, ptr %total_a, align 8
+  %c0 = load i64, ptr %cnt_a, align 8
+  %c1 = add i64 %c0, 1
+  store i64 %c1, ptr %cnt_a, align 8
+  br label %p1next
+
+p1next:
+  %in1 = add i64 %i1, 1
+  store i64 %in1, ptr %i_a, align 8
+  br label %p1chk
+
+p1done:
+  %cnt = load i64, ptr %cnt_a, align 8
+  %seps = sub i64 %cnt, 1
+  %hasany = icmp ne i64 %cnt, 0
+  %sepsclamped = select i1 %hasany, i64 %seps, i64 0
+  %tot = load i64, ptr %total_a, align 8
+  %totwsep = add i64 %tot, %sepsclamped
+  %buf = call ptr @__kml_str_alloc(i64 %totwsep)
+  %pos_a = alloca i64, align 8
+  %first_a = alloca i1, align 1
+  store i64 0, ptr %pos_a, align 8
+  store i1 1, ptr %first_a, align 1
+  store i64 0, ptr %i_a, align 8
+  br label %p2chk
+
+p2chk:
+  %i2 = load i64, ptr %i_a, align 8
+  %done2 = icmp uge i64 %i2, %n
+  br i1 %done2, label %p2done, label %p2body
+
+p2body:
+  %sp2 = getelementptr ptr, ptr %arr, i64 %i2
+  %s2 = load ptr, ptr %sp2, align 8
+  %sl2 = call i64 @strlen(ptr %s2)
+  %ne2 = icmp ne i64 %sl2, 0
+  br i1 %ne2, label %p2copy, label %p2next
+
+p2copy:
+  %isf = load i1, ptr %first_a, align 1
+  br i1 %isf, label %p2nosep, label %p2sep
+
+p2sep:
+  %posS = load i64, ptr %pos_a, align 8
+  %sepdst = getelementptr i8, ptr %buf, i64 %posS
+  store i8 47, ptr %sepdst, align 1
+  %posS1 = add i64 %posS, 1
+  store i64 %posS1, ptr %pos_a, align 8
+  br label %p2nosep
+
+p2nosep:
+  %posC = load i64, ptr %pos_a, align 8
+  %cdst = getelementptr i8, ptr %buf, i64 %posC
+  call ptr @memcpy(ptr %cdst, ptr %s2, i64 %sl2)
+  %posC1 = add i64 %posC, %sl2
+  store i64 %posC1, ptr %pos_a, align 8
+  store i1 0, ptr %first_a, align 1
+  br label %p2next
+
+p2next:
+  %in2 = add i64 %i2, 1
+  store i64 %in2, ptr %i_a, align 8
+  br label %p2chk
+
+p2done:
+  %endpos = load i64, ptr %pos_a, align 8
+  %nullp = getelementptr i8, ptr %buf, i64 %endpos
+  store i8 0, ptr %nullp, align 1
+  ret ptr %buf
+}`)
+}
+
 // ensurePathDirname declares __kml_path_dirname(ptr path) -> ptr: the
 // directory portion of a path (trailing slashes trimmed first, then the
 // portion before the last remaining '/'). Returns "." when path has no '/'

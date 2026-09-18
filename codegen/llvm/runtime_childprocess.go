@@ -458,8 +458,10 @@ entry:
   store ptr null, ptr %%pa, align 8
   %%en = getelementptr %s, ptr %%obj, i32 0, i32 8
   store double %%errno_neg, ptr %%en, align 8
+  %%de = getelementptr %s, ptr %%obj, i32 0, i32 9
+  store ptr null, ptr %%de, align 8
   ret ptr %%obj
-}`, fmtSpawn, errorObjType.StructSize(), eIR, eIR, eIR, spawnErrName, eIR, eIR, eIR, eIR, eIR, eIR))
+}`, fmtSpawn, errorObjType.StructSize(), eIR, eIR, eIR, spawnErrName, eIR, eIR, eIR, eIR, eIR, eIR, eIR))
 
 	// __kml_cp_dispatch(): drain + finalize every live child. Called by the
 	// event loop after select().

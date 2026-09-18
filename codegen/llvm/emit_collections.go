@@ -168,6 +168,13 @@ func (e *Emitter) mapKVTypes(keyAnn, valAnn *ast.TypeAnnotation, entries ast.Exp
 // runtime stores NaN-boxed values and returns the `undefined` box on a miss, so
 // its value slot must be interpreted as a box — a non-dynamic value type would
 // decode the miss sentinel as a raw pointer/scalar and crash (TDD-00211).
+//
+// This applies to a *dynamic*-keyed map only. A reference (object/array) key also
+// rides the any-keyed runtime (mapRuntime), but its value is stored **raw** (an
+// explicitly-typed `Map<T[],V>` keeps V concrete for typed reads), so its value
+// type stays V — the only wrinkle is the `.get()` miss, which the get path
+// handles for a pointer V by gating on has() and yielding a real null (see the
+// "any"-suffix branch in the get case) (ADR-00948).
 func forceAnyMapVal(keyTy, valTy Type) Type {
 	if keyTy.IsDynamic {
 		return TypeAny
@@ -483,6 +490,20 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 		}
 		raw := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_%s_get(ptr %s, %s %s)", raw, suffix, mapPtr, keyIR, kRef))
+		// The any-keyed runtime (object/array key) returns the boxed `undefined`
+		// sentinel on a miss, not 0 — so a raw decode of a *concrete* pointer/array
+		// value would be a garbage pointer (bad `=== undefined`, crash on use). Gate
+		// on has() and substitute 0 (a null pointer / null header) on a miss so the
+		// null-pointer-miss handling below and mapValFromI64's null-header guard
+		// yield a real `undefined`. A dynamic (`any`) value is skipped: its slot is
+		// meant to read back as the box, undefined sentinel included (ADR-00948).
+		if suffix == "any" && !valTy.IsDynamic {
+			present := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_any_has(ptr %s, %s %s)", present, mapPtr, keyIR, kRef))
+			gated := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", gated, present, raw))
+			raw = gated
+		}
 		v := e.mapValFromI64(raw, valTy)
 		// A pointer value type (string/object/class) reads its null-pointer miss
 		// as a real `V | undefined` — Node types `Map.get` `V | undefined`, and a
@@ -731,12 +752,35 @@ func (e *Emitter) valueToMapKey(v Value, keyTy Type) string {
 	// (`int32`, …) sign/zero-extends to i64 as before.
 	if keyTy.Float {
 		v = e.coerce(v, TypeF64)
+		norm := e.normalizeSameValueZero(v.Ref)
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", r, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", r, norm))
 		return r
 	}
 	v = e.coerce(v, TypeI64)
 	return v.Ref
+}
+
+// normalizeSameValueZero maps a double onto the canonical representative its
+// SameValueZero equivalence class expects before it is bitcast into an opaque
+// numeric map/set key: -0 collapses to +0 (they are one key in JS —
+// `new Set([0, -0]).size` is 1), and every NaN collapses to one canonical NaN
+// (all NaNs are one key — `new Set([NaN, NaN]).size` is 1), regardless of the
+// producing operation's payload bits. Every other value passes through
+// unchanged, so `1.5` and `1` stay distinct. Returns the normalized double reg.
+func (e *Emitter) normalizeSameValueZero(dbl string) string {
+	// -0 → +0: `fcmp oeq 0.0` is true for both signed zeros; adding +0.0 would
+	// also work, but the select keeps every other value bit-exact.
+	isZero := e.freshReg()
+	zeroed := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, 0.0", isZero, dbl))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0.0, double %s", zeroed, isZero, dbl))
+	// NaN → canonical quiet NaN (0x7FF8000000000000): `fcmp uno` detects any NaN.
+	isNaN := e.freshReg()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp uno double %s, %s", isNaN, dbl, dbl))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0x7FF8000000000000, double %s", r, isNaN, zeroed))
+	return r
 }
 
 // valueToMapVal converts any scalar value to i64 for uniform map storage.

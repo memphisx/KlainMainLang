@@ -4,7 +4,7 @@
   "kind": "language",
   "statusPage": "REGEXP.md",
   "coversRows": "all",
-  "coverage": { "loose": "13/14", "loosePct": 93, "strict": "5/14", "strictPct": 36 },
+  "coverage": { "loose": "13/14", "loosePct": 93, "strict": "6/14", "strictPct": 43 },
   "lede": "PCRE2 under the hood, but aligned to the ECMAScript dialect by default so the everyday edge cases (`$` at the true end, an unset backreference matching empty, `\\uXXXX` escapes) behave as real JS does. The recurring divergences are structural: strings are byte-indexed, so match offsets are byte positions unless you opt into `-regex=es-utf16`; result arrays narrow a truly-`null` optional capture to `\"\"` and drop the `index`/`input`/`groups` extras; and `matchAll` is eager, not a lazy iterator. The whole-program `-regex=<mode>` flag trades fidelity for speed across five modes, and the `u`/`y`/`d` flags are out of scope for V1.",
   "entries": [
     {
@@ -45,7 +45,7 @@
       "statusRow": ".source / .flags",
       "signature": "re.source: string; re.flags: string",
       "badge": "exact",
-      "description": "Plain field reads of the original constructor arguments, verbatim.",
+      "description": "Field reads decomposed once at construction: .flags reports the canonical d,g,i,m,s,u,v,y order regardless of how the flags were given, and an empty pattern's .source is the spec placeholder \"(?:)\".",
       "returns": { "type": "string", "desc": "The pattern source / flag string." },
       "exampleKey": "regexp/regexp",
       "snippet": "const r = new RegExp(\"^\\\\d+$\", \"gm\")\nconsole.log(r.flags) // gm",

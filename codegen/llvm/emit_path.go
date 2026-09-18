@@ -47,25 +47,27 @@ func (e *Emitter) emitPathJoin(f pathFlavor, args []ast.Expression, pos ast.Pos)
 		}
 		vals[i] = e.coerce(v, TypePtr)
 	}
-	isAbs := e.emitPathStartsWithSlash(vals[0])
 
-	raw := vals[0]
-	sep := Value{Ref: e.internString("/"), Ty: TypePtr}
-	for i := 1; i < len(vals); i++ {
-		var err error
-		raw, err = e.emitStringConcat(raw, sep)
-		if err != nil {
-			return Value{}, err
-		}
-		raw, err = e.emitStringConcat(raw, vals[i])
-		if err != nil {
-			return Value{}, err
-		}
+	// Node's path.join skips empty segments, joins the rest with a single '/',
+	// then normalizes — and its normalize preserves a trailing slash. Build the
+	// segment-pointer array, hand it to __kml_path_join_segs (the empty-skipping
+	// concatenation), then route through the trailing-preserving posix normalize
+	// sidecar (the same one path.normalize uses), rather than the IR normalize
+	// that strips the trailing slash (which resolve still wants). This makes
+	// join('foo','bar/') → 'foo/bar/' and join('a/','') → 'a/' (ADR-00993).
+	e.ensurePathJoinSegs()
+	e.ensurePathWin32() // __kml_path_posix_normalize
+	arr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, i64 %d, align 8", arr, len(vals)))
+	for i, v := range vals {
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", slot, arr, i))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", v.Ref, slot))
 	}
-
-	e.ensurePathNormalize()
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_join_segs(ptr %s, i64 %d)", raw, arr, len(vals)))
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_normalize(ptr %s, i1 %s)", r, raw.Ref, isAbs))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_posix_normalize(ptr %s)", r, raw))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 

@@ -170,6 +170,8 @@ type Emitter struct {
 	usesFloatFmt          bool            // set the first time a float is printed (drives dtoa.c compile+link in main.go — TDD-00080)
 	declaredDtoa          bool            // the __kml_dtoa declare has been emitted once
 	usedSignalAborted     bool            // the __kml_signal_aborted helper has been emitted (TDD-00081 Stage 3c)
+	usedAbortTimeout      bool            // AbortSignal.timeout used → the background abort-timeout dispatcher + register are emitted (TDD-00216)
+	usedAbortRegistry     bool            // the always-present abort-timeout registry globals + soonest/fire_due have been emitted (TDD-00216)
 	usedPrintf            bool
 	usedDprintf           bool
 	usedStdoutGlobal      bool // the libc `stdout` FILE* extern global is declared (ADR-00867)
@@ -427,6 +429,7 @@ type Emitter struct {
 	usedReadlineRuntime    bool
 	usedStdinRuntime       bool
 	usedNetRuntime         bool
+	usedNetSockIO          bool
 	usedDgramRuntime       bool
 	usedClusterRuntime     bool
 	usedProcessUptime      bool
@@ -570,6 +573,9 @@ type Emitter struct {
 	usedFwrite                   bool
 	usedFsThrow                  bool
 	usedErrnoCode                bool
+	usedErrnoDesc                bool
+	usedFsErrmsg                 bool
+	usedHTTPBindErrorFire        bool
 	usedStatDecl                 bool
 	usedQuerystringParse         bool
 	usedHTTPDate                 bool
@@ -589,6 +595,8 @@ type Emitter struct {
 	usedFsAppendFileBytes        bool
 	usedFsExists                 bool
 	usedFsUnlink                 bool
+	usedChmodDecl                bool
+	usedFsChmodCreated           bool
 	usedBase64Encode             bool
 	usedBase64Decode             bool
 	usedUtf8LabelCheck           bool
@@ -628,6 +636,7 @@ type Emitter struct {
 	usedMmapDecl                 bool
 	usedShutdownDecl             bool
 	usedHTTPCloseAllConns        bool
+	usedHTTPConnTimeouts         bool
 	usedStrHeaderRuntime         bool
 	usedMemmem                   bool
 	usedWinSpawn                 bool
@@ -648,6 +657,7 @@ type Emitter struct {
 	usedGetpid                   bool
 	usedExecPath                 bool
 	usedNodeInterpGuard          bool
+	usedReexecGuard              bool
 	usedProcessWarning           bool
 	usedHTTPClientReactions      bool
 	usedHTTPCFlushHook           bool // post-event-loop client-reaction flush hook global
@@ -693,6 +703,7 @@ type Emitter struct {
 	usedFsRename                 bool
 	usedFsReaddir                bool
 	usedFsReaddirRecursive       bool
+	usedFsReaddirRecursiveTypes  bool
 	usedFsCopyExclGuard          bool
 	usedFsFutimes                bool
 	usedConsoleGroupDepth        bool
@@ -764,6 +775,13 @@ type Emitter struct {
 	// duplicate @__kml_http_dispatch definition the LLVM backend would
 	// reject with a confusing symbol-collision error.
 	httpListenCallSeen bool
+	// httpFsListenSeen tracks specifically the klain:http `http.listen(...)`
+	// call site (as opposed to httpListenCallSeen, which the Node createServer
+	// path also sets). Two `http.listen` calls stay a clean rejection even in
+	// the cluster-combo mode (ADR-00989), which allows exactly one `http.listen`
+	// alongside any number of createServer servers.
+	httpFsListenSeen     bool
+	usedHTTP2ServerDecls bool
 	// httpServerCount counts Node http.createServer sites (TDD-00191 Stage 1):
 	// server 0 is the primary (keeps the @__kml_listen_* scalars + full
 	// capability); each additional server gets a suffixed dispatcher
@@ -773,6 +791,19 @@ type Emitter struct {
 	httpServerCount      int
 	curServerDispatchSym string
 	curServerIsPrimary   bool
+	// curServerHWM is the res.write backpressure threshold (bytes) for the server
+	// whose dispatcher/response is currently being emitted — a createServer
+	// `{ highWaterMark: N }` option (ADR-00983). 0 means "unset", read as Node's
+	// 16384 default at the res-mint store.
+	curServerHWM int64
+	// curServerHeadersTimeoutMs/RequestTimeoutMs/KeepAliveTimeoutMs are the
+	// createServer connection-timeout options (TDD-00217), in milliseconds, for
+	// the server whose dispatcher is currently being emitted. 0 = disabled (Node's
+	// value for "no timeout"). Baked as ns constants into the dispatcher's arming
+	// calls and OR'd into @__kml_http_any_timeout at listen.
+	curServerHeadersTimeoutMs   int64
+	curServerRequestTimeoutMs   int64
+	curServerKeepAliveTimeoutMs int64
 	// curDispatchSfx is the "" / "_N" suffix of the dispatcher currently being
 	// built, read by the dispatcher's handler load / streaming-writer hand-off /
 	// function name so an additional server reads its own globals.
@@ -929,6 +960,7 @@ type Emitter struct {
 	usedExceptionHelpers    bool
 	usedFrozenSet           bool
 	usedPathNormalize       bool
+	usedPathJoinSegs        bool
 	usedPerfObsRegistry     bool
 	usedPathDirname         bool
 	usedPathBasename        bool
@@ -941,6 +973,8 @@ type Emitter struct {
 	usedRegexUTF16Convert   bool
 	usedRegexUTF8Width      bool
 	usedRegexESNormalize    bool
+	usedRegexFlagsCanon     bool
+	usedRegexSourceNorm     bool
 	breakStack              []string // end labels for enclosing loops / switch
 	continueStack           []string // continue-target labels for enclosing loops
 	// pendingFinallys is the stack of enclosing `finally` block bodies, innermost

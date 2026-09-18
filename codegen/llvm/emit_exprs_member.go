@@ -670,6 +670,18 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return e.emitChildProcessMember(objVal, ex.Property, ex.GetPos())
 		}
 	}
+	// TextEncoder/TextDecoder `.encoding` — always "utf-8" (the only encoding
+	// this compiler's byte-string model supports; a non-UTF-8 TextDecoder label
+	// is rejected at construction, ADR-00567). The receiver is stateless, so the
+	// value is a constant; evaluate the object for its side effects only.
+	if ex.Property == "encoding" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsTextEncoder || objTy.IsTextDecoder {
+			if _, err := e.emitExpr(ex.Object); err != nil {
+				return Value{}, err
+			}
+			return Value{Ref: e.internString("utf-8"), Ty: TypePtr}, nil
+		}
+	}
 	if ex.Property == "byteLength" || ex.Property == "byteOffset" || ex.Property == "buffer" {
 		if objTy := e.inferExprType(ex.Object); objTy.IsDataView {
 			objVal, err := e.emitExpr(ex.Object)

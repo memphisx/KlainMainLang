@@ -2446,3 +2446,17 @@ const g = m.get("k");
 g("disk", 3);
 `, "static cpu=1\npush mem=2\nmap disk=3")
 }
+
+// An unannotated class field initialized with a sibling `new C()` takes C's
+// object type (ADR-00991): registration is topological, so at the time the
+// field's type is inferred the sibling's finalized ClassInfo.Ty may not exist
+// yet — the nominal class type is used and re-resolved on access. Regression
+// for a "field access on non-object" on `obj.p.x`.
+func TestE2EUnannotatedFieldSiblingClassType(t *testing.T) {
+	assertOutput(t, `
+class Point { x = 1; y = 2; }
+class Box { p = new Point(); n = 42; }
+const b = new Box();
+console.log(b.p.x, b.p.y, b.n);
+`, "1 2 42")
+}

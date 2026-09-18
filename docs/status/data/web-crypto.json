@@ -130,12 +130,12 @@
             "feature": "Node `crypto` module: `createHash(algorithm)` / `createHmac(algorithm, key)` → `Hash`/`Hmac` (`.update(data).digest(encoding?)`)",
             "status": "implemented",
             "caveats": [
-              "Algorithms: `md5`/`sha1`/`sha256`/`sha384`/`sha512` (a string literal); other names are a clean rejection",
-              "`.digest('hex')`/`'base64'`/`'base64url'` return a byte-exact string, `.digest()` a `Buffer`; `.digest('latin1')`/`'binary'` work but share the UTF-8-only string caveat for non-ASCII bytes (same as `Buffer.toString('latin1')` — [TDD-00034](../tdd/TDD-00034.md)); other encodings are clean rejections",
-              "`.update` (chainable) and `createHmac`'s key take a `string` (UTF-8, binary-safe via the length header) or a `Buffer`/`TypedArray`/`ArrayBuffer`"
+              "Algorithms limited to `md5`/`sha1`/`sha256`/`sha384`/`sha512` (a string literal); other names are a clean rejection",
+              "`.digest('latin1')`/`'binary'` share the UTF-8-only string caveat for non-ASCII bytes (same as `Buffer.toString('latin1')` — [TDD-00034](../tdd/TDD-00034.md)); encodings other than `hex`/`base64`/`base64url`/`latin1`/`binary` are clean rejections"
             ],
             "notes": [
-              "Real streaming digests — `.update` feeds the backend's incremental context (OpenSSL `EVP_MD_CTX`/`EVP_MAC`, CommonCrypto `CC_*`/`CCHmac`), no input buffering ([TDD-00159](../tdd/TDD-00159.md)/[ADR-00636](../adr/ADR-00636.md)/[ADR-00637](../adr/ADR-00637.md)). Makes the hand-rolled Node WebSocket handshake (`server.on('upgrade', …)` + `createHash('sha1').…digest('base64')`) faithful end to end"
+              "Real streaming digests — `.update` feeds the backend's incremental context (OpenSSL `EVP_MD_CTX`/`EVP_MAC`, CommonCrypto `CC_*`/`CCHmac`), no input buffering ([TDD-00159](../tdd/TDD-00159.md)/[ADR-00636](../adr/ADR-00636.md)/[ADR-00637](../adr/ADR-00637.md)). Makes the hand-rolled Node WebSocket handshake (`server.on('upgrade', …)` + `createHash('sha1').…digest('base64')`) faithful end to end",
+              "`.digest('hex')`/`'base64'`/`'base64url'` return a byte-exact string, `.digest()` a `Buffer`; `.update` (chainable) and `createHmac`'s key take a `string` (UTF-8, binary-safe via the length header) or a `Buffer`/`TypedArray`/`ArrayBuffer`"
             ]
           },
           {

@@ -34,7 +34,8 @@ const routes = [
     path: '/',
     component: () => import('layouts/MarketingLayout.vue'),
     children: [
-      { path: '', name: 'home', component: () => import('pages/IndexPage.vue') }
+      { path: '', name: 'home', component: () => import('pages/IndexPage.vue') },
+      { path: 'conformance', name: 'conformance', component: () => import('pages/Conformance.vue') }
     ]
   },
 

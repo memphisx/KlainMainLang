@@ -31,10 +31,10 @@
             "feature": "`ReadableStream`",
             "status": "implemented",
             "caveats": [
-              "No BYOB readers / byte controllers (`type: 'bytes'` rejected at compile time) — byte data flows as `Uint8Array` chunks through default readers",
+              "No BYOB readers / byte controllers (`type: 'bytes'` rejected at compile time)",
               "`ReadableStream.from()` accepts arrays only, not async iterables",
               "Source callbacks must be arrow/function-expression/method-shorthand literals; a cancel callback can't take a reason parameter; *async* method shorthand (`{ async pull(c) {…} }`) doesn't parse — use `pull: async (c) => …`",
-              "`read()` on a closed stream whose chunk type is an **array/tuple** (`ReadableStream<number[]>`) still yields the chunk's zero-shaped value, not `undefined` (an array slot has no spare absent state — [ADR-00246](../adr/ADR-00246.md)); a scalar/string/object chunk reads a real `undefined`, and `controller.desiredSize` is `null` once errored ([TDD-00196](../tdd/TDD-00196.md)/[ADR-00826](../adr/ADR-00826.md))",
+              "`read()` on a closed stream whose chunk type is an **array/tuple** (`ReadableStream<number[]>`) yields the chunk's zero-shaped value, not `undefined` (an array slot has no spare absent state — [ADR-00246](../adr/ADR-00246.md))",
               "`releaseLock()` leaves queued pending reads pending instead of rejecting them",
               "`values()` returns a reader usable in `for await` only (no standalone `.next()`)",
               "In the no-fiber tier, `await` of an already-settled `read()` skips the microtask drain, so a pending pull can run one tick later than real JS",
@@ -43,7 +43,8 @@
             ],
             "notes": [
               "One 144-byte heap struct fuses stream + controller + reader (compile-time retyping); chunk queue + pending-read promise FIFO with HWM/size accounting; spec CallPullIfNeeded; per-site fulfill thunk builds typed `{value,done}` records ([ADR-00296](../adr/ADR-00296.md))",
-              "Runs on the promise/microtask runtime alone — no fibers or libcurl for in-memory pipelines"
+              "Runs on the promise/microtask runtime alone — no fibers or libcurl for in-memory pipelines",
+              "A scalar/string/object chunk reads a real `undefined`, and `controller.desiredSize` is `null` once errored ([TDD-00196](../tdd/TDD-00196.md), [ADR-00826](../adr/ADR-00826.md))"
             ]
           },
           {
@@ -95,22 +96,26 @@
             "feature": "`stream.Readable` / `.Writable` / `.Duplex` / `.Transform` / `.PassThrough`",
             "status": "implemented",
             "caveats": [
-              "All five constructors default to **string chunks** (`<T>` overrides — [ADR-00449](../adr/ADR-00449.md); previously `Readable`/`Writable`/`Transform` defaulted to a numeric chunk that silently mangled pushed strings); `new PassThrough()` is the identity Transform, `highWaterMark`/`objectMode` options only ([ADR-00422](../adr/ADR-00422.md)); `new Duplex(...)` accepts only `read`/`write`/`final` callbacks plus the shared options ([ADR-00493](../adr/ADR-00493.md))",
-              "`class X extends Readable/Writable/Duplex/Transform` with a `this`-based `_read()` / `_write(chunk, enc, cb)` / `_transform(chunk, enc, cb)` override is supported (a `Duplex` drives both sides independently; a `Transform` routes each write through `_transform`, whose `this.push` feeds the readable side; `<T>` names both chunk types, or `Transform<In, Out>` names each). No `_flush` override yet. Options form (`new Readable({ read })`) also stays",
+              "All five constructors default to **string chunks** (`<T>` overrides)",
+              "`new PassThrough()` takes `highWaterMark`/`objectMode` options only; `new Duplex(...)` accepts only `read`/`write`/`final` callbacks plus the shared options",
+              "No `_flush` override for class-form `Transform` subclasses",
               "The options-form `read`/`write` callback receives the stream as a parameter, not as `this` (object-literal callbacks have no `this` binding); the class form has the real `this`",
-              "The options-form `write` callback must be single-parameter `write(chunk)` (implicit completion) — Node's standard `write(chunk, encoding, callback)` signature is a compile error (`a Writable write callback takes one (chunk) parameter`); the full `(chunk, enc, cb)` signature works only in the class-form `_write` override",
-              "No options-form `transform` callback for a `Transform`: `new Transform({ transform(chunk, enc, cb) {…} })` is rejected (`a transform callback takes (chunk, controller?)`) — Node's stream-style transform options object isn't accepted; use the class-form `_transform(chunk, enc, cb)` override instead",
-              "`class X extends Transform<In, Out>` (two type arguments) is a parse error (`expected '>' to close Transform<T>`) despite the note's `Transform<In, Out>` claim; only `extends Transform<T>` parses in an `extends` clause (the two-arg form still parses in `new Transform<In, Out>(…)`)",
-              "`highWaterMark` (options form and class-form `super({ highWaterMark })`) sets the queue watermark; `objectMode` is accepted but has no effect (chunks are already typed by `<T>`, effectively object-mode). A `super(options)` `highWaterMark` must be a literal/construction-scope constant — it can't reference a constructor parameter",
+              "The options-form `write` completion `cb()` can't defer completion past the call — the write is treated as complete when the sink returns (same V1 limit as class-form `_write`)",
+              "A two-parameter `write(chunk, x)` shape is ambiguous (encoding vs. callback) and rejected; the three-param `write(chunk, encoding, callback)` form's `encoding`/`callback` params must be annotated (`enc: string`, `cb: () => void`)",
+              "No options-form `transform` callback for a `Transform` (`new Transform({ transform(chunk, enc, cb) {…} })` rejected) — use the class-form `_transform(chunk, enc, cb)` override instead",
+              "`class X extends Transform<In, Out>` (two type arguments) is a parse error — only `extends Transform<T>` parses in an `extends` clause (the two-arg form still parses in `new Transform<In, Out>(…)`)",
+              "`objectMode` is accepted but has no effect (chunks are already typed by `<T>`, effectively object-mode)",
+              "A class-form `super({ highWaterMark })` must be a literal/construction-scope constant — it can't reference a constructor parameter",
               "A class-form `_write` completion callback is treated as fired when `_write` returns — it can't defer the write past the call",
               "Event names must be string literals; supported events are `data`/`end`/`error`/`close`/`finish`/`drain`",
-              "Synchronous `.read([size])` pops one queued chunk (empty → null, size ignored — [ADR-00484](../adr/ADR-00484.md)); `.destroy([err])` closes both sides (the error argument is dropped, no 'error' re-emission) and `.setEncoding('utf8')` is a no-op on the string-chunk default ([ADR-00483](../adr/ADR-00483.md))",
+              "Synchronous `.read([size])` ignores `size` (empty → null); `.destroy([err])` drops the error argument (no `'error'` re-emission); `.setEncoding('utf8')` is a no-op on the string-chunk default",
               "Event delivery can lag Node's synchronous re-entrancy by a microtask (emissions ride the reaction queue)",
-              "`fs`/`http` still don't hand out Node streams (their surfaces are WHATWG-based or buffered)"
+              "`fs` `createReadStream`/`createWriteStream` don't return Node streams (surfaces stay WHATWG-based or buffered), unlike the HTTP server's `req`"
             ],
             "notes": [
               "Wrappers over the WHATWG internals: rstream/wstream sides + the EventEmitter listener-list runtime; flowing mode is a reaction-driven read→emit loop started by the first `'data'` listener; `Readable.from`/`.fromWeb`/`.toWeb` bridge both worlds ([ADR-00304](../adr/ADR-00304.md))",
-              "The class form is a synthetic-root model mirroring `extends EventEmitter`: a hidden Node-stream handle field, the runtime pull/sink routed to the subclass's `_read`/`_write` method ([ADR-00393](../adr/ADR-00393.md))"
+              "The class form is a synthetic-root model mirroring `extends EventEmitter`: a hidden Node-stream handle field, the runtime pull/sink routed to the subclass's `_read`/`_write` method ([ADR-00393](../adr/ADR-00393.md)). `class X extends Readable/Writable/Duplex/Transform` supports `this`-based `_read`/`_write(chunk, enc, cb)`/`_transform(chunk, enc, cb)` overrides (a `Transform`'s `this.push` feeds its readable side; `<T>` names both chunk types); the options form (`new Readable({ read })`) also stays",
+              "Chunk-type defaults, constructor/option shapes, and the options-form `write` callback forms: see [ADR-00449](../adr/ADR-00449.md), [ADR-00422](../adr/ADR-00422.md), [ADR-00493](../adr/ADR-00493.md), [ADR-00982](../adr/ADR-00982.md), [ADR-00483](../adr/ADR-00483.md), [ADR-00484](../adr/ADR-00484.md), [ADR-00824](../adr/ADR-00824.md)"
             ]
           },
           {

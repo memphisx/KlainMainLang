@@ -10,7 +10,7 @@
         <nav class="km-header__nav">
           <router-link to="/docs" class="km-navlink">Docs</router-link>
           <router-link to="/docs/getting-started" class="km-navlink gt-sm">Get started</router-link>
-          <router-link to="/docs/coverage" class="km-navlink gt-sm">Coverage</router-link>
+          <router-link to="/conformance" class="km-navlink gt-sm">Conformance</router-link>
           <a :href="gh" target="_blank" rel="noopener" class="km-navlink">GitHub</a>
           <router-link to="/docs/install" class="km-btn km-btn--gold km-header__cta">
             <q-icon name="download" size="16px" /> Install

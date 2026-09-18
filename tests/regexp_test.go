@@ -38,6 +38,24 @@ console.log(r.lastIndex)
 `, "a+b\ngim\ntrue\ntrue\ntrue\nfalse\n0")
 }
 
+// TestE2ERegexFlagsSourceCanonical pins JS's observable `.flags`/`.source`
+// shapes: flags re-sorted into canonical `d,g,i,m,s,u,v,y` order regardless of
+// construction order, and an empty pattern's `.source` reported as the `(?:)`
+// placeholder rather than "" (ADR-00998).
+func TestE2ERegexFlagsSourceCanonical(t *testing.T) {
+	assertOutput(t, `
+console.log(new RegExp("x", "ig").flags)
+console.log(new RegExp("x", "sgi").flags)
+console.log(/abc/mi.flags)
+const r = new RegExp("a", "yu")
+console.log(r.flags)
+console.log(new RegExp("").source)
+console.log(new RegExp("").flags)
+console.log(new RegExp("abc").source)
+console.log(/abc/gi.source)
+`, "gi\ngis\nim\nuy\n(?:)\n\nabc\nabc")
+}
+
 func TestE2ERegExpConstructorNoFlags(t *testing.T) {
 	assertOutput(t, `
 const r = new RegExp("abc")

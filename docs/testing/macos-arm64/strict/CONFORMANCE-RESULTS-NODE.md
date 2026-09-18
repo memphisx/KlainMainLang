@@ -12,19 +12,19 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3957 files total: **51 passed**, 2535 failed, 1371 skipped (out of scope).
+3957 files total: **53 passed**, 2533 failed, 1371 skipped (out of scope).
 
-Of the 2586 files that compiled far enough to run, **51 passed (2.0%)**.
+Of the 2586 files that compiled far enough to run, **53 passed (2.0%)**.
 
 ## By suite
 
 | Suite | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|
-| parallel | 48 | 2424 | 1071 | 3543 |
+| parallel | 49 | 2423 | 1071 | 3543 |
 | sequential | 0 | 31 | 90 | 121 |
 | es-module | 2 | 57 | 116 | 175 |
 | message | 1 | 8 | 2 | 11 |
-| internet | 0 | 15 | 23 | 38 |
+| internet | 1 | 14 | 23 | 38 |
 | pummel | 0 | 0 | 52 | 52 |
 | known_issues | 0 | 0 | 17 | 17 |
 
@@ -57,7 +57,7 @@ Of the 2586 files that compiled far enough to run, **51 passed (2.0%)**.
 | require | 2 | 4 | 42 | 48 |
 | async | 0 | 43 | 4 | 47 |
 | runner | 1 | 21 | 23 | 45 |
-| dns | 0 | 15 | 25 | 40 |
+| dns | 1 | 14 | 25 | 40 |
 | debugger | 0 | 0 | 38 | 38 |
 | trace | 0 | 20 | 14 | 34 |
 | diagnostics | 2 | 27 | 3 | 32 |
@@ -83,27 +83,25 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 131 | COMPILE_ERROR: undefined variable '%s' |
 | 114 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 93 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
+| 90 | COMPILE_ERROR: field access on non-object (no field '%s') |
 | 84 | MODULE_NOT_IMPLEMENTED: vm |
-| 81 | COMPILE_ERROR: field access on non-object (no field '%s') |
 | 67 | COMPILE_ERROR: no field '%s' |
 | 54 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
-| 54 | COMPILE_ERROR: unknown class '%s' |
+| 53 | COMPILE_ERROR: unknown class '%s' |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
-| 52 | COMPILE_ERROR: undefined function or closure '%s' |
+| 51 | COMPILE_ERROR: undefined function or closure '%s' |
+| 44 | RUNTIME_NONZERO_EXIT:  |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
 | 32 | COMPILE_ERROR: fs has no method '%s' |
 | 30 | COMPILE_ERROR: process has no method '%s' |
 | 26 | COMPILE_ERROR: child_process.fork supports self-fork only — the path must be __filename or process… |
-| 26 | RUN_TIMEOUT |
-| 24 | COMPILE_ERROR: '%s' is not an array |
+| 23 | COMPILE_ERROR: '%s' is not an array |
 | 23 | MODULE_NOT_IMPLEMENTED: perf_hooks |
 | 22 | COMPILE_ERROR: a net socket supports '%s', '%s', '%s', and '%s'/'%s' (got '%s') |
+| 22 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
 | 22 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
-| 21 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s'|'%s'|'%s'|'%s', listener) (got '%s') |
 | 21 | COMPILE_ERROR: field assignment on non-object |
-| 21 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
 | 20 | MODULE_NOT_IMPLEMENTED: v8 |
-| 20 | RUNTIME_NONZERO_EXIT:  |
 | 19 | COMPILE_ERROR: unexpected token + in expression |
 | 18 | COMPILE_ERROR: a ChildProcess stream supports only .on('%s'|'%s', cb) |
 | 18 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
@@ -111,14 +109,16 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 17 | COMPILE_ERROR: type mismatch in array element — a value of one type cannot be used where an incomp… |
 | 17 | MODULE_NOT_IMPLEMENTED: module |
 | 16 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
+| 16 | COMPILE_ERROR: array elements must share one type — element 2 does not match the array's element t… |
 | 16 | COMPILE_ERROR: http.createServer's listener must be (req: IncomingMessage, res: ServerResponse) => v… |
-| 15 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
-| 15 | COMPILE_ERROR: array elements must share one type — element 2 does not match the array's element t… |
+| 15 | COMPILE_ERROR: array elements must share one type — element 1 does not match the array's element t… |
 | 15 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
+| 14 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
 | 13 | COMPILE_ERROR: child_process.spawnSync options support { cwd, encoding } only (got '%s') |
-| 13 | COMPILE_ERROR: createServer option '%s' is not supported (only {} or {requireHostHeader: false}) |
 | 13 | COMPILE_ERROR: expected ), got , |
 | 13 | COMPILE_ERROR: expected }, got : |
+| 13 | COMPILE_ERROR: new Worker options: only '%s' is supported (found '%s') |
+| 13 | COMPILE_ERROR: only simple function calls are supported (the callee is not a named function, a funct… |
 
 ## Top skip reasons
 
@@ -152,7 +152,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 12 | requires Node common harness (common.spawnPromisified) |
 | 11 | Node-internal harness file require('../common/dns') |
 
-## Passing files (51)
+## Passing files (53)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
@@ -160,6 +160,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 |---|---|---|
 | `es-module/test-require-module-detect-entry-point-aou.js` | require |  |
 | `es-module/test-require-module-detect-entry-point.js` | require |  |
+| `internet/test-dns-regress-6244.js` | dns |  |
 | `message/console_assert.js` | console_assert |  |
 | `parallel/test-assert-checktag.js` | assert |  |
 | `parallel/test-buffer-badhex.js` | buffer |  |
@@ -177,6 +178,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-global-customevent-disabled.js` | global |  |
 | `parallel/test-global-domexception.js` | global |  |
 | `parallel/test-global-webcrypto-disbled.js` | global |  |
+| `parallel/test-kill-segfault-freebsd.js` | kill |  |
 | `parallel/test-net-connect-after-destroy.js` | net |  |
 | `parallel/test-net-isipv4.js` | net |  |
 | `parallel/test-net-isipv6.js` | net |  |

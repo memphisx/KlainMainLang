@@ -27,7 +27,7 @@ OPTMEM ?=
 MODEFLAGS := $(if $(MM),-mm=$(MM)) $(if $(OPTMEM),-optimize-memory)
 MODEFLAGS_NOMM := $(if $(OPTMEM),-optimize-memory)
 
-.PHONY: all build dist install test test-par examples apps compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts conformance-wpt status status-check status-roundtrip reference-check reference-sync help
+.PHONY: all build dist install test test-par examples apps compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts conformance-wpt status status-check status-roundtrip reference-check reference-sync conformance-check conformance-sync coverage-check coverage-sync help
 
 ## all: build the compiler
 all: build
@@ -270,6 +270,22 @@ reference-check:
 ## reference-sync: rewrite each website reference surface's coverage counts/percentages from its status page (fixes stale numbers instead of erroring). Run after a change flips ✅ rows, then commit the updated reference JSON.
 reference-sync:
 	node website/scripts/check-reference.mjs --sync
+
+## conformance-check: fail if the website conformance data (website/src/data/conformance-platforms.json) has drifted from the canonical per-platform summaries under docs/testing/. Run same-commit as any conformance re-run so the site never ships stale numbers. Node built-ins only, no npm install.
+conformance-check:
+	node website/scripts/check-conformance.mjs
+
+## conformance-sync: regenerate the website conformance data from docs/testing/<platform>/conformance-summary.json (fixes drift instead of erroring). Run after a conformance re-run, then commit the updated JSON.
+conformance-sync:
+	node website/scripts/gen-conformance.mjs
+
+## coverage-check: fail if the website feature-area coverage figures (website/src/data/coverage.json) have drifted from the canonical status rollup (docs/status/coverage-rollup.json, emitted by `make status`). Run same-commit as any status-data change. Node built-ins only, no npm install.
+coverage-check:
+	node website/scripts/check-coverage.mjs
+
+## coverage-sync: regenerate the website coverage figures from docs/status/coverage-rollup.json (fixes drift instead of erroring). Run after a status-data change, then commit the updated JSON.
+coverage-sync:
+	node website/scripts/gen-coverage.mjs
 
 ## clean: remove the compiler binary and all compiled example artifacts
 clean:

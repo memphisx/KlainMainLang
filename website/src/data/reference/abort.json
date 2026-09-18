@@ -57,9 +57,9 @@
       "id": "abort.abortcontroller",
       "name": "AbortController / AbortSignal",
       "statusRow": "AbortController / AbortSignal",
-      "signature": "new AbortController(); controller.signal; controller.abort(reason?); AbortSignal.timeout(ms); signal.aborted; signal.reason",
+      "signature": "new AbortController(); controller.signal; controller.abort(reason?); AbortSignal.timeout(ms); signal.aborted; signal.reason; signal.onabort = cb",
       "badge": "caveats",
-      "description": "The WHATWG cancellation token. An AbortSignal is an EventTarget that fires an \"abort\" event, plus an aborted flag and a reason. fetch(url, { signal }) cancellation works — pre-flight, mid-flight, and via AbortSignal.timeout(ms) — on both the top-level await path and the fiber path inside an http.listen handler: the transfer is torn down and a DOMException is thrown, named AbortError for a manual abort and TimeoutError for a timeout. DOMException inherits Error, so both instanceof DOMException and instanceof Error hold; new DOMException(message?, name?) is constructible directly.",
+      "description": "The WHATWG cancellation token. An AbortSignal is an EventTarget that fires an \"abort\" event, plus an aborted flag and a reason. Listen with signal.addEventListener(\"abort\", cb) or the signal.onabort = cb event-handler property (fired together on controller.abort(); = null clears it). fetch(url, { signal }) cancellation works — pre-flight, mid-flight, and via AbortSignal.timeout(ms) — on both the top-level await path and the fiber path inside an http.listen handler: the transfer is torn down and a DOMException is thrown, named AbortError for a manual abort and TimeoutError for a timeout. DOMException inherits Error, so both instanceof DOMException and instanceof Error hold; new DOMException(message?, name?) is constructible directly.",
       "params": [
         { "name": "reason", "type": "any", "desc": "Optional abort reason stored on signal.reason." },
         { "name": "ms", "type": "number", "desc": "AbortSignal.timeout(ms) deadline in milliseconds." }
@@ -68,7 +68,7 @@
       "exampleKey": "events/fetch-abort",
       "snippet": "const controller = new AbortController()\ncontroller.abort()\ntry {\n\tawait fetch(\"http://example.com\", { signal: controller.signal })\n} catch (e) {\n\tconsole.log(e.name)   // AbortError\n}",
       "differences": [
-        "A bare `signal.aborted` read reflects a `timeout` only after some await loop has checked it (no background latching); `signal` is wired into `fetch` but not `setTimeout`",
+        "`AbortSignal.timeout(ms)` aborts in the background at its deadline — `aborted` becomes true and the `addEventListener('abort')` listeners + `onabort` fire with a `TimeoutError` reason — while the event loop is alive for other work, without ever keeping the loop alive on its own (a lone timeout or an early-completing fetch exits immediately, Node unref parity)",
         "A manual `controller.abort(reason)` with a custom reason still makes the awaited fetch throw an `AbortError` DOMException rather than that reason value; DOMException carries no legacy numeric `.code`"
       ],
       "seeAlso": ["abort.eventtarget", "abort.event"],

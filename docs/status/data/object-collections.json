@@ -39,11 +39,10 @@
             "feature": "`Object.keys(obj)`",
             "status": "implemented",
             "notes": [
-              "On a bare `any` value: runtime key enumeration of the D1 dynamic object's bag in insertion order, `[]` for a boxed primitive, TypeError for null/undefined — matching JS ([TDD-00155](../tdd/TDD-00155.md) Stage 1)"
+              "On a bare `any` value: runtime key enumeration of the D1 dynamic object's bag, `[]` for a boxed primitive, TypeError for null/undefined — matching JS ([TDD-00155](../tdd/TDD-00155.md) Stage 1)",
+              "Keys enumerate in ES own-property order (array-index keys ascending numeric first, then insertion order) across `Object.keys`/`values`/`entries`, `for...in`, spread and `JSON.stringify`, for static and dynamic objects alike ([ADR-00996](../adr/ADR-00996.md))"
             ],
-            "caveats": [
-              "Integer-like keys are not reordered ahead of string keys — `Object.keys({b:1,a:2,'2':3,'1':4})` is `['b','a','2','1']` (Node: `['1','2','b','a']`); applies equally to `for...in`, `Object.values`/`entries`, spread, and `JSON.stringify`."
-            ]
+            "caveats": []
           },
           {
             "feature": "`Object.values(obj)`",
@@ -93,7 +92,7 @@
             "status": "implemented",
             "caveats": [
               "Dynamic (`any`-typed / js-mode-literal) objects only — statically-typed structs have no descriptor table",
-              "`Object.defineProperties` and the descriptor-aware `Object.assign` form are follow-ons; `Cannot delete` TypeError text omits the property name"
+              "`Object.defineProperties` and the descriptor-aware `Object.assign` form are follow-ons"
             ],
             "notes": [
               "Real property descriptors ([TDD-00155](../tdd/TDD-00155.md) Stage 5, [ADR-00629](../adr/ADR-00629.md)): spec create-defaults (absent attributes are false), non-configurable redefinition rules, data and accessor descriptor forms. Object-literal `get`/`set` compile to dynamic-ABI functions invoked with the original receiver (inherited getters through the prototype chain included); `Object.keys`/`for...in`/`JSON.stringify` honor enumerability (stringify and spread invoke getters); rejected writes/deletes throw module-strict JS TypeErrors"
@@ -190,9 +189,6 @@
           {
             "feature": "`Map.set/get/has/delete/keys/values`",
             "status": "implemented",
-            "caveats": [
-              "A pure-numeric bare `new Map()` uses the raw-bits numeric runtime, which doesn't yet collapse `-0`/`+0` to one key; a heterogeneous (any-keyed) map does normalize them ([TDD-00211](../tdd/TDD-00211.md))"
-            ],
             "notes": [
               "`.get()` (`Map` and `WeakMap`) returns `V \\| undefined` — a missing key reads as a real `undefined` (as in Node), distinguishable from a stored `0`/`false`/`\"\"` via the presence-flagged nullable-scalar representation (scalar `V`) or the null-pointer miss typed `undefined` (pointer `V`); narrow / `?? d` / `!` before use ([TDD-00064](../tdd/TDD-00064.md)/[ADR-00833](../adr/ADR-00833.md)). (`URLSearchParams.get` is spec'd `string \\| null` and keeps `null`.)",
               "Keys of one kind pick a specialized runtime (string keys content-hashed, numeric keys raw-i64); a bare `new Map()` whose keys are **heterogeneous** widens to an any-keyed runtime with NaN-boxed keys/values and JS **SameValueZero** equality — string/number/NaN/boolean/object/array/`null`/`undefined` keys coexist, `NaN` matches `NaN`, and objects key by reference. Its values are `any` (boxed) ([TDD-00211](../tdd/TDD-00211.md)/[ADR-00932](../adr/ADR-00932.md))",

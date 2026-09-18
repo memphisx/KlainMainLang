@@ -844,6 +844,26 @@ console.log(s.has(null))
 `, "false")
 }
 
+// Numeric Map/Set keys follow JS SameValueZero: +0 and -0 are one key, and all
+// NaNs are one key, regardless of bit pattern — in the typed numeric runtime and
+// the bare `new Map()` numeric runtime alike (ADR-00995).
+func TestE2ENumericKeySameValueZero(t *testing.T) {
+	assertOutput(t, `
+const s = new Set([0, -0])
+console.log(s.size, s.has(0), s.has(-0))   // 1 true true
+const s2 = new Set([NaN, NaN])
+console.log(s2.size, s2.has(NaN))          // 1 true
+const m = new Map<number, string>()
+m.set(0, "zero"); m.set(-0, "neg"); m.set(NaN, "nan")
+console.log(m.size, m.get(0), m.get(NaN))  // 2 neg nan
+const s3 = new Set([1, 1.5, 2])
+console.log(s3.size)                       // 3 (non-zero stay distinct)
+const bare = new Map()
+bare.set(0, "a"); bare.set(-0, "b")
+console.log(bare.size, bare.get(0))        // 1 b
+`, "1 true true\n1 true\n2 neg nan\n3\n1 b")
+}
+
 // --- Reference-type Map keys / Set elements (ADR-00948) ---
 
 // A Map keyed by an object/array carries reference identity: the same reference
@@ -886,6 +906,34 @@ console.log(m.has([1]))
 const miss = m.get([9])
 console.log(miss)
 `, "2\n10\n20\ntrue\nfalse\nundefined")
+}
+
+// A reference-keyed Map rides the any-keyed runtime, whose raw get returns the
+// boxed `undefined` sentinel on a miss (not 0). A concrete *pointer*-typed value
+// (string/object) must still read that miss back as a real `undefined` — the get
+// path gates on has() and substitutes a null so `=== undefined` is true and using
+// the missed value doesn't crash — while a hit keeps its concrete type (no cast
+// needed for typed field access). Regression guard for ADR-00948.
+func TestE2EMapReferenceKeyPointerValueMiss(t *testing.T) {
+	assertOutput(t, `
+type O = { x: number }
+const key: O = { x: 1 }
+
+// string value: hit reads the string, miss reads undefined, use doesn't crash
+const ms = new Map<number[], string>()
+const k = [1]
+ms.set(k, 'v')
+console.log(ms.get(k))
+console.log(ms.get([9]) === undefined)
+console.log((ms.get([9]) ?? 'NONE'))
+
+// object value: typed field access on a hit (no cast), miss reads undefined
+const mo = new Map<O, O>()
+mo.set(key, { x: 42 })
+const hit = mo.get(key)
+console.log(hit ? hit.x : -1)
+console.log(mo.get({ x: 2 }) === undefined)
+`, "v\ntrue\nNONE\n42\ntrue")
 }
 
 // Iterating an object-keyed Map surfaces the live object references (identity

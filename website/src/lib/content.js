@@ -3,12 +3,14 @@
 // means the marketing page and the docs never drift apart.
 //
 // External-conformance NUMBERS are not written here — they are sourced from
-// src/data/conformance-summary.json, which the conformance tool emits and
-// `npm run gen:conformance` copies in (see website/scripts/gen-conformance.mjs
-// and tools/conformance/summary.go). Only the prose/explanations below are
-// hand-written; the figures below the fold are derived, so they never drift.
+// src/data/conformance-platforms.json (every platform's figures), which
+// `npm run gen:conformance` collects from docs/testing/<platform>/conformance-summary.json
+// (emitted by tools/conformance/summary.go), and check:conformance guards against
+// drift. Only the prose/explanations below are hand-written; the figures are
+// derived, so they never drift.
 
-import conformanceSummary from 'src/data/conformance-summary.json'
+import conformancePlatforms from 'src/data/conformance-platforms.json'
+import coverageData from 'src/data/coverage.json'
 
 export const GITHUB_URL = 'https://github.com/memphisx/KlainMainLang'
 
@@ -175,49 +177,21 @@ $ ./klainmain app.ts   # → native binary
 $ ./app
 hello, native world`
 
-// Coverage figures — source: docs/status/README.md (2026-08-30).
+// Coverage figures — DERIVED, never hand-typed. `npm run gen:coverage` builds
+// src/data/coverage.json from docs/status/coverage-rollup.json (emitted by
+// `make status` from docs/status/data/*.json with the same counting the README
+// uses); check:coverage guards it against drift. Only the editorial curation —
+// which areas to surface, their short labels and grouping — lives in
+// website/scripts/lib-coverage.mjs.
 //   pct    = Coverage      (works for its core case; real caveats disclosed)
 //   strict = Strict Coverage (works with ZERO known caveats/bugs of any severity)
 // The gap between the two is "works, but with a documented divergence from JS".
-export const coverage = [
-  { area: 'Async / Promise', pct: 100, strict: 100, group: 'Language' },
-  { area: 'Classes / OOP', pct: 100, strict: 56, group: 'Language' },
-  { area: 'Array methods', pct: 100, strict: 63, group: 'Language' },
-  { area: 'Number / Math', pct: 100, strict: 74, group: 'Language' },
-  { area: 'Type primitives', pct: 100, strict: 58, group: 'Language' },
-  { area: 'Object & collections', pct: 97, strict: 55, group: 'Language' },
-  { area: 'Type system features', pct: 95, strict: 26, group: 'Language' },
-  { area: 'Modules', pct: 94, strict: 50, group: 'Language' },
-  { area: 'String methods', pct: 93, strict: 70, group: 'Language' },
-  { area: 'JSON', pct: 87, strict: 67, group: 'Language' },
+export const coverage = coverageData.coverage
 
-  { area: 'Networking (fetch, WS, SSE)', pct: 100, strict: 17, group: 'Web platform' },
-  { area: 'Streams', pct: 100, strict: 11, group: 'Web platform' },
-  { area: 'Web Crypto', pct: 100, strict: 11, group: 'Web platform' },
-  { area: 'Workers / Concurrency', pct: 100, strict: 0, group: 'Web platform' },
-  { area: 'Binary data & Typed Arrays', pct: 100, strict: 0, group: 'Web platform' },
-  { area: 'URL', pct: 100, strict: 0, group: 'Web platform' },
-  { area: 'Timers', pct: 100, strict: 50, group: 'Web platform' },
-
-  { area: 'HTTP Server', pct: 100, strict: 88, group: 'Node.js' },
-  { area: 'events (EventEmitter)', pct: 100, strict: 50, group: 'Node.js' },
-  { area: 'path', pct: 100, strict: 88, group: 'Node.js' },
-  { area: 'os', pct: 100, strict: 86, group: 'Node.js' },
-  { area: 'Process / CLI I/O', pct: 100, strict: 45, group: 'Node.js' },
-  { area: 'File System (fs)', pct: 94, strict: 41, group: 'Node.js' },
-  { area: 'Other core modules', pct: 94, strict: 13, group: 'Node.js' },
-
-  { area: 'Desktop (klain:webview)', pct: 100, strict: 0, group: 'Desktop' }
-]
-
-// Headline area figures (docs/status/README.md section totals). These are
-// curated feature-area checklists — "does the core case work?" — NOT external
+// Headline section totals (docs/status README rollups), same derived source.
+// Curated feature-area checklists — "does the core case work?" — NOT external
 // conformance. See `conformance` below for the honest, unflattering numbers.
-export const headline = [
-  { label: 'TypeScript core language', value: '~96%', sub: '339 / 352 targeted features' },
-  { label: 'Web Platform APIs', value: '100%', sub: '57 / 57 targeted features' },
-  { label: 'Node.js APIs', value: '~98%', sub: '97 / 99 targeted features' }
-]
+export const headline = coverageData.headline
 
 // External conformance — full public test suites, run unfiltered. The numbers
 // come from conformanceSummary (generated); only the prose here is hand-written.
@@ -249,6 +223,10 @@ const suiteInfo = {
     label: 'Test262',
     blurb: 'The official ECMAScript conformance corpus, run unfiltered. Most of it is out of scope by design — eval-based assertions, Intl/Temporal, dynamic import — so the honest figure is the in-scope subset.'
   },
+  wpt: {
+    label: 'Web Platform Tests',
+    blurb: 'The browser platform’s own test suite, run headless through a testharness shim. It is dominated by DOM/rendering tests this compiler doesn’t target, so the runnable-document figure is low by design — shown for the JS/encoding/URL corners that do apply.'
+  },
   ts: {
     label: 'TypeScript accept/reject',
     blurb: "Agreement with tsc’s own accept/reject verdict over Microsoft’s compiler and conformance test cases — a measure of front-end fidelity, not runtime behavior."
@@ -259,16 +237,34 @@ const suiteInfo = {
   }
 }
 
-const suites = conformanceSummary?.suites ?? {}
+// Display order across the site (headline suite first).
+const SUITE_ORDER = ['test262', 'wpt', 'ts', 'node']
 
-// Headline value + subtitle for one suite/lane, derived from the summary.
-function laneFigure(suite, lane) {
-  const d = suites[suite]?.lanes?.[lane]
+// Human labels for the raw platform dir names (docs/testing/<platform>/).
+const PLATFORM_LABELS = {
+  'macos-arm64': 'macOS (Apple Silicon)',
+  'linux-arm64': 'Linux (arm64)',
+  'linux-x64': 'Linux (x86-64)',
+  'windows-x64': 'Windows (x86-64)'
+}
+const platformLabel = (p) => PLATFORM_LABELS[p] || p
+
+const platforms = conformancePlatforms?.platforms ?? []
+
+// Headline value + subtitle for one suite/lane, derived from a platform's suites.
+function laneFigure(suites, suite, lane) {
+  const d = suites?.[suite]?.lanes?.[lane]
   if (!d) return { value: '—', sub: 'not yet run' }
   if (suite === 'test262') {
     return {
       value: pctStr(d.inScope.pass, d.inScope.total),
       sub: `${fmtInt(d.inScope.pass)} / ${fmtInt(d.inScope.total)} in-scope · ${pctStr(d.overall.pass, d.overall.total)} of the full corpus`
+    }
+  }
+  if (suite === 'wpt') {
+    return {
+      value: pctStr(d.pass, d.runnable),
+      sub: `${fmtInt(d.pass)} / ${fmtInt(d.runnable)} runnable documents · ${fmtInt(d.subtestPass)} / ${fmtInt(d.subtestTotal)} subtests where a document executed`
     }
   }
   if (suite === 'ts') {
@@ -280,20 +276,38 @@ function laneFigure(suite, lane) {
   return { value: '—', sub: '' }
 }
 
-// Per-flag view: each suite with both lanes side by side, for the split display.
-export const conformanceByFlag = ['test262', 'ts', 'node'].map((suite) => ({
-  suite,
-  label: suiteInfo[suite].label,
-  blurb: suiteInfo[suite].blurb,
-  lanes: ['strict', 'js'].map((lane) => ({
-    flag: lane,
-    name: compatFlags[lane].name,
-    ...laneFigure(suite, lane)
+// Build the per-suite, per-lane view for a single platform's suites.
+function suitesForPlatform(suites) {
+  return SUITE_ORDER.filter((suite) => suites?.[suite]).map((suite) => ({
+    suite,
+    label: suiteInfo[suite].label,
+    blurb: suiteInfo[suite].blurb,
+    corpusCommit: suites[suite].corpusCommit || '',
+    lanes: ['strict', 'js'].map((lane) => ({
+      flag: lane,
+      name: compatFlags[lane].name,
+      ...laneFigure(suites, suite, lane)
+    }))
   }))
+}
+
+// Full per-platform projection — every platform with a committed summary, each
+// with every suite × both lanes. Drives the conformance page's OS tabs.
+export const conformancePlatformsView = platforms.map((p) => ({
+  platform: p.platform,
+  label: platformLabel(p.platform),
+  suites: suitesForPlatform(p.suites)
 }))
 
-// Backward-compatible flat array (strict lane) for the existing stat-card
-// renderers on the landing page and Coverage docs page.
+// Primary (headline) platform — platforms[0], the primary dev platform.
+const primary = platforms[0]?.suites ?? {}
+
+// Per-flag view for the PRIMARY platform: each suite with both lanes side by
+// side, for the split display on the Coverage docs page.
+export const conformanceByFlag = suitesForPlatform(primary)
+
+// Backward-compatible flat array (strict lane, primary platform) for the
+// existing stat-card renderers on the landing page and Coverage docs page.
 export const conformance = conformanceByFlag.map((s) => {
   const strict = s.lanes.find((l) => l.flag === 'strict') || s.lanes[0]
   return { label: s.label, value: strict.value, sub: strict.sub }

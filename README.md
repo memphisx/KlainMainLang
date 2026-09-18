@@ -340,7 +340,7 @@ Each report is written **once per `-compat` flag**, into its own folder — `doc
 
 ```sh
 make conformance-fetch   # clone the pinned test262 commit into .test262/ (idempotent, gitignored — ~263MB, not vendored)
-make conformance         # regenerate docs/testing/{strict,js}/CONFORMANCE-RESULTS.md — both lanes, full corpus (fetches first if needed; ~9 min per lane, all CPU cores)
+make conformance         # regenerate docs/testing/{strict,js}/CONFORMANCE-RESULTS.md — both lanes, full corpus (fetches first if needed; ~13 min per lane, all CPU cores)
 ```
 
 Both targets are safe to re-run on a fresh machine (a new dev machine, after `git clone`, or after switching hosts per this project's own "Machine switch" practice) — `make conformance` alone is enough; it fetches on demand. `tools/conformance/fetch.sh` pins an exact commit SHA (test262 has no versioned release tags upstream) so re-running reproduces the identical corpus; `tools/conformance/main.go` walks it directly as a Go library (no dependency on the `klainmain` binary being built first) and needs only `clang` on `PATH`, same as everything else here. `tools/conformance/harness-shim/` holds this repo's own compiler-compatible reimplementation of test262's shared `sta.js`/`assert.js` harness files (the real upstream ones use prototype-based pseudo-classes this compiler's type system can't represent) — every actual test file stays 100% unmodified.

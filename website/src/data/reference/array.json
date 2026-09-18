@@ -6,8 +6,8 @@
   "coverage": {
     "loose": "37/37",
     "loosePct": 100,
-    "strict": "20/37",
-    "strictPct": 56
+    "strict": "23/37",
+    "strictPct": 62
   },
   "lede": "Every Array method is present. The recurring caveats are structural, not per-method: a length change (push/pop/splice) inside a callee is now visible to the caller when the array is passed as a plain variable (arrays are reference values), though passing an object-field or array-element array still copies; and the element-comparing helpers (indexOf/includes/join/sort) reject a nested-array element.",
   "entries": [
@@ -97,7 +97,6 @@
       "snippet": "let stack = [10, 20, 30]\nlet a = stack.pop()   // 30",
       "differences": [
         "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens.",
-        "A nested-array element (`T[][]` receiver) still zero-fills the miss instead of `undefined` — its {ptr,i64} aggregate has no absent state.",
         "A length change propagates to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** or a HOF-callback element."
       ],
       "seeAlso": [
@@ -122,7 +121,6 @@
       "snippet": "const done = list.titles.shift()",
       "differences": [
         "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens.",
-        "A nested-array element (`T[][]` receiver) still zero-fills the miss instead of `undefined` — its {ptr,i64} aggregate has no absent state.",
         "A length change propagates to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** or a HOF-callback element."
       ],
       "seeAlso": [
@@ -200,7 +198,7 @@
       "id": "array.at",
       "name": ".at(i)",
       "signature": "at(i: number): T | undefined",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Returns the element at index i, with negative indices counting from the end.",
       "returns": {
         "type": "T | undefined",
@@ -214,8 +212,7 @@
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/at"
       },
       "differences": [
-        "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens.",
-        "A nested-array element (`T[][]` receiver) still zero-fills the miss instead of `undefined` — its {ptr,i64} aggregate has no absent state."
+        "The absence result is a real `T | undefined` (TDD-00187/TDD-00221, nested `T[][]` included): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens."
       ]
     },
     {
@@ -264,7 +261,7 @@
       "id": "array.find",
       "name": ".find(fn)",
       "signature": "find(fn: (x: T) => boolean): T | undefined",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Returns the first element for which the predicate is true.",
       "returns": {
         "type": "T | undefined",
@@ -280,8 +277,7 @@
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/find"
       },
       "differences": [
-        "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens.",
-        "A nested-array element (`T[][]` receiver) still zero-fills the miss instead of `undefined` — its {ptr,i64} aggregate has no absent state."
+        "The absence result is a real `T | undefined` (TDD-00187/TDD-00221, nested `T[][]` included): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens."
       ]
     },
     {
@@ -602,7 +598,7 @@
       "id": "array.findLast",
       "name": ".findLast(fn) / .findLastIndex(fn)",
       "signature": "findLast(fn: (x: T) => boolean): T | undefined; findLastIndex(fn): number",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Finds the last matching element / its index. Genuine reverse iteration, not a forward scan keeping the last match — the callback is invoked starting from the last element, matching real JS's reverse call order, observable via side effects.",
       "exampleKey": "arrays/array_methods",
       "seeAlso": [
@@ -613,8 +609,7 @@
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/findLast"
       },
       "differences": [
-        "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens.",
-        "A nested-array element (`T[][]` receiver) still zero-fills the miss instead of `undefined` — its {ptr,i64} aggregate has no absent state."
+        "The absence result is a real `T | undefined` (TDD-00187/TDD-00221, nested `T[][]` included): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens."
       ]
     },
     {

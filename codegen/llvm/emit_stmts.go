@@ -393,7 +393,7 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		if e.currentRetType.UnionMembers != nil && !unionAllowsAssignmentFrom(e.currentRetType, val.Ty) {
 			return fmt.Errorf("%d:%d: return value's type is not a member of the declared union return type", r.Value.GetPos().Line, r.Value.GetPos().Col)
 		}
-		val, err = e.emitBoxValue(val)
+		val, err = e.emitBoxValueWidened(val, r.Value)
 		if err != nil {
 			return err
 		}
@@ -1399,9 +1399,10 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 		if !objTy.IsObject || (!objTy.IsClass && len(fields) == 0) {
 			return fmt.Errorf("%d:%d: for...in requires an object with known fields", s.GetPos().Line, s.GetPos().Col)
 		}
-		// Build a compile-time string[] of field names and materialise it at runtime.
+		// Build a compile-time string[] of field names (ES enumeration order — Node
+		// key order) and materialise it at runtime.
 		var err error
-		keysVal, err = e.emitObjectFieldNames(fields, s.GetPos())
+		keysVal, err = e.emitObjectFieldNames(esOrderedFields(fields), s.GetPos())
 		if err != nil {
 			return err
 		}

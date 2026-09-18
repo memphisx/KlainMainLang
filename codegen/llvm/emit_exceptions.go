@@ -27,11 +27,13 @@ var errorKinds = []string{"Error", "TypeError", "RangeError", "SyntaxError", "Ev
 // emitErrorErrorsAccess) is kind-guarded so those trailing fields are never read
 // on a non-aggregate object. The allocation is sized to the full errorObjType
 // (not just the 5 IR fields here) so that a bounds-safe (if non-meaningful)
-// read of any errorObjType field — code/errcode/errstr and now syscall/path —
+// read of any errorObjType field — code/errcode/errstr and now syscall/path/dest —
 // through errorObjType.StructIR() on an AggregateError stays inside the buffer.
+// Kept >= errorObjType.StructSize() (currently 80, ten 8-byte fields); bump this
+// in lockstep whenever a field is appended to errorObjType.
 const (
 	aggregateErrorStructIR   = "{ i64, ptr, ptr, ptr, i64 }"
-	aggregateErrorStructSize = 72
+	aggregateErrorStructSize = 80
 )
 
 // errorKindIDs maps a kind name to its errorKinds index, built once at
@@ -84,6 +86,10 @@ var errorObjType = func() Type {
 		// which is node:sqlite's positive result code. Default 0; set by
 		// __kml_fs_throw (ADR-00770).
 		{Name: "errno", Ty: TypeF64},
+		// `err.dest` — the destination path of a two-path fs op (rename/copyFile).
+		// Node sets it alongside `err.path` (the source); null for every other
+		// error. Set only by __kml_fs_throw2 (ADR-01000).
+		{Name: "dest", Ty: TypePtr},
 	})
 	ty.IsError = true
 	return ty
@@ -140,6 +146,9 @@ func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
 	enGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 8", enGep, errorObjType.StructIR(), dataReg))
 	e.emitInstr(fmt.Sprintf("store double 0.0, ptr %s, align 8", enGep))
+	destGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 9", destGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", destGep))
 
 	return dataReg
 }

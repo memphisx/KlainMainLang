@@ -1014,3 +1014,34 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00968](ADR-00968.md) | Conformance harness reaps escaped child processes | |
 | [00969](ADR-00969.md) | Stable header identity for named-function values | |
 | [00970](ADR-00970.md) | Reject Node interpreter flags in compiled binaries | Extends [ADR-00968](ADR-00968.md) |
+| [00971](ADR-00971.md) | HTTP server `'clientError'` event (TDD-00215 Stage 1) | `Implements [TDD-00215](../tdd/TDD-00215.md)` |
+| [00972](ADR-00972.md) | Reject any self-spawn re-exec, not just interpreter flags | `Extends [ADR-00970](ADR-00970.md)` |
+| [00973](ADR-00973.md) | HTTP server `'error'` event / bind failure (TDD-00215 Stage 2) | `Implements [TDD-00215](../tdd/TDD-00215.md)` |
+| [00974](ADR-00974.md) | Wire net.Socket write/end/destroy into the HTTP `'clientError'` socket | `Extends [ADR-00971](ADR-00971.md)` |
+| [00975](ADR-00975.md) | Reference-keyed Map `.get()` miss with a pointer value reads a real `undefined` | `Extends [ADR-00948](ADR-00948.md)` (reference-type Map keys via the any-keyed runtime) |
+| [00976](ADR-00976.md) | Scalar-vs-pointer ternary branches reject cleanly instead of emitting invalid IR | |
+| [00977](ADR-00977.md) | `http.createServer` accepts every option that states existing behavior | Extends [ADR-00503](ADR-00503.md) |
+| [00978](ADR-00978.md) | `AbortSignal.onabort` event-handler property | Extends [ADR-00236](ADR-00236.md); Implements [TDD-00081](../tdd/TDD-00081.md) |
+| [00979](ADR-00979.md) | Background AbortSignal.timeout dispatch | Extends [ADR-00238](ADR-00238.md), [ADR-00978](ADR-00978.md); Implements [TDD-00216](../tdd/TDD-00216.md) |
+| [00980](ADR-00980.md) | `fs.readdirSync` supports `{ recursive: true, withFileTypes: true }` | Extends [ADR-00752](ADR-00752.md), [ADR-00786](ADR-00786.md), [ADR-00787](ADR-00787.md) |
+| [00981](ADR-00981.md) | Node `writable.write`/`end` accept `encoding` and a completion callback | Extends [ADR-00449](ADR-00449.md), [ADR-00483](ADR-00483.md) |
+| [00982](ADR-00982.md) | Options-form Node `Writable`/`Duplex` sink accepts `write(chunk, encoding, callback)` | Extends [ADR-00449](ADR-00449.md), [ADR-00483](ADR-00483.md), [ADR-00493](ADR-00493.md) |
+| [00983](ADR-00983.md) | configurable `highWaterMark` on `http.createServer` | Extends [ADR-00962](ADR-00962.md), [ADR-00977](ADR-00977.md) |
+| [00984](ADR-00984.md) | `http.createServer` connection timeouts | Implements [TDD-00217](../tdd/TDD-00217.md); Extends [ADR-00977](ADR-00977.md), [ADR-00983](ADR-00983.md) |
+| [00985](ADR-00985.md) | createServer async handler awaiting a task-promise on a fiber | |
+| [00986](ADR-00986.md) | async createServer handler task-await — concurrency + in-process client | `Extends [ADR-00985](ADR-00985.md)` |
+| [00987](ADR-00987.md) | fs.constants O_* open flags | `Extends [ADR-00795](ADR-00795.md)` |
+| [00988](ADR-00988.md) | writeFileSync / appendFileSync { mode } | `Extends [ADR-00785](ADR-00785.md)` |
+| [00989](ADR-00989.md) | cluster workers combine with additional HTTP servers | `Implements [TDD-00219](../tdd/TDD-00219.md)`, `Extends [ADR-00514](ADR-00514.md)` |
+| [00990](ADR-00990.md) | D1 Stage 6 (part 1) — allocation-site widening of a fresh object into `any` | `Implements [TDD-00155](../tdd/TDD-00155.md)` (Stage 6); `Extends [ADR-00621](ADR-00621.md)` (D1 bag), `[ADR-00622](ADR-00622.md)` (D1 dynamic arrays) |
+| [00991](ADR-00991.md) | unannotated class field typed by a sibling `new C()` during registration | `Extends [ADR-00990](ADR-00990.md)` (surfaced by allocation-site widening) |
+| [00992](ADR-00992.md) | Global isNaN/isFinite coerce concrete non-numeric operands | Extends [ADR-00902](ADR-00902.md) |
+| [00993](ADR-00993.md) | posix path.join preserves trailing slash, skips empty segments | |
+| [00994](ADR-00994.md) | TextEncoder.encodeInto and .encoding property | |
+| [00995](ADR-00995.md) | Numeric Map/Set keys follow SameValueZero (-0/+0, NaN) | |
+| [00996](ADR-00996.md) | ES own-property enumeration order (integer keys first) | |
+| [00997](ADR-00997.md) | instanceof survives class-instance widening into `any` | Extends [ADR-00990](ADR-00990.md) |
+| [00998](ADR-00998.md) | RegExp `.flags` canonical order and empty-pattern `.source` | |
+| [00999](ADR-00999.md) | Non-configurable-delete TypeError embeds the property name | |
+| [01000](ADR-01000.md) | Byte-exact fs sync-error messages (libuv description + two-path form) | Extends [ADR-00768](ADR-00768.md) (fs `err.code`/`syscall`/`path`), [ADR-00770](ADR-00770.md) (`err.errno`) |
+| [01001](ADR-01001.md) | `undefined` for a nested-array (`T[][]`) element result | Implements [TDD-00221](../tdd/TDD-00221.md); Extends [ADR-00778](ADR-00778.md) ([TDD-00187](../tdd/TDD-00187.md) scalar/pointer `T \| undefined`) |

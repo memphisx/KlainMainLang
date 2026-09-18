@@ -6,7 +6,7 @@
   "coversRows": "all",
   "coverage": {
     "loose": "2/2",
-    "strict": "0/2",
+    "strict": "1/2",
     "strictPct": 0
   },
   "lede": "Web-standard TextEncoder/TextDecoder for converting between strings and raw bytes. The single divergence from the browser API is scope: this is UTF-8 only. Because this compiler's strings are already raw UTF-8 byte sequences, encode/decode are direct byte copies with no real transcoding, and TextDecoder's optional label argument is validated against the UTF-8 aliases (a non-UTF-8 label throws a RangeError, since only UTF-8 is decodable). (atob/btoa and encodeURI(Component) live under global functions, not here.)",
@@ -15,9 +15,9 @@
       "id": "encoding.textencoder",
       "name": "TextEncoder",
       "statusRow": "TextEncoder",
-      "signature": "new TextEncoder().encode(str: string): Uint8Array",
+      "signature": "new TextEncoder().encode(str: string): Uint8Array; encodeInto(src, dest): { read, written }; encoding: string",
       "badge": "exact",
-      "description": "Encodes a string to its UTF-8 bytes as a Uint8Array. UTF-8-only matches the spec exactly — TextEncoder is UTF-8-only by definition, so this is not a narrowing. Since strings are already stored as raw UTF-8, encode is a direct byte copy.",
+      "description": "Encodes a string to its UTF-8 bytes as a Uint8Array. UTF-8-only matches the spec exactly — TextEncoder is UTF-8-only by definition, so this is not a narrowing. Since strings are already stored as raw UTF-8, encode is a direct byte copy. encodeInto(src, dest) writes into a caller-supplied Uint8Array (capped at its length) and returns { read, written }, and .encoding is \"utf-8\".",
       "returns": {
         "type": "Uint8Array",
         "desc": "The string's UTF-8 bytes."

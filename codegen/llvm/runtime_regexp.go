@@ -328,6 +328,100 @@ done:
 }`)
 }
 
+// ensureRegexFlagsCanon declares __kml_regex_flags_canon(flags): returns a
+// freshly headered string with the (already-validated, dup-free) flag bytes
+// reordered into JS's canonical `d,g,i,m,s,u,v,y` order, so `.flags` matches
+// V8 regardless of the order the constructor was given them in
+// (`new RegExp("x", "ig").flags` is `"gi"`, not `"ig"`). Runs at RUNTIME
+// because the flags string can be a dynamic value. The output is at most as
+// long as the input, so the input-sized buffer never overflows.
+func (e *Emitter) ensureRegexFlagsCanon() {
+	if e.usedRegexFlagsCanon {
+		return
+	}
+	e.usedRegexFlagsCanon = true
+	e.ensureStrlen()
+	e.emitGlobal(`@.kml_regex_flag_order = private unnamed_addr constant [8 x i8] c"dgimsuvy"`)
+	e.emitGlobal(`
+define ptr @__kml_regex_flags_canon(ptr %f) {
+entry:
+  %len = call i64 @strlen(ptr %f)
+  %out = call ptr @__kml_str_alloc(i64 %len)
+  %di = alloca i64, align 8
+  store i64 0, ptr %di, align 8
+  %ki = alloca i64, align 8
+  store i64 0, ptr %ki, align 8
+  br label %kcond
+kcond:
+  %k = load i64, ptr %ki, align 8
+  %kdone = icmp uge i64 %k, 8
+  br i1 %kdone, label %fin, label %kbody
+kbody:
+  %ordp = getelementptr i8, ptr @.kml_regex_flag_order, i64 %k
+  %oc = load i8, ptr %ordp, align 1
+  %si = alloca i64, align 8
+  store i64 0, ptr %si, align 8
+  br label %scond
+scond:
+  %s = load i64, ptr %si, align 8
+  %sdone = icmp uge i64 %s, %len
+  br i1 %sdone, label %knext, label %sbody
+sbody:
+  %fp = getelementptr i8, ptr %f, i64 %s
+  %fc = load i8, ptr %fp, align 1
+  %hit = icmp eq i8 %fc, %oc
+  br i1 %hit, label %emit, label %snext
+emit:
+  %d = load i64, ptr %di, align 8
+  %op = getelementptr i8, ptr %out, i64 %d
+  store i8 %oc, ptr %op, align 1
+  %dn = add i64 %d, 1
+  store i64 %dn, ptr %di, align 8
+  br label %knext
+snext:
+  %sn = add i64 %s, 1
+  store i64 %sn, ptr %si, align 8
+  br label %scond
+knext:
+  %kn = add i64 %k, 1
+  store i64 %kn, ptr %ki, align 8
+  br label %kcond
+fin:
+  %dfin = load i64, ptr %di, align 8
+  %ofin = getelementptr i8, ptr %out, i64 %dfin
+  store i8 0, ptr %ofin, align 1
+  call void @__kml_str_finalize(ptr %out)
+  ret ptr %out
+}`)
+}
+
+// ensureRegexSourceNorm declares __kml_regex_source_norm(src): returns the
+// spec's `.source` non-empty placeholder `(?:)` for an empty pattern (JS's
+// `new RegExp("").source` is `"(?:)"`, not `""`), and the source unchanged
+// otherwise. Runs at RUNTIME because the pattern can be a dynamic value.
+func (e *Emitter) ensureRegexSourceNorm() {
+	if e.usedRegexSourceNorm {
+		return
+	}
+	e.usedRegexSourceNorm = true
+	e.ensureStrlen()
+	e.ensureMemcpy()
+	e.emitGlobal(`@.kml_regex_empty_src = private unnamed_addr constant [5 x i8] c"(?:)\00"`)
+	e.emitGlobal(`
+define ptr @__kml_regex_source_norm(ptr %s) {
+entry:
+  %len = call i64 @strlen(ptr %s)
+  %empty = icmp eq i64 %len, 0
+  br i1 %empty, label %mk, label %keep
+mk:
+  %out = call ptr @__kml_str_alloc(i64 4)
+  call ptr @memcpy(ptr %out, ptr @.kml_regex_empty_src, i64 5)
+  ret ptr %out
+keep:
+  ret ptr %s
+}`)
+}
+
 // ensureRegexMatch declares PCRE2's match-time API — used by `.test(str)`
 // (emit_regexp.go's emitRegexTest, Stage 1) and every later stage that
 // needs a real match (.exec/.match/.matchAll/.replace/.replaceAll/.split/

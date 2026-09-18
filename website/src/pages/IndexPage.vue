@@ -50,7 +50,7 @@
         </p>
 
         <span class="km-eyebrow km-stats__eye km-stats__eye--2">External conformance · full public suites</span>
-        <div class="km-stats__grid">
+        <div class="km-stats__grid km-stats__grid--conf">
           <div v-for="c in conformance" :key="c.label" class="km-stat km-stat--conf">
             <span class="km-stat__value km-display">{{ c.value }}</span>
             <span class="km-stat__label">{{ c.label }}</span>
@@ -63,7 +63,7 @@
           untyped JS, and Node's suite is dynamic JavaScript against the full platform, both largely
           out of scope by design, not silent failures. A second lane, <code>-compat=js</code>, trades
           strict's guarantees for vanilla-JS reach and scores higher on the untyped corpora.
-          <router-link to="/docs/coverage" class="km-link">The per-flag breakdown.</router-link>
+          <router-link to="/conformance" class="km-link">All four suites, both lanes, per OS →</router-link>
         </p>
       </div>
     </section>
@@ -362,6 +362,10 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
 .km-stats__eye { display: block; color: #8a8a82; margin-bottom: 22px; }
 .km-stats__eye--2 { margin-top: 56px; padding-top: 34px; border-top: 1px solid rgba(0,0,0,0.12); }
 .km-stats__grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+/* Conformance row carries all four public suites — a single balanced row that
+   collapses 4 → 2 → 1 so it never leaves an orphaned card wrapping alone. */
+.km-stats__grid--conf { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 900px) { .km-stats__grid--conf { grid-template-columns: repeat(2, 1fr); } }
 .km-stat { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; border-top: 2px solid var(--km-black); }
 .km-stat__value { font-size: clamp(2.6rem, 6vw, 4.4rem); line-height: 1; }
 .km-stat__label { font-weight: 700; letter-spacing: 0.04em; }

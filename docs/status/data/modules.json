@@ -119,9 +119,10 @@
             "feature": "Static CommonJS `require('<literal>')`",
             "status": "implemented",
             "caveats": [
-              "Top-level, string-literal specifier only. `const x = require('m')` binds the namespace (whole module object); `const { a, b: c } = require('m')` is a named import; bare `require('m')` is side-effect-only. A destructuring default/nested-pattern/rest on a require binding, or a dynamic `require(expr)` / a `require` nested in a function body (lazy loading), is a clean compile error — deferred to the runtime/lazy-loading capability"
+              "Top-level, string-literal specifier only. A destructuring default/nested-pattern/rest on a require binding, or a dynamic `require(expr)` / a `require` nested in a function body (lazy loading), is a clean compile error — deferred to the runtime/lazy-loading capability"
             ],
             "notes": [
+              "`const x = require('m')` binds the namespace (whole module object); `const { a, b: c } = require('m')` is a named import; bare `require('m')` is side-effect-only",
               "Desugared to the equivalent ES import at parse time, so it resolves and dispatches identically to `import`; interoperates with `import` in the same file",
               "See [ADR-00369](../adr/ADR-00369.md)"
             ]

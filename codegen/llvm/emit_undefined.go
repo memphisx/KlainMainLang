@@ -21,10 +21,15 @@ import (
 // by-value tuple; a dynamic element, whose box carries undefined natively; a
 // type that is already nullable).
 func undefinedableElem(t Type) Type {
-	if t.Nullable || t.IsArray || t.IsDynamic || t.IsNull || t.IsTuple ||
+	if t.Nullable || t.IsDynamic || t.IsNull || t.IsTuple ||
 		t.IR == "" || t.IR == "void" {
 		return t
 	}
+	// A nested-array element (`T[][]`) rides its {ptr,i64} aggregate with a null
+	// *data-ptr* as the absent signal; the type flag is the null-vs-undefined
+	// discriminator the coercion sites need (typeof/String/JSON/??), since a null
+	// data-ptr alone can't tell `undefined` from an explicit `null` array
+	// (TDD-00221).
 	t.Nullable = true
 	t.IsUndefined = true
 	return t

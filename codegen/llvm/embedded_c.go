@@ -83,6 +83,9 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if e.UsesSpawnSync() {
 		out = append(out, CSource{"spawnsync", SpawnSyncSource(), nil, nil, ""})
 	}
+	if e.UsesReexecGuard() {
+		out = append(out, CSource{"reexecguard", ReexecGuardSource(), nil, nil, ""})
+	}
 	if e.UsesIPC() {
 		out = append(out, CSource{"ipc", IPCSource(), nil, nil, ""})
 	}

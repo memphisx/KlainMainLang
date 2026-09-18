@@ -96,7 +96,7 @@
             "feature": "`JSON.parse(s)` → top-level `T[]` (incl. object & nested arrays)",
             "status": "implemented",
             "caveats": [
-              "A bare reassignment into a **member or element** target (`obj.items = JSON.parse(...)`, `grid[i] = JSON.parse(...)`) isn't projected from declaration context — but writing the target type on the call (`obj.items = JSON.parse(...) as Item[]`) projects anywhere ([ADR-00715](../adr/ADR-00715.md)); a typed var-decl and a declared-variable reassignment (`let xs: T[] = …; xs = JSON.parse(...)`) both project ([ADR-00571](../adr/ADR-00571.md))"
+              "A bare reassignment into a **member or element** target (`obj.items = JSON.parse(...)`, `grid[i] = JSON.parse(...)`) isn't projected from declaration context — write the target type on the call (`obj.items = JSON.parse(...) as Item[]`) to project anywhere ([ADR-00715](../adr/ADR-00715.md))"
             ],
             "notes": [
               "Projects the tree's array node into the standard `{ptr,i64}` aggregate, reusing the array-literal build path ([ADR-00224](../adr/ADR-00224.md))",

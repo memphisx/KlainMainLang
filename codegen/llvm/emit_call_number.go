@@ -63,21 +63,45 @@ func (e *Emitter) emitNumberIsNaN(args []ast.Expression, pos ast.Pos) (Value, er
 		return Value{}, err
 	}
 	if !val.Ty.Float {
-		// An `any`-boxed operand: ToNumber it first (global isNaN semantics) so a
-		// boxed NaN — e.g. `isNaN(null + undefined)` — tests true instead of
-		// returning the non-float false. coerce(any→double) unboxes and runs the
-		// numeric conversion (ADR-00902). A boxed non-number rounds to this test's
-		// global-isNaN reading, which for a number-holding box matches Number.isNaN
-		// too. Other static non-float types keep the trivial false.
-		if val.Ty.IsDynamic {
+		// Global `isNaN` applies `ToNumber` to its argument (unlike `Number.isNaN`),
+		// so a non-numeric operand — reachable through `any`, or through an erased
+		// `expr as any` assertion that keeps the concrete type (ADR-00371) — must be
+		// coerced, not answered with a trivial false. A boxed `any` unboxes and runs
+		// the numeric conversion (ADR-00902); a concrete string/object/undefined is
+		// boxed first, then `ToNumber`'d the same way (`isNaN('hello' as any)` → true,
+		// `isNaN('42' as any)` → false). An integer or boolean always `ToNumber`s to a
+		// finite value, so those keep the fast trivial false.
+		switch {
+		case val.Ty.IsDynamic:
 			val = e.coerce(val, TypeF64)
-		} else {
+		case toNumberCanBeNaN(val.Ty):
+			boxed, err := e.emitBoxValue(val)
+			if err != nil {
+				return Value{}, err
+			}
+			val = e.coerce(boxed, TypeF64)
+		default:
 			return Value{Ref: "0", Ty: TypeBool}, nil
 		}
 	}
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = fcmp uno double %s, %s", r, val.Ref, val.Ref))
 	return Value{Ref: r, Ty: TypeBool}, nil
+}
+
+// toNumberCanBeNaN reports whether a concrete (non-float, non-dynamic) operand's
+// `ToNumber` conversion can produce a non-finite result — i.e. it is NOT an
+// integer or boolean (both of which always convert to a finite number). Strings
+// (`ToNumber('x')` → NaN), objects, and `undefined` all can, so global
+// `isNaN`/`isFinite` must actually convert them rather than shortcut.
+func toNumberCanBeNaN(ty Type) bool {
+	if ty.IR == "i1" {
+		return false // boolean → 0 or 1
+	}
+	if ty.IR == "i64" || ty.IR == "i32" || ty.IR == "i16" || ty.IR == "i8" {
+		return ty.IsUndefined // an integer converts to a finite number; undefined → NaN
+	}
+	return true // string / object / undefined / other pointer types
 }
 
 func (e *Emitter) emitNumberIsFinite(args []ast.Expression, pos ast.Pos) (Value, error) {
@@ -89,11 +113,21 @@ func (e *Emitter) emitNumberIsFinite(args []ast.Expression, pos ast.Pos) (Value,
 		return Value{}, err
 	}
 	if !val.Ty.Float {
-		// A boxed `any` operand: ToNumber then test (global isFinite), so a boxed
-		// non-finite value is detected rather than defaulting to finite (ADR-00902).
-		if val.Ty.IsDynamic {
+		// Global `isFinite` applies `ToNumber` first (ADR-00902): a boxed `any`, or a
+		// concrete string/object/undefined reachable through an erased `as any`
+		// (ADR-00371), is converted and tested — `isFinite('x' as any)` → false — not
+		// defaulted to finite. Integers and booleans always convert to a finite value,
+		// so they keep the trivial true.
+		switch {
+		case val.Ty.IsDynamic:
 			val = e.coerce(val, TypeF64)
-		} else {
+		case toNumberCanBeNaN(val.Ty):
+			boxed, err := e.emitBoxValue(val)
+			if err != nil {
+				return Value{}, err
+			}
+			val = e.coerce(boxed, TypeF64)
+		default:
 			return Value{Ref: "1", Ty: TypeBool}, nil
 		}
 	}

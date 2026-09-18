@@ -30,7 +30,7 @@
               "`new ArrayBuffer(byteLength, {maxByteLength}?)` — a fixed-length (or resizable — `.resizable`/`.maxByteLength`/`.resize(n)`, [ADR-00494](../adr/ADR-00494.md)), zero-initialized (`calloc`'d) raw byte buffer, plus `.byteLength` and `.slice(start?, end?)` (a copy, with array-slice negative-index/clamping rules — [ADR-00312](../adr/ADR-00312.md)). A general expression (works anywhere), like the TypedArrays below. See [ADR-00078](../adr/ADR-00078.md)/[TDD-00018](../tdd/TDD-00018.md)"
             ],
             "caveats": [
-              "`resize(n)` now grows **or shrinks** within `[0, maxByteLength]` ([ADR-00564](../adr/ADR-00564.md)); it still requires the `{maxByteLength}` construction option — compile-time rejection otherwise ([ADR-00494](../adr/ADR-00494.md))",
+              "`resize(n)` still requires the `{maxByteLength}` construction option — compile-time rejection otherwise ([ADR-00494](../adr/ADR-00494.md), [ADR-00564](../adr/ADR-00564.md))",
               "A TypedArray view captures its length at construction and does not length-track a later `resize` — re-`new` the view after resizing (spec auto-tracks a no-explicit-length view)"
             ]
           },

@@ -130,6 +130,16 @@ func generateAll(write bool) error {
 		return err
 	}
 	extra[filepath.Join(adrDir, "README.md")] = adrMD
+	rollup, err := generateCoverageRollup(idx, areas)
+	if err != nil {
+		return err
+	}
+	extra[filepath.Join(statusDir, coverageRollupFile)] = rollup
+	backlogMD, err := generateBacklogFile(areas)
+	if err != nil {
+		return err
+	}
+	extra["docs/BACKLOG.md"] = backlogMD
 	var extraPaths []string
 	for p := range extra {
 		extraPaths = append(extraPaths, p)

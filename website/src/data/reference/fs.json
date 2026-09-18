@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "19/20",
     "loosePct": 95,
-    "strict": "2/20",
-    "strictPct": 10
+    "strict": "5/20",
+    "strictPct": 25
   },
   "lede": "Node-fs-shaped file I/O for config, data, and logs. The sync set is the core; async variants (callback + Promise) and read/write streams wrap the same runtime helpers. The recurring divergence is text-first: the plain readFileSync/readFile/stream path is strlen-based and truncates at an embedded null byte — use readFileSyncBytes / an ArrayBuffer write for binary. There is no Buffer class (plain ArrayBuffer/TypedArrays). The async ops are genuinely non-blocking on a background thread pool — the fs.promises table, the legacy callback form, and binary-data writes alike (POSIX; Windows keeps an inline API shape for now).",
   "entries": [
@@ -107,7 +107,7 @@
       "exampleKey": "fs/fs",
       "snippet": "fs.writeFileSync('/tmp/out.txt', 'first line', 'utf8')\nfs.writeFileSync('/tmp/out.txt', ' more', { flag: 'a' })",
       "differences": [
-        "The options argument supports only `{ encoding: 'utf8', flag }` — `mode` and non-`'utf8'` encodings are clean rejections."
+        "The options argument supports only `{ encoding: 'utf8', flag, mode }` — a non-`'utf8'` encoding is a clean rejection. `{ mode }` sets the permission bits when the write creates the file (umask-reduced, applied only on creation, matching Node/open(2))."
       ],
       "seeAlso": [
         "fs.appendFileSync",
@@ -131,7 +131,7 @@
       "exampleKey": "fs/fs",
       "snippet": "fs.appendFileSync('/tmp/out.txt', '\\nsecond line', 'utf8')",
       "differences": [
-        "The options argument supports only `{ encoding: 'utf8', flag }` — `mode` and non-`'utf8'` encodings are clean rejections."
+        "The options argument supports only `{ encoding: 'utf8', flag, mode }` — a non-`'utf8'` encoding is a clean rejection. `{ mode }` sets the permission bits when the write creates the file (umask-reduced, applied only on creation, matching Node/open(2))."
       ],
       "seeAlso": [
         "fs.writeFileSync"
@@ -233,15 +233,15 @@
       "statusRow": "fs.readdirSync(path[, { withFileTypes, recursive }])",
       "signature": "readdirSync(path: string, options?: { withFileTypes?: true, recursive?: true }): string[] | Dirent[]",
       "badge": "caveats",
-      "description": "Lists a directory's entries (excluding . and ..) as a string[], in whatever order the OS's own readdir() returns them — no ordering guarantee, matching real Node. Verified on both Darwin and x86-64 Linux via a compiled offsetof probe. With { withFileTypes: true } it returns Dirent[] — each with .name, .parentPath (the directory it was read from), and the full kind-predicate set .isFile()/.isDirectory()/.isSymbolicLink()/.isFIFO()/.isCharacterDevice()/.isBlockDevice()/.isSocket(), classified from the entry's d_type (from FindFirstFile attributes on Windows) without a per-file stat. With { recursive: true } it walks the whole subtree, returning every nested entry as a '/'-joined path relative to the start directory.",
+      "description": "Lists a directory's entries (excluding . and ..) as a string[], in whatever order the OS's own readdir() returns them — no ordering guarantee, matching real Node. Verified on both Darwin and x86-64 Linux via a compiled offsetof probe. With { withFileTypes: true } it returns Dirent[] — each with .name, .parentPath (the directory it was read from), and the full kind-predicate set .isFile()/.isDirectory()/.isSymbolicLink()/.isFIFO()/.isCharacterDevice()/.isBlockDevice()/.isSocket(), classified from the entry's d_type (from FindFirstFile attributes on Windows) without a per-file stat. With { recursive: true } it walks the whole subtree, returning every nested entry as a '/'-joined path relative to the start directory. Combining { recursive: true, withFileTypes: true } walks the subtree as Dirent[], each entry's .parentPath being the full path of its containing directory.",
       "returns": {
         "type": "string[] | Dirent[]",
         "desc": "Directory entry names (recursive: relative paths), or Dirent objects when withFileTypes is set."
       },
       "differences": [
-        "`{ recursive: true, withFileTypes: true }` together is a clean rejection (recursive Dirents need `parentPath`); `encoding: 'buffer'` is unsupported; recursive paths join with `'/'` (Node uses the platform separator).",
+        "`encoding: 'buffer'` is unsupported; recursive paths join with `'/'` (Node uses the platform separator).",
         "A `DT_UNKNOWN` filesystem (rare) is not descended in recursive mode and reports all Dirent kinds `false` rather than falling back to `lstat`.",
-        "`Dirent` exposes `.name`/`.parentPath` and all seven kind predicates; only the `.path` alias for `.parentPath` is absent."
+        "`Dirent` exposes `.name`/`.parentPath` and all seven kind predicates; the deprecated `.path` alias is intentionally not a member (current Node removed it in v24), so reading `dirent.path` is a compile-time error."
       ],
       "exampleKey": "fs/fs",
       "snippet": "const entries: string[] = fs.readdirSync('/tmp/kml_fs_example_dir')\nentries.sort()",
@@ -426,7 +426,7 @@
         "desc": "The open file descriptor."
       },
       "differences": [
-        "`openSync` flags must be a string literal (`r r+ w w+ a a+ wx ax`) or a raw numeric mask — `fs.constants` has the access/copyFile constants but not the host-specific `O_*` open flags.",
+        "`openSync` flags must be a string literal (`r r+ w w+ a a+ wx ax`) or a raw numeric mask — not a runtime-computed flag string. `fs.constants` exposes the access/copyFile constants and the `O_*` open flags (each resolved to the target OS's `<fcntl.h>` bits), so `openSync(p, fs.constants.O_WRONLY | fs.constants.O_CREAT)` works.",
         "`writeSync` writes string data only (no Buffer/offset/length variant); `readSync`'s buffer must be a `Uint8Array`/`Buffer`."
       ],
       "seeAlso": [

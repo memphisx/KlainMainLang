@@ -921,6 +921,58 @@ setTimeout(() => { console.log("done"); }, 30);
 `, "sink: 2\nsink: 6\ndata: alpha\nfinished\ndata: beta\nend\ndone")
 }
 
+// Node writable.write(chunk[, encoding][, callback]) and end([chunk][,
+// encoding][, callback]) (ADR-00981): the trailing 'utf8' encoding is accepted,
+// and the completion callback fires (via the microtask queue) after the current
+// synchronous run, in write/end order.
+func TestE2ENodeStreamWriteEndCallbacks(t *testing.T) {
+	assertOutputImports(t, `
+import { Writable } from 'stream';
+const w = new Writable<string>({ write: (s) => {} });
+console.log("sync-start");
+w.write("a", "utf8", () => { console.log("cb-a"); });
+w.write("b", () => { console.log("cb-b"); });
+w.end("c", "utf8", () => { console.log("cb-end"); });
+console.log("sync-end");
+`, "sync-start\nsync-end\ncb-a\ncb-b\ncb-end")
+}
+
+// An options-form Writable whose sink takes Node's full write(chunk, encoding,
+// callback) signature (ADR-00982): the chunk is delivered, cb() runs, and the
+// write is treated as complete on return (V1). The one-parameter form still
+// works; a two-parameter shape is a clean rejection.
+func TestE2ENodeStreamOptionsFormThreeArgSink(t *testing.T) {
+	assertOutputImports(t, `
+import { Writable } from 'stream';
+const got: string[] = [];
+const w = new Writable<string>({
+  write: (chunk: string, enc: string, cb: () => void) => { got.push(chunk.toUpperCase()); cb(); }
+});
+w.on("finish", () => { console.log("finish: " + got.join(",")); });
+w.write("alpha");
+w.end("beta");
+`, "finish: ALPHA,BETA")
+}
+
+func TestE2ENodeStreamOptionsFormTwoArgSinkRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, `import { Writable } from 'stream';
+const w = new Writable<string>({ write: (chunk: string, enc: string) => {} });
+w.write("x");`)
+	if err == nil {
+		t.Fatal("expected an ambiguous two-parameter sink write callback to be rejected, got none")
+	}
+}
+
+// A non-utf8 encoding on write()/end() is a clean rejection.
+func TestE2ENodeStreamWriteBadEncodingRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, `import { Writable } from 'stream';
+const w = new Writable<string>({ write: (s) => {} });
+w.write("a", "latin1");`)
+	if err == nil {
+		t.Fatal("expected a non-utf8 write() encoding to be rejected, got none")
+	}
+}
+
 func TestE2ENodeStreamPipelineTransform(t *testing.T) {
 	assertOutputImports(t, `
 import { Readable, Writable, Transform } from 'stream';

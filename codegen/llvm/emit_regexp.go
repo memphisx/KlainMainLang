@@ -377,9 +377,18 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, dataReg, idx))
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ir, val, gep, align))
 	}
+	// `.source`/`.flags` follow JS's observable shapes: an empty pattern reads
+	// back as the `(?:)` placeholder, and the flag bytes are re-sorted into the
+	// canonical `d,g,i,m,s,u,v,y` order regardless of construction order.
+	e.ensureRegexSourceNorm()
+	srcNorm := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_regex_source_norm(ptr %s)", srcNorm, patternVal.Ref))
+	e.ensureRegexFlagsCanon()
+	flagsCanon := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_regex_flags_canon(ptr %s)", flagsCanon, flagsVal.Ref))
 	storeField(RegexHandleField, "ptr", handleReg, 8)
-	storeField("source", "ptr", patternVal.Ref, 8)
-	storeField("flags", "ptr", flagsVal.Ref, 8)
+	storeField("source", "ptr", srcNorm, 8)
+	storeField("flags", "ptr", flagsCanon, 8)
 	storeField("global", "i1", globalReg, 1)
 	storeField("ignoreCase", "i1", ignoreCaseReg, 1)
 	storeField("multiline", "i1", multilineReg, 1)

@@ -23,50 +23,50 @@
       "lanes": {
         "js": {
           "overall": {
-            "pass": 6881,
+            "pass": 7088,
             "total": 53578
           },
           "inScope": {
-            "pass": 6726,
+            "pass": 6919,
             "total": 42942
           },
           "pending": {
-            "pass": 489,
+            "pass": 488,
             "total": 2860
           },
           "byPhase": {
-            "clang": 307,
-            "codegen-hang": 3,
-            "compile": 43763,
-            "neg-accepted": 852,
-            "other": 64,
-            "run-timeout": 11,
-            "runtime": 1599,
-            "strict-reject": 98
+            "clang": 14,
+            "codegen-hang": 2,
+            "compile": 43651,
+            "neg-accepted": 872,
+            "other": 129,
+            "run-timeout": 12,
+            "runtime": 1713,
+            "strict-reject": 97
           }
         },
         "strict": {
           "overall": {
-            "pass": 6482,
+            "pass": 6598,
             "total": 53578
           },
           "inScope": {
-            "pass": 6347,
+            "pass": 6451,
             "total": 42942
           },
           "pending": {
-            "pass": 453,
+            "pass": 450,
             "total": 2860
           },
           "byPhase": {
-            "clang": 210,
-            "codegen-hang": 3,
-            "compile": 44378,
-            "neg-accepted": 837,
-            "other": 54,
+            "clang": 5,
+            "codegen-hang": 2,
+            "compile": 44263,
+            "neg-accepted": 857,
+            "other": 95,
             "run-timeout": 5,
-            "runtime": 1017,
-            "strict-reject": 592
+            "runtime": 1068,
+            "strict-reject": 685
           }
         }
       }

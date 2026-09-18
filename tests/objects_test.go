@@ -1663,3 +1663,38 @@ let w: number | null = null;
 console.log(w);
 `, "undefined\n4\n7\nnull")
 }
+
+// ES own-property enumeration order: array-index keys ascending numeric first,
+// then the rest in insertion/declaration order — for a static object literal
+// across Object.keys/values/entries, for...in, JSON.stringify and spread, and
+// for a dynamic (any) object across the same (ADR-00996).
+func TestE2EStaticObjectESEnumOrder(t *testing.T) {
+	assertOutput(t, `
+const o = { b: 1, a: 2, "2": 3, "1": 4 };
+console.log(Object.keys(o).join(","));
+console.log(Object.values(o).join(","));
+for (const k in o) console.log(k);
+console.log(JSON.stringify(o));
+const spread = { ...o, "0": 9 };
+console.log(Object.keys(spread).join(","));
+`, "1,2,b,a\n4,3,1,2\n1\n2\nb\na\n{\"1\":4,\"2\":3,\"b\":1,\"a\":2}\n0,1,2,b,a")
+}
+
+func TestE2EDynamicObjectESEnumOrder(t *testing.T) {
+	assertOutput(t, `
+const o: any = {};
+o.b = 1; o.a = 2; o["10"] = 3; o["2"] = 4; o["0"] = 5;
+console.log(Object.keys(o).join(","));
+for (const k in o) console.log(k);
+console.log(JSON.stringify(o));
+`, "0,2,10,b,a\n0\n2\n10\nb\na\n{\"0\":5,\"2\":4,\"10\":3,\"b\":1,\"a\":2}")
+}
+
+// A leading-zero or out-of-range numeric string is NOT an array index, so it
+// keeps insertion order among the string keys (not sorted numerically).
+func TestE2EObjectESEnumOrderNonIndexKeys(t *testing.T) {
+	assertOutput(t, `
+const o = { "01": 1, "4294967295": 2, "5": 3, name: 4 };
+console.log(Object.keys(o).join(","));
+`, "5,01,4294967295,name")
+}

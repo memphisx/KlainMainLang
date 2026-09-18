@@ -555,6 +555,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "encode" && e.inferExprType(mem.Object).IsTextEncoder {
 			return e.emitTextEncoderEncode(mem.Object, ex.Args, ex.GetPos())
 		}
+		if mem.Property == "encodeInto" && e.inferExprType(mem.Object).IsTextEncoder {
+			return e.emitTextEncoderEncodeInto(mem.Object, ex.Args, ex.GetPos())
+		}
 		if mem.Property == "decode" && e.inferExprType(mem.Object).IsTextDecoder {
 			return e.emitTextDecoderDecode(mem.Object, ex.Args, ex.GetPos())
 		}
@@ -884,6 +887,20 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 					return Value{Ref: res, Ty: TypeBool}, nil
 				}
 				if argTy.IsArray {
+					// A `T[] | undefined` value (a nested-array element absence,
+					// TDD-00221): a miss is `undefined`, and `Array.isArray(undefined)`
+					// is false — decide at runtime on the null data-ptr.
+					if argTy.Nullable {
+						v, err := e.emitExpr(ex.Args[0])
+						if err != nil {
+							return Value{}, err
+						}
+						dataPtr := e.freshReg()
+						e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, v.Ref))
+						isArr := e.freshReg()
+						e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isArr, dataPtr))
+						return Value{Ref: isArr, Ty: TypeBool}, nil
+					}
 					return Value{Ref: "true", Ty: TypeBool}, nil
 				}
 				return Value{Ref: "false", Ty: TypeBool}, nil
@@ -2421,7 +2438,7 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					// coerce (unlike this) has no notion of boxing, it only
 					// converts between concrete scalar IR types, so a bare-T
 					// param must be boxed explicitly instead.
-					if val, err = e.emitBoxValue(val); err != nil {
+					if val, err = e.emitBoxValueWidened(val, arg); err != nil {
 						return Value{}, err
 					}
 				} else if paramTy.IR != "" {
@@ -2468,7 +2485,7 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					return Value{}, fmt.Errorf("default value for param %d: %w", i, err)
 				}
 				if paramTy.IsDynamic {
-					if val, err = e.emitBoxValue(val); err != nil {
+					if val, err = e.emitBoxValueWidened(val, sig.Defaults[i]); err != nil {
 						return Value{}, err
 					}
 				} else if paramTy.IR != "" {

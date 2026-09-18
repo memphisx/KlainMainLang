@@ -33,6 +33,8 @@ func (e *Emitter) ensureNodeInterpFlagGuard() {
 	e.ensureStrcmp()
 	e.ensureExit()
 	e.ensureWriteDecl()
+	e.ensureGetenv()
+	e.emitGlobal(`@.kml_reexec_env = private unnamed_addr constant [17 x i8] c"KML_KLAIN_REEXEC\00"`)
 
 	flags := []struct{ sym, text string }{
 		{"@.kml_ni_p", "-p"},
@@ -47,7 +49,7 @@ func (e *Emitter) ensureNodeInterpFlagGuard() {
 			f.sym, len(f.text)+1, f.text))
 	}
 
-	msg := "error: Node interpreter flags (-p/-e/--eval/-i) are not supported by this compiled binary\n"
+	msg := "error: this compiled binary cannot act as the Node interpreter (a self-spawn via process.execPath, or an interpreter flag -p/-e/-i); refusing to re-run its own program body\n"
 	msgEsc, msgSize := escapeLLVM(msg) // msgSize counts the trailing NUL
 	msgLen := msgSize - 1              // bytes to write to stderr (message without NUL)
 	e.emitGlobal(fmt.Sprintf(`@.kml_ni_msg = private unnamed_addr constant [%d x i8] c"%s"`,
@@ -56,7 +58,14 @@ func (e *Emitter) ensureNodeInterpFlagGuard() {
 	var b []byte
 	w := func(format string, a ...any) { b = append(b, []byte(fmt.Sprintf(format, a...))...) }
 	w("\ndefine void @__kml_reject_node_interp_flags(i32 %%argc, ptr %%argv) {\n")
-	w("entry:\n  br label %%head\n")
+	// ADR-00972: a self-spawn (our own spawnSync/spawn detected the target is this
+	// executable and set KML_KLAIN_REEXEC in the child env) is rejected up front,
+	// regardless of argv — the general case ADR-00970's flag scan below could not
+	// catch, since a self-spawned child ignores its argv and re-runs main.
+	w("entry:\n")
+	w("  %%reexec = call ptr @getenv(ptr @.kml_reexec_env)\n")
+	w("  %%ismarked = icmp ne ptr %%reexec, null\n")
+	w("  br i1 %%ismarked, label %%reject, label %%head\n")
 	w("head:\n")
 	w("  %%i = phi i32 [1, %%entry], [%%inext, %%cont]\n")
 	w("  %%more = icmp slt i32 %%i, %%argc\n")

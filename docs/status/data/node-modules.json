@@ -243,13 +243,13 @@
         "heading": "",
         "featureColumn": "Module",
         "hasCaveats": true,
-        "hasNotes": false,
+        "hasNotes": true,
         "countsTowardParity": false,
         "rows": [
           {
             "feature": "`buffer` (`Buffer`)",
             "status": "implemented",
-            "caveats": [
+            "notes": [
               "A Node-specific global; `import { Buffer } from 'buffer'`/`'node:buffer'` works, same-name and aliased (`Buffer.from` member call → Stage 2 rename). `Blob`/`atob`/`btoa` importable too → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)"
             ]
           },
@@ -257,21 +257,32 @@
             "feature": "`timers`",
             "status": "implemented",
             "caveats": [
-              "`import { setTimeout }`/`setInterval`/`setImmediate`/`clear*` from 'timers'/'node:timers' works, same-name and aliased; the Web globals also work without import → [Timers](TIMERS.md). Pending: `timers/promises`"
+              "Pending: `timers/promises`"
+            ],
+            "notes": [
+              "`import { setTimeout }`/`setInterval`/`setImmediate`/`clear*` from 'timers'/'node:timers' works, same-name and aliased; the Web globals also work without import → [Timers](TIMERS.md)"
             ]
           },
           {
             "feature": "`url`",
             "status": "implemented",
             "caveats": [
-              "`import { URL, URLSearchParams } from 'url'` works (same-name + aliased); the legacy `url`-module functions (`parse`/`format`/`fileURLToPath`/`pathToFileURL`/`resolve`/…) work too → [URL](URL.md). Remaining: IDN conversion is libcurl-backend-gated; lenient relative parsing deferred"
+              "IDN conversion is libcurl-backend-gated",
+              "Lenient relative parsing deferred"
+            ],
+            "notes": [
+              "`import { URL, URLSearchParams } from 'url'` works (same-name + aliased); the legacy `url`-module functions (`parse`/`format`/`fileURLToPath`/`pathToFileURL`/`resolve`/…) work too → [URL](URL.md)"
             ]
           },
           {
             "feature": "`perf_hooks`",
             "status": "implemented",
             "caveats": [
-              "`import { performance } from 'perf_hooks'` works, same-name and aliased; `PerformanceObserver` works (synchronous V1) → [Performance & Timing](PERFORMANCE-TIMING.md). Pending: `monitorEventLoopDelay`/`createHistogram` and async-batched observer delivery"
+              "`PerformanceObserver` is synchronous V1 (no async-batched observer delivery)",
+              "Pending: `monitorEventLoopDelay`/`createHistogram`"
+            ],
+            "notes": [
+              "`import { performance } from 'perf_hooks'` works, same-name and aliased; `PerformanceObserver` works → [Performance & Timing](PERFORMANCE-TIMING.md)"
             ]
           }
         ]

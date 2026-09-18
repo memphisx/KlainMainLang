@@ -44,12 +44,13 @@
             "feature": "`gc`",
             "status": "implemented",
             "caveats": [
-              "Requires `bdw-gc`/`libgc` installed at build time (`brew install bdw-gc` / `apt-get install libgc-dev` / `apk add gc-dev`) — this compiler's only non-libc external dependency, and only for binaries compiled with `-mm=gc`",
-              "Strictly safer for long-running processes than `manual`, but the default hasn't been flipped to it",
-              "Collection is conservative (Boehm) and optimizer-dependent: on x86-64 `-O2` builds, a referent created and orphaned in straight-line code can stay pinned indefinitely by a stale stack-slot copy — WeakRef/FinalizationRegistry death signals for it never fire ([ADR-00717](../adr/ADR-00717.md)); referents churning through reused code paths (the real-workload shape) collect normally"
+              "Requires `bdw-gc`/`libgc` installed at build time (`brew install bdw-gc` / `apt-get install libgc-dev` / `apk add gc-dev`)",
+              "Not the default (`-mm=manual` is)",
+              "Conservative (Boehm) collection is optimizer-dependent: on x86-64 `-O2`, a referent orphaned in straight-line code can stay pinned indefinitely by a stale stack-slot copy, so its WeakRef/FinalizationRegistry death signal never fires ([ADR-00717](../adr/ADR-00717.md))"
             ],
             "notes": [
               "Boehm–Demers–Weiser collector (`libgc`): swaps the declared `@malloc`/`@realloc` for `@GC_malloc`/`@GC_realloc` and links `-lgc` — no per-feature codegen change beyond the allocation call sites, since the collector conservatively scans the native stack/registers/managed heap for live pointers",
+              "This compiler's only non-libc external dependency, and only for binaries built with `-mm=gc`; strictly safer than `manual` for long-running processes. Referents churning through reused code paths (the real-workload shape) collect normally",
               "`Memory.free(x)` stays legal (lowers to `GC_free`, an always-safe early-release optimization Boehm documents)",
               "See [ADR-00071](../adr/ADR-00071.md), [ADR-00080](../adr/ADR-00080.md), [ADR-00093](../adr/ADR-00093.md)"
             ]
@@ -58,7 +59,8 @@
             "feature": "`auto`",
             "status": "implemented",
             "caveats": [
-              "The escape analysis is deliberately very conservative: a value that is returned, stored, aliased, spread, passed to any non-whitelisted call, captured by a closure, or alive across `await` is never freed (it leaks, as in `manual`) — the whitelists (`console.log`/`String`/`JSON.parse`/`JSON.stringify` arguments; fresh-result container methods and `JSON.parse`/`JSON.stringify` for initializers) start minimal. Reassignment via an owning-fresh RHS (`s += …`, `s = a + b`, an interpolating template) frees the overwritten value at the store; any other reassignment shape still disqualifies the binding",
+              "Escape analysis is deliberately conservative: a value returned, stored, aliased, spread, passed to a non-whitelisted call, captured by a closure, or alive across `await` is never freed (leaks, as in `manual`); the whitelists start minimal",
+              "Reassignment frees the overwritten value only via an owning-fresh RHS (`s += …`, `s = a + b`, an interpolating template); any other reassignment shape disqualifies the binding",
               "Deep (recursive) reclamation covers **typed `JSON.parse`/`res.json()` trees only** ([TDD-00175](../tdd/TDD-00175.md) Stage 1, [ADR-00716](../adr/ADR-00716.md)) — graphs built from literals or user calls, mid-block garbage (rbtree-class), and closure graphs still leak beyond the top-level free (Stages 2–3); an interior-pointer extraction into a plain-`=` binding, a graph mutation, iteration, or a method call on the tree downgrades that binding to the shallow free",
               "No per-branch last-use placement for `@owned` — a last use inside `if`/loop frees at the join/after the loop; any use inside `try` falls back to block exit",
               "Thrown paths do not free (a same-function `catch` could resume with the value live) — they leak instead",
@@ -73,6 +75,7 @@
               "All frees route through the single `freeSymbol` chokepoint `Memory.free` uses (shallow, per-type) — the seam the FinalizationRegistry death-signal hook ([TDD-00163](../tdd/TDD-00163.md)/[ADR-00701](../adr/ADR-00701.md)) plugs into, so compiler-inserted frees fire cleanup callbacks exactly like explicit ones",
               "A registered FinalizationRegistry target's auto-free at scope exit fires its cleanup callback deterministically — register's target position is a free-notified retention, not a disqualifying escape ([ADR-00703](../adr/ADR-00703.md))",
               "Transitively-owned typed `JSON.parse`/`res.json()` trees are freed **deep** — a synthesized per-type recursive routine releases the row structs, their strings, and nested array buffers at block exit ([TDD-00175](../tdd/TDD-00175.md) Stage 1, [ADR-00716](../adr/ADR-00716.md)); interior-safe reads (`.length`, compound-op consumption like `total += x[0].n`) keep eligibility",
+              "Escape whitelists: `console.log`/`String`/`JSON.parse`/`JSON.stringify` arguments; fresh-result container methods and `JSON.parse`/`JSON.stringify` for initializers",
               "See [ADR-00708](../adr/ADR-00708.md)"
             ]
           },
@@ -80,10 +83,10 @@
             "feature": "`-optimize-memory` (orthogonal to `-mm`)",
             "status": "implemented",
             "caveats": [
-              "Stack allocation ([TDD-00134](../tdd/TDD-00134.md) Stage 1) covers non-escaping let/const bindings of object literals, closure literals (non-async), tuple-annotated literals, and class instances — `Map`/`Set` (runtime-created), plain arrays' growable data buffers, and async closures stay heap (Stage 2's flat arrays shipped as the flag-independent `/** @value */` annotation, next row)",
-              "By-value tuple returns (Stage 3) cover ≤2-plain-scalar-field tuples on non-async top-level functions never used as values — larger tuples, aggregate-slot fields (array/nullable/any), async functions, generics, and function values keep the pointer ABI; only the direct `const [v, err] = f()` consumer is allocation-free (any other consumer respills to the heap at the same allocation count as before)",
-              "A class instance stack-allocates only when the whole class passes a conservative `this`-audit — a constructor or any method that returns/stores/passes `this`, extracts a method as a value, captures `this` in a nested closure (even for a field read), or carries decorators keeps every instance of that class heap-bound; so does `return this` method chaining",
-              "Same deliberately-conservative escape analysis as `auto` — anything not provably block-local stays heap; explicit `@free`/`@owned` declarations keep their heap+free meaning",
+              "`Map`/`Set` (runtime-created), plain arrays' growable data buffers, and async closures stay heap — stack allocation covers only non-escaping object/closure/tuple literals and class instances",
+              "By-value tuple returns cover only ≤2-plain-scalar-field tuples on non-async top-level functions never used as values; larger tuples, aggregate-slot fields (array/nullable/any), async functions, generics, and function values keep the pointer ABI, and only the direct `const [v, err] = f()` consumer is allocation-free",
+              "A class instance stays heap-bound unless the whole class passes a conservative `this`-audit — any method returning/storing/passing `this`, extracting a method as a value, capturing `this` in a nested closure, `return this` chaining, or decorators disqualifies every instance",
+              "Anything not provably block-local stays heap (same conservative escape analysis as `auto`); explicit `@free`/`@owned` keep their heap+free meaning",
               "Off by default while the analysis matures"
             ],
             "notes": [

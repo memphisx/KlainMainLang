@@ -29,7 +29,7 @@
             "caveats": [
               "One listener per event, arrow-function literals only",
               "One message type per direction, declared by annotation",
-              "Payloads: structured-clone-safe values only (plus `SharedArrayBuffer`/`MessagePort`, which cross by reference — [ADR-00308](../adr/ADR-00308.md)/[ADR-00309](../adr/ADR-00309.md)); strings share their buffer across threads; no arrays through `onmessage`/`e.data`",
+              "Payloads must be structured-clone-safe; no arrays through `onmessage`/`e.data`",
               "`'error'` carries the message string, not an Error object; no `self.onerror`",
               "`terminate()` is cooperative, keeps queued messages, always exits 1",
               "Worker path must be a string literal; a worker module can't also be imported, can't spawn workers, and its named functions can't read its own top-level bindings",
@@ -39,6 +39,7 @@
               "Two surfaces: Node `worker_threads` and the browser `Worker`/`onmessage` shape ([TDD-00098](../tdd/TDD-00098.md), [ADR-00305](../adr/ADR-00305.md), [ADR-00306](../adr/ADR-00306.md))",
               "The worker file compiles into the same binary as its own entry function",
               "Each thread runs its own event loop (runtime singletons are `thread_local`); messages travel over pipes as pointer envelopes, deep-copied at the boundary",
+              "`SharedArrayBuffer`/`MessagePort` cross by reference rather than copied; strings share their buffer across threads. See [ADR-00308](../adr/ADR-00308.md), [ADR-00309](../adr/ADR-00309.md)",
               "`-mm=gc` registers each thread with Boehm",
               "Uncaught worker exception → `'error'` + `'exit'(1)` on the parent, or process exit if unhandled"
             ]
@@ -64,13 +65,15 @@
             "status": "implemented",
             "caveats": [
               "Message type fixed at construction (`new MessageChannel<T>()`, default `number`), symmetric for both ports",
-              "A port crosses a worker boundary only whole — as `workerData` or as the entire `postMessage` payload — and is **shared, not neutered**: the sender must stop using a sent port (unsynchronized use from two threads is memory-safe but unordered); the `MessageChannel` pair box itself never crosses",
+              "A port crosses a worker boundary only whole — as `workerData` or as the entire `postMessage` payload; the `MessageChannel` pair box itself never crosses",
+              "A sent port is **shared, not neutered** (unlike Node's transfer): the sender must stop using it",
               "`onmessage` property only (arrow literal); no `on('message')`, no `start()`/`'close'` event, no array payloads via `onmessage`",
               "`close()` leaks two pipe fds; `-mm=manual` leaks per message"
             ],
             "notes": [
               "Importable under Node's module name too — `import { MessageChannel/MessagePort/BroadcastChannel } from 'worker_threads'` ([ADR-00431](../adr/ADR-00431.md))",
               "One shared endpoint runtime with `BroadcastChannel` (pipe per endpoint, peer-linked halves); a port is drained by whichever thread registered its `onmessage` — no adoption protocol needed when a port moves to a worker ([TDD-00099](../tdd/TDD-00099.md), [ADR-00309](../adr/ADR-00309.md))",
+              "Unsynchronized use of a shared port from two threads is memory-safe but unordered",
               "`postMessage` into a closed peer silently discards, matching spec"
             ]
           },
@@ -79,15 +82,17 @@
             "status": "implemented",
             "caveats": [
               "Channel ops are synchronous blocking (`ch.send(v)`/`ch.receive()`), not `await`; element is a fixed 8-byte slot (number/string/object/boolean)",
-              "`select` cases are `ch.recvCase(v => …)` / `ch.sendCase(x, () => …)` / `defaultCase(() => …)`; a recv handler receives the value but not the closed flag (use `for (const v of ch)` range, which ends on close, to detect it)",
-              "Fixed goroutine stacks (default 256 KiB, tunable via `KLAINSYNC_STACK_KB`), no overflow guard — deep recursion is UB; true growable/moving stacks are gated on precise stack maps ([TDD-00135](../tdd/TDD-00135.md))",
-              "Blocking-syscall P-handoff is a bounded sysmon-driven rescue-M approximation, not full `entersyscall`/`exitsyscall`; a nil (never-constructed) channel isn't expressible — channels are always `new Channel`",
-              "Per-iteration capture of a loop `let` directly in a goroutine closure is a pre-existing general closure limitation — pass the value as a function parameter (a `spawn(work)` helper) instead; a `Channel<T>` keeps its type as a parameter/field/return, so channel plumbing splits cleanly across functions and modules ([ADR-00617](../adr/ADR-00617.md))",
+              "A `select` recv handler receives the value but not the closed flag (use a `for (const v of ch)` range, which ends on close, to detect it)",
+              "Fixed goroutine stacks (default 256 KiB, tunable via `KLAINSYNC_STACK_KB`), no overflow guard — deep recursion is UB; growable/moving stacks gated on precise stack maps",
+              "Blocking-syscall P-handoff is a bounded sysmon-driven rescue-M approximation, not full `entersyscall`/`exitsyscall`",
+              "A nil (never-constructed) channel isn't expressible — channels are always `new Channel`",
+              "Per-iteration capture of a loop `let` directly in a goroutine closure is a pre-existing general closure limitation — pass the value as a function parameter (a `spawn(work)` helper) instead",
               "`send` after `close` and `close` of a closed channel abort the process (Go-panic parity); native-only (compile error under plain `tsc`/Node)"
             ],
             "notes": [
               "A Go-style GMP work-stealing scheduler in the embedded C runtime `klainsyncsrc/klainsync.c`: one P + pinned M (pthread) per `GOMAXPROCS`, a global run-queue backstop, half-queue stealing, periodic global-queue poll; blocking channel send/receive parks the *goroutine*, not the OS thread ([TDD-00143](../tdd/TDD-00143.md), [ADR-00541](../adr/ADR-00541.md))",
-              "`go(() => void)` spawns; `new Channel<T>(cap)` is an unbuffered rendezvous or buffered ring with `.send`/`.receive`/`.close` and `for (const v of ch)` range; `select(...)` is Go's random-fair select over recv/send cases (`sudog` groups with an atomic winner claim) ([ADR-00543](../adr/ADR-00543.md))",
+              "`go(() => void)` spawns; `new Channel<T>(cap)` is an unbuffered rendezvous or buffered ring with `.send`/`.receive`/`.close` and `for (const v of ch)` range; `select(...)` is Go's random-fair select over recv/send cases — `ch.recvCase(v => …)` / `ch.sendCase(x, () => …)` / `defaultCase(() => …)` (`sudog` groups with an atomic winner claim) ([ADR-00543](../adr/ADR-00543.md))",
+              "A `Channel<T>` keeps its type as a parameter/field/return, so channel plumbing splits cleanly across functions and modules; growable/moving stacks are gated on precise stack maps. See [ADR-00617](../adr/ADR-00617.md), [TDD-00135](../tdd/TDD-00135.md)",
               "Complete tier-1 cooperative preemption ([ADR-00542](../adr/ADR-00542.md)): a `sysmon` thread flags an over-budget goroutine; the compiler emits `klainsync_safepoint()` at function entry and every loop back-edge (for/while/do-while/for-of/for-in), gated on the resolver's `UsesKlainSync` flag so a program that never imports the module emits and links nothing. Signal-based async preemption is unnecessary given full loop instrumentation",
               "Blocking-call resilience: work-stealing drains a blocked M's goroutines; when all Ms block at once, a bounded rescue M is spawned so the program doesn't deadlock",
               "`LockOSThread` (Go's `runtime.LockOSThread`): a goroutine can bind to its M so it never migrates. The Node event loop / reactor is thread-affine (its `ucontext` connection fibers and per-loop thread-local state can't move OS threads), so `http.listen` run inside a goroutine (`go(() => http.listen(...))`) locks its M at loop entry — a real in-process HTTP server + goroutine-pool load generator in one binary. Preemption is preserved; the locked goroutine resumes on the same M ([ADR-00616](../adr/ADR-00616.md))",

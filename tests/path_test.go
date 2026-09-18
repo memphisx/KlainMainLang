@@ -36,6 +36,25 @@ console.log(path.join("a//b///c"))
 		"a\\b\\c\n\\a\\c\na\\b\n.\na\nfoo\na\\b\\c"))
 }
 
+// Node's path.join preserves a trailing separator that the last non-empty
+// segment carries, and skips empty segments entirely before joining (so a
+// trailing empty arg does not manufacture a slash). ADR-00993.
+func TestE2EPathJoinTrailingSlash(t *testing.T) {
+	src := `
+import path from 'path'
+console.log("[" + path.posix.join("foo", "bar/") + "]")
+console.log("[" + path.posix.join("a", "b", "c/") + "]")
+console.log("[" + path.posix.join("/a/", "/b/") + "]")
+console.log("[" + path.posix.join("a", "../") + "]")
+console.log("[" + path.posix.join("/a", "../") + "]")
+console.log("[" + path.posix.join("foo", "") + "]")
+console.log("[" + path.posix.join("a/", "") + "]")
+console.log("[" + path.posix.join("foo/") + "]")
+`
+	assertOutputImports(t, src,
+		"[foo/bar/]\n[a/b/c/]\n[/a/b/]\n[./]\n[/]\n[foo]\n[a/]\n[foo/]")
+}
+
 func TestE2EPathResolve(t *testing.T) {
 	src := `
 import path from 'path'

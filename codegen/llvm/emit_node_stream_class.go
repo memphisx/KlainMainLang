@@ -342,6 +342,85 @@ func (e *Emitter) emitConstructNodeTransformHandle(info ClassInfo, className, da
 	return nil
 }
 
+// emitNodeWriteWrap3 is the options-form counterpart of emitClassStreamWrite
+// for a Node `Writable`/`Duplex` whose `write` callback takes Node's full
+// `write(chunk, encoding, callback)` signature (three parameters). It mirrors
+// emitStreamWriteWrap's env-closure shape ({userClosure, stream}) but, in place
+// of a WHATWG controller, supplies the interned `encoding` string ('buffer',
+// matching the class-form `_write`) and a no-op completion callback so an
+// idiomatic `cb()` inside the body runs — the runtime treats the write as
+// complete when the sink thunk returns (V1, same as the class form; the write
+// can't be deferred past the call). The encoding and callback parameters are
+// ptr-represented (validated by the caller), so both pass as `ptr`.
+func (e *Emitter) emitNodeWriteWrap3(userTy, chunkTy Type) string {
+	e.streamSiteCtr++
+	fn := fmt.Sprintf("@__kml_ns_optwrite3_%d", e.streamSiteCtr)
+	isAsync := callbackReturnsPromise(userTy)
+
+	restore := e.beginThunkEmit()
+	u := e.freshReg()
+	up := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", up))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", u, up))
+	fp := e.freshReg()
+	fpp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpp, u))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpp))
+	ep := e.freshReg()
+	epp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epp, u))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
+
+	var chunkArg, chunkSig string
+	if chunkTy.IsArray {
+		cp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %%v0 to ptr", cp))
+		hdr := e.newArrayHeader(cp, "%v1")
+		chunkArg = fmt.Sprintf(", ptr %s, i64 %%v1", hdr)
+		chunkSig = ", ptr, i64"
+	} else {
+		chunk := e.streamChunkFromWords("%v0", "%v1", chunkTy)
+		chunkArg = fmt.Sprintf(", %s %s", chunkTy.IR, chunk.Ref)
+		chunkSig = ", " + chunkTy.IR
+	}
+	enc := e.internString("buffer")
+	cb := e.buildBuiltinClosure(e.ensureNoopCallback(), "null")
+	args := fmt.Sprintf("ptr %s%s, ptr %s, ptr %s", ep, chunkArg, enc, cb)
+	sig := "ptr" + chunkSig + ", ptr, ptr"
+	if isAsync {
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr (%s) %s(%s)", r, sig, fp, args))
+		e.emitInstr(fmt.Sprintf("ret ptr %s", r))
+	} else {
+		e.emitInstr(fmt.Sprintf("call void (%s) %s(%s)", sig, fp, args))
+		e.emitInstr("ret ptr null")
+	}
+	body := e.allocas.String() + e.body.String()
+	restore()
+
+	e.functions.WriteString(fmt.Sprintf("\ndefine ptr %s(ptr %%env, i64 %%v0, i64 %%v1) {\nentry:\n%s}\n", fn, body))
+	return fn
+}
+
+// nodeOptionsWriteWrap validates a Node `Writable`/`Duplex` options-form `write`
+// callback's arity and returns the appropriate wrap: the plain one-parameter
+// `write(chunk)` (through emitStreamWriteWrap), or Node's full
+// `write(chunk, encoding, callback)` (through emitNodeWriteWrap3). A two-param
+// shape is ambiguous (encoding vs. callback) and rejected.
+func (e *Emitter) nodeOptionsWriteWrap(userTy, chunkTy Type, kind string, pos ast.Pos) (string, error) {
+	switch len(userTy.FuncParams) {
+	case 0, 1:
+		return e.emitStreamWriteWrap(userTy, chunkTy), nil
+	case 3:
+		if userTy.FuncParams[1].IR != "ptr" || userTy.FuncParams[2].IR != "ptr" {
+			return "", fmt.Errorf("%d:%d: a %s write(chunk, encoding, callback) callback needs a string encoding and a function callback", pos.Line, pos.Col, kind)
+		}
+		return e.emitNodeWriteWrap3(userTy, chunkTy), nil
+	default:
+		return "", fmt.Errorf("%d:%d: a %s write callback takes (chunk) or Node's (chunk, encoding, callback)", pos.Line, pos.Col, kind)
+	}
+}
+
 // ensureNoopCallback emits (once) a void(ptr) function usable as the fn of a
 // no-op closure — the `_write` completion callback our runtime auto-completes.
 func (e *Emitter) ensureNoopCallback() string {

@@ -158,6 +158,9 @@ func (e *Emitter) emitLoopTaskStubs() {
 	if (e.usedHTTP || e.usedTaskRuntime) && !e.usedReqBodyRuntime {
 		e.emitGlobal("define void @__kml_reqbody_pump() {\nentry:\n  ret void\n}")
 		e.emitGlobal("define i1 @__kml_reqbody_want() {\nentry:\n  ret i1 0\n}")
+		// ADR-00986: task_await_ready's fiber-yield safety gate; no reqbody
+		// streaming exists in this program, so nothing is ever active on any fd.
+		e.emitGlobal("define i1 @__kml_reqbody_active_on_fd(i64 %fd) {\nentry:\n  ret i1 0\n}")
 	}
 	if !e.usedHTTP {
 		return
@@ -543,6 +546,13 @@ nowake:
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_task_sched_step() {
 entry:
+  ; Per-call return slot for a resumed task, NOT the global @__kml_main_ctx
+  ; (ADR-00985). A task resumes with resumerCtx pointing here and swaps back
+  ; here when it suspends/finishes, so sched_step can be driven re-entrantly —
+  ; e.g. by a connection fiber busy-waiting in __kml_task_await_ready's toploop
+  ; — without clobbering the global main context the event loop (and every
+  ; fiber's uc_link) return through. Mirrors __kml_spawn_task's own callerctx.
+  %%saveslot = alloca [%d x i8], align 16
   %%multi = load ptr, ptr @__kml_curl_multi, align 8
   %%hasmulti = icmp ne ptr %%multi, null
   call void @__kml_reqbody_pump()
@@ -602,7 +612,7 @@ resume:
   %%r_st_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   store i64 0, ptr %%r_st_p, align 8
   %%r_rc_p = getelementptr %s, ptr %%t, i32 0, i32 %d
-  store ptr @__kml_main_ctx, ptr %%r_rc_p, align 8
+  store ptr %%saveslot, ptr %%r_rc_p, align 8
   %%rj_mainstk = load ptr, ptr @__kml_cur_jmp_stk, align 8
   %%rj_maintop = load i32, ptr @__kml_jmp_top, align 4
   %%rj_tjstk_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr }, ptr %%t, i32 0, i32 10
@@ -616,7 +626,7 @@ resume:
   %%dr_stk_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   %%r_ctx_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   %%r_ctx = load ptr, ptr %%r_ctx_p, align 8%s
-  %%r_sw = call i32 @swapcontext(ptr @__kml_main_ctx, ptr %%r_ctx)
+  %%r_sw = call i32 @swapcontext(ptr %%saveslot, ptr %%r_ctx)
   store ptr null, ptr @__kml_current_task, align 8%s
   store ptr %%rj_mainstk, ptr @__kml_cur_jmp_stk, align 8
   store i32 %%rj_maintop, ptr @__kml_jmp_top, align 4
@@ -626,7 +636,7 @@ next:
   br label %%cond
 done:
   ret void
-}`, taskStructIR, taskState, taskStructIR, taskPendingFetch, taskStructIR, taskPendingProm,
+}`, ctxSize, taskStructIR, taskState, taskStructIR, taskPendingFetch, taskStructIR, taskPendingProm,
 		promiseStructIR, taskStructIR, taskPendingFetch, taskStructIR, taskPendingProm,
 		taskStructIR, taskState, taskStructIR, taskResumerCtx, taskStructIR, taskStack,
 		taskStructIR, taskCtx, gcSetTaskStack, gcRestoreAfterSwap))
@@ -920,7 +930,65 @@ define void @__kml_task_await_ready(ptr %%promise) {
 entry:
   %%ct = load ptr, ptr @__kml_current_task, align 8
   %%topq = icmp eq ptr %%ct, null
-  br i1 %%topq, label %%toploop, label %%ontask
+  br i1 %%topq, label %%checkconn, label %%ontask
+checkconn:
+  ; No current scheduler task. If we are running on a connection fiber's own
+  ; stack — an async http.createServer/http.listen handler awaiting a
+  ; may-suspend helper (a task-shaped promise, not fetch directly) — park by
+  ; yielding the fiber to the event loop so other connections keep being
+  ; served, instead of busy-waiting the fiber to itself (which serialized such
+  ; requests behind one another and starved an in-process client's own
+  ; completion reactions — ADR-00986). The fiber is resumed by
+  ; @__kml_conn_poke, set when the awaited task settles (__kml_task_finish /
+  ; __kml_task_reject), or by fd readiness. Mirrors __kml_reqbody_pull's
+  ; task-vs-fiber guard: only the fiber's own stack may swapcontext through the
+  ; conn slot; a spawned task that merely inherited @__kml_current_conn_idx
+  ; must not (it takes the busy-drive toploop, since it cannot legally yield the
+  ; fiber). await only compiles inside async fns, and the one async fn that
+  ; runs with no current task is the connection handler itself, so
+  ; (task==null && conn_idx>=0) means we are genuinely on that fiber.
+  %%cidx = load i64, ptr @__kml_current_conn_idx, align 8
+  %%onfiber = icmp sge i64 %%cidx, 0
+  br i1 %%onfiber, label %%ckstreaming, label %%toploop
+ckstreaming:
+  ; Safety gate (ADR-00986): if THIS connection is consuming its own request
+  ; body via req.stream(), the fiber must not be yielded — the reactor would
+  ; re-drive/re-resume it on its own still-readable fd, a wild-jump crash (the
+  ; hazard that sank ADR-00985's first attempt on the streaming examples). Such
+  ; an await keeps the busy-drive toploop; only an await with an idle connection
+  ; fd (e.g. a proxy front awaiting an outbound fetch/helper) yields.
+  %%cdata0 = load ptr, ptr @__kml_conn_data, align 8
+  %%cslot0 = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%cdata0, i64 %%cidx
+  %%cfd0_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%cslot0, i32 0, i32 0
+  %%cfd0 = load i64, ptr %%cfd0_p, align 8
+  %%streaming = call i1 @__kml_reqbody_active_on_fd(i64 %%cfd0)
+  br i1 %%streaming, label %%toploop, label %%fiberwait
+fiberwait:
+  %%fres_p = getelementptr %s, ptr %%promise, i32 0, i32 0
+  %%fres = load i64, ptr %%fres_p, align 8
+  %%fdone = icmp ne i64 %%fres, 0
+  br i1 %%fdone, label %%ret, label %%fdrive
+fdrive:
+  ; Drive queued microtasks / the scheduler / timers first: a promise that can
+  ; settle without the reactor's I/O (a microtask already queued) resolves here
+  ; and returns with no yield. sched_step is re-entrant-safe from a fiber
+  ; (per-call resume slot, ADR-00985).
+  call void @__kml_drain_microtasks()
+  call void @__kml_task_sched_step()
+  %%ftf = call i1 @__kml_timer_fire_next()
+  %%fres2 = load i64, ptr %%fres_p, align 8
+  %%fdone2 = icmp ne i64 %%fres2, 0
+  br i1 %%fdone2, label %%ret, label %%fyield
+fyield:
+  ; Still pending: yield to the event loop. Recompute the slot each pass — the
+  ; connection array may be realloc-moved while this fiber is suspended.
+  %%fcidx = load i64, ptr @__kml_current_conn_idx, align 8
+  %%fcdata = load ptr, ptr @__kml_conn_data, align 8
+  %%fslot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%fcdata, i64 %%fcidx
+  %%fctx_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%fslot, i32 0, i32 1
+  %%fctx = load ptr, ptr %%fctx_p, align 8
+  %%fsw = call i32 @swapcontext(ptr %%fctx, ptr @__kml_main_ctx)
+  br label %%fiberwait
 toploop:
   %%tres_p = getelementptr %s, ptr %%promise, i32 0, i32 0
   %%tres = load i64, ptr %%tres_p, align 8
@@ -973,5 +1041,5 @@ parkit:
   br label %%ret
 ret:
   ret void
-}`, promiseStructIR, promiseStructIR, promiseStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, gcRestoreAfterSwap))
+}`, promiseStructIR, promiseStructIR, promiseStructIR, promiseStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, gcRestoreAfterSwap))
 }

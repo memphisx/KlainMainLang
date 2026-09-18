@@ -1336,7 +1336,9 @@ console.log(m.reduce((acc: number, row: number[]) => acc + row.length, 0));
 const found = m.find((row: number[]) => row.length === 3);
 console.log(found ? found.length : -1);
 const notFound = m.find((row: number[]) => row.length === 99);
-console.log(notFound === null ? "null" : "found");
+// A .find() miss is undefined, not null (TDD-00221): undefined === null is
+// false in JS, so this prints "undefined" via the === undefined arm.
+console.log(notFound === undefined ? "undefined" : (notFound === null ? "null" : "found"));
 console.log(m.findIndex((row: number[]) => row.length === 3));
 console.log(m.findLastIndex((row: number[]) => row.length === 1));
 const lastLenOne = m.findLast((row: number[]) => row.length === 1);
@@ -1346,7 +1348,7 @@ console.log(m.every((row: number[]) => row.length > 0));
 const doubled = m.map((row: number[]): number => row.length * 2);
 console.log(doubled[0]);
 console.log(doubled[1]);
-`, "6\n3\nnull\n1\n2\n1\ntrue\ntrue\n4\n6")
+`, "6\n3\nundefined\n1\n2\n1\ntrue\ntrue\n4\n6")
 }
 
 func TestE2ENestedArrayHOFRejectedCleanly(t *testing.T) {

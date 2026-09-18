@@ -26,7 +26,7 @@ the same number of files.
 | `emit_process.go` | `process.argv`, `process.exit(code)`, `process.env.KEY` / `process.env["KEY"]` |
 | `emit_date.go` | `Date`: construction, getters/setters, `parse`, arithmetic, formatting |
 | `emit_dynamic.go` | `any`/`unknown` as a runtime-tagged `{tag, payload}` value |
-| `emit_async.go` | `async`/`await`, `Promise<T>` (synchronous V1 — no event loop yet) |
+| `emit_async.go` | `async`/`await`, `Promise<T>` (over the `select()`-based event loop / reactor) |
 | `emit_promise.go` | `Promise.all`/`.race`/`.allSettled` |
 | `emit_fetch.go` | `fetch(url)`/`fetch(url, init)`/`fetch(request)` and `Response` (backed by libcurl) |
 | `emit_headers.go` | `Headers` — a case-insensitive `Map<string,string>` wrapper (`get`/`set`/`has`/`delete`/`append`; `forEach`/`entries`/`keys`/`values` reuse `Map`'s own) |
@@ -61,4 +61,4 @@ the same number of files.
 | `runtime_url.go` | libcurl URL API declarations (`curl_url*`) |
 | `runtime_misc.go` | console group/timer/count-map state, closure/map-free helpers |
 | `runtime_http.go` | HTTP server + fiber-scheduler C-runtime helpers |
-| `runtime_os.go` | `os` module's substantial C-runtime helpers: growable procfs reading, and the Linux (`/proc/cpuinfo`/`/proc/stat` parsing)/Darwin (Mach `host_processor_info`, unverified on real hardware) implementations of `os.cpus()` |
+| `runtime_os.go` | `os` module's substantial C-runtime helpers: growable procfs reading, and the Linux (`/proc/cpuinfo`/`/proc/stat` parsing)/Darwin (Mach `host_processor_info`) implementations of `os.cpus()` |

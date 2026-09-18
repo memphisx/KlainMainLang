@@ -26,6 +26,25 @@ func parseAndCompile(src string) (string, error) {
 	return em.EmitProgram(prog)
 }
 
+// resolveAndCompile is parseAndCompile for sources that use imports: it writes
+// src to a real temp file and goes through resolver.ResolveProgram (which strips
+// ImportDeclaration nodes) before codegen, so a rejection test can assert on the
+// codegen error of an import-bearing program (e.g. `import http from 'http'`)
+// without building a binary.
+func resolveAndCompile(t *testing.T, src string) (string, error) {
+	t.Helper()
+	d := tempDir(t)
+	srcFile := filepath.Join(d, "main.ts")
+	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	prog, err := resolver.ResolveProgram(srcFile)
+	if err != nil {
+		return "", err
+	}
+	return llvm.NewEmitter().EmitProgram(prog)
+}
+
 // applyTestModeEnv applies the TDD-00174 Stage-A mode knobs to a generic
 // buildBinary emitter: KLAIN_TEST_MM=manual|auto and KLAIN_TEST_OPTMEM=1 run
 // the whole E2E suite through that memory mode / -optimize-memory, turning it
@@ -325,6 +344,15 @@ func appendSpawnSync(t *testing.T, em *llvm.Emitter, dir string, clangArgs []str
 			t.Fatalf("write spawnsync source: %v", err)
 		}
 		clangArgs = append(clangArgs, ssFile)
+	}
+	// The self-spawn fork-chain guard C helper (ADR-00972), shared by the sync
+	// and async spawn paths.
+	if em.UsesReexecGuard() {
+		rgFile := filepath.Join(dir, "reexecguard.c")
+		if err := os.WriteFile(rgFile, []byte(llvm.ReexecGuardSource()), 0644); err != nil {
+			t.Fatalf("write reexecguard source: %v", err)
+		}
+		clangArgs = append(clangArgs, rgFile)
 	}
 	// The fork IPC framing C (TDD-00141) rides the same helper.
 	if em.UsesIPC() {

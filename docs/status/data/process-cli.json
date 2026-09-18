@@ -38,10 +38,10 @@
             "feature": "Environment variables (`process.env.KEY` / `process.env[\"KEY\"]`)",
             "status": "implemented",
             "notes": [
-              "Both dot and bracket notation; returns `string \\| undefined` — `process.env.X ?? \"default\"`, `=== undefined`, printing, and narrowing all behave as in Node ([ADR-00780](../adr/ADR-00780.md))"
+              "Both dot and bracket notation; returns `string \\| undefined` — `process.env.X ?? \"default\"`, `=== undefined`, printing, string compares, and narrowing all behave as in Node ([ADR-00724](../adr/ADR-00724.md)/[ADR-00780](../adr/ADR-00780.md))"
             ],
             "caveats": [
-              "`typeof process.env.MISSING` is `'string'` (Node: `'undefined'`) — `typeof` reads the static kind, not the runtime absence; every other observable (`=== undefined`, printing `undefined`, `??`, string compares) matches Node ([ADR-00724](../adr/ADR-00724.md)/[ADR-00780](../adr/ADR-00780.md))"
+              "`typeof process.env.MISSING` is `'string'` (Node: `'undefined'`) — `typeof` reads the static kind, not the runtime absence"
             ]
           },
           {
@@ -156,9 +156,10 @@
             "status": "implemented",
             "caveats": [
               "Text-only (byte-string, not binary-safe past an embedded null — same scope narrowing `console.log`'s own string formatting already has)",
-              "Beyond `.write`, `.isTTY` (a real `isatty(fd)` probe on all three stdio handles — [ADR-00424](../adr/ADR-00424.md)), and `.columns`/`.rows` (a live `ioctl(TIOCGWINSZ)` read — [ADR-00518](../adr/ADR-00518.md)), `process.stdout`/`stderr` expose no other stream surface (no `'drain'`)"
+              "No stream surface beyond `.write`/`.isTTY`/`.columns`/`.rows` (no `'drain'`)"
             ],
             "notes": [
+              "`process.stdout`/`stderr` also expose `.isTTY` (a real `isatty(fd)` probe on all three stdio handles — [ADR-00424](../adr/ADR-00424.md)) and `.columns`/`.rows` (a live `ioctl(TIOCGWINSZ)` read — [ADR-00518](../adr/ADR-00518.md))",
               "Unlike `console.log`/`.error` (always a trailing newline), a plain write of exactly `s` with nothing appended — useful for a progress indicator or assembling one line from several pieces",
               "`stdout` goes through buffered `printf` (matching `console.log`'s own fd=1 convention, so output ordering against `console.log` calls elsewhere in the same program stays correct); `stderr` goes through unbuffered `dprintf` (matching `console.error`'s own fd=2 convention)"
             ]
@@ -279,8 +280,8 @@
             "feature": "`process.version` / `process.versions`",
             "status": "implemented",
             "caveats": [
-              "`versions` reports only honest values — `node`/`v8` (the pinned Node compatibility baseline, v22.11.0) and `klain` (this compiler's version); it deliberately omits bundled-lib keys this compiler doesn't ship (`uv`/`undici`/`icu`/…) rather than fabricate them",
-              "The linked-library versions that could be reported truthfully (`openssl` under the OpenSSL backend, `zlib` when linked) are not surfaced — they need a runtime lib query + backend-aware linking",
+              "`versions` omits bundled-lib keys this compiler doesn't ship (`uv`/`undici`/`icu`/…) rather than fabricate them",
+              "Linked-library versions that could be reported truthfully (`openssl` under the OpenSSL backend, `zlib` when linked) are not surfaced",
               "`node`/`v8` track the compatibility *ceiling* (the pinned test-corpus release); a `--node-compat` floor is deferred ([TDD-00136](../tdd/TDD-00136.md))"
             ],
             "notes": [
@@ -327,15 +328,21 @@
             "caveats": [
               "The listener callbacks fire synchronously from the event loop's dispatch, not deferred through the microtask queue (`process.nextTick` — see the row above)",
               "One listener per event, an arrow/function-expression literal only (the same posture as `Worker`); no `removeListener`",
-              "spawn's options support `{ cwd, shell, stdio: 'pipe' }` ([ADR-00433](../adr/ADR-00433.md), [ADR-00740](../adr/ADR-00740.md)) — `cwd` is real (child chdir); `shell: true` routes the command through the platform shell (`/bin/sh -c` / `cmd.exe /d /s /c`, honouring `%ComSpec%`) as one string (a shell *path*, a dynamic value, or `shell:true` with an args array are clean rejections); `env` fully replaces the child's environment (an object literal of string values, Node's non-merging semantics — [ADR-00762](../adr/ADR-00762.md)); `windowsHide` (literal bool) suppresses the child's console window on Windows (`CREATE_NO_WINDOW`) and is a no-op on POSIX ([ADR-00763](../adr/ADR-00763.md)); `timeout` (ms) kills the child via the event loop with `killSignal` (a literal name/number, default SIGTERM), surfacing as the `(null, '<signal>')` exit event ([ADR-00764](../adr/ADR-00764.md)); `detached` (literal bool) makes the child a new session/group leader — `setsid` on POSIX, `DETACHED_PROCESS` on Windows ([ADR-00765](../adr/ADR-00765.md)); `stdio` takes `'pipe'`/`'inherit'`/`'ignore'` as a string or a 3-element `[stdin, stdout, stderr]` array — inherit wires the fd to the parent's, ignore sends it to `/dev/null`/NUL ([ADR-00766](../adr/ADR-00766.md); fd numbers, `'ipc'` and streams are clean rejections); exec/execFile still take no options",
-              "`exec`/`execSync` pass the command line to the shell **verbatim** — embedded quotes survive (`exec('echo \"hi\"')`), matching Node; on Windows a `.bat`/`.cmd` spawned *without* a shell is refused, surfacing as the spawn `'error'` event (`EINVAL`) rather than run through an implicit `cmd.exe`, closing the CVE-2024-27980 argument-injection path ([ADR-00740](../adr/ADR-00740.md)/[ADR-00754](../adr/ADR-00754.md))",
-              "The `'error'` Error carries `.message` (`spawn <reason>`), `.code` (`ENOENT` for a missing command — the canonical `e.code === 'ENOENT'` guard) and `.errno` (the negative libuv-style errno, `-2` on POSIX — [ADR-00784](../adr/ADR-00784.md)); `.syscall`/`.path`/`.spawnargs` and Node's `spawn <file> <CODE>` message wording (which need the command string threaded in) are still unset",
+              "Only `spawn` takes an options object; `exec`/`execFile` take no options",
+              "`shell` must be `true` (the command as one string); a shell *path*, a dynamic value, or `shell: true` with an args array are clean rejections",
+              "`env` must be an object literal of string values (fully replaces the child env, Node's non-merging semantics)",
+              "`stdio` fd numbers, `'ipc'`, and streams are clean rejections (only `'pipe'`/`'inherit'`/`'ignore'`, as a string or a 3-element array)",
+              "`timeout`'s `killSignal` must be a literal name/number",
+              "The `'error'` Error's `.syscall`/`.path`/`.spawnargs` and Node's `spawn <file> <CODE>` message wording are unset",
               "A legacy `'exit'`/`'close'` listener that declares one non-nullable `number` param sees `0` (not `null`) on a signal death — a plain `number` can't hold `null`; type the param `number | null` for the faithful `null` ([ADR-00761](../adr/ADR-00761.md))",
               "`child.kill` takes a signal *name* string only as a **literal** (resolved to the host's signal number at compile time) or a number; a dynamic signal-name string is a clean rejection",
               "Handles and their buffered output are never freed (`-mm=manual`)"
             ],
             "notes": [
               "fork()+execvp() with three pipes; the two read ends are non-blocking and fold into the same `select()` event loop as Worker/channel pipes ([ADR-00322](../adr/ADR-00322.md))",
+              "spawn options: `cwd` (child chdir), `shell: true` (platform shell `/bin/sh -c` / `cmd.exe /d /s /c`, honouring `%ComSpec%`), `env` (replaces the child env), `windowsHide` (Windows `CREATE_NO_WINDOW`, no-op on POSIX), `timeout`+`killSignal` (kills via the loop, default SIGTERM, surfacing as `(null, '<signal>')`), `detached` (new session/group leader — `setsid` / `DETACHED_PROCESS`), `stdio` (`'pipe'`/`'inherit'`/`'ignore'` string or 3-element array). See [ADR-00433](../adr/ADR-00433.md), [ADR-00740](../adr/ADR-00740.md), [ADR-00762](../adr/ADR-00762.md), [ADR-00763](../adr/ADR-00763.md), [ADR-00764](../adr/ADR-00764.md), [ADR-00765](../adr/ADR-00765.md), [ADR-00766](../adr/ADR-00766.md)",
+              "`exec`/`execSync` pass the command line to the shell **verbatim** (embedded quotes survive), matching Node; on Windows a `.bat`/`.cmd` spawned *without* a shell is refused (spawn `'error'`, `EINVAL`) rather than run through an implicit `cmd.exe`, closing the CVE-2024-27980 argument-injection path ([ADR-00740](../adr/ADR-00740.md)/[ADR-00754](../adr/ADR-00754.md))",
+              "The `'error'` Error carries `.message` (`spawn <reason>`), `.code` (`ENOENT` for a missing command) and `.errno` (negative libuv-style errno, `-2` on POSIX) ([ADR-00784](../adr/ADR-00784.md))",
               "`spawn` streams (`child.stdout`/`stderr` `'data'`/`'end'`, `child.on('close'/'exit'/'error')`, `child.stdin.write`/`.end`, `child.pid`, `child.kill`, `child.unref()`/`ref()` — the loop-keepalive opt-out, [ADR-00767](../adr/ADR-00767.md)); `exec` runs via `/bin/sh -c` and `execFile` execvp's directly, both buffering into a single `(err, stdout, stderr)` callback",
               "A spawn that fails to start (a missing command → `ENOENT`) emits the `'error'` event with an `Error` and **not** `'exit'` — detected via a close-on-exec status pipe on POSIX and `CreateProcessW`'s failure on Windows ([ADR-00754](../adr/ADR-00754.md))",
               "The `'exit'`/`'close'` exit `code` is the child's real width: on Windows the full 32-bit value (`cmd /c exit 300` → `300`, an access violation → `3221225477`), on POSIX the 8-bit wait-status field (`300 & 0xff = 44`, as Node also reports there) ([ADR-00759](../adr/ADR-00759.md))",
