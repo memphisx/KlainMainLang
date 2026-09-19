@@ -12,15 +12,15 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3957 files total: **52 passed**, 2534 failed, 1371 skipped (out of scope).
+3957 files total: **54 passed**, 2532 failed, 1371 skipped (out of scope).
 
-Of the 2586 files that compiled far enough to run, **52 passed (2.0%)**.
+Of the 2586 files that compiled far enough to run, **54 passed (2.1%)**.
 
 ## By suite
 
 | Suite | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|
-| parallel | 48 | 2424 | 1071 | 3543 |
+| parallel | 50 | 2422 | 1071 | 3543 |
 | sequential | 0 | 31 | 90 | 121 |
 | es-module | 2 | 57 | 116 | 175 |
 | message | 1 | 8 | 2 | 11 |
@@ -45,7 +45,7 @@ Of the 2586 files that compiled far enough to run, **52 passed (2.0%)**.
 | vm | 0 | 75 | 19 | 94 |
 | process | 6 | 63 | 21 | 90 |
 | dgram | 1 | 59 | 26 | 86 |
-| cluster | 0 | 63 | 22 | 85 |
+| cluster | 2 | 61 | 22 | 85 |
 | repl | 0 | 37 | 41 | 78 |
 | https | 0 | 53 | 15 | 68 |
 | inspector | 0 | 2 | 64 | 66 |
@@ -79,20 +79,20 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 227 | COMPILE_ERROR: a number has no method '%s' |
+| 229 | COMPILE_ERROR: a number has no method '%s' |
 | 219 | COMPILE_ERROR: slice is only supported on strings |
 | 135 | COMPILE_ERROR: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method |
-| 134 | COMPILE_ERROR: undefined variable '%s' |
+| 132 | COMPILE_ERROR: undefined variable '%s' |
 | 114 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 93 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 84 | MODULE_NOT_IMPLEMENTED: vm |
-| 64 | COMPILE_ERROR: field access on non-object (no field '%s') |
-| 55 | COMPILE_ERROR: no field '%s' |
+| 65 | COMPILE_ERROR: field access on non-object (no field '%s') |
+| 56 | COMPILE_ERROR: no field '%s' |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
 | 49 | COMPILE_ERROR: unknown class '%s' |
-| 44 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
+| 42 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
+| 41 | RUNTIME_NONZERO_EXIT:  |
 | 40 | COMPILE_ERROR: undefined function or closure '%s' |
-| 40 | RUNTIME_NONZERO_EXIT:  |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
 | 26 | COMPILE_ERROR: process has no method '%s' |
 | 24 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
@@ -101,24 +101,24 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 20 | COMPILE_ERROR: field assignment on non-object |
 | 20 | COMPILE_ERROR: fs has no method '%s' |
 | 20 | MODULE_NOT_IMPLEMENTED: v8 |
+| 19 | COMPILE_ERROR: type mismatch in array element — a value of one type cannot be used where an incomp… |
 | 19 | COMPILE_ERROR: unexpected token + in expression |
 | 18 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
 | 18 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
-| 18 | COMPILE_ERROR: type mismatch in array element — a value of one type cannot be used where an incomp… |
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
 | 17 | COMPILE_ERROR: only simple function calls are supported (the callee is not a named function, a funct… |
 | 17 | MODULE_NOT_IMPLEMENTED: module |
+| 16 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
 | 15 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
-| 15 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
 | 15 | COMPILE_ERROR: http.createServer's listener must be (req: IncomingMessage, res: ServerResponse) => v… |
 | 15 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
 | 13 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s'|'%s'|'%s'|'%s'|'%s'|'%s', listener) (got '… |
-| 13 | COMPILE_ERROR: expected ), got , |
 | 13 | COMPILE_ERROR: expected }, got : |
 | 13 | COMPILE_ERROR: new Worker options: only '%s' is supported (found '%s') |
 | 12 | COMPILE_ERROR: a ReadableStream's read callback must be an arrow function or function expression |
 | 12 | COMPILE_ERROR: on'%s's payload type |
 | 11 | COMPILE_ERROR: '%s' is not an object |
+| 11 | COMPILE_ERROR: a ChildProcess stream supports only .on('%s'|'%s', cb) |
 
 ## Top skip reasons
 
@@ -152,7 +152,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 12 | requires Node common harness (common.spawnPromisified) |
 | 11 | Node-internal harness file require('../common/dns') |
 
-## Passing files (52)
+## Passing files (54)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
@@ -166,6 +166,8 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-buffer-badhex.js` | buffer |  |
 | `parallel/test-buffer-nopendingdep-map.js` | buffer |  |
 | `parallel/test-child-process-set-blocking.js` | child |  |
+| `parallel/test-cluster-disconnect-with-no-workers.js` | cluster |  |
+| `parallel/test-cluster-worker-death.js` | cluster |  |
 | `parallel/test-dgram-abort-closed.js` | dgram |  |
 | `parallel/test-diagnostics-channel-has-subscribers.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-sync-unsubscribe.js` | diagnostics |  |

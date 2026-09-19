@@ -47,9 +47,6 @@
           {
             "feature": "`.push(...items)`",
             "status": "implemented",
-            "caveats": [
-              "An array passed as an **object field** or **array element** (`obj.items`, `grid[i]`), or as a higher-order-callback element, still crosses as a copy, so a length change through those is not seen by the caller ([TDD-00127](../tdd/TDD-00127.md))"
-            ],
             "notes": [
               "Variadic (incl. the zero-argument call), and works on any mutable receiver — a variable, an object/class array field (`this.items.push(x)`), or a nested-array element (`matrix[0].push(x)`) — see [ADR-00284](../adr/ADR-00284.md)"
             ]
@@ -57,9 +54,6 @@
           {
             "feature": "`.pop()`",
             "status": "implemented",
-            "caveats": [
-              "When the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element, a length change in a callee is not seen by the caller — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md))"
-            ],
             "notes": [
               "Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens",
               "Works on any mutable receiver (variable, object/class field, nested-array element — [ADR-00284](../adr/ADR-00284.md)). See [ADR-00167](../adr/ADR-00167.md)"
@@ -68,9 +62,6 @@
           {
             "feature": "`.shift()`",
             "status": "implemented",
-            "caveats": [
-              "When the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element, a length change in a callee is not seen by the caller — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md))"
-            ],
             "notes": [
               "Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens",
               "Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md)). See [ADR-00167](../adr/ADR-00167.md)"
@@ -79,9 +70,6 @@
           {
             "feature": "`.unshift(...items)`",
             "status": "implemented",
-            "caveats": [
-              "When the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element, a length change in a callee is not seen by the caller — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md))"
-            ],
             "notes": [
               "Variadic (incl. the zero-argument call), any mutable receiver ([ADR-00284](../adr/ADR-00284.md))"
             ]
@@ -89,9 +77,6 @@
           {
             "feature": "`.splice(start, delete?, ...items)`",
             "status": "implemented",
-            "caveats": [
-              "When the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element, a length change in a callee is not seen by the caller — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md))"
-            ],
             "notes": [
               "Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md))",
               "`delete` clamps to `[0, len - start]` and `start` normalizes negative indices, matching real JS",
@@ -99,7 +84,7 @@
             ]
           },
           {
-            "feature": "`.slice(start, end?)`",
+            "feature": "`.slice(start?, end?)`",
             "status": "implemented"
           },
           {

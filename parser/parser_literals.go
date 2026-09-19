@@ -448,17 +448,35 @@ func (p *Parser) parseNewErrorBody(pos ast.Pos, kind string) (*ast.NewErrorExpre
 		return nil, err
 	}
 	var msg ast.Expression
+	var cause ast.Expression
 	if !p.check(lexer.RPAREN) {
 		var err error
 		msg, err = p.parseAssignment()
 		if err != nil {
 			return nil, err
 		}
+		// Optional error-options second argument: `new Error(msg, { cause })`.
+		// The options bag must be an object literal whose sole member is
+		// `cause` — the one member the runtime error shape carries.
+		if p.check(lexer.COMMA) {
+			p.advance()
+			opts, err := p.parseAssignment()
+			if err != nil {
+				return nil, err
+			}
+			lit, ok := opts.(*ast.ObjectLiteral)
+			if !ok || len(lit.Properties) != 1 || lit.Properties[0].Key != "cause" || lit.Properties[0].Value == nil {
+				return nil, fmt.Errorf("%d:%d: new %s's second argument must be a `{ cause: <expr> }` object literal", pos.Line, pos.Col, kind)
+			}
+			cause = lit.Properties[0].Value
+		}
 	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
-	return ast.NewNewErrorExpression(kind, msg, pos), nil
+	ne := ast.NewNewErrorExpression(kind, msg, pos)
+	ne.Cause = cause
+	return ne, nil
 }
 
 // parseNewDOMExceptionBody parses `new DOMException(message?, name?)` — unlike

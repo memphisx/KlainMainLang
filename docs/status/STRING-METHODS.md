@@ -12,7 +12,7 @@ Format: [Status page format](README.md#status-page-format).
 |---|---|---|---|
 | `+` (concatenation) | ✅ | | • A null operand stringifies as `"null"` (`"x" + null === "xnull"`), matching real JS ([ADR-00165](../adr/ADR-00165.md))<br>• A `number \| null` operand renders `"null"` for the null case (`"x" + n`) — as a parameter, local, object field, or a `T | null`-returning call — not its payload zero ([ADR-00537](../adr/ADR-00537.md)/[ADR-00538](../adr/ADR-00538.md)) |
 | `.length` | ✅ | • Byte length, not the JS UTF-16 code-unit count — `'café'.length` is `5` (Node: `4`). | |
-| `.slice(start, end?)` | ✅ | • Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it (`'café'.slice(0, 4)` cuts mid-`é`), diverging from Node on non-ASCII text. | |
+| `.slice(start?, end?)` | ✅ | • Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it (`'café'.slice(0, 4)` cuts mid-`é`), diverging from Node on non-ASCII text. | |
 | `.substring(start, end?)` | ✅ | • Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it, unlike Node's code-unit indexing on non-ASCII text. | |
 | `.substr(start, length?)` | ✅ | • Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it, unlike Node's code-unit indexing on non-ASCII text. | |
 | `.indexOf(substr, fromIndex?)` | ✅ | • Returns a byte offset, not a UTF-16 index — `'naïve'.indexOf('ve')` is `4` (Node: `3`). | |

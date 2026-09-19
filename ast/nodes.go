@@ -1376,6 +1376,7 @@ type NewErrorExpression struct {
 	Message Expression // nil if no argument
 	Name    Expression // DOMException's 2nd arg; nil for the fixed-name kinds
 	Errors  Expression // AggregateError's 1st arg (the aggregated errors); nil otherwise
+	Cause   Expression // the options bag's `cause` (`new Error(msg, { cause })`); nil when absent
 	pos     Pos
 }
 

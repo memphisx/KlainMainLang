@@ -178,6 +178,7 @@ func (e *Emitter) ensureFetchAsync() {
 	e.ensureCurrentTaskGlobal() // @__kml_current_task, read by the may-suspend task-park path below
 	e.ensureExceptionHelpers()
 	e.ensureSignalAborted() // __kml_signal_aborted, used by the await abort check (TDD-00081)
+	e.ensureNanBox()        // __kml_nb_tag/__kml_nb_pay, to throw the boxed signal.reason on abort
 
 	// Task-park path (TDD-00083 Stage 2): when a fetch is awaited inside a
 	// coroutine task (not a connection fiber), park the task on the fetch and
@@ -209,7 +210,7 @@ func (e *Emitter) ensureFetchAsync() {
 	abortMsgPtr := e.internString("The operation was aborted")
 	timeoutNamePtr := e.internString("TimeoutError")
 	timeoutMsgPtr := e.internString("The operation timed out")
-	domExcKind := errorKindIDs["DOMException"]
+	domExcKind := errorTypeIDStored(errorKindIDs["DOMException"]) // field-0 Error type-id (TDD-00222)
 
 	e.emitGlobal("declare ptr @curl_multi_init()")
 	e.emitGlobal("declare i32 @curl_multi_add_handle(ptr noundef, ptr noundef)")
@@ -441,7 +442,7 @@ neterror:
   %errstr_hdr = call ptr @__kml_str_from_cstr(ptr %errstr)
   %errobj = call ptr @malloc(i64 24)
   %errobj.kind = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 0
-  store i64 0, ptr %errobj.kind, align 8
+  store i64 281474976710656, ptr %errobj.kind, align 8
   %errobj.msg = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 1
   store ptr %errstr_hdr, ptr %errobj.msg, align 8
   %errobj.name = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 2
@@ -512,12 +513,31 @@ doabort:
   %%ab_multi = load ptr, ptr @__kml_curl_multi, align 8
   call i32 @curl_multi_remove_handle(ptr %%ab_multi, ptr %%ab_easy)
   call void @curl_easy_cleanup(ptr %%ab_easy)
+  ; Node rejects the fetch with signal.reason. The reason slot is a NaN-boxed
+  ; any: when it holds a value (a custom abort(reason), or the default/timeout
+  ; DOMException stored at abort time), unbox and throw it as-is — the same
+  ; (tag, payload) path a user-level throw of an any takes. The slot can still
+  ; read undefined here for an AbortSignal.timeout whose deadline the aborted
+  ; check latched before the background dispatcher stored the reason — fall
+  ; back to constructing the matching DOMException below.
+  %%ab_r_p = getelementptr { i1, i64, ptr, i64 }, ptr %%sig, i32 0, i32 1
+  %%ab_r = load i64, ptr %%ab_r_p, align 8
+  %%ab_isundef = icmp eq i64 %%ab_r, %d
+  br i1 %%ab_isundef, label %%abdefault, label %%abreason
+
+abreason:
+  %%ab_rtag = call i8 @__kml_nb_tag(i64 %%ab_r)
+  %%ab_rpay = call i64 @__kml_nb_pay(i64 %%ab_r)
+  call void @__kml_throw_any(i8 %%ab_rtag, i64 %%ab_rpay)
+  unreachable
+
+abdefault:
   ; A non-zero deadline means this signal came from AbortSignal.timeout, whose
   ; abort is a "TimeoutError" DOMException; a manual controller.abort() (no
   ; deadline) is an "AbortError" DOMException. Both carry the DOMException kind
   ; tag so 'e instanceof DOMException' (and, since DOMException inherits Error,
   ; 'e instanceof Error') both hold in the catch handler.
-  %%ab_dl_p = getelementptr { i1, ptr, ptr, i64 }, ptr %%sig, i32 0, i32 3
+  %%ab_dl_p = getelementptr { i1, i64, ptr, i64 }, ptr %%sig, i32 0, i32 3
   %%ab_dl = load i64, ptr %%ab_dl_p, align 8
   %%ab_istimeout = icmp ne i64 %%ab_dl, 0
   %%ab_name = select i1 %%ab_istimeout, ptr %s, ptr %s
@@ -559,7 +579,7 @@ busyspin:
 finish:
   %%raw = call { i64, ptr, i64 } @__kml_pending_finish(ptr %%pending)
   ret { i64, ptr, i64 } %%raw
-}`, timeoutNamePtr, abortNamePtr, timeoutMsgPtr, abortMsgPtr, domExcKind, awfTaskCheck, awfTaskYield))
+}`, nbUndefined, timeoutNamePtr, abortNamePtr, timeoutMsgPtr, abortMsgPtr, domExcKind, awfTaskCheck, awfTaskYield))
 }
 
 // ensureAwaitFetchHeaders emits @__kml_await_fetch_headers (TDD-00097
@@ -875,7 +895,7 @@ notfound:
 		errName := e.internString("Error")
 		aggName := e.internString("AggregateError")
 		aggMsg := e.internString("All promises were rejected")
-		aggID := errorKindIDs["AggregateError"]
+		aggID := errorTypeIDStored(errorKindIDs["AggregateError"]) // field-0 Error type-id (TDD-00222)
 		e.emitGlobal(fmt.Sprintf(`
 define void @__kml_group_throw_aggregate(ptr %%group) {
 entry:
@@ -900,7 +920,7 @@ body:
   %%errstr_hdr = call ptr @__kml_str_from_cstr(ptr %%errstr)
   %%eo = call ptr @malloc(i64 24)
   %%eo_k = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 0
-  store i64 0, ptr %%eo_k, align 8
+  store i64 281474976710656, ptr %%eo_k, align 8
   %%eo_m = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 1
   store ptr %%errstr_hdr, ptr %%eo_m, align 8
   %%eo_n = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 2

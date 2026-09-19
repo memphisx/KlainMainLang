@@ -6,10 +6,10 @@
   "coverage": {
     "loose": "37/37",
     "loosePct": 100,
-    "strict": "23/37",
-    "strictPct": 62
+    "strict": "28/37",
+    "strictPct": 76
   },
-  "lede": "Every Array method is present. The recurring caveats are structural, not per-method: a length change (push/pop/splice) inside a callee is now visible to the caller when the array is passed as a plain variable (arrays are reference values), though passing an object-field or array-element array still copies; and the element-comparing helpers (indexOf/includes/join/sort) reject a nested-array element.",
+  "lede": "Every Array method is present, and arrays are full reference values: a length change (push/pop/splice) inside a callee is visible to the caller for every argument shape — a plain variable, an object-field or array-element array, or a HOF-callback element. The remaining recurring caveat is structural: the element-comparing helpers (indexOf/includes/join/sort) reject a nested-array element.",
   "entries": [
     {
       "id": "array.literal",
@@ -64,7 +64,7 @@
       "id": "array.push",
       "name": ".push(...items)",
       "signature": "push(...items: T[]): number",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Appends items and returns the new length. Variadic (including the zero-argument call), and works on any mutable receiver — a variable, an object/class array field (this.items.push(x)), or a nested-array element (matrix[0].push(x)).",
       "returns": {
         "type": "number",
@@ -72,9 +72,6 @@
       },
       "exampleKey": "arrays/array_methods",
       "snippet": "let arr = new Array<number>(0)\narr.push(10)\nlet len: number = arr.push(20)   // 2",
-      "differences": [
-        "A length change inside a callee is seen by the caller when the array is passed as a plain **variable** (full JS reference semantics); an array passed as an **object field** or **array element** (`obj.items`, `grid[i]`) crosses as a copy, so a length change through those is not seen."
-      ],
       "seeAlso": [
         "array.pop",
         "array.unshift"
@@ -87,7 +84,7 @@
       "id": "array.pop",
       "name": ".pop()",
       "signature": "pop(): T | undefined",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Removes and returns the last element. Works on any mutable receiver (variable, object/class field, nested-array element).",
       "returns": {
         "type": "T | undefined",
@@ -96,8 +93,7 @@
       "exampleKey": "arrays/array_methods",
       "snippet": "let stack = [10, 20, 30]\nlet a = stack.pop()   // 30",
       "differences": [
-        "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens.",
-        "A length change propagates to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** or a HOF-callback element."
+        "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens."
       ],
       "seeAlso": [
         "array.push",
@@ -111,7 +107,7 @@
       "id": "array.shift",
       "name": ".shift()",
       "signature": "shift(): T | undefined",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Removes and returns the first element, shifting the rest down. Works on any mutable receiver.",
       "returns": {
         "type": "T | undefined",
@@ -120,8 +116,7 @@
       "exampleKey": "arrays/mutators_everywhere",
       "snippet": "const done = list.titles.shift()",
       "differences": [
-        "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens.",
-        "A length change propagates to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** or a HOF-callback element."
+        "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens."
       ],
       "seeAlso": [
         "array.unshift",
@@ -135,7 +130,7 @@
       "id": "array.unshift",
       "name": ".unshift(...items)",
       "signature": "unshift(...items: T[]): number",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Prepends items and returns the new length. Variadic (including the zero-argument call), any mutable receiver.",
       "returns": {
         "type": "number",
@@ -143,9 +138,6 @@
       },
       "exampleKey": "arrays/mutators_everywhere",
       "snippet": "list.titles.unshift(\"wake up\", \"coffee in Thessaloniki\")",
-      "differences": [
-        "A length change propagates to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** or a HOF-callback element."
-      ],
       "seeAlso": [
         "array.shift",
         "array.push"
@@ -158,16 +150,13 @@
       "id": "array.splice",
       "name": ".splice(start, delete?, ...items)",
       "signature": "splice(start: number, deleteCount?: number, ...items: T[]): T[]",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Removes deleteCount elements from start and inserts items in their place. deleteCount clamps to [0, len - start] and a negative start is normalized, matching real JS. Works on any mutable receiver.",
       "returns": {
         "type": "T[]",
         "desc": "The removed elements."
       },
       "exampleKey": "arrays/array_methods",
-      "differences": [
-        "A length change propagates to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** or a HOF-callback element."
-      ],
       "seeAlso": [
         "array.slice",
         "array.toSorted"
@@ -178,10 +167,10 @@
     },
     {
       "id": "array.slice",
-      "name": ".slice(start, end?)",
-      "signature": "slice(start: number, end?: number): T[]",
+      "name": ".slice(start?, end?)",
+      "signature": "slice(start?: number, end?: number): T[]",
       "badge": "exact",
-      "description": "Returns a shallow copy of a section of the array. Negative indices count from the end. Does not mutate the original.",
+      "description": "Returns a shallow copy of a section of the array (the whole array with no arguments). Negative indices count from the end. Does not mutate the original.",
       "returns": {
         "type": "T[]",
         "desc": "A new array."

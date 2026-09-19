@@ -348,6 +348,22 @@ func constObjectKey(index ast.Expression) (string, bool) {
 }
 
 func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
+	// cluster.workers[id] is Node's ID-keyed lookup (the workers "object" is
+	// keyed by worker id, not position): a registry scan for .id == id,
+	// null when the worker exited or never existed.
+	if mem, ok := ex.Object.(*ast.MemberExpression); ok && mem.Property == "workers" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "cluster__kml_builtin" {
+			e.ensureClusterRuntime()
+			idxVal, err := e.emitExpr(ex.Index)
+			if err != nil {
+				return Value{}, err
+			}
+			idx := e.coerce(idxVal, TypeI64)
+			w := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_cluster_worker_by_id(i64 %s)", w, idx.Ref))
+			return Value{Ref: w, Ty: ClusterWorkerType()}, nil
+		}
+	}
 	// Enum bracket access (ADR-00480): `E["B"]` with a literal string key is
 	// the member's value; `E[0]` / `E[expr]` with a numeric key is the
 	// *reverse* mapping (value → member name string), resolved at compile
@@ -874,6 +890,10 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return e.emitClusterIsWorker()
 		case "workerId":
 			return e.emitClusterWorkerID()
+		case "workers":
+			return e.emitClusterWorkers()
+		case "settings":
+			return e.emitClusterSettings()
 		}
 	}
 	if e.inferExprType(ex.Object).IsClusterWorker {

@@ -165,3 +165,48 @@ int64_t __kml_ipc_send(int64_t fd, const char *s) {
     free(buf);
     return w == o ? 1 : 0;
 }
+
+// take2 — like __kml_ipc_take, additionally reporting the wire kind: *isstr =
+// 1 when the line was a quoted JSON string (payload returned unquoted, Node's
+// send("...") case), 0 when it was any other JSON value (object/array/number/
+// boolean — the raw JSON text is returned verbatim for the receiver to parse).
+// Node's `json` serialization mode both directions (TDD-00105/TDD-00141).
+char *__kml_ipc_take2(void *chanv, int64_t *isstr) {
+    KmlIpcChan *ch = (KmlIpcChan *)chanv;
+    *isstr = 0;
+    if (!ch->data) return NULL;
+    char *nl = memchr(ch->data, '\n', ch->len);
+    if (!nl) return NULL;
+    int64_t linelen = nl - ch->data;
+    char *msg = ipc_unquote(ch->data, linelen);
+    if (msg) {
+        *isstr = 1;
+    } else {
+        msg = malloc(linelen + 1);
+        memcpy(msg, ch->data, linelen);
+        msg[linelen] = 0;
+    }
+    int64_t rest = ch->len - linelen - 1;
+    memmove(ch->data, nl + 1, rest);
+    ch->len = rest;
+    ch->data[ch->len] = 0;
+    return msg;
+}
+
+// Write one already-serialized JSON value as a line, verbatim — the non-string
+// send path (send({...}) / send(5) stringifies first, then frames here).
+int64_t __kml_ipc_send_raw(int64_t fd, const char *s) {
+    int64_t n = (int64_t)strlen(s);
+    char *buf = malloc(n + 2);
+    memcpy(buf, s, n);
+    buf[n] = '\n';
+    int64_t o = n + 1;
+    int64_t w = 0;
+    while (w < o) {
+        int64_t r = (int64_t)write((int)fd, buf + w, o - w);
+        if (r <= 0) break;
+        w += r;
+    }
+    free(buf);
+    return w == o ? 1 : 0;
+}

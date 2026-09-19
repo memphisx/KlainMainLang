@@ -2142,6 +2142,66 @@ console.log(u === t);
 `, "[ 1, 2, 3, 4 ]\ntrue\n[ 1, 2, 3, 4, 5 ]\nfalse\ntrue\n[ 1, 2, 3, 4, 5, 6 ]\n[ 7, 8 ]\nfalse")
 }
 
+func TestE2EArrayArgReferenceThroughFieldElementHOF(t *testing.T) {
+	// TDD-00127 residual closed: an array reaching a callee through an object
+	// field (`f(o.xs)`), a nested element (`f(m[0])`), or a HOF callback
+	// element (`outer.forEach(inner => inner.push(...))`) shares its live
+	// {data,len} header, so length mutation inside the callee propagates —
+	// full JS reference semantics for every argument shape, not just named
+	// variables. Includes a realloc-forcing growth (moved-buffer path), a
+	// `find` result alias, element-store aliasing (`m[0] = named`), and the
+	// invariants that must NOT change: a transient (.slice()) stays detached
+	// and whole-parameter reassignment stays local.
+	assertOutput(t, `
+function f(a: number[]) { a.push(99); }
+function grow(a: number[]) { for (let i = 0; i < 100; i++) a.push(i); }
+const o = { xs: [1, 2] };
+f(o.xs);
+console.log(o.xs.length);
+grow(o.xs);
+console.log(o.xs.length, o.xs[102]);
+const m = [[1, 2], [3]];
+f(m[0]);
+console.log(m[0].length);
+const outer = [[1], [2]];
+outer.forEach(inner => inner.push(7));
+console.log(outer[0].length, outer[1].length);
+const named = [7, 8];
+m[0] = named;
+named.push(9);
+console.log(m[0].length);
+m[0].push(10);
+console.log(named.length);
+const groups = [[1], [2, 2]];
+const g = groups.find(x => x.length === 2);
+if (g) { g.push(3); }
+console.log(groups[1].length);
+const src = [1, 2];
+f(src.slice(0));
+console.log(src.length);
+function reassign(a: number[]) { a = [9, 9, 9]; }
+reassign(o.xs);
+console.log(o.xs.length);
+class Bag { items: number[] = []; constructor() {} }
+const bag = new Bag();
+f(bag.items);
+console.log(bag.items.length);
+`, "3\n103 99\n3\n2 2\n3\n4\n3\n2\n103\n1")
+}
+
+func TestE2ESliceZeroArgs(t *testing.T) {
+	// `arr.slice()` / `str.slice()` with no arguments is a full copy (JS
+	// allows 0-2 args; the arity check previously required at least 1).
+	assertOutput(t, `
+const a = [1, 2, 3];
+const b = a.slice();
+b.push(4);
+console.log(a.length, b.length, b.join(","));
+const s = "hello";
+console.log(s.slice(), s.slice() === s);
+`, "3 4 1,2,3,4\nhello true")
+}
+
 func TestE2EBuiltinConversionAsCallback(t *testing.T) {
 	// String/Number/Boolean passed as a first-class function reference to a HOF
 	// (ADR-00853) — `.map(String)`, `.map(Number)`, `.filter(Boolean)`.

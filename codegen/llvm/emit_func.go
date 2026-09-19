@@ -91,6 +91,15 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	e.breakStack = nil
 	e.continueStack = nil
 	e.namedLabelStack = nil
+	// An enclosing loop's pending iterator-close finallys (the generator
+	// for-of `.return()` synthesis) must not run inside THIS function's own
+	// `return` — the synthesized statement references the enclosing frame's
+	// synthetic generator binding, which does not exist in this function
+	// (found as "a number has no method 'return'" on an arrow with a block
+	// `return` inside a generator for-of body).
+	savedPendingFinallys := e.pendingFinallys
+	savedBreakFinallyDepth, savedContinueFinallyDepth := e.breakFinallyDepth, e.continueFinallyDepth
+	e.pendingFinallys, e.breakFinallyDepth, e.continueFinallyDepth = nil, nil, nil
 	// currentGenerator resets the same way, same reasoning, same
 	// defer-not-plain-assignment fix: a `return`/`yield` inside THIS
 	// function's own body must never be misrouted into an *enclosing*
@@ -133,6 +142,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	defer func() {
 		e.breakStack = savedBreakStack
 		e.pendingFrees, e.breakFreeScope, e.continueFreeScope = savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope
+		e.pendingFinallys, e.breakFinallyDepth, e.continueFinallyDepth = savedPendingFinallys, savedBreakFinallyDepth, savedContinueFinallyDepth
 		e.continueStack = savedContinueStack
 		e.namedLabelStack = savedNamedLabelStack
 		e.currentGenerator = savedCurrentGenerator
@@ -658,7 +668,30 @@ func (e *Emitter) pushNestedFuncScope(params []ast.Param, body []ast.Statement) 
 		// stay on the existing direct-registration path here regardless of capture.
 		if fd.IsGenerator {
 			e.nestedFuncCtr++
+			// Bind the enclosing body's params/locals (types only) around the
+			// signature build, so a captured local's type flows into the yield
+			// -expression element inference. Must mirror inferBlockReturnExpr's
+			// own binding: a host function returning this generator by name
+			// re-infers its GenTy THERE with locals visible — the two elem
+			// types must agree or a yielded f64 reads back as garbage bits.
+			e.pushScope()
+			for _, p := range params {
+				if p.Type != nil {
+					e.define(p.Name, Symbol{Ty: e.resolveType(p.Type)})
+				}
+			}
+			for _, st := range body {
+				switch d := st.(type) {
+				case *ast.VarDeclaration:
+					e.defineForInference(d)
+				case *ast.VarDeclarationList:
+					for _, dd := range d.Decls {
+						e.defineForInference(dd)
+					}
+				}
+			}
 			info, err := e.buildGeneratorSig(fd)
+			e.popScope()
 			if err != nil {
 				popFrames()
 				return err
@@ -678,15 +711,11 @@ func (e *Emitter) pushNestedFuncScope(params []ast.Param, body []ast.Statement) 
 		// byName/byDecl. Keeping it out of resolveFuncRef is what makes a call
 		// fall through to the closure-value lookup, and makes a call before the
 		// declaration a clean "undefined function or closure" error.
-		// A for-loop variable capture is rejected before the ordinary
-		// capturing/non-capturing split — the loop variable isn't an
-		// enclosingCapturables binding (it's declared in the for-init, not a
-		// body statement), so nestedDeclCaptures would misclassify it as
-		// non-capturing and emit a broken direct call.
-		if v, ok := e.nestedDeclCapturesForLoopVar(fd); ok {
-			popFrames()
-			return fmt.Errorf("%d:%d: a nested function declaration capturing a for-loop variable ('%s') is not supported — the loop variable is a single per-loop cell, so a closure over it would corrupt the loop; copy it to a `const` inside the loop body and capture that instead", fd.GetPos().Line, fd.GetPos().Col, v)
-		}
+		// A for-loop variable is capturable like any body local: emitFor
+		// pushes the loop's own variables as an enclosingCapturables frame
+		// and gives each iteration its own cell (per-iteration `let`
+		// semantics), so a nested declaration capturing one classifies as
+		// capturing here and closes over that iteration's cell.
 		if e.nestedDeclCaptures(fd) {
 			scope.capturing[fd] = true
 			continue
@@ -739,6 +768,42 @@ func (e *Emitter) emitCapturingNestedFunc(fd *ast.FunctionDeclaration) error {
 	e.define(fd.Name, Symbol{Ptr: ptrName, Ty: val.Ty})
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
 	return nil
+}
+
+// letrecEmitCapturingNested implements TDD-00129 Stage 2 (pre-declaration
+// hoisting): a capturing nested function declaration referenced BEFORE its
+// declaration statement is emitted on demand at the reference point instead of
+// erroring. Semantics match JS's function-declaration hoisting for every legal
+// program: a legal call-before-declaration only touches captured variables
+// already initialized above the call (a variable declared between the call and
+// the declaration would be a runtime TDZ crash in JS — here it stays a clean
+// compile-time undefined-variable error, the TDD-00070/00071 posture). Captures
+// are by shared heap cell, so the later declaration statement's re-emission
+// binds a closure over the SAME cells — behavior is identical whichever
+// construction a caller holds. Only the innermost body's own declarations are
+// eligible: a reference from a deeper nested function to an outer body's
+// not-yet-emitted sibling keeps the clean error (emitting it mid-inner-body
+// could capture shadowed symbols).
+func (e *Emitter) letrecEmitCapturingNested(name string) (bool, error) {
+	if len(e.nestedFuncScopes) == 0 {
+		return false, nil
+	}
+	// Top scope only, deliberately: a capturing sibling referenced from
+	// INSIDE another capturing sibling's body (mutual recursion) would need
+	// a shared self-capture cell to terminate — on-demand emission there
+	// recurses f→g→f without bound. That case stays a clean
+	// "undefined function or closure" error (letrec cross-sibling capture,
+	// still open).
+	scope := e.nestedFuncScopes[len(e.nestedFuncScopes)-1]
+	for fd := range scope.capturing {
+		if fd.Name == name {
+			if err := e.emitCapturingNestedFunc(fd); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // popNestedFuncScope removes the most recently pushed nestedFuncScope frame,
@@ -799,29 +864,6 @@ func (e *Emitter) nestedDeclCaptures(fd *ast.FunctionDeclaration) bool {
 		}
 	}
 	return false
-}
-
-// nestedDeclCapturesForLoopVar reports whether nested declaration fd closes over
-// a C-style for-loop variable whose body is currently being emitted (TDD-00152).
-// Such a capture is rejected: the loop variable lives in one alloca reused every
-// iteration, so a closure over it would share the counter cell and corrupt the
-// loop (the same per-iteration-binding limitation arrows hit).
-func (e *Emitter) nestedDeclCapturesForLoopVar(fd *ast.FunctionDeclaration) (string, bool) {
-	if fd.Body == nil || len(e.activeForLoopVars) == 0 {
-		return "", false
-	}
-	bound := map[string]bool{fd.Name: true}
-	addParamBoundNames(bound, fd.Params)
-	refs := map[string]bool{}
-	scanStmtsFV(fd.Body.Body, bound, refs)
-	for name := range refs {
-		for _, frame := range e.activeForLoopVars {
-			if frame[name] {
-				return name, true
-			}
-		}
-	}
-	return "", false
 }
 
 // resolveFuncRef resolves a bare identifier used as a callee/callback name:
@@ -1637,6 +1679,20 @@ func capScanStmts(stmts []ast.Statement, bound map[string]bool, result map[strin
 				}
 				local[prop.Local] = true
 			}
+		case *ast.FunctionDeclaration:
+			// A nested function declaration (TDD-00129) closes over enclosing
+			// locals exactly like an arrow — closure boundary: RESET bound to
+			// its own params (+ its own name; self-recursion is not a
+			// capture), so a captured local is eagerly boxed at its
+			// declaration point. Without this, a capturing declaration inside
+			// a conditional block boxed lazily in a non-dominating block —
+			// invalid IR ("Instruction does not dominate all uses").
+			innerBound := make(map[string]bool, len(s.Params)+1)
+			innerBound[s.Name] = true
+			addParamBoundNames(innerBound, s.Params)
+			if s.Body != nil {
+				capScanStmts(s.Body.Body, innerBound, result)
+			}
 		}
 	}
 }
@@ -2315,6 +2371,15 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	e.breakStack = nil
 	e.continueStack = nil
 	e.namedLabelStack = nil
+	// An enclosing loop's pending iterator-close finallys (the generator
+	// for-of `.return()` synthesis) must not run inside THIS function's own
+	// `return` — the synthesized statement references the enclosing frame's
+	// synthetic generator binding, which does not exist in this function
+	// (found as "a number has no method 'return'" on an arrow with a block
+	// `return` inside a generator for-of body).
+	savedPendingFinallys := e.pendingFinallys
+	savedBreakFinallyDepth, savedContinueFinallyDepth := e.breakFinallyDepth, e.continueFinallyDepth
+	e.pendingFinallys, e.breakFinallyDepth, e.continueFinallyDepth = nil, nil, nil
 	// currentGenerator resets the same way, same reasoning — see
 	// emitFunctionDeclAs's identical reset for the real, confirmed bug this
 	// avoids (a `return`/`yield` inside this function's own body must
@@ -2357,6 +2422,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	defer func() {
 		e.breakStack = savedBreakStack
 		e.pendingFrees, e.breakFreeScope, e.continueFreeScope = savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope
+		e.pendingFinallys, e.breakFinallyDepth, e.continueFinallyDepth = savedPendingFinallys, savedBreakFinallyDepth, savedContinueFinallyDepth
 		e.continueStack = savedContinueStack
 		e.namedLabelStack = savedNamedLabelStack
 		e.currentGenerator = savedCurrentGenerator
@@ -2709,6 +2775,62 @@ func firstReturnExprInBlock(block *ast.BlockStatement) ast.Expression {
 	return nil
 }
 
+// returnExprsInBlock collects every return statement's value expression in
+// source order, walking the same statement shapes firstReturnExprInStmt does.
+// Used by inferUnannotatedReturnType to try the NEXT return when the first
+// one's inference is poisoned by a recursion cycle (sigInferCycleHit) — a
+// recursive nested function must infer from its base-case return.
+func returnExprsInBlock(block *ast.BlockStatement, out []ast.Expression) []ast.Expression {
+	if block == nil {
+		return out
+	}
+	for _, stmt := range block.Body {
+		out = returnExprsInStmt(stmt, out)
+	}
+	return out
+}
+
+func returnExprsInStmt(stmt ast.Statement, out []ast.Expression) []ast.Expression {
+	switch s := stmt.(type) {
+	case *ast.ReturnStatement:
+		if s.Value != nil {
+			out = append(out, s.Value)
+		}
+	case *ast.BlockStatement:
+		out = returnExprsInBlock(s, out)
+	case *ast.IfStatement:
+		out = returnExprsInBlock(s.Consequent, out)
+		if s.Alternate != nil {
+			out = returnExprsInStmt(s.Alternate, out)
+		}
+	case *ast.ForStatement:
+		out = returnExprsInBlock(s.Body, out)
+	case *ast.ForOfStatement:
+		out = returnExprsInBlock(s.Body, out)
+	case *ast.ForInStatement:
+		out = returnExprsInBlock(s.Body, out)
+	case *ast.WhileStatement:
+		out = returnExprsInBlock(s.Body, out)
+	case *ast.DoWhileStatement:
+		out = returnExprsInBlock(s.Body, out)
+	case *ast.SwitchStatement:
+		for _, c := range s.Cases {
+			for _, cs := range c.Body {
+				out = returnExprsInStmt(cs, out)
+			}
+		}
+	case *ast.TryStatement:
+		out = returnExprsInBlock(s.Body, out)
+		if s.Catch != nil {
+			out = returnExprsInBlock(s.Catch.Body, out)
+		}
+		if s.Finally != nil {
+			out = returnExprsInBlock(s.Finally, out)
+		}
+	}
+	return out
+}
+
 // blockAlwaysDiverges reports whether every path through the block ends without
 // returning normally — i.e. always throws. Used to infer a `never` return type
 // for an unannotated function whose body only throws (TS types such a function
@@ -2817,9 +2939,36 @@ func (e *Emitter) inferUnannotatedReturnType(block *ast.BlockStatement, paramNam
 		e.define(name, Symbol{Ty: paramTypes[i]})
 	}
 	defineArgumentsForInference(e, paramNames)
-	inferred := e.inferBlockReturnExpr(block, retExpr)
+	inferred := e.inferCandidateReturnExpr(block, retExpr)
 	e.popScope()
 	return inferred, true
+}
+
+// inferCandidateReturnExpr infers retExpr's type via inferBlockReturnExpr,
+// and when that inference was poisoned by a signature-recursion cycle
+// (sigInferCycleHit — see buildFunctionSig's guard) retries with each later
+// return expression until one infers cleanly. All poisoned ⇒ the first
+// candidate's (void-defaulted) result stands: a purely self-recursive
+// function has no base type to find.
+func (e *Emitter) inferCandidateReturnExpr(block *ast.BlockStatement, retExpr ast.Expression) Type {
+	savedCycleHit := e.sigInferCycleHit
+	defer func() { e.sigInferCycleHit = savedCycleHit }()
+	e.sigInferCycleHit = false
+	inferred := e.inferBlockReturnExpr(block, retExpr)
+	if !e.sigInferCycleHit {
+		return inferred
+	}
+	for _, cand := range returnExprsInBlock(block, nil) {
+		if cand == retExpr {
+			continue
+		}
+		e.sigInferCycleHit = false
+		t := e.inferBlockReturnExpr(block, cand)
+		if !e.sigInferCycleHit {
+			return t
+		}
+	}
+	return inferred
 }
 
 // defineArgumentsForInference makes a bare `arguments` reference resolve to
@@ -2856,7 +3005,7 @@ func (e *Emitter) inferUnannotatedReturnTypeParams(block *ast.BlockStatement, pa
 		names[i] = p.Name
 	}
 	defineArgumentsForInference(e, names)
-	inferred := e.inferBlockReturnExpr(block, retExpr)
+	inferred := e.inferCandidateReturnExpr(block, retExpr)
 	e.popScope()
 	return inferred, true
 }
@@ -2867,22 +3016,48 @@ func (e *Emitter) inferUnannotatedReturnTypeParams(block *ast.BlockStatement, pa
 // `return { body: localStream }` infers the local's real type instead of the
 // bare-scalar default (found wiring TDD-00097 Stage 5's streaming http bodies;
 // helps any handler returning a local).
-func (e *Emitter) inferBlockReturnExpr(block *ast.BlockStatement, retExpr ast.Expression) Type {
-	defineDecl := func(vd *ast.VarDeclaration) {
-		if vd.TypeAnnot != nil {
-			e.define(vd.Name, Symbol{Ty: e.resolveType(vd.TypeAnnot)})
-		} else if vd.Init != nil {
-			e.define(vd.Name, Symbol{Ty: e.inferExprType(vd.Init)})
-		}
+// defineForInference binds one var declaration's name with its declared or
+// best-effort-inferred type in the current (inference-only) scope — shared by
+// inferBlockReturnExpr and pushNestedFuncScope's generator-signature binding,
+// which must agree on the types they see (see the comment there).
+func (e *Emitter) defineForInference(vd *ast.VarDeclaration) {
+	if vd.TypeAnnot != nil {
+		e.define(vd.Name, Symbol{Ty: e.resolveType(vd.TypeAnnot)})
+	} else if vd.Init != nil {
+		e.define(vd.Name, Symbol{Ty: e.inferExprType(vd.Init)})
 	}
+}
+
+func (e *Emitter) inferBlockReturnExpr(block *ast.BlockStatement, retExpr ast.Expression) Type {
 	for _, st := range block.Body {
 		switch vd := st.(type) {
 		case *ast.VarDeclaration:
-			defineDecl(vd)
+			e.defineForInference(vd)
 		case *ast.VarDeclarationList:
 			for _, d := range vd.Decls {
-				defineDecl(d)
+				e.defineForInference(d)
 			}
+		case *ast.FunctionDeclaration:
+			// A nested function declaration returned by name
+			// (`function bump() {...}; return bump`, TDD-00129) must infer
+			// as a closure type, not the bare-scalar default — otherwise the
+			// caller's binding is mistyped and calling it fails. A nested
+			// GENERATOR returned by name is a first-class constructor closure
+			// whose call yields the instance (emitGeneratorCtorClosure).
+			if vd.IsGenerator {
+				if ginfo, gerr := e.buildGeneratorSig(vd); gerr == nil {
+					e.define(vd.Name, Symbol{Ty: FuncType(ginfo.ParamTypes, ginfo.GenTy)})
+				}
+				continue
+			}
+			nsig := e.buildFunctionSig(vd)
+			nft := FuncType(nsig.ParamTypes, nsig.RetType)
+			// Mirror emitNamedFunctionValue: an implicit-`arguments` rest
+			// must survive into the inferred closure type, or the caller of
+			// an escaped nested function packs the variadic args wrong
+			// (invalid IR — a string treated as an array header).
+			nft.FuncHasRest = nsig.HasRest
+			e.define(vd.Name, Symbol{Ty: nft})
 		}
 	}
 	return e.inferExprType(retExpr)
@@ -3437,6 +3612,15 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	e.breakStack = nil
 	e.continueStack = nil
 	e.namedLabelStack = nil
+	// An enclosing loop's pending iterator-close finallys (the generator
+	// for-of `.return()` synthesis) must not run inside THIS function's own
+	// `return` — the synthesized statement references the enclosing frame's
+	// synthetic generator binding, which does not exist in this function
+	// (found as "a number has no method 'return'" on an arrow with a block
+	// `return` inside a generator for-of body).
+	savedPendingFinallys := e.pendingFinallys
+	savedBreakFinallyDepth, savedContinueFinallyDepth := e.breakFinallyDepth, e.continueFinallyDepth
+	e.pendingFinallys, e.breakFinallyDepth, e.continueFinallyDepth = nil, nil, nil
 	// currentGenerator resets the same way, same reasoning — see
 	// emitFunctionDeclAs's identical reset for the real, confirmed bug this
 	// avoids (a `return`/`yield` inside this function's own body must
@@ -3474,6 +3658,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	defer func() {
 		e.breakStack = savedBreakStack
 		e.pendingFrees, e.breakFreeScope, e.continueFreeScope = savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope
+		e.pendingFinallys, e.breakFinallyDepth, e.continueFinallyDepth = savedPendingFinallys, savedBreakFinallyDepth, savedContinueFinallyDepth
 		e.continueStack = savedContinueStack
 		e.namedLabelStack = savedNamedLabelStack
 		e.currentGenerator = savedCurrentGenerator

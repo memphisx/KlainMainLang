@@ -320,28 +320,38 @@ func (e *Emitter) newArrayHeaderSlotFromAggregate(val Value) string {
 	return slot
 }
 
-// arrayArgFromAggregate materializes an array aggregate Value into a fresh
-// {data, len} header and returns (headerReg, lenReg) for packing as a (ptr, i64)
-// call argument under the object-reference ABI (TDD-00127). A transient
-// expression argument gets a fresh header (the callee may mutate it, but it has
-// no caller-visible identity); a named-variable argument should instead pass its
-// own header pointer so mutations propagate — see arrayDataLenSlots.
+// arrayArgFromAggregate produces the {data, len} header to pass an array Value
+// as a (ptr, i64) call argument under the object-reference ABI (TDD-00127).
+// A Value carrying a live header (a field read, nested element, returned or
+// captured array) passes that SAME header so mutations inside the callee
+// (push/splice) propagate — JS reference semantics across every argument
+// shape, not just named variables. Only a genuinely transient expression
+// (literal, slice/map result — no ArrayHeader) gets a fresh header: the callee
+// may mutate it, but it has no caller-visible identity. A carried header can
+// be null (an absent calloc'd field, a Map get miss): the callee derefs its
+// header unguarded, so a fresh header wrapping the (safe {null,0}) aggregate
+// is selected in that case.
 func (e *Emitter) arrayArgFromAggregate(val Value) (header, lenReg string) {
-	header = e.boxArrayValue(val)
 	lenReg = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-	return
+	fresh := e.boxArrayValue(val)
+	if val.ArrayHeader == "" {
+		return fresh, lenReg
+	}
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.ArrayHeader))
+	sel := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, isNull, fresh, val.ArrayHeader))
+	return sel, lenReg
 }
 
 // packArrayArg produces the (headerReg, lenReg) pair to pass an array argument
 // under the object-reference ABI (TDD-00127). When the argument is a named array
 // variable, its own header pointer is passed, so an in-place mutation inside the
 // callee (push/splice) propagates back to the caller — JS reference semantics.
-// Any other array expression is a transient with no caller-visible identity, so
-// a fresh header wrapping its aggregate is passed instead. (A member/index
-// array — e.g. `obj.field` — currently takes the transient path, so passing an
-// object's array field to a mutating function does not propagate; that is a
-// known limitation, not new behaviour.)
+// Any other array expression goes through arrayArgFromAggregate, which shares
+// the value's own live header when it carries one (a member/index/field read)
+// and mints a fresh header only for a true transient.
 func (e *Emitter) packArrayArg(arg ast.Expression, val Value) (header, lenReg string) {
 	if id, ok := arg.(*ast.Identifier); ok {
 		if sym, found := e.lookup(id.Name); found && sym.Ty.IsArray {
@@ -379,11 +389,15 @@ func (e *Emitter) bindArrayParam(name string, pty Type) {
 // produced by boxArrayValue, returning it as an ordinary array Value —
 // exactly the representation every other array-producing expression already
 // returns (function return, literal, slice, ...), so nothing downstream of a
-// nested-array element read needs to know boxing happened at all.
+// nested-array element read needs to know boxing happened at all. The box IS
+// the element's live {data,len} header (one shared cell per nested array), so
+// the Value carries it in ArrayHeader — a nested element passed onward (call
+// argument, binding, HOF callback element) then aliases the same array
+// instead of snapshotting (TDD-00127 residual).
 func (e *Emitter) unboxArrayValue(boxPtr string, elemTy Type) Value {
 	agg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, boxPtr))
-	return Value{Ref: agg, Ty: elemTy}
+	return Value{Ref: agg, Ty: elemTy, ArrayHeader: boxPtr}
 }
 
 // loadArrayElem loads the value at a GEP'd array-backing-buffer slot
@@ -443,7 +457,10 @@ func (e *Emitter) loadArrayElemMaybeNull(slotPtr string, elemTy Type) Value {
 	e.emitLabel(doneL)
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = phi {ptr, i64} [ %s, %%%s ], [ %s, %%%s ]", result, nullAgg, nullL, foundAgg, foundL))
-	return Value{Ref: result, Ty: elemTy}
+	// The box IS the element's live header; carry it (possibly null — the
+	// "no match" sentinel, which downstream consumers null-guard) so a found
+	// element aliases the source array (TDD-00127 residual).
+	return Value{Ref: result, Ty: elemTy, ArrayHeader: boxPtr}
 }
 
 // storeArrayElem stores val (of type elemTy) into a GEP'd array-backing-
@@ -461,7 +478,22 @@ func (e *Emitter) storeArrayElem(gepReg string, elemTy Type, val Value) {
 		return
 	}
 	if elemTy.IsArray {
-		box := e.boxArrayValue(val)
+		// Share the value's live header when it has one (reference semantics:
+		// `m[i] = existingArray` aliases, matching storeArrayFieldHeader); a
+		// new array expression mints its own box. A null carried header (an
+		// absent field read) falls back to the fresh box, since element reads
+		// unbox unguarded.
+		box := val.ArrayHeader
+		if box == "" {
+			box = e.boxArrayValue(val)
+		} else {
+			fresh := e.boxArrayValue(val)
+			isNull := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, box))
+			sel := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, isNull, fresh, box))
+			box = sel
+		}
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", box, gepReg))
 		return
 	}

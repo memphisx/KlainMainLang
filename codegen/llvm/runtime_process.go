@@ -243,7 +243,7 @@ throwexit:
   call void @__kml_str_finalize(ptr %msgbuf1)
   %errobj1 = call ptr @malloc(i64 24)
   %errobj1.kind = getelementptr { i64, ptr, ptr }, ptr %errobj1, i32 0, i32 0
-  store i64 0, ptr %errobj1.kind, align 8
+  store i64 281474976710656, ptr %errobj1.kind, align 8
   %errobj1.msg = getelementptr { i64, ptr, ptr }, ptr %errobj1, i32 0, i32 1
   store ptr %msgbuf1, ptr %errobj1.msg, align 8
   %errobj1.name = getelementptr { i64, ptr, ptr }, ptr %errobj1, i32 0, i32 2
@@ -262,7 +262,7 @@ signaled:
   call void @__kml_str_finalize(ptr %msgbuf2)
   %errobj2 = call ptr @malloc(i64 24)
   %errobj2.kind = getelementptr { i64, ptr, ptr }, ptr %errobj2, i32 0, i32 0
-  store i64 0, ptr %errobj2.kind, align 8
+  store i64 281474976710656, ptr %errobj2.kind, align 8
   %errobj2.msg = getelementptr { i64, ptr, ptr }, ptr %errobj2, i32 0, i32 1
   store ptr %msgbuf2, ptr %errobj2.msg, align 8
   %errobj2.name = getelementptr { i64, ptr, ptr }, ptr %errobj2, i32 0, i32 2
@@ -637,7 +637,7 @@ fail:
   call void @__kml_str_finalize(ptr %%buf)
   %%errobj = call ptr @malloc(i64 24)
   %%errobj.kind = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 0
-  store i64 0, ptr %%errobj.kind, align 8
+  store i64 281474976710656, ptr %%errobj.kind, align 8
   %%errobj.msg = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 1
   store ptr %%buf, ptr %%errobj.msg, align 8
   %%errobj.name = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 2

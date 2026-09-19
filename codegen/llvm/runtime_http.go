@@ -192,7 +192,7 @@ entry:
   call void @__kml_str_finalize(ptr %%buf)
   %%errobj = call ptr @malloc(i64 24)
   %%errobj.kind = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 0
-  store i64 0, ptr %%errobj.kind, align 8
+  store i64 281474976710656, ptr %%errobj.kind, align 8
   %%errobj.msg = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 1
   store ptr %%buf, ptr %%errobj.msg, align 8
   %%errobj.name = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 2
@@ -1026,6 +1026,8 @@ define void @__kml_reactor_thread_lock() {
 	accessor := errnoAccessor()
 	e.ensureErrnoAccessor()
 
+	e.ensureListeningAnnounceHook()
+
 	e.emitGlobal(fmt.Sprintf(`
 define i32 @__kml_http_bind_and_listen(i32 %%port, i32 %%hostaddr, i32 %%backlog) {
 entry:
@@ -1091,6 +1093,16 @@ setnonblocklistener:
   br label %%success
 
 success:
+  ; listening-announce hook (null unless the cluster runtime armed it at
+  ; startup): a worker tells the primary it bound, driving the cluster-level
+  ; 'listening' event
+  %%lhook = load ptr, ptr @__kml_http_listening_announce, align 8
+  %%lhset = icmp ne ptr %%lhook, null
+  br i1 %%lhset, label %%announce, label %%retfd
+announce:
+  call void %%lhook(i32 %%port)
+  br label %%retfd
+retfd:
   ret i32 %%fd
 
 failwithfd:
@@ -1826,6 +1838,7 @@ entry:
   %tv = alloca { i64, i64 }, align 8
   %runningp2 = alloca i32, align 4
   %rsi = alloca i64, align 8
+  %pokesnap = alloca i8, align 1
   %forcezero = alloca i1, align 1
   %fdsi = alloca i64, align 8
   %havefetchdl = alloca i1, align 1
@@ -2417,7 +2430,7 @@ fdchksig:
   br i1 %fdhassig, label %fdchkdl, label %fdfoldnext
 
 fdchkdl:
-  %fddl_p = getelementptr { i1, ptr, ptr, i64 }, ptr %fdsig, i32 0, i32 3
+  %fddl_p = getelementptr { i1, i64, ptr, i64 }, ptr %fdsig, i32 0, i32 3
   %fddl = load i64, ptr %fddl_p, align 8
   %fdhasdl = icmp ne i64 %fddl, 0
   br i1 %fdhasdl, label %fdfold, label %fdfoldnext
@@ -2725,6 +2738,21 @@ scanconn:
   ; select() just populated (a fiber that finished sets its own entry's fd
   ; to -1 right before returning, so "still >= 0 after resume" means it
   ; genuinely yielded again and should keep being watched next iteration).
+  ;
+  ; The task-completion poke is SNAPSHOTTED here and cleared up front, and the
+  ; scan below reads only the snapshot. Clearing after the scan instead lost a
+  ; wakeup: a fiber resumed mid-scan drives the scheduler (fdrive →
+  ; task_sched_step), which can finish ANOTHER fiber's awaited task and set the
+  ; poke — but a fiber at an earlier index was already scanned un-poked, and
+  ; the post-scan clear wiped the flag before ctodone could see it. With the
+  ; task finished (not resumable), no curl fds and no timer left, select() then
+  ; blocked forever — an intermittent hard hang of N concurrent task-await
+  ; handlers under CPU load. A poke set during the scan now survives in the
+  ; global for ctodone's non-blocking decision and is serviced by the NEXT
+  ; iteration's snapshot.
+  %pokenow = load i8, ptr @__kml_conn_poke, align 1
+  store i8 %pokenow, ptr %pokesnap, align 1
+  store i8 0, ptr @__kml_conn_poke, align 1
   store i64 0, ptr %rsi, align 8
   br label %rscanloop
 
@@ -2811,7 +2839,7 @@ rcheckready:
   ; handler's last input was pump-fed the fd never becomes readable again —
   ; the resumed fiber re-checks its own await condition and re-parks if it
   ; is still genuinely waiting, so a spurious resume is benign.
-  %rpoke = load i8, ptr @__kml_conn_poke, align 1
+  %rpoke = load i8, ptr %pokesnap, align 1
   %rpoked = icmp ne i8 %rpoke, 0
   %rready = or i1 %rfdready, %rpoked
   br i1 %rready, label %rresume, label %rscannext
@@ -2832,9 +2860,8 @@ rscannext:
   br label %rscanloop
 
 checktimerfire:
-  ; The poke is one-shot: every parked fiber has now been resumed once and
-  ; re-parked if still waiting; clear it so the scan goes back to fd-driven.
-  store i8 0, ptr @__kml_conn_poke, align 1
+  ; The poke snapshot was consumed at scanconn (cleared BEFORE the scan, see
+  ; there) — no clear here, so a poke set during the scan stays pending.
   ; %havetimer_js (not the merged %havetimer, which also goes true whenever
   ; only an EventSource reconnect deadline bounded the wait, see scandone
   ; above) — %besti below indexes into @__kml_timer_data and is -1 whenever
@@ -3338,4 +3365,17 @@ raw:
   %c = call i32 @close(i32 %fd)
   ret void
 }`)
+}
+
+// ensureListeningAnnounceHook defines @__kml_http_listening_announce once —
+// the null-until-armed hook __kml_http_bind_and_listen fires on a successful
+// bind. Shared by the HTTP runtime (the call site) and the cluster runtime
+// (which arms it at startup with the worker's announce function), either of
+// which may be emitted without the other.
+func (e *Emitter) ensureListeningAnnounceHook() {
+	if e.usedListeningAnnounceHook {
+		return
+	}
+	e.usedListeningAnnounceHook = true
+	e.emitGlobal("@__kml_http_listening_announce = internal global ptr null, align 8")
 }

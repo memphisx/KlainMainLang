@@ -280,8 +280,8 @@ func (e *Emitter) emitNormalizeSliceIdx(idx, sLen string) string {
 // emitStringSlice implements s.slice(start[, end]).
 // Negative indices count from the end; both are clamped to [0, len].
 func (e *Emitter) emitStringSlice(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: slice takes 1 or 2 arguments", pos.Line, pos.Col)
+	if len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: slice takes 0 to 2 arguments", pos.Line, pos.Col)
 	}
 	objVal, err := e.emitExpr(mem.Object)
 	if err != nil {
@@ -297,15 +297,19 @@ func (e *Emitter) emitStringSlice(mem *ast.MemberExpression, args []ast.Expressi
 	sLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, objVal.Ref))
 
-	startRaw, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
+	// Zero-arg slice() copies the whole string: start = 0.
+	startN := "0"
+	if len(args) >= 1 {
+		startRaw, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		startRef, err := e.coerceNumArgRef(startRaw, TypeI64, args[0].GetPos(), "slice index")
+		if err != nil {
+			return Value{}, err
+		}
+		startN = e.emitNormalizeSliceIdx(startRef, sLen)
 	}
-	startRef, err := e.coerceNumArgRef(startRaw, TypeI64, args[0].GetPos(), "slice index")
-	if err != nil {
-		return Value{}, err
-	}
-	startN := e.emitNormalizeSliceIdx(startRef, sLen)
 
 	var endN string
 	if len(args) == 2 {

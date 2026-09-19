@@ -1081,20 +1081,122 @@ console.log(outer(7));
 `, "7")
 }
 
-func TestE2ENestedFunctionCaptureUsedBeforeDeclarationRejected(t *testing.T) {
-	// TDD-00129 Stage 1 supports use at or after the declaration point only; a
-	// capturing nested function called before its declaration is a clean error
-	// (full pre-declaration hoisting is Stage 2).
-	_, err := parseAndCompile(`
+func TestE2ENestedFunctionCaptureUsedBeforeDeclaration(t *testing.T) {
+	// TDD-00129 Stage 2 (letrec hoisting): a capturing nested function called
+	// or referenced BEFORE its declaration statement works, exactly like JS's
+	// function-declaration hoisting — as long as the captured variables are
+	// initialized above the use (a capture of a variable declared between the
+	// call and the declaration stays a clean TDZ-posture compile error).
+	assertOutput(t, `
 function outer(x: number): number {
     const r = inner();
     function inner(): number { return x + 1; }
     return r;
 }
 console.log(outer(1));
+function h(): number {
+  let base = 5;
+  const v = pre();
+  function pre(): number { return base + 37; }
+  return v;
+}
+console.log(h());
+function byRef(): number {
+  let base = 7;
+  const f = pre;
+  function pre(): number { return base * 2; }
+  return f();
+}
+console.log(byRef());
+`, "2\n42\n14")
+}
+
+func TestE2ENestedFunctionCaptureTDZRejected(t *testing.T) {
+	// The TDZ-posture edge: the hoisted call touches a captured variable
+	// declared BETWEEN the call and the declaration — a runtime TDZ crash in
+	// JS, a clean compile error here (TDD-00070/00071 posture).
+	_, err := parseAndCompile(`
+function bad(): number {
+  const v = pre();
+  let base = 5;
+  function pre(): number { return base + 1; }
+  return v;
+}
+console.log(bad());
 `)
 	if err == nil {
-		t.Fatal("expected a compile error for a capturing nested function used before its declaration, got none")
+		t.Fatal("expected a compile error for a hoisted call reading a not-yet-declared captured variable, got none")
+	}
+}
+
+func TestE2ENestedFunctionCaptureSelfRecursive(t *testing.T) {
+	// A self-recursive UNANNOTATED capturing nested function: the signature
+	// inference used to recurse without bound through the letrec identifier
+	// lookup (buildFunctionSig → inferUnannotatedReturnType → inferExprType →
+	// buildFunctionSig …) and blow the compiler's stack. The guard keeps the
+	// cycle finite; when the FIRST reachable return is the recursive call
+	// itself, inference must fall through to the base-case return's type (the
+	// string case below emitted invalid IR otherwise).
+	assertOutput(t, `
+function outer(): number {
+  let x = 1;
+  function f(n) {
+    if (n > 0) return f(n - 1);
+    return x;
+  }
+  return f(5);
+}
+console.log(outer());
+function outerStr(): string {
+  let p = "x";
+  function f(n) {
+    if (n > 0) return f(n - 1);
+    return p + "done";
+  }
+  return f(3);
+}
+console.log(outerStr());
+`, "1\nxdone")
+}
+
+func TestE2ENestedFunctionEscapedArgumentsRest(t *testing.T) {
+	// A nested function that reads `arguments` gains an implicit any[] rest
+	// (TDD-00210); when it escapes by name, the inferred closure type must
+	// carry that rest flag — the caller otherwise packed the variadic args
+	// as if the first one were already an array header (invalid IR; Test262
+	// language/statements/function/S13.2_A2_T1.js).
+	assertOutput(t, `
+function outer() {
+  function inner() {
+    return arguments[0];
+  }
+  return inner;
+}
+console.log(outer()("jedi"));
+`, "jedi")
+}
+
+func TestE2ENestedFunctionMutualRecursionRejected(t *testing.T) {
+	// Two mutually-recursive CAPTURING nested functions need a shared
+	// self-capture cell to emit (cross-sibling letrec, still open) — the
+	// posture is a clean compile error, never a compiler hang or crash.
+	_, err := parseAndCompile(`
+function outer(): number {
+  let x = 1;
+  function f(n) {
+    if (n <= 0) return x;
+    return g(n - 1);
+  }
+  function g(n) {
+    if (n <= 0) return x;
+    return f(n - 1);
+  }
+  return f(5);
+}
+console.log(outer());
+`)
+	if err == nil {
+		t.Fatal("expected a clean compile error for mutually-recursive capturing nested functions, got none")
 	}
 }
 
@@ -1217,10 +1319,11 @@ console.log(classify(5));
 `, "one\nother")
 }
 
-// A block-nested function capturing a C-style for-loop variable is rejected
-// cleanly — the loop variable is a single per-iteration cell.
-func TestE2ENestedFunctionCapturingForLoopVarRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// A closure over a C-style `let` loop variable captures THAT iteration's
+// binding (per-iteration cells, JS semantics) — for arrows and block-nested
+// function declarations alike; `var` keeps the single shared binding.
+func TestE2ENestedFunctionCapturingForLoopVar(t *testing.T) {
+	assertOutput(t, `
 function outer(): number {
     let t = 0;
     for (let i = 0; i < 3; i++) {
@@ -1230,13 +1333,19 @@ function outer(): number {
     return t;
 }
 console.log(outer());
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a nested function capturing a for-loop variable, got none")
-	}
-	if !strings.Contains(err.Error(), "capturing a for-loop variable") {
-		t.Fatalf("expected the for-loop-variable-capture error, got: %v", err)
-	}
+const fs: (() => number)[] = [];
+for (let i = 0; i < 3; i++) { fs.push(() => i * 10); }
+let sum = 0;
+for (const f of fs) sum += f();
+console.log(sum);
+const vs: (() => number)[] = [];
+for (var v = 0; v < 3; v++) { vs.push(() => v); }
+console.log(vs.map(f => f()).join(","));
+const ms: (() => number)[] = [];
+for (let i = 0; i < 3; i++) { ms.push(() => { i += 100; return i; }); }
+console.log(ms.map(f => f()).join(","));
+console.log(ms.map(f => f()).join(","));
+`, "3\n30\n3,3,3\n100,101,102\n200,201,202")
 }
 
 func TestE2ENestedFunctionNotVisibleOutsideEncloser(t *testing.T) {
@@ -2743,4 +2852,83 @@ try {
 }
 console.log("reached:" + reached);
 `, "caught\nreached:false")
+}
+
+func TestE2ENestedFunctionEscapesWithInferredClosureType(t *testing.T) {
+	// TDD-00129 residual: returning a capturing nested function BY NAME from
+	// a function with no return-type annotation must infer a closure type
+	// (previously the bare-scalar default mistyped the caller's binding and
+	// calling it was "undefined function or closure"). Also pins the already-
+	// working neighbors: capture+mutation, hoisted call-before-decl, mutual
+	// recursion, capturing generator, HOF pass, self-recursive escape.
+	assertOutput(t, `
+function makeCounter() {
+  let n = 0;
+  function bump() { n++; return n; }
+  return bump;
+}
+const c = makeCounter();
+c(); c();
+console.log(c());
+function host(n: number): string {
+  return even(n) ? "even" : "odd";
+  function even(k: number): boolean { return k === 0 ? true : odd(k - 1); }
+  function odd(k: number): boolean { return k === 0 ? false : even(k - 1); }
+}
+console.log(host(7), host(10));
+function tally(xs: number[]): number {
+  let sum = 0;
+  function add(v: number) { sum += v; }
+  xs.forEach(add);
+  return sum;
+}
+console.log(tally([1, 2, 3]));
+function makeFib() {
+  let calls = 0;
+  function fib(n: number): number { calls++; return n < 2 ? n : fib(n-1) + fib(n-2); }
+  return fib;
+}
+console.log(makeFib()(10));
+function genHost() {
+  let base = 100;
+  function* g() { yield base + 1; yield base + 2; }
+  for (const v of g()) console.log(v);
+}
+genHost();
+`, "3\nodd even\n6\n55\n101\n102")
+}
+
+func TestE2EGeneratorFirstClassValue(t *testing.T) {
+	// TDD-00129: a generator function in value position is a first-class
+	// constructor closure — returning/storing it works, each call constructs a
+	// fresh instance, and a nested one's captured environment stays live (by
+	// shared cell) across the enclosing frame's return.
+	assertOutput(t, `
+function make() {
+  let bump = 0;
+  function* seq(start: number): number {
+    yield start + bump;
+    yield start + bump;
+  }
+  const inc = () => { bump += 100; };
+  return { seq, inc };
+}
+const m = make();
+const a = m.seq(1);
+console.log(a.next().value);
+m.inc();
+console.log(a.next().value);
+const b = m.seq(50);
+console.log(b.next().value);
+function genHostEsc() {
+  let base = 10;
+  function* g() { yield base; }
+  return g;
+}
+const gg = genHostEsc();
+for (const v of gg()) console.log(v);
+function* three(): number { yield 3; }
+const t = three;
+console.log(t().next().value);
+`, "1\n101\n150\n10\n3")
 }

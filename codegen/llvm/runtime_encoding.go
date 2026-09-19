@@ -387,7 +387,7 @@ vthrow:
   %ename = call ptr @__kml_str_from_cstr(ptr @.kml_atob_errname)
   %errobj = call ptr @malloc(i64 24)
   %kindp = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 0
-  store i64 7, ptr %kindp, align 8
+  store i64 281474976710663, ptr %kindp, align 8
   %msgp = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 1
   store ptr %emsg, ptr %msgp, align 8
   %namep = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 2
@@ -792,7 +792,7 @@ pcterr:
   %%uename = call ptr @__kml_str_from_cstr(ptr %s)
   %%uerrobj = call ptr @malloc(i64 24)
   %%ukindp = getelementptr { i64, ptr, ptr }, ptr %%uerrobj, i32 0, i32 0
-  store i64 5, ptr %%ukindp, align 8
+  store i64 281474976710661, ptr %%ukindp, align 8
   %%umsgp = getelementptr { i64, ptr, ptr }, ptr %%uerrobj, i32 0, i32 1
   store ptr %%uemsg, ptr %%umsgp, align 8
   %%unamep = getelementptr { i64, ptr, ptr }, ptr %%uerrobj, i32 0, i32 2

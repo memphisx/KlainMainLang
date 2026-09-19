@@ -82,11 +82,24 @@ function classify(n: number): string {
 console.log(classify(-1));  // negative
 console.log(classify(3));   // sum=6
 
-// --- One deliberate limit: a block-nested function cannot capture a C-style
-// for-loop's own variable (it is a single per-iteration cell) — copy it to a
-// `const` inside the loop body and capture that instead:
-//
-//   for (let i = 0; i < 3; i++) {
-//       const cur = i;
-//       function useCur(): number { return cur; }  // ok
-//   }
+// --- A block-nested function over a C-style `let` loop variable captures
+// THAT iteration's binding (per-iteration cells, exactly like JS):
+const grabs: (() => number)[] = []
+for (let i = 0; i < 3; i++) {
+    function grab(): number { return i * 10 }
+    grabs.push(grab)
+}
+console.log(grabs.map((f) => f()).join(","))  // 0,10,20
+
+// --- A capturing nested declaration escapes as a real closure: returning it
+// by name (no return-type annotation needed) hands the caller a callable that
+// keeps its captured state alive — the classic counter factory.
+function makeCounter() {
+    let n = 0;
+    function bump(): number { n++; return n; }
+    return bump;
+}
+const tick = makeCounter();
+tick();
+tick();
+console.log("count=" + tick());  // count=3

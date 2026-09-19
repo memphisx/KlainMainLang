@@ -6,6 +6,64 @@ import (
 	"fmt"
 )
 
+// errorTypeIDFlag is the high marker bit set in field 0 of every Error-shaped
+// object — a built-in errorObjType (where field 0 is the error kind) and an
+// error-subclass class instance (where field 0 is the class TagID). It lets a
+// general boxed-object site tell an Error apart from a plain class instance or
+// a dynobj bag, whose field-0 tag is a small integer (class TagIDs are far
+// below this bit by construction). The low bits keep the original kind/TagID,
+// so nothing that reads the value masks — every kind read is an equality
+// compare, which flags the compared constant via errorTypeIDStored instead
+// (TDD-00222).
+//
+// Bit 48 specifically: a render/member/JSON site reads field 0 of an ARBITRARY
+// boxed object (which may be a plain malloc'd struct whose field 0 is a
+// pointer, e.g. a boxed allSettled settlement). Valid user-space heap pointers
+// on both targets (arm64 macOS, x86-64 Linux) are < 2^47, so bit 48 is always
+// clear for a pointer or a small tag — only a real Error ever has it set, so
+// the field-0 probe can never mistake a pointer slot for an Error.
+const errorTypeIDFlag = 1 << 48
+
+// errorTypeIDStored returns the field-0 value stored for an Error whose logical
+// kind/TagID is id: the marker bit OR'd onto id. Every write of an Error's
+// field 0 uses this, and every compare against an Error's field 0 flags its
+// constant with it, so the two sides stay in lockstep.
+func errorTypeIDStored(id int64) int64 { return errorTypeIDFlag | id }
+
+// errorSubclassTagBase is the TagID floor for a `class X extends Error`
+// instance (TDD-00155 Stage 6). It sits above every builtin error kind (0–8)
+// so a caught subclass instance never satisfies `instanceof TypeError`, and it
+// lets a boxed-object render/member site tell a built-in errorObjType (whose
+// message/name fields line up) from a subclass class instance (a different
+// struct layout): a flagged field-0 whose low bits are < this base is a
+// built-in error; >= this base is a subclass instance (TDD-00222).
+const errorSubclassTagBase = 1000
+
+// emitBoxedErrorProbe reads field 0 of a boxed object whose i64 payload
+// (a ptrtoint of the object pointer) is payloadReg, and returns objPtr (the
+// pointer) plus an i1 that is true iff the object is Error-shaped — the Error
+// type-id flag is set. That covers both a built-in errorObjType AND an
+// error-subclass class instance: a `class X extends Error` layout is
+// prefix-compatible with errorObjType by construction (the tag slot occupies
+// the kind slot, message/name follow at the same offsets, and an error
+// subclass can never carry a vtable — dynamic dispatch requires subclassing,
+// which is rejected for error subclasses), so render/member sites read the
+// real fields the same way for both (TDD-00222; the subclass arm closed the
+// former "renders [object Object]" caveat on allSettled/AbortSignal reasons).
+func (e *Emitter) emitBoxedErrorProbe(payloadReg string) (objPtr, isErr string) {
+	objPtr = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", objPtr, payloadReg))
+	f0Gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", f0Gep, errorObjType.StructIR(), objPtr))
+	f0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", f0, f0Gep))
+	flagged := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", flagged, f0, errorTypeIDFlag))
+	isErr = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isErr, flagged))
+	return objPtr, isErr
+}
+
 // errorKinds is the fixed, built-in Error kind enum (TDD-00013 Option A) —
 // index into this slice is the runtime kind tag stored in every Error
 // object's hidden field 0. "Error" is always kind 0, the base every other
@@ -90,6 +148,9 @@ var errorObjType = func() Type {
 		// Node sets it alongside `err.path` (the source); null for every other
 		// error. Set only by __kml_fs_throw2 (ADR-01000).
 		{Name: "dest", Ty: TypePtr},
+		// `err.cause` — the error-options bag's cause (`new Error(m, { cause })`),
+		// a NaN-boxed any (nbUndefined when absent), matching Node's untyped slot.
+		{Name: "cause", Ty: TypeAny},
 	})
 	ty.IsError = true
 	return ty
@@ -115,7 +176,7 @@ func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
 
 	kindGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", kindID, kindGep))
+	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", errorTypeIDStored(kindID), kindGep))
 
 	msgGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", msgGep, errorObjType.StructIR(), dataReg))
@@ -149,6 +210,9 @@ func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
 	destGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 9", destGep, errorObjType.StructIR(), dataReg))
 	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", destGep))
+	causeGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 10", causeGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, causeGep))
 
 	return dataReg
 }
@@ -214,16 +278,15 @@ func (e *Emitter) buildAggregateErrorObj(msgPtr, namePtr, dataPtr, lenRef string
 	e.ensureExceptionHelpers()
 	e.ensureMalloc()
 	kindID := errorKindIDs["AggregateError"]
-	data := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", data, aggregateErrorStructSize))
+	// Allocate and default-fill through buildErrorObj (full errorObjType size,
+	// so a stray shared-field read — code/cause/… — is bounds-safe and
+	// well-defined), then overlay the aggregate's trailing { data, len } pair.
+	data := e.buildErrorObj(kindID, msgPtr, namePtr)
 	store := func(idx int, ty, ref string) {
 		gp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gp, aggregateErrorStructIR, data, idx))
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ty, ref, gp))
 	}
-	store(0, "i64", fmt.Sprintf("%d", kindID))
-	store(1, "ptr", msgPtr)
-	store(2, "ptr", namePtr)
 	store(3, "ptr", dataPtr)
 	store(4, "i64", lenRef)
 	return data
@@ -297,6 +360,19 @@ func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 	}
 
 	dataReg := e.buildErrorObj(errorKindIDs[ne.Kind], msgPtr, namePtr)
+	if ne.Cause != nil {
+		causeVal, err := e.emitExpr(ne.Cause)
+		if err != nil {
+			return Value{}, err
+		}
+		boxed, err := e.emitBoxValue(causeVal)
+		if err != nil {
+			return Value{}, err
+		}
+		causeGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 10", causeGep, errorObjType.StructIR(), dataReg))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, causeGep))
+	}
 	return Value{Ref: dataReg, Ty: errorObjType}, nil
 }
 
@@ -340,7 +416,7 @@ func (e *Emitter) emitErrorErrorsAccess(errPtr string) Value {
 	isAgg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kp, errorObjType.StructIR(), errPtr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", k, kp))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isAgg, k, aggID))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isAgg, k, errorTypeIDStored(aggID)))
 	aggL := e.freshLabel("aggerr.errors")
 	emptyL := e.freshLabel("aggerr.empty")
 	mergeL := e.freshLabel("aggerr.merge")

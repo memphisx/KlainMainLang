@@ -39,7 +39,7 @@
             ]
           },
           {
-            "feature": "`.slice(start, end?)`",
+            "feature": "`.slice(start?, end?)`",
             "status": "implemented",
             "caveats": [
               "Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it (`'café'.slice(0, 4)` cuts mid-`é`), diverging from Node on non-ASCII text."

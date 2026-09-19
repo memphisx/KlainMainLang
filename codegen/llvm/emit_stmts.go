@@ -3,8 +3,10 @@
 package llvm
 
 import (
-	"KlainMainLang/ast"
 	"fmt"
+	"sort"
+
+	"KlainMainLang/ast"
 )
 
 // namedLabel is one entry in Emitter.namedLabelStack: a label name and the
@@ -424,15 +426,46 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 			return err
 		}
 	}
-	// TDD-00152: mark this loop's own variable name(s) as active for the
-	// duration of the body, so a block-nested `function` capturing one is
-	// rejected cleanly rather than closing over the shared counter cell.
+	// Per-iteration `let` binding semantics (JS): a closure created inside the
+	// body over a `let` loop variable captures THAT iteration's binding, not
+	// one shared counter cell. Detect which loop variables some closure in the
+	// body captures (loopVars as the bound set: a plain body reference stays
+	// bound and isn't collected; the scan resets bound at every closure
+	// boundary, so only closure-crossing references collect). `var` keeps the
+	// single shared binding, exactly like JS.
 	loopVars := map[string]bool{}
 	if s.Init != nil {
-		collectCapturableNames([]ast.Statement{s.Init}, loopVars)
+		switch init := s.Init.(type) {
+		case *ast.VarDeclaration:
+			if init.Kind != "var" {
+				loopVars[init.Name] = true
+			}
+		case *ast.VarDeclarationList:
+			for _, d := range init.Decls {
+				if d.Kind != "var" {
+					loopVars[d.Name] = true
+				}
+			}
+		}
 	}
-	e.activeForLoopVars = append(e.activeForLoopVars, loopVars)
-	defer func() { e.activeForLoopVars = e.activeForLoopVars[:len(e.activeForLoopVars)-1] }()
+	capturedLoop := []string{}
+	if len(loopVars) > 0 && s.Body != nil {
+		free := map[string]bool{}
+		capScanStmts([]ast.Statement{s.Body}, loopVars, free)
+		for name := range loopVars {
+			if free[name] {
+				capturedLoop = append(capturedLoop, name)
+			}
+		}
+		sort.Strings(capturedLoop)
+	}
+	// A nested function declaration in the body must see the loop variables as
+	// capturable bindings (they're declared in the for-init, not a body
+	// statement, so pushNestedFuncScope's own frame misses them).
+	if len(loopVars) > 0 {
+		e.enclosingCapturables = append(e.enclosingCapturables, loopVars)
+		defer func() { e.enclosingCapturables = e.enclosingCapturables[:len(e.enclosingCapturables)-1] }()
+	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(condL)
@@ -449,12 +482,52 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 	}
 
 	e.emitLabel(bodyL)
+	// Per-iteration cells for the closure-captured `let` loop variables: at
+	// each iteration's start, a FRESH heap cell is seeded from the working
+	// slot and the name is shadow-bound to it (Boxed, so a closure captures
+	// the cell directly); at the increment block the cell's final value is
+	// written back to the working slot, which the update expression and next
+	// condition read — matching JS's copy-in/copy-out per-iteration `let`.
+	// The write-back sits at incL's top so a `continue` (which jumps there)
+	// carries the body's mutations too; a `break` skips it, but the loop
+	// variable is out of scope after the loop anyway.
+	type perIterCell struct {
+		workPtr string // the loop-scope working slot (init's own storage)
+		cell    string // this iteration's fresh cell register
+		ty      Type
+	}
+	var iterCells []perIterCell
+	if len(capturedLoop) > 0 {
+		e.ensureMalloc()
+		e.pushScope()
+		for _, name := range capturedLoop {
+			sym, ok := e.lookup(name)
+			if !ok {
+				continue
+			}
+			cell := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", cell, sym.Ty.Align()))
+			cur := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", cur, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, cur, cell, sym.Ty.Align()))
+			e.define(name, Symbol{Ptr: cell, Ty: sym.Ty, Boxed: true, IsConst: sym.IsConst})
+			iterCells = append(iterCells, perIterCell{workPtr: sym.Ptr, cell: cell, ty: sym.Ty})
+		}
+	}
 	if err := e.emitStmt(s.Body); err != nil {
 		return err
+	}
+	if len(capturedLoop) > 0 {
+		e.popScope()
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
 
 	e.emitLabel(incL)
+	for _, c := range iterCells {
+		fin := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", fin, c.ty.IR, c.cell, c.ty.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", c.ty.IR, fin, c.workPtr, c.ty.Align()))
+	}
 	for _, upd := range s.Update {
 		if _, err := e.emitExpr(upd); err != nil {
 			return err
@@ -594,6 +667,22 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 
 	e.pushScope()
 	defer e.popScope()
+
+	// The loop variable(s) are capturable bindings for a nested function
+	// declaration in the body (they're declared by the loop head, not a body
+	// statement, so pushNestedFuncScope's own frame misses them — same
+	// arrangement emitFor makes). Each iteration re-binds the variable, so
+	// the capturing-closure path naturally captures that iteration's cell.
+	loopVars := map[string]bool{}
+	if s.VarName != "" {
+		loopVars[s.VarName] = true
+	}
+	collectArrayPatternNames(s.ArrayPattern, loopVars)
+	collectObjectPatternNames(s.ObjectPattern, loopVars)
+	if len(loopVars) > 0 {
+		e.enclosingCapturables = append(e.enclosingCapturables, loopVars)
+		defer func() { e.enclosingCapturables = e.enclosingCapturables[:len(e.enclosingCapturables)-1] }()
+	}
 
 	// Sync generator (ADR-00613/ADR-00614): register an iterator-close `finally`
 	// *before* the break/continue targets, so a `return`/`throw`/outer

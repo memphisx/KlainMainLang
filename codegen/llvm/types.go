@@ -1546,10 +1546,11 @@ func EventTargetType() Type {
 func AbortSignalType() Type {
 	t := ObjectType([]Field{
 		{Name: "aborted", Ty: TypeBool},
-		// reason is typed as an error object so `signal.reason.name` resolves to
-		// the default "AbortError" DOMException (a custom non-error reason is
-		// still stored, but is read back through the error-object shape).
-		{Name: "reason", Ty: errorObjType},
+		// reason is `any` (a NaN-boxed i64): abort(reason) accepts any value, and
+		// a default/timeout DOMException boxes as kmlTagObject whose field-0
+		// type-id lets the render/member/instanceof paths recover the Error
+		// shape. A never-aborted signal's reason reads back as undefined.
+		{Name: "reason", Ty: TypeAny},
 		{Name: "listeners", Ty: TypePtr},
 		// deadlineNs: a monotonic-ns deadline for AbortSignal.timeout(ms) (0 =
 		// none). The fetch await loop / event loop fold this in via
@@ -1561,6 +1562,12 @@ func AbortSignalType() Type {
 		// on. Fired alongside the addEventListener listeners in
 		// emitAbortControllerAbort (ADR-00983).
 		{Name: "onabort", Ty: TypePtr},
+		// followers: head of a linked list of { ptr composite, ptr next } nodes —
+		// the AbortSignal.any composites that follow this signal, so a source
+		// aborted AFTER the composite is built still propagates to it
+		// (emitAbortPropagateFn). null when nothing follows. Trailing field, so
+		// the fixed indices the runtime GEP literals rely on are untouched.
+		{Name: "followers", Ty: TypePtr},
 	})
 	t.IsAbortSignal = true
 	return t
@@ -1853,6 +1860,16 @@ func ClusterWorkerType() Type {
 	return ty
 }
 
+// clusterAddressType is the cluster 'listening' event's address object —
+// Node's { address, port, addressType } shape (workers bind INADDR_ANY, IPv4).
+func clusterAddressType() Type {
+	return ObjectType([]Field{
+		{Name: "address", Ty: TypePtr},
+		{Name: "port", Ty: TypeF64},
+		{Name: "addressType", Ty: TypeF64},
+	})
+}
+
 // BufferType returns a Node Buffer's type (TDD-00103): a Uint8Array
 // (TypedArrayType("uint8")) with IsBuffer set — see the flag's doc comment.
 func BufferType() Type {
@@ -1911,20 +1928,22 @@ func TypedArrayType(elemKind string) Type {
 }
 
 // SettlementType returns Promise.allSettled()'s per-element result shape:
-// { status: string, value: T, reason: Error }. Both value and reason are
-// always allocated regardless of which branch is live (this compiler has no
-// optional/union fields) — codegen must explicitly zero-fill whichever one
-// doesn't apply per element (null ptr, matching errorObjType/most T's own
-// ptr-sized IR) rather than leave it uninitialized, so e.g. a fulfilled
-// entry's .reason reads a defined null instead of garbage. reason reuses
-// emit_exceptions.go's existing errorObjType (the same shape thrown/caught
-// values already use), so a rejected entry's .reason.message/.reason.name
-// is readable exactly like any caught Error's.
+// { status: string, value: T, reason: any }. Both value and reason are always
+// allocated regardless of which branch is live (this compiler has no
+// optional/union fields) — codegen zero-fills whichever one doesn't apply per
+// element (a fulfilled entry's reason is boxed `undefined`; a rejected entry's
+// value is T's zero) rather than leave it uninitialized. `reason` is a
+// NaN-boxed `any` carrying the ORIGINAL rejected value with full type fidelity
+// (TDD-00169): `reject(42)` keeps `typeof reason === "number"` and serializes
+// as `42`, and a rejected Error is recovered at the render/JSON/member sites
+// via the field-0 Error type-id (TDD-00222) — `reason.message`/`.name` read
+// the real fields, `JSON.stringify` yields `{}`. It shares field 2's i64 width
+// with the former errorObjType pointer, so the struct layout is unchanged.
 func SettlementType(valueTy Type) Type {
 	return ObjectType([]Field{
 		{Name: "status", Ty: TypePtr},
 		{Name: "value", Ty: valueTy},
-		{Name: "reason", Ty: errorObjType},
+		{Name: "reason", Ty: TypeAny},
 	})
 }
 
@@ -2652,6 +2671,14 @@ func ResolveTypeName(name string) Type {
 		return TypePtr
 	case "boolean":
 		return TypeBool
+	case "ClusterWorker":
+		// A cluster.fork() Worker handle — the name cluster.on(...) listeners
+		// are context-typed with (Node types it as cluster's own `Worker`,
+		// which would collide with worker_threads' here).
+		return ClusterWorkerType()
+	case "ClusterAddress":
+		// The cluster 'listening' event's address object.
+		return clusterAddressType()
 	case "EventTarget":
 		return EventTargetType()
 	case "AbortController":

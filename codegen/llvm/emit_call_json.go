@@ -692,9 +692,10 @@ func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value,
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", accF.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
-	// Rejected: append "reason": <reason> only. The reason slot holds the raw
-	// rejection value's string form (emit_promise.go), so serialize it as a
-	// string rather than as the errorObjType the slot is nominally typed as.
+	// Rejected: append "reason": <reason> only. The reason slot is a NaN-boxed
+	// `any` carrying the original rejected value (TDD-00169): a number/string
+	// renders as itself, a real Error as `{}` (recovered via its field-0 type-id,
+	// TDD-00222) — the dynamic JSON walker self-describes the box tag.
 	e.emitLabel(rejL)
 	accR, err := e.jsonAppend(acc, ind.itemPrefix(1)+`"reason"`+ind.colon())
 	if err != nil {
@@ -704,8 +705,8 @@ func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value,
 	rGep := e.freshReg()
 	rReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", rGep, structIR, val.Ref, rIdx))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rReg, rGep))
-	rJSON, err := e.emitJSONStringifyValue(Value{Ref: rReg, Ty: TypePtr}, ind.child())
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", rReg, rGep))
+	rJSON, err := e.emitJSONStringifyValue(Value{Ref: rReg, Ty: TypeAny}, ind.child())
 	if err != nil {
 		return Value{}, err
 	}

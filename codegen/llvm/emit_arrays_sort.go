@@ -255,8 +255,8 @@ func (e *Emitter) emitArrayToSorted(mem *ast.MemberExpression, args []ast.Expres
 // touching the original (toSorted, toReversed, with, values, toSpliced).
 
 func (e *Emitter) emitArraySlice(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: slice takes 1 or 2 arguments", pos.Line, pos.Col)
+	if len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: slice takes 0 to 2 arguments", pos.Line, pos.Col)
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
@@ -265,15 +265,19 @@ func (e *Emitter) emitArraySlice(mem *ast.MemberExpression, args []ast.Expressio
 	e.ensureMalloc()
 	e.ensureMemcpy()
 
-	startRaw, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
+	// Zero-arg slice() is a full shallow copy: start = 0.
+	startN := "0"
+	if len(args) >= 1 {
+		startRaw, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		startIdx, err := e.arrayIndexToI64(startRaw, args[0].GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		startN = e.emitNormalizeSliceIdx(startIdx.Ref, lenReg)
 	}
-	startIdx, err := e.arrayIndexToI64(startRaw, args[0].GetPos())
-	if err != nil {
-		return Value{}, err
-	}
-	startN := e.emitNormalizeSliceIdx(startIdx.Ref, lenReg)
 
 	var endN string
 	if len(args) == 2 {

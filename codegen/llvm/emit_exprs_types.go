@@ -604,7 +604,32 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			// (must match emitIdent's own emission).
 			return TypeAny
 		}
+		// A generator function in value position is a first-class constructor
+		// closure (must match emitGeneratorCtorClosure's emission).
+		if info, found := e.lookupGenerator(ex.Name); found {
+			return FuncType(info.ParamTypes, info.GenTy)
+		}
+		// A capturing nested function declaration referenced before its
+		// declaration statement (TDD-00129 Stage 2, letrec hoisting): its type
+		// is the closure the on-demand emission will produce — mirror
+		// letrecEmitCapturingNested without emitting.
+		if len(e.nestedFuncScopes) > 0 {
+			for fd := range e.nestedFuncScopes[len(e.nestedFuncScopes)-1].capturing {
+				if fd.Name == ex.Name {
+					nsig := e.buildFunctionSig(fd)
+					lt := FuncType(nsig.ParamTypes, nsig.RetType)
+					lt.FuncHasRest = nsig.HasRest
+					return lt
+				}
+			}
+		}
 	case *ast.IndexExpression:
+		// cluster.workers[id] — the ID-keyed Worker lookup (mirrors emitIndex).
+		if mem, ok := ex.Object.(*ast.MemberExpression); ok && mem.Property == "workers" {
+			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "cluster__kml_builtin" {
+				return ClusterWorkerType()
+			}
+		}
 		// process.env["K"] and process.argv[i] are `string | undefined`
 		// (TDD-00187 Stage 3) — must mirror the emit sites.
 		if e.isProcessEnvExpr(ex.Object) {
@@ -934,6 +959,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return TypeBool
 			case "workerId":
 				return TypeI64
+			case "workers":
+				return ArrayOf(ClusterWorkerType())
+			case "settings":
+				return clusterSettingsType()
 			}
 		}
 		// cluster.fork() Worker's `.id`.
@@ -1811,6 +1840,20 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if sym, found := e.lookup(id.Name); found && sym.Ty.IsFunc && sym.Ty.FuncRetType != nil {
 				return *sym.Ty.FuncRetType
 			}
+			// A call to a capturing nested function not yet bound (letrec
+			// hoisting, TDD-00129 Stage 2 — including the self-recursive call
+			// inside its own body while its return type is being inferred):
+			// its type is the signature the on-demand emission will produce.
+			// Must mirror the Identifier case above; buildFunctionSig's
+			// recursion guard turns a cycle into sigInferCycleHit instead of
+			// unbounded recursion.
+			if len(e.nestedFuncScopes) > 0 {
+				for fd := range e.nestedFuncScopes[len(e.nestedFuncScopes)-1].capturing {
+					if fd.Name == id.Name {
+						return e.buildFunctionSig(fd).RetType
+					}
+				}
+			}
 			if e.isShadowedByLocal(id.Name) {
 				return TypeI64 // matches this function's own generic identifier-call fallback below
 			}
@@ -2245,7 +2288,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "zlib__kml_builtin" {
 				// The *Sync forms return a Buffer; the callback forms return void.
 				if n := len(mem.Property); n > 4 && mem.Property[n-4:] == "Sync" {
-					return TypedArrayType("uint8")
+					return BufferType()
 				}
 				return TypeVoid
 			}

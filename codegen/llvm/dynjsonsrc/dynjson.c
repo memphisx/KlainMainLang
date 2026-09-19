@@ -227,11 +227,23 @@ static int stringify_val(Sb *b, long long tag, long long pay,
     case 9:
     case 12:
         return 0; /* undefined / function-ish: skipped (object) or null (array) */
+    case 6: {
+        /* A boxed Error (field-0 type-id flag, KlainMainLang TDD-00222) has no
+           enumerable own properties, so JSON.stringify(new Error(...)) is "{}"
+           — matching Node. Any other boxed object (a plain class instance) has
+           no runtime shape to walk here. */
+        if (pay && (*(long long *)pay & (1LL << 48))) {
+            sb_cstr(b, "{}");
+            return 1;
+        }
+        *err = 2;
+        return 0;
+    }
     case 10:
     case 11:
         break;
     default:
-        *err = 2; /* tag 6/7: no runtime shape to walk */
+        *err = 2; /* tag 7: no runtime shape to walk */
         return 0;
     }
     if (depth >= KML_DYN_MAX_DEPTH) {
@@ -404,6 +416,69 @@ char *__kml_dynarr_join(char *a) {
 
 static void inspect_val(Sb *b, long long tag, long long pay, int depth);
 
+/* key_is_ident: an inspect key prints bare when it is a valid JS identifier
+   (`{ a: 1 }`), single-quoted otherwise (`{ 'a-b': 1 }`) — util.inspect's rule. */
+static int key_is_ident(const char *k) {
+    if (!k || !*k) return 0;
+    if (!((k[0] >= 'a' && k[0] <= 'z') || (k[0] >= 'A' && k[0] <= 'Z') || k[0] == '_' || k[0] == '$'))
+        return 0;
+    for (const char *p = k + 1; *p; p++) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '_' || *p == '$'))
+            return 0;
+    }
+    return 1;
+}
+
+/* inspect_obj renders a dynamic object the way util.inspect (console.log)
+   does: `{ a: 1, b: 'x' }`, `{}` when empty, keys in ES enumeration order,
+   non-enumerable entries skipped, accessors shown as [Getter]/[Setter]
+   (never invoked), and — Node's default depth — anything nested deeper than
+   two object levels collapsed to [Object]. */
+static void inspect_obj(Sb *b, char *o, int depth) {
+    if (depth > 2) { sb_cstr(b, "[Object]"); return; }
+    /* A Proxy header (flag 1<<33) forwards to its target, as JSON does. */
+    while (*(long long *)o & (1LL << 33)) o = *(char **)(o + 8);
+    long long n = obj_count(o);
+    long long *order = (n > 0) ? (long long *)malloc((size_t)n * sizeof(long long)) : NULL;
+    if (order) n = es_order(o, n, order);
+    int wrote = 0;
+    for (long long oi = 0; oi < n; oi++) {
+        long long i = order ? order[oi] : oi;
+        long long attrs = obj_attrs(o, i);
+        if (!(attrs & 2)) continue; /* non-enumerable: hidden from inspect */
+        if (wrote) sb_cstr(b, ", ");
+        else sb_cstr(b, "{ ");
+        const char *k = obj_key(o, i);
+        if (key_is_ident(k)) {
+            sb_cstr(b, k);
+        } else {
+            sb_ch(b, '\'');
+            sb_cstr(b, k ? k : "");
+            sb_ch(b, '\'');
+        }
+        sb_cstr(b, ": ");
+        if (attrs & 8) {
+            char *pair = (char *)obj_pay(o, i);
+            void *getter = *(void **)pair;
+            void *setter = *(void **)(pair + 8);
+            sb_cstr(b, getter && setter ? "[Getter/Setter]" : (getter ? "[Getter]" : "[Setter]"));
+        } else {
+            inspect_val(b, obj_tag(o, i), obj_pay(o, i), depth + 1);
+        }
+        wrote = 1;
+    }
+    free(order);
+    sb_cstr(b, wrote ? " }" : "{}");
+}
+
+char *__kml_dynobj_inspect(char *o) {
+    Sb b;
+    sb_init(&b);
+    inspect_obj(&b, o, 0);
+    return sb_finish(&b);
+}
+
 static void inspect_arr(Sb *b, char *a, int depth) {
     if (depth >= KML_DYN_MAX_DEPTH) { sb_cstr(b, "[Array]"); return; }
     long long n = arr_len(a);
@@ -444,8 +519,14 @@ static void inspect_val(Sb *b, long long tag, long long pay, int depth) {
     case 5:
         sb_cstr(b, "undefined");
         break;
+    case 10:
+        inspect_obj(b, (char *)pay, depth);
+        break;
     case 11:
         inspect_arr(b, (char *)pay, depth);
+        break;
+    case 12:
+        sb_cstr(b, "[Function (anonymous)]");
         break;
     default:
         sb_cstr(b, "[Object]");

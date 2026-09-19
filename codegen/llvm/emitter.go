@@ -171,6 +171,7 @@ type Emitter struct {
 	declaredDtoa          bool            // the __kml_dtoa declare has been emitted once
 	usedSignalAborted     bool            // the __kml_signal_aborted helper has been emitted (TDD-00081 Stage 3c)
 	usedAbortTimeout      bool            // AbortSignal.timeout used → the background abort-timeout dispatcher + register are emitted (TDD-00216)
+	usedAbortPropagate    bool            // abort propagation to AbortSignal.any followers emitted (@__kml_abort_propagate)
 	usedAbortRegistry     bool            // the always-present abort-timeout registry globals + soonest/fire_due have been emitted (TDD-00216)
 	usedPrintf            bool
 	usedDprintf           bool
@@ -260,6 +261,19 @@ type Emitter struct {
 	// entered into the flat, whole-program e.funcs map.
 	nestedFuncScopes []nestedFuncScope
 	nestedFuncCtr    int
+	// sigInferInProgress holds the declarations whose unannotated return
+	// type buildFunctionSig is currently inferring. Re-entry for the same
+	// declaration (a recursive nested function whose first reachable return
+	// is the recursive call itself, reached back through the letrec
+	// identifier inference or inferBlockReturnExpr) keeps the void default
+	// instead of recursing without bound.
+	sigInferInProgress map[*ast.FunctionDeclaration]bool
+	// sigInferCycleHit is set when that guard trips, telling
+	// inferUnannotatedReturnType the candidate return it just inferred was
+	// poisoned by the cycle so it should try the next return statement
+	// (`if (n > 0) return f(n - 1); return p + "done";` must infer from the
+	// base case, not void).
+	sigInferCycleHit bool
 	// prog is the whole program AST, retained for `typeof value` resolution
 	// (finding a referenced value's top-level declaration before value scope is
 	// populated).
@@ -295,14 +309,6 @@ type Emitter struct {
 	// pushNestedFuncScope. Purely syntactic, since pre-scan runs before the
 	// enclosing scope's params/locals are define()d.
 	enclosingCapturables []map[string]bool
-	// activeForLoopVars is the set of C-style `for (let i …)` loop-variable
-	// names whose loop body is currently being emitted (TDD-00152). A
-	// block-nested `function` capturing one of these is rejected cleanly: the
-	// loop variable lives in a single alloca reused across iterations, so a
-	// closure over it would share the counter cell and corrupt the loop —
-	// the same per-iteration-binding limitation arrows hit. Pushed by emitFor
-	// around its body, so a nested declaration one or more blocks deeper sees it.
-	activeForLoopVars []map[string]bool
 	// objLitClassCtr names each synthetic anonymous class an object literal
 	// with getters/setters is lowered to (TDD-00153) — one per literal site.
 	// objLitClasses maps each such literal to its synthetic class name (so the
@@ -432,6 +438,10 @@ type Emitter struct {
 	usedNetSockIO          bool
 	usedDgramRuntime       bool
 	usedClusterRuntime     bool
+	usedCPListenerAppend   bool
+	// usedListeningAnnounceHook: @__kml_http_listening_announce defined once,
+	// shared by the HTTP bind (call site) and cluster (armer) runtimes.
+	usedListeningAnnounceHook bool
 	usedProcessUptime      bool
 	usedProcessHrtime      bool
 	usedGetrusage          bool
@@ -1615,7 +1625,9 @@ func (e *Emitter) resolveValueType(name string) (Type, bool) {
 				}
 				if declName == name && len(d.TypeParams) == 0 {
 					sig := e.buildFunctionSig(d)
-					return FuncType(sig.ParamTypes, sig.RetType), true
+					tt := FuncType(sig.ParamTypes, sig.RetType)
+					tt.FuncHasRest = sig.HasRest
+					return tt, true
 				}
 			}
 		}
@@ -1627,7 +1639,9 @@ func (e *Emitter) resolveValueType(name string) (Type, bool) {
 		return sym.Ty, true
 	}
 	if _, sig, ok := e.resolveFuncRef(name); ok {
-		return FuncType(sig.ParamTypes, sig.RetType), true
+		tt := FuncType(sig.ParamTypes, sig.RetType)
+		tt.FuncHasRest = sig.HasRest
+		return tt, true
 	}
 	return Type{}, false
 }
@@ -3243,7 +3257,19 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 	// from the function's own first return statement (see
 	// inferUnannotatedReturnType) fixes both; a function with no
 	// reachable return value at all keeps the void default.
-	if fd.ReturnType == nil {
+	if fd.ReturnType == nil && e.sigInferInProgress[fd] {
+		// Recursion guard: this declaration's return type is already being
+		// inferred higher up the stack (a recursive nested function reached
+		// back through the letrec identifier inference or
+		// inferBlockReturnExpr). Keep the void default here and tell the
+		// in-flight inference its current candidate is poisoned.
+		e.sigInferCycleHit = true
+	} else if fd.ReturnType == nil {
+		if e.sigInferInProgress == nil {
+			e.sigInferInProgress = map[*ast.FunctionDeclaration]bool{}
+		}
+		e.sigInferInProgress[fd] = true
+		defer delete(e.sigInferInProgress, fd)
 		paramNames := make([]string, len(fd.Params))
 		for i, p := range fd.Params {
 			paramNames[i] = p.Name

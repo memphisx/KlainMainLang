@@ -723,19 +723,18 @@ func (e *Emitter) emitProcessOn(args []ast.Expression, pos ast.Pos) (Value, erro
 	case "message":
 		// The fork IPC channel's child side (TDD-00141): (msg: string) => void.
 		// Arms the channel (parses NODE_CHANNEL_FD) and holds the event loop
-		// open while it stays connected.
-		contextTypeArrowParams(args[1], "string")
-		cb, err := e.resolveCallbackWithHints(args[1], []Type{TypePtr})
+		// open while it stays connected. Stored via the wire adapter — an
+		// `any`-typed (or untyped) listener receives the faithful sent value
+		// (json serialization mode), `msg: string` the plain text.
+		e.ensureIPCChildRuntime()
+		hdr, err := e.cpMessageAdapter(args[1], pos)
 		if err != nil {
 			return Value{}, err
 		}
-		if cb.kind != cbClosure {
-			return Value{}, fmt.Errorf("%d:%d: a process 'message' listener must be an arrow function literal", pos.Line, pos.Col)
-		}
-		e.ensureIPCChildRuntime()
 		fd := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_ipcc_fd()", fd))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_ipcc_msg_listener, align 8", cb.hdrPtr))
+		e.ensureCPListenerAppend()
+		e.emitInstr(fmt.Sprintf("call void @__kml_cp_listener_append(ptr @__kml_ipcc_msg_listener, ptr %s)", hdr))
 	case "warning":
 		// The listener receives the warning as an Error: (warning) => void.
 		// process.emitWarning still prints to stderr (matching Node's always-on
@@ -869,16 +868,17 @@ func (e *Emitter) emitProcessSend(args []ast.Expression, pos ast.Pos) (Value, er
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: process.send takes one message", pos.Line, pos.Col)
 	}
-	mv, err := e.emitExpr(args[0])
+	e.ensureIPCChildRuntime()
+	ref, rawJSON, err := e.emitWireSend(args[0], pos)
 	if err != nil {
 		return Value{}, err
 	}
-	if !isStringTy(mv.Ty) {
-		return Value{}, fmt.Errorf("%d:%d: process.send supports string messages in this version", pos.Line, pos.Col)
+	sendFn := "@__kml_ipcc_send"
+	if rawJSON {
+		sendFn = "@__kml_ipcc_send_json"
 	}
-	e.ensureIPCChildRuntime()
 	ok := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_ipcc_send(ptr %s)", ok, mv.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i1 %s(ptr %s)", ok, sendFn, ref))
 	return Value{Ref: ok, Ty: TypeBool}, nil
 }
 

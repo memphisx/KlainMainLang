@@ -237,3 +237,17 @@ console.log("raw:", dec.decode(zlib.inflateRawSync(f)).length === ` + strconv.It
 `
 	assertOutputImports(t, src, "zlib: true\nraw: true")
 }
+
+// zlib results are Node Buffers: `.toString()` works without an explicit
+// `: Buffer` annotation, on both the *Sync forms and the callback delivery.
+func TestE2EZlibResultIsBuffer(t *testing.T) {
+	assertOutputImports(t, `
+import * as zlib from "zlib"
+const g = zlib.gzipSync("hello")
+console.log(zlib.gunzipSync(g).toString())
+zlib.gunzip(g, (err, buf) => {
+  console.log(buf.toString())
+  console.log(buf.length)
+})
+`, "hello\nhello\n5")
+}

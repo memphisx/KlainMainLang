@@ -44,3 +44,26 @@ const results = await Promise.allSettled([
 console.log(results[0].status) // fulfilled
 console.log(results[0].value)  // 7
 console.log(results[1].status) // rejected
+
+// ── Promise.allSettled: rejection reason keeps its original value ────────────
+// `reason` is the original rejected value, not a coerced Error: a number stays
+// a number (typeof + JSON), and a rejected Error is recovered at every site —
+// `reason.message`/`.name`, String(reason), JSON `{}`, and `instanceof Error`.
+const mixed = await Promise.allSettled([
+    Promise.reject(42),
+    Promise.reject(new TypeError("bad input")),
+])
+const numReason = mixed[0]
+if (numReason.status === "rejected") {
+    console.log(typeof numReason.reason, numReason.reason) // number 42
+}
+const errReason = mixed[1]
+if (errReason.status === "rejected") {
+    const r = errReason.reason
+    console.log(r.message, r.name)        // bad input TypeError
+    console.log(String(r))                // TypeError: bad input
+    console.log(r instanceof Error)       // true
+    console.log(r instanceof TypeError)   // true
+}
+console.log(JSON.stringify(mixed))
+// [{"status":"rejected","reason":42},{"status":"rejected","reason":{}}]

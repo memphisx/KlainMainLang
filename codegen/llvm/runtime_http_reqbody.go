@@ -163,7 +163,7 @@ again:
 earlyend:
   %%eo = call ptr @malloc(i64 24)
   %%eo_kind = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 0
-  store i64 0, ptr %%eo_kind, align 8
+  store i64 281474976710656, ptr %%eo_kind, align 8
   %%eo_msg = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 1
   store ptr %s, ptr %%eo_msg, align 8
   %%eo_name = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 2
@@ -456,7 +456,7 @@ yield:
 disturbed:
   %%do = call ptr @malloc(i64 24)
   %%do_kind = getelementptr { i64, ptr, ptr }, ptr %%do, i32 0, i32 0
-  store i64 0, ptr %%do_kind, align 8
+  store i64 281474976710656, ptr %%do_kind, align 8
   %%do_msg = getelementptr { i64, ptr, ptr }, ptr %%do, i32 0, i32 1
   store ptr %s, ptr %%do_msg, align 8
   %%do_name = getelementptr { i64, ptr, ptr }, ptr %%do, i32 0, i32 2

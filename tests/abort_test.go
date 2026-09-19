@@ -166,6 +166,47 @@ run()
 `, "AbortError true true")
 }
 
+// A fetch aborted with a custom reason rejects with that reason value itself
+// (Node/WHATWG: fetch rejects with signal.reason) — any value's type is
+// preserved, and an Error reason keeps its full shape in the catch handler.
+func TestE2EFetchAbortCustomReasonRethrown(t *testing.T) {
+	assertOutput(t, `
+async function run() {
+  const c = new AbortController()
+  c.abort(42)
+  try {
+    await fetch("http://example.com", { signal: c.signal })
+    console.log("no throw")
+  } catch (e) {
+    console.log(e, typeof e)
+  }
+  const c2 = new AbortController()
+  c2.abort(new Error("cancelled by user"))
+  try {
+    await fetch("http://example.com", { signal: c2.signal })
+    console.log("no throw")
+  } catch (e) {
+    console.log(e instanceof Error, e.message)
+  }
+}
+run()
+`, "42 number\ntrue cancelled by user")
+}
+
+// Throwing an `any` that holds a boxed Error restores the Error shape at the
+// catch site (the throw runtime consults the boxed-object type-id): .name,
+// .message, and instanceof all behave as if the Error were thrown unboxed.
+func TestE2EThrowBoxedErrorAnyKeepsShape(t *testing.T) {
+	assertOutput(t, `
+const x: any = new Error("boom")
+try {
+  throw x
+} catch (e) {
+  console.log(e.name, e.message, e instanceof Error)
+}
+`, "Error boom true")
+}
+
 // new DOMException(message?, name?): name is the 2nd arg (default "Error"),
 // message the 1st (default ""); it is instanceof both DOMException and Error,
 // while a different Error kind is not instanceof DOMException.

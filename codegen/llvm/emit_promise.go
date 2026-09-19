@@ -341,6 +341,14 @@ func (e *Emitter) buildSettlement(settleTy Type, statusStr, valueRef, reasonRef 
 		idx, fieldTy, _ := settleTy.FieldIndex(name)
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, obj, idx))
+		// The absent `reason` of a fulfilled entry passes the literal "null"; the
+		// slot is now a NaN-boxed `any` (TDD-00169), so store a boxed `undefined`
+		// rather than a null pointer, so JSON omits it and `typeof reason` reads
+		// "undefined".
+		if fieldTy.IsDynamic && ref == "null" {
+			e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, gep))
+			return
+		}
 		if fieldTy.IsArray {
 			// Array-typed slot holds a header pointer (TDD-00213 Stage 2). The
 			// absent side of a settlement (a rejected result's `value`, a fulfilled
@@ -773,10 +781,14 @@ func (e *Emitter) emitPromiseAllSettled(args []ast.Expression, pos ast.Pos) (Val
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 			e.emitLabel(failL)
-			// The reason is the raw rejection value (a transport-failure message
-			// string here), stored directly — real allSettled reports the thrown
-			// value, not a synthetic Error wrapper around it.
-			settleFail := e.buildSettlement(settleTy, rejectedStr, "null", reasonMsg)
+			// The reason is a transport-failure message string — wrap it in a real
+			// errorObjType so the `.reason` slot is always a valid Error object
+			// (`.reason.message` reads the message field, no crash), then box it as
+			// a kmlTagObject `any` so the `reason: any` slot (TDD-00169) recovers
+			// the Error shape via its field-0 type-id (TDD-00222).
+			reasonErr := e.buildErrorObj(0, reasonMsg, e.internString("Error"))
+			reasonAny := e.emitNbTagPtr(reasonErr, kmlTagObject)
+			settleFail := e.buildSettlement(settleTy, rejectedStr, "null", reasonAny)
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 			e.emitLabel(mergeL)
@@ -821,18 +833,17 @@ func (e *Emitter) emitPromiseAllSettled(args []ast.Expression, pos ast.Pos) (Val
 			e.emitLabel(okEndL)
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 			e.emitLabel(failL)
-			// The rejection reason is a caught value (TDD-00207) — render it to a
-			// string for `reason` via the caught toString (an Error yields its
-			// message-bearing string form; a string/number reason renders itself),
-			// rather than blindly dereferencing v0 as an errorObj (which segfaults
-			// on a non-Error reason).
+			// The rejection reason is a caught value (TDD-00207) — box it as the
+			// original value into `reason: any` (TDD-00169): a non-Error keeps its
+			// true type (`reject(42)` → `typeof reason === "number"`, JSON `42`),
+			// and an Error boxes to kmlTagObject whose field-0 type-id (TDD-00222)
+			// lets `.reason.message`/`.name`/`String`/JSON recover its shape at the
+			// consuming site. No coercion to a stringified Error — the former lossy
+			// path (and its segfault) is gone.
 			reasonC := e.loadRejectReasonCaught(ph)
-			reasonStrVal, rerr := e.emitCaughtToString(reasonC)
-			if rerr != nil {
-				panic(rerr)
-			}
-			settleFail := e.buildSettlement(settleTy, rejectedStr, innerTy.zeroLiteral(), reasonStrVal.Ref)
-			// emitCaughtToString added blocks, so pin the phi predecessor with an
+			reasonAny := e.emitCaughtToAny(reasonC)
+			settleFail := e.buildSettlement(settleTy, rejectedStr, innerTy.zeroLiteral(), reasonAny.Ref)
+			// emitCaughtToAny added blocks, so pin the phi predecessor with an
 			// explicit trailing label rather than the stale failL.
 			failEndL := e.freshLabel("settled.failend")
 			e.emitTerminator(fmt.Sprintf("br label %%%s", failEndL))

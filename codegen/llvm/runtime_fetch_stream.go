@@ -88,7 +88,7 @@ err:
   %%errstr_hdr = call ptr @__kml_str_from_cstr(ptr %%errstr)
   %%eo = call ptr @malloc(i64 24)
   %%eo_kind = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 0
-  store i64 0, ptr %%eo_kind, align 8
+  store i64 281474976710656, ptr %%eo_kind, align 8
   %%eo_msg = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 1
   store ptr %%errstr_hdr, ptr %%eo_msg, align 8
   %%eo_name = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 2

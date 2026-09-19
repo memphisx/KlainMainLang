@@ -17,17 +17,18 @@ func (e *Emitter) emitNewAbortControllerExpression() (Value, error) {
 	e.ensureMapStrHelpers()
 	e.ensureMalloc()
 
-	// The signal: aborted=false, reason=null, a fresh listener map.
+	// The signal: aborted=false, reason=undefined, a fresh listener map.
 	sigTy := AbortSignalType()
 	sigReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", sigReg, sigTy.StructSize()))
 	listenersMap := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", listenersMap))
 	e.storeEventField(sigTy, sigReg, "aborted", "i1", "0")
-	e.storeEventField(sigTy, sigReg, "reason", "ptr", "null")
+	e.storeEventField(sigTy, sigReg, "reason", "i64", fmt.Sprintf("%d", nbUndefined))
 	e.storeEventField(sigTy, sigReg, "listeners", "ptr", listenersMap)
 	e.storeEventField(sigTy, sigReg, "deadlineNs", "i64", "0")
 	e.storeEventField(sigTy, sigReg, "onabort", "ptr", "null")
+	e.storeEventField(sigTy, sigReg, "followers", "ptr", "null")
 
 	// The controller wraps the signal.
 	ctrlTy := AbortControllerType()
@@ -60,11 +61,14 @@ func (e *Emitter) emitAbortControllerAbort(objExpr ast.Expression, args []ast.Ex
 		if err != nil {
 			return Value{}, err
 		}
-		reasonVal = e.coerce(reasonVal, TypePtr)
-		e.storeEventField(sigTy, sigPtr, "reason", "ptr", reasonVal.Ref)
+		reasonVal, err = e.emitBoxValue(reasonVal)
+		if err != nil {
+			return Value{}, err
+		}
+		e.storeEventField(sigTy, sigPtr, "reason", "i64", reasonVal.Ref)
 	} else {
 		// Node defaults a no-argument abort() to an "AbortError" DOMException.
-		e.storeEventField(sigTy, sigPtr, "reason", "ptr", e.buildDefaultAbortReason())
+		e.storeEventField(sigTy, sigPtr, "reason", "i64", e.buildDefaultAbortReason())
 	}
 
 	// Dispatch an "abort" event to the signal's listeners.
@@ -83,6 +87,9 @@ func (e *Emitter) emitAbortControllerAbort(objExpr ast.Expression, args []ast.Ex
 	if _, err := e.emitDispatchToMap(listenersMap, eventVal); err != nil {
 		return Value{}, err
 	}
+	// Live-propagate to any AbortSignal.any composites following this signal.
+	e.ensureAbortPropagate()
+	e.emitInstr(fmt.Sprintf("call void @__kml_abort_propagate(ptr %s)", sigPtr))
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -205,10 +212,11 @@ func (e *Emitter) emitAbortSignalTimeout(args []ast.Expression, pos ast.Pos) (Va
 	listenersMap := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", listenersMap))
 	e.storeEventField(sigTy, sigReg, "aborted", "i1", "0")
-	e.storeEventField(sigTy, sigReg, "reason", "ptr", "null")
+	e.storeEventField(sigTy, sigReg, "reason", "i64", fmt.Sprintf("%d", nbUndefined))
 	e.storeEventField(sigTy, sigReg, "listeners", "ptr", listenersMap)
 	e.storeEventField(sigTy, sigReg, "deadlineNs", "i64", deadline)
 	e.storeEventField(sigTy, sigReg, "onabort", "ptr", "null")
+	e.storeEventField(sigTy, sigReg, "followers", "ptr", "null")
 	// TDD-00216: register the deadline so the event loop / timer drain fire the
 	// abort (aborted + reason + listeners/onabort) in the background — without
 	// keeping the loop alive for it (Node unref parity).
@@ -337,6 +345,7 @@ func (e *Emitter) ensureAbortTimeoutRuntime() {
 	e.ensureAbortRegistryGlobals()
 
 	// The single compile-time dispatcher (fires one signal's listeners+onabort).
+	e.ensureAbortPropagate()
 	e.emitAbortTimeoutDispatcher()
 
 	// register(deadline, sig): append the entry and arm the fire fn pointer so
@@ -400,9 +409,10 @@ func (e *Emitter) emitAbortTimeoutDispatcher() {
 	sigTy := AbortSignalType()
 	// aborted = 1
 	e.storeEventField(sigTy, "%sig", "aborted", "i1", "1")
-	// reason = TimeoutError DOMException (Node's AbortSignal.timeout reason).
+	// reason = TimeoutError DOMException (Node's AbortSignal.timeout reason),
+	// boxed as a kmlTagObject `any` for the reason slot.
 	reason := e.buildErrorObj(errorKindIDs["DOMException"], e.internString("The operation timed out"), e.internString("TimeoutError"))
-	e.storeEventField(sigTy, "%sig", "reason", "ptr", reason)
+	e.storeEventField(sigTy, "%sig", "reason", "i64", e.emitNbTagPtr(reason, kmlTagObject))
 	// Dispatch the "abort" event to onabort + the addEventListener listeners.
 	eventVal := e.buildAbortEvent()
 	e.emitFireOnabort(sigTy, "%sig", eventVal)
@@ -413,6 +423,8 @@ func (e *Emitter) emitAbortTimeoutDispatcher() {
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", listenersMap, lGep))
 	// emitDispatchToMap may fail only on a malformed event shape (fixed here).
 	_, _ = e.emitDispatchToMap(listenersMap, eventVal)
+	// Live-propagate to AbortSignal.any composites following this signal.
+	e.emitInstr("call void @__kml_abort_propagate(ptr %sig)")
 	e.emitTerminator("ret void")
 
 	e.functions.WriteString("\ndefine void @__kml_abort_timeout_fire(ptr %sig) {\nentry:\n")
@@ -431,9 +443,11 @@ func (e *Emitter) emitAbortTimeoutDispatcher() {
 
 // buildDefaultAbortReason builds the "AbortError" DOMException Node uses as the
 // default reason for a no-argument abort() (controller.abort() and the static
-// AbortSignal.abort()). Returns the error-object pointer register.
+// AbortSignal.abort()). Returns an i64 register holding the error boxed as a
+// kmlTagObject `any`, ready to store into the signal's reason slot.
 func (e *Emitter) buildDefaultAbortReason() string {
-	return e.buildErrorObj(errorKindIDs["DOMException"], e.internString("This operation was aborted"), e.internString("AbortError"))
+	err := e.buildErrorObj(errorKindIDs["DOMException"], e.internString("This operation was aborted"), e.internString("AbortError"))
+	return e.emitNbTagPtr(err, kmlTagObject)
 }
 
 // emitAbortSignalStaticAbort implements the static `AbortSignal.abort(reason?)`:
@@ -452,16 +466,20 @@ func (e *Emitter) emitAbortSignalStaticAbort(args []ast.Expression, pos ast.Pos)
 	e.storeEventField(sigTy, sigReg, "listeners", "ptr", listenersMap)
 	e.storeEventField(sigTy, sigReg, "deadlineNs", "i64", "0")
 	e.storeEventField(sigTy, sigReg, "onabort", "ptr", "null")
+	e.storeEventField(sigTy, sigReg, "followers", "ptr", "null")
 
 	if len(args) >= 1 {
 		reasonVal, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
 		}
-		reasonVal = e.coerce(reasonVal, TypePtr)
-		e.storeEventField(sigTy, sigReg, "reason", "ptr", reasonVal.Ref)
+		reasonVal, err = e.emitBoxValue(reasonVal)
+		if err != nil {
+			return Value{}, err
+		}
+		e.storeEventField(sigTy, sigReg, "reason", "i64", reasonVal.Ref)
 	} else {
-		e.storeEventField(sigTy, sigReg, "reason", "ptr", e.buildDefaultAbortReason())
+		e.storeEventField(sigTy, sigReg, "reason", "i64", e.buildDefaultAbortReason())
 	}
 	return Value{Ref: sigReg, Ty: sigTy}, nil
 }
@@ -484,10 +502,11 @@ func (e *Emitter) emitAbortSignalAny(args []ast.Expression, pos ast.Pos) (Value,
 	listenersMap := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", listenersMap))
 	e.storeEventField(sigTy, sigReg, "aborted", "i1", "0")
-	e.storeEventField(sigTy, sigReg, "reason", "ptr", "null")
+	e.storeEventField(sigTy, sigReg, "reason", "i64", fmt.Sprintf("%d", nbUndefined))
 	e.storeEventField(sigTy, sigReg, "listeners", "ptr", listenersMap)
 	e.storeEventField(sigTy, sigReg, "deadlineNs", "i64", "0")
 	e.storeEventField(sigTy, sigReg, "onabort", "ptr", "null")
+	e.storeEventField(sigTy, sigReg, "followers", "ptr", "null")
 
 	// Resolve the input array to (ptr, len) of AbortSignal pointers.
 	ptr, length, _, err := e.resolveArrayForHOF(args[0], pos)
@@ -538,7 +557,26 @@ func (e *Emitter) emitAbortSignalAny(args []ast.Expression, pos ast.Pos) (Value,
 	srcAborted := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_signal_aborted(ptr %s)", srcAborted, srcPtr))
 	doSetL := e.freshLabel("absany.doset")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", srcAborted, doSetL, nextL))
+	regL := e.freshLabel("absany.reg")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", srcAborted, doSetL, regL))
+
+	// Not (yet) aborted: register the composite as a follower of this source,
+	// so a later abort of the source live-propagates (ensureAbortPropagate).
+	e.emitLabel(regL)
+	e.ensureAbortPropagate()
+	folIdx, _, _ := sigTy.FieldIndex("followers")
+	folGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", folGep, sigTy.StructIR(), srcPtr, folIdx))
+	oldHead := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", oldHead, folGep))
+	node := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", node))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sigReg, node))
+	nodeNext := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", nodeNext, node))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", oldHead, nodeNext))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", node, folGep))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
 
 	e.emitLabel(doSetL)
 	// Latch aborted and copy the source's reason.
@@ -547,8 +585,8 @@ func (e *Emitter) emitAbortSignalAny(args []ast.Expression, pos ast.Pos) (Value,
 	srcReasonGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", srcReasonGep, sigTy.StructIR(), srcPtr, srcReasonIdx))
 	srcReason := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", srcReason, srcReasonGep))
-	e.storeEventField(sigTy, sigReg, "reason", "ptr", srcReason)
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", srcReason, srcReasonGep))
+	e.storeEventField(sigTy, sigReg, "reason", "i64", srcReason)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
 
 	e.emitLabel(nextL)
@@ -571,4 +609,118 @@ func (e *Emitter) buildAbortEvent() Value {
 	e.storeEventField(ty, objReg, "defaultPrevented", "i1", "0")
 	e.storeEventField(ty, objReg, "stopImmediate", "i1", "0")
 	return Value{Ref: objReg, Ty: ty}
+}
+
+// ensureAbortPropagate emits @__kml_abort_propagate(ptr %sig) once: walk the
+// signal's `followers` linked list ({ ptr composite, ptr next } nodes) and, for
+// each not-yet-aborted follower, latch it with the source's reason, fire its
+// onabort + addEventListener listeners, then recurse so a composite that is
+// itself a source of another composite propagates onward. Called after every
+// abort that fires listeners (controller.abort(), the timeout dispatcher), so
+// a source aborted AFTER an AbortSignal.any(...) composite was built still
+// reaches it.
+func (e *Emitter) ensureAbortPropagate() {
+	if e.usedAbortPropagate {
+		return
+	}
+	e.usedAbortPropagate = true
+
+	savedAllocas := e.allocas
+	savedBody := e.body
+	savedRegCtr := e.regCtr
+	savedLabelCtr := e.labelCtr
+	savedScopes := e.scopes
+	savedBlockDone := e.blockDone
+	savedRetType := e.currentRetType
+
+	e.allocas = strings.Builder{}
+	e.body = strings.Builder{}
+	e.regCtr = 0
+	e.labelCtr = 0
+	e.scopes = nil
+	e.blockDone = false
+	e.currentRetType = TypeVoid
+
+	sigTy := AbortSignalType()
+	reasonIdx, _, _ := sigTy.FieldIndex("reason")
+	followersIdx, _, _ := sigTy.FieldIndex("followers")
+
+	// The source's (already-stored) reason, copied to each follower.
+	srGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%sig, i32 0, i32 %d", srGep, sigTy.StructIR(), reasonIdx))
+	srcReason := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", srcReason, srGep))
+
+	nodePtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", nodePtr))
+	fGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%sig, i32 0, i32 %d", fGep, sigTy.StructIR(), followersIdx))
+	head := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", head, fGep))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", head, nodePtr))
+
+	condL := e.freshLabel("absprop.cond")
+	bodyL := e.freshLabel("absprop.body")
+	fireL := e.freshLabel("absprop.fire")
+	nextL := e.freshLabel("absprop.next")
+	doneL := e.freshLabel("absprop.done")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(condL)
+	cur := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cur, nodePtr))
+	isEnd := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isEnd, cur))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isEnd, doneL, bodyL))
+
+	e.emitLabel(bodyL)
+	fol := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fol, cur))
+	// Skip a follower already aborted (its own abort won the race).
+	abGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", abGep, sigTy.StructIR(), fol))
+	ab := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", ab, abGep))
+	already := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i8 %s, 0", already, ab))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", already, nextL, fireL))
+
+	e.emitLabel(fireL)
+	e.storeEventField(sigTy, fol, "aborted", "i1", "1")
+	e.storeEventField(sigTy, fol, "reason", "i64", srcReason)
+	eventVal := e.buildAbortEvent()
+	e.emitFireOnabort(sigTy, fol, eventVal)
+	lIdx, _, _ := sigTy.FieldIndex("listeners")
+	lGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", lGep, sigTy.StructIR(), fol, lIdx))
+	lMap := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", lMap, lGep))
+	_, _ = e.emitDispatchToMap(lMap, eventVal)
+	// A composite can itself be another composite's source — recurse.
+	e.emitInstr(fmt.Sprintf("call void @__kml_abort_propagate(ptr %s)", fol))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
+
+	e.emitLabel(nextL)
+	nGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", nGep, cur))
+	nxt := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", nxt, nGep))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nxt, nodePtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(doneL)
+	e.emitTerminator("ret void")
+
+	e.functions.WriteString("\ndefine void @__kml_abort_propagate(ptr %sig) {\nentry:\n")
+	e.functions.WriteString(e.allocas.String())
+	e.functions.WriteString(e.body.String())
+	e.functions.WriteString("}\n")
+
+	e.allocas = savedAllocas
+	e.body = savedBody
+	e.regCtr = savedRegCtr
+	e.labelCtr = savedLabelCtr
+	e.scopes = savedScopes
+	e.blockDone = savedBlockDone
+	e.currentRetType = savedRetType
 }

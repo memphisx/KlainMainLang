@@ -377,16 +377,16 @@
       "id": "nodecore.cluster",
       "name": "cluster (fork, worker messaging, isPrimary/isWorker/workerId, Worker.id/.process)",
       "statusRow": "cluster (fork, worker messaging, isPrimary/isWorker/workerId, Worker.id/.process)",
-      "signature": "cluster.fork(); worker.send(msg); worker.on('message', fn); cluster.isPrimary",
+      "signature": "cluster.fork(); cluster.on('exit', (worker, code) => {}); cluster.workers[id]; cluster.setupPrimary({ args, silent }); cluster.disconnect(cb?)",
       "badge": "caveats",
-      "description": "Unifies with http.listen({ workers: N })'s worker-id global — the primary stays in the event loop while workers live (via their IPC handles), then blocks in waitpid as the backstop. Workers carry the fork IPC channel: worker.send/.on('message'/'online'/'exit'/'close'/'error')/.disconnect()/.kill()/.destroy()/.process.pid; in-worker process.send/process.on('message').",
+      "description": "Unifies with http.listen({ workers: N })'s worker-id global — the primary stays in the event loop while workers live (via their IPC handles), then blocks in waitpid as the backstop. Workers carry the fork IPC channel with Node's json serialization mode: strings AND objects/arrays/numbers/booleans cross as themselves, both directions. Cluster-level events mirror Node's — cluster.on('fork'/'online'/'message'/'exit'/'disconnect'/'listening'), each passing the Worker first ('listening' adds { address, port, addressType }), in either registration order. cluster.workers is live (a reaped worker is dropped before its 'exit' listeners run, like Node) with cluster.workers[id] lookup; several listeners per event coexist in registration order; cluster.disconnect(cb) flushes in-flight messages; setupPrimary honors args (worker argv tail) and silent (worker stdio piped to worker.process.stdout/stderr), read back as cluster.settings.",
       "returns": {
         "type": "cluster.Worker",
         "desc": "A worker handle."
       },
       "differences": [
-        "Messages are strings; one listener per event; `'online'` fires from a queued microtask (the worker is exec'd by then), not a wire handshake",
-        "No `cluster.on(...)` (cluster-level events), `cluster.workers` map, `cluster.disconnect()`, `setupPrimary()`(`setupMaster`)/`settings`",
+        "`setupPrimary`'s `exec`/`execArgv` are a compile-time rejection — workers re-exec this compiled program itself; there is no separate script file for a worker to run (a genuine impossibility of native compilation); `silent` is POSIX-only until the Windows spawn lane lands",
+        "`'online'` fires from a queued microtask (the worker is exec'd by then), not a wire handshake; `cluster.workers` iterates and indexes by id but is not a real id-keyed *object* (no `Object.keys` over it)",
         "Workers each bind the port via `SO_REUSEPORT`; on Linux the kernel load-balances accepts across them, on Darwin the distribution is uneven (often one worker) — correctness holds, balancing differs",
         "Can't be combined with Worker threads (same restriction as `http.listen({workers})`)"
       ],

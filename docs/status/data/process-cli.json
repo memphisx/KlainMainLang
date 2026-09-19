@@ -354,12 +354,12 @@
             "status": "implemented",
             "caveats": [
               "Self-fork only: the path must be `__filename` or `process.argv[1]` (forking a *different* module would need a second compiled program — clean rejection); the options object must be an empty `{}`",
-              "Messages are strings (`send(obj)` is a clean rejection); one `'message'` listener per side",
               "Bare `process.send` reads as a *boolean* forked-ness probe, not Node's function-or-undefined — `assert.strictEqual(process.send, undefined)`-style tests type-mismatch cleanly"
             ],
             "notes": [
               "Node's own mechanism ([TDD-00141](../tdd/TDD-00141.md)/[ADR-00425](../adr/ADR-00425.md)): socketpair + re-exec of the current binary with `NODE_CHANNEL_FD` set; child argv layout `[exe, modulePath, ...args]` so extra args land at `argv[2]`; NDJSON string frames (embedded C, linked only when used)",
-              "Parent: `child.send(str)→bool`, `child.on('message'/'exit'/'close')`, `child.disconnect()`, inherited stdio; child: `process.send(str)→bool` (false unforked), `process.on('message')` (holds the event loop open while connected), `process.disconnect()`; `mustCall`-wrapped listeners contextually typed",
+              "Parent: `child.send(msg)→bool`, `child.on('message'/'exit'/'close')` (several listeners per event, fired in registration order — [ADR-01015](../adr/ADR-01015.md)), `child.disconnect()` (flushes in-flight messages), inherited stdio; child: `process.send(msg)→bool` (false unforked), `process.on('message')` (holds the event loop open while connected), `process.disconnect()`; `mustCall`-wrapped listeners contextually typed",
+              "Messages cross as themselves — strings, and objects/arrays/numbers/booleans via Node's json serialization mode ([ADR-01015](../adr/ADR-01015.md)); an untyped `'message'` parameter is `any` (the sent value), `msg: string` keeps the plain-text fast path",
               "`process.argv[i]` out-of-range reads are a real `undefined` ([ADR-00780](../adr/ADR-00780.md)) — the `argv[2] === 'child'` / `if (!argv[2])` idioms and `=== undefined` all behave as in Node"
             ]
           },

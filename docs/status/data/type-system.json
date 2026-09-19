@@ -83,9 +83,8 @@
             "caveats": [
               "Under `-compat=js`, unary `+` on an `any` isn't parsed yet (arithmetic otherwise runtime-dispatches; under `-compat=strict` it's a clean compile error)",
               "Widening a static object into `any` covers only a fresh `new C()` of a data-only class ([ADR-00990](../adr/ADR-00990.md), [TDD-00155](../tdd/TDD-00155.md) Stage 6); an *aliased* static binding (`const a: any = o`), a method-carrying class, and a cyclic object graph still reject member access",
-              "A dynamic object has no inspect-style `{ a: 1 }` form — `console.log`/`String()` render it `[object Object]`",
               "`Object.defineProperties` (plural) and descriptor-form `Object.assign` are follow-ons",
-              "Primitive members through `any` (`x.length` on a boxed string/array) read as `undefined` — no runtime primitive-method dispatch yet"
+              "Primitive-member dispatch through `any` covers `.length` (boxed string/array, [ADR-01009](../adr/ADR-01009.md)); other primitive members read `undefined` and primitive *method calls* (`s.toUpperCase()`, `a.push()`) aren't dispatched yet"
             ],
             "notes": [
               "Under `-compat=js`, object operands to `+`/`==` coerce via runtime `ToPrimitive` and loose-`==` is the full JS Abstract Equality ([TDD-00201](../tdd/TDD-00201.md))",

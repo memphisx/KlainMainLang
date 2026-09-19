@@ -111,6 +111,15 @@ entry:
   ret ptr %%cp
 }`, nonblock, cp, cp, cp, cp, cp, cp))
 
+	// Cluster hooks (null unless the cluster runtime arms them, at fork time):
+	// disc fires once when a handle's channel transitions open→closed (either
+	// end); ctrl intercepts a control-prefixed line ("__kml:...", e.g. a
+	// worker's listening announcement) instead of delivering it as 'message'.
+	e.emitGlobal("@__kml_cp_disc_hook = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_cp_ctrl_hook = internal global ptr null, align 8")
+	e.ensureStrncmp()
+	ctrlPrefix := e.internString("__kml:")
+
 	// __kml_cp_ipc_drain(cp): read the channel until EAGAIN/EOF, feed the
 	// C-side line buffer, then fire the 'message' listener once per decoded
 	// line. EOF closes the fd (state -1) so finalize can proceed.
@@ -119,6 +128,7 @@ define void @__kml_cp_ipc_drain(ptr %%cp) {
 entry:
   %%chunk = alloca [4096 x i8], align 1
   %%chunkptr = getelementptr [4096 x i8], ptr %%chunk, i32 0, i32 0
+  %%isstrslot = alloca i64, align 8
   %%ipc_p = getelementptr %s, ptr %%cp, i32 0, i32 17
   %%chan_p = getelementptr %s, ptr %%cp, i32 0, i32 19
   %%chanv = load ptr, ptr %%chan_p, align 8
@@ -140,15 +150,36 @@ ckeof:
 oneof:
   call i32 @close(i32 %%fd)
   store i32 -1, ptr %%ipc_p, align 4
+  %%dh = load ptr, ptr @__kml_cp_disc_hook, align 8
+  %%dhset = icmp ne ptr %%dh, null
+  br i1 %%dhset, label %%discfire, label %%deliver
+discfire:
+  call void %%dh(ptr %%cp)
   br label %%deliver
 deliver:
   %%haschan = icmp ne ptr %%chanv, null
   br i1 %%haschan, label %%take, label %%ret
 take:
-  %%msg = call ptr @__kml_ipc_take(ptr %%chanv)
+  %%msg = call ptr @__kml_ipc_take2(ptr %%chanv, ptr %%isstrslot)
   %%hasmsg = icmp ne ptr %%msg, null
   br i1 %%hasmsg, label %%fire, label %%ret
 fire:
+  %%isstr64 = load i64, ptr %%isstrslot, align 8
+  %%isstr = icmp ne i64 %%isstr64, 0
+  ; a "__kml:"-prefixed line is runtime control traffic (worker listening
+  ; announcements), routed to the ctrl hook instead of the 'message' listener
+  %%ctlcmp = call i32 @strncmp(ptr %%msg, ptr %s, i64 6)
+  %%isctl = icmp eq i32 %%ctlcmp, 0
+  br i1 %%isctl, label %%ctl, label %%norm
+ctl:
+  %%ch = load ptr, ptr @__kml_cp_ctrl_hook, align 8
+  %%chset = icmp ne ptr %%ch, null
+  br i1 %%chset, label %%ctlcall, label %%freemsg
+ctlcall:
+  call void %%ch(ptr %%cp, ptr %%msg)
+  br label %%freemsg
+norm:
+  ; field 18 is a listener LIST — fire each registered 'message' listener
   %%mL_p = getelementptr %s, ptr %%cp, i32 0, i32 18
   %%mL = load ptr, ptr %%mL_p, align 8
   %%hasL = icmp ne ptr %%mL, null
@@ -159,20 +190,32 @@ docall:
   call ptr @memcpy(ptr %%mstr, ptr %%msg, i64 %%mlen)
   %%mnul = getelementptr i8, ptr %%mstr, i64 %%mlen
   store i8 0, ptr %%mnul, align 1
-  %%fp_p = getelementptr { ptr, ptr }, ptr %%mL, i32 0, i32 0
+  br label %%mloop
+mloop:
+  %%mnode = phi ptr [ %%mL, %%docall ], [ %%mnext, %%mcall ]
+  %%mdone = icmp eq ptr %%mnode, null
+  br i1 %%mdone, label %%freemsg, label %%mcall
+mcall:
+  %%mhdr_p = getelementptr { ptr, ptr }, ptr %%mnode, i32 0, i32 0
+  %%mhdr = load ptr, ptr %%mhdr_p, align 8
+  %%fp_p = getelementptr { ptr, ptr }, ptr %%mhdr, i32 0, i32 0
   %%fp = load ptr, ptr %%fp_p, align 8
-  %%ep_p = getelementptr { ptr, ptr }, ptr %%mL, i32 0, i32 1
+  %%ep_p = getelementptr { ptr, ptr }, ptr %%mhdr, i32 0, i32 1
   %%ep = load ptr, ptr %%ep_p, align 8
-  call void %%fp(ptr %%ep, ptr %%mstr)
-  br label %%freemsg
+  call void %%fp(ptr %%ep, ptr %%mstr, i1 %%isstr)
+  %%mnext_p = getelementptr { ptr, ptr }, ptr %%mnode, i32 0, i32 1
+  %%mnext = load ptr, ptr %%mnext_p, align 8
+  br label %%mloop
 freemsg:
   call void @free(ptr %%msg)
   br label %%take
 ret:
   ret void
-}`, cp, cp, cp))
+}`, cp, cp, ctrlPrefix, cp))
 
 	// __kml_cp_send(cp, s): JSON-quote + newline + write. false once closed.
+	// The _raw sibling frames an already-serialized JSON value verbatim (the
+	// non-string send path — Node's json serialization mode).
 	e.emitGlobal(fmt.Sprintf(`
 define i1 @__kml_cp_send(ptr %%cp, ptr %%s) {
 entry:
@@ -188,6 +231,20 @@ wr:
 no:
   ret i1 0
 }
+define i1 @__kml_cp_send_json(ptr %%cp, ptr %%s) {
+entry:
+  %%ipc_p = getelementptr %s, ptr %%cp, i32 0, i32 17
+  %%fd = load i32, ptr %%ipc_p, align 4
+  %%open = icmp sgt i32 %%fd, 0
+  br i1 %%open, label %%wr, label %%no
+wr:
+  %%fd64 = sext i32 %%fd to i64
+  %%ok = call i64 @__kml_ipc_send_raw(i64 %%fd64, ptr %%s)
+  %%okb = icmp ne i64 %%ok, 0
+  ret i1 %%okb
+no:
+  ret i1 0
+}
 define void @__kml_cp_disconnect(ptr %%cp) {
 entry:
   %%ipc_p = getelementptr %s, ptr %%cp, i32 0, i32 17
@@ -195,12 +252,28 @@ entry:
   %%open = icmp sgt i32 %%fd, 0
   br i1 %%open, label %%cl, label %%ret
 cl:
-  call i32 @close(i32 %%fd)
+  ; deliver any message already in flight before closing (Node flushes the
+  ; channel on disconnect rather than dropping queued messages)
+  call void @__kml_cp_ipc_drain(ptr %%cp)
+  ; the drain's own EOF path (worker already closed) has closed the fd AND
+  ; fired the disc hook — don't fire it twice
+  %%fd2 = load i32, ptr %%ipc_p, align 4
+  %%still = icmp sgt i32 %%fd2, 0
+  br i1 %%still, label %%doclose, label %%ret
+doclose:
+  call i32 @close(i32 %%fd2)
   store i32 -1, ptr %%ipc_p, align 4
+  br label %%hook
+hook:
+  %%dh = load ptr, ptr @__kml_cp_disc_hook, align 8
+  %%dhset = icmp ne ptr %%dh, null
+  br i1 %%dhset, label %%dhcall, label %%ret
+dhcall:
+  call void %%dh(ptr %%cp)
   br label %%ret
 ret:
   ret void
-}`, cp, cp))
+}`, cp, cp, cp))
 }
 
 // ensureIPCChildRuntime emits the child-side channel: NODE_CHANNEL_FD
@@ -275,6 +348,19 @@ wr:
 no:
   ret i1 0
 }
+define i1 @__kml_ipcc_send_json(ptr %s) {
+entry:
+  %fd = call i32 @__kml_ipcc_fd()
+  %open = icmp sgt i32 %fd, 0
+  br i1 %open, label %wr, label %no
+wr:
+  %fd64 = sext i32 %fd to i64
+  %ok = call i64 @__kml_ipc_send_raw(i64 %fd64, ptr %s)
+  %okb = icmp ne i64 %ok, 0
+  ret i1 %okb
+no:
+  ret i1 0
+}
 define void @__kml_ipcc_disconnect() {
 entry:
   %fd = load i32, ptr @__kml_ipcc_fd_g, align 4
@@ -313,6 +399,7 @@ define void @__kml_ipcc_dispatch() {
 entry:
   %chunk = alloca [4096 x i8], align 1
   %chunkptr = getelementptr [4096 x i8], ptr %chunk, i32 0, i32 0
+  %isstrslot = alloca i64, align 8
   %chanv = load ptr, ptr @__kml_ipcc_chan, align 8
   br label %loop
 loop:
@@ -337,10 +424,12 @@ deliver:
   %haschan = icmp ne ptr %chanv, null
   br i1 %haschan, label %take, label %ret
 take:
-  %msg = call ptr @__kml_ipc_take(ptr %chanv)
+  %msg = call ptr @__kml_ipc_take2(ptr %chanv, ptr %isstrslot)
   %hasmsg = icmp ne ptr %msg, null
   br i1 %hasmsg, label %fire, label %ret
 fire:
+  %isstr64 = load i64, ptr %isstrslot, align 8
+  %isstr = icmp ne i64 %isstr64, 0
   %mL = load ptr, ptr @__kml_ipcc_msg_listener, align 8
   %hasL = icmp ne ptr %mL, null
   br i1 %hasL, label %docall, label %freemsg
@@ -350,12 +439,22 @@ docall:
   call ptr @memcpy(ptr %mstr, ptr %msg, i64 %mlen)
   %mnul = getelementptr i8, ptr %mstr, i64 %mlen
   store i8 0, ptr %mnul, align 1
-  %fp_p = getelementptr { ptr, ptr }, ptr %mL, i32 0, i32 0
+  br label %mloop
+mloop:
+  %mnode = phi ptr [ %mL, %docall ], [ %mnext, %mcall ]
+  %mdone = icmp eq ptr %mnode, null
+  br i1 %mdone, label %freemsg, label %mcall
+mcall:
+  %mhdr_p = getelementptr { ptr, ptr }, ptr %mnode, i32 0, i32 0
+  %mhdr = load ptr, ptr %mhdr_p, align 8
+  %fp_p = getelementptr { ptr, ptr }, ptr %mhdr, i32 0, i32 0
   %fp = load ptr, ptr %fp_p, align 8
-  %ep_p = getelementptr { ptr, ptr }, ptr %mL, i32 0, i32 1
+  %ep_p = getelementptr { ptr, ptr }, ptr %mhdr, i32 0, i32 1
   %ep = load ptr, ptr %ep_p, align 8
-  call void %fp(ptr %ep, ptr %mstr)
-  br label %freemsg
+  call void %fp(ptr %ep, ptr %mstr, i1 %isstr)
+  %mnext_p = getelementptr { ptr, ptr }, ptr %mnode, i32 0, i32 1
+  %mnext = load ptr, ptr %mnext_p, align 8
+  br label %mloop
 freemsg:
   call void @free(ptr %msg)
   br label %take

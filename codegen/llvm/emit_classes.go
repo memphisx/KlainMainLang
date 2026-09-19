@@ -1216,7 +1216,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		// >=1000 range keeps it disjoint from the builtin kinds (0–8) so a
 		// caught instance never satisfies `instanceof TypeError` and friends.
 		if isErrorRoot {
-			info.TagID = 1000 + e.errSubCount
+			info.TagID = errorSubclassTagBase + e.errSubCount
 			e.errSubCount++
 		}
 
@@ -2219,7 +2219,15 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 
 	tagGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", tagGep, info.Ty.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", info.TagID, tagGep))
+	// An error-subclass instance carries its TagID in field 0 marked with the
+	// Error type-id flag, so a boxed instance is recognised as an Error at a
+	// general render/JSON/member/instanceof site (TDD-00222). A plain class
+	// stores the bare TagID.
+	storedTag := info.TagID
+	if info.IsErrorSubclass {
+		storedTag = errorTypeIDStored(storedTag)
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", storedTag, tagGep))
 
 	if info.Ty.HasVTable {
 		vtGep := e.freshReg()
@@ -3452,7 +3460,7 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 		loadedKind := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedKind, kindGep))
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", r, loadedKind, info.TagID))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", r, loadedKind, errorTypeIDStored(info.TagID)))
 		return Value{Ref: r, Ty: TypeBool}, nil
 	}
 
@@ -3500,6 +3508,14 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 		tagIDs := []int64{info.TagID}
 		for _, d := range info.Descendants {
 			tagIDs = append(tagIDs, e.classes[d].TagID)
+		}
+		// An error-subclass instance stamps its field-0 TagID with the Error
+		// type-id flag (TDD-00222); a hierarchy rooted at Error is uniformly
+		// error-subclass, so flag the whole compare set together.
+		if info.IsErrorSubclass {
+			for i := range tagIDs {
+				tagIDs[i] = errorTypeIDStored(tagIDs[i])
+			}
 		}
 		classMatch := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", classMatch, loadedTag, tagIDs[0]))
@@ -3566,6 +3582,13 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 			tagIDs := []int64{targetInfo.TagID}
 			for _, d := range targetInfo.Descendants {
 				tagIDs = append(tagIDs, e.classes[d].TagID)
+			}
+			// Error-subclass instances stamp field 0 with the Error type-id flag
+			// (TDD-00222); flag the compare set to match the stored value.
+			if targetInfo.IsErrorSubclass {
+				for i := range tagIDs {
+					tagIDs[i] = errorTypeIDStored(tagIDs[i])
+				}
 			}
 
 			resultAlloca := e.freshReg()
@@ -3646,7 +3669,33 @@ func (e *Emitter) emitErrorInstanceOf(ex *ast.BinaryExpression, kindName string,
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
 
 		if kindName == "Error" {
-			return Value{Ref: isObj, Ty: TypeBool}, nil
+			// A boxed Error (built-in errorObjType or an error-subclass instance)
+			// is an object whose field-0 type-id carries errorTypeIDFlag; a boxed
+			// plain object/bag does not, so `plainObj instanceof Error` is now
+			// correctly false rather than the old unconditional true (TDD-00222).
+			baseAlloca := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", baseAlloca))
+			e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", baseAlloca))
+			baseObjL := e.freshLabel("errinstanceof.baseobj")
+			baseMergeL := e.freshLabel("errinstanceof.basemerge")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, baseObjL, baseMergeL))
+			e.emitLabel(baseObjL)
+			basePtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", basePtr, payload))
+			baseF0Gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", baseF0Gep, errorObjType.StructIR(), basePtr))
+			baseF0 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", baseF0, baseF0Gep))
+			baseMasked := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", baseMasked, baseF0, errorTypeIDFlag))
+			baseIsErr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", baseIsErr, baseMasked))
+			e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", baseIsErr, baseAlloca))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", baseMergeL))
+			e.emitLabel(baseMergeL)
+			baseRes := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", baseRes, baseAlloca))
+			return Value{Ref: baseRes, Ty: TypeBool}, nil
 		}
 
 		resultAlloca := e.freshReg()
@@ -3664,7 +3713,7 @@ func (e *Emitter) emitErrorInstanceOf(ex *ast.BinaryExpression, kindName string,
 		loadedKind := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedKind, kindGep))
 		kindMatch := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", kindMatch, loadedKind, kindID))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", kindMatch, loadedKind, errorTypeIDStored(kindID)))
 		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", kindMatch, resultAlloca))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
@@ -3698,7 +3747,7 @@ func (e *Emitter) emitErrorInstanceOf(ex *ast.BinaryExpression, kindName string,
 		loadedKind := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedKind, kindGep))
 		result := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", result, loadedKind, kindID))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", result, loadedKind, errorTypeIDStored(kindID)))
 		return Value{Ref: result, Ty: TypeBool}, nil
 	}
 

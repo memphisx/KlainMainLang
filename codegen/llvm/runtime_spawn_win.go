@@ -283,6 +283,18 @@ func (e *Emitter) clusterForkIR(fmtID, envID, fmtFD, envFD string) string {
   br i1 %ischild, label %child, label %parent
 child:
   call i32 @close(i32 %pfd)
+  ; setupPrimary({ silent: true }): route this worker's stdio into the
+  ; parent's pipes (which stream via worker.process.stdout/stderr)
+  br i1 %dosilent, label %cdup, label %cnodup
+cdup:
+  call i32 @close(i32 %out_r)
+  call i32 @close(i32 %err_r)
+  call i32 @dup2(i32 %out_w, i32 1)
+  call i32 @dup2(i32 %err_w, i32 2)
+  call i32 @close(i32 %out_w)
+  call i32 @close(i32 %err_w)
+  br label %cnodup
+cnodup:
   %idbuf = call ptr @malloc(i64 24)
   call i32 (ptr, ptr, ...) @sprintf(ptr %idbuf, ptr ` + fmtID + `, i64 %id)
   call i32 @setenv(ptr ` + envID + `, ptr %idbuf, i32 1)
@@ -291,7 +303,31 @@ child:
   call i32 (ptr, ptr, ...) @sprintf(ptr %fdbuf, ptr ` + fmtFD + `, i64 %cfd64)
   call i32 @setenv(ptr ` + envFD + `, ptr %fdbuf, i32 1)
   %exe = call ptr @__kml_cluster_self_exe()
-  %argv = load ptr, ptr @__argv_ptr, align 8
+  ; setupPrimary({ args }): a stored args vector replaces the inherited argv
+  ; tail — worker argv becomes [argv0, ...args] (Node's settings.args)
+  %sal = load i64, ptr @__kml_cluster_setup_args_len, align 8
+  %hasargs = icmp sgt i64 %sal, 0
+  br i1 %hasargs, label %cargs, label %cinherit
+cargs:
+  %av0p = load ptr, ptr @__argv_ptr, align 8
+  %av0 = load ptr, ptr %av0p, align 8
+  %an = add i64 %sal, 2
+  %ab = mul i64 %an, 8
+  %argv2 = call ptr @malloc(i64 %ab)
+  store ptr %av0, ptr %argv2, align 8
+  %ad = load ptr, ptr @__kml_cluster_setup_args, align 8
+  %a1 = getelementptr ptr, ptr %argv2, i64 1
+  %ab2 = mul i64 %sal, 8
+  call ptr @memcpy(ptr %a1, ptr %ad, i64 %ab2)
+  %anull = add i64 %sal, 1
+  %ans = getelementptr ptr, ptr %argv2, i64 %anull
+  store ptr null, ptr %ans, align 8
+  br label %cexec
+cinherit:
+  %argvi = load ptr, ptr @__argv_ptr, align 8
+  br label %cexec
+cexec:
+  %argv = phi ptr [ %argv2, %cargs ], [ %argvi, %cinherit ]
   call i32 @execv(ptr %exe, ptr %argv)
   call void @_exit(i32 127)
   unreachable

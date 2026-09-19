@@ -781,6 +781,44 @@ func (e *Emitter) emitDynamicRender(v Value, inspect bool) (Value, error) {
 	store(daStr)
 	e.emitLabel(nextL)
 
+	// A dynamic object under console.log renders in its util.inspect form
+	// (`{ a: 1, b: 'x' }` — keys in enumeration order, accessors as [Getter],
+	// Node's default depth-2 collapse). String()/interpolation never reaches
+	// this tag with a plain object: emitAnyToPrimitive above already resolved
+	// it (own toString, else the "[object Object]" primitive).
+	if inspect {
+		matchL, nextL = e.emitTagCheck(tag, kmlTagDynObject, "dynstr.dynobj")
+		e.emitLabel(matchL)
+		e.ensureDynJSONC()
+		doPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", doPtr, payload))
+		doStr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_inspect(ptr %s)", doStr, doPtr))
+		store(doStr)
+		e.emitLabel(nextL)
+	}
+
+	// A boxed built-in Error (field-0 type-id flag set, low bits a builtin
+	// kind) renders as `name: message` via emitErrorToString — matching
+	// `String(new Error("x")) === "Error: x"`. This recovers the Error shape a
+	// boxed `any` otherwise loses (TDD-00222); a boxed plain object (or an
+	// error-subclass instance, whose fields don't line up) keeps the default.
+	matchL, nextL = e.emitTagCheck(tag, kmlTagObject, "dynstr.obj")
+	e.emitLabel(matchL)
+	errObjPtr, errIsErr := e.emitBoxedErrorProbe(payload)
+	errL := e.freshLabel("dynstr.obj.err")
+	plainL := e.freshLabel("dynstr.obj.plain")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", errIsErr, errL, plainL))
+	e.emitLabel(errL)
+	errStr, err := e.emitErrorToString(Value{Ref: errObjPtr, Ty: TypePtr})
+	if err != nil {
+		return Value{}, err
+	}
+	store(errStr.Ref)
+	e.emitLabel(plainL)
+	store(e.internString("[object Object]"))
+	e.emitLabel(nextL)
+
 	// Remaining tag: object → "[object Object]", matching JS's
 	// `String({}) === "[object Object]"` (a plain object has no useful
 	// value-string, and its field contents aren't recovered from the boxed

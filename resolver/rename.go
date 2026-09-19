@@ -895,6 +895,9 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		if e.Errors != nil {
 			e.Errors = rewriteExpr(e.Errors, sc, lu)
 		}
+		if e.Cause != nil {
+			e.Cause = rewriteExpr(e.Cause, sc, lu)
+		}
 	case *ast.NewDateExpression:
 		if e.Millis != nil {
 			e.Millis = rewriteExpr(e.Millis, sc, lu)

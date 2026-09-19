@@ -177,7 +177,11 @@ func (e *Emitter) emitObjectLiteralWithAccessors(lit *ast.ObjectLiteral) (Value,
 	structIR := ty.StructIR()
 	tagGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", tagGep, structIR, dataReg))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", info.TagID, tagGep))
+	valTag := info.TagID
+	if info.IsErrorSubclass { // error type-id flag, matching class construction (TDD-00222)
+		valTag = errorTypeIDStored(valTag)
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", valTag, tagGep))
 
 	for _, p := range lit.Properties {
 		if p.AccessorKind != "" || p.Key == "" {

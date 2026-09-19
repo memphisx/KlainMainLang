@@ -784,6 +784,11 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 				// A named function taken by value (`const g = f`) is a closure
 				// value — a ptr — so the slot must be sized as one.
 				ty = funcTypeFromSig(sig)
+			} else if lty := e.inferExprType(init); lty.IsFunc {
+				// A capturing nested function declaration referenced before its
+				// declaration statement (TDD-00129 Stage 2 letrec) — the closure
+				// type inferExprType mirrors from the pending declaration.
+				ty = lty
 			} else {
 				switch init.Name {
 				case "NaN", "Infinity":

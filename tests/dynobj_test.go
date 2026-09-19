@@ -310,3 +310,37 @@ const p: any = { legs: 4 };
 console.log(p instanceof Dog);
 `, "4\ntrue\ntrue\nfalse")
 }
+
+// Dynamic-object console.log renders the util.inspect form ({ a: 1, b: 'x' },
+// keys unquoted when identifier-like, Node's default depth-2 collapse), while
+// String()/interpolation keeps [object Object]. Byte-exact against Node.
+func TestE2EDynObjConsoleInspect(t *testing.T) {
+	assertOutput(t, `
+const o: any = { a: 1, b: "x" }
+console.log(o)
+const empty: any = {}
+console.log(empty)
+const nested: any = { a: { b: { c: { d: 1 } } }, arr: [1, "two"] }
+console.log(nested)
+const weird: any = { "a-b": 5, ok: true, u: undefined, n: null, f: 1.5 }
+console.log(weird)
+console.log(String(o))
+`, "{ a: 1, b: 'x' }\n{}\n{ a: { b: { c: [Object] } }, arr: [ 1, 'two' ] }\n{ 'a-b': 5, ok: true, u: undefined, n: null, f: 1.5 }\n[object Object]")
+}
+
+// Primitive-member dispatch through any, V1: `.length` on a boxed string
+// answers the byte length; on a boxed statically-typed array it answers the
+// LIVE header length (a post-box push is reflected). Other props on a boxed
+// string stay undefined, as in JS.
+func TestE2EAnyPrimitiveLength(t *testing.T) {
+	assertOutput(t, `
+const s: any = "hello"
+console.log(s.length, typeof s.length)
+const named = [1, 2, 3]
+const a: any = named
+console.log(a.length)
+named.push(4)
+console.log(a.length)
+console.log(s.foo)
+`, "5 number\n3\n4\nundefined")
+}

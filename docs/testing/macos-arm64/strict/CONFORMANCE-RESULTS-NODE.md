@@ -12,15 +12,15 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3957 files total: **53 passed**, 2533 failed, 1371 skipped (out of scope).
+3957 files total: **55 passed**, 2531 failed, 1371 skipped (out of scope).
 
-Of the 2586 files that compiled far enough to run, **53 passed (2.0%)**.
+Of the 2586 files that compiled far enough to run, **55 passed (2.1%)**.
 
 ## By suite
 
 | Suite | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|
-| parallel | 49 | 2423 | 1071 | 3543 |
+| parallel | 51 | 2421 | 1071 | 3543 |
 | sequential | 0 | 31 | 90 | 121 |
 | es-module | 2 | 57 | 116 | 175 |
 | message | 1 | 8 | 2 | 11 |
@@ -45,7 +45,7 @@ Of the 2586 files that compiled far enough to run, **53 passed (2.0%)**.
 | vm | 0 | 75 | 19 | 94 |
 | process | 6 | 63 | 21 | 90 |
 | dgram | 1 | 59 | 26 | 86 |
-| cluster | 1 | 62 | 22 | 85 |
+| cluster | 3 | 60 | 22 | 85 |
 | repl | 0 | 37 | 41 | 78 |
 | https | 0 | 53 | 15 | 68 |
 | inspector | 0 | 2 | 64 | 66 |
@@ -79,18 +79,18 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 299 | COMPILE_ERROR: a number has no method '%s' |
-| 131 | COMPILE_ERROR: undefined variable '%s' |
+| 303 | COMPILE_ERROR: a number has no method '%s' |
+| 129 | COMPILE_ERROR: undefined variable '%s' |
 | 114 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 93 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
-| 90 | COMPILE_ERROR: field access on non-object (no field '%s') |
+| 91 | COMPILE_ERROR: field access on non-object (no field '%s') |
 | 84 | MODULE_NOT_IMPLEMENTED: vm |
-| 67 | COMPILE_ERROR: no field '%s' |
-| 54 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
+| 69 | COMPILE_ERROR: no field '%s' |
 | 53 | COMPILE_ERROR: unknown class '%s' |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
+| 51 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
 | 51 | COMPILE_ERROR: undefined function or closure '%s' |
-| 44 | RUNTIME_NONZERO_EXIT:  |
+| 45 | RUNTIME_NONZERO_EXIT:  |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
 | 32 | COMPILE_ERROR: fs has no method '%s' |
 | 30 | COMPILE_ERROR: process has no method '%s' |
@@ -110,15 +110,15 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 17 | MODULE_NOT_IMPLEMENTED: module |
 | 16 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
 | 16 | COMPILE_ERROR: array elements must share one type — element 2 does not match the array's element t… |
+| 16 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
 | 16 | COMPILE_ERROR: http.createServer's listener must be (req: IncomingMessage, res: ServerResponse) => v… |
 | 15 | COMPILE_ERROR: array elements must share one type — element 1 does not match the array's element t… |
-| 15 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
 | 14 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
 | 13 | COMPILE_ERROR: child_process.spawnSync options support { cwd, encoding } only (got '%s') |
-| 13 | COMPILE_ERROR: expected ), got , |
 | 13 | COMPILE_ERROR: expected }, got : |
 | 13 | COMPILE_ERROR: new Worker options: only '%s' is supported (found '%s') |
 | 13 | COMPILE_ERROR: only simple function calls are supported (the callee is not a named function, a funct… |
+| 12 | COMPILE_ERROR: a ChildProcess has no method '%s' |
 
 ## Top skip reasons
 
@@ -152,7 +152,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 12 | requires Node common harness (common.spawnPromisified) |
 | 11 | Node-internal harness file require('../common/dns') |
 
-## Passing files (53)
+## Passing files (55)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
@@ -165,7 +165,9 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-assert-checktag.js` | assert |  |
 | `parallel/test-buffer-badhex.js` | buffer |  |
 | `parallel/test-buffer-nopendingdep-map.js` | buffer |  |
+| `parallel/test-cluster-disconnect-with-no-workers.js` | cluster |  |
 | `parallel/test-cluster-kill-infinite-loop.js` | cluster |  |
+| `parallel/test-cluster-worker-death.js` | cluster |  |
 | `parallel/test-dgram-abort-closed.js` | dgram |  |
 | `parallel/test-diagnostics-channel-has-subscribers.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-sync-unsubscribe.js` | diagnostics |  |

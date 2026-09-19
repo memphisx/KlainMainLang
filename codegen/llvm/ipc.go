@@ -27,4 +27,6 @@ func (e *Emitter) ensureIPCDecls() {
 	e.emitGlobal("declare void @__kml_ipc_feed(ptr, ptr, i64)")
 	e.emitGlobal("declare ptr @__kml_ipc_take(ptr)")
 	e.emitGlobal("declare i64 @__kml_ipc_send(i64, ptr)")
+	e.emitGlobal("declare ptr @__kml_ipc_take2(ptr, ptr)")
+	e.emitGlobal("declare i64 @__kml_ipc_send_raw(i64, ptr)")
 }

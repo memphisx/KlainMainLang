@@ -43,8 +43,8 @@
     },
     {
       "id": "string.slice",
-      "name": ".slice(start, end?)",
-      "signature": "slice(start: number, end?: number): string",
+      "name": ".slice(start?, end?)",
+      "signature": "slice(start?: number, end?: number): string",
       "badge": "exact",
       "description": "Returns a section of the string without mutating the original. Negative indices count from the end.",
       "params": [

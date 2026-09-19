@@ -689,14 +689,13 @@
       "statusRow": "child_process.fork() (self-fork + IPC channel)",
       "signature": "fork(modulePath, args?): ChildProcess",
       "badge": "caveats",
-      "description": "Node's own mechanism: socketpair + re-exec of the current binary with NODE_CHANNEL_FD set; NDJSON string frames. Parent: child.send(str)→bool, child.on('message'/'exit'/'close'), child.disconnect(); child: process.send(str)→bool, process.on('message'), process.disconnect().",
+      "description": "Node's own mechanism: socketpair + re-exec of the current binary with NODE_CHANNEL_FD set; NDJSON string frames. Parent: child.send(str)→bool, child.on('message'/'exit'/'close'), child.disconnect(); child: process.send(str)→bool, process.on('message'), process.disconnect(). Messages cross as themselves — strings, and objects/arrays/numbers/booleans via Node's json serialization mode; several 'message' listeners per side coexist in registration order.",
       "returns": {
         "type": "ChildProcess",
         "desc": "The forked child with an IPC channel."
       },
       "differences": [
         "Self-fork only: the path must be `__filename` or `process.argv[1]` (forking a *different* module is a clean rejection); the options object must be an empty `{}`.",
-        "Messages are strings (`send(obj)` is a clean rejection); one `'message'` listener per side.",
         "Bare `process.send` reads as a *boolean* forked-ness probe, not Node's function-or-undefined.",
         "`process.argv[i]` out-of-range reads yield `\"\"` (falsy) rather than Node's `undefined`."
       ],

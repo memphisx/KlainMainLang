@@ -453,13 +453,12 @@
             "feature": "Nested function declarations (`function outer() { function inner() {...}; return inner(); }`)",
             "status": "implemented",
             "caveats": [
-              "A declaration inside a lexical block (an `if`/`for`/`while`/`do-while`/bare block, a `try`/`catch`/`finally` block, or a `switch` case) is supported and block-scoped ([TDD-00152](../tdd/TDD-00152.md)/[ADR-00602](../adr/ADR-00602.md)); the residual is the specialized `for…of`/`for…in` iterator variants (generator/stream/`Symbol.iterator` paths) that iterate their body directly (no miscompile — capturing such a loop variable is a clean rejection)",
-              "A block-nested declaration capturing a **C-style `for` loop variable** is a clean rejection — the loop variable is a single per-iteration cell; copy it to a `const` inside the loop body and capture that ([ADR-00602](../adr/ADR-00602.md))",
-              "Captures enclosing locals/parameters (by reference, emitted as a closure value — [TDD-00129](../tdd/TDD-00129.md) Stage 1/[ADR-00386](../adr/ADR-00386.md)), but only for use **at or after** the declaration point — a capturing nested function called before its declaration is a clean error (full pre-declaration hoisting is Stage 2); a non-capturing one keeps full hoisting/forward-reference. Capturing an array variable, and a capturing nested *generator*, stay clean rejections",
-              "Generic (`<T>`) nested declarations and same-scope duplicate names are clean compile errors ([TDD-00057](../tdd/TDD-00057.md)/[ADR-00149](../adr/ADR-00149.md))"
+              "Generic (`<T>`) nested declarations and same-scope duplicate names are clean compile errors ([TDD-00057](../tdd/TDD-00057.md)/[ADR-00149](../adr/ADR-00149.md)); a hoisted call that reads a captured variable declared *between* the call and the declaration is a clean compile error (Node crashes with a runtime TDZ error there — the [TDD-00070](../tdd/TDD-00070.md) posture)",
+              "Two mutually-recursive **capturing** nested siblings (`f` calls `g`, `g` calls `f`, both closing over an enclosing local) are a clean `undefined function or closure` compile error — cross-sibling letrec needs a shared self-capture cell ([ADR-01016](../adr/ADR-01016.md)); self-recursion, including unannotated with the recursive call as the first return, works"
             ],
             "notes": [
-              "Hoisted, forward-referenceable, self-recursive, visible to its own further-nested descendants"
+              "Hoisted, forward-referenceable, self-recursive, visible to its own further-nested descendants — including a CAPTURING declaration called or referenced before its declaration statement (letrec hoisting, [ADR-01014](../adr/ADR-01014.md))",
+              "Captures enclosing locals/parameters by reference ([TDD-00129](../tdd/TDD-00129.md)/[ADR-00386](../adr/ADR-00386.md)) including array variables ([ADR-00941](../adr/ADR-00941.md)) and C-style/iterator `for` loop variables (per-iteration `let` binding semantics, `var` shared — [ADR-01014](../adr/ADR-01014.md)); escapes by name with an inferred closure type ([ADR-01013](../adr/ADR-01013.md)); a capturing nested *generator* works in scope and escapes as a first-class constructor closure ([ADR-01014](../adr/ADR-01014.md))"
             ]
           },
           {
@@ -541,7 +540,7 @@
               "`.race`/`.any` over task promises wait via an event-driven waiter list (a settling member wakes the awaiter), not a busy poll ([ADR-00266](../adr/ADR-00266.md))"
             ],
             "caveats": [
-              "`Promise.allSettled` reports a rejected element's `.reason` as a wrapped `Error` (stringified message), not the original rejected value — `(await Promise.allSettled([Promise.reject(42)]))[0].reason.message` is `'42'`, where Node gives `.reason === 42`; the always-present `value`/`reason` fields also aren't omitted (a faithful reject-value model is [TDD-00169](../tdd/TDD-00169.md))."
+              "`JSON.stringify` of an **error-subclass instance** reason yields `{}` where Node serializes its own enumerable fields — needs per-field enumerability ([TDD-00222](../tdd/TDD-00222.md)). Everything else about a reason is faithful — `typeof`, `.message`/`.name`/`String(reason)` (subclasses included), and precise `instanceof` ([ADR-01003](../adr/ADR-01003.md)/[TDD-00169](../tdd/TDD-00169.md))."
             ]
           },
           {

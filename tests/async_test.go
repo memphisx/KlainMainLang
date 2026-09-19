@@ -196,8 +196,8 @@ async function f(n: number): Promise<number[]> {
 const rs = await Promise.allSettled([f(2), f(-1)])
 console.log(rs[0].status, rs[1].status)
 if (rs[0].status === "fulfilled") console.log(rs[0].value[0], rs[0].value[1])
-if (rs[1].status === "rejected") console.log(rs[1].reason)
-`, "fulfilled rejected\n2 3\nError: neg")
+if (rs[1].status === "rejected") console.log(rs[1].reason.message)
+`, "fulfilled rejected\n2 3\nneg")
 }
 
 func TestE2EPromiseRaceOrdinaryPromises(t *testing.T) {

@@ -41,7 +41,7 @@ throw:
   %%name = select i1 %%isinv, ptr %s, ptr %%n2
   %%errobj = call ptr @malloc(i64 24)
   %%kindp = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 0
-  store i64 0, ptr %%kindp, align 8
+  store i64 281474976710656, ptr %%kindp, align 8
   %%msgp = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 1
   store ptr %%msg, ptr %%msgp, align 8
   %%namep = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 2

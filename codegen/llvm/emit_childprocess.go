@@ -688,6 +688,16 @@ func (e *Emitter) cpStoreExecCallback(cp string, cbArg ast.Expression, pos ast.P
 }
 
 // cpStoreField GEPs cp field idx and stores a ptr into it.
+// cpAppendListener appends a closure header to one of the LIST-shaped
+// listener slots (close 10 / exit 11 / error 12 / message 18) in
+// registration order — see ensureCPListenerAppend.
+func (e *Emitter) cpAppendListener(cp string, idx int, hdr string) {
+	e.ensureCPListenerAppend()
+	slot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slot, cpStructIR, cp, idx))
+	e.emitInstr(fmt.Sprintf("call void @__kml_cp_listener_append(ptr %s, ptr %s)", slot, hdr))
+}
+
 func (e *Emitter) cpStoreField(cp string, idx int, val string) {
 	slot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slot, cpStructIR, cp, idx))
@@ -788,41 +798,45 @@ func (e *Emitter) emitCPHandleMethod(objVal Value, method string, args []ast.Exp
 			if evt == "exit" {
 				idx = 11
 			}
-			e.cpStoreField(objVal.Ref, idx, hdr)
+			e.cpAppendListener(objVal.Ref, idx, hdr)
 		case "error":
 			cb, err := e.cpArrowClosure(args[1], []Type{errorObjType}, pos)
 			if err != nil {
 				return Value{}, err
 			}
-			e.cpStoreField(objVal.Ref, 12, cb)
+			e.cpAppendListener(objVal.Ref, 12, cb)
 		case "message":
-			// The fork IPC channel (TDD-00141) — string payloads. See through
-			// a `test` counting wrapper the way ADR-00412/00422 sites do.
-			contextTypeArrowParams(args[1], "string")
-			cb, err := e.cpArrowClosure(args[1], []Type{TypePtr}, pos)
+			// The fork IPC channel (TDD-00141), json serialization mode: the
+			// stored value is a wire adapter that hands an `any`-typed
+			// listener the faithful sent value (string, or parsed
+			// object/array/number/boolean) and a string-typed one the text.
+			hdr, err := e.cpMessageAdapter(args[1], pos)
 			if err != nil {
 				return Value{}, err
 			}
-			e.cpStoreField(objVal.Ref, 18, cb)
+			e.cpAppendListener(objVal.Ref, 18, hdr)
 		default:
 			return Value{}, fmt.Errorf("%d:%d: child.on supports 'close', 'exit', 'error' and 'message' (got '%s')", pos.Line, pos.Col, evt)
 		}
 		return Value{Ty: TypeVoid}, nil
 	case "send":
-		// fork IPC: send one string message to the child (TDD-00141).
+		// fork IPC (TDD-00141), json serialization mode: a string crosses as
+		// a quoted line, any other value (object/array/number/boolean/any) is
+		// JSON.stringify'd and framed verbatim.
 		if len(args) != 1 {
 			return Value{}, fmt.Errorf("%d:%d: child.send takes one message", pos.Line, pos.Col)
 		}
-		mv, err := e.emitExpr(args[0])
+		e.ensureCPForkRuntime()
+		ref, rawJSON, err := e.emitWireSend(args[0], pos)
 		if err != nil {
 			return Value{}, err
 		}
-		if !isStringTy(mv.Ty) {
-			return Value{}, fmt.Errorf("%d:%d: child.send supports string messages in this version", pos.Line, pos.Col)
+		sendFn := "@__kml_cp_send"
+		if rawJSON {
+			sendFn = "@__kml_cp_send_json"
 		}
-		e.ensureCPForkRuntime()
 		ok := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_cp_send(ptr %s, ptr %s)", ok, objVal.Ref, mv.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call i1 %s(ptr %s, ptr %s)", ok, sendFn, objVal.Ref, ref))
 		return Value{Ref: ok, Ty: TypeBool}, nil
 	case "disconnect":
 		e.ensureCPForkRuntime()
@@ -927,6 +941,110 @@ func (e *Emitter) cpArrowClosure(arg ast.Expression, hints []Type, pos ast.Pos) 
 		return e.chunkHeaderAdapterClosure(cb.hdrPtr), nil
 	}
 	return cb.hdrPtr, nil
+}
+
+// emitWireMessageArg materializes one IPC wire message for a listener
+// parameter of type p: the channel delivers (ptr msg, i1 isstr) — a quoted
+// string line arrives unquoted with isstr=1, any other JSON value as its raw
+// text with isstr=0 (Node's json serialization mode, TDD-00141). A
+// string-typed parameter takes the text as-is; an `any` parameter gets the
+// faithful Node value — the string boxed, or the JSON parsed to a dynamic
+// tree (objects/arrays/numbers/booleans cross as themselves). Returns the
+// call-operand string ("<ir> <ref>").
+func (e *Emitter) emitWireMessageArg(p Type, msgReg, isstrReg string) (string, error) {
+	if !p.IsDynamic {
+		return storageIR(p) + " " + msgReg, nil
+	}
+	strL := e.freshLabel("wmsg.str")
+	jsonL := e.freshLabel("wmsg.json")
+	doneL := e.freshLabel("wmsg.done")
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isstrReg, strL, jsonL))
+	e.emitLabel(strL)
+	boxed, err := e.emitBoxValue(Value{Ref: msgReg, Ty: TypePtr})
+	if err != nil {
+		return "", err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(jsonL)
+	parsed, err := e.emitJSONParseValue(Value{Ref: msgReg, Ty: TypePtr}, TypeAny, ast.Pos{})
+	if err != nil {
+		return "", err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", parsed.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, slot))
+	return "i64 " + out, nil
+}
+
+// cpMessageAdapter wraps a user 'message' listener in the wire's 3-arg ABI
+// void(ptr env, ptr msg, i1 isstr) — env is the user closure header. The
+// untyped parameter defaults to `any` (JS-faithful: Node delivers whatever
+// was sent); an explicit `msg: string` annotation keeps the plain-text fast
+// path.
+func (e *Emitter) cpMessageAdapter(arg ast.Expression, pos ast.Pos) (string, error) {
+	contextTypeArrowParams(arg, "any")
+	cb, err := e.resolveCallbackWithHints(arg, []Type{TypeAny})
+	if err != nil {
+		return "", err
+	}
+	if cb.kind != cbClosure {
+		return "", fmt.Errorf("%d:%d: a 'message' listener must be an arrow function literal", pos.Line, pos.Col)
+	}
+	params := cb.ty.FuncParams
+
+	fn := fmt.Sprintf("@__kml_cp_msg_adapter_%d", e.closureCtr)
+	e.closureCtr++
+	restore := e.beginThunkEmit()
+	rfpp := e.freshReg()
+	rfp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", rfpp))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rfp, rfpp))
+	repp := e.freshReg()
+	rep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", repp))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rep, repp))
+	argParts := []string{"ptr " + rep}
+	for i, p := range params {
+		if i == 0 {
+			part, aerr := e.emitWireMessageArg(p, "%msg", "%isstr")
+			if aerr != nil {
+				restore()
+				return "", aerr
+			}
+			argParts = append(argParts, part)
+			continue
+		}
+		argParts = append(argParts, storageIR(p)+" "+zeroRef(p))
+	}
+	e.emitInstr(fmt.Sprintf("call void %s(%s)", rfp, strings.Join(argParts, ", ")))
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%env, ptr %%msg, i1 %%isstr) {\nentry:\n%sret void\n}\n", fn, body))
+	return e.buildBuiltinClosure(fn, cb.hdrPtr), nil
+}
+
+// emitWireSend serializes one send(x) argument for the IPC wire and returns
+// (valueRef, rawJSON bool): a plain string keeps the quoted-line fast path;
+// anything else (any/object/array/number/boolean) is JSON.stringify'd and
+// framed verbatim — Node's json serialization mode.
+func (e *Emitter) emitWireSend(arg ast.Expression, pos ast.Pos) (string, bool, error) {
+	mv, err := e.emitExpr(arg)
+	if err != nil {
+		return "", false, err
+	}
+	if isStringTy(mv.Ty) && !mv.Ty.IsDynamic {
+		return mv.Ref, false, nil
+	}
+	sv, err := e.emitJSONStringifyValue(mv, jsonIndent{})
+	if err != nil {
+		return "", false, err
+	}
+	return sv.Ref, true, nil
 }
 
 // cpExitCloseAdapter wraps a user 'exit'/'close' listener in a fixed-ABI adapter

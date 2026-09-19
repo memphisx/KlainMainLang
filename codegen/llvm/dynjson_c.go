@@ -32,4 +32,5 @@ func (e *Emitter) ensureDynJSONC() {
 	e.emitGlobal(`declare ptr @__kml_array_join(ptr, i64, i8)`)    // TDD-00212
 	e.emitGlobal(`declare ptr @__kml_array_inspect(ptr, i64, i8)`) // TDD-00212 Stage 2
 	e.emitGlobal(`declare ptr @__kml_dynarr_inspect(ptr)`)         // TDD-00212 Stage 2
+	e.emitGlobal(`declare ptr @__kml_dynobj_inspect(ptr)`)         // dynamic-object console.log form
 }

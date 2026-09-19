@@ -365,6 +365,28 @@ func (e *Emitter) emitGeneratorConstructionWithThis(info *GeneratorInfo, thisRef
 	if len(args) != len(info.ParamTypes) {
 		return Value{}, fmt.Errorf("%d:%d: generator expects %d argument(s), got %d", pos.Line, pos.Col, len(info.ParamTypes), len(args))
 	}
+	paramVals := make([]Value, len(args))
+	for i, argExpr := range args {
+		val, err := e.emitExpr(argExpr)
+		if err != nil {
+			return Value{}, err
+		}
+		paramVals[i] = e.coerce(val, info.ParamTypes[i])
+	}
+	env, err := e.packGeneratorEnv(info, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	return e.emitGeneratorConstructValues(info, thisRef, paramVals, env), nil
+}
+
+// emitGeneratorConstructValues is the construction core over already-evaluated
+// parameter Values and an already-packed env pointer register ("null" when
+// capture-free): fiber ctx/stack setup, field init, __paramN/__this/__env
+// stores. Shared by the expression-level construction above and the
+// first-class generator-value thunk (emitGeneratorCtorClosure), which packs
+// the env at the escape point and constructs later.
+func (e *Emitter) emitGeneratorConstructValues(info *GeneratorInfo, thisRef string, paramVals []Value, envReg string) Value {
 	e.ensureGeneratorRuntime()
 
 	genTy := info.GenTy
@@ -422,48 +444,87 @@ func (e *Emitter) emitGeneratorConstructionWithThis(info *GeneratorInfo, thisRef
 	e.storeGeneratorField(genObj, genTy, GeneratorReqHeadField, "ptr", "null")
 	e.storeGeneratorField(genObj, genTy, GeneratorReqTailField, "ptr", "null")
 
-	for i, argExpr := range args {
-		val, err := e.emitExpr(argExpr)
-		if err != nil {
-			return Value{}, err
-		}
-		val = e.coerce(val, info.ParamTypes[i])
+	for i, val := range paramVals {
 		e.storeGeneratorField(genObj, genTy, fmt.Sprintf("__param%d", i), val.Ty.IR, val.Ref)
 	}
 	if thisRef != "" {
 		e.storeGeneratorField(genObj, genTy, GeneratorThisField, "ptr", thisRef)
 	}
+	// A nested generator's closure env (TDD-00094): the captured cells, packed
+	// by packGeneratorEnv (shared by reference with the enclosing scope,
+	// mirroring an arrow's capture); "null" for a top-level/capture-free one.
+	e.storeGeneratorField(genObj, genTy, GeneratorEnvField, "ptr", envReg)
 
-	// A nested generator's closure env (TDD-00094): box each captured cell (shared
-	// by reference with the enclosing scope, mirroring an arrow's capture) and
-	// store the env pointer into __env. Each capture's *current* symbol is
-	// re-resolved here (construction is at the `g()` call site, after the
-	// declaration — the var may have been boxed by an intervening closure); the
-	// type is fixed from the declaration. A top-level/non-capturing generator
-	// stores a null __env.
-	if len(info.Captures) > 0 {
-		env := e.freshReg()
-		envIR := envStructIR(info.Captures)
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", env, envStructSize(info.Captures)))
-		for i, cap := range info.Captures {
-			sym, ok := e.lookup(cap.Name)
-			if !ok {
-				return Value{}, fmt.Errorf("%d:%d: generator captures '%s' but it is not in scope at construction", pos.Line, pos.Col, cap.Name)
-			}
-			cellPtr := sym.Ptr
-			if !sym.Boxed {
-				cellPtr = e.promoteCaptureToCell(cap.Name, cap.Ty, sym.Ptr, sym.IsConst)
-			}
-			slotReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slotReg, envIR, env, i))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cellPtr, slotReg))
-		}
-		e.storeGeneratorField(genObj, genTy, GeneratorEnvField, "ptr", env)
-	} else {
-		e.storeGeneratorField(genObj, genTy, GeneratorEnvField, "ptr", "null")
+	return Value{Ref: genObj, Ty: genTy}
+}
+
+// emitGeneratorCtorClosure realizes a generator referenced in VALUE position
+// (`return g`, `const G = g`, passing `g` as an argument) as a first-class
+// closure whose call constructs a fresh instance — matching JS, where a
+// generator function is an ordinary function value. The captured env is
+// packed HERE, at the escape point, while the enclosing scope's cells are
+// still resolvable; the thunk carries it as its closure env and threads it
+// into every instance it constructs (cells are shared heap boxes, so
+// enclosing-scope mutations stay visible by reference, and instances made
+// after the enclosing frame returned keep working).
+func (e *Emitter) emitGeneratorCtorClosure(info *GeneratorInfo, pos ast.Pos) (Value, error) {
+	env, err := e.packGeneratorEnv(info, pos)
+	if err != nil {
+		return Value{}, err
 	}
 
-	return Value{Ref: genObj, Ty: genTy}, nil
+	fn := fmt.Sprintf("@__kml_genctor_%d", e.closureCtr)
+	e.closureCtr++
+	restore := e.beginThunkEmit()
+	paramDecl := "ptr %env"
+	paramVals := make([]Value, len(info.ParamTypes))
+	for i, pt := range info.ParamTypes {
+		if pt.IsArray {
+			// The closure ABI passes an array as (header ptr, i64 len) —
+			// rebuild the aggregate (carrying the live header) for the store.
+			paramDecl += fmt.Sprintf(", ptr %%p%d_ptr, i64 %%p%d_len", i, i)
+			paramVals[i] = e.arrayValueFromHeaderReg(fmt.Sprintf("%%p%d_ptr", i), pt)
+			continue
+		}
+		paramDecl += fmt.Sprintf(", %s %%p%d", pt.IR, i)
+		paramVals[i] = Value{Ref: fmt.Sprintf("%%p%d", i), Ty: pt}
+	}
+	inst := e.emitGeneratorConstructValues(info, "", paramVals, "%env")
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.functions.WriteString(fmt.Sprintf("\ndefine ptr %s(%s) {\nentry:\n%sret ptr %s\n}\n", fn, paramDecl, body, inst.Ref))
+
+	hdr := e.buildBuiltinClosure(fn, env)
+	return Value{Ref: hdr, Ty: FuncType(info.ParamTypes, info.GenTy)}, nil
+}
+
+// packGeneratorEnv boxes a nested generator's captured cells into a fresh env
+// struct in the CURRENT scope, returning its pointer register ("null" for a
+// capture-free generator). Split out of construction so a generator escaping
+// as a first-class value (emitGeneratorCtorClosure) can pack the env at the
+// escape point — where the enclosing scope is still live — and hand it to the
+// constructor thunk that runs later.
+func (e *Emitter) packGeneratorEnv(info *GeneratorInfo, pos ast.Pos) (string, error) {
+	if len(info.Captures) == 0 {
+		return "null", nil
+	}
+	env := e.freshReg()
+	envIR := envStructIR(info.Captures)
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", env, envStructSize(info.Captures)))
+	for i, cap := range info.Captures {
+		sym, ok := e.lookup(cap.Name)
+		if !ok {
+			return "", fmt.Errorf("%d:%d: generator captures '%s' but it is not in scope at construction", pos.Line, pos.Col, cap.Name)
+		}
+		cellPtr := sym.Ptr
+		if !sym.Boxed {
+			cellPtr = e.promoteCaptureToCell(cap.Name, cap.Ty, sym.Ptr, sym.IsConst)
+		}
+		slotReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slotReg, envIR, env, i))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cellPtr, slotReg))
+	}
+	return env, nil
 }
 
 // emitGeneratorSwapToCaller stores val into the generator's own __yielded

@@ -1,5 +1,7 @@
 package llvm
 
+import "fmt"
+
 // ensureExceptionHelpers hand-writes @__kml_throw's uncaught-error path
 // against errorObjType's layout directly ({ i64 kind, ptr message, ptr name
 // } — emit_exceptions.go) rather than through the generic FieldIndex/
@@ -139,13 +141,32 @@ other:
   ret ptr @.kml_unc_thrown
 }`)
 
-	e.emitGlobal(`define void @__kml_throw_any(i8 %tag, i64 %pay) {
+	e.emitGlobal(fmt.Sprintf(`define void @__kml_throw_any(i8 %%tag, i64 %%pay) {
 entry:
-  store i8 %tag, ptr @__kml_thrown_tag, align 1
-  store i64 %pay, ptr @__kml_thrown_pay, align 8
+  ; A thrown object box whose field-0 carries the boxed-object Error type-id
+  ; (TDD-00222: flag bit set, low bits below the subclass tag base) IS a
+  ; built-in Error — restore it to a tag-13 throw so catch handlers see the
+  ; full Error shape (.name/.message/instanceof), exactly as if it had been
+  ; thrown unboxed. Subclass instances (different struct layout) stay boxed.
+  %%isobj = icmp eq i8 %%tag, %d
+  br i1 %%isobj, label %%probe, label %%keep
+probe:
+  %%obj = inttoptr i64 %%pay to ptr
+  %%f0 = load i64, ptr %%obj, align 8
+  %%flagbit = and i64 %%f0, %d
+  %%hasflag = icmp ne i64 %%flagbit, 0
+  %%low = and i64 %%f0, %d
+  %%isbuiltin = icmp ult i64 %%low, %d
+  %%iserrbox = and i1 %%hasflag, %%isbuiltin
+  br label %%keep
+keep:
+  %%iserrph = phi i1 [ %%iserrbox, %%probe ], [ 0, %%entry ]
+  %%tag2 = select i1 %%iserrph, i8 13, i8 %%tag
+  store i8 %%tag2, ptr @__kml_thrown_tag, align 1
+  store i64 %%pay, ptr @__kml_thrown_pay, align 8`, kmlTagObject, errorTypeIDFlag, errorTypeIDFlag-1, errorSubclassTagBase)+`
   ; Keep @__kml_thrown pointing at the Error object for tag 13 (internal
   ; Error-only catch paths + the uncaught printer read it); null otherwise.
-  %isErr = icmp eq i8 %tag, 13
+  %isErr = icmp eq i8 %tag2, 13
   %errObj = inttoptr i64 %pay to ptr
   %thrownPtr = select i1 %isErr, ptr %errObj, ptr null
   store ptr %thrownPtr, ptr @__kml_thrown, align 8
@@ -164,7 +185,7 @@ procunc:
   call void @exit(i32 1)
   unreachable
 defunc:
-  %msg = call ptr @__kml_caught_unc_msg(i8 %tag, i64 %pay)
+  %msg = call ptr @__kml_caught_unc_msg(i8 %tag2, i64 %pay)
   ; TDD-00098 stage 5: on a worker thread this call does NOT return — it
   ; reports 'error' + exit(1) to the parent and ends only that thread.
   call void @__kml_worker_uncaught(ptr %msg)

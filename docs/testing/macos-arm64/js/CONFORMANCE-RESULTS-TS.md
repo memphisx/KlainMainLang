@@ -8,19 +8,19 @@ V1 measures accept/reject **agreement** only — not error-message text or posit
 
 ## Overall
 
-**6213 / 11034 agree with TypeScript (56.3%)** on accept/reject over 11034 classified cases (800 multi-file/out-of-scope skipped).
+**6223 / 11034 agree with TypeScript (56.4%)** on accept/reject over 11034 classified cases (800 multi-file/out-of-scope skipped).
 
-- **2383** match-accept (both compile clean)
-- **3830** match-reject (both reject)
-- **3647** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
-- **1174** false-accept (TS rejects, we accept — a soundness gap worth investigating)
+- **2406** match-accept (both compile clean)
+- **3817** match-reject (both reject)
+- **3624** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
+- **1187** false-accept (TS rejects, we accept — a soundness gap worth investigating)
 
 ## By group
 
 | Group | Agree | Classified | % | False-accept | Skipped |
 |---|---|---|---|---|---|
-| compiler | 3227 | 5990 | 53.9% | 741 | 273 |
-| conformance | 2986 | 5044 | 59.2% | 433 | 527 |
+| compiler | 3233 | 5990 | 54.0% | 744 | 273 |
+| conformance | 2990 | 5044 | 59.3% | 443 | 527 |
 
 ## False-accepts (TypeScript rejects, this compiler accepted)
 
@@ -103,8 +103,11 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `assignmentCompatInterfaceWithStringIndexSignature` | compiler |
 | `assignmentCompatWithCallSignatures` | conformance |
 | `assignmentCompatWithCallSignatures6` | conformance |
+| `assignmentCompatWithCallSignaturesWithOptionalParameters` | conformance |
+| `assignmentCompatWithCallSignaturesWithRestParameters` | conformance |
 | `assignmentCompatWithConstructSignatures` | conformance |
 | `assignmentCompatWithConstructSignatures2` | conformance |
+| `assignmentCompatWithConstructSignaturesWithOptionalParameters` | conformance |
 | `assignmentCompatWithEnumIndexer` | conformance |
 | `assignmentCompatWithGenericCallSignatures4` | conformance |
 | `assignmentCompatWithNumericIndexer2` | conformance |
@@ -125,10 +128,7 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `awaitLiteralValues` | compiler |
 | `awaitedTypeNoLib` | compiler |
 | `baseConstraintOfDecorator` | compiler |
-| `baseTypePrivateMemberClash` | compiler |
-| `bigIntWithTargetLessThanES2016` | compiler |
-| `binaryArithmatic1` | compiler |
-| … | +1074 more |
+| … | +1087 more |
 
 ## False-reject reasons (TypeScript accepts, this compiler rejected)
 
@@ -136,11 +136,11 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 
 | Count | Reason |
 |---|---|
-| 187 | REJECTED: undefined variable '%s' |
+| 186 | REJECTED: undefined variable '%s' |
 | 157 | REJECTED: import path '%s' must start with '%s' or '%s' — bare/package-style imports are not supported |
 | 113 | REJECTED: expected '%s' after export specifier list, got ; |
+| 90 | REJECTED: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s' to infer from, or p… |
 | 90 | REJECTED: undefined function or closure '%s' |
-| 88 | REJECTED: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s' to infer from, or p… |
 | 79 | REJECTED: '%s' is declared more than once in <path> |
 | 65 | REJECTED: a number has no method '%s' |
 | 60 | REJECTED: a computed class member name must be a constant string or number literal — a dynamic key (identifier, call, Symbol, or… |
@@ -150,21 +150,21 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 47 | REJECTED: '%s' is only valid inside a method or constructor body |
 | 47 | REJECTED: expected {, got STRING |
 | 43 | REJECTED: unexpected token = in expression |
-| 36 | REJECTED: a union with two or more object members must be a discriminated union — every member needs a common first-position str… |
+| 38 | REJECTED: a union with two or more object members must be a discriminated union — every member needs a common first-position str… |
 | 36 | REJECTED: unexpected token , in expression |
 | 34 | REJECTED: a call signature combined with other interface members is not supported — a callable object value has no runtime shape… |
+| 34 | REJECTED: expected type name, got this |
 | 34 | REJECTED: generic function '%s': type argument is not supported in V1 (only number, string, boolean, arrays of these, and object/c… |
-| 33 | REJECTED: expected type name, got this |
-| 33 | REJECTED: getter/setter '%s' on class '%s' disagree on type |
 | 32 | REJECTED: expected :, got IDENT |
-| 31 | REJECTED: field access on non-object (no field '%s') |
 | 31 | REJECTED: union member types are limited to number, string, boolean (plus null/undefined), object<path>, and ReadableStream types |
 | 30 | REJECTED: '%s' is not an array |
+| 30 | REJECTED: getter/setter '%s' on class '%s' disagree on type |
 | 29 | REJECTED: at most one call signature is supported per object type |
 | 29 | REJECTED: expected IDENT, got ( |
+| 29 | REJECTED: field access on non-object (no field '%s') |
+| 28 | REJECTED: unexpected token void in expression |
 | 27 | REJECTED: an object has no method '%s' |
 | 27 | REJECTED: static getters/setters are not yet supported ('%s' on class '%s') |
-| 27 | REJECTED: unexpected token void in expression |
 | 26 | REJECTED: a destructured parameter requires an explicit type annotation |
 | 26 | REJECTED: dynamic import('%s') under -dynamic-import=eager — the eager result-object backend (TDD-00055 Stage 2) is not yet impl… |
 | 26 | REJECTED: unexpected token + in expression |
@@ -173,10 +173,8 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 23 | REJECTED: expected :, got . |
 | 22 | REJECTED: a class expression is only supported as a top-level `const<path> X = class {...}` binding (V1) — using it as a value (… |
 | 22 | REJECTED: expected '%s' after import specifier list, got { |
-| 22 | REJECTED: unexpected token : in expression |
 | 21 | REJECTED: `import foo = require(...)` is not supported — use an ES import declaration instead |
 | 21 | REJECTED: expected member name, got < |
-| 21 | REJECTED: initializer'%s's type — this compiler is a typed subset |
 | 20 | REJECTED: <path>: expected ] in array type annotation |
 | 20 | REJECTED: expected IDENT, got await |
 | 20 | REJECTED: expected type name, got \| |
@@ -196,7 +194,9 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 17 | REJECTED: expected type name, got ... |
 | 17 | REJECTED: object destructuring requires an object variable, function call, or object literal |
 | 17 | REJECTED: unexpected character '%s' |
-| … | +420 more distinct reasons |
+| 17 | REJECTED: unterminated regular expression literal |
+| 16 | REJECTED: '%s' can only precede a function, variable, interface, type alias, enum, or class declaration |
+| … | +421 more distinct reasons |
 
 ## False-reject blockers (concrete identifier/character)
 
@@ -206,7 +206,7 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 |---|---|
 | 153 | `from` |
 | 152 | `require(...)`` |
-| 72 | `T` |
+| 73 | `T` |
 | 59 | `>` |
 | 56 | `foo` |
 | 48 | `members` |
@@ -214,22 +214,22 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 36 | `x` |
 | 32 | `C__kml_mod0` |
 | 30 | `a` |
-| 21 | `s type is incompatible with the variable` |
 | 20 | `dec__kml_mod0` |
 | 19 | `b` |
 | 19 | `f__kml_mod0` |
-| 18 | `foo__kml_mod0` |
 | 17 | `B__kml_mod0` |
 | 17 | `c` |
 | 16 | `./0` |
 | 16 | `export` |
+| 16 | `s type is incompatible with the variable` |
 | 15 | `C` |
+| 15 | `foo__kml_mod0` |
 | 14 | `D__kml_mod0` |
 | 13 | `Foo` |
 | 13 | `new` |
+| 12 | `A` |
 | 12 | `Foo__kml_mod0` |
 | 12 | `export * as ns from` |
-| 11 | `A` |
 | 11 | `B` |
 | 11 | `Symbol` |
 | 11 | `a__kml_mod0` |
@@ -246,16 +246,15 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 8 | `./b` |
 | 8 | `Object` |
 | 8 | `Point` |
+| 8 | `object)` |
 | 8 | `of` |
 | 8 | `which` |
 | 7 | `M` |
 | 7 | `U` |
-| 7 | `number)` |
 | 6 | `#` |
 | 6 | `<` |
 | 6 | `C2__kml_mod0` |
 | 6 | `Derived__kml_mod0` |
-| 6 | `arguments` |
 | 6 | `m` |
 | 6 | `m__kml_mod0` |
 | 6 | `s type is not a member of ` |
@@ -264,4 +263,5 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 5 | `Bar__kml_mod0` |
 | 5 | `C1__kml_mod0` |
 | 5 | `[]` |
-| … | +524 more distinct blockers |
+| 5 | `\\` |
+| … | +522 more distinct blockers |

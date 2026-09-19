@@ -170,14 +170,16 @@ show(a);
 `, "same\ndiff\nobject\n1,2,3")
 }
 
-// A boxed object now stringifies to JS's "[object Object]" instead of
-// printing the raw struct bytes (blank/garbage) — a now-reachable path once
-// any-typed parameters can carry an object.
+// console.log of a boxed object renders the util.inspect form ({ a: 1 },
+// ADR-01008), matching Node; String()/interpolation still give
+// "[object Object]" (ToPrimitive).
 func TestE2EBoxedObjectToString(t *testing.T) {
 	assertOutput(t, `
 function show(x: any): void { console.log(x); }
 show({ a: 1 });
-`, "[object Object]")
+function str(x: any): void { console.log("" + x); }
+str({ a: 1 });
+`, "{ a: 1 }\n[object Object]")
 }
 
 // A boxed-element array (`any[]`, TDD-00200) accepts a mix of element types,

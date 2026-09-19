@@ -1973,6 +1973,16 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			rewritten := ast.NewCallExpression(ast.NewIdentifier(m, ex.GetPos()), ex.Args, ex.GetPos())
 			return e.emitCall(rewritten)
 		}
+		// TDD-00129 Stage 2: a capturing nested function declaration called
+		// before its declaration statement hoists — emit it on demand here,
+		// then dispatch as the closure value it now is.
+		if ok, lerr := e.letrecEmitCapturingNested(id.Name); lerr != nil {
+			return Value{}, lerr
+		} else if ok {
+			if sym, found := e.lookup(id.Name); found && sym.Ty.IsFunc {
+				return e.emitClosureCall(sym, ex.Args, ex.GetPos())
+			}
+		}
 		return Value{}, fmt.Errorf("%d:%d: undefined function or closure '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name)
 	}
 
@@ -2388,12 +2398,10 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					if !val.Ty.IsArray {
 						return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", arg.GetPos().Line, arg.GetPos().Col)
 					}
-					// A transient array expression is materialized into a fresh
-					// header (TDD-00127); the callee may mutate it, but it has no
-					// caller-visible identity, so that is correct.
-					header := e.boxArrayValue(val)
-					lenReg := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+					// A member/index/field array shares its live header so callee
+					// mutation propagates; a true transient gets a fresh one
+					// (TDD-00127).
+					header, lenReg := e.arrayArgFromAggregate(val)
 					argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 					paramArrayHeader = header
 				}

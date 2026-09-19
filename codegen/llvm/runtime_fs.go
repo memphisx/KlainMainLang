@@ -248,7 +248,7 @@ entry:
   %%errno_d = sitofp i32 %%errno_val to double
   %%errobj = call ptr @malloc(i64 %d)
   %%errobj.kind = getelementptr %s, ptr %%errobj, i32 0, i32 0
-  store i64 0, ptr %%errobj.kind, align 8
+  store i64 281474976710656, ptr %%errobj.kind, align 8
   %%errobj.msg = getelementptr %s, ptr %%errobj, i32 0, i32 1
   store ptr %%buf, ptr %%errobj.msg, align 8
   %%errobj.name = getelementptr %s, ptr %%errobj, i32 0, i32 2

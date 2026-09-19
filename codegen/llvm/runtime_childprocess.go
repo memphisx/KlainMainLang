@@ -210,6 +210,12 @@ ret:
   ret void
 }`)
 
+	// Post-reap hook — null unless the cluster runtime arms it (fork time);
+	// see finalize's own ret-path comment.
+	e.emitGlobal("@__kml_cp_reaped_hook = internal global ptr null, align 8")
+
+	e.ensureCPListenerAppend()
+
 	// __kml_cp_finalize(cp): both stdio pipes are at EOF — reap (WNOHANG) and,
 	// once reaped, store the exit code and fire the terminal listeners /
 	// buffered callback, then mark the handle finalized (state 2).
@@ -223,7 +229,7 @@ entry:
   store i32 0, ptr %%stslot, align 4
   %%r = call i32 @waitpid(i32 %%pid, ptr %%stslot, i32 1)
   %%reaped = icmp eq i32 %%r, %%pid
-  br i1 %%reaped, label %%doreap, label %%ret
+  br i1 %%reaped, label %%doreap, label %%retz
 doreap:
   %%st = load i32, ptr %%stslot, align 4
   %%low = and i32 %%st, 127
@@ -262,6 +268,16 @@ store:
   %%evcode_d = sitofp i64 %%evcode_sel to double
   %%st_p = getelementptr %s, ptr %%cp, i32 0, i32 4
   store i64 2, ptr %%st_p, align 8
+  ; post-reap hook (null unless the cluster runtime armed it): drops the
+  ; worker from cluster.workers BEFORE the exit/close listeners run — Node
+  ; deletes the entry before emitting 'exit'.
+  %%rhook = load ptr, ptr @__kml_cp_reaped_hook, align 8
+  %%rhset = icmp ne ptr %%rhook, null
+  br i1 %%rhset, label %%rhcall, label %%rhafter
+rhcall:
+  call void %%rhook(ptr %%cp)
+  br label %%rhafter
+rhafter:
   %%mode_p = getelementptr %s, ptr %%cp, i32 0, i32 13
   %%mode = load i64, ptr %%mode_p, align 8
   %%modebuf = and i64 %%mode, 1
@@ -280,13 +296,24 @@ errevt:
   %%hasErr = icmp ne ptr %%errL, null
   br i1 %%hasErr, label %%callerr, label %%aftexit
 callerr:
+  ; field 12 is a listener LIST ({hdr, next} nodes) — fire each in order
   %%serrobj = call ptr @__kml_cp_spawn_errobj(i64 %%sf20)
-  %%efp3_p = getelementptr { ptr, ptr }, ptr %%errL, i32 0, i32 0
+  br label %%errloop
+errloop:
+  %%enode = phi ptr [ %%errL, %%callerr ], [ %%enext, %%errcall ]
+  %%edone = icmp eq ptr %%enode, null
+  br i1 %%edone, label %%aftexit, label %%errcall
+errcall:
+  %%ehdr_p = getelementptr { ptr, ptr }, ptr %%enode, i32 0, i32 0
+  %%ehdr = load ptr, ptr %%ehdr_p, align 8
+  %%efp3_p = getelementptr { ptr, ptr }, ptr %%ehdr, i32 0, i32 0
   %%efp3 = load ptr, ptr %%efp3_p, align 8
-  %%eep3_p = getelementptr { ptr, ptr }, ptr %%errL, i32 0, i32 1
+  %%eep3_p = getelementptr { ptr, ptr }, ptr %%ehdr, i32 0, i32 1
   %%eep3 = load ptr, ptr %%eep3_p, align 8
   call void %%efp3(ptr %%eep3, ptr %%serrobj)
-  br label %%aftexit
+  %%enext_p = getelementptr { ptr, ptr }, ptr %%enode, i32 0, i32 1
+  %%enext = load ptr, ptr %%enext_p, align 8
+  br label %%errloop
 normexit:
   ; fire 'exit'(code, signal) then 'close'(code, signal) — the stored listener
   ; is a fixed-ABI adapter void(ptr env, i1 present, double code, ptr signal)
@@ -296,24 +323,44 @@ normexit:
   %%hasExit = icmp ne ptr %%exitL, null
   br i1 %%hasExit, label %%callexit, label %%aftexit
 callexit:
-  %%xfp_p = getelementptr { ptr, ptr }, ptr %%exitL, i32 0, i32 0
+  br label %%exitloop
+exitloop:
+  %%xnode = phi ptr [ %%exitL, %%callexit ], [ %%xnext, %%exitcall ]
+  %%xdone = icmp eq ptr %%xnode, null
+  br i1 %%xdone, label %%aftexit, label %%exitcall
+exitcall:
+  %%xhdr_p = getelementptr { ptr, ptr }, ptr %%xnode, i32 0, i32 0
+  %%xhdr = load ptr, ptr %%xhdr_p, align 8
+  %%xfp_p = getelementptr { ptr, ptr }, ptr %%xhdr, i32 0, i32 0
   %%xfp = load ptr, ptr %%xfp_p, align 8
-  %%xep_p = getelementptr { ptr, ptr }, ptr %%exitL, i32 0, i32 1
+  %%xep_p = getelementptr { ptr, ptr }, ptr %%xhdr, i32 0, i32 1
   %%xep = load ptr, ptr %%xep_p, align 8
   call void %%xfp(ptr %%xep, i1 %%evpresent, double %%evcode_d, ptr %%evsigname)
-  br label %%aftexit
+  %%xnext_p = getelementptr { ptr, ptr }, ptr %%xnode, i32 0, i32 1
+  %%xnext = load ptr, ptr %%xnext_p, align 8
+  br label %%exitloop
 aftexit:
   %%closeL_p = getelementptr %s, ptr %%cp, i32 0, i32 10
   %%closeL = load ptr, ptr %%closeL_p, align 8
   %%hasClose = icmp ne ptr %%closeL, null
   br i1 %%hasClose, label %%callclose, label %%ret
 callclose:
-  %%cfp_p = getelementptr { ptr, ptr }, ptr %%closeL, i32 0, i32 0
+  br label %%closeloop
+closeloop:
+  %%cnode = phi ptr [ %%closeL, %%callclose ], [ %%cnext, %%closecall ]
+  %%cdone = icmp eq ptr %%cnode, null
+  br i1 %%cdone, label %%ret, label %%closecall
+closecall:
+  %%chdr_p = getelementptr { ptr, ptr }, ptr %%cnode, i32 0, i32 0
+  %%chdr = load ptr, ptr %%chdr_p, align 8
+  %%cfp_p = getelementptr { ptr, ptr }, ptr %%chdr, i32 0, i32 0
   %%cfp = load ptr, ptr %%cfp_p, align 8
-  %%cep_p = getelementptr { ptr, ptr }, ptr %%closeL, i32 0, i32 1
+  %%cep_p = getelementptr { ptr, ptr }, ptr %%chdr, i32 0, i32 1
   %%cep = load ptr, ptr %%cep_p, align 8
   call void %%cfp(ptr %%cep, i1 %%evpresent, double %%evcode_d, ptr %%evsigname)
-  br label %%ret
+  %%cnext_p = getelementptr { ptr, ptr }, ptr %%cnode, i32 0, i32 1
+  %%cnext = load ptr, ptr %%cnext_p, align 8
+  br label %%closeloop
 bufcb:
   %%cb_p = getelementptr %s, ptr %%cp, i32 0, i32 16
   %%cb = load ptr, ptr %%cb_p, align 8
@@ -349,6 +396,8 @@ callcb:
   call void %%bfp(ptr %%bep, ptr %%errv, ptr %%sostr, ptr %%sestr)
   br label %%ret
 ret:
+  ret void
+retz:
   ret void
 }`, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, errName)
 	if targetGOOS() == "windows" {
@@ -982,4 +1031,40 @@ func cpSignalNumber(name string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+
+// ensureCPListenerAppend defines __kml_cp_listener_append once: the
+// 'close'/'exit'/'error'/'message' listener slots (and the child-side
+// process.on('message') global) hold a LIST of closure headers ({hdr, next}
+// nodes, appended in registration order — Node fires listeners in the order
+// they were added), so several .on(...) registrations and a cluster-level
+// relay coexist instead of overwriting one another.
+func (e *Emitter) ensureCPListenerAppend() {
+	if e.usedCPListenerAppend {
+		return
+	}
+	e.usedCPListenerAppend = true
+	e.ensureMalloc()
+	e.emitGlobal(`
+define void @__kml_cp_listener_append(ptr %slot, ptr %hdr) {
+entry:
+  %node = call ptr @malloc(i64 16)
+  %nh = getelementptr { ptr, ptr }, ptr %node, i32 0, i32 0
+  store ptr %hdr, ptr %nh, align 8
+  %nn = getelementptr { ptr, ptr }, ptr %node, i32 0, i32 1
+  store ptr null, ptr %nn, align 8
+  br label %walk
+walk:
+  %cursor = phi ptr [ %slot, %entry ], [ %nextp, %step ]
+  %cur = load ptr, ptr %cursor, align 8
+  %atend = icmp eq ptr %cur, null
+  br i1 %atend, label %attach, label %step
+step:
+  %nextp = getelementptr { ptr, ptr }, ptr %cur, i32 0, i32 1
+  br label %walk
+attach:
+  store ptr %node, ptr %cursor, align 8
+  ret void
+}`)
 }

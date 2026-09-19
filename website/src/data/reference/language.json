@@ -5,7 +5,10 @@
   "statusPage": "LANGUAGE-CONSTRUCTS.md",
   "coversRows": "all",
   "coverageScope": "subset",
-  "coverage": { "loose": "75/76", "strict": "48/76" },
+  "coverage": {
+    "loose": "75/76",
+    "strict": "48/76"
+  },
   "lede": "The core TypeScript surface this compiler lowers to native code: control flow, operators, declarations, functions and closures, async/Promise, and classes. Most of it matches JS/TS exactly, but the recurring divergences are worth knowing up front — strings are NUL-terminated (an embedded null truncates), a nullable scalar's null is often an in-band presence bit rather than a real undefined, `-compat` governs whether `&&`/`||` are value-preserving, and a top-level `const`/`let` is only readable from a named function when its type is knowable before main() runs (an arrow closure captures anything regardless). The whole surface is statically typed and structurally shaped — there is no dynamic property add/delete and no runtime eval.",
   "entries": [
     {
@@ -15,8 +18,12 @@
       "signature": "if (cond) { … } else if (cond) { … } else { … }",
       "badge": "exact",
       "description": "Conditional branching with the usual else-if chain and optional braceless single-statement bodies.",
-      "seeAlso": ["lang.ternary"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/if...else" }
+      "seeAlso": [
+        "lang.ternary"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/if...else"
+      }
     },
     {
       "id": "lang.while",
@@ -25,8 +32,13 @@
       "signature": "while (cond) { … }",
       "badge": "exact",
       "description": "Pre-condition loop; the body runs zero or more times.",
-      "seeAlso": ["lang.dowhile", "lang.for"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/while" }
+      "seeAlso": [
+        "lang.dowhile",
+        "lang.for"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/while"
+      }
     },
     {
       "id": "lang.dowhile",
@@ -36,8 +48,12 @@
       "badge": "exact",
       "description": "Post-condition loop; the body always runs at least once before the condition is checked. break/continue work inside it.",
       "snippet": "let i = 0\ndo {\n  console.log(i)\n  i++\n} while (i < 3)",
-      "seeAlso": ["lang.while"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/do...while" }
+      "seeAlso": [
+        "lang.while"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/do...while"
+      }
     },
     {
       "id": "lang.for",
@@ -46,8 +62,13 @@
       "signature": "for (let i = 0; i < n; i++) { … }",
       "badge": "exact",
       "description": "The C-style three-clause for loop.",
-      "seeAlso": ["lang.forof", "lang.while"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for" }
+      "seeAlso": [
+        "lang.forof",
+        "lang.while"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for"
+      }
     },
     {
       "id": "lang.forof",
@@ -60,8 +81,13 @@
         "A bare `for (const v of map)` iterates values (use `.keys()` for keys); the two-name pattern `for (const [k, v] of map)` decomposes entries.",
         "A string iterates per byte, not per Unicode code point — correct for ASCII/Latin-1."
       ],
-      "seeAlso": ["lang.forawaitof", "lang.arraydestructure"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for...of" }
+      "seeAlso": [
+        "lang.forawaitof",
+        "lang.arraydestructure"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for...of"
+      }
     },
     {
       "id": "lang.forin",
@@ -71,8 +97,12 @@
       "badge": "exact",
       "description": "Iterates the field names of an object as strings.",
       "snippet": "const point = { x: 10, y: 20, z: 30 }\nfor (const key in point) {\n  console.log(key)\n}",
-      "seeAlso": ["lang.forof"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for...in" }
+      "seeAlso": [
+        "lang.forof"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for...in"
+      }
     },
     {
       "id": "lang.switch",
@@ -81,8 +111,12 @@
       "signature": "switch (x) { case a: …; break; default: … }",
       "badge": "exact",
       "description": "Multi-way branch with numeric, string, and boolean discriminants.",
-      "seeAlso": ["lang.if"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/switch" }
+      "seeAlso": [
+        "lang.if"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/switch"
+      }
     },
     {
       "id": "lang.breakcontinue",
@@ -91,8 +125,13 @@
       "signature": "outer: for (...) { break outer; }",
       "badge": "exact",
       "description": "Loop break/continue, including a labeled target on an enclosing loop. A break/continue inside a nested closure can only target a loop declared within that closure's own body — a clean compile-time rejection otherwise, matching JS's no-cross-function-boundary label rule.",
-      "seeAlso": ["lang.for", "lang.while"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/label" }
+      "seeAlso": [
+        "lang.for",
+        "lang.while"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/label"
+      }
     },
     {
       "id": "lang.return",
@@ -101,8 +140,12 @@
       "signature": "return expr;",
       "badge": "exact",
       "description": "Typed return; an implicit void return is handled.",
-      "seeAlso": ["lang.functiondecl"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/return" }
+      "seeAlso": [
+        "lang.functiondecl"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/return"
+      }
     },
     {
       "id": "lang.throw",
@@ -111,8 +154,13 @@
       "signature": "throw new Error(msg)",
       "badge": "exact",
       "description": "Throws via setjmp/longjmp. A built-in error constructor is also a first-class value (a boxed funcref with exact identity, typeof \"function\").",
-      "seeAlso": ["lang.trycatch", "lang.newerror"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/throw" }
+      "seeAlso": [
+        "lang.trycatch",
+        "lang.newerror"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/throw"
+      }
     },
     {
       "id": "lang.trycatch",
@@ -125,8 +173,13 @@
       "differences": [
         "A catch pattern can only destructure the caught value's fixed `{kind, message, name}` shape (every thrown value, including a thrown non-Error primitive, is force-shaped into that one runtime layout), not an arbitrary custom object's own fields, and there's no array-pattern form."
       ],
-      "seeAlso": ["lang.throw", "lang.optcatch"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/try...catch" }
+      "seeAlso": [
+        "lang.throw",
+        "lang.optcatch"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/try...catch"
+      }
     },
     {
       "id": "lang.optcatch",
@@ -135,8 +188,12 @@
       "signature": "try { … } catch { … }",
       "badge": "exact",
       "description": "The catch parameter clause is optional (ES2019).",
-      "seeAlso": ["lang.trycatch"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/try...catch#catch_binding" }
+      "seeAlso": [
+        "lang.trycatch"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/try...catch#catch_binding"
+      }
     },
     {
       "id": "lang.debugger",
@@ -145,8 +202,12 @@
       "signature": "debugger;",
       "badge": "exact",
       "description": "Parsed and erased to a no-op — an AOT-compiled native binary has no attached inspector to break into, matching plain JS with no debugger attached. debugger is a reserved word, never a real identifier.",
-      "seeAlso": ["lang.return"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/debugger" }
+      "seeAlso": [
+        "lang.return"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/debugger"
+      }
     },
     {
       "id": "lang.numliterals",
@@ -155,8 +216,12 @@
       "signature": "42, 3.14, 0xFF, 0b101, 0o77",
       "badge": "exact",
       "description": "Decimal, float, hex, binary, and octal numeric literals.",
-      "seeAlso": ["lang.numseparators"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Lexical_grammar#numeric_literals" }
+      "seeAlso": [
+        "lang.numseparators"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Lexical_grammar#numeric_literals"
+      }
     },
     {
       "id": "lang.numseparators",
@@ -165,8 +230,12 @@
       "signature": "1_000_000",
       "badge": "exact",
       "description": "Underscore digit separators, stripped at lex time so every downstream consumer sees a clean literal. A leading/trailing/doubled separator, or one inside a legacy-octal literal, is a clean lexer error.",
-      "seeAlso": ["lang.numliterals"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Lexical_grammar#numeric_separators" }
+      "seeAlso": [
+        "lang.numliterals"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Lexical_grammar#numeric_separators"
+      }
     },
     {
       "id": "lang.strliterals",
@@ -179,8 +248,12 @@
         "An embedded NUL (`\\x00`, `\\0`) truncates the string, since strings are stored as NUL-terminated C strings.",
         "No strict-mode `SyntaxError` for a legacy octal escape (accepted unconditionally)."
       ],
-      "seeAlso": ["lang.template"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Lexical_grammar#string_literals" }
+      "seeAlso": [
+        "lang.template"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Lexical_grammar#string_literals"
+      }
     },
     {
       "id": "lang.boolliterals",
@@ -189,8 +262,12 @@
       "signature": "true, false",
       "badge": "exact",
       "description": "Boolean literals.",
-      "seeAlso": ["lang.logical"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Lexical_grammar#boolean_literal" }
+      "seeAlso": [
+        "lang.logical"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Lexical_grammar#boolean_literal"
+      }
     },
     {
       "id": "lang.null",
@@ -199,8 +276,13 @@
       "signature": "null",
       "badge": "exact",
       "description": "The null literal; a T | null union type is supported.",
-      "seeAlso": ["lang.nullish", "lang.undefined"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/null" }
+      "seeAlso": [
+        "lang.nullish",
+        "lang.undefined"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/null"
+      }
     },
     {
       "id": "lang.undefined",
@@ -209,8 +291,12 @@
       "signature": "undefined",
       "badge": "exact",
       "description": "The undefined literal.",
-      "seeAlso": ["lang.null"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/undefined" }
+      "seeAlso": [
+        "lang.null"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/undefined"
+      }
     },
     {
       "id": "lang.template",
@@ -220,8 +306,13 @@
       "badge": "exact",
       "description": "Backtick template literals with arbitrary interpolation depth.",
       "snippet": "const msg = `Hello, ${name}!`",
-      "seeAlso": ["lang.taggedtemplate", "lang.strliterals"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Template_literals" }
+      "seeAlso": [
+        "lang.taggedtemplate",
+        "lang.strliterals"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Template_literals"
+      }
     },
     {
       "id": "lang.arithmetic",
@@ -230,8 +321,12 @@
       "signature": "a + b - c * d / e % f",
       "badge": "exact",
       "description": "The five basic arithmetic operators.",
-      "seeAlso": ["lang.exponent"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators#arithmetic_operators" }
+      "seeAlso": [
+        "lang.exponent"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators#arithmetic_operators"
+      }
     },
     {
       "id": "lang.exponent",
@@ -240,8 +335,12 @@
       "signature": "2 ** 10",
       "badge": "exact",
       "description": "Right-associative exponentiation (ES2016), binding tighter than * / %, with **=. number operands are doubles so 2 ** -1 is 0.5 and 2 ** 0.5 is a real root; explicit integer-typed operands use exact i64 exponentiation-by-squaring and stay i64. -2 ** 2 is a SyntaxError, matching JS.",
-      "seeAlso": ["lang.arithmetic"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Exponentiation" }
+      "seeAlso": [
+        "lang.arithmetic"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Exponentiation"
+      }
     },
     {
       "id": "lang.comparison",
@@ -250,8 +349,12 @@
       "signature": "a === b, a < b",
       "badge": "exact",
       "description": "The comparison operators; string comparison via strcmp. NaN compares per JS: NaN !== NaN is true while ===/</>/<=/>= against NaN are all false.",
-      "seeAlso": ["lang.arithmetic"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators#relational_operators" }
+      "seeAlso": [
+        "lang.arithmetic"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators#relational_operators"
+      }
     },
     {
       "id": "lang.logical",
@@ -263,8 +366,13 @@
       "differences": [
         "Under `-compat=js`, `&&`/`||` are value-preserving only for **same-typed** operands; differently-typed operands (`0 || \"x\"`) stay bool, since the value-preserving result would be a union this compiler can't represent."
       ],
-      "seeAlso": ["lang.logicalassign", "lang.nullish"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators#logical_operators" }
+      "seeAlso": [
+        "lang.logicalassign",
+        "lang.nullish"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators#logical_operators"
+      }
     },
     {
       "id": "lang.bitwise",
@@ -273,8 +381,12 @@
       "signature": "a & b, a << b, a >>> b",
       "badge": "exact",
       "description": "The bitwise and shift operators, including the unsigned right shift >>>.",
-      "seeAlso": ["lang.assignops"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators#bitwise_operators" }
+      "seeAlso": [
+        "lang.assignops"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators#bitwise_operators"
+      }
     },
     {
       "id": "lang.assignops",
@@ -283,8 +395,12 @@
       "signature": "x += 1, x <<= 2",
       "badge": "exact",
       "description": "The full set of compound assignment operators.",
-      "seeAlso": ["lang.logicalassign"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Assignment" }
+      "seeAlso": [
+        "lang.logicalassign"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Assignment"
+      }
     },
     {
       "id": "lang.logicalassign",
@@ -294,8 +410,13 @@
       "badge": "exact",
       "description": "Genuinely short-circuiting logical assignment (ES2021). Works against scalar variables, array elements, object fields, static class fields, and a computed dynamic-object key (dynObj[key] ??= v), including a nullable-scalar field routed through the presence-flagged path so obj.n ??= v fires exactly when the field is absent.",
       "differences": [],
-      "seeAlso": ["lang.logical", "lang.nullish"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Logical_AND_assignment" }
+      "seeAlso": [
+        "lang.logical",
+        "lang.nullish"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Logical_AND_assignment"
+      }
     },
     {
       "id": "lang.incdec",
@@ -305,8 +426,12 @@
       "badge": "full",
       "description": "Prefix and postfix increment/decrement on an identifier, member (obj.x++, this.x++, C.staticField++, makeObj().x++), or index (arr[i]++, makeArr()[i]++) target. A member/index target desugars to += 1 / -= 1; prefix yields the new value, postfix the old. A consumed postfix hoists any side-effecting component so each runs exactly once, matching JS.",
       "differences": [],
-      "seeAlso": ["lang.assignops"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Increment" }
+      "seeAlso": [
+        "lang.assignops"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Increment"
+      }
     },
     {
       "id": "lang.ternary",
@@ -315,8 +440,12 @@
       "signature": "cond ? a : b",
       "badge": "exact",
       "description": "The conditional (ternary) operator.",
-      "seeAlso": ["lang.if"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Conditional_operator" }
+      "seeAlso": [
+        "lang.if"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Conditional_operator"
+      }
     },
     {
       "id": "lang.comma",
@@ -328,8 +457,12 @@
       "differences": [
         "A sequence whose *first* operand is a lone identifier (`(a, b)`) is instead parsed as an arrow-function parameter list — a known ambiguity; write a non-identifier first operand."
       ],
-      "seeAlso": ["lang.for"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Comma_operator" }
+      "seeAlso": [
+        "lang.for"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Comma_operator"
+      }
     },
     {
       "id": "lang.nullish",
@@ -338,8 +471,13 @@
       "signature": "a ?? b",
       "badge": "exact",
       "description": "Works on a pointer T | null (string/object/…) and a non-pointer scalar T | null (number | null, boolean | null) via a real presence bit — so let x: number | null = null; x ?? 42 yields 42 while a present 0 yields 0.",
-      "seeAlso": ["lang.optchain", "lang.null"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Nullish_coalescing" }
+      "seeAlso": [
+        "lang.optchain",
+        "lang.null"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Nullish_coalescing"
+      }
     },
     {
       "id": "lang.optchain",
@@ -348,8 +486,12 @@
       "signature": "obj?.field",
       "badge": "exact",
       "description": "Null-guards pointer fields; returns null on a null receiver.",
-      "seeAlso": ["lang.nullish"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Optional_chaining" }
+      "seeAlso": [
+        "lang.nullish"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Optional_chaining"
+      }
     },
     {
       "id": "lang.typeof",
@@ -362,8 +504,12 @@
         "`typeof <namespace>.<method>` answers `\"function\"` for the common built-in namespaces (`Promise`/`Math`/`JSON`, `console`, and the static methods of `Object`/`Number`/`String`/`Array`/`Date`/`Symbol`/`Reflect`); a non-method static (`Number.MAX_VALUE`) answers through normal inference, and a namespace outside this allow-list falls back to inference.",
         "`typeof value.method` is `\"function\"` for a class instance method or a common built-in string/array method (a class getter reads as its return type); a string/array method name outside the curated set falls back to inference."
       ],
-      "seeAlso": ["lang.instanceof"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/typeof" }
+      "seeAlso": [
+        "lang.instanceof"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/typeof"
+      }
     },
     {
       "id": "lang.in",
@@ -372,8 +518,13 @@
       "signature": "key in obj",
       "badge": "exact",
       "description": "Reduces to the same compile-time FieldIndex lookup Object.hasOwn() uses — object shapes are fully structural/static, so a string-literal key against an object is a compile-time-constant true/false, not a runtime scan. Parsed as a contextual keyword at instanceof precedence.",
-      "seeAlso": ["lang.instanceof", "lang.objliteral"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/in" }
+      "seeAlso": [
+        "lang.instanceof",
+        "lang.objliteral"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/in"
+      }
     },
     {
       "id": "lang.spread",
@@ -382,8 +533,12 @@
       "signature": "[...a, ...b]",
       "badge": "exact",
       "description": "Array-literal spread.",
-      "seeAlso": ["lang.restparams"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Spread_syntax" }
+      "seeAlso": [
+        "lang.restparams"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Spread_syntax"
+      }
     },
     {
       "id": "lang.vardecl",
@@ -396,8 +551,13 @@
         "Definite-assignment analysis is sound-not-complete: a typed `var`/`let` assigned only in a maybe-skipped loop or across correlated conditions still falls through to the `undefined`/zero default rather than raising `used before being assigned`.",
         "A top-level `const`/`let` still isn't readable from a named `function` only in the invariant's genuine edges — a `bigint`, a *scalar*-returning un-annotated call (the `i64` default), a `new Set([…])` typed from its initializer array, or an init depending on a runtime-local (a `{ …rest }` spread of a destructuring target); an arrow/closure still captures any of them."
       ],
-      "seeAlso": ["lang.functiondecl", "lang.arrow"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/const" }
+      "seeAlso": [
+        "lang.functiondecl",
+        "lang.arrow"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/const"
+      }
     },
     {
       "id": "lang.arraydestructure",
@@ -409,8 +569,13 @@
       "differences": [
         "*Assignment* to already-declared targets (`[a, b] = expr`, not a fresh declaration) reaches declaration-form parity for nesting: nested array/object patterns, a trailing `...rest`, and a per-element `= default` all work. A compound operator (`[a, b] += …`) and a member target (`[obj.x] = e`) stay rejected."
       ],
-      "seeAlso": ["lang.objdestructure", "lang.destructparams"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Destructuring_assignment#array_destructuring" }
+      "seeAlso": [
+        "lang.objdestructure",
+        "lang.destructparams"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Destructuring_assignment#array_destructuring"
+      }
     },
     {
       "id": "lang.objdestructure",
@@ -425,8 +590,13 @@
         "`{ ...rest }` over an `any`/union/generic source and in the *assignment* form (`({ a, ...rest } = e)`) stay clean rejections.",
         "A computed key (`{ [k]: v }`) is supported only for a constant string/number literal key (`{ [\"a\"]: v }`, `{ [0]: v }`); a runtime-valued key on a fixed object is a clean rejection."
       ],
-      "seeAlso": ["lang.arraydestructure", "lang.objliteral"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Destructuring_assignment#object_destructuring" }
+      "seeAlso": [
+        "lang.arraydestructure",
+        "lang.objliteral"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Destructuring_assignment#object_destructuring"
+      }
     },
     {
       "id": "lang.taggedtemplate",
@@ -438,8 +608,12 @@
       "differences": [
         "A user tag's `strings` argument has no `.raw` property (arrays carry no extra properties); the built-in `String.raw` tag itself is implemented and interleaves the raw, un-escaped quasis."
       ],
-      "seeAlso": ["lang.template"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Template_literals#tagged_templates" }
+      "seeAlso": [
+        "lang.template"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Template_literals#tagged_templates"
+      }
     },
     {
       "id": "lang.functiondecl",
@@ -453,8 +627,13 @@
         "A genuinely circular pair of mutually-recursive unannotated functions can't converge on a return type and keeps the scalar-default fallback.",
         "The `arguments` object reflects the declared parameters rather than growing with extra untyped arguments; mixed-type parameters, a rest/destructured parameter, and an arrow function (which has no own `arguments` in JS) are clean rejections."
       ],
-      "seeAlso": ["lang.nestedfn", "lang.arrow"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/function" }
+      "seeAlso": [
+        "lang.nestedfn",
+        "lang.arrow"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/function"
+      }
     },
     {
       "id": "lang.arrow",
@@ -464,8 +643,13 @@
       "badge": "exact",
       "description": "Full closures; captures via a heap-allocated env struct.",
       "snippet": "function makeCounter(): () => number {\n  let count = 0\n  return (): number => {\n    count = count + 1\n    return count\n  }\n}",
-      "seeAlso": ["lang.fnexpr", "lang.functiondecl"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/Arrow_functions" }
+      "seeAlso": [
+        "lang.fnexpr",
+        "lang.functiondecl"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/Arrow_functions"
+      }
     },
     {
       "id": "lang.fnexpr",
@@ -478,8 +662,13 @@
       "differences": [
         "A generic function used by value is out of scope (no single monomorphized symbol to point at)."
       ],
-      "seeAlso": ["lang.arrow", "lang.callapplybind"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/function" }
+      "seeAlso": [
+        "lang.arrow",
+        "lang.callapplybind"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/function"
+      }
     },
     {
       "id": "lang.defaultparams",
@@ -492,8 +681,12 @@
         "A default may reference an earlier scalar/string parameter — `function f(a: number, b: number = a * 2)`, chaining included (`c = b + 1`) — for a free function, an instance/static method, and a constructor (parameter properties included, `constructor(public x = 1, public y = x)`); an earlier param of any supported kind is referenceable — scalar/string, array (`b = a.length`, `a[i]`), and nullable-scalar (`b = (a ?? 0) + 1`). A rest-parameter constructor is unsupported.",
         "Defaults are also filled when the function is a first-class value — a closure bound to a variable or object field, an object shorthand method, an IIFE — including cross-parameter defaults (`(x, y = x) => …`) and defaults that reference a variable captured from the closure's defining scope (each returned closure keeps its own capture). This covers scalar/string/object/array captured-scope defaults, async closures, and `.bind` (the presence mask threads through the bind trampoline). A captured-default on a nullable-scalar or destructured parameter is still a clean compile error, and a default that references a captured array *variable* (rather than a module-global array) hits the separate array-capture limitation."
       ],
-      "seeAlso": ["lang.optparams"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/Default_parameters" }
+      "seeAlso": [
+        "lang.optparams"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/Default_parameters"
+      }
     },
     {
       "id": "lang.optparams",
@@ -507,8 +700,12 @@
         "An array-typed optional parameter stays an empty array when omitted (an array aggregate has no spare absent state).",
         "An un-narrowed optional scalar is still lenient in arithmetic — the payload is unwrapped before the operator, so `a + b` on an absent `b` reads 0 rather than erroring (the same residual as any un-narrowed nullable local)."
       ],
-      "seeAlso": ["lang.defaultparams"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions#optional_parameters" }
+      "seeAlso": [
+        "lang.defaultparams"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions#optional_parameters"
+      }
     },
     {
       "id": "lang.restparams",
@@ -517,8 +714,13 @@
       "signature": "function f(...args: number[]) { … }",
       "badge": "exact",
       "description": "Works on named function declarations, class methods, arrow functions/closures, and function type annotations ((...xs: number[]) => R and the same as a type alias) alike.",
-      "seeAlso": ["lang.spread", "lang.destructparams"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/rest_parameters" }
+      "seeAlso": [
+        "lang.spread",
+        "lang.destructparams"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/rest_parameters"
+      }
     },
     {
       "id": "lang.destructparams",
@@ -531,8 +733,13 @@
         "No combination with `...` or a whole-parameter default value; a pattern param with no annotation and no contextual type (a plain `function f([a, b])`) is still rejected, matching TS's implicit-any error.",
         "A `= default` on a nested position is a clean rejection; per-element defaults follow the same rules as the statement-level destructuring rows."
       ],
-      "seeAlso": ["lang.arraydestructure", "lang.objdestructure"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Destructuring_assignment" }
+      "seeAlso": [
+        "lang.arraydestructure",
+        "lang.objdestructure"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Destructuring_assignment"
+      }
     },
     {
       "id": "lang.nestedfn",
@@ -540,16 +747,20 @@
       "statusRow": "Nested function declarations (function outer() { function inner() {...}; return inner(); })",
       "signature": "function outer() { function inner() { … } }",
       "badge": "caveats",
-      "description": "A helper function declared inside another function's body — hoisted, forward-referenceable, self-recursive, and visible to its own further-nested descendants.",
+      "description": "A helper function declared inside another function's body — hoisted (letrec-style: a capturing declaration is usable before its declaration statement), forward-referenceable, self-recursive, and visible to its own further-nested descendants. Captures enclosing locals/parameters by reference — arrays and loop variables included (a C-style or iterator `let` loop variable is captured per-iteration, JS semantics; `var` shares) — and escapes by name as a real closure value with an inferred type; a nested generator escapes as a first-class constructor closure.",
       "snippet": "function outer(x: number): number {\n  function double(y: number): number {\n    return y * 2;\n  }\n  return double(x) + 1;\n}",
       "differences": [
-        "A declaration inside a lexical block (an `if`/`for`/`while`/`do-while`/bare block, `try`/`catch`/`finally`, or a `switch` case) is supported and block-scoped; the residual is the specialized `for…of`/`for…in` iterator variants (generator/stream/`Symbol.iterator` paths) that iterate their body directly (no miscompile — capturing such a loop variable is a clean rejection).",
-        "A block-nested declaration capturing a C-style `for` loop variable is a clean rejection — the loop variable is a single per-iteration cell; copy it to a `const` inside the loop body and capture that.",
-        "Captures enclosing locals/parameters by reference, but only for use **at or after** the declaration point — a capturing nested function called before its declaration is a clean error (a non-capturing one keeps full hoisting/forward-reference). Capturing an array variable, and a capturing nested *generator*, stay clean rejections.",
-        "Generic (`<T>`) nested declarations and same-scope duplicate names are clean compile errors."
+        "Generic (`<T>`) nested declarations and same-scope duplicate names are clean compile errors.",
+        "A hoisted call that reads a captured variable declared *between* the call and the declaration is a clean compile error (Node crashes with a runtime TDZ error there).",
+        "Two mutually-recursive *capturing* nested siblings (`f` calls `g`, `g` calls `f`, both closing over an enclosing local) are a clean compile error; self-recursion works, including unannotated."
       ],
-      "seeAlso": ["lang.functiondecl", "lang.arrow"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/function" }
+      "seeAlso": [
+        "lang.functiondecl",
+        "lang.arrow"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/function"
+      }
     },
     {
       "id": "lang.callapplybind",
@@ -565,8 +776,13 @@
         "`.apply` takes either a literal array or a runtime array spread into a **rest** parameter; a runtime array into a fixed-arity function is the usual spread-into-fixed-arity rejection.",
         "`.bind` is V1-scoped to functions whose parameters are plain scalar/string/pointer types with no rest slot — an array/nullable-scalar/rest parameter is a clean compile error."
       ],
-      "seeAlso": ["lang.fnexpr", "lang.arrow"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/call" }
+      "seeAlso": [
+        "lang.fnexpr",
+        "lang.arrow"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/call"
+      }
     },
     {
       "id": "lang.overloads",
@@ -578,8 +794,12 @@
       "differences": [
         "Overload heads are **erased**, not used for per-signature overload resolution: a call is checked against the implementation signature only, so give it parameter/return types (often a union) wide enough to cover every overload."
       ],
-      "seeAlso": ["lang.functiondecl"],
-      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/functions.html#function-overloads" }
+      "seeAlso": [
+        "lang.functiondecl"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/2/functions.html#function-overloads"
+      }
     },
     {
       "id": "lang.generators",
@@ -594,8 +814,13 @@
         "The return-type annotation is optional (inferred from the body's yields); still requires a plain non-destructured parameter list and a non-array parameter type. An array element type is supported — yielded/sent arrays round-trip through for...of, .next(), yield*, and for await.",
         "Calling `.next()` again after completion returns `{value: <T's zero value>, done: true}`, not `undefined` — deliberately kept bare: tsc types the result's `value` as `any`, so the typed `T` here is already stricter than TS."
       ],
-      "seeAlso": ["lang.asyncgen", "lang.forof"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/function*" }
+      "seeAlso": [
+        "lang.asyncgen",
+        "lang.forof"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/function*"
+      }
     },
     {
       "id": "lang.asyncfn",
@@ -605,8 +830,13 @@
       "badge": "exact",
       "description": "Every async fn returns a real task-shaped Promise<T>: a fn containing an await runs on a ucontext fiber; a no-await one settles inline. Named declarations, async arrows, and async function expressions are all supported. No libcurl linked unless fetch is used.",
       "snippet": "async function add(a: number, b: number): Promise<number> {\n  return a + b\n}\nconst sum = await add(10, 32)",
-      "seeAlso": ["lang.await", "lang.asyncgen"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function" }
+      "seeAlso": [
+        "lang.await",
+        "lang.asyncgen"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function"
+      }
     },
     {
       "id": "lang.await",
@@ -615,18 +845,28 @@
       "signature": "const x = await p",
       "badge": "exact",
       "description": "A Promise is a reusable value — await p twice returns the same result. Every await yields a microtask tick, of an already-settled promise and of a non-promise value, FIFO-ordered with .then/queueMicrotask, matching JS. Registers a resume reaction and parks.",
-      "seeAlso": ["lang.asyncfn", "lang.promiseexecutor"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/await" }
+      "seeAlso": [
+        "lang.asyncfn",
+        "lang.promiseexecutor"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/await"
+      }
     },
     {
       "id": "lang.promisecombinators",
       "name": "Promise.all / .race / .allSettled",
       "statusRow": "Promise.all / .race / .allSettled",
       "signature": "await Promise.all([p1, p2])",
-      "badge": "exact",
-      "description": "Real concurrency over Array<Promise<Response>> (fetch) and over Array<Promise<T>> from may-suspend async fns. Each member is a reusable value. .race/.any return the shortest-delay member via an event-driven waiter list. A rejecting member rejects .all/.race and reports rejected in .allSettled.",
-      "seeAlso": ["lang.promiseany", "lang.await"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/all" }
+      "badge": "caveats",
+      "description": "Real concurrency over Array<Promise<Response>> (fetch) and over Array<Promise<T>> from may-suspend async fns. Each member is a reusable value. .race/.any return the shortest-delay member via an event-driven waiter list. A rejecting member rejects .all/.race and reports rejected in .allSettled. A rejected .allSettled element's .reason is the original rejected value with full fidelity — a primitive keeps its typeof and JSON, a rejected Error serializes as {} and reads .message/.name/String and instanceof (TDD-00169). An error-subclass instance reason reads .message/.name and renders Name: message too; only its JSON.stringify still yields {} where Node serializes its own enumerable fields.",
+      "seeAlso": [
+        "lang.promiseany",
+        "lang.await"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/all"
+      }
     },
     {
       "id": "lang.promiseany",
@@ -635,8 +875,12 @@
       "signature": "await Promise.any([p1, p2])",
       "badge": "exact",
       "description": "Over task promises it skips rejected members and resolves to the first fulfilled one; when every member rejects it throws a real AggregateError carrying each reason on .errors. Over raw fetches, an HTTP 404/500 is a fulfilled fetch, per WHATWG.",
-      "seeAlso": ["lang.promisecombinators"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/any" }
+      "seeAlso": [
+        "lang.promisecombinators"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/any"
+      }
     },
     {
       "id": "lang.promiseresolvereject",
@@ -645,8 +889,13 @@
       "signature": "Promise.resolve(v); Promise.reject(e)",
       "badge": "exact",
       "description": "Both build a settled task promise, so await/.then/.catch/.finally and the combinators all work. Promise.resolve(v) fulfils with v (an already-promise arg flattens through); Promise.reject(e) is typed Promise<never>, so a rejected value assigns to any binding. No fiber/libcurl linked.",
-      "seeAlso": ["lang.promisethen", "lang.promiseexecutor"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/resolve" }
+      "seeAlso": [
+        "lang.promisethen",
+        "lang.promiseexecutor"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/resolve"
+      }
     },
     {
       "id": "lang.promiseexecutor",
@@ -658,8 +907,13 @@
       "differences": [
         "Only a typed `Promise` argument adopts; a custom duck-typed `{ then }` object isn't adopted (this compiler has no `PromiseLike<T>` type — it's a clean type mismatch, not a silent miss)."
       ],
-      "seeAlso": ["lang.promisethen", "lang.await"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/Promise" }
+      "seeAlso": [
+        "lang.promisethen",
+        "lang.await"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/Promise"
+      }
     },
     {
       "id": "lang.promisethen",
@@ -668,8 +922,13 @@
       "signature": "p.then(f).catch(g).finally(h)",
       "badge": "exact",
       "description": ".then/.catch/.finally directly on a raw fetch Promise<Response> never block the synchronous script — the wait is deferred to a queued microtask. The callback runs as a microtask when the promise settles and its result chains into the returned promise. A missing callback slot is a pass-through. queueMicrotask is a FIFO drained after the sync script and before timers.",
-      "seeAlso": ["lang.promiseexecutor", "lang.await"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/then" }
+      "seeAlso": [
+        "lang.promiseexecutor",
+        "lang.await"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/then"
+      }
     },
     {
       "id": "lang.asyncgen",
@@ -678,8 +937,13 @@
       "signature": "async function* f() { yield await x; }",
       "badge": "exact",
       "description": "V8/spec step timing: .next() starts the body synchronously up to the first await/yield; an await inside the body parks the step. Top-level or nested async function* and a class async *m() method. .next() returns a real Promise<{value,done}>. Full protocol: .throw(e)/.return(v) and yield* over an inner async generator or a Symbol.asyncIterator iterable.",
-      "seeAlso": ["lang.generators", "lang.forawaitof"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*" }
+      "seeAlso": [
+        "lang.generators",
+        "lang.forawaitof"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*"
+      }
     },
     {
       "id": "lang.forawaitof",
@@ -688,8 +952,13 @@
       "signature": "for await (const x of asyncIterable) { … }",
       "badge": "exact",
       "description": "Consumes an async-generator instance, a user class or object literal implementing the async-iteration protocol, or any sync iterable the sync for...of takes (awaiting each element). Awaits each .next() promise before reading .done/.value; the loop is itself a suspension point. A destructuring loop variable unpacks each element.",
-      "seeAlso": ["lang.asyncgen", "lang.forof"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for-await...of" }
+      "seeAlso": [
+        "lang.asyncgen",
+        "lang.forof"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for-await...of"
+      }
     },
     {
       "id": "lang.enumsnum",
@@ -699,8 +968,13 @@
       "badge": "exact",
       "description": "Numeric enums with auto-increment and explicit values.",
       "snippet": "enum Direction {\n  North,\n  East,\n  South,\n  West,\n}\nconsole.log(Direction.East)  // 1",
-      "seeAlso": ["lang.enumsstr", "lang.switch"],
-      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/enums.html" }
+      "seeAlso": [
+        "lang.enumsstr",
+        "lang.switch"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/enums.html"
+      }
     },
     {
       "id": "lang.enumsstr",
@@ -709,8 +983,12 @@
       "signature": "enum E { A = 'a', B = 'b' }",
       "badge": "exact",
       "description": "String enums; members are interned string constants. The enum name (and its [] array form) as a type annotation resolves to the enum's ptr backing type, so a typed variable/param/field/array, comparison, and switch all work.",
-      "seeAlso": ["lang.enumsnum"],
-      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/enums.html#string-enums" }
+      "seeAlso": [
+        "lang.enumsnum"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/enums.html#string-enums"
+      }
     },
     {
       "id": "lang.namespaces",
@@ -722,8 +1000,12 @@
       "differences": [
         "V1 scope: top-level only, members must be `export function` / `export const`/`let` (single binding); no nesting, no `declare namespace`, no cross-module `export namespace`; the same namespace member declared in two files is a link-time duplicate-symbol error, not file-private."
       ],
-      "seeAlso": ["lang.functiondecl"],
-      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/namespaces.html" }
+      "seeAlso": [
+        "lang.functiondecl"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/namespaces.html"
+      }
     },
     {
       "id": "lang.interfaces",
@@ -732,8 +1014,13 @@
       "signature": "interface T { x: number }",
       "badge": "exact",
       "description": "Structural interfaces backed by heap-allocated objects.",
-      "seeAlso": ["lang.typealias", "lang.objliteral"],
-      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/objects.html" }
+      "seeAlso": [
+        "lang.typealias",
+        "lang.objliteral"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/2/objects.html"
+      }
     },
     {
       "id": "lang.typealias",
@@ -742,8 +1029,12 @@
       "signature": "type T = { x: number }",
       "badge": "exact",
       "description": "Type alias declarations.",
-      "seeAlso": ["lang.interfaces"],
-      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html#type-aliases" }
+      "seeAlso": [
+        "lang.interfaces"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html#type-aliases"
+      }
     },
     {
       "id": "lang.objliteral",
@@ -756,8 +1047,13 @@
         "Constant-key bracket access reads and writes the matching field on a fixed object or class instance (`o[\"a\"]`, `o[0]`, `o[\"a\"] = v`) — the same field `o.a` reaches; a non-constant key on a fixed object stays a clean rejection (use a `{ [k: string]: T }` dynamic object for runtime keys). A numeric-literal key still can't be declared in an `interface`/type annotation.",
         "No duplicate-`__proto__`-key detection (Annex B legacy `SyntaxError` rule)."
       ],
-      "seeAlso": ["lang.objdestructure", "lang.interfaces"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Object_initializer" }
+      "seeAlso": [
+        "lang.objdestructure",
+        "lang.interfaces"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Object_initializer"
+      }
     },
     {
       "id": "lang.getset",
@@ -771,8 +1067,12 @@
         "console.log of an accessor object prints only its data fields, not x: [Getter].",
         "Static accessors, and logical assignment (`&&=`/`||=`/`??=`) on an accessor, remain out of scope for V1."
       ],
-      "seeAlso": ["lang.class"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/get" }
+      "seeAlso": [
+        "lang.class"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/get"
+      }
     },
     {
       "id": "lang.newerror",
@@ -781,8 +1081,13 @@
       "signature": "new Error(msg)",
       "badge": "exact",
       "description": "The base Error constructor.",
-      "seeAlso": ["lang.errorsubtypes", "lang.throw"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error" }
+      "seeAlso": [
+        "lang.errorsubtypes",
+        "lang.throw"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error"
+      }
     },
     {
       "id": "lang.errorsubtypes",
@@ -790,13 +1095,19 @@
       "statusRow": "Built-in Error subtypes (new TypeError(msg), RangeError, SyntaxError, EvalError, URIError, ReferenceError, DOMException) and instanceof against them",
       "signature": "new TypeError(msg); e instanceof RangeError",
       "badge": "caveats",
-      "description": "A small fixed kind enum (a hidden runtime tag on the shared Error object shape, not a real class hierarchy), plus a real .name field. instanceof Error matches any kind; instanceof TypeError matches only that one. new DOMException(message?, name?) takes its .name from the 2nd argument.",
+      "description": "A small fixed kind enum (a hidden runtime tag on the shared Error object shape, not a real class hierarchy), plus a real .name field. instanceof Error matches any kind; instanceof TypeError matches only that one. new DOMException(message?, name?) takes its .name from the 2nd argument. The ES2022 error-options bag works too: new Error(msg, { cause }) stores any value as err.cause (default undefined), preserved through throw/catch.",
       "differences": [
         "`class X extends Error` works one level deep — construction, `super(msg)`, `.message`/`.name`, extra fields/methods, throw/catch with `instanceof` discrimination against sibling subclasses. Extending an Error *subclass* is a clean rejection, and `.stack`/`Error.captureStackTrace` don't exist.",
-        "`DOMException` carries no legacy numeric `.code`."
+        "`DOMException` carries no legacy numeric `.code`.",
+        "The error-options second argument must be a `{ cause: <expr> }` object literal — a variable/computed options bag is a clean rejection; `AggregateError` takes no options (its `.cause` reads `undefined`)."
       ],
-      "seeAlso": ["lang.newerror", "lang.instanceof"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypeError" }
+      "seeAlso": [
+        "lang.newerror",
+        "lang.instanceof"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypeError"
+      }
     },
     {
       "id": "lang.newarray",
@@ -805,8 +1116,13 @@
       "signature": "new Array<T>(n)",
       "badge": "exact",
       "description": "Constructs an array of length n.",
-      "seeAlso": ["lang.newmap", "lang.newset"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/Array" }
+      "seeAlso": [
+        "lang.newmap",
+        "lang.newset"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/Array"
+      }
     },
     {
       "id": "lang.newmap",
@@ -815,8 +1131,13 @@
       "signature": "new Map<K, V>()",
       "badge": "exact",
       "description": "Constructs a Map.",
-      "seeAlso": ["lang.newset", "lang.newarray"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/Map" }
+      "seeAlso": [
+        "lang.newset",
+        "lang.newarray"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/Map"
+      }
     },
     {
       "id": "lang.newset",
@@ -825,8 +1146,13 @@
       "signature": "new Set<T>()",
       "badge": "exact",
       "description": "Constructs a Set.",
-      "seeAlso": ["lang.newmap", "lang.newarray"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/Set" }
+      "seeAlso": [
+        "lang.newmap",
+        "lang.newarray"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/Set"
+      }
     },
     {
       "id": "lang.class",
@@ -843,8 +1169,15 @@
         "Class early-error gaps (deferred): a field initializer containing `arguments` or a `super()` call, a `super()` in a method parameter default, field-definition ASI on the same line, and the `#constructor` private-name ban all compile instead of raising the spec's `SyntaxError`.",
         "The **`readonly` field modifier** is enforced as a compile-time immutability check — a write is allowed only in the declaring class's constructor and rejected elsewhere (method, outside `obj.x = v`, nested closure, subclass constructor). Deep immutability (`readonly xs: number[]` then `xs.push(...)`) stays unenforced, matching TS."
       ],
-      "seeAlso": ["lang.classstatic", "lang.classinherit", "lang.getset", "lang.paramprops"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes" }
+      "seeAlso": [
+        "lang.classstatic",
+        "lang.classinherit",
+        "lang.getset",
+        "lang.paramprops"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes"
+      }
     },
     {
       "id": "lang.paramprops",
@@ -858,8 +1191,12 @@
         "Desugars at parse time to a declared field plus a `this.x = x` constructor prologue; `private`/`protected` get the same enforcement as ordinary declared fields, and `readonly` is enforced (a write after construction is rejected).",
         "The modifiers are valid only on a constructor parameter — elsewhere they are a clean parse error."
       ],
-      "seeAlso": ["lang.class"],
-      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/classes.html#parameter-properties" }
+      "seeAlso": [
+        "lang.class"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/2/classes.html#parameter-properties"
+      }
     },
     {
       "id": "lang.classstatic",
@@ -868,8 +1205,13 @@
       "signature": "class C { static x = 1; static {} private y; abstract m(); }",
       "badge": "exact",
       "description": "static members are inherited through extends (a non-redeclared static field shares its base's storage). private/protected are compile-time-only (zero runtime check, matching TS erasure) and reject super.privateMethod(). abstract reuses override-detection; implements is a compile-time structural self-check.",
-      "seeAlso": ["lang.class", "lang.privatefield"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes/static" }
+      "seeAlso": [
+        "lang.class",
+        "lang.privatefield"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes/static"
+      }
     },
     {
       "id": "lang.privatefield",
@@ -882,8 +1224,13 @@
         "No class-field-initializer syntax (`#x = 1;` — a pre-existing gap for every field, not `#`-specific).",
         "No early-error check for a `#m`/`static #m` name collision in the same class, or for the `#constructor`-is-always-banned rule."
       ],
-      "seeAlso": ["lang.classstatic", "lang.class"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes/Private_properties" }
+      "seeAlso": [
+        "lang.classstatic",
+        "lang.class"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes/Private_properties"
+      }
     },
     {
       "id": "lang.classinherit",
@@ -892,8 +1239,13 @@
       "signature": "class D extends B { constructor() { super(); } }",
       "badge": "exact",
       "description": "Single inheritance, base-first field layout, super(args)/super.method(args), and an implicit pass-through constructor when a derived class adds no fields. Dispatch is static except for a method provably overridden somewhere, which goes through a per-tree vtable (decided at compile time via whole-program analysis). extends also accepts EventEmitter<T>.",
-      "seeAlso": ["lang.class", "lang.instanceof"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes/extends" }
+      "seeAlso": [
+        "lang.class",
+        "lang.instanceof"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes/extends"
+      }
     },
     {
       "id": "lang.instanceof",
@@ -905,8 +1257,13 @@
       "differences": [
         "`x instanceof Object` is a compile-time constant — true for any non-primitive (class instance, object, array, function, Date, Map/Set, RegExp, …), false for a primitive. Only an undecidable static type (any/union/nullable) is a clean rejection."
       ],
-      "seeAlso": ["lang.classinherit", "lang.errorsubtypes"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/instanceof" }
+      "seeAlso": [
+        "lang.classinherit",
+        "lang.errorsubtypes"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/instanceof"
+      }
     },
     {
       "id": "lang.decorators",
@@ -921,7 +1278,10 @@
         "Factory-call decorators (@dec(...) — the @Controller('/api')/@Get('/users') shape) work across placements, including a returned closure that captures the factory's arguments (dynamic functions now carry their captures). The standard dialect covers every member placement — class, method, instance-field, getter/setter, and accessor auto-field decorators — plus context.addInitializer (per-instance). A decorated `accessor x` desugars to a backing field + get/set and follows the TC39 { get, set, init } protocol. A decorator that *replaces* a method/getter/setter can't do typed this.field access (the replacement runs with a boxed this) — observe-only and init decorators are unaffected.",
         "The standard (TC39) (value, context) dialect (-decorators=standard, default is experimental) runs class and method decorators; its field/accessor/getter-setter decorators and context.addInitializer are a rejected sub-stage, and TC39 has no parameter decorators. design:* metadata types are name-carrying descriptors, not the real constructors."
       ],
-      "seeAlso": ["lang.class", "lang.classstatic"]
+      "seeAlso": [
+        "lang.class",
+        "lang.classstatic"
+      ]
     }
   ]
 }

@@ -343,6 +343,15 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// f`, `apply(f, ...)`) — materialize a closure value wrapping it via an
 		// env-dropping trampoline. A direct call `f(...)` never reaches here
 		// (emitCall dispatches a named callee straight to a direct call).
+		// A generator function in value position (`return g`, `const G = g`) is
+		// a first-class constructor closure — calling it builds an instance
+		// (TDD-00129 Stage 3 escape; env packed here at the escape point).
+		// Checked before resolveFuncRef: a nested generator is registered
+		// there too (with only Gen info, no callable Sig), and the plain
+		// funcref wrapper would emit a return-typeless function.
+		if info, found := e.lookupGenerator(id.Name); found {
+			return e.emitGeneratorCtorClosure(info, id.GetPos())
+		}
 		if mangled, sig, found := e.resolveFuncRef(id.Name); found {
 			return e.emitNamedFuncValue(mangled, sig), nil
 		}
@@ -359,6 +368,16 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// name the module instead of the internal marker.
 		if mod, ok := strings.CutSuffix(id.Name, "__kml_builtin"); ok {
 			return Value{}, fmt.Errorf("%d:%d: this usage of the built-in '%s' module is not supported", id.GetPos().Line, id.GetPos().Col, mod)
+		}
+		// TDD-00129 Stage 2: a capturing nested function declaration referenced
+		// (in value position) before its declaration statement hoists — emit it
+		// on demand and yield the closure value.
+		if ok, lerr := e.letrecEmitCapturingNested(id.Name); lerr != nil {
+			return Value{}, lerr
+		} else if ok {
+			if _, found := e.lookup(id.Name); found {
+				return e.emitExpr(id) // re-enter: the binding now exists
+			}
 		}
 		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", id.GetPos().Line, id.GetPos().Col, id.Name)
 	}

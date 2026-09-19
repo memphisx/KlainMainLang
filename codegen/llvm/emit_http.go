@@ -436,6 +436,9 @@ func contextTypeArrowParams(expr ast.Expression, names ...string) {
 	}
 	names = names[:len(params)]
 	for i := range names {
+		if names[i] == "" { // caller types this position itself (e.g. a hint)
+			continue
+		}
 		p := &params[i]
 		if p.Type == nil && p.ArrayPattern == nil && p.ObjectPattern == nil && !p.Rest {
 			p.Type = &ast.TypeAnnotation{Name: names[i], Source: "ts"}

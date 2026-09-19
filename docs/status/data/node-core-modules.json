@@ -164,8 +164,7 @@
               "The callback form fires synchronously, not deferred to the next event-loop tick",
               "No Brotli (`brotliCompress*`) — it would pull in `-lbrotli`, a new system dependency this binding deliberately avoids",
               "No class/stream forms (`createGzip()`, `zlib.Gzip`, …) — the WHATWG `CompressionStream`/`DecompressionStream` cover the streaming case ([STREAMS.md](STREAMS.md))",
-              "`{ level }` is the only supported option and must be a compile-time constant",
-              "A decompressed result needs an explicit `: Buffer` annotation to call `.toString()` — the return type infers as a bare `Uint8Array`, so `zlib.gunzipSync(g).toString()` unannotated is a compile error"
+              "`{ level }` is the only supported option and must be a compile-time constant"
             ],
             "notes": [
               "Surface: `gzip`/`gunzip`, `deflate`/`inflate`, `deflateRaw`/`inflateRaw`, `unzip`, each `*Sync` + `(err, result)` callback",
@@ -236,13 +235,14 @@
             "feature": "`cluster`",
             "status": "implemented",
             "caveats": [
-              "Messages are strings; one listener per event; `'online'` fires from a queued microtask (the worker is exec'd by then), not a wire handshake",
-              "No `cluster.on(...)` (cluster-level events), `cluster.workers` map, `cluster.disconnect()`, `setupPrimary()`(`setupMaster`)/`settings` ([TDD-00105](../tdd/TDD-00105.md)/[ADR-00331](../adr/ADR-00331.md))",
+              "`setupPrimary`'s `exec`/`execArgv` are a compile-time rejection — workers re-exec this compiled program itself, so there is no separate script file for a worker to run (a genuine impossibility of native compilation, [ADR-01015](../adr/ADR-01015.md)); `silent` is POSIX-only until the Windows spawn lane lands ([TDD-00177](../tdd/TDD-00177.md))",
+              "`'online'` fires from a queued microtask (the worker is exec'd by then), not a wire handshake; `cluster.workers` iterates and indexes by id but is not a real id-keyed *object* (no `Object.keys` over it)",
               "On Darwin, `SO_REUSEPORT` accept distribution is uneven (often one worker) — correctness holds, balancing differs from Linux's kernel load-balancing",
               "Can't be combined with Worker threads (same restriction as `http.listen({workers})`)"
             ],
             "notes": [
-              "Surface: `fork`, worker messaging, `isPrimary`/`isWorker`/`workerId`, `Worker.id`/`.process`",
+              "Surface: `fork`, worker messaging (strings AND objects/arrays/numbers/booleans — Node's json serialization mode, both directions, [ADR-01015](../adr/ADR-01015.md)), `isPrimary`/`isWorker`/`workerId`, `Worker.id`/`.process`, cluster-level `cluster.on('fork'/'online'/'message'/'exit'/'disconnect'/'listening')` (listeners get the Worker first, either registration order; 'listening' passes Node's `{ address, port, addressType }`), `cluster.workers` (live — a reaped worker is dropped BEFORE its `'exit'` listeners run, like Node — with `cluster.workers[id]` lookup), `cluster.disconnect(cb?)` (flushes in-flight messages), `setupPrimary({ args, silent })` + `cluster.settings` ([ADR-01012](../adr/ADR-01012.md)/[ADR-01015](../adr/ADR-01015.md))",
+              "Several listeners per event coexist in registration order — `worker.on(...)` lists plus the cluster-level relays ([ADR-01015](../adr/ADR-01015.md))",
               "Workers each bind the port via `SO_REUSEPORT`",
               "Unifies with `http.listen({ workers: N })`'s worker-id global — the primary stays in the event loop while workers live (their IPC handles), then blocks in `waitpid` as the backstop",
               "Workers carry the TDD-00141 fork IPC channel ([ADR-00427](../adr/ADR-00427.md)): `worker.send`/`.on('message'/'online'/'exit'/'close'/'error')`/`.disconnect()`/`.kill()`/`.destroy()`/`.process.pid`; in-worker `process.send`/`process.on('message')`"

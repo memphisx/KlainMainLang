@@ -183,6 +183,84 @@ func (e *Emitter) emitDynAnyMemberGetNamed(objVal Value, keyRef, propName string
 	e.emitThrowTypeError("Cannot read properties of undefined" + reading)
 	e.emitLabel(nextL)
 
+	// Primitive-member dispatch through `any` (V1: `.length`): a boxed string
+	// answers its length, and a boxed statically-typed array answers its LIVE
+	// header length — instead of the silent `undefined` (string) / TypeError
+	// (array) those tags otherwise fall into below.
+	if propName == "length" {
+		e.ensureStrlen()
+		matchL, nextL = e.emitTagCheck(tag, kmlTagString, "dynget.strlen")
+		e.emitLabel(matchL)
+		sp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", sp, payload))
+		sn := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sn, sp))
+		sd := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", sd, sn))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitNbEncodeDouble(sd), resPtr))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+		e.emitLabel(nextL)
+
+		matchL, nextL = e.emitTagCheck(tag, kmlTagArray, "dynget.arrlen")
+		e.emitLabel(matchL)
+		abox := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", abox, payload))
+		ahdr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ahdr, abox))
+		alenGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", alenGep, arrayHeaderTy, ahdr))
+		alen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", alen, alenGep))
+		ad := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", ad, alen))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitNbEncodeDouble(ad), resPtr))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+		e.emitLabel(nextL)
+	}
+
+	// A boxed built-in Error (field-0 type-id flag, low bits a builtin kind):
+	// recover the requested property from the real errorObjType fields —
+	// `reason.message`/`.name` on a rejected/caught Error boxed into `any`
+	// (TDD-00222/TDD-00169). A boxed non-error object keeps the existing
+	// "no dynamic shape" TypeError.
+	matchL, nextL = e.emitTagCheck(tag, kmlTagObject, "dynget.errobj")
+	e.emitLabel(matchL)
+	errPtr, errIsErr := e.emitBoxedErrorProbe(payload)
+	errReadL := e.freshLabel("dynget.errread")
+	notErrL := e.freshLabel("dynget.noterr")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", errIsErr, errReadL, notErrL))
+	e.emitLabel(errReadL)
+	// propName is a compile-time constant, so exactly one arm is emitted.
+	readField := func(idx int) string {
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, errorObjType.StructIR(), errPtr, idx))
+		p := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", p, gep))
+		return e.emitNbTagPtr(p, kmlTagString)
+	}
+	var errBoxed string
+	switch propName {
+	case "message":
+		errBoxed = readField(1)
+	case "name":
+		errBoxed = readField(2)
+	case "stack":
+		// No real stack is retained; `err.stack` is approximated by the
+		// `name: message` toString form, a faithful subset of Node's string.
+		s, serr := e.emitErrorToString(Value{Ref: errPtr, Ty: TypePtr})
+		if serr != nil {
+			return Value{}, serr
+		}
+		errBoxed = e.emitNbTagPtr(s.Ref, kmlTagString)
+	default:
+		errBoxed = fmt.Sprintf("%d", nbUndefined)
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", errBoxed, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(notErrL)
+	e.emitThrowTypeError("dynamic property access on a statically-typed value is not supported")
+	e.emitLabel(nextL)
+
 	// Primitives (int/float/string/boolean) read as undefined; a
 	// statically-shaped reference (object/array/funcRef/stream) has no runtime
 	// shape to read from — a clean TypeError until Stage 6 widening.

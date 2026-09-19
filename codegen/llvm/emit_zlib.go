@@ -93,7 +93,7 @@ func (e *Emitter) emitZlibModuleCall(method string, args []ast.Expression, pos a
 		}
 		// A -1 length field signals a zlib error (corrupt/truncated input).
 		e.emitZlibThrowOnError(resReg, base, pos)
-		return Value{Ref: resReg, Ty: TypedArrayType("uint8")}, nil
+		return Value{Ref: resReg, Ty: BufferType()}, nil
 	}
 
 	// Callback form: zlib.<base>(buffer[, opts], callback).
@@ -105,7 +105,7 @@ func (e *Emitter) emitZlibModuleCall(method string, args []ast.Expression, pos a
 		return Value{}, err
 	}
 	cbArg := args[len(args)-1]
-	cb, err := e.resolveCallbackWithHints(cbArg, []Type{errorObjType, TypedArrayType("uint8")})
+	cb, err := e.resolveCallbackWithHints(cbArg, []Type{errorObjType, BufferType()})
 	if err != nil {
 		return Value{}, err
 	}
@@ -125,7 +125,7 @@ func (e *Emitter) emitZlibModuleCall(method string, args []ast.Expression, pos a
 
 	e.emitLabel(okL)
 	nullErr := Value{Ref: "null", Ty: errorObjType}
-	if _, err := e.emitCBCall(cb, []Value{nullErr, {Ref: resReg, Ty: TypedArrayType("uint8")}}); err != nil {
+	if _, err := e.emitCBCall(cb, []Value{nullErr, {Ref: resReg, Ty: BufferType()}}); err != nil {
 		return Value{}, err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
@@ -134,7 +134,7 @@ func (e *Emitter) emitZlibModuleCall(method string, args []ast.Expression, pos a
 	errObj := e.buildErrorObj(0, e.internString(base+" failed: invalid input"), e.internString("Error"))
 	empty := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } { ptr null, i64 0 }, ptr null, 0", empty))
-	if _, err := e.emitCBCall(cb, []Value{{Ref: errObj, Ty: errorObjType}, {Ref: empty, Ty: TypedArrayType("uint8")}}); err != nil {
+	if _, err := e.emitCBCall(cb, []Value{{Ref: errObj, Ty: errorObjType}, {Ref: empty, Ty: BufferType()}}); err != nil {
 		return Value{}, err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
