@@ -58,11 +58,19 @@ func fsOpenConstant(name string) (float64, bool) {
 		v, ok := m[name]
 		return v, ok
 	case "windows":
-		// MSVC _O_* (Node on Windows exposes only this subset).
+		// The Windows fs runtime presents a Linux-ABI O_* encoding (win32fs.c's
+		// L_O_* constants, and the same bits openFlagBits bakes into the
+		// string-flag masks), so a numeric fs.constants mask reaches open_shared
+		// in the encoding it checks. Using the MSVC _O_* values here instead
+		// (O_CREAT 0x0100) made `openSync(p, O_WRONLY|O_CREAT|O_TRUNC)` miss the
+		// L_O_CREAT (0x40) bit and fail ENOENT, while the string flag `'w'`
+		// worked — the numeric raw values differ from Node's Windows constants,
+		// but they must match this runtime's own open path. Node exposes only
+		// this subset on Windows.
 		m := map[string]float64{
 			"O_RDONLY": 0, "O_WRONLY": 1, "O_RDWR": 2,
-			"O_APPEND": 0x0008, "O_CREAT": 0x0100, "O_TRUNC": 0x0200,
-			"O_EXCL": 0x0400,
+			"O_APPEND": 0x400, "O_CREAT": 0x40, "O_TRUNC": 0x200,
+			"O_EXCL": 0x80,
 		}
 		v, ok := m[name]
 		return v, ok

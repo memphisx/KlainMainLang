@@ -19,7 +19,11 @@ import (
 func skipFFIOnWindows(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("node:ffi is POSIX-only for now (no LoadLibrary shim)")
+		// node:ffi itself works on Windows now (LoadLibrary/GetProcAddress shim,
+		// ADR-01019 — see the ffi example). These E2E cases stay POSIX-pinned:
+		// they resolve libc by its POSIX symbol names (getpid, …) and assert the
+		// `so`/`dylib` suffix, neither of which holds on Windows.
+		t.Skip("node:ffi E2E cases are POSIX-symbol-pinned; the feature itself runs on Windows (ADR-01019)")
 	}
 }
 

@@ -235,7 +235,7 @@
             "feature": "`cluster`",
             "status": "implemented",
             "caveats": [
-              "`setupPrimary`'s `exec`/`execArgv` are a compile-time rejection — workers re-exec this compiled program itself, so there is no separate script file for a worker to run (a genuine impossibility of native compilation, [ADR-01015](../adr/ADR-01015.md)); `silent` is POSIX-only until the Windows spawn lane lands ([TDD-00177](../tdd/TDD-00177.md))",
+              "`setupPrimary`'s `exec`/`execArgv` are a compile-time rejection — workers re-exec this compiled program itself, so there is no separate script file for a worker to run (a genuine impossibility of native compilation, [ADR-01015](../adr/ADR-01015.md)); `args` and `silent` work on every platform, Windows included ([ADR-01018](../adr/ADR-01018.md))",
               "`'online'` fires from a queued microtask (the worker is exec'd by then), not a wire handshake; `cluster.workers` iterates and indexes by id but is not a real id-keyed *object* (no `Object.keys` over it)",
               "On Darwin, `SO_REUSEPORT` accept distribution is uneven (often one worker) — correctness holds, balancing differs from Linux's kernel load-balancing",
               "Can't be combined with Worker threads (same restriction as `http.listen({workers})`)"

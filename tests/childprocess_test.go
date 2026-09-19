@@ -44,10 +44,13 @@ console.log('rejected:', child.status !== 0)
 
 // A spawn of a DIFFERENT executable must be unaffected — the self-spawn marker
 // is set only when the target resolves to this binary, so a normal child runs.
+// `printf` (a PATH lookup, like the streaming test below) resolves on every
+// lane, including the Windows runner's MSYS2 coreutils; an absolute POSIX path
+// such as /bin/echo would not resolve under CreateProcess on Windows.
 func TestE2EChildProcessSpawnOtherProgramUnaffected(t *testing.T) {
 	assertOutputImports(t, `
 import { spawnSync } from 'child_process'
-const child = spawnSync("/bin/echo", ["hi"])
+const child = spawnSync("printf", ["hi"])
 console.log('status:', child.status)
 `, "status: 0")
 }

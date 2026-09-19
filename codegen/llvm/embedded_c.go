@@ -86,6 +86,11 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if e.UsesReexecGuard() {
 		out = append(out, CSource{"reexecguard", ReexecGuardSource(), nil, nil, ""})
 	}
+	if e.UsesFFIDl() && targetGOOS() == "windows" {
+		// Windows has no libdl; supply dlopen/dlsym/dlclose/dlerror over
+		// LoadLibrary/GetProcAddress so node:ffi links (runtime_ffi.go).
+		out = append(out, CSource{"ffiwindl", FFIWinDlShimSource(), nil, nil, ""})
+	}
 	if e.UsesIPC() {
 		out = append(out, CSource{"ipc", IPCSource(), nil, nil, ""})
 	}

@@ -104,7 +104,16 @@ console.log(shared.join(","));
 	for _, optMem := range []bool{false, true} {
 		for name, src := range cases {
 			bin := buildArrayRefASanAuto(t, src, optMem)
-			out, err := exec.Command(bin).CombinedOutput()
+			cmd := exec.Command(bin)
+			// The free policy (a) deliberately LEAKS shared/escaping buffers under
+			// the non-GC modes — the documented perf tradeoff (GC mode reclaims
+			// them). That intentional leak is not the failure under test here; the
+			// target is a shared buffer freed while still aliased (use-after-free /
+			// double-free), which ASan+UBSan still catch with leak detection off.
+			// Leaving LeakSanitizer on would fail every case on the policy's own
+			// by-design leak. So suppress only leak reporting.
+			cmd.Env = append(os.Environ(), "ASAN_OPTIONS=detect_leaks=0")
+			out, err := cmd.CombinedOutput()
 			so := string(out)
 			if strings.Contains(so, "ERROR: AddressSanitizer") ||
 				strings.Contains(so, "runtime error:") ||

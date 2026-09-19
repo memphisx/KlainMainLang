@@ -2272,6 +2272,12 @@ server.listen(8198)
 	port := startHTTPServer(t, src, 8198)
 
 	const n = 4
+	// A bounded per-request timeout: the concurrency window is ~300ms, so 20s
+	// only trips on a genuine server-side hang. Without it a deadlock in the
+	// async-handler fiber-park path would block wg.Wait() forever and take the
+	// entire `go test` 50m budget down with it (masking every other test) rather
+	// than failing this one test fast.
+	client := &http.Client{Timeout: 20 * time.Second}
 	start := time.Now()
 	var wg sync.WaitGroup
 	errs := make(chan error, n)
@@ -2279,7 +2285,7 @@ server.listen(8198)
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/c%d", port, i))
+			resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/c%d", port, i))
 			if err != nil {
 				errs <- err
 				return

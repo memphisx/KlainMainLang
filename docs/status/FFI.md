@@ -2,9 +2,9 @@
 
 # FFI (node:ffi)
 
-> Part of the [Implementation Status](README.md) index. Node's experimental `node:ffi` module (v26.1.0+, `--experimental-ffi`) — call C functions from shared libraries with plain-object signatures, and peek/poke native memory through `bigint` pointers. Import-gated (`import ffi from 'node:ffi'`). Signatures are resolved at compile time and lowered to direct C-ABI calls (no libffi, no trampoline); 64-bit integers and pointers travel as `bigint`, exactly as in Node. `registerCallback` hands a closure to C as a real function pointer via statically-emitted trampoline families. POSIX only for now (`dlopen`/`dlsym`; no Windows `LoadLibrary` shim yet). See [ADR-00797](../adr/ADR-00797.md)/[ADR-00798](../adr/ADR-00798.md)/[ADR-00799](../adr/ADR-00799.md)/[ADR-00800](../adr/ADR-00800.md)/[ADR-00808](../adr/ADR-00808.md)/[TDD-00164](../tdd/TDD-00164.md).
+> Part of the [Implementation Status](README.md) index. Node's experimental `node:ffi` module (v26.1.0+, `--experimental-ffi`) — call C functions from shared libraries with plain-object signatures, and peek/poke native memory through `bigint` pointers. Import-gated (`import ffi from 'node:ffi'`). Signatures are resolved at compile time and lowered to direct C-ABI calls (no libffi, no trampoline); 64-bit integers and pointers travel as `bigint`, exactly as in Node. `registerCallback` hands a closure to C as a real function pointer via statically-emitted trampoline families. Runs on POSIX and Windows — the latter over a `LoadLibrary`/`GetProcAddress` shim for `dlopen`/`dlsym` ([ADR-01019](../adr/ADR-01019.md)). See [ADR-00797](../adr/ADR-00797.md)/[ADR-00798](../adr/ADR-00798.md)/[ADR-00799](../adr/ADR-00799.md)/[ADR-00800](../adr/ADR-00800.md)/[ADR-00808](../adr/ADR-00808.md)/[TDD-00164](../tdd/TDD-00164.md).
 
-**Coverage**: 11/13 (~85%) · **Strict Coverage**: 4/13 (~31%).
+**Coverage**: 11/12 (~92%) · **Strict Coverage**: 4/12 (~33%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -22,4 +22,3 @@ Format: [Status page format](README.md#status-page-format).
 | `ffi.toString(ptr)` / `ffi.toBuffer(ptr, len, copy?)` / `ffi.toArrayBuffer(ptr, len, copy?)` / `ffi.getRawPointer(src)` | ✅ | | • `copy: false` wraps the native memory zero-copy (the caller keeps it valid, Node's contract); `toString(0n)` → `null` |
 | `ffi.exportString/exportBuffer/exportArrayBuffer/exportArrayBufferView(src, ptr, length)` | ✅ | • `exportString` supports only the `'utf8'` encoding (UTF-8-native strings) and truncates to the capacity — whether Node instead throws on overflow is unverified against a real `--experimental-ffi` build<br>• A too-small `length` on the byte-export forms throws, as in Node | |
 | `ffi.getCurrentEventLoop()` | ❌ | | • Returns a `uv_loop_t*` in Node; this runtime has no libuv loop, so a faithful value does not exist — revisit when the Node API stabilizes |
-| Windows | ❌ | | • `dlopen`/`dlsym` need a `LoadLibrary`/`GetProcAddress` shim; rejected cleanly on a Windows host |

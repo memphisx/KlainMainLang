@@ -245,15 +245,17 @@ func (e *Emitter) zlibResolveInput(arg ast.Expression, pos ast.Pos) (string, str
 
 	default:
 		// String input: encode as its UTF-8 bytes (the stored form already is
-		// UTF-8), length via strlen.
+		// UTF-8). Length comes from the KML string header, NOT strlen: a klain
+		// string may contain embedded NUL bytes, and a string literal can be
+		// interned as a non-NUL-terminated prefix of a larger constant (e.g.
+		// "GET / HT" sharing storage with "GET / HTTP/…"), where strlen would
+		// over-read into the neighbouring bytes and send/compress far too much.
 		strVal, err := e.emitExpr(arg)
 		if err != nil {
 			return "", "", err
 		}
 		strVal = e.coerce(strVal, TypePtr)
-		e.ensureStrlen()
-		lenReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", lenReg, strVal.Ref))
+		lenReg := e.emitStrLenHeader(strVal.Ref)
 		return strVal.Ref, lenReg, nil
 	}
 }

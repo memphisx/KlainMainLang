@@ -1105,6 +1105,56 @@ int close(int fd) {
 			return CloseHandle((HANDLE)s) ? 0 : (errno = L_EBADF, -1);
 		}
 		p_shutdown(s, 1 /* SD_SEND */);
+		// Graceful-close drain: shutdown(SD_SEND) sends our queued data + FIN, but
+		// closesocket() still aborts the connection with an RST (discarding that
+		// queued data) if the receive buffer holds bytes the peer sent that we
+		// never read — e.g. an HTTP server answering (431/413/redirect/clientError)
+		// while the client is still uploading a body. Linux's close() delivers the
+		// response in that case; to match, drain what the peer already sent so no
+		// unread input forces the RST, then closesocket() delivers our response.
+		//
+		// Only pay for this when there IS unread data: a first non-blocking recv
+		// that returns EWOULDBLOCK (the common case — we consumed the whole
+		// request, or it is an idle keep-alive close) skips the loop entirely, so
+		// normal closes add just one recv and no latency. When data is present the
+		// peer may still be mid-send (its writes unblock as we drain), so we ride
+		// out the in-flight remainder with short readability waits, stopping once
+		// the peer goes quiet — bounded in bytes and total wait so a peer that
+		// never stops cannot hang the close (past the cap we accept the RST, as any
+		// bounded server must).
+		{
+			unsigned long nb = 1;
+			if (p_ioctlsocket) p_ioctlsocket(s, WS_FIONBIO, &nb); // never block the drain
+			char drainbuf[65536];
+			// One non-blocking probe: only unread data (r > 0) triggers the drain,
+			// so the common close (r <= 0, EWOULDBLOCK/FIN) adds a single recv and
+			// no latency.
+			int r = p_recv(s, drainbuf, (int)sizeof drainbuf, 0);
+			if (r > 0) {
+				long budget = 32 * 1024 * 1024; // byte cap
+				int idleWaits = 0;              // consecutive quiet waits before giving up
+				for (;;) {
+					if (r > 0) {
+						budget -= r; idleWaits = 0;
+						if (budget <= 0) break; // hostile flood: accept the RST
+					} else if (r == 0) {
+						break;                  // peer FIN — fully drained
+					} else {
+						// EWOULDBLOCK: the peer may still be mid-send (its writes
+						// unblock as we drain). Wait briefly; give up once it has been
+						// quiet long enough that the buffer is empty at close time.
+						int e = p_WSAGetLastError ? p_WSAGetLastError() : 0;
+						if (e != WSAEWOULDBLOCK) break;
+						ws_big_fd_set rf; rf.fd_count = 1; rf.fd_array[0] = s;
+						ws_timeval tv; tv.tv_sec = 0; tv.tv_usec = 20000; // 20ms
+						if (!p_select || p_select(0, &rf, NULL, NULL, &tv) <= 0) {
+							if (++idleWaits >= 5) break; // ~100ms quiet: peer done
+						}
+					}
+					r = p_recv(s, drainbuf, (int)sizeof drainbuf, 0);
+				}
+			}
+		}
 		return p_closesocket(s) == 0 ? 0 : set_wsa_errno();
 	}
 	if (kfd[fd].kind == KFD_FOREIGN) { errno = L_EBADF; return -1; } // not ours to close

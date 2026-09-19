@@ -183,11 +183,12 @@ func ffiSuffix() string {
 	return "so"
 }
 
-// ffiRejectWindows returns the clean rejection for the not-yet-shimmed host.
+// ffiRejectWindows was the guard for the not-yet-shimmed host; node:ffi now has
+// a LoadLibrary/GetProcAddress-backed dlopen shim on Windows (FFIWinDlShimSource,
+// wired through ensureFFIDl), so it is a no-op. Retained as the single point to
+// re-gate from should a specific FFI surface prove Windows-incompatible.
 func ffiRejectWindows(pos ast.Pos) error {
-	if targetGOOS() == "windows" {
-		return fmt.Errorf("%d:%d: node:ffi is not supported on Windows yet (dlopen has no LoadLibrary shim)", pos.Line, pos.Col)
-	}
+	_ = pos
 	return nil
 }
 

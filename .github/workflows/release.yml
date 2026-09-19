@@ -17,7 +17,11 @@ jobs:
   test:
     name: test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90 # the Intel macOS runner needs ~75 min for suite + examples; a genuine hang is caught by go test's own 50 min timeout
+    # Intel macOS needs ~75 min for suite + examples; Windows is the slow, less
+    # predictable lane (see the go test step) so it gets 120 min to fit its
+    # roomier 80m hang-catcher plus the slow MSYS2 setup. A genuine hang is still
+    # caught by go test's own per-lane timeout well before the job ceiling.
+    timeout-minutes: ${{ matrix.goos == 'windows' && 120 || 90 }}
     strategy:
       fail-fast: false
       matrix:
@@ -122,7 +126,11 @@ jobs:
       - name: docs/status pages must match their data/ JSON source (reference lane only)
         if: matrix.name == 'linux-x64'
         run: make status-check
-      - run: go test -timeout 50m ./...
+      # Windows runners are consistently slower and less predictable than the
+      # others (MSYS2 toolchain + Defender scanning every compiled binary), so
+      # the hang-catcher gets extra headroom there to avoid a spurious timeout on
+      # a merely-slow run; the POSIX lanes keep the tighter 50m.
+      - run: go test -timeout ${{ matrix.goos == 'windows' && '80m' || '50m' }} ./...
       - name: Compile and run every example (POSIX lanes; the example runner is a POSIX Makefile recipe)
         if: matrix.goos != 'windows'
         run: make examples

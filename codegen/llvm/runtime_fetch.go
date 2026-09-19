@@ -220,6 +220,9 @@ func (e *Emitter) ensureFetchAsync() {
 	e.emitGlobal("declare i32 @curl_multi_perform(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare ptr @curl_multi_info_read(ptr noundef, ptr noundef)")
 	e.emitGlobal("@__kml_curl_multi = internal thread_local global ptr null, align 8")
+	// For the HEAD → CURLOPT_NOBODY check in __kml_fetch_async's setmethod block.
+	e.ensureStrcmp()
+	e.emitGlobal(`@.kml_fetch_head_method = private unnamed_addr constant [5 x i8] c"HEAD\00"`)
 
 	e.emitGlobal(`
 define ptr @__kml_fetch_async(ptr %url, ptr %method, ptr %headers, ptr %body, ptr %signal) {
@@ -296,6 +299,17 @@ havemulti:
 
 setmethod:
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10036, ptr %method)
+  ; A HEAD request must also set CURLOPT_NOBODY (44). With CUSTOMREQUEST alone,
+  ; libcurl still expects a response body and blocks the transfer waiting for
+  ; one a HEAD reply never sends — the reader-completion path then never fires
+  ; (observed as a hang on Windows). NOBODY tells libcurl the reply is
+  ; headers-only, so the transfer completes after the headers.
+  %ishead = call i32 @strcmp(ptr %method, ptr @.kml_fetch_head_method)
+  %isheadz = icmp eq i32 %ishead, 0
+  br i1 %isheadz, label %setnobody, label %skipmethod
+
+setnobody:
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 44, i64 1)
   br label %skipmethod
 
 skipmethod:

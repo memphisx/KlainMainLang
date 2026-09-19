@@ -94,7 +94,10 @@ void *__kml_cp_spawn_sync(const char *file, char **args, int64_t argn, const cha
   argv[0] = (char *)file;
   for (int64_t i = 0; i < argn; i++) argv[i + 1] = args[i];
   argv[argn + 1] = NULL;
-  int pid = __kml_win_spawn(file, argv, cwd, -1, outp[1], errp[1], -1, (int)(flags & 1), NULL);
+  /* 0x10000 = guard self-spawn: spawnSync(process.execPath, ...) must not
+     re-run our own body in the child (ADR-00972); mark it so the startup guard
+     rejects it. Mirrors __kml_mark_child_if_self_spawn on the POSIX branch. */
+  int pid = __kml_win_spawn(file, argv, cwd, -1, outp[1], errp[1], -1, (int)(flags & 1) | 0x10000, NULL);
   free(argv);
   if (pid < 0) {
     close(outp[0]); close(outp[1]); close(errp[0]); close(errp[1]);

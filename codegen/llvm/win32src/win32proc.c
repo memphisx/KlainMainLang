@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 enum { L_EACCES = 13, L_ENOENT = 2, L_EINVAL = 22, L_ENOSYS = 38, L_ECHILD = 10, L_ESRCH = 3 };
 enum { KFD_PLAIN = 0, KFD_SOCKET = 1 };
@@ -149,6 +150,32 @@ static int is_batch_file(const char *s) {
 	                             : ((ext[1] | 32) == 'c' && (ext[2] | 32) == 'm' && (ext[3] | 32) == 'd'));
 }
 
+// ADR-00972: does this spawn target resolve to the running executable? A
+// compiled binary handed process.execPath re-runs main in the child (it has no
+// interpreter mode), re-hitting the same spawn — an unbounded self-fork chain.
+// When the target is ourselves the child's env is marked so its startup guard
+// (@__kml_reject_node_interp_flags) refuses to re-run the program body. POSIX
+// sets the marker in the forked child before execvp; Windows has no fork, so the
+// self-spawn is detected here and the marker injected into the child's
+// environment block. Best-effort path comparison: both sides go through
+// GetFullPathNameW (normalizing ./.. and mixed slashes) and compare
+// case-insensitively, the case-fold Win32 filesystems use.
+static int is_self_spawn(const char *file, char **argv) {
+	const char *cand = (file && *file) ? file : (argv && argv[0] ? argv[0] : NULL);
+	if (!cand) return 0;
+	wchar_t *wc = wide_alloc(cand);
+	if (!wc) return 0;
+	static wchar_t selfw[32768], fullself[32768], fullcand[32768];
+	DWORD n = GetModuleFileNameW(NULL, selfw, 32768);
+	int match = 0;
+	if (n > 0 && n < 32768 &&
+	    GetFullPathNameW(selfw, 32768, fullself, NULL) &&
+	    GetFullPathNameW(wc, 32768, fullcand, NULL))
+		match = (_wcsicmp(fullself, fullcand) == 0);
+	free(wc);
+	return match;
+}
+
 // ---- spawn ------------------------------------------------------------------------------
 // __kml_win_spawn(file, argv, cwd, in_fd, out_fd, err_fd, inherit_fd, flags):
 // argv is NULL-terminated with argv[0] the program as Node passes it (a
@@ -217,12 +244,24 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 	wchar_t *env = NULL;
 	HANDLE hinh = INVALID_HANDLE_VALUE;
 	wchar_t markerbuf[96];
-	const wchar_t *marker = NULL;
+	const wchar_t *markers[2];
+	int nmarkers = 0;
 	if (inherit_fd >= 0) {
 		hinh = inheritable_dup(inherit_fd);
 		wsprintfW(markerbuf, L"KML_WIN_INHERIT_FD=%d:%I64u", inherit_fd, (unsigned long long)(uintptr_t)hinh);
-		marker = markerbuf;
+		markers[nmarkers++] = markerbuf;
 	}
+	// A self-spawn (target is this executable) is marked so the child's startup
+	// guard refuses to re-run main — otherwise it ignores argv and re-forks (a
+	// fork bomb). Only the child_process spawn/spawnSync/execFileSync paths set
+	// the guard bit (flags & 0x10000); the cluster / child_process.fork /
+	// http-cluster re-exec of ourselves is a DELIBERATE self-run (the worker
+	// detects its channel/id and does worker work) and must NOT be marked — the
+	// POSIX side likewise marks only the child_process spawn sites, not execv of
+	// a cluster worker. Injected even when a custom spawn_env replaces the block.
+	if ((flags & 0x10000) && is_self_spawn(file, argv)) markers[nmarkers++] = L"KML_KLAIN_REEXEC=1";
+	size_t mlen = 0;
+	for (int i = 0; i < nmarkers; i++) mlen += wcslen(markers[i]) + 1;
 	if (spawn_env) {
 		// Each UTF-8 entry → wide (the wide count includes the terminating NUL,
 		// which is exactly the per-entry separator a double-NUL block wants).
@@ -232,24 +271,23 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 			int wn = MultiByteToWideChar(CP_UTF8, 0, spawn_env[ne], -1, NULL, 0);
 			wtotal += (wn > 0 ? (size_t)wn : 1);
 		}
-		size_t mlen = marker ? (wcslen(marker) + 1) : 0;
 		env = (wchar_t *)malloc((wtotal + mlen + 1) * sizeof(wchar_t));
 		wchar_t *p = env;
 		for (int i = 0; i < ne; i++) {
 			int wn = MultiByteToWideChar(CP_UTF8, 0, spawn_env[i], -1, p, (int)(wtotal - (size_t)(p - env)));
 			p += (wn > 0 ? wn : 1);
 		}
-		if (marker) { size_t l = wcslen(marker) + 1; memcpy(p, marker, l * sizeof(wchar_t)); p += l; }
+		for (int i = 0; i < nmarkers; i++) { size_t l = wcslen(markers[i]) + 1; memcpy(p, markers[i], l * sizeof(wchar_t)); p += l; }
 		*p = 0;
-	} else if (marker) {
+	} else if (nmarkers) {
 		wchar_t *cur = GetEnvironmentStringsW();
 		size_t curlen = 0;
 		for (wchar_t *q = cur; *q; q += wcslen(q) + 1) curlen += wcslen(q) + 1;
-		size_t mlen = wcslen(marker) + 1;
 		env = (wchar_t *)malloc((curlen + mlen + 1) * sizeof(wchar_t));
 		memcpy(env, cur, curlen * sizeof(wchar_t));
-		memcpy(env + curlen, marker, mlen * sizeof(wchar_t));
-		env[curlen + mlen] = 0;
+		wchar_t *p = env + curlen;
+		for (int i = 0; i < nmarkers; i++) { size_t l = wcslen(markers[i]) + 1; memcpy(p, markers[i], l * sizeof(wchar_t)); p += l; }
+		*p = 0;
 		FreeEnvironmentStringsW(cur);
 	}
 
@@ -393,6 +431,11 @@ int __kml_win_exit_code(int pid) {
 	return pr ? (int)pr->exitcode : -1;
 }
 
+// Delivers a signal to our own process through the handler queue (defined with
+// the signal machinery below); returns 1 when queued, 0 when there is no
+// handler to run.
+static int kml_deliver_self_signal(int sig);
+
 int kill(int pid, int sig) {
 	if (sig == 0) {
 		kml_proc *pr0 = proc_slot((DWORD)pid, 0);
@@ -402,6 +445,13 @@ int kill(int pid, int sig) {
 		CloseHandle(h);
 		return 0;
 	}
+	// A signal to OURSELVES with a registered handler is delivered to that
+	// handler through the reactor (the same queue the console Ctrl handler
+	// uses), mirroring POSIX kill(getpid(), sig)/raise — e.g.
+	// process.kill(process.pid, 'SIGINT') for a graceful self-shutdown.
+	// TerminateProcess(self) would instead kill the process before the handler
+	// could run. With no handler it falls through to the default terminate.
+	if ((DWORD)pid == GetCurrentProcessId() && kml_deliver_self_signal(sig)) return 0;
 	// Node on Windows: any signal terminates the target unconditionally.
 	kml_proc *pr = proc_slot((DWORD)pid, 0);
 	// A child this process already reaped is gone: ESRCH from the table,
@@ -514,6 +564,22 @@ int __kml_win_sig_deliver(void) {
 		if (InterlockedExchange(&kml_sig_queued[s], 0) && kml_sig_handlers[s]) { kml_sig_handlers[s](s); n++; }
 	}
 	return n;
+}
+
+// Queue a self-directed signal for the installing thread to run, the same path
+// kml_ctrl_handler uses for a real Ctrl+C (see kill() above). Only the signals
+// Windows can actually deliver to a handler qualify — the console controls
+// SIGINT (2) / SIGHUP (1) / SIGBREAK (21) and SIGWINCH (28). Everything else,
+// SIGTERM included, is terminate-only on Windows (a SIGTERM listener is accepted
+// but never fires — nothing delivers it), so this returns 0 and kill() falls
+// through to TerminateProcess. Returns 0 too when no handler is registered.
+static int kml_deliver_self_signal(int sig) {
+	if (sig != 2 && sig != 1 && sig != 21 && sig != 28) return 0;
+	if (!kml_sig_handlers[sig]) return 0;
+	InterlockedExchange(&kml_sig_queued[sig], 1);
+	InterlockedExchange(&__kml_win_sig_wake, 1);
+	__kml_win_loop_wake();
+	return 1;
 }
 
 // SIGWINCH (28) has no Windows signal; libuv runs a console-resize watcher

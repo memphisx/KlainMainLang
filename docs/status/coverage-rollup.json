@@ -468,8 +468,8 @@
       "section": "Node.js APIs",
       "total": {
         "impl": 137,
-        "total": 141,
-        "pct": 97
+        "total": 140,
+        "pct": 98
       },
       "rows": [
         {
@@ -581,13 +581,13 @@
           "pageFile": "FFI.md",
           "coverage": {
             "impl": 11,
-            "total": 13,
-            "pct": 85
+            "total": 12,
+            "pct": 92
           },
           "strict": {
             "impl": 4,
-            "total": 13,
-            "pct": 31
+            "total": 12,
+            "pct": 33
           },
           "caveats": "• Signatures/definitions must be compile-time object literals (AOT lowering); the `functions`/`symbols` accumulators are compile-time records (literal names only, resolution order)\u003cbr\u003e• `registerCallback` caps at 16 concurrently-live callbacks per signature shape (static trampoline families) and `close()` doesn't invalidate callbacks; `using`/`[Symbol.dispose]` and Windows are not there yet; `exportString` is utf8-only and truncates to capacity"
         },

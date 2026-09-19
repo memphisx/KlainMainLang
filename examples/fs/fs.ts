@@ -227,9 +227,17 @@ fs.unlinkSync('/tmp/kml_stat_example.txt')
 // ── temp dirs, symlinks, and recursive removal ──────────────────────────────
 const tmpd = fs.mkdtempSync('/tmp/kml-example-')
 fs.writeFileSync(tmpd + '/data.txt', 'hello')
-fs.symlinkSync(tmpd + '/data.txt', tmpd + '/alias')
-console.log(fs.lstatSync(tmpd + '/alias').isSymbolicLink())  // true
-console.log(fs.readlinkSync(tmpd + '/alias') === tmpd + '/data.txt')  // true
+// symlinkSync needs Developer Mode (or an elevated shell) on Windows; on POSIX,
+// and on a Windows box with it enabled, it works. Attempt it and tolerate the
+// EPERM a locked-down Windows returns, so the rest of the demo still runs — the
+// same guard a cross-platform Node program uses.
+try {
+  fs.symlinkSync(tmpd + '/data.txt', tmpd + '/alias')
+  console.log(fs.lstatSync(tmpd + '/alias').isSymbolicLink())  // true
+  console.log(fs.readlinkSync(tmpd + '/alias') === tmpd + '/data.txt')  // true
+} catch (e) {
+  console.log('symlink skipped (needs Developer Mode on Windows): ' + e.code)
+}
 // linkSync makes a hard link — a second name for the same inode (no Developer
 // Mode needed on Windows, unlike symlinkSync). nlink counts the names.
 fs.linkSync(tmpd + '/data.txt', tmpd + '/data.hardlink')

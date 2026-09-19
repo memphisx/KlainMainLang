@@ -28,7 +28,11 @@ func (e *Emitter) cpSpawnForkIR() string {
 	if targetGOOS() == "windows" {
 		e.ensureWinSpawnDecl()
 		return `  %kmlverb64 = lshr i64 %mode, 1
-  %kmlverb = trunc i64 %kmlverb64 to i32
+  %kmlverbm = trunc i64 %kmlverb64 to i32
+  ; 0x10000 = guard self-spawn (ADR-00972): spawn(process.execPath, ...) must
+  ; not re-run our own body in the child. cluster/fork re-exec (a deliberate
+  ; self-run) leaves this bit clear.
+  %kmlverb = or i32 %kmlverbm, 65536
   ; Per-fd stdio (mode bits 4-9, ADR-00766): the pipe end for pipe (0), -1 for
   ; inherit (1, the shim uses our std handle), -2 for ignore (2, the shim opens
   ; NUL). __kml_win_spawn's inheritable_std reads the sentinels.
@@ -224,7 +228,9 @@ func cpStdinPipeCallIR() string {
 func (e *Emitter) execSyncForkIR() string {
 	if targetGOOS() == "windows" {
 		e.ensureWinSpawnDecl()
-		return `  %pid = call i32 @__kml_win_spawn(ptr %file, ptr %argv, ptr %cwd, i32 -1, i32 %writefd, i32 -1, i32 -1, i32 0, ptr null)
+		// 0x10000 (65536) = guard self-spawn (ADR-00972): execFileSync of
+		// process.execPath must not re-run our own body in the child.
+		return `  %pid = call i32 @__kml_win_spawn(ptr %file, ptr %argv, ptr %cwd, i32 -1, i32 %writefd, i32 -1, i32 -1, i32 65536, ptr null)
   br label %parent
 `
 	}
@@ -263,6 +269,8 @@ doexec:
 func (e *Emitter) clusterForkIR(fmtID, envID, fmtFD, envFD string) string {
 	if targetGOOS() == "windows" {
 		e.ensureWinSpawnDecl()
+		e.ensureMalloc()
+		e.ensureMemcpy()
 		return `  %idbuf = call ptr @malloc(i64 24)
   call i32 (ptr, ptr, ...) @sprintf(ptr %idbuf, ptr ` + fmtID + `, i64 %id)
   call i32 @setenv(ptr ` + envID + `, ptr %idbuf, i32 1)
@@ -271,8 +279,39 @@ func (e *Emitter) clusterForkIR(fmtID, envID, fmtFD, envFD string) string {
   call i32 (ptr, ptr, ...) @sprintf(ptr %fdbuf, ptr ` + fmtFD + `, i64 %cfd64)
   call i32 @setenv(ptr ` + envFD + `, ptr %fdbuf, i32 1)
   %exe = call ptr @__kml_cluster_self_exe()
-  %argv = load ptr, ptr @__argv_ptr, align 8
-  %pid = call i32 @__kml_win_spawn(ptr %exe, ptr %argv, ptr null, i32 -1, i32 -1, i32 -1, i32 %cfd, i32 0, ptr null)
+  ; setupPrimary({ args }): a stored args vector replaces the inherited argv
+  ; tail — worker argv becomes [argv0, ...args] (Node's settings.args), the same
+  ; rebuild the POSIX execv path does; no args → inherit our own argv.
+  %sal = load i64, ptr @__kml_cluster_setup_args_len, align 8
+  %hasargs = icmp sgt i64 %sal, 0
+  br i1 %hasargs, label %wcargs, label %wcinherit
+wcargs:
+  %av0p = load ptr, ptr @__argv_ptr, align 8
+  %av0 = load ptr, ptr %av0p, align 8
+  %an = add i64 %sal, 2
+  %ab = mul i64 %an, 8
+  %argv2 = call ptr @malloc(i64 %ab)
+  store ptr %av0, ptr %argv2, align 8
+  %ad = load ptr, ptr @__kml_cluster_setup_args, align 8
+  %a1 = getelementptr ptr, ptr %argv2, i64 1
+  %ab2 = mul i64 %sal, 8
+  call ptr @memcpy(ptr %a1, ptr %ad, i64 %ab2)
+  %anull = add i64 %sal, 1
+  %ans = getelementptr ptr, ptr %argv2, i64 %anull
+  store ptr null, ptr %ans, align 8
+  br label %wcexec
+wcinherit:
+  %argvi = load ptr, ptr @__argv_ptr, align 8
+  br label %wcexec
+wcexec:
+  %argv = phi ptr [ %argv2, %wcargs ], [ %argvi, %wcinherit ]
+  ; setupPrimary({ silent: true }): route the worker's stdout/stderr into the
+  ; pipes prepared in the entry region (their read ends stream via
+  ; worker.process.stdout/stderr) instead of inheriting our console. %dosilent,
+  ; %out_w and %err_w come from clusterSilentEntryIR.
+  %wout = select i1 %dosilent, i32 %out_w, i32 -1
+  %werr = select i1 %dosilent, i32 %err_w, i32 -1
+  %pid = call i32 @__kml_win_spawn(ptr %exe, ptr %argv, ptr null, i32 -1, i32 %wout, i32 %werr, i32 %cfd, i32 0, ptr null)
   call i32 @unsetenv(ptr ` + envID + `)
   call i32 @unsetenv(ptr ` + envFD + `)
   br label %parent

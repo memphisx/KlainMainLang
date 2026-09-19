@@ -567,12 +567,11 @@ done:
 
 // clusterSilentEntryIR is the entry-block region of __kml_cluster_fork that
 // prepares the setupPrimary({ silent: true }) stdio pipes BEFORE the fork —
-// the parent needs the read ends, the child the write ends. POSIX only; the
-// Windows spawn path lands with the platform lane (TDD-00177).
+// the parent needs the read ends, the child the write ends. The IR is
+// platform-neutral: @pipe on Windows yields the same child-stdout-capable pair
+// the child_process spawn path already uses there (the write ends reach the
+// worker as its stdout/stderr via __kml_win_spawn; TDD-00177).
 func clusterSilentEntryIR() string {
-	if targetGOOS() == "windows" {
-		return ""
-	}
 	return `  %silent = load i64, ptr @__kml_cluster_setup_silent, align 8
   %dosilent = icmp ne i64 %silent, 0
   %outp = alloca [2 x i32], align 4
@@ -603,9 +602,6 @@ pipesdone:
 // then streams them like a spawned child's stdio ('data' listeners on
 // worker.process.stdout/stderr) — and drop the write ends.
 func clusterSilentParentIR() string {
-	if targetGOOS() == "windows" {
-		return ""
-	}
 	nonblock := httpNonblockFlag()
 	return fmt.Sprintf(`  br i1 %%dosilent, label %%pwire, label %%pnowire
 pwire:

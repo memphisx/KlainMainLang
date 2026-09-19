@@ -11,6 +11,24 @@
 // non-zero exit status, or the child dying to a signal, throws a plain
 // catchable Error.
 
+// On Windows there is no /bin/echo or /bin/sh; the same execFileSync surface
+// (a direct fork+exec of a real .exe, no implicit shell) is shown via cmd.exe
+// and where.exe from System32. The POSIX demo below runs everywhere else.
+const isWin: boolean = process.platform === 'win32'
+if (isWin) {
+  console.log(process.execFileSync('cmd', ['/c', 'echo', 'hello', 'from', 'execFileSync']).trim())
+  console.log(process.execFileSync('cmd', ['/c', 'echo.']).length > 0)          // true
+  console.log(process.execFileSync('cmd', ['/c', 'cd'], { cwd: 'C:\\' }).trim()) // C:\
+  console.log(process.execFileSync('where', ['cmd']).length > 0)                 // true — PATH lookup
+  try {
+    process.execFileSync('cmd', ['/c', 'exit 1'])
+    console.log('never printed')
+  } catch (e) {
+    console.log(e.message)   // Command failed with exit code 1: cmd
+  }
+  console.log(process.execFileSync('cmd', ['/c', 'echo', 'shell-was-explicit']).trim())
+} else {
+
 // ── basic capture ───────────────────────────────────────────────────────────
 const echoArgs: string[] = ['hello', 'from', 'execFileSync']
 const out: string = process.execFileSync('/bin/echo', echoArgs)
@@ -46,3 +64,5 @@ try {
 const shellArgs: string[] = ['-c', 'echo shell-was-explicit']
 console.log(process.execFileSync('/bin/sh', shellArgs))
 // shell-was-explicit
+
+}

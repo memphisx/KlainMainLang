@@ -385,7 +385,7 @@
         "desc": "A worker handle."
       },
       "differences": [
-        "`setupPrimary`'s `exec`/`execArgv` are a compile-time rejection — workers re-exec this compiled program itself; there is no separate script file for a worker to run (a genuine impossibility of native compilation); `silent` is POSIX-only until the Windows spawn lane lands",
+        "`setupPrimary`'s `exec`/`execArgv` are a compile-time rejection — workers re-exec this compiled program itself; there is no separate script file for a worker to run (a genuine impossibility of native compilation); `args` and `silent` work on every platform, Windows included",
         "`'online'` fires from a queued microtask (the worker is exec'd by then), not a wire handshake; `cluster.workers` iterates and indexes by id but is not a real id-keyed *object* (no `Object.keys` over it)",
         "Workers each bind the port via `SO_REUSEPORT`; on Linux the kernel load-balances accepts across them, on Darwin the distribution is uneven (often one worker) — correctness holds, balancing differs",
         "Can't be combined with Worker threads (same restriction as `http.listen({workers})`)"

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,13 +14,23 @@ import (
 )
 
 // TestReaperEndToEndDetachedWorker is the full-path regression for the
-// conformance memory blowup. It reproduces the *exact* leak shape: a test that
-// spawns a DETACHED child (setsid → a new session that escapes kill(-pgid))
-// which re-execs the compiled binary (so its command line carries the workdir
-// path), then the parent exits 0 — a clean run, no timeout, nothing the
-// existing killableCommand group-kill can catch. The child loops forever,
-// re-parented to init. This is precisely what accumulated to ~880 processes /
-// ~42GB. The test drives the reproducer through the real harness exec path
+// conformance memory blowup. It reproduces the *exact* escape shape the reaper
+// exists to catch (reaper.go case 1): a test that spawns a DETACHED child
+// (setsid → a new session that escapes kill(-pgid)) which then keeps running
+// after the parent exits 0 — a clean run, no timeout, nothing the existing
+// killableCommand group-kill can catch. The child loops forever, re-parented to
+// init. This is precisely what accumulated to ~880 processes / ~42GB.
+//
+// The orphan is a detached `/bin/sh` looping forever, with absWorkDir carried in
+// its command line (so scanWorkdirProcs' substring match finds it). It is NOT a
+// self-re-exec of the compiled binary: that older shape is now correctly refused
+// up front by the self-spawn guard (ADR-00972) — a compiled binary handed its
+// own execPath exits rather than re-running its body — so a self-spawn can no
+// longer produce a long-lived orphan to reap. A detached spawn of a different
+// long-lived program is the faithful, still-reachable way to leak, and exercises
+// the identical setsid/re-parent escape the reaper targets.
+//
+// The test drives the reproducer through the real harness exec path
 // (killableCommand + runTracked) with a context that is never cancelled during
 // the assertions, so killableCommand's own group-kill provably cannot be what
 // clears the worker — only the reaper's sweepOnce may.
@@ -38,23 +49,19 @@ func TestReaperEndToEndDetachedWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A primary that spawns a DETACHED child re-execing this same binary (via
-	// process.execPath, so the child's command line carries the workdir path),
-	// then exits 0 without waiting. The child (KML_ROLE=worker) loops forever,
-	// setsid-detached and re-parented to init — escaping the primary's process
-	// group entirely.
+	// A primary that spawns a DETACHED, long-lived `/bin/sh` (setsid → a new
+	// session, re-parented to init), then exits 0 without waiting. The sh loops
+	// forever; absWorkDir is passed as its $0 so the child's command line carries
+	// the workdir path (scanWorkdirProcs matches on that substring). This is a
+	// spawn of a DIFFERENT program, not a self-re-exec, so the ADR-00972
+	// self-spawn guard does not apply — the orphan actually lives, as it must for
+	// there to be anything to reap.
 	src := filepath.Join(workDir, "detachedleak.ts")
-	prog := `import { spawn } from 'child_process';
-const role = process.env.KML_ROLE ?? '';
-if (role === 'worker') {
-  let i = 0;
-  while (true) { i = i + 1; }
-} else {
-  const c = spawn(process.execPath, [], { detached: true, stdio: 'ignore', env: { KML_ROLE: 'worker' } });
-  c.unref();
-  console.log('primary spawned detached worker, exiting');
-}
-`
+	prog := fmt.Sprintf(`import { spawn } from 'child_process';
+const c = spawn('/bin/sh', ['-c', 'while true; do sleep 1000; done', %q], { detached: true, stdio: 'ignore' });
+c.unref();
+console.log('primary spawned detached worker, exiting');
+`, absWorkDir)
 	if err := os.WriteFile(src, []byte(prog), 0644); err != nil {
 		t.Fatal(err)
 	}

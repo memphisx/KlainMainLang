@@ -60,6 +60,15 @@ static void kml_restore_console_cp(void) {
 }
 __attribute__((constructor)) static void kml_win_shim_init(void) {
 	__kml_win_stdin = stdin;
+	// Node's process.stdout is synchronous — writes reach the pipe/file as they
+	// happen, not withheld until exit. C stdio full-buffers a non-TTY stream, and
+	// the UCRT ignores _IOLBF (treats it as full buffering), so line-buffering
+	// cannot give incremental delivery here; unbuffer stdout outright, the
+	// faithful match (the POSIX startup path line-buffers instead, ADR-00867).
+	// Without this a cluster worker's stdout can arrive out of order with the
+	// primary's, or be lost entirely when the worker is killed before an implicit
+	// flush.
+	setvbuf(stdout, NULL, _IONBF, 0);
 	// A crash (access violation, abort) must end the process at once with a
 	// non-zero status, the way a signal does on POSIX. By default Windows
 	// parks a faulting process in Windows Error Reporting's dialog / WerFault
