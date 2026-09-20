@@ -15,6 +15,26 @@ import (
 // literal initializer) — an array/object/Map/complex value stays a `main()` local
 // (the pre-existing behavior), never miscompiled.
 func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
+	// Every name the program itself binds at top level. A call through one of
+	// these (`const f = async () => …; const p = f()`) is a *user* call whose
+	// result type the pre-pass cannot know unless the binding is already a
+	// registered function or module global — it must never be mistaken for a
+	// builtin (prePassStableBuiltinCall).
+	e.topLevelNames = map[string]bool{}
+	for _, stmt := range prog.Body {
+		switch s := stmt.(type) {
+		case *ast.VarDeclaration:
+			e.topLevelNames[s.Name] = true
+		case *ast.VarDeclarationList:
+			for _, d := range s.Decls {
+				e.topLevelNames[d.Name] = true
+			}
+		case *ast.FunctionDeclaration:
+			e.topLevelNames[s.Name] = true
+		case *ast.ClassDeclaration:
+			e.topLevelNames[s.Name] = true
+		}
+	}
 	promote := func(v *ast.VarDeclaration) {
 		if _, exists := e.moduleGlobals[v.Name]; exists {
 			return
@@ -257,6 +277,13 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 				return sig.RetType, true
 			}
 		}
+		// A builtin call with a context-stable simple result (`Date.now()`,
+		// `Math.floor(x)`, `parseInt(s)`, `setInterval(f, ms)`, `"a".toUpperCase()`).
+		// The declaration adopts this same type (emitVarDeclBody), so the global's
+		// IR cannot disagree with the store.
+		if ty := e.inferExprType(init); isSimpleGlobalType(ty) {
+			return ty, true
+		}
 		return Type{}, false
 	case *ast.BinaryExpression, *ast.UnaryExpression, *ast.MemberExpression:
 		// A constant scalar/string expression (gated by promotableInitInPrePass →
@@ -322,17 +349,20 @@ func (e *Emitter) promotableInitInPrePass(expr ast.Expression) bool {
 	case *ast.CallExpression:
 		id, ok := ex.Callee.(*ast.Identifier)
 		if !ok {
-			return false
+			return e.prePassStableBuiltinCall(ex)
 		}
 		if _, isGeneric := e.genericFuncs[id.Name]; isGeneric {
 			return false
 		}
 		_, sig, found := e.resolveFuncRef(id.Name)
-		if !found || sig.MaySuspend {
+		if !found {
+			return e.prePassStableBuiltinCall(ex)
+		}
+		if sig.MaySuspend || sig.IsAsync {
 			return false
 		}
 		rt := sig.RetType
-		return rt.IsArray || rt.IsObject || rt.IsMap || rt.IsSet || rt.IsDate || rt.IsFunc || isStringTy(rt)
+		return rt.IsArray || rt.IsObject || rt.IsMap || rt.IsSet || rt.IsDate || rt.IsFunc || isStringTy(rt) || isSimpleGlobalType(rt)
 	case *ast.ArrayLiteral:
 		for _, el := range ex.Elements {
 			if _, isSpread := el.(*ast.SpreadElement); isSpread {
@@ -521,6 +551,90 @@ func (e *Emitter) moduleGlobalPtrOrLocal(v *ast.VarDeclaration, ty Type) string 
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
 	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
 	return ptrName
+}
+
+// prePassStableBuiltinCall reports whether an un-annotated top-level initializer
+// that is a call to something other than a user function has a type the pre-pass
+// can rely on: a simple scalar/string result from a call whose receiver (if any)
+// is itself resolvable before main() runs — a literal, an earlier module global,
+// or a builtin namespace — never a main()-local, whose type is not known yet.
+// Without this, `const t0 = Date.now()` or `const iv = setInterval(f, 50)`
+// stayed a main() local and no named function could reference it at all
+// ("undefined variable").
+func (e *Emitter) prePassStableBuiltinCall(ex *ast.CallExpression) bool {
+	// An explicit list, not "whatever inferExprType says": for a call it does not
+	// model, inference falls back to a default scalar, and promoting on that
+	// guess would give the global the wrong type (`structuredClone(set)` is not
+	// a number). Every entry here has a fixed scalar/string result.
+	switch callee := ex.Callee.(type) {
+	case *ast.Identifier:
+		if e.topLevelNames[callee.Name] {
+			return false
+		}
+		if _, isLocal := e.lookup(callee.Name); isLocal {
+			return false
+		}
+		if !prePassScalarGlobalFns[callee.Name] {
+			return false
+		}
+	case *ast.MemberExpression:
+		switch obj := callee.Object.(type) {
+		case *ast.Identifier:
+			if g, isGlobal := e.moduleGlobals[obj.Name]; isGlobal {
+				// a method on an earlier string global
+				if !isStringTy(g.Ty) || !prePassScalarStringMethods[callee.Property] {
+					return false
+				}
+				break
+			}
+			if e.topLevelNames[obj.Name] {
+				return false // a top-level binding whose type is not known yet
+			}
+			if _, isLocal := e.lookup(obj.Name); isLocal {
+				return false
+			}
+			methods, ok := prePassScalarNamespaces[obj.Name]
+			if !ok || (methods != nil && !methods[callee.Property]) {
+				return false
+			}
+		case *ast.StringLiteral, *ast.TemplateLiteral:
+			if !prePassScalarStringMethods[callee.Property] {
+				return false
+			}
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+	return isSimpleGlobalType(e.inferExprType(ex))
+}
+
+// Builtin calls whose result is always a plain number / string / boolean.
+var prePassScalarGlobalFns = map[string]bool{
+	"parseInt": true, "parseFloat": true, "Number": true, "String": true, "Boolean": true,
+	"isNaN": true, "isFinite": true,
+	"setTimeout": true, "setInterval": true, "setImmediate": true,
+	"encodeURIComponent": true, "decodeURIComponent": true, "encodeURI": true, "decodeURI": true,
+	"btoa": true, "atob": true,
+}
+
+// Namespaces: nil = every method qualifies (all of Math returns a number).
+var prePassScalarNamespaces = map[string]map[string]bool{
+	"Math":        nil,
+	"Date":        {"now": true, "parse": true, "UTC": true},
+	"performance": {"now": true},
+	"Number":      {"parseInt": true, "parseFloat": true, "isInteger": true, "isFinite": true, "isNaN": true, "isSafeInteger": true},
+	"String":      {"fromCharCode": true, "fromCodePoint": true},
+	"JSON":        {"stringify": true},
+}
+
+var prePassScalarStringMethods = map[string]bool{
+	"toUpperCase": true, "toLowerCase": true, "trim": true, "trimStart": true, "trimEnd": true,
+	"slice": true, "substring": true, "substr": true, "repeat": true, "padStart": true, "padEnd": true,
+	"replace": true, "replaceAll": true, "concat": true, "charAt": true, "normalize": true,
+	"indexOf": true, "lastIndexOf": true, "includes": true, "startsWith": true, "endsWith": true,
+	"charCodeAt": true, "codePointAt": true, "localeCompare": true,
 }
 
 // isSimpleGlobalType reports whether a type occupies a single scalar/string slot —
@@ -1192,6 +1306,11 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 	var ptrName string
 	if e.promotedGlobalDecls[v] {
 		ptrName = e.moduleGlobals[v.Name].Ptr
+		if v.TypeAnnot == nil {
+			// The pre-pass decided this global's type; the store below must use it
+			// (the initializer is coerced to it, or rejected cleanly if it cannot be).
+			ty = e.moduleGlobals[v.Name].Ty
+		}
 	} else if e.hoistedCaptures[v.Name] {
 		// Captured by a nested closure: heap-box eagerly here at the declaration
 		// point (which dominates the whole lexical scope) rather than lazily at the

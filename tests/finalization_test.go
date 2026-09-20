@@ -150,6 +150,10 @@ func buildBinaryFinalizersReport(t *testing.T, src string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
+	// The float formatter C file, linked exactly as buildBinary and the CLI do —
+	// a timer + microtask program ends in the full event loop, which formats
+	// numbers.
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
@@ -257,6 +261,10 @@ func buildBinaryFinRegAuto(t *testing.T, src string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
+	// The float formatter C file, linked exactly as buildBinary and the CLI do —
+	// a timer + microtask program ends in the full event loop, which formats
+	// numbers.
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)

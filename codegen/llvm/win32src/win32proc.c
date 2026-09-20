@@ -51,7 +51,7 @@ int close(int);
 // instead of OpenProcess(pid) reaching whatever unrelated process now owns
 // the reused pid (ADR-00737). Reaped slots are reclaimed only when the
 // table needs room for a new child.
-typedef struct { DWORD pid; HANDLE h; int killsig; int failed; int reaped; int spawnerrno; DWORD exitcode; } kml_proc;
+typedef struct { DWORD pid; HANDLE h; int killsig; int failed; int reaped; int spawnerrno; DWORD exitcode; HANDLE wait; } kml_proc;
 #define KML_PROC_MAX 256
 static kml_proc kml_procs[KML_PROC_MAX];
 
@@ -391,6 +391,27 @@ char *__kml_win_self_exe(void) {
 	return s;
 }
 
+// ---- exit watch ---------------------------------------------------------------------------
+// __kml_win_child_watch(pid): wake the calling thread's reactor when the child
+// ends (TDD-00223 §5) — a registered wait on the process handle whose callback
+// posts a packet to that reactor's completion port, which is how libuv learns
+// of a child's exit on Windows. The loop then reaps it with waitpid(WNOHANG)
+// and fires 'exit', however long the child's stdio stays open. A process that
+// has already ended fires the callback at once.
+void *__kml_win_reactor_port(void);
+void __kml_win_port_wake(void *port);
+static void CALLBACK kml_child_exit_cb(void *port, BOOLEAN timed_out) {
+	(void)timed_out;
+	__kml_win_port_wake(port);
+}
+void __kml_win_child_watch(int pid) {
+	kml_proc *pr = proc_slot((DWORD)pid, 0);
+	if (!pr || !pr->h || pr->wait) return;
+	if (!RegisterWaitForSingleObject(&pr->wait, pr->h, kml_child_exit_cb, __kml_win_reactor_port(),
+	                                 INFINITE, WT_EXECUTEONLYONCE | WT_EXECUTEINWAITTHREAD))
+		pr->wait = NULL;
+}
+
 // ---- wait / kill -------------------------------------------------------------------------
 // Status is encoded the POSIX way the IR decodes: (code << 8) for a normal
 // exit, the signal number in the low bits when kill() terminated it — so
@@ -417,6 +438,9 @@ int waitpid(int pid, int *status, int options) {
 	if (pr && !pr->killsig) pr->exitcode = code;
 	int st = (pr && pr->killsig) ? (pr->killsig & 0x7f) : (int)((code & 0xff) << 8);
 	if (status) *status = st;
+	// The exit watch holds the handle: retire it (waiting out a callback that is
+	// mid-flight) before the handle it waits on is closed.
+	if (pr && pr->wait) { UnregisterWaitEx(pr->wait, INVALID_HANDLE_VALUE); pr->wait = NULL; }
 	CloseHandle(h);
 	if (pr) { pr->h = NULL; pr->reaped = 1; }
 	return pid;
@@ -556,6 +580,11 @@ static BOOL WINAPI kml_ctrl_handler(DWORD ev) {
 // installing thread; returns the number delivered (0 on any other thread or
 // with nothing queued). The waits in select()/nanosleep() call it and report
 // EINTR when it delivered, as the POSIX shape the IR already handles.
+// __kml_win_on_sig_thread: is the caller the thread that installed the handlers
+// (the one __kml_win_sig_deliver will deliver on)? select() uses it to decide
+// whether a pending signal should keep it from blocking — only the delivering
+// thread should, so a worker's event loop never busy-polls on the global flag.
+int __kml_win_on_sig_thread(void) { return __kml_win_sig_installed && GetCurrentThreadId() == kml_sig_thread; }
 int __kml_win_sig_deliver(void) {
 	if (!__kml_win_sig_installed || GetCurrentThreadId() != kml_sig_thread) return 0;
 	if (!InterlockedExchange(&__kml_win_sig_wake, 0)) return 0;

@@ -130,7 +130,7 @@ func (e *Emitter) emitHTTPUpgradeBlock(headersMapFinal, methodPtr, pathOnly, que
 
 	// --- socket: a net.Socket (netSocketIR) over this fd, TLS-aware ---
 	sockPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 64)", sockPtr))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 80)", sockPtr))
 	sockFdGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sockFdGep, netSocketIR, sockPtr))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", fd64, sockFdGep))
@@ -220,7 +220,7 @@ func (e *Emitter) emitHTTPConnectionEvent(sfx, readLoopL string) {
 	// A net.Socket over this fd (TLS ssl in field 5 for an HTTPS server), the
 	// same shape the upgrade path hands its handler.
 	sockPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 64)", sockPtr))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 80)", sockPtr))
 	e.ensureCalloc()
 	sockFdGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sockFdGep, netSocketIR, sockPtr))

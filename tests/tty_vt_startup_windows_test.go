@@ -17,7 +17,7 @@ import (
 func TestE2ETtyConsoleStartupVTOutput(t *testing.T) {
 	bin := buildBinary(t, "console.log('\\x1b[31mRED\\x1b[0m done')")
 	res := runInConPTY(t, bin, 80, 24, 20*time.Second, nil)
-	if !strings.Contains(res.Output, "\x1b[31m") || !strings.Contains(res.Output, "RED") {
+	if !strings.Contains(res.Output, "\x1b[31m") || !strings.Contains(res.Text, "RED") {
 		t.Fatalf("VT colour sequence not present/processed in console output:\n%q", res.Output)
 	}
 }

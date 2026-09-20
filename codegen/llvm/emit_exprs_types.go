@@ -1750,14 +1750,14 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "run":
 					if len(ex.Args) >= 2 {
 						if cbTy := e.inferExprType(ex.Args[1]); cbTy.IsFunc && cbTy.FuncRetType != nil {
-							return *cbTy.FuncRetType
+							return asyncCallbackResult(*cbTy.FuncRetType)
 						}
 					}
 					return TypeVoid
 				case "exit":
 					if len(ex.Args) >= 1 {
 						if cbTy := e.inferExprType(ex.Args[0]); cbTy.IsFunc && cbTy.FuncRetType != nil {
-							return *cbTy.FuncRetType
+							return asyncCallbackResult(*cbTy.FuncRetType)
 						}
 					}
 					return TypeVoid
@@ -2613,8 +2613,25 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					switch mem.Property {
 					case "then", "catch":
 						if len(ex.Args) >= 1 {
-							if t, ok := e.callbackReturnType(ex.Args[0]); ok {
+							// The fulfilment callback's parameter is the source's value
+							// (the same hint emitPromiseThen gives it), so an unannotated
+							// `r => r.text()` infers its real return type here too.
+							var hints []Type
+							if mem.Property == "then" && srcTy.PromiseType != nil {
+								hints = []Type{*srcTy.PromiseType}
+							}
+							if t, ok := e.callbackReturnType(ex.Args[0], hints...); ok {
 								retTy = t
+							}
+						}
+						// A callback that returns a promise resolves the chain with it
+						// (flattening): the result is Promise<U>, never Promise<Promise<U>>
+						// — this must agree with what emitPromiseThen builds.
+						if retTy.IsPromise {
+							if retTy.PromiseType != nil {
+								retTy = *retTy.PromiseType
+							} else {
+								retTy = TypeVoid
 							}
 						}
 					case "finally":

@@ -38,6 +38,13 @@ func (e *Emitter) classifyAsyncSuspension(prog *ast.Program) {
 			}
 		}
 	}
+	// TDD-00223 §2: every async callable that awaits is a coroutine, and fetch
+	// reactions run as coroutines, so the task-aware await paths must be the ones
+	// emitted whenever the program can wait at all — not only when a top-level
+	// declaration was classified.
+	if programMayWait(prog) {
+		e.hasMaySuspend = true
+	}
 	for name := range maySuspend {
 		if sig, ok := e.funcs[name]; ok {
 			sig.MaySuspend = true

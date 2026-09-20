@@ -62,10 +62,10 @@ func (e *Emitter) emitNetIsIP(method string, args []ast.Expression, pos ast.Pos)
 }
 
 // emitNetConnect implements net.connect(port, host, connectListener?) (and its
-// alias net.createConnection): a blocking connect that returns a NetSocket. The
-// connect listener, if given, fires synchronously once the connection is
-// established (the WebSocket-client "outcome known at establish time" posture).
-// A failed connection throws a catchable Error (V1: no async 'error' event).
+// alias net.createConnection): an asynchronous connect that returns a NetSocket
+// immediately (ADR-01021). The connect listener, if given, fires once the
+// connection completes on a later event-loop pass; a failed connection surfaces
+// as an async 'error' event (with a coded Error), never a synchronous throw.
 func (e *Emitter) emitNetConnect(args []ast.Expression, pos ast.Pos) (Value, error) {
 	// Two call shapes: positional `(port, host, cb?)` or options-object
 	// `({ port, host? }, cb?)` (Node's IPC `{ path }` form is not supported —
@@ -150,25 +150,16 @@ func (e *Emitter) emitNetConnect(args []ast.Expression, pos ast.Pos) (Value, err
 }
 
 // finishNetConnect handles the post-connect tail shared by the TCP and Unix
-// (IPC) forms: throw on a null (failed) socket, else store the optional
-// deferred 'connect' listener and return the NetSocket.
+// (IPC) forms: store the optional 'connect' listener and return the NetSocket.
+// net.connect is asynchronous (ADR-01021) — it always returns a socket and never
+// throws; a connection failure surfaces later as an async 'error' event, matching
+// Node (a socket with no 'error' listener throws uncaught, as Node also does).
 func (e *Emitter) finishNetConnect(sk string, cbExpr ast.Expression, pos ast.Pos) (Value, error) {
-	isnull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isnull, sk))
-	okL := e.freshLabel("netconnok")
-	failL := e.freshLabel("netconnfail")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isnull, failL, okL))
-
-	e.emitLabel(failL)
-	e.emitInternalThrow(e.internString("net.connect: connection failed"))
-
-	e.emitLabel(okL)
 	// The optional 'connect' listener (Node's, taking no arguments) is stored in
-	// the socket's field 4 and fired once on the first dispatch pass — deferred
-	// so it runs after net.connect returns and the `const sock = ...` binding is
-	// assigned. A listener closing over that binding therefore sees the real
-	// socket (closure capture of a not-yet-initialized binding is handled by
-	// ADR-00330).
+	// the socket's field 4 and fired once when the connect completes — after
+	// net.connect returns and the `const sock = ...` binding is assigned. A
+	// listener closing over that binding therefore sees the real socket (closure
+	// capture of a not-yet-initialized binding is handled by ADR-00330).
 	if cbExpr != nil {
 		cb, err := e.netArrowClosure(cbExpr, nil, pos)
 		if err != nil {
@@ -462,16 +453,26 @@ func (e *Emitter) emitNetSocketMethod(objExpr ast.Expression, method string, arg
 			}
 			e.netStorePtrField(objVal.Ref, netSocketIR, 6, cb)
 		case "connect", "ready":
-			// A post-connect registration on an already-connected client
-			// socket: stored in the same pending slot net.connect's own
-			// callback uses; the dispatch pass fires and clears it.
+			// A 'connect'/'ready' registration on a client socket: stored in the
+			// same field-4 slot net.connect's own callback uses; the dispatch pass
+			// fires and clears it when the async connect completes.
 			cb, err := e.netArrowClosure(args[1], nil, pos)
 			if err != nil {
 				return Value{}, err
 			}
 			e.netStorePtrField(objVal.Ref, netSocketIR, 4, cb)
+		case "error":
+			// An 'error' listener (Node's `(err: Error) => …`) stored in field 8,
+			// fired by the dispatch pass with a coded Error when an async connect
+			// fails (ADR-01021). Taking the errorObjType hint so `err.code` etc.
+			// resolve to the real Error fields inside the listener body.
+			cb, err := e.netArrowClosure(args[1], []Type{errorObjType}, pos)
+			if err != nil {
+				return Value{}, err
+			}
+			e.netStorePtrField(objVal.Ref, netSocketIR, 8, cb)
 		default:
-			return Value{}, fmt.Errorf("%d:%d: a net socket supports 'data', 'end', 'close', and 'connect'/'ready' (got '%s')", pos.Line, pos.Col, evt)
+			return Value{}, fmt.Errorf("%d:%d: a net socket supports 'data', 'end', 'close', 'error', and 'connect'/'ready' (got '%s')", pos.Line, pos.Col, evt)
 		}
 		return Value{Ty: TypeVoid}, nil
 	case "write":

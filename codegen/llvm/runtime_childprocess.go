@@ -26,7 +26,7 @@ import (
 //	1 i32 stdinFd   (write end; -1 after .end())
 //	2 i32 stdoutFd  (read end; -1 after EOF)
 //	3 i32 stderrFd  (read end; -1 after EOF)
-//	4 i64 state     (0 running · 2 reaped+finalized)
+//	4 i64 state     (0 running · 1 reaped, 'exit' fired · 2 closed/finalized)
 //	5 i64 exitCode
 //	6 ptr stdout 'data' listener   · 7 ptr stdout 'end' listener
 //	8 ptr stderr 'data' listener   · 9 ptr stderr 'end' listener
@@ -40,6 +40,7 @@ import (
 // 22 i64 timeout deadline (absolute monotonic ns, 0 = none — ADR-00764)
 // 23 i64 killSignal for the timeout kill (default 15 = SIGTERM)
 // 24 i64 unref flag (1 = child.unref()'d — does not keep the loop alive, ADR-00767)
+// 25 i64 raw wait status · 26 i64 plain exit code (both set at reap, read by __kml_cp_close)
 // Field 20 (i64) is the spawn-failure errno: 0 when the child started, else
 // the errno the exec failed with (ENOENT for a missing command).
 // __kml_cp_finalize fires 'error' instead of 'exit' when it is set
@@ -48,10 +49,10 @@ import (
 // POSIX recovers a signalled death from the wait status directly (WIFSIGNALED),
 // so this field only feeds the Windows `'exit'`/`'close'` `(code, signal)`
 // shape, where TerminateProcess leaves no signalled bit to read (TDD-00184).
-const cpStructIR = "{ i64, i32, i32, i32, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr, ptr, i32, ptr, ptr, i64, i64, i64, i64, i64 }"
+const cpStructIR = "{ i64, i32, i32, i32, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr, ptr, i32, ptr, ptr, i64, i64, i64, i64, i64, i64, i64 }"
 
-// cpStructBytes is the calloc size for cpStructIR (25 × 8).
-const cpStructBytes = 200
+// cpStructBytes is the calloc size for cpStructIR (27 × 8).
+const cpStructBytes = 216
 
 func (e *Emitter) ensureChildProcRuntime() {
 	if e.usedChildProcRuntime {
@@ -69,6 +70,7 @@ func (e *Emitter) ensureChildProcRuntime() {
 	e.ensureWorkerFdSetbit() // shared @__kml_worker_fd_setbit
 	e.ensureTimerRuntime()   // @__kml_monotonic_ns for the spawn `timeout` deadline
 	e.ensureCPKill()         // @kill — the timeout fire and child.kill share it
+	e.ensureCPExitWake()     // child exit wakes the loop (TDD-00223 §5)
 
 	e.emitGlobal("declare i32 @pipe(ptr noundef)")
 	e.ensureForkDecl()
@@ -216,190 +218,239 @@ ret:
 
 	e.ensureCPListenerAppend()
 
-	// __kml_cp_finalize(cp): both stdio pipes are at EOF — reap (WNOHANG) and,
-	// once reaped, store the exit code and fire the terminal listeners /
-	// buffered callback, then mark the handle finalized (state 2).
-	finalizeIR := fmt.Sprintf(`
-define void @__kml_cp_finalize(ptr %%cp) {
+	// A child's end is two independent events, as in Node (TDD-00223 §5):
+	//
+	//   'exit'  — the process ended. Fired by __kml_cp_reap the iteration the
+	//             reap succeeds, whatever the child's stdio is doing (a
+	//             grandchild may hold the pipes open long after).
+	//   'close' — the process ended AND its stdio streams closed, in either
+	//             order. Fired by __kml_cp_close; the buffered exec callback
+	//             rides the same condition (it needs the whole output).
+	//
+	// __kml_cp_reap(cp): waitpid(WNOHANG) a still-running child (state 0). Once
+	// reaped: record the wait status / exit codes, mark it state 1, run the
+	// post-reap hook, and fire 'exit' — or, for a spawn that never started,
+	// 'error' (ADR-00754: 'error' then 'close', never 'exit').
+	finalizeIR := strings.NewReplacer("CPTY", cp, "ERRNAME", errName).Replace(`
+define void @__kml_cp_reap(ptr %cp) {
 entry:
-  %%pid_p = getelementptr %s, ptr %%cp, i32 0, i32 0
-  %%pid64 = load i64, ptr %%pid_p, align 8
-  %%pid = trunc i64 %%pid64 to i32
-  %%stslot = alloca i32, align 4
-  store i32 0, ptr %%stslot, align 4
-  %%r = call i32 @waitpid(i32 %%pid, ptr %%stslot, i32 1)
-  %%reaped = icmp eq i32 %%r, %%pid
-  br i1 %%reaped, label %%doreap, label %%retz
+  %st0_p = getelementptr CPTY, ptr %cp, i32 0, i32 4
+  %st0 = load i64, ptr %st0_p, align 8
+  %running = icmp eq i64 %st0, 0
+  br i1 %running, label %dowait, label %retz
+dowait:
+  %pid_p = getelementptr CPTY, ptr %cp, i32 0, i32 0
+  %pid64 = load i64, ptr %pid_p, align 8
+  %pid = trunc i64 %pid64 to i32
+  %stslot = alloca i32, align 4
+  store i32 0, ptr %stslot, align 4
+  %r = call i32 @waitpid(i32 %pid, ptr %stslot, i32 1)
+  %reaped = icmp eq i32 %r, %pid
+  br i1 %reaped, label %doreap, label %retz
 doreap:
-  %%st = load i32, ptr %%stslot, align 4
-  %%low = and i32 %%st, 127
-  %%normal = icmp eq i32 %%low, 0
-  br i1 %%normal, label %%exited, label %%signaled
+  %st = load i32, ptr %stslot, align 4
+  %low = and i32 %st, 127
+  %normal = icmp eq i32 %low, 0
+  br i1 %normal, label %exited, label %signaled
 exited:
-  %%c0 = lshr i32 %%st, 8
-  %%code = and i32 %%c0, 255
-  br label %%store
+  %c0 = lshr i32 %st, 8
+  %code = and i32 %c0, 255
+  br label %store
 signaled:
-  %%sigcode = add i32 %%low, 128
-  br label %%store
+  %sigcode = add i32 %low, 128
+  br label %store
 store:
-  %%codev = phi i32 [ %%code, %%exited ], [ %%sigcode, %%signaled ]
+  %codev = phi i32 [ %code, %exited ], [ %sigcode, %signaled ]
   ; The plain exit code (0 on a signalled death) drives the streaming
-  ; 'exit'/'close' (code, signal) shape; %%codev keeps the folded 128+sig
+  ; 'exit'/'close' (code, signal) shape; %codev keeps the folded 128+sig
   ; value the buffered exec path / field-5 exitCode still expect (TDD-00184).
-  %%plaincode = phi i32 [ %%code, %%exited ], [ 0, %%signaled ]
-  %%code64 = zext i32 %%codev to i64
-  %%ec_p = getelementptr %s, ptr %%cp, i32 0, i32 5
-  store i64 %%code64, ptr %%ec_p, align 8
+  %plaincode = phi i32 [ %code, %exited ], [ 0, %signaled ]
+  %code64 = zext i32 %codev to i64
+  %ec_p = getelementptr CPTY, ptr %cp, i32 0, i32 5
+  store i64 %code64, ptr %ec_p, align 8
+  ; the raw wait status and the plain code, for __kml_cp_close's own
+  ; (code, signal) — it may run many iterations after this one
+  %st64 = zext i32 %st to i64
+  %ws_p = getelementptr CPTY, ptr %cp, i32 0, i32 25
+  store i64 %st64, ptr %ws_p, align 8
+  %plaincode64 = zext i32 %plaincode to i64
+  %pc_p = getelementptr CPTY, ptr %cp, i32 0, i32 26
+  store i64 %plaincode64, ptr %pc_p, align 8
   ; ---- streaming 'exit'/'close' (code, signal) shape (TDD-00184) ----
   ; __kml_cp_event_flags decides present/signum per platform: POSIX from the
   ; wait status (WIFSIGNALED/WTERMSIG), Windows from the recorded .kill() signal
   ; (field 21) since TerminateProcess leaves no signalled bit. code is null
   ; (present=false) means the listener sees 0, or null if it typed number|null.
-  %%ks_p = getelementptr %s, ptr %%cp, i32 0, i32 21
-  %%ks = load i64, ptr %%ks_p, align 8
-  %%evflags = call { i1, i32 } @__kml_cp_event_flags(i32 %%st, i64 %%ks)
-  %%evpresent = extractvalue { i1, i32 } %%evflags, 0
-  %%evsig = extractvalue { i1, i32 } %%evflags, 1
-  %%evsig64 = zext i32 %%evsig to i64
-  %%evsigname = call ptr @__kml_cp_signal_name(i64 %%evsig64)
-  %%plaincode64 = zext i32 %%plaincode to i64
-  %%evcode_sel = select i1 %%evpresent, i64 %%plaincode64, i64 0
-  %%evcode_d = sitofp i64 %%evcode_sel to double
-  %%st_p = getelementptr %s, ptr %%cp, i32 0, i32 4
-  store i64 2, ptr %%st_p, align 8
+  %ks_p = getelementptr CPTY, ptr %cp, i32 0, i32 21
+  %ks = load i64, ptr %ks_p, align 8
+  %evflags = call { i1, i32 } @__kml_cp_event_flags(i32 %st, i64 %ks)
+  %evpresent = extractvalue { i1, i32 } %evflags, 0
+  %evsig = extractvalue { i1, i32 } %evflags, 1
+  %evsig64 = zext i32 %evsig to i64
+  %evsigname = call ptr @__kml_cp_signal_name(i64 %evsig64)
+  %evcode_sel = select i1 %evpresent, i64 %plaincode64, i64 0
+  %evcode_d = sitofp i64 %evcode_sel to double
+  store i64 1, ptr %st0_p, align 8
   ; post-reap hook (null unless the cluster runtime armed it): drops the
   ; worker from cluster.workers BEFORE the exit/close listeners run — Node
   ; deletes the entry before emitting 'exit'.
-  %%rhook = load ptr, ptr @__kml_cp_reaped_hook, align 8
-  %%rhset = icmp ne ptr %%rhook, null
-  br i1 %%rhset, label %%rhcall, label %%rhafter
+  %rhook = load ptr, ptr @__kml_cp_reaped_hook, align 8
+  %rhset = icmp ne ptr %rhook, null
+  br i1 %rhset, label %rhcall, label %rhafter
 rhcall:
-  call void %%rhook(ptr %%cp)
-  br label %%rhafter
+  call void %rhook(ptr %cp)
+  br label %rhafter
 rhafter:
-  %%mode_p = getelementptr %s, ptr %%cp, i32 0, i32 13
-  %%mode = load i64, ptr %%mode_p, align 8
-  %%modebuf = and i64 %%mode, 1
-  %%buffered = icmp ne i64 %%modebuf, 0
-  br i1 %%buffered, label %%bufcb, label %%streamcb
+  %mode_p = getelementptr CPTY, ptr %cp, i32 0, i32 13
+  %mode = load i64, ptr %mode_p, align 8
+  %modebuf = and i64 %mode, 1
+  %buffered = icmp ne i64 %modebuf, 0
+  br i1 %buffered, label %retz, label %streamcb
 streamcb:
   ; A failed *spawn* (field 20 != 0) emits 'error' (with an Error) and 'close',
   ; but not 'exit' — Node's ChildProcess semantics (ADR-00754).
-  %%sf20_p = getelementptr %s, ptr %%cp, i32 0, i32 20
-  %%sf20 = load i64, ptr %%sf20_p, align 8
-  %%spawnfailed = icmp ne i64 %%sf20, 0
-  br i1 %%spawnfailed, label %%errevt, label %%normexit
+  %sf20_p = getelementptr CPTY, ptr %cp, i32 0, i32 20
+  %sf20 = load i64, ptr %sf20_p, align 8
+  %spawnfailed = icmp ne i64 %sf20, 0
+  br i1 %spawnfailed, label %errevt, label %normexit
 errevt:
-  %%errL_p = getelementptr %s, ptr %%cp, i32 0, i32 12
-  %%errL = load ptr, ptr %%errL_p, align 8
-  %%hasErr = icmp ne ptr %%errL, null
-  br i1 %%hasErr, label %%callerr, label %%aftexit
+  %errL_p = getelementptr CPTY, ptr %cp, i32 0, i32 12
+  %errL = load ptr, ptr %errL_p, align 8
+  %hasErr = icmp ne ptr %errL, null
+  br i1 %hasErr, label %callerr, label %retz
 callerr:
   ; field 12 is a listener LIST ({hdr, next} nodes) — fire each in order
-  %%serrobj = call ptr @__kml_cp_spawn_errobj(i64 %%sf20)
-  br label %%errloop
+  %serrobj = call ptr @__kml_cp_spawn_errobj(i64 %sf20)
+  br label %errloop
 errloop:
-  %%enode = phi ptr [ %%errL, %%callerr ], [ %%enext, %%errcall ]
-  %%edone = icmp eq ptr %%enode, null
-  br i1 %%edone, label %%aftexit, label %%errcall
+  %enode = phi ptr [ %errL, %callerr ], [ %enext, %errcall ]
+  %edone = icmp eq ptr %enode, null
+  br i1 %edone, label %retz, label %errcall
 errcall:
-  %%ehdr_p = getelementptr { ptr, ptr }, ptr %%enode, i32 0, i32 0
-  %%ehdr = load ptr, ptr %%ehdr_p, align 8
-  %%efp3_p = getelementptr { ptr, ptr }, ptr %%ehdr, i32 0, i32 0
-  %%efp3 = load ptr, ptr %%efp3_p, align 8
-  %%eep3_p = getelementptr { ptr, ptr }, ptr %%ehdr, i32 0, i32 1
-  %%eep3 = load ptr, ptr %%eep3_p, align 8
-  call void %%efp3(ptr %%eep3, ptr %%serrobj)
-  %%enext_p = getelementptr { ptr, ptr }, ptr %%enode, i32 0, i32 1
-  %%enext = load ptr, ptr %%enext_p, align 8
-  br label %%errloop
+  %ehdr_p = getelementptr { ptr, ptr }, ptr %enode, i32 0, i32 0
+  %ehdr = load ptr, ptr %ehdr_p, align 8
+  %efp3_p = getelementptr { ptr, ptr }, ptr %ehdr, i32 0, i32 0
+  %efp3 = load ptr, ptr %efp3_p, align 8
+  %eep3_p = getelementptr { ptr, ptr }, ptr %ehdr, i32 0, i32 1
+  %eep3 = load ptr, ptr %eep3_p, align 8
+  call void %efp3(ptr %eep3, ptr %serrobj)
+  %enext_p = getelementptr { ptr, ptr }, ptr %enode, i32 0, i32 1
+  %enext = load ptr, ptr %enext_p, align 8
+  br label %errloop
 normexit:
-  ; fire 'exit'(code, signal) then 'close'(code, signal) — the stored listener
-  ; is a fixed-ABI adapter void(ptr env, i1 present, double code, ptr signal)
-  ; that forwards to the user closure with its own arity (TDD-00184).
-  %%exitL_p = getelementptr %s, ptr %%cp, i32 0, i32 11
-  %%exitL = load ptr, ptr %%exitL_p, align 8
-  %%hasExit = icmp ne ptr %%exitL, null
-  br i1 %%hasExit, label %%callexit, label %%aftexit
-callexit:
-  br label %%exitloop
+  ; fire 'exit'(code, signal) — the stored listener is a fixed-ABI adapter
+  ; void(ptr env, i1 present, double code, ptr signal) that forwards to the
+  ; user closure with its own arity (TDD-00184).
+  %exitL_p = getelementptr CPTY, ptr %cp, i32 0, i32 11
+  %exitL = load ptr, ptr %exitL_p, align 8
+  br label %exitloop
 exitloop:
-  %%xnode = phi ptr [ %%exitL, %%callexit ], [ %%xnext, %%exitcall ]
-  %%xdone = icmp eq ptr %%xnode, null
-  br i1 %%xdone, label %%aftexit, label %%exitcall
+  %xnode = phi ptr [ %exitL, %normexit ], [ %xnext, %exitcall ]
+  %xdone = icmp eq ptr %xnode, null
+  br i1 %xdone, label %retz, label %exitcall
 exitcall:
-  %%xhdr_p = getelementptr { ptr, ptr }, ptr %%xnode, i32 0, i32 0
-  %%xhdr = load ptr, ptr %%xhdr_p, align 8
-  %%xfp_p = getelementptr { ptr, ptr }, ptr %%xhdr, i32 0, i32 0
-  %%xfp = load ptr, ptr %%xfp_p, align 8
-  %%xep_p = getelementptr { ptr, ptr }, ptr %%xhdr, i32 0, i32 1
-  %%xep = load ptr, ptr %%xep_p, align 8
-  call void %%xfp(ptr %%xep, i1 %%evpresent, double %%evcode_d, ptr %%evsigname)
-  %%xnext_p = getelementptr { ptr, ptr }, ptr %%xnode, i32 0, i32 1
-  %%xnext = load ptr, ptr %%xnext_p, align 8
-  br label %%exitloop
-aftexit:
-  %%closeL_p = getelementptr %s, ptr %%cp, i32 0, i32 10
-  %%closeL = load ptr, ptr %%closeL_p, align 8
-  %%hasClose = icmp ne ptr %%closeL, null
-  br i1 %%hasClose, label %%callclose, label %%ret
-callclose:
-  br label %%closeloop
-closeloop:
-  %%cnode = phi ptr [ %%closeL, %%callclose ], [ %%cnext, %%closecall ]
-  %%cdone = icmp eq ptr %%cnode, null
-  br i1 %%cdone, label %%ret, label %%closecall
-closecall:
-  %%chdr_p = getelementptr { ptr, ptr }, ptr %%cnode, i32 0, i32 0
-  %%chdr = load ptr, ptr %%chdr_p, align 8
-  %%cfp_p = getelementptr { ptr, ptr }, ptr %%chdr, i32 0, i32 0
-  %%cfp = load ptr, ptr %%cfp_p, align 8
-  %%cep_p = getelementptr { ptr, ptr }, ptr %%chdr, i32 0, i32 1
-  %%cep = load ptr, ptr %%cep_p, align 8
-  call void %%cfp(ptr %%cep, i1 %%evpresent, double %%evcode_d, ptr %%evsigname)
-  %%cnext_p = getelementptr { ptr, ptr }, ptr %%cnode, i32 0, i32 1
-  %%cnext = load ptr, ptr %%cnext_p, align 8
-  br label %%closeloop
-bufcb:
-  %%cb_p = getelementptr %s, ptr %%cp, i32 0, i32 16
-  %%cb = load ptr, ptr %%cb_p, align 8
-  %%hasCb = icmp ne ptr %%cb, null
-  br i1 %%hasCb, label %%docb, label %%ret
-docb:
-  ; stdout / stderr strings from the accumulators ("" if never allocated data)
-  %%so_p = getelementptr %s, ptr %%cp, i32 0, i32 14
-  %%so = load ptr, ptr %%so_p, align 8
-  %%sostr = call ptr @__kml_cp_accum_str(ptr %%so)
-  %%se_p = getelementptr %s, ptr %%cp, i32 0, i32 15
-  %%se = load ptr, ptr %%se_p, align 8
-  %%sestr = call ptr @__kml_cp_accum_str(ptr %%se)
-  ; err: null on success, else an Error object
-  %%failed = icmp ne i64 %%code64, 0
-  br i1 %%failed, label %%mkerr, label %%callcb
-mkerr:
-  %%emsg = call ptr @__kml_cp_exec_errmsg(i64 %%code64)
-  %%eobj = call ptr @malloc(i64 24)
-  %%ek = getelementptr { i64, ptr, ptr }, ptr %%eobj, i32 0, i32 0
-  store i64 0, ptr %%ek, align 8
-  %%em = getelementptr { i64, ptr, ptr }, ptr %%eobj, i32 0, i32 1
-  store ptr %%emsg, ptr %%em, align 8
-  %%en = getelementptr { i64, ptr, ptr }, ptr %%eobj, i32 0, i32 2
-  store ptr %s, ptr %%en, align 8
-  br label %%callcb
-callcb:
-  %%errv = phi ptr [ null, %%docb ], [ %%eobj, %%mkerr ]
-  %%bfp_p = getelementptr { ptr, ptr }, ptr %%cb, i32 0, i32 0
-  %%bfp = load ptr, ptr %%bfp_p, align 8
-  %%bep_p = getelementptr { ptr, ptr }, ptr %%cb, i32 0, i32 1
-  %%bep = load ptr, ptr %%bep_p, align 8
-  call void %%bfp(ptr %%bep, ptr %%errv, ptr %%sostr, ptr %%sestr)
-  br label %%ret
-ret:
-  ret void
+  %xhdr_p = getelementptr { ptr, ptr }, ptr %xnode, i32 0, i32 0
+  %xhdr = load ptr, ptr %xhdr_p, align 8
+  %xfp_p = getelementptr { ptr, ptr }, ptr %xhdr, i32 0, i32 0
+  %xfp = load ptr, ptr %xfp_p, align 8
+  %xep_p = getelementptr { ptr, ptr }, ptr %xhdr, i32 0, i32 1
+  %xep = load ptr, ptr %xep_p, align 8
+  call void %xfp(ptr %xep, i1 %evpresent, double %evcode_d, ptr %evsigname)
+  %xnext_p = getelementptr { ptr, ptr }, ptr %xnode, i32 0, i32 1
+  %xnext = load ptr, ptr %xnext_p, align 8
+  br label %exitloop
 retz:
   ret void
-}`, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, errName)
+}
+
+; __kml_cp_close(cp): a reaped child (state 1) whose stdio has ended — fire
+; 'close'(code, signal), or hand the buffered exec callback its whole output,
+; and mark the handle finalized (state 2). The caller checks the stdio side.
+define void @__kml_cp_close(ptr %cp) {
+entry:
+  %st_p = getelementptr CPTY, ptr %cp, i32 0, i32 4
+  %stv = load i64, ptr %st_p, align 8
+  %isreaped = icmp eq i64 %stv, 1
+  br i1 %isreaped, label %go, label %ret
+go:
+  store i64 2, ptr %st_p, align 8
+  %ws_p = getelementptr CPTY, ptr %cp, i32 0, i32 25
+  %st64 = load i64, ptr %ws_p, align 8
+  %st = trunc i64 %st64 to i32
+  %pc_p = getelementptr CPTY, ptr %cp, i32 0, i32 26
+  %plaincode64 = load i64, ptr %pc_p, align 8
+  %ec_p = getelementptr CPTY, ptr %cp, i32 0, i32 5
+  %code64 = load i64, ptr %ec_p, align 8
+  %ks_p = getelementptr CPTY, ptr %cp, i32 0, i32 21
+  %ks = load i64, ptr %ks_p, align 8
+  %evflags = call { i1, i32 } @__kml_cp_event_flags(i32 %st, i64 %ks)
+  %evpresent = extractvalue { i1, i32 } %evflags, 0
+  %evsig = extractvalue { i1, i32 } %evflags, 1
+  %evsig64 = zext i32 %evsig to i64
+  %evsigname = call ptr @__kml_cp_signal_name(i64 %evsig64)
+  %evcode_sel = select i1 %evpresent, i64 %plaincode64, i64 0
+  %evcode_d = sitofp i64 %evcode_sel to double
+  %mode_p = getelementptr CPTY, ptr %cp, i32 0, i32 13
+  %mode = load i64, ptr %mode_p, align 8
+  %modebuf = and i64 %mode, 1
+  %buffered = icmp ne i64 %modebuf, 0
+  br i1 %buffered, label %bufcb, label %streamclose
+streamclose:
+  %closeL_p = getelementptr CPTY, ptr %cp, i32 0, i32 10
+  %closeL = load ptr, ptr %closeL_p, align 8
+  br label %closeloop
+closeloop:
+  %cnode = phi ptr [ %closeL, %streamclose ], [ %cnext, %closecall ]
+  %cdone = icmp eq ptr %cnode, null
+  br i1 %cdone, label %ret, label %closecall
+closecall:
+  %chdr_p = getelementptr { ptr, ptr }, ptr %cnode, i32 0, i32 0
+  %chdr = load ptr, ptr %chdr_p, align 8
+  %cfp_p = getelementptr { ptr, ptr }, ptr %chdr, i32 0, i32 0
+  %cfp = load ptr, ptr %cfp_p, align 8
+  %cep_p = getelementptr { ptr, ptr }, ptr %chdr, i32 0, i32 1
+  %cep = load ptr, ptr %cep_p, align 8
+  call void %cfp(ptr %cep, i1 %evpresent, double %evcode_d, ptr %evsigname)
+  %cnext_p = getelementptr { ptr, ptr }, ptr %cnode, i32 0, i32 1
+  %cnext = load ptr, ptr %cnext_p, align 8
+  br label %closeloop
+bufcb:
+  %cb_p = getelementptr CPTY, ptr %cp, i32 0, i32 16
+  %cb = load ptr, ptr %cb_p, align 8
+  %hasCb = icmp ne ptr %cb, null
+  br i1 %hasCb, label %docb, label %ret
+docb:
+  ; stdout / stderr strings from the accumulators ("" if never allocated data)
+  %so_p = getelementptr CPTY, ptr %cp, i32 0, i32 14
+  %so = load ptr, ptr %so_p, align 8
+  %sostr = call ptr @__kml_cp_accum_str(ptr %so)
+  %se_p = getelementptr CPTY, ptr %cp, i32 0, i32 15
+  %se = load ptr, ptr %se_p, align 8
+  %sestr = call ptr @__kml_cp_accum_str(ptr %se)
+  ; err: null on success, else an Error object
+  %failed = icmp ne i64 %code64, 0
+  br i1 %failed, label %mkerr, label %callcb
+mkerr:
+  %emsg = call ptr @__kml_cp_exec_errmsg(i64 %code64)
+  %eobj = call ptr @malloc(i64 24)
+  %ek = getelementptr { i64, ptr, ptr }, ptr %eobj, i32 0, i32 0
+  store i64 0, ptr %ek, align 8
+  %em = getelementptr { i64, ptr, ptr }, ptr %eobj, i32 0, i32 1
+  store ptr %emsg, ptr %em, align 8
+  %en = getelementptr { i64, ptr, ptr }, ptr %eobj, i32 0, i32 2
+  store ptr ERRNAME, ptr %en, align 8
+  br label %callcb
+callcb:
+  %errv = phi ptr [ null, %docb ], [ %eobj, %mkerr ]
+  %bfp_p = getelementptr { ptr, ptr }, ptr %cb, i32 0, i32 0
+  %bfp = load ptr, ptr %bfp_p, align 8
+  %bep_p = getelementptr { ptr, ptr }, ptr %cb, i32 0, i32 1
+  %bep = load ptr, ptr %bep_p, align 8
+  call void %bfp(ptr %bep, ptr %errv, ptr %sostr, ptr %sestr)
+  br label %ret
+ret:
+  ret void
+}`)
 	if targetGOOS() == "windows" {
 		// Windows exit codes are full 32-bit; recover the wide value the POSIX
 		// 8-bit wait status dropped, falling back for foreign pids (ADR-00759).
@@ -488,7 +539,7 @@ entry:
   %%errno_pos = sitofp i32 %%e32 to double
   %%errno_neg32 = sub i32 0, %%e32
   %%errno_neg = sitofp i32 %%errno_neg32 to double
-  %%obj = call ptr @malloc(i64 %d)
+  %%obj = call ptr @calloc(i64 1, i64 %d)
   %%k = getelementptr %s, ptr %%obj, i32 0, i32 0
   store i64 0, ptr %%k, align 8
   %%m = getelementptr %s, ptr %%obj, i32 0, i32 1
@@ -517,12 +568,15 @@ entry:
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_cp_dispatch() {
 entry:
-  %%len = load i64, ptr @__kml_cp_len, align 8
-  %%data = load ptr, ptr @__kml_cp_data, align 8
+  call void @__kml_cp_wake_drain()
   %%i = alloca i64, align 8
   store i64 0, ptr %%i, align 8
   br label %%loop
 loop:
+  ; reloaded every iteration: a listener fired below may spawn a child, and
+  ; __kml_cp_register grows the registry with realloc
+  %%len = load i64, ptr @__kml_cp_len, align 8
+  %%data = load ptr, ptr @__kml_cp_data, align 8
   %%iv = load i64, ptr %%i, align 8
   %%inb = icmp slt i64 %%iv, %%len
   br i1 %%inb, label %%body, label %%done
@@ -577,6 +631,8 @@ tafter:
   %%a15 = load ptr, ptr %%a15_p, align 8
   call void @__kml_cp_drain(ptr %%cp, ptr %%fd3, ptr %%d8, ptr %%e9, ptr %%a15, i64 %%mode)
   call void @__kml_cp_ipc_drain(ptr %%cp)
+  ; 'exit' the iteration the process ends, independent of its stdio
+  call void @__kml_cp_reap(ptr %%cp)
   %%ofd = load i32, ptr %%fd2, align 4
   %%efd = load i32, ptr %%fd3, align 4
   %%oclosed = icmp slt i32 %%ofd, 0
@@ -590,7 +646,9 @@ tafter:
   %%botheof = and i1 %%botheof0, %%ipcdone
   br i1 %%botheof, label %%fin, label %%next
 fin:
-  call void @__kml_cp_finalize(ptr %%cp)
+  ; stdio has ended: 'close' fires once the child is also reaped (a no-op
+  ; until then — the exit wake brings the loop back here)
+  call void @__kml_cp_close(ptr %%cp)
   br label %%next
 next:
   %%inext = add i64 %%iv, 1
@@ -648,16 +706,16 @@ done:
   ret i64 %%r
 }`, cp, cp))
 
-	// __kml_cp_fdset_add(fdset, maxfd): add every live child's read fds; force
-	// a zero select() timeout when a child has both pipes at EOF but is not
-	// yet reaped (so dispatch finalizes it promptly).
+	// __kml_cp_fdset_add(fdset, maxfd): add every live child's read fds plus the
+	// exit wake. A child whose stdio has ended but which is still running costs
+	// nothing: the loop blocks, and the exit wake (runtime_childprocess_exit.go)
+	// brings it back to reap. True only for the one non-blocking pass a fresh
+	// registration asks for.
 	e.emitGlobal(fmt.Sprintf(`
 define i1 @__kml_cp_fdset_add(ptr %%fdset, ptr %%maxfd) {
 entry:
   %%len = load i64, ptr @__kml_cp_len, align 8
   %%data = load ptr, ptr @__kml_cp_data, align 8
-  %%force = alloca i1, align 1
-  store i1 0, ptr %%force, align 1
   %%i = alloca i64, align 8
   store i64 0, ptr %%i, align 8
   br label %%loop
@@ -697,21 +755,13 @@ addi:
   call void @__kml_worker_fd_setbit(i32 %%ipcfd, ptr %%fdset, ptr %%maxfd)
   br label %%chkforce
 chkforce:
-  %%obad = icmp slt i32 %%ofd, 0
-  %%ebad = icmp slt i32 %%efd, 0
-  %%both0 = and i1 %%obad, %%ebad
-  %%ipcdone = xor i1 %%ipcopen, 1
-  %%both = and i1 %%both0, %%ipcdone
-  br i1 %%both, label %%setforce, label %%next
-setforce:
-  store i1 1, ptr %%force, align 1
   br label %%next
 next:
   %%inext = add i64 %%iv, 1
   store i64 %%inext, ptr %%i, align 8
   br label %%loop
 done:
-  %%f = load i1, ptr %%force, align 1
+  %%f = call i1 @__kml_cp_wake_fdset_add(ptr %%fdset, ptr %%maxfd)
   ret i1 %%f
 }`, cp, cp, cp, cp))
 
@@ -755,6 +805,12 @@ no:
 	e.emitGlobal(`
 define void @__kml_cp_register(ptr %cp) {
 entry:
+  call void @__kml_cp_watch_init()
+  %wpid_p = getelementptr ` + cpStructIR + `, ptr %cp, i32 0, i32 0
+  %wpid64 = load i64, ptr %wpid_p, align 8
+  %wpid = trunc i64 %wpid64 to i32
+  call void @__kml_cp_watch_pid(i32 %wpid)
+  store i1 true, ptr @__kml_cp_kick, align 1
   %len = load i64, ptr @__kml_cp_len, align 8
   %cap = load i64, ptr @__kml_cp_cap, align 8
   %full = icmp sge i64 %len, %cap
@@ -784,6 +840,8 @@ store:
 	e.emitGlobal(fmt.Sprintf(`
 define ptr @__kml_cp_spawn(ptr %%file, ptr %%argsdata, i64 %%argslen, i64 %%mode, ptr %%cwd, ptr %%env, i64 %%timeout_ms, i64 %%killsig) {
 entry:
+  ; the exit wake must exist before the child can (TDD-00223 §5)
+  call void @__kml_cp_watch_init()
   %%argvlen = add i64 %%argslen, 2
   %%argvbytes = mul i64 %%argvlen, 8
   %%argv = call ptr @malloc(i64 %%argvbytes)
@@ -869,7 +927,7 @@ err_close:
 err_done:
   %%errr_val = phi i32 [ %%errr, %%err_pipe ], [ -1, %%err_close ]
 
-  %%cp = call ptr @calloc(i64 1, i64 200)
+  %%cp = call ptr @calloc(i64 1, i64 216)
   %%pid_p = getelementptr %s, ptr %%cp, i32 0, i32 0
   %%pid64 = zext i32 %%pid to i64
   store i64 %%pid64, ptr %%pid_p, align 8

@@ -386,7 +386,20 @@ func (e *Emitter) emitAlsRunExit(objVal Value, id string, elemT Type, method str
 	// normal-return path only; a callback that throws leaves its frame in place
 	// (a documented limitation — exception-safe restore is a follow-up).
 	e.emitInstr(fmt.Sprintf("call void @__kml_als_ctx_set(ptr %s)", old))
+	result.Ty = asyncCallbackResult(result.Ty)
 	return result, nil
+}
+
+// asyncCallbackResult types what a callback handed back when it is a promise: an
+// async callback returns a real task promise — pending until its body finishes
+// (TDD-00223 §2) — so `await als.run(store, async () => { … })` must wait on it.
+// A function type's return type does not carry the task flag by itself, and an
+// await of an unflagged Promise<void> reads nothing and continues at once.
+func asyncCallbackResult(t Type) Type {
+	if t.IsPromise && !(t.PromiseType != nil && t.PromiseType.IsResponse && !t.PromiseResolved) {
+		t.PromiseTask = true
+	}
+	return t
 }
 
 // --- AsyncResource + static bind/snapshot (TDD-00168 Stage 4) ---

@@ -51,6 +51,7 @@ type startupInfoEx struct {
 // conptyResult is what a pseudo-console run produced.
 type conptyResult struct {
 	Output   string // everything the console rendered, VT sequences included
+	Text     string // Output with the VT sequences removed (see stripVT)
 	ExitCode uint32
 }
 
@@ -185,7 +186,42 @@ func runInConPTYArgs(t *testing.T, argv []string, cols, rows int, timeout time.D
 	if ev == syscall.WAIT_TIMEOUT {
 		t.Fatalf("program did not exit within %v under the pseudo-console; output so far:\n%s", timeout, out.String())
 	}
-	return conptyResult{Output: out.String(), ExitCode: code}
+	return conptyResult{Output: out.String(), Text: stripVT(out.String()), ExitCode: code}
+}
+
+// stripVT removes the VT control sequences from a pseudo-console's output
+// stream: CSI (`ESC [ … final`), OSC (`ESC ] … BEL` or `… ESC \`), and the
+// two-byte `ESC x` forms. conhost renders asynchronously and is free to emit
+// its own sequences (the window-title OSC, cursor show/hide) at any byte
+// boundary — including the middle of a line the program wrote in one piece —
+// so a plain-text assertion has to match what a terminal would display, not
+// the raw stream.
+func stripVT(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != 0x1b || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		switch s[i+1] {
+		case '[':
+			i += 2
+			for i < len(s) && (s[i] < 0x40 || s[i] > 0x7e) {
+				i++
+			}
+		case ']':
+			i += 2
+			for i < len(s) && s[i] != 0x07 && !(s[i] == 0x1b && i+1 < len(s) && s[i+1] == '\\') {
+				i++
+			}
+			if i < len(s) && s[i] == 0x1b {
+				i++
+			}
+		default:
+			i++
+		}
+	}
+	return b.String()
 }
 
 // conptyChildPID is the pid of the most recently spawned pseudo-console

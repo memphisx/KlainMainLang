@@ -41,14 +41,14 @@ Where each failing file died in the pipeline. Near-misses (already compiled and 
 
 | Failing files | Phase |
 |---|---|
-| 1066 | runtime (ran, wrong result — near-miss) |
-| 7 | clang (invalid IR — codegen bug) |
+| 1061 | runtime (ran, wrong result — near-miss) |
+| 6 | clang (invalid IR — codegen bug) |
 | 2 | codegen (in-process hang — emitter/parser spin) |
 | 857 | wrongly-accepted (negative test compiled/ran) |
-| 685 | strict typed-rejection (recoverable under -compat=js) |
-| 44261 | compile (front-end parse/resolve/codegen) |
+| 687 | strict typed-rejection (recoverable under -compat=js) |
+| 44259 | compile (front-end parse/resolve/codegen) |
 | 3 | runtime (timeout) |
-| 96 | other |
+| 102 | other |
 
 ## Blocked-by histogram (compile-phase)
 
@@ -109,7 +109,7 @@ Each row is one concrete identifier/API whose absence was the *first* compile er
 | 103 | `===` | `built-ins/Array/prototype/every/15.4.4.16-7-b-15.js` |
 | 102 | `caller` | `built-ins/Function/15.3.5-1gs.js` |
 | 100 | `TestIterator` | `built-ins/Iterator/prototype/chunks/exhaustion-does-not-call-return.js` |
-| 90 | `result` | `built-ins/Array/prototype/forEach/15.4.4.18-5-2.js` |
+| 92 | `result` | `built-ins/Array/prototype/forEach/15.4.4.18-5-2.js` |
 | 89 | `DateTimeFormat` | `intl402/DateTimeFormat/canonicalize-calendar.js` |
 | 88 | `obj` | `built-ins/Array/from/elements-added-after.js` |
 | 86 | `y` | `built-ins/Date/value-symbol-to-prim-err.js` |
@@ -132,7 +132,7 @@ The `Reason` is normalized (position stripped, quoted identifiers collapsed to `
 | 2404 | compile | COMPILE_ERROR: undefined function or closure '%s' | `annexB/built-ins/Function/createdynfn-html-close-comment-body.js` |
 | 1465 | compile | COMPILE_ERROR: unexpected character '%s' | `built-ins/Function/prototype/toString/unicode.js` |
 | 1414 | compile | COMPILE_ERROR: Object.defineProperty requires a dynamic (any-typed) object | `annexB/built-ins/RegExp/prototype/Symbol.split/Symbol.match-getter-recompiles-source.js` |
-| 1059 | runtime | RUNTIME_NONZERO_EXIT:  | `annexB/built-ins/RegExp/RegExp-control-escape-russian-letter.js` |
+| 1054 | runtime | RUNTIME_NONZERO_EXIT:  | `annexB/built-ins/RegExp/RegExp-control-escape-russian-letter.js` |
 | 851 | neg-accepted | expected a parse-phase rejection but this compiled | `annexB/language/expressions/template-literal/legacy-octal-escape-sequence-strict.js` |
 | 748 | compile | COMPILE_ERROR: expected }, got [ | `annexB/language/statements/for-await-of/iterator-close-return-emulates-undefined-throws-when-called.js` |
 | 687 | compile | COMPILE_ERROR: '%s' is only valid inside a method or constructor body | `built-ins/Array/from/Array.from_forwards-length-for-array-likes.js` |
@@ -145,7 +145,7 @@ The `Reason` is normalized (position stripped, quoted identifiers collapsed to `
 | 422 | compile | COMPILE_ERROR: expected IDENT, got [ | `language/expressions/arrow-function/dstr/ary-ptrn-rest-ary-elem.js` |
 | 381 | compile | COMPILE_ERROR: a computed class member name must be a constant string or number literal — a dynamic key (identifier, call, Symbol, or… | `built-ins/Function/prototype/toString/async-generator-method-class-expression-static.js` |
 | 336 | compile | COMPILE_ERROR: no field '%s' | `built-ins/Array/prototype/concat/S15.4.4.4_A2_T2.js` |
-| 321 | strict-reject | STRICT_REJECT: cannot assign a string value to '%s' (a number) — a variable's type is fixed at its declaration; annotate it `: any` f… | `annexB/built-ins/escape/to-string-observe.js` |
+| 323 | strict-reject | STRICT_REJECT: cannot assign a string value to '%s' (a number) — a variable's type is fixed at its declaration; annotate it `: any` f… | `annexB/built-ins/escape/to-string-observe.js` |
 | 307 | compile | COMPILE_ERROR: '%s' requires an async generator, a sync generator, a class with a [Symbol.asyncIterator]() method, an array, a Map, or … | `language/expressions/async-generator/named-yield-promise-reject-next-for-await-of-sync-iterator.js` |
 | 303 | compile | COMPILE_ERROR: expected property name, got async | `built-ins/Array/fromAsync/async-iterable-input-does-not-await-input.js` |
 | 303 | compile | COMPILE_ERROR: unexpected token + in expression | `built-ins/Array/prototype/every/15.4.4.16-3-4.js` |

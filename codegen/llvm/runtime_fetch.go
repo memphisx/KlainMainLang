@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 )
 
 // ensureFetch declares the curl_easy_* primitives and __kml_curl_write_cb
@@ -172,6 +173,7 @@ func (e *Emitter) ensureFetchAsync() {
 		return
 	}
 	e.usedFetchAsync = true
+	e.noteLoopTurn() // the main-stack waits take turns of the real loop
 	e.ensureFetch()
 	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
 	e.ensureFiberRuntime()
@@ -220,6 +222,29 @@ func (e *Emitter) ensureFetchAsync() {
 	e.emitGlobal("declare i32 @curl_multi_perform(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare ptr @curl_multi_info_read(ptr noundef, ptr noundef)")
 	e.emitGlobal("@__kml_curl_multi = internal thread_local global ptr null, align 8")
+	// __kml_curl_inflight() -> i32: libcurl's count of transfers still in flight
+	// (0 with no multi handle). An in-flight transfer keeps the event loop alive —
+	// it is an open socket, which is what holds Node's loop open — whether or not
+	// anything is awaiting it yet (a Response body being streamed at top level, a
+	// fetch whose promise nobody has touched). curl_multi_perform is the only
+	// thing that reports the count; it is non-blocking, and completed transfers
+	// it notices are drained as usual.
+	e.emitGlobal(`
+define i32 @__kml_curl_inflight() {
+entry:
+  %multi = load ptr, ptr @__kml_curl_multi, align 8
+  %has = icmp ne ptr %multi, null
+  br i1 %has, label %ask, label %none
+ask:
+  %running = alloca i32, align 4
+  store i32 0, ptr %running, align 4
+  %rc = call i32 @curl_multi_perform(ptr %multi, ptr %running)
+  call void @__kml_curl_drain_messages()
+  %n = load i32, ptr %running, align 4
+  ret i32 %n
+none:
+  ret i32 0
+}`)
 	// For the HEAD → CURLOPT_NOBODY check in __kml_fetch_async's setmethod block.
 	e.ensureStrcmp()
 	e.emitGlobal(`@.kml_fetch_head_method = private unnamed_addr constant [5 x i8] c"HEAD\00"`)
@@ -329,7 +354,12 @@ setbody:
   br label %skipbody
 
 skipbody:
-  %pending = call ptr @malloc(i64 72)
+  ; 72 bytes of transfer state + field 9: the one task promise this fetch is
+  ; bridged to (null until something awaits or reacts to it) — see
+  ; @__kml_fetch_slot_to_promise.
+  %pending = call ptr @malloc(i64 80)
+  %p_bridge = getelementptr { ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64, ptr }, ptr %pending, i32 0, i32 9
+  store ptr null, ptr %p_bridge, align 8
   %p_easy = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 0
   store ptr %curl, ptr %p_easy, align 8
   %p_buf = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 1
@@ -585,6 +615,16 @@ doyield:
   br label %%checkloop
 
 busyspin:
+  ; Main stack, no task, no fiber: module top-level code. Take a turn of the
+  ; real event loop (TDD-00223 §1), pinned alive by this in-flight transfer —
+  ; it sleeps in select() on libcurl's sockets and serves every other source
+  ; meanwhile. Only from inside a loop callback (turn == 2) does the old
+  ; libcurl-only spin remain.
+  %%lturn = call i32 @__kml_loop_turn(i1 true)
+  %%lturn_cannot = icmp eq i32 %%lturn, 2
+  br i1 %%lturn_cannot, label %%rawspin, label %%checkloop
+
+rawspin:
   %%multi = load ptr, ptr @__kml_curl_multi, align 8
   call i32 @curl_multi_perform(ptr %%multi, ptr %%runningp)
   call void @__kml_curl_drain_messages()
@@ -679,6 +719,12 @@ doyield:
   store ptr null, ptr %ypf_p, align 8
   br label %checkloop
 spin:
+  ; module top-level code: a turn of the real loop, pinned by the transfer
+  ; (TDD-00223 §1); the libcurl-only spin survives only inside a loop callback
+  %lturn = call i32 @__kml_loop_turn(i1 true)
+  %lturn_cannot = icmp eq i32 %lturn, 2
+  br i1 %lturn_cannot, label %rawspin, label %checkloop
+rawspin:
   %multi = load ptr, ptr @__kml_curl_multi, align 8
   call i32 @curl_multi_perform(ptr %multi, ptr %runningp)
   call void @__kml_curl_drain_messages()
@@ -973,7 +1019,7 @@ done:
 	// the caller already holds %group and re-derives whatever it needs
 	// (winner index via __kml_first_done_index, per-member results via
 	// __kml_pending_finish/__kml_pending_finish_settled) once this returns.
-	e.emitGlobal(fmt.Sprintf(`
+	e.emitGlobal(strings.Replace(fmt.Sprintf(`
 define void @__kml_await_group_wait(ptr %%group) {
 entry:
   %%runningp = alloca i32, align 4
@@ -983,7 +1029,7 @@ checkloop:
   %%sat = call i1 @__kml_group_satisfied(ptr %%group)
   br i1 %%sat, label %%finish, label %%maybeyield
 
-maybeyield:
+maybeyield:;;TASKPARK;;
   %%curidx = load i64, ptr @__kml_current_conn_idx, align 8
   %%onfiber = icmp sge i64 %%curidx, 0
   br i1 %%onfiber, label %%doyield, label %%busyspin
@@ -1000,6 +1046,16 @@ doyield:
   br label %%checkloop
 
 busyspin:
+  ; Main stack, no task, no fiber: module top-level code. Take a turn of the
+  ; real event loop (TDD-00223 §1), pinned alive by this in-flight transfer —
+  ; it sleeps in select() on libcurl's sockets and serves every other source
+  ; meanwhile. Only from inside a loop callback (turn == 2) does the old
+  ; libcurl-only spin remain.
+  %%lturn = call i32 @__kml_loop_turn(i1 true)
+  %%lturn_cannot = icmp eq i32 %%lturn, 2
+  br i1 %%lturn_cannot, label %%rawspin, label %%checkloop
+
+rawspin:
   %%multi = load ptr, ptr @__kml_curl_multi, align 8
   call i32 @curl_multi_perform(ptr %%multi, ptr %%runningp)
   call void @__kml_curl_drain_messages()
@@ -1007,7 +1063,7 @@ busyspin:
 
 finish:
   ret void
-}`))
+}`), ";;TASKPARK;;", e.taskParkIR(taskPendingGroup, "%group"), 1))
 }
 
 // ensurePendingFinishSettled declares __kml_pending_finish_settled(ptr
@@ -1133,6 +1189,11 @@ doyield:
   br label %%checkloop
 
 busyspin:
+  ; This wait serves the synchronous XMLHttpRequest.send(): a blocking wait by
+  ; definition, and one that goroutine threads issue concurrently. It drives
+  ; libcurl alone and must never take a turn of the event loop — that belongs
+  ; to the reactor thread (TDD-00223 §1 applies to awaits, not to a call whose
+  ; contract is to block).
   %%multi = load ptr, ptr @__kml_curl_multi, align 8
   call i32 @curl_multi_perform(ptr %%multi, ptr %%runningp)
   call void @__kml_curl_drain_messages()
@@ -1377,4 +1438,41 @@ fin:
   store i8 0, ptr %term, align 1
   ret ptr %out
 }`)
+}
+
+// taskParkIR is the coroutine-park prefix of a fetch wait's maybeyield block: on
+// a task, record what the task is waiting for (field = value), suspend, and on
+// resume re-check. Without it a task waiting here fell into the main-stack spin
+// and held the whole loop. Returned in format-string form ('%%') because it is
+// spliced into a Sprintf template; empty when the program has no coroutines.
+func (e *Emitter) taskParkIR(field int, value string) string {
+	if !e.hasMaySuspend {
+		return ""
+	}
+	e.ensureCurrentTaskGlobal()
+	gc := ""
+	if e.isGCMode() {
+		gc = "\n  call void @__kml_task_gc_restore()"
+	}
+	t := taskStructIR
+	return fmt.Sprintf(`
+  %%tp_task = load ptr, ptr @__kml_current_task, align 8
+  %%tp_on = icmp ne ptr %%tp_task, null
+  br i1 %%tp_on, label %%tp_yield, label %%tp_no
+tp_yield:
+  %%tp_w_p = getelementptr %[1]s, ptr %%tp_task, i32 0, i32 %[2]d
+  store ptr %[3]s, ptr %%tp_w_p, align 8
+  %%tp_st_p = getelementptr %[1]s, ptr %%tp_task, i32 0, i32 %[4]d
+  store i64 1, ptr %%tp_st_p, align 8
+  %%tp_rc_p = getelementptr %[1]s, ptr %%tp_task, i32 0, i32 %[5]d
+  %%tp_rc = load ptr, ptr %%tp_rc_p, align 8
+  %%tp_ctx_p = getelementptr %[1]s, ptr %%tp_task, i32 0, i32 %[6]d
+  %%tp_ctx = load ptr, ptr %%tp_ctx_p, align 8
+  %%tp_sjt_p = getelementptr %[1]s, ptr %%tp_task, i32 0, i32 %[7]d
+  %%tp_top = load i32, ptr @__kml_jmp_top, align 4
+  %%tp_top64 = zext i32 %%tp_top to i64
+  store i64 %%tp_top64, ptr %%tp_sjt_p, align 8
+  %%tp_sw = call i32 @swapcontext(ptr %%tp_ctx, ptr %%tp_rc)%[8]s
+  br label %%checkloop
+tp_no:`, t, field, value, taskState, taskResumerCtx, taskCtx, taskSavedJmpTop, gc)
 }

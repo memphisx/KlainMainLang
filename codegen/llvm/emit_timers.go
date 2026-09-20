@@ -28,8 +28,15 @@ func (e *Emitter) timerCallbackPtr(arg ast.Expression, fnName string, pos ast.Po
 	if !val.Ty.IsFunc {
 		return "", fmt.Errorf("%d:%d: %s's first argument must be a function", pos.Line, pos.Col, fnName)
 	}
-	if len(val.Ty.FuncParams) != 0 || (val.Ty.FuncRetType != nil && val.Ty.FuncRetType.IR != "void") {
-		return "", fmt.Errorf("%d:%d: %s's callback must take no arguments and return nothing (() => void)", pos.Line, pos.Col, fnName)
+	if len(val.Ty.FuncParams) != 0 {
+		return "", fmt.Errorf("%d:%d: %s's callback must take no arguments", pos.Line, pos.Col, fnName)
+	}
+	// A timer ignores what its callback returns — `setTimeout(async () => { … })`
+	// and `setTimeout(() => count++)` are ordinary JS. The drain calls the
+	// closure as `void (ptr)`, so a value-returning callback goes through an
+	// adapter with the real return type rather than a mismatched call.
+	if val.Ty.FuncRetType != nil && val.Ty.FuncRetType.IR != "void" && val.Ty.FuncRetType.IR != "" {
+		val = e.emitDiscardReturnAdapter(val)
 	}
 	// TDD-00168 Stage 3: when the program uses AsyncLocalStorage, wrap the
 	// callback so it carries the async context captured at *this* schedule point
@@ -709,4 +716,36 @@ markdone2:
 tickret:
   ret void
 }`)
+}
+
+// emitDiscardReturnAdapter wraps a zero-argument closure that returns a value in
+// a `void (ptr)` closure that calls it and drops the result. env of the adapter
+// is the original closure header { fp, env }.
+func (e *Emitter) emitDiscardReturnAdapter(val Value) Value {
+	e.ensureMalloc()
+	e.discardAdapterCtr++
+	name := fmt.Sprintf("@__kml_discard_ret_%d", e.discardAdapterCtr)
+	retIR := val.Ty.FuncRetType.LLVMRetType()
+	e.emitGlobal(fmt.Sprintf(`
+define internal void %s(ptr %%orig) {
+entry:
+  %%fp_p = getelementptr { ptr, ptr }, ptr %%orig, i32 0, i32 0
+  %%fp = load ptr, ptr %%fp_p, align 8
+  %%ep_p = getelementptr { ptr, ptr }, ptr %%orig, i32 0, i32 1
+  %%ep = load ptr, ptr %%ep_p, align 8
+  %%ignored = call %s %%fp(ptr %%ep)
+  ret void
+}`, name, retIR))
+	clo := e.freshReg()
+	fpP := e.freshReg()
+	epP := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", clo))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpP, clo))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", name, fpP))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epP, clo))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, epP))
+	voidTy := TypeVoid
+	ty := val.Ty
+	ty.FuncRetType = &voidTy
+	return Value{Ref: clo, Ty: ty}
 }

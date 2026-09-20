@@ -137,6 +137,11 @@ none:
 // and/or not microtasks. When the real runtimes are present their definitions are
 // used and the corresponding stub is skipped. Called once at program finalization.
 func (e *Emitter) emitLoopTaskStubs() {
+	// The scheduler asks @__kml_group_satisfied about a task parked on a fetch
+	// group; without the combinator runtime no task ever parks on one.
+	if e.usedTaskRuntime && !e.usedPromiseCombinators {
+		e.emitGlobal("define i1 @__kml_group_satisfied(ptr %g) {\n  ret i1 1\n}")
+	}
 	// TDD-00142 Stage 3: the webview page-tick pump (@__kml_wv_pump) calls
 	// @__kml_timer_tick / @__kml_task_sched_step / @__kml_drain_microtasks
 	// unconditionally. When the corresponding runtime is absent, a no-op stub
@@ -222,6 +227,7 @@ func (e *Emitter) emitLoopTaskStubs() {
 	if !e.usedNetRuntime {
 		e.emitGlobal("define i1 @__kml_net_keepalive() {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define i1 @__kml_net_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define i1 @__kml_net_conn_wset_add(ptr %wfdset, ptr %efdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define void @__kml_net_dispatch() {\nentry:\n  ret void\n}")
 	}
 	// dgram (UDP socket) hooks likewise.
@@ -254,7 +260,7 @@ func (e *Emitter) ensureTaskRuntime() {
 	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := ucontextLayout()
 
 	e.emitGlobal("@__kml_task_launching = internal thread_local global ptr null, align 8")
-	e.emitGlobal("declare i32 @usleep(i32 noundef)")
+	e.ensureUsleepDecl()
 	e.emitGlobal("@__kml_task_data = internal thread_local global ptr null, align 8")
 	e.emitGlobal("@__kml_task_len = internal thread_local global i64 0, align 8")
 	e.emitGlobal("@__kml_task_cap = internal thread_local global i64 0, align 8")
@@ -563,11 +569,15 @@ pump:
   call void @__kml_curl_drain_messages()
   br label %%scan
 scan:
-  %%len = load i64, ptr @__kml_task_len, align 8
-  %%data = load ptr, ptr @__kml_task_data, align 8
   br label %%cond
 cond:
   %%i = phi i64 [ 0, %%scan ], [ %%inext, %%next ]
+  ; Reloaded every iteration: a resumed task can spawn tasks (an await on a
+  ; fetch spawns its bridge coroutine), and __kml_task_register grows the array
+  ; with realloc — a pointer or length held across the resume is stale, and the
+  ; scan would walk freed memory.
+  %%len = load i64, ptr @__kml_task_len, align 8
+  %%data = load ptr, ptr @__kml_task_data, align 8
   %%go = icmp slt i64 %%i, %%len
   br i1 %%go, label %%body, label %%done
 body:
@@ -595,6 +605,15 @@ chkfetch:
   %%fready = or i1 %%fdone, %%hdone
   br i1 %%fready, label %%resume, label %%next
 chkpp:
+  ; parked on a fetch group (Promise.all/race/any/allSettled over fetches)?
+  %%pg_p = getelementptr ` + taskStructIR + `, ptr %%t, i32 0, i32 ` + fmt.Sprintf("%d", taskPendingGroup) + `
+  %%pg = load ptr, ptr %%pg_p, align 8
+  %%haspg = icmp ne ptr %%pg, null
+  br i1 %%haspg, label %%chkgroup, label %%chkpp2
+chkgroup:
+  %%gsat = call i1 @__kml_group_satisfied(ptr %%pg)
+  br i1 %%gsat, label %%resume, label %%next
+chkpp2:
   %%pp_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   %%pp = load ptr, ptr %%pp_p, align 8
   %%haspp = icmp ne ptr %%pp, null
@@ -605,6 +624,8 @@ chkpres:
   %%presok = icmp ne i64 %%pres, 0
   br i1 %%presok, label %%resume, label %%next
 resume:
+  %%r_pg_p = getelementptr ` + taskStructIR + `, ptr %%t, i32 0, i32 ` + fmt.Sprintf("%d", taskPendingGroup) + `
+  store ptr null, ptr %%r_pg_p, align 8
   %%r_pf_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   store ptr null, ptr %%r_pf_p, align 8
   %%r_pp_p = getelementptr %s, ptr %%t, i32 0, i32 %d
@@ -682,6 +703,15 @@ chkfetch:
   %%fready = or i1 %%fdone, %%hdone
   br i1 %%fready, label %%yes, label %%next
 chkpp:
+  ; parked on a fetch group (Promise.all/race/any/allSettled over fetches)?
+  %%pg_p = getelementptr ` + taskStructIR + `, ptr %%t, i32 0, i32 ` + fmt.Sprintf("%d", taskPendingGroup) + `
+  %%pg = load ptr, ptr %%pg_p, align 8
+  %%haspg = icmp ne ptr %%pg, null
+  br i1 %%haspg, label %%chkgroup, label %%chkpp2
+chkgroup:
+  %%gsat = call i1 @__kml_group_satisfied(ptr %%pg)
+  br i1 %%gsat, label %%yes, label %%next
+chkpp2:
   %%pp_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   %%pp = load ptr, ptr %%pp_p, align 8
   %%haspp = icmp ne ptr %%pp, null
@@ -925,6 +955,7 @@ entry:
 	// microtask wakes it. At top level (no current task) it can't park, so it drives
 	// the microtask FIFO + scheduler + timers until settled. Emit code reads the
 	// value/rejection afterward.
+	e.noteLoopTurn() // the top-level branch waits through @__kml_top_await
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_task_await_ready(ptr %%promise) {
 entry:
@@ -949,7 +980,14 @@ checkconn:
   ; (task==null && conn_idx>=0) means we are genuinely on that fiber.
   %%cidx = load i64, ptr @__kml_current_conn_idx, align 8
   %%onfiber = icmp sge i64 %%cidx, 0
-  br i1 %%onfiber, label %%ckstreaming, label %%toploop
+  br i1 %%onfiber, label %%ckstreaming, label %%topawait
+topawait:
+  ; Neither a task nor a connection fiber: module top-level code on the main
+  ; stack. Wait by taking turns of the real event loop (TDD-00223 §1) — every
+  ; source keeps being served, as when Node suspends a module at its await.
+  %%ta_p = getelementptr %s, ptr %%promise, i32 0, i32 0
+  call void @__kml_top_await(ptr %%ta_p)
+  br label %%ret
 ckstreaming:
   ; Safety gate (ADR-00986): if THIS connection is consuming its own request
   ; body via req.stream(), the fiber must not be yielded — the reactor would
@@ -1041,5 +1079,5 @@ parkit:
   br label %%ret
 ret:
   ret void
-}`, promiseStructIR, promiseStructIR, promiseStructIR, promiseStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, gcRestoreAfterSwap))
+}`, promiseStructIR, promiseStructIR, promiseStructIR, promiseStructIR, promiseStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, gcRestoreAfterSwap))
 }

@@ -1922,6 +1922,8 @@ func (e *Emitter) emitClassVTable(className string) {
 // emitObjectLiteral).
 func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Param, sig FuncSig, body *ast.BlockStatement, retType Type, pos ast.Pos, isStatic, isAsync bool) error {
 	savedAllocas := e.allocas
+	savedSawAwait := e.sawAwait // TDD-00223 §2: did THIS body await?
+	e.sawAwait = false
 	savedBody := e.body
 	savedRegCtr := e.regCtr
 	savedLabelCtr := e.labelCtr
@@ -2070,8 +2072,8 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 
 	if isAsync {
 		e.emitInlineAsyncEpilogue()
-		e.functions.WriteString(fmt.Sprintf("\ndefine ptr @%s(%s) {\nentry:\n",
-			llvmName, strings.Join(llvmParams, ", ")))
+		// An async method whose body awaited runs as a coroutine (TDD-00223 §2).
+		e.writeAsyncDefinition(llvmName, strings.Join(llvmParams, ", "), e.sawAwait)
 	} else {
 		if retType.IR == "void" {
 			e.emitTerminator("ret void")
@@ -2081,9 +2083,12 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 		e.functions.WriteString(fmt.Sprintf("\ndefine %s @%s(%s) {\nentry:\n",
 			retType.LLVMRetType(), llvmName, strings.Join(llvmParams, ", ")))
 	}
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	if !isAsync {
+		e.functions.WriteString(e.allocas.String())
+		e.functions.WriteString(e.body.String())
+		e.functions.WriteString("}\n")
+	}
+	e.sawAwait = savedSawAwait
 
 	e.allocas = savedAllocas
 	e.body = savedBody

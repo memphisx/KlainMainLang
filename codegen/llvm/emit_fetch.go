@@ -339,8 +339,12 @@ func (e *Emitter) emitResponseArrayBuffer(objVal Value, pos ast.Pos) (Value, err
 // json() fast path (emitResponseJSON via emitDeclJSONProjection) still parses
 // straight into the declared type without the promise box — `await` there is
 // stripped before dispatch, so `const p: T = await r.json()` is unaffected.
-func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos) (Value, error) {
-	runner, innerTy, err := e.emitFetchBodyPromRunner(method, pos)
+func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos, jsonTarget ...Type) (Value, error) {
+	var target *Type
+	if len(jsonTarget) == 1 && method == "json" {
+		target = &jsonTarget[0]
+	}
+	runner, innerTy, err := e.emitFetchBodyPromRunner(method, pos, target)
 	if err != nil {
 		return Value{}, err
 	}
@@ -392,7 +396,7 @@ func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos) (Va
 // emitters — the drive-to-done is trivial since the fetch is already done) under
 // a setjmp guard and settles the promise fulfilled, or — for a JSON parse error
 // — rejected. Returns the runner name and the promise's inner value type.
-func (e *Emitter) emitFetchBodyPromRunner(method string, pos ast.Pos) (string, Type, error) {
+func (e *Emitter) emitFetchBodyPromRunner(method string, pos ast.Pos, jsonTarget *Type) (string, Type, error) {
 	respTy := ResponseType()
 	var innerTy Type
 	switch method {
@@ -401,6 +405,11 @@ func (e *Emitter) emitFetchBodyPromRunner(method string, pos ast.Pos) (string, T
 		innerTy = bodyTy
 	case "json":
 		innerTy = TypePtr
+		if jsonTarget != nil {
+			// `res.json() as T`: the same lazy promise, parsed into T when the body
+			// completes — never a synchronous drive of the transfer (TDD-00223).
+			innerTy = *jsonTarget
+		}
 	case "arrayBuffer":
 		innerTy = ArrayBufferType()
 	default:
@@ -410,11 +419,17 @@ func (e *Emitter) emitFetchBodyPromRunner(method string, pos ast.Pos) (string, T
 	if e.fetchBodyPromRunner == nil {
 		e.fetchBodyPromRunner = map[string]string{}
 	}
-	if name, ok := e.fetchBodyPromRunner[method]; ok {
-		return name, innerTy, nil
-	}
 	name := "@__kml_fetch_bodyprom_run_" + method
-	e.fetchBodyPromRunner[method] = name
+	if jsonTarget != nil {
+		// one runner per typed call site: its parse is specialised to T
+		e.fetchBodyPromTypedCtr++
+		name = fmt.Sprintf("@__kml_fetch_bodyprom_run_json_t%d", e.fetchBodyPromTypedCtr)
+	} else {
+		if cached, ok := e.fetchBodyPromRunner[method]; ok {
+			return cached, innerTy, nil
+		}
+		e.fetchBodyPromRunner[method] = name
+	}
 	e.ensureExceptionHelpers()
 
 	savedAllocas := e.allocas
@@ -458,7 +473,7 @@ func (e *Emitter) emitFetchBodyPromRunner(method string, pos ast.Pos) (string, T
 			if berr != nil {
 				return berr
 			}
-			val, err = e.emitJSONParseValue(body, TypePtr, pos)
+			val, err = e.emitJSONParseValue(body, innerTy, pos)
 		case "arrayBuffer":
 			val, err = e.emitResponseArrayBuffer(objVal, pos)
 		}
@@ -466,10 +481,14 @@ func (e *Emitter) emitFetchBodyPromRunner(method string, pos ast.Pos) (string, T
 			return err
 		}
 		e.emitInstr("call void @__kml_pop_jmpbuf()")
-		bits := e.promiseBitsOf(val)
-		vSlot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", vSlot, promiseStructIR, q))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bits, vSlot))
+		if jsonTarget != nil {
+			e.storePromiseValue(q, val) // any T, arrays included (two value words)
+		} else {
+			bits := e.promiseBitsOf(val)
+			vSlot := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", vSlot, promiseStructIR, q))
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bits, vSlot))
+		}
 		e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
 		e.emitTerminator("ret void")
 

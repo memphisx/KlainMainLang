@@ -101,10 +101,25 @@ done:
 define void @__kml_promise_drain_reactions(ptr %%p) {
 entry:
   %%rx_p = getelementptr %s, ptr %%p, i32 0, i32 4
-  %%head = load ptr, ptr %%rx_p, align 8
+  %%head0 = load ptr, ptr %%rx_p, align 8
+  br label %%rev
+rev:
+  ; The list is pushed at its head, so it holds the reactions newest-first;
+  ; they must run in the order they were registered (p.then(A); p.then(B) runs
+  ; A then B). Reverse it in place before enqueueing.
+  %%rprev = phi ptr [ null, %%entry ], [ %%rcur, %%revbody ]
+  %%rcur = phi ptr [ %%head0, %%entry ], [ %%rnext, %%revbody ]
+  %%rdone = icmp eq ptr %%rcur, null
+  br i1 %%rdone, label %%revdone, label %%revbody
+revbody:
+  %%rnext_p = getelementptr { ptr, ptr }, ptr %%rcur, i32 0, i32 1
+  %%rnext = load ptr, ptr %%rnext_p, align 8
+  store ptr %%rprev, ptr %%rnext_p, align 8
+  br label %%rev
+revdone:
   br label %%loop
 loop:
-  %%node = phi ptr [ %%head, %%entry ], [ %%next, %%body ]
+  %%node = phi ptr [ %%rprev, %%revdone ], [ %%next, %%body ]
   %%isnull = icmp eq ptr %%node, null
   br i1 %%isnull, label %%done, label %%body
 body:

@@ -1823,6 +1823,7 @@ tlsclosefd:
 		h2tlsBranch = b.String()
 	}
 
+	e.ensureLoopTurn()
 	e.emitGlobal(`
 define void @__kml_event_loop_run() {
 entry:
@@ -1849,9 +1850,22 @@ entry:
   ; goroutine / without klain:sync): the loop's fibers + thread-local state are
   ; thread-bound and must not migrate. See ensureHTTPRuntime's comment.
   call void @__kml_reactor_thread_lock()
+  %depth_in = load i64, ptr @__kml_loop_depth, align 8
+  %depth_in1 = add i64 %depth_in, 1
+  store i64 %depth_in1, ptr @__kml_loop_depth, align 8
   br label %outerloop
 
 outerloop:
+  ; TDD-00223 §1: a single-turn run (__kml_loop_turn) takes exactly one
+  ; iteration — one full pass over every source, one select() — and returns at
+  ; the top of the next, so the waiter can re-check what it is waiting for.
+  %oneshot = load i8, ptr @__kml_loop_oneshot, align 1
+  %oneshot_spent = icmp eq i8 %oneshot, 2
+  br i1 %oneshot_spent, label %alldone, label %oneshotarm
+oneshotarm:
+  %oneshot_armed = icmp eq i8 %oneshot, 1
+  %oneshot_next = select i1 %oneshot_armed, i8 2, i8 %oneshot
+  store i8 %oneshot_next, ptr @__kml_loop_oneshot, align 1
   ; TDD-00216: fire any background AbortSignal.timeout abort whose deadline has
   ; elapsed (no-op on an empty registry). Its deadline is folded into select()'s
   ; wait below (fdfolddone), so select wakes by the deadline and this fires it on
@@ -2151,17 +2165,31 @@ ccdone:
   %anywork = or i1 %anywork6h, %xlkeep
   ; TDD-00084 Part B: an active coroutine task keeps the loop alive too.
   %hasactivetasks_aw = load i1, ptr %hasactivetasks_slot, align 1
-  %anyworkt = or i1 %anywork, %hasactivetasks_aw
-  br i1 %anyworkt, label %dowork, label %alldone
+  %anyworkt0 = or i1 %anywork, %hasactivetasks_aw
+  ; A top-level wait on a fetch pins the loop: the transfer in flight is
+  ; libcurl's socket, which is what Node's loop would be holding open. (A wait
+  ; on a plain promise pins nothing: if the loop is otherwise empty the promise
+  ; can never settle, and the await site reports that as Node does — exit 13.)
+  %loop_pins = load i64, ptr @__kml_loop_pin, align 8
+  %loop_pinned = icmp sgt i64 %loop_pins, 0
+  %anyworkt1 = or i1 %anyworkt0, %loop_pinned
+  ; an in-flight libcurl transfer is an open socket: it holds the loop open.
+  ; Asked of libcurl here and now, never read from a cached count: transfers
+  ; are also driven and torn down outside this loop (the blocking
+  ; XMLHttpRequest.send(), an abort), and a stale "1" with no socket to wait on
+  ; would block the final select() forever.
+  %curl_inflight = call i32 @__kml_curl_inflight()
+  %curl_busy = icmp sgt i32 %curl_inflight, 0
+  %anyworkt = or i1 %anyworkt1, %curl_busy
+  br i1 %anyworkt, label %dowork, label %loopidle
 
 dowork:
-  ; TDD-00084 Part B: while a task is in flight, poll (zero select timeout) so a
-  ; task made runnable by another task's completion is stepped promptly rather
-  ; than blocked behind select() — the same busy-drive task_run_all does.
-  %ht_dw = load i1, ptr %hasactivetasks_slot, align 1
-  %fz_cur = load i1, ptr %forcezero, align 1
-  %fz_new = or i1 %fz_cur, %ht_dw
-  store i1 %fz_new, ptr %forcezero, align 1
+  ; A task in flight keeps the loop alive (above) but does NOT make it poll: a
+  ; parked task is woken by something this loop observes — its fetch's socket
+  ; or libcurl's timeout in select(), a promise settled by a callback or
+  ; microtask run in this iteration — and a task that is already runnable is
+  ; caught by @__kml_task_resumable below, which forbids blocking. Forcing a
+  ; zero timeout here made every await spin a full core for its whole wait.
   call ptr @memset(ptr %fdset, i32 0, i64 128)
   call ptr @memset(ptr %wfdset, i32 0, i64 128)
   call ptr @memset(ptr %efdset, i32 0, i64 128)
@@ -2346,6 +2374,13 @@ wscsetdone:
   %netfz0 = load i1, ptr %forcezero, align 1
   %netfz1 = or i1 %netfz0, %netfdforce
   store i1 %netfz1, ptr %forcezero, align 1
+  ; net: add every still-connecting client fd to the write + except sets so an
+  ; async connect completes (writable) or reports failure (excepted); a resolved
+  ; error forces a zero-timeout pass to deliver its 'error' event (ADR-01021).
+  %netwforce = call i1 @__kml_net_conn_wset_add(ptr %wfdset, ptr %efdset, ptr %maxfd)
+  %netwfz0 = load i1, ptr %forcezero, align 1
+  %netwfz1 = or i1 %netwfz0, %netwforce
+  store i1 %netwfz1, ptr %forcezero, align 1
   ; dgram: add every bound UDP socket fd.
   %dgfdforce = call i1 @__kml_dgram_fdset_add(ptr %fdset, ptr %maxfd)
   %dgfz0 = load i1, ptr %forcezero, align 1
@@ -2911,7 +2946,14 @@ markdone:
   store i64 -1, ptr %finterval_p, align 8
   br label %outerloop
 
+loopidle:
+  store i1 true, ptr @__kml_loop_idle, align 1
+  br label %alldone
+
 alldone:
+  %depth_out = load i64, ptr @__kml_loop_depth, align 8
+  %depth_out1 = sub i64 %depth_out, 1
+  store i64 %depth_out1, ptr @__kml_loop_depth, align 8
   ret void
 }`)
 }

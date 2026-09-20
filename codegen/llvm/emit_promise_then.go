@@ -193,6 +193,20 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 		retTy = innerTy // finally passes the source value through unchanged
 	}
 
+	// A callback that returns a promise resolves Q *with* that promise: Q settles
+	// the way it settles, to its value (flattening — `p.then(() => later())`
+	// yields later()'s value, not a promise). A raw fetch handle returned from
+	// the callback is bridged to a task promise first, inside the runner.
+	adopt := 0
+	if retTy.IsPromise {
+		adopt = 1
+		if !retTy.PromiseTask && retTy.PromiseType != nil && retTy.PromiseType.IsResponse && !retTy.PromiseResolved {
+			adopt = 2
+			e.ensureFetchSlotToPromise()
+		}
+		e.ensurePromiseAdopt()
+	}
+
 	// Q: the returned promise, allocated *pending* so a chained `.then` attaches a
 	// reaction that the runner fires when it settles Q.
 	q := e.freshReg()
@@ -214,7 +228,15 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	storeEnv(3, onFin)
 	storeEnv(4, q)
 
-	e.emitThenRunner(runner, innerTy, retTy)
+	e.emitThenRunner(runner, innerTy, retTy, adopt)
+	if adopt != 0 {
+		// Q's value type is what the returned promise resolves to.
+		if retTy.PromiseType != nil {
+			retTy = *retTy.PromiseType
+		} else {
+			retTy = TypeVoid
+		}
+	}
 
 	// closure { runner, env }
 	clo := e.freshReg()
@@ -329,10 +351,16 @@ try:
   call void @__kml_promise_settle(ptr %%prom, i64 1)
   ret void
 catch:
-  %%err = call ptr @__kml_get_thrown()
-  %%ebits = ptrtoint ptr %%err to i64
+  ; Reject with the thrown value itself — payload in v0, tag in v1, the shape
+  ; every rejection reader expects. A fetch aborted with a non-Error reason
+  ; (abort(42), abort("stop")) rejects with exactly that value, not a pointer.
+  %%epay = call i64 @__kml_get_thrown_pay()
+  %%etag = call i8 @__kml_get_thrown_tag()
+  %%etag64 = zext i8 %%etag to i64
   %%ev0_p = getelementptr %s, ptr %%prom, i32 0, i32 2
-  store i64 %%ebits, ptr %%ev0_p, align 8
+  store i64 %%epay, ptr %%ev0_p, align 8
+  %%ev1_p = getelementptr ` + promiseStructIR + `, ptr %%prom, i32 0, i32 3
+  store i64 %%etag64, ptr %%ev1_p, align 8
   call void @__kml_promise_settle(ptr %%prom, i64 2)
   ret void
 }`,
@@ -354,32 +382,11 @@ catch:
 // event loop drains, not at the `.then` call site. The fetch transfer itself is
 // already in flight from the fetch() call; only the completion wait is deferred.
 func (e *Emitter) emitFetchHandleToPendingPromise(slotRef string) Value {
-	e.ensureMicrotasks()
-	e.ensureFetchDriveRunner()
-
+	// The bridge runs as a coroutine that parks on the fetch (TDD-00223 §3) —
+	// see runtime_promise_adopt.go.
+	e.ensureFetchSlotToPromise()
 	prom := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
-
-	// env = { slot, prom }; closure = { @__kml_fetch_drive_run, env }
-	env := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
-	sGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", sGep, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", slotRef, sGep))
-	pGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", pGep, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", prom, pGep))
-
-	clo := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", clo))
-	cfp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", cfp, clo))
-	e.emitInstr(fmt.Sprintf("store ptr @__kml_fetch_drive_run, ptr %s, align 8", cfp))
-	cep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", cep, clo))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, cep))
-	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", clo))
-
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_slot_to_promise(ptr %s)", prom, slotRef))
 	rt := PromiseOf(ResponseType())
 	rt.PromiseTask = true
 	return Value{Ref: prom, Ty: rt}
@@ -473,7 +480,7 @@ func thenPassThroughIR(sfx string) string {
 // settled state, invokes the right callback, settles Q with its result (or
 // passes the source settlement through for finally / a missing callback), then
 // drains Q's own reactions so a chained `.then` fires.
-func (e *Emitter) emitThenRunner(runner string, argTy, retTy Type) {
+func (e *Emitter) emitThenRunner(runner string, argTy, retTy Type, adopt int) {
 	valLoad, argIR := thenValLoadIR(argTy)
 	produceF, storeSettleF := thenStoreResultIR(retTy, "f")
 	produceR, storeSettleR := thenStoreResultIR(retTy, "r")
@@ -531,6 +538,21 @@ func (e *Emitter) emitThenRunner(runner string, argTy, retTy Type) {
   store i64 2, ptr %qres_pr, align 8
 `
 	drainRet := "  call void @__kml_promise_drain_reactions(ptr %q)\n  ret void\n"
+	// The callback branches either settle Q with the returned value and drain, or
+	// — when the callback returned a promise — hand Q to the adoption job and
+	// leave it pending (draining a pending promise would fire its reactions early).
+	cbTail := func(storeSettle, sfx string) string {
+		if adopt == 0 {
+			return storeSettle + drainRet
+		}
+		h := "%rv" + sfx
+		pre := ""
+		if adopt == 2 {
+			pre = "  %rvp" + sfx + " = call ptr @__kml_fetch_slot_to_promise(ptr %rv" + sfx + ")\n"
+			h = "%rvp" + sfx
+		}
+		return pre + "  call void @__kml_promise_adopt(ptr %q, ptr " + h + ")\n  ret void\n"
+	}
 
 	e.emitGlobal(fmt.Sprintf(`
 define void %s(ptr %%env) {
@@ -579,9 +601,9 @@ propR:
 %s%s
 }`, runner, promiseStructIR, promiseStructIR, promiseStructIR,
 		passThroughD, drainRet,
-		fCall, storeSettleF+drainRet,
+		fCall, cbTail(storeSettleF, "f"),
 		passThroughF, drainRet,
-		rCall, storeSettleR+drainRet,
+		rCall, cbTail(storeSettleR, "r"),
 		propReject, drainRet))
 }
 

@@ -210,6 +210,7 @@ func (e *Emitter) buildResponseWithPending(status, body, bodyLen, pendingRef str
 // emitAwait evaluates the Promise (a ptr to the heap slot), loads the resolved
 // value, frees the slot, and returns the inner value.
 func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
+	e.sawAwait = true // the enclosing async callable runs as a coroutine (TDD-00223 §2)
 	hdlVal, err := e.emitExpr(ex.Argument)
 	if err != nil {
 		return Value{}, err
@@ -312,6 +313,17 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 // freed slot. A transport-level failure throws (an HTTP 4xx/5xx is a fulfilled
 // Response, per WHATWG).
 func (e *Emitter) emitAwaitFetchSlot(slotRef string) Value {
+	// `await p` on a fetch promise awaits the fetch's one bridge promise — the
+	// same promise `p.then(...)` reacts to — so awaits and reactions interleave
+	// in registration order and share one Response (TDD-00223 §3). The generator
+	// fiber and the http.listen handler keep the direct wait: neither is a task,
+	// and each already parks on the transfer itself.
+	if e.hasMaySuspend && e.currentGenerator == nil && !e.emittingHTTPHandler {
+		prom := e.emitFetchHandleToPendingPromise(slotRef)
+		if v, err := e.emitAwaitTaskPromise(prom.Ref, ResponseType()); err == nil {
+			return v
+		}
+	}
 	e.ensureFetchAsync()
 	e.ensureAwaitFetchHeaders()
 	pendingPtr := e.freshReg()
@@ -365,50 +377,17 @@ func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, er
 	} else {
 		e.ensurePromiseRuntime()
 		e.ensureMicrotasks()
-		// A pending task promise on the lightweight (no-fiber) path settles via a
-		// queued microtask (a `.then`/`.catch` chain reaction — ADR-00262) or a
-		// timer callback (`new Promise((res) => setTimeout(() => res(v)))` —
-		// TDD-00087). Drive both until it settles: drain the microtask FIFO, then
-		// fire the next due timer, re-checking each time. A settled async-fn result
-		// skips the loop immediately; a promise with nothing left to drive it falls
-		// through (rather than hanging). `__kml_timer_fire_next` is the real timer
-		// step when the program uses timers, else a no-op stub.
-		e.usedAwaitTimerDrive = true
-		loopL := e.freshLabel("await.loop")
-		drainL := e.freshLabel("await.drain")
-		timerL := e.freshLabel("await.timer")
-		readyL := e.freshLabel("await.ready")
-		stateOf := func() string {
-			sp := e.freshReg()
-			sv := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sp, promiseStructIR, hdlRef))
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", sv, sp))
-			return sv
-		}
-		e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
-		e.emitLabel(loopL)
-		s1 := stateOf()
-		set1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", set1, s1))
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", set1, readyL, drainL))
-		e.emitLabel(drainL)
-		e.emitInstr("call void @__kml_drain_microtasks()")
-		s2 := stateOf()
-		set2 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", set2, s2))
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", set2, readyL, timerL))
-		e.emitLabel(timerL)
-		fired := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_timer_fire_next()", fired))
-		// Also pump in-flight fetch transfers (TDD-00097 Stage 4) — a parked
-		// body-stream read is settled by curl's write callback, which only
-		// runs when the multi handle is driven. No fetch ⇒ a no-op stub.
-		pumped := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_fetch_pump()", pumped))
-		cont := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", cont, fired, pumped))
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cont, loopL, readyL))
-		e.emitLabel(readyL)
+		// A pending task promise with no coroutine to park: this is module
+		// top-level code (or a synchronous-path async fn it called). Wait by
+		// taking turns of the real event loop until the promise settles
+		// (@__kml_top_await, TDD-00223 §1) — a `.then` chain, a timer-deferred
+		// `new Promise`, a child's output, a socket: every source is served, as
+		// when Node suspends a module at its await. A promise nothing can ever
+		// settle ends the process with Node's exit code 13.
+		e.noteLoopTurn()
+		sp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sp, promiseStructIR, hdlRef))
+		e.emitInstr(fmt.Sprintf("call void @__kml_top_await(ptr %s)", sp))
 	}
 	// A rejected task promise (resolved == 2) re-throws its stored error at the
 	// awaiter, so `try { await f() } catch` works (TDD-00083 Stage 2).

@@ -540,15 +540,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				// `res.json() as T` supplies the parse target (a carve-out in
 				// the same spirit as `JSON.parse(s) as T`); the result is still
 				// a Promise<T> you await (TDD-00186 Part B).
-				bodyVal, err := e.emitResponseBody(objVal, ex.GetPos())
-				if err != nil {
-					return Value{}, err
-				}
-				parsed, err := e.emitJSONParseValue(bodyVal, ty, ex.GetPos())
-				if err != nil {
-					return Value{}, err
-				}
-				return e.wrapSettledTaskPromise(parsed), nil
+				return e.emitResponseCall(objVal, mem.Property, ex.GetPos(), ty)
 			}
 			return e.emitResponseCall(objVal, mem.Property, ex.GetPos())
 		}

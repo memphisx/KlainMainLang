@@ -87,11 +87,11 @@ var errorKinds = []string{"Error", "TypeError", "RangeError", "SyntaxError", "Ev
 // (not just the 5 IR fields here) so that a bounds-safe (if non-meaningful)
 // read of any errorObjType field — code/errcode/errstr and now syscall/path/dest —
 // through errorObjType.StructIR() on an AggregateError stays inside the buffer.
-// Kept >= errorObjType.StructSize() (currently 80, ten 8-byte fields); bump this
+// Kept >= errorObjType.StructSize() (thirteen 8-byte fields = 104); bump this
 // in lockstep whenever a field is appended to errorObjType.
 const (
 	aggregateErrorStructIR   = "{ i64, ptr, ptr, ptr, i64 }"
-	aggregateErrorStructSize = 80
+	aggregateErrorStructSize = 104
 )
 
 // errorKindIDs maps a kind name to its errorKinds index, built once at
@@ -151,6 +151,13 @@ var errorObjType = func() Type {
 		// `err.cause` — the error-options bag's cause (`new Error(m, { cause })`),
 		// a NaN-boxed any (nbUndefined when absent), matching Node's untyped slot.
 		{Name: "cause", Ty: TypeAny},
+		// Node net-error extras: `err.address` (the remote IP) and `err.port` (the
+		// remote port) of a failed connection — set only by the async net.connect
+		// failure path (__kml_net_connect_errobj, ADR-01021); null/0 for every
+		// other error. Every errorObjType allocation is calloc'd, so these default
+		// cleanly on errors that don't set them.
+		{Name: "address", Ty: TypePtr},
+		{Name: "port", Ty: TypeF64},
 	})
 	ty.IsError = true
 	return ty
@@ -213,6 +220,14 @@ func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
 	causeGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 10", causeGep, errorObjType.StructIR(), dataReg))
 	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, causeGep))
+	// The net-error extras address (11) / port (12) default null/0 on every error
+	// that does not set them (only the async net.connect failure path does).
+	addrGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 11", addrGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", addrGep))
+	portGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 12", portGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store double 0.0, ptr %s, align 8", portGep))
 
 	return dataReg
 }

@@ -59,14 +59,14 @@
             "total": 2860
           },
           "byPhase": {
-            "clang": 7,
+            "clang": 6,
             "codegen-hang": 2,
-            "compile": 44261,
+            "compile": 44259,
             "neg-accepted": 857,
-            "other": 96,
+            "other": 102,
             "run-timeout": 3,
-            "runtime": 1066,
-            "strict-reject": 685
+            "runtime": 1061,
+            "strict-reject": 687
           }
         }
       }

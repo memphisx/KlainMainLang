@@ -3293,7 +3293,7 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	e.emitLabel(ceFireL)
 	e.ensureCalloc()
 	ceSock := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 64)", ceSock))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 80)", ceSock))
 	ceSockFd := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", ceSockFd, netSocketIR, ceSock))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", fd64, ceSockFd))

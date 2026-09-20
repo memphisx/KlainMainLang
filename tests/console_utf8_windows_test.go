@@ -14,7 +14,7 @@ import (
 func TestE2EConsoleUTF8Output(t *testing.T) {
 	bin := buildBinary(t, "console.log('café-日本語-Ω')")
 	res := runInConPTY(t, bin, 80, 24, 20*time.Second, nil)
-	if !strings.Contains(res.Output, "café-日本語-Ω") {
+	if !strings.Contains(res.Text, "café-日本語-Ω") {
 		t.Fatalf("non-ASCII console output not rendered as UTF-8:\n%q", res.Output)
 	}
 }

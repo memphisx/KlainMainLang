@@ -57,7 +57,7 @@ http.listen(8241, (req: HttpRequest): { status: number; body: string } => {
 	if res.ExitCode != 0 {
 		t.Errorf("exit code = %d, want 0; output:\n%q", res.ExitCode, res.Output)
 	}
-	if !strings.Contains(res.Output, "handled:SIGINT") {
+	if !strings.Contains(res.Text, "handled:SIGINT") {
 		t.Errorf("handler never ran; output:\n%q", res.Output)
 	}
 }
@@ -82,10 +82,10 @@ http.listen(8242, (req: HttpRequest): { status: number; body: string } => {
 });
 `, readyPath))
 	res := runInConPTY(t, bin, 80, 24, 30*time.Second, ctrlCWhenReady(t, readyPath))
-	if !strings.Contains(res.Output, "handled:SIGINT") {
+	if !strings.Contains(res.Text, "handled:SIGINT") {
 		t.Errorf("SIGINT handler never ran; output:\n%q", res.Output)
 	}
-	if strings.Contains(res.Output, "handled:SIGTERM") {
+	if strings.Contains(res.Text, "handled:SIGTERM") {
 		t.Errorf("SIGTERM handler ran on Ctrl+C; output:\n%q", res.Output)
 	}
 }
@@ -130,10 +130,10 @@ setInterval(() => { console.log("tick"); }, 100000);
 	if res.ExitCode != 0 {
 		t.Errorf("exit code = %d, want 0; output:\n%q", res.ExitCode, res.Output)
 	}
-	if !strings.Contains(res.Output, "handled:SIGINT") {
+	if !strings.Contains(res.Text, "handled:SIGINT") {
 		t.Errorf("handler never ran; output:\n%q", res.Output)
 	}
-	if strings.Contains(res.Output, "tick") {
+	if strings.Contains(res.Text, "tick") {
 		t.Errorf("100s setInterval fired prematurely after Ctrl+C; output:\n%q", res.Output)
 	}
 }
@@ -199,10 +199,10 @@ setInterval(() => { console.log("tick"); }, 100000);
 	if res.ExitCode != 0 {
 		t.Errorf("exit code = %d, want 0; output:\n%q", res.ExitCode, res.Output)
 	}
-	if !strings.Contains(res.Output, "handled:SIGBREAK") {
+	if !strings.Contains(res.Text, "handled:SIGBREAK") {
 		t.Errorf("SIGBREAK handler never ran; output:\n%q", res.Output)
 	}
-	if strings.Contains(res.Output, "handled:SIGINT") {
+	if strings.Contains(res.Text, "handled:SIGINT") {
 		t.Errorf("SIGINT handler ran on Ctrl+Break; output:\n%q", res.Output)
 	}
 }

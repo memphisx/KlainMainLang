@@ -46,6 +46,9 @@ func errnoCodePairs() []errnoCodePair {
 		// Socket/bind errnos (TDD-00215 Stage 2: server 'error' event .code).
 		{int(syscall.EADDRINUSE), "EADDRINUSE"}, {int(syscall.EADDRNOTAVAIL), "EADDRNOTAVAIL"},
 		{int(syscall.ECONNRESET), "ECONNRESET"}, {int(syscall.ECONNREFUSED), "ECONNREFUSED"},
+		// Async net.connect failure errnos (ADR-01021: socket 'error' event .code).
+		{int(syscall.ETIMEDOUT), "ETIMEDOUT"}, {int(syscall.EHOSTUNREACH), "EHOSTUNREACH"},
+		{int(syscall.ENETUNREACH), "ENETUNREACH"}, {int(syscall.ECONNABORTED), "ECONNABORTED"},
 	}
 }
 
@@ -208,6 +211,7 @@ func (e *Emitter) ensureFsThrow() {
 	}
 	e.usedFsThrow = true
 	e.ensureMalloc()
+	e.ensureCalloc() // errobj is calloc'd so trailing fields (cause/address/port) default clean
 	e.ensureStrlen()
 	e.ensureSprintf()
 	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
@@ -246,7 +250,7 @@ entry:
   %%desc = select i1 %%desc_null, ptr %%errmsg, ptr %%desc_raw
   %%buf = call ptr @__kml_fs_errmsg(ptr %%code, ptr %%desc, ptr %%syscall, ptr %%path, ptr %%dest)
   %%errno_d = sitofp i32 %%errno_val to double
-  %%errobj = call ptr @malloc(i64 %d)
+  %%errobj = call ptr @calloc(i64 1, i64 %d)
   %%errobj.kind = getelementptr %s, ptr %%errobj, i32 0, i32 0
   store i64 281474976710656, ptr %%errobj.kind, align 8
   %%errobj.msg = getelementptr %s, ptr %%errobj, i32 0, i32 1

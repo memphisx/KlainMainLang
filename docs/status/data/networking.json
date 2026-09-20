@@ -33,7 +33,7 @@
             "notes": [
               "`init` is any value with some subset of `method: string` / `headers: Map<string,string> \\| Headers` / `body: string` fields; a real `Request` object works as the sole argument too, destructured the same way",
               "Non-blocking I/O ([ADR-00050](../adr/ADR-00050.md)): uses libcurl's multi-interface, driven by the same `select()`-based event loop `http.listen` uses, so `await fetch(...)` inside a connection-handler fiber yields — a slow upstream call doesn't stall other connections or timers",
-              "Outside any fiber (plain top-level code, no `http.listen`), there's nothing else to overlap with, so it busy-spins the same multi-interface calls to the same effect as a blocking wait",
+              "At module top level `await fetch(...)` takes turns of that same event loop until the response arrives — timers, sockets, child processes and an in-process server keep being served meanwhile, as when Node suspends a module at its `await` — and inside any async function, arrow or method it parks a coroutine; the loop sleeps in `select()` on libcurl's sockets either way ([TDD-00223](../tdd/TDD-00223.md)/[ADR-01023](../adr/ADR-01023.md))",
               "A network-level failure (DNS, connection refused, TLS, timeout) throws; a non-2xx HTTP status still resolves normally (`.ok` distinguishes it), matching real `fetch`",
               "`await fetch(...)` resolves when the response **headers** arrive (as in real JS, [ADR-00299](../adr/ADR-00299.md)); the body is read lazily — `.text()`/`.json()`/`.arrayBuffer()` drive the transfer to completion, `.body` streams it. A signal-carrying fetch still resolves at completion (its abort machinery lives in the full await)"
             ]

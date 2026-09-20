@@ -1220,6 +1220,13 @@ void klainsync_go(void *fn, void *env) {
  * local run queue are flushed to the global queue so a peer M can run them
  * (this M no longer will). A no-op off a goroutine (main/non-M thread already
  * never migrates). Idempotent. */
+/* Is the caller running as a goroutine? The event-loop turn a top-level await
+ * takes (runtime_loop_turn.go) belongs to a reactor thread; a goroutine has no
+ * loop of its own and must never run one on its M. */
+int klainsync_on_goroutine(void) {
+    return ks_curg != NULL;
+}
+
 void klainsync_lock_os_thread(void) {
     ks_g *g = ks_curg;
     ks_m *m = ks_curm;

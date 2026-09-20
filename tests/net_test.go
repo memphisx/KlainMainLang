@@ -249,18 +249,31 @@ sock.on('data', (chunk: Uint8Array) => {
 	}
 }
 
-// A connect to a closed port throws a catchable Error (V1: failure throws
-// rather than emitting an async 'error' event).
-func TestE2ENetConnectFailureThrows(t *testing.T) {
+// A connect to a closed port does not throw — net.connect is asynchronous
+// (ADR-01021). The socket is returned immediately and the failure surfaces as an
+// 'error' event carrying a coded Error (connect ECONNREFUSED <ip>:<port>, with
+// .code/.syscall/.errno/.address/.port), matching Node; the loop never blocks.
+func TestE2ENetConnectFailureEmitsError(t *testing.T) {
 	assertOutputImports(t, `
 import net from 'net'
-try {
-  net.connect(9, "127.0.0.1")   // port 9 (discard) refused on loopback here
-  console.log("no throw")
-} catch (e) {
-  console.log("caught")
+const sock = net.connect(1, "127.0.0.1")   // port 1 refused on loopback
+console.log("returned")
+sock.on('connect', () => { console.log("UNEXPECTED connect") })
+sock.on('error', (err) => {
+  console.log("error", err.code, err.syscall, err.message, err.address + ":" + err.port)
+})
+`, "returned\nerror ECONNREFUSED connect connect ECONNREFUSED 127.0.0.1:1 127.0.0.1:1")
 }
-`, "caught")
+
+// net.connect to an unresolvable host emits an async 'error' with a getaddrinfo
+// ENOTFOUND coded Error (ADR-01021) — Node's DNS-failure shape, not a throw.
+func TestE2ENetConnectDNSFailureEmitsError(t *testing.T) {
+	assertOutputImports(t, `
+import net from 'net'
+const sock = net.connect(80, "no-such-host.invalid.example")
+sock.on('connect', () => { console.log("UNEXPECTED connect") })
+sock.on('error', (err) => { console.log("error", err.code, err.syscall) })
+`, "error ENOTFOUND getaddrinfo")
 }
 
 // TDD-00131 (net.Server): server.address() reports the actual bound port,

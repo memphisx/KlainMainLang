@@ -53,6 +53,8 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 
 	// Save current function context.
 	savedAllocas := e.allocas
+	savedSawAwait := e.sawAwait // TDD-00223 §2: did THIS body await?
+	e.sawAwait = false
 	savedBody := e.body
 	savedRegCtr := e.regCtr
 	savedLabelCtr := e.labelCtr
@@ -368,8 +370,8 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		// Non-suspending async: coro.ret fulfills the settled promise, plus a
 		// catch block that rejects it on a thrown error (TDD-00084 Part A).
 		e.emitInlineAsyncEpilogue()
-		e.functions.WriteString(fmt.Sprintf("\ndefine ptr @%s(%s) {\nentry:\n",
-			llvmName, strings.Join(llvmParams, ", ")))
+		// A body that awaited runs as a coroutine (TDD-00223 §2).
+		e.writeAsyncDefinition(llvmName, strings.Join(llvmParams, ", "), e.sawAwait)
 	} else {
 		// Non-async: void → ret void; non-void → unreachable fallthrough.
 		if retType.IR == "void" {
@@ -380,9 +382,12 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		e.functions.WriteString(fmt.Sprintf("\ndefine %s @%s(%s) {\nentry:\n",
 			retType.LLVMRetType(), llvmName, strings.Join(llvmParams, ", ")))
 	}
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	if !decl.IsAsync || taskBody {
+		e.functions.WriteString(e.allocas.String())
+		e.functions.WriteString(e.body.String())
+		e.functions.WriteString("}\n")
+	}
+	e.sawAwait = savedSawAwait
 
 	// Restore saved context.
 	e.allocas = savedAllocas
@@ -2340,6 +2345,8 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	}
 	// Save emitter state.
 	savedAllocas := e.allocas
+	savedSawAwait := e.sawAwait // TDD-00223 §2: did THIS body await?
+	e.sawAwait = false
 	savedBody := e.body
 	savedRegCtr := e.regCtr
 	savedLabelCtr := e.labelCtr
@@ -2668,12 +2675,18 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 		}
 	}
 
-	// Write the function into e.functions.
-	e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n",
-		retTy.LLVMRetType(), closureName, paramStr))
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	// Write the function into e.functions. An async arrow whose body awaited
+	// runs as a coroutine (TDD-00223 §2).
+	if af.IsAsync {
+		e.writeAsyncDefinition(closureName, paramStr, e.sawAwait)
+	} else {
+		e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n",
+			retTy.LLVMRetType(), closureName, paramStr))
+		e.functions.WriteString(e.allocas.String())
+		e.functions.WriteString(e.body.String())
+		e.functions.WriteString("}\n")
+	}
+	e.sawAwait = savedSawAwait
 
 	// Restore state.
 	e.allocas = savedAllocas
@@ -3587,6 +3600,8 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	e.closureCtr++
 
 	savedAllocas := e.allocas
+	savedSawAwait := e.sawAwait // TDD-00223 §2: did THIS body await?
+	e.sawAwait = false
 	savedBody := e.body
 	savedRegCtr := e.regCtr
 	savedLabelCtr := e.labelCtr
@@ -3806,12 +3821,18 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	}
 
 	// Write the function into e.functions — exactly the same
-	// pattern emitClosureFunc uses: define + allocas + body + }.
-	e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n",
-		retTy.LLVMRetType(), closureName, paramStr))
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	// pattern emitClosureFunc uses: define + allocas + body + }. An async
+	// function expression whose body awaited runs as a coroutine (TDD-00223 §2).
+	if fe.IsAsync {
+		e.writeAsyncDefinition(closureName, paramStr, e.sawAwait)
+	} else {
+		e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n",
+			retTy.LLVMRetType(), closureName, paramStr))
+		e.functions.WriteString(e.allocas.String())
+		e.functions.WriteString(e.body.String())
+		e.functions.WriteString("}\n")
+	}
+	e.sawAwait = savedSawAwait
 
 	// Restore state.
 	e.allocas = savedAllocas

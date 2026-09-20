@@ -549,7 +549,7 @@
       "description": "var is function-scoped and re-declarable; let/const are block-scoped and const rebinding is rejected. A top-level const/let/var is a module global — readable and writable from any named function whenever its type is determinable before main() runs. Block redeclaration, TDZ, and use-before-assignment are compile errors.",
       "differences": [
         "Definite-assignment analysis is sound-not-complete: a typed `var`/`let` assigned only in a maybe-skipped loop or across correlated conditions still falls through to the `undefined`/zero default rather than raising `used before being assigned`.",
-        "A top-level `const`/`let` still isn't readable from a named `function` only in the invariant's genuine edges — a `bigint`, a *scalar*-returning un-annotated call (the `i64` default), a `new Set([…])` typed from its initializer array, or an init depending on a runtime-local (a `{ …rest }` spread of a destructuring target); an arrow/closure still captures any of them."
+        "A top-level `const`/`let` still isn't readable from a named `function` only in the invariant's genuine edges — a `bigint`, an un-annotated call *through another top-level binding* (`const f = () => …; const x = f()`), a `new Set([…])` typed from its initializer array, or an init depending on a runtime-local (a `{ …rest }` spread of a destructuring target); an arrow/closure still captures any of them."
       ],
       "seeAlso": [
         "lang.functiondecl",

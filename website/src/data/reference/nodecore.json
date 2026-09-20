@@ -10,7 +10,7 @@
     "strict": "1/17",
     "strictPct": 6
   },
-  "lede": "The smaller Node built-ins, grouped here rather than each given a full page. The recurring divergence is that anything nominally async is blocking under the hood — net/tls/dns/dgram fold their file descriptors into one select() loop, so a slow peer stalls it and connect/handshake failures throw a catchable Error rather than emitting an async 'error' event. Messages across process and channel boundaries (cluster, diagnostics_channel) are strings, the http/https clients are GET-only over libcurl, and vm stays out of scope behind the same blocker as bare eval().",
+  "lede": "The smaller Node built-ins, grouped here rather than each given a full page. net/tls/dns/dgram fold their file descriptors into one select() loop; net.connect is fully asynchronous (non-blocking connect, an async 'error' event with a coded Error), while tls.connect's handshake and dns are still blocking under the hood, so a slow peer there stalls the loop. Messages across process and channel boundaries (cluster, diagnostics_channel) are strings, the http/https clients are GET-only over libcurl, and vm stays out of scope behind the same blocker as bare eval().",
   "entries": [
     {
       "id": "nodecore.querystring",
@@ -130,7 +130,7 @@
       "statusRow": "net (TCP server: net.createServer, server.listen/address()/on('connection'|'listening')/close; TCP client: net.connect/createConnection (positional or { port, host }); connection socket .on('data'|'end')/.write/.end/.address()/.destroy()/.setNoDelay()/.setKeepAlive(); net.isIP/isIPv4/isIPv6)",
       "signature": "net.createServer(cb).listen(port, cb?); net.connect(port, host?, cb?)",
       "badge": "caveats",
-      "description": "TCP server and client. The accept loop and per-connection read pipes fold into the same select() event loop as child_process; a client socket reuses the same machinery once connected. 'data' delivers a Buffer; .write/.end take a string/Buffer/ArrayBuffer/DataView. address() reads the real bound address+port via getsockname+inet_ntop, making the listen(0) ephemeral-port idiom usable; net.isIP parses via inet_pton (0/4/6).",
+      "description": "TCP server and client. The accept loop and per-connection read pipes fold into the same select() event loop as child_process; net.connect is asynchronous — the socket returns immediately and the non-blocking connect completes on the loop, firing 'connect'/'ready' or an async 'error' (with a Node-shaped coded Error) then 'close'. 'data' delivers a Buffer; .write/.end take a string/Buffer/ArrayBuffer/DataView. address() reads the real bound address+port via getsockname+inet_ntop, making the listen(0) ephemeral-port idiom usable; net.isIP parses via inet_pton (0/4/6).",
       "returns": {
         "type": "net.Server | net.Socket",
         "desc": "A server or connection handle."
@@ -138,10 +138,10 @@
       "exampleKey": "net/echo_server",
       "snippet": "const server = net.createServer((socket) => {\n  socket.on('data', (chunk: Uint8Array) => { socket.write(chunk); });\n});\nserver.listen(9099);",
       "differences": [
-        "`net.connect` uses a **blocking** `connect()` — a slow/unreachable host blocks the event loop until the OS connect timeout; a connect failure **throws** a catchable `Error` rather than emitting an async `'error'` event",
+        "`net.connect` is **asynchronous** — the socket returns immediately and the non-blocking connect completes on the event loop's write/except sets: `'connect'`/`'ready'` on success, or an async `'error'` (a Node-shaped coded Error — `connect ECONNREFUSED <ip>:<port>` / `getaddrinfo ENOTFOUND <host>`, with `.code`/`.errno`/`.syscall`/`.address`/`.port`) followed by `'close'` on failure. It never blocks the loop or throws synchronously",
         "Server binds IPv4 `0.0.0.0` only (no `host`/`path`/options object on `listen`); `.address()` reports the **real** bound address/port via `getsockname` (`{ family: \"IPv4\", address, port }`) — for a server that's `0.0.0.0`, for a connected socket its real local IP (e.g. `127.0.0.1`). Because the bind is IPv4-native, an accepted socket reports `127.0.0.1` where Node's dual-stack default reports `::ffff:127.0.0.1`, and the server reports `IPv4`/`0.0.0.0` not `IPv6`/`::`",
         "`net.connect` accepts every positional arity (`(port)`, `(port, cb)`, `(port, host[, cb])`) and `{ port, host }` (host defaults to `localhost`); the IPC `{ path }` form connects to a Unix-domain socket (Mac-verified; Linux path-layout unverified)",
-        "`on('listening')` fires when the server binds (registered before or after `listen()`); no `'error'`/`'close'`/`'connect'` events on server or socket yet",
+        "`on('listening')` fires when the server binds (registered before or after `listen()`); a client socket fires `'connect'`/`'ready'`/`'close'`/`'error'`, but there is no server `'error'` event yet, and a mid-connection transport error (post-connect read/write failure) is not surfaced as `'error'` — only connect-time failures emit it",
         "`socket.setNoDelay`/`setKeepAlive` are real `setsockopt` calls — `setKeepAlive(enable, initialDelay)` honours the idle-time argument (`TCP_KEEPIDLE`, or `SIO_KEEPALIVE_VALS` on Windows); `setEncoding`/`ref`/`unref`/`pause`/`resume`/`setTimeout` are **accepted but no-ops** (the blocking read model has no separately-schedulable flow or idle timer, and a socket's chunk type already follows the listener's declared parameter type)",
         "No back-pressure: `.write` never returns `false` and there's no `'drain'` event",
         "Listeners must be arrow/function-expression literals",

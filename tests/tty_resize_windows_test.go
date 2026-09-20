@@ -23,7 +23,7 @@ setTimeout(() => {}, 3000)
 		conptyResize(120, 40)
 		time.Sleep(700 * time.Millisecond)
 	})
-	if !strings.Contains(res.Output, "RESIZE 120x40") {
+	if !strings.Contains(res.Text, "RESIZE 120x40") {
 		t.Fatalf("SIGWINCH did not fire with the new size:\n%q", res.Output)
 	}
 }

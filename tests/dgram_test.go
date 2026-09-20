@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,9 +68,15 @@ s.close()
 // probe datagram before returning; killed via t.Cleanup since it never exits.
 func startUDPServer(t *testing.T, src string, port int) int {
 	t.Helper()
-	np := freePort(t)
+	np := freeUDPPort(t)
 	binFile := buildBinaryImports(t, subPort(src, port, np))
 	cmd := exec.Command(binFile)
+	// Kept for the failure message: a server that never answers is otherwise
+	// opaque (run with KML_IO_TRACE=1 in the environment to get the Windows
+	// reactor's trace here too).
+	serverOut := &syncBuffer{}
+	cmd.Stdout = serverOut
+	cmd.Stderr = serverOut
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
@@ -96,6 +103,28 @@ func startUDPServer(t *testing.T, src string, port int) int {
 		conn.Close()
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("dgram server never responded on %s", addr)
+	t.Fatalf("dgram server never responded on %s; server output:\n%s", addr, tailLines(serverOut.String(), 40))
 	return -1
+}
+
+// tailLines returns the last n lines of s (for failure messages).
+func tailLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// freeUDPPort asks the OS for a free *UDP* port. freePort probes TCP, and a port
+// free for TCP can still be taken for UDP (a resolver, a browser's QUIC socket) —
+// the server's bind then fails and it never answers a probe.
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a UDP port: %v", err)
+	}
+	defer pc.Close()
+	return pc.LocalAddr().(*net.UDPAddr).Port
 }

@@ -22,7 +22,7 @@ const r: number = process.stdout.rows!
 console.log("size=" + c + "x" + r + " tty=" + process.stdout.isTTY)
 `)
 	res := runInConPTY(t, bin, 100, 30, 20*time.Second, nil)
-	if !strings.Contains(res.Output, "size=100x30 tty=true") {
+	if !strings.Contains(res.Text, "size=100x30 tty=true") {
 		t.Fatalf("console size/isTTY not reported; output:\n%q", res.Output)
 	}
 }
@@ -47,7 +47,7 @@ console.log("first=" + a.charCodeAt(0) + " second=" + codes.trim())
 		time.Sleep(300 * time.Millisecond)
 		write("\x1b[A")
 	})
-	if !strings.Contains(res.Output, "first=113 second=27 91 65") {
+	if !strings.Contains(res.Text, "first=113 second=27 91 65") {
 		t.Fatalf("raw-mode keys not delivered as expected; output:\n%q", res.Output)
 	}
 }
@@ -68,7 +68,7 @@ console.log("alen=" + a.length + " b=" + b)
 		time.Sleep(1500 * time.Millisecond)
 		write("z")
 	})
-	if !strings.Contains(res.Output, "alen=0 b=z") {
+	if !strings.Contains(res.Text, "alen=0 b=z") {
 		t.Fatalf("readKey timeout semantics off; output:\n%q", res.Output)
 	}
 }
@@ -97,10 +97,10 @@ process.stdin.on('end', () => { console.log("end") })
 	})
 	// The é must survive as UTF-8 (cooked ReadConsoleW → UTF-16 → UTF-8), and
 	// EOF must arrive so the flowing stream ends and the program exits.
-	if !strings.Contains(res.Output, "got[café]") {
+	if !strings.Contains(res.Text, "got[café]") {
 		t.Fatalf("console stdin did not deliver a UTF-8 line intact; output:\n%q", res.Output)
 	}
-	if !strings.Contains(res.Output, "end") {
+	if !strings.Contains(res.Text, "end") {
 		t.Fatalf("console stdin EOF (Ctrl+Z) did not end the stream; output:\n%q", res.Output)
 	}
 }
@@ -140,7 +140,7 @@ console.log("chose " + items[sel])
 		write("q")
 	})
 	for _, want := range []string{"Pick one (60 cols)", "gamma", "chose gamma"} {
-		if !strings.Contains(res.Output, want) {
+		if !strings.Contains(res.Text, want) {
 			t.Errorf("console TUI run missing %q; output:\n%q", want, res.Output)
 		}
 	}

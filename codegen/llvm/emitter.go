@@ -430,6 +430,16 @@ type Emitter struct {
 	// entry function is being emitted (gates parentPort/workerData).
 	usedConnPokeGlobal     bool
 	usedChildProcRuntime   bool
+	usedCPExitWake bool // runtime_childprocess_exit.go: the child-exit loop wake
+	usedLoopTurn     bool // emitted code references __kml_loop_turn/__kml_top_await (runtime_loop_turn.go)
+	usedLoopTurnDefs bool
+	usedPromiseAdopt       bool // runtime_promise_adopt.go
+	fetchBodyPromTypedCtr  int  // per-call-site typed json() runners (emit_fetch.go)
+	discardAdapterCtr      int  // emitDiscardReturnAdapter (emit_timers.go)
+	topLevelNames          map[string]bool // every name bound at module top level (registerModuleGlobals)
+	usedFetchSlotToPromise bool
+	sawAwait         bool // set by emitAwait/for-await while a function body is emitted; saved/restored per body
+	usedUsleepDecl   bool
 	usedFsWatchRuntime     bool
 	usedThreadPool         bool
 	usedReadlineRuntime    bool
@@ -2545,6 +2555,15 @@ entry:
 	// TDD-00098: a program that spawned workers must keep driving the full
 	// loop — it is what delivers worker messages and joins exited workers.
 	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedFsWatchRuntime || e.usedThreadPool || e.usedReadlineRuntime || e.usedStdinRuntime || e.usedNetRuntime || e.usedDgramRuntime || e.usedIPCChildRuntime || e.usedHTTPListen
+	// TDD-00223: anything that waits from the main stack takes turns of the real
+	// loop, and a program with coroutine tasks or async fetch sleeps in its
+	// select() instead of spinning a private scheduler drive.
+	useFullLoop = useFullLoop || e.usedLoopTurn || e.usedTaskRuntime || e.usedFetchAsync
+	// A timer callback that settles a promise queues its reactions as microtasks,
+	// and only the full loop drains microtasks between macrotasks; the plain
+	// timer drain fired the timer and then exited with the reactions still
+	// queued — `later(20).then(f)` never ran f.
+	useFullLoop = useFullLoop || (e.usedTimers && e.usedMicrotasks)
 	if useFullLoop {
 		e.ensureHTTPRuntime() // emit event_loop_run + every symbol it references
 		e.emitInstr("call void @__kml_event_loop_run()")

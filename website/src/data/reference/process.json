@@ -435,7 +435,7 @@
         "desc": "Registers the handler."
       },
       "differences": [
-        "The handler runs from ordinary control flow at the top of the event loop's iteration, never from real async signal context (on Windows the console callback queues the signal and the loop's next wait, at most 50 ms away, delivers it on the main thread).",
+        "The handler runs from ordinary control flow at the top of the event loop's iteration, never from real async signal context (on Windows the console callback queues the signal and ends the loop's wait with a completion packet, so it is delivered on the main thread at once).",
         "Event name must be a compile-time string literal, exactly `'SIGINT'`/`'SIGTERM'`/`'SIGWINCH'`/`'SIGBREAK'`.",
         "Handler must be a zero-argument `() => void` closure; one handler slot per signal (re-registering overwrites).",
         "Only fires while a `http.listen`- or timer-driven event loop is actively iterating; a plain synchronous script has no loop to check from."

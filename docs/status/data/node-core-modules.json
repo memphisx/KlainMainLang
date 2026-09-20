@@ -86,17 +86,15 @@
             "feature": "`net`",
             "status": "implemented",
             "caveats": [
-              "`net.connect` uses a **blocking** `connect()` — a slow/unreachable host blocks the event loop until the OS connect timeout ([ADR-00328](../adr/ADR-00328.md))",
-              "A connect failure **throws** a catchable `Error` rather than emitting an async `'error'` event",
               "Server binds IPv4 `0.0.0.0` only — no `host`/`path`/options object on `listen`",
               "IPv4-native bind: an accepted socket reports `127.0.0.1` where Node's dual-stack default reports `::ffff:127.0.0.1`, and the server reports `IPv4`/`0.0.0.0` not `IPv6`/`::`",
               "IPC `{ path }` Unix-domain socket: Linux path-layout unverified (Mac-verified only) ([ADR-00588](../adr/ADR-00588.md))",
-              "No `'error'`/`'close'`/`'connect'` events on server or socket yet",
+              "No server `'error'` event — a `listen`/bind failure has no async error path yet (a client socket's `'connect'`/`'ready'`/`'close'`/`'error'` all fire)",
               "`setEncoding`/`ref`/`unref`/`pause`/`resume`/`setTimeout` are accepted but no-ops",
               "No back-pressure: `.write` never returns `false` and there's no `'drain'` event",
               "Listeners must be arrow/function-expression literals",
               "`net.Server`/`net.Socket` are not exposed as constructible classes",
-              "Socket `'close'` fires with no `hadError` argument, and `'error'` listeners stay a rejection — the runtime's failure paths throw instead of emitting ([ADR-00501](../adr/ADR-00501.md))"
+              "Socket `'close'` fires with no `hadError` argument; a mid-connection transport error (a post-connect read/write failure) is not surfaced as `'error'` — only connect-time failures emit `'error'` ([ADR-01021](../adr/ADR-01021.md))"
             ],
             "notes": [
               "Surface: TCP server: `net.createServer`, `server.listen`/`address()`/`on('connection'\\|'listening')`/`close`; TCP client: `net.connect`/`createConnection` (positional or `{ port, host }`); connection socket `.on('data'\\|'end'\\|'close'\\|'connect'/'ready')`/`.write`/`.end`/`.address()`/`.destroy()`/`.setNoDelay()`/`.setKeepAlive()`; `net.isIP`/`isIPv4`/`isIPv6`",
@@ -105,6 +103,7 @@
               "`'data'` delivers a Buffer; `.write`/`.end` take a string/Buffer/ArrayBuffer/DataView",
               "`.address()` reports the real bound `{ family: \"IPv4\", address, port }` via `getsockname` — `0.0.0.0` for a server, the real local IP for a connected socket",
               "`net.connect` accepts every positional arity (`(port)`, `(port, cb)`, `(port, host[, cb])`) and `{ port, host }` (host defaults to `localhost`); `on('listening')` fires when the server binds, registered before or after `listen()` ([ADR-00413](../adr/ADR-00413.md))",
+              "`net.connect` is **asynchronous** ([ADR-01021](../adr/ADR-01021.md)): the socket returns immediately and the non-blocking connect completes on the event loop (write/except sets) — `'connect'`/`'ready'` on success, or an async `'error'` then `'close'` on failure. The `'error'` Error carries Node's exact shape: `connect ECONNREFUSED <ip>:<port>` (or `getaddrinfo ENOTFOUND <host>`) with `.code`/`.errno`/`.syscall`/`.address`/`.port`. It never blocks the loop or throws synchronously",
               "`socket.setNoDelay`/`setKeepAlive` are real `setsockopt` calls — `setKeepAlive(enable, initialDelay)` honours the idle-time argument (`TCP_KEEPIDLE`, or `SIO_KEEPALIVE_VALS` on Windows) ([ADR-00760](../adr/ADR-00760.md))",
               "See [ADR-00358](../adr/ADR-00358.md)",
               "`isIP`/`isIPv4`/`isIPv6` match Node's strict parser, not the platform `inet_pton`: leading-zero v4 octets and >4-digit v6 groups rejected, `%zone` IDs accepted ([ADR-00457](../adr/ADR-00457.md))"
@@ -131,7 +130,7 @@
             "feature": "`tls`",
             "status": "implemented",
             "caveats": [
-              "**Blocking** TCP connect + TLS handshake on both sides (a slow peer stalls the loop), the same simplification `net.connect` makes",
+              "**Blocking** TCP connect + TLS handshake on both sides (a slow peer stalls the loop); unlike plaintext `net.connect`, which is asynchronous ([ADR-01021](../adr/ADR-01021.md)), `tls.connect` has not yet moved off the blocking handshake",
               "OpenSSL-only (libssl) — a `-crypto=commoncrypto` build using `tls` is a clean compile error (Mac's CommonCrypto has no TLS API)",
               "Client options `{ rejectUnauthorized }` only — no client-cert / ALPN / `servername` override (SNI = the host)",
               "Server `{ cert, key }` are PEM **strings** only — one cert per server, no chain/passphrase, no `requestCert`"

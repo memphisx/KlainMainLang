@@ -767,9 +767,12 @@ async function main2(): Promise<void> {
     ps.push(fetch("%s/slow"))
     const responses = await Promise.all(ps)
     console.log(responses.length)
+    // Timed where the wait ends. main2() is not awaited, so a line printed
+    // after the call runs *before* the fetches finish — as in Node — and
+    // would measure nothing.
+    console.log(Date.now() - t0)
 }
 main2()
-console.log(Date.now() - t0)
 `, srv.URL, srv.URL)
 	out := compileAndRun(t, src)
 	lines := strings.Split(out, "\n")

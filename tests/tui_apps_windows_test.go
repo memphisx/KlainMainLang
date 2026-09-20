@@ -53,7 +53,7 @@ func TestE2ETuiMenuAppNavigates(t *testing.T) {
 
 	// The initial frame paints in full — title, every item unchecked, count 0.
 	for _, want := range []string{"fruit picker", "[ ] apple", "[ ] cherry", "[ ] elderberry", "chosen: 0/5"} {
-		if !strings.Contains(res.Output, want) {
+		if !strings.Contains(res.Text, want) {
 			t.Errorf("menu app: expected %q in the initial frame; output:\n%q", want, res.Output)
 		}
 	}
