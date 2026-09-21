@@ -123,6 +123,11 @@ static int (WINAPI *p_getpeername)(ws_SOCKET, void *, int *);
 static int (WINAPI *p_ioctlsocket)(ws_SOCKET, long, unsigned long *);
 static int (WINAPI *p_WSAIoctl)(ws_SOCKET, unsigned long, void *, unsigned long, void *, unsigned long, unsigned long *, void *, void *);
 static int (WINAPI *p_WSAPoll)(ws_pollfd *, unsigned long, int);
+// Socket hand-off between processes (cluster round-robin). The descriptor is
+// winsock2.h's WSAPROTOCOL_INFOW (628 bytes), opaque here.
+typedef struct { char opaque[628]; } ws_PROTOCOL_INFOW;
+static int (WINAPI *p_WSADuplicateSocketW)(ws_SOCKET, unsigned long, ws_PROTOCOL_INFOW *);
+static ws_SOCKET (WINAPI *p_WSASocketW)(int, int, int, ws_PROTOCOL_INFOW *, unsigned int, unsigned long);
 // Overlapped socket I/O for the IOCP reactor (TDD-00183 Stage 2). WSABUF is
 // winsock2.h's { u_long len; char *buf }; defined here since that header is not
 // included (it would clash with this file's POSIX-named socket definitions).
@@ -153,7 +158,7 @@ void ws_init(void) {
 	B(WSAStartup); B(WSAGetLastError); B(socket); B(bind); B(listen); B(accept);
 	B(connect); B(recv); B(send); B(recvfrom); B(sendto); B(closesocket);
 	B(shutdown); B(setsockopt); B(getsockopt); B(getsockname); B(getpeername);
-	B(ioctlsocket); B(WSAIoctl); B(WSAPoll); B(WSARecv); B(WSARecvFrom); B(WSAGetOverlappedResult); B(select); B(getaddrinfo); B(freeaddrinfo); B(inet_pton);
+	B(ioctlsocket); B(WSAIoctl); B(WSAPoll); B(WSADuplicateSocketW); B(WSASocketW); B(WSARecv); B(WSARecvFrom); B(WSAGetOverlappedResult); B(select); B(getaddrinfo); B(freeaddrinfo); B(inet_pton);
 	B(inet_ntop); B(gethostname); B(htons); B(ntohs);
 #undef B
 	ws_WSADATA d;
@@ -277,29 +282,29 @@ static void afd_bind_ext(ws_SOCKET s) {
 }
 
 // ---- owned fd descriptor table (TDD-00182 Stage 1) -------------------------
-// One slot per fd, replacing the former parallel kfd_kind/kfd_nonblock/
-// kfd_sock_handle/kfd_reset/kfd_inherited arrays with a single owned
-// description keyed by fd. The slot owns the `kind` tag that read/write/close/
-// select/fstat all dispatch on. Socket/foreign kinds keep the Winsock SOCKET
-// in `sock` (the CRT never wraps it — see the range note below); CRT-range fds
-// leave their OS handle with the CRT (_get_osfhandle), exactly as before, so
-// this consolidation is behaviour-preserving. Later reactor stages extend the
-// slot in place — per-handle overlapped read/write state (Stage 3) and a
-// refcounted shared description for dup2 aliasing (Stage 5) — rather than
-// adding new parallel arrays.
+// An fd is an index into a table of pointers to refcounted *descriptions*
+// (TDD-00183 Stage 3) — the POSIX open file description: the OS handle, its
+// `kind` tag (which read/write/close/select/fstat all dispatch on), its flags
+// and its overlapped/reactor state. dup2() makes two fds share one description
+// (refs++), close() drops a reference, and the handle is torn down exactly once,
+// when the last fd referring to it closes. Readiness, the non-blocking flag and
+// pending ops belong to the description, so they are seen through every alias.
 //
-// Three fd ranges still share the IR's 1024-slot bitmap (unchanged in Stage 1;
-// the socket-range partition dissolves in Stage 5):
-//   [0, 512)      CRT fds: files, pipes, stdio — the CRT owns the handle;
-//   [512, 896)    sockets this layer created — the SOCKET lives in slot.sock
-//                 and the CRT never sees it (a CRT fd wrapped around a socket
-//                 would CloseHandle it behind Winsock's back on _close, which
-//                 raises under a debugger and skips the socket's own teardown);
-//   [896, 1024)   foreign sockets owned by a library (libcurl) that select()
-//                 must still wait on — see curl_multi_fdset below.
+// Two fd ranges share the IR's 1024-slot bitmap:
+//   [0, 512)      CRT fds: regular files and the inherited stdio — the CRT owns
+//                 the handle (_get_osfhandle). A plain CRT fd has no pooled
+//                 description; its few flags live in a per-fd record. A slot
+//                 here can also *hold* a description: a std fd classified as a
+//                 pipe or the console, or the target of a dup2().
+//   [512, 1024)   the owned pool: every handle this layer owns — sockets, pipe
+//                 ends, and the foreign (libcurl) sockets select() must wait on —
+//                 allocates from it, first free slot. The CRT never sees these
+//                 handles (a CRT fd wrapped around a socket would CloseHandle it
+//                 behind Winsock's back on _close, and a pipe end needs none of
+//                 the CRT's services). The ceiling is the IR's 1024-bit fd_set.
+// Foreign-ness is the description's kind (KFD_FOREIGN), never the fd's number.
 enum { KFD_PLAIN = 0, KFD_SOCKET = 1, KFD_PIPE = 2, KFD_FOREIGN = 3, KFD_CONSOLE = 4 };
-#define KFD_SOCK_BASE 512
-#define KFD_FOREIGN_BASE 896
+#define KFD_POOL_BASE 512
 
 // A pending overlapped operation (TDD-00183 Stage 1). Heap-allocated so a
 // completion dequeued after the fd closed (and the slot was reused) is
@@ -309,10 +314,12 @@ enum { KFD_PLAIN = 0, KFD_SOCKET = 1, KFD_PIPE = 2, KFD_FOREIGN = 3, KFD_CONSOLE
 // never reaches the port (FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) and is freed
 // by its creator; a socket or AFD op always posts a packet, synchronous
 // success included, so the drain owns it from the moment it was issued.
+struct kfd_desc;
 typedef struct kfd_op {
 	OVERLAPPED ov;           // OPK_AFD_POLL reinterprets ov as the IO_STATUS_BLOCK
-	int fd;
-	unsigned gen;
+	struct kfd_desc *d;      // the description it was issued on (pooled: never freed, so always safe to read)
+	int fd;                  // the fd it was issued through — tracing only; an alias may outlive it
+	unsigned gen;            // d's generation at issue; a mismatch marks the op stale
 	unsigned char kind;      // OPK_*
 	char *buf;               // OPK_WRITE: the heap copy of the payload
 	unsigned long len;
@@ -337,7 +344,7 @@ enum { OPK_ZERO_READ = 1, OPK_WRITE = 2, OPK_AFD_POLL = 3, OPK_ACCEPT = 4, OPK_C
 // the handle — the same shape as the console reader. Jointly owned: the
 // closer signals stop, cancels the blocked read, joins, then frees.
 typedef struct {
-	int fd;
+	struct kfd_desc *d;
 	unsigned gen;
 	HANDLE h;
 	CRITICAL_SECTION cs;
@@ -349,8 +356,13 @@ typedef struct {
 	HANDLE port;              // the reactor port to wake (the thread that started this reader)
 } kfd_thr;
 
-typedef struct {
+typedef struct kfd_desc {
 	ws_SOCKET sock;          // socket/foreign kinds: the Winsock SOCKET; else 0
+	HANDLE h;                // an owned pipe end's handle (NULL when the CRT holds it — see crt_fd)
+	int refs;                // fds referring to this description (pooled descriptions only)
+	int crt_fd;              // >= 0: a classified std fd — the CRT owns the handle and does its I/O; else -1
+	unsigned long owner_tid;  // KFD_FOREIGN: the thread whose libcurl multi handle reported the socket
+	struct kfd_desc *next_free; // pool free list
 	unsigned char kind;      // KFD_PLAIN / KFD_SOCKET / KFD_PIPE / KFD_FOREIGN / KFD_CONSOLE
 	unsigned char nonblock;  // O_NONBLOCK emulation flag
 	// Set once a socket has reported a connection reset: Linux returns
@@ -395,104 +407,140 @@ typedef struct {
 	ws_SOCKET acc_sock;      // a completed AcceptEx's connection, waiting for accept()
 	unsigned char acc_have;  // acc_sock holds one
 	kfd_op *conn_op;         // pending ConnectEx
+	// ---- cluster round-robin (a listener shared with re-spawned workers) ----
+	struct kfd_rr *rr;       // primary: the workers this listener's connections rotate over
+	int rr_chan;             // worker: the fd connections arrive on from the primary (0 = none)
 	// rd_op (above) doubles as the socket zero-read op.
-} kfd_slot;
-static kfd_slot kfd[KFD_MAX];
+} kfd_desc;
+// The fd table. kfd_tab[fd] points at the pooled description an fd refers to;
+// NULL means the fd is a plain CRT fd (or closed), whose flags live in
+// kfd_plain[fd]. Pooled descriptions are recycled through a free list and never
+// returned to the heap, so a completion or reader thread that outlives its fd
+// can always read the description it was issued on and compare generations.
+static kfd_desc *kfd_tab[KFD_MAX];
+static kfd_desc kfd_plain[KFD_MAX];
+static kfd_desc kfd_pool[KFD_MAX];
+static kfd_desc *kfd_free_list;
+static int kfd_pool_used;      // high-water mark into kfd_pool
+// Slot and pool allocation is the one table mutation worker threads race on
+// (each opens its own sockets and pipes); I/O on an fd stays with its owner.
+static SRWLOCK kfd_lock = SRWLOCK_INIT;
+#define KD(fd) (kfd_tab[fd] ? kfd_tab[fd] : &kfd_plain[fd])
 
 // Cross-file accessors (win32proc.c, win32fs.c). Functions rather than exported
-// arrays so the slot layout can grow across reactor stages without other
+// arrays so the description layout can grow across reactor stages without other
 // objects rebuilding against a fixed struct. kfd_kind_of returns -1 for an
 // out-of-range fd (never a valid KFD_* value).
-int kfd_kind_of(int fd) { return (fd < 0 || fd >= KFD_MAX) ? -1 : kfd[fd].kind; }
-void kfd_set_inherited(int fd) { if (fd >= 0 && fd < KFD_MAX) kfd[fd].inherited = 1; }
+int kfd_kind_of(int fd) { return (fd < 0 || fd >= KFD_MAX) ? -1 : KD(fd)->kind; }
+void kfd_set_inherited(int fd) { if (fd >= 0 && fd < KFD_MAX) KD(fd)->inherited = 1; }
 
-// kfd_adopt_socket places socket handle s at exactly fd (used for a socket
-// inherited from a parent under an agreed fd number); -1 if the slot is
-// outside the socket range or taken.
-// Clear a slot's socket reactor state (a fresh socket, or a closed one). Pending
-// ops are the caller's to cancel first; their packets are recognized stale by
-// the generation bump the caller also makes.
-static void kfd_sock_reset(int fd) {
-	kfd[fd].sock_stream = kfd[fd].listening = kfd[fd].bound = 0;
-	kfd[fd].connecting = kfd[fd].connected = kfd[fd].conn_failed = 0;
-	kfd[fd].rd_ready = kfd[fd].wr_ready = kfd[fd].ex_ready = 0;
-	kfd[fd].family = 0;
-	kfd[fd].conn_err = 0;
-	kfd[fd].sock_port = NULL;
-	kfd[fd].emul = 0;
-	kfd[fd].rd_op = kfd[fd].afd_op = kfd[fd].acc_op = kfd[fd].conn_op = NULL;
-	kfd[fd].afd_armed = 0;
-	kfd[fd].afd_base = NULL;
-	kfd[fd].acc_sock = 0;
-	kfd[fd].acc_have = 0;
+// Take a description from the pool, cleared except for the two fields that must
+// survive recycling: the generation (stale ops compare against it) and the lazy
+// inline-wait events. Caller holds kfd_lock.
+static kfd_desc *kfd_desc_new(int kind) {
+	kfd_desc *d = kfd_free_list;
+	if (d) kfd_free_list = d->next_free;
+	else if (kfd_pool_used < KFD_MAX) d = &kfd_pool[kfd_pool_used++];
+	else return NULL;
+	unsigned gen = d->gen;
+	HANDLE rd_ev = d->rd_ev, wr_ev = d->wr_ev;
+	memset(d, 0, sizeof *d);
+	d->gen = gen;
+	d->rd_ev = rd_ev;
+	d->wr_ev = wr_ev;
+	d->kind = (unsigned char)kind;
+	d->refs = 1;
+	d->crt_fd = -1;
+	return d;
+}
+// Retire a description whose last fd closed: the generation bump is what turns
+// every op and reader thread still holding it into a recognized stale one.
+static void kfd_desc_retire(kfd_desc *d) {
+	AcquireSRWLockExclusive(&kfd_lock);
+	d->gen++;
+	d->kind = KFD_PLAIN;
+	d->next_free = kfd_free_list;
+	kfd_free_list = d;
+	ReleaseSRWLockExclusive(&kfd_lock);
 }
 
-int kfd_adopt_socket(HANDLE s, int fd) {
-	if (fd < KFD_SOCK_BASE || fd >= KFD_FOREIGN_BASE || kfd[fd].kind != KFD_PLAIN) { errno = L_EINVAL; return -1; }
-	kfd[fd].kind = KFD_SOCKET;
-	kfd[fd].nonblock = 0;
-	kfd[fd].reset = 0;
-	kfd[fd].inherited = 0;
-	kfd[fd].sock = (ws_SOCKET)s;
-	kfd_sock_reset(fd);
-	// The socket may arrive already shaped — a listener inherited from a cluster
-	// primary, a dup2 alias — so its kind is read off the socket itself rather
-	// than from the socket()/bind()/listen() calls this layer never saw.
+// Bind a fresh description of `kind` to a slot: exactly `want` when want >= 0
+// (-1 if it is taken or outside the pool), else the first free pool slot
+// (EMFILE when the pool is full).
+static int kfd_slot_new(int kind, int want) {
+	int fd = -1;
+	AcquireSRWLockExclusive(&kfd_lock);
+	if (want >= 0) {
+		if (want >= KFD_POOL_BASE && want < KFD_MAX && !kfd_tab[want]) fd = want;
+	} else {
+		for (int i = KFD_POOL_BASE; i < KFD_MAX; i++) if (!kfd_tab[i]) { fd = i; break; }
+	}
+	kfd_desc *d = fd >= 0 ? kfd_desc_new(kind) : NULL;
+	if (d) kfd_tab[fd] = d;
+	ReleaseSRWLockExclusive(&kfd_lock);
+	if (!d) { errno = want >= 0 ? L_EINVAL : L_EMFILE; return -1; }
+	return fd;
+}
+
+// The socket may arrive already shaped — a listener inherited from a cluster
+// primary — so its type is read off the socket itself rather than from the
+// socket()/bind()/listen() calls this layer never saw.
+static void kfd_sock_shape(int fd, HANDLE s) {
+	KD(fd)->sock = (ws_SOCKET)s;
 	if (p_getsockopt) {
 		int v = 0, l = sizeof v;
-		if (p_getsockopt((ws_SOCKET)s, WS_SOL_SOCKET, 0x1008 /* SO_TYPE */, (char *)&v, &l) == 0) kfd[fd].sock_stream = (v == 1);
+		if (p_getsockopt((ws_SOCKET)s, WS_SOL_SOCKET, 0x1008 /* SO_TYPE */, (char *)&v, &l) == 0) KD(fd)->sock_stream = (v == 1);
 		v = 0; l = sizeof v;
-		if (p_getsockopt((ws_SOCKET)s, WS_SOL_SOCKET, 0x0002 /* SO_ACCEPTCONN */, (char *)&v, &l) == 0) kfd[fd].listening = (v != 0);
+		if (p_getsockopt((ws_SOCKET)s, WS_SOL_SOCKET, 0x0002 /* SO_ACCEPTCONN */, (char *)&v, &l) == 0) KD(fd)->listening = (v != 0);
 	}
 	if (p_getsockname) {
 		struct { unsigned short fam; char rest[126]; } sa = {0};
 		int l = sizeof sa;
-		if (p_getsockname((ws_SOCKET)s, &sa, &l) == 0) { kfd[fd].family = sa.fam; kfd[fd].bound = 1; }
+		if (p_getsockname((ws_SOCKET)s, &sa, &l) == 0) { KD(fd)->family = sa.fam; KD(fd)->bound = 1; }
 	}
+}
+
+// kfd_adopt_socket places socket handle s at exactly fd (used for a socket
+// inherited from a parent under an agreed fd number); -1 if the slot is
+// outside the pool or taken.
+int kfd_adopt_socket(HANDLE s, int fd) {
+	if (fd < 0 || kfd_slot_new(KFD_SOCKET, fd) < 0) { errno = L_EINVAL; return -1; }
+	kfd_sock_shape(fd, s);
 	return fd;
 }
 
+// kfd_register gives an owned handle (a socket or a pipe end) the first free
+// pool fd.
 int kfd_register(HANDLE h, int kind) {
-	if (kind == KFD_SOCKET) {
-		for (int fd = KFD_SOCK_BASE; fd < KFD_FOREIGN_BASE; fd++) {
-			if (kfd[fd].kind == KFD_PLAIN) return kfd_adopt_socket(h, fd);
-		}
-		errno = L_EMFILE;
-		return -1;
-	}
-	// CRT range: _setmaxstdio raises the default 512-fd ceiling once so the
-	// CRT can hand out every slot below KFD_SOCK_BASE.
-	static int raised;
-	if (!raised) { _setmaxstdio(KFD_SOCK_BASE); raised = 1; }
-	int fd = _open_osfhandle((intptr_t)h, 0);
-	if (fd < 0 || fd >= KFD_SOCK_BASE) {
-		if (fd >= 0) _close(fd);
-		errno = L_EMFILE;
-		return -1;
-	}
-	kfd[fd].kind = (unsigned char)kind;
-	kfd[fd].nonblock = 0;
+	int fd = kfd_slot_new(kind, -1);
+	if (fd < 0) return -1;
+	if (kind == KFD_SOCKET) kfd_sock_shape(fd, h);
+	else KD(fd)->h = h;
 	return fd;
 }
 static inline int kfd_is(int fd, int kind) {
-	return fd >= 0 && fd < KFD_MAX && kfd[fd].kind == kind;
+	return fd >= 0 && fd < KFD_MAX && KD(fd)->kind == kind;
 }
-static inline ws_SOCKET kfd_sock(int fd) {
-	if (kfd[fd].kind == KFD_SOCKET || kfd[fd].kind == KFD_FOREIGN) return kfd[fd].sock;
-	return (ws_SOCKET)_get_osfhandle(fd);
+// kfd_handle: the OS handle behind any fd (win32proc.c duplicates it for a
+// child's stdio or an inherited IPC socket).
+// The handle behind a pooled description (the drain reaches it through an op,
+// when the fd the op was issued through may already be closed).
+static HANDLE kfd_desc_handle(kfd_desc *d) {
+	if (d->kind == KFD_SOCKET || d->kind == KFD_FOREIGN) return (HANDLE)d->sock;
+	if (d->h) return d->h;
+	return d->crt_fd >= 0 ? (HANDLE)_get_osfhandle(d->crt_fd) : INVALID_HANDLE_VALUE;
 }
+HANDLE kfd_handle(int fd) {
+	if (fd < 0 || fd >= KFD_MAX) return INVALID_HANDLE_VALUE;
+	if (kfd_tab[fd]) return kfd_desc_handle(kfd_tab[fd]);
+	return (HANDLE)_get_osfhandle(fd);
+}
+static inline ws_SOCKET kfd_sock(int fd) { return (ws_SOCKET)kfd_handle(fd); }
 // The Winsock SOCKET behind fd, for code that must hand a real socket to a
 // library speaking Winsock itself (OpenSSL's socket BIO in tls.c).
 intptr_t __kml_win_fd_socket(int fd) {
 	if (fd < 0 || fd >= KFD_MAX) return -1;
 	return (intptr_t)kfd_sock(fd);
-}
-// kfd_handle: the OS handle behind any fd (win32proc.c duplicates it for a
-// child's stdio or an inherited IPC socket).
-HANDLE kfd_handle(int fd) {
-	if (fd < 0 || fd >= KFD_MAX) return INVALID_HANDLE_VALUE;
-	if (kfd[fd].kind == KFD_SOCKET || kfd[fd].kind == KFD_FOREIGN) return (HANDLE)kfd[fd].sock;
-	return (HANDLE)_get_osfhandle(fd);
 }
 
 // ---- the completion port (TDD-00183) ----------------------------------------
@@ -527,6 +575,145 @@ void __kml_win_port_wake(void *port) { kml_wake_port((HANDLE)port); }
 // its first select() checks the raised flag before blocking.
 void __kml_win_loop_wake(void) { kml_wake_port(kml_sig_port); }
 
+// ---- high-resolution timing (TDD-00183 Stage 4) --------------------------------
+// The reactor's wait is bounded by a deadline, but GetQueuedCompletionStatusEx's
+// millisecond timeout inherits the system timer resolution (~15.6 ms by default),
+// so a 50 ms setInterval fired only every ~62 ms and the deadline itself, taken
+// from GetTickCount64, was quantised the same way. Deadlines now come from
+// QueryPerformanceCounter (microseconds), and the wait is ended at the real
+// deadline by a per-thread high-resolution waitable timer whose expiry is posted
+// to the thread's port as a completion packet (see kml_port_wait_until).
+// Pre-1803 Windows without the high-resolution flag falls back to a plain timer,
+// and a machine without the API at all falls back to the old coarse millisecond
+// wait.
+static int kml_port_drain(int timeout_ms); // defined below; the timer helpers wait through it
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+#ifndef TIMER_ALL_ACCESS
+#define TIMER_ALL_ACCESS 0x1F0003
+#endif
+static HANDLE (WINAPI *p_CreateWaitableTimerExW)(void *, const wchar_t *, unsigned long, unsigned long);
+static int (WINAPI *p_SetWaitableTimer)(HANDLE, const LARGE_INTEGER *, long, void *, void *, int);
+static int (WINAPI *p_CancelWaitableTimer)(HANDLE);
+// Wait completion packets (Windows 8+): the kernel posts a packet to the port
+// when the associated object — here the timer — is signalled.
+static LONG (WINAPI *p_NtCreateWaitCompletionPacket)(HANDLE *, ULONG, void *);
+static LONG (WINAPI *p_NtAssociateWaitCompletionPacket)(HANDLE, HANDLE, HANDLE, void *, void *, LONG, ULONG_PTR, BOOLEAN *);
+static LONG (WINAPI *p_NtCancelWaitCompletionPacket)(HANDLE, BOOLEAN);
+#define KML_KEY_TIMER 2 // completion key of a timer-expiry packet (0 = wake, 1 = op)
+static void kml_timer_load(void) {
+	// Any thread may get here first (a worker can reach its first wait alongside
+	// the main loop), so the flag is published only after the pointers: a racing
+	// thread either resolves the same values itself or sees them all set.
+	static volatile LONG done;
+	if (done) return;
+	HMODULE k = GetModuleHandleW(L"kernel32.dll");
+	if (!k) { done = 1; return; }
+	p_CreateWaitableTimerExW = (HANDLE (WINAPI *)(void *, const wchar_t *, unsigned long, unsigned long))(void *)GetProcAddress(k, "CreateWaitableTimerExW");
+	p_SetWaitableTimer = (int (WINAPI *)(HANDLE, const LARGE_INTEGER *, long, void *, void *, int))(void *)GetProcAddress(k, "SetWaitableTimer");
+	p_CancelWaitableTimer = (int (WINAPI *)(HANDLE))(void *)GetProcAddress(k, "CancelWaitableTimer");
+	HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+	if (nt) {
+		*(FARPROC *)&p_NtCreateWaitCompletionPacket = GetProcAddress(nt, "NtCreateWaitCompletionPacket");
+		*(FARPROC *)&p_NtAssociateWaitCompletionPacket = GetProcAddress(nt, "NtAssociateWaitCompletionPacket");
+		*(FARPROC *)&p_NtCancelWaitCompletionPacket = GetProcAddress(nt, "NtCancelWaitCompletionPacket");
+	}
+	MemoryBarrier();
+	done = 1;
+}
+static _Thread_local HANDLE kml_hrtimer;
+static _Thread_local int kml_hrtimer_tried;
+static HANDLE kml_hrtimer_get(void) {
+	if (kml_hrtimer || kml_hrtimer_tried) return kml_hrtimer;
+	kml_hrtimer_tried = 1;
+	kml_timer_load();
+	if (p_CreateWaitableTimerExW) {
+		kml_hrtimer = p_CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+		if (!kml_hrtimer) kml_hrtimer = p_CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
+	}
+	return kml_hrtimer;
+}
+static void CALLBACK kml_timer_apc(void *arg, DWORD lo, DWORD hi) { (void)arg; (void)lo; (void)hi; }
+
+// Monotonic microseconds from QPC, computed to avoid the int64 overflow a plain
+// counter*1e6 would hit after a few days of uptime.
+static int64_t kml_now_us(void) {
+	static LARGE_INTEGER freq;
+	if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+	LARGE_INTEGER c;
+	QueryPerformanceCounter(&c);
+	int64_t q = freq.QuadPart ? freq.QuadPart : 1;
+	return (c.QuadPart / q) * 1000000 + (c.QuadPart % q) * 1000000 / q;
+}
+
+// The thread's wait completion packet, binding its timer to its port.
+static _Thread_local HANDLE kml_hrpacket;
+static _Thread_local int kml_hrpacket_tried;
+static HANDLE kml_hrpacket_get(void) {
+	if (kml_hrpacket || kml_hrpacket_tried) return kml_hrpacket;
+	kml_hrpacket_tried = 1;
+	if (p_NtCreateWaitCompletionPacket && p_NtAssociateWaitCompletionPacket && p_NtCancelWaitCompletionPacket) {
+		HANDLE h = NULL;
+		if (p_NtCreateWaitCompletionPacket(&h, GENERIC_ALL, NULL) >= 0) kml_hrpacket = h;
+	}
+	return kml_hrpacket;
+}
+
+// Block on the port until deadline_us (absolute QPC microseconds; < 0 = forever),
+// waking at the real deadline. The timer's expiry reaches the port as a
+// completion packet (KML_KEY_TIMER, which the drain dequeues and ignores): a
+// timer APC also ends the alertable wait, but its delivery is quantised to the
+// system tick, which is the very thing being fixed — it is only the fallback
+// where wait completion packets are missing (pre-Windows 8). One wait per call.
+static void kml_port_wait_until(int64_t deadline_us) {
+	if (deadline_us < 0) { kml_port_drain(-1); return; }
+	int64_t rem = deadline_us - kml_now_us();
+	if (rem <= 0) return; // deadline already passed: do not block
+	HANDLE t = kml_hrtimer_get();
+	if (t && p_SetWaitableTimer) {
+		LARGE_INTEGER due;
+		due.QuadPart = -(rem * 10); // relative, 100 ns units
+		HANDLE pk = kml_hrpacket_get();
+		if (pk && p_SetWaitableTimer(t, &due, 0, NULL, NULL, 0)) {
+			BOOLEAN already = 0;
+			LONG st = p_NtAssociateWaitCompletionPacket(pk, kml_port_get(), t, (void *)(ULONG_PTR)KML_KEY_TIMER, NULL, 0, 0, &already);
+			if (st >= 0) {
+				if (!already) kml_port_drain(-1); // a packet — I/O, wake or the timer's — ends it
+				if (p_CancelWaitableTimer) p_CancelWaitableTimer(t);
+				// Disarm, removing an expiry packet that is queued but not yet
+				// dequeued, so the packet is free to be associated again.
+				p_NtCancelWaitCompletionPacket(pk, 1);
+				return;
+			}
+			if (p_CancelWaitableTimer) p_CancelWaitableTimer(t);
+		}
+		if (p_SetWaitableTimer(t, &due, 0, (void *)kml_timer_apc, NULL, 0)) {
+			kml_port_drain(-1); // INFINITE + alertable: a packet or the timer APC ends it
+			if (p_CancelWaitableTimer) p_CancelWaitableTimer(t);
+			return;
+		}
+	}
+	int64_t ms = (rem + 999) / 1000; // no high-res timer: the old coarse wait
+	kml_port_drain(ms > 0x7fffffff ? 0x7fffffff : (int)ms);
+}
+
+// A precise sleep on the calling thread, shared by usleep()/nanosleep() — the
+// last Sleep-slice remnants (TDD-00183 Stage 4).
+void __kml_win_hr_sleep_us(int64_t us) {
+	if (us <= 0) return;
+	HANDLE t = kml_hrtimer_get();
+	if (t && p_SetWaitableTimer) {
+		LARGE_INTEGER due;
+		due.QuadPart = -(us * 10);
+		if (p_SetWaitableTimer(t, &due, 0, NULL, NULL, 0)) {
+			WaitForSingleObject(t, INFINITE);
+			return;
+		}
+	}
+	Sleep((DWORD)((us + 999) / 1000));
+}
+
 // The AFD helper device: a handle to \Device\Afd opened for this reactor and
 // associated with its port. IOCTL_AFD_POLL is issued on *this* handle with the
 // polled socket named inside the request, so the socket itself is never
@@ -551,31 +738,65 @@ static HANDLE kml_afd_get(void) {
 	return dev;
 }
 
+// Ops are OS-heap memory, never the program's allocator.
+//
+// An op is memory *the kernel owns* while its operation is in flight: the
+// OVERLAPPED it completes through, and for an AFD poll the result buffer it
+// writes into. Nothing in this process need reference it meanwhile — an op is
+// deliberately orphaned from its description when the interest is re-armed or
+// the fd closed, and is reclaimed only when its (possibly cancelled) completion
+// is drained.
+//
+// Under `-mm=gc` a plain malloc here would come from Boehm, like every other
+// malloc in the link, and a conservative collector frees what it cannot see a
+// pointer to. An orphaned in-flight op is exactly that: its only holder is the
+// kernel, which the collector does not scan — nothing stops the block being
+// recycled under a live operation, leaving the kernel to write a completion
+// into another object. (Not the cause of any observed failure; found while
+// tracking down the fiber-stack scanning bug below, and closed here because
+// the window is real and the fix costs nothing.)
+//
+// Kernel-owned memory therefore comes from the process heap directly, which no
+// collector manages and no GC-mode link redefines — the same reasoning as
+// ADR-00351's GC_base guard, one level
+// earlier: memory that crosses into the kernel never belongs to the collector
+// in the first place. Payload buffers handed to WriteFile (`op->buf`) are the
+// kernel's for the same duration and come from the same place.
+static void *op_alloc(size_t n) {
+	return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, n);
+}
+static void op_release(void *p) {
+	if (p) HeapFree(GetProcessHeap(), 0, p);
+}
+
 static kfd_op *op_new(int fd, int kind) {
-	kfd_op *op = (kfd_op *)calloc(1, sizeof *op);
+	kfd_op *op = (kfd_op *)op_alloc(sizeof *op);
 	if (!op) return NULL;
+	op->d = KD(fd);
 	op->fd = fd;
-	op->gen = kfd[fd].gen;
+	op->gen = op->d->gen;
 	op->kind = (unsigned char)kind;
 	return op;
 }
+// The one place an op is released — every path goes through it, so a queued
+// write's payload and an emulated op's wait/event are never left behind.
 static void op_free(kfd_op *op) {
 	if (op->wait) UnregisterWait(op->wait);
 	if (op->ev) CloseHandle(op->ev);
-	free(op->buf);
-	free(op);
+	op_release(op->buf);
+	op_release(op);
 }
 
 // Associate a pipe fd's handle with the port once. FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
 // keeps synchronously-completing ops (data already buffered) from flooding the
 // port with packets the drain would only discard.
 static int kfd_assoc(int fd) {
-	if (kfd[fd].assoc) return 0;
+	if (KD(fd)->assoc) return 0;
 	HANDLE h = kfd_handle(fd);
 	if (h == INVALID_HANDLE_VALUE) return -1;
 	if (!CreateIoCompletionPort(h, kml_port_get(), 1 /* KEY_OP */, 0)) return -1;
 	SetFileCompletionNotificationModes(h, FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
-	kfd[fd].assoc = 1;
+	KD(fd)->assoc = 1;
 	return 0;
 }
 
@@ -605,11 +826,11 @@ static void CALLBACK kfd_emul_cb(void *arg, BOOLEAN timed_out) {
 static int kfd_sock_assoc(int fd) {
 	HANDLE port = kml_port_get();
 	if (!port) return -1;
-	if (kfd[fd].sock_port == port) return 0;
-	if (kfd[fd].sock_port || kfd[fd].emul) return 1;
-	if (CreateIoCompletionPort(kfd_handle(fd), port, 1 /* KEY_OP */, 0)) { kfd[fd].sock_port = port; return 0; }
+	if (KD(fd)->sock_port == port) return 0;
+	if (KD(fd)->sock_port || KD(fd)->emul) return 1;
+	if (CreateIoCompletionPort(kfd_handle(fd), port, 1 /* KEY_OP */, 0)) { KD(fd)->sock_port = port; return 0; }
 	if (GetLastError() != ERROR_INVALID_PARAMETER) return -1;
-	kfd[fd].emul = 1;
+	KD(fd)->emul = 1;
 	if (io_trace()) fprintf(stderr, "[io] fd=%d belongs to another port: emulated completion\n", fd);
 	return 1;
 }
@@ -628,10 +849,10 @@ static int op_sock_prepare(kfd_op *op, int fd) {
 	return 0;
 }
 // The Winsock error a completed socket op failed with (0 = it succeeded).
-static int op_wsa_error(int fd, kfd_op *op) {
+static int op_wsa_error(kfd_desc *d, kfd_op *op) {
 	unsigned long n = 0, fl = 0;
 	if (!p_WSAGetOverlappedResult) return WSAEINVAL;
-	if (p_WSAGetOverlappedResult(kfd_sock(fd), &op->ov, &n, FALSE, &fl)) return 0;
+	if (p_WSAGetOverlappedResult(d->sock, &op->ov, &n, FALSE, &fl)) return 0;
 	return p_WSAGetLastError ? p_WSAGetLastError() : WSAEINVAL;
 }
 
@@ -640,7 +861,7 @@ static int op_wsa_error(int fd, kfd_op *op) {
 // queue forward, and swallow wake packets. timeout_ms 0 polls; <0 blocks
 // (alertable, so queued APCs still run). Returns the number of entries
 // dequeued; the caller's signal check supplies the EINTR semantics.
-static void kfd_wq_pump(int fd); // below
+static void kfd_wq_pump(kfd_desc *d); // below
 static int map_wsa_errno(int e); // below
 // A bare wake packet was dequeued since select() last looked: some source with
 // no fd of its own — a child's exit, a reader thread's data, a signal — wants
@@ -657,18 +878,23 @@ static int kml_port_drain(int timeout_ms) {
 	}
 	for (ULONG i = 0; i < got; i++) {
 		kfd_op *op = (kfd_op *)ents[i].lpOverlapped;
-		if (!op) { kml_woken = 1; continue; } // a bare wake packet
+		if (!op) {
+			// A timer-expiry packet only ends the wait; a bare wake packet is a
+			// cross-thread wake the loop must see.
+			if (ents[i].lpCompletionKey != KML_KEY_TIMER) kml_woken = 1;
+			continue;
+		}
 		int fd = op->fd;
-		int live = fd >= 0 && fd < KFD_MAX && kfd[fd].gen == op->gen;
+		int live = op->d->gen == op->gen;
 		// The op's final NTSTATUS. OVERLAPPED.Internal is where the kernel leaves it
 		// for an overlapped op, an AFD poll (whose IO_STATUS_BLOCK is overlaid on
 		// ov), and an emulated op alike.
 		LONG st = (LONG)op->ov.Internal;
-		if (io_trace()) fprintf(stderr, "[io] port op fd=%d kind=%d live=%d st=0x%lx\n", fd, op->kind, live, (unsigned long)st);
-		kfd_slot *k = live ? &kfd[fd] : NULL;
+		if (io_trace()) fprintf(stderr, "[io] port op fd=%d kind=%d live=%d st=0x%lx foreign=%d\n", fd, op->kind, live, (unsigned long)st, live && op->d->kind == KFD_FOREIGN);
+		kfd_desc *k = live ? op->d : NULL;
 		switch (op->kind) {
 		case OPK_WRITE:
-			if (k && k->wr_op == op) { k->wr_op = NULL; kfd_wq_pump(fd); }
+			if (k && k->wr_op == op) { k->wr_op = NULL; kfd_wq_pump(k); }
 			break;
 		case OPK_ZERO_READ:
 			if (k && k->rd_op == op) {
@@ -715,11 +941,11 @@ static int kml_port_drain(int timeout_ms) {
 				k->conn_op = NULL;
 				k->connecting = 0;
 				if (st == KML_STATUS_CANCELLED) break;
-				int e = op_wsa_error(fd, op);
+				int e = op_wsa_error(k, op);
 				if (e == 0) {
 					// SO_UPDATE_CONNECT_CONTEXT: until it is set a ConnectEx socket
 					// refuses getpeername/shutdown.
-					if (p_setsockopt) p_setsockopt(kfd_sock(fd), WS_SOL_SOCKET, 0x7010, NULL, 0);
+					if (p_setsockopt) p_setsockopt(k->sock, WS_SOL_SOCKET, 0x7010, NULL, 0);
 					k->connected = 1;
 					k->wr_ready = 1;
 				} else {
@@ -741,15 +967,15 @@ static int kml_port_drain(int timeout_ms) {
 // when ready, the drain records the events, the next select() re-arms) and is
 // cancelled-and-replaced only when the interest mask changes.
 static void kfd_cancel_afd(int fd) {
-	kfd_op *op = kfd[fd].afd_op;
+	kfd_op *op = KD(fd)->afd_op;
 	if (op && op->dev) CancelIoEx(op->dev, &op->ov);
 	// The cancellation's packet is dequeued and freed by a later drain.
 }
 static void kfd_arm_afd(int fd, ULONG events) {
-	if (kfd[fd].afd_op) {
-		if (kfd[fd].afd_armed == events) return;
+	if (KD(fd)->afd_op) {
+		if (KD(fd)->afd_armed == events) return;
 		kfd_cancel_afd(fd);
-		kfd[fd].afd_op = NULL; // orphaned: the drain no longer matches it to the slot
+		KD(fd)->afd_op = NULL; // orphaned: the drain no longer matches it to the slot
 	}
 	HANDLE dev = kml_afd_get();
 	kfd_op *op = dev ? op_new(fd, OPK_AFD_POLL) : NULL;
@@ -757,15 +983,15 @@ static void kfd_arm_afd(int fd, ULONG events) {
 		// No AFD device (or no memory): readiness cannot be observed, so report
 		// it — select() permits spurious readiness, and the caller's I/O call
 		// then answers EAGAIN or the real state. Never reached on a stock system.
-		kfd[fd].rd_ready = kfd[fd].wr_ready = 1;
+		KD(fd)->rd_ready = KD(fd)->wr_ready = 1;
 		return;
 	}
-	if (!kfd[fd].afd_base) kfd[fd].afd_base = afd_base_handle(kfd_sock(fd));
+	if (!KD(fd)->afd_base) KD(fd)->afd_base = afd_base_handle(kfd_sock(fd));
 	op->dev = dev;
 	op->afd.Timeout.QuadPart = 0x7fffffffffffffffLL; // no AFD-side timeout; we cancel to disarm
 	op->afd.NumberOfHandles = 1;
 	op->afd.Exclusive = 0;
-	op->afd.Handles[0].Handle = kfd[fd].afd_base;
+	op->afd.Handles[0].Handle = KD(fd)->afd_base;
 	op->afd.Handles[0].Events = events;
 	op->afd.Handles[0].Status = 0;
 	// ApcContext = op: that value is what the completion packet carries as its
@@ -774,9 +1000,9 @@ static void kfd_arm_afd(int fd, ULONG events) {
 		(KML_IO_STATUS_BLOCK *)&op->ov, IOCTL_AFD_POLL,
 		&op->afd, sizeof op->afd, &op->afd, sizeof op->afd);
 	// STATUS_PENDING and a synchronous STATUS_SUCCESS both queue a packet.
-	if (st >= 0) { kfd[fd].afd_op = op; kfd[fd].afd_armed = events; return; }
+	if (st >= 0) { KD(fd)->afd_op = op; KD(fd)->afd_armed = events; return; }
 	op_free(op);
-	kfd[fd].rd_ready = kfd[fd].wr_ready = 1; // a dead socket: let the I/O call say so
+	KD(fd)->rd_ready = KD(fd)->wr_ready = 1; // a dead socket: let the I/O call say so
 }
 
 // ---- zero-read: libuv's read-interest mode ------------------------------------
@@ -788,21 +1014,21 @@ static void kfd_arm_afd(int fd, ULONG events) {
 // the zero-length receive and lost). Returns 0 when read-interest is handled
 // here, -1 when the caller must fall back to an AFD receive poll.
 static int kfd_arm_zero_read(int fd) {
-	if (kfd[fd].rd_op) return 0; // persistent: already armed
+	if (KD(fd)->rd_op) return 0; // persistent: already armed
 	if (!p_WSARecv) return -1;
 	kfd_op *op = op_new(fd, OPK_ZERO_READ);
 	if (!op) return -1;
 	if (op_sock_prepare(op, fd) != 0) { op_free(op); return -1; }
 	ws_WSABUF b; b.len = 0; b.buf = NULL;
-	unsigned long flags = kfd[fd].sock_stream ? 0 : 0x2 /* MSG_PEEK */, got = 0;
+	unsigned long flags = KD(fd)->sock_stream ? 0 : 0x2 /* MSG_PEEK */, got = 0;
 	int r = p_WSARecv(kfd_sock(fd), &b, 1, &got, &flags, &op->ov, NULL);
 	int e = r == 0 ? 0 : (p_WSAGetLastError ? p_WSAGetLastError() : 0);
-	if (r == 0 || e == ERROR_IO_PENDING /* == WSA_IO_PENDING */ ) { kfd[fd].rd_op = op; return 0; }
+	if (r == 0 || e == ERROR_IO_PENDING /* == WSA_IO_PENDING */ ) { KD(fd)->rd_op = op; return 0; }
 	// A synchronous failure queues no packet. Not-yet-connected / not-yet-bound
 	// is simply "nothing to read"; anything else (reset, shut down) is a
 	// condition the next read() reports, so the fd is readable.
 	op_free(op);
-	if (e != WSAENOTCONN && e != WSAEINVAL) kfd[fd].rd_ready = 1;
+	if (e != WSAENOTCONN && e != WSAEINVAL) KD(fd)->rd_ready = 1;
 	return 0;
 }
 
@@ -813,16 +1039,16 @@ static int kfd_arm_zero_read(int fd) {
 // when the caller must fall back to an AFD accept poll (a family AcceptEx does
 // not serve).
 static int kfd_family(int fd) {
-	if (!kfd[fd].family && p_getsockname) {
+	if (!KD(fd)->family && p_getsockname) {
 		struct { unsigned short fam; char rest[126]; } sa = {0};
 		int l = sizeof sa;
-		if (p_getsockname(kfd_sock(fd), &sa, &l) == 0) kfd[fd].family = sa.fam;
+		if (p_getsockname(kfd_sock(fd), &sa, &l) == 0) KD(fd)->family = sa.fam;
 	}
-	return kfd[fd].family;
+	return KD(fd)->family;
 }
 static int kfd_arm_accept(int fd) {
-	if (kfd[fd].acc_have) { kfd[fd].rd_ready = 1; return 0; }
-	if (kfd[fd].acc_op) return 0;
+	if (KD(fd)->acc_have) { KD(fd)->rd_ready = 1; return 0; }
+	if (KD(fd)->acc_op) return 0;
 	int fam = kfd_family(fd);
 	if (fam != 2 && fam != 23) return -1;
 	afd_bind_ext(kfd_sock(fd));
@@ -835,7 +1061,8 @@ static int kfd_arm_accept(int fd) {
 	SetHandleInformation((HANDLE)op->asock, HANDLE_FLAG_INHERIT, 0);
 	unsigned long got = 0;
 	BOOL ok = p_AcceptEx(kfd_sock(fd), op->asock, op->abuf, 0, 128 + 16, 128 + 16, &got, &op->ov);
-	if (ok || (p_WSAGetLastError && p_WSAGetLastError() == ERROR_IO_PENDING)) { kfd[fd].acc_op = op; return 0; }
+	if (ok || (p_WSAGetLastError && p_WSAGetLastError() == ERROR_IO_PENDING)) { KD(fd)->acc_op = op; return 0; }
+	if (io_trace()) fprintf(stderr, "[io] AcceptEx fd=%d failed wsa=%d\n", fd, p_WSAGetLastError ? p_WSAGetLastError() : -1);
 	p_closesocket(op->asock);
 	op_free(op);
 	return -1;
@@ -843,33 +1070,32 @@ static int kfd_arm_accept(int fd) {
 static void kfd_cancel_sock_ops(int fd) {
 	// Every overlapped op this process issued on the socket (zero-read, AcceptEx,
 	// ConnectEx); the AFD poll lives on the helper device and is cancelled there.
-	if (kfd[fd].rd_op || kfd[fd].acc_op || kfd[fd].conn_op) CancelIoEx((HANDLE)kfd_sock(fd), NULL);
-	if (kfd[fd].afd_op) kfd_cancel_afd(fd);
+	if (KD(fd)->rd_op || KD(fd)->acc_op || KD(fd)->conn_op) CancelIoEx((HANDLE)kfd_sock(fd), NULL);
+	if (KD(fd)->afd_op) kfd_cancel_afd(fd);
 }
 
 // Queued overlapped writes: post the head of the FIFO if nothing is in
 // flight. A synchronous completion pumps the next entry immediately; a
 // pending one is finished (and the queue pumped) by the port drain.
-static void kfd_wq_pump(int fd) {
-	while (!kfd[fd].wr_op && kfd[fd].wq_head) {
-		kfd_op *op = kfd[fd].wq_head;
-		kfd[fd].wq_head = op->next;
-		if (!kfd[fd].wq_head) kfd[fd].wq_tail = NULL;
+static void kfd_wq_pump(kfd_desc *d) {
+	while (!d->wr_op && d->wq_head) {
+		kfd_op *op = d->wq_head;
+		d->wq_head = op->next;
+		if (!d->wq_head) d->wq_tail = NULL;
 		op->next = NULL;
 		DWORD n = 0;
-		if (!WriteFile(kfd_handle(fd), op->buf, op->len, &n, &op->ov)) {
-			if (GetLastError() == ERROR_IO_PENDING) { kfd[fd].wr_op = op; return; }
+		if (!WriteFile(kfd_desc_handle(d), op->buf, op->len, &n, &op->ov)) {
+			if (GetLastError() == ERROR_IO_PENDING) { d->wr_op = op; return; }
 			// Broken pipe: drop the payload, as a POSIX write would EPIPE —
 			// the reader is gone; nothing can observe the bytes either way.
 		}
-		free(op->buf);
-		free(op);
+		op_free(op);
 	}
 }
 
 // Wait until fd's queued writes fully drained (close/flush path).
 static void kfd_wq_flush(int fd) {
-	while (kfd[fd].wr_op || kfd[fd].wq_head) {
+	while (KD(fd)->wr_op || KD(fd)->wq_head) {
 		if (kml_port_drain(-1) == 0) continue;
 	}
 }
@@ -912,10 +1138,10 @@ static DWORD WINAPI kfd_sync_pipe_thread(LPVOID arg) {
 	kfd_thr *t = (kfd_thr *)arg;
 	char chunk[16384];
 	for (;;) {
-		if (t->stop || kfd[t->fd].gen != t->gen) break;
+		if (t->stop || t->d->gen != t->gen) break;
 		DWORD n = 0;
 		if (!ReadFile(t->h, chunk, sizeof chunk, &n, NULL) || n == 0) break; // EOF / broken pipe
-		if (t->stop || kfd[t->fd].gen != t->gen) break;
+		if (t->stop || t->d->gen != t->gen) break;
 		DWORD off = 0;
 		while (off < n) {
 			EnterCriticalSection(&t->cs);
@@ -939,24 +1165,24 @@ static DWORD WINAPI kfd_sync_pipe_thread(LPVOID arg) {
 }
 
 static void kfd_ensure_sync_reader(int fd) {
-	if (kfd[fd].thr || kfd[fd].ovl) return;
+	if (KD(fd)->thr || KD(fd)->ovl) return;
 	kfd_thr *t = (kfd_thr *)calloc(1, sizeof *t);
 	if (!t) return;
-	t->fd = fd;
-	t->gen = kfd[fd].gen;
+	t->d = KD(fd);
+	t->gen = KD(fd)->gen;
 	t->h = kfd_handle(fd);
 	t->port = kml_port_get(); // this reactor is the one the thread wakes
 	InitializeCriticalSection(&t->cs);
 	t->space = CreateEventW(NULL, FALSE, FALSE, NULL);
 	HANDLE h = CreateThread(NULL, 0, kfd_sync_pipe_thread, t, 0, NULL);
 	if (!h) { DeleteCriticalSection(&t->cs); CloseHandle(t->space); free(t); return; }
-	kfd[fd].thr = h;
-	kfd[fd].thr_state = t;
+	KD(fd)->thr = h;
+	KD(fd)->thr_state = t;
 }
 
 // Readable/EOF state of a sync-reader-backed pipe (level-triggered probe).
 static int kfd_thr_readable(int fd) {
-	kfd_thr *t = kfd[fd].thr_state;
+	kfd_thr *t = KD(fd)->thr_state;
 	if (!t) return 0;
 	EnterCriticalSection(&t->cs);
 	int r = t->len > 0 ? 1 : (t->eof ? -1 : 0);
@@ -967,7 +1193,7 @@ static int kfd_thr_readable(int fd) {
 // Drain up to n bytes from the reader thread's buffer; 0 = EOF, -1/EAGAIN =
 // nothing yet (only when nonblocking — a blocking read waits for data).
 static int64_t kfd_thr_read(int fd, void *buf, size_t n, int nonblock) {
-	kfd_thr *t = kfd[fd].thr_state;
+	kfd_thr *t = KD(fd)->thr_state;
 	for (;;) {
 		EnterCriticalSection(&t->cs);
 		if (t->len > 0) {
@@ -988,19 +1214,19 @@ static int64_t kfd_thr_read(int fd, void *buf, size_t n, int nonblock) {
 }
 
 static void kfd_stop_sync_reader(int fd) {
-	kfd_thr *t = kfd[fd].thr_state;
+	kfd_thr *t = KD(fd)->thr_state;
 	if (!t) return;
 	InterlockedExchange(&t->stop, 1);
 	SetEvent(t->space);
 	// The thread may be blocked in the kernel read; break it, re-issuing until
 	// the join lands (CancelSynchronousIo misses a thread between calls).
-	while (WaitForSingleObject(kfd[fd].thr, 50) == WAIT_TIMEOUT) CancelSynchronousIo(kfd[fd].thr);
-	CloseHandle(kfd[fd].thr);
+	while (WaitForSingleObject(KD(fd)->thr, 50) == WAIT_TIMEOUT) CancelSynchronousIo(KD(fd)->thr);
+	CloseHandle(KD(fd)->thr);
 	DeleteCriticalSection(&t->cs);
 	CloseHandle(t->space);
 	free(t);
-	kfd[fd].thr = NULL;
-	kfd[fd].thr_state = NULL;
+	KD(fd)->thr = NULL;
+	KD(fd)->thr_state = NULL;
 }
 
 // ---- console input ----------------------------------------------------------
@@ -1107,15 +1333,30 @@ static int kcon_readable(void) {
 // fds 0-2 arrive from the parent as bare CRT fds; the reactor needs their
 // kind. Probed once, lazily, at the first read()/select() touch: a piped
 // stdin (fd 0) becomes KFD_PIPE served by the buffering reader thread; a
-// console fd 0 becomes KFD_CONSOLE (the reader-thread ReadConsoleW path).
+// console fd 0 becomes KFD_CONSOLE (the reader-thread ReadConsoleW path). Either
+// way the fd is promoted to a pooled description — it now has reactor state an
+// op or a reader thread can refer to — that leaves the handle with the CRT
+// (crt_fd): the CRT keeps doing the fd's plain reads and writes and closes it.
+static int kfd_promote_crt(int fd, int kind) {
+	AcquireSRWLockExclusive(&kfd_lock);
+	kfd_desc *d = kfd_tab[fd] ? NULL : kfd_desc_new(kind);
+	if (d) {
+		d->crt_fd = fd;
+		d->nonblock = kfd_plain[fd].nonblock;
+		d->classified = 1;
+		kfd_tab[fd] = d;
+	}
+	ReleaseSRWLockExclusive(&kfd_lock);
+	return d ? 0 : -1;
+}
 static void kfd_classify(int fd) {
-	if (fd < 0 || fd >= KFD_MAX || kfd[fd].classified || kfd[fd].kind != KFD_PLAIN) return;
-	kfd[fd].classified = 1;
-	HANDLE h = (HANDLE)_get_osfhandle(fd);
+	if (fd < 0 || fd >= KFD_MAX || KD(fd)->classified || KD(fd)->kind != KFD_PLAIN) return;
+	KD(fd)->classified = 1;
+	HANDLE h = kfd_handle(fd);
 	if (h == INVALID_HANDLE_VALUE) return;
 	DWORD type = GetFileType(h);
 	if (type == FILE_TYPE_PIPE) {
-		kfd[fd].kind = KFD_PIPE;
+		if (kfd_promote_crt(fd, KFD_PIPE) != 0) return;
 		// A pipe handle this layer did not create (an inherited std fd, a named
 		// pipe opened by path): how it must be driven depends on how it was
 		// opened, which only the handle knows — libuv asks it the same way. An
@@ -1129,11 +1370,11 @@ static void kfd_classify(int fd) {
 		if (p_NtQueryInformationFile &&
 		    p_NtQueryInformationFile(h, &iosb, &mode, sizeof mode, 16 /* FileModeInformation */) >= 0)
 			is_sync = (mode & (0x10 /* FILE_SYNCHRONOUS_IO_ALERT */ | 0x20 /* FILE_SYNCHRONOUS_IO_NONALERT */)) != 0;
-		if (is_sync) kfd[fd].use_reader = 1;
-		else kfd[fd].ovl_h = kfd[fd].ovl_rd = 1;
+		if (is_sync) KD(fd)->use_reader = 1;
+		else KD(fd)->ovl_h = KD(fd)->ovl_rd = 1;
 	} else if (type == FILE_TYPE_CHAR) {
 		DWORD mode;
-		if (fd == 0 && GetConsoleMode(h, &mode)) kfd[fd].kind = KFD_CONSOLE;
+		if (fd == 0 && GetConsoleMode(h, &mode)) kfd_promote_crt(fd, KFD_CONSOLE);
 	}
 }
 
@@ -1219,22 +1460,157 @@ int socket(int domain, int type, int protocol) {
 	SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
 	int fd = kfd_register((HANDLE)s, KFD_SOCKET);
 	if (fd < 0) { p_closesocket(s); return fd; }
-	kfd[fd].sock_stream = (type == 1); // SOCK_STREAM
-	kfd[fd].family = domain;
+	KD(fd)->sock_stream = (type == 1); // SOCK_STREAM
+	KD(fd)->family = domain;
 	return fd;
 }
 
 int bind(int fd, const void *addr, int len) {
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
 	if (p_bind(kfd_sock(fd), addr, len) != 0) return set_wsa_errno();
-	kfd[fd].bound = 1;
+	KD(fd)->bound = 1;
 	return 0;
 }
 int listen(int fd, int backlog) {
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
 	if (p_listen(kfd_sock(fd), backlog) != 0) return set_wsa_errno();
-	kfd[fd].listening = 1; // read-interest is a posted AcceptEx, not a zero-read
+	KD(fd)->listening = 1; // read-interest is a posted AcceptEx, not a zero-read
 	return 0;
+}
+
+// ---- cluster round-robin ------------------------------------------------------
+// Workers of an http.listen({ workers }) cluster are re-spawned processes that
+// inherit the listener. Letting each of them accept on it does not spread the
+// load: the kernel completes pending accepts most-recent-first, so whichever
+// process served the last connection re-arms and takes the next one as well.
+// This is why libuv/Node do not share the listener on Windows either: the
+// primary accepts every connection and deals them out in turn. Here the turn
+// includes the primary itself (it is one of the N serving processes, as under
+// fork), and a connection travels to a worker as the WSAPROTOCOL_INFOW that
+// WSADuplicateSocketW makes for that worker's pid, over a socket pair the worker
+// inherited. In the worker the pair's read end stands in for the listener's
+// read-interest and accept() turns each descriptor back into a socket.
+#define KFD_RR_MAX 64
+typedef struct kfd_rr {
+	int n, next; // next: 0 = this process, i = w[i-1]
+	struct { unsigned long pid; int chan; } w[KFD_RR_MAX];
+} kfd_rr;
+
+// Primary: the live listening sockets, for win32proc.c to hand to a worker.
+int kfd_listeners(int *out, int max) {
+	int n = 0;
+	for (int fd = KFD_POOL_BASE; fd < KFD_MAX && n < max; fd++)
+		if (kfd_tab[fd] && kfd_tab[fd]->kind == KFD_SOCKET && kfd_tab[fd]->listening) out[n++] = fd;
+	return n;
+}
+// Primary: worker `pid` was spawned holding the other end of chan for lfd.
+void kfd_rr_add_worker(int lfd, unsigned long pid, int chan) {
+	if (!kfd_is(lfd, KFD_SOCKET)) return;
+	kfd_desc *d = KD(lfd);
+	if (!d->rr) d->rr = (kfd_rr *)calloc(1, sizeof(kfd_rr));
+	if (!d->rr || d->rr->n >= KFD_RR_MAX) { close(chan); return; }
+	unsigned long nb = 1;
+	if (p_ioctlsocket) p_ioctlsocket(kfd_sock(chan), (long)WS_FIONBIO, &nb); // a wedged worker must not block the primary
+	d->rr->w[d->rr->n].pid = pid;
+	d->rr->w[d->rr->n].chan = chan;
+	d->rr->n++;
+}
+// Worker: connections for the inherited listener lfd arrive on chan. nonblock
+// is the listener's O_NONBLOCK in the primary: a file-description flag a forked
+// child would share, which this process's own table has to be told.
+int kfd_nonblock_of(int fd) { return fd >= 0 && fd < KFD_MAX && KD(fd)->nonblock; }
+void kfd_rr_adopt(int lfd, int chan, int nonblock) {
+	if (!kfd_is(lfd, KFD_SOCKET) || !kfd_is(chan, KFD_SOCKET)) return;
+	KD(lfd)->nonblock = nonblock != 0;
+	unsigned long nb = 1;
+	if (p_ioctlsocket) p_ioctlsocket(kfd_sock(chan), (long)WS_FIONBIO, &nb);
+	KD(chan)->nonblock = 1;
+	KD(lfd)->rr_chan = chan;
+}
+// Worker: an inherited listener bound to `port` that no bind has claimed yet
+// (port 0: the first unclaimed one), or -1. The re-run program binds the same
+// servers the primary did; each bind takes its listener from here instead.
+static unsigned char kfd_rr_claimed[KFD_MAX];
+int __kml_win_inherited_listener(int port) {
+	for (int fd = KFD_POOL_BASE; fd < KFD_MAX; fd++) {
+		if (!kfd_tab[fd] || kfd_tab[fd]->kind != KFD_SOCKET || !kfd_tab[fd]->rr_chan || kfd_rr_claimed[fd]) continue;
+		struct { uint16_t fam, port; char rest[28]; } sa = {0};
+		int l = sizeof sa;
+		if (port != 0 && (p_getsockname(kfd_sock(fd), &sa, &l) != 0 || htons(sa.port) != (unsigned short)port)) continue;
+		kfd_rr_claimed[fd] = 1;
+		return fd;
+	}
+	return -1;
+}
+// The fd whose readiness answers read-interest in fd.
+static inline int kfd_rd_src(int fd) { return KD(fd)->rr_chan ? KD(fd)->rr_chan : fd; }
+
+// Primary: give connection s to whoever's turn it is. 1 = a worker has it (s is
+// closed here), 0 = it is this process's. A worker whose channel is gone leaves
+// the rotation; one whose channel is full is skipped for this connection.
+static int kfd_rr_dispatch(kfd_desc *d, ws_SOCKET s) {
+	kfd_rr *rr = d->rr;
+	if (!p_WSADuplicateSocketW) return 0;
+	for (int tries = 0; tries <= rr->n; tries++) {
+		int slot = rr->next;
+		rr->next = (rr->next + 1) % (rr->n + 1);
+		if (slot == 0) return 0;
+		int chan = rr->w[slot - 1].chan;
+		if (!chan) continue;
+		ws_PROTOCOL_INFOW info;
+		int dead = p_WSADuplicateSocketW(s, rr->w[slot - 1].pid, &info) != 0;
+		if (!dead) {
+			ws_SOCKET cs = kfd_sock(chan);
+			int n = p_send(cs, (const char *)&info, (int)sizeof info, 0);
+			if (n < 0 && p_WSAGetLastError() == 10035 /* WSAEWOULDBLOCK */) continue; // backed up: not its turn
+			if (n > 0 && n < (int)sizeof info) {
+				// A descriptor must never be left half-sent: finish it blocking.
+				unsigned long nb = 0;
+				p_ioctlsocket(cs, (long)WS_FIONBIO, &nb);
+				while (n > 0 && n < (int)sizeof info) {
+					int m = p_send(cs, (const char *)&info + n, (int)sizeof info - n, 0);
+					if (m <= 0) { n = -1; break; }
+					n += m;
+				}
+				nb = 1;
+				p_ioctlsocket(cs, (long)WS_FIONBIO, &nb);
+			}
+			if (n == (int)sizeof info) {
+				if (io_trace()) fprintf(stderr, "[io] rr sock=%llu -> pid %lu\n", (unsigned long long)s, rr->w[slot - 1].pid);
+				p_closesocket(s);
+				return 1;
+			}
+			dead = 1;
+		}
+		if (dead) {
+			if (io_trace()) fprintf(stderr, "[io] rr worker pid %lu left the rotation\n", rr->w[slot - 1].pid);
+			rr->w[slot - 1].chan = 0;
+			close(chan);
+		}
+	}
+	return 0;
+}
+// Worker: the next connection the primary sent. 1 = *out is it, 0 = none yet,
+// -1 = the primary is gone (the caller falls back to accepting for itself).
+static int kfd_rr_recv(int fd, ws_SOCKET *out) {
+	int chan = KD(fd)->rr_chan;
+	ws_SOCKET cs = kfd_sock(chan);
+	ws_PROTOCOL_INFOW info;
+	KD(chan)->rd_ready = 0;
+	for (;;) {
+		int n = p_recv(cs, (char *)&info, (int)sizeof info, 2 /* MSG_PEEK */);
+		if (n < 0 && p_WSAGetLastError() == 10035 /* WSAEWOULDBLOCK */) return 0;
+		if (n <= 0) break;
+		if (n < (int)sizeof info) return 0; // the rest is in flight; the zero-read re-fires
+		p_recv(cs, (char *)&info, (int)sizeof info, 0);
+		ws_SOCKET s = p_WSASocketW ? p_WSASocketW(-1, -1, -1, &info, 0, 0x01 /* WSA_FLAG_OVERLAPPED */) : WS_INVALID;
+		if (s == WS_INVALID) continue; // the client is already gone: take the next one
+		*out = s;
+		return 1;
+	}
+	KD(fd)->rr_chan = 0;
+	close(chan);
+	return -1;
 }
 
 // accept(): a connection the posted AcceptEx already took is popped first —
@@ -1245,28 +1621,38 @@ int listen(int fd, int backlog) {
 int accept(int fd, void *addr, int *len) {
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
 	ws_SOCKET s = WS_INVALID;
-	kfd[fd].rd_ready = 0;
+	KD(fd)->rd_ready = 0;
 	for (;;) {
+		if (KD(fd)->rr_chan) {
+			int got = kfd_rr_recv(fd, &s);
+			if (got == 0) { errno = L_EAGAIN; return -1; }
+			if (got == 1) {
+				if (addr && len) p_getpeername(s, addr, len);
+				break;
+			}
+		}
 		if (kml_port) kml_port_drain(0); // a completed AcceptEx may be waiting on the port
-		if (kfd[fd].acc_have) {
-			s = kfd[fd].acc_sock;
-			kfd[fd].acc_have = 0;
-			kfd[fd].acc_sock = 0;
+		if (KD(fd)->acc_have) {
+			s = KD(fd)->acc_sock;
+			KD(fd)->acc_have = 0;
+			KD(fd)->acc_sock = 0;
 			// SO_UPDATE_ACCEPT_CONTEXT: the socket inherits the listener's
 			// properties and becomes usable with getpeername/shutdown/setsockopt.
 			ws_SOCKET ls = kfd_sock(fd);
 			p_setsockopt(s, WS_SOL_SOCKET, 0x700B, (const char *)&ls, sizeof ls);
 			if (addr && len) p_getpeername(s, addr, len);
+			if (KD(fd)->rr && kfd_rr_dispatch(KD(fd), s)) continue; // a worker's turn: take the next
 			break;
 		}
-		if (!kfd[fd].acc_op) {
+		if (!KD(fd)->acc_op) {
 			s = p_accept(kfd_sock(fd), addr, len);
 			if (s == WS_INVALID) return set_wsa_errno();
+			if (KD(fd)->rr && kfd_rr_dispatch(KD(fd), s)) continue;
 			break;
 		}
 		// An AcceptEx is outstanding, so the backlog is empty by construction:
 		// whatever arrives next lands in it, not in the backlog.
-		if (kfd[fd].nonblock) { errno = L_EAGAIN; return -1; }
+		if (KD(fd)->nonblock) { errno = L_EAGAIN; return -1; }
 		kml_port_drain(-1);
 	}
 	SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
@@ -1279,7 +1665,7 @@ int accept(int fd, void *addr, int *len) {
 		fprintf(stderr, "[io] accept fd=%d -> fd=%d sock=%llu peer=%u local=%u\n", fd, nfd, (unsigned long long)s, (unsigned)htons(pa.port), (unsigned)htons(la.port));
 	}
 	if (nfd < 0) { p_closesocket(s); return nfd; }
-	kfd[nfd].connected = 1;
+	KD(nfd)->connected = 1;
 	return nfd;
 }
 
@@ -1291,31 +1677,31 @@ int accept(int fd, void *addr, int *len) {
 // second connect() answering EISCONN) to learn which way. Returns -2 when
 // ConnectEx does not apply and the plain connect path should run.
 static int kfd_connectex(int fd, const void *addr, int len) {
-	if (!kfd[fd].nonblock || !kfd[fd].sock_stream || !addr || len < 2) return -2;
+	if (!KD(fd)->nonblock || !KD(fd)->sock_stream || !addr || len < 2) return -2;
 	int fam = *(const unsigned short *)addr;
-	if ((fam != 2 && fam != 23) || fam != kfd[fd].family) return -2;
+	if ((fam != 2 && fam != 23) || fam != KD(fd)->family) return -2;
 	afd_bind_ext(kfd_sock(fd));
 	if (!p_ConnectEx) return -2;
-	if (!kfd[fd].bound) {
+	if (!KD(fd)->bound) {
 		struct { unsigned short fam; char rest[26]; } any = {0};
 		any.fam = (unsigned short)fam;
 		if (p_bind(kfd_sock(fd), &any, fam == 2 ? 16 : 28) != 0) return set_wsa_errno();
-		kfd[fd].bound = 1;
+		KD(fd)->bound = 1;
 	}
 	kfd_op *op = op_new(fd, OPK_CONNECT);
 	if (!op) { errno = L_ENOMEM; return -1; }
 	if (op_sock_prepare(op, fd) != 0) { op_free(op); return -2; }
-	kfd[fd].conn_failed = 0;
-	kfd[fd].conn_err = 0;
-	kfd[fd].wr_ready = kfd[fd].ex_ready = 0;
+	KD(fd)->conn_failed = 0;
+	KD(fd)->conn_err = 0;
+	KD(fd)->wr_ready = KD(fd)->ex_ready = 0;
 	BOOL ok = p_ConnectEx(kfd_sock(fd), addr, len, NULL, 0, NULL, &op->ov);
 	int e = ok ? 0 : p_WSAGetLastError();
 	if (io_trace()) fprintf(stderr, "[io] connect fd=%d ConnectEx -> %d (wsa %d)\n", fd, (int)ok, e);
 	if (ok || e == ERROR_IO_PENDING) {
 		// An immediate success still queues its packet; the drain finishes the
 		// connect either way, so both report "in progress".
-		kfd[fd].conn_op = op;
-		kfd[fd].connecting = 1;
+		KD(fd)->conn_op = op;
+		KD(fd)->connecting = 1;
 		errno = L_EINPROGRESS;
 		return -1;
 	}
@@ -1326,12 +1712,12 @@ static int kfd_connectex(int fd, const void *addr, int len) {
 
 int connect(int fd, const void *addr, int len) {
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
-	if (kfd[fd].conn_op) {
+	if (KD(fd)->conn_op) {
 		// Give a just-completed ConnectEx the chance to be seen before answering.
 		if (kml_port) kml_port_drain(0);
-		if (kfd[fd].conn_op) { errno = L_EALREADY; return -1; }
+		if (KD(fd)->conn_op) { errno = L_EALREADY; return -1; }
 	}
-	if (kfd[fd].connected && kfd[fd].sock_stream) { errno = L_EISCONN; return -1; }
+	if (KD(fd)->connected && KD(fd)->sock_stream) { errno = L_EISCONN; return -1; }
 	int cx = kfd_connectex(fd, addr, len);
 	if (cx != -2) return cx;
 	if (p_connect(kfd_sock(fd), addr, len) == 0) {
@@ -1341,15 +1727,15 @@ int connect(int fd, const void *addr, int len) {
 			p_getsockname(kfd_sock(fd), &la, &ll);
 			fprintf(stderr, "[io] connect fd=%d sock=%llu -> 0 local=%u\n", fd, (unsigned long long)kfd_sock(fd), (unsigned)htons(la.port));
 		}
-		kfd[fd].bound = 1;
-		if (kfd[fd].sock_stream) kfd[fd].connected = 1;
+		KD(fd)->bound = 1;
+		if (KD(fd)->sock_stream) KD(fd)->connected = 1;
 		return 0;
 	}
 	int e = p_WSAGetLastError();
 	if (io_trace()) fprintf(stderr, "[io] connect fd=%d -> -1 (wsa %d)\n", fd, e);
 	// A non-blocking connect reports WOULDBLOCK on Windows; POSIX callers
 	// expect EINPROGRESS and then wait for writability.
-	if (e == WSAEWOULDBLOCK) { kfd[fd].connecting = 2; kfd[fd].bound = 1; errno = L_EINPROGRESS; return -1; }
+	if (e == WSAEWOULDBLOCK) { KD(fd)->connecting = 2; KD(fd)->bound = 1; errno = L_EINPROGRESS; return -1; }
 	errno = map_wsa_errno(e);
 	return -1;
 }
@@ -1418,11 +1804,11 @@ int getsockopt(int fd, int level, int opt, void *val, int *len) {
 	if (level == WS_SOL_SOCKET && opt == WS_SO_ERROR && val && len && *len >= 4) {
 		// A ConnectEx failure is reported through its completion, not through the
 		// socket's own SO_ERROR; the drain recorded it. Read-and-clear, as POSIX.
-		if (kfd[fd].conn_op && kml_port) kml_port_drain(0);
-		if (kfd[fd].conn_err) {
-			*(int *)val = kfd[fd].conn_err;
+		if (KD(fd)->conn_op && kml_port) kml_port_drain(0);
+		if (KD(fd)->conn_err) {
+			*(int *)val = KD(fd)->conn_err;
 			*len = 4;
-			kfd[fd].conn_err = 0;
+			KD(fd)->conn_err = 0;
 			return 0;
 		}
 	}
@@ -1436,7 +1822,7 @@ int getsockopt(int fd, int level, int opt, void *val, int *len) {
 
 int64_t recvfrom(int fd, void *buf, size_t n, int flags, void *addr, int *alen) {
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
-	kfd[fd].rd_ready = 0; // consumed; the next select() re-arms and re-learns it
+	KD(fd)->rd_ready = 0; // consumed; the next select() re-arms and re-learns it
 	int r = p_recvfrom(kfd_sock(fd), (char *)buf, (int)n, flags, addr, alen);
 	return r == WS_ERROR ? set_wsa_errno() : r;
 }
@@ -1503,7 +1889,7 @@ int pipe(int fds[2]) {
 	if (rfd < 0) { CloseHandle(r); CloseHandle(w); return -1; }
 	int wfd = kfd_register(w, KFD_PIPE);
 	if (wfd < 0) { close(rfd); CloseHandle(w); return -1; }
-	kfd[rfd].ovl_rd = 1;
+	KD(rfd)->ovl_rd = 1;
 	fds[0] = rfd;
 	fds[1] = wfd;
 	return 0;
@@ -1521,27 +1907,64 @@ int __kml_win_pipe_pw(int fds[2]) {
 	if (rfd < 0) { CloseHandle(r); CloseHandle(w); return -1; }
 	int wfd = kfd_register(w, KFD_PIPE);
 	if (wfd < 0) { close(rfd); CloseHandle(w); return -1; }
-	kfd[wfd].ovl = 1;
+	KD(wfd)->ovl = 1;
 	fds[0] = rfd;
 	fds[1] = wfd;
 	return 0;
 }
 
+// The CRT fd that does the plain I/O for fd: the fd itself, or — for an alias of
+// a classified std fd — the std fd the description was promoted from.
+static int kfd_crt_fd(int fd) {
+	return kfd_tab[fd] && kfd_tab[fd]->crt_fd >= 0 ? kfd_tab[fd]->crt_fd : fd;
+}
+
+// Set by dup2 while it replaces a std fd's description: the CRT's std fd stays
+// open under the new one (it is shadowed, not closed).
+static _Thread_local int kfd_keep_crt;
+
+// A slot below the pool that holds a description sits over a CRT fd number.
+// While it does, the CRT must not hand that number to the next _open: slots the
+// CRT has nothing open at are parked on NUL, and freed again when the slot is.
+static unsigned char kfd_parked[KFD_POOL_BASE];
+static void kfd_park(int fd) {
+	if (fd >= KFD_POOL_BASE || fd < 3) return; // the std fds are always open
+	int nul = _open("NUL", 2 /* _O_RDWR */);
+	if (nul < 0) return;
+	if (nul != fd) { _dup2(nul, fd); _close(nul); } // _dup2 closes whatever fd held
+	kfd_parked[fd] = 1;
+}
+static void kfd_unpark(int fd) {
+	if (fd < KFD_POOL_BASE && kfd_parked[fd]) { kfd_parked[fd] = 0; _close(fd); }
+}
+
+// dup2: newfd comes to refer to oldfd's open file description. For a pooled
+// description that is literal — both slots point at it, and it is torn down
+// when the last of them closes. A plain CRT file is duplicated by the CRT, whose
+// own fds share a file object the same way. A description placed on a std fd
+// shadows the CRT's fd of that number: all I/O dispatches through this layer.
 int dup2(int oldfd, int newfd) {
 	if (oldfd < 0 || oldfd >= KFD_MAX || newfd < 0 || newfd >= KFD_MAX) { errno = L_EBADF; return -1; }
-	if (kfd[oldfd].kind == KFD_SOCKET) {
-		// Socket slots are this layer's own; only a socket-range target works.
+	kfd_classify(oldfd);
+	kfd_desc *d = kfd_tab[oldfd];
+	if (!d) {
+		if ((HANDLE)_get_osfhandle(oldfd) == INVALID_HANDLE_VALUE) { errno = L_EBADF; return -1; }
 		if (newfd == oldfd) return newfd;
-		if (kfd[newfd].kind != KFD_PLAIN) close(newfd);
-		return kfd_adopt_socket((HANDLE)kfd[oldfd].sock, newfd);
+		// A CRT file can only be duplicated onto a CRT fd number.
+		if (newfd >= KFD_POOL_BASE) { errno = L_EBADF; return -1; }
+		if (kfd_tab[newfd]) close(newfd);
+		if (_dup2(oldfd, newfd) != 0) { errno = L_EBADF; return -1; }
+		kfd_plain[newfd] = kfd_plain[oldfd];
+		return newfd;
 	}
-	if (_dup2(oldfd, newfd) != 0) { errno = L_EBADF; return -1; }
-	kfd[newfd].kind = kfd[oldfd].kind;
-	kfd[newfd].nonblock = kfd[oldfd].nonblock;
-	kfd[newfd].ovl = kfd[oldfd].ovl;
-	kfd[newfd].ovl_rd = kfd[oldfd].ovl_rd;
-	kfd[newfd].ovl_h = kfd[oldfd].ovl_h;
-	kfd[newfd].classified = kfd[oldfd].classified;
+	if (newfd == oldfd) return newfd;
+	if (kfd_tab[newfd]) { kfd_keep_crt = newfd < 3; close(newfd); kfd_keep_crt = 0; }
+	else if (newfd >= 3 && newfd < KFD_POOL_BASE) memset(&kfd_plain[newfd], 0, sizeof kfd_plain[newfd]);
+	kfd_park(newfd); // closes a CRT file open at newfd, and holds the number
+	AcquireSRWLockExclusive(&kfd_lock);
+	d->refs++;
+	kfd_tab[newfd] = d;
+	ReleaseSRWLockExclusive(&kfd_lock);
 	return newfd;
 }
 
@@ -1561,19 +1984,19 @@ static int pipe_readable(HANDLE h, DWORD *avail) {
 // Returns 0 when armed (or decided on the spot), -1 when the handle cannot be
 // watched and the caller must fall back to the poll slice.
 static int kfd_arm_pipe_zero_read(int fd) {
-	if (kfd[fd].rd_op || kfd[fd].rd_ready) return 0;
+	if (KD(fd)->rd_op || KD(fd)->rd_ready) return 0;
 	kfd_op *op = op_new(fd, OPK_ZERO_READ);
 	if (!op) return -1;
 	if (op_sock_prepare(op, fd) != 0) { op_free(op); return -1; }
 	DWORD got = 0;
 	if (ReadFile(kfd_handle(fd), op->abuf, 0, &got, &op->ov) || GetLastError() == ERROR_IO_PENDING) {
-		kfd[fd].rd_op = op; // a synchronous success queues its packet too
+		KD(fd)->rd_op = op; // a synchronous success queues its packet too
 		return 0;
 	}
 	// Broken pipe (every writer gone) or any other hard failure: readable — the
 	// read() that follows reports end-of-file.
 	op_free(op);
-	kfd[fd].rd_ready = 1;
+	KD(fd)->rd_ready = 1;
 	return 0;
 }
 
@@ -1583,10 +2006,10 @@ static int kfd_arm_pipe_zero_read(int fd) {
 // the port — they are waited for right here.
 static int64_t kfd_ovl_pipe_read(int fd, void *buf, size_t n) {
 	HANDLE h = kfd_handle(fd);
-	int hinted = kfd[fd].rd_ready; // a completion said "bytes or EOF"
-	kfd[fd].rd_ready = 0;
+	int hinted = KD(fd)->rd_ready; // a completion said "bytes or EOF"
+	KD(fd)->rd_ready = 0;
 	int cancel_if_pending = 0;
-	if (kfd[fd].nonblock) {
+	if (KD(fd)->nonblock) {
 		DWORD avail = 0;
 		int st = pipe_readable(h, &avail);
 		if (st < 0) return 0; // every writer gone and the buffer drained: EOF
@@ -1594,11 +2017,11 @@ static int64_t kfd_ovl_pipe_read(int fd, void *buf, size_t n) {
 		else if (!hinted) { errno = L_EAGAIN; return -1; }
 		else cancel_if_pending = 1; // trust the completion over the probe: try the read itself
 	}
-	if (!kfd[fd].rd_ev) kfd[fd].rd_ev = CreateEventW(NULL, TRUE, FALSE, NULL);
-	if (!kfd[fd].rd_ev) { errno = L_ENOMEM; return -1; }
+	if (!KD(fd)->rd_ev) KD(fd)->rd_ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+	if (!KD(fd)->rd_ev) { errno = L_ENOMEM; return -1; }
 	OVERLAPPED ov;
 	memset(&ov, 0, sizeof ov);
-	ov.hEvent = (HANDLE)((ULONG_PTR)kfd[fd].rd_ev | 1);
+	ov.hEvent = (HANDLE)((ULONG_PTR)KD(fd)->rd_ev | 1);
 	DWORD got = 0, e = 0;
 	if (!ReadFile(h, buf, (DWORD)n, &got, &ov)) {
 		e = GetLastError();
@@ -1628,10 +2051,10 @@ static int io_trace(void) {
 
 int64_t read(int fd, void *buf, size_t n) {
 	if (fd < 0 || fd >= KFD_MAX) { errno = L_EBADF; return -1; }
-	if (io_trace()) fprintf(stderr, "[io] %llu read fd=%d kind=%d nonblock=%d ovl=%d n=%zu\n", (unsigned long long)(GetTickCount64() % 100000), fd, kfd[fd].kind, kfd[fd].nonblock, kfd[fd].ovl, n);
-	if (kfd[fd].kind == KFD_SOCKET) {
-		if (kfd[fd].reset) return 0; // the EOF that follows a reported reset
-		kfd[fd].rd_ready = 0; // consumed; the next select() re-arms and re-learns it
+	if (io_trace()) fprintf(stderr, "[io] %llu read fd=%d kind=%d nonblock=%d ovl=%d n=%zu\n", (unsigned long long)(GetTickCount64() % 100000), fd, KD(fd)->kind, KD(fd)->nonblock, KD(fd)->ovl, n);
+	if (KD(fd)->kind == KFD_SOCKET) {
+		if (KD(fd)->reset) return 0; // the EOF that follows a reported reset
+		KD(fd)->rd_ready = 0; // consumed; the next select() re-arms and re-learns it
 		int r = p_recv(kfd_sock(fd), (char *)buf, (int)n, 0);
 		if (io_trace()) {
 			fprintf(stderr, "[io]   recv -> %d (wsa %d)", r, r == WS_ERROR && p_WSAGetLastError ? p_WSAGetLastError() : 0);
@@ -1640,79 +2063,81 @@ int64_t read(int fd, void *buf, size_t n) {
 			if (r == 0) {
 				// EOF: report whether every other socket in the table is still a
 				// live handle (a closed one answers WSAENOTSOCK to getsockname).
-				for (int o = KFD_SOCK_BASE; o < KFD_FOREIGN_BASE; o++) {
-					if (kfd[o].kind != KFD_SOCKET) continue;
+				for (int o = 0; o < KFD_MAX; o++) {
+					if (KD(o)->kind != KFD_SOCKET) continue;
 					struct { uint16_t fam, port; uint32_t a; char z[8]; } la = {0};
 					int ll = sizeof la;
-					int rc = p_getsockname(kfd[o].sock, &la, &ll);
-					fprintf(stderr, "[io]     fd=%d sock=%llu getsockname=%d port=%u\n", o, (unsigned long long)kfd[o].sock, rc, (unsigned)htons(la.port));
+					int rc = p_getsockname(KD(o)->sock, &la, &ll);
+					fprintf(stderr, "[io]     fd=%d sock=%llu getsockname=%d port=%u\n", o, (unsigned long long)KD(o)->sock, rc, (unsigned)htons(la.port));
 				}
 			}
 		}
 		if (r == WS_ERROR) {
 			int e = p_WSAGetLastError();
-			if (e == WSAECONNRESET || e == WSAECONNABORTED) kfd[fd].reset = 1;
+			if (e == WSAECONNRESET || e == WSAECONNABORTED) KD(fd)->reset = 1;
 			errno = map_wsa_errno(e);
 			return -1;
 		}
 		return r;
 	}
 	kfd_classify(fd); // std fds get their kind on first touch
-	if (kfd[fd].kind == KFD_CONSOLE) return kcon_read(buf, n, kfd[fd].nonblock);
-	if (kfd[fd].kind == KFD_PIPE) {
-		HANDLE h = (HANDLE)_get_osfhandle(fd);
+	if (KD(fd)->kind == KFD_CONSOLE) return kcon_read(buf, n, KD(fd)->nonblock);
+	if (KD(fd)->kind == KFD_PIPE) {
+		HANDLE h = kfd_handle(fd);
 		// stdin (fd 0) is served by a buffering reader thread so a read never
 		// blocks the loop: never touch the handle here (it would race the
 		// thread) — drain the buffer. Spawn it on the first read if select()
 		// has not already.
-		if (kfd[fd].use_reader) {
-			if (!kfd[fd].thr_state) kfd_ensure_sync_reader(fd);
-			if (kfd[fd].thr_state) return kfd_thr_read(fd, buf, n, kfd[fd].nonblock);
+		if (KD(fd)->use_reader) {
+			if (!KD(fd)->thr_state) kfd_ensure_sync_reader(fd);
+			if (KD(fd)->thr_state) return kfd_thr_read(fd, buf, n, KD(fd)->nonblock);
 		}
 		// A read end this layer created (or inherited) overlapped: never the
 		// CRT's _read, which issues a ReadFile with no OVERLAPPED.
-		if (kfd[fd].ovl_rd) return kfd_ovl_pipe_read(fd, buf, n);
+		if (KD(fd)->ovl_rd) return kfd_ovl_pipe_read(fd, buf, n);
 		// Any other pipe (in-process worker/channel IPC, a child's stdout/stderr
 		// read end): the original PeekNamedPipe + non-blocking read path.
 		DWORD avail = 0;
 		int st = pipe_readable(h, &avail);
 		if (st < 0) return 0;               // writer gone: EOF
-		if (st == 0 && kfd[fd].nonblock) { errno = L_EAGAIN; return -1; }
+		if (st == 0 && KD(fd)->nonblock) { errno = L_EAGAIN; return -1; }
 	}
-	if (kfd[fd].kind == KFD_PIPE) {
-		int r = _read(fd, buf, (unsigned)n);
-		if (r < 0) return GetLastError() == ERROR_BROKEN_PIPE ? 0 : (errno = L_EBADF, -1);
-		return r;
+	if (KD(fd)->kind == KFD_PIPE) {
+		// A synchronous pipe end this layer owns: no CRT fd wraps it.
+		DWORD got = 0;
+		if (!ReadFile(kfd_handle(fd), buf, (DWORD)n, &got, NULL))
+			return GetLastError() == ERROR_BROKEN_PIPE ? 0 : (errno = L_EBADF, -1);
+		return got;
 	}
-	int r = _read(fd, buf, (unsigned)n);
+	int r = _read(kfd_crt_fd(fd), buf, (unsigned)n);
 	if (r < 0) errno = L_EBADF;
 	return r;
 }
 
 int64_t write(int fd, const void *buf, size_t n) {
 	if (fd < 0 || fd >= KFD_MAX) { errno = L_EBADF; return -1; }
-	if (kfd[fd].kind == KFD_SOCKET) {
+	if (KD(fd)->kind == KFD_SOCKET) {
 		int r = p_send(kfd_sock(fd), (const char *)buf, (int)n, 0);
 		if (io_trace()) fprintf(stderr, "[io] write fd=%d n=%zu -> %d (wsa %d)\n", fd, n, r, r == WS_ERROR && p_WSAGetLastError ? p_WSAGetLastError() : 0);
 		if (r == WS_ERROR) {
 			set_wsa_errno();
-			if (errno == L_EAGAIN) kfd[fd].wr_ready = 0; // the send buffer filled: no longer writable
+			if (errno == L_EAGAIN) KD(fd)->wr_ready = 0; // the send buffer filled: no longer writable
 			return -1;
 		}
 		return r;
 	}
 	kfd_classify(fd);
-	if (kfd[fd].kind == KFD_PIPE && kfd[fd].ovl_h && !kfd[fd].ovl) {
+	if (KD(fd)->kind == KFD_PIPE && KD(fd)->ovl_h && !KD(fd)->ovl) {
 		// An overlapped handle this layer did not create (an inherited std fd):
 		// every op on it needs an OVERLAPPED, so write it overlapped and wait
 		// right here — the blocking-write semantics the fd has always had. The
 		// event's low bit keeps the completion off any port.
-		HANDLE h = (HANDLE)_get_osfhandle(fd);
-		if (!kfd[fd].wr_ev) kfd[fd].wr_ev = CreateEventW(NULL, TRUE, FALSE, NULL);
-		if (!kfd[fd].wr_ev) { errno = L_ENOMEM; return -1; }
+		HANDLE h = kfd_handle(fd);
+		if (!KD(fd)->wr_ev) KD(fd)->wr_ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+		if (!KD(fd)->wr_ev) { errno = L_ENOMEM; return -1; }
 		OVERLAPPED ov;
 		memset(&ov, 0, sizeof ov);
-		ov.hEvent = (HANDLE)((ULONG_PTR)kfd[fd].wr_ev | 1);
+		ov.hEvent = (HANDLE)((ULONG_PTR)KD(fd)->wr_ev | 1);
 		DWORD wr = 0, e = 0;
 		if (!WriteFile(h, buf, (DWORD)n, &wr, &ov)) {
 			e = GetLastError();
@@ -1721,7 +2146,7 @@ int64_t write(int fd, const void *buf, size_t n) {
 		if (e) { errno = (e == ERROR_NO_DATA || e == ERROR_BROKEN_PIPE) ? L_EPIPE : L_EBADF; return -1; }
 		return wr;
 	}
-	if (kfd[fd].kind == KFD_PIPE && kfd[fd].ovl) {
+	if (KD(fd)->kind == KFD_PIPE && KD(fd)->ovl) {
 		// Overlapped end (the parent's child-stdin side): copy and queue — the
 		// user-space write queue Node keeps for a Writable. write() accepts the
 		// bytes immediately, the FIFO drains through overlapped completions,
@@ -1729,34 +2154,64 @@ int64_t write(int fd, const void *buf, size_t n) {
 		// deadlocks against a child whose stdout it is not yet draining.
 		if (kfd_assoc(fd) != 0) { errno = L_EBADF; return -1; }
 		kfd_op *op = op_new(fd, OPK_WRITE);
-		char *copy = op ? (char *)malloc(n ? n : 1) : NULL;
-		if (!copy) { free(op); errno = L_EBADF; return -1; }
+		char *copy = op ? (char *)op_alloc(n ? n : 1) : NULL;
+		if (!copy) { if (op) op_free(op); errno = L_EBADF; return -1; }
 		memcpy(copy, buf, n);
 		op->buf = copy;
 		op->len = (unsigned long)n;
-		if (kfd[fd].wq_tail) kfd[fd].wq_tail->next = op; else kfd[fd].wq_head = op;
-		kfd[fd].wq_tail = op;
-		kfd_wq_pump(fd);
+		if (KD(fd)->wq_tail) KD(fd)->wq_tail->next = op; else KD(fd)->wq_head = op;
+		KD(fd)->wq_tail = op;
+		kfd_wq_pump(KD(fd));
 		return (int64_t)n;
 	}
-	if (kfd[fd].kind == KFD_PIPE) {
+	if (KD(fd)->kind == KFD_PIPE) {
 		DWORD wr = 0;
-		if (!WriteFile((HANDLE)_get_osfhandle(fd), buf, (DWORD)n, &wr, NULL)) {
+		if (!WriteFile(kfd_handle(fd), buf, (DWORD)n, &wr, NULL)) {
 			DWORD e = GetLastError();
 			errno = (e == ERROR_NO_DATA || e == ERROR_BROKEN_PIPE) ? L_EPIPE : L_EBADF;
 			return -1;
 		}
 		return wr;
 	}
-	int r = _write(fd, buf, (unsigned)n);
+	int r = _write(kfd_crt_fd(fd), buf, (unsigned)n);
 	if (r < 0) errno = GetLastError() == ERROR_NO_DATA ? L_EPIPE : L_EBADF;
 	return r;
 }
 
+// Unbind fd from its description and return the description to the pool.
+static void kfd_slot_release(int fd) {
+	AcquireSRWLockExclusive(&kfd_lock);
+	kfd_desc *d = kfd_tab[fd];
+	kfd_tab[fd] = NULL;
+	ReleaseSRWLockExclusive(&kfd_lock);
+	if (d) kfd_desc_retire(d);
+	kfd_unpark(fd);
+}
+
+// close: drop fd's reference. Only the last reference tears the handle down —
+// until then the description (its handle, pending ops, readiness) stays whole
+// for the fds still sharing it.
 int close(int fd) {
 	if (fd < 0 || fd >= KFD_MAX) { errno = L_EBADF; return -1; }
-	if (io_trace()) fprintf(stderr, "[io] close fd=%d kind=%d\n", fd, kfd[fd].kind);
-	if (kfd[fd].kind == KFD_SOCKET) {
+	if (io_trace()) fprintf(stderr, "[io] close fd=%d kind=%d refs=%d\n", fd, KD(fd)->kind, kfd_tab[fd] ? kfd_tab[fd]->refs : 0);
+	if (KD(fd)->kind == KFD_FOREIGN) { errno = L_EBADF; return -1; } // not ours to close
+	if (kfd_tab[fd]) {
+		AcquireSRWLockExclusive(&kfd_lock);
+		kfd_desc *d = kfd_tab[fd];
+		int last = --d->refs == 0;
+		if (!last) kfd_tab[fd] = NULL;
+		ReleaseSRWLockExclusive(&kfd_lock);
+		if (!last) {
+			// A classified std fd whose description lives on through an alias: the
+			// CRT fd stays open underneath (the description reads and writes through
+			// it) and is closed with the last reference; it must not be classified
+			// into a second description meanwhile.
+			if (d->crt_fd == fd) kfd_plain[fd].classified = 1;
+			kfd_unpark(fd);
+			return 0;
+		}
+	}
+	if (KD(fd)->kind == KFD_SOCKET) {
 		// A socket fd never touches the CRT: closesocket does the whole
 		// teardown and the slot simply returns to the pool. A connected
 		// socket gets shutdown(SD_SEND) first so the peer sees a FIN: a bare
@@ -1764,22 +2219,27 @@ int close(int fd) {
 		// reported "connection forcibly closed" on a Connection: close
 		// response), where Linux's close() sends FIN.
 		ws_SOCKET s = kfd_sock(fd);
-		int inherited = kfd[fd].inherited;
+		int inherited = KD(fd)->inherited;
 		// Cancel every pending op and bump the generation: their packets still
 		// arrive (a cancelled op completes too) and the drain, finding the
 		// generation moved on, frees them without touching the slot's next
 		// tenant. A connection AcceptEx took that accept() never popped is closed
 		// with the listener — nobody else holds it.
 		kfd_cancel_sock_ops(fd);
-		if (kfd[fd].acc_have && p_closesocket) p_closesocket(kfd[fd].acc_sock);
-		kfd_sock_reset(fd);
-		kfd[fd].assoc = 0;
-		kfd[fd].gen++;
-		kfd[fd].kind = KFD_PLAIN;
-		kfd[fd].nonblock = 0;
-		kfd[fd].reset = 0;
-		kfd[fd].inherited = 0;
-		kfd[fd].sock = 0;
+		if (KD(fd)->acc_have && p_closesocket) p_closesocket(KD(fd)->acc_sock);
+		// A cluster listener takes its hand-off channels with it: the workers see
+		// the primary's end close and accept for themselves from then on.
+		kfd_rr *rr = KD(fd)->rr;
+		int rr_chan = KD(fd)->rr_chan;
+		KD(fd)->rr = NULL;
+		KD(fd)->rr_chan = 0;
+		kfd_rr_claimed[fd] = 0;
+		kfd_slot_release(fd);
+		if (rr_chan) close(rr_chan);
+		if (rr) {
+			for (int i = 0; i < rr->n; i++) if (rr->w[i].chan) close(rr->w[i].chan);
+			free(rr);
+		}
 		if (inherited) {
 			// A child holds this socket too: drop this process's handle only.
 			return CloseHandle((HANDLE)s) ? 0 : (errno = L_EBADF, -1);
@@ -1837,46 +2297,45 @@ int close(int fd) {
 		}
 		return p_closesocket(s) == 0 ? 0 : set_wsa_errno();
 	}
-	if (kfd[fd].kind == KFD_FOREIGN) { errno = L_EBADF; return -1; } // not ours to close
-	if (kfd[fd].kind == KFD_PIPE) {
+	if (KD(fd)->kind == KFD_PIPE) {
 		// Flush queued overlapped writes (the POSIX-parity point: a blocking
 		// write to this pipe would have blocked here too), stop the reader
 		// thread, and cancel the armed zero-read; its cancellation packet is
 		// freed by a later drain, recognized stale by the generation bump.
-		if (kfd[fd].ovl && (kfd[fd].wr_op || kfd[fd].wq_head)) kfd_wq_flush(fd);
-		if (kfd[fd].thr) kfd_stop_sync_reader(fd);
-		if (kfd[fd].rd_op) {
-			CancelIoEx((HANDLE)_get_osfhandle(fd), &kfd[fd].rd_op->ov);
-			kfd[fd].rd_op = NULL;
+		if (KD(fd)->ovl && (KD(fd)->wr_op || KD(fd)->wq_head)) kfd_wq_flush(fd);
+		if (KD(fd)->thr) kfd_stop_sync_reader(fd);
+		if (KD(fd)->rd_op) {
+			CancelIoEx(kfd_handle(fd), &KD(fd)->rd_op->ov);
+			KD(fd)->rd_op = NULL;
 		}
 	}
-	kfd[fd].kind = KFD_PLAIN;
-	kfd[fd].nonblock = 0;
-	kfd[fd].ovl = kfd[fd].ovl_rd = kfd[fd].ovl_h = 0;
-	kfd[fd].use_reader = 0;
-	kfd[fd].rd_ready = 0;
-	kfd[fd].sock_port = NULL;
-	kfd[fd].emul = 0;
-	kfd[fd].assoc = 0;
-	kfd[fd].classified = 0;
-	kfd[fd].wr_op = NULL;
-	kfd[fd].wq_head = kfd[fd].wq_tail = NULL;
-	kfd[fd].gen++;
+	if (kfd_tab[fd]) {
+		// An owned pipe end closes its own handle; a classified std fd's handle
+		// is the CRT's to close, under the fd it was promoted from.
+		HANDLE h = kfd_tab[fd]->h;
+		int crt = kfd_tab[fd]->crt_fd;
+		kfd_slot_release(fd);
+		if (h) return CloseHandle(h) ? 0 : (errno = L_EBADF, -1);
+		if (crt < 0 || kfd_keep_crt) return 0;
+		memset(&kfd_plain[crt], 0, sizeof kfd_plain[crt]);
+		return _close(crt) == 0 ? 0 : (errno = L_EBADF, -1);
+	}
+	memset(&kfd_plain[fd], 0, sizeof kfd_plain[fd]);
 	return _close(fd) == 0 ? 0 : (errno = L_EBADF, -1);
 }
 
 int fcntl(int fd, int cmd, ...) {
 	if (fd < 0 || fd >= KFD_MAX) { errno = L_EBADF; return -1; }
-	if (cmd == L_F_GETFL) return kfd[fd].nonblock ? L_O_NONBLOCK : 0;
+	if (cmd == L_F_GETFL) return KD(fd)->nonblock ? L_O_NONBLOCK : 0;
 	if (cmd == L_F_SETFL) {
 		va_list ap;
 		va_start(ap, cmd);
 		int flags = va_arg(ap, int);
 		va_end(ap);
 		int nb = (flags & L_O_NONBLOCK) != 0;
-		kfd[fd].nonblock = (unsigned char)nb;
-		if (io_trace()) fprintf(stderr, "[io] fcntl fd=%d kind=%d nonblock=%d\n", fd, kfd[fd].kind, nb);
-		if (kfd[fd].kind == KFD_SOCKET) {
+		KD(fd)->nonblock = (unsigned char)nb;
+		if (io_trace()) fprintf(stderr, "[io] fcntl fd=%d kind=%d nonblock=%d\n", fd, KD(fd)->kind, nb);
+		if (KD(fd)->kind == KFD_SOCKET) {
 			unsigned long v = (unsigned long)nb;
 			if (p_ioctlsocket(kfd_sock(fd), (long)WS_FIONBIO, &v) != 0) return set_wsa_errno();
 		}
@@ -1898,7 +2357,7 @@ static inline int fd_isset(const unsigned char *set, int fd) {
 // console (and any other waitable handle) via a zero-timeout wait, regular
 // files are always ready. Returns 1 ready, 0 not, -1 hangup (readable EOF).
 static int plain_readable(int fd) {
-	HANDLE h = (HANDLE)_get_osfhandle(fd);
+	HANDLE h = kfd_handle(fd);
 	if (h == INVALID_HANDLE_VALUE) return 0; // closed fd: never ready (POSIX would EBADF)
 	DWORD type = GetFileType(h);
 	if (type == FILE_TYPE_PIPE) {
@@ -1947,7 +2406,7 @@ static int kml_sig_interrupted(void) {
 // Arm whatever completion source answers the interest in one socket fd that is
 // not already answered by a ready bit (see the primitives near the top).
 static void kfd_arm_interest(int fd, int r, int w, int x) {
-	kfd_slot *k = &kfd[fd];
+	kfd_desc *k = KD(fd);
 	ULONG mask = 0;
 	const ULONG rd_events = AFD_POLL_RECEIVE | AFD_POLL_ACCEPT | AFD_POLL_DISCONNECT | AFD_POLL_ABORT;
 	if (k->kind == KFD_FOREIGN) {
@@ -1981,10 +2440,10 @@ int select(int nfds, unsigned char *rset, unsigned char *wset, unsigned char *es
 		trace_set("r", rset, nfds); trace_set("w", wset, nfds); trace_set("x", eset, nfds);
 		fprintf(stderr, " timeout=%lld\n", tv ? (long long)(tv->sec * 1000 + tv->usec / 1000) : -1LL);
 	}
-	int64_t deadline_ms = -1;
+	int64_t deadline_us = -1; // absolute QPC microseconds; -1 = no deadline
 	if (tv) {
-		int64_t ms = tv->sec * 1000 + (tv->usec + 999) / 1000;
-		deadline_ms = (int64_t)GetTickCount64() + (ms < 0 ? 0 : ms);
+		int64_t us = tv->sec * 1000000 + tv->usec;
+		deadline_us = kml_now_us() + (us < 0 ? 0 : us);
 	}
 	static _Thread_local int sock_fd[KFD_MAX];
 	unsigned char rout[128], wout[128], eout[128];
@@ -1997,7 +2456,7 @@ int select(int nfds, unsigned char *rset, unsigned char *wset, unsigned char *es
 		for (int fd = 0; fd < nfds; fd++) {
 			int r = fd_isset(rset, fd), w = fd_isset(wset, fd), x = fd_isset(eset, fd);
 			if (!r && !w && !x) continue;
-			if (kfd[fd].kind == KFD_SOCKET || kfd[fd].kind == KFD_FOREIGN) {
+			if (KD(fd)->kind == KFD_SOCKET || KD(fd)->kind == KFD_FOREIGN) {
 				sock_fd[nsock++] = fd;
 				continue;
 			}
@@ -2009,25 +2468,25 @@ int select(int nfds, unsigned char *rset, unsigned char *wset, unsigned char *es
 				// a plain pipe sets have_pollable_pipe so the slice keeps it live.
 				kfd_classify(fd);
 				int st;
-				if (kfd[fd].kind == KFD_CONSOLE) {
+				if (KD(fd)->kind == KFD_CONSOLE) {
 					kcon_ensure();
 					st = kcon_readable();
-				} else if (kfd[fd].kind == KFD_PIPE && kfd[fd].use_reader) {
+				} else if (KD(fd)->kind == KFD_PIPE && KD(fd)->use_reader) {
 					// stdin: readiness comes from the buffering reader thread
 					// (which wakes the port), never a direct handle probe.
-					if (!kfd[fd].thr_state) kfd_ensure_sync_reader(fd);
+					if (!KD(fd)->thr_state) kfd_ensure_sync_reader(fd);
 					st = kfd_thr_readable(fd);
-				} else if (kfd[fd].kind == KFD_PIPE && kfd[fd].ovl_rd) {
+				} else if (KD(fd)->kind == KFD_PIPE && KD(fd)->ovl_rd) {
 					// An overlapped read end (every pipe() this layer makes): bytes
 					// already buffered answer at once; otherwise a zero-read on the
 					// port ends the wait the moment the writer writes or closes.
-					st = kfd[fd].rd_ready ? 1 : pipe_readable((HANDLE)_get_osfhandle(fd), NULL);
+					st = KD(fd)->rd_ready ? 1 : pipe_readable(kfd_handle(fd), NULL);
 					if (st == 0 && kfd_arm_pipe_zero_read(fd) != 0) have_pollable_pipe = 1;
-					if (st == 0 && kfd[fd].rd_ready) st = 1; // decided while arming (broken pipe)
-				} else if (kfd[fd].kind == KFD_PIPE) {
+					if (st == 0 && KD(fd)->rd_ready) st = 1; // decided while arming (broken pipe)
+				} else if (KD(fd)->kind == KFD_PIPE) {
 					// A pipe handle that can be neither port-armed nor given a
 					// reader thread: PeekNamedPipe, re-probed on the slice below.
-					st = pipe_readable((HANDLE)_get_osfhandle(fd), NULL);
+					st = pipe_readable(kfd_handle(fd), NULL);
 					have_pollable_pipe = 1;
 				} else {
 					st = plain_readable(fd);
@@ -2042,16 +2501,20 @@ int select(int nfds, unsigned char *rset, unsigned char *wset, unsigned char *es
 		if (nsock) {
 			for (int i = 0; i < nsock; i++) {
 				int fd = sock_fd[i];
-				kfd_arm_interest(fd, fd_isset(rset, fd), fd_isset(wset, fd), fd_isset(eset, fd));
+				int src = kfd_rd_src(fd);
+				if (src != fd) {
+					kfd_arm_interest(src, fd_isset(rset, fd), 0, 0);
+					kfd_arm_interest(fd, 0, fd_isset(wset, fd), fd_isset(eset, fd));
+				} else kfd_arm_interest(fd, fd_isset(rset, fd), fd_isset(wset, fd), fd_isset(eset, fd));
 			}
 			while (kml_port_drain(0) == 64) {}
 			for (int i = 0; i < nsock; i++) {
 				int fd = sock_fd[i];
 				// "Excepted ⇒ also writable": POSIX callers wait for writability and
 				// then ask SO_ERROR why.
-				if (fd_isset(rset, fd) && kfd[fd].rd_ready) { rout[fd >> 3] |= (unsigned char)(1u << (fd & 7)); ready++; }
-				if (fd_isset(wset, fd) && (kfd[fd].wr_ready || kfd[fd].ex_ready)) { wout[fd >> 3] |= (unsigned char)(1u << (fd & 7)); ready++; }
-				if (fd_isset(eset, fd) && kfd[fd].ex_ready) { eout[fd >> 3] |= (unsigned char)(1u << (fd & 7)); ready++; }
+				if (fd_isset(rset, fd) && KD(kfd_rd_src(fd))->rd_ready) { rout[fd >> 3] |= (unsigned char)(1u << (fd & 7)); ready++; }
+				if (fd_isset(wset, fd) && (KD(fd)->wr_ready || KD(fd)->ex_ready)) { wout[fd >> 3] |= (unsigned char)(1u << (fd & 7)); ready++; }
+				if (fd_isset(eset, fd) && KD(fd)->ex_ready) { eout[fd >> 3] |= (unsigned char)(1u << (fd & 7)); ready++; }
 			}
 		}
 		// A wake with nothing ready ends the call with 0, exactly as a timeout
@@ -2060,14 +2523,14 @@ int select(int nfds, unsigned char *rset, unsigned char *wset, unsigned char *es
 		// here instead would strand a wake whose source has no fd in the sets.
 		int woken = kml_woken;
 		kml_woken = 0;
-		if (ready || woken || (deadline_ms >= 0 && (int64_t)GetTickCount64() >= deadline_ms)) {
+		if (ready || woken || (deadline_us >= 0 && kml_now_us() >= deadline_us)) {
 			// Reported readiness is consumed: the next select() re-arms, and a
 			// condition that still holds completes again at once.
 			for (int i = 0; i < nsock; i++) {
 				int fd = sock_fd[i];
-				if (rout[fd >> 3] & (1u << (fd & 7))) kfd[fd].rd_ready = 0;
-				if (wout[fd >> 3] & (1u << (fd & 7))) kfd[fd].wr_ready = 0;
-				if (eout[fd >> 3] & (1u << (fd & 7))) kfd[fd].ex_ready = 0;
+				if (rout[fd >> 3] & (1u << (fd & 7))) KD(kfd_rd_src(fd))->rd_ready = 0;
+				if (wout[fd >> 3] & (1u << (fd & 7))) KD(fd)->wr_ready = 0;
+				if (eout[fd >> 3] & (1u << (fd & 7))) KD(fd)->ex_ready = 0;
 			}
 			if (io_trace()) {
 				fprintf(stderr, "[io] select ->%d", ready);
@@ -2084,19 +2547,22 @@ int select(int nfds, unsigned char *rset, unsigned char *wset, unsigned char *es
 		// caller's deadline. The single exception is an anonymous pollable pipe
 		// (worker/channel IPC, a child's stdout/stderr), which cannot post to a
 		// port and so caps the wait at a 10 ms re-probe.
-		int slice;
-		if (deadline_ms < 0) slice = -1; else {
-			int64_t left = deadline_ms - (int64_t)GetTickCount64();
-			slice = left < 0 ? 0 : (int)(left > 0x7fffffff ? 0x7fffffff : left);
+		int64_t wake_us = deadline_us; // -1 = infinite
+		if (have_pollable_pipe) {
+			int64_t cap = kml_now_us() + 10000; // 10 ms re-probe
+			if (wake_us < 0 || cap < wake_us) wake_us = cap;
 		}
-		if (have_pollable_pipe && (slice < 0 || slice > 10)) slice = 10;
 		// A signal raised before the wait: its wake packet may already have been
 		// swallowed by a drain above, so don't block — deliver it now.
-		if (kml_sig_pending()) slice = 0;
+		if (kml_sig_pending()) wake_us = kml_now_us();
+		int willblock = (wake_us < 0) || (wake_us > kml_now_us());
 		// One line per blocking wait: the count of these against elapsed time is
 		// what shows a reactor that polls (many short waits) from one that waits.
-		if (io_trace() && slice != 0) fprintf(stderr, "[io] wait slice=%d\n", slice);
-		if (slice != 0) kml_port_drain(slice);
+		if (io_trace() && willblock) {
+			int64_t ms = wake_us < 0 ? -1 : (wake_us - kml_now_us()) / 1000;
+			fprintf(stderr, "[io] wait slice=%lld\n", (long long)ms);
+		}
+		if (willblock) kml_port_wait_until(wake_us);
 		if (kml_sig_interrupted()) return -1;
 	}
 }
@@ -2146,12 +2612,58 @@ typedef struct kml_ucontext {
 // scheduler (klainsync.c) runs a fiber scheduler on every M thread.
 static _Thread_local void *g_fiber_to_delete;
 
+// ---- fibers and the collector (-mm=gc) --------------------------------------
+// A Win32 fiber runs on a stack the *OS* allocated for it (CreateFiberEx), not
+// on the `ss_sp` block the IR mallocs for POSIX's makecontext — which is why
+// that block is unused here. Boehm has to be told, twice over:
+//
+//   * **The running fiber.** The IR points `GC_stackbottom` at the high end of
+//     its malloc'd stack before swapping in (correct under ucontext, where that
+//     block *is* the stack). On Windows the live SP is in the fiber's OS stack
+//     instead, so a collection would scan from that SP to an address in an
+//     unrelated heap block — a range spanning arbitrary, largely unmapped
+//     memory. It read whatever lay between as candidate pointers and eventually
+//     faulted inside the collector's own mark phase. Every resume therefore
+//     re-points GC_stackbottom at the stack actually in use, taken from the TEB
+//     (the fields Win32 swaps on SwitchToFiber), which is the last write before
+//     execution continues on that stack.
+//
+//   * **A parked fiber.** Under ucontext the parked stack is a GC_malloc'd
+//     block, reachable from the connection it belongs to, so the collector
+//     scans it like any other object. An OS-owned fiber stack is invisible, and
+//     anything live only in a parked frame — a request being assembled, a
+//     response buffer — would be collected out from under the fiber that is
+//     about to resume. The live part of the outgoing stack is registered as a
+//     root for exactly as long as it is parked.
+//
+// Both are set up by gcshim.c, which is linked only under `-mm=gc`; in every
+// other build the hooks stay NULL and this costs two predictable branches per
+// fiber switch. Keeping the collector's name out of this file is deliberate:
+// the shim must link with no GC present.
+void (*__kml_gc_set_stackbottom)(void *stack_base);
+void (*__kml_gc_root_add)(void *lo, void *hi_plus_one);
+void (*__kml_gc_root_remove)(void *lo, void *hi_plus_one);
+
+// The stack the calling context is really running on. On a fiber the TEB's
+// NT_TIB holds that fiber's bounds, swapped in by SwitchToFiber; on the thread
+// itself it holds the thread's own.
+static void *kml_stack_base(void) {
+	NT_TIB *tib = (NT_TIB *)NtCurrentTeb(); // a TEB begins with its NT_TIB
+	return tib->StackBase;
+}
+
+// Called wherever execution (re)starts on a fiber's stack, after the switch.
+static void kml_fiber_gc_resumed(void) {
+	if (__kml_gc_set_stackbottom) __kml_gc_set_stackbottom(kml_stack_base());
+}
+
 static void ensure_thread_is_fiber(void) {
 	if (!IsThreadAFiber()) ConvertThreadToFiber(NULL);
 }
 
 static void CALLBACK kml_fiber_tramp(void *arg) {
 	kml_ucontext *ctx = (kml_ucontext *)arg;
+	kml_fiber_gc_resumed(); // first run on this fiber's own stack
 	ctx->fn();
 	// Like makecontext's uc_link: when fn returns, resume the linked context.
 	// The fiber cannot delete itself; leave it for the next switch to reap.
@@ -2188,15 +2700,24 @@ int swapcontext(kml_ucontext *from, kml_ucontext *to) {
 	ensure_thread_is_fiber();
 	from->fiber = GetCurrentFiber();
 	if (!to->fiber) { errno = L_EINVAL; return -1; }
+	// The parked range is held in this frame — which lives on the very stack
+	// being parked, so it needs no bookkeeping elsewhere and cannot be lost.
+	volatile char probe;
+	void *lo = (void *)((uintptr_t)&probe & ~(uintptr_t)15), *hi = kml_stack_base();
+	if (__kml_gc_root_add && lo < hi) __kml_gc_root_add(lo, hi);
 	SwitchToFiber(to->fiber);
-	// Back on `from`: reap whatever finished while we were away.
+	// Back on `from`, on its own stack again: it is scanned as the running
+	// stack from here on, so drop the parked-root registration first.
+	if (__kml_gc_root_remove && lo < hi) __kml_gc_root_remove(lo, hi);
+	kml_fiber_gc_resumed();
+	// Reap whatever finished while we were away.
 	reap_finished_fiber();
 	return 0;
 }
 
 
 // ---- misc ---------------------------------------------------------------------
-int usleep(unsigned usec) { Sleep((usec + 999) / 1000); return 0; }
+int usleep(unsigned usec) { __kml_win_hr_sleep_us((int64_t)usec); return 0; }
 
 // ---- libcurl fd_set bridge ---------------------------------------------------
 // The reactor merges libcurl's transfers into its select() by calling
@@ -2206,29 +2727,24 @@ int usleep(unsigned usec) { Sleep((usec + 999) / 1000); return 0; }
 // nothing the bitmap select could use. This definition shadows libcurl's
 // export (the linker prefers an object's symbol over the import library),
 // calls the real one through the already-loaded DLL, and hands each of
-// curl's sockets a stable fd number in the foreign range that select()
-// resolves back to the SOCKET. The mapping is rebuilt on every call, so a
-// socket curl closed is dropped one reactor iteration later at worst.
+// curl's sockets a stable fd number from the owned pool, under a KFD_FOREIGN
+// description that select() resolves back to the SOCKET. The mapping is rebuilt
+// on every call, so a socket curl closed is dropped one reactor iteration later
+// at worst. Each reactor thread drives its own multi handle, so a description
+// records the thread that reported it and a sweep retires only its own.
 typedef struct { unsigned int fd_count; ws_SOCKET fd_array[64]; } ws_fd_set;
 static int (*p_curl_multi_fdset)(void *, ws_fd_set *, ws_fd_set *, ws_fd_set *, int *);
 
-static void kfd_cancel_sock_ops_foreign(int fd) {
-	if (kfd[fd].afd_op) kfd_cancel_afd(fd);
-	kfd_sock_reset(fd);
-	kfd[fd].gen++;
-}
-
 static int foreign_fd_for(ws_SOCKET s, unsigned char *seen) {
-	int free_fd = -1;
-	for (int fd = KFD_FOREIGN_BASE; fd < KFD_MAX; fd++) {
-		if (kfd[fd].kind == KFD_FOREIGN && kfd[fd].sock == s) { seen[fd] = 1; return fd; }
-		if (kfd[fd].kind != KFD_FOREIGN && free_fd < 0) free_fd = fd;
+	for (int fd = KFD_POOL_BASE; fd < KFD_MAX; fd++) {
+		if (kfd_tab[fd] && kfd_tab[fd]->kind == KFD_FOREIGN && kfd_tab[fd]->sock == s && kfd_tab[fd]->owner_tid == GetCurrentThreadId()) { seen[fd] = 1; return fd; }
 	}
-	if (free_fd < 0) return -1;
-	kfd[free_fd].kind = KFD_FOREIGN;
-	kfd[free_fd].sock = s;
-	seen[free_fd] = 1;
-	return free_fd;
+	int nfd = kfd_slot_new(KFD_FOREIGN, -1);
+	if (nfd < 0) return -1; // pool full: this transfer goes unwatched until a slot frees
+	kfd_tab[nfd]->sock = s;
+	kfd_tab[nfd]->owner_tid = GetCurrentThreadId();
+	seen[nfd] = 1;
+	return nfd;
 }
 
 static void bridge_set(const ws_fd_set *src, unsigned char *dst, int *maxfd, unsigned char *seen) {
@@ -2256,13 +2772,12 @@ int curl_multi_fdset(void *multi, unsigned char *rset, unsigned char *wset, unsi
 	if (rset) bridge_set(&r, rset, &mx, seen);
 	if (wset) bridge_set(&w, wset, &mx, seen);
 	if (eset) bridge_set(&x, eset, &mx, seen);
-	for (int fd = KFD_FOREIGN_BASE; fd < KFD_MAX; fd++) {
-		if (kfd[fd].kind == KFD_FOREIGN && !seen[fd]) {
+	for (int fd = KFD_POOL_BASE; fd < KFD_MAX; fd++) {
+		if (kfd_tab[fd] && kfd_tab[fd]->kind == KFD_FOREIGN && !seen[fd] && kfd_tab[fd]->owner_tid == GetCurrentThreadId()) {
 			// curl is done with this socket: disarm its poll and retire the slot, so a
 			// late completion is recognized stale and never marks the next tenant.
-			kfd_cancel_sock_ops_foreign(fd);
-			kfd[fd].kind = KFD_PLAIN;
-			kfd[fd].sock = 0;
+			if (kfd_tab[fd]->afd_op) kfd_cancel_afd(fd);
+			kfd_slot_release(fd);
 		}
 	}
 	// Preserve the reactor's "-1 means curl has nothing to wait on" contract.

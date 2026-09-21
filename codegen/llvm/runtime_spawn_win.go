@@ -408,15 +408,17 @@ child:
 
 // The http.listen({ workers: N }) cluster (TDD-00025) forks N-1 workers that
 // share the already-bound listening socket. On Windows the primary instead
-// re-spawns its own executable N-1 times with the listening socket
-// inherited (win32proc.c re-homes it at the same fd number before the
-// worker's main runs) and the worker id in the environment; a worker's
-// __kml_http_bind_and_listen then adopts that fd instead of binding, and
-// its own __kml_http_cluster_fork is a no-op. Every worker accepts on the
-// one shared socket, which is the same SCHED_NONE distribution the fork
-// model has on Linux — Node's Windows round-robin (primary accepts and hands
-// connections over) is recorded in TDD-00177 as the remaining gap. The
-// mmap'd close flag has no Windows equivalent yet; it stays null, so
+// re-spawns its own executable N-1 times with every listening socket it
+// holds inherited (win32proc.c re-homes each at the same fd number before
+// the worker's main runs) and the worker id in the environment; a worker's
+// __kml_http_bind_and_listen then takes the inherited listener bound to its
+// port instead of binding, and its own __kml_http_cluster_fork is a no-op.
+// Sharing accept() on the one socket does not distribute on Windows (the
+// kernel serves pending accepts most-recent-first, so one process takes
+// everything), so connections are dealt round-robin instead, the way Node's
+// cluster does there: the primary accepts and hands each connection to the
+// next process in turn, itself included (win32io.c, "cluster round-robin").
+// The mmap'd close flag has no Windows equivalent yet; it stays null, so
 // http.close() in a worker does not reach its siblings there.
 
 // httpClusterEntryIR is inserted at the top of __kml_http_cluster_fork.
@@ -426,9 +428,28 @@ func (e *Emitter) httpClusterEntryIR() string {
 	}
 	return `  %wid0 = load i64, ptr @__kml_cluster_worker_id, align 8
   %isworker0 = icmp ne i64 %wid0, 0
-  br i1 %isworker0, label %done, label %primary
+  br i1 %isworker0, label %wflag, label %primary
+wflag:
+  ; A re-spawned worker maps the primary's close-flag page (fork would have
+  ; inherited the mapping).
+  %wmm = call ptr @__kml_win_cluster_flag()
+  %wmmfail = icmp eq ptr %wmm, inttoptr (i64 -1 to ptr)
+  br i1 %wmmfail, label %done, label %wstore
+wstore:
+  store ptr %wmm, ptr @__kml_cluster_close_flag, align 8
+  br label %done
 primary:
 `
+}
+
+// httpClusterFlagIR allocates the shared close-flag page as %mm (MAP_FAILED on
+// failure): an anonymous MAP_SHARED mapping the forked workers inherit, or on
+// Windows a named section the re-spawned workers open (win32proc.c).
+func (e *Emitter) httpClusterFlagIR() string {
+	if targetGOOS() != "windows" {
+		return fmt.Sprintf("  %%mm = call ptr @mmap(ptr null, i64 16, i32 3, i32 %d, i32 -1, i64 0)\n", mmapSharedAnonFlags())
+	}
+	return "  %mm = call ptr @__kml_win_cluster_flag()\n"
 }
 
 // httpClusterForkIR replaces the per-worker fork block (doforkw: … up to
@@ -448,7 +469,6 @@ child:
   br label %done
 `
 	}
-	e.ensureListenFdGlobal()
 	e.ensureWinSpawnDecl()
 	e.ensureMalloc()
 	e.ensureSprintf()
@@ -456,21 +476,17 @@ child:
 	e.ensureUnsetenv()
 	idFmt := e.internString("%lld")
 	envID := e.internString("KML_CLUSTER_WORKER_ID")
-	envFD := e.internString("KML_HTTP_LISTEN_FD")
+	// Spawn flag 131072 (0x20000) = cluster worker: the platform layer hands it
+	// every listening socket this process holds plus a hand-off channel for each
+	// (win32proc.c); %lfd, the fork model's one shared listener, is not needed.
 	return `  call i32 @fflush(ptr null)
-  %lfd = load i32, ptr @__kml_listen_fd, align 4
-  %lfd64 = sext i32 %lfd to i64
   %idbuf = call ptr @malloc(i64 24)
   call i32 (ptr, ptr, ...) @sprintf(ptr %idbuf, ptr ` + idFmt + `, i64 %i)
   call i32 @setenv(ptr ` + envID + `, ptr %idbuf, i32 1)
-  %fdbuf = call ptr @malloc(i64 24)
-  call i32 (ptr, ptr, ...) @sprintf(ptr %fdbuf, ptr ` + idFmt + `, i64 %lfd64)
-  call i32 @setenv(ptr ` + envFD + `, ptr %fdbuf, i32 1)
   %exe = call ptr @__kml_win_self_exe()
   %argv = load ptr, ptr @__argv_ptr, align 8
-  %pid = call i32 @__kml_win_spawn(ptr %exe, ptr %argv, ptr null, i32 -1, i32 -1, i32 -1, i32 %lfd, i32 0, ptr null)
+  %pid = call i32 @__kml_win_spawn(ptr %exe, ptr %argv, ptr null, i32 -1, i32 -1, i32 -1, i32 -1, i32 131072, ptr null)
   call i32 @unsetenv(ptr ` + envID + `)
-  call i32 @unsetenv(ptr ` + envFD + `)
   br label %parentnext
 `
 }
@@ -481,15 +497,14 @@ func (e *Emitter) httpListenInheritIR() string {
 	if targetGOOS() != "windows" {
 		return ""
 	}
-	e.ensureGetenv()
-	e.ensureAtoll()
-	envFD := e.internString("KML_HTTP_LISTEN_FD")
-	return `  %inh = call ptr @getenv(ptr ` + envFD + `)
-  %noinh = icmp eq ptr %inh, null
+	if !e.usedWinInheritedListener {
+		e.usedWinInheritedListener = true
+		e.emitGlobal("declare i32 @__kml_win_inherited_listener(i32 noundef)")
+	}
+	return `  %inhfd = call i32 @__kml_win_inherited_listener(i32 %port)
+  %noinh = icmp slt i32 %inhfd, 0
   br i1 %noinh, label %fresh, label %inherited
 inherited:
-  %inh64 = call i64 @atoll(ptr %inh)
-  %inhfd = trunc i64 %inh64 to i32
   ret i32 %inhfd
 fresh:
 `
@@ -506,6 +521,7 @@ func (e *Emitter) ensureHTTPClusterSeed() {
 	e.ensureGetenv()
 	e.ensureAtoll()
 	e.emitGlobal("declare ptr @__kml_win_self_exe()")
+	e.emitGlobal("declare ptr @__kml_win_cluster_flag()")
 	e.emitGlobal(`
 define void @__kml_http_cluster_seed() {
 entry:

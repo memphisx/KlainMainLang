@@ -108,6 +108,22 @@ static void ensureGCStackbottomSet(void) {
 #endif
 }
 
+#ifdef _WIN32
+// win32io.c's fiber hooks, NULL until the constructor below fills them in.
+extern void (*__kml_gc_set_stackbottom)(void *stack_base);
+extern void (*__kml_gc_root_add)(void *lo, void *hi_plus_one);
+extern void (*__kml_gc_root_remove)(void *lo, void *hi_plus_one);
+// GC_stackbottom carries a deprecation attribute in newer Boehm headers; it is
+// still the documented way to say "the stack now in use", and the emitted IR
+// writes the same variable for its own fiber swaps (emitter.go's gcSBStore).
+_Pragma("GCC diagnostic push")
+_Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+static void kml_gc_set_stackbottom(void *base) { GC_stackbottom = (char *)base; }
+_Pragma("GCC diagnostic pop")
+static void kml_gc_root_add(void *lo, void *hi) { GC_add_roots((char *)lo, (char *)hi); }
+static void kml_gc_root_remove(void *lo, void *hi) { GC_remove_roots((char *)lo, (char *)hi); }
+#endif
+
 __attribute__((constructor))
 static void __kml_gc_ctor(void) {
 	ensureGCStackbottomSet();
@@ -128,6 +144,14 @@ static void __kml_gc_ctor(void) {
 	// registration might be unavailable; not needed here, since both of this
 	// project's target platforms, Linux glibc and Darwin/BSD libc, ship
 	// standard POSIX pthread_atfork.)
+#ifdef _WIN32
+	// Windows fibers: hand win32io.c the three collector operations its fiber
+	// switch needs (see "fibers and the collector" there). Done here because
+	// this file is the only one in the link that knows Boehm exists.
+	__kml_gc_set_stackbottom = kml_gc_set_stackbottom;
+	__kml_gc_root_add = kml_gc_root_add;
+	__kml_gc_root_remove = kml_gc_root_remove;
+#endif
 #ifndef _WIN32
 	GC_set_handle_fork(1);
 #endif // no fork() on Windows: Boehm aborts on the request there (TDD-00177)

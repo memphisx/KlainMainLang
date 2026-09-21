@@ -61,7 +61,7 @@ define void @__kml_cp_wake_drain() {
 	e.ensureWriteDecl()
 	e.ensureFcntlDecl()
 	e.ensureErrnoAccessor()
-	sigchld := signalNumbers["SIGCHLD"]
+	sigchld := signalNumbers()["SIGCHLD"]
 	// The pipe belongs to the process that created it. A forked cluster worker
 	// inherits both ends and the handler; were it to read the parent's pipe it
 	// would swallow the parent's wake bytes, so every use is gated on the owner

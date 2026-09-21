@@ -135,8 +135,8 @@ server.bind(%d)
 // connection (zero-read), and libcurl's upstream socket — a socket this layer
 // does not own, watched by an AFD poll issued on the reactor's helper device. A
 // handler that awaits a slow upstream parks on exactly that poll; the trace
-// must show its completions arriving through the port (op kind 3 on an fd in
-// the foreign range, 896+) rather than the loop spinning or stalling.
+// must show its completions arriving through the port (op kind 3 on a
+// description the trace marks foreign) rather than the loop spinning or stalling.
 func TestE2EReactorForeignSocketOnPort(t *testing.T) {
 	upstream := newDelayedUpstreamServer(t, 700*time.Millisecond)
 	np := freePort(t)
@@ -178,9 +178,11 @@ http.listen(8974, async (req: HttpRequest): Promise<Res> => {
 	trace := stderr.String()
 	foreign := false
 	for _, line := range strings.Split(trace, "\n") {
-		var fd, kind, live int
+		// Foreign-ness is the description's kind, reported by the trace — a libcurl
+		// socket takes an ordinary pool fd, so its number says nothing.
+		var fd, kind, live, isForeign int
 		var st string
-		if n, _ := fmt.Sscanf(line, "[io] port op fd=%d kind=%d live=%d st=%s", &fd, &kind, &live, &st); n >= 2 && kind == 3 && fd >= 896 {
+		if n, _ := fmt.Sscanf(line, "[io] port op fd=%d kind=%d live=%d st=%s foreign=%d", &fd, &kind, &live, &st, &isForeign); n == 5 && kind == 3 && isForeign == 1 {
 			foreign = true
 			break
 		}

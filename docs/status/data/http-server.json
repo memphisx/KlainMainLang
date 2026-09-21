@@ -75,7 +75,7 @@
             "feature": "`http.listen(port, handler, { workers: N })` — multi-process clustering",
             "status": "implemented",
             "notes": [
-              "`fork()`s `N-1` workers sharing the listening socket — parallelism across cores on top of each process's own fiber concurrency",
+              "`fork()`s `N-1` workers sharing the listening socket — parallelism across cores on top of each process's own fiber concurrency. On Windows (no `fork()`) the workers are re-spawned processes and the primary deals connections out round-robin, itself included ([ADR-01027](../adr/ADR-01027.md))",
               "`cluster.isPrimary`/`cluster.workerId` (0 = original, 1..N-1 per fork) branch on the current process",
               "Works under both memory modes",
               "May be combined with Node `http.createServer` servers in one program — declared after them, the cluster joins the shared reactor as an additional listener and the fork runs once every listener is bound, so each worker serves every port; the combined program cannot also use Worker *threads* (`fork()` + threads is unsafe) ([ADR-00989](../adr/ADR-00989.md))",
@@ -183,7 +183,7 @@
             "notes": [
               "A bare global function (like `http.listen` itself), reachable only from inside a running request handler, `setTimeout`/`setInterval` callback, or `process.on(...)` handler — the only places code ever runs \"alongside\" the event loop",
               "Graceful by design: stops accepting immediately and lets already-open connections finish before `http.listen()`'s own call returns control to the rest of the program (matching Node's default `server.close()`) — `http.closeAllConnections()` (next row) is the forceful counterpart",
-              "In a `{ workers: N }` cluster, one worker's `.close()` shuts down every worker — it sets a shared `mmap`'d flag each worker's event loop polls, so the whole cluster drains and exits with no external signal ([TDD-00117](../tdd/TDD-00117.md)/[ADR-00359](../adr/ADR-00359.md))",
+              "In a `{ workers: N }` cluster, one worker's `.close()` shuts down every worker — it sets a shared flag page (`mmap`'d under `fork()`, a named section on Windows) each worker's event loop polls, so the whole cluster drains and exits with no external signal ([TDD-00117](../tdd/TDD-00117.md)/[ADR-00359](../adr/ADR-00359.md))",
               "See [TDD-00027](../tdd/TDD-00027.md)/[ADR-00102](../adr/ADR-00102.md)"
             ],
             "caveats": []

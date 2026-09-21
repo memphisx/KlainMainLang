@@ -34,6 +34,12 @@ int kfd_kind_of(int fd);
 void kfd_set_inherited(int fd);
 int kfd_register(HANDLE h, int kind);
 int kfd_adopt_socket(HANDLE s, int fd);
+int kfd_listeners(int *out, int max);
+void kfd_rr_add_worker(int lfd, unsigned long pid, int chan);
+void kfd_rr_adopt(int lfd, int chan, int nonblock);
+void *__kml_win_cluster_flag(void); // defined below; the spawn hands its section over
+int kfd_nonblock_of(int fd);
+int socketpair(int, int, int, int[2]);
 HANDLE kfd_handle(int fd);
 void ws_init(void);
 int socket(int, int, int);
@@ -44,6 +50,19 @@ int connect(int, const void *, int);
 int getsockname(int, void *, int *);
 int getpeername(int, void *, int *);
 int close(int);
+
+// The cluster this process belongs to, named by its primary's pid: this
+// process's own unless it was spawned as a cluster worker.
+static DWORD kml_cluster_primary_pid;
+static DWORD kml_cluster_primary(void) {
+	return kml_cluster_primary_pid ? kml_cluster_primary_pid : GetCurrentProcessId();
+}
+
+// The cluster's shared close-flag section (see __kml_win_cluster_flag below):
+// created by the primary, its handle inherited by every worker at spawn.
+static HANDLE kml_flag_section;   // this process's handle (primary: created; worker: inherited)
+static void *kml_flag_view;       // mapped once, reused
+static HANDLE kml_flag_inherited; // handed over at spawn, before main runs
 
 // ---- pid table -----------------------------------------------------------------
 // A reaped child keeps its slot (pid + reaped flag, handle closed) so a
@@ -244,8 +263,51 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 	wchar_t *env = NULL;
 	HANDLE hinh = INVALID_HANDLE_VALUE;
 	wchar_t markerbuf[96];
-	const wchar_t *markers[2];
+	const wchar_t *markers[4];
 	int nmarkers = 0;
+	// flags bit 0x20000 = cluster worker (the http.listen({ workers }) re-spawn):
+	// it inherits every listening socket this process holds, each with the far
+	// end of a socket pair the primary deals that listener's connections over
+	// (win32io.c, "cluster round-robin"). KML_WIN_RR is the primary's pid, then
+	// the listeners as fd:listener-handle:channel-handle:nonblock, the worker
+	// adopting each listener under the fd number it has here.
+	enum { RR_MAX = 16 };
+	int rr_fd[RR_MAX], rr_near[RR_MAX], rr_n = 0;
+	HANDLE rr_lh[RR_MAX], rr_ch[RR_MAX];
+	wchar_t rrbuf[32 + RR_MAX * 64], flagbuf[64];
+	HANDLE flag_h = INVALID_HANDLE_VALUE;
+	if (flags & 0x20000) {
+		// The close-flag section, inheritable, so a worker that is still starting
+		// up when the cluster shuts down still shares the primary's page.
+		if (__kml_win_cluster_flag() != (void *)(intptr_t)-1 &&
+		    DuplicateHandle(GetCurrentProcess(), kml_flag_section, GetCurrentProcess(),
+		                    &flag_h, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+			wsprintfW(flagbuf, L"KML_WIN_FLAG=%I64u", (unsigned long long)(uintptr_t)flag_h);
+			markers[nmarkers++] = flagbuf;
+		} else {
+			flag_h = INVALID_HANDLE_VALUE;
+		}
+		int lfds[RR_MAX];
+		int nl = kfd_listeners(lfds, RR_MAX);
+		wchar_t *rp = rrbuf + wsprintfW(rrbuf, L"KML_WIN_RR=%lu|", (unsigned long)kml_cluster_primary());
+		for (int i = 0; i < nl; i++) {
+			int sv[2];
+			if (socketpair(0, 0, 0, sv) != 0) continue;
+			HANDLE lh = inheritable_dup(lfds[i]), ch = inheritable_dup(sv[1]);
+			close(sv[1]);
+			if (lh == INVALID_HANDLE_VALUE || ch == INVALID_HANDLE_VALUE) {
+				if (lh != INVALID_HANDLE_VALUE) CloseHandle(lh);
+				if (ch != INVALID_HANDLE_VALUE) CloseHandle(ch);
+				close(sv[0]);
+				continue;
+			}
+			rr_fd[rr_n] = lfds[i]; rr_near[rr_n] = sv[0]; rr_lh[rr_n] = lh; rr_ch[rr_n] = ch;
+			rp += wsprintfW(rp, L"%s%d:%I64u:%I64u:%d", rr_n ? L";" : L"", lfds[i],
+			                (unsigned long long)(uintptr_t)lh, (unsigned long long)(uintptr_t)ch, kfd_nonblock_of(lfds[i]));
+			rr_n++;
+		}
+		markers[nmarkers++] = rrbuf;
+	}
 	if (inherit_fd >= 0) {
 		hinh = inheritable_dup(inherit_fd);
 		wsprintfW(markerbuf, L"KML_WIN_INHERIT_FD=%d:%I64u", inherit_fd, (unsigned long long)(uintptr_t)hinh);
@@ -296,12 +358,14 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 	// exactly the handles meant for this child — libuv's practice, and the
 	// difference between "safe by convention" and safe (ADR-00737). If the
 	// attribute list cannot be built, fall back to the old wide inherit.
-	HANDLE inherit_list[4];
+	HANDLE inherit_list[5 + 2 * RR_MAX];
 	DWORD nlist = 0;
 	if (hin && hin != INVALID_HANDLE_VALUE) inherit_list[nlist++] = hin;
 	if (hout && hout != INVALID_HANDLE_VALUE) inherit_list[nlist++] = hout;
 	if (herr && herr != INVALID_HANDLE_VALUE) inherit_list[nlist++] = herr;
 	if (hinh != INVALID_HANDLE_VALUE) inherit_list[nlist++] = hinh;
+	for (int i = 0; i < rr_n; i++) { inherit_list[nlist++] = rr_lh[i]; inherit_list[nlist++] = rr_ch[i]; }
+	if (flag_h != INVALID_HANDLE_VALUE) inherit_list[nlist++] = flag_h;
 	SIZE_T asz = 0;
 	InitializeProcThreadAttributeList(NULL, 1, 0, &asz);
 	LPPROC_THREAD_ATTRIBUTE_LIST attrs = asz ? (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(asz) : NULL;
@@ -325,7 +389,10 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 	if (hout && hout != INVALID_HANDLE_VALUE) CloseHandle(hout);
 	if (herr && herr != INVALID_HANDLE_VALUE) CloseHandle(herr);
 	if (hinh != INVALID_HANDLE_VALUE) CloseHandle(hinh);
+	for (int i = 0; i < rr_n; i++) { CloseHandle(rr_lh[i]); CloseHandle(rr_ch[i]); }
+	if (flag_h != INVALID_HANDLE_VALUE) CloseHandle(flag_h);
 	if (!ok) {
+		for (int i = 0; i < rr_n; i++) close(rr_near[i]);
 		// On POSIX a program that cannot be exec'd still yields a child, one
 		// that _exit(127)s (Node's exec-failure convention), and every caller
 		// reads that through waitpid. Mirror it: hand back a pseudo-pid whose
@@ -346,6 +413,10 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 	// The child now shares the socket object behind inherit_fd; the parent's
 	// close() of that fd must release only its own handle (win32io.c).
 	if (inherit_fd >= 0 && inherit_fd < KFD_MAX && kfd_kind_of(inherit_fd) == KFD_SOCKET) kfd_set_inherited(inherit_fd);
+	for (int i = 0; i < rr_n; i++) {
+		kfd_set_inherited(rr_fd[i]);
+		kfd_rr_add_worker(rr_fd[i], pi.dwProcessId, rr_near[i]);
+	}
 	return (int)pi.dwProcessId;
 }
 
@@ -377,6 +448,69 @@ __attribute__((constructor)) static void kml_win_adopt_inherited(void) {
 	// copies the environment before constructors run (ADR-00737).
 	SetEnvironmentVariableA("KML_WIN_INHERIT_FD", NULL);
 	_putenv("KML_WIN_INHERIT_FD=");
+}
+
+// Child side of the cluster-worker spawn: adopt every inherited listener under
+// the primary's fd number first (so no channel takes one of those numbers),
+// then give each its hand-off channel.
+__attribute__((constructor)) static void kml_win_adopt_cluster(void) {
+	char buf[32 + 16 * 64];
+	if (!GetEnvironmentVariableA("KML_WIN_RR", buf, sizeof buf)) return;
+	ws_init();
+	int fds[16], nbs[16], n = 0;
+	HANDLE chans[16];
+	kml_cluster_primary_pid = (DWORD)strtoul(buf, NULL, 10);
+	char fb[64];
+	if (GetEnvironmentVariableA("KML_WIN_FLAG", fb, sizeof fb)) {
+		kml_flag_inherited = (HANDLE)(uintptr_t)strtoull(fb, NULL, 10);
+		SetEnvironmentVariableA("KML_WIN_FLAG", NULL);
+		_putenv("KML_WIN_FLAG=");
+	}
+	char *list = strchr(buf, '|');
+	for (char *q = list ? list + 1 : NULL; q && *q && n < 16;) {
+		int fd = atoi(q);
+		char *c1 = strchr(q, ':');
+		char *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
+		if (!c2) break;
+		HANDLE lh = (HANDLE)(uintptr_t)strtoull(c1 + 1, NULL, 10);
+		HANDLE ch = (HANDLE)(uintptr_t)strtoull(c2 + 1, NULL, 10);
+		char *c3 = strchr(c2 + 1, ':');
+		if (kfd_adopt_socket(lh, fd) >= 0) { fds[n] = fd; chans[n] = ch; nbs[n] = c3 ? atoi(c3 + 1) : 0; n++; }
+		q = strchr(c2, ';');
+		if (q) q++;
+	}
+	for (int i = 0; i < n; i++) {
+		int chan = kfd_register(chans[i], KFD_SOCKET);
+		if (chan >= 0) kfd_rr_adopt(fds[i], chan, nbs[i]);
+	}
+	SetEnvironmentVariableA("KML_WIN_RR", NULL);
+	_putenv("KML_WIN_RR=");
+}
+
+// __kml_win_cluster_flag: the cluster's shared close-flag page (two i64 words,
+// zeroed), or MAP_FAILED. Under fork() this is an anonymous MAP_SHARED mapping
+// every worker inherits; here it is a section whose *handle* each worker
+// inherits at spawn, mapped on first use.
+//
+// Inherited rather than opened by name, which is what a first attempt did. A
+// named section lives only while some process holds a handle or a view of it,
+// and a worker still starting up when the cluster shuts down finds all of them
+// gone: `CreateFileMappingW` then silently creates a *new*, zero-filled section
+// under the same name, and that worker waits forever on a flag nobody will set
+// again — it keeps the listening socket alive through its inherited handle, so
+// the port never stops accepting. An inherited handle exists from the moment
+// the worker is created and keeps the section alive by itself, which is the
+// property fork's shared page has for free.
+void *__kml_win_cluster_flag(void) {
+	if (kml_flag_view) return kml_flag_view;
+	HANDLE m = kml_flag_inherited;
+	if (!m) m = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 16, NULL);
+	if (!m) return (void *)(intptr_t)-1;
+	void *v = MapViewOfFile(m, FILE_MAP_ALL_ACCESS, 0, 0, 16);
+	if (!v) return (void *)(intptr_t)-1;
+	kml_flag_section = m;
+	kml_flag_view = v;
+	return v;
 }
 
 // __kml_win_self_exe: the running executable's path as a malloc'd UTF-8

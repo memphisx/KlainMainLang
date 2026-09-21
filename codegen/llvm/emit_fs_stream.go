@@ -36,19 +36,6 @@ func (e *Emitter) emitFsCreateReadStream(args []ast.Expression, pos ast.Pos) (Va
 	e.ensureNodeStreamRuntime()
 	chunkTy := TypePtr // string chunks
 
-	// The pool runtime is POSIX-only (see emitFsPromisePooled): Windows keeps
-	// the pre-TDD-00186 eager read-to-EOF fill until the reactor work lands.
-	if targetGOOS() == "windows" {
-		e.ensureFsReadStream()
-		fulfillFn := e.emitStreamFulfillThunk(chunkTy)
-		rs := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 1.0, ptr %s)", rs, fulfillFn))
-		e.emitInstr(fmt.Sprintf("call void @__kml_fs_read_stream(ptr %s, ptr %s, i64 %d)", pathVal.Ref, rs, hwm))
-		closed := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_close(ptr %s)", closed, rs))
-		return e.wrapWebReadable(Value{Ref: rs, Ty: ReadableStreamType(chunkTy)})
-	}
-
 	e.ensureThreadPool() // pool + stream-completion drain helpers (TDD-00186)
 	e.ensureFsOpenRead()
 

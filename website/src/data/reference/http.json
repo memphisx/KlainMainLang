@@ -66,7 +66,7 @@
       "statusRow": "`http.listen(port, handler, { workers: N })` — multi-process clustering",
       "signature": "http.listen(port, handler, { workers: N }): void",
       "badge": "exact",
-      "description": "Multi-process clustering: fork()s N-1 workers sharing the listening socket — parallelism across cores on top of each process's own fiber concurrency. cluster.isPrimary / cluster.workerId (0 = original, 1..N-1 per fork) branch on the current process. Works under both memory modes. os.cpus().length is the natural N.",
+      "description": "Multi-process clustering: fork()s N-1 workers sharing the listening socket — parallelism across cores on top of each process's own fiber concurrency. cluster.isPrimary / cluster.workerId (0 = original, 1..N-1 per fork) branch on the current process. Works under both memory modes. os.cpus().length is the natural N. On Windows, which has no fork(), each worker is a re-spawned process that runs the program from the top (as a Node cluster worker does) and the primary deals connections out round-robin, itself included.",
       "exampleKey": "http/http_cluster",
       "snippet": "import cluster from 'cluster'\nhttp.listen(8081, (req: HttpRequest): Res => {\n  return { status: 200, body: 'served by worker ' + cluster.workerId.toString() }\n}, { workers: os.cpus().length })",
       "seeAlso": ["http.listen", "http.close"],

@@ -678,13 +678,21 @@ ok:
 // on BSD/Darwin) to always return EINTR on a signal regardless of
 // SA_RESTART, so signal()'s restart semantics don't matter for this
 // design's correctness.
-// signalNumbers is the host's signal-name table for process.kill(pid, name)
-// (ADR-00728): the names Node's os.constants.signals exposes on that host,
-// with the numbers the host's kill() takes — Linux's on Linux (and on
-// Windows, where the shim accepts Linux numbers; SIGBREAK is libuv's 21),
-// Darwin's on macOS. Node rejects a name outside the host's table with
-// ERR_UNKNOWN_SIGNAL, which the compile-time rejection / runtime -1 mirror.
-var signalNumbers = func() map[string]int {
+// signalNumbers is the *target's* signal-name table for process.kill(pid, name)
+// (ADR-00728): the names Node's os.constants.signals exposes there, with the
+// numbers that platform's kill() takes — Linux's on Linux (and on Windows,
+// where the shim accepts Linux numbers; SIGBREAK is libuv's 21), Darwin's on
+// macOS. Node rejects a name outside that table with ERR_UNKNOWN_SIGNAL, which
+// the compile-time rejection / runtime -1 mirror.
+//
+// A function, not a package-level var: `targetGOOS()` answers from the
+// `--target` flag, which is parsed long after package initialisation would have
+// frozen the table to the *host*. As a var, a macOS→Linux cross-compile
+// ([ADR-00813](../../docs/adr/ADR-00813.md)) emitted Darwin's numbers into a
+// Linux binary — SIGCHLD 20 for 17, so the child-exit self-pipe
+// ([ADR-01023](../../docs/adr/ADR-01023.md)) would have watched a signal the
+// kernel never raises.
+func signalNumbers() map[string]int {
 	switch targetGOOS() {
 	case "windows":
 		return map[string]int{"SIGHUP": 1, "SIGINT": 2, "SIGILL": 4, "SIGABRT": 6, "SIGFPE": 8, "SIGKILL": 9, "SIGSEGV": 11, "SIGTERM": 15, "SIGBREAK": 21, "SIGWINCH": 28}
@@ -693,11 +701,11 @@ var signalNumbers = func() map[string]int {
 	default:
 		return map[string]int{"SIGHUP": 1, "SIGINT": 2, "SIGQUIT": 3, "SIGILL": 4, "SIGTRAP": 5, "SIGABRT": 6, "SIGBUS": 7, "SIGFPE": 8, "SIGKILL": 9, "SIGUSR1": 10, "SIGSEGV": 11, "SIGUSR2": 12, "SIGPIPE": 13, "SIGALRM": 14, "SIGTERM": 15, "SIGCHLD": 17, "SIGCONT": 18, "SIGSTOP": 19, "SIGTSTP": 20, "SIGTTIN": 21, "SIGTTOU": 22, "SIGURG": 23, "SIGXCPU": 24, "SIGXFSZ": 25, "SIGVTALRM": 26, "SIGPROF": 27, "SIGWINCH": 28, "SIGIO": 29, "SIGPWR": 30, "SIGSYS": 31}
 	}
-}()
+}
 
 // ensureSignalFromName defines __kml_signal_from_name(ptr name) -> i64: the
 // runtime lookup for a non-literal signal name in process.kill, over the same
-// host table; -1 for an unknown name (kill() then fails with EINVAL and the
+// target table; -1 for an unknown name (kill() then fails with EINVAL and the
 // existing throw path reports it).
 func (e *Emitter) ensureSignalFromName() {
 	if e.usedSignalFromName {
@@ -705,8 +713,9 @@ func (e *Emitter) ensureSignalFromName() {
 	}
 	e.usedSignalFromName = true
 	e.ensureStrcmp()
-	names := make([]string, 0, len(signalNumbers))
-	for n := range signalNumbers {
+	table := signalNumbers()
+	names := make([]string, 0, len(table))
+	for n := range table {
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -714,7 +723,7 @@ func (e *Emitter) ensureSignalFromName() {
 	b.WriteString("\ndefine i64 @__kml_signal_from_name(ptr %name) {\nentry:\n  br label %c0\n")
 	for i, n := range names {
 		ptr := e.internString(n)
-		fmt.Fprintf(&b, "c%d:\n  %%r%d = call i32 @strcmp(ptr %%name, ptr %s)\n  %%eq%d = icmp eq i32 %%r%d, 0\n  br i1 %%eq%d, label %%hit%d, label %%c%d\nhit%d:\n  ret i64 %d\n", i, i, ptr, i, i, i, i, i+1, i, signalNumbers[n])
+		fmt.Fprintf(&b, "c%d:\n  %%r%d = call i32 @strcmp(ptr %%name, ptr %s)\n  %%eq%d = icmp eq i32 %%r%d, 0\n  br i1 %%eq%d, label %%hit%d, label %%c%d\nhit%d:\n  ret i64 %d\n", i, i, ptr, i, i, i, i, i+1, i, table[n])
 	}
 	fmt.Fprintf(&b, "c%d:\n  ret i64 -1\n}", len(names))
 	e.emitGlobal(b.String())

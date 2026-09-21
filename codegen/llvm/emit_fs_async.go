@@ -2,15 +2,15 @@
 // and the Promise form (fs.promises.readFile(path) / import from 'fs/promises').
 // TDD-00107.
 //
-// On POSIX both forms are genuinely non-blocking (TDD-00185): the op runs on
+// Both forms are genuinely non-blocking (TDD-00185): the op runs on
 // the blocking-work thread pool (threadpoolsrc/klainpool.c) and the loop settles
 // a pending Promise on completion. The Promise form returns that Promise; the
 // callback form attaches a settle reaction that fires the callback on the loop
 // thread (emitFsCallbackReaction) — the reaction node keeps the callback
 // GC-rooted while the op is in flight, and a binary ArrayBuffer/TypedArray body
-// is copied raw at submit so no GC pointer crosses the thread boundary. Windows
-// (no pool build yet) falls back to the inline path below: the *synchronous*,
-// blocking runtime helper (runtime_fs.go) run inline, async-shaped only.
+// is copied raw at submit so no GC pointer crosses the thread boundary. An op
+// the pool has no thunk for takes the inline path below: the *synchronous*
+// runtime helper (runtime_fs.go) run inline, async-shaped only.
 // A failure (the sync helper throws via @__kml_fs_throw) is caught with the same
 // setjmp/@__kml_get_thrown primitive emitTry uses and re-surfaced as the `err`
 // callback argument / a rejected Promise, so the async paths reuse every sync
@@ -126,7 +126,7 @@ func (e *Emitter) emitFsAsyncCallback(op string, args []ast.Expression, pos ast.
 	// on the loop thread. The op runs off-thread, so the callback form is
 	// genuinely non-blocking, reusing the promise-form submit and the GC-safe
 	// reaction machinery (the reaction node keeps the callback rooted). Falls
-	// back to the inline guarded path where the pool declines (Windows).
+	// back to the inline guarded path where the pool declines.
 	if promVal, pooled, perr := e.emitFsPromisePooled(op, opArgs, pos); perr != nil {
 		return Value{}, perr
 	} else if pooled {
@@ -192,12 +192,6 @@ var fsPoolOpID = map[string]int{
 // binary-data writeFile/appendFile, whose byte-length dispatch the inline path
 // owns), so the caller falls through.
 func (e *Emitter) emitFsPromisePooled(op string, args []ast.Expression, pos ast.Pos) (Value, bool, error) {
-	// The pool runtime (klainpool.c) is POSIX-only — pthread condvars plus a
-	// socketpair/select() wakeup with no Win32 build. Windows keeps the inline
-	// settled-Promise path until the reactor work (TDD-00182/00183) subsumes it.
-	if targetGOOS() == "windows" {
-		return Value{}, false, nil
-	}
 	opid, ok := fsPoolOpID[op]
 	if !ok {
 		return Value{}, false, nil

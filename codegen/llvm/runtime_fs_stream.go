@@ -1,67 +1,14 @@
 // runtime_fs_stream.go — the runtime backing fs.createReadStream /
 // fs.createWriteStream (TDD-00108).
 //
-// A read stream: fopen("rb"), read the file in highWaterMark-sized chunks with
-// fread, enqueue each as a string chunk into an already-alloc'd WHATWG rstream,
-// then fclose — eager read-to-EOF, no select() (a regular file is always ready).
+// A read stream: fopen("rb") on the loop thread; the chunked, demand-driven read
+// itself runs on the thread pool (threadpoolsrc/klainpool.c, TDD-00186).
 // A write stream: fopen once, and two sink thunks the Node Writable drives —
 // a per-chunk fwrite and an fclose on close. Both throw a catchable Error (via
 // @__kml_fs_throw) if the file can't be opened, matching readFileSync.
 package llvm
 
 import "fmt"
-
-// ensureFsReadStream declares @__kml_fs_read_stream(path, rstream, hwm): drains
-// the file into the rstream as string chunks. The rstream is closed by the
-// caller (emit_fs_stream.go) after this returns.
-func (e *Emitter) ensureFsReadStream() {
-	if e.usedFsReadStream {
-		return
-	}
-	e.usedFsReadStream = true
-	e.ensureStrHeaderRuntime()
-	e.ensureFsThrow()
-	e.ensureMalloc()
-	e.ensureFree()
-	e.ensureFopen()
-	e.ensureFclose()
-	e.ensureStreamRuntime() // @__kml_rs_enqueue
-	e.ensureFread()
-	modePtr := e.internString("rb")
-	opDescPtr := e.internString("cannot open file for reading")
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_fs_read_stream(ptr %%path, ptr %%rs, i64 %%hwm) {
-entry:
-  %%f = call ptr @fopen(ptr %%path, ptr %s)
-  %%isnull = icmp eq ptr %%f, null
-  br i1 %%isnull, label %%fail, label %%loop
-fail:
-  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
-  unreachable
-loop:
-  %%buf = call ptr @__kml_str_alloc(i64 %%hwm)
-  %%n = call i64 @fread(ptr %%buf, i64 1, i64 %%hwm, ptr %%f)
-  %%has = icmp sgt i64 %%n, 0
-  br i1 %%has, label %%enq, label %%done
-enq:
-  ; TDD-00120: set the header to the exact bytes read (binary-safe, may be < hwm),
-  ; so a (c: string) chunk's .length is correct. Enqueued chunks are leaked (the
-  ; stream never frees them), so the header raises no free-offset issue.
-  %%hdrp = getelementptr i8, ptr %%buf, i64 -8
-  store i64 %%n, ptr %%hdrp, align 8
-  %%term = getelementptr i8, ptr %%buf, i64 %%n
-  store i8 0, ptr %%term, align 1
-  %%pi = ptrtoint ptr %%buf to i64
-  %%ig = call i64 @__kml_rs_enqueue(ptr %%rs, i64 %%pi, i64 0)
-  br label %%loop
-done:
-  ; the final (EOF) buf was never enqueued; free its length-prefixed base.
-  %%base = getelementptr i8, ptr %%buf, i64 -8
-  call void @free(ptr %%base)
-  call i32 @fclose(ptr %%f)
-  ret void
-}`, modePtr, opDescPtr, e.internString("open")))
-}
 
 // ensureFsOpenRead declares @__kml_fs_open_read(path) -> FILE*: fopen("rb"),
 // throwing the Node-shaped Error synchronously on a missing file (matching the

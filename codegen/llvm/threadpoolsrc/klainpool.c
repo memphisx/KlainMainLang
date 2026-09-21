@@ -16,11 +16,10 @@
 //     {result, err}) and __kml_pool_settle (stores the value word and calls
 //     __kml_promise_settle) — so this file needs no knowledge of either struct.
 //
-// The wakeup socketpair is the general per-loop primitive the §1 audit found
-// missing on POSIX (the Windows fs.watch one, ADR-00757, is the same idea); the
-// Windows event-loop reactor work (TDD-00182/00183) is where this folds in on
-// that platform, so the pool is POSIX-first and Windows keeps the inline
-// (blocking) fs path until then.
+// The wakeup is per loop. On POSIX it is a socketpair whose read end sits in the
+// loop's select() set. On Windows the reactor's one wait is the loop thread's
+// completion port (TDD-00183), so a worker wakes it with an addressed packet to
+// that port — no descriptor, nothing in the fd sets.
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -30,9 +29,15 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <errno.h>
+#ifdef _WIN32
+// win32io.c: the calling thread's reactor port, and a wake addressed to a port.
+extern void *__kml_win_reactor_port(void);
+extern void __kml_win_port_wake(void *port);
+#else
 #include <sys/select.h>
 #include <sys/socket.h>
-#include <errno.h>
+#endif
 
 // ---- IR-exported thunks (Promise/exception layout lives in the emitted IR) --
 // Each thunk runs one fs op under a per-worker setjmp guard and returns two
@@ -141,11 +146,16 @@ enum {
 };
 
 // Per-loop completion port: a Treiber stack the workers push completions onto,
-// a socketpair the workers write to wake this loop's select(), and the count of
-// this loop's outstanding submissions (keeps the loop alive while I/O flies).
+// the wakeup that ends this loop's select() (a socketpair on POSIX, the loop
+// thread's reactor port on Windows), and the count of this loop's outstanding
+// submissions (keeps the loop alive while I/O flies).
 typedef struct kml_loop_port {
     _Atomic(kml_pool_item *) comp_head;
+#ifdef _WIN32
+    void *win_port;
+#else
     int wake_r, wake_w;
+#endif
     atomic_long inflight;
 } kml_loop_port;
 
@@ -156,6 +166,9 @@ static __thread kml_loop_port *tls_port = NULL;
 static kml_loop_port *loop_port(void) {
     if (tls_port) return tls_port;
     kml_loop_port *p = (kml_loop_port *)calloc(1, sizeof *p);
+#ifdef _WIN32
+    p->win_port = __kml_win_reactor_port();   // loop_port() runs on the loop thread
+#else
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
         // Fall back to a pipe: read end sv[0], write end sv[1].
@@ -167,6 +180,7 @@ static kml_loop_port *loop_port(void) {
         int fl = fcntl(p->wake_r, F_GETFL, 0);
         fcntl(p->wake_r, F_SETFL, fl | O_NONBLOCK);   // drain never blocks
     }
+#endif
     tls_port = p;
     return p;
 }
@@ -186,11 +200,15 @@ static void push_completion(kml_loop_port *p, kml_pool_item *it) {
         it->next = h;
     } while (!atomic_compare_exchange_weak_explicit(
                  &p->comp_head, &h, it, memory_order_release, memory_order_relaxed));
+#ifdef _WIN32
+    __kml_win_port_wake(p->win_port);
+#else
     if (p->wake_w >= 0) {
         char b = 1;
         ssize_t n = write(p->wake_w, &b, 1);
         (void)n;
     }
+#endif
 }
 
 // Post a fresh completion (kind, target, v0) to the loop. Used by the stream
@@ -446,6 +464,11 @@ _Bool __kml_pool_keepalive(void) {
 // 0 (no forced-zero timeout): we *want* select() to block on the wakefd so the
 // loop sleeps until a completion lands rather than spinning.
 _Bool __kml_pool_fdset_add(void *fdset, int *maxfd) {
+#ifdef _WIN32
+    // The wake is a packet on the reactor's port, which select() always waits on.
+    (void)fdset; (void)maxfd;
+    return 0;
+#else
     if (!tls_port ||
         atomic_load_explicit(&tls_port->inflight, memory_order_relaxed) <= 0 ||
         tls_port->wake_r < 0)
@@ -453,6 +476,7 @@ _Bool __kml_pool_fdset_add(void *fdset, int *maxfd) {
     FD_SET(tls_port->wake_r, (fd_set *)fdset);
     if (tls_port->wake_r > *maxfd) *maxfd = tls_port->wake_r;
     return 0;
+#endif
 }
 
 // Drain arrived completions on the loop thread. The comp stack is LIFO, but a
@@ -461,10 +485,12 @@ _Bool __kml_pool_fdset_add(void *fdset, int *maxfd) {
 void __kml_pool_dispatch(void) {
     kml_loop_port *p = tls_port;
     if (!p) return;
+#ifndef _WIN32
     if (p->wake_r >= 0) {
         char buf[64];
         while (read(p->wake_r, buf, sizeof buf) > 0) { /* drain wakeup bytes */ }
     }
+#endif
     kml_pool_item *it = atomic_exchange_explicit(&p->comp_head, NULL,
                                                  memory_order_acquire);
     // Reverse LIFO -> FIFO (insertion order).

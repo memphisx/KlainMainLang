@@ -771,7 +771,7 @@ func (e *Emitter) ensureHTTPClusterFork() {
 	// is a guarded no-op.
 	e.emitGlobal("@__kml_cluster_close_flag = internal global ptr null, align 8")
 	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_http_cluster_fork(i64 %%numWorkers) {
+define void @__kml_http_cluster_fork(i64 %%numWorkers, i32 %%lfd) {
 entry:
 %s  %%ip = alloca i64, align 8
   store i64 1, ptr %%ip, align 8
@@ -783,8 +783,7 @@ mkflag:
   ; worker inherits the same physical mapping. MAP_FAILED ((void*)-1) leaves the
   ; flag null — cross-worker close degrades to the caller's own process, no boot
   ; fail.
-  %%mm = call ptr @mmap(ptr null, i64 16, i32 3, i32 %d, i32 -1, i64 0)
-  %%mmfail = icmp eq ptr %%mm, inttoptr (i64 -1 to ptr)
+%s  %%mmfail = icmp eq ptr %%mm, inttoptr (i64 -1 to ptr)
   br i1 %%mmfail, label %%forkloop, label %%storeflag
 
 storeflag:
@@ -807,7 +806,7 @@ doforkw:
 
 done:
   ret void
-}`, e.httpClusterEntryIR(), mmapSharedAnonFlags(), e.httpClusterForkIR()))
+}`, e.httpClusterEntryIR(), e.httpClusterFlagIR(), e.httpClusterForkIR()))
 }
 
 // ensureHTTPDate declares __kml_http_date(ptr %buf): formats the current wall

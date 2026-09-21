@@ -775,7 +775,7 @@ func (e *Emitter) emitProcessKill(args []ast.Expression, pos ast.Pos) (Value, er
 		// compile time; a dynamic string goes through the runtime table
 		// (ADR-00728). Unknown names throw, as Node's ERR_UNKNOWN_SIGNAL does.
 		if lit, ok := args[1].(*ast.StringLiteral); ok {
-			n, known := signalNumbers[lit.Value]
+			n, known := signalNumbers()[lit.Value]
 			if !known {
 				return Value{}, fmt.Errorf("%d:%d: process.kill: unknown signal %q", pos.Line, pos.Col, lit.Value)
 			}

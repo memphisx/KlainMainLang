@@ -232,6 +232,35 @@ main2()
 	assertOutput(t, src, "200 404 200 len=3\nrace>=200:true")
 }
 
+// Promise.race/.any over task promises at MODULE TOP LEVEL (ADR-01029).
+//
+// Distinct from TestE2EPromiseCombinatorsOverTasks above, which runs the same
+// combinators inside an async fn: there the caller is a coroutine and the
+// combinator helper *parks*, so the top-level branch is never taken. Only
+// module top-level code reaches it, and that branch used to spin
+// @__kml_task_sched_step, which drains finished libcurl transfers but never
+// performs them — so a member backed by an in-flight fetch never progressed and
+// the program hung forever.
+//
+// That gap is why the defect reached main: the only thing exercising it was
+// examples/async/concurrent_tasks.ts, and `make examples` is a POSIX-lane-only
+// CI step (release.yml, `if: matrix.goos != 'windows'`). This test runs on
+// every lane.
+func TestE2EPromiseRaceAnyOverTasksAtTopLevel(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function grab(u: string): Promise<number> {
+    const r = await fetch(u)
+    return r.status
+}
+const first: number = await Promise.race([grab("%s/flat"), grab("%s/notfound")])
+console.log("race>=200:" + (first >= 200))
+const firstOk: number = await Promise.any([grab("%s/flat"), grab("%s/notfound")])
+console.log("any>=200:" + (firstOk >= 200))
+`, srv.URL, srv.URL, srv.URL, srv.URL)
+	assertOutput(t, src, "race>=200:true\nany>=200:true")
+}
+
 // A may-suspend async fn that throws rejects its promise; awaiting it re-throws
 // at the awaiter (so try/catch works), and Promise.all rejects on the first
 // rejection — including under concurrency, which exercises the per-task jmpbuf

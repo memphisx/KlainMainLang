@@ -741,9 +741,12 @@ no:
 	// busy-repolling every step. A stale waiter left after this returns can only
 	// cause a harmless spurious wake (the resumed wait re-checks its condition and
 	// re-parks).
+	e.noteLoopTurn() // the top-level branch waits by taking turns of the real loop
 	e.emitGlobal(fmt.Sprintf(`
 define i64 @__kml_task_await_any_of(ptr %%members, i64 %%count) {
 entry:
+  %%idleseen = alloca i1, align 1
+  store i1 false, ptr %%idleseen, align 1
   br label %%scan
 scan:
   br label %%cond
@@ -768,7 +771,38 @@ sdone:
   %%top = icmp eq ptr %%ct, null
   br i1 %%top, label %%drive, label %%park
 drive:
+  ; Module top level on the main stack: take a turn of the real event loop, the
+  ; same wait every other main-stack wait uses (TDD-00223 §1). The former
+  ; @__kml_task_sched_step-only spin drained finished transfers but never called
+  ; curl_multi_perform, so a member backed by an in-flight fetch could never
+  ; progress and Promise.race/any hung forever.
+  %%dturn = call i32 @__kml_loop_turn(i1 false)
+  switch i32 %%dturn, label %%drescan [
+    i32 1, label %%didle
+    i32 2, label %%dinner
+  ]
+dinner:
+  ; issued from inside a loop callback: the old subset drive, which may not
+  ; re-enter the loop under its own iteration
+  call void @__kml_drain_microtasks()
   call void @__kml_task_sched_step()
+  %%dfired = call i1 @__kml_timer_fire_next()
+  %%dpumped = call i1 @__kml_fetch_pump()
+  br label %%drescan
+didle:
+  ; nothing alive can wake the loop again. The turn's own final microtask and
+  ; scheduler pass may still have settled a member, so rescan once; a second
+  ; idle verdict means this await can never settle.
+  %%wasidle = load i1, ptr %%idleseen, align 1
+  br i1 %%wasidle, label %%dgiveup, label %%dmark
+dmark:
+  store i1 true, ptr %%idleseen, align 1
+  br label %%scan
+dgiveup:
+  call void @__kml_tla_unsettled()
+  unreachable
+drescan:
+  store i1 false, ptr %%idleseen, align 1
   br label %%scan
 park:
   %%m0gep = getelementptr ptr, ptr %%members, i64 0
@@ -815,6 +849,8 @@ wregdone:
 	e.emitGlobal(fmt.Sprintf(`
 define i64 @__kml_task_await_first_fulfilled(ptr %%members, i64 %%count) {
 entry:
+  %%idleseen = alloca i1, align 1
+  store i1 false, ptr %%idleseen, align 1
   br label %%scan
 scan:
   br label %%cond
@@ -848,7 +884,38 @@ waitmore:
   %%top = icmp eq ptr %%ct, null
   br i1 %%top, label %%drive, label %%park
 drive:
+  ; Module top level on the main stack: take a turn of the real event loop, the
+  ; same wait every other main-stack wait uses (TDD-00223 §1). The former
+  ; @__kml_task_sched_step-only spin drained finished transfers but never called
+  ; curl_multi_perform, so a member backed by an in-flight fetch could never
+  ; progress and Promise.race/any hung forever.
+  %%dturn = call i32 @__kml_loop_turn(i1 false)
+  switch i32 %%dturn, label %%drescan [
+    i32 1, label %%didle
+    i32 2, label %%dinner
+  ]
+dinner:
+  ; issued from inside a loop callback: the old subset drive, which may not
+  ; re-enter the loop under its own iteration
+  call void @__kml_drain_microtasks()
   call void @__kml_task_sched_step()
+  %%dfired = call i1 @__kml_timer_fire_next()
+  %%dpumped = call i1 @__kml_fetch_pump()
+  br label %%drescan
+didle:
+  ; nothing alive can wake the loop again. The turn's own final microtask and
+  ; scheduler pass may still have settled a member, so rescan once; a second
+  ; idle verdict means this await can never settle.
+  %%wasidle = load i1, ptr %%idleseen, align 1
+  br i1 %%wasidle, label %%dgiveup, label %%dmark
+dmark:
+  store i1 true, ptr %%idleseen, align 1
+  br label %%scan
+dgiveup:
+  call void @__kml_tla_unsettled()
+  unreachable
+drescan:
+  store i1 false, ptr %%idleseen, align 1
   br label %%scan
 park:
   %%m0gep = getelementptr ptr, ptr %%members, i64 0

@@ -485,7 +485,7 @@
             "total": 20,
             "pct": 25
           },
-          "caveats": "• The fs async thread pool is POSIX-only so far — Windows keeps the inline path until the reactor work lands ([TDD-00185](../tdd/TDD-00185.md))\u003cbr\u003e• `createWriteStream` still writes inline on the loop thread, and stream chunks are **strings** ([TDD-00186](../tdd/TDD-00186.md)/[TDD-00108](../tdd/TDD-00108.md))\u003cbr\u003e• `readFileSync`/`readFile` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md))"
+          "caveats": "• `createWriteStream` still writes inline on the loop thread, and stream chunks are **strings** ([TDD-00186](../tdd/TDD-00186.md)/[TDD-00108](../tdd/TDD-00108.md))\u003cbr\u003e• `readFileSync`/`readFile` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md))"
         },
         {
           "category": "Process / CLI I/O",

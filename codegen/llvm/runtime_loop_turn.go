@@ -143,6 +143,20 @@ innernap:
 ret:
   ret void
 }`)
+
+	// @__kml_tla_unsettled(): the give-up path shared with the combinator waits
+	// (@__kml_task_await_any_of / @__kml_task_await_first_fulfilled). Those wait
+	// on a set of member promises rather than one state word, so they cannot use
+	// @__kml_top_await itself, but a top-level await that can never settle must
+	// end the same way wherever it was issued — one warning, exit 13, as Node
+	// ends a module whose top-level await never settles.
+	e.emitGlobal(`
+define void @__kml_tla_unsettled() {
+entry:
+  %w = call i64 @write(i32 2, ptr @.kml_tla_unsettled, i64 ` + strconv.Itoa(len(msg)) + `)
+  call void @exit(i32 13)
+  unreachable
+}`)
 }
 
 // ensureUsleepDecl declares usleep once — the task runtime and the loop-turn

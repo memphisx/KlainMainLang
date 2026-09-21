@@ -211,7 +211,19 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		// TDD-00185: the blocking-work thread pool for real async fs I/O. Needs
 		// pthread; under -mm=gc each worker registers with Boehm before its first
 		// allocation (KLAINPOOL_GC), matching the Worker/klain:sync threads.
-		out = append(out, CSource{"threadpool", ThreadPoolSource(), e.ThreadPoolCFlags(), nil, ""})
+		// --static on Windows links the static winpthread archive instead of
+		// -pthread's DLL, as klain:sync does above (ADR-00772).
+		if runtime.GOOS == "windows" && staticLinkMode {
+			var cflags []string
+			for _, f := range e.ThreadPoolCFlags() {
+				if f != "-pthread" {
+					cflags = append(cflags, f)
+				}
+			}
+			out = append(out, CSource{"threadpool", ThreadPoolSource(), cflags, WorkerPthreadLinkFlags(), ""})
+		} else {
+			out = append(out, CSource{"threadpool", ThreadPoolSource(), e.ThreadPoolCFlags(), nil, ""})
+		}
 	}
 	if e.UsesEmbeddedAssets() {
 		// The embedded static server needs pthread; -pthread is already added

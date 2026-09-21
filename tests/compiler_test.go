@@ -1709,28 +1709,14 @@ func skipSanitizersOnWindows(t *testing.T) {
 	}
 }
 
-// skipInlineFsPoolOnWindows: the libuv-style blocking-work thread pool
-// (klainpool.c, TDD-00185/00186) is POSIX-first; on Windows fs ops keep the
-// inline (blocking) path until the event-loop reactor lands (TDD-00182/00183,
-// BACKLOG §2). Tests that assert the pool's non-blocking loop ordering — a
-// concurrently-due timer firing before an awaited read settles — cannot hold on
-// the inline path and are skipped there; the functional pooled tests still run.
-func skipInlineFsPoolOnWindows(t *testing.T) {
+// skipForkOnlyOnWindows: Windows has no fork(), so a { workers: N } cluster's
+// workers are re-spawned processes that run the program from the top (as every
+// Node cluster worker does) instead of continuing from the fork point. A test
+// of a fork-only property — code before http.listen running once — cannot hold
+// there. Distribution itself is tested on every host.
+func skipForkOnlyOnWindows(t *testing.T, why string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("fs runs on the inline blocking path on Windows (no thread pool yet, TDD-00182/00183); loop-ordering assertion is POSIX-only")
-	}
-}
-
-// skipClusterDistributionOnWindows: on Windows a cluster's workers are
-// re-spawned processes sharing one inherited listening socket, and the
-// kernel hands connections to whichever worker is in accept() — in practice
-// mostly one — where Linux's fork model distributes and Node's Windows
-// cluster round-robins from the primary. Documented gap in TDD-00177; the
-// re-spawn model also re-runs top-level code per worker.
-func skipClusterDistributionOnWindows(t *testing.T, why string) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("cluster worker distribution is shared-accept on Windows (documented TDD-00177 gap): " + why)
+		t.Skip("fork()-only property (Windows cluster workers are re-spawned, not forked): " + why)
 	}
 }

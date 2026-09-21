@@ -603,7 +603,6 @@ type Emitter struct {
 	usedHTTPFireClose            bool
 	usedFsReadFile               bool
 	usedFsReadFileRaw            bool
-	usedFsReadStream             bool
 	usedFsOpenRead               bool
 	usedFread                    bool
 	usedFsWriteStream            bool
@@ -664,6 +663,7 @@ type Emitter struct {
 	usedOSHomedirPw              bool
 	usedHeapStats                bool
 	usedHTTPClusterSeed          bool
+	usedWinInheritedListener     bool
 	usedListenFdGlobal           bool
 	usedOSCpusWin                bool
 	usedSetenvDecl               bool

@@ -227,7 +227,7 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 		dispSym := "@__kml_http_dispatch" + sfx
 		h2vtSym := "@__kml_h2_vtbl" + sfx
 		e.emitInstr(fmt.Sprintf("call void @__kml_http_register_extra_listener(i32 %s, ptr %s, ptr null, ptr %s)", listenfd, dispSym, h2vtSym))
-		e.emitInstr(fmt.Sprintf("call void @__kml_http_cluster_fork(i64 %s)", workersRef))
+		e.emitInstr(fmt.Sprintf("call void @__kml_http_cluster_fork(i64 %s, i32 %s)", workersRef, listenfd))
 		e.usedHTTPListen = true
 		return Value{Ty: TypeVoid}, nil
 	}
@@ -237,7 +237,7 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	// buildHTTPDispatcher/the event loop below). Every process that falls
 	// through (the original plus every fork) shares this same listenfd and
 	// proceeds identically from here on — see TDD-00025's Design section.
-	e.emitInstr(fmt.Sprintf("call void @__kml_http_cluster_fork(i64 %s)", workersRef))
+	e.emitInstr(fmt.Sprintf("call void @__kml_http_cluster_fork(i64 %s, i32 %s)", workersRef, listenfd))
 
 	if err := e.buildHTTPDispatcher(paramTy, retTy, isAsyncHandler, "", true); err != nil {
 		return Value{}, err
@@ -1480,7 +1480,7 @@ func (e *Emitter) emitHTTPServerListen(objVal Value, args []ast.Expression, pos 
 	afterBindL := e.freshLabel("http.listen.afterbind")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bindOK, setupL, skipL))
 	e.emitLabel(setupL)
-	e.emitInstr("call void @__kml_http_cluster_fork(i64 0)")
+	e.emitInstr("call void @__kml_http_cluster_fork(i64 0, i32 -1)")
 	// TDD-00191 Stage 1: route by the handle's primary flag (slot 3). The
 	// primary server keeps the @__kml_listen_fd scalar the reactor is wired to;
 	// an additional server registers `{fd, its dispatcher}` in the extra-listener

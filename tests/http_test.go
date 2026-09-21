@@ -2772,7 +2772,6 @@ http.listen(8966, (req: HttpRequest): Res => { return { status: 200, body: "x", 
 // time gives the kernel no real distribution pressure — the same worker
 // could plausibly win every sequential accept() race.
 func TestE2EHTTPListenClusteringMultipleWorkerPIDs(t *testing.T) {
-	skipClusterDistributionOnWindows(t, "expects several worker PIDs / one banner")
 	src := `
 import http from 'klain:http'
 interface Res { status: number; body: string }
@@ -2820,7 +2819,6 @@ http.listen(8963, (req: HttpRequest): Res => {
 // than one worker PID (proving the fork happened after both listeners were bound
 // and every worker inherited both).
 func TestE2EHTTPClusterCombinedWithCreateServer(t *testing.T) {
-	skipClusterDistributionOnWindows(t, "expects several worker PIDs across two servers")
 	p1 := freePort(t) // Node createServer (primary)
 	p2 := freePort(t) // klain:http cluster (additional listener)
 	src := fmt.Sprintf(`
@@ -2926,7 +2924,7 @@ http.listen(8964, (req: HttpRequest): Res => {
 // not a TTY) rather than checking against a real terminal, since the bug
 // only manifested in the piped/non-TTY case.
 func TestE2EHTTPListenClusteringFlushesStdoutBeforeFork(t *testing.T) {
-	skipClusterDistributionOnWindows(t, "expects several worker PIDs / one banner")
+	skipForkOnlyOnWindows(t, "asserts code before http.listen prints once")
 	src := `
 import http from 'klain:http'
 interface Res { status: number; body: string }
@@ -3032,7 +3030,6 @@ http.listen(8974, (req: HttpRequest): Res => {
 // one distinct worker PID answering is the evidence clustering itself
 // still works under -mm=gc.
 func TestE2EHTTPListenClusteringGCModeMultipleWorkerPIDs(t *testing.T) {
-	skipClusterDistributionOnWindows(t, "expects several worker PIDs / one banner")
 	src := `
 import http from 'klain:http'
 interface Res { status: number; body: string }

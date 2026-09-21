@@ -141,27 +141,34 @@ int clock_gettime(int clk, kml_timespec *ts) {
 // with EINTR and the remaining time in rem, as a POSIX signal would.
 extern int __kml_win_sig_installed;
 int __kml_win_sig_deliver(void);
+void __kml_win_hr_sleep_us(int64_t us); // win32io.c: high-resolution waitable-timer sleep
 int nanosleep(const kml_timespec *req, kml_timespec *rem) {
-	int64_t ms = req->sec * 1000 + (req->nsec + 999999) / 1000000;
-	if (ms < 0) ms = 0;
-	if (!__kml_win_sig_installed) { Sleep((DWORD)ms); return 0; }
-	ULONGLONG deadline = GetTickCount64() + (ULONGLONG)ms;
+	int64_t us = req->sec * 1000000 + (req->nsec + 999) / 1000; // sub-ms precision
+	if (us < 0) us = 0;
+	if (!__kml_win_sig_installed) { __kml_win_hr_sleep_us(us); return 0; }
+	// Slices of at most 50 ms between signal checks, each a high-resolution
+	// sleep against a monotonic (QPC) deadline, so an installed handler does
+	// not drop the sleep back to the ~15.6 ms system tick.
+	kml_timespec now;
+	clock_gettime(1, &now);
+	int64_t deadline = now.sec * 1000000 + now.nsec / 1000 + us;
 	for (;;) {
+		clock_gettime(1, &now);
+		int64_t left = deadline - (now.sec * 1000000 + now.nsec / 1000);
+		if (left < 0) left = 0;
 		if (__kml_win_sig_deliver()) {
-			ULONGLONG now = GetTickCount64();
-			int64_t left = deadline > now ? (int64_t)(deadline - now) : 0;
-			if (rem) { rem->sec = left / 1000; rem->nsec = (left % 1000) * 1000000; }
+			if (rem) { rem->sec = left / 1000000; rem->nsec = (left % 1000000) * 1000; }
 			errno = EINTR;
 			return -1;
 		}
-		ULONGLONG now = GetTickCount64();
-		if (now >= deadline) return 0;
-		ULONGLONG left = deadline - now;
-		Sleep((DWORD)(left > 50 ? 50 : left));
+		if (left == 0) return 0;
+		__kml_win_hr_sleep_us(left > 50000 ? 50000 : left);
 	}
 }
 
 // ---- stdio extensions ----------------------------------------------------
+int64_t kml_fd_write(int fd, const void *buf, size_t n) __asm__("write"); // win32io.c's write(); io.h declares a different one
+HANDLE kfd_handle(int fd);                         // win32io.c
 int dprintf(int fd, const char *fmt, ...) {
 	va_list ap;
 	va_start(ap, fmt);
@@ -178,7 +185,7 @@ int dprintf(int fd, const char *fmt, ...) {
 		vsnprintf(buf, (size_t)n + 1, fmt, ap2);
 	}
 	va_end(ap2);
-	int w = _write(fd, buf, (unsigned)n);
+	int w = (int)kml_fd_write(fd, buf, (size_t)n); // the fd layer's write: fd may be a socket or an owned pipe end, which no CRT fd wraps
 	if (buf != stackbuf) free(buf);
 	return w;
 }
@@ -267,7 +274,7 @@ int64_t getrandom(void *buf, size_t n, unsigned flags) {
 // not "is a terminal". Node asks the console subsystem, which is the
 // faithful test: GetConsoleMode succeeds only on a real console handle.
 int isatty(int fd) {
-	HANDLE h = (HANDLE)_get_osfhandle(fd);
+	HANDLE h = kfd_handle(fd); // any fd: a pool fd (socket, pipe end) has no CRT handle to ask for
 	if (h == INVALID_HANDLE_VALUE) return 0;
 	DWORD mode;
 	return GetConsoleMode(h, &mode) ? 1 : 0;
