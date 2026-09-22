@@ -745,7 +745,7 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 	// number. In this value position (array element / object field) an
 	// undefined box renders as JSON `null`, matching real JSON.stringify of an
 	// array hole / present-but-undefined element.
-	if isUnconstrainedDynamic(val.Ty) {
+	if isSelfDescribingBox(val.Ty) {
 		dyn, err := e.emitJSONStringifyDynamic(val, ind, ast.Pos{})
 		if err != nil {
 			return Value{}, err

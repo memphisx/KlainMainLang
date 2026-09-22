@@ -22,9 +22,19 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 	// one is invalid IR (ADR-00539). A non-nullable array is never null; a
 	// nullable array uses the {null, 0} value sentinel whose own `.length` is 0,
 	// so plain access is the right behavior either way.
+	// `xs?.length` on a nullable array: `undefined` when the binding holds no
+	// array. The value in hand is already null-safe ({null,0} when absent), so
+	// the length comes straight off the aggregate.
+	if objVal.Ty.IsArray && objVal.Ty.Nullable && ex.Property == "length" {
+		present := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", present, e.emitArrayIsAbsent(objVal)))
+		lenReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, objVal.Ref))
+		return e.wrapUndefinedable(e.countToNumber(Value{Ref: lenReg, Ty: TypeI64}), present), nil
+	}
 	if objVal.Ty.IR != "ptr" || objVal.Ty.IsArray {
 		plain := &ast.MemberExpression{Object: ex.Object, Property: ex.Property}
-		return e.emitMember(plain)
+		return e.emitMemberUnguarded(plain)
 	}
 
 	// Determine the result type before emitting branches. TDD-00030: a
@@ -234,16 +244,120 @@ func (e *Emitter) emitDivZeroGuard(ty Type, left, right Value) {
 // treated as unsigned so a negative index and index >= length are caught by
 // a single comparison).
 func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy Type, err error) {
-	var dataPtrReg string
-	var lenReg string
+	dataPtrReg, lenReg, idxRef, elemTy, err := e.emitIndexBase(ex)
+	if err != nil {
+		return "", TypeVoid, err
+	}
 
+	oobReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, %s", oobReg, idxRef, lenReg))
+	oobL := e.freshLabel("arr.oob")
+	okL := e.freshLabel("arr.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", oobReg, oobL, okL))
+
+	e.emitLabel(oobL)
+	e.emitInternalThrow(e.internString("Array index out of bounds"))
+
+	e.emitLabel(okL)
+	return e.indexElemGEP(dataPtrReg, idxRef, elemTy), elemTy, nil
+}
+
+// indexElemGEP addresses element idxRef of an array backing buffer (a flat
+// value-type element strides by its struct size).
+func (e *Emitter) indexElemGEP(dataPtrReg, idxRef string, elemTy Type) string {
+	gepReg := e.freshReg()
+	gepTy := elemTy.IR
+	if elemTy.Inline {
+		gepTy = elemTy.StructIR()
+	}
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, gepTy, dataPtrReg, idxRef))
+	return gepReg
+}
+
+// emitIndexRead implements the element read `a[i]`: an in-range index loads
+// the element, an out-of-range one (negative included — the index compares
+// unsigned) reads `undefined`, as in Node. The result is the element's
+// `T | undefined` form (indexReadType): a scalar rides the { i1, T } aggregate
+// (a missing float payload is NaN, what Node's arithmetic on `undefined`
+// gives), a pointer is null, a nested array the {null,0} aggregate with a null
+// header, a dynamic element the `undefined` box.
+func (e *Emitter) emitIndexRead(ex *ast.IndexExpression) (Value, error) {
+	dataPtrReg, lenReg, idxRef, elemTy, err := e.emitIndexBase(ex)
+	if err != nil {
+		return Value{}, err
+	}
+	bigElem := e.inferExprType(ex.Object)
+	resTy := elemTy
+	if elemTy.Inline {
+		resTy.Inline = false
+	}
+	if bigElem.BigIntElem {
+		resTy = BigIntType()
+	}
+	resIR := resTy.IR
+	miss := missRef(resTy)
+	switch {
+	case resTy.IsArray:
+		resIR, miss = "{ptr, i64}", "zeroinitializer"
+	case resTy.Float && !resTy.IsDynamic:
+		miss = "0x7FF8000000000000"
+	}
+	result := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", result, resIR))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", resIR, miss, result))
+	var headerSlot string
+	if resTy.IsArray {
+		headerSlot = e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", headerSlot))
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", headerSlot))
+	}
+
+	inb := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %s, %s", inb, idxRef, lenReg))
+	loadL := e.freshLabel("idx.load")
+	doneL := e.freshLabel("idx.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inb, loadL, doneL))
+
+	e.emitLabel(loadL)
+	elem := e.loadArrayElem(e.indexElemGEP(dataPtrReg, idxRef, elemTy), elemTy)
+	// TDD-00101: a BigInt64Array/BigUint64Array element surfaces as a bigint
+	// handle, not the raw stored i64.
+	if bigElem.BigIntElem {
+		elem = e.wrapTypedArrayLoad(elem, bigElem)
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", resIR, elem.Ref, result))
+	if headerSlot != "" && elem.ArrayHeader != "" {
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", elem.ArrayHeader, headerSlot))
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", out, resIR, result))
+	v := Value{Ref: out, Ty: elem.Ty}
+	if headerSlot != "" {
+		h := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, headerSlot))
+		v.ArrayHeader = h
+	}
+	rty := indexReadType(v.Ty)
+	if isNullableScalar(rty) && !isNullableScalar(v.Ty) {
+		return Value{Ref: e.makeNullableScalarAgg(rty, inb, v.Ref), Ty: rty}, nil
+	}
+	v.Ty = rty
+	return v, nil
+}
+
+// emitIndexBase evaluates the array and index operands of `a[i]`, returning the
+// backing-buffer pointer, the length, the index as an i64 and the element type.
+func (e *Emitter) emitIndexBase(ex *ast.IndexExpression) (dataPtrReg, lenReg, idxRef string, elemTy Type, err error) {
 	if id, ok := ex.Object.(*ast.Identifier); ok {
 		sym, ok := e.lookup(id.Name)
 		if !ok {
-			return "", TypeVoid, fmt.Errorf("%d:%d: undefined variable '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name)
+			return "", "", "", TypeVoid, fmt.Errorf("%d:%d: undefined variable '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name)
 		}
 		if !sym.Ty.IsArray && !sym.Ty.IsFlatArray {
-			return "", TypeVoid, fmt.Errorf("%d:%d: '%s' is not an array", ex.GetPos().Line, ex.GetPos().Col, id.Name)
+			return "", "", "", TypeVoid, fmt.Errorf("%d:%d: '%s' is not an array", ex.GetPos().Line, ex.GetPos().Col, id.Name)
 		}
 		elemTy = *sym.Ty.ElemType
 		if sym.Ty.IsFlatArray {
@@ -262,10 +376,10 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 		// Expression producing a {ptr, i64} aggregate (e.g. arr.slice(1), Object.keys(obj)).
 		arrVal, evalErr := e.emitExpr(ex.Object)
 		if evalErr != nil {
-			return "", TypeVoid, evalErr
+			return "", "", "", TypeVoid, evalErr
 		}
 		if !arrVal.Ty.IsArray || arrVal.Ty.ElemType == nil {
-			return "", TypeVoid, fmt.Errorf("%d:%d: cannot index a non-array expression", ex.GetPos().Line, ex.GetPos().Col)
+			return "", "", "", TypeVoid, fmt.Errorf("%d:%d: cannot index a non-array expression", ex.GetPos().Line, ex.GetPos().Col)
 		}
 		elemTy = *arrVal.Ty.ElemType
 		dataPtrReg = e.freshReg()
@@ -276,30 +390,14 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 
 	idxVal, err := e.emitExpr(ex.Index)
 	if err != nil {
-		return "", TypeVoid, err
+		return "", "", "", TypeVoid, err
 	}
 	idxVal, err = e.arrayIndexToI64(idxVal, ex.Index.GetPos())
 	if err != nil {
-		return "", TypeVoid, err
+		return "", "", "", TypeVoid, err
 	}
 
-	oobReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, %s", oobReg, idxVal.Ref, lenReg))
-	oobL := e.freshLabel("arr.oob")
-	okL := e.freshLabel("arr.ok")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", oobReg, oobL, okL))
-
-	e.emitLabel(oobL)
-	e.emitInternalThrow(e.internString("Array index out of bounds"))
-
-	e.emitLabel(okL)
-	gepReg = e.freshReg()
-	gepTy := elemTy.IR
-	if elemTy.Inline {
-		gepTy = elemTy.StructIR()
-	}
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, gepTy, dataPtrReg, idxVal.Ref))
-	return gepReg, elemTy, nil
+	return dataPtrReg, lenReg, idxVal.Ref, elemTy, nil
 }
 
 // emitTupleElemAssign implements `t[i] = val` for a constant i (TDD-00066): GEP
@@ -347,7 +445,60 @@ func constObjectKey(index ast.Expression) (string, bool) {
 	return "", false
 }
 
+// optionalIndexGuards reports whether `a?.[k]` needs a run-time null guard: only
+// a pointer receiver can be nullish. An array is a value aggregate that is never
+// a null pointer (its absent form is the empty {null,0}, whose elements read
+// `undefined` anyway), and a scalar cannot be null — both use plain access,
+// exactly as `a?.x` does (emitOptionalMember).
+func optionalIndexGuards(objTy Type) bool {
+	return objTy.IR == "ptr" && !objTy.IsArray
+}
+
+// emitOptionalIndex implements `a?.[k]`: the receiver is evaluated once; when it
+// is null/undefined the access short-circuits to `undefined` without evaluating
+// `k`, otherwise the ordinary element access runs on the bound receiver.
+func (e *Emitter) emitOptionalIndex(ex *ast.IndexExpression) (Value, error) {
+	plain := *ex
+	plain.Optional = false
+	if !optionalIndexGuards(e.inferExprType(ex.Object)) {
+		return e.emitIndexUnguarded(&plain)
+	}
+	objVal, err := e.emitExpr(ex.Object)
+	if err != nil {
+		return Value{}, err
+	}
+	if !optionalIndexGuards(objVal.Ty) {
+		return e.emitIndexUnguarded(&plain)
+	}
+	e.optionalCallCtr++
+	recvName := fmt.Sprintf("__optc_idx_%d", e.optionalCallCtr)
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", objVal.Ref, slot))
+	recvTy := objVal.Ty
+	recvTy.Nullable = false
+	recvTy.IsUndefined = false
+	e.define(recvName, Symbol{Ptr: slot, Ty: recvTy})
+	through := ast.NewIndexExpression(ast.NewIdentifier(recvName, ex.Object.GetPos()), ex.Index, ex.GetPos())
+	return e.emitNullGuardedExpr(e.ptrIsNull(objVal.Ref), through)
+}
+
 func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
+	if ex.Optional {
+		return e.emitOptionalIndex(ex)
+	}
+	// An element read off a run-time undefined/null base throws (emit_nullderef.go).
+	undo, err := e.guardIndexBase(ex.Object, ex.Index, false)
+	if err != nil {
+		return Value{}, err
+	}
+	defer undo()
+	return e.emitIndexUnguarded(ex)
+}
+
+// emitIndexUnguarded is emitIndex without the absent-base TypeError (see
+// emitMemberUnguarded).
+func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 	// cluster.workers[id] is Node's ID-keyed lookup (the workers "object" is
 	// keyed by worker id, not position): a registry scan for .id == id,
 	// null when the worker exited or never existed.
@@ -597,17 +748,7 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 		}
 	}
 	// Array indexing.
-	gepReg, elemTy, err := e.emitIndexPtr(ex)
-	if err != nil {
-		return Value{}, err
-	}
-	raw := e.loadArrayElem(gepReg, elemTy)
-	// TDD-00101: a BigInt64Array/BigUint64Array element surfaces as a bigint
-	// handle, not the raw stored i64.
-	if taTy := e.inferExprType(ex.Object); taTy.BigIntElem {
-		return e.wrapTypedArrayLoad(raw, taTy), nil
-	}
-	return raw, nil
+	return e.emitIndexRead(ex)
 }
 
 // unwrapGlobalThis rewrites a `globalThis.X` member chain into a bare
@@ -645,6 +786,18 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	if ex.Optional {
 		return e.emitOptionalMember(ex)
 	}
+	// A read off a run-time undefined/null base throws (emit_nullderef.go).
+	undo, err := e.guardBase(ex.Object, ex.Property, false)
+	if err != nil {
+		return Value{}, err
+	}
+	defer undo()
+	return e.emitMemberUnguarded(ex)
+}
+
+// emitMemberUnguarded is emitMember without the absent-base TypeError — the
+// access `?.` falls back to for a base it has already established the shape of.
+func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	// A namespace-qualified type-member chain (`X.Color.Red`,
 	// `X.C.staticField` — ADR-00480): drop the namespace qualifier up
 	// front — a pure AST rewrite — so every dispatch below sees the bare

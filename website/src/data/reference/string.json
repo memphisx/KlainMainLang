@@ -5,10 +5,10 @@
   "statusPage": "STRING-METHODS.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "31/32",
+    "loose": "32/33",
     "loosePct": 97,
-    "strict": "17/32",
-    "strictPct": 53
+    "strict": "18/33",
+    "strictPct": 55
   },
   "lede": "The String surface is nearly complete. Comparison and substring search are binary-safe (length-headed, NUL-tolerant); the open edges are real Unicode — normalization, surrogate-pair code points, and locale collation — which this compiler has no tables for and does not fake.",
   "entries": [
@@ -448,6 +448,33 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padEnd"
+      }
+    },
+    {
+      "id": "string.concatMethod",
+      "name": ".concat(...values)",
+      "signature": "concat(...values: string[]): string",
+      "badge": "exact",
+      "description": "Returns the string followed by each argument, left to right. Arguments are converted with ToString, as in a template literal: an object's toString() is asked before its valueOf() (the + operator asks valueOf() first). A spread array contributes each of its elements.",
+      "params": [
+        {
+          "name": "...values",
+          "type": "string[]",
+          "desc": "Values to append; none returns the string itself."
+        }
+      ],
+      "returns": {
+        "type": "string",
+        "desc": "The concatenated string."
+      },
+      "exampleKey": "strings/string_concat",
+      "snippet": "console.log('a'.concat('b', 'c'))          // abc\nconsole.log('s:'.concat(...['p', 'q']))   // s:pq",
+      "seeAlso": [
+        "string.repeat",
+        "string.padEnd"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/concat"
       }
     },
     {

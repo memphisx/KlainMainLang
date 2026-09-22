@@ -873,7 +873,15 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 
 	// Infer type from init when no annotation.
 	if !ty.IsArray && !ty.IsObject && v.TypeAnnot == nil {
-		switch init := v.Init.(type) {
+		// A chain that continues past a `?.` (`a?.b.c`) is `T | undefined` as a
+		// whole (emitOptionalChain): the per-shape cases below look only at the
+		// outermost link and would size the slot for a bare T.
+		preInit := v.Init
+		if optionalChainDepth(v.Init) >= 0 {
+			ty = e.inferExprType(v.Init)
+			preInit = nil
+		}
+		switch init := preInit.(type) {
 		case *ast.NullLiteral:
 			if init.IsUndefined {
 				ty = TypeUndefined
@@ -1053,6 +1061,20 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			// what emitExpr(v.Init) actually produces as a ptr-typed
 			// generator instance, a hard clang-stage type mismatch, not
 			// just a wrong result).
+			if init.Optional {
+				// `f?.(...)` is `RetType | undefined`: the callee-name switch
+				// below knows nothing of the `undefined` half, and its blind
+				// i64 default would store a skipped call as a present zero.
+				ty = e.inferExprType(init)
+				break
+			}
+			// An immediately-invoked arrow / function expression: the callee
+			// switch below only knows named callees, and its blind default
+			// stored a boolean/string result in a number slot.
+			switch init.Callee.(type) {
+			case *ast.ArrowFunction, *ast.FunctionExpression:
+				ty = e.inferExprType(init)
+			}
 			if id, ok := init.Callee.(*ast.Identifier); ok {
 				if info, found := e.lookupGenerator(id.Name); found {
 					ty = info.GenTy
@@ -1295,6 +1317,17 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 	// emit_nullable_scalar.go / TDD-00064.
 	if isNullableScalar(ty) {
 		return e.emitNullableScalarVarDecl(v, ty)
+	}
+
+	// An initializer that produces no value (`var r = (function () { … })()`,
+	// a void call through any callee shape the inference above resolved) must
+	// not make `void` the slot type: `alloca void` is invalid IR, and it would be
+	// emitted before the void-initializer handler below gets to rebind the name
+	// as `undefined` (ADR-00479). Each inference branch above guards this for its
+	// own shape; this is the one net under all of them. The default slot is left
+	// dead, exactly as in those branches.
+	if ty.IR == "void" {
+		ty = TypeI64
 	}
 
 	// Module-global promotion (TDD-00093): at module scope, a top-level

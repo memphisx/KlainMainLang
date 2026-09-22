@@ -33,6 +33,23 @@ func isUnconstrainedDynamic(ty Type) bool {
 	return ty.IsDynamic && ty.UnionMembers == nil
 }
 
+// isSelfDescribingBox reports whether a value of type ty is a NaN box whose
+// run-time tag alone says what it holds: bare any/unknown, or a constrained
+// union of scalars (`number | string`). Such a value renders/serializes through
+// the dynamic walkers exactly like `any`. A union with an object member is not
+// one — its tag-6 payload is a static struct only the member types describe.
+func isSelfDescribingBox(ty Type) bool {
+	if !ty.IsDynamic {
+		return false
+	}
+	for _, m := range ty.UnionMembers {
+		if scalarTypeKind(m) == "" {
+			return false
+		}
+	}
+	return true
+}
+
 // containsDynamicElement reports whether ty contains, as an array element or
 // object field, ANY dynamic type — bare any/unknown or a constrained union
 // alike. Used to reject the out-of-scope positions (array element, object
@@ -84,7 +101,7 @@ func containsDynamicElement(ty Type) bool {
 		// construction and HOF element passing would skip the check) — a
 		// deliberate scope cut (TDD-00043).
 		if et.IsDynamic {
-			return len(et.UnionMembers) != 0
+			return false
 		}
 		return containsDynamicElement(et)
 	}

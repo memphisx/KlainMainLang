@@ -546,6 +546,34 @@ func (e *Emitter) emitInspectCollection(name, lenReg string, render func(idxVal 
 // distinct from the top-level bare formatting emitValueToString produces.
 func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 	switch {
+	case isSelfDescribingBox(v.Ty):
+		// A boxed element (`any[]`, `(number | string)[]`) renders by its run-time
+		// tag: a string is quoted like any other nested string, the rest inspect.
+		s, err := e.emitDynamicInspect(v)
+		if err != nil {
+			return Value{}, err
+		}
+		q := Value{Ref: e.internString("'"), Ty: TypePtr}
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", s.Ref, slot))
+		tag, _ := e.emitUnboxTagPayload(v)
+		strL, doneL := e.emitTagCheck(tag, kmlTagString, "inspect.box.str")
+		e.emitLabel(strL)
+		s1, err := e.emitStringConcat(q, s)
+		if err != nil {
+			return Value{}, err
+		}
+		quoted, err := e.emitStringConcat(s1, q)
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", quoted.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		out := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+		return Value{Ref: out, Ty: TypePtr}, nil
 	case v.Ty.IsBigInt:
 		return e.emitBigIntToString(v, true) // `10n`, like Node inspect
 	case isInspectableObject(v.Ty):
@@ -577,10 +605,7 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 		// renders as its keyword on a miss (null data-ptr), not `[]`. Inspecting a
 		// null-data-ptr array is itself safe (len 0 → "[]"), so a select suffices.
 		if v.Ty.Nullable {
-			dataPtr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, v.Ref))
-			isAbsent := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isAbsent, dataPtr))
+			isAbsent := e.emitArrayIsAbsent(v)
 			base := v.Ty
 			base.Nullable, base.IsUndefined = false, false
 			arr, err := e.emitInspectArray(Value{Ref: v.Ref, Ty: base}, depth)
@@ -603,7 +628,20 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		return e.emitStringConcat(s1, q)
+		quoted, err := e.emitStringConcat(s1, q)
+		if err != nil {
+			return Value{}, err
+		}
+		// An absent string (a null pointer: an out-of-range element stored on, a
+		// `string | null` field) renders as its bare keyword, never quoted. A
+		// plain `string` slot can only be null by absence — `undefined`.
+		word := "undefined"
+		if v.Ty.Nullable && !v.Ty.IsUndefined {
+			word = "null"
+		}
+		sel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, e.ptrIsNull(v.Ref), e.internString(word), quoted.Ref))
+		return Value{Ref: sel, Ty: TypePtr}, nil
 	default:
 		return e.emitValueToString(v) // number / bool / symbol / date
 	}

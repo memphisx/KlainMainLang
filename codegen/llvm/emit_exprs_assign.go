@@ -182,6 +182,23 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		}
 	}
 
+	// A write through a run-time undefined/null base throws; a compound
+	// assignment reads first, so it reports the read (emit_nullderef.go).
+	switch left := ex.Left.(type) {
+	case *ast.MemberExpression:
+		undo, err := e.guardBase(left.Object, left.Property, ex.Op == "=")
+		if err != nil {
+			return Value{}, err
+		}
+		defer undo()
+	case *ast.IndexExpression:
+		undo, err := e.guardIndexBase(left.Object, left.Index, ex.Op == "=")
+		if err != nil {
+			return Value{}, err
+		}
+		defer undo()
+	}
+
 	// TDD-00098 stage 6, browser Worker surface. Parent side:
 	// `w.onmessage = ...` / `w.onerror = ...` on a Worker-typed receiver.
 	// Worker side: a bare (or self.) `onmessage = ...` at the module top
@@ -535,6 +552,12 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
+			// `xs = null` / `xs = undefined` on a `T[] | null` binding: the slot
+			// holds no array (the null header). Only this binding changes — an
+			// alias keeps the array.
+			if val.Ty.IsNull && sym.Ty.Nullable {
+				val = e.emitAbsentArrayValue(sym.Ty)
+			}
 			if !val.Ty.IsArray {
 				return Value{}, fmt.Errorf("%d:%d: cannot assign a non-array value to array variable '%s'", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
 			}
@@ -549,7 +572,12 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.ArrayHeader, sym.Ptr))
 				return val, nil
 			}
-			newHeader := e.boxArrayValue(val)
+			newHeader := ""
+			if sym.Ty.Nullable {
+				newHeader = e.arrayReturnHeader(val) // null for an absent transient
+			} else {
+				newHeader = e.boxArrayValue(val)
+			}
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newHeader, sym.Ptr))
 			return val, nil
 		}
@@ -683,6 +711,21 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			rhs, err = e.emitArith(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, arithTy, ex.GetPos())
 			if err != nil {
 				return Value{}, err
+			}
+		}
+		// The field counterpart of the variable-reassignment check below: a value
+		// with no conversion to the field's declared type (`p.n = "foo"` into a
+		// `number` field, `re.lastIndex = {}`) is tsc's "Type 'string' is not
+		// assignable to type 'number'". coerce leaves such a value as it is, and
+		// storing it was invalid IR (the variable path rejected it, the field
+		// path did not). Aggregate-shaped fields box or re-header whatever they
+		// are given in storeScalarOrNullableField, so only a plain slot can
+		// mismatch.
+		if !fieldTy.IsArray && !fieldTy.IsDynamic && !isNullableScalar(fieldTy) {
+			rhs = e.coerce(rhs, fieldTy)
+			if rhs.Ty.IR != fieldTy.IR || rhs.Ty.IsArray != fieldTy.IsArray {
+				return Value{}, fmt.Errorf("%d:%d: type '%s' is not assignable to type '%s' (field '%s')",
+					ex.GetPos().Line, ex.GetPos().Col, tsTypeName(rhs.Ty), tsTypeName(fieldTy), memEx.Property)
 			}
 		}
 		e.storeScalarOrNullableField(gepReg, fieldTy, rhs)
@@ -869,6 +912,12 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		// string / handle slot and then emits `store ptr %agg` — the aggregate
 		// where a pointer is required, invalid IR. Reject that shape divergence
 		// too (e.g. `var x = {}; x = []` in strict, ADR-00933).
+		// A binding that is `undefined` because its initializer produced no value
+		// (`let c = log()`, ADR-00479) takes another no-value result the same way:
+		// the call has run for its effects, and the binding still reads `undefined`.
+		if rhs.Ty.IR == "void" && sym.Ty.IsUndefined {
+			return Value{Ref: "null", Ty: TypeUndefined}, nil
+		}
 		if rhs.Ty.IR != sym.Ty.IR || rhs.Ty.IsArray != sym.Ty.IsArray {
 			describe := func(t Type) string {
 				switch {

@@ -106,6 +106,14 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 			return v, nil
 		}
 	}
+	// A `T | undefined` local bound into a box (`any`, a union, a boxed array
+	// element) keeps its presence bit so coerce can box an absent one as
+	// `undefined` — a plain read surfaces the bare payload zero.
+	if hint.IsDynamic {
+		if _, ok := e.nullableScalarLValue(expr); ok {
+			return e.emitPreserveNullableOperand(expr)
+		}
+	}
 	// An object literal bound into a bare any/unknown slot becomes a D1
 	// dynamic object (TDD-00155) — a real runtime property bag, not a static
 	// struct boxed as an opaque tag-6 pointer.

@@ -16,7 +16,7 @@
 //	6 endEmitted i64
 //	7 drainArmed i64
 //	8 wRegistered i64 (writable completion reaction armed)
-//	9 reserved
+//	9 finishedProm ptr  finished(readable)'s promise — settled once 'end'/'close' were emitted (lazily created)
 package llvm
 
 import "fmt"
@@ -247,6 +247,14 @@ ended:
   store i64 1, ptr %%f6, align 8
   call void @__kml_ns_emit_common(ptr %%n, ptr %s, i64 0, i64 0, i64 0)
   call void @__kml_ns_emit_common(ptr %%n, ptr %s, i64 0, i64 0, i64 0)
+  %%f9d = getelementptr %s, ptr %%n, i32 0, i32 9
+  %%finp = load ptr, ptr %%f9d, align 8
+  %%hasfin = icmp ne ptr %%finp, null
+  br i1 %%hasfin, label %%finsettle, label %%finret
+finsettle:
+  call void @__kml_promise_settle(ptr %%finp, i64 1)
+  ret void
+finret:
   ret void
 chunk:
   call void @__kml_ns_emit_common(ptr %%n, ptr %s, i64 2, i64 %%v0, i64 %%v1)
@@ -288,7 +296,155 @@ go:
   ret void
 ret:
   ret void
-}`, ns, ns, p, p, ns, e.internString("error"), ns, ns, ns, e.internString("end"), e.internString("close"), e.internString("data")))
+}`, ns, ns, p, p, ns, e.internString("error"), ns, ns, ns, e.internString("end"), e.internString("close"), ns, e.internString("data")))
+
+	// __kml_ns_finished_prom(n) → finished(readable)'s promise. Node's finished()
+	// resolves on the stream's 'end'/'close', i.e. after every 'data' and every
+	// earlier-registered 'end' listener ran — not when the source closes, which
+	// for a flowing stream is a read earlier. A flowing stream's promise is
+	// settled by the flow loop after it emits 'end' and 'close'; one that is not
+	// flowing (consumed by a pipe or a reader) settles with the source's closed
+	// promise. A rejected closed promise rejects it either way.
+	e.ensurePromiseSettle()
+	e.emitGlobal(fmt.Sprintf(`
+define ptr @__kml_ns_finished_prom(ptr %%n, ptr %%closed) {
+entry:
+  %%f9 = getelementptr %[1]s, ptr %%n, i32 0, i32 9
+  %%cur = load ptr, ptr %%f9, align 8
+  %%have = icmp ne ptr %%cur, null
+  br i1 %%have, label %%ret, label %%mk
+ret:
+  ret ptr %%cur
+mk:
+  %%fp = call ptr @__kml_task_alloc_promise()
+  store ptr %%fp, ptr %%f9, align 8
+  %%f6 = getelementptr %[1]s, ptr %%n, i32 0, i32 6
+  %%ended = load i64, ptr %%f6, align 8
+  %%isended = icmp ne i64 %%ended, 0
+  br i1 %%isended, label %%now, label %%react
+now:
+  call void @__kml_promise_settle(ptr %%fp, i64 1)
+  ret ptr %%fp
+react:
+  %%env = call ptr @malloc(i64 16)
+  %%e0 = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0
+  store ptr %%closed, ptr %%e0, align 8
+  %%e1 = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1
+  store ptr %%n, ptr %%e1, align 8
+  %%clo = call ptr @__kml_mkclo(ptr @__kml_ns_fin_onclosed, ptr %%env)
+  call void @__kml_promise_add_reaction(ptr %%closed, ptr %%clo)
+  ret ptr %%fp
+}
+
+define void @__kml_ns_fin_onclosed(ptr %%env) {
+entry:
+  %%e0 = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0
+  %%closed = load ptr, ptr %%e0, align 8
+  %%e1 = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1
+  %%n = load ptr, ptr %%e1, align 8
+  %%f9 = getelementptr %[1]s, ptr %%n, i32 0, i32 9
+  %%fp = load ptr, ptr %%f9, align 8
+  %%st_p = getelementptr %[2]s, ptr %%closed, i32 0, i32 0
+  %%st = load i64, ptr %%st_p, align 8
+  %%rej = icmp eq i64 %%st, 2
+  br i1 %%rej, label %%reject, label %%ok
+reject:
+  %%cv0_p = getelementptr %[2]s, ptr %%closed, i32 0, i32 2
+  %%cv0 = load i64, ptr %%cv0_p, align 8
+  %%cv1_p = getelementptr %[2]s, ptr %%closed, i32 0, i32 3
+  %%cv1 = load i64, ptr %%cv1_p, align 8
+  %%fv0_p = getelementptr %[2]s, ptr %%fp, i32 0, i32 2
+  store i64 %%cv0, ptr %%fv0_p, align 8
+  %%fv1_p = getelementptr %[2]s, ptr %%fp, i32 0, i32 3
+  store i64 %%cv1, ptr %%fv1_p, align 8
+  call void @__kml_promise_settle(ptr %%fp, i64 2)
+  ret void
+ok:
+  ; a flowing stream still has its 'end' to emit: the flow loop settles it
+  %%f3 = getelementptr %[1]s, ptr %%n, i32 0, i32 3
+  %%fl = load i64, ptr %%f3, align 8
+  %%flowing = icmp ne i64 %%fl, 0
+  %%f6 = getelementptr %[1]s, ptr %%n, i32 0, i32 6
+  %%ended = load i64, ptr %%f6, align 8
+  %%notended = icmp eq i64 %%ended, 0
+  %%wait = and i1 %%flowing, %%notended
+  br i1 %%wait, label %%leave, label %%settle
+settle:
+  call void @__kml_promise_settle(ptr %%fp, i64 1)
+  ret void
+leave:
+  ret void
+}`, ns, p))
+
+	// __kml_ns_finished_both(a, b) → a promise fulfilled once both are, rejected
+	// with the first rejection: finished() on a Duplex/Transform waits for the
+	// readable side's 'end' and the writable side's 'finish'.
+	e.emitGlobal(fmt.Sprintf(`
+define ptr @__kml_ns_finished_both(ptr %%a, ptr %%b) {
+entry:
+  %%out = call ptr @__kml_task_alloc_promise()
+  %%env = call ptr @malloc(i64 24)
+  %%e0 = getelementptr { ptr, ptr, ptr }, ptr %%env, i32 0, i32 0
+  store ptr %%out, ptr %%e0, align 8
+  %%e1 = getelementptr { ptr, ptr, ptr }, ptr %%env, i32 0, i32 1
+  store ptr %%a, ptr %%e1, align 8
+  %%e2 = getelementptr { ptr, ptr, ptr }, ptr %%env, i32 0, i32 2
+  store ptr %%b, ptr %%e2, align 8
+  %%clo = call ptr @__kml_mkclo(ptr @__kml_ns_fin_both_step, ptr %%env)
+  call void @__kml_promise_add_reaction(ptr %%a, ptr %%clo)
+  call void @__kml_promise_add_reaction(ptr %%b, ptr %%clo)
+  ret ptr %%out
+}
+
+define void @__kml_ns_fin_both_step(ptr %%env) {
+entry:
+  %%e0 = getelementptr { ptr, ptr, ptr }, ptr %%env, i32 0, i32 0
+  %%out = load ptr, ptr %%e0, align 8
+  %%e1 = getelementptr { ptr, ptr, ptr }, ptr %%env, i32 0, i32 1
+  %%a = load ptr, ptr %%e1, align 8
+  %%e2 = getelementptr { ptr, ptr, ptr }, ptr %%env, i32 0, i32 2
+  %%b = load ptr, ptr %%e2, align 8
+  %%as_p = getelementptr %[1]s, ptr %%a, i32 0, i32 0
+  %%as = load i64, ptr %%as_p, align 8
+  %%bs_p = getelementptr %[1]s, ptr %%b, i32 0, i32 0
+  %%bs = load i64, ptr %%bs_p, align 8
+  %%arej = icmp eq i64 %%as, 2
+  br i1 %%arej, label %%reja, label %%ckb
+ckb:
+  %%brej = icmp eq i64 %%bs, 2
+  br i1 %%brej, label %%rejb, label %%ckboth
+reja:
+  br label %%reject
+rejb:
+  br label %%reject
+reject:
+  %%src = phi ptr [ %%a, %%reja ], [ %%b, %%rejb ]
+  %%sv0_p = getelementptr %[1]s, ptr %%src, i32 0, i32 2
+  %%sv0 = load i64, ptr %%sv0_p, align 8
+  %%sv1_p = getelementptr %[1]s, ptr %%src, i32 0, i32 3
+  %%sv1 = load i64, ptr %%sv1_p, align 8
+  %%os_p = getelementptr %[1]s, ptr %%out, i32 0, i32 0
+  %%os = load i64, ptr %%os_p, align 8
+  %%osettled = icmp ne i64 %%os, 0
+  br i1 %%osettled, label %%ret, label %%doreject
+doreject:
+  %%ov0_p = getelementptr %[1]s, ptr %%out, i32 0, i32 2
+  store i64 %%sv0, ptr %%ov0_p, align 8
+  %%ov1_p = getelementptr %[1]s, ptr %%out, i32 0, i32 3
+  store i64 %%sv1, ptr %%ov1_p, align 8
+  call void @__kml_promise_settle(ptr %%out, i64 2)
+  ret void
+ckboth:
+  %%aok = icmp eq i64 %%as, 1
+  %%bok = icmp eq i64 %%bs, 1
+  %%both = and i1 %%aok, %%bok
+  br i1 %%both, label %%fulfil, label %%ret
+fulfil:
+  call void @__kml_promise_settle(ptr %%out, i64 1)
+  ret void
+ret:
+  ret void
+}`, p))
 
 	// Writable completion: one reaction on the inner wstream's closed
 	// promise — fulfilled emits 'finish' then 'close', rejected emits

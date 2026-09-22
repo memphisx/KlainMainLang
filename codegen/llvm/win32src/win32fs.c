@@ -69,7 +69,9 @@ enum {
 	L_EBUSY = 16, L_EEXIST = 17, L_EXDEV = 18, L_ENOTDIR = 20, L_EISDIR = 21,
 	L_EINVAL = 22, L_EMFILE = 24, L_ENOSPC = 28, L_ESPIPE = 29, L_EROFS = 30,
 	L_EPIPE = 32, L_ENAMETOOLONG = 36, L_ENOTEMPTY = 39, L_ELOOP = 40,
-	L_ENOSYS = 38,
+	L_ENOSYS = 38, L_ENOMEM = 12,
+	L_ENOTSUP = 4049, // no Linux number separates ENOTSUP from EOPNOTSUPP; libuv does
+	L_UNKNOWN = 4094, // libuv's UV_UNKNOWN; no Linux errno carries this meaning
 	L_O_CREAT = 0x40, L_O_EXCL = 0x80, L_O_TRUNC = 0x200, L_O_APPEND = 0x400,
 	L_O_DIRECTORY = 0x10000,
 };
@@ -101,29 +103,40 @@ enum {
 
 // ---- errno --------------------------------------------------------------------
 static int win_errno(DWORD e) {
+	// libuv's uv_translate_sys_error, so err.code is what Node reports on
+	// Windows — notably ACCESS_DENIED is EPERM there, not EACCES, and anything
+	// libuv has no name for is UNKNOWN rather than a guessed EIO.
 	switch (e) {
 	case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: case ERROR_INVALID_NAME:
-	case ERROR_BAD_NETPATH: case ERROR_INVALID_DRIVE: return L_ENOENT;
-	case ERROR_ACCESS_DENIED: case ERROR_LOCK_VIOLATION:
+	case ERROR_BAD_NETPATH: case ERROR_INVALID_DRIVE: case ERROR_BAD_PATHNAME:
+	case ERROR_MOD_NOT_FOUND: case ERROR_INVALID_REPARSE_DATA:
+	case ERROR_ENVVAR_NOT_FOUND: case ERROR_BAD_NET_NAME: return L_ENOENT;
+	case ERROR_ACCESS_DENIED: case ERROR_PRIVILEGE_NOT_HELD: return L_EPERM;
+	case ERROR_NOACCESS: case ERROR_ELEVATION_REQUIRED: case ERROR_CANT_ACCESS_FILE:
 	case ERROR_CURRENT_DIRECTORY: return L_EACCES;
-	// libuv maps a sharing violation to EBUSY, not EACCES — Node reports an
-	// open-elsewhere file as "resource busy or locked".
-	case ERROR_SHARING_VIOLATION: return L_EBUSY;
-	case ERROR_PRIVILEGE_NOT_HELD: return L_EPERM;
+	// A sharing or lock violation is "resource busy or locked" in Node.
+	case ERROR_SHARING_VIOLATION: case ERROR_LOCK_VIOLATION: case ERROR_PIPE_BUSY:
+	case ERROR_BUSY: return L_EBUSY;
 	case ERROR_ALREADY_EXISTS: case ERROR_FILE_EXISTS: return L_EEXIST;
 	case ERROR_DIR_NOT_EMPTY: return L_ENOTEMPTY;
 	case ERROR_DIRECTORY: return L_ENOTDIR;
 	case ERROR_NOT_SAME_DEVICE: return L_EXDEV;
 	case ERROR_TOO_MANY_OPEN_FILES: return L_EMFILE;
-	case ERROR_DISK_FULL: case ERROR_HANDLE_DISK_FULL: return L_ENOSPC;
+	case ERROR_DISK_FULL: case ERROR_HANDLE_DISK_FULL: case ERROR_END_OF_MEDIA: return L_ENOSPC;
 	case ERROR_WRITE_PROTECT: return L_EROFS;
 	case ERROR_FILENAME_EXCED_RANGE: case ERROR_BUFFER_OVERFLOW: return L_ENAMETOOLONG;
 	case ERROR_INVALID_HANDLE: return L_EBADF;
-	case ERROR_INVALID_PARAMETER: case ERROR_INVALID_FUNCTION: return L_EINVAL;
-	case ERROR_BROKEN_PIPE: case ERROR_NO_DATA: return L_EPIPE;
+	case ERROR_INVALID_PARAMETER: case ERROR_INVALID_FUNCTION: case ERROR_INVALID_DATA:
+	case ERROR_INSUFFICIENT_BUFFER: case ERROR_SYMLINK_NOT_SUPPORTED: return L_EINVAL;
+	case ERROR_BROKEN_PIPE: case ERROR_NO_DATA: case ERROR_BAD_PIPE:
+	case ERROR_PIPE_NOT_CONNECTED: return L_EPIPE;
 	case ERROR_CANT_RESOLVE_FILENAME: return L_ELOOP;
-	case ERROR_BUSY: return L_EBUSY;
-	default: return L_EIO;
+	case ERROR_NOT_ENOUGH_MEMORY: case ERROR_OUTOFMEMORY: return L_ENOMEM;
+	case ERROR_NOT_SUPPORTED: return L_ENOTSUP;
+	case ERROR_OPEN_FAILED: case ERROR_IO_DEVICE: case ERROR_CRC: case ERROR_GEN_FAILURE:
+	case ERROR_DEVICE_REQUIRES_CLEANING: case ERROR_DEVICE_DOOR_OPEN:
+	case ERROR_DISK_CORRUPT: case ERROR_FILE_CORRUPT: return L_EIO;
+	default: return L_UNKNOWN;
 	}
 }
 static int fail(void) { errno = win_errno(GetLastError()); return -1; }
@@ -304,7 +317,13 @@ static int stat_handle(HANDLE h, kml_stat *st, int as_link) {
 		if (tgt) free(tgt);
 	}
 	st->st_blksize = 4096;
+	// 512-byte units of what the file actually occupies (libuv:
+	// AllocationSize >> 9) — a sparse or compressed file is smaller than its
+	// length, a small file rounds up to a cluster.
 	st->st_blocks = (st->st_size + 511) / 512;
+	FILE_STANDARD_INFO fsi;
+	if (GetFileInformationByHandleEx(h, FileStandardInfo, &fsi, sizeof fsi))
+		st->st_blocks = (int64_t)(fsi.AllocationSize.QuadPart >> 9);
 	filetime_to_ts(&bi.ftLastAccessTime, &st->atime_sec, &st->atime_nsec);
 	filetime_to_ts(&bi.ftLastWriteTime, &st->mtime_sec, &st->mtime_nsec);
 	filetime_to_ts(&bi.ftCreationTime, &st->birth_sec, &st->birth_nsec);
@@ -603,6 +622,53 @@ int rmdir(const char *path) {
 	return ok ? 0 : fail();
 }
 
+// The Ex information classes postdate some mingw header sets, so the two
+// structures and their class numbers are spelled out here rather than taken
+// from <winbase.h>.
+typedef struct { ULONG Flags; } kml_disposition_ex;
+typedef struct { ULONG Flags; HANDLE RootDirectory; DWORD FileNameLength; WCHAR FileName[1]; } kml_rename_ex;
+enum { KML_FileDispositionInfoEx = 21, KML_FileRenameInfoEx = 22 };
+enum {
+	KML_DISPOSITION_DELETE = 0x1, KML_DISPOSITION_POSIX = 0x2, KML_DISPOSITION_IGNORE_READONLY = 0x10,
+	KML_RENAME_REPLACE = 0x1, KML_RENAME_POSIX = 0x2, KML_RENAME_IGNORE_READONLY = 0x40,
+};
+
+// posix_delete removes a name the way libuv's fs__unlink does: with POSIX
+// semantics the name disappears at once even while another handle holds the
+// file open, so it can be recreated immediately (as on Linux) instead of
+// lingering in a delete-pending state until the last close. Returns 0 when the
+// filesystem does not support the class (FAT, some network shares) or the
+// delete fails, leaving the caller's classic DeleteFileW path to run and report.
+static int posix_delete(const wchar_t *w) {
+	HANDLE h = CreateFileW(w, DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+	                       NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	if (h == INVALID_HANDLE_VALUE) return 0;
+	kml_disposition_ex d = { KML_DISPOSITION_DELETE | KML_DISPOSITION_POSIX | KML_DISPOSITION_IGNORE_READONLY };
+	BOOL ok = SetFileInformationByHandle(h, (FILE_INFO_BY_HANDLE_CLASS)KML_FileDispositionInfoEx, &d, sizeof d);
+	CloseHandle(h);
+	return ok ? 1 : 0;
+}
+
+// posix_rename is libuv's fs__rename fast path: FileRenameInfoEx with POSIX
+// semantics replaces a target that is open elsewhere (MoveFileExW answers
+// ACCESS_DENIED there). Returns 0 to fall back to MoveFileExW.
+static int posix_rename(const wchar_t *from, const wchar_t *to) {
+	HANDLE h = CreateFileW(from, DELETE | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+	                       NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	if (h == INVALID_HANDLE_VALUE) return 0;
+	size_t n = wcslen(to);
+	size_t bytes = sizeof(kml_rename_ex) + n * sizeof(WCHAR);
+	kml_rename_ex *ri = (kml_rename_ex *)calloc(1, bytes);
+	if (!ri) { CloseHandle(h); return 0; }
+	ri->Flags = KML_RENAME_REPLACE | KML_RENAME_POSIX | KML_RENAME_IGNORE_READONLY;
+	ri->FileNameLength = (DWORD)(n * sizeof(WCHAR));
+	memcpy(ri->FileName, to, n * sizeof(WCHAR));
+	BOOL ok = SetFileInformationByHandle(h, (FILE_INFO_BY_HANDLE_CLASS)KML_FileRenameInfoEx, ri, (DWORD)bytes);
+	free(ri);
+	CloseHandle(h);
+	return ok ? 1 : 0;
+}
+
 static int unlink_w(wchar_t *w) {
 	DWORD a = GetFileAttributesW(w);
 	if (a == INVALID_FILE_ATTRIBUTES) return fail();
@@ -615,6 +681,7 @@ static int unlink_w(wchar_t *w) {
 		// read-only file succeeds as it does on POSIX.
 		SetFileAttributesW(w, a & ~(DWORD)FILE_ATTRIBUTE_READONLY);
 	}
+	if (posix_delete(w)) return 0;
 	if (DeleteFileW(w)) return 0;
 	DWORD err = GetLastError();
 	// A failed unlink must leave the file as it was: restore the read-only
@@ -646,8 +713,10 @@ int remove(const char *path) {
 int rename(const char *from, const char *to) {
 	wchar_t *wf = to_wide(from), *wt = to_wide(to);
 	if (!wf || !wt) { free_keep_err(wf); free_keep_err(wt); return -1; }
-	// POSIX rename replaces an existing target; MOVEFILE_REPLACE_EXISTING.
-	BOOL ok = MoveFileExW(wf, wt, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
+	// POSIX rename replaces an existing target. No MOVEFILE_COPY_ALLOWED: a
+	// cross-volume rename is EXDEV in Node (libuv does not copy), which is what
+	// callers test for before falling back to copy+unlink themselves.
+	BOOL ok = posix_rename(wf, wt) || MoveFileExW(wf, wt, MOVEFILE_REPLACE_EXISTING);
 	free_keep_err(wf); free_keep_err(wt);
 	return ok ? 0 : fail();
 }
@@ -681,7 +750,20 @@ int chdir(const char *path) {
 	if (!w) return -1;
 	BOOL ok = SetCurrentDirectoryW(w);
 	free_keep_err(w);
-	return ok ? 0 : fail();
+	if (!ok) return fail();
+	// Windows keeps a current directory per drive in the hidden "=X:"
+	// environment variables, which is how a drive-relative path ("D:foo")
+	// resolves. SetCurrentDirectoryW does not maintain them — the CRT's chdir
+	// and libuv's uv_chdir do, so a child process and path.win32.resolve see the
+	// directory this one left the drive in.
+	wchar_t cwd[32768];
+	DWORD n = GetCurrentDirectoryW(32768, cwd);
+	if (n >= 2 && n < 32768 && cwd[1] == L':') {
+		wchar_t var[4] = { L'=', cwd[0], L':', 0 };
+		if (var[1] >= L'a' && var[1] <= L'z') var[1] = (wchar_t)(var[1] - L'a' + L'A');
+		SetEnvironmentVariableW(var, cwd);
+	}
+	return 0;
 }
 
 char *kml_win_getcwd(char *buf, size_t size) __asm__("getcwd");
@@ -748,29 +830,45 @@ typedef struct {
 } kml_reparse;
 
 // reparse_target_utf8 reads an open reparse-point handle's link target as a
-// malloc'd UTF-8 string, preferring the PrintName (the user-facing form Node's
-// readlink returns), falling back to the SubstituteName with its "\??\" NT
-// prefix stripped. NULL on failure (not a reparse point, or an unhandled tag).
-// Shared by readlink and lstat's S_IFLNK size (ADR-00769).
+// malloc'd UTF-8 string, the way libuv's fs__readlink_handle does: from the
+// SubstituteName (the name the kernel actually follows — the PrintName is a
+// display hint a creator may leave empty or stale), with the NT namespace
+// prefix rewritten to the Win32 form: `\??\C:\…` → `C:\…`, and
+// `\??\UNC\server\share` → `\\server\share`. A relative symlink's
+// SubstituteName has no prefix and passes through. A mount point that is not a
+// drive path (a volume GUID mount) is not a link Node can name: NULL. NULL also
+// on failure (not a reparse point, or an unhandled tag). Shared by readlink and
+// lstat's S_IFLNK size (ADR-00769).
 static char *reparse_target_utf8(HANDLE h) {
 	char raw[16 * 1024];
 	DWORD got = 0;
 	if (!DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0, raw, sizeof raw, &got, NULL)) return NULL;
 	kml_reparse *rp = (kml_reparse *)raw;
 	const WCHAR *name; USHORT nlen;
+	int junction = 0;
 	if (rp->ReparseTag == IO_REPARSE_TAG_SYMLINK) {
-		name = rp->u.sym.PathBuffer + rp->u.sym.PrintNameOffset / 2; nlen = rp->u.sym.PrintNameLength / 2;
-		if (nlen == 0) { name = rp->u.sym.PathBuffer + rp->u.sym.SubstituteNameOffset / 2; nlen = rp->u.sym.SubstituteNameLength / 2; }
+		name = rp->u.sym.PathBuffer + rp->u.sym.SubstituteNameOffset / 2; nlen = rp->u.sym.SubstituteNameLength / 2;
 	} else if (rp->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT) {
-		name = rp->u.mnt.PathBuffer + rp->u.mnt.PrintNameOffset / 2; nlen = rp->u.mnt.PrintNameLength / 2;
-		if (nlen == 0) { name = rp->u.mnt.PathBuffer + rp->u.mnt.SubstituteNameOffset / 2; nlen = rp->u.mnt.SubstituteNameLength / 2; }
+		name = rp->u.mnt.PathBuffer + rp->u.mnt.SubstituteNameOffset / 2; nlen = rp->u.mnt.SubstituteNameLength / 2;
+		junction = 1;
 	} else return NULL;
 	wchar_t tmp[32768];
-	if (nlen >= 32768) nlen = 32767;
-	memcpy(tmp, name, nlen * sizeof(wchar_t));
-	tmp[nlen] = 0;
-	const wchar_t *p = tmp;
-	if (wcsncmp(p, L"\\??\\", 4) == 0) p += 4;
+	if (nlen >= 32768 - 2) nlen = 32768 - 3;
+	memcpy(tmp + 2, name, nlen * sizeof(wchar_t));
+	tmp[nlen + 2] = 0;
+	wchar_t *p = tmp + 2;
+	int nt = nlen >= 4 && p[0] == L'\\' && p[1] == L'?' && p[2] == L'?' && p[3] == L'\\';
+	int drive = nt && nlen >= 6 && ((p[4] >= L'A' && p[4] <= L'Z') || (p[4] >= L'a' && p[4] <= L'z')) && p[5] == L':' && (nlen == 6 || p[6] == L'\\');
+	if (drive) {
+		p += 4;
+	} else if (!junction && nt && nlen >= 8 && (p[4] == L'U' || p[4] == L'u') && (p[5] == L'N' || p[5] == L'n') && (p[6] == L'C' || p[6] == L'c') && p[7] == L'\\') {
+		p += 6; // leaves "\server…" with one cell before it
+		p[0] = L'\\';
+		p[1] = L'\\';
+	} else if (junction) {
+		SetLastError(ERROR_SYMLINK_NOT_SUPPORTED);
+		return NULL;
+	}
 	return to_utf8(p);
 }
 
@@ -803,13 +901,100 @@ int64_t readlink(const char *path, char *buf, size_t cap) {
 	return (int64_t)len;
 }
 
+// fs.symlinkSync's third argument, Windows-only in effect (Node ignores it on
+// POSIX): 'file', 'dir', or 'junction'. The IR stages it here just before its
+// symlink() call; symlink() consumes and clears it. 0 = autodetect from the
+// target, which is what Node does when the argument is absent or null.
+enum { KML_LINK_AUTO = 0, KML_LINK_FILE = 1, KML_LINK_DIR = 2, KML_LINK_JUNCTION = 3 };
+static _Thread_local int kml_link_type;
+int __kml_win_symlink_type(const char *type) {
+	kml_link_type = KML_LINK_AUTO;
+	if (!type) return 0;
+	if (strcmp(type, "file") == 0) kml_link_type = KML_LINK_FILE;
+	else if (strcmp(type, "dir") == 0) kml_link_type = KML_LINK_DIR;
+	else if (strcmp(type, "junction") == 0) kml_link_type = KML_LINK_JUNCTION;
+	else { errno = L_EINVAL; return -1; }
+	return 0;
+}
+
+// create_junction makes `wp` a directory junction to `wt`, as libuv's
+// fs__create_junction does: an NTFS mount-point reparse point, which needs no
+// privilege (unlike a symlink). A junction can only name an absolute path, so a
+// relative target is resolved against the link's own directory first (Node does
+// the same before calling down). Substitute name `\??\C:\dir\`, print name
+// `C:\dir\`.
+static int create_junction(const wchar_t *wt, const wchar_t *wp) {
+	wchar_t *joined = NULL;
+	const wchar_t *src = wt;
+	int absolute = wt[0] == L'\\' || wt[0] == L'/' || (wt[0] && wt[1] == L':');
+	if (!absolute) {
+		size_t pl = wcslen(wp), tl = wcslen(wt);
+		joined = (wchar_t *)malloc((pl + tl + 2) * sizeof(wchar_t));
+		if (!joined) { errno = L_ENOMEM; return -1; }
+		wcscpy(joined, wp);
+		wchar_t *slash = wcsrchr(joined, L'\\'), *slash2 = wcsrchr(joined, L'/');
+		if (slash2 > slash) slash = slash2;
+		if (slash) slash[1] = 0; else joined[0] = 0;
+		wcscat(joined, wt);
+		src = joined;
+	}
+	wchar_t *full = (wchar_t *)malloc(32768 * sizeof(wchar_t));
+	if (!full) { free(joined); errno = L_ENOMEM; return -1; }
+	DWORD fn = GetFullPathNameW(src, 32768 - 2, full, NULL);
+	free(joined);
+	if (fn == 0 || fn >= 32768 - 2) { free(full); errno = L_ENAMETOOLONG; return -1; }
+	// GetFullPathNameW keeps a "\\?\" prefix; the reparse data wants the bare path.
+	wchar_t *abs = full;
+	if (wcsncmp(abs, L"\\\\?\\", 4) == 0) { abs += 4; fn -= 4; }
+	if (abs[fn - 1] != L'\\') { abs[fn++] = L'\\'; abs[fn] = 0; }
+
+	if (!CreateDirectoryW(wp, NULL)) { DWORD e = GetLastError(); free(full); errno = win_errno(e); return -1; }
+	HANDLE h = CreateFileW(wp, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+	                       FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+	if (h == INVALID_HANDLE_VALUE) { DWORD e = GetLastError(); RemoveDirectoryW(wp); free(full); errno = win_errno(e); return -1; }
+
+	size_t sub_cells = 4 + fn, print_cells = fn;
+	size_t path_bytes = (sub_cells + 1 + print_cells + 1) * sizeof(WCHAR);
+	size_t hdr = 8 /* tag, length, reserved */ + 8 /* the four name offsets/lengths */;
+	char *raw = (char *)calloc(1, hdr + path_bytes);
+	if (!raw) { CloseHandle(h); RemoveDirectoryW(wp); free(full); errno = L_ENOMEM; return -1; }
+	kml_reparse *rp = (kml_reparse *)raw;
+	rp->ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
+	rp->ReparseDataLength = (USHORT)(8 + path_bytes);
+	rp->u.mnt.SubstituteNameOffset = 0;
+	rp->u.mnt.SubstituteNameLength = (USHORT)(sub_cells * sizeof(WCHAR));
+	rp->u.mnt.PrintNameOffset = (USHORT)((sub_cells + 1) * sizeof(WCHAR));
+	rp->u.mnt.PrintNameLength = (USHORT)(print_cells * sizeof(WCHAR));
+	WCHAR *pb = rp->u.mnt.PathBuffer;
+	memcpy(pb, L"\\??\\", 4 * sizeof(WCHAR));
+	memcpy(pb + 4, abs, fn * sizeof(WCHAR));
+	memcpy(pb + sub_cells + 1, abs, fn * sizeof(WCHAR));
+	DWORD got = 0;
+	BOOL ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, raw, (DWORD)(hdr + path_bytes), NULL, 0, &got, NULL);
+	DWORD e = GetLastError();
+	CloseHandle(h);
+	free(raw); free(full);
+	if (!ok) { RemoveDirectoryW(wp); errno = win_errno(e); return -1; }
+	return 0;
+}
+
 int symlink(const char *target, const char *path) {
+	int type = kml_link_type;
+	kml_link_type = KML_LINK_AUTO;
 	wchar_t *wt = to_wide(target), *wp = to_wide(path);
 	if (!wt || !wp) { free_keep_err(wt); free_keep_err(wp); return -1; }
+	if (type == KML_LINK_JUNCTION) {
+		int r = create_junction(wt, wp);
+		int e = errno;
+		free(wt); free(wp);
+		errno = e;
+		return r;
+	}
 	// Node picks 'dir' vs 'file' from the target when no type is given; a
 	// relative target is resolved against the link's directory for that.
 	DWORD flags = 0;
-	{
+	if (type == KML_LINK_DIR) flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
+	else if (type == KML_LINK_AUTO) {
 		wchar_t full[32768];
 		const wchar_t *probe = wt;
 		if (!(wt[0] == L'\\' || wt[0] == L'/' || (wt[1] == L':'))) {
@@ -832,6 +1017,30 @@ int symlink(const char *target, const char *path) {
 	free_keep_err(wt); free_keep_err(wp);
 	if (ok) return 0;
 	errno = err == ERROR_PRIVILEGE_NOT_HELD ? L_EPERM : win_errno(err);
+	return -1;
+}
+
+// __kml_win_copyfile is fs.copyFileSync's transfer, libuv's fs__copyfile: the
+// OS copy, which carries what a read-then-write loses — the file's attributes,
+// its timestamps, alternate data streams, sparseness and compression. 0, or -1
+// with errno set.
+int __kml_win_copyfile(const char *src, const char *dst) {
+	wchar_t *ws = to_wide(src), *wd = to_wide(dst);
+	if (!ws || !wd) { free_keep_err(ws); free_keep_err(wd); return -1; }
+	BOOL ok = CopyFileW(ws, wd, FALSE);
+	DWORD err = GetLastError();
+	if (!ok && err == ERROR_ACCESS_DENIED) {
+		// A read-only destination refuses the overwrite; POSIX (and Node, by
+		// reopening it) replaces it. Clear the bit and retry once.
+		DWORD a = GetFileAttributesW(wd);
+		if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_READONLY) && SetFileAttributesW(wd, a & ~(DWORD)FILE_ATTRIBUTE_READONLY)) {
+			ok = CopyFileW(ws, wd, FALSE);
+			err = GetLastError();
+		}
+	}
+	free(ws); free(wd);
+	if (ok) return 0;
+	errno = win_errno(err);
 	return -1;
 }
 

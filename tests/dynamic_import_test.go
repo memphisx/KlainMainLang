@@ -82,6 +82,35 @@ func TestE2EDynamicImportLazy(t *testing.T) {
 	}
 }
 
+// TestE2EDynamicImportLazyNonASCIIPath: the island is located beside the
+// executable, so the loader must survive an install directory whose name is not
+// representable in a narrow code page (on Windows that means the wide
+// GetModuleFileNameW/LoadLibraryW boundary, not the ANSI one).
+func TestE2EDynamicImportLazyNonASCIIPath(t *testing.T) {
+	cli := buildCLI(t)
+	dir := filepath.Join(tempDir(t), "καλημέρα-日本")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "mod.ts"), "export const answer: number = 7;\n")
+	writeFile(t, filepath.Join(dir, "entry.ts"),
+		"async function main(): Promise<void> {\n"+
+			"  const m = await import('./mod');\n"+
+			"  console.log(m.answer);\n"+
+			"}\nmain();\n")
+	compile := exec.Command(cli, "-dynamic-import=lazy", filepath.Join(dir, "entry.ts"))
+	if out, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("compile: %v\n%s", err, out)
+	}
+	out, err := exec.Command(filepath.Join(dir, "entry")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	if string(out) != "7\n" {
+		t.Errorf("got %q, want %q", out, "7\n")
+	}
+}
+
 // TestE2EDynamicImportNonLiteralRejected confirms a runtime-computed specifier
 // is a clean compile error, not a silent gap.
 func TestE2EDynamicImportNonLiteralRejected(t *testing.T) {

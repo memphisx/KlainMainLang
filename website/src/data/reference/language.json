@@ -196,6 +196,25 @@
       }
     },
     {
+      "id": "lang.nullderef",
+      "name": "TypeError on a property access off undefined/null (s.length, r.name, p.m(), s[i], p.x = v)",
+      "statusRow": "TypeError on a property access off undefined/null (s.length, r.name, p.m(), s[i], p.x = v)",
+      "signature": "undefined.x   // TypeError",
+      "badge": "caveats",
+      "description": "Reading a property, calling a method, indexing, or writing a property on a value that is undefined or null at run time throws Node's TypeError — Cannot read properties of undefined (reading 'length') / Cannot set properties of null (setting 'x') — catchable and instanceof TypeError; uncaught, the program reports it and exits 1. Covers string, object, class and Map bases, a T | undefined scalar receiver, x!.p, compound assignment and ++. Optional chaining never throws. An out-of-range element read is undefined, so rows[5].name throws too; an absent array (T[] | null, an omitted xs?: T[]) throws on xs[0] / xs.length / xs.push(), and TypeError: xs is not iterable on for…of and spread. An empty array is present: truthy and !== null.",
+      "snippet": "interface User { name: string; manager?: User }\nconst boss: User = { name: \"Ada\" }\ntry {\n  console.log(boss.manager.name)\n} catch (err) {\n  console.log(err instanceof TypeError)   // true\n  console.log((err as Error).message)     // Cannot read properties of undefined (reading 'name')\n}\nconsole.log(boss.manager?.name)          // undefined",
+      "differences": [
+        "In `p.x = f()` the base is checked before the right-hand side is evaluated, so `f()` does not run ahead of the `TypeError` (JS evaluates it first)."
+      ],
+      "seeAlso": [
+        "lang.optchain",
+        "lang.trycatch"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Errors/Cant_access_property"
+      }
+    },
+    {
       "id": "lang.debugger",
       "name": "debugger statement",
       "statusRow": "debugger statement",
@@ -438,8 +457,12 @@
       "name": "Ternary cond ? a : b",
       "statusRow": "Ternary cond ? a : b",
       "signature": "cond ? a : b",
-      "badge": "exact",
-      "description": "The conditional (ternary) operator.",
+      "badge": "caveats",
+      "description": "The conditional (ternary) operator. A cond ? scalar : null mix is a T | null value, and scalar branches of different kinds (c ? 1 : \"a\", c ? 1 : true) yield their union (number | string), narrowable with typeof.",
+      "snippet": "function label(n: number) { return n % 2 === 0 ? n : \"odd\" }\nconsole.log(label(2), label(3))   // 2 odd\nconsole.log(typeof label(3))       // string",
+      "differences": [
+        "A pointer branch mixed with a scalar one that is not a scalar union (`c ? 1 : someObject`), and an array-typed ternary, are compile-time rejections — narrow first, or assign each branch separately."
+      ],
       "seeAlso": [
         "lang.if"
       ],
@@ -470,7 +493,7 @@
       "statusRow": "Nullish coalescing ??",
       "signature": "a ?? b",
       "badge": "exact",
-      "description": "Works on a pointer T | null (string/object/…) and a non-pointer scalar T | null (number | null, boolean | null) via a real presence bit — so let x: number | null = null; x ?? 42 yields 42 while a present 0 yields 0.",
+      "description": "Works on a pointer T | null (string/object/…) and a non-pointer scalar T | null (number | null, boolean | null) via a real presence bit — so let x: number | null = null; x ?? 42 yields 42 while a present 0 yields 0. Operands of different kinds (n ?? \"none\", s ?? 0) yield their union, number | string, narrowable with typeof. A pointer left operand keeps its own type, so the result is usable in place — (row ?? dflt).name — and stays T | undefined when the right operand can itself be absent; an element of a (number | undefined)[] coalesced with a number is a plain number.",
       "seeAlso": [
         "lang.optchain",
         "lang.null"
@@ -483,9 +506,9 @@
       "id": "lang.optchain",
       "name": "Optional chaining ?.",
       "statusRow": "Optional chaining ?.",
-      "signature": "obj?.field",
+      "signature": "a?.b   a?.[k]   f?.(args)",
       "badge": "exact",
-      "description": "Null-guards pointer fields; returns null on a null receiver.",
+      "description": "All three forms — property a?.b, element a?.[k] and call f?.(args) / a?.m(args) — short-circuit to a real undefined on a null or undefined base, and the chain short-circuits as a whole: in a?.b.c or a?.b.m(x) a nullish a skips every later link and leaves call arguments and element keys unevaluated. Parentheses end the chain, as in JavaScript. The result is typed T | undefined.",
       "seeAlso": [
         "lang.nullish"
       ],
@@ -697,7 +720,6 @@
       "description": "Optional parameters. An omitted argument reads as a real `T | undefined` inside the body (as in TS) — a present 0/\"\" is distinguishable from an omitted argument; narrow, `?? d`, or `!` to consume it.",
       "differences": [
         "Works through a first-class function value too — an arrow or function expression bound to a variable or object field — not only a named function; an omitted optional argument is absent there as well, not a typed zero.",
-        "An array-typed optional parameter stays an empty array when omitted (an array aggregate has no spare absent state).",
         "An un-narrowed optional scalar is still lenient in arithmetic — the payload is unwrapped before the operator, so `a + b` on an absent `b` reads 0 rather than erroring (the same residual as any un-narrowed nullable local)."
       ],
       "seeAlso": [
@@ -844,7 +866,7 @@
       "statusRow": "await expressions",
       "signature": "const x = await p",
       "badge": "exact",
-      "description": "A Promise is a reusable value — await p twice returns the same result. Every await yields a microtask tick, of an already-settled promise and of a non-promise value, FIFO-ordered with .then/queueMicrotask, matching JS. Registers a resume reaction and parks.",
+      "description": "A Promise is a reusable value — await p twice returns the same result. Every await yields a microtask tick, of an already-settled promise and of a non-promise value, FIFO-ordered with .then/queueMicrotask, matching JS. Registers a resume reaction and parks — at the entry program's top level too: a module with a top-level await runs as a coroutine, so its continuation is ordered among the promise's other reactions exactly as in Node, and an await nothing can settle ends the process with Node's warning and exit code 13.",
       "seeAlso": [
         "lang.asyncfn",
         "lang.promiseexecutor"

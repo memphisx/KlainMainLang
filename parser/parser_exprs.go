@@ -499,6 +499,37 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 		switch p.peek().Type {
 		case lexer.OPTIONAL_DOT:
 			p.advance()
+			// Optional call `f?.(args)` / `a.b?.(args)`: the `?.` guards the
+			// callee itself, not a property read.
+			if p.check(lexer.LPAREN) {
+				lparen := p.advance()
+				args, err := p.parseArgList()
+				if err != nil {
+					return nil, err
+				}
+				if _, err := p.expect(lexer.RPAREN); err != nil {
+					return nil, err
+				}
+				call := ast.NewCallExpression(expr, args, posOf(lparen))
+				call.Optional = true
+				expr = call
+				continue
+			}
+			// Optional element access `a?.[k]`.
+			if p.check(lexer.LBRACKET) {
+				lbrak := p.advance()
+				index, err := p.parseExpression()
+				if err != nil {
+					return nil, err
+				}
+				if _, err := p.expect(lexer.RBRACKET); err != nil {
+					return nil, err
+				}
+				idx := ast.NewIndexExpression(expr, index, posOf(lbrak))
+				idx.Optional = true
+				expr = idx
+				continue
+			}
 			propTok, err := p.expectPropertyName()
 			if err != nil {
 				return nil, err

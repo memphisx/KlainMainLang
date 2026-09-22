@@ -96,7 +96,25 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 	// matching real JS's `String([a, b])` / `${tuple}` — checked before the
 	// generic ptr/object handling below (a tuple is structurally an object).
 	if v.Ty.IsTuple {
-		return e.emitTupleToString(v)
+		// An absent tuple (an omitted `p?: [number, string]` field) is a null
+		// pointer: render its keyword rather than reading through it.
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(absentWord(v.Ty)), slot))
+		presentL := e.freshLabel("tuple.str")
+		doneL := e.freshLabel("tuple.str.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(v.Ref), doneL, presentL))
+		e.emitLabel(presentL)
+		s, err := e.emitTupleToString(v)
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", s.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		out := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+		return Value{Ref: out, Ty: TypePtr}, nil
 	}
 	// An array stringifies to its elements joined by commas (real JS's
 	// Array.prototype.toString / String([a,b]) / `${arr}`) — the same routine
@@ -117,11 +135,9 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		// null data-ptr — render "undefined", not the empty join. `absentLiteral`
 		// picks "undefined" (IsUndefined) over "null".
 		if v.Ty.Nullable {
-			isAbsent := e.freshReg()
 			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isAbsent, ptrReg))
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s",
-				r, isAbsent, e.internString(absentLiteral(v.Ty)), joined.Ref))
+				r, e.emitArrayIsAbsent(v), e.internString(absentLiteral(v.Ty)), joined.Ref))
 			return Value{Ref: r, Ty: TypePtr}, nil
 		}
 		return joined, nil
@@ -527,7 +543,11 @@ func (e *Emitter) callbackReturnType(arg ast.Expression, paramHints ...Type) (Ty
 	return Type{}, false
 }
 
-func (e *Emitter) inferExprType(expr ast.Expression) Type {
+func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
+	// A chain that continues past a `?.` — mirror emitOptionalChain.
+	if ty, ok := e.inferOptionalChain(expr); ok {
+		return ty
+	}
 	// `globalThis.X` (and its call form) infers as the bare global X — mirror
 	// the same alias-peeling emitMember/emitCall apply, so member-type-driven
 	// dispatch agrees with codegen.
@@ -624,6 +644,17 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 		}
 	case *ast.IndexExpression:
+		// `a?.[k]` is `ElemType | undefined` behind a pointer receiver — mirror
+		// emitOptionalIndex.
+		if ex.Optional {
+			plain := *ex
+			plain.Optional = false
+			inner := e.inferExprType(&plain)
+			if !optionalIndexGuards(e.inferExprType(ex.Object)) {
+				return inner
+			}
+			return optionalCallResultType(optCalleeValue, inner)
+		}
 		// cluster.workers[id] — the ID-keyed Worker lookup (mirrors emitIndex).
 		if mem, ok := ex.Object.(*ast.MemberExpression); ok && mem.Property == "workers" {
 			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "cluster__kml_builtin" {
@@ -648,7 +679,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 		// `/** @value */` flat array: an index read is the element (a view).
 		if objTy.IsFlatArray && objTy.ElemType != nil {
-			return *objTy.ElemType
+			return indexReadType(*objTy.ElemType)
 		}
 		// String-keyed Map bracket access yields the value type (TDD-00139).
 		if objTy.IsMap && objTy.MapKey != nil && isPlainStringType(*objTy.MapKey) {
@@ -673,11 +704,13 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 		}
 		// TDD-00101: BigInt64Array/BigUint64Array elements surface as bigint.
+		// An element read is `T | undefined` — out of range reads `undefined`
+		// (mirrors emitIndexRead).
 		if objTy.BigIntElem {
-			return BigIntType()
+			return indexReadType(BigIntType())
 		}
 		if objTy.IsArray && objTy.ElemType != nil {
-			return *objTy.ElemType
+			return indexReadType(*objTy.ElemType)
 		}
 	case *ast.BinaryExpression:
 		// Infer each operand's type exactly once, up front, and reuse it in
@@ -733,8 +766,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		// string/ptr slot and the boxed result is mis-stored). A real-string side
 		// keeps the concat result (string); object/array operands keep their paths.
 		if e.compatJS() {
-			lNullish := lt.IsNull || lt.IsUndefined
-			rNullish := rt.IsNull || rt.IsUndefined
+			lNullish := (lt.IsNull || lt.IsUndefined) && !lt.UncheckedIndex
+			rNullish := (rt.IsNull || rt.IsUndefined) && !rt.UncheckedIndex
 			lRealStr := isStringTy(lt) && !lNullish
 			rRealStr := isStringTy(rt) && !rNullish
 			if (lNullish || rNullish) && !lRealStr && !rRealStr &&
@@ -808,6 +841,28 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		case "&&", "||":
 			return lt
 		case "??":
+			// Operands of different scalar kinds yield their union — mirror
+			// emitNullCoalesce / emitNullCoalesceScalar.
+			if !lt.IsNull && !lt.IsDynamic && (isNullableScalar(lt) || (lt.IR == "ptr" && !lt.IsArray)) {
+				if uTy, ok := nullCoalesceUnion(lt.withoutNullable(), rt); ok {
+					return uTy
+				}
+			}
+			// A dynamic left operand mirrors emitNullCoalesceDynamic: a constrained
+			// nullable box resolves against a scalar right operand, anything else
+			// stays `any`.
+			if lt.IsDynamic {
+				if resTy, ok := nullCoalesceBoxResult(lt, rt); ok {
+					return resTy
+				}
+				return TypeAny
+			}
+			if lt.IR == "ptr" && !lt.IsArray && !lt.IsNull {
+				return nullCoalescePtrResult(lt, rt)
+			}
+			if lt.IsArray && lt.Nullable {
+				return nullCoalesceArrayResult(lt, rt) // mirrors emitNullCoalesceArray
+			}
 			if lt.IR == "ptr" {
 				return rt
 			}
@@ -834,7 +889,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			objTy := e.inferExprType(ex.Object)
 			plain := ast.NewMemberExpression(ex.Object, ex.Property, ex.GetPos())
 			inner := e.inferExprType(plain)
-			if (objTy.IR == "ptr" && !objTy.IsArray) || isNullableScalar(objTy) {
+			if (objTy.IR == "ptr" && !objTy.IsArray) || isNullableScalar(objTy) ||
+				(objTy.IsArray && objTy.Nullable && ex.Property == "length") {
 				return undefinedableElem(inner)
 			}
 			return inner
@@ -1309,6 +1365,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 		return e.inferExprType(desugarTaggedTemplate(ex))
 	case *ast.CallExpression:
+		// Optional call `f?.(...)` — mirror emitOptionalCalleeCall.
+		if ex.Optional {
+			plain := *ex
+			plain.Optional = false
+			return optionalCallResultType(e.classifyOptionalCallee(ex.Callee), e.inferExprType(&plain))
+		}
 		// `a?.m(...)` is `RetType | undefined` — mirror emitOptionalCall, which
 		// wraps a pointer (non-array) receiver's optional call as `T | undefined`.
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Optional {
@@ -1320,6 +1382,17 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return undefinedableElem(inner)
 			}
 			return inner
+		}
+		// An immediately-invoked arrow / function expression returns its own
+		// return type (`((x: number) => x === 1)(1)` is a boolean).
+		switch ex.Callee.(type) {
+		case *ast.ArrowFunction, *ast.FunctionExpression:
+			if ft := e.inferExprType(ex.Callee); ft.IsFunc {
+				if ft.FuncRetType == nil {
+					return TypeVoid
+				}
+				return *ft.FuncRetType
+			}
 		}
 		// klain:assets (TDD-00142 Stage 7): embedDir(...) → EmbeddedAssets,
 		// assets.get(...) → ArrayBuffer.
@@ -3013,6 +3086,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return undefinedableElem(TypePtr) // string.at → `string | undefined`
 			case "sort", "concat", "reverse", "fill", "toReversed", "toSorted", "toSpliced", "with", "copyWithin", "values":
 				objTy := e.inferExprType(mem.Object)
+				if mem.Property == "concat" && isForOfStringTy(objTy) {
+					return TypePtr // String.prototype.concat — mirrors emitStringConcatMethod
+				}
 				if objTy.IsArray {
 					return objTy
 				}
@@ -3192,10 +3268,19 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if nty, ok := ternaryNullableScalarType(e.inferExprType(ex.Consequent), e.inferExprType(ex.Alternate)); ok {
 			return nty
 		}
+		// An array-valued ternary (mirrors emitConditionalArray).
+		if aty, ok := ternaryArrayType(e.inferExprType(ex.Consequent), e.inferExprType(ex.Alternate)); ok {
+			return aty
+		}
 		// A dynamic branch makes the whole ternary `any` (mirrors
 		// emitConditionalAny).
 		if e.inferExprType(ex.Consequent).IsDynamic || e.inferExprType(ex.Alternate).IsDynamic {
 			return TypeAny
+		}
+		// Scalar branches of different kinds are their union (mirrors
+		// emitConditional).
+		if uTy, ok := ternaryUnion(e.inferExprType(ex.Consequent), e.inferExprType(ex.Alternate)); ok {
+			return uTy
 		}
 		return e.inferExprType(ex.Consequent)
 	case *ast.SequenceExpression:
@@ -3416,7 +3501,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if ex.RetType != nil {
 			ret = e.resolveType(ex.RetType)
 		} else if ex.Body != nil {
+			// The body is typed with its parameters in scope: `(s: string) =>
+			// s.length` / `=> s[0]` are a number / a string only once `s` is
+			// known — unresolved, they fell to the i64 default while the closure
+			// itself was emitted returning double / ptr.
+			e.pushScope()
+			for i, p := range ex.Params {
+				e.definePatternParamForInference(p, params[i], i)
+			}
 			ret = e.inferExprType(ex.Body)
+			e.popScope()
 		} else if blockHasReturn(ex.Block) {
 			// Same best-effort inference emitArrowFunctionWithHints uses when
 			// actually emitting this closure — this duplicate exists because
@@ -3615,10 +3709,8 @@ func (e *Emitter) toBool(v Value) Value {
 		// (RegExp.exec) is likewise {null,0}. (An empty present array is also
 		// {null,0}, so it reads falsy — the same edge every nullable-array test in
 		// this compiler shares; documented.)
-		ptrReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, v.Ref))
 		reg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", reg, ptrReg))
+		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", reg, e.emitArrayIsAbsent(v)))
 		return Value{Ref: reg, Ty: TypeBool}
 	}
 	if isPlainStringTy(v.Ty) {

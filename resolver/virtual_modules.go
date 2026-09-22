@@ -223,7 +223,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"fsyncSync": true, "fdatasyncSync": true, "ftruncateSync": true,
 		// Real Node exports with existing codegen dispatch, previously usable
 		// only via the `fs.` namespace form — also valid as named imports.
-		"accessSync": true, "chmodSync": true, "truncateSync": true, "symlinkSync": true,
+		"accessSync": true, "chmodSync": true, "truncateSync": true, "symlinkSync": true, "rmSync": true,
 		// fs.constants namespace (ADR-00795) — also valid as `import { constants }`.
 		"constants": true,
 		// Async callback form (TDD-00107): fs.readFile(path, cb), etc.
@@ -351,7 +351,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"exportString": true, "exportBuffer": true,
 		"exportArrayBuffer": true, "exportArrayBufferView": true,
 		"getRawPointer": true,
-		"getInt8": true, "getUint8": true, "getInt16": true, "getUint16": true,
+		"getInt8":       true, "getUint8": true, "getInt16": true, "getUint16": true,
 		"getInt32": true, "getUint32": true, "getInt64": true, "getUint64": true,
 		"getFloat32": true, "getFloat64": true,
 		"setInt8": true, "setUint8": true, "setInt16": true, "setUint16": true,

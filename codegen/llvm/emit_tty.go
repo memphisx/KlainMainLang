@@ -210,9 +210,41 @@ int __kml_tty_rows(int fd) {
   if (GetConsoleScreenBufferInfo((HANDLE)_get_osfhandle(fd), &i)) return i.srWindow.Bottom - i.srWindow.Top + 1;
   return -1;
 }
+/* Console keys are read wide and handed out as UTF-8. ReadFile on a console
+   goes through the input code page, where a typed non-ASCII character is
+   whatever that page makes of it (and under code page 65001 has historically
+   come back as NULs); ReadConsoleW is exact on every code page, and with VT
+   input on it carries the same ESC [ A sequences. One key can be a surrogate
+   pair, so a lone high half waits for its partner. Returns the UTF-8 length
+   written to out (0 at EOF/error). */
+static int kmltty_console_key(HANDLE hin, char *out, int cap, int max_units) {
+  wchar_t w[34];
+  DWORD got = 0;
+  if (max_units > 32) max_units = 32;
+  if (!ReadConsoleW(hin, w, (DWORD)max_units, &got, NULL) || got == 0) return 0;
+  if (w[got - 1] >= 0xD800 && w[got - 1] <= 0xDBFF) {
+    DWORD more = 0;
+    if (ReadConsoleW(hin, w + got, 1, &more, NULL)) got += more;
+  }
+  int n = WideCharToMultiByte(CP_UTF8, 0, w, (int)got, out, cap, NULL, NULL);
+  return n > 0 ? n : 0;
+}
+/* readByte's view of the same stream: the UTF-8 bytes of one key at a time. */
+static char kmltty_pending[8];
+static int kmltty_pending_n = 0, kmltty_pending_at = 0;
 int __kml_tty_read_byte(void) {
+  HANDLE hin = GetStdHandle(STD_INPUT_HANDLE);
+  DWORD mode;
+  if (GetConsoleMode(hin, &mode)) {
+    if (kmltty_pending_at >= kmltty_pending_n) {
+      kmltty_pending_n = kmltty_console_key(hin, kmltty_pending, (int)sizeof kmltty_pending, 1);
+      kmltty_pending_at = 0;
+      if (kmltty_pending_n == 0) return -1;
+    }
+    return (int)(unsigned char)kmltty_pending[kmltty_pending_at++];
+  }
   unsigned char c; DWORD n = 0;
-  if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), &c, 1, &n, NULL) || n == 0) return -1;
+  if (!ReadFile(hin, &c, 1, &n, NULL) || n == 0) return -1;
   return (int)c;
 }
 /* A key is "available" only for a key-down record; the console also queues
@@ -243,6 +275,11 @@ char *__kml_tty_read_key(int timeout_ms) {
       if (now >= deadline) return kmltty_str("", 0);
       WaitForSingleObject(hin, (DWORD)(deadline - now));
     }
+  }
+  if (is_console) {
+    char key[128];
+    int kn = kmltty_console_key(hin, key, (int)sizeof key, 31);
+    return kmltty_str(key, (int64_t)kn);
   }
   char buf[32]; DWORD n = 0;
   if (!ReadFile(hin, buf, sizeof(buf) - 1, &n, NULL) || n == 0) return kmltty_str("", 0);

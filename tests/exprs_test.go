@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -518,20 +519,56 @@ console.log((null ?? 42) + 1)
 `, "42\nx\ntrue\n43")
 }
 
-func TestE2ENullishPtrOrNonPtrUnionRejected(t *testing.T) {
-	// ADR-00652: a nullable-ptr left with a non-ptr right (`str | null ?? 42`)
-	// is a genuine `ptr | number` union the single-ptr result slot can't
-	// represent — a clean rejection, not an invalid `store ptr <double>`.
-	cases := []string{
-		`let s: string | null = null; const r = s ?? 42;`,
-		`let s: string | null = 'a'; const r = s ?? true;`,
-	}
-	for _, src := range cases {
-		if _, err := parseAndCompile(src); err == nil {
-			t.Fatalf("expected a clean rejection for a ptr|non-ptr ?? union, got none for: %s", src)
-		}
-	}
-	// A nullable string with a string default still works.
+// ADR-01037: `a ?? b` with operands of different scalar kinds yields their
+// union (`number | string`), boxed like an annotated union. ADR-00652 had made
+// the string-left form a clean rejection; the number/boolean-left form was
+// never covered and emitted an invalid `store double <ptr>`.
+func TestE2ENullishMixedKindsYieldUnion(t *testing.T) {
+	assertOutput(t, `
+function f(x?: number): void {
+  console.log(x ?? "fallback")
+  const v = x ?? "none"
+  console.log(v, typeof v)
+  if (typeof v === "string") console.log("string branch", v.length)
+  else console.log("number branch", v + 1)
+}
+f(1); f(0); f()
+function g(s?: string): void { const v = s ?? 42; console.log(v, typeof v) }
+g("has"); g(""); g()
+let sn: string | null = null
+console.log(sn ?? 42, sn ?? true)
+function h(b?: boolean): void { console.log(b ?? "unset") }
+h(true); h(false); h()
+function k(x?: number, y?: string): void { const v = x ?? y; console.log(v, typeof v) }
+k(1, "a"); k(undefined, "a"); k()
+function chain(x?: number): string { return "got:" + (x ?? "nothing") }
+console.log(chain(5), chain())
+interface Row { name: string }
+function viaChain(r?: Row): void { console.log(r?.name.length ?? "no row") }
+viaChain({ name: "abc" }); viaChain()
+`, `1
+1 number
+number branch 2
+0
+0 number
+number branch 1
+fallback
+none string
+string branch 4
+has string
+ string
+42 number
+42 true
+true
+false
+unset
+1 number
+a string
+undefined undefined
+got:5 got:nothing
+3
+no row`)
+	// A nullable string with a string default still shares the one ptr slot.
 	assertOutput(t, `
 let s: string | null = null
 console.log(s ?? 'def')
@@ -1627,6 +1664,136 @@ console.log(n.get("a")?.toFixed(1))
 console.log(n.get("z")?.toFixed(1))
 console.log(n.get("z")?.toFixed(1) === undefined)
 `, "HELLO\nundefined\ntrue\n1.0\nundefined\ntrue")
+}
+
+// ADR-01037: the optional call `f?.(...)` — a nullish callee short-circuits
+// to a real `undefined` and the arguments are not evaluated; a present callee
+// is called once. Previously a parse error (`expected IDENT, got (`).
+func TestE2EOptionalCalleeCall(t *testing.T) {
+	assertOutput(t, `
+let evaluated = 0
+function arg(): number { evaluated++; return 21 }
+function run(cb?: (n: number) => number): void {
+  const r = cb?.(arg())
+  console.log(r === undefined, r)
+}
+run((n) => n * 2)
+run()
+console.log("evaluations", evaluated)
+function str(cb?: () => string): void { console.log(cb?.()) }
+str(() => "s")
+str()
+function eff(cb?: (s: string) => void): void { cb?.("ran") }
+eff((s) => console.log(s))
+eff()
+`, "false 42\ntrue undefined\nevaluations 1\ns\nundefined\nran")
+}
+
+// A function-typed object field, and a declared function (never nullish — an
+// ordinary call whose type stays the plain return type).
+func TestE2EOptionalCalleeCallFieldAndDeclared(t *testing.T) {
+	assertOutput(t, `
+interface Hooks { onDone?: (msg: string) => string }
+const quiet: Hooks = {}
+const loud: Hooks = { onDone: (msg) => "done:" + msg }
+console.log(quiet.onDone?.("x"))
+console.log(loud.onDone?.("x"))
+function always(n: number): number { return n + 1 }
+const v: number = always?.(1)
+console.log(v)
+`, "undefined\ndone:x\n2")
+}
+
+// ADR-01037: an optional chain short-circuits as a WHOLE — in `a?.b.c` a
+// nullish `a` skips `.c` too. Previously only the `?.` link itself was guarded
+// and the rest of the chain ran against the absent value (a crash).
+func TestE2EOptionalChainShortCircuitsWholeChain(t *testing.T) {
+	assertOutput(t, `
+class Inner {
+  label: string = "L"
+  nums: number[] = [5, 6]
+  count: number = 3
+  run(tag: string): string { console.log("run", tag); return "ran:" + tag }
+  self(): Inner { return this }
+}
+class Row { name: string = "abc"; inner: Inner | null = new Inner() }
+let sideEffects = 0
+function tag(): string { sideEffects++; return "t" }
+function probe(r?: Row): void {
+  console.log(r?.name.length, r?.name.toUpperCase().length)
+  console.log(r?.inner?.label.length, r?.inner?.nums[1])
+  console.log(r?.inner?.self().self().label)
+  console.log(r?.inner?.count.toFixed(1), r?.inner?.label.length ?? -1)
+  r?.inner?.self().run(tag())
+  const n = r?.inner?.count
+  console.log(n === undefined ? "n undefined" : "n " + n)
+}
+probe(new Row())
+probe()
+const noInner = new Row()
+noInner.inner = null
+probe(noInner)
+console.log("side effects", sideEffects)
+const m = new Map<string, number>()
+m.set("a", 12.5)
+console.log(m.get("a")?.toFixed(1).length, m.get("z")?.toFixed(1).length)
+`, `3 3
+1 6
+L
+3.0 1
+run t
+n 3
+undefined undefined
+undefined undefined
+undefined
+undefined -1
+n undefined
+3 3
+undefined undefined
+undefined
+undefined -1
+n undefined
+side effects 1
+4 undefined`)
+}
+
+// ADR-01037: optional element access `a?.[k]` — the key expression is not
+// evaluated when the receiver is nullish. Previously a parse error.
+func TestE2EOptionalElementAccess(t *testing.T) {
+	assertOutput(t, `
+interface Row { name: string; tags: string[] }
+let evaluated = 0
+function key(): number { evaluated++; return 0 }
+function firstTag(r?: Row): string | undefined { return r?.tags?.[key()] }
+console.log(firstTag({ name: "a", tags: ["x", "y"] }), firstTag())
+function ch(s?: string): string | undefined { return s?.[key()] }
+console.log(ch("hello"), ch(), ch() === undefined)
+const m: Map<string, number[]> = new Map()
+m.set("k", [7, 8])
+console.log(m.get("k")?.[1])
+const arr = [1, 2, 3]
+console.log(arr?.[2])
+console.log("key evaluations", evaluated)
+`, "x undefined\nh undefined true\n8\n3\nkey evaluations 2")
+}
+
+// process.getuid/geteuid/getgid/getegid exist on POSIX only (Node leaves them
+// undefined on Windows); the portable spelling is the optional call, typed
+// `number | undefined` on every host.
+func TestE2EProcessGetuidOptionalCall(t *testing.T) {
+	out := compileAndRunImports(t, `
+function kind(id: number | undefined): string { return id === undefined ? "undefined" : "number" }
+console.log(kind(process.getuid?.()))
+console.log(kind(process.geteuid?.()))
+const gid = process.getgid?.()
+console.log(kind(gid))
+console.log(typeof process.getegid?.())
+`)
+	want := "number\nnumber\nnumber\nnumber"
+	if runtime.GOOS == "windows" {
+		want = "undefined\nundefined\nundefined\nundefined"
+	}
+	compareLines(t, out, want)
 }
 
 // ADR-00735: Math.random() must cover [0,1) on every host. On Windows the

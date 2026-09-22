@@ -56,7 +56,19 @@ func FFIWinDlShimSource() string {
 void *dlopen(const char *path, int flags) {
 	(void)flags;
 	if (!path) return KML_DL_SELF; // dlopen(NULL): the process image (see dlsym)
-	return (void *)LoadLibraryA(path);
+	// The path is UTF-8 (every string in a compiled program is), so it crosses
+	// the wide boundary rather than the ANSI code page: a library under a
+	// non-ASCII directory loads.
+	int wn = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+	if (wn <= 0) { SetLastError(ERROR_INVALID_NAME); return NULL; }
+	wchar_t *w = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)wn * sizeof(wchar_t));
+	if (!w) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
+	MultiByteToWideChar(CP_UTF8, 0, path, -1, w, wn);
+	HMODULE m = LoadLibraryW(w);
+	DWORD err = GetLastError();
+	HeapFree(GetProcessHeap(), 0, w);
+	SetLastError(err);
+	return (void *)m;
 }
 
 void *dlsym(void *handle, const char *name) {
@@ -70,6 +82,21 @@ void *dlsym(void *handle, const char *name) {
 			if (!m) continue;
 			FARPROC p = GetProcAddress(m, name);
 			if (p) return (void *)(uintptr_t)p;
+		}
+		// The POSIX names the CRT only exports underscored (getpid, strdup,
+		// fileno, …): a C program reaches them through the import library's
+		// alias, so the process-image lookup honours the same alias.
+		size_t nl = strlen(name);
+		if (name[0] != '_' && nl < 126) {
+			char alias[128];
+			alias[0] = '_';
+			memcpy(alias + 1, name, nl + 1);
+			for (int i = 0; i < 2; i++) {
+				HMODULE m = GetModuleHandleA(mods[i]);
+				if (!m) continue;
+				FARPROC p = GetProcAddress(m, alias);
+				if (p) return (void *)(uintptr_t)p;
+			}
 		}
 		return NULL;
 	}

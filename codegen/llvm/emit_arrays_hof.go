@@ -37,6 +37,11 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	if isTypedArray {
 		retElemTy = elemTy
 	}
+	// A callback returning `T | undefined` (`k => m.get(k)`) fills a boxed-element
+	// array: the { i1, T } optional has no element storage, and storing it into a
+	// bare-T slot was invalid IR.
+	boxedRet := isNullableScalar(retElemTy)
+	retElemTy = arrayElemType(retElemTy)
 
 	e.ensureMalloc()
 	outBytes := e.freshReg()
@@ -83,6 +88,9 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 		} else {
 			resultVal = e.coerce(resultVal, retElemTy)
 		}
+	}
+	if boxedRet {
+		resultVal = e.coerce(resultVal, retElemTy)
 	}
 
 	outGep := e.freshReg()
@@ -402,6 +410,14 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 		return Value{}, err
 	}
 	newAccCoerced := e.coerce(newAcc, accTy)
+	// The accumulator has one type for the whole fold: the initial value's, or
+	// the element type without one. A callback whose result has no conversion
+	// to it (`[1, 2].reduce((x, y) => `${x}+${y}`, 0)` — a string into a number)
+	// is tsc's "no overload matches this call"; storing it anyway was invalid IR.
+	if newAccCoerced.Ty.IR != accTy.IR {
+		return Value{}, fmt.Errorf("%d:%d: %s callback returns %s but the accumulator is %s — give the initial value the callback's result type",
+			pos.Line, pos.Col, verb, tsTypeName(newAcc.Ty), tsTypeName(accTy))
+	}
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accTy.IR, newAccCoerced.Ref, accAlloca, accTy.Align()))
 
 	idxNext := e.freshReg()

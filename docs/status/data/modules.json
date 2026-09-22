@@ -177,7 +177,7 @@
               "`import.meta.url` is the only supported member — bare `import.meta` or any other member (`import.meta.resolve`, etc.) is a clean parse-time error"
             ],
             "notes": [
-              "Resolved entirely at compile time, per file, into a plain string literal (`\"file://\" + that file's own absolute path`, matching real Node/browser convention); codegen never sees a real \"module metadata object\"",
+              "Resolved entirely at compile time, per file, into a plain string literal — that file's own absolute path as Node renders it: percent-encoded (`my dir/a#b.ts` → `…/my%20dir/a%23b.ts`), `file:///C:/dir/f.ts` on Windows, `file://server/share/f.ts` for a UNC path — so `fileURLToPath(import.meta.url)` and `new URL('./x', import.meta.url)` behave as in Node ([ADR-01046](../adr/ADR-01046.md)); codegen never sees a real \"module metadata object\"",
               "See [TDD-00055](../tdd/TDD-00055.md) Stage 1/[ADR-00148](../adr/ADR-00148.md)"
             ]
           },

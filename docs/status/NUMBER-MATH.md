@@ -12,7 +12,7 @@ Format: [Status page format](README.md#status-page-format).
 |---|---|---|---|
 | `Number.isInteger(x)` | ✅ | | • `false` for any non-finite value (`Infinity`/`-Infinity`/`NaN`) — the whole-number test is gated on a finiteness check ([ADR-00531](../adr/ADR-00531.md)) |
 | `Number.isFinite(x)` | ✅ | | |
-| `Number.isNaN(x)` | ✅ | | |
+| `Number.isNaN(x)` | ✅ | | • All four `Number.isX` predicates are `false` for an absent value — an out-of-range `xs[i]`, a `Map.get` miss, an omitted optional parameter — where the global `isNaN`/`isFinite` ToNumber it first (`isNaN(undefined)` is `true`) ([ADR-01043](../adr/ADR-01043.md)) |
 | `Number.isSafeInteger(x)` | ✅ | | |
 | `Number.parseInt(s)` | ✅ | | • Returns a double (as real JS) so a no-digits input is a real `NaN` — endptr-checked `strtoll` ([ADR-00287](../adr/ADR-00287.md))<br>• With radix omitted, auto-detects base 16 for a `"0x"`/`"0X"` prefix and base 10 otherwise — no octal auto-detect ([ADR-00530](../adr/ADR-00530.md)) |
 | `Number.parseFloat(s)` | ✅ | | • A `"0x10"` hex prefix reads only its leading `0` → `0` (real parseFloat, unlike `Number("0x10")` → `16`) via `__kml_strtod_parsefloat` ([ADR-00545](../adr/ADR-00545.md))<br>• A no-conversion input returns a real `NaN` via the endptr check; only the exact word `"Infinity"` parses to `Infinity` (`"inf"` → `NaN`) ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md)) |

@@ -7,9 +7,10 @@
 // back, and waitpid()/kill() work through a pid→handle table. Argument
 // quoting follows libuv's make_program_args (the rules cmd.exe and the
 // MSVCRT argv parser agree on). Signals: process.on('SIGINT') is a console
-// control handler (Ctrl+C and Ctrl+Break both arrive as SIGINT, as in
-// Node); a 'SIGTERM' listener is accepted but never fires, since nothing on
-// Windows delivers SIGTERM; SIGWINCH has no console equivalent.
+// control handler (Ctrl+C is SIGINT, Ctrl+Break SIGBREAK, as in Node); a
+// 'SIGTERM' listener is accepted but never fires, since nothing on Windows
+// delivers SIGTERM; SIGWINCH comes from a console-size watcher thread, the
+// console having no resize notification of its own.
 #define NO_OLDNAMES 1
 #define WIN32_LEAN_AND_MEAN
 #ifndef _WIN32_WINNT
@@ -195,11 +196,201 @@ static int is_self_spawn(const char *file, char **argv) {
 	return match;
 }
 
+// ---- child environment block + program search (libuv's process.c) ---------------------
+// env_key_len is the length of an entry's name. A leading '=' belongs to the
+// name: the hidden per-drive "=C:=C:\dir" variables.
+static size_t env_key_len(const wchar_t *e) {
+	const wchar_t *eq = wcschr(e[0] == L'=' ? e + 1 : e, L'=');
+	return eq ? (size_t)(eq - e) : wcslen(e);
+}
+static int env_key_cmp(const wchar_t *a, size_t an, const wchar_t *b, size_t bn) {
+	int r = CompareStringOrdinal(a, (int)an, b, (int)bn, TRUE);
+	return r == CSTR_LESS_THAN ? -1 : r == CSTR_GREATER_THAN ? 1 : 0;
+}
+static int env_entry_cmp(const void *pa, const void *pb) {
+	const wchar_t *a = *(const wchar_t *const *)pa, *b = *(const wchar_t *const *)pb;
+	return env_key_cmp(a, env_key_len(a), b, env_key_len(b));
+}
+
+// build_env_block assembles the child's environment the way libuv's
+// make_program_env does. The entries are either `custom` (a NULL-terminated
+// UTF-8 "KEY=val" list that REPLACES the parent's, ADR-00762) or the parent's
+// own block, plus this shim's `markers`. The list is de-duplicated
+// case-insensitively, first spelling winning (Node does this before libuv sees
+// it); the variables Windows programs cannot start without are carried over from
+// the parent when a custom list omits them; and the block is sorted by name,
+// case-insensitively, which CreateProcessW documents as a requirement. Returns a
+// malloc'd double-NUL block, or NULL to inherit the parent's block untouched.
+static wchar_t *build_env_block(char **custom, const wchar_t **markers, int nmarkers) {
+	static const wchar_t *required[] = {
+		L"HOMEDRIVE", L"HOMEPATH", L"LOGONSERVER", L"PATH", L"SYSTEMDRIVE", L"SYSTEMROOT",
+		L"TEMP", L"USERDOMAIN", L"USERNAME", L"USERPROFILE", L"WINDIR",
+	};
+	enum { NREQ = sizeof required / sizeof required[0] };
+	if (!custom && !nmarkers) return NULL;
+	int ncustom = 0;
+	if (custom) while (custom[ncustom]) ncustom++;
+	wchar_t *parent = GetEnvironmentStringsW();
+	int nparent = 0;
+	if (!custom && parent) for (wchar_t *q = parent; *q; q += wcslen(q) + 1) nparent++;
+	int cap = ncustom + nparent + nmarkers + NREQ + 1;
+	wchar_t **ent = (wchar_t **)calloc((size_t)cap, sizeof *ent);
+	char *owned = (char *)calloc((size_t)cap, 1); // entries this function malloc'd
+	if (!ent || !owned) { free(ent); free(owned); if (parent) FreeEnvironmentStringsW(parent); return NULL; }
+	int n = 0;
+	// Markers first so that, under first-wins de-duplication, they override a
+	// same-named entry from either source.
+	for (int i = 0; i < nmarkers; i++) ent[n++] = (wchar_t *)markers[i];
+	for (int i = 0; i < ncustom; i++) {
+		wchar_t *w = wide_alloc(custom[i]);
+		if (!w) continue;
+		if (!wcschr(w[0] == L'=' ? w + 1 : w, L'=')) { free(w); continue; } // not KEY=val
+		owned[n] = 1; ent[n++] = w;
+	}
+	if (!custom && parent) for (wchar_t *q = parent; *q; q += wcslen(q) + 1) ent[n++] = q;
+	// De-duplicate, first occurrence wins.
+	int m = 0;
+	for (int i = 0; i < n; i++) {
+		int dup = 0;
+		size_t kl = env_key_len(ent[i]);
+		for (int j = 0; j < m && !dup; j++) dup = env_key_cmp(ent[i], kl, ent[j], env_key_len(ent[j])) == 0;
+		if (dup) { if (owned[i]) free(ent[i]); continue; }
+		ent[m] = ent[i]; owned[m] = owned[i]; m++;
+	}
+	n = m;
+	if (custom) {
+		for (int r = 0; r < NREQ; r++) {
+			size_t rl = wcslen(required[r]);
+			int have = 0;
+			for (int j = 0; j < n && !have; j++) have = env_key_cmp(required[r], rl, ent[j], env_key_len(ent[j])) == 0;
+			if (have) continue;
+			DWORD vn = GetEnvironmentVariableW(required[r], NULL, 0);
+			if (!vn) continue; // the parent has none either
+			wchar_t *e = (wchar_t *)malloc((rl + 1 + vn + 1) * sizeof(wchar_t));
+			if (!e) continue;
+			memcpy(e, required[r], rl * sizeof(wchar_t));
+			e[rl] = L'=';
+			GetEnvironmentVariableW(required[r], e + rl + 1, vn);
+			owned[n] = 1; ent[n++] = e;
+		}
+	}
+	// qsort moves the pointers, so remember which to free by value.
+	wchar_t **tofree = (wchar_t **)calloc((size_t)n + 1, sizeof *tofree);
+	int nfree = 0;
+	if (tofree) for (int i = 0; i < n; i++) if (owned[i]) tofree[nfree++] = ent[i];
+	qsort(ent, (size_t)n, sizeof *ent, env_entry_cmp);
+	size_t total = 1;
+	for (int i = 0; i < n; i++) total += wcslen(ent[i]) + 1;
+	wchar_t *block = (wchar_t *)malloc((total + 1) * sizeof(wchar_t));
+	if (block) {
+		wchar_t *p = block;
+		for (int i = 0; i < n; i++) { size_t l = wcslen(ent[i]) + 1; memcpy(p, ent[i], l * sizeof(wchar_t)); p += l; }
+		if (n == 0) *p++ = 0; // an empty block is two NULs
+		*p = 0;
+	}
+	for (int i = 0; i < nfree; i++) free(tofree[i]);
+	free(tofree); free(ent); free(owned);
+	if (parent) FreeEnvironmentStringsW(parent);
+	return block;
+}
+
+// block_lookup finds NAME in a double-NUL environment block (NULL if absent).
+static const wchar_t *block_lookup(const wchar_t *block, const wchar_t *name) {
+	size_t nl = wcslen(name);
+	for (const wchar_t *q = block; q && *q; q += wcslen(q) + 1)
+		if (env_key_cmp(q, env_key_len(q), name, nl) == 0) return q + nl + 1;
+	return NULL;
+}
+
+static int is_regular_file(const wchar_t *path) {
+	DWORD a = GetFileAttributesW(path);
+	return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// try_in_dir probes dir\name[.com|.exe] in libuv's order: the name as given
+// first when it already carries an extension, then with each of the two
+// extensions CreateProcess itself can start. Batch files are deliberately not
+// searched for: without a shell they are refused (CVE-2024-27980). Returns a
+// malloc'd path or NULL.
+static wchar_t *try_in_dir(const wchar_t *dir, size_t dirlen, const wchar_t *name, int has_ext) {
+	static const wchar_t *exts[] = { L"", L".com", L".exe" };
+	size_t nl = wcslen(name);
+	wchar_t *buf = (wchar_t *)malloc((dirlen + 1 + nl + 5) * sizeof(wchar_t));
+	if (!buf) return NULL;
+	for (int i = has_ext ? 0 : 1; i < 3; i++) {
+		size_t o = 0;
+		if (dirlen) {
+			memcpy(buf, dir, dirlen * sizeof(wchar_t)); o = dirlen;
+			if (buf[o - 1] != L'\\' && buf[o - 1] != L'/' && buf[o - 1] != L':') buf[o++] = L'\\';
+		}
+		memcpy(buf + o, name, nl * sizeof(wchar_t)); o += nl;
+		wcscpy(buf + o, exts[i]);
+		if (is_regular_file(buf)) return buf;
+	}
+	free(buf);
+	return NULL;
+}
+
+// search_program resolves argv[0] to the executable the child will run, as
+// libuv's search_path does — against the CHILD's working directory and the
+// CHILD's PATH (a custom `env` redirects the lookup, which CreateProcessW's own
+// search, keyed on the parent, cannot honour). A name with a directory part is
+// looked up there only; a bare name is tried in the working directory and then
+// along PATH. NULL when nothing matches (the spawn then fails ENOENT).
+static wchar_t *search_program(const wchar_t *file, const wchar_t *cwd, const wchar_t *path) {
+	size_t fl = wcslen(file);
+	if (fl == 0 || file[fl - 1] == L'\\' || file[fl - 1] == L'/' || file[fl - 1] == L':') return NULL;
+	const wchar_t *base = file + fl;
+	while (base > file && base[-1] != L'\\' && base[-1] != L'/' && base[-1] != L':') base--;
+	const wchar_t *dot = wcsrchr(base, L'.');
+	int has_ext = dot && dot[1] != 0;
+	wchar_t *cwdbuf = NULL;
+	if (!cwd) {
+		cwdbuf = (wchar_t *)malloc(32768 * sizeof(wchar_t));
+		DWORD n = cwdbuf ? GetCurrentDirectoryW(32768, cwdbuf) : 0;
+		cwd = (n && n < 32768) ? cwdbuf : L".";
+	}
+	wchar_t *r = NULL;
+	if (base != file) {
+		// A directory part: absolute as is, otherwise relative to the child's cwd.
+		size_t dl = (size_t)(base - file);
+		int absolute = file[0] == L'\\' || file[0] == L'/' || (fl > 1 && file[1] == L':');
+		if (absolute) {
+			r = try_in_dir(file, dl, base, has_ext);
+		} else {
+			size_t cl = wcslen(cwd);
+			wchar_t *dir = (wchar_t *)malloc((cl + 1 + dl + 1) * sizeof(wchar_t));
+			if (dir) {
+				memcpy(dir, cwd, cl * sizeof(wchar_t));
+				size_t o = cl;
+				if (o && dir[o - 1] != L'\\' && dir[o - 1] != L'/') dir[o++] = L'\\';
+				memcpy(dir + o, file, dl * sizeof(wchar_t)); o += dl;
+				r = try_in_dir(dir, o, base, has_ext);
+				free(dir);
+			}
+		}
+		free(cwdbuf);
+		return r;
+	}
+	r = try_in_dir(cwd, wcslen(cwd), file, has_ext);
+	for (const wchar_t *d = path; !r && d && *d;) {
+		const wchar_t *end = d;
+		int quoted = 0;
+		while (*end && (quoted || *end != L';')) { if (*end == L'"') quoted = !quoted; end++; }
+		const wchar_t *ds = d; size_t dl = (size_t)(end - d);
+		if (dl >= 2 && ds[0] == L'"' && ds[dl - 1] == L'"') { ds++; dl -= 2; }
+		if (dl) r = try_in_dir(ds, dl, file, has_ext);
+		d = *end ? end + 1 : end;
+	}
+	free(cwdbuf);
+	return r;
+}
+
 // ---- spawn ------------------------------------------------------------------------------
 // __kml_win_spawn(file, argv, cwd, in_fd, out_fd, err_fd, inherit_fd, flags):
-// argv is NULL-terminated with argv[0] the program as Node passes it (a
-// PATH lookup like execvp's, plus the implicit .exe handling CreateProcess
-// does); in/out/err are the pipe ends the child owns as fds 0/1/2 (-1
+// file is the program, found by search_program (libuv's lookup against the
+// child's cwd and PATH); argv is NULL-terminated with argv[0] the name the
+// child sees; in/out/err are the pipe ends the child owns as fds 0/1/2 (-1
 // inherits ours); inherit_fd (-1 or a socket fd) reaches the child under
 // the same fd number, for cluster IPC. flags bit 0 is Node's
 // windowsVerbatimArguments: the arguments join with single spaces and no
@@ -207,7 +398,6 @@ static int is_self_spawn(const char *file, char **argv) {
 // libuv passes the command line through verbatim. Returns the pid, or -1
 // with errno set (ENOENT when CreateProcess cannot find the program).
 int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, int out_fd, int err_fd, int inherit_fd, int flags, char **spawn_env) {
-	(void)file;
 	int verbatim = flags & 1;
 	// flags bit 1 = windowsHide (CREATE_NO_WINDOW, ADR-00763); flags bit 2 =
 	// detached (DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP so the child has no
@@ -322,36 +512,26 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 	// POSIX side likewise marks only the child_process spawn sites, not execv of
 	// a cluster worker. Injected even when a custom spawn_env replaces the block.
 	if ((flags & 0x10000) && is_self_spawn(file, argv)) markers[nmarkers++] = L"KML_KLAIN_REEXEC=1";
-	size_t mlen = 0;
-	for (int i = 0; i < nmarkers; i++) mlen += wcslen(markers[i]) + 1;
-	if (spawn_env) {
-		// Each UTF-8 entry → wide (the wide count includes the terminating NUL,
-		// which is exactly the per-entry separator a double-NUL block wants).
-		size_t wtotal = 0;
-		int ne = 0;
-		for (; spawn_env[ne]; ne++) {
-			int wn = MultiByteToWideChar(CP_UTF8, 0, spawn_env[ne], -1, NULL, 0);
-			wtotal += (wn > 0 ? (size_t)wn : 1);
+	env = build_env_block(spawn_env, (const wchar_t **)markers, nmarkers);
+
+	// Resolve the program against the child's cwd and PATH (libuv's search), and
+	// hand CreateProcessW the result so its own parent-keyed search — which also
+	// looks in this executable's directory and the system directories first —
+	// never runs.
+	// `file` is the program to run (execvp's first argument); argv[0] is only
+	// what the child sees as its own name.
+	wchar_t *wfile = wide_alloc((file && *file) ? file : argv[0]);
+	wchar_t *parent_path = NULL;
+	const wchar_t *child_path = env ? block_lookup(env, L"PATH") : NULL;
+	if (!env) {
+		DWORD pn = GetEnvironmentVariableW(L"PATH", NULL, 0);
+		if (pn && (parent_path = (wchar_t *)malloc((pn + 1) * sizeof(wchar_t)))) {
+			GetEnvironmentVariableW(L"PATH", parent_path, pn);
+			child_path = parent_path;
 		}
-		env = (wchar_t *)malloc((wtotal + mlen + 1) * sizeof(wchar_t));
-		wchar_t *p = env;
-		for (int i = 0; i < ne; i++) {
-			int wn = MultiByteToWideChar(CP_UTF8, 0, spawn_env[i], -1, p, (int)(wtotal - (size_t)(p - env)));
-			p += (wn > 0 ? wn : 1);
-		}
-		for (int i = 0; i < nmarkers; i++) { size_t l = wcslen(markers[i]) + 1; memcpy(p, markers[i], l * sizeof(wchar_t)); p += l; }
-		*p = 0;
-	} else if (nmarkers) {
-		wchar_t *cur = GetEnvironmentStringsW();
-		size_t curlen = 0;
-		for (wchar_t *q = cur; *q; q += wcslen(q) + 1) curlen += wcslen(q) + 1;
-		env = (wchar_t *)malloc((curlen + mlen + 1) * sizeof(wchar_t));
-		memcpy(env, cur, curlen * sizeof(wchar_t));
-		wchar_t *p = env + curlen;
-		for (int i = 0; i < nmarkers; i++) { size_t l = wcslen(markers[i]) + 1; memcpy(p, markers[i], l * sizeof(wchar_t)); p += l; }
-		*p = 0;
-		FreeEnvironmentStringsW(cur);
 	}
+	wchar_t *app = wfile ? search_program(wfile, wcwd, child_path) : NULL;
+	free(wfile); free(parent_path);
 
 	// bInheritHandles=TRUE inherits EVERY inheritable handle in the process
 	// unless an explicit PROC_THREAD_ATTRIBUTE_HANDLE_LIST narrows it to
@@ -378,11 +558,11 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 
 	PROCESS_INFORMATION pi;
 	memset(&pi, 0, sizeof pi);
-	BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE,
+	BOOL ok = app && CreateProcessW(app, cmd, NULL, NULL, TRUE,
 	                         CREATE_UNICODE_ENVIRONMENT | create_flag | (attrok ? EXTENDED_STARTUPINFO_PRESENT : 0),
 	                         env, wcwd, &siex.StartupInfo, &pi);
-	DWORD err = GetLastError();
-	free(cmd); free(wcwd); free(env);
+	DWORD err = app ? GetLastError() : ERROR_FILE_NOT_FOUND;
+	free(app); free(cmd); free(wcwd); free(env);
 	if (attrok) DeleteProcThreadAttributeList(attrs);
 	free(attrs);
 	if (hin && hin != INVALID_HANDLE_VALUE) CloseHandle(hin);
@@ -450,6 +630,28 @@ __attribute__((constructor)) static void kml_win_adopt_inherited(void) {
 	_putenv("KML_WIN_INHERIT_FD=");
 }
 
+// A cluster worker does not outlive its primary: Node's worker exits when its
+// channel to the primary disconnects (process.exit(0) on 'disconnect'), and a
+// worker left behind keeps the listening port open through its inherited
+// handle. The hand-off channel's EOF is not the signal — a primary that closes
+// one server closes that channel too and lives on — so the worker waits on the
+// primary's process handle itself. A pid that no longer names the primary (it
+// died before this ran, or the number was reused by a process younger than this
+// one) counts as gone.
+static VOID CALLBACK kml_primary_gone(PVOID ctx, BOOLEAN timed_out) {
+	(void)ctx; (void)timed_out;
+	ExitProcess(0);
+}
+static void kml_watch_primary(DWORD pid) {
+	HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+	if (!h) ExitProcess(0);
+	FILETIME pc, mc, ex, kt, ut;
+	if (GetProcessTimes(h, &pc, &ex, &kt, &ut) && GetProcessTimes(GetCurrentProcess(), &mc, &ex, &kt, &ut) &&
+	    CompareFileTime(&pc, &mc) > 0) ExitProcess(0);
+	HANDLE wait;
+	if (!RegisterWaitForSingleObject(&wait, h, kml_primary_gone, NULL, INFINITE, WT_EXECUTEONLYONCE)) CloseHandle(h);
+}
+
 // Child side of the cluster-worker spawn: adopt every inherited listener under
 // the primary's fd number first (so no channel takes one of those numbers),
 // then give each its hand-off channel.
@@ -460,6 +662,7 @@ __attribute__((constructor)) static void kml_win_adopt_cluster(void) {
 	int fds[16], nbs[16], n = 0;
 	HANDLE chans[16];
 	kml_cluster_primary_pid = (DWORD)strtoul(buf, NULL, 10);
+	kml_watch_primary(kml_cluster_primary_pid);
 	char fb[64];
 	if (GetEnvironmentVariableA("KML_WIN_FLAG", fb, sizeof fb)) {
 		kml_flag_inherited = (HANDLE)(uintptr_t)strtoull(fb, NULL, 10);
@@ -610,7 +813,10 @@ int kill(int pid, int sig) {
 	// TerminateProcess(self) would instead kill the process before the handler
 	// could run. With no handler it falls through to the default terminate.
 	if ((DWORD)pid == GetCurrentProcessId() && kml_deliver_self_signal(sig)) return 0;
-	// Node on Windows: any signal terminates the target unconditionally.
+	// libuv's uv_kill: SIGTERM, SIGKILL, SIGINT and SIGQUIT terminate the target
+	// unconditionally; any other signal has no Windows meaning and is ENOSYS
+	// (Node throws `kill ENOSYS`), rather than silently killing the process.
+	if (sig != 15 && sig != 9 && sig != 2 && sig != 3) { errno = L_ENOSYS; return -1; }
 	kml_proc *pr = proc_slot((DWORD)pid, 0);
 	// A child this process already reaped is gone: ESRCH from the table,
 	// never OpenProcess(pid) — the pid may belong to an unrelated process

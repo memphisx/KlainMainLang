@@ -410,6 +410,8 @@ typedef struct kfd_desc {
 	// ---- cluster round-robin (a listener shared with re-spawned workers) ----
 	struct kfd_rr *rr;       // primary: the workers this listener's connections rotate over
 	int rr_chan;             // worker: the fd connections arrive on from the primary (0 = none)
+	unsigned char npipe;     // KFD_PIPE: a named pipe reached through the socket API (net.connect({ path }))
+	unsigned char npipe_eof; // its handle was released by shutdown(): reads are end-of-file, writes EPIPE
 	// rd_op (above) doubles as the socket zero-read op.
 } kfd_desc;
 // The fd table. kfd_tab[fd] points at the pooled description an fd refers to;
@@ -1086,9 +1088,15 @@ static void kfd_wq_pump(kfd_desc *d) {
 		DWORD n = 0;
 		if (!WriteFile(kfd_desc_handle(d), op->buf, op->len, &n, &op->ov)) {
 			if (GetLastError() == ERROR_IO_PENDING) { d->wr_op = op; return; }
-			// Broken pipe: drop the payload, as a POSIX write would EPIPE —
-			// the reader is gone; nothing can observe the bytes either way.
+		} else if (d->npipe) {
+			// A duplex handle keeps the default notification mode (its read side
+			// counts on a packet for every completion), so a write that finished
+			// synchronously still has its packet coming: the drain owns the op.
+			d->wr_op = op;
+			return;
 		}
+		// Done at once, or a broken pipe: drop the payload, as a POSIX write
+		// would EPIPE — the reader is gone; nothing can observe the bytes either way.
 		op_free(op);
 	}
 }
@@ -1710,8 +1718,78 @@ static int kfd_connectex(int fd, const void *addr, int len) {
 	return -1;
 }
 
+// ---- named pipes behind net.connect({ path }) -----------------------------------
+// Node's IPC path on Windows is a named pipe (`\\.\pipe\name` or `\\?\pipe\name`),
+// not a Unix-domain socket: that is what every Windows service and tool that
+// speaks "local socket" listens on. The IR stays host-agnostic — it makes an
+// AF_UNIX stream socket and connect()s it to a sockaddr_un — so the mapping
+// happens here: a connect whose path is in the pipe namespace opens the pipe
+// overlapped and turns the description into a duplex overlapped pipe end, the
+// same kind a child's stdio pipe is, served by the same zero-read / queued-write
+// machinery. Any other path stays a real AF_UNIX socket.
+static int is_pipe_namespace(const char *p) {
+	if (!p || p[0] != '\\' || p[1] != '\\' || (p[2] != '.' && p[2] != '?') || p[3] != '\\') return 0;
+	return (p[4] == 'p' || p[4] == 'P') && (p[5] == 'i' || p[5] == 'I') &&
+	       (p[6] == 'p' || p[6] == 'P') && (p[7] == 'e' || p[7] == 'E') && p[8] == '\\' && p[9] != 0;
+}
+
+// 0 = connected (the pipe handle is open, so there is no in-progress state),
+// -1 = errno set and fd still the socket it was, so the caller's error path can
+// close it as usual.
+static int kfd_pipe_connect(int fd, const char *path) {
+	int wn = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+	wchar_t *w = wn > 0 ? (wchar_t *)malloc((size_t)wn * sizeof(wchar_t)) : NULL;
+	if (!w) { errno = L_ENOMEM; return -1; }
+	MultiByteToWideChar(CP_UTF8, 0, path, -1, w, wn);
+	HANDLE h = INVALID_HANDLE_VALUE;
+	DWORD err = 0;
+	// Every instance busy is transient: a server is between accepting one client
+	// and offering the next instance. libuv waits for one (up to 30 s, on a
+	// worker thread); a bounded wait here covers the same window.
+	for (int tries = 0; tries < 3; tries++) {
+		h = CreateFileW(w, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+		if (h != INVALID_HANDLE_VALUE) break;
+		err = GetLastError();
+		if (err != ERROR_PIPE_BUSY || !WaitNamedPipeW(w, 2000)) break;
+	}
+	free(w);
+	if (h == INVALID_HANDLE_VALUE) {
+		errno = err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND || err == ERROR_BAD_PATHNAME ? L_ENOENT
+		      : err == ERROR_ACCESS_DENIED ? L_EACCES
+		      : err == ERROR_PIPE_BUSY || err == ERROR_SEM_TIMEOUT ? L_ETIMEDOUT
+		      : L_ECONNREFUSED;
+		return -1;
+	}
+	kfd_desc *k = KD(fd);
+	kfd_cancel_sock_ops(fd);
+	if (k->sock && p_closesocket) p_closesocket(k->sock);
+	k->sock = 0;
+	k->sock_port = NULL;
+	k->emul = 0;
+	k->kind = KFD_PIPE;
+	k->h = h;
+	k->ovl = 1;     // writes queue as overlapped WriteFiles
+	k->ovl_rd = 1;  // reads are readiness-driven off a zero-read
+	k->npipe = 1;
+	k->connected = 1;
+	// One association, made here for both directions, in the sockets' style: no
+	// FILE_SKIP_COMPLETION_PORT_ON_SUCCESS, which the write-only pipe ends use
+	// and which would swallow the packet of a zero-read that completes at once
+	// (data already waiting) — leaving the descriptor never readable.
+	if (CreateIoCompletionPort(h, kml_port_get(), 1 /* KEY_OP */, 0)) {
+		k->sock_port = kml_port_get();
+		k->assoc = 1;
+	}
+	k->rd_ready = k->wr_ready = k->ex_ready = 0;
+	return 0;
+}
+
 int connect(int fd, const void *addr, int len) {
+	if (fd >= 0 && fd < KFD_MAX && KD(fd)->kind == KFD_PIPE && KD(fd)->npipe) { errno = L_EISCONN; return -1; }
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
+	// sockaddr_un: a 2-byte family, then the NUL-terminated path.
+	if (addr && len > 2 && *(const unsigned short *)addr == 1 /* AF_UNIX */ && is_pipe_namespace((const char *)addr + 2))
+		return kfd_pipe_connect(fd, (const char *)addr + 2);
 	if (KD(fd)->conn_op) {
 		// Give a just-completed ConnectEx the chance to be seen before answering.
 		if (kml_port) kml_port_drain(0);
@@ -1739,21 +1817,50 @@ int connect(int fd, const void *addr, int len) {
 	errno = map_wsa_errno(e);
 	return -1;
 }
+// The socket-API calls a net.Socket makes on its descriptor, once that
+// descriptor is a named pipe. A pipe has no half-close: libuv's shutdown drains
+// the writes and then lets the handle go (its EOF timer), which is how the peer
+// learns the stream ended. After that this end reads as end-of-file.
+static int kfd_is_npipe(int fd) { return fd >= 0 && fd < KFD_MAX && KD(fd)->kind == KFD_PIPE && KD(fd)->npipe; }
+static int kfd_npipe_shutdown(int fd, int how) {
+	if (how == 0 /* SHUT_RD */) return 0;
+	kfd_desc *k = KD(fd);
+	if (!k->h) return 0;
+	if (k->wr_op || k->wq_head) kfd_wq_flush(fd);
+	if (k->rd_op) { CancelIoEx(k->h, &k->rd_op->ov); k->rd_op = NULL; }
+	HANDLE h = k->h;
+	k->h = NULL;
+	k->assoc = 0;
+	k->npipe_eof = 1;
+	k->rd_ready = 1;
+	CloseHandle(h);
+	return 0;
+}
 int shutdown(int fd, int how) {
+	if (kfd_is_npipe(fd)) return kfd_npipe_shutdown(fd, how);
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
 	if (io_trace()) fprintf(stderr, "[io] shutdown fd=%d how=%d\n", fd, how);
 	return p_shutdown(kfd_sock(fd), how) == 0 ? 0 : set_wsa_errno();
 }
+// A pipe has no address; the socket API still has to answer for one. AF_UNIX
+// with an empty path is what an unbound Unix-domain socket reports.
+static int kfd_npipe_name(void *addr, int *len) {
+	if (addr && len && *len >= 2) { *(unsigned short *)addr = 1; *len = 2; }
+	return 0;
+}
 int getsockname(int fd, void *addr, int *len) {
+	if (kfd_is_npipe(fd)) return kfd_npipe_name(addr, len);
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
 	return p_getsockname(kfd_sock(fd), addr, len) == 0 ? 0 : set_wsa_errno();
 }
 int getpeername(int fd, void *addr, int *len) {
+	if (kfd_is_npipe(fd)) return kfd_npipe_name(addr, len);
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
 	return p_getpeername(kfd_sock(fd), addr, len) == 0 ? 0 : set_wsa_errno();
 }
 
 int setsockopt(int fd, int level, int opt, const void *val, int len) {
+	if (kfd_is_npipe(fd)) return 0; // TCP_NODELAY/SO_KEEPALIVE mean nothing to a pipe; Node ignores them too
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
 	if (level == L_IPPROTO_TCP && opt == L_TCP_KEEPIDLE) {
 		// Windows has no TCP_KEEPIDLE (opt 4 is TCP_MAXSEG); libuv/Node set the
@@ -1790,12 +1897,41 @@ int setsockopt(int fd, int level, int opt, const void *val, int len) {
 			return 0;
 		case L_SO_KEEPALIVE: opt = WS_SO_KEEPALIVE; break;
 		case L_SO_BROADCAST: opt = WS_SO_BROADCAST; break;
+		// The Linux option numbers mean something else to Winsock (7 is not
+		// SO_SNDBUF there), and two options differ in representation too.
+		case 7: opt = 0x1001; break; // SO_SNDBUF
+		case 8: opt = 0x1002; break; // SO_RCVBUF
+		case 13: { // SO_LINGER: Linux {int l_onoff, l_linger} -> Winsock {u_short, u_short}
+			if (!val || len < 8) { errno = L_EINVAL; return -1; }
+			unsigned short wl[2] = { (unsigned short)(((const int *)val)[0] != 0), (unsigned short)((const int *)val)[1] };
+			return p_setsockopt(kfd_sock(fd), level, 0x0080, (const char *)wl, sizeof wl) == 0 ? 0 : set_wsa_errno();
+		}
+		case 20: case 21: { // SO_RCVTIMEO / SO_SNDTIMEO: struct timeval {i64 s, i64 us} -> DWORD ms
+			if (!val || len < 16) { errno = L_EINVAL; return -1; }
+			int64_t ms64 = ((const int64_t *)val)[0] * 1000 + ((const int64_t *)val)[1] / 1000;
+			unsigned long ms = ms64 < 0 ? 0 : ms64 > 0xffffffffLL ? 0xffffffffUL : (unsigned long)ms64;
+			return p_setsockopt(kfd_sock(fd), level, opt == 20 ? 0x1006 : 0x1005, (const char *)&ms, sizeof ms) == 0 ? 0 : set_wsa_errno();
+		}
 		default: break;
 		}
 	}
 	return p_setsockopt(kfd_sock(fd), level, opt, (const char *)val, len) == 0 ? 0 : set_wsa_errno();
 }
+
+// msg_flags translates the Linux MSG_* bits the C and IR callers use into
+// Winsock's: PEEK/OOB/DONTROUTE share values, WAITALL does not, and
+// NOSIGNAL/DONTWAIT have no Winsock bit (no SIGPIPE exists; non-blocking is a
+// property of the socket here).
+static int msg_flags(int f) {
+	int w = f & 0x7;           // MSG_OOB 1, MSG_PEEK 2, MSG_DONTROUTE 4
+	if (f & 0x100) w |= 0x8;   // MSG_WAITALL
+	return w;
+}
 int getsockopt(int fd, int level, int opt, void *val, int *len) {
+	if (kfd_is_npipe(fd)) { // SO_ERROR after the connect: it succeeded, or fd would still be a socket
+		if (val && len && *len >= 4) { *(int *)val = 0; *len = 4; }
+		return 0;
+	}
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
 	if (level == L_SOL_SOCKET) {
 		level = WS_SOL_SOCKET;
@@ -1822,13 +1958,13 @@ int getsockopt(int fd, int level, int opt, void *val, int *len) {
 
 int64_t recvfrom(int fd, void *buf, size_t n, int flags, void *addr, int *alen) {
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
-	KD(fd)->rd_ready = 0; // consumed; the next select() re-arms and re-learns it
-	int r = p_recvfrom(kfd_sock(fd), (char *)buf, (int)n, flags, addr, alen);
+	if (!(flags & 0x2)) KD(fd)->rd_ready = 0; // consumed (a MSG_PEEK leaves it); the next select() re-arms and re-learns it
+	int r = p_recvfrom(kfd_sock(fd), (char *)buf, (int)n, msg_flags(flags), addr, alen);
 	return r == WS_ERROR ? set_wsa_errno() : r;
 }
 int64_t sendto(int fd, const void *buf, size_t n, int flags, const void *addr, int alen) {
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
-	int r = p_sendto(kfd_sock(fd), (const char *)buf, (int)n, flags, addr, alen);
+	int r = p_sendto(kfd_sock(fd), (const char *)buf, (int)n, msg_flags(flags), addr, alen);
 	return r == WS_ERROR ? set_wsa_errno() : r;
 }
 
@@ -2051,6 +2187,7 @@ static int io_trace(void) {
 
 int64_t read(int fd, void *buf, size_t n) {
 	if (fd < 0 || fd >= KFD_MAX) { errno = L_EBADF; return -1; }
+	if (KD(fd)->npipe_eof) return 0; // a shut-down named pipe: end-of-file
 	if (io_trace()) fprintf(stderr, "[io] %llu read fd=%d kind=%d nonblock=%d ovl=%d n=%zu\n", (unsigned long long)(GetTickCount64() % 100000), fd, KD(fd)->kind, KD(fd)->nonblock, KD(fd)->ovl, n);
 	if (KD(fd)->kind == KFD_SOCKET) {
 		if (KD(fd)->reset) return 0; // the EOF that follows a reported reset
@@ -2116,6 +2253,7 @@ int64_t read(int fd, void *buf, size_t n) {
 
 int64_t write(int fd, const void *buf, size_t n) {
 	if (fd < 0 || fd >= KFD_MAX) { errno = L_EBADF; return -1; }
+	if (KD(fd)->npipe_eof) { errno = L_EPIPE; return -1; } // written after its own shutdown()
 	if (KD(fd)->kind == KFD_SOCKET) {
 		int r = p_send(kfd_sock(fd), (const char *)buf, (int)n, 0);
 		if (io_trace()) fprintf(stderr, "[io] write fd=%d n=%zu -> %d (wsa %d)\n", fd, n, r, r == WS_ERROR && p_WSAGetLastError ? p_WSAGetLastError() : 0);
@@ -2606,6 +2744,8 @@ typedef struct kml_ucontext {
 	struct kml_ucontext *uc_link; // 24
 	void (*fn)(void);  // 32
 	int64_t argc;      // 40
+	void *park_lo;     // 48  the GC root registered while this context is parked
+	void *park_hi;     // 56
 } kml_ucontext;
 
 // A finished fiber, deleted on the next switch. Thread-local: the goroutine
@@ -2685,6 +2825,7 @@ static void reap_finished_fiber(void) {
 int getcontext(kml_ucontext *ctx) {
 	ensure_thread_is_fiber();
 	ctx->fiber = GetCurrentFiber();
+	ctx->park_lo = ctx->park_hi = NULL;
 	return 0;
 }
 
@@ -2702,19 +2843,38 @@ int swapcontext(kml_ucontext *from, kml_ucontext *to) {
 	if (!to->fiber) { errno = L_EINVAL; return -1; }
 	// The parked range is held in this frame — which lives on the very stack
 	// being parked, so it needs no bookkeeping elsewhere and cannot be lost.
+	// SwitchToFiber keeps the outgoing fiber's callee-saved registers in the
+	// fiber's own control block, which the collector never sees: a pointer the
+	// caller holds only in rbx/rsi/rdi/r12–r15 would be invisible for as long as
+	// this context is parked. Force them into this frame — above `probe`, so
+	// inside the registered range.
+	__builtin_unwind_init();
 	volatile char probe;
 	void *lo = (void *)((uintptr_t)&probe & ~(uintptr_t)15), *hi = kml_stack_base();
-	if (__kml_gc_root_add && lo < hi) __kml_gc_root_add(lo, hi);
+	from->park_lo = from->park_hi = NULL;
+	if (__kml_gc_root_add && lo < hi) { __kml_gc_root_add(lo, hi); from->park_lo = lo; from->park_hi = hi; }
 	SwitchToFiber(to->fiber);
 	// Back on `from`, on its own stack again: it is scanned as the running
 	// stack from here on, so drop the parked-root registration first.
 	if (__kml_gc_root_remove && lo < hi) __kml_gc_root_remove(lo, hi);
+	from->park_lo = from->park_hi = NULL;
 	kml_fiber_gc_resumed();
 	// Reap whatever finished while we were away.
 	reap_finished_fiber();
 	return 0;
 }
 
+// A coroutine that finished by switching away (it never returns through
+// kml_fiber_tramp, so the reap above never sees it) is released by whoever
+// resumed it: drop the parked-stack root its last switch left registered —
+// that stack is about to be unmapped — and delete the fiber.
+void __kml_ctx_release(kml_ucontext *ctx) {
+	if (!ctx) return;
+	if (ctx->park_lo && __kml_gc_root_remove) __kml_gc_root_remove(ctx->park_lo, ctx->park_hi);
+	ctx->park_lo = ctx->park_hi = NULL;
+	if (ctx->fiber && ctx->fiber != GetCurrentFiber()) DeleteFiber(ctx->fiber);
+	ctx->fiber = NULL;
+}
 
 // ---- misc ---------------------------------------------------------------------
 int usleep(unsigned usec) { __kml_win_hr_sleep_us((int64_t)usec); return 0; }

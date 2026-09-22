@@ -1038,6 +1038,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			// (push growing/moving the buffer) writes the new data ptr/len back
 			// into these same header fields, so each iteration's reload observes
 			// it, exactly as the old two-alloca form did.
+			e.emitNotIterableGuard(id.Name, iterSym) // `for (… of undefined)`
 			dataPtrAlloca, lenAlloca = e.arrayDataLenSlots(iterSym)
 			elemTy = *iterSym.Ty.ElemType
 		case found && (iterSym.Ty.IsMap || iterSym.Ty.IsSet):
@@ -1062,6 +1063,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		switch {
 		case arrVal.Ty.IsArray && arrVal.Ty.ElemType != nil:
 			iterTaTy = arrVal.Ty
+			e.emitNotIterableValueGuard(s.Iterable, arrVal) // `for (… of o.tags)` with no array
 			elemTy = *arrVal.Ty.ElemType
 			dataPtrAlloca, lenAlloca = e.splitArrayAggregate(arrVal)
 		case arrVal.Ty.IsMap || arrVal.Ty.IsSet:

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -64,6 +65,38 @@ func applyTestModeEnv(em *llvm.Emitter) {
 	}
 }
 
+// sidecarArg returns what to hand clang for one embedded C runtime file: the
+// path of an object compiled once and shared by every test that needs it
+// (llvm.CSource.CachedObject, keyed by source + flags, under the temp root so
+// it follows KML_SCRATCH), instead of a fresh copy of the source recompiled for
+// each of the few thousand programs this suite builds. The code-generation
+// flags already on the caller's clang line (-O level, -fsanitize, -D, …) are
+// carried into that compile, so an ASan build gets an instrumented sidecar of
+// its own. cflags are the member's own flags; the caller still appends them to
+// the link line. If the object cannot be built, the source is written into dir
+// as before and clang reports the error through the normal path.
+func sidecarArg(t *testing.T, dir string, clangArgs []string, name, content string, cflags ...string) string {
+	t.Helper()
+	var compileFlags []string
+	for _, a := range clangArgs {
+		for _, p := range []string{"-O", "-f", "-g", "-D", "-m", "-std=", "-I", "-isystem"} {
+			if strings.HasPrefix(a, p) {
+				compileFlags = append(compileFlags, a)
+				break
+			}
+		}
+	}
+	cs := llvm.CSource{Name: strings.TrimSuffix(name, ".c"), Content: content, CFlags: cflags}
+	if obj, err := cs.CachedObject(filepath.Join(os.TempDir(), "klainmain-cobj"), compileFlags); err == nil {
+		return obj
+	}
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return p
+}
+
 // buildBinary compiles the given TypeScript source to a native binary and
 // returns its path. The test is skipped if clang is not available.
 func buildBinary(t *testing.T, src string) string {
@@ -96,9 +129,7 @@ func buildBinary(t *testing.T, src string) string {
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	if em.UsesFFIDl() {
-		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	}
+	clangArgs = appendFFIDl(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -122,12 +153,7 @@ func buildBinary(t *testing.T, src string) string {
 	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		if bigintUsed {
-			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
-		}
-		if cryptoUsed {
-			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
-		}
+		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	return binFile
@@ -141,6 +167,39 @@ func buildBinary(t *testing.T, src string) string {
 // vs. main.go). Skips (doesn't fail) if clang or the Boehm GC dev package
 // aren't available, so `go test ./...` stays green on a machine that hasn't
 // installed bdw-gc/libgc-dev.
+// missingDependencyRE matches the toolchain's own report that a library or a
+// header could not be resolved: GNU ld / lld / Apple ld for `-lNAME`, clang for
+// an `#include`.
+var missingDependencyRE = regexp.MustCompile(
+	`cannot find -l|library not found for -l|unable to find library -l|library '[^']+' not found|` +
+		`fatal error: '[^']+' file not found|fatal error: [^:\n]+: No such file or directory`)
+
+// dependencyMissing reports whether a failed clang run failed because a
+// library or header is not installed — the one failure an optional backend's
+// test may skip on. Anything else (invalid IR, an undefined symbol, a compile
+// error in a sidecar) is a bug in what is being tested and has to fail: a
+// blanket "the backend may not be installed" skip once hid eleven tests that
+// had never linked.
+func dependencyMissing(out []byte) bool {
+	return missingDependencyRE.Match(out)
+}
+
+// skipIfBackendMissing skips when an optional bigint/crypto backend is in use
+// and the link failed on a missing dependency; it returns otherwise, and the
+// caller fails the test.
+func skipIfBackendMissing(t *testing.T, em *llvm.Emitter, bigintUsed, cryptoUsed bool, err error, out []byte) {
+	t.Helper()
+	if !dependencyMissing(out) {
+		return
+	}
+	if bigintUsed {
+		t.Skipf("bigint backend %q is not installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+	}
+	if cryptoUsed {
+		t.Skipf("crypto backend %q is not installed: clang: %v\n%s", em.CryptoBackend(), err, out)
+	}
+}
+
 // appendBigIntBackend compiles+links the selected bigint backend C file into the
 // clang invocation when the program used bigint, mirroring main.go so the test
 // build and the real build can't drift (the same rationale ADR-00020 applies to
@@ -153,12 +212,9 @@ func appendBigIntBackend(t *testing.T, em *llvm.Emitter, dir string, clangArgs [
 	}
 	backend := em.BigIntBackend()
 	src, _ := llvm.BigIntBackendSource(backend)
-	biFile := filepath.Join(dir, "bigint.c")
-	if err := os.WriteFile(biFile, []byte(src), 0644); err != nil {
-		t.Fatalf("write bigint backend: %v", err)
-	}
-	clangArgs = append(clangArgs, biFile)
 	cflags, libs := llvm.LocateBigInt(backend)
+	biFile := sidecarArg(t, dir, clangArgs, "bigint.c", src, cflags...)
+	clangArgs = append(clangArgs, biFile)
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
 	return clangArgs, true
@@ -177,12 +233,9 @@ func appendTLSBackend(t *testing.T, em *llvm.Emitter, dir string, clangArgs []st
 	if !em.UsesTLS() {
 		return clangArgs
 	}
-	tlsFile := filepath.Join(dir, "tls.c")
-	if err := os.WriteFile(tlsFile, []byte(llvm.TLSClientSource()), 0644); err != nil {
-		t.Fatalf("write tls helper: %v", err)
-	}
-	clangArgs = append(clangArgs, tlsFile)
 	cflags, libs := llvm.LocateTLS()
+	tlsFile := sidecarArg(t, dir, clangArgs, "tls.c", llvm.TLSClientSource(), cflags...)
+	clangArgs = append(clangArgs, tlsFile)
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
 	return clangArgs
@@ -196,12 +249,9 @@ func appendHTTP2Backend(t *testing.T, em *llvm.Emitter, dir string, clangArgs []
 	if !em.UsesHTTP2() {
 		return clangArgs
 	}
-	h2File := filepath.Join(dir, "http2.c")
-	if err := os.WriteFile(h2File, []byte(llvm.HTTP2ServerSource()), 0644); err != nil {
-		t.Fatalf("write http2 helper: %v", err)
-	}
-	clangArgs = append(clangArgs, h2File)
 	cflags, libs := llvm.LocateHTTP2()
+	h2File := sidecarArg(t, dir, clangArgs, "http2.c", llvm.HTTP2ServerSource(), cflags...)
+	clangArgs = append(clangArgs, h2File)
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
 	return clangArgs
@@ -214,12 +264,9 @@ func appendCryptoBackend(t *testing.T, em *llvm.Emitter, dir string, clangArgs [
 	}
 	backend := em.CryptoBackend()
 	src, _ := llvm.CryptoBackendSource(backend)
-	crFile := filepath.Join(dir, "crypto.c")
-	if err := os.WriteFile(crFile, []byte(src), 0644); err != nil {
-		t.Fatalf("write crypto backend: %v", err)
-	}
-	clangArgs = append(clangArgs, crFile)
 	cflags, libs := llvm.LocateCrypto(backend)
+	crFile := sidecarArg(t, dir, clangArgs, "crypto.c", src, cflags...)
+	clangArgs = append(clangArgs, crFile)
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
 	return clangArgs, true
@@ -234,10 +281,7 @@ func appendJSONParseTree(t *testing.T, em *llvm.Emitter, dir string, clangArgs [
 	if !em.UsesJSONParse() {
 		return clangArgs
 	}
-	jsonFile := filepath.Join(dir, "jsontree.c")
-	if err := os.WriteFile(jsonFile, []byte(llvm.JSONParseTreeSource()), 0644); err != nil {
-		t.Fatalf("write JSON parse-tree source: %v", err)
-	}
+	jsonFile := sidecarArg(t, dir, clangArgs, "jsontree.c", llvm.JSONParseTreeSource())
 	return append(clangArgs, jsonFile)
 }
 
@@ -250,10 +294,7 @@ func appendDynJSON(t *testing.T, em *llvm.Emitter, dir string, clangArgs []strin
 	if !em.UsesDynJSON() {
 		return clangArgs
 	}
-	djFile := filepath.Join(dir, "dynjson.c")
-	if err := os.WriteFile(djFile, []byte(llvm.DynJSONSource()), 0644); err != nil {
-		t.Fatalf("write dynjson source: %v", err)
-	}
+	djFile := sidecarArg(t, dir, clangArgs, "dynjson.c", llvm.DynJSONSource())
 	return append(clangArgs, djFile)
 }
 
@@ -266,10 +307,7 @@ func appendBufferCodecs(t *testing.T, em *llvm.Emitter, dir string, clangArgs []
 	if !em.UsesBufferCodecs() {
 		return clangArgs
 	}
-	bcFile := filepath.Join(dir, "bufcodecs.c")
-	if err := os.WriteFile(bcFile, []byte(llvm.BufferCodecsSource()), 0644); err != nil {
-		t.Fatalf("write Buffer codec source: %v", err)
-	}
+	bcFile := sidecarArg(t, dir, clangArgs, "bufcodecs.c", llvm.BufferCodecsSource())
 	return append(clangArgs, bcFile)
 }
 
@@ -282,10 +320,7 @@ func appendURLPattern(t *testing.T, em *llvm.Emitter, dir string, clangArgs []st
 	if !em.UsesURLPattern() {
 		return clangArgs
 	}
-	upFile := filepath.Join(dir, "urlpattern.c")
-	if err := os.WriteFile(upFile, []byte(llvm.URLPatternSource()), 0644); err != nil {
-		t.Fatalf("write URLPattern runtime source: %v", err)
-	}
+	upFile := sidecarArg(t, dir, clangArgs, "urlpattern.c", llvm.URLPatternSource())
 	return append(clangArgs, upFile)
 }
 
@@ -294,10 +329,7 @@ func appendURLSearchParams(t *testing.T, em *llvm.Emitter, dir string, clangArgs
 	if !em.UsesURLSearchParams() {
 		return clangArgs
 	}
-	f := filepath.Join(dir, "urlsearchparams.c")
-	if err := os.WriteFile(f, []byte(llvm.URLSearchParamsSource()), 0644); err != nil {
-		t.Fatalf("write URLSearchParams runtime source: %v", err)
-	}
+	f := sidecarArg(t, dir, clangArgs, "urlsearchparams.c", llvm.URLSearchParamsSource())
 	return append(clangArgs, f)
 }
 
@@ -311,10 +343,7 @@ func appendPathWin32(t *testing.T, em *llvm.Emitter, dir string, clangArgs []str
 	if !em.UsesPathWin32() {
 		return clangArgs
 	}
-	pwFile := filepath.Join(dir, "pathwin32.c")
-	if err := os.WriteFile(pwFile, []byte(llvm.PathWin32Source()), 0644); err != nil {
-		t.Fatalf("write path.win32 source: %v", err)
-	}
+	pwFile := sidecarArg(t, dir, clangArgs, "pathwin32.c", llvm.PathWin32Source())
 	return append(clangArgs, pwFile)
 }
 
@@ -326,11 +355,24 @@ func appendDtoa(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) 
 	if !em.UsesFloatFmt() {
 		return clangArgs
 	}
-	dtoaFile := filepath.Join(dir, "dtoa.c")
-	if err := os.WriteFile(dtoaFile, []byte(llvm.DtoaSource()), 0644); err != nil {
-		t.Fatalf("write dtoa source: %v", err)
-	}
+	dtoaFile := sidecarArg(t, dir, clangArgs, "dtoa.c", llvm.DtoaSource())
 	return append(clangArgs, dtoaFile)
+}
+
+// appendFFIDl adds node:ffi's libdl link flags and, on Windows (no libdl),
+// the LoadLibrary-backed dlopen/dlsym shim — mirroring embedded_c.go so the
+// test build and the real build can't drift.
+func appendFFIDl(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesFFIDl() {
+		return clangArgs
+	}
+	clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
+	if runtime.GOOS == "windows" {
+		shim := sidecarArg(t, dir, clangArgs, "ffiwindl.c", llvm.FFIWinDlShimSource())
+		clangArgs = append(clangArgs, shim)
+	}
+	return clangArgs
 }
 
 // appendSpawnSync compiles the blocking child_process *Sync C file
@@ -339,27 +381,18 @@ func appendDtoa(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) 
 func appendSpawnSync(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
 	t.Helper()
 	if em.UsesSpawnSync() {
-		ssFile := filepath.Join(dir, "spawnsync.c")
-		if err := os.WriteFile(ssFile, []byte(llvm.SpawnSyncSource()), 0644); err != nil {
-			t.Fatalf("write spawnsync source: %v", err)
-		}
+		ssFile := sidecarArg(t, dir, clangArgs, "spawnsync.c", llvm.SpawnSyncSource())
 		clangArgs = append(clangArgs, ssFile)
 	}
 	// The self-spawn fork-chain guard C helper (ADR-00972), shared by the sync
 	// and async spawn paths.
 	if em.UsesReexecGuard() {
-		rgFile := filepath.Join(dir, "reexecguard.c")
-		if err := os.WriteFile(rgFile, []byte(llvm.ReexecGuardSource()), 0644); err != nil {
-			t.Fatalf("write reexecguard source: %v", err)
-		}
+		rgFile := sidecarArg(t, dir, clangArgs, "reexecguard.c", llvm.ReexecGuardSource())
 		clangArgs = append(clangArgs, rgFile)
 	}
 	// The fork IPC framing C (TDD-00141) rides the same helper.
 	if em.UsesIPC() {
-		ipcFile := filepath.Join(dir, "ipc.c")
-		if err := os.WriteFile(ipcFile, []byte(llvm.IPCSource()), 0644); err != nil {
-			t.Fatalf("write ipc source: %v", err)
-		}
+		ipcFile := sidecarArg(t, dir, clangArgs, "ipc.c", llvm.IPCSource())
 		clangArgs = append(clangArgs, ipcFile)
 	}
 	return clangArgs
@@ -409,10 +442,7 @@ func appendSync(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) 
 	if !em.UsesSync() {
 		return clangArgs
 	}
-	syncFile := filepath.Join(dir, "klainsync.c")
-	if err := os.WriteFile(syncFile, []byte(llvm.SyncSource()), 0644); err != nil {
-		t.Fatalf("write klainsync runtime: %v", err)
-	}
+	syncFile := sidecarArg(t, dir, clangArgs, "klainsync.c", llvm.SyncSource(), "-pthread", "-Wno-deprecated-declarations")
 	return append(clangArgs, "-pthread", "-Wno-deprecated-declarations", syncFile)
 }
 
@@ -424,10 +454,7 @@ func appendThreadPool(t *testing.T, em *llvm.Emitter, dir string, clangArgs []st
 	if !em.UsesThreadPool() {
 		return clangArgs
 	}
-	poolFile := filepath.Join(dir, "klainpool.c")
-	if err := os.WriteFile(poolFile, []byte(llvm.ThreadPoolSource()), 0644); err != nil {
-		t.Fatalf("write threadpool runtime: %v", err)
-	}
+	poolFile := sidecarArg(t, dir, clangArgs, "klainpool.c", llvm.ThreadPoolSource(), em.ThreadPoolCFlags()...)
 	clangArgs = append(clangArgs, em.ThreadPoolCFlags()...)
 	return append(clangArgs, poolFile)
 }
@@ -437,10 +464,7 @@ func appendProcMem(t *testing.T, em *llvm.Emitter, dir string, clangArgs []strin
 	if !em.UsesHeapStats() {
 		return clangArgs
 	}
-	pmFile := filepath.Join(dir, "procmem.c")
-	if err := os.WriteFile(pmFile, []byte(llvm.ProcMemSource()), 0644); err != nil {
-		t.Fatalf("write procmem shim: %v", err)
-	}
+	pmFile := sidecarArg(t, dir, clangArgs, "procmem.c", llvm.ProcMemSource())
 	// This harness always builds in the default (non-gc) allocator mode, so the
 	// Darwin/glibc allocator-stats branch is what compiles here; the -mm=gc
 	// (KLAIN_GC) branch is exercised through the CLI / make examples path.
@@ -452,10 +476,7 @@ func appendOSHomedirPw(t *testing.T, em *llvm.Emitter, dir string, clangArgs []s
 	if !em.UsesOSHomedirPw() {
 		return clangArgs
 	}
-	pwFile := filepath.Join(dir, "oshomedirpw.c")
-	if err := os.WriteFile(pwFile, []byte(llvm.OSHomedirPwSource()), 0644); err != nil {
-		t.Fatalf("write os.homedir passwd shim: %v", err)
-	}
+	pwFile := sidecarArg(t, dir, clangArgs, "oshomedirpw.c", llvm.OSHomedirPwSource())
 	return append(clangArgs, pwFile)
 }
 
@@ -464,10 +485,7 @@ func appendTty(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) [
 	if !em.UsesTtyShim() {
 		return clangArgs
 	}
-	ttyFile := filepath.Join(dir, "tty.c")
-	if err := os.WriteFile(ttyFile, []byte(llvm.TTYShimSource()), 0644); err != nil {
-		t.Fatalf("write tty shim: %v", err)
-	}
+	ttyFile := sidecarArg(t, dir, clangArgs, "tty.c", llvm.TTYShimSource())
 	return append(clangArgs, ttyFile)
 }
 
@@ -530,9 +548,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 	clangArgs := []string{"-O2", llFile, shimFile, "-o", binFile}
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
-	if em.UsesFFIDl() {
-		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	}
+	clangArgs = appendFFIDl(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -613,9 +629,7 @@ func buildBinaryFromFile(t *testing.T, srcFile string) string {
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	if em.UsesFFIDl() {
-		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	}
+	clangArgs = appendFFIDl(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -644,14 +658,9 @@ func buildBinaryFromFile(t *testing.T, srcFile string) string {
 	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		if bigintUsed {
-			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
-		}
-		if cryptoUsed {
-			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
-		}
-		if webviewUsed {
-			t.Skipf("webview dev packages may not be installed: clang: %v\n%s", err, out)
+		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
+		if webviewUsed && dependencyMissing(out) {
+			t.Skipf("webview dev packages are not installed: clang: %v\n%s", err, out)
 		}
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
@@ -668,10 +677,7 @@ func appendEmbedBlobs(t *testing.T, em *llvm.Emitter, dir string, clangArgs []st
 	}
 	// The embedded static-server C runtime (main.go links this via EmbeddedCSources;
 	// the test build path appends sources individually, so add it here).
-	eaFile := filepath.Join(dir, "embedassets.c")
-	if err := os.WriteFile(eaFile, []byte(llvm.EmbedAssetsSource()), 0644); err != nil {
-		t.Fatalf("write embed_assets.c: %v", err)
-	}
+	eaFile := sidecarArg(t, dir, clangArgs, "embedassets.c", llvm.EmbedAssetsSource(), "-pthread")
 	clangArgs = append(clangArgs, eaFile, "-pthread")
 	blobs, err := em.EmbeddedBlobs()
 	if err != nil {
@@ -737,9 +743,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 	clangArgs := []string{"-O2", llFile, shimFile, "-o", binFile}
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
-	if em.UsesFFIDl() {
-		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	}
+	clangArgs = appendFFIDl(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -919,9 +923,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 		"-fsanitize=address", "-fsanitize=undefined",
 		llFile, asanOptFile, "-o", binFile,
 	}
-	if em.UsesFFIDl() {
-		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	}
+	clangArgs = appendFFIDl(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1009,9 +1011,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	}
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
-	if em.UsesFFIDl() {
-		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	}
+	clangArgs = appendFFIDl(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1111,9 +1111,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	if em.UsesFFIDl() {
-		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	}
+	clangArgs = appendFFIDl(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1137,12 +1135,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		if bigintUsed {
-			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
-		}
-		if cryptoUsed {
-			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
-		}
+		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	return binFile
@@ -1184,9 +1177,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	if em.UsesFFIDl() {
-		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	}
+	clangArgs = appendFFIDl(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1210,12 +1201,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		if bigintUsed {
-			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
-		}
-		if cryptoUsed {
-			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
-		}
+		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	return binFile
@@ -1287,9 +1273,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	if em.UsesFFIDl() {
-		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	}
+	clangArgs = appendFFIDl(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1313,12 +1297,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		if bigintUsed {
-			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
-		}
-		if cryptoUsed {
-			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
-		}
+		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	return binFile
@@ -1353,9 +1332,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	if em.UsesFFIDl() {
-		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	}
+	clangArgs = appendFFIDl(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1379,12 +1356,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		if bigintUsed {
-			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
-		}
-		if cryptoUsed {
-			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
-		}
+		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	return binFile
@@ -1415,9 +1387,7 @@ func assertOutputWithDecoratorMetadata(t *testing.T, src, want string) {
 		t.Fatalf("write IR: %v", err)
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
-	if em.UsesFFIDl() {
-		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	}
+	clangArgs = appendFFIDl(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1457,9 +1427,7 @@ func assertOutputStandardDecorators(t *testing.T, src, want string) {
 		t.Fatalf("write IR: %v", err)
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
-	if em.UsesFFIDl() {
-		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	}
+	clangArgs = appendFFIDl(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1532,9 +1500,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	if em.UsesFFIDl() {
-		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	}
+	clangArgs = appendFFIDl(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -1558,12 +1524,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		if bigintUsed {
-			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
-		}
-		if cryptoUsed {
-			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
-		}
+		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	return binFile

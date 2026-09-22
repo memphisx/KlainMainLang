@@ -1961,6 +1961,16 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+		// Parentheses end an optional chain: `(a?.b).c` reads `.c` off the
+		// chain's *result*, where `a?.b.c` short-circuits as a whole.
+		switch n := expr.(type) {
+		case *ast.MemberExpression:
+			n.ChainEnd = true
+		case *ast.IndexExpression:
+			n.ChainEnd = true
+		case *ast.CallExpression:
+			n.ChainEnd = true
+		}
 		return expr, nil
 
 	case lexer.LBRACKET:

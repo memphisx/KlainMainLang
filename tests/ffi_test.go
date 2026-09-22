@@ -14,29 +14,21 @@ import (
 
 // node:ffi Stage A (TDD-00164): dlopen/DynamicLibrary/getFunction/getSymbol/
 // dlclose/suffix/types + typed C-ABI calls through statically-resolved
-// signature objects. POSIX-only for now (no LoadLibrary shim on Windows).
-
-func skipFFIOnWindows(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		// node:ffi itself works on Windows now (LoadLibrary/GetProcAddress shim,
-		// ADR-01019 — see the ffi example). These E2E cases stay POSIX-pinned:
-		// they resolve libc by its POSIX symbol names (getpid, …) and assert the
-		// `so`/`dylib` suffix, neither of which holds on Windows.
-		t.Skip("node:ffi E2E cases are POSIX-symbol-pinned; the feature itself runs on Windows (ADR-01019)")
-	}
-}
+// signature objects. Runs on every host: Windows resolves through the
+// LoadLibrary/GetProcAddress shim, where ffi.suffix is `dll`.
 
 // hostSuffix mirrors ffi.suffix for assertions.
 func hostSuffix() string {
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		return "dylib"
+	case "windows":
+		return "dll"
 	}
 	return "so"
 }
 
 func TestE2EFFILibcSelfProcess(t *testing.T) {
-	skipFFIOnWindows(t)
 	assertOutputImports(t, `
 import ffi from 'node:ffi';
 const { lib, functions } = ffi.dlopen(null, {
@@ -56,7 +48,6 @@ console.log('closed');
 }
 
 func TestE2EFFIPointerBigintRoundTrip(t *testing.T) {
-	skipFFIOnWindows(t)
 	assertOutputImports(t, `
 import { dlopen, dlsym } from 'node:ffi';
 const { lib, functions } = dlopen(null, {
@@ -73,7 +64,6 @@ console.log(dlsym(lib, 'malloc') > 0n);
 }
 
 func TestE2EFFIMissingSymbolThrows(t *testing.T) {
-	skipFFIOnWindows(t)
 	assertOutputImports(t, `
 import ffi from 'node:ffi';
 const { lib } = ffi.dlopen(null);
@@ -87,7 +77,6 @@ lib.close();
 }
 
 func TestE2EFFISuffixConstant(t *testing.T) {
-	skipFFIOnWindows(t)
 	assertOutputImports(t, `
 import ffi from 'node:ffi';
 console.log(ffi.suffix);
@@ -121,7 +110,6 @@ void invoke_str(void (*f)(const char *), const char *s) { f(s); }
 }
 
 func TestE2EFFICustomSharedLibrary(t *testing.T) {
-	skipFFIOnWindows(t)
 	libFile := buildFFITestLib(t)
 	assertOutputImports(t, fmt.Sprintf(`
 import ffi, { DynamicLibrary } from 'node:ffi';
@@ -153,7 +141,6 @@ console.log('done');
 }
 
 func TestE2EFFIPrimitiveAccessors(t *testing.T) {
-	skipFFIOnWindows(t)
 	assertOutputImports(t, `
 import ffi from 'node:ffi';
 const { functions } = ffi.dlopen(null, {
@@ -180,7 +167,6 @@ functions.free(p);
 }
 
 func TestE2EFFIStringBufferHelpers(t *testing.T) {
-	skipFFIOnWindows(t)
 	assertOutputImports(t, `
 import ffi from 'node:ffi';
 const { functions } = ffi.dlopen(null, {
@@ -216,7 +202,6 @@ functions.free(p);
 }
 
 func TestE2EFFIRegisterCallbackQsort(t *testing.T) {
-	skipFFIOnWindows(t)
 	assertOutputImports(t, `
 import ffi from 'node:ffi';
 const { lib, functions } = ffi.dlopen(null, {
@@ -254,7 +239,6 @@ functions.free(p);
 }
 
 func TestE2EFFICallbackScalarStringAndSlots(t *testing.T) {
-	skipFFIOnWindows(t)
 	libFile := buildFFITestLib(t)
 	assertOutputImports(t, fmt.Sprintf(`
 import ffi, { DynamicLibrary } from 'node:ffi';
@@ -287,7 +271,6 @@ try {
 }
 
 func TestE2EFFISymbolAccumulators(t *testing.T) {
-	skipFFIOnWindows(t)
 	assertOutputImports(t, `
 import ffi, { DynamicLibrary } from 'node:ffi';
 const { lib } = ffi.dlopen(null, {
@@ -331,7 +314,6 @@ func assertFFICodegenErrorImports(t *testing.T, src, wantSubstr string) {
 }
 
 func TestE2EFFIStaticSignatureRejections(t *testing.T) {
-	skipFFIOnWindows(t)
 	assertFFICodegenErrorImports(t, `
 import ffi from 'node:ffi';
 const sig = { arguments: ['int32'], return: 'int32' };

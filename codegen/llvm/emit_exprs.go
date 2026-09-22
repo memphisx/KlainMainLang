@@ -15,6 +15,22 @@ import (
 )
 
 func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
+	v, err := e.emitExprUnguarded(expr)
+	// The base of a member/index/call access: an absent value throws the
+	// TypeError instead of being dereferenced (emit_nullderef.go).
+	if err == nil && len(e.pendingDeref) > 0 {
+		if gerr := e.applyPendingDeref(expr, v); gerr != nil {
+			return Value{}, gerr
+		}
+	}
+	return v, err
+}
+
+func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
+	// A chain that continues past a `?.` short-circuits as a whole.
+	if v, handled, err := e.emitOptionalChain(expr); handled {
+		return v, err
+	}
 	switch ex := expr.(type) {
 	case *ast.NumberLiteral:
 		return e.emitNumberLit(ex)

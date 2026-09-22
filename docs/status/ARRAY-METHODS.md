@@ -29,7 +29,7 @@ Format: [Status page format](README.md#status-page-format).
 | `.every(fn)` | ✅ | | |
 | `.map(fn)` | ✅ | | |
 | `.filter(fn)` | ✅ | | |
-| `.reduce(fn, init?)` | ✅ | | |
+| `.reduce(fn, init?)` | ✅ | | • The accumulator has one type — the initial value's, or the element type without one; a callback whose result has no conversion to it (`xs.reduce((x, y) => `${x}+${y}`, 0)`) is a compile error, as in tsc ([ADR-01043](../adr/ADR-01043.md)) |
 | `.reduceRight(fn, init?)` | ✅ | | • Right-to-left fold sharing `.reduce`'s machinery — only the traversal direction reverses ([ADR-00776](../adr/ADR-00776.md)) |
 | `.forEach(fn)` | ✅ | | |
 | `.join(sep?)` | ✅ | | • A nested-array element is unboxed and rendered as its own comma-joined string (real JS's recursive `Array.prototype.toString`), so `[[1,2],[3,4]].join("-")` is `"1,2-3,4"` — shares the array→string coercion path (`String(arr)`/`` `${arr}` ``) added in [ADR-00528](../adr/ADR-00528.md) |

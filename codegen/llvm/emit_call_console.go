@@ -178,6 +178,12 @@ func (e *Emitter) emitConsolePrintArgToken(arg ast.Expression, fd int, term stri
 	if err != nil {
 		return err
 	}
+	// A call that returns nothing has run for its effects; its value is
+	// `undefined`, and Node prints it (`console.log(arr.forEach(f))`). Printing
+	// no token at all also dropped the separator / line ending that goes with it.
+	if val.Ty.IR == "void" {
+		val = Value{Ref: "null", Ty: TypeUndefined}
+	}
 	return e.emitConsolePrintValueToken(val, fd, term)
 }
 
@@ -269,10 +275,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		// prints its keyword on a miss (null data-ptr), not `[]` — mirroring the
 		// absent-object case below.
 		if val.Ty.Nullable {
-			dataPtr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, val.Ref))
-			isAbsent := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isAbsent, dataPtr))
+			isAbsent := e.emitArrayIsAbsent(val)
 			absentL := e.freshLabel("clog.arrnull")
 			arrL := e.freshLabel("clog.arr")
 			doneL := e.freshLabel("clog.arrdone")

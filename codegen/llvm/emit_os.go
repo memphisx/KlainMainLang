@@ -27,7 +27,18 @@ func (e *Emitter) emitOSHomedir(args []ast.Expression, pos ast.Pos) (Value, erro
 		return Value{}, fmt.Errorf("%d:%d: os.homedir() takes no arguments", pos.Line, pos.Col)
 	}
 	if targetGOOS() == "windows" {
-		val := e.emitGetenvCall(e.internString("USERPROFILE"))
+		// USERPROFILE, else the token's profile directory (libuv's
+		// uv_os_homedir) — the shim helper; null only when both fail.
+		e.ensureStrHeaderRuntime()
+		if !e.usedOSHomedirWin {
+			e.usedOSHomedirWin = true
+			e.emitGlobal("declare ptr @__kml_os_homedir()")
+		}
+		raw := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_os_homedir()", raw))
+		wrapped := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", wrapped, raw))
+		val := Value{Ref: wrapped, Ty: TypePtr}
 		isNull := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
 		failL := e.freshLabel("os.homedir.fail")

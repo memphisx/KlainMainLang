@@ -785,6 +785,12 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 
 	// --- pass 3: pure — sum lengths, then build the output string ---
 	e.emitLabel(fillDoneL)
+	// A global replace leaves lastIndex at 0: the spec's loop ends on the failed
+	// match that resets it. This pass stops after the counted matches instead,
+	// without running that last failing match, which left lastIndex just past
+	// the final match (`/a/g` over "aaa": 3) — visible to the program, and the
+	// start offset of its next exec()/test().
+	e.emitRegexStoreLastIndex(regexVal, "0")
 	subjectLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", subjectLen, strVal.Ref))
 

@@ -655,7 +655,7 @@ func (e *Emitter) emitHTTPBindErrorFireHelper() {
 		e.emitInstr(fmt.Sprintf("call void @__kml_str_finalize(ptr %s)", buf))
 		// .errno is Node's negative errno; .errcode field carries the same.
 		errnoNeg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = sub i32 0, %%errno_val", errnoNeg))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_uv_errno(i32 %%errno_val)", errnoNeg))
 		errnoD := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = sitofp i32 %s to double", errnoD, errnoNeg))
 		errobj := e.buildErrorObjWithCode(errorKindIDs["Error"], buf, e.internString("Error"), codeStr, errnoD, errmsg)
@@ -762,6 +762,11 @@ func (e *Emitter) ensureHTTPClusterFork() {
 	e.ensureFflushDecl()
 	e.ensureMmapDecl()
 	e.emitGlobal("@__kml_cluster_worker_id = internal global i64 0, align 8")
+	// The primary's pid in a forked worker (0 in the primary and in a
+	// single-process program): what the worker's orphan poll compares its parent
+	// against (httpClusterOrphanIR).
+	e.emitGlobal("@__kml_cluster_primary_pid = internal global i32 0, align 4")
+	e.ensureGetpid()
 	e.ensureHTTPClusterSeed()
 	// TDD-00117: shared close flags. Null until __kml_http_cluster_fork mmaps a
 	// MAP_SHARED region (only when it actually forks workers); every worker's
@@ -1966,8 +1971,11 @@ timerscan:
   call void @__kml_task_sched_step()
   call void @__kml_drain_microtasks()
   call void @__kml_reqbody_pump()
-  %tact_el = load i64, ptr @__kml_task_active, align 8
-  %hasactivetasks_el = icmp sgt i64 %tact_el, 0
+  ; A task parked on a promise does not hold the loop open — a pending promise
+  ; keeps nothing alive in Node either; whatever can settle it (a timer, a
+  ; socket, a child) is what holds the loop. A task that can run right now does,
+  ; and so does one parked on a fetch (@__kml_task_holds_loop).
+  %hasactivetasks_el = call i1 @__kml_task_holds_loop()
   store i1 %hasactivetasks_el, ptr %hasactivetasks_slot, align 1
   %len = load i64, ptr @__kml_timer_len, align 8
   %data = load ptr, ptr @__kml_timer_data, align 8
@@ -2061,6 +2069,8 @@ afteresreconnect:
   br i1 %cchas, label %ccpoll, label %ccdone
 
 ccpoll:
+` + e.httpClusterOrphanIR() + `
+ccpoll1:
   ; word[1]: a sibling's http.closeAllConnections() → force-close our own conns.
   %ccw1 = getelementptr i64, ptr %ccflag, i64 1
   %ccv1 = load atomic i64, ptr %ccw1 seq_cst, align 8

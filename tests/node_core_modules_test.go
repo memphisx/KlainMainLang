@@ -521,6 +521,23 @@ console.log(pathToFileURL("/foo bar/baz#1").href)
 `, "file:///foo%20bar/baz%231")
 }
 
+// Node's escape set for a file URL's path is wider than libcurl's: `[ ] { } ~`
+// (and `^ | "` and the backtick) are escaped too, with upper-case hex, while the
+// sub-delims `! $ & ' ( ) * + , ; = @` stay literal. href and pathname agree.
+func TestE2EPathToFileURLNodeEscapeSet(t *testing.T) {
+	root, rootURL := "/d/", "file:///d/"
+	if runtime.GOOS == "windows" {
+		root, rootURL = "C:\\\\d\\\\", "file:///C:/d/"
+	}
+	assertOutputImports(t, `
+import { pathToFileURL, fileURLToPath } from 'url'
+const u = pathToFileURL("`+root+`a[b]{c}~d^e|f!g$h&i'j(k)l*m+n,o;p=q@r%s")
+console.log(u.href)
+console.log(u.pathname === u.href.slice("file://".length))
+console.log(fileURLToPath(u).endsWith("a[b]{c}~d^e|f!g$h&i'j(k)l*m+n,o;p=q@r%s"))
+`, rootURL+"a%5Bb%5D%7Bc%7D%7Ed%5Ee%7Cf!g$h&i'j(k)l*m+n,o;p=q@r%25s\ntrue\ntrue")
+}
+
 func TestE2EFileURLRoundTrip(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		assertOutputImports(t, `

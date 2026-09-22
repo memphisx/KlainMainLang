@@ -1,9 +1,12 @@
 package tests
 
 import (
+	"fmt"
 	"os"
 	"os/signal"
 	"testing"
+
+	"KlainMainLang/internal/scratch"
 )
 
 // TestMain exists to make SIGINT *caught* in the test process itself. The
@@ -23,7 +26,14 @@ import (
 // run (where the go tool's own Notify already provided this by accident).
 // Exiting on receipt also restores Ctrl-C's ability to stop a
 // backgrounded shard, which SIG_IGN previously blocked.
+//
+// It also applies the KML_SCRATCH override (internal/scratch) before any test
+// runs, so t.TempDir and every compiler/clang child write under that root.
 func TestMain(m *testing.M) {
+	if _, err := scratch.Apply(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, os.Interrupt)
 	go func() {

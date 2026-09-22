@@ -93,6 +93,51 @@ done:
   ret void
 }`)
 
+	// @__kml_microtask_tick(): the one tick a module top-level `await` of a plain
+	// value or an already-settled promise takes. In JS the continuation is queued
+	// BEHIND the jobs already waiting and AHEAD of whatever those jobs enqueue
+	// (`await 1` between two `.then` links interleaves: tick 1, await 1, tick 2,
+	// …). Top-level code runs on the main stack, not as a coroutine, so instead
+	// of queueing itself it runs exactly the jobs queued at this moment and then
+	// carries on — the same order. Both bounds are re-read every iteration: a job
+	// may run a full drain of its own, which resets the indices.
+	e.emitGlobal(`
+define void @__kml_microtask_tick() {
+entry:
+  %snap = load i64, ptr @__kml_mt_len, align 8
+  br label %loop
+loop:
+  %head = load i64, ptr @__kml_mt_head, align 8
+  %len = load i64, ptr @__kml_mt_len, align 8
+  %insnap = icmp slt i64 %head, %snap
+  %inq = icmp slt i64 %head, %len
+  %more = and i1 %insnap, %inq
+  br i1 %more, label %run, label %done
+run:
+  %data = load ptr, ptr @__kml_mt_data, align 8
+  %slot = getelementptr ptr, ptr %data, i64 %head
+  %cl = load ptr, ptr %slot, align 8
+  %nh = add i64 %head, 1
+  store i64 %nh, ptr @__kml_mt_head, align 8
+  %fp_p = getelementptr { ptr, ptr }, ptr %cl, i32 0, i32 0
+  %fp = load ptr, ptr %fp_p, align 8
+  %ep_p = getelementptr { ptr, ptr }, ptr %cl, i32 0, i32 1
+  %ep = load ptr, ptr %ep_p, align 8
+  call void (ptr) %fp(ptr %ep)
+  br label %loop
+done:
+  %h2 = load i64, ptr @__kml_mt_head, align 8
+  %l2 = load i64, ptr @__kml_mt_len, align 8
+  %empty = icmp sge i64 %h2, %l2
+  br i1 %empty, label %reset, label %out
+reset:
+  store i64 0, ptr @__kml_mt_head, align 8
+  store i64 0, ptr @__kml_mt_len, align 8
+  br label %out
+out:
+  ret void
+}`)
+
 	// @__kml_promise_drain_reactions(ptr %p): enqueue every reaction closure
 	// registered on promise %p (the { ptr closure, ptr next } list at field 4)
 	// onto the microtask FIFO, then clear the list. Called by a task when it

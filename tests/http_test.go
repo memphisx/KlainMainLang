@@ -83,9 +83,22 @@ func startHTTPServerFixed(t *testing.T, src string, port int) {
 	t.Helper()
 	binFile := buildBinaryImports(t, src)
 	cmd := exec.Command(binFile)
+	// Keep what the server printed: a server that never came up (a bind error,
+	// a crash at start) is otherwise undiagnosable from the readiness timeout.
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	cmd.WaitDelay = 2 * time.Second // a grandchild holding the pipe must not hang Wait
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
+	// Registered first, so it runs last — after the kill + Wait below, when no
+	// goroutine is still writing to out.
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("server process state: %v\nserver output:\n%s", cmd.ProcessState, out.String())
+		}
+	})
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -164,6 +177,53 @@ func startHTTPClusterServer(t *testing.T, src string, port int) int {
 	})
 	waitListening(t, np)
 	return np
+}
+
+// TestE2EHTTPClusterWorkersExitWithPrimary: a { workers: N } worker does not
+// outlive its primary. Node's cluster worker exits when its channel to the
+// primary disconnects; workers left behind keep the shared listener — and so
+// the port — open for good. Only the primary is killed here (no group kill);
+// the port has to stop accepting once the workers notice.
+func TestE2EHTTPClusterWorkersExitWithPrimary(t *testing.T) {
+	src := `
+import http from 'klain:http'
+interface Res { status: number; body: string }
+http.listen(8977, (req: HttpRequest): Res => {
+  return { status: 200, body: "ok" }
+}, { workers: 3 })
+`
+	np := freePort(t)
+	binFile := buildBinaryImports(t, subPort(src, 8977, np))
+	cmd := exec.Command(binFile)
+	setProcGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", np)
+	t.Cleanup(func() {
+		killProcGroup(cmd)
+		_ = cmd.Wait()
+		waitPortFree(addr)
+	})
+	waitListening(t, np)
+	// Let every worker reach its event loop before the primary goes.
+	time.Sleep(500 * time.Millisecond)
+
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill primary: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err != nil {
+			return
+		}
+		conn.Close()
+		if time.Now().After(deadline) {
+			t.Fatalf("%s still accepts 10s after the primary was killed: workers outlived it", addr)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // startHTTPClusterServerGC is startHTTPClusterServer's -mm=gc counterpart —

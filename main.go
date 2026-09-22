@@ -385,10 +385,7 @@ func main() {
 		}
 		clangArgs = append(clangArgs, "-Wl,-rpath,"+harbourRpathDir("harbour-"+appSlug(nm)))
 	}
-	cmd := llvm.ClangCommand(clangArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := llvm.RunClangLink(clangArgs...); err != nil {
 		fatal("clang: %v", err)
 	}
 
@@ -490,10 +487,7 @@ func main() {
 				iArgs = append(iArgs, cs.CFlags...)
 				iArgs = append(iArgs, cs.Libs...)
 			}
-			icmd := llvm.ClangCommand(iArgs...)
-			icmd.Stdout = os.Stdout
-			icmd.Stderr = os.Stderr
-			if err := icmd.Run(); err != nil {
+			if err := llvm.RunClangLink(iArgs...); err != nil {
 				fatal("island %s: clang: %v", root, err)
 			}
 			fmt.Fprintf(os.Stderr, "  island: %s\n", soPath)
@@ -556,10 +550,7 @@ func main() {
 				}
 			}
 			args = append(args, extra...)
-			cmd := llvm.ClangCommand(args...)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			return cmd.Run()
+			return llvm.RunClangLink(args...)
 		}
 		artifact, perr := packageApp(outBin, opts, relink)
 		if perr != nil {

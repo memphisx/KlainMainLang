@@ -319,6 +319,18 @@ try {
 `, "true")
 }
 
+// The kill error carries Node's fields: reading `.code`/`.syscall` off it used
+// to read past a truncated error object and crash.
+func TestE2EProcessKillErrorCarriesCodeAndSyscall(t *testing.T) {
+	assertOutput(t, `
+try {
+    process.kill(999999999, 0)
+} catch (e: any) {
+    console.log(e.code, e.syscall, e.errno < 0)
+}
+`, "ESRCH kill true")
+}
+
 func TestE2EProcessKillWrongArgCountRejected(t *testing.T) {
 	_, err := parseAndCompile(`process.kill()`)
 	if err == nil {

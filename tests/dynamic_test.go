@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -462,13 +463,21 @@ console.log(handle({ status: "err", msg: "bad" }))
 `, "V:7\nE:bad")
 }
 
-func TestE2EUnionArrayElementRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-let arr: (string | number)[] = [1, "two", 3]
-console.log(arr.length)
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a union as an array element type (not yet supported nested in a container), got none")
+// A union array element is supported (ADR-01039, TestE2EUnionArrayElements);
+// what stays a compile error is a value outside the member set — in the
+// literal, a push, or an index write — exactly as for a union local.
+func TestE2EUnionArrayElementNonMemberRejected(t *testing.T) {
+	for _, src := range []string{
+		`let arr: (string | number)[] = [1, true]`,
+		`let arr: (string | number)[] = [1]
+arr.push(true)`,
+		`let arr: (string | number)[] = [1]
+arr[0] = true`,
+	} {
+		_, err := parseAndCompile(src)
+		if err == nil || !strings.Contains(err.Error(), "not a member of the declared union type") {
+			t.Fatalf("expected the union member-set rejection for:\n%s\ngot: %v", src, err)
+		}
 	}
 }
 

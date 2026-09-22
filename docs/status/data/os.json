@@ -34,7 +34,7 @@
             "feature": "`os.homedir()`",
             "status": "implemented",
             "notes": [
-              "Mirrors libuv's `uv_os_homedir` (ADR-00790): a set `$HOME` wins (an empty one included, matching Node's `\"\"`), POSIX unset falls back to the passwd database (`getpwuid(getuid())->pw_dir`), and it throws only when that fails too; Windows reads `USERPROFILE`"
+              "Mirrors libuv's `uv_os_homedir` (ADR-00790): a set `$HOME` wins (an empty one included, matching Node's `\"\"`), POSIX unset falls back to the passwd database (`getpwuid(getuid())->pw_dir`), and it throws only when that fails too; Windows reads `USERPROFILE`, falling back to the process token's profile directory (`GetUserProfileDirectoryW`, [ADR-01032](../adr/ADR-01032.md))"
             ]
           },
           {

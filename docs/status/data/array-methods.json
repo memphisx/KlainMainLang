@@ -144,7 +144,10 @@
           },
           {
             "feature": "`.reduce(fn, init?)`",
-            "status": "implemented"
+            "status": "implemented",
+            "notes": [
+              "The accumulator has one type — the initial value's, or the element type without one; a callback whose result has no conversion to it (`xs.reduce((x, y) => `${x}+${y}`, 0)`) is a compile error, as in tsc ([ADR-01043](../adr/ADR-01043.md))"
+            ]
           },
           {
             "feature": "`.reduceRight(fn, init?)`",

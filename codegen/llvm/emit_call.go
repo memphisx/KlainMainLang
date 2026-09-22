@@ -113,7 +113,130 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 
 	through := ast.NewCallExpression(&ast.MemberExpression{Object: ast.NewIdentifier(recvName, mem.GetPos()), Property: mem.Property}, ex.Args, ex.GetPos())
 	through.TypeArgs = ex.TypeArgs
+	return e.emitNullGuardedExpr(e.ptrIsNull(objVal.Ref), through)
+}
 
+// optionalCalleeKind classifies the callee of an optional call `f?.(...)`.
+type optionalCalleeKind int
+
+const (
+	// optCalleePresent: a declared function, method or built-in — never
+	// nullish, so the call is an ordinary one.
+	optCalleePresent optionalCalleeKind = iota
+	// optCalleeValue: a function-typed variable or field, which may hold
+	// null/undefined at run time — guarded by a null check.
+	optCalleeValue
+	// optCalleeHostDependent: a built-in Node defines on some hosts only
+	// (process.getuid/geteuid/getgid/getegid: POSIX yes, Windows `undefined`).
+	// Its optional call is `T | undefined` on every host so a program's types
+	// do not change with the target.
+	optCalleeHostDependent
+)
+
+func (e *Emitter) classifyOptionalCallee(callee ast.Expression) optionalCalleeKind {
+	switch c := callee.(type) {
+	case *ast.Identifier:
+		if sym, ok := e.lookup(c.Name); ok && sym.Ty.IsFunc && sym.Ty.IR == "ptr" {
+			return optCalleeValue
+		}
+	case *ast.MemberExpression:
+		if id, ok := c.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal("process") {
+			switch c.Property {
+			case "getuid", "geteuid", "getgid", "getegid":
+				return optCalleeHostDependent
+			}
+			return optCalleePresent
+		}
+		objTy := e.inferExprType(c.Object)
+		if objTy.IsObject || objTy.IsClass {
+			if _, fty, ok := objTy.FieldIndex(c.Property); ok && fty.IsFunc && fty.IR == "ptr" {
+				return optCalleeValue
+			}
+		}
+	}
+	return optCalleePresent
+}
+
+// optionalCallResultType is the static type of `f?.(...)` given the type of
+// the same call written without `?.` — shared by emitOptionalCalleeCall and
+// inferExprType so the two cannot disagree.
+func optionalCallResultType(kind optionalCalleeKind, inner Type) Type {
+	if kind == optCalleePresent || inner.IR == "void" || inner.IR == "" || inner.IsArray {
+		return inner
+	}
+	if u := undefinedableElem(inner); u.Nullable {
+		return u
+	}
+	return inner
+}
+
+// emitOptionalCalleeCall implements the optional call `f?.(...)` /
+// `a.b?.(...)`: a nullish callee short-circuits the whole call to `undefined`
+// without evaluating the arguments. The callee is evaluated exactly once.
+func (e *Emitter) emitOptionalCalleeCall(ex *ast.CallExpression) (Value, error) {
+	plain := *ex
+	plain.Optional = false
+	switch e.classifyOptionalCallee(ex.Callee) {
+	case optCalleeHostDependent:
+		inner := e.inferExprType(&plain)
+		resTy := optionalCallResultType(optCalleeHostDependent, inner)
+		if targetGOOS() == "windows" {
+			// Node leaves these undefined on Windows: the call is skipped.
+			if isNullableScalar(resTy) {
+				return Value{Ref: e.makeNullableScalarAgg(resTy, "false", zeroRef(inner)), Ty: resTy}, nil
+			}
+			return Value{Ref: zeroRef(inner), Ty: resTy}, nil
+		}
+		v, err := e.emitCall(&plain)
+		if err != nil {
+			return Value{}, err
+		}
+		if isNullableScalar(resTy) {
+			v = e.coerce(v, inner)
+			return Value{Ref: e.makeNullableScalarAgg(resTy, "true", v.Ref), Ty: resTy}, nil
+		}
+		return v, nil
+	case optCalleeValue:
+		fv, err := e.emitExpr(ex.Callee)
+		if err != nil {
+			return Value{}, err
+		}
+		if fv.Ty.IR != "ptr" {
+			return e.emitCall(&plain)
+		}
+		// Bind the evaluated callee to a throwaway local: the guarded call goes
+		// through it, so a side-effecting callee expression runs once.
+		e.optionalCallCtr++
+		fnName := fmt.Sprintf("__optc_fn_%d", e.optionalCallCtr)
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", fv.Ref, slot))
+		fnTy := fv.Ty
+		fnTy.Nullable = false
+		fnTy.IsUndefined = false
+		e.define(fnName, Symbol{Ptr: slot, Ty: fnTy})
+		through := ast.NewCallExpression(ast.NewIdentifier(fnName, ex.Callee.GetPos()), ex.Args, ex.GetPos())
+		through.TypeArgs = ex.TypeArgs
+		return e.emitNullGuardedExpr(e.ptrIsNull(fv.Ref), through)
+	}
+	return e.emitCall(&plain)
+}
+
+// ptrIsNull emits the i1 "this pointer is null" condition emitNullGuardedExpr
+// branches on.
+func (e *Emitter) ptrIsNull(ref string) string {
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", r, ref))
+	return r
+}
+
+// emitNullGuardedExpr evaluates `through` unless the i1 `isNull` is set, in
+// which case it is skipped entirely (a call's arguments, an index's key
+// expression, the rest of a chain) and the result is a real `undefined`. The
+// shared tail of `a?.m(...)` (guard = the receiver), `f?.(...)` (guard = the
+// callee value), `a?.[k]` and a chain continuing past a `?.`
+// (emitOptionalChain), whose guard may also be a nullable scalar's presence bit.
+func (e *Emitter) emitNullGuardedExpr(isNull string, through ast.Expression) (Value, error) {
 	retTy := e.inferExprType(through)
 	isVoid := retTy.IR == "void" || retTy.IR == ""
 	// `a?.m()` is `RetType | undefined` — a nullish receiver short-circuits to a
@@ -129,8 +252,6 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, resIR, undefTy.Align()))
 	}
 
-	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, objVal.Ref))
 	nullL := e.freshLabel("optcall.null")
 	nnL := e.freshLabel("optcall.nn")
 	mergeL := e.freshLabel("optcall.merge")
@@ -147,7 +268,7 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 			hdr := e.newArrayHeader("null", "0")
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, resPtr))
 		} else if isNullableScalar(undefTy) {
-			agg := e.makeNullableScalarAgg(undefTy, "false", zeroRef(retTy))
+			agg := e.makeNullableScalarAgg(undefTy, "false", zeroRef(retTy.withoutNullable()))
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, agg, resPtr, undefTy.Align()))
 		} else {
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, zeroRef(retTy), resPtr, undefTy.Align()))
@@ -157,7 +278,7 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 
 	// non-null branch: the real call, through the bound receiver.
 	e.emitLabel(nnL)
-	callVal, err := e.emitCall(through)
+	callVal, err := e.emitExpr(through)
 	if err != nil {
 		return Value{}, err
 	}
@@ -169,7 +290,10 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 		} else {
 			stored := e.coerce(callVal, retTy)
 			storeRef := stored.Ref
-			if isNullableScalar(undefTy) {
+			// A guarded expression that is itself `T | undefined` (a further `?.`
+			// to its right) already carries the { i1, T } aggregate — its own
+			// absence passes through; wrapping it again is a type error.
+			if isNullableScalar(undefTy) && !isNullableScalar(stored.Ty) {
 				storeRef = e.makeNullableScalarAgg(undefTy, "true", stored.Ref)
 			}
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, storeRef, resPtr, undefTy.Align()))
@@ -293,6 +417,10 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	if _, ok := ex.Callee.(*ast.SuperExpression); ok {
 		return e.emitSuperCall(ex)
 	}
+	// Optional call `f?.(...)`: guard the callee, then dispatch the plain call.
+	if ex.Optional {
+		return e.emitOptionalCalleeCall(ex)
+	}
 	// `globalThis.setTimeout(...)` / `globalThis.JSON.stringify(...)` — peel the
 	// `globalThis.` alias off the callee so it dispatches as the bare global.
 	if unwrapped := e.unwrapGlobalThis(ex.Callee); unwrapped != ex.Callee {
@@ -311,6 +439,13 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Optional {
 			return e.emitOptionalCall(ex, mem)
 		}
+		// A method call on a run-time undefined/null receiver throws
+		// (emit_nullderef.go).
+		undo, err := e.guardBase(mem.Object, mem.Property, false)
+		if err != nil {
+			return Value{}, err
+		}
+		defer undo()
 	}
 	// Node's chained `http.createServer((req, res) => …).listen(port[, cb])`
 	// (TDD-00131) — the callee is `<createServer call>.listen`. Routed through
@@ -1030,8 +1165,11 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			case "getuid", "geteuid", "getgid", "getegid":
 				if targetGOOS() == "windows" {
 					// Node has no process.getuid/getgid family on Windows (they are
-					// undefined there); reject at compile time (TDD-00177).
-					return Value{}, fmt.Errorf("%d:%d: process.%s is not available on Windows (Node defines it only on POSIX)", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
+					// undefined there, so the bare call is a TypeError in Node);
+					// reject at compile time (TDD-00177). The portable spelling is
+					// the optional call, which evaluates to `undefined` here
+					// (emitOptionalCalleeCall).
+					return Value{}, fmt.Errorf("%d:%d: process.%s is not available on Windows (Node defines it only on POSIX) — use the optional call `process.%s?.()`, which is `undefined` on Windows", ex.GetPos().Line, ex.GetPos().Col, mem.Property, mem.Property)
 				}
 				if len(ex.Args) != 0 {
 					return Value{}, fmt.Errorf("%d:%d: process.%s takes no arguments", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
@@ -1491,8 +1629,12 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitStringAt(mem, ex.Args, ex.GetPos())
 		}
 		if mem.Property == "concat" {
-			if e.inferExprType(mem.Object).IsArray {
+			objTy := e.inferExprType(mem.Object)
+			if objTy.IsArray {
 				return e.emitArrayConcat(mem, ex.Args, ex.GetPos())
+			}
+			if isForOfStringTy(objTy) {
+				return e.emitStringConcatMethod(mem, ex.Args, ex.GetPos())
 			}
 		}
 		if mem.Property == "findIndex" {
@@ -1837,9 +1979,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		case "Boolean":
 			return e.emitGlobalBooleanConv(ex.Args, ex.GetPos())
 		case "isNaN":
-			return e.emitNumberIsNaN(ex.Args, ex.GetPos())
+			return e.emitNumberIsNaN(ex.Args, ex.GetPos(), true)
 		case "isFinite":
-			return e.emitNumberIsFinite(ex.Args, ex.GetPos())
+			return e.emitNumberIsFinite(ex.Args, ex.GetPos(), true)
 		case "fetch":
 			return e.emitFetch(ex.Args, ex.GetPos())
 		case "btoa":
@@ -2368,9 +2510,7 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					// pointer so mutations inside the callee (push/splice)
 					// propagate back to this caller. The i64 length is redundant
 					// (kept for ABI stability).
-					header, lenSlot := e.arrayDataLenSlots(sym)
-					lenReg := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
+					header, lenReg := e.packArrayArg(arg, Value{}, paramTy)
 					argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 					paramArrayHeader = header
 				} else {
@@ -2387,13 +2527,16 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					if err != nil {
 						return Value{}, err
 					}
+					if val.Ty.IsNull && paramTy.Nullable {
+						val = e.emitAbsentArrayValue(paramTy) // f(null) / f(undefined)
+					}
 					if !val.Ty.IsArray {
 						return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", arg.GetPos().Line, arg.GetPos().Col)
 					}
 					// A member/index/field array shares its live header so callee
 					// mutation propagates; a true transient gets a fresh one
 					// (TDD-00127).
-					header, lenReg := e.arrayArgFromAggregate(val)
+					header, lenReg := e.packArrayArg(arg, val, paramTy)
 					argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 					paramArrayHeader = header
 				}
@@ -2505,7 +2648,7 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 			// A nullable scalar's omitted value is a genuinely absent
 			// { i1, T } aggregate (present = false).
 			if paramTy.IsArray {
-				argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
+				argParts = append(argParts, "ptr "+e.omittedArrayArgHeader(paramTy), "i64 0")
 			} else if isNullableScalar(paramTy) {
 				argParts = append(argParts, nullableScalarStorageIR(paramTy)+" zeroinitializer")
 				paramNullableAgg = "zeroinitializer"

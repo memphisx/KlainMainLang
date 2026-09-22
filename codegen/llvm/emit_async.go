@@ -233,7 +233,7 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	argTy := e.inferExprType(ex.Argument)
 	if !hdlVal.Ty.IsPromise && !argTy.IsPromise {
 		inAsyncGenBody := e.currentGenerator != nil && e.currentGenerator.genTy.GeneratorIsAsync
-		if (e.isAsync && e.currentGenerator == nil && e.hasMaySuspend) || inAsyncGenBody {
+		if ((e.isAsync || e.inModuleTask) && e.currentGenerator == nil && e.hasMaySuspend) || inAsyncGenBody {
 			e.ensurePromiseRuntime()
 			prom := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
@@ -246,6 +246,14 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", rp, promiseStructIR, prom))
 			e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", rp))
 			return e.emitAwaitTaskPromise(prom, hdlVal.Ty)
+		}
+		// Top-level code that is not a task — a worker module or a dynamic-import
+		// island (the entry program's module body is one, TDD-00224): the main
+		// stack cannot park, so it takes the await's one tick by running the jobs
+		// already queued (@__kml_microtask_tick) before carrying on.
+		if !e.isAsync && !e.inModuleTask && e.currentGenerator == nil {
+			e.needMicrotaskTick = true
+			e.emitInstr("call void @__kml_microtask_tick()")
 		}
 		return hdlVal, nil
 	}

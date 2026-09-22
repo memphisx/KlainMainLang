@@ -29,7 +29,7 @@ const e: number[][] = [[1, 2]];
 const empty: number[][] = [];
 console.log(String(e.at(0)));
 console.log(String(empty.pop()));
-console.log(` + "`${e.at(0)}|${empty.pop()}`" + `);
+console.log(`+"`${e.at(0)}|${empty.pop()}`"+`);
 `, "1,2\nundefined\n1,2|undefined")
 }
 

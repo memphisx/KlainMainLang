@@ -109,10 +109,11 @@
             "feature": "`url.pathToFileURL(path)` (POSIX)",
             "status": "implemented",
             "caveats": [
-              "POSIX only; the `options` argument is unsupported ([ADR-00671](../adr/ADR-00671.md))"
+              "The `options` argument is unsupported ([ADR-00671](../adr/ADR-00671.md))"
             ],
             "notes": [
-              "Resolves the path to absolute, percent-encodes it, and returns a WHATWG `URL` with the `file:` scheme"
+              "Resolves the path to absolute, percent-encodes it, and returns a WHATWG `URL` with the `file:` scheme; on Windows a drive path is `file:///C:/dir/f` and a UNC path keeps its server as the host ([ADR-00722](../adr/ADR-00722.md))",
+              "The escape set is Node's, not libcurl's: controls, space, `\" # % < > ? [ ] ^ { | } ~`, the backtick and every non-ASCII byte become upper-case `%XX`; the sub-delims `! $ & ' ( ) * + , ; = @` stay literal; `href` and `pathname` agree ([ADR-01046](../adr/ADR-01046.md))"
             ]
           },
           {

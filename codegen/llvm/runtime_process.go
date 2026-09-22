@@ -613,6 +613,8 @@ func (e *Emitter) ensureProcessKill() {
 	e.ensureExceptionHelpers()
 	e.ensureErrnoAccessor()
 	e.ensureStrerror()
+	e.ensureCalloc()
+	e.ensureErrnoCode()
 	accessor := errnoAccessor()
 	e.ensureCPKill() // single owner of `declare i32 @kill` (shared with child.kill)
 	fmtPtr := e.internString("kill(pid=%lld, signal=%lld): %s")
@@ -627,27 +629,44 @@ entry:
   br i1 %%failed, label %%fail, label %%ok
 
 fail:
-  %%errno_ptr = call ptr @%s()
+  %%errno_ptr = call ptr @%[1]s()
   %%errno_val = load i32, ptr %%errno_ptr, align 4
   %%errmsg = call ptr @strerror(i32 %%errno_val)
   %%errlen = call i64 @strlen(ptr %%errmsg)
   %%bufsize = add i64 %%errlen, 48
   %%buf = call ptr @__kml_str_alloc(i64 %%bufsize)
-  call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, i64 %%pid, i64 %%sig, ptr %%errmsg)
+  call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %[2]s, i64 %%pid, i64 %%sig, ptr %%errmsg)
   call void @__kml_str_finalize(ptr %%buf)
-  %%errobj = call ptr @malloc(i64 24)
-  %%errobj.kind = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 0
+  ; The full error shape, zero-filled: a catch handler reads .code/.errno/
+  ; .syscall off this object, so it must be the whole struct — and those three
+  ; are what Node's kill error carries (code 'ESRCH', syscall 'kill').
+  %%errobj = call ptr @calloc(i64 1, i64 %[4]d)
+  %%errobj.kind = getelementptr %[5]s, ptr %%errobj, i32 0, i32 0
   store i64 281474976710656, ptr %%errobj.kind, align 8
-  %%errobj.msg = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 1
+  %%errobj.msg = getelementptr %[5]s, ptr %%errobj, i32 0, i32 1
   store ptr %%buf, ptr %%errobj.msg, align 8
-  %%errobj.name = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 2
-  store ptr %s, ptr %%errobj.name, align 8
+  %%errobj.name = getelementptr %[5]s, ptr %%errobj, i32 0, i32 2
+  store ptr %[3]s, ptr %%errobj.name, align 8
+  %%code = call ptr @__kml_errno_code(i32 %%errno_val)
+  %%errobj.code = getelementptr %[5]s, ptr %%errobj, i32 0, i32 3
+  store ptr %%code, ptr %%errobj.code, align 8
+  %%errno_d = sitofp i32 %%errno_val to double
+  %%errobj.errcode = getelementptr %[5]s, ptr %%errobj, i32 0, i32 4
+  store double %%errno_d, ptr %%errobj.errcode, align 8
+  %%errobj.errstr = getelementptr %[5]s, ptr %%errobj, i32 0, i32 5
+  store ptr %%errmsg, ptr %%errobj.errstr, align 8
+  %%errobj.syscall = getelementptr %[5]s, ptr %%errobj, i32 0, i32 6
+  store ptr %[6]s, ptr %%errobj.syscall, align 8
+  %%uv = call i32 @__kml_uv_errno(i32 %%errno_val)
+  %%uvd = sitofp i32 %%uv to double
+  %%errobj.errno = getelementptr %[5]s, ptr %%errobj, i32 0, i32 8
+  store double %%uvd, ptr %%errobj.errno, align 8
   call void @__kml_throw(ptr %%errobj)
   unreachable
 
 ok:
   ret void
-}`, accessor, fmtPtr, killErrNamePtr))
+}`, accessor, fmtPtr, killErrNamePtr, errorObjType.StructSize(), errorObjType.StructIR(), e.internString("kill")))
 }
 
 // ensureSignalHandlerRuntime declares the shared machinery behind

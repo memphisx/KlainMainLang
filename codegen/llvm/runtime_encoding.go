@@ -745,6 +745,27 @@ func (e *Emitter) ensureEncodeURI() {
 	e.ensurePercentEncode(&e.usedEncodeURI, "__kml_encode_uri", percentEncodeUnreserved+percentEncodeReserved)
 }
 
+// fileURLPathSafe is what Node's url.pathToFileURL leaves unescaped in a path:
+// printable ASCII except `" # % < > ? [ ] ^ { | } ~`, the backtick and the
+// backslash (a separator on Windows, already turned into `/` by then; an
+// ordinary file-name character on POSIX, where Node escapes it). Everything
+// else — controls, space, DEL, every byte of a non-ASCII character — becomes
+// %XX. libcurl's own CURLU_URLENCODE leaves `[ ] { } ~` alone, so the path is
+// encoded here and handed to libcurl as-is. Mirrors resolver/fileurl.go.
+func fileURLPathSafe() string {
+	var b []byte
+	for c := byte(0x21); c < 0x7F; c++ {
+		if !strings.ContainsRune("\"#%<>?[]^`{|}~\\", rune(c)) {
+			b = append(b, c)
+		}
+	}
+	return string(b)
+}
+
+func (e *Emitter) ensureEncodeFileURLPath() {
+	e.ensurePercentEncode(&e.usedEncodeFileURLPath, "__kml_encode_file_url_path", fileURLPathSafe())
+}
+
 // ensurePercentDecode is the shared implementation behind
 // decodeURIComponent and decodeURI. Permissive: a malformed or truncated
 // "%" escape (not followed by two valid hex digits) passes through as a

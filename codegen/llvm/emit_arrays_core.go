@@ -24,6 +24,12 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 		e.define(v.Name, Symbol{Ptr: slot, Ty: ty, IsConst: v.Kind == "const"})
 	}
+	// `let a: T[] | null = null` (or no initializer at all): the binding holds no
+	// array — a null header, which every read of a nullable binding guards.
+	if _, isNullLit := v.Init.(*ast.NullLiteral); ty.Nullable && (isNullLit || v.Init == nil) {
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+		return nil
+	}
 	ptrName := e.newArrayHeader("null", "0")
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ptrName, slot))
 	lenName := e.freshReg()
@@ -113,6 +119,13 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.ArrayHeader, slot))
 		return nil
 	}
+	if val.Ty.Nullable && (ty.Nullable || !e.promotedGlobalDecls[v]) {
+		// A header-less possibly-absent value (a RegExp miss): absent binds the
+		// null header, so the binding's absence test is the header alone.
+		sel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", sel, e.emitArrayIsAbsent(val), ptrName))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sel, slot))
+	}
 	return e.storeArrayAggregateInto(val, ptrName, lenName)
 }
 
@@ -183,9 +196,17 @@ func (e *Emitter) loadArraySlotAggregate(slot string, ty Type) Value {
 // identity so the caller aliases the same array), else mints a fresh header from
 // the {data,len} aggregate (a transient/new array expression). Mirrors
 // storeArrayFieldHeader, the field-storage analogue.
+//
+// A possibly-absent header-less value (a RegExp miss — absent by its null data
+// pointer) yields the null header, so absence has one meaning across the ABI.
 func (e *Emitter) arrayReturnHeader(val Value) string {
 	if val.ArrayHeader != "" {
 		return val.ArrayHeader
+	}
+	if val.Ty.Nullable {
+		sel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", sel, e.emitArrayIsAbsent(val), e.boxArrayValue(val)))
+		return sel
 	}
 	return e.boxArrayValue(val)
 }
@@ -196,6 +217,12 @@ func (e *Emitter) arrayReturnHeader(val Value) string {
 // result aliases the returned array (`let x = f(); x === f()`'s source shares one
 // header). headerReg is the raw call-instruction result.
 func (e *Emitter) arrayValueFromHeaderReg(headerReg string, ty Type) Value {
+	if ty.Nullable {
+		// A `T[] | null` result may be the null header (arrayReturnHeader): read
+		// the shared all-zero cell instead. Branchless — this runs inside state
+		// machines' linear control flow too.
+		return e.loadArrayHeaderOrAbsent(headerReg, ty)
+	}
 	agg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, headerReg))
 	return Value{Ref: agg, Ty: ty, ArrayHeader: headerReg}
@@ -235,11 +262,9 @@ func (e *Emitter) arrayValueFromHeaderSlotGuarded(header string, ty Type) Value 
 // header from the {data,len} aggregate (a new array expression). fieldSlot is the
 // field's GEP address.
 func (e *Emitter) storeArrayFieldHeader(fieldSlot string, val Value) {
-	header := val.ArrayHeader
-	if header == "" {
-		header = e.boxArrayValue(val)
-	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, fieldSlot))
+	// arrayReturnHeader: a header-less absent value of a nullable type (a SQL
+	// NULL blob, a RegExp miss) stores the null header — the field's absence.
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.arrayReturnHeader(val), fieldSlot))
 }
 
 // boxArrayValue heap-allocates a 16-byte {ptr, i64} box and stores val's
@@ -352,14 +377,42 @@ func (e *Emitter) arrayArgFromAggregate(val Value) (header, lenReg string) {
 // Any other array expression goes through arrayArgFromAggregate, which shares
 // the value's own live header when it carries one (a member/index/field read)
 // and mints a fresh header only for a true transient.
-func (e *Emitter) packArrayArg(arg ast.Expression, val Value) (header, lenReg string) {
+//
+// An absent array crosses the call as a null header, but only into a parameter
+// whose type can be absent (`T[] | null`, `xs?: T[]`) — that callee guards its
+// header. Any other callee derefs it unguarded, so it gets an empty array.
+// The length word is redundant (bindArrayParam), so an absent array passes 0.
+func (e *Emitter) packArrayArg(arg ast.Expression, val Value, paramTy Type) (header, lenReg string) {
 	if id, ok := arg.(*ast.Identifier); ok {
 		if sym, found := e.lookup(id.Name); found && sym.Ty.IsArray {
+			if sym.Ty.Nullable {
+				h := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, sym.Ptr))
+				if paramTy.Nullable {
+					return h, "0"
+				}
+				sel := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, e.ptrIsNull(h), e.emptyArrayArgHeader(), h))
+				return sel, "0"
+			}
 			dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 			lr := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lr, lenSlot))
 			return dataSlot, lr
 		}
+	}
+	if paramTy.Nullable && val.Ty.Nullable {
+		// A possibly-absent value into a parameter that can be absent: keep a
+		// carried header as is; a header-less transient is absent exactly when
+		// its data pointer is null (a `null` literal, a RegExp miss).
+		if val.ArrayHeader != "" {
+			return val.ArrayHeader, "0"
+		}
+		lenReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+		sel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", sel, e.emitArrayIsAbsent(val), e.boxArrayValue(val)))
+		return sel, lenReg
 	}
 	return e.arrayArgFromAggregate(val)
 }
@@ -369,6 +422,89 @@ func (e *Emitter) packArrayArg(arg ast.Expression, val Value) (header, lenReg st
 // header (TDD-00127).
 func (e *Emitter) emptyArrayArgHeader() string {
 	return e.newArrayHeader("null", "0")
+}
+
+// omittedArrayArgHeader is the header an omitted `xs?: T[]` argument passes: a
+// null header — the absent array, `undefined` in the callee — when the
+// parameter's type can say so, else the empty array it has always been.
+func (e *Emitter) omittedArrayArgHeader(paramTy Type) string {
+	if paramTy.Nullable {
+		return "null"
+	}
+	return e.emptyArrayArgHeader()
+}
+
+// emitAbsentArrayValue is the `null`/`undefined` value of a nullable array type:
+// the {null,0} aggregate carrying a null header, which is what every absence
+// test consults (emitArrayIsAbsent).
+func (e *Emitter) emitAbsentArrayValue(ty Type) Value {
+	return Value{Ref: "zeroinitializer", Ty: ty, ArrayHeader: "null"}
+}
+
+// emitArrayIsAbsent yields the i1 "this nullable array value is null/undefined".
+// The header decides when the value carries one — a present array, even an
+// empty one, has a header — and the data pointer otherwise (a header-less
+// transient: a RegExp miss, a `find` miss).
+func (e *Emitter) emitArrayIsAbsent(v Value) string {
+	if v.ArrayHeader != "" {
+		return e.ptrIsNull(v.ArrayHeader)
+	}
+	d := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", d, v.Ref))
+	return e.ptrIsNull(d)
+}
+
+// iterableDisplayName renders an iterated expression the way Node names it in
+// "… is not iterable": `xs`, `o.tags`, `this.items`, `f(...)`.
+func iterableDisplayName(expr ast.Expression) string {
+	switch ex := expr.(type) {
+	case *ast.Identifier:
+		return demangleModuleName(ex.Name)
+	case *ast.ThisExpression:
+		return "this"
+	case *ast.MemberExpression:
+		return iterableDisplayName(ex.Object) + "." + ex.Property
+	case *ast.NonNullExpression:
+		return iterableDisplayName(ex.Arg)
+	case *ast.CallExpression:
+		return iterableDisplayName(ex.Callee) + " is not a function or its return value"
+	}
+	return "object"
+}
+
+// emitNotIterableValueGuard is emitNotIterableGuard for an array *value* (a
+// field read, a call result) of a nullable type.
+func (e *Emitter) emitNotIterableValueGuard(expr ast.Expression, v Value) {
+	if !v.Ty.IsArray || !v.Ty.Nullable || e.blockDone {
+		return
+	}
+	e.ensureNullDerefThrow()
+	throwL := e.freshLabel("notiter.throw")
+	okL := e.freshLabel("notiter.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitArrayIsAbsent(v), throwL, okL))
+	e.emitLabel(throwL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw_nullderef(ptr %s)", e.internString(iterableDisplayName(expr)+" is not iterable")))
+	e.emitTerminator("unreachable")
+	e.emitLabel(okL)
+}
+
+// emitNotIterableGuard throws Node's `TypeError: xs is not iterable` when the
+// nullable array binding sym (named name) holds no array — the check `for…of`
+// and spread make before touching the header.
+func (e *Emitter) emitNotIterableGuard(name string, sym Symbol) {
+	if !sym.Ty.Nullable || e.blockDone {
+		return
+	}
+	h := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, sym.Ptr))
+	e.ensureNullDerefThrow()
+	throwL := e.freshLabel("notiter.throw")
+	okL := e.freshLabel("notiter.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(h), throwL, okL))
+	e.emitLabel(throwL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw_nullderef(ptr %s)", e.internString(demangleModuleName(name)+" is not iterable")))
+	e.emitTerminator("unreachable")
+	e.emitLabel(okL)
 }
 
 // bindArrayParam binds an array-typed function/method/closure parameter under
@@ -394,10 +530,26 @@ func (e *Emitter) bindArrayParam(name string, pty Type) {
 // the Value carries it in ArrayHeader — a nested element passed onward (call
 // argument, binding, HOF callback element) then aliases the same array
 // instead of snapshotting (TDD-00127 residual).
+//
+// A null box is an absent element (`[xs.at(9)]`, storeArrayElem): it reads as
+// the {null,0} aggregate carrying the null header, never through the pointer.
 func (e *Emitter) unboxArrayValue(boxPtr string, elemTy Type) Value {
+	return e.loadArrayHeaderOrAbsent(boxPtr, elemTy)
+}
+
+// loadArrayHeaderOrAbsent reads the {data,len} aggregate behind a header that
+// may be null, selecting one shared all-zero cell for the null case —
+// branchless, so it is safe inside a state machine's linear control flow.
+func (e *Emitter) loadArrayHeaderOrAbsent(header string, ty Type) Value {
+	if !e.usedAbsentArrayCell {
+		e.usedAbsentArrayCell = true
+		e.emitGlobal("@__kml_absent_array = internal constant { ptr, i64 } zeroinitializer, align 8")
+	}
+	src := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr @__kml_absent_array, ptr %s", src, e.ptrIsNull(header), header))
 	agg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, boxPtr))
-	return Value{Ref: agg, Ty: elemTy, ArrayHeader: boxPtr}
+	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, src))
+	return Value{Ref: agg, Ty: ty, ArrayHeader: header}
 }
 
 // loadArrayElem loads the value at a GEP'd array-backing-buffer slot
@@ -485,7 +637,9 @@ func (e *Emitter) storeArrayElem(gepReg string, elemTy Type, val Value) {
 		// unbox unguarded.
 		box := val.ArrayHeader
 		if box == "" {
-			box = e.boxArrayValue(val)
+			box = e.arrayReturnHeader(val) // a null box for an absent value
+		} else if val.Ty.Nullable {
+			// keep a carried null header: the element is absent
 		} else {
 			fresh := e.boxArrayValue(val)
 			isNull := e.freshReg()
@@ -677,6 +831,11 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 			if verr != nil {
 				return "", "", verr
 			}
+			if elemTy.UnionMembers != nil {
+				if val, verr = e.coerceChecked(val, elemTy, elem.GetPos(), "array element"); verr != nil {
+					return "", "", verr
+				}
+			}
 			val = e.coerce(val, elemTy)
 			cVal := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cVal, cursorPtr))
@@ -702,7 +861,7 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 	// isn't a supported array element shape (its `{ i1, T }` / boxed storage has
 	// never been wired into the array-element path) — reject cleanly rather than
 	// emitting an invalid store of the aggregate into a bare-scalar slot.
-	if isNullableScalar(elemTy) || elemTy.UnionMembers != nil {
+	if isNullableScalar(elemTy) {
 		return "", 0, fmt.Errorf("%d:%d: a nullable or union array element type (e.g. `(number | null)[]`) is not yet supported — a union is usable as an object field, but not yet as an array element", lit.GetPos().Line, lit.GetPos().Col)
 	}
 	n = int64(len(lit.Elements))
@@ -713,6 +872,11 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 		val, verr := e.emitExprWithObjectHint(elem, elemTy)
 		if verr != nil {
 			return "", 0, verr
+		}
+		if elemTy.UnionMembers != nil {
+			if val, verr = e.coerceChecked(val, elemTy, elem.GetPos(), "array element"); verr != nil {
+				return "", 0, verr
+			}
 		}
 		val = e.coerce(val, elemTy)
 		// A heterogeneous array literal (`[obj, 0, "s"]`) reaches here with an
@@ -1244,6 +1408,10 @@ func (e *Emitter) resolveArrayForHOF(objExpr ast.Expression, pos ast.Pos) (ptrRe
 		if sym.Ty.ElemType != nil {
 			elemTy = *sym.Ty.ElemType
 		}
+		// Walking a binding that holds no array (`for…of`, spread, destructuring
+		// of an omitted `xs?: T[]`) is `TypeError: xs is not iterable`; a method
+		// call already threw its own TypeError at the member access.
+		e.emitNotIterableGuard(id.Name, sym)
 		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 		ptrReg = e.freshReg()
 		lenReg = e.freshReg()
@@ -1261,6 +1429,7 @@ func (e *Emitter) resolveArrayForHOF(objExpr ast.Expression, pos ast.Pos) (ptrRe
 		err = fmt.Errorf("%d:%d: value is not an array", pos.Line, pos.Col)
 		return
 	}
+	e.emitNotIterableValueGuard(objExpr, val)
 	elemTy = TypeI64
 	if val.Ty.ElemType != nil {
 		elemTy = *val.Ty.ElemType

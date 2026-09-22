@@ -37,10 +37,10 @@ func (e *Emitter) ensureResStreamRuntime() {
 	e.ensureMemcpy()
 	e.ensureMemmove()
 	e.ensureSprintf()
-	e.ensureHTTPStreamRuntime()      // __kml_http_send_stream_head + fcntl/write decls
-	e.ensureHTTPSerializeHeaders()   // __kml_http_serialize_headers
-	e.ensureHTTPKeepAliveDecision()  // __kml_http_keepalive_decision
-	e.ensureWStreamRuntime()         // __kml_ws_alloc / _write / _close / _started
+	e.ensureHTTPStreamRuntime()     // __kml_http_send_stream_head + fcntl/write decls
+	e.ensureHTTPSerializeHeaders()  // __kml_http_serialize_headers
+	e.ensureHTTPKeepAliveDecision() // __kml_http_keepalive_decision
+	e.ensureWStreamRuntime()        // __kml_ws_alloc / _write / _close / _started
 	e.ensureConnPokeGlobal()
 	e.ensureErrnoAccessor() // EAGAIN detection in the park-aware write helper
 

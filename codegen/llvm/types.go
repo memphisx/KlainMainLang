@@ -50,7 +50,7 @@ type Type struct {
 	// binding-preserved path FuncHasRest does. FuncParamNames keys the
 	// paramDefaultScratch scope so a default can reference an earlier parameter
 	// (`b = a`); a nil FuncParamDefaults[i] means parameter i has no default.
-	FuncParamNames    []string
+	FuncParamNames []string
 	// FuncParamOptional[i] marks parameter i as omittable at the call site — a
 	// `?`-declared parameter, a defaulted parameter, or a rest slot. A first-class
 	// call site (emitClosureCallByPtr/emitCBCall) rejects a *missing* argument for
@@ -110,6 +110,11 @@ type Type struct {
 	// keeping the IR well-typed while it stays dead (TDD-00087 follow-up).
 	IsNever  bool
 	Nullable bool
+	// UncheckedIndex marks the `T | undefined` an array element read yields: an
+	// out-of-range `a[i]` reads `undefined` at run time, but tsc types the
+	// expression as plain `T` (no noUncheckedIndexedAccess), so the strict
+	// `possibly undefined` gates (TDD-00187) let it through unnarrowed.
+	UncheckedIndex bool
 	// IsPromise marks Promise<T> types (the coroutine handle, IR type ptr).
 	// PromiseType is the T in Promise<T>; nil means Promise<void>.
 	IsPromise   bool
@@ -724,7 +729,39 @@ type Type struct {
 
 // ArrayOf returns an array type whose elements are of the given type.
 func ArrayOf(elem Type) Type {
+	elem = arrayElemType(elem)
 	return Type{IR: "ptr", IsArray: true, ElemType: &elem}
+}
+
+// arrayElemType is the type an array stores for a declared/produced element
+// type. A `(number | undefined)[]` / `(boolean | null)[]` element: the { i1, T }
+// optional is a local-slot shape with no array-element storage, so the element
+// rides the boxed-element array instead — one self-describing NaN box per slot,
+// the union `T | undefined` (TDD-00200's `any[]` storage). Every other element
+// type is stored as itself. A producer that fills a buffer by hand (a HOF's
+// result array) must size, coerce and store against this type, not the raw one.
+func arrayElemType(elem Type) Type {
+	elem = elem.staticIndexType()
+	if !isNullableScalar(elem) {
+		return elem
+	}
+	return Type{IR: TypeAny.IR, IsDynamic: true, UnionMembers: []Type{elem.withoutNullable()},
+		Nullable: true, IsUndefined: elem.IsUndefined}
+}
+
+// staticIndexType is the type tsc gives an element read: the plain `T` behind
+// an UncheckedIndex `T | undefined`. Inferred *declarations* — an array's
+// element type, a function's return type, an object literal's field — take it,
+// so `idx.map(i => vals[i])` stays a `number[]`; the run-time absence survives
+// only where the read is consumed directly. Any other type is returned as is.
+func (t Type) staticIndexType() Type {
+	if !t.UncheckedIndex {
+		return t
+	}
+	t.UncheckedIndex = false
+	t.Nullable = false
+	t.IsUndefined = false
+	return t
 }
 
 // ObjectType returns an object type with the given fields.

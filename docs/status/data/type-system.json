@@ -224,10 +224,10 @@
             "status": "implemented",
             "caveats": [
               "Scalar members (`number`/`string`/`boolean` + `null`/`undefined`), object/interface/class members (one object member ([TDD-00115](../tdd/TDD-00115.md)), or ≥2 as a **discriminated union** sharing a first-position string-literal tag ([TDD-00116](../tdd/TDD-00116.md))), and a `ReadableStream` member ([TDD-00119](../tdd/TDD-00119.md)); array/`ArrayBuffer` members, number-literal tags, and a non-first-position tag aren't supported",
-              "Usable at the top level of a var declaration/function param/return and as an **object field** (checked + boxed at construction, [TDD-00119](../tdd/TDD-00119.md)); as an **array element** it's still rejected (element-level checking not wired)",
               "Flow narrowing is for a union **local** via `typeof`/truthiness/`==null` (if/else branches + early return); a field/element, discriminated-union tag, `switch (typeof x)`, and `as` casts aren't narrowed; an un-narrowed object union has no field access ([TDD-00114](../tdd/TDD-00114.md))"
             ],
             "notes": [
+              "Usable at the top level of a var declaration/function param/return, as an **object field** ([TDD-00119](../tdd/TDD-00119.md)) and as an **array element** (`(number \\| string)[]`, a discriminated `(A \\| B)[]`, and `(number \\| undefined)[]` whose absent elements are real `undefined`s) — every write (literal, `push`, `xs[i] = v`) is checked against the member set and boxed ([ADR-01039](../adr/ADR-01039.md))",
               "Same runtime box as `any`/`unknown` with a checked member set on top ([TDD-00043](../tdd/TDD-00043.md)/[ADR-00136](../adr/ADR-00136.md)); a narrowed local unboxes to the concrete member ([ADR-00354](../adr/ADR-00354.md)), an object member to its typed pointer ([ADR-00355](../adr/ADR-00355.md))",
               "An uninitialized union binding reads as boxed `undefined` (JS `let x;` semantics) until assigned ([ADR-00475](../adr/ADR-00475.md))"
             ]

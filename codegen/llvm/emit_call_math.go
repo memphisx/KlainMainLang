@@ -51,11 +51,28 @@ func (e *Emitter) emitMathCall(property string, args []ast.Expression, pos ast.P
 // emitMathClz32 counts leading zero bits in the ToUint32 of its argument,
 // via LLVM's own llvm.ctlz.i32 intrinsic (the "is_zero_undef" second operand
 // is false, so clz32(0) correctly returns 32, matching real JS).
+// emitMathOperand evaluates one Math.* argument. Every Math function ToNumbers
+// its arguments, so a `T | undefined` scalar — an element read that may be out
+// of range, a Map lookup — is demoted from its `{ i1, T }` aggregate to the bare
+// payload here: an absent float payload is NaN, which is what ToNumber(undefined)
+// is, so `Math.floor(xs[9])` is NaN as in Node. Handing the aggregate itself to
+// libm was invalid IR.
+func (e *Emitter) emitMathOperand(arg ast.Expression) (Value, error) {
+	v, err := e.emitExpr(arg)
+	if err != nil {
+		return Value{}, err
+	}
+	if isNullableScalar(v.Ty) {
+		v = e.nullableScalarPayloadOf(v)
+	}
+	return v, nil
+}
+
 func (e *Emitter) emitMathClz32(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Math.clz32 expects 1 argument", pos.Line, pos.Col)
 	}
-	val, err := e.emitExpr(args[0])
+	val, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
@@ -76,7 +93,7 @@ func (e *Emitter) emitMathFround(args []ast.Expression, pos ast.Pos) (Value, err
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Math.fround expects 1 argument", pos.Line, pos.Col)
 	}
-	val, err := e.emitExpr(args[0])
+	val, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
@@ -95,11 +112,11 @@ func (e *Emitter) emitMathImul(args []ast.Expression, pos ast.Pos) (Value, error
 	if len(args) != 2 {
 		return Value{}, fmt.Errorf("%d:%d: Math.imul expects 2 arguments", pos.Line, pos.Col)
 	}
-	aVal, err := e.emitExpr(args[0])
+	aVal, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
-	bVal, err := e.emitExpr(args[1])
+	bVal, err := e.emitMathOperand(args[1])
 	if err != nil {
 		return Value{}, err
 	}
@@ -118,7 +135,7 @@ func (e *Emitter) emitMathRound(fn string, args []ast.Expression, pos ast.Pos) (
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Math.%s expects 1 argument", pos.Line, pos.Col, fn)
 	}
-	val, err := e.emitExpr(args[0])
+	val, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
@@ -160,7 +177,7 @@ func (e *Emitter) emitMathAbs(args []ast.Expression, pos ast.Pos) (Value, error)
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Math.abs expects 1 argument", pos.Line, pos.Col)
 	}
-	val, err := e.emitExpr(args[0])
+	val, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
@@ -184,7 +201,7 @@ func (e *Emitter) emitMathUnaryFloat(fn string, args []ast.Expression, pos ast.P
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Math.%s expects 1 argument", pos.Line, pos.Col, fn)
 	}
-	val, err := e.emitExpr(args[0])
+	val, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
@@ -201,7 +218,7 @@ func (e *Emitter) emitMathCbrt(args []ast.Expression, pos ast.Pos) (Value, error
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Math.cbrt expects 1 argument", pos.Line, pos.Col)
 	}
-	val, err := e.emitExpr(args[0])
+	val, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
@@ -216,11 +233,11 @@ func (e *Emitter) emitMathBinaryFloat(fn string, args []ast.Expression, pos ast.
 	if len(args) != 2 {
 		return Value{}, fmt.Errorf("%d:%d: Math.%s expects 2 arguments", pos.Line, pos.Col, fn)
 	}
-	v1, err := e.emitExpr(args[0])
+	v1, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
-	v2, err := e.emitExpr(args[1])
+	v2, err := e.emitMathOperand(args[1])
 	if err != nil {
 		return Value{}, err
 	}
@@ -255,7 +272,7 @@ func (e *Emitter) emitMathMinMax(fn string, args []ast.Expression, pos ast.Pos) 
 	vals := make([]Value, 0, len(args))
 	anyFloat := false
 	for _, arg := range args {
-		v, err := e.emitExpr(arg)
+		v, err := e.emitMathOperand(arg)
 		if err != nil {
 			return Value{}, err
 		}
@@ -335,7 +352,7 @@ func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast
 			}
 			items = append(items, mmItem{spread: true, ptr: ptrReg, length: lenReg, elemTy: elemTy})
 		} else {
-			v, err := e.emitExpr(arg)
+			v, err := e.emitMathOperand(arg)
 			if err != nil {
 				return Value{}, err
 			}
@@ -433,7 +450,7 @@ func (e *Emitter) emitMathSign(args []ast.Expression, pos ast.Pos) (Value, error
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Math.sign expects 1 argument", pos.Line, pos.Col)
 	}
-	val, err := e.emitExpr(args[0])
+	val, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
@@ -506,15 +523,15 @@ func (e *Emitter) emitMathClamp(args []ast.Expression, pos ast.Pos) (Value, erro
 	if len(args) != 3 {
 		return Value{}, fmt.Errorf("%d:%d: Math.clamp expects 3 arguments (value, min, max)", pos.Line, pos.Col)
 	}
-	vVal, err := e.emitExpr(args[0])
+	vVal, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
-	loVal, err := e.emitExpr(args[1])
+	loVal, err := e.emitMathOperand(args[1])
 	if err != nil {
 		return Value{}, err
 	}
-	hiVal, err := e.emitExpr(args[2])
+	hiVal, err := e.emitMathOperand(args[2])
 	if err != nil {
 		return Value{}, err
 	}

@@ -155,7 +155,7 @@ func TestE2EErrorToString(t *testing.T) {
 	assertOutput(t, `
 console.log(new Error("x").toString())
 console.log(String(new RangeError("r")))
-console.log(` + "`" + `err: ${new TypeError("bad")}` + "`" + `)
+console.log(`+"`"+`err: ${new TypeError("bad")}`+"`"+`)
 const e = new Error("boom")
 console.log("" + e)
 console.log(new Error("").toString())

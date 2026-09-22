@@ -24,9 +24,9 @@ var catRe = regexp.MustCompile(`^(.+?) (\d+)/(\d+) \((~?)(\d+)%\)$`)
 const strictSentence = "A row counts toward Strict only when its **Caveats** column is empty."
 
 type catFig struct {
-	name       string
-	n, d, pct  int
-	approx     bool
+	name      string
+	n, d, pct int
+	approx    bool
 }
 
 // stripBanner requires the generated-file banner as the first chunk and
@@ -62,7 +62,7 @@ func importPage(path, src string) (*StatusArea, error) {
 
 	// Observed coverage figures, verified against the rows after all tables
 	// are parsed.
-	var obsStd []catFig            // standard: [loose, strict] (name "")
+	var obsStd []catFig                 // standard: [loose, strict] (name "")
 	var obsCats, obsStrictCats []catFig // multiCategory
 
 	for ci := 0; ci < len(chunks); ci++ {

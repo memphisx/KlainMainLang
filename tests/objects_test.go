@@ -666,6 +666,9 @@ console.log(c.items.length)
 `, "4")
 }
 
+// A null receiver short-circuits the whole chain: `cc?.items.length` is
+// `undefined` (as in JS), not the zero-shaped array's length 0 this test once
+// pinned (ADR-01037).
 func TestE2EArrayTypedFieldOptionalChaining(t *testing.T) {
 	assertOutput(t, `
 interface Container { items: number[] }
@@ -676,7 +679,7 @@ const items: number[] = [1, 2, 3]
 const c: Container = { items: items }
 printLen(c)
 printLen(null)
-`, "3\n0")
+`, "3\nundefined")
 }
 
 func TestE2EArrayTypedFieldReturnedFromFunction(t *testing.T) {

@@ -96,7 +96,8 @@
             "feature": "`fs.rmSync` / `realpathSync` / `mkdtempSync` / `symlinkSync` / `linkSync` / `readlinkSync` / `chmodSync` / `truncateSync` / `accessSync`",
             "status": "implemented",
             "notes": [
-              "`linkSync(existing, newPath)` makes a hard link — a second name for one inode, so `nlink` rises and the content outlives unlinking the original; on Windows it is `CreateHardLinkW` (unprivileged, unlike `symlinkSync` which needs Developer Mode) ([ADR-00751](../adr/ADR-00751.md))"
+              "`linkSync(existing, newPath)` makes a hard link — a second name for one inode, so `nlink` rises and the content outlives unlinking the original; on Windows it is `CreateHardLinkW` (unprivileged, unlike `symlinkSync` which needs Developer Mode) ([ADR-00751](../adr/ADR-00751.md))",
+              "`symlinkSync(target, path[, type])` takes Node's `type` (`'file'` \\| `'dir'` \\| `'junction'` \\| `null`): ignored on POSIX, as in Node; on Windows `'junction'` makes an NTFS junction — a directory link that needs no privilege, its relative target resolved against the link's directory — and `readlinkSync` reports a link's target from the name the kernel follows, with `\\??\\UNC\\…` read back as `\\\\server\\share` ([ADR-01030](../adr/ADR-01030.md))"
             ],
             "caveats": [
               "`rmSync` options must be a `{recursive, force}` boolean-literal object; no `maxRetries`/`retryDelay` (a Windows-centric retry knob — the retryable errors don't arise on the POSIX removal path)",
@@ -109,6 +110,7 @@
             "notes": [
               "On Windows, files open through `CreateFileW` with `FILE_SHARE_DELETE`, so a file this process holds open can still be unlinked or renamed (matching POSIX/Node); `a`/`a+` use a kernel append (`FILE_APPEND_DATA`), not a CRT seek-then-write ([ADR-00743](../adr/ADR-00743.md))",
               "On Windows, a path at/over `MAX_PATH` gets the `\\\\?\\` extended-length prefix (after `GetFullPathNameW` normalization), so fs ops on paths longer than 260 chars work instead of failing path-too-long — across every fs call, not just `openSync` ([ADR-00748](../adr/ADR-00748.md))",
+              "On Windows an unlinked or renamed-over file's name is released at once even while another descriptor holds it open (POSIX-semantics delete/rename, libuv's approach), a cross-volume `renameSync` is `EXDEV`, `err.code` follows libuv's Win32→errno table (access denied is `EPERM`; an unmapped error is `UNKNOWN`), `err.errno` is libuv's Windows numbering (`ENOENT` → `-4058`), `process.chdir` maintains the per-drive `=X:` directories, and `stat.blocks` is the allocation size ([ADR-01030](../adr/ADR-01030.md), [ADR-01031](../adr/ADR-01031.md))",
               "A numeric `openSync` flag mask can be built from `fs.constants`' `O_*` members (`O_RDONLY`/`O_WRONLY`/`O_RDWR`/`O_CREAT`/`O_TRUNC`/`O_APPEND`/`O_EXCL`/… ), each resolved to the target OS's `<fcntl.h>` bits — the same bits the string flags expand to ([ADR-00987](../adr/ADR-00987.md))"
             ],
             "caveats": [
@@ -201,6 +203,7 @@
               "Binary-safe: composes the raw `__kml_fs_read_file_raw`/`__kml_fs_write_file_bytes` helpers ([ADR-00094](../adr/ADR-00094.md)), threading the source's exact byte count, so a file with an embedded null byte copies back whole — no new C-level I/O code",
               "The optional `mode` bitmask is honoured for `COPYFILE_EXCL` (bit `1`): the copy fails with `EEXIST` if `dest` already exists (an atomic `O_EXCL` guard), instead of the default overwrite ([ADR-00788](../adr/ADR-00788.md))",
               "A failure surfaces as Node's two-path `copyfile` error (a pre-flight guard probes both ends), so the `.message` (`ENOENT: …, copyfile '<src>' -> '<dest>'`), `err.syscall` (`'copyfile'`), `err.path` (source), and `err.dest` (destination) all match ([ADR-01000](../adr/ADR-01000.md))",
+              "On Windows the transfer is the OS copy (`CopyFileW`, as libuv's), so the destination carries the source's attributes, timestamps and alternate data streams — a read-only source yields a read-only copy, as in Node ([ADR-01030](../adr/ADR-01030.md))",
               "See [ADR-00027](../adr/ADR-00027.md)/[ADR-00525](../adr/ADR-00525.md)"
             ]
           },

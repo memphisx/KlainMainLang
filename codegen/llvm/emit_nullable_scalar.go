@@ -222,6 +222,17 @@ func (e *Emitter) boxNullableScalarFromValue(v Value, ty Type) string {
 	if isNullableScalar(v.Ty) && v.Ty.IR == ty.IR {
 		return v.Ref // already a matching aggregate
 	}
+	if isNullableScalar(v.Ty) {
+		// A different payload (`{ i1, i64 }` into a `number | undefined` slot):
+		// coerce converts the payload and keeps the presence bit — boxing the
+		// demoted payload as present turned `undefined` into `0`.
+		return e.coerce(v, ty).Ref
+	}
+	if v.Ty.IsDynamic {
+		// A box (`any`, a `(number | undefined)[]` element): coerce reads the tag,
+		// so a boxed undefined/null arrives absent rather than as a present NaN.
+		return e.coerce(v, ty).Ref
+	}
 	bare := e.coerce(v, ty.withoutNullable())
 	return e.makeNullableScalarAgg(ty, "true", bare.Ref)
 }
@@ -392,11 +403,88 @@ func (e *Emitter) storeNullableScalarAggregate(ptr string, ty Type, aggRef strin
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", nullableScalarStorageIR(ty), aggRef, ptr, storageAlign(ty)))
 }
 
+// nullCoalesceUnion reports the result type of `left ?? right` when the two
+// operands are scalars of different JS kinds (`n ?? "none"`, `s ?? 0`): no
+// single slot holds both, so the result is the constrained union
+// `Left | Right` — the same NaN-boxed type a `number | string` annotation
+// produces — and each branch boxes its own value into it. leftBare is the left
+// operand's type with its nullability removed. ok is false when the operands
+// share a kind (the existing same-slot paths) or either is not a scalar union
+// member. Shared by emission and inferExprType so the two cannot disagree.
+func nullCoalesceUnion(leftBare, right Type) (Type, bool) {
+	kind := func(t Type) string {
+		if t.IR == "ptr" && !isStringTy(t) {
+			return ""
+		}
+		return scalarTypeKind(t)
+	}
+	rightBare := right.withoutNullable()
+	lk, rk := kind(leftBare), kind(rightBare)
+	if lk == "" || rk == "" || lk == rk {
+		return Type{}, false
+	}
+	return Type{IR: TypeAny.IR, IsDynamic: true, UnionMembers: []Type{leftBare, rightBare}, Nullable: right.Nullable}, true
+}
+
+// emitNullCoalesceUnion emits `left ?? right` with a union result (see
+// nullCoalesceUnion): present selects the already-evaluated left value, and the
+// right operand is evaluated only when the left is absent.
+func (e *Emitter) emitNullCoalesceUnion(present string, left Value, rightExpr ast.Expression, uTy Type) (Value, error) {
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, uTy.IR, uTy.Align()))
+
+	presentL := e.freshLabel("nullc.present")
+	absentL := e.freshLabel("nullc.absent")
+	mergeL := e.freshLabel("nullc.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, presentL, absentL))
+
+	e.emitLabel(absentL)
+	right, err := e.emitPreserveNullableOperand(rightExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	var rb Value
+	if right.Ty.IR == "ptr" && right.Ty.Nullable && !right.Ty.IsNull {
+		// A `string | undefined` right operand: its absence is a run-time null
+		// pointer, while the box reads the static `undefined` flag as the literal
+		// — so a present string boxed as `undefined`. Box the two cases apart.
+		undef, uerr := e.emitExpr(ast.NewNullLiteral(true, rightExpr.GetPos()))
+		if uerr != nil {
+			return Value{}, uerr
+		}
+		asUndef := e.coerce(undef, uTy)
+		asValue := e.coerce(Value{Ref: right.Ref, Ty: right.Ty.withoutNullable()}, uTy)
+		isNull := e.ptrIsNull(right.Ref)
+		sel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s %s", sel, isNull, uTy.IR, asUndef.Ref, uTy.IR, asValue.Ref))
+		rb = Value{Ref: sel, Ty: uTy}
+	} else {
+		rb = e.coerce(right, uTy)
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", uTy.IR, rb.Ref, resPtr, uTy.Align()))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(presentL)
+	lb := e.coerce(left, uTy)
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", uTy.IR, lb.Ref, resPtr, uTy.Align()))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, uTy.IR, resPtr, uTy.Align()))
+	return Value{Ref: result, Ty: uTy}, nil
+}
+
 // emitNullCoalesceScalar emits `left ?? right` for a nullable-scalar left
 // operand whose presence bit is presentRef and whose payload (already loaded)
 // is payload. The right side is evaluated only when left is absent.
 func (e *Emitter) emitNullCoalesceScalar(presentRef string, payload Value, rightExpr ast.Expression) (Value, error) {
 	base := payload.Ty // already the bare (non-nullable) payload type
+	// Operands of different kinds (`n ?? "none"`): the result is their union.
+	// Coercing the string into the number's slot emitted `store double <ptr>`.
+	if uTy, ok := nullCoalesceUnion(base, e.inferExprType(rightExpr)); ok {
+		return e.emitNullCoalesceUnion(presentRef, payload, rightExpr, uTy)
+	}
 	// If the right operand is itself a nullable scalar (`a ?? b` where b is
 	// `T | undefined`, e.g. a chained `m.get(x) ?? m.get(y) ?? d`), the result
 	// stays `T | undefined` — `undefined ?? undefined` is `undefined`, not the

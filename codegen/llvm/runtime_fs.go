@@ -43,6 +43,7 @@ func errnoCodePairs() []errnoCodePair {
 		{int(syscall.EAGAIN), "EAGAIN"}, {int(syscall.EPIPE), "EPIPE"},
 		{int(syscall.EFBIG), "EFBIG"}, {int(syscall.ENODEV), "ENODEV"},
 		{int(syscall.ESPIPE), "ESPIPE"}, {int(syscall.EMLINK), "EMLINK"},
+		{int(syscall.ESRCH), "ESRCH"}, {int(syscall.ECHILD), "ECHILD"},
 		// Socket/bind errnos (TDD-00215 Stage 2: server 'error' event .code).
 		{int(syscall.EADDRINUSE), "EADDRINUSE"}, {int(syscall.EADDRNOTAVAIL), "EADDRNOTAVAIL"},
 		{int(syscall.ECONNRESET), "ECONNRESET"}, {int(syscall.ECONNREFUSED), "ECONNREFUSED"},
@@ -60,6 +61,7 @@ var libuvErrnoDesc = map[string]string{
 	"EPERM":         "operation not permitted",
 	"ENOENT":        "no such file or directory",
 	"EIO":           "i/o error",
+	"UNKNOWN":       "unknown error",
 	"EBADF":         "bad file descriptor",
 	"EACCES":        "permission denied",
 	"EEXIST":        "file already exists",
@@ -112,6 +114,70 @@ entry:
 %sunknown:
   ret ptr null
 }`, cases.String(), blocks.String()))
+	e.emitUVErrno()
+}
+
+// uvWinErrno is libuv's fixed Windows errno numbering (uv/errno.h: the UV__E*
+// fallbacks, which Windows always takes). Node's `err.errno` is this value
+// there — `ENOENT` is -4058, not -2 — so the error-object boundary translates
+// the shim's Linux-numbered errno through it. Anything libuv has no name for is
+// UV_UNKNOWN.
+var uvWinErrno = map[string]int{
+	"E2BIG": -4093, "EACCES": -4092, "EADDRINUSE": -4091, "EADDRNOTAVAIL": -4090,
+	"EAFNOSUPPORT": -4089, "EAGAIN": -4088, "EALREADY": -4084, "EBADF": -4083,
+	"EBUSY": -4082, "ECANCELED": -4081, "ECONNABORTED": -4079, "ECONNREFUSED": -4078,
+	"ECONNRESET": -4077, "EDESTADDRREQ": -4076, "EEXIST": -4075, "EFAULT": -4074,
+	"EHOSTUNREACH": -4073, "EINTR": -4072, "EINVAL": -4071, "EIO": -4070,
+	"EISCONN": -4069, "EISDIR": -4068, "ELOOP": -4067, "EMFILE": -4066,
+	"EMSGSIZE": -4065, "ENAMETOOLONG": -4064, "ENETDOWN": -4063, "ENETUNREACH": -4062,
+	"ENFILE": -4061, "ENOBUFS": -4060, "ENODEV": -4059, "ENOENT": -4058,
+	"ENOMEM": -4057, "ENONET": -4056, "ENOSPC": -4055, "ENOSYS": -4054,
+	"ENOTCONN": -4053, "ENOTDIR": -4052, "ENOTEMPTY": -4051, "ENOTSOCK": -4050,
+	"ENOTSUP": -4049, "EOPNOTSUPP": -4049, "EPERM": -4048, "EPIPE": -4047,
+	"EPROTO": -4046, "EPROTONOSUPPORT": -4045, "EPROTOTYPE": -4044, "EROFS": -4043,
+	"ESHUTDOWN": -4042, "ESPIPE": -4041, "ESRCH": -4040, "ETIMEDOUT": -4039,
+	"ETXTBSY": -4038, "EXDEV": -4037, "EFBIG": -4036, "ENOPROTOOPT": -4035,
+	"ERANGE": -4034, "ENXIO": -4033, "EMLINK": -4032, "EHOSTDOWN": -4031,
+	"ENOTTY": -4029, "EILSEQ": -4027, "EOVERFLOW": -4026,
+}
+
+const uvWinUnknown = -4094
+
+// emitUVErrno defines __kml_uv_errno(i32 errno) -> i32: the value Node reports
+// as `err.errno`. On POSIX libuv's numbers are the negated OS errno; on Windows
+// they are libuv's own table (uvWinErrno).
+func (e *Emitter) emitUVErrno() {
+	if targetGOOS() != "windows" {
+		e.emitGlobal(`define i32 @__kml_uv_errno(i32 %e) {
+entry:
+  %n = sub i32 0, %e
+  ret i32 %n
+}`)
+		return
+	}
+	seen := map[int]bool{}
+	var cases, blocks strings.Builder
+	for _, p := range errnoCodePairs() {
+		uv, ok := uvWinErrno[p.name]
+		if !ok || seen[p.v] {
+			continue
+		}
+		seen[p.v] = true
+		cases.WriteString(fmt.Sprintf("    i32 %d, label %%uv_%s\n", p.v, p.name))
+		blocks.WriteString(fmt.Sprintf("uv_%s:\n  ret i32 %d\n", p.name, uv))
+	}
+	e.emitGlobal(fmt.Sprintf(`define i32 @__kml_uv_errno(i32 %%e) {
+entry:
+  %%zero = icmp eq i32 %%e, 0
+  br i1 %%zero, label %%none, label %%look
+none:
+  ret i32 0
+look:
+  switch i32 %%e, label %%unknown [
+%s  ]
+%sunknown:
+  ret i32 %d
+}`, cases.String(), blocks.String(), uvWinUnknown))
 }
 
 // ensureErrnoDesc declares __kml_errno_desc(i32 errno) -> ptr: the libuv
@@ -267,7 +333,7 @@ entry:
   store ptr %%syscall, ptr %%errobj.syscall, align 8
   %%errobj.path = getelementptr %s, ptr %%errobj, i32 0, i32 7
   store ptr %%path, ptr %%errobj.path, align 8
-  %%errno_neg = sub i32 0, %%errno_val
+  %%errno_neg = call i32 @__kml_uv_errno(i32 %%errno_val)
   %%errno_negd = sitofp i32 %%errno_neg to double
   %%errobj.errno = getelementptr %s, ptr %%errobj, i32 0, i32 8
   store double %%errno_negd, ptr %%errobj.errno, align 8
@@ -1723,6 +1789,30 @@ ok:
 		truncateDesc, e.internString("open"), accessDesc, e.internString("access")))
 }
 
+// ensureFsCopyFileOS declares __kml_fs_copy_file_os(src, dest): the Windows
+// transfer half of fs.copyFileSync, the shim's CopyFileW, throwing Node's
+// two-path `copyfile` error on failure.
+func (e *Emitter) ensureFsCopyFileOS() {
+	if e.usedFsCopyFileOS {
+		return
+	}
+	e.usedFsCopyFileOS = true
+	e.ensureFsThrow()
+	e.emitGlobal("declare i32 @__kml_win_copyfile(ptr, ptr)")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_fs_copy_file_os(ptr %%src, ptr %%dest) {
+entry:
+  %%r = call i32 @__kml_win_copyfile(ptr %%src, ptr %%dest)
+  %%bad = icmp ne i32 %%r, 0
+  br i1 %%bad, label %%fail, label %%ok
+ok:
+  ret void
+fail:
+  call void @__kml_fs_throw2(ptr %s, ptr %s, ptr %%src, ptr %%dest)
+  unreachable
+}`, e.internString("cannot copy file"), e.internString("copyfile")))
+}
+
 // ensureFsCopyFileGuard declares __kml_fs_copy_file_guard(src, dest, excl): the
 // pre-flight validation for fs.copyFileSync, run before the binary-safe
 // read+write composition fills the copy. It probes both ends so any failure
@@ -1734,6 +1824,7 @@ ok:
 //   - opens dest O_WRONLY|O_CREAT|O_TRUNC (+O_EXCL when `excl`, the COPYFILE_EXCL
 //     mode bit — ADR-00788): catches a missing dest parent, an unwritable dest,
 //     a directory dest, and the EEXIST of an existing dest under COPYFILE_EXCL.
+//
 // Both descriptors are closed immediately; the subsequent
 // __kml_fs_read_file_raw/__kml_fs_write_file_bytes then do the real transfer
 // (and, under excl, fill the empty file this guard atomically created). Uses
@@ -2064,7 +2155,8 @@ var linuxErrnoPairs = [][2]interface{}{
 	{23, "ENFILE"}, {28, "ENOSPC"}, {30, "EROFS"}, {16, "EBUSY"}, {39, "ENOTEMPTY"},
 	{40, "ELOOP"}, {36, "ENAMETOOLONG"}, {18, "EXDEV"}, {11, "EAGAIN"}, {32, "EPIPE"},
 	{27, "EFBIG"}, {19, "ENODEV"}, {29, "ESPIPE"}, {31, "EMLINK"},
-	{12, "ENOMEM"}, {14, "EFAULT"}, {38, "ENOSYS"}, {115, "EINPROGRESS"},
+	{4049, "ENOTSUP"}, {4094, "UNKNOWN"}, // the shim's L_UNKNOWN: a Win32 error libuv has no name for
+	{3, "ESRCH"}, {10, "ECHILD"}, {12, "ENOMEM"}, {14, "EFAULT"}, {38, "ENOSYS"}, {115, "EINPROGRESS"},
 	// Socket codes the expanded WSA→errno table can now produce (ADR-00742),
 	// so err.code on a network error matches Node on Windows.
 	{98, "EADDRINUSE"}, {99, "EADDRNOTAVAIL"}, {100, "ENETDOWN"},

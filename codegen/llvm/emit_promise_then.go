@@ -359,7 +359,7 @@ catch:
   %%etag64 = zext i8 %%etag to i64
   %%ev0_p = getelementptr %s, ptr %%prom, i32 0, i32 2
   store i64 %%epay, ptr %%ev0_p, align 8
-  %%ev1_p = getelementptr ` + promiseStructIR + `, ptr %%prom, i32 0, i32 3
+  %%ev1_p = getelementptr `+promiseStructIR+`, ptr %%prom, i32 0, i32 3
   store i64 %%etag64, ptr %%ev1_p, align 8
   call void @__kml_promise_settle(ptr %%prom, i64 2)
   ret void

@@ -45,8 +45,9 @@ const (
 	taskJmpStk       = 10 // this task's own jmpbuf stack (fiber-safe exceptions)
 	taskSavedJmpTop  = 11 // jmp_top saved across suspension
 	taskAsyncCtx     = 12 // AsyncLocalStorage context-frame head (TDD-00168) — inherited at spawn, survives await with the task
-	taskStructBytes  = 104
-	taskStructIR     = "{ ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr }"
+	taskStackSize    = 13 // bytes in this task's stack — the module task's is far larger than taskStackBytes (TDD-00224)
+	taskStructBytes  = 112
+	taskStructIR     = "{ ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr, i64 }"
 	// promise resolved: 0 = pending, 1 = fulfilled (v0/v1 hold the value), 2 =
 	// rejected (v0 holds the error object pointer's bits) — TDD-00083 Stage 2.
 	// Field 4 (reactions) is the head of a { ptr closure, ptr next } list of
@@ -137,6 +138,11 @@ none:
 // and/or not microtasks. When the real runtimes are present their definitions are
 // used and the corresponding stub is skipped. Called once at program finalization.
 func (e *Emitter) emitLoopTaskStubs() {
+	// A top-level await's tick (@__kml_microtask_tick) in a program that never
+	// queues a microtask: there is nothing to run.
+	if e.needMicrotaskTick && !e.usedMicrotasks {
+		e.emitGlobal("define void @__kml_microtask_tick() {\nentry:\n  ret void\n}")
+	}
 	// The scheduler asks @__kml_group_satisfied about a task parked on a fetch
 	// group; without the combinator runtime no task ever parks on one.
 	if e.usedTaskRuntime && !e.usedPromiseCombinators {
@@ -174,6 +180,7 @@ func (e *Emitter) emitLoopTaskStubs() {
 		e.emitGlobal("@__kml_task_active = internal thread_local global i64 0, align 8")
 		e.emitGlobal("define void @__kml_task_sched_step() {\nentry:\n  ret void\n}")
 		e.emitGlobal("define i1 @__kml_task_resumable() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define i1 @__kml_task_holds_loop() {\nentry:\n  ret i1 0\n}")
 	}
 	if !e.usedMicrotasks {
 		e.emitGlobal("define void @__kml_drain_microtasks() {\nentry:\n  ret void\n}")
@@ -273,7 +280,7 @@ func (e *Emitter) ensureTaskRuntime() {
 		if !e.isGCMode() {
 			return ""
 		}
-		return fmt.Sprintf("\n  %%__gchigh = getelementptr i8, ptr %s, i64 %d\n  %s", stackReg, taskStackBytes, e.gcSBStore("%__gchigh"))
+		return fmt.Sprintf("\n  %%__gchigh = getelementptr i8, ptr %s, i64 %%stackBytes\n  %s", stackReg, e.gcSBStore("%__gchigh"))
 	}
 	gcRestoreAfterSwap := ""
 	if e.isGCMode() {
@@ -298,10 +305,12 @@ main:
 fiber:
   %%stk_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
   %%stk = load ptr, ptr %%stk_p, align 8
-  %%high = getelementptr i8, ptr %%stk, i64 %d
+  %%stksz_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
+  %%stksz = load i64, ptr %%stksz_p, align 8
+  %%high = getelementptr i8, ptr %%stk, i64 %%stksz
   %s
   ret void
-}`, e.gcSBStore("%orig"), taskStructIR, taskStack, taskStackBytes, e.gcSBStore("%high")))
+}`, e.gcSBStore("%orig"), taskStructIR, taskStack, taskStructIR, taskStackSize, e.gcSBStore("%high")))
 	}
 
 	// @__kml_task_trampoline() : makecontext entry. Reads the just-launched task
@@ -382,17 +391,25 @@ nowake:
 	e.emitGlobal(fmt.Sprintf(`
 define ptr @__kml_spawn_task(ptr %%fn, ptr %%args, ptr %%promiseSlot) {
 entry:
+  %%t = call ptr @__kml_spawn_task_ex(ptr %%fn, ptr %%args, ptr %%promiseSlot, i64 %d, ptr @__kml_task_trampoline)
+  ret ptr %%t
+}
+
+define ptr @__kml_spawn_task_ex(ptr %%fn, ptr %%args, ptr %%promiseSlot, i64 %%stackBytes, ptr %%tramp) {
+entry:
   %%t = call ptr @malloc(i64 %d)
   %%ctx = call ptr @malloc(i64 %d)
-  %%stack = call ptr @malloc(i64 %d)
+  %%stack = call ptr @malloc(i64 %%stackBytes)
   call void @getcontext(ptr %%ctx)
   %%ss_sp_p = getelementptr i8, ptr %%ctx, i64 %d
   store ptr %%stack, ptr %%ss_sp_p, align 8
   %%ss_size_p = getelementptr i8, ptr %%ctx, i64 %d
-  store i64 %d, ptr %%ss_size_p, align 8
+  store i64 %%stackBytes, ptr %%ss_size_p, align 8
   %%uc_link_p = getelementptr i8, ptr %%ctx, i64 %d
   store ptr @__kml_main_ctx, ptr %%uc_link_p, align 8
-  call void (ptr, ptr, i32, ...) @makecontext(ptr %%ctx, ptr @__kml_task_trampoline, i32 0)
+  call void (ptr, ptr, i32, ...) @makecontext(ptr %%ctx, ptr %%tramp, i32 0)
+  %%stksz_p = getelementptr %s, ptr %%t, i32 0, i32 %d
+  store i64 %%stackBytes, ptr %%stksz_p, align 8
 
   %%ctx_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   store ptr %%ctx, ptr %%ctx_p, align 8
@@ -459,10 +476,14 @@ __als_done:
   store ptr %%prev, ptr @__kml_current_task, align 8%s
   store ptr %%callerStk, ptr @__kml_cur_jmp_stk, align 8
   store i32 %%callerTop, ptr @__kml_jmp_top, align 4
+  ; ran to completion without parking: its stack is already dead
+  call void @__kml_task_reclaim(ptr %%t)
   ret ptr %%t
 }`,
-		taskStructBytes, ctxSize, taskStackBytes,
-		ssSpOff, ssSizeOff, taskStackBytes, ucLinkOff,
+		taskStackBytes,
+		taskStructBytes, ctxSize,
+		ssSpOff, ssSizeOff, ucLinkOff,
+		taskStructIR, taskStackSize,
 		taskStructIR, taskCtx, taskStructIR, taskStack, taskStructIR, taskPromiseSlot,
 		taskStructIR, taskState, taskStructIR, taskPendingFetch, taskStructIR, taskPendingGroup,
 		taskStructIR, taskPendingProm, taskStructIR, taskFn, taskStructIR, taskArgs,
@@ -500,6 +521,90 @@ app:
   store i64 %act1, ptr @__kml_task_active, align 8
   ret void
 }`)
+
+	// @__kml_ctx_release(ptr %ctx): give back whatever the platform holds for a
+	// context beyond the IR-allocated blocks. POSIX ucontext holds nothing; on
+	// Windows the context is a Win32 fiber with an OS-owned stack (win32io.c),
+	// which only DeleteFiber returns.
+	if targetGOOS() == "windows" {
+		e.emitGlobal("declare void @__kml_ctx_release(ptr)")
+	} else {
+		e.emitGlobal("define internal void @__kml_ctx_release(ptr %ctx) {\nentry:\n  ret void\n}")
+	}
+
+	// @__kml_task_reclaim(ptr %t): called by whoever swapped into %t, once the
+	// swap has returned and the swapper's own jmpbuf stack / GC stack bottom are
+	// restored. A finished task (state 2) is off its stack for good — it left
+	// through @__kml_task_finish / @__kml_task_reject — so its fiber stack,
+	// context and jmpbuf stack are freed here. Without this every coroutine call
+	// kept its 256 KiB stack for the life of the process. The task struct itself
+	// stays: a promise's waiter field can still name a task that has since
+	// finished (a Promise.race loser settling late), and it is written through.
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_task_reclaim(ptr %%t) {
+entry:
+  %%st_p = getelementptr %s, ptr %%t, i32 0, i32 %d
+  %%st = load i64, ptr %%st_p, align 8
+  %%isdone = icmp eq i64 %%st, 2
+  br i1 %%isdone, label %%chk, label %%ret
+chk:
+  %%stk_p = getelementptr %s, ptr %%t, i32 0, i32 %d
+  %%stk = load ptr, ptr %%stk_p, align 8
+  %%has = icmp ne ptr %%stk, null
+  br i1 %%has, label %%rel, label %%ret
+rel:
+  %%ctx_p = getelementptr %s, ptr %%t, i32 0, i32 %d
+  %%ctx = load ptr, ptr %%ctx_p, align 8
+  call void @__kml_ctx_release(ptr %%ctx)
+  call void @free(ptr %%stk)
+  call void @free(ptr %%ctx)
+  %%js_p = getelementptr %s, ptr %%t, i32 0, i32 %d
+  %%js = load ptr, ptr %%js_p, align 8
+  call void @free(ptr %%js)
+  store ptr null, ptr %%stk_p, align 8
+  store ptr null, ptr %%ctx_p, align 8
+  store ptr null, ptr %%js_p, align 8
+  br label %%ret
+ret:
+  ret void
+}`, taskStructIR, taskState, taskStructIR, taskStack, taskStructIR, taskCtx, taskStructIR, taskJmpStk))
+
+	// @__kml_task_compact(): drop finished tasks from the task array, in order, so
+	// the scheduler's scan stays proportional to the tasks that are alive rather
+	// than to every task the process ever ran. Only ever called by the outermost
+	// @__kml_task_sched_step, before its scan starts.
+	e.emitGlobal(fmt.Sprintf(`
+@__kml_task_sched_depth = internal thread_local global i64 0, align 8
+define void @__kml_task_compact() {
+entry:
+  %%len = load i64, ptr @__kml_task_len, align 8
+  %%data = load ptr, ptr @__kml_task_data, align 8
+  br label %%cond
+cond:
+  %%i = phi i64 [ 0, %%entry ], [ %%inext, %%next ]
+  %%w = phi i64 [ 0, %%entry ], [ %%wnext, %%next ]
+  %%go = icmp slt i64 %%i, %%len
+  br i1 %%go, label %%body, label %%done
+body:
+  %%sp = getelementptr ptr, ptr %%data, i64 %%i
+  %%t = load ptr, ptr %%sp, align 8
+  %%st_p = getelementptr %s, ptr %%t, i32 0, i32 %d
+  %%st = load i64, ptr %%st_p, align 8
+  %%dead = icmp eq i64 %%st, 2
+  br i1 %%dead, label %%next, label %%keep
+keep:
+  %%wp = getelementptr ptr, ptr %%data, i64 %%w
+  store ptr %%t, ptr %%wp, align 8
+  %%w1 = add i64 %%w, 1
+  br label %%next
+next:
+  %%wnext = phi i64 [ %%w, %%body ], [ %%w1, %%keep ]
+  %%inext = add i64 %%i, 1
+  br label %%cond
+done:
+  store i64 %%w, ptr @__kml_task_len, align 8
+  ret void
+}`, taskStructIR, taskState))
 
 	// @__kml_task_finish(ptr %task): the body calls this after storing its result
 	// into the promise's v0/v1. Marks the promise resolved, wakes a parked waiter
@@ -547,7 +652,7 @@ nowake:
 	// finishing task). Resume = swapcontext main -> task, with resumerCtx = main.
 	gcSetTaskStack := ""
 	if e.isGCMode() {
-		gcSetTaskStack = fmt.Sprintf("\n  %%dr_stk = load ptr, ptr %%dr_stk_p, align 8\n  %%dr_high = getelementptr i8, ptr %%dr_stk, i64 %d\n  store ptr %%dr_high, ptr @GC_stackbottom, align 8", taskStackBytes)
+		gcSetTaskStack = fmt.Sprintf("\n  %%dr_stk = load ptr, ptr %%dr_stk_p, align 8\n  %%dr_stksz_p = getelementptr %s, ptr %%t, i32 0, i32 %d\n  %%dr_stksz = load i64, ptr %%dr_stksz_p, align 8\n  %%dr_high = getelementptr i8, ptr %%dr_stk, i64 %%dr_stksz\n  %s", taskStructIR, taskStackSize, e.gcSBStore("%dr_high"))
 	}
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_task_sched_step() {
@@ -569,9 +674,21 @@ pump:
   call void @__kml_curl_drain_messages()
   br label %%scan
 scan:
+  ; the outermost step drops finished tasks before scanning; a nested one (a
+  ; resumed task driving the scheduler itself) must not move entries under the
+  ; scan that is in progress above it
+  %%sd_in = load i64, ptr @__kml_task_sched_depth, align 8
+  %%sd_in1 = add i64 %%sd_in, 1
+  store i64 %%sd_in1, ptr @__kml_task_sched_depth, align 8
+  %%outermost = icmp eq i64 %%sd_in, 0
+  br i1 %%outermost, label %%compact, label %%scan2
+compact:
+  call void @__kml_task_compact()
+  br label %%scan2
+scan2:
   br label %%cond
 cond:
-  %%i = phi i64 [ 0, %%scan ], [ %%inext, %%next ]
+  %%i = phi i64 [ 0, %%scan2 ], [ %%inext, %%next ]
   ; Reloaded every iteration: a resumed task can spawn tasks (an await on a
   ; fetch spawns its bridge coroutine), and __kml_task_register grows the array
   ; with realloc — a pointer or length held across the resume is stale, and the
@@ -606,7 +723,7 @@ chkfetch:
   br i1 %%fready, label %%resume, label %%next
 chkpp:
   ; parked on a fetch group (Promise.all/race/any/allSettled over fetches)?
-  %%pg_p = getelementptr ` + taskStructIR + `, ptr %%t, i32 0, i32 ` + fmt.Sprintf("%d", taskPendingGroup) + `
+  %%pg_p = getelementptr `+taskStructIR+`, ptr %%t, i32 0, i32 `+fmt.Sprintf("%d", taskPendingGroup)+`
   %%pg = load ptr, ptr %%pg_p, align 8
   %%haspg = icmp ne ptr %%pg, null
   br i1 %%haspg, label %%chkgroup, label %%chkpp2
@@ -624,7 +741,7 @@ chkpres:
   %%presok = icmp ne i64 %%pres, 0
   br i1 %%presok, label %%resume, label %%next
 resume:
-  %%r_pg_p = getelementptr ` + taskStructIR + `, ptr %%t, i32 0, i32 ` + fmt.Sprintf("%d", taskPendingGroup) + `
+  %%r_pg_p = getelementptr `+taskStructIR+`, ptr %%t, i32 0, i32 `+fmt.Sprintf("%d", taskPendingGroup)+`
   store ptr null, ptr %%r_pg_p, align 8
   %%r_pf_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   store ptr null, ptr %%r_pf_p, align 8
@@ -651,11 +768,15 @@ resume:
   store ptr null, ptr @__kml_current_task, align 8%s
   store ptr %%rj_mainstk, ptr @__kml_cur_jmp_stk, align 8
   store i32 %%rj_maintop, ptr @__kml_jmp_top, align 4
+  call void @__kml_task_reclaim(ptr %%t)
   br label %%next
 next:
   %%inext = add i64 %%i, 1
   br label %%cond
 done:
+  %%sd_out = load i64, ptr @__kml_task_sched_depth, align 8
+  %%sd_out1 = sub i64 %%sd_out, 1
+  store i64 %%sd_out1, ptr @__kml_task_sched_depth, align 8
   ret void
 }`, ctxSize, taskStructIR, taskState, taskStructIR, taskPendingFetch, taskStructIR, taskPendingProm,
 		promiseStructIR, taskStructIR, taskPendingFetch, taskStructIR, taskPendingProm,
@@ -704,7 +825,7 @@ chkfetch:
   br i1 %%fready, label %%yes, label %%next
 chkpp:
   ; parked on a fetch group (Promise.all/race/any/allSettled over fetches)?
-  %%pg_p = getelementptr ` + taskStructIR + `, ptr %%t, i32 0, i32 ` + fmt.Sprintf("%d", taskPendingGroup) + `
+  %%pg_p = getelementptr `+taskStructIR+`, ptr %%t, i32 0, i32 `+fmt.Sprintf("%d", taskPendingGroup)+`
   %%pg = load ptr, ptr %%pg_p, align 8
   %%haspg = icmp ne ptr %%pg, null
   br i1 %%haspg, label %%chkgroup, label %%chkpp2
@@ -730,6 +851,50 @@ no:
   ret i1 0
 }`, taskStructIR, taskState, taskStructIR, taskPendingFetch,
 		taskStructIR, taskPendingProm, promiseStructIR))
+
+	// @__kml_task_holds_loop() -> i1: does any task hold the event loop open? One
+	// that can run right now does (@__kml_task_resumable), and so does one parked
+	// on a fetch or a fetch group — its transfer may not have reached libcurl yet,
+	// so the in-flight count cannot stand in for it. A task parked on a promise
+	// holds nothing: a pending promise keeps nothing alive in Node either, and
+	// whatever can settle it is a loop source with a keep-alive term of its own.
+	e.emitGlobal(fmt.Sprintf(`
+define i1 @__kml_task_holds_loop() {
+entry:
+  %%res = call i1 @__kml_task_resumable()
+  br i1 %%res, label %%yes, label %%scan
+scan:
+  %%len = load i64, ptr @__kml_task_len, align 8
+  %%data = load ptr, ptr @__kml_task_data, align 8
+  br label %%cond
+cond:
+  %%i = phi i64 [ 0, %%scan ], [ %%inext, %%next ]
+  %%go = icmp slt i64 %%i, %%len
+  br i1 %%go, label %%body, label %%no
+body:
+  %%slotp = getelementptr ptr, ptr %%data, i64 %%i
+  %%t = load ptr, ptr %%slotp, align 8
+  %%st_p = getelementptr %[1]s, ptr %%t, i32 0, i32 %[2]d
+  %%st = load i64, ptr %%st_p, align 8
+  %%susp = icmp eq i64 %%st, 1
+  br i1 %%susp, label %%chk, label %%next
+chk:
+  %%pf_p = getelementptr %[1]s, ptr %%t, i32 0, i32 %[3]d
+  %%pf = load ptr, ptr %%pf_p, align 8
+  %%haspf = icmp ne ptr %%pf, null
+  %%pg_p = getelementptr %[1]s, ptr %%t, i32 0, i32 %[4]d
+  %%pg = load ptr, ptr %%pg_p, align 8
+  %%haspg = icmp ne ptr %%pg, null
+  %%onio = or i1 %%haspf, %%haspg
+  br i1 %%onio, label %%yes, label %%next
+next:
+  %%inext = add i64 %%i, 1
+  br label %%cond
+yes:
+  ret i1 1
+no:
+  ret i1 0
+}`, taskStructIR, taskState, taskPendingFetch, taskPendingGroup))
 
 	// @__kml_task_await_any_of(ptr %members, i64 %count) -> i64: wait until any
 	// member task-promise resolves, returning its index (Promise.race/any over
@@ -1010,6 +1175,7 @@ entry:
   store ptr null, ptr @__kml_current_task, align 8%s
   store ptr %%mstk, ptr @__kml_cur_jmp_stk, align 8
   store i32 %%mtop, ptr @__kml_jmp_top, align 4
+  call void @__kml_task_reclaim(ptr %%t)
   ret void
 }`, ctxSize, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, gcSetTaskStack, gcRestoreAfterSwap))
 

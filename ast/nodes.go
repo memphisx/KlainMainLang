@@ -208,7 +208,7 @@ type FunctionDeclaration struct {
 	// default monomorphization into compiling its body exactly once, with
 	// every bare-T parameter/return position treated as TypeAny instead.
 	// Meaningless (always false) unless len(TypeParams) > 0.
-	Erased     bool
+	Erased bool
 	// Pure is set by a `/** @pure */` JSDoc annotation (TDD-00128): the function
 	// is asserted side-effect-free, and a front-end pass (codegen/llvm/
 	// pure_check.go) ENFORCES it — rejecting parameter/captured/global mutation,
@@ -871,7 +871,15 @@ type CallExpression struct {
 	// stays erased (ADR-00371). Stored as a field rather than a wrapper node
 	// so the many AST walkers need no new case.
 	AssertedType *TypeAnnotation
-	pos          Pos
+	// Optional marks an optional call `f?.(...)` / `a.b?.(...)`: a nullish
+	// callee short-circuits the whole call to `undefined` and the arguments are
+	// not evaluated. (`a?.b(...)` is different — that is an ordinary call whose
+	// callee MemberExpression is Optional.)
+	Optional bool
+	// ChainEnd is set when this node was written in parentheses: an optional
+	// chain's short-circuit stops there (`(a?.b()).c`).
+	ChainEnd bool
+	pos      Pos
 }
 
 func (*CallExpression) nodeMarker()   {}
@@ -886,6 +894,7 @@ type MemberExpression struct {
 	Object   Expression
 	Property string
 	Optional bool // true for ?.
+	ChainEnd bool // written in parentheses — see CallExpression.ChainEnd
 	pos      Pos
 }
 
@@ -913,7 +922,12 @@ func NewArrayLiteral(elems []Expression, pos Pos) *ArrayLiteral {
 type IndexExpression struct {
 	Object Expression
 	Index  Expression
-	pos    Pos
+	// Optional marks `a?.[k]`: a nullish receiver short-circuits to `undefined`
+	// and the key expression is not evaluated.
+	Optional bool
+	// ChainEnd: written in parentheses — see CallExpression.ChainEnd.
+	ChainEnd bool
+	pos      Pos
 }
 
 func (*IndexExpression) nodeMarker()   {}
@@ -1712,7 +1726,7 @@ type NewArrayBufferExpression struct {
 	// present (`new SharedArrayBuffer(n, {maxByteLength: m})`, ADR-00494) —
 	// nil for a fixed-size buffer.
 	MaxByteLength Expression
-	pos    Pos
+	pos           Pos
 }
 
 func (*NewArrayBufferExpression) nodeMarker()   {}
@@ -2197,31 +2211,31 @@ type AnnotField struct {
 // KeyType is non-nil only for Map<K,V> — its key type; ElemType holds the value type.
 // IsFuncType is true for function type annotations like (x: number) => number.
 type TypeAnnotation struct {
-	Name        string // e.g. "number", "string", "int32", "uint8", "float64"
-	Source      string // "ts" or "jsdoc"
-	Fields      []AnnotField
-	ElemType    *TypeAnnotation   // non-nil for { ... }[], or Promise<T>/Array<T>/Set<T>'s T, or Map<K,V>'s V
-	KeyType     *TypeAnnotation   // non-nil only for Map<K,V> — the key type K
-	TypeArgs    []*TypeAnnotation // N type arguments for a user-defined generic interface usage, e.g. Box<number, string> (TDD-00037); built-ins keep using ElemType/KeyType above, unrelated to this field
-	IsFuncType  bool
-	FuncParams  []TypeAnnotation // param types for function type annotations
+	Name       string // e.g. "number", "string", "int32", "uint8", "float64"
+	Source     string // "ts" or "jsdoc"
+	Fields     []AnnotField
+	ElemType   *TypeAnnotation   // non-nil for { ... }[], or Promise<T>/Array<T>/Set<T>'s T, or Map<K,V>'s V
+	KeyType    *TypeAnnotation   // non-nil only for Map<K,V> — the key type K
+	TypeArgs   []*TypeAnnotation // N type arguments for a user-defined generic interface usage, e.g. Box<number, string> (TDD-00037); built-ins keep using ElemType/KeyType above, unrelated to this field
+	IsFuncType bool
+	FuncParams []TypeAnnotation // param types for function type annotations
 	// FuncParamOptional[i] is true when parameter i of a function type carried a
 	// `?` marker (`(x?: T) => R`) — omittable at the call site, distinct from an
 	// explicit `T | undefined` which still requires the argument. Parallel to
 	// FuncParams; nil (or short) means no parameter was optional.
 	FuncParamOptional []bool
-	FuncRetType *TypeAnnotation  // return type for function type annotations
+	FuncRetType       *TypeAnnotation // return type for function type annotations
 	// FuncHasRest marks the last entry of FuncParams as a rest slot, e.g.
 	// `(...xs: number[]) => T` or `(a: number, ...xs: number[]) => T`. The
 	// stored type is the collected array type (number[]), matching the codegen
 	// Type.FuncHasRest convention.
 	FuncHasRest bool
-	Nullable    bool             // true for T | null or T | undefined
+	Nullable    bool // true for T | null or T | undefined
 	// Undefined records that the nullish member of the union was spelled
 	// `undefined` (or that the type comes from a `?:` optional field), so the
 	// resolved Type carries IsUndefined and an absent value renders/compares
 	// as `undefined`, not `null` (TDD-00187). Only meaningful with Nullable.
-	Undefined   bool
+	Undefined bool
 	// UnionMembers holds every non-null/undefined member of a T | U | ...
 	// union with more than one such member (TDD-00043). nil for the common
 	// single-type case (with or without Nullable) — this field only becomes

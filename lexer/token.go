@@ -6,7 +6,7 @@ type TokenType int
 
 const (
 	NUMBER TokenType = iota
-	BIGINT // integer literal with a trailing `n` suffix (123n) — TDD-00074
+	BIGINT           // integer literal with a trailing `n` suffix (123n) — TDD-00074
 	STRING
 	IDENT
 	PRIVATE_NAME // #foo — a class private field/method name (TDD-00021)

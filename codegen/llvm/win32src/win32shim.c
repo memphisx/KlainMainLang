@@ -216,15 +216,76 @@ int64_t getline(char **lineptr, size_t *n, FILE *stream) {
 }
 
 // ---- environment ---------------------------------------------------------
-// _putenv_s updates the CRT copy *and* the Win32 process environment, so
-// a child spawned later sees it — same observable effect as POSIX setenv.
+// process.env is the live Win32 environment block, read and written through
+// the wide API as Node does (libuv's uv_os_getenv/uv_os_setenv), not the UCRT's
+// startup snapshot: a variable another layer set with SetEnvironmentVariableW
+// (chdir's "=X:" drive directories, the spawn shim) is visible, a non-ASCII
+// value round-trips as UTF-8 instead of through the ANSI code page, and a child
+// spawned later inherits every write. Lookup is case-insensitive, as the OS's is.
+static wchar_t *env_wide(const char *u) {
+	int n = MultiByteToWideChar(CP_UTF8, 0, u, -1, NULL, 0);
+	if (n <= 0) return NULL;
+	wchar_t *w = (wchar_t *)malloc((size_t)n * sizeof(wchar_t));
+	if (w) MultiByteToWideChar(CP_UTF8, 0, u, -1, w, n);
+	return w;
+}
+
+// The C contract lets a later getenv call reuse the storage, and every caller
+// here copies the result at once; one buffer per thread keeps Workers apart.
+char *getenv(const char *name) {
+	static _Thread_local char *out;
+	if (!name || !*name) return NULL;
+	wchar_t *wn = env_wide(name);
+	if (!wn) return NULL;
+	wchar_t small[512], *wv = small;
+	SetLastError(0);
+	DWORD n = GetEnvironmentVariableW(wn, wv, 512);
+	if (n >= 512) {
+		wv = (wchar_t *)malloc((size_t)(n + 1) * sizeof(wchar_t));
+		if (!wv) { free(wn); return NULL; }
+		n = GetEnvironmentVariableW(wn, wv, n + 1);
+	}
+	char *res = NULL;
+	if (n != 0 || GetLastError() != ERROR_ENVVAR_NOT_FOUND) {
+		wv[n] = 0;
+		int un = WideCharToMultiByte(CP_UTF8, 0, wv, -1, NULL, 0, NULL, NULL);
+		char *nb = un > 0 ? (char *)realloc(out, (size_t)un) : NULL;
+		if (nb) {
+			out = nb;
+			WideCharToMultiByte(CP_UTF8, 0, wv, -1, out, un, NULL, NULL);
+			res = out;
+		}
+	}
+	if (wv != small) free(wv);
+	free(wn);
+	return res;
+}
+
 int setenv(const char *name, const char *value, int overwrite) {
+	if (!name || !*name || strchr(name + 1, '=')) { errno = 22; return -1; } // EINVAL ("=X:" names keep their leading '=')
 	if (!overwrite && getenv(name)) return 0;
-	return _putenv_s(name, value) == 0 ? 0 : -1;
+	wchar_t *wn = env_wide(name), *wv = env_wide(value ? value : "");
+	int r = -1;
+	if (wn && wv) {
+		// The wide CRT call keeps the CRT's own copy in step for C libraries that
+		// read it directly (the narrow one would re-encode through the ANSI code
+		// page); it rejects an empty value and the "=X:" names, which go to the
+		// OS block alone.
+		_wputenv_s(wn, wv);
+		if (SetEnvironmentVariableW(wn, wv)) r = 0;
+	}
+	free(wn); free(wv);
+	return r;
 }
 
 int unsetenv(const char *name) {
-	return _putenv_s(name, "") == 0 ? 0 : -1;
+	if (!name || !*name) { errno = 22; return -1; }
+	wchar_t *wn = env_wide(name);
+	if (!wn) return -1;
+	_wputenv_s(wn, L"");
+	SetEnvironmentVariableW(wn, NULL);
+	free(wn);
+	return 0;
 }
 
 // ---- sysconf ---------------------------------------------------------------
@@ -361,6 +422,39 @@ char *strcasestr(const char *hay, const char *needle) {
 		if (!*n) return (char *)hay;
 	}
 	return NULL;
+}
+
+// os.homedir() (Windows): libuv's uv_os_homedir — a set USERPROFILE wins;
+// without one (a service, a stripped environment) the profile directory comes
+// from the process token via GetUserProfileDirectoryW, so the call still
+// answers instead of throwing. userenv.dll is bound at run time so programs that
+// never ask carry no import for it. Returns a malloc'd UTF-8 string or NULL.
+char *__kml_os_homedir(void) {
+	const char *p = getenv("USERPROFILE");
+	if (p && *p) {
+		char *out = (char *)malloc(strlen(p) + 1);
+		if (out) strcpy(out, p);
+		return out;
+	}
+	HMODULE ue = LoadLibraryW(L"userenv.dll");
+	if (!ue) return NULL;
+	typedef BOOL (WINAPI *gupd_fn)(HANDLE, LPWSTR, LPDWORD);
+	gupd_fn gupd = (gupd_fn)(void *)GetProcAddress(ue, "GetUserProfileDirectoryW");
+	HANDLE tok = NULL;
+	char *out = NULL;
+	if (gupd && OpenProcessToken(GetCurrentProcess(), TOKEN_READ, &tok)) {
+		DWORD n = 0;
+		gupd(tok, NULL, &n); // sizing call: fails with ERROR_INSUFFICIENT_BUFFER, n = cells
+		wchar_t *w = n ? (wchar_t *)malloc((size_t)n * sizeof(wchar_t)) : NULL;
+		if (w && gupd(tok, w, &n)) {
+			int un = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+			if (un > 0 && (out = (char *)malloc((size_t)un))) WideCharToMultiByte(CP_UTF8, 0, w, -1, out, un, NULL, NULL);
+		}
+		free(w);
+		CloseHandle(tok);
+	}
+	FreeLibrary(ue);
+	return out;
 }
 
 // os.tmpdir() (Windows): TEMP, then TMP, then <SystemRoot|windir>\temp, with

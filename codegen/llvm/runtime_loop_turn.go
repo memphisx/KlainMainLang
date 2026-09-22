@@ -45,6 +45,7 @@ func (e *Emitter) ensureLoopTurn() {
 	}
 	e.usedLoopTurnDefs = true
 	e.usedAwaitTimerDrive = true
+	e.needMicrotaskTick = true
 	e.ensureExit()
 	e.ensureWriteDecl()
 	e.ensureUsleepDecl()
@@ -61,7 +62,7 @@ func (e *Emitter) ensureLoopTurn() {
 	e.emitGlobal("@__kml_loop_pin = internal thread_local global i64 0, align 8")
 	e.emitGlobal("@__kml_loop_depth = internal thread_local global i64 0, align 8")
 	e.emitGlobal("@__kml_loop_idle = internal thread_local global i1 false, align 1")
-	msg := "Warning: Detected unsettled top-level await\n"
+	msg := tlaUnsettledMsg
 	e.emitGlobal(`@.kml_tla_unsettled = private unnamed_addr constant [` + strconv.Itoa(len(msg)) + ` x i8] c"Warning: Detected unsettled top-level await\0A"`)
 	e.emitGlobal(`
 define i32 @__kml_loop_turn(i1 %pin) {
@@ -100,7 +101,14 @@ run:
 
 define void @__kml_top_await(ptr %word) {
 entry:
-  br label %check
+  ; Already settled: the await still takes its one tick — the jobs queued so far
+  ; run before the continuation (see @__kml_microtask_tick).
+  %v0 = load i64, ptr %word, align 8
+  %settled0 = icmp ne i64 %v0, 0
+  br i1 %settled0, label %tick, label %check
+tick:
+  call void @__kml_microtask_tick()
+  ret void
 check:
   %v = load i64, ptr %word, align 8
   %settled = icmp ne i64 %v, 0

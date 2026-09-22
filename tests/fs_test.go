@@ -1182,11 +1182,32 @@ scandir scandir /no/such/f
 plain null null`)
 }
 
-// ADR-00770: fs errors carry Node's numeric `err.errno` — the negative
-// libuv-style errno (ENOENT → -2). On POSIX this equals Node exactly; on Windows
-// the port normalizes errno to the Linux numbers, so it is the negated Linux
-// value (a documented divergence from Node's Windows UV_E* numbering). A plain
+// ADR-00770: fs errors carry Node's numeric `err.errno` — libuv's errno. On
+// POSIX that is the negated OS errno (ENOENT → -2); on Windows it is libuv's own
+// fixed numbering (ENOENT → -4058), which is what Node reports there. A plain
 // non-fs Error reads 0 (the falsy default; Node reports undefined).
+// rmSync is a named export of 'fs' like the rest of the sync family (it used to
+// be reachable only through the `fs.` namespace form).
+func TestE2EFsRmSyncNamedImport(t *testing.T) {
+	assertOutputImports(t, `
+import { rmSync, mkdirSync, existsSync, writeFileSync } from 'fs'
+import os from 'os'
+import path from 'path'
+const d = path.join(os.tmpdir(), 'kml-rm-named-' + process.pid)
+mkdirSync(d)
+writeFileSync(path.join(d, 'f'), 'x')
+rmSync(d, { recursive: true, force: true })
+console.log(existsSync(d))
+`, "false")
+}
+
+func uvENOENT() string {
+	if runtime.GOOS == "windows" {
+		return "-4058"
+	}
+	return "-2"
+}
+
 func TestE2EFsErrorErrno(t *testing.T) {
 	assertOutputImports(t, `
 import { readFileSync } from 'fs'
@@ -1194,10 +1215,10 @@ function main2(): void {
   try {
     readFileSync('/no/such/dir/nope.txt')
   } catch (e: any) {
-    console.log(e.errno, e.errno === -2)
+    console.log(e.errno)
   }
   try { throw new Error('plain') } catch (e: any) { console.log(e.errno) }
 }
 main2()
-`, "-2 true\n0")
+`, uvENOENT()+"\n0")
 }

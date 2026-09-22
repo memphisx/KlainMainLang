@@ -233,7 +233,7 @@ func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
 }
 
 // emitErrorToString renders an Error the way `err.toString()` / `String(err)` /
-// `` `${err}` `` do in JS: `name` when the message is empty, otherwise
+// “ `${err}` “ do in JS: `name` when the message is empty, otherwise
 // `name + ": " + message` (name is the kind name, always set). errVal is the
 // error object pointer.
 func (e *Emitter) emitErrorToString(errVal Value) (Value, error) {

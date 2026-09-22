@@ -65,6 +65,9 @@ extern int  GC_unregister_my_thread(void);
 extern void GC_allow_register_threads(void);
 extern void GC_add_roots(void *low, void *high_plus_one);
 extern void GC_remove_roots(void *low, void *high_plus_one);
+/* gcshim.c: this thread's TLS block as a root (a no-op off Windows). */
+extern void __kml_gc_tls_register(void);
+extern void __kml_gc_tls_unregister(void);
 extern void *GC_malloc_uncollectable(size_t);
 extern void GC_free(void *);
 /* Control blocks live across threads and are reachable from queues the
@@ -1047,9 +1050,11 @@ static void *ks_m_main(void *arg) {
     void *sb[2];
     GC_get_stack_base(sb);
     GC_register_my_thread(sb);
+    __kml_gc_tls_register();
 #endif
     ks_sched_loop(m);
 #ifdef KLAINSYNC_GC
+    __kml_gc_tls_unregister();
     GC_unregister_my_thread();
 #endif
     return NULL;
@@ -1084,6 +1089,7 @@ static void *ks_rescue_main(void *arg) {
     void *sb[2];
     GC_get_stack_base(sb);
     GC_register_my_thread(sb);
+    __kml_gc_tls_register();
 #endif
     ks_sched_loop(m); /* never returns; parks when idle */
     return NULL;

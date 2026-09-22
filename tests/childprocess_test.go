@@ -442,7 +442,7 @@ c.on('close', () => {
 }
 
 // A failed spawn's 'error' Error carries Node's `err.code` ('ENOENT' for a
-// missing command) and the negative libuv-style `err.errno` (-2 on POSIX) —
+// missing command) and the libuv `err.errno` (-2 on POSIX, -4058 on Windows) —
 // ADR-00784. The canonical guard `e.code === 'ENOENT'` matches.
 func TestE2EChildProcessSpawnErrorCodeErrno(t *testing.T) {
 	assertOutputImports(t, `
@@ -453,7 +453,7 @@ c.on('error', (e) => {
   console.log("isENOENT", (e as any).code === 'ENOENT')
   console.log("errno", (e as any).errno)
 })
-`, "code ENOENT\nisENOENT true\nerrno -2")
+`, "code ENOENT\nisENOENT true\nerrno "+uvENOENT())
 }
 
 func TestE2EChildProcessSpawnSyncLargeInterleavedOutput(t *testing.T) {

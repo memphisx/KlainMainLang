@@ -537,7 +537,7 @@ entry:
   call void @__kml_str_finalize(ptr %%buf)
   %%code = call ptr @__kml_errno_code(i32 %%e32)
   %%errno_pos = sitofp i32 %%e32 to double
-  %%errno_neg32 = sub i32 0, %%e32
+  %%errno_neg32 = call i32 @__kml_uv_errno(i32 %%e32)
   %%errno_neg = sitofp i32 %%errno_neg32 to double
   %%obj = call ptr @calloc(i64 1, i64 %d)
   %%k = getelementptr %s, ptr %%obj, i32 0, i32 0
@@ -861,7 +861,7 @@ setnull:
   %%inpipe = alloca [2 x i32], align 4
   %%outpipe = alloca [2 x i32], align 4
   %%errpipe = alloca [2 x i32], align 4
-  ` + cpStdinPipeCallIR() + `
+  `+cpStdinPipeCallIR()+`
   call i32 @pipe(ptr %%outpipe)
   call i32 @pipe(ptr %%errpipe)
   %%inr_p = getelementptr [2 x i32], ptr %%inpipe, i32 0, i32 0
@@ -1090,7 +1090,6 @@ func cpSignalNumber(name string) (int, bool) {
 	}
 	return 0, false
 }
-
 
 // ensureCPListenerAppend defines __kml_cp_listener_append once: the
 // 'close'/'exit'/'error'/'message' listener slots (and the child-side

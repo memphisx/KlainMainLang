@@ -21,6 +21,7 @@ package resolver
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"KlainMainLang/ast"
@@ -1023,9 +1024,9 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 	case *ast.ImportMetaUrl:
 		// TDD-00055 Stage 1: resolved entirely at this stage, per-file,
 		// into a plain string literal — codegen never sees this node.
-		// "file://" + absolute path matches real Node/browser
-		// import.meta.url's own convention.
-		return ast.NewStringLiteral("file://"+lu.filePath, e.GetPos())
+		// The module's file URL as Node renders it: percent-encoded, and on
+		// Windows `file:///C:/dir/f.ts` (see fileURLFromPath).
+		return ast.NewStringLiteral(fileURLFromPath(lu.filePath, runtime.GOOS == "windows"), e.GetPos())
 	}
 	// Every other expression kind (literals, ThisExpression, SuperExpression,
 	// NewXMLHttpRequestExpression/NewTextEncoderExpression — both zero-arg)

@@ -41,6 +41,85 @@ file; the exhaustive list of every unfinished TDD is the generated table in
 
 ---
 
+## 0. Open bugs — before anything else, in this order
+
+Wrong behaviour in something that claims to work. A bug found and not fixed the
+same day lands here, at the top.
+
+1. **Invalid IR under `-compat=js`, three Test262 files** (2026-09-21 run; strict has
+   none left but the `truncate` link clash below). Fix before anything else:
+   `language/statements/do-while/S12.6.1_A4_T2.js` and `…_A4_T4.js` —
+   `'%t40' defined with type 'i1' but expected 'ptr'` on a `store ptr`: nested
+   labelled `do…while` with `var`s declared after a `break` (dead code), then
+   read in an `&&`/`!` chain; `staging/sm/TypedArray/set-tointeger.js` —
+   `expected value token` at the function's closing `}` (a block left without a
+   terminator operand). Related and smaller: a hoisted `var` that is never
+   assigned prints `null`, Node prints `undefined` (`do { var a = 1; break; var b = 2 } while (0); console.log(b)`).
+2. **Top-level `await` of a pending promise resumes out of order in a Worker
+   module and in an `import()` target** — the entry program is fixed (its module
+   body is a coroutine, ADR-01050). TDD-00224 Stage 2: an island's `init` spawns
+   the module task and hands the importer its promise (no loop of its own, and
+   there the trampoline keeps the catch-all: a throwing module rejects the
+   `import()` promise); a Worker entry takes the entry program's shape on its own
+   thread. Then delete `emitAwait`'s tick branch and `@__kml_top_await`'s callers
+   that are left without one.
+3. **macOS CI red since `43d171e`** (arm64 + x64): a 25 ms `setInterval` fires
+   4–7× during a 600 ms in-flight fetch (~100 ms cadence), and HTTP-server tests
+   hang (`TestE2EHTTPCreateServerRequireHostHeaderFalse`). Suspect: "a parked task
+   no longer makes the loop poll" exposing a wrong `select()` wait. Needs a Mac:
+   log `nfds`, the computed wait, `curl_multi_timeout`, `select`'s return.
+4. **Conformance timeouts** (2026-09-21 run, 8 workers, nothing else running).
+   `CLANG_TIMEOUT`: `staging/sm/String/string-upper-lower-mapping.js` (both lanes),
+   `staging/sm/regress/regress-561031.js` (strict). `RUN_TIMEOUT`, both lanes:
+   `built-ins/Array/prototype/indexOf/15.4.4.14-5-13.js`, `…-5-14.js`,
+   `built-ins/Set/prototype/has/returns-false-when-value-not-present-nan.js`; js
+   only: `built-ins/Array/prototype/filter/15.4.4.20-9-c-i-2.js`,
+   `built-ins/Atomics/wait/retrieve-length-before-index-coercion.js`,
+   `language/arguments-object/10.6-10-c-ii-1.js`, `…-ii-2.js`,
+   `language/expressions/tagged-template/cache-eval-inner-function.js`,
+   `language/statements/for/S12.6.3_A11_T2.js`, `…_A12_T2.js`,
+   `language/statements/for/head-init-expr-check-empty-inc-empty-syntax.js`. A run
+   timeout in a terminating test is an infinite loop in emitted code — wrong
+   behaviour, not slowness. The in-process codegen hangs are gone (ADR-01045).
+5. **The conformance harness skips the resolver**, so user names are unmangled: a
+   test function called `truncate` collides with libc at link
+   (`language/expressions/modulus/S11.5.3_A4_T7.js`). Route it through
+   `resolver.ResolveProgram`; needs a full before/after run.
+6. **RegExp sticky `y` is accepted and ignored** — silently wrong matches.
+   Implement it (PCRE2 `ANCHORED` at `lastIndex`) or reject it at compile time.
+7. **Array write that leaves a gap / negative-index write throws**
+   (`a[a.length + 2] = v`); Node extends with holes. A typed scalar buffer has no
+   hole: hole bitmap vs boxed elements — TDD.
+8. **`console.log(obj)` prints an absent optional field as `key: undefined`**;
+   Node omits the key. All optional field types.
+9. **An optional tuple field has no absence**: `o.pair === undefined` is `false`
+   when the field was omitted.
+10. **One-off, unexplained:** `TestE2EHTTPCreateServerResStreamLargeBodyIntact` —
+    "server never started listening" once in 274 network tests, never again. The
+    helper now logs the server's output on failure; chase it when it recurs.
+11. **`-mm=gc` on macOS: thread-local roots are not registered.** Windows and Linux
+    register each thread's TLS block with the collector (ADR-01049); on macOS
+    `_Thread_local` storage is allocated lazily by dyld and the hook is a no-op.
+    Needs a Mac: run `TestE2EGCModeThreadLocalRootsSurviveChurn` and the C
+    reproduction from the ADR; if it fails, find the block (`tlv` descriptors).
+12. **`setTimeout(f, 0)` has no 1 ms clamp** — Node coerces a delay below 1 to 1;
+    20,000 sequential zero-delay timers take 0.3 s here, ≥ 20 s in Node.
+13. **A generic function cannot settle its own `new Promise<T>`**:
+    `function later<T>(ms: number, v: T): Promise<T> { return new Promise<T>((resolve) => setTimeout(() => resolve(v), ms)); }`
+    → codegen error "argument 1 has a type incompatible with the parameter's
+    declared type" at `resolve(v)` (both `later(1, "x")` and `later(1, 2)`). The
+    commonest async helper there is; the non-generic spelling compiles.
+14. **A finished coroutine's 112-byte task struct is never freed** in manual mode
+    (ADR-01048): a promise's `waiter` field can outlive the task it names. Clear
+    the field when the waiter resumes, then free the struct in the compaction.
+15. **Under `-mm=gc` a coroutine's stack block is a collector allocation** — zeroed
+    and scanned as heap as well as as a stack. 256 KiB per task was tolerable; the
+    module task's is 8 MiB (ADR-01050). Allocate task stacks outside the collected
+    heap (`mmap`/system allocator) and register only the live range.
+16. Small: the `url.fileURLToPath` status row/reference still say "POSIX only"
+    (Windows shipped, ADR-00722); `klainmain -run` puts its temp binary under the
+    OS temp dir, ignoring `KML_SCRATCH`.
+
 ## 1. Highest leverage — do these first
 
 - Conformance headless DOM shim (TDD-00204 Track 5): jsdom tier — element tree,
@@ -56,8 +135,8 @@ file; the exhaustive list of every unfinished TDD is the generated table in
   primitive-member dispatch through `any`, `Object.values`/`entries` on dynamic
   objects. Broader: property add/delete on typed structs, full `Proxy` traps,
   well-known symbols as dispatch. Adjacent: TDD-00068. Perf follow-up: TDD-00220.
-- **C FFI residue** (TDD-00164) — `using`/`[Symbol.dispose]` disposal, the Windows
-  `LoadLibrary` shim, `close()`-invalidates-callbacks. Beyond-Node: TDD-00190.
+- **C FFI residue** (TDD-00164) — `using`/`[Symbol.dispose]` disposal,
+  `close()`-invalidates-callbacks. Beyond-Node: TDD-00190.
 
 ## 2. Windows port
 
@@ -66,10 +145,55 @@ laptop. Cross-platform work is driven from Mac/Linux (Docker + CI), but anything
 that genuinely needs a native Windows box to complete or verify should be
 finished while on it — don't defer such work into another comeback.
 
+Cross-platform features that block a Windows row (build on every host; the
+Windows half is named):
+
+- **`server.listen(path)` / `listen({ path, host })`** — no host has it. POSIX
+  AF_UNIX; Windows a named-pipe server (`CreateNamedPipeW` overlapped +
+  `ConnectNamedPipe` as the accept op, a fresh instance per client; the client
+  half exists, ADR-01034).
+- **`process.env` enumeration** (`Object.keys`, `for…in`, spread) — Windows:
+  `GetEnvironmentStringsW`, skip `=X:` entries, keep case.
+- **`os.*` breadth** — `type`/`release`/`version`/`arch`/`endianness`/`uptime`/
+  `loadavg` (Windows `[0,0,0]`)/`userInfo`/`networkInterfaces`
+  (`GetAdaptersAddresses`)/`availableParallelism`/`devNull`/`machine`.
+- **`process.umask()`**, **`fs.fchmodSync`**, **`fs.statfsSync`**
+  (`GetDiskFreeSpaceExW`).
+- **child_process options** — `argv0`, `windowsVerbatimArguments`, `maxBuffer`;
+  `env`/`timeout`/`killSignal`/`stdio`/`shell`/`windowsHide` on `exec`/`*Sync`/
+  `fork`; numeric-fd `stdio`; `execSync`'s Error with `.status`/`.stdout`/`.stderr`.
+- **`net.Socket` no-ops → real** (`setEncoding`/`ref`/`unref`/`pause`/`resume`/
+  `setTimeout`).
+- `url.fileURLToPath(url, { windows })`.
+- **Local-time `Date`** (UTC-only on every host today; in scope) — Windows:
+  `GetTimeZoneInformationForYear`/`TZ`.
+
+Windows-only:
+
+- **`--static` = "self-contained"** (depends on nothing the OS doesn't ship), not
+  "Linux full-static": Windows already links the optional libraries statically —
+  audit per library and prove it with an import-table check per feature
+  (generalise `tests/tui_selfcontained_windows_test.go`); macOS links the Homebrew
+  `.a` archives and leaves system libraries dynamic (`otool -L` check). Decide
+  webview (WebView2 loader is a DLL) and whether `-package` defaults to it. TDD
+  first; then fix the "Linux only" help text and the stale out-of-scope notes.
+- **Non-ASCII `%TEMP%`**: mingw `ld` opens intermediates through the narrow API
+  (ADR-01035 covers only the output path) — stage the build dir under an ASCII root.
+- **Writes to a redirected stdout/stderr pipe block the loop** (non-overlapped
+  inherited pipe). Check what Node does on Windows first; then a writer thread +
+  flush at exit. Same spot: the 10 ms re-probe for unarmable pipe handles.
+- **512-descriptor ceiling** — the IR speaks a 1024-bit `fd_set` (same limit on
+  Linux). A loop-interface change (poll- or registration-shaped); TDD.
+- Child IPC channel → named pipe (today a peer-verified loopback TCP pair).
+- Spawn markers carry raw handle values in the environment → `STARTUPINFO.lpReserved2`.
+- **`-crypto=cng`** (TDD-00177 Stage 5) — BCrypt/NCrypt backend; removes OpenSSL
+  from non-TLS programs.
+- TLS write-error probe: client `destroy()`s a `wss`/h2 connection while the
+  server writes; compare `err.code` with Node on Windows.
 - **Deferred edges (low value / untestable from a dev box):** broken-pipe write
-  codes + the TLS-BIO error on long-lived pub/sub, named pipes for `net`,
-  non-ASCII console *input*, `readlink` UNC / `chdir` drive vars (all TDD-00180).
-- **Out of scope:** `--static` full-static, `-crypto=commoncrypto`, ASan/UBSan.
+  codes + the TLS-BIO error on long-lived pub/sub (TDD-00180 §5).
+- **Out of scope:** `-crypto=commoncrypto`, ASan/UBSan.
+- `tools/ramdisk/run.sh` is unverified on macOS/Linux.
 
 ## 3. Node / runtime surface (mostly small, incremental)
 
@@ -84,9 +208,8 @@ finished while on it — don't defer such work into another comeback.
   `ReadableStream.from()` arrays only.
 - **WebSocket** — binary `ev.data` NUL-truncates (typed `string`; use
   `ev.dataBytes()`); `.close()` doesn't await the peer echo.
-- **net / dgram / dns** — `net.Socket` `setEncoding`/`ref`/`unref`/`pause`/
-  `resume`/`setTimeout` are no-ops; `dgram` udp4-only + `.on('message')` only;
-  `dns` absent.
+- **net / dgram / dns** — `net.Socket` no-ops (see §2); `dgram` udp4-only +
+  `.on('message')` only; `dns` absent.
 - **child_process** — sync listener dispatch, one listener per event, arrow-only,
   no `removeListener`; `fork` self-fork only; narrow `env`/`timeout`/`stdio`.
 - **process / os / console** — no `'unhandledRejection'`;
@@ -193,7 +316,7 @@ and Raspberry Pi (TDD-00045) targets, Immix (TDD-00135).
 
 Generated by `make status` from `docs/status/data/*.json`. **Every line here is an issue to tackle.** A missing feature and a behavioural divergence both break code ported from Node/TS/JS, so both count. **Strict Coverage** of an area = the ✅ features carrying zero caveats; the number rises only when a caveat is *fixed and deleted*, never by rewording. Fix a caveat in the status data and it disappears from here; do not edit below the marker by hand.
 
-**Total: 648 caveats · overall Strict Coverage 311/611 (~51%).** Areas below are ordered worst Strict Coverage first.
+**Total: 650 caveats · overall Strict Coverage 310/613 (~51%).** Areas below are ordered worst Strict Coverage first.
 
 ### Concurrency (Workers) — Strict 0/4 (0%) · 24 caveats — [Concurrency (Workers)](status/CONCURRENCY-WORKERS.md)
 - `Worker` — One listener per event, arrow-function literals only
@@ -258,7 +381,7 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `url.format(urlObject)` (legacy) — The `options` argument (`auth`/`fragment`/`search`/`unicode` toggles) is not supported; components are taken verbatim, no re-encoding ([ADR-00670](adr/ADR-00670.md))
 - `url.format(urlObject)` (legacy) — Reconstructs `protocol // [auth@] host pathname (search|?query) hash`; a WHATWG `URL` argument serializes to its `href`
 - `url.fileURLToPath(url)` (POSIX) — POSIX only; the `options` (`windows`) argument is unsupported, and a non-`localhost` host is ignored rather than rejected ([ADR-00671](adr/ADR-00671.md))
-- `url.pathToFileURL(path)` (POSIX) — POSIX only; the `options` argument is unsupported ([ADR-00671](adr/ADR-00671.md))
+- `url.pathToFileURL(path)` (POSIX) — The `options` argument is unsupported ([ADR-00671](adr/ADR-00671.md))
 - `url.resolve(from, to)` (legacy) — Absolute bases only — a scheme-less/malformed base throws `Invalid URL`, the same leniency gap as `url.parse` ([ADR-00672](adr/ADR-00672.md))
 - `url.urlToHttpOptions(url)` — Expects a WHATWG `URL`; a legacy `Url`/plain object isn't accepted ([ADR-00672](adr/ADR-00672.md))
 - `url.domainToASCII(domain)` / `url.domainToUnicode(domain)` — IDN conversion of a **non-ASCII** domain requires the libcurl build to include an IDN backend (libidn2) — present on typical Linux, **absent on the Mac build** where a non-ASCII domain returns `""` (Node's own failure contract). ASCII domains pass through everywhere ([ADR-00672](adr/ADR-00672.md))
@@ -545,7 +668,7 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `events.on(emitter, name)` (async iterator) — Same payload rules as `once`: single-value / homogeneous multi-argument events; mixed-type multi-argument, payload-less, and non-scalar payloads are clean rejections
 - `events.on(emitter, name)` (async iterator) — The buffer is unbounded (Node's default); iterator `.return()`/`.throw()` unregistering the listener is a deferred follow-up ([ADR-00677](adr/ADR-00677.md))
 
-### Type System — Strict 12/31 (~39%) · 44 caveats — [Type System](status/TYPE-SYSTEM.md)
+### Type System — Strict 12/31 (~39%) · 43 caveats — [Type System](status/TYPE-SYSTEM.md)
 - `number` → `double` — Mixing an explicit integer type with a bare literal promotes to double (`int32 / 2` is `3.5`); use two integer-typed operands for integer division
 - `null` / `undefined` — A value typed as **both** `T | null | undefined` shares the single `ptr null` sentinel, so it can't tell which nullish kind it holds — it compares per the statically-chosen kind, which can be wrong for the other
 - `any` — Under `-compat=js`, unary `+` on an `any` isn't parsed yet (arithmetic otherwise runtime-dispatches; under `-compat=strict` it's a clean compile error)
@@ -560,7 +683,6 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - Object types (interfaces / inline `{}`) — A bare call signature is supported only alone (desugars to the function type); mixing it with fields/an index signature is a clean rejection, for both inline `{}` types and interfaces ([ADR-00448](adr/ADR-00448.md)/[ADR-00455](adr/ADR-00455.md))
 - Object types (interfaces / inline `{}`) — A same-name `interface` + `class` pair: the class wins as the binding, the interface's extra members ignored ([ADR-00466](adr/ADR-00466.md))
 - Union types beyond `T \| null` — Scalar members (`number`/`string`/`boolean` + `null`/`undefined`), object/interface/class members (one object member ([TDD-00115](tdd/TDD-00115.md)), or ≥2 as a **discriminated union** sharing a first-position string-literal tag ([TDD-00116](tdd/TDD-00116.md))), and a `ReadableStream` member ([TDD-00119](tdd/TDD-00119.md)); array/`ArrayBuffer` members, number-literal tags, and a non-first-position tag aren't supported
-- Union types beyond `T \| null` — Usable at the top level of a var declaration/function param/return and as an **object field** (checked + boxed at construction, [TDD-00119](tdd/TDD-00119.md)); as an **array element** it's still rejected (element-level checking not wired)
 - Union types beyond `T \| null` — Flow narrowing is for a union **local** via `typeof`/truthiness/`==null` (if/else branches + early return); a field/element, discriminated-union tag, `switch (typeof x)`, and `as` casts aren't narrowed; an un-narrowed object union has no field access ([TDD-00114](tdd/TDD-00114.md))
 - Intersection types — Object-type members only — a non-object member (scalar/function/array/tuple/union, all `never` in TS), or a generic-with-type-arguments member, is a clean compile error
 - Intersection types — A field declared with conflicting **non-object** types across members is rejected under `-compat=strict` (default); the `-compat=js` TS-faithful `never`-field is not yet implemented, so a conflict is currently rejected in both modes (same-named **object** fields are recursively intersected instead — `{ x: A } & { x: B }` ⇒ `x: A & B`)
@@ -688,7 +810,7 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 ### Encoding / Text — Strict 1/2 (50%) · 1 caveat — [Encoding / Text](status/ENCODING-TEXT.md)
 - `TextDecoder` — UTF-8 only (V1 scope) — non-UTF-8 support (Latin-1/windows-1252, UTF-16, Greek, the rest of the WHATWG label list) is a staged, low-priority follow-on in [TDD-00034](tdd/TDD-00034.md), not started; a recognized non-UTF-8 label (`latin1`/`utf-16`/…) therefore throws a `RangeError` at construction rather than decoding ([ADR-00567](adr/ADR-00567.md))
 
-### String Methods — Strict 17/32 (~53%) · 14 caveats — [String Methods](status/STRING-METHODS.md)
+### String Methods — Strict 18/33 (~55%) · 14 caveats — [String Methods](status/STRING-METHODS.md)
 - `.length` — Byte length, not the JS UTF-16 code-unit count — `'café'.length` is `5` (Node: `4`).
 - `.slice(start?, end?)` — Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it (`'café'.slice(0, 4)` cuts mid-`é`), diverging from Node on non-ASCII text.
 - `.substring(start, end?)` — Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it, unlike Node's code-unit indexing on non-ASCII text.
@@ -738,13 +860,15 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `WeakMap` / `WeakSet` / `WeakRef` — Object-identity keys only (a primitive key is a clean compile error); non-iterable (no `size`/iteration — matches spec)
 - `WeakMap` / `WeakSet` / `WeakRef` — Under `-mm=manual` (default) a weak reference is strong: nothing is ever collected, so `.deref()` never nulls and keys persist ("leak by design"). Real weak semantics require `-mm=gc` ([TDD-00112](tdd/TDD-00112.md)/[ADR-00349](adr/ADR-00349.md))
 
-### Language Constructs — Strict 48/78 (~62%) · 64 caveats — [Language Constructs](status/LANGUAGE-CONSTRUCTS.md)
+### Language Constructs — Strict 46/79 (~58%) · 67 caveats — [Language Constructs](status/LANGUAGE-CONSTRUCTS.md)
 - `for…of` over arrays, strings, `Map`, `Set`, and a class implementing `next(): T \| null` — A bare `for (const v of map)` iterates values (use `.keys()` for keys — [ADR-00011](adr/ADR-00011.md)); the two-name pattern `for (const [k, v] of map)` decomposes entries ([ADR-00481](adr/ADR-00481.md))
 - `for…of` over arrays, strings, `Map`, `Set`, and a class implementing `next(): T \| null` — A string iterates per byte, not per Unicode code point — correct for ASCII/Latin-1, the same byte-string narrowing the rest of the string layer carries ([ADR-00535](adr/ADR-00535.md))
 - `try` / `catch` / `finally` — A catch pattern can only destructure the caught value's fixed `{kind, message, name}` shape (every thrown value, including a thrown non-Error primitive, is force-shaped into that one runtime layout), not an arbitrary custom object's own fields, and there's no array-pattern form ([ADR-00170](adr/ADR-00170.md))
+- `TypeError` on a property access off `undefined`/`null` (`s.length`, `r.name`, `p.m()`, `s[i]`, `p.x = v`) — In `p.x = f()` the base is checked before the right-hand side is evaluated, so `f()` does not run ahead of the `TypeError` (JS evaluates it first)
 - String literals (single/double quote) — An embedded NUL (`\x00`, `\0`) truncates the string, since strings are stored as NUL-terminated C strings
 - String literals (single/double quote) — No strict-mode `SyntaxError` for a legacy octal escape (accepted unconditionally)
 - Logical operators `&& \|\| !` — Under `-compat=js`, `&&`/`\|\|` are value-preserving only for **same-typed** operands; differently-typed operands (`0 \|\| "x"`) stay bool, since the value-preserving result would be a union this compiler can't represent ([ADR-00220](adr/ADR-00220.md))
+- Ternary `cond ? a : b` — A pointer branch mixed with a scalar one that is not a scalar union (`c ? 1 : someObject`), and an array-typed ternary, are compile-time rejections — narrow first, or assign each branch separately
 - Comma / sequence operator `(a, b, c)` — A sequence whose *first* operand is a lone identifier (`(a, b)`) is instead parsed as an arrow-function parameter list — a known ambiguity; write a non-identifier first operand ([ADR-00179](adr/ADR-00179.md))
 - `typeof` operator — `typeof <namespace>.<method>` answers `"function"` for the common built-in namespaces — `Promise`/`Math`/`JSON`, `console` (any member), and the static methods of `Object`/`Number`/`String`/`Array`/`Date`/`Symbol`/`Reflect`/`Boolean` ([ADR-00282](adr/ADR-00282.md)/[ADR-00596](adr/ADR-00596.md)); a non-method static (`Number.MAX_VALUE`) still answers through normal inference, and a method on a namespace outside this allow-list falls back to inference
 - `typeof` operator — `typeof value.method` is `"function"` for a class instance method and the common built-in string/array methods ([ADR-00607](adr/ADR-00607.md)); a string/array method name outside that curated set falls back to inference (a wrong `"number"`)
@@ -762,7 +886,7 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - Function expressions (`var f = function(x) {...}`, callback arguments, IIFE bodies) — A generic function used by value is out of scope (no single monomorphized symbol to point at) ([ADR-00200](adr/ADR-00200.md))
 - Default parameter values — A default expression referencing an earlier parameter works across free functions, instance/static methods, and constructors ([ADR-00598](adr/ADR-00598.md)); a rest-parameter constructor is unsupported
 - Default parameter values — Filled through a first-class function value too — a closure bound to a variable/field, an object shorthand method, an IIFE ([ADR-00914](adr/ADR-00914.md)) — including a default that references a variable captured from the closure's defining scope, evaluated in the body prologue via an argument-presence mask ([ADR-00915](adr/ADR-00915.md)); this also covers a scalar/string/object/array captured-default parameter, an async closure, and `.bind` (the mask threads through the bind trampoline) ([ADR-00916](adr/ADR-00916.md)). A captured-default on a nullable-scalar or destructured (`{a}`/`[a]`) parameter stays a clean rejection (no single overwrite slot), and capturing an array *variable* into a default (vs. referencing a module-global array) hits the separate array-capture limitation
-- Optional parameters (`param?`) — An array-typed optional parameter stays an empty array when omitted (an array aggregate has no spare absent state); an un-narrowed optional scalar is still lenient in arithmetic (`emitIdent` unwraps the payload before the operator, so `a + b` on an absent `b` reads `0` rather than erroring — the same residual as any un-narrowed nullable local)
+- Optional parameters (`param?`) — An un-narrowed optional scalar is still lenient in arithmetic (`emitIdent` unwraps the payload before the operator, so `a + b` on an absent `b` reads `0` rather than erroring — the same residual as any un-narrowed nullable local)
 - Destructured function parameters (`function f({ x, y }: T) {}` / `function f([a, b]: T[]) {}`) — No combination with `...` or a whole-parameter default value; a pattern param with no annotation and no contextual type (a plain `function f([a, b])`) is still rejected, matching TS's implicit-any error
 - Destructured function parameters (`function f({ x, y }: T) {}` / `function f([a, b]: T[]) {}`) — A `= default` on a nested position is a clean rejection; per-element defaults follow the same rules as the statement-level destructuring rows
 - Nested function declarations (`function outer() { function inner() {...}; return inner(); }`) — Generic (`<T>`) nested declarations and same-scope duplicate names are clean compile errors ([TDD-00057](tdd/TDD-00057.md)/[ADR-00149](adr/ADR-00149.md)); a hoisted call that reads a captured variable declared *between* the call and the declaration is a clean compile error (Node crashes with a runtime TDZ error there — the [TDD-00070](tdd/TDD-00070.md) posture)
@@ -776,11 +900,12 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - Generator functions (`function* f(): T { yield x; }`, `.next(value)`, `for...of`) — The return-type annotation is optional — the element type is inferred from the body's yields (numeric join, `yield*` delegation, return fallback; only a genuinely non-joinable mix still requires the annotation — [ADR-00293](adr/ADR-00293.md)); still requires a plain non-destructured parameter list and a non-array parameter type (an array *element* type is supported — yielded/sent arrays round-trip through every generator slot, `for...of`/`.next()`/`yield*`/`for await` alike, [ADR-00676](adr/ADR-00676.md); a tuple/object element type also works)
 - Generator functions (`function* f(): T { yield x; }`, `.next(value)`, `for...of`) — When present, the annotation may be the element type written directly (`function* f(): number`) or the idiomatic-TS wrapper around it — `Generator<T>`, `IterableIterator<T>`, `Iterator<T>`, `Iterable<T>` and their `Async` forms, plus the three-arg `Generator<T, TReturn, TNext>` (TReturn/TNext ignored in V1) — which unwraps to `T` ([ADR-00814](adr/ADR-00814.md))
 - Generator functions (`function* f(): T { yield x; }`, `.next(value)`, `for...of`) — Calling `.next()` again after completion returns `{value: <T's zero value>, done: true}`, not `undefined` ([TDD-00061](tdd/TDD-00061.md)/[ADR-00173](adr/ADR-00173.md)) — deliberately kept bare even with the `T \| undefined` sentinel available: tsc types the result's `value` as `any`, so the typed `T` here is already stricter than TS, and flipping it would break every `.next().value` consumer for no faithfulness gain ([ADR-00781](adr/ADR-00781.md))
+- `await` expressions — In a **Worker module** or a **dynamically imported module** (`import()` target), a top-level `await` of a still-*pending* promise resumes out of order: the continuation runs before reactions registered on that promise ahead of it (`p.then(r1); await p` runs the code after the `await` before `r1`; Node runs `r1` first). The entry program, every async function, and a top-level await of a settled promise or a plain value anywhere have Node's order ([TDD-00224](tdd/TDD-00224.md) Stage 2)
 - `Promise.all` / `.race` / `.allSettled` — `JSON.stringify` of an **error-subclass instance** reason yields `{}` where Node serializes its own enumerable fields — needs per-field enumerability ([TDD-00222](tdd/TDD-00222.md)). Everything else about a reason is faithful — `typeof`, `.message`/`.name`/`String(reason)` (subclasses included), and precise `instanceof` ([ADR-01003](adr/ADR-01003.md)/[TDD-00169](tdd/TDD-00169.md)).
 - Namespaces (`namespace X {}` / `module X {}`, function merging) — Top-level declarations only (a namespace inside a function body is not supported); no `declare namespace`, no cross-module `export namespace`; the same namespace member declared in two files is a link-time duplicate-symbol error, not file-private ([TDD-00095](tdd/TDD-00095.md)/[TDD-00148](tdd/TDD-00148.md))
 - Namespaces (`namespace X {}` / `module X {}`, function merging) — Type members (class/interface/type/enum) desugar to *bare-name* top-level declarations — two namespaces declaring the same class name collide, ([ADR-00450](adr/ADR-00450.md)); outside `X.Enum.Member` / `X.Class.static` chains resolve through the qualifier strip ([ADR-00480](adr/ADR-00480.md))
 - Namespaces (`namespace X {}` / `module X {}`, function merging) — A top-level namespace `const` initializer can't reference a sibling member (it evaluates outside the namespace context); sibling references *inside member function bodies* work, with consts subject to the [ADR-00342](adr/ADR-00342.md) promotion type limits
-- Interfaces (structural) — An optional field whose type is an array or tuple stays bare — an omitted `tags?: string[]` reads as an empty array, not `undefined` (the `{ptr,i64}` slot has no distinct absent state — [ADR-00246](adr/ADR-00246.md))
+- Interfaces (structural) — An optional **tuple** field stays bare: an omitted `pair?: [number, string]` prints `undefined` but `o.pair === undefined` is `false` ([ADR-00246](adr/ADR-00246.md)). An optional *array* field is a real `undefined` when omitted ([ADR-01041](adr/ADR-01041.md))
 - Object literals `{ key: value }` — No duplicate-`__proto__`-key detection (Annex B legacy `SyntaxError` rule)
 - Getters / setters (`get x() {}` / `set x(v) {}`) on classes and object literals — An accessor-bearing **object literal** can't be assigned to a *differently-shaped* structural object type (`const p: { x: number } = objWithGetter`) — its accessors are methods, not fields; a clean rejection, used directly it works ([ADR-00603](adr/ADR-00603.md))
 - Getters / setters (`get x() {}` / `set x(v) {}`) on classes and object literals — `console.log` of an accessor object prints only its data fields, not `x: [Getter]` (an inspect-fidelity gap)

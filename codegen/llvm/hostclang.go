@@ -55,6 +55,77 @@ func ClangCommand(args ...string) *exec.Cmd {
 	return exec.Command("clang", HostClangArgv(args...)...)
 }
 
+// RunClangLink runs a linking clang invocation with the driver's stdio. On
+// Windows the mingw linker opens its output through the narrow (ANSI) file API,
+// so an output path holding characters outside the active code page fails with
+// "cannot open output file … Invalid argument" — a project under a non-ASCII
+// directory could not be built at all. There the link goes to an ASCII-named
+// temp file and is moved into place (Go's rename is wide); the import library
+// and PDB-less mingw output carry no path back to the temp name.
+func RunClangLink(args ...string) error {
+	final, idx := "", -1
+	if runtime.GOOS == "windows" {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-o" && !isASCII(args[i+1]) {
+				final, idx = args[i+1], i+1
+			}
+		}
+	}
+	var tmpDir string
+	if idx >= 0 {
+		d, err := os.MkdirTemp("", "kml-link-")
+		if err != nil || !isASCII(d) {
+			// No ASCII temp location either: fall through and let the linker
+			// report the failure against the real path.
+			if err == nil {
+				os.RemoveAll(d)
+			}
+			idx = -1
+		} else {
+			tmpDir = d
+			defer os.RemoveAll(tmpDir)
+			args = append([]string{}, args...)
+			args[idx] = filepath.Join(tmpDir, "out"+filepath.Ext(final))
+		}
+	}
+	cmd := ClangCommand(args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	if idx < 0 {
+		return nil
+	}
+	return moveFile(args[idx], final)
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// moveFile renames src over dst, falling back to copy+remove when they sit on
+// different volumes (the temp directory and the project often do).
+func moveFile(src, dst string) error {
+	os.Remove(dst)
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(dst, data, 0755); err != nil {
+		return err
+	}
+	return os.Remove(src)
+}
+
 // staticLinkMode is set once from the --static flag (SetStaticLink) before any
 // compilation. It gates whether the non-system feature libraries (C++ runtime,
 // winpthread, pcre2, the curl chain) link statically for a self-contained binary,

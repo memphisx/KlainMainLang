@@ -138,8 +138,8 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// dispatch before the concat decision below would stringify the nullish
 	// side. A nullish + *string* pair stays concatenation, as in JS.
 	if e.compatJS() && ex.Op == "+" {
-		lNullish := left.Ty.IsNull || left.Ty.IsUndefined
-		rNullish := right.Ty.IsNull || right.Ty.IsUndefined
+		lNullish := (left.Ty.IsNull || left.Ty.IsUndefined) && !left.Ty.UncheckedIndex
+		rNullish := (right.Ty.IsNull || right.Ty.IsUndefined) && !right.Ty.UncheckedIndex
 		if (lNullish && scalarTypeKind(right.Ty) == "number") || (rNullish && scalarTypeKind(left.Ty) == "number") {
 			return e.emitAnyBinary("+", left, right, ex.GetPos())
 		}
@@ -158,7 +158,7 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 			// relational use gates.
 			if !(ex.Op == "+" && (isStringTy(left.Ty) || isStringTy(right.Ty))) {
 				for _, v := range []Value{left, right} {
-					if isNullableScalar(v.Ty) && v.Ty.IsUndefined {
+					if isNullableScalar(v.Ty) && v.Ty.IsUndefined && !v.Ty.UncheckedIndex {
 						return Value{}, fmt.Errorf("%d:%d: '%s | undefined' is possibly undefined in operator '%s' — narrow with `if (x !== undefined)`, provide a default with `??`, or assert with `!`",
 							ex.GetPos().Line, ex.GetPos().Col, tsTypeName(v.Ty.withoutNullable()), ex.Op)
 					}
@@ -295,8 +295,8 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// emitNullableScalarNullCompare / the presence-aware paths — folding it here
 	// would treat a possibly-present value as constant-null (regression found in
 	// `writer.desiredSize === null`).
-	lNullish := (left.Ty.IsNull || left.Ty.IsUndefined || left.Ty.IR == "void") && !isNullableScalar(left.Ty)
-	rNullish := (right.Ty.IsNull || right.Ty.IsUndefined || right.Ty.IR == "void") && !isNullableScalar(right.Ty)
+	lNullish := isNullishLiteralTy(left.Ty) && !isNullableScalar(left.Ty)
+	rNullish := isNullishLiteralTy(right.Ty) && !isNullableScalar(right.Ty)
 	lRealStr := isStringTy(left.Ty) && !lNullish
 	rRealStr := isStringTy(right.Ty) && !rNullish
 	if (lNullish || rNullish) && !lRealStr && !rRealStr &&
@@ -397,14 +397,23 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		default:
 			return Value{}, fmt.Errorf("%d:%d: operator '%s' is not supported between an array and null", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
 		}
-		// Absence is a null data pointer, consistent across the two absent-array
-		// representations (a Map miss's {null,0} and a `T[] | null` sentinel's
-		// {null,0}). A present-but-empty array is also {null,0} and so reads as
-		// absent — the shared nullable-array edge, documented.
-		ptrReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, arrVal.Ref))
-		reg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp %s ptr %s, null", reg, cmpOp, ptrReg))
+		// A non-nullable transient (a literal, a slice/HOF result) is never
+		// null/undefined — an empty one included, whatever its data pointer.
+		if !arrVal.Ty.Nullable && arrVal.ArrayHeader == "" {
+			if cmpOp == "eq" {
+				return Value{Ref: "false", Ty: TypeBool}, nil
+			}
+			return Value{Ref: "true", Ty: TypeBool}, nil
+		}
+		// Absence is the null header (a `null` binding, an omitted argument, a Map
+		// miss, an absent field), or a null data pointer for a header-less
+		// transient (a RegExp miss) — emitArrayIsAbsent.
+		reg := e.emitArrayIsAbsent(arrVal)
+		if cmpOp == "ne" {
+			ne := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", ne, reg))
+			reg = ne
+		}
 		return Value{Ref: reg, Ty: TypeBool}, nil
 	}
 
@@ -1808,6 +1817,27 @@ func ternaryNullableScalarType(a, b Type) (Type, bool) {
 		nt.Nullable = true
 		return nt, true
 	}
+	// A branch that is already a `T | undefined` scalar (`c ? a[i] : 0`, `c ?
+	// xs.pop() : null`) keeps its absence: the result is that nullable scalar,
+	// with a float payload when either side is one.
+	for _, p := range [][2]Type{{a, b}, {b, a}} {
+		n, o := p[0], p[1]
+		if !isNullableScalar(n) || !(o.IsNull || isNullableScalar(o) || nonPtrScalar(o)) {
+			continue
+		}
+		if !o.IsNull && scalarTypeKind(o.withoutNullable()) != scalarTypeKind(n.withoutNullable()) {
+			continue
+		}
+		nt := n
+		if o.Float && !n.Float {
+			nt = o
+			nt.Nullable, nt.IsUndefined, nt.UncheckedIndex = true, n.IsUndefined, n.UncheckedIndex
+		}
+		if !(isNullableScalar(o) && o.UncheckedIndex) && !(nonPtrScalar(o)) {
+			nt.UncheckedIndex = false
+		}
+		return nt, true
+	}
 	return Type{}, false
 }
 
@@ -1840,8 +1870,11 @@ func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) 
 		return e.emitConditionalNullableScalar(ex, nty)
 	}
 	ty := e.inferExprType(ex.Consequent)
+	if aty, ok := ternaryArrayType(ty, e.inferExprType(ex.Alternate)); ok {
+		return e.emitConditionalArray(ex, aty)
+	}
 	if ty.IsArray {
-		return Value{}, fmt.Errorf("%d:%d: ternary operator is not supported for array types", ex.GetPos().Line, ex.GetPos().Col)
+		return Value{}, fmt.Errorf("%d:%d: ternary branches have incompatible types (an array vs a non-array)", ex.GetPos().Line, ex.GetPos().Col)
 	}
 	// A ternary whose branches mix a string with a non-string (or a pointer with
 	// a scalar) has a genuine union result type this typed-subset compiler can't
@@ -1854,7 +1887,13 @@ func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) 
 	// A ternary with a dynamic (`any`) branch has a representable result after
 	// all: `any`. Box both branches into the NaN-boxed word (TDD-00155/00156).
 	if ty.IsDynamic || altTy.IsDynamic {
-		return e.emitConditionalAny(ex)
+		return e.emitConditionalAny(ex, nil)
+	}
+	// Scalar branches of different JS kinds (`c ? 1 : "a"`, `c ? 1 : true`) are
+	// the union of the two — the same boxed type a `number | string` annotation
+	// produces, and what `??` yields for the same operand shape.
+	if uTy, ok := ternaryUnion(ty, altTy); ok {
+		return e.emitConditionalAny(ex, &uTy)
 	}
 	// A pointer/reference branch (string/object/array) and a non-pointer scalar
 	// branch (number/boolean/bigint) can't share the single result slot below:
@@ -1910,10 +1949,71 @@ func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) 
 	return Value{Ref: result, Ty: ty}, nil
 }
 
+// ternaryArrayType is the result type of `c ? xs : ys` / `c ? xs : null`: the
+// array type, nullable when a branch is `null`/`undefined` or itself nullable.
+// Shared by emission and inferExprType.
+func ternaryArrayType(a, b Type) (Type, bool) {
+	switch {
+	case a.IsArray && b.IsArray:
+		if b.Nullable && !a.Nullable {
+			a.Nullable, a.IsUndefined = true, b.IsUndefined
+		}
+		return a, true
+	case a.IsArray && b.IsNull:
+		a.Nullable, a.IsUndefined = true, b.IsUndefined
+		return a, true
+	case b.IsArray && a.IsNull:
+		b.Nullable, b.IsUndefined = true, a.IsUndefined
+		return b, true
+	}
+	return Type{}, false
+}
+
+// emitConditionalArray emits an array-valued ternary. Arrays are references, so
+// the single result slot holds the chosen branch's *header* (a null header for
+// a `null` branch) — the result aliases the array it picked, as in JS.
+func (e *Emitter) emitConditionalArray(ex *ast.ConditionalExpression, aty Type) (Value, error) {
+	thenL := e.freshLabel("ternary.then")
+	elseL := e.freshLabel("ternary.else")
+	mergeL := e.freshLabel("ternary.merge")
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+
+	cond, err := e.emitExpr(ex.Test)
+	if err != nil {
+		return Value{}, err
+	}
+	cond = e.toBool(cond)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cond.Ref, thenL, elseL))
+	for _, br := range []struct {
+		label string
+		expr  ast.Expression
+	}{{thenL, ex.Consequent}, {elseL, ex.Alternate}} {
+		e.emitLabel(br.label)
+		v, err := e.emitExprWithObjectHint(br.expr, aty)
+		if err != nil {
+			return Value{}, err
+		}
+		if v.Ty.IsNull {
+			v = e.emitAbsentArrayValue(aty)
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.arrayReturnHeader(v), slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	}
+	e.emitLabel(mergeL)
+	h := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, slot))
+	nullable := aty
+	nullable.Nullable = true // read through the null-safe loader either way
+	out := e.arrayValueFromHeaderReg(h, nullable)
+	out.Ty = aty
+	return out, nil
+}
+
 // emitConditionalAny emits a `cond ? a : b` where at least one branch is
 // dynamic: each branch value is boxed into the NaN-boxed `any` word, so the
 // result is a well-typed `any` regardless of how the branch types mix.
-func (e *Emitter) emitConditionalAny(ex *ast.ConditionalExpression) (Value, error) {
+func (e *Emitter) emitConditionalAny(ex *ast.ConditionalExpression, uTy *Type) (Value, error) {
 	thenL := e.freshLabel("ternary.then")
 	elseL := e.freshLabel("ternary.else")
 	mergeL := e.freshLabel("ternary.merge")
@@ -1934,8 +2034,10 @@ func (e *Emitter) emitConditionalAny(ex *ast.ConditionalExpression) (Value, erro
 		if err != nil {
 			return err
 		}
-		boxed, err := e.emitBoxValue(v)
-		if err != nil {
+		var boxed Value
+		if uTy != nil {
+			boxed = e.coerce(v, *uTy)
+		} else if boxed, err = e.emitBoxValue(v); err != nil {
 			return err
 		}
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, resPtr))
@@ -1952,7 +2054,92 @@ func (e *Emitter) emitConditionalAny(ex *ast.ConditionalExpression) (Value, erro
 	e.emitLabel(mergeL)
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, resPtr))
+	if uTy != nil {
+		return Value{Ref: result, Ty: *uTy}, nil
+	}
 	return Value{Ref: result, Ty: TypeAny}, nil
+}
+
+// nullCoalesceBoxResult reports the result type of `left ?? right` when left is
+// a *constrained* nullable box — the `T | undefined` a `(number | undefined)[]`
+// element reads as — and right is a plain scalar. The nullish half is gone from
+// the result: a right operand of the box's own single kind leaves the bare `T`
+// (`xs[i] ?? 0` is a number, usable in arithmetic); any other scalar leaves the
+// non-nullable union of the members and the right operand. ok is false for bare
+// any/unknown and for a nullable/dynamic right operand, which keep the `any`
+// result. Shared by emission and inferExprType so the two cannot disagree.
+func nullCoalesceBoxResult(left, right Type) (Type, bool) {
+	if !left.IsDynamic || len(left.UnionMembers) == 0 || !isSelfDescribingBox(left) {
+		return Type{}, false
+	}
+	rk := scalarTypeKind(right)
+	if rk == "" || right.Nullable || (right.IR == "ptr" && !isStringTy(right)) {
+		return Type{}, false
+	}
+	members := left.UnionMembers
+	covered := false
+	for _, m := range members {
+		if scalarTypeKind(m) == rk {
+			covered = true
+		}
+	}
+	if covered && len(members) == 1 {
+		return members[0], true
+	}
+	if !covered {
+		members = append(append([]Type{}, members...), right)
+	}
+	return Type{IR: TypeAny.IR, IsDynamic: true, UnionMembers: members}, true
+}
+
+// emitNullCoalesceBox emits `left ?? right` for nullCoalesceBoxResult's shape:
+// a nullish box evaluates the right operand, a present one unboxes/re-boxes the
+// left value into resTy.
+func (e *Emitter) emitNullCoalesceBox(left Value, rightExpr ast.Expression, resTy Type) (Value, error) {
+	resSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resSlot, resTy.IR, resTy.Align()))
+	tag, _ := e.emitUnboxTagPayload(left)
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNull, tag, kmlTagNull))
+	isUndef := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
+	isNullish := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", isNullish, isNull, isUndef))
+	nullishL := e.freshLabel("nullc.box.nullish")
+	presentL := e.freshLabel("nullc.box.present")
+	mergeL := e.freshLabel("nullc.box.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNullish, nullishL, presentL))
+
+	e.emitLabel(nullishL)
+	right, err := e.emitExpr(rightExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	right = e.coerce(right, resTy)
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resTy.IR, right.Ref, resSlot, resTy.Align()))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(presentL)
+	present := left
+	present.Ty.Nullable, present.Ty.IsUndefined = false, false
+	present = e.coerce(present, resTy)
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resTy.IR, present.Ref, resSlot, resTy.Align()))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, resTy.IR, resSlot, resTy.Align()))
+	return Value{Ref: result, Ty: resTy}, nil
+}
+
+// ternaryUnion reports the union result type of a ternary whose branches are
+// scalars of different JS kinds (see nullCoalesceUnion, whose kind rule it
+// shares). Shared by emission and inferExprType so the two cannot disagree.
+func ternaryUnion(a, b Type) (Type, bool) {
+	if a.Nullable || b.Nullable || a.IsNull || b.IsNull || a.IsDynamic || b.IsDynamic {
+		return Type{}, false
+	}
+	return nullCoalesceUnion(a, b)
 }
 
 // emitConditionalNullableScalar emits a `cond ? a : b` whose result type is a
@@ -2029,6 +2216,11 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 		payloadReg := e.loadNullableScalarPayload(sym.Ptr, sym.Ty)
 		payload := Value{Ref: payloadReg, Ty: sym.Ty.withoutNullable()}
 		if sym.NarrowedNonNull {
+			// Still typed as the operands' union when they differ in kind
+			// (nullCoalesceUnion) — inference cannot see the narrowing.
+			if uTy, ok := nullCoalesceUnion(payload.Ty, e.inferExprType(ex.Right)); ok {
+				return e.coerce(payload, uTy), nil
+			}
 			return payload, nil
 		}
 		present := e.loadNullableScalarPresent(sym.Ptr, sym.Ty)
@@ -2073,6 +2265,13 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 	if left.Ty.IR != "ptr" {
 		return left, nil
 	}
+	// A string left with a number/boolean right (`s ?? 42`): the result is the
+	// union of the two (nullCoalesceUnion).
+	if uTy, ok := nullCoalesceUnion(left.Ty.withoutNullable(), e.inferExprType(ex.Right)); ok {
+		nonNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", nonNull, left.Ref))
+		return e.emitNullCoalesceUnion(nonNull, Value{Ref: left.Ref, Ty: left.Ty.withoutNullable()}, ex.Right, uTy)
+	}
 
 	resPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
@@ -2095,6 +2294,7 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 	// ?? 42`) is a genuine `ptr | number` union this compiler can't represent —
 	// reject cleanly rather than let `coerce(number, ptr)` fall through and emit
 	// an invalid `store ptr <double>`.
+	rightTy := right.Ty
 	right, err = e.coerceChecked(right, TypePtr, ex.GetPos(), "?? operands")
 	if err != nil {
 		return Value{}, err
@@ -2109,7 +2309,29 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 	e.emitLabel(mergeL)
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
-	return Value{Ref: result, Ty: TypePtr}, nil
+	return Value{Ref: result, Ty: nullCoalescePtrResult(left.Ty, rightTy)}, nil
+}
+
+// nullCoalescePtrResult is the type of `left ?? right` for a pointer left
+// operand (string, object, class instance, Map…): the left's own type with its
+// nullability dropped — `(row ?? dflt).name` is a field read off a Row — unless
+// the right operand can itself be absent (`a ?? b` with `b?: string`, `a ??
+// null`), in which case the result stays nullable, with the right's
+// null-vs-undefined flavour. A left that carries no structure of its own (the
+// literal-typed bare pointer) takes the right's. Shared by emission and
+// inferExprType so the two cannot disagree.
+func nullCoalescePtrResult(left, right Type) Type {
+	res := left.withoutNullable()
+	res.IsUndefined = false
+	if right.IR == "ptr" && !right.IsNull && right.IsObject && !res.IsObject {
+		res = right.withoutNullable()
+		res.IsUndefined = false
+	}
+	if right.IsNull || right.Nullable {
+		res.Nullable = true
+		res.IsUndefined = right.IsUndefined
+	}
+	return res
 }
 
 // emitNullCoalesceArray implements `a ?? b` when the left operand is a
@@ -2118,16 +2340,14 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 // present the whole expression is the left array; when absent it is the right
 // operand, coerced to the (non-nullable) array type.
 func (e *Emitter) emitNullCoalesceArray(left Value, rightExpr ast.Expression) (Value, error) {
-	resTy := left.Ty
-	resTy.Nullable = false
-	resTy.IsUndefined = false
+	resTy := nullCoalesceArrayResult(left.Ty, e.inferExprType(rightExpr))
+	if resTy.IsDynamic {
+		return e.emitNullCoalesceArrayAny(left, rightExpr)
+	}
 
 	resSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca {ptr, i64}, align 8", resSlot))
-	dataPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, left.Ref))
-	isAbsent := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isAbsent, dataPtr))
+	isAbsent := e.emitArrayIsAbsent(left)
 
 	absentL := e.freshLabel("nullc.arr.absent")
 	presentL := e.freshLabel("nullc.arr.present")
@@ -2135,7 +2355,7 @@ func (e *Emitter) emitNullCoalesceArray(left Value, rightExpr ast.Expression) (V
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAbsent, absentL, presentL))
 
 	e.emitLabel(absentL)
-	right, err := e.emitExpr(rightExpr)
+	right, err := e.emitExprWithObjectHint(rightExpr, resTy)
 	if err != nil {
 		return Value{}, err
 	}
@@ -2153,11 +2373,68 @@ func (e *Emitter) emitNullCoalesceArray(left Value, rightExpr ast.Expression) (V
 	return Value{Ref: result, Ty: resTy}, nil
 }
 
+// nullCoalesceArrayResult is the type of `xs ?? r` for a nullable array left
+// operand: the array type (still nullable when `r` can itself be absent) for an
+// array or nullish right operand, and `any` for anything else (`xs ?? "none"`
+// is `T[] | string`). Shared by emission and inferExprType.
+func nullCoalesceArrayResult(left, right Type) Type {
+	if !right.IsArray && !right.IsNull {
+		return TypeAny
+	}
+	res := left
+	res.Nullable, res.IsUndefined = false, false
+	if right.IsNull || right.Nullable {
+		res.Nullable, res.IsUndefined = true, right.IsUndefined
+	}
+	return res
+}
+
+// emitNullCoalesceArrayAny is `xs ?? r` with a non-array `r`: each side is boxed
+// into the `any` word.
+func (e *Emitter) emitNullCoalesceArrayAny(left Value, rightExpr ast.Expression) (Value, error) {
+	resSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", resSlot, TypeAny.IR))
+	absentL := e.freshLabel("nullc.arr.absent")
+	presentL := e.freshLabel("nullc.arr.present")
+	mergeL := e.freshLabel("nullc.arr.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitArrayIsAbsent(left), absentL, presentL))
+
+	e.emitLabel(absentL)
+	right, err := e.emitExpr(rightExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	rb, err := e.emitBoxValue(right)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", TypeAny.IR, rb.Ref, resSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(presentL)
+	present := left
+	present.Ty.Nullable, present.Ty.IsUndefined = false, false
+	lb, err := e.emitBoxValue(present)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", TypeAny.IR, lb.Ref, resSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", result, TypeAny.IR, resSlot))
+	return Value{Ref: result, Ty: TypeAny}, nil
+}
+
 // emitNullCoalesceDynamic implements `a ?? b` when the left operand is a dynamic
 // (any/unknown) NaN-boxed value: it is nullish only when its tag is null or
 // undefined. The result is an any-box holding the left value when present, else
 // the right operand coerced to any.
 func (e *Emitter) emitNullCoalesceDynamic(left Value, rightExpr ast.Expression) (Value, error) {
+	if resTy, ok := nullCoalesceBoxResult(left.Ty, e.inferExprType(rightExpr)); ok {
+		return e.emitNullCoalesceBox(left, rightExpr, resTy)
+	}
 	resSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", resSlot))
 

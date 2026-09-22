@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"KlainMainLang/codegen/llvm"
@@ -57,7 +58,34 @@ func TestE2EImportMetaUrlSingleFile(t *testing.T) {
 		"main.ts": `console.log(import.meta.url)`,
 	})
 	got := buildAndRunFromDir(t, dir, "main.ts")
-	want := "file://" + filepath.Join(dir, "main.ts") + "\n"
+	want := wantFileURL(filepath.Join(dir, "main.ts")) + "\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// wantFileURL is the test's own, deliberately naive rendering of Node's
+// import.meta.url for the temp paths these tests use: `file:///C:/dir/f.ts` on
+// Windows, `file:///dir/f.ts` elsewhere, with the two characters such paths
+// actually contain (a space, and the `~` of a Windows short name) encoded.
+func wantFileURL(path string) string {
+	p := filepath.ToSlash(path)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	p = strings.ReplaceAll(p, " ", "%20")
+	p = strings.ReplaceAll(p, "~", "%7E")
+	return "file://" + p
+}
+
+// Node percent-encodes the URL: a module in `my dir/caf#é.ts` is
+// `…/my%20dir/caf%23%C3%A9.ts`, not the raw path.
+func TestE2EImportMetaUrlIsPercentEncoded(t *testing.T) {
+	dir := writeMultiFile(t, map[string]string{
+		"my dir/caf#é.ts": `console.log(import.meta.url)`,
+	})
+	got := buildAndRunFromDir(t, dir, filepath.Join("my dir", "caf#é.ts"))
+	want := wantFileURL(dir) + "/my%20dir/caf%23%C3%A9.ts\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -78,8 +106,8 @@ console.log(libUrl())
 `,
 	})
 	got := buildAndRunFromDir(t, dir, "main.ts")
-	want := "file://" + filepath.Join(dir, "main.ts") + "\n" +
-		"file://" + filepath.Join(dir, "lib.ts") + "\n"
+	want := wantFileURL(filepath.Join(dir, "main.ts")) + "\n" +
+		wantFileURL(filepath.Join(dir, "lib.ts")) + "\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

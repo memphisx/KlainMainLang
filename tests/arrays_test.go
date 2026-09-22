@@ -573,16 +573,167 @@ console.log(Array.isArray('hello'))
 
 // --- Array bounds checking ---
 
-func TestE2EArrayIndexOutOfBoundsReadThrows(t *testing.T) {
+// An out-of-range element read is `undefined`, as in Node (ADR-01040) — every
+// element kind, every direct consumer, and the ADR-01038 TypeError off it.
+func TestE2EArrayIndexOutOfRangeReadsUndefined(t *testing.T) {
 	src := `
-const arr: number[] = [1, 2, 3]
+interface Row { name: string }
+const nums: number[] = [1, 2, 3]
+const strs: string[] = ["a", "b"]
+const rows: Row[] = [{ name: "x" }]
+const nested: number[][] = [[1], []]
+const bools: boolean[] = [true]
+console.log(nums[5], strs[5], rows[5], nested[7], bools[3], nums[-1])
+console.log(nested[1], nested[1] === undefined, nested[7] === undefined)
+console.log(nums[5] === undefined, strs[5] === undefined, rows[5] === undefined)
+console.log(typeof nums[5], typeof strs[5], typeof rows[5])
+console.log(nums[5] ?? 42, strs[5] ?? "dflt", rows[5]?.name)
+if (nums[5]) { console.log("truthy") } else { console.log("falsy") }
+console.log(strs[7] + "!", JSON.stringify({ v: nums[0], u: nums[9] }))
 try {
-    console.log(arr[5])
+    console.log(rows[5].name)
 } catch (e) {
-    console.log("caught: " + e.message)
+    console.log(e instanceof TypeError, (e as Error).message)
+}
+try {
+    console.log(strs[5].length)
+} catch (e) {
+    console.log(e instanceof TypeError, (e as Error).message)
 }
 `
-	assertOutput(t, src, "caught: Array index out of bounds")
+	assertOutput(t, src, `undefined undefined undefined undefined undefined undefined
+[] false true
+true true true
+undefined undefined undefined
+42 dflt undefined
+falsy
+undefined! {"v":1}
+true Cannot read properties of undefined (reading 'name')
+true Cannot read properties of undefined (reading 'length')`)
+}
+
+// tsc types `a[i]` as plain `T`: in-range reads feed arithmetic, typed slots,
+// call arguments and inferred containers with no narrowing, in strict mode.
+func TestE2EArrayIndexReadIsPlainTStatically(t *testing.T) {
+	src := `
+const idx: number[] = [2, 0, 1]
+const vals: number[] = [10, 20, 30]
+const names: string[] = ["x", "y"]
+function total(a: number[]): number { let s = 0; for (const v of a) s += v; return s }
+function firstOf(a: number[]) { return a[0] }
+const picked = idx.map(i => vals[i])
+console.log(total(picked), picked.map(v => v * 2))
+const g: number = firstOf(vals) + 1
+console.log(g, total([firstOf(vals), vals[1]]))
+const t = vals[1] > 10 ? vals[1] : 0
+console.log(t, vals[0] + vals[1] * vals[2], vals[0] < vals[1])
+const m = new Map<string, number>()
+m.set(names[0], vals[0])
+console.log(m.get("x"), names[0] + names[1], idx.map(i => names[i]))
+const fl: number[] = [1.5]
+console.log(fl[0] * 2, fl[9] * 2)
+`
+	assertOutput(t, src, `60 [ 60, 20, 40 ]
+11 30
+20 610 true
+10 xy [ undefined, 'x', 'y' ]
+3 NaN`)
+}
+
+// A nullable array that holds no array (ADR-01041): null/undefined initialisers,
+// reassignment, arguments, returns through a ternary, `??`, a class field — and
+// an empty array is present (truthy, `!== null`).
+func TestE2ENullableArrayAbsence(t *testing.T) {
+	src := `
+let a: number[] | null = null
+console.log(a, a === null, a == null, !a)
+a = [4, 5]
+if (a !== null) { a.push(6); console.log(a.length, a[2], a) }
+a = null
+try { console.log(a.length) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+try { a.push(1) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+function find(flag: boolean): string[] | null { return flag ? ["hit"] : null }
+const r1 = find(true)
+const r2 = find(false)
+console.log(r1, r2, r1 === null, r2 === null, r2 ?? ["fallback"], r1 ?? ["fallback"])
+function count(xs: number[] | null): number { if (!xs) return -1; let n = 0; for (const x of xs) n += x; return n }
+console.log(count(null), count([]), count([2, 3]))
+class Bag { items: string[] | null = null; add(s: string) { if (this.items === null) this.items = []; this.items.push(s) } }
+const bag = new Bag()
+console.log(bag.items, bag.items === null)
+bag.add("p"); bag.add("q")
+console.log(bag.items, bag.items === null, bag.items?.length)
+const empty: number[] = []
+console.log(((xs: number[] | null) => xs === null)(empty), JSON.stringify({ a: a, e: empty, r: r1 }))
+let u: number[] | undefined = undefined
+console.log(u === undefined, typeof u, u?.length ?? "no length")
+u = []
+console.log(u === undefined, typeof u, u?.length ?? "no length", u)
+function log(xs?: string[]) { console.log(xs, xs?.length, xs ?? "dflt") }
+log(); log([]); log(["z"])
+`
+	assertOutput(t, src, `null true true true
+3 6 [ 4, 5, 6 ]
+true Cannot read properties of null (reading 'length')
+true Cannot read properties of null (reading 'push')
+[ 'hit' ] null false true [ 'fallback' ] [ 'hit' ]
+-1 0 5
+null true
+[ 'p', 'q' ] false 2
+false {"a":null,"e":[],"r":["hit"]}
+true undefined no length
+false object 0 []
+undefined undefined dflt
+[] 0 []
+[ 'z' ] 1 [ 'z' ]`)
+}
+
+// Walking an absent array is Node's "is not iterable" TypeError; indexing it is
+// the property-read TypeError.
+func TestE2EAbsentArrayNotIterable(t *testing.T) {
+	src := `
+function sum(xs?: number[]): number { let s = 0; for (const x of xs) s += x; return s }
+function spread(xs?: number[]) { return [...xs] }
+function head(xs?: number[]) { return xs[0] }
+try { console.log(sum()) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+try { console.log(spread()) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+try { console.log(head()) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+console.log(sum([1, 2]), spread([3]), head([4]), sum([]))
+`
+	assertOutput(t, src, `true xs is not iterable
+true xs is not iterable
+true Cannot read properties of undefined (reading '0')
+3 [ 3 ] 4 0`)
+}
+
+// The same TypeError for an absent array reached through an expression — an
+// optional field, a nullable call result — named the way Node names it; and an
+// absent optional tuple field prints `undefined` instead of reading through null.
+func TestE2EAbsentArrayExpressionNotIterable(t *testing.T) {
+	src := `
+interface Opt { name: string; tags?: string[]; pair?: [number, string] }
+const o1: Opt = { name: "a" }
+const o3: Opt = { name: "c", tags: ["x", "y"] }
+console.log(o1.tags, o1.tags === undefined, o1.tags?.length, o1.tags ?? ["dflt"], o1.pair)
+try { for (const t of o1.tags) console.log(t) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+try { console.log([...o1.tags]) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+for (const t of o3.tags) console.log(t)
+console.log([...o3.tags], o3.tags.map(t => t + "!"))
+function get(f: boolean): number[] | null { return f ? [1] : null }
+try { for (const n of get(false)) console.log(n) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+for (const n of get(true)) console.log(n)
+const v = ((x: number) => x === 1)(1)
+console.log(v, typeof v)
+`
+	assertOutput(t, src, `undefined true undefined [ 'dflt' ] undefined
+true o1.tags is not iterable
+true o1.tags is not iterable
+x
+y
+[ 'x', 'y' ] [ 'x!', 'y!' ]
+true get is not a function or its return value is not iterable
+1
+true boolean`)
 }
 
 func TestE2EArrayIndexOutOfBoundsWriteThrows(t *testing.T) {
@@ -596,28 +747,6 @@ try {
 console.log(arr[0])
 `
 	assertOutput(t, src, "caught: Array index out of bounds\n1")
-}
-
-func TestE2EArrayNegativeIndexThrows(t *testing.T) {
-	src := `
-const arr: number[] = [1, 2, 3]
-try {
-    console.log(arr[-1])
-} catch (e) {
-    console.log("caught: " + e.message)
-}
-`
-	assertOutput(t, src, "caught: Array index out of bounds")
-}
-
-func TestE2EArrayIndexOutOfBoundsUncaughtExitsNonZero(t *testing.T) {
-	_, exitCode := compileAndRunExpectExit(t, `
-const arr: number[] = [1, 2, 3]
-console.log(arr[5])
-`)
-	if exitCode == 0 {
-		t.Fatal("expected a non-zero exit code for an uncaught array out-of-bounds access, got 0")
-	}
 }
 
 func TestE2EArrayInBoundsAccessStillWorks(t *testing.T) {

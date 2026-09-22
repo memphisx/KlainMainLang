@@ -35,6 +35,25 @@ func undefinedableElem(t Type) Type {
 	return t
 }
 
+// indexReadType is the type an array element read `a[i]` yields for element
+// type t: `T | undefined` (an out-of-range index reads `undefined`, as in
+// Node), flagged UncheckedIndex because tsc types the expression as plain `T`.
+// An element type with no spare absent state passes through unchanged.
+func indexReadType(t Type) Type {
+	nty := undefinedableElem(t)
+	if nty.Nullable && !t.Nullable {
+		nty.UncheckedIndex = true
+	}
+	return nty
+}
+
+// isNullishLiteralTy reports the static type of a bare `null`/`undefined`
+// (or void) operand — as opposed to a `T | undefined` value, which carries
+// IsUndefined only as its null-vs-undefined rendering flag.
+func isNullishLiteralTy(t Type) bool {
+	return t.IsNull || t.IR == "void" || (t.IsUndefined && !t.Nullable)
+}
+
 // optionalParamType widens an optional parameter's declared type to
 // `T | undefined` (TDD-00187): inside the body a `f(x?: T)` parameter reads as
 // possibly-absent — an omitted argument is a real `undefined`, exactly as tsc
@@ -148,7 +167,7 @@ func (e *Emitter) checkStrictUndefinedAssign(target Type, rhs ast.Expression, po
 		return nil
 	}
 	src := e.inferExprType(rhs)
-	if !src.Nullable || !src.IsUndefined || src.IsDynamic {
+	if !src.Nullable || !src.IsUndefined || src.IsDynamic || src.UncheckedIndex {
 		return nil
 	}
 	// A flow-narrowed local is proven present; its static type still reads

@@ -38,7 +38,7 @@
       "statusRow": "os.homedir()",
       "signature": "homedir(): string",
       "badge": "exact",
-      "description": "Returns the current user's home directory, mirroring libuv's uv_os_homedir: a set HOME wins (an empty one included, matching Node's \"\"); on POSIX an unset HOME falls back to the passwd database (getpwuid), throwing a catchable Error only if that fails too. Windows reads USERPROFILE.",
+      "description": "Returns the current user's home directory, mirroring libuv's uv_os_homedir: a set HOME wins (an empty one included, matching Node's \"\"); on POSIX an unset HOME falls back to the passwd database (getpwuid), throwing a catchable Error only if that fails too. Windows reads USERPROFILE, falling back to the process token's profile directory.",
       "returns": {
         "type": "string",
         "desc": "The home directory path."

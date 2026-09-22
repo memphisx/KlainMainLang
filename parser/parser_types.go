@@ -79,7 +79,7 @@ func (p *Parser) parseObjectTypeSignatureTail(source string) (*ast.TypeAnnotatio
 		if p.check(lexer.IDENT) &&
 			(p.peekNth(1).Type == lexer.COLON ||
 				(p.peekNth(1).Type == lexer.QUESTION && p.peekNth(2).Type == lexer.COLON)) {
-			p.advance()                         // name
+			p.advance() // name
 			paramOptional = p.match(lexer.QUESTION)
 			p.advance() // ':'
 		}

@@ -122,6 +122,25 @@ make ir FILE=examples/basics/basics.ts
 | `make conformance` | Regenerate the Test262 reports against the full corpus, both compat lanes, into `docs/testing/strict/` and `docs/testing/js/` (fetches first if needed) |
 | `make clean` | Remove compiler binary and compiled example artifacts |
 
+### Keeping test writes off the SSD
+
+The E2E suite and the conformance runner build, run and delete thousands of small native binaries: every test writes its IR, objects and an executable that live for seconds, and a full `-compat=both` conformance run does the same for tens of thousands of files, twice. It is not a speed problem (writing a test's artifacts takes about a millisecond against roughly a second of `clang -O2`); it is wear, which matters on a laptop whose SSD is soldered.
+
+Set **`KML_SCRATCH`** to a directory and the test harness and `tools/conformance` put every throwaway write under it — the temp root (`TMP`/`TEMP`/`TMPDIR`, so `t.TempDir`, the compiler's build directories and clang's temporaries all follow), the shared cache of pre-compiled runtime C sidecars, and the conformance workdir (`-workdir` still overrides it). Add `GOTMPDIR` to move the go tool's own link output (the ~40 MB test binary) too.
+
+`tools/ramdisk/` wraps that around a RAM-backed volume — create, export both variables, run the command, tear down:
+
+```sh
+tools/ramdisk/run.sh -s 8192 -- go test ./... -timeout 80m      # macOS (hdiutil) / Linux (tmpfs or /dev/shm)
+tools/ramdisk/run.sh -s 16384 -- go run ./tools/conformance -compat=both
+```
+
+```powershell
+tools\ramdisk\run.ps1 -SizeGB 12 -Run "go test ./... -timeout 80m"   # Windows, via OSFMount (winget install PassMark.OSFMount)
+```
+
+In Docker, mount the scratch as tmpfs **with `exec`** (the tests run the binaries they build from it): `docker run --tmpfs /scratch:exec,size=8g -e KML_SCRATCH=/scratch -e GOTMPDIR=/scratch …`.
+
 ## CLI flags
 
 ```text

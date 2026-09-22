@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 31/32 (~97%) · **Strict Coverage**: 17/32 (~53%).
+**Coverage**: 32/33 (~97%) · **Strict Coverage**: 18/33 (~55%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -30,6 +30,7 @@ Format: [Status page format](README.md#status-page-format).
 | `.repeat(n)` | ✅ | | |
 | `.padStart(len, pad?)` | ✅ | | • Empty pad string is a no-op, matching JS ([ADR-00004](../adr/ADR-00004.md)) |
 | `.padEnd(len, pad?)` | ✅ | | • Same empty-pad rule as `.padStart` ([ADR-00004](../adr/ADR-00004.md)) |
+| `.concat(...values)` | ✅ | | • The receiver followed by ToString of each argument — the template-literal conversion, so an object's `toString()` is asked before its `valueOf()` (`+` asks `valueOf()` first) and `null`/`undefined` print as words; a spread array contributes each element ([ADR-01047](../adr/ADR-01047.md)) |
 | `.charCodeAt(i)` | ✅ | | • Bounds-checked: an out-of-range index (negative or `>= length`) returns `NaN`, as real JS — the result is a double for exactly that reason ([ADR-00287](../adr/ADR-00287.md)); byte-space code units per this compiler's byte-sequence strings |
 | `.at(i)` | ✅ | | • Returns `string | undefined`: an out-of-range `i` (including a negative index past `-length`) is a real `undefined`, as in Node — narrow, `?? ''`, or `!` before use ([TDD-00187](../tdd/TDD-00187.md), [ADR-00830](../adr/ADR-00830.md)) |
 | `.charAt(i)` | ✅ | | • Never wraps a negative index from the end — always `""` for any out-of-range `i`, matching real JS's distinction from `.at()` ([ADR-00028](../adr/ADR-00028.md)) |

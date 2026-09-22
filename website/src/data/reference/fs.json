@@ -500,7 +500,7 @@
       },
       "differences": [
         "`atime`/`mtime` accept a number or `Date` only — a numeric string (which Node also coerces) is not supported.",
-        "A missing path throws a coded `Error` (`e.code === 'ENOENT'`) that also carries `err.syscall` (the bare syscall — `'open'`/`'stat'`/`'scandir'`/…), `err.path`, and the numeric `err.errno` (the negated errno, `-2` for ENOENT); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
+        "A missing path throws a coded `Error` (`e.code === 'ENOENT'`) that also carries `err.syscall` (the bare syscall — `'open'`/`'stat'`/`'scandir'`/…), `err.path`, and the numeric `err.errno` (libuv's value, as in Node: the negated errno on POSIX — `-2` for ENOENT — and libuv's own numbering on Windows, `-4058`); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
       ],
       "seeAlso": [
         "fs.statSync"

@@ -157,6 +157,13 @@
             ]
           },
           {
+            "feature": "`.concat(...values)`",
+            "status": "implemented",
+            "notes": [
+              "The receiver followed by ToString of each argument — the template-literal conversion, so an object's `toString()` is asked before its `valueOf()` (`+` asks `valueOf()` first) and `null`/`undefined` print as words; a spread array contributes each element ([ADR-01047](../adr/ADR-01047.md))"
+            ]
+          },
+          {
             "feature": "`.charCodeAt(i)`",
             "status": "implemented",
             "notes": [

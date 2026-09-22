@@ -905,6 +905,7 @@ func (e *Emitter) emitBoxValueWidened(v Value, srcExpr ast.Expression) (Value, e
 //   - a cyclic object graph (a self- or mutually-referential object field) —
 //     the helper unrolls the shape at compile time, so a cycle would unroll
 //     forever; `seen` breaks the recursion by declaring a cycle non-widenable.
+//
 // A plain data shape (interface/struct types, data-only classes) with
 // scalar/array/nested-data-object fields is widenable. `seen` is keyed by the
 // type's registry name; pass a fresh map at the top call.

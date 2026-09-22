@@ -246,7 +246,14 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	e.emitInstr(fmt.Sprintf("store i32 %s, ptr @__kml_listen_fd, align 4", listenfd))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_handler, align 8", handlerVal.Ref))
 	e.emitInstr("store ptr @__kml_http_dispatch, ptr @__kml_listen_dispatch, align 8")
-	e.emitInstr("call void @__kml_event_loop_run()")
+	if e.moduleTask {
+		// The loop may not run on the module coroutine's stack: main() runs it
+		// and resumes the module task when it returns (TDD-00224).
+		e.ensureModuleTaskRuntime()
+		e.emitInstr("call void @__kml_module_run_loop()")
+	} else {
+		e.emitInstr("call void @__kml_event_loop_run()")
+	}
 	e.emitPostLoopFlush()
 	return Value{Ty: TypeVoid}, nil
 }
@@ -333,11 +340,11 @@ func (e *Emitter) emitNewServerResponse() string {
 	emptyMap := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", emptyMap))
 	store("headers", "ptr", emptyMap)
-	store("ended", "i64", "0")            // TDD-00195: set by res.end()
-	store("__kml_fd", "i64", "-1")        // TDD-00195 Stage 2: filled by the dispatcher
-	store("__kml_wsink", "ptr", "null")   // lazily built on first res.write / pipe
-	store("__kml_streaming", "i64", "0")  // 0 buffered · 1 streaming · 2 ended
-	store("__kml_keepalive", "i64", "0")  // set at head-send
+	store("ended", "i64", "0")           // TDD-00195: set by res.end()
+	store("__kml_fd", "i64", "-1")       // TDD-00195 Stage 2: filled by the dispatcher
+	store("__kml_wsink", "ptr", "null")  // lazily built on first res.write / pipe
+	store("__kml_streaming", "i64", "0") // 0 buffered · 1 streaming · 2 ended
+	store("__kml_keepalive", "i64", "0") // set at head-send
 	store("__kml_reqheaders", "ptr", "null")
 	store("__kml_outq", "ptr", "null")     // TDD-00214: lazily built on first partial write
 	store("__kml_drain_cb", "ptr", "null") // set by res.on('drain')

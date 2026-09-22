@@ -10,9 +10,9 @@ func (e *Emitter) emitNumberStaticCall(property string, args []ast.Expression, p
 	case "isInteger":
 		return e.emitNumberIsInteger(args, pos)
 	case "isFinite":
-		return e.emitNumberIsFinite(args, pos)
+		return e.emitNumberIsFinite(args, pos, false)
 	case "isNaN":
-		return e.emitNumberIsNaN(args, pos)
+		return e.emitNumberIsNaN(args, pos, false)
 	case "isSafeInteger":
 		return e.emitNumberIsSafeInteger(args, pos)
 	case "parseInt":
@@ -23,16 +23,50 @@ func (e *Emitter) emitNumberStaticCall(property string, args []ast.Expression, p
 	return Value{}, fmt.Errorf("%d:%d: Number.%s is not supported", pos.Line, pos.Col, property)
 }
 
+// emitNumberPredicateOperand evaluates the argument of a Number.isX / global isX
+// predicate. A `T | undefined` / `T | null` scalar — an element read that may be
+// out of range, a nullable local, a Map lookup — arrives as its `{ i1, T }`
+// aggregate: the predicates answer for the *payload* and then for the absence
+// (numberPredicateResult), so present is the aggregate's presence bit and val
+// its bare payload. present is "" for a value that cannot be absent;
+// absentIsUndefined tells an absent `undefined` from an absent `null`.
+func (e *Emitter) emitNumberPredicateOperand(arg ast.Expression) (val Value, present string, absentIsUndefined bool, err error) {
+	val, err = e.emitPreserveNullableOperand(arg)
+	if err != nil {
+		return Value{}, "", false, err
+	}
+	if isNullableScalar(val.Ty) {
+		absentIsUndefined = val.Ty.IsUndefined
+		present, val = e.nullableScalarAggParts(val)
+	}
+	return val, present, absentIsUndefined, nil
+}
+
+// numberPredicateResult is r for a present operand and the constant absent for
+// an absent one (present == "" means the operand cannot be absent).
+func (e *Emitter) numberPredicateResult(r Value, present string, absent bool) Value {
+	if present == "" {
+		return r
+	}
+	absentRef := "0"
+	if absent {
+		absentRef = "1"
+	}
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i1 %s, i1 %s", out, present, r.Ref, absentRef))
+	return Value{Ref: out, Ty: TypeBool}
+}
+
 func (e *Emitter) emitNumberIsInteger(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Number.isInteger expects 1 argument", pos.Line, pos.Col)
 	}
-	val, err := e.emitExpr(args[0])
+	val, present, _, err := e.emitNumberPredicateOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
 	if !val.Ty.Float {
-		return Value{Ref: "1", Ty: TypeBool}, nil
+		return e.numberPredicateResult(Value{Ref: "1", Ty: TypeBool}, present, false), nil
 	}
 	e.ensureMathFuncs()
 	floored := e.freshReg()
@@ -51,17 +85,22 @@ func (e *Emitter) emitNumberIsInteger(args []ast.Expression, pos ast.Pos) (Value
 	e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", sub, val.Ref, val.Ref))
 	e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, 0.0", finite, sub))
 	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", r, isWhole, finite))
-	return Value{Ref: r, Ty: TypeBool}, nil
+	return e.numberPredicateResult(Value{Ref: r, Ty: TypeBool}, present, false), nil
 }
 
-func (e *Emitter) emitNumberIsNaN(args []ast.Expression, pos ast.Pos) (Value, error) {
+// global selects the global `isNaN` (which ToNumbers its argument) over
+// `Number.isNaN` (which answers false for anything that is not a number): they
+// differ on an absent value — `isNaN(undefined)` is true, `Number.isNaN(undefined)`
+// false, and both are false for `null` (ToNumber(null) is 0).
+func (e *Emitter) emitNumberIsNaN(args []ast.Expression, pos ast.Pos, global bool) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: isNaN expects 1 argument", pos.Line, pos.Col)
 	}
-	val, err := e.emitExpr(args[0])
+	val, present, absentIsUndefined, err := e.emitNumberPredicateOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
+	absent := global && absentIsUndefined
 	if !val.Ty.Float {
 		// Global `isNaN` applies `ToNumber` to its argument (unlike `Number.isNaN`),
 		// so a non-numeric operand — reachable through `any`, or through an erased
@@ -81,12 +120,12 @@ func (e *Emitter) emitNumberIsNaN(args []ast.Expression, pos ast.Pos) (Value, er
 			}
 			val = e.coerce(boxed, TypeF64)
 		default:
-			return Value{Ref: "0", Ty: TypeBool}, nil
+			return e.numberPredicateResult(Value{Ref: "0", Ty: TypeBool}, present, absent), nil
 		}
 	}
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = fcmp uno double %s, %s", r, val.Ref, val.Ref))
-	return Value{Ref: r, Ty: TypeBool}, nil
+	return e.numberPredicateResult(Value{Ref: r, Ty: TypeBool}, present, absent), nil
 }
 
 // toNumberCanBeNaN reports whether a concrete (non-float, non-dynamic) operand's
@@ -104,14 +143,17 @@ func toNumberCanBeNaN(ty Type) bool {
 	return true // string / object / undefined / other pointer types
 }
 
-func (e *Emitter) emitNumberIsFinite(args []ast.Expression, pos ast.Pos) (Value, error) {
+// global: see emitNumberIsNaN. `isFinite(null)` is true (ToNumber(null) is 0),
+// `isFinite(undefined)` false; `Number.isFinite` is false for both.
+func (e *Emitter) emitNumberIsFinite(args []ast.Expression, pos ast.Pos, global bool) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: isFinite expects 1 argument", pos.Line, pos.Col)
 	}
-	val, err := e.emitExpr(args[0])
+	val, present, absentIsUndefined, err := e.emitNumberPredicateOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
+	absent := global && !absentIsUndefined
 	if !val.Ty.Float {
 		// Global `isFinite` applies `ToNumber` first (ADR-00902): a boxed `any`, or a
 		// concrete string/object/undefined reachable through an erased `as any`
@@ -128,7 +170,7 @@ func (e *Emitter) emitNumberIsFinite(args []ast.Expression, pos ast.Pos) (Value,
 			}
 			val = e.coerce(boxed, TypeF64)
 		default:
-			return Value{Ref: "1", Ty: TypeBool}, nil
+			return e.numberPredicateResult(Value{Ref: "1", Ty: TypeBool}, present, absent), nil
 		}
 	}
 	// x - x == 0.0 is true only for finite values (Inf → NaN, NaN → NaN)
@@ -136,14 +178,14 @@ func (e *Emitter) emitNumberIsFinite(args []ast.Expression, pos ast.Pos) (Value,
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", diff, val.Ref, val.Ref))
 	e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, 0.0", r, diff))
-	return Value{Ref: r, Ty: TypeBool}, nil
+	return e.numberPredicateResult(Value{Ref: r, Ty: TypeBool}, present, absent), nil
 }
 
 func (e *Emitter) emitNumberIsSafeInteger(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Number.isSafeInteger expects 1 argument", pos.Line, pos.Col)
 	}
-	val, err := e.emitExpr(args[0])
+	val, present, _, err := e.emitNumberPredicateOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
@@ -157,7 +199,7 @@ func (e *Emitter) emitNumberIsSafeInteger(args []ast.Expression, pos ast.Pos) (V
 		e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", cmpNeg, val.Ref))
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", absVal, cmpNeg, val.Ref, neg))
 		e.emitInstr(fmt.Sprintf("%s = icmp sle i64 %s, %s", r, absVal, maxSafe))
-		return Value{Ref: r, Ty: TypeBool}, nil
+		return e.numberPredicateResult(Value{Ref: r, Ty: TypeBool}, present, false), nil
 	}
 	e.ensureMathFuncs()
 	floored := e.freshReg()
@@ -170,7 +212,7 @@ func (e *Emitter) emitNumberIsSafeInteger(args []ast.Expression, pos ast.Pos) (V
 	e.emitInstr(fmt.Sprintf("%s = call double @fabs(double %s)", absVal, val.Ref))
 	e.emitInstr(fmt.Sprintf("%s = fcmp ole double %s, 9.007199254740991e+15", inRange, absVal))
 	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", r, isInt, inRange))
-	return Value{Ref: r, Ty: TypeBool}, nil
+	return e.numberPredicateResult(Value{Ref: r, Ty: TypeBool}, present, false), nil
 }
 
 // emitGlobalStringConv implements the String(x) conversion call — routes

@@ -107,6 +107,18 @@
             ]
           },
           {
+            "feature": "`TypeError` on a property access off `undefined`/`null` (`s.length`, `r.name`, `p.m()`, `s[i]`, `p.x = v`)",
+            "status": "implemented",
+            "caveats": [
+              "In `p.x = f()` the base is checked before the right-hand side is evaluated, so `f()` does not run ahead of the `TypeError` (JS evaluates it first)"
+            ],
+            "notes": [
+              "Node's exact message — `Cannot read properties of undefined (reading 'length')`, `Cannot set properties of null (setting 'x')` — catchable, `instanceof TypeError`; uncaught, the program reports it and exits 1. `undefined` vs `null` follows the declared type; a run-time bracket key is evaluated and named, as in JS ([ADR-01038](../adr/ADR-01038.md))",
+              "Covers a string/object/class/Map base, a `T \\| undefined` scalar receiver (`n.toFixed()`), `x!.p`, compound assignment and `++` (which report the read); `?.` never throws",
+              "An out-of-range element read is `undefined`, so `rows[5].name` is this `TypeError` ([ADR-01040](../adr/ADR-01040.md)); an absent array (`T[] \\| null`, an omitted `xs?: T[]`) throws it on `xs[0]`/`xs.length`/`xs.push()`, and `TypeError: xs is not iterable` on `for…of`/spread — an empty array is present, truthy and `!== null` ([ADR-01041](../adr/ADR-01041.md))"
+            ]
+          },
+          {
             "feature": "`debugger` statement",
             "status": "implemented",
             "notes": [
@@ -229,8 +241,12 @@
           {
             "feature": "Ternary `cond ? a : b`",
             "status": "implemented",
+            "caveats": [
+              "A pointer branch mixed with a scalar one that is not a scalar union (`c ? 1 : someObject`), and an array-typed ternary, are compile-time rejections — narrow first, or assign each branch separately"
+            ],
             "notes": [
-              "A `cond ? scalar : null` (or `cond ? null : scalar`) branch mix is a `T | null` value — the null survives into `??`/concat/`=== null`/an unannotated binding, not collapsed to a payload zero ([ADR-00538](../adr/ADR-00538.md))"
+              "A `cond ? scalar : null` (or `cond ? null : scalar`) branch mix is a `T | null` value — the null survives into `??`/concat/`=== null`/an unannotated binding, not collapsed to a payload zero ([ADR-00538](../adr/ADR-00538.md))",
+              "Scalar branches of different kinds (`c ? 1 : \"a\"`, `c ? 1 : true`) yield their **union** (`number \\| string`, …), narrowable with `typeof` — the same value `??` yields for that operand shape ([ADR-01039](../adr/ADR-01039.md))"
             ]
           },
           {
@@ -249,7 +265,9 @@
             "feature": "Nullish coalescing `??`",
             "status": "implemented",
             "notes": [
-              "Works on a pointer `T \\| null` (string/object/…) and, since [TDD-00064](../tdd/TDD-00064.md)/[ADR-00199](../adr/ADR-00199.md), a non-pointer scalar `T \\| null` (`number \\| null`, `boolean \\| null`, …) too — a real presence bit, so `let x: number \\| null = null; x ?? 42` yields `42` while a present `0` yields `0`"
+              "Works on a pointer `T \\| null` (string/object/…) and, since [TDD-00064](../tdd/TDD-00064.md)/[ADR-00199](../adr/ADR-00199.md), a non-pointer scalar `T \\| null` (`number \\| null`, `boolean \\| null`, …) too — a real presence bit, so `let x: number \\| null = null; x ?? 42` yields `42` while a present `0` yields `0`",
+              "Operands of different scalar kinds (`n ?? \"none\"`, `s ?? 0`, `flag ?? \"unset\"`) yield their **union** (`number \\| string`, …) — the same boxed value an annotated union is, narrowable with `typeof` ([ADR-01037](../adr/ADR-01037.md))",
+              "A pointer left operand keeps its own type, so the result is usable in place — `(row ?? dflt).name`, `(s ?? \"x\").length` — and stays `T \\| undefined` / `T \\| null` when the right operand can itself be absent; a boxed `T \\| undefined` left (an element of a `(number \\| undefined)[]`) against a plain `T` unwraps to the bare `T` ([ADR-01039](../adr/ADR-01039.md))"
             ]
           },
           {
@@ -257,6 +275,8 @@
             "status": "implemented",
             "notes": [
               "`o?.x` is `PropType | undefined` — a null receiver short-circuits to a real `undefined` (as in TS), not `null` or a stand-in zero; a scalar prop rides the `{ i1, T }` optional, a pointer prop the null-pointer-flagged-undefined, an array prop keeps its zero-shaped value (no absent state, [ADR-00246](../adr/ADR-00246.md)) ([ADR-00834](../adr/ADR-00834.md))",
+              "All three forms: property `a?.b`, element `a?.[k]` and call `f?.(args)` (a function-typed variable, parameter or field; a declared function is never nullish, so its `?.()` is an ordinary call) — alongside the method form `a?.m(args)` ([ADR-01037](../adr/ADR-01037.md))",
+              "The chain short-circuits **as a whole**: in `a?.b.c`, `a?.b.m(x)`, `a?.[k].d` a nullish `a` skips every later link, and call arguments / element keys are not evaluated. Parentheses end the chain (`(a?.b).c`), as in JS ([ADR-01037](../adr/ADR-01037.md))",
               "An array receiver (`arr?.length`, `arr?.map(...)`) uses plain access — an array is a value aggregate, never a null pointer ([ADR-00539](../adr/ADR-00539.md))"
             ]
           },
@@ -421,10 +441,11 @@
             "status": "implemented",
             "notes": [
               "An omitted `?` argument reads as a real `T | undefined` inside the body, as in TS ([ADR-00164](../adr/ADR-00164.md), [ADR-00783](../adr/ADR-00783.md), [TDD-00187](../tdd/TDD-00187.md)) — a present `0`/`\"\"` is distinguishable from an omitted argument; narrow, `?? d`, or `!` to consume it",
-              "Works through a first-class function value too — an arrow or function expression bound to a variable/field — not just a named function ([ADR-00914](../adr/ADR-00914.md))"
+              "Works through a first-class function value too — an arrow or function expression bound to a variable/field — not just a named function ([ADR-00914](../adr/ADR-00914.md))",
+              "An omitted array parameter (`xs?: T[]`) is a real `undefined` as well — `xs === undefined`, `xs?.length`, `xs ?? d`, and the `TypeError` on an un-narrowed use ([ADR-01041](../adr/ADR-01041.md))"
             ],
             "caveats": [
-              "An array-typed optional parameter stays an empty array when omitted (an array aggregate has no spare absent state); an un-narrowed optional scalar is still lenient in arithmetic (`emitIdent` unwraps the payload before the operator, so `a + b` on an absent `b` reads `0` rather than erroring — the same residual as any un-narrowed nullable local)"
+              "An un-narrowed optional scalar is still lenient in arithmetic (`emitIdent` unwraps the payload before the operator, so `a + b` on an absent `b` reads `0` rather than erroring — the same residual as any un-narrowed nullable local)"
             ]
           },
           {
@@ -525,8 +546,11 @@
             "status": "implemented",
             "notes": [
               "A Promise is a **reusable value** — `await p` twice returns the same result, and a member is readable after a combinator; `await` reads the slot without freeing it, including a raw-fetch `Promise<Response>` (its pending struct is never freed and `__kml_await_fetch` short-circuits an already-done handle) ([ADR-00270](../adr/ADR-00270.md)/[TDD-00090](../tdd/TDD-00090.md))",
-              "Every `await` yields a microtask tick — of an already-settled promise **and of a non-promise value** (`await 1` defers the continuation exactly as JS does; identity in value only) — and the resume is a microtask ordered in FIFO with `.then`/`queueMicrotask` (matches JS: `f(); log(\"c\")` where `f` awaits prints `a c b`) ([ADR-00268](../adr/ADR-00268.md)/[TDD-00088](../tdd/TDD-00088.md), [ADR-00281](../adr/ADR-00281.md)); inside an *async generator body* an await parks the step itself ([ADR-00283](../adr/ADR-00283.md))",
+              "Every `await` yields a microtask tick — of an already-settled promise **and of a non-promise value** (`await 1` defers the continuation exactly as JS does; identity in value only) — and the resume is a microtask ordered in FIFO with `.then`/`queueMicrotask` (matches JS: `f(); log(\"c\")` where `f` awaits prints `a c b`) ([ADR-00268](../adr/ADR-00268.md)/[TDD-00088](../tdd/TDD-00088.md), [ADR-00281](../adr/ADR-00281.md)); inside an *async generator body* an await parks the step itself ([ADR-00283](../adr/ADR-00283.md)); an entry program with a **top-level `await`** runs its module body as a coroutine too, so a top-level await parks as a reaction like any other — `p.then(r1); await p` runs `r1` first, an uncaught top-level throw stays an uncaught exception, and an await nothing can settle ends the process with Node's warning, `'exit'` listeners and exit code 13 ([TDD-00224](../tdd/TDD-00224.md)/[ADR-01050](../adr/ADR-01050.md)); a Worker module's or a dynamically imported module's top level still runs on its thread's main stack and takes the tick by running exactly the jobs already queued ([ADR-01044](../adr/ADR-01044.md))",
               "Registers a resume reaction on the promise and parks; on `fetch()`'s `Promise<Response>` it really waits ([ADR-00050](../adr/ADR-00050.md)); an explicitly `: Promise<T>`-annotated variable, a plain function returning `new Promise`, and an `async` fn returning a promise all `await` correctly ([ADR-00265](../adr/ADR-00265.md))"
+            ],
+            "caveats": [
+              "In a **Worker module** or a **dynamically imported module** (`import()` target), a top-level `await` of a still-*pending* promise resumes out of order: the continuation runs before reactions registered on that promise ahead of it (`p.then(r1); await p` runs the code after the `await` before `r1`; Node runs `r1` first). The entry program, every async function, and a top-level await of a settled promise or a plain value anywhere have Node's order ([TDD-00224](../tdd/TDD-00224.md) Stage 2)"
             ]
           },
           {
@@ -650,7 +674,7 @@
             "feature": "Interfaces (structural)",
             "status": "implemented",
             "caveats": [
-              "An optional field whose type is an array or tuple stays bare — an omitted `tags?: string[]` reads as an empty array, not `undefined` (the `{ptr,i64}` slot has no distinct absent state — [ADR-00246](../adr/ADR-00246.md))"
+              "An optional **tuple** field stays bare: an omitted `pair?: [number, string]` prints `undefined` but `o.pair === undefined` is `false` ([ADR-00246](../adr/ADR-00246.md)). An optional *array* field is a real `undefined` when omitted ([ADR-01041](../adr/ADR-01041.md))"
             ],
             "notes": [
               "Heap-allocated objects",

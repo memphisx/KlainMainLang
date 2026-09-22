@@ -52,6 +52,36 @@ console.log("first=" + a.charCodeAt(0) + " second=" + codes.trim())
 	}
 }
 
+// A typed non-ASCII character reaches a raw-mode readKey as its UTF-8 bytes,
+// whatever the console's input code page: keys are read through the wide
+// console API, not the code-page-translating byte read. One BMP letter, one
+// astral character (a surrogate pair at the console), and readByte seeing the
+// same stream a byte at a time.
+func TestE2ETtyConsoleRawReadKeyNonASCII(t *testing.T) {
+	bin := buildBinaryImports(t, `
+import { readKey, readByte } from 'klain:tty'
+process.stdin.setRawMode(true)
+const a: string = readKey()
+const b: string = readKey()
+const b0: number = readByte()
+const b1: number = readByte()
+process.stdin.setRawMode(false)
+const enc = new TextEncoder()
+console.log("a=" + enc.encode(a).join(",") + " b=" + enc.encode(b).join(",") + " bytes=" + b0 + "," + b1)
+`)
+	res := runInConPTY(t, bin, 80, 24, 20*time.Second, func(write func(string)) {
+		time.Sleep(700 * time.Millisecond)
+		write("λ")
+		time.Sleep(300 * time.Millisecond)
+		write("😀")
+		time.Sleep(300 * time.Millisecond)
+		write("é")
+	})
+	if !strings.Contains(res.Text, "a=206,187 b=240,159,152,128 bytes=195,169") {
+		t.Fatalf("non-ASCII raw-mode keys not delivered as UTF-8; output:\n%q", res.Output)
+	}
+}
+
 // readKey(ms) at a console polls the input queue: nothing pressed within the
 // timeout yields "" (the redraw tick of a self-refreshing TUI loop), and a
 // key pressed later is returned by the next call.

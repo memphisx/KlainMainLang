@@ -15,7 +15,7 @@ func TestNormalizeClosureType(t *testing.T) {
 		"function(): void":                  "() => void",
 		"String":                            "string",
 		`import("./shapes").Point`:          "Point",
-		"number | string":                  "number | string",
+		"number | string":                   "number | string",
 	}
 	for in, want := range cases {
 		if got := normalizeClosureType(in); got != want {

@@ -78,6 +78,7 @@
               "`fork()`s `N-1` workers sharing the listening socket — parallelism across cores on top of each process's own fiber concurrency. On Windows (no `fork()`) the workers are re-spawned processes and the primary deals connections out round-robin, itself included ([ADR-01027](../adr/ADR-01027.md))",
               "`cluster.isPrimary`/`cluster.workerId` (0 = original, 1..N-1 per fork) branch on the current process",
               "Works under both memory modes",
+              "A worker exits (status 0) once its primary is gone, as Node's cluster worker does when its channel disconnects — it does not keep the port open ([ADR-01042](../adr/ADR-01042.md))",
               "May be combined with Node `http.createServer` servers in one program — declared after them, the cluster joins the shared reactor as an additional listener and the fork runs once every listener is bound, so each worker serves every port; the combined program cannot also use Worker *threads* (`fork()` + threads is unsafe) ([ADR-00989](../adr/ADR-00989.md))",
               "[TDD-00025](../tdd/TDD-00025.md), [ADR-00097](../adr/ADR-00097.md)–[ADR-00101](../adr/ADR-00101.md)"
             ],

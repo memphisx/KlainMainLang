@@ -281,7 +281,7 @@ flushfinal:
 // ensurePathJoinSegs declares __kml_path_join_segs(ptr arr, i64 n) -> ptr:
 // concatenates n string pointers with a single '/' between them, matching
 // Node's path.join, which *skips empty segments entirely* before joining (so
-// join('foo','') is 'foo', not 'foo/', and join('a/','') keeps the 'a/' from
+// join('foo',”) is 'foo', not 'foo/', and join('a/',”) keeps the 'a/' from
 // its own trailing slash rather than manufacturing one). The joined raw string
 // is then handed to __kml_path_posix_normalize by emitPathJoin, whose
 // trailing-slash-preserving normalization completes the Node semantics. All

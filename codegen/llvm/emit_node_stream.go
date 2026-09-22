@@ -896,7 +896,7 @@ func (e *Emitter) emitStreamPromisesCall(method string, args []ast.Expression, p
 			return Value{}, err
 		}
 		v = e.asNodeStreamValue(v)
-		cp, err := closedPromOf(v)
+		cp, err := e.streamFinishedProm(v, pos)
 		if err != nil {
 			return Value{}, err
 		}
@@ -914,6 +914,35 @@ func (e *Emitter) emitStreamPromisesCall(method string, args []ast.Expression, p
 		return voidPromise(cp), nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: unknown stream/promises member '%s'", pos.Line, pos.Col, method)
+}
+
+// streamFinishedProm is what finished() settles on. For a Readable that is the
+// wrapper's own finished promise (@__kml_ns_finished_prom): Node's finished()
+// follows the stream's 'end', which a flowing stream emits after its last
+// 'data' — later than the source's closed promise settles. A Writable's closed
+// promise already is its 'finish'. A Duplex/Transform has both sides and
+// finished() waits for both (@__kml_ns_finished_both).
+func (e *Emitter) streamFinishedProm(v Value, pos ast.Pos) (string, error) {
+	if !v.Ty.IsNodeReadable {
+		return e.streamClosedProm(v, pos)
+	}
+	rs := e.nodeStreamSide(v.Ref, 0)
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 16", gep, rstreamStructIR, rs))
+	rclosed := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rclosed, gep))
+	rfin := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ns_finished_prom(ptr %s, ptr %s)", rfin, v.Ref, rclosed))
+	if !v.Ty.IsNodeWritable {
+		return rfin, nil
+	}
+	wclosed, err := e.streamClosedProm(v, pos)
+	if err != nil {
+		return "", err
+	}
+	both := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ns_finished_both(ptr %s, ptr %s)", both, rfin, wclosed))
+	return both, nil
 }
 
 // streamClosedProm loads the stream's completion promise: a Writable's closed
@@ -1065,7 +1094,7 @@ func (e *Emitter) emitStreamModuleCall(method string, args []ast.Expression, pos
 			return Value{}, err
 		}
 		v = e.asNodeStreamValue(v)
-		cp, err := e.streamClosedProm(v, pos)
+		cp, err := e.streamFinishedProm(v, pos)
 		if err != nil {
 			return Value{}, err
 		}

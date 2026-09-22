@@ -7,6 +7,7 @@ package llvm
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"KlainMainLang/ast"
@@ -1807,7 +1808,14 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 // for it here.
 func (e *Emitter) emitClassStaticFieldGlobals(className string) {
 	info := e.classes[className]
-	for name, ty := range info.OwnStaticFieldTypes {
+	// Sorted: map order would make the emitted IR differ from build to build.
+	names := make([]string, 0, len(info.OwnStaticFieldTypes))
+	for name := range info.OwnStaticFieldTypes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		ty := info.OwnStaticFieldTypes[name]
 		e.emitGlobal(fmt.Sprintf("@%s = global %s zeroinitializer, align %d", llvmSafeSymbol(className+"_static_"+name), ty.IR, ty.Align()))
 	}
 }
@@ -2330,7 +2338,7 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 			case i < len(sig.Optional) && sig.Optional[i]:
 				// ADR-00164: an omitted `param?: T` gets T's zero value.
 				if paramTy.IsArray {
-					argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
+					argParts = append(argParts, "ptr "+e.omittedArrayArgHeader(paramTy), "i64 0")
 				} else if isNullableScalar(paramTy) {
 					// An omitted optional `T | undefined` param is a genuinely
 					// absent { i1, T } aggregate (present = false) — TDD-00187.
@@ -2358,7 +2366,7 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 				if !val.Ty.IsArray {
 					return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", a.GetPos().Line, a.GetPos().Col)
 				}
-				header, lenReg := e.packArrayArg(a, val)
+				header, lenReg := e.packArrayArg(a, val, paramTy)
 				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 				scratch.bindArray(i, header, paramTy)
 				continue
@@ -2589,7 +2597,7 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			// len) at the callee side, so their "zero value" is an empty
 			// array (null ptr, 0 len), not a single zeroLiteral() operand.
 			if paramTy.IsArray {
-				argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
+				argParts = append(argParts, "ptr "+e.omittedArrayArgHeader(paramTy), "i64 0")
 			} else if isNullableScalar(paramTy) {
 				// An omitted optional `T | undefined` param is a genuinely
 				// absent { i1, T } aggregate (present = false) — TDD-00187.
@@ -2628,7 +2636,7 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			if !val.Ty.IsArray {
 				return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", a.GetPos().Line, a.GetPos().Col)
 			}
-			header, lenReg := e.packArrayArg(a, val)
+			header, lenReg := e.packArrayArg(a, val, paramTy)
 			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 			scratch.bindArray(i, header, paramTy)
 			continue
@@ -2748,10 +2756,10 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		reg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", reg, sig.RetType.LLVMRetType(), llvmName, argsIR))
 		if sig.RetType.IsArray {
-		// Array return ABI is a header pointer (TDD-00213 Stage 3): deref + alias.
-		return e.arrayValueFromHeaderReg(reg, sig.RetType), nil
-	}
-	return Value{Ref: reg, Ty: taskTaggedRet(sig)}, nil
+			// Array return ABI is a header pointer (TDD-00213 Stage 3): deref + alias.
+			return e.arrayValueFromHeaderReg(reg, sig.RetType), nil
+		}
+		return Value{Ref: reg, Ty: taskTaggedRet(sig)}, nil
 	}
 
 	vtGep := e.freshReg()
@@ -2960,7 +2968,7 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			// len) at the callee side, so their "zero value" is an empty
 			// array (null ptr, 0 len), not a single zeroLiteral() operand.
 			if paramTy.IsArray {
-				argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
+				argParts = append(argParts, "ptr "+e.omittedArrayArgHeader(paramTy), "i64 0")
 			} else if isNullableScalar(paramTy) {
 				// An omitted optional `T | undefined` param is a genuinely
 				// absent { i1, T } aggregate (present = false) — TDD-00187.
@@ -2985,7 +2993,7 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			if !val.Ty.IsArray {
 				return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", a.GetPos().Line, a.GetPos().Col)
 			}
-			header, lenReg := e.packArrayArg(a, val)
+			header, lenReg := e.packArrayArg(a, val, paramTy)
 			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 			scratch.bindArray(i, header, paramTy)
 			continue

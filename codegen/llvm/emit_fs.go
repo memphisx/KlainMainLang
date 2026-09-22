@@ -420,6 +420,15 @@ func (e *Emitter) emitFsCopyFileSync(args []ast.Expression, pos ast.Pos) (Value,
 	e.ensureFsCopyFileGuard()
 	e.emitInstr(fmt.Sprintf("call void @__kml_fs_copy_file_guard(ptr %s, ptr %s, i1 %s)", srcVal.Ref, destVal.Ref, exclRef))
 
+	if targetGOOS() == "windows" {
+		// The OS copy (libuv's fs__copyfile is CopyFileW): it carries the
+		// attributes, timestamps and alternate streams a read-then-write drops.
+		// The guard above has already produced Node's error for a bad end, and
+		// under COPYFILE_EXCL atomically created the empty dest this overwrites.
+		e.ensureFsCopyFileOS()
+		e.emitInstr(fmt.Sprintf("call void @__kml_fs_copy_file_os(ptr %s, ptr %s)", srcVal.Ref, destVal.Ref))
+		return Value{Ty: TypeVoid}, nil
+	}
 	e.ensureFsReadFileRaw()
 	e.ensureFsWriteFileBytes()
 	rawReg := e.freshReg()
@@ -613,7 +622,7 @@ func (e *Emitter) buildStatsObject(trip string) Value {
 func (e *Emitter) emitFsPathOp(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	argN := map[string][2]int{
 		"realpathSync": {1, 1}, "mkdtempSync": {1, 1}, "readlinkSync": {1, 1},
-		"symlinkSync": {2, 2}, "linkSync": {2, 2}, "chmodSync": {2, 2}, "truncateSync": {1, 2}, "accessSync": {1, 2},
+		"symlinkSync": {2, 3}, "linkSync": {2, 2}, "chmodSync": {2, 2}, "truncateSync": {1, 2}, "accessSync": {1, 2},
 	}[method]
 	if len(args) < argN[0] || len(args) > argN[1] {
 		return Value{}, fmt.Errorf("%d:%d: fs.%s: wrong argument count", pos.Line, pos.Col, method)
@@ -642,6 +651,25 @@ func (e *Emitter) emitFsPathOp(method string, args []ast.Expression, pos ast.Pos
 		}
 		p1 = e.coerce(p1, TypePtr)
 		fn := map[string]string{"symlinkSync": "symlink", "linkSync": "link"}[method]
+		if method == "symlinkSync" && len(args) == 3 {
+			// The link type ('file' | 'dir' | 'junction' | null) only means
+			// something on Windows; Node ignores it elsewhere. A literal is
+			// validated on every host, as Node does (ERR_INVALID_ARG_VALUE).
+			if lit, ok := args[2].(*ast.StringLiteral); ok && lit.Value != "file" && lit.Value != "dir" && lit.Value != "junction" {
+				return Value{}, fmt.Errorf("%d:%d: fs.symlinkSync type must be 'file', 'dir' or 'junction', got %q", pos.Line, pos.Col, lit.Value)
+			}
+			tv, err := e.emitExpr(args[2])
+			if err != nil {
+				return Value{}, err
+			}
+			if targetGOOS() == "windows" {
+				if !e.usedWinSymlinkType {
+					e.usedWinSymlinkType = true
+					e.emitGlobal("declare i32 @__kml_win_symlink_type(ptr)")
+				}
+				e.emitInstr(fmt.Sprintf("call i32 @__kml_win_symlink_type(ptr %s)", e.coerce(tv, TypePtr).Ref))
+			}
+		}
 		e.emitInstr(fmt.Sprintf("call void @__kml_fs_%s(ptr %s, ptr %s)", fn, p0.Ref, p1.Ref))
 		return Value{Ty: TypeVoid}, nil
 	case "chmodSync", "truncateSync", "accessSync":

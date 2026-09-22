@@ -131,7 +131,7 @@ type Emitter struct {
 	// push/insert/reassign usages (TDD-00205 Stage 1) — so `a.push("x")` gives it
 	// `string[]` instead of the blind `number[]` default. Saved/restored per body
 	// like widenedBindings.
-	emptyArrayElems       map[string]Type
+	emptyArrayElems map[string]Type
 	// emptyMapKV maps an untyped bare-`new Map()` binding in the current scope to
 	// the key/value types inferred from its later `map.set(k, v)` usages
 	// (TDD-00211) — so heterogeneous keys widen to an `any`-keyed map instead of
@@ -178,20 +178,24 @@ type Emitter struct {
 	usedStdoutGlobal      bool // the libc `stdout` FILE* extern global is declared (ADR-00867)
 	usedMalloc            bool
 	usedCalloc            bool
-	usedRealloc           bool
-	usedMemmove           bool
-	usedStripExpZeros     bool
-	usedTableHelpers      bool
-	funcs                 map[string]FuncSig            // registered function signatures
-	interfaces            map[string]Type               // named interface, type alias, and class registry
-	interfaceMethodSigs   map[string]map[string]FuncSig // interface name → method name → signature (TDD-00009 Stage 4, `implements` conformance only — not used for dispatch)
-	classes               map[string]ClassInfo          // named class registry (fields/ctor/methods) — see emit_classes.go
+	usedNullDerefThrow    bool
+	usedAbsentArrayCell   bool
+	// pendingDeref: base nodes whose value emitExpr must null-guard (emit_nullderef.go).
+	pendingDeref        map[ast.Expression]derefGuard
+	usedRealloc         bool
+	usedMemmove         bool
+	usedStripExpZeros   bool
+	usedTableHelpers    bool
+	funcs               map[string]FuncSig            // registered function signatures
+	interfaces          map[string]Type               // named interface, type alias, and class registry
+	interfaceMethodSigs map[string]map[string]FuncSig // interface name → method name → signature (TDD-00009 Stage 4, `implements` conformance only — not used for dispatch)
+	classes             map[string]ClassInfo          // named class registry (fields/ctor/methods) — see emit_classes.go
 	// genericFuncs/genericInterfaces/genericClasses hold the raw declaration
 	// for every `<T>`-parameterized function/interface/class (TDD-00010 V1),
 	// keyed by its bare source name — deliberately *not* also entered into
 	// funcs/interfaces/classes, since T isn't resolvable until a real call/
 	// usage/construction site supplies a concrete type. See emit_generics.go.
-	genericFuncs      map[string]*ast.FunctionDeclaration
+	genericFuncs map[string]*ast.FunctionDeclaration
 	// topFuncDecls holds every non-generic top-level function declaration by name,
 	// so a named-function HOF callback (`arr.reduce(callbackfn)`) whose untyped
 	// parameters mismatch the element type can be re-emitted monomorphized against
@@ -430,16 +434,20 @@ type Emitter struct {
 	// entry function is being emitted (gates parentPort/workerData).
 	usedConnPokeGlobal     bool
 	usedChildProcRuntime   bool
-	usedCPExitWake bool // runtime_childprocess_exit.go: the child-exit loop wake
-	usedLoopTurn     bool // emitted code references __kml_loop_turn/__kml_top_await (runtime_loop_turn.go)
-	usedLoopTurnDefs bool
-	usedPromiseAdopt       bool // runtime_promise_adopt.go
-	fetchBodyPromTypedCtr  int  // per-call-site typed json() runners (emit_fetch.go)
-	discardAdapterCtr      int  // emitDiscardReturnAdapter (emit_timers.go)
+	usedCPExitWake         bool // runtime_childprocess_exit.go: the child-exit loop wake
+	usedGCSBCur            bool // @__kml_gc_sb_cur declared (Windows gc mode, runtime_worker.go)
+	usedLoopTurn           bool // emitted code references __kml_loop_turn/__kml_top_await (runtime_loop_turn.go)
+	usedLoopTurnDefs       bool
+	moduleTask             bool // the entry program has a top-level await: its module body is a coroutine task (TDD-00224)
+	inModuleTask           bool // emitting @__kml_module_body
+	usedModuleTaskRuntime  bool
+	usedPromiseAdopt       bool            // runtime_promise_adopt.go
+	fetchBodyPromTypedCtr  int             // per-call-site typed json() runners (emit_fetch.go)
+	discardAdapterCtr      int             // emitDiscardReturnAdapter (emit_timers.go)
 	topLevelNames          map[string]bool // every name bound at module top level (registerModuleGlobals)
 	usedFetchSlotToPromise bool
-	sawAwait         bool // set by emitAwait/for-await while a function body is emitted; saved/restored per body
-	usedUsleepDecl   bool
+	sawAwait               bool // set by emitAwait/for-await while a function body is emitted; saved/restored per body
+	usedUsleepDecl         bool
 	usedFsWatchRuntime     bool
 	usedThreadPool         bool
 	usedReadlineRuntime    bool
@@ -452,23 +460,23 @@ type Emitter struct {
 	// usedListeningAnnounceHook: @__kml_http_listening_announce defined once,
 	// shared by the HTTP bind (call site) and cluster (armer) runtimes.
 	usedListeningAnnounceHook bool
-	usedProcessUptime      bool
-	usedProcessHrtime      bool
-	usedGetrusage          bool
-	usedCurrentRSS         bool
-	usedProcessLifecycle   bool
-	usedTestRuntime        bool // TDD-00122: the `test` module's mustCall registry + exit verifier
-	testTrampolines        map[string]bool
-	testSkipFmtEmitted     bool
-	testMustNotCallEmitted bool
-	dnsDeclared            bool
-	getaddrinfoDeclared    bool
-	usedCPKill             bool
-	usedWorkerRuntime      bool
-	hasWorkers             bool // set at EmitProgram start from Program.WorkerModules
-	workerEntries          map[string]*workerEntryInfo
-	currentWorkerMod       string
-	workerAdaptCtr         int
+	usedProcessUptime         bool
+	usedProcessHrtime         bool
+	usedGetrusage             bool
+	usedCurrentRSS            bool
+	usedProcessLifecycle      bool
+	usedTestRuntime           bool // TDD-00122: the `test` module's mustCall registry + exit verifier
+	testTrampolines           map[string]bool
+	testSkipFmtEmitted        bool
+	testMustNotCallEmitted    bool
+	dnsDeclared               bool
+	getaddrinfoDeclared       bool
+	usedCPKill                bool
+	usedWorkerRuntime         bool
+	hasWorkers                bool // set at EmitProgram start from Program.WorkerModules
+	workerEntries             map[string]*workerEntryInfo
+	currentWorkerMod          string
+	workerAdaptCtr            int
 	// genericDepth counts nested generic interface/alias instantiations in
 	// resolveType — the cap that turns an infinitely expanding generic
 	// (`interface Foo<T> { x: Foo<Foo<T>> }`) into an opaque tail instead of
@@ -625,6 +633,7 @@ type Emitter struct {
 	usedHexDecodeTable           bool
 	usedEncodeURIComponent       bool
 	usedEncodeURI                bool
+	usedEncodeFileURLPath        bool
 	usedDecodeURIComponent       bool
 	usedDecodeURI                bool
 	usedDecodeURIComponentStrict bool
@@ -660,6 +669,9 @@ type Emitter struct {
 	usedMemmem                   bool
 	usedWinSpawn                 bool
 	usedOSTmpdirWin              bool
+	usedOSHomedirWin             bool // declared @__kml_os_homedir (Windows shim)
+	usedWinSymlinkType           bool // declared @__kml_win_symlink_type (Windows shim)
+	usedFsCopyFileOS             bool // defined @__kml_fs_copy_file_os (Windows CopyFileW)
 	usedOSHomedirPw              bool
 	usedHeapStats                bool
 	usedHTTPClusterSeed          bool
@@ -675,6 +687,10 @@ type Emitter struct {
 	usedProcessCwd               bool
 	usedProcessChdir             bool
 	usedGetpid                   bool
+	usedGetppid                  bool // the cluster worker's orphan poll (httpClusterOrphanIR)
+	needMicrotaskTick            bool // emitted code calls @__kml_microtask_tick (a top-level await's tick)
+	inferDepth                   int  // nesting of memoised inferExprType calls (infer_memo.go)
+	inferMemo                    []inferMemoLayer
 	usedExecPath                 bool
 	usedNodeInterpGuard          bool
 	usedReexecGuard              bool
@@ -1302,11 +1318,18 @@ func (e *Emitter) resolveRegexMode() string {
 
 // --- Scope ---
 
-func (e *Emitter) pushScope() { e.scopes = append(e.scopes, scope{syms: make(map[string]Symbol)}) }
-func (e *Emitter) popScope()  { e.scopes = e.scopes[:len(e.scopes)-1] }
+func (e *Emitter) pushScope() {
+	e.scopes = append(e.scopes, scope{syms: make(map[string]Symbol)})
+	e.inferMemoScopePushed()
+}
+func (e *Emitter) popScope() {
+	e.scopes = e.scopes[:len(e.scopes)-1]
+	e.inferMemoScopePopped()
+}
 
 func (e *Emitter) define(name string, sym Symbol) {
 	e.scopes[len(e.scopes)-1].syms[name] = sym
+	e.inferMemoDefined()
 }
 
 // promoteVarToFuncScope moves a just-defined `var` binding from the innermost
@@ -2174,6 +2197,10 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// stackbottom mechanism up front.
 	e.hasWorkers = len(prog.WorkerModules) > 0
 
+	// TDD-00224: known before any emission — a blocking event-loop call emitted in
+	// a function body (Pass 2) already needs to know the module body is a task.
+	e.moduleTask = e.islandHash == "" && programHasTopLevelAwait(prog)
+
 	// TDD-00158: whether the program registers a Node HTTP `'upgrade'` handler
 	// (`server.on('upgrade', …)`) anywhere. Decided up front by a whole-program
 	// walk because `.on('upgrade')` is a separate statement that can be emitted
@@ -2510,6 +2537,12 @@ entry:
 	// excluded at the declaration site (emit_exprs_vardecl.go) — a global already
 	// dominates everything and is resolved directly, never captured.
 	e.hoistedCaptures = capturedLocalNames(prog.Body, nil)
+	// TDD-00224: with a top-level await the statements below go into the module
+	// task's body instead of main(). Islands keep the main-stack wait (Stage 2).
+	var modSplit *moduleBodySplit
+	if e.moduleTask {
+		modSplit = e.beginModuleBody()
+	}
 	// e.widenedBindings was already computed for prog.Body before
 	// registerModuleGlobals (above) and hasn't been overwritten since (function
 	// bodies save/restore it), so it still holds the module-scope set here.
@@ -2524,6 +2557,10 @@ entry:
 	}
 	// TDD-00173: frees owed by top-level bindings at the end of main().
 	e.emitFreesAbove(0)
+	modProm := ""
+	if modSplit != nil {
+		modProm = e.endModuleBody(modSplit)
+	}
 	// If the program ever constructed an EventSource, prefer the full
 	// __kml_event_loop_run() over the narrower __kml_timer_drain() below —
 	// it already generalizes plain timer draining (see its own doc comment
@@ -2566,7 +2603,16 @@ entry:
 	useFullLoop = useFullLoop || (e.usedTimers && e.usedMicrotasks)
 	if useFullLoop {
 		e.ensureHTTPRuntime() // emit event_loop_run + every symbol it references
+		modLoopL := ""
+		if modProm != "" {
+			modLoopL = e.freshLabel("mod.loop")
+			e.emitTerminator(fmt.Sprintf("br label %%%s", modLoopL))
+			e.emitLabel(modLoopL)
+		}
 		e.emitInstr("call void @__kml_event_loop_run()")
+		if modProm != "" {
+			e.emitModuleLoopResume(modLoopL)
+		}
 		if e.usedHTTPListen {
 			// Non-blocking Node listen defers its event loop to here — flush the
 			// http-client reaction hook after it, exactly as an inline listen
@@ -2579,6 +2625,9 @@ entry:
 		e.emitInstr("call void @__kml_task_run_all()")
 	} else if e.usedTimers {
 		e.emitInstr("call void @__kml_timer_drain()")
+	}
+	if modProm != "" {
+		e.emitModuleUnsettledCheck(modProm)
 	}
 	// TDD-00084 Part B: if the event loop was emitted but the task/microtask
 	// runtimes were not, define no-op stubs for the symbols it references.

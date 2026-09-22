@@ -785,6 +785,12 @@ func (e *Emitter) normalizeSameValueZero(dbl string) string {
 
 // valueToMapVal converts any scalar value to i64 for uniform map storage.
 func (e *Emitter) valueToMapVal(v Value, valTy Type) string {
+	// A `T | undefined` scalar (`m.set(k, a[i])`, `m.set(k, xs.pop())`) bound
+	// for a plain-T slot stores its payload — the { i1, T } aggregate is not
+	// the scalar its type's IR names.
+	if isNullableScalar(v.Ty) && !isNullableScalar(valTy) {
+		v = e.nullableScalarPayloadOf(v)
+	}
 	// An array value stores its shared {data,len} header pointer (not the
 	// {ptr,i64} aggregate, which doesn't fit the i64 slot). This keeps
 	// reference identity across get() the same way an array struct field does

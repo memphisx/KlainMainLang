@@ -1,8 +1,8 @@
 package tests
 
 import (
-	"strings"
 	"runtime"
+	"strings"
 	"testing"
 )
 

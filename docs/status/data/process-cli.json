@@ -38,7 +38,8 @@
             "feature": "Environment variables (`process.env.KEY` / `process.env[\"KEY\"]`)",
             "status": "implemented",
             "notes": [
-              "Both dot and bracket notation; returns `string \\| undefined` — `process.env.X ?? \"default\"`, `=== undefined`, printing, string compares, and narrowing all behave as in Node ([ADR-00724](../adr/ADR-00724.md)/[ADR-00780](../adr/ADR-00780.md))"
+              "Both dot and bracket notation; returns `string \\| undefined` — `process.env.X ?? \"default\"`, `=== undefined`, printing, string compares, and narrowing all behave as in Node ([ADR-00724](../adr/ADR-00724.md)/[ADR-00780](../adr/ADR-00780.md))",
+              "On Windows it is the live Win32 environment read and written through the wide API (libuv's `uv_os_getenv`/`setenv`), not the C runtime's startup snapshot: non-ASCII values round-trip as UTF-8, lookup is case-insensitive as the OS's is, and a child spawned later inherits every write ([ADR-01032](../adr/ADR-01032.md))"
             ],
             "caveats": [
               "`typeof process.env.MISSING` is `'string'` (Node: `'undefined'`) — `typeof` reads the static kind, not the runtime absence"
@@ -145,7 +146,7 @@
             "notes": [
               "Sends `signal` (defaults to `15`/`SIGTERM`, matching real Node) to `pid` via POSIX `kill()`. Throws a catchable `Error` if the target process doesn't exist or the signal can't be sent; signal `0` is the standard POSIX \"does this process exist\" check and never actually delivers a signal. See [ADR-00026](../adr/ADR-00026.md).",
               "The signal may be a name (`'SIGTERM'`, `'SIGINT'`, …) as in Node — a literal resolves at compile time against the host's `os.constants.signals` table, a dynamic string at run time; an unknown literal name is a compile error, the counterpart of Node's `ERR_UNKNOWN_SIGNAL` ([ADR-00729](../adr/ADR-00729.md))",
-              "On Windows every signal except `0` terminates the target unconditionally (libuv's `TerminateProcess`), exit code 1 — a `SIGTERM` listener in the target never runs, as in Node ([ADR-00728](../adr/ADR-00728.md))"
+              "On Windows `SIGTERM`/`SIGKILL`/`SIGINT`/`SIGQUIT` terminate the target unconditionally (libuv's `TerminateProcess`), exit code 1 — a `SIGTERM` listener in the target never runs, as in Node — and any other signal throws `ENOSYS` instead of killing it ([ADR-00728](../adr/ADR-00728.md), [ADR-01033](../adr/ADR-01033.md)); the thrown `Error` carries `code`/`errno`/`syscall: 'kill'` on every host"
             ],
             "caveats": [
               "The thrown message carries the signal number (`kill(pid=…, signal=15)`), not the name Node prints"
@@ -250,7 +251,7 @@
             "feature": "`process.getuid()` / `geteuid()` / `getgid()` / `getegid()`",
             "status": "implemented",
             "notes": [
-              "Direct POSIX credential reads returning a `number`, matching Node-on-POSIX ([ADR-00428](../adr/ADR-00428.md)); on Windows they are rejected at compile time, exactly as Node leaves them undefined there ([TDD-00177](../tdd/TDD-00177.md))"
+              "Direct POSIX credential reads returning a `number`, matching Node-on-POSIX ([ADR-00428](../adr/ADR-00428.md)); on Windows Node leaves them `undefined`, so the bare call is rejected at compile time (in Node it is a `TypeError`) and the portable optional call `process.getuid?.()` evaluates to `undefined` there — typed `number | undefined` on every host ([TDD-00177](../tdd/TDD-00177.md), [ADR-01037](../adr/ADR-01037.md))"
             ],
             "caveats": []
           },
@@ -341,6 +342,7 @@
             "notes": [
               "fork()+execvp() with three pipes; the two read ends are non-blocking and fold into the same `select()` event loop as Worker/channel pipes ([ADR-00322](../adr/ADR-00322.md))",
               "spawn options: `cwd` (child chdir), `shell: true` (platform shell `/bin/sh -c` / `cmd.exe /d /s /c`, honouring `%ComSpec%`), `env` (replaces the child env), `windowsHide` (Windows `CREATE_NO_WINDOW`, no-op on POSIX), `timeout`+`killSignal` (kills via the loop, default SIGTERM, surfacing as `(null, '<signal>')`), `detached` (new session/group leader — `setsid` / `DETACHED_PROCESS`), `stdio` (`'pipe'`/`'inherit'`/`'ignore'` string or 3-element array). See [ADR-00433](../adr/ADR-00433.md), [ADR-00740](../adr/ADR-00740.md), [ADR-00762](../adr/ADR-00762.md), [ADR-00763](../adr/ADR-00763.md), [ADR-00764](../adr/ADR-00764.md), [ADR-00765](../adr/ADR-00765.md), [ADR-00766](../adr/ADR-00766.md)",
+              "On Windows the program is resolved as libuv does — against the **child's** `cwd` and the **child's** `PATH` (so a custom `env.PATH` redirects the lookup), trying the name, then `.com`, then `.exe` — and a custom `env` reaches the child sorted, de-duplicated case-insensitively (first spelling wins) and with the variables Windows programs cannot start without (`SystemRoot`, `PATH`, `TEMP`, `USERPROFILE`, …) carried over when omitted ([ADR-01033](../adr/ADR-01033.md))",
               "`exec`/`execSync` pass the command line to the shell **verbatim** (embedded quotes survive), matching Node; on Windows a `.bat`/`.cmd` spawned *without* a shell is refused (spawn `'error'`, `EINVAL`) rather than run through an implicit `cmd.exe`, closing the CVE-2024-27980 argument-injection path ([ADR-00740](../adr/ADR-00740.md)/[ADR-00754](../adr/ADR-00754.md))",
               "The `'error'` Error carries `.message` (`spawn <reason>`), `.code` (`ENOENT` for a missing command) and `.errno` (negative libuv-style errno, `-2` on POSIX) ([ADR-00784](../adr/ADR-00784.md))",
               "`spawn` streams (`child.stdout`/`stderr` `'data'`/`'end'`, `child.on('close'/'exit'/'error')`, `child.stdin.write`/`.end`, `child.pid`, `child.kill`, `child.unref()`/`ref()` — the loop-keepalive opt-out, [ADR-00767](../adr/ADR-00767.md)); `exec` runs via `/bin/sh -c` and `execFile` execvp's directly, both buffering into a single `(err, stdout, stderr)` callback",

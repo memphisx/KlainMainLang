@@ -163,7 +163,7 @@ keep:
   %%iserrph = phi i1 [ %%iserrbox, %%probe ], [ 0, %%entry ]
   %%tag2 = select i1 %%iserrph, i8 13, i8 %%tag
   store i8 %%tag2, ptr @__kml_thrown_tag, align 1
-  store i64 %%pay, ptr @__kml_thrown_pay, align 8`, kmlTagObject, errorTypeIDFlag, errorTypeIDFlag-1, errorSubclassTagBase)+`
+  store i64 %%pay, ptr @__kml_thrown_pay, align 8`, kmlTagObject, errorTypeIDFlag, errorTypeIDFlag-1, errorSubclassTagBase) + `
   ; Keep @__kml_thrown pointing at the Error object for tag 13 (internal
   ; Error-only catch paths + the uncaught printer read it); null otherwise.
   %isErr = icmp eq i8 %tag2, 13

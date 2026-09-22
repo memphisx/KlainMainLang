@@ -1259,6 +1259,31 @@ func (e *Emitter) emitStringFromCharCode(args []ast.Expression, pos ast.Pos) (Va
 
 // emitStringRepeat implements s.repeat(count): returns a new string consisting
 // of count copies of s concatenated together.
+// emitStringConcatMethod implements `str.concat(...values)`: the receiver
+// followed by ToString of each argument. That is exactly what a template
+// literal does with its substitutions (string hint — an object's `toString`
+// wins over its `valueOf`, unlike `+`, whose default hint asks `valueOf`
+// first), so the call is emitted as “ `${str}${a}${b}` “. A spread argument
+// contributes ToString of each element: “ xs.map((c) => `${c}`).join("") “ —
+// not a bare `join`, which renders a null/undefined element as "".
+func (e *Emitter) emitStringConcatMethod(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	exprs := []ast.Expression{mem.Object}
+	for _, a := range args {
+		sp, ok := a.(*ast.SpreadElement)
+		if !ok {
+			exprs = append(exprs, a)
+			continue
+		}
+		const elem = "__kml_concat_elem"
+		each := ast.NewArrowFunction([]ast.Param{{Name: elem}}, nil,
+			ast.NewTemplateLiteral([]string{"", ""}, []ast.Expression{ast.NewIdentifier(elem, pos)}, pos), nil, pos)
+		mapped := ast.NewCallExpression(ast.NewMemberExpression(sp.Arg, "map", pos), []ast.Expression{each}, pos)
+		exprs = append(exprs, ast.NewCallExpression(ast.NewMemberExpression(mapped, "join", pos),
+			[]ast.Expression{ast.NewStringLiteral("", pos)}, pos))
+	}
+	return e.emitExpr(ast.NewTemplateLiteral(make([]string, len(exprs)+1), exprs, pos))
+}
+
 func (e *Emitter) emitStringRepeat(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: repeat takes exactly 1 argument", pos.Line, pos.Col)

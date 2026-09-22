@@ -21,12 +21,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"KlainMainLang/codegen/llvm"
+	"KlainMainLang/internal/scratch"
 	"KlainMainLang/parser"
 )
 
@@ -334,7 +336,18 @@ func main() {
 	// nothing to do with the compiler. An explicit -workdir is left exactly as
 	// given (the caller owns isolation then). Kept under the default root, not
 	// auto-deleted, so the .ll files stay inspectable after a run.
+	//
+	// KML_SCRATCH (internal/scratch) moves that default root — and the temp
+	// directory clang and the compiled tests inherit — onto the caller's scratch
+	// volume, so a full-corpus run stays off the repo's disk.
+	scratchRoot, serr := scratch.Apply()
+	if serr != nil {
+		fatal("%v", serr)
+	}
 	if *workDir == ".conformance-out" {
+		if scratchRoot != "" {
+			*workDir = filepath.Join(scratchRoot, "conformance-out")
+		}
 		*workDir = filepath.Join(*workDir, fmt.Sprintf("run-%d", os.Getpid()))
 	}
 
@@ -375,6 +388,8 @@ func main() {
 	default:
 		fatal("unknown -suite %q (want test262, node, wpt, or ts)", *suite)
 	}
+
+	partialRun = *category != "" || *limit > 0
 
 	testDir := filepath.Join(*corpus, "test")
 	harnessDir := filepath.Join(*corpus, "harness")
@@ -438,13 +453,10 @@ func main() {
 		lanes = append(lanes, "js")
 	}
 	// Each lane runs the full corpus and writes its own report into its own
-	// folder (docs/testing/<lane>/…). `primary` (the last lane run) feeds the
-	// optional pass/fail dumps used for triage.
-	var primary []result
+	// folder (docs/testing/<lane>/…).
 	for _, lane := range lanes {
 		laneCompat = lane
 		all := runTest262Lane(files, testDir, harnessDir, defaultHarness, *workDir, *workers, *perFileTimeout)
-		primary = all
 		// An explicit -out overrides the folder layout only for a single-lane
 		// run (a scratch/triage report); -compat=both always uses the per-lane
 		// folders so the two never clobber one file.
@@ -456,29 +468,39 @@ func main() {
 			fatal("writing report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "done (lane=%s). report written to %s\n", laneLabel(), outPath)
-	}
-	if *passList != "" {
-		var passing []string
-		for _, r := range primary {
-			if r.Pass {
-				passing = append(passing, r.Path)
+		// The triage dumps are per lane: under -compat=both each lane writes its
+		// own file (<path>.strict / <path>.js) — a single file would keep only the
+		// last lane's and lose the other's names for good (the reports cap their
+		// lists).
+		laneFile := func(p string) string {
+			if *compatFlag == "both" {
+				return p + "." + laneLabel()
+			}
+			return p
+		}
+		if *passList != "" {
+			var passing []string
+			for _, r := range all {
+				if r.Pass {
+					passing = append(passing, r.Path)
+				}
+			}
+			sort.Strings(passing)
+			if err := os.WriteFile(laneFile(*passList), []byte(strings.Join(passing, "\n")+"\n"), 0644); err != nil {
+				fatal("writing passlist: %v", err)
 			}
 		}
-		sort.Strings(passing)
-		if err := os.WriteFile(*passList, []byte(strings.Join(passing, "\n")+"\n"), 0644); err != nil {
-			fatal("writing passlist: %v", err)
-		}
-	}
-	if *failList != "" {
-		var failing []string
-		for _, r := range primary {
-			if !r.Pass {
-				failing = append(failing, r.Path+"\t"+r.Reason)
+		if *failList != "" {
+			var failing []string
+			for _, r := range all {
+				if !r.Pass {
+					failing = append(failing, r.Path+"\t"+r.Reason)
+				}
 			}
-		}
-		sort.Strings(failing)
-		if err := os.WriteFile(*failList, []byte(strings.Join(failing, "\n")+"\n"), 0644); err != nil {
-			fatal("writing faillist: %v", err)
+			sort.Strings(failing)
+			if err := os.WriteFile(laneFile(*failList), []byte(strings.Join(failing, "\n")+"\n"), 0644); err != nil {
+				fatal("writing faillist: %v", err)
+			}
 		}
 	}
 }
@@ -536,6 +558,10 @@ func runTest262Lane(files []string, testDir, harnessDir, defaultHarness, workDir
 
 // laneLabel names the lane currently running for progress output and for the
 // per-lane report folder ("strict" or "js").
+// partialRun is set for a test262 run over a slice of the corpus (-category,
+// -limit): such a run writes its report but leaves the shared summary alone.
+var partialRun bool
+
 func laneLabel() string {
 	if laneCompat == "js" {
 		return "js"
@@ -690,6 +716,11 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		defer func() {
 			if r := recover(); r != nil {
 				out = cgOut{err: fmt.Errorf("CRASH: %v", r)}
+				// KML_CONF_STACK=1: print the compiler panic's stack — the reason
+				// string alone does not say where it came from.
+				if os.Getenv("KML_CONF_STACK") != "" {
+					fmt.Fprintf(os.Stderr, "CRASH in %s: %v\n%s\n", path, r, debug.Stack())
+				}
 			}
 			cgCh <- out
 		}()
@@ -763,11 +794,17 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	// (dtoa float formatter, bigint/crypto/JSON/… backends) — the same set the
 	// CLI driver links. Without these, any test needing one fails to *link*
 	// (e.g. every number-to-string via dtoa) even though the IR is valid.
+	// Each is compiled once per run into <workdir>/cobj and linked as an object
+	// from then on: the sources are identical for all ~53k files, so rebuilding
+	// them per file was most of the run's clang time and disk writes.
 	for _, cs := range cSources {
-		cPath := filepath.Join(workDir, fmt.Sprintf("w%d.%s.%s", workerID, cs.Name, cs.SrcExt()))
-		if err := os.WriteFile(cPath, []byte(cs.Content), 0644); err != nil {
-			res.Reason = normalizeReason("WRITE_ERROR", err.Error())
-			return res
+		cPath, oerr := cs.CachedObject(filepath.Join(workDir, "cobj"), []string{"-O2"})
+		if oerr != nil {
+			cPath = filepath.Join(workDir, fmt.Sprintf("w%d.%s.%s", workerID, cs.Name, cs.SrcExt()))
+			if err := os.WriteFile(cPath, []byte(cs.Content), 0644); err != nil {
+				res.Reason = normalizeReason("WRITE_ERROR", err.Error())
+				return res
+			}
 		}
 		clangArgs = append(clangArgs, cPath)
 		clangArgs = append(clangArgs, cs.CFlags...)
@@ -794,6 +831,15 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 			res.Reason = "CLANG_TIMEOUT"
 		} else {
 			res.Reason = normalizeReason("CLANG_ERROR", firstLine(clangOut.String()))
+			// IR clang rejects is a codegen bug by definition, and the worker's
+			// .ll is overwritten by its next file: keep this one, with clang's full
+			// output, so the bucket can be worked without re-deriving each input.
+			keep := filepath.Join(workDir, "clang-fail")
+			if os.MkdirAll(keep, 0755) == nil {
+				base := filepath.Join(keep, strings.NewReplacer("/", "__", "\\", "__").Replace(res.Path))
+				_ = os.WriteFile(base+".ll", []byte(ir), 0644)
+				_ = os.WriteFile(base+".clang.txt", clangOut.Bytes(), 0644)
+			}
 		}
 		return res
 	}
@@ -1151,13 +1197,18 @@ func writeReport(path string, all []result) error {
 	for ph, n := range byPhase {
 		phaseCounts[phaseShort(ph)] = n
 	}
-	if err := updateConformanceSummary("test262", laneLabel(), test262SummaryLane{
-		Overall: passTotal{Pass: passed, Total: total},
-		InScope: passTotal{Pass: inPassed, Total: inTotal},
-		Pending: passTotal{Pass: pendPassed, Total: pendTotal},
-		ByPhase: phaseCounts,
-	}, ""); err != nil {
-		return err
+	// A filtered run (-category / -limit) measures a slice of the corpus: its
+	// totals are not the suite's, and merging them would replace the committed
+	// whole-corpus numbers with a triage run's.
+	if !partialRun {
+		if err := updateConformanceSummary("test262", laneLabel(), test262SummaryLane{
+			Overall: passTotal{Pass: passed, Total: total},
+			InScope: passTotal{Pass: inPassed, Total: inTotal},
+			Pending: passTotal{Pass: pendPassed, Total: pendTotal},
+			ByPhase: phaseCounts,
+		}, ""); err != nil {
+			return err
+		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {

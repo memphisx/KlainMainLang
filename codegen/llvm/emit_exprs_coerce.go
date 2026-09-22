@@ -44,6 +44,22 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 	// raw reinterpretation of the encoded word (which is what the generic
 	// scalar paths below would do now that TypeAny's IR is i64).
 	if v.Ty.IsDynamic && target.IR != "" && !target.IsDynamic {
+		// A box flowing into a `T | undefined` slot: a null/undefined tag is the
+		// absent optional, not a present zero (`const v: number | undefined =
+		// xs[i]` off a `(number | undefined)[]`).
+		if isNullableScalar(target) {
+			tag, _ := e.emitUnboxTagPayload(v)
+			isNull := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNull, tag, kmlTagNull))
+			isUndef := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
+			nullish := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", nullish, isNull, isUndef))
+			present := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", present, nullish))
+			payload := e.coerce(v, target.withoutNullable())
+			return Value{Ref: e.makeNullableScalarAgg(target, present, payload.Ref), Ty: target}
+		}
 		switch {
 		case target.Float:
 			d := e.emitAnyToNum(v)
@@ -77,7 +93,31 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 	// lets arithmetic, stores, returns, and argument passing consume a boundary
 	// value (a T|null return/param/field) without knowing the aggregate shape.
 	// Keep it intact only when the target is itself a matching nullable scalar.
-	if isNullableScalar(v.Ty) && !(isNullableScalar(target) && target.IR == v.Ty.IR) {
+	//
+	// A nullable scalar flowing into a nullable scalar of a *different* payload
+	// (`{ i1, i64 }` → `{ i1, double }`: an integer-valued `T | undefined` passed
+	// as a `number | undefined`) converts the payload and carries the presence
+	// bit across. Demoting it like the plain-scalar case lost the absent state:
+	// the bare zero was then re-wrapped as *present* by the scalar→nullable
+	// branch below, so `undefined` arrived as `0` (ADR-01037).
+	if isNullableScalar(v.Ty) && isNullableScalar(target) && target.IR != v.Ty.IR {
+		present, payload := e.nullableScalarAggParts(v)
+		conv := e.coerce(payload, target.withoutNullable())
+		return Value{Ref: e.makeNullableScalarAgg(target, present, conv.Ref), Ty: target}
+	}
+	// A nullable scalar flowing into a box (`any`, a union, a boxed array element)
+	// keeps its absence: an absent `{ i1, T }` boxes as `undefined`/`null`, not as
+	// the payload zero the demotion below would box as a present number.
+	if isNullableScalar(v.Ty) && target.IsDynamic {
+		present, payload := e.nullableScalarAggParts(v)
+		boxed := e.coerce(payload, target)
+		absentLit, _ := e.emitExpr(ast.NewNullLiteral(v.Ty.IsUndefined, ast.Pos{}))
+		absent := e.coerce(absentLit, target)
+		sel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s %s", sel, present, target.IR, boxed.Ref, target.IR, absent.Ref))
+		return Value{Ref: sel, Ty: target}
+	}
+	if isNullableScalar(v.Ty) && !isNullableScalar(target) {
 		v = e.nullableScalarPayloadOf(v)
 	}
 	// null/undefined coerced *to* a nullable scalar becomes an absent { i1, T }
@@ -97,6 +137,9 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 	// not this aggregate shape) — a real bug found assigning a literal
 	// `null` to a `T[] | null` interface field (ADR-00158).
 	if v.Ty.IsNull && target.IsArray {
+		if target.Nullable {
+			return e.emitAbsentArrayValue(target) // carries the null header
+		}
 		return Value{Ref: "{ ptr null, i64 0 }", Ty: target}
 	}
 	// null/undefined assigned to a non-ptr type becomes the zero value —
@@ -358,6 +401,12 @@ func (e *Emitter) coerceChecked(v Value, target Type, pos ast.Pos, what string) 
 	// sites that have no compile-time reject path, like the ArrayBuffer ctor).
 	if v.Ty.IsSymbol && (target.Float || (target.IsInteger() && target.IR != "" && target.IR != "ptr")) {
 		return Value{}, fmt.Errorf("%d:%d: type mismatch in %s — a Symbol cannot be converted to a number (this compiler is a typed subset)", pos.Line, pos.Col, what)
+	}
+	// A constrained union target (`number | string`, a union array element)
+	// checks the member set: `xs.push(true)` into a `(number | string)[]` is the
+	// same rejection `const w: number | string = true` is.
+	if target.IsDynamic && target.UnionMembers != nil && !unionAllowsAssignmentFrom(target, v.Ty) {
+		return Value{}, fmt.Errorf("%d:%d: type mismatch in %s — value's type is not a member of the declared union type", pos.Line, pos.Col, what)
 	}
 	out := e.coerce(v, target)
 	if !coercionIsSound(out.Ty, target) {

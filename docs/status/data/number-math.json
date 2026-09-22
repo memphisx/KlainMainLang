@@ -36,7 +36,10 @@
           },
           {
             "feature": "`Number.isNaN(x)`",
-            "status": "implemented"
+            "status": "implemented",
+            "notes": [
+              "All four `Number.isX` predicates are `false` for an absent value — an out-of-range `xs[i]`, a `Map.get` miss, an omitted optional parameter — where the global `isNaN`/`isFinite` ToNumber it first (`isNaN(undefined)` is `true`) ([ADR-01043](../adr/ADR-01043.md))"
+            ]
           },
           {
             "feature": "`Number.isSafeInteger(x)`",

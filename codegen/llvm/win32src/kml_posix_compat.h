@@ -71,13 +71,16 @@ static inline int kml_nanosleep_ts(const struct timespec *req) {
 
 // ---- ucontext (Win32 Fibers in the shim) ---------------------------------------
 // Field offsets match win32io.c's kml_ucontext: fiber 0, ss_sp 8, ss_size
-// 16, uc_link 24, fn 32, argc 40.
+// 16, uc_link 24, fn 32, argc 40, park_lo 48, park_hi 56 (swapcontext writes
+// the last two — the struct must be the full 64 bytes wherever it is declared).
 typedef struct kml_ucontext_t {
 	void *fiber;
 	struct { void *ss_sp; size_t ss_size; } uc_stack;
 	struct kml_ucontext_t *uc_link;
 	void (*fn)(void);
 	int64_t argc;
+	void *park_lo;
+	void *park_hi;
 } ucontext_t;
 int getcontext(ucontext_t *ctx);
 void makecontext(ucontext_t *ctx, void (*fn)(void), int argc, ...);
@@ -149,8 +152,11 @@ int getsockname(int fd, void *addr, int *len);
 int getpeername(int fd, void *addr, int *len);
 int64_t recvfrom(int fd, void *buf, size_t n, int flags, void *addr, int *alen);
 int64_t sendto(int fd, const void *buf, size_t n, int flags, const void *addr, int alen);
-static inline int64_t recv(int fd, void *buf, size_t n, int flags) { (void)flags; return read(fd, buf, n); }
-static inline int64_t send(int fd, const void *buf, size_t n, int flags) { (void)flags; return write(fd, buf, n); }
+// A flagless recv/send is the descriptor's ordinary read/write (the reactor's
+// path); one carrying MSG_PEEK/MSG_WAITALL/… must reach Winsock with its flags,
+// or a peek would consume the data.
+static inline int64_t recv(int fd, void *buf, size_t n, int flags) { return (flags & 0x107) ? recvfrom(fd, buf, n, flags, 0, 0) : read(fd, buf, n); }
+static inline int64_t send(int fd, const void *buf, size_t n, int flags) { return (flags & 0x107) ? sendto(fd, buf, n, flags, 0, 0) : write(fd, buf, n); }
 unsigned short htons(unsigned short v);
 unsigned short ntohs(unsigned short v);
 static inline uint32_t htonl(uint32_t v) { return ((v & 0xffu) << 24) | ((v & 0xff00u) << 8) | ((v >> 8) & 0xff00u) | (v >> 24); }

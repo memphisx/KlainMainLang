@@ -43,11 +43,33 @@ const workerCtrlBytes = 112
 // fiber machinery has always used; under Worker threads, the lock-guarded
 // per-thread @__kml_gc_set_sb call (TDD-00098 stage 4) — a raw store to the
 // process-wide global would corrupt the other threads' scanning.
+//
+// Windows: a context is a Win32 fiber running on a stack the OS allocated, not
+// on the block the IR malloc'd for it (win32io.c), so val — computed from that
+// block — is never the stack in use. The shim re-points the collector on every
+// switch; an IR store after the switch would undo that with a heap address and
+// the next collection would scan from the live SP into unrelated memory. There
+// the statement records the stack actually running, read from the TEB.
 func (e *Emitter) gcSBStore(val string) string {
+	if targetGOOS() == "windows" {
+		e.ensureGCStackBottomCurrent()
+		return "call void @__kml_gc_sb_cur()"
+	}
 	if e.hasWorkers {
 		return fmt.Sprintf("call void @__kml_gc_set_sb(ptr %s)", val)
 	}
 	return fmt.Sprintf("store ptr %s, ptr @GC_stackbottom, align 8", val)
+}
+
+// ensureGCStackBottomCurrent declares @__kml_gc_sb_cur (gcshim.c, Windows only —
+// see gcSBStore): record the stack this code is running on, as the TEB reports
+// it, as the current thread's GC stack base.
+func (e *Emitter) ensureGCStackBottomCurrent() {
+	if e.usedGCSBCur {
+		return
+	}
+	e.usedGCSBCur = true
+	e.emitGlobal("declare void @__kml_gc_sb_cur()")
 }
 
 // sigBlockFlag returns SIG_BLOCK's numeric value — glibc defines it as 0,
@@ -219,14 +241,19 @@ putslot:
 		e.emitGlobal("declare i32 @GC_get_stack_base(ptr noundef)")
 		e.emitGlobal("declare i32 @GC_register_my_thread(ptr noundef)")
 		e.emitGlobal("declare i32 @GC_unregister_my_thread()")
+		// gcshim.c: this thread's TLS block as a GC root (Windows; a no-op elsewhere).
+		e.emitGlobal("declare void @__kml_gc_tls_register()")
+		e.emitGlobal("declare void @__kml_gc_tls_unregister()")
 		gcRegister = `
   %gcsb = alloca [2 x ptr], align 8
   call i32 @GC_get_stack_base(ptr %gcsb)
   call i32 @GC_register_my_thread(ptr %gcsb)
+  call void @__kml_gc_tls_register()
   %gcmem_p = getelementptr [2 x ptr], ptr %gcsb, i32 0, i32 0
   %gcmem = load ptr, ptr %gcmem_p, align 8
   store ptr %gcmem, ptr @__kml_gc_orig_stackbottom, align 8`
 		gcUnregister = `
+  call void @__kml_gc_tls_unregister()
   call i32 @GC_unregister_my_thread()`
 	}
 	e.emitGlobal(fmt.Sprintf(`define ptr @__kml_worker_main(ptr %%ctrl) {

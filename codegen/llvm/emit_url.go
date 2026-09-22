@@ -677,7 +677,12 @@ func (e *Emitter) emitPathToFileURL(args []ast.Expression, pos ast.Pos) (Value, 
 	// path stays part of the path).
 	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartScheme, e.internString("file")))
 	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartHost, hostRef))
-	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 %d)", e.freshReg(), handle, curluPartPath, abs.Ref, curluURLEncode))
+	// The path is percent-encoded here, with Node's set, not by libcurl
+	// (CURLU_URLENCODE leaves `[ ] { } ~` unescaped; Node escapes them).
+	e.ensureEncodeFileURLPath()
+	encPath := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_encode_file_url_path(ptr %s)", encPath, abs.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartPath, encPath))
 
 	urlTy := URLType()
 	objReg := e.freshReg()
@@ -685,45 +690,32 @@ func (e *Emitter) emitPathToFileURL(args []ast.Expression, pos ast.Pos) (Value, 
 	if err := e.deriveURLFieldsIntoObject(handle, objReg); err != nil {
 		return Value{}, err
 	}
-	if hostPathFlavor() == pathWin32 {
-		// libcurl serializes a `file:` URL without its host, so a UNC input's
-		// href would come back as `file:///share/p`. Node's is
-		// `file://server/share/p`: rebuild href from the derived host and
-		// (percent-encoded) pathname when a host is present.
-		e.ensureStrlen()
-		field := func(name string) (gep string, ty Type) {
-			idx, fieldTy, _ := urlTy.FieldIndex(name)
-			g := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, urlTy.StructIR(), objReg, idx))
-			return g, fieldTy
-		}
-		hostGep, hostTy := field("host")
-		hostVal := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", hostVal, hostTy.IR, hostGep, hostTy.Align()))
-		hostLen := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", hostLen, hostVal))
-		hasHost := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", hasHost, hostLen))
-		fixL := e.freshLabel("p2f.unchref")
-		doneL := e.freshLabel("p2f.hrefdone")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasHost, fixL, doneL))
-		e.emitLabel(fixL)
-		pathGep, pathTy := field("pathname")
-		pathVal := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", pathVal, pathTy.IR, pathGep, pathTy.Align()))
-		a, err := e.emitStringConcat(Value{Ref: e.internString("file://"), Ty: TypePtr}, Value{Ref: hostVal, Ty: TypePtr})
-		if err != nil {
-			return Value{}, err
-		}
-		href, err := e.emitStringConcat(a, Value{Ref: pathVal, Ty: TypePtr})
-		if err != nil {
-			return Value{}, err
-		}
-		hrefGep, hrefTy := field("href")
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", hrefTy.IR, href.Ref, hrefGep, hrefTy.Align()))
-		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-		e.emitLabel(doneL)
+	// pathname and href are set from the path as encoded above, not read back
+	// from libcurl: it lower-cases the hex digits of an already-escaped path
+	// (Node's are upper-case) and serializes a `file:` URL without its host, so
+	// a Windows UNC input would come back as `file:///share/p` where Node's is
+	// `file://server/share/p`.
+	field := func(name string) (gep string, ty Type) {
+		idx, fieldTy, _ := urlTy.FieldIndex(name)
+		g := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, urlTy.StructIR(), objReg, idx))
+		return g, fieldTy
 	}
+	hostGep, hostTy := field("host")
+	hostVal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", hostVal, hostTy.IR, hostGep, hostTy.Align()))
+	a, err := e.emitStringConcat(Value{Ref: e.internString("file://"), Ty: TypePtr}, Value{Ref: hostVal, Ty: TypePtr})
+	if err != nil {
+		return Value{}, err
+	}
+	href, err := e.emitStringConcat(a, Value{Ref: encPath, Ty: TypePtr})
+	if err != nil {
+		return Value{}, err
+	}
+	pathGep, pathTy := field("pathname")
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", pathTy.IR, encPath, pathGep, pathTy.Align()))
+	hrefGep, hrefTy := field("href")
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", hrefTy.IR, href.Ref, hrefGep, hrefTy.Align()))
 	return Value{Ref: objReg, Ty: urlTy}, nil
 }
 
@@ -1415,7 +1407,6 @@ func (e *Emitter) emitURLComponentSet(objVal Value, property string, rhsExpr ast
 	return rhsVal, nil
 }
 
-
 // emitMapStrToQueryString serializes the Map<string,string> at mapPtr back
 // to "k1=v1&k2=v2" (percent-encoding each key/value via the same helper
 // encodeURIComponent uses), in whatever order __kml_map_str_keys/vals
@@ -1514,4 +1505,3 @@ func (e *Emitter) emitMapStrToQueryString(mapPtr string) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, accAlloca))
 	return Value{Ref: result, Ty: TypePtr}, nil
 }
-

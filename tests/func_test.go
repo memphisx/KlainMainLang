@@ -386,13 +386,23 @@ console.log(box(1, 2, 3))
 }
 
 func TestE2EOptionalParamArray(t *testing.T) {
-	// An array aggregate has no spare absent state, so an omitted array-typed
-	// optional parameter stays an empty array (not `undefined`).
+	// An omitted array-typed optional parameter is a real `undefined`, as in
+	// Node (ADR-01041) — through a named function, an arrow, a method.
 	assertOutput(t, `
-function count(nums?: number[]): number { return nums.length }
-console.log(count())
-console.log(count([1, 2, 3]))
-`, "0\n3")
+function count(nums?: number[]): number { return nums === undefined ? -1 : nums.length }
+const arrow = (xs?: number[]) => xs?.length ?? "absent"
+class K { m(xs?: string[]): string { return xs ? xs.join("+") : "none" } }
+function inner(xs?: number[]): string { return xs === undefined ? "absent" : "len " + xs.length }
+function outer(xs?: number[]): string { return inner(xs) }
+console.log(count(), count([]), count([1, 2, 3]))
+console.log(arrow(), arrow([]), new K().m(), new K().m([]), new K().m(["a", "b"]))
+console.log(outer(), outer([]), outer([1, 2]))
+function bad(nums?: number[]): number { return nums.length }
+try { console.log(bad()) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+`, `-1 0 3
+absent 0 none  a+b
+absent len 0 len 2
+true Cannot read properties of undefined (reading 'length')`)
 }
 
 func TestE2EOptionalParamClassMethod(t *testing.T) {

@@ -228,7 +228,7 @@
       },
       "snippet": "import { pathToFileURL } from 'url'\nconsole.log(pathToFileURL('/foo bar').href) // file:///foo%20bar",
       "differences": [
-        "POSIX only; the options argument is unsupported"
+        "The options argument is unsupported"
       ],
       "seeAlso": [
         "url.fileURLToPath",

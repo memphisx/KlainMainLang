@@ -5,8 +5,8 @@
     {
       "section": "TypeScript Core Language",
       "total": {
-        "impl": 354,
-        "total": 360,
+        "impl": 356,
+        "total": 362,
         "pct": 98
       },
       "rows": [
@@ -14,14 +14,14 @@
           "category": "Control flow statements",
           "pageFile": "LANGUAGE-CONSTRUCTS.md",
           "coverage": {
-            "impl": 13,
-            "total": 13,
+            "impl": 14,
+            "total": 14,
             "pct": 100
           },
           "strict": {
             "impl": 11,
-            "total": 13,
-            "pct": 85
+            "total": 14,
+            "pct": 79
           },
           "caveats": "• A `for` loop's non-declaration init clause (`for (i = 0, j = 10; ...)`) is a clean rejection (the update clause does take comma-separated expressions — [ADR-00156](../adr/ADR-00156.md))\u003cbr\u003e• No ASI restriction on a line break before a postfix `++`/`--`\u003cbr\u003e• `finally` does not run on an early `return`/`break`/`continue` inside an `async`/generator body (it does everywhere else — [ADR-00191](../adr/ADR-00191.md))"
         },
@@ -34,9 +34,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 18,
+            "impl": 17,
             "total": 22,
-            "pct": 82
+            "pct": 77
           },
           "caveats": "• `++`/`--` work on identifier, member, and index targets; the one edge is a postfix update on a side-effecting receiver used as a value, which evaluates the receiver twice ([ADR-00376](../adr/ADR-00376.md))\u003cbr\u003e• `typeof` of a static-method reference outside the covered Promise/Math/JSON tables (`Object.keys`, `console.log`, …) answers from inference, not `\"function\"` ([ADR-00282](../adr/ADR-00282.md))\u003cbr\u003e• `\u0026\u0026`/`\\|\\|` yield a bool by default; `-compat=js` makes them value-preserving for same-typed operands ([ADR-00186](../adr/ADR-00186.md)/[ADR-00220](../adr/ADR-00220.md))"
         },
@@ -94,23 +94,23 @@
             "pct": 100
           },
           "strict": {
-            "impl": 8,
+            "impl": 7,
             "total": 9,
-            "pct": 89
+            "pct": 78
           }
         },
         {
           "category": "String methods",
           "pageFile": "STRING-METHODS.md",
           "coverage": {
-            "impl": 31,
-            "total": 32,
+            "impl": 32,
+            "total": 33,
             "pct": 97
           },
           "strict": {
-            "impl": 17,
-            "total": 32,
-            "pct": 53
+            "impl": 18,
+            "total": 33,
+            "pct": 55
           },
           "caveats": "• No `.normalize()` (needs Unicode normalization tables — deliberately deferred, never faked)\u003cbr\u003e• `.codePointAt()`/`.charCodeAt()` read bytes, not UTF-16 code units — no surrogate-pair decoding (this compiler has no Unicode infrastructure; correct for ASCII/Latin-1)"
         },

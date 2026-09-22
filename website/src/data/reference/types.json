@@ -301,11 +301,10 @@
       "statusRow": "Union types beyond T | null",
       "signature": "let x: string | number",
       "badge": "caveats",
-      "description": "The same runtime box as any/unknown with a checked member set on top, statically restricted to the declared members at every assignment/call/return boundary. A narrowed local unboxes to the concrete member; an object member to its typed pointer.",
+      "description": "The same runtime box as any/unknown with a checked member set on top, statically restricted to the declared members at every assignment/call/return boundary. A narrowed local unboxes to the concrete member; an object member to its typed pointer. Usable for a variable, parameter, return value, object field and array element ((number | string)[], and (number | undefined)[] whose absent elements are real undefineds); every write is checked against the member set.",
       "snippet": "let x: string | number = \"hello\"\nconsole.log(typeof x)    // string\nx = 42\nconsole.log(typeof x)    // number",
       "differences": [
         "Scalar members (`number`/`string`/`boolean` + `null`/`undefined`), object/interface/class members (one object member, or ≥2 as a **discriminated union** sharing a first-position string-literal tag), and a `ReadableStream` member; array/`ArrayBuffer` members, number-literal tags, and a non-first-position tag aren't supported",
-        "Usable at the top level of a var declaration/function param/return and as an **object field** (checked + boxed at construction); as an **array element** it's still rejected (element-level checking not wired)",
         "Flow narrowing is for a union **local** via `typeof`/truthiness/`==null` (if/else branches + early return); a field/element, discriminated-union tag, `switch (typeof x)`, and `as` casts aren't narrowed; an un-narrowed object union has no field access"
       ],
       "seeAlso": [

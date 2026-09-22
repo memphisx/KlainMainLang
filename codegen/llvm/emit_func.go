@@ -59,6 +59,16 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	savedRegCtr := e.regCtr
 	savedLabelCtr := e.labelCtr
 	savedScopes := e.scopes
+	// An error return partway through the body must not leave this function's
+	// own scope stack in place: the enclosing statement emitters pop their
+	// scopes as the error unwinds, and on the wrong (shorter) stack that was a
+	// slice-bounds panic instead of the compile error.
+	scopesRestored := false
+	defer func() {
+		if !scopesRestored {
+			e.scopes = savedScopes
+		}
+	}()
 	savedRetType := e.currentRetType
 	savedIsAsync := e.isAsync
 	savedCoroHdl := e.coroHdl
@@ -395,6 +405,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	e.regCtr = savedRegCtr
 	e.labelCtr = savedLabelCtr
 	e.scopes = savedScopes
+	scopesRestored = true
 	e.currentRetType = savedRetType
 	e.isAsync = savedIsAsync
 	e.coroHdl = savedCoroHdl
@@ -1955,7 +1966,8 @@ func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type
 	defer e.popScope()
 	add := func(name string, t Type) {
 		if candidates[name] {
-			contrib[name] = append(contrib[name], t)
+			// An element read contributes tsc's plain `T` (`m.push(e[0])`).
+			contrib[name] = append(contrib[name], t.staticIndexType())
 		}
 	}
 	declare := func(v *ast.VarDeclaration) {
@@ -2351,6 +2363,16 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	savedRegCtr := e.regCtr
 	savedLabelCtr := e.labelCtr
 	savedScopes := e.scopes
+	// An error return partway through the body must not leave this function's
+	// own scope stack in place: the enclosing statement emitters pop their
+	// scopes as the error unwinds, and on the wrong (shorter) stack that was a
+	// slice-bounds panic instead of the compile error.
+	scopesRestored := false
+	defer func() {
+		if !scopesRestored {
+			e.scopes = savedScopes
+		}
+	}()
 	savedRetType := e.currentRetType
 	savedBlockDone := e.blockDone
 	savedIsAsync := e.isAsync
@@ -2694,6 +2716,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	e.regCtr = savedRegCtr
 	e.labelCtr = savedLabelCtr
 	e.scopes = savedScopes
+	scopesRestored = true
 	e.currentRetType = savedRetType
 	e.blockDone = savedBlockDone
 	e.isAsync = savedIsAsync
@@ -3606,6 +3629,16 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	savedRegCtr := e.regCtr
 	savedLabelCtr := e.labelCtr
 	savedScopes := e.scopes
+	// An error return partway through the body must not leave this function's
+	// own scope stack in place: the enclosing statement emitters pop their
+	// scopes as the error unwinds, and on the wrong (shorter) stack that was a
+	// slice-bounds panic instead of the compile error.
+	scopesRestored := false
+	defer func() {
+		if !scopesRestored {
+			e.scopes = savedScopes
+		}
+	}()
 	savedRetType := e.currentRetType
 	savedBlockDone := e.blockDone
 	savedIsAsync := e.isAsync
@@ -3840,6 +3873,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	e.regCtr = savedRegCtr
 	e.labelCtr = savedLabelCtr
 	e.scopes = savedScopes
+	scopesRestored = true
 	e.currentRetType = savedRetType
 	e.blockDone = savedBlockDone
 	e.isAsync = savedIsAsync
@@ -4229,7 +4263,7 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 			// other slot takes an `undefined` literal, which the paths below
 			// coerce (scalar → zero) or box as absent (nullable-scalar).
 			if paramTy.IsArray {
-				argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
+				argParts = append(argParts, "ptr "+e.omittedArrayArgHeader(paramTy), "i64 0")
 				continue
 			}
 			arg = ast.NewNullLiteral(true, pos)
@@ -4285,7 +4319,7 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 		// {ptr,i64} aggregate (emitExprWithObjectHint/emitExpr's own
 		// IsArray handling), so this only needs to split it, not build it.
 		if paramTy.IsArray {
-			header, lenReg := e.packArrayArg(arg, val)
+			header, lenReg := e.packArrayArg(arg, val, paramTy)
 			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 			scratch.bindArray(i, header, paramTy)
 			continue

@@ -524,7 +524,7 @@ conn:
   store ptr %%code, ptr %%cc, align 8
   %%csc = getelementptr %[2]s, ptr %%obj, i32 0, i32 6
   store ptr %[9]s, ptr %%csc, align 8
-  %%neg = sub i32 0, %%err
+  %%neg = call i32 @__kml_uv_errno(i32 %%err)
   %%negd = sitofp i32 %%neg to double
   %%cen = getelementptr %[2]s, ptr %%obj, i32 0, i32 8
   store double %%negd, ptr %%cen, align 8

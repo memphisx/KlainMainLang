@@ -7,9 +7,18 @@
 // compiler: this is the only definition of these symbols in the link, so
 // no special linker flags (-flat_namespace, --defsym, LD_PRELOAD) are
 // needed on either Linux or macOS. See docs/adr/ADR-00071.md.
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE // dl_iterate_phdr's dlpi_tls_data
+#endif
 #include <gc.h>
 #include <stddef.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h> // NtCurrentTeb, for this thread's TLS block
+#endif
+#if defined(__linux__)
+#include <link.h> // dl_iterate_phdr, for this thread's TLS blocks
+#endif
 
 #if defined(__linux__)
 // On at least one Boehm GC build (Ubuntu's libgc-dev package, confirmed via
@@ -118,10 +127,83 @@ extern void (*__kml_gc_root_remove)(void *lo, void *hi_plus_one);
 // writes the same variable for its own fiber swaps (emitter.go's gcSBStore).
 _Pragma("GCC diagnostic push")
 _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
-static void kml_gc_set_stackbottom(void *base) { GC_stackbottom = (char *)base; }
+// The Win32 collector is the threaded build: it scans each registered thread
+// from its SP to the stack base recorded for *that thread*, and never reads
+// GC_stackbottom. With the SP on a fiber's stack and the recorded base still
+// the thread's original one, it finds the SP out of range and scans the
+// original stack instead — the running fiber's frames are not roots at all,
+// and whatever only they reference is collected under them. The per-thread
+// record is what has to move (under the allocation lock, as gc.h requires);
+// the global is kept in step for anything that still reads it.
+static void *kml_gc_set_sb_locked(void *base) {
+	struct GC_stack_base sb;
+	memset(&sb, 0, sizeof sb);
+	sb.mem_base = base;
+	GC_set_stackbottom(NULL, &sb);
+	GC_stackbottom = (char *)base;
+	return NULL;
+}
+static void kml_gc_set_stackbottom(void *base) { GC_call_with_alloc_lock(kml_gc_set_sb_locked, base); }
 _Pragma("GCC diagnostic pop")
+// The IR's every GC stack-bottom write on Windows (gcSBStore): its own idea of
+// a context's stack is the unused malloc'd block, so it asks for "the stack
+// now running" instead, which the TEB knows.
+void __kml_gc_sb_cur(void) { kml_gc_set_stackbottom(((NT_TIB *)NtCurrentTeb())->StackBase); }
 static void kml_gc_root_add(void *lo, void *hi) { GC_add_roots((char *)lo, (char *)hi); }
 static void kml_gc_root_remove(void *lo, void *hi) { GC_remove_roots((char *)lo, (char *)hi); }
+
+// Thread-local storage is not a root on Windows. Boehm scans the image's data
+// sections and each registered thread's stack; a thread's TLS block is a
+// separate loader allocation it never looks at. The runtime keeps its loop
+// state in thread_local globals — the task array, the microtask queue, the
+// timer list — so under -mm=gc those were collected while in use and handed
+// out again, surfacing as a crash inside a later allocation. Each thread that
+// runs emitted code registers its own block (the mingw CRT's TLS template
+// bounds give the size; the TEB's slot array gives this thread's copy) and
+// drops it before the thread — and with it the block — goes away.
+extern char _tls_start, _tls_end;
+extern unsigned long _tls_index;
+static void kml_tls_bounds(char **lo, char **hi) {
+	char **slots = (char **)((void **)NtCurrentTeb())[11]; // TEB.ThreadLocalStoragePointer (+0x58)
+	*lo = slots ? slots[_tls_index] : NULL;
+	*hi = *lo ? *lo + (&_tls_end - &_tls_start) : NULL;
+}
+void __kml_gc_tls_register(void) {
+	char *lo, *hi;
+	kml_tls_bounds(&lo, &hi);
+	if (lo && lo < hi) GC_add_roots(lo, hi);
+}
+void __kml_gc_tls_unregister(void) {
+	char *lo, *hi;
+	kml_tls_bounds(&lo, &hi);
+	if (lo && lo < hi) GC_remove_roots(lo, hi);
+}
+#endif
+
+#if defined(__linux__)
+// The same hole exists on Linux: neither the main thread's static TLS block nor
+// a registered pthread's is part of what Boehm scans (checked directly — a
+// block held only by a _Thread_local pointer is collected and handed out
+// again, on the main thread and on a registered worker alike). Every loaded
+// module's PT_TLS segment has a per-thread copy; dl_iterate_phdr reports the
+// calling thread's.
+static int kml_tls_phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
+	(void)size;
+	if (!info->dlpi_tls_data) return 0; // no TLS, or not yet allocated for this thread
+	for (int i = 0; i < info->dlpi_phnum; i++) {
+		if (info->dlpi_phdr[i].p_type != PT_TLS || info->dlpi_phdr[i].p_memsz == 0) continue;
+		char *lo = (char *)info->dlpi_tls_data, *hi = lo + info->dlpi_phdr[i].p_memsz;
+		if (*(int *)data) GC_add_roots(lo, hi); else GC_remove_roots(lo, hi);
+	}
+	return 0;
+}
+void __kml_gc_tls_register(void) { int add = 1; dl_iterate_phdr(kml_tls_phdr_cb, &add); }
+void __kml_gc_tls_unregister(void) { int add = 0; dl_iterate_phdr(kml_tls_phdr_cb, &add); }
+#elif !defined(_WIN32)
+// macOS: thread-local variables are allocated lazily by dyld per thread; not
+// covered here (unverified on this platform).
+void __kml_gc_tls_register(void) {}
+void __kml_gc_tls_unregister(void) {}
 #endif
 
 __attribute__((constructor))
@@ -156,6 +238,7 @@ static void __kml_gc_ctor(void) {
 	GC_set_handle_fork(1);
 #endif // no fork() on Windows: Boehm aborts on the request there (TDD-00177)
 	GC_INIT();
+	__kml_gc_tls_register(); // the main thread's block
 	ctorDone = 1;
 }
 
