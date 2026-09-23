@@ -35,11 +35,35 @@ func (e *Emitter) emitSymbolConstructor(args []ast.Expression, pos ast.Pos) (Val
 	e.ensureMalloc()
 	dataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, ty.StructSize()))
+	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", symbolTypeIDFlag, dataReg))
 	idx, fieldTy, _ := ty.FieldIndex("description")
 	gepReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, ty.StructIR(), dataReg, idx))
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), descPtr, gepReg, fieldTy.Align()))
 	return Value{Ref: dataReg, Ty: ty}, nil
+}
+
+// symbolTypeIDFlag is the marker bit stored in a Symbol's hidden field 0
+// (ADR-01059). Bit 47, for the same reason Errors use bit 48
+// (errorTypeIDFlag): user-space heap pointers on every target are < 2^47, so
+// a plain object whose field 0 is a pointer or a small tag can never carry
+// it, and an Error's field 0 (bit 48 | kind) never has bit 47 set either —
+// the two probes cannot mistake each other's objects.
+const symbolTypeIDFlag = 1 << 47
+
+// emitBoxedSymbolProbe reads field 0 of a boxed object (payloadReg is the
+// ptrtoint'd object pointer) and answers whether it is a Symbol. Only valid
+// under a kmlTagObject tag check.
+func (e *Emitter) emitBoxedSymbolProbe(payloadReg string) (objPtr, isSym string) {
+	objPtr = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", objPtr, payloadReg))
+	f0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", f0, objPtr))
+	flagged := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", flagged, f0, symbolTypeIDFlag))
+	isSym = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isSym, flagged))
+	return objPtr, isSym
 }
 
 // emitSymbolToString formats val (a Symbol-typed Value) as "Symbol(desc)" —
@@ -97,12 +121,13 @@ found:
   ret ptr %%p
 create:
   %%sym = call ptr @malloc(i64 %d)
+  store i64 %d, ptr %%sym, align 8
   %%dgep = getelementptr %s, ptr %%sym, i32 0, i32 %d
   store ptr %%key, ptr %%dgep, align 8
   %%si = ptrtoint ptr %%sym to i64
   call void @__kml_map_str_set(ptr %%reg, ptr %%key, i64 %%si)
   ret ptr %%sym
-}`, ty.StructSize(), ty.StructIR(), idx))
+}`, ty.StructSize(), symbolTypeIDFlag, ty.StructIR(), idx))
 	e.emitGlobal(fmt.Sprintf(`
 define ptr @__kml_symbol_keyfor(ptr %%sym) {
 entry:

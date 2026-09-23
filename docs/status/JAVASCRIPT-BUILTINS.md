@@ -23,7 +23,7 @@ Format: [Status page format](README.md#status-page-format). ✅ = the built-in w
 | `JSON` (`stringify`/`parse`, dynamic + typed trees, `toJSON`) | ✅ | | • → [JSON](JSON.md) |
 | `RegExp` (literal + ctor, `exec`/`test`/`match`/`matchAll`/`replace`/`replaceAll`/`split`/`search`) — PCRE2-backed | ✅ | | • → [RegExp](REGEXP.md) |
 | `Error` + subtypes (`TypeError`/`RangeError`/`SyntaxError`/`EvalError`/`URIError`/`ReferenceError`/`AggregateError`/`DOMException`), `class X extends Error` (1 level) | ✅ | • The error-options second argument must be a `{ cause: <expr> }` object **literal** — a variable/computed options bag is a clean rejection ([ADR-01007](../adr/ADR-01007.md)); `AggregateError` takes no options (its `.cause` reads `undefined`)<br>• `.stack` is typed a number, not a string (`typeof err.stack` is `'number'`, Node: `'string'`) | • → [Language constructs](LANGUAGE-CONSTRUCTS.md)<br>• `.toString()` / `String(err)` / `` `${err}` `` render `name: message` as in Node. See [ADR-00846](../adr/ADR-00846.md) |
-| `Symbol` (`Symbol()`/`for`/`keyFor`, `.description`, `typeof`) — opaque unique values | ✅ | | • → [Type system](TYPE-SYSTEM.md) |
+| `Symbol` (`Symbol()`/`for`/`keyFor`, `.description`, `typeof`) — opaque unique values | ✅ | | • → [Type system](TYPE-SYSTEM.md)<br>• A Symbol keeps its identity inside an `any` (hidden type-id word): `typeof` → `"symbol"` and narrows, `===`, `.description`, `Symbol(desc)` rendering, and ToNumber (`Number(x)`, a `TypedArray.set` offset, `+x`/`x * 1` under `-compat=js`) throws the spec's `TypeError` ([ADR-01059](../adr/ADR-01059.md)) |
 | `Promise` (`all`/`race`/`allSettled`/`any`/`resolve`/`reject`, executor, `then`/`catch`/`finally`) | ✅ | • `JSON.stringify` of an **error-subclass instance** reason yields `{}` where Node serializes its own enumerable fields (an assigned `this.name`, extra declared fields) — needs per-field enumerability ([TDD-00222](../tdd/TDD-00222.md)). Everything else about a subclass reason is faithful — `.message`/`.name`, `String` (`Name: message`), precise `instanceof`; primitive and built-in-Error reasons fully so ([ADR-01003](../adr/ADR-01003.md)) | • → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | async functions / `await` / async generators / `for await…of` | ✅ | | • → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | Generators (`function*`, `yield`/`yield*`, `.next(value)`) | ✅ | | • → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
@@ -56,7 +56,7 @@ Each compiles and runs for its core case but carries a limitation, mostly driven
 | `Number` | ✅ | • `toString(radix)` non-power-of-two fractional trailing-digit divergence; `toPrecision` fixed/exp threshold differs → [Number & Math](NUMBER-MATH.md) |
 | `Function` `.call`/`.apply`/`.bind` | ✅ | • forward args but **ignore `thisArg`** (no method-borrowing); `.bind` scalar-param only; first-class function values, not built-ins → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | `Symbol` | ✅ | • no well-known symbols as runtime values; only `[Symbol.iterator]`/`[Symbol.asyncIterator]` recognized syntactically → [Type system](TYPE-SYSTEM.md) |
-| `RegExp` | ✅ | • `u`/`y`/`d` flags **missing** (accepted, not implemented); `exec` result lacks `index`/`input`/`groups`; unmatched groups become `""` not `null` → [RegExp](REGEXP.md) |
+| `RegExp` | ✅ | • `u`/`d` flags **missing** (accepted, not implemented); `exec` result lacks `index`/`input`/`groups`; unmatched groups become `""` not `null` → [RegExp](REGEXP.md) |
 | `JSON` | ✅ | • statically-typed heterogeneous-array `stringify` **missing** (use a tuple/`any`); function/array `replacer` rejected; `space` must be literal → [JSON](JSON.md) |
 | TypedArrays / `ArrayBuffer` | ✅ | • no `.buffer` back-ref; `resize`/`grow` need `{maxByteLength}`; views don't length-track resize → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md) |
 | `TextDecoder` | ✅ | • UTF-8 only; non-UTF-8 labels throw `RangeError` at construction → [Encoding & text](ENCODING-TEXT.md) |
@@ -75,7 +75,7 @@ Standard built-ins that fit the model and would add value, not yet built.
 | Built-in | Status | Notes |
 |---|---|---|
 | `String.prototype.normalize()` | ❌ | • Deliberately deferred (needs NFC/NFD/NFKC/NFKD tables) → [String methods](STRING-METHODS.md) |
-| `RegExp` `u`/`v`/`y`/`d` flag semantics | ❌ | • Accepted but not implemented → [RegExp](REGEXP.md) |
+| `RegExp` `u`/`v`/`d` flag semantics | ❌ | • Accepted but not implemented → [RegExp](REGEXP.md) |
 | `Iterator` / `AsyncIterator` helpers (`Iterator.prototype.map`/`filter`/`take`/`drop`/…) | ❌ | • No general lazy-iterator protocol exists yet (materialized iteration across Array/Map/Set/`matchAll`) |
 | `Reflect.apply` / `Reflect.construct` | ❌ | • Explicitly missing → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
 | Dynamic `eval` (arbitrary strings) | ❌ | • The opt-in embedded JS engine is not started (only the static-subset eval works) → [Global functions](GLOBAL-FUNCTIONS.md) |

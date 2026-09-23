@@ -2022,16 +2022,63 @@ f(false);
 `, "undefined")
 }
 
-func TestE2EConditionalTypedVarReadsZeroDeterministic(t *testing.T) {
-	// A typed `var` on a not-taken path reads a deterministic zero default
-	// rather than garbage (V1: full TS definite-assignment errors are deferred).
-	assertOutput(t, `
+func TestE2EConditionalTypedVarReadsUndefined(t *testing.T) {
+	// A typed `var` on a not-taken path reads `undefined` — the JS hoisted
+	// binding — not its type's zero (ADR-01057; previously `0`). Every scalar,
+	// string, object and array shape; `typeof`, `===`, narrowing and a return
+	// all see the absence. Both lanes. Matches Node line for line.
+	src := `
 function f(cond: boolean): void {
-  if (cond) { var r = 42; }
-  console.log(r);
+  if (cond) { var r = 42; var s = "s"; var b = true; var o = { x: 1 }; var a = [1, 2]; }
+  console.log(r, s, b, o, a);
+  console.log(typeof r, typeof s, typeof b, typeof o, typeof a);
+  console.log(r === undefined, s === undefined, a === undefined);
+  if (r !== undefined) console.log(r + 1);
 }
 f(false);
-`, "0")
+f(true);
+function g() {
+  if (false) { var q = 3; }
+  return q;
+}
+console.log(g(), typeof g());
+do { var d = 1; break; var e = "x"; } while (0);
+console.log(d, e, typeof e);
+`
+	want := "undefined undefined undefined undefined undefined\n" +
+		"undefined undefined undefined undefined undefined\n" +
+		"true true true\n" +
+		"42 s true { x: 1 } [ 1, 2 ]\n" +
+		"number string boolean object object\n" +
+		"false false false\n" +
+		"43\n" +
+		"undefined undefined\n" +
+		"1 undefined undefined"
+	assertOutput(t, src, want)
+	assertOutputCompatJS(t, src, want)
+}
+
+func TestE2EHoistedVarLoopAndSwitchShapes(t *testing.T) {
+	// A `for` init `var` is not widened (it runs whenever the loop is reached);
+	// a `var` in a loop body, `while`, `switch` case or `try` is. A `var`
+	// re-read inside its own loop body (`acc ?? 0`) sees its previous value.
+	assertOutput(t, `
+function h(c: boolean) {
+  for (var i = 0; i < 2; i++) { var k = i * 2; }
+  console.log(i, k);
+  while (c) { var w = "w"; break; }
+  console.log(w);
+  switch (c ? 1 : 2) { case 1: var sw = 9; break; }
+  console.log(sw);
+  var cnt = 0;
+  for (var j = 0; j < 3; j++) { var acc = (acc ?? 0) + j; cnt += j; }
+  console.log(acc, cnt);
+  var fn = () => { if (c) { var inner = 5; } return inner; };
+  console.log(fn());
+}
+h(true);
+h(false);
+`, "2 2\nw\n9\n3 3\n5\n2 2\nundefined\nundefined\n3 3\nundefined")
 }
 
 func TestE2EBlockScopedLetRedeclarationRejected(t *testing.T) {
@@ -2261,8 +2308,8 @@ outer();
 func TestE2EDefiniteAssignConditionalVarAllowed(t *testing.T) {
 	// ADR-00454 policy revision: `var` has no TDZ in JS (hoisted,
 	// undefined-initialized), so a maybe-unassigned var read is legal and
-	// yields the deterministic zero default; only `let`/`const` keep
-	// definite-assignment enforcement.
+	// yields `undefined` (ADR-01057; the deterministic zero default before
+	// that); only `let`/`const` keep definite-assignment enforcement.
 	assertOutput(t, `
 function f(c: boolean): void {
   if (c) { var r = 42; }
@@ -2270,7 +2317,7 @@ function f(c: boolean): void {
 }
 f(false);
 f(true);
-`, "0\n42")
+`, "undefined\n42")
 }
 
 func TestE2EDefiniteAssignTypedLetNoInitRejected(t *testing.T) {

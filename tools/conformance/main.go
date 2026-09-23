@@ -29,7 +29,7 @@ import (
 
 	"KlainMainLang/codegen/llvm"
 	"KlainMainLang/internal/scratch"
-	"KlainMainLang/parser"
+	"KlainMainLang/resolver"
 )
 
 // frontmatter holds the subset of a Test262 file's /*--- ... ---*/ YAML
@@ -56,7 +56,7 @@ var (
 	// file-position prefix (the per-worker temp scratch file the front-end
 	// read) so the reason buckets by message and doesn't leak the local
 	// machine's directory layout into the report.
-	reFilePosPrefix = regexp.MustCompile(`^/[\w.\-/]+:\s*\d+:\d+:\s*`)
+	reFilePosPrefix = regexp.MustCompile(`^(?:/[\w.\-/]+|[A-Za-z]:[\\/][^:]*):\s*\d+:\d+:\s*`)
 	// reScratchPrefix strips a clang error's leading `…/w<id>.ll:line:col: `
 	// prefix — the per-worker scratch module path (now under a per-process
 	// `run-<pid>/` subdirectory). Bucketing by the clang *message* keeps the
@@ -157,6 +157,12 @@ func inScope(fm frontmatter, category string) bool {
 // can't wedge the whole run. Generous on purpose — it is a hang backstop, not a
 // performance gate.
 const codegenTimeout = 30 * time.Second
+
+// clangCommitBudget is the memory reserved per worker when deriving the
+// default worker count: a `clang -O2` over an emitted module with the
+// runtimes linked in peaks well under 1 GiB; 1.5 GiB leaves the run phase
+// and the runner itself their share.
+const clangCommitBudget = 1536 << 20
 
 // laneCompat is the emitter compat mode for the lane currently running
 // ("" == strict, "js" == -compat=js) — a package global, like regexModeFlag,
@@ -300,7 +306,24 @@ func main() {
 	if defaultWorkers < 1 {
 		defaultWorkers = 1
 	}
-	workers := flag.Int("workers", defaultWorkers, "parallel workers")
+	// Memory is the other ceiling: each worker is a `clang -O2` over a
+	// runtime-laden module, and when the OS runs out of commit charge clang
+	// itself dies mid-compile — which the report then counts as an invalid-IR
+	// "clang" failure that no `.ll` file reproduces (ADR-01060). Budget one
+	// worker per clangCommitBudget of what the OS says it can still hand out.
+	memWorkers := 0
+	if avail := availableCommitBytes(); avail > 0 {
+		memWorkers = int(avail / clangCommitBudget)
+		if memWorkers < 1 {
+			memWorkers = 1
+		}
+		if memWorkers < defaultWorkers {
+			fmt.Fprintf(os.Stderr, "workers: %d by CPU, but only %.1f GiB of commit is available — defaulting to %d (override with -workers)\n",
+				defaultWorkers, float64(avail)/(1<<30), memWorkers)
+			defaultWorkers = memWorkers
+		}
+	}
+	workers := flag.Int("workers", defaultWorkers, "parallel workers (default: CPUs-2, capped by available memory at ~1.5 GiB per worker)")
 	limit := flag.Int("limit", 0, "stop after N files (0 = no limit) — for smoke-testing the harness itself")
 	// The flakiness is fixed by the worker headroom above, not by the timeout —
 	// so this stays 5s, the value the whole Test262 baseline was measured at (a
@@ -463,6 +486,11 @@ func main() {
 		outPath := reportPath("CONFORMANCE-RESULTS.md")
 		if *out != "" && *compatFlag != "both" {
 			outPath = *out
+		} else if partialRun {
+			// A -limit/-category smoke run must never overwrite the committed
+			// full-corpus report (a 1-file probe once did — ADR-01060): it lands
+			// in the work dir unless -out says otherwise.
+			outPath = filepath.Join(*workDir, "CONFORMANCE-RESULTS-"+laneLabel()+".md")
 		}
 		if err := writeReport(outPath, all); err != nil {
 			fatal("writing report: %v", err)
@@ -724,7 +752,20 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 			}
 			cgCh <- out
 		}()
-		prog, perr := parser.Parse(full)
+		// The assembled harness+test goes through the same front end as the
+		// CLI — the resolver, not a bare parser.Parse — so the run measures the
+		// shipped pipeline: the per-file `__kml_modN` rename of top-level
+		// declarations (a test's `function truncate()`/`write()`/`stat()` is
+		// otherwise emitted under its bare name and collides with the C
+		// symbol of the same name at link time, mis-bucketed as invalid IR)
+		// and the resolver's early errors. The resolver reads from disk, so
+		// the source is staged as this worker's own file in the workdir.
+		srcFile := filepath.Join(workDir, fmt.Sprintf("w%d.js", workerID))
+		if werr := os.WriteFile(srcFile, []byte(full), 0644); werr != nil {
+			out.err = werr
+			return
+		}
+		prog, perr := resolver.ResolveProgramWithOptions(srcFile, laneCompat == "js", false)
 		if perr != nil {
 			out.err = perr
 			return

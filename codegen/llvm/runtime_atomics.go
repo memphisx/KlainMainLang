@@ -50,6 +50,7 @@ func (e *Emitter) ensureAtomicsRuntime() {
 	}
 	e.usedAtomicsRuntime = true
 
+	e.ensureFptosiSat()
 	e.ensurePthreadMutexDecls()
 	e.emitGlobal("declare i32 @pthread_cond_init(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @pthread_cond_wait(ptr noundef, ptr noundef)")
@@ -158,7 +159,12 @@ enqueue:
   %%head = load ptr, ptr @__kml_atomics_waiters, align 8
   store ptr %%head, ptr %%nx_p, align 8
   store ptr %%node, ptr @__kml_atomics_waiters, align 8
-  %%hastmo = fcmp oge double %%tmoms, 0.0
+  ; A NaN (also the emitter's "absent") or +Infinity timeout waits without a
+  ; deadline; a negative one clamps to 0 and times out at once (spec
+  ; DoWait: t = max(ToNumber(timeout), 0), NaN → +∞).
+  %%isnum = fcmp ord double %%tmoms, %%tmoms
+  %%finite = fcmp one double %%tmoms, 0x7FF0000000000000
+  %%hastmo = and i1 %%isnum, %%finite
   br i1 %%hastmo, label %%deadline, label %%waitloop
 
 deadline:
@@ -169,8 +175,10 @@ deadline:
   %%nsec_p = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 1
   %%sec = load i64, ptr %%sec_p, align 8
   %%nsec = load i64, ptr %%nsec_p, align 8
-  %%tmons_f = fmul double %%tmoms, 1.0e6
-  %%tmons = fptosi double %%tmons_f to i64
+  %%isneg = fcmp olt double %%tmoms, 0.0
+  %%tmoclamp = select i1 %%isneg, double 0.0, double %%tmoms
+  %%tmons_f = fmul double %%tmoclamp, 1.0e6
+  %%tmons = call i64 @llvm.fptosi.sat.i64.f64(double %%tmons_f)
   %%addsec = sdiv i64 %%tmons, 1000000000
   %%addns = srem i64 %%tmons, 1000000000
   %%ns1 = add i64 %%nsec, %%addns

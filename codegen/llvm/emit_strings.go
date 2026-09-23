@@ -903,10 +903,23 @@ func (e *Emitter) emitStringToUpper(mem *ast.MemberExpression, args []ast.Expres
 	if !isStringTy(objVal.Ty) {
 		return Value{}, fmt.Errorf("%d:%d: toUpperCase is only supported on strings", pos.Line, pos.Col)
 	}
-	e.ensureStringToUpper()
+	return e.emitStringCasemap(objVal, "@__kml_str_toupper"), nil
+}
+
+// emitStringCasemap calls the Unicode case-mapping sidecar (casemap.c): the
+// full Default Case Conversion, replacing the ASCII-only @__kml_toupper/
+// @__kml_tolower the runtime keeps for its own raw buffers. strlen-bounded,
+// like every string boundary: a sidecar-produced string (URL fields, crypto
+// output, Blob.text()) carries no length header, so the header cannot be
+// trusted here — an embedded NUL still ends the string (BACKLOG §0).
+func (e *Emitter) emitStringCasemap(objVal Value, fn string) Value {
+	e.ensureCasemap()
+	e.ensureStrlen()
+	n := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", n, objVal.Ref))
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_toupper(ptr %s)", result, objVal.Ref))
-	return Value{Ref: result, Ty: TypePtr}, nil
+	e.emitInstr(fmt.Sprintf("%s = call ptr %s(ptr %s, i64 %s)", result, fn, objVal.Ref, n))
+	return Value{Ref: result, Ty: TypePtr}
 }
 
 func (e *Emitter) emitStringToLower(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
@@ -920,10 +933,7 @@ func (e *Emitter) emitStringToLower(mem *ast.MemberExpression, args []ast.Expres
 	if !isStringTy(objVal.Ty) {
 		return Value{}, fmt.Errorf("%d:%d: toLowerCase is only supported on strings", pos.Line, pos.Col)
 	}
-	e.ensureStringToLower()
-	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_tolower(ptr %s)", result, objVal.Ref))
-	return Value{Ref: result, Ty: TypePtr}, nil
+	return e.emitStringCasemap(objVal, "@__kml_str_tolower"), nil
 }
 
 func (e *Emitter) emitStringStartsWith(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {

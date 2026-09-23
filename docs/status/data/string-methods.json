@@ -127,15 +127,15 @@
           {
             "feature": "`.toUpperCase()`",
             "status": "implemented",
-            "caveats": [
-              "ASCII-only case mapping (`a`–`z`/`A`–`Z`) — `'café'.toUpperCase()` is `'CAFé'` (Node: `'CAFÉ'`); no Unicode case tables."
+            "notes": [
+              "Full Unicode Default Case Conversion, as Node: simple mappings on every plane plus the SpecialCasing expansions (`'ß'` → `'SS'`, `'ﬁ'` → `'FI'`, `'ᾀ'` → `'ἈΙ'`) ([ADR-01075](../adr/ADR-01075.md))"
             ]
           },
           {
             "feature": "`.toLowerCase()`",
             "status": "implemented",
-            "caveats": [
-              "ASCII-only case mapping — `'Σ'.toLowerCase()` is `'Σ'` (Node: `'σ'`); non-ASCII bytes pass through unchanged."
+            "notes": [
+              "Full Unicode Default Case Conversion including the context-sensitive final sigma (`'ΟΔΥΣΣΕΥΣ'` → `'οδυσσευς'`) and the `'İ'` → `'i̇'` expansion ([ADR-01075](../adr/ADR-01075.md))"
             ]
           },
           {

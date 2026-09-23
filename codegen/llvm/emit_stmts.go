@@ -63,13 +63,32 @@ func (e *Emitter) emitVarRedeclaration(v *ast.VarDeclaration) (bool, error) {
 	if v.Kind != "var" || v.Name == "" {
 		return false, nil
 	}
-	if _, ok := e.varRedeclarationTarget(v.Name); !ok {
+	sym, ok := e.varRedeclarationTarget(v.Name)
+	if !ok {
 		return false, nil
 	}
 	if v.Init == nil {
 		return true, nil // `var x;` again: no effect
 	}
 	pos := v.GetPos()
+	// A promoted top-level `var m = new Map()` / `var s = new Set()` lands here
+	// (the module global already exists), and a plain `emitExpr` of the bare
+	// `new` would build the string-keyed default family while the binding's
+	// type — decided from the annotation or the widening pre-pass — says
+	// otherwise: `s.has(NaN)` then called `__kml_map_num_has` on a str set
+	// (ADR-01061). Hand the binding's own type to the `new` expression.
+	switch init := v.Init.(type) {
+	case *ast.NewMapExpression:
+		if init.KeyType == nil && init.ValType == nil && init.Init == nil && sym.Ty.IsMap {
+			e.newCollectionHint = &sym.Ty
+			defer func() { e.newCollectionHint = nil }()
+		}
+	case *ast.NewSetExpression:
+		if init.ElemType == nil && init.Init == nil && sym.Ty.IsSet {
+			e.newCollectionHint = &sym.Ty
+			defer func() { e.newCollectionHint = nil }()
+		}
+	}
 	_, err := e.emitExpr(ast.NewAssignmentExpression("=", ast.NewIdentifier(v.Name, pos), v.Init, pos))
 	return true, err
 }
@@ -215,6 +234,35 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 	return fmt.Errorf("unknown statement type %T", stmt)
 }
 
+// emitValuelessRet is the `ret` for a `return;` and for falling off the end
+// of a non-async, non-generator body: `undefined` where the return type can
+// carry it (a `T | undefined` scalar's absent aggregate, a null pointer, the
+// `undefined` NaN-box for a dynamic return), else the type-correct zero. The
+// fall-off path used to be an `unreachable` — UB that clang -O2 compiled into
+// an infinite loop when the body did fall off (ADR-01061).
+func (e *Emitter) emitValuelessRet() {
+	rt := e.currentRetType
+	switch {
+	case rt.IR == "void" || rt.IR == "":
+		e.emitTerminator("ret void")
+	case isNullableScalar(rt):
+		e.emitTerminator(fmt.Sprintf("ret %s zeroinitializer", nullableScalarStorageIR(rt)))
+	case rt.IsTuple && rt.TupleByVal:
+		// The aggregate's zero, matching the signature (a plain `ret ptr null`
+		// would be an IR type mismatch against the aggregate return).
+		e.emitTerminator(fmt.Sprintf("ret %s zeroinitializer", rt.StructIR()))
+	case rt.IsDynamic:
+		e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
+	case rt.IsArray:
+		// Arrays return a header pointer (LLVMRetType); null is the absent array.
+		e.emitTerminator("ret ptr null")
+	default:
+		// zeroRef gives the type-correct zero (0.0 for a float `number`,
+		// null for a ptr, false for i1) — a bare `ret double 0` is invalid IR.
+		e.emitTerminator(fmt.Sprintf("ret %s %s", rt.IR, zeroRef(rt)))
+	}
+}
+
 func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	// Generator functions (TDD-00061/ADR-00172): a `return` inside a
 	// generator body never emits an ordinary `ret` at all — it suspends via
@@ -314,22 +362,7 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		if err := e.emitReturnCleanups(); err != nil {
 			return err
 		}
-		switch {
-		case e.currentRetType.IR == "void":
-			e.emitTerminator("ret void")
-		case isNullableScalar(e.currentRetType):
-			// `return;` in a `T | null` function yields undefined -> absent.
-			e.emitTerminator(fmt.Sprintf("ret %s zeroinitializer", nullableScalarStorageIR(e.currentRetType)))
-		case e.currentRetType.IsTuple && e.currentRetType.TupleByVal:
-			// Bare `return;` in a by-value-tuple function: the aggregate's
-			// zero, matching the signature (a plain `ret ptr null` would be
-			// an IR type mismatch against the aggregate return).
-			e.emitTerminator(fmt.Sprintf("ret %s zeroinitializer", e.currentRetType.StructIR()))
-		default:
-			// zeroRef gives the type-correct zero (0.0 for a float `number`,
-			// null for a ptr, false for i1) — a bare `ret double 0` is invalid IR.
-			e.emitTerminator(fmt.Sprintf("ret %s %s", e.currentRetType.IR, zeroRef(e.currentRetType)))
-		}
+		e.emitValuelessRet()
 		return nil
 	}
 
@@ -422,7 +455,11 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 	defer e.pushPendingLabel(endL, incL)()
 
 	if s.Init != nil {
-		if err := e.emitStmt(s.Init); err != nil {
+		savedInit := e.forInitDepth
+		e.forInitDepth = len(e.scopes)
+		err := e.emitStmt(s.Init)
+		e.forInitDepth = savedInit
+		if err != nil {
 			return err
 		}
 	}
@@ -1004,6 +1041,12 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		}
 	}
 
+	// A bare any/unknown iterable (a D1 dynamic array, or a static array boxed
+	// into `any`) iterates by its runtime `length` and index reads (ADR-01077).
+	if objTy := e.inferExprType(s.Iterable); isUnconstrainedDynamic(objTy) {
+		return e.emitForOfAny(s, condL, bodyL, incL, endL)
+	}
+
 	// Resolve the iterable to a data-ptr alloca and a len alloca.
 	// For named variables we reuse their existing allocas (no copy).
 	// For any other expression we evaluate it, extract the aggregate fields,
@@ -1491,9 +1534,19 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 			return fmt.Errorf("%d:%d: for...in requires an object with known fields", s.GetPos().Line, s.GetPos().Col)
 		}
 		// Build a compile-time string[] of field names (ES enumeration order — Node
-		// key order) and materialise it at runtime.
+		// key order) and materialise it at runtime. An object with optional
+		// fields lists only the present ones, as Object.keys does (ADR-01066).
+		ordered := esOrderedFields(fields)
 		var err error
-		keysVal, err = e.emitObjectFieldNames(esOrderedFields(fields), s.GetPos())
+		if hasSkippableField(ordered) {
+			objVal, oerr := e.emitExpr(s.Object)
+			if oerr != nil {
+				return oerr
+			}
+			keysVal, err = e.emitObjectPresentFieldNames(objVal, ordered)
+		} else {
+			keysVal, err = e.emitObjectFieldNames(ordered, s.GetPos())
+		}
 		if err != nil {
 			return err
 		}

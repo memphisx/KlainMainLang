@@ -187,8 +187,9 @@ procunc:
 defunc:
   %msg = call ptr @__kml_caught_unc_msg(i8 %tag2, i64 %pay)
   ; TDD-00098 stage 5: on a worker thread this call does NOT return — it
-  ; reports 'error' + exit(1) to the parent and ends only that thread.
-  call void @__kml_worker_uncaught(ptr %msg)
+  ; reports 'error' (the Error object itself, or null for a non-Error throw,
+  ; plus the rendered message) + exit(1) to the parent and ends only that thread.
+  call void @__kml_worker_uncaught(ptr %msg, ptr %thrownPtr)
   call i32 (ptr, ...) @printf(ptr @.kml_unc_fmt, ptr %msg)
   call void @exit(i32 1)
   unreachable

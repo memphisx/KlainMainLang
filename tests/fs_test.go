@@ -948,12 +948,15 @@ func TestE2EFsPathOps(t *testing.T) {
 	assertOutputImports(t, `
 import * as fs from 'fs'
 import os from 'os'
+import path from 'path'
 const base = os.tmpdir() + '/kmlops-'
 const tmp = fs.mkdtempSync(base)
 console.log(tmp.indexOf(base) === 0)
 fs.writeFileSync(tmp + '/a.txt', 'data')
 fs.symlinkSync(tmp + '/a.txt', tmp + '/link')
-console.log(fs.readlinkSync(tmp + '/link') === tmp + '/a.txt')
+// Windows stores a symlink's target normalized (backslashes) and readlink
+// reports it that way, as Node does (ADR-01030); compare normalized forms.
+console.log(path.normalize(fs.readlinkSync(tmp + '/link')) === path.normalize(tmp + '/a.txt'))
 console.log(fs.lstatSync(tmp + '/link').isSymbolicLink())
 console.log(fs.lstatSync(tmp + '/link').isFile())
 console.log(fs.statSync(tmp + '/link').size)

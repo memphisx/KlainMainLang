@@ -861,3 +861,36 @@ const r = new RegExp("a+", undefined)
 console.log(r.flags === "", r.multiline, r.test("caab"))
 `, "true false true")
 }
+
+// The `y` (sticky) flag (ADR-01062): a match is anchored at `.lastIndex`,
+// `.lastIndex` is honoured when global OR sticky is set, and it advances on
+// success / resets to 0 on failure exactly as for `g`. The flag flows through
+// every matching method. Before this the flag was accepted and ignored.
+func TestE2ERegExpStickyFlag(t *testing.T) {
+	src := `
+const re = /foo/y
+console.log(re.sticky, re.flags, re.global)
+console.log(re.test("barfoo"), re.lastIndex)
+re.lastIndex = 3
+console.log(re.test("barfoo"), re.lastIndex)
+console.log(re.test("barfoo"), re.lastIndex)
+const r2 = new RegExp("a+", "gy")
+console.log("aaba".match(r2))
+const r3 = /b/y
+r3.lastIndex = 1
+const m = r3.exec("abc")
+console.log(m ? m[0] : null, r3.lastIndex)
+console.log("abc".replace(/b/y, "X"), "abc".replace(/a/y, "X"))
+const r4 = /a/y
+r4.lastIndex = 5
+console.log(r4.test("a"), r4.lastIndex)
+console.log("xxabc".search(/abc/y), "abc".search(/abc/y))
+const words = /\w+/y
+let out = ""
+while (words.test("ab cd")) { out += words.lastIndex + ";" }
+console.log(out)
+console.log("a1b2".replaceAll(/\d/gy, "#"), "1a2".replaceAll(/\d/gy, "#"))
+`
+	assertOutput(t, src, "true y false\nfalse 0\ntrue 6\nfalse 0\n[ 'aa' ]\nb 2\nabc Xbc\nfalse 0\n-1 0\n2;\na1b2 #a2")
+	assertSameAsNode(t, src)
+}

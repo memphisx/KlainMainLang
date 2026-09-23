@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"KlainMainLang/ast"
@@ -139,6 +140,8 @@ func buildBinary(t *testing.T, src string) string {
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -148,6 +151,7 @@ func buildBinary(t *testing.T, src string) string {
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
 	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
+	clangArgs = appendOSInfo(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -289,6 +293,30 @@ func appendJSONParseTree(t *testing.T, em *llvm.Emitter, dir string, clangArgs [
 // (__kml_dynjson_* ABI, libc + dtoa) into the clang invocation when the
 // program stringified a dynamic value, mirroring main.go so the test build
 // and the real build can't drift (TDD-00155 Stage 2).
+// appendInspectReduce compiles the util.inspect line-layout C file (ADR-01067)
+// into the clang invocation when the program inspected a structured value,
+// mirroring EmbeddedCSources so the test build path can't drift from the CLI's.
+func appendInspectReduce(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesInspectReduce() {
+		return clangArgs
+	}
+	f := sidecarArg(t, dir, clangArgs, "inspect.c", llvm.InspectReduceSource())
+	return append(clangArgs, f)
+}
+
+// appendCasemap compiles the Unicode case-mapping C file (toUpperCase/
+// toLowerCase) into the clang invocation when the program used either method,
+// mirroring EmbeddedCSources.
+func appendCasemap(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesCasemap() {
+		return clangArgs
+	}
+	f := sidecarArg(t, dir, clangArgs, "casemap.c", llvm.CasemapSource())
+	return append(clangArgs, f)
+}
+
 func appendDynJSON(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
 	t.Helper()
 	if !em.UsesDynJSON() {
@@ -480,6 +508,19 @@ func appendOSHomedirPw(t *testing.T, em *llvm.Emitter, dir string, clangArgs []s
 	return append(clangArgs, pwFile)
 }
 
+// appendOSInfo compiles the host-information C file (os.type/release/…/
+// networkInterfaces, process.env enumeration) into the clang invocation,
+// mirroring EmbeddedCSources.
+func appendOSInfo(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesOSInfo() {
+		return clangArgs
+	}
+	f := sidecarArg(t, dir, clangArgs, "osinfo.c", llvm.OSInfoSource())
+	clangArgs = append(clangArgs, f)
+	return append(clangArgs, llvm.OSInfoLibs()...)
+}
+
 func appendTty(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
 	t.Helper()
 	if !em.UsesTtyShim() {
@@ -554,6 +595,8 @@ func buildBinaryGC(t *testing.T, src string) string {
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -563,6 +606,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
 	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
+	clangArgs = appendOSInfo(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
@@ -639,6 +683,8 @@ func buildBinaryFromFile(t *testing.T, srcFile string) string {
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -648,6 +694,7 @@ func buildBinaryFromFile(t *testing.T, srcFile string) string {
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
 	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
+	clangArgs = appendOSInfo(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs, webviewUsed, wverr := appendWebview(t, em, dir, clangArgs)
@@ -749,6 +796,8 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -758,6 +807,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
 	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
+	clangArgs = appendOSInfo(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
@@ -929,6 +979,8 @@ func buildBinaryASan(t *testing.T, src string) string {
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -938,6 +990,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
 	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
+	clangArgs = appendOSInfo(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -1017,6 +1070,8 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -1026,6 +1081,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
 	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
+	clangArgs = appendOSInfo(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
@@ -1121,6 +1177,8 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -1130,6 +1188,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
 	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
+	clangArgs = appendOSInfo(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -1187,6 +1246,8 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -1196,6 +1257,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
 	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
+	clangArgs = appendOSInfo(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -1283,6 +1345,8 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -1292,6 +1356,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
 	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
+	clangArgs = appendOSInfo(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -1342,6 +1407,8 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -1351,6 +1418,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
 	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
+	clangArgs = appendOSInfo(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -1393,6 +1461,8 @@ func assertOutputWithDecoratorMetadata(t *testing.T, src, want string) {
 	}
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	if out, err := llvm.ClangCommand(clangArgs...).CombinedOutput(); err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
@@ -1433,6 +1503,8 @@ func assertOutputStandardDecorators(t *testing.T, src, want string) {
 	}
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	if out, err := llvm.ClangCommand(clangArgs...).CombinedOutput(); err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
@@ -1510,6 +1582,8 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -1519,6 +1593,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	clangArgs = appendThreadPool(t, em, dir, clangArgs)
 	clangArgs = appendProcMem(t, em, dir, clangArgs)
 	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
+	clangArgs = appendOSInfo(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -1617,6 +1692,104 @@ func compileAndRunCaptureStderr(t *testing.T, src string) (stdout, stderr string
 func assertOutput(t *testing.T, src, want string) {
 	t.Helper()
 	compareLines(t, compileAndRun(t, src), want)
+}
+
+// nodeStripTypesBin returns a node binary that can run TypeScript source
+// directly (`--experimental-strip-types`, Node ≥ 22.6), or skips the test.
+// Memoized: one probe per test binary.
+var nodeStripTypesOnce sync.Once
+var nodeStripTypesPath string
+
+func nodeStripTypesBin(t *testing.T) string {
+	t.Helper()
+	nodeStripTypesOnce.Do(func() {
+		bin, err := exec.LookPath("node")
+		if err != nil {
+			return
+		}
+		dir, err := os.MkdirTemp("", "kml-node-probe")
+		if err != nil {
+			return
+		}
+		defer os.RemoveAll(dir)
+		probe := filepath.Join(dir, "probe.ts")
+		if err := os.WriteFile(probe, []byte("const n: number = 1; console.log(n);\n"), 0644); err != nil {
+			return
+		}
+		out, err := exec.Command(bin, "--experimental-strip-types", "--no-warnings", probe).Output()
+		if err == nil && strings.TrimSpace(string(out)) == "1" {
+			nodeStripTypesPath = bin
+		}
+	})
+	if nodeStripTypesPath == "" {
+		t.Skip("node with --experimental-strip-types not on PATH — skipping Node-identical check")
+	}
+	return nodeStripTypesPath
+}
+
+// runNodeTS runs src (TypeScript, types stripped) under Node and returns its
+// stdout; a non-zero exit is a test failure that shows Node's stderr, since
+// the program is meant to be a valid, terminating Node program.
+func runNodeTS(t *testing.T, src string) string {
+	t.Helper()
+	bin := nodeStripTypesBin(t)
+	dir := tempDir(t)
+	file := filepath.Join(dir, "prog.ts")
+	if err := os.WriteFile(file, []byte(src), 0644); err != nil {
+		t.Fatalf("write prog.ts: %v", err)
+	}
+	cmd := exec.Command(bin, "--experimental-strip-types", "--no-warnings", file)
+	cmd.Dir = dir
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	raw, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("node run failed: %v\n%s", err, stderr.String())
+	}
+	return strings.TrimRight(string(raw), "\n")
+}
+
+// assertSameAsNode is the faithfulness check in one line: the SAME TypeScript
+// program is compiled and run here and run under Node (types stripped), and
+// their stdout must be identical. Node is the oracle, so the expected output
+// is never typed by hand (ADR-01060). Skips when Node isn't available; use
+// assertOutput next to it for the CI lanes without Node when the expectation
+// must also be pinned in the source.
+func assertSameAsNode(t *testing.T, src string) {
+	t.Helper()
+	theirs := runNodeTS(t, src)
+	ours := compileAndRun(t, src)
+	if ours != theirs {
+		t.Fatalf("output differs from node:\n--- ours ---\n%s\n--- node ---\n%s", ours, theirs)
+	}
+	compareLines(t, ours, theirs)
+}
+
+// assertSameAsNodeImports is assertSameAsNode for source using a real `import`
+// statement (the resolver path, see buildBinaryImports).
+func assertSameAsNodeImports(t *testing.T, src string) {
+	t.Helper()
+	theirs := runNodeTS(t, src)
+	ours := compileAndRunImports(t, src)
+	if ours != theirs {
+		t.Fatalf("output differs from node:\n--- ours ---\n%s\n--- node ---\n%s", ours, theirs)
+	}
+	compareLines(t, ours, theirs)
+}
+
+// assertSameAsNodeCompatJS is assertSameAsNode under -compat=js.
+func assertSameAsNodeCompatJS(t *testing.T, src string) {
+	t.Helper()
+	theirs := runNodeTS(t, src)
+	binFile := buildBinaryCompatJS(t, src)
+	raw, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	ours := strings.TrimRight(string(raw), "\n")
+	if ours != theirs {
+		t.Fatalf("output differs from node:\n--- ours ---\n%s\n--- node ---\n%s", ours, theirs)
+	}
 }
 
 // compareLines compares got against want line by line so individual

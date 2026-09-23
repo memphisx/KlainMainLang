@@ -91,8 +91,18 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		}
 		return e.emitNewArraySizedAggregate(ex, e.resolveType(ex.ElemType))
 	case *ast.NewMapExpression:
+		// A redeclared top-level `var m = new Map()` passes the promoted
+		// binding's K/V down (emitVarRedeclaration, ADR-01061).
+		if h := e.newCollectionHint; h != nil && h.IsMap && h.MapKey != nil && h.MapVal != nil {
+			e.newCollectionHint = nil
+			return e.emitNewMapValueTyped(ex, *h.MapKey, *h.MapVal)
+		}
 		return e.emitNewMapValue(ex)
 	case *ast.NewSetExpression:
+		if h := e.newCollectionHint; h != nil && h.IsSet && h.MapKey != nil {
+			e.newCollectionHint = nil
+			return e.emitNewSetValueTyped(ex, h.MapKey)
+		}
 		return e.emitNewSetValue(ex)
 	case *ast.NewWeakMapExpression:
 		return e.emitNewWeakMapValue(ex)

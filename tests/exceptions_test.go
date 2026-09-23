@@ -491,3 +491,30 @@ try { req(); } catch (e) {
 }
 `, "HttpError 404: no forecast\ntrue")
 }
+
+// A local written inside a `try` body must be visible in the catch and after
+// it (ADR-01057). `try` is setjmp/longjmp, and the catch block is a CFG
+// successor of the setjmp call rather than of the try body, so LLVM used to
+// forward the value the slot held *at the setjmp* into the catch — `x` read
+// 0 and `y` read undefined. Every local touched in a try/catch/finally is now
+// pinned as escaped memory. Matches Node.
+func TestE2ETryBodyWriteSurvivesThrow(t *testing.T) {
+	assertOutput(t, `
+function h() {
+  let x = 0;
+  let y: number | undefined = undefined;
+  let s = "a";
+  let arr = [1];
+  try { x = 1; y = 2; s = "b"; arr = [2, 3]; throw new Error("e"); } catch (e) { console.log("catch", x, y, s, arr); }
+  console.log("after", x, y, s, arr);
+  try { var tt = 1; throw new Error("e"); } catch (e) { console.log("catch tt", tt); }
+  console.log("after tt", tt);
+  let n = 0;
+  for (let i = 0; i < 3; i++) {
+    try { n += 10; if (i === 1) throw new Error("mid"); n += 1; } catch (e) { n += 100; } finally { n += 1000; }
+  }
+  console.log(n);
+}
+h();
+`, "catch 1 2 b [ 2, 3 ]\nafter 1 2 b [ 2, 3 ]\ncatch tt 1\nafter tt 1\n3132")
+}

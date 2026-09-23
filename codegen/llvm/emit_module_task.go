@@ -51,6 +51,12 @@ func moduleTaskStackBytes() int {
 // programMayWait, so a node kind that gains a child expression later is not
 // silently missed; it stops at every function-like and class node.
 func programHasTopLevelAwait(prog *ast.Program) bool {
+	return stmtsHaveTopLevelAwait(prog.Body)
+}
+
+// stmtsHaveTopLevelAwait is programHasTopLevelAwait over a module's statement
+// list — the entry program's body or a worker module's (TDD-00224 Stage 2).
+func stmtsHaveTopLevelAwait(body []ast.Statement) bool {
 	found := false
 	seen := map[uintptr]bool{}
 	var walk func(v reflect.Value)
@@ -102,7 +108,7 @@ func programHasTopLevelAwait(prog *ast.Program) bool {
 			}
 		}
 	}
-	walk(reflect.ValueOf(prog.Body))
+	walk(reflect.ValueOf(body))
 	return found
 }
 
@@ -116,6 +122,9 @@ func (e *Emitter) ensureModuleTaskRuntime() {
 	e.ensureTaskRuntime()
 	e.emitGlobal("@__kml_module_task = internal thread_local global ptr null, align 8")
 	e.emitGlobal("@__kml_module_wants_loop = internal thread_local global i1 false, align 1")
+	// The module promise of a worker module task, for the worker thread's
+	// unsettled check (the entry program keeps its promise in a main() register).
+	e.emitGlobal("@__kml_module_promise = internal thread_local global ptr null, align 8")
 
 	// No catch-all (unlike @__kml_task_trampoline): the task's jmpbuf stack is
 	// empty at entry, so an uncaught throw takes the process-level uncaught path.
@@ -209,9 +218,17 @@ func (e *Emitter) endModuleBody(s *moduleBodySplit) string {
 	e.ensureModuleTaskRuntime()
 	prom := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_module_promise, align 8", prom))
+	// An island's top-level throw rejects its module promise — and with it the
+	// importer's import() (TDD-00225) — so its task keeps the ordinary
+	// trampoline's catch-all; the entry program's throw is an uncaught exception.
+	tramp := "@__kml_module_trampoline"
+	if e.islandHash != "" {
+		tramp = "@__kml_task_trampoline"
+	}
 	t := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_spawn_task_ex(ptr @__kml_module_body, ptr null, ptr %s, i64 %d, ptr @__kml_module_trampoline)",
-		t, prom, moduleTaskStackBytes()))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_spawn_task_ex(ptr @__kml_module_body, ptr null, ptr %s, i64 %d, ptr %s)",
+		t, prom, moduleTaskStackBytes(), tramp))
 	return prom
 }
 

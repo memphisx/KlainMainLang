@@ -121,6 +121,16 @@ type Emitter struct {
 	// restored) per function body, exactly like e.allocas. See capturedLocalNames
 	// and boxHoistedCapture.
 	hoistedCaptures map[string]bool
+	// forInitDepth is len(e.scopes) while a `for` statement's init clause is
+	// emitted (0 otherwise). The init runs whenever the loop statement itself
+	// is reached, so a `var` there is as definitely-initialized as one in the
+	// enclosing statement list and must not be widened by hoistedVarMaySkip.
+	// Keyed on the depth rather than a bool so a closure body nested in the
+	// init (fresh single-frame scope stack) is unaffected.
+	forInitDepth int
+	// tryDepth > 0 while a try/catch/finally body is emitted; every local
+	// looked up there is pinned across the setjmp (pinSlotAcrossSetjmp).
+	tryDepth int
 	// widenedBindings names the untyped scalar bindings in the current scope
 	// that -compat=js must back with the any-box from declaration because they
 	// hold two or more distinct scalar kinds over their lifetime (crossType-
@@ -137,17 +147,24 @@ type Emitter struct {
 	// (TDD-00211) — so heterogeneous keys widen to an `any`-keyed map instead of
 	// riding the blind string-key/number-value default. Saved/restored per body
 	// like emptyArrayElems.
-	emptyMapKV            map[string]mapKV
+	emptyMapKV map[string]mapKV
+	// newCollectionHint carries a redeclared `var`'s already-decided Map/Set
+	// type into the bare `new Map()`/`new Set()` its initializer emits
+	// (emitVarRedeclaration → emitExpr, ADR-01061). Consumed on first use.
+	newCollectionHint     *Type
 	regCtr                int
 	labelCtr              int
 	strConsts             map[string]string // Go string value → @.s<n> name
 	strIdx                int
+	arrLitIdx             int             // @.arrlit<n> static array-literal images (ADR-01064)
 	linkLibs              map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
 	memMode               string          // "" (== "manual", the default) or "gc" — see SetMemMode
 	dynamicImportMode     string          // "eager" (default) or "lazy" — see SetDynamicImportMode (TDD-00055/TDD-00056)
 	usesDynamicImport     bool            // set when an import(...) call is emitted
 	islandHash            string          // non-empty when compiling a shared-library island (TDD-00056): its stable hash
 	dynImportShimDeclared bool            // guards the one-time @__kml_dynimport_run declaration
+	usedDynImportWatch    bool            // the import() watcher runtime + loop hooks are emitted (TDD-00225)
+	importSettleCtr       int             // per-site @__kml_dynimport_settle_<n> counter
 	regexMode             string          // "" (== the default, resolving to the highest implemented ES stage) or "pcre"/"es-ascii"/"es-unicode" — see SetRegexMode / TDD-00067
 	bigintBackend         string          // "" (== "libtommath", the default) or "gmp" — the __kml_bigint_* ABI implementation to link. See SetBigIntBackend / TDD-00074
 	compatMode            string          // "" (== "strict", the default) or "js" — the whole-program compatibility axis. See SetCompatMode / TDD-00075
@@ -303,6 +320,14 @@ type Emitter struct {
 	// resolveTypeDepth bounds resolveType recursion so a self-referential type
 	// bails to a fallback instead of overflowing the stack.
 	resolveTypeDepth int
+	// typeParamScope maps a generic declaration's type-parameter names to the
+	// concrete types of the instantiation being built (its signature, body,
+	// and return-type inference). resolveType consults it first, so a type
+	// parameter is substituted at *any* nesting depth — `Promise<T>`,
+	// `Map<string, T>`, `T[][]`, `(x: T) => T` — not just the bare-T / T[]
+	// parameter positions substituteGenericType handles on its own. Pushed
+	// and popped by withTypeParamScope; nil outside any instantiation.
+	typeParamScope map[string]Type
 	// enclosingCapturables (TDD-00129 Stage 1) is a stack parallel to
 	// nestedFuncScopes: one frame per enclosing function/closure body, holding
 	// the names of that body's *capturable* bindings — its parameters plus its
@@ -366,6 +391,13 @@ type Emitter struct {
 	usedAnyEq           bool
 	usedDynObj          bool
 	usedDynArr          bool
+	usedArrLitRows      bool         // __kml_arr_lit_rows (ADR-01064)
+	usedInspectReduce   bool         // inspect_reduce.c (ADR-01067)
+	usedCasemap         bool         // casemap.c — Unicode toUpperCase/toLowerCase
+	usedOSInfo          bool         // osinfo.c — os.type/release/…/networkInterfaces, process.env enumeration
+	usedOSInfoBags      bool         // the IR bag builders over osinfo.c (process.env value, networkInterfaces)
+	usedDynObjEntries   bool         // @__kml_dynobj_entries — Object.entries/values on a dynamic object
+	closureBoxOnEntry   map[int]bool // the closure being emitted: params annotated `any` whose ABI is the hint type (boxed on entry, ADR-01080)
 	usedDynJSONFromNode bool
 	usedDynJSONC        bool
 	usedNanBox          bool
@@ -436,6 +468,7 @@ type Emitter struct {
 	usedChildProcRuntime   bool
 	usedCPExitWake         bool // runtime_childprocess_exit.go: the child-exit loop wake
 	usedGCSBCur            bool // @__kml_gc_sb_cur declared (Windows gc mode, runtime_worker.go)
+	usedGCSBGet            bool // @__kml_gc_get_sb defined (gc mode + Workers, runtime_worker.go gcSBLoad)
 	usedLoopTurn           bool // emitted code references __kml_loop_turn/__kml_top_await (runtime_loop_turn.go)
 	usedLoopTurnDefs       bool
 	moduleTask             bool // the entry program has a top-level await: its module body is a coroutine task (TDD-00224)
@@ -733,6 +766,9 @@ type Emitter struct {
 	usedFsPathOps                bool
 	usedFsRm                     bool
 	usedFsFdOps                  bool
+	usedFsFchmod                 bool // __kml_fs_fchmod (fs.fchmodSync)
+	usedFsStatfs                 bool // __kml_fs_statfs_checked (fs.statfsSync)
+	usedUmask                    bool // umask decl (process.umask)
 	usedOpenDecl                 bool
 	usedFsUtimes                 bool
 	usedFsRmdir                  bool
@@ -890,6 +926,7 @@ type Emitter struct {
 	dgramMsgHdrAdapterEmitted bool
 	generatorBodyCtr          int
 	usedMathFuncs             bool
+	usedFptosiSat             bool
 	usedFloatMinMax           bool
 	usedToNumber              bool
 	usedBswap16               bool
@@ -1330,6 +1367,9 @@ func (e *Emitter) popScope() {
 func (e *Emitter) define(name string, sym Symbol) {
 	e.scopes[len(e.scopes)-1].syms[name] = sym
 	e.inferMemoDefined()
+	if e.tryDepth > 0 {
+		e.pinSlotAcrossSetjmp(sym.Ptr)
+	}
 }
 
 // promoteVarToFuncScope moves a just-defined `var` binding from the innermost
@@ -1350,6 +1390,50 @@ func (e *Emitter) define(name string, sym Symbol) {
 // than yielding `undefined` (typed `var`) — matching the TypeScript
 // definite-assignment view rather than sloppy-JS hoist-to-undefined. See
 // ADR-00210 / TDD-00070.
+// pinSlotAcrossSetjmp makes a local's alloca visible to LLVM as escaped
+// memory, so its value survives a `try` (ADR-01057). `try` is setjmp/longjmp
+// (emitTry): the catch block is a CFG successor of the setjmp call, not of the
+// try body, so for a non-escaping alloca SSA promotion forwards the value the
+// slot held *at the setjmp* into the catch — `let x = 0; try { x = 1; throw …
+// } catch { x }` read 0. Once the address has been handed to an opaque inline
+// asm (the classic `asm volatile("" :: "r"(p) : "memory")` escape) every call
+// — the setjmp, the throw — may read or write it, so the try body's store is
+// materialized and the catch reloads it. The pin goes into the entry block,
+// which dominates everything, next to the alloca; only real allocas of the
+// current function qualify (a heap-boxed capture cell is a malloc'd pointer,
+// already opaque). Called from lookup for every local touched inside a
+// try/catch/finally body; cost is confined to those slots.
+func (e *Emitter) pinSlotAcrossSetjmp(ptr string) {
+	if ptr == "" || !strings.HasPrefix(ptr, "%") {
+		return
+	}
+	allocas := e.allocas.String()
+	if !strings.Contains(allocas, "  "+ptr+" = alloca ") {
+		return
+	}
+	pin := fmt.Sprintf("call void asm sideeffect \"\", \"r,~{memory}\"(ptr %s)", ptr)
+	if strings.Contains(allocas, pin) {
+		return
+	}
+	e.emitAlloca(pin)
+}
+
+// hoistedVarMaySkip reports whether the `var` declaration being emitted can be
+// skipped on some path to a later read of its (function-scoped) binding: it
+// sits in a nested block — an `if`/loop/`switch`/`try` body — rather than
+// the function's own statement list, or it is dead code after a terminator
+// (`break; var b = "x"`). Such a binding reads `undefined` on that path in
+// JS, so emitVarDecl widens it to `T | undefined` (ADR-01057). A `for` init
+// clause is exempt (see forInitDepth). The hand-off is deliberately
+// syntactic: a nested-block `var` read only inside its block pays a
+// presence bit it never needs, which is a cost, not a divergence.
+func (e *Emitter) hoistedVarMaySkip() bool {
+	if e.blockDone {
+		return true
+	}
+	return len(e.scopes) > 1 && len(e.scopes) != e.forInitDepth
+}
+
 func (e *Emitter) promoteVarToFuncScope(name string) {
 	if len(e.scopes) <= 1 {
 		return
@@ -1364,6 +1448,9 @@ func (e *Emitter) promoteVarToFuncScope(name string) {
 func (e *Emitter) lookup(name string) (Symbol, bool) {
 	for i := len(e.scopes) - 1; i >= 0; i-- {
 		if s, ok := e.scopes[i].syms[name]; ok {
+			if e.tryDepth > 0 {
+				e.pinSlotAcrossSetjmp(s.Ptr)
+			}
 			return s, true
 		}
 	}
@@ -1731,6 +1818,39 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	if e.resolveTypeDepth > 300 {
 		return TypePtr
 	}
+	// A type parameter of the generic instantiation being built (see
+	// typeParamScope): `T` anywhere inside `Promise<T>` / `T[][]` / a closure
+	// type substitutes its concrete type. Only a bare name matches — a
+	// user-generic `T<…>` or `T[]` (ElemType set) still resolves structurally
+	// below, recursing back here for the inner `T`.
+	if e.typeParamScope != nil && ta.ElemType == nil && len(ta.TypeArgs) == 0 && ta.UnionMembers == nil &&
+		ta.IntersectionMembers == nil && !ta.IsFuncType && !ta.IsTypeof {
+		if concrete, ok := e.typeParamScope[ta.Name]; ok {
+			if ta.Nullable {
+				concrete.Nullable = true
+				concrete.IsUndefined = ta.Undefined
+			}
+			return concrete
+		}
+		// `T[]` / `T[][]` spelled as one suffixed name (the parser's array
+		// shorthand keeps the brackets in Name): peel one level and recurse.
+		if base, isArr := strings.CutSuffix(ta.Name, "[]"); isArr {
+			root := base
+			for strings.HasSuffix(root, "[]") {
+				root = strings.TrimSuffix(root, "[]")
+			}
+			if _, ok := e.typeParamScope[root]; ok {
+				inner := *ta
+				inner.Name = base
+				inner.Nullable, inner.Undefined = false, false
+				t := ArrayOf(e.resolveType(&inner))
+				if ta.Nullable {
+					t.Nullable, t.IsUndefined = true, ta.Undefined
+				}
+				return t
+			}
+		}
+	}
 	// `typeof value` type query (ADR-00389): resolve the referenced value's type,
 	// then walk any trailing member path (`typeof a.b`).
 	if ta.IsTypeof {
@@ -2008,7 +2128,11 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		for i, et := range ta.TupleElems {
 			elems[i] = e.resolveType(et)
 		}
-		return TupleType(elems)
+		ty := TupleType(elems)
+		if ta.Nullable { // `[T, U] | null` / `| undefined` (ADR-01063)
+			ty.Nullable, ty.IsUndefined = true, ta.Undefined
+		}
+		return ty
 	}
 	if ta.ElemType != nil {
 		return ArrayOf(e.resolveType(ta.ElemType))
@@ -2032,7 +2156,11 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 			}
 			fields[i] = Field{Name: af.Name, Ty: fty}
 		}
-		return ObjectType(fields)
+		ty := ObjectType(fields)
+		if ta.Nullable { // `{ … } | null` / `| undefined` (ADR-01063)
+			ty.Nullable, ty.IsUndefined = true, ta.Undefined
+		}
+		return ty
 	}
 
 	// Named type: check interface registry before falling back to built-ins.
@@ -2199,7 +2327,9 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 
 	// TDD-00224: known before any emission — a blocking event-loop call emitted in
 	// a function body (Pass 2) already needs to know the module body is a task.
-	e.moduleTask = e.islandHash == "" && programHasTopLevelAwait(prog)
+	// An island too (TDD-00225): its main() spawns the task and returns; the
+	// importer's loop drives it through the island's poll export.
+	e.moduleTask = programHasTopLevelAwait(prog)
 
 	// TDD-00158: whether the program registers a Node HTTP `'upgrade'` handler
 	// (`server.on('upgrade', …)`) anywhere. Decided up front by a whole-program
@@ -2308,6 +2438,9 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	}
 
 	// Pass 1: register all top-level function signatures so calls work regardless of order.
+	// Signature inference may meet a top-level binding that is not yet a module
+	// global (Pass 1.7); it needs the name set to type it from its declaration.
+	e.collectTopLevelNames(prog)
 	if err := e.registerFunctions(prog); err != nil {
 		return "", err
 	}
@@ -2561,6 +2694,17 @@ entry:
 	if modSplit != nil {
 		modProm = e.endModuleBody(modSplit)
 	}
+	islandTask := modProm != "" && e.islandHash != ""
+	if islandTask {
+		// TDD-00225: an island's main() ends right after the spawn — the body ran
+		// to its first await; no loop of its own, no unsettled exit. The importer
+		// polls the island's loop (emitIslandGlue) and settles its import() from
+		// @__kml_module_promise.
+		e.emitTerminator("ret i32 0")
+		modProm = ""
+		e.ensureHTTPRuntime() // the island's own loop, turned by its poll export
+		e.ensureLoopTurn()    // @__kml_loop_oneshot / _nowait / _idle
+	}
 	// If the program ever constructed an EventSource, prefer the full
 	// __kml_event_loop_run() over the narrower __kml_timer_drain() below —
 	// it already generalizes plain timer draining (see its own doc comment
@@ -2639,9 +2783,13 @@ entry:
 	// links — its sockets always have a null SSL*, so the stubs are never run.
 	e.emitTLSNetSymbols()
 	// TDD-00098 stage 5: @__kml_throw's uncaught path references
-	// @__kml_worker_uncaught unconditionally; no-op stub without workers.
+	// @__kml_worker_uncaught unconditionally, and the task runtime's swap sites
+	// reference @__kml_worker_abort_check; no-op stubs without workers.
 	if e.usedExceptionHelpers && !e.usedWorkerRuntime {
-		e.emitGlobal("define void @__kml_worker_uncaught(ptr %msg) {\nentry:\n  ret void\n}")
+		e.emitGlobal("define void @__kml_worker_uncaught(ptr %msg, ptr %err) {\nentry:\n  ret void\n}")
+	}
+	if e.usedTaskRuntime && !e.usedWorkerRuntime {
+		e.emitGlobal("define void @__kml_worker_abort_check() {\nentry:\n  ret void\n}")
 	}
 	// TDD-00098: __kml_worker_spawn calls this before the first
 	// pthread_create — curl_global_init is not thread-safe and must run
@@ -2832,6 +2980,7 @@ func (e *Emitter) emitIslandGlue(prog *ast.Program, out *strings.Builder) {
 	out.WriteString("  %ig = call i32 @main(i32 0, ptr null)\n")
 	out.WriteString("  br label %skip\n")
 	out.WriteString("skip:\n  ret void\n}\n")
+	e.emitIslandTaskGlue(out)
 
 	publics := make([]string, 0, len(prog.EntryExportMangled))
 	for p := range prog.EntryExportMangled {

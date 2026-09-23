@@ -61,6 +61,34 @@ func (e *Emitter) gcSBStore(val string) string {
 	return fmt.Sprintf("store ptr %s, ptr @GC_stackbottom, align 8", val)
 }
 
+// gcSBLoad returns the IR statement that reads the CURRENT thread's GC stack
+// bottom into reg — the value a later gcSBStore(reg) puts back. Single-threaded
+// that is @GC_stackbottom, the variable gcSBStore writes; under Worker threads
+// the per-thread record @__kml_gc_set_sb writes, read back through
+// GC_get_my_stackbottom. On Windows gcSBStore ignores its operand (it reads the
+// TEB), so any defined value serves.
+func (e *Emitter) gcSBLoad(reg string) string {
+	if targetGOOS() == "windows" {
+		return fmt.Sprintf("%s = load ptr, ptr @__kml_gc_orig_stackbottom, align 8", reg)
+	}
+	if e.hasWorkers {
+		if !e.usedGCSBGet {
+			e.usedGCSBGet = true
+			e.emitGlobal("declare ptr @GC_get_my_stackbottom(ptr noundef)")
+			e.emitGlobal(`define ptr @__kml_gc_get_sb() {
+entry:
+  %sb = alloca [2 x ptr], align 8
+  call ptr @GC_get_my_stackbottom(ptr %sb)
+  %slot = getelementptr [2 x ptr], ptr %sb, i32 0, i32 0
+  %mem = load ptr, ptr %slot, align 8
+  ret ptr %mem
+}`)
+		}
+		return fmt.Sprintf("%s = call ptr @__kml_gc_get_sb()", reg)
+	}
+	return fmt.Sprintf("%s = load ptr, ptr @GC_stackbottom, align 8", reg)
+}
+
 // ensureGCStackBottomCurrent declares @__kml_gc_sb_cur (gcshim.c, Windows only —
 // see gcSBStore): record the stack this code is running on, as the TEB reports
 // it, as the current thread's GC stack base.
@@ -265,7 +293,10 @@ entry:%s
   %%entry_p = getelementptr %s, ptr %%ctrl, i32 0, i32 14
   %%entryfn = load ptr, ptr %%entry_p, align 8
   call void %%entryfn()
-  call void @__kml_event_loop_run()
+  ; @__kml_worker_run_loop (emitWorkerModules): the loop, plus — for a worker
+  ; module that is a module task (TDD-00224 Stage 2) — the resume-and-loop-again
+  ; hand-off and the unsettled-top-level-await exit (code 13).
+  call void @__kml_worker_run_loop(ptr %%ctrl)
   ; The exited flag is deliberately NOT set here: the parent sets it when it
   ; processes the exit envelope. Setting it from this thread would race the
   ; parent's keepalive check — the parent's loop could exit (and the process
@@ -559,8 +590,9 @@ termenv:
 
 noterm:
   ; kind 3: uncaught exception on the worker thread (TDD-00098 stage 5) —
-  ; w0 is the (heap) error-message string. With an 'error' listener, dispatch
-  ; it; without one, print and kill the process, Node's own default.
+  ; w0 is the thrown Error object (null for a non-Error throw), w1 the
+  ; rendered message. With an 'error' listener, dispatch the Error object;
+  ; without one, print the message and kill the process, Node's own default.
   %%iserr = icmp eq i64 %%kind, 3
   br i1 %%iserr, label %%errenv, label %%loop
 
@@ -575,11 +607,13 @@ callrcb:
   %%rep_p = getelementptr { ptr, ptr }, ptr %%rcb, i32 0, i32 1
   %%rfp = load ptr, ptr %%rfp_p, align 8
   %%rep = load ptr, ptr %%rep_p, align 8
-  call void %%rfp(ptr %%rep, i64 %%w0, i64 %%w1)
+  %%eobj = call ptr @__kml_worker_err_obj(i64 %%w0, i64 %%w1)
+  %%eobjw = ptrtoint ptr %%eobj to i64
+  call void %%rfp(ptr %%rep, i64 %%eobjw, i64 0)
   br label %%loop
 
 errfatal:
-  %%emsg = inttoptr i64 %%w0 to ptr
+  %%emsg = inttoptr i64 %%w1 to ptr
   call i32 (ptr, ...) @printf(ptr %s, ptr %%emsg)
   call void @exit(i32 1)
   unreachable
@@ -635,11 +669,13 @@ done:
   ret void
 }`, workerCtrlIR, workerCtrlIR, workerCtrlIR))
 	// __kml_worker_uncaught: called from @__kml_throw's uncaught path with
-	// the error's message string (TDD-00098 stage 5). On the main thread it
-	// returns (the caller prints and exits, today's behavior). On a worker
-	// thread it does NOT return: it reports the error + an exit(1) envelope
-	// to the parent and ends just this thread.
-	e.emitGlobal(fmt.Sprintf(`define void @__kml_worker_uncaught(ptr %%msg) {
+	// the rendered message and the thrown Error object (null for a non-Error
+	// throw) (TDD-00098 stage 5). On the main thread it returns (the caller
+	// prints and exits, today's behavior). On a worker thread it does NOT
+	// return: it reports the error (w0 = the Error object the parent's
+	// 'error' listener receives, w1 = the message the no-listener default
+	// prints) + an exit(1) envelope to the parent and ends just this thread.
+	e.emitGlobal(fmt.Sprintf(`define void @__kml_worker_uncaught(ptr %%msg, ptr %%err) {
 entry:
   %%self = load ptr, ptr @__kml_worker_self, align 8
   %%isworker = icmp ne ptr %%self, null
@@ -652,9 +688,72 @@ workerside:
   %%w2pw_p = getelementptr %s, ptr %%self, i32 0, i32 4
   %%w2pw = load i32, ptr %%w2pw_p, align 4
   %%msgw = ptrtoint ptr %%msg to i64
-  call void @__kml_worker_send_env(i32 %%w2pw, i64 3, i64 %%msgw, i64 0)
+  %%errw = ptrtoint ptr %%err to i64
+  call void @__kml_worker_send_env(i32 %%w2pw, i64 3, i64 %%errw, i64 %%msgw)
   call void @__kml_worker_send_env(i32 %%w2pw, i64 1, i64 1, i64 0)
+  ; On a coroutine stack (a worker module task's top level, TDD-00224 Stage 2,
+  ; or any task) the thread may not end from here: winpthreads' pthread_exit
+  ; longjmps to the thread's start frame, and a longjmp off a fiber stack
+  ; fast-fails the process. Park for good and let whoever resumed the task —
+  ; always on the thread's own stack — end the thread (@__kml_worker_abort_check).
+  %%ct = load ptr, ptr @__kml_current_task, align 8
+  %%ontask = icmp ne ptr %%ct, null
+  br i1 %%ontask, label %%parkforever, label %%exitthread
+exitthread:
   call void @pthread_exit(ptr null)
   unreachable
-}`, workerCtrlIR))
+parkforever:
+  store i1 true, ptr @__kml_worker_abort, align 1
+  %%rc_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
+  %%rc = load ptr, ptr %%rc_p, align 8
+  %%ctx_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
+  %%ctx = load ptr, ptr %%ctx_p, align 8
+  %%sw = call i32 @swapcontext(ptr %%ctx, ptr %%rc)
+  unreachable
+}`, workerCtrlIR, taskStructIR, taskResumerCtx, taskStructIR, taskCtx))
+
+	// @__kml_worker_abort: set by a worker's uncaught path when it fired on a
+	// task; @__kml_worker_abort_check runs after every task swap returns
+	// (spawn, the scheduler, @__kml_task_resume) and ends the thread once
+	// control is back on the thread's own stack.
+	e.emitGlobal("@__kml_worker_abort = internal thread_local global i1 false, align 1")
+	e.emitGlobal(`define void @__kml_worker_abort_check() {
+entry:
+  %abort = load i1, ptr @__kml_worker_abort, align 1
+  br i1 %abort, label %chk, label %done
+chk:
+  %ct = load ptr, ptr @__kml_current_task, align 8
+  %onstack = icmp eq ptr %ct, null
+  br i1 %onstack, label %exitthread, label %done
+exitthread:
+  call void @pthread_exit(ptr null)
+  unreachable
+done:
+  ret void
+}`)
+
+	// __kml_worker_err_obj: the Error object a parent's 'error' listener
+	// receives for a worker's uncaught throw — the thrown object itself when
+	// it was an Error, else an `Error` carrying the rendered message (Node
+	// delivers the thrown value as is; a typed listener here has one payload
+	// type, so a non-Error throw arrives wrapped — a disclosed narrowing).
+	e.ensureCalloc()
+	e.emitGlobal(fmt.Sprintf(`define ptr @__kml_worker_err_obj(i64 %%errw, i64 %%msgw) {
+entry:
+  %%err = inttoptr i64 %%errw to ptr
+  %%iserr = icmp ne ptr %%err, null
+  br i1 %%iserr, label %%haveerr, label %%wrap
+haveerr:
+  ret ptr %%err
+wrap:
+  %%msg = inttoptr i64 %%msgw to ptr
+  %%obj = call ptr @calloc(i64 1, i64 %d)
+  %%kind_p = getelementptr %s, ptr %%obj, i32 0, i32 0
+  store i64 %d, ptr %%kind_p, align 8
+  %%msg_p = getelementptr %s, ptr %%obj, i32 0, i32 1
+  store ptr %%msg, ptr %%msg_p, align 8
+  %%name_p = getelementptr %s, ptr %%obj, i32 0, i32 2
+  store ptr %s, ptr %%name_p, align 8
+  ret ptr %%obj
+}`, errorObjType.StructSize(), errorObjType.StructIR(), errorTypeIDStored(0), errorObjType.StructIR(), errorObjType.StructIR(), e.internString("Error")))
 }

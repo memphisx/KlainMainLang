@@ -15,7 +15,10 @@
 // was never used (emitCPRuntimeStubs, called from program finalization).
 package llvm
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ensureCPForkRuntime emits the parent-side fork machinery.
 func (e *Emitter) ensureCPForkRuntime() {
@@ -86,13 +89,13 @@ setnull:
 	// around an already-created IPC socket (parent end): inherited stdio (no
 	// pipes), fd made non-blocking, a fresh line-buffer channel. Shared by
 	// __kml_cp_fork and cluster.fork (runtime_cluster.go).
-	e.emitGlobal(fmt.Sprintf(`
+	e.emitGlobal(strings.ReplaceAll(fmt.Sprintf(`
 define ptr @__kml_cp_wrap_ipc(i64 %%pid64, i32 %%pfd) {
 entry:
   %%fl = call i32 (i32, i32, ...) @fcntl(i32 %%pfd, i32 3)
   %%fln = or i32 %%fl, %d
   call i32 (i32, i32, ...) @fcntl(i32 %%pfd, i32 4, i32 %%fln)
-  %%cp = call ptr @calloc(i64 1, i64 216)
+  %%cp = call ptr @calloc(i64 1, i64 CPBYTES)
   %%pid_p = getelementptr %s, ptr %%cp, i32 0, i32 0
   store i64 %%pid64, ptr %%pid_p, align 8
   ; stdio is inherited — no pipes on the handle
@@ -109,7 +112,7 @@ entry:
   store ptr %%chanv, ptr %%chan_p, align 8
   call void @__kml_cp_register(ptr %%cp)
   ret ptr %%cp
-}`, nonblock, cp, cp, cp, cp, cp, cp))
+}`, nonblock, cp, cp, cp, cp, cp, cp), "CPBYTES", fmt.Sprint(cpStructBytes)))
 
 	// Cluster hooks (null unless the cluster runtime arms them, at fork time):
 	// disc fires once when a handle's channel transitions open→closed (either

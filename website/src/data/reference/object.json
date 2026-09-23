@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "32/32",
     "loosePct": 100,
-    "strict": "18/32",
-    "strictPct": 56
+    "strict": "17/32",
+    "strictPct": 53
   },
   "lede": "A two-tier object model. Statically-typed objects are fixed-shape heap structs — compile-time field offsets, real per-heap-identity Object.freeze, compile-time Object.hasOwn. Dynamic objects (any-typed values, untyped JSON, js-mode literals) are real property bags with prototype chains (Object.create, __proto__), property descriptors (defineProperty, accessors, enumerability, descriptor-backed freeze/seal), and runtime add/delete. Map and Set carry the full core API; where JS says Iterable, this compiler narrows to a concrete array, and a missing Map key reads back as a real undefined (as in Node).",
   "entries": [
@@ -67,14 +67,17 @@
       "name": "Object.keys(obj)",
       "statusRow": "Object.keys(obj)",
       "signature": "Object.keys(obj): string[]",
-      "badge": "exact",
-      "description": "Returns a string[] of the object's field names in declaration order. The result can be iterated directly without an intermediate variable.",
+      "badge": "caveats",
+      "description": "Returns a string[] of the object's field names in ES own-property order. An omitted optional field (x?: T) is not a key: it is filtered out at runtime by its presence, as JSON.stringify already did. The result can be iterated directly without an intermediate variable.",
       "returns": {
         "type": "string[]",
-        "desc": "Field names in declaration order."
+        "desc": "Present field names in ES own-property order."
       },
       "exampleKey": "objects/object_static",
       "snippet": "for (const k of Object.keys(person)) {\n  console.log(k)\n}\nconsole.log(Object.keys(person).length)   // 3",
+      "differences": [
+        "Object.values/entries/for...in still list an omitted optional field (as undefined); only keys filters it"
+      ],
       "seeAlso": [
         "object.values",
         "object.entries"
@@ -249,7 +252,7 @@
       "statusRow": "Object.hasOwn() / .hasOwnProperty()",
       "signature": "Object.hasOwn(obj, key): boolean; obj.hasOwnProperty(key): boolean",
       "badge": "caveats",
-      "description": "Field-presence check. Object shapes are fully structural/static, so this is a compile-time FieldIndex lookup, not a runtime scan. The `in` operator applies the same check as an operator form.",
+      "description": "Field-presence check. Object shapes are fully structural/static, so this is a compile-time FieldIndex lookup, not a runtime scan — except an optional field (x?: T), whose answer is its runtime presence ('age' in { name } is false, as in Node). The `in` operator applies the same check as an operator form.",
       "returns": {
         "type": "boolean",
         "desc": "Whether the field exists on the object."

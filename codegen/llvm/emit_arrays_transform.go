@@ -621,6 +621,13 @@ func (e *Emitter) emitArrayFlatMap(mem *ast.MemberExpression, args []ast.Express
 	if mapped.Ty.ElemType == nil || !mapped.Ty.ElemType.IsArray {
 		return mapped, nil
 	}
+	// A callback that can fall off the end maps to `U[] | undefined` (ADR-01065):
+	// JS appends the `undefined` itself as an element, so the result is
+	// `(U | undefined)[]` — a nullable-scalar element array, which has no storage
+	// here yet. Reject cleanly instead of flattening past the absent rows.
+	if mapped.Ty.ElemType.Nullable {
+		return Value{}, fmt.Errorf("%d:%d: flatMap callback may return undefined (a path falls off the end), so the result would be a `(T | undefined)[]` — a nullable array element type is not yet supported; return an array on every path", pos.Line, pos.Col)
+	}
 
 	ptrReg := e.freshReg()
 	lenReg := e.freshReg()

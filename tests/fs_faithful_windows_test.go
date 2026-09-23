@@ -155,3 +155,39 @@ mkdirSync("`+sub+`")
 try { writeFileSync("`+sub+`", 'x') } catch (e: any) { console.log(e.code, e.errno) }
 `, "EISDIR -4068")
 }
+
+// fs.realpathSync resolves the way Node's readlink-based walk does, not only
+// the way the kernel's final-path query does (ADR-01058): a relative link
+// target stored with forward slashes (which the kernel will not follow — Node
+// can't `open` it either, yet its realpath resolves it), a directory link with
+// a trailing component, a link chain, `..`/`.` segments, a link loop (ELOOP),
+// a dangling link and a missing path (ENOENT). The same walk is what serves a
+// volume without a DOS device name (a RAM disk), where the final-path query
+// fails outright — run with KML_SCRATCH on such a drive to exercise that leg.
+func TestE2EWinRealpathWalksLinks(t *testing.T) {
+	probe := tempDir(t)
+	if err := os.Symlink(probe, filepath.Join(probe, "probe-link")); err != nil {
+		t.Skip("symlink creation not permitted on this Windows box (needs Developer Mode or admin)")
+	}
+	dir := filepath.ToSlash(tempDir(t))
+	want := filepath.FromSlash(dir) + `\w\dir\sub\f.txt`
+	assertOutputImports(t, `
+import * as fs from 'fs'
+const tmp = "`+dir+`";
+fs.mkdirSync(tmp + "/w/dir/sub", { recursive: true });
+fs.writeFileSync(tmp + "/w/dir/sub/f.txt", "x");
+fs.symlinkSync("dir/sub/f.txt", tmp + "/w/rel");
+fs.symlinkSync(tmp + "/w/dir", tmp + "/w/dlink", "dir");
+fs.symlinkSync("rel", tmp + "/w/chain");
+fs.symlinkSync("loopb", tmp + "/w/loopa");
+fs.symlinkSync("loopa", tmp + "/w/loopb");
+fs.symlinkSync("nowhere", tmp + "/w/dangling");
+console.log(fs.realpathSync(tmp + "/w/rel"));
+console.log(fs.realpathSync(tmp + "/w/dlink/sub/f.txt"));
+console.log(fs.realpathSync(tmp + "/w/chain"));
+console.log(fs.realpathSync(tmp + "/w/dir/../dir/sub/./f.txt"));
+for (const p of ["/w/loopa", "/w/dangling", "/w/missing"]) {
+  try { fs.realpathSync(tmp + p); console.log("no throw"); } catch (e) { console.log((e as any).code); }
+}
+`, strings.Repeat(want+"\n", 4)+"ELOOP\nENOENT\nENOENT")
+}

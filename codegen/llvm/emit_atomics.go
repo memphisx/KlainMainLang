@@ -44,18 +44,65 @@ func (e *Emitter) emitAtomicsElemPtr(method string, args []ast.Expression, pos a
 	default:
 		return "", Type{}, Type{}, fmt.Errorf("%d:%d: Atomics.%s requires an integer TypedArray (Int8/Uint8/Int16/Uint16/Int32/Uint32/BigInt64/BigUint64Array)", pos.Line, pos.Col, method)
 	}
-	ptrReg, _, _, err := e.resolveArrayForHOF(args[0], pos)
+	// ValidateAtomicAccess: the length is read BEFORE the index is coerced (a
+	// `valueOf` that grows the buffer must not widen the check), the index goes
+	// through ToIndex (ToNumber → integer, so an object's valueOf runs and a
+	// string converts), and an out-of-range index is a RangeError — not an
+	// unchecked address, which made `Atomics.wait` block on foreign memory
+	// forever (ADR-01061).
+	ptrReg, lenReg, _, err := e.resolveArrayForHOF(args[0], pos)
 	if err != nil {
 		return "", Type{}, Type{}, err
 	}
-	idxVal, err := e.emitExpr(args[1])
+	idxRaw, err := e.emitExpr(args[1])
 	if err != nil {
 		return "", Type{}, Type{}, err
 	}
-	idxVal = e.coerce(idxVal, TypeI64)
+	idxNum, err := e.emitUnaryPlus(idxRaw, args[1].GetPos())
+	if err != nil {
+		return "", Type{}, Type{}, err
+	}
+	idxNum = e.coerce(idxNum, TypeF64)
+	// ToIntegerOrInfinity: NaN → 0, else truncate.
+	e.ensureMathFuncs()
+	isNaN := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp uno double %s, %s", isNaN, idxNum.Ref, idxNum.Ref))
+	noNaN := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0.0, double %s", noNaN, isNaN, idxNum.Ref))
+	truncD := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call double @trunc(double %s)", truncD, noNaN))
+	lenD := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", lenD, lenReg))
+	isNeg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp olt double %s, 0.0", isNeg, truncD))
+	beyond := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp oge double %s, %s", beyond, truncD, lenD))
+	bad := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", bad, isNeg, beyond))
+	badL := e.freshLabel("atomics.badidx")
+	okL := e.freshLabel("atomics.okidx")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
+	e.emitLabel(badL)
+	e.emitInternalThrowKind("RangeError", e.internString("Invalid atomic access index"))
+	e.emitLabel(okL)
+	idxReg := e.emitFloatToI64("double", truncD)
 	elemPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", elemPtr, elemTy.IR, ptrReg, idxVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", elemPtr, elemTy.IR, ptrReg, idxReg))
 	return elemPtr, elemTy, taTy, nil
+}
+
+// emitAtomicsNumber is ToNumber for an Atomics value/timeout operand: an
+// object's valueOf runs (and may throw), a string converts, a number is itself.
+func (e *Emitter) emitAtomicsNumber(expr ast.Expression) (Value, error) {
+	v, err := e.emitExpr(expr)
+	if err != nil {
+		return Value{}, err
+	}
+	n, err := e.emitUnaryPlus(v, expr.GetPos())
+	if err != nil {
+		return Value{}, err
+	}
+	return e.coerce(n, TypeF64), nil
 }
 
 // emitAtomicsOperand converts an Atomics value operand into the raw stored
@@ -190,18 +237,18 @@ func (e *Emitter) emitAtomicsCall(method string, args []ast.Expression, pos ast.
 		if len(args) != 3 && len(args) != 4 {
 			return Value{}, fmt.Errorf("%d:%d: Atomics.wait takes (int32Array, index, expected, timeoutMs?)", pos.Line, pos.Col)
 		}
-		expVal, err := e.emitExpr(args[2])
+		// Spec order: index (above), then ToInt32(value), then ToNumber(timeout).
+		expVal, err := e.emitAtomicsNumber(args[2])
 		if err != nil {
 			return Value{}, err
 		}
 		expVal = e.coerce(expVal, TypeI32)
-		tmoRef := "-1.0"
+		tmoRef := "0x7FF8000000000000" // absent → NaN → wait forever
 		if len(args) == 4 {
-			tmoVal, err := e.emitExpr(args[3])
+			tmoVal, err := e.emitAtomicsNumber(args[3])
 			if err != nil {
 				return Value{}, err
 			}
-			tmoVal = e.coerce(tmoVal, TypeF64)
 			tmoRef = tmoVal.Ref
 		}
 		e.ensureAtomicsRuntime()

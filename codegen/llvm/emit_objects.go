@@ -165,10 +165,10 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 	// parameter types so its optionality ABI matches the slot (ADR-00963).
 	if hint.IsFunc {
 		if af, ok := expr.(*ast.ArrowFunction); ok {
-			return e.emitArrowFunctionWithHints(af, hint.FuncParams)
+			return e.emitClosureAgainstHint(e.emitArrowFunctionWithHints(af, hint.FuncParams))(hint, af.GetPos())
 		}
 		if fe, ok := expr.(*ast.FunctionExpression); ok {
-			return e.emitFunctionExpression(fe, hint.FuncParams)
+			return e.emitClosureAgainstHint(e.emitFunctionExpression(fe, hint.FuncParams))(hint, fe.GetPos())
 		}
 	}
 	if lit, ok := expr.(*ast.ObjectLiteral); ok && hint.IsObject {
@@ -211,16 +211,31 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 	// pre-existing gap confirmed directly against a plain, EventSource-
 	// unrelated `let cb: (b: Box) => void = (b) => b.value` snippet too.
 	if af, ok := expr.(*ast.ArrowFunction); ok && hint.IsFunc {
-		return e.emitArrowFunctionWithHints(af, hint.FuncParams)
+		return e.emitClosureAgainstHint(e.emitArrowFunctionWithHints(af, hint.FuncParams))(hint, af.GetPos())
 	}
 	// Same hint propagation, for a function expression assigned/passed into
 	// a declared function-typed slot (`let cb: (b: Box) => number =
 	// function(b) { return b.value; }`) — function expressions need the
 	// same outside-context typing an arrow function does (TDD-00060).
 	if fe, ok := expr.(*ast.FunctionExpression); ok && hint.IsFunc {
-		return e.emitFunctionExpression(fe, hint.FuncParams)
+		return e.emitClosureAgainstHint(e.emitFunctionExpression(fe, hint.FuncParams))(hint, fe.GetPos())
 	}
 	return e.emitExpr(expr)
+}
+
+// emitClosureAgainstHint wraps a hinted closure emission: the closure's own
+// inferred return type is checked against the expected function type's
+// (closureFallOffMismatch, ADR-01065) before the value is handed to the slot.
+func (e *Emitter) emitClosureAgainstHint(v Value, err error) func(hint Type, pos ast.Pos) (Value, error) {
+	return func(hint Type, pos ast.Pos) (Value, error) {
+		if err != nil {
+			return Value{}, err
+		}
+		if merr := closureFallOffMismatch(v.Ty, hint, pos, "a function-typed slot"); merr != nil {
+			return Value{}, merr
+		}
+		return v, nil
+	}
 }
 
 // emitObjectLiteralWithHint is emitObjectLiteral's real implementation. When
@@ -245,6 +260,11 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 	}
 	if lit.HasAccessors() {
 		return e.emitObjectLiteralWithAccessors(lit)
+	}
+	// A spread of a bare any value has no compile-time key set: the literal
+	// is a D1 dynamic object, whatever the hint (ADR-01077).
+	if e.hasDynamicSpread(lit) {
+		return e.emitDynObjLiteral(lit)
 	}
 	// A plain object literal assigned to a string index-signature target
 	// (TDD-00130) is built as a map, not a fixed struct, so `d[key]` access
@@ -564,6 +584,12 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 	} else {
 		ptrName = e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+		if v.Kind == "var" {
+			// A skippable `var` (hoistedVarMaySkip widened it to `T | undefined`)
+			// reads null — absent — on the path where this declaration never ran
+			// (ADR-01057).
+			e.emitAlloca(fmt.Sprintf("store ptr null, ptr %s, align 8", ptrName))
+		}
 		e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
 	}
 
@@ -1157,7 +1183,11 @@ func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, err
 	if !val.Ty.IsObject || (!val.Ty.IsClass && len(val.Ty.VisibleFields()) == 0) {
 		return Value{}, fmt.Errorf("%d:%d: Object.keys requires an object with known fields", pos.Line, pos.Col)
 	}
-	return e.emitObjectFieldNames(esOrderedFields(val.Ty.VisibleFields()), pos)
+	fields := esOrderedFields(val.Ty.VisibleFields())
+	if hasSkippableField(fields) {
+		return e.emitObjectPresentFieldNames(val, fields)
+	}
+	return e.emitObjectFieldNames(fields, pos)
 }
 
 // emitObjectFieldNames allocates a string[] of compile-time field names.
@@ -1176,6 +1206,43 @@ func (e *Emitter) emitObjectFieldNames(fields []Field, pos ast.Pos) (Value, erro
 	r1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %d, 1", r1, r0, n))
+	return Value{Ref: r1, Ty: ArrayOf(TypePtr)}, nil
+}
+
+// emitObjectPresentFieldNames is emitObjectFieldNames for an object with
+// optional (`x?: T`) fields: an absent one has no key (Node), so the names
+// are appended at runtime behind each field's presence test (ADR-01063).
+func (e *Emitter) emitObjectPresentFieldNames(val Value, fields []Field) (Value, error) {
+	n := int64(len(fields))
+	e.ensureMalloc()
+	dataReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*8))
+	countA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", countA))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", countA))
+	for _, f := range fields {
+		present, _ := e.emitFieldPresent(val.Ref, val.Ty, f)
+		doL := e.freshLabel("keys.opt.add")
+		contL := e.freshLabel("keys.opt.cont")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, doL, contL))
+		e.emitLabel(doL)
+		cur := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, countA))
+		slotReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotReg, dataReg, cur))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(f.Name), slotReg))
+		next := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, cur))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, countA))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+		e.emitLabel(contL)
+	}
+	count := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", count, countA))
+	r0 := e.freshReg()
+	r1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, count))
 	return Value{Ref: r1, Ty: ArrayOf(TypePtr)}, nil
 }
 
@@ -1199,13 +1266,19 @@ func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, e
 		}
 		return e.emitMapCall(objVal.Ty, objVal.Ref, "values", nil, pos)
 	}
+	// A bare any (D1 dynamic object / array): a dynamic array of the values.
+	if isUnconstrainedDynamic(objVal.Ty) {
+		return e.emitDynAnyEntries(objVal, false, pos)
+	}
 	visFields := objVal.Ty.VisibleFields()
 	if !objVal.Ty.IsObject || (!objVal.Ty.IsClass && len(visFields) == 0) {
 		return Value{}, fmt.Errorf("%d:%d: Object.values requires an object with known fields", pos.Line, pos.Col)
 	}
 	// Homogeneous fixed shapes keep real typed values (ADR-00492) — same
-	// rule Object.entries applies below; mixed shapes still stringify.
-	valTy, homogeneous := homogeneousFieldType(visFields)
+	// rule Object.entries applies below; mixed shapes still stringify. An
+	// optional field counts by its present type: only present fields are
+	// listed (ADR-01066), so `{ x: number; y?: number }` values are `number[]`.
+	valTy, homogeneous := homogeneousFieldType(presentFieldTypes(visFields))
 	if !homogeneous {
 		valTy = TypePtr
 	}
@@ -1214,34 +1287,96 @@ func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, e
 	e.ensureMalloc()
 	dataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(valTy.Align())))
-	for i, f := range visFields {
-		idx, _, _ := objVal.Ty.FieldIndex(f.Name)
-		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
-		var elemVal Value
-		if f.Ty.IsArray {
-			elemVal = e.loadArrayFieldValue(gepReg, f.Ty) // header-ptr slot (TDD-00213 S2)
-		} else {
-			rawReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rawReg, StructFieldIR(f.Ty), gepReg, f.Ty.Align()))
-			elemVal = Value{Ref: rawReg, Ty: f.Ty}
-		}
+	count, err := e.forEachPresentField(objVal, visFields, func(f Field, idxRef string, elemVal Value) error {
 		if !homogeneous {
 			strVal, err := e.emitValueToString(elemVal)
 			if err != nil {
-				return Value{}, fmt.Errorf("%d:%d: Object.values: field '%s': %w", pos.Line, pos.Col, f.Name, err)
+				return fmt.Errorf("%d:%d: Object.values: field '%s': %w", pos.Line, pos.Col, f.Name, err)
 			}
 			elemVal = strVal
 		}
 		slotReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", slotReg, StructFieldIR(valTy), dataReg, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slotReg, StructFieldIR(valTy), dataReg, idxRef))
 		e.storeArrayElem(slotReg, valTy, elemVal)
+		return nil
+	})
+	if err != nil {
+		return Value{}, err
 	}
 	r0 := e.freshReg()
 	r1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %d, 1", r1, r0, n))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, count))
 	return Value{Ref: r1, Ty: ArrayOf(valTy)}, nil
+}
+
+// presentFieldTypes maps each field to the type it has when present: an
+// optional `T | undefined` field contributes its bare T (ADR-01066).
+func presentFieldTypes(fields []Field) []Field {
+	out := make([]Field, len(fields))
+	for i, f := range fields {
+		out[i] = f
+		if jsonFieldSkippable(f.Ty) {
+			out[i].Ty = presentFieldType(f.Ty)
+		}
+	}
+	return out
+}
+
+// presentFieldType is the value type of an optional field once known present.
+func presentFieldType(t Type) Type {
+	if isNullableScalar(t) {
+		return t.withoutNullable()
+	}
+	t.Nullable = false
+	t.IsUndefined = false
+	return t
+}
+
+// forEachPresentField runs body once per *present* field of objVal, in the
+// given order, handing it the field, the runtime output index (a constant when
+// no field is optional) and the field's present-typed value (a nullable
+// scalar's payload, an array/pointer as is). Returns the output count operand.
+// An absent optional field is skipped — the one enumeration Object.values,
+// Object.entries and for…in share with Object.keys (ADR-01063/ADR-01066).
+func (e *Emitter) forEachPresentField(objVal Value, fields []Field, body func(f Field, idxRef string, v Value) error) (string, error) {
+	if !hasSkippableField(fields) {
+		for i, f := range fields {
+			_, v := e.emitFieldPresent(objVal.Ref, objVal.Ty, f)
+			if err := body(f, fmt.Sprintf("%d", i), v); err != nil {
+				return "", err
+			}
+		}
+		return fmt.Sprintf("%d", len(fields)), nil
+	}
+	countA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", countA))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", countA))
+	for _, f := range fields {
+		present, v := e.emitFieldPresent(objVal.Ref, objVal.Ty, f)
+		if isNullableScalar(v.Ty) {
+			_, v = e.nullableScalarAggParts(v)
+		} else if jsonFieldSkippable(v.Ty) && !v.Ty.UncheckedIndex {
+			v.Ty = presentFieldType(v.Ty)
+		}
+		doL := e.freshLabel("fld.opt.add")
+		contL := e.freshLabel("fld.opt.cont")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, doL, contL))
+		e.emitLabel(doL)
+		cur := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, countA))
+		if err := body(f, cur, v); err != nil {
+			return "", err
+		}
+		next := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, cur))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, countA))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+		e.emitLabel(contL)
+	}
+	count := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", count, countA))
+	return count, nil
 }
 
 // emitObjectEntries implements Object.entries(obj) → {key: string, value: string}[].
@@ -1266,6 +1401,11 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 		}
 		return e.emitMapCall(objVal.Ty, objVal.Ref, "entries", nil, pos)
 	}
+	// A bare any (D1 dynamic object / array): a dynamic array of [key, value]
+	// pairs — JS's real tuple shape, since the elements are themselves dynamic.
+	if isUnconstrainedDynamic(objVal.Ty) {
+		return e.emitDynAnyEntries(objVal, true, pos)
+	}
 	visFields := objVal.Ty.VisibleFields()
 	if !objVal.Ty.IsObject || (!objVal.Ty.IsClass && len(visFields) == 0) {
 		return Value{}, fmt.Errorf("%d:%d: Object.entries requires an object with known fields", pos.Line, pos.Col)
@@ -1274,7 +1414,7 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 	// field shares one type, V is that real type (ADR-00492); a heterogeneous
 	// object still stringifies its values (the union V would need is
 	// representable only as `any`, whose operators aren't dispatched yet).
-	valTy, homogeneous := homogeneousFieldType(visFields)
+	valTy, homogeneous := homogeneousFieldType(presentFieldTypes(visFields))
 	if !homogeneous {
 		valTy = TypePtr
 	}
@@ -1285,9 +1425,9 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 	e.ensureMalloc()
 	dataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*8))
-	for i, f := range visFields {
-		idx, _, _ := objVal.Ty.FieldIndex(f.Name)
-		// Allocate one {key: string, value: string} entry struct.
+	// Only present fields get an entry (ADR-01066) — see forEachPresentField.
+	count, err := e.forEachPresentField(objVal, visFields, func(f Field, idxRef string, entryVal Value) error {
+		// Allocate one {key: string, value: V} entry struct.
 		entryReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", entryReg, entrySize))
 		// Store the key (compile-time field name).
@@ -1295,36 +1435,33 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 		keySlot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", keySlot, entryTy.StructIR(), entryReg))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", keyPtr, keySlot))
-		// Read, stringify, and store the value.
-		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
-		var entryVal Value
-		if f.Ty.IsArray {
-			entryVal = e.loadArrayFieldValue(gepReg, f.Ty) // header-ptr slot (TDD-00213 S2)
-		} else {
-			rawReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rawReg, StructFieldIR(f.Ty), gepReg, f.Ty.Align()))
-			entryVal = Value{Ref: rawReg, Ty: f.Ty}
-		}
 		if !homogeneous {
 			strVal, err := e.emitValueToString(entryVal)
 			if err != nil {
-				return Value{}, fmt.Errorf("%d:%d: Object.entries: field '%s': %w", pos.Line, pos.Col, f.Name, err)
+				return fmt.Errorf("%d:%d: Object.entries: field '%s': %w", pos.Line, pos.Col, f.Name, err)
 			}
 			entryVal = strVal
 		}
 		valSlot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", valSlot, entryTy.StructIR(), entryReg))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(valTy), entryVal.Ref, valSlot, valTy.Align()))
+		if valTy.IsArray {
+			e.storeArrayFieldHeader(valSlot, entryVal)
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(valTy), entryVal.Ref, valSlot, valTy.Align()))
+		}
 		// Store entry pointer in the outer array.
 		slotReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", slotReg, dataReg, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotReg, dataReg, idxRef))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", entryReg, slotReg))
+		return nil
+	})
+	if err != nil {
+		return Value{}, err
 	}
 	r0 := e.freshReg()
 	r1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %d, 1", r1, r0, n))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, count))
 	return Value{Ref: r1, Ty: ArrayOf(entryTy)}, nil
 }
 
@@ -1526,8 +1663,14 @@ func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, callerName
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: %s requires a string literal key (dynamic keys are not supported)", pos.Line, pos.Col, callerName)
 	}
-	_, _, found := objVal.Ty.FieldIndex(keyLit.Value)
+	_, fieldTy, found := objVal.Ty.FieldIndex(keyLit.Value)
 	if found {
+		// An optional field that was omitted has no key — `"age" in a` is a
+		// runtime presence test, not a static true (ADR-01063).
+		if jsonFieldSkippable(fieldTy) {
+			present, _ := e.emitFieldPresent(objVal.Ref, objVal.Ty, Field{Name: keyLit.Value, Ty: fieldTy})
+			return Value{Ref: present, Ty: TypeBool}, nil
+		}
 		return Value{Ref: "true", Ty: TypeBool}, nil
 	}
 	return Value{Ref: "false", Ty: TypeBool}, nil

@@ -126,20 +126,19 @@ func (e *Emitter) ensurePerformanceMarkMap() {
 
 // ensureDateDecompose declares __kml_date_decompose: converts a milliseconds-
 // since-epoch i64 into its UTC calendar fields (year, month[0-11], day,
-// weekday[0=Sun..6=Sat], hour, minute, second, millisecond) via gmtime(),
-// returned as an { i64 x 8 } aggregate in that order. Deliberately UTC (not
-// local time) so output is deterministic across machines/CI regardless of
-// timezone — see docs/adr for the Date ADR. struct tm's first 7 fields
-// (tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_wday) are `int`
-// (i32) in that exact order on both glibc and Darwin/BSD, the standard
-// POSIX layout — reading only those (not the platform-varying tail fields
-// like tm_gmtoff) keeps this portable across this compiler's targets.
+// weekday[0=Sun..6=Sat], hour, minute, second, millisecond), returned as an
+// { i64 x 8 } aggregate in that order. Deliberately UTC (not local time) so
+// output is deterministic across machines/CI regardless of timezone — see
+// docs/adr for the Date ADR. Pure integer arithmetic (Hinnant's
+// civil_from_days, the inverse of __kml_days_from_civil below), not gmtime():
+// the Windows CRT's gmtime returns NULL for any time before 1970, which
+// crashed every pre-epoch Date read there, and gmtime's static buffer is not
+// thread-safe.
 func (e *Emitter) ensureDateDecompose() {
 	if e.usedDateDecompose {
 		return
 	}
 	e.usedDateDecompose = true
-	e.emitGlobal("declare ptr @gmtime(ptr noundef)")
 	e.emitGlobal(`
 define { i64, i64, i64, i64, i64, i64, i64, i64 } @__kml_date_decompose(i64 %ms) {
 entry:
@@ -150,31 +149,63 @@ entry:
   %millis = select i1 %millis_neg, i64 %millis_adj, i64 %millis_raw
   %secs_adj = select i1 %millis_neg, i64 -1, i64 0
   %secs_final = add i64 %secs, %secs_adj
-  %tbuf = alloca i64, align 8
-  store i64 %secs_final, ptr %tbuf, align 8
-  %tmptr = call ptr @gmtime(ptr %tbuf)
-  %sec_p = getelementptr { i32, i32, i32, i32, i32, i32, i32 }, ptr %tmptr, i32 0, i32 0
-  %min_p = getelementptr { i32, i32, i32, i32, i32, i32, i32 }, ptr %tmptr, i32 0, i32 1
-  %hour_p = getelementptr { i32, i32, i32, i32, i32, i32, i32 }, ptr %tmptr, i32 0, i32 2
-  %mday_p = getelementptr { i32, i32, i32, i32, i32, i32, i32 }, ptr %tmptr, i32 0, i32 3
-  %mon_p = getelementptr { i32, i32, i32, i32, i32, i32, i32 }, ptr %tmptr, i32 0, i32 4
-  %year_p = getelementptr { i32, i32, i32, i32, i32, i32, i32 }, ptr %tmptr, i32 0, i32 5
-  %wday_p = getelementptr { i32, i32, i32, i32, i32, i32, i32 }, ptr %tmptr, i32 0, i32 6
-  %sec_i32 = load i32, ptr %sec_p, align 4
-  %min_i32 = load i32, ptr %min_p, align 4
-  %hour_i32 = load i32, ptr %hour_p, align 4
-  %mday_i32 = load i32, ptr %mday_p, align 4
-  %mon_i32 = load i32, ptr %mon_p, align 4
-  %year_i32 = load i32, ptr %year_p, align 4
-  %wday_i32 = load i32, ptr %wday_p, align 4
-  %sec64 = sext i32 %sec_i32 to i64
-  %min64 = sext i32 %min_i32 to i64
-  %hour64 = sext i32 %hour_i32 to i64
-  %mday64 = sext i32 %mday_i32 to i64
-  %mon64 = sext i32 %mon_i32 to i64
-  %year64_raw = sext i32 %year_i32 to i64
-  %year64 = add i64 %year64_raw, 1900
-  %wday64 = sext i32 %wday_i32 to i64
+  ; floor-divide into days since the epoch + second of the day
+  %days_raw = sdiv i64 %secs_final, 86400
+  %sod_raw = srem i64 %secs_final, 86400
+  %sod_neg = icmp slt i64 %sod_raw, 0
+  %sod_adj = add i64 %sod_raw, 86400
+  %sod = select i1 %sod_neg, i64 %sod_adj, i64 %sod_raw
+  %days_dec = sub i64 %days_raw, 1
+  %days = select i1 %sod_neg, i64 %days_dec, i64 %days_raw
+  %hour64 = sdiv i64 %sod, 3600
+  %soh = srem i64 %sod, 3600
+  %min64 = sdiv i64 %soh, 60
+  %sec64 = srem i64 %soh, 60
+  ; 1970-01-01 was a Thursday (4)
+  %wd4 = add i64 %days, 4
+  %wd_raw = srem i64 %wd4, 7
+  %wd_neg = icmp slt i64 %wd_raw, 0
+  %wd_adj = add i64 %wd_raw, 7
+  %wday64 = select i1 %wd_neg, i64 %wd_adj, i64 %wd_raw
+  ; civil_from_days (Howard Hinnant)
+  %z = add i64 %days, 719468
+  %z_neg = icmp slt i64 %z, 0
+  %z_m = sub i64 %z, 146096
+  %z_e = select i1 %z_neg, i64 %z_m, i64 %z
+  %era = sdiv i64 %z_e, 146097
+  %era_d = mul i64 %era, 146097
+  %doe = sub i64 %z, %era_d
+  %doe_a = sdiv i64 %doe, 1460
+  %doe_b = sdiv i64 %doe, 36524
+  %doe_c = sdiv i64 %doe, 146096
+  %yo1 = sub i64 %doe, %doe_a
+  %yo2 = add i64 %yo1, %doe_b
+  %yo3 = sub i64 %yo2, %doe_c
+  %yoe = sdiv i64 %yo3, 365
+  %era_y = mul i64 %era, 400
+  %y0 = add i64 %yoe, %era_y
+  %yoe365 = mul i64 %yoe, 365
+  %yoe4 = sdiv i64 %yoe, 4
+  %yoe100 = sdiv i64 %yoe, 100
+  %dy1 = add i64 %yoe365, %yoe4
+  %dy2 = sub i64 %dy1, %yoe100
+  %doy = sub i64 %doe, %dy2
+  %mp5 = mul i64 %doy, 5
+  %mp5b = add i64 %mp5, 2
+  %mp = sdiv i64 %mp5b, 153
+  %md1 = mul i64 %mp, 153
+  %md2 = add i64 %md1, 2
+  %md3 = sdiv i64 %md2, 5
+  %md4 = sub i64 %doy, %md3
+  %mday64 = add i64 %md4, 1
+  %mp_lt10 = icmp slt i64 %mp, 10
+  %m_a = add i64 %mp, 3
+  %m_b = sub i64 %mp, 9
+  %m1 = select i1 %mp_lt10, i64 %m_a, i64 %m_b
+  %mon64 = sub i64 %m1, 1
+  %m_le2 = icmp sle i64 %m1, 2
+  %y_inc = zext i1 %m_le2 to i64
+  %year64 = add i64 %y0, %y_inc
   %r0 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64 } undef, i64 %year64, 0
   %r1 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %r0, i64 %mon64, 1
   %r2 = insertvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %r1, i64 %mday64, 2

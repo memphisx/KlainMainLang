@@ -96,22 +96,18 @@
             ]
           },
           {
-            "feature": "`url.fileURLToPath(url)` (POSIX)",
+            "feature": "`url.fileURLToPath(url[, { windows }])`",
             "status": "implemented",
-            "caveats": [
-              "POSIX only; the `options` (`windows`) argument is unsupported, and a non-`localhost` host is ignored rather than rejected ([ADR-00671](../adr/ADR-00671.md))"
-            ],
             "notes": [
-              "Converts a `file:` URL (string or WHATWG `URL`) to the percent-decoded filesystem path; throws on a non-`file:` scheme"
+              "Converts a `file:` URL (string or WHATWG `URL`) to the percent-decoded filesystem path; throws on a non-`file:` scheme. On Windows `file:///C:/dir/f` is `C:\\dir\\f` and `file://server/share/f` is the UNC path `\\\\server\\share\\f` ([ADR-00722](../adr/ADR-00722.md))",
+              "`{ windows }` picks the flavor on any host — a literal at compile time, a run-time boolean through both halves — and `undefined` means the host; the POSIX half throws Node's `File URL host must be \"localhost\" or empty on <platform>` for a non-empty, non-`localhost` host and rejects an encoded `/`; neither half goes through libcurl, which refuses a drive letter in a file URL on Linux/macOS ([ADR-01079](../adr/ADR-01079.md))"
             ]
           },
           {
-            "feature": "`url.pathToFileURL(path)` (POSIX)",
+            "feature": "`url.pathToFileURL(path[, { windows }])`",
             "status": "implemented",
-            "caveats": [
-              "The `options` argument is unsupported ([ADR-00671](../adr/ADR-00671.md))"
-            ],
             "notes": [
+              "`{ windows }` selects the win32 (`file:///C:/dir/f`, UNC host) or POSIX form on any host, `undefined` meaning the host's ([ADR-01079](../adr/ADR-01079.md))",
               "Resolves the path to absolute, percent-encodes it, and returns a WHATWG `URL` with the `file:` scheme; on Windows a drive path is `file:///C:/dir/f` and a UNC path keeps its server as the host ([ADR-00722](../adr/ADR-00722.md))",
               "The escape set is Node's, not libcurl's: controls, space, `\" # % < > ? [ ] ^ { | } ~`, the backtick and every non-ASCII byte become upper-case `%XX`; the sub-delims `! $ & ' ( ) * + , ; = @` stay literal; `href` and `pathname` agree ([ADR-01046](../adr/ADR-01046.md))"
             ]

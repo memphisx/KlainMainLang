@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "32/33",
     "loosePct": 97,
-    "strict": "18/33",
-    "strictPct": 55
+    "strict": "20/33",
+    "strictPct": 61
   },
   "lede": "The String surface is nearly complete. Comparison and substring search are binary-safe (length-headed, NUL-tolerant); the open edges are real Unicode — normalization, surrogate-pair code points, and locale collation — which this compiler has no tables for and does not fake.",
   "entries": [
@@ -338,13 +338,13 @@
       "name": ".toUpperCase()",
       "signature": "toUpperCase(): string",
       "badge": "exact",
-      "description": "Returns the string with ASCII letters uppercased.",
+      "description": "Returns the string uppercased by the Unicode Default Case Conversion, as Node: every plane's simple mappings plus the SpecialCasing expansions ('ß' becomes 'SS', 'ﬁ' becomes 'FI'); an embedded NUL is an ordinary character.",
       "returns": {
         "type": "string",
         "desc": "The uppercased string."
       },
       "exampleKey": "strings/string_methods",
-      "snippet": "console.log('Hello World'.toUpperCase())   // HELLO WORLD",
+      "snippet": "console.log('straße'.toUpperCase())   // STRASSE",
       "seeAlso": [
         "string.toLowerCase"
       ],
@@ -357,13 +357,13 @@
       "name": ".toLowerCase()",
       "signature": "toLowerCase(): string",
       "badge": "exact",
-      "description": "Returns the string with ASCII letters lowercased.",
+      "description": "Returns the string lowercased by the Unicode Default Case Conversion, as Node — including the context-sensitive final sigma ('ΟΔΥΣΣΕΥΣ' becomes 'οδυσσευς') and the 'İ' expansion.",
       "returns": {
         "type": "string",
         "desc": "The lowercased string."
       },
       "exampleKey": "strings/string_methods",
-      "snippet": "console.log('Hello World'.toLowerCase())   // hello world",
+      "snippet": "console.log('ΟΔΥΣΣΕΥΣ'.toLowerCase())   // οδυσσευς",
       "seeAlso": [
         "string.toUpperCase"
       ],

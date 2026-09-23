@@ -162,11 +162,13 @@
               "String-literal specifier only — a runtime-computed `import(expr)` is a clean compile error (all imports resolve at compile time)",
               "Result object exposes the target's **annotated scalar/string exports** only (via dlsym'd accessors); `function`/`class`/array/object exports are omitted in V1, and an un-annotated export has no field",
               "Incompatible with `--static` (a static binary can't `dlopen`) — a clean mutual-exclusion rejection; the lazy build emits a sibling `<binary>.d/` island directory that must ship with the binary",
-              "A nested dynamic `import()` inside an island compiles eagerly (islands don't recursively partition in V1)"
+              "A nested dynamic `import()` inside an island compiles eagerly (islands don't recursively partition in V1)",
+              "An island's sockets, pipes and children are invisible to the importer's `select()`: while such an island's top-level `await` is pending, the importer re-polls it every 10 ms instead of waking on the island's fd ([TDD-00225](../tdd/TDD-00225.md)); the island's timers are folded exactly"
             ],
             "notes": [
               "Under `-dynamic-import=lazy` each target is compiled to its own shared-library island (`.so`/`.dylib`) beside the binary and `dlopen`'d on first `import()`, running its top-level exactly once — **real laziness**: the target's code runs only when the call site executes, not at startup. Verified on darwin/arm64 and Linux (glibc/arm64, Docker)",
               "The executable self-locates via `_NSGetExecutablePath`/`/proc/self/exe`, so the binary + its `.d/` directory relocate together; island export symbols are hashed from the target's absolute path, computed identically both sides",
+              "An island with a top-level `await` evaluates as a coroutine driven by the importer's event loop: `import()` is pending until the island's module promise settles, the importer's own microtasks and timers interleave with the island's awaits, a top-level throw rejects `import()` with the island's Error ([ADR-01056](../adr/ADR-01056.md)/[TDD-00225](../tdd/TDD-00225.md))",
               "See [ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md); [TDD-00055](../tdd/TDD-00055.md) is the alternative eager backend"
             ]
           },

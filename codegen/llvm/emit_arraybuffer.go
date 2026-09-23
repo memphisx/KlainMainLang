@@ -634,25 +634,132 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 		return Value{}, fmt.Errorf("%d:%d: set takes 1 or 2 arguments (source, offset?)", pos.Line, pos.Col)
 	}
 	dstTy := e.inferExprType(mem.Object)
-	if dstTy.BigIntElem != e.inferExprType(args[0]).BigIntElem {
+	srcTy := e.inferExprType(args[0])
+	if dstTy.BigIntElem != srcTy.BigIntElem {
 		return Value{}, fmt.Errorf("%d:%d: set()'s source and target must both (or neither) be BigInt64Array/BigUint64Array", pos.Line, pos.Col)
 	}
 	dstPtrReg, dstLenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	srcPtrReg, srcLenReg, srcElemTy, err := e.resolveArrayForHOF(args[0], pos)
-	if err != nil {
-		return Value{}, err
+	var srcPtrReg, srcLenReg string
+	var srcElemTy Type
+	if srcTy.IsDynamic || !srcTy.IsArray {
+		// An `any` source — or any statically non-array one (a string, an
+		// object literal, null) — is boxed and materialised at runtime as a
+		// fresh double buffer with ToNumber applied per element (ADR-01059):
+		// the spec's ToObject + LengthOfArrayLike + per-index Get/ToNumber walk
+		// over a boxed static array, a dynamic array, a string, or an array-like
+		// object (`{ length, 0, 1 }`); a number/boolean has no length → zero
+		// elements. null/undefined cannot be converted to an object: the helper
+		// answers length -1 and the TypeError is thrown here.
+		// Emitted under an `any` hint, exactly as `const s: any = <arg>` would
+		// be: an object literal (`{ length: 2, 0: 7 }`) then becomes a dynamic
+		// bag with a walkable key table rather than a fixed-shape struct the
+		// helper cannot read (TDD-00155 Stage 6); a fresh `new C()` widens the
+		// same way; everything else boxes plainly.
+		srcVal, err := e.emitExprWithObjectHint(args[0], TypeAny)
+		if err != nil {
+			return Value{}, err
+		}
+		if srcVal.Ty.IsObject && !srcVal.Ty.IsDynamic && e.dynWidenable(srcVal.Ty, map[string]bool{}) {
+			// A named static object (`const o = { length: 1, 0: 5 }; ta.set(o)`)
+			// is only read here, so a bag copy of its shape is exact — identity
+			// never leaves this call.
+			srcVal, err = e.emitStaticObjToBag(srcVal)
+		} else {
+			srcVal, err = e.emitBoxValueWidened(srcVal, args[0])
+		}
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureDynJSONC()
+		lenPtr := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenPtr))
+		srcPtrReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_any_arraylike_f64(i64 %s, ptr %s)", srcPtrReg, srcVal.Ref, lenPtr))
+		srcLenReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", srcLenReg, lenPtr))
+		isNullish := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNullish, srcLenReg))
+		nullishL := e.freshLabel("typedarray.set.nullish")
+		srcOkL := e.freshLabel("typedarray.set.srcok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNullish, nullishL, srcOkL))
+		e.emitLabel(nullishL)
+		e.emitThrowTypeError("Cannot convert undefined or null to object")
+		e.emitLabel(srcOkL)
+		srcElemTy = TypeF64
+	} else {
+		srcPtrReg, srcLenReg, srcElemTy, err = e.resolveArrayForHOF(args[0], pos)
+		if err != nil {
+			return Value{}, err
+		}
 	}
 
+	// %TypedArray%.prototype.set: targetOffset = ToIntegerOrInfinity(offset) —
+	// ToNumber (ToPrimitive with a number hint for an object, `"3"` → 3, an
+	// unparsable string / undefined → NaN), NaN → +0, truncation toward zero
+	// (`-0.9` → -0, in range). Then, in spec order: a negative offset (-∞
+	// included) is a RangeError, +∞ is a RangeError, and srcLength +
+	// targetOffset > targetLength is a RangeError. The range checks run on the
+	// double: an fptosi of ±∞ or a huge magnitude is poison, which is how a
+	// negative or infinite offset used to slip past the bounds check into an
+	// out-of-bounds write (ADR-01057). A statically Symbol-typed offset throws
+	// the ToNumber TypeError through coerce; a Symbol inside an `any` box is not
+	// distinguishable from an object today and reads as NaN → 0.
 	offsetReg := "0"
 	if len(args) == 2 {
 		offRaw, err := e.emitExpr(args[1])
 		if err != nil {
 			return Value{}, err
 		}
-		offsetReg = e.coerce(offRaw, TypeI64).Ref
+		if offRaw.Ty.IsSymbol {
+			// ToNumber(Symbol) throws; the call is dead from here (the throw is a
+			// terminator, so nothing below it may be emitted for this call).
+			e.emitThrowTypeError("Cannot convert a Symbol value to a number")
+			return Value{Ty: TypeVoid}, nil
+		}
+		var offD string
+		switch {
+		case offRaw.Ty.IsNull || offRaw.Ty.IR == "void":
+			offD = "0.0" // null → 0; undefined → NaN → 0
+		case offRaw.Ty.IsDynamic:
+			prim := e.emitAnyToPrimitive(offRaw.Ref, false)
+			offD = e.emitAnyToNum(Value{Ref: prim, Ty: TypeAny})
+		case isStringTy(offRaw.Ty):
+			boxed, err := e.emitBoxValue(offRaw)
+			if err != nil {
+				return Value{}, err
+			}
+			offD = e.emitAnyToNum(boxed)
+		default:
+			offD = e.coerce(offRaw, TypeF64).Ref
+		}
+		e.ensureMathFuncs()
+		isNaN := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fcmp uno double %s, %s", isNaN, offD, offD))
+		noNaN := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0.0, double %s", noNaN, isNaN, offD))
+		truncD := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call double @trunc(double %s)", truncD, noNaN))
+		dstLenD := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", dstLenD, dstLenReg))
+		isNeg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fcmp olt double %s, 0.0", isNeg, truncD))
+		// +∞ > targetLength, so one comparison covers both the infinity step and
+		// the plain out-of-range offset (a stricter check with srcLength follows).
+		beyond := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fcmp ogt double %s, %s", beyond, truncD, dstLenD))
+		badOff := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", badOff, isNeg, beyond))
+		badL := e.freshLabel("typedarray.set.badoff")
+		okL := e.freshLabel("typedarray.set.okoff")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", badOff, badL, okL))
+		e.emitLabel(badL)
+		e.emitInternalThrowKind("RangeError", e.internString("offset is out of bounds"))
+		e.emitLabel(okL)
+		offsetReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", offsetReg, truncD))
 	}
 
 	endReg := e.freshReg()
@@ -664,7 +771,9 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", tooBig, badL, okL))
 
 	e.emitLabel(badL)
-	e.emitInternalThrow(e.internString("source is too large for set()'s target, starting at the given offset"))
+	// Node: `RangeError: offset is out of bounds` (%TypedArray%.prototype.set
+	// step "If srcLength + targetOffset > targetLength, throw a RangeError").
+	e.emitInternalThrowKind("RangeError", e.internString("offset is out of bounds"))
 
 	e.emitLabel(okL)
 	idxAlloca := e.freshReg()

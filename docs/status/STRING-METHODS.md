@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 32/33 (~97%) · **Strict Coverage**: 18/33 (~55%).
+**Coverage**: 32/33 (~97%) · **Strict Coverage**: 20/33 (~61%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -25,8 +25,8 @@ Format: [Status page format](README.md#status-page-format).
 | `.trim()` | ✅ | | • Strips the full JS WhiteSpace/LineTerminator set (U+00A0, U+1680, U+2000–200A, U+2028/29, U+202F, U+205F, U+3000, U+FEFF — UTF-8-aware `__kml_ws_span`), not just ASCII ([ADR-00295](../adr/ADR-00295.md)) |
 | `.trimStart()` / `.trimEnd()` | ✅ | | • Same full-whitespace-set handling as `.trim()` ([ADR-00295](../adr/ADR-00295.md)) |
 | `.toString()` | ✅ | | • Identity on a string, matching JS — kept because Node code habitually calls it on values that are Buffers there but strings here (spawnSync results, stream chunks) |
-| `.toUpperCase()` | ✅ | • ASCII-only case mapping (`a`–`z`/`A`–`Z`) — `'café'.toUpperCase()` is `'CAFé'` (Node: `'CAFÉ'`); no Unicode case tables. | |
-| `.toLowerCase()` | ✅ | • ASCII-only case mapping — `'Σ'.toLowerCase()` is `'Σ'` (Node: `'σ'`); non-ASCII bytes pass through unchanged. | |
+| `.toUpperCase()` | ✅ | | • Full Unicode Default Case Conversion, as Node: simple mappings on every plane plus the SpecialCasing expansions (`'ß'` → `'SS'`, `'ﬁ'` → `'FI'`, `'ᾀ'` → `'ἈΙ'`) ([ADR-01075](../adr/ADR-01075.md)) |
+| `.toLowerCase()` | ✅ | | • Full Unicode Default Case Conversion including the context-sensitive final sigma (`'ΟΔΥΣΣΕΥΣ'` → `'οδυσσευς'`) and the `'İ'` → `'i̇'` expansion ([ADR-01075](../adr/ADR-01075.md)) |
 | `.repeat(n)` | ✅ | | |
 | `.padStart(len, pad?)` | ✅ | | • Empty pad string is a no-op, matching JS ([ADR-00004](../adr/ADR-00004.md)) |
 | `.padEnd(len, pad?)` | ✅ | | • Same empty-pad rule as `.padStart` ([ADR-00004](../adr/ADR-00004.md)) |

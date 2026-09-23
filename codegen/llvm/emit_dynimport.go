@@ -9,6 +9,7 @@ package llvm
 import (
 	"fmt"
 	"hash/fnv"
+	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -175,34 +176,121 @@ func (e *Emitter) emitImportCall(ex *ast.ImportCallExpression) (Value, error) {
 		}
 		// Load + run-once the island via the dlopen shim, keyed by the stable
 		// hash of the target's absolute path (computed identically here and in
-		// the island's own compile), then dlsym each annotated value export and
-		// pack them into the typed result object `await import()` yields. Real
-		// laziness: the target's top-level runs only now, on first import.
+		// the island's own compile). Real laziness: the target's top-level runs
+		// only now, on first import — to completion, or (TDD-00225) to its first
+		// top-level await, after which the island's module task is driven by
+		// this program's event loop through the island's poll export and the
+		// import() promise settles when the island's module promise does.
 		e.ensureDynImportShim()
+		e.ensureDynImportWatch()
 		hash := IslandHash(ex.ResolvedPath)
 		handle := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynimport_load(ptr %s)", handle, e.internString(hash)))
-
-		// Build the typed result object: for each field, dlsym the island's
-		// accessor and call it to read the export's value.
 		objTy := e.importCallResultObjectType(ex)
-		e.ensureCalloc()
-		obj := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", obj, objTy.StructSize()))
-		structIR := objTy.StructIR()
-		for _, f := range objTy.Fields {
-			symName := fmt.Sprintf("__kml_dynmod_%s_%s", hash, f.Name)
+		settleFn := e.emitImportSettleFn(hash, objTy)
+		sym := func(suffix string) string {
 			fp := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynimport_sym(ptr %s, ptr %s)", fp, handle, e.internString(symName)))
-			v := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call %s %s()", v, f.Ty.IR, fp))
-			idx, _, _ := objTy.FieldIndex(f.Name)
-			gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, obj, idx))
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", f.Ty.IR, v, gep, f.Ty.Align()))
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynimport_sym(ptr %s, ptr %s)", fp, handle, e.internString("__kml_dynmod_"+hash+"_"+suffix)))
+			return fp
 		}
-		return e.wrapResolvedPromise(Value{Ref: obj, Ty: objTy}), nil
+		stateFn, pollFn, errFn, dlFn := sym("state"), sym("poll"), sym("error"), sym("next_deadline_ns")
+		prom := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
+		e.emitInstr(fmt.Sprintf("call void @__kml_dynimport_watch(ptr %s, ptr %s, ptr @%s, ptr %s, ptr %s, ptr %s, ptr %s)",
+			handle, prom, settleFn, stateFn, pollFn, errFn, dlFn))
+		promTy := PromiseOf(objTy)
+		promTy.PromiseTask = true
+		return Value{Ref: prom, Ty: promTy}, nil
 	default: // "eager"
 		return Value{}, fmt.Errorf("%d:%d: dynamic import('%s') under -dynamic-import=eager — the eager result-object backend (TDD-00055 Stage 2) is not yet implemented; the frontend and resolver edge are in place. Pass -dynamic-import=lazy for the shared-library backend once it lands", ex.GetPos().Line, ex.GetPos().Col, lit.Value)
 	}
+}
+
+// emitIslandTaskGlue appends the island exports the importer's loop drives an
+// island with a top-level await through (TDD-00225): `_state` (the module
+// promise's state word — 0 pending / 1 fulfilled / 2 rejected; 1 for an island
+// without a top-level await, whose init ran it to completion), `_poll` (one
+// non-blocking turn of the island's own loop, then the state, with 0x100 set
+// when the loop reported idle — nothing in the island can wake it any more),
+// `_next_deadline_ns` (the island's earliest pending timer on the shared
+// monotonic clock, 0 for none) and `_error` (the rejection value). Written into
+// the final module text, so every runtime piece it references was ensured
+// earlier (emitter.go, where islandTask is decided).
+func (e *Emitter) emitIslandTaskGlue(out *strings.Builder) {
+	h := e.islandHash
+	if !e.moduleTask {
+		fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_state() {\nentry:\n  ret i64 1\n}\n", h)
+		fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_poll() {\nentry:\n  ret i64 257\n}\n", h)
+		fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_next_deadline_ns() {\nentry:\n  ret i64 0\n}\n", h)
+		fmt.Fprintf(out, "define ptr @__kml_dynmod_%s_error() {\nentry:\n  ret ptr null\n}\n", h)
+		return
+	}
+	fmt.Fprintf(out, `define i64 @__kml_dynmod_%s_state() {
+entry:
+  %%p = load ptr, ptr @__kml_module_promise, align 8
+  %%st_p = getelementptr %s, ptr %%p, i32 0, i32 0
+  %%st = load i64, ptr %%st_p, align 8
+  ret i64 %%st
+}
+define i64 @__kml_dynmod_%s_poll() {
+entry:
+  store i8 1, ptr @__kml_loop_nowait, align 1
+  store i8 1, ptr @__kml_loop_oneshot, align 1
+  store i1 false, ptr @__kml_loop_idle, align 1
+  call void @__kml_event_loop_run()
+  store i8 0, ptr @__kml_loop_oneshot, align 1
+  store i8 0, ptr @__kml_loop_nowait, align 1
+  %%idle = load i1, ptr @__kml_loop_idle, align 1
+  %%idlebit = select i1 %%idle, i64 256, i64 0
+  %%p = load ptr, ptr @__kml_module_promise, align 8
+  %%st_p = getelementptr %s, ptr %%p, i32 0, i32 0
+  %%st = load i64, ptr %%st_p, align 8
+  %%r = or i64 %%st, %%idlebit
+  ret i64 %%r
+}
+define ptr @__kml_dynmod_%s_error() {
+entry:
+  %%p = load ptr, ptr @__kml_module_promise, align 8
+  %%v0_p = getelementptr %s, ptr %%p, i32 0, i32 2
+  %%v0 = load i64, ptr %%v0_p, align 8
+  %%err = inttoptr i64 %%v0 to ptr
+  ret ptr %%err
+}
+`, h, promiseStructIR, h, promiseStructIR, h, promiseStructIR)
+	if !e.usedTimers {
+		fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_next_deadline_ns() {\nentry:\n  ret i64 0\n}\n", h)
+		return
+	}
+	// Earliest pending entry of the timer queue ({ id, fireAtNs, intervalMs,
+	// closure }, intervalMs == -1 means cancelled/done — emit_timers.go).
+	fmt.Fprintf(out, `define i64 @__kml_dynmod_%s_next_deadline_ns() {
+entry:
+  %%len = load i64, ptr @__kml_timer_len, align 8
+  %%data = load ptr, ptr @__kml_timer_data, align 8
+  br label %%loop
+loop:
+  %%i = phi i64 [ 0, %%entry ], [ %%inext, %%next ]
+  %%best = phi i64 [ 0, %%entry ], [ %%best2, %%next ]
+  %%inb = icmp slt i64 %%i, %%len
+  br i1 %%inb, label %%body, label %%done
+body:
+  %%slot = getelementptr { i64, i64, i64, ptr }, ptr %%data, i64 %%i
+  %%iv_p = getelementptr { i64, i64, i64, ptr }, ptr %%slot, i32 0, i32 2
+  %%iv = load i64, ptr %%iv_p, align 8
+  %%live = icmp ne i64 %%iv, -1
+  %%fa_p = getelementptr { i64, i64, i64, ptr }, ptr %%slot, i32 0, i32 1
+  %%fa = load i64, ptr %%fa_p, align 8
+  %%none = icmp eq i64 %%best, 0
+  %%sooner = icmp slt i64 %%fa, %%best
+  %%take0 = or i1 %%none, %%sooner
+  %%take = and i1 %%live, %%take0
+  %%best2 = select i1 %%take, i64 %%fa, i64 %%best
+  br label %%next
+next:
+  %%inext = add i64 %%i, 1
+  br label %%loop
+done:
+  ret i64 %%best
+}
+`, h)
 }

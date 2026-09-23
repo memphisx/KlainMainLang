@@ -89,6 +89,7 @@ func (e *Emitter) emitWorkerModules(prog *ast.Program) error {
 		e.workerEntries[wm.Path] = info
 	}
 
+	anyModuleTask := false
 	for _, wm := range prog.WorkerModules {
 		info := e.workerEntries[wm.Path]
 		savedAllocas := e.allocas
@@ -107,6 +108,16 @@ func (e *Emitter) emitWorkerModules(prog *ast.Program) error {
 		e.blockDone = false
 		e.pushScope()
 		e.currentWorkerMod = wm.Path
+		// TDD-00224 Stage 2: a worker module with a top-level await takes the
+		// entry program's shape on its own thread — its statements become the
+		// body of a module task, and the entry symbol only spawns that task;
+		// the worker thread then runs its loop (runtime_worker.go's
+		// @__kml_worker_main), which resumes the task from the reactions it
+		// parks in, and ends the worker with code 13 if the module promise
+		// never settled.
+		moduleTask := stmtsHaveTopLevelAwait(wm.Body)
+		savedInModuleTask := e.inModuleTask
+		e.inModuleTask = moduleTask
 
 		var emitErr error
 		for _, stmt := range wm.Body {
@@ -116,12 +127,30 @@ func (e *Emitter) emitWorkerModules(prog *ast.Program) error {
 		}
 		if emitErr == nil {
 			e.emitTerminator("ret void")
-			e.functions.WriteString(fmt.Sprintf("\ndefine void @%s() {\nentry:\n", info.Symbol))
-			e.functions.WriteString(e.allocas.String())
-			e.functions.WriteString(e.body.String())
-			e.functions.WriteString("}\n")
+			if moduleTask {
+				e.functions.WriteString(fmt.Sprintf("\ndefine internal void @%s_body(ptr %%__kml_module_args) {\nentry:\n", info.Symbol))
+				e.functions.WriteString(e.allocas.String())
+				e.functions.WriteString(e.body.String())
+				e.functions.WriteString("}\n")
+				e.ensureModuleTaskRuntime()
+				e.functions.WriteString(fmt.Sprintf(`
+define void @%s() {
+entry:
+  %%p = call ptr @__kml_task_alloc_promise()
+  store ptr %%p, ptr @__kml_module_promise, align 8
+  %%t = call ptr @__kml_spawn_task_ex(ptr @%s_body, ptr null, ptr %%p, i64 %d, ptr @__kml_module_trampoline)
+  ret void
+}
+`, info.Symbol, info.Symbol, moduleTaskStackBytes()))
+			} else {
+				e.functions.WriteString(fmt.Sprintf("\ndefine void @%s() {\nentry:\n", info.Symbol))
+				e.functions.WriteString(e.allocas.String())
+				e.functions.WriteString(e.body.String())
+				e.functions.WriteString("}\n")
+			}
 		}
 
+		e.inModuleTask = savedInModuleTask
 		e.currentWorkerMod = ""
 		e.allocas = savedAllocas
 		e.body = savedBody
@@ -133,8 +162,59 @@ func (e *Emitter) emitWorkerModules(prog *ast.Program) error {
 		if emitErr != nil {
 			return fmt.Errorf("worker module %s: %w", wm.Path, emitErr)
 		}
+		if moduleTask {
+			anyModuleTask = true
+		}
 	}
+	e.emitWorkerRunLoop(anyModuleTask)
 	return nil
+}
+
+// emitWorkerRunLoop defines @__kml_worker_run_loop(ctrl), what a worker thread
+// runs after its module's entry (runtime_worker.go's @__kml_worker_main). With
+// no worker module task it is the plain event loop. With one, it is main()'s
+// shape from TDD-00224: run the loop; if the module task parked asking for an
+// inline loop run (@__kml_module_run_loop), resume it and run the loop again;
+// when the loop finally returns with the module promise still pending, print
+// Node's warning and make the worker's exit code 13 — the worker ends, the
+// parent's 'exit' listener sees 13, and the process goes on.
+func (e *Emitter) emitWorkerRunLoop(anyModuleTask bool) {
+	if !anyModuleTask {
+		e.emitGlobal("define void @__kml_worker_run_loop(ptr %ctrl) {\nentry:\n  call void @__kml_event_loop_run()\n  ret void\n}")
+		return
+	}
+	e.ensureModuleTaskRuntime()
+	e.ensureWriteDecl()
+	e.ensureLoopTurn() // owns @.kml_tla_unsettled
+	e.emitGlobal(fmt.Sprintf(`define void @__kml_worker_run_loop(ptr %%ctrl) {
+entry:
+  br label %%loop
+loop:
+  call void @__kml_event_loop_run()
+  %%wants = load i1, ptr @__kml_module_wants_loop, align 1
+  br i1 %%wants, label %%resume, label %%check
+resume:
+  store i1 false, ptr @__kml_module_wants_loop, align 1
+  %%mt = load ptr, ptr @__kml_module_task, align 8
+  call void @__kml_task_resume(ptr %%mt)
+  br label %%loop
+check:
+  %%prom = load ptr, ptr @__kml_module_promise, align 8
+  %%hasprom = icmp ne ptr %%prom, null
+  br i1 %%hasprom, label %%state, label %%done
+state:
+  %%st_p = getelementptr %s, ptr %%prom, i32 0, i32 0
+  %%st = load i64, ptr %%st_p, align 8
+  %%pending = icmp eq i64 %%st, 0
+  br i1 %%pending, label %%unsettled, label %%done
+unsettled:
+  %%w = call i64 @write(i32 2, ptr @.kml_tla_unsettled, i64 %d)
+  %%code_p = getelementptr %s, ptr %%ctrl, i32 0, i32 7
+  store i64 13, ptr %%code_p, align 8
+  br label %%done
+done:
+  ret void
+}`, promiseStructIR, len(tlaUnsettledMsg), workerCtrlIR))
 }
 
 // emitNewWorkerExpression emits `new Worker('./w.ts', { workerData: v })`:
@@ -286,6 +366,15 @@ func (e *Emitter) emitWorkerListenerAdapterWrapped(userClosure Value, payloadTy 
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%uc, i32 0, i32 1", epSlot))
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epSlot))
 	v := e.decodeWorkerPayload("%w0", "%w1", payloadTy)
+	if wrapField == "message" {
+		// onerror: the envelope carries the thrown Error object; the browser
+		// ErrorEvent's `message` is its message string.
+		mp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", mp, errorObjType.StructIR(), v.Ref))
+		m := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", m, mp))
+		v = Value{Ref: m, Ty: TypePtr}
+	}
 	evt := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", evt))
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", payloadTy.IR, v.Ref, evt))
@@ -440,9 +529,11 @@ func (e *Emitter) emitWorkerMethodCall(obj ast.Expression, method string, args [
 			payloadTy = TypeI64
 			slot = 11
 		case "error":
-			// The payload is the uncaught error's message string (not an
-			// Error object — see the status page caveat).
-			payloadTy = TypePtr
+			// The payload is the uncaught Error object itself (`e.message`,
+			// `e.name`, `e instanceof RangeError`); a non-Error throw arrives
+			// wrapped in an `Error` carrying its rendered message
+			// (@__kml_worker_err_obj, runtime_worker.go).
+			payloadTy = errorObjType
 			slot = 12
 		default:
 			return Value{}, fmt.Errorf("%d:%d: worker.on supports 'message', 'error' and 'exit' (got '%s')", pos.Line, pos.Col, evt)

@@ -1095,6 +1095,104 @@ func (e *Emitter) emitFsReadSync(args []ast.Expression, pos ast.Pos) (Value, err
 	return Value{Ref: n, Ty: TypeI64}, nil
 }
 
+// emitFsFchmodSync implements fs.fchmodSync(fd, mode) — chmodSync over an
+// open fd (ADR-01078). Windows applies the read-only-bit model through the
+// handle.
+func (e *Emitter) emitFsFchmodSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("%d:%d: fs.fchmodSync takes exactly 2 arguments (fd, mode)", pos.Line, pos.Col)
+	}
+	fv, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	mv, err := e.emitExpr(args[1])
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureFsFchmod()
+	e.emitInstr(fmt.Sprintf("call void @__kml_fs_fchmod(i64 %s, i64 %s)", e.coerce(fv, TypeI64).Ref, e.coerce(mv, TypeI64).Ref))
+	return Value{Ty: TypeVoid}, nil
+}
+
+// statFsFieldOrder is the osinfo sidecar's out[] order for statfs — and
+// StatFsType's field order.
+var statFsFieldOrder = []string{"type", "bsize", "frsize", "blocks", "bfree", "bavail", "files", "ffree"}
+
+// StatFsType is the `fs.StatFs` object statfsSync returns.
+func StatFsType() Type {
+	fields := make([]Field, len(statFsFieldOrder))
+	for i, n := range statFsFieldOrder {
+		fields[i] = Field{Name: n, Ty: TypeI64}
+	}
+	return ObjectType(fields)
+}
+
+// emitFsStatfsSync implements fs.statfsSync(path) (ADR-01078): statfs(2) on
+// POSIX, GetDiskFreeSpaceW of the volume on Windows (where type/files/ffree
+// are 0, as Node reports). The `{ bigint }` option is accepted and ignored —
+// the fields are numbers either way.
+func (e *Emitter) emitFsStatfsSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: fs.statfsSync takes (path[, options])", pos.Line, pos.Col)
+	}
+	pv, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	pv = e.coerce(pv, TypePtr)
+	e.ensureFsStatfs()
+	e.ensureMalloc()
+	ty := StatFsType()
+	obj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", obj, ty.StructSize()))
+	// The struct is eight consecutive i64 — exactly the sidecar's out[8].
+	e.emitInstr(fmt.Sprintf("call void @__kml_fs_statfs_checked(ptr %s, ptr %s)", pv.Ref, obj))
+	return Value{Ref: obj, Ty: ty}, nil
+}
+
+// emitProcessUmask implements process.umask([mask]) (ADR-01078): with no
+// argument, read the mask the way libuv does (set 0, restore); with one, set
+// it and return the previous. Windows' CRT keeps its own `_umask` (Node
+// returns 0 by default there).
+func (e *Emitter) emitProcessUmask(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) > 1 {
+		return Value{}, fmt.Errorf("%d:%d: process.umask takes 0 or 1 arguments (mask?)", pos.Line, pos.Col)
+	}
+	if !e.usedUmask {
+		e.usedUmask = true
+		e.emitGlobal(fmt.Sprintf("declare i32 @%s(i32 noundef)", umaskSymbol()))
+	}
+	if len(args) == 1 {
+		mv, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		m32 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", m32, e.coerce(mv, TypeI64).Ref))
+		old := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @%s(i32 %s)", old, umaskSymbol(), m32))
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = zext i32 %s to i64", r, old))
+		return Value{Ref: r, Ty: TypeI64}, nil
+	}
+	old := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @%s(i32 0)", old, umaskSymbol()))
+	e.emitInstr(fmt.Sprintf("call i32 @%s(i32 %s)", umaskSymbol(), old))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = zext i32 %s to i64", r, old))
+	return Value{Ref: r, Ty: TypeI64}, nil
+}
+
+// umaskSymbol is the C symbol of umask on the build host: the UCRT exports
+// only the underscore form.
+func umaskSymbol() string {
+	if targetGOOS() == "windows" {
+		return "_umask"
+	}
+	return "umask"
+}
+
 // emitFsFstatSync implements fs.fstatSync(fd) — statSync over an open fd.
 func (e *Emitter) emitFsFstatSync(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {

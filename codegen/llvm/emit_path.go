@@ -87,6 +87,23 @@ func (e *Emitter) emitPathResolve(f pathFlavor, args []ast.Expression, pos ast.P
 	if f == pathWin32 {
 		return e.emitPathWin32Variadic("resolve", args, pos)
 	}
+	segs := make([]Value, 0, len(args))
+	for _, a := range args {
+		segVal, err := e.emitExpr(a)
+		if err != nil {
+			return Value{}, err
+		}
+		segs = append(segs, segVal)
+	}
+	return e.emitPathResolveValues(f, segs, pos)
+}
+
+// emitPathResolveValues is emitPathResolve over already-evaluated segments
+// (POSIX flavor only; the win32 flavor takes the sidecar's variadic path).
+func (e *Emitter) emitPathResolveValues(f pathFlavor, segs []Value, pos ast.Pos) (Value, error) {
+	if f == pathWin32 {
+		return Value{}, fmt.Errorf("%d:%d: internal: emitPathResolveValues is POSIX-only", pos.Line, pos.Col)
+	}
 	e.ensureProcessCwd()
 	accPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accPtr))
@@ -95,11 +112,7 @@ func (e *Emitter) emitPathResolve(f pathFlavor, args []ast.Expression, pos ast.P
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cwdReg, accPtr))
 
 	sep := Value{Ref: e.internString("/"), Ty: TypePtr}
-	for _, a := range args {
-		segVal, err := e.emitExpr(a)
-		if err != nil {
-			return Value{}, err
-		}
+	for _, segVal := range segs {
 		segVal = e.coerce(segVal, TypePtr)
 		isAbs := e.emitPathStartsWithSlash(segVal)
 

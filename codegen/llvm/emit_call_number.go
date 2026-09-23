@@ -271,11 +271,19 @@ func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Valu
 		}
 		return Value{Ref: "0", Ty: TypeI64}, nil
 	}
-	v, err := e.emitExpr(args[0])
+	v, err := e.emitExprKeepNullable(args[0])
 	if err != nil {
 		return Value{}, err
 	}
 	switch {
+	case v.Ty.IsDynamic:
+		// Number(x: any) is ordinary typed TS, so it runs in both lanes:
+		// ToPrimitive(number) then ToNumber (ADR-01057). Checked before the
+		// numeric case: the NaN-box is an i64, so IsInteger() is true for it.
+		prim := e.emitAnyToPrimitive(v.Ref, false)
+		return Value{Ref: e.emitAnyToNum(Value{Ref: prim, Ty: TypeAny}), Ty: TypeF64}, nil
+	case isNullableScalar(v.Ty):
+		return e.emitUnaryPlus(v, pos) // absent → 0 (null) / NaN (undefined)
 	case v.Ty.IR == "i1":
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", r, v.Ref))
@@ -294,7 +302,9 @@ func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Valu
 		e.emitInstr(fmt.Sprintf("%s = call double @__kml_to_number(ptr %s)", r, v.Ref))
 		return Value{Ref: r, Ty: TypeF64}, nil
 	}
-	return Value{}, fmt.Errorf("%d:%d: Number() conversion from this operand type is not supported", pos.Line, pos.Col)
+	// Everything else (null/undefined-typed values, nullable scalars, objects,
+	// arrays, Symbol) is exactly unary `+`.
+	return e.emitUnaryPlus(v, pos)
 }
 
 func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error) {

@@ -63,7 +63,7 @@ func TestE2EInspectDepthCap(t *testing.T) {
 	assertOutput(t, `
 const deep = { a: { b: { c: { d: { e: { f: 1 } } } } } }
 console.log(deep)
-`, "{ a: { b: { c: { d: { e: [Object] } } } } }")
+`, "{ a: { b: { c: [Object] } } }")
 }
 
 func TestE2EInspectStringCoercionStrict(t *testing.T) {

@@ -30,7 +30,7 @@
               "One listener per event, arrow-function literals only",
               "One message type per direction, declared by annotation",
               "Payloads must be structured-clone-safe; no arrays through `onmessage`/`e.data`",
-              "`'error'` carries the message string, not an Error object; no `self.onerror`",
+              "`'error'` delivers the thrown Error object; a non-Error throw (`throw \"x\"`) arrives wrapped in an `Error` carrying its message, where Node delivers the value itself; no `self.onerror`",
               "`terminate()` is cooperative, keeps queued messages, always exits 1",
               "Worker path must be a string literal; a worker module can't also be imported, can't spawn workers, and its named functions can't read its own top-level bindings",
               "`-mm=manual` leaks per message; no combining with `http.listen({workers:N})`"

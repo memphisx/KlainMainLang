@@ -31,6 +31,7 @@
             ],
             "notes": [
               "Bare global functions, matching real JS (not a namespace)",
+              "The delay is clamped to `[1, 2^31-1]` ms as Node does — an omitted, `0`, negative or oversized delay is 1 ms, so a chain of zero-delay timers advances one millisecond per link (`setInterval` too; `setImmediate` is not clamped) ([ADR-01071](../adr/ADR-01071.md))",
               "See [ADR-00031](../adr/ADR-00031.md)"
             ]
           },

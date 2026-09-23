@@ -26,11 +26,21 @@ func (e *Emitter) ensureDynJSONC() {
 		return
 	}
 	e.usedDynJSONC = true
-	e.ensureDtoa() // dynjson.c calls __kml_dtoa for float rendering
+	e.ensureDtoa()          // dynjson.c calls __kml_dtoa for float rendering
+	e.ensureInspectReduce() // and the util.inspect layout/quote helpers (ADR-01067)
+	// The any-array element helpers (ADR-01059) call ToPrimitive/ToNumber and
+	// the dynamic-object getter; the C object references them unconditionally,
+	// so they must be defined whenever the file is linked in.
+	e.ensureAnyOps()
+	e.ensureAnyToPrimitive()
+	e.ensureDynObj()
 	e.emitGlobal(`declare ptr @__kml_dynjson_stringify(i64, i64, ptr, ptr)`)
 	e.emitGlobal(`declare ptr @__kml_dynarr_join(ptr)`)
-	e.emitGlobal(`declare ptr @__kml_array_join(ptr, i64, i8)`)    // TDD-00212
-	e.emitGlobal(`declare ptr @__kml_array_inspect(ptr, i64, i8)`) // TDD-00212 Stage 2
-	e.emitGlobal(`declare ptr @__kml_dynarr_inspect(ptr)`)         // TDD-00212 Stage 2
-	e.emitGlobal(`declare ptr @__kml_dynobj_inspect(ptr)`)         // dynamic-object console.log form
+	e.emitGlobal(`declare ptr @__kml_array_join(ptr)`)             // TDD-00212; takes the box (ADR-01059)
+	e.emitGlobal(`declare ptr @__kml_array_inspect_at(ptr, i64)`)  // TDD-00212 Stage 2; takes the box + nesting depth (ADR-01067)
+	e.emitGlobal(`declare ptr @__kml_dynarr_inspect_at(ptr, i64)`) // TDD-00212 Stage 2
+	e.emitGlobal(`declare ptr @__kml_dynobj_inspect_at(ptr, i64)`) // dynamic-object console.log form
+	// ADR-01059: element access through an `any` holding a boxed static array.
+	e.emitGlobal(`declare i64 @__kml_anyarr_get_by_key(ptr, ptr)`)
+	e.emitGlobal(`declare ptr @__kml_any_arraylike_f64(i64, ptr)`)
 }

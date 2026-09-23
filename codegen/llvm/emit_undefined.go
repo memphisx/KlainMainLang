@@ -20,8 +20,23 @@ import (
 // element — its {ptr,i64} aggregate has no spare absent state, ADR-00246; a
 // by-value tuple; a dynamic element, whose box carries undefined natively; a
 // type that is already nullable).
+// reduceAccWidenable reports whether a reduce accumulator of type t can be
+// widened to `t | undefined` under `-compat=js` when the callback may fall off
+// the end: a plain scalar (which gains the { i1, T } aggregate) or a pointer
+// value (a string/object, whose null pointer is the absence). Arrays and
+// already-nullable/dynamic values keep the existing collapse.
+func reduceAccWidenable(t Type) bool {
+	if t.Nullable || t.IsDynamic || t.IsArray || t.IsNull || t.IsUndefined || t.IR == "" || t.IR == "void" {
+		return false
+	}
+	w := undefinedableElem(t)
+	return isNullableScalar(w) || w.IR == "ptr"
+}
+
 func undefinedableElem(t Type) Type {
-	if t.Nullable || t.IsDynamic || t.IsNull || t.IsTuple ||
+	// A heap tuple is a pointer like any object, so null is its absence; only
+	// the by-value aggregate form has no spare state (ADR-01063).
+	if t.Nullable || t.IsDynamic || t.IsNull || (t.IsTuple && t.TupleByVal) ||
 		t.IR == "" || t.IR == "void" {
 		return t
 	}
@@ -33,6 +48,52 @@ func undefinedableElem(t Type) Type {
 	t.Nullable = true
 	t.IsUndefined = true
 	return t
+}
+
+// emitFieldPresent loads an object's field and reports (present, value): for a
+// skippable `T | undefined` field (jsonFieldSkippable) `present` is the
+// nullable-scalar presence bit / a non-null header or pointer, else the
+// constant `true`. The one predicate JSON.stringify, util.inspect, Object.keys
+// and `in`/hasOwnProperty share for "is this optional field there" (ADR-01063).
+func (e *Emitter) emitFieldPresent(objRef string, objTy Type, field Field) (present string, val Value) {
+	idx, _, _ := objTy.FieldIndex(field.Name)
+	gepReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objTy.StructIR(), objRef, idx))
+	if field.Ty.IsArray {
+		val = e.loadArrayFieldValue(gepReg, field.Ty) // header-pointer slot (TDD-00213 S2)
+	} else {
+		loadReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
+		val = Value{Ref: loadReg, Ty: field.Ty}
+	}
+	// An UncheckedIndex field (a spawnSync result's stdout, typed plain `T`
+	// by tsc) always has its key; only its value may be undefined.
+	if !jsonFieldSkippable(field.Ty) || field.Ty.UncheckedIndex {
+		return "true", val
+	}
+	switch {
+	case isNullableScalar(field.Ty):
+		present, _ = e.nullableScalarAggParts(val)
+	case field.Ty.IsArray:
+		dataPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, val.Ref))
+		present = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, dataPtr))
+	default:
+		present = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, val.Ref))
+	}
+	return present, val
+}
+
+// hasSkippableField reports whether any field can be absent at runtime.
+func hasSkippableField(fields []Field) bool {
+	for _, f := range fields {
+		if jsonFieldSkippable(f.Ty) {
+			return true
+		}
+	}
+	return false
 }
 
 // indexReadType is the type an array element read `a[i]` yields for element

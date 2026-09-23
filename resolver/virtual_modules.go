@@ -217,7 +217,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"createReadStream": true, "createWriteStream": true, "watch": true,
 		// Stat/handle family — implemented in codegen (inferExprType) and long
 		// usable via the `fs.` namespace form; also valid as named imports.
-		"statSync": true, "lstatSync": true, "fstatSync": true,
+		"statSync": true, "lstatSync": true, "fstatSync": true, "fchmodSync": true, "statfsSync": true,
 		"realpathSync": true, "mkdtempSync": true, "readlinkSync": true, "linkSync": true, "utimesSync": true, "futimesSync": true,
 		"openSync": true, "closeSync": true, "writeSync": true, "readSync": true,
 		"fsyncSync": true, "fdatasyncSync": true, "ftruncateSync": true,
@@ -249,6 +249,10 @@ var virtualModuleMembers = map[string]map[string]bool{
 	"os": {
 		"platform": true, "homedir": true, "tmpdir": true, "hostname": true,
 		"totalmem": true, "freemem": true, "cpus": true, "EOL": true,
+		"type": true, "release": true, "version": true, "machine": true,
+		"arch": true, "endianness": true, "uptime": true, "loadavg": true,
+		"userInfo": true, "availableParallelism": true, "networkInterfaces": true,
+		"devNull": true,
 	},
 	"querystring": {"parse": true, "stringify": true},
 	"zlib": {

@@ -2174,23 +2174,24 @@ func (e *Emitter) emitAwaitSettledResult(promReg string, resultTy Type) Value {
 
 // generatorGCStackbottomOps returns the gc-mode-only GC_stackbottom
 // repoint/restore IR text around a .next() call's own swapcontext — empty
-// strings in manual mode. Mirrors runtime_http.go's identical
-// connection-fiber launch/resume pattern exactly (repoint to the target
-// fiber's own stack's high end before swapping in, restore to the real
-// process stack right after the swap returns, unconditionally — covers
-// both a mid-body yield and the generator running to completion in one
-// shot, same reasoning as the HTTP case's own comment).
+// strings in manual mode. Repoint to the generator's own stack's high end
+// before swapping in; right after the swap returns (a mid-body yield or the
+// body running to completion alike), restore the stack bottom the *caller*
+// had. That is not always the process stack: the caller may itself run on a
+// coroutine stack — the module task of a top-level-await entry (ADR-01050),
+// an async task, another generator. Restoring the process stack there left
+// the collector scanning from a coroutine SP to the process stack base,
+// across unmapped memory (a Linux -mm=gc segfault).
 func (e *Emitter) generatorGCStackbottomOps(genObj string, genTy Type) (setOp, restoreOp string) {
 	if !e.isGCMode() {
 		return "", ""
 	}
+	saved := e.freshReg()
 	stack := e.loadGeneratorField(genObj, genTy, GeneratorStackField)
 	high := e.freshReg()
-	setOp = fmt.Sprintf("  %s = getelementptr i8, ptr %s, i64 %d\n  %s\n",
-		high, stack.Ref, fiberStackBytes, e.gcSBStore(high))
-	origBottom := e.freshReg()
-	restoreOp = fmt.Sprintf("  %s = load ptr, ptr @__kml_gc_orig_stackbottom, align 8\n  %s\n",
-		origBottom, e.gcSBStore(origBottom))
+	setOp = fmt.Sprintf("  %s\n  %s = getelementptr i8, ptr %s, i64 %d\n  %s\n",
+		e.gcSBLoad(saved), high, stack.Ref, fiberStackBytes, e.gcSBStore(high))
+	restoreOp = fmt.Sprintf("  %s\n", e.gcSBStore(saved))
 	return setOp, restoreOp
 }
 

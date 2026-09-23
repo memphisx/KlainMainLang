@@ -40,25 +40,34 @@
             "status": "implemented",
             "notes": [
               "On a bare `any` value: runtime key enumeration of the D1 dynamic object's bag, `[]` for a boxed primitive, TypeError for null/undefined — matching JS ([TDD-00155](../tdd/TDD-00155.md) Stage 1)",
-              "Keys enumerate in ES own-property order (array-index keys ascending numeric first, then insertion order) across `Object.keys`/`values`/`entries`, `for...in`, spread and `JSON.stringify`, for static and dynamic objects alike ([ADR-00996](../adr/ADR-00996.md))"
+              "Keys enumerate in ES own-property order (array-index keys ascending numeric first, then insertion order) across `Object.keys`/`values`/`entries`, `for...in`, spread and `JSON.stringify`, for static and dynamic objects alike ([ADR-00996](../adr/ADR-00996.md))",
+              "An omitted optional field (`x?: T`) is not a key — filtered at runtime by its presence, as `JSON.stringify` already did ([ADR-01063](../adr/ADR-01063.md))"
             ],
-            "caveats": []
+            "caveats": [
+              "`Object.values`/`entries`/`for...in` still list an omitted optional field (as `undefined`); only `keys` filters"
+            ]
           },
           {
             "feature": "`Object.values(obj)`",
             "status": "implemented",
             "caveats": [
-              "A heterogeneous object's values are stringified ([ADR-00492](../adr/ADR-00492.md)); a homogeneous shape returns a real typed `V[]`"
+              "A heterogeneous object's values are stringified ([ADR-00492](../adr/ADR-00492.md)); a homogeneous shape returns a real typed `V[]`",
+              "On a *static* array (`Object.values([7, 8])`) it is a clean rejection; a bare `any` holding an array answers its elements"
+            ],
+            "notes": [
+              "On a bare `any` value: the D1 dynamic object's enumerable own values (or an array's elements) as a dynamic array, TypeError for null/undefined, `[]` for a boxed primitive ([ADR-01077](../adr/ADR-01077.md))"
             ]
           },
           {
             "feature": "`Object.entries(obj)`",
             "status": "implemented",
             "caveats": [
-              "A heterogeneous object's values are stringified — its value union is representable only as `any`, whose operators aren't dispatched yet ([ADR-00492](../adr/ADR-00492.md)); a homogeneous shape returns real typed `[string, V]` tuples"
+              "A heterogeneous object's values are stringified — its value union is representable only as `any`, whose operators aren't dispatched yet ([ADR-00492](../adr/ADR-00492.md)); a homogeneous shape returns real typed `[string, V]` tuples",
+              "On a *static* array (`Object.entries([7, 8])`) it is a clean rejection; a bare `any` holding an array answers `[\"0\", v0], …`"
             ],
             "notes": [
-              "Returns a real `[string, string][]` tuple array; destructure with `for (const [k, v] of Object.entries(obj))`"
+              "Returns a real `[string, string][]` tuple array; destructure with `for (const [k, v] of Object.entries(obj))`",
+              "On a bare `any` value: a dynamic array of `[key, value]` pairs — the dynamic object's enumerable own entries in ES order, or an array's index/element pairs — TypeError for null/undefined, `[]` for a boxed primitive ([ADR-01077](../adr/ADR-01077.md))"
             ]
           },
           {
@@ -141,7 +150,7 @@
               "The key must be a string literal — a runtime-computed key is a clean compile error (no runtime field-name table to check it against) ([ADR-00065](../adr/ADR-00065.md))"
             ],
             "notes": [
-              "Object shapes are fully structural/static, so this is a compile-time `FieldIndex` lookup, not a runtime scan"
+              "Object shapes are fully structural/static, so this is a compile-time `FieldIndex` lookup, not a runtime scan — except an optional field (`x?: T`), whose answer is its runtime presence (`\"age\" in { name }` is `false`, ADR-01063)"
             ]
           },
           {
@@ -156,7 +165,10 @@
           },
           {
             "feature": "Object spread `{ ...obj, key: val }`",
-            "status": "implemented"
+            "status": "implemented",
+            "notes": [
+              "Spreading a bare `any` (`{ ...process.env, X: '1' }`, a `JSON.parse` result) builds the literal as a D1 dynamic object, since its key set exists only at run time; the result is `any` ([ADR-01077](../adr/ADR-01077.md))"
+            ]
           },
           {
             "feature": "Computed property keys `{ [expr]: value }`",

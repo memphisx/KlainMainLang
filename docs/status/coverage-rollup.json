@@ -5,8 +5,8 @@
     {
       "section": "TypeScript Core Language",
       "total": {
-        "impl": 356,
-        "total": 362,
+        "impl": 357,
+        "total": 363,
         "pct": 98
       },
       "rows": [
@@ -53,7 +53,7 @@
             "total": 3,
             "pct": 0
           },
-          "caveats": "Definite-assignment is enforced for a typed `let` read before assignment (`var` is exempt — hoisted and zero/`undefined`-initialized, no TDZ, [ADR-00454](../adr/ADR-00454.md)) — including `if`/`else`, `do/while`, and `switch`-with-`default` control flow — but the analysis is sound-not-complete: a binding assigned only inside a maybe-skipped `for`/`while` body, or in a `try` that may throw first, still escapes (reading its deterministic zero/`undefined` default — [ADR-00215](../adr/ADR-00215.md) — not uninitialized memory); correlated conditions (`if (c) {x=1} if (!c) {x=2}`) are conservatively *rejected*, matching TypeScript. See [TDD-00071](../tdd/TDD-00071.md)/[ADR-00210](../adr/ADR-00210.md)–[ADR-00215](../adr/ADR-00215.md)"
+          "caveats": "Definite-assignment is enforced for a typed `let` read before assignment (`var` is exempt — hoisted, no TDZ, `undefined` when its declaration was skipped, [ADR-00454](../adr/ADR-00454.md)/[ADR-01057](../adr/ADR-01057.md)) — including `if`/`else`, `do/while`, and `switch`-with-`default` control flow — but the analysis is sound-not-complete: a binding assigned only inside a maybe-skipped `for`/`while` body, or in a `try` that may throw first, still escapes (reading its deterministic zero/`undefined` default — [ADR-00215](../adr/ADR-00215.md) — not uninitialized memory); correlated conditions (`if (c) {x=1} if (!c) {x=2}`) are conservatively *rejected*, matching TypeScript. See [TDD-00071](../tdd/TDD-00071.md)/[ADR-00210](../adr/ADR-00210.md)–[ADR-00215](../adr/ADR-00215.md)"
         },
         {
           "category": "Functions \u0026 closures",
@@ -108,9 +108,9 @@
             "pct": 97
           },
           "strict": {
-            "impl": 18,
+            "impl": 20,
             "total": 33,
-            "pct": 55
+            "pct": 61
           },
           "caveats": "• No `.normalize()` (needs Unicode normalization tables — deliberately deferred, never faked)\u003cbr\u003e• `.codePointAt()`/`.charCodeAt()` read bytes, not UTF-16 code units — no surrogate-pair decoding (this compiler has no Unicode infrastructure; correct for ASCII/Latin-1)"
         },
@@ -118,16 +118,16 @@
           "category": "RegExp",
           "pageFile": "REGEXP.md",
           "coverage": {
-            "impl": 13,
-            "total": 14,
+            "impl": 14,
+            "total": 15,
             "pct": 93
           },
           "strict": {
-            "impl": 6,
-            "total": 14,
-            "pct": 43
+            "impl": 7,
+            "total": 15,
+            "pct": 47
           },
-          "caveats": "• `u`/`y`/`d` flags out of scope for V1\u003cbr\u003e• Several other deliberate scope narrowings (no implicit string→RegExp coercion, etc.) — see [REGEXP.md](REGEXP.md)'s own Caveats\u003cbr\u003e• `new RegExp` doesn't validate its flags string ([ADR-00166](../adr/ADR-00166.md))"
+          "caveats": "• `u`/`d` flags out of scope for V1\u003cbr\u003e• Several other deliberate scope narrowings (no implicit string→RegExp coercion, etc.) — see [REGEXP.md](REGEXP.md)'s own Caveats\u003cbr\u003e• `new RegExp` doesn't validate its flags string ([ADR-00166](../adr/ADR-00166.md))"
         },
         {
           "category": "Array methods",
@@ -168,9 +168,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 18,
+            "impl": 17,
             "total": 32,
-            "pct": 56
+            "pct": 53
           },
           "caveats": "• `Object.create`/`getPrototypeOf`/`setPrototypeOf`/`__proto__` work on **dynamic (`any`-typed) objects only** — statically-typed structs have no prototype link ([TDD-00155](../tdd/TDD-00155.md) Stage 3)\u003cbr\u003e• `WeakMap`/`WeakSet`/`WeakRef` are strong-backed under `-mm=manual`; real weak semantics only under `-mm=gc` ([TDD-00112](../tdd/TDD-00112.md))\u003cbr\u003e• Object literal method shorthand (`{ foo() {...} }`) has no `this` binding (no nominal type to give it a shape, no dynamic call-site binding) — a clean compile-time rejection, not silently wrong. See [ADR-00169](../adr/ADR-00169.md)"
         },
@@ -347,9 +347,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 0,
+            "impl": 2,
             "total": 10,
-            "pct": 0
+            "pct": 20
           },
           "caveats": "• `url.searchParams` mutations don't write back to `url.search`; non-special-scheme URLs (`foo:bar`) and IDN of a non-ASCII domain on Mac are unsupported ([TDD-00203](../tdd/TDD-00203.md))\u003cbr\u003e• `URLPattern` is object-init only with a literals/`*`/`:name`/`:name?` grammar subset; `.exec()` returns a merged `Map` of named groups, not the spec's `URLPatternResult`"
         },
@@ -467,8 +467,8 @@
     {
       "section": "Node.js APIs",
       "total": {
-        "impl": 137,
-        "total": 140,
+        "impl": 146,
+        "total": 149,
         "pct": 98
       },
       "rows": [
@@ -476,14 +476,14 @@
           "category": "File System (fs)",
           "pageFile": "FILE-SYSTEM.md",
           "coverage": {
-            "impl": 19,
-            "total": 20,
+            "impl": 21,
+            "total": 22,
             "pct": 95
           },
           "strict": {
-            "impl": 5,
-            "total": 20,
-            "pct": 25
+            "impl": 6,
+            "total": 22,
+            "pct": 27
           },
           "caveats": "• `createWriteStream` still writes inline on the loop thread, and stream chunks are **strings** ([TDD-00186](../tdd/TDD-00186.md)/[TDD-00108](../tdd/TDD-00108.md))\u003cbr\u003e• `readFileSync`/`readFile` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md))"
         },
@@ -491,13 +491,13 @@
           "category": "Process / CLI I/O",
           "pageFile": "PROCESS-CLI.md",
           "coverage": {
-            "impl": 32,
-            "total": 32,
+            "impl": 34,
+            "total": 34,
             "pct": 100
           },
           "strict": {
-            "impl": 13,
-            "total": 32,
+            "impl": 14,
+            "total": 34,
             "pct": 41
           },
           "caveats": "• `process.on(...)` covers `'SIGINT'`/`'SIGTERM'`/`'exit'`/`'uncaughtException'` but not `'unhandledRejection'`; an `'uncaughtException'` handler runs then still exits (can't resume)\u003cbr\u003e• `process.version`/`versions` report the pinned Node baseline + `klain`; real linked-lib versions (`openssl`/`zlib`) and a `--node-compat` floor are follow-ons\u003cbr\u003e• `process.memoryUsage()`'s `external`/`arrayBuffers` are always 0 (no off-heap accounting), and `heapTotal`/`heapUsed` measure this compiler's own heap, not a V8 heap ([ADR-00791](../adr/ADR-00791.md))\u003cbr\u003e• `child_process.fork()` is self-fork only — forking a different module stays out"
@@ -536,14 +536,14 @@
           "category": "`os`",
           "pageFile": "OS.md",
           "coverage": {
-            "impl": 7,
-            "total": 7,
+            "impl": 12,
+            "total": 12,
             "pct": 100
           },
           "strict": {
-            "impl": 7,
-            "total": 7,
-            "pct": 100
+            "impl": 11,
+            "total": 12,
+            "pct": 92
           }
         },
         {

@@ -246,3 +246,22 @@ function show(): void { console.log((Date.now() - t0 >= 0) + " " + (n + 1) + " "
 show()
 `, "true 42 ABC\nstopped after 2")
 }
+
+// A fetch that completes inside the loop's own keep-alive check: asking libcurl
+// how many transfers are in flight also drains the finished ones, settling
+// their promises. With nothing else holding the loop (a parked module task
+// holds nothing, ADR-01051) the loop used to leave with that continuation
+// queued — an intermittent "unsettled top-level await" exit 13 after the
+// response had arrived (~3 in 90 runs of examples/fetch/fetch_init.ts).
+// 150 sequential top-level awaits give the race many chances per run.
+func TestE2ETopLevelAwaitFetchCompletingInKeepAliveCheck(t *testing.T) {
+	up := newDelayedUpstreamServer(t, 0)
+	assertOutput(t, fmt.Sprintf(`
+let n = 0
+for (let i = 0; i < 150; i++) {
+  const r = await fetch("%s/p" + i)
+  n += (await r.text()).length > 0 ? 1 : 0
+}
+console.log("done", n)
+`, up.URL), "done 150")
+}

@@ -93,3 +93,6 @@ apps/**
 
 # PerryTS `perry setup windows` drops its xwin-fetched CRT/SDK cache wherever it is run
 /.xwin-cache/
+
+# tools/testsel scratch probes
+/tools/testsel/probes/

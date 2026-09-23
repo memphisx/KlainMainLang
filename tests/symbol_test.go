@@ -105,3 +105,46 @@ Memory.free(a)
 console.log("freed ok")
 `, "Symbol(x)\nfreed ok")
 }
+
+// ADR-01059: a Symbol keeps its identity inside an `any` box (hidden field-0
+// type-id): typeof, narrowing, ===, .description, rendering, and the ToNumber
+// TypeError all behave as in Node instead of reading as a plain object.
+func TestE2ESymbolInsideAny(t *testing.T) {
+	assertOutput(t, `
+const s = Symbol("hi");
+const x: any = s;
+console.log(typeof x, typeof x === "symbol", x === s, x.description, x.foo);
+console.log(x, String(x));
+const o: any = { a: 1 };
+console.log(typeof o, typeof o === "symbol");
+const e: any = new Error("boom");
+console.log(typeof e, String(e));
+try { console.log(Number(x)); } catch (err) { console.log((err as Error).message); }
+const ta = new Int32Array(2);
+try { ta.set([1], x); } catch (err) { console.log((err as Error).message); }
+const fx: any = Symbol.for("k");
+console.log(typeof fx, fx === Symbol.for("k"), fx.description);
+if (typeof x === "symbol") { console.log("narrowed", x.description); }
+`, "symbol true true hi undefined\nSymbol(hi) Symbol(hi)\nobject false\nobject Error: boom\nCannot convert a Symbol value to a number\nCannot convert a Symbol value to a number\nsymbol true k\nnarrowed hi")
+}
+
+func TestE2ESymbolInsideAnyArithmeticJS(t *testing.T) {
+	assertOutputCompatJS(t, `
+const x: any = Symbol("hi");
+try { console.log(x * 1); } catch (err) { console.log((err as Error).message); }
+try { console.log(+x); } catch (err) { console.log((err as Error).message); }
+`, "Cannot convert a Symbol value to a number\nCannot convert a Symbol value to a number")
+}
+
+// Node-oracle twin of TestE2ESymbolInsideAny (ADR-01060).
+func TestOracleSymbolInsideAny(t *testing.T) {
+	assertSameAsNode(t, `
+const s = Symbol("hi");
+const x: any = s;
+console.log(typeof x, typeof x === "symbol", x === s, x.description, x.foo);
+console.log(x, String(x));
+try { console.log(Number(x)); } catch (err) { console.log((err as Error).message); }
+const fx: any = Symbol.for("k");
+console.log(typeof fx, fx === Symbol.for("k"), fx.description);
+`)
+}

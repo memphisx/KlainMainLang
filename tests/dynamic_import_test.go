@@ -134,3 +134,96 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+// runLazyIsland compiles entry.ts (with the given island files) under
+// -dynamic-import=lazy and runs it, returning combined output and exit code.
+func runLazyIsland(t *testing.T, files map[string]string) (string, int) {
+	t.Helper()
+	cli := buildCLI(t)
+	dir := tempDir(t)
+	for name, src := range files {
+		writeFile(t, filepath.Join(dir, name), src)
+	}
+	compile := exec.Command(cli, "-dynamic-import=lazy", filepath.Join(dir, "entry.ts"))
+	if out, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("compile: %v\n%s", err, out)
+	}
+	run := exec.Command(filepath.Join(dir, "entry"))
+	out, _ := run.CombinedOutput()
+	return string(out), run.ProcessState.ExitCode()
+}
+
+// --- TDD-00225: an island with a top-level await is driven by the importer's
+// loop (ADR-01056) — the importer's own microtasks and timers interleave with
+// the island's awaits, as in Node, instead of waiting behind a nested loop. ---
+
+func TestE2EDynamicImportLazyIslandTopLevelAwaitInterleaves(t *testing.T) {
+	out, code := runLazyIsland(t, map[string]string{
+		"mod.ts": "const later = (ms: number) => new Promise<number>((res) => setTimeout(() => res(42), ms));\n" +
+			"console.log(\"island: start\");\n" +
+			"export const v: number = await later(30);\n" +
+			"console.log(\"island: after await\", v);\n" +
+			"export const after: string = \"done\";\n",
+		"entry.ts": "console.log(\"main: start\");\n" +
+			"setTimeout(() => console.log(\"main: timer 10\"), 10);\n" +
+			"Promise.resolve().then(() => console.log(\"main: microtask\"));\n" +
+			"const m = await import('./mod');\n" +
+			"console.log(\"main: got\", m.v, m.after);\n" +
+			"setTimeout(() => console.log(\"main: timer after\"), 5);\n",
+	})
+	want := "main: start\nisland: start\nmain: microtask\nmain: timer 10\nisland: after await 42\nmain: got 42 done\nmain: timer after\n"
+	if out != want || code != 0 {
+		t.Errorf("exit %d, output:\ngot  %q\nwant %q", code, out, want)
+	}
+}
+
+// import() from inside an async function: the importer's synchronous tail and
+// its timer run while the island waits.
+func TestE2EDynamicImportLazyIslandAwaitFromAsyncFunction(t *testing.T) {
+	out, code := runLazyIsland(t, map[string]string{
+		"mod.ts": "const later = (ms: number) => new Promise<number>((res) => setTimeout(() => res(42), ms));\n" +
+			"console.log(\"island: start\");\n" +
+			"export const v: number = await later(30);\n" +
+			"console.log(\"island: after await\", v);\n",
+		"entry.ts": "async function load(): Promise<number> {\n" +
+			"  console.log(\"load: before\");\n" +
+			"  const m = await import('./mod');\n" +
+			"  console.log(\"load: after\", m.v);\n" +
+			"  return m.v;\n}\n" +
+			"setTimeout(() => console.log(\"main: timer 15\"), 15);\n" +
+			"load().then((v) => console.log(\"main: loaded\", v));\n" +
+			"console.log(\"main: sync end\");\n",
+	})
+	want := "load: before\nisland: start\nmain: sync end\nmain: timer 15\nisland: after await 42\nload: after 42\nmain: loaded 42\n"
+	if out != want || code != 0 {
+		t.Errorf("exit %d, output:\ngot  %q\nwant %q", code, out, want)
+	}
+}
+
+// A throw after the island's top-level await rejects the import() promise
+// with the island's Error object.
+func TestE2EDynamicImportLazyIslandThrowRejectsImport(t *testing.T) {
+	out, code := runLazyIsland(t, map[string]string{
+		"mod.ts": "export const x: number = 1;\n" +
+			"await new Promise<void>((r) => setTimeout(r, 5));\n" +
+			"throw new RangeError(\"island exploded\");\n",
+		"entry.ts": "try {\n  const m = await import('./mod');\n  console.log(\"unexpected\", m.x);\n} catch (e) {\n" +
+			"  console.log(\"caught:\", e.name, e.message, e instanceof RangeError);\n}\nconsole.log(\"after\");\n",
+	})
+	want := "caught: RangeError island exploded true\nafter\n"
+	if out != want || code != 0 {
+		t.Errorf("exit %d, output:\ngot  %q\nwant %q", code, out, want)
+	}
+}
+
+// An island whose top-level await can never settle: the importer's await of
+// import() is an unsettled top-level await — Node's warning, exit code 13.
+func TestE2EDynamicImportLazyIslandUnsettledExits13(t *testing.T) {
+	out, code := runLazyIsland(t, map[string]string{
+		"mod.ts":   "export const y: number = 2;\nconsole.log(\"island: start\");\nawait new Promise<void>(() => {});\n",
+		"entry.ts": "console.log(\"before\");\nconst m = await import('./mod');\nconsole.log(\"never\", m.y);\n",
+	})
+	if code != 13 || !strings.Contains(out, "unsettled top-level await") || strings.Contains(out, "never") {
+		t.Errorf("exit %d, output:\n%s", code, out)
+	}
+}

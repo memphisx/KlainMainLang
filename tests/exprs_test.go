@@ -1814,3 +1814,45 @@ console.log(max > 0.5, min < 0.5, min >= 0, max < 1)
 		t.Fatalf("Math.random() distribution: got %q", out)
 	}
 }
+
+// Unary `+` is ToNumber (ADR-01057; it was a parse error before): numbers
+// pass through, strings go through StringToNumber (whitespace trimmed,
+// `Infinity`, 0x/0o/0b, junk → NaN), booleans/null/undefined convert, an
+// object takes the ToPrimitive ladder, an array converts through its string
+// form. `Number()` is the same conversion, including on `any` and a nullable
+// scalar. A BigInt or Symbol operand throws the spec TypeError. The bitwise
+// operators' ToInt32 handles NaN/±∞/out-of-i64-range (0, modulo 2^32) and
+// runs the same ToNumber on an object/array/`any` operand.
+func TestE2EUnaryPlusToNumber(t *testing.T) {
+	src := `
+const ss = ["  Infinity  ", "Infinity", "inf", "  12 ", "0x10", "1e3", "", " ", "nan", "-Infinity", "+5", "0b11", "12px"];
+for (const s of ss) console.log(JSON.stringify(s), Number(s), +s);
+const xs: any[] = ss;
+for (const x of xs) console.log(x * 1, +x, Number(x));
+const s1 = "5"; console.log(+s1, -(+s1), +s1 + 1);
+console.log(+true, +false, +null, +undefined, +[], +[5], +[1, 2], +{}, +{ valueOf() { return 9; } });
+let n: number | undefined = undefined; console.log(+n, Number(n)); n = 3; console.log(+n, -n, +n + 1);
+try { console.log(+Symbol("s")); } catch (e) { console.log(e instanceof TypeError, String(e)); }
+try { console.log(+10n); } catch (e) { console.log(e instanceof TypeError, String(e)); }
+console.log(~({}), ~"x", ~"3", ~[], ~[5], ~"", ~NaN, ~Infinity, 1e20 | 0, -1e20 | 0, 4294967297 | 0, (2**53) >> 0, NaN >>> 0, Infinity >>> 0);
+const a: any = 5; const b: any = "3"; console.log(~a, ~b, a | 0, b << 1, 1 << a);
+`
+	want := ""
+	for _, line := range []string{
+		`"  Infinity  " Infinity Infinity`, `"Infinity" Infinity Infinity`, `"inf" NaN NaN`, `"  12 " 12 12`,
+		`"0x10" 16 16`, `"1e3" 1000 1000`, `"" 0 0`, `" " 0 0`, `"nan" NaN NaN`, `"-Infinity" -Infinity -Infinity`,
+		`"+5" 5 5`, `"0b11" 3 3`, `"12px" NaN NaN`,
+		"Infinity Infinity Infinity", "Infinity Infinity Infinity", "NaN NaN NaN", "12 12 12", "16 16 16",
+		"1000 1000 1000", "0 0 0", "0 0 0", "NaN NaN NaN", "-Infinity -Infinity -Infinity", "5 5 5", "3 3 3", "NaN NaN NaN",
+		"5 -5 6",
+		"1 0 0 NaN 0 5 NaN NaN 9",
+		"NaN NaN", "3 -3 4",
+		"true TypeError: Cannot convert a Symbol value to a number",
+		"true TypeError: Cannot convert a BigInt value to a number",
+		"-1 -1 -4 -1 -6 -1 -1 -1 1661992960 -1661992960 1 0 0 0",
+		"-6 -4 5 6 32",
+	} {
+		want += line + "\n"
+	}
+	assertOutputCompatJS(t, src, strings.TrimSuffix(want, "\n"))
+}

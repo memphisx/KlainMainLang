@@ -4478,3 +4478,22 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
 		t.Fatalf("body = %q, want %q", got, want)
 	}
 }
+
+// http.get with no event loop is serviced by __kml_httpc_drive. Its pump loop
+// allocated a stack slot on every pass and spun without waiting, so a transfer
+// slow to fail — a refused connect retries for ~2 s on Windows — overflowed
+// the stack (0xC00000FD) instead of reaching the uncaught-error exit. Now it
+// waits on curl's sockets between pumps and exits 1 as on Linux.
+func TestE2EHTTPClientRefusedConnectExitsCleanly(t *testing.T) {
+	out, code := compileAndRunExpectExitImports(t, `
+import http from 'http'
+console.log("start")
+http.get("http://127.0.0.1:1/", (res) => { console.log(res.statusCode) })
+`)
+	if code != 1 {
+		t.Fatalf("exit code %d (want 1, the uncaught transport error); stdout %q", code, out)
+	}
+	if !strings.HasPrefix(out, "start") || !strings.Contains(out, "Could not connect") {
+		t.Fatalf("stdout %q: want the program's own line, then the uncaught transport error", out)
+	}
+}

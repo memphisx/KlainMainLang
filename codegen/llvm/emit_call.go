@@ -978,7 +978,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		// str.toString() is the identity — Node code calls it habitually on
 		// values that are Buffers there but strings here (spawnSync results,
 		// stream chunks), so this keeps that idiom compiling.
-		if mem.Property == "toString" && len(ex.Args) == 0 && isPlainStringType(e.inferExprType(mem.Object)) {
+		if mem.Property == "toString" && len(ex.Args) == 0 && isPlainStringType(e.inferExprType(mem.Object).staticIndexType()) {
 			return e.emitExpr(mem.Object)
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Array" && !e.isShadowedByLocal(id.Name) {
@@ -1004,14 +1004,39 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 					if err != nil {
 						return Value{}, err
 					}
-					tag, _ := e.emitUnboxTagPayload(v)
+					tag, payload := e.emitUnboxTagPayload(v)
 					isArr := e.freshReg()
 					isDyn := e.freshReg()
-					res := e.freshReg()
 					e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isArr, tag, kmlTagArray))
 					e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isDyn, tag, kmlTagDynArray))
-					e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", res, isArr, isDyn))
+					// A boxed TypedArray is kmlTagArray too, but `Array.isArray(new
+					// Int32Array(1))` is false — read the box's typed byte (ADR-01059).
+					// Only dereferenced when the tag says the payload is a box.
+					resPtr := e.freshReg()
+					e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resPtr))
+					e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", isDyn, resPtr))
+					typedL := e.freshLabel("isarray.typed")
+					mergeL := e.freshLabel("isarray.merge")
+					e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isArr, typedL, mergeL))
+					e.emitLabel(typedL)
+					box := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", box, payload))
+					typedGep := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", typedGep, anyArrayBoxTy, box))
+					typedB := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", typedB, typedGep))
+					plain := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", plain, typedB, anyArrayPlain))
+					e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", plain, resPtr))
+					e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+					e.emitLabel(mergeL)
+					res := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", res, resPtr))
 					return Value{Ref: res, Ty: TypeBool}, nil
+				}
+				if argTy.IsTypedArray || argTy.IsBuffer {
+					// A TypedArray/Buffer is IsArray storage-wise but not a JS Array.
+					return Value{Ref: "false", Ty: TypeBool}, nil
 				}
 				if argTy.IsArray {
 					// A `T[] | undefined` value (a nested-array element absence,
@@ -1154,6 +1179,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitProcessNextTick(ex.Args, ex.GetPos())
 			case "uptime":
 				return e.emitProcessUptime(ex.Args, ex.GetPos())
+			case "umask":
+				return e.emitProcessUmask(ex.Args, ex.GetPos())
 			case "hrtime":
 				return e.emitProcessHrtime(ex.Args, ex.GetPos())
 			case "memoryUsage":
@@ -1246,6 +1273,10 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitFsReadSync(ex.Args, ex.GetPos())
 			case "fstatSync":
 				return e.emitFsFstatSync(ex.Args, ex.GetPos())
+			case "fchmodSync":
+				return e.emitFsFchmodSync(ex.Args, ex.GetPos())
+			case "statfsSync":
+				return e.emitFsStatfsSync(ex.Args, ex.GetPos())
 			case "utimesSync":
 				return e.emitFsUtimesSync(ex.Args, ex.GetPos())
 			case "futimesSync":
@@ -1311,6 +1342,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitOSFreemem(ex.Args, ex.GetPos())
 			case "cpus":
 				return e.emitOSCpus(ex.Args, ex.GetPos())
+			}
+			if v, handled, err := e.emitOSCall(mem.Property, ex.Args, ex.GetPos()); handled {
+				return v, err
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "querystring__kml_builtin" {

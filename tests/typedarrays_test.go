@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -144,9 +145,9 @@ try {
   a.set(b, 0)
   console.log(a[0])
 } catch (e) {
-  console.log("caught: " + e.message)
+  console.log("caught: " + e.message, e instanceof RangeError, e.name)
 }
-`, "caught: source is too large for set()'s target, starting at the given offset")
+`, "caught: offset is out of bounds true RangeError")
 }
 
 func TestE2ETypedArraySubarrayIsAView(t *testing.T) {
@@ -374,4 +375,156 @@ console.log(new Int32Array([1, 2, 3]).map((x) => x * 2).join(","))
 const o: { buf: Uint8Array } = { buf: new Uint8Array([7, 8, 9]) }
 console.log(o.buf.length, o.buf[1])
 `, "60\n3 7\n0\n2,4,6\n3 8")
+}
+
+// `() => ta.set(...)` — set() returns undefined; the arrow's return type once
+// inferred i64 and emitted `ret i64 ` with no value (invalid IR). Found by the
+// Test262 staging/sm/TypedArray/set-tointeger.js `assert.throws(RangeError,
+// () => ta.set(source, offset))` shape (ADR-01054).
+func TestE2ETypedArraySetInArrowReturn(t *testing.T) {
+	assertOutputCompatJS(t, `
+let ta = new Int32Array(4);
+const f = () => ta.set([1], 9);
+try { f(); } catch (e) { console.log(e instanceof RangeError, e.name, e.message); }
+const g = () => ta.set([7], 1);
+console.log(g(), ta[1]);
+`, "true RangeError offset is out of bounds\nundefined 7")
+}
+
+// %TypedArray%.prototype.set(src, offset) runs ToIntegerOrInfinity on the
+// offset (ADR-01057): NaN/undefined/"junk" → 0, "3"/{valueOf} convert, -0.9
+// truncates to -0 (valid), a negative or infinite offset is a RangeError
+// before any write (a negative offset used to write out of bounds), and a
+// Symbol offset is a TypeError. Lines match Node.
+func TestE2ETypedArraySetOffsetToInteger(t *testing.T) {
+	assertOutputCompatJS(t, `
+let ta = new Int32Array(4);
+let sources = [[], [7]];
+let typed = [new Int32Array(0), new Int32Array(1)];
+let valid = [0, 0.1, 3, 3.9, -0, -0.9, NaN, undefined, null, true, "", "3", "  1\t\n", "junk", {valueOf() { return 2; }}];
+let n = 0;
+for (let offset of valid) for (let source of sources) { ta.set(source, offset); n++; }
+for (let offset of valid) for (let source of typed) { ta.set(source, offset); n++; }
+console.log(n, ta);
+let invalid = [5, 2147483648, Infinity, -1, -1.1, -4294967297, -Infinity, "8", "  Infinity  ", {valueOf() { return 10; }}];
+let bad = 0;
+for (let offset of invalid) for (let source of sources) {
+  try { ta.set(source, offset); bad++; } catch (e) { if (!(e instanceof RangeError)) bad++; }
+}
+for (let offset of invalid) for (let source of typed) {
+  try { ta.set(source, offset); bad++; } catch (e) { if (!(e instanceof RangeError)) bad++; }
+}
+console.log(bad);
+ta.set([], 4); ta.set([], 4.9);
+try { ta.set([1], 4.9); console.log("no throw"); } catch (e) { console.log(e instanceof RangeError); }
+try { ta.set([1], Symbol()); console.log("no throw"); } catch (e) { console.log(e instanceof TypeError); }
+`, "60 Int32Array(4) [ 0, 0, 0, 0 ]\n0\ntrue\ntrue")
+}
+
+// ADR-01059: a mixed array literal never reinterprets a buffer — strict
+// rejects it cleanly, -compat=js boxes it to any[] keeping each element's
+// identity (Node prints `Int32Array(1) [ 8 ]`, and set() reads the i32s).
+func TestE2EMixedArrayLiteralStrictRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const mixed = [[7], new Int32Array([8])];
+console.log(mixed);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a number[] / Int32Array mixed literal, got none")
+	}
+	if !strings.Contains(err.Error(), "element 1 is a Int32Array, not a number[]") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestE2EMixedArrayLiteralJSBoxes(t *testing.T) {
+	assertOutputCompatJS(t, `
+const mixed = [[7], new Int32Array([8])];
+console.log(mixed);
+const ta = new Int32Array(2);
+ta.set(mixed[1]);
+console.log(ta, mixed[1].length, mixed[0][0]);
+`, "[ [ 7 ], Int32Array(1) [ 8 ] ]\nInt32Array(2) [ 8, 0 ] 1 7")
+}
+
+// ADR-01059: set() takes an `any` (or any non-array) source through the
+// spec's array-like walk — a boxed typed array, a string, an array-like
+// object, a number (no length → no-op); null/undefined throw.
+func TestE2ETypedArraySetAnySource(t *testing.T) {
+	assertOutput(t, `
+const ta = new Int32Array(3);
+const src: any = new Int16Array([1, -2, 3]);
+ta.set(src);
+console.log(ta);
+const s: any = "12x";
+ta.set(s);
+console.log(ta);
+const arrLike: any = { length: 2, 0: 7, 1: "8" };
+ta.set(arrLike, 1);
+console.log(ta);
+const plain: any = [9.5, true];
+ta.set(plain);
+console.log(ta);
+ta.set(5);
+try { ta.set(null); } catch (e) { console.log((e as Error).message); }
+try { ta.set(undefined); } catch (e) { console.log((e as Error).message); }
+ta.set("4");
+console.log(ta);
+ta.set({ length: 2, 0: 6, 1: 5 }, 1);
+const named = { length: 1, 0: 3 };
+ta.set(named);
+console.log(ta);
+`, "Int32Array(3) [ 1, -2, 3 ]\nInt32Array(3) [ 1, 2, 0 ]\nInt32Array(3) [ 1, 7, 8 ]\nInt32Array(3) [ 9, 1, 8 ]\nCannot convert undefined or null to object\nCannot convert undefined or null to object\nInt32Array(3) [ 4, 1, 8 ]\nInt32Array(3) [ 3, 6, 5 ]")
+}
+
+// ADR-01059: a TypedArray keeps its identity through `any` — inspect prefix,
+// JSON object form, Array.isArray false, element/length reads — and an
+// any-annotated top-level typed array is boxed, not promoted as a raw array.
+func TestE2ETypedArrayThroughAny(t *testing.T) {
+	assertOutput(t, `
+const y: any = new Int32Array([8, 9]);
+console.log(y, y.length, y[1], y[5], JSON.stringify(y), Array.isArray(y));
+const c: any = new Uint8ClampedArray([300, 5]);
+console.log(c, JSON.stringify(c));
+const plain: any = [1.5, 2];
+console.log(plain, JSON.stringify(plain), String(plain), plain[0], Array.isArray(plain));
+const strs: any = ["a", "b"];
+console.log(strs[1], strs.length);
+const nested: any = [[1], [2, 3]];
+console.log(nested, JSON.stringify(nested));
+const named = [[1], [2, 3]]; const viaNamed: any = named; console.log(viaNamed[1], viaNamed[1][0], JSON.stringify(viaNamed), String(viaNamed));
+console.log(Array.isArray(new Uint8Array(1)), Array.isArray([1]));
+function f() { return y.length; }
+console.log(f());
+`, "Int32Array(2) [ 8, 9 ] 2 9 undefined {\"0\":8,\"1\":9} false\nUint8ClampedArray(2) [ 255, 5 ] {\"0\":255,\"1\":5}\n[ 1.5, 2 ] [1.5,2] 1.5,2 1.5 true\nb 2\n[ [ 1 ], [ 2, 3 ] ] [[1],[2,3]]\n[ 2, 3 ] 2 [[1],[2,3]] 1,2,3\nfalse true\n2")
+}
+
+// The same programs as the pinned tests above, with Node as the oracle
+// (ADR-01060) — skipped where Node isn't installed.
+func TestOracleTypedArrayThroughAny(t *testing.T) {
+	assertSameAsNode(t, `
+const y: any = new Int32Array([8, 9]);
+console.log(y, y.length, y[1], y[5], JSON.stringify(y), Array.isArray(y));
+const c: any = new Uint8ClampedArray([300, 5]);
+console.log(c, JSON.stringify(c));
+const plain: any = [1.5, 2];
+console.log(plain, JSON.stringify(plain), String(plain), plain[0], Array.isArray(plain));
+const named = [[1], [2, 3]]; const viaNamed: any = named;
+console.log(viaNamed[1], viaNamed[1][0], JSON.stringify(viaNamed), String(viaNamed));
+const ta = new Int32Array(3);
+ta.set(y); console.log(ta);
+ta.set("12x"); console.log(ta);
+ta.set({ length: 2, 0: 7, 1: "8" }, 1); console.log(ta);
+try { ta.set(null); } catch (e) { console.log((e as Error).message); }
+`)
+}
+
+func TestOracleMixedArrayLiteralJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const mixed = [[7], new Int32Array([8])];
+console.log(mixed);
+const ta = new Int32Array(2);
+ta.set(mixed[1]);
+console.log(ta, mixed[1].length, mixed[0][0]);
+`)
 }

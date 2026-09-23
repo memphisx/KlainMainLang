@@ -72,14 +72,15 @@
     },
     {
       "id": "lang.forof",
-      "name": "for…of over arrays, strings, Map, Set, and a class implementing next(): T | null",
-      "statusRow": "for…of over arrays, strings, Map, Set, and a class implementing next(): T | null",
+      "name": "for…of over arrays, strings, Map, Set, a bare any, and a class implementing next(): T | null",
+      "statusRow": "for…of over arrays, strings, Map, Set, a bare any, and a class implementing next(): T | null",
       "signature": "for (const x of iterable) { … }",
       "badge": "caveats",
-      "description": "Iterates arrays, a string (its characters), Map (values), Set (elements), generators, and both the structural next(): T | null shape and the spec's real [Symbol.iterator]() protocol. The loop variable may be a destructuring pattern, including nested. A scalar next() returns a presence-flagged aggregate so a yielded 0/false doesn't end iteration.",
+      "description": "Iterates arrays, a string (its characters), Map (values), Set (elements), generators, a bare any holding a dynamic or boxed array (by its runtime length, with an any loop variable; anything else throws Node's 'is not iterable' TypeError), and both the structural next(): T | null shape and the spec's real [Symbol.iterator]() protocol. The loop variable may be a destructuring pattern, including nested. A scalar next() returns a presence-flagged aggregate so a yielded 0/false doesn't end iteration.",
       "differences": [
         "A bare `for (const v of map)` iterates values (use `.keys()` for keys); the two-name pattern `for (const [k, v] of map)` decomposes entries.",
-        "A string iterates per byte, not per Unicode code point — correct for ASCII/Latin-1."
+        "A string iterates per byte, not per Unicode code point — correct for ASCII/Latin-1.",
+        "Over a bare `any`, each element is read through a numeric-string key — a per-tag element walk is the perf follow-up."
       ],
       "seeAlso": [
         "lang.forawaitof",
@@ -381,9 +382,9 @@
       "statusRow": "Logical operators && || !",
       "signature": "a && b, a || b, !a",
       "badge": "caveats",
-      "description": "Genuinely short-circuiting logical operators. Result type is bool under -compat=strict (default); -compat=js makes &&/|| value-preserving for same-typed operands (x || \"default\" yields the string).",
+      "description": "Genuinely short-circuiting logical operators. Result type is bool under -compat=strict (default); -compat=js makes &&/|| value-preserving (x || \"default\" yields the string; scalars of different kinds yield their union, 0 || \"x\" is number | string).",
       "differences": [
-        "Under `-compat=js`, `&&`/`||` are value-preserving only for **same-typed** operands; differently-typed operands (`0 || \"x\"`) stay bool, since the value-preserving result would be a union this compiler can't represent."
+        "Under `-compat=js`, an array, tuple, object or nullable-scalar operand mixed with another kind still degrades the `&&`/`||` result to a bool; same-typed operands and mixed scalar kinds (`0 || \"x\"` is the union `number | string`) are value-preserving."
       ],
       "seeAlso": [
         "lang.logicalassign",

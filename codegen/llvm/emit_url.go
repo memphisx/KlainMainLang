@@ -494,8 +494,8 @@ const (
 // filesystem path. Throws a catchable Error on a non-`file:` scheme, matching
 // Node's `ERR_INVALID_URL_SCHEME`.
 func (e *Emitter) emitFileURLToPath(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 {
-		return Value{}, fmt.Errorf("%d:%d: url.fileURLToPath(url) requires a url string or URL argument", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: url.fileURLToPath(url[, { windows }]) requires a url string or URL argument", pos.Line, pos.Col)
 	}
 	e.ensureCurlURL()
 	e.ensureExceptionHelpers()
@@ -519,59 +519,130 @@ func (e *Emitter) emitFileURLToPath(args []ast.Expression, pos ast.Pos) (Value, 
 	} else {
 		urlStr = e.coerce(objVal, TypePtr)
 	}
+	return e.emitFlavorBranch(args[1:], "url.fileURLToPath", pos, func(flavor pathFlavor) (Value, error) {
+		return e.emitFileURLToPathFlavor(urlStr, flavor)
+	})
+}
 
-	// Windows (ADR-00722): libcurl refuses `file://server/...`, so the UNC host
-	// is split off before parsing and rejoined by the sidecar below.
-	uncHostRef := ""
-	if hostPathFlavor() == pathWin32 {
-		e.ensurePathWin32()
-		hostSlot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", hostSlot))
-		split := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_split_file_host(ptr %s, ptr %s)", split, urlStr.Ref, hostSlot))
-		urlStr = Value{Ref: split, Ty: TypePtr}
-		h := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, hostSlot))
-		uncHostRef = h
+// emitFlavorBranch runs body for the path flavor `{ windows }` selects
+// (ADR-01079): absent / `undefined` / a literal boolean picks it at compile
+// time; a run-time boolean emits both halves under a branch and joins them.
+func (e *Emitter) emitFlavorBranch(opt []ast.Expression, what string, pos ast.Pos, body func(pathFlavor) (Value, error)) (Value, error) {
+	if len(opt) == 0 {
+		return body(hostPathFlavor())
+	}
+	ol, ok := opt[0].(*ast.ObjectLiteral)
+	if !ok {
+		if nl, isNull := opt[0].(*ast.NullLiteral); isNull && nl.IsUndefined {
+			return body(hostPathFlavor())
+		}
+		return Value{}, fmt.Errorf("%d:%d: %s options must be an object literal ({ windows })", pos.Line, pos.Col, what)
+	}
+	var winExpr ast.Expression
+	for _, prop := range ol.Properties {
+		if prop.Key != "windows" || prop.KeyExpr != nil {
+			return Value{}, fmt.Errorf("%d:%d: %s: unknown option '%s' (only { windows } is supported)", pos.Line, pos.Col, what, prop.Key)
+		}
+		winExpr = prop.Value
+	}
+	if winExpr == nil {
+		return body(hostPathFlavor())
+	}
+	switch v := winExpr.(type) {
+	case *ast.BooleanLiteral:
+		if v.Value {
+			return body(pathWin32)
+		}
+		return body(pathPosix)
+	case *ast.NullLiteral:
+		if v.IsUndefined {
+			return body(hostPathFlavor())
+		}
+	}
+	// Run-time boolean: both halves, joined by a phi on the result pointer.
+	wv, err := e.emitExpr(winExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	cond := e.coerce(wv, TypeBool)
+	winL := e.freshLabel("flavor.win")
+	posL := e.freshLabel("flavor.posix")
+	winEndL := e.freshLabel("flavor.winend")
+	posEndL := e.freshLabel("flavor.posixend")
+	joinL := e.freshLabel("flavor.join")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cond.Ref, winL, posL))
+	e.emitLabel(winL)
+	wres, err := body(pathWin32)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", winEndL))
+	e.emitLabel(winEndL)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(posL)
+	pres, err := body(pathPosix)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", posEndL))
+	e.emitLabel(posEndL)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(joinL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", r, wres.Ref, winEndL, pres.Ref, posEndL))
+	return Value{Ref: r, Ty: wres.Ty}, nil
+}
+
+// emitFileURLToPathFlavor is emitFileURLToPath's body for one path flavor.
+func (e *Emitter) emitFileURLToPathFlavor(urlStr Value, flavor pathFlavor) (Value, error) {
+	// libcurl refuses `file://server/...`, so the host is split off before
+	// parsing (ADR-00722): the win32 half rejoins it as a UNC prefix; the POSIX
+	// half throws Node's ERR_INVALID_FILE_URL_HOST for anything but "" /
+	// "localhost" (which the WHATWG parser drops for file: URLs).
+	e.ensurePathWin32()
+	hostSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", hostSlot))
+	split := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_split_file_host(ptr %s, ptr %s)", split, urlStr.Ref, hostSlot))
+	urlStr = Value{Ref: split, Ty: TypePtr}
+	uncHostRef := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", uncHostRef, hostSlot))
+	if flavor == pathPosix {
+		hasHost := e.emitStrNonEmpty(uncHostRef)
+		isLocal := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", isLocal, uncHostRef, e.internString("localhost")))
+		notLocal := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", notLocal, isLocal))
+		badHost := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", badHost, hasHost, notLocal))
+		bhL := e.freshLabel("f2p.badhost")
+		okhL := e.freshLabel("f2p.okhost")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", badHost, bhL, okhL))
+		e.emitLabel(bhL)
+		// Node names the *host* platform in this message, whatever `windows` says.
+		e.emitInternalThrow(e.internString("File URL host must be \"localhost\" or empty on " + nodePlatformName()))
+		e.emitLabel(okhL)
 	}
 
-	handle := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @curl_url()", handle))
-	setCode := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", setCode, handle, curluPartURL, urlStr.Ref))
-	bad := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", bad, setCode))
-	badL := e.freshLabel("f2p.bad")
-	okL := e.freshLabel("f2p.ok")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
-	e.emitLabel(badL)
-	e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
-	e.emitInternalThrow(e.internString("Invalid URL"))
-	e.emitLabel(okL)
-
-	// Require the file: scheme.
-	scheme, _ := e.curlURLGetPart(handle, curluPartScheme)
-	cmp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", cmp, scheme, e.internString("file")))
-	notFile := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", notFile, cmp))
-	nfL := e.freshLabel("f2p.notfile")
-	fileL := e.freshLabel("f2p.file")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", notFile, nfL, fileL))
-	e.emitLabel(nfL)
-	e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
-	e.emitInternalThrow(e.internString("The URL must be of scheme file"))
-	e.emitLabel(fileL)
-
-	if hostPathFlavor() == pathWin32 {
+	if flavor == pathWin32 {
 		// Windows (TDD-00178 / ADR-00722): Node's getPathFromURLWin32 — the
 		// still-encoded pathname and the hostname go to the win32 sidecar, which
 		// rejects an encoded `/` or ``, flips separators, percent-decodes, and
-		// either prefixes `\host` or requires a drive letter.
+		// either prefixes `\host` or requires a drive letter. The pathname is
+		// taken by the sidecar too, not libcurl: a Linux/macOS libcurl refuses a
+		// drive letter in a file URL, and this half runs on every host (ADR-01079).
 		e.ensurePathWin32()
 		hostReg := uncHostRef
-		rawReg, _ := e.curlURLGetPart(handle, curluPartPath)
-		e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
+		rawReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_file_url_pathname(ptr %s)", rawReg, urlStr.Ref))
+		notFile := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", notFile, rawReg))
+		nfL := e.freshLabel("f2p.notfile")
+		fileL := e.freshLabel("f2p.file")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", notFile, nfL, fileL))
+		e.emitLabel(nfL)
+		e.emitInternalThrow(e.internString("The URL must be of scheme file"))
+		e.emitLabel(fileL)
 		errSlot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", errSlot))
 		res := e.freshReg()
@@ -597,31 +668,67 @@ func (e *Emitter) emitFileURLToPath(args []ast.Expression, pos ast.Pos) (Value, 
 		return Value{Ref: res, Ty: TypePtr}, nil
 	}
 
-	// The decoded path is the filesystem path (POSIX).
-	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
-	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_get(ptr %s, i32 %d, ptr %s, i32 %d)", e.freshReg(), handle, curluPartPath, slot, curluURLDecode))
-	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", raw, slot))
-	path := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", path, raw))
-	e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
-	return Value{Ref: path, Ty: TypePtr}, nil
+	// POSIX (getPathFromURLPosix): the still-encoded pathname (the same sidecar
+	// parse as the win32 half — no libcurl, which refuses a drive letter in a
+	// file URL on Linux/macOS), an encoded `/` rejected, then decodeURIComponent
+	// (strict: a malformed escape is a URIError, as in Node).
+	e.ensurePathWin32()
+	e.ensureStrstr()
+	e.ensureDecodeURIComponentStrict()
+	encReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_file_url_pathname(ptr %s)", encReg, urlStr.Ref))
+	notFile := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", notFile, encReg))
+	nfL := e.freshLabel("f2p.notfile")
+	fileL := e.freshLabel("f2p.file")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", notFile, nfL, fileL))
+	e.emitLabel(nfL)
+	e.emitInternalThrow(e.internString("The URL must be of scheme file"))
+	e.emitLabel(fileL)
+	encUp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @strstr(ptr %s, ptr %s)", encUp, encReg, e.internString("%2F")))
+	encLo := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @strstr(ptr %s, ptr %s)", encLo, encReg, e.internString("%2f")))
+	hasUp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasUp, encUp))
+	hasLo := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasLo, encLo))
+	hasEnc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", hasEnc, hasUp, hasLo))
+	encL := e.freshLabel("f2p.posixenc")
+	decL := e.freshLabel("f2p.posixdec")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasEnc, encL, decL))
+	e.emitLabel(encL)
+	e.emitInternalThrow(e.internString("File URL path must not include encoded / characters"))
+	e.emitLabel(decL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_decode_uri_component_strict(ptr %s)", r, encReg))
+	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
 // emitPathToFileURL implements `url.pathToFileURL(path)` (TDD-00165 Stage 4,
 // POSIX): resolves the path to absolute, percent-encodes it, and returns a
 // WHATWG URL object with the `file:` scheme (`file:///abs/path`).
 func (e *Emitter) emitPathToFileURL(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 {
-		return Value{}, fmt.Errorf("%d:%d: url.pathToFileURL(path) requires a path string argument", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: url.pathToFileURL(path[, { windows }]) requires a path string argument", pos.Line, pos.Col)
 	}
 	e.ensureCurlURL()
 	e.ensureMalloc()
 	e.ensureMapStrHelpers()
 	e.ensureHTTPParseQuery()
+	raw, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	raw = e.coerce(raw, TypePtr)
+	return e.emitFlavorBranch(args[1:], "url.pathToFileURL", pos, func(flavor pathFlavor) (Value, error) {
+		return e.emitPathToFileURLFlavor(raw, flavor, pos)
+	})
+}
 
+// emitPathToFileURLFlavor is emitPathToFileURL's body for one path flavor.
+func (e *Emitter) emitPathToFileURLFlavor(raw Value, flavor pathFlavor, pos ast.Pos) (Value, error) {
 	// Resolve to an absolute, normalized path (path.resolve semantics). On
 	// Windows (TDD-00178 / ADR-00722) the input is evaluated once and both the
 	// raw string (a UNC path keeps its host) and the resolved path go to the
@@ -629,12 +736,7 @@ func (e *Emitter) emitPathToFileURL(args []ast.Expression, pos ast.Pos) (Value, 
 	// (`/C:/foo/bar`) plus the URL host — Node's pathToFileURL on win32.
 	hostRef := e.internString("")
 	var abs Value
-	if hostPathFlavor() == pathWin32 {
-		raw, err := e.emitExpr(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		raw = e.coerce(raw, TypePtr)
+	if flavor == pathWin32 {
 		e.ensurePathWin32()
 		e.ensureProcessCwd()
 		e.ensureExceptionHelpers()
@@ -663,7 +765,7 @@ func (e *Emitter) emitPathToFileURL(args []ast.Expression, pos ast.Pos) (Value, 
 		abs = Value{Ref: pn, Ty: TypePtr}
 	} else {
 		var err error
-		abs, err = e.emitPathResolve(pathPosix, args[:1], pos)
+		abs, err = e.emitPathResolveValues(pathPosix, []Value{raw}, pos)
 		if err != nil {
 			return Value{}, err
 		}

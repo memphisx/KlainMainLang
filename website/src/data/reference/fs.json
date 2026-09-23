@@ -5,10 +5,10 @@
   "statusPage": "FILE-SYSTEM.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "19/20",
+    "loose": "21/22",
     "loosePct": 95,
-    "strict": "5/20",
-    "strictPct": 25
+    "strict": "6/22",
+    "strictPct": 27
   },
   "lede": "Node-fs-shaped file I/O for config, data, and logs. The sync set is the core; async variants (callback + Promise) and read/write streams wrap the same runtime helpers. The recurring divergence is text-first: the plain readFileSync/readFile/stream path is strlen-based and truncates at an embedded null byte — use readFileSyncBytes / an ArrayBuffer write for binary. There is no Buffer class (plain ArrayBuffer/TypedArrays). The async ops are genuinely non-blocking on a background thread pool — the fs.promises table, the legacy callback form, and binary-data writes alike (POSIX; Windows keeps an inline API shape for now).",
   "entries": [
@@ -468,6 +468,60 @@
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/fs.html#fsfsyncsyncfd"
+      }
+    },
+    {
+      "id": "fs.fchmodsync",
+      "name": "fs.fchmodSync(fd, mode)",
+      "statusRow": "fs.fchmodSync(fd, mode)",
+      "signature": "fchmodSync(fd: number, mode: number): void",
+      "badge": "exact",
+      "description": "chmodSync over an open file descriptor: fchmod(2) on POSIX; on Windows the same read-only-bit model as chmodSync, applied through the handle (FileBasicInfo, as libuv does). A socket or pipe fd is EBADF, and the thrown error is Node's fd-shaped `EBADF: bad file descriptor, fchmod`.",
+      "params": [
+        {
+          "name": "fd",
+          "type": "number",
+          "desc": "An open file descriptor from openSync."
+        },
+        {
+          "name": "mode",
+          "type": "number",
+          "desc": "The new permission bits (e.g. 0o644)."
+        }
+      ],
+      "returns": {
+        "type": "void",
+        "desc": "Nothing; throws a coded Error on failure."
+      },
+      "snippet": "const fd = fs.openSync(p, 'r+')\nfs.fchmodSync(fd, 0o444)\nconsole.log((fs.fstatSync(fd).mode & 0o222) === 0) // true",
+      "seeAlso": [
+        "fs.rmsync",
+        "fs.openSync"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/fs.html#fsfchmodsyncfd-mode"
+      }
+    },
+    {
+      "id": "fs.statfssync",
+      "name": "fs.statfsSync(path)",
+      "statusRow": "fs.statfsSync(path)",
+      "signature": "statfsSync(path: string, options?: { bigint?: boolean }): { type, bsize, frsize, blocks, bfree, bavail, files, ffree }",
+      "badge": "caveats",
+      "description": "File-system statistics of the volume holding path: statfs(2) read against the platform's own struct on POSIX (Darwin's frsize is bsize, as libuv reports); on Windows GetDiskFreeSpaceW of the path's volume, with type/files/ffree 0 as in Node. The path itself is probed first, so a missing file is `ENOENT: no such file or directory, statfs '<path>'`.",
+      "returns": {
+        "type": "object",
+        "desc": "{ type, bsize, frsize, blocks, bfree, bavail, files, ffree }, all numbers."
+      },
+      "snippet": "const s = fs.statfsSync(os.tmpdir())\nconsole.log(s.bavail * s.bsize) // free bytes available to this user",
+      "differences": [
+        "The `{ bigint: true }` option is accepted and ignored — the fields are always numbers."
+      ],
+      "seeAlso": [
+        "fs.statsync"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/fs.html#fsstatfssyncpath-options"
       }
     },
     {

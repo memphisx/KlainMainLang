@@ -45,3 +45,15 @@ const [host, port] = parts;
 console.log(host);                      // host
 console.log(port);                      // undefined
 console.log(port ?? "8080");            // 8080
+
+// Enumeration sees only the fields an object has (ADR-01063/ADR-01066):
+// an omitted optional field has no key in Object.keys/values/entries,
+// for...in, `in`, util.inspect and JSON.stringify.
+console.log(Object.keys(anon), Object.values(anon));   // [ 'name', 'age' ] [ 'Chrysa', '44' ]
+// (a mixed-type object's values stringify — ADR-00492; a homogeneous one keeps real values)
+interface Pt { x: number; y?: number }
+const pt: Pt = { x: 1 };
+console.log(Object.values(pt), Object.entries(pt));      // [ 1 ] [ [ 'x', 1 ] ]
+console.log(Object.entries(m));                        // [ [ 'name', 'm' ] ]
+for (const k in m) console.log("key", k);              // key name
+console.log("age" in m, m);                            // false { name: 'm' }

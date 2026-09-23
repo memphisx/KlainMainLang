@@ -317,6 +317,20 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	if err != nil {
 		return Value{}, err
 	}
+	// `-compat=js`: a callback that can fall off the end returns `T | undefined`
+	// (ADR-01065), and in JS the accumulator then *is* undefined on the next
+	// step — `[1,2,3].reduce((a, x) => { if (x > 1) return a + x }, 0)` is NaN
+	// in Node. Widen the accumulator to the same nullable scalar and re-resolve
+	// the callback with that parameter hint, so `a + x` inside it sees a
+	// presence-aware operand (nullableScalarOperand) rather than a payload zero.
+	accWidened := false
+	if rt := cb.retType(); e.compatJS() && hasInitial && rt.Nullable && rt.IsUndefined && reduceAccWidenable(accTyHint) {
+		accTyHint = undefinedableElem(accTyHint)
+		if cb, err = e.resolveCallbackWithHints(args[0], []Type{accTyHint, elemTy}); err != nil {
+			return Value{}, err
+		}
+		accWidened = true
+	}
 	// A reduce callback must return the accumulator value; a void callback would
 	// leave nothing to store back into the accumulator (invalid IR otherwise).
 	if rt := cb.retType(); rt.IR == "void" || rt.IR == "" {
@@ -332,7 +346,22 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	lastIdx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", lastIdx, lenReg))
 
-	if hasInitial {
+	if accWidened {
+		initVal, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		accTy = accTyHint
+		agg := storageIR(accTy)
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, agg, storageAlign(accTy)))
+		seed := e.coerce(initVal, accTy)
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", agg, seed.Ref, accAlloca, storageAlign(accTy)))
+		if fromRight {
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lastIdx, idxAlloca))
+		} else {
+			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+		}
+	} else if hasInitial {
 		initVal, err := e.emitExpr(args[1])
 		if err != nil {
 			return Value{}, err
@@ -400,7 +429,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 
 	e.emitLabel(bodyL)
 	accCur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", accCur, accTy.IR, accAlloca, accTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", accCur, storageIR(accTy), accAlloca, storageAlign(accTy)))
 	inGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	inVal := e.loadArrayElem(inGep, elemTy)
@@ -409,16 +438,33 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	if err != nil {
 		return Value{}, err
 	}
-	newAccCoerced := e.coerce(newAcc, accTy)
-	// The accumulator has one type for the whole fold: the initial value's, or
-	// the element type without one. A callback whose result has no conversion
-	// to it (`[1, 2].reduce((x, y) => `${x}+${y}`, 0)` — a string into a number)
-	// is tsc's "no overload matches this call"; storing it anyway was invalid IR.
-	if newAccCoerced.Ty.IR != accTy.IR {
-		return Value{}, fmt.Errorf("%d:%d: %s callback returns %s but the accumulator is %s — give the initial value the callback's result type",
-			pos.Line, pos.Col, verb, tsTypeName(newAcc.Ty), tsTypeName(accTy))
+	// A callback that can fall off the end returns `T | undefined` (ADR-01065);
+	// storing that into a bare-`T` accumulator is tsc's "Type 'T | undefined' is
+	// not assignable to type 'T'" — reject as tsc does rather than let coerce
+	// collapse the absent value to zero. `-compat=js` keeps the lenient collapse
+	// (the accumulator would be `undefined` there — BACKLOG §0).
+	if isNullableScalar(newAcc.Ty) && !isNullableScalar(accTy) && !e.compatJS() {
+		return Value{}, fmt.Errorf("%d:%d: %s callback returns %s | undefined (a path falls off the end) but the accumulator is %s — every path of the callback must return a value",
+			pos.Line, pos.Col, verb, tsTypeName(newAcc.Ty.withoutNullable()), tsTypeName(accTy))
 	}
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accTy.IR, newAccCoerced.Ref, accAlloca, accTy.Align()))
+	if accWidened {
+		// The widened accumulator stores the callback's nullable result as is
+		// (the { i1, T } aggregate, or a possibly-null pointer) — absence travels
+		// with it into the next step and out as the result.
+		stepped := e.coerce(newAcc, accTy)
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", storageIR(accTy), stepped.Ref, accAlloca, storageAlign(accTy)))
+	} else {
+		newAccCoerced := e.coerce(newAcc, accTy)
+		// The accumulator has one type for the whole fold: the initial value's, or
+		// the element type without one. A callback whose result has no conversion
+		// to it (`[1, 2].reduce((x, y) => `${x}+${y}`, 0)` — a string into a number)
+		// is tsc's "no overload matches this call"; storing it anyway was invalid IR.
+		if newAccCoerced.Ty.IR != accTy.IR {
+			return Value{}, fmt.Errorf("%d:%d: %s callback returns %s but the accumulator is %s — give the initial value the callback's result type",
+				pos.Line, pos.Col, verb, tsTypeName(newAcc.Ty), tsTypeName(accTy))
+		}
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accTy.IR, newAccCoerced.Ref, accAlloca, accTy.Align()))
+	}
 
 	idxNext := e.freshReg()
 	if fromRight {
@@ -431,7 +477,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 
 	e.emitLabel(doneL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, accTy.IR, accAlloca, accTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, storageIR(accTy), accAlloca, storageAlign(accTy)))
 	return Value{Ref: result, Ty: accTy}, nil
 }
 

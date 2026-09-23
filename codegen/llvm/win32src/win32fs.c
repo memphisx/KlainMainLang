@@ -745,6 +745,23 @@ int chmod(const char *path, int mode) {
 	return ok ? 0 : fail();
 }
 
+// fchmod(fd, mode): the same read-only-bit model as chmod, applied through the
+// handle (FileBasicInfo, libuv's fs__fchmod uses FileBasicInformation). A
+// socket/pipe/console fd is EBADF, as the CRT's would be.
+int kml_win_fchmod(int fd, int mode) __asm__("fchmod");
+int kml_win_fchmod(int fd, int mode) {
+	int kind = kfd_kind_of(fd);
+	HANDLE h = kfd_handle(fd);
+	if (kind != KFD_PLAIN || h == INVALID_HANDLE_VALUE) { errno = L_EBADF; return -1; }
+	FILE_BASIC_INFO bi;
+	if (!GetFileInformationByHandleEx(h, FileBasicInfo, &bi, sizeof bi)) return fail();
+	if (mode & 0222) bi.FileAttributes &= ~(DWORD)FILE_ATTRIBUTE_READONLY; else bi.FileAttributes |= FILE_ATTRIBUTE_READONLY;
+	if (bi.FileAttributes == 0) bi.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+	// Leave the timestamps alone: a zero (or -1) FILETIME means "don't change".
+	bi.CreationTime.QuadPart = bi.LastAccessTime.QuadPart = bi.LastWriteTime.QuadPart = bi.ChangeTime.QuadPart = 0;
+	return SetFileInformationByHandle(h, FileBasicInfo, &bi, sizeof bi) ? 0 : fail();
+}
+
 int chdir(const char *path) {
 	wchar_t *w = to_wide(path);
 	if (!w) return -1;
@@ -805,15 +822,110 @@ static char *final_path_utf8(HANDLE h) {
 	return to_utf8(p);
 }
 
+// realpath_walk resolves an absolute, normalized path component by component,
+// following every symlink/junction through its reparse target — the walk
+// Node's own (JS) fs.realpath does. It is the fallback when the final-path
+// query has no DOS name to give: a volume mounted without a drive-letter
+// mapping (an OSFMount RAM disk) answers GetFinalPathNameByHandleW(VOLUME_
+// NAME_DOS) with ERROR_INVALID_FUNCTION and only the `\Device\…` NT form
+// exists, which no Node program can use (ADR-01058). Case is kept as given,
+// like Node's walk. Bounded at 40 link hops (ELOOP). Returns malloc'd UTF-8,
+// or NULL with the Win32 last-error set.
+static char *realpath_walk(const wchar_t *in) {
+	static const size_t CAP = 32768;
+	wchar_t *full = (wchar_t *)malloc(CAP * sizeof(wchar_t));
+	wchar_t *acc = (wchar_t *)malloc(CAP * sizeof(wchar_t));
+	wchar_t *rest = (wchar_t *)malloc(CAP * sizeof(wchar_t));
+	wchar_t *join = (wchar_t *)malloc(CAP * sizeof(wchar_t));
+	char *out = NULL;
+	int hops = 0;
+	if (!full || !acc || !rest || !join) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto done; }
+	{
+		DWORD n = GetFullPathNameW(in, (DWORD)CAP, full, NULL);
+		if (n == 0 || n >= CAP) goto done;
+	}
+restart:;
+	{
+		// Split off the root: `X:\` or `\\server\share\`.
+		size_t rootlen = 0;
+		if (((full[0] >= L'A' && full[0] <= L'Z') || (full[0] >= L'a' && full[0] <= L'z')) && full[1] == L':' && full[2] == L'\\') {
+			rootlen = 3;
+		} else if (full[0] == L'\\' && full[1] == L'\\') {
+			const wchar_t *p = wcschr(full + 2, L'\\');
+			if (p) p = wcschr(p + 1, L'\\');
+			rootlen = p ? (size_t)(p - full) + 1 : wcslen(full);
+		} else { SetLastError(ERROR_INVALID_NAME); goto done; }
+		wmemcpy(acc, full, rootlen); acc[rootlen] = 0;
+		wcscpy(rest, full + rootlen);
+	}
+	while (rest[0]) {
+		wchar_t *sep = wcschr(rest, L'\\');
+		size_t clen = sep ? (size_t)(sep - rest) : wcslen(rest);
+		size_t alen = wcslen(acc);
+		if (clen == 0) { wmemmove(rest, rest + 1, wcslen(rest)); continue; }
+		if (alen + 1 + clen + 1 >= CAP) { SetLastError(ERROR_FILENAME_EXCED_RANGE); goto done; }
+		if (acc[alen - 1] != L'\\') acc[alen++] = L'\\';
+		wmemcpy(acc + alen, rest, clen); acc[alen + clen] = 0;
+		wmemmove(rest, rest + clen + (sep ? 1 : 0), wcslen(rest + clen + (sep ? 1 : 0)) + 1);
+
+		HANDLE h = CreateFileW(acc, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+		if (h == INVALID_HANDLE_VALUE) goto done;
+		int link = is_reparse_link(h);
+		char *target = link ? reparse_target_utf8(h) : NULL;
+		CloseHandle(h);
+		if (!link) continue;
+		if (!target) goto done;
+		if (++hops > 40) { free(target); SetLastError(ERROR_CANT_RESOLVE_FILENAME); goto done; }
+		wchar_t *wt = to_wide(target);
+		free(target);
+		if (!wt) { SetLastError(ERROR_INVALID_NAME); goto done; }
+		// An absolute target replaces the walked prefix; a relative one joins
+		// onto the link's parent. Then the not-yet-walked remainder follows.
+		int absolute = (wt[0] && wt[1] == L':' && (wt[2] == L'\\' || wt[2] == L'/')) ||
+		               ((wt[0] == L'\\' || wt[0] == L'/') && (wt[1] == L'\\' || wt[1] == L'/'));
+		if (absolute) {
+			wcscpy(join, wt);
+		} else {
+			wchar_t *last = wcsrchr(acc, L'\\');
+			size_t plen = last ? (size_t)(last - acc) + 1 : 0;
+			if (plen + wcslen(wt) + 1 >= CAP) { free(wt); SetLastError(ERROR_FILENAME_EXCED_RANGE); goto done; }
+			wmemcpy(join, acc, plen); wcscpy(join + plen, wt);
+		}
+		free(wt);
+		if (rest[0]) {
+			size_t jl = wcslen(join);
+			if (jl + 1 + wcslen(rest) + 1 >= CAP) { SetLastError(ERROR_FILENAME_EXCED_RANGE); goto done; }
+			if (join[jl - 1] != L'\\') join[jl++] = L'\\';
+			wcscpy(join + jl, rest);
+		}
+		DWORD n = GetFullPathNameW(join, (DWORD)CAP, full, NULL);
+		if (n == 0 || n >= CAP) goto done;
+		goto restart;
+	}
+	out = to_utf8(acc);
+	if (!out) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+done:
+	free(full); free(acc); free(rest); free(join);
+	return out;
+}
+
 char *realpath(const char *path, char *resolved) {
 	wchar_t *w = to_wide(path);
 	if (!w) return NULL;
+	// Fast path: let the kernel follow the links and ask for the final DOS
+	// path (case-corrected, like realpathSync.native). Fall back to the
+	// component walk when that can't answer: a volume with no DOS name, or a
+	// link the kernel won't follow but Node's readlink-based walk resolves (a
+	// relative target stored with forward slashes).
+	char *u = NULL;
 	HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	if (h != INVALID_HANDLE_VALUE) {
+		u = final_path_utf8(h);
+		CloseHandle(h);
+	}
+	if (!u) u = realpath_walk(w);
+	if (!u) { free_keep_err(w); return failp(); }
 	free_keep_err(w);
-	if (h == INVALID_HANDLE_VALUE) return failp();
-	char *u = final_path_utf8(h);
-	CloseHandle(h);
-	if (!u) { errno = L_EINVAL; return NULL; }
 	if (!resolved) return u;
 	strncpy(resolved, u, 4096);
 	resolved[4095] = 0;

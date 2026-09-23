@@ -180,3 +180,22 @@ buf[0] = 100
 console.log(sum())
 `, "150")
 }
+
+// ADR-01060: a named function whose unannotated return is a top-level binding
+// infers that binding's type from its declaration even though signatures are
+// built before module globals are registered — `const s = "x"; function f()
+// { return s }` used to infer f as number and emit `ret ptr` for an i64.
+func TestE2EModuleGlobalReturnTypeInferredBeforePromotion(t *testing.T) {
+	assertOutput(t, `
+const s = "x";
+function f() { return s; }
+const arr = [1.5];
+function g() { return arr; }
+const n: any = 5;
+function h() { return [n, 7]; }
+let later: any;
+function k() { return later; }
+later = "set";
+console.log(f(), g(), h(), k());
+`, "x [ 1.5 ] [ 5, 7 ] set")
+}

@@ -19,6 +19,49 @@
 #if defined(__linux__)
 #include <link.h> // dl_iterate_phdr, for this thread's TLS blocks
 #endif
+#ifndef _WIN32
+#include <sys/mman.h> // mmap/munmap, for coroutine stacks
+#endif
+#if defined(__GLIBC__)
+#include <pthread.h> // the foreign-block set's lock
+#include <stdint.h>
+// Declared by gc.h only under GC_THREADS; every libgc this project links is
+// the threaded build, which exports it.
+GC_API int GC_CALL GC_thread_is_registered(void);
+#endif
+
+// Coroutine (task) stacks live outside the collected heap. A GC_malloc'd
+// stack block was zeroed at allocation (8 MiB resident for the module task,
+// ADR-01050) and then scanned as one enormous heap object on every
+// collection, in addition to being scanned as the running stack. Here the
+// block is a bare anonymous mapping — pages exist only once touched — and on
+// POSIX, where a parked task's frames really do live in it, the whole range
+// is a root for the block's lifetime (the same shape klainsync.c uses for
+// goroutine stacks). Registering the live [sp, high) slice per park would
+// scan less; the whole-range root is already strictly cheaper than before.
+// On Windows a context is a Win32 fiber on an OS stack — win32io.c registers
+// the parked fiber stack itself (park_lo/park_hi) — so the block is only the
+// size hint makecontext reads, never a root.
+void *__kml_task_stack_alloc(size_t n) {
+#ifdef _WIN32
+	return VirtualAlloc(NULL, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+	void *p = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (p == MAP_FAILED) return NULL;
+	GC_add_roots((char *)p, (char *)p + n);
+	return p;
+#endif
+}
+void __kml_task_stack_free(void *p, size_t n) {
+	if (!p) return;
+#ifdef _WIN32
+	(void)n;
+	VirtualFree(p, 0, MEM_RELEASE);
+#else
+	GC_remove_roots((char *)p, (char *)p + n);
+	munmap(p, n);
+#endif
+}
 
 #if defined(__linux__)
 // On at least one Boehm GC build (Ubuntu's libgc-dev package, confirmed via
@@ -242,7 +285,88 @@ static void __kml_gc_ctor(void) {
 	ctorDone = 1;
 }
 
+#if defined(__GLIBC__)
+// Threads the collector does not know. The shim replaces malloc for the whole
+// process, so a library's own threads allocate here too — libcurl's threaded
+// DNS resolver runs getaddrinfo on one. GC_malloc from such a thread can start
+// a collection, and Boehm aborts one begun on an unregistered thread
+// ("Collecting from unknown thread"); even without that, a block it handed out
+// would be collectable while only that thread — whose stack is no root —
+// referenced it. Those threads get the C library's own allocator instead, and
+// their blocks are tracked so free()/realloc() on any thread can tell them
+// from GC objects and from other foreign pointers (see free() below).
+extern void *__libc_malloc(size_t);
+extern void *__libc_calloc(size_t, size_t);
+extern void *__libc_realloc(void *, size_t);
+extern void __libc_free(void *);
+static __thread int kmlGCThreadKnown; // a cached "registered with the collector"
+static int kml_foreign_thread(void) {
+	if (kmlGCThreadKnown) return 0;
+	if (GC_thread_is_registered()) {
+		kmlGCThreadKnown = 1;
+		return 0;
+	}
+	return 1; // asked again next time: the thread may register later
+}
+// The foreign-block set: open addressing, linear probing, tombstones.
+static pthread_mutex_t kmlForeignMu = PTHREAD_MUTEX_INITIALIZER;
+static void **kmlForeignTab;
+static size_t kmlForeignCap, kmlForeignUsed; // used counts live + tombstones
+static size_t kmlForeignLive; // read without the lock only as a "maybe any" hint
+#define KML_TOMB ((void *)1)
+static size_t kml_fhash(void *p, size_t cap) { return (((uintptr_t)p >> 4) * 0x9E3779B97F4A7C15ull) & (cap - 1); }
+static void kml_fput(void *p) { // lock held; room guaranteed
+	size_t i = kml_fhash(p, kmlForeignCap);
+	while (kmlForeignTab[i] && kmlForeignTab[i] != KML_TOMB) i = (i + 1) & (kmlForeignCap - 1);
+	if (!kmlForeignTab[i]) kmlForeignUsed++;
+	kmlForeignTab[i] = p;
+	kmlForeignLive++;
+}
+static void kml_foreign_add(void *p) {
+	pthread_mutex_lock(&kmlForeignMu);
+	if ((kmlForeignUsed + 1) * 2 > kmlForeignCap) {
+		size_t oldCap = kmlForeignCap, ncap = oldCap ? oldCap : 64;
+		while ((kmlForeignLive + 1) * 2 > ncap / 2) ncap *= 2;
+		void **old = kmlForeignTab;
+		kmlForeignTab = __libc_calloc(ncap, sizeof(void *));
+		kmlForeignCap = ncap;
+		kmlForeignUsed = kmlForeignLive = 0;
+		for (size_t i = 0; i < oldCap; i++)
+			if (old[i] && old[i] != KML_TOMB) kml_fput(old[i]);
+		__libc_free(old);
+	}
+	kml_fput(p);
+	pthread_mutex_unlock(&kmlForeignMu);
+}
+static int kml_foreign_remove(void *p) { // 1 when p was a foreign block
+	if (!p || !__atomic_load_n(&kmlForeignLive, __ATOMIC_RELAXED)) return 0;
+	int found = 0;
+	pthread_mutex_lock(&kmlForeignMu);
+	if (kmlForeignCap) {
+		size_t i = kml_fhash(p, kmlForeignCap);
+		while (kmlForeignTab[i]) {
+			if (kmlForeignTab[i] == p) {
+				kmlForeignTab[i] = KML_TOMB;
+				kmlForeignLive--;
+				found = 1;
+				break;
+			}
+			i = (i + 1) & (kmlForeignCap - 1);
+		}
+	}
+	pthread_mutex_unlock(&kmlForeignMu);
+	return found;
+}
+#endif
+
 void *malloc(size_t size) {
+#if defined(__GLIBC__)
+	if (ctorDone && kml_foreign_thread()) {
+		void *p = __libc_malloc(size);
+		if (p) kml_foreign_add(p);
+		return p;
+	}
+#endif
 	if (!ctorDone) {
 		void *p = bumpAlloc(size);
 		if (p != NULL) {
@@ -254,6 +378,13 @@ void *malloc(size_t size) {
 }
 
 void *calloc(size_t nmemb, size_t size) {
+#if defined(__GLIBC__)
+	if (ctorDone && kml_foreign_thread()) {
+		void *p = __libc_calloc(nmemb, size);
+		if (p) kml_foreign_add(p);
+		return p;
+	}
+#endif
 	if (!ctorDone) {
 		void *p = bumpAlloc(nmemb * size);
 		if (p != NULL) {
@@ -268,6 +399,27 @@ void *calloc(size_t nmemb, size_t size) {
 }
 
 void *realloc(void *ptr, size_t size) {
+#if defined(__GLIBC__)
+	// A foreign block stays a libc block, whichever thread resizes it.
+	if (kml_foreign_remove(ptr)) {
+		void *q = __libc_realloc(ptr, size);
+		kml_foreign_add(q ? q : ptr);
+		return q;
+	}
+	if (ctorDone && kml_foreign_thread()) {
+		void *q = __libc_malloc(size);
+		if (!q) return NULL;
+		if (ptr && GC_base(ptr)) { // a GC object resized off-collector: copy it out
+			size_t old = GC_size(ptr);
+			memcpy(q, ptr, old < size ? old : size);
+		} else if (ptr) {
+			__libc_free(q); // unknown provenance: keep the collector's behaviour
+			return GC_realloc(ptr, size);
+		}
+		kml_foreign_add(q);
+		return q;
+	}
+#endif
 	if (!ctorDone && (ptr == NULL || isBumpPtr(ptr))) {
 		void *p = bumpAlloc(size);
 		if (p != NULL) {
@@ -285,6 +437,12 @@ void free(void *ptr) {
 	if (isBumpPtr(ptr)) {
 		return; // no-op: bump-allocated memory is never individually freed
 	}
+#if defined(__GLIBC__)
+	if (kml_foreign_remove(ptr)) { // handed out to a thread the collector does not know
+		__libc_free(ptr);
+		return;
+	}
+#endif
 	// GC_free is only safe on a pointer Boehm actually owns. A foreign pointer
 	// reaching this shim's free() — a library that allocated through a private
 	// arena (e.g. OpenSSL's CRYPTO_secure_malloc) and frees it via libc free(),

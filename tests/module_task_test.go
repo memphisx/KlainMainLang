@@ -229,3 +229,110 @@ f().then(function(value) { console.log(value); });
 `, "incompatible with the parameter's declared type")
 	}
 }
+
+// --- TDD-00224 Stage 2: a worker module with a top-level await is a module
+// task on the worker's own thread (ADR-01055). ---
+
+// The continuation of a worker's top-level `await p` is a reaction on p —
+// after the `.then` registered before it, before the one registered after.
+func TestE2EWorkerModuleTaskAwaitContinuationIsAReaction(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"w.ts": `
+import { parentPort } from 'worker_threads';
+const later = (ms: number) => new Promise<number>((res) => setTimeout(() => res(7), ms));
+const p = later(20);
+p.then(() => console.log("w: reaction 1"));
+const v: number = await p;
+console.log("w: after await", v);
+p.then(() => console.log("w: reaction 2"));
+await null;
+console.log("w: after await null");
+parentPort.postMessage(v);
+`,
+		"main.ts": `
+import { Worker } from 'worker_threads';
+const w = new Worker('./w.ts');
+w.on('message', (m: number) => console.log("main: msg", m));
+w.on('exit', (c: number) => console.log("main: exit", c));
+`,
+	}, "main.ts", "w: reaction 1\nw: after await 7\nw: reaction 2\nw: after await null\nmain: msg 7\nmain: exit 0")
+}
+
+// An uncaught throw after a worker's top-level await ends that worker only:
+// the parent's 'error' listener gets the Error object, 'exit' sees 1, the
+// process goes on and exits 0. (On Windows the thread has to end from its own
+// stack, not the coroutine's — runtime_worker.go's @__kml_worker_abort_check.)
+func TestE2EWorkerModuleTaskThrowAfterAwaitIsWorkerError(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"w.ts": `
+console.log("w: start");
+await null;
+throw new RangeError("boom from worker");
+`,
+		"main.ts": `
+import { Worker } from 'worker_threads';
+const w = new Worker('./w.ts');
+w.on('error', (e: Error) => console.log("main: error", e.message, e.name, e instanceof RangeError));
+w.on('exit', (c: number) => console.log("main: exit", c, "still here"));
+`,
+	}, "main.ts", "w: start\nmain: error boom from worker RangeError true\nmain: exit 1 still here")
+}
+
+// A worker whose top-level await never settles: Node's warning, the worker
+// exits with code 13, the parent keeps running and the process exits 0.
+func TestE2EWorkerModuleTaskUnsettledExits13(t *testing.T) {
+	bin := buildBinaryMultiFile(t, map[string]string{
+		"w.ts": `
+console.log("w: start");
+await new Promise<void>(() => {});
+console.log("w: never");
+`,
+		"main.ts": `
+import { Worker } from 'worker_threads';
+const w = new Worker('./w.ts');
+w.on('exit', (c: number) => console.log("main: exit", c));
+`,
+	}, "main.ts")
+	cmd := exec.Command(bin)
+	raw, _ := cmd.CombinedOutput()
+	out := string(raw)
+	if code := cmd.ProcessState.ExitCode(); code != 0 {
+		t.Errorf("exit code = %d, want 0\n%s", code, out)
+	}
+	if !strings.Contains(out, "main: exit 13") || strings.Contains(out, "never") {
+		t.Errorf("unexpected output:\n%s", out)
+	}
+	if !strings.Contains(out, "unsettled top-level await") {
+		t.Errorf("missing the unsettled-await warning:\n%s", out)
+	}
+}
+
+// The worker module task under -mm=gc: the body allocates garbage across its
+// awaits (collections while the coroutine is parked and while it runs) and the
+// values survive.
+func TestE2EWorkerModuleTaskGCMode(t *testing.T) {
+	assertMultiFileOutputGC(t, map[string]string{
+		"w.ts": `
+import { parentPort } from 'worker_threads';
+const later = (ms: number) => new Promise<number>((res) => setTimeout(() => res(1), ms));
+const keep: string[] = [];
+for (let round = 0; round < 3; round++) {
+    let acc = 0;
+    for (let i = 0; i < 2000; i++) {
+        const arr: number[] = [i, i + 1, i + 2];
+        const s = "x" + i;
+        acc += arr[0] + s.length;
+    }
+    keep.push("round" + round + ":" + acc);
+    await later(5);
+}
+parentPort.postMessage(keep.join(","));
+`,
+		"main.ts": `
+import { Worker } from 'worker_threads';
+const w = new Worker('./w.ts');
+w.on('message', (m: string) => console.log("r:", m));
+w.on('exit', (c: number) => console.log("done", c));
+`,
+	}, "main.ts", "r: round0:2007890,round1:2007890,round2:2007890\ndone 0")
+}

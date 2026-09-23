@@ -409,3 +409,38 @@ function fmt(x: Date): string {
 console.log(fmt(d))
 `, "Thu Jan 01 1970\n1/1/1970")
 }
+
+// Dates before 1970 and years outside 0..9999: the calendar fields come from
+// integer arithmetic, not gmtime (the Windows CRT returns NULL before 1970,
+// which crashed every pre-epoch read there), and the year prints in Node's
+// expanded ISO form / sign-padded toDateString form.
+const datePreEpochSrc = `
+for (const m of [-1, -86400000, -2208988800000, -62135596800000, -62198755200000, 951782400000, 8640000000000000, -8640000000000000]) {
+  const d = new Date(m)
+  console.log(d.toISOString(), d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCDay(), d.getUTCHours(), d.getUTCMilliseconds())
+}
+`
+
+// toDateString is local time in Node (UTC here, a known gap), so it stays out
+// of the Node comparison; this pins its expanded-year form.
+const datePreEpochDateStringSrc = `
+for (const m of [-86400000, -62198755200000, 8640000000000000, -8640000000000000]) {
+  console.log(new Date(m).toDateString())
+}
+`
+
+func TestE2EDatePreEpochAndExpandedYears(t *testing.T) {
+	assertOutput(t, datePreEpochSrc, `1969-12-31T23:59:59.999Z 1969 11 31 3 23 999
+1969-12-31T00:00:00.000Z 1969 11 31 3 0 0
+1900-01-01T00:00:00.000Z 1900 0 1 1 0 0
+0001-01-01T00:00:00.000Z 1 0 1 1 0 0
+-000001-01-01T00:00:00.000Z -1 0 1 5 0 0
+2000-02-29T00:00:00.000Z 2000 1 29 2 0 0
++275760-09-13T00:00:00.000Z 275760 8 13 6 0 0
+-271821-04-20T00:00:00.000Z -271821 3 20 2 0 0`)
+	assertOutput(t, datePreEpochDateStringSrc, "Wed Dec 31 1969\nFri Jan 01 -0001\nSat Sep 13 275760\nTue Apr 20 -271821")
+}
+
+func TestE2EDatePreEpochAndExpandedYearsSameAsNode(t *testing.T) {
+	assertSameAsNode(t, datePreEpochSrc)
+}

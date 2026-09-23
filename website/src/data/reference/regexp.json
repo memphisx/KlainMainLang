@@ -4,8 +4,8 @@
   "kind": "language",
   "statusPage": "REGEXP.md",
   "coversRows": "all",
-  "coverage": { "loose": "13/14", "loosePct": 93, "strict": "6/14", "strictPct": 43 },
-  "lede": "PCRE2 under the hood, but aligned to the ECMAScript dialect by default so the everyday edge cases (`$` at the true end, an unset backreference matching empty, `\\uXXXX` escapes) behave as real JS does. The recurring divergences are structural: strings are byte-indexed, so match offsets are byte positions unless you opt into `-regex=es-utf16`; result arrays narrow a truly-`null` optional capture to `\"\"` and drop the `index`/`input`/`groups` extras; and `matchAll` is eager, not a lazy iterator. The whole-program `-regex=<mode>` flag trades fidelity for speed across five modes, and the `u`/`y`/`d` flags are out of scope for V1.",
+  "coverage": { "loose": "14/15", "loosePct": 93, "strict": "7/15", "strictPct": 47 },
+  "lede": "PCRE2 under the hood, but aligned to the ECMAScript dialect by default so the everyday edge cases (`$` at the true end, an unset backreference matching empty, `\\uXXXX` escapes) behave as real JS does. The recurring divergences are structural: strings are byte-indexed, so match offsets are byte positions unless you opt into `-regex=es-utf16`; result arrays narrow a truly-`null` optional capture to `\"\"` and drop the `index`/`input`/`groups` extras; and `matchAll` is eager, not a lazy iterator. The whole-program `-regex=<mode>` flag trades fidelity for speed across five modes, and the `u`/`d` flags are out of scope for V1 (`y`/sticky is implemented).",
   "entries": [
     {
       "id": "regexp.construction",
@@ -21,7 +21,7 @@
       "returns": { "type": "RegExp", "desc": "A compiled RegExp." },
       "exampleKey": "regexp/regexp",
       "snippet": "const fromCtor = new RegExp(\"[a-z]+@[a-z]+\\\\.[a-z]+\", \"i\")\nconsole.log(fromCtor.source)",
-      "seeAlso": ["regexp.literal", "regexp.sourceFlags", "regexp.uyd"],
+      "seeAlso": ["regexp.literal", "regexp.sourceFlags", "regexp.ud"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/RegExp" }
     },
     {
@@ -62,7 +62,7 @@
       "returns": { "type": "boolean", "desc": "Whether the corresponding flag is set." },
       "exampleKey": "regexp/regexp",
       "snippet": "const r = new RegExp(\"^\\\\d+$\", \"gm\")\nconsole.log(r.global)     // 1\nconsole.log(r.multiline)  // 1",
-      "seeAlso": ["regexp.sourceFlags", "regexp.uyd"],
+      "seeAlso": ["regexp.sourceFlags", "regexp.ud"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/global" }
     },
     {
@@ -218,13 +218,26 @@
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/search" }
     },
     {
-      "id": "regexp.uyd",
-      "name": "u / y / d flags",
-      "statusRow": "u / y / d flags",
+      "id": "regexp.sticky",
+      "name": "y (sticky) flag",
+      "statusRow": "y (sticky) flag — .sticky, anchored matching at .lastIndex",
+      "signature": "re.sticky: boolean  // /pattern/y, new RegExp(p, \"y\")",
+      "badge": "exact",
+      "description": "A sticky RegExp matches only at exactly .lastIndex: the match is anchored there, .lastIndex advances to the match end on success and resets to 0 on failure, exactly as for g. The real RegExpBuiltinExec rule — lastIndex is honoured when global OR sticky is set — flows through exec, test, match, matchAll, replace, replaceAll and search.",
+      "returns": { "type": "boolean", "desc": "Whether the y flag is set." },
+      "exampleKey": "regexp/regexp",
+      "snippet": "const re = /foo/y\nre.lastIndex = 3\nconsole.log(re.test(\"barfoo\"), re.lastIndex)  // true 6\nconsole.log(re.test(\"barfoo\"), re.lastIndex)  // false 0",
+      "seeAlso": ["regexp.boolFlags", "regexp.lastIndex", "regexp.ud"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/sticky" }
+    },
+    {
+      "id": "regexp.ud",
+      "name": "u / d flags",
+      "statusRow": "u / d flags",
       "signature": "// not supported",
       "badge": "missing",
-      "description": "The u (unicode), y (sticky), and d (indices) flags are deferred for the whole feature's V1. \\u{…} code-point escapes, surrogate handling, Unicode \\p{…}/class semantics, and strict-syntax validation are a later option.",
-      "seeAlso": ["regexp.construction", "regexp.boolFlags"],
+      "description": "The u (unicode) and d (indices) flags are deferred for the whole feature's V1. \\u{…} code-point escapes, surrogate handling, Unicode \\p{…}/class semantics, and strict-syntax validation are a later option.",
+      "seeAlso": ["regexp.construction", "regexp.boolFlags", "regexp.sticky"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/unicode" }
     }
   ]

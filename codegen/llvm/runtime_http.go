@@ -2157,6 +2157,8 @@ ccdone:
   %plkeep = call i1 @__kml_pool_keepalive()
   ; TDD-00191 Stage 1: any open additional http server keeps the loop alive.
   %xlkeep = call i1 @__kml_http_xl_keepalive()
+  ; TDD-00225: a pending dynamic-import island whose own loop still has work.
+  %dikeep = call i1 @__kml_dynimport_keepalive()
   %anywork0 = or i1 %havetimer, %haslistener
   %anywork1 = or i1 %anywork0, %hasactiveconns
   %anywork2 = or i1 %anywork1, %hasopenes
@@ -2171,7 +2173,8 @@ ccdone:
   %anywork6f = or i1 %anywork6e, %ipcckeep
   %anywork6g = or i1 %anywork6f, %fwkeep
   %anywork6h = or i1 %anywork6g, %plkeep
-  %anywork = or i1 %anywork6h, %xlkeep
+  %anywork6i = or i1 %anywork6h, %xlkeep
+  %anywork = or i1 %anywork6i, %dikeep
   ; TDD-00084 Part B: an active coroutine task keeps the loop alive too.
   %hasactivetasks_aw = load i1, ptr %hasactivetasks_slot, align 1
   %anyworkt0 = or i1 %anywork, %hasactivetasks_aw
@@ -2189,7 +2192,18 @@ ccdone:
   ; would block the final select() forever.
   %curl_inflight = call i32 @__kml_curl_inflight()
   %curl_busy = icmp sgt i32 %curl_inflight, 0
-  %anyworkt = or i1 %anyworkt1, %curl_busy
+  %anyworkt2 = or i1 %anyworkt1, %curl_busy
+  ; That call also drains the transfers libcurl just finished, settling their
+  ; promises: a fetch completing *inside* it leaves 0 in flight and its
+  ; continuation queued (a microtask, or a parked task made runnable — the
+  ; module task of a top-level await, which holds nothing open itself,
+  ; ADR-01051). Leaving here would drop that work: an intermittent "unsettled
+  ; top-level await" exit 13 with the response already received. Take another
+  ; turn instead; the dowork pass below runs it without blocking.
+  %post_mt = call i1 @__kml_microtasks_pending()
+  %post_task = call i1 @__kml_task_resumable()
+  %post_work = or i1 %post_mt, %post_task
+  %anyworkt = or i1 %anyworkt2, %post_work
   br i1 %anyworkt, label %dowork, label %loopidle
 
 dowork:
@@ -2570,6 +2584,21 @@ cptostore:
   store i64 %cptons, ptr %cmdlabs, align 8
   br label %cptodone
 cptodone:
+  ; TDD-00225: fold the pending dynamic-import islands' earliest timer (or the
+  ; 10 ms re-poll cap) into the extra-deadline slot, same min-merge shape.
+  %ditons = call i64 @__kml_dynimport_next_deadline_ns()
+  %ditohas = icmp ne i64 %ditons, 0
+  br i1 %ditohas, label %ditofold, label %ditodone
+ditofold:
+  %ditocur = load i64, ptr %cmdlabs, align 8
+  %ditoempty = icmp eq i64 %ditocur, 0
+  %ditosoon = icmp slt i64 %ditons, %ditocur
+  %ditotake = or i1 %ditoempty, %ditosoon
+  br i1 %ditotake, label %ditostore, label %ditodone
+ditostore:
+  store i64 %ditons, ptr %cmdlabs, align 8
+  br label %ditodone
+ditodone:
   ; TDD-00217: fold the soonest connection request/keep-alive timeout deadline
   ; into the extra-deadline slot so select() wakes by it and the top-of-loop sweep
   ; then shutdown()s the expired connection. Same min-merge shape as the folds
@@ -2615,7 +2644,12 @@ ctodone:
   %pend0a = or i1 %pend01, %pokep
   %pend0 = or i1 %pend0a, %ranp
   %needimmediate0 = load i1, ptr %forcezero, align 1
-  %needimmediate = or i1 %needimmediate0, %pend0
+  ; TDD-00225: a non-blocking turn — a dynamic-import island being polled by
+  ; its importer's loop never sleeps in its own select().
+  %nowaitv = load i8, ptr @__kml_loop_nowait, align 1
+  %nowaitp = icmp ne i8 %nowaitv, 0
+  %needimmediate1 = or i1 %needimmediate0, %pend0
+  %needimmediate = or i1 %needimmediate1, %nowaitp
   %usetimer0 = or i1 %havetimer, %needimmediate
   %havefetchdlv = load i1, ptr %havefetchdl, align 1
   %usetimer1 = or i1 %usetimer0, %havefetchdlv
@@ -2709,6 +2743,9 @@ afterselectok:
   call void @__kml_chan_dispatch()
   ; child_process: drain spawned children's stdout/stderr and finalize exits.
   call void @__kml_cp_dispatch()
+  ; TDD-00225: poll pending dynamic-import islands (one turn of each island's
+  ; own loop) and settle the import() promises whose module promise settled.
+  call void @__kml_dynimport_dispatch()
   ; fork IPC (child side): drain the channel and fire 'message' listeners.
   call void @__kml_ipcc_dispatch()
   ; fs.watch: read pending file-change events and fire watcher listeners.

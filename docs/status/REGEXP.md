@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 13/14 (~93%) · **Strict Coverage**: 6/14 (~43%).
+**Coverage**: 14/15 (~93%) · **Strict Coverage**: 7/15 (~47%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -14,7 +14,7 @@ Matching follows the **ECMAScript dialect by default** ([TDD-00067](../tdd/TDD-0
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| Construction: `new RegExp(pattern, flags?)` | ✅ | | • Validates the *flags* string as real JS does — a duplicate flag (`"gg"`) or an unrecognized flag character (`"z"`) throws a catchable `SyntaxError`; the eight valid JS flag letters `d,g,i,m,s,u,v,y` are accepted (`u`/`v`/`y`/`d` are accepted but their behavior isn't implemented — see the `u`/`y`/`d` flags row) ([ADR-00549](../adr/ADR-00549.md))<br>• Compiles the pattern once via `pcre2_compile_8`; throws a real, catchable `SyntaxError` on an invalid *pattern*<br>• A `\uXXXX`/`\xXX` escape compiles as an ECMAScript escape in the default/`es-ascii` modes (`PCRE2_ALT_BSUX`) — see [TDD-00067](../tdd/TDD-00067.md) |
+| Construction: `new RegExp(pattern, flags?)` | ✅ | | • Validates the *flags* string as real JS does — a duplicate flag (`"gg"`) or an unrecognized flag character (`"z"`) throws a catchable `SyntaxError`; the eight valid JS flag letters `d,g,i,m,s,u,v,y` are accepted (`u`/`v`/`d` are accepted but their behavior isn't implemented — see the `u`/`d` flags row) ([ADR-00549](../adr/ADR-00549.md))<br>• Compiles the pattern once via `pcre2_compile_8`; throws a real, catchable `SyntaxError` on an invalid *pattern*<br>• A `\uXXXX`/`\xXX` escape compiles as an ECMAScript escape in the default/`es-ascii` modes (`PCRE2_ALT_BSUX`) — see [TDD-00067](../tdd/TDD-00067.md) |
 | Literal syntax: `/pattern/flags` | ✅ | • `x in /foo/` mis-lexes the `/` as division (the lexer's regex-vs-division disambiguation gap, since `in` isn't its own token in this lexer) — a small, deliberately-accepted gap | • Desugars to the same construction at parse time — see [ADR-00114](../adr/ADR-00114.md) |
 | `.source` / `.flags` | ✅ | | • `.flags` reports the canonical `d,g,i,m,s,u,v,y` order regardless of construction order (`new RegExp("x", "ig").flags` is `"gi"`), and an empty pattern's `.source` is the spec placeholder `"(?:)"` ([ADR-00998](../adr/ADR-00998.md)) |
 | `.global` / `.ignoreCase` / `.multiline` / `.dotAll` | ✅ | | • Decomposed from the flags string once at construction — no method needs to re-parse it |
@@ -27,7 +27,8 @@ Matching follows the **ECMAScript dialect by default** ([TDD-00067](../tdd/TDD-0
 | `str.replaceAll(regexp, replacement)` (string or callback) | ✅ | • Same replacement narrowing as `.replace()` (`$1`-`$9`/`$&`/`$$` only; fixed `(match, offset, string)` callback) | • Same replacement rules as `.replace()`; requires the `g` flag, throwing `TypeError` otherwise. See [ADR-00118](../adr/ADR-00118.md) |
 | `str.split(regexp)` | ✅ | • Only splits on a non-zero-length match — real JS's more intricate zero-length-match handling isn't replicated (see [ADR-00119](../adr/ADR-00119.md))<br>• Captured groups in the split pattern are never spliced into the result (out of scope from the start) | • Finds every match regardless of `g` (its own local search loop, like real JS) |
 | `str.search(regexp)` | ✅ | | • A plain-string argument is coerced to a `RegExp` as in real JS — metacharacters are interpreted ([ADR-00548](../adr/ADR-00548.md))<br>• Always searches from offset 0, restores `.lastIndex` afterward — invisible to later `.exec()`/`.test()` iteration, matching real JS exactly. See [ADR-00119](../adr/ADR-00119.md) |
-| `u` / `y` / `d` flags | ❌ | | • Deferred for the whole feature's V1, not just Stage 0 — see the TDD's flag scope table; `\u{…}` code-point escapes, surrogate handling, Unicode `\p{…}`/class semantics, and strict-syntax validation are Option C |
+| `y` (sticky) flag — `.sticky`, anchored matching at `.lastIndex` | ✅ | | • Real RegExpBuiltinExec: `lastIndex` is the start offset whenever `global` **or** `sticky` is set, the match is `PCRE2_ANCHORED` there, and `lastIndex` advances/resets exactly as for `g`; flows through `exec`/`test`/`match`/`matchAll`/`replace`/`replaceAll`/`search` ([ADR-01062](../adr/ADR-01062.md)) |
+| `u` / `d` flags | ❌ | | • Deferred for the whole feature's V1, not just Stage 0 — see the TDD's flag scope table; `\u{…}` code-point escapes, surrogate handling, Unicode `\p{…}`/class semantics, and strict-syntax validation are Option C |
 
 ## Known limitations
 
@@ -39,4 +40,4 @@ Matching follows the **ECMAScript dialect by default** ([TDD-00067](../tdd/TDD-0
   - **`es-ascii` — `.` matches `\r`.** With no compile context, PCRE2's default newline convention treats only `\n` as the line end, so `.` matches `\r` where ES excludes it. Deliberate: `es-ascii` is defined as option-bits-only. Use the default `es-unicode` (which excludes `\r`) if this matters.
   - **`pcre` — raw PCRE2/Perl semantics throughout.** The PCRE2-vs-ECMAScript divergences the ES modes correct (`$`/newline, unset backref, `\uXXXX` throw) all apply by design in this mode; it exists for PCRE-only features and pattern porting, not ES fidelity.
   - **`es-unicode`/`ecmascript` — `\w`/`\s`/`\b` are not Unicode-aware.** `PCRE2_UCP` is deliberately not enabled: its Unicode-property tables diverge from ECMAScript's (UCP `\s` matches U+180E, dropped as whitespace by ES in Unicode 6.3), and enabling it *lost* net conformance on `built-ins/RegExp`. So `\w`/`\s`/`\b` match the ASCII/PCRE-default set, not ES's Unicode definitions — the ES Unicode class semantics are deferred ([TDD-00067](../tdd/TDD-00067.md)). Code-point `.` (from `PCRE2_UTF`) is unaffected and works.
-  - **`u`(nicode) flag still not implemented in any mode.** `es-unicode`'s `PCRE2_UTF` gives it code-point matching, but `\u{…}` code-point escapes, surrogate handling, Unicode `\p{…}`/class semantics, and strict-syntax validation are Option C — the `u`/`y`/`d` flags remain out of scope (see the row above).
+  - **`u`(nicode) flag still not implemented in any mode.** `es-unicode`'s `PCRE2_UTF` gives it code-point matching, but `\u{…}` code-point escapes, surrogate handling, Unicode `\p{…}`/class semantics, and strict-syntax validation are Option C — the `u`/`d` flags remain out of scope (see the row above).

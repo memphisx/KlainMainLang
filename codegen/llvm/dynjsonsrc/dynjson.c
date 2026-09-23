@@ -21,6 +21,15 @@
 #include <stdio.h>
 
 extern void __kml_dtoa(char *buf, double v);
+/* util.inspect layout + quoting (inspectsrc/inspect_reduce.c, ADR-01067):
+   entries collected into a list, laid out on one line or one per line. */
+#define KML_INSPECT_MAX_ARRAY 100 /* util.inspect's maxArrayLength default */
+extern void *__kml_inspect_begin(long long depth, long long nonempty);
+extern void __kml_inspect_push(void *l, char *entry);
+extern void __kml_inspect_push_more(void *l, long long remaining);
+extern char *__kml_inspect_end(void *l, const char *open, const char *close,
+                               long long indent, long long depth, long long is_array, long long numeric);
+extern char *__kml_inspect_quote(const char *s);
 
 #define KML_DYN_MAX_DEPTH 512
 
@@ -151,10 +160,12 @@ static char *sb_finish(Sb *b) {
     return base + 8;
 }
 
-/* JSON string escaping per ECMAScript QuoteJSONString. */
-static void sb_json_string(Sb *b, const char *s) {
+/* JSON string escaping per ECMAScript QuoteJSONString. strlen-bounded: not
+   every runtime string carries a length header (sidecar-produced strings
+   don't), so an embedded NUL still ends the string (BACKLOG). */
+static void sb_json_bytes(Sb *b, const char *s, long long n) {
     sb_ch(b, '"');
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    for (const unsigned char *p = (const unsigned char *)s, *e = p + n; p < e; p++) {
         unsigned char c = *p;
         switch (c) {
         case '"': sb_cstr(b, "\\\""); break;
@@ -176,6 +187,13 @@ static void sb_json_string(Sb *b, const char *s) {
     }
     sb_ch(b, '"');
 }
+static void sb_json_string(Sb *b, const char *s) { sb_json_bytes(b, s, (long long)strlen(s)); }
+
+/* A boxed STATIC array (tag 7) — the walkers are defined with the box layout
+   further down (ADR-01059); stringify needs them first. */
+struct KjBoxS;
+static void kj_box_info(const void *box, long long *len, int *kind, int *typed);
+static long long kj_elem_box(const struct KjBoxS *b, long long i);
 
 static void sb_number(Sb *b, long long tag, long long pay) {
     char tmp[40];
@@ -239,11 +257,45 @@ static int stringify_val(Sb *b, long long tag, long long pay,
         *err = 2;
         return 0;
     }
+    case 7: {
+        /* A boxed STATIC array (ADR-01059): a plain array serializes as a JSON
+           array; a TypedArray, per JSON.stringify's own rules, as an object of
+           its index keys (`{"0":8,"1":9}`). An element kind the box could not
+           describe has no walkable shape → err 2 (the pre-existing rejection). */
+        long long n;
+        int kind, typed;
+        kj_box_info((const void *)pay, &n, &kind, &typed);
+        if (kind < 0) {
+            *err = 2;
+            return 0;
+        }
+        int pretty7 = indent && indent[0];
+        char key[32];
+        sb_ch(b, typed ? '{' : '[');
+        for (long long i = 0; i < n; i++) {
+            long long etag, epay;
+            nb_decode(kj_elem_box((const struct KjBoxS *)pay, i), &etag, &epay);
+            if (i) sb_ch(b, ',');
+            if (pretty7) sb_indent(b, indent, depth + 1);
+            if (typed) {
+                snprintf(key, sizeof key, "%lld", i);
+                sb_json_bytes(b, key, (long long)strlen(key));
+                sb_cstr(b, pretty7 ? ": " : ":");
+            }
+            if (!stringify_val(b, etag, epay, indent, parents, depth + 1, err)) {
+                if (*err) return 0;
+                sb_cstr(b, "null"); /* an undefined element → null */
+            }
+        }
+        if (pretty7 && n) sb_indent(b, indent, depth);
+        sb_ch(b, typed ? '}' : ']');
+        return 1;
+    }
     case 10:
     case 11:
         break;
     default:
-        *err = 2; /* tag 7: no runtime shape to walk */
+        *err = 2; /* funcRef/stream: no runtime shape to walk */
         return 0;
     }
     if (depth >= KML_DYN_MAX_DEPTH) {
@@ -352,6 +404,11 @@ char *__kml_dynjson_stringify(long long tag, long long pay,
 /* ---- Array toString (String(arr) / `${arr}` / console.log) ---- */
 
 static void join_val(Sb *b, long long tag, long long pay, int depth);
+/* A boxed STATIC array (tag 7) nested in a dynamic value renders as itself
+   through the box walkers defined below (ADR-01059). */
+struct KjBoxS;
+static void kj_join(Sb *b, const struct KjBoxS *bx, int depth);
+static void kj_inspect(Sb *b, const struct KjBoxS *bx, int depth);
 
 static void join_arr(Sb *b, char *a, int depth) {
     if (depth >= KML_DYN_MAX_DEPTH) return;
@@ -389,7 +446,7 @@ static void join_val(Sb *b, long long tag, long long pay, int depth) {
         join_arr(b, (char *)pay, depth);
         break;
     case 7:
-        sb_cstr(b, "[object Array]");
+        kj_join(b, (const struct KjBoxS *)pay, depth);
         break;
     default:
         sb_cstr(b, "[object Object]");
@@ -436,59 +493,78 @@ static int key_is_ident(const char *k) {
    (never invoked), and — Node's default depth — anything nested deeper than
    two object levels collapsed to [Object]. */
 static void inspect_obj(Sb *b, char *o, int depth) {
-    if (depth > 2) { sb_cstr(b, "[Object]"); return; }
     /* A Proxy header (flag 1<<33) forwards to its target, as JSON does. */
     while (*(long long *)o & (1LL << 33)) o = *(char **)(o + 8);
     long long n = obj_count(o);
     long long *order = (n > 0) ? (long long *)malloc((size_t)n * sizeof(long long)) : NULL;
     if (order) n = es_order(o, n, order);
-    int wrote = 0;
+    long long visible = 0;
+    for (long long oi = 0; oi < n; oi++) {
+        long long i = order ? order[oi] : oi;
+        if (obj_attrs(o, i) & 2) visible++;
+    }
+    /* Node prints an empty object as `{}` even past the depth cap. */
+    if (visible == 0) { free(order); sb_cstr(b, "{}"); return; }
+    if (depth > 2) { free(order); sb_cstr(b, "[Object]"); return; }
+    void *list = __kml_inspect_begin(depth, 1);
     for (long long oi = 0; oi < n; oi++) {
         long long i = order ? order[oi] : oi;
         long long attrs = obj_attrs(o, i);
         if (!(attrs & 2)) continue; /* non-enumerable: hidden from inspect */
-        if (wrote) sb_cstr(b, ", ");
-        else sb_cstr(b, "{ ");
+        Sb eb;
+        sb_init(&eb);
         const char *k = obj_key(o, i);
         if (key_is_ident(k)) {
-            sb_cstr(b, k);
+            sb_cstr(&eb, k);
         } else {
-            sb_ch(b, '\'');
-            sb_cstr(b, k ? k : "");
-            sb_ch(b, '\'');
+            sb_ch(&eb, '\'');
+            sb_cstr(&eb, k ? k : "");
+            sb_ch(&eb, '\'');
         }
-        sb_cstr(b, ": ");
+        sb_cstr(&eb, ": ");
         if (attrs & 8) {
             char *pair = (char *)obj_pay(o, i);
             void *getter = *(void **)pair;
             void *setter = *(void **)(pair + 8);
-            sb_cstr(b, getter && setter ? "[Getter/Setter]" : (getter ? "[Getter]" : "[Setter]"));
+            sb_cstr(&eb, getter && setter ? "[Getter/Setter]" : (getter ? "[Getter]" : "[Setter]"));
         } else {
-            inspect_val(b, obj_tag(o, i), obj_pay(o, i), depth + 1);
+            inspect_val(&eb, obj_tag(o, i), obj_pay(o, i), depth + 1);
         }
-        wrote = 1;
+        __kml_inspect_push(list, sb_finish(&eb));
     }
     free(order);
-    sb_cstr(b, wrote ? " }" : "{}");
+    char *out = __kml_inspect_end(list, "{", "}", 2 * depth, depth, 0, 0);
+    sb_cstr(b, out);
+    free(out - 8);
 }
 
-char *__kml_dynobj_inspect(char *o) {
+char *__kml_dynobj_inspect_at(char *o, long long depth) {
     Sb b;
     sb_init(&b);
-    inspect_obj(&b, o, 0);
+    inspect_obj(&b, o, (int)depth);
     return sb_finish(&b);
 }
+char *__kml_dynobj_inspect(char *o) { return __kml_dynobj_inspect_at(o, 0); }
 
 static void inspect_arr(Sb *b, char *a, int depth) {
-    if (depth >= KML_DYN_MAX_DEPTH) { sb_cstr(b, "[Array]"); return; }
     long long n = arr_len(a);
     if (n == 0) { sb_cstr(b, "[]"); return; }
-    sb_cstr(b, "[ ");
-    for (long long i = 0; i < n; i++) {
-        if (i) sb_cstr(b, ", ");
-        inspect_val(b, arr_tag(a, i), arr_pay(a, i), depth + 1);
+    if (depth > 2) { sb_cstr(b, "[Array]"); return; }
+    void *list = __kml_inspect_begin(depth, 1);
+    long long numeric = 1;
+    long long shown = n < KML_INSPECT_MAX_ARRAY ? n : KML_INSPECT_MAX_ARRAY;
+    for (long long i = 0; i < shown; i++) {
+        long long tag = arr_tag(a, i);
+        if (tag != 0 && tag != 1) numeric = 0;
+        Sb eb;
+        sb_init(&eb);
+        inspect_val(&eb, tag, arr_pay(a, i), depth + 1);
+        __kml_inspect_push(list, sb_finish(&eb));
     }
-    sb_cstr(b, " ]");
+    if (n > shown) __kml_inspect_push_more(list, n - shown);
+    char *out = __kml_inspect_end(list, "[", "]", 2 * depth, depth, 1, numeric);
+    sb_cstr(b, out);
+    free(out - 8);
 }
 
 static void inspect_val(Sb *b, long long tag, long long pay, int depth) {
@@ -505,11 +581,12 @@ static void inspect_val(Sb *b, long long tag, long long pay, int depth) {
         sb_cstr(b, tmp);
         break;
     }
-    case 2:
-        sb_ch(b, '\'');
-        sb_cstr(b, (const char *)pay);
-        sb_ch(b, '\'');
+    case 2: {
+        char *q = __kml_inspect_quote((const char *)pay);
+        sb_cstr(b, q);
+        free(q - 8);
         break;
+    }
     case 3:
         sb_cstr(b, pay ? "true" : "false");
         break;
@@ -528,34 +605,238 @@ static void inspect_val(Sb *b, long long tag, long long pay, int depth) {
     case 12:
         sb_cstr(b, "[Function (anonymous)]");
         break;
+    case 7:
+        kj_inspect(b, (const struct KjBoxS *)pay, depth);
+        break;
     default:
         sb_cstr(b, "[Object]");
         break;
     }
 }
 
-char *__kml_dynarr_inspect(char *a) {
+char *__kml_dynarr_inspect_at(char *a, long long depth) {
     Sb b;
     sb_init(&b);
-    inspect_arr(&b, a, 0);
+    inspect_arr(&b, a, (int)depth);
     return sb_finish(&b);
 }
+char *__kml_dynarr_inspect(char *a) { return __kml_dynarr_inspect_at(a, 0); }
 
-/* __kml_array_join renders a STATICALLY-TYPED array boxed into `any`
-   (TDD-00212) the way JS Array.prototype.toString does — elements joined with
-   ",". Unlike the dynamic-array join above, the elements are raw (not boxed):
-   `kind` describes their storage so the walker can stride the buffer and format
-   each element as JS does. A negative `kind` means the element kind was not
-   representable at box time (nested array / object / heterogeneous), in which
-   case the honest `[object Array]` stand-in is returned unchanged — no
-   regression on cases Stage 1 does not yet render. Keep `kind` in sync with
-   arrayElemKind (emit_dynamic.go). Returns a length-prefixed heap string. */
+/* ---- A STATICALLY-TYPED array boxed into `any` (TDD-00212, ADR-01059) ----
+   The box (anyArrayBoxTy in emit_dynamic.go, `{ ptr, i8, i8 }`) holds the LIVE
+   array header ({data, len} — the cell the source array mutates through), the
+   element-kind byte the walker strides/formats by, and a typed-array byte:
+   0 = plain array, 1 = TypedArray, 2 = Uint8ClampedArray. Unlike the dynamic
+   array above, the elements are raw (not boxed). A negative `kind` means the
+   element kind was not representable at box time (nested array / object /
+   Map / …), in which case the honest `[object Array]` / `[Array]` stand-in is
+   rendered and an element read is refused by the caller. Keep `kind` in sync
+   with arrayElemKind (emit_dynamic.go). */
 enum {
     KJ_F64 = 0, KJ_F32 = 1,
     KJ_I64 = 2, KJ_U64 = 3, KJ_I32 = 4, KJ_U32 = 5,
     KJ_I16 = 6, KJ_U16 = 7, KJ_I8 = 8, KJ_U8 = 9,
-    KJ_BOOL = 10, KJ_STRING = 11
+    KJ_BOOL = 10, KJ_STRING = 11,
+    KJ_ANY = 12,  /* each element is itself a NaN-boxed word (`any[]`) */
+    KJ_ARRAY = 13 /* each element is an array header pointer (`T[][]`), its own
+                     kind/typed described by the box's inner bytes */
 };
+
+typedef struct KjBoxS {
+    char *hdr;          /* arrayHeaderTy: [0]=ptr data  [8]=i64 len */
+    signed char kind;   /* KJ_* or -1 */
+    signed char typed;  /* 0 plain, 1 TypedArray, 2 Uint8ClampedArray */
+    signed char ikind;  /* KJ_ARRAY only: the nested arrays' element kind */
+    signed char ityped; /* KJ_ARRAY only: the nested arrays' typed byte */
+} KjBox;
+
+
+static char *kj_data(const KjBox *b) { return *(char **)b->hdr; }
+static long long kj_len(const KjBox *b) { return *(long long *)(b->hdr + 8); }
+static void kj_box_info(const void *box, long long *len, int *kind, int *typed) {
+    const KjBox *b = (const KjBox *)box;
+    *len = kj_len(b);
+    *kind = b->kind;
+    *typed = b->typed;
+}
+
+/* kj_inner fills a box describing nested element i of a KJ_ARRAY box; false
+   when that element is absent (a null header). */
+static int kj_inner(const KjBox *b, long long i, KjBox *out) {
+    char *h = ((char **)kj_data(b))[i];
+    if (!h) return 0;
+    out->hdr = h;
+    out->kind = b->ikind;
+    out->typed = b->ityped;
+    out->ikind = -1;
+    out->ityped = 0;
+    return 1;
+}
+
+/* The `Int32Array(3) ` prefix util.inspect puts before a TypedArray. */
+static const char *kj_typed_name(const KjBox *b) {
+    if (b->typed == 2) return "Uint8ClampedArray";
+    switch (b->kind) {
+    case KJ_F64: return "Float64Array";
+    case KJ_F32: return "Float32Array";
+    case KJ_I64: return "BigInt64Array";
+    case KJ_U64: return "BigUint64Array";
+    case KJ_I32: return "Int32Array";
+    case KJ_U32: return "Uint32Array";
+    case KJ_I16: return "Int16Array";
+    case KJ_U16: return "Uint16Array";
+    case KJ_I8: return "Int8Array";
+    case KJ_U8: return "Uint8Array";
+    default: return "TypedArray";
+    }
+}
+
+/* nb_double / nb_pack mirror __kml_nb_pack (runtime_nanbox.go — keep in sync):
+   a number is its canonical-NaN double bits + 2^49; immediates undefined=10,
+   null=2, false=6, true=7; a pointer carries its kind in the low 3 bits. */
+static long long nb_double(double d) {
+    unsigned long long bits;
+    if (d != d) bits = 0x7FF8000000000000ULL;
+    else memcpy(&bits, &d, 8);
+    return (long long)(bits + (1ULL << 49));
+}
+static long long nb_pack(long long tag, long long pay) {
+    switch (tag) {
+    case 0: return nb_double((double)pay);
+    case 1: { double d; memcpy(&d, &pay, 8); return nb_double(d); }
+    case 3: return pay ? 7 : 6;
+    case 4: return 2;
+    case 5: return 10;
+    case 2: return pay;
+    case 6: return pay | 1;
+    case 7: return pay | 2;
+    case 8: return pay | 3;
+    case 9: return pay | 4;
+    case 10: return pay | 5;
+    case 11: return pay | 6;
+    case 12: return pay | 7;
+    default: return 10;
+    }
+}
+
+/* kj_elem_box reads element i of a boxed static array as a NaN-boxed word —
+   a number widens to a double (a JS number IS a double), a string is its own
+   pointer, a hole in a string array is undefined. The caller has already
+   refused kind < 0. */
+static long long kj_elem_box(const KjBox *b, long long i) {
+    char *d = kj_data(b);
+    switch (b->kind) {
+    case KJ_F64: return nb_double(((double *)d)[i]);
+    case KJ_F32: return nb_double((double)((float *)d)[i]);
+    case KJ_I64: return nb_double((double)((long long *)d)[i]);
+    case KJ_U64: return nb_double((double)((unsigned long long *)d)[i]);
+    case KJ_I32: return nb_double((double)((int *)d)[i]);
+    case KJ_U32: return nb_double((double)((unsigned int *)d)[i]);
+    case KJ_I16: return nb_double((double)((short *)d)[i]);
+    case KJ_U16: return nb_double((double)((unsigned short *)d)[i]);
+    case KJ_I8: return nb_double((double)((signed char *)d)[i]);
+    case KJ_U8: return nb_double((double)((unsigned char *)d)[i]);
+    case KJ_BOOL: return ((signed char *)d)[i] ? 7 : 6;
+    case KJ_STRING: { char *s = ((char **)d)[i]; return s ? (long long)s : 10; }
+    case KJ_ANY: return ((long long *)d)[i];
+    case KJ_ARRAY: {
+        KjBox *nb = (KjBox *)malloc(sizeof(KjBox));
+        if (!kj_inner(b, i, nb)) { free(nb); return 10; }
+        return (long long)nb | 2; /* an array-box word (kind bits 2) */
+    }
+    default: return 10;
+    }
+}
+
+/* __kml_anyarr_get_by_key: `x[k]` / `x.k` on an `any` holding a boxed static
+   array — "length" answers the LIVE header length, a canonical index answers
+   the element (undefined past the end, as JS), anything else is undefined. An
+   in-range index into an element kind the box could not describe answers the
+   otherwise-unused immediate 1: the emitter turns that into a TypeError
+   rather than inventing an `undefined`. */
+long long __kml_anyarr_get_by_key(void *box, const char *key) {
+    KjBox *b = (KjBox *)box;
+    if (strcmp(key, "length") == 0) return nb_double((double)kj_len(b));
+    char *end;
+    long long idx = strtoll(key, &end, 10);
+    if (end == key || *end != 0 || idx < 0) return 10;
+    if (idx >= kj_len(b)) return 10;
+    if (b->kind < 0) return 1;
+    return kj_elem_box(b, idx);
+}
+
+extern long long __kml_toprimitive(long long v, _Bool strHint);
+extern double __kml_any_tonum(long long v);
+extern long long __kml_dynobj_get(char *o, const char *key);
+
+static double any_elem_tonum(long long word) {
+    return __kml_any_tonum(__kml_toprimitive(word, 0));
+}
+
+/* __kml_any_arraylike_f64 materialises an array-like `any` as a fresh double
+   buffer with ToNumber applied per element — the source of
+   %TypedArray%.prototype.set(any) (ADR-01059). Per the spec's ToObject +
+   LengthOfArrayLike walk: a boxed static array or dynamic array yields its
+   elements; a string yields its characters (digits → their value, the rest
+   NaN); a dynamic object is walked by its `length` and index keys; a number /
+   boolean / function is an object with no `length` → zero elements. null and
+   undefined cannot be converted to an object: *outLen = -1, NULL — the caller
+   throws the TypeError. */
+double *__kml_any_arraylike_f64(long long word, long long *outLen) {
+    long long tag, pay;
+    nb_decode(word, &tag, &pay);
+    long long n = 0;
+    double *buf = NULL;
+    switch (tag) {
+    case 4:
+    case 5:
+        *outLen = -1;
+        return NULL;
+    case 7: {
+        KjBox *b = (KjBox *)pay;
+        n = kj_len(b);
+        buf = (double *)malloc((size_t)(n > 0 ? n : 1) * sizeof(double));
+        for (long long i = 0; i < n; i++)
+            buf[i] = b->kind < 0 ? (0.0 / 0.0) : any_elem_tonum(kj_elem_box(b, i));
+        break;
+    }
+    case 11: {
+        char *a = (char *)pay;
+        n = arr_len(a);
+        buf = (double *)malloc((size_t)(n > 0 ? n : 1) * sizeof(double));
+        for (long long i = 0; i < n; i++)
+            buf[i] = any_elem_tonum(nb_pack(arr_tag(a, i), arr_pay(a, i)));
+        break;
+    }
+    case 2: {
+        const char *s = (const char *)pay;
+        n = *(const long long *)(s - 8);
+        buf = (double *)malloc((size_t)(n > 0 ? n : 1) * sizeof(double));
+        for (long long i = 0; i < n; i++)
+            buf[i] = (s[i] >= '0' && s[i] <= '9') ? (double)(s[i] - '0') : (0.0 / 0.0);
+        break;
+    }
+    case 10: {
+        char *o = (char *)pay;
+        double lenD = any_elem_tonum(__kml_dynobj_get(o, "length"));
+        if (!(lenD > 0)) lenD = 0; /* NaN / negative → 0 (ToLength) */
+        if (lenD > 9007199254740991.0) lenD = 9007199254740991.0;
+        n = (long long)lenD;
+        buf = (double *)malloc((size_t)(n > 0 ? n : 1) * sizeof(double));
+        char key[32];
+        for (long long i = 0; i < n; i++) {
+            snprintf(key, sizeof key, "%lld", i);
+            buf[i] = any_elem_tonum(__kml_dynobj_get(o, key));
+        }
+        break;
+    }
+    default:
+        buf = (double *)malloc(sizeof(double));
+        break;
+    }
+    *outLen = n;
+    return buf;
+}
 
 /* jsNumToStr writes d with JS Number.prototype.toString semantics — note this
    differs from JSON (NaN/Infinity print literally, not as null). */
@@ -568,38 +849,68 @@ static void jsNumToStr(Sb *b, double d) {
     sb_cstr(b, tmp);
 }
 
-char *__kml_array_join(void *data, long long len, signed char kind) {
-    if (kind < 0) {
-        Sb sbf;
-        sb_init(&sbf);
-        sb_cstr(&sbf, "[object Array]");
-        return sb_finish(&sbf);
+/* kj_elem_render writes element i of a boxed static array: numbers/bools as
+   JS formats them; a string bare (join) or single-quoted (inspect); an `any`
+   element through the dynamic walkers, so a nested box renders as itself. */
+static void kj_elem_render(Sb *b, const KjBox *bx, long long i, int inspect, int depth) {
+    char *data = kj_data(bx);
+    char tmp[40];
+    switch (bx->kind) {
+    case KJ_F64: jsNumToStr(b, ((double *)data)[i]); break;
+    case KJ_F32: jsNumToStr(b, (double)((float *)data)[i]); break;
+    case KJ_I64: snprintf(tmp, sizeof tmp, "%lld", ((long long *)data)[i]); sb_cstr(b, tmp); break;
+    case KJ_U64: snprintf(tmp, sizeof tmp, "%llu", ((unsigned long long *)data)[i]); sb_cstr(b, tmp); break;
+    case KJ_I32: snprintf(tmp, sizeof tmp, "%d", ((int *)data)[i]); sb_cstr(b, tmp); break;
+    case KJ_U32: snprintf(tmp, sizeof tmp, "%u", ((unsigned int *)data)[i]); sb_cstr(b, tmp); break;
+    case KJ_I16: snprintf(tmp, sizeof tmp, "%d", (int)((short *)data)[i]); sb_cstr(b, tmp); break;
+    case KJ_U16: snprintf(tmp, sizeof tmp, "%u", (unsigned int)((unsigned short *)data)[i]); sb_cstr(b, tmp); break;
+    case KJ_I8: snprintf(tmp, sizeof tmp, "%d", (int)((signed char *)data)[i]); sb_cstr(b, tmp); break;
+    case KJ_U8: snprintf(tmp, sizeof tmp, "%u", (unsigned int)((unsigned char *)data)[i]); sb_cstr(b, tmp); break;
+    case KJ_BOOL: sb_cstr(b, ((signed char *)data)[i] ? "true" : "false"); break;
+    case KJ_STRING: {
+        char *s = ((char **)data)[i];
+        if (inspect) {
+            if (s) { char *q = __kml_inspect_quote(s); sb_cstr(b, q); free(q - 8); }
+            else sb_cstr(b, "''");
+        } else if (s) sb_cstr(b, s); /* a null element joins as empty */
+        break;
     }
+    case KJ_ANY: {
+        long long tag, pay;
+        nb_decode(((long long *)data)[i], &tag, &pay);
+        if (inspect) inspect_val(b, tag, pay, depth + 1);
+        else join_val(b, tag, pay, depth + 1);
+        break;
+    }
+    case KJ_ARRAY: {
+        KjBox inner;
+        if (!kj_inner(bx, i, &inner)) { if (inspect) sb_cstr(b, "undefined"); break; }
+        if (inspect) kj_inspect(b, &inner, depth + 1);
+        else kj_join(b, &inner, depth + 1);
+        break;
+    }
+    default: break;
+    }
+}
+
+/* __kml_array_join renders a boxed static array the way JS
+   Array.prototype.toString does — elements joined with ",", a TypedArray the
+   same (its toString is Array.prototype.toString). A negative kind renders
+   the honest `[object Array]` stand-in. Returns a length-prefixed heap
+   string. */
+static void kj_join(Sb *b, const KjBox *bx, int depth) {
+    if (bx->kind < 0 || depth >= KML_DYN_MAX_DEPTH) { sb_cstr(b, "[object Array]"); return; }
+    long long len = kj_len(bx);
+    for (long long i = 0; i < len; i++) {
+        if (i > 0) sb_ch(b, ',');
+        kj_elem_render(b, bx, i, 0, depth);
+    }
+}
+
+char *__kml_array_join(void *box) {
     Sb b;
     sb_init(&b);
-    char tmp[40];
-    for (long long i = 0; i < len; i++) {
-        if (i > 0) sb_ch(&b, ',');
-        switch (kind) {
-        case KJ_F64: jsNumToStr(&b, ((double *)data)[i]); break;
-        case KJ_F32: jsNumToStr(&b, (double)((float *)data)[i]); break;
-        case KJ_I64: snprintf(tmp, sizeof tmp, "%lld", ((long long *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_U64: snprintf(tmp, sizeof tmp, "%llu", ((unsigned long long *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_I32: snprintf(tmp, sizeof tmp, "%d", ((int *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_U32: snprintf(tmp, sizeof tmp, "%u", ((unsigned int *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_I16: snprintf(tmp, sizeof tmp, "%d", (int)((short *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_U16: snprintf(tmp, sizeof tmp, "%u", (unsigned int)((unsigned short *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_I8: snprintf(tmp, sizeof tmp, "%d", (int)((signed char *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_U8: snprintf(tmp, sizeof tmp, "%u", (unsigned int)((unsigned char *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_BOOL: sb_cstr(&b, ((signed char *)data)[i] ? "true" : "false"); break;
-        case KJ_STRING: {
-            char *s = ((char **)data)[i];
-            if (s) sb_cstr(&b, s); /* a null element joins as empty */
-            break;
-        }
-        default: break;
-        }
-    }
+    kj_join(&b, (const KjBox *)box, 0);
     return sb_finish(&b);
 }
 
@@ -611,43 +922,41 @@ char *__kml_array_join(void *data, long long len, signed char kind) {
    (element kind not representable at box time) yields the `[Array]` placeholder,
    matching util.inspect's depth behaviour. Numbers/bools format exactly as the
    join helper does. Returns a length-prefixed heap string. */
-char *__kml_array_inspect(void *data, long long len, signed char kind) {
+static void kj_inspect(Sb *b, const KjBox *bx, int depth) {
+    if (bx->kind < 0 || depth >= KML_DYN_MAX_DEPTH) {
+        /* util.inspect's depth placeholder; a TypedArray of an unrenderable
+           kind (BigInt64Array) still names itself. */
+        if (bx->typed) { sb_cstr(b, kj_typed_name(bx)); sb_cstr(b, " [Array]"); }
+        else sb_cstr(b, "[Array]");
+        return;
+    }
+    long long len = kj_len(bx);
+    char open[64] = "[";
+    if (bx->typed) {
+        /* Node: `Int32Array(2) [ 8, 9 ]`, `Uint8Array(0) []`. */
+        snprintf(open, sizeof open, "%s(%lld) [", kj_typed_name(bx), len);
+    }
+    if (len == 0) { sb_cstr(b, open); sb_cstr(b, "]"); return; }
+    if (depth > 2) { sb_cstr(b, "[Array]"); return; }
+    void *list = __kml_inspect_begin(depth, 1);
+    long long shown = len < KML_INSPECT_MAX_ARRAY ? len : KML_INSPECT_MAX_ARRAY;
+    for (long long i = 0; i < shown; i++) {
+        Sb eb;
+        sb_init(&eb);
+        kj_elem_render(&eb, bx, i, 1, depth);
+        __kml_inspect_push(list, sb_finish(&eb));
+    }
+    if (len > shown) __kml_inspect_push_more(list, len - shown);
+    long long numeric = bx->kind != KJ_BOOL && bx->kind != KJ_STRING && bx->kind != KJ_ANY && bx->kind != KJ_ARRAY;
+    char *out = __kml_inspect_end(list, open, "]", 2 * depth, depth, 1, numeric);
+    sb_cstr(b, out);
+    free(out - 8);
+}
+
+char *__kml_array_inspect_at(void *box, long long depth) {
     Sb b;
     sb_init(&b);
-    if (kind < 0) {
-        sb_cstr(&b, "[Array]");
-        return sb_finish(&b);
-    }
-    if (len == 0) {
-        sb_cstr(&b, "[]");
-        return sb_finish(&b);
-    }
-    char tmp[40];
-    sb_cstr(&b, "[ ");
-    for (long long i = 0; i < len; i++) {
-        if (i > 0) sb_cstr(&b, ", ");
-        switch (kind) {
-        case KJ_F64: jsNumToStr(&b, ((double *)data)[i]); break;
-        case KJ_F32: jsNumToStr(&b, (double)((float *)data)[i]); break;
-        case KJ_I64: snprintf(tmp, sizeof tmp, "%lld", ((long long *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_U64: snprintf(tmp, sizeof tmp, "%llu", ((unsigned long long *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_I32: snprintf(tmp, sizeof tmp, "%d", ((int *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_U32: snprintf(tmp, sizeof tmp, "%u", ((unsigned int *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_I16: snprintf(tmp, sizeof tmp, "%d", (int)((short *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_U16: snprintf(tmp, sizeof tmp, "%u", (unsigned int)((unsigned short *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_I8: snprintf(tmp, sizeof tmp, "%d", (int)((signed char *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_U8: snprintf(tmp, sizeof tmp, "%u", (unsigned int)((unsigned char *)data)[i]); sb_cstr(&b, tmp); break;
-        case KJ_BOOL: sb_cstr(&b, ((signed char *)data)[i] ? "true" : "false"); break;
-        case KJ_STRING: {
-            char *s = ((char **)data)[i];
-            sb_ch(&b, '\'');
-            if (s) sb_cstr(&b, s); /* a null element inspects as '' */
-            sb_ch(&b, '\'');
-            break;
-        }
-        default: break;
-        }
-    }
-    sb_cstr(&b, " ]");
+    kj_inspect(&b, (const KjBox *)box, (int)depth);
     return sb_finish(&b);
 }
+char *__kml_array_inspect(void *box) { return __kml_array_inspect_at(box, 0); }

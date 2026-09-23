@@ -81,3 +81,14 @@ function firstItems(cc: Container): number[] {
   return cc.items
 }
 console.log(firstItems(c).length)  // 3
+
+// --- An omitted optional field has no key ---
+// console.log leaves it out, Object.keys does not list it, and `in` is a
+// real presence test; an optional tuple field is a real `undefined`.
+interface Profile { name: string; age?: number; pair?: [number, number] }
+const bare: Profile = { name: 'bare' }
+const full: Profile = { name: 'full', age: 41, pair: [1, 2] }
+console.log(bare)                                   // { name: 'bare' }
+console.log(full)                                   // { name: 'full', age: 41, pair: [ 1, 2 ] }
+console.log(Object.keys(bare), 'age' in bare)       // [ 'name' ] false
+console.log(bare.pair === undefined, full.pair)     // true [ 1, 2 ]

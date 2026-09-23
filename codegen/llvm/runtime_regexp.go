@@ -19,8 +19,12 @@ const (
 	pcre2CaseLess         = 8
 	pcre2Multiline        = 1024
 	pcre2Dotall           = 32
-	pcre2InfoCaptureCount = 4  // pcre2_pattern_info()'s request-type enum, not an option bit
-	pcre2Unset            = -1 // PCRE2_UNSET, ~(PCRE2_SIZE)0 — same bit pattern as pcre2ZeroTerminated but a distinct meaning (an ovector pair that didn't participate in the match, e.g. an optional capture group), kept as its own named constant for clarity at call sites
+	pcre2InfoCaptureCount = 4 // pcre2_pattern_info()'s request-type enum, not an option bit
+	// PCRE2_ANCHORED (0x80000000u): a pcre2_match option that only allows a
+	// match starting exactly at the start offset — the `y`/sticky flag
+	// (ADR-01062). Passed as an i32 immediate, so spelled as its signed value.
+	pcre2Anchored = -2147483648
+	pcre2Unset    = -1 // PCRE2_UNSET, ~(PCRE2_SIZE)0 — same bit pattern as pcre2ZeroTerminated but a distinct meaning (an ovector pair that didn't participate in the match, e.g. an optional capture group), kept as its own named constant for clarity at call sites
 
 	// ECMAScript-alignment compile options (TDD-00067 Options A/B). Same
 	// hardcoded-macro convention and re-verification rule as the block above:
@@ -533,10 +537,11 @@ func (e *Emitter) ensureRegexParseFlags() {
 	}
 	e.usedRegexParseFlags = true
 	e.emitGlobal(`
-define void @__kml_regex_parse_flags(ptr %flags, ptr %optout, ptr %gout, ptr %iout, ptr %mout, ptr %sout) {
+define void @__kml_regex_parse_flags(ptr %flags, ptr %optout, ptr %gout, ptr %iout, ptr %mout, ptr %sout, ptr %yout) {
 entry:
   store i32 0, ptr %optout, align 4
   store i1 0, ptr %gout, align 1
+  store i1 0, ptr %yout, align 1
   store i1 0, ptr %iout, align 1
   store i1 0, ptr %mout, align 1
   store i1 0, ptr %sout, align 1
@@ -578,7 +583,13 @@ setm:
 
 checks:
   %iss = icmp eq i8 %ch, 115
-  br i1 %iss, label %sets, label %next
+  br i1 %iss, label %sets, label %checky
+checky:
+  %isy = icmp eq i8 %ch, 121
+  br i1 %isy, label %sety, label %next
+sety:
+  store i1 1, ptr %yout, align 1
+  br label %next
 sets:
   store i1 1, ptr %sout, align 1
   %opt.s0 = load i32, ptr %optout, align 4

@@ -680,3 +680,33 @@ console.log(m.get("u") === undefined)
 console.log(JSON.stringify(b))
 `, "true false undefined\ntrue false object\ntrue true\ntrue\n[null,5,\"x\",null]")
 }
+
+// A `T | undefined` / `T | null` pointer (string, object) boxed into `any`:
+// present boxes as itself, absent as its own flavour. The literal-`undefined`
+// arm used to catch every `T | undefined` pointer, so a present
+// `string | undefined` read back as undefined.
+const anyBoxNullablePtrSrc = `
+let s: string | undefined = 'q'
+let n: string | undefined = undefined
+let z: string | null = null
+const w: any = s, wn: any = n, wz: any = z
+console.log(w, wn, wz, w === 'q', wn === undefined, wz === null, typeof w)
+const a: string[] = ['x']
+const v: any = a[0], vz: any = a[3]
+console.log(v, vz, typeof v, typeof vz)
+const c = a.length > 3
+console.log(c ? a[0].length > 0 : a[0], c ? true : a[4], a[0].toString())
+class P { k = 1 }
+let po: P | undefined = new P()
+let pn: P | undefined = undefined
+const bo: any = po, bn: any = pn
+console.log(bo !== undefined, bo === null, bn === undefined, bn)
+`
+
+func TestE2EAnyBoxNullablePointer(t *testing.T) {
+	assertOutput(t, anyBoxNullablePtrSrc, "q undefined null true true true string\nx undefined string undefined\nx undefined x\ntrue false true undefined")
+}
+
+func TestE2EAnyBoxNullablePointerSameAsNode(t *testing.T) {
+	assertSameAsNode(t, anyBoxNullablePtrSrc)
+}

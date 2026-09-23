@@ -81,7 +81,6 @@
             "feature": "`any`",
             "status": "implemented",
             "caveats": [
-              "Under `-compat=js`, unary `+` on an `any` isn't parsed yet (arithmetic otherwise runtime-dispatches; under `-compat=strict` it's a clean compile error)",
               "Widening a static object into `any` covers only a fresh `new C()` of a data-only class ([ADR-00990](../adr/ADR-00990.md), [TDD-00155](../tdd/TDD-00155.md) Stage 6); an *aliased* static binding (`const a: any = o`), a method-carrying class, and a cyclic object graph still reject member access",
               "`Object.defineProperties` (plural) and descriptor-form `Object.assign` are follow-ons",
               "Primitive-member dispatch through `any` covers `.length` (boxed string/array, [ADR-01009](../adr/ADR-01009.md)); other primitive members read `undefined` and primitive *method calls* (`s.toUpperCase()`, `a.push()`) aren't dispatched yet"
@@ -146,7 +145,7 @@
               "`BigInt.asIntN(bits, x)` / `BigInt.asUintN(bits, x)` clamp to the low `bits` bits (two's-complement signed / non-negative), implemented in both bigint backends ([ADR-00584](../adr/ADR-00584.md))",
               "`Number(bigint)` converts to the nearest `double` (Infinity when out of range), matching JS ([ADR-00586](../adr/ADR-00586.md))",
               "Mixing a bigint and a number in **arithmetic** is a clean compile error (matches JS's `TypeError`); comparing a bigint with a **float** is a `-compat`-governed behavior ([TDD-00075](../tdd/TDD-00075.md)/[ADR-00217](../adr/ADR-00217.md)): default `strict` rejects it (a likely bug), and `-compat=js` does JS's exact real-number comparison (exact even past 2^53) — a design choice, not a caveat",
-              "`>>>`, unary `+`, and `JSON.stringify` on a bigint are clean compile errors (all TypeErrors in JS)"
+              "`>>>` and `JSON.stringify` on a bigint are clean compile errors, and unary `+` on a bigint throws the spec `TypeError` at run time ([ADR-01057](../adr/ADR-01057.md)) — all TypeErrors in JS"
             ]
           }
         ]
@@ -301,6 +300,7 @@
             ],
             "notes": [
               "V1 (default): monomorphization — one specialized implementation per distinct combination of concrete types actually used; an object/interface/class type argument mangles structurally (a class by name), so field access/destructuring/`T[]` on a `T`-bound object ride the per-instantiation body ([TDD-00069](../tdd/TDD-00069.md)/[ADR-00352](../adr/ADR-00352.md))",
+              "The type parameters are in scope for the whole instantiation — `T` inside `Promise<T>`, `T[][]`, `Map<string, T>`, `T | null`, a `(x: T) => T` parameter or a body-local annotation substitutes, so `new Promise<T>((resolve) => resolve(v))` in a generic async helper compiles ([ADR-01072](../adr/ADR-01072.md))",
               "`<T extends X>` constraints are parsed and enforced (structural width subtyping) on functions and classes ([TDD-00113](../tdd/TDD-00113.md)/[ADR-00353](../adr/ADR-00353.md))",
               "Covers `function identity<T>(x: T): T`, `interface Box<T>`, `class Box<T>`, and multiple type parameters `<K, V>` ([TDD-00037](../tdd/TDD-00037.md)/[ADR-00132](../adr/ADR-00132.md))",
               "A generic class needs an explicit type-argument list at each `new Box<T>(...)` site; can't use `extends`/`implements`/`abstract`/static members ([ADR-00103](../adr/ADR-00103.md)/[TDD-00010](../tdd/TDD-00010.md))",

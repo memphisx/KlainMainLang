@@ -3,23 +3,19 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"strings"
 )
 
-// registerModuleGlobals promotes each top-level `const`/`let`/`var` of a simple
-// scalar/string type to an LLVM module global (TDD-00093), so a named `function`
-// declaration — emitted with its own fresh scope, unlike an arrow/closure that
-// captures — can read it. Run before function bodies are emitted (they resolve
-// the name through e.moduleGlobals). The global is zero-initialized; the actual
-// initializer runs in `main()` at the declaration's position (emitVarDecl stores
-// into the same global). Only reliably-simple types are promoted (annotated, or a
-// literal initializer) — an array/object/Map/complex value stays a `main()` local
-// (the pre-existing behavior), never miscompiled.
-func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
-	// Every name the program itself binds at top level. A call through one of
-	// these (`const f = async () => …; const p = f()`) is a *user* call whose
-	// result type the pre-pass cannot know unless the binding is already a
-	// registered function or module global — it must never be mistaken for a
-	// builtin (prePassStableBuiltinCall).
+// collectTopLevelNames records every name the program itself binds at top
+// level (e.topLevelNames). A call through one of these (`const f = async () =>
+// …; const p = f()`) is a *user* call whose result type the pre-pass cannot
+// know unless the binding is already a registered function or module global —
+// it must never be mistaken for a builtin (prePassStableBuiltinCall); and an
+// identifier naming one, met while a function signature is inferred before
+// the binding is a module global, types from its declaration (inferExprType's
+// Identifier case, ADR-01060). Idempotent; runs before Pass 1 and again at
+// registerModuleGlobals.
+func (e *Emitter) collectTopLevelNames(prog *ast.Program) {
 	e.topLevelNames = map[string]bool{}
 	for _, stmt := range prog.Body {
 		switch s := stmt.(type) {
@@ -35,6 +31,28 @@ func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
 			e.topLevelNames[s.Name] = true
 		}
 	}
+}
+
+// unmangleTopLevelName strips the resolver's per-file `__kml_mod<N>` suffix
+// from a top-level binding's name.
+func unmangleTopLevelName(name string) string {
+	if i := strings.LastIndex(name, "__kml_mod"); i > 0 {
+		return name[:i]
+	}
+	return name
+}
+
+// registerModuleGlobals promotes each top-level `const`/`let`/`var` of a simple
+// scalar/string type to an LLVM module global (TDD-00093), so a named `function`
+// declaration — emitted with its own fresh scope, unlike an arrow/closure that
+// captures — can read it. Run before function bodies are emitted (they resolve
+// the name through e.moduleGlobals). The global is zero-initialized; the actual
+// initializer runs in `main()` at the declaration's position (emitVarDecl stores
+// into the same global). Only reliably-simple types are promoted (annotated, or a
+// literal initializer) — an array/object/Map/complex value stays a `main()` local
+// (the pre-existing behavior), never miscompiled.
+func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
+	e.collectTopLevelNames(prog)
 	promote := func(v *ast.VarDeclaration) {
 		if _, exists := e.moduleGlobals[v.Name]; exists {
 			return
@@ -155,6 +173,16 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 		elemTy := TypePtr
 		if init.ElemType != nil {
 			elemTy = e.resolveType(init.ElemType)
+		} else if v.TypeAnnot != nil {
+			// Bare `new Set()` under a `Set<T>` annotation (ADR-01061), matching
+			// emitSetVarDecl.
+			if annTy := e.resolveType(v.TypeAnnot); annTy.IsSet && annTy.MapKey != nil {
+				elemTy = *annTy.MapKey
+			}
+		} else if kv, ok := e.emptyMapKV[v.Name]; ok && kv.keyKnown {
+			// Bare `new Set()`: the pre-pass's widened element type (ADR-01061),
+			// matching emitSetVarDecl.
+			elemTy = kv.key
 		}
 		return SetType(elemTy), true
 	case *ast.NewChannelExpression:
@@ -199,8 +227,14 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 		// A TypedArray is a 2-slot `{ptr,i64}` IsArray value — promoted via the
 		// same two-global (data + length) path as a plain array; emitArrayVarDecl
 		// already both constructs a `new Uint8Array(...)` and honors the promoted
-		// globals. Type matches emitVarDecl's own `TypedArrayType(init.ElemKind)`.
-		return TypedArrayType(init.ElemKind), true
+		// globals. Type matches emitVarDecl's own `TypedArrayType(init.ElemKind)`
+		// — which only applies to an UNANNOTATED binding: emitVarDecl types an
+		// annotated one from the annotation (`const y: any = new Int32Array(…)`
+		// boxes), so the annotation branch below must decide those, or the
+		// pre-declared global's shape disagrees with the store (ADR-01059).
+		if v.TypeAnnot == nil {
+			return TypedArrayType(init.ElemKind), true
+		}
 	}
 	// An http server handle — `const server = http.createServer(cb)` or the
 	// chained `…createServer(cb).listen(0, readyCb)` binding — is a single
@@ -221,6 +255,13 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 	if v.TypeAnnot != nil {
 		ty := e.resolveType(v.TypeAnnot)
 		if ty.IsArray && ty.ElemType != nil {
+			return ty, true
+		}
+		// An annotated `any`/`unknown`/union binding is a single i64 NaN-box
+		// slot whatever its initializer (emitVarDecl boxes on store), so it
+		// promotes like the -compat=js widened bindings above; before this a
+		// named function could not see `const cfg: any = …` at all (ADR-01059).
+		if ty.IsDynamic && !ty.IsDynamicObject {
 			return ty, true
 		}
 		// A fixed-shape object (or tuple) is a single ptr slot, stored the same way
@@ -418,7 +459,7 @@ func (e *Emitter) constFoldableScalarInit(expr ast.Expression) bool {
 		_, ok := e.moduleGlobals[ex.Name]
 		return ok
 	case *ast.MemberExpression:
-		return numericBuiltinConst(ex)
+		return numericBuiltinConst(ex) || e.processConstMember(ex)
 	case *ast.UnaryExpression:
 		return e.constFoldableScalarInit(ex.Arg)
 	case *ast.BinaryExpression:
@@ -447,6 +488,24 @@ func numericBuiltinConst(mem *ast.MemberExpression) bool {
 			"MIN_SAFE_INTEGER", "POSITIVE_INFINITY", "NEGATIVE_INFINITY", "NaN":
 			return true
 		}
+	}
+	return false
+}
+
+// processConstMember reports whether a member expression is one of the
+// context-stable `process` constants — `platform`/`arch`/`execPath`/`version`
+// (strings) and `pid` (a number) — so `const isWin = process.platform ===
+// 'win32'` promotes to a module global a named function can read (ADR-01080).
+// `process.env.X`/`argv[i]` are excluded: their `string | undefined` shape is
+// not a simple slot.
+func (e *Emitter) processConstMember(mem *ast.MemberExpression) bool {
+	id, ok := mem.Object.(*ast.Identifier)
+	if !ok || id.Name != "process" || e.isShadowedByLocal("process") {
+		return false
+	}
+	switch mem.Property {
+	case "platform", "arch", "execPath", "version", "pid":
+		return true
 	}
 	return false
 }
@@ -537,6 +596,39 @@ func isHandleNewExpr(init ast.Expression) bool {
 		return true
 	}
 	return false
+}
+
+// promotedStorageAgrees is the invariant behind module-global promotion
+// (TDD-00093): the pre-pass (reliableGlobalType) and the declaration
+// (emitVarDecl and its per-shape helpers) decide a binding's type
+// independently, and the pre-declared global's shape MUST equal what the
+// declaration stores, or a named function reads garbage through it (the
+// `const y: any = new Int32Array(…)` misread, ADR-01059). Until the two
+// deciders are one function (BACKLOG), every promoted declaration checks the
+// two here and a disagreement is a loud internal compile error rather than a
+// silent wrong value. Storage shape = IR word + array-ness + box-ness.
+func (e *Emitter) promotedStorageAgrees(v *ast.VarDeclaration, declTy Type) error {
+	if !e.promotedGlobalDecls[v] {
+		return nil
+	}
+	g := e.moduleGlobals[v.Name].Ty
+	if g.IR == declTy.IR && g.IsArray == declTy.IsArray && g.IsDynamic == declTy.IsDynamic &&
+		g.IsTypedArray == declTy.IsTypedArray && (!g.IsArray || arrayStorageCompatible(g, declTy)) {
+		return nil
+	}
+	return fmt.Errorf("%d:%d: internal: the module-global pre-pass typed '%s' as %s but its declaration stores %s — reliableGlobalType and emitVarDecl disagree; fix the pre-pass arm for this initializer shape",
+		v.GetPos().Line, v.GetPos().Col, v.Name, describeStorage(g), describeStorage(declTy))
+}
+
+// describeStorage names a type's storage shape for the invariant message.
+func describeStorage(t Type) string {
+	switch {
+	case t.IsArray:
+		return arrayTypeName(t)
+	case t.IsDynamic:
+		return "an any box (i64)"
+	}
+	return t.IR
 }
 
 // moduleGlobalPtrOrLocal returns the storage pointer for a single-ptr binding v
@@ -755,6 +847,22 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			*ast.ArrayLiteral, *ast.NewExpression:
 			e.pendingStackAllocLit = v.Init
 			defer func() { e.pendingStackAllocLit = nil }()
+		}
+	}
+	// A Map/Set/WeakMap/WeakSet/WeakRef/channel initializer types its binding
+	// from itself, not from an annotation; under an `any`/`unknown`/union
+	// annotation the binding would be a ptr handle the pre-pass and the reads
+	// disagree about (`const m: any = new Map(); function f() { return m }`
+	// emitted `ret ptr` for an i64 — invalid IR, ADR-01060), and none of these
+	// handles has a NaN-box kind to be held in an `any` faithfully yet
+	// (BACKLOG §0). Reject cleanly at the declaration.
+	if v.TypeAnnot != nil {
+		switch v.Init.(type) {
+		case *ast.NewMapExpression, *ast.NewSetExpression, *ast.NewWeakMapExpression,
+			*ast.NewWeakSetExpression, *ast.NewWeakRefExpression, *ast.NewChannelExpression:
+			if e.resolveType(v.TypeAnnot).IsDynamic {
+				return fmt.Errorf("%d:%d: a Map/Set/WeakMap/WeakSet/WeakRef/channel cannot be declared as `any`/`unknown`/a union yet — annotate it with its own type (e.g. `Map<string, number>`) or leave the annotation off", v.GetPos().Line, v.GetPos().Col)
+			}
 		}
 	}
 	if init, ok := v.Init.(*ast.NewMapExpression); ok {
@@ -1272,6 +1380,17 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 	// semantics — previously a rejection (ADR-00475); `const` without an
 	// initializer is still rejected at parse time, and `let` reads before
 	// assignment stay definite-assignment errors.
+	//
+	// A `var` whose declaration can be skipped on the way to a read is really
+	// `T | undefined` at run time (sloppy hoisting: `if (c) { var r = 1 }
+	// use(r)`), even though tsc types the binding as plain `T` — the same shape
+	// an out-of-range `a[i]` read has (indexReadType, ADR-01040). Widen it so a
+	// read on the skipped path yields a real `undefined` rather than the type's
+	// zero (ADR-01057).
+	hoisted := v.Kind == "var" && e.hoistedVarMaySkip()
+	if hoisted && (ty.IsArray || ty.IsObject || ty.IsDynamicObject) {
+		ty = indexReadType(ty)
+	}
 	if ty.IsArray {
 		// TDD-00134 Stage 2: `/** @value */` opts this binding into the flat
 		// value-type layout instead of the default pointer-slot array.
@@ -1312,10 +1431,27 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 		}
 	}
 
+	// Skippable `var` (see above): a scalar/string slot becomes `T | undefined`.
+	if hoisted && !ty.IsDynamic && ty.IR != "void" {
+		ty = indexReadType(ty)
+	}
+
 	// A nullable non-pointer scalar (`number | null`, `boolean | null`, ...)
 	// gets a presence-flagged { i1, T } slot rather than a bare scalar — see
 	// emit_nullable_scalar.go / TDD-00064.
 	if isNullableScalar(ty) {
+		if hoisted {
+			// The slot must read absent on the path where this declaration never
+			// ran; the { i1, T } alloca gets its `undefined` in the entry block.
+			ptrName := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, nullableScalarStorageIR(ty), storageAlign(ty)))
+			e.emitAlloca(fmt.Sprintf("store %s zeroinitializer, ptr %s, align %d", nullableScalarStorageIR(ty), ptrName, storageAlign(ty)))
+			e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: false, NullableBoxed: true})
+			if v.Init == nil {
+				return nil
+			}
+			return e.storeNullableScalar(ptrName, ty, v.Init)
+		}
 		return e.emitNullableScalarVarDecl(v, ty)
 	}
 
@@ -1343,6 +1479,8 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			// The pre-pass decided this global's type; the store below must use it
 			// (the initializer is coerced to it, or rejected cleanly if it cannot be).
 			ty = e.moduleGlobals[v.Name].Ty
+		} else if err := e.promotedStorageAgrees(v, ty); err != nil {
+			return err
 		}
 	} else if e.hoistedCaptures[v.Name] {
 		// Captured by a nested closure: heap-box eagerly here at the declaration

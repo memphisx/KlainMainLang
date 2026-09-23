@@ -87,11 +87,11 @@ var errorKinds = []string{"Error", "TypeError", "RangeError", "SyntaxError", "Ev
 // (not just the 5 IR fields here) so that a bounds-safe (if non-meaningful)
 // read of any errorObjType field — code/errcode/errstr and now syscall/path/dest —
 // through errorObjType.StructIR() on an AggregateError stays inside the buffer.
-// Kept >= errorObjType.StructSize() (thirteen 8-byte fields = 104); bump this
+// Kept >= errorObjType.StructSize() (fourteen 8-byte fields = 112); bump this
 // in lockstep whenever a field is appended to errorObjType.
 const (
 	aggregateErrorStructIR   = "{ i64, ptr, ptr, ptr, i64 }"
-	aggregateErrorStructSize = 104
+	aggregateErrorStructSize = 112
 )
 
 // errorKindIDs maps a kind name to its errorKinds index, built once at
@@ -158,6 +158,12 @@ var errorObjType = func() Type {
 		// cleanly on errors that don't set them.
 		{Name: "address", Ty: TypePtr},
 		{Name: "port", Ty: TypeF64},
+		// `extra` — a D1 dynamic-object bag of further own properties an error
+		// carries beyond the fixed fields above (child_process's `status`/
+		// `signal`/`stdout`/`stderr`/`pid`/`output` on an execSync failure,
+		// ADR-01080); null for every other error. A caught value's unknown
+		// property read consults it (emitDynAnyMemberGetNamed's error arm).
+		{Name: "extra", Ty: TypePtr},
 	})
 	ty.IsError = true
 	return ty
@@ -228,6 +234,9 @@ func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
 	portGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 12", portGep, errorObjType.StructIR(), dataReg))
 	e.emitInstr(fmt.Sprintf("store double 0.0, ptr %s, align 8", portGep))
+	extraGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 13", extraGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", extraGep))
 
 	return dataReg
 }
@@ -567,6 +576,10 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 	if s.Finally != nil {
 		e.pendingFinallys = append(e.pendingFinallys, s.Finally.Body)
 	}
+	// Locals touched anywhere in the statement must survive the longjmp
+	// (pinSlotAcrossSetjmp, ADR-01057).
+	e.tryDepth++
+	defer func() { e.tryDepth-- }()
 
 	// --- try body ---
 	e.emitLabel(tryL)

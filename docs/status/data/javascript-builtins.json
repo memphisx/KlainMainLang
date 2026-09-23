@@ -122,7 +122,8 @@
             "feature": "`Symbol` (`Symbol()`/`for`/`keyFor`, `.description`, `typeof`) — opaque unique values",
             "status": "implemented",
             "notes": [
-              "→ [Type system](TYPE-SYSTEM.md)"
+              "→ [Type system](TYPE-SYSTEM.md)",
+              "A Symbol keeps its identity inside an `any` (hidden type-id word): `typeof` → `\"symbol\"` and narrows, `===`, `.description`, `Symbol(desc)` rendering, and ToNumber (`Number(x)`, a `TypedArray.set` offset, `+x`/`x * 1` under `-compat=js`) throws the spec's `TypeError` ([ADR-01059](../adr/ADR-01059.md))"
             ]
           },
           {
@@ -339,7 +340,7 @@
             "feature": "`RegExp`",
             "status": "implemented",
             "caveats": [
-              "`u`/`y`/`d` flags **missing** (accepted, not implemented); `exec` result lacks `index`/`input`/`groups`; unmatched groups become `\"\"` not `null` → [RegExp](REGEXP.md)"
+              "`u`/`d` flags **missing** (accepted, not implemented); `exec` result lacks `index`/`input`/`groups`; unmatched groups become `\"\"` not `null` → [RegExp](REGEXP.md)"
             ]
           },
           {
@@ -437,7 +438,7 @@
             ]
           },
           {
-            "feature": "`RegExp` `u`/`v`/`y`/`d` flag semantics",
+            "feature": "`RegExp` `u`/`v`/`d` flag semantics",
             "status": "missing",
             "notes": [
               "Accepted but not implemented → [RegExp](REGEXP.md)"

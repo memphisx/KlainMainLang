@@ -306,11 +306,11 @@ parentPort.on('message', (n: number) => {
 		"main.ts": `
 import { Worker } from 'worker_threads';
 const w = new Worker('./bad_worker.ts');
-w.on('error', (msg: string) => { console.log("worker error: " + msg); });
+w.on('error', (e: Error) => { console.log("worker error: " + e.message, e.name, e instanceof Error); });
 w.on('exit', (c: number) => { console.log("worker gone: " + c); console.log("parent still alive"); });
 w.postMessage(7);
 `,
-	}, "main.ts", "worker error: boom 7\nworker gone: 1\nparent still alive")
+	}, "main.ts", "worker error: boom 7 Error true\nworker gone: 1\nparent still alive")
 }
 
 func TestE2EWorkerUncaughtExceptionNoListenerKillsProcess(t *testing.T) {
@@ -392,4 +392,27 @@ w.onmessage = (e) => { console.log(e.data); w.terminate(); };
 w.postMessage("hi");
 `,
 	}, "main.ts", "hi!")
+}
+
+// `parentPort!.postMessage(v)` / `parentPort!.on(...)` — the non-null
+// assertion tsc users write because `parentPort` is typed `MessagePort | null`
+// — dispatches exactly like the bare name (ADR-01058). It used to infer the
+// asserted identifier as a number ("a number has no method 'postMessage'").
+func TestE2EWorkerParentPortNonNullAssertion(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"nn_worker.ts": `
+import { parentPort, workerData } from 'worker_threads';
+const base: number = workerData;
+parentPort!.on('message', (msg: number) => {
+    parentPort!.postMessage(msg + base);
+});
+`,
+		"main.ts": `
+import { Worker } from 'worker_threads';
+const w = new Worker('./nn_worker.ts', { workerData: 10 });
+w.on('message', (n: number) => { console.log("got " + n); w.terminate(); });
+w.on('exit', (code: number) => { console.log("exit " + code); });
+w.postMessage(5);
+`,
+	}, "main.ts", "got 15\nexit 1")
 }

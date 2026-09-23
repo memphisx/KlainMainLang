@@ -51,14 +51,26 @@ func (e *Emitter) timerCallbackPtr(arg ast.Expression, fnName string, pos ast.Po
 // timerDelayArg resolves the optional delayMs argument (0 if omitted).
 func (e *Emitter) timerDelayArg(args []ast.Expression, idx int) (string, error) {
 	if idx >= len(args) {
-		return "0", nil
+		return "1", nil
 	}
 	val, err := e.emitExpr(args[idx])
 	if err != nil {
 		return "", err
 	}
 	val = e.coerce(val, TypeI64)
-	return val.Ref, nil
+	// Node's clamp (lib/internal/timers.js): a delay outside [1, 2^31-1] —
+	// including the omitted/0/negative/NaN cases — becomes 1 ms. This is what
+	// makes 20,000 sequential `setTimeout(f, 0)` take ≥ 20 s there; a flat 0
+	// here fired them all in a burst. setImmediate does not go through this.
+	tooSmall := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 1", tooSmall, val.Ref))
+	tooBig := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 2147483647", tooBig, val.Ref))
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", out, tooSmall, tooBig))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 1, i64 %s", r, out, val.Ref))
+	return r, nil
 }
 
 func (e *Emitter) emitSetTimeout(args []ast.Expression, pos ast.Pos) (Value, error) {

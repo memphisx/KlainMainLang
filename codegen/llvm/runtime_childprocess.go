@@ -41,6 +41,8 @@ import (
 // 23 i64 killSignal for the timeout kill (default 15 = SIGTERM)
 // 24 i64 unref flag (1 = child.unref()'d — does not keep the loop alive, ADR-00767)
 // 25 i64 raw wait status · 26 i64 plain exit code (both set at reap, read by __kml_cp_close)
+// 27 i64 maxBuffer (bytes per stream, 0 = unlimited — exec/execFile, ADR-01080)
+// 28 i64 maxBuffer hit (0 none · 1 stdout · 2 stderr): the child was killed for it
 // Field 20 (i64) is the spawn-failure errno: 0 when the child started, else
 // the errno the exec failed with (ENOENT for a missing command).
 // __kml_cp_finalize fires 'error' instead of 'exit' when it is set
@@ -49,10 +51,10 @@ import (
 // POSIX recovers a signalled death from the wait status directly (WIFSIGNALED),
 // so this field only feeds the Windows `'exit'`/`'close'` `(code, signal)`
 // shape, where TerminateProcess leaves no signalled bit to read (TDD-00184).
-const cpStructIR = "{ i64, i32, i32, i32, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr, ptr, i32, ptr, ptr, i64, i64, i64, i64, i64, i64, i64 }"
+const cpStructIR = "{ i64, i32, i32, i32, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr, ptr, i32, ptr, ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64 }"
 
-// cpStructBytes is the calloc size for cpStructIR (27 × 8).
-const cpStructBytes = 216
+// cpStructBytes is the calloc size for cpStructIR (29 × 8).
+const cpStructBytes = 232
 
 func (e *Emitter) ensureChildProcRuntime() {
 	if e.usedChildProcRuntime {
@@ -71,6 +73,7 @@ func (e *Emitter) ensureChildProcRuntime() {
 	e.ensureTimerRuntime()   // @__kml_monotonic_ns for the spawn `timeout` deadline
 	e.ensureCPKill()         // @kill — the timeout fire and child.kill share it
 	e.ensureCPExitWake()     // child exit wakes the loop (TDD-00223 §5)
+	e.ensureDynObj()         // the exec error's killed/signal own properties (ADR-01080)
 
 	e.emitGlobal("declare i32 @pipe(ptr noundef)")
 	e.ensureForkDecl()
@@ -153,7 +156,7 @@ copy:
 	// __kml_cp_drain(cp, fdslot i32*, dataL, endL, accum, mode): read the fd
 	// until EAGAIN/EOF. On data: fire dataL (streaming) or append (buffered).
 	// On EOF: close, set fd -1, fire endL (streaming).
-	e.emitGlobal(`
+	e.emitGlobal(strings.ReplaceAll(`
 define void @__kml_cp_drain(ptr %cp, ptr %fdslot, ptr %dataL, ptr %endL, ptr %accum, i64 %mode) {
 entry:
   %chunk = alloca [4096 x i8], align 1
@@ -189,6 +192,34 @@ docall:
   br label %loop
 append:
   call void @__kml_cp_accum(ptr %accum, ptr %chunkptr, i64 %n)
+  ; maxBuffer (ADR-01080): past the limit the child is killed with the
+  ; killSignal and the overrun stream recorded for the callback's error.
+  %mb_p = getelementptr CPTY, ptr %cp, i32 0, i32 27
+  %mb = load i64, ptr %mb_p, align 8
+  %mbset = icmp sgt i64 %mb, 0
+  br i1 %mbset, label %mbchk, label %loop
+mbchk:
+  %alen_p = getelementptr { ptr, i64, i64 }, ptr %accum, i32 0, i32 1
+  %alen = load i64, ptr %alen_p, align 8
+  %over = icmp sgt i64 %alen, %mb
+  %hit_p = getelementptr CPTY, ptr %cp, i32 0, i32 28
+  %hit = load i64, ptr %hit_p, align 8
+  %fresh = icmp eq i64 %hit, 0
+  %dokill = and i1 %over, %fresh
+  br i1 %dokill, label %mbkill, label %loop
+mbkill:
+  %so_acc_p = getelementptr CPTY, ptr %cp, i32 0, i32 14
+  %so_acc = load ptr, ptr %so_acc_p, align 8
+  %isout = icmp eq ptr %accum, %so_acc
+  %which = select i1 %isout, i64 1, i64 2
+  store i64 %which, ptr %hit_p, align 8
+  %kpid_p = getelementptr CPTY, ptr %cp, i32 0, i32 0
+  %kpid = load i64, ptr %kpid_p, align 8
+  %kpid32 = trunc i64 %kpid to i32
+  %ksig_p = getelementptr CPTY, ptr %cp, i32 0, i32 23
+  %ksig = load i64, ptr %ksig_p, align 8
+  %ksig32 = trunc i64 %ksig to i32
+  call i32 @kill(i32 %kpid32, i32 %ksig32)
   br label %loop
 ckeof:
   %iseof = icmp eq i64 %n, 0
@@ -210,7 +241,7 @@ callend:
   br label %ret
 ret:
   ret void
-}`)
+}`, "CPTY", cpStructIR))
 
 	// Post-reap hook — null unless the cluster runtime arms it (fork time);
 	// see finalize's own ret-path comment.
@@ -231,7 +262,14 @@ ret:
 	// reaped: record the wait status / exit codes, mark it state 1, run the
 	// post-reap hook, and fire 'exit' — or, for a spawn that never started,
 	// 'error' (ADR-00754: 'error' then 'close', never 'exit').
-	finalizeIR := strings.NewReplacer("CPTY", cp, "ERRNAME", errName).Replace(`
+	finalizeIR := strings.NewReplacer("CPTY", cp, "ERRNAME", errName,
+		"ERRTY", errorObjType.StructIR(), "ERRSIZE", fmt.Sprint(errorObjType.StructSize()),
+		"RANGENAME", e.internString("RangeError"), "RANGEKIND", fmt.Sprint(errorTypeIDStored(errorKindIDs["RangeError"])),
+		"MBCODE", e.internString("ERR_CHILD_PROCESS_STDIO_MAXBUFFER"),
+		"MBOUTMSG", e.internString("stdout maxBuffer length exceeded"),
+		"MBERRMSG", e.internString("stderr maxBuffer length exceeded"),
+		"KILLEDKEY", e.internString("killed"), "SIGNALKEY", e.internString("signal"),
+		"ERRKIND0", fmt.Sprint(errorTypeIDStored(0))).Replace(`
 define void @__kml_cp_reap(ptr %cp) {
 entry:
   %st0_p = getelementptr CPTY, ptr %cp, i32 0, i32 4
@@ -427,21 +465,52 @@ docb:
   %se_p = getelementptr CPTY, ptr %cp, i32 0, i32 15
   %se = load ptr, ptr %se_p, align 8
   %sestr = call ptr @__kml_cp_accum_str(ptr %se)
-  ; err: null on success, else an Error object
-  %failed = icmp ne i64 %code64, 0
+  ; err: null on success, else an Error object (a full errorObjType — its
+  ; code/errno/… fields are readable, ADR-01080). A maxBuffer overrun is
+  ; Node's RangeError ERR_CHILD_PROCESS_STDIO_MAXBUFFER, whatever the exit code.
+  %hit_p = getelementptr CPTY, ptr %cp, i32 0, i32 28
+  %hit = load i64, ptr %hit_p, align 8
+  %hitany = icmp ne i64 %hit, 0
+  %nonzero = icmp ne i64 %code64, 0
+  %failed = or i1 %nonzero, %hitany
   br i1 %failed, label %mkerr, label %callcb
 mkerr:
-  %emsg = call ptr @__kml_cp_exec_errmsg(i64 %code64)
-  %eobj = call ptr @malloc(i64 24)
-  %ek = getelementptr { i64, ptr, ptr }, ptr %eobj, i32 0, i32 0
-  store i64 0, ptr %ek, align 8
-  %em = getelementptr { i64, ptr, ptr }, ptr %eobj, i32 0, i32 1
+  %emsg0 = call ptr @__kml_cp_exec_errmsg(i64 %code64)
+  %hitout = icmp eq i64 %hit, 1
+  %mbmsg = select i1 %hitout, ptr MBOUTMSG, ptr MBERRMSG
+  %emsg = select i1 %hitany, ptr %mbmsg, ptr %emsg0
+  %ename = select i1 %hitany, ptr RANGENAME, ptr ERRNAME
+  %ekind = select i1 %hitany, i64 RANGEKIND, i64 ERRKIND0
+  %ecode = select i1 %hitany, ptr MBCODE, ptr null
+  %eobj = call ptr @calloc(i64 1, i64 ERRSIZE)
+  %ek = getelementptr ERRTY, ptr %eobj, i32 0, i32 0
+  store i64 %ekind, ptr %ek, align 8
+  %em = getelementptr ERRTY, ptr %eobj, i32 0, i32 1
   store ptr %emsg, ptr %em, align 8
-  %en = getelementptr { i64, ptr, ptr }, ptr %eobj, i32 0, i32 2
-  store ptr ERRNAME, ptr %en, align 8
+  %en = getelementptr ERRTY, ptr %eobj, i32 0, i32 2
+  store ptr %ename, ptr %en, align 8
+  %ec = getelementptr ERRTY, ptr %eobj, i32 0, i32 3
+  store ptr %ecode, ptr %ec, align 8
+  %ecause = getelementptr ERRTY, ptr %eobj, i32 0, i32 10
+  store i64 10, ptr %ecause, align 8
+  ; Node's ExecException own properties: killed (this side ended it — a
+  ; child.kill() or the timeout) and signal (the name or null). The maxBuffer
+  ; RangeError is not decorated, as in Node.
+  br i1 %hitany, label %callcb, label %decorate
+decorate:
+  %ebag = call ptr @__kml_dynobj_new()
+  %kswas = icmp ne i64 %ks, 0
+  %killedb = select i1 %kswas, i64 7, i64 6
+  call void @__kml_dynobj_set(ptr %ebag, ptr KILLEDKEY, i64 %killedb)
+  %signull = icmp eq ptr %evsigname, null
+  %sigptr = ptrtoint ptr %evsigname to i64
+  %sigb = select i1 %signull, i64 2, i64 %sigptr
+  call void @__kml_dynobj_set(ptr %ebag, ptr SIGNALKEY, i64 %sigb)
+  %ex_p = getelementptr ERRTY, ptr %eobj, i32 0, i32 13
+  store ptr %ebag, ptr %ex_p, align 8
   br label %callcb
 callcb:
-  %errv = phi ptr [ null, %docb ], [ %eobj, %mkerr ]
+  %errv = phi ptr [ null, %docb ], [ %eobj, %mkerr ], [ %eobj, %decorate ]
   %bfp_p = getelementptr { ptr, ptr }, ptr %cb, i32 0, i32 0
   %bfp = load ptr, ptr %bfp_p, align 8
   %bep_p = getelementptr { ptr, ptr }, ptr %cb, i32 0, i32 1
@@ -837,8 +906,8 @@ store:
 	// __kml_cp_spawn(file, argsdata, argslen, mode): fork+exec with three
 	// pipes; returns the ChildProcess handle. The two read fds are made
 	// non-blocking; buffered mode pre-allocates the accumulators.
-	e.emitGlobal(fmt.Sprintf(`
-define ptr @__kml_cp_spawn(ptr %%file, ptr %%argsdata, i64 %%argslen, i64 %%mode, ptr %%cwd, ptr %%env, i64 %%timeout_ms, i64 %%killsig) {
+	e.emitGlobal(strings.ReplaceAll(fmt.Sprintf(`
+define ptr @__kml_cp_spawn(ptr %%file, ptr %%argsdata, i64 %%argslen, i64 %%mode, ptr %%cwd, ptr %%env, i64 %%timeout_ms, i64 %%killsig, i64 %%maxbuf) {
 entry:
   ; the exit wake must exist before the child can (TDD-00223 §5)
   call void @__kml_cp_watch_init()
@@ -927,7 +996,7 @@ err_close:
 err_done:
   %%errr_val = phi i32 [ %%errr, %%err_pipe ], [ -1, %%err_close ]
 
-  %%cp = call ptr @calloc(i64 1, i64 216)
+  %%cp = call ptr @calloc(i64 1, i64 CPBYTES)
   %%pid_p = getelementptr %s, ptr %%cp, i32 0, i32 0
   %%pid64 = zext i32 %%pid to i64
   store i64 %%pid64, ptr %%pid_p, align 8
@@ -951,6 +1020,8 @@ err_done:
   store i64 %%todl, ptr %%todl_p, align 8
   %%toks_p = getelementptr %s, ptr %%cp, i32 0, i32 23
   store i64 %%killsig, ptr %%toks_p, align 8
+  %%mbf_p = getelementptr %s, ptr %%cp, i32 0, i32 27
+  store i64 %%maxbuf, ptr %%mbf_p, align 8
   %%modebufa = and i64 %%mode, 1
   %%buffered = icmp ne i64 %%modebufa, 0
   br i1 %%buffered, label %%allocbufs, label %%reg
@@ -966,7 +1037,7 @@ reg:
 %s
   call void @__kml_cp_register(ptr %%cp)
   ret ptr %%cp
-}`, e.cpSpawnStatusSetupIR(), e.cpSpawnForkIR(), nonblock, nonblock, cp, cp, cp, cp, cp, cp, cp, cp, cp, e.cpSpawnFailDetectIR(cp)))
+}`, e.cpSpawnStatusSetupIR(), e.cpSpawnForkIR(), nonblock, nonblock, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, e.cpSpawnFailDetectIR(cp)), "CPBYTES", fmt.Sprint(cpStructBytes)))
 
 	// stdin write / end
 	e.emitGlobal(fmt.Sprintf(`

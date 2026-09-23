@@ -13,10 +13,10 @@
       "statusRow": "console.log(...)",
       "signature": "log(...args: any[]): void",
       "badge": "caveats",
-      "description": "Writes its arguments to stdout on one line, joined by single spaces, followed by a newline. A no-argument call prints a bare newline, and -0 displays as -0 (matching Node's util.inspect display, even though String(-0) stays \"0\").",
+      "description": "Writes its arguments to stdout on one line, joined by single spaces, followed by a newline. A no-argument call prints a bare newline; objects and arrays are laid out as Node's util.inspect does — 80-column breaks, grouped columns, at most 100 array elements then `... n more items`, -0 shown as -0.",
       "returns": { "type": "void", "desc": "Nothing." },
       "differences": [
-        "A printed string is written via `printf`'s `\"%s\"`, so a value with an embedded null byte truncates *on display* at the first `\\0` — the stored string is intact (`.length` and every operation see the full bytes); a binary-safe `fwrite` print is deferred as display-only, low-value. Use `process.stdout.write` for binary output"
+        "A bare string is written via `printf`'s `\"%s\"`, so a value with an embedded null byte truncates *on display* at the first `\\0` — the stored string is intact, and inside an array/object it renders as `'a\\x00b'`. Use `process.stdout.write` for binary output"
       ],
       "seeAlso": ["console.error", "console.dir", "console.group"],
       "spec": { "mdn": "https://nodejs.org/api/console.html#consolelogdata-args" }

@@ -53,3 +53,19 @@ console.log(Buffer.from("hi"))
 console.log(Buffer.from([]))
 `, "<Buffer 68 69>\n<Buffer >")
 }
+
+// console.* evaluates its whole argument list before printing anything
+// (ADR-01057): a later argument's own console output must not land in the
+// middle of the line being assembled. Previously each token printed as soon
+// as it was evaluated. Covers the plain path and the format-string leftovers.
+func TestE2EConsoleEvaluatesAllArgsBeforePrinting(t *testing.T) {
+	assertOutput(t, `
+function side(): number { console.log("side"); return 1; }
+const a: number[] = [1];
+console.log(a[0], side());
+console.log("x", a[0], side());
+console.log("%s!", "hi", side());
+let n: number | undefined = undefined;
+console.log(n, side());
+`, "side\n1 1\nside\nx 1 1\nside\nhi! 1\nside\nundefined 1")
+}

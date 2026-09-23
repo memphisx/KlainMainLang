@@ -141,6 +141,14 @@ tools\ramdisk\run.ps1 -SizeGB 12 -Run "go test ./... -timeout 80m"   # Windows, 
 
 In Docker, mount the scratch as tmpfs **with `exec`** (the tests run the binaries they build from it): `docker run --tmpfs /scratch:exec,size=8g -e KML_SCRATCH=/scratch -e GOTMPDIR=/scratch …`.
 
+A RAM drive competes with the conformance runner for memory: its default worker count is CPUs−2, capped by the memory the OS can still commit (≈1.5 GiB per `clang -O2` worker) — it prints the cap when it applies, and `-workers` overrides it. Without the cap, clang itself dies mid-compile on a full box and the report counts that as invalid IR.
+
+### Running a slice of the suite
+
+`go test ./...` is ~25 min on Windows and ~10 min on Linux. `tools/testsel/` runs the E2E tests a change touches: `py tools/testsel/batch.py file:typedarrays,symbol` runs every test in `tests/typedarrays_test.go` and `tests/symbol_test.go` (the test files are the area map), or a regex over each test's source body; `netbatch.py` runs the network-named ones. See its README.
+
+Tests whose expected output should be *Node's* use `assertSameAsNode(t, src)`: the same TypeScript program runs here and under `node --experimental-strip-types` and the two stdouts must match, so no expectation is typed by hand. Such tests skip when Node isn't installed; pair them with an `assertOutput` twin when the expectation must also hold on a Node-less CI lane.
+
 ## CLI flags
 
 ```text

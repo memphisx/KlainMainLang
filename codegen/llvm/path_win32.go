@@ -77,6 +77,7 @@ func (e *Emitter) ensurePathWin32() {
 	e.emitGlobal("declare ptr @__kml_path_win32_to_file_url(ptr, ptr, ptr)")
 	e.emitGlobal("declare ptr @__kml_path_win32_from_file_url(ptr, ptr, ptr)")
 	e.emitGlobal("declare ptr @__kml_path_win32_split_file_host(ptr, ptr)")
+	e.emitGlobal("declare ptr @__kml_path_win32_file_url_pathname(ptr)")
 	// normalize / relative / toNamespacedPath, both flavours (ADR-00723): the
 	// posix trio lives in the same sidecar since it shares normalizeString.
 	e.emitGlobal("declare ptr @__kml_path_win32_normalize(ptr)")

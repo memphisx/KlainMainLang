@@ -250,6 +250,19 @@ func (e *Emitter) storePromiseValue(promiseReg string, val Value) {
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", l, v1))
 		return
 	}
+	if isNullableScalar(val.Ty) {
+		// `T | undefined`: payload bits in v0, presence in v1 (ADR-01065) — the
+		// same two-word split the task-args bundle uses for such a parameter.
+		present, payload := e.nullableScalarAggParts(val)
+		bits := e.promiseBitsOf(payload)
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bits, v0))
+		presI64 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", presI64, present))
+		v1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", v1, promiseStructIR, promiseReg))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", presI64, v1))
+		return
+	}
 	bits := e.promiseBitsOf(val)
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bits, v0))
 }
@@ -275,7 +288,24 @@ func (e *Emitter) loadPromiseValue(promiseReg string, ty Type) Value {
 	}
 	bits := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", bits, v0))
+	if isNullableScalar(ty) {
+		v1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", v1, promiseStructIR, promiseReg))
+		presI64 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", presI64, v1))
+		return e.nullableScalarFromWords(bits, presI64, ty)
+	}
 	return e.promiseValFromBits(bits, ty)
+}
+
+// nullableScalarFromWords rebuilds a `T | undefined` aggregate from its two
+// transport words (payload bits, presence as i64) — the inverse of the split
+// storePromiseValue/streamChunkWords perform (ADR-01065).
+func (e *Emitter) nullableScalarFromWords(bits, presI64 string, ty Type) Value {
+	payload := e.promiseValFromBits(bits, ty.withoutNullable())
+	pres := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i1", pres, presI64))
+	return Value{Ref: e.makeNullableScalarAgg(ty, pres, payload.Ref), Ty: ty}
 }
 
 // emitMaySuspendCall evaluates the arguments to a may-suspend async function and

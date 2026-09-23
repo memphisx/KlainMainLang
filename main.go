@@ -2,6 +2,7 @@ package main
 
 import (
 	"KlainMainLang/codegen/llvm"
+	"KlainMainLang/internal/scratch"
 	"KlainMainLang/resolver"
 	"flag"
 	"fmt"
@@ -71,6 +72,12 @@ func main() {
 	if flag.NArg() < 1 {
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	// KML_SCRATCH moves every throwaway write — the --run temp binary, the
+	// link directory, clang's own temp objects — off the OS temp dir.
+	if _, err := scratch.Apply(); err != nil {
+		fatal("%v", err)
 	}
 
 	if *runNow {

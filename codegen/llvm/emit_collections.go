@@ -312,7 +312,23 @@ func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, 
 
 // emitSetVarDecl handles `const s = new Set<T>()`.
 func (e *Emitter) emitSetVarDecl(v *ast.VarDeclaration, init *ast.NewSetExpression) error {
-	val, err := e.emitNewSetValue(init)
+	var elemOverride *Type
+	if init.ElemType == nil && init.Init == nil {
+		// A bare `new Set()` takes its element type from the `Set<T>` annotation,
+		// else from the widening pre-pass over its `.add`/`.has`/`.delete` uses
+		// (mirroring emitMapVarDecl; ADR-01061). Both were silently the string
+		// default before, so `s.has(NaN)` strcmp'd a poison pointer.
+		if v.TypeAnnot != nil {
+			if annTy := e.resolveType(v.TypeAnnot); annTy.IsSet && annTy.MapKey != nil {
+				t := *annTy.MapKey
+				elemOverride = &t
+			}
+		} else if kv, ok := e.emptyMapKV[v.Name]; ok && kv.keyKnown {
+			t := kv.key
+			elemOverride = &t
+		}
+	}
+	val, err := e.emitNewSetValueTyped(init, elemOverride)
 	if err != nil {
 		return err
 	}
@@ -329,7 +345,17 @@ func (e *Emitter) emitSetVarDecl(v *ast.VarDeclaration, init *ast.NewSetExpressi
 // else inferred from the initializer array's own element type, else the
 // pre-existing string-element default for the bare no-argument form.
 func (e *Emitter) emitNewSetValue(init *ast.NewSetExpression) (Value, error) {
+	return e.emitNewSetValueTyped(init, nil)
+}
+
+// emitNewSetValueTyped is emitNewSetValue with an optional element type the
+// declaration site already decided (annotation or pre-pass); nil keeps the
+// expression's own inference.
+func (e *Emitter) emitNewSetValueTyped(init *ast.NewSetExpression, elemOverride *Type) (Value, error) {
 	elemTy := TypePtr // default: string elements
+	if elemOverride != nil {
+		elemTy = *elemOverride
+	}
 	var srcPtr, srcLen string
 	haveSrc := false
 	if init.Init != nil {
@@ -1238,6 +1264,12 @@ func (e *Emitter) inferEmptyMapKVTypes(body []ast.Statement) map[string]mapKV {
 			nm.KeyType == nil && nm.ValType == nil && nm.Init == nil {
 			candidates[v.Name] = true
 		}
+		// A bare `new Set()` is the same shape with one slot: its `.add`/`.has`/
+		// `.delete` arguments pick the element runtime (ADR-01061 — the string
+		// default turned `s.has(NaN)` into a strcmp on a poison pointer).
+		if ns, ok := v.Init.(*ast.NewSetExpression); ok && ns.ElemType == nil && ns.Init == nil {
+			candidates[v.Name] = true
+		}
 	}
 	var walkExpr func(ast.Expression)
 	walkExpr = func(expr ast.Expression) {
@@ -1251,7 +1283,7 @@ func (e *Emitter) inferEmptyMapKVTypes(body []ast.Statement) map[string]mapKV {
 							keyContrib[id.Name] = append(keyContrib[id.Name], e.inferExprType(ex.Args[0]))
 							valContrib[id.Name] = append(valContrib[id.Name], e.inferExprType(ex.Args[1]))
 						}
-					case "get", "has", "delete":
+					case "get", "has", "delete", "add":
 						// A lookup key also constrains the runtime family: an empty
 						// `new Map()` probed with `map.has([])` still needs the
 						// any-keyed runtime even though nothing was ever set.

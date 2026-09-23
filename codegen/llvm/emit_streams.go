@@ -29,6 +29,12 @@ func (e *Emitter) streamChunkWords(val Value) (string, string) {
 		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", pi, p))
 		return pi, l
 	}
+	if isNullableScalar(val.Ty) {
+		present, payload := e.nullableScalarAggParts(val)
+		presI64 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", presI64, present))
+		return e.promiseBitsOf(payload), presI64
+	}
 	return e.promiseBitsOf(val), "0"
 }
 
@@ -43,6 +49,9 @@ func (e *Emitter) streamChunkFromWords(v0, v1 string, ty Type) Value {
 		e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", agg0, p))
 		e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %s, 1", agg1, agg0, v1))
 		return Value{Ref: agg1, Ty: ty}
+	}
+	if isNullableScalar(ty) {
+		return e.nullableScalarFromWords(v0, v1, ty)
 	}
 	return e.promiseValFromBits(v0, ty)
 }

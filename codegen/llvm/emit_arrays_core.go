@@ -18,10 +18,19 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 	// branches are untouched.
 	var slot string
 	if e.promotedGlobalDecls[v] {
+		if err := e.promotedStorageAgrees(v, ty); err != nil {
+			return err
+		}
 		slot = e.moduleGlobals[v.Name].Ptr
 	} else {
 		slot = e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		if v.Kind == "var" {
+			// A skippable `var` (hoistedVarMaySkip widened it to `T[] |
+			// undefined`) reads the null header — absent — on the path where this
+			// declaration never ran (ADR-01057).
+			e.emitAlloca(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+		}
 		e.define(v.Name, Symbol{Ptr: slot, Ty: ty, IsConst: v.Kind == "const"})
 	}
 	// `let a: T[] | null = null` (or no initializer at all): the binding holds no
@@ -865,6 +874,11 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 		return "", 0, fmt.Errorf("%d:%d: a nullable or union array element type (e.g. `(number | null)[]`) is not yet supported — a union is usable as an object field, but not yet as an array element", lit.GetPos().Line, lit.GetPos().Col)
 	}
 	n = int64(len(lit.Elements))
+	// A literal-only literal (a constant table) is built from a static image
+	// rather than element by element (ADR-01064).
+	if d, ok := e.tryEmitStaticArrayLiteral(lit, elemTy); ok {
+		return d, n, nil
+	}
 	e.ensureMalloc()
 	dataReg = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
@@ -898,6 +912,14 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 		// and is exempt; an array-of-arrays elemTy (both sides IsArray) matches.
 		if val.Ty.IsArray != elemTy.IsArray && !elemTy.IsDynamic {
 			return "", 0, fmt.Errorf("%d:%d: array elements must share one type — element %d does not match the array's element type (a heterogeneous array is not supported)", elem.GetPos().Line, elem.GetPos().Col, i)
+		}
+		// Both sides arrays, but with different storage (`[[7], new
+		// Int32Array([8])]`: a number[] slot handed an i32 buffer) — storing the
+		// header would silently reinterpret the element bits (ADR-01059). Under
+		// -compat=js inferArrayType already boxed such a literal to `any[]`; a
+		// strict literal, or an explicit `number[][]` annotation, is rejected.
+		if val.Ty.IsArray && elemTy.IsArray && !elemTy.IsDynamic && !arrayStorageCompatible(val.Ty, elemTy) {
+			return "", 0, fmt.Errorf("%d:%d: array elements must share one type — element %d is a %s, not a %s (a heterogeneous array is not supported; under -compat=js it becomes any[])", elem.GetPos().Line, elem.GetPos().Col, i, arrayTypeName(val.Ty), arrayTypeName(elemTy))
 		}
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))

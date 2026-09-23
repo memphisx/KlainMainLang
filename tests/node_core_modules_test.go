@@ -479,6 +479,31 @@ console.log(fileURLToPath("file:///foo%20bar/baz.txt"))
 `, "/foo/bar\n/foo bar/baz.txt")
 }
 
+// The `{ windows }` option (ADR-01079) picks the flavor on any host: a literal
+// at compile time, a run-time boolean through both halves. Node is the oracle
+// (the messages name the *host* platform, as Node's do).
+func TestE2EFileURLToPathWindowsOptionSameAsNode(t *testing.T) {
+	assertSameAsNodeImports(t, `
+import url from 'url'
+console.log(url.fileURLToPath("file:///C:/path/to/file.txt", { windows: true }))
+console.log(url.fileURLToPath("file://server/share/dir/f.txt", { windows: true }))
+console.log(url.fileURLToPath("file:///home/user/a%20b.txt", { windows: false }))
+console.log(url.fileURLToPath("file:///C:/x/y", { windows: false }))
+console.log(url.fileURLToPath("file://localhost/etc/hosts", { windows: false }))
+console.log(url.fileURLToPath("file:///C:/x/y", { windows: undefined }) === url.fileURLToPath("file:///C:/x/y"))
+const w = process.argv.length > 5
+console.log(url.fileURLToPath("file:///C:/dyn/z", { windows: w }))
+console.log(url.fileURLToPath("file:///C:/dyn/z", { windows: !w }))
+console.log(url.pathToFileURL("C:\\Users\\me\\a b.txt", { windows: true }).href)
+console.log(url.pathToFileURL("/tmp/a b#c.txt", { windows: false }).href)
+console.log(url.pathToFileURL("\\\\srv\\share\\f.txt", { windows: true }).href)
+try { url.fileURLToPath("file:///home/x", { windows: true }) } catch (e) { console.log((e as Error).message) }
+try { url.fileURLToPath("file://host/x", { windows: false }) } catch (e) { console.log((e as Error).message) }
+try { url.fileURLToPath("file:///a%2Fb", { windows: false }) } catch (e) { console.log((e as Error).message) }
+try { url.fileURLToPath("file:///C:/a%2Fb", { windows: true }) } catch (e) { console.log((e as Error).message) }
+`)
+}
+
 func TestE2EFileURLToPathNonFileRejected(t *testing.T) {
 	src := `import { fileURLToPath } from 'url'
 try { fileURLToPath("https://x.com/p") } catch (e) { console.log("threw:", e.message) }`

@@ -405,6 +405,40 @@ func (e *Emitter) ensureSscanf() {
 // construction and works for any year, including pre-1970 (negative
 // timestamps).
 
+// ensureFptosiSat declares the saturating double→i64 intrinsic once. A plain
+// `fptosi` of NaN or ±Infinity is poison, and every integer consumer downstream
+// (an indexOf fromIndex, a slice bound, a Set hash) then behaves arbitrarily —
+// the conformance run-timeouts of ADR-01061 were exactly that. The saturating
+// form gives NaN → 0 and ±Infinity → INT64_MIN/MAX, which is JS's
+// ToIntegerOrInfinity as seen by a consumer that clamps to a length.
+func (e *Emitter) ensureFptosiSat() {
+	if e.usedFptosiSat {
+		return
+	}
+	e.usedFptosiSat = true
+	e.emitGlobal("declare i64 @llvm.fptosi.sat.i64.f64(double)")
+	e.emitGlobal("declare i64 @llvm.fptosi.sat.i64.f32(float)")
+}
+
+// floatInfLiteral / floatNegInfLiteral: ±Infinity as an LLVM constant for the
+// given float IR type (a `float` constant is spelled as the exactly-representable
+// double bit pattern).
+func floatInfLiteral(irTy string) string    { return "0x7FF0000000000000" }
+func floatNegInfLiteral(irTy string) string { return "0xFFF0000000000000" }
+
+// emitFloatToI64 converts a float register to i64 with JS semantics for the
+// non-finite cases (see ensureFptosiSat). `irTy` is "double" or "float".
+func (e *Emitter) emitFloatToI64(irTy, ref string) string {
+	e.ensureFptosiSat()
+	r := e.freshReg()
+	suffix := "f64"
+	if irTy == "float" {
+		suffix = "f32"
+	}
+	e.emitInstr(fmt.Sprintf("%s = call i64 @llvm.fptosi.sat.i64.%s(%s %s)", r, suffix, irTy, ref))
+	return r
+}
+
 func (e *Emitter) ensureMathFuncs() {
 	if e.usedMathFuncs {
 		return

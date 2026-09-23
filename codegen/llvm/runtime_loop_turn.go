@@ -59,6 +59,8 @@ func (e *Emitter) ensureLoopTurn() {
 		e.emitGlobal("define internal i1 @__kml_loop_on_goroutine() {\n  ret i1 false\n}")
 	}
 	e.emitGlobal("@__kml_loop_oneshot = internal thread_local global i8 0, align 1")
+	// TDD-00225: set around a single turn that must not block in select().
+	e.emitGlobal("@__kml_loop_nowait = internal thread_local global i8 0, align 1")
 	e.emitGlobal("@__kml_loop_pin = internal thread_local global i64 0, align 8")
 	e.emitGlobal("@__kml_loop_depth = internal thread_local global i64 0, align 8")
 	e.emitGlobal("@__kml_loop_idle = internal thread_local global i1 false, align 1")

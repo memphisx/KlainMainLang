@@ -97,6 +97,7 @@
             "status": "implemented",
             "notes": [
               "`linkSync(existing, newPath)` makes a hard link — a second name for one inode, so `nlink` rises and the content outlives unlinking the original; on Windows it is `CreateHardLinkW` (unprivileged, unlike `symlinkSync` which needs Developer Mode) ([ADR-00751](../adr/ADR-00751.md))",
+              "`realpathSync` on Windows resolves like Node's readlink walk when the kernel's final-path query can't answer — a volume with no DOS device name (a RAM disk), or a relative link target stored with forward slashes ([ADR-01058](../adr/ADR-01058.md))",
               "`symlinkSync(target, path[, type])` takes Node's `type` (`'file'` \\| `'dir'` \\| `'junction'` \\| `null`): ignored on POSIX, as in Node; on Windows `'junction'` makes an NTFS junction — a directory link that needs no privilege, its relative target resolved against the link's directory — and `readlinkSync` reports a link's target from the name the kernel follows, with `\\??\\UNC\\…` read back as `\\\\server\\share` ([ADR-01030](../adr/ADR-01030.md))"
             ],
             "caveats": [
@@ -127,6 +128,23 @@
             ],
             "caveats": [
               "`fdatasyncSync` is an alias for `fsyncSync` (the data-only optimization isn't observable in the file's contents)"
+            ]
+          },
+          {
+            "feature": "`fs.fchmodSync(fd, mode)`",
+            "status": "implemented",
+            "notes": [
+              "`fchmod(2)` on POSIX; on Windows the same read-only-bit model as `chmodSync`, applied through the handle (`FileBasicInfo`, libuv's `fs__fchmod`); a socket/pipe fd is `EBADF`, and the thrown error is Node's fd-shaped `EBADF: bad file descriptor, fchmod` ([ADR-01078](../adr/ADR-01078.md))"
+            ]
+          },
+          {
+            "feature": "`fs.statfsSync(path)`",
+            "status": "implemented",
+            "notes": [
+              "A `{ type, bsize, frsize, blocks, bfree, bavail, files, ffree }` object: `statfs(2)` read against the platform's own struct on POSIX (Darwin's `frsize` is `bsize`, as libuv reports); on Windows `GetDiskFreeSpaceW` of the path's volume, with `type`/`files`/`ffree` `0` as in Node, after the path itself is probed so a missing file is `ENOENT: no such file or directory, statfs '<path>'` ([ADR-01078](../adr/ADR-01078.md))"
+            ],
+            "caveats": [
+              "The `{ bigint: true }` option is accepted and ignored — the fields are always numbers"
             ]
           },
           {

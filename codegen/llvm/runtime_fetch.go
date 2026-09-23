@@ -249,7 +249,7 @@ none:
 	e.ensureStrcmp()
 	e.emitGlobal(`@.kml_fetch_head_method = private unnamed_addr constant [5 x i8] c"HEAD\00"`)
 
-	e.emitGlobal(`
+	e.emitGlobal(withCurlNativeCA(`
 define ptr @__kml_fetch_async(ptr %url, ptr %method, ptr %headers, ptr %body, ptr %signal) {
 entry:
   %inited = load i1, ptr @__kml_curl_inited, align 1
@@ -386,7 +386,7 @@ skipbody:
   call i32 @curl_multi_perform(ptr %multi2, ptr %runningp)
 
   ret ptr %pending
-}`)
+}`))
 
 	e.emitGlobal(`
 define void @__kml_curl_drain_messages() {
@@ -1475,4 +1475,18 @@ tp_yield:
   %%tp_sw = call i32 @swapcontext(ptr %%tp_ctx, ptr %%tp_rc)%[8]s
   br label %%checkloop
 tp_no:`, t, field, value, taskState, taskResumerCtx, taskCtx, taskSavedJmpTop, gc)
+}
+
+// withCurlNativeCA adds CURLOPT_SSL_OPTIONS = CURLSSLOPT_NATIVE_CA right after
+// each curl_easy_init in an IR template, on a Windows target: the MSYS2
+// libcurl/OpenSSL finds its CA bundle relative to the running executable
+// (<exe dir>/../etc/ssl/certs), so a compiled program living anywhere else had
+// no roots and every https request failed ("SSL connect error"). The Windows
+// certificate store is always there, as Node's roots always are.
+func withCurlNativeCA(ir string) string {
+	if targetGOOS() != "windows" {
+		return ir
+	}
+	const initLine = "  %curl = call ptr @curl_easy_init()\n"
+	return strings.Replace(ir, initLine, initLine+"  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 216, i64 16)\n", 1)
 }

@@ -26,8 +26,12 @@ func (e *Emitter) emitAsyncPrologue() {
 	} else {
 		size = 1 // Promise<void>: allocate one byte (never written)
 	}
+	// Zeroed: a body that falls off the end never writes the slot, and the
+	// epilogue reads it as the fulfilment value — zero is `undefined` for a
+	// `T | undefined` result (absent presence bit), 0/null otherwise (ADR-01065).
+	e.ensureCalloc()
 	frameReg := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", frameReg, size))
+	e.emitAlloca(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", frameReg, size))
 	e.coroHdl = frameReg
 }
 
@@ -86,8 +90,10 @@ func (e *Emitter) emitSettledAsyncPrologue() {
 	e.ensureMalloc()
 
 	// coroHdl slot for the body's return value (the return machinery stores here).
+	// Zeroed for the fall-off path — see emitAsyncPrologue.
+	e.ensureCalloc()
 	frameReg := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", frameReg, asyncSlotSize(e.currentPromiseTy)))
+	e.emitAlloca(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", frameReg, asyncSlotSize(e.currentPromiseTy)))
 	e.coroHdl = frameReg
 
 	// The settled task promise this function returns.
@@ -247,14 +253,10 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 			e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", rp))
 			return e.emitAwaitTaskPromise(prom, hdlVal.Ty)
 		}
-		// Top-level code that is not a task — a worker module or a dynamic-import
-		// island (the entry program's module body is one, TDD-00224): the main
-		// stack cannot park, so it takes the await's one tick by running the jobs
-		// already queued (@__kml_microtask_tick) before carrying on.
-		if !e.isAsync && !e.inModuleTask && e.currentGenerator == nil {
-			e.needMicrotaskTick = true
-			e.emitInstr("call void @__kml_microtask_tick()")
-		}
+		// Every module top level with an await is a coroutine now — the entry
+		// program, a worker module, a dynamic-import island (TDD-00224,
+		// TDD-00225) — so nothing reaches here from module code; the main-stack
+		// tick this branch once took (ADR-01044) is gone with it.
 		return hdlVal, nil
 	}
 

@@ -416,7 +416,9 @@ func (p *Parser) parseUnary() (ast.Expression, error) {
 			return nil, err
 		}
 		return ast.NewUnaryExpression(op.Literal, true, arg, posOf(op)), nil
-	case lexer.MINUS:
+	case lexer.MINUS, lexer.PLUS:
+		// Unary `+x` is JS's ToNumber (`+"3"` is 3); it was a parse error
+		// before ADR-01057.
 		op := p.advance()
 		arg, err := p.parseUnary()
 		if err != nil {

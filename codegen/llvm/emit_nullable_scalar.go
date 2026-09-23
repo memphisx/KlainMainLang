@@ -126,6 +126,20 @@ func (e *Emitter) nullableScalarLValue(expr ast.Expression) (sym Symbol, ok bool
 	return Symbol{}, false
 }
 
+// emitExprKeepNullable is emitExpr for a consumer that must see a
+// nullable-scalar local's absence: an identifier read normally auto-unwraps
+// to the bare payload (emitIdentifier), so an un-narrowed nullable-scalar
+// local is read here as its { i1, T } aggregate instead. Everything else is a
+// plain emitExpr.
+func (e *Emitter) emitExprKeepNullable(expr ast.Expression) (Value, error) {
+	if sym, ok := e.nullableScalarLValue(expr); ok && !sym.NarrowedNonNull {
+		present := e.loadNullableScalarPresent(sym.Ptr, sym.Ty)
+		payload := e.loadNullableScalarPayload(sym.Ptr, sym.Ty)
+		return Value{Ref: e.makeNullableScalarAgg(sym.Ty, present, payload), Ty: sym.Ty}, nil
+	}
+	return e.emitExpr(expr)
+}
+
 // --- Stage 3: nullable-scalar aggregate *values* -------------------------
 //
 // At a boundary (a function return, a parameter, an object field, a Map value)
@@ -187,6 +201,42 @@ func (e *Emitter) nullableScalarAggParts(v Value) (present string, payload Value
 func (e *Emitter) nullableScalarPayloadOf(v Value) Value {
 	_, payload := e.nullableScalarAggParts(v)
 	return payload
+}
+
+// nullableScalarOperand demotes a nullable-scalar aggregate that is an operand
+// of binary operator op. Strict mode and a `T | null` operand keep the payload
+// collapse (JS's ToNumber(null) *is* 0: `null + 1 === 1`, `null * 2 === 0`).
+// Under `-compat=js` a `T | undefined` numeric operand of an arithmetic or
+// relational operator becomes a double that is NaN when absent — JS's
+// ToNumber(undefined) — so `undefined + 2` is NaN and `undefined < 1` is false,
+// as in Node. Bitwise/shift operators keep the zero collapse, which is exactly
+// ToInt32(NaN) = 0.
+func (e *Emitter) nullableScalarOperand(v Value, op string) Value {
+	present, payload := e.nullableScalarAggParts(v)
+	if !e.compatJS() || !v.Ty.IsUndefined || scalarTypeKind(payload.Ty) != "number" {
+		return payload
+	}
+	switch op {
+	case "+", "-", "*", "/", "%", "**", "<", ">", "<=", ">=":
+	default:
+		return payload
+	}
+	f := e.coerce(payload, TypeF64)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double %s, double 0x7FF8000000000000", r, present, f.Ref))
+	return Value{Ref: r, Ty: TypeF64}
+}
+
+// jsUndefinedLocalOperand is nullableScalarOperand for an operand that is a
+// `T | undefined` local identifier (already auto-unwrapped by emitIdent to
+// `cur`): under `-compat=js` it re-reads the aggregate from the local's slot
+// and demotes it presence-aware. Any other operand is returned as is.
+func (e *Emitter) jsUndefinedLocalOperand(expr ast.Expression, cur Value, op string) Value {
+	sym, ok := e.nullableScalarLValue(expr)
+	if !ok || !sym.Ty.IsUndefined || isStringTy(cur.Ty) {
+		return cur
+	}
+	return e.nullableScalarOperand(e.loadNullableScalarAgg(sym.Ptr, sym.Ty), op)
 }
 
 // emitNullableScalarBoxedValue evaluates expr and produces a { i1, T }
@@ -858,31 +908,23 @@ func (e *Emitter) applyBranchNarrowing(test ast.Expression, branchIsTrue bool) {
 // via its printf conversion. Shared by the payload branch of a nullable
 // scalar's null-aware print.
 func (e *Emitter) emitConsoleScalarValue(val Value, fd int, term string) error {
-	if val.Ty.IR == "i1" {
-		strVal, err := e.emitValueToString(val)
-		if err != nil {
-			return err
-		}
-		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
-		return nil
+	// Always through emitValueToString — a raw printf `%g` renders NaN as
+	// "nan" and Infinity as "inf", where Node prints NaN / Infinity, and
+	// formats large/small doubles unlike JS Number#toString.
+	strVal, err := e.emitValueToString(val)
+	if err != nil {
+		return err
 	}
-	e.emitConsolePrintVal(val, e.internString(val.Ty.PrintfFmt()+term), fd)
+	e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 	return nil
 }
 
-// emitConsoleNullableScalar prints an un-narrowed nullable-scalar local: its
-// value when present, the literal `null` when absent — the real JS rendering,
-// which the pre-Option-A representation could not produce (a null read back as
-// the payload 0 and printed as "0"). A narrowed local never reaches here; it
-// prints its payload through the ordinary path instead.
-func (e *Emitter) emitConsoleNullableScalar(sym Symbol, fd int, term string) error {
-	present := e.loadNullableScalarPresent(sym.Ptr, sym.Ty)
-	payload := Value{Ref: e.loadNullableScalarPayload(sym.Ptr, sym.Ty), Ty: sym.Ty.withoutNullable()}
-	return e.emitConsolePresenceBranch(present, payload, absentLiteral(sym.Ty), fd, term)
-}
-
 // emitConsoleNullableScalarAgg prints a nullable-scalar aggregate *value* (a
-// T|null return/field value) the same null-aware way a boxed local prints.
+// T|null return/field value, or an un-narrowed nullable-scalar local read as
+// its aggregate by emitConsoleEvalArg): its value when present, the literal
+// `null`/`undefined` when absent — the real JS rendering, which the
+// pre-Option-A representation could not produce (a null read back as the
+// payload 0 and printed as "0").
 func (e *Emitter) emitConsoleNullableScalarAgg(val Value, fd int, term string) error {
 	present, payload := e.nullableScalarAggParts(val)
 	return e.emitConsolePresenceBranch(present, payload, absentLiteral(val.Ty), fd, term)

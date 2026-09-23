@@ -34,15 +34,19 @@ console.log(box(2))        // 2  (h and d default to 1)
 console.log(box(2, 3))     // 6  (d still defaults to 1)
 console.log(box(2, 3, 4))  // 24
 
-// An array-typed optional parameter's omitted value is an empty array (an array
-// aggregate has no spare "absent" state), so `.length` is safe with no narrowing.
+// An array-typed optional parameter's omitted value is `undefined`, as in
+// JavaScript: reading `.length` off it throws a TypeError, so narrow (or default)
+// before use.
 function total(nums?: number[]): number {
   let sum = 0
-  for (let i = 0; i < nums.length; i++) { sum += nums[i] }
+  const xs = nums ?? []
+  for (let i = 0; i < xs.length; i++) { sum += xs[i] }
   return sum
 }
 console.log(total())            // 0
 console.log(total([1, 2, 3]))   // 6
+function unguarded(nums?: number[]): number { return nums.length }
+try { unguarded() } catch (e) { console.log((e as Error).message) } // Cannot read properties of undefined (reading 'length')
 
 // Works identically on instance and static class methods.
 class Greeter {

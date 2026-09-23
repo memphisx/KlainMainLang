@@ -205,6 +205,12 @@ func (e *Emitter) emitLoopTaskStubs() {
 		e.emitGlobal("define void @__kml_cp_dispatch() {\nentry:\n  ret void\n}")
 		e.emitGlobal("define i64 @__kml_cp_next_timeout_ns() {\nentry:\n  ret i64 0\n}")
 	}
+	// dynamic-import island hooks likewise (TDD-00225).
+	if !e.usedDynImportWatch {
+		e.emitGlobal("define i1 @__kml_dynimport_keepalive() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define void @__kml_dynimport_dispatch() {\nentry:\n  ret void\n}")
+		e.emitGlobal("define i64 @__kml_dynimport_next_deadline_ns() {\nentry:\n  ret i64 0\n}")
+	}
 	// readline hooks likewise.
 	if !e.usedReadlineRuntime {
 		e.emitGlobal("define i1 @__kml_rl_keepalive() {\nentry:\n  ret i1 0\n}")
@@ -285,6 +291,19 @@ func (e *Emitter) ensureTaskRuntime() {
 	gcRestoreAfterSwap := ""
 	if e.isGCMode() {
 		gcRestoreAfterSwap = "\n  call void @__kml_task_gc_restore()"
+	}
+	// A task's stack block: libc malloc in manual/auto mode (lazily committed,
+	// never zeroed); under -mm=gc an anonymous mapping outside the collected
+	// heap that the shim registers as a root for its lifetime (gcshim.c) —
+	// not a GC_malloc'd block that is zeroed on allocation and scanned as one
+	// huge heap object on every collection.
+	stackAllocCall := "call ptr @malloc(i64 %stackBytes)"
+	stackFreeCall := "call void @free(ptr %stk)"
+	if e.isGCMode() {
+		e.emitGlobal("declare ptr @__kml_task_stack_alloc(i64)")
+		e.emitGlobal("declare void @__kml_task_stack_free(ptr, i64)")
+		stackAllocCall = "call ptr @__kml_task_stack_alloc(i64 %stackBytes)"
+		stackFreeCall = "call void @__kml_task_stack_free(ptr %stk, i64 %stksz)"
 	}
 
 	// @__kml_task_gc_restore: set GC_stackbottom back to the swapper's stack —
@@ -399,7 +418,7 @@ define ptr @__kml_spawn_task_ex(ptr %%fn, ptr %%args, ptr %%promiseSlot, i64 %%s
 entry:
   %%t = call ptr @malloc(i64 %d)
   %%ctx = call ptr @malloc(i64 %d)
-  %%stack = call ptr @malloc(i64 %%stackBytes)
+  %%stack = %s
   call void @getcontext(ptr %%ctx)
   %%ss_sp_p = getelementptr i8, ptr %%ctx, i64 %d
   store ptr %%stack, ptr %%ss_sp_p, align 8
@@ -476,12 +495,13 @@ __als_done:
   store ptr %%prev, ptr @__kml_current_task, align 8%s
   store ptr %%callerStk, ptr @__kml_cur_jmp_stk, align 8
   store i32 %%callerTop, ptr @__kml_jmp_top, align 4
+  call void @__kml_worker_abort_check()
   ; ran to completion without parking: its stack is already dead
   call void @__kml_task_reclaim(ptr %%t)
   ret ptr %%t
 }`,
 		taskStackBytes,
-		taskStructBytes, ctxSize,
+		taskStructBytes, ctxSize, stackAllocCall,
 		ssSpOff, ssSizeOff, ucLinkOff,
 		taskStructIR, taskStackSize,
 		taskStructIR, taskCtx, taskStructIR, taskStack, taskStructIR, taskPromiseSlot,
@@ -538,8 +558,7 @@ app:
 	// through @__kml_task_finish / @__kml_task_reject — so its fiber stack,
 	// context and jmpbuf stack are freed here. Without this every coroutine call
 	// kept its 256 KiB stack for the life of the process. The task struct itself
-	// stays: a promise's waiter field can still name a task that has since
-	// finished (a Promise.race loser settling late), and it is written through.
+	// is freed later, by @__kml_task_compact, once it has left the task array.
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_task_reclaim(ptr %%t) {
 entry:
@@ -556,7 +575,9 @@ rel:
   %%ctx_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   %%ctx = load ptr, ptr %%ctx_p, align 8
   call void @__kml_ctx_release(ptr %%ctx)
-  call void @free(ptr %%stk)
+  %%stksz_p = getelementptr %s, ptr %%t, i32 0, i32 %d
+  %%stksz = load i64, ptr %%stksz_p, align 8
+  %s
   call void @free(ptr %%ctx)
   %%js_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   %%js = load ptr, ptr %%js_p, align 8
@@ -567,7 +588,7 @@ rel:
   br label %%ret
 ret:
   ret void
-}`, taskStructIR, taskState, taskStructIR, taskStack, taskStructIR, taskCtx, taskStructIR, taskJmpStk))
+}`, taskStructIR, taskState, taskStructIR, taskStack, taskStructIR, taskCtx, taskStructIR, taskStackSize, stackFreeCall, taskStructIR, taskJmpStk))
 
 	// @__kml_task_compact(): drop finished tasks from the task array, in order, so
 	// the scheduler's scan stays proportional to the tasks that are alive rather
@@ -591,14 +612,21 @@ body:
   %%st_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   %%st = load i64, ptr %%st_p, align 8
   %%dead = icmp eq i64 %%st, 2
-  br i1 %%dead, label %%next, label %%keep
+  br i1 %%dead, label %%drop, label %%keep
+drop:
+  ; A done task's stack/context went in __kml_task_reclaim; nothing names the
+  ; struct any more (waiter registrations are undone on resume by
+  ; __kml_task_unwait, resume closures are consumed when they run), so the
+  ; struct itself goes here — the last per-call residue of a coroutine.
+  call void @free(ptr %%t)
+  br label %%next
 keep:
   %%wp = getelementptr ptr, ptr %%data, i64 %%w
   store ptr %%t, ptr %%wp, align 8
   %%w1 = add i64 %%w, 1
   br label %%next
 next:
-  %%wnext = phi i64 [ %%w, %%body ], [ %%w1, %%keep ]
+  %%wnext = phi i64 [ %%w, %%drop ], [ %%w1, %%keep ]
   %%inext = add i64 %%i, 1
   br label %%cond
 done:
@@ -768,6 +796,7 @@ resume:
   store ptr null, ptr @__kml_current_task, align 8%s
   store ptr %%rj_mainstk, ptr @__kml_cur_jmp_stk, align 8
   store i32 %%rj_maintop, ptr @__kml_jmp_top, align 4
+  call void @__kml_worker_abort_check()
   call void @__kml_task_reclaim(ptr %%t)
   br label %%next
 next:
@@ -1000,6 +1029,7 @@ wregdone:
   %%ao_top64 = zext i32 %%ao_top to i64
   store i64 %%ao_top64, ptr %%ao_sjt_p, align 8
   %%sw = call i32 @swapcontext(ptr %%ctx, ptr %%rc)%s
+  call void @__kml_task_unwait(ptr %%members, i64 %%count, ptr %%ct)
   br label %%scan
 }`, promiseStructIR, taskStructIR, taskPendingProm, promiseStructIR, taskStructIR, taskState, taskStructIR, taskResumerCtx,
 		taskStructIR, taskCtx, gcRestoreAfterSwap))
@@ -1113,9 +1143,43 @@ wregdone:
   %%ao_top64 = zext i32 %%ao_top to i64
   store i64 %%ao_top64, ptr %%ao_sjt_p, align 8
   %%sw = call i32 @swapcontext(ptr %%ctx, ptr %%rc)%s
+  call void @__kml_task_unwait(ptr %%members, i64 %%count, ptr %%ct)
   br label %%scan
 }`, promiseStructIR, taskStructIR, taskPendingProm, promiseStructIR, taskStructIR, taskState, taskStructIR, taskResumerCtx,
 		taskStructIR, taskCtx, gcRestoreAfterSwap))
+
+	// @__kml_task_unwait(ptr %members, i64 %count, ptr %task): drop %task from
+	// the waiter field of every member that still names it. A resumed
+	// await_any_of / await_first_fulfilled was woken by one member; the others
+	// would otherwise keep naming the task after it has finished — and
+	// __kml_task_finish / __kml_promise_settle write through that field when
+	// they settle, which is what kept a finished task's struct from ever being
+	// freed. With every registration undone on resume, the struct has no holder
+	// left once it is done, and __kml_task_compact frees it.
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_task_unwait(ptr %%members, i64 %%count, ptr %%task) {
+entry:
+  br label %%cond
+cond:
+  %%i = phi i64 [ 0, %%entry ], [ %%inext, %%next ]
+  %%go = icmp slt i64 %%i, %%count
+  br i1 %%go, label %%body, label %%done
+body:
+  %%mgep = getelementptr ptr, ptr %%members, i64 %%i
+  %%m = load ptr, ptr %%mgep, align 8
+  %%wp = getelementptr %s, ptr %%m, i32 0, i32 1
+  %%w = load ptr, ptr %%wp, align 8
+  %%mine = icmp eq ptr %%w, %%task
+  br i1 %%mine, label %%clear, label %%next
+clear:
+  store ptr null, ptr %%wp, align 8
+  br label %%next
+next:
+  %%inext = add i64 %%i, 1
+  br label %%cond
+done:
+  ret void
+}`, promiseStructIR))
 
 	// @__kml_task_run_all(): drive the scheduler until no task is still active —
 	// the program-exit drain for a task program (a top-level async call that was
@@ -1175,6 +1239,7 @@ entry:
   store ptr null, ptr @__kml_current_task, align 8%s
   store ptr %%mstk, ptr @__kml_cur_jmp_stk, align 8
   store i32 %%mtop, ptr @__kml_jmp_top, align 4
+  call void @__kml_worker_abort_check()
   call void @__kml_task_reclaim(ptr %%t)
   ret void
 }`, ctxSize, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, gcSetTaskStack, gcRestoreAfterSwap))

@@ -1163,7 +1163,13 @@ func URLPatternType() Type {
 // above. Uniqueness and === come from the struct's own pointer identity, not
 // from anything stored in the struct — see IsSymbol's doc comment.
 func SymbolType() Type {
-	ty := ObjectType([]Field{{Name: "description", Ty: TypePtr}})
+	// Field 0 is a hidden type-id word carrying symbolTypeIDFlag (ADR-01059):
+	// once a Symbol is boxed into `any` it is a kmlTagObject payload like any
+	// other struct, and the flag is what lets typeof / ToNumber / ToString /
+	// `=== "symbol"` narrowing tell it apart from a plain object at runtime —
+	// the same field-0 probe Errors use, on a different bit. Every allocation
+	// site (Symbol(), Symbol.for) stores it.
+	ty := ObjectType([]Field{{Name: "__kml_typeid", Ty: TypeI64}, {Name: "description", Ty: TypePtr}})
 	ty.IsSymbol = true
 	return ty
 }
@@ -1470,7 +1476,7 @@ const RegexHandleField = "__kml_regex_handle"
 // source/flags carry the original constructor arguments verbatim;
 // global/ignoreCase/multiline/dotAll are decomposed once at construction
 // (V1's supported flag set — see docs/tdd/TDD-00035.md's flag scope table;
-// u/y/d are deferred) so no method needs to re-parse the flags string;
+// u/d are deferred; `y` since ADR-01062) so no method needs to re-parse the flags string;
 // lastIndex is mutable, `g`-flag iteration state.
 func RegExpType() Type {
 	ty := ObjectType([]Field{
@@ -1481,6 +1487,7 @@ func RegExpType() Type {
 		{Name: "ignoreCase", Ty: TypeBool},
 		{Name: "multiline", Ty: TypeBool},
 		{Name: "dotAll", Ty: TypeBool},
+		{Name: "sticky", Ty: TypeBool},
 		{Name: "lastIndex", Ty: TypeI64},
 	})
 	ty.IsRegExp = true
@@ -2087,6 +2094,8 @@ func (t Type) VisibleFields() []Field {
 		fields = fields[skip:]
 	case t.IsError && len(fields) > 0:
 		fields = fields[1:]
+	case t.IsSymbol && len(fields) > 0:
+		fields = fields[1:] // the hidden type-id word (ADR-01059)
 	case t.IsRegExp && len(fields) > 0:
 		fields = fields[1:]
 	case t.IsEventSource && len(fields) > 1:
@@ -2555,6 +2564,11 @@ func (t Type) Align() int {
 func (t Type) zeroLiteral() string {
 	if t.Float {
 		return "0.0"
+	}
+	if t.IsDynamic && t.IR == "i64" {
+		// A NaN-box's "nothing yet" is `undefined`, not the word 0 (which also
+		// decodes as undefined today, but only by the immediate-range fallback).
+		return fmt.Sprintf("%d", nbUndefined)
 	}
 	if t.IR == "ptr" {
 		return "null"

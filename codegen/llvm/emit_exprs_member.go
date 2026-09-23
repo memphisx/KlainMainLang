@@ -768,6 +768,18 @@ func (e *Emitter) unwrapGlobalThis(expr ast.Expression) ast.Expression {
 		return expr
 	}
 	newObj := e.unwrapGlobalThis(mem.Object)
+	// `parentPort!.postMessage(v)` (ADR-01058): a non-null assertion on an
+	// ambient/virtual binding — one that is not a declared local, so its
+	// meaning lives in the by-name dispatch tables (`parentPort`, `process`,
+	// `self`, …) — is erased here, the way `globalThis.` is peeled. The
+	// identifier itself has no local type to strip nullability from; left in
+	// place it inferred as the bare-scalar default and `.postMessage` became
+	// "a number has no method". A `!` on a declared local keeps its own path.
+	if nn, ok := newObj.(*ast.NonNullExpression); ok {
+		if id, isID := nn.Arg.(*ast.Identifier); isID && !e.isShadowedByLocal(id.Name) {
+			newObj = id
+		}
+	}
 	if id, ok := newObj.(*ast.Identifier); ok && id.Name == "globalThis" && !e.isShadowedByLocal("globalThis") {
 		return ast.NewIdentifier(mem.Property, mem.GetPos())
 	}
@@ -1122,7 +1134,13 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 				return Value{Ref: e.internString("\r\n"), Ty: TypePtr}, nil
 			}
 			return Value{Ref: e.internString("\n"), Ty: TypePtr}, nil
+		case "devNull":
+			return Value{Ref: e.internString(osDevNull()), Ty: TypePtr}, nil
 		}
+	}
+	// Bare `process.env` (not a keyed read): the enumerable environment object.
+	if e.isProcessEnvExpr(ex) {
+		return e.emitProcessEnvValue()
 	}
 	// HttpRequest.body under streaming dispatch (TDD-00097 Stage 5b):
 	// Node's `req.url` (IncomingMessage, TDD-00131) is this request's path —

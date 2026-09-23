@@ -75,6 +75,44 @@
             "notes": [
               "`\"\\r\\n\"` on Windows, `\"\\n\"` on POSIX — matching Node, resolved as a compile-time constant baked to the build host ([TDD-00177](../tdd/TDD-00177.md) Stage 1), since this compiler targets the host it runs on rather than cross-compiling"
             ]
+          },
+          {
+            "feature": "`os.type()` / `os.release()` / `os.version()` / `os.machine()`",
+            "status": "implemented",
+            "notes": [
+              "POSIX `uname` fields; Windows `Windows_NT`, `RtlGetVersion`'s `major.minor.build` (unaffected by the manifest shim), the registry `ProductName` with libuv's `Windows 10` → `Windows 11` rewrite for build ≥ 22000, and `x86_64`/`arm64` from `GetNativeSystemInfo` — verified byte-identical to Node on Windows 11 ([ADR-01077](../adr/ADR-01077.md))"
+            ]
+          },
+          {
+            "feature": "`os.arch()` / `os.endianness()` / `os.devNull`",
+            "status": "implemented",
+            "notes": [
+              "Compile-time constants of the build host, like `process.arch`; `devNull` is `\\\\.\\nul` on Windows, `/dev/null` elsewhere ([ADR-01077](../adr/ADR-01077.md))"
+            ]
+          },
+          {
+            "feature": "`os.uptime()` / `os.loadavg()` / `os.availableParallelism()`",
+            "status": "implemented",
+            "notes": [
+              "libuv's sources: `CLOCK_BOOTTIME` (Linux) / `kern.boottime` (Darwin) / `GetTickCount64` (Windows) seconds as a double; `getloadavg` with Windows' `[0, 0, 0]`; the affinity-set CPU count on Linux, the online count elsewhere, `GetActiveProcessorCount` on Windows ([ADR-01077](../adr/ADR-01077.md))"
+            ]
+          },
+          {
+            "feature": "`os.userInfo()`",
+            "status": "implemented",
+            "notes": [
+              "`{ uid, gid, username, homedir, shell }` from the effective uid's passwd entry; Windows reports `uid`/`gid` `-1`, `GetUserNameW`, `os.homedir()` and `shell: null`, as Node does ([ADR-01077](../adr/ADR-01077.md)); a failed lookup throws"
+            ]
+          },
+          {
+            "feature": "`os.networkInterfaces()`",
+            "status": "implemented",
+            "notes": [
+              "An object keyed by interface name (a dynamic object — the keys exist only at run time), each an array of `{ address, netmask, family, mac, internal, cidr, scopeid }` records with `scopeid` on IPv6 entries only; `getifaddrs` (up+running interfaces, MAC from the link-layer entry) / `GetAdaptersAddresses` (operational adapters, `FriendlyName`, `OnLinkPrefixLength`); `cidr` is `null` for a non-contiguous netmask — verified byte-identical to Node's walk and JSON on Windows ([ADR-01077](../adr/ADR-01077.md))"
+            ],
+            "caveats": [
+              "Typed `any` rather than `NodeJS.Dict<NetworkInterfaceInfo[]>`: the entries read through the dynamic paths (`for…of`, `Object.keys`, destructuring), so array *methods* on a per-interface list (`.filter`, `.map`) are the D1 method-through-`any` residue"
+            ]
           }
         ]
       }

@@ -159,3 +159,15 @@ searchRe.exec("boo")
 console.log(searchRe.lastIndex)              // 2
 console.log("hello world".search(searchRe))  // 4
 console.log(searchRe.lastIndex)              // 2 — unchanged by search()
+
+// --- y (sticky): the match must start exactly at lastIndex ---
+const sticky = /foo/y
+console.log(sticky.sticky, sticky.test("barfoo"))   // true false — "foo" is at 3, not 0
+sticky.lastIndex = 3
+console.log(sticky.test("barfoo"), sticky.lastIndex) // true 6
+console.log(sticky.test("barfoo"), sticky.lastIndex) // false 0 — reset on failure
+// A sticky tokenizer: consecutive matches only, stops at the first gap.
+const tok = /\w+/y
+let tokens = ""
+while (tok.test("ab cd")) tokens += tok.lastIndex + ";"
+console.log(tokens)                                  // 2;

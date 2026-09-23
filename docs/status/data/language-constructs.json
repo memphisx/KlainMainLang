@@ -41,13 +41,15 @@
             "status": "implemented"
           },
           {
-            "feature": "`for…of` over arrays, strings, `Map`, `Set`, and a class implementing `next(): T \\| null`",
+            "feature": "`for…of` over arrays, strings, `Map`, `Set`, a bare `any`, and a class implementing `next(): T \\| null`",
             "status": "implemented",
             "caveats": [
               "A bare `for (const v of map)` iterates values (use `.keys()` for keys — [ADR-00011](../adr/ADR-00011.md)); the two-name pattern `for (const [k, v] of map)` decomposes entries ([ADR-00481](../adr/ADR-00481.md))",
-              "A string iterates per byte, not per Unicode code point — correct for ASCII/Latin-1, the same byte-string narrowing the rest of the string layer carries ([ADR-00535](../adr/ADR-00535.md))"
+              "A string iterates per byte, not per Unicode code point — correct for ASCII/Latin-1, the same byte-string narrowing the rest of the string layer carries ([ADR-00535](../adr/ADR-00535.md))",
+              "Over a bare `any`, each element is read through a numeric-string key (a per-element `sprintf` + dynamic get) — a direct per-tag element walk is the perf follow-up"
             ],
             "notes": [
+              "A bare `any` holding a D1 dynamic array or a boxed static array iterates by its runtime `length` (re-read each pass) with an `any` loop variable, destructuring patterns included; any other value throws Node's `TypeError: x is not iterable` ([ADR-01077](../adr/ADR-01077.md))",
               "The loop variable may be a destructuring pattern (`for (const [a, b] of pairs)` over an array-of-arrays, `for (const { x, y } of points)`), including nested patterns (`for (const [[a, b], c] of …)`) — see [ADR-00192](../adr/ADR-00192.md)/[ADR-00193](../adr/ADR-00193.md)/[TDD-00065](../tdd/TDD-00065.md) Stages 1–2",
               "Iterates arrays, a string (its characters, one per byte — [ADR-00535](../adr/ADR-00535.md)), `Map` (values), `Set` (elements), generators, a class implementing `next(): T \\| null` ([TDD-00009](../tdd/TDD-00009.md) Stage 1a, a compile-time structural check), **and the spec's real protocol**: a class or object literal with a `[Symbol.iterator]()` returning an iterator whose `next()` yields `{value, done}` — dispatched ahead of the structural shape when both exist ([ADR-00278](../adr/ADR-00278.md)/[ADR-00279](../adr/ADR-00279.md))",
               "A `next(): T \\| null` with a non-pointer scalar `T` returns a presence-flagged aggregate ([TDD-00064](../tdd/TDD-00064.md)/[ADR-00199](../adr/ADR-00199.md)), so a legitimately-yielded `0`/`false` does not end iteration; a pointer `T` keeps its null-pointer sentinel — see [ADR-00063](../adr/ADR-00063.md)"
@@ -96,6 +98,7 @@
             ],
             "notes": [
               "Single catch variable, or a destructured object pattern (`catch ({ message, name })`)",
+              "A local written inside the `try` body keeps that value in the `catch` and after it — every local touched in a `try`/`catch`/`finally` is pinned as escaped memory so the setjmp-based unwind can't let SSA promotion forward the pre-`try` value ([ADR-01057](../adr/ADR-01057.md))",
               "`finally` runs on an early `return`/`break`/`continue` (labeled or not), not only on fall-through — the return value is captured before it, a `return` in `finally` overrides, and nested finallys run innermost-first, matching JS ([ADR-00191](../adr/ADR-00191.md)). This holds inside an `async` function and a generator too, including a `finally` that itself `await`s ([ADR-00612](../adr/ADR-00612.md))"
             ]
           },
@@ -184,7 +187,10 @@
           },
           {
             "feature": "Arithmetic operators `+ - * / %`",
-            "status": "implemented"
+            "status": "implemented",
+            "notes": [
+              "Unary `+` is `ToNumber`: a string converts as `Number()` does (whitespace trimmed, `Infinity`, `0x`/`0o`/`0b`, junk → `NaN`), booleans/`null`/`undefined` convert, an object takes the `ToPrimitive` ladder, an array converts through its string form; a bigint or Symbol operand throws the spec `TypeError` ([ADR-01057](../adr/ADR-01057.md))"
+            ]
           },
           {
             "feature": "`**` (exponentiation, ES2016)",
@@ -207,10 +213,10 @@
             "feature": "Logical operators `&& \\|\\| !`",
             "status": "implemented",
             "caveats": [
-              "Under `-compat=js`, `&&`/`\\|\\|` are value-preserving only for **same-typed** operands; differently-typed operands (`0 \\|\\| \"x\"`) stay bool, since the value-preserving result would be a union this compiler can't represent ([ADR-00220](../adr/ADR-00220.md))"
+              "Under `-compat=js`, `&&`/`\\|\\|` are value-preserving for same-typed operands and for scalars of different kinds (`0 \\|\\| \"x\"` is the union `number \\| string`, [ADR-01054](../adr/ADR-01054.md)); an array, tuple, object or nullable-scalar operand mixed with another kind still degrades the result to a bool ([ADR-00220](../adr/ADR-00220.md))"
             ],
             "notes": [
-              "Result type is a bool under `-compat=strict` (default); `-compat=js` makes `&&`/`\\|\\|` value-preserving (`x \\|\\| \"default\"` yields the string) for same-typed operands — a `-compat`-governed behavior ([ADR-00186](../adr/ADR-00186.md)/[ADR-00220](../adr/ADR-00220.md)/[TDD-00075](../tdd/TDD-00075.md))",
+              "Result type is a bool under `-compat=strict` (default); `-compat=js` makes `&&`/`\\|\\|` value-preserving (`x \\|\\| \"default\"` yields the string; mixed scalar kinds yield their union) — a `-compat`-governed behavior ([ADR-00186](../adr/ADR-00186.md)/[ADR-00220](../adr/ADR-00220.md)/[TDD-00075](../tdd/TDD-00075.md))",
               "Genuinely short-circuiting in both modes — `&&` only evaluates its right operand when the left is truthy, `\\|\\|` only when the left is falsy, so `x && x.field` / `arr.length > 0 && arr[0]` don't run the right side down the guarded branch ([ADR-00186](../adr/ADR-00186.md))"
             ]
           },
@@ -326,14 +332,14 @@
             "status": "implemented",
             "caveats": [
               "Definite-assignment analysis is sound-not-complete: a typed `let` assigned only in a maybe-skipped loop or across correlated conditions still falls through to the `undefined`/zero default rather than raising `used before being assigned` ([TDD-00071](../tdd/TDD-00071.md) Stage 2/[ADR-00213](../adr/ADR-00213.md))",
-              "A top-level `const`/`let` still isn't readable from a named `function` only in the invariant's genuine edges — a `bigint`, an un-annotated call *through another top-level binding* (`const f = () => …; const x = f()` — its result type isn't known before `main()` runs), a `new Set([…])` typed from its initializer array, or an init depending on a runtime-local (a `{ …rest }` spread of a destructuring target); an arrow/closure still captures any of them ([TDD-00093](../tdd/TDD-00093.md))"
+              "A top-level `const`/`let` still isn't readable from a named `function` only in the invariant's genuine edges — a `bigint`, an un-annotated call *through another top-level binding* (`const f = () => …; const x = f()` — its result type isn't known before `main()` runs), a `new Set([…])` typed from its initializer array, or an init depending on a runtime-local (a `{ …rest }` spread of a destructuring target); an arrow/closure still captures any of them ([TDD-00093](../tdd/TDD-00093.md)). An annotated `any`/`unknown`/union binding is a module global like the rest ([ADR-01059](../adr/ADR-01059.md))"
             ],
             "notes": [
               "A top-level `const`/`let`/`var` is a **module global** — readable and writable from any named `function`, not only a capturing arrow — whenever its type is determinable before `main()` runs: a scalar/string/array/object/`Map`/`Set`, an **un-annotated call** to a named function — any return type, scalars included — or to a builtin with a scalar/string result (`const cfg = loadConfig()`, `const t0 = Date.now()`, `const iv = setInterval(tick, 50)`, [ADR-01023](../adr/ADR-01023.md)), or an initializer referencing an **earlier global** (`const b = a`). A mutation through it (a reassignment, `arr.push`, `obj.field =`, `map.set`) is seen everywhere, including by a capturing closure ([ADR-00273](../adr/ADR-00273.md)/[TDD-00093](../tdd/TDD-00093.md))",
               "`var` is function-scoped (leaks its enclosing block, and re-declarable with the same name); `let`/`const` are block-scoped; `const` rebinding is rejected",
               "Block-scoped `let`/`const` redeclaration is a compile error; the top-level duplicate check is kind-aware (`var x; var x` allowed, `let x; let x` / `let x; var x` rejected) and the cross-block `let x; { var x }` intersection is caught too — see [TDD-00070](../tdd/TDD-00070.md)/[ADR-00210](../adr/ADR-00210.md)/[ADR-00211](../adr/ADR-00211.md)",
               "A `let`/`const` read before its declaration is a distinct `cannot access 'x' before initialization` TDZ error (including the block-shadowing form) — [TDD-00071](../tdd/TDD-00071.md) Stage 1/[ADR-00212](../adr/ADR-00212.md)",
-              "A typed `let` read before assignment is a `used before being assigned` error for the common cases; `var` is exempt — hoisted and zero/`undefined`-initialized, no TDZ ([TDD-00071](../tdd/TDD-00071.md) Stage 2/[ADR-00213](../adr/ADR-00213.md)/[ADR-00454](../adr/ADR-00454.md))"
+              "A typed `let` read before assignment is a `used before being assigned` error for the common cases; `var` is exempt — hoisted, no TDZ, and a `var` whose declaration can be skipped on the way to a read (`if (c) { var r = 1 } use(r)`, dead code after a `break`) reads a real `undefined`, typed `T | undefined` at run time while tsc keeps the plain `T` ([TDD-00071](../tdd/TDD-00071.md) Stage 2/[ADR-00213](../adr/ADR-00213.md)/[ADR-00454](../adr/ADR-00454.md)/[ADR-01057](../adr/ADR-01057.md))"
             ]
           },
           {
@@ -445,7 +451,7 @@
               "An omitted array parameter (`xs?: T[]`) is a real `undefined` as well — `xs === undefined`, `xs?.length`, `xs ?? d`, and the `TypeError` on an un-narrowed use ([ADR-01041](../adr/ADR-01041.md))"
             ],
             "caveats": [
-              "An un-narrowed optional scalar is still lenient in arithmetic (`emitIdent` unwraps the payload before the operator, so `a + b` on an absent `b` reads `0` rather than erroring — the same residual as any un-narrowed nullable local)"
+              "In strict mode an un-narrowed optional scalar is still lenient in arithmetic (`emitIdent` unwraps the payload before the operator, so `a + b` on an absent `b` reads `0` rather than tsc's `possibly undefined` error — the same residual as any un-narrowed nullable local); under `-compat=js` the absent operand is `NaN`, as `ToNumber(undefined)` ([ADR-01070](../adr/ADR-01070.md))"
             ]
           },
           {
@@ -674,11 +680,12 @@
             "feature": "Interfaces (structural)",
             "status": "implemented",
             "caveats": [
-              "An optional **tuple** field stays bare: an omitted `pair?: [number, string]` prints `undefined` but `o.pair === undefined` is `false` ([ADR-00246](../adr/ADR-00246.md)). An optional *array* field is a real `undefined` when omitted ([ADR-01041](../adr/ADR-01041.md))"
+              "An optional field that is also nullable (`n?: T \\| null`) has one absent state: an explicit `null` and an omitted field are the same null pointer, so `console.log`/`JSON.stringify`/`Object.keys`/`in` treat `{ n: null }` as omitted (Node keeps the key)"
             ],
             "notes": [
               "Heap-allocated objects",
-              "An optional field (`y?: T`) is a real `T \\| undefined` ([TDD-00187](../tdd/TDD-00187.md) Stage 2, [ADR-00779](../adr/ADR-00779.md)): an omitted field reads back `undefined` (never a stand-in zero), a written one is present; strict mode gates bare-`T` use, `-compat=js` auto-widens. Class `tag?: T` fields work the same way"
+              "An optional field (`y?: T`) is a real `T \\| undefined` ([TDD-00187](../tdd/TDD-00187.md) Stage 2, [ADR-00779](../adr/ADR-00779.md)): an omitted field reads back `undefined` (never a stand-in zero), a written one is present; strict mode gates bare-`T` use, `-compat=js` auto-widens. Class `tag?: T` fields work the same way. An optional *array* field ([ADR-01041](../adr/ADR-01041.md)) and an optional *tuple* field ([ADR-01063](../adr/ADR-01063.md)) are real `undefined` when omitted too",
+              "An omitted optional field has **no key**: `console.log(o)` omits it, `Object.keys(o)` leaves it out, and `\"k\" in o` / `hasOwnProperty` are runtime presence tests — as in Node ([ADR-01063](../adr/ADR-01063.md))"
             ]
           },
           {

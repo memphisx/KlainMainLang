@@ -1101,6 +1101,30 @@ char *__kml_path_win32_to_file_url(const char *filepath, const char *resolved, c
     return p;
 }
 
+/* fileURLToPath's win32 half without libcurl (ADR-01079): a Linux/macOS
+ * libcurl refuses a drive letter in a file URL (CURLUE_BAD_FILE_URL), so the
+ * `{ windows: true }` flavor on those hosts parses here. `url` has had its
+ * host split off already. Returns the still-encoded pathname (up to `?`/`#`,
+ * `\` normalized to `/` as the WHATWG file-URL parser does, a rooting `/`
+ * added when the path is bare), or NULL when the scheme is not `file:`
+ * (case-insensitively, as the parser lowercases it). */
+char *__kml_path_win32_file_url_pathname(const char *url) {
+    static const char scheme[] = "file:";
+    for (int i = 0; scheme[i]; i++) {
+        int c = url[i];
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if (c != scheme[i]) return NULL;
+    }
+    const char *p = url + 5;
+    if (p[0] == '/' && p[1] == '/') p += 2; /* the (now empty) authority */
+    const char *end = p;
+    while (*end && *end != '?' && *end != '#') end++;
+    sb_t b; sb_init(&b);
+    if (*p != '/' && *p != '\\') sb_append_ch(&b, '/');
+    for (const char *q = p; q < end; q++) sb_append_ch(&b, *q == '\\' ? '/' : *q);
+    return sb_finish(&b);
+}
+
 /* libcurl rejects a `file:` URL whose host is anything but empty/localhost
  * (CURLUE_BAD_FILE_URL), but Node's win32 fileURLToPath maps such a host to a
  * UNC server. Split the host off `file://server/share/p` before curl parses

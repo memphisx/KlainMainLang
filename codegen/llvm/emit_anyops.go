@@ -32,13 +32,19 @@ func (e *Emitter) ensureAnyOps() {
 	}
 	e.usedAnyOps = true
 	e.ensureNanBox()
-	e.ensureStrtod()
 	e.ensureStrHeaderRuntime()
+	e.ensureToNumber()
+	e.ensureNullDerefThrow()
+	symMsg := e.internString("Cannot convert a Symbol value to a number")
 	e.emitGlobal(`
 ; JS ToNumber over a NaN-boxed word. Numbers decode; true/false -> 1/0;
-; null -> 0; undefined -> NaN; a string parses fully or yields NaN (empty/
-; whitespace-only -> 0); a bare heap reference -> NaN (an object operand is
-; ToPrimitive'd at the operator site before reaching here, TDD-00201 Stage 4).
+; null -> 0; undefined -> NaN; a string goes through the same StringToNumber
+; as Number(s) (@__kml_to_number: whitespace trimmed, Infinity, 0x/0o/0b,
+; junk -> NaN — strtod alone took "inf" and rejected "  Infinity  ",
+; ADR-01057); a boxed Symbol (an object whose hidden field 0 carries
+; symbolTypeIDFlag, ADR-01059) throws the spec's TypeError; any other bare
+; heap reference -> NaN (an object operand is ToPrimitive'd at the operator
+; site before reaching here, TDD-00201 Stage 4).
 define double @__kml_any_tonum(i64 %v) {
 entry:
   %isnum = icmp uge i64 %v, 562949953421312
@@ -63,23 +69,24 @@ one:
 ptr:
   %kind = and i64 %v, 7
   %isstr = icmp eq i64 %kind, 0
-  br i1 %isstr, label %str, label %retnan
+  br i1 %isstr, label %str, label %notstr
 str:
   %s = inttoptr i64 %v to ptr
-  %len = call i64 @__kml_str_len(ptr %s)
-  %empty = icmp eq i64 %len, 0
-  br i1 %empty, label %zero, label %parse
-parse:
-  %endp = alloca ptr, align 8
-  %pv = call double @strtod(ptr %s, ptr %endp)
-  %end = load ptr, ptr %endp, align 8
-  %si = ptrtoint ptr %s to i64
-  %ei = ptrtoint ptr %end to i64
-  %consumed = sub i64 %ei, %si
-  %full = icmp eq i64 %consumed, %len
-  br i1 %full, label %ok, label %retnan
-ok:
+  %pv = call double @__kml_to_number(ptr %s)
   ret double %pv
+notstr:
+  %isobj = icmp eq i64 %kind, 1
+  br i1 %isobj, label %obj, label %retnan
+obj:
+  %opay = and i64 %v, -8
+  %optr = inttoptr i64 %opay to ptr
+  %f0 = load i64, ptr %optr, align 8
+  %symbit = and i64 %f0, ` + fmt.Sprintf("%d", symbolTypeIDFlag) + `
+  %issym = icmp ne i64 %symbit, 0
+  br i1 %issym, label %symthrow, label %retnan
+symthrow:
+  call void @__kml_throw_nullderef(ptr ` + symMsg + `)
+  unreachable
 retnan:
   ret double 0x7FF8000000000000
 }

@@ -18,6 +18,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"strings"
 )
 
 // emitRejectCallback emits a `.catch`/onRejected callback, hinting an
@@ -396,6 +397,18 @@ func (e *Emitter) emitFetchHandleToPendingPromise(slotRef string) Value {
 // promise's `%v0` i64 bits, and the argument-type string for the callback call.
 // For a void source there is no argument.
 func thenValLoadIR(ty Type) (load, argIR string) {
+	// A nullable scalar (`T | undefined`) travels as payload bits in v0 and the
+	// presence bit in v1 (storePromiseValue's convention, ADR-01065); the
+	// callback takes the `{ i1, T }` aggregate.
+	if isNullableScalar(ty) {
+		base := ty.withoutNullable()
+		pl, _ := thenValLoadIR(base)
+		pl = strings.Replace(pl, "%val", "%valpl", 1)
+		agg := nullableScalarStorageIR(ty)
+		return pl + "  %valpr = trunc i64 %v1 to i1\n" +
+			"  %val0 = insertvalue " + agg + " undef, i1 %valpr, 0\n" +
+			"  %val = insertvalue " + agg + " %val0, " + base.IR + " %valpl, 1\n", agg
+	}
 	switch ty.IR {
 	case "void", "":
 		return "", ""
@@ -435,6 +448,22 @@ func thenStoreResultIR(retTy Type, sfx string) (produce func(callExpr string) st
 				"  store i64 %rvpi" + sfx + ", ptr %qv0" + sfx + ", align 8\n" +
 				"  %qv1" + sfx + " = getelementptr " + promiseStructIR + ", ptr %q, i32 0, i32 3\n" +
 				"  store i64 %rvl" + sfx + ", ptr %qv1" + sfx + ", align 8\n" + settle
+	}
+	// A nullable-scalar result: payload bits → v0, presence → v1 (ADR-01065).
+	if isNullableScalar(retTy) {
+		base := retTy.withoutNullable()
+		agg := nullableScalarStorageIR(retTy)
+		_, baseStore := thenStoreResultIR(base, sfx)
+		// baseStore converts `%rv<sfx>` (a bare T) into v0 and settles; feed it
+		// the extracted payload under that name and add the presence word.
+		return func(callExpr string) string {
+				return "  %rvagg" + sfx + " = " + callExpr + "\n" +
+					"  %rvpr" + sfx + " = extractvalue " + agg + " %rvagg" + sfx + ", 0\n" +
+					"  %rv" + sfx + " = extractvalue " + agg + " %rvagg" + sfx + ", 1\n"
+			},
+			"  %rvpri" + sfx + " = zext i1 %rvpr" + sfx + " to i64\n" +
+				"  %qv1n" + sfx + " = getelementptr " + promiseStructIR + ", ptr %q, i32 0, i32 3\n" +
+				"  store i64 %rvpri" + sfx + ", ptr %qv1n" + sfx + ", align 8\n" + baseStore
 	}
 	switch retTy.IR {
 	case "void", "":
@@ -617,6 +646,9 @@ func thenCallRetIR(retTy Type) string {
 		// An array is returned by the header-pointer ABI (`ret ptr`, TDD-00213
 		// Stage 3), not the {ptr,i64} aggregate.
 		return "ptr"
+	}
+	if isNullableScalar(retTy) {
+		return nullableScalarStorageIR(retTy)
 	}
 	return retTy.IR
 }

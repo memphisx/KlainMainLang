@@ -50,6 +50,8 @@ func errnoCodePairs() []errnoCodePair {
 		// Async net.connect failure errnos (ADR-01021: socket 'error' event .code).
 		{int(syscall.ETIMEDOUT), "ETIMEDOUT"}, {int(syscall.EHOSTUNREACH), "EHOSTUNREACH"},
 		{int(syscall.ENETUNREACH), "ENETUNREACH"}, {int(syscall.ECONNABORTED), "ECONNABORTED"},
+		// spawnSync's maxBuffer overrun (ADR-01080).
+		{int(syscall.ENOBUFS), "ENOBUFS"},
 	}
 }
 
@@ -2144,6 +2146,56 @@ fail:
 ok:
   ret void
 }`, fdDesc, e.internString("fsync"), fdDesc, e.internString("ftruncate")))
+}
+
+// ensureFsFchmod declares __kml_fs_fchmod(fd, mode): fchmod(2) (the Windows
+// shim's FileBasicInfo read-only-bit form), throwing the fd-shaped fs error.
+func (e *Emitter) ensureFsFchmod() {
+	if e.usedFsFchmod {
+		return
+	}
+	e.usedFsFchmod = true
+	e.ensureFsThrow()
+	e.emitGlobal("declare i32 @fchmod(i32 noundef, i32 noundef)")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_fs_fchmod(i64 %%fd, i64 %%mode) {
+entry:
+  %%f32 = trunc i64 %%fd to i32
+  %%m32 = trunc i64 %%mode to i32
+  %%r = call i32 @fchmod(i32 %%f32, i32 %%m32)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr null)
+  unreachable
+ok:
+  ret void
+}`, e.internString("fd operation failed"), e.internString("fchmod")))
+}
+
+// ensureFsStatfs declares __kml_fs_statfs_checked(path, out): the osinfo
+// sidecar's statfs (statfs(2) / GetDiskFreeSpaceW) with the path-shaped fs
+// error on failure (Node: `ENOENT: no such file or directory, statfs '<p>'`).
+func (e *Emitter) ensureFsStatfs() {
+	if e.usedFsStatfs {
+		return
+	}
+	e.usedFsStatfs = true
+	e.ensureFsThrow()
+	e.ensureOSInfo()
+	e.emitGlobal("declare i32 @__kml_fs_statfs(ptr, ptr)")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_fs_statfs_checked(ptr %%path, ptr %%out) {
+entry:
+  %%r = call i32 @__kml_fs_statfs(ptr %%path, ptr %%out)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
+  unreachable
+ok:
+  ret void
+}`, e.internString("cannot statfs path"), e.internString("statfs")))
 }
 
 // linuxErrnoPairs is the errno→code table for Windows, where the shim sets

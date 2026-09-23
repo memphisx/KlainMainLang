@@ -118,6 +118,19 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if e.UsesDynJSON() {
 		out = append(out, CSource{"dynjson", DynJSONSource(), nil, nil, ""})
 	}
+	if e.UsesCasemap() {
+		// Unicode case mapping for toUpperCase/toLowerCase. Tables + code,
+		// libc only.
+		out = append(out, CSource{"casemap", CasemapSource(), nil, nil, ""})
+	}
+	if e.UsesInspectReduce() {
+		out = append(out, CSource{"inspect", InspectReduceSource(), nil, nil, ""})
+	}
+	if e.UsesOSInfo() {
+		// os.type/release/version/machine/uptime/loadavg/userInfo/
+		// availableParallelism/networkInterfaces + process.env enumeration.
+		out = append(out, CSource{"osinfo", OSInfoSource(), nil, OSInfoLibs(), ""})
+	}
 	if e.UsesURLPattern() {
 		out = append(out, CSource{"urlpattern", URLPatternSource(), nil, nil, ""})
 	}

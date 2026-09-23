@@ -58,3 +58,17 @@ console.log(typed.size); // 1 (both "x" and "y" have length 1)
 // An empty array argument is just an empty set — same as the no-argument form.
 const fromEmpty = new Set<number>([]);
 console.log(fromEmpty.size); // 0
+
+// ── bare new Set(): the element type comes from its .add/.has uses ─────────
+// (or from a `Set<T>` annotation), so a number set stays a number set and
+// NaN is SameValueZero-equal to itself, as in JS.
+var bare = new Set();
+console.log(bare.has(NaN)); // false
+bare.add(NaN);
+bare.add(NaN);
+bare.add(1.5);
+console.log(bare.has(NaN), bare.has(1.5), bare.size); // true true 2
+
+const annotated: Set<number> = new Set();
+annotated.add(2.5);
+console.log(annotated.has(2.5), annotated.has(2)); // true false

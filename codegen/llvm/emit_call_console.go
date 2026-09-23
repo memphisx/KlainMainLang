@@ -54,16 +54,56 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 	if lit, ok := args[0].(*ast.StringLiteral); ok {
 		return e.emitConsoleFormatLine(lit.Value, args, fd)
 	}
-	for i, arg := range args {
+	// Every argument is evaluated before anything is printed (Node evaluates
+	// the argument list, then formats it): a side effect in a later argument —
+	// `console.log(a, f())` with f logging — must not land mid-line.
+	vals, err := e.emitConsoleEvalArgs(args)
+	if err != nil {
+		return Value{}, err
+	}
+	for i, val := range vals {
 		term := "\n"
 		if i < len(args)-1 {
 			term = " "
 		}
-		if err := e.emitConsolePrintArgToken(arg, fd, term); err != nil {
+		if err := e.emitConsolePrintValueToken(val, fd, term); err != nil {
 			return Value{}, err
 		}
 	}
 	return Value{Ty: TypeVoid}, nil
+}
+
+// emitConsoleEvalArgs evaluates every console.* argument, in order, into the
+// value emitConsolePrintValueToken prints — the evaluation half of
+// emitConsolePrintArgToken, split off so a whole argument list can be
+// evaluated before its first token is printed.
+func (e *Emitter) emitConsoleEvalArgs(args []ast.Expression) ([]Value, error) {
+	vals := make([]Value, 0, len(args))
+	for _, arg := range args {
+		val, err := e.emitConsoleEvalArg(arg)
+		if err != nil {
+			return nil, err
+		}
+		vals = append(vals, val)
+	}
+	return vals, nil
+}
+
+func (e *Emitter) emitConsoleEvalArg(arg ast.Expression) (Value, error) {
+	// An un-narrowed nullable-scalar local prints its value or the literal
+	// `null`/`undefined` (TDD-00064 Stage 2), rather than the payload 0 the bare
+	// representation used to surface for a null — read as its aggregate.
+	val, err := e.emitExprKeepNullable(arg)
+	if err != nil {
+		return Value{}, err
+	}
+	// A call that returns nothing has run for its effects; its value is
+	// `undefined`, and Node prints it (`console.log(arr.forEach(f))`). Printing
+	// no token at all also dropped the separator / line ending that goes with it.
+	if val.Ty.IR == "void" {
+		val = Value{Ref: "null", Ty: TypeUndefined}
+	}
+	return val, nil
 }
 
 // emitConsoleFormatLine renders a console.* line whose first argument is a
@@ -150,11 +190,16 @@ func (e *Emitter) emitConsoleFormatLine(f string, args []ast.Expression, fd int)
 		return Value{Ty: TypeVoid}, nil
 	}
 	// Substituted prefix, no line-ending yet; each leftover argument follows a
-	// separator space and renders with the normal per-token dispatch.
+	// separator space and renders with the normal per-token dispatch. All are
+	// evaluated before the line starts (see emitConsolePrint).
+	vals, err := e.emitConsoleEvalArgs(remaining)
+	if err != nil {
+		return Value{}, err
+	}
 	e.emitConsolePrintVal(acc, e.internString("%s"), fd)
-	for _, arg := range remaining {
+	for _, val := range vals {
 		e.emitConsolePrintVal(Value{Ref: e.internString(" "), Ty: TypePtr}, e.internString("%s"), fd)
-		if err := e.emitConsolePrintArgToken(arg, fd, ""); err != nil {
+		if err := e.emitConsolePrintValueToken(val, fd, ""); err != nil {
 			return Value{}, err
 		}
 	}
@@ -167,22 +212,9 @@ func (e *Emitter) emitConsoleFormatLine(f string, args []ast.Expression, fd int)
 // so the runtime-separator spread path (emitConsolePrintSpread) can reuse the
 // exact same per-argument type dispatch.
 func (e *Emitter) emitConsolePrintArgToken(arg ast.Expression, fd int, term string) error {
-	// An un-narrowed nullable-scalar local prints its value or the literal
-	// `null` (TDD-00064 Stage 2), rather than the payload 0 the bare
-	// representation used to surface for a null. A narrowed local is known
-	// present and falls through to the ordinary path below.
-	if sym, ok := e.nullableScalarLValue(arg); ok && !sym.NarrowedNonNull {
-		return e.emitConsoleNullableScalar(sym, fd, term)
-	}
-	val, err := e.emitExpr(arg)
+	val, err := e.emitConsoleEvalArg(arg)
 	if err != nil {
 		return err
-	}
-	// A call that returns nothing has run for its effects; its value is
-	// `undefined`, and Node prints it (`console.log(arr.forEach(f))`). Printing
-	// no token at all also dropped the separator / line ending that goes with it.
-	if val.Ty.IR == "void" {
-		val = Value{Ref: "null", Ty: TypeUndefined}
 	}
 	return e.emitConsolePrintValueToken(val, fd, term)
 }
@@ -257,11 +289,20 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 		return nil
 	}
-	// A tuple prints as its comma-joined elements (TDD-00066) — checked
-	// before the array rejection, since a tuple is a fixed-shape value with
-	// a well-defined rendering, unlike a general homogeneous array.
+	// A heap tuple prints like an array, `[ 1, 'a' ]` (util.inspect; ADR-01063
+	// — it was the `1,a` String() join before), an absent one its keyword; a
+	// by-value tuple keeps the join (its aggregate has no inspect path).
 	if val.Ty.IsTuple {
-		strVal, err := e.emitValueToString(val)
+		var strVal Value
+		var err error
+		switch {
+		case val.Ty.TupleByVal:
+			strVal, err = e.emitValueToString(val)
+		case val.Ty.Nullable || val.Ty.IsNull:
+			strVal, err = e.emitInspectNullablePtr(val, func(b Value) (Value, error) { return e.emitInspectTuple(b, 0) })
+		default:
+			strVal, err = e.emitInspectTuple(val, 0)
+		}
 		if err != nil {
 			return err
 		}
@@ -372,24 +413,28 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 			return err
 		}
 		if val.Ty.Float {
-			// console.log(-0) displays `-0` (Node's util.inspect), even
-			// though String(-0) — what emitValueToString computes — is
-			// "0". Detected by exact bit pattern (only -0.0 has just the
-			// sign bit set), so no other value pays for the check.
-			f64 := e.coerce(val, TypeF64)
-			bits := e.freshReg()
-			isNegZero := e.freshReg()
-			sel := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", bits, f64.Ref))
-			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, -9223372036854775808", isNegZero, bits))
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, isNegZero, e.internString("-0"), strVal.Ref))
-			strVal = Value{Ref: sel, Ty: TypePtr}
+			strVal = e.inspectNegZero(val, strVal)
 		}
 		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 		return nil
 	}
 	e.emitConsolePrintVal(val, e.internString(val.Ty.PrintfFmt()+term), fd)
 	return nil
+}
+
+// inspectNegZero makes a float's inspect rendering `-0` for negative zero:
+// util.inspect shows it (top level and inside containers alike), even though
+// String(-0) — what emitValueToString computes — is "0". Detected by exact
+// bit pattern (only -0.0 has just the sign bit set), so no other value pays.
+func (e *Emitter) inspectNegZero(val Value, strVal Value) Value {
+	f64 := e.coerce(val, TypeF64)
+	bits := e.freshReg()
+	isNegZero := e.freshReg()
+	sel := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", bits, f64.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, -9223372036854775808", isNegZero, bits))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, isNegZero, e.internString("-0"), strVal.Ref))
+	return Value{Ref: sel, Ty: TypePtr}
 }
 
 // emitConsolePrintSpread renders console.* output when the argument list holds

@@ -211,6 +211,16 @@
             ]
           },
           {
+            "feature": "`process.env` as a value (`Object.keys`/`values`/`entries`, `for…in`, `{ ...process.env }`, `JSON.stringify`, `const env = process.env`)",
+            "status": "implemented",
+            "notes": [
+              "The live environment block as a dynamic object — a copy of `environ` on POSIX, `GetEnvironmentStringsW` on Windows with the hidden `=X:` per-drive entries skipped and key case kept — so every enumeration form works and every value is a string ([ADR-01077](../adr/ADR-01077.md))"
+            ],
+            "caveats": [
+              "The object is a snapshot taken when the bare `process.env` expression is evaluated: keyed reads/writes (`process.env.X`) stay live, but a write through an alias (`const env = process.env; env.X = '1'`) lands in the copy, not the environment — Node's object is a live proxy"
+            ]
+          },
+          {
             "feature": "`process.on('SIGINT'/'SIGTERM'/'SIGWINCH'/'SIGBREAK', handler)` (signal handlers)",
             "status": "implemented",
             "caveats": [
@@ -299,6 +309,13 @@
             "caveats": []
           },
           {
+            "feature": "`process.umask([mask])`",
+            "status": "implemented",
+            "notes": [
+              "No argument reads the mask the way libuv does (set 0, restore); with one it sets it and returns the previous. POSIX `umask(2)` — a file created afterwards carries the mask; on Windows the CRT's `_umask`, which Node's own answer is too (`0` by default, and it never affects a created file's attributes) ([ADR-01078](../adr/ADR-01078.md))"
+            ]
+          },
+          {
             "feature": "`process.stdin` (streamed reads, not just `readLineSync()`)",
             "status": "implemented",
             "caveats": [
@@ -329,8 +346,8 @@
             "caveats": [
               "The listener callbacks fire synchronously from the event loop's dispatch, not deferred through the microtask queue (`process.nextTick` — see the row above)",
               "One listener per event, an arrow/function-expression literal only (the same posture as `Worker`); no `removeListener`",
-              "Only `spawn` takes an options object; `exec`/`execFile` take no options",
-              "`shell` must be `true` (the command as one string); a shell *path*, a dynamic value, or `shell: true` with an args array are clean rejections",
+              "`shell` must be a literal `true` or a literal shell path (the command as one string); a dynamic value, or a shell with an args array, are clean rejections",
+              "The `exec`/`execFile` callback Error's `code` is null — Node's is the numeric exit code, which the string-typed `code` slot cannot carry; `killed`/`signal` are on it, `cmd` is not",
               "`env` must be an object literal of string values (fully replaces the child env, Node's non-merging semantics)",
               "`stdio` fd numbers, `'ipc'`, and streams are clean rejections (only `'pipe'`/`'inherit'`/`'ignore'`, as a string or a 3-element array)",
               "`timeout`'s `killSignal` must be a literal name/number",
@@ -345,6 +362,7 @@
               "On Windows the program is resolved as libuv does — against the **child's** `cwd` and the **child's** `PATH` (so a custom `env.PATH` redirects the lookup), trying the name, then `.com`, then `.exe` — and a custom `env` reaches the child sorted, de-duplicated case-insensitively (first spelling wins) and with the variables Windows programs cannot start without (`SystemRoot`, `PATH`, `TEMP`, `USERPROFILE`, …) carried over when omitted ([ADR-01033](../adr/ADR-01033.md))",
               "`exec`/`execSync` pass the command line to the shell **verbatim** (embedded quotes survive), matching Node; on Windows a `.bat`/`.cmd` spawned *without* a shell is refused (spawn `'error'`, `EINVAL`) rather than run through an implicit `cmd.exe`, closing the CVE-2024-27980 argument-injection path ([ADR-00740](../adr/ADR-00740.md)/[ADR-00754](../adr/ADR-00754.md))",
               "The `'error'` Error carries `.message` (`spawn <reason>`), `.code` (`ENOENT` for a missing command) and `.errno` (negative libuv-style errno, `-2` on POSIX) ([ADR-00784](../adr/ADR-00784.md))",
+              "`exec(cmd[, options], cb)` / `execFile(file[, args][, options], cb)` take the spawn options plus `maxBuffer` (Node's 1 MiB default): past it the child is killed with `killSignal` and the callback's error is Node's `RangeError [ERR_CHILD_PROCESS_STDIO_MAXBUFFER]: stdout maxBuffer length exceeded`; a timeout/kill error carries `killed: true` and the `signal` name; an `(err: any)` callback parameter sees a real boxed Error (`err?.code`, `err?.message`), as does every closure whose `any` parameter is called with a concrete value ([ADR-01080](../adr/ADR-01080.md))",
               "`spawn` streams (`child.stdout`/`stderr` `'data'`/`'end'`, `child.on('close'/'exit'/'error')`, `child.stdin.write`/`.end`, `child.pid`, `child.kill`, `child.unref()`/`ref()` — the loop-keepalive opt-out, [ADR-00767](../adr/ADR-00767.md)); `exec` runs via `/bin/sh -c` and `execFile` execvp's directly, both buffering into a single `(err, stdout, stderr)` callback",
               "A spawn that fails to start (a missing command → `ENOENT`) emits the `'error'` event with an `Error` and **not** `'exit'` — detected via a close-on-exec status pipe on POSIX and `CreateProcessW`'s failure on Windows ([ADR-00754](../adr/ADR-00754.md))",
               "The `'exit'`/`'close'` exit `code` is the child's real width: on Windows the full 32-bit value (`cmd /c exit 300` → `300`, an access violation → `3221225477`), on POSIX the 8-bit wait-status field (`300 & 0xff = 44`, as Node also reports there) ([ADR-00759](../adr/ADR-00759.md))",
@@ -370,13 +388,15 @@
             "feature": "`child_process.spawnSync()` / `.execSync()` / `.execFileSync()` (blocking)",
             "status": "implemented",
             "caveats": [
-              "Options object supports `{ cwd, encoding: 'utf8' }` only (no `env`/`timeout`/`input`/`shell`/`stdio` — clean rejections); results are strings (the `encoding: 'utf8'` shape), not Buffers",
-              "`spawnSync`'s result carries `status`/`stdout`/`stderr`/`pid` only — no `signal`/`error`/`output` fields (a signal death folds into `status` as `128+signal`)",
-              "`execSync`/`execFileSync` throw `Command failed: <command>` on a non-zero exit status ([ADR-00753](../adr/ADR-00753.md)), but the thrown plain `Error` does not yet carry the `.status`/`.stdout`/`.stderr` ExecException properties — use `spawnSync().status` when the exit code or captured output of a failing command is needed"
+              "Results are strings (the `encoding: 'utf8'` shape), not Buffers; `encoding` accepts `'utf8'` only",
+              "`stdio`, `shell`, `killSignal`, `windowsHide` and `windowsVerbatimArguments` must be literals (they change what is emitted); `env` must be an object literal of string values; `uid`/`gid` are not supported",
+              "An absent `stdout`/`stderr` (never started, or `stdio: 'inherit'`/`'ignore'`) stays typed `string`, as in Node's typings: read directly it is `undefined`/`null` and a method call on it throws Node's `TypeError` ([ADR-01081](../adr/ADR-01081.md)), but once stored in a binding declared `string` the absence is lost (`=== undefined` is false, it prints `null`) — the general declared-slot gap an out-of-range array read shares"
             ],
             "notes": [
-              "One embedded C core ([ADR-00411](../adr/ADR-00411.md)): fork + execvp with both stdio pipes poll-multiplexed to completion (no deadlock when a child fills stderr while stdout drains), then a blocking waitpid; `execSync` runs via `/bin/sh -c`",
-              "`execSync`/`execFileSync` throw on a non-zero exit and return the captured stdout only on success, matching Node ([ADR-00753](../adr/ADR-00753.md))",
+              "One embedded C core ([ADR-00411](../adr/ADR-00411.md)): fork + execvp with the piped stdio poll-multiplexed to completion (no deadlock when a child fills stderr while stdout drains), then a blocking waitpid; `execSync` runs via `/bin/sh -c` (`%ComSpec% /d /s /c` on Windows)",
+              "Node's full options set ([ADR-01080](../adr/ADR-01080.md)): `cwd`, `env` (replaces the child's), `input` (a string or `Uint8Array` fed to stdin without blocking the drain), `argv0`, `stdio` (`'pipe'`/`'inherit'`/`'ignore'`, string or 3-element array), `timeout` + `killSignal` (the child is killed and `error.code` is `ETIMEDOUT`), `maxBuffer` (1 MiB default; overrun kills and gives `ENOBUFS`), `shell` (`true`, or a shell path — a `cmd`-shaped one takes `/d /s /c`, others `-c`; the args join the command with spaces), `windowsHide`, `windowsVerbatimArguments`",
+              "`spawnSync` returns Node's `{ error?, status, signal, output, pid, stdout, stderr }` in that key order (`error` first when present, [ADR-01081](../adr/ADR-01081.md)): `status` is `number | null` (null on a signal death or a never-started child), `signal` the name or null, `output` `[null, stdout, stderr]` (null for a never-started child), and `error` an `Error` with `code`/`errno`/`syscall: 'spawnSync <file>'`/`path` for a failed spawn (`ENOENT` → `status: null`, `pid: 0`, `output: null`, `stdout`/`stderr` `undefined`, as Node) or the timeout/maxBuffer kill",
+              "`execSync`/`execFileSync` return stdout on success and throw otherwise ([ADR-00753](../adr/ADR-00753.md)): the spawn/timeout/maxBuffer error itself, or `Command failed: <command>` followed by the captured stderr on a non-zero exit — either way the thrown Error carries Node's ExecException own properties `status`, `signal`, `output`, `pid`, `stdout`, `stderr` (readable through `catch (e: any)`); without an explicit `stdio` the child's stderr is also mirrored to ours, as Node does ([ADR-01080](../adr/ADR-01080.md))",
               "Distinct from the bespoke `process.execFileSync` above (which throws on failure and inherits stderr)"
             ]
           }

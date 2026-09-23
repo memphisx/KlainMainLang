@@ -146,7 +146,30 @@ func (e *Emitter) substituteGenericType(ta *ast.TypeAnnotation, subs map[string]
 			return ArrayOf(concrete)
 		}
 	}
-	return e.resolveType(ta)
+	// Anything deeper (`Promise<T>`, `Map<string, T>`, `T[][]`, a closure type
+	// mentioning T) resolves structurally with the type parameters in scope.
+	var t Type
+	e.withTypeParamScope(subs, func() { t = e.resolveType(ta) })
+	return t
+}
+
+// withTypeParamScope runs fn with subs layered over the active type-parameter
+// scope (an inner generic instantiation shadows an outer one's names), so
+// every resolveType inside fn — a body's `new Promise<T>`, a local's `T[]`
+// annotation, the return-type inference — substitutes the concrete types.
+// Restored on return, including on the error paths fn unwinds through.
+func (e *Emitter) withTypeParamScope(subs map[string]Type, fn func()) {
+	saved := e.typeParamScope
+	merged := make(map[string]Type, len(saved)+len(subs))
+	for k, v := range saved {
+		merged[k] = v
+	}
+	for k, v := range subs {
+		merged[k] = v
+	}
+	e.typeParamScope = merged
+	defer func() { e.typeParamScope = saved }()
+	fn()
 }
 
 // buildGenericParamSig is buildParamSig's generic-aware sibling: the same
@@ -342,12 +365,17 @@ func (e *Emitter) genericCallReturnType(decl *ast.FunctionDeclaration, args []as
 	if decl.ReturnType != nil {
 		return e.substituteGenericType(decl.ReturnType, subs), true
 	}
-	sig := e.buildGenericParamSig(decl.Params, subs)
-	paramNames := make([]string, len(decl.Params))
-	for i, p := range decl.Params {
-		paramNames[i] = p.Name
-	}
-	return e.inferUnannotatedReturnType(decl.Body, paramNames, sig.ParamTypes)
+	var t Type
+	var ok2 bool
+	e.withTypeParamScope(subs, func() {
+		sig := e.buildGenericParamSig(decl.Params, subs)
+		paramNames := make([]string, len(decl.Params))
+		for i, p := range decl.Params {
+			paramNames[i] = p.Name
+		}
+		t, ok2 = e.inferUnannotatedReturnType(decl.Body, paramNames, sig.ParamTypes)
+	})
+	return t, ok2
 }
 
 // instantiateGenericFunc returns the mangled LLVM name and signature for
@@ -364,29 +392,36 @@ func (e *Emitter) instantiateGenericFunc(decl *ast.FunctionDeclaration, subs map
 		return mangled, sig, nil
 	}
 
-	sig := e.buildGenericParamSig(decl.Params, subs)
-	if decl.ReturnType != nil {
-		sig.RetType = e.substituteGenericType(decl.ReturnType, subs)
-	} else {
-		// Best-effort inference, same as registerFunctions.
-		paramNames := make([]string, len(decl.Params))
-		for i, p := range decl.Params {
-			paramNames[i] = p.Name
-		}
-		if inferred, ok := e.inferUnannotatedReturnType(decl.Body, paramNames, sig.ParamTypes); ok {
-			sig.RetType = inferred
+	var sig FuncSig
+	var emitErr error
+	e.withTypeParamScope(subs, func() {
+		sig = e.buildGenericParamSig(decl.Params, subs)
+		if decl.ReturnType != nil {
+			sig.RetType = e.substituteGenericType(decl.ReturnType, subs)
 		} else {
-			sig.RetType = TypeVoid
+			// Best-effort inference, same as registerFunctions.
+			paramNames := make([]string, len(decl.Params))
+			for i, p := range decl.Params {
+				paramNames[i] = p.Name
+			}
+			if inferred, ok := e.inferUnannotatedReturnType(decl.Body, paramNames, sig.ParamTypes); ok {
+				sig.RetType = inferred
+			} else {
+				sig.RetType = TypeVoid
+			}
 		}
-	}
 
-	// Register before emitting the body — guards direct/mutual recursion the
-	// same way top-level forward references already rely on signatures
-	// being registered ahead of bodies (registerFunctions vs. emitFunctionDecl).
-	e.funcs[mangled] = sig
-	if err := e.emitFunctionDeclAs(decl, mangled, sig); err != nil {
+		// Register before emitting the body — guards direct/mutual recursion the
+		// same way top-level forward references already rely on signatures
+		// being registered ahead of bodies (registerFunctions vs. emitFunctionDecl).
+		// The body is emitted with the type parameters in scope, so a
+		// `new Promise<T>` / `const xs: T[]` inside it substitutes too.
+		e.funcs[mangled] = sig
+		emitErr = e.emitFunctionDeclAs(decl, mangled, sig)
+	})
+	if emitErr != nil {
 		delete(e.funcs, mangled)
-		return "", FuncSig{}, err
+		return "", FuncSig{}, emitErr
 	}
 	return mangled, sig, nil
 }

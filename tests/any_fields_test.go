@@ -1,6 +1,9 @@
 package tests
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TDD-00208: an `any`/`unknown`-typed object or class field is a boxed slot
 // (one NaN box, box-on-write / unbox-on-read) — the field-shaped counterpart of
@@ -72,4 +75,33 @@ function take(o: { x: any }): void { console.log(o.x); }
 const c = { x: 5 };
 take(c);
 `, "incompatible")
+}
+
+// ADR-01059/ADR-01060: an annotated `any` module binding is a real module
+// global (a named function reads it), and a container handle that has no box
+// kind yet (`Map`/`Set`/…) under an `any` annotation is a clean rejection —
+// it used to emit `ret ptr` for an i64 (invalid IR).
+func TestE2EAnyAnnotatedModuleGlobal(t *testing.T) {
+	assertOutput(t, `
+const cfg: any = { retries: 3 };
+const n: any = 5;
+const arr: any = [1, 2];
+let later: any;
+function f() { return [cfg.retries, n, arr.length]; }
+function g() { return later; }
+later = "set";
+console.log(f(), g(), typeof later);
+`, "[ 3, 5, 2 ] set string")
+}
+
+func TestE2EAnyAnnotatedMapRejected(t *testing.T) {
+	for _, init := range []string{"new Map<string, number>()", "new Set<number>()", "new WeakMap<object, number>()"} {
+		_, err := parseAndCompile("const m: any = " + init + ";\nfunction f() { return m; }\nconsole.log(f());\n")
+		if err == nil {
+			t.Fatalf("expected a compile error for `const m: any = %s`, got none", init)
+		}
+		if !strings.Contains(err.Error(), "cannot be declared as `any`") {
+			t.Fatalf("unexpected error for %s: %v", init, err)
+		}
+	}
 }

@@ -354,14 +354,45 @@ func (e *Emitter) emitDateToISOString(dateVal Value) (Value, error) {
 	month := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", month, month0))
 
+	// A year outside 0..9999 is the expanded form: a sign and six digits
+	// (`-000001-01-01…`, `+275760-09-13…`), as in Node.
+	sign, absYear := e.emitDateYearSign(year, true)
+	isExt := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ugt i64 %s, 9999", isExt, year)) // negative is huge unsigned
+	width := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i32 6, i32 4", width, isExt))
+
 	e.ensureSprintf()
 	buf := e.emitStringScratch(32) // TDD-00120
-	fmtPtr := e.internString("%04lld-%02lld-%02lldT%02lld:%02lld:%02lld.%03lldZ")
+	fmtPtr := e.internString("%s%0*lld-%02lld-%02lldT%02lld:%02lld:%02lld.%03lldZ")
 	e.emitInstr(fmt.Sprintf(
-		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s)",
-		buf, fmtPtr, year, month, day, hour, minute, sec, millis))
+		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, i32 %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s)",
+		buf, fmtPtr, sign, width, absYear, month, day, hour, minute, sec, millis))
 	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
+}
+
+// emitDateYearSign splits a decomposed year into its printed sign ("-" when
+// negative; "+" above 9999 when plusAbove9999, the ISO expanded form; else
+// "") and its absolute value.
+func (e *Emitter) emitDateYearSign(year string, plusAbove9999 bool) (sign, abs string) {
+	neg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, year))
+	negY := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 0, %s", negY, year))
+	abs = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", abs, neg, negY, year))
+	pos := e.internString("")
+	if plusAbove9999 {
+		big := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 9999", big, year))
+		p := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", p, big, e.internString("+"), pos))
+		pos = p
+	}
+	sign = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sign, neg, e.internString("-"), pos))
+	return sign, abs
 }
 
 // weekdayAbbrevs / monthAbbrevs back a runtime lookup table (ensureDateNameTables,
@@ -396,12 +427,14 @@ func (e *Emitter) emitDateToDateString(dateVal Value) (Value, error) {
 	monthName := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", monthName, monthGep))
 
+	// A negative year keeps four digits after its sign (`-0001`), as in Node.
+	sign, absYear := e.emitDateYearSign(year, false)
 	e.ensureSprintf()
 	buf := e.emitStringScratch(32) // TDD-00120
-	fmtPtr := e.internString("%s %s %02lld %04lld")
+	fmtPtr := e.internString("%s %s %02lld %s%04lld")
 	e.emitInstr(fmt.Sprintf(
-		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, ptr %s, i64 %s, i64 %s)",
-		buf, fmtPtr, wdayName, monthName, day, year))
+		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, ptr %s, i64 %s, ptr %s, i64 %s)",
+		buf, fmtPtr, wdayName, monthName, day, sign, absYear))
 	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }

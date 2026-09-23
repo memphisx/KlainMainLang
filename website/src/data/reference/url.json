@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "10/10",
     "loosePct": 100,
-    "strict": "0/10",
-    "strictPct": 0
+    "strict": "2/10",
+    "strictPct": 20
   },
   "lede": "WHATWG URL parsing, query-string building, and route matching — the natural companions to fetch() for the REST-client priority. Parsing reuses libcurl's already-linked URL API rather than a hand-rolled parser. The recurring divergence is single-value-per-key: URLSearchParams is backed by a plain Map<string,string>, so a repeated key keeps only its last value and getAll() never returns more than one element. URLPattern is object-literal init only, and its exec() returns a merged Map rather than the spec's per-component result object.",
   "entries": [
@@ -180,26 +180,27 @@
     {
       "id": "url.fileURLToPath",
       "name": "url.fileURLToPath()",
-      "statusRow": "url.fileURLToPath(url) (POSIX)",
-      "signature": "url.fileURLToPath(url: string | URL): string",
-      "badge": "caveats",
-      "description": "Converts a file: URL (a string or WHATWG URL) into the percent-decoded POSIX filesystem path. Throws on a non-file: scheme.",
+      "statusRow": "url.fileURLToPath(url[, { windows }])",
+      "signature": "url.fileURLToPath(url: string | URL, options?: { windows?: boolean }): string",
+      "badge": "exact",
+      "description": "Converts a file: URL (a string or WHATWG URL) into the percent-decoded filesystem path: a POSIX path, or a Windows drive path (file:///C:/dir/f → C:\\dir\\f) or UNC path when the URL has a host. { windows } picks the flavor on any host (undefined = the host's); a literal is resolved at compile time, a run-time boolean runs both halves. Throws on a non-file: scheme, an encoded / (or \\ on win32), a non-absolute win32 path, and — on the POSIX flavor — a host other than empty/localhost, with Node's messages.",
       "params": [
         {
           "name": "url",
           "type": "string | URL",
           "desc": "A file: URL."
+        },
+        {
+          "name": "options",
+          "type": "{ windows?: boolean }",
+          "desc": "Optional. true for the win32 form, false for POSIX, undefined for the host's."
         }
       ],
       "returns": {
         "type": "string",
         "desc": "The decoded path."
       },
-      "snippet": "import { fileURLToPath } from 'url'\nconsole.log(fileURLToPath('file:///foo%20bar')) // /foo bar",
-      "differences": [
-        "POSIX only; the options (windows) argument is unsupported",
-        "A non-localhost host is ignored, not rejected"
-      ],
+      "snippet": "import { fileURLToPath } from 'url'\nconsole.log(fileURLToPath('file:///foo%20bar')) // /foo bar\nconsole.log(fileURLToPath('file:///C:/dir/f', { windows: true })) // C:\\dir\\f",
       "seeAlso": [
         "url.pathToFileURL",
         "URL"
@@ -211,25 +212,27 @@
     {
       "id": "url.pathToFileURL",
       "name": "url.pathToFileURL()",
-      "statusRow": "url.pathToFileURL(path) (POSIX)",
-      "signature": "url.pathToFileURL(path: string): URL",
-      "badge": "caveats",
-      "description": "Resolves a path to absolute, percent-encodes it, and returns a WHATWG URL with the file: scheme.",
+      "statusRow": "url.pathToFileURL(path[, { windows }])",
+      "signature": "url.pathToFileURL(path: string, options?: { windows?: boolean }): URL",
+      "badge": "exact",
+      "description": "Resolves a path to absolute, percent-encodes it (Node's escape set), and returns a WHATWG URL with the file: scheme; a Windows drive path is file:///C:/dir/f and a UNC path keeps its server as the host. { windows } picks the flavor on any host (undefined = the host's).",
       "params": [
         {
           "name": "path",
           "type": "string",
           "desc": "A filesystem path."
+        },
+        {
+          "name": "options",
+          "type": "{ windows?: boolean }",
+          "desc": "Optional. true for the win32 form, false for POSIX, undefined for the host's."
         }
       ],
       "returns": {
         "type": "URL",
         "desc": "A file: URL."
       },
-      "snippet": "import { pathToFileURL } from 'url'\nconsole.log(pathToFileURL('/foo bar').href) // file:///foo%20bar",
-      "differences": [
-        "The options argument is unsupported"
-      ],
+      "snippet": "import { pathToFileURL } from 'url'\nconsole.log(pathToFileURL('/foo bar').href) // file:///foo%20bar\nconsole.log(pathToFileURL('C:\\\\dir\\\\f', { windows: true }).href) // file:///C:/dir/f",
       "seeAlso": [
         "url.fileURLToPath",
         "URL"

@@ -69,6 +69,9 @@ func buildBinaryAuto(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
+	clangArgs = appendCasemap(t, em, dir, clangArgs)
+	clangArgs = appendOSInfo(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
@@ -609,4 +612,26 @@ console.log(f())
 	if !strings.Contains(ir, "__kml_deep_free") {
 		t.Errorf("length-only use of a typed parse tree must be deep-freed; no synthesized routine in IR")
 	}
+}
+
+func TestE2EMemoryAutoBlobSliceNotFreedAsString(t *testing.T) {
+	// A Blob is a `ptr` handle, so the loose string test took `g.slice()` for
+	// a string slice (a fresh owned string) and the block exit freed the Blob
+	// with the string free — `free(): invalid pointer` on Linux, heap
+	// corruption on Windows (examples/blob/blob.ts under -mm=auto).
+	const src = `
+function run(): void {
+  const g = new Blob(["Hello, ", "world", "!"], { type: "text/plain" })
+  const w = g.slice(7, 12, "text/x-word")
+  console.log(w.size, w.type)
+}
+run()
+console.log('done')
+`
+	binFile := buildBinaryAuto(t, src)
+	out, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run (crash = a bad auto-free): %v", err)
+	}
+	compareLines(t, strings.TrimRight(string(out), "\n"), "5 text/x-word\ndone")
 }

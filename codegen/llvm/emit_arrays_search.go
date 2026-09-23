@@ -65,7 +65,8 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	idxVal := e.freshReg()
 	done := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
+	// `sge`, not `eq`: a fromIndex past the end starts the scan beyond len.
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)

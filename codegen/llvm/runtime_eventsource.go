@@ -298,7 +298,7 @@ skip:
   ret i64 %%total
 }`, ctPrefix))
 
-	e.emitGlobal(`
+	e.emitGlobal(withCurlNativeCA(`
 define ptr @__kml_eventsource_connect(ptr %url, ptr %headers, ptr %es_entry) {
 entry:
   %inited = load i1, ptr @__kml_curl_inited, align 1
@@ -369,7 +369,7 @@ skiphdr:
   call i32 @curl_multi_perform(ptr %multi2, ptr %runningp)
 
   ret ptr %pending
-}`)
+}`))
 
 	e.emitGlobal(`
 define ptr @__kml_eventsource_open(ptr %url, ptr %instance) {

@@ -69,9 +69,7 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 		case target.IR == "i64" || target.IR == "i32" || target.IR == "i16" || target.IR == "i8":
 			if !target.IsDate {
 				d := e.emitAnyToNum(v)
-				r := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", r, d))
-				return e.coerce(Value{Ref: r, Ty: TypeI64}, target)
+				return e.coerce(Value{Ref: d, Ty: TypeF64}, target)
 			}
 		case target.IR == "ptr" && !target.IsArray:
 			// A dynamic value flowing into a string- (or other single-pointer-)
@@ -261,20 +259,29 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 	// UB and gives JS's modular wraparound for narrow integer / TypedArray element
 	// stores (ToUint8/ToInt32: `300 → 44`, `-1 → 255`). TDD-00123.
 	case v.Ty.Float && dstInt:
+		// NaN and ±Infinity are poison under a plain fptosi; the saturating
+		// intrinsic gives NaN → 0 and ±Infinity → INT64_MIN/MAX (ADR-01061).
 		if typeBits(target.IR) < 64 {
 			// Always via a signed i64 intermediate: fptoui of a negative value is
 			// itself UB, and the modular trunc's 2's-complement bit pattern is the
 			// same regardless of the intermediate's signedness (-1 → i64 -1 → i8
-			// 0xFF = 255, matching JS ToUint8).
-			wide := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = fptosi %s %s to i64", wide, v.Ty.IR, v.Ref))
-			e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to %s", reg, wide, target.IR))
+			// 0xFF = 255, matching JS ToUint8). ToInt32/ToUint8 map a non-finite
+			// value to 0, which the saturated word would not truncate to.
+			wide := e.emitFloatToI64(v.Ty.IR, v.Ref)
+			finite := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = fcmp one %s %s, %s", finite, v.Ty.IR, v.Ref, floatInfLiteral(v.Ty.IR)))
+			finiteNeg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = fcmp one %s %s, %s", finiteNeg, v.Ty.IR, v.Ref, floatNegInfLiteral(v.Ty.IR)))
+			both := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", both, finite, finiteNeg))
+			zeroed := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", zeroed, both, wide))
+			e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to %s", reg, zeroed, target.IR))
+		} else if target.Signed {
+			wide := e.emitFloatToI64(v.Ty.IR, v.Ref)
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 0", reg, wide))
 		} else {
-			op := "fptosi"
-			if !target.Signed {
-				op = "fptoui"
-			}
-			e.emitInstr(fmt.Sprintf("%s = %s %s %s to %s", reg, op, v.Ty.IR, v.Ref, target.IR))
+			e.emitInstr(fmt.Sprintf("%s = fptoui %s %s to %s", reg, v.Ty.IR, v.Ref, target.IR))
 		}
 
 	// float → float
@@ -408,6 +415,13 @@ func (e *Emitter) coerceChecked(v Value, target Type, pos ast.Pos, what string) 
 	if target.IsDynamic && target.UnionMembers != nil && !unionAllowsAssignmentFrom(target, v.Ty) {
 		return Value{}, fmt.Errorf("%d:%d: type mismatch in %s — value's type is not a member of the declared union type", pos.Line, pos.Col, what)
 	}
+	// A closure whose body can fall off the end returns `T | undefined`
+	// (ADR-01065); binding it to a declared `(...) => T` is tsc's "Type 'T |
+	// undefined' is not assignable to type 'T'". The two return ABIs differ
+	// (`{ i1, T }` vs bare T), so this must be a rejection, not a passthrough.
+	if err := closureFallOffMismatch(v.Ty, target, pos, what); err != nil {
+		return Value{}, err
+	}
 	out := e.coerce(v, target)
 	if !coercionIsSound(out.Ty, target) {
 		return Value{}, fmt.Errorf("%d:%d: type mismatch in %s — a value of one type cannot be used where an incompatible type is expected (this compiler is a typed subset; mixing types the way untyped JS does is not supported)", pos.Line, pos.Col, what)
@@ -444,4 +458,23 @@ func typeBits(ir string) int {
 		return 64
 	}
 	return 64
+}
+
+// closureFallOffMismatch rejects a closure whose inferred return is `T |
+// undefined` (a body that can fall off the end, ADR-01065) bound to a declared
+// function type returning the bare T — tsc's "Type 'T | undefined' is not
+// assignable to type 'T'". The two return ABIs differ (`{ i1, T }` vs T), so an
+// indirect call through the declared slot would read the wrong words; the
+// rejection is the only sound outcome. A void/any/nullable expected return
+// accepts the closure unchanged.
+func closureFallOffMismatch(vTy, target Type, pos ast.Pos, what string) error {
+	if !vTy.IsFunc || !target.IsFunc || vTy.FuncRetType == nil || target.FuncRetType == nil {
+		return nil
+	}
+	tr := *target.FuncRetType
+	if !isNullableScalar(*vTy.FuncRetType) || isNullableScalar(tr) || tr.IsDynamic || tr.IR == "void" || tr.IR == "" {
+		return nil
+	}
+	return fmt.Errorf("%d:%d: type mismatch in %s — the function returns %s | undefined (a path falls off the end without a value) but the expected type returns %s; return a value on every path",
+		pos.Line, pos.Col, what, tsTypeName(vTy.FuncRetType.withoutNullable()), tsTypeName(tr))
 }

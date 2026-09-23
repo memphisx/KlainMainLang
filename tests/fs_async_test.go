@@ -107,19 +107,20 @@ main()
 // The loop must not exit while a pooled read is in flight, and other work
 // scheduled before the await must still run — i.e. the read no longer freezes
 // the reactor. A timer set before the await fires (its callback runs), and the
-// awaited read still resolves afterward.
+// awaited read still resolves afterward. The file is 8 MB so the reads outlast
+// the timer's 1 ms clamp (ADR-01071).
 func TestE2EFsPromisesPooledReadDoesNotFreezeLoop(t *testing.T) {
 	dir := tempDir(t)
 	p := filepath.Join(dir, "big.txt")
 	src := fmt.Sprintf(`
 import fs from 'fs'
 async function main(): Promise<void> {
-  await fs.promises.writeFile(%q, "payload")
+  await fs.promises.writeFile(%q, "payload" + "x".repeat(8 << 20))
   let timerFired: boolean = false
   setTimeout(() => { timerFired = true }, 0)
   const s: string = await fs.promises.readFile(%q)
   await fs.promises.readFile(%q)
-  console.log((timerFired ? "timer-ran" : "timer-missed") + ":" + s)
+  console.log((timerFired ? "timer-ran" : "timer-missed") + ":" + s.slice(0, 7))
 }
 main()
 `, p, p, p)
@@ -294,15 +295,16 @@ fs.readdir(%q, (err, entries: string[]) => {
 
 // The pooled callback form does not block the reactor. A concurrently scheduled
 // setTimeout(0) fires *before* the read's callback, because the read parks on a
-// pool thread (a real round-trip) while the 0 ms timer is immediately due on the
-// loop — an inline read would run to completion first and settle its callback
-// microtask ahead of the timer.
+// pool thread (a real round-trip) while the timer is due on the loop — an
+// inline read would run to completion first and settle its callback microtask
+// ahead of the timer. The file is 8 MB so the read outlasts the timer's 1 ms
+// clamp (ADR-01071) on every host.
 func TestE2EFsAsyncCallbackPooledNonBlocking(t *testing.T) {
 	dir := tempDir(t)
 	path := filepath.Join(dir, "nb.dat")
 	src := fmt.Sprintf(`
 import fs from 'fs'
-fs.writeFileSync(%q, "data")
+fs.writeFileSync(%q, "x".repeat(8 << 20))
 let timerFirst: boolean = false
 let done: boolean = false
 setTimeout(() => { if (!done) { timerFirst = true } }, 0)

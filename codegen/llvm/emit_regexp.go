@@ -275,8 +275,10 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", multilineSlot))
 	dotAllSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", dotAllSlot))
-	e.emitInstr(fmt.Sprintf("call void @__kml_regex_parse_flags(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)",
-		flagsVal.Ref, optSlot, globalSlot, ignoreCaseSlot, multilineSlot, dotAllSlot))
+	stickySlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", stickySlot))
+	e.emitInstr(fmt.Sprintf("call void @__kml_regex_parse_flags(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)",
+		flagsVal.Ref, optSlot, globalSlot, ignoreCaseSlot, multilineSlot, dotAllSlot, stickySlot))
 	optReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", optReg, optSlot))
 
@@ -365,6 +367,8 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", multilineReg, multilineSlot))
 	dotAllReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", dotAllReg, dotAllSlot))
+	stickyReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", stickyReg, stickySlot))
 
 	ty := RegExpType()
 	dataReg := e.freshReg()
@@ -393,6 +397,7 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 	storeField("ignoreCase", "i1", ignoreCaseReg, 1)
 	storeField("multiline", "i1", multilineReg, 1)
 	storeField("dotAll", "i1", dotAllReg, 1)
+	storeField("sticky", "i1", stickyReg, 1)
 	storeField("lastIndex", "i64", "0", 8)
 
 	return Value{Ref: dataReg, Ty: ty}, nil
@@ -444,6 +449,31 @@ func (e *Emitter) regexSubjectToString(v Value) (Value, error) {
 	return e.emitArgToString(v)
 }
 
+// emitRegexMatchStart is the lastIndex half of RegExpBuiltinExec shared by
+// `.test()` and emitRegexSingleMatchCore (ADR-01062): `lastIndex` is read as
+// the start offset when `global` OR `sticky` is set (else 0), converted from
+// the mode's index space to PCRE2's byte offset, and a sticky regex matches
+// with PCRE2_ANCHORED so it can only succeed exactly at that offset. Returns
+// the `useLastIndex` flag the caller uses to advance/reset lastIndex after
+// the match, the original lastIndex, the byte start offset, and the
+// pcre2_match option word.
+func (e *Emitter) emitRegexMatchStart(objVal, strVal Value) (useLastIndexReg, lastIndexReg, startOffsetReg, matchOptsReg string) {
+	globalReg := e.emitRegexLoadField(objVal, "global", "i1", 1)
+	stickyReg := e.emitRegexLoadField(objVal, "sticky", "i1", 1)
+	lastIndexReg = e.emitRegexLoadField(objVal, "lastIndex", "i64", 8)
+	useLastIndexReg = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", useLastIndexReg, globalReg, stickyReg))
+	// lastIndex is stored in the mode's own index space (UTF-16 code units for
+	// es-utf16, bytes otherwise); PCRE2 always wants a byte start offset, so
+	// convert on the way in (identity in non-es-utf16 modes).
+	lastIndexByteReg := e.regexUTF16ToByte(strVal.Ref, lastIndexReg)
+	startOffsetReg = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", startOffsetReg, useLastIndexReg, lastIndexByteReg))
+	matchOptsReg = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i32 %d, i32 0", matchOptsReg, stickyReg, pcre2Anchored))
+	return
+}
+
 func (e *Emitter) emitRegexTest(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: test takes exactly 1 argument", pos.Line, pos.Col)
@@ -463,23 +493,14 @@ func (e *Emitter) emitRegexTest(mem *ast.MemberExpression, args []ast.Expression
 
 	e.ensureRegexMatch()
 	handleReg := e.emitRegexHandleLoad(objVal)
-	globalReg := e.emitRegexLoadField(objVal, "global", "i1", 1)
-	lastIndexReg := e.emitRegexLoadField(objVal, "lastIndex", "i64", 8)
-
-	// lastIndex is stored in the mode's own index space (UTF-16 code units for
-	// es-utf16, bytes otherwise); PCRE2 wants a byte start offset — convert on
-	// the way in (identity in non-es-utf16 modes), and only honor it when
-	// `global` is set.
-	lastIndexByteReg := e.regexUTF16ToByte(strVal.Ref, lastIndexReg)
-	startOffsetReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", startOffsetReg, globalReg, lastIndexByteReg))
+	useLastIdxReg, lastIndexReg, startOffsetReg, matchOptsReg := e.emitRegexMatchStart(objVal, strVal)
 
 	matchDataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_match_data_create_from_pattern_8(ptr %s, ptr null)", matchDataReg, handleReg))
 
 	rcReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @pcre2_match_8(ptr %s, ptr %s, i64 %d, i64 %s, i32 0, ptr %s, ptr null)",
-		rcReg, handleReg, strVal.Ref, pcre2ZeroTerminated, startOffsetReg, matchDataReg))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @pcre2_match_8(ptr %s, ptr %s, i64 %d, i64 %s, i32 %s, ptr %s, ptr null)",
+		rcReg, handleReg, strVal.Ref, pcre2ZeroTerminated, startOffsetReg, matchOptsReg, matchDataReg))
 	matchedReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sge i32 %s, 0", matchedReg, rcReg))
 
@@ -501,13 +522,13 @@ func (e *Emitter) emitRegexTest(mem *ast.MemberExpression, args []ast.Expression
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", endOfMatchReg, endOfMatchGep))
 	endStoredReg := e.regexByteToUTF16(strVal.Ref, endOfMatchReg)
 	advancedLastIndexReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", advancedLastIndexReg, globalReg, endStoredReg, lastIndexReg))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", advancedLastIndexReg, useLastIdxReg, endStoredReg, lastIndexReg))
 	e.emitRegexStoreLastIndex(objVal, advancedLastIndexReg)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(nomatchL)
 	resetLastIndexReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", resetLastIndexReg, globalReg, lastIndexReg))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", resetLastIndexReg, useLastIdxReg, lastIndexReg))
 	e.emitRegexStoreLastIndex(objVal, resetLastIndexReg)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
@@ -606,15 +627,7 @@ func (e *Emitter) emitRegexSingleMatchCore(objVal, strVal Value) (result Value, 
 	e.ensureMemcpy()
 
 	handleReg := e.emitRegexHandleLoad(objVal)
-	globalReg := e.emitRegexLoadField(objVal, "global", "i1", 1)
-	lastIndexReg := e.emitRegexLoadField(objVal, "lastIndex", "i64", 8)
-
-	// lastIndex is stored in the mode's own index space (UTF-16 code units for
-	// es-utf16, bytes otherwise); PCRE2 always wants a byte start offset, so
-	// convert on the way in (identity in non-es-utf16 modes).
-	lastIndexByteReg := e.regexUTF16ToByte(strVal.Ref, lastIndexReg)
-	startOffsetReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", startOffsetReg, globalReg, lastIndexByteReg))
+	useLastIdxReg, lastIndexReg, startOffsetReg, matchOptsReg := e.emitRegexMatchStart(objVal, strVal)
 
 	captureSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", captureSlot))
@@ -629,8 +642,8 @@ func (e *Emitter) emitRegexSingleMatchCore(objVal, strVal Value) (result Value, 
 	matchDataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_match_data_create_from_pattern_8(ptr %s, ptr null)", matchDataReg, handleReg))
 	rcReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @pcre2_match_8(ptr %s, ptr %s, i64 %d, i64 %s, i32 0, ptr %s, ptr null)",
-		rcReg, handleReg, strVal.Ref, pcre2ZeroTerminated, startOffsetReg, matchDataReg))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @pcre2_match_8(ptr %s, ptr %s, i64 %d, i64 %s, i32 %s, ptr %s, ptr null)",
+		rcReg, handleReg, strVal.Ref, pcre2ZeroTerminated, startOffsetReg, matchOptsReg, matchDataReg))
 	matchedReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sge i32 %s, 0", matchedReg, rcReg))
 
@@ -670,7 +683,7 @@ func (e *Emitter) emitRegexSingleMatchCore(objVal, strVal Value) (result Value, 
 	// verbatim (already in that space), so it is never converted.
 	endStoredReg := e.regexByteToUTF16(strVal.Ref, endOfMatchReg)
 	advancedLastIndexReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", advancedLastIndexReg, globalReg, endStoredReg, lastIndexReg))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", advancedLastIndexReg, useLastIdxReg, endStoredReg, lastIndexReg))
 	e.emitRegexStoreLastIndex(objVal, advancedLastIndexReg)
 
 	byteCountReg := e.freshReg()
@@ -756,7 +769,7 @@ func (e *Emitter) emitRegexSingleMatchCore(objVal, strVal Value) (result Value, 
 	e.emitLabel(nomatchL)
 	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8(ptr %s)", matchDataReg))
 	resetLastIndexReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", resetLastIndexReg, globalReg, lastIndexReg))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", resetLastIndexReg, useLastIdxReg, lastIndexReg))
 	e.emitRegexStoreLastIndex(objVal, resetLastIndexReg)
 	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", resultPtrSlot))
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", resultLenSlot))

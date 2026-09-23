@@ -40,227 +40,19 @@ func (e *Emitter) emitChildProcessModuleCall(method string, args []ast.Expressio
 	return Value{}, fmt.Errorf("%d:%d: child_process.%s is not supported", pos.Line, pos.Col, method)
 }
 
-// cpSpawnSyncResultType is spawnSync's result record — Node's
-// `{ status, stdout, stderr, pid }` with stdout/stderr as strings (the
-// `encoding: 'utf8'` shape; there is no Buffer default here). Field order
-// must match cpSpawnSyncResultObject's stores.
-func cpSpawnSyncResultType() Type {
-	return ObjectType([]Field{
-		{Name: "status", Ty: TypeF64},
-		{Name: "stdout", Ty: TypePtr},
-		{Name: "stderr", Ty: TypePtr},
-		{Name: "pid", Ty: TypeF64},
-	})
-}
-
-// cpSpawnSyncCall evaluates (file, argv) and emits the blocking
-// @__kml_cp_spawn_sync call, returning the raw C result-struct pointer
-// (layout: i64 status @0, ptr stdout @8, ptr stderr @16, i64 pid @24).
-// flags bit 0 marks a shell invocation (execSync): on Windows the command
-// line is passed verbatim, Node's windowsVerbatimArguments (ADR-00740).
-func (e *Emitter) cpSpawnSyncCall(fileRef, argsPtr, argsLen, cwdRef string, flags int) string {
-	e.ensureSpawnSyncRuntime()
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_cp_spawn_sync(ptr %s, ptr %s, i64 %s, ptr %s, i64 %d)", r, fileRef, argsPtr, argsLen, cwdRef, flags))
-	return r
-}
-
-// cpSyncOptions evaluates the optional trailing options object of the *Sync
-// forms. Supported: `cwd` (child chdir before exec) and `encoding` (must be
-// the literal 'utf8' — results are already utf8 strings). Anything else is a
-// clean rejection rather than a silent ignore.
-func (e *Emitter) cpSyncOptions(arg ast.Expression, name string, pos ast.Pos) (cwdRef string, err error) {
-	cwdRef = "null"
-	lit, ok := arg.(*ast.ObjectLiteral)
-	if !ok {
-		return "", fmt.Errorf("%d:%d: child_process.%s's options must be an object literal", pos.Line, pos.Col, name)
-	}
-	for _, prop := range lit.Properties {
-		switch prop.Key {
-		case "cwd":
-			v, verr := e.emitExpr(prop.Value)
-			if verr != nil {
-				return "", verr
-			}
-			cwdRef = e.coerce(v, TypePtr).Ref
-		case "encoding":
-			s, ok := prop.Value.(*ast.StringLiteral)
-			if !ok || (s.Value != "utf8" && s.Value != "utf-8") {
-				return "", fmt.Errorf("%d:%d: child_process.%s supports encoding: 'utf8' only (results are strings)", pos.Line, pos.Col, name)
-			}
-		default:
-			return "", fmt.Errorf("%d:%d: child_process.%s options support { cwd, encoding } only (got '%s')", pos.Line, pos.Col, name, prop.Key)
-		}
-	}
-	return cwdRef, nil
-}
-
-// cpSpawnSyncField loads field idx (8-byte slots) from the C result struct.
-func (e *Emitter) cpSpawnSyncField(raw string, idx int, ir string) string {
-	gep := e.freshReg()
-	v := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", gep, raw, idx*8))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", v, ir, gep))
-	return v
-}
-
-// emitCPSpawnSync implements spawnSync(command, args?) — blocks until the
-// child exits and returns { status, stdout, stderr, pid }.
-func (e *Emitter) emitCPSpawnSync(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 3 {
-		return Value{}, fmt.Errorf("%d:%d: child_process.spawnSync takes (command, args?, { cwd, encoding }?)", pos.Line, pos.Col)
-	}
-	fileVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	fileVal = e.coerce(fileVal, TypePtr)
-	argsPtr, argsLen, cwdRef := "null", "0", "null"
-	rest := args[1:]
-	if len(rest) >= 1 {
-		if _, isObj := rest[0].(*ast.ObjectLiteral); isObj && len(rest) == 1 {
-			// spawnSync(cmd, { cwd }) — options with no args array.
-			c, err := e.cpSyncOptions(rest[0], "spawnSync", pos)
-			if err != nil {
-				return Value{}, err
-			}
-			cwdRef = c
-		} else {
-			p, l, err := e.cpResolveArgv(rest[0], pos, "spawnSync")
-			if err != nil {
-				return Value{}, err
-			}
-			argsPtr, argsLen = p, l
-			if len(rest) == 2 {
-				c, err := e.cpSyncOptions(rest[1], "spawnSync", pos)
-				if err != nil {
-					return Value{}, err
-				}
-				cwdRef = c
-			}
-		}
-	}
-	raw := e.cpSpawnSyncCall(fileVal.Ref, argsPtr, argsLen, cwdRef, 0)
-
-	ty := cpSpawnSyncResultType()
-	e.ensureCalloc()
-	obj := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", obj, ty.StructSize()))
-	structIR := ty.StructIR()
-	store := func(idx int, ir, val string) {
-		g := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, structIR, obj, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ir, val, g))
-	}
-	statI := e.cpSpawnSyncField(raw, 0, "i64")
-	statD := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", statD, statI))
-	store(0, "double", statD)
-	store(1, "ptr", e.cpSpawnSyncField(raw, 1, "ptr"))
-	store(2, "ptr", e.cpSpawnSyncField(raw, 2, "ptr"))
-	pidI := e.cpSpawnSyncField(raw, 3, "i64")
-	pidD := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", pidD, pidI))
-	store(3, "double", pidD)
-	return Value{Ref: obj, Ty: ty}, nil
-}
-
-// emitCPExecSync implements execSync(command): runs via `/bin/sh -c` and
-// returns the captured stdout string. Like Node, a nonzero exit status
-// throws (ADR-00753) — the returned stdout is only reached on success.
-func (e *Emitter) emitCPExecSync(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: child_process.execSync takes (command, { cwd, encoding }?)", pos.Line, pos.Col)
-	}
-	cwdRef := "null"
-	if len(args) == 2 {
-		c, err := e.cpSyncOptions(args[1], "execSync", pos)
-		if err != nil {
-			return Value{}, err
-		}
-		cwdRef = c
-	}
-	cmdVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	cmdVal = e.coerce(cmdVal, TypePtr)
-	e.ensureMalloc()
-	shFile, argvPtr, shArgc := e.emitShellArgv(cmdVal.Ref)
-	raw := e.cpSpawnSyncCall(shFile, argvPtr, shArgc, cwdRef, 1)
-	return e.cpExecSyncResult(raw, cmdVal)
-}
-
-// cpExecSyncResult throws `Command failed: <command>` when the child exited
-// nonzero (Node's execSync/execFileSync behaviour), otherwise yields the
-// captured stdout string. The thrown value is a plain Error; the richer
-// `.status`/`.stdout`/`.stderr` ExecException properties are not attached yet
-// — spawnSync exposes the status without throwing (documented caveat).
-func (e *Emitter) cpExecSyncResult(raw string, cmdVal Value) (Value, error) {
-	status := e.cpSpawnSyncField(raw, 0, "i64")
-	stdout := e.cpSpawnSyncField(raw, 1, "ptr")
-	nonzero := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", nonzero, status))
-	failL := e.freshLabel("execsync.fail")
-	okL := e.freshLabel("execsync.ok")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", nonzero, failL, okL))
-	e.emitLabel(failL)
-	msg, err := e.emitStringConcat(Value{Ref: e.internString("Command failed: "), Ty: TypePtr}, cmdVal)
-	if err != nil {
-		return Value{}, err
-	}
-	e.emitInternalThrow(msg.Ref)
-	e.emitLabel(okL)
-	return Value{Ref: stdout, Ty: TypePtr}, nil
-}
-
-// emitCPExecFileSync implements execFileSync(file, args?, options?): execvp
-// with no shell, returning the captured stdout string. Like execSync, a
-// nonzero exit status throws (ADR-00753).
-func (e *Emitter) emitCPExecFileSync(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 3 {
-		return Value{}, fmt.Errorf("%d:%d: child_process.execFileSync takes (file, args?, { cwd, encoding }?)", pos.Line, pos.Col)
-	}
-	fileVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	fileVal = e.coerce(fileVal, TypePtr)
-	argsPtr, argsLen, cwdRef := "null", "0", "null"
-	rest := args[1:]
-	if len(rest) >= 1 {
-		if _, isObj := rest[0].(*ast.ObjectLiteral); isObj && len(rest) == 1 {
-			c, err := e.cpSyncOptions(rest[0], "execFileSync", pos)
-			if err != nil {
-				return Value{}, err
-			}
-			cwdRef = c
-		} else {
-			p, l, err := e.cpResolveArgv(rest[0], pos, "execFileSync")
-			if err != nil {
-				return Value{}, err
-			}
-			argsPtr, argsLen = p, l
-			if len(rest) == 2 {
-				c, err := e.cpSyncOptions(rest[1], "execFileSync", pos)
-				if err != nil {
-					return Value{}, err
-				}
-				cwdRef = c
-			}
-		}
-	}
-	raw := e.cpSpawnSyncCall(fileVal.Ref, argsPtr, argsLen, cwdRef, 0)
-	return e.cpExecSyncResult(raw, fileVal)
-}
-
 // cpSpawnCall emits the @__kml_cp_spawn call and returns the handle register.
 // cwdRef is a string ptr (the child chdir()s to it before exec) or "null";
 // envRef is a NULL-terminated `char**` of "KEY=value" strings that fully
 // replaces the child's environment, or "null" to inherit ours (ADR-00762).
 func (e *Emitter) cpSpawnCall(fileRef, argsPtr, argsLen string, mode int, cwdRef, envRef, timeoutRef string, killSig int) string {
+	return e.cpSpawnCallMax(fileRef, argsPtr, argsLen, mode, cwdRef, envRef, timeoutRef, killSig, "0")
+}
+
+// cpSpawnCallMax is cpSpawnCall with the buffered forms' maxBuffer (bytes per
+// stream before the child is killed; "0" = unlimited, ADR-01080).
+func (e *Emitter) cpSpawnCallMax(fileRef, argsPtr, argsLen string, mode int, cwdRef, envRef, timeoutRef string, killSig int, maxBufRef string) string {
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_cp_spawn(ptr %s, ptr %s, i64 %s, i64 %d, ptr %s, ptr %s, i64 %s, i64 %d)", r, fileRef, argsPtr, argsLen, mode, cwdRef, envRef, timeoutRef, killSig))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_cp_spawn(ptr %s, ptr %s, i64 %s, i64 %d, ptr %s, ptr %s, i64 %s, i64 %d, i64 %s)", r, fileRef, argsPtr, argsLen, mode, cwdRef, envRef, timeoutRef, killSig, maxBufRef))
 	return r
 }
 
@@ -281,8 +73,10 @@ type cpSpawnOpts struct {
 	killSig     int    // signal for the timeout kill (default 15 = SIGTERM)
 	shell       bool
 	windowsHide bool
-	detached    bool // setsid (POSIX) / DETACHED_PROCESS (Windows) — ADR-00765
-	stdioModes  int  // per-fd stdio: 2 bits each (stdin/stdout/stderr), 0=pipe 1=inherit 2=ignore — ADR-00766
+	detached    bool   // setsid (POSIX) / DETACHED_PROCESS (Windows) — ADR-00765
+	stdioModes  int    // per-fd stdio: 2 bits each (stdin/stdout/stderr), 0=pipe 1=inherit 2=ignore — ADR-00766
+	maxBufRef   string // exec/execFile: i64 bytes per stream before the kill ("0" = spawn's unlimited) — ADR-01080
+	shellFile   string // `shell: <path>`: the shell to run the command with ("" = the platform default)
 }
 
 // cpStdioModeVal maps a Node stdio string to this compiler's 2-bit mode.
@@ -332,10 +126,19 @@ func (e *Emitter) cpParseStdio(v ast.Expression, pos ast.Pos) (int, error) {
 }
 
 func (e *Emitter) cpSpawnOptions(arg ast.Expression, pos ast.Pos) (cpSpawnOpts, error) {
-	opts := cpSpawnOpts{cwdRef: "null", envRef: "null", timeoutRef: "0", killSig: 15}
+	opts := cpSpawnOpts{cwdRef: "null", envRef: "null", timeoutRef: "0", killSig: 15, maxBufRef: "0"}
 	if lit, ok := arg.(*ast.ObjectLiteral); ok {
 		for _, prop := range lit.Properties {
 			switch prop.Key {
+			case "maxBuffer":
+				// exec/execFile only (ADR-01080): bytes per stream before the
+				// child is killed with killSignal and the callback gets
+				// ERR_CHILD_PROCESS_STDIO_MAXBUFFER.
+				v, err := e.emitExpr(prop.Value)
+				if err != nil {
+					return cpSpawnOpts{}, err
+				}
+				opts.maxBufRef = e.coerce(v, TypeI64).Ref
 			case "timeout":
 				// Kill the child after N ms (the event loop enforces it). Any
 				// numeric expression → i64 ms (ADR-00764).
@@ -371,12 +174,16 @@ func (e *Emitter) cpSpawnOptions(arg ast.Expression, pos ast.Pos) (cpSpawnOpts, 
 			case "shell":
 				// Literal true routes the command through the platform shell
 				// (`/bin/sh -c` / `cmd.exe /d /s /c`, ADR-00740); false is the
-				// default. A shell *path* or dynamic value is not supported.
-				b, ok := prop.Value.(*ast.BooleanLiteral)
-				if !ok {
-					return cpSpawnOpts{}, fmt.Errorf("%d:%d: child_process.spawn's shell option must be the literal true or false (a custom shell path is not supported)", pos.Line, pos.Col)
+				// default; a literal string names the shell to use (ADR-01080).
+				switch v := prop.Value.(type) {
+				case *ast.BooleanLiteral:
+					opts.shell = v.Value
+				case *ast.StringLiteral:
+					opts.shell = true
+					opts.shellFile = v.Value
+				default:
+					return cpSpawnOpts{}, fmt.Errorf("%d:%d: child_process.spawn's shell option must be a literal boolean or shell path", pos.Line, pos.Col)
 				}
-				opts.shell = b.Value
 			case "stdio":
 				m, err := e.cpParseStdio(prop.Value, pos)
 				if err != nil {
@@ -413,7 +220,7 @@ func (e *Emitter) cpSpawnOptions(arg ast.Expression, pos ast.Pos) (cpSpawnOpts, 
 				}
 				opts.detached = b.Value
 			default:
-				return cpSpawnOpts{}, fmt.Errorf("%d:%d: child_process.spawn options support { cwd, shell, stdio: 'pipe', env, windowsHide, timeout, killSignal, detached } only (got '%s')", pos.Line, pos.Col, prop.Key)
+				return cpSpawnOpts{}, fmt.Errorf("%d:%d: child_process.spawn options support { cwd, shell, stdio, env, windowsHide, timeout, killSignal, detached, maxBuffer } only (got '%s')", pos.Line, pos.Col, prop.Key)
 			}
 		}
 		return opts, nil
@@ -512,7 +319,7 @@ func (e *Emitter) emitCPSpawn(args []ast.Expression, pos ast.Pos) (Value, error)
 			rest = rest[1:]
 		}
 	}
-	opts := cpSpawnOpts{cwdRef: "null", envRef: "null", timeoutRef: "0", killSig: 15}
+	opts := cpSpawnOpts{cwdRef: "null", envRef: "null", timeoutRef: "0", killSig: 15, maxBufRef: "0"}
 	if len(rest) >= 1 {
 		o, err := e.cpSpawnOptions(rest[0], pos)
 		if err != nil {
@@ -543,7 +350,7 @@ func (e *Emitter) emitCPSpawn(args []ast.Expression, pos ast.Pos) (Value, error)
 		if argsPtr != "null" {
 			return Value{}, fmt.Errorf("%d:%d: child_process.spawn with shell: true takes the whole command as one string — put the arguments in the command, or drop shell", pos.Line, pos.Col)
 		}
-		shFile, shArgv, shArgc := e.emitShellArgv(fileVal.Ref)
+		shFile, shArgv, shArgc := e.cpShellArgvFor(opts.shellFile, fileVal.Ref)
 		// mode 2: streaming (bit 0 clear) + shell/verbatim (bit 1).
 		cp := e.cpSpawnCall(shFile, shArgv, shArgc, 2|optBits, opts.cwdRef, opts.envRef, opts.timeoutRef, opts.killSig)
 		return Value{Ref: cp, Ty: ChildProcessType()}, nil
@@ -610,30 +417,61 @@ func (e *Emitter) emitCPFork(args []ast.Expression, pos ast.Pos) (Value, error) 
 // emitCPExec implements exec(command, callback): runs command via `/bin/sh
 // -c`, buffering stdout/stderr, then fires callback(err, stdout, stderr).
 func (e *Emitter) emitCPExec(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: child_process.exec takes (command, callback)", pos.Line, pos.Col)
+	if len(args) < 2 || len(args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: child_process.exec takes (command, options?, callback)", pos.Line, pos.Col)
 	}
 	cmdVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
 	}
 	cmdVal = e.coerce(cmdVal, TypePtr)
+	opts, optBits, err := e.cpBufferedOptions(args[1:len(args)-1], pos)
+	if err != nil {
+		return Value{}, err
+	}
 	// argv = ["-c", command] via /bin/sh, or cmd.exe /d /s /c on Windows
-	shFile, argvPtr, shArgc := e.emitShellArgv(cmdVal.Ref)
+	shFile, argvPtr, shArgc := e.cpShellArgvFor(opts.shellFile, cmdVal.Ref)
 	// mode 3: buffered (bit 0) + shell/verbatim command line (bit 1) — on
 	// Windows the command reaches cmd.exe verbatim, not re-quoted (ADR-00740).
-	cp := e.cpSpawnCall(shFile, argvPtr, shArgc, 3, "null", "null", "0", 15)
-	if err := e.cpStoreExecCallback(cp, args[1], pos, "exec"); err != nil {
+	cp := e.cpSpawnCallMax(shFile, argvPtr, shArgc, 3|optBits, opts.cwdRef, opts.envRef, opts.timeoutRef, opts.killSig, opts.maxBufRef)
+	if err := e.cpStoreExecCallback(cp, args[len(args)-1], pos, "exec"); err != nil {
 		return Value{}, err
 	}
 	return Value{Ref: cp, Ty: ChildProcessType()}, nil
 }
 
+// cpBufferedOptions resolves exec/execFile's optional options object
+// (ADR-01080): the spawn set (cwd, env, timeout, killSignal, windowsHide,
+// detached, stdio) plus maxBuffer (Node's 1 MiB default) and a shell path.
+// Returns the options and the mode bits they set.
+func (e *Emitter) cpBufferedOptions(optArgs []ast.Expression, pos ast.Pos) (cpSpawnOpts, int, error) {
+	opts := cpSpawnOpts{cwdRef: "null", envRef: "null", timeoutRef: "0", killSig: 15, maxBufRef: strconv.Itoa(cpMaxBufferDefault)}
+	if len(optArgs) == 1 {
+		o, err := e.cpSpawnOptions(optArgs[0], pos)
+		if err != nil {
+			return cpSpawnOpts{}, 0, err
+		}
+		if o.maxBufRef == "0" {
+			o.maxBufRef = strconv.Itoa(cpMaxBufferDefault)
+		}
+		opts = o
+	}
+	optBits := 0
+	if opts.windowsHide {
+		optBits |= 4
+	}
+	if opts.detached {
+		optBits |= 8
+	}
+	optBits |= opts.stdioModes << 4
+	return opts, optBits, nil
+}
+
 // emitCPExecFile implements execFile(file, args?, callback): execvp's file
 // (no shell), buffering stdout/stderr, then fires callback(err, stdout, stderr).
 func (e *Emitter) emitCPExecFile(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 2 || len(args) > 3 {
-		return Value{}, fmt.Errorf("%d:%d: child_process.execFile takes (file, args?, callback)", pos.Line, pos.Col)
+	if len(args) < 2 || len(args) > 4 {
+		return Value{}, fmt.Errorf("%d:%d: child_process.execFile takes (file, args?, options?, callback)", pos.Line, pos.Col)
 	}
 	fileVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -642,14 +480,33 @@ func (e *Emitter) emitCPExecFile(args []ast.Expression, pos ast.Pos) (Value, err
 	fileVal = e.coerce(fileVal, TypePtr)
 	argsPtr, argsLen := "null", "0"
 	cbArg := args[len(args)-1]
-	if len(args) == 3 {
-		p, l, err := e.cpResolveArgv(args[1], pos, "execFile")
-		if err != nil {
+	middle := args[1 : len(args)-1]
+	if len(middle) >= 1 {
+		if _, isObj := middle[0].(*ast.ObjectLiteral); !isObj {
+			p, l, err := e.cpResolveArgv(middle[0], pos, "execFile")
+			if err != nil {
+				return Value{}, err
+			}
+			argsPtr, argsLen = p, l
+			middle = middle[1:]
+		}
+	}
+	opts, optBits, err := e.cpBufferedOptions(middle, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	if opts.shell {
+		if argsPtr != "null" {
+			return Value{}, fmt.Errorf("%d:%d: child_process.execFile with shell takes the whole command as one string — put the arguments in the command, or drop shell", pos.Line, pos.Col)
+		}
+		shFile, shArgv, shArgc := e.cpShellArgvFor(opts.shellFile, fileVal.Ref)
+		cp := e.cpSpawnCallMax(shFile, shArgv, shArgc, 3|optBits, opts.cwdRef, opts.envRef, opts.timeoutRef, opts.killSig, opts.maxBufRef)
+		if err := e.cpStoreExecCallback(cp, cbArg, pos, "execFile"); err != nil {
 			return Value{}, err
 		}
-		argsPtr, argsLen = p, l
+		return Value{Ref: cp, Ty: ChildProcessType()}, nil
 	}
-	cp := e.cpSpawnCall(fileVal.Ref, argsPtr, argsLen, 1, "null", "null", "0", 15)
+	cp := e.cpSpawnCallMax(fileVal.Ref, argsPtr, argsLen, 1|optBits, opts.cwdRef, opts.envRef, opts.timeoutRef, opts.killSig, opts.maxBufRef)
 	if err := e.cpStoreExecCallback(cp, cbArg, pos, "execFile"); err != nil {
 		return Value{}, err
 	}

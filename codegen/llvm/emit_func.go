@@ -383,12 +383,9 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		// A body that awaited runs as a coroutine (TDD-00223 §2).
 		e.writeAsyncDefinition(llvmName, strings.Join(llvmParams, ", "), e.sawAwait)
 	} else {
-		// Non-async: void → ret void; non-void → unreachable fallthrough.
-		if retType.IR == "void" {
-			e.emitTerminator("ret void")
-		} else {
-			e.emitTerminator("unreachable")
-		}
+		// Non-async: falling off the end returns `undefined`/the zero of the
+		// return type (emitValuelessRet, ADR-01061) — never `unreachable`.
+		e.emitValuelessRet()
 		e.functions.WriteString(fmt.Sprintf("\ndefine %s @%s(%s) {\nentry:\n",
 			retType.LLVMRetType(), llvmName, strings.Join(llvmParams, ", ")))
 	}
@@ -2120,7 +2117,10 @@ func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type
 func elemKindKeyBroad(t Type) string {
 	switch {
 	case t.IsArray:
-		return "array"
+		// Two arrays are the same kind only when their storage is (ADR-01059):
+		// `[[7], new Int32Array([8])]` used to unify to `number[][]` and read the
+		// Int32Array's i32 bits as doubles.
+		return "array:" + arrayStorageKey(t)
 	case t.IsObject || t.IsClass:
 		return "object"
 	case t.IR == "i1":
@@ -2134,6 +2134,72 @@ func elemKindKeyBroad(t Type) string {
 	default:
 		return "other"
 	}
+}
+
+// arrayStorageKey names an array type's element storage — element IR, the
+// typed-array family (plain / TypedArray / Uint8ClampedArray / BigInt64Array)
+// and, for a nested array element, its own storage recursively — so two
+// arrays with the same key can share one buffer and two with different keys
+// never silently do (ADR-01059).
+func arrayStorageKey(t Type) string {
+	if t.ElemType == nil {
+		return "?"
+	}
+	el := *t.ElemType
+	k := el.IR
+	switch {
+	case el.IsArray:
+		k = "[" + arrayStorageKey(el) + "]"
+	case el.IsDynamic:
+		k = "any"
+	}
+	switch {
+	case t.Clamped:
+		k += "/clamped"
+	case t.BigIntElem:
+		k += "/bigint"
+	case t.IsBuffer:
+		k += "/buffer"
+	case t.IsTypedArray:
+		k += "/typed"
+	}
+	return k
+}
+
+// arrayTypeName names an array type for a diagnostic: `Int32Array`, `Buffer`,
+// `number[]`, `string[][]`, `any[]`.
+func arrayTypeName(t Type) string {
+	switch {
+	case t.IsBuffer:
+		return "Buffer"
+	case t.IsTypedArray:
+		if n := typedArrayConstructorName(t); n != "" {
+			return n
+		}
+		return "TypedArray"
+	case t.ElemType == nil:
+		return "array"
+	}
+	el := *t.ElemType
+	switch {
+	case el.IsArray:
+		return arrayTypeName(el) + "[]"
+	case el.IsDynamic:
+		return "any[]"
+	case el.IR == "i1":
+		return "boolean[]"
+	case isStringTy(el) && !el.IsObject && !el.IsClass:
+		return "string[]"
+	case el.Float || el.IsInteger():
+		return "number[]"
+	}
+	return el.IR + "[]"
+}
+
+// arrayStorageCompatible reports whether a value of array type a can be stored
+// where array type b is expected without reinterpreting its buffer.
+func arrayStorageCompatible(a, b Type) bool {
+	return arrayStorageKey(a) == arrayStorageKey(b)
 }
 
 // isHeterogeneousElems reports whether a set of inferred element-contribution
@@ -2522,6 +2588,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	// different problem (an env slot holds one heap-cell pointer, not a
 	// (ptr, i64) pair) not attempted here.
 	paramStr := "ptr %env"
+	boxParams := e.closureBoxOnEntry
 	for i, p := range af.Params {
 		pty := paramTypes[i]
 		if pty.IsArray {
@@ -2568,6 +2635,23 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
 			if err := e.unpackObjectPatternInto(objPtrReg, pty, p.ObjectPattern, af.GetPos()); err != nil {
 				return err
+			}
+			continue
+		}
+		if boxParams[i] {
+			// An `any`-annotated parameter with a concrete ABI type: box the
+			// incoming value and bind the name as `any` (ADR-01080).
+			boxed, err := e.emitBoxValue(Value{Ref: "%p_" + p.Name, Ty: pty})
+			if err != nil {
+				return err
+			}
+			anyPtr := "%va_" + p.Name
+			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", anyPtr))
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, anyPtr))
+			if e.hoistedCaptures[p.Name] {
+				e.boxHoistedCapture(p.Name, TypeAny, boxed.Ref, false, true)
+			} else {
+				e.define(p.Name, Symbol{Ptr: anyPtr, Ty: TypeAny})
 			}
 			continue
 		}
@@ -2621,10 +2705,8 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			// inside the block already branched to coroRetLabel itself
 			// (emitReturn's async-aware path).
 			e.emitInlineAsyncEpilogue()
-		} else if retTy.IR == "void" {
-			e.emitTerminator("ret void")
 		} else {
-			e.emitTerminator("unreachable")
+			e.emitValuelessRet() // fall-off returns undefined/zero (ADR-01061)
 		}
 	} else if af.Body != nil {
 		if af.IsAsync {
@@ -2977,7 +3059,7 @@ func (e *Emitter) inferUnannotatedReturnType(block *ast.BlockStatement, paramNam
 	defineArgumentsForInference(e, paramNames)
 	inferred := e.inferCandidateReturnExpr(block, retExpr)
 	e.popScope()
-	return inferred, true
+	return widenIfMayFallOff(block, inferred), true
 }
 
 // inferCandidateReturnExpr infers retExpr's type via inferBlockReturnExpr,
@@ -3043,7 +3125,12 @@ func (e *Emitter) inferUnannotatedReturnTypeParams(block *ast.BlockStatement, pa
 	defineArgumentsForInference(e, names)
 	inferred := e.inferCandidateReturnExpr(block, retExpr)
 	e.popScope()
-	return inferred, true
+	// Widened exactly as the name-bound sibling above: inferExprType's
+	// ArrowFunction case goes through inferUnannotatedReturnType, so the
+	// closure's *emitted* return type (this path) must agree or an indirect
+	// call reads a `{ i1, T }` from a define that returned a bare T
+	// (ADR-01065).
+	return widenIfMayFallOff(block, inferred), true
 }
 
 // inferBlockReturnExpr infers the type of a block's first return expression,
@@ -3065,6 +3152,14 @@ func (e *Emitter) defineForInference(vd *ast.VarDeclaration) {
 }
 
 func (e *Emitter) inferBlockReturnExpr(block *ast.BlockStatement, retExpr ast.Expression) Type {
+	// A `var` declared in a nested block is function-scoped and widened to
+	// `T | undefined` at emission (hoistedVarMaySkip, ADR-01057); bind it the
+	// same way so `if (c) { var q = 3 } return q` infers the widened type and
+	// the return carries a real `undefined` rather than unwrapping to zero.
+	// Bound first so a same-named top-level declaration below wins.
+	for _, st := range block.Body {
+		e.defineNestedVarsForInference(st, false)
+	}
 	for _, st := range block.Body {
 		switch vd := st.(type) {
 		case *ast.VarDeclaration:
@@ -3097,6 +3192,90 @@ func (e *Emitter) inferBlockReturnExpr(block *ast.BlockStatement, retExpr ast.Ex
 		}
 	}
 	return e.inferExprType(retExpr)
+}
+
+// defineNestedVarsForInference binds, for return-type inference, every `var`
+// declared inside a block nested under s (never s itself when it is a
+// top-level declaration — those bind through defineForInference with their
+// plain type) with the widened `T | undefined` type emitVarDecl gives a
+// skippable `var` (hoistedVarMaySkip). `nested` says whether s already sits
+// inside a nested block; a `for` init clause is exempt, as at emission.
+// Nested function bodies are their own scope and are not entered.
+func (e *Emitter) defineNestedVarsForInference(s ast.Statement, nested bool) {
+	if s == nil {
+		return
+	}
+	bind := func(vd *ast.VarDeclaration) {
+		if vd.Kind != "var" {
+			return
+		}
+		var ty Type
+		if vd.TypeAnnot != nil {
+			ty = e.resolveType(vd.TypeAnnot)
+		} else if vd.Init != nil {
+			ty = e.inferExprType(vd.Init)
+			if nl, ok := vd.Init.(*ast.NumberLiteral); ok && !nl.IsBigInt {
+				ty = TypeF64
+			}
+		} else {
+			return
+		}
+		if ty.IsDynamic || ty.IR == "void" || ty.IR == "" {
+			return
+		}
+		e.define(vd.Name, Symbol{Ty: indexReadType(ty)})
+	}
+	block := func(b *ast.BlockStatement) {
+		if b == nil {
+			return
+		}
+		for _, st := range b.Body {
+			e.defineNestedVarsForInference(st, true)
+		}
+	}
+	switch n := s.(type) {
+	case *ast.VarDeclaration:
+		if nested {
+			bind(n)
+		}
+	case *ast.VarDeclarationList:
+		if nested {
+			for _, d := range n.Decls {
+				bind(d)
+			}
+		}
+	case *ast.BlockStatement:
+		block(n)
+	case *ast.IfStatement:
+		e.defineNestedVarsForInference(n.Consequent, true)
+		e.defineNestedVarsForInference(n.Alternate, true)
+	case *ast.ForStatement:
+		// The init clause runs whenever the loop is reached: not widened.
+		e.defineNestedVarsForInference(n.Init, nested)
+		e.defineNestedVarsForInference(n.Body, true)
+	case *ast.ForOfStatement:
+		e.defineNestedVarsForInference(n.Body, true)
+	case *ast.ForInStatement:
+		e.defineNestedVarsForInference(n.Body, true)
+	case *ast.WhileStatement:
+		e.defineNestedVarsForInference(n.Body, true)
+	case *ast.DoWhileStatement:
+		e.defineNestedVarsForInference(n.Body, true)
+	case *ast.SwitchStatement:
+		for _, c := range n.Cases {
+			for _, cs := range c.Body {
+				e.defineNestedVarsForInference(cs, true)
+			}
+		}
+	case *ast.TryStatement:
+		block(n.Body)
+		if n.Catch != nil {
+			block(n.Catch.Body)
+		}
+		block(n.Finally)
+	case *ast.LabeledStatement:
+		e.defineNestedVarsForInference(n.Body, nested)
+	}
 }
 
 // definePatternParamForInference binds a parameter's names into the current
@@ -3154,6 +3333,7 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 
 	// Resolve param types: use hint when no annotation is present.
 	paramTypes := make([]Type, len(af.Params))
+	boxOnEntry := map[int]bool{}
 	for i, p := range af.Params {
 		if p.Rest && p.Type == nil {
 			// Same default rest-element type buildFunctionSig (emitter.go)
@@ -3170,6 +3350,17 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 			paramTypes[i].Inferred = true // no annotation, no hint — see docs/adr/ADR-00042.md
 		} else {
 			paramTypes[i] = e.resolveType(p.Type)
+			// `(err: any) => …` handed to a runtime that calls with a concrete
+			// type (a child_process callback's errorObjType, a fs callback's
+			// string): the hint is the ABI, and the body sees the value boxed
+			// into a real `any` on entry (ADR-01080) — otherwise the raw pointer
+			// bits land in the i64 slot as a string-kind box.
+			if isUnconstrainedDynamic(paramTypes[i]) && i < len(hints) && !hints[i].IsDynamic &&
+				hints[i].IR != "" && hints[i].IR != "void" && !hints[i].IsArray && !isNullableScalar(hints[i]) &&
+				p.ArrayPattern == nil && p.ObjectPattern == nil {
+				paramTypes[i] = hints[i]
+				boxOnEntry[i] = true
+			}
 		}
 		// An optional `x?: T` parameter reads as `T | undefined` in the body
 		// (TDD-00187), the same widening a named function's signature gets — so an
@@ -3244,7 +3435,11 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 	// Emit the LLVM function for this closure.
 	closureName := fmt.Sprintf("@__closure_%d", e.closureCtr)
 	e.closureCtr++
-	if err := e.emitClosureFunc(af, caps, retTy, paramTypes, closureName); err != nil {
+	savedBoxOnEntry := e.closureBoxOnEntry
+	e.closureBoxOnEntry = boxOnEntry
+	err = e.emitClosureFunc(af, caps, retTy, paramTypes, closureName)
+	e.closureBoxOnEntry = savedBoxOnEntry
+	if err != nil {
 		return Value{}, err
 	}
 
@@ -3847,10 +4042,8 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	e.emitFreesAbove(0) // TDD-00173: fall-off-the-end frees
 	if fe.IsAsync {
 		e.emitInlineAsyncEpilogue()
-	} else if retTy.IR == "void" {
-		e.emitTerminator("ret void")
 	} else {
-		e.emitTerminator("unreachable")
+		e.emitValuelessRet() // fall-off returns undefined/zero (ADR-01061)
 	}
 
 	// Write the function into e.functions — exactly the same
@@ -4823,7 +5016,9 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 				tyParts = append(tyParts, "ptr", "i64")
 				continue
 			}
-			tyParts = append(tyParts, p.IR)
+			// A nullable-scalar parameter crosses the call as its { i1, T }
+			// aggregate (nullableScalarParamDecl), not the bare payload.
+			tyParts = append(tyParts, storageIR(p))
 		}
 		fnType := "(" + strings.Join(tyParts, ", ") + ")"
 
@@ -4853,7 +5048,7 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 				continue
 			}
-			argParts = append(argParts, params[i].IR+" "+v.Ref)
+			argParts = append(argParts, storageIR(params[i])+" "+v.Ref)
 		}
 		// Overflow arguments packed into the trailing rest slot (TDD-00210): a
 		// boxed `any[]` for the implicit `arguments` rest, or an explicit
@@ -4911,7 +5106,7 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 				continue
 			}
-			argParts = append(argParts, params[i].IR+" "+v.Ref)
+			argParts = append(argParts, storageIR(params[i])+" "+v.Ref)
 		}
 		// Overflow into the trailing rest slot (TDD-00210) — same as the
 		// cbClosure branch; a named function used as a callback packs its rest

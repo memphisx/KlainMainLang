@@ -62,3 +62,17 @@ class CountTo3 {
 for (const n of new CountTo3()) {
     console.log(n)             // 0, then 1, then 2
 }
+
+// --- A body that can fall off the end yields undefined on that path ---
+// The unannotated return type is inferred as `boolean | undefined`, exactly as
+// tsc infers it; a bare `return;` is the same absent value.
+function isBig(x: number) {
+    if (x > 100) return true
+}
+function describe(x: number) {
+    if (x === 1) return "one"
+    if (x === 2) return
+    return "many"
+}
+console.log(isBig(500), isBig(5), isBig(5) === undefined)   // true undefined true
+console.log(describe(1), describe(2), describe(3))          // one undefined many

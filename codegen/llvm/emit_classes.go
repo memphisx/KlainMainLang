@@ -2083,11 +2083,7 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 		// An async method whose body awaited runs as a coroutine (TDD-00223 §2).
 		e.writeAsyncDefinition(llvmName, strings.Join(llvmParams, ", "), e.sawAwait)
 	} else {
-		if retType.IR == "void" {
-			e.emitTerminator("ret void")
-		} else {
-			e.emitTerminator("unreachable")
-		}
+		e.emitValuelessRet() // fall-off returns undefined/zero (ADR-01061)
 		e.functions.WriteString(fmt.Sprintf("\ndefine %s @%s(%s) {\nentry:\n",
 			retType.LLVMRetType(), llvmName, strings.Join(llvmParams, ", ")))
 	}

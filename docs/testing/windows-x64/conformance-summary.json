@@ -23,11 +23,11 @@
       "lanes": {
         "js": {
           "overall": {
-            "pass": 7109,
+            "pass": 7424,
             "total": 53578
           },
           "inScope": {
-            "pass": 6944,
+            "pass": 7244,
             "total": 42942
           },
           "pending": {
@@ -35,22 +35,21 @@
             "total": 2860
           },
           "byPhase": {
-            "clang": 5,
-            "compile": 43638,
-            "neg-accepted": 868,
-            "other": 143,
-            "run-timeout": 11,
-            "runtime": 1705,
-            "strict-reject": 99
+            "clang": 1,
+            "compile": 43513,
+            "neg-accepted": 774,
+            "other": 119,
+            "runtime": 1647,
+            "strict-reject": 100
           }
         },
         "strict": {
           "overall": {
-            "pass": 6617,
+            "pass": 6901,
             "total": 53578
           },
           "inScope": {
-            "pass": 6474,
+            "pass": 6750,
             "total": 42942
           },
           "pending": {
@@ -58,13 +57,12 @@
             "total": 2860
           },
           "byPhase": {
-            "clang": 3,
-            "compile": 44254,
-            "neg-accepted": 853,
-            "other": 109,
-            "run-timeout": 3,
-            "runtime": 1050,
-            "strict-reject": 689
+            "clang": 1,
+            "compile": 44112,
+            "neg-accepted": 759,
+            "other": 103,
+            "runtime": 1012,
+            "strict-reject": 690
           }
         }
       }

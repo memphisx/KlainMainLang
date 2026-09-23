@@ -267,7 +267,10 @@ func (e *Emitter) autoFreeOwningInit(init ast.Expression, explicit bool) bool {
 			}
 			if escFreshMethodResults[m.Property] {
 				rt := e.inferExprType(m.Object)
-				if rt.IsArray || (isStringTy(rt) && !rt.IsDynamic) || rt.IsMap || rt.IsSet {
+				// The strict string test: a Blob/URL/TypedArray handle is a `ptr`
+				// too, and its `slice` is not a fresh string (a Blob's slice
+				// was freed as one — `free(): invalid pointer` under -mm=auto).
+				if rt.IsArray || isForOfStringTy(rt.withoutNullable()) || rt.IsMap || rt.IsSet {
 					return true
 				}
 			}
