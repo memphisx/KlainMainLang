@@ -63,13 +63,12 @@ func ffiCbValidate(sig *FFISignature, params []Type, ret *Type, pos ast.Pos) (st
 			if l != 'i' && l != 'd' {
 				return "", fmt.Errorf("%d:%d: registerCallback: parameter %d must be a number for FFI type '%s'", pos.Line, pos.Col, i+1, c)
 			}
-		case "int64", "uint64", "pointer", "function", "buffer", "arraybuffer":
+		case "int64", "uint64", "pointer", "function", "buffer", "arraybuffer", "string":
+			// `string` is pointer-like into a callback too: Node hands the C
+			// `char*` to the closure as a raw pointer bigint, not a JS string
+			// (klain:ffi would add marshalling — TDD-00190).
 			if l != 'b' {
 				return "", fmt.Errorf("%d:%d: registerCallback: parameter %d must be a bigint for FFI type '%s' (64-bit values and pointers marshal as bigint)", pos.Line, pos.Col, i+1, c)
-			}
-		case "string":
-			if l != 's' {
-				return "", fmt.Errorf("%d:%d: registerCallback: parameter %d must be a string for FFI type 'string'", pos.Line, pos.Col, i+1)
 			}
 		}
 		letters = append(letters, l)
@@ -89,13 +88,12 @@ func ffiCbValidate(sig *FFISignature, params []Type, ret *Type, pos ast.Pos) (st
 		if rl != 'b' && rl != 'i' {
 			return "", fmt.Errorf("%d:%d: registerCallback: the callback must return a bigint (or number) for FFI return type '%s'", pos.Line, pos.Col, sig.Ret)
 		}
-	case "pointer", "function":
+	case "pointer", "function", "string":
+		// A `string` return from a callback is pointer-like: Node requires the
+		// closure to return the pointer bigint (returning a JS string aborts
+		// with "Callback returned invalid value for declared FFI type").
 		if rl != 'b' {
 			return "", fmt.Errorf("%d:%d: registerCallback: the callback must return a bigint for FFI return type '%s'", pos.Line, pos.Col, sig.Ret)
-		}
-	case "string":
-		if rl != 's' {
-			return "", fmt.Errorf("%d:%d: registerCallback: the callback must return a string for FFI return type 'string'", pos.Line, pos.Col)
 		}
 	}
 	return string(letters) + string(rl), nil
@@ -212,21 +210,13 @@ func (e *Emitter) ffiCbWrapperDef(name, tab string, slot int, sig *FFISignature,
 		case "uint64":
 			v = r()
 			fmt.Fprintf(&b, "  %s = call ptr @__kml_bigint_from_u64(i64 %s)\n", v, cReg)
-		case "pointer", "function", "buffer", "arraybuffer":
+		case "pointer", "function", "buffer", "arraybuffer", "string":
+			// `string` included: a C `char*` reaches the closure as its raw
+			// pointer bigint (Node's behavior; no char*→JS-string marshalling).
 			ai := r()
 			fmt.Fprintf(&b, "  %s = ptrtoint ptr %s to i64\n", ai, cReg)
 			v = r()
 			fmt.Fprintf(&b, "  %s = call ptr @__kml_bigint_from_u64(i64 %s)\n", v, ai)
-		case "string":
-			// NULL-safe: pass null through untouched.
-			isN := r()
-			fmt.Fprintf(&b, "  %s = icmp eq ptr %s, null\n", isN, cReg)
-			fmt.Fprintf(&b, "  br i1 %s, label %%snull%d, label %%sconv%d\nsconv%d:\n", isN, i, i, i)
-			sv := r()
-			fmt.Fprintf(&b, "  %s = call ptr @__kml_str_from_cstr(ptr %s)\n", sv, cReg)
-			fmt.Fprintf(&b, "  br label %%sdone%d\nsnull%d:\n  br label %%sdone%d\nsdone%d:\n", i, i, i, i)
-			v = r()
-			fmt.Fprintf(&b, "  %s = phi ptr [ %s, %%sconv%d ], [ null, %%snull%d ]\n", v, sv, i, i)
 		}
 		// Numeric letter conversion: the C value normalized above is i64 for
 		// ints, double for floats — flip if the closure declared the other.
@@ -292,14 +282,14 @@ func (e *Emitter) ffiCbWrapperDef(name, tab string, slot int, sig *FFISignature,
 			fmt.Fprintf(&b, "  %s = sitofp i64 %s to double\n", v, res)
 		}
 		fmt.Fprintf(&b, "  ret double %s\ndead:\n  ret double 0.000000e+00\n}", v)
-	case "pointer", "function":
+	case "pointer", "function", "string":
+		// `string` return is pointer-like: the closure yields a pointer bigint,
+		// converted back to the C `char*` (Node aborts on a JS-string return).
 		ai := r()
 		fmt.Fprintf(&b, "  %s = call i64 @__kml_bigint_to_u64(ptr %s)\n", ai, res)
 		out := r()
 		fmt.Fprintf(&b, "  %s = inttoptr i64 %s to ptr\n", out, ai)
 		fmt.Fprintf(&b, "  ret ptr %s\ndead:\n  ret ptr null\n}", out)
-	case "string":
-		fmt.Fprintf(&b, "  ret ptr %s\ndead:\n  ret ptr null\n}", res)
 	}
 	return b.String()
 }
@@ -333,7 +323,7 @@ func (e *Emitter) emitFFIRegisterCallback(args []ast.Expression, pos ast.Pos) (V
 		params = cb.sig.ParamTypes
 		rt := cb.sig.RetType
 		ret = &rt
-		hdr = e.emitNamedFuncValue(cb.name, cb.sig).Ref
+		hdr = e.emitNamedFuncValue(cb.name, cb.sig, cb.name).Ref
 	}
 	abi, err := ffiCbValidate(sig, params, ret, pos)
 	if err != nil {

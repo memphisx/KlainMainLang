@@ -15,7 +15,7 @@ func TestE2EFsReadFileSyncOnDirectoryThrowsEISDIR(t *testing.T) {
 	src := fmt.Sprintf(`
 import fs from 'fs'
 try {
-    const content: string = fs.readFileSync(%q)
+    const content: string = fs.readFileSync(%q, 'utf8')
     console.log("NO THROW len=" + content.length)
 } catch (e) {
     console.log((e as any).code)

@@ -120,7 +120,7 @@
       "params": [{ "name": "regexp", "type": "RegExp", "desc": "The pattern to match." }],
       "returns": { "type": "string[] | null", "desc": "Match array, or null." },
       "exampleKey": "regexp/regexp",
-      "snippet": "const allDigits = \"a1 b22 c333\".match(/\\d+/g)\nif (allDigits !== null) { console.log(allDigits.length) } // 3\nconsole.log(\"nothing\".match(/\\d+/g) === null) // 1",
+      "snippet": "const allDigits = \"a1 b22 c333\".match(/\\d+/g)\nif (allDigits !== null) { console.log(allDigits.length) } // 3\nconsole.log(\"nothing\".match(/\\d+/g) === null) // true",
       "differences": [
         "Shares `.exec()`'s result-array narrowing (an unmatched optional capture group becomes `\"\"`, not per-element `null`; no `index`/`input`/`groups`)"
       ],

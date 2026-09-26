@@ -35,7 +35,7 @@ func (e *Emitter) ensureReadlineRuntime() {
 	e.ensureFcntlDecl()
 	e.ensureWorkerFdSetbit() // shared @__kml_worker_fd_setbit
 
-	nonblock := httpNonblockFlag()
+	nonblock := e.httpNonblockFlag()
 
 	e.ensureStrHeaderRuntime()
 	e.emitGlobal("@__kml_rl_active = internal global ptr null, align 8")

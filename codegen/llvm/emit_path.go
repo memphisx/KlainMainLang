@@ -1,13 +1,14 @@
 // emit_path.go — Node's `path` module: join, resolve, dirname, basename,
 // extname, parse, format, isAbsolute, sep, delimiter. Two flavours
 // (TDD-00178): the posix algorithms live here and in runtime_path.go as
-// hand-written IR; the win32 algorithms are the C sidecar behind
-// path_win32.go. A bare `path.X` is the host's flavour, `path.posix.X` and
+// hand-written IR (format shares the sidecar's _format); the win32
+// algorithms are the C sidecar behind path_win32.go. A bare `path.X` is the host's flavour, `path.posix.X` and
 // `path.win32.X` name one explicitly — pathFlavorOf() resolves the object.
 package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -301,12 +302,10 @@ func (e *Emitter) emitPathParse(f pathFlavor, args []ast.Expression, pos ast.Pos
 	return Value{Ref: objReg, Ty: ty}, nil
 }
 
-// emitPathFormat implements path.format(pathObject): the inverse of
-// path.parse, following real Node's own algorithm — base wins over
-// name+ext when base is non-empty; dir falls back to root when dir is
-// empty; the result is just base when dir is also empty; dir and base are
-// joined directly (no separator) when dir equals root (e.g. "/" + "foo" is
-// "/foo", not "//foo"), otherwise joined with '/'.
+// emitPathFormat implements path.format(pathObject) through the sidecar's
+// copy of Node's _format: base wins over name+ext (ext gains a leading dot),
+// dir falls back to root, and dir and base join with the separator unless
+// dir is root. An absent or undefined field is NULL, read as empty.
 func (e *Emitter) emitPathFormat(f pathFlavor, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: path.format takes exactly 1 argument", pos.Line, pos.Col)
@@ -319,124 +318,28 @@ func (e *Emitter) emitPathFormat(f pathFlavor, args []ast.Expression, pos ast.Po
 	if err != nil {
 		return Value{}, err
 	}
-	readField := func(name string) (Value, error) {
+	fields := make([]string, 0, 5)
+	for _, name := range []string{"root", "dir", "base", "ext", "name"} {
 		idx, fieldTy, ok := objTy.FieldIndex(name)
 		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: path.format's argument has no field '%s' (expected the shape returned by path.parse)", pos.Line, pos.Col, name)
+			fields = append(fields, "ptr null")
+			continue
+		}
+		if fieldTy.IR != "ptr" {
+			return Value{}, fmt.Errorf("%d:%d: path.format's '%s' field must be a string", pos.Line, pos.Col, name)
 		}
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, objTy.StructIR(), objVal.Ref, idx))
-		result := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, fieldTy.IR, gep, fieldTy.Align()))
-		return Value{Ref: result, Ty: fieldTy}, nil
+		v := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", v, gep))
+		fields = append(fields, "ptr "+v)
 	}
-	rootV, err := readField("root")
-	if err != nil {
-		return Value{}, err
-	}
-	dirV, err := readField("dir")
-	if err != nil {
-		return Value{}, err
-	}
-	baseV, err := readField("base")
-	if err != nil {
-		return Value{}, err
-	}
-	extV, err := readField("ext")
-	if err != nil {
-		return Value{}, err
-	}
-	nameV, err := readField("name")
-	if err != nil {
-		return Value{}, err
-	}
+	fn := "__kml_path_posix_format"
 	if f == pathWin32 {
-		e.ensurePathWin32()
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_format(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)", r, rootV.Ref, dirV.Ref, baseV.Ref, extV.Ref, nameV.Ref))
-		return Value{Ref: r, Ty: TypePtr}, nil
+		fn = "__kml_path_win32_format"
 	}
-
-	e.ensureStrlen()
-	e.ensureStrcmp()
-
-	baseLenReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", baseLenReg, baseV.Ref))
-	baseNonEmpty := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", baseNonEmpty, baseLenReg))
-	baseFinalRef, err := e.emitStrBranch(baseNonEmpty,
-		func() (string, error) { return baseV.Ref, nil },
-		func() (string, error) {
-			combined, err := e.emitStringConcat(nameV, extV)
-			if err != nil {
-				return "", err
-			}
-			return combined.Ref, nil
-		},
-	)
-	if err != nil {
-		return Value{}, err
-	}
-
-	dirLenReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", dirLenReg, dirV.Ref))
-	dirNonEmpty := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", dirNonEmpty, dirLenReg))
-	dirFinalRef, err := e.emitStrBranch(dirNonEmpty,
-		func() (string, error) { return dirV.Ref, nil },
-		func() (string, error) { return rootV.Ref, nil },
-	)
-	if err != nil {
-		return Value{}, err
-	}
-
-	dirFinalLenReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", dirFinalLenReg, dirFinalRef))
-	dirFinalEmpty := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", dirFinalEmpty, dirFinalLenReg))
-
-	noDirL := e.freshLabel("pathformat.nodir")
-	hasDirL := e.freshLabel("pathformat.hasdir")
-	mergeL := e.freshLabel("pathformat.merge")
-	resPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", dirFinalEmpty, noDirL, hasDirL))
-
-	e.emitLabel(noDirL)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", baseFinalRef, resPtr))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-
-	e.emitLabel(hasDirL)
-	sameAsRootReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", sameAsRootReg, dirFinalRef, rootV.Ref))
-	sameAsRoot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", sameAsRoot, sameAsRootReg))
-	rootJoinL := e.freshLabel("pathformat.rootjoin")
-	sepJoinL := e.freshLabel("pathformat.sepjoin")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", sameAsRoot, rootJoinL, sepJoinL))
-
-	e.emitLabel(rootJoinL)
-	joined1, err := e.emitStringConcat(Value{Ref: dirFinalRef, Ty: TypePtr}, Value{Ref: baseFinalRef, Ty: TypePtr})
-	if err != nil {
-		return Value{}, err
-	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", joined1.Ref, resPtr))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-
-	e.emitLabel(sepJoinL)
-	withSep, err := e.emitStringConcat(Value{Ref: dirFinalRef, Ty: TypePtr}, Value{Ref: e.internString("/"), Ty: TypePtr})
-	if err != nil {
-		return Value{}, err
-	}
-	joined2, err := e.emitStringConcat(withSep, Value{Ref: baseFinalRef, Ty: TypePtr})
-	if err != nil {
-		return Value{}, err
-	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", joined2.Ref, resPtr))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-
-	e.emitLabel(mergeL)
-	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
-	return Value{Ref: result, Ty: TypePtr}, nil
+	e.ensurePathWin32()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @%s(%s)", r, fn, strings.Join(fields, ", ")))
+	return Value{Ref: r, Ty: TypePtr}, nil
 }

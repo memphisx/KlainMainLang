@@ -234,7 +234,7 @@ console.log(b.value);
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}
-	if n := strings.Count(ir, "define void @Box__num_constructor("); n != 1 {
+	if n := strings.Count(ir, "define void @Box__num__kml_ctor("); n != 1 {
 		t.Fatalf("expected exactly one specialization of Box's constructor for number, got %d\n%s", n, ir)
 	}
 }

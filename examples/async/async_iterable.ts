@@ -81,7 +81,7 @@ async function main(): Promise<void> {
       console.log(v)
     }
   } catch (e) {
-    console.log("caught " + e.message)  // caught stream failed
+    console.log("caught " + (e as Error).message)  // caught stream failed
   }
 
   // for await also works over a sync array — each element is awaited, so an

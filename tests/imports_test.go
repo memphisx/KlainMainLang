@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -427,6 +428,40 @@ console.log(add(2, 3))
 	}, "main.ts", "5")
 }
 
+// A local export list (`export { a, b as c }`) exports the file's own
+// declarations; `export {}` exports nothing.
+func TestE2EExportListLocal(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"lib.ts": `
+const base = 40
+function add(a: number, b: number): number { return a + b }
+class Pt { constructor(public x: number) {} }
+export { base, add as plus, Pt }
+export {}
+`,
+		"main.ts": `
+import { base, plus, Pt } from './lib'
+console.log(plus(base, 2), new Pt(7).x)
+`,
+	}, "main.ts", "42 7")
+}
+
+func TestE2EExportListUndeclaredRejected(t *testing.T) {
+	err := resolveAndEmitMultiFile(t, map[string]string{
+		"lib.ts":  `export { missing }`,
+		"main.ts": `import { missing } from './lib'` + "\nconsole.log(missing)\n",
+	}, "main.ts")
+	if err == nil || !strings.Contains(err.Error(), "not declared") {
+		t.Fatalf("expected an undeclared-export error, got %v", err)
+	}
+}
+
+func TestE2EEmptyExportList(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"main.ts": "export {}\nconsole.log('module')\n",
+	}, "main.ts", "module")
+}
+
 func TestE2EReExportAliased(t *testing.T) {
 	assertMultiFileOutput(t, map[string]string{
 		"core.ts": `export function add(a: number, b: number): number { return a + b }`,
@@ -729,4 +764,41 @@ console.log(helperB())
 console.log(MAX)
 `,
 	}, "main.ts", "1\n2\n100")
+}
+
+// Type-only imports and exports: `import type`, a `type` specifier,
+// `export type { … }` (local and re-export) and a builtin module's types, all
+// erased; a value use of a type-only import is tsc's TS1361.
+func TestE2ETypeOnlyImportsAndExports(t *testing.T) {
+	files := map[string]string{
+		"shapes.ts": `
+export interface Box { w: number; h: number }
+interface Side { s: string }
+export type { Side }
+export function area(b: Box): number { return b.w * b.h }
+`,
+		"reexp.ts": `export type { Box } from './shapes'`,
+		"main.ts": `
+import type { Box } from './shapes'
+import { type Side, area } from './shapes'
+import type { Box as B2 } from './reexp'
+import type { IncomingMessage } from 'http'
+import { type ParsedPath, basename } from 'path'
+import type from './named'
+const b: Box = { w: 2, h: 3 }
+const c: B2 = { w: 1, h: 1 }
+const s: Side = { s: "x" }
+function method(req: IncomingMessage): string { return req.method ?? "" }
+console.log(area(b), area(c), s.s, basename("/x/y.ts"), typeof method, type)
+`,
+		"named.ts": `export default "a default named type"`,
+	}
+	assertMultiFileOutput(t, files, "main.ts", "6 1 x y.ts function a default named type")
+	_, err := resolveMultiFile(t, map[string]string{
+		"shapes.ts": `export function area(w: number): number { return w * w }`,
+		"main.ts":   "import type { area } from './shapes'\nconsole.log(area(2))\n",
+	}, "main.ts")
+	if err == nil || !strings.Contains(err.Error(), "'area' cannot be used as a value because it was imported using 'import type'") {
+		t.Fatalf("expected TS1361, got %v", err)
+	}
 }

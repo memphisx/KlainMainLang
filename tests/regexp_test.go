@@ -118,7 +118,7 @@ try {
   const r = new RegExp("(unterminated", "")
   console.log("no throw")
 } catch (e) {
-  console.log(e.name)
+  console.log((e as Error).name)
 }
 `, "SyntaxError")
 }
@@ -155,7 +155,7 @@ try {
   const r = new RegExp("[a-", "")
   console.log("no throw")
 } catch (e) {
-  console.log(e.name)
+  console.log((e as Error).name)
 }
 `, "SyntaxError")
 }
@@ -480,19 +480,19 @@ try {
   const willThrow = "abc".matchAll(bad)
   console.log("no throw - wrong")
 } catch (e) {
-  console.log(e.name)
+  console.log((e as Error).name)
 }
 `, "TypeError")
 }
 
-func TestE2EStringMatchRejectsNonRegExpArgument(t *testing.T) {
-	_, err := parseAndCompile(`
-const m = "abc".match("a")
-console.log(m)
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for match() called with a non-RegExp argument (no implicit string-to-RegExp coercion)")
-	}
+// A non-RegExp match()/matchAll() argument is compiled as
+// `new RegExp(String(arg))`, matchAll's global, as real JS coerces it.
+func TestE2EStringMatchCoercesNonRegExpArgument(t *testing.T) {
+	assertOutput(t, `
+const s = "a.b.c"
+console.log(s.match(".")![0], s.match("x"), [...s.matchAll(".")].map((m) => m[0]).join(""))
+console.log("a5b".match(String(5))![0])
+`, "a null a.b.c\n5")
 }
 
 // --- Stage 4: str.replace(regexp, replacement), str.replaceAll(regexp, replacement) ---
@@ -545,7 +545,7 @@ try {
   const bad = /a/
   console.log("x".replaceAll(bad, "y"))
 } catch (e) {
-  console.log(e.name)
+  console.log((e as Error).name)
 }
 `, "bbb\nTypeError")
 }

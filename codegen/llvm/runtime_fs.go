@@ -22,8 +22,8 @@ type errnoCodePair struct {
 // errnoCodePairs is the single (errno, code-name) table both ensureErrnoCode and
 // ensureErrnoDesc build their switches from, so the two can never drift on which
 // numeric values map to which code. Windows uses the shim's Linux errno numbers.
-func errnoCodePairs() []errnoCodePair {
-	if targetGOOS() == "windows" {
+func (e *Emitter) errnoCodePairs() []errnoCodePair {
+	if e.opts.Target.OS() == "windows" {
 		pairs := make([]errnoCodePair, 0, len(linuxErrnoPairs))
 		for _, p := range linuxErrnoPairs {
 			pairs = append(pairs, errnoCodePair{p[0].(int), p[1].(string)})
@@ -96,7 +96,7 @@ func (e *Emitter) ensureErrnoCode() {
 		return
 	}
 	e.usedErrnoCode = true
-	pairs := errnoCodePairs()
+	pairs := e.errnoCodePairs()
 	seen := map[int]bool{}
 	var cases, blocks strings.Builder
 	for _, p := range pairs {
@@ -149,7 +149,7 @@ const uvWinUnknown = -4094
 // as `err.errno`. On POSIX libuv's numbers are the negated OS errno; on Windows
 // they are libuv's own table (uvWinErrno).
 func (e *Emitter) emitUVErrno() {
-	if targetGOOS() != "windows" {
+	if e.opts.Target.OS() != "windows" {
 		e.emitGlobal(`define i32 @__kml_uv_errno(i32 %e) {
 entry:
   %n = sub i32 0, %e
@@ -159,7 +159,7 @@ entry:
 	}
 	seen := map[int]bool{}
 	var cases, blocks strings.Builder
-	for _, p := range errnoCodePairs() {
+	for _, p := range e.errnoCodePairs() {
 		uv, ok := uvWinErrno[p.name]
 		if !ok || seen[p.v] {
 			continue
@@ -195,7 +195,7 @@ func (e *Emitter) ensureErrnoDesc() {
 	e.usedErrnoDesc = true
 	seen := map[int]bool{}
 	var cases, blocks strings.Builder
-	for _, p := range errnoCodePairs() {
+	for _, p := range e.errnoCodePairs() {
 		if seen[p.v] {
 			continue
 		}
@@ -284,7 +284,7 @@ func (e *Emitter) ensureFsThrow() {
 	e.ensureSprintf()
 	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
 	e.ensureExceptionHelpers()
-	accessor := errnoAccessor()
+	accessor := e.errnoAccessor()
 	e.ensureErrnoAccessor()
 	e.ensureStrerror()
 	e.ensureErrnoCode()
@@ -309,6 +309,12 @@ define void @__kml_fs_throw2(ptr %%opdesc, ptr %%syscall, ptr %%path, ptr %%dest
 entry:
   %%errno_ptr = call ptr @%s()
   %%errno_val = load i32, ptr %%errno_ptr, align 4
+  %%errobj = call ptr @__kml_fs_error_new(i32 %%errno_val, ptr %%syscall, ptr %%path, ptr %%dest)
+  call void @__kml_throw(ptr %%errobj)
+  ret void
+}
+define ptr @__kml_fs_error_new(i32 %%errno_val, ptr %%syscall, ptr %%path, ptr %%dest) {
+entry:
   %%errmsg = call ptr @strerror(i32 %%errno_val)
   %%code_raw = call ptr @__kml_errno_code(i32 %%errno_val)
   %%code_null = icmp eq ptr %%code_raw, null
@@ -341,8 +347,7 @@ entry:
   store double %%errno_negd, ptr %%errobj.errno, align 8
   %%errobj.dest = getelementptr %s, ptr %%errobj, i32 0, i32 9
   store ptr %%dest, ptr %%errobj.dest, align 8
-  call void @__kml_throw(ptr %%errobj)
-  ret void
+  ret ptr %%errobj
 }
 define void @__kml_fs_throw(ptr %%opdesc, ptr %%syscall, ptr %%path) {
 entry:
@@ -373,7 +378,7 @@ func (e *Emitter) ensureStatDecl() {
 // hardware as of writing — the macOS x64 CI lane is its test.
 func (e *Emitter) emitFSDecl(name, ret string, params []string) {
 	sig := strings.Join(params, " noundef, ") + " noundef"
-	if !(targetGOOS() == "darwin" && targetGOARCH() == "amd64") {
+	if !(e.opts.Target.OS() == "darwin" && e.opts.Target.Arch() == "amd64") {
 		e.emitGlobal(fmt.Sprintf("declare %s @%s(%s)", ret, name, sig))
 		return
 	}
@@ -458,6 +463,69 @@ entry:
 }`)
 }
 
+// ensureFsReadFd declares __kml_fs_read_fd_all(fd) -> {ptr, i64}: every
+// byte read(2) returns from an open descriptor until end of file (stdin is
+// fd 0), in a buffer that doubles as it fills, NUL-terminated past its
+// length. A read error throws Node's `<CODE>: <desc>, read` (no path), and
+// an interrupted read retries.
+func (e *Emitter) ensureFsReadFd() {
+	if e.usedFsReadFd {
+		return
+	}
+	e.usedFsReadFd = true
+	e.ensureFsThrow()
+	e.ensureMalloc()
+	e.ensureRealloc()
+	e.ensureReadDecl()
+	e.ensureErrnoAccessor()
+	accessor := e.errnoAccessor()
+	e.emitGlobal(fmt.Sprintf(`
+define { ptr, i64 } @__kml_fs_read_fd_all(i32 %%fd) {
+entry:
+  %%buf0 = call ptr @malloc(i64 65537)
+  br label %%loop
+loop:
+  %%buf = phi ptr [ %%buf0, %%entry ], [ %%buf, %%retry ], [ %%buf, %%more ], [ %%nbuf, %%grow ]
+  %%cap = phi i64 [ 65536, %%entry ], [ %%cap, %%retry ], [ %%cap, %%more ], [ %%ncap, %%grow ]
+  %%len = phi i64 [ 0, %%entry ], [ %%len, %%retry ], [ %%len2, %%more ], [ %%len2, %%grow ]
+  %%dst = getelementptr i8, ptr %%buf, i64 %%len
+  %%room = sub i64 %%cap, %%len
+  %%n = call i64 @read(i32 %%fd, ptr %%dst, i64 %%room)
+  %%neg = icmp slt i64 %%n, 0
+  br i1 %%neg, label %%err, label %%got
+err:
+  %%ep = call ptr @%s()
+  %%ev = load i32, ptr %%ep, align 4
+  %%intr = icmp eq i32 %%ev, 4
+  br i1 %%intr, label %%retry, label %%fail
+retry:
+  br label %%loop
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr null)
+  unreachable
+got:
+  %%eof = icmp eq i64 %%n, 0
+  br i1 %%eof, label %%done, label %%more0
+more0:
+  %%len2 = add i64 %%len, %%n
+  %%full = icmp eq i64 %%len2, %%cap
+  br i1 %%full, label %%grow, label %%more
+more:
+  br label %%loop
+grow:
+  %%ncap = mul i64 %%cap, 2
+  %%nsz = add i64 %%ncap, 1
+  %%nbuf = call ptr @realloc(ptr %%buf, i64 %%nsz)
+  br label %%loop
+done:
+  %%endp = getelementptr i8, ptr %%buf, i64 %%len
+  store i8 0, ptr %%endp, align 1
+  %%r0 = insertvalue { ptr, i64 } undef, ptr %%buf, 0
+  %%r1 = insertvalue { ptr, i64 } %%r0, i64 %%len, 1
+  ret { ptr, i64 } %%r1
+}`, accessor, e.internString("read"), e.internString("read")))
+}
+
 // ensureFsReadFileRaw declares __kml_fs_read_file_raw(path) -> {ptr, i64}:
 // the actual fopen/fseek/ftell/fread implementation, returning both the
 // malloc'd (null-terminated, for the string wrapper's benefit) buffer and
@@ -490,7 +558,7 @@ func (e *Emitter) ensureFsReadFileRaw() {
 	// directory up front with stat(2) + the host struct-stat mode field, set
 	// errno to EISDIR, and route through the shared __kml_fs_throw so `.code`,
 	// `.errno`, and the Node-shaped message all come from the one code path.
-	L := statLayout()
+	L := e.statLayout()
 	modeLoadTy := fmt.Sprintf("i%d", L.modeBits)
 	modeReg := "%mode_raw"
 	if L.modeBits < 32 {
@@ -601,7 +669,7 @@ growdone:
   %%fr0 = insertvalue { ptr, i64 } undef, ptr %%fbuf, 0
   %%fr1 = insertvalue { ptr, i64 } %%fr0, i64 %%ftot, 1
   ret { ptr, i64 } %%fr1
-}`, L.modeOff, modeLoadTy, modeExtLL, modeReg, errnoAccessor(), errnoEISDIR(), eisdirOpDescPtr, scRead, modePtr, opDescPtr, scOpen))
+}`, L.modeOff, modeLoadTy, modeExtLL, modeReg, e.errnoAccessor(), e.errnoEISDIR(), eisdirOpDescPtr, scRead, modePtr, opDescPtr, scOpen))
 }
 
 // ensureFsWriteFile declares __kml_fs_write_file: writes (creating or
@@ -956,11 +1024,11 @@ ok:
 // ucontext_t bug — this number was correct all along, unlike that one.
 // Both numbers assume a 64-bit build, which is this project's only target
 // per its own stated scope.
-func direntNameOffset() int {
-	if targetGOOS() == "windows" {
+func (e *Emitter) direntNameOffset() int {
+	if e.opts.Target.OS() == "windows" {
 		return 9 // kml_dirent: d_ino u32, d_reclen u16, d_namlen u16, d_type u8, d_name
 	}
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		return 21
 	}
 	return 19
@@ -972,11 +1040,11 @@ func direntNameOffset() int {
 // d_reclen(2)+d_namlen(2) → 20. Windows: the shim's kml_dirent places d_type
 // right after d_namlen, at offset 8 (win32fs.c), populated from the Win32
 // FindFirstFile attributes since mingw's own dirent has no d_type.
-func direntTypeOffset() int {
-	if targetGOOS() == "windows" {
+func (e *Emitter) direntTypeOffset() int {
+	if e.opts.Target.OS() == "windows" {
 		return 8
 	}
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		return 20
 	}
 	return 18
@@ -985,7 +1053,7 @@ func direntTypeOffset() int {
 // ensureFsReaddir declares __kml_fs_readdir: lists a directory's entries
 // (excluding "." and "..", matching real Node's fs.readdirSync) via POSIX
 // opendir/readdir/closedir, returning a {ptr, i64} string[] aggregate grown
-// with the same realloc-doubling shape __kml_fetch/__kml_exec_file_sync
+// with the same realloc-doubling shape __kml_fetch
 // already use for their own growable buffers — just growing an array of
 // ptr-sized name slots here instead of raw bytes. Each returned name is a
 // malloc'd strdup() copy, independent of the OS's own dirent buffer (which
@@ -1004,9 +1072,30 @@ func (e *Emitter) ensureFsReaddir() {
 	e.emitFSDecl("readdir", "ptr", []string{"ptr"})
 	e.emitGlobal("declare i32 @closedir(ptr noundef)")
 	e.emitGlobal("declare ptr @strdup(ptr noundef)")
+	e.ensureQsort()
 	opDescPtr := e.internString("cannot open directory")
 	dotPtr := e.internString(".")
 	dotdotPtr := e.internString("..")
+	// Node's entries come sorted by name: libuv's uv_fs_scandir sorts them
+	// with strcmp. A name slot holds the string; a Dirent's first field does.
+	e.emitGlobal(`
+define i32 @__kml_fs_cmp_name(ptr %a, ptr %b) {
+entry:
+  %sa = load ptr, ptr %a, align 8
+  %sb = load ptr, ptr %b, align 8
+  %r = call i32 @strcmp(ptr %sa, ptr %sb)
+  ret i32 %r
+}
+
+define i32 @__kml_fs_cmp_dirent(ptr %a, ptr %b) {
+entry:
+  %da = load ptr, ptr %a, align 8
+  %db = load ptr, ptr %b, align 8
+  %sa = load ptr, ptr %da, align 8
+  %sb = load ptr, ptr %db, align 8
+  %r = call i32 @strcmp(ptr %sa, ptr %sb)
+  ret i32 %r
+}`)
 	e.emitGlobal(fmt.Sprintf(`
 define {ptr, i64} @__kml_fs_readdir(ptr %%path, i1 %%withTypes) {
 entry:
@@ -1106,10 +1195,12 @@ done:
   call i32 @closedir(ptr %%dir)
   %%finaldata = load ptr, ptr %%data_p, align 8
   %%finallen = load i64, ptr %%len_p, align 8
+  %%cmp = select i1 %%withTypes, ptr @__kml_fs_cmp_dirent, ptr @__kml_fs_cmp_name
+  call void @qsort(ptr %%finaldata, i64 %%finallen, i64 8, ptr %%cmp)
   %%r0 = insertvalue {ptr, i64} undef, ptr %%finaldata, 0
   %%r1 = insertvalue {ptr, i64} %%r0, i64 %%finallen, 1
   ret {ptr, i64} %%r1
-}`, opDescPtr, e.internString("scandir"), direntNameOffset(), dotPtr, dotdotPtr, direntTypeOffset()))
+}`, opDescPtr, e.internString("scandir"), e.direntNameOffset(), dotPtr, dotdotPtr, e.direntTypeOffset()))
 }
 
 // ensureFsReaddirRecursive declares __kml_fs_readdir_recursive, backing
@@ -1258,8 +1349,7 @@ ok:
   %%r0 = insertvalue {ptr, i64} undef, ptr %%finaldata, 0
   %%r1 = insertvalue {ptr, i64} %%r0, i64 %%finallen, 1
   ret {ptr, i64} %%r1
-}`,
-		direntNameOffset(), dotPtr, dotdotPtr, joinFmt, direntTypeOffset(), joinFmt,
+}`, e.direntNameOffset(), dotPtr, dotdotPtr, joinFmt, e.direntTypeOffset(), joinFmt,
 		opDescPtr, e.internString("scandir"), emptyPtr))
 }
 
@@ -1404,8 +1494,7 @@ ok:
   %%r0 = insertvalue {ptr, i64} undef, ptr %%finaldata, 0
   %%r1 = insertvalue {ptr, i64} %%r0, i64 %%finallen, 1
   ret {ptr, i64} %%r1
-}`,
-		direntNameOffset(), dotPtr, dotdotPtr, direntTypeOffset(), joinFmt,
+}`, e.direntNameOffset(), dotPtr, dotdotPtr, e.direntTypeOffset(), joinFmt,
 		opDescPtr, e.internString("scandir")))
 }
 
@@ -1445,8 +1534,8 @@ type statFieldLayout struct {
 	birthSec, birthNsec     int // birthSec < 0 → report 0
 }
 
-func statLayout() statFieldLayout {
-	if targetGOOS() == "windows" {
+func (e *Emitter) statLayout() statFieldLayout {
+	if e.opts.Target.OS() == "windows" {
 		// win32fs.c writes the glibc x86-64 layout and puts birthtime (real on
 		// Windows, as in Node) in the struct's reserved tail.
 		return statFieldLayout{
@@ -1464,7 +1553,7 @@ func statLayout() statFieldLayout {
 			birthSec: 120, birthNsec: 128,
 		}
 	}
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		return statFieldLayout{
 			devOff: 0, devBits: 32,
 			modeOff: 4, modeBits: 16,
@@ -1480,7 +1569,7 @@ func statLayout() statFieldLayout {
 			birthSec: 80, birthNsec: 88,
 		}
 	}
-	if targetGOARCH() == "arm64" {
+	if e.opts.Target.Arch() == "arm64" {
 		return statFieldLayout{
 			devOff: 0, devBits: 64,
 			inoOff: 8, inoBits: 64,
@@ -1595,7 +1684,7 @@ fail:
   unreachable
 
 ok:
-%s}`, statResultIR, opDescPtr, e.internString("stat"), statBodyLL(statLayout())))
+%s}`, statResultIR, opDescPtr, e.internString("stat"), statBodyLL(e.statLayout())))
 }
 
 // ensureFsLstat declares __kml_fs_lstat — statSync's twin over lstat(2)
@@ -1621,7 +1710,7 @@ fail:
   unreachable
 
 ok:
-%s}`, statResultIR, opDescPtr, e.internString("lstat"), statBodyLL(statLayout())))
+%s}`, statResultIR, opDescPtr, e.internString("lstat"), statBodyLL(e.statLayout())))
 }
 
 // ensureFsPathOps declares the one-shot path-based helpers (ADR-00497):
@@ -1702,7 +1791,7 @@ entry:
   %%failed = icmp ne i32 %%r, 0
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
+  call void @__kml_fs_throw2(ptr %s, ptr %s, ptr %%target, ptr %%path)
   unreachable
 ok:
   ret void
@@ -1714,7 +1803,7 @@ entry:
   %%failed = icmp ne i32 %%r, 0
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
+  call void @__kml_fs_throw2(ptr %s, ptr %s, ptr %%existing, ptr %%path)
   unreachable
 ok:
   ret void
@@ -1838,9 +1927,9 @@ func (e *Emitter) ensureFsCopyFileGuard() {
 	e.usedFsCopyExclGuard = true
 	e.ensureFsThrow()
 	e.ensureFsFdOps() // shares the open/close declarations
-	rd, _ := openFlagBits("r")
-	w, _ := openFlagBits("w")
-	wx, _ := openFlagBits("wx")
+	rd, _ := e.openFlagBits("r")
+	w, _ := e.openFlagBits("w")
+	wx, _ := e.openFlagBits("wx")
 	desc := e.internString("cannot copy file")
 	sc := e.internString("copyfile")
 	e.emitGlobal(fmt.Sprintf(`
@@ -1886,7 +1975,7 @@ func (e *Emitter) ensureFsRm() {
 	e.ensureStrlen()
 	e.ensureMemcpy()
 	rmDesc := e.internString("cannot remove path")
-	nameOff := direntNameOffset()
+	nameOff := e.direntNameOffset()
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_fs_rm(ptr %%path, i1 %%recursive, i1 %%force) {
 entry:
@@ -1958,9 +2047,9 @@ done:
 // per-OS constants (Darwin and glibc disagree on everything past
 // O_RDONLY/O_WRONLY/O_RDWR), resolved at compile time from the literal
 // (ADR-00498).
-func openFlagBits(flags string) (int, bool) {
+func (e *Emitter) openFlagBits(flags string) (int, bool) {
 	creat, trunc, appnd, excl := 0x200, 0x400, 0x8, 0x800
-	if targetGOOS() != "darwin" {
+	if e.opts.Target.OS() != "darwin" {
 		creat, trunc, appnd, excl = 0x40, 0x200, 0x400, 0x80
 	}
 	m := map[string]int{
@@ -2115,7 +2204,7 @@ fail:
   unreachable
 ok:
 %s}`, openDesc, e.internString("open"), fdDesc, e.internString("read"),
-		statResultIR, fdDesc, e.internString("fstat"), statBodyLL(statLayout())))
+		statResultIR, fdDesc, e.internString("fstat"), statBodyLL(e.statLayout())))
 	// fd-based ops carry no path in Node's message (and `err.path` is undefined),
 	// so pass a null path — __kml_fs_errmsg emits `<CODE>: <desc>, <syscall>` with
 	// no path clause, and the null flows through to `err.path` (ADR-01000). The
@@ -2225,8 +2314,8 @@ var linuxErrnoPairs = [][2]interface{}{
 // a directory read: the host's on Linux/macOS, and the Linux number on
 // Windows (Go's syscall.EISDIR there is synthetic; the shim speaks Linux
 // errno — TDD-00177).
-func errnoEISDIR() int {
-	if targetGOOS() == "windows" {
+func (e *Emitter) errnoEISDIR() int {
+	if e.opts.Target.OS() == "windows" {
 		return 21
 	}
 	return int(syscall.EISDIR)

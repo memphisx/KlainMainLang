@@ -239,8 +239,8 @@ const wptFetchShim = `
 class __WptResponse {
   path: string;
   constructor(path: string) { this.path = path; }
-  json(): Promise<any> { return Promise.resolve(JSON.parse(fs.readFileSync(this.path))); }
-  text(): Promise<string> { return Promise.resolve(fs.readFileSync(this.path)); }
+  json(): Promise<any> { return Promise.resolve(JSON.parse(fs.readFileSync(this.path, "utf8"))); }
+  text(): Promise<string> { return Promise.resolve(fs.readFileSync(this.path, "utf8")); }
 }
 function fetch(path: string): Promise<__WptResponse> {
   return Promise.resolve(new __WptResponse(path));

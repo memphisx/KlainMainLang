@@ -18,5 +18,5 @@ console.log(agg instanceof Error)          // true (AggregateError inherits Erro
 try {
   throw new AggregateError([new Error("only one")], "wrapped")
 } catch (e) {
-  console.log(e.name + ": " + e.errors.length + " (" + e.errors[0].message + ")")
+  console.log((e as AggregateError).name + ": " + (e as AggregateError).errors.length + " (" + (e as AggregateError).errors[0].message + ")")
 }

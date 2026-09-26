@@ -101,7 +101,7 @@ func (e *Emitter) TuiCSources() ([]CSource, error) {
 	if !e.usedTui {
 		return nil, nil
 	}
-	return yogaCSources()
+	return yogaCSources(e.Toolchain())
 }
 
 // yogaCSources materializes and pre-compiles the vendored Yoga engine, returning
@@ -118,7 +118,7 @@ func (e *Emitter) TuiCSources() ([]CSource, error) {
 // reach the shared link. The one member's Content is an empty C++ TU so the
 // existing "write Content, append CFlags/Libs" build loops carry the objects
 // through unchanged.
-func yogaCSources() ([]CSource, error) {
+func yogaCSources(tc Toolchain) ([]CSource, error) {
 	dir := yogaExtractDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("yoga: temp dir: %w", err)
@@ -132,6 +132,10 @@ func yogaCSources() ([]CSource, error) {
 	objSub := "obj-clang"
 	if runtime.GOOS == "windows" && staticLinkMode {
 		objSub = "obj-gpp-static"
+	}
+	if tc.Target.Triple != "" {
+		// …and by target, so a cross build never links host objects.
+		objSub += "-" + strings.NewReplacer("/", "_", "\\", "_").Replace(tc.Target.Triple)
 	}
 	objDir := filepath.Join(dir, objSub)
 	if err := os.MkdirAll(objDir, 0755); err != nil {
@@ -154,7 +158,7 @@ func yogaCSources() ([]CSource, error) {
 				// there is no static-archive ABI-match constraint (ADR-00772).
 				cmd = exec.Command("g++", "-std=c++20", "-O2", "-I"+includeRoot, "-c", src, "-o", obj)
 			} else {
-				cmd = ClangCommand("-std=c++20", "-O2", "-I"+includeRoot, "-c", src, "-o", obj)
+				cmd = tc.Command("-std=c++20", "-O2", "-I"+includeRoot, "-c", src, "-o", obj)
 			}
 			if out, cerr := cmd.CombinedOutput(); cerr != nil {
 				return nil, fmt.Errorf("yoga: compiling %s: %v\n%s", rel, cerr, out)

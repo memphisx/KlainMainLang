@@ -9,7 +9,7 @@ import fs from "fs";
 // --- Promise form: fs.promises.* with async/await ---
 async function promiseDemo(): Promise<void> {
   await fs.promises.writeFile("__demo_async.txt", "written via fs.promises");
-  const text: string = await fs.promises.readFile("__demo_async.txt");
+  const text: string = await fs.promises.readFile("__demo_async.txt", "utf8");
   console.log("promises read:", text);
 
   const entries: string[] = await fs.promises.readdir(".");
@@ -29,14 +29,14 @@ async function promiseDemo(): Promise<void> {
   console.log("promises cleanup done");
 }
 
-// --- Callback form: fs.readFile(path, (err, data) => ...) ---
+// --- Callback form: fs.readFile(path, encoding, (err, data) => ...) ---
 function callbackDemo(): void {
   fs.writeFile("__demo_cb.txt", "written via callback", (err) => {
     if (err) {
       console.log("callback write error");
       return;
     }
-    fs.readFile("__demo_cb.txt", (err2, data: string) => {
+    fs.readFile("__demo_cb.txt", "utf8", (err2, data) => {
       if (err2) {
         console.log("callback read error");
         return;

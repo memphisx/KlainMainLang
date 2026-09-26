@@ -4,6 +4,8 @@
 // initializer — not as a call argument, a return value, an object-literal
 // field value, or a plain reassignment target.
 
+import { EventEmitter } from 'events';
+
 // --- Array literal as a call argument ---
 
 function first(arr: number[]): number {
@@ -83,8 +85,8 @@ const s = makeSet();
 s.add(9);
 console.log(s.has(9));  // 1
 
-function makeEmitter(): EventEmitter<string> {
-  return new EventEmitter<string>();
+function makeEmitter(): EventEmitter {
+  return new EventEmitter();
 }
 const e = makeEmitter();
 e.on("msg", (data: string): void => {

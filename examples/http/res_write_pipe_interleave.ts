@@ -5,6 +5,7 @@
 // echoed body. (Both paths used to have independent output paths that could
 // interleave out of order.)
 import http from 'http';
+import type { AddressInfo } from 'net';
 
 async function consume(port: number): Promise<void> {
   const res = await fetch("http://127.0.0.1:" + port + "/", {
@@ -17,14 +18,14 @@ async function consume(port: number): Promise<void> {
   process.exit(0);
 }
 
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "application/octet-stream" });
   res.write("PREFIX:");
   req.pipe(res);
 });
 
 server.listen(0, () => {
-  const port: number = server.address().port;
+  const port: number = (server.address() as AddressInfo).port;
   console.log("listening:", port > 0);
   setTimeout(() => { consume(port); }, 50);
 });

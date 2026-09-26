@@ -127,18 +127,22 @@ var errorKindIDs = func() map[string]int64 {
 // them on an AggregateError object is not meaningful (that struct's trailing
 // slots mean something else) but is bounds-safe.
 var errorObjType = func() Type {
+	// A field an error has only when something sets it (Node's own
+	// properties): absent, it reads undefined.
+	optStr := TypePtr
+	optStr.Nullable, optStr.IsUndefined = true, true
 	ty := ObjectType([]Field{
 		{Name: "kind", Ty: TypeI64},
 		{Name: "message", Ty: TypePtr},
 		{Name: "name", Ty: TypePtr},
-		{Name: "code", Ty: TypePtr},
+		{Name: "code", Ty: optStr},
 		{Name: "errcode", Ty: TypeF64},
-		{Name: "errstr", Ty: TypePtr},
+		{Name: "errstr", Ty: optStr},
 		// Node fs-error extras: `err.syscall` (the bare syscall name — "open",
 		// "stat", "scandir", …) and `err.path` (the offending path). Default
 		// null for non-fs errors; set by __kml_fs_throw (ADR-00768).
-		{Name: "syscall", Ty: TypePtr},
-		{Name: "path", Ty: TypePtr},
+		{Name: "syscall", Ty: optStr},
+		{Name: "path", Ty: optStr},
 		// `err.errno` — the negative libuv-style errno (Node fs/net/child_process
 		// convention: ENOENT → -2 on POSIX). Distinct from `errcode` (idx 4),
 		// which is node:sqlite's positive result code. Default 0; set by
@@ -147,7 +151,7 @@ var errorObjType = func() Type {
 		// `err.dest` — the destination path of a two-path fs op (rename/copyFile).
 		// Node sets it alongside `err.path` (the source); null for every other
 		// error. Set only by __kml_fs_throw2 (ADR-01000).
-		{Name: "dest", Ty: TypePtr},
+		{Name: "dest", Ty: optStr},
 		// `err.cause` — the error-options bag's cause (`new Error(m, { cause })`),
 		// a NaN-boxed any (nbUndefined when absent), matching Node's untyped slot.
 		{Name: "cause", Ty: TypeAny},
@@ -156,7 +160,7 @@ var errorObjType = func() Type {
 		// failure path (__kml_net_connect_errobj, ADR-01021); null/0 for every
 		// other error. Every errorObjType allocation is calloc'd, so these default
 		// cleanly on errors that don't set them.
-		{Name: "address", Ty: TypePtr},
+		{Name: "address", Ty: optStr},
 		{Name: "port", Ty: TypeF64},
 		// `extra` — a D1 dynamic-object bag of further own properties an error
 		// carries beyond the fixed fields above (child_process's `status`/
@@ -168,6 +172,22 @@ var errorObjType = func() Type {
 	ty.IsError = true
 	return ty
 }()
+
+// errorOptionalNumber reports whether an error's number field name is one it
+// has only when something sets it (`errno`, `port`, node:sqlite's
+// `errcode`): stored as 0 when absent, which no set value is, and read as
+// undefined then.
+func errorOptionalNumber(objTy Type, name string) bool {
+	if !objTy.IsError && !objTy.IsClass {
+		return false
+	}
+	switch name {
+	case "errno", "errcode", "port":
+		_, ty, ok := objTy.FieldIndex(name)
+		return ok && ty.Float
+	}
+	return false
+}
 
 // buildErrorObj mallocs and fills a new errorObjType instance ({i64 kind,
 // ptr message, ptr name}) from already-computed operands, returning the
@@ -545,37 +565,71 @@ func (e *Emitter) emitPendingFinallys() error {
 	return e.emitFinallysToDepth(0)
 }
 
+// pendingExit is what leaving an enclosing try/catch on an early exit must
+// do (Emitter.pendingFinallys): pop its handler, then run its finally body.
+type pendingExit struct {
+	popHandler bool
+	body       []ast.Statement
+}
+
 // emitTry emits a try/catch/finally statement using setjmp/longjmp.
 //
 // Control flow layout:
 //
 //	current_block → (setjmp == 0) → try_body
-//	              → (setjmp != 0) → catch_block
+//	              → (setjmp != 0) → handler
 //	try_body   → (success) → after
-//	catch_block            → after
-//	after      → finally body (inline)
+//	handler    → catch body (itself under a handler when there is a finally)
+//	           → after, the exception pending when there is no catch or the
+//	             catch threw
+//	after      → finally body (inline), then the pending exception rethrown
+//
+// As in JavaScript, a finally runs however its try or catch completes, and
+// an exception neither catches is rethrown after it.
 func (e *Emitter) emitTry(s *ast.TryStatement) error {
 	e.ensureExceptionHelpers()
 
 	tryL := e.freshLabel("try.body")
 	catchL := e.freshLabel("try.catch")
 	afterL := e.freshLabel("try.after")
+	hasFinally := s.Finally != nil
+	var finallyBody []ast.Statement
+	if hasFinally {
+		finallyBody = s.Finally.Body
+	}
+
+	// The exception a finally must rethrow: set where the try throws with no
+	// catch, or the catch throws. Written after a setjmp and read after a
+	// longjmp, so every access is volatile.
+	var pendSlot, tagSlot, paySlot string
+	if hasFinally {
+		pendSlot, tagSlot, paySlot = e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", pendSlot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca i8, align 1", tagSlot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", paySlot))
+		e.emitInstr(fmt.Sprintf("store volatile i1 false, ptr %s, align 1", pendSlot))
+	}
+	recordPending := func() {
+		tag, pay := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_get_thrown_tag()", tag))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_get_thrown_pay()", pay))
+		e.emitInstr(fmt.Sprintf("store volatile i8 %s, ptr %s, align 1", tag, tagSlot))
+		e.emitInstr(fmt.Sprintf("store volatile i64 %s, ptr %s, align 8", pay, paySlot))
+		e.emitInstr(fmt.Sprintf("store volatile i1 true, ptr %s, align 1", pendSlot))
+	}
 
 	// Push a jmpbuf slot and call setjmp.
 	jmpbuf := e.freshReg()
 	sjRet := e.freshReg()
 	threw := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jmpbuf))
-	e.emitInstr(fmt.Sprintf("%s = %s", sjRet, setjmpCall(jmpbuf)))
+	e.emitInstr(fmt.Sprintf("%s = %s", sjRet, e.setjmpCall(jmpbuf)))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sjRet))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, catchL, tryL))
 
-	// A `return`/`break`/`continue` inside the try or catch must run this
-	// finally before it exits — push it so emitPendingFinallys can splice it in
-	// (popped just before the normal-path inline finally at afterL below).
-	if s.Finally != nil {
-		e.pendingFinallys = append(e.pendingFinallys, s.Finally.Body)
-	}
+	// A `return`/`break`/`continue` inside the try must pop its handler and
+	// run its finally before it exits (emitPendingFinallys).
+	e.pendingFinallys = append(e.pendingFinallys, pendingExit{popHandler: true, body: finallyBody})
 	// Locals touched anywhere in the statement must survive the longjmp
 	// (pinSlotAcrossSetjmp, ADR-01057).
 	e.tryDepth++
@@ -591,75 +645,154 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 		}
 	}
 	e.popScope()
+	e.pendingFinallys = e.pendingFinallys[:len(e.pendingFinallys)-1]
 	// Pop jmpbuf only on the success path; __kml_throw pops it on the throw path.
 	e.emitInstr("call void @__kml_pop_jmpbuf()")
 	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
-	// --- catch block ---
+	// --- handler: the try threw ---
 	e.emitLabel(catchL)
-	if s.Catch != nil {
-		e.pushScope()
-		if s.Catch.Param != "" {
-			// TDD-00202: bind the catch variable as the unpacked thrown-value
-			// record (TypeCaught ≈ TypeScript `unknown`) — a { i8 tag, i64
-			// payload } aggregate reconstructed from the throw. Narrowing
-			// (typeof/instanceof/===) and Error member access resolve off the tag.
-			tagR := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_get_thrown_tag()", tagR))
-			payR := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_get_thrown_pay()", payR))
-			agg := e.emitCaughtAggregate(tagR, payR)
-			varPtr := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca { i8, i64 }, align 8", varPtr))
-			e.emitInstr(fmt.Sprintf("store { i8, i64 } %s, ptr %s, align 8", agg.Ref, varPtr))
-			e.define(s.Catch.Param, Symbol{Ptr: varPtr, Ty: TypeCaught})
-		} else if len(s.Catch.ObjectPattern) > 0 {
-			// Destructured catch binding (`catch ({ message, name }) {}`). A
-			// caught Error is destructured by its errorObjType fields; a
-			// non-Error thrown value has no such fields, so the record's payload
-			// is not a valid errorObjType pointer — synthesize an empty Error so
-			// the destructured names read as empty rather than dereferencing a
-			// bad pointer (the bare `{ kind, message, name }` shape, TDD-00202).
-			tagR := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_get_thrown_tag()", tagR))
-			isErr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isErr, tagR, kmlTagError))
-			realPtr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", realPtr))
-			emptyErr := e.buildErrorObj(0, e.internString(""), e.internString("Error"))
-			errPtr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", errPtr, isErr, realPtr, emptyErr))
-			if err := e.unpackObjectPatternInto(errPtr, errorObjType, s.Catch.ObjectPattern, s.Catch.Pos); err != nil {
-				e.popScope()
-				return err
-			}
+	if s.Catch == nil {
+		if hasFinally {
+			recordPending()
 		}
-		for _, stmt := range s.Catch.Body.Body {
-			if err := e.emitStmt(stmt); err != nil {
-				e.popScope()
-				return err
-			}
+	} else {
+		catchRunL := e.freshLabel("try.catch.body")
+		if hasFinally {
+			// The catch runs under a handler of its own: an exception it
+			// throws is pending until the finally has run.
+			catchThrewL := e.freshLabel("try.catch.threw")
+			jb2, sj2, threw2 := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jb2))
+			e.emitInstr(fmt.Sprintf("%s = %s", sj2, e.setjmpCall(jb2)))
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw2, sj2))
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw2, catchThrewL, catchRunL))
+			e.emitLabel(catchThrewL)
+			recordPending()
+			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+			e.pendingFinallys = append(e.pendingFinallys, pendingExit{popHandler: true, body: finallyBody})
+		} else {
+			e.emitTerminator(fmt.Sprintf("br label %%%s", catchRunL))
 		}
-		e.popScope()
+		e.emitLabel(catchRunL)
+		if err := e.emitCatchBody(s); err != nil {
+			return err
+		}
+		if hasFinally {
+			e.pendingFinallys = e.pendingFinallys[:len(e.pendingFinallys)-1]
+			e.emitInstr("call void @__kml_pop_jmpbuf()")
+		}
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
-	// --- merge / finally ---
-	// Pop the pending finally: from here on it runs via the normal fall-through
-	// path below, not via an early-exit splice.
-	if s.Finally != nil {
-		e.pendingFinallys = e.pendingFinallys[:len(e.pendingFinallys)-1]
-	}
+	// --- after: the finally, then any pending exception rethrown ---
 	e.emitLabel(afterL)
-	if s.Finally != nil {
+	if hasFinally {
 		e.pushScope()
-		for _, stmt := range s.Finally.Body {
+		for _, stmt := range finallyBody {
 			if err := e.emitStmt(stmt); err != nil {
 				e.popScope()
 				return err
 			}
 		}
 		e.popScope()
+		if !e.blockDone {
+			pend := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load volatile i1, ptr %s, align 1", pend, pendSlot))
+			rethrowL, doneL := e.freshLabel("try.rethrow"), e.freshLabel("try.done")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", pend, rethrowL, doneL))
+			e.emitLabel(rethrowL)
+			tag, pay := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load volatile i8, ptr %s, align 1", tag, tagSlot))
+			e.emitInstr(fmt.Sprintf("%s = load volatile i64, ptr %s, align 8", pay, paySlot))
+			e.emitInstr(fmt.Sprintf("call void @__kml_throw_any(i8 %s, i64 %s)", tag, pay))
+			e.emitTerminator("unreachable")
+			e.emitLabel(doneL)
+		}
 	}
 	return nil
+}
+
+// emitCatchBody binds a catch clause's parameter to the thrown value and
+// emits its body.
+func (e *Emitter) emitCatchBody(s *ast.TryStatement) error {
+	e.pushScope()
+	defer e.popScope()
+	if s.Catch.Param != "" {
+		// TDD-00202: bind the catch variable as the unpacked thrown-value
+		// record (TypeCaught ≈ TypeScript `unknown`) — a { i8 tag, i64
+		// payload } aggregate reconstructed from the throw. Narrowing
+		// (typeof/instanceof/===) and Error member access resolve off the tag.
+		tagR := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_get_thrown_tag()", tagR))
+		payR := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_get_thrown_pay()", payR))
+		agg := e.emitCaughtAggregate(tagR, payR)
+		varPtr := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca { i8, i64 }, align 8", varPtr))
+		e.emitInstr(fmt.Sprintf("store { i8, i64 } %s, ptr %s, align 8", agg.Ref, varPtr))
+		e.define(s.Catch.Param, Symbol{Ptr: varPtr, Ty: TypeCaught})
+	} else if len(s.Catch.ObjectPattern) > 0 && flatCatchPattern(s.Catch.ObjectPattern) {
+		// Destructured catch binding (`catch ({ message, name }: any)`): each
+		// name reads as the caught value's member (a field the value lacks is
+		// undefined), its default taking an undefined one.
+		hidden := fmt.Sprintf("__kml_caught%d", e.closureCtr)
+		e.closureCtr++
+		tagR := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_get_thrown_tag()", tagR))
+		payR := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_get_thrown_pay()", payR))
+		agg := e.emitCaughtAggregate(tagR, payR)
+		varPtr := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca { i8, i64 }, align 8", varPtr))
+		e.emitInstr(fmt.Sprintf("store { i8, i64 } %s, ptr %s, align 8", agg.Ref, varPtr))
+		e.define(hidden, Symbol{Ptr: varPtr, Ty: TypeCaught})
+		pos := s.Catch.Pos
+		for _, p := range s.Catch.ObjectPattern {
+			var init ast.Expression = ast.NewMemberExpression(ast.NewIdentifier(hidden, pos), p.Key, pos)
+			if p.Default != nil {
+				isUndef := ast.NewBinaryExpression("===", ast.NewMemberExpression(ast.NewIdentifier(hidden, pos), p.Key, pos), ast.NewNullLiteral(true, pos), pos)
+				init = ast.NewConditionalExpression(isUndef, p.Default, init, pos)
+			}
+			if err := e.emitStmt(ast.NewVarDeclaration("let", p.Local, nil, init, pos)); err != nil {
+				return err
+			}
+		}
+	} else if len(s.Catch.ObjectPattern) > 0 {
+		// Destructured catch binding (`catch ({ message, name }) {}`). A
+		// caught Error is destructured by its errorObjType fields; a
+		// non-Error thrown value has no such fields, so the record's payload
+		// is not a valid errorObjType pointer — synthesize an empty Error so
+		// the destructured names read as empty rather than dereferencing a
+		// bad pointer (the bare `{ kind, message, name }` shape, TDD-00202).
+		tagR := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_get_thrown_tag()", tagR))
+		isErr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isErr, tagR, kmlTagError))
+		realPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", realPtr))
+		emptyErr := e.buildErrorObj(0, e.internString(""), e.internString("Error"))
+		errPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", errPtr, isErr, realPtr, emptyErr))
+		if err := e.unpackObjectPatternInto(errPtr, errorObjType, s.Catch.ObjectPattern, s.Catch.Pos); err != nil {
+			return err
+		}
+	}
+	for _, stmt := range s.Catch.Body.Body {
+		if err := e.emitStmt(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// flatCatchPattern reports a catch binding pattern of plain names (no nested
+// pattern, no rest).
+func flatCatchPattern(ps []ast.DestructProp) bool {
+	for _, p := range ps {
+		if p.SubArray != nil || p.SubObject != nil || p.Rest {
+			return false
+		}
+	}
+	return true
 }

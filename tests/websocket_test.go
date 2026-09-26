@@ -132,8 +132,8 @@ func wsRecvFrame(t *testing.T, conn net.Conn) (opcode int, payload []byte) {
 func TestE2EWSHandshakeAndEcho(t *testing.T) {
 	src := `
 import http from 'http'
-import { WebSocketServer } from 'klain:ws'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+import { WebSocketServer, WSConnection } from 'klain:ws'
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("not a websocket request")
 })
 const wss = new WebSocketServer({ server })
@@ -170,11 +170,11 @@ func TestE2EWSOnAdditionalServer(t *testing.T) {
 	pa, pb := freePort(t), freePort(t)
 	src := `
 import http from 'http'
-import { WebSocketServer } from 'klain:ws'
-const primary = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+import { WebSocketServer, WSConnection } from 'klain:ws'
+const primary = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("plain primary")
 })
-const wsServer = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const wsServer = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("not a websocket request")
 })
 const wss = new WebSocketServer({ server: wsServer })
@@ -228,8 +228,8 @@ primary.listen(19701, () => { wsServer.listen(19702, () => { console.log("ready"
 func TestE2EWSExtendedLength(t *testing.T) {
 	src := `
 import http from 'http'
-import { WebSocketServer } from 'klain:ws'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+import { WebSocketServer, WSConnection } from 'klain:ws'
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("not a websocket request")
 })
 const wss = new WebSocketServer({ server })
@@ -264,9 +264,9 @@ server.listen(8976)
 func TestE2EWSCoexistsWithNormalHTTP(t *testing.T) {
 	src := `
 import http from 'http'
-import { WebSocketServer } from 'klain:ws'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
-  res.writeHead(200); res.end("plain http: " + req.path)
+import { WebSocketServer, WSConnection } from 'klain:ws'
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
+  res.writeHead(200); res.end("plain http: " + req.url)
 })
 const wss = new WebSocketServer({ server })
 wss.on('connection', (socket: WSConnection) => {
@@ -306,8 +306,8 @@ server.listen(8977)
 func TestE2EWSCloseFrameEndsConnectionCleanly(t *testing.T) {
 	src := `
 import http from 'http'
-import { WebSocketServer } from 'klain:ws'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+import { WebSocketServer, WSConnection } from 'klain:ws'
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("not a websocket request")
 })
 const wss = new WebSocketServer({ server })
@@ -366,8 +366,8 @@ server.listen(8978)
 func TestE2EWSPingPong(t *testing.T) {
 	src := `
 import http from 'http'
-import { WebSocketServer } from 'klain:ws'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+import { WebSocketServer, WSConnection } from 'klain:ws'
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("not a websocket request")
 })
 const wss = new WebSocketServer({ server })
@@ -414,8 +414,8 @@ server.listen(8979)
 func TestE2EWSServerInitiatedClose(t *testing.T) {
 	src := `
 import http from 'http'
-import { WebSocketServer } from 'klain:ws'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+import { WebSocketServer, WSConnection } from 'klain:ws'
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("not a websocket request")
 })
 const wss = new WebSocketServer({ server })
@@ -486,8 +486,8 @@ func runClientWithTimeout(t *testing.T, src string, timeout time.Duration) strin
 func TestE2EWebSocketClientAgainstServer(t *testing.T) {
 	serverSrc := `
 import http from 'http'
-import { WebSocketServer } from 'klain:ws'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+import { WebSocketServer, WSConnection } from 'klain:ws'
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("not a websocket request")
 })
 const wss = new WebSocketServer({ server })
@@ -536,8 +536,8 @@ setTimeout(() => {
 func TestE2EWebSocketBinaryRoundTrip(t *testing.T) {
 	serverSrc := `
 import http from 'http'
-import { WebSocketServer } from 'klain:ws'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+import { WebSocketServer, WSConnection } from 'klain:ws'
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("not a websocket request")
 })
 const wss = new WebSocketServer({ server })

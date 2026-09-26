@@ -146,5 +146,8 @@ static char *convert(const char *src, long long n, int upper) {
     return out;
 }
 
-char *__kml_str_toupper(const char *s, long long n) { return convert(s, n, 1); }
-char *__kml_str_tolower(const char *s, long long n) { return convert(s, n, 0); }
+/* String.prototype.toUpperCase/toLowerCase, the entry points the builtin
+   declarations lower to. strlen-bounded, as every string boundary is: a
+   sidecar-produced string carries no length header. */
+char *__kml_String_toUpperCase(const char *s) { return convert(s, (long long)strlen(s), 1); }
+char *__kml_String_toLowerCase(const char *s) { return convert(s, (long long)strlen(s), 0); }

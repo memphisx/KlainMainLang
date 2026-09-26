@@ -1,14 +1,18 @@
-// EventEmitter<T> (TDD-00023): a class extending EventEmitter<T> gets a
+// EventEmitter (TDD-00023): a class extending EventEmitter gets a
 // real on/once/emit/off/removeListener/removeAllListeners/listenerCount/
 // eventNames surface for free, plus a standalone composed emitter for code
 // that doesn't want (or can't have, given single inheritance) its own class
-// hierarchy rooted in EventEmitter.
+// hierarchy rooted in EventEmitter. With no type argument, an event takes
+// any arguments, as in @types/node's default event map.
 
-class Downloader extends EventEmitter<string> {
+import { EventEmitter } from 'events';
+
+class Downloader extends EventEmitter {
   name: string;
   bytesDone: number;
 
   constructor(name: string) {
+    super();
     this.name = name;
     this.bytesDone = 0;
   }
@@ -37,18 +41,18 @@ dl.finish();          // done: archive.zip
 dl.finish();          // (once listener already fired — no further output)
 
 // Unlistened 'error' events throw, matching real Node's one specially
-// treated event name — useful so a forgotten error handler fails loudly
-// instead of silently swallowing a real problem.
+// treated event name: an Error argument is thrown as is, anything else is
+// wrapped in "Unhandled error. (…)".
 try {
   dl.emit("error", "disk full");
 } catch (e) {
-  console.log("caught: " + e.message); // caught: disk full
+  console.log("caught: " + (e as Error).message); // caught: Unhandled error. ('disk full')
 }
 
 // A standalone, composed EventEmitter — for code that doesn't want its own
 // class hierarchy rooted in EventEmitter (single inheritance means a class
-// can extend EventEmitter<T> XOR some other base, not both).
-const bus = new EventEmitter<number>();
+// can extend EventEmitter XOR some other base, not both).
+const bus = new EventEmitter();
 const onTick = (n: number): void => {
   console.log("tick: " + n);
 };

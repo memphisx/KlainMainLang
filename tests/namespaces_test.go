@@ -70,7 +70,7 @@ module Geometry {
 console.log(Geometry.describe(3, 4));
 const p = new Geometry.Point(1, 2);
 console.log(p.sum());
-const k: Kind = Kind.Tall;
+const k: Geometry.Kind = Geometry.Kind.Tall;
 console.log(k);
 `, "area=24\n3\n1")
 }
@@ -105,6 +105,32 @@ console.log(A.B.g());
 console.log(A.top());
 console.log(C.D.get());
 `, "7\n8\n7\n5")
+}
+
+// Two dotted namespaces each open intermediate namespaces (`A`, `A.B`) that
+// have no declaration of their own; binding them used to crash.
+func TestE2ENamespaceTwoDottedChains(t *testing.T) {
+	assertOutput(t, `
+namespace A.B.C { export function f(): number { return 1 } }
+namespace X.Y.Z { export function g(): number { return 2 } }
+console.log(A.B.C.f(), X.Y.Z.g())
+`, "1 2")
+}
+
+// A class name declared in two namespaces is a clean rejection: namespace
+// type members share one top-level name.
+func TestE2ENamespaceTypeMemberClashIsError(t *testing.T) {
+	_, err := resolveAndCompile(t, `
+namespace a { export class c {} }
+namespace d { export class c {} }
+console.log(typeof a.c)
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a class name declared in two namespaces")
+	}
+	if !strings.Contains(err.Error(), "more than one namespace") || strings.Contains(err.Error(), "internal error") {
+		t.Errorf("unexpected error message: %v", err)
+	}
 }
 
 func TestE2ENamespaceV2ModuleStaysAnIdentifier(t *testing.T) {
@@ -211,7 +237,7 @@ declare namespace Svc {
     export var count: number;
 }
 console.log(Svc.count);
-try { Svc.ping(); } catch (e) { console.log(e.message); }
+try { Svc.ping(); } catch (e) { console.log((e as Error).message); }
 declare module "fs-extra" { }
 declare global { }
 console.log("erased forms ok");
@@ -235,4 +261,17 @@ console.log(Shapes.Point.origin());
 console.log(Shapes.Point.count);
 console.log(new Shapes.Point(4).x);
 `, "1\n0,0\n3\n4")
+}
+
+// `export declare var` is a namespace member: declared without a value, set
+// and read through the namespace.
+func TestE2ENamespaceDeclareVarMember(t *testing.T) {
+	assertOutput(t, `
+namespace M {
+    export declare var n: number
+    export var k = 3
+}
+M.n = 5
+console.log(M.n + M.k)
+`, "8")
 }

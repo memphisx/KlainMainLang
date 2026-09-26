@@ -256,7 +256,7 @@ func TestE2EHTTPCreateServerNodeShape(t *testing.T) {
 	// req.method access.
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.setHeader("X-Method", req.method)
   res.writeHead(201, { "Content-Type": "text/plain" })
   res.write("part1;")
@@ -293,7 +293,7 @@ import http from 'http'
 http.createServer(
   { noDelay: true, keepAlive: false, requestTimeout: 0, headersTimeout: 0,
     maxRequestsPerSocket: 0, insecureHTTPParser: false, requireHostHeader: false },
-  (req: IncomingMessage, res: ServerResponse) => {
+  (req: http.IncomingMessage, res: http.ServerResponse) => {
     res.writeHead(200, { "Content-Type": "text/plain" })
     res.end("ok")
   }).listen(8971)
@@ -314,21 +314,16 @@ http.createServer(
 }
 
 func TestE2EHTTPCreateServerOptionRejections(t *testing.T) {
-	// ADR-00977: a value that would change behavior — or an unrecognized option —
-	// is a clean rejection, never a silent ignore.
+	// An option of the wrong type is tsc's TS2345 against ServerOptions.
 	cases := []struct{ opt, want string }{
-		{"noDelay: false", "noDelay option supports only the literal true"},
-		{"keepAlive: true", "keepAlive option supports only the literal false"},
-		{"maxRequestsPerSocket: 5", "maxRequestsPerSocket option supports only the literal 0"},
-		{`highWaterMark: "big"`, "highWaterMark option must be a compile-time integer"},
-		{`requestTimeout: "x"`, "requestTimeout must be a compile-time integer"},
-		{`headersTimeout: "y"`, "headersTimeout must be a compile-time integer"},
-		{"maxHeaderSize: 100", "createServer option 'maxHeaderSize' is not supported"},
+		{`highWaterMark: "big"`, "is not assignable to parameter of type 'ServerOptions'"},
+		{`requestTimeout: "x"`, "is not assignable to parameter of type 'ServerOptions'"},
+		{`headersTimeout: "y"`, "is not assignable to parameter of type 'ServerOptions'"},
 	}
 	for _, tc := range cases {
 		src := fmt.Sprintf(`
 import http from 'http'
-http.createServer({ %s }, (req: IncomingMessage, res: ServerResponse) => { res.end("x") }).listen(0)
+http.createServer({ %s }, (req: http.IncomingMessage, res: http.ServerResponse) => { res.end("x") }).listen(0)
 `, tc.opt)
 		_, err := resolveAndCompile(t, src)
 		if err == nil {
@@ -347,7 +342,7 @@ func TestE2EHTTPCreateServerStatusCodeSetter(t *testing.T) {
 	// `res.statusCode` back returns what was set — used here to echo it in the body.
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.statusCode = 404
   res.setHeader("Content-Type", "text/plain")
   const code = res.statusCode
@@ -378,7 +373,7 @@ func TestE2EHTTPCreateServerNonBlockingListen(t *testing.T) {
 	src := `
 import http from 'http'
 let phase = "before"
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
   res.end(phase)
 }).listen(8959)
@@ -402,7 +397,7 @@ func TestE2EHTTPCreateServerWriteBoolAndCork(t *testing.T) {
 	// res.cork()/uncork() are accepted no-op hints.
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.cork()
   const ok = res.write("a;")
   res.uncork()
@@ -428,7 +423,7 @@ func TestE2EHTTPCreateServerResIncrementalStream(t *testing.T) {
 	// response is Transfer-Encoding: chunked and reassembles to the joined chunks.
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "text/plain" })
   res.write("one;")
   res.write("two;")
@@ -462,7 +457,7 @@ func TestE2EHTTPCreateServerResWriteBinary(t *testing.T) {
 	// NUL must survive — a stringified path would truncate there.
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "application/octet-stream" })
   const a = new Uint8Array(3)
   a[0] = 5; a[1] = 0; a[2] = 200
@@ -491,7 +486,7 @@ func TestE2EHTTPCreateServerResEndBinaryBuffered(t *testing.T) {
 	// included, rather than stringifying the array.
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "application/octet-stream" })
   const b = new Uint8Array(4)
   b[0] = 7; b[1] = 0; b[2] = 9; b[3] = 250
@@ -504,8 +499,9 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
 		t.Fatalf("GET: %v", err)
 	}
 	defer resp.Body.Close()
-	if len(resp.TransferEncoding) != 0 {
-		t.Errorf("TransferEncoding: got %v, want [] (Content-Length path)", resp.TransferEncoding)
+	// writeHead stored the header without a length, so Node chunks the body.
+	if len(resp.TransferEncoding) != 1 || resp.TransferEncoding[0] != "chunked" {
+		t.Errorf("TransferEncoding: got %v, want [chunked]", resp.TransferEncoding)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	want := []byte{7, 0, 9, 250}
@@ -525,7 +521,7 @@ func TestE2EHTTPCreateServerResStreamBackpressure(t *testing.T) {
 	kb := strings.Repeat("x", 1024)
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   if (req.url === "/big") {
     res.writeHead(200)
     let i = 0
@@ -588,7 +584,7 @@ func TestE2EHTTPCreateServerResStreamLargeBodyIntact(t *testing.T) {
 	// must resume and finish every chunk on EAGAIN, never drop bytes.
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "text/plain" })
   let i = 0
   while (i < 4096) {
@@ -626,7 +622,7 @@ func TestE2EHTTPCreateServerResWriteBackpressureDrain(t *testing.T) {
 	const totalChunks = 128 // 8 MiB
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
   const chunk = "0123456789ABCDEF".repeat(4096) // 64 KiB
   let n = 0
@@ -712,7 +708,7 @@ func TestE2EHTTPCreateServerHighWaterMark(t *testing.T) {
 	const totalChunks = 128 // 8 MiB
 	src := `
 import http from 'http'
-http.createServer({ highWaterMark: 256 }, (req: IncomingMessage, res: ServerResponse) => {
+http.createServer({ highWaterMark: 256 }, (req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
   const chunk = "0123456789ABCDEF".repeat(4096) // 64 KiB
   let n = 0
@@ -789,8 +785,8 @@ func TestE2EHTTPCreateServerConnectionTimeouts(t *testing.T) {
 	src := `
 import http from 'http'
 http.createServer(
-  { headersTimeout: 300, requestTimeout: 900, keepAliveTimeout: 400 },
-  (req: IncomingMessage, res: ServerResponse) => {
+  { headersTimeout: 300, requestTimeout: 900, keepAliveTimeout: 400, connectionsCheckingInterval: 100 },
+  (req: http.IncomingMessage, res: http.ServerResponse) => {
     res.writeHead(200)
     res.end("ok")
   }).listen(8131)
@@ -865,8 +861,10 @@ http.createServer(
 			break
 		}
 	}
-	if elapsed := time.Since(start).Seconds(); elapsed > 1.2 {
-		t.Errorf("keepAliveTimeout: idle connection closed after %.2fs, want < ~1.2", elapsed)
+	// Node closes an idle kept-alive socket keepAliveTimeout plus
+	// keepAliveTimeoutBuffer (1000ms) after the response.
+	if elapsed := time.Since(start).Seconds(); elapsed < 1.2 || elapsed > 2.0 {
+		t.Errorf("keepAliveTimeout: idle connection closed after %.2fs, want ~1.4", elapsed)
 	}
 
 	// The server is still healthy after all the aborts.
@@ -887,7 +885,7 @@ func TestE2EHTTPCreateServerResClientAbortSurvives(t *testing.T) {
 	// returns EPIPE and the connection unwinds; a subsequent request still works.
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
   let i = 0
   while (i < 4096) {
@@ -933,7 +931,7 @@ func TestE2EHTTPCreateServerResStreamKeepAlive(t *testing.T) {
 	// so two sequential requests on one reused connection both stream correctly.
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
   res.write("chunk-")
   res.end("end")
@@ -959,7 +957,7 @@ func TestE2EHTTPCreateServerReqPipeRes(t *testing.T) {
 	// res (Node Writable) echoes the request body straight back to the client.
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "application/octet-stream" })
   req.pipe(res)
 }).listen(8996)
@@ -986,7 +984,7 @@ func TestE2EHTTPCreateServerResWritePipeInterleave(t *testing.T) {
 	// wrote straight to the socket, so the two could interleave out of order.
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "application/octet-stream" })
   res.write("PREFIX:")
   req.pipe(res)
@@ -1012,9 +1010,9 @@ func TestE2EHTTPCreateServerBoundHandle(t *testing.T) {
 	// server is bound to a const and .listen() is a later statement.
 	src := `
 import http from 'http'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
-  res.end("pong:" + req.path)
+  res.end("pong:" + req.url)
 })
 server.listen(8973)
 `
@@ -1039,7 +1037,7 @@ import { createServer } from 'http'
 const server = createServer()
 server.on('request', (req, res) => {
   res.writeHead(200)
-  res.end("on:" + req.path)
+  res.end("on:" + req.url)
 })
 server.listen(8972)
 `
@@ -1061,11 +1059,12 @@ func TestE2EHTTPCreateServerEphemeralPortAndClose(t *testing.T) {
 	// the blocking listen call.
 	src := `
 import http from 'http'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+import type { AddressInfo } from 'net'
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("unused")
 })
 server.listen(0, () => {
-  const port: number = server.address().port
+  const port: number = (server.address() as AddressInfo).port
   if (port > 0) { console.log("got ephemeral port") }
   setTimeout(() => { server.close() }, 20)
 })
@@ -1086,11 +1085,12 @@ func TestE2EHTTPServerListenOptionsObject(t *testing.T) {
 	// server.address().address reflects via getsockname; backlog is accepted.
 	src := `
 import http from 'http'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+import type { AddressInfo } from 'net'
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("unused")
 })
 server.listen({ port: 0, host: "127.0.0.1", backlog: 64 }, () => {
-  const a = server.address()
+  const a = server.address() as AddressInfo
   if (a.port > 0) { console.log("addr=" + a.address) }
   server.close()
 })
@@ -1106,21 +1106,22 @@ console.log("after loop")
 }
 
 func TestE2EHTTPServerListenOptionsDefaultHost(t *testing.T) {
-	// An options literal with no host binds INADDR_ANY (0.0.0.0), same as the
-	// positional listen(0) form.
+	// An options literal with no host binds the unspecified IPv6 address,
+	// dual-stack (::), as Node does, the same as the positional listen(0) form.
 	src := `
 import http from 'http'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+import type { AddressInfo } from 'net'
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("unused")
 })
 server.listen({ port: 0 }, () => {
-  console.log("addr=" + server.address().address)
+  console.log("addr=" + (server.address() as AddressInfo).address)
   server.close()
 })
 `
 	out := compileAndRunImports(t, src)
-	if !strings.Contains(out, "addr=0.0.0.0") {
-		t.Errorf("default host was not 0.0.0.0: %q", out)
+	if !strings.Contains(out, "addr=::") {
+		t.Errorf("default host was not ::: %q", out)
 	}
 }
 
@@ -1130,10 +1131,10 @@ func TestE2EHTTPMultipleServers(t *testing.T) {
 	pa, pb := freePort(t), freePort(t)
 	src := `
 import http from 'http'
-const a = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const a = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("A:" + req.url)
 })
-const b = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const b = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("B:" + req.url)
 })
 a.listen(19301, () => { b.listen(19302, () => { console.log("ready") }) })
@@ -1181,8 +1182,8 @@ func TestE2EHTTPMultipleServersCloseExits(t *testing.T) {
 	// extra-listener-table entry, or the loop would spin forever.
 	src := `
 import http from 'http'
-const a = http.createServer((req: IncomingMessage, res: ServerResponse) => { res.end("a") })
-const b = http.createServer((req: IncomingMessage, res: ServerResponse) => { res.end("b") })
+const a = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => { res.end("a") })
+const b = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => { res.end("b") })
 a.listen(0, () => {
   b.listen(0, () => {
     console.log("up")
@@ -1217,10 +1218,10 @@ func TestE2EHTTPMultipleServersRelisten(t *testing.T) {
 	pa, pb1, pb2 := freePort(t), freePort(t), freePort(t)
 	src := `
 import http from 'http'
-const b = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const b = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("B:" + req.url)
 })
-const a = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const a = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   if (req.url === "/move") { b.close(); b.listen(19402, () => {}) }
   res.writeHead(200); res.end("A:" + req.url)
 })
@@ -1270,14 +1271,14 @@ func TestE2EHTTPMultipleServersUpgradeOnPrimary(t *testing.T) {
 	pa, pb := freePort(t), freePort(t)
 	src := `
 import http from 'http'
-const a = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const a = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end('plain http')
 })
 a.on('upgrade', (req, socket, head) => {
   socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n')
   socket.on('data', (chunk) => { socket.write('echo:' + chunk.toString()) })
 })
-const b = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const b = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end('B:' + req.url)
 })
 a.listen(19501, () => { b.listen(19502, () => { console.log('ready') }) })
@@ -1338,10 +1339,10 @@ func TestE2EHTTPMultipleServersUpgradeOnExtra(t *testing.T) {
 	pa, pb := freePort(t), freePort(t)
 	src := `
 import http from 'http'
-const a = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const a = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end('A:' + req.url)
 })
-const b = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const b = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end('B:' + req.url)
 })
 b.on('upgrade', (req, socket, head) => {
@@ -1623,9 +1624,9 @@ let lastCode = "none"
 const server = http.createServer((req, res) => {
   res.end("count=" + count + " code=" + lastCode)
 })
-server.on('clientError', (err: Error, socket) => {
+server.on('clientError', (err: NodeJS.ErrnoException, socket) => {
   count = count + 1
-  lastCode = err.code
+  lastCode = err.code ?? "none"
 })
 server.listen(8310)
 `
@@ -1639,7 +1640,7 @@ server.listen(8310)
 		t.Fatalf("write partial: %v", err)
 	}
 	time.Sleep(200 * time.Millisecond)
-	c1.Close() // truncate mid-request → clientError(ECONNRESET)
+	c1.Close() // truncate mid-request → clientError(HPE_INVALID_EOF_STATE), as Node reports it
 	time.Sleep(300 * time.Millisecond)
 
 	// A normal request on a fresh connection reports what the listener recorded.
@@ -1654,7 +1655,7 @@ server.listen(8310)
 	}
 	c2.SetReadDeadline(time.Now().Add(4 * time.Second))
 	resp := readContentLengthResponse(t, b2)
-	if !strings.Contains(resp, "count=1") || !strings.Contains(resp, "code=ECONNRESET") {
+	if !strings.Contains(resp, "count=1") || !strings.Contains(resp, "code=HPE_INVALID_EOF_STATE") {
 		t.Fatalf("clientError did not fire as expected:\n%q", resp)
 	}
 }
@@ -1737,49 +1738,45 @@ server.listen(8312)
 }
 
 func TestE2EHTTPServerErrorEventEADDRINUSE(t *testing.T) {
-	// TDD-00215 Stage 2: binding a port already held by another server fires the
-	// server 'error' event with err.code === 'EADDRINUSE' instead of aborting the
-	// process. The listener runs synchronously at listen() time; exiting from it
-	// keeps the event loop (still holding s1's listener) from running.
+	// Binding a port another server holds fires the server 'error' event with
+	// err.code === 'EADDRINUSE' — on the next tick, as Node emits it, so the
+	// code after listen() runs first.
 	src := `
 import http from 'http'
 const s1 = http.createServer((req, res) => { res.end("a") })
 s1.listen(8317)
 const s2 = http.createServer((req, res) => { res.end("b") })
-s2.on('error', (err: Error) => {
+s2.on('error', (err: NodeJS.ErrnoException) => {
   console.log("error code=" + err.code)
   process.exit(0)
 })
 s2.listen(8317)
-console.log("unreachable")
+console.log("after listen")
 `
 	out := compileAndRunImports(t, src)
-	if !strings.Contains(out, "error code=EADDRINUSE") {
-		t.Fatalf("expected EADDRINUSE error event, got:\n%q", out)
-	}
-	if strings.Contains(out, "unreachable") {
-		t.Fatalf("code after a fired-and-exited error handler ran:\n%q", out)
+	if out != "after listen\nerror code=EADDRINUSE" {
+		t.Fatalf("got:\n%q", out)
 	}
 }
 
 func TestE2EHTTPServerErrorEventNoListenerThrows(t *testing.T) {
-	// TDD-00215 Stage 2: with no 'error' listener registered, a bind failure still
-	// surfaces as an uncaught, process-aborting error (Node parity) — the
-	// pre-feature behavior of __kml_http_bind_and_listen is preserved.
+	// With no 'error' listener, a bind failure is an unhandled 'error' event
+	// that ends the process (nonzero) — on the next tick, after the code that
+	// follows listen().
 	src := `
 import http from 'http'
 const s1 = http.createServer((req, res) => { res.end("a") })
 s1.listen(8318)
 const s2 = http.createServer((req, res) => { res.end("b") })
 s2.listen(8318)
-console.log("unreachable")
+console.log("after listen")
 `
 	out, code := compileAndRunExpectExitImports(t, src)
 	if code == 0 {
 		t.Fatalf("expected nonzero exit on unhandled bind failure, got 0:\n%q", out)
 	}
-	if strings.Contains(out, "unreachable") {
-		t.Fatalf("code after an unhandled bind failure ran:\n%q", out)
+	if !strings.HasPrefix(out, "after listen") {
+		t.Fatalf("expected the code after listen() to run first:\n%q", out)
 	}
 }
 
@@ -1854,9 +1851,10 @@ func TestE2EHTTPExpressionBodiedHandler(t *testing.T) {
 	// the ServerResponse-method return-type inference gap (ADR-00801).
 	src := `
 import http from 'http'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => res.end("hi"))
+import type { AddressInfo } from 'net'
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => res.end("hi"))
 server.listen(0, () => {
-  console.log("bound:" + (server.address().port > 0))
+  console.log("bound:" + ((server.address() as AddressInfo).port > 0))
   server.close()
 })
 `
@@ -1994,7 +1992,7 @@ try {
     return { status: 200, body: "ok" }
   })
 } catch (e) {
-  console.log("caught: " + e.message)
+  console.log("caught: " + (e as Error).message)
 }
 `
 	port := freePort(t)
@@ -2259,7 +2257,7 @@ async function proxy(path: string): Promise<string> {
   const r = await fetch("%s" + path)
   return await r.text()
 }
-const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
   const v = await proxy(req.url)
   res.writeHead(200)
   res.end("front:" + v)
@@ -2322,7 +2320,7 @@ async function proxy(path: string): Promise<string> {
   const r = await fetch("%s" + path)
   return await r.text()
 }
-const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
   const v = await proxy("/slow")
   res.writeHead(200)
   res.end("front:" + v)
@@ -2385,7 +2383,7 @@ import http from 'http';
 async function delay(ms: number): Promise<void> {
   return await new Promise<void>((r) => setTimeout(() => r(), ms));
 }
-http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
+http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
   await delay(20);
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("kalimera from the server");
@@ -2885,7 +2883,7 @@ func TestE2EHTTPClusterCombinedWithCreateServer(t *testing.T) {
 import http from 'http'
 import khttp from 'klain:http'
 interface Res { status: number; body: string }
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
   res.end("extra")
 }).listen(%d)
@@ -2951,14 +2949,14 @@ khttp.listen(%d, (req: HttpRequest): Res => {
 
 // TestE2EHTTPListenClusteringDefaultIsSingleProcess confirms the two-argument
 // form (no workers option) forks nothing — cluster.isPrimary must read true
-// and cluster.workerId 0, byte-identical to today's single-process behavior.
+// and cluster.worker undefined, byte-identical to today's single-process behavior.
 func TestE2EHTTPListenClusteringDefaultIsSingleProcess(t *testing.T) {
 	src := `
 import http from 'klain:http'
 import cluster from 'cluster'
 interface Res { status: number; body: string }
 http.listen(8964, (req: HttpRequest): Res => {
-  return { status: 200, body: (cluster.isPrimary ? "primary" : "worker") + " " + cluster.workerId.toString() }
+  return { status: 200, body: (cluster.isPrimary ? "primary" : "worker") + " " + (cluster.worker?.id ?? 0).toString() }
 })
 `
 	port := startHTTPServer(t, src, 8964)
@@ -3432,13 +3430,14 @@ func TestE2EHTTPCreateServerNodeTestIdiom(t *testing.T) {
 	// winds down (post-loop reaction flush).
 	src := `
 import http from 'http'
+import type { AddressInfo } from 'net'
 import { mustCall } from 'test'
 const server = http.createServer(mustCall((req, res) => {
-  res.end("resp:" + req.path)
+  res.end("resp:" + req.url)
   server.close()
 }))
 server.listen(0, mustCall(() => {
-  http.get({ port: server.address().port, path: "/req7" }, mustCall((res) => {
+  http.get({ port: (server.address() as AddressInfo).port, path: "/req7" }, mustCall((res) => {
     let data = ""
     res.on('data', (chunk: string) => { data = data + chunk })
     res.on('end', () => { console.log("got", data) })
@@ -3537,11 +3536,11 @@ import http from 'http'
 import http2 from 'http2'
 const cert = "%s"
 const key = "%s"
-const plain = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const plain = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("plain:" + req.url)
 })
 const secure = http2.createSecureServer({ cert: cert, key: key }, (req, res) => {
-  res.writeHead(200); res.end("h2:" + req.path)
+  res.writeHead(200); res.end("h2:" + req.url)
 })
 plain.listen(19911, () => { secure.listen(19912, () => { console.log("ready") }) })
 `, certLit, keyLit)
@@ -3630,10 +3629,9 @@ server.listen(8985)
 
 func TestE2EHTTPSServer(t *testing.T) {
 	skipIfLoopbackTrafficFiltered(t)
-	// TDD-00111: https.createServer — HTTPS/1.1 over TLS. The accepted fd is
-	// TLS-handshaken; the h1-only ALPN forces even an h2-capable client to 1.1,
-	// and the connection is served by the ordinary fiber dispatcher whose socket
-	// I/O is routed through the SSL shims. curl -k accepts the self-signed cert.
+	// https.createServer — HTTPS/1.1 over TLS: the default ALPN list is
+	// http/1.1 only, so even an h2-capable client speaks 1.1. The body is read
+	// off the request stream. curl -k accepts the self-signed cert.
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Skip("curl not found in PATH")
 	}
@@ -3643,8 +3641,12 @@ import https from 'https'
 const cert = "%s"
 const key = "%s"
 const server = https.createServer({ cert: cert, key: key }, (req, res) => {
-  res.writeHead(200)
-  res.end("https:" + req.method + ":" + req.path + ":" + req.body)
+  let body = ""
+  req.on("data", (c: Buffer) => { body += c.toString() })
+  req.on("end", () => {
+    res.writeHead(200)
+    res.end("https:" + req.method + ":" + req.url + ":" + body)
+  })
 })
 server.listen(8987)
 `, certLit, keyLit)
@@ -3660,7 +3662,7 @@ server.listen(8987)
 		t.Errorf("https GET: got %q, want %q", got, "https:GET:/hello:|1.1")
 	}
 
-	// A POST body — exercises the Content-Length read loop over the SSL shims.
+	// A POST body, read as the request's data events.
 	out, err = exec.Command(nativeCurl(), "-sk", fmt.Sprintf("https://127.0.0.1:%d/echo", port),
 		"-d", "payload", "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
@@ -3837,11 +3839,11 @@ import http from 'http'
 import https from 'https'
 const cert = "%s"
 const key = "%s"
-const plain = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const plain = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("plain:" + req.url)
 })
 const secure = https.createServer({ cert: cert, key: key }, (req, res) => {
-  res.writeHead(200); res.end("secure:" + req.method + ":" + req.path)
+  res.writeHead(200); res.end("secure:" + req.method + ":" + req.url)
 })
 plain.listen(19801, () => { secure.listen(19802, () => { console.log("ready") }) })
 `, certLit, keyLit)
@@ -3895,10 +3897,10 @@ import https from 'https'
 const cert = "%s"
 const key = "%s"
 const a = https.createServer({ cert: cert, key: key }, (req, res) => {
-  res.writeHead(200); res.end("A:" + req.path)
+  res.writeHead(200); res.end("A:" + req.url)
 })
 const b = https.createServer({ cert: cert, key: key }, (req, res) => {
-  res.writeHead(200); res.end("B:" + req.path)
+  res.writeHead(200); res.end("B:" + req.url)
 })
 a.listen(19811, () => { b.listen(19812, () => { console.log("ready") }) })
 `, certLit, keyLit)
@@ -4037,13 +4039,14 @@ func TestE2EHTTPServerNoHandlerListen(t *testing.T) {
 	// responding. A synthesized empty handler answers 200/empty.
 	assertOutputImports(t, `
 import http from 'http'
+import type { AddressInfo } from 'net'
 const server = http.createServer()
 server.listen(0, () => {
-  console.log("up", server.address().port > 0)
+  console.log("up", (server.address() as AddressInfo).port > 0)
   setTimeout(() => { server.close() }, 10)
 })
 console.log("done")
-`, "up true\ndone")
+`, "done\nup true")
 }
 
 func TestE2EHTTP2ClientSession(t *testing.T) {
@@ -4133,11 +4136,12 @@ func TestE2EHTTPChainedListenBinding(t *testing.T) {
 	// (the var-decl split, ADR-00423).
 	src := `
 import http from 'http'
+import type { AddressInfo } from 'net'
 import { mustCall } from 'test'
 const server = http.createServer(mustCall((req, res) => {
-  res.end("hi:" + req.path)
+  res.end("hi:" + req.url)
 })).listen(0, mustCall(() => {
-  http.get({ port: server.address().port, path: "/c" }, mustCall((res) => {
+  http.get({ port: (server.address() as AddressInfo).port, path: "/c" }, mustCall((res) => {
     let data = ""
     res.on('data', (chunk: string) => { data = data + chunk })
     res.on('end', () => { console.log("chained", data) })
@@ -4157,10 +4161,11 @@ func TestE2EHTTPCreateServerMustNotCall(t *testing.T) {
 	// handler that invokes it, so a hit registers the exit-verified failure.
 	src := `
 import http from 'http'
+import type { AddressInfo } from 'net'
 import { mustCall, mustNotCall } from 'test'
 const server = http.createServer(mustNotCall())
 server.listen(0, mustCall(() => {
-  console.log("bound: " + (server.address().port > 0))
+  console.log("bound: " + ((server.address() as AddressInfo).port > 0))
   server.close()
 }))
 `
@@ -4177,12 +4182,13 @@ func TestE2EHTTPServerHandleInTopLevelFunction(t *testing.T) {
 	// chained) promotes to a module global (ADR-00426).
 	src := `
 import http from 'http'
+import type { AddressInfo } from 'net'
 import { mustCall } from 'test'
 const server = http.createServer(mustCall((req, res) => {
-  res.end("r" + req.path)
+  res.end("r" + req.url)
 }, 2))
 function nextRequest(i: number) {
-  http.get({ port: server.address().port, path: "/q" + i }, mustCall((res) => {
+  http.get({ port: (server.address() as AddressInfo).port, path: "/q" + i }, mustCall((res) => {
     res.resume()
     if (i === 1) { nextRequest(2) } else { server.close() }
   }))
@@ -4198,15 +4204,14 @@ console.log("done")
 
 func TestE2EHTTPClientVariableOptionsObject(t *testing.T) {
 	// A variable-bound options object (`const options = {...};
-	// http.get(options, cb)`) — previously the object pointer silently fell
-	// through as the URL and the program hung (ADR-00429). The 'agent' key
-	// is accepted (one connection per request ≙ a non-keepAlive Agent).
+	// http.get(options, cb)`); `agent: false` is a one-off Agent.
 	src := `
 import http from 'http'
+import type { AddressInfo } from 'net'
 import { mustCall } from 'test'
-const server = http.createServer(mustCall((req, res) => { res.end("v:" + req.path) }))
+const server = http.createServer(mustCall((req, res) => { res.end("v:" + req.url) }))
 server.listen(0, mustCall(() => {
-  const options = { agent: null, port: server.address().port, path: "/varopt" }
+  const options = { agent: false, port: (server.address() as AddressInfo).port, path: "/varopt" }
   http.get(options, mustCall((res) => {
     let d = ""
     res.on('data', (c: string) => { d = d + c })
@@ -4227,12 +4232,13 @@ func TestE2EHTTPClientRequestHandle(t *testing.T) {
 	// never fires — the server handler is mustNotCall-verified.
 	src := `
 import http from 'http'
+import type { AddressInfo } from 'net'
 import { mustCall } from 'test'
 const server = http.createServer(mustCall((req, res) => {
   res.end('ok')
   server.close()
 })).listen(0, mustCall(() => {
-  http.request({ port: server.address().port }, mustCall((res) => {
+  http.request({ port: (server.address() as AddressInfo).port }, mustCall((res) => {
     let data = ''
     res.on('data', (chunk: string) => { data = data + chunk })
     res.on('end', mustCall(() => { console.log("data: " + data) }))
@@ -4246,17 +4252,21 @@ const server = http.createServer(mustCall((req, res) => {
 }
 
 func TestE2EHTTPClientRequestBody(t *testing.T) {
-	// A ClientRequest can carry a request body (ADR-00575): req.write(chunk)
-	// stages bytes (appending across calls), req.end([body]) appends a final
-	// chunk and fires. The server echoes method + body.
+	// A ClientRequest's body: req.write(chunk), then req.end(last chunk). The
+	// server reads the request stream and echoes method + body.
 	src := `
 import http from 'http'
+import type { AddressInfo } from 'net'
 import { mustCall } from 'test'
 const server = http.createServer(mustCall((req, res) => {
-  res.end(req.method + ":" + req.body)
-  server.close()
+  let body = ''
+  req.on('data', (c: Buffer) => { body += c.toString() })
+  req.on('end', () => {
+    res.end(req.method + ":" + body)
+    server.close()
+  })
 })).listen(0, mustCall(() => {
-  const req = http.request({ port: server.address().port, method: "POST" }, mustCall((res) => {
+  const req = http.request({ port: (server.address() as AddressInfo).port, method: "POST" }, mustCall((res) => {
     let data = ''
     res.on('data', (chunk: string) => { data = data + chunk })
     res.on('end', mustCall(() => { console.log("got: " + data) }))
@@ -4274,10 +4284,11 @@ const server = http.createServer(mustCall((req, res) => {
 func TestE2EHTTPClientRequestAbort(t *testing.T) {
 	src := `
 import http from 'http'
+import type { AddressInfo } from 'net'
 import { mustCall, mustNotCall } from 'test'
 const server = http.createServer(mustNotCall())
 server.listen(0, mustCall(() => {
-  const req = http.request({ port: server.address().port })
+  const req = http.request({ port: (server.address() as AddressInfo).port })
   req.on('error', mustNotCall())
   req.abort()
   server.close()
@@ -4297,11 +4308,12 @@ func TestE2EHTTPAgentInert(t *testing.T) {
 	// connection per request, Node's non-keepAlive behavior).
 	src := `
 import http from 'http'
+import type { AddressInfo } from 'net'
 import { mustCall } from 'test'
 const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
 const server = http.createServer(mustCall((req, res) => { res.end('a') }))
 server.listen(0, mustCall(() => {
-  http.get({ port: server.address().port, agent: agent }, mustCall((res) => {
+  http.get({ port: (server.address() as AddressInfo).port, agent: agent }, mustCall((res) => {
     res.resume()
     agent.destroy()
     server.close()
@@ -4320,7 +4332,7 @@ func TestE2EHTTPReasonPhrase(t *testing.T) {
 	// (previously a fixed "OK" for every status).
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(404)
   res.end("nope")
 }).listen(8956)
@@ -4341,13 +4353,14 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
 func TestE2EHTTPClientMethodAndHeaders(t *testing.T) {
 	src := `
 import http from 'http'
+import type { AddressInfo } from 'net'
 import { mustCall } from 'test'
 const server = http.createServer(mustCall((req, res) => {
   res.end(req.method + "|" + req.headers["x-probe"])
 }))
 server.listen(0, mustCall(() => {
   const req = http.request({
-    port: server.address().port,
+    port: (server.address() as AddressInfo).port,
     path: "/m",
     method: "DELETE",
     headers: { "X-Probe": "kml42" },
@@ -4371,11 +4384,12 @@ server.listen(0, mustCall(() => {
 func TestE2EHTTPServerListeningEvent(t *testing.T) {
 	src := `
 import http from 'http'
+import type { AddressInfo } from 'net'
 import { mustCall } from 'test'
 const server = http.createServer((req, res) => { res.end("ok") })
 server.on('listening', mustCall(() => {
-  console.log("listening on", server.address().port > 0)
-  http.get({ port: server.address().port, path: "/" }, mustCall((res) => {
+  console.log("listening on", (server.address() as AddressInfo).port > 0)
+  http.get({ port: (server.address() as AddressInfo).port, path: "/" }, mustCall((res) => {
     res.on('data', (c: string) => {})
     res.on('end', () => { server.close(); process.exit(0) })
   }))
@@ -4394,9 +4408,10 @@ server.listen(0)
 func TestE2EHTTPCreateServerRequireHostHeaderFalse(t *testing.T) {
 	src := `
 import http from 'http'
+import type { AddressInfo } from 'net'
 const server = http.createServer({ requireHostHeader: false }, (req, res) => { res.end("ok") })
 server.listen(0, () => {
-  http.get({ port: server.address().port }, (res) => {
+  http.get({ port: (server.address() as AddressInfo).port }, (res) => {
     console.log("status", res.statusCode)
     res.on('data', (c: string) => {})
     res.on('end', () => { server.close(); process.exit(0) })
@@ -4459,7 +4474,7 @@ func skipIfLoopbackTrafficFiltered(t *testing.T) {
 func TestE2EResFireAndForgetOnData(t *testing.T) {
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   let total = 0
   req.on('data', (c: Uint8Array) => { total = total + c.length })
   req.on('end', () => { res.end("ff=" + total) })
@@ -4479,11 +4494,8 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
 	}
 }
 
-// http.get with no event loop is serviced by __kml_httpc_drive. Its pump loop
-// allocated a stack slot on every pass and spun without waiting, so a transfer
-// slow to fail — a refused connect retries for ~2 s on Windows — overflowed
-// the stack (0xC00000FD) instead of reaching the uncaught-error exit. Now it
-// waits on curl's sockets between pumps and exits 1 as on Linux.
+// A refused connect is the request's 'error' event; with no listener it is
+// the uncaught ECONNREFUSED, exit 1.
 func TestE2EHTTPClientRefusedConnectExitsCleanly(t *testing.T) {
 	out, code := compileAndRunExpectExitImports(t, `
 import http from 'http'
@@ -4493,7 +4505,33 @@ http.get("http://127.0.0.1:1/", (res) => { console.log(res.statusCode) })
 	if code != 1 {
 		t.Fatalf("exit code %d (want 1, the uncaught transport error); stdout %q", code, out)
 	}
-	if !strings.HasPrefix(out, "start") || !strings.Contains(out, "Could not connect") {
+	if !strings.HasPrefix(out, "start") || !strings.Contains(out, "connect ECONNREFUSED 127.0.0.1:1") {
 		t.Fatalf("stdout %q: want the program's own line, then the uncaught transport error", out)
+	}
+}
+
+func TestE2EHTTPClientCreateConnection(t *testing.T) {
+	// http.request's createConnection option makes the socket; no agent is
+	// used and the request goes out with Connection: close.
+	src := `
+import http from 'http'
+import net from 'net'
+import type { AddressInfo } from 'net'
+import { mustCall } from 'test'
+const server = http.createServer(mustCall((req, res) => {
+  res.end(String(req.headers.connection))
+  server.close()
+})).listen(0, mustCall(() => {
+  const port = (server.address() as AddressInfo).port
+  http.request({ port, createConnection: mustCall((opts, oncreate) => net.createConnection(port, '127.0.0.1')) }, mustCall((res) => {
+    let data = ''
+    res.on('data', (chunk: string) => { data = data + chunk })
+    res.on('end', mustCall(() => { console.log("data: " + data) }))
+  })).end()
+}))
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "data: close") {
+		t.Errorf("createConnection request failed: %q", out)
 	}
 }

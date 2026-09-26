@@ -5,8 +5,9 @@
 // the resolver transparently follows the re-export chain to the real
 // declaration in re_export_core.ts.
 
-import { add, multiply, greet } from './re_export_lib'
+import { add, multiply, greet, VERSION, loud } from './re_export_lib'
 
 console.log(add(2, 3))          // 5
 console.log(multiply(4, 5))     // 20
 console.log(greet("world"))     // hello world
+console.log(VERSION, loud("hey")) // 1.0 HEY!

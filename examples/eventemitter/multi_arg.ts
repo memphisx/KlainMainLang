@@ -3,10 +3,12 @@
 // like real Node's `emit('data', chunk, size)` / `on('data', (chunk, size) => …)`.
 // This file runs the same way under Node.js.
 
+import { EventEmitter } from 'events';
+
 class Download extends EventEmitter<{
   progress: [number, number];
   done: [string];
-  error: void;
+  error: [];
 }> {
   run(): void {
     this.emit("progress", 512, 1024);

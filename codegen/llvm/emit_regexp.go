@@ -930,11 +930,27 @@ func (e *Emitter) emitRegexCollectGlobalMatches(regexVal, strVal Value, storeEle
 // null," which turned out to be a real mistake in the design writeup,
 // corrected during implementation per usual practice — see ADR-00117).
 //
-// No implicit string-to-RegExp coercion — real JS coerces a non-RegExp
-// `match()` argument, but this compiler has no such coercion path (the
-// same documented scope narrowing `.search()` already established, see
-// docs/status/STRING-METHODS.md) — a non-RegExp argument is a compile-time
-// error here instead.
+// A non-RegExp argument is compiled as `new RegExp(String(arg))`, as real JS
+// coerces it (emitRegExpArg).
+// emitRegExpArg is the RegExp a match/matchAll/search argument denotes: a
+// RegExp itself, or anything else as `new RegExp(String(arg), flags)` — the
+// spec's coercion (matchAll's is global).
+func (e *Emitter) emitRegExpArg(arg ast.Expression, flags string) (Value, error) {
+	ty := e.inferExprType(arg)
+	if ty.IsRegExp {
+		return e.emitExpr(arg)
+	}
+	pattern := arg
+	if !isStringTy(ty) {
+		pattern = ast.NewCallExpression(ast.NewIdentifier("String", arg.GetPos()), []ast.Expression{arg}, arg.GetPos())
+	}
+	re := &ast.NewRegExpExpression{Pattern: pattern}
+	if flags != "" {
+		re.Flags = ast.NewStringLiteral(flags, arg.GetPos())
+	}
+	return e.emitNewRegExpExpression(re)
+}
+
 func (e *Emitter) emitStringMatch(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: match takes exactly 1 argument", pos.Line, pos.Col)
@@ -947,10 +963,7 @@ func (e *Emitter) emitStringMatch(mem *ast.MemberExpression, args []ast.Expressi
 		return Value{}, fmt.Errorf("%d:%d: match is only supported on strings", pos.Line, pos.Col)
 	}
 	strVal = e.coerce(strVal, TypePtr)
-	if !e.inferExprType(args[0]).IsRegExp {
-		return Value{}, fmt.Errorf("%d:%d: match requires a RegExp argument (implicit string-to-RegExp coercion is not supported)", pos.Line, pos.Col)
-	}
-	regexVal, err := e.emitExpr(args[0])
+	regexVal, err := e.emitRegExpArg(args[0], "")
 	if err != nil {
 		return Value{}, err
 	}
@@ -1044,10 +1057,7 @@ func (e *Emitter) emitStringMatchAll(mem *ast.MemberExpression, args []ast.Expre
 		return Value{}, fmt.Errorf("%d:%d: matchAll is only supported on strings", pos.Line, pos.Col)
 	}
 	strVal = e.coerce(strVal, TypePtr)
-	if !e.inferExprType(args[0]).IsRegExp {
-		return Value{}, fmt.Errorf("%d:%d: matchAll requires a RegExp argument (implicit string-to-RegExp coercion is not supported)", pos.Line, pos.Col)
-	}
-	regexVal, err := e.emitExpr(args[0])
+	regexVal, err := e.emitRegExpArg(args[0], "g")
 	if err != nil {
 		return Value{}, err
 	}

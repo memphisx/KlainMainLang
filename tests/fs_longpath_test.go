@@ -21,7 +21,7 @@ const f = deep + '/data.txt'
 fs.writeFileSync(f, 'long-path-ok')
 console.log(f.length > 260)
 console.log(fs.existsSync(f))
-console.log(fs.readFileSync(f))
+console.log(fs.readFileSync(f, 'utf8'))
 console.log(fs.statSync(f).size)
 fs.unlinkSync(f)
 console.log(fs.existsSync(f))

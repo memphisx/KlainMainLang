@@ -3,7 +3,9 @@
 // built-in behavior — the single most common real-world subclass idiom.
 // The override wins at every call site (statically and through the vtable),
 // and `super.<method>(...)` reaches the underlying dispatch.
-class MetricsBus extends EventEmitter<[string, number]> {
+import { EventEmitter } from 'events';
+
+class MetricsBus extends EventEmitter {
   emitted: number = 0;
   attached: number = 0;
 
@@ -14,7 +16,7 @@ class MetricsBus extends EventEmitter<[string, number]> {
   }
 
   // Wrap on to count subscriptions; stays chainable via super.on's `this`.
-  on(event: string, listener: (name: string, value: number) => void): MetricsBus {
+  on(event: string | symbol, listener: (...args: any[]) => void): this {
     this.attached++;
     return super.on(event, listener);
   }

@@ -54,10 +54,12 @@ const netSocketStructSize = 80
 // (netConnConnecting / netConnDone / netConnErr / netConnDNSErr) · 1 i32
 // addrlen (the sockaddr length for the connect() retry) · 2 i32 err (the errno
 // captured on a connect failure; 0 otherwise) · 3 i32 pad · 4 [128 x i8] addr
-// (the target sockaddr, replayed by the connect() completion retry). Heap blob
-// (calloc), freed when the connect resolves.
-const netConnStateIR = "{ i32, i32, i32, i32, [128 x i8] }"
-const netConnStateSize = 144
+// (the target sockaddr, replayed by the connect() completion retry) · 5 ptr
+// pbuf (bytes written before the connect completed — Node buffers pre-connect
+// writes and flushes them on 'connect') · 6 i64 plen (pbuf length). Heap blob
+// (calloc), freed when the connect resolves; pbuf freed then too.
+const netConnStateIR = "{ i32, i32, i32, i32, [128 x i8], ptr, i64 }"
+const netConnStateSize = 160
 
 // ensureNtohs declares ntohs exactly once — both the net and dgram runtimes
 // need it, and duplicate declarations are an LLVM redefinition error.
@@ -83,19 +85,49 @@ func (e *Emitter) ensureNetSockIO() {
 	e.usedNetSockIO = true
 	e.ensureWriteDecl()
 	e.ensureCloseDecl()
+	e.ensureRealloc() // pre-connect write buffering (netConnStateIR field 5)
+	e.ensureMemcpy()
 	sock := netSocketIR
+	connstate := netConnStateIR
 	// __kml_net_sock_write(sock, data, n): write n bytes to the connection fd
 	// (no-op once closed).
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_net_sock_write(ptr %%sock, ptr %%data, i64 %%n) {
 entry:
-  %%fd_p = getelementptr %s, ptr %%sock, i32 0, i32 0
+  %%fd_p = getelementptr %[1]s, ptr %%sock, i32 0, i32 0
   %%fd64 = load i64, ptr %%fd_p, align 8
   %%open = icmp sge i64 %%fd64, 0
-  br i1 %%open, label %%wr, label %%ret
+  br i1 %%open, label %%chkcon, label %%ret
+chkcon:
+  ; A client socket whose non-blocking connect() is still outstanding carries a
+  ; connect-state blob (field 9) with status==1 (connecting). Node buffers writes
+  ; issued before 'connect' and flushes them once the connection completes; a raw
+  ; write() here would hit ENOTCONN/EAGAIN and silently drop the bytes, so append
+  ; them to the blob's pending buffer instead (dispatch flushes it at conndone).
+  %%cs_p = getelementptr %[1]s, ptr %%sock, i32 0, i32 9
+  %%cs = load ptr, ptr %%cs_p, align 8
+  %%hascs = icmp ne ptr %%cs, null
+  br i1 %%hascs, label %%maybebuf, label %%wr
+maybebuf:
+  %%wst_p = getelementptr %[2]s, ptr %%cs, i32 0, i32 0
+  %%wst = load i32, ptr %%wst_p, align 4
+  %%conning = icmp eq i32 %%wst, 1
+  br i1 %%conning, label %%buf, label %%wr
+buf:
+  %%pb_p = getelementptr %[2]s, ptr %%cs, i32 0, i32 5
+  %%pl_p = getelementptr %[2]s, ptr %%cs, i32 0, i32 6
+  %%pb = load ptr, ptr %%pb_p, align 8
+  %%pl = load i64, ptr %%pl_p, align 8
+  %%newlen = add i64 %%pl, %%n
+  %%grown = call ptr @realloc(ptr %%pb, i64 %%newlen)
+  %%dst = getelementptr i8, ptr %%grown, i64 %%pl
+  call ptr @memcpy(ptr %%dst, ptr %%data, i64 %%n)
+  store ptr %%grown, ptr %%pb_p, align 8
+  store i64 %%newlen, ptr %%pl_p, align 8
+  br label %%ret
 wr:
   %%fd = trunc i64 %%fd64 to i32
-  %%ssl_p = getelementptr %s, ptr %%sock, i32 0, i32 5
+  %%ssl_p = getelementptr %[1]s, ptr %%sock, i32 0, i32 5
   %%ssl = load ptr, ptr %%ssl_p, align 8
   %%istls = icmp ne ptr %%ssl, null
   br i1 %%istls, label %%wtls, label %%wraw
@@ -110,13 +142,13 @@ ret:
 }
 define void @__kml_net_sock_close(ptr %%sock) {
 entry:
-  %%fd_p = getelementptr %s, ptr %%sock, i32 0, i32 0
+  %%fd_p = getelementptr %[1]s, ptr %%sock, i32 0, i32 0
   %%fd64 = load i64, ptr %%fd_p, align 8
   %%open = icmp sge i64 %%fd64, 0
   br i1 %%open, label %%cl, label %%ret
 cl:
   %%fd = trunc i64 %%fd64 to i32
-  %%ssl_p = getelementptr %s, ptr %%sock, i32 0, i32 5
+  %%ssl_p = getelementptr %[1]s, ptr %%sock, i32 0, i32 5
   %%ssl = load ptr, ptr %%ssl_p, align 8
   %%istls = icmp ne ptr %%ssl, null
   br i1 %%istls, label %%cfree, label %%craw
@@ -127,7 +159,7 @@ cfree:
 craw:
   call i32 @close(i32 %%fd)
   store i64 -1, ptr %%fd_p, align 8
-  %%st_p = getelementptr %s, ptr %%sock, i32 0, i32 1
+  %%st_p = getelementptr %[1]s, ptr %%sock, i32 0, i32 1
   store i64 1, ptr %%st_p, align 8
   %%clsn_p = getelementptr { i64, i64, ptr, ptr, ptr, ptr, ptr, ptr }, ptr %%sock, i32 0, i32 6
   %%clsn = load ptr, ptr %%clsn_p, align 8
@@ -143,7 +175,7 @@ firecl:
   br label %%ret
 ret:
   ret void
-}`, sock, sock, sock, sock, sock))
+}`, sock, connstate))
 }
 
 func (e *Emitter) ensureNetRuntime() {
@@ -181,12 +213,12 @@ func (e *Emitter) ensureNetRuntime() {
 	srv := netServerIR
 	sock := netSocketIR
 	connstate := netConnStateIR
-	solSocket, soReuseAddr := httpSockConstants()
-	fam0, fam1 := httpSockaddrFamilyBytes()
-	nonblock := httpNonblockFlag()
+	solSocket, soReuseAddr := e.httpSockConstants()
+	fam0, fam1 := e.httpSockaddrFamilyBytes()
+	nonblock := e.httpNonblockFlag()
 	e.ensureErrnoAccessor() // async connect reads errno to classify EINPROGRESS vs failure
-	einprog, ewouldblk, ealready, eintr, eisconn := netConnectErrnos()
-	soErr := netSOError() // getsockopt(SO_ERROR) for connect-completion failure detection
+	einprog, ewouldblk, ealready, eintr, eisconn := e.netConnectErrnos()
+	soErr := e.netSOError() // getsockopt(SO_ERROR) for connect-completion failure detection
 	e.emitGlobal("declare i32 @getsockopt(i32, i32, i32, ptr, ptr)")
 
 	// __kml_net_srv_register / __kml_net_conn_register: append a handle to the
@@ -298,7 +330,7 @@ entry:
   %%sk = call ptr @calloc(i64 1, i64 80)
   %%fd_p = getelementptr %[1]s, ptr %%sk, i32 0, i32 0
   store i64 -1, ptr %%fd_p, align 8
-  %%cs = call ptr @calloc(i64 1, i64 144)
+  %%cs = call ptr @calloc(i64 1, i64 160)
   %%cs_p = getelementptr %[1]s, ptr %%sk, i32 0, i32 9
   store ptr %%cs, ptr %%cs_p, align 8
   %%ip = call ptr @__kml_dns_lookup(ptr %%host)
@@ -370,7 +402,7 @@ dnsfail:
 reg:
   call void @__kml_net_conn_register(ptr %%sk)
   ret ptr %%sk
-}`, sock, connstate, errnoAccessor(), nonblock, fam0, fam1, einprog, ewouldblk, ealready, eintr))
+}`, sock, connstate, e.errnoAccessor(), nonblock, fam0, fam1, einprog, ewouldblk, ealready, eintr))
 
 	// __kml_net_connect_unix(path): AF_UNIX (Unix-domain socket) asynchronous
 	// connect — Node's IPC `net.connect({ path })`, ADR-01021. The same
@@ -382,7 +414,7 @@ reg:
 	// NB: famStore is spliced in via %[5]s below, so its LLVM locals use a single
 	// `%` (they are not run back through Sprintf's %%-reduction).
 	famStore := "  store i16 1, ptr %addr, align 2\n" // Linux: sa_family_t = AF_UNIX(1)
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		// macOS: sun_len (offset 0) = the address length, sun_family (offset 1) = AF_UNIX.
 		famStore = "  %lenb = trunc i64 %alen64 to i8\n" +
 			"  store i8 %lenb, ptr %addr, align 1\n" +
@@ -395,7 +427,7 @@ entry:
   %%sk = call ptr @calloc(i64 1, i64 80)
   %%fd_p = getelementptr %[1]s, ptr %%sk, i32 0, i32 0
   store i64 -1, ptr %%fd_p, align 8
-  %%cs = call ptr @calloc(i64 1, i64 144)
+  %%cs = call ptr @calloc(i64 1, i64 160)
   %%cs_p = getelementptr %[1]s, ptr %%sk, i32 0, i32 9
   store ptr %%cs, ptr %%cs_p, align 8
   %%len = call i64 @strlen(ptr %%path)
@@ -452,7 +484,7 @@ sockfail:
 reg:
   call void @__kml_net_conn_register(ptr %%sk)
   ret ptr %%sk
-}`, sock, connstate, errnoAccessor(), nonblock, famStore, einprog, ewouldblk, ealready, eintr))
+}`, sock, connstate, e.errnoAccessor(), nonblock, famStore, einprog, ewouldblk, ealready, eintr))
 
 	// The two low-level byte-IO helpers (__kml_net_sock_write/close) live in
 	// ensureNetSockIO so a path that hands out a net.Socket without standing up a
@@ -785,6 +817,20 @@ compltry2:
   %%isconn = icmp eq i32 %%ce, %[4]d
   br i1 %%isconn, label %%conndone, label %%cnext
 conndone:
+  ; Flush bytes socket.write() buffered while the connect was still in flight
+  ; (netConnStateIR fields 5/6), then release the connect-state blob. The fd is
+  ; now connected, so a plain write() delivers them in order before 'connect'.
+  %%fpb_p = getelementptr %[2]s, ptr %%cs, i32 0, i32 5
+  %%fpb = load ptr, ptr %%fpb_p, align 8
+  %%fpl_p = getelementptr %[2]s, ptr %%cs, i32 0, i32 6
+  %%fpl = load i64, ptr %%fpl_p, align 8
+  %%haspb = icmp ne ptr %%fpb, null
+  br i1 %%haspb, label %%flushpb, label %%freecs
+flushpb:
+  call i64 @write(i32 %%cfd, ptr %%fpb, i64 %%fpl)
+  call void @free(ptr %%fpb)
+  br label %%freecs
+freecs:
   store ptr null, ptr %%cs_p, align 8
   call void @free(ptr %%cs)
   %%dconl_p = getelementptr %[1]s, ptr %%sk2, i32 0, i32 4
@@ -805,6 +851,9 @@ connfail:
   %%ferr = load i32, ptr %%ferr_p, align 4
   %%faddr = getelementptr %[2]s, ptr %%cs, i32 0, i32 4
   %%errobj = call ptr @__kml_net_conn_errobj(i32 %%fstatus, i32 %%ferr, ptr %%faddr)
+  %%ffpb_p = getelementptr %[2]s, ptr %%cs, i32 0, i32 5
+  %%ffpb = load ptr, ptr %%ffpb_p, align 8
+  call void @free(ptr %%ffpb)
   store ptr null, ptr %%cs_p, align 8
   call void @free(ptr %%cs)
   %%ffd_p = getelementptr %[1]s, ptr %%sk2, i32 0, i32 0
@@ -845,7 +894,7 @@ fireclose2:
   %%cl6ep_p = getelementptr { ptr, ptr }, ptr %%cl6, i32 0, i32 1
   %%cl6ep = load ptr, ptr %%cl6ep_p, align 8
   call void %%cl6fp(ptr %%cl6ep)
-  br label %%cnext`, sock, connstate, errnoAccessor(), eisconn, solSocket, soErr)
+  br label %%cnext`, sock, connstate, e.errnoAccessor(), eisconn, solSocket, soErr)
 
 	// __kml_net_dispatch(): accept pending connections on every listening
 	// server (non-blocking accept loops until EAGAIN), complete any in-progress
@@ -1192,7 +1241,7 @@ term:
   ret i32 %%r
 fail:
   ret i32 0
-}`, netAFInet6()))
+}`, e.netAFInet6()))
 	e.emitGlobal(`
 define i32 @__kml_net_is_ip(ptr %s) {
 entry:
@@ -1224,8 +1273,8 @@ ret0:
 // classifies a non-blocking connect() by. Windows uses the win32 shim's Linux
 // errno namespace (win32io.c L_E*), so it shares the Linux column; macOS/BSD
 // carry their own numbers. Host-only, matching netAFInet6's no-cross-compile note.
-func netConnectErrnos() (einprogress, ewouldblock, ealready, eintr, eisconn int) {
-	if targetGOOS() == "darwin" {
+func (e *Emitter) netConnectErrnos() (einprogress, ewouldblock, ealready, eintr, eisconn int) {
+	if e.opts.Target.OS() == "darwin" {
 		return 36, 35, 37, 4, 56
 	}
 	return 115, 11, 114, 4, 106 // linux + windows (shim)
@@ -1236,8 +1285,8 @@ func netConnectErrnos() (einprogress, ewouldblock, ealready, eintr, eisconn int)
 // Linux value 4 (L_SO_ERROR), translates it to WS_SO_ERROR, and maps the
 // returned code back into the Linux errno namespace — so 4 is correct there too.
 // The level is always httpSockConstants()'s SOL_SOCKET.
-func netSOError() int {
-	if targetGOOS() == "darwin" {
+func (e *Emitter) netSOError() int {
+	if e.opts.Target.OS() == "darwin" {
 		return 0x1007
 	}
 	return 4 // linux + windows (shim)
@@ -1245,8 +1294,8 @@ func netSOError() int {
 
 // netAFInet6 is the platform's AF_INET6 value (macOS 30, Linux 10) — host-only,
 // since this compiler doesn't cross-compile.
-func netAFInet6() int {
-	if targetGOOS() == "darwin" {
+func (e *Emitter) netAFInet6() int {
+	if e.opts.Target.OS() == "darwin" {
 		return 30
 	}
 	return 10
@@ -1254,9 +1303,9 @@ func netAFInet6() int {
 
 // netKeepAliveConst returns the platform's (SOL_SOCKET, SO_KEEPALIVE) pair for
 // setsockopt (macOS 0xffff/0x0008, Linux 1/9).
-func netKeepAliveConst() (solSocket, soKeepAlive int) {
-	sol, _ := httpSockConstants()
-	if targetGOOS() == "darwin" {
+func (e *Emitter) netKeepAliveConst() (solSocket, soKeepAlive int) {
+	sol, _ := e.httpSockConstants()
+	if e.opts.Target.OS() == "darwin" {
 		return sol, 0x0008
 	}
 	return sol, 9
@@ -1268,8 +1317,8 @@ func netKeepAliveConst() (solSocket, soKeepAlive int) {
 // TCP_KEEPIDLE (4). Windows uses the Linux number, which the win32 shim
 // remaps to SIO_KEEPALIVE_VALS — a bare setsockopt(4) there is TCP_MAXSEG,
 // not a keepalive control (ADR-00760).
-func netKeepIdleConst() (ipprotoTCP, tcpKeepIdle int) {
-	if targetGOOS() == "darwin" {
+func (e *Emitter) netKeepIdleConst() (ipprotoTCP, tcpKeepIdle int) {
+	if e.opts.Target.OS() == "darwin" {
 		return 6, 0x10
 	}
 	return 6, 4

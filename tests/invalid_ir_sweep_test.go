@@ -52,7 +52,7 @@ console.log(threw);
 // now rejects it cleanly (was invalid IR — a double compared as a string ptr),
 // while -compat=js evaluates it via JS Abstract Equality. ADR-00897.
 func TestE2EStringNumberLooseEqRejectedStrict(t *testing.T) {
-	mustCompileError(t, `console.log(("-1" == -1))`, "incompatible types")
+	mustCompileError(t, `console.log(("-1" == -1))`, "have no overlap")
 }
 
 func TestE2EStringNumberLooseEqCompatJS(t *testing.T) {
@@ -135,7 +135,7 @@ console.log("n" + undefined);
 }
 
 func TestE2ENullArithmeticRejectedStrict(t *testing.T) {
-	mustCompileError(t, `const x = null + undefined; console.log(x);`, "on null/undefined")
+	mustCompileError(t, `const x = null + undefined; console.log(x);`, "the value 'null' cannot be used here")
 }
 
 // isNaN / isFinite on an any-boxed value must ToNumber it first, so a boxed NaN

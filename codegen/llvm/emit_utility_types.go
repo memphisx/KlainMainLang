@@ -30,6 +30,7 @@ var utilityTypeNames = map[string]bool{
 	"Pick":        true,
 	"Omit":        true,
 	"Record":      true,
+	"ReturnType":  true,
 }
 
 // resolveUtilityType evaluates a built-in single-argument utility type to a
@@ -54,6 +55,24 @@ func (e *Emitter) resolveUtilityType(name string, args []*ast.TypeAnnotation) (T
 		ty := e.resolveType(args[0])
 		ty.Nullable = false
 		return ty, true
+	case "ReturnType":
+		// ReturnType<F>: the return type of a function type, or of a
+		// function's `typeof`. A timer function's is its handle (the id, as
+		// NodeJS.Timeout is).
+		if len(args) != 1 || args[0] == nil {
+			return Type{}, false
+		}
+		if a := args[0]; a.IsTypeof && len(a.TypeofPath) == 0 {
+			switch a.TypeofName {
+			case "setTimeout", "setInterval", "setImmediate":
+				return TypeI64, true
+			}
+		}
+		ft := e.resolveType(args[0])
+		if !ft.IsFunc || ft.FuncRetType == nil {
+			return Type{}, false
+		}
+		return *ft.FuncRetType, true
 	case "Pick", "Omit":
 		// Pick<T,K>/Omit<T,K>: filter T's field set by the string-literal-union
 		// key K. A non-object T or a non-literal K falls through (return false)

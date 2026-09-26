@@ -34,7 +34,7 @@ console.log(plain instanceof AggregateError)
 try {
   throw new AggregateError([new Error("x")], "w")
 } catch (e) {
-  console.log(e.name + ":" + e.errors[0].message)
+  console.log((e as AggregateError).name + ":" + (e as AggregateError).errors[0].message)
 }
 `, "AggregateError\nboom\n2\na\ntrue\ntrue\nfalse\nAggregateError:x")
 }

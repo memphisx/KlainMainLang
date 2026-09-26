@@ -129,37 +129,26 @@ rollover.setMonth(12)                  // month 12 (0-indexed) == January of nex
 console.log(rollover.toISOString())    // 1971-01-01T00:00:00.000Z
 
 // ── Date arithmetic — adding/subtracting durations ──────────────────────────
-// This compiler's Date is a plain number (ms since epoch) under the hood, so
-// +/- with a number operand does duration arithmetic directly, producing a
-// new Date you can keep chaining methods on. This is a deliberate deviation
-// from real JS, where `+` on a Date coerces it to a string (its default
-// ToPrimitive hint) rather than adding numerically — treating it as plain
-// numeric duration arithmetic is far more useful here. `Date - Date` (unlike
-// `Date + Date`, which is rejected as meaningless) stays a real, meaningful
-// operation matching real JS: the difference in milliseconds, as a number.
+// A Date is a point in time; arithmetic goes through its millisecond count
+// (getTime()), as TypeScript requires — a Date is not a number.
 const start: Date = new Date(0)
 const oneDayMs: number = 24 * 60 * 60 * 1000
 
-const tomorrow: Date = start + oneDayMs
+const tomorrow: Date = new Date(start.getTime() + oneDayMs)
 console.log(tomorrow.toISOString())        // 1970-01-02T00:00:00.000Z
 
-const yesterday: Date = start - oneDayMs
+const yesterday: Date = new Date(start.getTime() - oneDayMs)
 console.log(yesterday.toISOString())       // 1969-12-31T00:00:00.000Z
 
-const elapsedMs: number = tomorrow - start
+const elapsedMs: number = tomorrow.getTime() - start.getTime()
 console.log(elapsedMs)                      // 86400000
 
-// Compound assignment mutates the variable in place, same as the setters
+// Moving a Date in place goes through setTime.
 let clock: Date = new Date(0)
-clock += oneDayMs
+clock.setTime(clock.getTime() + oneDayMs)
 console.log(clock.toISOString())            // 1970-01-02T00:00:00.000Z
-clock -= 60 * 60 * 1000
+clock.setTime(clock.getTime() - 60 * 60 * 1000)
 console.log(clock.toISOString())            // 1970-01-01T23:00:00.000Z
-
-// Adding two Dates together, or compound-assigning a Date into a Date, is
-// rejected at compile time rather than silently producing a nonsense value:
-//   tomorrow + yesterday        // error: cannot add two Dates together
-//   clock += tomorrow           // error: cannot compound-assign a Date with '+='
 
 // ── Date formatting — toDateString() / toLocaleDateString() ────────────────
 // Both are always UTC (like every other Date method here). toDateString

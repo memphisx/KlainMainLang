@@ -42,6 +42,9 @@ type Type struct {
 	// trailing call arguments," the same distinction FuncSig.HasRest
 	// already lets a named function's call sites make.
 	FuncHasRest bool
+	// FuncThis marks a function taking its `this` as FuncParams[0] (a
+	// `this: T` parameter): a call passes the receiver there.
+	FuncThis bool
 	// FuncParamNames and FuncParamDefaults let a first-class function value's
 	// call site (emitClosureCallByPtr) fill an omitted trailing parameter with
 	// its default expression, the same way a named/class/IIFE call site already
@@ -272,13 +275,19 @@ type Type struct {
 	// FFISig is the statically-resolved node:ffi signature of an IsFFIFunction
 	// value: canonical node:ffi type names (aliases already normalized).
 	FFISig *FFISignature
-	// FFILibReg is an IsFFILibrary type's compile-time accumulator of the
-	// names resolved through it (dlopen definitions, getFunction/getFunctions,
-	// getSymbol) — the shared pointer travels with the type through
-	// destructuring/assignment, so `library.functions`/`library.symbols` and
-	// no-arg `getFunctions()`/`getSymbols()` can rebuild Node's accumulator
-	// objects statically (re-dlsym'd at the read point; no runtime registry).
-	FFILibReg *FFILibReg
+	// DynPropTy, on a dynamic (`any`) object, is the declared type of every
+	// property it holds — an index-signature view (`{ [k: string]: bigint }`,
+	// node:ffi's `lib.symbols`, TDD-00229): a member/bracket read unboxes to
+	// it instead of staying `any`.
+	DynPropTy *Type
+	// DictFields are an index-signature dictionary's named properties
+	// (`interface H { [k: string]: string | string[]; host?: string }`): a
+	// read of one has its declared type.
+	DictFields []Field
+	// IsNullProtoObject marks a statically-shaped object built with a null
+	// prototype (node:ffi's `getFunctions(defs)` / `dlopen().functions`,
+	// TDD-00229): rendered with util.inspect's `[Object: null prototype]`.
+	IsNullProtoObject bool
 	// IsURL marks `new URL(...)`'s result: an ordinary heap object (href,
 	// protocol, host, hostname, port, pathname, search, hash, origin,
 	// searchParams — all plain field reads via the existing object
@@ -360,14 +369,6 @@ type Type struct {
 	// ClassEventEmitterField and registerClasses.
 	HasEventEmitter bool
 
-	// HasNodeStream marks a class that `extends Readable/Writable/Duplex/
-	// Transform` (TDD-00132) — its instances carry a hidden Node-stream
-	// handle field (ClassNodeStreamField), positioned right after the tag
-	// (and vtable pointer, if present). The readable-vs-writable split and
-	// the chunk/out element types live on the class's ClassInfo, not here —
-	// this flag only governs the hidden field's presence and VisibleFields'
-	// skip count.
-	HasNodeStream bool
 	// IsArrayBuffer marks `new ArrayBuffer(byteLength)`: a fixed-length,
 	// zero-initialized raw byte buffer. Deliberately not IsObject — the
 	// runtime value is a ptr to a hidden 2-word heap struct ({i64
@@ -1045,62 +1046,23 @@ type FFISignature struct {
 	Ret  string
 }
 
-// FFILibFunc is one resolution entry in an FFILibReg: a nil Sig means the name
-// was resolved only as a raw symbol (getSymbol/dlsym), not a callable.
-type FFILibFunc struct {
-	Name string
-	Sig  *FFISignature
-}
-
-// FFILibReg accumulates the symbol/function names statically resolved through
-// one DynamicLibrary value, in resolution (source) order — see Type.FFILibReg.
-type FFILibReg struct {
-	Entries []FFILibFunc
-}
-
-// AddFunc records a function registration once per name (first signature wins,
-// matching the shipped no-rediagnosis posture); a prior symbol-only entry for
-// the name is upgraded in place, keeping its original position.
-func (r *FFILibReg) AddFunc(name string, sig *FFISignature) {
-	for i, f := range r.Entries {
-		if f.Name == name {
-			if f.Sig == nil {
-				r.Entries[i].Sig = sig
-			}
-			return
-		}
-	}
-	r.Entries = append(r.Entries, FFILibFunc{Name: name, Sig: sig})
-}
-
-// AddSym records a getSymbol/dlsym resolution once per name.
-func (r *FFILibReg) AddSym(name string) {
-	for _, f := range r.Entries {
-		if f.Name == name {
-			return
-		}
-	}
-	r.Entries = append(r.Entries, FFILibFunc{Name: name})
-}
-
 // FFILibraryType returns node:ffi's DynamicLibrary handle type (TDD-00164):
-// the raw dlopen handle in a hidden __kml_handle field plus the library path
-// as a plain `path` field, read through the ordinary object machinery. Every
-// construction carries a fresh registration accumulator; the one that lands in
-// the variable's symbol-table type is the live one.
+// a pointer to the runtime registry (ffisrc/ffi_registry.c, TDD-00229) whose
+// first two words are the raw dlopen handle (hidden __kml_handle) and the
+// `path` string, read through the ordinary object machinery.
 func FFILibraryType() Type {
 	ty := ObjectType([]Field{
 		{Name: "__kml_handle", Ty: TypePtr},
 		{Name: "path", Ty: TypePtr},
 	})
 	ty.IsFFILibrary = true
-	ty.FFILibReg = &FFILibReg{}
 	return ty
 }
 
-// FFIFunctionType returns the type of a bound native function (TDD-00164):
-// runtime value is the raw symbol pointer; the signature travels at compile
-// time only.
+// FFIFunctionType returns the type of a bound native function (TDD-00164): at
+// runtime a function object (an extended tag-12 record, TDD-00229) whose env
+// is the registry entry; the signature travels at compile time and lowers a
+// direct call to an inline validated C-ABI call.
 func FFIFunctionType(sig *FFISignature) Type {
 	t := TypePtr
 	t.IsFFIFunction = true
@@ -2015,14 +1977,6 @@ const ClassVTableField = "__kml_vtable"
 // field with this name is a compile-time error.
 const ClassEventEmitterField = "__kml_ee_listeners"
 
-// ClassNodeStreamField is the name of the hidden ptr field a class carries
-// (TDD-00132) when HasNodeStream is set — positioned right after the tag
-// (and vtable pointer, if present; a stream class never also sets
-// HasEventEmitter, since the Node-stream runtime carries its own listener
-// surface). Holds the `nodestream` handle the options-form `new Readable(...)`
-// builds. Reserved the same way ClassTagField/ClassVTableField are.
-const ClassNodeStreamField = "__kml_ns_handle"
-
 // ClassType returns a user-defined class's instance type: an ordinary
 // object type (see IsObject's doc comment on why this is enough for field
 // access, JSON, Object.* etc. to work unmodified) plus IsClass/ClassName so
@@ -2041,7 +1995,7 @@ const ClassNodeStreamField = "__kml_ns_handle"
 // Callers that enumerate *all* fields for reflection (Object.keys/values/
 // entries, JSON, for...in, spread) must use VisibleFields() instead of
 // Fields directly, or the hidden fields leak out as fake user-visible ones.
-func ClassType(name string, inherited []Field, own []Field, hasVTable, hasEventEmitter, hasNodeStream bool) Type {
+func ClassType(name string, inherited []Field, own []Field, hasVTable, hasEventEmitter bool) Type {
 	tagged := make([]Field, 0, 4+len(inherited)+len(own))
 	tagged = append(tagged, Field{Name: ClassTagField, Ty: TypeI64})
 	if hasVTable {
@@ -2050,9 +2004,6 @@ func ClassType(name string, inherited []Field, own []Field, hasVTable, hasEventE
 	if hasEventEmitter {
 		tagged = append(tagged, Field{Name: ClassEventEmitterField, Ty: TypePtr})
 	}
-	if hasNodeStream {
-		tagged = append(tagged, Field{Name: ClassNodeStreamField, Ty: TypePtr})
-	}
 	tagged = append(tagged, inherited...)
 	tagged = append(tagged, own...)
 	ty := ObjectType(tagged)
@@ -2060,7 +2011,6 @@ func ClassType(name string, inherited []Field, own []Field, hasVTable, hasEventE
 	ty.ClassName = name
 	ty.HasVTable = hasVTable
 	ty.HasEventEmitter = hasEventEmitter
-	ty.HasNodeStream = hasNodeStream
 	return ty
 }
 
@@ -2086,9 +2036,6 @@ func (t Type) VisibleFields() []Field {
 			skip++
 		}
 		if t.HasEventEmitter {
-			skip++
-		}
-		if t.HasNodeStream {
 			skip++
 		}
 		fields = fields[skip:]
@@ -2675,6 +2622,13 @@ var (
 
 // FuncSig holds the signature of a user-defined function.
 type FuncSig struct {
+	// This marks a function declared with a `this: T` parameter, which is
+	// ParamTypes[0] (maybeAddThisParam).
+	This bool
+	// RetThis marks a method returning the polymorphic `this`: a call's
+	// result has the receiver's type (`http.Server`'s inherited
+	// `listen(…)` returns the http.Server).
+	RetThis    bool
 	ParamTypes []Type
 	ParamNames []string // for error messages only (e.g. an inferred-parameter type mismatch)
 	RetType    Type
@@ -2850,6 +2804,40 @@ func ResolveTypeName(name string) Type {
 		return TypeF32
 	case "float64":
 		return TypeF64
+	// The objects of the code-generated Node modules, by @types/node's names
+	// (`fs.Stats`, `crypto.Hash`, `child_process.ChildProcess`).
+	case "Stats":
+		return StatsType()
+	case "Dirent":
+		return DirentType()
+	case "StatsFs":
+		return StatFsType()
+	case "FSWatcher":
+		return FSWatcherType()
+	case "Hash":
+		return HashType()
+	case "Hmac":
+		return HmacType()
+	case "ChildProcess":
+		return ChildProcessType()
+	case "PerformanceEntry":
+		return PerformanceEntryType()
+	case "PerformanceObserver":
+		return PerfObserverType()
+	case "PerformanceObserverEntryList":
+		return PerfEntryListType()
+	case "DataView":
+		return DataViewType()
+	case "TextEncoder":
+		return TextEncoderType()
+	case "TextDecoder":
+		return TextDecoderType()
+	case "Blob":
+		return BlobType()
+	case "CryptoKey":
+		return CryptoKeyType()
+	case "CryptoKeyPair":
+		return CryptoKeyPairType()
 	}
 	return TypeI64 // default
 }

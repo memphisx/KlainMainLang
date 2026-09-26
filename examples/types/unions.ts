@@ -38,7 +38,7 @@ console.log(describe("hi"))  // matched a string
 console.log(describe(21))    // 21
 
 // --- arrow functions work the same way ---
-const toDisplay = (n: number | boolean): string | number => {
+const toDisplay = (n: number | boolean): number | boolean => {
 	return n
 }
 console.log(toDisplay(7))     // 7
@@ -47,9 +47,11 @@ console.log(toDisplay(false)) // false
 // --- equality reuses any/unknown's own tag-aware comparison ---
 let a: string | number = 5
 let b: string | number = 5
-console.log(a === b)     // 1
-let c: string | number = "5"
-console.log(a === c)     // 0
+console.log(a === b)     // true
+// A value typed as the whole union keeps both members possible, so
+// TypeScript lets it compare against a (narrowed) number.
+let c = "5" as string | number
+console.log(a === c)     // false
 
 // --- flow narrowing (TDD-00114): typeof/truthiness refine a union in-branch ---
 function describeVal(x: string | number): string {

@@ -66,14 +66,11 @@ console.log(typeof y)
 `, "3.14\nnumber")
 }
 
-func TestE2EAnyArithmeticRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EAnyArithmetic(t *testing.T) {
+	assertOutput(t, `
 let x: any = 5
-console.log(x + 1)
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for arithmetic on an any-typed value, got none")
-	}
+console.log(x + 1, x - 1, x + "!")
+`, "6 4 5!")
 }
 
 // TDD-00062 (Staged V2): a bare `any`/`unknown` parameter is now supported —
@@ -291,7 +288,7 @@ f(true)
 
 func TestE2EUnionArrowFunction(t *testing.T) {
 	assertOutput(t, `
-const toStr = (x: number | boolean): string | number => {
+const toStr = (x: number | boolean): number | boolean => {
 	return x
 }
 console.log(toStr(5))
@@ -475,7 +472,7 @@ arr.push(true)`,
 arr[0] = true`,
 	} {
 		_, err := parseAndCompile(src)
-		if err == nil || !strings.Contains(err.Error(), "not a member of the declared union type") {
+		if err == nil || !strings.Contains(err.Error(), "not a member of the declared union type") && !strings.Contains(err.Error(), "is not assignable to") {
 			t.Fatalf("expected the union member-set rejection for:\n%s\ngot: %v", src, err)
 		}
 	}
@@ -709,4 +706,23 @@ func TestE2EAnyBoxNullablePointer(t *testing.T) {
 
 func TestE2EAnyBoxNullablePointerSameAsNode(t *testing.T) {
 	assertSameAsNode(t, anyBoxNullablePtrSrc)
+}
+
+// A function held in an `any` called with spread arguments, through
+// apply/call and Reflect.apply; concrete elements spread into an any[] box.
+func TestE2EDynamicCallSpreadApply(t *testing.T) {
+	assertOutput(t, `
+function add(a: number, b: number): number { return a + b }
+const f: any = add
+const args: any[] = [2, 3]
+console.log(f(...args), f.apply(null, [4, 5]), f.call(undefined, 6, 7), Reflect.apply(add, undefined, [1, 1]))
+const nums = [7, 8]
+console.log(f.apply(null, nums))
+const all: any[] = [...nums, "x"]
+console.log(all)
+const o: any = { apply: (x: number) => x * 2 }
+console.log(o.apply(21))
+function mk(): () => string { return () => "made" }
+console.log(mk()())
+`, "5 9 13 2\n15\n[ 7, 8, 'x' ]\n42\nmade")
 }

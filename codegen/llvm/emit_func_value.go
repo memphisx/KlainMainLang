@@ -28,6 +28,7 @@ import (
 func funcTypeFromSig(sig FuncSig) Type {
 	ft := FuncType(sig.ParamTypes, sig.RetType)
 	ft.FuncHasRest = sig.HasRest
+	ft.FuncThis = sig.This
 	return ft
 }
 
@@ -91,7 +92,7 @@ func fnValueHeaderName(mangled string) string {
 }
 
 // emitNamedFuncValue returns the `{ trampoline, null }` closure header for a
-// named function referenced by value, as a FuncType Value the ordinary
+// named function referenced by value (displayName is its source name), as a FuncType Value the ordinary
 // closure-call path can invoke.
 //
 // The header is a compile-time constant: the trampoline symbol is fixed per
@@ -103,8 +104,11 @@ func fnValueHeaderName(mangled string) string {
 // pointers) match the `addEventListener(f)` header. As a static value it is not
 // heap-owned, so `Memory.free`-ing a bare function reference is undefined in
 // the same way freeing a string literal already is (see freeResolvedPointer).
-func (e *Emitter) emitNamedFuncValue(mangled string, sig FuncSig) Value {
+func (e *Emitter) emitNamedFuncValue(mangled string, sig FuncSig, displayName string) Value {
 	tramp := e.ensureFuncValueTrampoline(mangled, sig)
+	// The trampoline is the header's code pointer, so the function's `name`/
+	// `length` are registered under it (TDD-00229).
+	e.registerFnMeta(tramp, unmangleTopLevelName(displayName), fnLengthFromSig(sig), fnKindOf(sig.IsAsync, false))
 	sym := fnValueHeaderName(mangled)
 	if !e.fnValueHeaders[mangled] {
 		e.fnValueHeaders[mangled] = true

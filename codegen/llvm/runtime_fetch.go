@@ -249,7 +249,7 @@ none:
 	e.ensureStrcmp()
 	e.emitGlobal(`@.kml_fetch_head_method = private unnamed_addr constant [5 x i8] c"HEAD\00"`)
 
-	e.emitGlobal(withCurlNativeCA(`
+	e.emitGlobal(e.withCurlNativeCA(`
 define ptr @__kml_fetch_async(ptr %url, ptr %method, ptr %headers, ptr %body, ptr %signal) {
 entry:
   %inited = load i1, ptr @__kml_curl_inited, align 1
@@ -1483,8 +1483,8 @@ tp_no:`, t, field, value, taskState, taskResumerCtx, taskCtx, taskSavedJmpTop, g
 // (<exe dir>/../etc/ssl/certs), so a compiled program living anywhere else had
 // no roots and every https request failed ("SSL connect error"). The Windows
 // certificate store is always there, as Node's roots always are.
-func withCurlNativeCA(ir string) string {
-	if targetGOOS() != "windows" {
+func (e *Emitter) withCurlNativeCA(ir string) string {
+	if e.opts.Target.OS() != "windows" {
 		return ir
 	}
 	const initLine = "  %curl = call ptr @curl_easy_init()\n"

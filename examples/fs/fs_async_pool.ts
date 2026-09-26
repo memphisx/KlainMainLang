@@ -15,14 +15,14 @@ async function main(): Promise<void> {
   // 1. Binary write + append, then read back. "AB\0CD" then "EF" → 7 bytes.
   await fs.promises.writeFile(path, new Uint8Array([65, 66, 0, 67, 68]));
   await fs.promises.appendFile(path, new Uint8Array([69, 70]));
-  const back: string = await fs.promises.readFile(path);
+  const back: string = await fs.promises.readFile(path, "utf8");
   console.log('bytes written: ' + back.length);
 
   // 2. Callback form, non-blocking: the timer wins the race with the read.
   let timerFirst: boolean = false;
   let done: boolean = false;
   setTimeout(() => { if (!done) { timerFirst = true; } }, 0);
-  fs.readFile(path, (err, data: string) => {
+  fs.readFile(path, "utf8", (err, data) => {
     done = true;
     console.log('callback read: ' + data.length + ' bytes');
     console.log('read was non-blocking: ' + timerFirst);

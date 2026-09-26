@@ -103,7 +103,7 @@ async function run() {
     await fetch("http://example.com", { signal: ctrl.signal })
     console.log("no throw")
   } catch (e) {
-    console.log(e.name)
+    console.log((e as Error).name)
   }
 }
 run()
@@ -122,7 +122,7 @@ async function run() {
     await p
     console.log("no throw")
   } catch (e) {
-    console.log(e.name)
+    console.log((e as Error).name)
   }
 }
 run()
@@ -141,7 +141,7 @@ async function run() {
     await fetch("http://example.com", { signal: AbortSignal.timeout(0) })
     console.log("completed")
   } catch (e) {
-    console.log(e.name)
+    console.log((e as Error).name)
   }
 }
 run()
@@ -159,7 +159,7 @@ async function run() {
   try {
     await fetch("http://example.com", { signal: ctrl.signal })
   } catch (e) {
-    console.log(e.name + " " + (e instanceof DOMException) + " " + (e instanceof Error))
+    console.log((e as Error).name + " " + (e instanceof DOMException) + " " + (e instanceof Error))
   }
 }
 run()
@@ -186,7 +186,7 @@ async function run() {
     await fetch("http://example.com", { signal: c2.signal })
     console.log("no throw")
   } catch (e) {
-    console.log(e instanceof Error, e.message)
+    console.log(e instanceof Error, (e as Error).message)
   }
 }
 run()
@@ -202,7 +202,7 @@ const x: any = new Error("boom")
 try {
   throw x
 } catch (e) {
-  console.log(e.name, e.message, e instanceof Error)
+  console.log((e as Error).name, (e as Error).message, e instanceof Error)
 }
 `, "Error boom true")
 }

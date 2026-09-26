@@ -33,26 +33,77 @@ type fsAsyncOp struct {
 	resultTy Type
 	argc     int
 	dataArg  bool
+	// options: the op takes a trailing options argument (Node's `[options]`,
+	// or copyFile's `[mode]`) after its argc positional ones.
+	options bool
 }
 
 func fsAsyncOps() map[string]fsAsyncOp {
 	return map[string]fsAsyncOp{
-		"readFile":   {(*Emitter).emitFsReadFileSync, TypePtr, 1, true},
-		"writeFile":  {(*Emitter).emitFsWriteFileSync, TypeVoid, 2, false},
-		"appendFile": {(*Emitter).emitFsAppendFileSync, TypeVoid, 2, false},
-		"unlink":     {(*Emitter).emitFsUnlinkSync, TypeVoid, 1, false},
-		"mkdir":      {(*Emitter).emitFsMkdirSync, TypeVoid, 1, false},
-		"rmdir":      {(*Emitter).emitFsRmdirSync, TypeVoid, 1, false},
-		"rename":     {(*Emitter).emitFsRenameSync, TypeVoid, 2, false},
-		"copyFile":   {(*Emitter).emitFsCopyFileSync, TypeVoid, 2, false},
-		"readdir":    {(*Emitter).emitFsReaddirSync, ArrayOf(TypePtr), 1, true},
+		"readFile":   {(*Emitter).emitFsReadFileSync, BufferType(), 1, true, true},
+		"writeFile":  {(*Emitter).emitFsWriteFileSync, TypeVoid, 2, false, true},
+		"appendFile": {(*Emitter).emitFsAppendFileSync, TypeVoid, 2, false, true},
+		"unlink":     {(*Emitter).emitFsUnlinkSync, TypeVoid, 1, false, false},
+		"mkdir":      {(*Emitter).emitFsMkdirSync, TypeVoid, 1, false, true},
+		"rmdir":      {(*Emitter).emitFsRmdirSync, TypeVoid, 1, false, true},
+		"rename":     {(*Emitter).emitFsRenameSync, TypeVoid, 2, false, false},
+		"copyFile":   {(*Emitter).emitFsCopyFileSync, TypeVoid, 2, false, true},
+		"readdir":    {(*Emitter).emitFsReaddirSync, ArrayOf(TypePtr), 1, true, true},
+		"stat":       {(*Emitter).emitFsStatSync, StatsType(), 1, true, true},
+		"lstat":      {(*Emitter).emitFsLstatSync, StatsType(), 1, true, true},
+		"fstat":      {(*Emitter).emitFsFstatSync, StatsType(), 1, true, true},
+		"statfs":     {(*Emitter).emitFsStatfsSync, StatFsType(), 1, true, true},
+		"rm":         {(*Emitter).emitFsRmSync, TypeVoid, 1, false, true},
+		"utimes":     {(*Emitter).emitFsUtimesSync, TypeVoid, 3, false, false},
+		"futimes":    {(*Emitter).emitFsFutimesSync, TypeVoid, 3, false, false},
+		"ftruncate":  {(*Emitter).emitFsFtruncateSync, TypeVoid, 1, false, true},
+		"fchmod":     {(*Emitter).emitFsFchmodSync, TypeVoid, 2, false, false},
+		"realpath":   {fsPathOpAs("realpathSync"), TypePtr, 1, true, false},
+		"mkdtemp":    {fsPathOpAs("mkdtempSync"), TypePtr, 1, true, false},
+		"readlink":   {fsPathOpAs("readlinkSync"), TypePtr, 1, true, false},
+		"link":       {fsPathOpAs("linkSync"), TypeVoid, 2, false, false},
+		"symlink":    {fsPathOpAs("symlinkSync"), TypeVoid, 2, false, true},
+		"chmod":      {fsPathOpAs("chmodSync"), TypeVoid, 2, false, false},
+		"truncate":   {fsPathOpAs("truncateSync"), TypeVoid, 1, false, true},
+		"access":     {fsPathOpAs("accessSync"), TypeVoid, 1, false, true},
 	}
 }
 
-// fsAsyncResultType returns PromiseOf(<op result>) for the Promise form, or
-// TypeVoid for the callback form — used by call-type inference.
-func fsAsyncPromiseResult(op string) (Type, bool) {
+// fsPathOpAs is emitFsPathOp's sync form of method as an fsAsyncOp body.
+func fsPathOpAs(method string) func(*Emitter, []ast.Expression, ast.Pos) (Value, error) {
+	return func(e *Emitter, args []ast.Expression, pos ast.Pos) (Value, error) {
+		return e.emitFsPathOp(method, args, pos)
+	}
+}
+
+// fsAsyncSpecFor is the op's spec for one call's arguments (the op's own,
+// without a callback): its result type follows the options as the sync
+// form's does — readFile is a Buffer without an encoding and a string with
+// one; readdir's entries are Dirents with `withFileTypes`.
+func (e *Emitter) fsAsyncSpecFor(op string, opArgs []ast.Expression) (fsAsyncOp, bool) {
 	spec, ok := fsAsyncOps()[op]
+	if !ok {
+		return spec, false
+	}
+	if spec.dataArg && len(opArgs) > spec.argc {
+		pos := opArgs[0].GetPos()
+		call := ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("fs__kml_builtin", pos), op+"Sync", pos), opArgs, pos)
+		if t := e.inferExprType(call); t.IR != "" && t.IR != "void" {
+			spec.resultTy = t
+		}
+	}
+	return spec, true
+}
+
+// fsArgcOK reports whether n arguments (callback excluded) fit the op.
+func (spec fsAsyncOp) fsArgcOK(n int) bool {
+	return n == spec.argc || (spec.options && n == spec.argc+1)
+}
+
+// fsAsyncPromiseResult returns PromiseOf(<op result>) for the Promise form —
+// used by call-type inference.
+func (e *Emitter) fsAsyncPromiseResult(op string, args []ast.Expression) (Type, bool) {
+	spec, ok := e.fsAsyncSpecFor(op, args)
 	if !ok {
 		return Type{}, false
 	}
@@ -75,7 +126,7 @@ func (e *Emitter) emitFsGuarded(tryBody func() error, catchBody func(errPtr stri
 	sj := e.freshReg()
 	thr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jb))
-	e.emitInstr(fmt.Sprintf("%s = %s", sj, setjmpCall(jb)))
+	e.emitInstr(fmt.Sprintf("%s = %s", sj, e.setjmpCall(jb)))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", thr, sj))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", thr, catchL, tryL))
 
@@ -100,10 +151,10 @@ func (e *Emitter) emitFsGuarded(tryBody func() error, catchBody func(errPtr stri
 // fsAsyncEmptyResult builds the "no data" value handed to a callback's data
 // slot on error: a null string pointer, or an empty {ptr,i64} array aggregate.
 func (e *Emitter) fsAsyncEmptyResult(ty Type) Value {
+	ty.Nullable, ty.IsUndefined = true, true
 	if ty.IsArray {
-		agg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } { ptr null, i64 0 }, ptr null, 0", agg))
-		return Value{Ref: agg, Ty: ty}
+		// The absent array (a null header): `undefined` in the callback.
+		return e.emitAbsentArrayValue(ty)
 	}
 	return Value{Ref: "null", Ty: ty}
 }
@@ -112,13 +163,17 @@ func (e *Emitter) fsAsyncEmptyResult(ty Type) Value {
 // (err) or (err, data) — the classic Node callback form.
 func (e *Emitter) emitFsAsyncCallback(op string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	spec := fsAsyncOps()[op]
-	if len(args) != spec.argc+1 {
-		return Value{}, fmt.Errorf("%d:%d: fs.%s takes %d argument(s) and a callback", pos.Line, pos.Col, op, spec.argc)
+	if len(args) == 0 || !spec.fsArgcOK(len(args)-1) {
+		return Value{}, fmt.Errorf("%d:%d: fs.%s takes %d argument(s), options and a callback", pos.Line, pos.Col, op, spec.argc)
 	}
-	opArgs := args[:spec.argc]
+	opArgs := args[:len(args)-1]
+	spec, _ = e.fsAsyncSpecFor(op, opArgs)
 	hints := []Type{errorObjType}
 	if spec.dataArg {
-		hints = append(hints, spec.resultTy)
+		// On an error the data argument is absent (`undefined` in Node).
+		dataTy := spec.resultTy
+		dataTy.Nullable, dataTy.IsUndefined = true, true
+		hints = append(hints, dataTy)
 	}
 
 	// Pooled path (TDD-00185): submit the op to the thread pool — returning a
@@ -140,35 +195,18 @@ func (e *Emitter) emitFsAsyncCallback(op string, args []ast.Expression, pos ast.
 		return Value{Ty: TypeVoid}, nil
 	}
 
+	// An op the pool declines runs inline, and its callback still fires on a
+	// later turn, as Node's always does: through the same settle reaction, on
+	// the inline form's settled Promise.
+	q, err := e.emitFsInlinePromise(spec, opArgs, pos)
+	if err != nil {
+		return Value{}, err
+	}
 	cb, err := e.resolveCallbackWithHints(args[len(args)-1], hints)
 	if err != nil {
 		return Value{}, err
 	}
-
-	err = e.emitFsGuarded(
-		func() error {
-			res, serr := spec.sync(e, opArgs, pos)
-			if serr != nil {
-				return serr
-			}
-			e.emitInstr("call void @__kml_pop_jmpbuf()")
-			cbArgs := []Value{{Ref: "null", Ty: errorObjType}}
-			if spec.dataArg {
-				cbArgs = append(cbArgs, res)
-			}
-			_, cerr := e.emitCBCall(cb, cbArgs)
-			return cerr
-		},
-		func(errPtr string) error {
-			cbArgs := []Value{{Ref: errPtr, Ty: errorObjType}}
-			if spec.dataArg {
-				cbArgs = append(cbArgs, e.fsAsyncEmptyResult(spec.resultTy))
-			}
-			_, cerr := e.emitCBCall(cb, cbArgs)
-			return cerr
-		},
-	)
-	if err != nil {
+	if err := e.emitFsCallbackReaction(spec, cb, q.Ref); err != nil {
 		return Value{}, err
 	}
 	return Value{Ty: TypeVoid}, nil
@@ -196,7 +234,46 @@ func (e *Emitter) emitFsPromisePooled(op string, args []ast.Expression, pos ast.
 	if !ok {
 		return Value{}, false, nil
 	}
-	spec := fsAsyncOps()[op]
+	// A file descriptor in place of the path (`readFile(fd, …)`): the pool
+	// thunks take a path; the inline form reads or writes the descriptor.
+	if len(args) > 0 {
+		if t := e.inferExprType(args[0]); isScalarNonString(t) {
+			return Value{}, false, nil
+		}
+	}
+	spec, _ := e.fsAsyncSpecFor(op, args)
+	if len(args) > spec.argc {
+		// The pool thunks take no options: readFile's utf8 encoding and a
+		// write's utf8 encoding are what they do anyway; anything else (a
+		// flag, a mode, `recursive`, another encoding) runs inline.
+		switch {
+		case op == "readFile":
+			enc, err := fsReadOptions(args[1], pos, "fs.readFile")
+			if err != nil {
+				return Value{}, true, err
+			}
+			if enc != "" && enc != "utf8" {
+				return Value{}, false, nil
+			}
+		case op == "writeFile" || op == "appendFile":
+			if isNullLiteralExpr(args[2]) {
+				break
+			}
+			flag, mode, err := fsTextOption(args[2], pos, "fs."+op, true)
+			if err != nil {
+				return Value{}, true, err
+			}
+			if flag != "" || mode != nil {
+				return Value{}, false, nil
+			}
+		default:
+			return Value{}, false, nil
+		}
+		args = args[:spec.argc]
+	}
+	if op == "readFile" && spec.resultTy.IsBuffer {
+		opid = fsPoolOpReadFileBytes
+	}
 
 	// writeFile/appendFile of an ArrayBuffer/TypedArray pools onto the pool's
 	// explicit-length byte thunk (KML_OP_*FILE_BYTES): the buffer is copied raw
@@ -213,7 +290,10 @@ func (e *Emitter) emitFsPromisePooled(op string, args []ast.Expression, pos ast.
 		if err != nil {
 			return Value{}, false, err
 		}
-		argRefs[i] = e.coerce(v, TypePtr).Ref
+		if v, err = e.fsPath(v, pos); err != nil {
+			return Value{}, true, err
+		}
+		argRefs[i] = v.Ref
 	}
 
 	e.ensurePromiseRuntime()
@@ -228,10 +308,11 @@ func (e *Emitter) emitFsPromisePooled(op string, args []ast.Expression, pos ast.
 }
 
 // Pool op ids for the binary-write thunks — must match the KML_OP_* enum in
-// threadpoolsrc/klainpool.c (after READSTREAM = 9).
+// threadpoolsrc/klainpool.c (after READDIR = 8).
 const (
-	fsPoolOpWriteFileBytes  = 10
-	fsPoolOpAppendFileBytes = 11
+	fsPoolOpWriteFileBytes  = 9
+	fsPoolOpAppendFileBytes = 10
+	fsPoolOpReadFileBytes   = 11
 )
 
 // emitFsPromisePooledBytes pools a binary writeFile/appendFile: it resolves the
@@ -244,7 +325,9 @@ func (e *Emitter) emitFsPromisePooledBytes(op string, args []ast.Expression, pos
 	if err != nil {
 		return Value{}, false, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, true, err
+	}
 
 	dataTy := e.inferExprType(args[1])
 	var dataRef, lenRef string
@@ -428,9 +511,10 @@ func (e *Emitter) fsAsyncDataFromWords(ty Type, v0, v1 string) Value {
 // and the 'fs/promises' named import — returning a settled task Promise.
 func (e *Emitter) emitFsAsyncPromise(op string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	spec := fsAsyncOps()[op]
-	if len(args) != spec.argc {
-		return Value{}, fmt.Errorf("%d:%d: fs.promises.%s takes %d argument(s)", pos.Line, pos.Col, op, spec.argc)
+	if !spec.fsArgcOK(len(args)) {
+		return Value{}, fmt.Errorf("%d:%d: fs.promises.%s takes %d argument(s) and options", pos.Line, pos.Col, op, spec.argc)
 	}
+	spec, _ = e.fsAsyncSpecFor(op, args)
 	// TDD-00185: the fs.promises ops run on the blocking-work thread pool — a
 	// genuinely non-blocking op that returns a *pending* Promise the loop settles
 	// when the worker completes. Binary-data writes (writeFile/appendFile of an
@@ -441,6 +525,13 @@ func (e *Emitter) emitFsAsyncPromise(op string, args []ast.Expression, pos ast.P
 	} else if pooled {
 		return v, nil
 	}
+	return e.emitFsInlinePromise(spec, args, pos)
+}
+
+// emitFsInlinePromise runs an op the pool declines inline and returns its
+// settled Promise: resolved with the result, or rejected with the error the
+// sync form throws.
+func (e *Emitter) emitFsInlinePromise(spec fsAsyncOp, args []ast.Expression, pos ast.Pos) (Value, error) {
 	e.ensurePromiseRuntime()
 	q := e.emitAllocSettledPromise()
 

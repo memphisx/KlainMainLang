@@ -35,7 +35,7 @@ func (e *Emitter) ensureCPExitWake() {
 	e.ensureWorkerFdSetbit()
 	// Set by __kml_cp_register: the next fdset_add reports "don't block".
 	e.emitGlobal("@__kml_cp_kick = internal global i1 false, align 1")
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		e.emitGlobal("declare void @__kml_win_child_watch(i32 noundef)")
 		e.emitGlobal(`
 define void @__kml_cp_watch_init() {
@@ -61,7 +61,7 @@ define void @__kml_cp_wake_drain() {
 	e.ensureWriteDecl()
 	e.ensureFcntlDecl()
 	e.ensureErrnoAccessor()
-	sigchld := signalNumbers()["SIGCHLD"]
+	sigchld := e.signalNumbers()["SIGCHLD"]
 	// The pipe belongs to the process that created it. A forked cluster worker
 	// inherits both ends and the handler; were it to read the parent's pipe it
 	// would swallow the parent's wake bytes, so every use is gated on the owner
@@ -161,5 +161,5 @@ rd:
   br i1 %%more, label %%rd, label %%ret
 ret:
   ret void
-}`, errnoAccessor(), httpNonblockFlag(), sigchld))
+}`, e.errnoAccessor(), e.httpNonblockFlag(), sigchld))
 }

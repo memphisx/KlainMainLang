@@ -20,12 +20,12 @@ console.log(grid[1], grid[1][0]); // [ 2, 3 ] 2
 const dst = new Int32Array(3);
 dst.set(ta);
 console.log(dst); // Int32Array(3) [ 8, 9, 0 ]
-dst.set("12x");
+dst.set("12x" as any);
 console.log(dst); // Int32Array(3) [ 1, 2, 0 ]
-dst.set({ length: 2, 0: 7, 1: "8" }, 1);
+dst.set({ length: 2, 0: 7, 1: "8" } as any, 1);
 console.log(dst); // Int32Array(3) [ 1, 7, 8 ]
 try {
-  dst.set(null);
+  dst.set(null as any);
 } catch (e) {
   console.log((e as Error).message); // Cannot convert undefined or null to object
 }

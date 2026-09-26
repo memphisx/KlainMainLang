@@ -7,70 +7,42 @@
   "coverage": {
     "loose": "21/22",
     "loosePct": 95,
-    "strict": "6/22",
-    "strictPct": 27
+    "strict": "5/22",
+    "strictPct": 23
   },
-  "lede": "Node-fs-shaped file I/O for config, data, and logs. The sync set is the core; async variants (callback + Promise) and read/write streams wrap the same runtime helpers. The recurring divergence is text-first: the plain readFileSync/readFile/stream path is strlen-based and truncates at an embedded null byte — use readFileSyncBytes / an ArrayBuffer write for binary. There is no Buffer class (plain ArrayBuffer/TypedArrays). The async ops are genuinely non-blocking on a background thread pool — the fs.promises table, the legacy callback form, and binary-data writes alike (POSIX; Windows keeps an inline API shape for now).",
+  "lede": "Node-fs-shaped file I/O for config, data, and logs. The sync set is the core; the async variants (callback + Promise), the callback file operations and the read/write streams run on a background thread pool and call back from the event loop. readFileSync and readFile return a Buffer of the file's exact bytes without an encoding and a string with one. The file streams and the callback operations are Node's own code ported to TypeScript (Buffer chunks, Node's options, errors as 'error' events).",
   "entries": [
     {
       "id": "fs.readFileSync",
       "name": "fs.readFileSync(path[, 'utf8'])",
       "statusRow": "fs.readFileSync(path[, 'utf8'])",
-      "signature": "readFileSync(path: string, encoding?: 'utf8' | { encoding?: 'utf8', flag?: string }): string",
+      "signature": "readFileSync(path: string | number): Buffer; readFileSync(path: string | number, encoding: BufferEncoding | { encoding: BufferEncoding, flag?: string }): string",
       "badge": "caveats",
-      "description": "Reads the whole file into a string. Throws a catchable Error (built from strerror(errno)) if the file can't be opened. The optional encoding argument accepts 'utf8' (a bare string or { encoding: 'utf8' }) — a faithful no-op since strings are UTF-8, so the everyday readFileSync(path, 'utf8') idiom compiles.",
+      "description": "Reads the whole file: a Buffer of its exact bytes with no encoding, a string with one (a bare encoding or { encoding }), decoded as buf.toString(encoding). A file descriptor reads to its end, so readFileSync(0, 'utf8') is all of stdin. Throws a catchable Error with Node's message, code, syscall and path if the file can't be opened.",
       "params": [
         {
           "name": "path",
-          "type": "string",
-          "desc": "Path to read."
+          "type": "string | number",
+          "desc": "Path to read, or an open file descriptor (0 is stdin)."
         },
         {
           "name": "encoding",
-          "type": "'utf8' | { encoding?: 'utf8', flag?: string }",
-          "desc": "Optional. Only 'utf8' is accepted; other encodings reject at compile time."
+          "type": "BufferEncoding | { encoding: BufferEncoding, flag?: string }",
+          "desc": "Optional. Any Buffer encoding (utf8, hex, base64, base64url, latin1, ascii, utf16le); a string literal, as the codec is chosen at compile time."
         }
       ],
       "returns": {
-        "type": "string",
-        "desc": "The file contents as text."
+        "type": "Buffer | string",
+        "desc": "The file's bytes, or its decoded text with an encoding."
       },
       "exampleKey": "fs/fs",
       "snippet": "const content = fs.readFileSync('/tmp/kml_fs_example.txt', 'utf8')\nconsole.log(content.length)",
       "differences": [
-        "Text-only by design — a file with embedded null bytes reads back shorter than its real size (`.length` is `strlen`-based); use `fs.readFileSyncBytes(path)` for a binary file.",
-        "With no encoding the result is still a `string`, not a `Buffer` (the text-only default); a non-`'utf8'` encoding is a clean rejection."
+        "With `'utf8'` the string is strlen-based: an embedded null byte truncates it (the Buffer form keeps every byte); a non-`'utf8'` encoding is a clean rejection."
       ],
       "seeAlso": [
-        "fs.readFileSyncBytes",
         "fs.writeFileSync",
         "fs.async"
-      ],
-      "spec": {
-        "mdn": "https://nodejs.org/api/fs.html#fsreadfilesyncpath-options"
-      }
-    },
-    {
-      "id": "fs.readFileSyncBytes",
-      "name": "fs.readFileSyncBytes(path)",
-      "statusRow": "fs.readFileSyncBytes(path)",
-      "signature": "readFileSyncBytes(path: string): Uint8Array",
-      "badge": "exact",
-      "description": "Binary-safe sibling of readFileSync: returns a Uint8Array with the file's exact byte count (no strlen involved), so a file with an embedded null byte reads back whole. There is no Buffer class — this compiler uses plain ArrayBuffer/TypedArrays.",
-      "params": [
-        {
-          "name": "path",
-          "type": "string",
-          "desc": "Path to read."
-        }
-      ],
-      "returns": {
-        "type": "Uint8Array",
-        "desc": "The exact file bytes."
-      },
-      "seeAlso": [
-        "fs.readFileSync",
-        "fs.writeFileSync"
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/fs.html#fsreadfilesyncpath-options"
@@ -107,7 +79,8 @@
       "exampleKey": "fs/fs",
       "snippet": "fs.writeFileSync('/tmp/out.txt', 'first line', 'utf8')\nfs.writeFileSync('/tmp/out.txt', ' more', { flag: 'a' })",
       "differences": [
-        "The options argument supports only `{ encoding: 'utf8', flag, mode }` — a non-`'utf8'` encoding is a clean rejection. `{ mode }` sets the permission bits when the write creates the file (umask-reduced, applied only on creation, matching Node/open(2))."
+        "The options argument supports only `{ encoding: 'utf8', flag, mode }` — a non-`'utf8'` encoding is a clean rejection. `{ mode }` sets the permission bits when the write creates the file (umask-reduced, applied only on creation, matching Node/open(2)).",
+        "A file descriptor in place of the path (`fs.writeFileSync(fd, …)`) is a compile error."
       ],
       "seeAlso": [
         "fs.appendFileSync",
@@ -131,7 +104,8 @@
       "exampleKey": "fs/fs",
       "snippet": "fs.appendFileSync('/tmp/out.txt', '\\nsecond line', 'utf8')",
       "differences": [
-        "The options argument supports only `{ encoding: 'utf8', flag, mode }` — a non-`'utf8'` encoding is a clean rejection. `{ mode }` sets the permission bits when the write creates the file (umask-reduced, applied only on creation, matching Node/open(2))."
+        "The options argument supports only `{ encoding: 'utf8', flag, mode }` — a non-`'utf8'` encoding is a clean rejection. `{ mode }` sets the permission bits when the write creates the file (umask-reduced, applied only on creation, matching Node/open(2)).",
+        "A file descriptor in place of the path (`fs.appendFileSync(fd, …)`) is a compile error."
       ],
       "seeAlso": [
         "fs.writeFileSync"
@@ -287,8 +261,7 @@
         "`COPYFILE_FICLONE`/`FICLONE_FORCE` mode bits are accepted but a best-effort no-op (no reflink); `fs.constants.COPYFILE_EXCL`/`COPYFILE_FICLONE`/`COPYFILE_FICLONE_FORCE` name all three."
       ],
       "seeAlso": [
-        "fs.renameSync",
-        "fs.readFileSyncBytes"
+        "fs.renameSync"
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/fs.html#fscopyfilesyncsrc-dest-mode"
@@ -298,19 +271,18 @@
       "id": "fs.async",
       "name": "Async variants (callback + fs.promises)",
       "statusRow": "Async variants — callback (`fs.readFile(path, cb)`) + Promise (`fs.promises.readFile` / `import from 'fs/promises'`)",
-      "signature": "fs.readFile(path, cb); await fs.promises.readFile(path)",
+      "signature": "fs.readFile(path[, options], cb); await fs.promises.readFile(path[, options])",
       "badge": "caveats",
-      "description": "Async forms of the sync set: readFile/writeFile/appendFile/unlink/mkdir/rmdir/rename/copyFile/readdir. The callback gets (err[, data]); the Promise rejects with the same Error the sync form throws. Each reuses its *Sync runtime helper verbatim, catching the throw via the compiler's setjmp catch primitive — no parallel non-throwing I/O code.",
+      "description": "Async forms of the sync set, with their options: readFile/writeFile/appendFile/unlink/mkdir/rmdir/rename/copyFile/readdir. readFile resolves to a Buffer, or a string with an encoding. The callback gets (err[, data]), data undefined on an error; the Promise rejects with the same Error the sync form throws. Each reuses its *Sync runtime helper verbatim, catching the throw via the compiler's setjmp catch primitive.",
       "returns": {
         "type": "void | Promise<T>",
         "desc": "Callback delivery, or a Promise."
       },
       "exampleKey": "fs_async/fs_async",
-      "snippet": "await fs.promises.writeFile('demo.txt', 'hi')\nconst text: string = await fs.promises.readFile('demo.txt')",
+      "snippet": "await fs.promises.writeFile('demo.txt', 'hi')\nconst text: string = await fs.promises.readFile('demo.txt', 'utf8')",
       "differences": [
-        "The async ops are genuinely non-blocking — readFile/writeFile/appendFile/unlink/mkdir/rmdir/rename/copyFile/readdir run on a background thread pool (default 4, UV_THREADPOOL_SIZE) and return a pending Promise the loop settles on completion, so other connections/timers keep running during the I/O (TDD-00185). The callback form (fs.readFile(path, cb), fired from a GC-safe settle reaction) and binary writeFile/appendFile of an ArrayBuffer/TypedArray run on the pool too (ADR-00820). The pool is POSIX-first; Windows keeps the inline path for now.",
-        "`readFile` delivers a string (text) — inherits `readFileSync`'s text-only caveat; no async binary (`Buffer`) form.",
-        "No `options`/`encoding` argument; no async `stat` (no sync `stat` exists either)."
+        "The async ops are genuinely non-blocking — they run on a background thread pool (default 4, UV_THREADPOOL_SIZE) and return a pending Promise the loop settles on completion (TDD-00185). An op given options beyond a utf8 encoding (a flag, a mode, recursive, withFileTypes, another readFile encoding) runs inline on the loop thread instead. The pool is POSIX-first; Windows keeps the inline path for now.",
+        "No async `stat`."
       ],
       "seeAlso": [
         "fs.readFileSync",
@@ -321,26 +293,47 @@
       }
     },
     {
-      "id": "fs.streams",
-      "name": "fs.createReadStream / createWriteStream",
-      "statusRow": "fs.createReadStream / fs.createWriteStream",
-      "signature": "fs.createReadStream(path, opts?): Readable; fs.createWriteStream(path, opts?): Writable",
+      "id": "fs.callbacks",
+      "name": "fs.open / read / write / writev / fsync / close",
+      "statusRow": "fs.open / close / read / write / writev / fsync (callback form)",
+      "signature": "fs.open(path, flags?, mode?, cb); fs.read(fd, buffer, offset, length, position, cb); fs.write(fd, buffer | string, …, cb); fs.writev(fd, buffers, position?, cb); fs.fsync(fd, cb); fs.close(fd, cb?)",
       "badge": "caveats",
-      "description": "createReadStream returns a Node Readable (consume via for await, .on('data')/.on('end'), or .pipe()); createWriteStream a Node Writable (.write/.end, 'finish'/'close'/'drain'). A read→write .pipe() round-trips; a failed open throws a catchable Error.",
+      "description": "The descriptor-level callback operations, with Node's argument forms (fs.read's options object and bare forms, fs.write's string form with a position and encoding), validation errors and system errors (code, errno, syscall, path). Each runs on the thread pool and calls back from the event loop.",
       "returns": {
-        "type": "Readable | Writable",
-        "desc": "A Node stream."
+        "type": "void",
+        "desc": "The result arrives through the callback."
       },
-      "exampleKey": "fs_streams/fs_streams",
-      "snippet": "for await (const chunk of fs.createReadStream('demo.txt')) { /* ... */ }\nfs.createReadStream('a.txt').pipe(fs.createWriteStream('b.txt'))",
+      "snippet": "fs.open('data.bin', 'r', (err, fd) => {\n  fs.read(fd, Buffer.alloc(16), 0, 16, 0, (err, n, buf) => fs.close(fd, () => {}));\n});",
       "differences": [
-        "Chunks are **strings**, not `Buffer`s — text-first, like `readFileSync` (an embedded NUL truncates a chunk); binary (`Uint8Array`) streaming is a follow-on.",
-        "`createReadStream` reads on a background thread pool (TDD-00186): the file opens synchronously (a missing file still throws), then each highWaterMark chunk is read off the loop thread and enqueued into the Readable in order, so the read no longer freezes the reactor. Consumer backpressure is honored (ADR-00821) — the worker reads one chunk per demand, at most ~one outstanding, and a mid-read failure surfaces as a stream 'error' rather than a silent early EOF.",
-        "Options: `createReadStream` takes `{ highWaterMark }`, `createWriteStream` `{ flags: \"w\"|\"a\" }` — both compile-time literals; `start`/`end`/`fd`/`encoding` are clean errors."
+        "On Windows a positioned read or write seeks, then transfers — not atomic against another operation on the same descriptor; not verified on Windows."
       ],
       "seeAlso": [
-        "fs.async",
-        "fs.readFileSync"
+        "fs.streams",
+        "fs.async"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/fs.html#fsopenpath-flags-mode-callback"
+      }
+    },
+    {
+      "id": "fs.streams",
+      "name": "fs.createReadStream / createWriteStream",
+      "statusRow": "fs.createReadStream / fs.createWriteStream / ReadStream / WriteStream",
+      "signature": "fs.createReadStream(path, options?): fs.ReadStream; fs.createWriteStream(path, options?): fs.WriteStream",
+      "badge": "caveats",
+      "description": "A ReadStream is a Readable over the file: Buffer chunks (strings with an encoding), highWaterMark 64 KiB, start/end byte ranges. A WriteStream is a Writable: writes append in order, 'finish' then 'close'. Both open on the next tick ('open', 'ready'); a failed open or read is an 'error' event. Node's lib/internal/fs/streams.js, ported to TypeScript.",
+      "returns": {
+        "type": "ReadStream | WriteStream",
+        "desc": "A Node stream (instanceof Readable / Writable)."
+      },
+      "exampleKey": "fs_streams/fs_streams",
+      "snippet": "for await (const chunk of fs.createReadStream('demo.txt')) { /* Buffer */ }\nfs.createReadStream('a.txt').pipe(fs.createWriteStream('b.txt'))",
+      "differences": [
+        "The `fs` (custom operations) and `signal` options, and a `FileHandle` as `fd`, are not supported."
+      ],
+      "seeAlso": [
+        "fs.callbacks",
+        "fs.async"
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/fs.html#fscreatereadstreampath-options"

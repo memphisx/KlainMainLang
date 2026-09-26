@@ -12,6 +12,16 @@ import _ "embed"
 //go:embed tlssrc/tls.c
 var tlsClientSource string
 
+//go:embed tlssrc/tlshandle.c
+var tlsHandleSource string
+
+// TLSHandleSource returns the C source of the TLS primitives over the pool's
+// TCP handles (the `tls` module written in TypeScript).
+func TLSHandleSource() string { return tlsHandleSource }
+
+// UsesTLSHandles reports whether the program's TypeScript uses them.
+func (e *Emitter) UsesTLSHandles() bool { return e.usedTLSHandles }
+
 // TLSClientSource returns the C source implementing the __kml_tls_* ABI.
 func TLSClientSource() string { return tlsClientSource }
 

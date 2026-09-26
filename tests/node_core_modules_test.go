@@ -5,45 +5,57 @@ import (
 	"testing"
 )
 
-// --- querystring (see docs/adr/ADR-00139.md) ---
+// --- querystring: lib/node/querystring.ts, Node's lib/querystring.js ---
 
 func TestE2EQuerystringParse(t *testing.T) {
 	assertOutputImports(t, `
 import querystring from 'querystring'
-const m = querystring.parse("a=1&b=hello%20world")
-console.log(m.get("a"))
-console.log(m.get("b"))
-`, "1\nhello world")
+const m = querystring.parse("a=1&b=hello%20world&a=3&c&d=x+y")
+console.log(m)
+console.log(m.b, m.c === "", Array.isArray(m.a))
+`, `[Object: null prototype] {
+  a: [ '1', '3' ],
+  b: 'hello world',
+  c: '',
+  d: 'x y'
 }
-
-func TestE2EQuerystringParseBareFlagIsEmptyString(t *testing.T) {
-	assertOutputImports(t, `
-import querystring from 'querystring'
-const m = querystring.parse("debug&x=1")
-console.log(m.get("debug"))
-console.log(m.get("x"))
-`, "\n1")
+hello world true true`)
 }
 
 func TestE2EQuerystringParseDoesNotStripLeadingQuestionMark(t *testing.T) {
 	// Unlike `new URLSearchParams(str)`, querystring.parse treats a leading
-	// '?' as plain text at the start of the first key — matching real Node.
+	// '?' as plain text at the start of the first key; a malformed escape
+	// decodes through unescapeBuffer.
 	assertOutputImports(t, `
-import querystring from 'querystring'
-const m = querystring.parse("?a=1")
-console.log(m.get("?a"))
-console.log(m.get("a"))
-`, "1\nundefined")
+import { parse } from 'querystring'
+const m = parse("?a=1&%zz=%E2%82%AC")
+console.log(m["?a"], m.a, m["%zz"])
+`, "1 undefined €")
+}
+
+func TestE2EQuerystringParseOptions(t *testing.T) {
+	assertOutputImports(t, `
+import { parse } from 'node:querystring'
+console.log(parse("a:1;b:2", ";", ":"))
+console.log(parse("a=1&b=2&c=3", undefined, undefined, { maxKeys: 2 }))
+console.log(parse("a=%41", undefined, undefined, { decodeURIComponent: (s: string) => s.toLowerCase() }))
+`, `[Object: null prototype] { a: '1', b: '2' }
+[Object: null prototype] { a: '1', b: '2' }
+[Object: null prototype] { a: '%41' }`)
 }
 
 func TestE2EQuerystringStringify(t *testing.T) {
 	assertOutputImports(t, `
 import querystring from 'querystring'
-const m = new Map<string, string>()
-m.set("q", "hello world")
-m.set("page", "2")
-console.log(querystring.stringify(m))
-`, "q=hello%20world&page=2")
+console.log(querystring.stringify({ q: "hello world", page: 2, tags: ["a", "b"], on: true, n: null }))
+console.log(querystring.stringify({ a: "1" }, ";", ":"), querystring.escape("ä ö/"), querystring.unescape("%41%zz"))
+const r = { x: 5, s: "t" }
+console.log(querystring.stringify(r))
+console.log(querystring.encode === querystring.stringify, typeof querystring.decode)
+`, `q=hello%20world&page=2&tags=a&tags=b&on=true&n=
+a:1 %C3%A4%20%C3%B6%2F A%zz
+x=5&s=t
+true function`)
 }
 
 func TestE2EQuerystringRoundTrip(t *testing.T) {
@@ -69,10 +81,10 @@ func TestE2EAssertOkThrowsWithDefaultMessage(t *testing.T) {
 	assertOutputImports(t, `
 import assert from 'assert'
 try {
-  assert.ok(1 === 2)
+  assert.ok((1 as number) === 2)
 } catch (e) {
-  console.log(e.name)
-  console.log(e.message)
+  console.log((e as Error).name)
+  console.log((e as Error).message)
 }
 `, "AssertionError\nthe expression evaluated to a falsy value")
 }
@@ -83,7 +95,7 @@ import assert from 'assert'
 try {
   assert(false, "custom failure")
 } catch (e) {
-  console.log(e.message)
+  console.log((e as Error).message)
 }
 `, "custom failure")
 }
@@ -103,7 +115,7 @@ import assert from 'assert'
 try {
   assert.equal(1, 2)
 } catch (e) {
-  console.log(e.message)
+  console.log((e as Error).message)
 }
 `, "values are not equal")
 }
@@ -115,7 +127,7 @@ assert.notEqual(1, 2)
 try {
   assert.notStrictEqual(5, 5)
 } catch (e) {
-  console.log(e.message)
+  console.log((e as Error).message)
 }
 `, "values are equal")
 }
@@ -126,12 +138,12 @@ import assert from 'assert'
 try {
   assert.fail("boom")
 } catch (e) {
-  console.log(e.name + ": " + e.message)
+  console.log((e as Error).name + ": " + (e as Error).message)
 }
 try {
   assert.fail()
 } catch (e) {
-  console.log(e.message)
+  console.log((e as Error).message)
 }
 `, "AssertionError: boom\nfailed")
 }
@@ -150,7 +162,7 @@ import assert from 'assert'
 try {
   assert.throws(() => { const x = 1 })
 } catch (e) {
-  console.log(e.message)
+  console.log((e as Error).message)
 }
 `, "missing expected exception")
 }
@@ -161,7 +173,7 @@ import assert from 'assert'
 try {
   assert.throws(() => { const x = 1 }, "expected a throw")
 } catch (e) {
-  console.log(e.message)
+  console.log((e as Error).message)
 }
 `, "expected a throw")
 }
@@ -190,7 +202,7 @@ assert.doesNotMatch("abc", /xyz/)
 try {
   assert.match("abc", /nope/)
 } catch (e) {
-  console.log("caught: " + e.message)
+  console.log("caught: " + (e as Error).message)
 }
 console.log("ok")
 `, "caught: the input did not match the regular expression\nok")
@@ -203,8 +215,8 @@ import assert from 'assert'
 assert.ifError(null)
 assert.ifError(0)
 assert.doesNotThrow(() => { console.log("ran clean") })
-try { assert.ifError("boom") } catch (e) { console.log("caught:", e.message) }
-try { assert.doesNotThrow(() => { throw new Error("x") }) } catch (e) { console.log("caught:", e.message) }
+try { assert.ifError("boom") } catch (e) { console.log("caught:", (e as Error).message) }
+try { assert.doesNotThrow(() => { throw new Error("x") }) } catch (e) { console.log("caught:", (e as Error).message) }
 console.log("done")
 `, "ran clean\ncaught: ifError got unwanted exception\ncaught: got unwanted exception\ndone")
 }
@@ -506,7 +518,7 @@ try { url.fileURLToPath("file:///C:/a%2Fb", { windows: true }) } catch (e) { con
 
 func TestE2EFileURLToPathNonFileRejected(t *testing.T) {
 	src := `import { fileURLToPath } from 'url'
-try { fileURLToPath("https://x.com/p") } catch (e) { console.log("threw:", e.message) }`
+try { fileURLToPath("https://x.com/p") } catch (e) { console.log("threw:", (e as Error).message) }`
 	assertOutputImports(t, src, "threw: The URL must be of scheme file")
 }
 

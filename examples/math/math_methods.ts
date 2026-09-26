@@ -71,15 +71,17 @@ console.log(Math.sinh(0.0))   // 0
 console.log(Math.cosh(0.0))   // 1
 console.log(Math.tanh(0.0))   // 0
 
+// ── exp / inverse hyperbolic ──────────────────────────────────────────────────
+console.log(Math.exp(0))      // 1
+console.log(Math.asinh(0))    // 0
+console.log(Math.acosh(1))    // 0
+console.log(Math.atanh(0))    // 0
+console.log(Math.acosh(0.5))  // NaN
+
 // ── cbrt / expm1 / log1p ──────────────────────────────────────────────────────
 console.log(Math.cbrt(27.0))   // 3
 console.log(Math.expm1(0.0))   // 0
 console.log(Math.log1p(0.0))   // 0
-
-// ── clamp (TypeGo extension) ──────────────────────────────────────────────────
-console.log(Math.clamp(5, 0, 10))   // 5
-console.log(Math.clamp(-5, 0, 10))  // 0
-console.log(Math.clamp(15, 0, 10))  // 10
 
 // ── random ────────────────────────────────────────────────────────────────────
 // Math.random() returns a float in [0, 1); just verify it's in range

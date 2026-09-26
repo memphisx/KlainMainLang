@@ -870,7 +870,7 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(chunkTy), loaded, varPtr, chunkTy.Align()))
 		}
 	}
-	if err := e.emitStmt(s.Body); err != nil {
+	if err := e.emitForOfBody(s); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))

@@ -15,6 +15,7 @@
 package main
 
 import (
+	"KlainMainLang/options"
 	"bytes"
 	"context"
 	"fmt"
@@ -72,10 +73,19 @@ func frontEnd(entryPath string) (emitted, error) {
 		// global (`var Symbol = …`), so the permissive compat mode is the
 		// faithful measurement configuration (ADR-00472). Tier-2 names stay
 		// reserved either way.
-		prog, perr := resolver.ResolveProgramWithOptions(entryPath, true, false)
+		prog, perr := resolver.ResolveProgramWithOptions(entryPath, options.Options{Compat: "js"})
 		if perr != nil {
 			out.err = perr
 			return
+		}
+		// The strict lane is TypeScript's: its type errors reject the program,
+		// as the CLI's strict resolve does (TDD-00230 P2.7), though the
+		// globals rule above stays the permissive one.
+		if laneCompat != "js" {
+			if terr := resolver.TypeCheck(prog, nil, options.Options{}, false); terr != nil {
+				out.err = terr
+				return
+			}
 		}
 		em := llvm.NewEmitter()
 		em.SetRegexMode(regexModeFlag)
@@ -179,6 +189,18 @@ var nodeAmbientMemberGlobal = map[string]map[string]string{
 		"clearTimeout": "clearTimeout", "clearInterval": "clearInterval",
 		"setImmediate": "setImmediate"},
 }
+
+// nodeImportableDefault and nodeImportableNamed are the ambient modules the
+// resolver also imports from (their Web-global members re-exported, TDD-00165):
+// a require of one becomes the import Node's own module would bind — a
+// namespace for `url`'s functions, `events`' default EventEmitter — instead of
+// leaving the file to name a module binding it never declared.
+var nodeImportableDefault = map[string]string{
+	"url":    "import * as %s from '%s'",
+	"events": "import %s from '%s'",
+}
+
+var nodeImportableNamed = map[string]bool{"url": true, "events": true, "buffer": true, "timers": true}
 
 var nodeAmbientModule = map[string]bool{
 	"buffer": true, "process": true, "console": true, "timers": true,
@@ -508,6 +530,11 @@ func transformNodeSource(src, absPath string) (out string, platformStripped int,
 				imports = append(imports, fmt.Sprintf("import { Countdown as %s } from '../common/countdown'", name))
 				continue
 			}
+			if imp, ok := nodeImportableDefault[mod]; ok {
+				// A module the resolver imports from: bind it as Node does.
+				imports = append(imports, fmt.Sprintf(imp, name, mod))
+				continue
+			}
 			if nodeAmbientModule[mod] {
 				continue // ambient globals — drop the require, use the globals directly
 			}
@@ -519,6 +546,12 @@ func transformNodeSource(src, absPath string) (out string, platformStripped int,
 		case reCjsDestruct.MatchString(line):
 			m := reCjsDestruct.FindStringSubmatch(line)
 			names, mod := m[1], normalizeNodeModule(m[2])
+			if nodeImportableNamed[mod] && !strings.Contains(names, ":") {
+				// `const { URL, domainToASCII } = require('url')` → the named
+				// import; a member the module lacks fails at the resolver.
+				imports = append(imports, fmt.Sprintf("import {%s} from '%s'", strings.TrimSpace(names), mod))
+				continue
+			}
 			if nodeAmbientModule[mod] {
 				continue // ambient globals (Buffer, URL, …) — drop; already in scope
 			}
@@ -783,7 +816,7 @@ import fs from 'fs';
 const fixturesDir: string = ` + strconv.Quote(fixturesAbs) + `;
 
 const readKeyOf = (name: string): string => {
-  return fs.readFileSync(path.join(fixturesDir, "keys", name));
+  return fs.readFileSync(path.join(fixturesDir, "keys", name), "utf8");
 };
 
 const joinFrom = (...args: string[]): string => {
@@ -796,7 +829,7 @@ const fixtures = {
   fixturesDir: fixturesDir,
   path: joinFrom,
   readSync: (...args: string[]): string => {
-    return fs.readFileSync(path.join(fixturesDir, args[0]));
+    return fs.readFileSync(path.join(fixturesDir, args[0]), "utf8");
   },
   readKey: (...args: string[]): string => {
     return readKeyOf(args[0]);
@@ -1238,7 +1271,7 @@ func compileAndRun(src, workDir, tag string, timeout time.Duration) (bool, strin
 func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir, entrySub string) (bool, string, string, string) {
 	prog, perr := frontEndSource(src, filepath.Join(workDir, entrySub), tag)
 	if perr != nil {
-		return false, nodeReason("COMPILE_ERROR", perr.Error()), "", ""
+		return false, nodeReason("COMPILE_ERROR", firstLine(perr.Error())), "", ""
 	}
 
 	llFile := filepath.Join(workDir, tag+".ll")
@@ -1254,14 +1287,12 @@ func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir,
 		}
 		clangArgs = append(clangArgs, cFile)
 		clangArgs = append(clangArgs, cs.CFlags...)
-		for _, lib := range cs.Libs {
-			clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
-		}
+		clangArgs = append(clangArgs, cs.Libs...) // link flags as given, as main.go passes them
 	}
 	for _, lib := range prog.linkLibs {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	cctx, cancel := context.WithTimeout(context.Background(), timeout)
+	cctx, cancel := context.WithTimeout(context.Background(), clangTimeout)
 	defer cancel()
 	var clangOut bytes.Buffer
 	clangCmd := killableCommand(cctx, "clang", llvm.HostClangArgv(clangArgs...)...)

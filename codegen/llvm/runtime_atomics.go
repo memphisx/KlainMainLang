@@ -22,11 +22,11 @@ import (
 
 // etimedoutErrno is ETIMEDOUT's per-OS value (Darwin 60, Linux 110) — same
 // per-OS-constant pattern as sigBlockFlag/httpNonblockFlag.
-func etimedoutErrno() int {
-	if targetGOOS() == "windows" {
+func (e *Emitter) etimedoutErrno() int {
+	if e.opts.Target.OS() == "windows" {
 		return 138 // mingw-w64 errno.h / winpthreads ETIMEDOUT
 	}
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		return 60
 	}
 	return 110
@@ -225,7 +225,7 @@ timedout:
   call void @__kml_atomics_unlink(ptr %%node)
   call i32 @pthread_mutex_unlock(ptr @__kml_atomics_mtx)
   ret i64 2
-}`, etimedoutErrno()))
+}`, e.etimedoutErrno()))
 
 	// __kml_atomics_notify(addr, count): mark up to count waiters on addr
 	// notified, broadcast, return how many were marked.

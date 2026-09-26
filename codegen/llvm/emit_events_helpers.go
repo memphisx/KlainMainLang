@@ -20,6 +20,9 @@ import (
 // array element type (this compiler's arrays are homogeneous), so it is a clean
 // V1 rejection.
 func (e *Emitter) eventsOnceArgShape(evTy Type, pos ast.Pos) (Type, int, error) {
+	if evTy.IsDynamic {
+		return TypeAny, -1, nil // a dynamic emitter: every emitted argument, as any[]
+	}
 	if !evTy.IsTuple {
 		return evTy, 1, nil
 	}
@@ -41,6 +44,8 @@ func (e *Emitter) eventsOnceArgShape(evTy Type, pos ast.Pos) (Type, int, error) 
 // width-exact name is needed for the resolved array's element type to match).
 func eventsElemAnnotationName(elem Type) string {
 	switch {
+	case elem.IsDynamic:
+		return "any" // before i64: an any is an i64 box word
 	case isStringTy(elem):
 		return "string"
 	case elem.IR == "double":
@@ -101,14 +106,21 @@ func (e *Emitter) emitEventsOnce(args []ast.Expression, pos ast.Pos) (Value, err
 
 	// Desugar: new Promise<elem[]>((__once_res, __once_rej) =>
 	//            emitter.once(name, (__once_v0, …) => __once_res([__once_v0, …])))
-	params := make([]ast.Param, arity)
-	elems := make([]ast.Expression, arity)
-	for i := 0; i < arity; i++ {
-		n := fmt.Sprintf("__once_v%d", i)
-		params[i] = ast.Param{Name: n}
-		elems[i] = ast.NewIdentifier(n, pos)
+	var params []ast.Param
+	var resArg ast.Expression
+	if arity < 0 {
+		params = []ast.Param{{Name: "__once_args", Rest: true}}
+		resArg = ast.NewIdentifier("__once_args", pos)
+	} else {
+		elems := make([]ast.Expression, arity)
+		for i := 0; i < arity; i++ {
+			n := fmt.Sprintf("__once_v%d", i)
+			params = append(params, ast.Param{Name: n})
+			elems[i] = ast.NewIdentifier(n, pos)
+		}
+		resArg = ast.NewArrayLiteral(elems, pos)
 	}
-	resCall := ast.NewCallExpression(ast.NewIdentifier("__once_res", pos), []ast.Expression{ast.NewArrayLiteral(elems, pos)}, pos)
+	resCall := ast.NewCallExpression(ast.NewIdentifier("__once_res", pos), []ast.Expression{resArg}, pos)
 	listener := ast.NewArrowFunction(params, nil, nil, ast.NewBlockStatement([]ast.Statement{ast.NewExpressionStatement(resCall, pos)}, pos), pos)
 	onceCall := ast.NewCallExpression(ast.NewMemberExpression(args[0], "once", pos), []ast.Expression{args[1], listener}, pos)
 	executor := ast.NewArrowFunction(
@@ -179,21 +191,6 @@ func eventsOnStateAnnotation(elemName string) string {
 	return fmt.Sprintf("{ q: %s[][]; resolve: ((v: %s[]) => void) | null }", elemName, elemName)
 }
 
-// eventsOnPayloadAnnotation is the `EventEmitter<...>` type argument the setup
-// function's emitter parameter carries — a single element for a one-argument
-// event, or a homogeneous tuple for a multi-argument one (so `ee.on`'s existing
-// per-payload listener hinting types the listener's parameters).
-func eventsOnPayloadAnnotation(elemName string, arity int) string {
-	if arity == 1 {
-		return elemName
-	}
-	parts := make([]string, arity)
-	for i := range parts {
-		parts[i] = elemName
-	}
-	return "[" + joinComma(parts) + "]"
-}
-
 func joinComma(parts []string) string {
 	out := ""
 	for i, p := range parts {
@@ -207,25 +204,30 @@ func joinComma(parts []string) string {
 
 // eventsOnHelperSource is the TypeScript source of one setup + iterator pair.
 func eventsOnHelperSource(setupName, iterName, elemName string, arity int) string {
-	lp := make([]string, arity) // listener params (untyped — hinted from the payload)
-	el := make([]string, arity) // items packed into the args array
-	for i := 0; i < arity; i++ {
-		lp[i] = fmt.Sprintf("__on_v%d", i)
-		el[i] = fmt.Sprintf("__on_v%d", i)
+	// The emitter parameter is the untyped EventEmitter: every emitter has
+	// the one listener representation, and the event name is not a literal.
+	listener, item := "...__on_args: any[]", "__on_args"
+	if arity >= 0 {
+		lp := make([]string, arity) // listener params, typed as the event's
+		el := make([]string, arity) // items packed into the args array
+		for i := 0; i < arity; i++ {
+			lp[i] = fmt.Sprintf("__on_v%d: %s", i, elemName)
+			el[i] = fmt.Sprintf("__on_v%d", i)
+		}
+		listener, item = joinComma(lp), "["+joinComma(el)+"]"
 	}
 	state := eventsOnStateAnnotation(elemName)
-	payload := eventsOnPayloadAnnotation(elemName, arity)
 	return fmt.Sprintf(`
-function %s(__on_ee: EventEmitter<%s>, __on_name: string): %s {
+function %s(__on_ee: EventEmitter, __on_name: string): %s {
   const __on_st: %s = { q: [], resolve: null };
   __on_ee.on(__on_name, (%s) => {
-    const __on_item = [%s];
+    const __on_item = %s;
     if (__on_st.resolve !== null) { const __on_r = __on_st.resolve; __on_st.resolve = null; __on_r(__on_item); }
     else { __on_st.q.push(__on_item); }
   });
   return __on_st;
 }
-async function* %s(__on_st: %s): %s[] {
+async function* %s(__on_st: %s): AsyncGenerator<%s[]> {
   while (true) {
     if (__on_st.q.length > 0) {
       yield __on_st.q.shift();
@@ -234,7 +236,7 @@ async function* %s(__on_st: %s): %s[] {
     }
   }
 }
-`, setupName, payload, state, state, joinComma(lp), joinComma(el),
+`, setupName, state, state, listener, item,
 		iterName, state, elemName, elemName)
 }
 
@@ -275,6 +277,9 @@ func (e *Emitter) eventsOnArgShape(args []ast.Expression, pos ast.Pos) (elem Typ
 // path), keeping type inference free of IR emission.
 func (e *Emitter) ensureEventsOnHelperSigs(elemName string, arity int) (*eventsOnHelper, error) {
 	key := fmt.Sprintf("%s_%d", elemName, arity)
+	if arity < 0 {
+		key = elemName + "_rest"
+	}
 	if h, ok := e.eventsOnHelpers[key]; ok {
 		return h, nil
 	}

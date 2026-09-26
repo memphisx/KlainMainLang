@@ -7,8 +7,9 @@
 // an arbitrary constant: it closes the loop between this feature and the
 // os module (ADR-00090).
 //
-// cluster.isPrimary/cluster.workerId (0 for the original process, 1..N-1
-// for each fork) exist purely for cases like the startup banner below —
+// cluster.isPrimary and cluster.worker (undefined in the original process,
+// the Worker with ids 1..N-1 in each fork) exist purely for cases like the
+// startup banner below —
 // logging it from every one of N processes would be noisy, so real
 // programs typically want exactly one of them to do it.
 //
@@ -39,5 +40,5 @@ if (cluster.isPrimary) {
 }
 
 http.listen(8081, (req: HttpRequest): Res => {
-  return { status: 200, body: 'served by worker ' + cluster.workerId.toString() + ' (pid ' + process.pid.toString() + ')' }
+  return { status: 200, body: 'served by worker ' + (cluster.worker?.id ?? 0).toString() + ' (pid ' + process.pid.toString() + ')' }
 }, { workers: os.cpus().length })

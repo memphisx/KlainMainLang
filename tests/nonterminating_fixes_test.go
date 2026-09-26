@@ -150,9 +150,9 @@ func TestE2EAtomicsIndexValidation(t *testing.T) {
 const sab = new SharedArrayBuffer(16)
 const ta = new Int32Array(sab)
 console.log(Atomics.wait(ta, 0, 1), Atomics.wait(ta, 0, 0, 5), Atomics.wait(ta, 0, 0, -3), Atomics.wait(ta, "1", 1, 0))
-try { Atomics.wait(ta, 4, 0, 0) } catch (e) { console.log(e.name) }
-try { Atomics.load(ta, -1) } catch (e) { console.log(e.name) }
-try { Atomics.store(ta, NaN, 7); console.log(Atomics.load(ta, 0)) } catch (e) { console.log(e.name) }
+try { Atomics.wait(ta, 4, 0, 0) } catch (e) { console.log((e as Error).name) }
+try { Atomics.load(ta, -1) } catch (e) { console.log((e as Error).name) }
+try { Atomics.store(ta, NaN, 7); console.log(Atomics.load(ta, 0)) } catch (e) { console.log((e as Error).name) }
 console.log(Atomics.add(ta, 2, 5), Atomics.load(ta, 2))
 `
 	assertOutput(t, src, "not-equal timed-out timed-out not-equal\nRangeError\nRangeError\n7\n0 5")

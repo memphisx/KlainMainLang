@@ -1,7 +1,8 @@
 // emit_cluster.go — codegen for Node's `cluster` module (TDD-00105): the
-// cluster.fork() callable and the cluster.isWorker accessor. cluster.isPrimary
-// and cluster.workerId live in emit_http.go (they predate this file, reading
-// the shared @__kml_cluster_worker_id global). Backed by runtime_cluster.go.
+// cluster.fork() callable and the cluster.isWorker / cluster.worker
+// accessors. cluster.isPrimary lives in emit_http.go (it predates this file,
+// reading the shared @__kml_cluster_worker_id global). Backed by
+// runtime_cluster.go.
 package llvm
 
 import (
@@ -48,7 +49,7 @@ func (e *Emitter) emitClusterModuleCall(method string, args []ast.Expression, po
 		}
 		return Value{Ty: TypeVoid}, nil
 	}
-	return Value{}, fmt.Errorf("%d:%d: cluster.%s is not supported (fork/on/once/disconnect/setupPrimary, plus isPrimary/isWorker/workerId/workers/settings)", pos.Line, pos.Col, method)
+	return Value{}, fmt.Errorf("%d:%d: cluster.%s is not supported (fork/on/once/disconnect/setupPrimary, plus isPrimary/isWorker/worker/workers/settings)", pos.Line, pos.Col, method)
 }
 
 // emitClusterSetupPrimary implements cluster.setupPrimary(settings) (and its
@@ -245,7 +246,8 @@ func (e *Emitter) clusterRelayAdapter(arg ast.Expression, key string, pos ast.Po
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rep, repp))
 
 	// 'listening' materializes the Node address object from the announced
-	// port: { address, port, addressType } (workers bind INADDR_ANY).
+	// port and host: { address, port, addressType } (address null when the
+	// server listened on every address).
 	var addrObj string
 	if key == "listening" {
 		aty := clusterAddressType()
@@ -253,7 +255,7 @@ func (e *Emitter) clusterRelayAdapter(arg ast.Expression, key string, pos ast.Po
 		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", addrObj, aty.StructSize()))
 		f0 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", f0, aty.StructIR(), addrObj))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("0.0.0.0"), f0))
+		e.emitInstr(fmt.Sprintf("store ptr %%host, ptr %s, align 8", f0))
 		portD := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = sitofp i64 %%port to double", portD))
 		f1 := e.freshReg()
@@ -306,7 +308,7 @@ func (e *Emitter) clusterRelayAdapter(arg ast.Expression, key string, pos ast.Po
 	case "fork":
 		sig = "ptr %env, ptr %worker"
 	case "listening":
-		sig = "ptr %env, i64 %port"
+		sig = "ptr %env, i64 %port, ptr %host"
 	default: // online, disc
 		sig = "ptr %env"
 	}
@@ -413,4 +415,53 @@ func (e *Emitter) emitClusterWorkerMethodCall(objExpr ast.Expression, method str
 		return e.emitCPHandleMethod(cpVal, "kill", args, pos)
 	}
 	return Value{}, fmt.Errorf("%d:%d: a cluster Worker has no method '%s' (send/disconnect/kill/destroy/on)", pos.Line, pos.Col, method)
+}
+
+// clusterSelfWorkerType is `cluster.worker`: the current process's own Worker
+// in a forked worker, undefined in the primary (Node's `Worker | undefined`).
+func clusterSelfWorkerType() Type {
+	t := ClusterWorkerType()
+	t.Nullable, t.IsUndefined = true, true
+	return t
+}
+
+// emitClusterSelfWorker implements `cluster.worker`: in a worker, a Worker
+// handle carrying this process's id (Node numbers forked workers from 1);
+// in the primary (id 0), undefined. Its IPC channel is the process's own,
+// so the handle has no ChildProcess of its own.
+func (e *Emitter) emitClusterSelfWorker() (Value, error) {
+	e.ensureHTTPClusterFork()
+	e.ensureMalloc()
+	id := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_cluster_worker_id, align 8", id))
+	isWorker := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isWorker, id))
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+	mkL, doneL := e.freshLabel("cluster.self"), e.freshLabel("cluster.self.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isWorker, mkL, doneL))
+	e.emitLabel(mkL)
+	w := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 24)", w))
+	idp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", idp, clusterWorkerIR, w))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", id, idp))
+	e.ensureGetpid()
+	pid := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @getpid()", pid))
+	pid64 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", pid64, pid))
+	pp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", pp, clusterWorkerIR, w))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", pid64, pp))
+	cpp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", cpp, clusterWorkerIR, w))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", cpp))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", w, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	return Value{Ref: r, Ty: clusterSelfWorkerType()}, nil
 }

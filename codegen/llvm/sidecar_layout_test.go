@@ -83,6 +83,8 @@ void __kml_inspect_push(void *l, char *e) { (void)l; (void)e; }
 void __kml_inspect_push_more(void *l, long long r) { (void)l; (void)r; }
 char *__kml_inspect_end(void *l, const char *o, const char *c, long long i, long long d, long long a, long long n) { (void)l; (void)o; (void)c; (void)i; (void)d; (void)a; (void)n; return 0; }
 char *__kml_inspect_quote(const char *s) { (void)s; return 0; }
+char *__kml_fn_inspect_dyn(void **r, long long d) { (void)r; (void)d; return 0; }
+char *__kml_boxed_bigint_str(void *c) { (void)c; return 0; }
 int main(void) {
     printf("kjbox %zu %zu %zu %zu %zu %zu\n", sizeof(KjBox), offsetof(KjBox, hdr), offsetof(KjBox, kind),
            offsetof(KjBox, typed), offsetof(KjBox, ikind), offsetof(KjBox, ityped));
@@ -161,8 +163,8 @@ var sidecarExterns = map[string]struct {
 	externs  []string // symbols the C file declares extern, sorted
 }{
 	"dynjsonsrc/dynjson.c": {
-		provider: "ensureDynJSONC (dynjson_c.go): ensureDtoa, ensureAnyOps, ensureAnyToPrimitive, ensureDynObj, ensureInspectReduce",
-		externs:  []string{"__kml_any_tonum", "__kml_dtoa", "__kml_dynobj_get", "__kml_inspect_begin", "__kml_inspect_end", "__kml_inspect_push", "__kml_inspect_push_more", "__kml_inspect_quote", "__kml_toprimitive"},
+		provider: "ensureDynJSONC (dynjson_c.go): ensureDtoa, ensureAnyOps, ensureAnyToPrimitive, ensureDynObj, ensureInspectReduce, ensureFnMeta, ensureBoxedBigIntHooks",
+		externs:  []string{"__kml_any_tonum", "__kml_boxed_bigint_str", "__kml_dtoa", "__kml_dynobj_get", "__kml_fn_inspect_dyn", "__kml_inspect_begin", "__kml_inspect_end", "__kml_inspect_push", "__kml_inspect_push_more", "__kml_inspect_quote", "__kml_toprimitive"},
 	},
 }
 

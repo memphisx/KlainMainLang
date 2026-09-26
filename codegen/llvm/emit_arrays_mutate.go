@@ -21,10 +21,17 @@ import (
 // arbitrary array-valued expression.
 func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos ast.Pos) (ptrPtr, lenPtr string, elemTy Type, err error) {
 	switch obj := objExpr.(type) {
+	case *ast.NonNullExpression:
+		// `xs!.push(v)`: the assertion is erased; an absent receiver was
+		// already reported by the call's absent-base guard.
+		return e.resolveArrayMutLoc(obj.Arg, verb, pos)
 	case *ast.Identifier:
 		sym, ok := e.lookup(obj.Name)
 		if !ok {
 			return "", "", Type{}, fmt.Errorf("%d:%d: undefined variable '%s'", pos.Line, pos.Col, obj.Name)
+		}
+		if e.isDynamicBinding(obj.Name) {
+			break // a union narrowed to its array member: through its value
 		}
 		if !sym.Ty.IsArray || sym.Ty.ElemType == nil {
 			return "", "", Type{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, obj.Name)
@@ -53,11 +60,6 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 		if !fieldTy.IsArray || fieldTy.ElemType == nil {
 			return "", "", Type{}, fmt.Errorf("%d:%d: field '%s' is not an array", pos.Line, pos.Col, obj.Property)
 		}
-		if objVal.Ty.IsClass {
-			if err := e.checkFieldVisibility(objVal.Ty.ClassName, obj.Property, pos); err != nil {
-				return "", "", Type{}, err
-			}
-		}
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slot, objVal.Ty.StructIR(), objVal.Ref, idx))
 		// The field slot holds a POINTER to the array's shared header (TDD-00213
@@ -72,6 +74,9 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 		return ptrPtr, lenPtr, *fieldTy.ElemType, nil
 
 	case *ast.IndexExpression:
+		if ot := e.inferExprType(obj.Object); ot.IsMap || ot.IsDynamicObject {
+			break // a dictionary's array value: through its value (below)
+		}
 		slot, eTy, idxErr := e.emitIndexPtr(obj)
 		if idxErr != nil {
 			return "", "", Type{}, idxErr
@@ -86,6 +91,13 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 		e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i32 0, i32 0", ptrPtr, boxPtr))
 		e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i32 0, i32 1", lenPtr, boxPtr))
 		return ptrPtr, lenPtr, *eTy.ElemType, nil
+	}
+	// Any other expression whose value carries its live header (an array
+	// unboxed from `any`, `(o.list as string[]).push(x)`): mutate through it.
+	if v, err := e.emitExpr(objExpr); err == nil && v.Ty.IsArray && v.Ty.ElemType != nil && v.ArrayHeader != "" {
+		lenPtr = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lenPtr, arrayHeaderTy, v.ArrayHeader))
+		return v.ArrayHeader, lenPtr, *v.Ty.ElemType, nil
 	}
 	return "", "", Type{}, fmt.Errorf("%d:%d: %s requires an array variable, array field, or nested-array element", pos.Line, pos.Col, verb)
 }

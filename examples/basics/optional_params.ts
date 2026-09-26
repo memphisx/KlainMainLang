@@ -45,7 +45,7 @@ function total(nums?: number[]): number {
 }
 console.log(total())            // 0
 console.log(total([1, 2, 3]))   // 6
-function unguarded(nums?: number[]): number { return nums.length }
+function unguarded(nums?: number[]): number { return nums!.length }
 try { unguarded() } catch (e) { console.log((e as Error).message) } // Cannot read properties of undefined (reading 'length')
 
 // Works identically on instance and static class methods.

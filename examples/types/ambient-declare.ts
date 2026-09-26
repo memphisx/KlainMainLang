@@ -25,4 +25,4 @@ console.log(double(21)); // 42
 declare var ambientFlag: boolean;
 declare function notLinked(): void;
 console.log(ambientFlag);
-try { notLinked(); } catch (e) { console.log(e.message); }
+try { notLinked(); } catch (e) { console.log((e as Error).message); }

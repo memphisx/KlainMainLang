@@ -11,9 +11,6 @@ func (e *Emitter) emitMathCall(property string, args []ast.Expression, pos ast.P
 		return e.emitMathRound(property, args, pos)
 	case "abs":
 		return e.emitMathAbs(args, pos)
-	case "sqrt", "log", "log2", "log10", "sin", "cos", "tan",
-		"asin", "acos", "atan", "sinh", "cosh", "tanh", "expm1", "log1p":
-		return e.emitMathUnaryFloat(property, args, pos)
 	case "cbrt":
 		// Not the platform libm cbrt — that isn't reliably correctly-rounded
 		// (glibc's runtime cbrt(27) is 3.0000000000000004, where macOS/V8/fdlibm
@@ -26,8 +23,6 @@ func (e *Emitter) emitMathCall(property string, args []ast.Expression, pos ast.P
 		return e.emitMathBinaryFloat("__kml_js_pow", args, pos)
 	case "hypot":
 		return e.emitMathBinaryFloat("hypot", args, pos)
-	case "atan2":
-		return e.emitMathBinaryFloat("atan2", args, pos)
 	case "min":
 		return e.emitMathMinMax("min", args, pos)
 	case "max":
@@ -36,8 +31,6 @@ func (e *Emitter) emitMathCall(property string, args []ast.Expression, pos ast.P
 		return e.emitMathSign(args, pos)
 	case "random":
 		return e.emitMathRandom(pos)
-	case "clamp":
-		return e.emitMathClamp(args, pos)
 	case "clz32":
 		return e.emitMathClz32(args, pos)
 	case "fround":
@@ -195,21 +188,6 @@ func (e *Emitter) emitMathAbs(args []ast.Expression, pos ast.Pos) (Value, error)
 	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", cmp, iVal.Ref))
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", r, cmp, iVal.Ref, neg))
 	return Value{Ref: r, Ty: TypeI64}, nil
-}
-
-func (e *Emitter) emitMathUnaryFloat(fn string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Math.%s expects 1 argument", pos.Line, pos.Col, fn)
-	}
-	val, err := e.emitMathOperand(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	fval := e.coerce(val, TypeF64)
-	e.ensureMathFuncs()
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call double @%s(double %s)", r, fn, fval.Ref))
-	return Value{Ref: r, Ty: TypeF64}, nil
 }
 
 // emitMathCbrt routes Math.cbrt through @__kml_cbrt (ensureCbrt), the
@@ -483,7 +461,7 @@ func (e *Emitter) emitMathSign(args []ast.Expression, pos ast.Pos) (Value, error
 }
 
 func (e *Emitter) emitMathRandom(_ ast.Pos) (Value, error) {
-	switch targetGOOS() {
+	switch e.opts.Target.OS() {
 	case "windows":
 		// rand_s() — UCRT, backed by the system CSPRNG (RtlGenRandom), no seeding.
 		// The C89 fallback below is unusable here: UCRT RAND_MAX is 32767, so
@@ -516,45 +494,4 @@ func (e *Emitter) emitMathRandom(_ ast.Pos) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = call double @__klain_math_random()", result))
 		return Value{Ref: result, Ty: TypeF64}, nil
 	}
-}
-
-// Math.clamp(x, lo, hi) — not in the JS spec but very handy.
-func (e *Emitter) emitMathClamp(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 3 {
-		return Value{}, fmt.Errorf("%d:%d: Math.clamp expects 3 arguments (value, min, max)", pos.Line, pos.Col)
-	}
-	vVal, err := e.emitMathOperand(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	loVal, err := e.emitMathOperand(args[1])
-	if err != nil {
-		return Value{}, err
-	}
-	hiVal, err := e.emitMathOperand(args[2])
-	if err != nil {
-		return Value{}, err
-	}
-	loVal = e.coerce(loVal, vVal.Ty)
-	hiVal = e.coerce(hiVal, vVal.Ty)
-
-	cmpLo := e.freshReg()
-	clampedLo := e.freshReg()
-	cmpHi := e.freshReg()
-	r := e.freshReg()
-	if vVal.Ty.Float {
-		e.emitInstr(fmt.Sprintf("%s = fcmp ogt double %s, %s", cmpLo, vVal.Ref, loVal.Ref))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, double %s, double %s", clampedLo, cmpLo, vVal.Ref, loVal.Ref))
-		e.emitInstr(fmt.Sprintf("%s = fcmp olt double %s, %s", cmpHi, clampedLo, hiVal.Ref))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, double %s, double %s", r, cmpHi, clampedLo, hiVal.Ref))
-	} else {
-		iV := e.coerce(vVal, TypeI64)
-		iLo := e.coerce(loVal, TypeI64)
-		iHi := e.coerce(hiVal, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", cmpLo, iV.Ref, iLo.Ref))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", clampedLo, cmpLo, iV.Ref, iLo.Ref))
-		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", cmpHi, clampedLo, iHi.Ref))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", r, cmpHi, clampedLo, iHi.Ref))
-	}
-	return Value{Ref: r, Ty: vVal.Ty}, nil
 }

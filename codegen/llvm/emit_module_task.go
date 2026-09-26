@@ -25,7 +25,6 @@ package llvm
 
 import (
 	"fmt"
-	"reflect"
 	"strings"
 
 	"KlainMainLang/ast"
@@ -37,8 +36,8 @@ const tlaUnsettledMsg = "Warning: Detected unsettled top-level await\n"
 
 // moduleTaskStackBytes is the module task's stack: the platform's main-thread
 // default, which is what top-level code ran on before it became a task.
-func moduleTaskStackBytes() int {
-	if targetGOOS() == "windows" {
+func (e *Emitter) moduleTaskStackBytes() int {
+	if e.opts.Target.OS() == "windows" {
 		// the mingw-w64 linker's default stack reserve (the PE header's
 		// SizeOfStackReserve of every executable this compiler produces)
 		return 2 * 1024 * 1024
@@ -47,9 +46,7 @@ func moduleTaskStackBytes() int {
 }
 
 // programHasTopLevelAwait reports whether an `await` / `for await` occurs whose
-// nearest enclosing function is the module itself. Reflective, like
-// programMayWait, so a node kind that gains a child expression later is not
-// silently missed; it stops at every function-like and class node.
+// nearest enclosing function is the module itself.
 func programHasTopLevelAwait(prog *ast.Program) bool {
 	return stmtsHaveTopLevelAwait(prog.Body)
 }
@@ -57,59 +54,12 @@ func programHasTopLevelAwait(prog *ast.Program) bool {
 // stmtsHaveTopLevelAwait is programHasTopLevelAwait over a module's statement
 // list — the entry program's body or a worker module's (TDD-00224 Stage 2).
 func stmtsHaveTopLevelAwait(body []ast.Statement) bool {
-	found := false
-	seen := map[uintptr]bool{}
-	var walk func(v reflect.Value)
-	walk = func(v reflect.Value) {
-		if found || !v.IsValid() {
-			return
-		}
-		switch v.Kind() {
-		case reflect.Interface:
-			if !v.IsNil() {
-				walk(v.Elem())
-			}
-		case reflect.Ptr:
-			if v.IsNil() {
-				return
-			}
-			if p := v.Pointer(); seen[p] {
-				return
-			} else {
-				seen[p] = true
-			}
-			switch n := v.Interface().(type) {
-			case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction,
-				*ast.ClassDeclaration, *ast.ClassExpression:
-				return
-			case *ast.AwaitExpression:
-				found = true
-				return
-			case *ast.ForOfStatement:
-				if n.Await {
-					found = true
-					return
-				}
-			}
-			walk(v.Elem())
-		case reflect.Struct:
-			for i := 0; i < v.NumField(); i++ {
-				if v.Type().Field(i).IsExported() {
-					walk(v.Field(i))
-				}
-			}
-		case reflect.Slice, reflect.Array:
-			for i := 0; i < v.Len(); i++ {
-				walk(v.Index(i))
-			}
-		case reflect.Map:
-			for _, k := range v.MapKeys() {
-				walk(v.MapIndex(k))
-			}
+	for _, st := range body {
+		if awaitsDirectly(st) {
+			return true
 		}
 	}
-	walk(reflect.ValueOf(body))
-	return found
+	return false
 }
 
 // ensureModuleTaskRuntime emits the module task's trampoline and the helper a
@@ -228,7 +178,7 @@ func (e *Emitter) endModuleBody(s *moduleBodySplit) string {
 	}
 	t := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_spawn_task_ex(ptr @__kml_module_body, ptr null, ptr %s, i64 %d, ptr %s)",
-		t, prom, moduleTaskStackBytes(), tramp))
+		t, prom, e.moduleTaskStackBytes(), tramp))
 	return prom
 }
 

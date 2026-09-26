@@ -162,7 +162,7 @@ func (e *Emitter) emitGetMetadata(targetBagPtr, propKeyRef, metaKeyRef string) V
 // decorated member, before its user decorators run (so a user decorator can
 // read it). targetBagPtr is the raw ptr of the per-class decorator target.
 func (e *Emitter) emitClassMemberDesignMetadata(targetBagPtr string, cd *ast.ClassDeclaration, pos ast.Pos) {
-	if !e.emitDecoratorMetadata {
+	if !e.opts.EmitDecoratorMetadata {
 		return
 	}
 	// A decorated class emits design:paramtypes for its constructor (TS), stored

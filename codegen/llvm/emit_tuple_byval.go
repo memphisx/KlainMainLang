@@ -21,7 +21,6 @@ package llvm
 
 import (
 	"fmt"
-	"reflect"
 
 	"KlainMainLang/ast"
 )
@@ -54,7 +53,7 @@ func tupleByValEligible(ty Type) bool {
 // disqualifying side — a name it cannot prove is only ever a direct callee
 // keeps the pointer ABI, losing only the optimization, never soundness.
 func (e *Emitter) planTupleByValReturns(prog *ast.Program) {
-	if !e.optimizeMemory {
+	if !e.opts.OptimizeMemory {
 		return
 	}
 	candidates := map[string]bool{}
@@ -80,49 +79,36 @@ func (e *Emitter) planTupleByValReturns(prog *ast.Program) {
 	}
 }
 
-// collectFnValueRefs walks the whole program and reports which of the given
-// function names appear anywhere OTHER than as a direct call's callee — i.e.
-// are used as values. Reflection-based like collectFinRegNames/thisEscapesFn:
-// the only positively-recognized safe shape is `name(...)` (the callee
-// identifier is skipped, the arguments are descended into); any other
-// *ast.Identifier bearing a candidate name marks it referenced.
+// collectFnValueRefs reports which of the given function names appear anywhere
+// in the program — worker modules included — OTHER than as a direct call's
+// callee, i.e. are used as values. The only safe shape is `name(...)`: the
+// callee identifier is skipped and the arguments are walked; any other
+// identifier bearing a candidate name marks it referenced.
 func collectFnValueRefs(prog *ast.Program, names map[string]bool) map[string]bool {
 	refs := map[string]bool{}
-	var visit func(v reflect.Value)
-	visit = func(v reflect.Value) {
-		switch v.Kind() {
-		case reflect.Ptr, reflect.Interface:
-			if v.IsNil() {
-				return
-			}
-			switch n := v.Interface().(type) {
-			case *ast.CallExpression:
-				if id, ok := n.Callee.(*ast.Identifier); ok && names[id.Name] {
-					for _, a := range n.Args {
-						visit(reflect.ValueOf(a))
-					}
-					return
+	var visit func(n ast.Node) bool
+	visit = func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.CallExpression:
+			if id, ok := n.Callee.(*ast.Identifier); ok && names[id.Name] {
+				for _, a := range n.Args {
+					ast.Inspect(a, visit)
 				}
-			case *ast.Identifier:
-				if names[n.Name] {
-					refs[n.Name] = true
-				}
-				return
+				return false
 			}
-			visit(v.Elem())
-		case reflect.Slice:
-			for i := 0; i < v.Len(); i++ {
-				visit(v.Index(i))
-			}
-		case reflect.Struct:
-			for i := 0; i < v.NumField(); i++ {
-				if f := v.Field(i); f.CanInterface() {
-					visit(f)
-				}
+		case *ast.Identifier:
+			if names[n.Name] {
+				refs[n.Name] = true
 			}
 		}
+		return true
 	}
-	visit(reflect.ValueOf(prog))
+	ast.Inspect(prog, visit)
+	for _, wm := range prog.WorkerModules {
+		for _, st := range wm.Body {
+			ast.Inspect(st, visit)
+		}
+	}
 	return refs
 }
 

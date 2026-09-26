@@ -110,7 +110,15 @@ func (e *Emitter) emitTestMustCall(property string, args []ast.Expression, pos a
 		return Value{}, fmt.Errorf("%d:%d: test.%s does not support rest-parameter callbacks", pos.Line, pos.Col, property)
 	}
 
-	fnVal, err := e.emitExpr(args[0])
+	var fnVal Value
+	var err error
+	if hint := e.mustCallFnHint; hint != nil {
+		// Typed by the slot mustCall's result goes to (emitExprWithObjectHint).
+		e.mustCallFnHint = nil
+		fnVal, err = e.emitExprWithObjectHint(args[0], *hint)
+	} else {
+		fnVal, err = e.emitExpr(args[0])
+	}
 	if err != nil {
 		return Value{}, err
 	}

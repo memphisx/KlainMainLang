@@ -55,8 +55,8 @@ func (e *Emitter) ensureDgramRuntime() {
 
 	sock := dgramSocketIR
 	rinfo := dgramRinfoStructIR
-	fam0, fam1 := httpSockaddrFamilyBytes()
-	nonblock := httpNonblockFlag()
+	fam0, fam1 := e.httpSockaddrFamilyBytes()
+	nonblock := e.httpNonblockFlag()
 	fmtIP := e.internString("%u.%u.%u.%u")
 
 	// registry append (realloc-doubling)

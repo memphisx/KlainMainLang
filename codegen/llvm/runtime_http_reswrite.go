@@ -539,16 +539,14 @@ retTrue:
 	renonblock := fmt.Sprintf(
 		"%%rebfl = call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 3)\n"+
 			"  %%rebnb = or i32 %%rebfl, %d\n"+
-			"  %%rebign = call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 4, i32 %%rebnb)",
-		httpNonblockFlag())
+			"  %%rebign = call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 4, i32 %%rebnb)", e.httpNonblockFlag())
 
 	// Order matters: strings.NewReplacer uses argument order at each position, so
 	// every token that is a prefix of another (WS ⊂ WSINK, HEADERS-shaped names)
 	// must be listed AFTER the longer one. Longest-first is the safe rule.
 	repl := strings.NewReplacer(
 		"RENONBLOCK", renonblock,
-		"ERRNOFN", errnoAccessor(),
-		"EAGAINNO", fmt.Sprintf("%d", httpEagainErrno()),
+		"ERRNOFN", e.errnoAccessor(), "EAGAINNO", fmt.Sprintf("%d", e.httpEagainErrno()),
 		"REQHEADERS", fmt.Sprintf("%d", idx("__kml_reqheaders")),
 		"KEEPALIVE", fmt.Sprintf("%d", idx("__kml_keepalive")),
 		"DRAINONCE", fmt.Sprintf("%d", idx("__kml_drain_once")),
@@ -559,8 +557,8 @@ retTrue:
 		"HWMIDX", fmt.Sprintf("%d", idx("__kml_hwm")),
 		"TERMINATOR", terminator,
 		"CHUNKFMT", chunkFmt,
-		"NBCLEAR", fmt.Sprintf("%d", ^httpNonblockFlag()),
-		"NBSET", fmt.Sprintf("%d", httpNonblockFlag()),
+		"NBCLEAR", fmt.Sprintf("%d", ^e.httpNonblockFlag()),
+		"NBSET", fmt.Sprintf("%d", e.httpNonblockFlag()),
 		"HEADERS", fmt.Sprintf("%d", idx("headers")),
 		"STATUS", fmt.Sprintf("%d", idx("status")),
 		"WSINK", fmt.Sprintf("%d", idx("__kml_wsink")),

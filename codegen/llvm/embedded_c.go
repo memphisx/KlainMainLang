@@ -76,6 +76,13 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		cflags, libs := LocateTLS()
 		out = append(out, CSource{"tls", TLSClientSource(), cflags, libs, ""})
 	}
+	if e.UsesTLSHandles() {
+		if e.CryptoBackend() == "commoncrypto" {
+			return nil, fmt.Errorf("tls: the `tls` module requires the OpenSSL crypto backend")
+		}
+		cflags, libs := LocateTLS()
+		out = append(out, CSource{"tlshandle", TLSHandleSource(), cflags, libs, ""})
+	}
 	if e.UsesHTTP2() {
 		cflags, libs := LocateHTTP2()
 		out = append(out, CSource{"http2", HTTP2ServerSource(), cflags, libs, ""})
@@ -86,10 +93,15 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if e.UsesReexecGuard() {
 		out = append(out, CSource{"reexecguard", ReexecGuardSource(), nil, nil, ""})
 	}
-	if e.UsesFFIDl() && targetGOOS() == "windows" {
+	if e.UsesFFIDl() && e.opts.Target.OS() == "windows" {
 		// Windows has no libdl; supply dlopen/dlsym/dlclose/dlerror over
 		// LoadLibrary/GetProcAddress so node:ffi links (runtime_ffi.go).
 		out = append(out, CSource{"ffiwindl", FFIWinDlShimSource(), nil, nil, ""})
+	}
+	if e.UsesFFIRegistry() {
+		// node:ffi's runtime library registry + its std::unordered_map-ordered
+		// tables (TDD-00229).
+		out = append(out, e.FFIRegistrySources()...)
 	}
 	if e.UsesIPC() {
 		out = append(out, CSource{"ipc", IPCSource(), nil, nil, ""})
@@ -97,13 +109,13 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if e.UsesBufferCodecs() {
 		out = append(out, CSource{"bufcodecs", BufferCodecsSource(), nil, nil, ""})
 	}
-	if e.usesDynamicImport && e.dynamicImportMode == "lazy" {
+	if e.usesDynamicImport && e.opts.DynamicImport == "lazy" {
 		// The dlopen island loader (TDD-00056). Linux resolves dlopen from
 		// libdl (-ldl); macOS ships it in libSystem, so no extra lib there.
 		var libs []string
-		if targetGOOS() != "darwin" {
+		if e.opts.Target.OS() != "darwin" {
 			libs = []string{"-ldl"}
-			if targetGOOS() == "windows" {
+			if e.opts.Target.OS() == "windows" {
 				libs = nil // LoadLibrary lives in kernel32; there is no libdl
 			}
 		}
@@ -123,13 +135,22 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		// libc only.
 		out = append(out, CSource{"casemap", CasemapSource(), nil, nil, ""})
 	}
+	if e.UsesStringC() {
+		out = append(out, CSource{"string", StringSource(), nil, nil, ""})
+	}
+	if e.UsesNumberC() {
+		out = append(out, CSource{"number", NumberSource(), nil, nil, ""})
+	}
+	if e.UsesFnMeta() {
+		out = append(out, CSource{"fnmeta", FnMetaSource(), nil, nil, ""})
+	}
 	if e.UsesInspectReduce() {
 		out = append(out, CSource{"inspect", InspectReduceSource(), nil, nil, ""})
 	}
 	if e.UsesOSInfo() {
 		// os.type/release/version/machine/uptime/loadavg/userInfo/
 		// availableParallelism/networkInterfaces + process.env enumeration.
-		out = append(out, CSource{"osinfo", OSInfoSource(), nil, OSInfoLibs(), ""})
+		out = append(out, CSource{"osinfo", OSInfoSource(), nil, e.OSInfoLibs(), ""})
 	}
 	if e.UsesURLPattern() {
 		out = append(out, CSource{"urlpattern", URLPatternSource(), nil, nil, ""})
@@ -141,7 +162,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"dtoa", DtoaSource(), nil, nil, ""})
 	}
 	if e.UsesWebview() {
-		cflags, libs, err := LocateWebview(e.WebviewBackend())
+		cflags, libs, err := e.LocateWebview(e.WebviewBackend())
 		if err != nil {
 			return nil, err
 		}
@@ -192,7 +213,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		// TDD-00150 Stage 1: the klain:tui painter runtime (tui.c) plus the
 		// vendored Yoga flexbox engine, which is pre-compiled to objects and
 		// linked in — see yogaCSources for why (C++20 can't share the C line).
-		tui, err := yogaCSources()
+		tui, err := yogaCSources(e.Toolchain())
 		if err != nil {
 			return nil, err
 		}

@@ -27,25 +27,14 @@
             "feature": "`fs.readFileSync(path[, 'utf8'])`",
             "status": "implemented",
             "caveats": [
-              "Text-only by design — a file with embedded null bytes reads back shorter than its real size (`.length` is `strlen`-based); use `fs.readFileSyncBytes(path)` for a binary file",
-              "With no encoding the result is still a `string`, not a `Buffer` (the text-only default above); a non-`'utf8'` encoding is a clean rejection ([ADR-00785](../adr/ADR-00785.md))"
+              "With an encoding the string is strlen-based: a file with an embedded null byte reads back truncated there (the Buffer form keeps every byte) ([ADR-00785](../adr/ADR-00785.md))"
             ],
             "notes": [
-              "Reads the whole file into a string",
-              "The optional encoding argument accepts `'utf8'`/`'utf-8'` (a bare string or `{ encoding: 'utf8' }`) — a faithful no-op since strings are UTF-8, so the everyday `readFileSync(path, 'utf8')` idiom compiles ([ADR-00785](../adr/ADR-00785.md))",
-              "Throws a catchable `Error` (built from `strerror(errno)`) if the file can't be opened",
+              "With no encoding the result is a `Buffer` of the file's exact bytes, as in Node; with an encoding (a bare string or `{ encoding }`: utf8, hex, base64, base64url, latin1, ascii, utf16le) it is the bytes decoded as `buf.toString(encoding)` ([ADR-00785](../adr/ADR-00785.md), [ADR-01163](../adr/ADR-01163.md))",
+              "A file descriptor in place of the path reads it to its end: `readFileSync(0)` is stdin",
+              "Throws a catchable `Error` (built from `strerror(errno)`) if the file can't be opened; its `.message` is byte-exact to Node's `ENOENT: …, open '<path>'` form, and `err.code`/`syscall`/`path`/`errno` all match ([ADR-00768](../adr/ADR-00768.md), [ADR-01000](../adr/ADR-01000.md))",
               "Pseudo-files under `/proc` and `/sys` (which report `st_size` 0 yet stream real bytes) read correctly — the read grows to EOF rather than trusting the stat size ([ADR-00811](../adr/ADR-00811.md))",
-              "See [ADR-00023](../adr/ADR-00023.md)"
-            ]
-          },
-          {
-            "feature": "`fs.readFileSyncBytes(path)`",
-            "status": "implemented",
-            "notes": [
-              "Binary-safe sibling of `readFileSync`: returns a `Uint8Array` with the file's exact byte count (no `strlen` involved), so a file with an embedded null byte reads back whole",
-              "No `Buffer` class — this compiler has none; plain `ArrayBuffer`/TypedArrays instead",
-              "The failure `Error`'s `.message` is byte-exact to Node's `ENOENT: …, open '<path>'` form, and `err.code`/`syscall`/`path`/`errno` all match ([ADR-00768](../adr/ADR-00768.md), [ADR-01000](../adr/ADR-01000.md))",
-              "See [ADR-00094](../adr/ADR-00094.md)"
+              "See [ADR-00023](../adr/ADR-00023.md), [ADR-00094](../adr/ADR-00094.md)"
             ]
           },
           {
@@ -53,12 +42,13 @@
             "status": "implemented",
             "notes": [
               "Creates or truncates the file with `data`. Throws on failure",
-              "`data` may be a string (the original, `strlen`-based path, unchanged) or an `ArrayBuffer`/TypedArray (binary-safe, writes the real byte count via `fwrite` directly — [ADR-00094](../adr/ADR-00094.md)), dispatched on `data`'s inferred type",
+              "`data` may be a string (the `strlen`-based path) or a Buffer/TypedArray (binary-safe, writes the real byte count via `fwrite` directly — [ADR-00094](../adr/ADR-00094.md)), dispatched on `data`'s inferred type; a bare `ArrayBuffer` throws Node's `ERR_INVALID_ARG_TYPE` `TypeError`",
               "Optional third argument: `'utf8'` (or `{ encoding: 'utf8', flag, mode }`); `{ flag: 'a' }` appends instead of truncating, `{ flag: 'w' }` (default) truncates ([ADR-00785](../adr/ADR-00785.md))",
               "`{ mode }` sets the permission bits when the write creates the file — applied only on creation and reduced by the umask, matching Node/`open(2)` (ignored for a file that already exists) ([ADR-00988](../adr/ADR-00988.md))"
             ],
             "caveats": [
-              "The options argument supports only `{ encoding: 'utf8', flag, mode }` — a non-`'utf8'` encoding is a clean rejection ([ADR-00785](../adr/ADR-00785.md), [ADR-00988](../adr/ADR-00988.md))."
+              "The options argument supports only `{ encoding: 'utf8', flag, mode }` — a non-`'utf8'` encoding is a clean rejection ([ADR-00785](../adr/ADR-00785.md), [ADR-00988](../adr/ADR-00988.md)).",
+              "A file descriptor in place of the path (`fs.writeFileSync(fd, …)`) is a compile error"
             ]
           },
           {
@@ -66,11 +56,12 @@
             "status": "implemented",
             "notes": [
               "Like `writeFileSync`, but appends instead of truncating (creates the file if it doesn't exist). Throws on failure",
-              "Same string/`ArrayBuffer`/TypedArray dispatch as `writeFileSync`",
+              "Same string/Buffer/TypedArray dispatch as `writeFileSync` (a bare `ArrayBuffer` throws)",
               "Optional third argument `'utf8'` / `{ encoding: 'utf8', flag, mode }` accepted (the flag is a no-op — it always appends); `{ mode }` sets the permission bits when the append creates the file (umask-reduced, only on creation — [ADR-00988](../adr/ADR-00988.md)) ([ADR-00785](../adr/ADR-00785.md))"
             ],
             "caveats": [
-              "The options argument supports only `{ encoding: 'utf8', flag, mode }` — a non-`'utf8'` encoding is a clean rejection ([ADR-00785](../adr/ADR-00785.md), [ADR-00988](../adr/ADR-00988.md))."
+              "The options argument supports only `{ encoding: 'utf8', flag, mode }` — a non-`'utf8'` encoding is a clean rejection ([ADR-00785](../adr/ADR-00785.md), [ADR-00988](../adr/ADR-00988.md)).",
+              "A file descriptor in place of the path (`fs.appendFileSync(fd, …)`) is a compile error"
             ]
           },
           {
@@ -98,11 +89,12 @@
             "notes": [
               "`linkSync(existing, newPath)` makes a hard link — a second name for one inode, so `nlink` rises and the content outlives unlinking the original; on Windows it is `CreateHardLinkW` (unprivileged, unlike `symlinkSync` which needs Developer Mode) ([ADR-00751](../adr/ADR-00751.md))",
               "`realpathSync` on Windows resolves like Node's readlink walk when the kernel's final-path query can't answer — a volume with no DOS device name (a RAM disk), or a relative link target stored with forward slashes ([ADR-01058](../adr/ADR-01058.md))",
+              "`readlinkSync` reads targets of any length (a growing buffer — [ADR-00788](../adr/ADR-00788.md)); `accessSync`'s mode defaults to existence-only (F_OK) and `fs.constants.F_OK`/`R_OK`/`W_OK`/`X_OK` name the others ([ADR-00795](../adr/ADR-00795.md))",
+              "`rmSync`'s options are any object (`{ recursive, force }` read by truthiness); `linkSync`/`symlinkSync` errors name both paths (`link 'a' -> 'b'`), as Node's do ([ADR-01176](../adr/ADR-01176.md))",
               "`symlinkSync(target, path[, type])` takes Node's `type` (`'file'` \\| `'dir'` \\| `'junction'` \\| `null`): ignored on POSIX, as in Node; on Windows `'junction'` makes an NTFS junction — a directory link that needs no privilege, its relative target resolved against the link's directory — and `readlinkSync` reports a link's target from the name the kernel follows, with `\\??\\UNC\\…` read back as `\\\\server\\share` ([ADR-01030](../adr/ADR-01030.md))"
             ],
             "caveats": [
-              "`rmSync` options must be a `{recursive, force}` boolean-literal object; no `maxRetries`/`retryDelay` (a Windows-centric retry knob — the retryable errors don't arise on the POSIX removal path)",
-              "`readlinkSync` reads targets of any length (a growing buffer — [ADR-00788](../adr/ADR-00788.md)); `accessSync`'s mode defaults to existence-only (F_OK) and `fs.constants.F_OK`/`R_OK`/`W_OK`/`X_OK` name the others ([ADR-00795](../adr/ADR-00795.md))"
+              "`rmSync`'s `maxRetries`/`retryDelay` are accepted and unused (Node retries only on Windows' `EBUSY`/`ENOTEMPTY`/`EPERM`); not verified on Windows"
             ]
           },
           {
@@ -190,7 +182,7 @@
             "feature": "`fs.readdirSync(path[, { withFileTypes, recursive }])`",
             "status": "implemented",
             "notes": [
-              "Lists a directory's entries (excluding `.`/`..`) as a `string[]`, in whatever order the OS's own `readdir()` returns them — no ordering guarantee, matching real Node",
+              "Lists a directory's entries (excluding `.`/`..`) as a `string[]`, sorted by name as libuv's `scandir` sorts them for Node",
               "Built from `struct dirent`'s `d_name` field at a `runtime.GOOS`-conditional byte offset, independently verified by a compiled `offsetof` probe on both Darwin and (via Docker, see [ADR-00051](../adr/ADR-00051.md)) x86-64 Linux",
               "`{ withFileTypes: true }` returns `Dirent[]` — each with `.name`, `.parentPath` (the directory it was read from), and the full kind-predicate set `.isFile()`/`.isDirectory()`/`.isSymbolicLink()`/`.isFIFO()`/`.isCharacterDevice()`/`.isBlockDevice()`/`.isSocket()`, all classified from the entry's `d_type` (from the `FindFirstFile` attributes on Windows, whose `dirent` has none) with no per-file `stat` ([ADR-00752](../adr/ADR-00752.md), [ADR-00787](../adr/ADR-00787.md))",
               "`{ recursive: true }` walks the whole subtree, returning every nested entry as a `'/'`-joined path relative to the start directory (a genuine recursive descent; only the top-level open throws) ([ADR-00786](../adr/ADR-00786.md))",
@@ -229,27 +221,33 @@
             "feature": "Async variants — callback (`fs.readFile(path, cb)`) + Promise (`fs.promises.readFile` / `import from 'fs/promises'`)",
             "status": "implemented",
             "caveats": [
-              "`readFile` delivers a string (text) — inherits `readFileSync`'s text-only caveat; no async binary (`Buffer`) form",
-              "No `options`/`encoding` argument",
-              "No *async* `stat` (the sync `fs.statSync`/`lstatSync` exist but have no callback/Promise form yet)"
+              "An op the pool has no worker for runs on the loop thread (its callback and Promise still settle on a later turn): `stat`/`lstat`/`fstat`/`statfs`/`realpath`/`mkdtemp`/`readlink`/`link`/`symlink`/`utimes`/`futimes`/`ftruncate`/`truncate`/`access`/`chmod`/`fchmod`/`rm`, and an op given options other than a utf8 encoding (a `flag`, a `mode`, `recursive`, `withFileTypes`, a non-utf8 `readFile` encoding)",
+              "`realpath`/`mkdtemp`/`readlink` take no options argument (their `encoding`)"
             ],
             "notes": [
-              "Covers the sync set: `readFile`/`writeFile`/`appendFile`/`unlink`/`mkdir`/`rmdir`/`rename`/`copyFile`/`readdir`. Callback gets `(err[, data])`; the Promise rejects with the same `Error` the sync form throws",
+              "Covers `readFile`/`writeFile`/`appendFile`/`unlink`/`mkdir`/`rmdir`/`rename`/`copyFile`/`readdir`/`stat`/`lstat`/`fstat`/`statfs`/`rm`/`utimes`/`futimes`/`ftruncate`/`fchmod`/`realpath`/`mkdtemp`/`readlink`/`link`/`symlink`/`chmod`/`truncate`/`access`, with their options ([ADR-01176](../adr/ADR-01176.md)). `readFile` resolves to a `Buffer`, or a string with an encoding (any Buffer encoding). Callback gets `(err[, data])`, `data` `undefined` on an error; the Promise rejects with the same `Error` the sync form throws",
               "The callback form (firing from a GC-safe settle reaction) and binary `writeFile`/`appendFile` (`ArrayBuffer`/`TypedArray` body, copied raw at submit) run on the pool, off the loop thread ([ADR-00820](../adr/ADR-00820.md))",
               "Reuses each `*Sync` runtime helper verbatim, catching its throw via the compiler's own `setjmp` catch primitive — no parallel non-throwing I/O code"
             ]
           },
           {
-            "feature": "`fs.createReadStream` / `fs.createWriteStream`",
+            "feature": "`fs.open` / `close` / `read` / `write` / `writev` / `fsync` (callback form)",
             "status": "implemented",
             "caveats": [
-              "Chunks are **strings**, not `Buffer`s — text-first, like `readFileSync` (an embedded NUL truncates a chunk); binary (`Uint8Array`) streaming is a follow-on",
-              "Options: `createReadStream` takes only `{ highWaterMark }`, `createWriteStream` only `{ flags: \"w\"\\|\"a\" }` (both compile-time literals); `start`/`end`/`fd`/`encoding` are clean errors"
+              "On Windows a positioned read or write seeks, then transfers — not atomic against another operation on the same descriptor; not verified on Windows"
             ],
             "notes": [
-              "`createReadStream` returns a Node `Readable` (consumable via `for await` or `.on('data')`/`.on('end')`/`.pipe()`); `createWriteStream` a Node `Writable` (`.write`/`.end`, `'finish'`/`'close'`/`'drain'`). A read→write `.pipe()` round-trips. A failed open throws a catchable `Error` (like `readFileSync`) ([TDD-00108](../tdd/TDD-00108.md)/[ADR-00343](../adr/ADR-00343.md))",
-              "Consumer backpressure is honored ([ADR-00821](../adr/ADR-00821.md)): the pool worker reads one chunk per demand (credit-gated on the readable's high-water mark), at most ~one chunk outstanding; a mid-read failure surfaces as a stream `'error'`",
-              "Also wired `for await` over any Node `Readable` (was WHATWG-only)"
+              "Node's argument forms (`open(path[, flags[, mode]], cb)`; `read`'s buffer, options and bare forms; `write`'s Buffer and string forms), validation errors and `uvException` errors, ported from Node's `lib/fs.js` to TypeScript (`lib/node/internal_fs.ts`); each operation runs on the thread pool and calls back from the loop ([ADR-01166](../adr/ADR-01166.md), [ADR-01167](../adr/ADR-01167.md))"
+            ]
+          },
+          {
+            "feature": "`fs.createReadStream` / `fs.createWriteStream` / `ReadStream` / `WriteStream`",
+            "status": "implemented",
+            "caveats": [
+              "The `fs` (custom operations) and `signal` options, and a `FileHandle` as `fd`, are not supported"
+            ],
+            "notes": [
+              "Node's `lib/internal/fs/streams.js` ported to TypeScript over the `stream` module: `Buffer` chunks (strings with an `encoding`), `start`/`end`, `flags`, `mode`, `fd`, `autoClose`, `emitClose`, `flush`, `highWaterMark`; `'open'`/`'ready'`, errors as `'error'` events, `bytesRead`/`bytesWritten`, `close(cb)` ([ADR-01167](../adr/ADR-01167.md))"
             ]
           },
           {

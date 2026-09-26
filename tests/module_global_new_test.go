@@ -113,8 +113,9 @@ run()
 }
 
 func TestE2EModuleGlobalEventEmitter(t *testing.T) {
-	assertOutput(t, `
-const em = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const em = new EventEmitter()
 let got = ""
 em.on("data", (s: string) => { got = s })
 function fire(): string { em.emit("data", "hello"); return got }

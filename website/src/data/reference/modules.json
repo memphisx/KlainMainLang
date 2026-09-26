@@ -4,7 +4,7 @@
   "kind": "language",
   "statusPage": "MODULES.md",
   "coversRows": "all",
-  "coverage": { "loose": "16/16", "loosePct": 100, "strict": "8/16", "strictPct": 50 },
+  "coverage": { "loose": "18/18", "loosePct": 100, "strict": "9/18", "strictPct": 50 },
   "lede": "ES module syntax — named/default/namespace imports, re-exports, aliasing, and static CommonJS require — resolved by a whole-program model rather than separate compilation units. The big divergence is architectural: the resolver merges the entry file plus every transitive import into one program before codegen, so there is no runtime module object, no live bindings, and no separate-compilation boundary. Namespace imports and import.meta.url are compile-time-only constructs, and an import cycle is restricted to declarations. Dynamic import() breaks the whole-program mold opt-in: under -dynamic-import=lazy each literal-specifier target compiles to a dlopen'd shared-library island loaded on first use — real laziness.",
   "entries": [
     {
@@ -17,6 +17,18 @@
       "exampleKey": "imports/math",
       "snippet": "export function add(a: number, b: number): number {\n    return a + b\n}",
       "seeAlso": ["modules.namedImport", "modules.exportDefault"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/export" }
+    },
+    {
+      "id": "modules.exportList",
+      "name": "Local export list (export { a, b as c }, export {})",
+      "statusRow": "Local export list (`export { a, b as c }`, `export {}`)",
+      "signature": "export { a, b as c }; export {}",
+      "badge": "exact",
+      "description": "Exports the file's own top-level declarations, optionally under another name. A name the file does not declare at its top level is a compile error. `export {}` exports nothing: it only marks the file as a module.",
+      "exampleKey": "imports/re_export_lib",
+      "snippet": "const VERSION = \"1.0\"\nfunction shout(s: string): string { return s.toUpperCase() + \"!\" }\nexport { VERSION, shout as loud }",
+      "seeAlso": ["modules.exportDeclarations", "modules.reExports"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/export" }
     },
     {
@@ -94,6 +106,19 @@
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import" }
     },
     {
+      "id": "modules.typeOnly",
+      "name": "Type-only imports and exports",
+      "statusRow": "Type-only imports and exports (`import type`, `{ type X }`, `export type { X }`)",
+      "signature": "import type { T } from './path'; import { type T, f } from './path'; export type { T }",
+      "badge": "caveats",
+      "description": "Every form is erased with its statement, including a builtin module's types (`import type { IncomingMessage } from 'http'`). A plain named import of a Node class this compiler implements only as a type (`import { IncomingMessage } from 'http'`) is a type import too. Using a type-only import as a value is TS1361, as in tsc.",
+      "exampleKey": "imports/type_only",
+      "snippet": "import type { Box } from './type_only_shapes'\nimport { type Side, area } from './type_only_shapes'",
+      "differences": ["A Node class implemented only as a type (`IncomingMessage`, `ServerResponse`, …) can't be used as a value (`x instanceof IncomingMessage` is a compile error)."],
+      "seeAlso": ["modules.namedImport", "modules.aliasing"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import" }
+    },
+    {
       "id": "modules.exportDefault",
       "name": "export default",
       "statusRow": "export default",
@@ -123,12 +148,11 @@
       "statusRow": "import * as ns from '...' (namespace import)",
       "signature": "import * as ns from './path'",
       "badge": "caveats",
-      "description": "`ns.member` is rewritten directly to that member's mangled name during resolution. Only actually-exported members are reachable (`ns.privateHelper` is rejected, same visibility rule as a named import); `ns.default` reaches a default export the same way any other member does.",
+      "description": "`ns.member` is rewritten directly to that member's mangled name during resolution, in values, `new ns.C()`, `extends ns.C` and types (`x: ns.T[]`). Only actually-exported members are reachable (`ns.privateHelper` is rejected, same visibility rule as a named import); `ns.default` reaches a default export the same way any other member does.",
       "exampleKey": "imports/namespace_import",
       "snippet": "import * as greetLib from './greet'\nconsole.log(greetLib.shout(\"hey\"))\nconsole.log(greetLib.default(\"there\"))",
       "differences": [
-        "Compile-time-only — `ns` is never a runtime value, usable only as the object of a non-computed dotted access; assigning it to a variable, passing it as a value, or `ns[\"x\"]` reaches codegen as a plain undefined reference rather than a dedicated error message",
-        "Type-position access (`let x: ns.SomeInterface`) and `new ns.SomeClass(...)` are not supported — the latter a pre-existing, namespace-independent restriction (`new` already only accepts a single bare identifier)"
+        "Compile-time-only — `ns` is never a runtime value, usable only as the object of a non-computed dotted access; assigning it to a variable, passing it as a value, or `ns[\"x\"]` reaches codegen as a plain undefined reference rather than a dedicated error message"
       ],
       "seeAlso": ["modules.namedImport", "modules.defaultImport"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import" }

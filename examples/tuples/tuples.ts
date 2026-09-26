@@ -71,3 +71,13 @@ console.log(big.join(","))                         // width,height
 const pairs: [string, number][] = [["a", 3], ["b", 4]]
 const total = pairs.reduce((sum, [key, n]) => sum + n, 0)
 console.log(total)                                 // 7
+
+// --- Labelled elements: the labels document the positions ---
+type Reading = [city: string, celsius: number]
+const reading: Reading = ["Thessaloniki", 24]
+const [city, celsius] = reading
+console.log(city + ": " + celsius)                 // Thessaloniki: 24
+function span(xs: number[]): [min: number, max: number] {
+    return [Math.min(...xs), Math.max(...xs)]
+}
+console.log(span([4, 9, 2]))                       // [ 2, 9 ]

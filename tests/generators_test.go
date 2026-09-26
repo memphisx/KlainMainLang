@@ -351,7 +351,7 @@ async function main2(): Promise<void> {
     await it.next()
     console.log("no throw")
   } catch (e) {
-    console.log("caught " + e.message)
+    console.log("caught " + (e as Error).message)
   }
 }
 main2()
@@ -456,7 +456,7 @@ async function main2(): Promise<void> {
   try {
     for await (const b of new Boom()) { console.log(b) }
   } catch (e) {
-    console.log("caught " + e.message)
+    console.log("caught " + (e as Error).message)
   }
   console.log("done")
 }
@@ -570,7 +570,7 @@ async function main2(): Promise<void> {
   try {
     for await (const v of mixed()) { console.log(v) }
   } catch (e) {
-    console.log("caught " + e.message)
+    console.log("caught " + (e as Error).message)
   }
 }
 main2()
@@ -819,7 +819,7 @@ async function main2(): Promise<void> {
   const it = p.pages()
   console.log((await it.next()).value)
   console.log((await it.next()).value)
-  try { await it.next() } catch (e) { console.log("caught " + e.message) }
+  try { await it.next() } catch (e) { console.log("caught " + (e as Error).message) }
 }
 main2()
 `, "5\n6\ncaught end")
@@ -833,7 +833,7 @@ func TestE2EGeneratorThrowCaughtInBody(t *testing.T) {
 	assertOutput(t, `
 function* g(): number {
   try { yield 1; yield 2 }
-  catch (e) { console.log("caught " + e.message); yield 99 }
+  catch (e) { console.log("caught " + (e as Error).message); yield 99 }
 }
 const it = g()
 console.log(it.next().value)
@@ -849,7 +849,7 @@ function* g(): number { yield 1; yield 2 }
 const it = g()
 console.log(it.next().value)
 try { it.throw(new Error("nope")); console.log("no throw") }
-catch (e) { console.log("propagated " + e.message) }
+catch (e) { console.log("propagated " + (e as Error).message) }
 console.log(it.next().done)
 `, "1\npropagated nope\ntrue")
 }
@@ -1027,7 +1027,7 @@ func TestE2EYieldStarForwardsThrow(t *testing.T) {
 	assertOutput(t, `
 function* inner(): number {
   try { yield 1; yield 2 }
-  catch (e) { console.log("inner caught " + e.message); yield 99 }
+  catch (e) { console.log("inner caught " + (e as Error).message); yield 99 }
 }
 function* outer(): number { yield* inner(); yield 100 }
 const it = outer()
@@ -1062,7 +1062,7 @@ func TestE2EAsyncGeneratorThrowCaught(t *testing.T) {
 async function inc(n: number): Promise<number> { return n + 1 }
 async function* g(): number {
   try { yield await inc(0); yield await inc(1) }
-  catch (e) { console.log("caught " + e.message); yield 99 }
+  catch (e) { console.log("caught " + (e as Error).message); yield 99 }
 }
 async function main2(): Promise<void> {
   const it = g()
@@ -1082,7 +1082,7 @@ async function main2(): Promise<void> {
   const it = g()
   console.log((await it.next()).value)
   try { await it.throw(new Error("nope")); console.log("no throw") }
-  catch (e) { console.log("rejected " + e.message) }
+  catch (e) { console.log("rejected " + (e as Error).message) }
   console.log((await it.next()).done)
 }
 main2()
@@ -1147,7 +1147,7 @@ func TestE2EAsyncYieldStarForwardsSentAndThrow(t *testing.T) {
 	assertOutput(t, `
 async function* inner(): number {
   try { const a = yield 1; yield a + 10 }
-  catch (e) { console.log("inner caught " + e.message); yield 99 }
+  catch (e) { console.log("inner caught " + (e as Error).message); yield 99 }
 }
 async function* outer(): number { yield* inner(); yield 100 }
 async function main2(): Promise<void> {
@@ -1258,7 +1258,7 @@ class Range {
   }
 }
 async function* outer(): number {
-  try { yield* new Range(5) } catch (e) { console.log("outer caught " + e.message); yield 77 }
+  try { yield* new Range(5) } catch (e) { console.log("outer caught " + (e as Error).message); yield 77 }
 }
 async function main2(): Promise<void> {
   const it = outer()
@@ -1470,4 +1470,23 @@ const result = iter.return(45).value;
 console.log(obj.foo);
 console.log(result);
 `, "not modified\n1")
+}
+
+// `async *[Symbol.asyncIterator]()` makes a class async-iterable through its
+// own async generator, reading the instance's state (TDD-00231).
+func TestE2EAsyncGeneratorAsyncIteratorMethod(t *testing.T) {
+	assertOutput(t, `
+class Queue {
+  private chunks: any[] = [];
+  push(c: any): void { this.chunks.push(c) }
+  async *[Symbol.asyncIterator](): AsyncIterableIterator<any> {
+    while (this.chunks.length > 0) yield this.chunks.shift()
+  }
+}
+async function run() {
+  const q = new Queue(); q.push("a"); q.push(2); q.push({ k: 1 });
+  for await (const v of q) console.log(v)
+}
+run()
+`, "a\n2\n{ k: 1 }")
 }

@@ -25,6 +25,8 @@ import (
 	"strings"
 
 	"KlainMainLang/ast"
+	"KlainMainLang/diag"
+	"KlainMainLang/lib"
 )
 
 // scope is a stack of locally-bound names (function/arrow parameters,
@@ -64,6 +66,10 @@ func (s *scope) bound(name string) bool {
 	return false
 }
 
+// nativeGlobal is the object of native primitives only a builtin module
+// written in TypeScript may name (lib/native.d.ts).
+const nativeGlobal = "__kml_native"
+
 // builtinMemberRef is one named import of a single member from a virtual
 // built-in module (TDD-00049 Stage 2, `import { readFileSync } from 'fs'`)
 // — Marker is the module's own reserved identifier (`fs__kml_builtin`, see
@@ -97,14 +103,23 @@ type lookupTable struct {
 	ns             map[string]map[string]string
 	builtinMembers map[string]builtinMemberRef
 	// parseTimeAliases maps an aliased import local name to the canonical
-	// parse-time built-in constructor it stands for (`U` → `URL` for
-	// `import { URL as U } from 'url'`, TDD-00165 Stage 3). A `new U(...)` — which
-	// the parser produced as a generic NewExpression — is rebuilt into the
-	// specialized built-in node under the canonical name during the walk.
-	parseTimeAliases     map[string]string
+	// builtin constructor it stands for (`U` → `URL` for
+	// `import { URL as U } from 'url'`, TDD-00165 Stage 3). A `new U(...)` is
+	// renamed to the canonical name; sema then builds the builtin.
+	parseTimeAliases map[string]string
+	// typeOnly is every local an `import type` (or a `type` specifier)
+	// binds: a value use of one is TS1361.
+	typeOnly map[string]bool
+	// nodeTypes is every local bound to a Node export implemented only as
+	// a type (Program.NodeTypeImports): a value use is an error.
+	nodeTypes            map[string]string
 	allowGlobalShadowing bool
-	reservedErr          *error // first-write-wins: set by the first reserved-name violation found anywhere in the walk, checked by the caller once renameFile returns
-	filePath             string // this file's own absolute path (TDD-00055 Stage 1) — backs import.meta.url's rewrite, see rewriteExpr's *ast.ImportMetaUrl case
+	reservedErr          *error                        // first-write-wins: set by the first reserved-name violation found anywhere in the walk, checked by the caller once renameFile returns
+	filePath             string                        // this file's own absolute path (TDD-00055 Stage 1) — backs import.meta.url's rewrite, see rewriteExpr's *ast.ImportMetaUrl case
+	resolved             map[*ast.StringLiteral]string // module-specifier literals resolved to canonical files, shared by every file
+	// thisParams are the file's `this: T` parameter annotations
+	// (Program.ThisParams), rewritten with their functions' parameters.
+	thisParams map[ast.Node]*ast.TypeAnnotation
 }
 
 // checkBinding is TDD-00050's hook, called at every point a local binding
@@ -129,6 +144,7 @@ func (lu lookupTable) checkBinding(name string, pos ast.Pos) {
 // they're tracked purely via the scope stack, which always wins when a name
 // is shadowed.
 func renameFile(prog *ast.Program, lu lookupTable) {
+	lu.thisParams = prog.ThisParams
 	for _, stmt := range prog.Body {
 		rewriteTopLevelStmt(stmt, lu)
 	}
@@ -203,6 +219,9 @@ func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) 
 	}
 	bindParams(f.Params, sc, lu, f.GetPos())
 	rewritePatternDefaults(f.Params, sc, lu)
+	if ta := lu.thisParams[f]; ta != nil {
+		rewriteType(ta, sc, lu)
+	}
 	for i := range f.Params {
 		if f.Params[i].Type != nil {
 			rewriteType(f.Params[i].Type, sc, lu)
@@ -222,6 +241,11 @@ func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) 
 		rewriteBlock(f.Body, sc, lu)
 	}
 	sc.pop()
+	// The overload signatures kept beside the implementation name the same
+	// types (`open(path: PathLike, …)`), in the same scope.
+	for _, o := range f.Overloads {
+		rewriteFunctionLike(o, sc, lu)
+	}
 }
 
 // bindParams adds every name a parameter list binds — a plain name, or the
@@ -276,6 +300,17 @@ func rewriteInterfaceDecl(i *ast.InterfaceDeclaration, lu lookupTable) {
 	for _, tp := range i.TypeParams {
 		sc.bind(tp)
 	}
+	// The declaration as written, which the checker reads.
+	for _, tp := range i.TypeParameters {
+		rewriteTypeNode(tp.Constraint, sc, lu)
+		rewriteTypeNode(tp.Default, sc, lu)
+	}
+	for _, h := range i.Heritage {
+		rewriteTypeNode(h, sc, lu)
+	}
+	for _, m := range i.Members {
+		rewriteTypeMember(m, sc, lu)
+	}
 	for _, c := range i.TypeParamConstraints {
 		if c != nil {
 			rewriteType(c, sc, lu)
@@ -284,6 +319,8 @@ func rewriteInterfaceDecl(i *ast.InterfaceDeclaration, lu lookupTable) {
 	for fi := range i.Fields {
 		rewriteType(i.Fields[fi].Type, sc, lu)
 	}
+	rewriteType(i.IndexSig, sc, lu)
+	rewriteType(i.CallSig, sc, lu)
 	for mi := range i.Methods {
 		sc.push()
 		bindParams(i.Methods[mi].Params, sc, lu, i.GetPos())
@@ -312,7 +349,10 @@ func rewriteClassDecl(c *ast.ClassDeclaration, lu lookupTable) {
 		}
 	}
 
-	if c.BaseClass != "" && !sc.bound(c.BaseClass) {
+	// `extends ns.Base` through a namespace import: that module's Base.
+	if m, ok := lu.ns[c.BaseQualifier][c.BaseClass]; ok && c.BaseQualifier != "" && !sc.bound(c.BaseQualifier) {
+		c.BaseClass = m
+	} else if c.BaseClass != "" && !sc.bound(c.BaseClass) {
 		if m, ok := lu.names[c.BaseClass]; ok {
 			c.BaseClass = m
 		}
@@ -573,6 +613,20 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 	switch e := expr.(type) {
 	case *ast.Identifier:
 		if !sc.bound(e.Name) {
+			if lu.typeOnly[e.Name] && lu.reservedErr != nil && *lu.reservedErr == nil {
+				p := e.GetPos()
+				*lu.reservedErr = diag.New(diag.TypeOnlyImportValue, diag.Span{Pos: diag.Pos{Line: p.Line, Col: p.Col}}, e.Name)
+			}
+			if mod, ok := lu.nodeTypes[e.Name]; ok && lu.reservedErr != nil && *lu.reservedErr == nil {
+				p := e.GetPos()
+				*lu.reservedErr = fmt.Errorf("%d:%d: '%s' from '%s' is supported as a type only", p.Line, p.Col, e.Name, mod)
+			}
+			if e.Name == nativeGlobal && !strings.HasPrefix(lu.filePath, lib.ModuleRoot) && lu.reservedErr != nil && *lu.reservedErr == nil {
+				// The native primitives are the builtin modules' own
+				// (lib/native.d.ts); a program cannot name them.
+				p := e.GetPos()
+				*lu.reservedErr = diag.New(diag.CannotFindName, diag.Span{Pos: diag.Pos{Line: p.Line, Col: p.Col}}, e.Name)
+			}
 			if m, ok := lu.names[e.Name]; ok {
 				e.Name = m
 				break
@@ -648,6 +702,9 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		}
 	case *ast.AwaitExpression:
 		e.Argument = rewriteExpr(e.Argument, sc, lu)
+	case *ast.ImportCallExpression:
+		// A non-literal specifier is an ordinary reference (`import(p)`).
+		e.Specifier = rewriteExpr(e.Specifier, sc, lu)
 	case *ast.YieldExpression:
 		if e.Argument != nil {
 			e.Argument = rewriteExpr(e.Argument, sc, lu)
@@ -667,6 +724,9 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		e.Arg = rewriteExpr(e.Arg, sc, lu)
 	case *ast.AsExpression:
 		e.Expr = rewriteExpr(e.Expr, sc, lu)
+		if e.TypeAnnot != nil {
+			rewriteType(e.TypeAnnot, sc, lu) // `x as C` names C by its file's mangled name
+		}
 	case *ast.SpreadElement:
 		e.Arg = rewriteExpr(e.Arg, sc, lu)
 	case *ast.UnaryExpression:
@@ -718,13 +778,6 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 	case *ast.IndexExpression:
 		e.Object = rewriteExpr(e.Object, sc, lu)
 		e.Index = rewriteExpr(e.Index, sc, lu)
-	case *ast.NewArrayExpression:
-		if e.ElemType != nil {
-			rewriteType(e.ElemType, sc, lu)
-		}
-		if e.Size != nil {
-			e.Size = rewriteExpr(e.Size, sc, lu)
-		}
 	case *ast.ObjectLiteral:
 		for i := range e.Properties {
 			if e.Properties[i].KeyExpr != nil {
@@ -774,6 +827,9 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		sc.bind(e.Name)
 		bindParams(e.Params, sc, lu, e.GetPos())
 		rewritePatternDefaults(e.Params, sc, lu)
+		if ta := lu.thisParams[e]; ta != nil {
+			rewriteType(ta, sc, lu)
+		}
 		for i := range e.Params {
 			if e.Params[i].Type != nil {
 				rewriteType(e.Params[i].Type, sc, lu)
@@ -797,219 +853,16 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		for i := range e.Exprs {
 			e.Exprs[i] = rewriteExpr(e.Exprs[i], sc, lu)
 		}
-	case *ast.NewMapExpression:
-		if e.KeyType != nil {
-			rewriteType(e.KeyType, sc, lu)
-		}
-		if e.ValType != nil {
-			rewriteType(e.ValType, sc, lu)
-		}
-		if e.Init != nil {
-			e.Init = rewriteExpr(e.Init, sc, lu)
-		}
-	case *ast.NewSetExpression:
-		if e.ElemType != nil {
-			rewriteType(e.ElemType, sc, lu)
-		}
-		if e.Init != nil {
-			e.Init = rewriteExpr(e.Init, sc, lu)
-		}
-	case *ast.NewWeakMapExpression:
-		if e.KeyType != nil {
-			rewriteType(e.KeyType, sc, lu)
-		}
-		if e.ValType != nil {
-			rewriteType(e.ValType, sc, lu)
-		}
-	case *ast.NewWeakSetExpression:
-		if e.ElemType != nil {
-			rewriteType(e.ElemType, sc, lu)
-		}
-	case *ast.NewWeakRefExpression:
-		if e.ElemType != nil {
-			rewriteType(e.ElemType, sc, lu)
-		}
-		if e.Init != nil {
-			e.Init = rewriteExpr(e.Init, sc, lu)
-		}
-	case *ast.NewEventEmitterExpression:
-		if e.PayloadType != nil {
-			rewriteType(e.PayloadType, sc, lu)
-		}
-	case *ast.NewNodeStreamExpression:
-		if e.InType != nil {
-			rewriteType(e.InType, sc, lu)
-		}
-		if e.OutType != nil {
-			rewriteType(e.OutType, sc, lu)
-		}
-		if e.Options != nil {
-			e.Options = rewriteExpr(e.Options, sc, lu)
-		}
-	case *ast.NewCompressionStreamExpression:
-		if e.Format != nil {
-			e.Format = rewriteExpr(e.Format, sc, lu)
-		}
-	case *ast.NewTransformStreamExpression:
-		if e.InType != nil {
-			rewriteType(e.InType, sc, lu)
-		}
-		if e.OutType != nil {
-			rewriteType(e.OutType, sc, lu)
-		}
-		if e.Transformer != nil {
-			e.Transformer = rewriteExpr(e.Transformer, sc, lu)
-		}
-		if e.WritableStrategy != nil {
-			e.WritableStrategy = rewriteExpr(e.WritableStrategy, sc, lu)
-		}
-		if e.ReadableStrategy != nil {
-			e.ReadableStrategy = rewriteExpr(e.ReadableStrategy, sc, lu)
-		}
-	case *ast.NewWritableStreamExpression:
-		if e.ChunkType != nil {
-			rewriteType(e.ChunkType, sc, lu)
-		}
-		if e.Sink != nil {
-			e.Sink = rewriteExpr(e.Sink, sc, lu)
-		}
-		if e.Strategy != nil {
-			e.Strategy = rewriteExpr(e.Strategy, sc, lu)
-		}
-	case *ast.NewReadableStreamExpression:
-		if e.ChunkType != nil {
-			rewriteType(e.ChunkType, sc, lu)
-		}
-		if e.Source != nil {
-			e.Source = rewriteExpr(e.Source, sc, lu)
-		}
-		if e.Strategy != nil {
-			e.Strategy = rewriteExpr(e.Strategy, sc, lu)
-		}
-	case *ast.NewErrorExpression:
-		if e.Message != nil {
-			e.Message = rewriteExpr(e.Message, sc, lu)
-		}
-		if e.Name != nil {
-			e.Name = rewriteExpr(e.Name, sc, lu)
-		}
-		if e.Errors != nil {
-			e.Errors = rewriteExpr(e.Errors, sc, lu)
-		}
-		if e.Cause != nil {
-			e.Cause = rewriteExpr(e.Cause, sc, lu)
-		}
-	case *ast.NewDateExpression:
-		if e.Millis != nil {
-			e.Millis = rewriteExpr(e.Millis, sc, lu)
-		}
-		for i := range e.Args {
-			e.Args[i] = rewriteExpr(e.Args[i], sc, lu)
-		}
-	case *ast.NewURLExpression:
-		e.URL = rewriteExpr(e.URL, sc, lu)
-		if e.Base != nil {
-			e.Base = rewriteExpr(e.Base, sc, lu)
-		}
-	case *ast.NewEventSourceExpression:
-		e.URL = rewriteExpr(e.URL, sc, lu)
-	case *ast.NewWebSocketExpression:
-		e.URL = rewriteExpr(e.URL, sc, lu)
-	case *ast.NewWorkerExpression:
-		// TDD-00098: canonicalize the worker path relative to this file, the
-		// same way visit() resolved it as a dependency edge — the resulting
-		// key is what codegen matches against WorkerModule.Path.
-		if e.WorkerData != nil {
-			e.WorkerData = rewriteExpr(e.WorkerData, sc, lu)
-		}
-		abs, found, err := resolveTsFile(filepath.Dir(lu.filePath), e.Path)
-		if err == nil && !found {
-			err = fmt.Errorf("%d:%d: cannot find worker module '%s' (resolved to %s)", e.GetPos().Line, e.GetPos().Col, e.Path, abs)
-		}
-		if err != nil {
-			if *lu.reservedErr == nil {
-				*lu.reservedErr = err
-			}
-			break
-		}
-		e.ResolvedPath = abs
-	case *ast.NewURLSearchParamsExpression:
-		if e.Init != nil {
-			e.Init = rewriteExpr(e.Init, sc, lu)
-		}
-	case *ast.NewURLPatternExpression:
-		if e.Init != nil {
-			e.Init = rewriteExpr(e.Init, sc, lu)
-		}
-	case *ast.NewHeadersExpression:
-		if e.Init != nil {
-			e.Init = rewriteExpr(e.Init, sc, lu)
-		}
-	case *ast.NewRequestExpression:
-		e.URL = rewriteExpr(e.URL, sc, lu)
-		if e.Init != nil {
-			e.Init = rewriteExpr(e.Init, sc, lu)
-		}
-	case *ast.NewArrayBufferExpression:
-		e.ByteLength = rewriteExpr(e.ByteLength, sc, lu)
-	case *ast.NewDataViewExpression:
-		e.Buffer = rewriteExpr(e.Buffer, sc, lu)
-		if e.ByteOffset != nil {
-			e.ByteOffset = rewriteExpr(e.ByteOffset, sc, lu)
-		}
-		if e.ByteLength != nil {
-			e.ByteLength = rewriteExpr(e.ByteLength, sc, lu)
-		}
-	case *ast.NewBlobExpression:
-		if e.Parts != nil {
-			e.Parts = rewriteExpr(e.Parts, sc, lu)
-		}
-		if e.Options != nil {
-			e.Options = rewriteExpr(e.Options, sc, lu)
-		}
-	case *ast.NewChannelExpression:
-		if e.Capacity != nil {
-			e.Capacity = rewriteExpr(e.Capacity, sc, lu)
-		}
-	case *ast.NewWebviewExpression:
-		// The options object may reference bindings (a variable of functions),
-		// whose identifiers must be renamed like any other (TDD-00142 Stage 5).
-		if e.Options != nil {
-			e.Options = rewriteExpr(e.Options, sc, lu)
-		}
-	case *ast.NewTypedArrayExpression:
-		if e.Arg != nil {
-			e.Arg = rewriteExpr(e.Arg, sc, lu)
-		}
-		if e.ByteOffset != nil {
-			e.ByteOffset = rewriteExpr(e.ByteOffset, sc, lu)
-		}
-		if e.Length != nil {
-			e.Length = rewriteExpr(e.Length, sc, lu)
-		}
-	case *ast.NewTextDecoderExpression:
-		if e.Label != nil {
-			e.Label = rewriteExpr(e.Label, sc, lu)
-		}
-	case *ast.NewRegExpExpression:
-		e.Pattern = rewriteExpr(e.Pattern, sc, lu)
-		if e.Flags != nil {
-			e.Flags = rewriteExpr(e.Flags, sc, lu)
-		}
 	case *ast.NewExpression:
-		if !sc.bound(e.ClassName) {
+		// `new ns.C()` through a namespace import: that module's C.
+		if m, ok := lu.ns[e.Qualifier][e.ClassName]; ok && e.Qualifier != "" && !sc.bound(e.Qualifier) {
+			e.ClassName = m
+		} else if !sc.bound(e.ClassName) {
 			if canon, ok := lu.parseTimeAliases[e.ClassName]; ok {
-				// TDD-00165 Stage 3: an aliased parse-time built-in constructor.
-				// Rewrite the sub-expressions first, then rebuild as the specialized
-				// node under the canonical name (the parser produced a generic
-				// NewExpression because it keyed on the alias identifier).
-				for _, ta := range e.TypeArgs {
-					rewriteType(ta, sc, lu)
-				}
-				for i := range e.Args {
-					e.Args[i] = rewriteExpr(e.Args[i], sc, lu)
-				}
-				return lu.buildReexportConstructor(canon, e)
+				// TDD-00165 Stage 3: an aliased import of a builtin constructor
+				// (`import { URL as U } from 'url'`) constructs the builtin; sema
+				// builds it from the canonical name.
+				e.ClassName = canon
 			}
 			if m, ok := lu.names[e.ClassName]; ok {
 				e.ClassName = m
@@ -1020,6 +873,15 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		}
 		for i := range e.Args {
 			e.Args[i] = rewriteExpr(e.Args[i], sc, lu)
+		}
+		// TDD-00098: a `new Worker('./w.ts')` of the builtin names a worker
+		// module; canonicalize its path relative to this file, the same way
+		// visit() resolved it as a dependency edge — the key codegen matches
+		// against WorkerModule.Path.
+		if e.ClassName == "Worker" && !sc.bound("Worker") && len(e.Args) > 0 {
+			if lit, ok := e.Args[0].(*ast.StringLiteral); ok {
+				lu.resolveWorkerPath(lit)
+			}
 		}
 	case *ast.ImportMetaUrl:
 		// TDD-00055 Stage 1: resolved entirely at this stage, per-file,
@@ -1039,9 +901,11 @@ func rewriteType(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
 		return
 	}
 	rewriteTypeName(ta, sc, lu)
+	rewriteTypeNode(ta.TypeNode(), sc, lu)
 	for i := range ta.Fields {
 		rewriteType(ta.Fields[i].Type, sc, lu)
 	}
+	rewriteType(ta.IndexSig, sc, lu)
 	if ta.ElemType != nil {
 		rewriteType(ta.ElemType, sc, lu)
 	}
@@ -1088,6 +952,77 @@ func rewriteType(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
 	rewriteType(ta.FalseType, sc, lu)
 }
 
+// rewriteTypeNode renames the declarations a type-syntax tree references
+// (TDD-00230 P1.5), as rewriteTypeName does for the converted annotation: the
+// checker reads the tree, so a renamed interface must be found by it too.
+// Renaming is idempotent (a mangled name is never a lookup key), so a
+// subtree the annotation's parts share is safe to visit twice.
+// rewriteTypeMember renames the type names in an interface or type-literal
+// member; a generic signature's own type parameters shadow top-level names.
+func rewriteTypeMember(m ast.TypeMember, sc *scope, lu lookupTable) {
+	var tps []*ast.TypeParameter
+	switch m := m.(type) {
+	case *ast.MethodSignature:
+		tps = m.TypeParameters
+	case *ast.CallSignature:
+		tps = m.TypeParameters
+	case *ast.ConstructSignature:
+		tps = m.TypeParameters
+	}
+	sc.push()
+	for _, tp := range tps {
+		sc.bind(tp.Name)
+	}
+	ast.ForEachChild(m, func(n ast.Node) bool {
+		if t, ok := n.(ast.TypeNode); ok {
+			rewriteTypeNode(t, sc, lu)
+			return true
+		}
+		if p, ok := n.(*ast.SignatureParameter); ok {
+			rewriteTypeNode(p.Type, sc, lu)
+			return true
+		}
+		if tp, ok := n.(*ast.TypeParameter); ok {
+			rewriteTypeNode(tp.Constraint, sc, lu)
+			rewriteTypeNode(tp.Default, sc, lu)
+		}
+		return true
+	})
+	sc.pop()
+}
+
+func rewriteTypeNode(n ast.TypeNode, sc *scope, lu lookupTable) {
+	if n == nil {
+		return
+	}
+	var walk func(n ast.Node) bool
+	walk = func(n ast.Node) bool {
+		switch t := n.(type) {
+		case *ast.TypeReference:
+			// `ns.T` through a namespace import: that module's T.
+			if len(t.Qualifier) == 1 && !sc.bound(t.Qualifier[0]) {
+				if m, ok := lu.ns[t.Qualifier[0]][t.Name]; ok {
+					t.Name, t.Qualifier = m, nil
+				}
+			}
+			if len(t.Qualifier) == 0 && !sc.bound(t.Name) {
+				if m, ok := lu.names[t.Name]; ok {
+					t.Name = m
+				}
+			}
+		case *ast.TypeQuery:
+			if !sc.bound(t.Name) {
+				if m, ok := lu.names[t.Name]; ok {
+					t.Name = m
+				}
+			}
+		}
+		ast.ForEachChild(n, walk)
+		return true
+	}
+	walk(n)
+}
+
 // rewriteTypeName rewrites ta.Name, accounting for parser_types.go's flat
 // "Foo[]" (or multi-dimensional "Foo[][]") encoding of a named type followed
 // by an array suffix — the suffix is baked directly into the Name string
@@ -1100,70 +1035,41 @@ func rewriteTypeName(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
 		name = name[:len(name)-2]
 		suffix += "[]"
 	}
+	// `ns.T` through a namespace import: that module's T.
+	if len(ta.Qualifier) == 1 && !sc.bound(ta.Qualifier[0]) {
+		if m, ok := lu.ns[ta.Qualifier[0]][name]; ok {
+			ta.Name, ta.Qualifier = m+suffix, nil
+			return
+		}
+	}
 	if sc.bound(name) {
 		return
+	}
+	// A library namespace's type (`NodeJS.Platform`) keeps its name: the last
+	// segment alone may name a user type. A user namespace's type members are
+	// bare top-level names (ADR-00450), so its qualified references rename.
+	if len(ta.Qualifier) > 0 && lib.KnownGlobal(ta.Qualifier[0]) && !sc.bound(ta.Qualifier[0]) {
+		if _, own := lu.names[ta.Qualifier[0]]; !own {
+			return
+		}
 	}
 	if m, ok := lu.names[name]; ok {
 		ta.Name = m + suffix
 	}
 }
 
-// buildReexportConstructor rebuilds a generic `new <alias>(args)` NewExpression
-// (produced by the parser because it keyed on the alias identifier, not the
-// canonical built-in name) into the specialized built-in AST node the parser
-// would have produced for the un-aliased form — the mechanism behind aliased
-// imports of the parse-time reexport constructors (TDD-00165 Stage 3). Its
-// sub-expressions (Args/TypeArgs) are already rewritten by the caller. An
-// argument-count violation records a first-write-wins error via lu.reservedErr
-// (the same channel reserved-name checks use) and returns the node unchanged, so
-// compilation aborts with a clear message rather than silently miscompiling.
-func (lu lookupTable) buildReexportConstructor(canon string, e *ast.NewExpression) ast.Expression {
-	pos := e.GetPos()
-	fail := func(msg string) ast.Expression {
-		if lu.reservedErr != nil && *lu.reservedErr == nil {
-			*lu.reservedErr = fmt.Errorf("%d:%d: %s", pos.Line, pos.Col, msg)
-		}
-		return e
+// resolveWorkerPath records the canonical file a worker path literal names,
+// or the resolution error.
+func (lu lookupTable) resolveWorkerPath(lit *ast.StringLiteral) {
+	abs, found, err := resolveTsFile(filepath.Dir(lu.filePath), lit.Value)
+	if err == nil && !found {
+		err = fmt.Errorf("%d:%d: cannot find worker module '%s' (resolved to %s)", lit.GetPos().Line, lit.GetPos().Col, lit.Value, abs)
 	}
-	switch canon {
-	case "URL":
-		if len(e.Args) < 1 || len(e.Args) > 2 {
-			return fail("new URL(url, base?) takes 1 or 2 arguments")
+	if err != nil {
+		if *lu.reservedErr == nil {
+			*lu.reservedErr = err
 		}
-		if len(e.Args) == 2 {
-			return ast.NewNewURLExpressionWithBase(e.Args[0], e.Args[1], pos)
-		}
-		return ast.NewNewURLExpression(e.Args[0], pos)
-	case "URLSearchParams":
-		if len(e.Args) > 1 {
-			return fail("new URLSearchParams(init?) takes at most 1 argument")
-		}
-		var init ast.Expression
-		if len(e.Args) == 1 {
-			init = e.Args[0]
-		}
-		return ast.NewNewURLSearchParamsExpression(init, pos)
-	case "Blob":
-		if len(e.Args) > 2 {
-			return fail("new Blob(parts?, options?) takes at most 2 arguments")
-		}
-		var parts, options ast.Expression
-		if len(e.Args) >= 1 {
-			parts = e.Args[0]
-		}
-		if len(e.Args) == 2 {
-			options = e.Args[1]
-		}
-		return ast.NewNewBlobExpression(parts, options, pos)
-	case "EventEmitter":
-		if len(e.Args) != 0 {
-			return fail("new EventEmitter() does not accept arguments")
-		}
-		var payload *ast.TypeAnnotation
-		if len(e.TypeArgs) == 1 {
-			payload = e.TypeArgs[0]
-		}
-		return ast.NewNewEventEmitterExpression(payload, pos)
+		return
 	}
-	return e
+	lu.resolved[lit] = abs
 }

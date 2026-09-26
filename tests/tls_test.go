@@ -119,34 +119,30 @@ sock.on("end", () => {
 	assertOutputImports(t, src, "got-body")
 }
 
-// The default (rejectUnauthorized: true) rejects the self-signed fixture cert —
-// the handshake fails and tls.connect throws a catchable Error.
+// The default (rejectUnauthorized: true) rejects the self-signed fixture
+// cert: the socket's 'error' event carries Node's verify error, after the
+// code following tls.connect ran (connect never throws).
 func TestE2ETLSConnectVerifyFails(t *testing.T) {
 	_, port := newTLSTestServer(t)
 	src := fmt.Sprintf(`
 import tls from 'tls'
-try {
-  const sock = tls.connect(%s, "127.0.0.1")
-  console.log("unexpected connect")
-} catch (e) {
-  console.log("verify rejected")
-}
+const sock = tls.connect(%s, "127.0.0.1", () => { console.log("unexpected connect") })
+sock.on("error", (e: NodeJS.ErrnoException) => { console.log("verify rejected " + (e.code === "DEPTH_ZERO_SELF_SIGNED_CERT")) })
+console.log("connecting")
 `, port)
-	assertOutputImports(t, src, "verify rejected")
+	// httptest's certificate is self-signed, as Node reports it.
+	assertOutputImports(t, src, "connecting\nverify rejected true")
 }
 
-// Connecting to a closed port throws a catchable Error (connect refused).
+// Connecting to a closed port reports ECONNREFUSED through 'error'.
 func TestE2ETLSConnectRefused(t *testing.T) {
 	src := `
 import tls from 'tls'
-try {
-  const sock = tls.connect(1, "127.0.0.1", { rejectUnauthorized: false })
-  console.log("unexpected connect")
-} catch (e) {
-  console.log("refused")
-}
+const sock = tls.connect(1, "127.0.0.1", { rejectUnauthorized: false })
+sock.on("error", (e: NodeJS.ErrnoException) => { console.log("refused " + e.code) })
+console.log("connecting")
 `
-	assertOutputImports(t, src, "refused")
+	assertOutputImports(t, src, "connecting\nrefused ECONNREFUSED")
 }
 
 // TestE2ETLSCreateServerOptionsVariable: the options bound to a const first

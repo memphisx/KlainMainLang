@@ -7,6 +7,18 @@ import (
 
 // coerce inserts a type conversion instruction if necessary.
 func (e *Emitter) coerce(v Value, target Type) Value {
+	// A plain object of one layout where another is expected (a
+	// `ReadableOptions` passed on as `DuplexOptions`): its fields, by name,
+	// in the target's layout.
+	if needsObjectRelayout(v.Ty, target) {
+		return e.emitObjectRelayout(v, target)
+	}
+	// A plain object where a string-keyed dictionary is expected: its fields
+	// become the dictionary's entries.
+	if target.IsDynamicObject && target.IsMap && target.MapKey != nil && isStringTy(*target.MapKey) &&
+		plainRecordType(v.Ty) {
+		return e.emitObjectToDict(v, target)
+	}
 	// A caught value (TypeCaught, TDD-00202) flowing out of catch-local scope:
 	// to itself it passes through; to `any` it packs to a NaN-box (Error →
 	// object); to a concrete Error it unwraps the payload (valid after an
@@ -71,6 +83,38 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 				d := e.emitAnyToNum(v)
 				return e.coerce(Value{Ref: d, Ty: TypeF64}, target)
 			}
+		case target.IsBigInt:
+			// A boxed bigint is a { magic, ptr } cell (TDD-00229), not the
+			// pointer itself.
+			return e.emitUnboxBoxToType(v.Ref, target)
+		case target.IsArray && !target.IsFlatArray:
+			// The box's array (its live header carried along).
+			return e.emitUnboxBoxToType(v.Ref, target)
+		case target.IsFunc && !isUnconstrainedDynamic(v.Ty):
+			// A union's function member: unboxed as a narrowing does.
+			return e.emitUnboxBoxToType(v.Ref, target)
+		case target.IsFunc && isUnconstrainedDynamic(v.Ty):
+			// A boxed function into a function-typed slot: a thunk calls it
+			// through the dynamic ABI.
+			if c, ok := e.emitAnyToClosure(v, target); ok {
+				return c
+			}
+			_, payload := e.emitUnboxTagPayload(v)
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, payload))
+			return Value{Ref: r, Ty: target}
+		case isForOfStringTy(target) && !target.IsClass:
+			// A string-typed slot holding another kind at run time (an `any`
+			// Buffer handed to a `(chunk: string) => …` listener): JS keeps the
+			// value itself, which every string use then converts with
+			// ToString; a string, null or undefined passes through.
+			if s, ok := e.emitAnyIntoString(v, target); ok {
+				return s
+			}
+			_, payload := e.emitUnboxTagPayload(v)
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, payload))
+			return Value{Ref: r, Ty: target}
 		case target.IR == "ptr" && !target.IsArray:
 			// A dynamic value flowing into a string- (or other single-pointer-)
 			// typed target reinterprets its boxed payload as that pointer:
@@ -374,6 +418,12 @@ func coerciblePure(src, target Type) bool {
 		!objectFieldBoxingCompatible(src, target) {
 		return false
 	}
+	// An array's value is its { ptr, i64 } aggregate: no string, number or
+	// boolean slot holds it (`const s: string = xs`, which only -compat=js
+	// reaches).
+	if src.IsArray && !target.IsArray && !target.IsDynamic && (isStringTy(target) || target.IsInteger() || target.Float || target.IR == "i1") {
+		return false
+	}
 	if src.IR == target.IR {
 		return true
 	}
@@ -477,4 +527,191 @@ func closureFallOffMismatch(vTy, target Type, pos ast.Pos, what string) error {
 	}
 	return fmt.Errorf("%d:%d: type mismatch in %s — the function returns %s | undefined (a path falls off the end without a value) but the expected type returns %s; return a value on every path",
 		pos.Line, pos.Col, what, tsTypeName(vTy.FuncRetType.withoutNullable()), tsTypeName(tr))
+}
+
+// plainRecordType reports whether t is a plain static object (an interface,
+// type literal or object literal), not a class instance or a host object.
+func plainRecordType(t Type) bool {
+	return isUnionObjectMember(t) && !t.IsClass && t.ClassName == "" && !t.IsDynamic &&
+		!t.Inline && !t.IsError && len(t.Fields) > 0
+}
+
+// needsObjectRelayout reports whether a src value must be copied to be read
+// as target: both plain objects whose layouts differ, where every field the
+// target requires is in the source.
+func needsObjectRelayout(src, target Type) bool {
+	return objectRelayoutNeeded(src, target, false)
+}
+
+// needsObjectRelayoutBoxing is needsObjectRelayout where a concrete source
+// field may box into a union/any target field — a union member's copy.
+func needsObjectRelayoutBoxing(src, target Type) bool {
+	return objectRelayoutNeeded(src, target, true)
+}
+
+func objectRelayoutNeeded(src, target Type, boxing bool) bool {
+	if !plainRecordType(src) || !plainRecordType(target) {
+		return false
+	}
+	if sameFieldLayout(src, target) {
+		return false
+	}
+	for _, tf := range target.Fields {
+		sf, ok := fieldByName(src, tf.Name)
+		if !ok {
+			// An optional field the source lacks: absent (undefined) in a
+			// box, null in a pointer slot, empty in an array slot.
+			if !tf.Ty.IsUndefined && !isNullableScalar(tf.Ty) && !tf.Ty.Nullable &&
+				!tf.Ty.IsDynamic && !tf.Ty.IsArray && tf.Ty.IR != "ptr" {
+				return false
+			}
+			continue
+		}
+		// A concrete source field boxes into a union/any target field.
+		if boxing && tf.Ty.IsDynamic && !tf.Ty.IsArray && !sf.Ty.IsDynamic {
+			continue
+		}
+		if sf.Ty.IsDynamic != tf.Ty.IsDynamic || sf.Ty.IsArray != tf.Ty.IsArray {
+			return false
+		}
+	}
+	return true
+}
+
+func sameFieldLayout(a, b Type) bool {
+	if len(a.Fields) != len(b.Fields) {
+		return false
+	}
+	for i := range a.Fields {
+		if a.Fields[i].Name != b.Fields[i].Name || StructFieldIR(a.Fields[i].Ty) != StructFieldIR(b.Fields[i].Ty) {
+			return false
+		}
+	}
+	return true
+}
+
+// emitObjectRelayout copies v's fields into a new object of target's
+// layout; a field the source lacks is absent. A null source stays null.
+func (e *Emitter) emitObjectRelayout(v Value, target Type) Value {
+	e.ensureCalloc()
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+	copyL := e.freshLabel("relayout.copy")
+	doneL := e.freshLabel("relayout.done")
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, copyL))
+	e.emitLabel(copyL)
+	obj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", obj, target.StructSize()))
+	for ti, tf := range target.Fields {
+		si, sfTy, ok := v.Ty.FieldIndex(tf.Name)
+		if !ok {
+			// An absent field of a box type is undefined, not the zero word.
+			if tf.Ty.IsDynamic && !tf.Ty.IsArray && StructFieldIR(tf.Ty) == "i64" {
+				g := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, target.StructIR(), obj, ti))
+				e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, g))
+			}
+			continue
+		}
+		src := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", src, v.Ty.StructIR(), v.Ref, si))
+		val := e.loadScalarOrNullableField(src, sfTy)
+		if isNullableScalar(sfTy) && !isNullableScalar(tf.Ty) {
+			val = Value{Ref: e.loadNullableScalarPayload(src, sfTy), Ty: sfTy.withoutNullable()}
+		}
+		dst := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dst, target.StructIR(), obj, ti))
+		e.storeScalarOrNullableField(dst, tf.Ty, val)
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", obj, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+	return Value{Ref: out, Ty: target}
+}
+
+// emitAnyIntoString is a box's value in a string-typed slot: its string
+// pointer when it holds a string (or null/undefined, the null pointer), else
+// its ToString.
+func (e *Emitter) emitAnyIntoString(v Value, target Type) (Value, bool) {
+	tag, payload := e.emitUnboxTagPayload(v)
+	isStr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isStr, tag, kmlTagString))
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNull, tag, kmlTagNull))
+	isUndef := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
+	n1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", n1, isNull, isUndef))
+	direct := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", direct, isStr, n1))
+	directL := e.freshLabel("anystr.direct")
+	convL := e.freshLabel("anystr.conv")
+	joinL := e.freshLabel("anystr.join")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", direct, directL, convL))
+	e.emitLabel(directL)
+	p := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, payload))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(convL)
+	sv, err := e.emitDynamicToString(Value{Ref: v.Ref, Ty: TypeAny})
+	if err != nil {
+		return Value{}, false
+	}
+	convEnd := e.freshLabel("anystr.convend")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", convEnd))
+	e.emitLabel(convEnd)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(joinL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", r, p, directL, sv.Ref, convEnd))
+	return Value{Ref: r, Ty: target}, true
+}
+
+// emitObjectToDict builds a string-keyed dictionary from a plain object's
+// fields (a null object stays null).
+func (e *Emitter) emitObjectToDict(v Value, target Type) Value {
+	e.ensureMapStrHelpers()
+	valTy := TypeAny
+	if target.MapVal != nil {
+		valTy = *target.MapVal
+	}
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+	copyL, doneL := e.freshLabel("obj2dict.copy"), e.freshLabel("obj2dict.done")
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, copyL))
+	e.emitLabel(copyL)
+	m := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", m))
+	for i, f := range v.Ty.Fields {
+		g := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, v.Ty.StructIR(), v.Ref, i))
+		fv := e.loadScalarOrNullableField(g, f.Ty)
+		ft := valTy
+		if dt, ok := dictFieldType(target, ast.NewStringLiteral(f.Name, ast.Pos{})); ok {
+			ft = dt
+		}
+		if ft.IsDynamic && !fv.Ty.IsDynamic {
+			if b, err := e.emitBoxValue(fv); err == nil {
+				fv = b
+			}
+		} else {
+			fv = e.coerce(fv, ft)
+		}
+		ref := e.valueToMapVal(fv, ft)
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", m, e.internString(f.Name), ref))
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", m, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+	return Value{Ref: out, Ty: target}
 }

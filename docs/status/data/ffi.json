@@ -5,7 +5,7 @@
   "segments": [
     {
       "kind": "block",
-      "text": "> Part of the [Implementation Status](README.md) index. Node's experimental `node:ffi` module (v26.1.0+, `--experimental-ffi`) — call C functions from shared libraries with plain-object signatures, and peek/poke native memory through `bigint` pointers. Import-gated (`import ffi from 'node:ffi'`). Signatures are resolved at compile time and lowered to direct C-ABI calls (no libffi, no trampoline); 64-bit integers and pointers travel as `bigint`, exactly as in Node. `registerCallback` hands a closure to C as a real function pointer via statically-emitted trampoline families. Runs on POSIX and Windows — the latter over a `LoadLibrary`/`GetProcAddress` shim for `dlopen`/`dlsym` ([ADR-01019](../adr/ADR-01019.md)). See [ADR-00797](../adr/ADR-00797.md)/[ADR-00798](../adr/ADR-00798.md)/[ADR-00799](../adr/ADR-00799.md)/[ADR-00800](../adr/ADR-00800.md)/[ADR-00808](../adr/ADR-00808.md)/[TDD-00164](../tdd/TDD-00164.md)."
+      "text": "> Part of the [Implementation Status](README.md) index. Node's experimental `node:ffi` module (v26.1.0+, `--experimental-ffi`) — call C functions from shared libraries with plain-object signatures, and peek/poke native memory through `bigint` pointers. Import-gated (`import ffi from 'node:ffi'`). Signatures are resolved at compile time and lowered to direct C-ABI calls (no libffi, no trampoline); 64-bit integers and pointers travel as `bigint`, exactly as in Node. `registerCallback` hands a closure to C as a real function pointer via statically-emitted trampoline families. Runs on POSIX and Windows — the latter over a `LoadLibrary`/`GetProcAddress` shim for `dlopen`/`dlsym` ([ADR-01019](../adr/ADR-01019.md)). Node-conformance is machine-checked by a differential oracle: the same program compiled here and run under a real `--experimental-ffi` Node (26.1.0+) must print identically (`assertSameAsNodeFFI`; a `string` return is the raw pointer `bigint`, `ffi.types.DOUBLE` is `\"double\"` — as Node does). A library is a runtime registry mirroring Node's own (`symbols`/`functions` tables in `std::unordered_map` order, per-name callable identity, Node's argument validation and error codes), and a bound function is a real function object ([ADR-01095](../adr/ADR-01095.md)). See [ADR-00797](../adr/ADR-00797.md)/[ADR-00798](../adr/ADR-00798.md)/[ADR-00799](../adr/ADR-00799.md)/[ADR-00800](../adr/ADR-00800.md)/[ADR-00808](../adr/ADR-00808.md)/[TDD-00164](../tdd/TDD-00164.md)."
     },
     {
       "kind": "coverage",
@@ -38,17 +38,20 @@
             "status": "implemented",
             "caveats": [
               "`using` declarations and `[Symbol.dispose]()` are not supported yet — explicit `.close()` is the disposal path (close is idempotent, as in Node)"
+            ],
+            "notes": [
+              "`close()` is idempotent; afterwards every call, lookup and accumulator read throws `ERR_FFI_LIBRARY_CLOSED` (`path` still reads — `''` for a `null` open), as in Node"
             ]
           },
           {
             "feature": "`lib.getFunction(name, signature)` / `lib.getFunctions(definitions)`",
             "status": "implemented",
             "caveats": [
-              "`signature` must be a compile-time object literal (same reason as `dlopen` definitions)",
-              "Re-resolving the same symbol with a different signature is not diagnosed (Node throws)"
+              "`signature` must be a compile-time object literal (same reason as `dlopen` definitions)"
             ],
             "notes": [
-              "The bound function's `.pointer` property works"
+              "A bound function is a function object: `typeof` is `'function'`, `name`/`length`, an own `pointer` bigint, one identity per symbol per library (`getFunction`/`getFunctions`/`lib.functions` hand out the same one), and util.inspect's `[Function: abs] { pointer: … }`",
+              "Re-requesting a symbol with a different libffi signature throws Node's `ERR_INVALID_ARG_VALUE`; aliases and the whole pointer family compare equal, as in Node. An invalid static signature (unknown type, a `void` argument, non-array `arguments`) is Node's runtime `TypeError`, and keys other than `arguments`/`return` are ignored"
             ]
           },
           {
@@ -59,19 +62,18 @@
             "feature": "`library.functions` / `library.symbols` / no-arg `getFunctions()` / `getSymbols()`",
             "status": "implemented",
             "caveats": [
-              "The accumulator is compile-time — a runtime-string name is resolved but not recorded"
+              "Windows: the order is an MSVC-STL port (Node's Windows build uses the MSVC STL, this toolchain mingw) not yet checked against a Windows `node:ffi`"
             ],
             "notes": [
-              "Records names registered through literal `getFunction`/`getSymbol` calls and `dlopen`/`getFunctions` definitions on that library value, in resolution order; addresses are re-`dlsym`'d at the read point"
+              "Fresh null-prototype objects, enumerated in Node's `std::unordered_map` order — the real container on macOS (libc++) and Linux (libstdc++), identical to Node by construction; every resolution is recorded, runtime-string names included. `lib.symbols` reads type as the typings' `bigint`"
             ]
           },
           {
             "feature": "Typed calls + marshalling (all scalar types, `string`, `pointer`, `buffer`, `arraybuffer`, 64-bit ↔ `bigint`)",
             "status": "implemented",
-            "caveats": [
-              "`int64`/`uint64` parameters also accept a plain `number` (Node requires `bigint`); `bool` marshals as 0/1 numbers, matching Node"
-            ],
             "notes": [
+              "Arguments are validated as Node does, for direct calls and calls through `any` alike: 8–32-bit integers in range (`-0` is rejected only by the 32-bit kinds), `int64`/`uint64` only an in-range `bigint`, floats any number, the pointer family a bigint in [0, 2^64), a string, a buffer/view/`ArrayBuffer`, `null` or `undefined`; a wrong argument count throws. `bool` is `uint8` and `char` the platform char (`int8` on macOS, `uint8` on Linux/arm64)",
+              "`string` is pointer-like exactly as in Node: a JS string *argument* to a C call is marshalled to a `char*`, but a `string` *return value* (and a `string` callback parameter) arrives as the raw pointer `bigint` — read it with `ffi.toString(ptr)`; Node does not auto-marshal it. Marshalling `string` returns/args to a JS value is a `klain:ffi` extension ([TDD-00190](../tdd/TDD-00190.md))",
               "A `function`-typed value can be passed through as a raw `bigint` address; to hand C a callable made from a closure, use `library.registerCallback([sig,] cb)` (its own row below), which emits a real C-ABI function pointer"
             ]
           },
@@ -83,8 +85,8 @@
             "feature": "`library.registerCallback([sig,] cb)` / `unregisterCallback(ptr)` / `refCallback` / `unrefCallback`",
             "status": "implemented",
             "caveats": [
-              "At most 16 concurrently-live callbacks per signature shape (static per-signature trampoline families — no runtime codegen); exceeding it throws, unregistered slots recycle",
-              "64-bit/pointer parameters must be declared `bigint` (and `string` as `string`) — validated with a clear compile-time error",
+              "At most 16 concurrently-live callbacks per signature shape (static per-signature trampoline families — no runtime codegen); exceeding it throws, unregistered slots recycle. This is a deliberate divergence-by-necessity: Node's libffi closures have no such limit (verified against a real `--experimental-ffi` build), but an unbounded closure model needs runtime codegen this backend does not do",
+              "64-bit/pointer/`string` parameters must be declared `bigint` (a `string` callback parameter is the raw `char*` pointer, as in Node) — validated with a clear compile-time error",
               "`refCallback`/`unrefCallback` are validated no-ops (a registered callback is always strongly referenced here), and `library.close()` does not invalidate callbacks — unregister explicitly; Node's same-thread/no-throw/no-promise runtime rules are not enforced"
             ]
           },
@@ -102,9 +104,8 @@
           {
             "feature": "`ffi.exportString/exportBuffer/exportArrayBuffer/exportArrayBufferView(src, ptr, length)`",
             "status": "implemented",
-            "caveats": [
-              "`exportString` supports only the `'utf8'` encoding (UTF-8-native strings) and truncates to the capacity — whether Node instead throws on overflow is unverified against a real `--experimental-ffi` build",
-              "A too-small `length` on the byte-export forms throws, as in Node"
+            "notes": [
+              "`exportString` takes any Buffer encoding (`utf16le`/`ucs2` write a 2-byte terminator) and validates like Node: the length is an integer `number` (`ERR_INVALID_ARG_TYPE` for a bigint, `ERR_OUT_OF_RANGE` otherwise), an unknown encoding is `ERR_UNKNOWN_ENCODING`, and a length that cannot hold the encoded string plus its terminator throws `ERR_OUT_OF_RANGE`; the byte-export forms need room for the source's `byteLength`"
             ]
           },
           {

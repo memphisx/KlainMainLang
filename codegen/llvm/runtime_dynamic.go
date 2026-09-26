@@ -13,6 +13,7 @@ func (e *Emitter) ensureAnyEq() {
 	}
 	e.usedAnyEq = true
 	e.ensureStrcmp()
+	e.ensureBoxedBigIntHooks()
 	e.emitGlobal(`
 define i1 @__kml_any_eq(i64 %a, i64 %b) {
 entry:
@@ -55,7 +56,30 @@ not_string:
   %aarr = and i1 %aptr, %aarr0
   %barr = and i1 %bptr, %barr0
   %botharr = and i1 %aarr, %barr
-  br i1 %botharr, label %cmp_array, label %not_equal
+  br i1 %botharr, label %cmp_array, label %not_array
+not_array:
+  ; both object-kind (kind bits 1) boxed bigint cells (field 0 = the exact
+  ; magic word, emit_bigint_box.go): bigints compare by value (TDD-00229)
+  %aobj0 = icmp eq i64 %ak, 1
+  %bobj0 = icmp eq i64 %bk, 1
+  %aobj = and i1 %aptr, %aobj0
+  %bobj = and i1 %bptr, %bobj0
+  %bothobj = and i1 %aobj, %bobj
+  br i1 %bothobj, label %cmp_obj, label %not_equal
+cmp_obj:
+  %oa = and i64 %a, -8
+  %ob = and i64 %b, -8
+  %oap = inttoptr i64 %oa to ptr
+  %obp = inttoptr i64 %ob to ptr
+  %fa = load i64, ptr %oap, align 8
+  %fb = load i64, ptr %obp, align 8
+  %abig = icmp eq i64 %fa, 9219994340110199574
+  %bbig = icmp eq i64 %fb, 9219994340110199574
+  %bothbig = and i1 %abig, %bbig
+  br i1 %bothbig, label %cmp_big, label %not_equal
+cmp_big:
+  %big_eq = call i1 @__kml_boxed_bigint_eq(ptr %oap, ptr %obp)
+  ret i1 %big_eq
 cmp_array:
   %ha = and i64 %a, -8
   %hb = and i64 %b, -8

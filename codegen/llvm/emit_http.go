@@ -1051,9 +1051,10 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 			// Node-faithful HTTP upgrade event (TDD-00158): store the handler
 			// in the module global the dispatcher's upgrade block reads. The
 			// block itself is emitted only when e.usedHTTPUpgrade — set by the
-			// whole-program pre-scan (programUsesHTTPUpgrade). If that pre-scan
-			// somehow missed this very call, the handler would be stored but
-			// never read; fail loudly rather than silently drop it.
+			// whole-program pre-scan (programUsesHTTPUpgrade). Its predicate
+			// (isUpgradeOnCall) and this dispatch must agree on what counts as
+			// an upgrade registration; if they ever don't, fail loudly rather
+			// than store a handler nothing reads.
 			if !e.usedHTTPUpgrade {
 				return Value{}, fmt.Errorf("%d:%d: internal: server.on('upgrade') was not detected by the upgrade pre-scan — please report", pos.Line, pos.Col)
 			}
@@ -2088,9 +2089,9 @@ func (e *Emitter) emitHTTPCloseAllConnections(args []ast.Expression, pos ast.Pos
 	return Value{Ty: TypeVoid}, nil
 }
 
-// emitClusterIsPrimary/emitClusterWorkerID implement the read-only
-// cluster.isPrimary/cluster.workerId globals (TDD-00025) — 0 for the
-// original process, 1..N-1 for each fork spawned by
+// emitClusterIsPrimary implements the read-only cluster.isPrimary global
+// (TDD-00025), from the process's worker id: 0 for the original process,
+// 1..N-1 for each fork spawned by
 // __kml_http_cluster_fork. ensureHTTPClusterFork() is called here too (not
 // just from http.listen itself) so @__kml_cluster_worker_id is guaranteed
 // declared even in the (unusual but valid) case a program reads cluster.*
@@ -2102,13 +2103,6 @@ func (e *Emitter) emitClusterIsPrimary() (Value, error) {
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", r, id))
 	return Value{Ref: r, Ty: TypeBool}, nil
-}
-
-func (e *Emitter) emitClusterWorkerID() (Value, error) {
-	e.ensureHTTPClusterFork()
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_cluster_worker_id, align 8", r))
-	return Value{Ref: r, Ty: TypeI64}, nil
 }
 
 // maxHTTPRequestBytes bounds how far buildHTTPDispatcher's read buffer will
@@ -2593,11 +2587,11 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	e.emitLabel(checkEagainL)
 	e.ensureErrnoAccessor()
 	errnoPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @%s()", errnoPtr, errnoAccessor()))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @%s()", errnoPtr, e.errnoAccessor()))
 	errnoVal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", errnoVal, errnoPtr))
 	isEagain := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, %d", isEagain, errnoVal, httpEagainErrno()))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, %d", isEagain, errnoVal, e.httpEagainErrno()))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isEagain, doYieldL, abEndL))
 
 	// abEndL: EOF or a non-EAGAIN read error. If any request bytes were already

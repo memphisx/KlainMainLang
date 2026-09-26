@@ -364,9 +364,7 @@ catch:
   store i64 %%etag64, ptr %%ev1_p, align 8
   call void @__kml_promise_settle(ptr %%prom, i64 2)
   ret void
-}`,
-		setjmpCall("%jb"),
-		respTy.StructSize(),
+}`, e.setjmpCall("%jb"), respTy.StructSize(),
 		fieldStore("status", "double", "%statusd", 8),
 		fieldStore("ok", "i1", "%ok", 1),
 		fieldStore("body", "ptr", "null", 8),

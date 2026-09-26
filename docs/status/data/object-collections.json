@@ -93,7 +93,8 @@
               "Inherited properties don't appear in `for...in` (own-only enumeration; real JS walks the chain's enumerables)"
             ],
             "notes": [
-              "The D1 prototype chain ([TDD-00155](../tdd/TDD-00155.md) Stage 3, [ADR-00623](../adr/ADR-00623.md)): property reads and the `in` operator walk the chain (own shadows inherited; `delete` re-exposes the proto's value), writes/`Object.keys`/`JSON.stringify` stay own-table — matching JS. `Object.create(proto|null)`, `get/setPrototypeOf`, the `__proto__` accessor (JS setter semantics: non-object values silently ignored), and the `{ __proto__: base }` literal form all work; a prototype cycle throws V8's `Cyclic __proto__ value`"
+              "The D1 prototype chain ([TDD-00155](../tdd/TDD-00155.md) Stage 3, [ADR-00623](../adr/ADR-00623.md)): property reads and the `in` operator walk the chain (own shadows inherited; `delete` re-exposes the proto's value), writes/`Object.keys`/`JSON.stringify` stay own-table — matching JS. `Object.create(proto|null)`, `get/setPrototypeOf`, the `__proto__` accessor (JS setter semantics: non-object values silently ignored), and the `{ __proto__: base }` literal form all work; a prototype cycle throws V8's `Cyclic __proto__ value`",
+              "A null prototype is tracked distinctly from an ordinary object's (unmodeled) `Object.prototype` link: such objects render `[Object: null prototype] { … }`, `Object.getPrototypeOf({})` is the shared `Object.prototype` object (not `null`), and `{ __proto__: null }` builds a null-prototype object ([ADR-01094](../adr/ADR-01094.md))"
             ]
           },
           {
@@ -122,7 +123,7 @@
             "feature": "`Reflect.get/set/has/deleteProperty/ownKeys/getPrototypeOf/setPrototypeOf/isExtensible/preventExtensions/defineProperty` + `defineMetadata`/`getMetadata`/`hasMetadata`",
             "status": "implemented",
             "caveats": [
-              "`Reflect.apply` / `Reflect.construct` are missing",
+              "`Reflect.construct` is missing; `Reflect.apply` takes a function value (a code-generated builtin such as `Math.max` is not one)",
               "The metadata API (`defineMetadata`/`getMetadata`/`getOwnMetadata`/`hasMetadata`/`hasOwnMetadata`, TDD-00161 Stage 3) stores on a dynamic-object target and does not walk the prototype chain (so `get` == `getOwn`); `Reflect.metadata` as a decorator factory is rejected",
               "Boolean-returning forms (`set`/`deleteProperty`/`setPrototypeOf`) return the success flag rather than throwing, per spec",
               "Every form requires a dynamic (`any`-typed, or `-compat=js`) target: a statically-typed object operand is a clean compile-time rejection (strict mode does not widen a typed struct to a bag, [ADR-00630](../adr/ADR-00630.md)), including `get`/`has`"
@@ -140,7 +141,7 @@
             "feature": "`Object.seal(obj)`",
             "status": "implemented",
             "notes": [
-              "A genuine no-op, not a scope-narrowed approximation: seal's guarantee (\"no new/deleted fields\") is already structurally impossible for this compiler's fixed-shape objects, so there's nothing further to enforce ([ADR-00055](../adr/ADR-00055.md))"
+              "A static object's shape is fixed at compile time, so seal enforces nothing further on it; it records the object's integrity level so `Object.isSealed`/`isFrozen`/`isExtensible` answer as in JS — as do `Object.preventExtensions` and `Object.freeze` ([ADR-01094](../adr/ADR-01094.md))"
             ]
           },
           {
@@ -191,8 +192,8 @@
             "feature": "Method shorthand `{ foo() {...} }`",
             "status": "implemented",
             "caveats": [
-              "No `this` binding at all — `this` inside a method-shorthand body is a clean compile-time rejection (an object literal has no nominal type to give `this` a shape, and no dynamic call-site binding machinery exists), not silently wrong",
-              "No `async`/generator method shorthand either, matching this compiler's class methods ([ADR-00169](../adr/ADR-00169.md))"
+              "`this` in a method-shorthand body is bound only when the literal's contextual type gives the method a `this: T` parameter (`{ read() { this.push(x) } }` against `read: (this: S, n: number) => void`, [ADR-01158](../adr/ADR-01158.md)); otherwise it is a clean compile-time rejection, where TypeScript types it as the object literal",
+              "No generator method shorthand (`*g() {}`): rejected like a generator expression used as a value ([ADR-00169](../adr/ADR-00169.md))"
             ],
             "notes": [
               "Desugars to `{ foo: function() {...} }` — a plain anonymous function value, reusing the same closure machinery ([TDD-00060](../tdd/TDD-00060.md))"

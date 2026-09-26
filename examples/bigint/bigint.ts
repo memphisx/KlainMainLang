@@ -27,7 +27,9 @@ console.log(~5n); // -6n
 // Comparisons and truthiness (0n is falsy).
 console.log(10n < 20n); // true
 console.log(50n > 10); // true — a bigint compares with an integer number
-console.log(42n == 42); // true — loose cross-type equality (mathematical)
+// Loose cross-type equality is mathematical; TypeScript allows == between a
+// bigint and a number only through a type that admits both.
+console.log((42n as bigint | number) == 42); // true
 if (0n) {
   console.log("unreachable");
 } else {
@@ -68,7 +70,7 @@ try {
   const zero = 0n;
   console.log(1n / zero);
 } catch (e) {
-  console.log(e.message); // Division by zero
+  console.log((e as Error).message); // Division by zero
 }
 
 // bigint and number deliberately don't mix: `a + 1` would be a compile error,

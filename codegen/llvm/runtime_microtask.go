@@ -50,9 +50,68 @@ app:
   ret void
 }`)
 
+	// The process.nextTick queue, apart from the promise jobs as in Node:
+	// every tick runs before the next promise job (processTicksAndRejections).
+	e.emitGlobal("@__kml_tq_data = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_tq_len  = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_tq_cap  = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_tq_head = internal thread_local global i64 0, align 8")
+	e.emitGlobal(`
+define void @__kml_nexttick_enqueue(ptr %cl) {
+entry:
+  %len = load i64, ptr @__kml_tq_len, align 8
+  %cap = load i64, ptr @__kml_tq_cap, align 8
+  %need = add i64 %len, 1
+  %grow = icmp sgt i64 %need, %cap
+  br i1 %grow, label %dogrow, label %app
+dogrow:
+  %data = load ptr, ptr @__kml_tq_data, align 8
+  %cap2 = mul i64 %cap, 2
+  %ge8 = icmp sgt i64 %cap2, 8
+  %nc = select i1 %ge8, i64 %cap2, i64 8
+  %bytes = mul i64 %nc, 8
+  %nd = call ptr @realloc(ptr %data, i64 %bytes)
+  store ptr %nd, ptr @__kml_tq_data, align 8
+  store i64 %nc, ptr @__kml_tq_cap, align 8
+  br label %app
+app:
+  %d = load ptr, ptr @__kml_tq_data, align 8
+  %slot = getelementptr ptr, ptr %d, i64 %len
+  store ptr %cl, ptr %slot, align 8
+  %nl = add i64 %len, 1
+  store i64 %nl, ptr @__kml_tq_len, align 8
+  ret void
+}`)
+	e.emitGlobal(`
+define void @__kml_drain_ticks() {
+entry:
+  br label %loop
+loop:
+  %head = load i64, ptr @__kml_tq_head, align 8
+  %len = load i64, ptr @__kml_tq_len, align 8
+  %more = icmp slt i64 %head, %len
+  br i1 %more, label %run, label %done
+run:
+  %data = load ptr, ptr @__kml_tq_data, align 8
+  %slot = getelementptr ptr, ptr %data, i64 %head
+  %cl = load ptr, ptr %slot, align 8
+  %nh = add i64 %head, 1
+  store i64 %nh, ptr @__kml_tq_head, align 8
+  %fp_p = getelementptr { ptr, ptr }, ptr %cl, i32 0, i32 0
+  %fp = load ptr, ptr %fp_p, align 8
+  %ep_p = getelementptr { ptr, ptr }, ptr %cl, i32 0, i32 1
+  %ep = load ptr, ptr %ep_p, align 8
+  call void (ptr) %fp(ptr %ep)
+  br label %loop
+done:
+  store i64 0, ptr @__kml_tq_head, align 8
+  store i64 0, ptr @__kml_tq_len, align 8
+  ret void
+}`)
+
 	// @__kml_microtasks_pending() -> i1: the event loop's select() must not
-	// block while reactions sit queued (TDD-00097 Stage 5 — a stream chain
-	// advanced by a pull_settled reaction stalled behind an indefinite
+	// block while reactions or ticks sit queued (TDD-00097 Stage 5 — a stream
+	// chain advanced by a pull_settled reaction stalled behind an indefinite
 	// select() before this check existed).
 	e.emitGlobal(`
 define i1 @__kml_microtasks_pending() {
@@ -60,14 +119,36 @@ entry:
   %head = load i64, ptr @__kml_mt_head, align 8
   %len = load i64, ptr @__kml_mt_len, align 8
   %pending = icmp slt i64 %head, %len
-  ret i1 %pending
+  %th = load i64, ptr @__kml_tq_head, align 8
+  %tl = load i64, ptr @__kml_tq_len, align 8
+  %tpending = icmp slt i64 %th, %tl
+  %any = or i1 %pending, %tpending
+  ret i1 %any
 }`)
 
-	// @__kml_drain_microtasks(): run queued callbacks FIFO until empty — a
-	// callback may enqueue more (chained .then), which are drained in the same
-	// pass, matching the microtask-checkpoint semantics.
+	// @__kml_drain_microtasks(): Node's processTicksAndRejections — every
+	// queued tick, then every promise job (a job may queue more, drained in
+	// the same pass), again while a job queued a tick.
 	e.emitGlobal(`
 define void @__kml_drain_microtasks() {
+entry:
+  br label %loop
+loop:
+  call void @__kml_drain_ticks()
+  call void @__kml_drain_promise_jobs()
+  %th = load i64, ptr @__kml_tq_head, align 8
+  %tl = load i64, ptr @__kml_tq_len, align 8
+  %again = icmp slt i64 %th, %tl
+  br i1 %again, label %loop, label %done
+done:
+  ret void
+}`)
+
+	// @__kml_drain_promise_jobs(): run queued promise jobs FIFO until empty
+	// — a job may enqueue more (chained .then), which are drained in the same
+	// pass, matching the microtask-checkpoint semantics.
+	e.emitGlobal(`
+define void @__kml_drain_promise_jobs() {
 entry:
   br label %loop
 loop:

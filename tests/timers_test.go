@@ -72,7 +72,7 @@ const id = setInterval(() => {
 func TestE2ESetIntervalSelfCancelsViaAssignment(t *testing.T) {
 	assertOutput(t, `
 let count: number = 0
-let id: number = 0
+let id: NodeJS.Timeout | undefined = undefined
 id = setInterval(() => {
     count = count + 1
     console.log("tick " + count)

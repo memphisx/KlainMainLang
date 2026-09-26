@@ -132,7 +132,7 @@ func (e *Emitter) emitForOfFlatArray(s *ast.ForOfStatement, arrTy Type, condL, b
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, dataSlot))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.StructIR(), data, idx2))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", gep, elemSlot))
-	if err := e.emitStmt(s.Body); err != nil {
+	if err := e.emitForOfBody(s); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))

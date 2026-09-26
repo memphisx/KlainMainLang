@@ -34,8 +34,8 @@ const fiberStackBytes = 1024 * 1024
 // errnoAccessor() above — this compiler always builds and runs on the same
 // host, so a compile-time Go-side branch is sufficient, no IR-level
 // conditional needed.
-func httpSockConstants() (solSocket, soReuseAddr int) {
-	if targetGOOS() == "darwin" {
+func (e *Emitter) httpSockConstants() (solSocket, soReuseAddr int) {
+	if e.opts.Target.OS() == "darwin" {
 		return 0xffff, 4
 	}
 	return 1, 2
@@ -50,8 +50,8 @@ func httpSockConstants() (solSocket, soReuseAddr int) {
 // to an already-used port must still fail and throw (SO_REUSEPORT would silently
 // let it succeed). The shared-fd `http.listen({workers})` model doesn't need it
 // either (it binds once and inherits the fd).
-func httpReusePortConst() int {
-	if targetGOOS() == "darwin" {
+func (e *Emitter) httpReusePortConst() int {
+	if e.opts.Target.OS() == "darwin" {
 		return 0x200
 	}
 	return 15
@@ -65,8 +65,8 @@ func httpReusePortConst() int {
 // split those same two bytes into sin_len (=16, the struct's own total
 // size) followed by a 1-byte sin_family. Port and address fields (offset
 // 2 and 4) are identical on both, so only these two bytes need branching.
-func httpSockaddrFamilyBytes() (byte0, byte1 int) {
-	if targetGOOS() == "darwin" {
+func (e *Emitter) httpSockaddrFamilyBytes() (byte0, byte1 int) {
+	if e.opts.Target.OS() == "darwin" {
 		return 16, 2 // sin_len=16, sin_family=AF_INET
 	}
 	return 2, 0 // sin_family=AF_INET as a little-endian i16
@@ -79,8 +79,8 @@ func httpSockaddrFamilyBytes() (byte0, byte1 int) {
 // memory, matching every other libc constant this project hardcodes. Used
 // by the event loop's accept path to make a freshly-accepted connection's
 // fd non-blocking before handing it to its own fiber.
-func httpNonblockFlag() int {
-	if targetGOOS() == "darwin" {
+func (e *Emitter) httpNonblockFlag() int {
+	if e.opts.Target.OS() == "darwin" {
 		return 0x4
 	}
 	return 0x800
@@ -90,8 +90,8 @@ func httpNonblockFlag() int {
 // macOS exposes it as `__stdoutp` (with `stdout` a macro over it); glibc and the
 // other Linux libcs export `stdout` directly. Used to setvbuf() stdout at startup
 // (ADR-00867). Not meaningful on Windows, which this is never called for.
-func stdoutGlobalSymbol() string {
-	if targetGOOS() == "darwin" {
+func (e *Emitter) stdoutGlobalSymbol() string {
+	if e.opts.Target.OS() == "darwin" {
 		return "__stdoutp"
 	}
 	return "stdout"
@@ -101,8 +101,8 @@ func stdoutGlobalSymbol() string {
 // is 0x1 on both; MAP_ANONYMOUS is 0x1000 on Darwin, 0x20 on Linux — the cluster
 // close-flag page (TDD-00117) is mmap'd with these before the worker fork so all
 // forked processes share one physical word.
-func mmapSharedAnonFlags() int {
-	if targetGOOS() == "darwin" {
+func (e *Emitter) mmapSharedAnonFlags() int {
+	if e.opts.Target.OS() == "darwin" {
 		return 0x1001
 	}
 	return 0x21
@@ -114,8 +114,8 @@ func mmapSharedAnonFlags() int {
 // loop checks the current errno against this after a failed non-blocking
 // read to distinguish "no data yet, yield and retry later" from a real
 // error.
-func httpEagainErrno() int {
-	if targetGOOS() == "darwin" {
+func (e *Emitter) httpEagainErrno() int {
+	if e.opts.Target.OS() == "darwin" {
 		return 35
 	}
 	return 11
@@ -144,16 +144,16 @@ func httpEagainErrno() int {
 // corruption, manifesting unpredictably depending on what happened to be
 // laid out next in memory (which is exactly what the observed symptoms —
 // connection resets, hangs — looked like).
-func ucontextLayout() (size, ssSpOff, ssSizeOff, ucLinkOff int64) {
-	if targetGOOS() == "windows" {
+func (e *Emitter) ucontextLayout() (size, ssSpOff, ssSizeOff, ucLinkOff int64) {
+	if e.opts.Target.OS() == "windows" {
 		// win32io.c's kml_ucontext: {fiber, ss_sp, ss_size, uc_link, fn, argc}.
 		return 64, 8, 16, 24
 	}
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		return 880, 8, 16, 32
 	}
 	// Linux (glibc): offsets are identical across architectures; size isn't.
-	if targetGOARCH() == "arm64" {
+	if e.opts.Target.Arch() == "arm64" {
 		return 4560, 16, 32, 8
 	}
 	return 968, 16, 32, 8 // amd64 and other 64-bit Linux targets
@@ -199,7 +199,7 @@ entry:
   store ptr %s, ptr %%errobj.name, align 8
   call void @__kml_throw(ptr %%errobj)
   ret void
-}`, errnoAccessor(), fmtPtr, errNamePtr))
+}`, e.errnoAccessor(), fmtPtr, errNamePtr))
 }
 
 // ensureSplitFirst declares __kml_split_first(ptr s, ptr sep) -> {ptr, ptr},
@@ -555,7 +555,7 @@ func (e *Emitter) ensureFiberRuntime() {
 	e.emitGlobal("declare void @getcontext(ptr noundef)")
 	e.emitGlobal("declare void @makecontext(ptr noundef, ptr noundef, i32 noundef, ...)")
 	e.emitGlobal("declare i32 @swapcontext(ptr noundef, ptr noundef)")
-	ctxSize, _, _, _ := ucontextLayout()
+	ctxSize, _, _, _ := e.ucontextLayout()
 	e.emitGlobal(fmt.Sprintf("@__kml_main_ctx = internal thread_local global [%d x i8] zeroinitializer, align 16", ctxSize))
 	e.emitGlobal("@__kml_conn_data = internal thread_local global ptr null, align 8")
 	e.emitGlobal("@__kml_conn_len = internal thread_local global i64 0, align 8")
@@ -1021,13 +1021,13 @@ define void @__kml_reactor_thread_lock() {
 	// over the accepted fd before HTTP parsing begins.
 	e.emitGlobal("@__kml_listen_connection_handler = internal thread_local global ptr null, align 8")
 
-	solSocket, soReuseAddr := httpSockConstants()
-	fam0, fam1 := httpSockaddrFamilyBytes()
+	solSocket, soReuseAddr := e.httpSockConstants()
+	fam0, fam1 := e.httpSockaddrFamilyBytes()
 
 	// TDD-00215 Stage 2: a bind/listen failure routes to a registered server
 	// 'error' listener (return -1) instead of throwing. errno is captured before
 	// close() (which can clobber it) and handed to the fire helper.
-	accessor := errnoAccessor()
+	accessor := e.errnoAccessor()
 	e.ensureErrnoAccessor()
 
 	e.ensureListeningAnnounceHook()
@@ -1135,8 +1135,7 @@ nffire:
 nfthrow:
   call void @__kml_http_throw(ptr %s)
   unreachable
-}`, e.httpListenInheritIR(), solSocket, soReuseAddr, solSocket, httpReusePortConst(), fam0, fam1, httpNonblockFlag(),
-		accessor, e.internString("http.listen: failed to bind or listen"),
+}`, e.httpListenInheritIR(), solSocket, soReuseAddr, solSocket, e.httpReusePortConst(), fam0, fam1, e.httpNonblockFlag(), accessor, e.internString("http.listen: failed to bind or listen"),
 		accessor, e.internString("http.listen: failed to create socket")))
 
 	e.emitHTTPBindErrorFireHelper()
@@ -1164,7 +1163,7 @@ nfthrow:
 	// ctxSize/ssSpOff/ssSizeOff/ucLinkOff: see ucontextLayout's doc comment
 	// — sizeof(ucontext_t) and its field offsets are NOT portable across
 	// platforms (a real bug found via a failing Linux CI run, fixed here).
-	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := ucontextLayout()
+	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := e.ucontextLayout()
 
 	// gc mode: repoint Boehm's GC_stackbottom at this fiber's own stack
 	// (stacks grow down, so the high end of the fiberStackBytes block is the
@@ -1547,7 +1546,7 @@ tlschk:` + xlTLSAccept + `
 setup:
   call i32 @setsockopt(i32 %newfd, i32 6, i32 1, ptr @__kml_http_nodelay_one, i32 4)
   %curflags = call i32 (i32, i32, ...) @fcntl(i32 %newfd, i32 3)
-  %newflags = or i32 %curflags, ` + fmt.Sprintf("%d", httpNonblockFlag()) + `
+  %newflags = or i32 %curflags, ` + fmt.Sprintf("%d", e.httpNonblockFlag()) + `
   call i32 (i32, i32, ...) @fcntl(i32 %newfd, i32 4, i32 %newflags)
   %dp = getelementptr { i64, ptr, ptr, ptr }, ptr %slot, i32 0, i32 1
   %dispatch = load ptr, ptr %dp, align 8
@@ -2154,12 +2153,21 @@ ccdone:
   %fwkeep = call i1 @__kml_fswatch_keepalive()
   ; async-I/O thread pool: an outstanding fs read/write keeps this loop alive
   ; so it doesn't exit before the completion settles its Promise (TDD-00185).
-  %plkeep = call i1 @__kml_pool_keepalive()
+  %plkeep0 = call i1 @__kml_pool_keepalive()
+  ; TCP handles of the builtin modules (net/http in TypeScript): a ref'd open
+  ; handle, a pending close or a queued write keeps this loop alive.
+  %tcpkeep = call i1 @__kml_tcp_keepalive()
+  %plkeep = or i1 %plkeep0, %tcpkeep
   ; TDD-00191 Stage 1: any open additional http server keeps the loop alive.
   %xlkeep = call i1 @__kml_http_xl_keepalive()
   ; TDD-00225: a pending dynamic-import island whose own loop still has work.
   %dikeep = call i1 @__kml_dynimport_keepalive()
-  %anywork0 = or i1 %havetimer, %haslistener
+  ; An unref'd timer fires while something else keeps the loop, but does not
+  ; keep it by itself.
+  %anytimerref = call i1 @__kml_timer_any_ref()
+  %havetimerref = and i1 %havetimer_js, %anytimerref
+  %havetimerkeep = or i1 %havetimerref, %hasesreconnect
+  %anywork0 = or i1 %havetimerkeep, %haslistener
   %anywork1 = or i1 %anywork0, %hasactiveconns
   %anywork2 = or i1 %anywork1, %hasopenes
   %anywork3 = or i1 %anywork2, %hasopenwsc
@@ -2382,6 +2390,13 @@ wscsetdone:
   ; is in flight, so select() sleeps until a worker posts a completion instead
   ; of spinning (TDD-00185). Returns 0 — no forced-zero timeout.
   call i1 @__kml_pool_fdset_add(ptr %fdset, ptr %maxfd)
+  ; TCP handles: listeners and readers in the read set, connects and queued
+  ; writes in the write set; ready work (a close, a failed connect) forces a
+  ; zero-timeout pass.
+  %tcpforce = call i1 @__kml_tcp_fdset_add(ptr %fdset, ptr %wfdset, ptr %maxfd)
+  %tcpfz0 = load i1, ptr %forcezero, align 1
+  %tcpfz1 = or i1 %tcpfz0, %tcpforce
+  store i1 %tcpfz1, ptr %forcezero, align 1
   ; readline: add stdin (fd 0) while an interface is open.
   %rlfdforce = call i1 @__kml_rl_fdset_add(ptr %fdset, ptr %maxfd)
   %rlfz0 = load i1, ptr %forcezero, align 1
@@ -2752,7 +2767,14 @@ afterselectok:
   call void @__kml_fswatch_dispatch()
   ; async-I/O thread pool: drain arrived completions and settle their Promises
   ; on this (the loop) thread (TDD-00185).
-  call void @__kml_pool_dispatch()
+  %plran0 = call zeroext i1 @__kml_pool_dispatch()
+  %tcpran = call zeroext i1 @__kml_tcp_dispatch()
+  %plran = or i1 %plran0, %tcpran
+  ; A completion's callback may have settled what a parked connection fiber
+  ; awaits: poke the fibers to re-check, as a fired timer's callback does.
+  %plpoke0 = load i8, ptr @__kml_conn_poke, align 1
+  %plpoke1 = select i1 %plran, i8 1, i8 %plpoke0
+  store i8 %plpoke1, ptr @__kml_conn_poke, align 1
   ; readline: drain stdin and emit 'line'/'close' events.
   call void @__kml_rl_dispatch()
   ; process.stdin: drain stdin and emit 'data'/'end' events.
@@ -2808,7 +2830,7 @@ doaccept:
 ` + h2tlsBranch + `
 setnonblock:
   %curflags = call i32 (i32, i32, ...) @fcntl(i32 %newfd, i32 3)
-  %newflags = or i32 %curflags, ` + fmt.Sprintf("%d", httpNonblockFlag()) + `
+  %newflags = or i32 %curflags, ` + fmt.Sprintf("%d", e.httpNonblockFlag()) + `
   call i32 (i32, i32, ...) @fcntl(i32 %newfd, i32 4, i32 %newflags)
   %primdispatch = load ptr, ptr @__kml_listen_dispatch, align 8
   call void @__kml_http_append_conn(i32 %newfd, ptr %primdispatch)

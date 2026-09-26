@@ -7,31 +7,36 @@
   "coverage": {
     "loose": "16/17",
     "loosePct": 94,
-    "strict": "1/17",
-    "strictPct": 6
+    "strict": "2/17",
+    "strictPct": 12
   },
-  "lede": "The smaller Node built-ins, grouped here rather than each given a full page. net/tls/dns/dgram fold their file descriptors into one select() loop; net.connect is fully asynchronous (non-blocking connect, an async 'error' event with a coded Error), while tls.connect's handshake and dns are still blocking under the hood, so a slow peer there stalls the loop. Messages across process and channel boundaries (cluster, diagnostics_channel) are strings, the http/https clients are GET-only over libcurl, and vm stays out of scope behind the same blocker as bare eval().",
+  "lede": "The smaller Node built-ins, grouped here rather than each given a full page. net, tls, http and https are Node's own layering ported to TypeScript — a net.Socket is a Duplex over a native TCP handle, a TLSSocket a Socket whose handle carries a non-blocking OpenSSL session, and http/https build on them — all on one event loop with dgram and dns. Messages across process and channel boundaries (cluster, diagnostics_channel) are strings, and vm stays out of scope behind the same blocker as bare eval().",
   "entries": [
     {
       "id": "nodecore.querystring",
-      "name": "querystring (.parse, .stringify)",
+      "name": "querystring (.parse, .stringify, .escape, .unescape)",
       "statusRow": "querystring (.parse, .stringify)",
-      "signature": "querystring.parse(str: string): Map<string,string>; querystring.stringify(m: Map<string,string>): string",
+      "signature": "querystring.parse(str: string, sep?: string, eq?: string, options?: ParseOptions): ParsedUrlQuery; querystring.stringify(obj?: ParsedUrlQueryInput, sep?: string, eq?: string, options?: StringifyOptions): string",
       "badge": "exact",
-      "description": "The legacy \"a=b&c=d\" parse/stringify pair, largely superseded by URLSearchParams but a natural companion when a request handler already holds a Map<string,string>. A Map goes in and comes out — the same shape req.query and URLSearchParams already use. .parse does not strip a leading '?' (matching real Node, and distinct from new URLSearchParams(str), which does).",
+      "description": "Node's legacy \"a=b&c=d\" parse/stringify, ported from Node's own lib/querystring.js. parse returns a null-prototype object; a repeated key collects its values into an array; a leading '?' is plain text (unlike new URLSearchParams(str)). stringify takes an object whose array values repeat the key. Custom separators, maxKeys and custom encode/decode functions are honoured; escape, unescape, unescapeBuffer, encode and decode are exported too.",
       "params": [
         {
-          "name": "str / m",
-          "type": "string | Map<string,string>",
-          "desc": "A raw query tail to parse, or a Map to serialize."
+          "name": "str / obj",
+          "type": "string | ParsedUrlQueryInput",
+          "desc": "A raw query tail to parse, or an object to serialize."
+        },
+        {
+          "name": "sep, eq",
+          "type": "string",
+          "desc": "The pair and key/value separators ('&' and '=' by default)."
         }
       ],
       "returns": {
-        "type": "Map<string,string> | string",
-        "desc": "The parsed map, or the serialized query string."
+        "type": "ParsedUrlQuery | string",
+        "desc": "The parsed object, or the serialized query string."
       },
       "exampleKey": "querystring/querystring",
-      "snippet": "const parsed = querystring.parse(\"name=Ada&topic=compilers%20and%20types\")\nconsole.log(parsed.get(\"topic\"))  // compilers and types",
+      "snippet": "const parsed = querystring.parse(\"topic=compilers%20and%20types&tag=a&tag=b\")\nconsole.log(parsed.topic)  // compilers and types\nconsole.log(parsed.tag)    // [ 'a', 'b' ]",
       "seeAlso": [
         "nodecore.httpclient"
       ],
@@ -130,7 +135,7 @@
       "statusRow": "net (TCP server: net.createServer, server.listen/address()/on('connection'|'listening')/close; TCP client: net.connect/createConnection (positional or { port, host }); connection socket .on('data'|'end')/.write/.end/.address()/.destroy()/.setNoDelay()/.setKeepAlive(); net.isIP/isIPv4/isIPv6)",
       "signature": "net.createServer(cb).listen(port, cb?); net.connect(port, host?, cb?)",
       "badge": "caveats",
-      "description": "TCP server and client. The accept loop and per-connection read pipes fold into the same select() event loop as child_process; net.connect is asynchronous — the socket returns immediately and the non-blocking connect completes on the loop, firing 'connect'/'ready' or an async 'error' (with a Node-shaped coded Error) then 'close'. 'data' delivers a Buffer; .write/.end take a string/Buffer/ArrayBuffer/DataView. address() reads the real bound address+port via getsockname+inet_ntop, making the listen(0) ephemeral-port idiom usable; net.isIP parses via inet_pton (0/4/6).",
+      "description": "Node's lib/net.js ported to TypeScript over native TCP handles on the event loop. A Socket is a Duplex — back-pressure and 'drain', pause/resume, setEncoding, setTimeout, ref/unref; Server listens by port/host/backlog/options or a Unix-socket path, dual-stack :: by default. Errors are built as Node builds them (connect ECONNREFUSED, getaddrinfo ENOTFOUND, with .code/.errno/.syscall/.address/.port).",
       "returns": {
         "type": "net.Server | net.Socket",
         "desc": "A server or connection handle."
@@ -138,14 +143,10 @@
       "exampleKey": "net/echo_server",
       "snippet": "const server = net.createServer((socket) => {\n  socket.on('data', (chunk: Uint8Array) => { socket.write(chunk); });\n});\nserver.listen(9099);",
       "differences": [
-        "`net.connect` is **asynchronous** — the socket returns immediately and the non-blocking connect completes on the event loop's write/except sets: `'connect'`/`'ready'` on success, or an async `'error'` (a Node-shaped coded Error — `connect ECONNREFUSED <ip>:<port>` / `getaddrinfo ENOTFOUND <host>`, with `.code`/`.errno`/`.syscall`/`.address`/`.port`) followed by `'close'` on failure. It never blocks the loop or throws synchronously",
-        "Server binds IPv4 `0.0.0.0` only (no `host`/`path`/options object on `listen`); `.address()` reports the **real** bound address/port via `getsockname` (`{ family: \"IPv4\", address, port }`) — for a server that's `0.0.0.0`, for a connected socket its real local IP (e.g. `127.0.0.1`). Because the bind is IPv4-native, an accepted socket reports `127.0.0.1` where Node's dual-stack default reports `::ffff:127.0.0.1`, and the server reports `IPv4`/`0.0.0.0` not `IPv6`/`::`",
-        "`net.connect` accepts every positional arity (`(port)`, `(port, cb)`, `(port, host[, cb])`) and `{ port, host }` (host defaults to `localhost`); the IPC `{ path }` form connects to a Unix-domain socket (Mac-verified; Linux path-layout unverified)",
-        "`on('listening')` fires when the server binds (registered before or after `listen()`); a client socket fires `'connect'`/`'ready'`/`'close'`/`'error'`, but there is no server `'error'` event yet, and a mid-connection transport error (post-connect read/write failure) is not surfaced as `'error'` — only connect-time failures emit it",
-        "`socket.setNoDelay`/`setKeepAlive` are real `setsockopt` calls — `setKeepAlive(enable, initialDelay)` honours the idle-time argument (`TCP_KEEPIDLE`, or `SIO_KEEPALIVE_VALS` on Windows); `setEncoding`/`ref`/`unref`/`pause`/`resume`/`setTimeout` are **accepted but no-ops** (the blocking read model has no separately-schedulable flow or idle timer, and a socket's chunk type already follows the listener's declared parameter type)",
-        "No back-pressure: `.write` never returns `false` and there's no `'drain'` event",
-        "Listeners must be arrow/function-expression literals",
-        "`net.Server`/`net.Socket` are not exposed as constructible classes"
+        "`connect`/`createConnection` take a port, an options object or `{ path }`; the connect is non-blocking and a failure arrives as an async `'error'` then `'close'`",
+        "`listen`'s `'listening'` and `'error'` fire on the next tick, as in Node; `maxConnections` and `getConnections` are supported; `isIP`/`isIPv4`/`isIPv6`",
+        "BlockList, SocketAddress and happy-eyeballs address selection (`autoSelectFamily`) are not ported",
+        "Windows keeps the earlier code-generated `net` (its TCP handles are POSIX sockets)"
       ],
       "seeAlso": [
         "nodecore.tls",
@@ -188,7 +189,7 @@
       "statusRow": "tls (TLS-wrapped sockets)",
       "signature": "tls.connect(port, host[, {rejectUnauthorized}][, onSecureConnect]); tls.createServer({ cert, key }, connectionListener)",
       "badge": "caveats",
-      "description": "Client tls.connect (cert verification + SNI on by default) and server tls.createServer({ cert, key }) both return net-shaped handles (an SSL* in the socket), so .on('data')/.write()/.end()/.on('connection') reuse the net machinery, routing through SSL_read/SSL_write. A handshake or verify failure throws a catchable Error.",
+      "description": "Node's _tls_wrap shape in TypeScript: a TLSSocket is a net.Socket whose handle carries a non-blocking OpenSSL session, so the handshake runs on the event loop. tls.connect supports servername, rejectUnauthorized, ca/cert/key and ALPN, firing 'secureConnect' with authorized/authorizationError and Node's verify error codes and messages; tls.createServer emits 'secureConnection' and 'tlsClientError'; createSecureContext, getProtocol and getCipher.",
       "returns": {
         "type": "tls.TLSSocket | tls.Server",
         "desc": "A net-shaped TLS handle."
@@ -196,9 +197,9 @@
       "exampleKey": "tls/tls_client",
       "snippet": "const sock = tls.connect(443, \"example.com\", () => {\n  sock.write(\"GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n\");\n});\nsock.on(\"data\", (chunk: string) => { response += chunk; });",
       "differences": [
-        "**Blocking** TCP connect + TLS handshake on both sides (a slow peer stalls the loop), the same simplification `net.connect` makes",
         "OpenSSL-only (libssl) — a `-crypto=commoncrypto` build using `tls` is a clean compile error (Mac's CommonCrypto has no TLS API)",
-        "Client options `{ rejectUnauthorized }` only (SNI = the host; no client-cert / ALPN / `servername` override); server `{ cert, key }` are PEM **strings** only (one cert per server, no chain/passphrase, no `requestCert`); the options may be an object literal or a bound object value"
+        "Session resumption, OCSP, renegotiation, PSK and `getPeerCertificate()`'s certificate object are not ported",
+        "Windows keeps the earlier code-generated, blocking `tls`"
       ],
       "seeAlso": [
         "nodecore.net",
@@ -313,17 +314,15 @@
       "statusRow": "http client (http.get/http.request)",
       "signature": "http.get(url, res => …); const req = http.request(opts); req.write(body); req.end()",
       "badge": "caveats",
-      "description": "A libcurl-backed HTTP client with async event-loop delivery and contextually-typed callbacks (including test wrappers). Both http.get and http.request return a ClientRequest handle, and a request can carry a body via req.write/req.end(body).",
+      "description": "Node's _http_agent/_http_client in TypeScript over net. http.get and http.request return a ClientRequest (an OutgoingMessage) and the response is an IncomingMessage — a Readable.",
       "returns": {
         "type": "ClientRequest",
         "desc": "A request handle; the response arrives via callback."
       },
       "differences": [
-        "Request bodies are supported: req.write(chunk) stages a string chunk (appending across calls) and req.end([body]) appends a final chunk before firing, paired with a method: \"POST\" option; response surface is `res.statusCode`/`res.on('data'/'end')`/`res.resume()`/`setEncoding`",
-        "Both calls return a ClientRequest handle: `request()` sends nothing until `.end()`; `.abort()`/`.destroy()` cancel only a not-yet-fired request (an in-flight transfer isn't torn down); `.on('error')` is accepted but never fired — transport failures throw instead",
-        "`new http.Agent(options)`/`new https.Agent(options)` construct an inert token: recognized pool options are validated but configure nothing (one connection per request), `.destroy()` is a no-op, and `.sockets`/`.requests` reject cleanly",
-        "Options objects (literal **or variable-bound**) support `{ port, path, host/hostname, method, headers, agent }`; `headers` is literal-form-only",
-        "`agent` is accepted and ignored — this client opens one connection per request (Node's own `agent: false` behavior); `new http.Agent(...)` itself is not implemented, and no pooling ever happens"
+        "ClientRequest: chunked or `Content-Length` bodies, `'response'`/`'socket'`/`'information'`/`'upgrade'`/`'error'`, `abort`/`destroy`/`setTimeout`",
+        "`http.Agent` pools keep-alive sockets; `http.globalAgent` keeps them alive and unref'd, as Node 19+",
+        "`http.request(new URL(…))` is not accepted — pass a string or an options object"
       ],
       "seeAlso": [
         "nodecore.https"
@@ -338,14 +337,13 @@
       "statusRow": "https (client: https.get/https.request)",
       "signature": "https.get(url, res => …); const req = https.request(opts); req.end()",
       "badge": "caveats",
-      "description": "get/request ride the same libcurl backend as the http client, so the TLS handshake and certificate verification come from the URL scheme — no https-specific machinery. Verified against a live TLS host on Mac.",
+      "description": "https.createServer is a tls.Server running the http module's connection handling; https.request/get/Agent/globalAgent connect with tls.connect. Same request and response objects as http.",
       "returns": {
         "type": "ClientRequest",
         "desc": "A request handle; the response arrives via callback."
       },
       "differences": [
-        "**Client only** — `https.createServer` is a clean rejection (the HTTP accept loop is not TLS-wrapped; use `tls.createServer` for a raw TLS socket server, or terminate TLS in front of `http.createServer`)",
-        "Same V1 client surface and caveats as `http.get`/`request`"
+        "Same client limit as `http` for a `URL` argument"
       ],
       "seeAlso": [
         "nodecore.httpclient",
@@ -375,8 +373,8 @@
     },
     {
       "id": "nodecore.cluster",
-      "name": "cluster (fork, worker messaging, isPrimary/isWorker/workerId, Worker.id/.process)",
-      "statusRow": "cluster (fork, worker messaging, isPrimary/isWorker/workerId, Worker.id/.process)",
+      "name": "cluster (fork, worker messaging, isPrimary/isWorker/worker, Worker.id/.process)",
+      "statusRow": "cluster (fork, worker messaging, isPrimary/isWorker/worker, Worker.id/.process)",
       "signature": "cluster.fork(); cluster.on('exit', (worker, code) => {}); cluster.workers[id]; cluster.setupPrimary({ args, silent }); cluster.disconnect(cb?)",
       "badge": "caveats",
       "description": "Unifies with http.listen({ workers: N })'s worker-id global — the primary stays in the event loop while workers live (via their IPC handles), then blocks in waitpid as the backstop. Workers carry the fork IPC channel with Node's json serialization mode: strings AND objects/arrays/numbers/booleans cross as themselves, both directions. Cluster-level events mirror Node's — cluster.on('fork'/'online'/'message'/'exit'/'disconnect'/'listening'), each passing the Worker first ('listening' adds { address, port, addressType }), in either registration order. cluster.workers is live (a reaped worker is dropped before its 'exit' listeners run, like Node) with cluster.workers[id] lookup; several listeners per event coexist in registration order; cluster.disconnect(cb) flushes in-flight messages; setupPrimary honors args (worker argv tail) and silent (worker stdio piped to worker.process.stdout/stderr), read back as cluster.settings.",

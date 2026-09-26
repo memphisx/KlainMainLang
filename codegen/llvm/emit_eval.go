@@ -35,7 +35,7 @@ func (e *Emitter) emitStaticEval(args []ast.Expression, pos ast.Pos) (Value, err
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: eval is only supported with a compile-time-constant string argument; a dynamic eval needs an embedded JS engine", pos.Line, pos.Col)
 	}
-	prog, err := parser.Parse(src)
+	prog, err := parser.ParseEval(src)
 	if err != nil {
 		return Value{}, fmt.Errorf("%d:%d: eval of a static string only supports a single expression, and this one did not parse as one: %v", pos.Line, pos.Col, err)
 	}
@@ -67,7 +67,7 @@ func (e *Emitter) inferStaticEvalType(args []ast.Expression) (Type, bool) {
 	if !ok {
 		return Type{}, false
 	}
-	prog, err := parser.Parse(src)
+	prog, err := parser.ParseEval(src)
 	if err != nil || len(prog.Body) != 1 {
 		return Type{}, false
 	}

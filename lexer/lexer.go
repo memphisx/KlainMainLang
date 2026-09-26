@@ -1,17 +1,33 @@
 package lexer
 
 import (
-	"fmt"
 	"strings"
 	"unicode"
+
+	"KlainMainLang/diag"
 )
 
 type Lexer struct {
-	src           []rune
+	src []rune
+	// offs[i] is the byte offset of src[i] in the original text; offs[len(src)]
+	// is the text's length. Token positions are reported in bytes.
+	offs          []int
 	pos           int
 	line          int
 	col           int
 	templateStack []int // brace depth for each open ${ expression
+	// mode is the reading the next token is scanned under (see ScanMode).
+	mode ScanMode
+	// sawNL: a line terminator was consumed since the previous token ended.
+	sawNL bool
+	// start of the token being scanned: rune index and preceding-line-break.
+	startPos int
+	startNL  bool
+	// pendingDoc is the last /** … */ comment since the previous token.
+	pendingDoc string
+	// Docs records every /** … */ comment by byte offset, including ones only
+	// passed during a scan the parser later rewound (a rescan revisits them).
+	Docs map[int]string
 	// lastSig is the most recently returned token's type, used only to
 	// disambiguate a `/` as the start of a regex literal (an expression is
 	// expected) vs. the division operator (a value just ended) — see
@@ -22,7 +38,100 @@ type Lexer struct {
 }
 
 func New(src string) *Lexer {
-	return &Lexer{src: []rune(src), pos: 0, line: 1, col: 1, lastSig: SEMICOLON}
+	runes := []rune(src)
+	offs := make([]int, 0, len(runes)+1)
+	for i := range src {
+		offs = append(offs, i)
+	}
+	offs = append(offs, len(src))
+	return &Lexer{src: runes, offs: offs, pos: 0, line: 1, col: 1, lastSig: SEMICOLON, Docs: map[int]string{}}
+}
+
+// ScanMode selects how an ambiguous character is read. The scanner always
+// produces the context-free reading; the parser, which knows the grammatical
+// context, asks for another one by rewinding to the token's start state.
+type ScanMode uint8
+
+const (
+	// ScanDefault: `>` is always a single GT; `/` is a regex where the
+	// previous token cannot end an expression (regexAllowed), else division.
+	ScanDefault ScanMode = iota
+	// ScanGlueGreater: `>` combines with following `>`/`=` into `>>`, `>>>`,
+	// `>=`, `>>=`, `>>>=` — only where a binary or assignment operator is
+	// expected, so `Array<Promise<T>>` never needs splitting.
+	ScanGlueGreater
+	// ScanRegex: a `/` starts a regular-expression literal (the parser expects
+	// a primary expression).
+	ScanRegex
+	// ScanNoRegex: a `/` is the division operator (the parser expects an
+	// operator).
+	ScanNoRegex
+)
+
+// State is everything the scanner needs to resume from a position. It is a
+// value: saving is a copy, restoring is an assignment.
+type State struct {
+	pos, line, col int
+	templateStack  []int
+	lastSig        TokenType
+	sawNL          bool
+	pendingDoc     string
+}
+
+// Mark returns the scanner's current state.
+func (l *Lexer) Mark() State {
+	return State{l.pos, l.line, l.col, append([]int(nil), l.templateStack...), l.lastSig, l.sawNL, l.pendingDoc}
+}
+
+// Rewind restores a state returned by Mark.
+func (l *Lexer) Rewind(st State) {
+	l.pos, l.line, l.col = st.pos, st.line, st.col
+	l.templateStack = append(l.templateStack[:0], st.templateStack...)
+	l.lastSig, l.sawNL, l.pendingDoc = st.lastSig, st.sawNL, st.pendingDoc
+}
+
+// Scan returns the next token read under mode. A tokenizing error comes back
+// as an ILLEGAL token whose Literal is the error text and Err the diagnostic.
+func (l *Lexer) Scan(mode ScanMode) Token {
+	l.mode = mode
+	tok, err := l.NextToken()
+	l.mode = ScanDefault
+	if err != nil {
+		t := Token{Type: ILLEGAL, Literal: err.Error(), Line: l.line, Col: l.col, Pos: l.offs[l.startPos], End: l.offs[l.pos]}
+		t.Err, _ = err.(*diag.Diagnostic)
+		return t
+	}
+	return tok
+}
+
+// errAt reports m at line:col (0:0 when the position is not known), spanning
+// the token scanned so far.
+func (l *Lexer) errAt(line, col int, m *diag.Message, args ...any) *diag.Diagnostic {
+	return diag.New(m, diag.Span{Pos: diag.Pos{Line: line, Col: col}, Start: l.offs[l.startPos], End: l.offs[l.pos]}, args...)
+}
+
+// Offset returns the byte offset of line:col (1-based; a column counts
+// characters, and only '\n' starts a line, as in the scanner's own positions).
+func (l *Lexer) Offset(line, col int) int {
+	if line < 1 || col < 1 {
+		return 0
+	}
+	i := 0
+	for ln := 1; ln < line && i < len(l.src); i++ {
+		if l.src[i] == '\n' {
+			ln++
+		}
+	}
+	i += col - 1
+	if i > len(l.src) {
+		i = len(l.src)
+	}
+	return l.offs[i]
+}
+
+// isLineTerminator: LF, CR, LINE SEPARATOR, PARAGRAPH SEPARATOR.
+func isLineTerminator(ch rune) bool {
+	return ch == '\n' || ch == '\r' || ch == '\u2028' || ch == '\u2029'
 }
 
 func (l *Lexer) peek() rune {
@@ -46,6 +155,9 @@ func (l *Lexer) advance() rune {
 	}
 	ch := l.src[l.pos]
 	l.pos++
+	if isLineTerminator(ch) {
+		l.sawNL = true
+	}
 	if ch == '\n' {
 		l.line++
 		l.col = 1
@@ -66,7 +178,12 @@ func (l *Lexer) skipWhitespace() {
 }
 
 func (l *Lexer) tok(typ TokenType, lit string, line, col int) Token {
-	return Token{Type: typ, Literal: lit, Line: line, Col: col}
+	t := Token{Type: typ, Literal: lit, Line: line, Col: col, Pos: l.offs[l.startPos], End: l.offs[l.pos], Doc: l.pendingDoc}
+	if l.startNL {
+		t.Flags |= PrecedingLineBreak
+	}
+	l.pendingDoc = ""
+	return t
 }
 
 // NextToken returns the next token, tracking lastSig across calls (used to
@@ -78,6 +195,7 @@ func (l *Lexer) tok(typ TokenType, lit string, line, col int) Token {
 // wrapper) only updates lastSig once per real token actually handed back
 // to the caller.
 func (l *Lexer) NextToken() (Token, error) {
+	l.sawNL = false
 	tok, err := l.nextToken()
 	if err != nil {
 		return tok, err
@@ -88,6 +206,7 @@ func (l *Lexer) NextToken() (Token, error) {
 
 func (l *Lexer) nextToken() (Token, error) {
 	l.skipWhitespace()
+	l.startPos, l.startNL = l.pos, l.sawNL
 
 	if l.pos >= len(l.src) {
 		return l.tok(EOF, "", l.line, l.col), nil
@@ -121,13 +240,15 @@ func (l *Lexer) nextToken() (Token, error) {
 				buf.WriteRune(l.advance())
 			}
 			if isJSDoc {
-				return l.tok(JSDOC, strings.TrimSpace(buf.String()), line, col), nil
+				doc := strings.TrimSpace(buf.String())
+				l.pendingDoc = doc
+				l.Docs[l.offs[l.startPos]] = doc
 			}
 			return l.nextToken()
 		}
 	}
 
-	if ch == '/' && l.regexAllowed() {
+	if ch == '/' && (l.mode == ScanRegex || (l.mode == ScanDefault && l.regexAllowed())) {
 		return l.readRegex(line, col)
 	}
 
@@ -234,6 +355,9 @@ func (l *Lexer) nextToken() (Token, error) {
 		}
 		return l.tok(LT, "<", line, col), nil
 	case '>':
+		if l.mode != ScanGlueGreater {
+			return l.tok(GT, ">", line, col), nil
+		}
 		if l.peek() == '>' {
 			l.advance()
 			if l.peek() == '>' {
@@ -345,7 +469,7 @@ func (l *Lexer) nextToken() (Token, error) {
 		return l.tok(AT, "@", line, col), nil
 	}
 
-	return Token{}, fmt.Errorf("%d:%d: unexpected character %q", line, col, ch)
+	return Token{}, l.errAt(line, col, diag.UnexpectedCharacter, ch)
 }
 
 // readDigitRun consumes a run of characters matching isDigit into buf,
@@ -362,7 +486,7 @@ func (l *Lexer) readDigitRun(buf *strings.Builder, isDigit func(rune) bool, line
 			lastWasDigit = true
 		} else if c == '_' {
 			if !lastWasDigit || !isDigit(l.peekAt(1)) {
-				return fmt.Errorf("%d:%d: numeric separator '_' must be between two digits", line, col)
+				return l.errAt(line, col, diag.NumericSeparatorPlacement)
 			}
 			l.advance()
 			lastWasDigit = false
@@ -443,10 +567,10 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 			lastWasDigit = false
 		} else if c == '_' {
 			if legacyLeadingZero {
-				return Token{}, fmt.Errorf("%d:%d: a numeric separator '_' is not allowed in a legacy octal or non-octal-decimal literal", line, col)
+				return Token{}, l.errAt(line, col, diag.NumericSeparatorLegacy)
 			}
 			if !lastWasDigit || !unicode.IsDigit(l.peekAt(1)) {
-				return Token{}, fmt.Errorf("%d:%d: numeric separator '_' must be between two digits", line, col)
+				return Token{}, l.errAt(line, col, diag.NumericSeparatorPlacement)
 			}
 			l.advance()
 			lastWasDigit = false
@@ -477,7 +601,7 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 					lastWasDigit = true
 				} else if c == '_' {
 					if !lastWasDigit || !unicode.IsDigit(l.peekAt(1)) {
-						return Token{}, fmt.Errorf("%d:%d: numeric separator '_' must be between two digits", line, col)
+						return Token{}, l.errAt(line, col, diag.NumericSeparatorPlacement)
 					}
 					l.advance()
 					lastWasDigit = false
@@ -489,13 +613,13 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 	}
 	if l.peek() == 'n' {
 		if hasDot {
-			return Token{}, fmt.Errorf("%d:%d: a BigInt literal cannot contain a decimal point", line, col)
+			return Token{}, l.errAt(line, col, diag.BigIntDecimalPoint)
 		}
 		if hasExp {
-			return Token{}, fmt.Errorf("%d:%d: a BigInt literal cannot contain an exponent", line, col)
+			return Token{}, l.errAt(line, col, diag.BigIntExponent)
 		}
 		if legacyLeadingZero {
-			return Token{}, fmt.Errorf("%d:%d: a BigInt literal cannot use a legacy-octal / non-octal-decimal form", line, col)
+			return Token{}, l.errAt(line, col, diag.BigIntLegacyOctal)
 		}
 		l.advance() // consume the 'n' suffix
 		return l.tok(BIGINT, buf.String(), line, col), nil
@@ -510,7 +634,7 @@ func (l *Lexer) readString(line, col int) (Token, error) {
 		c := l.peek()
 		if c == quote {
 			l.advance()
-			break
+			return l.tok(STRING, buf.String(), line, col), nil
 		}
 		if c == '\\' {
 			l.advance()
@@ -519,12 +643,15 @@ func (l *Lexer) readString(line, col int) (Token, error) {
 			}
 			continue
 		}
-		if c == '\n' && quote != '`' {
-			return Token{}, fmt.Errorf("%d:%d: unterminated string literal", line, col)
+		// A line feed or carriage return ends the line, and a string literal
+		// may not span lines (U+2028/U+2029 may appear in one).
+		if (c == '\n' || c == '\r') && quote != '`' {
+			return Token{}, l.errAt(line, col, diag.UnterminatedString)
 		}
 		buf.WriteRune(l.advance())
 	}
-	return l.tok(STRING, buf.String(), line, col), nil
+	// The input ended before the closing quote.
+	return Token{}, l.errAt(line, col, diag.UnterminatedString)
 }
 
 // scanStringEscape decodes one string-literal escape sequence (the leading
@@ -575,7 +702,7 @@ func (l *Lexer) scanStringEscape(buf *strings.Builder, line, col int) error {
 	case 'x':
 		v, ok := l.readHexEscape(2)
 		if !ok {
-			return fmt.Errorf("%d:%d: invalid hexadecimal escape sequence", line, col)
+			return l.errAt(line, col, diag.InvalidHexEscape)
 		}
 		buf.WriteRune(rune(v))
 	case 'u':
@@ -585,24 +712,24 @@ func (l *Lexer) scanStringEscape(buf *strings.Builder, line, col int) error {
 			for l.peek() != '}' && l.pos < len(l.src) {
 				d, ok := hexDigitVal(l.peek())
 				if !ok {
-					return fmt.Errorf("%d:%d: invalid Unicode escape sequence", line, col)
+					return l.errAt(line, col, diag.InvalidUnicodeEscape)
 				}
 				l.advance()
 				val = val*16 + d
 				n++
 				if val > 0x10FFFF {
-					return fmt.Errorf("%d:%d: Unicode code point out of range", line, col)
+					return l.errAt(line, col, diag.CodePointOutOfRange)
 				}
 			}
 			if n == 0 || l.peek() != '}' {
-				return fmt.Errorf("%d:%d: invalid Unicode escape sequence", line, col)
+				return l.errAt(line, col, diag.InvalidUnicodeEscape)
 			}
 			l.advance() // consume '}'
 			buf.WriteRune(rune(val))
 		} else {
 			v, ok := l.readHexEscape(4)
 			if !ok {
-				return fmt.Errorf("%d:%d: invalid Unicode escape sequence", line, col)
+				return l.errAt(line, col, diag.InvalidUnicodeEscape)
 			}
 			buf.WriteRune(rune(v))
 		}
@@ -614,7 +741,7 @@ func (l *Lexer) scanStringEscape(buf *strings.Builder, line, col int) error {
 			l.advance()
 		}
 	case 0:
-		return fmt.Errorf("%d:%d: unterminated string literal", line, col)
+		return l.errAt(line, col, diag.UnterminatedString)
 	default:
 		// NonEscapeCharacter — the character itself, without the backslash.
 		buf.WriteRune(esc)
@@ -700,13 +827,13 @@ func (l *Lexer) readRegex(line, col int) (Token, error) {
 	inClass := false
 	for {
 		if l.pos >= len(l.src) || l.peek() == '\n' {
-			return Token{}, fmt.Errorf("%d:%d: unterminated regular expression literal", line, col)
+			return Token{}, l.errAt(line, col, diag.UnterminatedRegExp)
 		}
 		c := l.peek()
 		if c == '\\' {
 			pattern.WriteRune(l.advance())
 			if l.pos >= len(l.src) || l.peek() == '\n' {
-				return Token{}, fmt.Errorf("%d:%d: unterminated regular expression literal", line, col)
+				return Token{}, l.errAt(line, col, diag.UnterminatedRegExp)
 			}
 			pattern.WriteRune(l.advance())
 			continue
@@ -731,7 +858,9 @@ func (l *Lexer) readRegex(line, col int) (Token, error) {
 	for l.pos < len(l.src) && unicode.IsLetter(l.peek()) {
 		flags.WriteRune(l.advance())
 	}
-	return Token{Type: REGEX, Literal: pattern.String(), Flags: flags.String(), Line: line, Col: col}, nil
+	t := l.tok(REGEX, pattern.String(), line, col)
+	t.RegexFlags = flags.String()
+	return t, nil
 }
 
 func (l *Lexer) readIdent(line, col int) (Token, error) {
@@ -776,12 +905,12 @@ func (l *Lexer) readTemplateSegment() (cooked, raw string, atEnd bool, err error
 	for l.pos < len(l.src) {
 		c := l.peek()
 		if c == '`' {
-			raw = string(l.src[rawStart:l.pos])
+			raw = normalizeLineTerminators(string(l.src[rawStart:l.pos]))
 			l.advance()
 			return buf.String(), raw, true, nil
 		}
 		if c == '$' && l.peekAt(1) == '{' {
-			raw = string(l.src[rawStart:l.pos])
+			raw = normalizeLineTerminators(string(l.src[rawStart:l.pos]))
 			l.advance() // $
 			l.advance() // {
 			return buf.String(), raw, false, nil
@@ -798,9 +927,26 @@ func (l *Lexer) readTemplateSegment() (cooked, raw string, atEnd bool, err error
 			}
 			continue
 		}
+		if c == '\r' {
+			// A template's CR LF and lone CR are LF, cooked and raw alike.
+			l.advance()
+			if l.pos < len(l.src) && l.peek() == '\n' {
+				l.advance()
+			}
+			buf.WriteByte('\n')
+			continue
+		}
 		buf.WriteRune(l.advance())
 	}
-	return "", "", false, fmt.Errorf("unterminated template literal")
+	return "", "", false, l.errAt(0, 0, diag.UnterminatedTemplate)
+}
+
+// normalizeLineTerminators turns a template's CR LF and lone CR into LF.
+func normalizeLineTerminators(s string) string {
+	if !strings.Contains(s, "\r") {
+		return s
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
 }
 
 // readTemplateHead is called when a backtick is seen (not yet consumed).
@@ -836,20 +982,4 @@ func (l *Lexer) readTemplatePart(line, col int) (Token, error) {
 	t := l.tok(TEMPLATE_MIDDLE, seg, line, col)
 	t.Raw = raw
 	return t, nil
-}
-
-func Tokenize(src string) ([]Token, error) {
-	l := New(src)
-	var tokens []Token
-	for {
-		tok, err := l.NextToken()
-		if err != nil {
-			return nil, err
-		}
-		tokens = append(tokens, tok)
-		if tok.Type == EOF {
-			break
-		}
-	}
-	return tokens, nil
 }

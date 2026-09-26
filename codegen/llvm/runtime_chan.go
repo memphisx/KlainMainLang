@@ -137,7 +137,7 @@ reg:
 
 done:
   ret ptr %%ep
-}`, epAlloc, httpNonblockFlag(), chanEpIR, chanEpIR, chanEpIR, chanEpIR, chanEpIR))
+}`, epAlloc, e.httpNonblockFlag(), chanEpIR, chanEpIR, chanEpIR, chanEpIR, chanEpIR))
 
 	// __kml_chan_append: generic doubling append of ep into the (data, len,
 	// cap) triple at the given global slots. Caller synchronizes.

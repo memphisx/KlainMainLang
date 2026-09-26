@@ -179,9 +179,9 @@ class Node {
 const c = new Node(3, null);
 const b = new Node(2, c);
 const a = new Node(1, b);
-console.log(a.nextNode.nextNode.value)
+console.log(a.nextNode!.nextNode!.value)
 const { nextNode } = b;
-console.log(nextNode.value)
+console.log(nextNode!.value)
 `, "3\n3")
 }
 
@@ -481,7 +481,7 @@ console.log(f instanceof Bar)
 	if err == nil {
 		t.Fatal("expected a compile error for instanceof against an unregistered class")
 	}
-	if !strings.Contains(err.Error(), "not a registered class") {
+	if !strings.Contains(err.Error(), "cannot find name 'Bar'") { // tsc's TS2304
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -764,7 +764,7 @@ class Derived extends Ghost {
 	if err == nil {
 		t.Fatal("expected a compile error for extending an unknown class")
 	}
-	if !strings.Contains(err.Error(), "extends unknown class") {
+	if !strings.Contains(err.Error(), "cannot find name 'Ghost'") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -801,6 +801,9 @@ class Derived extends Base {
 	}
 }
 
+// A subclass redeclaring an inherited field with an incompatible type is an
+// error (tsc's TS2416); the same type is ordinary TypeScript
+// (TestE2ESubclassRedeclaresInheritedField).
 func TestE2EClassCollidingFieldNameIsError(t *testing.T) {
 	_, err := parseAndCompile(`
 class Base {
@@ -808,14 +811,14 @@ class Base {
   constructor(x: number) { this.x = x; }
 }
 class Derived extends Base {
-  x: number;
-  constructor(x: number) { super(x); this.x = x; }
+  x: string;
+  constructor(x: number) { super(x); this.x = "s"; }
 }
 `)
 	if err == nil {
-		t.Fatal("expected a compile error for a field colliding with an inherited one")
+		t.Fatal("expected a compile error for a field redeclared with an incompatible type")
 	}
-	if !strings.Contains(err.Error(), "redeclares inherited field") {
+	if !strings.Contains(err.Error(), "redeclares inherited field") && !strings.Contains(err.Error(), "TS2416") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -907,7 +910,7 @@ class Other {
 	if err == nil {
 		t.Fatal("expected a compile error for private field access from an unrelated class")
 	}
-	if !strings.Contains(err.Error(), "is private and not accessible") {
+	if !strings.Contains(err.Error(), "is private and only accessible within class") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -925,7 +928,7 @@ class Other {
 	if err == nil {
 		t.Fatal("expected a compile error for protected field access from an unrelated class")
 	}
-	if !strings.Contains(err.Error(), "is protected and not accessible") {
+	if !strings.Contains(err.Error(), "is protected and only accessible within class") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -942,7 +945,7 @@ console.log(a.balance)
 	if err == nil {
 		t.Fatal("expected a compile error for private field access from top-level code")
 	}
-	if !strings.Contains(err.Error(), "is private and not accessible") {
+	if !strings.Contains(err.Error(), "is private and only accessible within class") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -1063,7 +1066,7 @@ console.log(b.#v);
 	if err == nil {
 		t.Fatal("expected a compile error for private-name field access from outside the class")
 	}
-	if !strings.Contains(err.Error(), "is private and not accessible") {
+	if !strings.Contains(err.Error(), "is not declared in an enclosing class") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -1083,7 +1086,7 @@ class Derived extends Base {
 	if err == nil {
 		t.Fatal("expected a compile error for a subclass reading a base class's private-name field")
 	}
-	if !strings.Contains(err.Error(), "is private and not accessible") {
+	if !strings.Contains(err.Error(), "is not declared in an enclosing class") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -1099,7 +1102,7 @@ class Box {
 	if err == nil {
 		t.Fatal("expected a compile error for referencing an undeclared private name")
 	}
-	if !strings.Contains(err.Error(), "no field '#nope'") {
+	if !strings.Contains(err.Error(), "the private name '#nope' is not declared in an enclosing class") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -1120,8 +1123,8 @@ class Box {
 }
 
 // TestE2ESuperPrivateMethodIsError guards a subtle correctness point: an
-// explicit super.method() call still goes through checkMemberVisibility
-// even though it always dispatches directly (never virtual) — the
+// explicit super.method() call is still checked (TS2341) even though it
+// always dispatches directly (never virtual) — the
 // enclosing class there is the *subclass*, which a private check on the
 // *base*'s own method must still refuse, matching real JS/TS (private
 // members are never accessible from a subclass, only the exact declaring
@@ -1138,7 +1141,7 @@ class Derived extends Base {
 	if err == nil {
 		t.Fatal("expected a compile error for super.privateMethod()")
 	}
-	if !strings.Contains(err.Error(), "is private and not accessible") {
+	if !strings.Contains(err.Error(), "is private and only accessible within class") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -1164,7 +1167,7 @@ const s = new Singleton();
 	if err == nil {
 		t.Fatal("expected a compile error for a private constructor called from outside the class")
 	}
-	if !strings.Contains(err.Error(), "is private and not accessible") {
+	if !strings.Contains(err.Error(), "is private and only accessible within the class declaration") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -2459,4 +2462,169 @@ class Box { p = new Point(); n = 42; }
 const b = new Box();
 console.log(b.p.x, b.p.y, b.n);
 `, "1 2 42")
+}
+
+// A `;` between class members is an empty class element.
+func TestE2EClassEmptyElements(t *testing.T) {
+	assertOutput(t, `
+class A { ; m() { return 1 }; n() { return 2 };; x = 3; }
+const a = new A()
+console.log(a.m() + a.n() + a.x)
+`, "6")
+}
+
+// A computed `["constructor"]` key names an ordinary method, not the
+// constructor: the class keeps its real constructor, and the method is
+// callable by that name.
+func TestE2EClassComputedConstructorKeyIsMethod(t *testing.T) {
+	assertOutput(t, `
+let r = 0
+class B {
+  constructor() { r += 2 }
+  ["constructor"]() { r += 1 }
+}
+const b = new B()
+console.log(r)
+b.constructor()
+console.log(r)
+`, "2\n3")
+}
+
+// A definite assignment assertion (`name!: T`) declares a field set outside
+// the constructor; it parses and the field reads what the method stored.
+func TestE2EClassDefiniteAssignmentField(t *testing.T) {
+	assertOutput(t, `
+class Conn {
+  host!: string;
+  port!: number;
+  constructor(url: string) { this.init(url); }
+  init(url: string): void {
+    const i = url.indexOf(":");
+    this.host = url.slice(0, i);
+    this.port = Number(url.slice(i + 1));
+  }
+}
+const c = new Conn("thessaloniki.example:8080");
+console.log(c.host, c.port);
+`, "thessaloniki.example 8080")
+}
+
+// An optional parameter property (`public p?: T`) declares an optional
+// field: called without the argument, it reads undefined, not a zero or
+// null stand-in.
+func TestE2EOptionalParameterProperty(t *testing.T) {
+	assertOutput(t, `
+class C { constructor(public p?: number, public s?: string) {} }
+const c = new C()
+console.log(c.p, c.s, c.p === undefined, c.s === undefined)
+const d = new C(2, "x")
+console.log(d.p, d.s)
+`, "undefined undefined true true\n2 x")
+}
+
+// A derived class calls super() even when its base has no constructor; the
+// `this` type in a method; a closure with fixed parameters passed where a
+// rest signature is expected; the empty tuple type.
+func TestE2ESuperThisTypeRestSpread(t *testing.T) {
+	assertOutput(t, `
+class Base { x = 5 }
+class Derived extends Base {
+  y: number
+  constructor() { super(); this.y = 7 }
+  self(): this { return this }
+}
+const d = new Derived()
+console.log(d.self().y, d.x)
+function call(f: (...args: any[]) => void) { f("a", 2) }
+call((s: string, n: number) => console.log(s, n))
+function run(cb: (...args: any[]) => void) { cb("u", 9) }
+run((a, b) => console.log(typeof a, a, b))
+type NoArgs = []
+const none: NoArgs = []
+console.log(none.length)
+`, "7 5\na 2\nstring u 9\n0")
+}
+
+// A parameter property's default may hold a closure over an earlier
+// parameter.
+func TestE2EParameterPropertyDefaultClosure(t *testing.T) {
+	assertOutput(t, `
+class C {
+    constructor(y: number, public x = ((z: number) => z + y)(1)) {}
+}
+console.log(new C(10).x)
+console.log(new C(1, 7).x)
+`, "11\n7")
+}
+
+// An override may declare fewer parameters than the method it overrides,
+// as TypeScript allows; a call through the base passes the rest unused.
+func TestE2EOverrideWithFewerParameters(t *testing.T) {
+	assertOutput(t, `
+class Base {
+  step(size: number, tag: string): string { return "base " + size + tag }
+  run(): string { return this.step(16, "!") }
+}
+class Derived extends Base {
+  step(): string { return "derived" }
+}
+const b: Base = new Derived();
+console.log(b.run(), new Base().run())
+`, "derived base 16!")
+}
+
+// An arrow inside a method reads the class's private members, and an
+// element access by name reaches a private member, as TypeScript allows.
+func TestE2EPrivateMemberFromArrowAndElementAccess(t *testing.T) {
+	assertOutput(t, `
+class Counter {
+  private n = 0;
+  private bump(): number { return ++this.n }
+  twice(): number { const f = () => this.bump(); f(); return f() }
+}
+const c = new Counter();
+console.log(c.twice(), c["n"], c["bump"]())
+`, "2 2 3")
+}
+
+func TestE2EProtectedMemberThroughOtherInstanceIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class A { protected q = 1 }
+class B extends A { peek(a: A): number { return a.q } }
+`)
+	if err == nil || !strings.Contains(err.Error(), "is protected and only accessible through an instance of class 'B'") {
+		t.Fatalf("want TS2446, got %v", err)
+	}
+}
+
+// An object literal passed to a method's, a static method's or a
+// constructor's `any` parameter is the object, as it is for a function's.
+func TestE2EObjectLiteralIntoAnyParameterOfMethod(t *testing.T) {
+	assertOutput(t, `
+class U {
+  static show(c: any): void { console.log(c) }
+  constructor(c: any) { console.log(c) }
+  put(c: any): void { console.log(c) }
+}
+U.show({ k: 1 });
+new U({ k: 2 }).put({ k: 3 });
+`, "{ k: 1 }\n{ k: 2 }\n{ k: 3 }")
+}
+
+// A local a method's closure captures in one branch is still a shared cell
+// in the other (the eager capture boxing functions already had).
+func TestE2EMethodClosureCapturedInOneBranch(t *testing.T) {
+	assertOutput(t, `
+class W {
+  private hook?: (cb: () => void) => void;
+  constructor(hook?: (cb: () => void) => void) { this.hook = hook }
+  finish(): void {
+    const done = () => { console.log("done") };
+    if (this.hook) this.hook(() => { done() });
+    else done();
+  }
+}
+new W().finish();
+new W((cb) => { console.log("hooked"); cb() }).finish();
+`, "done\nhooked\ndone")
 }

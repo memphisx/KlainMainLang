@@ -11,7 +11,7 @@ assert(true, "this message is never seen")
 try {
   assert(false, "expected true")
 } catch (e) {
-  console.log(e.name + ": " + e.message)  // AssertionError: expected true
+  console.log((e as Error).name + ": " + (e as Error).message)  // AssertionError: expected true
 }
 
 // ── equal / strictEqual (aliases here — this compiler's == is already
@@ -22,7 +22,7 @@ assert.strictEqual("a" + "b", "ab")
 try {
   assert.equal(1, 2)
 } catch (e) {
-  console.log(e.message)  // values are not equal
+  console.log((e as Error).message)  // values are not equal
 }
 
 // ── notEqual / notStrictEqual ─────────────────────────────────────────────
@@ -31,14 +31,14 @@ assert.notEqual(1, 2)
 try {
   assert.notStrictEqual(5, 5)
 } catch (e) {
-  console.log(e.message)  // values are equal
+  console.log((e as Error).message)  // values are equal
 }
 
 // ── fail: always throws ───────────────────────────────────────────────────
 try {
   assert.fail("unreachable branch was reached")
 } catch (e) {
-  console.log(e.message)  // unreachable branch was reached
+  console.log((e as Error).message)  // unreachable branch was reached
 }
 
 // ── throws: expects the given zero-arg function to throw ─────────────────
@@ -52,7 +52,7 @@ try {
     const x = 1  // never throws
   }, "expected an error")
 } catch (e) {
-  console.log(e.message)  // expected an error
+  console.log((e as Error).message)  // expected an error
 }
 
 // ifError fails on any truthy value (the Node callback-style error guard);

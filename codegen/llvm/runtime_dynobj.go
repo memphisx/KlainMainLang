@@ -4,8 +4,9 @@ package llvm
 // per-instance property bag behind box tag 10 (kmlTagDynObject). Layout:
 //
 //	DynObj header (48 bytes):
-//	  offset 0:  i64 flags   — low 32 bits magic 0x444C4D4B ("KMLD"); high bits
-//	                           reserved for EXTENSIBLE/SEALED/FROZEN (Stage 5)
+//	  offset 0:  i64 flags   — low 32 bits magic 0x444C4D4B ("KMLD"); bit 32
+//	                           non-extensible, bit 33 Proxy, bit 34 NULLPROTO
+//	                           (prototype explicitly null — set_proto, TDD-00229)
 //	  offset 8:  ptr proto   — prototype pointer (live since Stage 3: get and
 //	                           the `in` operator walk it; set/delete/keys stay
 //	                           own-table; set_proto keeps chains acyclic)
@@ -488,13 +489,45 @@ define ptr @__kml_dynobj_get_proto(ptr %o) {
 entry:
   %protop = getelementptr i8, ptr %o, i64 8
   %proto = load ptr, ptr %protop, align 8
+  %isnull = icmp eq ptr %proto, null
+  br i1 %isnull, label %unset, label %done
+unset:
+  ; An ordinary object's [[Prototype]] is Object.prototype, whose chain is not
+  ; linked into every bag; only a NULLPROTO (1<<34) or Proxy (1<<33) bag
+  ; really answers null here (TDD-00229).
+  %fl = load i64, ptr %o, align 8
+  %special = and i64 %fl, 25769803776
+  %isspecial = icmp ne i64 %special, 0
+  br i1 %isspecial, label %done, label %objproto
+objproto:
+  %op = call ptr @__kml_object_prototype()
+  ret ptr %op
+done:
   ret ptr %proto
+}
+
+; Object.prototype: one shared bag whose own prototype is null (renders
+; as [Object: null prototype] {}, as in Node). Created on first use.
+@__kml_objproto = internal global ptr null, align 8
+define ptr @__kml_object_prototype() {
+entry:
+  %cur = load ptr, ptr @__kml_objproto, align 8
+  %have = icmp ne ptr %cur, null
+  br i1 %have, label %ret, label %make
+make:
+  %b = call ptr @__kml_dynobj_new()
+  %ok = call i1 @__kml_dynobj_set_proto(ptr %b, ptr null)
+  store ptr %b, ptr @__kml_objproto, align 8
+  ret ptr %b
+ret:
+  ret ptr %cur
 }
 
 ; set_proto refuses a cycle (returns false), keeping every chain acyclic so
 ; the get/has walks need no visited set. proto may be null.
 define i1 @__kml_dynobj_set_proto(ptr %o, ptr %proto) {
 entry:
+  %isnull0 = icmp eq ptr %proto, null
   br label %scan
 scan:
   %cur = phi ptr [ %proto, %entry ], [ %parent, %step ]
@@ -510,6 +543,14 @@ step:
 ok:
   %slot = getelementptr i8, ptr %o, i64 8
   store ptr %proto, ptr %slot, align 8
+  ; NULLPROTO (1<<34, TDD-00229): a prototype explicitly set to null, as
+  ; distinct from an ordinary object whose Object.prototype link is not
+  ; modeled (proto slot also null). Cleared when a real prototype is set.
+  %fl = load i64, ptr %o, align 8
+  %flclr = and i64 %fl, -17179869185
+  %flset = or i64 %fl, 17179869184
+  %flnew = select i1 %isnull0, i64 %flset, i64 %flclr
+  store i64 %flnew, ptr %o, align 8
   ret i1 true
 cycle:
   ret i1 false

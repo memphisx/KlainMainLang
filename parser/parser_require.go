@@ -1,7 +1,7 @@
 package parser
 
 import (
-	"fmt"
+	"KlainMainLang/diag"
 
 	"KlainMainLang/ast"
 )
@@ -51,7 +51,7 @@ func (p *Parser) desugarRequire(stmt ast.Statement) (ast.Statement, error) {
 		specs := make([]ast.ImportSpecifier, 0, len(s.Props))
 		for _, prop := range s.Props {
 			if prop.Default != nil || prop.SubArray != nil || prop.SubObject != nil || prop.Rest {
-				return nil, fmt.Errorf("%d:%d: only simple `{ a, b: c }` destructuring is supported when binding a require('...') import (no defaults, nested patterns, or rest)", s.GetPos().Line, s.GetPos().Col)
+				return nil, errAtPos(s.GetPos(), diag.RequireDestructure)
 			}
 			specs = append(specs, ast.ImportSpecifier{Imported: prop.Key, Local: prop.Local})
 		}
@@ -95,5 +95,5 @@ func requireCall(expr ast.Expression) (source string, matched, dynamic bool) {
 }
 
 func requireDynamicErr(pos ast.Pos) error {
-	return fmt.Errorf("%d:%d: dynamic require(...) with a non-string-literal module path is not supported — use a string-literal path (e.g. require('path')); runtime/lazy module loading is a separate capability", pos.Line, pos.Col)
+	return errAtPos(pos, diag.DynamicRequire)
 }

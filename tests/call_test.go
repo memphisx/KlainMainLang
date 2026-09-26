@@ -154,7 +154,7 @@ console.log('ok')
 func TestE2EConsoleAssertFail(t *testing.T) {
 	// failing assertion prints to stderr; stdout is unaffected
 	assertOutput(t, `
-console.assert(1 === 2, 'bad math')
+console.assert((1 as number) === 2, 'bad math')
 console.log('still running')
 `, "still running")
 }
@@ -429,6 +429,139 @@ console.log(Math.log1p(0.0))
 `, "3\n0\n0")
 }
 
+// Math functions compiled from their builtin declarations (lib/es.d.ts
+// `@lower`): exp and the inverse hyperbolics, a shadowed Math left alone, and
+// the JavaScript call shapes — an extra argument evaluated and ignored, a
+// missing one NaN (ToNumber(undefined)).
+func TestE2EMathLoweredFromDeclarations(t *testing.T) {
+	assertOutput(t, `
+console.log(Math.exp(0), Math.asinh(0), Math.acosh(1), Math.atanh(0))
+console.log(Math.acosh(0.5), Math.atanh(1), Math.exp(-Infinity))
+const xs: number[] = [4, 9]
+console.log(xs.map((x) => Math.sqrt(x)).join(","))
+function shadowed(): number {
+	const Math = { sqrt: (x: number) => x + 1 }
+	return Math.sqrt(3)
+}
+console.log(shadowed())
+`, "1 0 0 0\nNaN Infinity 0\n2,3\n4")
+	assertOutputCompatJS(t, `
+let n = 0
+const bump = () => { n++; return 1 }
+console.log(Math.sin(), Math.atan2(1), Math.sqrt(16, bump()), n)
+`, "NaN NaN 4 1")
+}
+
+// String methods compiled from their builtin declarations (lib/es.d.ts
+// `@lower`): the receiver passed first, a user method of the same name left
+// alone, an optional position absent (omitted, `undefined`, or undefined at
+// run time) or present, an empty search string found at the position, a
+// callback parameter the checker cannot type, and ToString of the search.
+func TestE2EStringLoweredFromDeclarations(t *testing.T) {
+	assertOutput(t, `
+const s = "  Hello World  "
+console.log("[" + s.trim() + "]", "[" + s.trimStart() + "]", "[" + s.trimEnd() + "]")
+console.log(s.toUpperCase().trim(), s.toLowerCase().trim())
+class K { trim(): string { return "mine" } }
+console.log(new K().trim())
+const t = "hello world, hello"
+let u: number | undefined
+console.log(t.indexOf("hello", 1), t.indexOf("o", undefined), t.indexOf("o", u), t.indexOf("x"))
+u = 6
+console.log(t.indexOf("o", u), t.indexOf("o", -5), t.indexOf("o", NaN), t.indexOf("o", Infinity))
+console.log(t.indexOf(""), t.indexOf("", 99), t.includes(""), t.includes("world", 7), t.includes("hello", 13))
+console.log("hello".replace(/l/g, (m) => m.toUpperCase()), "abc".replace("", "-"))
+`, "[Hello World] [Hello World  ] [  Hello World]\nHELLO WORLD hello world\nmine\n13 4 4 -1\n7 4 4 -1\n0 18 true false true\nheLLo -abc")
+	assertOutputCompatJS(t, `
+const s = "a1b1"
+const w: any = 2
+console.log(s.indexOf(1), s.indexOf("b", w), s.includes(1, 3), "a5b".search(5))
+`, "1 2 true 1")
+}
+
+// The index-based String methods, compiled from their declarations into the
+// C string runtime: ToIntegerOrInfinity positions, negative bounds, an
+// optional argument undefined at run time, and padStart's RangeError past
+// the longest string Node makes. Expected output is Node's.
+func TestE2EStringIndexMethodsLowered(t *testing.T) {
+	assertOutput(t, `
+const s = "hello world"
+let u: number | undefined
+console.log(s.charAt(1), s.charAt(-1) === "", s.charAt(99) === "", s.charCodeAt(0), s.charCodeAt(99))
+console.log(s.slice(-5), s.slice(2, -3), s.slice(5, 2) === "", s.slice(2, u), s.slice(NaN, 3))
+console.log(s.substring(7, 2), s.substring(-3, 4), s.substring(3, u), s.substr(-5, 3), s.substr(2, u))
+console.log(s.startsWith("wor", 6), s.startsWith("hel", -9), s.endsWith("hell", 4), s.endsWith("world", u))
+console.log(s.lastIndexOf("o"), s.lastIndexOf("o", 5), s.lastIndexOf("o", u), s.lastIndexOf("", 3), s.lastIndexOf("zz"))
+console.log("[" + "7".padStart(3, "0") + "]", "[" + "ab".padEnd(7, "xy") + "]", "[" + "x".padStart(4) + "]", "[" + "abc".padEnd(2, "z") + "]")
+try { "x".padStart(Infinity) } catch (e) { console.log((e as Error).name, (e as Error).message) }
+`, "e true true 104 NaN\nworld llo wo true llo world hel\nllo w hell lo world wor llo world\ntrue true true true\n7 4 7 3 -1\n[007] [abxyxyx] [   x] [abc]\nRangeError Invalid string length")
+}
+
+// String methods with an optional result (`at`, `codePointAt`: absent past
+// the string) and repeat's RangeErrors, which name the count as JavaScript
+// prints it. Expected output is Node's.
+func TestE2EStringOptionalResultsLowered(t *testing.T) {
+	assertOutput(t, `
+for (const c of [-1, -1.5, -Infinity, Infinity, 2 ** 30, -0.5, 0, 3, 2.7, NaN]) {
+  try { const r = "ab".repeat(c); console.log(c, JSON.stringify(r)) } catch (e) { console.log(c, (e as Error).message) }
+}
+const s = "abc";
+console.log(s.at(-1), s.at(3), s.at(-4), s.at(0.9), s.at(NaN), s.codePointAt(1), s.codePointAt(5), s.codePointAt(-1));
+const a = s.at(1);
+if (a !== undefined) console.log(a.toUpperCase());
+const cp = s.codePointAt(9);
+console.log(cp === undefined, typeof cp, (s.codePointAt(0) ?? 0) + 1);
+`, "-1 Invalid count value: -1\n-1.5 Invalid count value: -1.5\n-Infinity Invalid count value: -Infinity\nInfinity Invalid count value: Infinity\n1073741824 Invalid string length\n-0.5 \"\"\n0 \"\"\n3 \"ababab\"\n2.7 \"abab\"\nNaN \"\"\nc undefined undefined a a 98 undefined undefined\nB\ntrue undefined 98")
+}
+
+// split with a string separator resolves to its own overload's lowering
+// (an array result, returned as the array's header): limits (ToUint32), an
+// empty separator splitting into characters, empty strings, and the result
+// used as an ordinary array. The RegExp overload keeps its own path, and an
+// undefined separator (JavaScript) leaves the string whole. Expected output
+// is Node's.
+func TestE2EStringSplitLowered(t *testing.T) {
+	assertOutput(t, `
+const cases: string[][] = [["a,b,,c", ","], ["abc", ""], ["", ","], ["", ""], ["a,b", ",,"], [",a,", ","], ["héllo", ""], ["aXbXc", "X"], ["abc", "abc"], ["abcabc", "bc"]];
+for (const c of cases) {
+  console.log(JSON.stringify(c[0].split(c[1])), JSON.stringify(c[0].split(c[1], 2)), JSON.stringify(c[0].split(c[1], 0)), JSON.stringify(c[0].split(c[1], -1)));
+}
+const parts = "k=v;x=y".split(";");
+parts.push("z=w");
+console.log(parts.length, parts.join("|"));
+`, "[\"a\",\"b\",\"\",\"c\"] [\"a\",\"b\"] [] [\"a\",\"b\",\"\",\"c\"]\n[\"a\",\"b\",\"c\"] [\"a\",\"b\"] [] [\"a\",\"b\",\"c\"]\n[\"\"] [\"\"] [] [\"\"]\n[] [] [] []\n[\"a,b\"] [\"a,b\"] [] [\"a,b\"]\n[\"\",\"a\",\"\"] [\"\",\"a\"] [] [\"\",\"a\",\"\"]\n[\"h\",\"é\",\"l\",\"l\",\"o\"] [\"h\",\"é\"] [] [\"h\",\"é\",\"l\",\"l\",\"o\"]\n[\"a\",\"b\",\"c\"] [\"a\",\"b\"] [] [\"a\",\"b\",\"c\"]\n[\"\",\"\"] [\"\",\"\"] [] [\"\",\"\"]\n[\"a\",\"a\",\"\"] [\"a\",\"a\"] [] [\"a\",\"a\",\"\"]\n3 k=v|x=y|z=w")
+	assertOutput(t, `
+const s = "a1b2c"
+console.log(s.split(/\d/).join("|"), s.split(/\d/, 2).join("|"))
+`, "a|b|c a|b")
+	assertOutputCompatJS(t, `
+const s = "a1b2c"
+console.log(s.split(undefined), s.split("b"))
+`, "[ 'a1b2c' ] [ 'a1', '2c' ]")
+}
+
+// Number's formatting methods, compiled from their declarations into the C
+// number runtime: the spec's toFixed/toExponential/toPrecision over the exact
+// decimal expansion (ties to the larger value), V8's radix algorithm, and
+// Node's RangeErrors. Expected output is Node's.
+func TestE2ENumberFormattingLowered(t *testing.T) {
+	assertOutput(t, `
+const xs: number[] = [0.5, 1.5, 2.5, -2.5, 1.005, 1.45, 123.456, 0, -0, 1e21, 1e-7, 123456789.123, 0.000001, NaN, Infinity, -Infinity, 5e-324, 1.7976931348623157e308];
+for (const x of xs) {
+  console.log(x, x.toFixed(), x.toFixed(2), x.toFixed(5), x.toPrecision(3), x.toPrecision(1), x.toExponential(), x.toExponential(2), x.toString(2).slice(0, 30), x.toString(16).slice(0, 20), x.toString(36).slice(0, 20));
+}
+`, "0.5 1 0.50 0.50000 0.500 0.5 5e-1 5.00e-1 0.1 0.8 0.i\n1.5 2 1.50 1.50000 1.50 2 1.5e+0 1.50e+0 1.1 1.8 1.i\n2.5 3 2.50 2.50000 2.50 3 2.5e+0 2.50e+0 10.1 2.8 2.i\n-2.5 -3 -2.50 -2.50000 -2.50 -3 -2.5e+0 -2.50e+0 -10.1 -2.8 -2.i\n1.005 1 1.00 1.00500 1.00 1 1.005e+0 1.00e+0 1.0000000101000111101011100001 1.0147ae147ae14 1.06ha2voha2i\n1.45 1 1.45 1.45000 1.45 1 1.45e+0 1.45e+0 1.0111001100110011001100110011 1.7333333333333 1.g777777777\n123.456 123 123.46 123.45600 123 1e+2 1.23456e+2 1.23e+2 1111011.0111010010111100011010 7b.74bc6a7ef9dc 3f.gez4w97ry\n0 0 0.00 0.00000 0.00 0 0e+0 0.00e+0 0 0 0\n-0 0 0.00 0.00000 0.00 0 0e+0 0.00e+0 0 0 0\n1e+21 1e+21 1e+21 1e+21 1.00e+21 1e+21 1e+21 1.00e+21 110110001101011100100110101101 3635c9adc5dea00000 5v1j4f4ds7c000\n1e-7 0 0.00 0.00000 1.00e-7 1e-7 1e-7 1.00e-7 0.0000000000000000000000011010 0.000001ad7f29abcaf4 0.000061oezo085tl\n123456789.123 123456789 123456789.12 123456789.12300 1.23e+8 1e+8 1.23456789123e+8 1.23e+8 111010110111100110100010101.00 75bcd15.1f7ced8 21i3v9.4feor\n0.000001 0 0.00 0.00000 0.00000100 0.000001 1e-6 1.00e-6 0.0000000000000000000100001100 0.000010c6f7a0b5ed8d 0.0001ogs5wo29m8\nNaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN\nInfinity Infinity Infinity Infinity Infinity Infinity Infinity Infinity Infinity Infinity Infinity\n-Infinity -Infinity -Infinity -Infinity -Infinity -Infinity -Infinity -Infinity -Infinity -Infinity -Infinity\n5e-324 0 0.00 0.00000 4.94e-324 5e-324 5e-324 4.94e-324 0.0000000000000000000000000000 0.000000000000000000 0.000000000000000000\n1.7976931348623157e+308 1.7976931348623157e+308 1.7976931348623157e+308 1.7976931348623157e+308 1.80e+308 2e+308 1.7976931348623157e+308 1.80e+308 111111111111111111111111111111 fffffffffffff8000000 1a1e4vngaiqo00000000")
+	assertOutput(t, `
+const tries: Array<() => string> = [() => (1).toFixed(101), () => (1).toFixed(Infinity), () => (1).toExponential(-1), () => NaN.toExponential(-1), () => (1).toPrecision(0), () => (1).toString(1), () => NaN.toFixed(200)];
+for (const f of tries) {
+  try { console.log(f()) } catch (e) { console.log((e as Error).name + ": " + (e as Error).message) }
+}
+const n = 255;
+let big = 9007199254740993;
+console.log((0).toPrecision(3), (-0).toExponential(2), (0.00001).toPrecision(2), (123.456).toExponential(), (1e21).toFixed(2), (-1.5).toFixed(0), n.toString(16), (-255.5).toString(2), (0.1).toString(3), (1e21).toString(36), big.toString(), n.toFixed(2), (7).toPrecision(), (3).toString());
+`, "RangeError: toFixed() digits argument must be between 0 and 100\nRangeError: toFixed() digits argument must be between 0 and 100\nRangeError: toExponential() argument must be between 0 and 100\nNaN\nRangeError: toPrecision() argument must be between 1 and 100\nRangeError: toString() radix argument must be between 2 and 36\nRangeError: toFixed() digits argument must be between 0 and 100\n0.00 0.00e+0 0.000010 1.23456e+2 1e+21 -2 ff -11111111.1 0.0022002200220022002200220022002201 5v1j4f4ds7c000 9007199254740992 255.00 7 3")
+}
+
 // Math.cbrt must be correctly rounded and identical across platforms: the
 // platform libm cbrt is not (glibc's runtime cbrt(27) is 3.0000000000000004,
 // cbrt(2) is ...34 not ...32), so these use the deterministic fdlibm @__kml_cbrt
@@ -633,7 +766,7 @@ console.log(f.hasOwnProperty("x"))
 
 // --- Near-zero-effort roadmap batch: NaN/Infinity, performance.now,
 // atob/btoa, encodeURI(Component)/decodeURI(Component),
-// crypto.getRandomValues/randomUUID, process.readLineSync ---
+// crypto.getRandomValues/randomUUID ---
 
 func TestE2ENaNInfinityBareGlobals(t *testing.T) {
 	assertOutput(t, `
@@ -738,7 +871,7 @@ try {
   performance.measure("bad", "never-marked")
 } catch (e) {
   console.log("caught")
-  console.log(e.message)
+  console.log((e as Error).message)
 }
 `, "caught\nperformance.measure: no mark named 'never-marked'")
 }
@@ -844,7 +977,7 @@ func TestE2EAtobInvalidCharacterThrows(t *testing.T) {
 	// WHATWG atob: invalid input throws an InvalidCharacterError
 	// DOMException (ADR-00458); previously it silently decoded garbage.
 	assertOutput(t, `
-try { atob("we go!"); console.log("no throw"); } catch (e) { console.log(e.name); }
+try { atob("we go!"); console.log("no throw"); } catch (e) { console.log((e as Error).name); }
 console.log(typeof DOMException);
 console.log(atob(btoa("round trip")));
 `, "InvalidCharacterError\nfunction\nround trip")
@@ -897,4 +1030,37 @@ const a: number[] = [1, 1/0, 0/0, 2];
 console.log(JSON.stringify(a));
 console.log(JSON.stringify({ x: -1/0, y: 5 }));
 `, "null\nnull\n[1,null,null,2]\n{\"x\":null,\"y\":5}")
+}
+
+// A lowered method's number parameter converts its argument with ToNumber
+// under -compat=js: a string, boolean, null or undefined position.
+func TestE2ELoweredNumberArgToNumber(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+console.log('abcd'.charAt('   +00200.0000E-0002   '), 'abcd'.charAt(true), 'abcd'.charAt(null), 'abcd'.charAt(undefined))
+console.log('abcd'.indexOf('c', '1'), 'abcd'.substr(1, false), 'abcd'.substr(1, null), 'ab'.repeat('0') === '')
+console.log((1.5).toFixed('1'), (123.456).toPrecision('4'), (12345).toExponential(true))
+console.log('abc'.at('1'), 'abcd'.slice('1', '3'), 'abcd'.substring(true, '3'), 'abc'.charCodeAt('1'))
+console.log('abcd'.startsWith('b', '1'), 'abcd'.endsWith('c', '3'), 'abcd'.includes('a', '1'))
+`)
+}
+
+// String.prototype.concat lowers through its rest parameter: the arguments,
+// converted by ToString, cross as one array. An absent string (null,
+// undefined, a `string | null` holding null) converts to its word, through
+// every lowered string parameter.
+func TestE2EStringConcatLowered(t *testing.T) {
+	assertOutput(t, `
+const s = "ab"
+let n = 0
+const f = () => { n++; return "k" + n }
+const parts = ["x", "y"]
+let absent: string | null = null
+let missing: string | undefined
+console.log(s.concat(), s.concat("c"), s.concat("c", "dé", ""), "".concat(f(), f()), "<".concat(...parts, ">"))
+console.log("a".concat(absent as string), "xnull".indexOf(absent as string), "b".concat(missing as string))
+`, "ab abc abcdé k1k2 <xy>\nanull 1 bundefined")
+	assertOutputCompatJS(t, `
+const o = { toString() { return "T" }, valueOf() { return 7 } }
+console.log("a".concat(1, true, null, undefined, o, [1, 2]), "anull".indexOf(null), "xundefined".includes(undefined))
+`, "a1truenullundefinedT1,2 1 true")
 }

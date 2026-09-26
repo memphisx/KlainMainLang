@@ -35,8 +35,8 @@ const (
 // hostPathFlavor is what a bare `path.X` means on this host: Node's `path` is
 // `path.win32` on Windows and `path.posix` everywhere else. A compile-time
 // switch, like nodePlatformName() — this compiler builds for the host only.
-func hostPathFlavor() pathFlavor {
-	if targetGOOS() == "windows" {
+func (e *Emitter) hostPathFlavor() pathFlavor {
+	if e.opts.Target.OS() == "windows" {
 		return pathWin32
 	}
 	return pathPosix
@@ -86,11 +86,12 @@ func (e *Emitter) ensurePathWin32() {
 	e.emitGlobal("declare ptr @__kml_path_posix_normalize(ptr)")
 	e.emitGlobal("declare ptr @__kml_path_posix_resolve(i64, ptr, ptr)")
 	e.emitGlobal("declare ptr @__kml_path_posix_relative(ptr, ptr, ptr)")
+	e.emitGlobal("declare ptr @__kml_path_posix_format(ptr, ptr, ptr, ptr, ptr)")
 }
 
 // hostIsWindowsI32 is Node's `isWindows` as the sidecar's i32 argument.
-func hostIsWindowsI32() int {
-	if targetGOOS() == "windows" {
+func (e *Emitter) hostIsWindowsI32() int {
+	if e.opts.Target.OS() == "windows" {
 		return 1
 	}
 	return 0
@@ -139,7 +140,7 @@ func (e *Emitter) emitPathRelative(f pathFlavor, args []ast.Expression, pos ast.
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_process_cwd()", cwd))
 	r := e.freshReg()
 	if f == pathWin32 {
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_relative(ptr %s, ptr %s, ptr %s, i32 %d)", r, from.Ref, to.Ref, cwd, hostIsWindowsI32()))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_relative(ptr %s, ptr %s, ptr %s, i32 %d)", r, from.Ref, to.Ref, cwd, e.hostIsWindowsI32()))
 	} else {
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_posix_relative(ptr %s, ptr %s, ptr %s)", r, from.Ref, to.Ref, cwd))
 	}
@@ -165,16 +166,16 @@ func (e *Emitter) emitPathToNamespacedPath(f pathFlavor, args []ast.Expression, 
 	cwd := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_process_cwd()", cwd))
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_to_namespaced_path(ptr %s, ptr %s, i32 %d)", r, v.Ref, cwd, hostIsWindowsI32()))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_to_namespaced_path(ptr %s, ptr %s, i32 %d)", r, v.Ref, cwd, e.hostIsWindowsI32()))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
 // pathFlavorOf resolves the object of a `path` member expression to a flavour:
 // the bare virtual-module marker is the host's flavour; `path.posix` and
 // `path.win32` name one explicitly. ok is false for anything else.
-func pathFlavorOf(obj ast.Expression) (pathFlavor, bool) {
+func (e *Emitter) pathFlavorOf(obj ast.Expression) (pathFlavor, bool) {
 	if id, ok := obj.(*ast.Identifier); ok && id.Name == "path__kml_builtin" {
-		return hostPathFlavor(), true
+		return e.hostPathFlavor(), true
 	}
 	if mem, ok := obj.(*ast.MemberExpression); ok {
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "path__kml_builtin" {
@@ -223,7 +224,7 @@ func (e *Emitter) emitPathWin32Variadic(which string, args []ast.Expression, pos
 	cwd := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_process_cwd()", cwd))
 	hostWin := 0
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		hostWin = 1
 	}
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_resolve(i64 %d, ptr %s, ptr %s, i32 %d)", r, n, arr, cwd, hostWin))

@@ -25,7 +25,7 @@ console.log(pts[3].x)   // 7
 console.log(pts.length)  // 4
 
 // pop returns the removed object
-let popped: { x: number; y: number } = pts.pop()
+let popped: { x: number; y: number } = pts.pop()!
 console.log(popped.x)   // 7
 console.log(pts.length)  // 3
 

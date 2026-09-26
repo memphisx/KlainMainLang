@@ -2,14 +2,17 @@ package resolver
 
 import (
 	"strings"
+	"sync"
 
 	"KlainMainLang/ast"
+	"KlainMainLang/lib"
+	"KlainMainLang/parser"
 )
 
 // TDD-00049 Stage 1: a fixed table of "virtual" built-in module specifiers —
 // never a real file on disk, unlike every other import source this
 // resolver handles. Recognized here purely so a Category-B pseudo-namespace
-// (fs/path/os/querystring/assert/http/cluster/Memory — see the TDD's own
+// (fs/path/os/assert/http/cluster/Memory — see the TDD's own
 // Design section for the Category A/B/C split) can only be referenced in a
 // file that actually imported it, closing the collision/shadowing bug the
 // TDD found: today codegen/llvm recognizes these by bare AST-identifier
@@ -34,7 +37,6 @@ var virtualBuiltinMarkers = map[string]string{
 	"fs/promises":   "fspromises__kml_builtin",
 	"path":          "path__kml_builtin",
 	"os":            "os__kml_builtin",
-	"querystring":   "querystring__kml_builtin",
 	"zlib":          "zlib__kml_builtin",
 	"child_process": "childprocess__kml_builtin",
 	"readline":      "readline__kml_builtin",
@@ -170,7 +172,7 @@ var globalReexportModules = map[string]map[string]bool{
 
 // moduleFunctionMembers (TDD-00165 Stage 4) are the *module-only* function
 // exports of a global-reexport module — members with no same-named global, so
-// they are dispatched in codegen via the module's marker (like `querystring.parse`)
+// they are dispatched in codegen via the module's marker (like `url.parse`)
 // rather than erased to a global. Their presence also makes a namespace/default
 // import of the module bind the marker (so `import * as url from 'url'; url.parse(…)`
 // works). A named import of one records an ordinary builtin-member reference.
@@ -210,7 +212,7 @@ var defaultReexportName = map[string]string{
 // dispatch tables live in Go source, not data.
 var virtualModuleMembers = map[string]map[string]bool{
 	"fs": {
-		"readFileSync": true, "readFileSyncBytes": true, "writeFileSync": true,
+		"readFileSync": true, "writeFileSync": true,
 		"appendFileSync": true, "existsSync": true, "unlinkSync": true,
 		"mkdirSync": true, "rmdirSync": true, "renameSync": true,
 		"copyFileSync": true, "readdirSync": true,
@@ -229,13 +231,18 @@ var virtualModuleMembers = map[string]map[string]bool{
 		// Async callback form (TDD-00107): fs.readFile(path, cb), etc.
 		"readFile": true, "writeFile": true, "appendFile": true, "unlink": true,
 		"mkdir": true, "rmdir": true, "rename": true, "copyFile": true,
-		"readdir": true,
+		"readdir": true, "stat": true, "lstat": true, "fstat": true, "statfs": true,
+		"rm": true, "utimes": true, "futimes": true, "ftruncate": true, "fchmod": true,
+		"realpath": true, "mkdtemp": true, "readlink": true, "link": true,
+		"symlink": true, "chmod": true, "truncate": true, "access": true,
 	},
 	// Async Promise form (TDD-00107): import { readFile } from 'fs/promises'.
 	"fs/promises": {
 		"readFile": true, "writeFile": true, "appendFile": true, "unlink": true,
 		"mkdir": true, "rmdir": true, "rename": true, "copyFile": true,
-		"readdir": true,
+		"readdir": true, "stat": true, "lstat": true, "statfs": true, "rm": true,
+		"utimes": true, "realpath": true, "mkdtemp": true, "readlink": true,
+		"link": true, "symlink": true, "chmod": true, "truncate": true, "access": true,
 	},
 	"path": {
 		"join": true, "resolve": true, "dirname": true, "basename": true,
@@ -254,7 +261,6 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"userInfo": true, "availableParallelism": true, "networkInterfaces": true,
 		"devNull": true,
 	},
-	"querystring": {"parse": true, "stringify": true},
 	"zlib": {
 		"gzipSync": true, "gunzipSync": true,
 		"deflateSync": true, "inflateSync": true,
@@ -293,7 +299,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"Progress": true, "TextInput": true,
 		"render": true, "enter": true, "leave": true,
 	},
-	"cluster": {"isPrimary": true, "workerId": true, "isWorker": true, "fork": true},
+	"cluster": {"isPrimary": true, "worker": true, "isWorker": true, "fork": true},
 	"memory":  {"free": true},
 	"stream": {
 		"Readable": true, "Writable": true, "Duplex": true, "Transform": true,
@@ -326,7 +332,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 	// constructors re-exported under their Node module name — identity, like
 	// Worker.
 	"worker_threads": {
-		"Worker": true, "parentPort": true, "workerData": true,
+		"Worker": true, "parentPort": true, "workerData": true, "isMainThread": true,
 		"MessageChannel": true, "MessagePort": true, "BroadcastChannel": true,
 	},
 	"test": {
@@ -433,5 +439,198 @@ func init() {
 			continue
 		}
 		defaultReexportName["node:"+name] = def
+	}
+	// A module written in TypeScript whose native primitives are POSIX-only
+	// keeps its code-generated form on Windows, under a private specifier the
+	// resolver rewrites a Windows program's import to (windowsCodegenModule).
+	for name, alias := range windowsCodegenModules {
+		virtualBuiltinMarkers[alias] = virtualBuiltinMarkers[name]
+		virtualModuleMembers[alias] = virtualModuleMembers[name]
+	}
+	// A module written in TypeScript (TDD-00231) is an import of a real
+	// file, not a virtual module.
+	for name := range virtualBuiltinMarkers {
+		if _, ok := lib.ModulePath(name); ok {
+			delete(virtualBuiltinMarkers, name)
+			delete(virtualModuleMembers, name)
+			delete(globalReexportModules, name)
+			delete(moduleFunctionMembers, name)
+			delete(defaultReexportName, name)
+		}
+	}
+}
+
+// IsBuiltinModule reports whether an import specifier names a builtin module
+// (a Node core module, with or without `node:`, or a `klain:` module) rather
+// than a user file or package.
+func IsBuiltinModule(src string) bool {
+	_, ok := virtualBuiltinMarkers[src]
+	return ok
+}
+
+var (
+	companionMu    sync.Mutex
+	companionCache = map[string]map[string]bool{}
+)
+
+// companionExports is every name the TypeScript companion of the builtin
+// module spec exports (lib.CompanionPath), or nil when it has none.
+func companionExports(spec string) map[string]bool {
+	path, ok := companionPath(spec)
+	if !ok {
+		return nil
+	}
+	companionMu.Lock()
+	defer companionMu.Unlock()
+	if names, ok := companionCache[path]; ok {
+		return names
+	}
+	var names map[string]bool
+	if src, ok := lib.ModuleSource(path); ok {
+		if prog, err := parser.Parse(string(src)); err == nil {
+			names = exportedNames(prog)
+		}
+	}
+	// A name starting with `_kml` is shared with the other builtin modules
+	// (imported by path), not the module's.
+	for n := range names {
+		if strings.HasPrefix(n, "_kml") {
+			delete(names, n)
+		}
+	}
+	companionCache[path] = names
+	return names
+}
+
+// eraseBuiltinTypeImports drops the type-only bindings of a builtin module's
+// imports (`import type { IncomingMessage } from 'http'`, `{ type X }`): a
+// builtin module's types are the library's, erased like any type import, and
+// its value-export table does not list them. An import left binding nothing
+// is dropped.
+func eraseBuiltinTypeImports(prog *ast.Program) {
+	var aliases []ast.Statement // `import type { A as B }`: `type B = A`
+	defer func() { prog.Body = append(aliases, prog.Body...) }()
+	body := prog.Body[:0]
+	for _, stmt := range prog.Body {
+		imp, ok := stmt.(*ast.ImportDeclaration)
+		if !ok {
+			body = append(body, stmt)
+			continue
+		}
+		_, virtual := virtualBuiltinMarkers[imp.Source]
+		_, reexport := globalReexportModules[imp.Source]
+		if !virtual && !reexport {
+			body = append(body, stmt)
+			continue
+		}
+		bound := len(imp.Specifiers) > 0 || imp.Namespace != ""
+		specs := imp.Specifiers[:0]
+		companion := companionExports(imp.Source)
+		for _, spec := range imp.Specifiers {
+			if companion[spec.Imported] {
+				// The module's part written in TypeScript declares it, a
+				// type as much as a value: it resolves there.
+				specs = append(specs, spec)
+				continue
+			}
+			if virtual && spec.Imported != "default" && !spec.TypeOnly && !virtualModuleMembers[imp.Source][spec.Imported] && lib.NodeModuleExport(imp.Source, spec.Imported) {
+				// Node exports it, but not as a value this compiler
+				// implements (a class used as a type): a type import.
+				if prog.NodeTypeImports == nil {
+					prog.NodeTypeImports = map[string]string{}
+				}
+				prog.NodeTypeImports[spec.Local] = imp.Source
+				aliases = appendTypeAlias(aliases, spec, imp.GetPos())
+				continue
+			}
+			if !spec.TypeOnly {
+				specs = append(specs, spec)
+			} else {
+				aliases = appendTypeAlias(aliases, spec, imp.GetPos())
+			}
+		}
+		imp.Specifiers = specs
+		if imp.TypeOnly {
+			imp.Namespace = ""
+		}
+		if bound && len(imp.Specifiers) == 0 && imp.Namespace == "" {
+			continue
+		}
+		body = append(body, stmt)
+	}
+	prog.Body = body
+}
+
+// appendTypeAlias adds `type Local = Imported` for an erased type import
+// bound under another name, so an annotation naming it still reaches the
+// builtin type.
+func appendTypeAlias(aliases []ast.Statement, spec ast.ImportSpecifier, pos ast.Pos) []ast.Statement {
+	if spec.Local == spec.Imported {
+		return aliases
+	}
+	ta, err := ast.TypeAnnotationOf(&ast.TypeReference{Name: spec.Imported}, "ts")
+	if err != nil {
+		return aliases
+	}
+	return append(aliases, ast.NewTypeAliasDeclaration(spec.Local, ta, pos))
+}
+
+// typeOnlyLocals is every local name a user module's type-only import binds.
+func typeOnlyLocals(prog *ast.Program) map[string]bool {
+	var out map[string]bool
+	for _, stmt := range prog.Body {
+		imp, ok := stmt.(*ast.ImportDeclaration)
+		if !ok {
+			continue
+		}
+		for _, spec := range imp.Specifiers {
+			if spec.TypeOnly {
+				if out == nil {
+					out = map[string]bool{}
+				}
+				out[spec.Local] = true
+			}
+		}
+		if imp.TypeOnly && imp.Namespace != "" {
+			if out == nil {
+				out = map[string]bool{}
+			}
+			out[imp.Namespace] = true
+		}
+	}
+	return out
+}
+
+// windowsCodegenModules maps a module written in TypeScript over POSIX-only
+// native primitives (the TCP handles) to the private specifier of its
+// code-generated form, which a Windows program imports instead.
+var windowsCodegenModules = map[string]string{
+	"net":      "klain:codegen-net",
+	"tls":      "klain:codegen-tls",
+	"klain:ws": "klain:codegen-ws",
+}
+
+// windowsTarget is set while a Windows program resolves: its builtin
+// modules keep their code-generated forms, the companions written in
+// TypeScript included (lib.CompanionPath's), since they stand on net.
+var windowsTarget bool
+
+// companionPath is lib.CompanionPath for the program being resolved.
+func companionPath(spec string) (string, bool) {
+	if windowsTarget {
+		return "", false
+	}
+	return lib.CompanionPath(spec)
+}
+
+// redirectWindowsModules points a Windows program's imports of such a module
+// at its code-generated form.
+func redirectWindowsModules(prog *ast.Program) {
+	for _, st := range prog.Body {
+		if imp, ok := st.(*ast.ImportDeclaration); ok {
+			if alias, ok := windowsCodegenModules[strings.TrimPrefix(imp.Source, "node:")]; ok {
+				imp.Source = alias
+			}
+		}
 	}
 }

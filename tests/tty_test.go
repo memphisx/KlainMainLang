@@ -119,15 +119,12 @@ console.log("a=" + a.charCodeAt(0) + " blen=" + b.length)
 	}
 }
 
-func TestE2EStrictRejectsColumnsIntoBareNumber(t *testing.T) {
-	// `process.stdout.columns` is `number | undefined` (TDD-00187 Stage 4) —
-	// a bare-number binding or arithmetic use requires narrowing/`??`/`!`.
-	for _, src := range []string{
-		`const c: number = process.stdout.columns;`,
-		`console.log(process.stdout.rows * 2);`,
-	} {
-		if _, err := parseAndCompile(src); err == nil {
-			t.Fatalf("expected a strict-mode compile error for: %s", src)
-		}
-	}
+func TestE2EStdoutRowsArithmeticWhenNotTTY(t *testing.T) {
+	// @types/node types `process.stdout.columns`/`rows` as `number`, so tsc
+	// accepts a bare use; off a TTY they are undefined, and arithmetic on
+	// one is NaN (ToNumber(undefined)), as in Node.
+	assertOutput(t, `
+const c: number = process.stdout.columns;
+console.log(process.stdout.rows * 2)
+`, "NaN")
 }

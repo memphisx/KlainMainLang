@@ -171,7 +171,7 @@ earlyend:
   %%ebits = ptrtoint ptr %%eo to i64
   call void @__kml_reqbody_finish(ptr %%ctx, i64 %%ebits)
   ret i64 -1
-}`, rb, rb, rb, errnoAccessor(), httpEagainErrno(), earlyEndMsg, errName))
+}`, rb, rb, rb, e.errnoAccessor(), e.httpEagainErrno(), earlyEndMsg, errName))
 
 	// __kml_reqbody_yield_fiber(): park the current connection fiber until
 	// the event loop's readable-scan resumes it — the same slot/swapcontext
@@ -465,5 +465,5 @@ disturbed:
   unreachable
 ret:
   ret void
-}`, rb, rb, rb, rb, rb, errnoAccessor(), httpEagainErrno(), disturbedMsg, typeErrName))
+}`, rb, rb, rb, rb, rb, e.errnoAccessor(), e.httpEagainErrno(), disturbedMsg, typeErrName))
 }

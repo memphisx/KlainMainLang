@@ -307,8 +307,8 @@ console.log(m00 + ' ' + m01 + ' ' + m10 + ' ' + m11)  // 1 2 3 4
 interface Leaf { v: number }
 interface Tree { left: Leaf; span: number[] }
 const tree: Tree = { left: { v: 9 }, span: [100, 200] }
-const { left: { v: leafVal }, span: [lo, hi] } = tree
-console.log(leafVal + ' ' + lo + ' ' + hi)  // 9 100 200
+const { left: { v: leafVal }, span: [spanLo, spanHi] } = tree
+console.log(leafVal + ' ' + spanLo + ' ' + spanHi)  // 9 100 200
 
 // A nested pattern also works as a for-of loop variable and a parameter.
 const cells: number[][] = [[1, 2], [3, 4]]

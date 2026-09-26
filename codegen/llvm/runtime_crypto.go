@@ -17,7 +17,7 @@ func (e *Emitter) ensureCryptoRandomBytes() {
 		return
 	}
 	e.usedCryptoRandomBytes = true
-	switch targetGOOS() {
+	switch e.opts.Target.OS() {
 	case "darwin", "freebsd", "openbsd", "netbsd", "dragonfly":
 		e.emitGlobal("declare void @arc4random_buf(ptr noundef, i64 noundef)")
 		e.emitGlobal(`

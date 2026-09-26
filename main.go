@@ -2,7 +2,9 @@ package main
 
 import (
 	"KlainMainLang/codegen/llvm"
+	"KlainMainLang/diag"
 	"KlainMainLang/internal/scratch"
+	"KlainMainLang/options"
 	"KlainMainLang/resolver"
 	"flag"
 	"fmt"
@@ -19,6 +21,7 @@ func main() {
 	static := flag.Bool("static", false, "statically link the output binary — for minimal/scratch Docker images. Linux only: run klainmain itself on Linux to use this (macOS's linker has no static-libc support at all, by design)")
 	mm := flag.String("mm", "manual", "memory management `mode`: manual (default, Memory.free(x) only), gc (Boehm GC — allocations are collected automatically; needs bdw-gc/libgc installed), or auto (the compiler inserts free calls where it can prove them safe — /** @free */ and /** @owned */ annotations plus automatic freeing of provably-local values; Memory.free is a compile error)")
 	dynImport := flag.String("dynamic-import", "eager", "dynamic `import()` `mode`: eager (default — a literal-specifier import resolved at compile time, target runs eagerly, wrapped in a resolved Promise) or lazy (each dynamic-import target compiled to a shared-library island loaded on first use — real laziness; incompatible with --static, produces multiple artifacts)")
+	diagFormat := flag.String("diagnostics", "text", "how errors in the program are reported (the `format`): text (default — one file: line:col: message line each; parsing continues past an error, so every syntax error is reported) or json (an array on stdout, one object per error with code, severity, file, line, col, start, end, message, kind, phase; a code below 90000 is TypeScript's)")
 	compat := flag.String("compat", "strict", "compatibility `mode`: strict (default — the compiler's opinionated, safer-than-JS semantics; e.g. a declaration colliding with an ambient built-in name like Math/fetch is a compile error) or js (best-effort JS-faithful — e.g. real-JS/browser global shadowing)")
 	regex := flag.String("regex", "", "RegExp `dialect`: es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus a source-normalization pass — exact dot line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
 	bigint := flag.String("bigint", "libtommath", "bigint backend `library`, linked only when a program uses bigint: libtommath (default, public domain) or gmp (LGPL, faster). Both give identical arbitrary-precision semantics")
@@ -118,7 +121,7 @@ func main() {
 		// Cross-*OS* codegen: the compiler now threads the *target* OS/arch
 		// through the runtime-emission sites (ucontext layout, process.execPath,
 		// the os module, process.platform/arch, math, dgram, FFI, fs stat layouts,
-		// clocks) via llvm.targetGOOS()/targetGOARCH() (TDD-00146 Stage 1
+		// clocks) via the options' Target (TDD-00146 Stage 1
 		// completion), so a program's C-level behavior follows the target. The
 		// only enabled cross-OS pair is macOS→Linux, which is fully
 		// execution-verifiable (link with lld against the target sysroot, run the
@@ -131,7 +134,6 @@ func main() {
 				fatal("cross-compiling from %s to a %s target is not supported yet: only macOS→Linux cross-OS builds are enabled (the fully execution-verifiable direction). A Windows target needs the mingw link toolchain; a macOS target can't be produced from a non-macOS host. Cross-compiling to a different CPU architecture on the same OS always works — so build a %s target by running klainmain on a %s host", runtime.GOOS, tgtOS, tgtOS, tgtOS)
 			}
 		}
-		llvm.SetCrossTarget(triple, *sysroot)
 	} else if *sysroot != "" {
 		fatal("--sysroot has no effect without --target: set --target=<triple|preset> to cross-compile")
 	}
@@ -204,6 +206,12 @@ func main() {
 		fatal("unrecognized -dynamic-import value %q — must be one of: eager (default), lazy", *dynImport)
 	}
 
+	switch *diagFormat {
+	case "text", "json":
+	default:
+		fatal("unrecognized -diagnostics value %q — must be one of: text (default), json", *diagFormat)
+	}
+
 	switch *decorators {
 	case "experimental", "standard":
 		// ok
@@ -211,10 +219,23 @@ func main() {
 		fatal("unrecognized -decorators value %q — must be one of: experimental (default), standard", *decorators)
 	}
 
+	// The compile modes, built once: the program and each of its lazy
+	// islands compile under the same ones.
+	opts := options.Options{
+		Compat: *compat, NoAny: *noAny, Decorators: *decorators, EmitDecoratorMetadata: *emitDecoratorMetadata,
+		MemMode: *mm, DynamicImport: *dynImport, Regex: *regex,
+		BigInt: *bigint, Crypto: *cryptoBackend, Webview: *webviewBackend,
+		OptimizeMemory: *optimizeMemory, Finalizers: *finalizers,
+		Target: llvm.ParseTarget(crossTriple, *sysroot),
+	}
+	if opts.NoAny && opts.CompatJS() {
+		fmt.Fprintln(os.Stderr, "warning: --no-any is ignored under -compat=js (js is best-effort untyped; there is no `any` to ban)")
+		opts.NoAny = false
+	}
 	inFile := flag.Arg(0)
-	prog, err := resolver.ResolveProgramWithOptions(inFile, *compat == "js", *dynImport == "lazy")
+	prog, err := resolver.ResolveProgramWithOptions(inFile, opts)
 	if err != nil {
-		fatal("parse error: %v", err)
+		reportDiagnostics("parse error", err, *diagFormat)
 	}
 
 	// TDD-00056: the lazy backend loads shared-library islands via dlopen at
@@ -226,24 +247,7 @@ func main() {
 	}
 
 	em := llvm.NewEmitter()
-	em.SetMemMode(*mm)
-	em.SetDynamicImportMode(*dynImport)
-	em.SetRegexMode(*regex)
-	em.SetBigIntBackend(*bigint)
-	em.SetCryptoBackend(*cryptoBackend)
-	em.SetWebviewBackend(*webviewBackend)
-	em.SetCompatMode(*compat)
-	if *noAny {
-		if *compat == "js" {
-			fmt.Fprintln(os.Stderr, "warning: --no-any is ignored under -compat=js (js is best-effort untyped; there is no `any` to ban)")
-		} else {
-			em.SetNoAny(true)
-		}
-	}
-	em.SetEmitDecoratorMetadata(*emitDecoratorMetadata)
-	em.SetDecoratorDialect(*decorators)
-	em.SetFinalizersMode(*finalizers)
-	em.SetOptimizeMemory(*optimizeMemory)
+	em.SetOptions(opts)
 	ir, err := em.EmitProgram(prog)
 	if err != nil {
 		fatal("codegen error: %v", err)
@@ -255,12 +259,12 @@ func main() {
 	// frameworks — from the build host, so a macOS→Linux build of one would
 	// mis-link. Reject it cleanly rather than emit a broken link. (Plain CLI +
 	// the whole Node runtime surface cross-compiles fine.)
-	if llvm.CrossTargetGOOS() != "" && llvm.CrossTargetGOOS() != runtime.GOOS {
+	if opts.Target.GOOS != "" && opts.Target.GOOS != runtime.GOOS {
 		if em.UsesWebview() {
-			fatal("cross-OS build (%s→%s) of a klain:webview program is not supported: the webview backend is still selected and linked for the build host. Build webview apps natively on the target OS", runtime.GOOS, llvm.CrossTargetGOOS())
+			fatal("cross-OS build (%s→%s) of a klain:webview program is not supported: the webview backend is still selected and linked for the build host. Build webview apps natively on the target OS", runtime.GOOS, opts.Target.GOOS)
 		}
 		if em.UsesTui() {
-			fatal("cross-OS build (%s→%s) of a klain:tui program is not supported: the Yoga C++ layout engine is still compiled/linked for the build host. Build TUI apps natively on the target OS", runtime.GOOS, llvm.CrossTargetGOOS())
+			fatal("cross-OS build (%s→%s) of a klain:tui program is not supported: the Yoga C++ layout engine is still compiled/linked for the build host. Build TUI apps natively on the target OS", runtime.GOOS, opts.Target.GOOS)
 		}
 	}
 
@@ -338,8 +342,8 @@ func main() {
 		// A Qt source (the Sailfish webview shim) needs moc run over it first,
 		// producing the webview_sailfish.moc it #includes (TDD-00146 Stage 3).
 		if cs.NeedsMoc() {
-			moc := llvm.SailfishMocPath(llvm.CrossTargetSysroot())
-			if err := llvm.RunSailfishMoc(moc, cPath, llvm.CrossTargetSysroot()); err != nil {
+			moc := llvm.SailfishMocPath(opts.Target.Sysroot)
+			if err := llvm.RunSailfishMoc(moc, cPath, opts.Target.Sysroot); err != nil {
 				fatal("%v", err)
 			}
 		}
@@ -392,7 +396,7 @@ func main() {
 		}
 		clangArgs = append(clangArgs, "-Wl,-rpath,"+harbourRpathDir("harbour-"+appSlug(nm)))
 	}
-	if err := llvm.RunClangLink(clangArgs...); err != nil {
+	if err := em.Toolchain().RunLink(clangArgs...); err != nil {
 		fatal("clang: %v", err)
 	}
 
@@ -443,21 +447,14 @@ func main() {
 		}
 		for _, root := range prog.IslandRoots {
 			hash := llvm.IslandHash(root)
-			iprog, err := resolver.ResolveProgramWithOptions(root, *compat == "js", false)
+			iopts := opts
+			iopts.DynamicImport = "" // an island's own import() is eager, as before
+			iprog, err := resolver.ResolveProgramWithOptions(root, iopts)
 			if err != nil {
 				fatal("island %s: parse error: %v", root, err)
 			}
 			iem := llvm.NewEmitter()
-			iem.SetMemMode(*mm)
-			iem.SetRegexMode(*regex)
-			iem.SetBigIntBackend(*bigint)
-			iem.SetCryptoBackend(*cryptoBackend)
-			iem.SetWebviewBackend(*webviewBackend)
-			iem.SetCompatMode(*compat)
-			iem.SetEmitDecoratorMetadata(*emitDecoratorMetadata)
-			iem.SetDecoratorDialect(*decorators)
-			iem.SetFinalizersMode(*finalizers)
-			iem.SetOptimizeMemory(*optimizeMemory)
+			iem.SetOptions(iopts)
 			iem.SetIslandHash(hash)
 			iir, err := iem.EmitProgram(iprog)
 			if err != nil {
@@ -485,8 +482,8 @@ func main() {
 					fatal("cannot write island %s source: %v", cs.Name, err)
 				}
 				if cs.NeedsMoc() {
-					moc := llvm.SailfishMocPath(llvm.CrossTargetSysroot())
-					if err := llvm.RunSailfishMoc(moc, cPath, llvm.CrossTargetSysroot()); err != nil {
+					moc := llvm.SailfishMocPath(opts.Target.Sysroot)
+					if err := llvm.RunSailfishMoc(moc, cPath, opts.Target.Sysroot); err != nil {
 						fatal("island %s: %v", root, err)
 					}
 				}
@@ -494,7 +491,7 @@ func main() {
 				iArgs = append(iArgs, cs.CFlags...)
 				iArgs = append(iArgs, cs.Libs...)
 			}
-			if err := llvm.RunClangLink(iArgs...); err != nil {
+			if err := em.Toolchain().RunLink(iArgs...); err != nil {
 				fatal("island %s: clang: %v", root, err)
 			}
 			fmt.Fprintf(os.Stderr, "  island: %s\n", soPath)
@@ -557,7 +554,7 @@ func main() {
 				}
 			}
 			args = append(args, extra...)
-			return llvm.RunClangLink(args...)
+			return em.Toolchain().RunLink(args...)
 		}
 		artifact, perr := packageApp(outBin, opts, relink)
 		if perr != nil {
@@ -565,6 +562,32 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "packaged: %s\n", artifact)
 	}
+}
+
+// reportDiagnostics prints the diagnostics err carries, one line each (or as
+// JSON on stdout), and exits; any other error is reported through fatal.
+func reportDiagnostics(what string, err error, format string) {
+	ds := diag.As(err)
+	if ds == nil {
+		fatal("%s: %v", what, err)
+	}
+	if format == "json" {
+		if err := diag.WriteJSON(os.Stdout, ds); err != nil {
+			fatal("%v", err)
+		}
+		os.Exit(1)
+	}
+	for _, d := range ds {
+		label := what
+		if d.Message.Kind == diag.TypeScriptError {
+			label = "type error"
+		}
+		fmt.Fprintf(os.Stderr, "klainmain: %s: %s\n", label, d.Located())
+		if d.Hint != "" {
+			fmt.Fprintf(os.Stderr, "  hint: %s\n", d.Hint)
+		}
+	}
+	os.Exit(1)
 }
 
 func fatal(format string, args ...any) {

@@ -144,6 +144,23 @@ console.log(path.format(p))
 		"/\n/home/user/dir\nfile.txt\n.txt\nfile\n/home/user/dir\\file.txt"))
 }
 
+// path.format with a partial object: an absent or undefined field is empty,
+// and an ext without its dot gains one (Node's _format).
+func TestE2EPathFormatPartial(t *testing.T) {
+	src := `
+import path from 'path'
+console.log(path.format({ dir: "/a", base: "b.txt" }))
+console.log(path.format({ root: "/", name: "f", ext: ".js" }))
+console.log(path.format({ name: "f", ext: "js" }))
+console.log(path.format({ root: "/", base: "x" }), path.format({ dir: "d" }), JSON.stringify(path.format({})))
+const o = { dir: "/x", name: "n", ext: undefined }
+console.log(path.format(o), path.win32.format({ dir: "C:\\a", base: "b" }))
+`
+	assertOutputImports(t, src, pathHost(
+		"/a/b.txt\n/f.js\nf.js\n/x d/ \"\"\n/x/n C:\\a\\b",
+		"/a\\b.txt\n/f.js\nf.js\n/x d\\ \"\"\n/x\\n C:\\a\\b"))
+}
+
 func TestE2EPathSepDelimiter(t *testing.T) {
 	src := `
 import path from 'path'

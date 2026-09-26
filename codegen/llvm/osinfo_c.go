@@ -19,8 +19,8 @@ func OSInfoSource() string { return osinfoSource }
 // iphlpapi (GetAdaptersAddresses) on Windows — inet_ntop comes from the win32
 // shim, which already owns that symbol — nothing elsewhere (uname/getifaddrs/
 // getpwuid live in libc).
-func OSInfoLibs() []string {
-	if targetGOOS() == "windows" {
+func (e *Emitter) OSInfoLibs() []string {
+	if e.opts.Target.OS() == "windows" {
 		return []string{"-liphlpapi"}
 	}
 	return nil

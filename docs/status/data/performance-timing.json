@@ -95,11 +95,11 @@
             "feature": "`Date` arithmetic (`date ± durationMs`, `date - date`, `date += durationMs`)",
             "status": "implemented",
             "caveats": [
-              "`Date ± number` gives a new Date (a deliberate deviation from real JS, where `+` on a Date string-concatenates instead — numeric duration arithmetic is far more useful for this compiler's plain-number Date representation)",
-              "`Date + Date`, `number - Date`, and compound-assigning a Date into a Date are all rejected at compile time"
+              "Under `-compat=js`, `Date ± number` gives a new Date; JavaScript converts the Date to a string for `+` (concatenation) and to its millisecond count for `-` (a number)"
             ],
             "notes": [
-              "`Date - Date` gives the difference in milliseconds (a number), matching real JS",
+              "The strict lane rejects arithmetic on a Date as TypeScript does (TS2362, TS2363, TS2365): the millisecond count is `getTime()` ([ADR-01134](../adr/ADR-01134.md))",
+              "`Date - Date` under `-compat=js` gives the difference in milliseconds (a number), matching real JS",
               "See [ADR-00018](../adr/ADR-00018.md)"
             ]
           },

@@ -24,3 +24,16 @@ words.sort((a: string, b: string) => a.localeCompare(b))
 for (const w of words) {
     console.log(w)   // apple, banana, cherry
 }
+
+// --- An empty search string, and optional positions ---
+// The empty string is found at the search position; an absent position
+// (omitted, or undefined at run time) starts at 0.
+const text = 'hello world'
+console.log(text.indexOf(''))          // 0
+console.log(text.indexOf('', 99))      // 11 (clamped to the length)
+console.log(text.includes(''))         // true
+console.log('abc'.replace('', '-'))    // -abc
+let from: number | undefined
+console.log(text.indexOf('o', from))   // 4
+from = 5
+console.log(text.indexOf('o', from))   // 7

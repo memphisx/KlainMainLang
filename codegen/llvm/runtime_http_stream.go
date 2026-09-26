@@ -200,8 +200,8 @@ rearm:
 		"TERMINATOR", terminator,
 		"CHUNKFMT", chunkFmt,
 		"CRLF", crlf,
-		"NBCLEAR", fmt.Sprintf("%d", ^httpNonblockFlag()),
-		"NBSET", fmt.Sprintf("%d", httpNonblockFlag()),
+		"NBCLEAR", fmt.Sprintf("%d", ^e.httpNonblockFlag()),
+		"NBSET", fmt.Sprintf("%d", e.httpNonblockFlag()),
 	)
 	streamBlock := repl.Replace(tmpl)
 

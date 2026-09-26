@@ -19,7 +19,7 @@ module Geometry {
 console.log(Geometry.describe(3, 4));
 const p = new Geometry.Point(1, 2);
 console.log(p.sum());
-const k: Kind = Kind.Tall;
+const k: Geometry.Kind = Geometry.Kind.Tall;
 console.log(k);
 
 // V3: nested namespaces + dotted declarations + relative references.

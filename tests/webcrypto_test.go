@@ -187,7 +187,7 @@ async function run(): Promise<void> {
   try {
     await crypto.subtle.decrypt({ name: "AES-GCM", iv: iv }, key, ct);
   } catch (err) {
-    console.log("usage:", err.name);
+    console.log("usage:", (err as Error).name);
   }
   const key2 = await crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["decrypt"]);
   const bad = new Uint8Array(ct);
@@ -195,12 +195,12 @@ async function run(): Promise<void> {
   try {
     await crypto.subtle.decrypt({ name: "AES-GCM", iv: iv }, key2, bad);
   } catch (err) {
-    console.log("tamper:", err.name);
+    console.log("tamper:", (err as Error).name);
   }
   try {
     await crypto.subtle.exportKey("raw", key);
   } catch (err) {
-    console.log("export:", err.name);
+    console.log("export:", (err as Error).name);
   }
 }
 run();
@@ -287,12 +287,12 @@ async function run(): Promise<void> {
   try {
     await crypto.subtle.exportKey("pkcs8", pair.publicKey);
   } catch (err) {
-    console.log("pkcs8-of-public:", err.name);
+    console.log("pkcs8-of-public:", (err as Error).name);
   }
   try {
     await crypto.subtle.exportKey("spki", pair.privateKey);
   } catch (err) {
-    console.log("spki-of-private:", err.name);
+    console.log("spki-of-private:", (err as Error).name);
   }
 }
 run();

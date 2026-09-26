@@ -35,6 +35,19 @@
             ]
           },
           {
+            "feature": "`Function` instances — `name`, `length`, util.inspect form (`[Function: f]`, `[AsyncFunction: f]`, `bound f`, …)",
+            "status": "implemented",
+            "caveats": [
+              "`toString()` / `String(f)` has no source text (a compile error on a statically-typed function)",
+              "Own properties on a user function (`f.x = 1`) are unsupported",
+              "Boxing the same closure into `any` twice yields two values that are not `===`",
+              "A class value has no `[class X]` rendering"
+            ],
+            "notes": [
+              "Names follow ECMAScript NamedEvaluation (binding, property key, assignment target, default, class field); `length` counts the parameters before the first default/rest one; the same holds through `any` and for built-in Error constructors ([ADR-01093](../adr/ADR-01093.md))"
+            ]
+          },
+          {
             "feature": "`Boolean` / `Boolean(x)`",
             "status": "implemented",
             "notes": [
@@ -305,7 +318,7 @@
             "feature": "`Reflect`",
             "status": "implemented",
             "caveats": [
-              "missing `apply`/`construct`; requires a dynamic target → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+              "missing `construct`; the object methods require a dynamic target → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
             ]
           },
           {
@@ -326,7 +339,7 @@
             "feature": "`Function` `.call`/`.apply`/`.bind`",
             "status": "implemented",
             "caveats": [
-              "forward args but **ignore `thisArg`** (no method-borrowing); `.bind` scalar-param only; first-class function values, not built-ins → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
+              "`thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); `.bind` scalar-param only; first-class function values, not built-ins → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
             ]
           },
           {
@@ -452,7 +465,7 @@
             ]
           },
           {
-            "feature": "`Reflect.apply` / `Reflect.construct`",
+            "feature": "`Reflect.construct`",
             "status": "missing",
             "notes": [
               "Explicitly missing → [Object, Map & Set](OBJECT-COLLECTIONS.md)"

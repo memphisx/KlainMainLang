@@ -7,9 +7,10 @@
 // the client itself (e.g. a custom 400 on the header-overflow path, where the
 // peer is still connected).
 import http from 'http';
+import type { AddressInfo } from 'net';
 import net from 'net';
 
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200);
   res.end("ok");
 });
@@ -23,7 +24,7 @@ server.on('clientError', (err: Error, socket) => {
 
 // listen(0) lets the OS pick a free port; address().port reads it back.
 server.listen(0, () => {
-  const port = server.address().port;
+  const port = (server.address() as AddressInfo).port;
   const client = net.connect({ port: port, host: "127.0.0.1" }, () => {
     // A truncated request: a partial request with no blank-line terminator,
     // then end() — the peer closes mid-parse, so the server never sees a

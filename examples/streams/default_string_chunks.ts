@@ -1,28 +1,34 @@
-// The un-parameterized Node stream constructors default to string chunks,
-// matching Node's non-objectMode semantics. Use `<T>` for numeric or
-// typed-array chunk streams.
+// Byte-mode streams (the default): a pushed string is stored as a Buffer,
+// read() returns what is buffered, setEncoding() decodes it back to strings.
 import stream from 'stream';
 
 const r = new stream.Readable({ read() {} });
 r.push("alpha");
 r.push("beta");
 r.push(null);
-r.on('data', (c) => { console.log(c.toString()); });
+r.on('data', (c) => { console.log(c, c.toString()); });
 r.on('end', () => { console.log("done"); });
 
-// destroy() tears the stream down; setEncoding('utf8') is a no-op on the
-// string-chunk default.
+// destroy() tears the stream down and emits 'close'.
 const short = new stream.Readable({ read() {} });
-short.setEncoding("utf8");
 short.on('close', () => { console.log("short closed"); });
 short.destroy();
 
-// Synchronous read(): pops queued chunks, null when empty.
+// Synchronous read(): the whole buffer, or n bytes of it; null when empty.
 const q = new stream.Readable({ read() {} });
 q.push("queued");
-console.log(q.read(), q.read() === null);
+console.log(q.read(3), q.read(), q.read());
 
-// unshift(): put a chunk back at the front.
-q.push("tail");
-q.unshift("head");
-console.log(q.read(), q.read());
+// setEncoding: chunks come out as strings, a character split across two
+// pushes decoded whole.
+const text = new stream.Readable({ read() {} });
+text.setEncoding("utf8");
+text.on('data', (s) => { console.log("text:", s); });
+text.push(Buffer.from([0x4b, 0xce]));
+text.push(Buffer.from([0xb1, 0x21]));
+
+// unshift(): put a chunk back at the front (object mode keeps them apart).
+const o = new stream.Readable({ objectMode: true, read() {} });
+o.push("tail");
+o.unshift("head");
+console.log(o.read(), o.read());

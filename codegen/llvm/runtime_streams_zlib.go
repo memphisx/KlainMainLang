@@ -68,7 +68,7 @@ func (e *Emitter) ensureZlibOneshot() {
 	e.ensureFree()
 	e.ensureZlibExterns()
 
-	e.emitGlobal(zsFix(`
+	e.emitGlobal(e.zsFix(`
 define { ptr, i64 } @__kml_zlib_oneshot(ptr %data, i64 %len, i64 %mode, i64 %wbits, i64 %level) {
 entry:
   %strm = call ptr @calloc(i64 1, i64 112)
@@ -211,7 +211,7 @@ func (e *Emitter) ensureZlibStreamRuntime() {
 
 	// __kml_zs_init(mode, windowBits) -> zctx (readable patched in by the
 	// construction site). Returns null when zlib rejects the init.
-	e.emitGlobal(zsFix(fmt.Sprintf(`
+	e.emitGlobal(e.zsFix(fmt.Sprintf(`
 define ptr @__kml_zs_init(i64 %%mode, i64 %%wbits) {
 entry:
   %%strm = call ptr @calloc(i64 1, i64 112)
@@ -246,7 +246,7 @@ ok:
 
 	// __kml_zs_pump(zctx, flushFlag): run deflate/inflate over the current
 	// input until it is consumed, enqueuing every produced output block.
-	e.emitGlobal(zsFix(fmt.Sprintf(`
+	e.emitGlobal(e.zsFix(fmt.Sprintf(`
 define void @__kml_zs_pump(ptr %%ctx, i32 %%flush) {
 entry:
   %%f0 = getelementptr %s, ptr %%ctx, i32 0, i32 0
@@ -371,8 +371,8 @@ endinf:
 // moves next_out/avail_out from 24/32 to 16/24 and shrinks the struct from
 // 112 to 88 bytes (measured against the mingw-w64 zlib.h, ADR-00719). The
 // LP64 numbers stay in the templates as written.
-func zsFix(ir string) string {
-	if targetGOOS() != "windows" {
+func (e *Emitter) zsFix(ir string) string {
+	if e.opts.Target.OS() != "windows" {
 		return ir
 	}
 	r := strings.NewReplacer(

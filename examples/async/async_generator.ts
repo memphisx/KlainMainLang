@@ -63,7 +63,7 @@ async function main(): Promise<void> {
   try {
     await b.next()
   } catch (e) {
-    console.log("caught " + e.message)                 // caught stop
+    console.log("caught " + (e as Error).message)                 // caught stop
   }
 
   // .throw(e) injects an error at the suspension point; a body try/catch handles
@@ -102,7 +102,7 @@ async function* guardedGen(): number {
     yield await slowSquare(1)
     yield await slowSquare(2)
   } catch (e) {
-    console.log("gen caught " + e.message)             // gen caught oops
+    console.log("gen caught " + (e as Error).message)             // gen caught oops
     yield 42
   }
 }

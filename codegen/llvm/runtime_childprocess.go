@@ -87,7 +87,7 @@ func (e *Emitter) ensureChildProcRuntime() {
 	e.ensureWaitpidDecl()
 	e.ensureFcntlDecl()
 	e.ensureErrnoAccessor() // the spawn-fail status pipe reports the child's errno
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		// win32proc.c exposes CreateProcessW's failure as a Linux-ABI errno
 		// (0 on success) so the spawn 'error' event fires (ADR-00754).
 		e.emitGlobal("declare i32 @__kml_win_spawn_failed(i32 noundef)")
@@ -114,7 +114,7 @@ func (e *Emitter) ensureChildProcRuntime() {
 	e.emitGlobal("@__kml_cp_cap = internal global i64 0, align 8")
 
 	cp := cpStructIR
-	nonblock := httpNonblockFlag()
+	nonblock := e.httpNonblockFlag()
 	errName := e.internString("Error")
 
 	// __kml_cp_accum(accum {ptr,i64,i64}*, src, n): append n bytes, keeping a
@@ -520,7 +520,7 @@ callcb:
 ret:
   ret void
 }`)
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		// Windows exit codes are full 32-bit; recover the wide value the POSIX
 		// 8-bit wait status dropped, falling back for foreign pids (ADR-00759).
 		finalizeIR = strings.Replace(finalizeIR,
@@ -930,7 +930,7 @@ setnull:
   %%inpipe = alloca [2 x i32], align 4
   %%outpipe = alloca [2 x i32], align 4
   %%errpipe = alloca [2 x i32], align 4
-  `+cpStdinPipeCallIR()+`
+  `+e.cpStdinPipeCallIR()+`
   call i32 @pipe(ptr %%outpipe)
   call i32 @pipe(ptr %%errpipe)
   %%inr_p = getelementptr [2 x i32], ptr %%inpipe, i32 0, i32 0
@@ -1077,7 +1077,7 @@ ret:
 // Returned as a register aggregate { i1 present, i32 signum } — present=true and
 // signum=0 for a normal exit, present=false and signum=<sig> for a signalled one.
 func (e *Emitter) emitCPEventFlags() {
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		e.emitGlobal(`
 define { i1, i32 } @__kml_cp_event_flags(i32 %status, i64 %killsig) {
 entry:
@@ -1109,7 +1109,7 @@ entry:
 // synthetic signals reuse the Linux-style numbers our .kill() records.
 func (e *Emitter) emitCPSignalName() {
 	var cases, arms strings.Builder
-	for _, s := range cpSignalTable() {
+	for _, s := range e.cpSignalTable() {
 		lbl := fmt.Sprintf("s%d", s.num)
 		cases.WriteString(fmt.Sprintf("    i64 %d, label %%%s\n", s.num, lbl))
 		arms.WriteString(fmt.Sprintf("%s:\n  ret ptr %s\n", lbl, e.internString(s.name)))
@@ -1137,13 +1137,13 @@ type cpSignalEntry struct {
 // resolved per GOOS. Windows reuses the Linux-style numbers our .kill() records.
 // Shared by __kml_cp_signal_name (number→name for the exit event) and
 // child.kill (name→number). TDD-00184.
-func cpSignalTable() []cpSignalEntry {
+func (e *Emitter) cpSignalTable() []cpSignalEntry {
 	t := []cpSignalEntry{
 		{1, "SIGHUP"}, {2, "SIGINT"}, {3, "SIGQUIT"}, {4, "SIGILL"},
 		{5, "SIGTRAP"}, {6, "SIGABRT"}, {8, "SIGFPE"}, {9, "SIGKILL"},
 		{11, "SIGSEGV"}, {13, "SIGPIPE"}, {14, "SIGALRM"}, {15, "SIGTERM"},
 	}
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		t = append(t, cpSignalEntry{10, "SIGBUS"}, cpSignalEntry{30, "SIGUSR1"}, cpSignalEntry{31, "SIGUSR2"})
 	} else {
 		t = append(t, cpSignalEntry{7, "SIGBUS"}, cpSignalEntry{10, "SIGUSR1"}, cpSignalEntry{12, "SIGUSR2"})
@@ -1153,8 +1153,8 @@ func cpSignalTable() []cpSignalEntry {
 
 // cpSignalNumber resolves a Node signal name (e.g. "SIGTERM") to the host's
 // signal number for child.kill(signal). TDD-00184.
-func cpSignalNumber(name string) (int, bool) {
-	for _, s := range cpSignalTable() {
+func (e *Emitter) cpSignalNumber(name string) (int, bool) {
+	for _, s := range e.cpSignalTable() {
 		if s.name == name {
 			return s.num, true
 		}

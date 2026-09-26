@@ -15,7 +15,7 @@ import (
 
 // ensureWinSpawnDecl declares __kml_win_spawn once (Windows only).
 func (e *Emitter) ensureWinSpawnDecl() {
-	if targetGOOS() != "windows" || e.usedWinSpawn {
+	if e.opts.Target.OS() != "windows" || e.usedWinSpawn {
 		return
 	}
 	e.usedWinSpawn = true
@@ -25,7 +25,7 @@ func (e *Emitter) ensureWinSpawnDecl() {
 // cpSpawnForkIR is the region of __kml_cp_spawn between the pipe setup and
 // the `parent:` label.
 func (e *Emitter) cpSpawnForkIR() string {
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		e.ensureWinSpawnDecl()
 		return `  %kmlverb64 = lshr i64 %mode, 1
   %kmlverbm = trunc i64 %kmlverb64 to i32
@@ -153,7 +153,7 @@ doexec:
   ; execvp only returns on failure — report errno up the CLOEXEC status pipe
   ; (%spw, from cpSpawnStatusSetupIR) so the parent can fire 'error' (ADR-00754).
   %spawnerrslot = alloca i32, align 4
-  %spawnerrptr = call ptr @` + errnoAccessor() + `()
+  %spawnerrptr = call ptr @` + e.errnoAccessor() + `()
   %spawnerrv = load i32, ptr %spawnerrptr, align 4
   store i32 %spawnerrv, ptr %spawnerrslot, align 4
   call i64 @write(i32 %spw, ptr %spawnerrslot, i64 4)
@@ -168,7 +168,7 @@ doexec:
 // it (ADR-00754). Windows has no fork/exec, so nothing is set up here — the
 // detection reads __kml_win_spawn's failure flag instead.
 func (e *Emitter) cpSpawnStatusSetupIR() string {
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		return ""
 	}
 	// F_SETFD = 2, FD_CLOEXEC = 1.
@@ -189,7 +189,7 @@ func (e *Emitter) cpSpawnStatusSetupIR() string {
 // __kml_win_spawn_failed, which returns the errno a failed CreateProcessW
 // mapped to (0 on success). cp is the struct-type string.
 func (e *Emitter) cpSpawnFailDetectIR(cp string) string {
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		return `  %sf_e = call i32 @__kml_win_spawn_failed(i32 %pid)
   %sf_e64 = sext i32 %sf_e to i64
   %sf20_p = getelementptr ` + cp + `, ptr %cp, i32 0, i32 20
@@ -216,47 +216,11 @@ func (e *Emitter) cpSpawnFailDetectIR(cp string) string {
 // parent's write end is the overlapped, write-queued server — the reverse of
 // pipe()'s reader-side-server layout, so a dedicated pair creator is used.
 // POSIX pipes have no such asymmetry.
-func cpStdinPipeCallIR() string {
-	if targetGOOS() == "windows" {
+func (e *Emitter) cpStdinPipeCallIR() string {
+	if e.opts.Target.OS() == "windows" {
 		return "call i32 @__kml_win_pipe_pw(ptr %%inpipe)"
 	}
 	return "call i32 @pipe(ptr %%inpipe)"
-}
-
-// execSyncForkIR is the same region of __kml_exec_file_sync (one pipe, the
-// child's stdout).
-func (e *Emitter) execSyncForkIR() string {
-	if targetGOOS() == "windows" {
-		e.ensureWinSpawnDecl()
-		// 0x10000 (65536) = guard self-spawn (ADR-00972): execFileSync of
-		// process.execPath must not re-run our own body in the child.
-		return `  %pid = call i32 @__kml_win_spawn(ptr %file, ptr %argv, ptr %cwd, i32 -1, i32 %writefd, i32 -1, i32 -1, i32 65536, ptr null)
-  br label %parent
-`
-	}
-	e.ensureReexecGuardHelper() // ADR-00972: self-spawn fork-chain guard
-	return `  %pid = call i32 @fork()
-  %ischild = icmp eq i32 %pid, 0
-  br i1 %ischild, label %child, label %parent
-
-child:
-  call i32 @close(i32 %readfd)
-  call i32 @dup2(i32 %writefd, i32 1)
-  call i32 @close(i32 %writefd)
-  %hascwd = icmp ne ptr %cwd, null
-  br i1 %hascwd, label %dochdir, label %doexec
-dochdir:
-  call i32 @chdir(ptr %cwd)
-  br label %doexec
-doexec:
-  ; ADR-00972: a self-spawn (target resolves to this executable) marks the child
-  ; env so its startup guard refuses to re-run this program body — otherwise the
-  ; child ignores argv and re-runs main, re-hitting this spawn (a fork chain).
-  call void @__kml_mark_child_if_self_spawn(ptr %file)
-  call i32 @execvp(ptr %file, ptr %argv)
-  call void @_exit(i32 127)
-  unreachable
-`
 }
 
 // clusterForkIR is the region of __kml_cluster_fork. On Windows the primary
@@ -267,7 +231,7 @@ doexec:
 // fmtFD/envFD are the interned-constant references the template already
 // holds for the "%d" formats and the two variable names.
 func (e *Emitter) clusterForkIR(fmtID, envID, fmtFD, envFD string) string {
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		e.ensureWinSpawnDecl()
 		e.ensureMalloc()
 		e.ensureMemcpy()
@@ -377,7 +341,7 @@ cexec:
 // clusterForkIR but with a single channel-fd variable and argv0 as the
 // program.
 func (e *Emitter) cpForkIR(fmtFD, envFD string) string {
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		e.ensureWinSpawnDecl()
 		e.ensureUnsetenv()
 		return `  %numbuf = alloca [16 x i8], align 1
@@ -424,7 +388,7 @@ child:
 
 // httpClusterEntryIR is inserted at the top of __kml_http_cluster_fork.
 func (e *Emitter) httpClusterEntryIR() string {
-	if targetGOOS() != "windows" {
+	if e.opts.Target.OS() != "windows" {
 		return ""
 	}
 	return `  %wid0 = load i64, ptr @__kml_cluster_worker_id, align 8
@@ -447,8 +411,8 @@ primary:
 // failure): an anonymous MAP_SHARED mapping the forked workers inherit, or on
 // Windows a named section the re-spawned workers open (win32proc.c).
 func (e *Emitter) httpClusterFlagIR() string {
-	if targetGOOS() != "windows" {
-		return fmt.Sprintf("  %%mm = call ptr @mmap(ptr null, i64 16, i32 3, i32 %d, i32 -1, i64 0)\n", mmapSharedAnonFlags())
+	if e.opts.Target.OS() != "windows" {
+		return fmt.Sprintf("  %%mm = call ptr @mmap(ptr null, i64 16, i32 3, i32 %d, i32 -1, i64 0)\n", e.mmapSharedAnonFlags())
 	}
 	return "  %mm = call ptr @__kml_win_cluster_flag()\n"
 }
@@ -456,7 +420,7 @@ func (e *Emitter) httpClusterFlagIR() string {
 // httpClusterForkIR replaces the per-worker fork block (doforkw: … up to
 // parentnext:) of __kml_http_cluster_fork.
 func (e *Emitter) httpClusterForkIR() string {
-	if targetGOOS() != "windows" {
+	if e.opts.Target.OS() != "windows" {
 		return `  ; fflush(NULL) before fork() is required, not optional: fork() copies
   ; libc's stdio buffers verbatim, so any console.log output still sitting
   ; unflushed in stdout's buffer (the common case once stdout isn't a TTY)
@@ -505,7 +469,7 @@ child:
 // waits on the primary's process handle instead (win32proc.c), so nothing is
 // polled here.
 func (e *Emitter) httpClusterOrphanIR() string {
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		return "  br label %ccpoll1"
 	}
 	e.ensureExit()
@@ -528,7 +492,7 @@ ccorphaned:
 // httpListenInheritIR is inserted at the top of __kml_http_bind_and_listen:
 // a spawned worker returns the inherited listening fd instead of binding.
 func (e *Emitter) httpListenInheritIR() string {
-	if targetGOOS() != "windows" {
+	if e.opts.Target.OS() != "windows" {
 		return ""
 	}
 	if !e.usedWinInheritedListener {
@@ -548,7 +512,7 @@ fresh:
 // re-spawned worker reads its id from KML_CLUSTER_WORKER_ID at startup, the
 // value the fork model would have inherited in memory.
 func (e *Emitter) ensureHTTPClusterSeed() {
-	if targetGOOS() != "windows" || e.usedHTTPClusterSeed {
+	if e.opts.Target.OS() != "windows" || e.usedHTTPClusterSeed {
 		return
 	}
 	e.usedHTTPClusterSeed = true
@@ -579,7 +543,7 @@ done:
 func (e *Emitter) emitShellArgv(cmdRef string) (fileRef, argvPtr, argsLen string) {
 	e.ensureMalloc()
 	argvPtr = e.freshReg()
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 32)", argvPtr))
 		for i, a := range []string{"/d", "/s", "/c"} {
 			s := e.freshReg()

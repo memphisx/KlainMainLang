@@ -152,7 +152,7 @@ func (e *Emitter) emitDgramSetBroadcast(objVal Value, args []ast.Expression, pos
 	valp := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", valp))
 	e.emitInstr(fmt.Sprintf("store i32 %s, ptr %s, align 4", enable, valp))
-	level, optname := dgramBroadcastConst()
+	level, optname := e.dgramBroadcastConst()
 	fd32 := e.netFieldFd32(objVal.Ref, dgramSocketIR)
 	e.emitInstr(fmt.Sprintf("call i32 @setsockopt(i32 %s, i32 %d, i32 %d, ptr %s, i32 4)", fd32, level, optname, valp))
 	return objVal, nil
@@ -160,9 +160,9 @@ func (e *Emitter) emitDgramSetBroadcast(objVal Value, args []ast.Expression, pos
 
 // dgramBroadcastConst returns the platform's (SOL_SOCKET, SO_BROADCAST) pair for
 // setsockopt (macOS 0xffff/0x0020, Linux 1/6) — host-only, no cross-compile.
-func dgramBroadcastConst() (solSocket, soBroadcast int) {
-	sol, _ := httpSockConstants()
-	if targetGOOS() == "darwin" {
+func (e *Emitter) dgramBroadcastConst() (solSocket, soBroadcast int) {
+	sol, _ := e.httpSockConstants()
+	if e.opts.Target.OS() == "darwin" {
 		return sol, 0x0020
 	}
 	return sol, 6

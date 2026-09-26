@@ -16,7 +16,7 @@
 // argument `openSync(path, flags)` consumes as a raw numeric mask, passed
 // straight to the host `open(2)`. Their values are genuinely host-specific
 // (Darwin and glibc disagree on everything past O_RDONLY/O_WRONLY/O_RDWR), so
-// they are resolved against `targetGOOS()` — the same target-aware table
+// they are resolved against `e.opts.Target.OS()` — the same target-aware table
 // `openFlagBits` already uses for the string-flag path (`'w'`/`'a'`/…), so
 // `openSync(p, O_WRONLY|O_CREAT|O_TRUNC)` and `openSync(p, 'w')` produce
 // identical masks. A cross-compiled binary carries its *target's* values, which
@@ -45,8 +45,8 @@ var fsConstants = map[string]float64{
 // O_WRONLY/O_RDWR are the universal access-mode low bits; the rest are the
 // per-OS flag bits. A flag a target's Node does not expose (e.g. O_DIRECT on
 // macOS, O_SYMLINK on Linux) is absent there too, matching Node's own set.
-func fsOpenConstant(name string) (float64, bool) {
-	switch targetGOOS() {
+func (e *Emitter) fsOpenConstant(name string) (float64, bool) {
+	switch e.opts.Target.OS() {
 	case "darwin":
 		m := map[string]float64{
 			"O_RDONLY": 0, "O_WRONLY": 1, "O_RDWR": 2,
@@ -104,7 +104,7 @@ func (e *Emitter) isFsConstantsExpr(expr ast.Expression) bool {
 func (e *Emitter) emitFsConstant(name string, pos ast.Pos) (Value, error) {
 	v, ok := fsConstants[name]
 	if !ok {
-		v, ok = fsOpenConstant(name)
+		v, ok = e.fsOpenConstant(name)
 	}
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: fs.constants has no member '%s' (the POSIX access modes F_OK/R_OK/W_OK/X_OK, the copyFile flags COPYFILE_EXCL/COPYFILE_FICLONE/COPYFILE_FICLONE_FORCE, and the O_* open flags for this target are covered)", pos.Line, pos.Col, name)

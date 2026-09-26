@@ -61,7 +61,8 @@ func (e *Emitter) emitProcessExit(args []ast.Expression, pos ast.Pos) (Value, er
 }
 
 // emitProcessNextTick implements process.nextTick(fn): enqueue fn onto the
-// microtask queue (drained after the current synchronous run, before timers).
+// tick queue, which runs ahead of the promise jobs (drained after the current
+// synchronous run, before timers).
 // V1 accepts a zero-argument callback only (Node forwards extra args to fn).
 func (e *Emitter) emitProcessNextTick(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
@@ -72,7 +73,7 @@ func (e *Emitter) emitProcessNextTick(args []ast.Expression, pos ast.Pos) (Value
 		return Value{}, err
 	}
 	e.ensureMicrotasks()
-	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", cbPtr))
+	e.emitInstr(fmt.Sprintf("call void @__kml_nexttick_enqueue(ptr %s)", cbPtr))
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -212,85 +213,6 @@ func (e *Emitter) emitProcessEnvGetDynamic(keyExpr ast.Expression) (Value, error
 		return Value{}, err
 	}
 	return e.emitGetenvCall(keyVal.Ref), nil
-}
-
-// emitProcessExecFileSync implements process.execFileSync(file, args?):
-// forks + execvp()s file (no shell involved, matching real Node's
-// execFileSync — not execSync's shell-interpolation behavior), captures its
-// stdout, and returns it as a string once the child exits. Throws a
-// catchable Error on a non-zero exit status or a signal death. V1 scope: no
-// options object (cwd/env/timeout/stdio all deferred), stdout only (stderr
-// is inherited, printed straight to this program's own stderr, not
-// captured).
-func (e *Emitter) emitProcessExecFileSync(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 3 {
-		return Value{}, fmt.Errorf("%d:%d: process.execFileSync takes (file[, args][, options])", pos.Line, pos.Col)
-	}
-	fileVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	fileVal = e.coerce(fileVal, TypePtr)
-
-	// The 2nd argument is the args array, unless it's the options object (Node
-	// allows execFileSync(file, options)). The 3rd, if present, is options.
-	argsPtr, argsLen := "null", "0"
-	var optsExpr ast.Expression
-	rest := args[1:]
-	if len(rest) > 0 {
-		if _, isObj := rest[0].(*ast.ObjectLiteral); isObj {
-			optsExpr = rest[0]
-			rest = rest[1:]
-		} else if al, isArr := rest[0].(*ast.ArrayLiteral); isArr && len(al.Elements) == 0 {
-			// An empty args array — no argv entries to append.
-			rest = rest[1:]
-		} else {
-			ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(rest[0], pos)
-			if err != nil {
-				return Value{}, err
-			}
-			if elemTy.IR != "ptr" || elemTy.IsObject || elemTy.IsArray || elemTy.IsFunc || elemTy.IsDynamic {
-				return Value{}, fmt.Errorf("%d:%d: process.execFileSync's args argument must be a string[]", pos.Line, pos.Col)
-			}
-			argsPtr, argsLen = ptrReg, lenReg
-			rest = rest[1:]
-		}
-	}
-	if len(rest) > 0 {
-		if _, isObj := rest[0].(*ast.ObjectLiteral); !isObj {
-			return Value{}, fmt.Errorf("%d:%d: process.execFileSync's options argument must be an object literal", pos.Line, pos.Col)
-		}
-		optsExpr = rest[0]
-	}
-
-	// options: only `{ cwd }` is honored (encoding: 'utf8' is the default and
-	// accepted); any other key is a clean rejection.
-	cwdRef := "null"
-	if optsExpr != nil {
-		ol := optsExpr.(*ast.ObjectLiteral)
-		for _, prop := range ol.Properties {
-			switch prop.Key {
-			case "cwd":
-				cv, err := e.emitExpr(prop.Value)
-				if err != nil {
-					return Value{}, err
-				}
-				cwdRef = e.coerce(cv, TypePtr).Ref
-			case "encoding":
-				sl, ok := prop.Value.(*ast.StringLiteral)
-				if !ok || sl.Value != "utf8" {
-					return Value{}, fmt.Errorf("%d:%d: process.execFileSync's encoding option supports only 'utf8'", pos.Line, pos.Col)
-				}
-			default:
-				return Value{}, fmt.Errorf("%d:%d: process.execFileSync options support only { cwd, encoding: 'utf8' }", pos.Line, pos.Col)
-			}
-		}
-	}
-
-	e.ensureExecFileSync()
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_exec_file_sync(ptr %s, ptr %s, i64 %s, ptr %s)", r, fileVal.Ref, argsPtr, argsLen, cwdRef))
-	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
 // emitProcessCwd implements process.cwd(): the current working directory.
@@ -775,7 +697,7 @@ func (e *Emitter) emitProcessKill(args []ast.Expression, pos ast.Pos) (Value, er
 		// compile time; a dynamic string goes through the runtime table
 		// (ADR-00728). Unknown names throw, as Node's ERR_UNKNOWN_SIGNAL does.
 		if lit, ok := args[1].(*ast.StringLiteral); ok {
-			n, known := signalNumbers()[lit.Value]
+			n, known := e.signalNumbers()[lit.Value]
 			if !known {
 				return Value{}, fmt.Errorf("%d:%d: process.kill: unknown signal %q", pos.Line, pos.Col, lit.Value)
 			}
@@ -830,11 +752,11 @@ func (e *Emitter) emitProcessStreamWrite(args []ast.Expression, streamName strin
 		// buffered (ADR-00867), so a write with no trailing newline would
 		// otherwise sit in the buffer until the next newline or exit. Flush it
 		// now to match (Windows keeps its own stdio path).
-		if targetGOOS() != "windows" {
+		if e.opts.Target.OS() != "windows" {
 			e.ensureStdoutGlobal()
 			e.ensureFflushDecl()
 			so := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @%s, align 8", so, stdoutGlobalSymbol()))
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @%s, align 8", so, e.stdoutGlobalSymbol()))
 			e.emitInstr(fmt.Sprintf("call i32 @fflush(ptr %s)", so))
 		}
 	}

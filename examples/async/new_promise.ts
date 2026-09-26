@@ -17,7 +17,7 @@ async function main(): Promise<void> {
       reject(new Error("denied"))
     })
   } catch (e) {
-    console.log("caught " + e.message)             // caught denied
+    console.log("caught " + (e as Error).message)             // caught denied
   }
 
   // First settle wins: the later resolve and the reject are ignored.

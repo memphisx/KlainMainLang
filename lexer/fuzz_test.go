@@ -8,9 +8,9 @@ import (
 	"KlainMainLang/lexer"
 )
 
-// FuzzTokenize checks that Tokenize never panics or hangs on arbitrary input,
-// and that a successful tokenization always ends in a trailing EOF token.
-func FuzzTokenize(f *testing.F) {
+// FuzzScan checks that scanning arbitrary input never panics or loops: it
+// always reaches EOF or an ILLEGAL token.
+func FuzzScan(f *testing.F) {
 	seeds := []string{
 		"",
 		"42",
@@ -50,12 +50,16 @@ func FuzzTokenize(f *testing.F) {
 	})
 
 	f.Fuzz(func(t *testing.T, src string) {
-		toks, err := lexer.Tokenize(src)
-		if err != nil {
-			return // rejecting malformed input is fine; panicking is not
-		}
-		if len(toks) == 0 || toks[len(toks)-1].Type != lexer.EOF {
-			t.Fatalf("token stream for %q missing trailing EOF: %v", src, toks)
+		// Scanning must terminate at EOF or an ILLEGAL token, never panic or loop.
+		l := lexer.New(src)
+		for i := 0; ; i++ {
+			tok := l.Scan(lexer.ScanDefault)
+			if tok.Type == lexer.EOF || tok.Type == lexer.ILLEGAL {
+				return
+			}
+			if i > len(src)+1 {
+				t.Fatalf("scan of %q did not reach EOF", src)
+			}
 		}
 	})
 }

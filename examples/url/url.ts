@@ -45,7 +45,7 @@ console.log(JSON.stringify(new URL("https://example.com/")))  // "https://exampl
 try {
   new URL("not a url")
 } catch (e) {
-  console.log(e.message)  // Invalid URL
+  console.log((e as Error).message)  // Invalid URL
 }
 
 // ── component setters: re-parse and re-derive every field ───────────────────

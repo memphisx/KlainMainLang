@@ -287,7 +287,7 @@ const server = net.createServer((socket) => {
   socket.on('data', (chunk: Uint8Array) => { socket.write("pong") })
 })
 server.listen(0, () => {
-  const addr = server.address()
+  const addr = server.address() as net.AddressInfo
   console.log(addr.family, addr.address, addr.port > 0)
   const client = net.connect(addr.port, "127.0.0.1", () => { client.write("ping") })
   client.on('data', (chunk: Uint8Array) => {
@@ -296,7 +296,7 @@ server.listen(0, () => {
     server.close()
   })
 })
-`, "IPv4 0.0.0.0 true\nroundtrip pong")
+`, "IPv6 :: true\nroundtrip pong")
 }
 
 // TDD-00131 (net.Server): socket.address() reports the socket's real local
@@ -310,8 +310,8 @@ const server = net.createServer((sock) => {
 })
 server.on('listening', () => { console.log("listening") })
 server.listen(0, () => {
-  const client = net.connect(server.address().port, "127.0.0.1", () => {
-    const ca = client.address()
+  const client = net.connect((server.address() as net.AddressInfo).port, "127.0.0.1", () => {
+    const ca = client.address() as net.AddressInfo
     console.log("local", ca.address, ca.family, ca.port > 0)
     client.write("ping")
   })
@@ -344,7 +344,7 @@ const server = net.createServer((sock) => {
   sock.on('data', (c: Uint8Array) => { sock.write("ok") })
 })
 server.listen(0, () => {
-  const client = net.connect({ port: server.address().port, host: "127.0.0.1" }, () => {
+  const client = net.connect({ port: (server.address() as net.AddressInfo).port, host: "127.0.0.1" }, () => {
     client.setKeepAlive()
     client.write("go")
   })
@@ -359,7 +359,7 @@ server.listen(0, () => {
 
 func TestE2ENetConnectPortOnly(t *testing.T) {
 	// `net.connect(port)` — host defaults to localhost; the shape Node code
-	// uses with server.address().port. Full echo round trip against an
+	// uses with (server.address() as net.AddressInfo).port. Full echo round trip against an
 	// in-process net server, closing cleanly from the data handler.
 	assertOutputImports(t, `
 import net from 'net'
@@ -367,7 +367,7 @@ const server = net.createServer((socket) => {
   socket.on('data', (c: string) => { socket.write("e:" + c); socket.end() })
 })
 server.listen(0, () => {
-  const sock = net.connect(server.address().port)
+  const sock = net.connect((server.address() as net.AddressInfo).port)
   sock.on('data', (c: string) => { console.log("got", c); server.close() })
   sock.write("hi")
 })
@@ -413,7 +413,7 @@ const server = net.createServer((sock) => {
   sock.end("bye")
 })
 server.on('listening', mustCall(() => {
-  const c = net.connect(server.address().port, "127.0.0.1")
+  const c = net.connect((server.address() as net.AddressInfo).port, "127.0.0.1")
   c.on('ready', mustCall(() => { console.log("ready") }))
   c.on('data', (chunk: string) => { console.log("data:", chunk) })
   c.on('end', mustCall(() => { console.log("end") }))
@@ -438,7 +438,7 @@ const server = net.createServer((sock) => {
   sock.on('data', (c: Uint8Array) => { sock.write("ok") })
 })
 server.listen(0, () => {
-  const client = net.connect({ port: server.address().port, host: "127.0.0.1" }, () => {
+  const client = net.connect({ port: (server.address() as net.AddressInfo).port, host: "127.0.0.1" }, () => {
     client.setKeepAlive(true, 10000)
     client.setKeepAlive(false)
     client.setKeepAlive(true, 0)

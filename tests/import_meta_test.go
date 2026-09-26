@@ -43,8 +43,9 @@ func buildAndRunFromDir(t *testing.T, dir, entryName string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
+	clangArgs = appendFnMeta(t, em, dir, clangArgs)
 	if out, err := llvm.ClangCommand(clangArgs...).CombinedOutput(); err != nil {
-		t.Fatalf("clang: %v\n%s", err, out)
+		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
 	result, err := exec.Command(binFile).Output()
 	if err != nil {

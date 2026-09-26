@@ -345,11 +345,11 @@ func (e *Emitter) emitHTTPRawSocketLoop(sockPtr, noReqL string) {
 
 	e.emitLabel(eagainL)
 	errnoPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @%s()", errnoPtr, errnoAccessor()))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @%s()", errnoPtr, e.errnoAccessor()))
 	errnoVal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", errnoVal, errnoPtr))
 	isEagain := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, %d", isEagain, errnoVal, httpEagainErrno()))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, %d", isEagain, errnoVal, e.httpEagainErrno()))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isEagain, yieldL, eofL))
 
 	e.emitLabel(yieldL)
@@ -394,32 +394,25 @@ func (e *Emitter) emitFireSocketVoidListener(sockPtr string, idx int) {
 }
 
 // programUsesHTTPUpgrade reports whether the program registers a Node
-// `'upgrade'` handler anywhere (`server.on('upgrade', …)` / `.once`). A
-// recursive whole-program walk rather than a shallow top-level scan: the
-// registration can sit inside any function body, block, or expression, and a
-// miss would silently drop the handler (the dispatcher would omit the upgrade
-// block, so the stored handler global is never read). The `.on('upgrade')`
-// registration site (emitHTTPServerMethod) carries a compile-error safety net
-// for the theoretical case this walk misses a container type.
+// `'upgrade'` handler anywhere (`server.on('upgrade', …)` / `.once`), in any
+// function body, block or expression: the dispatcher's upgrade block is emitted
+// only when it does.
 func programUsesHTTPUpgrade(prog *ast.Program) bool {
 	return programContainsCall(prog, isUpgradeOnCall)
 }
 
 // programContainsCall reports whether the program contains, anywhere, a call
-// expression matching pred — the shared whole-program pre-scan behind
-// programUsesHTTPUpgrade and programUsesHTTPS1Server (TDD-00191 Stage 3). The
-// recursive walk (rather than a shallow top-level scan) matters because the call
-// can sit inside any function body, block, or expression emitted before the
-// top-level statement that needs the pre-scan's result.
+// expression matching pred — the whole-program pre-scan behind
+// programUsesHTTPUpgrade and programUsesHTTPS1Server (TDD-00191 Stage 3).
 func programContainsCall(prog *ast.Program, pred func(*ast.CallExpression) bool) bool {
 	found := false
-	for _, s := range prog.Body {
-		walkStmtForCall(pred, s, &found)
-		if found {
-			return true
+	ast.Inspect(prog, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpression); ok && pred(c) {
+			found = true
 		}
-	}
-	return false
+		return !found
+	})
+	return found
 }
 
 // isHTTPSCreateServerCall reports whether ex is `https.createServer(...)` — the
@@ -471,152 +464,4 @@ func isUpgradeOnCall(ex *ast.CallExpression) bool {
 	}
 	lit, ok := ex.Args[0].(*ast.StringLiteral)
 	return ok && lit.Value == "upgrade"
-}
-
-func walkStmtForCall(pred func(*ast.CallExpression) bool, s ast.Statement, found *bool) {
-	if *found || s == nil {
-		return
-	}
-	switch n := s.(type) {
-	case *ast.BlockStatement:
-		walkBlockForCall(pred, n, found)
-	case *ast.ExpressionStatement:
-		walkExprForCall(pred, n.Expr, found)
-	case *ast.VarDeclaration:
-		walkExprForCall(pred, n.Init, found)
-	case *ast.VarDeclarationList:
-		for _, d := range n.Decls {
-			walkStmtForCall(pred, d, found)
-		}
-	case *ast.ReturnStatement:
-		walkExprForCall(pred, n.Value, found)
-	case *ast.ThrowStatement:
-		walkExprForCall(pred, n.Argument, found)
-	case *ast.IfStatement:
-		walkExprForCall(pred, n.Test, found)
-		walkStmtForCall(pred, n.Consequent, found)
-		walkStmtForCall(pred, n.Alternate, found)
-	case *ast.ForStatement:
-		walkStmtForCall(pred, n.Init, found)
-		walkExprForCall(pred, n.Test, found)
-		for _, u := range n.Update {
-			walkExprForCall(pred, u, found)
-		}
-		walkStmtForCall(pred, n.Body, found)
-	case *ast.ForOfStatement:
-		walkExprForCall(pred, n.Iterable, found)
-		walkStmtForCall(pred, n.Body, found)
-	case *ast.ForInStatement:
-		walkStmtForCall(pred, n.Body, found)
-	case *ast.WhileStatement:
-		walkExprForCall(pred, n.Test, found)
-		walkStmtForCall(pred, n.Body, found)
-	case *ast.DoWhileStatement:
-		walkStmtForCall(pred, n.Body, found)
-		walkExprForCall(pred, n.Test, found)
-	case *ast.SwitchStatement:
-		walkExprForCall(pred, n.Discriminant, found)
-		for _, c := range n.Cases {
-			walkExprForCall(pred, c.Test, found)
-			for _, cs := range c.Body {
-				walkStmtForCall(pred, cs, found)
-			}
-		}
-	case *ast.TryStatement:
-		walkBlockForCall(pred, n.Body, found)
-		if n.Catch != nil {
-			walkBlockForCall(pred, n.Catch.Body, found)
-		}
-		walkBlockForCall(pred, n.Finally, found)
-	case *ast.LabeledStatement:
-		walkStmtForCall(pred, n.Body, found)
-	case *ast.FunctionDeclaration:
-		walkBlockForCall(pred, n.Body, found)
-	case *ast.ExportDeclaration:
-		walkStmtForCall(pred, n.Decl, found)
-	}
-}
-
-func walkBlockForCall(pred func(*ast.CallExpression) bool, b *ast.BlockStatement, found *bool) {
-	if b == nil || *found {
-		return
-	}
-	for _, s := range b.Body {
-		walkStmtForCall(pred, s, found)
-		if *found {
-			return
-		}
-	}
-}
-
-func walkExprForCall(pred func(*ast.CallExpression) bool, ex ast.Expression, found *bool) {
-	if *found || ex == nil {
-		return
-	}
-	switch n := ex.(type) {
-	case *ast.CallExpression:
-		if pred(n) {
-			*found = true
-			return
-		}
-		walkExprForCall(pred, n.Callee, found)
-		for _, a := range n.Args {
-			walkExprForCall(pred, a, found)
-		}
-	case *ast.MemberExpression:
-		walkExprForCall(pred, n.Object, found)
-	case *ast.IndexExpression:
-		walkExprForCall(pred, n.Object, found)
-		walkExprForCall(pred, n.Index, found)
-	case *ast.BinaryExpression:
-		walkExprForCall(pred, n.Left, found)
-		walkExprForCall(pred, n.Right, found)
-	case *ast.AssignmentExpression:
-		walkExprForCall(pred, n.Left, found)
-		walkExprForCall(pred, n.Right, found)
-	case *ast.ConditionalExpression:
-		walkExprForCall(pred, n.Test, found)
-		walkExprForCall(pred, n.Consequent, found)
-		walkExprForCall(pred, n.Alternate, found)
-	case *ast.SequenceExpression:
-		for _, e := range n.Exprs {
-			walkExprForCall(pred, e, found)
-		}
-	case *ast.NonNullExpression:
-		walkExprForCall(pred, n.Arg, found)
-	case *ast.AsExpression:
-		walkExprForCall(pred, n.Expr, found)
-	case *ast.UnaryExpression:
-		walkExprForCall(pred, n.Arg, found)
-	case *ast.UpdateExpression:
-		walkExprForCall(pred, n.Arg, found)
-	case *ast.SpreadElement:
-		walkExprForCall(pred, n.Arg, found)
-	case *ast.AwaitExpression:
-		walkExprForCall(pred, n.Argument, found)
-	case *ast.YieldExpression:
-		walkExprForCall(pred, n.Argument, found)
-	case *ast.ArrayLiteral:
-		for _, e := range n.Elements {
-			walkExprForCall(pred, e, found)
-		}
-	case *ast.ObjectLiteral:
-		for _, p := range n.Properties {
-			walkExprForCall(pred, p.KeyExpr, found)
-			walkExprForCall(pred, p.Value, found)
-		}
-	case *ast.TemplateLiteral:
-		for _, e := range n.Exprs {
-			walkExprForCall(pred, e, found)
-		}
-	case *ast.NewExpression:
-		for _, a := range n.Args {
-			walkExprForCall(pred, a, found)
-		}
-	case *ast.ArrowFunction:
-		walkExprForCall(pred, n.Body, found)
-		walkBlockForCall(pred, n.Block, found)
-	case *ast.FunctionExpression:
-		walkBlockForCall(pred, n.Body, found)
-	}
 }

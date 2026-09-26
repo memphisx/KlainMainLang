@@ -1,6 +1,6 @@
 // klaintop — a live process manager, htop-style, in the terminal. It pairs the
 // self-refreshing `klain:tui` loop with real OS data: `os` for the CPU/memory
-// header bars, and `ps` (via `process.execFileSync`) for a scrolling, sortable
+// header bars, and `ps` (via `child_process.execFileSync`) for a scrolling, sortable
 // process table. The selected process can be killed with a y/n confirm.
 //
 //   ./klaintop              # interactive: ↑/↓ select · c/m sort · k kill · q quit

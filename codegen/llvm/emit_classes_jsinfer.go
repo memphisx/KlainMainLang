@@ -542,7 +542,7 @@ func (e *Emitter) jsInferConstructorFields(cd *ast.ClassDeclaration, seen map[st
 			return nil // inherited/declared field write, not a new field
 		}
 		switch name {
-		case ClassTagField, ClassVTableField, ClassEventEmitterField, ClassNodeStreamField:
+		case ClassTagField, ClassVTableField, ClassEventEmitterField:
 			return fmt.Errorf("%d:%d: class '%s' cannot introduce a field named '%s' — reserved for the compiler's internal use", pos.Line, pos.Col, cd.Name, name)
 		}
 		var ty Type

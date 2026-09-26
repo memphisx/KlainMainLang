@@ -2,8 +2,8 @@ package parser
 
 import (
 	"KlainMainLang/ast"
+	"KlainMainLang/diag"
 	"KlainMainLang/lexer"
-	"fmt"
 )
 
 // --- Expression parsing (precedence climbing) ---
@@ -45,54 +45,21 @@ func (p *Parser) parseAssignment() (ast.Expression, error) {
 		return nil, err
 	}
 
-	// TypeScript type assertions (ADR-00371): `expr as T`, `expr as const`,
-	// `expr satisfies T`. `as`/`satisfies` are contextual keywords (plain
-	// IDENT tokens). Left-associative postfix, looser than the ternary chain.
-	for p.check(lexer.IDENT) && (p.peek().Literal == "as" || p.peek().Literal == "satisfies") {
-		kw := p.advance()
-		// TypeScript type assertions are **erased**: `as T`, `as const`, and
-		// `satisfies T` are all identity at runtime, and this compiler keeps the
-		// expression's own inferred type rather than adopting the asserted one
-		// (a sound reinterpret across differing representations isn't modeled
-		// here). The syntax is consumed and dropped so real TS compiles; the
-		// assertion has no static effect (ADR-00371).
-		//
-		// One carve-out: `as T` written directly on a call whose result is
-		// otherwise `any` and whose emission consults a target type —
-		// `JSON.parse(s) as Rec[]`, `res.json() as Rec` — is kept on the call
-		// node (CallExpression.AssertedType), supplying the projection target
-		// exactly as `const p: Rec[] = JSON.parse(s)` would. That matches the
-		// assertion's real static effect in TypeScript (narrowing `any` to T).
-		// `satisfies` never narrows in TS and stays fully erased.
-		if kw.Literal == "as" && p.check(lexer.CONST) {
-			p.advance() // `as const`
-			continue
-		}
-		ta, terr := p.parseTypeAnnotation("as")
-		if terr != nil {
-			return nil, terr
-		}
-		if kw.Literal == "as" {
-			if ce := assertableCall(left); ce != nil {
-				ce.AssertedType = ta // chained `as A as B`: the outermost wins
-			} else {
-				// Every other `expr as T`: keep it as a node so a narrowing from a
-				// dynamic operand (`x as number` where `x: any`) is honored at
-				// codegen; a concrete→concrete assertion stays erased there
-				// (ADR-00929). `satisfies`/`as const` never wrap (they are pure
-				// identity — `as const` already `continue`d above).
-				left = ast.NewAsExpression(left, ta, posOf(kw))
-			}
-		}
-	}
-
-	switch p.peek().Type {
+	switch p.peekOperator().Type {
 	case lexer.ASSIGN,
 		lexer.PLUS_ASSIGN, lexer.MINUS_ASSIGN, lexer.STAR_ASSIGN, lexer.POW_ASSIGN, lexer.SLASH_ASSIGN, lexer.PERCENT_ASSIGN,
 		lexer.AND_ASSIGN, lexer.OR_ASSIGN, lexer.XOR_ASSIGN,
 		lexer.LSHIFT_ASSIGN, lexer.RSHIFT_ASSIGN, lexer.URSHIFT_ASSIGN,
 		lexer.LOGICAL_AND_ASSIGN, lexer.LOGICAL_OR_ASSIGN, lexer.NULLISH_ASSIGN:
 		opTok := p.advance()
+		_, call := left.(*ast.CallExpression)
+		logical := opTok.Type == lexer.LOGICAL_AND_ASSIGN || opTok.Type == lexer.LOGICAL_OR_ASSIGN || opTok.Type == lexer.NULLISH_ASSIGN
+		if !assignTarget(left, opTok.Type == lexer.ASSIGN) || call && logical {
+			// A call is never a logical assignment's target (only `=` and
+			// the arithmetic compounds keep sloppy code's web-compatible form).
+			// An early error: `1 == 2 = 1`, `a + b += 1`.
+			return nil, p.errAt(opTok, diag.InvalidAssignTarget)
+		}
 		right, err := p.parseAssignment() // right-assoc
 		if err != nil {
 			return nil, err
@@ -125,7 +92,7 @@ func (p *Parser) parseYield() (ast.Expression, error) {
 	// whatever comes next) — `yield` can appear inside a call's argument
 	// list or an array/object literal, unlike return/break/continue, which
 	// are always a full statement on their own.
-	if p.peek().Line != tok.Line {
+	if p.peek().HasPrecedingLineBreak() {
 		return ast.NewYieldExpression(nil, delegate, pos), nil
 	}
 	switch p.peek().Type {
@@ -288,10 +255,19 @@ func (p *Parser) parseRelational() (ast.Expression, error) {
 	// IDENT's literal text — parser_stmts.go's parseFor), so a variable or
 	// field actually named "in" keeps working everywhere outside this one
 	// operator position.
-	for p.peek().Type == lexer.LT || p.peek().Type == lexer.GT ||
-		p.peek().Type == lexer.LTE || p.peek().Type == lexer.GTE ||
-		p.peek().Type == lexer.INSTANCEOF ||
-		(p.peek().Type == lexer.IDENT && p.peek().Literal == "in") {
+	for {
+		var asserted bool
+		if left, asserted, err = p.parseAssertion(left); err != nil {
+			return nil, err
+		} else if asserted {
+			continue
+		}
+		if !(p.peekOperator().Type == lexer.LT || p.peek().Type == lexer.GT ||
+			p.peek().Type == lexer.LTE || p.peek().Type == lexer.GTE ||
+			p.peek().Type == lexer.INSTANCEOF ||
+			(p.peek().Type == lexer.IDENT && p.peek().Literal == "in" && !p.inExcluded())) {
+			break
+		}
 		op := p.advance()
 		right, err := p.parseShift()
 		if err != nil {
@@ -302,12 +278,64 @@ func (p *Parser) parseRelational() (ast.Expression, error) {
 	return left, nil
 }
 
+// parseAssertion parses one `as T`, `as const` or `satisfies T` suffix on
+// left (ADR-00371), and reports whether there was one. `as`/`satisfies`
+// are contextual keywords (plain IDENT tokens) that TypeScript parses as
+// binary operators of relational precedence, left-associative:
+// `a === b as T` is `a === (b as T)`, `a < b as T` is `(a < b) as T`. A
+// line break before the keyword ends the expression.
+func (p *Parser) parseAssertion(left ast.Expression) (ast.Expression, bool, error) {
+	if !p.check(lexer.IDENT) || p.peek().Literal != "as" && p.peek().Literal != "satisfies" || p.peek().HasPrecedingLineBreak() {
+		return left, false, nil
+	}
+	kw := p.advance()
+	// TypeScript type assertions are **erased**: `as T`, `as const`, and
+	// `satisfies T` are all identity at runtime, and this compiler keeps the
+	// expression's own inferred type rather than adopting the asserted one
+	// (a sound reinterpret across differing representations isn't modeled
+	// here). The syntax is consumed and dropped so real TS compiles; the
+	// assertion has no static effect (ADR-00371).
+	//
+	// One carve-out: `as T` written directly on a call whose result is
+	// otherwise `any` and whose emission consults a target type —
+	// `JSON.parse(s) as Rec[]`, `res.json() as Rec` — is kept on the call
+	// node (CallExpression.AssertedType), supplying the projection target
+	// exactly as `const p: Rec[] = JSON.parse(s)` would. That matches the
+	// assertion's real static effect in TypeScript (narrowing `any` to T).
+	// `satisfies` never narrows in TS and stays fully erased.
+	if kw.Literal == "as" && p.check(lexer.CONST) {
+		p.advance() // `as const`
+		p.assert(left, func(a *ast.Assertion) { a.Const = true })
+		return left, true, nil
+	}
+	ta, terr := p.parseTypeAnnotation("as")
+	if terr != nil {
+		return nil, false, terr
+	}
+	if kw.Literal == "satisfies" {
+		p.assert(left, func(a *ast.Assertion) { a.Satisfies = ta })
+	}
+	if kw.Literal == "as" {
+		if ce := assertableCall(left); ce != nil {
+			ce.AssertedType = ta // chained `as A as B`: the outermost wins
+		} else {
+			// Every other `expr as T`: keep it as a node so a narrowing from a
+			// dynamic operand (`x as number` where `x: any`) is honored at
+			// codegen; a concrete→concrete assertion stays erased there
+			// (ADR-00929). `satisfies`/`as const` never wrap (they are pure
+			// identity — `as const` already returned above).
+			left = ast.NewAsExpression(left, ta, posOf(kw))
+		}
+	}
+	return left, true, nil
+}
+
 func (p *Parser) parseShift() (ast.Expression, error) {
 	left, err := p.parseAdditive()
 	if err != nil {
 		return nil, err
 	}
-	for p.peek().Type == lexer.LSHIFT || p.peek().Type == lexer.RSHIFT || p.peek().Type == lexer.URSHIFT {
+	for p.peekOperator().Type == lexer.LSHIFT || p.peek().Type == lexer.RSHIFT || p.peek().Type == lexer.URSHIFT {
 		op := p.advance()
 		right, err := p.parseAdditive()
 		if err != nil {
@@ -339,7 +367,7 @@ func (p *Parser) parseMultiplicative() (ast.Expression, error) {
 	if err != nil {
 		return nil, err
 	}
-	for p.peek().Type == lexer.STAR || p.peek().Type == lexer.SLASH || p.peek().Type == lexer.PERCENT {
+	for p.peekOperator().Type == lexer.STAR || p.peek().Type == lexer.SLASH || p.peek().Type == lexer.PERCENT {
 		op := p.advance()
 		right, err := p.parseExponentiation()
 		if err != nil {
@@ -369,7 +397,7 @@ func (p *Parser) parseExponentiation() (ast.Expression, error) {
 	}
 	if p.peek().Type == lexer.POW {
 		if u, ok := left.(*ast.UnaryExpression); ok && u.Prefix && startTok.Type != lexer.LPAREN {
-			return nil, fmt.Errorf("%d:%d: unary operator '%s' before '**' is ambiguous — parenthesize as '(%s x) ** y' or '%s(x ** y)'", startTok.Line, startTok.Col, u.Op, u.Op, u.Op)
+			return nil, p.errAt(startTok, diag.ExponentUnaryAmbiguous, u.Op, u.Op, u.Op)
 		}
 		op := p.advance()
 		right, err := p.parseExponentiation()
@@ -398,15 +426,24 @@ func (p *Parser) parseUnary() (ast.Expression, error) {
 	// (no JSX here). Erased exactly like the postfix `expr as T` form
 	// (ADR-00371) — the angle-bracketed type is parsed and dropped, and the
 	// operand's own inferred type is kept.
+	if p.check(lexer.LT) && p.genericArrowAhead() {
+		return p.parseGenericArrow()
+	}
 	if p.check(lexer.LT) {
 		p.advance() // consume '<'
-		if _, err := p.parseTypeAnnotation("as"); err != nil {
+		ta, err := p.parseTypeAnnotation("as")
+		if err != nil {
 			return nil, err
 		}
 		if err := p.expectGT("type assertion"); err != nil {
 			return nil, err
 		}
-		return p.parseUnary()
+		operand, err := p.parseUnary()
+		if err != nil {
+			return nil, err
+		}
+		p.assert(operand, func(a *ast.Assertion) { a.Cast = ta }) // for the checker
+		return operand, nil
 	}
 	switch p.peek().Type {
 	case lexer.NOT, lexer.BITNOT:
@@ -438,6 +475,9 @@ func (p *Parser) parseUnary() (ast.Expression, error) {
 		if err != nil {
 			return nil, err
 		}
+		if !assignTarget(arg, false) {
+			return nil, p.errAt(op, diag.InvalidUpdateTarget)
+		}
 		return ast.NewUpdateExpression(op.Literal, true, arg, posOf(op)), nil
 	case lexer.AWAIT:
 		op := p.advance()
@@ -455,8 +495,13 @@ func (p *Parser) parsePostfix() (ast.Expression, error) {
 	if err != nil {
 		return nil, err
 	}
-	if p.peek().Type == lexer.INC || p.peek().Type == lexer.DEC {
+	// restricted production: a line terminator before `++`/`--` makes it the
+	// prefix operator of the next statement (`a\n++b` is `a; ++b`)
+	if t := p.peek(); (t.Type == lexer.INC || t.Type == lexer.DEC) && !t.HasPrecedingLineBreak() {
 		op := p.advance()
+		if !assignTarget(expr, false) {
+			return nil, p.errAt(op, diag.InvalidUpdateTarget)
+		}
 		return ast.NewUpdateExpression(op.Literal, false, expr, posOf(op)), nil
 	}
 	return expr, nil
@@ -478,7 +523,7 @@ func (p *Parser) expectPropertyName() (lexer.Token, error) {
 	// A private name (`this.#x`, `obj.#x` — TDD-00021) is syntactically
 	// valid in member-access position; whether it names a field the
 	// enclosing class actually declares is a semantic check, not a parse
-	// one (checkMemberVisibility, codegen/llvm/emit_classes.go).
+	// one.
 	if p.check(lexer.PRIVATE_NAME) {
 		return p.advance(), nil
 	}
@@ -491,10 +536,26 @@ func (p *Parser) expectPropertyName() (lexer.Token, error) {
 }
 
 // parseCallMember handles left-recursive .prop and (args) chains.
+// assert records an erased assertion on e for the checker.
+func (p *Parser) assert(e ast.Expression, set func(*ast.Assertion)) {
+	if p.assertions == nil {
+		p.assertions = map[ast.Expression]ast.Assertion{}
+	}
+	a := p.assertions[e]
+	set(&a)
+	p.assertions[e] = a
+}
+
 func (p *Parser) parseCallMember() (ast.Expression, error) {
 	expr, err := p.parsePrimary()
 	if err != nil {
 		return nil, err
+	}
+	if a, ok := expr.(*ast.ArrowFunction); ok && a == p.bareArrow {
+		// An arrow function is not a callee or an object: `() => {}` ends
+		// the expression, and a `(` on the next line starts a statement
+		// (automatic semicolon insertion).
+		return expr, nil
 	}
 
 	for {
@@ -570,15 +631,16 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 			// and `(` follows is it a call; otherwise the `<` is left for
 			// the binary-operator level. Only tried on an identifier/member
 			// callee, mirroring TS's own disambiguation.
-			if _, isIdent := expr.(*ast.Identifier); !isIdent {
-				if _, isMem := expr.(*ast.MemberExpression); !isMem {
-					return expr, nil
-				}
+			switch expr.(type) {
+			case *ast.Identifier, *ast.MemberExpression, *ast.IndexExpression, *ast.CallExpression, *ast.SuperExpression:
+			default:
+				return expr, nil
 			}
 			save := p.pos
 			p.advance() // '<'
 			var targs []*ast.TypeAnnotation
 			okParse := true
+			p.speculating++
 			for {
 				ta, err := p.parseTypeAnnotation("ts")
 				if err != nil {
@@ -595,8 +657,24 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 					okParse = false
 				}
 			}
+			p.speculating--
+			if okParse && (p.check(lexer.TEMPLATE_NO_SUB) || p.check(lexer.TEMPLATE_HEAD)) {
+				// `` tag<T>`…` ``: a tagged template with type arguments.
+				tok := p.advance()
+				quasis, raws, exprs := []string{tok.Literal}, []string{tok.Raw}, []ast.Expression(nil)
+				if tok.Type == lexer.TEMPLATE_HEAD {
+					var err error
+					if quasis, raws, exprs, err = p.parseTemplateRestRaw(tok.Literal, tok.Raw); err != nil {
+						return nil, err
+					}
+				}
+				tt := ast.NewTaggedTemplateExpression(expr, quasis, raws, exprs, posOf(tok))
+				tt.TypeArgs = targs
+				expr = tt
+				continue
+			}
 			if !okParse || !p.check(lexer.LPAREN) {
-				p.pos = save
+				p.rewind(save)
 				return expr, nil
 			}
 			lparen := p.advance()
@@ -667,4 +745,105 @@ func assertableCall(expr ast.Expression) *ast.CallExpression {
 		return ce
 	}
 	return nil
+}
+
+// assignTarget reports whether e may be assigned to (JavaScript's
+// AssignmentTargetType): a name, a member or element access that is not an
+// optional chain, `x!` or `x as T` around one, and for a plain `=` a
+// destructuring pattern. A call stays accepted: sloppy code throws a
+// ReferenceError for it at run time (Annex B), not a syntax error.
+func assignTarget(e ast.Expression, pattern bool) bool {
+	switch x := e.(type) {
+	case *ast.Identifier:
+		return true
+	case *ast.NullLiteral:
+		return x.IsUndefined // `undefined` is an identifier (a TypeError to assign in strict code)
+	case *ast.MemberExpression:
+		return !x.Optional && !inChain(x.Object)
+	case *ast.IndexExpression:
+		return !x.Optional && !inChain(x.Object)
+	case *ast.NonNullExpression:
+		return assignTarget(x.Arg, pattern)
+	case *ast.AsExpression:
+		return assignTarget(x.Expr, pattern)
+	case *ast.CallExpression:
+		return !x.Optional
+	case *ast.ArrayLiteral:
+		// An array pattern: each element a target (a default's left side
+		// one), and a rest element last, itself a target without a default.
+		if !pattern || x.RestTrailingComma {
+			return false
+		}
+		for i, el := range x.Elements {
+			switch el := el.(type) {
+			case *ast.SpreadElement:
+				if _, dflt := el.Arg.(*ast.AssignmentExpression); dflt || i != len(x.Elements)-1 || !assignTarget(el.Arg, true) {
+					return false
+				}
+			case *ast.AssignmentExpression:
+				if el.Op != "=" || !assignTarget(el.Left, true) {
+					return false
+				}
+			default:
+				if !assignTarget(el, true) {
+					return false
+				}
+			}
+		}
+		return true
+	case *ast.ObjectLiteral:
+		// An object pattern's rest property is last, and a plain target.
+		if !pattern {
+			return false
+		}
+		for i, p := range x.Properties {
+			if sp, ok := p.Value.(*ast.SpreadElement); ok && p.Key == "" && p.KeyExpr == nil {
+				switch sp.Arg.(type) {
+				case *ast.Identifier, *ast.MemberExpression, *ast.IndexExpression:
+				default:
+					return false
+				}
+				if i != len(x.Properties)-1 {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// inChain reports whether e continues an optional chain (`a?.b` in
+// `a?.b.c = 1`, an early error).
+func inChain(e ast.Expression) bool {
+	for {
+		switch x := e.(type) {
+		case *ast.MemberExpression:
+			if x.Optional {
+				return true
+			}
+			if x.ChainEnd {
+				return false
+			}
+			e = x.Object
+		case *ast.IndexExpression:
+			if x.Optional {
+				return true
+			}
+			if x.ChainEnd {
+				return false
+			}
+			e = x.Object
+		case *ast.CallExpression:
+			if x.Optional {
+				return true
+			}
+			if x.ChainEnd {
+				return false
+			}
+			e = x.Callee
+		default:
+			return false
+		}
+	}
 }

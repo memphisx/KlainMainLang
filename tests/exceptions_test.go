@@ -16,12 +16,12 @@ function divide(a: number, b: number): number {
 try {
   console.log(divide(10, 2))
 } catch (e) {
-  console.log('err: ' + e.message)
+  console.log('err: ' + (e as Error).message)
 }
 try {
   console.log(divide(10, 0))
 } catch (e) {
-  console.log('err: ' + e.message)
+  console.log('err: ' + (e as Error).message)
 }
 `, "5\nerr: division by zero")
 }
@@ -39,12 +39,12 @@ let b: int64 = 0
 try {
   console.log(a / b)
 } catch (e) {
-  console.log('err: ' + e.message)
+  console.log('err: ' + (e as Error).message)
 }
 try {
   console.log(a % b)
 } catch (e) {
-  console.log('err: ' + e.message)
+  console.log('err: ' + (e as Error).message)
 }
 `, "Infinity\n-Infinity\nNaN\nerr: Division by zero\nerr: Division by zero")
 }
@@ -65,18 +65,18 @@ let negOne: int64 = -1
 try {
   console.log(minVal / negOne)
 } catch (e) {
-  console.log('err: ' + e.message)
+  console.log('err: ' + (e as Error).message)
 }
 try {
   console.log(minVal % negOne)
 } catch (e) {
-  console.log('err: ' + e.message)
+  console.log('err: ' + (e as Error).message)
 }
 let x: int64 = -9223372036854775808
 try {
   x /= negOne
 } catch (e) {
-  console.log('err: ' + e.message)
+  console.log('err: ' + (e as Error).message)
 }
 let y: int64 = 10
 console.log(y / negOne)
@@ -104,7 +104,7 @@ func TestE2EDestructuredCatchBinding(t *testing.T) {
 	assertOutput(t, `
 try {
   throw new Error('boom')
-} catch ({ message, name }) {
+} catch ({ message, name }: any) {
   console.log(message)
   console.log(name)
 }
@@ -115,7 +115,7 @@ func TestE2EDestructuredCatchBindingRenamed(t *testing.T) {
 	assertOutput(t, `
 try {
   throw new TypeError('bad type')
-} catch ({ message: msg, name: kind }) {
+} catch ({ message: msg, name: kind }: any) {
   console.log(msg)
   console.log(kind)
 }
@@ -129,27 +129,33 @@ func TestE2EDestructuredCatchBindingScopedCorrectly(t *testing.T) {
 const message: string = 'outer'
 try {
   throw new Error('inner boom')
-} catch ({ message }) {
+} catch ({ message }: any) {
   console.log(message)
 }
 console.log(message)
 `, "inner boom\nouter")
 }
 
+// Destructuring the caught value needs its `any` annotation (the value is
+// unknown otherwise, tsc's TS2339); a field the error lacks is undefined.
 func TestE2EDestructuredCatchBindingUnknownFieldRejected(t *testing.T) {
 	_, err := parseAndCompile(`
 try {
   throw new Error('boom')
-} catch ({ notAField }) {
-  console.log(notAField)
+} catch ({ message }) {
+  console.log(message)
 }
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for an unknown field in a destructured catch binding, got none")
+	if err == nil || !strings.Contains(err.Error(), "property 'message' does not exist on type 'unknown'") {
+		t.Fatalf("expected TS2339 on the unknown caught value, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "object has no field 'notAField'") {
-		t.Fatalf("expected \"object has no field 'notAField'\", got: %v", err)
-	}
+	assertOutput(t, `
+try {
+  throw new Error('boom')
+} catch ({ notAField }: any) {
+  console.log(notAField)
+}
+`, "undefined")
 }
 
 // TestE2ECapturedObjectInTryUsedInCatch is the ADR-00872 regression: an object/
@@ -196,14 +202,14 @@ function outer(): void {
   try {
     inner()
   } catch (e) {
-    console.log('outer caught: ' + e.message)
+    console.log('outer caught: ' + (e as Error).message)
     throw new Error('rethrown')
   }
 }
 try {
   outer()
 } catch (e) {
-  console.log('top caught: ' + e.message)
+  console.log('top caught: ' + (e as Error).message)
 }
 `, "outer caught: from inner\ntop caught: rethrown")
 }
@@ -408,7 +414,7 @@ func TestE2EThrowInCatch(t *testing.T) {
 try {
   throw new Error('original')
 } catch (e) {
-  console.log('caught: ' + e.message)
+  console.log('caught: ' + (e as Error).message)
 }
 console.log('done')
 `, "caught: original\ndone")
@@ -440,10 +446,10 @@ try { throw true; } catch (e) { console.log(typeof e, e === true); }
 func TestE2EThrowCatchErrorShapePreserved(t *testing.T) {
 	assertOutput(t, `
 try { throw new Error("boom"); } catch (e) {
-  console.log(typeof e, e instanceof Error, e.message);
+  console.log(typeof e, e instanceof Error, (e as Error).message);
 }
 try { throw new TypeError("bad"); } catch (e) {
-  console.log(e instanceof TypeError, e instanceof Error, e.name, e.message, e.message.length);
+  console.log(e instanceof TypeError, e instanceof Error, (e as Error).name, (e as Error).message, (e as Error).message.length);
 }
 `, "object true boom\ntrue true TypeError bad 3")
 }
@@ -517,4 +523,15 @@ function h() {
 }
 h();
 `, "catch 1 2 b [ 2, 3 ]\nafter 1 2 b [ 2, 3 ]\ncatch tt 1\nafter tt 1\n3132")
+}
+
+// A caught value that is not an Error has no Error fields: they read
+// undefined, directly and through a destructured binding with a default.
+func TestE2ECaughtNonErrorFieldsUndefined(t *testing.T) {
+	assertOutput(t, `
+try { throw 5 } catch (e: any) { console.log(e.message, e.code, typeof e.message) }
+try { throw 5 } catch (e) { const m = (e as any).message; console.log(m) }
+try { throw 5 } catch ({ message, code = "dflt" }: any) { console.log(message, code) }
+try { throw new TypeError("t") } catch ({ message, name, code = "dflt" }: any) { console.log(message, name, code) }
+`, "undefined undefined undefined\nundefined\nundefined dflt\nt TypeError dflt")
 }

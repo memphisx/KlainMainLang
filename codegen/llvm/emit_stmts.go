@@ -382,9 +382,6 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 
 	// TDD-00187 strict gate: returning a `T | undefined` absence result from
 	// a bare-T function is a compile error under strict.
-	if err := e.checkStrictUndefinedAssign(e.currentRetType, r.Value, r.GetPos(), "return value"); err != nil {
-		return err
-	}
 
 	// A by-value small-tuple return (TDD-00134 Stage 3): `return [a, b]`
 	// builds the aggregate with insertvalue — no allocation at all.
@@ -403,10 +400,16 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		if err != nil {
 			return err
 		}
-		if !arrVal.Ty.IsArray {
+		if arrVal.Ty.IsDynamic {
+			arrVal = e.emitUnboxBoxToType(arrVal.Ref, e.currentRetType)
+		}
+		if !arrVal.Ty.IsArray && !arrVal.Ty.IsNull {
 			return fmt.Errorf("%d:%d: expression is not an array", r.Value.GetPos().Line, r.Value.GetPos().Col)
 		}
-		header := e.arrayReturnHeader(arrVal)
+		header := "null" // `return null` / `return undefined` from a `T[] | null` function
+		if arrVal.Ty.IsArray {
+			header = e.arrayReturnHeader(arrVal)
+		}
 		if err := e.emitReturnCleanups(); err != nil {
 			return err
 		}
@@ -532,6 +535,7 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 		workPtr string // the loop-scope working slot (init's own storage)
 		cell    string // this iteration's fresh cell register
 		ty      Type
+		ir      string // the storage type (a nullable scalar's aggregate)
 	}
 	var iterCells []perIterCell
 	if len(capturedLoop) > 0 {
@@ -542,13 +546,18 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 			if !ok {
 				continue
 			}
+			// A nullable-scalar local's cell holds its { i1, T } aggregate.
+			sir, size := sym.Ty.IR, sym.Ty.Align()
+			if sym.isNullableScalarLocal() {
+				sir, size = nullableScalarStorageIR(sym.Ty), 16
+			}
 			cell := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", cell, sym.Ty.Align()))
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", cell, size))
 			cur := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", cur, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, cur, cell, sym.Ty.Align()))
-			e.define(name, Symbol{Ptr: cell, Ty: sym.Ty, Boxed: true, IsConst: sym.IsConst})
-			iterCells = append(iterCells, perIterCell{workPtr: sym.Ptr, cell: cell, ty: sym.Ty})
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", cur, sir, sym.Ptr, sym.Ty.Align()))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sir, cur, cell, sym.Ty.Align()))
+			e.define(name, Symbol{Ptr: cell, Ty: sym.Ty, Boxed: true, IsConst: sym.IsConst, NullableBoxed: sym.isNullableScalarLocal()})
+			iterCells = append(iterCells, perIterCell{workPtr: sym.Ptr, cell: cell, ty: sym.Ty, ir: sir})
 		}
 	}
 	if err := e.emitStmt(s.Body); err != nil {
@@ -562,8 +571,8 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 	e.emitLabel(incL)
 	for _, c := range iterCells {
 		fin := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", fin, c.ty.IR, c.cell, c.ty.Align()))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", c.ty.IR, fin, c.workPtr, c.ty.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", fin, c.ir, c.cell, c.ty.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", c.ir, fin, c.workPtr, c.ty.Align()))
 	}
 	for _, upd := range s.Update {
 		if _, err := e.emitExpr(upd); err != nil {
@@ -609,6 +618,18 @@ func (e *Emitter) emitWhile(s *ast.WhileStatement) error {
 }
 
 func (e *Emitter) emitIf(s *ast.IfStatement) error {
+	// `if (isMainThread)` / `if (!isMainThread)`: a constant in the program's
+	// code and in a worker module's, so only the branch that runs there is
+	// emitted (a file that is its own worker spawns it in the main branch).
+	if main, ok := e.isMainThreadTest(s.Test); ok {
+		if main == (e.currentWorkerMod == "") {
+			return e.emitStmt(s.Consequent)
+		}
+		if s.Alternate != nil {
+			return e.emitStmt(s.Alternate)
+		}
+		return nil
+	}
 	thenL := e.freshLabel("if.then")
 	endL := e.freshLabel("if.end")
 	elseL := endL
@@ -746,7 +767,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 					ast.NewMemberExpression(ast.NewIdentifier(gname, s.GetPos()), "return", s.GetPos()),
 					nil, s.GetPos()),
 				s.GetPos())
-			e.pendingFinallys = append(e.pendingFinallys, []ast.Statement{closeStmt})
+			e.pendingFinallys = append(e.pendingFinallys, pendingExit{body: []ast.Statement{closeStmt}})
 			defer func() { e.pendingFinallys = e.pendingFinallys[:len(e.pendingFinallys)-1] }()
 			defer e.pushBreakTarget(endL)()
 			defer e.pushContinueTarget(incL)()
@@ -1024,11 +1045,14 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", vg, valTy.IR, vd, idx2))
 			vv := e.loadArrayElem(vg, valTy)
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", valTy.IR, vv.Ref, vPtr, valTy.Align()))
+			end := e.beginLoopIteration(s.Kind, forOfLoopVars(s), s.Body)
 			for _, st := range s.Body.Body {
 				if err := e.emitStmt(st); err != nil {
+					end()
 					return err
 				}
 			}
+			end()
 			e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
 			e.emitLabel(incL)
 			idx3, idx4 := e.freshReg(), e.freshReg()
@@ -1070,7 +1094,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		charArr := e.emitStringToCharArray(sv)
 		elemTy = TypePtr
 		dataPtrAlloca, lenAlloca = e.splitArrayAggregate(charArr)
-	} else if id, ok := s.Iterable.(*ast.Identifier); ok {
+	} else if id, ok := s.Iterable.(*ast.Identifier); ok && !e.isDynamicBinding(id.Name) {
 		iterSym, found := e.lookup(id.Name)
 		switch {
 		case found && iterSym.Ty.IsArray:
@@ -1218,7 +1242,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", bindTy.IR, elemVal.Ref, varPtr, bindTy.Align()))
 	}
 
-	if err := e.emitStmt(s.Body); err != nil {
+	if err := e.emitForOfBody(s); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
@@ -1233,6 +1257,74 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 
 	e.emitLabel(endL)
 	return nil
+}
+
+// forOfLoopVars is the names a for-of head binds.
+func forOfLoopVars(s *ast.ForOfStatement) map[string]bool {
+	names := map[string]bool{}
+	if s.VarName != "" {
+		names[s.VarName] = true
+	}
+	collectArrayPatternNames(s.ArrayPattern, names)
+	collectObjectPatternNames(s.ObjectPattern, names)
+	return names
+}
+
+// emitForOfBody and emitForInBody emit one iteration's body after its head
+// bound the loop variables (see beginLoopIteration).
+func (e *Emitter) emitForOfBody(s *ast.ForOfStatement) error {
+	defer e.beginLoopIteration(s.Kind, forOfLoopVars(s), s.Body)()
+	return e.emitStmt(s.Body)
+}
+
+func (e *Emitter) emitForInBody(s *ast.ForInStatement) error {
+	defer e.beginLoopIteration(s.Kind, map[string]bool{s.VarName: true}, s.Body)()
+	return e.emitStmt(s.Body)
+}
+
+// beginLoopIteration gives each `let`/`const` loop-head binding that a
+// closure in body captures a fresh heap cell, seeded from its slot: JS's
+// per-iteration binding, as emitFor does for a classic loop. The cell is made
+// at the body's top, which dominates every capture in it; boxing it lazily at
+// the first capture (inside a branch, say) left a later capture using a
+// register that does not dominate it. The returned func ends the iteration's
+// scope. A `var` keeps its one shared binding.
+func (e *Emitter) beginLoopIteration(kind string, names map[string]bool, body *ast.BlockStatement) func() {
+	if kind == "var" || body == nil || len(names) == 0 {
+		return func() {}
+	}
+	bound := make(map[string]bool, len(names))
+	for n := range names {
+		bound[n] = true
+	}
+	free := map[string]bool{}
+	capScanStmts([]ast.Statement{body}, bound, free)
+	var captured []string
+	for n := range names {
+		if free[n] {
+			captured = append(captured, n)
+		}
+	}
+	if len(captured) == 0 {
+		return func() {}
+	}
+	sort.Strings(captured)
+	e.ensureMalloc()
+	e.pushScope()
+	for _, name := range captured {
+		sym, ok := e.lookup(name)
+		if !ok || sym.Ty.IsArray {
+			continue // an array binding keeps its header slot
+		}
+		cell := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", cell, sym.Ty.Align()))
+		cur := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", cur, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, cur, cell, sym.Ty.Align()))
+		sym.Ptr, sym.Boxed = cell, true
+		e.define(name, sym)
+	}
+	return e.popScope
 }
 
 // emitBreak jumps to the nearest enclosing loop/switch end label, or — when
@@ -1274,8 +1366,13 @@ func (e *Emitter) emitFinallysToDepth(depth int) error {
 			break
 		}
 		e.pendingFinallys = saved[:i]
+		if saved[i].popHandler {
+			// Leaving the try (or protected catch): its handler goes first,
+			// so a throw from the finally reaches the handlers outside it.
+			e.emitInstr("call void @__kml_pop_jmpbuf()")
+		}
 		e.pushScope()
-		for _, stmt := range saved[i] {
+		for _, stmt := range saved[i].body {
 			if err := e.emitStmt(stmt); err != nil {
 				e.popScope()
 				return err
@@ -1400,6 +1497,7 @@ func (e *Emitter) emitSwitch(s *ast.SwitchStatement) error {
 	}
 
 	// Emit comparison chain.
+	var discID *ast.Identifier
 	for ci, caseIdx := range nonDefaultIdxs {
 		e.emitLabel(cmpLabels[ci])
 		c := s.Cases[caseIdx]
@@ -1413,6 +1511,20 @@ func (e *Emitter) emitSwitch(s *ast.SwitchStatement) error {
 			failTarget = endL
 		}
 
+		if !e.switchFastCompare(disc.Ty, e.inferExprType(c.Test)) {
+			// Any other pairing (`switch (null) { case 0: }`, a union or `any`
+			// discriminant, mixed kinds) matches exactly as `===` does.
+			if discID == nil {
+				discID = e.bindSwitchDiscriminant(disc, s.GetPos())
+			}
+			eq, err := e.emitExpr(ast.NewBinaryExpression("===", discID, c.Test, c.Test.GetPos()))
+			if err != nil {
+				return err
+			}
+			eq = e.toBool(eq)
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", eq.Ref, bodyLabels[caseIdx], failTarget))
+			continue
+		}
 		caseVal, err := e.emitExpr(c.Test)
 		if err != nil {
 			return err
@@ -1460,6 +1572,40 @@ func (e *Emitter) emitSwitch(s *ast.SwitchStatement) error {
 
 	e.emitLabel(endL)
 	return nil
+}
+
+// switchFastCompare reports whether a case label compares with the
+// discriminant directly: two strings, or two plain numbers of one kind.
+func (e *Emitter) switchFastCompare(disc, test Type) bool {
+	plain := func(t Type) bool {
+		return !t.IsDynamic && !t.Nullable && !t.IsUndefined && !t.IsNull && t.UnionMembers == nil
+	}
+	if !plain(disc) || !plain(test) {
+		return false
+	}
+	if isStringTy(disc) {
+		return isStringTy(test) && !test.IsObject
+	}
+	return isNumberTy(disc) && isNumberTy(test) && disc.IR != "i1" && test.IR != "i1" &&
+		!disc.IsBigInt && !test.IsBigInt && !disc.IsDate && !test.IsDate
+}
+
+// bindSwitchDiscriminant stores the evaluated discriminant in a slot bound to
+// a synthetic name, so a case can be compared by emitting `disc === test`.
+func (e *Emitter) bindSwitchDiscriminant(disc Value, pos ast.Pos) *ast.Identifier {
+	name := fmt.Sprintf("__kml_switch_disc%d", e.switchDiscCount)
+	e.switchDiscCount++
+	slot := e.freshReg()
+	if disc.Ty.IR == "void" {
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+		e.define(name, Symbol{Ptr: slot, Ty: TypeUndefined, IsConst: true})
+	} else {
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, disc.Ty.IR, disc.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", disc.Ty.IR, disc.Ref, slot, disc.Ty.Align()))
+		e.define(name, Symbol{Ptr: slot, Ty: disc.Ty, IsConst: true})
+	}
+	return ast.NewIdentifier(name, pos)
 }
 
 // emitDoWhile emits a do { body } while (cond) loop.
@@ -1525,6 +1671,16 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 			return err
 		}
 		keysVal, err = e.emitDynAnyKeys(objVal, s.GetPos())
+		if err != nil {
+			return err
+		}
+	} else if objTy.IsDynamicObject {
+		// An index-signature dictionary: its keys, insertion order.
+		objVal, err := e.emitExpr(s.Object)
+		if err != nil {
+			return err
+		}
+		keysVal, err = e.emitMapCall(objVal.Ty, objVal.Ref, "keys", nil, s.GetPos())
 		if err != nil {
 			return err
 		}
@@ -1598,7 +1754,7 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", elemVal, gepReg))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", elemVal, varPtr))
 
-	if err := e.emitStmt(s.Body); err != nil {
+	if err := e.emitForInBody(s); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
@@ -1613,4 +1769,21 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 
 	e.emitLabel(endL)
 	return nil
+}
+
+// isMainThreadTest reports a test of worker_threads' isMainThread (true) or
+// its negation (false).
+func (e *Emitter) isMainThreadTest(test ast.Expression) (bool, bool) {
+	neg := false
+	if u, ok := test.(*ast.UnaryExpression); ok && u.Op == "!" {
+		test, neg = u.Arg, true
+	}
+	id, ok := test.(*ast.Identifier)
+	if !ok || id.Name != "isMainThread" {
+		return false, false
+	}
+	if _, local := e.lookup(id.Name); local {
+		return false, false
+	}
+	return !neg, true
 }

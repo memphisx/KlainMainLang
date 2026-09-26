@@ -120,6 +120,7 @@ make ir FILE=examples/basics/basics.ts
 | `make fuzz-all` | Run every fuzz target |
 | `make conformance-fetch` | Clone/update the pinned Test262 corpus into `.test262/` (idempotent, gitignored — see [Test262 conformance](#test262-conformance)) |
 | `make conformance` | Regenerate the Test262 reports against the full corpus, both compat lanes, into `docs/testing/strict/` and `docs/testing/js/` (fetches first if needed) |
+| `make shadow-report` | Compile the corpus comparing each old codegen type decider with the new front end, and rank the disagreements into `.shadow-out/SHADOW-REPORT.md` (see [Comparing the old and new front end](#comparing-the-old-and-new-front-end)) |
 | `make clean` | Remove compiler binary and compiled example artifacts |
 
 ### Keeping test writes off the SSD
@@ -142,6 +143,14 @@ tools\ramdisk\run.ps1 -SizeGB 12 -Run "go test ./... -timeout 80m"   # Windows, 
 In Docker, mount the scratch as tmpfs **with `exec`** (the tests run the binaries they build from it): `docker run --tmpfs /scratch:exec,size=8g -e KML_SCRATCH=/scratch -e GOTMPDIR=/scratch …`.
 
 A RAM drive competes with the conformance runner for memory: its default worker count is CPUs−2, capped by the memory the OS can still commit (≈1.5 GiB per `clang -O2` worker) — it prints the cap when it applies, and `-workers` overrides it. Without the cap, clang itself dies mid-compile on a full box and the report counts that as invalid IR.
+
+### Tracing invalid IR to the emitter
+
+Set **`KML_IR_SITES=1`** and every line the compiler emits carries a `; @site file.go:N < file.go:M` comment naming the codegen code that wrote it. When clang then rejects the module, its error comes back with an `emitted by …` line under it: from `klainmain`, from the test harness, and in the conformance runner, which also groups `CLANG_ERROR` results by emitting site (`CLANG_ERROR: <message> @ emit_stmts.go:1427 < …`) and keeps the annotated output next to each failing module under `clang-fail/`. It changes nothing when unset.
+
+### Comparing the old and new front end
+
+While the compiler moves to a binder and checker, codegen still decides types itself in a few places: `inferExprType`, `resolveType`, `reliableGlobalType` and `inferUnannotatedReturnType`. With **`KML_SHADOW=<file>`** set and a new pass registered, each of those answers is also asked of the new pass, and every disagreement is appended to the file as a JSON line: the decider, the node kind and position, both answers, and the fields that differ. `make shadow-report` does this for the whole corpus and ranks the result into `.shadow-out/SHADOW-REPORT.md`. A decider is replaced by the new pass once its rows are gone. Asking changes nothing in the emitted IR, and with the variable unset nothing is asked.
 
 ### Running a slice of the suite
 
@@ -212,6 +221,15 @@ klainmain [flags] <file.ts>
                 import() lowering: eager (default — the target module is
                 resolved and linked at compile time, the returned promise
                 resolves to it) or lazy.
+
+  -diagnostics <f>
+                How errors in the program are reported: text (default —
+                one `file: line:col: message` line per error; parsing
+                continues past an error, so every syntax error in a file is
+                reported) or json (an array on stdout, one object per error
+                with its code, severity, file, line, col, byte range,
+                message, JavaScript error kind and phase). A code below
+                90000 is TypeScript's for the same condition.
 
   -decorators <d>
                 Decorator dialect: experimental (default — the legacy

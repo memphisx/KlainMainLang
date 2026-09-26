@@ -119,11 +119,54 @@ console.log(d[0], d[1], d[2]);
 }
 
 func TestE2EBufferRejections(t *testing.T) {
-	assertChanCompileError(t, `
+	// An encoding named by a variable picks its codec at run time (ADR-01169).
+	assertOutput(t, `
 const enc = "hex";
 const b = Buffer.from("ff", enc);
-`, "string literal")
-	assertChanCompileError(t, `
-const b = Buffer.from("hi", "utf16le");
-`, "not supported")
+console.log(b);
+`, "<Buffer ff>")
+	// An unknown one is Node's ERR_UNKNOWN_ENCODING at run time
+	// (TestE2EBufferRuntimeEncodings).
+}
+
+// A Buffer boxed into `any` stays a Buffer (TDD-00231): inspect, isBuffer,
+// String(), JSON and unboxing; long ones truncate at 50 bytes as Node's
+// INSPECT_MAX_BYTES does.
+func TestE2EBufferThroughAny(t *testing.T) {
+	assertOutput(t, `
+const x: any = Buffer.from("hi");
+console.log(x, [x], Buffer.isBuffer(x), Buffer.isBuffer(42 as any))
+console.log(String(x), JSON.stringify({ b: x }), typeof x, (x as Buffer).toString("hex"))
+console.log(Buffer.alloc(51, 97))
+console.log(Buffer.alloc(0))
+`, "<Buffer 68 69> [ <Buffer 68 69> ] true false\nhi {\"b\":{\"type\":\"Buffer\",\"data\":[104,105]}} object 6869\n<Buffer 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 ... 1 more byte>\n<Buffer >")
+}
+
+// An `any` narrowed by typeof reads as the primitive, and a ternary of a
+// Buffer and an `any` is an `any`, as a Node stream's chunk conversion needs.
+func TestE2EAnyNarrowedByTypeofIntoBuffer(t *testing.T) {
+	assertOutput(t, `
+const chunks: any[] = [];
+function push(c: any): void { chunks.push(typeof c === "string" ? Buffer.from(c) : c) }
+push("hi"); push(Buffer.from([1, 2])); push(42);
+for (const c of chunks) console.log(Buffer.isBuffer(c), c)
+`, "true <Buffer 68 69>\ntrue <Buffer 01 02>\nfalse 42")
+}
+
+// JSON.stringify of a Buffer is its toJSON form, at the top level and nested.
+func TestE2EBufferJSONStringify(t *testing.T) {
+	assertOutput(t, `
+const b = Buffer.from("hi");
+console.log(JSON.stringify(b), JSON.stringify({ b }), JSON.stringify([b]))
+`, `{"type":"Buffer","data":[104,105]} {"b":{"type":"Buffer","data":[104,105]}} [{"type":"Buffer","data":[104,105]}]`)
+}
+
+// An `any` passed to a Buffer parameter is the Buffer, and a BufferEncoding
+// annotation is a string (TDD-00231).
+func TestE2EAnyIntoBufferParameter(t *testing.T) {
+	assertOutput(t, `
+function hex(b: Buffer, enc: BufferEncoding): string { return enc === "hex" ? b.toString("hex") : b.toString() }
+const x: any = Buffer.from("hi");
+console.log(hex(x, "hex"), hex(x, "utf8"))
+`, "6869 hi")
 }

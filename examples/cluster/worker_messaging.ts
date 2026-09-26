@@ -13,7 +13,7 @@ if (cluster.isPrimary) {
   }))
   worker.on('exit', mustCall((code) => { console.log("worker exited with", code) }))
 } else {
-  process.send("greetings from worker " + cluster.workerId)
+  process.send("greetings from worker " + cluster.worker!.id)
   process.on('message', (msg) => {
     console.log("worker received:", msg)
     process.exit(0)

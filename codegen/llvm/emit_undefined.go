@@ -34,6 +34,14 @@ func reduceAccWidenable(t Type) bool {
 }
 
 func undefinedableElem(t Type) Type {
+	// A union's box holds undefined as it is; the flag keeps a guard's
+	// complement (`typeof o !== "function"` on `o?: A | F`) possibly
+	// undefined.
+	if t.IsDynamic && len(t.UnionMembers) > 0 && !t.Nullable {
+		t.Nullable = true
+		t.IsUndefined = true
+		return t
+	}
 	// A heap tuple is a pointer like any object, so null is its absence; only
 	// the by-value aggregate form has no spare state (ADR-01063).
 	if t.Nullable || t.IsDynamic || t.IsNull || (t.IsTuple && t.TupleByVal) ||
@@ -79,6 +87,10 @@ func (e *Emitter) emitFieldPresent(objRef string, objTy Type, field Field) (pres
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, val.Ref))
 		present = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, dataPtr))
+	case field.Ty.IsDynamic:
+		// A box: present unless it holds undefined.
+		present = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", present, val.Ref, nbUndefined))
 	default:
 		present = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, val.Ref))
@@ -212,36 +224,6 @@ func tsTypeName(t Type) string {
 	return t.IR
 }
 
-// checkStrictUndefinedAssign is the strict-mode gate (TDD-00187): assigning a
-// `T | undefined` absence result to a bare, non-nullable `T` slot is a compile
-// error — faithful strictNullChecks — unless the value was narrowed
-// (`if (x !== undefined)`) or asserted (`x!`). Under `-compat=js` this is a
-// no-op and coerce's silent unwrap gives strictNullChecks:false semantics.
-// Call it at every explicit bare-T boundary: a typed var declaration, an
-// assignment, a return, a call argument, a field store.
-func (e *Emitter) checkStrictUndefinedAssign(target Type, rhs ast.Expression, pos ast.Pos, what string) error {
-	if e.compatJS() || rhs == nil {
-		return nil
-	}
-	if target.Nullable || target.IsDynamic || target.IsNull ||
-		target.IR == "" || target.IR == "void" {
-		return nil
-	}
-	src := e.inferExprType(rhs)
-	if !src.Nullable || !src.IsUndefined || src.IsDynamic || src.UncheckedIndex {
-		return nil
-	}
-	// A flow-narrowed local is proven present; its static type still reads
-	// nullable here, so consult the narrowing flag directly.
-	if id, ok := rhs.(*ast.Identifier); ok {
-		if sym, found := e.lookup(id.Name); found && sym.NarrowedNonNull {
-			return nil
-		}
-	}
-	return fmt.Errorf("%d:%d: type '%s | undefined' is not assignable to type '%s' (the %s may be undefined) — narrow with `if (x !== undefined)`, provide a default with `??`, or assert with `!`",
-		pos.Line, pos.Col, tsTypeName(src), tsTypeName(target), what)
-}
-
 // nullableScalarEqComparable reports whether t can take part in the
 // presence-aware nullable-scalar equality below: a nullable scalar itself, or
 // a plain non-pointer numeric/boolean scalar to compare its payload against.
@@ -319,6 +301,13 @@ func (e *Emitter) emitNonNull(ex *ast.NonNullExpression) (Value, error) {
 // assertion is erased, matching ADR-00371 (a reinterpret across differing
 // concrete representations is not modeled).
 func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
+	// An array literal asserted to an array type is built as that type
+	// (`[5, "s", null] as any[]`): the assertion is its contextual type.
+	if lit, ok := ex.Expr.(*ast.ArrayLiteral); ok && ex.TypeAnnot != nil {
+		if target := e.resolveType(ex.TypeAnnot); target.IsArray && target.ElemType != nil && target.ElemType.IsDynamic {
+			return e.emitExprWithObjectHint(lit, target)
+		}
+	}
 	v, err := e.emitExpr(ex.Expr)
 	if err != nil {
 		return Value{}, err
@@ -328,6 +317,9 @@ func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
 	}
 	target := e.resolveType(ex.TypeAnnot)
 	if target.IsDynamic {
+		if isUnconstrainedDynamic(target) {
+			return Value{Ref: v.Ref, Ty: target}, nil // a union as any: the same box
+		}
 		return v, nil // `any as any`/union: nothing to unbox
 	}
 	// coerce carries the correct any→concrete unbox for scalars/strings/objects
@@ -338,4 +330,14 @@ func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
 		return e.emitUnboxBoxToType(v.Ref, target), nil
 	}
 	return e.coerce(v, target), nil
+}
+
+// dictMissReadsUndefined reports whether a string-keyed dictionary's read of
+// a missing key is typed `V | undefined`: a string, object or number value
+// (a box already holds undefined; an array value is its nullable header).
+func dictMissReadsUndefined(v Type) bool {
+	if v.Nullable || v.IsDynamic || v.IsArray || v.IsFunc {
+		return false
+	}
+	return v.IR == "ptr" || (v.IR == "double" && v.Float)
 }

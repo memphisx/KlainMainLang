@@ -3,6 +3,7 @@
 package tests
 
 import (
+	"KlainMainLang/codegen/llvm"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,7 +38,7 @@ int main(int argc, char **argv) {
 `)
 	exe := filepath.Join(dir, name+".exe")
 	if out, err := exec.Command("clang", "-O1", "-o", exe, src).CombinedOutput(); err != nil {
-		t.Fatalf("clang: %v\n%s", err, out)
+		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
 	return exe
 }

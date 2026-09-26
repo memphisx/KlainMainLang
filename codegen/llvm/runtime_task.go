@@ -228,7 +228,10 @@ func (e *Emitter) emitLoopTaskStubs() {
 	if !e.usedThreadPool {
 		e.emitGlobal("define i1 @__kml_pool_keepalive() {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define i1 @__kml_pool_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define void @__kml_pool_dispatch() {\nentry:\n  ret void\n}")
+		e.emitGlobal("define zeroext i1 @__kml_pool_dispatch() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define i1 @__kml_tcp_keepalive() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define i1 @__kml_tcp_fdset_add(ptr %fdset, ptr %wfdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define zeroext i1 @__kml_tcp_dispatch() {\nentry:\n  ret i1 0\n}")
 	}
 	// process.stdin streaming hooks likewise.
 	if !e.usedStdinRuntime {
@@ -270,7 +273,7 @@ func (e *Emitter) ensureTaskRuntime() {
 	// curl_multi_perform / __kml_curl_drain_messages rather than re-declaring.
 	e.ensureFetchAsync()
 
-	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := ucontextLayout()
+	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := e.ucontextLayout()
 
 	e.emitGlobal("@__kml_task_launching = internal thread_local global ptr null, align 8")
 	e.ensureUsleepDecl()
@@ -358,7 +361,7 @@ rejected:
   %%err = load ptr, ptr @__kml_thrown, align 8
   call void @__kml_task_reject(ptr %%t, ptr %%err)
   ret void
-}`, taskStructIR, taskFn, taskStructIR, taskArgs, setjmpCall("%jb")))
+}`, taskStructIR, taskFn, taskStructIR, taskArgs, e.setjmpCall("%jb")))
 
 	// @__kml_task_reject(ptr %task, ptr %err): mark the task's promise rejected
 	// (resolved = 2, v0 = error object), wake a parked waiter, and swap out — the
@@ -546,7 +549,7 @@ app:
 	// context beyond the IR-allocated blocks. POSIX ucontext holds nothing; on
 	// Windows the context is a Win32 fiber with an OS-owned stack (win32io.c),
 	// which only DeleteFiber returns.
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		e.emitGlobal("declare void @__kml_ctx_release(ptr)")
 	} else {
 		e.emitGlobal("define internal void @__kml_ctx_release(ptr %ctx) {\nentry:\n  ret void\n}")

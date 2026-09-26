@@ -70,7 +70,7 @@ func typeAnnotMentionsBareAny(ta *ast.TypeAnnotation) bool {
 // checkNoAnyAnnotation records the first --no-any violation seen for a resolved
 // type annotation. A no-op unless --no-any is active. Called from resolveType.
 func (e *Emitter) checkNoAnyAnnotation(ta *ast.TypeAnnotation) {
-	if !e.noAny || e.noAnyErr != nil || ta == nil {
+	if !e.opts.NoAny || e.noAnyErr != nil || ta == nil {
 		return
 	}
 	if typeAnnotMentionsBareAny(ta) {

@@ -16,7 +16,7 @@
       "id": "timers.setTimeout",
       "name": "setTimeout(fn, ms) / clearTimeout(id)",
       "statusRow": "setTimeout(fn, ms) / clearTimeout(id)",
-      "signature": "setTimeout(fn: () => void, ms: number): number; clearTimeout(id: number): void",
+      "signature": "setTimeout(fn: () => void, ms?: number): NodeJS.Timeout; clearTimeout(timeout: NodeJS.Timeout | string | number | undefined): void",
       "badge": "caveats",
       "description": "Schedules a callback to fire once after ms milliseconds and returns an id; clearTimeout cancels it before it fires. These are bare global functions, matching real JS (not a namespace). Multiple timeouts fire in delay order, not registration order.",
       "params": [
@@ -32,13 +32,14 @@
         }
       ],
       "returns": {
-        "type": "number",
-        "desc": "Timer id, usable with clearTimeout."
+        "type": "NodeJS.Timeout",
+        "desc": "Handle for clearTimeout; here it is the timer's numeric id."
       },
       "exampleKey": "timers/timers",
       "snippet": "setTimeout(() => { console.log(\"timeout fired\") }, 10)\nconst cancelledId = setTimeout(() => {}, 8)\nclearTimeout(cancelledId)",
       "differences": [
-        "Callback is restricted to a zero-argument, `void`-returning function — an arrow/function-expression closure, or a bare reference to a top-level named function."
+        "Callback is restricted to a zero-argument, `void`-returning function — an arrow/function-expression closure, or a bare reference to a top-level named function.",
+        "The handle is the timer's numeric id, not Node's `Timeout` object: `typeof` reads `\"number\"`, and `ref`/`unref`/`hasRef`/`refresh`/`close` are compile errors."
       ],
       "seeAlso": [
         "timers.setInterval",
@@ -85,7 +86,7 @@
       "id": "timers.setImmediate",
       "name": "setImmediate(fn) / clearImmediate(id)",
       "statusRow": "setImmediate(fn) / clearImmediate(id)",
-      "signature": "setImmediate(fn: () => void): number; clearImmediate(id: number): void",
+      "signature": "setImmediate(fn: () => void): NodeJS.Immediate; clearImmediate(immediate: NodeJS.Immediate | undefined): void",
       "badge": "caveats",
       "description": "Schedules a callback to run as soon as possible, reusing the exact same timer queue as a delay-0 setTimeout — clearImmediate is clearTimeout under another name. Fires after the synchronous script alongside the rest of the timer queue.",
       "params": [
@@ -96,13 +97,14 @@
         }
       ],
       "returns": {
-        "type": "number",
-        "desc": "Timer id, usable with clearImmediate."
+        "type": "NodeJS.Immediate",
+        "desc": "Handle for clearImmediate; here it is the timer's numeric id."
       },
       "exampleKey": "timers/timers",
       "snippet": "setImmediate(() => { console.log(\"immediate fired\") })\nconst cancelledImmediateId = setImmediate(() => {})\nclearImmediate(cancelledImmediateId)",
       "differences": [
-        "Real Node guarantees `setImmediate` fires before a same-tick `setTimeout(fn, 0)` when scheduled from inside an I/O callback, because its event loop has distinct phases (check vs. timers); this compiler's timer drain is a single flat fire-time-ordered queue with no phase concept, so the two are genuinely indistinguishable here (both fire at \"now\")."
+        "Real Node guarantees `setImmediate` fires before a same-tick `setTimeout(fn, 0)` when scheduled from inside an I/O callback, because its event loop has distinct phases (check vs. timers); this compiler's timer drain is a single flat fire-time-ordered queue with no phase concept, so the two are genuinely indistinguishable here (both fire at \"now\").",
+        "The handle is the timer's numeric id, not Node's `Immediate` object: `typeof` reads `\"number\"`, and `ref`/`unref`/`hasRef` are compile errors."
       ],
       "seeAlso": [
         "timers.setTimeout"

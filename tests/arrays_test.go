@@ -79,7 +79,7 @@ func TestE2EArrayPushTypeMismatchRejected(t *testing.T) {
 	mustCompileError(t, `
 const a = ["x", "y"]
 a.push(1)
-`, "array element")
+`, "argument of type 'number' is not assignable to parameter of type 'string'")
 }
 
 // TDD-00200/TDD-00205 Stage 2: the boxed-element array (`any[]`) supports the
@@ -310,7 +310,7 @@ const arr: number[] = []
 try {
   arr.reduce((acc, val) => acc + val)
 } catch (e) {
-  console.log(e.message)
+  console.log((e as Error).message)
 }
 `, "Reduce of empty array with no initial value")
 }
@@ -359,7 +359,7 @@ const arr: number[] = []
 try {
   arr.reduceRight((acc, val) => acc + val)
 } catch (e) {
-  console.log(e.message)
+  console.log((e as Error).message)
 }
 `, "Reduce of empty array with no initial value")
 }
@@ -650,8 +650,8 @@ console.log(a, a === null, a == null, !a)
 a = [4, 5]
 if (a !== null) { a.push(6); console.log(a.length, a[2], a) }
 a = null
-try { console.log(a.length) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
-try { a.push(1) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+try { console.log(a!.length) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+try { a!.push(1) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
 function find(flag: boolean): string[] | null { return flag ? ["hit"] : null }
 const r1 = find(true)
 const r2 = find(false)
@@ -694,7 +694,7 @@ func TestE2EAbsentArrayNotIterable(t *testing.T) {
 	src := `
 function sum(xs?: number[]): number { let s = 0; for (const x of xs) s += x; return s }
 function spread(xs?: number[]) { return [...xs] }
-function head(xs?: number[]) { return xs[0] }
+function head(xs?: number[]) { return xs![0] }
 try { console.log(sum()) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
 try { console.log(spread()) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
 try { console.log(head()) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
@@ -718,7 +718,7 @@ console.log(o1.tags, o1.tags === undefined, o1.tags?.length, o1.tags ?? ["dflt"]
 try { for (const t of o1.tags) console.log(t) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
 try { console.log([...o1.tags]) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
 for (const t of o3.tags) console.log(t)
-console.log([...o3.tags], o3.tags.map(t => t + "!"))
+console.log([...o3.tags], o3.tags!.map(t => t + "!"))
 function get(f: boolean): number[] | null { return f ? [1] : null }
 try { for (const n of get(false)) console.log(n) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
 for (const n of get(true)) console.log(n)
@@ -742,7 +742,7 @@ const arr: number[] = [1, 2, 3]
 try {
     arr[5] = 99
 } catch (e) {
-    console.log("caught: " + e.message)
+    console.log("caught: " + (e as Error).message)
 }
 console.log(arr[0])
 `
@@ -1391,14 +1391,14 @@ console.log(JSON.stringify(obj));
 func TestE2ENestedArrayAtWithFillPushPop(t *testing.T) {
 	assertOutput(t, `
 const matrix: number[][] = [[1, 2], [3, 4]];
-console.log(matrix.at(0)[0]);
-console.log(matrix.at(-1)[1]);
+console.log(matrix.at(0)![0]);
+console.log(matrix.at(-1)![1]);
 const withReplaced = matrix.with(0, [9, 9]);
 console.log(withReplaced[0][0]);
 console.log(matrix[0][0]);
 matrix.push([5, 6]);
 console.log(matrix.length);
-console.log(matrix.pop()[0]);
+console.log(matrix.pop()![0]);
 console.log(matrix.length);
 `, "1\n4\n9\n1\n3\n5\n2")
 }
@@ -2024,14 +2024,14 @@ console.log(b.length, b[1]);
 }
 
 func TestE2EArrayLiteralElisions(t *testing.T) {
-	// ADR-00467: holes read as undefined (the element type's zero value
-	// stand-in) and count toward the length, matching JS.
+	// ADR-00467: holes read as undefined and count toward the length,
+	// matching JS.
 	assertOutput(t, `
-const a: number[] = [1, , 3];
+const a: (number | undefined)[] = [1, , 3];
 console.log(a.length, a[1]);
-const b: string[] = [, "x", ];
+const b: (string | undefined)[] = [, "x", ];
 console.log(b.length, b[1]);
-`, "3 0\n2 x")
+`, "3 undefined\n2 x")
 }
 
 func TestE2EArrayFromIterables(t *testing.T) {

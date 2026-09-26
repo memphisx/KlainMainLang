@@ -51,7 +51,7 @@ func isDateMethodName(name string) bool {
 		return true
 	}
 	switch name {
-	case "getTime", "valueOf", "toISOString", "toDateString", "toLocaleDateString":
+	case "getTime", "valueOf", "toISOString", "toDateString", "toLocaleDateString", "toUTCString", "toGMTString":
 		return true
 	}
 	return false
@@ -180,6 +180,8 @@ func (e *Emitter) emitDateCall(dateVal Value, method string, pos ast.Pos) (Value
 		return e.emitDateToISOString(dateVal)
 	case "toDateString":
 		return e.emitDateToDateString(dateVal)
+	case "toUTCString", "toGMTString":
+		return e.emitDateToUTCString(dateVal)
 	case "toLocaleDateString":
 		return e.emitDateToLocaleDateString(dateVal)
 	}
@@ -435,6 +437,37 @@ func (e *Emitter) emitDateToDateString(dateVal Value) (Value, error) {
 	e.emitInstr(fmt.Sprintf(
 		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, ptr %s, i64 %s, ptr %s, i64 %s)",
 		buf, fmtPtr, wdayName, monthName, day, sign, absYear))
+	e.emitStringFinalizeLen(buf)
+	return Value{Ref: buf, Ty: TypePtr}, nil
+}
+
+// emitDateToUTCString formats RFC 7231's IMF-fixdate, as Node does:
+// "Thu, 01 Jan 1970 00:00:00 GMT".
+func (e *Emitter) emitDateToUTCString(dateVal Value) (Value, error) {
+	decomposed := e.emitDateDecompose(dateVal)
+	extract := func(idx int) string {
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %s, %d", r, decomposed, idx))
+		return r
+	}
+	year, month0, day, wday := extract(0), extract(1), extract(2), extract(3)
+	hour, min, sec := extract(4), extract(5), extract(6)
+	e.ensureDateNameTables()
+	wdayGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr [7 x ptr], ptr @__kml_weekday_names, i64 0, i64 %s", wdayGep, wday))
+	wdayName := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", wdayName, wdayGep))
+	monthGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr [12 x ptr], ptr @__kml_month_names, i64 0, i64 %s", monthGep, month0))
+	monthName := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", monthName, monthGep))
+	sign, absYear := e.emitDateYearSign(year, false)
+	e.ensureSprintf()
+	buf := e.emitStringScratch(48)
+	fmtPtr := e.internString("%s, %02lld %s %s%04lld %02lld:%02lld:%02lld GMT")
+	e.emitInstr(fmt.Sprintf(
+		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, i64 %s, ptr %s, ptr %s, i64 %s, i64 %s, i64 %s, i64 %s)",
+		buf, fmtPtr, wdayName, day, monthName, sign, absYear, hour, min, sec))
 	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }

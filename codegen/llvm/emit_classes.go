@@ -7,6 +7,7 @@ package llvm
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -119,24 +120,6 @@ type ClassInfo struct {
 	HasEventEmitter     bool
 	EventEmitterPayload Type
 
-	// HasNodeReadable/HasNodeWritable (TDD-00132) are set for a class that
-	// `extends Readable/Writable/Duplex/Transform` — Duplex/Transform set
-	// both. The class's instances carry a hidden Node-stream handle
-	// (ClassNodeStreamField, HasNodeStream on Ty). StreamOutTy is the
-	// readable-side element type (Readable<T>), StreamInTy the writable-side
-	// chunk type (Writable<T>); both default to i64. These flags propagate
-	// to every descendant, mirroring HasEventEmitter.
-	HasNodeReadable bool
-	HasNodeWritable bool
-	// HasNodeTransform (TDD-00132 Stage C2) additionally marks the both-sided
-	// class as a Transform (vs a plain Duplex): its writable sink routes each
-	// chunk through a `_transform(chunk, enc, cb)` override whose `this.push`
-	// feeds the readable side, rather than an independent `_read`/`_write`
-	// pair. Set for `extends Transform` and every descendant.
-	HasNodeTransform bool
-	StreamOutTy      Type
-	StreamInTy       Type
-
 	// --- TDD-00009 Stage 4 ---
 
 	// IsAbstract marks an `abstract class` — cannot be directly
@@ -149,27 +132,24 @@ type ClassInfo struct {
 	// slot IS the error kind slot), TagID lives in the >=1000 error-subclass
 	// range, and throw/catch/instanceof treat instances as real errors.
 	IsErrorSubclass bool
+	// ErrorBaseKind is the builtin error an error subclass extends
+	// directly ("Error", "TypeError", "RangeError", …): its default `.name`,
+	// and the builtin kind `instanceof` also matches.
+	ErrorBaseKind string
 	// Implements is the class's `implements A, B, ...` clause — purely a
 	// compile-time self-check (registerClasses' Pass 1), never affecting
 	// codegen/dispatch: does this class already structurally satisfy each
 	// named interface's fields and method signatures.
 	Implements []string
 
-	// FieldOrigin names which class actually declared an (instance) field
-	// — needed by checkMemberVisibility to find the field's own visibility
-	// annotation, since InheritedFields/OwnFields/FlatFields don't
-	// otherwise track per-field provenance.
+	// FieldOrigin names which class actually declared an (instance) field,
+	// since InheritedFields/OwnFields/FlatFields don't otherwise track
+	// per-field provenance.
 	FieldOrigin map[string]string
 	// ReadonlyFields is the set of `readonly` instance-field names (own +
 	// inherited) — TDD-00154. A write is rejected unless it is inside the
 	// constructor of the field's declaring class (FieldOrigin).
 	ReadonlyFields map[string]bool
-	// OwnFieldVisibility/OwnMethodVisibility are this class's own-declared
-	// members' visibility ("private"/"protected"/"" for public) — an
-	// inherited (not overridden) member's effective visibility is found by
-	// looking it up on its origin/implementor class instead.
-	OwnFieldVisibility  map[string]string
-	OwnMethodVisibility map[string]string
 
 	// StaticFieldTypes/StaticFieldOwner mirror FlatFields/FieldOrigin's
 	// shape for `static` fields, but storage-wise a static field is a
@@ -181,19 +161,17 @@ type ClassInfo struct {
 	// own) type per name; OwnStaticFieldTypes holds only this class's own
 	// newly-declared static fields (what actually needs a global emitted
 	// for it — see emitClassStaticFieldGlobals).
-	StaticFieldTypes         map[string]Type
-	OwnStaticFieldTypes      map[string]Type
-	StaticFieldOwner         map[string]string
-	OwnStaticFieldVisibility map[string]string
+	StaticFieldTypes    map[string]Type
+	OwnStaticFieldTypes map[string]Type
+	StaticFieldOwner    map[string]string
 
 	// StaticMethodSigs/StaticMethodImplementor mirror MethodSigs/
 	// MethodImplementor's inherit-then-override shape, but a static method
 	// call is a bare class-name receiver — never polymorphic, so there is
 	// no vtable/MethodDispatchSlot concept for statics at all, always a
 	// direct call to StaticMethodImplementor.
-	StaticMethodSigs          map[string]FuncSig
-	StaticMethodImplementor   map[string]string
-	OwnStaticMethodVisibility map[string]string
+	StaticMethodSigs        map[string]FuncSig
+	StaticMethodImplementor map[string]string
 }
 
 // canonicalizeClassTy swaps a class-typed Type for the live, fully-resolved
@@ -249,7 +227,9 @@ func (e *Emitter) canonicalizeClassTy(ty Type) Type {
 		}
 	}
 	if ty.IsClass {
-		if info, ok := e.classes[ty.ClassName]; ok {
+		// A class still registering has published its info before its
+		// type: the snapshot stands until then.
+		if info, ok := e.classes[ty.ClassName]; ok && info.Ty.IsClass {
 			// Nullable is a property of the field's own annotation (`Node |
 			// null`), not of the class itself — info.Ty is the bare class
 			// registry entry and is never Nullable, so swapping it in
@@ -297,12 +277,70 @@ func (e *Emitter) buildParamSig(params []ast.Param) FuncSig {
 	return sig
 }
 
+// adaptOverrideParams gives an override whose parameter is stored
+// differently from the overridden one's (`_write(chunk: Buffer, …)` over
+// `_write(chunk: any, …)`, which TypeScript's bivariant method parameters
+// allow) the base's parameter, converted to its own declared type at entry,
+// so both share one vtable signature.
+func (e *Emitter) adaptOverrideParams(m, base *ast.FunctionDeclaration) {
+	if base == nil || m.IsStatic || m.AccessorKind != "" || m.Body == nil {
+		return
+	}
+	var prologue []ast.Statement
+	for i := range m.Params {
+		if i >= len(base.Params) {
+			break
+		}
+		p, bp := &m.Params[i], base.Params[i]
+		if p.Rest || bp.Rest || p.Type == nil || bp.Type == nil || p.ArrayPattern != nil || p.ObjectPattern != nil || p.Default != nil {
+			continue
+		}
+		own, theirs := e.resolveType(p.Type), e.resolveType(bp.Type)
+		if own.IR == theirs.IR && own.IsArray == theirs.IsArray && own.IsDynamic == theirs.IsDynamic {
+			continue
+		}
+		tmp := fmt.Sprintf("__kml_adapt%d", i)
+		prologue = append(prologue, ast.NewVarDeclaration("let", p.Name, p.Type, ast.NewIdentifier(tmp, m.GetPos()), m.GetPos()))
+		p.Name, p.Type = tmp, bp.Type
+		p.Optional = p.Optional || bp.Optional
+	}
+	if len(prologue) > 0 {
+		m.Body.Body = append(prologue, m.Body.Body...)
+	}
+}
+
 // sigCompatible reports whether an overriding method's signature is
 // call-compatible with the signature it overrides — same parameter count
 // and per-parameter IR shape, same return IR shape. An indirect vtable call
 // site only ever knows the *introducing* declaration's signature, so every
 // override sharing that slot must agree on the actual LLVM call shape, or
 // the indirect call itself would be unsound.
+// padOverrideParams gives an override that declares fewer parameters than
+// the method it overrides (`_read()` over `_read(size: number)`, which
+// TypeScript allows) the base's remaining parameters as unused ones, so both
+// share one vtable signature. A rest parameter on either side is left alone.
+func padOverrideParams(m, base *ast.FunctionDeclaration) {
+	if base == nil || m.IsStatic || m.AccessorKind != "" || len(m.Params) >= len(base.Params) {
+		return
+	}
+	for _, p := range m.Params {
+		if p.Rest {
+			return
+		}
+	}
+	for i := len(m.Params); i < len(base.Params); i++ {
+		bp := base.Params[i]
+		if bp.Rest {
+			return
+		}
+		m.Params = append(m.Params, ast.Param{
+			Name:     fmt.Sprintf("__kml_pad%d", i),
+			Type:     bp.Type,
+			Optional: bp.Optional || bp.Default != nil,
+		})
+	}
+}
+
 func sigCompatible(base, override FuncSig) bool {
 	if len(base.ParamTypes) != len(override.ParamTypes) {
 		return false
@@ -343,6 +381,12 @@ func accessorMethodName(kind, prop string) string {
 // function name emits an illegal token (`@__kml_global_а...`) that clang rejects
 // with "expected '=' in global variable". The escape is deterministic and lands
 // in the reserved namespace, so it stays injective against real identifiers.
+// ctorSymbolSuffix names a class's constructor function (`@Point__kml_ctor`).
+// A method is `@Class_name`, so the suffix sits in the reserved `__kml_`
+// namespace: a method literally named `constructor` (a computed
+// `["constructor"]() {}`) must not take the constructor's symbol.
+const ctorSymbolSuffix = "__kml_ctor"
+
 func llvmSafeSymbol(s string) string {
 	s = strings.ReplaceAll(s, "@@", "__kml_wks_")
 	s = strings.ReplaceAll(s, "#", "__kml_priv_")
@@ -397,59 +441,6 @@ func (e *Emitter) classAccessorSigs(className, prop string) (getter, setter *Fun
 	return getter, setter, getter != nil || setter != nil
 }
 
-// checkMemberVisibility enforces TDD-00009 Stage 4's private/protected
-// rules — compile-time only, matching real TypeScript's own erasure (zero
-// runtime check ever emitted). vis == "" (public, the common case) is a
-// no-op fast path. originClass is whichever class actually declared the
-// member (FieldOrigin / MethodImplementor / StaticFieldOwner /
-// StaticMethodImplementor, depending on the kind of access).
-//
-// The enclosing class is read from scope symbol "__kml_enclosing_class"
-// (bound unconditionally by emitClassMember/emitClassStaticInit, both
-// static and instance contexts alike — "this" alone doesn't work here
-// since a static method has no receiver). Top-level code (no enclosing
-// class at all) fails both private and protected checks. This one check
-// also correctly rejects `super.privateMethod()` with no special-casing:
-// the enclosing class there is the *subclass*, which a private check on
-// the *base*'s member is right to refuse.
-func (e *Emitter) checkMemberVisibility(originClass, vis, kind, name string, pos ast.Pos) error {
-	if vis == "" {
-		return nil
-	}
-	var enclosing string
-	if sym, ok := e.lookup("__kml_enclosing_class"); ok {
-		enclosing = sym.Ty.ClassName
-	}
-	if enclosing == originClass {
-		return nil
-	}
-	if vis == "protected" && enclosing != "" {
-		for _, anc := range e.classes[enclosing].AncestorChain {
-			if anc == originClass {
-				return nil
-			}
-		}
-	}
-	return fmt.Errorf("%d:%d: %s '%s' is %s and not accessible here (declared on class '%s')", pos.Line, pos.Col, kind, name, vis, originClass)
-}
-
-// checkFieldVisibility looks up an instance field's declaring class/
-// visibility (via FieldOrigin/OwnFieldVisibility) and delegates to
-// checkMemberVisibility. A no-op if className isn't a registered class or
-// fieldName isn't a tracked field (both cases handled/reported elsewhere).
-func (e *Emitter) checkFieldVisibility(className, fieldName string, pos ast.Pos) error {
-	info, ok := e.classes[className]
-	if !ok {
-		return nil
-	}
-	origin, ok := info.FieldOrigin[fieldName]
-	if !ok {
-		return nil
-	}
-	vis := e.classes[origin].OwnFieldVisibility[fieldName]
-	return e.checkMemberVisibility(origin, vis, "field", fieldName, pos)
-}
-
 // checkReadonlyWrite enforces the TS `readonly` field modifier (TDD-00154): a
 // write to a readonly field is allowed only inside the constructor of the class
 // that declares it (which also covers field initializers, spliced into the
@@ -477,10 +468,6 @@ func (e *Emitter) emitStaticFieldRead(info ClassInfo, className, fieldName strin
 		return Value{}, fmt.Errorf("%d:%d: class '%s' has no static field '%s'", pos.Line, pos.Col, className, fieldName)
 	}
 	owner := info.StaticFieldOwner[fieldName]
-	vis := e.classes[owner].OwnStaticFieldVisibility[fieldName]
-	if err := e.checkMemberVisibility(owner, vis, "static field", fieldName, pos); err != nil {
-		return Value{}, err
-	}
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr @%s, align %d", reg, fieldTy.IR, llvmSafeSymbol(owner+"_static_"+fieldName), fieldTy.Align()))
 	return Value{Ref: reg, Ty: fieldTy}, nil
@@ -496,10 +483,6 @@ func (e *Emitter) emitStaticFieldAssign(info ClassInfo, className, fieldName, op
 		return Value{}, fmt.Errorf("%d:%d: class '%s' has no static field '%s'", pos.Line, pos.Col, className, fieldName)
 	}
 	owner := info.StaticFieldOwner[fieldName]
-	vis := e.classes[owner].OwnStaticFieldVisibility[fieldName]
-	if err := e.checkMemberVisibility(owner, vis, "static field", fieldName, pos); err != nil {
-		return Value{}, err
-	}
 	globalPtr := "@" + llvmSafeSymbol(owner+"_static_"+fieldName)
 
 	if isLogicalAssignOp(op) {
@@ -816,23 +799,8 @@ func (e *Emitter) registerClassNamePlaceholders(prog *ast.Program) {
 		if !ok || len(cd.TypeParams) > 0 {
 			continue
 		}
-		e.interfaces[cd.Name] = ClassType(cd.Name, nil, nil, false, false, false)
+		e.interfaces[cd.Name] = ClassType(cd.Name, nil, nil, false, false)
 	}
-}
-
-// nodeStreamRootKind reports whether base is one of Node's synthetic stream
-// root classes (TDD-00132) and, if so, which side(s) a subclass gets:
-// Readable → readable, Writable → writable, Duplex/Transform → both.
-func nodeStreamRootKind(base string) (readable, writable, ok bool) {
-	switch base {
-	case "Readable":
-		return true, false, true
-	case "Writable":
-		return false, true, true
-	case "Duplex", "Transform":
-		return true, true, true
-	}
-	return false, false, false
 }
 
 func (e *Emitter) registerClasses(prog *ast.Program) error {
@@ -876,7 +844,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// Placeholder: correct IR/IsObject/IsClass/ClassName, no fields
 			// yet — see canonicalizeClassTy's doc comment for why this must
 			// exist before any field/param/return type is resolved.
-			e.interfaces[cd.Name] = ClassType(cd.Name, nil, nil, false, false, false)
+			e.interfaces[cd.Name] = ClassType(cd.Name, nil, nil, false, false)
 		}
 	}
 
@@ -894,29 +862,20 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			return nil
 		}
 		visitState[name] = 1
-		if _, _, isStreamRoot := nodeStreamRootKind(cd.BaseClass); isStreamRoot {
-			// A synthetic stream root (TDD-00132): Readable/Writable/Duplex/
-			// Transform are never registered classes (mirroring EventEmitter
-			// in Pass 0), so there is nothing in classDeclByName to recurse
-			// into. An optional single type argument (Readable<T>) is allowed;
-			// more than one is rejected in Pass 1.
-			if len(cd.BaseTypeArgs) > 1 {
-				return fmt.Errorf("%d:%d: class '%s' extends %s with %d type arguments, expected at most 1", cd.GetPos().Line, cd.GetPos().Col, name, cd.BaseClass, len(cd.BaseTypeArgs))
-			}
-		} else if cd.BaseClass == "EventEmitter" {
+		if cd.BaseClass == "EventEmitter" {
 			// A synthetic root (TDD-00023): EventEmitter is never itself a
 			// registered class (no vtable slot, no TagID, not
 			// instanceof-checkable — same as Error/Date/Map), so there is
 			// nothing in classDeclByName to recurse into.
-			if len(cd.BaseTypeArgs) != 1 {
-				return fmt.Errorf("%d:%d: class '%s' extends EventEmitter but supplies %d type argument(s), expected exactly 1 (EventEmitter<T>)", cd.GetPos().Line, cd.GetPos().Col, name, len(cd.BaseTypeArgs))
+			if len(cd.BaseTypeArgs) > 1 {
+				return fmt.Errorf("%d:%d: class '%s' extends EventEmitter with %d type arguments, expected at most 1", cd.GetPos().Line, cd.GetPos().Col, name, len(cd.BaseTypeArgs))
 			}
-		} else if cd.BaseClass == "Error" {
-			// A synthetic root (TDD-00155 Stage 6): Error is never a
-			// registered class — nothing to recurse into; its fields are
-			// grafted in Pass 1.
+		} else if isErrorRootKind(cd.BaseClass) {
+			// A synthetic root (TDD-00155 Stage 6): Error (or a builtin kind
+			// of it) is never a registered class — nothing to recurse into;
+			// its fields are grafted in Pass 1.
 			if len(cd.BaseTypeArgs) > 0 {
-				return fmt.Errorf("%d:%d: class '%s' extends Error with type arguments, but Error is not generic", cd.GetPos().Line, cd.GetPos().Col, name)
+				return fmt.Errorf("%d:%d: class '%s' extends %s with type arguments, but %s is not generic", cd.GetPos().Line, cd.GetPos().Col, name, cd.BaseClass, cd.BaseClass)
 			}
 		} else if len(cd.BaseTypeArgs) > 0 {
 			return fmt.Errorf("%d:%d: class '%s' extends '%s' with type arguments, but only EventEmitter<T> currently supports generic extends", cd.GetPos().Line, cd.GetPos().Col, name, cd.BaseClass)
@@ -942,8 +901,11 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 
 	// Pass 1: per class, topological (base before derived).
 	var nextTagID int64
+	savedInLib := e.inLib
+	defer func() { e.inLib = savedInLib }()
 	for _, name := range topoOrder {
 		cd := classDeclByName[name]
+		e.inLib = e.libStmts[cd]
 
 		var baseInfo ClassInfo
 		// A class directly `extends EventEmitter<T>` (TDD-00023) has
@@ -953,15 +915,14 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		// exactly the same "root class" rules below as one with no base at
 		// all.
 		isEEDirect := cd.BaseClass == "EventEmitter"
-		rootReadable, rootWritable, isStreamRoot := nodeStreamRootKind(cd.BaseClass)
 		// `extends Error` (TDD-00155 Stage 6): Error is a synthetic root
 		// whose "inherited fields" are the error struct's own — minus its
 		// kind slot, which the class tag field occupies byte-for-byte. The
 		// subclass instance is therefore prefix-compatible with every
 		// throw/catch/message reader, and its TagID doubles as its error
 		// kind (allocated in a dedicated >=1000 range).
-		isErrorRoot := cd.BaseClass == "Error"
-		haveBase := cd.BaseClass != "" && !isEEDirect && !isStreamRoot && !isErrorRoot
+		isErrorRoot := isErrorRootKind(cd.BaseClass)
+		haveBase := cd.BaseClass != "" && !isEEDirect && !isErrorRoot
 		if haveBase {
 			baseInfo = e.classes[cd.BaseClass]
 			if baseInfo.IsErrorSubclass {
@@ -977,50 +938,13 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		}
 		hasEventEmitter := isEEDirect || (haveBase && baseInfo.HasEventEmitter)
 
-		// Node-stream synthetic roots (TDD-00132): a class `extends Readable/
-		// Writable/Duplex/Transform` (or a descendant of one) carries the
-		// readable/writable flags and the readable-out / writable-in element
-		// types. An optional `<T>` type argument names the readable-out type
-		// for Readable/Transform, else the writable-in type for Writable.
-		hasNodeReadable := (isStreamRoot && rootReadable) || (haveBase && baseInfo.HasNodeReadable)
-		hasNodeWritable := (isStreamRoot && rootWritable) || (haveBase && baseInfo.HasNodeWritable)
-		hasNodeTransform := (isStreamRoot && cd.BaseClass == "Transform") || (haveBase && baseInfo.HasNodeTransform)
-		streamOutTy := TypeI64
-		streamInTy := TypeI64
-		switch {
-		case isStreamRoot:
-			switch len(cd.BaseTypeArgs) {
-			case 1:
-				argTy := e.resolveType(cd.BaseTypeArgs[0])
-				// A both-sided root (Duplex/Transform): the single `<T>` names
-				// both the writable-in and readable-out chunk type. A
-				// single-sided root names only its own side.
-				if rootReadable {
-					streamOutTy = argTy
-				}
-				if rootWritable {
-					streamInTy = argTy
-				}
-			case 2:
-				// A both-sided root with `<In, Out>` (the Transform<I,O> form):
-				// first arg is the writable-in chunk type, second the
-				// readable-out type.
-				if rootWritable {
-					streamInTy = e.resolveType(cd.BaseTypeArgs[0])
-				}
-				if rootReadable {
-					streamOutTy = e.resolveType(cd.BaseTypeArgs[1])
-				}
-			}
-		case haveBase && (baseInfo.HasNodeReadable || baseInfo.HasNodeWritable):
-			streamOutTy = baseInfo.StreamOutTy
-			streamInTy = baseInfo.StreamInTy
-		}
-		hasNodeStream := hasNodeReadable || hasNodeWritable
 		var eePayload Type
 		switch {
 		case isEEDirect:
-			eePayload = e.resolveEventEmitterPayloadType(cd.BaseTypeArgs[0])
+			eePayload = TypeAny // @types/node's DefaultEventMap
+			if len(cd.BaseTypeArgs) == 1 {
+				eePayload = e.resolveEventEmitterPayloadType(cd.BaseTypeArgs[0])
+			}
 		case haveBase && baseInfo.HasEventEmitter:
 			eePayload = baseInfo.EventEmitterPayload
 		}
@@ -1045,7 +969,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		for k, v := range baseInfo.ReadonlyFields {
 			readonlyFields[k] = v
 		}
-		ownFieldVisibility := make(map[string]string)
 		staticFieldTypes := make(map[string]Type, len(baseInfo.StaticFieldTypes))
 		for k, v := range baseInfo.StaticFieldTypes {
 			staticFieldTypes[k] = v
@@ -1055,7 +978,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			staticFieldOwner[k] = v
 		}
 		ownStaticFieldTypes := make(map[string]Type)
-		ownStaticFieldVisibility := make(map[string]string)
 
 		var ownFields []Field
 		for _, f := range cd.Fields {
@@ -1067,9 +989,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			}
 			if f.Name == ClassEventEmitterField {
 				return fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal EventEmitter listener map", cd.GetPos().Line, cd.GetPos().Col, cd.Name, ClassEventEmitterField)
-			}
-			if f.Name == ClassNodeStreamField {
-				return fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal Node-stream handle", cd.GetPos().Line, cd.GetPos().Col, cd.Name, ClassNodeStreamField)
 			}
 			if f.Static {
 				// A static field's initializer (`static x = expr`) runs in the
@@ -1089,11 +1008,16 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				staticFieldTypes[f.Name] = fty
 				staticFieldOwner[f.Name] = cd.Name
 				ownStaticFieldTypes[f.Name] = fty
-				ownStaticFieldVisibility[f.Name] = f.Visibility
 				continue
 			}
 			if seen[f.Name] {
-				return fmt.Errorf("%d:%d: class '%s' redeclares inherited field '%s'", cd.GetPos().Line, cd.GetPos().Col, cd.Name, f.Name)
+				// A subclass redeclaring an inherited field (`code: string` over
+				// Error's) names the same property: it keeps the inherited slot
+				// when its storage is the same.
+				if f.Type != nil && !f.Optional && inheritedFieldIs(inheritedFields, f.Name, e.resolveType(f.Type)) {
+					continue
+				}
+				return fmt.Errorf("%d:%d: class '%s' redeclares inherited field '%s' with a different type", cd.GetPos().Line, cd.GetPos().Col, cd.Name, f.Name)
 			}
 			seen[f.Name] = true
 			// An unannotated field (`x = expr`, TDD-00063 Stage 1) takes its
@@ -1119,9 +1043,14 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				// canonicalizeClassTy re-resolves on demand at each drilling access
 				// (ADR-00946/00949, the class self-reference machinery).
 				e.pushScope()
-				e.define("this", Symbol{Ty: ClassType(cd.Name, nil, nil, false, false, false)})
+				e.define("this", Symbol{Ty: ClassType(cd.Name, nil, nil, false, false)})
 				fty = e.inferExprType(f.Initializer)
 				e.popScope()
+				// A call of a function registered after classes (`f = mk()`,
+				// `server = http.createServer(…)`) has its declared return type.
+				if rt, ok := e.declaredCallReturnType(prog, f.Initializer); ok {
+					fty = rt
+				}
 				// Evolving-any for a `null`/`undefined`-initialized unannotated
 				// field, the class-field counterpart of the local-binding
 				// widening (ADR-00923): if a method or the constructor later
@@ -1130,13 +1059,12 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				// (TDD-00208) rather than a `null`-typed `ptr` — so
 				// `this.#field ??= 1` stores 1 instead of a `double` into a
 				// null slot (invalid IR).
-				if (fty.IsNull || fty.IsUndefined) && !e.noAny && e.classFieldNullEvolves(cd, f.Name) {
+				if (fty.IsNull || fty.IsUndefined) && !e.opts.NoAny && e.classFieldNullEvolves(cd, f.Name) {
 					fty = TypeAny
 				}
 			}
 			ownFields = append(ownFields, Field{Name: f.Name, Ty: fty})
 			fieldOrigin[f.Name] = cd.Name
-			ownFieldVisibility[f.Name] = f.Visibility
 			if f.Readonly {
 				readonlyFields[f.Name] = true
 			}
@@ -1154,7 +1082,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				seen[f.Name] = true
 				ownFields = append(ownFields, f)
 				fieldOrigin[f.Name] = cd.Name
-				ownFieldVisibility[f.Name] = "" // public
 			}
 		}
 		flatFields := append(append([]Field{}, inheritedFields...), ownFields...)
@@ -1167,7 +1094,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		// hasEventEmitter, unlike HasVTable, is already fully known by this
 		// point (computed above, not deferred to a later pass), so it's
 		// threaded through here too.
-		provisionalTy := ClassType(cd.Name, inheritedFields, ownFields, false, hasEventEmitter, hasNodeStream)
+		provisionalTy := ClassType(cd.Name, inheritedFields, ownFields, false, hasEventEmitter)
 		e.interfaces[cd.Name] = provisionalTy
 
 		ancestorChain := append([]string{}, baseInfo.AncestorChain...)
@@ -1178,39 +1105,31 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		}
 
 		info := ClassInfo{
-			BaseClass:                 cd.BaseClass,
-			AncestorChain:             ancestorChain,
-			RootClass:                 rootClass,
-			InheritedFields:           inheritedFields,
-			OwnFields:                 ownFields,
-			FlatFields:                flatFields,
-			Methods:                   make(map[string]*ast.FunctionDeclaration),
-			MethodSigs:                make(map[string]FuncSig),
-			GenMethodInfo:             make(map[string]*GeneratorInfo),
-			MethodImplementor:         make(map[string]string),
-			MethodDispatchSlot:        make(map[string]*MethodSlot),
-			TagID:                     nextTagID,
-			IsErrorSubclass:           isErrorRoot,
-			IsAbstract:                cd.IsAbstract,
-			Implements:                cd.Implements,
-			FieldOrigin:               fieldOrigin,
-			ReadonlyFields:            readonlyFields,
-			OwnFieldVisibility:        ownFieldVisibility,
-			OwnMethodVisibility:       make(map[string]string),
-			StaticFieldTypes:          staticFieldTypes,
-			OwnStaticFieldTypes:       ownStaticFieldTypes,
-			StaticFieldOwner:          staticFieldOwner,
-			OwnStaticFieldVisibility:  ownStaticFieldVisibility,
-			StaticMethodSigs:          make(map[string]FuncSig),
-			StaticMethodImplementor:   make(map[string]string),
-			OwnStaticMethodVisibility: make(map[string]string),
-			HasEventEmitter:           hasEventEmitter,
-			EventEmitterPayload:       eePayload,
-			HasNodeReadable:           hasNodeReadable,
-			HasNodeWritable:           hasNodeWritable,
-			HasNodeTransform:          hasNodeTransform,
-			StreamOutTy:               streamOutTy,
-			StreamInTy:                streamInTy,
+			BaseClass:               cd.BaseClass,
+			AncestorChain:           ancestorChain,
+			RootClass:               rootClass,
+			InheritedFields:         inheritedFields,
+			OwnFields:               ownFields,
+			FlatFields:              flatFields,
+			Methods:                 make(map[string]*ast.FunctionDeclaration),
+			MethodSigs:              make(map[string]FuncSig),
+			GenMethodInfo:           make(map[string]*GeneratorInfo),
+			MethodImplementor:       make(map[string]string),
+			MethodDispatchSlot:      make(map[string]*MethodSlot),
+			TagID:                   nextTagID,
+			IsErrorSubclass:         isErrorRoot,
+			ErrorBaseKind:           errorBaseKind(isErrorRoot, cd.BaseClass),
+			IsAbstract:              cd.IsAbstract,
+			Implements:              cd.Implements,
+			FieldOrigin:             fieldOrigin,
+			ReadonlyFields:          readonlyFields,
+			StaticFieldTypes:        staticFieldTypes,
+			OwnStaticFieldTypes:     ownStaticFieldTypes,
+			StaticFieldOwner:        staticFieldOwner,
+			StaticMethodSigs:        make(map[string]FuncSig),
+			StaticMethodImplementor: make(map[string]string),
+			HasEventEmitter:         hasEventEmitter,
+			EventEmitterPayload:     eePayload,
 		}
 		nextTagID++
 		// An error subclass's TagID doubles as its runtime error kind — the
@@ -1264,17 +1183,13 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// override wins at every call site, and an override body reaches
 			// the underlying behavior via super.<method>(...) (routed to the
 			// built-in in emitSuperMethodCall). No rejection here anymore.
-			// Node-stream classes (TDD-00132) hand-dispatch on/push/pipe/…
-			// by name (emit_call.go) against the hidden stream handle, never
-			// a real vtable slot — but the `_read`/`_write`/`_transform`
-			// override hooks are ordinary user methods, so they are allowed.
-			if !m.IsStatic && hasNodeStream && isNodeStreamMethodName(m.Name) {
-				return fmt.Errorf("%d:%d: class '%s' cannot declare method '%s' — reserved by the Node stream base class", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
-			}
+			padOverrideParams(m, info.Methods[m.Name])
+			e.adaptOverrideParams(m, info.Methods[m.Name])
 			sig := e.buildParamSig(m.Params)
 			sig.IsAsync = m.IsAsync
 			if m.ReturnType != nil {
 				sig.RetType = e.resolveType(m.ReturnType)
+				sig.RetThis = m.ReturnType.IsThis
 			} else if m.Body == nil {
 				// Abstract method with no return-type annotation: nothing
 				// to infer from (no body) — defaults to void, same as any
@@ -1401,7 +1316,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				info.MethodImplementor[mangled] = cd.Name
 				info.MethodSigs[mangled] = sig
 				info.Methods[mangled] = m
-				info.OwnMethodVisibility[mangled] = m.Visibility
 				continue
 			}
 
@@ -1421,7 +1335,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				info.MethodImplementor[m.Name] = cd.Name
 				info.MethodSigs[m.Name] = sig
 				info.Methods[m.Name] = m
-				info.OwnMethodVisibility[m.Name] = m.Visibility
 				continue
 			}
 
@@ -1432,7 +1345,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				ownStaticDeclared[m.Name] = true
 				info.StaticMethodSigs[m.Name] = sig
 				info.StaticMethodImplementor[m.Name] = cd.Name
-				info.OwnStaticMethodVisibility[m.Name] = m.Visibility
 				continue
 			}
 
@@ -1468,7 +1380,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			info.MethodImplementor[m.Name] = cd.Name
 			info.MethodSigs[m.Name] = sig
 			info.Methods[m.Name] = m
-			info.OwnMethodVisibility[m.Name] = m.Visibility
 		}
 
 		// Abstract-completeness check (TDD-00009 Stage 4): a concrete
@@ -1480,7 +1391,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		// its own subclasses).
 		if !cd.IsAbstract {
 			for mname, decl := range info.Methods {
-				if decl.Body == nil {
+				if decl.Body == nil && !decl.IsOptional {
 					return fmt.Errorf("%d:%d: class '%s' does not implement abstract method '%s' inherited from '%s'", cd.GetPos().Line, cd.GetPos().Col, cd.Name, mname, info.MethodImplementor[mname])
 				}
 			}
@@ -1529,18 +1440,10 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			if baseCtor != nil && !callsSuper {
 				return fmt.Errorf("%d:%d: constructor of class '%s' must call super(...) (base class '%s' has a constructor)", cd.Constructor.GetPos().Line, cd.Constructor.GetPos().Col, cd.Name, cd.BaseClass)
 			}
-			if baseCtor == nil && callsSuper && !isStreamRoot && !isErrorRoot {
-				// A stream-root subclass (TDD-00132) is allowed to call
-				// `super({ highWaterMark, objectMode })`: the options are read
-				// statically and threaded into the hidden stream handle at
-				// construction (streamSuperHWM), and the super() call itself
-				// lowers to a no-op (emitSuperCall).
-				if haveBase {
-					return fmt.Errorf("%d:%d: constructor of class '%s' calls super(...) but base class '%s' has no constructor", cd.Constructor.GetPos().Line, cd.Constructor.GetPos().Col, cd.Name, cd.BaseClass)
-				}
-				if isEEDirect {
-					return fmt.Errorf("%d:%d: constructor of class '%s' calls super(...) but EventEmitter has no constructor to call", cd.Constructor.GetPos().Line, cd.Constructor.GetPos().Col, cd.Name)
-				}
+			// A derived class must call super() (TS2377) even when its base
+			// has no constructor of its own: that call is then a no-op
+			// (emitSuperCall), as is EventEmitter's.
+			if baseCtor == nil && callsSuper && !isErrorRoot && !haveBase && !isEEDirect {
 				return fmt.Errorf("%d:%d: constructor of class '%s' calls super(...) but the class has no base class", cd.Constructor.GetPos().Line, cd.Constructor.GetPos().Col, cd.Name)
 			}
 			info.Constructor = cd.Constructor
@@ -1709,7 +1612,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 	// site (unchanged since before Stage 3) sees the final shape.
 	for _, name := range topoOrder {
 		info := e.classes[name]
-		info.Ty = ClassType(name, info.InheritedFields, info.OwnFields, info.HasVTable, info.HasEventEmitter, info.HasNodeReadable || info.HasNodeWritable)
+		info.Ty = ClassType(name, info.InheritedFields, info.OwnFields, info.HasVTable, info.HasEventEmitter)
 		e.classes[name] = info
 		e.interfaces[name] = info.Ty
 	}
@@ -1719,7 +1622,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 
 // emitClassDecl emits one class's constructor (if declared or synthesized —
 // see registerClasses' constructor rules) and every own-declared method as
-// ordinary LLVM functions named "@ClassName_constructor" /
+// ordinary LLVM functions named "@ClassName__kml_ctor" /
 // "@ClassName_methodName". A method inherited-but-not-overridden gets no
 // function of its own here — calls to it resolve (via emitClassCall) to its
 // nearest ancestor's own function instead.
@@ -1746,7 +1649,7 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 		return fmt.Errorf("%d:%d: an `accessor` auto-field decorator is a standard (TC39) decorator — compile with -decorators=standard", cd.GetPos().Line, cd.GetPos().Col)
 	}
 	if info.Constructor != nil {
-		llvmName := cd.Name + "_constructor"
+		llvmName := cd.Name + ctorSymbolSuffix
 		e.currentCtorClass = cd.Name
 		err := e.emitClassMember(llvmName, info.Ty, info.Constructor.Params, info.CtorSig, info.Constructor.Body, TypeVoid, info.Constructor.GetPos(), false, false)
 		e.currentCtorClass = ""
@@ -1824,8 +1727,7 @@ func (e *Emitter) emitClassStaticFieldGlobals(className string) {
 // static {} block this class declares, concatenated in declaration order
 // (TDD-00009 Stage 4) — called once from EmitProgram's Pass 3, before any
 // top-level statement runs. A static context: no "this"/"super" (there is
-// no receiver), but "__kml_enclosing_class" is still bound so a private
-// static field/method access from inside the block is checked correctly.
+// no receiver).
 func (e *Emitter) emitClassStaticInit(cd *ast.ClassDeclaration) error {
 	savedAllocas := e.allocas
 	savedBody := e.body
@@ -1842,7 +1744,6 @@ func (e *Emitter) emitClassStaticInit(cd *ast.ClassDeclaration) error {
 	e.blockDone = false
 	e.currentRetType = TypeVoid
 	e.pushScope()
-	e.define("__kml_enclosing_class", Symbol{Ty: e.classes[cd.Name].Ty})
 
 	// Static field initializers run first, in declaration order (ADR-00375),
 	// then the `static {}` block(s). A class mixing the two runs all field
@@ -1907,6 +1808,9 @@ func (e *Emitter) emitClassVTable(className string) {
 		if slot == nil || !slot.Virtual {
 			continue
 		}
+		if m := info.Methods[mname]; m != nil && m.IsOptional && m.Body == nil {
+			continue // an optional method no class in the chain implements
+		}
 		slots[slot.Index] = fmt.Sprintf("ptr @%s", llvmSafeSymbol(info.MethodImplementor[mname]+"_"+mname))
 	}
 	e.emitGlobal(fmt.Sprintf("@%s_vtable = global [%d x ptr] [%s]", className, info.VTableSize, strings.Join(slots, ", ")))
@@ -1949,6 +1853,25 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 	e.scopes = nil
 	e.blockDone = false
 	e.pushScope()
+	// Eager-boxing capture set for this body, as a function's (see
+	// hoistedCaptures): a local a nested closure captures is boxed at its
+	// declaration, not at the first capture, which may sit in one branch.
+	savedHoistedCaptures := e.hoistedCaptures
+	savedForwardClosures, savedForwardBoxes := e.forwardClosures, e.forwardBoxes
+	defer func() {
+		e.hoistedCaptures = savedHoistedCaptures
+		e.forwardClosures, e.forwardBoxes = savedForwardClosures, savedForwardBoxes
+	}()
+	e.hoistedCaptures = nil
+	e.setForwardClosures(nil)
+	if body != nil {
+		paramNames := make([]string, len(params))
+		for i, p := range params {
+			paramNames[i] = p.Name
+		}
+		e.hoistedCaptures = capturedLocalNames(body.Body, paramNames)
+		e.setForwardClosures(body.Body)
+	}
 
 	// Async method (TDD-00063 Stage 2a): compiles to a coroutine exactly like
 	// a top-level async function — the IR return type is `ptr` (the coro
@@ -1976,15 +1899,6 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 		e.currentRetType = retType
 	}
 
-	// __kml_enclosing_class (TDD-00009 Stage 4) is a Ptr-less, lookup-only
-	// scope symbol (same established idiom this function's own return-type
-	// inference already uses for a bare "this" — see registerClasses)
-	// recording which class this code is lexically inside, for
-	// checkMemberVisibility's private/protected checks. Bound
-	// unconditionally, unlike "this"/"super", since a static method has no
-	// receiver at all but still needs a lexical-class identity.
-	e.define("__kml_enclosing_class", Symbol{Ty: classTy})
-
 	var llvmParams []string
 	if isStatic {
 		// No implicit receiver at all — a static member belongs to the
@@ -1997,6 +1911,12 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", thisPtr))
 		e.emitInstr(fmt.Sprintf("store ptr %%p_this, ptr %s, align 8", thisPtr))
 		e.define("this", Symbol{Ptr: thisPtr, Ty: classTy})
+		if body != nil && arrowsCaptureThis(body) {
+			// An arrow reads `this`: box the receiver at entry (which
+			// dominates the whole body), as a captured parameter is, not at
+			// the first capture, which may sit in one branch.
+			e.boxHoistedCapture("this", classTy, "%p_this", true, true)
+		}
 		if classInfo, ok := e.classes[classTy.ClassName]; ok && classInfo.BaseClass != "" {
 			baseTy := e.classes[classInfo.BaseClass].Ty
 			e.define("super", Symbol{Ptr: thisPtr, Ty: baseTy})
@@ -2051,7 +1971,13 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 				}
 				continue
 			}
-			e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
+			if e.hoistedCaptures[p.Name] {
+				// Captured by a nested closure: boxed at entry, as a
+				// function's parameter is.
+				e.boxHoistedCapture(p.Name, pty, "%p_"+p.Name, false, true)
+			} else {
+				e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
+			}
 		}
 	}
 
@@ -2207,11 +2133,6 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	if info.IsAbstract {
 		return Value{}, fmt.Errorf("%d:%d: cannot create an instance of abstract class '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName)
 	}
-	if info.Constructor != nil && info.Constructor.Visibility != "" {
-		if err := e.checkMemberVisibility(className, info.Constructor.Visibility, "constructor", ex.ClassName, ex.GetPos()); err != nil {
-			return Value{}, err
-		}
-	}
 
 	// Zeroing allocation (calloc, or — under -optimize-memory, for a
 	// non-escaping binding of a class whose ctor/methods provably never
@@ -2253,15 +2174,6 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", listenersPtr, eeGep))
 	}
 
-	// Node-stream class (TDD-00132): build the runtime handle and wire the
-	// pull/sink to the `_read`/`_write` override before the user constructor
-	// runs, so a `this.push(...)` in the constructor already has a handle.
-	if info.HasNodeReadable || info.HasNodeWritable {
-		if err := e.emitConstructNodeStreamHandle(info, className, dataReg, ex.GetPos()); err != nil {
-			return Value{}, err
-		}
-	}
-
 	// An error subclass (TDD-00155 Stage 6): default the error-struct prefix
 	// before the constructor — name is the class's source name, message the
 	// empty string. A constructor-less subclass takes JS's optional message
@@ -2275,9 +2187,9 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ref, gep))
 			}
 		}
-		// JS: `.name` is inherited from Error.prototype ("Error") unless the
-		// class assigns `this.name` itself.
-		storeField("name", e.internString("Error"))
+		// JS: `.name` is inherited from the builtin's prototype ("Error",
+		// "TypeError", …) unless the class assigns `this.name` itself.
+		storeField("name", e.internString(info.ErrorBaseKind))
 		storeField("message", e.internString(""))
 		if info.Constructor == nil {
 			if len(ex.Args) > 1 {
@@ -2380,7 +2292,7 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 				continue
 			}
 			scratch.enter(fromDefault)
-			val, err := e.emitExpr(a)
+			val, err := e.emitExprWithObjectHint(a, paramTy)
 			scratch.leave(fromDefault)
 			if err != nil {
 				return Value{}, err
@@ -2402,7 +2314,7 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 				scratch.bind(i, val)
 			}
 		}
-		e.emitInstr(fmt.Sprintf("call void @%s_constructor(%s)", className, strings.Join(argParts, ", ")))
+		e.emitInstr(fmt.Sprintf("call void @%s%s(%s)", className, ctorSymbolSuffix, strings.Join(argParts, ", ")))
 	} else if len(ex.Args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: class '%s' has no constructor but was called with %d argument(s)",
 			ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, len(ex.Args))
@@ -2507,11 +2419,6 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		return Value{}, fmt.Errorf("%d:%d: class '%s' has no method '%s'", pos.Line, pos.Col, objTy.ClassName, methodName)
 	}
 	implementor := info.MethodImplementor[methodName]
-	if vis := e.classes[implementor].OwnMethodVisibility[methodName]; vis != "" {
-		if err := e.checkMemberVisibility(implementor, vis, "method", methodName, pos); err != nil {
-			return Value{}, err
-		}
-	}
 	// TDD-00161 Stage 2: a decorated method's calls route through its runtime
 	// slot so a decorator that replaced the descriptor's `value` takes effect.
 	// A `super.method()` call (forceDirect) deliberately bypasses this — it
@@ -2652,21 +2559,12 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		}
 		// A function-typed parameter contextually types an untyped arrow /
 		// function-expression argument's parameters from its own declared
-		// signature — the same hint propagation the free-function call path
-		// (emitExprWithObjectHint) already applies. Without it, a class
-		// method's callback argument (`bus.on("x", (a, b) => ...)` against a
-		// `(a: string, b: number) => void` parameter) left its untyped params
-		// to self-infer to the ADR-00042 default, silently mis-decoding the
-		// callback's arguments — a real pre-existing bug, independent of
-		// TDD-00157's EventEmitter overrides that surfaced it.
+		// signature (`bus.on("x", (a, b) => ...)`).
+		// Every argument is built against its parameter's type, as the
+		// free-function path does: an object literal into an `any` parameter
+		// is a dynamic object, not a static one boxed.
 		scratch.enter(fromDefault)
-		var val Value
-		var err error
-		if paramTy.IsFunc {
-			val, err = e.emitExprWithObjectHint(a, paramTy)
-		} else {
-			val, err = e.emitExpr(a)
-		}
+		val, err := e.emitExprWithObjectHint(a, paramTy)
 		scratch.leave(fromDefault)
 		if err != nil {
 			return Value{}, err
@@ -2679,6 +2577,9 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		if paramTy.IsDynamic {
 			if paramTy.UnionMembers != nil && !unionAllowsAssignmentFrom(paramTy, val.Ty) {
 				return Value{}, fmt.Errorf("%d:%d: argument's type is not a member of parameter %d's declared union type", a.GetPos().Line, a.GetPos().Col, i+1)
+			}
+			if paramTy.UnionMembers != nil {
+				val = e.relayoutForUnion(val, paramTy)
 			}
 			if val, err = e.emitBoxValue(val); err != nil {
 				return Value{}, err
@@ -2744,6 +2645,16 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 
 	slot := info.MethodDispatchSlot[methodName]
 	if forceDirect || slot == nil || !slot.Virtual {
+		if m := info.Methods[methodName]; m != nil && m.IsOptional && m.Body == nil {
+			// An optional method no class in the chain implements: the
+			// member is undefined, and calling it is a TypeError.
+			e.emitThrowTypeError(methodName + " is not a function")
+			e.emitLabel(e.freshLabel("optcall.dead"))
+			if sig.RetType.IR == "void" {
+				return Value{Ty: TypeVoid}, nil
+			}
+			return Value{Ref: zeroRef(sig.RetType), Ty: sig.RetType}, nil
+		}
 		llvmName := llvmSafeSymbol(info.MethodImplementor[methodName] + "_" + methodName)
 		if sig.RetType.IR == "void" {
 			e.emitInstr(fmt.Sprintf("call void @%s(%s)", llvmName, argsIR))
@@ -2755,7 +2666,7 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			// Array return ABI is a header pointer (TDD-00213 Stage 3): deref + alias.
 			return e.arrayValueFromHeaderReg(reg, sig.RetType), nil
 		}
-		return Value{Ref: reg, Ty: taskTaggedRet(sig)}, nil
+		return Value{Ref: reg, Ty: e.thisRetType(sig, objTy)}, nil
 	}
 
 	vtGep := e.freshReg()
@@ -2786,7 +2697,19 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		// Array return ABI is a header pointer (TDD-00213 Stage 3): deref + alias.
 		return e.arrayValueFromHeaderReg(reg, sig.RetType), nil
 	}
-	return Value{Ref: reg, Ty: taskTaggedRet(sig)}, nil
+	return Value{Ref: reg, Ty: e.thisRetType(sig, objTy)}, nil
+}
+
+// thisRetType is a method call's result type: the receiver's class for a
+// method returning the polymorphic `this` it inherits, else its own.
+func (e *Emitter) thisRetType(sig FuncSig, recv Type) Type {
+	if sig.RetThis && recv.IsClass && sig.RetType.IsClass && recv.ClassName != sig.RetType.ClassName &&
+		e.classDerives(recv.ClassName, sig.RetType.ClassName) {
+		r := recv
+		r.Nullable, r.IsUndefined, r.IsNull = false, false, false
+		return r
+	}
+	return taskTaggedRet(sig)
 }
 
 // emitClassMethodCall emits `objExpr.methodName(args)` — objExpr is
@@ -2798,6 +2721,52 @@ func (e *Emitter) emitClassMethodCall(objTy Type, objExpr ast.Expression, method
 		return Value{}, err
 	}
 	return e.emitClassCall(objTy, thisVal, methodName, args, pos, false)
+}
+
+// optionalMethodPresence reads an optional method (`m?(): T;`) as a value:
+// the implementation's code pointer, or null when the instance's class does
+// not implement it — `this.m != null`, `if (this.m)`. ok is false for any
+// other member. A method is not otherwise a value yet.
+func (e *Emitter) optionalMethodPresence(objVal Value, name string) (Value, bool) {
+	info, ok := e.classes[objVal.Ty.ClassName]
+	if !ok || !e.isOptionalMethod(objVal.Ty.ClassName, name) {
+		return Value{}, false
+	}
+	ty := TypePtr
+	ty.Nullable, ty.IsUndefined = true, true
+	slot := info.MethodDispatchSlot[name]
+	if slot == nil || !slot.Virtual || !info.HasVTable {
+		if m := info.Methods[name]; m == nil || m.Body == nil {
+			return Value{Ref: "null", Ty: ty}, true
+		}
+		return Value{Ref: "@" + llvmSafeSymbol(info.MethodImplementor[name]+"_"+name), Ty: ty}, true
+	}
+	vtGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", vtGep, info.Ty.StructIR(), objVal.Ref))
+	vtPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", vtPtr, vtGep))
+	slotGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr [%d x ptr], ptr %s, i32 0, i32 %d", slotGep, info.VTableSize, vtPtr, slot.Index))
+	fn := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fn, slotGep))
+	return Value{Ref: fn, Ty: ty}, true
+}
+
+// isOptionalMethod reports whether class declares or inherits name as an
+// optional method.
+func (e *Emitter) isOptionalMethod(class, name string) bool {
+	info, ok := e.classes[class]
+	if !ok {
+		return false
+	}
+	for _, c := range append([]string{class}, info.AncestorChain...) {
+		if ci, ok := e.classes[c]; ok {
+			if m := ci.Methods[name]; m != nil && m.IsOptional {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // emitClassSetterCall invokes a setter (TDD-00030) whose single argument
@@ -2822,11 +2791,6 @@ func (e *Emitter) emitClassSetterCall(objTy Type, thisVal Value, methodName stri
 		return Value{}, fmt.Errorf("%d:%d: class '%s' has no method '%s'", pos.Line, pos.Col, objTy.ClassName, methodName)
 	}
 	implementor := info.MethodImplementor[methodName]
-	if vis := e.classes[implementor].OwnMethodVisibility[methodName]; vis != "" {
-		if err := e.checkMemberVisibility(implementor, vis, "method", methodName, pos); err != nil {
-			return Value{}, err
-		}
-	}
 	// TDD-00161 Stage 5: a decorated setter routes through its slot (the getter
 	// already routes via emitClassCall's decorated-method path).
 	if slot, ok := e.decoratedMethodSlots[implementor][methodName]; ok {
@@ -2911,11 +2875,6 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 		return Value{}, fmt.Errorf("%d:%d: class '%s' has no static method '%s'", pos.Line, pos.Col, className, methodName)
 	}
 	implementor := info.StaticMethodImplementor[methodName]
-	if vis := e.classes[implementor].OwnStaticMethodVisibility[methodName]; vis != "" {
-		if err := e.checkMemberVisibility(implementor, vis, "static method", methodName, pos); err != nil {
-			return Value{}, err
-		}
-	}
 	// Same three gaps found and fixed in emitClassCall (rest params, default
 	// values, array-typed parameters) also existed here — a wholly separate
 	// function for the static-call-site case, never given the matching
@@ -3006,18 +2965,10 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			scratch.bindNullable(i, agg, paramTy)
 			continue
 		}
-		// A function-typed parameter contextually types an untyped arrow /
-		// function-expression argument's parameters from its declared
-		// signature — same hint propagation as emitClassCall and the
-		// free-function path (see ADR-00632).
+		// Every argument is built against its parameter's type, as
+		// emitClassCall and the free-function path do (see ADR-00632).
 		scratch.enter(fromDefault)
-		var val Value
-		var err error
-		if paramTy.IsFunc {
-			val, err = e.emitExprWithObjectHint(a, paramTy)
-		} else {
-			val, err = e.emitExpr(a)
-		}
+		val, err := e.emitExprWithObjectHint(a, paramTy)
 		scratch.leave(fromDefault)
 		if err != nil {
 			return Value{}, err
@@ -3034,6 +2985,9 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 		if paramTy.IsDynamic {
 			if paramTy.UnionMembers != nil && !unionAllowsAssignmentFrom(paramTy, val.Ty) {
 				return Value{}, fmt.Errorf("%d:%d: argument's type is not a member of parameter %d's declared union type", a.GetPos().Line, a.GetPos().Col, i+1)
+			}
+			if paramTy.UnionMembers != nil {
+				val = e.relayoutForUnion(val, paramTy)
 			}
 			if val, err = e.emitBoxValue(val); err != nil {
 				return Value{}, err
@@ -3121,16 +3075,6 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 	if !ok || info.BaseClass == "" {
 		return Value{}, fmt.Errorf("%d:%d: super(...) is only valid inside the constructor of a class with a base class", ex.GetPos().Line, ex.GetPos().Col)
 	}
-	// A stream-root subclass's `super({ highWaterMark, objectMode })`
-	// (TDD-00132) is a no-op here: the options were already read statically and
-	// threaded into the hidden stream handle at construction (streamSuperHWM),
-	// and the synthetic root has no constructor to call.
-	if _, _, isStreamRoot := nodeStreamRootKind(info.BaseClass); isStreamRoot {
-		if len(ex.Args) > 1 {
-			return Value{}, fmt.Errorf("%d:%d: super(...) on a stream base takes at most one options object", ex.GetPos().Line, ex.GetPos().Col)
-		}
-		return Value{Ty: TypeVoid}, nil
-	}
 	// An error subclass's `super(message?)` (TDD-00155 Stage 6) stores the
 	// message into the error-struct prefix; kind/name were already set at
 	// construction. Error's synthetic root has no real constructor.
@@ -3159,20 +3103,52 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 		}
 		return Value{Ty: TypeVoid}, nil
 	}
+	// EventEmitter's constructor takes only options this compiler does not
+	// implement (captureRejections); a base with no constructor of its own
+	// has nothing to run.
+	if info.BaseClass == "EventEmitter" {
+		if len(ex.Args) > 0 {
+			return Value{}, fmt.Errorf("%d:%d: EventEmitter's constructor options are not supported", ex.GetPos().Line, ex.GetPos().Col)
+		}
+		return Value{Ty: TypeVoid}, nil
+	}
 	baseInfo := e.classes[info.BaseClass]
 	if baseInfo.Constructor == nil {
-		return Value{}, fmt.Errorf("%d:%d: base class '%s' has no constructor to call via super(...)", ex.GetPos().Line, ex.GetPos().Col, info.BaseClass)
+		if len(ex.Args) > 0 {
+			return Value{}, fmt.Errorf("%d:%d: base class '%s' has no constructor to pass super(...) arguments to", ex.GetPos().Line, ex.GetPos().Col, info.BaseClass)
+		}
+		return Value{Ty: TypeVoid}, nil
 	}
-	if len(ex.Args) != len(baseInfo.CtorSig.ParamTypes) {
+	sig := baseInfo.CtorSig
+	if len(ex.Args) > len(sig.ParamTypes) {
 		return Value{}, fmt.Errorf("%d:%d: super(...) expects %d argument(s), got %d",
-			ex.GetPos().Line, ex.GetPos().Col, len(baseInfo.CtorSig.ParamTypes), len(ex.Args))
+			ex.GetPos().Line, ex.GetPos().Col, len(sig.ParamTypes), len(ex.Args))
+	}
+	for i := len(ex.Args); i < len(sig.ParamTypes); i++ {
+		if !(i < len(sig.Optional) && sig.Optional[i]) {
+			return Value{}, fmt.Errorf("%d:%d: super(...) expects %d argument(s), got %d",
+				ex.GetPos().Line, ex.GetPos().Col, len(sig.ParamTypes), len(ex.Args))
+		}
 	}
 
 	thisReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, thisSym.Ptr))
 	argParts := []string{"ptr " + thisReg}
-	for i, a := range ex.Args {
-		paramTy := baseInfo.CtorSig.ParamTypes[i]
+	for i, paramTy := range sig.ParamTypes {
+		if i >= len(ex.Args) {
+			// An omitted optional parameter is undefined (its type's zero,
+			// or an absent aggregate), as `new` fills one.
+			switch {
+			case paramTy.IsArray:
+				argParts = append(argParts, "ptr "+e.omittedArrayArgHeader(paramTy), "i64 0")
+			case isNullableScalar(paramTy):
+				argParts = append(argParts, nullableScalarStorageIR(paramTy)+" zeroinitializer")
+			default:
+				argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
+			}
+			continue
+		}
+		a := ex.Args[i]
 		if isNullableScalar(paramTy) {
 			argStr, err := e.emitNullableScalarArg(a, paramTy)
 			if err != nil {
@@ -3181,14 +3157,21 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 			argParts = append(argParts, argStr)
 			continue
 		}
-		val, err := e.emitExpr(a)
+		// Built against the parameter's type, as a constructor argument is:
+		// an object literal takes the options interface's layout.
+		val, err := e.emitExprWithObjectHint(a, paramTy)
 		if err != nil {
 			return Value{}, err
+		}
+		if paramTy.IsArray {
+			header, lenReg := e.packArrayArg(a, val, paramTy)
+			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
+			continue
 		}
 		val = e.coerce(val, paramTy)
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
 	}
-	e.emitInstr(fmt.Sprintf("call void @%s_constructor(%s)", info.BaseClass, strings.Join(argParts, ", ")))
+	e.emitInstr(fmt.Sprintf("call void @%s%s(%s)", info.BaseClass, ctorSymbolSuffix, strings.Join(argParts, ", ")))
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -3296,7 +3279,7 @@ func (e *Emitter) emitForOfClassIterator(s *ast.ForOfStatement, objTy Type, next
 	loaded := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, elemTy.IR, resultAlloca, elemTy.Align()))
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, loaded, varPtr, elemTy.Align()))
-	if err := e.emitStmt(s.Body); err != nil {
+	if err := e.emitForOfBody(s); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
@@ -3721,8 +3704,7 @@ func (e *Emitter) emitErrorInstanceOf(ex *ast.BinaryExpression, kindName string,
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), ptrReg))
 		loadedKind := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedKind, kindGep))
-		kindMatch := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", kindMatch, loadedKind, errorTypeIDStored(kindID)))
+		kindMatch := e.errorKindMatch(loadedKind, kindName, kindID)
 		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", kindMatch, resultAlloca))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
@@ -3741,7 +3723,7 @@ func (e *Emitter) emitErrorInstanceOf(ex *ast.BinaryExpression, kindName string,
 	// subclass TagID range is disjoint from the builtin kinds).
 	if leftVal.Ty.IsClass {
 		if ci, ok := e.classes[leftVal.Ty.ClassName]; ok && ci.IsErrorSubclass {
-			if kindName == "Error" {
+			if kindName == "Error" || kindName == ci.ErrorBaseKind {
 				return Value{Ref: "1", Ty: TypeBool}, nil
 			}
 			return Value{Ref: "0", Ty: TypeBool}, nil
@@ -3755,10 +3737,87 @@ func (e *Emitter) emitErrorInstanceOf(ex *ast.BinaryExpression, kindName string,
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), leftVal.Ref))
 		loadedKind := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedKind, kindGep))
-		result := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", result, loadedKind, errorTypeIDStored(kindID)))
-		return Value{Ref: result, Ty: TypeBool}, nil
+		return Value{Ref: e.errorKindMatch(loadedKind, kindName, kindID), Ty: TypeBool}, nil
 	}
 
 	return Value{Ref: "0", Ty: TypeBool}, nil
+}
+
+// errorKindMatch is whether a stored error type id is the builtin kind
+// kindName's, or an error subclass's that extends that kind directly
+// (`class E extends TypeError`).
+func (e *Emitter) errorKindMatch(stored, kindName string, kindID int64) string {
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", r, stored, errorTypeIDStored(kindID)))
+	var subs []string
+	for name, ci := range e.classes {
+		if ci.IsErrorSubclass && ci.ErrorBaseKind == kindName {
+			subs = append(subs, name)
+		}
+	}
+	sort.Strings(subs)
+	for _, name := range subs {
+		m, or := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", m, stored, errorTypeIDStored(e.classes[name].TagID)))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", or, r, m))
+		r = or
+	}
+	return r
+}
+
+// isErrorRootKind reports whether a class extending base extends a builtin
+// error directly: Error, or a builtin kind of it with Error's layout.
+func isErrorRootKind(base string) bool {
+	switch base {
+	case "Error", "TypeError", "RangeError", "SyntaxError", "EvalError", "URIError", "ReferenceError":
+		return true
+	}
+	return false
+}
+
+func errorBaseKind(isErrorRoot bool, base string) string {
+	if !isErrorRoot {
+		return ""
+	}
+	return base
+}
+
+// inheritedFieldIs reports whether the inherited field name is stored as ty.
+func inheritedFieldIs(fields []Field, name string, ty Type) bool {
+	for _, f := range fields {
+		if f.Name == name {
+			if f.Ty.IR == "ptr" && f.Ty.Nullable && !ty.Nullable {
+				// A narrowing of an optional reference (`code: string` over
+				// Error's `code?: string`): the same storage.
+				ty.Nullable, ty.IsUndefined = f.Ty.Nullable, f.Ty.IsUndefined
+			}
+			return reflect.DeepEqual(f.Ty, ty)
+		}
+	}
+	return false
+}
+
+// declaredCallReturnType is the annotated return type of a call to a
+// top-level function not yet registered (classes register before functions):
+// class field inference reads it instead of the unknown-callee default.
+func (e *Emitter) declaredCallReturnType(prog *ast.Program, init ast.Expression) (Type, bool) {
+	call, ok := init.(*ast.CallExpression)
+	if !ok || call.Optional || len(call.TypeArgs) > 0 {
+		return Type{}, false
+	}
+	id, ok := call.Callee.(*ast.Identifier)
+	if !ok {
+		return Type{}, false
+	}
+	if _, known := e.funcs[id.Name]; known {
+		return Type{}, false
+	}
+	for _, st := range prog.Body {
+		fd, ok := st.(*ast.FunctionDeclaration)
+		if !ok || fd.Name != id.Name || fd.Body == nil || len(fd.TypeParams) > 0 || fd.ReturnType == nil || fd.IsAsync {
+			continue
+		}
+		return e.resolveType(fd.ReturnType), true
+	}
+	return Type{}, false
 }

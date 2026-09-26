@@ -298,7 +298,7 @@ skip:
   ret i64 %%total
 }`, ctPrefix))
 
-	e.emitGlobal(withCurlNativeCA(`
+	e.emitGlobal(e.withCurlNativeCA(`
 define ptr @__kml_eventsource_connect(ptr %url, ptr %headers, ptr %es_entry) {
 entry:
   %inited = load i1, ptr @__kml_curl_inited, align 1
@@ -637,7 +637,7 @@ entry:
   %%nsec_ms = sdiv i64 %%nsec, 1000000
   %%total = add i64 %%sec_ms, %%nsec_ms
   ret i64 %%total
-}`, monotonicClockID()))
+}`, e.monotonicClockID()))
 
 	// __kml_eventsource_scan: see this file's own top-of-file doc comment
 	// for the full per-entry dispatch this implements (waiting-to-reconnect

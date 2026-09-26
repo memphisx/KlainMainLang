@@ -38,5 +38,5 @@ http.listen(port, (req: HttpRequest): Res => {
   }
   const headers: Map<string, string> = new Map<string, string>()
   headers.set("Content-Type", contentType(file))
-  return { status: 200, body: readFileSync(file), headers: headers }
+  return { status: 200, body: readFileSync(file, "utf8"), headers: headers }
 })

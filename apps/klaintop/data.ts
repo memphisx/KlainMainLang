@@ -20,6 +20,7 @@
 import { cpus, totalmem, freemem } from "os";
 import { readFileSync, readdirSync } from "fs";
 import { Proc } from "./types";
+import { execFileSync } from "child_process";
 
 // Aggregate { total, idle } jiffies across every core.
 export function sample(): { total: number; idle: number } {
@@ -145,7 +146,7 @@ function listProcsProc(): Proc[] {
 function listProcsPs(): Proc[] {
   let raw = "";
   try {
-    raw = process.execFileSync("ps", ["-axo", "pid,pcpu,pmem,comm"]);
+    raw = execFileSync("ps", ["-axo", "pid,pcpu,pmem,comm"], { encoding: "utf8" });
   } catch (e) {
     return [];
   }

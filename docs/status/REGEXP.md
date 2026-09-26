@@ -32,7 +32,6 @@ Matching follows the **ECMAScript dialect by default** ([TDD-00067](../tdd/TDD-0
 
 ## Known limitations
 
-- **No implicit string→RegExp coercion.** Neither `match()`/`matchAll()`/`replace()`/`replaceAll()`/`search()` implicitly coerces a non-`RegExp` argument (a compile-time error instead), unlike real JS.
 - **Dialect-mode caveats** (what diverges from ES, per mode — these residuals exclude the matching rows above from Strict Coverage; [TDD-00067](../tdd/TDD-00067.md)/[ADR-00206](../adr/ADR-00206.md)–[ADR-00208](../adr/ADR-00208.md)):
   - **`ecmascript` (default) — `$`/`m` over-exclude three control chars.** `$`/`m` use `PCRE2_NEWLINE_ANY` and anchor at `\x0b`/`\x0c`/`\x85`, where ES does not — exact anchoring needs a further `$`-rewrite (deferred). The normalization pass does **not** yet handle `\u{…}`/`\p{…}` code-point escapes, ES Unicode `\w`/`\s`/`\b` semantics, Annex-B legacy octal escapes, or the `u`/`v` flags.
   - **`es-unicode` (opt-in) — `.`/`$`/`m` over-exclude three rare control characters.** The newline convention is `PCRE2_NEWLINE_ANY`, the closest single PCRE2 convention to ES's exact line terminators `\n \r \u2028 \u2029`, but it additionally treats `\x0b` (VT), `\x0c` (FF), and `\x85` (NEL) as line boundaries — so `.` excludes them and `$`/`m` anchor at them, where ES does not. Use the default `ecmascript` (whose normalization pass fixes `.`) if this matters.

@@ -5,7 +5,7 @@
 // process exits. Runs the same way under Node.js.
 import http from 'http';
 
-http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
+http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
   let total = 0;
   let chunks = 0;
   for await (const chunk of req) {

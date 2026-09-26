@@ -89,7 +89,9 @@ func TestFallOffClosureAgainstDeclaredTypeRejected(t *testing.T) {
 			t.Errorf("expected a compile-time rejection for:\n%s", src)
 			continue
 		}
-		if !strings.Contains(err.Error(), "falls off the end") {
+		// The checker rejects what it types (a closure returning
+		// `number | undefined` where `number` is declared), codegen the rest.
+		if !strings.Contains(err.Error(), "falls off the end") && !strings.Contains(err.Error(), "is not assignable to") {
 			t.Errorf("unexpected error for:\n%s\n%v", src, err)
 		}
 	}

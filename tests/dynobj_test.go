@@ -87,9 +87,9 @@ console.log(typeof o)
 func TestE2EDynObjNullUndefinedThrow(t *testing.T) {
 	assertOutput(t, `
 let z: any = null
-try { console.log(z.x) } catch (e) { console.log("caught:", e.message) }
+try { console.log(z.x) } catch (e) { console.log("caught:", (e as Error).message) }
 let u: any
-try { u.x = 1 } catch (e) { console.log("caught:", e.message) }
+try { u.x = 1 } catch (e) { console.log("caught:", (e as Error).message) }
 `, "caught: Cannot read properties of null (reading 'x')\ncaught: Cannot set properties of undefined (setting 'x')")
 }
 
@@ -170,10 +170,10 @@ console.log(o.meta.tags[0])
 
 func TestE2EDynJSONErrors(t *testing.T) {
 	assertOutput(t, `
-try { JSON.parse("{bad") } catch (e) { console.log("caught:", e.name) }
+try { JSON.parse("{bad") } catch (e) { console.log("caught:", (e as Error).name) }
 let cyc: any = { a: 1 }
 cyc.self = cyc
-try { JSON.stringify(cyc) } catch (e) { console.log("caught:", e.message) }
+try { JSON.stringify(cyc) } catch (e) { console.log("caught:", (e as Error).message) }
 `, "caught: SyntaxError\ncaught: Converting circular structure to JSON")
 }
 
@@ -234,8 +234,8 @@ const base: any = { greet: "hello" }
 const lit: any = { __proto__: base, mine: true }
 console.log(lit.greet, lit.mine, Object.hasOwn(lit, "greet"))
 const child: any = Object.create(base)
-try { Object.setPrototypeOf(base, child) } catch (e) { console.log("caught:", e.message) }
-try { let z: any = null; Object.getPrototypeOf(z) } catch (e) { console.log("caught:", e.name) }
+try { Object.setPrototypeOf(base, child) } catch (e) { console.log("caught:", (e as Error).message) }
+try { let z: any = null; Object.getPrototypeOf(z) } catch (e) { console.log("caught:", (e as Error).name) }
 `, "hello true false\ncaught: Cyclic __proto__ value\ncaught: TypeError")
 }
 

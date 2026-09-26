@@ -169,7 +169,15 @@ func TestE2EWinRealpathWalksLinks(t *testing.T) {
 	if err := os.Symlink(probe, filepath.Join(probe, "probe-link")); err != nil {
 		t.Skip("symlink creation not permitted on this Windows box (needs Developer Mode or admin)")
 	}
-	dir := filepath.ToSlash(tempDir(t))
+	// realpathSync canonicalizes 8.3 short components to their long form (as Node
+	// does — the runner's TMP arrives as C:\Users\RUNNER~1\...), so the expected
+	// path must be canonicalized the same way. EvalSymlinks resolves the short
+	// name; the sibling tests above do the same.
+	real, err := filepath.EvalSymlinks(tempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.ToSlash(real)
 	want := filepath.FromSlash(dir) + `\w\dir\sub\f.txt`
 	assertOutputImports(t, `
 import * as fs from 'fs'

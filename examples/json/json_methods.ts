@@ -91,7 +91,7 @@ try {
   const bad: number = JSON.parse("{oops}")
   console.log(bad)
 } catch (e) {
-  console.log(e.name)                // SyntaxError
+  console.log((e as Error).name)                // SyntaxError
 }
 
 // ── round-trip ────────────────────────────────────────────────────────────────

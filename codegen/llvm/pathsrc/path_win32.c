@@ -1205,9 +1205,9 @@ char *__kml_path_win32_from_file_url(const char *host, const char *rawPath, int 
     return out;
 }
 
-/* ---- win32.format (shared _format with sep '\\') --------------------------- */
+/* ---- format (Node's shared _format; NULL is an absent field) ---------------- */
 
-char *__kml_path_win32_format(const char *root, const char *dir, const char *base, const char *ext, const char *name) {
+static char *kml_path_format(char sep, const char *root, const char *dir, const char *base, const char *ext, const char *name) {
     const char *d = (dir && dir[0]) ? dir : root;
     sb_t b; sb_init(&b);
     if (base && base[0]) {
@@ -1222,8 +1222,16 @@ char *__kml_path_win32_format(const char *root, const char *dir, const char *bas
     if (!d || !d[0]) return sb_finish(&b);
     sb_t out; sb_init(&out);
     sb_append(&out, d);
-    if (strcmp(d, root ? root : "") != 0) sb_append_ch(&out, '\\');
+    if (strcmp(d, root ? root : "") != 0) sb_append_ch(&out, sep);
     sb_append_n(&out, sb_cstr(&b), b.len);
     free(b.buf);
     return sb_finish(&out);
+}
+
+char *__kml_path_win32_format(const char *root, const char *dir, const char *base, const char *ext, const char *name) {
+    return kml_path_format('\\', root, dir, base, ext, name);
+}
+
+char *__kml_path_posix_format(const char *root, const char *dir, const char *base, const char *ext, const char *name) {
+    return kml_path_format('/', root, dir, base, ext, name);
 }

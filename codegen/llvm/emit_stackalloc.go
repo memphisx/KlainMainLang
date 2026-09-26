@@ -96,7 +96,7 @@ func (e *Emitter) closureAllocs(lit ast.Expression, envIR string, envSize int64)
 // provably keeps the value block-local — the -optimize-memory analog of
 // planAutoFrees, writing to its own plan.
 func (e *Emitter) planStackAllocs(prog *ast.Program) error {
-	if !e.optimizeMemory {
+	if !e.opts.OptimizeMemory {
 		return nil
 	}
 	p := &escPlanner{
@@ -129,12 +129,8 @@ func (e *Emitter) classStackEligible(className string, info ClassInfo) bool {
 }
 
 func (e *Emitter) classStackAuditRun(className string, info ClassInfo) bool {
-	// A Node-stream class wires `this` into a runtime handle at construction;
-	// a decorated method's replacement slot may hold a wrapper that retains
-	// its receiver. Both are outside what the audit below can see.
-	if info.HasNodeReadable || info.HasNodeWritable {
-		return false
-	}
+	// A decorated method's replacement slot may hold a wrapper that retains
+	// its receiver, which the audit below cannot see.
 	if len(e.decoratedMethodSlots[className]) > 0 {
 		return false
 	}

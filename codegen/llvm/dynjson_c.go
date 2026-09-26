@@ -34,12 +34,15 @@ func (e *Emitter) ensureDynJSONC() {
 	e.ensureAnyOps()
 	e.ensureAnyToPrimitive()
 	e.ensureDynObj()
-	e.emitGlobal(`declare ptr @__kml_dynjson_stringify(i64, i64, ptr, ptr)`)
+	e.ensureFnMeta()           // dynjson.c renders tag-12 functions through fnmeta.c
+	e.ensureBoxedBigIntHooks() // and boxed bigint cells through the finalize-time hook
+	e.emitGlobal(`declare ptr @__kml_dynjson_stringify_at(i64, i64, ptr, i64, ptr)`)
 	e.emitGlobal(`declare ptr @__kml_dynarr_join(ptr)`)
 	e.emitGlobal(`declare ptr @__kml_array_join(ptr)`)             // TDD-00212; takes the box (ADR-01059)
 	e.emitGlobal(`declare ptr @__kml_array_inspect_at(ptr, i64)`)  // TDD-00212 Stage 2; takes the box + nesting depth (ADR-01067)
 	e.emitGlobal(`declare ptr @__kml_dynarr_inspect_at(ptr, i64)`) // TDD-00212 Stage 2
 	e.emitGlobal(`declare ptr @__kml_dynobj_inspect_at(ptr, i64)`) // dynamic-object console.log form
+	e.emitGlobal(`declare ptr @__kml_buffer_inspect(ptr, i64)`)    // a Buffer's `<Buffer 68 69>` form
 	// ADR-01059: element access through an `any` holding a boxed static array.
 	e.emitGlobal(`declare i64 @__kml_anyarr_get_by_key(ptr, ptr)`)
 	e.emitGlobal(`declare ptr @__kml_any_arraylike_f64(i64, ptr)`)

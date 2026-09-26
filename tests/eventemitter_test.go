@@ -8,8 +8,9 @@ import (
 // --- EventEmitter<T> (TDD-00023) ---
 
 func TestE2EEventEmitterBasicOnEmitString(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 e.on('msg', (data: string): void => {
   console.log('got: ' + data)
 })
@@ -19,8 +20,9 @@ console.log(result)
 }
 
 func TestE2EEventEmitterBasicOnEmitNumber(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<number>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 e.on('tick', (n: number): void => {
   console.log(n * 2)
 })
@@ -29,8 +31,9 @@ e.emit('tick', 21)
 }
 
 func TestE2EEventEmitterMultipleListenersOrder(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 e.on('x', (data: string): void => { console.log('first: ' + data) })
 e.on('x', (data: string): void => { console.log('second: ' + data) })
 e.emit('x', 'go')
@@ -38,8 +41,9 @@ e.emit('x', 'go')
 }
 
 func TestE2EEventEmitterEmitReturnsFalseWhenUnlistened(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 e.on('a', (data: string): void => { console.log(data) })
 console.log(e.emit('a', 'hi'))
 console.log(e.emit('b', 'nope'))
@@ -47,8 +51,9 @@ console.log(e.emit('b', 'nope'))
 }
 
 func TestE2EEventEmitterOnce(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 e.once('x', (data: string): void => { console.log('once: ' + data) })
 console.log(e.listenerCount('x'))
 e.emit('x', 'a')
@@ -58,8 +63,9 @@ e.emit('x', 'b')
 }
 
 func TestE2EEventEmitterOffRemovesOneListener(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 const listener1 = (data: string): void => { console.log('one: ' + data) }
 const listener2 = (data: string): void => { console.log('two: ' + data) }
 e.on('x', listener1)
@@ -75,10 +81,11 @@ console.log(e.listenerCount('x'))
 // same static closure header, so the pointer comparison off() does succeeds.
 // Regressed when each reference malloc'd a fresh header.
 func TestE2EEventEmitterOffByNamedFunctionRef(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
 let count = 0
 function onPing(msg: string): void { count = count + 1 }
-const e = new EventEmitter<string>()
+const e = new EventEmitter()
 e.on('ping', onPing)
 e.emit('ping', 'a')
 e.off('ping', onPing)
@@ -89,8 +96,9 @@ console.log(e.listenerCount('ping'))
 }
 
 func TestE2EEventEmitterRemoveListenerAlias(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 const listener1 = (data: string): void => { console.log(data) }
 e.on('x', listener1)
 e.removeListener('x', listener1)
@@ -99,8 +107,9 @@ console.log(e.listenerCount('x'))
 }
 
 func TestE2EEventEmitterRemoveAllListenersOneEvent(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 e.on('a', (data: string): void => { console.log('a: ' + data) })
 e.on('b', (data: string): void => { console.log('b: ' + data) })
 e.removeAllListeners('a')
@@ -112,8 +121,9 @@ console.log(e.listenerCount('b'))
 }
 
 func TestE2EEventEmitterRemoveAllListenersNoArg(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 e.on('a', (data: string): void => { console.log('a: ' + data) })
 e.on('b', (data: string): void => { console.log('b: ' + data) })
 e.removeAllListeners()
@@ -123,8 +133,9 @@ console.log(e.emit('b', 'y'))
 }
 
 func TestE2EEventEmitterListenerCountAndEventNames(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 e.on('a', (data: string): void => {})
 e.on('a', (data: string): void => {})
 e.on('b', (data: string): void => {})
@@ -137,8 +148,9 @@ console.log(names.length)
 }
 
 func TestE2EEventEmitterChaining(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 e.on('a', (data: string): void => { console.log('a: ' + data) }).on('b', (data: string): void => { console.log('b: ' + data) })
 e.emit('a', 'x')
 e.emit('b', 'y')
@@ -146,19 +158,21 @@ e.emit('b', 'y')
 }
 
 func TestE2EEventEmitterErrorEventThrowsWhenUnlistened(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 try {
   e.emit('error', 'boom')
 } catch (err) {
-  console.log('caught: ' + err.message)
+  console.log('caught: ' + (err as Error).message)
 }
-`, "caught: boom")
+`, "caught: Unhandled error. ('boom')")
 }
 
 func TestE2EEventEmitterErrorEventDoesNotThrowWhenListened(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 e.on('error', (msg: string): void => { console.log('handled: ' + msg) })
 e.emit('error', 'boom')
 console.log('after')
@@ -166,20 +180,22 @@ console.log('after')
 }
 
 func TestE2EEventEmitterErrorPayloadRethrowsExactError(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<Error>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 try {
   e.emit('error', new Error('bad thing'))
 } catch (err) {
-  console.log(err.message)
+  console.log((err as Error).message)
   console.log(err instanceof Error)
 }
 `, "bad thing\ntrue")
 }
 
 func TestE2EEventEmitterErrorPayloadListenedWithUntypedListener(t *testing.T) {
-	assertOutput(t, `
-const e = new EventEmitter<Error>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 e.on('error', (err) => { console.log('handled: ' + err.message) })
 e.emit('error', new Error('bad thing'))
 console.log('after')
@@ -189,10 +205,12 @@ console.log('after')
 // --- class X extends EventEmitter<T> ---
 
 func TestE2EEventEmitterClassExtendsBasic(t *testing.T) {
-	assertOutput(t, `
-class Downloader extends EventEmitter<string> {
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+class Downloader extends EventEmitter {
   name: string;
   constructor(name: string) {
+    super();
     this.name = name;
   }
   start(): void {
@@ -206,10 +224,12 @@ d.start()
 }
 
 func TestE2EEventEmitterClassExtendsFieldsCoexist(t *testing.T) {
-	assertOutput(t, `
-class Counter extends EventEmitter<number> {
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+class Counter extends EventEmitter {
   count: number;
   constructor() {
+    super();
     this.count = 0;
   }
   increment(): void {
@@ -226,8 +246,9 @@ console.log(c.count)
 }
 
 func TestE2EEventEmitterClassExtendsMultiLevel(t *testing.T) {
-	assertOutput(t, `
-class Base extends EventEmitter<number> {
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+class Base extends EventEmitter {
 }
 class Mid extends Base {
   trigger(n: number): void {
@@ -244,8 +265,9 @@ console.log(l.listenerCount('tick'))
 }
 
 func TestE2EEventEmitterClassExtendsWithVTable(t *testing.T) {
-	assertOutput(t, `
-class Shape extends EventEmitter<string> {
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+class Shape extends EventEmitter {
   area(): number {
     return 0
   }
@@ -257,6 +279,7 @@ class Shape extends EventEmitter<string> {
 class Square extends Shape {
   side: number;
   constructor(side: number) {
+    super();
     this.side = side;
   }
   area(): number {
@@ -275,8 +298,9 @@ sq.describe()
 // not a reserved-name collision. An override wins at the call site, and
 // super.<method>(...) reaches the built-in behavior.
 func TestE2EEventEmitterOverrideEmitCountsAndDelegates(t *testing.T) {
-	assertOutput(t, `
-class Bus extends EventEmitter<string> {
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+class Bus extends EventEmitter {
   emitCount: number = 0;
   emit(event: string, payload: string): boolean {
     this.emitCount++;
@@ -292,8 +316,9 @@ console.log("count:", bus.emitCount, "listeners:", bus.listenerCount("msg"));
 }
 
 func TestE2EEventEmitterOverrideOnChains(t *testing.T) {
-	assertOutput(t, `
-class Bus extends EventEmitter<string> {
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+class Bus extends EventEmitter {
   on(event: string, listener: (p: string) => void): Bus {
     console.log("attach:", event);
     return super.on(event, listener);
@@ -308,8 +333,9 @@ bus.emit("b", "2");
 
 func TestE2EEventEmitterOverrideTwoLevelSuperChain(t *testing.T) {
 	// B.emit -> A.emit -> built-in, and virtual dispatch through a base ref.
-	assertOutput(t, `
-class A extends EventEmitter<string> {
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+class A extends EventEmitter {
   emit(event: string, payload: string): boolean {
     console.log("A.emit");
     return super.emit(event, payload);
@@ -329,7 +355,8 @@ a.emit("x", "via-A-ref");
 }
 
 func TestE2EEventEmitterGenericExtendsOnNonEventEmitterRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+	_, err := parseAndCompileImports(t, `
+import { EventEmitter } from 'events'
 class Bar {}
 class Baz extends Bar<string> {}
 `)
@@ -342,32 +369,21 @@ class Baz extends Bar<string> {}
 }
 
 func TestE2EEventEmitterConstructorRejectsArgs(t *testing.T) {
-	_, err := parseAndCompile(`
-const e = new EventEmitter<string>(1, 2)
+	_, err := parseAndCompileImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter(1, 2)
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for new EventEmitter() with arguments")
 	}
 }
 
-func TestE2EEventEmitterListenerWrongArityRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-const e = new EventEmitter<string>()
-e.on('x', (): void => {})
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a zero-arg listener")
-	}
-	if !strings.Contains(err.Error(), "must take exactly 1 argument") {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
 func TestE2EEventEmitterInstanceofWorks(t *testing.T) {
 	// TDD-00097 Stage 7 lifted the old "instanceof EventEmitter is a compile
 	// error" limitation this test used to assert.
-	assertOutput(t, `
-const e = new EventEmitter<string>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const e = new EventEmitter()
 console.log(e instanceof EventEmitter)
 `, "true")
 }
@@ -375,8 +391,9 @@ console.log(e instanceof EventEmitter)
 // TDD-00097 Stage 7: event-map payload typing + instanceof.
 
 func TestE2EEventEmitterEventMap(t *testing.T) {
-	assertOutput(t, `
-const em = new EventEmitter<{ data: string; count: number; end: void; error: Error }>();
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const em = new EventEmitter<{ data: [s: string]; count: [n: number]; end: []; error: [err: Error] }>();
 em.on("data", (s) => { console.log("data:", s.toUpperCase()); });
 em.on("count", (n) => { console.log("count:", n * 2); });
 em.on("end", () => { console.log("ended"); });
@@ -386,14 +403,15 @@ em.emit("end");
 try {
   em.emit("error", new Error("boom"));
 } catch (e) {
-  console.log("caught:", e.message);
+  console.log("caught:", (e as Error).message);
 }
 `, "data: HELLO\ncount: 42\nended\ncaught: boom")
 }
 
 func TestE2EEventEmitterEventMapExtends(t *testing.T) {
-	assertOutput(t, `
-class Ticker extends EventEmitter<{ tick: number; done: void }> {
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+class Ticker extends EventEmitter<{ tick: [n: number]; done: [] }> {
   run(times: number): void {
     for (let i = 1; i <= times; i = i + 1) { this.emit("tick", i); }
     this.emit("done");
@@ -407,8 +425,9 @@ t.run(2);
 }
 
 func TestE2EEventEmitterEventMapUndeclaredEventRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-const em = new EventEmitter<{ data: string }>();
+	_, err := parseAndCompileImports(t, `
+import { EventEmitter } from 'events'
+const em = new EventEmitter<{ data: [s: string] }>();
 em.emit("nope", "x");
 `)
 	if err == nil {
@@ -420,9 +439,10 @@ em.emit("nope", "x");
 }
 
 func TestE2EEventEmitterInstanceof(t *testing.T) {
-	assertOutput(t, `
-const em = new EventEmitter<number>();
-class Sub extends EventEmitter<string> {}
+	assertOutputImports(t, `
+import { EventEmitter } from 'events';
+const em = new EventEmitter();
+class Sub extends EventEmitter {}
 const s = new Sub();
 const m = new Map<string, number>();
 console.log(em instanceof EventEmitter, s instanceof EventEmitter, m instanceof EventEmitter);
@@ -441,8 +461,9 @@ console.log(rs instanceof ReadableStream, ws instanceof WritableStream, ts insta
 func TestE2EEventEmitterMultiArgTuple(t *testing.T) {
 	// TDD-00131: Node's multi-argument events — a tuple-payload event emits and
 	// listens with one argument per element.
-	assertOutput(t, `
-class Bus extends EventEmitter<{ data: [string, number]; done: void }> {}
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+class Bus extends EventEmitter<{ data: [chunk: string, size: number]; done: [] }> {}
 const b = new Bus()
 b.on("data", (chunk: string, size: number) => {
   console.log(chunk + " " + size)
@@ -455,8 +476,9 @@ b.emit("done")
 }
 
 func TestE2EEventEmitterMultiArgSingleTupleOnce(t *testing.T) {
-	assertOutput(t, `
-const bus = new EventEmitter<[string, number, boolean]>()
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+const bus = new EventEmitter<{ evt: [name: string, code: number, ok: boolean] }>()
 bus.once("evt", (name: string, code: number, ok: boolean) => {
   console.log(name + " " + code + " " + ok)
 })
@@ -465,13 +487,50 @@ bus.emit("evt", "req2", 500, false)
 `, "req 200 true")
 }
 
-func TestE2EEventEmitterMultiArgWrongArity(t *testing.T) {
-	_, err := parseAndCompile(`
-class Bus extends EventEmitter<{ data: [string, number] }> {}
+// A listener may take fewer parameters than the event passes, as in
+// TypeScript and Node: the extra arguments are ignored.
+func TestE2EEventEmitterMultiArgFewerListenerParams(t *testing.T) {
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+class Bus extends EventEmitter<{ data: [chunk: string, size: number] }> {}
 const b = new Bus()
 b.on("data", (chunk: string) => { console.log(chunk) })
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a listener arity not matching the tuple payload, got none")
-	}
+b.emit("data", "hello", 5)
+`, "hello")
+}
+
+// @types/node's default event map: an EventEmitter with no type argument
+// takes any arguments per event; every emitter holds its listeners as
+// dynamic functions, so removal order, once, 'error', events.once/on and
+// array/nullable listener parameters all behave as in Node.
+func TestE2EEventEmitterDefaultEventMap(t *testing.T) {
+	assertOutputImports(t, `
+import { EventEmitter, once, on } from 'events'
+const e = new EventEmitter()
+const f = (x: number) => console.log("f", x)
+const g = (x: number) => console.log("g", x)
+e.on("a", f); e.on("a", g); e.on("a", f)
+e.emit("a", 1)
+e.off("a", f)
+e.emit("a", 2)
+e.once("b", (...args) => console.log("b", args.length, args[0], args[1]))
+console.log(e.emit("b", "x", 3), e.emit("b", "y"))
+e.on("n", (a, b) => console.log("n", a, b))
+e.emit("n", 1)
+e.removeAllListeners("a")
+console.log(e.eventNames())
+try { e.emit("error", 42) } catch (err) { console.log((err as Error).message) }
+const m = new EventEmitter<{ d: [xs: string[], n: number | null] }>()
+m.on('d', (xs, n) => console.log(xs.join('+'), n))
+m.emit('d', ['p', 'q'], null)
+async function main(): Promise<void> {
+  setTimeout(() => e.emit('ready', 'r', 2), 0)
+  const args = await once(e, 'ready')
+  console.log(args.length, args[0], args[1])
+  setTimeout(() => { e.emit('tick', 1); e.emit('tick', 2, 'x') }, 0)
+  let k = 0
+  for await (const ev of on(e, 'tick')) { console.log(ev.length, ev[0]); if (++k >= 2) break }
+}
+main()
+`, "f 1\ng 1\nf 1\nf 2\ng 2\nb 2 x 3\ntrue false\nn 1 undefined\n[ 'n' ]\nUnhandled error. (42)\np+q null\n2 r 2\n1 1\n2 2")
 }

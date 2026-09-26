@@ -129,7 +129,7 @@
             "notes": [
               "V1 opaque unique values — `Symbol()`/`Symbol(\"desc\")`, `===`/`!==`, `typeof`, `.description`, `.toString()`",
               "The fixed-shape object model has no dynamic-property-bag mechanism (blocks dynamic keys) and no runtime protocol-dispatch point (blocks the registry) ([TDD-00044](../tdd/TDD-00044.md))",
-              "`Symbol.for(key)` interns per key (shared identity); `Symbol.keyFor(sym)` returns the key or `null` ([ADR-00488](../adr/ADR-00488.md))"
+              "`Symbol.for(key)` interns per key (shared identity); `Symbol.keyFor(sym)` returns the key, or `undefined` for a symbol not in the registry ([ADR-00488](../adr/ADR-00488.md))"
             ]
           },
           {
@@ -236,8 +236,7 @@
             "status": "implemented",
             "caveats": [
               "Object-type members only — a non-object member (scalar/function/array/tuple/union, all `never` in TS), or a generic-with-type-arguments member, is a clean compile error",
-              "A field declared with conflicting **non-object** types across members is rejected under `-compat=strict` (default); the `-compat=js` TS-faithful `never`-field is not yet implemented, so a conflict is currently rejected in both modes (same-named **object** fields are recursively intersected instead — `{ x: A } & { x: B }` ⇒ `x: A & B`)",
-              "Inherits object types' missing-field leniency: a partial object literal for an `A & B`-typed target is not rejected (a pre-existing object-literal behavior, not intersection-specific)"
+              "A field declared with conflicting **non-object** types across members is rejected under `-compat=strict` (default); the `-compat=js` TS-faithful `never`-field is not yet implemented, so a conflict is currently rejected in both modes (same-named **object** fields are recursively intersected instead — `{ x: A } & { x: B }` ⇒ `x: A & B`)"
             ],
             "notes": [
               "Collapses at `resolveType` into one merged `ObjectType` (member fields concatenated, compatible duplicates deduped) — no runtime tag, unlike a union; reuses all existing object machinery unchanged ([TDD-00078](../tdd/TDD-00078.md)/[ADR-00225](../adr/ADR-00225.md))",
@@ -249,7 +248,7 @@
             "feature": "Tuple types",
             "status": "implemented",
             "caveats": [
-              "No rest/optional/named elements",
+              "No rest/optional elements",
               "Constant index only — no non-constant index; compound assignment to an element (`t[0] += x`) is a clean rejection",
               "No array methods (`.map`/`.filter`/…) on a tuple (`.length` works)",
               "Not supported nested in `any` or a union"
@@ -305,18 +304,20 @@
               "Covers `function identity<T>(x: T): T`, `interface Box<T>`, `class Box<T>`, and multiple type parameters `<K, V>` ([TDD-00037](../tdd/TDD-00037.md)/[ADR-00132](../adr/ADR-00132.md))",
               "A generic class needs an explicit type-argument list at each `new Box<T>(...)` site; can't use `extends`/`implements`/`abstract`/static members ([ADR-00103](../adr/ADR-00103.md)/[TDD-00010](../tdd/TDD-00010.md))",
               "V2: `/** @erased */` above a generic function compiles its body once (bare-`T` positions become `any`/`unknown`), no name mangling or instantiation blowup ([ADR-00121](../adr/ADR-00121.md))",
-              "Explicit call-site type arguments (`id<string>(x)`, `make<number>()`) pick the instantiation directly, bypassing inference; comparison expressions keep parsing via backtracking ([ADR-00473](../adr/ADR-00473.md))"
+              "Explicit call-site type arguments (`id<string>(x)`, `make<number>()`) pick the instantiation directly, bypassing inference; comparison expressions keep parsing via backtracking ([ADR-00473](../adr/ADR-00473.md))",
+              "A generic arrow, function expression or object-literal method (`<T>(x: T) => x`, `<T,>`, `function <U>(v: U)`) compiles once with its type parameters erased to `any`, as a generic class method's are ([ADR-01151](../adr/ADR-01151.md))"
             ]
           },
           {
             "feature": "Index signatures (`{ [k: string]: T }`)",
             "status": "implemented",
             "caveats": [
-              "A mixed named+index shape (`{ id: number; [k: string]: T }`) is a clean rejection; the class-body form (`class C { [n: number]: T }`) parses and is **dropped** — indexing a class instance keeps its use-site rejection ([ADR-00476](../adr/ADR-00476.md))",
+              "The class-body form (`class C { [n: number]: T }`) parses and is **dropped** — indexing a class instance keeps its use-site rejection ([ADR-00476](../adr/ADR-00476.md))",
               "`JSON.stringify` of an index-signature dict is compact output only — the `space` argument isn't threaded through this path ([ADR-00482](../adr/ADR-00482.md))"
             ],
             "notes": [
-              "String or number key, map-backed — `d[key]` read/write, an object-literal initializer, and `Object.keys/values/entries` + `for…of` all work; number keys stringify (JS object keys are strings), sharing the map backing ([TDD-00130](../tdd/TDD-00130.md)/[ADR-00390](../adr/ADR-00390.md)/[ADR-00461](../adr/ADR-00461.md))"
+              "String or number key, map-backed — `d[key]` read/write, an object-literal initializer, and `Object.keys/values/entries` + `for…of` all work; number keys stringify (JS object keys are strings), sharing the map backing; named properties beside the signature have their declared types; a missing key reads `undefined` ([ADR-01171](../adr/ADR-01171.md), [TDD-00130](../tdd/TDD-00130.md)/[ADR-00390](../adr/ADR-00390.md)/[ADR-00461](../adr/ADR-00461.md))",
+              "The type checker models them as tsc does — reads through any key, assignability with implicit index signatures for object literals only, TS2322 for an interface lacking one ([ADR-01160](../adr/ADR-01160.md))"
             ]
           },
           {
@@ -366,6 +367,19 @@
               "`declare var` is a real zero-initialized binding; `declare function` compiles to a throwing 'no implementation' stub (clear runtime error only if called); redeclared signatures collapse last-wins; `declare class/namespace/module/global` stay erased ([ADR-00471](../adr/ADR-00471.md))",
               "Identifier-named `declare namespace/module X` members are real ambient bindings (vars zero-init and assignable, functions throwing stubs); string-named module and `global` blocks stay erased ([ADR-00474](../adr/ADR-00474.md))",
               "`declare [const] enum` is a real enum ([ADR-00476](../adr/ADR-00476.md))"
+            ]
+          },
+          {
+            "feature": "TypeScript type errors (assignability, calls, operators, properties, assignment targets)",
+            "status": "implemented",
+            "caveats": [
+              "Reported: `TS2322`, `TS2345`, `TS2554`/`TS2555`, `TS2362`/`TS2363`/`TS2365`, `TS2367`, `TS2339`, `TS2353`, `TS2741`/`TS2739`/`TS2740`, `TS2588`/`TS2628`/`TS2629`/`TS2630`, `TS2769`, `TS18046`–`TS18050`, `TS2531`–`TS2533`, `TS2571`, `TS2721`–`TS2723`, `TS2304` and the forms tsc gives it for a value (`TS2552`, `TS2662`/`TS2663`, `TS2693`, `TS2708`, `TS2301`, `TS18004`, `TS2592`/`TS2593`), `TS2558`, `TS2754`, the class-member accessibility codes (`TS2341`, `TS2445`, `TS2446`, `TS2673`, `TS2674`, `TS2855`), a call's `this` context (`TS2684`). Not yet: a near-miss type name (`TS2552`), a type name out of its scope, a partly assigned variable read (`TS2454`), iterating a possibly-`undefined` value (`TS2488`), a call no overload takes by arity (`TS2575`), and more",
+              "A property is checked only on a type whose members the checker knows whole: not on a library global's name (an `interface Element` merges with the library's) or a class merged with an interface",
+              "A call is checked only against a function type the checker models whole: calls to generic functions and to the builtin library's undeclared parts are not checked, and a tagged template's call not at all",
+              "A function type in a message names its parameters `p0`, `p1`, … where tsc prints their declared names"
+            ],
+            "notes": [
+              "The strict lane rejects a program tsc rejects for these errors, with tsc's code, message and position; `-compat=js` compiles it as JavaScript ([ADR-01123](../adr/ADR-01123.md)). Measured against TypeScript 7.0.2's own test baselines, strict by default, every one of the 3,145 reports matches tsc's ([ADR-01122](../adr/ADR-01122.md), [ADR-01124](../adr/ADR-01124.md), [ADR-01125](../adr/ADR-01125.md), [ADR-01126](../adr/ADR-01126.md), [ADR-01128](../adr/ADR-01128.md), [ADR-01156](../adr/ADR-01156.md), [ADR-01157](../adr/ADR-01157.md), [ADR-01158](../adr/ADR-01158.md), [ADR-01160](../adr/ADR-01160.md))"
             ]
           }
         ]

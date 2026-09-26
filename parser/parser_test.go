@@ -1,7 +1,7 @@
 package parser_test
 
 import (
-	"reflect"
+	"strings"
 	"testing"
 
 	"KlainMainLang/ast"
@@ -440,23 +440,16 @@ func TestNewExpressionGeneric(t *testing.T) {
 // fallback (added for TDD-00009 Stage 0) accidentally swallowing any of the
 // five pre-existing hardcoded `new` forms — each must still parse to its own
 // dedicated node type, not the new generic ast.NewExpression.
-func TestNewBuiltinFormsUnaffected(t *testing.T) {
-	cases := []struct {
-		src  string
-		want any
-	}{
-		{"new Array<number>(3);", &ast.NewArrayExpression{}},
-		{"new Map<string, number>();", &ast.NewMapExpression{}},
-		{"new Set<number>();", &ast.NewSetExpression{}},
-		{`new Error("oops");`, &ast.NewErrorExpression{}},
-		{"new Date();", &ast.NewDateExpression{}},
-	}
-	for _, c := range cases {
-		t.Run(c.src, func(t *testing.T) {
-			expr := mustParseExpr(t, c.src)
-			wantType := reflect.TypeOf(c.want)
-			if reflect.TypeOf(expr) != wantType {
-				t.Errorf("got %T, want %v", expr, wantType)
+// The parser knows no builtin names (TDD-00230 P1.6): every `new` is a generic
+// NewExpression, and sema decides which ones construct a builtin.
+func TestNewIsAlwaysGeneric(t *testing.T) {
+	for _, src := range []string{
+		"new Array<number>(3);", "new Map<string, number>();", "new Set<number>();",
+		`new Error("oops");`, "new Date();", "new Date;", "new stream.Readable();",
+	} {
+		t.Run(src, func(t *testing.T) {
+			if _, ok := mustParseExpr(t, src).(*ast.NewExpression); !ok {
+				t.Errorf("%s: got %T, want *ast.NewExpression", src, mustParseExpr(t, src))
 			}
 		})
 	}
@@ -556,5 +549,36 @@ class C {
 		if !seen[name] {
 			t.Fatalf("method %q not parsed as a class member", name)
 		}
+	}
+}
+
+// `` tag<T>`…` `` is a tagged template with type arguments, and `super<T>(…)`
+// a call with them (which the checker rejects, TS2754).
+func TestTypeArgsBeforeTemplateAndSuper(t *testing.T) {
+	tt, ok := mustParseExpr(t, "tag<number>`a${1}b`").(*ast.TaggedTemplateExpression)
+	if !ok || len(tt.TypeArgs) != 1 || len(tt.Exprs) != 1 {
+		t.Fatalf("got %#v, want a tagged template with one type argument", tt)
+	}
+	if call, ok := mustParseExpr(t, "super<T>(0)").(*ast.CallExpression); !ok || len(call.TypeArgs) != 1 {
+		t.Fatalf("super<T>(0): got %#v, want a call with one type argument", call)
+	}
+}
+
+// A namespace's `export declare var` is a member; an ambient namespace may
+// list exports (`export { x }`), which a non-ambient one may not (TS1194).
+func TestNamespaceAmbientMembers(t *testing.T) {
+	prog := mustParse(t, "namespace M { export declare var n: number }")
+	found := false
+	for _, st := range prog.Body {
+		if v, ok := st.(*ast.VarDeclaration); ok && v.Name == ast.NamespaceMangle("M", "n") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("M.n is not declared")
+	}
+	mustParse(t, "declare namespace P { const x: number; export { x } }")
+	if _, err := parser.Parse("namespace Q { const x = 1; export { x } }"); err == nil || !strings.Contains(err.Error(), "not permitted in a namespace") {
+		t.Errorf("export list in a namespace: got %v, want TS1194", err)
 	}
 }

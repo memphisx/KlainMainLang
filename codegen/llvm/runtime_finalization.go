@@ -319,7 +319,7 @@ done:
 // survivors and callbacks enqueued after the last event-loop turn — runs.
 func (e *Emitter) emitFinRegAtexit() {
 	reportBlock := "  br label %flushstart\n"
-	if e.finalizersMode == "report" && !e.isGCMode() {
+	if e.opts.Finalizers == "report" && !e.isGCMode() {
 		hdr := e.internString("[finalizers] leak: %lld registration(s) never freed\n")
 		reportBlock = fmt.Sprintf(`  %%cntp = alloca i64, align 8
   %%ccurp = alloca ptr, align 8

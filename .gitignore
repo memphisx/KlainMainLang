@@ -78,6 +78,7 @@ apps/**
 # pinned by release tag in fetch.sh, sparse/blobless, not vendored into git.
 /.node-tests/
 /.ts-tests/
+/.types-node/
 
 # Fetched Web Platform Tests corpus (TDD-00082 Track 2, fetch.sh) — pinned by
 # commit SHA in fetch.sh, sparse/blobless, not vendored into git.
@@ -88,6 +89,8 @@ apps/**
 # compiled runner binary. The binary is ignored by its exact path so it does
 # not also swallow new source files under tools/conformance/.
 /.conformance-out/
+/.shadow-out/
+/.modelanes-out/
 /tools/conformance/conformance
 /tools/conformance/conformance.exe
 

@@ -19,8 +19,8 @@ func (e *Emitter) ensureClockGettime() {
 // against the system header rather than trusted from memory: Darwin's is 6
 // (confirmed in <_time.h>); glibc's is the well-known, decades-stable
 // kernel UAPI value 1. The same class of platform check as errnoAccessor.
-func monotonicClockID() string {
-	if targetGOOS() == "darwin" {
+func (e *Emitter) monotonicClockID() string {
+	if e.opts.Target.OS() == "darwin" {
 		return "6"
 	}
 	return "1"
@@ -103,7 +103,7 @@ entry:
   %%origin = load double, ptr @__kml_perf_origin, align 8
   %%elapsed = fsub double %%now, %%origin
   ret double %%elapsed
-}`, monotonicClockID()))
+}`, e.monotonicClockID()))
 }
 
 // ensurePerformanceMarkMap declares the hidden global backing

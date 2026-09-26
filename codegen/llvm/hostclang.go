@@ -1,6 +1,8 @@
 package llvm
 
 import (
+	"KlainMainLang/options"
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,17 +13,26 @@ import (
 // HostClangArgv is the single place that builds a `clang` argv for the
 // host, so every caller (the compiler driver, the E2E test helpers, the
 // embedded C++ bindings, the conformance runner) gets the same host-specific
-// prefix. On Linux and
-// macOS that prefix is empty: the system clang already targets the host and
-// finds its own libc. On Windows, LLVM's stock clang defaults to the MSVC
+// prefix. On Linux that
+// prefix is empty, and on macOS it only silences a spurious warning: the
+// system clang already targets the host and finds its own libc. On Windows, LLVM's stock clang defaults to the MSVC
 // target and ships no C runtime at all, so the emitted program is instead
 // built for the mingw-w64 UCRT target against an MSYS2 sysroot — see
 // TDD-00177 for why the toolchain is mingw while the platform semantics are
 // written against Win32 directly. ClangCommand wraps it in an exec.Cmd; a
 // caller that needs its own Cmd (the conformance runner's killable,
 // timeout-bound one) takes the argv directly.
-func HostClangArgv(args ...string) []string {
-	full := HostClangArgs()
+func HostClangArgv(args ...string) []string { return Toolchain{}.Argv(args...) }
+
+// Toolchain is the clang invocation for one compile target: the host's for
+// the zero value, or a cross target's (--target/--sysroot), which every
+// clang call of that build (the main compile, the embedded-C runtime, the GC
+// shim) goes through, matching the `target triple` the IR carries.
+type Toolchain struct{ Target options.Target }
+
+// Argv is HostClangArgv for tc's target.
+func (tc Toolchain) Argv(args ...string) []string {
+	full := tc.Args()
 	if runtime.GOOS == "windows" {
 		// The shim objects go *before* the caller's arguments: they shadow a
 		// few library exports (curl_multi_fdset), and lld resolves a symbol
@@ -51,8 +62,11 @@ func HostClangArgv(args ...string) []string {
 }
 
 // ClangCommand is HostClangArgv as a ready-to-run command.
-func ClangCommand(args ...string) *exec.Cmd {
-	return exec.Command("clang", HostClangArgv(args...)...)
+func ClangCommand(args ...string) *exec.Cmd { return Toolchain{}.Command(args...) }
+
+// Command is Argv as a ready-to-run command.
+func (tc Toolchain) Command(args ...string) *exec.Cmd {
+	return exec.Command("clang", tc.Argv(args...)...)
 }
 
 // RunClangLink runs a linking clang invocation with the driver's stdio. On
@@ -62,7 +76,10 @@ func ClangCommand(args ...string) *exec.Cmd {
 // directory could not be built at all. There the link goes to an ASCII-named
 // temp file and is moved into place (Go's rename is wide); the import library
 // and PDB-less mingw output carry no path back to the temp name.
-func RunClangLink(args ...string) error {
+func RunClangLink(args ...string) error { return Toolchain{}.RunLink(args...) }
+
+// RunLink is RunClangLink for tc's target.
+func (tc Toolchain) RunLink(args ...string) error {
 	final, idx := "", -1
 	if runtime.GOOS == "windows" {
 		for i := 0; i+1 < len(args); i++ {
@@ -88,10 +105,18 @@ func RunClangLink(args ...string) error {
 			args[idx] = filepath.Join(tmpDir, "out"+filepath.Ext(final))
 		}
 	}
-	cmd := ClangCommand(args...)
+	cmd := tc.Command(args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	var diag bytes.Buffer
+	if irSites {
+		cmd.Stderr = &diag // annotated with the emitting Go sites below
+	}
+	err := cmd.Run()
+	if irSites {
+		os.Stderr.WriteString(AnnotateClangOutput(diag.Bytes()))
+	}
+	if err != nil {
 		return err
 	}
 	if idx < 0 {
@@ -144,70 +169,14 @@ func SetStaticLink(v bool) { staticLinkMode = v }
 // StaticLink reports the current --static mode.
 func StaticLink() bool { return staticLinkMode }
 
-// crossTarget holds the --target/--sysroot cross-compilation request (TDD-00146
-// Stage 1). Empty triple = no cross target: build for the host, exactly as
-// before. When set, every clang invocation (the main compile, the embedded-C
-// runtime, the GC shim) is retargeted through HostClangArgs, and the emitted IR
-// carries a matching `target triple` line — the two must agree or clang warns
-// and mis-lowers. A package var, not an Emitter field, for the same reason as
-// staticLinkMode: the clang-argv helpers are package functions shared by the
-// driver, the test helpers, and the conformance runner, and it is written once
-// at startup and read-only thereafter.
-var crossTarget struct {
-	triple  string
-	sysroot string
-	goos    string // OS parsed from the triple, in Go GOOS spelling; "" if unrecognized
-	goarch  string // arch parsed from the triple, in Go GOARCH spelling; "" if unrecognized
-}
-
-// SetCrossTarget records the requested cross-compilation triple + sysroot
-// (main.go, once at startup, after the preset has been resolved to a real
-// triple). An empty triple leaves host targeting untouched. The triple's OS and
-// arch are parsed and cached here so the ~hundred codegen sites that choose a C
-// API, struct layout, or libcall can read the *target* platform via
-// targetGOOS()/targetGOARCH() instead of the build host's runtime.GOOS/GOARCH
-// (TDD-00146 Stage 1 completion).
-func SetCrossTarget(triple, sysroot string) {
-	crossTarget.triple = triple
-	crossTarget.sysroot = sysroot
-	crossTarget.goos = tripleGOOS(triple)
-	crossTarget.goarch = tripleGOARCH(triple)
-}
-
-// CrossTargetTriple returns the active cross-compilation triple, or "" when
-// building for the host. The emitter reads it to decide whether to stamp an
-// explicit `target triple` into the IR.
-func CrossTargetTriple() string { return crossTarget.triple }
-
-// CrossTargetGOOS / CrossTargetGOARCH expose the parsed target OS/arch (Go
-// spellings), or "" when building for the host or when the triple's field was
-// unrecognized. Read by main.go's cross-OS gate to reason about the target.
-func CrossTargetGOOS() string   { return crossTarget.goos }
-func CrossTargetGOARCH() string { return crossTarget.goarch }
-
-// CrossTargetSysroot returns the active --sysroot, or "" when building for the
-// host. Read by the Sailfish webview backend to resolve pkg-config metadata and
-// the target moc from inside the sysroot.
-func CrossTargetSysroot() string { return crossTarget.sysroot }
-
-// targetGOOS / targetGOARCH are the OS/arch every codegen site that emits code
-// *for the compiled program* must consult, instead of runtime.GOOS/GOARCH: they
-// return the cross-target's parsed value when a --target is active and its field
-// was recognized, else the build host's own value (the pre-cross behavior). The
-// clang-driver and host-toolchain link-flag helpers deliberately keep reading
-// runtime.GOOS — they describe the machine running clang, not the target.
-func targetGOOS() string {
-	if crossTarget.goos != "" {
-		return crossTarget.goos
+// ParseTarget is the compile target a --target triple and --sysroot name
+// (TDD-00146): the triple's OS and arch parsed to Go's spelling ("" when
+// unrecognized). An empty triple is the host.
+func ParseTarget(triple, sysroot string) options.Target {
+	if triple == "" {
+		return options.Target{}
 	}
-	return runtime.GOOS
-}
-
-func targetGOARCH() string {
-	if crossTarget.goarch != "" {
-		return crossTarget.goarch
-	}
-	return runtime.GOARCH
+	return options.Target{Triple: triple, Sysroot: sysroot, GOOS: tripleGOOS(triple), GOARCH: tripleGOARCH(triple)}
 }
 
 // tripleGOOS extracts the OS a clang triple names, normalized to the Go GOOS
@@ -355,26 +324,35 @@ func FFILinkFlags() []string {
 // HostClangArgs returns the host-specific arguments ClangCommand prepends.
 // Exposed so a caller that must build its own argv (e.g. for logging) can
 // still stay in sync.
-func HostClangArgs() []string {
+func HostClangArgs() []string { return Toolchain{}.Args() }
+
+// Args is HostClangArgs for tc's target.
+func (tc Toolchain) Args() []string {
 	// An explicit --target/--sysroot (TDD-00146 Stage 1) takes precedence over
 	// host defaults, including the Windows-host mingw preset below: the whole
 	// point is to retarget away from the host. The embedded-C runtime is
 	// compiled through this same argv, so it follows the sysroot automatically.
-	if crossTarget.triple != "" {
+	if tc.Target.Triple != "" {
 		// -Wno-override-module: the IR stamps the requested triple, and clang
 		// normalizes --target to its own canonical 4-field form (aarch64-linux-gnu
 		// → aarch64-unknown-linux-gnu), so the two differ textually and clang
 		// would warn that it is overriding the module triple with the --target
 		// one. That override is exactly the intended behavior — the --target value
 		// wins — so the warning is pure noise here.
-		args := []string{"--target=" + crossTarget.triple, "-Wno-override-module"}
-		if crossTarget.sysroot != "" {
-			args = append(args, "--sysroot="+crossTarget.sysroot)
+		args := []string{"--target=" + tc.Target.Triple, "-Wno-override-module"}
+		if tc.Target.Sysroot != "" {
+			args = append(args, "--sysroot="+tc.Target.Sysroot)
 		}
 		if lldAvailable() {
 			args = append(args, "-fuse-ld=lld")
 		}
 		return args
+	}
+	if runtime.GOOS == "darwin" {
+		// Apple clang 21 (macOS 27) warns that it overrides the module triple
+		// for every textual-IR input, even one stamping its own canonical
+		// triple verbatim; the host triple is the intended one.
+		return []string{"-Wno-override-module"}
 	}
 	if runtime.GOOS != "windows" {
 		return nil

@@ -5,6 +5,9 @@
 // with `as T`; `-compat=js` allows operating on the boxed value directly.
 
 // Indexed access + .length, including arguments beyond the declared arity.
+// The overload lets TypeScript accept the extra arguments; the body reads
+// them through `arguments`.
+function sum(first: number, ...more: number[]): number;
 function sum(first: number): number {
   let total = 0
   for (let i = 0; i < arguments.length; i++) {

@@ -151,7 +151,7 @@ func (e *Emitter) cpSpawnOptions(arg ast.Expression, pos ast.Pos) (cpSpawnOpts, 
 				// The signal the timeout uses (Node default SIGTERM). A string
 				// literal name → the host's number; a numeric literal passes.
 				if sl, ok := prop.Value.(*ast.StringLiteral); ok {
-					n, ok := cpSignalNumber(sl.Value)
+					n, ok := e.cpSignalNumber(sl.Value)
 					if !ok {
 						return cpSpawnOpts{}, fmt.Errorf("%d:%d: child_process.spawn killSignal: unknown signal %q", pos.Line, pos.Col, sl.Value)
 					}
@@ -708,7 +708,7 @@ func (e *Emitter) emitCPHandleMethod(objVal Value, method string, args []ast.Exp
 			// (TDD-00184); a bare number passes through. A dynamic (non-literal)
 			// string signal name is not supported yet — documented caveat.
 			if sl, ok := args[0].(*ast.StringLiteral); ok {
-				n, ok := cpSignalNumber(sl.Value)
+				n, ok := e.cpSignalNumber(sl.Value)
 				if !ok {
 					return Value{}, fmt.Errorf("%d:%d: child.kill: unknown signal %q", pos.Line, pos.Col, sl.Value)
 				}

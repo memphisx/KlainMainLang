@@ -18,7 +18,7 @@ interface Res { status: number; body: string }
 setTimeout(() => { process.exit(0) }, 300)
 
 // Additional Node server — the primary reactor slot.
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' })
   res.end('metrics from the side server\n')
 }).listen(8092)

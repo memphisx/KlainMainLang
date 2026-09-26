@@ -873,6 +873,7 @@ func (e *Emitter) emitTypedArraySubarray(mem *ast.MemberExpression, args []ast.E
 	recvTy := e.inferExprType(mem.Object)
 	ty.BigIntElem = recvTy.BigIntElem
 	ty.Clamped = recvTy.Clamped
+	ty.IsBuffer = recvTy.IsBuffer // Buffer.prototype.subarray returns a Buffer
 	return Value{Ref: r1, Ty: ty}, nil
 }
 

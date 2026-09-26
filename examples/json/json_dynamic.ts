@@ -58,5 +58,5 @@ cyc.self = cyc
 try {
   JSON.stringify(cyc)
 } catch (e) {
-  console.log(e.message)            // Converting circular structure to JSON
+  console.log((e as Error).message)            // Converting circular structure to JSON
 }

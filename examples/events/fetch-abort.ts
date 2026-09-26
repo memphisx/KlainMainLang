@@ -14,7 +14,7 @@ async function run(): Promise<void> {
 		await fetch("http://example.com", { signal: controller.signal })
 		console.log("request completed")
 	} catch (e) {
-		console.log("fetch failed: " + e.name)   // fetch failed: AbortError
+		console.log("fetch failed: " + (e as Error).name)   // fetch failed: AbortError
 		// The thrown value is a real DOMException (which, per the modern spec,
 		// inherits from Error), so both instanceof checks below print true.
 		console.log("is DOMException: " + (e instanceof DOMException))
@@ -28,7 +28,7 @@ async function run(): Promise<void> {
 	try {
 		await pending
 	} catch (e) {
-		console.log("also aborted: " + e.name)    // also aborted: AbortError
+		console.log("also aborted: " + (e as Error).name)    // also aborted: AbortError
 	}
 
 	// AbortSignal.timeout(ms): the fetch is cancelled once ms elapse — the real
@@ -39,7 +39,7 @@ async function run(): Promise<void> {
 	try {
 		await fetch("http://example.com", { signal: AbortSignal.timeout(0) })
 	} catch (e) {
-		console.log("timed out: " + e.name)        // timed out: TimeoutError
+		console.log("timed out: " + (e as Error).name)        // timed out: TimeoutError
 	}
 }
 

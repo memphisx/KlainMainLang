@@ -35,7 +35,7 @@ func (e *Emitter) ensureCPForkRuntime() {
 	e.ensureExecvDecl()
 
 	cp := cpStructIR
-	nonblock := httpNonblockFlag()
+	nonblock := e.httpNonblockFlag()
 	chanEnv := e.internString("NODE_CHANNEL_FD")
 
 	// __kml_cp_fork(argsdata, argslen): socketpair + fork; the child dups
@@ -304,7 +304,7 @@ func (e *Emitter) ensureIPCChildRuntime() {
 	e.emitGlobal("@__kml_ipcc_chan = internal global ptr null, align 8")
 	e.emitGlobal("@__kml_ipcc_msg_listener = internal global ptr null, align 8")
 	chanEnv := e.internString("NODE_CHANNEL_FD")
-	nonblock := httpNonblockFlag()
+	nonblock := e.httpNonblockFlag()
 
 	e.emitGlobal(fmt.Sprintf(`
 define i32 @__kml_ipcc_fd() {

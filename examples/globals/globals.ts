@@ -61,7 +61,7 @@ console.log(freshMs < loopMs)                               // true — measured
 try {
   performance.measure("bad", "never-marked")
 } catch (e) {
-  console.log(e.message)    // performance.measure: no mark named 'never-marked'
+  console.log((e as Error).message)    // performance.measure: no mark named 'never-marked'
 }
 
 // ── btoa / atob — base64 ─────────────────────────────────────────────────────

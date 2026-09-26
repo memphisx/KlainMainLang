@@ -4,7 +4,7 @@
 // is done, so it never blocks the server. Runs the same way under Node.js.
 import http from 'http';
 
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("kalimera from the server");
 }).listen(18521, () => {

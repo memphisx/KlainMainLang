@@ -11,8 +11,8 @@
 import tls from "tls";
 import fs from "fs";
 
-const cert = fs.readFileSync("cert.pem");
-const key = fs.readFileSync("key.pem");
+const cert = fs.readFileSync("cert.pem", "utf8");
+const key = fs.readFileSync("key.pem", "utf8");
 
 const server = tls.createServer({ cert: cert, key: key }, (socket) => {
   socket.on("data", (chunk: string) => {

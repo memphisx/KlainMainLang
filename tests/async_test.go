@@ -29,7 +29,7 @@ console.log("sync")
 async function bad(): Promise<number> { throw new Error("nope") }
 async function run(): Promise<void> {
   try { const x = await bad(); console.log("got " + x) }
-  catch (e) { console.log("caught " + e.message) }
+  catch (e) { console.log("caught " + (e as Error).message) }
 }
 run()
 `, "caught nope")
@@ -275,7 +275,7 @@ func TestE2EPromiseReject(t *testing.T) {
 	assertOutput(t, `
 async function main2(): Promise<void> {
   try { await Promise.reject(new Error("bad")) }
-  catch (e) { console.log("caught " + e.message) }
+  catch (e) { console.log("caught " + (e as Error).message) }
   Promise.reject(new Error("later")).catch((e) => { console.log("catch " + e.message) })
 }
 main2()
@@ -335,7 +335,7 @@ async function main2(): Promise<void> {
   const p = new Promise<number>((resolve, reject) => { resolve(42) })
   console.log(await p)
   const q = new Promise<number>((resolve, reject) => { reject(new Error("nope")) })
-  try { await q } catch (e) { console.log("caught " + e.message) }
+  try { await q } catch (e) { console.log("caught " + (e as Error).message) }
 }
 main2()
 `, "42\ncaught nope")
@@ -383,7 +383,7 @@ func TestE2EPromiseRejectNeverTyping(t *testing.T) {
 	assertOutput(t, `
 async function main2(): Promise<void> {
   try { const s: string = await Promise.reject(new Error("boom")); console.log(s) }
-  catch (e) { console.log("caught " + e.message) }
+  catch (e) { console.log("caught " + (e as Error).message) }
   const r: string = await Promise.reject(new Error("x")).catch((e) => "recovered")
   console.log(r)
 }
@@ -420,7 +420,7 @@ function make(ok: boolean): Promise<string> {
 }
 async function main2(): Promise<void> {
   console.log(await make(true))
-  try { await make(false) } catch (e) { console.log("err " + e.message) }
+  try { await make(false) } catch (e) { console.log("err " + (e as Error).message) }
 }
 main2()
 `, "yes\nerr no")
@@ -455,7 +455,7 @@ async function make(ok: boolean): Promise<string> {
 async function viaResolve(): Promise<number> { return Promise.resolve(5) }
 async function main2(): Promise<void> {
   console.log(await make(true))
-  try { await make(false) } catch (e) { console.log("err " + e.message) }
+  try { await make(false) } catch (e) { console.log("err " + (e as Error).message) }
   console.log(await viaResolve())
 }
 main2()
@@ -623,7 +623,7 @@ async function main2(): Promise<void> {
   try {
     await new Promise<number>((resolve) => { resolve(bad()) })
   } catch (e) {
-    console.log("caught " + e.message)
+    console.log("caught " + (e as Error).message)
   }
 }
 main2()
@@ -744,7 +744,7 @@ async function main2(): Promise<void> {
   try {
     for await (const x of [f(1), bad(), f(3)]) { console.log(x) }
   } catch (e) {
-    console.log("caught " + e.message)
+    console.log("caught " + (e as Error).message)
   }
 }
 main2()

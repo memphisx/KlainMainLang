@@ -54,6 +54,31 @@ jobs:
           go-version-file: go.mod
           cache: false # stdlib-only project, no go.sum to key the module cache on
 
+      # The FFI differential oracle (assertSameAsNodeFFI) needs `node:ffi`, which
+      # only exists in Node >= 26.1.0 behind --experimental-ffi — a *separate*
+      # oracle from the general one below. Install it first (POSIX lanes: node:ffi
+      # is exercised through dlopen there), capture its absolute path into
+      # KML_FFI_NODE, *then* install the general oracle so 24.19.0 wins PATH. On
+      # Windows KML_FFI_NODE stays unset and the FFI oracle self-skips (the tests
+      # still check our own output against the pinned expectation).
+      - uses: actions/setup-node@v4
+        if: matrix.goos != 'windows'
+        with:
+          node-version: '26.10.0'
+      - name: Record the node:ffi oracle path
+        if: matrix.goos != 'windows'
+        shell: bash
+        run: echo "KML_FFI_NODE=$(command -v node)" >> "$GITHUB_ENV"
+
+      # The 23 `assertSameAsNode*` oracle test files diff our stdout against the
+      # Node on PATH, so the oracle must be one exact version across both dev
+      # machines and every CI lane — an unpinned runner Node drifts (its
+      # fs.statfsSync predated the `frsize` field, reading as a spurious diff).
+      # 24.19.0 is the pinned oracle (Active LTS); dev boxes run the same.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+
       # --- Linux (x64 and arm64): clang + the optional libraries the suite links against ---
       - name: Install clang + libcurl (fetch examples link against it) + libgc (-mm=gc tests link against it) + libtommath (default bigint backend links against it) + libpcre2 (RegExp tests link -lpcre2-8) + libssl (default crypto.subtle backend links -lcrypto) + libnghttp2 (HTTP/2 server path links -lnghttp2) + libsqlite3 (node:sqlite links -lsqlite3) + gtk3/webkit2gtk-4.1 (klain:webview compile-tier tests link against it; headless so the window never opens)
         if: matrix.goos == 'linux'

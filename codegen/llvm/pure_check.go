@@ -160,54 +160,51 @@ func (c *purityChecker) checkFunction(fn pureFnInfo) error {
 	return c.checkStmts(fn.body.Body, sc)
 }
 
-// collectBlockLocals gathers every name declared inside a block (var/let/const,
-// loop variables, nested function-declaration names) into locals, without
-// descending into nested function *bodies* (those introduce their own pureScope).
+// collectBlockLocals gathers every name declared inside a block — var/let/const
+// and destructured bindings, loop variables, catch parameters, nested
+// function-declaration names — into locals, through the generated AST
+// traversal so no statement kind is skipped. It does not enter expressions or
+// nested function bodies (those introduce their own pureScope).
 func collectBlockLocals(b *ast.BlockStatement, locals map[string]bool) {
-	if b == nil {
-		return
-	}
-	for _, stmt := range b.Body {
-		collectStmtLocals(stmt, locals)
-	}
+	ast.Inspect(b, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.VarDeclaration:
+			locals[n.Name] = true
+		case *ast.ArrayDestructuring:
+			addPatternNames(n.Elems, nil, locals)
+		case *ast.ObjectDestructuring:
+			addPatternNames(nil, n.Props, locals)
+		case *ast.ForOfStatement:
+			locals[n.VarName] = true
+		case *ast.ForInStatement:
+			locals[n.VarName] = true
+		case *ast.TryStatement:
+			if n.Catch != nil && n.Catch.Param != "" {
+				locals[n.Catch.Param] = true
+			}
+		case *ast.FunctionDeclaration:
+			locals[n.Name] = true
+			return false
+		case ast.Expression:
+			return false
+		}
+		return true
+	})
 }
 
-func collectStmtLocals(stmt ast.Statement, locals map[string]bool) {
-	switch s := stmt.(type) {
-	case *ast.VarDeclaration:
-		locals[s.Name] = true
-	case *ast.VarDeclarationList:
-		for _, d := range s.Decls {
-			locals[d.Name] = true
+// addPatternNames records every name a destructuring pattern binds.
+func addPatternNames(elems []ast.ArrayPatternElem, props []ast.DestructProp, locals map[string]bool) {
+	for _, el := range elems {
+		if el.Name != "" {
+			locals[el.Name] = true
 		}
-	case *ast.FunctionDeclaration:
-		locals[s.Name] = true
-	case *ast.BlockStatement:
-		collectBlockLocals(s, locals)
-	case *ast.IfStatement:
-		collectBlockLocals(s.Consequent, locals)
-		if s.Alternate != nil {
-			collectStmtLocals(s.Alternate, locals)
+		addPatternNames(el.SubArray, el.SubObject, locals)
+	}
+	for _, pr := range props {
+		if pr.Local != "" {
+			locals[pr.Local] = true
 		}
-	case *ast.ForStatement:
-		if s.Init != nil {
-			collectStmtLocals(s.Init, locals)
-		}
-		collectBlockLocals(s.Body, locals)
-	case *ast.ForOfStatement:
-		locals[s.VarName] = true
-		collectBlockLocals(s.Body, locals)
-	case *ast.ForInStatement:
-		locals[s.VarName] = true
-		collectBlockLocals(s.Body, locals)
-	case *ast.WhileStatement:
-		collectBlockLocals(s.Body, locals)
-	case *ast.SwitchStatement:
-		for _, cs := range s.Cases {
-			for _, st := range cs.Body {
-				collectStmtLocals(st, locals)
-			}
-		}
+		addPatternNames(pr.SubArray, pr.SubObject, locals)
 	}
 }
 
@@ -288,6 +285,23 @@ func (c *purityChecker) checkStmt(stmt ast.Statement, sc *pureScope) error {
 				return err
 			}
 		}
+	case *ast.FunctionDeclaration, *ast.ClassDeclaration:
+		// a nested declaration is checked where it is called, not declared
+	default:
+		// Every other statement (try/catch/finally, do-while, labeled, throw,
+		// destructuring, …) is checked through its children: a statement kind
+		// this switch does not name can never hide an effect.
+		var err error
+		ast.ForEachChild(stmt, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case ast.Statement:
+				err = c.checkStmt(n, sc)
+			case ast.Expression:
+				err = c.checkExpr(n, sc)
+			}
+			return err == nil
+		})
+		return err
 	}
 	return nil
 }

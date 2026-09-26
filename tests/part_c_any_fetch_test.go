@@ -29,8 +29,8 @@ async function main2(): Promise<void> {
     const r: Response = await Promise.any([fetch("http://127.0.0.1:1/x"), fetch("http://127.0.0.1:2/y")])
     console.log("no throw " + r.status)
   } catch (e) {
-    console.log(e.name)
-    console.log(e.errors.length)
+    console.log((e as Error).name)
+    console.log((e as AggregateError).errors.length)
   }
 }
 main2()

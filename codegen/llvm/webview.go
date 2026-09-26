@@ -78,7 +78,7 @@ func WebviewSource(backend string) string {
 //     (Gecko/embedlite, TDD-00146 Stage 3) are recognized opt-in backends
 //     whose shims are not yet built, so they return a clean "not yet
 //     implemented" error naming the flag rather than a broken link line.
-func LocateWebview(backend string) (cflags, libs []string, err error) {
+func (e *Emitter) LocateWebview(backend string) (cflags, libs []string, err error) {
 	switch backend {
 	case "", "system":
 		// fall through to the per-platform system engine below.
@@ -87,7 +87,7 @@ func LocateWebview(backend string) (cflags, libs []string, err error) {
 		// flags come from the target sysroot's pkg-config, and the build runs the
 		// target moc over the shim (NeedsMoc, see EmbeddedCSources). Requires a
 		// --sysroot; LocateWebviewSailfish returns a clean error without one.
-		return LocateWebviewSailfish(CrossTargetSysroot())
+		return LocateWebviewSailfish(e.opts.Target.Sysroot)
 	case "cef", "qt":
 		return nil, nil, fmt.Errorf("-webview=%s is not yet implemented — only -webview=system (the default) is currently built (TDD-00144)", backend)
 	default:

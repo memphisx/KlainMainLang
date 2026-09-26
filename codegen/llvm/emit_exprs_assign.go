@@ -348,9 +348,6 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	// the D1 dynamic object model (TDD-00155 Stage 1).
 	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
 		if baseTy := e.inferExprType(idxEx.Object); isUnconstrainedDynamic(baseTy) {
-			if ex.Op != "=" {
-				return Value{}, fmt.Errorf("%d:%d: compound assignment ('%s') on a dynamic property is not yet supported", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
-			}
 			objVal, err := e.emitExpr(idxEx.Object)
 			if err != nil {
 				return Value{}, err
@@ -358,6 +355,9 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			keyRef, err := e.dynAnyKeyRef(idxEx.Index, ex.GetPos())
 			if err != nil {
 				return Value{}, err
+			}
+			if ex.Op != "=" {
+				return e.emitDynAnyCompoundAssign(objVal, keyRef, "", ex.Op, ex.Right, ex.GetPos())
 			}
 			rhs, err := e.emitExprWithObjectHint(ex.Right, TypeAny)
 			if err != nil {
@@ -596,25 +596,10 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		// Property write on a bare any/unknown base: a runtime tag dispatch
 		// into the D1 dynamic object model (TDD-00155 Stage 1).
 		if isUnconstrainedDynamic(objVal.Ty) {
-			if ex.Op != "=" && !isLogicalAssignOp(ex.Op) {
-				// `-compat=js` (TDD-00076 A2): read-modify-write through the
-				// runtime dispatch (`this.x *= k`); strict keeps the rejection.
-				if !e.compatJS() {
-					return Value{}, fmt.Errorf("%d:%d: compound assignment ('%s') on a dynamic property is not yet supported", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
-				}
-				cur, err := e.emitDynAnyMemberGetNamed(objVal, e.internString(memEx.Property), memEx.Property, ex.GetPos())
-				if err != nil {
-					return Value{}, err
-				}
-				rhsVal, err := e.emitExprWithObjectHint(ex.Right, TypeAny)
-				if err != nil {
-					return Value{}, err
-				}
-				res, err := e.emitAnyBinary(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, ex.GetPos())
-				if err != nil {
-					return Value{}, err
-				}
-				return e.emitDynAnyMemberSetNamed(objVal, e.internString(memEx.Property), memEx.Property, res, ex.GetPos())
+			if ex.Op != "=" {
+				// Read-modify-write through the runtime dispatch (`this.x *= k`,
+				// `o.n ??= 0`).
+				return e.emitDynAnyCompoundAssign(objVal, e.internString(memEx.Property), memEx.Property, ex.Op, ex.Right, ex.GetPos())
 			}
 			rhs, err := e.emitExprWithObjectHint(ex.Right, TypeAny)
 			if err != nil {
@@ -651,9 +636,6 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			return Value{}, fmt.Errorf("no field '%s'", memEx.Property)
 		}
 		if objVal.Ty.IsClass {
-			if err := e.checkFieldVisibility(objVal.Ty.ClassName, memEx.Property, ex.GetPos()); err != nil {
-				return Value{}, err
-			}
 			if err := e.checkReadonlyWrite(objVal.Ty.ClassName, memEx.Property, ex.GetPos()); err != nil {
 				return Value{}, err
 			}
@@ -801,17 +783,11 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	// TDD-00187 strict gate: `x = arr.pop()` into a bare-T binding is a
 	// compile error under strict (the value is `T | undefined`).
 	if ex.Op == "=" {
-		if err := e.checkStrictUndefinedAssign(sym.Ty, ex.Right, ex.GetPos(), "assigned value"); err != nil {
-			return Value{}, err
-		}
 	}
 
 	if sym.Ty.IsDynamic && ex.Op != "=" && !isLogicalAssignOp(ex.Op) {
-		// `-compat=js` (TDD-00076 A2): compound assignment dispatches the
-		// operator at runtime; strict keeps the rejection.
-		if !e.compatJS() {
-			return Value{}, fmt.Errorf("%d:%d: compound assignment ('%s') on any/unknown is not yet supported", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
-		}
+		// Compound assignment dispatches the operator at runtime (TDD-00076
+		// A2), as TypeScript allows on `any`.
 		cur := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, sym.Ptr))
 		rhsVal, err := e.emitExprWithObjectHint(ex.Right, TypeAny)
@@ -1242,4 +1218,63 @@ func unwrapDestructDefault(elem ast.Expression) (ast.Expression, ast.Expression)
 		return ae.Left, ae.Right
 	}
 	return elem, nil
+}
+
+// emitDynAnyCompoundAssign is `o[k] op= rhs` on an any base: an arithmetic
+// op reads, combines and writes; a logical one (`&&=`, `||=`, `??=`) writes
+// only when the current value says so, and is the current value otherwise.
+func (e *Emitter) emitDynAnyCompoundAssign(objVal Value, keyRef, propName, op string, rhsExpr ast.Expression, pos ast.Pos) (Value, error) {
+	cur, err := e.emitDynAnyMemberGetNamed(objVal, keyRef, propName, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	if !isLogicalAssignOp(op) {
+		rhsVal, err := e.emitExprWithObjectHint(rhsExpr, TypeAny)
+		if err != nil {
+			return Value{}, err
+		}
+		res, err := e.emitAnyBinary(strings.TrimSuffix(op, "="), cur, rhsVal, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyMemberSetNamed(objVal, keyRef, propName, res, pos)
+	}
+	var assign string
+	switch op {
+	case "&&=":
+		assign = e.emitAnyTruthy(cur).Ref
+	case "||=":
+		t := e.emitAnyTruthy(cur).Ref
+		assign = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", assign, t))
+	default: // ??=
+		tag, _ := e.emitUnboxTagPayload(cur)
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNull, tag, kmlTagNull))
+		isUndef := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
+		assign = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", assign, isNull, isUndef))
+	}
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", cur.Ref, slot))
+	setL := e.freshLabel("dynlassign.set")
+	doneL := e.freshLabel("dynlassign.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", assign, setL, doneL))
+	e.emitLabel(setL)
+	rhsVal, err := e.emitExprWithObjectHint(rhsExpr, TypeAny)
+	if err != nil {
+		return Value{}, err
+	}
+	res, err := e.emitDynAnyMemberSetNamed(objVal, keyRef, propName, rhsVal, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", res.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, slot))
+	return Value{Ref: r, Ty: TypeAny}, nil
 }

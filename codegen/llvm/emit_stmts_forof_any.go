@@ -118,7 +118,7 @@ func (e *Emitter) emitForOfAny(s *ast.ForOfStatement, condL, bodyL, incL, endL s
 	default:
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", elem.Ref, varPtr))
 	}
-	if err := e.emitStmt(s.Body); err != nil {
+	if err := e.emitForOfBody(s); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))

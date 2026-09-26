@@ -539,7 +539,7 @@ console.log(Suit.Spades)
 func TestE2EStringEnumTypedVariable(t *testing.T) {
 	assertOutput(t, `
 enum Color { Red = "RED", Green = "GREEN", Blue = "BLUE" }
-const c: Color = Color.Green
+const c = Color.Green as Color
 console.log(c)
 console.log(c === Color.Green)
 console.log(c === Color.Red)
@@ -1041,9 +1041,10 @@ console.log(name);
 }
 
 func TestE2EObjectDestructuringDefaultOnNullableArrayField(t *testing.T) {
+	// A default fills an omitted (undefined) field.
 	assertOutput(t, `
-interface Box { items: number[] | null }
-let empty: Box = { items: null };
+interface Box { items?: number[] }
+let empty: Box = {};
 let { items = [1, 2, 3] } = empty;
 console.log(items.length, items[0]);
 `, "3 1")
@@ -1700,4 +1701,36 @@ func TestE2EObjectESEnumOrderNonIndexKeys(t *testing.T) {
 const o = { "01": 1, "4294967295": 2, "5": 3, name: 4 };
 console.log(Object.keys(o).join(","));
 `, "5,01,4294967295,name")
+}
+
+// Object.fromEntries over string pairs (`[["p", "v"]]` infers as string[][]).
+func TestE2EObjectFromEntriesStringPairs(t *testing.T) {
+	assertSameAsNode(t, `
+const r = Object.fromEntries([["p", "v"], ["q", "w"]])
+console.log(r["p"], r.q, Object.keys(r).join(","))
+const pairs: string[][] = [["x", "1"]]
+console.log(JSON.stringify(Object.fromEntries(pairs)))
+`)
+}
+
+// `o?.f` of an optional scalar field is that field's value (TDD-00231).
+func TestE2EOptionalChainOptionalScalarField(t *testing.T) {
+	assertOutput(t, `
+interface O { f?: boolean; n?: number }
+function g(o?: O) { console.log(o?.f ?? "d", o?.n ?? 7, o?.f) }
+g(); g({ f: true, n: 1 }); g({});
+`, "d 7 undefined\ntrue 1 true\nd 7 undefined")
+}
+
+// A string index signature (a dictionary) reads through any key and
+// narrows; process.env is one.
+func TestE2EIndexSignatureDictionary(t *testing.T) {
+	assertOutput(t, `
+interface Dict { [k: string]: number }
+const d: Dict = { a: 1, b: 2 };
+const k = "b";
+console.log(d.a, d[k])
+const home = process.env.KML_NO_SUCH_VAR;
+if (home) console.log(home.length); else console.log("unset")
+`, "1 2\nunset")
 }

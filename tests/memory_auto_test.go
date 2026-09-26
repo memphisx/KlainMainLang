@@ -71,10 +71,13 @@ func buildBinaryAuto(t *testing.T, src string) string {
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
 	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
 	clangArgs = appendCasemap(t, em, dir, clangArgs)
+	clangArgs = appendStringC(t, em, dir, clangArgs)
+	clangArgs = appendNumberC(t, em, dir, clangArgs)
 	clangArgs = appendOSInfo(t, em, dir, clangArgs)
+	clangArgs = appendFnMeta(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		t.Fatalf("clang: %v\n%s", err, out)
+		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
 	return binFile
 }

@@ -31,6 +31,13 @@
             ]
           },
           {
+            "feature": "Local export list (`export { a, b as c }`, `export {}`)",
+            "status": "implemented",
+            "notes": [
+              "Exports the file's own top-level declarations, optionally under another name; a name the file does not declare is a compile error. `export {}` exports nothing ([ADR-01130](../adr/ADR-01130.md))"
+            ]
+          },
+          {
             "feature": "`import { a, b } from './relative/path'`",
             "status": "implemented",
             "notes": [
@@ -85,6 +92,19 @@
             ]
           },
           {
+            "feature": "Type-only imports and exports (`import type`, `{ type X }`, `export type { X }`)",
+            "status": "implemented",
+            "notes": [
+              "Erased with the statement; a builtin module's types (`import type { IncomingMessage } from 'http'`) are the library's",
+              "A named import of a Node class this compiler implements only as a type (`import { IncomingMessage } from 'http'`) is a type import too, plain or aliased ([ADR-01152](../adr/ADR-01152.md))",
+              "A value use of a type-only import is TS1361; `import type from './x'` stays a default import named `type`",
+              "See [ADR-01146](../adr/ADR-01146.md)"
+            ],
+            "caveats": [
+              "A Node class of a module code generation implements (`ChildProcess`, `Hash`, `readline`'s `Interface`, `Http2ServerRequest`, …) is a type only: a value use is a compile error; the classes of the modules written in TypeScript (`net`, `tls`, `http`, `https`, `stream`, `events`) are values"
+            ]
+          },
+          {
             "feature": "`export default`",
             "status": "implemented",
             "notes": [
@@ -106,8 +126,7 @@
             "feature": "`import * as ns from '...'` (namespace import)",
             "status": "implemented",
             "caveats": [
-              "Compile-time-only — `ns` is never a runtime value, usable only as the object of a non-computed dotted access; assigning it to a variable, passing it as a value, or `ns[\"x\"]` reaches codegen as a plain undefined reference rather than a dedicated error message",
-              "Type-position access (`let x: ns.SomeInterface`) and `new ns.SomeClass(...)` are not supported — the latter a pre-existing, namespace-independent restriction (`new` already only accepts a single bare identifier)"
+              "Compile-time-only — `ns` is never a runtime value, usable only as the object of a non-computed dotted access; assigning it to a variable, passing it as a value, or `ns[\"x\"]` reaches codegen as a plain undefined reference rather than a dedicated error message"
             ],
             "notes": [
               "`ns.member` is rewritten directly to that member's mangled name during resolution",

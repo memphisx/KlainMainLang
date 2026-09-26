@@ -5,28 +5,30 @@
   "statusPage": "EVENT-EMITTER.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "8/8",
+    "loose": "9/9",
     "loosePct": 100,
-    "strict": "3/8",
-    "strictPct": 38
+    "strict": "1/9",
+    "strictPct": 11
   },
-  "lede": "Node's classic EventEmitter, not the WHATWG EventTarget/Event trio. The big divergence is that it's a compiler-recognized generic built-in (monomorphized per T like Map/Set/Promise), not a real registered class — so the on/once/emit/off surface is hand-written codegen dispatched by name and instanceof answers as a compile-time constant. A subclass can still override any of those methods (the override wins at every call site, and super.<method>(...) reaches the built-in). Payloads are statically typed through an event-map type argument, with tuple payloads standing in for Node's multi-argument events.",
+  "lede": "Node's classic EventEmitter, imported from events (it is no global), not the WHATWG EventTarget/Event trio. With no type argument every event takes any arguments, @types/node's default event map; a type argument is an event map of argument tuples. The on/once/emit/off surface is compiled by the compiler rather than a registered class, so instanceof answers as a compile-time constant, and every listener is held as a dynamic function. A subclass can still override any of those methods (the override wins at every call site, and super.<method>(...) reaches the built-in).",
   "entries": [
     {
       "id": "events.EventEmitter",
       "name": "new EventEmitter<T>() / class X extends EventEmitter<T>",
       "statusRow": "new EventEmitter<T>() / extending it via class X extends EventEmitter<T>",
-      "signature": "new EventEmitter<T>(); class X extends EventEmitter<T> {}",
+      "signature": "import { EventEmitter } from 'events'; new EventEmitter<T>(); class X extends EventEmitter<T> {}",
       "badge": "caveats",
-      "description": "Either construct a standalone emitter or root a class in one via extends — the subclass then gets the whole on/once/emit/off/removeListener/removeAllListeners/listenerCount/eventNames surface for free. T is the event-payload type: a scalar/Error for a single shared payload, or an object type mapping each event name to its own payload.",
+      "description": "Either construct a standalone emitter or root a class in one via extends — the subclass then gets the whole on/once/emit/off/removeListener/removeAllListeners/listenerCount/eventNames surface for free, and its constructor calls super(). With no T every event takes any arguments; T is an event map of argument tuples (`{ data: [chunk: string]; end: [] }`).",
       "returns": {
         "type": "EventEmitter<T>",
         "desc": "An emitter, or a subclass instance rooted in one."
       },
       "exampleKey": "eventemitter/eventemitter",
-      "snippet": "class Downloader extends EventEmitter<string> {\n  progress(chunk: number): void {\n    this.emit(\"progress\", this.name + \": \" + this.bytesDone + \" bytes\");\n  }\n}\nconst bus = new EventEmitter<number>();",
+      "snippet": "import { EventEmitter } from 'events';\nclass Downloader extends EventEmitter {\n  progress(chunk: number): void {\n    this.emit(\"progress\", this.name + \": \" + this.bytesDone + \" bytes\");\n  }\n}\nconst bus = new EventEmitter();",
       "differences": [
-        "A subclass may override any EventEmitter method (`on`/`once`/`emit`/`off`/`removeListener`/`removeAllListeners`/`listenerCount`/`eventNames`) — the override wins at every call site (statically and virtually), and `super.<method>(...)` reaches the nearest ancestor override or the built-in dispatch. The override's declared signature isn't checked against the built-in it replaces"
+        "A subclass may override any EventEmitter method (`on`/`once`/`emit`/`off`/`removeListener`/`removeAllListeners`/`listenerCount`/`eventNames`) — the override wins at every call site (statically and virtually), and `super.<method>(...)` reaches the nearest ancestor override or the built-in dispatch. The override's declared signature isn't checked against the built-in it replaces",
+        "The type checker treats every event as taking any arguments; a typed map's event names and argument types are checked by code generation instead",
+        "Constructor options (`captureRejections`) are rejected"
       ],
       "seeAlso": [
         "events.on",
@@ -79,7 +81,7 @@
       "statusRow": ".emit(event, ...args)",
       "signature": ".emit(event: string, ...args): boolean",
       "badge": "caveats",
-      "description": "Synchronously invokes every listener registered for event, in registration order, passing along the arguments. Returns whether any listener ran. A tuple-payload event takes one argument per element; a scalar payload takes a single data argument.",
+      "description": "Synchronously invokes every listener registered for event, in registration order, passing along the arguments. Returns whether any listener ran. On a typed map an event takes exactly its tuple's arguments.",
       "params": [
         {
           "name": "event",
@@ -89,7 +91,7 @@
         {
           "name": "args",
           "type": "...",
-          "desc": "Payload — one arg per tuple element, or a single value."
+          "desc": "The event's arguments."
         }
       ],
       "returns": {
@@ -99,7 +101,6 @@
       "exampleKey": "eventemitter/multi_arg",
       "snippet": "this.emit(\"progress\", 512, 1024);\nthis.emit(\"done\", \"/tmp/file.bin\");",
       "differences": [
-        "Multi-argument `emit(event, a, b, …)` for an event whose payload is a tuple `[A, B, …]`; a non-tuple payload takes one data argument. Open-ended untyped varargs (beyond a declared tuple) aren't supported",
         "A map-typed emitter requires a string-literal event name"
       ],
       "seeAlso": [
@@ -116,7 +117,7 @@
       "statusRow": ".off(event, listener) / .removeListener(...) / .removeAllListeners(...)",
       "signature": ".off(event, listener): this; .removeListener(event, listener): this; .removeAllListeners(event?): this",
       "badge": "exact",
-      "description": "Detaches listeners. off and removeListener remove a single listener from an event. removeAllListeners with no argument clears every event; passed an event name, it clears just that one.",
+      "description": "Detaches listeners. off and removeListener remove the most recently added matching listener, keeping the rest in order. removeAllListeners with no argument clears every event; passed an event name, it clears just that one.",
       "params": [
         {
           "name": "event",
@@ -144,12 +145,47 @@
       }
     },
     {
+      "id": "events.prependListener",
+      "name": ".addListener / .prependListener / .prependOnceListener",
+      "statusRow": ".addListener(...) / .prependListener(...) / .prependOnceListener(...)",
+      "signature": ".addListener(event, listener): this; .prependListener(event, listener): this; .prependOnceListener(event, listener): this",
+      "badge": "caveats",
+      "description": "addListener is on under its other name. prependListener adds the listener before the ones already registered, so it runs first; prependOnceListener does the same for a one-shot listener.",
+      "params": [
+        {
+          "name": "event",
+          "type": "string",
+          "desc": "Event name."
+        },
+        {
+          "name": "listener",
+          "type": "(...args) => void",
+          "desc": "The function to call."
+        }
+      ],
+      "returns": {
+        "type": "this",
+        "desc": "The emitter, for chaining."
+      },
+      "snippet": "bus.on(\"tick\", () => console.log(\"second\"));\nbus.prependListener(\"tick\", () => console.log(\"first\"));\nbus.emit(\"tick\");",
+      "differences": [
+        "A map-typed emitter requires a string-literal event name"
+      ],
+      "seeAlso": [
+        "events.on",
+        "events.off"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/events.html#emitterprependlistenereventname-listener"
+      }
+    },
+    {
       "id": "events.listenerCount",
       "name": ".listenerCount(event) / .eventNames()",
       "statusRow": ".listenerCount(event) / .eventNames()",
       "signature": ".listenerCount(event: string): number; .eventNames(): string[]",
-      "badge": "exact",
-      "description": "listenerCount reports how many listeners are registered for an event. eventNames returns the names that currently have listeners, in registration order — an implementation detail of the underlying map, not a documented ordering guarantee.",
+      "badge": "caveats",
+      "description": "listenerCount reports how many listeners are registered for an event. eventNames returns the names that currently have listeners, in registration order; an event whose last listener is removed drops out.",
       "params": [
         {
           "name": "event",
@@ -168,27 +204,33 @@
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/events.html#emitterlistenercounteventname-listener"
-      }
+      },
+      "differences": [
+        "Event names are strings; a symbol event name is not supported"
+      ]
     },
     {
       "id": "events.error",
       "name": "emit('error', ...) special-case",
       "statusRow": "EventEmitter.prototype.emit('error', ...) special-cases (throws if no 'error' listener)",
       "signature": ".emit('error', payload): boolean  // throws if no 'error' listener",
-      "badge": "exact",
-      "description": "Matches Node's one specially treated event name: emitting 'error' with no registered 'error' listener throws instead of silently swallowing the problem, so a forgotten handler fails loudly. Resolved entirely at the emit call site — no runtime cost when the event name isn't 'error' beyond the strcmp itself.",
+      "badge": "caveats",
+      "description": "Matches Node's one specially treated event name: emitting 'error' with no registered 'error' listener throws — the argument itself when it is an Error, otherwise an Error reading \"Unhandled error. (<value>)\" — so a forgotten handler fails loudly. Resolved entirely at the emit call site.",
       "returns": {
         "type": "boolean",
         "desc": "As emit — but throws when 'error' has no listener."
       },
       "exampleKey": "eventemitter/eventemitter",
-      "snippet": "try {\n  dl.emit(\"error\", \"disk full\");\n} catch (e) {\n  console.log(\"caught: \" + e.message); // caught: disk full\n}",
+      "snippet": "try {\n  dl.emit(\"error\", \"disk full\");\n} catch (e) {\n  console.log(\"caught: \" + e.message); // caught: Unhandled error. ('disk full')\n}",
       "seeAlso": [
         "events.emit"
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/events.html#error-events"
-      }
+      },
+      "differences": [
+        "A non-Error, non-string argument is rendered with `String()` in the message, where Node uses `util.inspect`"
+      ]
     },
     {
       "id": "events.once",
@@ -231,7 +273,7 @@
       "statusRow": "events.on(emitter, name) (async iterator)",
       "signature": "on(emitter: EventEmitter, name: string): AsyncIterableIterator<args[]>",
       "badge": "caveats",
-      "description": "Returns an async iterator that yields the event's argument array on each emission, buffering events that arrive between iterations and parking the consumer when the queue drains. The listener attaches eagerly at the on(...) call, so events emitted before consumption starts are buffered rather than lost.",
+      "description": "Registers a listener for an event; once fires at most once then detaches itself. Both are chainable, returning the emitter. The listener's parameters are any on an untyped emitter, or come from the event's argument tuple; it may take fewer parameters than the event passes.",
       "params": [
         {
           "name": "emitter",
@@ -241,7 +283,7 @@
         {
           "name": "name",
           "type": "string",
-          "desc": "The event name."
+          "desc": "Callback taking the event's arguments."
         }
       ],
       "returns": {
@@ -250,8 +292,8 @@
       },
       "snippet": "import { EventEmitter, on } from 'events'\nconst ee = new EventEmitter<{ tick: [number] }>()\nsetTimeout(() => { ee.emit('tick', 1); ee.emit('tick', 2) }, 0)\nfor await (const [n] of on(ee, 'tick')) {\n  console.log(n)\n  if (n >= 2) break\n}",
       "differences": [
-        "Same payload rules as once: single-value / homogeneous multi-arg events only",
-        "The buffer is unbounded (Node's default); iterator .return()/.throw() unregistering the listener is a deferred follow-up"
+        "A map-typed emitter requires a string-literal event name at every call site",
+        "A `function` listener can't read `this` (the emitter, in Node)"
       ],
       "seeAlso": [
         "EventEmitter",

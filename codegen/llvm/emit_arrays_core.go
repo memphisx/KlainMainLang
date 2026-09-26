@@ -22,6 +22,18 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 			return err
 		}
 		slot = e.moduleGlobals[v.Name].Ptr
+	} else if fsym, ok := e.forwardBoxes[v]; ok {
+		// A closure built before this declaration already captured its cell.
+		slot = fsym.Ptr
+		e.define(v.Name, fsym)
+	} else if e.hoistedCaptures[v.Name] {
+		// Captured by a nested closure: the slot is a heap cell made here,
+		// which dominates every use — not at the capturing closure, which
+		// may sit in one branch (promoteCaptureToCell's work, done early).
+		slot = e.boxHoistedCapture(v.Name, TypePtr, "null", v.Kind == "const", v.Kind == "var")
+		sym, _ := e.lookup(v.Name)
+		sym.Ty = ty
+		e.define(v.Name, sym)
 	} else {
 		slot = e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
@@ -103,6 +115,11 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 	val, err := e.emitExpr(v.Init)
 	if err != nil {
 		return err
+	}
+	if val.Ty.IsDynamic {
+		// `const xs: T[] = anyValue` (an assertion in TS), or the array member
+		// of a union the checker narrowed to it: the box's array.
+		val = e.emitUnboxBoxToType(val.Ref, ty)
 	}
 	if !val.Ty.IsArray {
 		return fmt.Errorf("%d:%d: array variable must be initialized with an array expression", v.GetPos().Line, v.GetPos().Col)
@@ -524,6 +541,15 @@ func (e *Emitter) emitNotIterableGuard(name string, sym Symbol) {
 // `%p_<name>_len` argument is redundant (length lives in the header) and left
 // unused — kept only so the two-word (ptr, i64) array ABI is unchanged.
 func (e *Emitter) bindArrayParam(name string, pty Type) {
+	if e.hoistedCaptures[name] {
+		// Captured by a nested closure: a heap cell at entry, which dominates
+		// the whole body, not one made at the capture site.
+		e.boxHoistedCapture(name, TypePtr, "%p_"+name+"_ptr", false, true)
+		sym, _ := e.lookup(name)
+		sym.Ty = pty
+		e.define(name, sym)
+		return
+	}
 	slot := "%v_" + name + "_ptr"
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 	e.emitInstr(fmt.Sprintf("store ptr %%p_%s_ptr, ptr %s, align 8", name, slot))
@@ -637,6 +663,11 @@ func (e *Emitter) storeArrayElem(gepReg string, elemTy Type, val Value) {
 		e.ensureMemcpy()
 		e.emitInstr(fmt.Sprintf("call void @memcpy(ptr %s, ptr %s, i64 %d)", gepReg, val.Ref, elemTy.StructSize()))
 		return
+	}
+	if elemTy.IsArray && isSelfDescribingBox(val.Ty) {
+		// An `any` element into an array-of-arrays (or Buffer[]): the box's
+		// array.
+		val = e.emitUnboxBoxToType(val.Ref, elemTy)
 	}
 	if elemTy.IsArray {
 		// Share the value's live header when it has one (reference semantics:
@@ -758,7 +789,10 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 	// `[...arr.slice(1)]`, `[...[1,2]]`), returning its data ptr + length. The
 	// resulting SSA regs dominate both loops below, so each spread is evaluated
 	// exactly once.
-	type spreadSrc struct{ ptr, length string }
+	type spreadSrc struct {
+		ptr, length string
+		elem        Type
+	}
 	spreadOf := map[*ast.SpreadElement]spreadSrc{}
 	for _, elem := range lit.Elements {
 		sp, ok := elem.(*ast.SpreadElement)
@@ -782,14 +816,14 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 			sl0 := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", sp0, chars.Ref))
 			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", sl0, chars.Ref))
-			spreadOf[sp] = spreadSrc{ptr: sp0, length: sl0}
+			spreadOf[sp] = spreadSrc{ptr: sp0, length: sl0, elem: TypePtr}
 			continue
 		}
-		srcPtr, srcLen, _, rerr := e.resolveArrayForHOF(sp.Arg, sp.GetPos())
+		srcPtr, srcLen, srcElem, rerr := e.resolveArrayForHOF(sp.Arg, sp.GetPos())
 		if rerr != nil {
 			return "", "", rerr
 		}
-		spreadOf[sp] = spreadSrc{ptr: srcPtr, length: srcLen}
+		spreadOf[sp] = spreadSrc{ptr: srcPtr, length: srcLen, elem: srcElem}
 	}
 
 	// Compute runtime total = staticCount + sum(spread.length).
@@ -825,6 +859,17 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cVal, cursorPtr))
 			dstReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dstReg, elemTy.IR, dataReg, cVal))
+			// Concrete elements spread into box elements (`[...nums]` as
+			// any[]) are boxed one by one; a copy would reinterpret them.
+			if elemTy.IsDynamic && !elemTy.IsArray && src.elem.IR != "" && !src.elem.IsDynamic {
+				if err := e.emitSpreadBoxLoop(srcPtr, srcLen, src.elem, dstReg); err != nil {
+					return "", "", err
+				}
+				newC := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newC, cVal, srcLen))
+				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newC, cursorPtr))
+				continue
+			}
 			// bytes = len * elemSize
 			copyBytes := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", copyBytes, srcLen, elemTy.Align()))
@@ -891,6 +936,14 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 			if val, verr = e.coerceChecked(val, elemTy, elem.GetPos(), "array element"); verr != nil {
 				return "", 0, verr
 			}
+		}
+		// A boolean among numbers (or a number among booleans) is as
+		// heterogeneous as a string among them — both are plain scalars, so
+		// coerce would silently turn `[true, 5]` into `[true, true]`.
+		if !elemTy.IsDynamic && !val.Ty.IsDynamic && elemTy.IR != "ptr" && val.Ty.IR != "ptr" &&
+			!isNullableScalar(elemTy) && !isNullableScalar(val.Ty) && !elemTy.IsDate && !val.Ty.IsDate &&
+			(elemTy.IR == "i1") != (val.Ty.IR == "i1") && val.Ty.IR != "" && val.Ty.IR != "void" {
+			return "", 0, fmt.Errorf("%d:%d: array elements must share one type — element %d is a %s, not a %s (a heterogeneous array is not supported)", elem.GetPos().Line, elem.GetPos().Col, i, typeofString(val.Ty), typeofString(elemTy))
 		}
 		val = e.coerce(val, elemTy)
 		// A heterogeneous array literal (`[obj, 0, "s"]`) reaches here with an
@@ -1378,6 +1431,21 @@ func (e *Emitter) resolveArrayDataPtr(init ast.Expression, pos ast.Pos) (dataPtr
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, charArr.Ref))
 		return ptrReg, lenReg, TypePtr, nil
 	}
+	if id, ok := init.(*ast.Identifier); ok && e.isDynamicBinding(id.Name) {
+		// A union binding the checker narrows to its array member.
+		val, verr := e.emitExpr(id)
+		if verr != nil {
+			return "", "", Type{}, verr
+		}
+		if !val.Ty.IsArray || val.Ty.ElemType == nil {
+			return "", "", Type{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, id.Name)
+		}
+		ptrReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
+		lenReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+		return ptrReg, lenReg, *val.Ty.ElemType, nil
+	}
 	switch src := init.(type) {
 	case *ast.Identifier:
 		sym, found := e.lookup(src.Name)
@@ -1420,7 +1488,7 @@ func (e *Emitter) resolveArrayDataPtr(init ast.Expression, pos ast.Pos) (dataPtr
 }
 
 func (e *Emitter) resolveArrayForHOF(objExpr ast.Expression, pos ast.Pos) (ptrReg, lenReg string, elemTy Type, err error) {
-	if id, ok := objExpr.(*ast.Identifier); ok {
+	if id, ok := objExpr.(*ast.Identifier); ok && !e.isDynamicBinding(id.Name) {
 		sym, found := e.lookup(id.Name)
 		if !found || !sym.Ty.IsArray {
 			err = fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, id.Name)
@@ -1539,3 +1607,48 @@ func (e *Emitter) arrayIndexToI64(idxVal Value, pos ast.Pos) (Value, error) {
 
 // emitArrayIndexOf implements arr.indexOf(val): returns the index of the first
 // element equal to val, or -1 if not found.
+
+// isDynamicBinding reports whether name is bound to a box (any, a union):
+// an array read of it goes through its value, which the checker's
+// narrowing unboxes, not through an array binding's header slot.
+func (e *Emitter) isDynamicBinding(name string) bool {
+	sym, ok := e.lookup(name)
+	return ok && sym.Ty.IsDynamic && !sym.Ty.IsArray
+}
+
+// emitSpreadBoxLoop boxes n concrete elements of type srcElem at src into the
+// i64 box slots at dst.
+func (e *Emitter) emitSpreadBoxLoop(src, n string, srcElem Type, dst string) error {
+	idx := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idx))
+	condL, bodyL, endL := e.freshLabel("spreadbox.cond"), e.freshLabel("spreadbox.body"), e.freshLabel("spreadbox.end")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	i := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, idx))
+	more := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, i, n))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, endL))
+	e.emitLabel(bodyL)
+	slotIR := srcElem.IR
+	if srcElem.IsArray {
+		slotIR = "ptr" // an element array is its header pointer
+	}
+	sg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", sg, slotIR, src, i))
+	v := e.loadArrayElem(sg, srcElem)
+	boxed, err := e.emitBoxValue(v)
+	if err != nil {
+		return err
+	}
+	dg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", dg, dst, i))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, dg))
+	next := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idx))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(endL)
+	return nil
+}

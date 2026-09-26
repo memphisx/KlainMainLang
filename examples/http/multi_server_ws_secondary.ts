@@ -7,14 +7,15 @@
 //
 // A self-closing sequence keeps the example runnable to completion.
 import http from 'http';
-import { WebSocketServer } from 'klain:ws';
+import type { AddressInfo } from 'net';
+import { WebSocketServer, WSConnection } from 'klain:ws';
 
-const api = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const api = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end('{"status":"ok"}');
 });
 
-const realtime = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const realtime = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(426); res.end("upgrade required");
 });
 const wss = new WebSocketServer({ server: realtime });
@@ -24,8 +25,8 @@ wss.on('connection', (socket: WSConnection) => {
 
 api.listen(0, () => {
   realtime.listen(0, () => {
-    console.log("api (plain) on port", api.address().port > 0);
-    console.log("realtime (websocket) on port", realtime.address().port > 0);
+    console.log("api (plain) on port", (api.address() as AddressInfo).port > 0);
+    console.log("realtime (websocket) on port", (realtime.address() as AddressInfo).port > 0);
     api.close();
     realtime.close();
   });

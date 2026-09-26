@@ -197,6 +197,21 @@
       }
     },
     {
+      "id": "lang.asi",
+      "name": "Automatic semicolon insertion",
+      "statusRow": "Automatic semicolon insertion and the no-line-break rules",
+      "signature": "let a = 1\nlet b = 2",
+      "badge": "exact",
+      "description": "Semicolons are optional where JavaScript inserts them: a statement ends at a line break, before `}` or at the end of the file. A line break is refused where the grammar refuses one — before a postfix `++`/`--`, after `return`/`throw`/`break`/`continue`/`yield`, before `=>`, and between `async` and its function — so `a` then `++b` on the next line is two statements. `async` and `abstract` stay usable as names.",
+      "seeAlso": [
+        "lang.return",
+        "lang.throw"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Lexical_grammar#automatic_semicolon_insertion"
+      }
+    },
+    {
       "id": "lang.nullderef",
       "name": "TypeError on a property access off undefined/null (s.length, r.name, p.m(), s[i], p.x = v)",
       "statusRow": "TypeError on a property access off undefined/null (s.length, r.name, p.m(), s[i], p.x = v)",
@@ -381,11 +396,8 @@
       "name": "Logical operators && || !",
       "statusRow": "Logical operators && || !",
       "signature": "a && b, a || b, !a",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Genuinely short-circuiting logical operators. Result type is bool under -compat=strict (default); -compat=js makes &&/|| value-preserving (x || \"default\" yields the string; scalars of different kinds yield their union, 0 || \"x\" is number | string).",
-      "differences": [
-        "Under `-compat=js`, an array, tuple, object or nullable-scalar operand mixed with another kind still degrades the `&&`/`||` result to a bool; same-typed operands and mixed scalar kinds (`0 || \"x\"` is the union `number | string`) are value-preserving."
-      ],
       "seeAlso": [
         "lang.logicalassign",
         "lang.nullish"
@@ -628,9 +640,10 @@
       "statusRow": "Tagged template literals ( tagHello ${x} )",
       "signature": "tag`Hello ${x}`",
       "badge": "caveats",
-      "description": "Desugars to a plain call (tag([\"a\",\"b\"], x)) — interpolated values reach the tag as real typed values, not implicitly stringified. Any callable works as a tag, including an arrow/closure with a ...rest parameter.",
+      "description": "Desugars to a plain call (tag([\"a\",\"b\"], x)) — interpolated values reach the tag as real typed values, not implicitly stringified. Any callable works as a tag, including an arrow/closure with a ...rest parameter. The strings parameter is a TemplateStringsArray, and a generic tag takes explicit type arguments (tag<T>`…`).",
       "differences": [
-        "A user tag's `strings` argument has no `.raw` property (arrays carry no extra properties); the built-in `String.raw` tag itself is implemented and interleaves the raw, un-escaped quasis."
+        "A user tag's `strings` argument has no `.raw` property (arrays carry no extra properties); the built-in `String.raw` tag itself is implemented and interleaves the raw, un-escaped quasis.",
+        "A tag call's arguments are not checked against the tag's parameters, so a `strings: string[]` parameter (a type error in TypeScript) compiles."
       ],
       "seeAlso": [
         "lang.template"
@@ -794,7 +807,7 @@
       "description": "f.call/f.apply lower to a direct call; f.apply(thisArg, arr) spreads into a rest slot; f.bind builds a new partially-applied closure. All type-checked against f's parameters exactly as a normal call.",
       "snippet": "const add = (a: number, b: number): number => a + b;\nconsole.log(add.call(null, 3, 4));\nconsole.log(add.apply(null, [5, 6]));",
       "differences": [
-        "`thisArg` is evaluated then **ignored** — a closure has no rebindable `this`, so method-borrowing is unsupported; only the arguments are forwarded.",
+        "`thisArg` is the receiver only of a function with a `this: T` parameter (declared, or from its contextual type); for any other function it is evaluated then ignored, so borrowing a class method against another receiver is unsupported.",
         "Only on a first-class function **value** (a closure, function parameter, arrow/function expression, or named function) — call/apply/bind on a built-in isn't supported.",
         "`.apply` takes either a literal array or a runtime array spread into a **rest** parameter; a runtime array into a fixed-arity function is the usual spread-into-fixed-arity rejection.",
         "`.bind` is V1-scoped to functions whose parameters are plain scalar/string/pointer types with no rest slot — an array/nullable-scalar/rest parameter is a clean compile error."
@@ -1227,7 +1240,7 @@
       "statusRow": "class static members/static {} blocks, private/protected visibility, abstract classes/methods, implements",
       "signature": "class C { static x = 1; static {} private y; abstract m(); }",
       "badge": "exact",
-      "description": "static members are inherited through extends (a non-redeclared static field shares its base's storage). private/protected are compile-time-only (zero runtime check, matching TS erasure) and reject super.privateMethod(). abstract reuses override-detection; implements is a compile-time structural self-check.",
+      "description": "static members are inherited through extends (a non-redeclared static field shares its base's storage). private/protected are compile-time-only (zero runtime check, matching TS erasure), checked with tsc's own diagnostics (including super.privateMethod() and private or protected constructors); o[\"p\"] reaches a private member, as in TypeScript. abstract reuses override-detection; implements is a compile-time structural self-check.",
       "seeAlso": [
         "lang.class",
         "lang.privatefield"
@@ -1261,7 +1274,7 @@
       "statusRow": "class inheritance (extends/super)",
       "signature": "class D extends B { constructor() { super(); } }",
       "badge": "exact",
-      "description": "Single inheritance, base-first field layout, super(args)/super.method(args), and an implicit pass-through constructor when a derived class adds no fields. Dispatch is static except for a method provably overridden somewhere, which goes through a per-tree vtable (decided at compile time via whole-program analysis). extends also accepts EventEmitter<T>.",
+      "description": "Single inheritance, base-first field layout, super(args)/super.method(args), and an implicit pass-through constructor when a derived class adds no fields. Dispatch is static except for a method provably overridden somewhere, which goes through a per-tree vtable (decided at compile time via whole-program analysis). extends also accepts the imported EventEmitter, with or without an event-map type argument.",
       "seeAlso": [
         "lang.class",
         "lang.instanceof"

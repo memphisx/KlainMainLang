@@ -393,7 +393,7 @@ func (e *Emitter) emitGeneratorConstructValues(info *GeneratorInfo, thisRef stri
 	genObj := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", genObj, genTy.StructSize()))
 
-	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := ucontextLayout()
+	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := e.ucontextLayout()
 	ctxReg := e.freshReg()
 	stackReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", ctxReg, ctxSize))
@@ -467,7 +467,7 @@ func (e *Emitter) emitGeneratorConstructValues(info *GeneratorInfo, thisRef stri
 // into every instance it constructs (cells are shared heap boxes, so
 // enclosing-scope mutations stay visible by reference, and instances made
 // after the enclosing frame returned keep working).
-func (e *Emitter) emitGeneratorCtorClosure(info *GeneratorInfo, pos ast.Pos) (Value, error) {
+func (e *Emitter) emitGeneratorCtorClosure(info *GeneratorInfo, displayName string, pos ast.Pos) (Value, error) {
 	env, err := e.packGeneratorEnv(info, pos)
 	if err != nil {
 		return Value{}, err
@@ -475,6 +475,8 @@ func (e *Emitter) emitGeneratorCtorClosure(info *GeneratorInfo, pos ast.Pos) (Va
 
 	fn := fmt.Sprintf("@__kml_genctor_%d", e.closureCtr)
 	e.closureCtr++
+	// Generators take no default/rest parameters, so length is the count.
+	e.registerFnMeta(fn, unmangleTopLevelName(displayName), len(info.ParamTypes), fnKindOf(info.IsAsync, true))
 	restore := e.beginThunkEmit()
 	paramDecl := "ptr %env"
 	paramVals := make([]Value, len(info.ParamTypes))
@@ -1128,7 +1130,6 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", thisPtr))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", thisVal.Ref, thisPtr))
 		e.define("this", Symbol{Ptr: thisPtr, Ty: classTy})
-		e.define("__kml_enclosing_class", Symbol{Ty: classTy})
 		if classInfo, ok := e.classes[classTy.ClassName]; ok && classInfo.BaseClass != "" {
 			baseTy := e.classes[classInfo.BaseClass].Ty
 			e.define("super", Symbol{Ptr: thisPtr, Ty: baseTy})
@@ -1156,7 +1157,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 			cellReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slotReg, envIR, envVal.Ref, i))
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cellReg, slotReg))
-			e.define(cap.Name, Symbol{Ptr: cellReg, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst})
+			e.define(cap.Name, Symbol{Ptr: cellReg, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst, NullableBoxed: cap.Sym.NullableBoxed, ForwardName: cap.Sym.ForwardName})
 		}
 	}
 
@@ -1177,7 +1178,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 		bodyStartL := e.freshLabel("gen.body")
 		catchAllL := e.freshLabel("gen.catchall")
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", outerJb))
-		e.emitInstr(fmt.Sprintf("%s = %s", sj, setjmpCall(outerJb)))
+		e.emitInstr(fmt.Sprintf("%s = %s", sj, e.setjmpCall(outerJb)))
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sj))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, catchAllL, bodyStartL))
 
@@ -1263,7 +1264,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 // mis-park the consumer) and restored afterward.
 func (e *Emitter) emitGeneratorSwapCore(genObj string, genTy Type, resetCurrentTask bool) {
 	e.ensureExceptionHelpers()
-	ctxSize, _, _, _ := ucontextLayout()
+	ctxSize, _, _, _ := e.ucontextLayout()
 	saveCtx := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca [%d x i8], align 16", saveCtx, ctxSize))
 	e.storeGeneratorField(genObj, genTy, GeneratorCallerCtxField, "ptr", saveCtx)
@@ -2235,6 +2236,21 @@ func (e *Emitter) emitForAwaitOfGenerator(s *ast.ForOfStatement, genTy Type, gen
 		varPtr = e.genDefineLoopVar(s.VarName, elemTy)
 	}
 
+	// Leaving the loop early (a `break`, `return` or `throw` out of the body)
+	// closes the generator — `await it.return()`, running its `finally` —
+	// as JavaScript's AsyncIteratorClose does. The generator is bound to a
+	// synthetic name the close references.
+	genSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", genSlot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", genVal.Ref, genSlot))
+	gname := fmt.Sprintf("__kml_forawait_gen_%s", e.freshReg()[1:])
+	e.define(gname, Symbol{Ptr: genSlot, Ty: genTy})
+	closeStmt := ast.NewExpressionStatement(ast.NewAwaitExpression(
+		ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier(gname, s.GetPos()), "return", s.GetPos()), nil, s.GetPos()),
+		s.GetPos()), s.GetPos())
+	e.pendingFinallys = append(e.pendingFinallys, pendingExit{body: []ast.Statement{closeStmt}})
+	popClose := func() { e.pendingFinallys = e.pendingFinallys[:len(e.pendingFinallys)-1] }
+
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(condL)
@@ -2290,16 +2306,20 @@ func (e *Emitter) emitForAwaitOfGenerator(s *ast.ForOfStatement, genTy Type, gen
 	default:
 		e.genStoreLoopVar(varPtr, elemTy, loaded)
 	}
-	if err := e.emitStmt(s.Body); err != nil {
+	if err := e.emitForOfBody(s); err != nil {
+		popClose()
 		return err
 	}
+	popClose()
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
 
 	e.emitLabel(incL)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(endL)
-	return nil
+	// A `break` out of the loop leaves the generator suspended: close it
+	// (a no-op on one that already completed).
+	return e.emitStmt(closeStmt)
 }
 
 // emitForAwaitOfSyncGenerator consumes `for await (const x of syncGen())` —
@@ -2394,7 +2414,7 @@ func (e *Emitter) emitForAwaitOfSyncGenerator(s *ast.ForOfStatement, genTy Type,
 			e.genStoreLoopVar(varPtr, boundTy, boundVal.Ref)
 		}
 	}
-	if err := e.emitStmt(s.Body); err != nil {
+	if err := e.emitForOfBody(s); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
@@ -2425,7 +2445,14 @@ func (e *Emitter) emitForAwaitOfAsyncIterable(s *ast.ForOfStatement, iterableTy 
 	if err != nil {
 		return err
 	}
-	if !iterVal.Ty.IsClass {
+	switch {
+	case iterVal.Ty.IsGenerator && iterVal.Ty.GeneratorIsAsync:
+		// `async *[Symbol.asyncIterator]() { yield … }`: the method's own
+		// async generator is the iterator.
+		return e.emitForAwaitOfGenerator(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
+	case iterVal.Ty.IsGenerator:
+		return e.emitForAwaitOfSyncGenerator(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
+	case !iterVal.Ty.IsClass:
 		return fmt.Errorf("%d:%d: [Symbol.asyncIterator]() must return a class instance with a next() method (TDD-00089)", pos.Line, pos.Col)
 	}
 	return e.emitForAwaitOfAsyncIteratorInstance(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
@@ -2522,7 +2549,7 @@ func (e *Emitter) emitForAwaitOfAsyncIteratorInstance(s *ast.ForOfStatement, ite
 	default:
 		e.genStoreLoopVar(varPtr, elemTy, loaded)
 	}
-	if err := e.emitStmt(s.Body); err != nil {
+	if err := e.emitForOfBody(s); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
@@ -2664,7 +2691,7 @@ func (e *Emitter) emitForOfSymbolIterator(s *ast.ForOfStatement, iterableTy Type
 			e.genStoreLoopVar(varPtr, boundTy, boundVal.Ref)
 		}
 	}
-	if err := e.emitStmt(s.Body); err != nil {
+	if err := e.emitForOfBody(s); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
@@ -2843,7 +2870,7 @@ func (e *Emitter) emitForAwaitOfArrayCore(s *ast.ForOfStatement, elemTy Type, pt
 		}
 	}
 
-	if err := e.emitStmt(s.Body); err != nil {
+	if err := e.emitForOfBody(s); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
@@ -2921,7 +2948,7 @@ func (e *Emitter) emitForOfGenerator(s *ast.ForOfStatement, genTy Type, genVal V
 	default:
 		e.genStoreLoopVar(varPtr, elemTy, loaded)
 	}
-	if err := e.emitStmt(s.Body); err != nil {
+	if err := e.emitForOfBody(s); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
@@ -2946,111 +2973,23 @@ func (e *Emitter) emitForOfGenerator(s *ast.ForOfStatement, genTy Type, genVal V
 	return nil
 }
 
-// collectYieldExprs walks a statement list gathering every YieldExpression —
-// TDD-00096 Part 2's inference input. Same pragmatic statement/expression
-// coverage as the async classifier (emit_task_classify.go): common container
-// shapes, not an exhaustive visitor; a yield hiding in an unvisited corner
-// simply doesn't contribute to inference.
-func collectYieldExprs(stmts []ast.Statement, out *[]*ast.YieldExpression) {
-	for _, s := range stmts {
-		collectYieldStmt(s, out)
-	}
-}
-
-func collectYieldStmt(s ast.Statement, out *[]*ast.YieldExpression) {
-	switch st := s.(type) {
-	case *ast.BlockStatement:
-		collectYieldExprs(st.Body, out)
-	case *ast.VarDeclaration:
-		collectYieldExpr(st.Init, out)
-	case *ast.ExpressionStatement:
-		collectYieldExpr(st.Expr, out)
-	case *ast.ReturnStatement:
-		collectYieldExpr(st.Value, out)
-	case *ast.IfStatement:
-		collectYieldExpr(st.Test, out)
-		if st.Consequent != nil {
-			collectYieldExprs(st.Consequent.Body, out)
+// collectYields returns every yield expression of a generator body, in source
+// order, through the generated AST traversal — a yield in any expression or
+// statement position is found — without entering a nested function or class,
+// whose yields are its own.
+func collectYields(body *ast.BlockStatement) []*ast.YieldExpression {
+	var out []*ast.YieldExpression
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.YieldExpression:
+			out = append(out, n)
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction,
+			*ast.ClassDeclaration, *ast.ClassExpression:
+			return false
 		}
-		if st.Alternate != nil {
-			collectYieldStmt(st.Alternate, out)
-		}
-	case *ast.ForStatement:
-		if st.Init != nil {
-			collectYieldStmt(st.Init, out)
-		}
-		collectYieldExpr(st.Test, out)
-		for _, u := range st.Update {
-			collectYieldExpr(u, out)
-		}
-		if st.Body != nil {
-			collectYieldExprs(st.Body.Body, out)
-		}
-	case *ast.WhileStatement:
-		collectYieldExpr(st.Test, out)
-		if st.Body != nil {
-			collectYieldExprs(st.Body.Body, out)
-		}
-	case *ast.DoWhileStatement:
-		collectYieldExpr(st.Test, out)
-		if st.Body != nil {
-			collectYieldExprs(st.Body.Body, out)
-		}
-	case *ast.ForOfStatement:
-		collectYieldExpr(st.Iterable, out)
-		if st.Body != nil {
-			collectYieldExprs(st.Body.Body, out)
-		}
-	case *ast.ForInStatement:
-		collectYieldExpr(st.Object, out)
-		if st.Body != nil {
-			collectYieldExprs(st.Body.Body, out)
-		}
-	case *ast.TryStatement:
-		if st.Body != nil {
-			collectYieldExprs(st.Body.Body, out)
-		}
-		if st.Catch != nil && st.Catch.Body != nil {
-			collectYieldExprs(st.Catch.Body.Body, out)
-		}
-		if st.Finally != nil {
-			collectYieldExprs(st.Finally.Body, out)
-		}
-	case *ast.SwitchStatement:
-		collectYieldExpr(st.Discriminant, out)
-		for _, c := range st.Cases {
-			collectYieldExpr(c.Test, out)
-			collectYieldExprs(c.Body, out)
-		}
-	case *ast.LabeledStatement:
-		collectYieldStmt(st.Body, out)
-	}
-}
-
-func collectYieldExpr(ex ast.Expression, out *[]*ast.YieldExpression) {
-	switch x := ex.(type) {
-	case nil:
-	case *ast.YieldExpression:
-		*out = append(*out, x)
-		collectYieldExpr(x.Argument, out)
-	case *ast.CallExpression:
-		collectYieldExpr(x.Callee, out)
-		for _, a := range x.Args {
-			collectYieldExpr(a, out)
-		}
-	case *ast.BinaryExpression:
-		collectYieldExpr(x.Left, out)
-		collectYieldExpr(x.Right, out)
-	case *ast.ConditionalExpression:
-		collectYieldExpr(x.Test, out)
-		collectYieldExpr(x.Consequent, out)
-		collectYieldExpr(x.Alternate, out)
-	case *ast.AssignmentExpression:
-		collectYieldExpr(x.Left, out)
-		collectYieldExpr(x.Right, out)
-	case *ast.AwaitExpression:
-		collectYieldExpr(x.Argument, out)
-	}
+		return true
+	})
+	return out
 }
 
 // inferGeneratorElemType infers an un-annotated generator's element type
@@ -3142,10 +3081,7 @@ func (e *Emitter) inferGeneratorElemType(fd *ast.FunctionDeclaration, paramNames
 		bindLocals(fd.Body.Body)
 	}
 
-	var yields []*ast.YieldExpression
-	if fd.Body != nil {
-		collectYieldExprs(fd.Body.Body, &yields)
-	}
+	yields := collectYields(fd.Body)
 	var joined Type
 	have := false
 	join := func(t Type) bool {

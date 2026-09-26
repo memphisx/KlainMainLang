@@ -5,10 +5,10 @@
   "statusPage": "PROCESS-CLI.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "34/34",
+    "loose": "33/33",
     "loosePct": 100,
-    "strict": "14/34",
-    "strictPct": 41
+    "strict": "13/33",
+    "strictPct": 42
   },
   "lede": "What a CLI tool or containerized service needs day-to-day: argv, environment, exit codes, stdin, signals, timing, and child processes. The recurring divergence: every event/handler API here takes one listener slot per event, an arrow/function-literal only, firing synchronously from the event loop's dispatch rather than through a microtask queue. child_process (spawn/exec/fork/spawnSync) lives here too — it is what a process orchestrator actually reaches for.",
   "entries": [
@@ -81,24 +81,20 @@
       }
     },
     {
-      "id": "process.readLineSync",
-      "name": "process.readLineSync()",
-      "statusRow": "Reading stdin (sync line read)",
-      "signature": "process.readLineSync(): string | null",
+      "id": "process.stdinSync",
+      "name": "fs.readFileSync(0)",
+      "statusRow": "Reading stdin synchronously (fs.readFileSync(0))",
+      "signature": "readFileSync(0, 'utf8'): string",
       "badge": "exact",
-      "description": "Reads one line from stdin via POSIX getline() (handles arbitrarily long lines), stripped of its trailing newline. Returns null at EOF (same possibly-null convention as process.env). The blocking counterpart to the streamed process.stdin and the readline module.",
+      "description": "Reads all of stdin (file descriptor 0) to its end, blocking — the Node idiom for a CLI tool that takes piped input. A line-at-a-time read is the readline module.",
       "returns": {
-        "type": "string | null",
-        "desc": "The line, or null at EOF."
+        "type": "string",
+        "desc": "Everything on stdin."
       },
-      "exampleKey": "process/process",
-      "snippet": "const line = process.readLineSync()\nif (line === null) console.log(\"no input\")",
-      "seeAlso": [
-        "process.stdin",
-        "process.readline"
-      ],
+      "snippet": "import { readFileSync } from 'fs'\nconst input = readFileSync(0, 'utf8')\nconsole.log(input.split('\\n')[0])",
+      "seeAlso": [],
       "spec": {
-        "mdn": "https://nodejs.org/api/readline.html"
+        "mdn": "https://nodejs.org/api/fs.html#fsreadfilesyncpath-options"
       }
     },
     {
@@ -113,29 +109,6 @@
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/fs.html"
-      }
-    },
-    {
-      "id": "process.execFileSync",
-      "name": "process.execFileSync(file, args?)",
-      "statusRow": "process.execFileSync(file, args?, options?)",
-      "signature": "process.execFileSync(file: string, args?: string[], options?: { cwd?: string; encoding?: 'utf8' }): string",
-      "badge": "caveats",
-      "description": "Node's child_process.execFileSync (not execSync): fork()+execvp()s file directly with no shell, so shell metacharacters in args are never interpreted. Returns captured stdout as a string; throws a catchable Error on a non-zero exit status or a signal death. The { cwd } option runs the child in a different working directory.",
-      "returns": {
-        "type": "string",
-        "desc": "Captured stdout."
-      },
-      "differences": [
-        "Options support only `{ cwd, encoding: 'utf8' }` — `env`/`timeout`/`stdio` overrides are still deferred.",
-        "stderr is inherited (visible on the terminal live), not captured."
-      ],
-      "seeAlso": [
-        "process.spawnSync",
-        "process.spawn"
-      ],
-      "spec": {
-        "mdn": "https://nodejs.org/api/child_process.html#child_processexecfilesyncfile-args-options"
       }
     },
     {
@@ -329,9 +302,12 @@
       "id": "process.stdout.size",
       "name": "process.stdout.columns / .rows",
       "statusRow": "process.stdout.columns / .rows (terminal size)",
-      "signature": "process.stdout.columns: number | undefined; process.stdout.rows: number | undefined",
-      "badge": "exact",
-      "description": "The terminal's current width and height, read live via ioctl(TIOCGWINSZ) on each access (never cached, matching Node). Off a TTY (piped/redirected) the value is a real `undefined`, exactly as in Node — `?? 80` is the idiomatic fallback, and strict mode requires narrowing/`??`/`!` before bare-number use. Available on process.stdout and process.stderr. Pair with process.on('SIGWINCH') to repaint on a window resize.",
+      "signature": "process.stdout.columns: number; process.stdout.rows: number",
+      "badge": "caveats",
+      "description": "The terminal's current width and height, read live via ioctl(TIOCGWINSZ) on each access (never cached, matching Node). Off a TTY (piped/redirected) the value is a real `undefined`, exactly as in Node, and arithmetic on it is NaN — `?? 80` is the idiomatic fallback. Typed `number`, as @types/node has it. Available on process.stdout and process.stderr. Pair with process.on('SIGWINCH') to repaint on a window resize.",
+      "differences": [
+        "Stored into a declared `number` binding off a TTY, the value reads 0, not `undefined`."
+      ],
       "returns": {
         "type": "number | undefined",
         "desc": "Columns or rows, or undefined when the fd is not a terminal."
@@ -646,10 +622,10 @@
     {
       "id": "process.stdin",
       "name": "process.stdin (streamed)",
-      "statusRow": "process.stdin (streamed reads, not just readLineSync())",
+      "statusRow": "process.stdin (streamed reads)",
       "signature": "process.stdin.setEncoding('utf8'): typeof process.stdin; process.stdin.on('data' | 'end', cb): typeof process.stdin",
       "badge": "caveats",
-      "description": "Streamed stdin over a non-blocking fd 0 folded into the same select() loop as readline/child_process: 'data' per read chunk, 'end' once on EOF. setEncoding('utf8') and the stream methods return the stream, so the idiomatic setEncoding('utf8').on('data', …).on('end', …) chain works. Distinct from the blocking readLineSync() and the line-oriented readline module.",
+      "description": "Streamed stdin over a non-blocking fd 0 folded into the same select() loop as readline/child_process: 'data' per read chunk, 'end' once on EOF. setEncoding('utf8') and the stream methods return the stream, so the idiomatic setEncoding('utf8').on('data', …).on('end', …) chain works. Distinct from the blocking fs.readFileSync(0) and the line-oriented readline module.",
       "returns": {
         "type": "typeof process.stdin",
         "desc": "The stream, for chaining."
@@ -662,7 +638,6 @@
         "One listener per event, arrow/function-expression literal only; callbacks fire synchronously from the dispatch, not via a microtask."
       ],
       "seeAlso": [
-        "process.readLineSync",
         "process.readline"
       ],
       "spec": {
@@ -675,7 +650,7 @@
       "statusRow": "readline module (createInterface, 'line'/'close' events, question(), close())",
       "signature": "readline.createInterface({ input }); rl.on('line' | 'close'); rl.question(q, cb); rl.close()",
       "badge": "caveats",
-      "description": "Line-oriented stdin over the same non-blocking select() loop as child_process: one 'line' per newline (CR stripped), an unterminated final line flushed on EOF, then 'close'. Distinct from the blocking readLineSync().",
+      "description": "Line-oriented stdin over the same non-blocking select() loop as child_process: one 'line' per newline (CR stripped), an unterminated final line flushed on EOF, then 'close'. Distinct from the blocking fs.readFileSync(0).",
       "returns": {
         "type": "Interface",
         "desc": "The readline interface."
@@ -686,8 +661,7 @@
         "The `createInterface` options object is accepted but ignored — input is always stdin, output always stdout; one active interface at a time."
       ],
       "seeAlso": [
-        "process.stdin",
-        "process.readLineSync"
+        "process.stdin"
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/readline.html#readlinecreateinterfaceoptions"
@@ -751,9 +725,9 @@
       "id": "process.spawnSync",
       "name": "child_process.spawnSync / execSync / execFileSync",
       "statusRow": "child_process.spawnSync() / .execSync() / .execFileSync() (blocking)",
-      "signature": "spawnSync(cmd, args?, opts?): { status, signal, output, pid, stdout, stderr, error? }; execSync(cmd, opts?): string; execFileSync(file, args?, opts?): string",
+      "signature": "spawnSync(cmd, args?, opts?): { status, signal, output, pid, stdout, stderr, error? }; execSync(cmd, opts?): Buffer | string; execFileSync(file, args?, opts?): Buffer | string",
       "badge": "caveats",
-      "description": "One embedded C core: fork + execvp with the piped stdio poll-multiplexed to completion (no deadlock when a child fills stderr while stdout drains), an optional input fed to stdin, a timeout/maxBuffer kill, then a blocking waitpid; execSync runs via /bin/sh -c (%ComSpec% /d /s /c on Windows). Node's full options set: cwd, env (replaces the child's), input (string or Uint8Array), argv0, stdio ('pipe'/'inherit'/'ignore', string or 3-element array), timeout + killSignal (error.code ETIMEDOUT), maxBuffer (1 MiB default, ENOBUFS on overrun), shell (true or a shell path; args join the command with spaces), windowsHide, windowsVerbatimArguments. spawnSync returns Node's record in Node's key order — status is null on a signal death or a never-started child, output is [null, stdout, stderr], error carries code/errno/syscall 'spawnSync <file>'/path for a failed spawn (ENOENT: status null, pid 0, null streams). execSync/execFileSync return stdout or throw: the spawn/timeout/maxBuffer error itself, or 'Command failed: <cmd>' plus the captured stderr, the Error carrying the ExecException own properties status, signal, output, pid, stdout, stderr (readable through catch (e: any)); without an explicit stdio the child's stderr is mirrored to ours, as in Node. Distinct from the bespoke process.execFileSync above.",
+      "description": "One embedded C core: fork + execvp with the piped stdio poll-multiplexed to completion (no deadlock when a child fills stderr while stdout drains), an optional input fed to stdin, a timeout/maxBuffer kill, then a blocking waitpid; execSync runs via /bin/sh -c (%ComSpec% /d /s /c on Windows). Node's full options set: cwd, env (replaces the child's), input (string or Uint8Array), argv0, stdio ('pipe'/'inherit'/'ignore', string or 3-element array), timeout + killSignal (error.code ETIMEDOUT), maxBuffer (1 MiB default, ENOBUFS on overrun), shell (true or a shell path; args join the command with spaces), windowsHide, windowsVerbatimArguments. spawnSync returns Node's record in Node's key order — status is null on a signal death or a never-started child, output is [null, stdout, stderr], error carries code/errno/syscall 'spawnSync <file>'/path for a failed spawn (ENOENT: status null, pid 0, null streams). execSync/execFileSync return stdout — a Buffer, or a string with encoding: 'utf8' — or throw: the spawn/timeout/maxBuffer error itself, or 'Command failed: <cmd>' plus the captured stderr, the Error carrying the ExecException own properties status, signal, output, pid, stdout, stderr (readable through catch (e: any)); without an explicit stdio the child's stderr is mirrored to ours, as in Node.",
       "returns": {
         "type": "SpawnSyncResult | string",
         "desc": "The result object / captured stdout."
@@ -761,13 +735,12 @@
       "exampleKey": "process/spawn_sync",
       "snippet": "const r = spawnSync(\"echo\", [\"kalimera\", \"kosme\"])\nconsole.log(r.status, r.stdout.trim())",
       "differences": [
-        "Results are strings (the `encoding: 'utf8'` shape), not Buffers; `encoding` accepts `'utf8'` only. `status` is the child's real-width exit code: the full 32-bit value on Windows, the 8-bit wait-status field on POSIX (as Node also reports there).",
+        "`spawnSync`'s `stdout`/`stderr`/`output` are strings (the `encoding: 'utf8'` shape), not Buffers; `encoding` accepts `'utf8'` or `'buffer'` only. `status` is the child's real-width exit code: the full 32-bit value on Windows, the 8-bit wait-status field on POSIX (as Node also reports there).",
         "`stdio`, `shell`, `killSignal`, `windowsHide` and `windowsVerbatimArguments` must be literals; `env` must be an object literal of string values; `uid`/`gid` are not supported.",
         "An unpiped `stdout`/`stderr` (`stdio: 'inherit'`/`'ignore'`) is `null` at run time while the field stays typed `string` (Node's own typings do the same); `output` is typed `(string | null)[]`."
       ],
       "seeAlso": [
-        "process.spawn",
-        "process.execFileSync"
+        "process.spawn"
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/child_process.html#child_processspawnsynccommand-args-options"

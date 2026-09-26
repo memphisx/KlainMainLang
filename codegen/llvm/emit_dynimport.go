@@ -169,7 +169,7 @@ func (e *Emitter) emitImportCall(ex *ast.ImportCallExpression) (Value, error) {
 		return Value{}, fmt.Errorf("%d:%d: dynamic import() requires a string-literal specifier — this compiler resolves all imports at compile time, so a runtime-computed specifier cannot be loaded", ex.GetPos().Line, ex.GetPos().Col)
 	}
 
-	switch e.dynamicImportMode {
+	switch e.opts.DynamicImport {
 	case "lazy":
 		if ex.ResolvedPath == "" {
 			return Value{}, fmt.Errorf("%d:%d: dynamic import('%s'): unresolved target (internal: resolver did not annotate the path)", ex.GetPos().Line, ex.GetPos().Col, lit.Value)

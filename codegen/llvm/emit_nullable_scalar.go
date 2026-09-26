@@ -213,7 +213,7 @@ func (e *Emitter) nullableScalarPayloadOf(v Value) Value {
 // ToInt32(NaN) = 0.
 func (e *Emitter) nullableScalarOperand(v Value, op string) Value {
 	present, payload := e.nullableScalarAggParts(v)
-	if !e.compatJS() || !v.Ty.IsUndefined || scalarTypeKind(payload.Ty) != "number" {
+	if !v.Ty.IsUndefined || scalarTypeKind(payload.Ty) != "number" {
 		return payload
 	}
 	switch op {
@@ -229,8 +229,8 @@ func (e *Emitter) nullableScalarOperand(v Value, op string) Value {
 
 // jsUndefinedLocalOperand is nullableScalarOperand for an operand that is a
 // `T | undefined` local identifier (already auto-unwrapped by emitIdent to
-// `cur`): under `-compat=js` it re-reads the aggregate from the local's slot
-// and demotes it presence-aware. Any other operand is returned as is.
+// `cur`): it re-reads the aggregate from the local's slot and demotes it
+// presence-aware. Any other operand is returned as is.
 func (e *Emitter) jsUndefinedLocalOperand(expr ast.Expression, cur Value, op string) Value {
 	sym, ok := e.nullableScalarLValue(expr)
 	if !ok || !sym.Ty.IsUndefined || isStringTy(cur.Ty) {
@@ -393,9 +393,6 @@ func (e *Emitter) storeScalarOrNullableFieldExpr(gepReg string, fieldTy Type, ex
 	}
 	// TDD-00187 strict gate: storing a `T | undefined` absence result into a
 	// bare-T field is a compile error under strict.
-	if err := e.checkStrictUndefinedAssign(fieldTy, expr, expr.GetPos(), "field value"); err != nil {
-		return err
-	}
 	val, err := e.emitExprWithObjectHint(expr, fieldTy)
 	if err != nil {
 		return err
@@ -541,6 +538,9 @@ func (e *Emitter) emitNullCoalesceScalar(presentRef string, payload Value, right
 	// payload zero. Produce a presence-preserving `{ i1, T }` result.
 	if rt := e.inferExprType(rightExpr); isNullableScalar(rt) {
 		return e.emitNullCoalesceScalarNullableRight(presentRef, payload, rightExpr, rt)
+	} else if resTy, ok := nullCoalesceNullishRight(base, rt); ok {
+		// `x ?? null`: the result is `T | null`, absent where x is.
+		return e.emitNullCoalesceScalarNullableRight(presentRef, payload, rightExpr, resTy)
 	}
 	resPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, base.IR, base.Align()))
@@ -570,6 +570,17 @@ func (e *Emitter) emitNullCoalesceScalar(presentRef string, payload Value, right
 	return Value{Ref: result, Ty: base}, nil
 }
 
+// nullCoalesceNullishRight is the result type of `x ?? null` (or `??
+// undefined`) for a scalar x of type base: base | null (| undefined).
+func nullCoalesceNullishRight(base, right Type) (Type, bool) {
+	if !right.IsNull || right.IsDynamic {
+		return Type{}, false
+	}
+	res := base
+	res.Nullable, res.IsUndefined = true, right.IsUndefined
+	return res, isNullableScalar(res)
+}
+
 // emitNullCoalesceScalarNullableRight handles `a ?? b` where the right operand
 // is itself a nullable scalar: the result is `T | undefined` (present when the
 // left is present, else the right's own aggregate — which may be absent). The
@@ -593,6 +604,8 @@ func (e *Emitter) emitNullCoalesceScalarNullableRight(presentRef string, payload
 	var rightAgg string
 	if isNullableScalar(right.Ty) {
 		rightAgg = right.Ref // already a { i1, T } aggregate (may be absent)
+	} else if right.Ty.IsNull {
+		rightAgg = e.makeNullableScalarAgg(resTy, "false", zeroRef(resTy.withoutNullable()))
 	} else {
 		rv := e.coerce(right, resTy.withoutNullable())
 		rightAgg = e.makeNullableScalarAgg(resTy, "true", rv.Ref)

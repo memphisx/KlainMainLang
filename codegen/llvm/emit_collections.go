@@ -254,11 +254,11 @@ func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, 
 	if err != nil {
 		return err
 	}
-	if !elemTy.IsTuple || len(elemTy.Fields) != 2 {
+	pairArray := elemTy.IsArray && elemTy.ElemType != nil && !elemTy.ElemType.IsArray
+	if !pairArray && (!elemTy.IsTuple || len(elemTy.Fields) != 2) {
 		return fmt.Errorf("%d:%d: new Map(...) expects a [key, value][] array of 2-tuples", pos.Line, pos.Col)
 	}
 	suffix, keyIR := mapRuntime(keyTy)
-	tupleIR := elemTy.StructIR()
 
 	idxPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
@@ -280,14 +280,22 @@ func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, 
 	// struct), so load the tuple pointer, then GEP its two fields.
 	slotGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slotGep, elemTy.IR, srcPtr, idxReg))
-	tuplePtr := e.loadArrayElem(slotGep, elemTy)
-
-	kGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kGep, tupleIR, tuplePtr.Ref))
-	kVal := e.loadScalarOrNullableField(kGep, keyTy)
-	vGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", vGep, tupleIR, tuplePtr.Ref))
-	vVal := e.loadScalarOrNullableField(vGep, valTy)
+	entry := e.loadArrayElem(slotGep, elemTy)
+	var kVal, vVal Value
+	if pairArray {
+		// A `T[]` entry (`[["a", "b"]]`): its elements 0 and 1, a missing one
+		// reading as the element type's zero.
+		kVal = e.coerce(e.arrayEntryElemOrZero(entry, *elemTy.ElemType, 0), keyTy)
+		vVal = e.coerce(e.arrayEntryElemOrZero(entry, *elemTy.ElemType, 1), valTy)
+	} else {
+		tupleIR := elemTy.StructIR()
+		kGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kGep, tupleIR, entry.Ref))
+		kVal = e.loadScalarOrNullableField(kGep, keyTy)
+		vGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", vGep, tupleIR, entry.Ref))
+		vVal = e.loadScalarOrNullableField(vGep, valTy)
+	}
 
 	kRef, err := e.mapKeyRef(kVal, keyTy)
 	if err != nil {
@@ -308,6 +316,31 @@ func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, 
 
 	e.emitLabel(endL)
 	return nil
+}
+
+// arrayEntryElemOrZero reads element i of an array value (a `{ptr, i64}`
+// aggregate), or elemTy's zero when the array is shorter.
+func (e *Emitter) arrayEntryElemOrZero(arr Value, elemTy Type, i int) Value {
+	data, n := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", data, arr.Ref))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", n, arr.Ref))
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, elemTy.IR, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, elemTy.zeroLiteral(), slot, elemTy.Align()))
+	has := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %d", has, n, i))
+	readL, doneL := e.freshLabel("entry.read"), e.freshLabel("entry.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, readL, doneL))
+	e.emitLabel(readL)
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gep, elemTy.IR, data, i))
+	v := e.loadArrayElem(gep, elemTy)
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, v.Ref, slot, elemTy.Align()))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, elemTy.IR, slot, elemTy.Align()))
+	return Value{Ref: r, Ty: elemTy}
 }
 
 // emitSetVarDecl handles `const s = new Set<T>()`.
@@ -467,8 +500,10 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 		// A function-typed value contextually types an untyped arrow /
 		// function-expression argument's parameters from the value signature
 		// (ADR-00632); otherwise they self-infer to the numeric default.
+		// A union/any, array or object value types a literal the same way
+		// (`["a", 2]` for a `string | (string | number)[]` value).
 		var vVal Value
-		if valTy.IsFunc {
+		if valTy.IsFunc || valTy.IsDynamic || valTy.IsArray || valTy.IsObject {
 			vVal, err = e.emitExprWithObjectHint(args[1], valTy)
 		} else {
 			vVal, err = e.emitExpr(args[1])
@@ -523,6 +558,14 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 		// null-pointer-miss handling below and mapValFromI64's null-header guard
 		// yield a real `undefined`. A dynamic (`any`) value is skipped: its slot is
 		// meant to read back as the box, undefined sentinel included (ADR-00948).
+		if valTy.IsDynamic && suffix == "str" {
+			// A box: a missing key is undefined (the raw miss is 0).
+			present := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, %s %s)", present, mapPtr, keyIR, kRef))
+			gated := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", gated, present, raw, nbUndefined))
+			raw = gated
+		}
 		if suffix == "any" && !valTy.IsDynamic {
 			present := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_any_has(ptr %s, %s %s)", present, mapPtr, keyIR, kRef))

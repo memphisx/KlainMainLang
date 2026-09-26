@@ -433,6 +433,14 @@ func (e *Emitter) instantiateGenericFunc(decl *ast.FunctionDeclaration, subs map
 // existing convention for ArrayOf/MapType/SetType/PromiseOf (types.go) —
 // each call builds a fresh, structurally-equal Type value.
 func (e *Emitter) instantiateGenericInterface(decl *ast.InterfaceDeclaration, subs map[string]Type) Type {
+	// An index signature (`interface Dict<T> { [k: string]: T }`) makes it a
+	// dictionary of the substituted value type.
+	if decl.IndexSig != nil {
+		keyTy := TypePtr
+		valTy := e.substituteGenericType(decl.IndexSig, subs)
+		dict := Type{IR: "ptr", IsMap: true, IsDynamicObject: true, MapKey: &keyTy, MapVal: &valTy}
+		return e.withDictFields(dict, decl.Fields)
+	}
 	fields := make([]Field, len(decl.Fields))
 	for i, f := range decl.Fields {
 		fty := e.substituteGenericType(f.Type, subs)
@@ -493,7 +501,7 @@ func (e *Emitter) genericClassInstanceType(decl *ast.ClassDeclaration, subs map[
 	if err != nil {
 		return Type{}, err
 	}
-	return ClassType(mangled, nil, ownFields, false, false, false), nil
+	return ClassType(mangled, nil, ownFields, false, false), nil
 }
 
 // instantiateGenericClass builds and emits (on first use) a full,
@@ -512,35 +520,30 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 	if _, ok := e.classes[mangled]; ok {
 		return mangled, nil
 	}
-	ty := ClassType(mangled, nil, ownFields, false, false, false)
+	ty := ClassType(mangled, nil, ownFields, false, false)
 	e.interfaces[mangled] = ty
 
 	info := ClassInfo{
-		Ty:                        ty,
-		InheritedFields:           nil,
-		OwnFields:                 ownFields,
-		FlatFields:                ownFields,
-		Methods:                   make(map[string]*ast.FunctionDeclaration),
-		MethodSigs:                make(map[string]FuncSig),
-		MethodImplementor:         make(map[string]string),
-		MethodDispatchSlot:        make(map[string]*MethodSlot),
-		TagID:                     e.nextClassTagID,
-		RootClass:                 mangled,
-		FieldOrigin:               make(map[string]string),
-		OwnFieldVisibility:        make(map[string]string),
-		OwnMethodVisibility:       make(map[string]string),
-		StaticFieldTypes:          make(map[string]Type),
-		OwnStaticFieldTypes:       make(map[string]Type),
-		StaticFieldOwner:          make(map[string]string),
-		OwnStaticFieldVisibility:  make(map[string]string),
-		StaticMethodSigs:          make(map[string]FuncSig),
-		StaticMethodImplementor:   make(map[string]string),
-		OwnStaticMethodVisibility: make(map[string]string),
+		Ty:                      ty,
+		InheritedFields:         nil,
+		OwnFields:               ownFields,
+		FlatFields:              ownFields,
+		Methods:                 make(map[string]*ast.FunctionDeclaration),
+		MethodSigs:              make(map[string]FuncSig),
+		MethodImplementor:       make(map[string]string),
+		MethodDispatchSlot:      make(map[string]*MethodSlot),
+		TagID:                   e.nextClassTagID,
+		RootClass:               mangled,
+		FieldOrigin:             make(map[string]string),
+		StaticFieldTypes:        make(map[string]Type),
+		OwnStaticFieldTypes:     make(map[string]Type),
+		StaticFieldOwner:        make(map[string]string),
+		StaticMethodSigs:        make(map[string]FuncSig),
+		StaticMethodImplementor: make(map[string]string),
 	}
 	e.nextClassTagID++
 	for _, f := range decl.Fields {
 		info.FieldOrigin[f.Name] = mangled
-		info.OwnFieldVisibility[f.Name] = f.Visibility
 	}
 
 	// TDD-00063 Stage 1: run own field initializers at the top of the
@@ -594,7 +597,6 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 		info.MethodSigs[m.Name] = sig
 		info.Methods[m.Name] = m
 		info.MethodOrder = append(info.MethodOrder, m.Name)
-		info.OwnMethodVisibility[m.Name] = m.Visibility
 	}
 
 	// Register before emitting bodies — guards a method/constructor that
@@ -609,7 +611,7 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 }
 
 // emitClassDeclAs is emitClassDecl's generic-instantiation sibling: the same
-// "@llvmName_constructor" / "@llvmName_methodName" emission shape
+// "@llvmName__kml_ctor" / "@llvmName_methodName" emission shape
 // (emitClassMember does the actual work, already fully parameterized by
 // name/type/sig — no changes needed there), but reading info directly
 // instead of e.classes[decl.Name] and naming every emitted symbol off
@@ -618,7 +620,7 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 // declaration before it's ever registered into e.genericClasses.
 func (e *Emitter) emitClassDeclAs(decl *ast.ClassDeclaration, llvmName string, info ClassInfo) error {
 	if info.Constructor != nil {
-		ctorName := llvmName + "_constructor"
+		ctorName := llvmName + ctorSymbolSuffix
 		e.currentCtorClass = llvmName
 		err := e.emitClassMember(ctorName, info.Ty, info.Constructor.Params, info.CtorSig, info.Constructor.Body, TypeVoid, info.Constructor.GetPos(), false, false)
 		e.currentCtorClass = ""

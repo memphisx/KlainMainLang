@@ -397,7 +397,7 @@ function outer(xs?: number[]): string { return inner(xs) }
 console.log(count(), count([]), count([1, 2, 3]))
 console.log(arrow(), arrow([]), new K().m(), new K().m([]), new K().m(["a", "b"]))
 console.log(outer(), outer([]), outer([1, 2]))
-function bad(nums?: number[]): number { return nums.length }
+function bad(nums?: number[]): number { return nums!.length }
 try { console.log(bad()) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
 `, `-1 0 3
 absent 0 none  a+b
@@ -942,6 +942,7 @@ func TestE2EArgumentsObjectVariadicOverflow(t *testing.T) {
 	// TDD-00210: `arguments` reflects the values *actually* passed, including
 	// arguments beyond the declared arity (implicit `any[]` rest).
 	assertOutput(t, `
+function count(a: number, ...more: number[]): number;
 function count(a: number): number {
     let s = 0;
     for (let i = 0; i < arguments.length; i++) { s += arguments[i] as number; }
@@ -996,6 +997,7 @@ func TestE2EAsNarrowsFromAny(t *testing.T) {
 	// type (unboxing the value), so an un-annotated binding takes T — the case
 	// that previously needed an explicit `: number`.
 	assertOutput(t, `
+function pick(...xs: number[]): number;
 function pick(): number {
     let max = arguments[0] as number;
     for (const x of arguments) {
@@ -1801,8 +1803,8 @@ function notAGenerator(): void {
 	if err == nil {
 		t.Fatal("expected a compile error for yield outside a generator, got none")
 	}
-	if !strings.Contains(err.Error(), "'yield' is only valid inside a generator function body") {
-		t.Fatalf("expected \"'yield' is only valid inside a generator function body\", got: %v", err)
+	if !strings.Contains(err.Error(), "a 'yield' expression is only allowed in a generator body") { // TS1163
+		t.Fatalf("expected tsc's TS1163, got: %v", err)
 	}
 }
 
@@ -1951,8 +1953,8 @@ console.log(x);
 	if err == nil {
 		t.Fatal("expected a compile error for a duplicate top-level 'let', got none")
 	}
-	if !strings.Contains(err.Error(), "declared more than once") {
-		t.Fatalf("expected 'declared more than once', got: %v", err)
+	if !strings.Contains(err.Error(), "3:1: identifier 'x' has already been declared") {
+		t.Fatalf("expected the second 'let' at 3:1 to be a redeclaration, got: %v", err)
 	}
 }
 
@@ -1965,8 +1967,8 @@ console.log(x);
 	if err == nil {
 		t.Fatal("expected a compile error for a let/var cross-kind collision, got none")
 	}
-	if !strings.Contains(err.Error(), "declared more than once") {
-		t.Fatalf("expected 'declared more than once', got: %v", err)
+	if !strings.Contains(err.Error(), "3:1: identifier 'x' has already been declared") {
+		t.Fatalf("expected the 'var' at 3:1 to be a redeclaration, got: %v", err)
 	}
 }
 
@@ -2005,8 +2007,8 @@ h();
 	if err == nil {
 		t.Fatal("expected a compile error reading a block-scoped 'let' after its block, got none")
 	}
-	if !strings.Contains(err.Error(), "undefined variable") {
-		t.Fatalf("expected 'undefined variable', got: %v", err)
+	if !strings.Contains(err.Error(), "cannot find name 'y'") {
+		t.Fatalf("expected TS2304 'cannot find name', got: %v", err)
 	}
 }
 
@@ -2365,9 +2367,11 @@ m(false);
 `, "undefined")
 }
 
-func TestE2EDefiniteAssignLoopCarriedAllowed(t *testing.T) {
-	// A loop-carried assignment must not be a false positive.
-	assertOutputImports(t, `
+func TestE2EDefiniteAssignLoopCarriedRejected(t *testing.T) {
+	// The else branch reads x on an iteration the flow cannot prove followed
+	// one that assigned it, and the read after the loop is reached when the
+	// loop runs zero times: TypeScript rejects both reads (TS2454).
+	_, err := parseAndCompileImports(t, `
 function f(): void {
   let x: number;
   for (let i = 0; i < 3; i = i + 1) {
@@ -2376,7 +2380,11 @@ function f(): void {
   console.log(x);
 }
 f();
-`, "3")
+`)
+	if err == nil || !strings.Contains(err.Error(), "5:40: variable 'x' is used before being assigned") ||
+		!strings.Contains(err.Error(), "7:15: variable 'x' is used before being assigned") {
+		t.Fatalf("expected both reads rejected, got: %v", err)
+	}
 }
 
 func TestE2EDefiniteAssignSwitchDefaultAllowed(t *testing.T) {
@@ -2476,39 +2484,28 @@ g(2);
 // deliberately does not flag them (TDD-00071's no-false-positives trade). Kept
 // as tests so a future tightening's effect is visible. ---
 
-func TestE2EDefiniteAssignWhileOnlyEscapes(t *testing.T) {
-	// A binding assigned only in a for/while body that might not run is NOT
-	// caught (the body is over-seeded). Sound but incomplete — the read would be
-	// unsafe if the loop runs zero times. Compiles today.
+func TestE2EDefiniteAssignWhileOnlyRejected(t *testing.T) {
+	// A binding assigned only in a loop body is unassigned after the loop when
+	// the body never ran: TypeScript rejects the read (TS2454).
 	_, err := parseAndCompileImports(t, `
 function f(n: number): void { let x: number; while (n > 0) { x = n; n = n - 1; } console.log(x); }
 f(5);
 `)
-	if err != nil && strings.Contains(err.Error(), "used before being assigned") {
-		t.Fatalf("while-only assignment is a documented escape (should compile today), got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "used before being assigned") {
+		t.Fatalf("expected the read after the loop rejected, got: %v", err)
 	}
 }
 
-func TestE2EDefiniteAssignTryEscapes(t *testing.T) {
-	// A try body that may throw before its assignment is not caught (try is
-	// over-seeded). Sound but incomplete. Compiles today.
+func TestE2EDefiniteAssignTryRejected(t *testing.T) {
+	// The try block may throw before its assignment, and the catch clause
+	// completes normally: TypeScript rejects the read after it (TS2454).
 	_, err := parseAndCompileImports(t, `
 function f(): void { let x: number; try { x = 7; } catch (e) { } console.log(x); }
 f();
 `)
-	if err != nil && strings.Contains(err.Error(), "used before being assigned") {
-		t.Fatalf("try-body assignment is a documented escape (should compile today), got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "used before being assigned") {
+		t.Fatalf("expected the read after try/catch rejected, got: %v", err)
 	}
-}
-
-func TestE2EWhileEscapeReadsDeterministicDefault(t *testing.T) {
-	// A definite-assignment escape (a let assigned only in a maybe-skipped loop)
-	// now reads its deterministic zero default rather than uninitialized memory
-	// — ADR-00215. Here the loop runs zero times.
-	assertOutputImports(t, `
-function f(n: number): void { let x: number; while (n > 0) { x = n; n = n - 1; } console.log(x); }
-f(0);
-`, "0")
 }
 
 func TestE2EAnyTypedLetNoInitReadsUndefined(t *testing.T) {
@@ -2880,7 +2877,7 @@ setTimeout(pick ? a : b, 5);
 // still runs and throws, so the operator never produces a value.
 func TestE2ENeverReturningFunctionInBitwiseOperand(t *testing.T) {
 	assertOutput(t, `
-function boom() { throw new Error("boom"); }
+function boom(): never { throw new Error("boom"); }
 let reached = false;
 try {
   const r = boom() & 1;
@@ -2988,4 +2985,100 @@ function* three(): number { yield 3; }
 const t = three;
 console.log(t().next().value);
 `, "1\n101\n150\n10\n3")
+}
+
+// A for-of/for-in variable captured in two branches of the body: each
+// iteration's binding is a cell made at the body's top (per-iteration let).
+func TestE2ELoopVariableCapturedInBranches(t *testing.T) {
+	assertSameAsNode(t, `
+let f: () => string = () => ""
+let g: () => string = () => ""
+for (const x of ["a", "b"]) { if (x === "a") f = () => x; else g = () => x }
+console.log(f(), g())
+const ks: (() => string)[] = []
+for (const k in { p: 1, q: 2 }) { if (k === "p") ks.push(() => k); else ks.push(() => k + "!") }
+console.log(ks.map(h => h()).join(","))
+const m = new Map<string, number>([["a", 1], ["b", 2]])
+const ms: (() => string)[] = []
+for (const [k, v] of m) { if (v > 1) ms.push(() => k + v); else ms.push(() => k) }
+console.log(ms.map(h => h()).join(","))
+let last = ""
+for (let s of ["x", "y"]) { s = s + "1"; const c = () => s; last = c() }
+console.log(last)
+`)
+	assertSameAsNodeCompatJS(t, `
+var f, g
+for (let x in { a: 0, b: 0 }) if (!f) f = function() { return x }; else g = function() { return x }
+console.log(f(), g())
+`)
+}
+
+// A nullable scalar (`number | undefined`, `boolean | null`) keeps its
+// presence-flagged storage when a closure captures it — promoted lazily, boxed
+// eagerly, per loop iteration — and when a named function reads it as a
+// module global.
+func TestE2ENullableScalarCaptured(t *testing.T) {
+	assertOutput(t, `
+let a: number | undefined = undefined
+const fa = () => { console.log(a, a ?? -1, a === undefined) }
+fa(); a = 5; fa()
+let d: number | undefined
+if (d === undefined) { const fd = () => { d = (d ?? 0) + 10 }; fd() }
+console.log("d", d)
+const fs: (() => void)[] = []
+for (let i: number | undefined = 0; (i ?? 0) < 3; i = (i ?? 0) + 1) { fs.push(() => console.log("i", i)) }
+for (const f of fs) f()
+function hoisted() { console.log("h", c) }
+let c: boolean | undefined = true
+hoisted(); c = undefined; hoisted()
+function useG(): number { return (gl ?? 0) * 2 }
+let gl: number | null = null
+console.log(useG()); gl = 21; console.log(useG())
+let id: NodeJS.Timeout | undefined = undefined
+let count = 0
+id = setInterval(() => { count++; if (count >= 3) { clearInterval(id); console.log("done", count) } }, 2)
+`, "undefined -1 true\n5 5 false\nd 10\ni 0\ni 1\ni 2\nh true\nh undefined\n0\n42\ndone 3")
+}
+
+// A `this: T` parameter (TDD-00231): .call/.apply/.bind pass the receiver,
+// and a call through an object's field passes the object.
+func TestE2EThisParameterCallApplyBind(t *testing.T) {
+	assertOutput(t, `
+class Box { v = 5; }
+function scale(this: Box, n: number): number { return this.v * n; }
+const g = function (this: Box, n: number): number { return this.v + n; };
+const b = new Box();
+console.log(scale.call(b, 3), scale.apply(b, [4]), scale.bind(b)(2), g.call(b, 1), g.bind(b, 10)())
+`, "15 20 10 6 15")
+}
+
+// A function literal against a `this`-typed function type reads the
+// receiver its caller passes; an arrow keeps its lexical `this`.
+func TestE2EThisTypedCallbackReceivesReceiver(t *testing.T) {
+	assertOutput(t, `
+interface Handler { name: string; handle: (this: Handler, v: number) => string }
+const h: Handler = { name: "h", handle(v) { return this.name + v } };
+const other: Handler = { name: "k", handle: h.handle };
+console.log(h.handle(1), other.handle(2), h.handle.call(other, 3))
+const arrowed: Handler = { name: "a", handle: (v) => "arrow" + v };
+console.log(arrowed.handle(4))
+class Source {
+  items: string[] = [];
+  private read?: (this: Source, n: number) => void;
+  constructor(opts: { read?: (this: Source, n: number) => void }) { this.read = opts.read }
+  pull(n: number): string { if (this.read) this.read.call(this, n); return this.items.join(",") }
+}
+console.log(new Source({ read(n) { for (let i = 0; i < n; i++) this.items.push("i" + i) } }).pull(2))
+`, "h1 k2 k3\narrow4\ni0,i1")
+}
+
+// A call with no receiver, or the wrong one, is tsc's TS2684 / TS2741.
+func TestE2EThisParameterWrongReceiverIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+function show(this: { x: number }, k: number): number { return this.x + k }
+show(2)
+`)
+	if err == nil || !strings.Contains(err.Error(), "the 'this' context of type 'void' is not assignable") {
+		t.Fatalf("want TS2684, got %v", err)
+	}
 }

@@ -129,6 +129,9 @@ func (e *Emitter) emitJSONStringifyArray(arrExpr ast.Expression, pos ast.Pos, in
 // loadArrayElem has already unboxed into exactly this shape by the time it
 // gets here.
 func (e *Emitter) emitJSONStringifyArrayValue(val Value, ind jsonIndent) (Value, error) {
+	if val.Ty.IsBuffer {
+		return e.emitJSONStringifyValue(val, ind)
+	}
 	ptrReg := e.freshReg()
 	lenReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
@@ -318,7 +321,7 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 	// JSON.stringify(undefined) is the value `undefined` (console.log prints it as
 	// "undefined"); a present array serializes normally. Branch on the null
 	// data-ptr and carry an IsUndefined-flagged result on the miss.
-	if argTy.IsArray && argTy.ElemType != nil && argTy.Nullable {
+	if argTy.IsArray && argTy.ElemType != nil && argTy.Nullable && !argTy.IsBuffer {
 		val, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
@@ -326,7 +329,7 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 		return e.emitJSONStringifyNullableArray(val, ind)
 	}
 
-	if argTy.IsArray && argTy.ElemType != nil {
+	if argTy.IsArray && argTy.ElemType != nil && !argTy.IsBuffer {
 		return e.emitJSONStringifyArray(args[0], pos, ind)
 	}
 
@@ -343,6 +346,14 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 		v, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
+		}
+		if v.Ty.IsDynamicObject && v.Ty.MapVal != nil && v.Ty.MapVal.IsDynamic {
+			// Union values: serialize the boxed snapshot.
+			bag, err := e.emitDictToBag(v)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitJSONStringifyValue(bag, ind)
 		}
 		return e.emitJSONStringifyMapDict(v, ind)
 	}
@@ -736,6 +747,15 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 	// Real JS throws "Do not know how to serialize a BigInt" — TDD-00074.
 	if val.Ty.IsBigInt {
 		return Value{}, fmt.Errorf("JSON.stringify does not support BigInt values (TypeError in JS)")
+	}
+	// A Buffer serializes through its toJSON form, {"type":"Buffer","data":[…]},
+	// which the dynamic walker writes for a boxed Buffer.
+	if val.Ty.IsBuffer && !val.Ty.Nullable {
+		boxed, err := e.emitBoxValue(val)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitJSONStringifyValue(boxed, ind)
 	}
 	// A bare any/unknown value — a NaN-boxed element of a boxed-element array
 	// (`any[]`, TDD-00200) or an any-typed field — serializes through the

@@ -5,8 +5,8 @@
     {
       "section": "TypeScript Core Language",
       "total": {
-        "impl": 357,
-        "total": 363,
+        "impl": 362,
+        "total": 368,
         "pct": 98
       },
       "rows": [
@@ -14,14 +14,14 @@
           "category": "Control flow statements",
           "pageFile": "LANGUAGE-CONSTRUCTS.md",
           "coverage": {
-            "impl": 14,
-            "total": 14,
+            "impl": 15,
+            "total": 15,
             "pct": 100
           },
           "strict": {
-            "impl": 11,
-            "total": 14,
-            "pct": 79
+            "impl": 12,
+            "total": 15,
+            "pct": 80
           },
           "caveats": "• A `for` loop's non-declaration init clause (`for (i = 0, j = 10; ...)`) is a clean rejection (the update clause does take comma-separated expressions — [ADR-00156](../adr/ADR-00156.md))\u003cbr\u003e• No ASI restriction on a line break before a postfix `++`/`--`\u003cbr\u003e• `finally` does not run on an early `return`/`break`/`continue` inside an `async`/generator body (it does everywhere else — [ADR-00191](../adr/ADR-00191.md))"
         },
@@ -34,9 +34,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 17,
+            "impl": 18,
             "total": 22,
-            "pct": 77
+            "pct": 82
           },
           "caveats": "• `++`/`--` work on identifier, member, and index targets; the one edge is a postfix update on a side-effecting receiver used as a value, which evaluates the receiver twice ([ADR-00376](../adr/ADR-00376.md))\u003cbr\u003e• `typeof` of a static-method reference outside the covered Promise/Math/JSON tables (`Object.keys`, `console.log`, …) answers from inference, not `\"function\"` ([ADR-00282](../adr/ADR-00282.md))\u003cbr\u003e• `\u0026\u0026`/`\\|\\|` yield a bool by default; `-compat=js` makes them value-preserving for same-typed operands ([ADR-00186](../adr/ADR-00186.md)/[ADR-00220](../adr/ADR-00220.md))"
         },
@@ -127,7 +127,7 @@
             "total": 15,
             "pct": 47
           },
-          "caveats": "• `u`/`d` flags out of scope for V1\u003cbr\u003e• Several other deliberate scope narrowings (no implicit string→RegExp coercion, etc.) — see [REGEXP.md](REGEXP.md)'s own Caveats\u003cbr\u003e• `new RegExp` doesn't validate its flags string ([ADR-00166](../adr/ADR-00166.md))"
+          "caveats": "• `u`/`d` flags out of scope for V1\u003cbr\u003e• Several other deliberate scope narrowings — see [REGEXP.md](REGEXP.md)'s own Caveats\u003cbr\u003e• `new RegExp` doesn't validate its flags string ([ADR-00166](../adr/ADR-00166.md))"
         },
         {
           "category": "Array methods",
@@ -148,14 +148,14 @@
           "category": "Number / Math",
           "pageFile": "NUMBER-MATH.md",
           "coverage": {
-            "impl": 35,
-            "total": 35,
+            "impl": 36,
+            "total": 36,
             "pct": 100
           },
           "strict": {
-            "impl": 32,
-            "total": 35,
-            "pct": 91
+            "impl": 30,
+            "total": 36,
+            "pct": 83
           },
           "caveats": "• `Number.prototype.toString(radix?)` renders fractional digits, but a non-power-of-two repeating fraction is capped at 1100 digits and its trailing digits can differ from V8 (base 10 / power-of-two bases are exact)"
         },
@@ -223,14 +223,14 @@
           "category": "Type system features",
           "pageFile": "TYPE-SYSTEM.md",
           "coverage": {
-            "impl": 19,
-            "total": 19,
+            "impl": 20,
+            "total": 20,
             "pct": 100
           },
           "strict": {
             "impl": 6,
-            "total": 19,
-            "pct": 32
+            "total": 20,
+            "pct": 30
           },
           "caveats": "• `expr as T` **narrows a dynamic operand** (`any`/`unknown`) to the asserted concrete type, unboxing the value — so `const n = x as number` types `n` as `number` ([ADR-00929](../adr/ADR-00929.md)); a concrete→concrete assertion, `as const`, `satisfies`, and the `readonly T[]` modifier stay **erased** — they don't re-type the expression or enforce immutability ([ADR-00371](../adr/ADR-00371.md)/[ADR-00373](../adr/ADR-00373.md))\u003cbr\u003e• `typeof` type queries, ambient `declare` declarations, and string index signatures (`{ [k: string]: T }`) are supported ([ADR-00389](../adr/ADR-00389.md)/[ADR-00388](../adr/ADR-00388.md)/[ADR-00390](../adr/ADR-00390.md)); **template literal types** parse but erase to `string` ([ADR-00561](../adr/ADR-00561.md))\u003cbr\u003e• Generics support object/interface/class type arguments ([TDD-00069](../tdd/TDD-00069.md)) and `\u003cT extends X\u003e` constraints ([TDD-00113](../tdd/TDD-00113.md)); a *function*'s type arguments are inference-only (no explicit `identity\u003cnumber\u003e(5)`), and Map/Set/Promise/closure type arguments are a clean rejection ([TDD-00010](../tdd/TDD-00010.md), [TDD-00037](../tdd/TDD-00037.md))\u003cbr\u003e• Union types (beyond `T \\| null`) allow scalar members, object members (one object member, or ≥2 as a discriminated union with a first-position string-literal tag), and a `ReadableStream` member; usable as an **object field** (checked + boxed at construction, [TDD-00119](../tdd/TDD-00119.md)) but not yet as an **array element**; flow narrowing (`typeof`/truthiness/`==null`/`tag===lit`, if-else + early-return) works for a union local or field ([TDD-00043](../tdd/TDD-00043.md)/[TDD-00114](../tdd/TDD-00114.md)/[TDD-00115](../tdd/TDD-00115.md)/[TDD-00116](../tdd/TDD-00116.md))\u003cbr\u003e• Tuple types are fixed-shape structs ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/ADR-00201.md))\u003cbr\u003e• Intersection types are object-members-only, with a field conflict rejected rather than the `-compat=js` `never`-field ([TDD-00078](../tdd/TDD-00078.md)/[ADR-00225](../adr/ADR-00225.md))\u003cbr\u003e• Mapped \u0026 utility types are evaluated to concrete object types; `Partial`/`Required`/`Readonly` are structural no-ops, no `as` remapping ([TDD-00079](../tdd/TDD-00079.md)/[ADR-00228](../adr/ADR-00228.md)–[ADR-00230](../adr/ADR-00230.md))\u003cbr\u003e• Conditional types + `infer` evaluate at compile time (monomorphized check type); `infer` is scoped to Array/Promise/bare forms, no function-signature inference ([ADR-00231](../adr/ADR-00231.md))"
         },
@@ -283,13 +283,13 @@
           "category": "Modules",
           "pageFile": "MODULES.md",
           "coverage": {
-            "impl": 16,
-            "total": 16,
+            "impl": 18,
+            "total": 18,
             "pct": 100
           },
           "strict": {
-            "impl": 8,
-            "total": 16,
+            "impl": 9,
+            "total": 18,
             "pct": 50
           },
           "caveats": "• Whole-program compile only\u003cbr\u003e• `klmpm` is Stage 1 only — a `klain_modules/\u003cname\u003e/` package must be hand-built, no package-manager tool yet ([TDD-00054](../tdd/TDD-00054.md))\u003cbr\u003e• No namespace re-exports (`export * as ns from`); no npm/`node_modules` interop ([TDD-00053](../tdd/TDD-00053.md)); dynamic `import()` works opt-in via `-dynamic-import=lazy` — real laziness through a `dlopen`'d `.so`/`.dylib` island per target ([ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md)); the eager compile-time-merge backend ([TDD-00055](../tdd/TDD-00055.md)) and a dynamic-or-lazy `require()` stay unbuilt\u003cbr\u003e• Static CommonJS `require('\u003cliteral\u003e')` works, desugared to an import ([ADR-00369](../adr/ADR-00369.md))\u003cbr\u003e• Node-style built-ins (`fs`/`path`/…) require a default, namespace, named, or `require` import, not ambient; the `node:` prefix resolves too ([TDD-00049](../tdd/TDD-00049.md)/[ADR-00419](../adr/ADR-00419.md))"
@@ -366,7 +366,7 @@
             "total": 9,
             "pct": 11
           },
-          "caveats": "• TypedArray construction is restricted to a variable declaration's initializer (Node `Buffer`'s call-syntax statics are exempt); no `.buffer`\u003cbr\u003e• BigInt64Array/BigUint64Array support an explicit method allow-list — everything else is a compile-time rejection\u003cbr\u003e• Buffer has no `utf16le`, and encodings must be string literals\u003cbr\u003e• No `Atomics.waitAsync`, no `getFloat16`"
+          "caveats": "• TypedArray construction is restricted to a variable declaration's initializer (Node `Buffer`'s call-syntax statics are exempt); no `.buffer`\u003cbr\u003e• BigInt64Array/BigUint64Array support an explicit method allow-list — everything else is a compile-time rejection\u003cbr\u003e• Buffer encodings must be string literals\u003cbr\u003e• No `Atomics.waitAsync`, no `getFloat16`"
         },
         {
           "category": "Web Crypto",
@@ -422,9 +422,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 1,
+            "impl": 2,
             "total": 9,
-            "pct": 11
+            "pct": 22
           },
           "caveats": "• No BYOB readers / byte controllers; `ReadableStream.from()` takes arrays only\u003cbr\u003e• Node stream classes carry string chunks; `extends Transform` has no `_flush` override; `finished` returns no cleanup fn\u003cbr\u003e• `Blob.stream()` delivers the whole blob as one `Uint8Array` chunk, not incrementally — full per-row lists on the page"
         },
@@ -481,24 +481,24 @@
             "pct": 95
           },
           "strict": {
-            "impl": 6,
+            "impl": 5,
             "total": 22,
-            "pct": 27
+            "pct": 23
           },
-          "caveats": "• `createWriteStream` still writes inline on the loop thread, and stream chunks are **strings** ([TDD-00186](../tdd/TDD-00186.md)/[TDD-00108](../tdd/TDD-00108.md))\u003cbr\u003e• `readFileSync`/`readFile` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md))"
+          "caveats": "• `createWriteStream` still writes inline on the loop thread, and stream chunks are **strings** ([TDD-00186](../tdd/TDD-00186.md)/[TDD-00108](../tdd/TDD-00108.md))\u003cbr\u003e• `readFileSync` returns a Buffer without an encoding; `readFile` (async) is still text-only"
         },
         {
           "category": "Process / CLI I/O",
           "pageFile": "PROCESS-CLI.md",
           "coverage": {
-            "impl": 34,
-            "total": 34,
+            "impl": 33,
+            "total": 33,
             "pct": 100
           },
           "strict": {
-            "impl": 14,
-            "total": 34,
-            "pct": 41
+            "impl": 13,
+            "total": 33,
+            "pct": 39
           },
           "caveats": "• `process.on(...)` covers `'SIGINT'`/`'SIGTERM'`/`'exit'`/`'uncaughtException'` but not `'unhandledRejection'`; an `'uncaughtException'` handler runs then still exits (can't resume)\u003cbr\u003e• `process.version`/`versions` report the pinned Node baseline + `klain`; real linked-lib versions (`openssl`/`zlib`) and a `--node-compat` floor are follow-ons\u003cbr\u003e• `process.memoryUsage()`'s `external`/`arrayBuffers` are always 0 (no off-heap accounting), and `heapTotal`/`heapUsed` measure this compiler's own heap, not a V8 heap ([ADR-00791](../adr/ADR-00791.md))\u003cbr\u003e• `child_process.fork()` is self-fork only — forking a different module stays out"
         },
@@ -550,14 +550,14 @@
           "category": "`events` (`EventEmitter`)",
           "pageFile": "EVENT-EMITTER.md",
           "coverage": {
-            "impl": 8,
-            "total": 8,
+            "impl": 9,
+            "total": 9,
             "pct": 100
           },
           "strict": {
-            "impl": 3,
-            "total": 8,
-            "pct": 38
+            "impl": 1,
+            "total": 9,
+            "pct": 11
           },
           "caveats": "• Multi-argument events via a tuple payload (`emit(e, a, b)` — [ADR-00392](../adr/ADR-00392.md)); no open-ended untyped `...args` beyond a declared tuple\u003cbr\u003e• `instanceof EventEmitter` is a compile-time constant, not a runtime tag"
         },
@@ -585,11 +585,11 @@
             "pct": 92
           },
           "strict": {
-            "impl": 4,
+            "impl": 6,
             "total": 12,
-            "pct": 33
+            "pct": 50
           },
-          "caveats": "• Signatures/definitions must be compile-time object literals (AOT lowering); the `functions`/`symbols` accumulators are compile-time records (literal names only, resolution order)\u003cbr\u003e• `registerCallback` caps at 16 concurrently-live callbacks per signature shape (static trampoline families) and `close()` doesn't invalidate callbacks; `using`/`[Symbol.dispose]` and Windows are not there yet; `exportString` is utf8-only and truncates to capacity"
+          "caveats": "• Signatures/definitions must be compile-time object literals (AOT lowering)\u003cbr\u003e• `registerCallback` caps at 16 concurrently-live callbacks per signature shape (static trampoline families) and `close()` doesn't invalidate callbacks; `using`/`[Symbol.dispose]` not there yet; the Windows `symbols`/`functions` order (an MSVC-STL port) is unverified against a Windows Node"
         },
         {
           "category": "Other core modules (`querystring`, `assert`, `test`, `zlib`, `net`, `util`, `dns`, `dgram`, `cluster`, `tls`, `http` client, `https`, `stream/web`, `vm`, `http2`)",
@@ -600,9 +600,9 @@
             "pct": 94
           },
           "strict": {
-            "impl": 1,
+            "impl": 2,
             "total": 17,
-            "pct": 6
+            "pct": 12
           },
           "caveats": "`querystring`/`assert`/`zlib`/`net`/`util`/`dns`/`dgram`/`cluster`/`tls` done (`tls` = client + server); `https` = client (`get`/`request` over libcurl) + server (`https.createServer`, HTTPS/1.1, [ADR-00505](../adr/ADR-00505.md)); `stream/web` re-exports the WHATWG classes; `diagnostics_channel` pub/sub (string messages); `http2` ships all four stages — `createServer` (h2c) + `createSecureServer` (h2 over TLS, `allowHTTP1` 1.1 fallback), compat + `.on('stream')` APIs, client sessions, constants/settings ([TDD-00139](../tdd/TDD-00139.md)/[TDD-00111](../tdd/TDD-00111.md)); `vm` not started"
         },

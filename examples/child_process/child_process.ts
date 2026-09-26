@@ -48,7 +48,7 @@ missing.on('error', (err) => {
 // missing command from other spawn failures.
 
 // ── execSync: blocking, returns stdout, throws on a nonzero exit ──────────
-console.log("execSync:", execSync("echo synchronous").trim())
+console.log("execSync:", execSync("echo synchronous", { encoding: "utf8" }).trim())
 try {
   execSync("exit 2")   // nonzero status → throws, like Node
 } catch (e) {

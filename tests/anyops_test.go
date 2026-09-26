@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -95,15 +94,16 @@ console.log(true + 1)
 `, "28\nid-5\n2")
 }
 
-func TestStrictModeAnyOpsStillRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// TypeScript allows every operator on `any`: the strict lane dispatches it
+// at run time, as -compat=js does.
+func TestStrictModeAnyOps(t *testing.T) {
+	assertOutput(t, `
 let a: any = 1
 let b: any = 2
-console.log(a * b)
-`)
-	if err == nil || !strings.Contains(err.Error(), "operator '*' on any/unknown") {
-		t.Fatalf("expected strict-mode operator rejection, got: %v", err)
-	}
+console.log(a * b, -b, +"3" + a, ~a)
+a += 4
+console.log(a)
+`, "2 -2 4 -2\n5")
 }
 
 func TestE2EAnyOpsProtoMethodArithmetic(t *testing.T) {

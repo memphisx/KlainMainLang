@@ -32,4 +32,6 @@ try { count = 1; throw new Error("boom"); } catch (e) { console.log("caught with
 console.log(count);                                             // 1
 
 // Unary + is ToNumber, exactly like Number().
-console.log(+"  12 ", +"0x10", +"junk", +true, +null, +undefined, +[], +[5]); // 12 16 NaN 1 0 NaN 0 5
+// (TypeScript rejects a bare `+null`; a value typed any reaches it.)
+const nothing: any = null, missing: any = undefined;
+console.log(+"  12 ", +"0x10", +"junk", +true, +nothing, +missing, +[], +[5]); // 12 16 NaN 1 0 NaN 0 5

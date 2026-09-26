@@ -320,7 +320,11 @@ func (e *Emitter) ensureStringReplace() {
 	e.emitGlobal(`
 define ptr @__kml_replace(ptr %s, i64 %slen, ptr %search, i64 %search_len, ptr %rep, i64 %rep_len) {
 entry:
-  %found = call ptr @memmem(ptr %s, i64 %slen, ptr %search, i64 %search_len)
+  ; An empty search matches at 0 ("abc".replace("", "-") is "-abc"); memmem's
+  ; empty-needle result is not portable (NULL on macOS).
+  %mm = call ptr @memmem(ptr %s, i64 %slen, ptr %search, i64 %search_len)
+  %empty = icmp eq i64 %search_len, 0
+  %found = select i1 %empty, ptr %s, ptr %mm
   %is_found = icmp ne ptr %found, null
   br i1 %is_found, label %do_replace, label %no_replace
 no_replace:

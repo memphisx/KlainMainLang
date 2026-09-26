@@ -26,13 +26,10 @@
           {
             "feature": "`querystring`",
             "status": "implemented",
-            "caveats": [
-              "Repeated keys collapse to the last value instead of an array — `.parse('a=1&a=3')` yields `{a:'3'}`, not Node's `{a:['1','3']}`"
-            ],
             "notes": [
-              "Surface: `.parse`, `.stringify`",
-              "A `Map<string,string>` in, out — the same shape `req.query`/`URLSearchParams` already use",
-              "`.parse` doesn't strip a leading `?` (matching real Node; distinct from `new URLSearchParams(str)`, which does)"
+              "Surface: `.parse`, `.stringify`, `.escape`, `.unescape`, `.unescapeBuffer`, `.encode`, `.decode` — Node's `lib/querystring.js` in TypeScript ([ADR-01173](../adr/ADR-01173.md))",
+              "`.parse` returns a null-prototype object (a repeated key's values in an array), honours `sep`/`eq`/`maxKeys`/`decodeURIComponent`, and doesn't strip a leading `?` (unlike `new URLSearchParams(str)`)",
+              "`.stringify` takes an object (an array value repeats its key), with `sep`/`eq`/`encodeURIComponent`"
             ]
           },
           {
@@ -72,12 +69,12 @@
             "feature": "`util`",
             "status": "implemented",
             "caveats": [
-              "No `.promisify` — the callback builtins (`zlib.gzip`, `child_process.exec`) are name-dispatched calls, not first-class function values to wrap; importing `promisify` fails cleanly ([ADR-00325](../adr/ADR-00325.md))",
+              "`.promisify` wraps a function value (a program's own, or a module written in TypeScript's); a code-generated builtin (`zlib.gzip`, `child_process.exec`, `fs.readFile`) is not a function value to pass it; `promisify.custom` is not read",
               "`.format` requires a string-**literal** format (compile-time walk); a runtime format string is a compile error",
               "`.inspect`'s options object is accepted but ignored (no `depth`/`colors`)"
             ],
             "notes": [
-              "Surface: `.inspect`, `.format`",
+              "Surface: `.inspect`, `.format`, `.promisify` (Node's `lib/internal/util.js`, in TypeScript: the callback's first argument rejects, its second resolves; a non-function is `ERR_INVALID_ARG_TYPE`) ([ADR-01172](../adr/ADR-01172.md))",
               "`.inspect` reuses the same value formatter as `console.log` (strings single-quoted, `ClassName { … }`, arrays, `10n`)",
               "`.format`: `%s`/`%d`/`%i`/`%f`/`%j`/`%o`/`%O`/`%%`, excess args appended space-separated, unrecognized specifiers left literal — matching Node"
             ]
@@ -86,28 +83,11 @@
             "feature": "`net`",
             "status": "implemented",
             "caveats": [
-              "Server binds IPv4 `0.0.0.0` only — no `host`/`path`/options object on `listen`",
-              "IPv4-native bind: an accepted socket reports `127.0.0.1` where Node's dual-stack default reports `::ffff:127.0.0.1`, and the server reports `IPv4`/`0.0.0.0` not `IPv6`/`::`",
-              "IPC `{ path }` Unix-domain socket: Linux path-layout unverified (Mac-verified only) ([ADR-00588](../adr/ADR-00588.md))",
-              "No server `'error'` event — a `listen`/bind failure has no async error path yet (a client socket's `'connect'`/`'ready'`/`'close'`/`'error'` all fire)",
-              "`setEncoding`/`ref`/`unref`/`pause`/`resume`/`setTimeout` are accepted but no-ops",
-              "No back-pressure: `.write` never returns `false` and there's no `'drain'` event",
-              "Listeners must be arrow/function-expression literals",
-              "`net.Server`/`net.Socket` are not exposed as constructible classes",
-              "Socket `'close'` fires with no `hadError` argument; a mid-connection transport error (a post-connect read/write failure) is not surfaced as `'error'` — only connect-time failures emit `'error'` ([ADR-01021](../adr/ADR-01021.md))"
+              "BlockList, SocketAddress and happy-eyeballs address selection (`autoSelectFamily`) are not ported",
+              "Windows keeps the earlier code-generated `net` (the TCP handles are POSIX sockets)"
             ],
             "notes": [
-              "Surface: TCP server: `net.createServer`, `server.listen`/`address()`/`on('connection'\\|'listening')`/`close`; TCP client: `net.connect`/`createConnection` (positional or `{ port, host }`); connection socket `.on('data'\\|'end'\\|'close'\\|'connect'/'ready')`/`.write`/`.end`/`.address()`/`.destroy()`/`.setNoDelay()`/`.setKeepAlive()`; `net.isIP`/`isIPv4`/`isIPv6`",
-              "Accept loop and per-connection read pipes fold into the same `select()` event loop as `child_process` ([ADR-00324](../adr/ADR-00324.md)); a client socket reuses the same machinery once connected. A plausible base for a future `WebSocket` (see [NETWORKING.md](NETWORKING.md))",
-              "`address()` reads the real bound address+port via `getsockname`+`inet_ntop`, making the `listen(0)` ephemeral-port idiom (`listen(0, () => net.connect(server.address().port, …))`) usable; `net.isIP` parses via `inet_pton` (0/4/6) ([ADR-00397](../adr/ADR-00397.md)/[ADR-00399](../adr/ADR-00399.md))",
-              "`'data'` delivers a Buffer; `.write`/`.end` take a string/Buffer/ArrayBuffer/DataView",
-              "`.address()` reports the real bound `{ family: \"IPv4\", address, port }` via `getsockname` — `0.0.0.0` for a server, the real local IP for a connected socket",
-              "`net.connect` accepts every positional arity (`(port)`, `(port, cb)`, `(port, host[, cb])`) and `{ port, host }` (host defaults to `localhost`); `on('listening')` fires when the server binds, registered before or after `listen()` ([ADR-00413](../adr/ADR-00413.md))",
-              "`net.connect` is **asynchronous** ([ADR-01021](../adr/ADR-01021.md)): the socket returns immediately and the non-blocking connect completes on the event loop (write/except sets) — `'connect'`/`'ready'` on success, or an async `'error'` then `'close'` on failure. The `'error'` Error carries Node's exact shape: `connect ECONNREFUSED <ip>:<port>` (or `getaddrinfo ENOTFOUND <host>`) with `.code`/`.errno`/`.syscall`/`.address`/`.port`. It never blocks the loop or throws synchronously",
-              "`socket.setNoDelay`/`setKeepAlive` are real `setsockopt` calls — `setKeepAlive(enable, initialDelay)` honours the idle-time argument (`TCP_KEEPIDLE`, or `SIO_KEEPALIVE_VALS` on Windows) ([ADR-00760](../adr/ADR-00760.md))",
-              "On Windows `net.connect({ path })` with a `\\\\.\\pipe\\…` (or `\\\\?\\pipe\\…`) path is a named pipe, as in Node — duplex, `'data'` per message, the server's close is `'end'`/`'close'`, a missing pipe is `'error'` `ENOENT`; any other path is a Unix-domain socket ([ADR-01034](../adr/ADR-01034.md))",
-              "See [ADR-00358](../adr/ADR-00358.md)",
-              "`isIP`/`isIPv4`/`isIPv6` match Node's strict parser, not the platform `inet_pton`: leading-zero v4 octets and >4-digit v6 groups rejected, `%zone` IDs accepted ([ADR-00457](../adr/ADR-00457.md))"
+              "Node's `lib/net.js` ported to TypeScript (`lib/node/net.ts`) over native TCP handles on the event loop: Socket (a Duplex — back-pressure, `'drain'`, pause/resume, `setEncoding`, `setTimeout`, `ref`/`unref`), Server (`listen` by port/host/backlog/options or a Unix-socket path, dual-stack `::` by default, `'listening'`/`'error'` on the next tick, `maxConnections`, `getConnections`), `connect`/`createConnection` (port, options, `{ path }`), `isIP`/`isIPv4`/`isIPv6`; errors built as Node builds them ([ADR-01170](../adr/ADR-01170.md))"
             ]
           },
           {
@@ -131,15 +111,12 @@
             "feature": "`tls`",
             "status": "implemented",
             "caveats": [
-              "**Blocking** TCP connect + TLS handshake on both sides (a slow peer stalls the loop); unlike plaintext `net.connect`, which is asynchronous ([ADR-01021](../adr/ADR-01021.md)), `tls.connect` has not yet moved off the blocking handshake",
               "OpenSSL-only (libssl) — a `-crypto=commoncrypto` build using `tls` is a clean compile error (Mac's CommonCrypto has no TLS API)",
-              "Client options `{ rejectUnauthorized }` only — no client-cert / ALPN / `servername` override (SNI = the host)",
-              "Server `{ cert, key }` are PEM **strings** only — one cert per server, no chain/passphrase, no `requestCert`"
+              "Session resumption, OCSP, renegotiation, PSK and `getPeerCertificate()`'s certificate object are not ported",
+              "Windows keeps the earlier code-generated, blocking `tls`"
             ],
             "notes": [
-              "Surface: TLS-wrapped sockets",
-              "Options may be an object literal or a bound object value ([ADR-00413](../adr/ADR-00413.md))",
-              "**Client** `tls.connect(port, host[, {rejectUnauthorized}][, onSecureConnect])` (cert verification + SNI on by default) and **server** `tls.createServer({ cert, key }, connectionListener)` (`.listen`/`.close`, per-connection `SSL_accept`) — both return **net-shaped** handles (an `SSL*` in the socket), so `.on('data')`/`.write()`/`.end()`/`.on('connection')` reuse the net machinery, routing through `SSL_read`/`SSL_write`. A handshake/verify failure throws a catchable `Error` ([TDD-00109](../tdd/TDD-00109.md)/[TDD-00110](../tdd/TDD-00110.md)/[ADR-00344](../adr/ADR-00344.md)/[ADR-00345](../adr/ADR-00345.md))"
+              "Node's `_tls_wrap` shape in TypeScript (`lib/node/tls.ts`): a TLSSocket is a net.Socket whose handle carries a non-blocking OpenSSL session — `tls.connect` (`servername`, `rejectUnauthorized`, `ca`/`cert`/`key`, ALPN; `'secureConnect'`, `authorized`/`authorizationError`, Node's verify error codes and messages), `tls.createServer` (`'secureConnection'`, `'tlsClientError'`), `createSecureContext`, `getProtocol`/`getCipher` ([ADR-01170](../adr/ADR-01170.md))"
             ]
           },
           {
@@ -197,30 +174,20 @@
             "feature": "`http` client",
             "status": "implemented",
             "caveats": [
-              "`.abort()`/`.destroy()` cancel only a not-yet-fired request — an in-flight transfer isn't torn down",
-              "`.on('error')` is accepted but never fired — transport failures throw instead",
-              "`http.Agent`/`https.Agent` are inert — pool options are validated but configure nothing (one connection per request), `.destroy()` is a no-op, `.sockets`/`.requests` reject cleanly ([ADR-00432](../adr/ADR-00432.md))",
-              "`headers` is literal-form-only; request-body chunks are strings only (`req.write()`/`req.end(body)`)",
-              "`agent` is accepted and ignored — one connection per request (Node's `agent: false`), no pooling"
+              "`http.request(new URL(…))` is not accepted — a `string | URL | options` parameter is a union code generation cannot tell apart ([BACKLOG](../BACKLOG.md))"
             ],
             "notes": [
-              "Surface: `http.get`/`http.request`",
-              "Request bodies: `req.write(chunk)` stages a string chunk (appending across calls), `req.end([body])` appends a final chunk before firing, pairing with a `method: \"POST\"` option; response surface is `res.statusCode`/`res.on('data'/'end')`/`res.resume()`/`setEncoding`. Both calls return a ClientRequest handle (`request()` sends nothing until `.end()`). Options objects are literal or variable-bound, supporting `{ port, path, host/hostname, method, headers, agent }`. See [ADR-00575](../adr/ADR-00575.md), [ADR-00430](../adr/ADR-00430.md), [ADR-00429](../adr/ADR-00429.md), [ADR-00500](../adr/ADR-00500.md), [TDD-00138](../tdd/TDD-00138.md)",
-              "libcurl-backed with async event-loop delivery, contextually-typed callbacks incl. `test` wrappers ([ADR-00404](../adr/ADR-00404.md)–[ADR-00406](../adr/ADR-00406.md), [ADR-00412](../adr/ADR-00412.md))"
+              "Node's `_http_agent`/`_http_client` in TypeScript (`lib/node/internal_http.ts`) over `net`: ClientRequest (an OutgoingMessage — chunked bodies, `'response'`/`'socket'`/`'information'`/`'upgrade'`/`'error'`, `abort`/`destroy`/`setTimeout`), Agent with keep-alive pooling (`http.globalAgent` keeps sockets alive and unref'd, as Node 19+), `IncomingMessage` responses as Readables ([ADR-01170](../adr/ADR-01170.md))"
             ]
           },
           {
             "feature": "`https`",
             "status": "implemented",
             "caveats": [
-              "`https.createServer` is HTTPS/1.1 only — an http/1.1-only ALPN forces even an h2-capable client to 1.1",
-              "Inherits `http.createServer`'s V1 `res` subset and one-request-per-connection (`Connection: close`) posture",
-              "Same V1 client surface and caveats as `http.get`/`request` ([TDD-00138](../tdd/TDD-00138.md))"
+              "Same client limit as `http` for a `URL` argument ([BACKLOG](../BACKLOG.md))"
             ],
             "notes": [
-              "Surface: `https.get`/`https.request` client + `https.createServer`",
-              "`https.createServer({ cert, key }[, handler])` uses the same `(req, res)` core as `http.createServer`, with the connection fiber's socket I/O routed through per-fd `SSL_read`/`SSL_write` shims; streaming response bodies over TLS are supported. See [TDD-00111](../tdd/TDD-00111.md), [ADR-00505](../adr/ADR-00505.md)",
-              "`get`/`request` ride the libcurl backend, so TLS handshake + certificate verification come from the URL scheme — no https-specific machinery ([ADR-00410](../adr/ADR-00410.md)); verified against a live TLS host (Mac)"
+              "`https.createServer` is a `tls.Server` running the http module's connection handling; `https.request`/`get`/`Agent`/`globalAgent` connect with `tls.connect` ([ADR-01170](../adr/ADR-01170.md))"
             ]
           },
           {
@@ -238,10 +205,11 @@
               "`setupPrimary`'s `exec`/`execArgv` are a compile-time rejection — workers re-exec this compiled program itself, so there is no separate script file for a worker to run (a genuine impossibility of native compilation, [ADR-01015](../adr/ADR-01015.md)); `args` and `silent` work on every platform, Windows included ([ADR-01018](../adr/ADR-01018.md))",
               "`'online'` fires from a queued microtask (the worker is exec'd by then), not a wire handshake; `cluster.workers` iterates and indexes by id but is not a real id-keyed *object* (no `Object.keys` over it)",
               "On Darwin, `SO_REUSEPORT` accept distribution is uneven (often one worker) — correctness holds, balancing differs from Linux's kernel load-balancing",
-              "Can't be combined with Worker threads (same restriction as `http.listen({workers})`)"
+              "Can't be combined with Worker threads (same restriction as `http.listen({workers})`)",
+              "In a worker, `cluster.worker` exposes `.id`; its `.process` and messaging methods are not available on it (use the global `process`)"
             ],
             "notes": [
-              "Surface: `fork`, worker messaging (strings AND objects/arrays/numbers/booleans — Node's json serialization mode, both directions, [ADR-01015](../adr/ADR-01015.md)), `isPrimary`/`isWorker`/`workerId`, `Worker.id`/`.process`, cluster-level `cluster.on('fork'/'online'/'message'/'exit'/'disconnect'/'listening')` (listeners get the Worker first, either registration order; 'listening' passes Node's `{ address, port, addressType }`), `cluster.workers` (live — a reaped worker is dropped BEFORE its `'exit'` listeners run, like Node — with `cluster.workers[id]` lookup), `cluster.disconnect(cb?)` (flushes in-flight messages), `setupPrimary({ args, silent })` + `cluster.settings` ([ADR-01012](../adr/ADR-01012.md)/[ADR-01015](../adr/ADR-01015.md))",
+              "Surface: `fork`, worker messaging (strings AND objects/arrays/numbers/booleans — Node's json serialization mode, both directions, [ADR-01015](../adr/ADR-01015.md)), `isPrimary`/`isWorker`/`worker`, `Worker.id`/`.process`, cluster-level `cluster.on('fork'/'online'/'message'/'exit'/'disconnect'/'listening')` (listeners get the Worker first, either registration order; 'listening' passes Node's `{ address, port, addressType }`), `cluster.workers` (live — a reaped worker is dropped BEFORE its `'exit'` listeners run, like Node — with `cluster.workers[id]` lookup), `cluster.disconnect(cb?)` (flushes in-flight messages), `setupPrimary({ args, silent })` + `cluster.settings` ([ADR-01012](../adr/ADR-01012.md)/[ADR-01015](../adr/ADR-01015.md))",
               "Several listeners per event coexist in registration order — `worker.on(...)` lists plus the cluster-level relays ([ADR-01015](../adr/ADR-01015.md))",
               "Workers each bind the port via `SO_REUSEPORT`",
               "Unifies with `http.listen({ workers: N })`'s worker-id global — the primary stays in the event loop while workers live (their IPC handles), then blocks in `waitpid` as the backstop",

@@ -402,7 +402,7 @@ func TestWebviewWindowsMissingSDKMessage(t *testing.T) {
 		t.Skip("Windows-only: the WebView2 SDK probe")
 	}
 	t.Setenv("KLAIN_SYSROOT", t.TempDir())
-	_, _, err := llvm.LocateWebview("system")
+	_, _, err := llvm.NewEmitter().LocateWebview("system")
 	if err == nil || !strings.Contains(err.Error(), "webview2-loader") {
 		t.Fatalf("expected an error naming the webview2-loader package, got: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestE2EPackageWindowsGUIExe(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-only: the GUI-subsystem packager")
 	}
-	if _, _, err := llvm.LocateWebview("system"); err != nil {
+	if _, _, err := llvm.NewEmitter().LocateWebview("system"); err != nil {
 		t.Skipf("webview: %v", err)
 	}
 	cli := buildCLI(t)

@@ -3,7 +3,6 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
-	"reflect"
 )
 
 // emit_regexp_replace.go — str.replace(regexp, replacement)/
@@ -87,13 +86,10 @@ func (e *Emitter) constRegexLiteral(name string) (*ast.NewRegExpExpression, bool
 		e.constRegexNonConst = map[string]bool{}
 		e.constRegexReassigned = map[string]bool{}
 		if e.prog != nil {
-			for _, s := range e.prog.Body {
-				e.scanConstRegex(s)
-			}
+			e.scanConstRegex(e.prog)
 			// A `let`/`var` regex-literal binding is honored only if it is never
 			// reassigned (an assignment target or `++`/`--` arg anywhere in the
-			// program) — otherwise its capture count isn't statically known. One
-			// reflective walk collects every reassigned identifier name.
+			// program) — otherwise its capture count isn't statically known.
 			collectReassignedIdents(e.prog, e.constRegexReassigned)
 		}
 	}
@@ -111,103 +107,33 @@ func (e *Emitter) constRegexLiteral(name string) (*ast.NewRegExpExpression, bool
 // of every identifier used as an assignment target (`x = …`, `x += …`) or an
 // update operand (`x++`, `--x`). Used by constRegexLiteral to admit a
 // never-reassigned `let`/`var` regex-literal binding as statically capture-known.
-func collectReassignedIdents(n any, out map[string]bool) {
-	switch v := n.(type) {
-	case nil:
-		return
-	case *ast.AssignmentExpression:
-		if id, ok := v.Left.(*ast.Identifier); ok {
-			out[id.Name] = true
-		}
-	case *ast.UpdateExpression:
-		if id, ok := v.Arg.(*ast.Identifier); ok {
-			out[id.Name] = true
-		}
-	}
-	rv := reflect.ValueOf(n)
-	if rv.Kind() == reflect.Ptr {
-		if rv.IsNil() {
-			return
-		}
-		rv = rv.Elem()
-	}
-	switch rv.Kind() {
-	case reflect.Struct:
-		for i := 0; i < rv.NumField(); i++ {
-			f := rv.Field(i)
-			if f.CanInterface() {
-				collectReassignedIdents(f.Interface(), out)
+func collectReassignedIdents(root ast.Node, out map[string]bool) {
+	ast.Inspect(root, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.AssignmentExpression:
+			if id, ok := v.Left.(*ast.Identifier); ok {
+				out[id.Name] = true
+			}
+		case *ast.UpdateExpression:
+			if id, ok := v.Arg.(*ast.Identifier); ok {
+				out[id.Name] = true
 			}
 		}
-	case reflect.Slice, reflect.Array:
-		for i := 0; i < rv.Len(); i++ {
-			if rv.Index(i).CanInterface() {
-				collectReassignedIdents(rv.Index(i).Interface(), out)
-			}
-		}
-	}
+		return true
+	})
 }
 
 // scanConstRegex records `const <name> = /regex/` bindings and blacklists any
 // name it sees declared more than once (any kind, any scope) as ambiguous, so a
-// shadowed binding is never misattributed. Recurses through the common
-// statement containers; anything it does not descend into simply falls back to
-// the (match, offset, string) narrowing, never a miscount.
-func (e *Emitter) scanConstRegex(s ast.Statement) {
-	switch n := s.(type) {
-	case *ast.VarDeclaration:
-		e.recordConstRegex(n)
-	case *ast.VarDeclarationList:
-		for _, d := range n.Decls {
-			e.scanConstRegex(d)
+// shadowed binding is never misattributed. Every declaration in the program is
+// seen: the walk is the generated AST traversal.
+func (e *Emitter) scanConstRegex(root ast.Node) {
+	ast.Inspect(root, func(n ast.Node) bool {
+		if vd, ok := n.(*ast.VarDeclaration); ok {
+			e.recordConstRegex(vd)
 		}
-	case *ast.BlockStatement:
-		if n != nil {
-			for _, st := range n.Body {
-				e.scanConstRegex(st)
-			}
-		}
-	case *ast.IfStatement:
-		e.scanConstRegex(n.Consequent)
-		e.scanConstRegex(n.Alternate)
-	case *ast.ForStatement:
-		e.scanConstRegex(n.Init)
-		e.scanConstRegex(n.Body)
-	case *ast.ForOfStatement:
-		e.scanConstRegex(n.Body)
-	case *ast.ForInStatement:
-		e.scanConstRegex(n.Body)
-	case *ast.WhileStatement:
-		e.scanConstRegex(n.Body)
-	case *ast.DoWhileStatement:
-		e.scanConstRegex(n.Body)
-	case *ast.TryStatement:
-		if n.Body != nil {
-			for _, st := range n.Body.Body {
-				e.scanConstRegex(st)
-			}
-		}
-		if n.Catch != nil && n.Catch.Body != nil {
-			for _, st := range n.Catch.Body.Body {
-				e.scanConstRegex(st)
-			}
-		}
-		if n.Finally != nil {
-			for _, st := range n.Finally.Body {
-				e.scanConstRegex(st)
-			}
-		}
-	case *ast.LabeledStatement:
-		e.scanConstRegex(n.Body)
-	case *ast.FunctionDeclaration:
-		if n.Body != nil {
-			for _, st := range n.Body.Body {
-				e.scanConstRegex(st)
-			}
-		}
-	case *ast.ExportDeclaration:
-		e.scanConstRegex(n.Decl)
-	}
+		return true
+	})
 }
 
 func (e *Emitter) recordConstRegex(vd *ast.VarDeclaration) {

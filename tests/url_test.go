@@ -44,7 +44,7 @@ try {
   const u = new URL("not a url")
   console.log(u.href)
 } catch (e) {
-  console.log("caught: " + e.message)
+  console.log("caught: " + (e as Error).message)
 }
 `, "caught: Invalid URL")
 }

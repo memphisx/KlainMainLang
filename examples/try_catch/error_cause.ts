@@ -19,6 +19,6 @@ console.log(new Error("plain").cause)     // undefined
 try {
   throw high
 } catch (e) {
-  console.log("caught:", e.message)       // caught: config load failed
-  console.log("because:", String(e.cause)) // because: Error: disk read failed
+  console.log("caught:", (e as Error).message)       // caught: config load failed
+  console.log("because:", String((e as Error).cause)) // because: Error: disk read failed
 }

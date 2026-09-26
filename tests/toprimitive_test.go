@@ -7,7 +7,9 @@ import "testing"
 // relational, and bitwise operators. Values verified against `node`.
 
 func TestE2EToPrimitiveValueOfBitwise(t *testing.T) {
-	assertOutput(t, `
+	// Arithmetic on an object is a TypeScript type error: the strict lane
+	// rejects it, and -compat=js runs it with JavaScript's ToPrimitive.
+	assertOutputCompatJS(t, `
 const a = { valueOf: function() { return 6; } };
 console.log(a & 3);
 console.log(a | 1);
@@ -16,7 +18,9 @@ console.log(a << 1);
 }
 
 func TestE2EToPrimitiveValueOfArithmetic(t *testing.T) {
-	assertOutput(t, `
+	// Arithmetic on an object is a TypeScript type error: the strict lane
+	// rejects it, and -compat=js runs it with JavaScript's ToPrimitive.
+	assertOutputCompatJS(t, `
 const b = { valueOf: function() { return 5; } };
 console.log(b * 2);
 console.log(b - 3);
@@ -37,7 +41,9 @@ console.log(b >= 5);
 func TestE2EToPrimitiveSymbolToPrimitive(t *testing.T) {
 	// [Symbol.toPrimitive](hint) is consulted first — via the @@toPrimitive
 	// string-alias desugar, no dynamic-property-bag dependency.
-	assertOutput(t, `
+	// Arithmetic on an object is a TypeScript type error: the strict lane
+	// rejects it, and -compat=js runs it with JavaScript's ToPrimitive.
+	assertOutputCompatJS(t, `
 const c = { [Symbol.toPrimitive]: function(hint: string) { return 42; } };
 console.log(c * 1);
 console.log(c % 5);
@@ -61,7 +67,8 @@ console.log(String(p));
 func TestE2EToPrimitiveStringMethodArg(t *testing.T) {
 	// A string method's search argument is ToString'd: s.indexOf(obj) searches for
 	// obj's toString value, not its pointer.
-	assertOutput(t, `
+	// TypeScript rejects a non-string argument; JavaScript ToStrings it.
+	assertOutputCompatJS(t, `
 console.log("xABABx".indexOf({ toString: function() { return "AB"; } }));
 console.log("abcabc".lastIndexOf({ toString: function() { return "bc"; } }));
 `, "1\n4")
@@ -70,7 +77,8 @@ console.log("abcabc".lastIndexOf({ toString: function() { return "bc"; } }));
 func TestE2EToPrimitiveStringMethodSweep(t *testing.T) {
 	// includes/startsWith/endsWith and replace/replaceAll/split ToString an object
 	// argument; a RegExp argument is dispatched before coercion (not ToString'd).
-	assertOutput(t, `
+	// TypeScript rejects a non-string argument; JavaScript ToStrings it.
+	assertOutputCompatJS(t, `
 console.log("hello world".includes({ toString: function() { return "world"; } }));
 console.log("hello".startsWith({ toString: function() { return "he"; } }));
 console.log("hello".endsWith({ toString: function() { return "lo"; } }));
@@ -84,7 +92,9 @@ console.log("x1x1".replace(/1/g, "9"));
 func TestE2EToPrimitivePlusOperator(t *testing.T) {
 	// `+` uses the "default" hint (valueOf→toString); the result drives the
 	// concat-vs-add overload. Verified against `node`.
-	assertOutput(t, `
+	// Arithmetic on an object is a TypeScript type error: the strict lane
+	// rejects it, and -compat=js runs it with JavaScript's ToPrimitive.
+	assertOutputCompatJS(t, `
 const n = { valueOf: function() { return 5; } };
 console.log(n + 3);
 console.log("x" + n);
@@ -160,7 +170,9 @@ console.log(o);
 func TestE2EToPrimitiveValueOfObjectSkipsToString(t *testing.T) {
 	// valueOf returning a non-primitive is skipped; toString (numeric) wins —
 	// mirrors the spec's "if result is an Object, continue" for the number hint.
-	assertOutput(t, `
+	// Arithmetic on an object is a TypeScript type error: the strict lane
+	// rejects it, and -compat=js runs it with JavaScript's ToPrimitive.
+	assertOutputCompatJS(t, `
 const d = { valueOf: function() { return {}; }, toString: function() { return 3; } };
 console.log(d & 2);
 console.log(d * 4);
@@ -173,7 +185,9 @@ func TestE2EToPrimitiveBitwiseInlineObjectLiteral(t *testing.T) {
 	// truncated its raw pointer to i32 — invalid IR. The number-hint ToPrimitive
 	// ladder now runs on it before ToInt32, in both operand positions, including
 	// the toString-fallthrough when valueOf yields a non-primitive.
-	assertOutput(t, `
+	// Arithmetic on an object is a TypeScript type error: the strict lane
+	// rejects it, and -compat=js runs it with JavaScript's ToPrimitive.
+	assertOutputCompatJS(t, `
 console.log(({ valueOf: function() { return 1; } } & 1));
 console.log((1 & { toString: function() { return 1; } }));
 console.log((1 & { valueOf: function() { return {}; }, toString: function() { return 1; } }));

@@ -49,6 +49,30 @@ func adapterConvertible(concrete Type) bool {
 	return false
 }
 
+// restElem is a rest slot's element type (number when unannotated).
+func restElem(rest Type) Type {
+	if rest.ElemType != nil {
+		return *rest.ElemType
+	}
+	return TypeF64
+}
+
+// spreadConvertible reports whether a rest tail's element of type te can be
+// passed to a fixed parameter of type sp: the same scalar storage, or a
+// dynamic element unboxed (or a concrete one boxed) across the boundary.
+func spreadConvertible(te, sp Type) bool {
+	if sp.IsArray && te.IsDynamic {
+		return true // the box's array (emitUnboxBoxToType)
+	}
+	if sp.IsArray || te.IsArray || isNullableScalar(sp) || isNullableScalar(te) {
+		return false
+	}
+	if te.IsDynamic || sp.IsDynamic {
+		return adapterConvertible(te) || adapterConvertible(sp)
+	}
+	return storageIR(te) == storageIR(sp)
+}
+
 // restOf splits a function type into its fixed parameters and (optional)
 // rest slot type.
 func restOf(t Type) (fixed []Type, rest *Type) {
@@ -76,10 +100,23 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 	}
 	sFixed, sRest := restOf(src)
 	tFixed, tRest := restOf(tgt)
-	if len(sFixed) > len(tFixed) {
-		return false, false
-	}
 	supported = true
+	if len(sFixed) > len(tFixed) {
+		// More fixed source parameters than the target passes: only a
+		// target rest tail can supply them (`(a, b) => …` where `(...args:
+		// any[]) => void` is expected), each spread from it by position.
+		if tRest == nil || sRest != nil {
+			return false, false
+		}
+		needed = true
+		te := restElem(*tRest)
+		for _, sp := range sFixed[len(tFixed):] {
+			if !spreadConvertible(te, sp) {
+				supported = false
+			}
+		}
+		sFixed = sFixed[:len(tFixed)]
+	}
 	for i := range sFixed {
 		sp, tp := sFixed[i], tFixed[i]
 		if sp.IsDynamic != tp.IsDynamic {
@@ -168,6 +205,8 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 	src := orig.Ty
 	e.closureAdaptCtr++
 	name := fmt.Sprintf("@__kml_fnadapt_%d", e.closureAdaptCtr)
+	// The adapter's env is the original header: it is that function (TDD-00229).
+	e.registerFnMeta(name, "", 0, fnFlagThroughEnv)
 
 	sFixed, sRest := restOf(src)
 	tFixed, tRest := restOf(tgt)
@@ -201,7 +240,7 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 				argParts = append(argParts, fmt.Sprintf("%s %s", storageIR(sp), refs[0]))
 			}
 		case tp.IsDynamic: // dynamic argument → concrete parameter: unbox
-			v := e.emitUnboxBoxToType(refs[0], sp)
+			v := e.unboxArgToParam(refs[0], sp)
 			if sp.IsArray {
 				// The unboxed array is a {ptr,i64} aggregate; the target's array
 				// param expects a header pointer (TDD-00127).
@@ -240,6 +279,17 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 		refs := adapterSigParams(&sigParts, *tRest, len(tFixed), true)
 		if sRest != nil {
 			argParts = append(argParts, "ptr "+refs[0], "i64 "+refs[1])
+		}
+		// Source parameters past the target's fixed ones take the tail's
+		// elements by position; a missing one is undefined, as in JS.
+		te := restElem(*tRest)
+		for j := len(tFixed); j < len(sFixed); j++ {
+			a, ok := e.spreadRestArg(refs[0], refs[1], j-len(tFixed), te, sFixed[j])
+			if !ok {
+				buildOK = false
+				break
+			}
+			argParts = append(argParts, a)
 		}
 		// else: target rest tail dropped.
 	} else if sRest != nil {
@@ -324,4 +374,52 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 	e.ensureMalloc()
 	hdr := e.buildBuiltinClosure(name, orig.Ref)
 	return Value{Ref: hdr, Ty: tgt}, true
+}
+
+// spreadRestArg reads element k of a rest tail (header pointer hdr holding
+// its data pointer, length n) as the argument for a fixed parameter of type
+// sp, converting from the element type te; past the end it is undefined.
+func (e *Emitter) spreadRestArg(hdr, n string, k int, te, sp Type) (string, bool) {
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	e.ensureNanBox()
+	haveL, missL, joinL := e.freshLabel("spread.have"), e.freshLabel("spread.miss"), e.freshLabel("spread.join")
+	have := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %d", have, n, k))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", have, haveL, missL))
+	e.emitLabel(haveL)
+	data := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, hdr))
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gep, storageIR(te), data, k))
+	el := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", el, storageIR(te), gep))
+	// Every element crosses as a box word, so a missing one can be
+	// undefined whatever the parameter's type.
+	word := el
+	if !te.IsDynamic {
+		b, err := e.emitBoxValue(Value{Ref: el, Ty: te})
+		if err != nil {
+			return "", false
+		}
+		word = b.Ref
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", word, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(missL)
+	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(joinL)
+	w := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, slot))
+	if sp.IsDynamic {
+		return "i64 " + w, true
+	}
+	v := e.unboxArgToParam(w, sp)
+	if sp.IsArray {
+		// An array parameter takes its header pointer and length.
+		header, lReg := e.arrayArgFromAggregate(v)
+		return fmt.Sprintf("ptr %s, i64 %s", header, lReg), true
+	}
+	return fmt.Sprintf("%s %s", storageIR(sp), v.Ref), true
 }

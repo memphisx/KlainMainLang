@@ -159,16 +159,15 @@
       "statusRow": "Date arithmetic (date ± durationMs, date - date, date += durationMs)",
       "signature": "date + durationMs; date - durationMs; date - date; date += durationMs",
       "badge": "caveats",
-      "description": "Date - Date gives the difference in milliseconds (a number), matching real JS. Adding or subtracting a numeric duration produces a new Date you can keep chaining methods on.",
+      "description": "TypeScript rejects arithmetic on a Date, and so does the default strict lane: the millisecond count is getTime(). Under -compat=js, Date - Date gives the difference in milliseconds (a number), matching real JS.",
       "returns": {
         "type": "Date | number",
         "desc": "A new Date for ± duration; a number for Date - Date."
       },
       "exampleKey": "date/date",
-      "snippet": "const start: Date = new Date(0)\nconst tomorrow: Date = start + oneDayMs\nconst elapsedMs: number = tomorrow - start\nconsole.log(elapsedMs)                      // 86400000",
+      "snippet": "const start: Date = new Date(0)\nconst tomorrow: Date = new Date(start.getTime() + oneDayMs)\nconst elapsedMs: number = tomorrow.getTime() - start.getTime()\nconsole.log(elapsedMs)                      // 86400000",
       "differences": [
-        "`Date ± number` gives a new Date (a deliberate deviation from real JS, where `+` on a Date string-concatenates instead — numeric duration arithmetic is far more useful for this compiler's plain-number Date representation)",
-        "`Date + Date`, `number - Date`, and compound-assigning a Date into a Date are all rejected at compile time"
+        "Under -compat=js, `Date ± number` gives a new Date; JavaScript converts the Date to a string for `+` (concatenation) and to its millisecond count for `-` (a number)"
       ],
       "seeAlso": [
         "Date",

@@ -652,3 +652,18 @@ class Endpoint {
 const endpoint = new Endpoint("localhost", 8080);
 console.log(endpoint.url());
 // endpoint.host = "other";  // compile error: cannot assign to a read-only property
+
+// `name!: T` is a definite assignment assertion: the field is set outside
+// the constructor (here by a helper method), and the `!` says so.
+class Conn {
+    host!: string;
+    port!: number;
+    constructor(url: string) { this.init(url); }
+    init(url: string): void {
+        const i = url.indexOf(":");
+        this.host = url.slice(0, i);
+        this.port = Number(url.slice(i + 1));
+    }
+}
+const conn = new Conn("thessaloniki.example:8080");
+console.log(conn.host, conn.port);  // thessaloniki.example 8080

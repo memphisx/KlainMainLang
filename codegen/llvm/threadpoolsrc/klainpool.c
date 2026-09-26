@@ -37,6 +37,12 @@ extern void __kml_win_port_wake(void *port);
 #else
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/un.h>
+#include <poll.h>
 #endif
 
 // ---- IR-exported thunks (Promise/exception layout lives in the emitted IR) --
@@ -60,13 +66,8 @@ extern void __kml_pool_thunk_readdir(const char *path, struct kml_triple *out);
 // TypedArray body, copied raw at submit so no GC pointer crosses the thread).
 extern void __kml_pool_thunk_writefile_bytes(const char *path, const void *data, int64_t len, struct kml_triple *out);
 extern void __kml_pool_thunk_appendfile_bytes(const char *path, const void *data, int64_t len, struct kml_triple *out);
+extern void __kml_pool_thunk_readfile_bytes(const char *path, struct kml_triple *out);
 extern void __kml_pool_settle(void *promise, int64_t v0, int64_t v1, int64_t state);
-// TDD-00186 stream drain (loop thread): enqueue one chunk / close / error the
-// readable, and re-run the WHATWG pull check to grant the next credit.
-extern void __kml_pool_stream_chunk(void *rs, int64_t chunk);
-extern void __kml_pool_stream_end(void *rs);
-extern void __kml_pool_stream_error(void *rs, int64_t err_errno);
-extern void __kml_rs_pull_if_needed(void *rs);
 
 #ifdef KLAINPOOL_GC
 // Under -mm=gc a worker allocates GC memory (the read buffer / result string),
@@ -82,54 +83,44 @@ extern void GC_allow_register_threads(void);
 #endif
 #endif
 
-// A completion's drain action on the loop thread (TDD-00186 adds the stream
-// kinds). The one-shot fs ops post one SETTLE; a createReadStream job posts many
-// STREAM_CHUNKs and a terminal STREAM_END.
+// A completion's drain action on the loop thread: a one-shot fs op settles its
+// Promise; a native operation calls its callback.
 enum {
     KML_CMP_SETTLE = 0,      // settle a Promise (target = promise, v0/v1/state)
-    KML_CMP_STREAM_CHUNK,    // enqueue a chunk into a readable (target = ctl, v0 = chunk ptr)
-    KML_CMP_STREAM_END,      // close a readable (target = ctl)
-    KML_CMP_STREAM_ERROR,    // error a readable (target = ctl, v0 = errno)
+    KML_CMP_CALL,            // a native operation's callback (inv/clo, err/result)
 };
 
-// TDD-00186 backpressure: a demand-driven read stream. The worker reads exactly
-// one chunk per credit and blocks otherwise; the loop grants a credit from the
-// readable's pull hook (fired by the WHATWG machinery when the consumer drains
-// below the high-water mark) and re-arms it as each chunk is drained — so at most
-// ~one chunk is outstanding. `inflight` is loop-only (guards against a double
-// grant while a read is in flight); `credits` is the worker's condvar signal.
-typedef struct kml_stream_ctl {
-    pthread_mutex_t mu;
-    pthread_cond_t  cv;
-    int64_t credits;         // worker go-signal (mutex-guarded)
-    int inflight;            // loop-only: a read is dispatched, not yet drained
-    int stop;                // loop sets on cancel; worker exits its wait
-    void *rs;                // the readable (loop-thread use only)
-    void *fp;                // FILE* opened on the loop thread
-    int64_t hwm;             // fread chunk size
-    struct kml_loop_port *port;
-} kml_stream_ctl;
-
-// One struct, reused as work item (loop -> pool), stream job, and completion
-// item (pool -> loop). arg0/arg1 are strdup'd copies the item owns and frees.
+// One struct, reused as work item (loop -> pool) and completion item (pool ->
+// loop). arg0/arg1 are strdup'd copies the item owns and frees.
 typedef struct kml_pool_item {
     struct kml_pool_item *next;
     int opid;               // work: which fs op (KML_OP_*)
     int kind;               // completion: drain action (KML_CMP_*)
-    void *promise;          // completion target: a Promise, or (stream) the readable
+    void *promise;          // completion target: a Promise
     char *arg0;
     char *arg1;
     void *data;             // binary write: raw malloc'd byte buffer the item owns
     int64_t datalen;        // binary write: its byte length
-    void *fp;               // stream job: the FILE* opened on the loop thread
-    int64_t hwm;            // stream job: highWaterMark chunk size
     struct kml_loop_port *port;
     int64_t state;          // worker fills: 1 fulfilled / 2 rejected
-    int64_t v0;             // worker fills: result word 0 (or Error ptr on reject / chunk ptr)
+    int64_t v0;             // worker fills: result word 0 (or Error ptr on reject)
     int64_t v1;             // worker fills: result word 1 (readdir's length; else 0)
+    // A native operation (KML_OP_NATIVE): its work, run on a worker, fills
+    // err/res; the loop then calls inv(clo, err, res). a[] and buf/buflen are
+    // its arguments. live links it into native_live while it is pending.
+    void (*work)(struct kml_pool_item *);
+    void *inv;
+    void *clo;
+    int64_t a[4];
+    void *buf;
+    int64_t buflen;
+    int64_t err;            // a positive errno, or 0
+    double res;
+    char *res_str;          // a string result, read by nativeLastString()
+    struct kml_pool_item *live_prev, *live_next;
 } kml_pool_item;
 
-// Op ids — must match the lowering in emit_fs_async.go / emit_fs_stream.go.
+// Op ids — must match the lowering in emit_fs_async.go.
 enum {
     KML_OP_READFILE = 0,
     KML_OP_WRITEFILE,
@@ -140,9 +131,10 @@ enum {
     KML_OP_RENAME,
     KML_OP_COPYFILE,
     KML_OP_READDIR,
-    KML_OP_READSTREAM,      // TDD-00186: chunked file read feeding a Readable
     KML_OP_WRITEFILE_BYTES,  // TDD-00185: writeFile of a raw byte buffer
     KML_OP_APPENDFILE_BYTES, // TDD-00185: appendFile of a raw byte buffer
+    KML_OP_READFILE_BYTES,   // readFile with no encoding: the file's bytes
+    KML_OP_NATIVE,           // a native operation: the item's own work function
 };
 
 // Per-loop completion port: a Treiber stack the workers push completions onto,
@@ -211,67 +203,12 @@ static void push_completion(kml_loop_port *p, kml_pool_item *it) {
 #endif
 }
 
-// Post a fresh completion (kind, target, v0) to the loop. Used by the stream
-// job, which emits many completions from one work item.
-static void post_completion(kml_loop_port *p, int kind, void *target, int64_t v0) {
-    kml_pool_item *c = (kml_pool_item *)calloc(1, sizeof *c);
-    c->kind = kind;
-    c->promise = target;
-    c->v0 = v0;
-    c->port = p;
-    push_completion(p, c);
-}
-
-static void free_stream_ctl(kml_stream_ctl *ctl) {
-    pthread_mutex_destroy(&ctl->mu);
-    pthread_cond_destroy(&ctl->cv);
-    free(ctl);
-}
-
-// TDD-00186: read a file in hwm chunks on the worker, ONE chunk per credit
-// (backpressure). Blocks on the condvar until the loop grants a credit from the
-// readable's pull hook; posts each chunk as a STREAM_CHUNK, a terminal
-// STREAM_END at clean EOF, or a STREAM_ERROR on a mid-read failure / a consumer
-// cancel (`stop`). The chunk is a length-prefixed KML string (length at data-8),
-// built in plain C — the readable leaks its chunks (as the eager path did), so
-// no GC alloc happens off-thread.
-static void run_read_stream(kml_stream_ctl *ctl) {
-    FILE *f = (FILE *)ctl->fp;
-    kml_loop_port *p = ctl->port;
-    int64_t hwm = ctl->hwm > 0 ? ctl->hwm : 65536;
-    int err_errno = 0;               // 0 = clean EOF (or cancel); nonzero = error
-    for (;;) {
-        pthread_mutex_lock(&ctl->mu);
-        while (ctl->credits <= 0 && !ctl->stop) pthread_cond_wait(&ctl->cv, &ctl->mu);
-        int stop = ctl->stop;
-        if (!stop) ctl->credits--;
-        pthread_mutex_unlock(&ctl->mu);
-        if (stop) break;             // consumer cancelled — end the stream cleanly
-
-        char *base = (char *)malloc((size_t)hwm + 9);
-        if (!base) { err_errno = ENOMEM; break; }
-        size_t n = f ? fread(base + 8, 1, (size_t)hwm, f) : 0;
-        if (n == 0) {
-            if (f && ferror(f)) err_errno = EIO;
-            free(base);
-            break;
-        }
-        *(int64_t *)base = (int64_t)n;   // length header at data-8
-        base[8 + n] = 0;                 // NUL terminator
-        post_completion(p, KML_CMP_STREAM_CHUNK, ctl, (int64_t)(intptr_t)(base + 8));
-    }
-    if (f) fclose(f);
-    if (err_errno) post_completion(p, KML_CMP_STREAM_ERROR, ctl, (int64_t)err_errno);
-    else post_completion(p, KML_CMP_STREAM_END, ctl, 0);
-}
-
-// Run one work item. Returns 1 if the item itself should be pushed as its
-// completion (the one-shot ops), 0 if it posted its own completions and should
-// be freed (the stream job).
-static int run_item(kml_pool_item *it) {
-    if (it->opid == KML_OP_READSTREAM) {
-        run_read_stream((kml_stream_ctl *)it->promise);
-        return 0;
+// Run one work item, which becomes its own completion.
+static void run_item(kml_pool_item *it) {
+    if (it->opid == KML_OP_NATIVE) {
+        it->work(it);
+        it->kind = KML_CMP_CALL;
+        return;
     }
     struct kml_triple r = { 0, 0, NULL };
     switch (it->opid) {
@@ -286,6 +223,7 @@ static int run_item(kml_pool_item *it) {
     case KML_OP_READDIR:    __kml_pool_thunk_readdir(it->arg0, &r); break;
     case KML_OP_WRITEFILE_BYTES:  __kml_pool_thunk_writefile_bytes(it->arg0, it->data, it->datalen, &r); break;
     case KML_OP_APPENDFILE_BYTES: __kml_pool_thunk_appendfile_bytes(it->arg0, it->data, it->datalen, &r); break;
+    case KML_OP_READFILE_BYTES:   __kml_pool_thunk_readfile_bytes(it->arg0, &r); break;
     default:                r.err = (void *)1; break;
     }
     it->kind = KML_CMP_SETTLE;
@@ -302,7 +240,6 @@ static int run_item(kml_pool_item *it) {
         it->v0 = r.v0;
         it->v1 = r.v1;
     }
-    return 1;
 }
 
 static void *worker_main(void *arg) {
@@ -321,14 +258,8 @@ static void *worker_main(void *arg) {
         pthread_mutex_unlock(&q_mu);
 
         it->next = NULL;
-        if (run_item(it)) {
-            push_completion(it->port, it);   // one-shot: the item is its own completion
-        } else {
-            free(it->arg0);
-            free(it->arg1);
-            free(it->data);
-            free(it);                         // stream job: completions already posted
-        }
+        run_item(it);
+        push_completion(it->port, it);       // the item is its own completion
     }
     return NULL;
 }
@@ -355,15 +286,11 @@ static void ensure_pool_locked(void) {
 }
 
 // ---- submit (called on the loop thread) ------------------------------------
-// Enqueue a prepared work item and bump this loop's inflight count. Only the
-// terminal completion (SETTLE, or a stream's STREAM_END) decrements inflight, so
-// the loop stays alive across a whole multi-chunk stream read.
-// bump: whether the submit itself is an in-flight read (one-shot ops), or not
-// (a demand-driven read stream, where each granted credit — not the submit —
-// bumps inflight, so an unconsumed stream doesn't pin the loop alive).
-static void enqueue_work(kml_loop_port *p, kml_pool_item *it, int bump) {
+// Enqueue a prepared work item and bump this loop's inflight count, which its
+// completion decrements: the loop stays alive while it is in flight.
+static void enqueue_work(kml_loop_port *p, kml_pool_item *it) {
     it->port = p;
-    if (bump) atomic_fetch_add_explicit(&p->inflight, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&p->inflight, 1, memory_order_relaxed);
     pthread_mutex_lock(&q_mu);
     ensure_pool_locked();
     if (q_tail) q_tail->next = it; else q_head = it;
@@ -380,7 +307,7 @@ void __kml_pool_submit(int opid, void *promise, const char *arg0, const char *ar
     it->promise = promise;
     it->arg0 = arg0 ? strdup(arg0) : NULL;
     it->arg1 = arg1 ? strdup(arg1) : NULL;
-    enqueue_work(loop_port(), it, 1);
+    enqueue_work(loop_port(), it);
 }
 
 // TDD-00185: submit a binary writeFile/appendFile. The byte buffer is copied
@@ -396,61 +323,847 @@ void __kml_pool_submit_write_bytes(int opid, void *promise, const char *path, co
         it->data = malloc((size_t)len);
         if (it->data) memcpy(it->data, data, (size_t)len);
     }
-    enqueue_work(loop_port(), it, 1);
+    enqueue_work(loop_port(), it);
 }
 
-// TDD-00186: allocate a demand-driven read-stream control block on the loop
-// thread. `rs` is the readable, `fp` the FILE* opened synchronously, `hwm` the
-// fread chunk size. The returned handle is the env of the pull/cancel closures
-// installed on the readable and the work item's target.
-void *__kml_pool_stream_ctl_new(void *rs, void *fp, int64_t hwm) {
-    kml_stream_ctl *ctl = (kml_stream_ctl *)calloc(1, sizeof *ctl);
-    pthread_mutex_init(&ctl->mu, NULL);
-    pthread_cond_init(&ctl->cv, NULL);
-    ctl->rs = rs;
-    ctl->fp = fp;
-    ctl->hwm = hwm;
-    ctl->port = loop_port();
-    return ctl;
+// ---- native operations (TDD-00231) -----------------------------------------
+// The primitives the builtin modules written in TypeScript call (lib/native.d.ts):
+// each runs one blocking syscall on a worker and calls its callback on the loop
+// thread with (errno or 0, result). A pending operation is linked into
+// native_live, a process-wide root: the collector scans globals but not the
+// loop thread's TLS port, and the callback's closure (and the buffer it keeps)
+// must stay reachable while the syscall runs.
+
+static pthread_mutex_t live_mu = PTHREAD_MUTEX_INITIALIZER;
+static kml_pool_item *native_live = NULL;
+
+static void native_link(kml_pool_item *it) {
+    pthread_mutex_lock(&live_mu);
+    it->live_prev = NULL;
+    it->live_next = native_live;
+    if (native_live) native_live->live_prev = it;
+    native_live = it;
+    pthread_mutex_unlock(&live_mu);
 }
 
-// TDD-00186: submit a chunked read for a control block onto the pool.
-void __kml_pool_submit_readstream(void *ctl) {
+static void native_unlink(kml_pool_item *it) {
+    pthread_mutex_lock(&live_mu);
+    if (it->live_prev) it->live_prev->live_next = it->live_next;
+    else native_live = it->live_next;
+    if (it->live_next) it->live_next->live_prev = it->live_prev;
+    pthread_mutex_unlock(&live_mu);
+}
+
+static kml_pool_item *native_item(void (*work)(kml_pool_item *), void *inv, void *clo) {
     kml_pool_item *it = (kml_pool_item *)calloc(1, sizeof *it);
-    it->opid = KML_OP_READSTREAM;
-    it->promise = ctl;
-    enqueue_work(loop_port(), it, 0);   // credits, not the submit, bump inflight
+    it->opid = KML_OP_NATIVE;
+    it->work = work;
+    it->inv = inv;
+    it->clo = clo;
+    return it;
 }
 
-// TDD-00186 pull hook (loop thread): the readable's field-9 pull closure. Grant
-// exactly one read credit unless one is already in flight — returns NULL (a
-// synchronous pull); the chunk lands later via the completion drain, which
-// clears `inflight` and re-arms the pull.
-void *__kml_pool_stream_pull(void *ctlv) {
-    kml_stream_ctl *ctl = (kml_stream_ctl *)ctlv;
-    if (ctl->inflight) return NULL;
-    ctl->inflight = 1;
-    // A dispatched read keeps the loop alive; its completion (chunk/end/error)
-    // decrements. Between reads a demand-starved stream sits at 0, so an
-    // abandoned consumer lets the loop exit rather than hang.
-    atomic_fetch_add_explicit(&ctl->port->inflight, 1, memory_order_relaxed);
-    pthread_mutex_lock(&ctl->mu);
-    ctl->credits++;
-    pthread_cond_signal(&ctl->cv);
-    pthread_mutex_unlock(&ctl->mu);
-    return NULL;
+static void native_submit(kml_pool_item *it) {
+    native_link(it);
+    enqueue_work(loop_port(), it);
 }
 
-// TDD-00186 cancel hook (loop thread): the readable's field-10 cancel closure.
-// Tell the worker to stop; it wakes, ends the stream, and the drain frees ctl.
-void *__kml_pool_stream_cancel(void *ctlv) {
-    kml_stream_ctl *ctl = (kml_stream_ctl *)ctlv;
-    pthread_mutex_lock(&ctl->mu);
-    ctl->stop = 1;
-    pthread_cond_signal(&ctl->cv);
-    pthread_mutex_unlock(&ctl->mu);
-    return NULL;
+#ifdef _WIN32
+#include <io.h>
+#define kml_fsync _commit
+// No pread/pwrite in the C runtime: seek, then transfer. A positioned
+// transfer on a descriptor shared across workers is not atomic here.
+static int64_t kml_pread(int fd, void *b, size_t n, int64_t pos) {
+    if (_lseeki64(fd, pos, SEEK_SET) < 0) return -1;
+    return _read(fd, b, (unsigned)n);
 }
+static int64_t kml_pwrite(int fd, const void *b, size_t n, int64_t pos) {
+    if (_lseeki64(fd, pos, SEEK_SET) < 0) return -1;
+    return _write(fd, b, (unsigned)n);
+}
+#else
+#define kml_fsync fsync
+static int64_t kml_pread(int fd, void *b, size_t n, int64_t pos) { return pread(fd, b, n, (off_t)pos); }
+static int64_t kml_pwrite(int fd, const void *b, size_t n, int64_t pos) { return pwrite(fd, b, n, (off_t)pos); }
+#endif
+
+static void work_open(kml_pool_item *it) {
+#ifdef O_CLOEXEC
+    int fd = open(it->arg0, (int)it->a[0] | O_CLOEXEC, (int)it->a[1]);
+#else
+    int fd = open(it->arg0, (int)it->a[0], (int)it->a[1]);
+#endif
+    if (fd < 0) it->err = errno; else it->res = fd;
+}
+
+static void work_close(kml_pool_item *it) {
+    if (close((int)it->a[0]) != 0) it->err = errno;
+}
+
+static void work_fsync(kml_pool_item *it) {
+    if (kml_fsync((int)it->a[0]) != 0) it->err = errno;
+}
+
+// a[0] fd, a[1] length, a[2] position (-1: the file's current position); buf
+// is the region to fill or send.
+static void work_read(kml_pool_item *it) {
+    int64_t n;
+    do {
+        n = it->a[2] < 0 ? read((int)it->a[0], it->buf, (size_t)it->a[1])
+                         : kml_pread((int)it->a[0], it->buf, (size_t)it->a[1], it->a[2]);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0) it->err = errno; else it->res = (double)n;
+}
+
+static void work_write(kml_pool_item *it) {
+    int64_t n;
+    do {
+        n = it->a[2] < 0 ? write((int)it->a[0], it->buf, (size_t)it->a[1])
+                         : kml_pwrite((int)it->a[0], it->buf, (size_t)it->a[1], it->a[2]);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0) it->err = errno; else it->res = (double)n;
+}
+
+void __kml_native_fs_open(const char *path, double flags, double mode, void *inv, void *clo) {
+    kml_pool_item *it = native_item(work_open, inv, clo);
+    it->arg0 = strdup(path ? path : "");
+    it->a[0] = (int64_t)flags;
+    it->a[1] = (int64_t)mode;
+    native_submit(it);
+}
+
+void __kml_native_fs_close(double fd, void *inv, void *clo) {
+    kml_pool_item *it = native_item(work_close, inv, clo);
+    it->a[0] = (int64_t)fd;
+    native_submit(it);
+}
+
+void __kml_native_fs_fsync(double fd, void *inv, void *clo) {
+    kml_pool_item *it = native_item(work_fsync, inv, clo);
+    it->a[0] = (int64_t)fd;
+    native_submit(it);
+}
+
+// The region [offset, offset+length) of the buffer (data, size); the caller
+// has validated it, and a region past the end is clamped, never overrun.
+static void native_region(kml_pool_item *it, void *data, int64_t size, double offset, double length) {
+    int64_t off = (int64_t)offset, len = (int64_t)length;
+    if (off < 0) off = 0;
+    if (off > size) off = size;
+    if (len < 0) len = 0;
+    if (len > size - off) len = size - off;
+    it->buf = (char *)data + off;
+    it->a[1] = len;
+}
+
+void __kml_native_fs_read(double fd, void *data, int64_t size, double offset, double length, double position, void *inv, void *clo) {
+    kml_pool_item *it = native_item(work_read, inv, clo);
+    it->a[0] = (int64_t)fd;
+    native_region(it, data, size, offset, length);
+    it->a[2] = position >= 0 ? (int64_t)position : -1;
+    native_submit(it);
+}
+
+void __kml_native_fs_write(double fd, void *data, int64_t size, double offset, double length, double position, void *inv, void *clo) {
+    kml_pool_item *it = native_item(work_write, inv, clo);
+    it->a[0] = (int64_t)fd;
+    native_region(it, data, size, offset, length);
+    it->a[2] = position >= 0 ? (int64_t)position : -1;
+    native_submit(it);
+}
+
+// Node's stringToFlags: an open-flags string as the platform's O_* bits, or
+// -1 for one Node rejects.
+double __kml_native_fs_flags(const char *s) {
+    if (!s) return -1;
+#ifndef O_SYNC
+#define O_SYNC 0
+#endif
+    static const struct { const char *name; int flags; } table[] = {
+        {"r", O_RDONLY}, {"rs", O_RDONLY | O_SYNC}, {"sr", O_RDONLY | O_SYNC},
+        {"r+", O_RDWR}, {"rs+", O_RDWR | O_SYNC}, {"sr+", O_RDWR | O_SYNC},
+        {"w", O_TRUNC | O_CREAT | O_WRONLY}, {"wx", O_TRUNC | O_CREAT | O_WRONLY | O_EXCL},
+        {"xw", O_TRUNC | O_CREAT | O_WRONLY | O_EXCL},
+        {"w+", O_TRUNC | O_CREAT | O_RDWR}, {"wx+", O_TRUNC | O_CREAT | O_RDWR | O_EXCL},
+        {"xw+", O_TRUNC | O_CREAT | O_RDWR | O_EXCL},
+        {"a", O_APPEND | O_CREAT | O_WRONLY}, {"ax", O_APPEND | O_CREAT | O_WRONLY | O_EXCL},
+        {"xa", O_APPEND | O_CREAT | O_WRONLY | O_EXCL},
+        {"as", O_APPEND | O_CREAT | O_WRONLY | O_SYNC}, {"sa", O_APPEND | O_CREAT | O_WRONLY | O_SYNC},
+        {"a+", O_APPEND | O_CREAT | O_RDWR}, {"ax+", O_APPEND | O_CREAT | O_RDWR | O_EXCL},
+        {"xa+", O_APPEND | O_CREAT | O_RDWR | O_EXCL},
+        {"as+", O_APPEND | O_CREAT | O_RDWR | O_SYNC}, {"sa+", O_APPEND | O_CREAT | O_RDWR | O_SYNC},
+    };
+    for (size_t i = 0; i < sizeof table / sizeof table[0]; i++)
+        if (strcmp(s, table[i].name) == 0) return table[i].flags;
+    return -1;
+}
+
+// ---- a native callback's string result -------------------------------------
+// A callback's arguments are numbers; a string result (a resolved address)
+// is read with nativeLastString() inside the callback.
+static __thread char *native_last_str = NULL;
+
+static void native_set_last_string(const char *s) {
+    free(native_last_str);
+    native_last_str = s ? strdup(s) : NULL;
+}
+
+// For the other runtime units (tls.c).
+void __kml_native_set_last_string(const char *s) { native_set_last_string(s); }
+
+// A headered KML string copy of the last string result ("" when none).
+extern char *__kml_str_alloc(int64_t n);
+extern void __kml_str_finalize(char *s);
+char *__kml_native_last_string(void) {
+    const char *src = native_last_str ? native_last_str : "";
+    int64_t n = (int64_t)strlen(src);
+    char *out = __kml_str_alloc(n + 1);
+    memcpy(out, src, (size_t)n + 1);
+    __kml_str_finalize(out);
+    return out;
+}
+
+#ifndef _WIN32 // the TCP handles and dns.lookup: POSIX sockets (net keeps its codegen form on Windows)
+// ---- dns.lookup (getaddrinfo on the pool) --------------------------------------
+// The callback gets (0, family) with the address as the last string, or
+// (10000 + EAI code, 0) when the lookup fails.
+static void work_lookup(kml_pool_item *it) {
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = it->a[0] == 4 ? AF_INET : it->a[0] == 6 ? AF_INET6 : 0;
+    hints.ai_socktype = SOCK_STREAM;
+    int rc = getaddrinfo(it->arg0, NULL, &hints, &res);
+    if (rc != 0 || !res) {
+        it->err = 10000 + (rc < 0 ? -rc : rc);
+        return;
+    }
+    char buf[64] = {0};
+    if (res->ai_family == AF_INET6) {
+        inet_ntop(AF_INET6, &((struct sockaddr_in6 *)res->ai_addr)->sin6_addr, buf, sizeof buf);
+        it->res = 6;
+    } else {
+        inet_ntop(AF_INET, &((struct sockaddr_in *)res->ai_addr)->sin_addr, buf, sizeof buf);
+        it->res = 4;
+    }
+    it->res_str = strdup(buf);
+    freeaddrinfo(res);
+}
+
+void __kml_native_dns_lookup(const char *host, double family, void *inv, void *clo) {
+    kml_pool_item *it = native_item(work_lookup, inv, clo);
+    it->arg0 = strdup(host ? host : "");
+    it->a[0] = (int64_t)family;
+    native_submit(it);
+}
+
+// The EAI code's name, as Node's err.code (ENOTFOUND for a name that does
+// not resolve).
+char *__kml_native_eai_code(double code) {
+    const char *name = "EAI_FAIL";
+    int c = (int)code;
+#ifdef EAI_NONAME
+    if (c == (EAI_NONAME < 0 ? -EAI_NONAME : EAI_NONAME)) name = "ENOTFOUND";
+#endif
+#ifdef EAI_NODATA
+    if (c == (EAI_NODATA < 0 ? -EAI_NODATA : EAI_NODATA)) name = "ENOTFOUND";
+#endif
+#ifdef EAI_AGAIN
+    if (c == (EAI_AGAIN < 0 ? -EAI_AGAIN : EAI_AGAIN)) name = "EAI_AGAIN";
+#endif
+    int64_t n = (int64_t)strlen(name);
+    char *out = __kml_str_alloc(n + 1);
+    memcpy(out, name, (size_t)n + 1);
+    __kml_str_finalize(out);
+    return out;
+}
+
+// ---- TCP handles (Node's tcp_wrap, libuv-shaped) ------------------------------
+// A handle is an integer id into a process-wide table, a collector root for
+// the closures it holds. The reactor wakes on the handles' fds; dispatch
+// polls each one and runs what became ready: an accept, a connect's
+// completion, a read, a queued write's progress, a shutdown, a close.
+typedef struct kml_wreq {
+    struct kml_wreq *next;
+    char *data;
+    int64_t len, off;
+    void *inv, *clo;
+} kml_wreq;
+
+typedef struct kml_tcp {
+    int fd;
+    int server, listening, connecting, reading, refd;
+    int closing, closed_notified, shut_pending, shut_done, read_eof;
+    void *conn_inv, *conn_clo;       // server: onConnection
+    void *connect_inv, *connect_clo; // client: onConnect
+    void *read_inv, *read_clo;       // onRead
+    void *shut_inv, *shut_clo;
+    void *close_inv, *close_clo;
+    kml_wreq *wq_head, *wq_tail;
+    char *rbuf;
+    int64_t rlen;
+    char *pipe_path; // a listening pipe's path, unlinked at its close
+    // TLS over the handle (tls.c's, Node's tls_wrap): the session, its state
+    // (0 none, 1 handshaking, 2 open, 3 failed) and onSecure(status, 0).
+    void *tls;
+    int tls_state;
+    void *sec_inv, *sec_clo;
+} kml_tcp;
+
+// The TLS session operations tls.c installs: I/O returns bytes, 0 at the
+// end of the stream (read), -EAGAIN when the session waits on the socket,
+// or another -errno / -(10000 + reason) for an error.
+typedef struct kml_tls_ops {
+    int (*handshake)(void *tls);  // 1 done, 0 waiting, <0 error
+    int64_t (*read)(void *tls, char *buf, int64_t n);
+    int64_t (*write)(void *tls, const char *buf, int64_t n);
+    int (*want_write)(void *tls);
+    int (*pending)(void *tls);
+    void (*shutdown)(void *tls);
+    void (*free)(void *tls);
+} kml_tls_ops;
+static const kml_tls_ops *tcp_tls = NULL;
+
+void __kml_tcp_set_tls_ops(const void *ops) { tcp_tls = (const kml_tls_ops *)ops; }
+
+static kml_tcp **tcp_tab = NULL;
+static int tcp_cap = 0, tcp_n = 0;
+
+static int tcp_new(int fd) {
+    if (tcp_n == tcp_cap) {
+        int nc = tcp_cap ? tcp_cap * 2 : 16;
+        kml_tcp **nt = (kml_tcp **)calloc((size_t)nc, sizeof *nt);
+        if (tcp_tab) memcpy(nt, tcp_tab, (size_t)tcp_cap * sizeof *nt);
+        tcp_tab = nt;
+        tcp_cap = nc;
+    }
+    kml_tcp *h = (kml_tcp *)calloc(1, sizeof *h);
+    h->fd = fd;
+    h->refd = 1;
+    tcp_tab[tcp_n] = h;
+    return tcp_n++;
+}
+
+static kml_tcp *tcp_get(double id) {
+    int i = (int)id;
+    return (i >= 0 && i < tcp_n) ? tcp_tab[i] : NULL;
+}
+
+int __kml_tcp_fd(double id) {
+    kml_tcp *h = tcp_get(id);
+    return h ? h->fd : -1;
+}
+
+// Start TLS on the handle: the handshake runs in the dispatch, then
+// onSecure(0, 0), or onSecure(error, 0).
+int __kml_tcp_attach_tls(double id, void *tls, void *inv, void *clo) {
+    kml_tcp *h = tcp_get(id);
+    if (!h || h->fd < 0) return -EBADF;
+    h->tls = tls;
+    h->tls_state = 1;
+    h->sec_inv = inv;
+    h->sec_clo = clo;
+    return 0;
+}
+
+void *__kml_tcp_tls(double id) {
+    kml_tcp *h = tcp_get(id);
+    return h ? h->tls : NULL;
+}
+
+// Plain or TLS I/O on the handle: bytes, -EAGAIN, or another -errno.
+static int64_t tcp_send(kml_tcp *h, const char *p, int64_t n) {
+    if (h->tls && tcp_tls) return tcp_tls->write(h->tls, p, n);
+#ifdef MSG_NOSIGNAL
+    int64_t r = send(h->fd, p, (size_t)n, MSG_NOSIGNAL);
+#else
+    int64_t r = write(h->fd, p, (size_t)n);
+#endif
+    if (r < 0) return (errno == EWOULDBLOCK || errno == EINTR) ? -EAGAIN : -errno;
+    return r;
+}
+
+static int64_t tcp_recv(kml_tcp *h, char *p, int64_t n) {
+    if (h->tls && tcp_tls) return tcp_tls->read(h->tls, p, n);
+    int64_t r = read(h->fd, p, (size_t)n);
+    if (r < 0) return (errno == EWOULDBLOCK || errno == EINTR) ? -EAGAIN : -errno;
+    return r;
+}
+
+static void set_nonblock(int fd) {
+    int fl = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+
+typedef void (*kml_inv2)(void *, double, double);
+#define TCP_CALL(inv, clo, a, b) ((kml_inv2)(inv))((clo), (double)(a), (double)(b))
+
+// Parse an IP string into a sockaddr; 0 on success.
+static int tcp_addr(const char *host, int port, struct sockaddr_storage *ss, socklen_t *len) {
+    memset(ss, 0, sizeof *ss);
+    struct sockaddr_in6 *a6 = (struct sockaddr_in6 *)ss;
+    struct sockaddr_in *a4 = (struct sockaddr_in *)ss;
+    if (host && strchr(host, ':')) {
+        a6->sin6_family = AF_INET6;
+        a6->sin6_port = htons((unsigned short)port);
+        if (inet_pton(AF_INET6, host, &a6->sin6_addr) != 1) return EINVAL;
+        *len = sizeof *a6;
+        return 0;
+    }
+    a4->sin_family = AF_INET;
+    a4->sin_port = htons((unsigned short)port);
+    if (inet_pton(AF_INET, host && *host ? host : "0.0.0.0", &a4->sin_addr) != 1) return EINVAL;
+    *len = sizeof *a4;
+    return 0;
+}
+
+// A cluster worker tells the primary it is listening (the cluster runtime's
+// strong definition replaces this one when the program uses cluster).
+#ifndef _WIN32
+__attribute__((weak)) void __kml_cluster_announce_listening_at(int32_t port, const char *host) { (void)port; (void)host; }
+#endif
+
+// Listen on host:port ("" is every address, IPv6 dual-stack when possible).
+// Returns the handle id, or -errno.
+double __kml_native_tcp_listen(const char *host, double port, double backlog, void *inv, void *clo) {
+    struct sockaddr_storage ss;
+    socklen_t len;
+    int any = !host || !*host;
+    int fd = -1;
+    if (any) {
+        fd = socket(AF_INET6, SOCK_STREAM, 0);
+        if (fd >= 0) {
+            int off = 0;
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off);
+            tcp_addr("::", (int)port, &ss, &len);
+        }
+    }
+    if (fd < 0) {
+        if (tcp_addr(any ? "0.0.0.0" : host, (int)port, &ss, &len) != 0) return -EINVAL;
+        fd = socket(ss.ss_family, SOCK_STREAM, 0);
+        if (fd < 0) return -errno;
+    }
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+#if defined(SO_REUSEPORT) && !defined(_WIN32)
+    // Cluster workers share the port; the kernel spreads the accepts.
+    int worker = getenv("KML_CLUSTER_WORKER_ID") != NULL;
+    if (worker) setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+#endif
+    if (bind(fd, (struct sockaddr *)&ss, len) != 0 || listen(fd, backlog > 0 ? (int)backlog : 511) != 0) {
+        int e = errno;
+        close(fd);
+        return -e;
+    }
+#ifdef FD_CLOEXEC
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
+    set_nonblock(fd);
+    int id = tcp_new(fd);
+    kml_tcp *h = tcp_tab[id];
+    h->server = h->listening = 1;
+    h->conn_inv = inv;
+    h->conn_clo = clo;
+#if defined(SO_REUSEPORT) && !defined(_WIN32)
+    if (worker) {
+        struct sockaddr_storage bound;
+        socklen_t blen = sizeof bound;
+        int bport = (int)port;
+        if (getsockname(fd, (struct sockaddr *)&bound, &blen) == 0)
+            bport = ntohs(bound.ss_family == AF_INET6 ? ((struct sockaddr_in6 *)&bound)->sin6_port
+                                                      : ((struct sockaddr_in *)&bound)->sin_port);
+        __kml_cluster_announce_listening_at(bport, any ? NULL : host);
+    }
+#endif
+    return id;
+}
+
+// Connect to ip:port; onConnect(errno, 0) runs once it completes. Returns
+// the handle id, or -errno.
+double __kml_native_tcp_connect(const char *ip, double port, void *inv, void *clo) {
+    struct sockaddr_storage ss;
+    socklen_t len;
+    if (tcp_addr(ip, (int)port, &ss, &len) != 0) return -EINVAL;
+    int fd = socket(ss.ss_family, SOCK_STREAM, 0);
+    if (fd < 0) return -errno;
+    set_nonblock(fd);
+    int id = tcp_new(fd);
+    kml_tcp *h = tcp_tab[id];
+    h->connecting = 1;
+    h->connect_inv = inv;
+    h->connect_clo = clo;
+    if (connect(fd, (struct sockaddr *)&ss, len) != 0 && errno != EINPROGRESS && errno != EINTR) {
+        h->connecting = 2 + errno; // fails on the next dispatch, as libuv reports it
+    }
+    return id;
+}
+
+// A Unix-domain socket address for path; 0 on success.
+static int pipe_addr(const char *path, struct sockaddr_un *su) {
+    memset(su, 0, sizeof *su);
+    su->sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof su->sun_path) return ENAMETOOLONG;
+    strcpy(su->sun_path, path);
+    return 0;
+}
+
+// Listen on the Unix-domain socket path (libuv's uv_pipe_bind + listen).
+// Returns the handle id, or -errno.
+double __kml_native_pipe_listen(const char *path, double backlog, void *inv, void *clo) {
+    struct sockaddr_un su;
+    int rc = pipe_addr(path, &su);
+    if (rc != 0) return -rc;
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -errno;
+    if (bind(fd, (struct sockaddr *)&su, sizeof su) != 0 || listen(fd, backlog > 0 ? (int)backlog : 511) != 0) {
+        int e = errno;
+        close(fd);
+        return -e;
+    }
+#ifdef FD_CLOEXEC
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
+    set_nonblock(fd);
+    int id = tcp_new(fd);
+    kml_tcp *h = tcp_tab[id];
+    h->server = h->listening = 1;
+    h->conn_inv = inv;
+    h->conn_clo = clo;
+    h->pipe_path = strdup(path);
+    return id;
+}
+
+// Connect to the Unix-domain socket path; as tcp_connect.
+double __kml_native_pipe_connect(const char *path, void *inv, void *clo) {
+    struct sockaddr_un su;
+    int rc = pipe_addr(path, &su);
+    if (rc != 0) return -rc;
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -errno;
+    set_nonblock(fd);
+    int id = tcp_new(fd);
+    kml_tcp *h = tcp_tab[id];
+    h->connecting = 1;
+    h->connect_inv = inv;
+    h->connect_clo = clo;
+    if (connect(fd, (struct sockaddr *)&su, sizeof su) != 0 && errno != EINPROGRESS && errno != EINTR && errno != EAGAIN) {
+        h->connecting = 2 + errno;
+    }
+    return id;
+}
+
+// Start delivering reads: onRead(0, n) with n bytes to take, (0, -1) at the
+// end of the stream, (errno, 0) on an error.
+void __kml_native_tcp_read_start(double id, void *inv, void *clo) {
+    kml_tcp *h = tcp_get(id);
+    if (!h) return;
+    h->reading = 1;
+    h->read_inv = inv;
+    h->read_clo = clo;
+}
+
+void __kml_native_tcp_read_stop(double id) {
+    kml_tcp *h = tcp_get(id);
+    if (h) h->reading = 0;
+}
+
+// Copy the bytes a read delivered into buf (inside onRead).
+double __kml_native_tcp_take(double id, void *buf, int64_t size) {
+    kml_tcp *h = tcp_get(id);
+    if (!h || !h->rbuf) return 0;
+    int64_t n = h->rlen < size ? h->rlen : size;
+    memcpy(buf, h->rbuf, (size_t)n);
+    return (double)n;
+}
+
+static int tcp_flush(kml_tcp *h) {
+    while (h->wq_head) {
+        kml_wreq *w = h->wq_head;
+        while (w->off < w->len) {
+            int64_t n = tcp_send(h, w->data + w->off, w->len - w->off);
+            if (n < 0) {
+                if (n == -EAGAIN) return 0;
+                return (int)-n;
+            }
+            w->off += n;
+        }
+        h->wq_head = w->next;
+        if (!h->wq_head) h->wq_tail = NULL;
+        if (w->inv) TCP_CALL(w->inv, w->clo, 0, 0);
+        free(w->data);
+        free(w);
+    }
+    return 0;
+}
+
+// Write len bytes of buf from offset. Returns 1 when they were all written
+// now (the caller runs its callback itself, as Node's write does when the
+// request completes synchronously), 0 when queued (onWritten(errno, 0)
+// runs later), or -errno.
+double __kml_native_tcp_write(double id, void *buf, int64_t size, double offset, double length, void *inv, void *clo) {
+    kml_tcp *h = tcp_get(id);
+    if (!h || h->fd < 0) return -EBADF;
+    int64_t off = (int64_t)offset, len = (int64_t)length;
+    if (off < 0) off = 0;
+    if (off > size) off = size;
+    if (len > size - off) len = size - off;
+    const char *src = (const char *)buf + off;
+    int64_t done = 0;
+    if (!h->wq_head && !h->connecting && h->tls_state != 1) {
+        while (done < len) {
+            int64_t n = tcp_send(h, src + done, len - done);
+            if (n < 0) {
+                if (n == -EAGAIN) break;
+                return n;
+            }
+            done += n;
+        }
+        if (done == len) return 1;
+    }
+    kml_wreq *w = (kml_wreq *)calloc(1, sizeof *w);
+    w->len = len - done;
+    w->data = (char *)malloc((size_t)w->len + 1);
+    memcpy(w->data, src + done, (size_t)w->len);
+    w->inv = inv;
+    w->clo = clo;
+    if (h->wq_tail) h->wq_tail->next = w; else h->wq_head = w;
+    h->wq_tail = w;
+    return 0;
+}
+
+// Half-close once the queued writes are out; onShutdown(errno, 0).
+void __kml_native_tcp_shutdown(double id, void *inv, void *clo) {
+    kml_tcp *h = tcp_get(id);
+    if (!h) return;
+    h->shut_pending = 1;
+    h->shut_inv = inv;
+    h->shut_clo = clo;
+}
+
+// Close the handle; onClose(0, 0) runs on the next dispatch.
+void __kml_native_tcp_close(double id, void *inv, void *clo) {
+    kml_tcp *h = tcp_get(id);
+    if (!h || h->closing) return;
+    h->closing = 1;
+    h->reading = 0;
+    h->close_inv = inv;
+    h->close_clo = clo;
+    if (h->tls && tcp_tls) tcp_tls->free(h->tls);
+    h->tls = NULL;
+    if (h->fd >= 0) close(h->fd);
+    h->fd = -1;
+    if (h->pipe_path) {
+        unlink(h->pipe_path);
+        free(h->pipe_path);
+        h->pipe_path = NULL;
+    }
+}
+
+void __kml_native_tcp_set_no_delay(double id, _Bool on) {
+    kml_tcp *h = tcp_get(id);
+    int v = on ? 1 : 0;
+    if (h && h->fd >= 0) setsockopt(h->fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof v);
+}
+
+void __kml_native_tcp_set_keep_alive(double id, _Bool on, double delaySecs) {
+    kml_tcp *h = tcp_get(id);
+    if (!h || h->fd < 0) return;
+    int v = on ? 1 : 0;
+    setsockopt(h->fd, SOL_SOCKET, SO_KEEPALIVE, &v, sizeof v);
+#if defined(TCP_KEEPIDLE)
+    if (on && delaySecs > 0) { int d = (int)delaySecs; setsockopt(h->fd, IPPROTO_TCP, TCP_KEEPIDLE, &d, sizeof d); }
+#elif defined(TCP_KEEPALIVE)
+    if (on && delaySecs > 0) { int d = (int)delaySecs; setsockopt(h->fd, IPPROTO_TCP, TCP_KEEPALIVE, &d, sizeof d); }
+#endif
+}
+
+void __kml_native_tcp_ref(double id, _Bool on) {
+    kml_tcp *h = tcp_get(id);
+    if (h) h->refd = on ? 1 : 0;
+}
+
+// The local (peer false) or remote address: port + 65536 * family (4 or 6),
+// the address as the last string; -errno on failure.
+double __kml_native_tcp_address(double id, _Bool peer) {
+    kml_tcp *h = tcp_get(id);
+    if (!h || h->fd < 0) return -EBADF;
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof ss;
+    int rc = peer ? getpeername(h->fd, (struct sockaddr *)&ss, &len) : getsockname(h->fd, (struct sockaddr *)&ss, &len);
+    if (rc != 0) return -errno;
+    if (ss.ss_family != AF_INET && ss.ss_family != AF_INET6) return -EAFNOSUPPORT; // a pipe
+    char buf[64] = {0};
+    int port, fam;
+    if (ss.ss_family == AF_INET6) {
+        struct sockaddr_in6 *a = (struct sockaddr_in6 *)&ss;
+        inet_ntop(AF_INET6, &a->sin6_addr, buf, sizeof buf);
+        port = ntohs(a->sin6_port);
+        fam = 6;
+    } else {
+        struct sockaddr_in *a = (struct sockaddr_in *)&ss;
+        inet_ntop(AF_INET, &a->sin_addr, buf, sizeof buf);
+        port = ntohs(a->sin_port);
+        fam = 4;
+    }
+    native_set_last_string(buf);
+    return port + 65536.0 * fam;
+}
+
+static int tcp_active(kml_tcp *h) {
+    return !h->closed_notified && (h->fd >= 0 || h->closing);
+}
+
+_Bool __kml_tcp_keepalive(void) {
+    for (int i = 0; i < tcp_n; i++) {
+        kml_tcp *h = tcp_tab[i];
+        if (tcp_active(h) && (h->refd || h->closing || h->wq_head)) return 1;
+    }
+    return 0;
+}
+
+// Add the handles' fds to the reactor's sets: read interest for a
+// listening server or a reading stream, write interest for a connect or
+// queued writes. Returns true when work is ready without waiting.
+_Bool __kml_tcp_fdset_add(void *fdset, void *wfdset, int *maxfd) {
+    _Bool now = 0;
+    for (int i = 0; i < tcp_n; i++) {
+        kml_tcp *h = tcp_tab[i];
+        if (h->closing && !h->closed_notified) { now = 1; continue; }
+        if (h->fd < 0) continue;
+        if (h->connecting > 1) { now = 1; continue; }
+        if (h->listening || (h->reading && !h->read_eof) || h->tls_state == 1) {
+            FD_SET(h->fd, (fd_set *)fdset);
+            if (h->fd > *maxfd) *maxfd = h->fd;
+        }
+        int tls_wants_write = h->tls && tcp_tls && tcp_tls->want_write(h->tls);
+        if (h->connecting || (h->wq_head && h->tls_state != 1) || tls_wants_write) {
+            FD_SET(h->fd, (fd_set *)wfdset);
+            if (h->fd > *maxfd) *maxfd = h->fd;
+        }
+        // Decrypted bytes buffered in the session: ready without the socket.
+        if (h->tls_state == 2 && h->reading && !h->read_eof && tcp_tls && tcp_tls->pending(h->tls) > 0) now = 1;
+        if (h->shut_pending && !h->wq_head) now = 1;
+    }
+    return now;
+}
+
+// Run what became ready on every handle. Returns whether anything ran.
+_Bool __kml_tcp_dispatch(void) {
+    _Bool ran = 0;
+    for (int i = 0; i < tcp_n; i++) {
+        kml_tcp *h = tcp_tab[i];
+        if (h->closing) {
+            if (!h->closed_notified) {
+                h->closed_notified = 1;
+                ran = 1;
+                if (h->close_inv) TCP_CALL(h->close_inv, h->close_clo, 0, 0);
+            }
+            continue;
+        }
+        if (h->fd < 0) continue;
+        struct pollfd pfd = { h->fd, POLLIN | POLLOUT, 0 };
+        if (poll(&pfd, 1, 0) < 0) continue;
+        int readable = (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+        int writable = (pfd.revents & (POLLOUT | POLLERR | POLLHUP)) != 0;
+        if (h->listening) {
+            if (!readable) continue;
+            for (;;) {
+                int c = accept(h->fd, NULL, NULL);
+                if (c < 0) break;
+                set_nonblock(c);
+                int cid = tcp_new(c);
+                h = tcp_tab[i];
+                ran = 1;
+                TCP_CALL(h->conn_inv, h->conn_clo, 0, cid);
+                h = tcp_tab[i];
+                if (h->closing || h->fd < 0) break;
+            }
+            continue;
+        }
+        if (h->connecting) {
+            int err = 0;
+            if (h->connecting > 1) err = h->connecting - 2;
+            else if (writable) {
+                socklen_t el = sizeof err;
+                getsockopt(h->fd, SOL_SOCKET, SO_ERROR, &err, &el);
+            } else continue;
+            h->connecting = 0;
+            ran = 1;
+            TCP_CALL(h->connect_inv, h->connect_clo, err, 0);
+            h = tcp_tab[i];
+            if (h->fd < 0) continue;
+        }
+        if (h->tls_state == 1 && tcp_tls) {
+            int rc = tcp_tls->handshake(h->tls);
+            if (rc == 0) continue;
+            h->tls_state = rc > 0 ? 2 : 3;
+            ran = 1;
+            if (h->sec_inv) TCP_CALL(h->sec_inv, h->sec_clo, rc > 0 ? 0 : -rc, 0);
+            h = tcp_tab[i];
+            if (h->fd < 0 || h->tls_state != 2) continue;
+            writable = 1;
+            readable = 1;
+        }
+        if (h->tls_state == 3) continue;
+        if (h->wq_head && writable) {
+            int err = tcp_flush(h);
+            ran = 1;
+            if (err) {
+                kml_wreq *w = h->wq_head;
+                h->wq_head = h->wq_tail = NULL;
+                while (w) {
+                    kml_wreq *nx = w->next;
+                    if (w->inv) TCP_CALL(w->inv, w->clo, err, 0);
+                    free(w->data);
+                    free(w);
+                    w = nx;
+                }
+            }
+            h = tcp_tab[i];
+            if (h->fd < 0) continue;
+        }
+        if (h->shut_pending && !h->wq_head) {
+            h->shut_pending = 0;
+            if (h->tls && tcp_tls) tcp_tls->shutdown(h->tls);
+            int err = shutdown(h->fd, SHUT_WR) == 0 ? 0 : errno;
+            ran = 1;
+            if (h->shut_inv) TCP_CALL(h->shut_inv, h->shut_clo, err, 0);
+            h = tcp_tab[i];
+            if (h->fd < 0) continue;
+        }
+        if (h->tls && tcp_tls && tcp_tls->pending(h->tls) > 0) readable = 1;
+        while (h->reading && !h->read_eof && readable && h->fd >= 0) {
+            char buf[65536];
+            int64_t n = tcp_recv(h, buf, sizeof buf);
+            if (n < 0) {
+                if (n == -EAGAIN) break;
+                int e = (int)-n;
+                ran = 1;
+                h->read_eof = 1;
+                TCP_CALL(h->read_inv, h->read_clo, e, 0);
+                break;
+            }
+            ran = 1;
+            if (n == 0) {
+                h->read_eof = 1;
+                TCP_CALL(h->read_inv, h->read_clo, 0, -1);
+                break;
+            }
+            h->rbuf = buf;
+            h->rlen = n;
+            TCP_CALL(h->read_inv, h->read_clo, 0, (double)n);
+            h = tcp_tab[i];
+            h->rbuf = NULL;
+            h->rlen = 0;
+            if (n < (int64_t)sizeof buf) break;
+        }
+    }
+    return ran;
+}
+#else
+_Bool __kml_tcp_keepalive(void) { return 0; }
+_Bool __kml_tcp_fdset_add(void *fdset, void *wfdset, int *maxfd) { (void)fdset; (void)wfdset; (void)maxfd; return 0; }
+_Bool __kml_tcp_dispatch(void) { return 0; }
+#endif
 
 // ---- event-loop hooks (called from the emitted reactor) --------------------
 // An outstanding submission keeps this loop alive so it doesn't exit while a
@@ -479,12 +1192,12 @@ _Bool __kml_pool_fdset_add(void *fdset, int *maxfd) {
 #endif
 }
 
-// Drain arrived completions on the loop thread. The comp stack is LIFO, but a
-// stream's chunks must be enqueued in the order the worker read them, so reverse
-// the batch to insertion order before dispatching.
-void __kml_pool_dispatch(void) {
+// Drain arrived completions on the loop thread. The comp stack is LIFO: reverse
+// the batch to completion order before dispatching.
+// Returns whether any completion ran.
+_Bool __kml_pool_dispatch(void) {
     kml_loop_port *p = tls_port;
-    if (!p) return;
+    if (!p) return 0;
 #ifndef _WIN32
     if (p->wake_r >= 0) {
         char buf[64];
@@ -493,6 +1206,7 @@ void __kml_pool_dispatch(void) {
 #endif
     kml_pool_item *it = atomic_exchange_explicit(&p->comp_head, NULL,
                                                  memory_order_acquire);
+    _Bool ran = it != NULL;
     // Reverse LIFO -> FIFO (insertion order).
     kml_pool_item *ordered = NULL;
     while (it) {
@@ -508,33 +1222,21 @@ void __kml_pool_dispatch(void) {
             __kml_pool_settle(c->promise, c->v0, c->v1, c->state);
             atomic_fetch_sub_explicit(&p->inflight, 1, memory_order_relaxed);
             break;
-        case KML_CMP_STREAM_CHUNK: {
-            kml_stream_ctl *ctl = (kml_stream_ctl *)c->promise;
+        case KML_CMP_CALL:
+            native_unlink(c);
             atomic_fetch_sub_explicit(&p->inflight, 1, memory_order_relaxed);
-            __kml_pool_stream_chunk(ctl->rs, c->v0);
-            ctl->inflight = 0;                    // read complete
-            __kml_rs_pull_if_needed(ctl->rs);     // grant the next credit if wanted
+            // The tick queue and the promise jobs run after the dispatch, at
+            // the loop's own drain (its step also resumes what they wake).
+            native_set_last_string(c->res_str);
+            ((void (*)(void *, double, double))c->inv)(c->clo, (double)c->err, c->res);
             break;
-        }
-        case KML_CMP_STREAM_END: {
-            kml_stream_ctl *ctl = (kml_stream_ctl *)c->promise;
-            __kml_pool_stream_end(ctl->rs);
-            free_stream_ctl(ctl);
-            atomic_fetch_sub_explicit(&p->inflight, 1, memory_order_relaxed);
-            break;
-        }
-        case KML_CMP_STREAM_ERROR: {
-            kml_stream_ctl *ctl = (kml_stream_ctl *)c->promise;
-            __kml_pool_stream_error(ctl->rs, c->v0);
-            free_stream_ctl(ctl);
-            atomic_fetch_sub_explicit(&p->inflight, 1, memory_order_relaxed);
-            break;
-        }
         }
         free(c->arg0);
         free(c->arg1);
         free(c->data);
+        free(c->res_str);
         free(c);
         c = nx;
     }
+    return ran;
 }

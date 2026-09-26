@@ -6,6 +6,7 @@
 // ~2 MB in 1 KB chunks; the client consumes it through fetch's streaming body
 // and the full byte count comes back intact across all the park/resume cycles.
 import http from 'http';
+import type { AddressInfo } from 'net';
 
 const CHUNK = "x".repeat(1024);
 
@@ -19,7 +20,7 @@ async function consume(port: number): Promise<void> {
   process.exit(0);
 }
 
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "application/octet-stream" });
   let i = 0;
   while (i < 2048) { // ~2 MB, well past the socket send buffer
@@ -30,7 +31,7 @@ const server = http.createServer((req: IncomingMessage, res: ServerResponse) => 
 });
 
 server.listen(0, () => {
-  const port: number = server.address().port;
+  const port: number = (server.address() as AddressInfo).port;
   console.log("listening:", port > 0);
   setTimeout(() => { consume(port); }, 50);
 });

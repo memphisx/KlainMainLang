@@ -49,12 +49,17 @@ func ffiCanonicalType(name string, pos ast.Pos) (string, error) {
 	return "", fmt.Errorf("%d:%d: unknown FFI type name '%s'", pos.Line, pos.Col, name)
 }
 
-// ffiTypesConstants maps the ffi.types.* constant names to canonical type
-// names (they are plain string constants in Node).
+// ffiTypesConstants maps the ffi.types.* constant names to their literal string
+// value in Node — the exact strings `ffi.types` holds (verified against a real
+// `--experimental-ffi` build): `FLOAT` is `"float"` and `DOUBLE` is `"double"`
+// (their canonical-name aliases, not `"float32"`/`"float64"`), and `BOOL` is
+// `"bool"`. These are what `console.log(ffi.types.X)` must print; used in a
+// signature they are run back through ffiCanonicalType (ffiTypeNameExpr), which
+// maps `float`→`float32`, `double`→`float64`, `bool`→`uint8`.
 var ffiTypesConstants = map[string]string{
 	"VOID": "void", "POINTER": "pointer", "BUFFER": "buffer",
-	"ARRAY_BUFFER": "arraybuffer", "FUNCTION": "function", "BOOL": "uint8",
-	"CHAR": "char", "STRING": "string", "FLOAT": "float32", "DOUBLE": "float64",
+	"ARRAY_BUFFER": "arraybuffer", "FUNCTION": "function", "BOOL": "bool",
+	"CHAR": "char", "STRING": "string", "FLOAT": "float", "DOUBLE": "double",
 	"INT_8": "int8", "UINT_8": "uint8", "INT_16": "int16", "UINT_16": "uint16",
 	"INT_32": "int32", "UINT_32": "uint32", "INT_64": "int64",
 	"UINT_64": "uint64", "FLOAT_32": "float32", "FLOAT_64": "float64",
@@ -71,7 +76,9 @@ func ffiTypeNameExpr(expr ast.Expression) (string, error) {
 		if inner, ok := mem.Object.(*ast.MemberExpression); ok && inner.Property == "types" {
 			if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "ffi__kml_builtin" {
 				if c, present := ffiTypesConstants[mem.Property]; present {
-					return c, nil
+					// The constant's value is Node's public spelling (e.g.
+					// "double"/"float"/"bool"); canonicalize it for signature use.
+					return ffiCanonicalType(c, pos)
 				}
 				return "", fmt.Errorf("%d:%d: unknown ffi.types constant '%s'", pos.Line, pos.Col, mem.Property)
 			}
@@ -160,21 +167,21 @@ func ffiReturnKmlType(canonical string) Type {
 		return TypeVoid
 	case "char", "int8", "uint8", "int16", "uint16", "int32", "uint32":
 		return TypeI64
-	case "int64", "uint64", "pointer", "function":
+	case "int64", "uint64", "pointer", "function", "string", "buffer", "arraybuffer":
+		// `string` is pointer-like: a call returning it yields the raw pointer
+		// bigint, exactly like `pointer` (Node does not marshal the char* to a
+		// JS string; read it with ffi.toString). Callers pass only primitive
+		// accessor types here, so this affects only bound-function call returns.
 		return BigIntType()
 	case "float32", "float64":
 		return TypeF64
-	case "string":
-		nt := TypePtr
-		nt.Nullable = true
-		return nt
 	}
 	return TypeVoid
 }
 
 // ffiSuffix is the host's shared-library filename suffix (ffi.suffix).
-func ffiSuffix() string {
-	switch targetGOOS() {
+func (e *Emitter) ffiSuffix() string {
+	switch e.opts.Target.OS() {
 	case "darwin":
 		return "dylib"
 	case "windows":
@@ -219,39 +226,186 @@ func (e *Emitter) emitFFIThrowOnNull(ptrReg, fallback string) {
 	e.emitLabel(contL)
 }
 
-// emitFFIDlopenHandle emits the dlopen call for a path expression (a string,
-// or null/undefined for the current process image) and throws on failure.
-func (e *Emitter) emitFFIDlopenHandle(pathExpr ast.Expression, pos ast.Pos) (handleReg, pathRef string, err error) {
-	e.ensureFFIDl()
-	pathRef = "null"
+// emitFFIOpenLibrary opens a library for `new DynamicLibrary(path)` /
+// `ffi.dlopen(path)`: a string path, or null/undefined for the process image.
+// Any other static type is Node's TypeError; a failed open is
+// ERR_FFI_CALL_FAILED ("dlopen failed: …").
+func (e *Emitter) emitFFIOpenLibrary(pathExpr ast.Expression, pos ast.Pos) (Value, error) {
+	e.ensureFFIRuntime()
+	pathRef := "null"
 	if pathExpr != nil {
 		pv, err := e.emitExpr(pathExpr)
 		if err != nil {
-			return "", "", err
+			return Value{}, err
 		}
-		if !pv.Ty.IsNull {
-			pathRef = e.coerce(pv, TypePtr).Ref
+		switch {
+		case pv.Ty.IsNull:
+		case isStringTy(pv.Ty) && !pv.Ty.IsDynamic:
+			pathRef = pv.Ref
+		default:
+			e.emitFFIThrowWhen("true", "TypeError", "ERR_INVALID_ARG_TYPE", e.internString("Library path must be a string or null"))
 		}
 	}
-	handleReg = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @dlopen(ptr %s, i32 %d)", handleReg, pathRef, ffiRTLDFlags()))
-	e.emitFFIThrowOnNull(handleReg, "dlopen failed")
-	return handleReg, pathRef, nil
+	out := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", out))
+	st := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ffi_open(ptr %s, ptr %s)", st, pathRef, out))
+	e.emitFFIStatusCheck(st, nil)
+	lib := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", lib, out))
+	return Value{Ref: lib, Ty: FFILibraryType()}, nil
 }
 
-// emitFFIBuildLibrary wraps a dlopen handle + path into a DynamicLibrary object.
-func (e *Emitter) emitFFIBuildLibrary(handleReg, pathRef string) Value {
-	e.ensureMalloc()
-	libTy := FFILibraryType()
-	obj := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", obj, libTy.StructSize()))
-	e.storeSQLiteField(libTy, obj, "__kml_handle", "ptr", handleReg)
-	e.storeSQLiteField(libTy, obj, "path", "ptr", pathRef)
-	return Value{Ref: obj, Ty: libTy}
+// ffiParsedDef is one statically-parsed definition: the signature, or the
+// runtime error Node would throw for it (rtErr, "%s" = the function name).
+type ffiParsedDef struct {
+	name  string
+	sig   *FFISignature
+	rtErr string
+	code  string // the error's code/kind: ERR_INVALID_ARG_VALUE (TypeError) or ERR_INVALID_ARG_TYPE (TypeError)
 }
 
-// ffiDefinitionsType statically derives the `functions` object type from a
-// dlopen/getFunctions definitions object literal.
+// ffiParseSignatureRT parses a signature the way Node's ParseFunctionSignature
+// does, turning every invalid-but-static shape into the runtime TypeError Node
+// throws (Go error only for a shape that has no AOT lowering: a signature,
+// argument list or type name computed at run time). Only `return` and
+// `arguments` are read; other keys are ignored, as in Node.
+func ffiParseSignatureRT(expr ast.Expression) (sig *FFISignature, rtErr string, err error) {
+	sig = &FFISignature{Ret: "void"}
+	expr = ffiStripTS(expr)
+	lit, ok := expr.(*ast.ObjectLiteral)
+	if !ok {
+		switch expr.(type) {
+		case *ast.ArrayLiteral, *ast.StringLiteral, *ast.NumberLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.TemplateLiteral:
+			return sig, "\x00Function signature must be an object", nil
+		}
+		pos := expr.GetPos()
+		return nil, "", fmt.Errorf("%d:%d: an FFI signature must be an object literal ({ arguments: [...], return: '...' }) — it is resolved at compile time", pos.Line, pos.Col)
+	}
+	var retExpr, argsExpr ast.Expression
+	for _, prop := range lit.Properties {
+		if prop.KeyExpr != nil {
+			pos := lit.GetPos()
+			return nil, "", fmt.Errorf("%d:%d: an FFI signature cannot use computed property keys", pos.Line, pos.Col)
+		}
+		switch prop.Key {
+		case "return":
+			retExpr = prop.Value
+		case "arguments":
+			argsExpr = prop.Value
+		}
+	}
+	typeName := func(el ast.Expression) (name string, isStr bool, err error) {
+		switch t := el.(type) {
+		case *ast.StringLiteral:
+			return t.Value, true, nil
+		case *ast.NumberLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.ArrayLiteral, *ast.ObjectLiteral:
+			return "", false, nil
+		case *ast.MemberExpression:
+			if inner, ok := t.Object.(*ast.MemberExpression); ok && inner.Property == "types" {
+				if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "ffi__kml_builtin" {
+					if c, present := ffiTypesConstants[t.Property]; present {
+						return c, true, nil
+					}
+					return "", false, nil // undefined — not a string
+				}
+			}
+		}
+		pos := el.GetPos()
+		return "", false, fmt.Errorf("%d:%d: an FFI type must be a string literal (or ffi.types constant) — the signature is resolved at compile time", pos.Line, pos.Col)
+	}
+	if retExpr != nil {
+		n, isStr, err := typeName(retExpr)
+		if err != nil {
+			return nil, "", err
+		}
+		if !isStr {
+			return sig, "Return value type of function %s must be a string", nil
+		}
+		c, cerr := ffiCanonicalType(n, retExpr.GetPos())
+		if cerr != nil {
+			return sig, "\x00Unsupported FFI type: " + n, nil
+		}
+		sig.Ret = c
+	}
+	if argsExpr != nil {
+		arr, ok := argsExpr.(*ast.ArrayLiteral)
+		if !ok {
+			switch argsExpr.(type) {
+			case *ast.StringLiteral, *ast.NumberLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.ObjectLiteral, *ast.TemplateLiteral:
+				return sig, "Arguments list of function %s must be an array", nil
+			}
+			pos := argsExpr.GetPos()
+			return nil, "", fmt.Errorf("%d:%d: an FFI signature's 'arguments' must be an array literal of type names", pos.Line, pos.Col)
+		}
+		for i, el := range arr.Elements {
+			n, isStr, err := typeName(el)
+			if err != nil {
+				return nil, "", err
+			}
+			if !isStr {
+				return sig, fmt.Sprintf("Argument %d of function %%s must be a string", i), nil
+			}
+			c, cerr := ffiCanonicalType(n, el.GetPos())
+			if cerr != nil {
+				return sig, "\x00Unsupported FFI type: " + n, nil
+			}
+			if c == "void" {
+				return sig, fmt.Sprintf("Argument %d of function %%s must not be 'void'; use an empty array for no-argument functions", i), nil
+			}
+			sig.Args = append(sig.Args, c)
+		}
+	}
+	return sig, "", nil
+}
+
+// ffiStripTS looks through the TS-only wrappers type stripping removes
+// (`x as T`, `x!`), so `{ … } as any` parses as the literal it is.
+func ffiStripTS(expr ast.Expression) ast.Expression {
+	for {
+		switch w := expr.(type) {
+		case *ast.AsExpression:
+			expr = w.Expr
+		case *ast.NonNullExpression:
+			expr = w.Arg
+		default:
+			return expr
+		}
+	}
+}
+
+// ffiRTErrMessage builds the runtime message of a parse error for function
+// `nameRef` (a KML string register). A leading NUL marks a message with no
+// name slot (and, for "Function signature must be an object", a type error).
+func (e *Emitter) ffiRTErrMessage(rtErr, nameRef string) (string, error) {
+	if strings.HasPrefix(rtErr, "\x00") {
+		return e.internString(rtErr[1:]), nil
+	}
+	i := strings.Index(rtErr, "%s")
+	pre := Value{Ref: e.internString(rtErr[:i]), Ty: TypePtr}
+	mid, err := e.emitStringConcat(pre, Value{Ref: nameRef, Ty: TypePtr})
+	if err != nil {
+		return "", err
+	}
+	out, err := e.emitStringConcat(mid, Value{Ref: e.internString(rtErr[i+2:]), Ty: TypePtr})
+	if err != nil {
+		return "", err
+	}
+	return out.Ref, nil
+}
+
+// ffiRTErrCode is the error code of a parse error (ERR_INVALID_ARG_TYPE for a
+// non-object signature, ERR_INVALID_ARG_VALUE for the rest).
+func ffiRTErrCode(rtErr string) string {
+	if rtErr == "\x00Function signature must be an object" {
+		return "ERR_INVALID_ARG_TYPE"
+	}
+	return "ERR_INVALID_ARG_VALUE"
+}
+
+// ffiDefinitionsType statically derives the `functions` object type of a
+// dlopen/getFunctions definitions literal: one bound function per key, in the
+// literal's order, with a null prototype.
 func ffiDefinitionsType(defs *ast.ObjectLiteral) (Type, error) {
 	var fields []Field
 	for _, prop := range defs.Properties {
@@ -259,67 +413,170 @@ func ffiDefinitionsType(defs *ast.ObjectLiteral) (Type, error) {
 			pos := defs.GetPos()
 			return Type{}, fmt.Errorf("%d:%d: FFI definitions cannot use computed property keys", pos.Line, pos.Col)
 		}
-		sig, err := ffiParseSignature(prop.Value)
+		sig, _, err := ffiParseSignatureRT(prop.Value)
 		if err != nil {
 			return Type{}, err
 		}
 		fields = append(fields, Field{Name: prop.Key, Ty: FFIFunctionType(sig)})
 	}
-	return ObjectType(fields), nil
+	ty := ObjectType(fields)
+	ty.IsNullProtoObject = true
+	return ty, nil
 }
 
-// emitFFIResolveFunctions dlsym-resolves every definition against handleReg
-// and returns the populated `functions` object.
-func (e *Emitter) emitFFIResolveFunctions(handleReg string, defs *ast.ObjectLiteral) (Value, error) {
+// emitFFINameArg validates a function/symbol name argument as Node does
+// (a string without NUL bytes; `what` is "Function" or "Symbol") and returns
+// its pointer and byte length.
+func (e *Emitter) emitFFINameArg(nameExpr ast.Expression, what string) (ptr, length string, err error) {
+	nv, err := e.emitExpr(nameExpr)
+	if err != nil {
+		return "", "", err
+	}
+	if !isStringTy(nv.Ty) || nv.Ty.IsDynamic {
+		e.emitFFIThrowWhen("true", "TypeError", "ERR_INVALID_ARG_TYPE", e.internString(what+" name must be a string"))
+		return e.internString(""), "0", nil
+	}
+	return e.emitFFINameChecked(nv.Ref, what), e.ffiLastLen, nil
+}
+
+// emitFFINameChecked rejects a name holding a NUL byte (its length header
+// disagreeing with strlen) and records the length in e.ffiLastLen.
+func (e *Emitter) emitFFINameChecked(nameRef, what string) string {
+	l := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", l, nameRef))
+	sl := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", sl, nameRef))
+	nul := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %s", nul, l, sl))
+	e.emitFFIThrowWhen(nul, "TypeError", "ERR_INVALID_ARG_VALUE", e.internString(what+" name must not contain null bytes"))
+	e.ffiLastLen = l
+	return nameRef
+}
+
+// emitFFIPrepare runs PrepareFunction for one name/signature and returns the
+// registry entry and its freshness. A static parse error throws first, in
+// Node's order (after the name checks, before any lookup).
+func (e *Emitter) emitFFIPrepare(libPtr, nameRef, nameLen string, sig *FFISignature, rtErr string, onFail func()) (fnReg, freshReg string, err error) {
+	if rtErr != "" {
+		msg, err := e.ffiRTErrMessage(rtErr, nameRef)
+		if err != nil {
+			return "", "", err
+		}
+		if onFail != nil {
+			throwL := e.freshLabel("ffi.sig.throw")
+			contL := e.freshLabel("ffi.sig.ok")
+			e.emitTerminator(fmt.Sprintf("br i1 true, label %%%s, label %%%s", throwL, contL))
+			e.emitLabel(throwL)
+			onFail()
+			e.emitThrowCoded("TypeError", ffiRTErrCode(rtErr), msg)
+			e.emitLabel(contL)
+		} else {
+			e.emitFFIThrowWhen("true", "TypeError", ffiRTErrCode(rtErr), msg)
+		}
+	}
+	out := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", out))
+	fresh := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", fresh))
+	st := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ffi_prepare(ptr %s, ptr %s, i64 %s, ptr %s, ptr %s, ptr %s)",
+		st, libPtr, nameRef, nameLen, e.internString(e.ffiSigKey(sig)), out, fresh))
+	e.emitFFIStatusCheck(st, onFail)
+	fnReg = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fnReg, out))
+	freshReg = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", freshReg, fresh))
+	return fnReg, freshReg, nil
+}
+
+// emitFFIGetFunctionsDefs implements getFunctions(definitions) (and dlopen's
+// definitions): every definition is prepared first — one failure caches
+// nothing — then committed and turned into its function object, and the
+// result is a null-prototype object in the literal's key order.
+func (e *Emitter) emitFFIGetFunctionsDefs(libPtr string, defsExpr ast.Expression, onFail func()) (Value, error) {
+	defsExpr = ffiStripTS(defsExpr)
+	defs, ok := defsExpr.(*ast.ObjectLiteral)
+	if !ok {
+		switch defsExpr.(type) {
+		case *ast.ArrayLiteral, *ast.StringLiteral, *ast.NumberLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.TemplateLiteral:
+			if onFail != nil {
+				throwL := e.freshLabel("ffi.defs.throw")
+				contL := e.freshLabel("ffi.defs.ok")
+				e.emitTerminator(fmt.Sprintf("br i1 true, label %%%s, label %%%s", throwL, contL))
+				e.emitLabel(throwL)
+				onFail()
+				e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_TYPE", e.internString("Functions signatures must be an object"))
+				e.emitLabel(contL)
+			} else {
+				e.emitFFIThrowWhen("true", "TypeError", "ERR_INVALID_ARG_TYPE", e.internString("Functions signatures must be an object"))
+			}
+			ty := ObjectType(nil)
+			ty.IsNullProtoObject = true
+			return Value{Ref: "null", Ty: ty}, nil
+		}
+		pos := defsExpr.GetPos()
+		return Value{}, fmt.Errorf("%d:%d: FFI definitions must be an object literal — signatures are resolved at compile time", pos.Line, pos.Col)
+	}
 	funcsTy, err := ffiDefinitionsType(defs)
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureMalloc()
+	type prepared struct{ fn, fresh string }
+	var preps []prepared
+	for _, prop := range defs.Properties {
+		sig, rtErr, err := ffiParseSignatureRT(prop.Value)
+		if err != nil {
+			return Value{}, err
+		}
+		if strings.HasPrefix(rtErr, "\x00Function signature must be an object") {
+			rtErr = "\x00Signature of function " + prop.Key + " must be an object"
+		}
+		nameRef := e.internString(prop.Key)
+		nameLen := fmt.Sprintf("%d", len(prop.Key))
+		if strings.ContainsRune(prop.Key, 0) {
+			e.emitFFIThrowWhen("true", "TypeError", "ERR_INVALID_ARG_VALUE", e.internString("Function name must not contain null bytes"))
+		}
+		fn, fresh, err := e.emitFFIPrepare(libPtr, nameRef, nameLen, sig, rtErr, onFail)
+		if err != nil {
+			return Value{}, err
+		}
+		preps = append(preps, prepared{fn, fresh})
+	}
 	obj := e.freshReg()
 	size := funcsTy.StructSize()
 	if size == 0 {
-		size = 8 // an empty definitions map still yields a real (empty) object
+		size = 8
 	}
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", obj, size))
-	for _, f := range funcsTy.Fields {
-		sym := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @dlsym(ptr %s, ptr %s)", sym, handleReg, e.internString(f.Name)))
-		e.emitFFIThrowOnNull(sym, fmt.Sprintf("undefined symbol: %s", f.Name))
-		e.storeSQLiteField(funcsTy, obj, f.Name, "ptr", sym)
+	for i, f := range funcsTy.Fields {
+		rec := e.emitFFIRecordFor(libPtr, preps[i].fn, preps[i].fresh, f.Ty.FFISig)
+		e.storeSQLiteField(funcsTy, obj, f.Name, "ptr", rec)
 	}
 	return Value{Ref: obj, Ty: funcsTy}, nil
 }
 
-// ffiDlopenResultType derives ffi.dlopen(...)'s `{ lib, functions }` type from
-// the call's arguments — shared by codegen and inferExprType so both agree.
+// ffiDlopenResultType derives ffi.dlopen(...)'s `{ lib, functions }` type —
+// shared by codegen and inferExprType so both agree.
 func ffiDlopenResultType(args []ast.Expression) (Type, error) {
 	funcsTy := ObjectType(nil)
+	funcsTy.IsNullProtoObject = true
 	if len(args) >= 2 {
-		defs, ok := args[1].(*ast.ObjectLiteral)
-		if !ok {
-			pos := args[1].GetPos()
-			return Type{}, fmt.Errorf("%d:%d: ffi.dlopen definitions must be an object literal — signatures are resolved at compile time", pos.Line, pos.Col)
+		if defs, ok := ffiStripTS(args[1]).(*ast.ObjectLiteral); ok {
+			var err error
+			funcsTy, err = ffiDefinitionsType(defs)
+			if err != nil {
+				return Type{}, err
+			}
 		}
-		var err error
-		funcsTy, err = ffiDefinitionsType(defs)
-		if err != nil {
-			return Type{}, err
-		}
-	}
-	libTy := FFILibraryType()
-	// The dlopen definitions seed the library's accumulator, so a later
-	// `lib.functions` includes them, as in Node.
-	for _, f := range funcsTy.Fields {
-		libTy.FFILibReg.AddFunc(f.Name, f.Ty.FFISig)
 	}
 	return ObjectType([]Field{
-		{Name: "lib", Ty: libTy},
+		{Name: "lib", Ty: FFILibraryType()},
 		{Name: "functions", Ty: funcsTy},
 	}), nil
 }
 
-// emitFFIModuleCall dispatches ffi.dlopen / ffi.dlclose / ffi.dlsym.
+// emitFFIModuleCall dispatches ffi.dlopen / ffi.dlclose / ffi.dlsym and the
+// raw-memory helpers.
 func (e *Emitter) emitFFIModuleCall(prop string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if err := ffiRejectWindows(pos); err != nil {
 		return Value{}, err
@@ -333,22 +590,27 @@ func (e *Emitter) emitFFIModuleCall(prop string, args []ast.Expression, pos ast.
 		if err != nil {
 			return Value{}, err
 		}
-		handle, pathRef, err := e.emitFFIDlopenHandle(args[0], pos)
+		lib, err := e.emitFFIOpenLibrary(args[0], pos)
 		if err != nil {
 			return Value{}, err
 		}
-		lib := e.emitFFIBuildLibrary(handle, pathRef)
 		var funcs Value
 		if len(args) == 2 {
-			funcs, err = e.emitFFIResolveFunctions(handle, args[1].(*ast.ObjectLiteral))
+			// A failing definition closes the library before the error
+			// propagates, as Node's dlopen does.
+			closeLib := func() { e.emitInstr(fmt.Sprintf("call void @__kml_ffi_close(ptr %s)", lib.Ref)) }
+			funcs, err = e.emitFFIGetFunctionsDefs(lib.Ref, args[1], closeLib)
 			if err != nil {
 				return Value{}, err
 			}
 		} else {
-			e.ensureMalloc()
+			// No definitions: a frozen empty null-prototype object.
 			emptyObj := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", emptyObj))
-			funcs = Value{Ref: emptyObj, Ty: ObjectType(nil)}
+			e.emitStaticIntegrity(emptyObj, staticIntegrityFrozen)
+			ty := ObjectType(nil)
+			ty.IsNullProtoObject = true
+			funcs = Value{Ref: emptyObj, Ty: ty}
 		}
 		obj := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", obj, resTy.StructSize()))
@@ -619,55 +881,171 @@ func (e *Emitter) emitFFIExportString(args []ast.Expression, pos ast.Pos) (Value
 	if len(args) < 3 || len(args) > 4 {
 		return Value{}, fmt.Errorf("%d:%d: ffi.exportString takes (string, pointer, length, encoding?)", pos.Line, pos.Col)
 	}
-	if len(args) == 4 {
-		lit, ok := args[3].(*ast.StringLiteral)
-		if !ok || (lit.Value != "utf8" && lit.Value != "utf-8") {
-			return Value{}, fmt.Errorf("%d:%d: ffi.exportString supports only the 'utf8' encoding (this compiler's strings are UTF-8-native)", pos.Line, pos.Col)
-		}
-	}
+	e.ensureFFIRuntime()
+	// Node's order (lib/ffi.js): validateString(str), validateString(encoding),
+	// validateInteger(len, 0), then Buffer.from(str, encoding) — an unknown
+	// encoding throws there — then the capacity check against the encoded
+	// bytes plus a terminator (2 bytes for utf16le/ucs2).
 	sv, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
 	}
-	s := e.coerce(sv, TypePtr).Ref
+	if !isStringTy(sv.Ty) || sv.Ty.IsDynamic {
+		// Node's message ends with the inspected value: "… Received type number (5)".
+		boxed, berr := e.emitBoxValue(sv)
+		if berr != nil {
+			return Value{}, berr
+		}
+		shown, serr := e.emitDynamicInspect(boxed)
+		if serr != nil {
+			return Value{}, serr
+		}
+		msg, cerr := e.emitStringConcat(Value{Ref: e.internString(fmt.Sprintf("The \"string\" argument must be of type string. Received type %s (", typeofString(sv.Ty))), Ty: TypePtr}, shown)
+		if cerr != nil {
+			return Value{}, cerr
+		}
+		msg, cerr = e.emitStringConcat(msg, Value{Ref: e.internString(")"), Ty: TypePtr})
+		if cerr != nil {
+			return Value{}, cerr
+		}
+		e.emitFFIThrowWhen("true", "TypeError", "ERR_INVALID_ARG_TYPE", msg.Ref)
+		return Value{Ty: TypeVoid}, nil
+	}
 	dst, err := e.emitFFIPtrPlusOffset(args[1], nil, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	capRef, err := e.emitFFII64Arg(args[2])
+	enc := "utf8"
+	encName := "utf8"
+	if len(args) == 4 {
+		lit, ok := ffiStripTS(args[3]).(*ast.StringLiteral)
+		if !ok {
+			return Value{}, fmt.Errorf("%d:%d: ffi.exportString's encoding must be a string literal (the codec is chosen at compile time)", pos.Line, pos.Col)
+		}
+		encName = lit.Value
+		if c, err := bufferEncodingArg([]ast.Expression{lit}, 0, pos); err == nil {
+			enc = c
+		} else {
+			enc = ""
+		}
+	}
+	lv, err := e.emitExpr(args[2])
 	if err != nil {
 		return Value{}, err
 	}
-
-	e.ensureStrlen()
+	if lv.Ty.IsBigInt || !isNumberTy(lv.Ty) || lv.Ty.IsDynamic {
+		msg := fmt.Sprintf("The \"len\" argument must be of type number. Received type %s", typeofString(lv.Ty))
+		if lv.Ty.IsBigInt {
+			s, serr := e.emitBigIntToString(lv, true)
+			if serr != nil {
+				return Value{}, serr
+			}
+			full, cerr := e.emitStringConcat(Value{Ref: e.internString(msg + " ("), Ty: TypePtr}, s)
+			if cerr != nil {
+				return Value{}, cerr
+			}
+			full, cerr = e.emitStringConcat(full, Value{Ref: e.internString(")"), Ty: TypePtr})
+			if cerr != nil {
+				return Value{}, cerr
+			}
+			e.emitFFIThrowWhen("true", "TypeError", "ERR_INVALID_ARG_TYPE", full.Ref)
+		} else {
+			e.emitFFIThrowWhen("true", "TypeError", "ERR_INVALID_ARG_TYPE", e.internString(msg))
+		}
+		return Value{Ty: TypeVoid}, nil
+	}
+	d := e.coerce(lv, TypeF64).Ref
+	// validateInteger(len, 'len', 0): an integer in [0, MAX_SAFE_INTEGER].
+	e.ensureSprintf()
+	notInt := e.freshReg()
+	tr := e.freshReg()
+	e.ensureMathFuncs()
+	e.emitInstr(fmt.Sprintf("%s = call double @trunc(double %s)", tr, d))
+	e.emitInstr(fmt.Sprintf("%s = fcmp une double %s, %s", notInt, tr, d))
+	intMsg, err := e.ffiOutOfRangeMsg("an integer", d)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitFFIThrowWhen(notInt, "RangeError", "ERR_OUT_OF_RANGE", intMsg)
+	outRange := e.freshReg()
+	lo := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp olt double %s, 0.0", lo, d))
+	hi := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp ogt double %s, 9007199254740991.0", hi, d))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", outRange, lo, hi))
+	rangeMsg, err := e.ffiOutOfRangeMsg(">= 0 && <= 9007199254740991", d)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitFFIThrowWhen(outRange, "RangeError", "ERR_OUT_OF_RANGE", rangeMsg)
+	if enc == "" {
+		e.emitFFIThrowWhen("true", "TypeError", "ERR_UNKNOWN_ENCODING", e.internString("Unknown encoding: "+encName))
+		return Value{Ty: TypeVoid}, nil
+	}
+	capRef := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", capRef, d))
+	src, n := e.emitBufferDecodeString(sv.Ref, enc)
+	term := 1
+	if enc == "utf16le" {
+		term = 2
+	}
+	needed := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", needed, n, term))
+	small := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", small, capRef, needed))
+	// "The value of "len" is out of range. It must be >= <needed>. Received <len>"
+	neededD := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", neededD, needed))
+	neededS, err := e.emitValueToString(Value{Ref: neededD, Ty: TypeF64})
+	if err != nil {
+		return Value{}, err
+	}
+	head, err := e.emitStringConcat(Value{Ref: e.internString(">= "), Ty: TypePtr}, neededS)
+	if err != nil {
+		return Value{}, err
+	}
+	smallMsg, err := e.ffiOutOfRangeMsgRef(head.Ref, d)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitFFIThrowWhen(small, "RangeError", "ERR_OUT_OF_RANGE", smallMsg)
 	e.ensureMemcpy()
-	n := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", n, s))
-	// w = min(n, max(cap-1, 0)); write w bytes + NUL (NUL only when cap > 0).
-	capm1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", capm1, capRef))
-	neg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, capm1))
-	room := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", room, neg, capm1))
-	fits := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %s, %s", fits, n, room))
-	w := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", w, fits, n, room))
 	cp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @memcpy(ptr %s, ptr %s, i64 %s)", cp, dst, s, w))
-	hasRoom := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", hasRoom, capRef))
-	nulL := e.freshLabel("ffi.nul")
-	doneL := e.freshLabel("ffi.exported")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasRoom, nulL, doneL))
-	e.emitLabel(nulL)
-	end := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", end, dst, w))
-	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", end))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-	e.emitLabel(doneL)
+	e.emitInstr(fmt.Sprintf("%s = call ptr @memcpy(ptr %s, ptr %s, i64 %s)", cp, dst, src, n))
+	for i := 0; i < term; i++ {
+		off := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", off, n, i))
+		end := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", end, dst, off))
+		e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", end))
+	}
 	return Value{Ty: TypeVoid}, nil
+}
+
+// ffiOutOfRangeMsg builds Node's ERR_OUT_OF_RANGE text for `len`:
+// `The value of "len" is out of range. It must be <range>. Received <d>`.
+func (e *Emitter) ffiOutOfRangeMsg(rangeText, d string) (string, error) {
+	return e.ffiOutOfRangeMsgRef(e.internString(rangeText), d)
+}
+
+func (e *Emitter) ffiOutOfRangeMsgRef(rangeRef, d string) (string, error) {
+	pre, err := e.emitStringConcat(Value{Ref: e.internString(`The value of "len" is out of range. It must be `), Ty: TypePtr}, Value{Ref: rangeRef, Ty: TypePtr})
+	if err != nil {
+		return "", err
+	}
+	mid, err := e.emitStringConcat(pre, Value{Ref: e.internString(". Received "), Ty: TypePtr})
+	if err != nil {
+		return "", err
+	}
+	ds, err := e.emitValueToString(Value{Ref: d, Ty: TypeF64})
+	if err != nil {
+		return "", err
+	}
+	out, err := e.emitStringConcat(mid, ds)
+	if err != nil {
+		return "", err
+	}
+	return out.Ref, nil
 }
 
 // emitFFIExportBytes implements ffi.exportBuffer/exportArrayBuffer/
@@ -684,6 +1062,12 @@ func (e *Emitter) emitFFIExportBytes(prop string, args []ast.Expression, pos ast
 	dst, err := e.emitFFIPtrPlusOffset(args[1], nil, pos)
 	if err != nil {
 		return Value{}, err
+	}
+	// Node validates the length as a number (`validateInteger`), throwing
+	// ERR_INVALID_ARG_TYPE on a bigint — match that (a bigint length is a static
+	// type error here, the AOT equivalent of Node's runtime throw).
+	if e.inferExprType(args[2]).IsBigInt {
+		return Value{}, fmt.Errorf("%d:%d: ffi export: the length argument must be a number, not a bigint", pos.Line, pos.Col)
 	}
 	capRef, err := e.emitFFII64Arg(args[2])
 	if err != nil {
@@ -703,7 +1087,7 @@ func (e *Emitter) emitFFILibraryMethod(objExpr ast.Expression, method string, ar
 	if err := ffiRejectWindows(pos); err != nil {
 		return Value{}, err
 	}
-	e.ensureFFIDl()
+	e.ensureFFIRuntime()
 	objVal, err := e.emitExpr(objExpr)
 	if err != nil {
 		return Value{}, err
@@ -711,93 +1095,76 @@ func (e *Emitter) emitFFILibraryMethod(objExpr ast.Expression, method string, ar
 	if !objVal.Ty.IsFFILibrary {
 		return Value{}, fmt.Errorf("%d:%d: '%s' requires a DynamicLibrary receiver", pos.Line, pos.Col, method)
 	}
-	handleIdx, _, _ := objVal.Ty.FieldIndex("__kml_handle")
-	handle := e.loadFieldValue(objVal, handleIdx, TypePtr).Ref
-
-	reg := objVal.Ty.FFILibReg
+	lib := objVal.Ref
 
 	switch method {
 	case "getFunction":
 		if len(args) != 2 {
 			return Value{}, fmt.Errorf("%d:%d: getFunction takes exactly 2 arguments (name, signature)", pos.Line, pos.Col)
 		}
-		sig, err := ffiParseSignature(args[1])
+		sig, rtErr, err := ffiParseSignatureRT(args[1])
 		if err != nil {
 			return Value{}, err
 		}
-		if lit, ok := args[0].(*ast.StringLiteral); ok && reg != nil {
-			reg.AddFunc(lit.Value, sig)
-		}
-		nameVal, err := e.emitExpr(args[0])
+		// Node's order: the name's type, the signature's type, the name's
+		// NUL bytes, then the signature's contents.
+		nv, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
 		}
-		nameRef := e.coerce(nameVal, TypePtr).Ref
-		sym := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @dlsym(ptr %s, ptr %s)", sym, handle, nameRef))
-		e.emitFFIThrowOnNull(sym, "undefined symbol")
-		return Value{Ref: sym, Ty: FFIFunctionType(sig)}, nil
+		if !isStringTy(nv.Ty) || nv.Ty.IsDynamic {
+			e.emitFFIThrowWhen("true", "TypeError", "ERR_INVALID_ARG_TYPE", e.internString("Function name must be a string"))
+			return e.ffiZeroFn(sig), nil
+		}
+		if ffiRTErrCode(rtErr) == "ERR_INVALID_ARG_TYPE" && rtErr != "" {
+			e.emitFFIThrowWhen("true", "TypeError", "ERR_INVALID_ARG_TYPE", e.internString("Function signature must be an object"))
+			return e.ffiZeroFn(sig), nil
+		}
+		name := e.emitFFINameChecked(nv.Ref, "Function")
+		fn, fresh, err := e.emitFFIPrepare(lib, name, e.ffiLastLen, sig, rtErr, nil)
+		if err != nil {
+			return Value{}, err
+		}
+		rec := e.emitFFIRecordFor(lib, fn, fresh, sig)
+		return Value{Ref: rec, Ty: FFIFunctionType(sig)}, nil
 
 	case "getFunctions":
 		// With no arguments, Node returns the accumulator of everything
 		// previously resolved — same as the `functions` property.
 		if len(args) == 0 {
-			return e.emitFFILibAccumulator(objVal, handle, true, pos)
+			return e.emitFFIAccumulator(lib, true), nil
 		}
 		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: getFunctions takes a definitions object literal (or no argument for the previously-resolved set)", pos.Line, pos.Col)
+			return Value{}, fmt.Errorf("%d:%d: getFunctions takes a definitions object (or no argument for the previously-resolved set)", pos.Line, pos.Col)
 		}
-		defs, ok := args[0].(*ast.ObjectLiteral)
-		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: getFunctions definitions must be an object literal — signatures are resolved at compile time", pos.Line, pos.Col)
-		}
-		if reg != nil {
-			funcsTy, err := ffiDefinitionsType(defs)
-			if err != nil {
-				return Value{}, err
-			}
-			for _, f := range funcsTy.Fields {
-				reg.AddFunc(f.Name, f.Ty.FFISig)
-			}
-		}
-		return e.emitFFIResolveFunctions(handle, defs)
+		return e.emitFFIGetFunctionsDefs(lib, args[0], nil)
 
 	case "getSymbol":
 		if len(args) != 1 {
 			return Value{}, fmt.Errorf("%d:%d: getSymbol takes exactly 1 argument (name)", pos.Line, pos.Col)
 		}
-		if lit, ok := args[0].(*ast.StringLiteral); ok && reg != nil {
-			reg.AddSym(lit.Value)
-		}
-		nameVal, err := e.emitExpr(args[0])
+		name, nameLen, err := e.emitFFINameArg(args[0], "Symbol")
 		if err != nil {
 			return Value{}, err
 		}
-		nameRef := e.coerce(nameVal, TypePtr).Ref
-		sym := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @dlsym(ptr %s, ptr %s)", sym, handle, nameRef))
-		e.emitFFIThrowOnNull(sym, "undefined symbol")
-		return e.ffiPtrToBigInt(sym), nil
+		out := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", out))
+		st := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ffi_get_symbol(ptr %s, ptr %s, i64 %s, ptr %s)", st, lib, name, nameLen, out))
+		e.emitFFIStatusCheck(st, nil)
+		p := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", p, out))
+		return e.ffiPtrToBigInt(p), nil
 
 	case "getSymbols":
 		if len(args) != 0 {
 			return Value{}, fmt.Errorf("%d:%d: getSymbols takes no arguments (it returns the previously-resolved symbol addresses)", pos.Line, pos.Col)
 		}
-		return e.emitFFILibAccumulator(objVal, handle, false, pos)
+		return e.emitFFIAccumulator(lib, false), nil
 
 	case "close":
-		// Idempotent: dlclose only a live handle, then null it out.
-		live := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", live, handle))
-		closeL := e.freshLabel("ffi.close")
-		doneL := e.freshLabel("ffi.closed")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", live, closeL, doneL))
-		e.emitLabel(closeL)
-		rc := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @dlclose(ptr %s)", rc, handle))
-		e.storeSQLiteField(objVal.Ty, objVal.Ref, "__kml_handle", "ptr", "null")
-		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-		e.emitLabel(doneL)
+		// Idempotent (the registry ignores a second close).
+		e.emitInstr(fmt.Sprintf("call void @__kml_ffi_close(ptr %s)", lib))
 		return Value{Ty: TypeVoid}, nil
 
 	case "registerCallback":
@@ -822,61 +1189,21 @@ func (e *Emitter) emitFFILibraryMethod(objExpr ast.Expression, method string, ar
 	return Value{}, fmt.Errorf("%d:%d: unknown DynamicLibrary method '%s'", pos.Line, pos.Col, method)
 }
 
-// ffiLibAccumulatorType derives the object type of `library.functions` /
-// `library.symbols` (and their no-arg getter forms) from the accumulator.
-func ffiLibAccumulatorType(reg *FFILibReg, wantFuncs bool) Type {
-	var fields []Field
-	if reg != nil {
-		for _, f := range reg.Entries {
-			if wantFuncs {
-				if f.Sig != nil {
-					fields = append(fields, Field{Name: f.Name, Ty: FFIFunctionType(f.Sig)})
-				}
-				continue
-			}
-			// Node's `symbols` holds every previously-resolved address —
-			// getSymbol names and resolved functions alike.
-			fields = append(fields, Field{Name: f.Name, Ty: BigIntType()})
-		}
-	}
-	return ObjectType(fields)
+// ffiZeroFn is a placeholder bound-function value after an unconditional
+// throw.
+func (e *Emitter) ffiZeroFn(sig *FFISignature) Value {
+	return Value{Ref: "null", Ty: FFIFunctionType(sig)}
 }
 
-// emitFFILibAccumulator materializes the accumulator object: every recorded
-// name re-dlsym'd against the live handle (same address as the original
-// resolution), typed as callable functions or bigint addresses.
-func (e *Emitter) emitFFILibAccumulator(objVal Value, handle string, wantFuncs bool, pos ast.Pos) (Value, error) {
-	ty := ffiLibAccumulatorType(objVal.Ty.FFILibReg, wantFuncs)
-	e.ensureMalloc()
-	obj := e.freshReg()
-	size := ty.StructSize()
-	if size == 0 {
-		size = 8
-	}
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", obj, size))
-	for _, f := range ty.Fields {
-		sym := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @dlsym(ptr %s, ptr %s)", sym, handle, e.internString(f.Name)))
-		e.emitFFIThrowOnNull(sym, fmt.Sprintf("undefined symbol: %s", f.Name))
-		val := sym
-		if !wantFuncs {
-			val = e.ffiPtrToBigInt(sym).Ref
-		}
-		e.storeSQLiteField(ty, obj, f.Name, "ptr", val)
-	}
-	return Value{Ref: obj, Ty: ty}, nil
-}
-
-// emitFFILibraryProperty lowers `library.functions` / `library.symbols`.
+// emitFFILibraryProperty lowers `library.functions` / `library.symbols`: a
+// fresh null-prototype object of every previously resolved function/address.
 func (e *Emitter) emitFFILibraryProperty(objExpr ast.Expression, prop string, pos ast.Pos) (Value, error) {
+	e.ensureFFIRuntime()
 	objVal, err := e.emitExpr(objExpr)
 	if err != nil {
 		return Value{}, err
 	}
-	handleIdx, _, _ := objVal.Ty.FieldIndex("__kml_handle")
-	handle := e.loadFieldValue(objVal, handleIdx, TypePtr).Ref
-	e.ensureFFIDl()
-	return e.emitFFILibAccumulator(objVal, handle, prop == "functions", pos)
+	return e.emitFFIAccumulator(objVal.Ref, prop == "functions"), nil
 }
 
 // emitNewDynamicLibrary implements `new DynamicLibrary(path)` (TDD-00164).
@@ -888,11 +1215,7 @@ func (e *Emitter) emitNewDynamicLibrary(ex *ast.NewExpression) (Value, error) {
 	if len(ex.Args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: new DynamicLibrary takes exactly 1 argument (path)", pos.Line, pos.Col)
 	}
-	handle, pathRef, err := e.emitFFIDlopenHandle(ex.Args[0], pos)
-	if err != nil {
-		return Value{}, err
-	}
-	return e.emitFFIBuildLibrary(handle, pathRef), nil
+	return e.emitFFIOpenLibrary(ex.Args[0], pos)
 }
 
 // ffiPtrToBigInt wraps a raw pointer register into a bigint address value.
@@ -1025,9 +1348,10 @@ func (e *Emitter) emitFFIPointerArg(argExpr ast.Expression, pos ast.Pos) (irTy, 
 	return "ptr", e.coerce(v, TypePtr).Ref, nil
 }
 
-// emitFFIFunctionCall lowers a call through an IsFFIFunction value: marshal
-// each argument to the declared C type, emit the indirect C-ABI call, and
-// marshal the return.
+// emitFFIFunctionCall lowers a direct call through a bound native function:
+// the arguments are evaluated first (JS order), then the record's
+// closed-library, argument-count and per-argument checks run and the C
+// function is called (emitFFICallThroughRecord).
 func (e *Emitter) emitFFIFunctionCall(ex *ast.CallExpression) (Value, error) {
 	pos := ex.GetPos()
 	if err := ffiRejectWindows(pos); err != nil {
@@ -1041,28 +1365,16 @@ func (e *Emitter) emitFFIFunctionCall(ex *ast.CallExpression) (Value, error) {
 	if sig == nil {
 		return Value{}, fmt.Errorf("%d:%d: FFI function value has no compile-time signature", pos.Line, pos.Col)
 	}
-	if len(ex.Args) != len(sig.Args) {
-		return Value{}, fmt.Errorf("%d:%d: FFI call expects %d argument(s), got %d", pos.Line, pos.Col, len(sig.Args), len(ex.Args))
-	}
-	callArgs := ""
-	for i, argExpr := range ex.Args {
-		irTy, ref, err := e.emitFFIMarshalArg(argExpr, sig.Args[i], pos)
+	e.ensureFFIRuntime()
+	args := make([]Value, len(ex.Args))
+	for i, a := range ex.Args {
+		v, err := e.emitExpr(a)
 		if err != nil {
 			return Value{}, err
 		}
-		if i > 0 {
-			callArgs += ", "
-		}
-		callArgs += irTy + " " + ref
+		args[i] = v
 	}
-	retIR := ffiLLVMType(sig.Ret)
-	if retIR == "void" {
-		e.emitInstr(fmt.Sprintf("call void %s(%s)", calleeVal.Ref, callArgs))
-		return Value{Ty: TypeVoid}, nil
-	}
-	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call %s %s(%s)", raw, retIR, calleeVal.Ref, callArgs))
-	return e.emitFFIMarshalReturn(raw, sig.Ret)
+	return e.emitFFICallThroughRecord(calleeVal.Ref, sig, args)
 }
 
 // emitFFIMarshalReturn widens/wraps a raw C return register to its KML value.

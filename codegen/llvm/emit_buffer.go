@@ -38,13 +38,13 @@ func (e *Emitter) bufferAggregate(ptrRef, lenRef string) Value {
 
 // bufferEncodingArg resolves an optional encoding argument. The codec choice
 // is a compile-time dispatch, so the argument must be a string literal;
-// names are normalized (utf-8 → utf8, binary/ascii → latin1, ucs2 aliases
-// rejected with the utf16 message).
+// names are normalized (utf-8 → utf8, binary/ascii → latin1, ucs2/utf-16le →
+// utf16le).
 func bufferEncodingArg(args []ast.Expression, idx int, pos ast.Pos) (string, error) {
 	if len(args) <= idx {
 		return "utf8", nil
 	}
-	lit, ok := args[idx].(*ast.StringLiteral)
+	lit, ok := stringLiteralThrough(args[idx])
 	if !ok {
 		return "", fmt.Errorf("%d:%d: a Buffer encoding must be a string literal (the codec is chosen at compile time)", pos.Line, pos.Col)
 	}
@@ -60,9 +60,87 @@ func bufferEncodingArg(args []ast.Expression, idx int, pos ast.Pos) (string, err
 	case "latin1", "binary", "ascii":
 		return "latin1", nil
 	case "utf16le", "utf-16le", "ucs2", "ucs-2":
-		return "", fmt.Errorf("%d:%d: the '%s' encoding is not supported (this compiler's strings are UTF-8-native)", pos.Line, pos.Col, lit.Value)
+		return "utf16le", nil
 	}
 	return "", fmt.Errorf("%d:%d: unknown Buffer encoding '%s' (utf8/hex/base64/base64url/latin1/binary/ascii)", pos.Line, pos.Col, lit.Value)
+}
+
+// bufferEncoding resolves an optional encoding argument: a string literal
+// picks its codec at compile time (enc), any other expression names one at
+// run time (encRef, the evaluated string).
+func (e *Emitter) bufferEncoding(args []ast.Expression, idx int, pos ast.Pos) (enc, encRef string, err error) {
+	if len(args) > idx {
+		if _, ok := stringLiteralThrough(args[idx]); !ok {
+			v, err := e.emitExpr(args[idx])
+			if err != nil {
+				return "", "", err
+			}
+			if isStringTy(v.Ty) && !v.Ty.IsDynamic {
+				return "", v.Ref, nil // null (undefined) is utf8
+			}
+			s, err := e.emitArgToString(v)
+			if err != nil {
+				return "", "", err
+			}
+			if v.Ty.IsDynamic && v.Ty.IR == "i64" {
+				// An undefined encoding is utf8.
+				isU, r := e.freshReg(), e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, v.Ref, nbUndefined))
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", r, isU, s.Ref))
+				return "", r, nil
+			}
+			return "", s.Ref, nil
+		}
+	}
+	enc, err = bufferEncodingArg(args, idx, pos)
+	if err != nil && len(args) > idx {
+		// A name Node rejects: its ERR_UNKNOWN_ENCODING, at run time.
+		lit, _ := stringLiteralThrough(args[idx])
+		return "", e.internString(lit.Value), nil
+	}
+	return enc, "", err
+}
+
+// emitBufferDecodeStringDyn is emitBufferDecodeString for an encoding named
+// at run time; an unknown one throws Node's ERR_UNKNOWN_ENCODING.
+func (e *Emitter) emitBufferDecodeStringDyn(strRef, encRef string) (ptrRef, lenRef string) {
+	e.ensureBufferCodecs()
+	outSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", outSlot))
+	l := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_buf_decode_enc(ptr %s, ptr %s, ptr %s)", l, strRef, encRef, outSlot))
+	bad := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", bad, l))
+	e.emitUnknownEncodingGuard(bad, encRef)
+	buf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", buf, outSlot))
+	return buf, l
+}
+
+// emitBufferEncodeStringDyn is emitBufferEncodeString for an encoding named
+// at run time; an unknown one throws Node's ERR_UNKNOWN_ENCODING.
+func (e *Emitter) emitBufferEncodeStringDyn(ptrRef, lenRef, encRef string) Value {
+	e.ensureBufferCodecs()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_buf_encode_enc(ptr %s, i64 %s, ptr %s)", r, ptrRef, lenRef, encRef))
+	bad := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", bad, r))
+	e.emitUnknownEncodingGuard(bad, encRef)
+	return Value{Ref: r, Ty: TypePtr}
+}
+
+// emitUnknownEncodingGuard throws `TypeError [ERR_UNKNOWN_ENCODING]: Unknown
+// encoding: <enc>` where bad holds.
+func (e *Emitter) emitUnknownEncodingGuard(bad, encRef string) {
+	throwL := e.freshLabel("buf.badenc")
+	okL := e.freshLabel("buf.enc")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, throwL, okL))
+	e.emitLabel(throwL)
+	msg, _ := e.emitStringConcat(Value{Ref: e.internString("Unknown encoding: "), Ty: TypePtr}, Value{Ref: encRef, Ty: TypePtr})
+	errObj := e.buildErrorObjWithCode(errorKindIDs["TypeError"], msg.Ref, e.internString("TypeError"), e.internString("ERR_UNKNOWN_ENCODING"), "0.0", "null")
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+	e.emitTerminator("unreachable")
+	e.emitLabel(okL)
 }
 
 // emitBufferDecodeString lowers (string, encoding) → (dataPtr, len)
@@ -86,6 +164,7 @@ func (e *Emitter) emitBufferDecodeString(strRef, enc string) (ptrRef, lenRef str
 			"base64":    "@__kml_buf_b64_dec",
 			"base64url": "@__kml_buf_b64_dec",
 			"latin1":    "@__kml_buf_latin1_bytes",
+			"utf16le":   "@__kml_buf_utf16le_bytes",
 		}[enc]
 		outSlot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", outSlot))
@@ -101,15 +180,12 @@ func (e *Emitter) emitBufferDecodeString(strRef, enc string) (ptrRef, lenRef str
 func (e *Emitter) emitBufferEncodeString(ptrRef, lenRef, enc string) Value {
 	switch enc {
 	case "utf8":
-		// Copy + NUL-terminate (embedded NULs truncate — the standard
-		// string-boundary caveat).
-		e.ensureMemcpy()
-		nul := e.freshReg()
-		buf := e.emitStringAlloc(lenRef) // TDD-00120: length-prefixed string
-		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, ptrRef, lenRef))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", nul, buf, lenRef))
-		e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", nul))
-		return Value{Ref: buf, Ty: TypePtr}
+		// The WHATWG decoder: invalid sequences become U+FFFD (embedded NULs
+		// truncate — the standard string-boundary caveat).
+		e.ensureBufferCodecs()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_buf_utf8_str(ptr %s, i64 %s)", r, ptrRef, lenRef))
+		return Value{Ref: r, Ty: TypePtr}
 	case "hex":
 		e.ensureBufferCodecs()
 		r := e.freshReg()
@@ -123,6 +199,17 @@ func (e *Emitter) emitBufferEncodeString(ptrRef, lenRef, enc string) Value {
 		}
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_buf_b64_enc(ptr %s, i64 %s, i32 %s)", r, ptrRef, lenRef, urlsafe))
+		return Value{Ref: r, Ty: TypePtr}
+	case "utf16le":
+		e.ensureBufferCodecs()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_buf_utf16le_str(ptr %s, i64 %s)", r, ptrRef, lenRef))
+		return Value{Ref: r, Ty: TypePtr}
+	case "ascii":
+		// Decoding drops each byte's high bit (encoding is latin1's).
+		e.ensureBufferCodecs()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_buf_ascii_str(ptr %s, i64 %s)", r, ptrRef, lenRef))
 		return Value{Ref: r, Ty: TypePtr}
 	default: // latin1
 		e.ensureBufferCodecs()
@@ -196,15 +283,22 @@ func (e *Emitter) emitBufferStaticCall(method string, args []ast.Expression, pos
 			if !isStringTy(v.Ty) || v.Ty.IsArrayBuffer || v.Ty.IsBlob || v.Ty.IsDataView {
 				return Value{}, fmt.Errorf("%d:%d: Buffer.from takes a string, array, TypedArray, ArrayBuffer, or Buffer", pos.Line, pos.Col)
 			}
-			enc, err := bufferEncodingArg(args, 1, pos)
+			enc, encRef, err := e.bufferEncoding(args, 1, pos)
 			if err != nil {
 				return Value{}, err
+			}
+			if encRef != "" {
+				data, l := e.emitBufferDecodeStringDyn(v.Ref, encRef)
+				return e.bufferAggregate(data, l), nil
 			}
 			data, l := e.emitBufferDecodeString(v.Ref, enc)
 			return e.bufferAggregate(data, l), nil
 		}
 
-	case "alloc", "allocUnsafe":
+	case "alloc", "allocUnsafe", "allocUnsafeSlow":
+		if method == "allocUnsafeSlow" {
+			method = "allocUnsafe" // no pool to bypass
+		}
 		if len(args) < 1 || (method == "allocUnsafe" && len(args) != 1) || len(args) > 2 {
 			return Value{}, fmt.Errorf("%d:%d: Buffer.%s takes (size%s)", pos.Line, pos.Col, method, map[string]string{"alloc": ", fill?", "allocUnsafe": ""}[method])
 		}
@@ -252,7 +346,7 @@ func (e *Emitter) emitBufferStaticCall(method string, args []ast.Expression, pos
 		}
 		lit, ok := args[0].(*ast.ArrayLiteral)
 		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.concat's list must be an inline array literal of Buffers/TypedArrays", pos.Line, pos.Col)
+			return e.emitBufferConcatList(args, pos)
 		}
 		type part struct{ ptrRef, lenRef string }
 		parts := make([]part, 0, len(lit.Elements))
@@ -331,11 +425,15 @@ func (e *Emitter) emitBufferStaticCall(method string, args []ast.Expression, pos
 		if len(args) != 1 {
 			return Value{}, fmt.Errorf("%d:%d: Buffer.isBuffer takes 1 argument", pos.Line, pos.Col)
 		}
-		// A compile-time constant from the inferred type; the argument is
-		// still evaluated for its side effects.
+		// A compile-time constant from the inferred type (the argument is
+		// still evaluated for its side effects), except for an `any`, whose
+		// box says.
 		v, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
+		}
+		if isSelfDescribingBox(v.Ty) {
+			return Value{Ref: e.emitBoxIsTypedArray(v, anyArrayBuffer), Ty: TypeBool}, nil
 		}
 		if v.Ty.IsBuffer {
 			return Value{Ref: "true", Ty: TypeBool}, nil
@@ -353,22 +451,28 @@ func (e *Emitter) emitBufferStaticCall(method string, args []ast.Expression, pos
 		if v.Ty.IsTypedArray || v.Ty.IsArrayBuffer {
 			return Value{}, fmt.Errorf("%d:%d: Buffer.byteLength here takes a string (use .byteLength on a TypedArray/ArrayBuffer value)", pos.Line, pos.Col)
 		}
-		enc, err := bufferEncodingArg(args, 1, pos)
-		if err != nil {
-			return Value{}, err
+		// Node's per-encoding formula (__kml_buf_byte_length): hex is the
+		// length >>> 1 however valid its digits, an unknown name is utf8.
+		encRef := "null"
+		if len(args) > 1 {
+			lit, isLit := stringLiteralThrough(args[1])
+			switch {
+			case isLit:
+				encRef = e.internString(lit.Value)
+			default:
+				_, r, err := e.bufferEncoding(args, 1, pos)
+				if err != nil {
+					return Value{}, err
+				}
+				encRef = r
+			}
 		}
-		if enc == "utf8" {
-			e.ensureStrlen()
-			l := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", l, v.Ref))
-			return Value{Ref: l, Ty: TypeI64}, nil
-		}
-		// Non-utf8: decode and take the length — exact for every codec
-		// (Node's fast formulas are just optimizations).
-		_, l := e.emitBufferDecodeString(v.Ref, enc)
+		e.ensureBufferCodecs()
+		l := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_buf_byte_length(ptr %s, ptr %s)", l, v.Ref, encRef))
 		return Value{Ref: l, Ty: TypeI64}, nil
 	}
-	return Value{}, fmt.Errorf("%d:%d: unknown Buffer method '%s' (from/alloc/allocUnsafe/concat/compare/isBuffer/byteLength)", pos.Line, pos.Col, method)
+	return Value{}, fmt.Errorf("%d:%d: unknown Buffer method '%s' (from/alloc/allocUnsafe/allocUnsafeSlow/concat/compare/isBuffer/byteLength)", pos.Line, pos.Col, method)
 }
 
 // emitBufferCopyCoerceLoop copies lenReg elements from a source array
@@ -840,9 +944,14 @@ func (e *Emitter) emitBufferInstanceCall(mem *ast.MemberExpression, method strin
 		if len(args) > 3 {
 			return Value{}, fmt.Errorf("%d:%d: Buffer.toString takes (encoding?, start?, end?)", pos.Line, pos.Col)
 		}
-		enc, err := bufferEncodingArg(args, 0, pos)
+		enc, encRef, err := e.bufferEncoding(args, 0, pos)
 		if err != nil {
 			return Value{}, err
+		}
+		if len(args) > 0 {
+			if lit, ok := stringLiteralThrough(args[0]); ok && strings.EqualFold(lit.Value, "ascii") {
+				enc = "ascii"
+			}
 		}
 		ptrReg, lenReg, _, err := e.resolveArrayForHOF(mem.Object, pos)
 		if err != nil {
@@ -872,6 +981,9 @@ func (e *Emitter) emitBufferInstanceCall(mem *ast.MemberExpression, method strin
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", n, isNeg, rawLen))
 		base := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", base, ptrReg, startN))
+		if encRef != "" {
+			return e.emitBufferEncodeStringDyn(base, n, encRef), nil
+		}
 		return e.emitBufferEncodeString(base, n, enc), nil
 
 	case "write":
@@ -901,11 +1013,16 @@ func (e *Emitter) emitBufferInstanceCall(mem *ast.MemberExpression, method strin
 				encIdx = 2
 			}
 		}
-		enc, err := bufferEncodingArg(args, encIdx, pos)
+		enc, encRef, err := e.bufferEncoding(args, encIdx, pos)
 		if err != nil {
 			return Value{}, err
 		}
-		srcPtr, srcLen := e.emitBufferDecodeString(sv.Ref, enc)
+		var srcPtr, srcLen string
+		if encRef != "" {
+			srcPtr, srcLen = e.emitBufferDecodeStringDyn(sv.Ref, encRef)
+		} else {
+			srcPtr, srcLen = e.emitBufferDecodeString(sv.Ref, enc)
+		}
 		dstPtr, dstLen, _, err := e.resolveArrayForHOF(mem.Object, pos)
 		if err != nil {
 			return Value{}, err
@@ -1007,4 +1124,49 @@ func (e *Emitter) emitBufferInstanceCall(mem *ast.MemberExpression, method strin
 		return Value{Ref: r, Ty: TypeBool}, nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: unknown Buffer method '%s'", pos.Line, pos.Col, method)
+}
+
+// emitBufferConcatList is Buffer.concat(list, totalLength?) over a runtime
+// array of Buffers or byte TypedArrays (an inline literal is joined in IR
+// instead).
+func (e *Emitter) emitBufferConcatList(args []ast.Expression, pos ast.Pos) (Value, error) {
+	lt := e.inferExprType(args[0])
+	if !lt.IsArray || lt.ElemType == nil || !lt.ElemType.IsTypedArray || lt.ElemType.BigIntElem || lt.ElemType.ElemType == nil || lt.ElemType.ElemType.Align() != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.concat's list must be an array of Buffers or byte TypedArrays", pos.Line, pos.Col)
+	}
+	ptrReg, lenReg, _, err := e.resolveArrayForHOF(args[0], pos)
+	if err != nil {
+		return Value{}, err
+	}
+	total := "-1"
+	if len(args) == 2 {
+		tv, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		total = e.coerce(tv, TypeI64).Ref
+	}
+	e.ensureBufferCodecs()
+	outLen := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", outLen))
+	data := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_buf_concat(ptr %s, i64 %s, i64 %s, ptr %s)", data, ptrReg, lenReg, total, outLen))
+	n := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", n, outLen))
+	return e.bufferAggregate(data, n), nil
+}
+
+// stringLiteralThrough is expr's string literal, seen through a type
+// assertion (`'UCS-2' as BufferEncoding`), which changes no value.
+func stringLiteralThrough(expr ast.Expression) (*ast.StringLiteral, bool) {
+	for {
+		switch x := expr.(type) {
+		case *ast.StringLiteral:
+			return x, true
+		case *ast.AsExpression:
+			expr = x.Expr
+		default:
+			return nil, false
+		}
+	}
 }

@@ -1,6 +1,11 @@
 package tests
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"KlainMainLang/parser"
+)
 
 // Tuple types `[T0, T1, ...]` (TDD-00066): declaration, constant-index read,
 // and rendering.
@@ -87,6 +92,36 @@ const pair: [User, number] = [{ name: "Zoe" }, 5]
 console.log(pair[0].name)
 console.log(pair[1])
 `, "Zoe\n5")
+}
+
+// Labelled elements (`[name: T, …]`) are documentation only: the tuple is the
+// same positional value as without labels.
+func TestE2ETupleLabelledElements(t *testing.T) {
+	assertOutput(t, `
+type Reading = [city: string, celsius: number]
+const r: Reading = ["Thessaloniki", 24]
+const [city, c] = r
+console.log(city, c, r[1], r.length)
+function span(xs: number[]): [min: number, max: number] {
+  return [Math.min(...xs), Math.max(...xs)]
+}
+const [lo, hi] = span([4, 9, 2])
+console.log(lo, hi)
+`, "Thessaloniki 24 24 2\n2 9")
+}
+
+// An optional or rest element has no storage in the fixed-shape tuple, and is
+// rejected cleanly.
+func TestE2ETupleOptionalRestRejected(t *testing.T) {
+	for src, want := range map[string]string{
+		`const t: [a: number, b?: string] = [1]`: "1:22: an optional tuple element is not yet supported",
+		`const t: [number, string?] = [1]`:       "1:19: an optional tuple element is not yet supported",
+		`const t: [number, ...string[]] = [1]`:   "1:19: a rest tuple element is not yet supported",
+	} {
+		if _, err := parser.Parse(src); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: got %v, want %q", src, err, want)
+		}
+	}
 }
 
 // A tuple element may itself be an array or a nullable scalar.

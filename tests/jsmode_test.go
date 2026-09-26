@@ -1,6 +1,9 @@
 package tests
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -109,7 +112,8 @@ func TestStrictModeClassFieldInferenceOff(t *testing.T) {
 class Point { constructor(x, y) { this.x = x } }
 new Point(1, 2)
 `)
-	if err == nil || !strings.Contains(err.Error(), "no field 'x'") {
+	// tsc's TS2339: the class declares no `x`.
+	if err == nil || !strings.Contains(err.Error(), "property 'x' does not exist on type 'Point'") {
 		t.Fatalf("expected strict-mode no-field rejection, got: %v", err)
 	}
 }
@@ -417,4 +421,120 @@ func TestE2EJSModeDestructureDynamicObjectNestedArray(t *testing.T) {
 	assertOutputCompatJS(t, `
 for (const { x: [a], } of [{ x: [45] }]) { console.log(a) }
 `, "45")
+}
+
+// -compat=js: a property of a union whose one object member declares it
+// reads at run time (JavaScript's read): the member's field, a primitive's
+// property, or JavaScript's TypeError on null.
+func TestCompatJSUnionSoleObjectMemberRead(t *testing.T) {
+	assertOutputCompatJS(t, `
+function addr(k: number): { port: number } | string | null {
+  if (k === 0) return { port: 8080 }
+  if (k === 1) return "pipe"
+  return null
+}
+const a = addr(0), b = addr(1), c = addr(2)
+console.log(a.port, b.port)
+try { console.log(c.port) } catch (e) { console.log(e.message) }
+`, "8080 undefined\nCannot read properties of null (reading 'port')")
+}
+
+// -compat=js: the builtin modules written in TypeScript (http over net)
+// compile in the strict lane whatever the program's lane; a js-lane program
+// using them runs as Node does.
+func TestCompatJSProgramUsingHTTP(t *testing.T) {
+	bin := buildCLI(t)
+	dir := tempDir(t)
+	src := filepath.Join(dir, "main.js")
+	if err := os.WriteFile(src, []byte(`
+const http = require('http');
+const server = http.createServer(function(req, res) { res.end('ok:' + req.url); });
+server.listen(0, function() {
+  const port = server.address().port;
+  http.get({ port: port, path: '/x' }, function(res) {
+    let body = '';
+    res.on('data', function(c) { body += c; });
+    res.on('end', function() { console.log(res.statusCode, body); server.close(); });
+  });
+});
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
+	if b, err := exec.Command(bin, "-compat=js", "-o", out, src).CombinedOutput(); err != nil {
+		t.Fatalf("compile: %v\n%s", err, b)
+	}
+	got, err := exec.Command(out).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, got)
+	}
+	compareLines(t, strings.TrimRight(string(got), "\n"), "200 ok:/x")
+}
+
+// -compat=js: Node's function-style constructors construct when called
+// without `new` (`http.Server(…)`, `net.Server()`, `stream.Readable(…)`);
+// the strict lane rejects the call, tsc's TS2348.
+func TestCompatJSCallableNodeConstructors(t *testing.T) {
+	bin := buildCLI(t)
+	dir := tempDir(t)
+	src := filepath.Join(dir, "main.js")
+	if err := os.WriteFile(src, []byte(`
+const http = require('http');
+const net = require('net');
+const { Readable } = require('stream');
+const server = http.Server(function(req, res) { res.end('ok'); });
+console.log(server instanceof http.Server);
+const s2 = net.Server();
+console.log(s2 instanceof net.Server);
+const r = Readable({ read() {} });
+r.push('x'); r.push(null);
+r.on('data', (c) => console.log('data', c.toString()));
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
+	if b, err := exec.Command(bin, "-compat=js", "-o", out, src).CombinedOutput(); err != nil {
+		t.Fatalf("compile: %v\n%s", err, b)
+	}
+	got, err := exec.Command(out).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, got)
+	}
+	compareLines(t, strings.TrimRight(string(got), "\n"), "true\ntrue\ndata x")
+	tsSrc := filepath.Join(dir, "strict.ts")
+	if err := os.WriteFile(tsSrc, []byte("class A { x = 1 }\nconst a = A()\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	b, err := exec.Command(bin, "-o", out, tsSrc).CombinedOutput()
+	if err == nil || !strings.Contains(string(b), "value of type 'typeof A' is not callable") {
+		t.Fatalf("want TS2348, got %v\n%s", err, b)
+	}
+}
+
+// -compat=js: a top-level binding a function reads (`const server =
+// http.createServer(…).listen(0, client)` read in `function client()`) is a
+// module global.
+func TestCompatJSTopLevelReadInFunction(t *testing.T) {
+	bin := buildCLI(t)
+	dir := tempDir(t)
+	src := filepath.Join(dir, "main.js")
+	if err := os.WriteFile(src, []byte(`
+const http = require('http');
+const server = http.createServer((req, res) => { res.end('ok'); }).listen(0, client);
+function client() {
+  const port = server.address().port;
+  http.get({ port }, (res) => { res.resume(); res.on('end', () => { console.log('status', res.statusCode); server.close(); }); });
+}
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
+	if b, err := exec.Command(bin, "-compat=js", "-o", out, src).CombinedOutput(); err != nil {
+		t.Fatalf("compile: %v\n%s", err, b)
+	}
+	got, err := exec.Command(out).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, got)
+	}
+	compareLines(t, strings.TrimRight(string(got), "\n"), "status 200")
 }

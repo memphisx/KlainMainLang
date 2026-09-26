@@ -370,11 +370,11 @@ func (e *Emitter) emitWSServerLoop(wsConnReg string) error {
 
 	e.emitLabel(checkEagainL)
 	errnoPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @%s()", errnoPtr, errnoAccessor()))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @%s()", errnoPtr, e.errnoAccessor()))
 	errnoVal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", errnoVal, errnoPtr))
 	isEagain := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, %d", isEagain, errnoVal, httpEagainErrno()))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, %d", isEagain, errnoVal, e.httpEagainErrno()))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isEagain, doYieldL, endL))
 
 	e.emitLabel(doYieldL)

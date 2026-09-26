@@ -2,8 +2,8 @@ package parser
 
 import (
 	"KlainMainLang/ast"
+	"KlainMainLang/diag"
 	"KlainMainLang/lexer"
-	"fmt"
 )
 
 // parseImportDeclaration parses `import { a, b as c } from './path'`, a
@@ -23,12 +23,19 @@ func (p *Parser) parseImportDeclaration() (*ast.ImportDeclaration, error) {
 
 	var specs []ast.ImportSpecifier
 	var namespace string
+	// `import type { A }`, `import type * as ns`, `import type D from`; but
+	// `import type from './x'` is a default import named `type`.
+	typeOnly := p.isWord(0, "type") && (p.peekNth(1).Type == lexer.LBRACE || p.peekNth(1).Type == lexer.STAR ||
+		(p.peekNth(1).Type == lexer.IDENT && !(p.peekNth(1).Literal == "from" && p.peekNth(2).Type == lexer.STRING)))
+	if typeOnly {
+		p.advance() // 'type'
+	}
 
 	switch {
 	case p.check(lexer.STAR):
 		p.advance() // '*'
 		if !(p.peek().Type == lexer.IDENT && p.peek().Literal == "as") {
-			return nil, fmt.Errorf("%d:%d: expected 'as' after '*' in namespace import, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
+			return nil, p.errAt(p.peek(), diag.ExpectedAsNamespace, p.peek().Type)
 		}
 		p.advance() // 'as'
 		nsTok, err := p.expect(lexer.IDENT)
@@ -56,7 +63,7 @@ func (p *Parser) parseImportDeclaration() (*ast.ImportDeclaration, error) {
 	}
 
 	if !(p.peek().Type == lexer.IDENT && p.peek().Literal == "from") {
-		return nil, fmt.Errorf("%d:%d: expected 'from' after import specifier list, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
+		return nil, p.errAt(p.peek(), diag.ExpectedFromImport, p.peek().Type)
 	}
 	p.advance() // 'from'
 
@@ -64,10 +71,40 @@ func (p *Parser) parseImportDeclaration() (*ast.ImportDeclaration, error) {
 	if err != nil {
 		return nil, err
 	}
-	if p.check(lexer.SEMICOLON) {
-		p.advance()
+	if err := p.parseSemicolon(); err != nil {
+		return nil, err
 	}
-	return ast.NewImportDeclaration(specs, namespace, srcTok.Literal, pos), nil
+	decl := ast.NewImportDeclaration(specs, namespace, srcTok.Literal, pos)
+	if typeOnly {
+		decl.TypeOnly = true
+		for i := range decl.Specifiers {
+			decl.Specifiers[i].TypeOnly = true
+		}
+	}
+	return decl, nil
+}
+
+// isTypeModifier reports whether the `type` at the cursor is a specifier's
+// type-only modifier (`{ type A }`, `{ type A as B }`) rather than a name
+// (`{ type }`, `{ type as B }`).
+func (p *Parser) isTypeModifier() bool {
+	if !p.isWord(0, "type") {
+		return false
+	}
+	next := p.peekNth(1)
+	if next.Type == lexer.DEFAULT {
+		return true
+	}
+	if next.Type != lexer.IDENT {
+		return false
+	}
+	// `{ type as B }` imports `type` as B; `{ type as as B }` and
+	// `{ type as }` are the modifier on a name `as`.
+	if next.Literal == "as" {
+		after := p.peekNth(2)
+		return after.Type != lexer.IDENT || after.Literal == "as"
+	}
+	return true
 }
 
 // parseImportSpecifierList parses the `{ a, b as c }` named-specifier list.
@@ -77,11 +114,15 @@ func (p *Parser) parseImportSpecifierList() ([]ast.ImportSpecifier, error) {
 	}
 	var specs []ast.ImportSpecifier
 	for !p.check(lexer.RBRACE) {
+		typeOnly := p.isTypeModifier()
+		if typeOnly {
+			p.advance() // 'type'
+		}
 		nameTok, err := p.expect(lexer.IDENT)
 		if err != nil {
 			return nil, err
 		}
-		spec := ast.ImportSpecifier{Imported: nameTok.Literal, Local: nameTok.Literal}
+		spec := ast.ImportSpecifier{Imported: nameTok.Literal, Local: nameTok.Literal, TypeOnly: typeOnly}
 		if p.peek().Type == lexer.IDENT && p.peek().Literal == "as" {
 			p.advance() // 'as'
 			aliasTok, err := p.expect(lexer.IDENT)
@@ -107,15 +148,26 @@ func (p *Parser) parseImportSpecifierList() ([]ast.ImportSpecifier, error) {
 // let/const, interface, type alias, enum, or class declaration —
 // `export default <target>` (TDD-00042), or a re-export
 // (`export { a, b as c } from './path'` / `export * from './path'`,
-// TDD-00051). `export { x };` (no `from`, exporting an already-declared
-// local name) is a different, smaller feature and is not supported here —
-// see TDD-00051's Design section.
+// TDD-00051), or a local export list (`export { a, b as c }`).
 func (p *Parser) parseExportDeclaration() (ast.Statement, error) {
 	tok := p.advance() // 'export'
 	pos := posOf(tok)
 
 	if p.check(lexer.LBRACE) || p.check(lexer.STAR) {
 		return p.parseExportFromDeclaration(pos)
+	}
+	// `export type { A }` / `export type { A } from './x'` / `export type *
+	// from './x'`: a type-only list (`export type A = …` is an alias).
+	if p.isWord(0, "type") && (p.peekNth(1).Type == lexer.LBRACE || p.peekNth(1).Type == lexer.STAR) {
+		p.advance() // 'type'
+		decl, err := p.parseExportFromDeclaration(pos)
+		if err != nil {
+			return nil, err
+		}
+		for i := range decl.Specifiers {
+			decl.Specifiers[i].TypeOnly = true
+		}
+		return decl, nil
 	}
 
 	if p.check(lexer.DEFAULT) {
@@ -156,7 +208,7 @@ func (p *Parser) parseExportDeclaration() (ast.Statement, error) {
 		// parsers return; pass it through unwrapped (ADR-00468).
 		return decl, nil
 	default:
-		return nil, fmt.Errorf("%d:%d: 'export' can only precede a function, variable, interface, type alias, enum, or class declaration", pos.Line, pos.Col)
+		return nil, errAtPos(pos, diag.ExportNotDeclaration)
 	}
 }
 
@@ -170,7 +222,7 @@ func (p *Parser) parseExportFromDeclaration(pos ast.Pos) (*ast.ExportFromDeclara
 	if p.check(lexer.STAR) {
 		p.advance() // '*'
 		if p.peek().Type == lexer.IDENT && p.peek().Literal == "as" {
-			return nil, fmt.Errorf("%d:%d: namespace re-exports ('export * as ns from') are not supported yet", p.peek().Line, p.peek().Col)
+			return nil, p.errAt(p.peek(), diag.NamespaceReexport)
 		}
 		all = true
 	} else {
@@ -182,7 +234,15 @@ func (p *Parser) parseExportFromDeclaration(pos ast.Pos) (*ast.ExportFromDeclara
 	}
 
 	if !(p.peek().Type == lexer.IDENT && p.peek().Literal == "from") {
-		return nil, fmt.Errorf("%d:%d: expected 'from' after export specifier list, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
+		if all {
+			return nil, p.errAt(p.peek(), diag.ExpectedFromExport, p.peek().Type)
+		}
+		// `export { a, b as c }`: an export list of this file's own
+		// declarations (no Source).
+		if err := p.parseSemicolon(); err != nil {
+			return nil, err
+		}
+		return ast.NewExportFromDeclaration(specs, false, "", pos), nil
 	}
 	p.advance() // 'from'
 
@@ -190,8 +250,8 @@ func (p *Parser) parseExportFromDeclaration(pos ast.Pos) (*ast.ExportFromDeclara
 	if err != nil {
 		return nil, err
 	}
-	if p.check(lexer.SEMICOLON) {
-		p.advance()
+	if err := p.parseSemicolon(); err != nil {
+		return nil, err
 	}
 	return ast.NewExportFromDeclaration(specs, all, srcTok.Literal, pos), nil
 }
@@ -209,11 +269,15 @@ func (p *Parser) parseExportFromSpecifierList() ([]ast.ImportSpecifier, error) {
 	}
 	var specs []ast.ImportSpecifier
 	for !p.check(lexer.RBRACE) {
+		typeOnly := p.isTypeModifier()
+		if typeOnly {
+			p.advance() // 'type'
+		}
 		name, err := p.expectIdentOrDefault()
 		if err != nil {
 			return nil, err
 		}
-		spec := ast.ImportSpecifier{Imported: name, Local: name}
+		spec := ast.ImportSpecifier{Imported: name, Local: name, TypeOnly: typeOnly}
 		if p.peek().Type == lexer.IDENT && p.peek().Literal == "as" {
 			p.advance() // 'as'
 			alias, err := p.expectIdentOrDefault()
@@ -272,7 +336,7 @@ func (p *Parser) parseDefaultExportTarget() (ast.Statement, error) {
 		}
 		cd := unwrapClassDecl(stmt)
 		if cd == nil {
-			return nil, fmt.Errorf("%d:%d: decorators can only be applied to a class declaration or its members", pos.Line, pos.Col)
+			return nil, errAtPos(pos, diag.DecoratorsNotValid)
 		}
 		cd.Decorators = decs
 		return stmt, nil
@@ -280,16 +344,14 @@ func (p *Parser) parseDefaultExportTarget() (ast.Statement, error) {
 		return p.parseFunctionDecl(false, "default")
 	case lexer.CLASS:
 		return p.parseClassDecl(false, "default")
-	case lexer.ABSTRACT:
-		if p.peekNth(1).Type == lexer.CLASS {
-			p.advance() // 'abstract'
-			return p.parseClassDecl(true, "default")
-		}
-	case lexer.ASYNC:
-		if p.peekNth(1).Type == lexer.FUNCTION {
-			p.advance() // 'async'
-			return p.parseFunctionDecl(true, "default")
-		}
+	}
+	if p.isWord(0, "abstract") && p.peekNth(1).Type == lexer.CLASS && p.sameLine(1) {
+		p.advance() // 'abstract'
+		return p.parseClassDecl(true, "default")
+	}
+	if p.isWord(0, "async") && p.peekNth(1).Type == lexer.FUNCTION && p.sameLine(1) {
+		p.advance() // 'async'
+		return p.parseFunctionDecl(true, "default")
 	}
 	if p.peek().Type == lexer.IDENT {
 		switch p.peek().Literal {
@@ -306,8 +368,8 @@ func (p *Parser) parseDefaultExportTarget() (ast.Statement, error) {
 	if err != nil {
 		return nil, err
 	}
-	if p.check(lexer.SEMICOLON) {
-		p.advance()
+	if err := p.parseSemicolon(); err != nil {
+		return nil, err
 	}
 	return ast.NewVarDeclaration("const", "default", nil, expr, pos), nil
 }
@@ -329,11 +391,11 @@ func (p *Parser) parseImportExpr() (ast.Expression, error) {
 	case p.check(lexer.DOT):
 		p.advance() // '.'
 		if !(p.peek().Type == lexer.IDENT && p.peek().Literal == "meta") {
-			return nil, fmt.Errorf("%d:%d: expected 'meta' after 'import.'", p.peek().Line, p.peek().Col)
+			return nil, p.errAt(p.peek(), diag.ExpectedImportMeta)
 		}
 		p.advance() // 'meta'
 		if !p.check(lexer.DOT) || !(p.peekNth(1).Type == lexer.IDENT && p.peekNth(1).Literal == "url") {
-			return nil, fmt.Errorf("%d:%d: 'import.meta' is only supported as 'import.meta.url'", p.peek().Line, p.peek().Col)
+			return nil, p.errAt(p.peek(), diag.ImportMetaOnlyURL)
 		}
 		p.advance() // '.'
 		p.advance() // 'url'
@@ -350,17 +412,9 @@ func (p *Parser) parseImportExpr() (ast.Expression, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
-		// Record a string-literal specifier as a dependency edge (mirrors
-		// workerPaths); a non-literal specifier is left for a clean
-		// codegen-time error.
-		node := ast.NewImportCallExpression(spec, pos)
-		if lit, ok := spec.(*ast.StringLiteral); ok {
-			p.dynamicImportPaths = append(p.dynamicImportPaths, lit.Value)
-			p.dynamicImportNodes = append(p.dynamicImportNodes, node)
-		}
-		return node, nil
+		return ast.NewImportCallExpression(spec, pos), nil
 	default:
-		return nil, fmt.Errorf("%d:%d: expected '.' or '(' after 'import' in an expression, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
+		return nil, p.errAt(p.peek(), diag.ExpectedImportDotOr, p.peek().Type)
 	}
 }
 
@@ -381,13 +435,15 @@ func (p *Parser) parseImportEquals(scope string, exported bool) (ast.Statement, 
 		return nil, err
 	}
 	if p.check(lexer.IDENT) && p.peek().Literal == "require" && p.peekNth(1).Type == lexer.LPAREN {
-		return nil, fmt.Errorf("%d:%d: `import %s = require(...)` is not supported — use an ES import declaration instead", tok.Line, tok.Col, nameTok.Literal)
+		return nil, p.errAt(tok, diag.ImportRequireAssignment, nameTok.Literal)
 	}
 	target, err := p.parseNamespaceName()
 	if err != nil {
 		return nil, err
 	}
-	p.consumeSemicolon()
+	if err := p.parseSemicolon(); err != nil {
+		return nil, err
+	}
 	p.nsAliases = append(p.nsAliases, ast.NSAliasDecl{Scope: scope, Name: nameTok.Literal, Target: target, Exported: exported})
 	return ast.NewBlockStatement(nil, posOf(tok)), nil
 }

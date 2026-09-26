@@ -1,38 +1,36 @@
-// The stream module's named function exports: PassThrough (identity
-// Transform, string chunks by default), the callback forms of finished()
-// and pipeline() (their Promise twins live in 'stream/promises'), and
-// duplexPair() — two cross-wired Duplex handles.
+// The stream module's other exports: PassThrough (an identity Transform),
+// the callback forms of finished() and pipeline() (their promise twins live
+// in 'stream/promises'), duplexPair(), and the options form of Duplex.
 import { PassThrough, Writable, Duplex, finished, pipeline, duplexPair } from 'stream';
 
-// PassThrough echoes writes to its readable side untouched.
+// PassThrough passes each written chunk through.
 const echo = new PassThrough();
-echo.on("data", (chunk) => { console.log("echo:", chunk); });
-finished(echo, (err) => { console.log("echo finished, clean:", err === null); });
+echo.on("data", (chunk) => { console.log("echo:", chunk.toString()); });
+finished(echo, (err) => { console.log("echo finished, clean:", !err); });
 echo.write("kalimera");
 echo.end("thessaloniki");
 
 // Callback pipeline: source → passthrough → sink.
 const src = new PassThrough();
-const sink = new Writable<string>({
-  write: (chunk: string) => { console.log("sink:", chunk); }
+const sink = new Writable({
+  write(chunk: Buffer, _enc, cb) { console.log("sink:", chunk.toString()); cb(); }
 });
-pipeline(src, new PassThrough(), sink, () => { console.log("pipeline done"); });
+pipeline(src, new PassThrough(), sink, (err) => { console.log("pipeline done", err ? err.message : "ok"); });
 src.end("via pipeline");
 
 // duplexPair: what one side writes, the other side reads.
 const [clientSide, serverSide] = duplexPair();
-serverSide.on("data", (d) => { console.log("server saw:", d); });
+serverSide.on("data", (d) => { console.log("server saw:", d.toString()); });
 serverSide.on("end", () => { console.log("server side ended"); });
 clientSide.end("hello over the pair");
 
-// new Duplex({read, write, final}) — both sides on one handle, independent:
-// the read callback feeds 'data' consumers, write/final consume the
-// writable side (unlike Transform, nothing crosses between them).
+// new Duplex({ read, write, final }): two sides on one stream, independent
+// (unlike a Transform, nothing crosses between them).
 const dup = new Duplex({
-  read: (s) => { s.push("from-read"); s.push(null); },
-  write: (chunk: string) => { console.log("dup sink:", chunk); },
-  final: () => { console.log("dup finished"); },
+  read() { this.push("from-read"); this.push(null); },
+  write(chunk: Buffer, _enc, cb) { console.log("dup sink:", chunk.toString()); cb(); },
+  final(cb) { console.log("dup finished"); cb(); },
 });
-dup.on("data", (c: string) => { console.log("dup data:", c); });
+dup.on("data", (c) => { console.log("dup data:", c.toString()); });
 dup.write("into-write");
 dup.end();

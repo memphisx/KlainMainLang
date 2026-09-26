@@ -1,6 +1,7 @@
 package lexer_test
 
 import (
+	"errors"
 	"testing"
 
 	"KlainMainLang/lexer"
@@ -12,11 +13,34 @@ type tok struct {
 	lit string
 }
 
+// scanAll scans src the way the parser does in operator position: a `>` is
+// rescanned with gluing so `>>`, `>=`, `>>>=` come back whole. An ILLEGAL
+// token is returned as an error.
+func scanAll(src string) ([]lexer.Token, error) {
+	l := lexer.New(src)
+	var out []lexer.Token
+	for {
+		st := l.Mark()
+		t := l.Scan(lexer.ScanDefault)
+		if t.Type == lexer.GT {
+			l.Rewind(st)
+			t = l.Scan(lexer.ScanGlueGreater)
+		}
+		if t.Type == lexer.ILLEGAL {
+			return nil, errors.New(t.Literal)
+		}
+		out = append(out, t)
+		if t.Type == lexer.EOF {
+			return out, nil
+		}
+	}
+}
+
 func tokenize(t *testing.T, src string) []tok {
 	t.Helper()
-	ts, err := lexer.Tokenize(src)
+	ts, err := scanAll(src)
 	if err != nil {
-		t.Fatalf("Tokenize(%q): %v", src, err)
+		t.Fatalf("scan(%q): %v", src, err)
 	}
 	var out []tok
 	for _, token := range ts {
@@ -197,10 +221,64 @@ func TestBlockComment(t *testing.T) {
 	assertTokens(t, "x /* ignored */ y", []tok{{lexer.IDENT, "x"}, {lexer.IDENT, "y"}})
 }
 
-func TestJSDocComment(t *testing.T) {
-	toks := tokenize(t, "/** @type {number} */")
-	if len(toks) != 1 || toks[0].typ != lexer.JSDOC {
-		t.Fatalf("expected one JSDOC token, got %v", toks)
+func TestJSDocCommentAttachesToTheNextToken(t *testing.T) {
+	ts, err := scanAll("/** @type {number} */\nlet x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ts[0].Type != lexer.LET || ts[0].Doc != "@type {number}" {
+		t.Fatalf("doc not attached to the next token: %+v", ts[0])
+	}
+	if ts[1].Doc != "" {
+		t.Fatalf("doc leaked onto a later token: %+v", ts[1])
+	}
+}
+
+func TestGreaterIsSingleUnlessGlued(t *testing.T) {
+	l := lexer.New("a >>= b")
+	l.Scan(lexer.ScanDefault)
+	st := l.Mark()
+	if g := l.Scan(lexer.ScanDefault); g.Type != lexer.GT || g.End-g.Pos != 1 {
+		t.Fatalf("default scan of `>>=` should give one GT, got %+v", g)
+	}
+	l.Rewind(st)
+	if g := l.Scan(lexer.ScanGlueGreater); g.Type != lexer.RSHIFT_ASSIGN {
+		t.Fatalf("glued scan should give >>=, got %+v", g)
+	}
+}
+
+func TestRegexOrDivisionByMode(t *testing.T) {
+	// after `)` the default reading of `/` is division
+	l := lexer.New(") /x/g")
+	l.Scan(lexer.ScanDefault)
+	st := l.Mark()
+	if d := l.Scan(lexer.ScanDefault); d.Type != lexer.SLASH {
+		t.Fatalf("default after ')' should be SLASH, got %+v", d)
+	}
+	l.Rewind(st)
+	if r := l.Scan(lexer.ScanRegex); r.Type != lexer.REGEX || r.Literal != "x" || r.RegexFlags != "g" {
+		t.Fatalf("regex scan: %+v", r)
+	}
+}
+
+func TestPrecedingLineBreakAndOffsets(t *testing.T) {
+	ts, err := scanAll("a\n++b /* x\n */ c\u2028d\r\ne é")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []struct {
+		lit string
+		nl  bool
+	}{{"a", false}, {"++", true}, {"b", false}, {"c", true}, {"d", true}, {"e", true}, {"é", false}}
+	for i, w := range want {
+		if ts[i].Literal != w.lit || ts[i].HasPrecedingLineBreak() != w.nl {
+			t.Errorf("token %d: got %q nl=%v, want %q nl=%v", i, ts[i].Literal, ts[i].HasPrecedingLineBreak(), w.lit, w.nl)
+		}
+	}
+	src := "a\n++b /* x\n */ c\u2028d\r\ne é"
+	last := ts[6]
+	if src[last.Pos:last.End] != "é" {
+		t.Errorf("byte offsets wrong: [%d,%d) = %q", last.Pos, last.End, src[last.Pos:last.End])
 	}
 }
 
@@ -225,7 +303,7 @@ func TestPrivateName(t *testing.T) {
 	// A bare '#' not immediately followed by an identifier-start character
 	// isn't a private name — still an unhandled character, same as before
 	// this token existed.
-	_, err := lexer.Tokenize("#1")
+	_, err := scanAll("#1")
 	if err == nil {
 		t.Fatal("expected error for '#1' ('#' not followed by an identifier-start char), got nil")
 	}
@@ -234,7 +312,7 @@ func TestPrivateName(t *testing.T) {
 func TestUnexpectedCharError(t *testing.T) {
 	// `\` outside a string/template is not a valid token start (`@` now lexes
 	// as the decorator prefix, TDD-00161).
-	_, err := lexer.Tokenize("\\bad")
+	_, err := scanAll("\\bad")
 	if err == nil {
 		t.Fatal("expected error for '\\', got nil")
 	}
@@ -254,4 +332,17 @@ func TestLeadingBOM(t *testing.T) {
 		{lexer.IDENT, "a"},
 		{lexer.IDENT, "b"},
 	})
+}
+
+// A template's CR LF and lone CR are LF, in the cooked and the raw text
+// alike (ECMAScript's TV and TRV).
+func TestTemplateLineTerminatorsNormalized(t *testing.T) {
+	l := lexer.New("`a\r\nb\rc`")
+	tk, err := l.NextToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tk.Type != lexer.TEMPLATE_NO_SUB || tk.Literal != "a\nb\nc" || tk.Raw != "a\nb\nc" {
+		t.Errorf("got {%v %q raw %q}, want cooked and raw \"a\\nb\\nc\"", tk.Type, tk.Literal, tk.Raw)
+	}
 }

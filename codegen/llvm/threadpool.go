@@ -15,9 +15,15 @@ import (
 //go:embed threadpoolsrc/klainpool.c
 var threadPoolSource string
 
+// The HTTP/1 parser the http module's TypeScript drives, compiled into the
+// same unit (it uses the pool's string helpers).
+//
+//go:embed threadpoolsrc/klainhttp.c
+var httpParserSource string
+
 // ThreadPoolSource returns the embedded pool C runtime, linked (with -pthread)
 // whenever the program routes an fs op through the pool.
-func ThreadPoolSource() string { return threadPoolSource }
+func ThreadPoolSource() string { return threadPoolSource + "\n" + httpParserSource }
 
 // UsesThreadPool reports whether any pooled async fs op was emitted, so the CLI
 // driver / conformance runner know to compile and link klainpool.c.
@@ -53,7 +59,7 @@ func (e *Emitter) ensureThreadPool() {
 
 	e.ensureExceptionHelpers() // __kml_push_jmpbuf / __kml_get_thrown / setjmp
 	e.ensurePromiseSettle()    // __kml_promise_settle — called by __kml_pool_settle
-	e.ensureStreamRuntime()    // __kml_rs_enqueue / __kml_rs_close — the stream drain (TDD-00186)
+	e.ensureMicrotasks()       // __kml_drain_microtasks — run after a native callback
 
 	// klainpool.c provides these — declare them so the emitted reactor's calls
 	// resolve at the IR level (the no-op stubs in runtime_task.go are emitted
@@ -61,54 +67,12 @@ func (e *Emitter) ensureThreadPool() {
 	// lowering (emit_fs_async.go); the loop hooks from the reactor.
 	e.emitGlobal("declare void @__kml_pool_submit(i32 noundef, ptr noundef, ptr noundef, ptr noundef)")
 	e.emitGlobal("declare void @__kml_pool_submit_write_bytes(i32 noundef, ptr noundef, ptr noundef, ptr noundef, i64 noundef)")
-	e.emitGlobal("declare ptr @__kml_pool_stream_ctl_new(ptr noundef, ptr noundef, i64 noundef)")
-	e.emitGlobal("declare void @__kml_pool_submit_readstream(ptr noundef)")
-	// Field-9/10 pull/cancel closures for the backpressured read stream (their
-	// env is a C control block); referenced by name from the createReadStream site.
-	e.emitGlobal("declare ptr @__kml_pool_stream_pull(ptr noundef)")
-	e.emitGlobal("declare ptr @__kml_pool_stream_cancel(ptr noundef)")
 	e.emitGlobal("declare i1 @__kml_pool_keepalive()")
 	e.emitGlobal("declare i1 @__kml_pool_fdset_add(ptr noundef, ptr noundef)")
-	e.emitGlobal("declare void @__kml_pool_dispatch()")
-
-	// TDD-00186 stream-completion drain helpers, called from klainpool.c's
-	// dispatch on the loop thread — enqueue one chunk into the readable, or close
-	// it at EOF. Reuse the WHATWG readable runtime verbatim; the C side stays
-	// ignorant of the stream layout, exactly like __kml_pool_settle for Promises.
-	e.emitGlobal(`
-define void @__kml_pool_stream_chunk(ptr %rs, i64 %chunk) {
-entry:
-  %ig = call i64 @__kml_rs_enqueue(ptr %rs, i64 %chunk, i64 0)
-  ret void
-}`)
-	e.emitGlobal(`
-define void @__kml_pool_stream_end(ptr %rs) {
-entry:
-  %ig = call i64 @__kml_rs_close(ptr %rs)
-  ret void
-}`)
-
-	// TDD-00186 STREAM_ERROR drain: a mid-read failure errors the readable so a
-	// consumer's 'error'/for-await sees it, rather than a silent early EOF. The
-	// worker can't allocate a JS Error off-thread, so it posts the errno and the
-	// loop builds the `{kind,msg,name}` error object here (the reqbody shape) and
-	// calls __kml_rs_error. The errno is not yet mapped to a specific message.
-	streamErrMsg := e.internString("fs read stream failed")
-	streamErrName := e.internString("Error")
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_pool_stream_error(ptr %%rs, i64 %%errno) {
-entry:
-  %%eo = call ptr @malloc(i64 24)
-  %%eo_kind = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 0
-  store i64 281474976710656, ptr %%eo_kind, align 8
-  %%eo_msg = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 1
-  store ptr %s, ptr %%eo_msg, align 8
-  %%eo_name = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 2
-  store ptr %s, ptr %%eo_name, align 8
-  %%bits = ptrtoint ptr %%eo to i64
-  call void @__kml_rs_error(ptr %%rs, i64 %%bits)
-  ret void
-}`, streamErrMsg, streamErrName))
+	e.emitGlobal("declare zeroext i1 @__kml_pool_dispatch()")
+	e.emitGlobal("declare i1 @__kml_tcp_keepalive()")
+	e.emitGlobal("declare i1 @__kml_tcp_fdset_add(ptr noundef, ptr noundef, ptr noundef)")
+	e.emitGlobal("declare zeroext i1 @__kml_tcp_dispatch()")
 
 	// One thunk per pooled fs op. Each runs the existing *throwing* sync helper
 	// under a per-worker setjmp guard (the jmpbuf stack is thread-local, so each
@@ -192,6 +156,13 @@ var poolThunks = []poolThunkSpec{
 	{"appendfile_bytes", 0, []func(*Emitter){(*Emitter).ensureFsAppendFileBytes},
 		"  call void @__kml_fs_append_file_bytes(ptr %a0, ptr %a1, i64 %a2)\n" + zeroWords,
 		"ptr %a0, ptr %a1, i64 %a2"},
+	// readFile with no encoding resolves to a Buffer: the {data, len} pair,
+	// as readdir's array.
+	{"readfile_bytes", 1, []func(*Emitter){(*Emitter).ensureFsReadFileRaw},
+		"  %raw = call { ptr, i64 } @__kml_fs_read_file_raw(ptr %a0)\n" +
+			"  %p = extractvalue { ptr, i64 } %raw, 0\n" +
+			"  %v0 = ptrtoint ptr %p to i64\n" +
+			"  %v1 = extractvalue { ptr, i64 } %raw, 1", ""},
 }
 
 // buildPoolThunk composes the full thunk for one op: the shared setjmp-guard
@@ -232,5 +203,5 @@ caught:
   store i64 0, ptr %%c1, align 8
   store ptr %%err, ptr %%c2, align 8
   ret void
-}`, op.name, params, setjmpCall("%jb"), op.tryBody)
+}`, op.name, params, e.setjmpCall("%jb"), op.tryBody)
 }

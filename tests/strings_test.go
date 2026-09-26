@@ -8,26 +8,24 @@ import (
 
 // A non-numeric argument to a string/number method that expects a numeric
 // index/count/position (e.g. a Symbol, as the Test262 `*-symbol` files pass) is
-// a clean compile-time type error — the typed-subset equivalent of the runtime
-// TypeError real JS throws from ToNumber(symbol), and what tsc itself reports —
-// not invalid IR emitted at the arithmetic/compare site (the String A1
-// invalid-IR cluster; same fix as ADR-00882's DataView).
+// the checker's TS2345, as tsc reports it — not invalid IR emitted at the
+// arithmetic/compare site (the String A1 invalid-IR cluster).
 func TestE2EStringNonNumericArgRejected(t *testing.T) {
 	cases := []struct{ src, want string }{
-		{`"hello".charAt(Symbol("x"))`, "charAt index"},
-		{`"hello".charCodeAt(Symbol("x"))`, "charCodeAt index"},
-		{`"hello".codePointAt(Symbol("x"))`, "codePointAt index"},
-		{`"hello".slice(Symbol("x"))`, "slice index"},
-		{`"hello".substring(Symbol("x"))`, "substring index"},
-		{`"hello".substr(Symbol("x"))`, "substr start"},
-		{`"hello".indexOf("l", Symbol("x"))`, "indexOf fromIndex"},
-		{`"hello".includes("l", Symbol("x"))`, "includes position"},
-		{`"hello".startsWith("h", Symbol("x"))`, "startsWith position"},
-		{`"hello".repeat(Symbol("x"))`, "repeat count"},
-		{`"hello".at(Symbol("x"))`, "at index"},
-		{`"5".padStart(Symbol("x"))`, "pad target length"},
-		{`(3.14).toFixed(Symbol("x"))`, "toFixed digits"},
-		{`(255).toString(Symbol("x"))`, "toString radix"},
+		{`"hello".charAt(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`"hello".charCodeAt(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`"hello".codePointAt(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`"hello".slice(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`"hello".substring(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`"hello".substr(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`"hello".indexOf("l", Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`"hello".includes("l", Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`"hello".startsWith("h", Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`"hello".repeat(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`"hello".at(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`"5".padStart(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`(3.14).toFixed(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`(255).toString(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
 	}
 	for _, c := range cases {
 		mustCompileError(t, c.src, c.want)
@@ -667,4 +665,35 @@ console.log("hello".lastIndexOf("l", 1))
 console.log("hello".lastIndexOf("l", 100))
 console.log("hello".lastIndexOf("l", -5))
 `, "2\n3\n-1\n3\n-1")
+}
+
+// A generic tag takes explicit type arguments (tag<T> before the
+// template), as a call does.
+func TestE2ETaggedTemplateExplicitTypeArguments(t *testing.T) {
+	assertOutput(t, `
+function tag<T>(strings: TemplateStringsArray, ...values: T[]): string {
+    return strings.join("|") + ":" + values.join(",")
+}
+console.log(tag<number>`+"`"+`a${1}b${2}c`+"`"+`)
+console.log(tag<string>`+"`"+`plain`+"`"+`)
+`, "a|b|c:1,2\nplain:")
+}
+
+// A tag's strings parameter typed TemplateStringsArray (tsc rejects a
+// string[] one), in a function and an arrow.
+func TestE2ETaggedTemplateStringsArrayParameter(t *testing.T) {
+	assertOutput(t, `
+function first(strings: TemplateStringsArray, ...values: number[]): string {
+    return strings[0] + strings.length + values.length
+}
+const count = (strings: TemplateStringsArray, ...values: number[]): number => strings.length + values.length
+console.log(first`+"`"+`a${1}b`+"`"+`)
+console.log(count`+"`"+`x${1}y${2}z`+"`"+`)
+`, "a21\n5")
+}
+
+// A template's CR LF and lone CR line breaks are LF in its value, as in
+// Node.
+func TestE2ETemplateLiteralLineTerminators(t *testing.T) {
+	assertOutput(t, "const s = `x\r\ny\rz`\nconsole.log(JSON.stringify(s), s.length)\n", "\"x\\ny\\nz\" 5")
 }

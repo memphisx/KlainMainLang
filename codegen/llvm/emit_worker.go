@@ -71,20 +71,20 @@ func (e *Emitter) emitWorkerModules(prog *ast.Program) error {
 		info := &workerEntryInfo{Symbol: fmt.Sprintf("__kml_worker_entry_%d", i)}
 		// Pre-scan the annotated `const cfg: Cfg = workerData` declaration —
 		// the annotation must be known before the statement itself emits.
+		// Nested too: a file that is its own worker reads workerData in its
+		// `isMainThread` else branch.
 		for _, stmt := range wm.Body {
-			decls := []*ast.VarDeclaration{}
-			switch s := stmt.(type) {
-			case *ast.VarDeclaration:
-				decls = append(decls, s)
-			case *ast.VarDeclarationList:
-				decls = append(decls, s.Decls...)
-			}
-			for _, d := range decls {
+			ast.Inspect(stmt, func(n ast.Node) bool {
+				d, ok := n.(*ast.VarDeclaration)
+				if !ok || info.DataSet {
+					return true
+				}
 				if id, ok := d.Init.(*ast.Identifier); ok && id.Name == "workerData" && d.TypeAnnot != nil {
 					info.DataTy = e.resolveType(d.TypeAnnot)
 					info.DataSet = true
 				}
-			}
+				return true
+			})
 		}
 		e.workerEntries[wm.Path] = info
 	}
@@ -141,7 +141,7 @@ entry:
   %%t = call ptr @__kml_spawn_task_ex(ptr @%s_body, ptr null, ptr %%p, i64 %d, ptr @__kml_module_trampoline)
   ret void
 }
-`, info.Symbol, info.Symbol, moduleTaskStackBytes()))
+`, info.Symbol, info.Symbol, e.moduleTaskStackBytes()))
 			} else {
 				e.functions.WriteString(fmt.Sprintf("\ndefine void @%s() {\nentry:\n", info.Symbol))
 				e.functions.WriteString(e.allocas.String())

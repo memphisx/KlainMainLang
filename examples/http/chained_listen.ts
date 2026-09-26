@@ -3,12 +3,13 @@
 // is read back via server.address(). Self-contained: the program makes one
 // request against itself and closes.
 import http from 'http'
+import type { AddressInfo } from 'net';
 import { mustCall } from 'test'
 
 const server = http.createServer(mustCall((req, res) => {
-  res.end("hello from " + req.path)
+  res.end("hello from " + req.url)
 })).listen(0, mustCall(() => {
-  const port = server.address().port
+  const port = (server.address() as AddressInfo).port
   console.log("bound an ephemeral port:", port > 0)
   http.get({ port: port, path: "/thessaloniki" }, mustCall((res) => {
     let data = ""

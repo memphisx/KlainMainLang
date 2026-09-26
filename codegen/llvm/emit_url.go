@@ -529,12 +529,12 @@ func (e *Emitter) emitFileURLToPath(args []ast.Expression, pos ast.Pos) (Value, 
 // time; a run-time boolean emits both halves under a branch and joins them.
 func (e *Emitter) emitFlavorBranch(opt []ast.Expression, what string, pos ast.Pos, body func(pathFlavor) (Value, error)) (Value, error) {
 	if len(opt) == 0 {
-		return body(hostPathFlavor())
+		return body(e.hostPathFlavor())
 	}
 	ol, ok := opt[0].(*ast.ObjectLiteral)
 	if !ok {
 		if nl, isNull := opt[0].(*ast.NullLiteral); isNull && nl.IsUndefined {
-			return body(hostPathFlavor())
+			return body(e.hostPathFlavor())
 		}
 		return Value{}, fmt.Errorf("%d:%d: %s options must be an object literal ({ windows })", pos.Line, pos.Col, what)
 	}
@@ -546,7 +546,7 @@ func (e *Emitter) emitFlavorBranch(opt []ast.Expression, what string, pos ast.Po
 		winExpr = prop.Value
 	}
 	if winExpr == nil {
-		return body(hostPathFlavor())
+		return body(e.hostPathFlavor())
 	}
 	switch v := winExpr.(type) {
 	case *ast.BooleanLiteral:
@@ -556,7 +556,7 @@ func (e *Emitter) emitFlavorBranch(opt []ast.Expression, what string, pos ast.Po
 		return body(pathPosix)
 	case *ast.NullLiteral:
 		if v.IsUndefined {
-			return body(hostPathFlavor())
+			return body(e.hostPathFlavor())
 		}
 	}
 	// Run-time boolean: both halves, joined by a phi on the result pointer.
@@ -620,7 +620,7 @@ func (e *Emitter) emitFileURLToPathFlavor(urlStr Value, flavor pathFlavor) (Valu
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", badHost, bhL, okhL))
 		e.emitLabel(bhL)
 		// Node names the *host* platform in this message, whatever `windows` says.
-		e.emitInternalThrow(e.internString("File URL host must be \"localhost\" or empty on " + nodePlatformName()))
+		e.emitInternalThrow(e.internString("File URL host must be \"localhost\" or empty on " + e.nodePlatformName()))
 		e.emitLabel(okhL)
 	}
 

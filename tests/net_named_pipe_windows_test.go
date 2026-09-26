@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"KlainMainLang/codegen/llvm"
 	"bufio"
 	"bytes"
 	"fmt"
@@ -48,7 +49,7 @@ int main(int argc, char **argv) {
 `)
 	exe := filepath.Join(dir, "pipesrv.exe")
 	if out, err := exec.Command("clang", "-O1", "-o", exe, src).CombinedOutput(); err != nil {
-		t.Fatalf("clang: %v\n%s", err, out)
+		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
 	return exe
 }

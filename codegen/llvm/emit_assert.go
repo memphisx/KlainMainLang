@@ -1,5 +1,5 @@
 // emit_assert.go — Node's `assert` core module: a lightweight namespace
-// (like path/os/querystring — see emit_call.go's dispatcher) wrapping this
+// (like path/os — see emit_call.go's dispatcher) wrapping this
 // compiler's existing throw and binary-comparison machinery rather than a
 // new subsystem. Every check funnels into emitAssertCheck, which throws an
 // AssertionError — an ordinary base-kind Error (errorObjType,
@@ -366,7 +366,7 @@ func (e *Emitter) emitAssertThrows(args []ast.Expression, pos ast.Pos) (Value, e
 	sjRet := e.freshReg()
 	threw := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jmpbuf))
-	e.emitInstr(fmt.Sprintf("%s = %s", sjRet, setjmpCall(jmpbuf)))
+	e.emitInstr(fmt.Sprintf("%s = %s", sjRet, e.setjmpCall(jmpbuf)))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sjRet))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, caughtL, tryL))
 
@@ -412,7 +412,7 @@ func (e *Emitter) emitAssertDoesNotThrow(args []ast.Expression, pos ast.Pos) (Va
 	sjRet := e.freshReg()
 	threw := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jmpbuf))
-	e.emitInstr(fmt.Sprintf("%s = %s", sjRet, setjmpCall(jmpbuf)))
+	e.emitInstr(fmt.Sprintf("%s = %s", sjRet, e.setjmpCall(jmpbuf)))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sjRet))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, caughtL, tryL))
 

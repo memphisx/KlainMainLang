@@ -32,12 +32,13 @@
               "Payloads must be structured-clone-safe; no arrays through `onmessage`/`e.data`",
               "`'error'` delivers the thrown Error object; a non-Error throw (`throw \"x\"`) arrives wrapped in an `Error` carrying its message, where Node delivers the value itself; no `self.onerror`",
               "`terminate()` is cooperative, keeps queued messages, always exits 1",
-              "Worker path must be a string literal; a worker module can't also be imported, can't spawn workers, and its named functions can't read its own top-level bindings",
+              "Worker path must be a string literal or `__filename`; a worker module can't also be imported, can't spawn workers (a file that is its own worker starts it under `if (isMainThread)`), and its named functions can't read its own top-level bindings",
               "`-mm=manual` leaks per message; no combining with `http.listen({workers:N})`"
             ],
             "notes": [
               "Two surfaces: Node `worker_threads` and the browser `Worker`/`onmessage` shape ([TDD-00098](../tdd/TDD-00098.md), [ADR-00305](../adr/ADR-00305.md), [ADR-00306](../adr/ADR-00306.md))",
               "The worker file compiles into the same binary as its own entry function",
+              "`isMainThread`; a program that is its own worker (`new Worker(__filename)` under `if (isMainThread)`, as Node's own tests are written) compiles its code for both threads ([ADR-01177](../adr/ADR-01177.md))",
               "Each thread runs its own event loop (runtime singletons are `thread_local`); messages travel over pipes as pointer envelopes, deep-copied at the boundary",
               "`SharedArrayBuffer`/`MessagePort` cross by reference rather than copied; strings share their buffer across threads. See [ADR-00308](../adr/ADR-00308.md), [ADR-00309](../adr/ADR-00309.md)",
               "`-mm=gc` registers each thread with Boehm",

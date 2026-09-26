@@ -115,7 +115,7 @@ function* guarded(): number {
         yield 1;
         yield 2;
     } catch (e) {
-        console.log("caught " + e.message);   // caught boom
+        console.log("caught " + (e as Error).message);   // caught boom
         yield 99;
     }
 }

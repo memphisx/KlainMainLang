@@ -65,7 +65,7 @@
             "caveats": [
               "Object-literal init only, over `protocol`/`hostname`/`port`/`pathname`/`search`/`hash`/`username`/`password` ([ADR-00585](../adr/ADR-00585.md)) — no constructor-string form, no `baseURL`",
               "Pattern grammar is literals, `\\` escapes, `*`, `:name`, and `:name?` — `{}` groups, `+` modifiers, and inline `(regex)` groups throw a `TypeError` at construction",
-              "`.exec()` returns a merged `Map<string, string> \\| null` of every named group across components (an unset optional group is absent), not the spec's per-component `URLPatternResult` object — needs the deferred dynamic object model ([TDD-00068](../tdd/TDD-00068.md))",
+              "`.exec()` returns a merged `Map<string, string> \\| null` of every named group across components (an unset optional group is absent), not the spec's per-component `URLPatternResult` object — needs the dynamic object model ([TDD-00155](../tdd/TDD-00155.md))",
               "`*` wildcards aren't exposed as numbered groups; no `hasRegExpGroups`"
             ],
             "notes": [

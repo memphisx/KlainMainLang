@@ -9,12 +9,12 @@
 // runs synchronously at listen() time.
 import http from 'http';
 
-const first = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const first = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("first");
 });
 first.listen(8422);
 
-const second = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const second = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("second");
 });
 

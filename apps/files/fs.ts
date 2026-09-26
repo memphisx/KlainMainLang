@@ -39,6 +39,6 @@ export function preview(dir: string, entry: string): string {
     for (let i = 0; i < inner.length && i < 12; i++) s = s + "  " + inner[i] + "\n";
     return s;
   }
-  const body = readFileSync(full);
+  const body = readFileSync(full, "utf8");
   return body.slice(0, 600);
 }

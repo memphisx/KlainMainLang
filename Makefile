@@ -27,7 +27,7 @@ OPTMEM ?=
 MODEFLAGS := $(if $(MM),-mm=$(MM)) $(if $(OPTMEM),-optimize-memory)
 MODEFLAGS_NOMM := $(if $(OPTMEM),-optimize-memory)
 
-.PHONY: all build dist install test test-par examples apps compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts conformance-wpt status status-check status-roundtrip reference-check reference-sync conformance-check conformance-sync coverage-check coverage-sync help
+.PHONY: all build dist install test test-par examples apps compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts conformance-wpt shadow-report mode-lanes status status-check status-roundtrip reference-check reference-sync conformance-check conformance-sync coverage-check coverage-sync help
 
 ## all: build the compiler
 all: build
@@ -99,6 +99,11 @@ test-par: build
 ## httpbin-lite fixture server (tools/httpbin-lite/, ADR-00096) instead of a
 ## real external host, so the suite stays deterministic and offline-capable
 ## instead of depending on some third-party website's uptime.
+# Each example runs under a time limit, so one that hangs fails instead of
+# stalling the whole run (macOS has no `timeout`; SIGALRM ends the program).
+EXAMPLE_TIMEOUT := 300
+RUN_LIMITED = perl -e 'alarm shift; exec @ARGV or exit 127' $(EXAMPLE_TIMEOUT)
+
 examples: build
 	@./$(BINARY) -o $(HTTPBIN_LITE) tools/httpbin-lite/httpbin.ts >/dev/null 2>&1
 	@HTTPBIN_LITE_PORT=$(HTTPBIN_LITE_PORT) ./$(HTTPBIN_LITE) & \
@@ -114,7 +119,7 @@ examples: build
 		flags="$(MODEFLAGS)"; \
 		case $$f in examples/memory/memory_free.ts|examples/finalization/finalization_registry.ts) flags="$(MODEFLAGS_NOMM)";; esac; \
 		printf '%-50s' "  $$f"; \
-		if ./$(BINARY) $$flags $$f 2>/dev/null && $$out </dev/null 2>/dev/null >/dev/null; then \
+		if ./$(BINARY) $$flags $$f 2>/dev/null && $(RUN_LIMITED) $$out </dev/null 2>/dev/null >/dev/null; then \
 			echo "OK"; ok=$$((ok+1)); \
 		else \
 			echo "FAIL"; fail=$$((fail+1)); \
@@ -124,7 +129,7 @@ examples: build
 		[ -e "$$f" ] || continue; \
 		out=$$(dirname $$f)/$$(basename $$f .js); \
 		printf '%-50s' "  $$f (-compat=js)"; \
-		if ./$(BINARY) $(MODEFLAGS) -compat=js $$f 2>/dev/null && $$out </dev/null 2>/dev/null >/dev/null; then \
+		if ./$(BINARY) $(MODEFLAGS) -compat=js $$f 2>/dev/null && $(RUN_LIMITED) $$out </dev/null 2>/dev/null >/dev/null; then \
 			echo "OK"; ok=$$((ok+1)); \
 		else \
 			echo "FAIL"; fail=$$((fail+1)); \
@@ -134,7 +139,7 @@ examples: build
 		[ -e "$$f" ] || continue; \
 		out=$$(dirname $$f)/$$(basename $$f .ts); \
 		printf '%-50s' "  $$f (-decorators=standard)"; \
-		if ./$(BINARY) $(MODEFLAGS) -decorators=standard $$f 2>/dev/null && $$out </dev/null 2>/dev/null >/dev/null; then \
+		if ./$(BINARY) $(MODEFLAGS) -decorators=standard $$f 2>/dev/null && $(RUN_LIMITED) $$out </dev/null 2>/dev/null >/dev/null; then \
 			echo "OK"; ok=$$((ok+1)); \
 		else \
 			echo "FAIL"; fail=$$((fail+1)); \
@@ -217,7 +222,7 @@ lint: fmt vet
 ## fuzz: fuzz the lexer and parser for 30s each  (usage: make fuzz [FUZZTIME=30s])
 FUZZTIME := 30s
 fuzz:
-	$(GO) test ./lexer/ -run=^$$ -fuzz=FuzzTokenize -fuzztime=$(FUZZTIME)
+	$(GO) test ./lexer/ -run=^$$ -fuzz=FuzzScan -fuzztime=$(FUZZTIME)
 	$(GO) test ./parser/ -run=^$$ -fuzz=FuzzParse -fuzztime=$(FUZZTIME)
 
 ## fuzz-codegen: fuzz the full parse->codegen->clang->run pipeline for 30s each (usage: make fuzz-codegen [FUZZTIME=30s])
@@ -250,6 +255,22 @@ conformance-ts: conformance-fetch
 ## conformance-wpt: regenerate the Web Platform Tests reports (both compat lanes → docs/testing/<platform>/{strict|js}/CONFORMANCE-RESULTS-WPT.md) — the FULL headless multi-global corpus (every .any.js/.window.js/.worker.js repo-wide, no allowlist) through a testharness.js shim (TDD-00082 Track 2, TDD-00204)
 conformance-wpt: conformance-fetch
 	$(GO) run ./tools/conformance -suite=wpt -compat=both
+
+## mode-lanes: build and run every example in the default memory mode and under -mm=auto, -mm=auto -optimize-memory and -mm=gc, and fail when an output differs (.modelanes-out/MODE-LANES.md; TDD-00230 P0.3)
+mode-lanes: build
+	@./$(BINARY) -o $(HTTPBIN_LITE) tools/httpbin-lite/httpbin.ts >/dev/null 2>&1
+	@HTTPBIN_LITE_PORT=$(HTTPBIN_LITE_PORT) ./$(HTTPBIN_LITE) & \
+	fixture_pid=$$!; \
+	trap "kill $$fixture_pid 2>/dev/null" EXIT INT TERM; \
+	for i in $$(seq 1 50); do \
+		curl -s -o /dev/null http://127.0.0.1:$(HTTPBIN_LITE_PORT)/get && break; \
+		sleep 0.1; \
+	done; \
+	$(GO) run ./tools/modelanes -bin ./$(BINARY)
+
+## shadow-report: compile the corpus comparing every old codegen decider with the new front end, and rank the disagreements into .shadow-out/SHADOW-REPORT.md (TDD-00230 P0.2)
+shadow-report: build
+	$(GO) run ./tools/shadow -bin ./$(BINARY)
 
 ## status: regenerate every docs/status page (README included) from the docs/status/data/*.json source of truth — edit the JSON, never the pages; all coverage numbers derive from the row tables. Also regenerates the docs/adr/ and docs/tdd/ index README tables (and the status TDD backlog) from the ADR/TDD record files — edit those files, never the index tables.
 status:

@@ -1,27 +1,23 @@
-// querystring — legacy "a=b&c=d" parse/stringify. Largely superseded by
-// URLSearchParams (see examples/url/url.ts), but a natural companion when
-// a request handler already has a Map<string,string> and just needs it
-// serialized, or a raw tail string and just needs it parsed. Import-gated
-// (TDD-00049) — a virtual built-in module, not a real file.
+// querystring — Node's legacy "a=b&c=d" parse/stringify. parse returns a
+// null-prototype object whose repeated keys collect into an array;
+// stringify takes an object whose array values repeat the key.
 
 import querystring from 'querystring'
 
-// ── parse: string → Map<string,string> ───────────────────────────────────
-const parsed = querystring.parse("name=Ada&topic=compilers%20and%20types")
-console.log(parsed.get("name"))   // Ada
-console.log(parsed.get("topic"))  // compilers and types
+// ── parse: string → object ────────────────────────────────────────────────
+const parsed = querystring.parse("name=Ada&topic=compilers%20and%20types&tag=a&tag=b")
+console.log(parsed)
+console.log(parsed.name)   // Ada
+console.log(parsed.tag)    // [ 'a', 'b' ]
 
-// A leading '?' is treated as plain text, not stripped — pass req.url's
-// raw query tail directly (after the '?' has already been split off), or
-// a URLSearchParams.toString() result, not a full "?a=1" search string.
-const bare = querystring.parse("flag")
-console.log(bare.get("flag"))  // (empty — a key with no '=' has no value)
+// A leading '?' is plain text, not stripped: pass the tail after the '?'.
+console.log(querystring.parse("flag"))  // { flag: '' }
 
-// ── stringify: Map<string,string> → string ───────────────────────────────
-const params = new Map<string, string>()
-params.set("q", "hello world")
-params.set("page", "2")
-console.log(querystring.stringify(params))  // q=hello%20world&page=2
+// Custom separators.
+console.log(querystring.parse("a:1;b:2", ";", ":"))
+
+// ── stringify: object → string ────────────────────────────────────────────
+console.log(querystring.stringify({ q: "hello world", page: 2, tags: ["x", "y"] }))
 
 // Round-trips cleanly through both directions.
 console.log(querystring.stringify(querystring.parse("a=1&b=2")))  // a=1&b=2

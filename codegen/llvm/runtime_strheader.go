@@ -27,8 +27,7 @@ func (e *Emitter) ensureStrHeaderRuntime() {
 	e.ensureMemmem()
 	// TDD-00120 Stage 2 binary-safe primitives. __kml_str_cmp is a strcmp-shaped
 	// (<0/0/>0) lexicographic compare using the header lengths + memcmp, so an
-	// embedded NUL no longer stops the comparison early. __kml_str_indexof is a
-	// strstr-shaped substring search via memmem, returning the byte index or -1.
+	// embedded NUL no longer stops the comparison early.
 	e.emitGlobal(`
 define i32 @__kml_str_cmp(ptr %a, ptr %b) {
 entry:
@@ -53,43 +52,6 @@ ret_pos:
   ret i32 1
 ret_eq:
   ret i32 0
-}
-define i64 @__kml_str_indexof(ptr %hay, ptr %needle) {
-entry:
-  %lh = call i64 @__kml_str_len(ptr %hay)
-  %ln = call i64 @__kml_str_len(ptr %needle)
-  %p = call ptr @memmem(ptr %hay, i64 %lh, ptr %needle, i64 %ln)
-  %isnull = icmp eq ptr %p, null
-  br i1 %isnull, label %notfound, label %found
-found:
-  %pi = ptrtoint ptr %p to i64
-  %hi = ptrtoint ptr %hay to i64
-  %off = sub i64 %pi, %hi
-  ret i64 %off
-notfound:
-  ret i64 -1
-}
-define i64 @__kml_str_indexof_from(ptr %hay, ptr %needle, i64 %from) {
-entry:
-  %lh = call i64 @__kml_str_len(ptr %hay)
-  %ln = call i64 @__kml_str_len(ptr %needle)
-  ; clamp from to [0, lh]
-  %fneg = icmp slt i64 %from, 0
-  %f0 = select i1 %fneg, i64 0, i64 %from
-  %ftoobig = icmp sgt i64 %f0, %lh
-  %fc = select i1 %ftoobig, i64 %lh, i64 %f0
-  %sublen = sub i64 %lh, %fc
-  %hp = getelementptr i8, ptr %hay, i64 %fc
-  %p = call ptr @memmem(ptr %hp, i64 %sublen, ptr %needle, i64 %ln)
-  %isnull = icmp eq ptr %p, null
-  br i1 %isnull, label %ifnotfound, label %iffound
-iffound:
-  %pi = ptrtoint ptr %p to i64
-  %hi = ptrtoint ptr %hay to i64
-  %off = sub i64 %pi, %hi
-  ret i64 %off
-ifnotfound:
-  ret i64 -1
 }
 define i1 @__kml_str_startswith_at(ptr %hay, ptr %needle, i64 %pos) {
 entry:
@@ -297,15 +259,14 @@ done:
 }
 
 // ensureMemmem declares memmem, or on Windows defines it: memmem is a
-// GNU/BSD extension absent from every Windows C runtime (UCRT included), and
-// __kml_str_indexof is the one consumer. A byte-loop definition in IR keeps
+// GNU/BSD extension absent from every Windows C runtime (UCRT included). A byte-loop definition in IR keeps
 // the Windows build free of an extra C shim file (TDD-00177 Stage 0).
 func (e *Emitter) ensureMemmem() {
 	if e.usedMemmem {
 		return
 	}
 	e.usedMemmem = true
-	if targetGOOS() != "windows" {
+	if e.opts.Target.OS() != "windows" {
 		e.emitGlobal("declare ptr @memmem(ptr noundef, i64 noundef, ptr noundef, i64 noundef)")
 		return
 	}

@@ -32,6 +32,7 @@ type cpSyncOpts struct {
 	verbatim    bool
 	windowsHide bool
 	argv0Ref    string // "null" or a ptr
+	encoding    bool   // an `encoding` other than 'buffer': exec*Sync returns a string
 }
 
 // cpMaxBufferDefault is Node's maxBuffer default (1024 * 1024 bytes).
@@ -101,7 +102,7 @@ func (e *Emitter) cpSyncOptions(arg ast.Expression, name string, pos ast.Pos) (c
 			o.maxBufRef = e.coerce(v, TypeI64).Ref
 		case "killSignal":
 			if sl, ok := prop.Value.(*ast.StringLiteral); ok {
-				n, ok := cpSignalNumber(sl.Value)
+				n, ok := e.cpSignalNumber(sl.Value)
 				if !ok {
 					return o, fmt.Errorf("%d:%d: child_process.%s killSignal: unknown signal %q", pos.Line, pos.Col, name, sl.Value)
 				}
@@ -154,9 +155,10 @@ func (e *Emitter) cpSyncOptions(arg ast.Expression, name string, pos ast.Pos) (c
 			o.envRef = ref
 		case "encoding":
 			s, ok := prop.Value.(*ast.StringLiteral)
-			if !ok || (s.Value != "utf8" && s.Value != "utf-8") {
-				return o, fmt.Errorf("%d:%d: child_process.%s supports encoding: 'utf8' only (results are strings)", pos.Line, pos.Col, name)
+			if !ok || (s.Value != "utf8" && s.Value != "utf-8" && s.Value != "buffer") {
+				return o, fmt.Errorf("%d:%d: child_process.%s supports encoding: 'utf8' or 'buffer' only", pos.Line, pos.Col, name)
 			}
+			o.encoding = s.Value != "buffer"
 		default:
 			return o, fmt.Errorf("%d:%d: child_process.%s options support { cwd, input, argv0, stdio, env, timeout, killSignal, maxBuffer, encoding, shell, windowsHide, windowsVerbatimArguments } (got '%s')", pos.Line, pos.Col, name, prop.Key)
 		}
@@ -546,7 +548,7 @@ func (e *Emitter) emitCPSpawnSync(args []ast.Expression, pos ast.Pos) (Value, er
 // signal throws `Command failed: <cmd>` (plus the stderr text) — either
 // Error carrying `status`, `signal`, `output`, `pid`, `stdout` and `stderr`
 // as own properties (the `extra` bag, ADR-01080). Success yields stdout.
-func (e *Emitter) cpExecSyncResult(raw string, cmdVal Value, o cpSyncOpts) (Value, error) {
+func (e *Emitter) cpExecSyncResult(raw string, cmdVal, msgCmd Value, o cpSyncOpts) (Value, error) {
 	res := e.cpSyncResultObject(raw, cmdVal.Ref, o.stdioModes)
 	ty := res.Ty
 	structIR := ty.StructIR()
@@ -595,7 +597,7 @@ func (e *Emitter) cpExecSyncResult(raw string, cmdVal Value, o cpSyncOpts) (Valu
 	e.emitLabel(failL)
 	// The thrown Error: the spawn error when there is one, else "Command
 	// failed: <cmd>" + "\n" + stderr (when stderr is non-empty).
-	msg, err := e.emitStringConcat(Value{Ref: e.internString("Command failed: "), Ty: TypePtr}, cmdVal)
+	msg, err := e.emitStringConcat(Value{Ref: e.internString("Command failed: "), Ty: TypePtr}, msgCmd)
 	if err != nil {
 		return Value{}, err
 	}
@@ -651,7 +653,39 @@ func (e *Emitter) cpExecSyncResult(raw string, cmdVal Value, o cpSyncOpts) (Valu
 	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", thrown))
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
-	return Value{Ref: stdout.Ref, Ty: TypePtr}, nil // inferExprType's execSync type
+	if o.encoding {
+		return Value{Ref: stdout.Ref, Ty: TypePtr}, nil // inferExprType's execSync type
+	}
+	// No encoding: a Buffer of stdout's bytes, as in Node.
+	out := orEmpty(stdout)
+	e.ensureStrHeaderRuntime()
+	n := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", n, out.Ref))
+	e.ensureMalloc()
+	e.ensureMemcpy()
+	buf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, n))
+	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, out.Ref, n))
+	return e.bufferAggregate(buf, n), nil
+}
+
+// cpSyncHasEncoding reports whether an exec*Sync call's options object
+// names an encoding other than 'buffer' (then the result is a string, else
+// a Buffer) — inferExprType's reading of the same option cpSyncOptions
+// emits from.
+func cpSyncHasEncoding(args []ast.Expression) bool {
+	for _, a := range args {
+		ol, ok := a.(*ast.ObjectLiteral)
+		if !ok {
+			continue
+		}
+		for _, p := range ol.Properties {
+			if s, ok := p.Value.(*ast.StringLiteral); ok && p.Key == "encoding" && s.Value != "buffer" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // emitCPExecSync implements execSync(command[, options]): the command runs
@@ -676,7 +710,7 @@ func (e *Emitter) emitCPExecSync(args []ast.Expression, pos ast.Pos) (Value, err
 	o.shell = true
 	shFile, argvPtr, shArgc := e.cpShellArgvFor(o.shellFile, cmdVal.Ref)
 	raw := e.cpSpawnSyncCall(shFile, argvPtr, shArgc, o)
-	return e.cpExecSyncResult(raw, cmdVal, o)
+	return e.cpExecSyncResult(raw, cmdVal, cmdVal, o)
 }
 
 // emitCPExecFileSync implements execFileSync(file[, args][, options]): the
@@ -702,8 +736,13 @@ func (e *Emitter) emitCPExecFileSync(args []ast.Expression, pos ast.Pos) (Value,
 		}
 		shFile, shArgv, shArgc := e.cpShellArgvFor(o.shellFile, line.Ref)
 		raw := e.cpSpawnSyncCall(shFile, shArgv, shArgc, o)
-		return e.cpExecSyncResult(raw, fileVal, o)
+		return e.cpExecSyncResult(raw, fileVal, line, o)
 	}
 	raw := e.cpSpawnSyncCall(fileVal.Ref, argsPtr, argsLen, o)
-	return e.cpExecSyncResult(raw, fileVal, o)
+	// Node's message names the file and its arguments, space-joined.
+	line, err := e.cpShellCommandLine(fileVal, argsExpr, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	return e.cpExecSyncResult(raw, fileVal, line, o)
 }

@@ -94,12 +94,14 @@
             "feature": "`try` / `catch` / `finally`",
             "status": "implemented",
             "caveats": [
-              "A catch pattern can only destructure the caught value's fixed `{kind, message, name}` shape (every thrown value, including a thrown non-Error primitive, is force-shaped into that one runtime layout), not an arbitrary custom object's own fields, and there's no array-pattern form ([ADR-00170](../adr/ADR-00170.md))"
+              "A thrown plain object's own fields read `undefined` through the caught value (`throw { code: 1 }` then `e.code` or `catch ({ code }: any)`): a static object has no runtime shape once boxed",
+              "A nested or array catch pattern destructures only the Error shape (`{ kind, message, name }`) ([ADR-00170](../adr/ADR-00170.md))"
             ],
             "notes": [
-              "Single catch variable, or a destructured object pattern (`catch ({ message, name })`)",
+              "Single catch variable, or a destructured object pattern (`catch ({ message, name }: any)`; without the annotation it is tsc's TS2339 on `unknown`) whose names read as the caught value's members, a non-Error's Error fields `undefined` ([ADR-01171](../adr/ADR-01171.md))",
               "A local written inside the `try` body keeps that value in the `catch` and after it — every local touched in a `try`/`catch`/`finally` is pinned as escaped memory so the setjmp-based unwind can't let SSA promotion forward the pre-`try` value ([ADR-01057](../adr/ADR-01057.md))",
-              "`finally` runs on an early `return`/`break`/`continue` (labeled or not), not only on fall-through — the return value is captured before it, a `return` in `finally` overrides, and nested finallys run innermost-first, matching JS ([ADR-00191](../adr/ADR-00191.md)). This holds inside an `async` function and a generator too, including a `finally` that itself `await`s ([ADR-00612](../adr/ADR-00612.md))"
+              "`finally` runs on an early `return`/`break`/`continue` (labeled or not), not only on fall-through — the return value is captured before it, a `return` in `finally` overrides, and nested finallys run innermost-first, matching JS ([ADR-00191](../adr/ADR-00191.md)). This holds inside an `async` function and a generator too, including a `finally` that itself `await`s ([ADR-00612](../adr/ADR-00612.md))",
+              "An exception no `catch` handles — thrown in a `try` without one, or in the `catch` itself — is rethrown after the `finally`; an early exit pops the `try`'s handler first ([ADR-01169](../adr/ADR-01169.md))"
             ]
           },
           {
@@ -126,6 +128,14 @@
             "status": "implemented",
             "notes": [
               "Parsed and erased to a no-op — an AOT-compiled native binary has no attached inspector to break into, matching plain JS with no debugger attached. `debugger` is a reserved word, never a real identifier. See [ADR-00373](../adr/ADR-00373.md)"
+            ]
+          },
+          {
+            "feature": "Automatic semicolon insertion and the no-line-break rules",
+            "status": "implemented",
+            "notes": [
+              "A statement ends at `;`, before `}`, at the end of input, or at a line break; `x = 1 y = 2` on one line is an error. No line break is allowed before a postfix `++`/`--` (`a\\n++b` is `a; ++b`), after `return`/`throw`/`break`/`continue`/`yield`, before `=>`, or between `async` and its function or arrow ([ADR-01101](../adr/ADR-01101.md))",
+              "`async` and `abstract` are keywords only in those positions — a variable, field or method may be named `async` ([ADR-01101](../adr/ADR-01101.md))"
             ]
           }
         ]
@@ -212,11 +222,8 @@
           {
             "feature": "Logical operators `&& \\|\\| !`",
             "status": "implemented",
-            "caveats": [
-              "Under `-compat=js`, `&&`/`\\|\\|` are value-preserving for same-typed operands and for scalars of different kinds (`0 \\|\\| \"x\"` is the union `number \\| string`, [ADR-01054](../adr/ADR-01054.md)); an array, tuple, object or nullable-scalar operand mixed with another kind still degrades the result to a bool ([ADR-00220](../adr/ADR-00220.md))"
-            ],
             "notes": [
-              "Result type is a bool under `-compat=strict` (default); `-compat=js` makes `&&`/`\\|\\|` value-preserving (`x \\|\\| \"default\"` yields the string; mixed scalar kinds yield their union) — a `-compat`-governed behavior ([ADR-00186](../adr/ADR-00186.md)/[ADR-00220](../adr/ADR-00220.md)/[TDD-00075](../tdd/TDD-00075.md))",
+              "`&&`/`\\|\\|` are value-preserving in both lanes: `x \\|\\| \"default\"` yields the string, `xs \\|\\| []` the array, `err && err.message` the message; operands of different kinds are carried as their union ([ADR-00186](../adr/ADR-00186.md)/[ADR-01054](../adr/ADR-01054.md)/[ADR-01169](../adr/ADR-01169.md))",
               "Genuinely short-circuiting in both modes — `&&` only evaluates its right operand when the left is truthy, `\\|\\|` only when the left is falsy, so `x && x.field` / `arr.length > 0 && arr[0]` don't run the right side down the guarded branch ([ADR-00186](../adr/ADR-00186.md))"
             ]
           },
@@ -248,7 +255,7 @@
             "feature": "Ternary `cond ? a : b`",
             "status": "implemented",
             "caveats": [
-              "A pointer branch mixed with a scalar one that is not a scalar union (`c ? 1 : someObject`), and an array-typed ternary, are compile-time rejections — narrow first, or assign each branch separately"
+              "A pointer branch mixed with a scalar one that is not a scalar union (`c ? 1 : someObject`), and an array branch mixed with a non-array one, are compile-time rejections unless one branch is `any` (then the result is `any`, [ADR-01159](../adr/ADR-01159.md)) — narrow first, or assign each branch separately"
             ],
             "notes": [
               "A `cond ? scalar : null` (or `cond ? null : scalar`) branch mix is a `T | null` value — the null survives into `??`/concat/`=== null`/an unannotated binding, not collapsed to a payload zero ([ADR-00538](../adr/ADR-00538.md))",
@@ -331,15 +338,15 @@
             "feature": "`const` / `let` / `var` declarations",
             "status": "implemented",
             "caveats": [
-              "Definite-assignment analysis is sound-not-complete: a typed `let` assigned only in a maybe-skipped loop or across correlated conditions still falls through to the `undefined`/zero default rather than raising `used before being assigned` ([TDD-00071](../tdd/TDD-00071.md) Stage 2/[ADR-00213](../adr/ADR-00213.md))",
+              "Under `-compat=js`, a function declared in a block is not visible after the block: Annex B hoists it to the enclosing function as a `var` (`if (c) { function g() {} } g()` runs in Node), here it is a clean rejection",
               "A top-level `const`/`let` still isn't readable from a named `function` only in the invariant's genuine edges — a `bigint`, an un-annotated call *through another top-level binding* (`const f = () => …; const x = f()` — its result type isn't known before `main()` runs), a `new Set([…])` typed from its initializer array, or an init depending on a runtime-local (a `{ …rest }` spread of a destructuring target); an arrow/closure still captures any of them ([TDD-00093](../tdd/TDD-00093.md)). An annotated `any`/`unknown`/union binding is a module global like the rest ([ADR-01059](../adr/ADR-01059.md))"
             ],
             "notes": [
               "A top-level `const`/`let`/`var` is a **module global** — readable and writable from any named `function`, not only a capturing arrow — whenever its type is determinable before `main()` runs: a scalar/string/array/object/`Map`/`Set`, an **un-annotated call** to a named function — any return type, scalars included — or to a builtin with a scalar/string result (`const cfg = loadConfig()`, `const t0 = Date.now()`, `const iv = setInterval(tick, 50)`, [ADR-01023](../adr/ADR-01023.md)), or an initializer referencing an **earlier global** (`const b = a`). A mutation through it (a reassignment, `arr.push`, `obj.field =`, `map.set`) is seen everywhere, including by a capturing closure ([ADR-00273](../adr/ADR-00273.md)/[TDD-00093](../tdd/TDD-00093.md))",
               "`var` is function-scoped (leaks its enclosing block, and re-declarable with the same name); `let`/`const` are block-scoped; `const` rebinding is rejected",
-              "Block-scoped `let`/`const` redeclaration is a compile error; the top-level duplicate check is kind-aware (`var x; var x` allowed, `let x; let x` / `let x; var x` rejected) and the cross-block `let x; { var x }` intersection is caught too — see [TDD-00070](../tdd/TDD-00070.md)/[ADR-00210](../adr/ADR-00210.md)/[ADR-00211](../adr/ADR-00211.md)",
-              "A `let`/`const` read before its declaration is a distinct `cannot access 'x' before initialization` TDZ error (including the block-shadowing form) — [TDD-00071](../tdd/TDD-00071.md) Stage 1/[ADR-00212](../adr/ADR-00212.md)",
-              "A typed `let` read before assignment is a `used before being assigned` error for the common cases; `var` is exempt — hoisted, no TDZ, and a `var` whose declaration can be skipped on the way to a read (`if (c) { var r = 1 } use(r)`, dead code after a `break`) reads a real `undefined`, typed `T | undefined` at run time while tsc keeps the plain `T` ([TDD-00071](../tdd/TDD-00071.md) Stage 2/[ADR-00213](../adr/ADR-00213.md)/[ADR-00454](../adr/ADR-00454.md)/[ADR-01057](../adr/ADR-01057.md))"
+              "Redeclarations are compile errors in every scope, as strict code's early errors: a lexical declaration clashes with any other of its name (`let x; let x`, `let x; var x`, a parameter or a `catch` variable against a `let` in the body, the cross-block `let x; { var x }`), while `var` redeclares freely; under `-compat=js` two plain functions in one block merge (Annex B) — see [ADR-01108](../adr/ADR-01108.md)",
+              "A `let`/`const`/`class`/`enum` read or written where no path from its declaration reaches, within the same function, is a `cannot access 'x' before initialization` error (including the block-shadowing form, a binding fresh on each loop iteration, and a `switch` case entered around the declaration); a read from a nested function is not checked, since it may run later — see [ADR-01110](../adr/ADR-01110.md)",
+              "A typed `let` declared without an initializer and read on a path where no value was stored is TypeScript's `used before being assigned` error (a loop that may not run, a `try` that may throw first, one branch of an `if`); an unannotated `let x;` has an evolving type and is not checked, as in TypeScript; `var` is exempt — hoisted, no TDZ, and a `var` whose declaration can be skipped on the way to a read (`if (c) { var r = 1 } use(r)`, dead code after a `break`) reads a real `undefined`, typed `T | undefined` at run time while tsc keeps the plain `T` ([TDD-00071](../tdd/TDD-00071.md) Stage 2/[ADR-00213](../adr/ADR-00213.md)/[ADR-00454](../adr/ADR-00454.md)/[ADR-01057](../adr/ADR-01057.md))"
             ]
           },
           {
@@ -393,11 +400,13 @@
             "feature": "Tagged template literals (`` tag`Hello ${x}` ``)",
             "status": "implemented",
             "caveats": [
-              "A **user** tag's `strings` argument has no `.raw` property (this compiler's arrays carry no extra properties) — the built-in `String.raw` tag itself is implemented and interleaves the raw, un-escaped quasis ([ADR-00562](../adr/ADR-00562.md))"
+              "A **user** tag's `strings` argument has no `.raw` property (this compiler's arrays carry no extra properties) — the built-in `String.raw` tag itself is implemented and interleaves the raw, un-escaped quasis ([ADR-00562](../adr/ADR-00562.md))",
+              "The strict lane does not check a tag call's arguments against the tag's parameters: a `strings: string[]` parameter, which tsc rejects (TS2740), compiles"
             ],
             "notes": [
               "Desugars to a plain call (`tag([\"a\",\"b\"], x)`) — interpolated values reach the tag function as real typed values, not implicitly stringified the way a plain template literal's own interpolation is",
-              "Any callable — a named function, a class method, or an arrow function/closure (including with a `...rest` parameter) — works as a tag. See [TDD-00059](../tdd/TDD-00059.md)/[ADR-00151](../adr/ADR-00151.md)/[ADR-00152](../adr/ADR-00152.md)"
+              "Any callable — a named function, a class method, or an arrow function/closure (including with a `...rest` parameter) — works as a tag. See [TDD-00059](../tdd/TDD-00059.md)/[ADR-00151](../adr/ADR-00151.md)/[ADR-00152](../adr/ADR-00152.md)",
+              "The `strings` parameter is typed `TemplateStringsArray`, as in TypeScript; a generic tag takes explicit type arguments (`` tag<T>`…` ``). A template's CR LF and lone CR line breaks are LF in its value ([ADR-01156](../adr/ADR-01156.md))"
             ]
           },
           {
@@ -440,6 +449,9 @@
             "caveats": [
               "A default expression referencing an earlier parameter works across free functions, instance/static methods, and constructors ([ADR-00598](../adr/ADR-00598.md)); a rest-parameter constructor is unsupported",
               "Filled through a first-class function value too — a closure bound to a variable/field, an object shorthand method, an IIFE ([ADR-00914](../adr/ADR-00914.md)) — including a default that references a variable captured from the closure's defining scope, evaluated in the body prologue via an argument-presence mask ([ADR-00915](../adr/ADR-00915.md)); this also covers a scalar/string/object/array captured-default parameter, an async closure, and `.bind` (the mask threads through the bind trampoline) ([ADR-00916](../adr/ADR-00916.md)). A captured-default on a nullable-scalar or destructured (`{a}`/`[a]`) parameter stays a clean rejection (no single overwrite slot), and capturing an array *variable* into a default (vs. referencing a module-global array) hits the separate array-capture limitation"
+            ],
+            "notes": [
+              "An unannotated parameter takes its literal (or module-global) default's type, as TypeScript does (`p = '!'` is a `string`); a call through `any` fills the default for an omitted or `undefined` argument ([ADR-01097](../adr/ADR-01097.md))"
             ]
           },
           {
@@ -492,12 +504,13 @@
             "feature": "`Function.prototype.call` / `.apply` / `.bind`",
             "status": "implemented",
             "caveats": [
-              "`thisArg` is evaluated then **ignored** — a closure has no rebindable `this`, so method-borrowing (calling a method value against a different receiver) is unsupported; only the arguments are forwarded",
+              "`thisArg` is the receiver only of a function with a `this: T` parameter, declared or from its contextual type ([ADR-01158](../adr/ADR-01158.md)); for any other function it is evaluated then ignored, so borrowing a class method against another receiver (`obj.m.call(other)`) is unsupported",
               "Only on a first-class function **value** (a closure, function parameter, arrow/function expression, or named function) — call/apply/bind on a built-in (`net.connect.apply(…)`) isn't supported, since built-ins aren't function values",
               "`.apply` takes either a literal array (`f.apply(null, [a, b])`) or a runtime array spread into a **rest** parameter (`f.apply(null, arr)` where `f` is `(...xs) => …`); a runtime array into a fixed-arity function is the usual spread-into-fixed-arity rejection",
               "`.bind` is V1-scoped to functions whose parameters are plain scalar/string/pointer types with no rest slot — an array/nullable-scalar/rest parameter is a clean compile error"
             ],
             "notes": [
+              "On a function held in an `any`, `f.apply(thisArg, arr)`, `f.call(thisArg, …)` and `f(...args, x)` pass the argument list through the dynamic call ABI, any array ([ADR-01172](../adr/ADR-01172.md))",
               "`f.call(thisArg, a, b)` / `f.apply(thisArg, [a, b])` lower to a direct `f(a, b)`; `f.apply(thisArg, arr)` spreads into the rest slot; `f.bind(thisArg, …bound)` builds a new partially-applied closure (a trampoline capturing `f` + bound args). All type-checked against `f`'s parameters exactly as a normal call ([TDD-00137](../tdd/TDD-00137.md))"
             ]
           },
@@ -626,9 +639,10 @@
             "feature": "`for await...of` (async iteration)",
             "status": "implemented",
             "notes": [
-              "Consumes an async-generator instance, a user class implementing the async-iteration protocol by hand — a `[Symbol.asyncIterator]()` returning an iterator whose `async next(): Promise<{value,done}>` is awaited each turn (`return this` self-iterators and separate iterator objects both work) ([ADR-00269](../adr/ADR-00269.md)/[TDD-00089](../tdd/TDD-00089.md)) — an **object literal** carrying `[Symbol.asyncIterator]` (arrow-valued or method shorthand, returning an async/sync generator or a class iterator; captures via the closure, since object-literal methods have no `this`) ([ADR-00279](../adr/ADR-00279.md)), **or any sync iterable the sync `for...of` takes**, awaiting each element: an array (a promise element awaits to its value — including a raw fetch `Promise<Response>` element, built to its `Response` — a rejected element propagates and stops the loop, a plain value awaits as identity), a `Map` (values) / `Set` (elements), a sync generator, and a `[Symbol.iterator]()` class or object literal ([ADR-00272](../adr/ADR-00272.md)/[TDD-00092](../tdd/TDD-00092.md), [ADR-00277](../adr/ADR-00277.md)/[ADR-00278](../adr/ADR-00278.md))",
+              "Consumes an async-generator instance, a user class implementing the async-iteration protocol — a `[Symbol.asyncIterator]()` returning an iterator whose `async next(): Promise<{value,done}>` is awaited each turn (`return this` self-iterators and separate iterator objects both work) ([ADR-00269](../adr/ADR-00269.md)/[TDD-00089](../tdd/TDD-00089.md)), or an `async *[Symbol.asyncIterator]()` generator method ([ADR-01159](../adr/ADR-01159.md)) — an **object literal** carrying `[Symbol.asyncIterator]` (arrow-valued or method shorthand, returning an async/sync generator or a class iterator; captures via the closure, since object-literal methods have no `this`) ([ADR-00279](../adr/ADR-00279.md)), **or any sync iterable the sync `for...of` takes**, awaiting each element: an array (a promise element awaits to its value — including a raw fetch `Promise<Response>` element, built to its `Response` — a rejected element propagates and stops the loop, a plain value awaits as identity), a `Map` (values) / `Set` (elements), a sync generator, and a `[Symbol.iterator]()` class or object literal ([ADR-00272](../adr/ADR-00272.md)/[TDD-00092](../tdd/TDD-00092.md), [ADR-00277](../adr/ADR-00277.md)/[ADR-00278](../adr/ADR-00278.md))",
               "Awaits each `.next()` promise (re-throwing a rejected step) before reading `.done`/`.value` ([ADR-00253](../adr/ADR-00253.md)/[TDD-00085](../tdd/TDD-00085.md)); the loop is a suspension point in itself — an enclosing async fn parks at the first element even when nothing else in it awaits, so the top-level script continues first, as in JS ([ADR-00281](../adr/ADR-00281.md))",
-              "A destructuring loop variable (`for await (const { x, y } of …)`, `const [a, b]` over a tuple element) unpacks each element in the body, reusing the sync for-of destructuring core ([ADR-00257](../adr/ADR-00257.md))"
+              "A destructuring loop variable (`for await (const { x, y } of …)`, `const [a, b]` over a tuple element) unpacks each element in the body, reusing the sync for-of destructuring core ([ADR-00257](../adr/ADR-00257.md))",
+              "Leaving the loop early — a `break`, a `return` or a throw from the body — closes an async generator with `await it.return()`, running its `finally` ([ADR-01169](../adr/ADR-01169.md))"
             ]
           }
         ]
@@ -680,7 +694,8 @@
             "feature": "Interfaces (structural)",
             "status": "implemented",
             "caveats": [
-              "An optional field that is also nullable (`n?: T \\| null`) has one absent state: an explicit `null` and an omitted field are the same null pointer, so `console.log`/`JSON.stringify`/`Object.keys`/`in` treat `{ n: null }` as omitted (Node keeps the key)"
+              "An optional field that is also nullable (`n?: T \\| null`) has one absent state: an explicit `null` and an omitted field are the same null pointer, so `console.log`/`JSON.stringify`/`Object.keys`/`in` treat `{ n: null }` as omitted (Node keeps the key)",
+              "An explicit `undefined` stored into an optional field (`{ a: undefined }`, `this.f = undefined`, an optional parameter property called without its argument) reads as omitted: `console.log` drops the key and `Object.keys`/`in` report it absent (Node keeps the key, `{ a: undefined }`)"
             ],
             "notes": [
               "Heap-allocated objects",
@@ -726,8 +741,9 @@
             "feature": "Built-in `Error` subtypes (`new TypeError(msg)`, `RangeError`, `SyntaxError`, `EvalError`, `URIError`, `ReferenceError`, `DOMException`) and `instanceof` against them",
             "status": "implemented",
             "caveats": [
-              "`class X extends Error` works one level deep ([ADR-00630](../adr/ADR-00630.md)): construction, `super(msg)`, `.message`/`.name` (default `\"Error\"` unless assigned), extra fields/methods, throw/catch with `instanceof` discrimination against sibling subclasses, `Error.prototype.toString`; extending an Error *subclass* is a clean rejection, and `.stack`/`Error.captureStackTrace` don't exist",
-              "`DOMException` carries no legacy numeric `.code`"
+              "`class X extends Error` (or a built-in kind, `extends TypeError`, [ADR-01169](../adr/ADR-01169.md)) works one level deep ([ADR-00630](../adr/ADR-00630.md)): construction, `super(msg)`, `.message`/`.name` (default the base's name unless assigned), `instanceof` the base, extra fields/methods, throw/catch with `instanceof` discrimination against sibling subclasses, `Error.prototype.toString`; extending an Error *subclass* is a clean rejection, and `.stack`/`Error.captureStackTrace` don't exist",
+              "`DOMException` carries no legacy numeric `.code`",
+              "`console.log` of a subclass's instance prints `Error: message`, not Node's `X [Error]: message` with its own properties"
             ],
             "notes": [
               "[TDD-00013](../tdd/TDD-00013.md) Option A — a small fixed kind enum (a hidden runtime tag on the same shared `Error` object shape, not a real class hierarchy), plus a real `.name` field",
@@ -766,7 +782,7 @@
             "notes": [
               "[TDD-00009](../tdd/TDD-00009.md) Stage 1 — instances reuse the same heap-object/GEP machinery interfaces already use; methods compile to plain static calls (`this` as an implicit first arg), no closure indirection. See [ADR-00063](../adr/ADR-00063.md)",
               "The **`readonly` field modifier** is enforced as a compile-time immutability check: a write is allowed only in the declaring class's constructor (and field initializers), and rejected in a method, from outside (`obj.x = v`), in a nested closure, or in a subclass constructor writing an inherited readonly field — TS's rule ([TDD-00154](../tdd/TDD-00154.md)/[ADR-00604](../adr/ADR-00604.md)). Deep immutability (`readonly xs: number[]` then `xs.push(...)`) stays unenforced, matching TS's own shallow check",
-              "Qualified constructors and bases parse: `new stream.Readable(...)` and `class X extends events.EventEmitter` dispatch on the final name exactly like the bare form (the qualifier is not validated against the module — [ADR-00408](../adr/ADR-00408.md))"
+              "Qualified constructors, bases and types resolve through a namespace import (`new m.C()`, `class D extends m.C`, `x: m.T[]`, [ADR-01162](../adr/ADR-01162.md)); any other qualifier dispatches on the final name, like the bare form ([ADR-00408](../adr/ADR-00408.md))"
             ]
           },
           {
@@ -782,7 +798,8 @@
             "status": "implemented",
             "notes": [
               "[TDD-00009](../tdd/TDD-00009.md) Stage 4 — `static` members are inherited through `extends` like real JS/TS (a non-redeclared static field shares its base's storage, not a per-subclass copy)",
-              "`private`/`protected` are compile-time-only (zero runtime check, matching real TypeScript's own erasure) and correctly reject `super.privateMethod()`",
+              "`private`/`protected` are compile-time-only (zero runtime check, matching real TypeScript's own erasure), checked by the type checker with tsc's codes (`TS2341`, `TS2445`, `TS2446`, `TS2673`/`TS2674` for a constructor), including `super.privateMethod()`; an element access by name (`o[\"p\"]`) is TypeScript's way around a modifier and compiles ([ADR-01157](../adr/ADR-01157.md))",
+              "An optional method (`m?(): T;`) is `undefined` on a class that does not implement it: `this.m != null`, `if (this.m)`, `typeof this.m` and `this.m?.(…)` read its presence ([ADR-01168](../adr/ADR-01168.md))",
               "`abstract` reuses Stage 3's override-detection machinery almost entirely for free; `implements` is a compile-time-only structural self-check against a new interface-method-signature grammar, not a mechanism for polymorphic dispatch through an interface-typed reference. See [ADR-00084](../adr/ADR-00084.md)"
             ]
           },
@@ -803,7 +820,7 @@
             "notes": [
               "[TDD-00009](../tdd/TDD-00009.md) Stage 3 — single inheritance, base-first field layout, `super(args)`/`super.method(args)`, an implicit pass-through constructor when a derived class adds no fields of its own",
               "Dispatch is static (a plain direct call, identical to Stage 1/2) except for a method provably overridden somewhere in the whole program, which goes through a per-tree vtable instead — decided once at compile time via whole-program override analysis, not per call site. See [ADR-00083](../adr/ADR-00083.md)",
-              "`extends` also accepts one built-in generic, `EventEmitter<T>` ([TDD-00023](../tdd/TDD-00023.md)/[ADR-00089](../adr/ADR-00089.md)) — a synthetic root never itself registered as a real class"
+              "`extends` also accepts the imported `EventEmitter`, with or without an event-map type argument ([TDD-00023](../tdd/TDD-00023.md)/[ADR-00089](../adr/ADR-00089.md)) — a synthetic root never itself registered as a real class"
             ]
           },
           {
@@ -844,7 +861,7 @@
     },
     {
       "kind": "block",
-      "text": "- **Strict-mode early errors**: there's no general strict-mode parser context, so several Test262 early-error cases around a literal `\"use strict\"` directive stay unrejected — notably `eval`/`arguments` as an *assignment* target in strict code, and bindings inside a getter/setter accessor body. A narrower safe subset is caught: duplicate parameter names, a non-simple parameter list, and `eval`/`arguments` as a parameter or `let`/`const`/`var` (or for-of/for-in loop-variable) binding name under `\"use strict\"` (or an always-strict class method). Block-scope `let`/`const`-vs-`var` redeclaration *is* tracked — a strict-independent early error, including the cross-nested-block `let x; { var x }` intersection (see [TDD-00070](../tdd/TDD-00070.md)/[ADR-00210](../adr/ADR-00210.md)/[ADR-00211](../adr/ADR-00211.md))."
+      "text": "- **Strict-mode early errors**: strict code is a whole program that opens with `\"use strict\"` or is a module, and a function or class body; the program-level rules (`delete` of a name, a call as an assignment or update target) are not applied inside a function that alone says `\"use strict\"`, and `eval`/`arguments` as an *assignment* target and bindings inside a getter/setter accessor body are not rejected yet."
     }
   ]
 }

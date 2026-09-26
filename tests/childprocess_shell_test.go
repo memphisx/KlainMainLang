@@ -30,7 +30,7 @@ func TestE2EChildProcessExecSyncPreservesQuotes(t *testing.T) {
 	}
 	assertOutputImports(t, `
 import { execSync } from 'child_process'
-console.log(execSync('echo "hi"').trim())
+console.log(execSync('echo "hi"', { encoding: 'utf8' }).trim())
 `, want)
 }
 

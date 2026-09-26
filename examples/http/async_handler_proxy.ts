@@ -18,7 +18,7 @@ async function proxyGet(path: string): Promise<string> {
   return await r.text()
 }
 
-const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
   const upstream = await proxyGet('/get')
   res.writeHead(200, { "Content-Type": "text/plain" })
   res.end("proxied " + upstream.length + " bytes")

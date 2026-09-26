@@ -5,6 +5,7 @@
 // embedded NUL byte that a stringified path would truncate. The server fetches
 // its own endpoint and reads the bytes back through Response.arrayBuffer().
 import http from 'http';
+import type { AddressInfo } from 'net';
 
 async function consume(port: number): Promise<void> {
   const res = await fetch("http://127.0.0.1:" + port + "/");
@@ -15,7 +16,7 @@ async function consume(port: number): Promise<void> {
   process.exit(0);
 }
 
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "application/octet-stream" });
   const a = new Uint8Array(3);
   a[0] = 5; a[1] = 0; a[2] = 200; // embedded NUL survives
@@ -26,7 +27,7 @@ const server = http.createServer((req: IncomingMessage, res: ServerResponse) => 
 });
 
 server.listen(0, () => {
-  const port: number = server.address().port;
+  const port: number = (server.address() as AddressInfo).port;
   console.log("listening:", port > 0);
   setTimeout(() => { consume(port); }, 50);
 });

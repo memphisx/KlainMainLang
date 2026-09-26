@@ -17,7 +17,7 @@ import (
 func TestE2EHTTPResponseDateAndKeepAlive(t *testing.T) {
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("ok")
 }).listen(8971)
 `
@@ -77,7 +77,7 @@ func TestE2EHTTPResponseConnectionClose(t *testing.T) {
 	skipIfLoopbackTrafficFiltered(t)
 	src := `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("bye")
 }).listen(8973)
 `

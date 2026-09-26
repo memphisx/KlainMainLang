@@ -125,16 +125,17 @@
             "feature": "Node `Buffer` (`Buffer.from`/`.alloc`/`.toString(encoding)`/`.write`/etc.)",
             "status": "implemented",
             "caveats": [
-              "No `utf16le`/`ucs2` encodings (the compiler's strings are UTF-8-native)",
-              "Encoding arguments must be compile-time string literals",
-              "`Buffer.from(arrayBuffer)` **copies** (Node views); `Buffer.concat`'s list must be an inline array literal",
-              "String-valued `.indexOf`/`.includes`/`.lastIndexOf` search the needle's UTF-8 bytes ([ADR-00558](../adr/ADR-00558.md)), and `.fill(string, offset?, end?)` repeats the needle's bytes ([ADR-00559](../adr/ADR-00559.md)) — all single-argument-plus-range forms (no `byteOffset`/`encoding`); no 4-arg `.write(string, offset, length, encoding)` form; no `.swap16/32/64`, `.toJSON`, `Buffer.of`, `Buffer.isAscii`/`Buffer.isUtf8`, arbitrary-width `readIntLE(offset, byteLength)`, `poolSize`/`allocUnsafeSlow`",
+              "`Buffer.from(arrayBuffer)` **copies** (Node views)",
+              "String-valued `.indexOf`/`.includes`/`.lastIndexOf` search the needle's UTF-8 bytes ([ADR-00558](../adr/ADR-00558.md)), and `.fill(string, offset?, end?)` repeats the needle's bytes ([ADR-00559](../adr/ADR-00559.md)) — all single-argument-plus-range forms (no `byteOffset`/`encoding`); no 4-arg `.write(string, offset, length, encoding)` form; no `.swap16/32/64`, `.toJSON`, `Buffer.of`, `Buffer.isAscii`/`Buffer.isUtf8`, arbitrary-width `readIntLE(offset, byteLength)`, `poolSize`",
               "`.toString()` (utf8/latin1) truncates at an embedded null byte"
             ],
             "notes": [
               "A Buffer IS a `Uint8Array` — indexing, `.length`, `.slice`/`.subarray`, numeric `.fill`/`.indexOf`/`.includes`, HOFs, for-of, `.set`, `.byteLength`, and `fs.writeFileSync(buffer)` all shared with the TypedArray machinery; `Buffer.from(...)`/`.alloc(...)` are **general expressions** (call syntax, no vardecl restriction) ([TDD-00103](../tdd/TDD-00103.md)/[ADR-00315](../adr/ADR-00315.md), superseding [ADR-00094](../adr/ADR-00094.md)'s \"no Buffer class\" half — fetch/fs still return WHATWG types)",
               "Codecs both directions: utf8, hex, base64, base64url (unpadded, per Node), latin1/binary/ascii — via an embedded libc-only C runtime, compiled in only when used",
-              "`alloc(n, fill?)` — the fill is a numeric byte (memset) or a **string** whose UTF-8 bytes are repeated across the buffer ([ADR-00576](../adr/ADR-00576.md)) — `/allocUnsafe`/`concat(list, totalLength?)`/`compare`/`isBuffer`/`byteLength(string, enc?)`; instance `.toString(enc?, start?, end?)`/`.write(string, offset?, enc?)`/`.copy`/`.equals`/`.compare`; full `read/write{U}Int{8,16,32}{LE,BE}` + `Float`/`Double` + `BigInt64`/`BigUInt64` accessors with catchable RangeError bounds checks"
+              "An encoding named at run time dispatches in C, case-insensitively; an unknown one throws `ERR_UNKNOWN_ENCODING`. `Buffer.byteLength` follows Node's per-encoding formula ([ADR-01169](../adr/ADR-01169.md))",
+              "`alloc(n, fill?)` — the fill is a numeric byte (memset) or a **string** whose UTF-8 bytes are repeated across the buffer ([ADR-00576](../adr/ADR-00576.md)) — `/allocUnsafe`/`concat(list, totalLength?)`/`compare`/`isBuffer`/`byteLength(string, enc?)`; instance `.toString(enc?, start?, end?)`/`.write(string, offset?, enc?)`/`.copy`/`.equals`/`.compare`; full `read/write{U}Int{8,16,32}{LE,BE}` + `Float`/`Double` + `BigInt64`/`BigUInt64` accessors with catchable RangeError bounds checks",
+              "`utf16le`/`ucs2` transcode the UTF-8 string's code points to UTF-16LE code units and back, surrogate pairs above the BMP included ([ADR-01098](../adr/ADR-01098.md))",
+              "A Buffer keeps its identity through `any`: `console.log` prints `<Buffer 68 69>` (at most 50 bytes, as Node's `INSPECT_MAX_BYTES`), `Buffer.isBuffer` is true, `String()` decodes UTF-8 and `JSON.stringify` gives `{\"type\":\"Buffer\",\"data\":[…]}`, statically too ([ADR-01159](../adr/ADR-01159.md))"
             ]
           }
         ]

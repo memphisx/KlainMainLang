@@ -80,7 +80,7 @@
         {
           "category": "RegExp",
           "pageFile": "REGEXP.md",
-          "caveats": "• `u`/`d` flags out of scope for V1<br>• Several other deliberate scope narrowings (no implicit string→RegExp coercion, etc.) — see [REGEXP.md](REGEXP.md)'s own Caveats<br>• `new RegExp` doesn't validate its flags string ([ADR-00166](../adr/ADR-00166.md))"
+          "caveats": "• `u`/`d` flags out of scope for V1<br>• Several other deliberate scope narrowings — see [REGEXP.md](REGEXP.md)'s own Caveats<br>• `new RegExp` doesn't validate its flags string ([ADR-00166](../adr/ADR-00166.md))"
         },
         {
           "category": "Array methods",
@@ -185,7 +185,7 @@
         {
           "category": "Binary data & Typed Arrays",
           "pageFile": "BINARY-DATA-TYPED-ARRAYS.md",
-          "caveats": "• TypedArray construction is restricted to a variable declaration's initializer (Node `Buffer`'s call-syntax statics are exempt); no `.buffer`<br>• BigInt64Array/BigUint64Array support an explicit method allow-list — everything else is a compile-time rejection<br>• Buffer has no `utf16le`, and encodings must be string literals<br>• No `Atomics.waitAsync`, no `getFloat16`"
+          "caveats": "• TypedArray construction is restricted to a variable declaration's initializer (Node `Buffer`'s call-syntax statics are exempt); no `.buffer`<br>• BigInt64Array/BigUint64Array support an explicit method allow-list — everything else is a compile-time rejection<br>• Buffer encodings must be string literals<br>• No `Atomics.waitAsync`, no `getFloat16`"
         },
         {
           "category": "Web Crypto",
@@ -250,7 +250,7 @@
         {
           "category": "File System (fs)",
           "pageFile": "FILE-SYSTEM.md",
-          "caveats": "• `createWriteStream` still writes inline on the loop thread, and stream chunks are **strings** ([TDD-00186](../tdd/TDD-00186.md)/[TDD-00108](../tdd/TDD-00108.md))<br>• `readFileSync`/`readFile` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md))"
+          "caveats": "• `createWriteStream` still writes inline on the loop thread, and stream chunks are **strings** ([TDD-00186](../tdd/TDD-00186.md)/[TDD-00108](../tdd/TDD-00108.md))<br>• `readFileSync` returns a Buffer without an encoding; `readFile` (async) is still text-only"
         },
         {
           "category": "Process / CLI I/O",
@@ -285,7 +285,7 @@
         {
           "category": "FFI (`node:ffi`)",
           "pageFile": "FFI.md",
-          "caveats": "• Signatures/definitions must be compile-time object literals (AOT lowering); the `functions`/`symbols` accumulators are compile-time records (literal names only, resolution order)<br>• `registerCallback` caps at 16 concurrently-live callbacks per signature shape (static trampoline families) and `close()` doesn't invalidate callbacks; `using`/`[Symbol.dispose]` and Windows are not there yet; `exportString` is utf8-only and truncates to capacity"
+          "caveats": "• Signatures/definitions must be compile-time object literals (AOT lowering)<br>• `registerCallback` caps at 16 concurrently-live callbacks per signature shape (static trampoline families) and `close()` doesn't invalidate callbacks; `using`/`[Symbol.dispose]` not there yet; the Windows `symbols`/`functions` order (an MSVC-STL port) is unverified against a Windows Node"
         },
         {
           "category": "Other core modules (`querystring`, `assert`, `test`, `zlib`, `net`, `util`, `dns`, `dgram`, `cluster`, `tls`, `http` client, `https`, `stream/web`, `vm`, `http2`)",
@@ -474,14 +474,6 @@
     {
       "kind": "tddBacklog",
       "editorial": {
-        "228": {
-          "title": "Runtime handles in an `any` — a type-id word for Map/Set/Weak*/channel/Promise/Date",
-          "notes": "`const m: any = new Map()` is a clean rejection ([ADR-01060](../adr/ADR-01060.md)) because the NaN box has no free pointer kind and a Map/Set header's field 0 is its entry count. The design generalises the Error/Symbol hidden field-0 type-id (bit 46) to every boxable handle — a leading word on the Map/Set header (30 raw field-0 sites, offsets named as constants first), WeakMap/WeakSet/WeakRef, the channel struct, the Promise struct, a boxing-time cell for `Date` — then `typeof`/`inspect`/`JSON`/`instanceof`/member dispatch through `any` per kind. Staged: constants + layout test, Map/Set, dispatch, Weak*/channel, Promise/Date"
-        },
-        "227": {
-          "title": "`n?: T | null` — absent vs explicit `null` vs present",
-          "notes": "An optional field whose type is itself nullable has three states in TS/Node; here `undefinedableElem` leaves `T | null` unchanged, so an omitted `s?: string | null` reads `null`, is enumerated and `\"s\" in o` is true. The design: a `ThreeState` type flag, a `{ i8 state, T }` scalar aggregate (0 absent / 1 null / 2 present) and a one-byte side slot for pointer fields, with the presence gate (`emitFieldPresent`/`jsonFieldSkippable`) and every enumeration/`in`/`inspect`/`JSON`/`typeof`/`??`/destructuring site gaining a three-state arm; the parser must stop folding `null`/`undefined` into one flag. A per-object presence bitmap and a null sentinel pointer are rejected in the document"
-        },
         "226": {
           "title": "Array holes — a lazy hole bitmap beside the scalar buffer",
           "notes": "`a[a.length + 2] = v` throws here; Node extends `length` with *holes*, a third element state that `in`/`forEach`/`Object.keys` skip, `for…of`/spread see as `undefined`, `inspect` shows as `<n empty items>` and `JSON` as `null`. The chosen design (Option A) adds one hidden `holes` word to the heap array header — null for every packed array, a bitmap after the first gap write, `delete a[i]`, `a.length = n` growth, `new Array(n)` or a literal elision — so the `{ptr,i64}` aggregate, the named-binding shape and the call ABI are untouched and a packed array pays one null test. Boxed-element and sentinel alternatives are rejected there. Staged: header field + fast paths, producers + readers, mutator bitmap maintenance, `delete`/`length`/`in` on arrays"
@@ -524,7 +516,7 @@
         },
         "204": {
           "title": "Conformance denominator honesty — full upstream corpora, mechanical exclusions only",
-          "notes": "Tracks 1\u20134 SHIPPED ([ADR-00875](../adr/ADR-00875.md)\u2013[ADR-00879](../adr/ADR-00879.md)): WPT runs the full 4,207-source headless corpus (allowlist deleted, capability-ladder report comparable to Servo/wpt.fyi, `META: global=` variant counting); Test262 runs the 5,624 `async`-flagged files under the real `$DONE` doneprintHandle protocol plus `raw`/`module` files, with shipped features un-excluded and dynamic-code/dynamic-object tags counted in-scope under named pending-capability buckets; the Node oracle fetches and measures every behavioral suite (`sequential` serialized, `es-module` via ESM\u2192require rewrite, `message` against `.out` baselines, `pummel`/`known_issues` as counted skips); the TS oracle materializes multi-file `@filename:` cases (skips 2,578\u2192800). Reports moved to per-platform folders (`docs/testing/<platform>/<lane>/`, [ADR-00877](../adr/ADR-00877.md)) with live progress + a `klainconf` TUI dashboard (watch/start/stop/restart, `docs/testing/PROGRESS-DASHBOARD.md`). **Remaining \u2014 Track 5**: the headless DOM shim (jsdom tier) unlocking the ~20\u201325K WPT testharness `.html` documents; own TDD before implementation"
+          "notes": "Tracks 1–4 SHIPPED ([ADR-00875](../adr/ADR-00875.md)–[ADR-00879](../adr/ADR-00879.md)): WPT runs the full 4,207-source headless corpus (allowlist deleted, capability-ladder report comparable to Servo/wpt.fyi, `META: global=` variant counting); Test262 runs the 5,624 `async`-flagged files under the real `$DONE` doneprintHandle protocol plus `raw`/`module` files, with shipped features un-excluded and dynamic-code/dynamic-object tags counted in-scope under named pending-capability buckets; the Node oracle fetches and measures every behavioral suite (`sequential` serialized, `es-module` via ESM→require rewrite, `message` against `.out` baselines, `pummel`/`known_issues` as counted skips); the TS oracle materializes multi-file `@filename:` cases (skips 2,578→800). Reports moved to per-platform folders (`docs/testing/<platform>/<lane>/`, [ADR-00877](../adr/ADR-00877.md)) with live progress + a `klainconf` TUI dashboard (watch/start/stop/restart, `docs/testing/PROGRESS-DASHBOARD.md`). **Remaining — Track 5**: the headless DOM shim (jsdom tier) unlocking the ~20–25K WPT testharness `.html` documents; own TDD before implementation"
         },
         "203": {
           "title": "URL / URLSearchParams WHATWG-conformance overhaul",
@@ -560,7 +552,7 @@
         },
         "187": {
           "title": "`undefined` for a concrete scalar — retiring the zero-fill caveat family",
-          "notes": "Complete. The last adopter \u2014 `ReadableStream.read()`'s `{value, done}` record and `controller.desiredSize` \u2014 shipped as [TDD-00196](../tdd/TDD-00196.md)/[ADR-00826](../adr/ADR-00826.md): a closed read yields a real `undefined` value for scalar/string/object chunks (array/tuple chunks keep zero-on-close, [ADR-00246](../adr/ADR-00246.md)), and `desiredSize` is `null` once errored. Deliberate non-goal: a generator's `.next().value` stays bare `T` \u2014 tsc types it `any` there, so the current typing is already stricter than TS ([ADR-00781](../adr/ADR-00781.md))"
+          "notes": "Complete. The last adopter — `ReadableStream.read()`'s `{value, done}` record and `controller.desiredSize` — shipped as [TDD-00196](../tdd/TDD-00196.md)/[ADR-00826](../adr/ADR-00826.md): a closed read yields a real `undefined` value for scalar/string/object chunks (array/tuple chunks keep zero-on-close, [ADR-00246](../adr/ADR-00246.md)), and `desiredSize` is `null` once errored. Deliberate non-goal: a generator's `.next().value` stays bare `T` — tsc types it `any` there, so the current typing is already stricter than TS ([ADR-00781](../adr/ADR-00781.md))"
         },
         "183": {
           "title": "Windows IOCP reactor (completion-model I/O)",
@@ -589,10 +581,6 @@
         "168": {
           "title": "`async_hooks` — `AsyncLocalStorage`",
           "notes": "Context propagation over the existing fiber model — the store lives in the coroutine task struct, so cross-`await` propagation is nearly free; low-level `createHook`/async-id lifecycle is a documented out-of-scope faithful impossibility"
-        },
-        "3": {
-          "title": "Alternative fetch backend (Go helper vs libcurl)",
-          "notes": "Low priority"
         },
         "11": {
           "title": "IndexedDB-compatible storage API",
@@ -646,10 +634,6 @@
           "title": "Generalized destructuring (for-of, nested patterns, object rest)",
           "notes": "Declaration/for-of/nested-param forms done; object rest and assignment-form nested patterns deferred"
         },
-        "68": {
-          "title": "Object-model evolution — static reach vs. dynamic/prototype model",
-          "notes": "Direction decided: near-term static shipped; a deferred native dynamic/prototype model is where prototype semantics + vanilla-JS compat land — designed in [TDD-00155](../tdd/TDD-00155.md)"
-        },
         "72": {
           "title": "Enriched diagnostics + strict spec-error-matching mode",
           "notes": "A caret-snippet renderer (default) plus JS-error-kind/wording matching behind a strict mode"
@@ -700,7 +684,7 @@
         },
         "132": {
           "title": "Node streams as real classes (`class X extends Readable/Writable`)",
-          "notes": "Readable/Writable/Duplex/Transform + PassThrough done (options form too); residual `_flush` override and some `super(options)` edges deferred — see the Streams row"
+          "notes": "Superseded by [TDD-00231](../tdd/TDD-00231.md): the stream classes are Node's own implementation in TypeScript, and a subclass is ordinary inheritance"
         },
         "143": {
           "title": "`klain:sync` — Go-fidelity goroutine runtime (preemptive M:N, channels, select)",
@@ -720,7 +704,7 @@
         },
         "142": {
           "title": "`klain:webview` — desktop apps via the system webview",
-          "notes": "Remaining: multi-window \u2014 a second `new Webview` is a clean rejection until the engine run-loop/app-delegate rework lands \u2014 see the Desktop row"
+          "notes": "Remaining: multi-window — a second `new Webview` is a clean rejection until the engine run-loop/app-delegate rework lands — see the Desktop row"
         },
         "145": {
           "title": "Status tracking as JSON source-of-truth (Markdown generated)",
@@ -747,12 +731,12 @@
           "notes": "The one database surface that is also a built-in Node API, so implemented faithfully under its real specifier (synchronous like `fs.readFileSync`; libsqlite3 links like libcurl). Remaining: the dynamic-row mode for untyped `SELECT *` (rows currently need an explicit `.all<T>()` shape), `db.aggregate()`, error `.code`, and a lazy `iterate()`; sessions/changesets, extension loading, and async `backup()` are rejected as out of scope. Not the KV-for-IndexedDB use [TDD-00011](../tdd/TDD-00011.md) set aside"
         },
         "155": {
-          "title": "The native dynamic object model (D1) — property bag, prototype chain, descriptors",
-          "notes": "The design for [00068](../tdd/TDD-00068.md)'s deferred Axis-2 endpoint — the single largest caveat cluster in these pages (~30% of all caveats trace to the static object model). Two-tier: typed objects stay fixed-shape structs; `any`/`JSON.parse`/prototype code gets a per-instance bag (any-box values, proto pointer, descriptors), with the prototype chain, vanilla-JS prototype classes, descriptors, and `Proxy`/`Reflect` layered over it ([TDD-00155](../tdd/TDD-00155.md)). Remaining follow-up: the slot-storage collapse"
+          "title": "The native dynamic object model (D1)",
+          "notes": "Stages 1–5 shipped; Stage 6 (static bridge) and Stage 7 (`Proxy`/`Reflect`) in part — method-carrying classes and aliased bindings into `any` still reject, only the `get`/`set`/`has`/`deleteProperty` traps on dynamic targets. The widening analysis moves to [TDD-00230](../tdd/TDD-00230.md)"
         },
         "161": {
           "title": "Decorators (`@decorator` on classes, members, parameters)",
-          "notes": "Remaining: class-decorator *replacement* (refused at runtime under the static vtable model — a documented divergence whose home is a future `-compat=js`/first-class-constructor world; a replacement decorator reading typed `this.field` hits the same boundary) and static-field decorators. Both dialects (experimental + `-decorators=standard`), every member placement, factory decorators, and `-emit-decorator-metadata` otherwise run ([ADR-00641](../adr/ADR-00641.md)\u2013[ADR-00649](../adr/ADR-00649.md))"
+          "notes": "Remaining: class-decorator *replacement* (refused at runtime under the static vtable model — a documented divergence whose home is a future `-compat=js`/first-class-constructor world; a replacement decorator reading typed `this.field` hits the same boundary) and static-field decorators. Both dialects (experimental + `-decorators=standard`), every member placement, factory decorators, and `-emit-decorator-metadata` otherwise run ([ADR-00641](../adr/ADR-00641.md)–[ADR-00649](../adr/ADR-00649.md))"
         },
         "162": {
           "title": "Implicit `any` for untyped bindings + clean rejection of incompatible reassignment",
@@ -780,7 +764,7 @@
         },
         "165": {
           "title": "Importable specifiers for the Web-global-backed Node modules (`url`/`timers`/`perf_hooks`/`buffer`/`events`)",
-          "notes": "Remaining (Stage 4): new feature surfaces on the now-importable Web-global-backed modules, ranked by leverage \u2014 `PerformanceObserver` extensions ([TDD-00166](../tdd/TDD-00166.md)) and `timers/promises`. The import wiring itself (same-name/`node:`/default/aliased specifiers) is complete"
+          "notes": "Remaining (Stage 4): new feature surfaces on the now-importable Web-global-backed modules, ranked by leverage — `PerformanceObserver` extensions ([TDD-00166](../tdd/TDD-00166.md)) and `timers/promises`. The import wiring itself (same-name/`node:`/default/aliased specifiers) is complete"
         },
         "166": {
           "title": "`PerformanceObserver` (perf_hooks)",
@@ -809,6 +793,22 @@
         "174": {
           "title": "Maturity gate for flipping `-mm=auto` (+ `-optimize-memory`) to default",
           "notes": "Two flips: dev-default first (tests/examples/per-delivery checks compile in auto+optimize so every deliverable soaks the escape analysis by construction), shipped CLI default gated on quantified exit criteria — mode-differential lanes over the examples/E2E/conformance corpora, ASan-armed, an escape-shaped fuzz lane, klainload soak, free census"
+        },
+        "120": {
+          "title": "Length-carrying (binary-safe) strings",
+          "notes": "Stages 1–4 shipped; `Blob.text()` still returns a headerless string and EventSource data / WebCrypto string outputs are unchecked, so the length-driven `console.log`/`JSON.stringify` paths stay `strlen`-bounded"
+        },
+        "229": {
+          "title": "Function objects, null-prototype objects, and a runtime node:ffi library registry",
+          "notes": "Stages B (null-prototype objects, `Object.prototype`, integrity levels — [ADR-01094](../adr/ADR-01094.md)) and C (the `node:ffi` registry in Node's `std::unordered_map` order, function objects, validation — [ADR-01095](../adr/ADR-01095.md)) shipped, with Stage A's rendering/`name`/`length` via code-pointer metadata ([ADR-01093](../adr/ADR-01093.md)). Left of Stage A: `===` identity of a closure boxed twice, a reverse adapter for a tag-12 value in a typed function slot, own properties on user functions, `Function.prototype.toString` source text, `[class X]`"
+        },
+        "230": {
+          "title": "Compiler restructure — scanner/parser, binder, checker, declaration-driven builtins, libuv runtime",
+          "notes": "Phase 0 (IR site attribution, shadow-mode agreement harness) → 1 (on-demand scanner, real ASI, error recovery, schema-generated traversal, no builtin names in the parser) → 2 (binder + flow graph + checker; every `infer*` decider deleted) → 3 (`lib/*.d.ts` builtins with `@lower`, closed `reprOf`/`convert`, no `Is*` flags) → 4 (runtime in C on libuv, own TDD) → 5 (uniform heap header). Absorbs [TDD-00226](../tdd/TDD-00226.md), [TDD-00227](../tdd/TDD-00227.md), [TDD-00228](../tdd/TDD-00228.md)"
+        },
+        "231": {
+          "title": "Builtin modules written in TypeScript, Node's `stream` first",
+          "notes": "An embedded-module loader compiles `lib/node/*.ts` with the program; `stream` is Node v24's implementation ported to TypeScript (stages 1–3 shipped); the HTTP request/response and fs streams move onto it next (stage 4)"
         }
       }
     },

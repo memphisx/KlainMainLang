@@ -578,7 +578,10 @@ func (e *Emitter) ensureMapStrHelpers() {
 	e.emitGlobal(`
 define ptr @__kml_map_str_create() {
 entry:
-  %h = call ptr @malloc(i64 56)
+  %h = call ptr @malloc(i64 64)
+  ; offset 56: flags (bit 0: a null-prototype dictionary, Object.create(null))
+  %flags_p = getelementptr i8, ptr %h, i64 56
+  store i64 0, ptr %flags_p, align 8
   store i64 0, ptr %h, align 8
   %cap_p = getelementptr i8, ptr %h, i64 8
   store i64 8, ptr %cap_p, align 8

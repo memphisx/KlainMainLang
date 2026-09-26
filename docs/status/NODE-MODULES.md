@@ -33,7 +33,7 @@ Format: [Status page format](README.md#status-page-format). ✅ = the module wor
 | `diagnostics_channel` | ✅ | • → [Other Node core modules](NODE-CORE-MODULES.md) |
 | `crypto` / `node:crypto` | ✅ | • WebCrypto global + node crypto hashes/HMAC/keygen → [Web Crypto](WEB-CRYPTO.md) |
 | `worker_threads` | ✅ | • → [Concurrency & workers](CONCURRENCY-WORKERS.md) |
-| `events` (`EventEmitter`) | ✅ | • `EventEmitter` is an ambient global; `import EventEmitter from 'events'` / `{ EventEmitter }` work, and the static helpers `events.once` and `events.on` (async iterator) work too → [EventEmitter](EVENT-EMITTER.md) |
+| `events` (`EventEmitter`) | ✅ | • `EventEmitter` exists only through an import of `events` (named, default or namespace): it is no global, in Node or the web platform (the web's is `EventTarget`). The static helpers `events.once` and `events.on` (async iterator) work too → [EventEmitter](EVENT-EMITTER.md) |
 | `stream` | ✅ | • → [Streams](STREAMS.md) |
 | `stream/promises` | ✅ | • → [Streams](STREAMS.md) |
 | `stream/web` | ✅ | • → [Streams](STREAMS.md) |
@@ -43,7 +43,7 @@ Format: [Status page format](README.md#status-page-format). ✅ = the module wor
 
 ## Web-global-backed — primary exports fully importable, module extras pending
 
-The primary export of each is a spec-identical re-export of an ambient global, and as of [TDD-00165](../tdd/TDD-00165.md) (Stages 1–3, [ADR-00666](../adr/ADR-00666.md)–[ADR-00668](../adr/ADR-00668.md)) it is **fully importable in every common form** — same-name (`import { URL } from 'url'`), `node:` (`import { setTimeout } from 'node:timers'`), the `events` default (`import EventEmitter from 'events'`), and **aliased** (`import { URL as U } from 'url'`, `{ setTimeout as later }`, `{ Buffer as B }`) — validated and either erased to the global or renamed/rebuilt onto it (using the global directly still works too). What remains is **Stage 4**: the genuinely module-only *extras* with no same-named global — legacy `url.parse`/`format`/`fileURLToPath`, `perf_hooks.PerformanceObserver`, `timers/promises` — which are separate not-yet-built feature surfaces. `Buffer` is a Node-*specific* global (not a Web API).
+The primary export of each is a spec-identical re-export of an ambient global, and as of [TDD-00165](../tdd/TDD-00165.md) (Stages 1–3, [ADR-00666](../adr/ADR-00666.md)–[ADR-00668](../adr/ADR-00668.md)) it is **fully importable in every common form** — same-name (`import { URL } from 'url'`), `node:` (`import { setTimeout } from 'node:timers'`), and **aliased** (`import { URL as U } from 'url'`, `{ setTimeout as later }`, `{ Buffer as B }`) — validated and either erased to the global or renamed/rebuilt onto it (using the global directly still works too). What remains is **Stage 4**: the genuinely module-only *extras* with no same-named global — legacy `url.parse`/`format`/`fileURLToPath`, `perf_hooks.PerformanceObserver`, `timers/promises` — which are separate not-yet-built feature surfaces. `Buffer` is a Node-*specific* global (not a Web API).
 
 | Module | Status | Caveats | Notes |
 |---|---|---|---|

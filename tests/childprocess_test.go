@@ -398,12 +398,14 @@ console.log("badstatus", bad.status)
 func TestE2EChildProcessExecSyncAndExecFileSync(t *testing.T) {
 	skipPOSIXToolsOnWindows(t, "sh arithmetic via execSync")
 	// execSync runs through /bin/sh -c; execFileSync execvp's with no shell.
-	// Both return captured stdout as a string.
+	// With an encoding both return captured stdout as a string; without one,
+	// a Buffer.
 	assertOutputImports(t, `
 import { execSync, execFileSync } from 'child_process'
-console.log("exec", execSync("echo shell-$((2+3))").trim())
-console.log("execfile", execFileSync("printf", ["%s-%s", "a", "b"]))
-`, "exec shell-5\nexecfile a-b")
+console.log("exec", execSync("echo shell-$((2+3))", { encoding: "utf8" }).trim())
+console.log("execfile", execFileSync("printf", ["%s-%s", "a", "b"], { encoding: "utf8" }))
+console.log(execFileSync("printf", ["ab"]))
+`, "exec shell-5\nexecfile a-b\n<Buffer 61 62>")
 }
 
 // execSync throws on a nonzero exit status, matching Node (ADR-00753); the
@@ -412,7 +414,7 @@ console.log("execfile", execFileSync("printf", ["%s-%s", "a", "b"]))
 func TestE2EChildProcessExecSyncThrowsOnNonZero(t *testing.T) {
 	assertOutputImports(t, `
 import { execSync } from 'child_process'
-console.log(execSync("echo ok").trim())
+console.log(execSync("echo ok", { encoding: "utf8" }).trim())
 try {
   execSync("exit 7")
   console.log("NO THROW")

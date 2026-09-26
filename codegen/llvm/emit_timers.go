@@ -29,7 +29,13 @@ func (e *Emitter) timerCallbackPtr(arg ast.Expression, fnName string, pos ast.Po
 		return "", fmt.Errorf("%d:%d: %s's first argument must be a function", pos.Line, pos.Col, fnName)
 	}
 	if len(val.Ty.FuncParams) != 0 {
-		return "", fmt.Errorf("%d:%d: %s's callback must take no arguments", pos.Line, pos.Col, fnName)
+		// Called with no arguments, as JavaScript calls it: each parameter
+		// is undefined (or its default).
+		adapted, err := e.emitNoArgAdapter(val)
+		if err != nil {
+			return "", err
+		}
+		val = adapted
 	}
 	// A timer ignores what its callback returns — `setTimeout(async () => { … })`
 	// and `setTimeout(() => count++)` are ordinary JS. The drain calls the
@@ -159,7 +165,7 @@ func (e *Emitter) emitClearTimer(args []ast.Expression, fnName string, pos ast.P
 //
 //	__kml_timer_schedule(ptr closure, i64 delayMs, i64 intervalMs) -> i64
 //	  Appends a new entry (growing the queue via the same realloc-doubling
-//	  shape __kml_fetch/__kml_exec_file_sync/__kml_fs_readdir all already
+//	  shape __kml_fetch/__kml_fs_readdir all already
 //	  use, just holding fixed-size 32-byte structs this time instead of
 //	  bytes or ptrs) and returns its id. intervalMs is 0 for a one-shot
 //	  setTimeout, or the repeat cadence for setInterval.
@@ -318,7 +324,7 @@ func (e *Emitter) ensureTimerRuntime() {
 	// or not AbortSignal.timeout is used; the event loop pulls them in the same
 	// way (it also ensures the timer runtime).
 	e.ensureAbortRegistryGlobals()
-	clockID := monotonicClockID()
+	clockID := e.monotonicClockID()
 	e.emitGlobal("declare i32 @nanosleep(ptr noundef, ptr noundef)")
 	e.emitGlobal("@__kml_timer_data = internal thread_local global ptr null, align 8")
 	e.emitGlobal("@__kml_timer_len = internal thread_local global i64 0, align 8")
@@ -404,7 +410,8 @@ loop:
 body:
   %slot = getelementptr { i64, i64, i64, ptr }, ptr %data, i64 %i
   %id_p = getelementptr { i64, i64, i64, ptr }, ptr %slot, i32 0, i32 0
-  %eid = load i64, ptr %id_p, align 8
+  %eidraw = load i64, ptr %id_p, align 8
+  %eid = and i64 %eidraw, 4611686018427387903
   %match = icmp eq i64 %eid, %id
   br i1 %match, label %cancelit, label %next
 
@@ -420,6 +427,89 @@ next:
 
 done:
   ret void
+}`)
+
+	// Timeout.unref()/ref()/hasRef(): bit 62 of an entry's id marks it unref'd —
+	// it still fires, but it does not by itself keep the loop alive.
+	e.emitGlobal(`
+define void @__kml_timer_set_ref(i64 %id, i1 %on) {
+entry:
+  %len = load i64, ptr @__kml_timer_len, align 8
+  %data = load ptr, ptr @__kml_timer_data, align 8
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %inext, %next ]
+  %inb = icmp slt i64 %i, %len
+  br i1 %inb, label %body, label %done
+body:
+  %id_p = getelementptr { i64, i64, i64, ptr }, ptr %data, i64 %i, i32 0
+  %raw = load i64, ptr %id_p, align 8
+  %eid = and i64 %raw, 4611686018427387903
+  %match = icmp eq i64 %eid, %id
+  br i1 %match, label %set, label %next
+set:
+  %unrefd = or i64 %eid, 4611686018427387904
+  %v = select i1 %on, i64 %eid, i64 %unrefd
+  store i64 %v, ptr %id_p, align 8
+  br label %done
+next:
+  %inext = add i64 %i, 1
+  br label %loop
+done:
+  ret void
+}
+define i1 @__kml_timer_has_ref(i64 %id) {
+entry:
+  %len = load i64, ptr @__kml_timer_len, align 8
+  %data = load ptr, ptr @__kml_timer_data, align 8
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %inext, %next ]
+  %inb = icmp slt i64 %i, %len
+  br i1 %inb, label %body, label %none
+body:
+  %id_p = getelementptr { i64, i64, i64, ptr }, ptr %data, i64 %i, i32 0
+  %raw = load i64, ptr %id_p, align 8
+  %eid = and i64 %raw, 4611686018427387903
+  %match = icmp eq i64 %eid, %id
+  br i1 %match, label %found, label %next
+found:
+  %bit = and i64 %raw, 4611686018427387904
+  %r = icmp eq i64 %bit, 0
+  ret i1 %r
+next:
+  %inext = add i64 %i, 1
+  br label %loop
+none:
+  ret i1 1
+}
+define i1 @__kml_timer_any_ref() {
+entry:
+  %len = load i64, ptr @__kml_timer_len, align 8
+  %data = load ptr, ptr @__kml_timer_data, align 8
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %inext, %next ]
+  %inb = icmp slt i64 %i, %len
+  br i1 %inb, label %body, label %none
+body:
+  %slot = getelementptr { i64, i64, i64, ptr }, ptr %data, i64 %i
+  %iv_p = getelementptr { i64, i64, i64, ptr }, ptr %slot, i32 0, i32 2
+  %iv = load i64, ptr %iv_p, align 8
+  %live = icmp ne i64 %iv, -1
+  %id_p = getelementptr { i64, i64, i64, ptr }, ptr %slot, i32 0, i32 0
+  %raw = load i64, ptr %id_p, align 8
+  %bit = and i64 %raw, 4611686018427387904
+  %refd = icmp eq i64 %bit, 0
+  %yes = and i1 %live, %refd
+  br i1 %yes, label %found, label %next
+found:
+  ret i1 1
+next:
+  %inext = add i64 %i, 1
+  br label %loop
+none:
+  ret i1 0
 }`)
 
 	e.emitGlobal(`
@@ -555,7 +645,11 @@ scannext:
 
 scandone:
   %foundbest = load i64, ptr %besti, align 8
-  %nomore = icmp eq i64 %foundbest, -1
+  %nomore0 = icmp eq i64 %foundbest, -1
+  ; Only unref'd timers left: nothing keeps the process alive.
+  %anyref = call i1 @__kml_timer_any_ref()
+  %noref = xor i1 %anyref, true
+  %nomore = or i1 %nomore0, %noref
   br i1 %nomore, label %alldone, label %havebest
 
 havebest:
@@ -733,6 +827,40 @@ tickret:
 // emitDiscardReturnAdapter wraps a zero-argument closure that returns a value in
 // a `void (ptr)` closure that calls it and drops the result. env of the adapter
 // is the original closure header { fp, env }.
+// emitNoArgAdapter wraps a closure that declares parameters as the
+// zero-argument, void closure the timer and tick drains call: the adapter
+// calls it with no arguments, each parameter getting what a missing argument
+// gets, and drops its result.
+func (e *Emitter) emitNoArgAdapter(val Value) (Value, error) {
+	e.ensureMalloc()
+	e.discardAdapterCtr++
+	name := fmt.Sprintf("@__kml_noarg_%d", e.discardAdapterCtr)
+	restore := e.beginThunkEmit()
+	if _, err := e.emitCBCall(Callback{kind: cbClosure, hdrPtr: "%orig", ty: val.Ty}, nil); err != nil {
+		restore()
+		return Value{}, err
+	}
+	e.emitInstr("ret void")
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.functions.WriteString(fmt.Sprintf("\ndefine internal void %s(ptr %%orig) {\nentry:\n%s}\n", name, body))
+	clo := e.freshReg()
+	fpP := e.freshReg()
+	epP := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", clo))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpP, clo))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", name, fpP))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epP, clo))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, epP))
+	voidTy := TypeVoid
+	ty := val.Ty
+	ty.FuncParams = nil
+	ty.FuncParamDefaults = nil
+	ty.FuncHasRest = false
+	ty.FuncRetType = &voidTy
+	return Value{Ref: clo, Ty: ty}, nil
+}
+
 func (e *Emitter) emitDiscardReturnAdapter(val Value) Value {
 	e.ensureMalloc()
 	e.discardAdapterCtr++

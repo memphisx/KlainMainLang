@@ -97,31 +97,22 @@
             "feature": "`Number.prototype.toFixed(n)`",
             "status": "implemented",
             "notes": [
-              "The `digits` argument is optional and defaults to `0` (`(3.7).toFixed()` → `\"4\"`), matching real JS ([ADR-00533](../adr/ADR-00533.md))"
-            ],
-            "caveats": [
-              "Exact-halfway values round half-to-even (C `printf`), not JS's round-half-up — `(2.5).toFixed(0)` is `'2'` (Node: `'3'`) and `(8.5).toFixed(0)` is `'8'` (Node: `'9'`)."
+              "The spec's algorithm over the double's exact decimal expansion: an exact tie rounds to the larger value (`(2.5).toFixed(0)` is `'3'`), `|x| ≥ 1e21` gives `String(x)`, and a digit count outside 0..100 throws Node's `RangeError` ([ADR-01143](../adr/ADR-01143.md))"
             ]
           },
           {
             "feature": "`Number.prototype.toString(radix?)`",
             "status": "implemented",
-            "caveats": [
-              "For a **non-power-of-two** base a repeating fractional expansion is capped at 1100 digits and the double-precision multiply can differ from V8's exact-bignum result in the trailing digits"
-            ],
             "notes": [
-              "A fractional receiver now renders fractional digits: the default/`radix 10` form delegates to `String(x)` (shortest round-trip decimal), and any other base runs a hand-rolled integer-part digit loop plus a repeated-multiply fractional expansion — bit-exact to V8 for a power-of-two base ([ADR-00566](../adr/ADR-00566.md))",
+              "Radix 10 is `String(x)`; any other base is V8's own algorithm (`DoubleToRadixCString`): the integer digits exactly and the fraction only as far as the double's precision reaches, so every base matches Node digit for digit ([ADR-01143](../adr/ADR-01143.md))",
               "A radix outside 2..36 throws a `RangeError` as in real JS ([ADR-00552](../adr/ADR-00552.md))"
             ]
           },
           {
             "feature": "`Number.prototype.toPrecision(n)`",
             "status": "implemented",
-            "caveats": [
-              "Chooses exponential vs fixed notation at C `%g`'s threshold (exponent < -4) rather than JS's (exponent < -6), so a small magnitude like `0.0000123` renders `\"1.23e-5\"` where real JS gives `\"0.0000123\"` ([ADR-00065](../adr/ADR-00065.md))"
-            ],
             "notes": [
-              "`sprintf(\"%#.*g\", ...)`; the exponent is normalized to JS's minimum-digit form (`e+5`, not `e+05`), and exact halfway-tie rounding may differ from JS (glibc round-half-to-even) ([ADR-00551](../adr/ADR-00551.md)/[ADR-00065](../adr/ADR-00065.md))",
+              "The spec's algorithm: exact decimal rounding with ties to the larger value, exponential notation below `1e-6` or at `10^precision` and up (`(0.00001).toPrecision(2)` is `'0.000010'`), and Node's `RangeError` outside 1..100 ([ADR-01143](../adr/ADR-01143.md))",
               "The precision argument is optional; `x.toPrecision()` with no argument is exactly `String(x)`, as real JS ([ADR-00534](../adr/ADR-00534.md))"
             ]
           },
@@ -129,7 +120,7 @@
             "feature": "`Number.prototype.toExponential(n?)`",
             "status": "implemented",
             "notes": [
-              "With a fraction-digits argument: `sprintf(\"%.*e\", ...)`, exponent normalized to JS's minimum-digit form (`1.23e+4`, not `1.23e+04`) ([ADR-00551](../adr/ADR-00551.md)). With no argument: the shortest round-trip mantissa via `__kml_dtoa_exp` (reuses the dtoa shortest-precision loop), as in Node ([ADR-00832](../adr/ADR-00832.md))"
+              "The spec's algorithm over the exact decimal expansion (ties to the larger value); with no argument, the shortest round-trip mantissa, as in Node ([ADR-01143](../adr/ADR-01143.md))"
             ]
           },
           {
@@ -174,11 +165,17 @@
           },
           {
             "feature": "`Math.log/log2/log10`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)"
+            ]
           },
           {
             "feature": "`Math.sin/cos/tan`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)"
+            ]
           },
           {
             "feature": "`Math.min/max`",
@@ -207,15 +204,31 @@
             "status": "implemented",
             "notes": [
               "`cbrt` uses a deterministic, correctly-rounded fdlibm implementation (`@__kml_cbrt`) rather than platform libm, whose runtime `cbrt` is not reliably correctly-rounded and diverged by OS (glibc `cbrt(27)` → `3.0000000000000004`); `expm1`/`log1p` delegate to libm ([ADR-00242](../adr/ADR-00242.md))"
+            ],
+            "caveats": [
+              "Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)"
             ]
           },
           {
             "feature": "`Math.asin/acos/atan/atan2`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)"
+            ]
           },
           {
             "feature": "`Math.sinh/cosh/tanh`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)"
+            ]
+          },
+          {
+            "feature": "`Math.exp` and `Math.asinh/acosh/atanh`",
+            "status": "implemented",
+            "caveats": [
+              "Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)"
+            ]
           },
           {
             "feature": "`Math.clz32/fround/imul`",

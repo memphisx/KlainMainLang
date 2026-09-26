@@ -47,7 +47,7 @@ func TestE2EBoolean(t *testing.T) {
 console.log(1 < 2)
 console.log(2 > 3)
 console.log(1 === 1)
-console.log(1 !== 2)
+console.log((1 as number) !== 2)
 `, "true\nfalse\ntrue\ntrue")
 }
 
@@ -860,8 +860,10 @@ console.log(typeof Math.PI)
 console.log(typeof JSON.parse)
 console.log(typeof K)
 console.log(typeof fetch)
-console.log(typeof totallyUndeclared)
-`, "function\nfunction\nfunction\nundefined\nobject\nfunction\nnumber\nfunction\nfunction\nfunction\nundefined")
+`, "function\nfunction\nfunction\nundefined\nobject\nfunction\nnumber\nfunction\nfunction\nfunction")
+	// An undeclared name is TS2304 to tsc; JavaScript reads its typeof as
+	// "undefined".
+	assertOutputCompatJS(t, `console.log(typeof totallyUndeclared)`, "undefined")
 }
 
 // ADR-00596: typeof on a static method of a common namespace answers "function"
@@ -1161,8 +1163,8 @@ console.log(parseInt("0x"), parseInt("0X"), parseInt("0xG"), parseInt("0xff", 16
 // (Test262 parseInt S15.1.2.2_A1_T3, found on the Windows port).
 func TestE2EParseIntNullUndefinedIsNaN(t *testing.T) {
 	assertOutput(t, `
-const u = undefined
-console.log(parseInt(null), parseInt(u), parseFloat(null), parseFloat(u), parseInt("7"), parseFloat("2.5"))
+const n: any = null, u: any = undefined
+console.log(parseInt(n), parseInt(u), parseFloat(n), parseFloat(u), parseInt("7"), parseFloat("2.5"))
 `, "NaN NaN NaN NaN 7 2.5")
 }
 
@@ -1240,7 +1242,7 @@ func TestE2EMixedNumericPromotion(t *testing.T) {
 let i = 3;
 console.log(i * 1.5, i + 0.5, i - 0.25, i / 2.0, i % 2.5);
 console.log(1.5 * i, 0.5 + i);
-console.log(3 === 3.5, 3 < 3.5, 4.5 > i);
+console.log((3 as number) === 3.5, 3 < 3.5, 4.5 > i);
 const x = i * 1.5;
 console.log(x, typeof x);
 `, "4.5 3.5 2.75 1.5 0.5\n4.5 3.5\nfalse true true\n4.5 number")
@@ -1609,7 +1611,6 @@ func TestE2EIncompatibleReassignmentRejectedInStrict(t *testing.T) {
 	// `: any` annotation (or -compat=js), both exercised as the passing case.
 	reject := []string{
 		`let x = 5; x = 'hi';`,    // inferred number, string assigned
-		`let x; x = 1; x = 's';`,  // untyped, first-assignment number, then string
 		`let s = 'a'; s = 3;`,     // inferred string, number assigned
 		`let b = true; b = 'no';`, // inferred boolean, string assigned
 	}

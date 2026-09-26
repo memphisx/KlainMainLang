@@ -32,11 +32,7 @@ func parseJSDocTypeString(raw string) *ast.TypeAnnotation {
 	if norm == "" {
 		return nil
 	}
-	toks, err := lexer.Tokenize(norm)
-	if err != nil {
-		return nil
-	}
-	sub := New(toks)
+	sub := New(norm)
 	ta, err := sub.parseTypeAnnotation("jsdoc")
 	if err != nil || ta == nil {
 		return nil

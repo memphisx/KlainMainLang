@@ -9,14 +9,14 @@ try {
   const result = divide(10, 2)
   console.log(result)
 } catch (e) {
-  console.log('caught: ' + e.message)
+  console.log('caught: ' + (e as Error).message)
 }
 
 try {
   const result = divide(10, 0)
   console.log(result)
 } catch (e) {
-  console.log('caught: ' + e.message)
+  console.log('caught: ' + (e as Error).message)
 }
 
 // Built-in Error subtypes (TDD-00013 Option A): a small fixed kind enum
@@ -38,7 +38,7 @@ try {
   } else if (e instanceof TypeError) {
     console.log('type error: ' + e.message)
   }
-  console.log('e.name = ' + e.name)
+  console.log('e.name = ' + (e as Error).name)
   console.log('instanceof Error: ' + (e instanceof Error))
 }
 
@@ -55,6 +55,6 @@ try {
 // as any other object destructuring.
 try {
   throw new TypeError('bad type')
-} catch ({ message, name: kind }) {
+} catch ({ message, name: kind }: any) {
   console.log(message + ' (' + kind + ')')
 }

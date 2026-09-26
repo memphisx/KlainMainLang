@@ -31,7 +31,7 @@ func (e *Emitter) ensureDprintf() {
 // the per-write fflush (ADR-00867). Never used on Windows.
 func (e *Emitter) ensureStdoutGlobal() {
 	if !e.usedStdoutGlobal {
-		e.emitGlobal(fmt.Sprintf("@%s = external global ptr", stdoutGlobalSymbol()))
+		e.emitGlobal(fmt.Sprintf("@%s = external global ptr", e.stdoutGlobalSymbol()))
 		e.usedStdoutGlobal = true
 	}
 }
@@ -171,12 +171,12 @@ func (e *Emitter) ensureCurrentRSS() {
 		return
 	}
 	e.usedCurrentRSS = true
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		// Defined by win32shim.c over GetProcessMemoryInfo (WorkingSetSize).
 		e.emitGlobal("declare i64 @__kml_current_rss_bytes()")
 		return
 	}
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		e.emitGlobal("@mach_task_self_ = external global i32")
 		e.emitGlobal("declare i32 @task_info(i32, i32, ptr, ptr)")
 		e.emitGlobal(`
@@ -448,30 +448,30 @@ func (e *Emitter) ensureMathFuncs() {
 	// on macOS too since libSystem folds libm in and -lm is still accepted there
 	// as a standard no-op flag, so this doesn't need a runtime.GOOS branch.
 	e.requireLink("m")
-	e.emitGlobal("declare double @floor(double noundef)")
-	e.emitGlobal("declare double @ceil(double noundef)")
-	e.emitGlobal("declare double @round(double noundef)")
-	e.emitGlobal("declare double @trunc(double noundef)")
-	e.emitGlobal("declare double @fabs(double noundef)")
-	e.emitGlobal("declare double @sqrt(double noundef)")
-	e.emitGlobal("declare double @pow(double noundef, double noundef)")
-	e.emitGlobal("declare double @log(double noundef)")
-	e.emitGlobal("declare double @log2(double noundef)")
-	e.emitGlobal("declare double @log10(double noundef)")
-	e.emitGlobal("declare double @sin(double noundef)")
-	e.emitGlobal("declare double @cos(double noundef)")
-	e.emitGlobal("declare double @tan(double noundef)")
-	e.emitGlobal("declare double @hypot(double noundef, double noundef)")
-	e.emitGlobal("declare double @asin(double noundef)")
-	e.emitGlobal("declare double @acos(double noundef)")
-	e.emitGlobal("declare double @atan(double noundef)")
-	e.emitGlobal("declare double @atan2(double noundef, double noundef)")
-	e.emitGlobal("declare double @sinh(double noundef)")
-	e.emitGlobal("declare double @cosh(double noundef)")
-	e.emitGlobal("declare double @tanh(double noundef)")
-	e.emitGlobal("declare double @cbrt(double noundef)")
-	e.emitGlobal("declare double @expm1(double noundef)")
-	e.emitGlobal("declare double @log1p(double noundef)")
+	e.declareFn("floor", "declare double @floor(double noundef)")
+	e.declareFn("ceil", "declare double @ceil(double noundef)")
+	e.declareFn("round", "declare double @round(double noundef)")
+	e.declareFn("trunc", "declare double @trunc(double noundef)")
+	e.declareFn("fabs", "declare double @fabs(double noundef)")
+	e.declareFn("sqrt", "declare double @sqrt(double noundef)")
+	e.declareFn("pow", "declare double @pow(double noundef, double noundef)")
+	e.declareFn("log", "declare double @log(double noundef)")
+	e.declareFn("log2", "declare double @log2(double noundef)")
+	e.declareFn("log10", "declare double @log10(double noundef)")
+	e.declareFn("sin", "declare double @sin(double noundef)")
+	e.declareFn("cos", "declare double @cos(double noundef)")
+	e.declareFn("tan", "declare double @tan(double noundef)")
+	e.declareFn("hypot", "declare double @hypot(double noundef, double noundef)")
+	e.declareFn("asin", "declare double @asin(double noundef)")
+	e.declareFn("acos", "declare double @acos(double noundef)")
+	e.declareFn("atan", "declare double @atan(double noundef)")
+	e.declareFn("atan2", "declare double @atan2(double noundef, double noundef)")
+	e.declareFn("sinh", "declare double @sinh(double noundef)")
+	e.declareFn("cosh", "declare double @cosh(double noundef)")
+	e.declareFn("tanh", "declare double @tanh(double noundef)")
+	e.declareFn("cbrt", "declare double @cbrt(double noundef)")
+	e.declareFn("expm1", "declare double @expm1(double noundef)")
+	e.declareFn("log1p", "declare double @log1p(double noundef)")
 }
 
 // ensureJsPow defines @__kml_js_pow: libm pow with the one place JS's
@@ -1026,8 +1026,8 @@ func (e *Emitter) ensureQsort() {
 // for the same thing, since `errno` is a macro, not a portable global
 // symbol — the same class of platform check emitMathRandom already makes
 // for arc4random vs a portable fallback.
-func errnoAccessor() string {
-	switch targetGOOS() {
+func (e *Emitter) errnoAccessor() string {
+	switch e.opts.Target.OS() {
 	case "darwin", "freebsd", "openbsd", "netbsd", "dragonfly":
 		return "__error"
 	case "windows":
@@ -1048,7 +1048,7 @@ func (e *Emitter) ensureErrnoAccessor() {
 		return
 	}
 	e.usedErrnoAccessor = true
-	e.emitGlobal(fmt.Sprintf("declare ptr @%s()", errnoAccessor()))
+	e.emitGlobal(fmt.Sprintf("declare ptr @%s()", e.errnoAccessor()))
 }
 
 // ensureStrerror declares C strerror() exactly once — same singleton-sharing

@@ -17,7 +17,7 @@ console.log("isIP:", net.isIP("127.0.0.1"), net.isIP("::1"), net.isIP("host"));
 // listen(0) lets the OS pick a free port; server.address() reads it back —
 // the idiomatic Node pattern, and collision-free versus a hardcoded port.
 server.listen(0, () => {
-  const port = server.address().port;
+  const port = (server.address() as net.AddressInfo).port;
   // net.connect also takes an options object { port, host }.
   const client = net.connect({ port: port, host: "127.0.0.1" }, () => {
     client.setNoDelay(true);

@@ -34,7 +34,6 @@ package llvm
 
 import (
 	"fmt"
-	"reflect"
 	"strings"
 
 	"KlainMainLang/ast"
@@ -42,66 +41,31 @@ import (
 
 // programMayWait reports whether the program contains anything that can wait on
 // the event loop: an `await`, a `for await`, or a fetch call (whose promise
-// reactions run as coroutines). It decides hasMaySuspend before any code is
-// emitted, because runtime functions emitted early (the fetch waits) include
-// their coroutine-park path only when it is set. A reflective walk rather than
-// a hand-written one: it cannot silently miss a node kind that gains a child
-// expression later.
+// reactions run as coroutines), in the entry module or a worker module compiled
+// with it. It decides hasMaySuspend before any code is emitted, because runtime
+// functions emitted early (the fetch waits) include their coroutine-park path
+// only when it is set.
 func programMayWait(prog *ast.Program) bool {
 	found := false
-	seen := map[uintptr]bool{}
-	var walk func(v reflect.Value)
-	walk = func(v reflect.Value) {
-		if found || !v.IsValid() {
-			return
-		}
-		switch v.Kind() {
-		case reflect.Interface:
-			if !v.IsNil() {
-				walk(v.Elem())
-			}
-		case reflect.Ptr:
-			if v.IsNil() {
-				return
-			}
-			if p := v.Pointer(); seen[p] {
-				return
-			} else {
-				seen[p] = true
-			}
-			switch n := v.Interface().(type) {
-			case *ast.AwaitExpression:
+	visit := func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AwaitExpression:
+			found = true
+		case *ast.ForOfStatement:
+			found = found || n.Await
+		case *ast.CallExpression:
+			if id, ok := n.Callee.(*ast.Identifier); ok && id.Name == "fetch" {
 				found = true
-				return
-			case *ast.ForOfStatement:
-				if n.Await {
-					found = true
-					return
-				}
-			case *ast.CallExpression:
-				if id, ok := n.Callee.(*ast.Identifier); ok && id.Name == "fetch" {
-					found = true
-					return
-				}
 			}
-			walk(v.Elem())
-		case reflect.Struct:
-			for i := 0; i < v.NumField(); i++ {
-				if v.Type().Field(i).IsExported() {
-					walk(v.Field(i))
-				}
-			}
-		case reflect.Slice, reflect.Array:
-			for i := 0; i < v.Len(); i++ {
-				walk(v.Index(i))
-			}
-		case reflect.Map:
-			for _, k := range v.MapKeys() {
-				walk(v.MapIndex(k))
-			}
+		}
+		return !found
+	}
+	ast.Inspect(prog, visit)
+	for _, wm := range prog.WorkerModules {
+		for _, st := range wm.Body {
+			ast.Inspect(st, visit)
 		}
 	}
-	walk(reflect.ValueOf(prog))
 	return found
 }
 

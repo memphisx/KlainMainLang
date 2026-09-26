@@ -2,6 +2,7 @@ package parser
 
 import (
 	"KlainMainLang/ast"
+	"KlainMainLang/diag"
 	"KlainMainLang/lexer"
 	"fmt"
 )
@@ -10,6 +11,7 @@ func (p *Parser) parseArrayLiteral() (*ast.ArrayLiteral, error) {
 	tok := p.advance() // consume [
 	pos := posOf(tok)
 	var elems []ast.Expression
+	restTrailing := false
 	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
 		var elem ast.Expression
 		if p.check(lexer.COMMA) {
@@ -29,6 +31,9 @@ func (p *Parser) parseArrayLiteral() (*ast.ArrayLiteral, error) {
 				return nil, err
 			}
 			elem = ast.NewSpreadElement(arg, posOf(spreadTok))
+			if p.check(lexer.COMMA) && p.peekNth(1).Type == lexer.RBRACKET {
+				restTrailing = true
+			}
 		} else {
 			var err error
 			elem, err = p.parseAssignment()
@@ -44,7 +49,9 @@ func (p *Parser) parseArrayLiteral() (*ast.ArrayLiteral, error) {
 	if _, err := p.expect(lexer.RBRACKET); err != nil {
 		return nil, err
 	}
-	return ast.NewArrayLiteral(elems, pos), nil
+	al := ast.NewArrayLiteral(elems, pos)
+	al.RestTrailingComma = restTrailing
+	return al, nil
 }
 
 func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
@@ -93,7 +100,8 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 					if err != nil {
 						return nil, err
 					}
-					val = ast.NewFunctionExpression("", fd.Params, fd.ReturnType, fd.Body, false, fnPos)
+					eraseTypeParams(fd)
+					val = p.newFuncExpr("", fd, false, fnPos)
 				} else {
 					if _, err := p.expect(lexer.COLON); err != nil {
 						return nil, err
@@ -137,8 +145,37 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			if err != nil {
 				return nil, err
 			}
-			fnVal := ast.NewFunctionExpression("", fd.Params, fd.ReturnType, fd.Body, false, fnPos)
+			eraseTypeParams(fd)
+			fnVal := p.newFuncExpr("", fd, false, fnPos)
 			props = append(props, ast.ObjectProperty{Key: nameTok.Literal, Value: fnVal, AccessorKind: accessorKind})
+			if !p.match(lexer.COMMA) {
+				break
+			}
+			continue
+		}
+		// Async / generator method shorthand: `async m() {}`, `*m() {}`,
+		// `async *m() {}`. `async` is contextual — a modifier only when a
+		// member name or `*` follows on the same line (`{ async: 1 }`,
+		// `{ async() {} }` keep their plain meaning).
+		isAsyncMethod := p.isWord(0, "async") && p.sameLine(1) && objectMethodNameStart(p.peekNth(1))
+		if isAsyncMethod {
+			p.advance() // 'async'
+		}
+		isGeneratorMethod := p.match(lexer.STAR)
+		if isAsyncMethod || isGeneratorMethod {
+			keyTok := p.advance()
+			if keyTok.Type != lexer.IDENT && keyTok.Type != lexer.STRING && keyTok.Type != lexer.NUMBER && !lexer.IsKeyword(keyTok.Type) {
+				return nil, p.errAt(keyTok, diag.ExpectedMethodName, keyTok.Type)
+			}
+			fnPos := posOf(p.peek())
+			fd, err := p.parseFunctionRest("", isAsyncMethod, false, false)
+			if err != nil {
+				return nil, err
+			}
+			eraseTypeParams(fd)
+			fe := p.newFuncExpr("", fd, isAsyncMethod, fnPos)
+			fe.IsGenerator = isGeneratorMethod
+			props = append(props, ast.ObjectProperty{Key: keyTok.Literal, Value: fe})
 			if !p.match(lexer.COMMA) {
 				break
 			}
@@ -152,24 +189,25 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 		// '(' follows, so keyword statements after a brace still parse.
 		if !p.check(lexer.IDENT) && !p.check(lexer.STRING) && !p.check(lexer.NUMBER) &&
 			!(lexer.IsKeyword(p.peek().Type) && (p.peekNth(1).Type == lexer.COLON || p.peekNth(1).Type == lexer.LPAREN)) {
-			return nil, fmt.Errorf("%d:%d: expected property name, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
+			return nil, p.errAt(p.peek(), diag.ExpectedPropertyName, p.peek().Type)
 		}
 		keyTok := p.advance()
 		var val ast.Expression
-		if p.check(lexer.LPAREN) {
-			// Method shorthand `{ foo() { ... } }` — sugar for `{ foo:
+		coverInit, shorthand := false, false
+		if p.check(lexer.LPAREN) || p.check(lexer.LT) {
+			// Method shorthand `{ foo() { ... } }`, generic `{ foo<T>() {…} }`
+			// too — sugar for `{ foo:
 			// function() { ... } }`, reusing the same parseFunctionRest tail
 			// a class method/named function declaration already shares, and
 			// the same FunctionExpression value a `key: function(){}` field
-			// already works with. V1 scope matches this compiler's own class
-			// methods: no `async`/generator method shorthand (neither is
-			// supported for class methods either — a separate, larger gap).
+			// already works with (async/generator forms above).
 			fnPos := posOf(p.peek())
 			fd, err := p.parseFunctionRest("", false, false, false)
 			if err != nil {
 				return nil, err
 			}
-			val = ast.NewFunctionExpression("", fd.Params, fd.ReturnType, fd.Body, false, fnPos)
+			eraseTypeParams(fd)
+			val = p.newFuncExpr("", fd, false, fnPos)
 		} else if p.check(lexer.COLON) {
 			p.advance() // ':'
 			var err error
@@ -178,7 +216,7 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 				return nil, err
 			}
 		} else if keyTok.Type != lexer.IDENT {
-			return nil, fmt.Errorf("%d:%d: expected :, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
+			return nil, p.errAt(p.peek(), diag.ExpectedColon, p.peek().Type)
 		} else if p.check(lexer.ASSIGN) {
 			// Shorthand-with-default `{ x = default }` — valid only as a
 			// destructuring-assignment target (a cover-grammar production; the
@@ -192,12 +230,14 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			}
 			ident := ast.NewIdentifier(keyTok.Literal, posOf(keyTok))
 			val = ast.NewAssignmentExpression("=", ident, def, posOf(keyTok))
+			coverInit, shorthand = true, true
 		} else {
 			// Shorthand property `{ x }` — sugar for `{ x: x }`, referencing
 			// the in-scope variable/binding of the same name.
 			val = ast.NewIdentifier(keyTok.Literal, posOf(keyTok))
+			shorthand = true
 		}
-		props = append(props, ast.ObjectProperty{Key: keyTok.Literal, Value: val})
+		props = append(props, ast.ObjectProperty{Key: keyTok.Literal, Value: val, CoverInit: coverInit, Shorthand: shorthand})
 		if !p.match(lexer.COMMA) {
 			break
 		}
@@ -208,162 +248,44 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 	return ast.NewObjectLiteral(props, pos), nil
 }
 
+// objectMethodNameStart reports whether t can follow a method modifier in an
+// object literal: a member name or the generator `*`.
+func objectMethodNameStart(t lexer.Token) bool {
+	return t.Type == lexer.IDENT || t.Type == lexer.STRING || t.Type == lexer.NUMBER ||
+		t.Type == lexer.STAR || lexer.IsKeyword(t.Type)
+}
+
 func (p *Parser) parseNew() (ast.Expression, error) {
 	tok := p.advance() // consume 'new'
 	pos := posOf(tok)
 
 	nameTok := p.peek()
 	if nameTok.Type != lexer.IDENT {
-		return nil, fmt.Errorf("%d:%d: expected constructor name after 'new'", nameTok.Line, nameTok.Col)
+		return nil, p.errAt(nameTok, diag.ExpectedConstructor)
 	}
 	// Qualified constructor: `new mod.Class(...)` (`new stream.Readable(...)`,
-	// `new http.ClientRequest(...)` — the standard Node namespace-import shape).
-	// Consume the qualifier segments and dispatch on the final class name
-	// through the same switch below, so `new stream.Readable(opts)` behaves
-	// exactly like `new Readable(opts)`. The qualifier is validated only
-	// syntactically; a final name no case matches falls to parseNewGenericBody
-	// and gets codegen's per-class rejection rather than a parse error.
+	// `new http.ClientRequest(...)` — the standard Node namespace-import
+	// shape). The qualifier is consumed and the class name kept; which class
+	// that is (a user class or a builtin) is decided after name resolution
+	// (sema), never here.
+	qualified := false
+	qualifier := ""
 	for p.peekNth(1).Type == lexer.DOT && p.peekNth(2).Type == lexer.IDENT {
-		p.advance() // qualifier ident
-		p.advance() // '.'
+		qualifier = p.advance().Literal // qualifier ident
+		p.advance()                     // '.'
 		nameTok = p.peek()
+		qualified = true
 	}
-	switch nameTok.Literal {
-	case "Array":
-		return p.parseNewArrayBody(pos)
-	case "Map":
-		return p.parseNewMapBody(pos)
-	case "Set":
-		return p.parseNewSetBody(pos)
-	case "WeakMap":
-		return p.parseNewWeakMapBody(pos)
-	case "WeakSet":
-		return p.parseNewWeakSetBody(pos)
-	case "WeakRef":
-		return p.parseNewWeakRefBody(pos)
-	case "EventEmitter":
-		return p.parseNewEventEmitterBody(pos)
-	case "ReadableStream":
-		return p.parseNewReadableStreamBody(pos)
-	case "WritableStream":
-		return p.parseNewWritableStreamBody(pos)
-	case "TransformStream":
-		return p.parseNewTransformStreamBody(pos)
-	case "Readable":
-		return p.parseNewNodeStreamBody(pos, "readable")
-	case "Writable":
-		return p.parseNewNodeStreamBody(pos, "writable")
-	case "Transform":
-		return p.parseNewNodeStreamBody(pos, "transform")
-	case "PassThrough":
-		return p.parseNewNodeStreamBody(pos, "passthrough")
-	case "Duplex":
-		return p.parseNewNodeStreamBody(pos, "duplex")
-	case "Agent":
-		return p.parseNewAgentBody(pos)
-	case "Webview":
-		return p.parseNewWebviewBody(pos)
-	case "DatabaseSync":
-		return p.parseNewDatabaseSyncBody(pos)
-	case "CompressionStream":
-		return p.parseNewCompressionStreamBody(pos, false)
-	case "DecompressionStream":
-		return p.parseNewCompressionStreamBody(pos, true)
-	case "Error":
-		return p.parseNewErrorBody(pos, "Error")
-	case "TypeError":
-		return p.parseNewErrorBody(pos, "TypeError")
-	case "RangeError":
-		return p.parseNewErrorBody(pos, "RangeError")
-	case "SyntaxError":
-		return p.parseNewErrorBody(pos, "SyntaxError")
-	case "EvalError":
-		return p.parseNewErrorBody(pos, "EvalError")
-	case "URIError":
-		return p.parseNewErrorBody(pos, "URIError")
-	case "ReferenceError":
-		return p.parseNewErrorBody(pos, "ReferenceError")
-	case "DOMException":
-		return p.parseNewDOMExceptionBody(pos)
-	case "AggregateError":
-		return p.parseNewAggregateErrorBody(pos)
-	case "Date":
-		return p.parseNewDateBody(pos)
-	case "URL":
-		return p.parseNewURLBody(pos)
-	case "EventSource":
-		return p.parseNewEventSourceBody(pos)
-	case "EventTarget":
-		return p.parseNewEventTargetBody(pos)
-	case "AbortController":
-		return p.parseNewAbortControllerBody(pos)
-	case "Event":
-		return p.parseNewEventBody(pos)
-	case "CustomEvent":
-		return p.parseNewCustomEventBody(pos)
-	case "WebSocket":
-		return p.parseNewWebSocketBody(pos)
-	case "Worker":
-		return p.parseNewWorkerBody(pos)
-	case "URLSearchParams":
-		return p.parseNewURLSearchParamsBody(pos)
-	case "URLPattern":
-		return p.parseNewURLPatternBody(pos)
-	case "Headers":
-		return p.parseNewHeadersBody(pos)
-	case "Request":
-		return p.parseNewRequestBody(pos)
-	case "XMLHttpRequest":
-		return p.parseNewXMLHttpRequestBody(pos)
-	case "ArrayBuffer", "SharedArrayBuffer":
-		return p.parseNewArrayBufferBody(pos)
-	case "BroadcastChannel":
-		return p.parseNewBroadcastChannelBody(pos)
-	case "MessageChannel":
-		return p.parseNewMessageChannelBody(pos)
-	case "Channel":
-		return p.parseNewChannelBody(pos)
-	case "DataView":
-		return p.parseNewDataViewBody(pos)
-	case "TextEncoder":
-		return p.parseNewTextEncoderBody(pos)
-	case "TextDecoder":
-		return p.parseNewTextDecoderBody(pos)
-	case "RegExp":
-		return p.parseNewRegExpBody(pos)
-	case "Blob":
-		return p.parseNewBlobBody(pos)
-	default:
-		if elemKind, ok := typedArrayElemKinds[nameTok.Literal]; ok {
-			return p.parseNewTypedArrayBody(pos, elemKind)
-		}
-		return p.parseNewGenericBody(pos)
+	ne, err := p.parseNewGenericBody(pos)
+	if ne != nil {
+		ne.Qualified = qualified
+		ne.Qualifier = qualifier
 	}
+	return ne, err
 }
 
-// typedArrayElemKinds maps each of the 11 supported TypedArray constructor
-// names to the element-kind string codegen resolves into a concrete Type
-// (see docs/tdd/TDD-00018.md, and TDD-00101 for the BigInt64Array/
-// BigUint64Array/Uint8ClampedArray additions) — the same lowercase names
-// ResolveTypeName (codegen/llvm/types.go) already understands for JSDoc
-// @type annotations.
-var typedArrayElemKinds = map[string]string{
-	"Int8Array":         "int8",
-	"Uint8Array":        "uint8",
-	"Uint8ClampedArray": "uint8clamped",
-	"Int16Array":        "int16",
-	"Uint16Array":       "uint16",
-	"Int32Array":        "int32",
-	"Uint32Array":       "uint32",
-	"Float32Array":      "float32",
-	"Float64Array":      "float64",
-	"BigInt64Array":     "bigint64",
-	"BigUint64Array":    "biguint64",
-}
-
-// parseNewGenericBody parses `new ClassName(args)` for anything that isn't
-// one of the hardcoded builtin forms above. Codegen doesn't act on this
-// yet (TDD-00009 Stage 1) — it's front-end groundwork only.
+// parseNewGenericBody parses `new ClassName<TypeArgs>(args)` — every `new`,
+// builtin or user class alike; sema decides which.
 func (p *Parser) parseNewGenericBody(pos ast.Pos) (*ast.NewExpression, error) {
 	nameTok := p.advance() // consume class name
 	// Optional explicit `<T>` or `<K, V>` type argument list (TDD-00010 V1 /
@@ -389,1176 +311,26 @@ func (p *Parser) parseNewGenericBody(pos ast.Pos) (*ast.NewExpression, error) {
 			return nil, err
 		}
 	}
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
+	// `new X` without an argument list is `new X()`.
 	var args []ast.Expression
-	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
-		arg, err := p.parseAssignment()
-		if err != nil {
+	if p.match(lexer.LPAREN) {
+		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+			arg, err := p.parseAssignment()
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, arg)
+			if !p.match(lexer.COMMA) {
+				break
+			}
+		}
+		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
-		args = append(args, arg)
-		if !p.match(lexer.COMMA) {
-			break
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
 	}
 	ne := ast.NewNewExpression(nameTok.Literal, args, pos)
 	ne.TypeArgs = typeArgs
 	return ne, nil
-}
-
-func (p *Parser) parseNewDateBody(pos ast.Pos) (*ast.NewDateExpression, error) {
-	p.advance() // consume 'Date'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var args []ast.Expression
-	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
-		arg, err := p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-		args = append(args, arg)
-		if !p.match(lexer.COMMA) {
-			break
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	switch {
-	case len(args) == 0:
-		return ast.NewNewDateExpression(nil, pos), nil
-	case len(args) == 1:
-		return ast.NewNewDateExpression(args[0], pos), nil
-	case len(args) > 7:
-		return nil, fmt.Errorf("%d:%d: new Date(...) accepts at most 7 arguments (year, month, day, hours, minutes, seconds, milliseconds)", pos.Line, pos.Col)
-	default:
-		return ast.NewNewDateExpressionMulti(args, pos), nil
-	}
-}
-
-func (p *Parser) parseNewErrorBody(pos ast.Pos, kind string) (*ast.NewErrorExpression, error) {
-	p.advance() // consume the constructor name ('Error', 'TypeError', ...)
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var msg ast.Expression
-	var cause ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		msg, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-		// Optional error-options second argument: `new Error(msg, { cause })`.
-		// The options bag must be an object literal whose sole member is
-		// `cause` — the one member the runtime error shape carries.
-		if p.check(lexer.COMMA) {
-			p.advance()
-			opts, err := p.parseAssignment()
-			if err != nil {
-				return nil, err
-			}
-			lit, ok := opts.(*ast.ObjectLiteral)
-			if !ok || len(lit.Properties) != 1 || lit.Properties[0].Key != "cause" || lit.Properties[0].Value == nil {
-				return nil, fmt.Errorf("%d:%d: new %s's second argument must be a `{ cause: <expr> }` object literal", pos.Line, pos.Col, kind)
-			}
-			cause = lit.Properties[0].Value
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	ne := ast.NewNewErrorExpression(kind, msg, pos)
-	ne.Cause = cause
-	return ne, nil
-}
-
-// parseNewDOMExceptionBody parses `new DOMException(message?, name?)` — unlike
-// the fixed-name Error kinds, its runtime `.name` is the optional second
-// argument (defaulting to "Error"), so the parsed name expression rides on the
-// node's Name field (TDD-00081).
-func (p *Parser) parseNewDOMExceptionBody(pos ast.Pos) (*ast.NewErrorExpression, error) {
-	p.advance() // consume 'DOMException'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var msg, name ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		if msg, err = p.parseAssignment(); err != nil {
-			return nil, err
-		}
-		if p.check(lexer.COMMA) {
-			p.advance()
-			if name, err = p.parseAssignment(); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	ne := ast.NewNewErrorExpression("DOMException", msg, pos)
-	ne.Name = name
-	return ne, nil
-}
-
-// parseNewAggregateErrorBody parses `new AggregateError(errors, message?)` — the
-// first argument is the aggregated errors (an array), the optional second is the
-// message. Mirrors real JS's `AggregateError(errors, message?)` signature; also
-// what `Promise.any` throws on all-reject (TDD-00083).
-func (p *Parser) parseNewAggregateErrorBody(pos ast.Pos) (*ast.NewErrorExpression, error) {
-	p.advance() // consume 'AggregateError'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var errors, msg ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		if errors, err = p.parseAssignment(); err != nil {
-			return nil, err
-		}
-		if p.check(lexer.COMMA) {
-			p.advance()
-			if msg, err = p.parseAssignment(); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	ne := ast.NewNewErrorExpression("AggregateError", msg, pos)
-	ne.Errors = errors
-	return ne, nil
-}
-
-func (p *Parser) parseNewURLBody(pos ast.Pos) (*ast.NewURLExpression, error) {
-	p.advance() // consume 'URL'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	url, err := p.parseAssignment()
-	if err != nil {
-		return nil, err
-	}
-	var base ast.Expression
-	if p.peek().Type == lexer.COMMA {
-		p.advance() // consume ','
-		base, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	if base != nil {
-		return ast.NewNewURLExpressionWithBase(url, base, pos), nil
-	}
-	return ast.NewNewURLExpression(url, pos), nil
-}
-
-// parseNewDatabaseSyncBody parses `new DatabaseSync(path, options?)` from
-// node:sqlite (ADR-00540): a required path expression and an optional
-// options-object literal, validated in codegen.
-func (p *Parser) parseNewDatabaseSyncBody(pos ast.Pos) (*ast.NewDatabaseSyncExpression, error) {
-	p.advance() // consume 'DatabaseSync'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	path, err := p.parseAssignment()
-	if err != nil {
-		return nil, err
-	}
-	var options ast.Expression
-	if p.check(lexer.COMMA) {
-		p.advance()
-		options, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewDatabaseSyncExpression(path, options, pos), nil
-}
-
-// parseNewAbortControllerBody parses `new AbortController()` (TDD-00081 Stage 3).
-func (p *Parser) parseNewAbortControllerBody(pos ast.Pos) (*ast.NewAbortControllerExpression, error) {
-	p.advance() // consume 'AbortController'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewAbortControllerExpression(pos), nil
-}
-
-// parseNewEventTargetBody parses `new EventTarget()` (TDD-00081 Stage 2).
-func (p *Parser) parseNewEventTargetBody(pos ast.Pos) (*ast.NewEventTargetExpression, error) {
-	p.advance() // consume 'EventTarget'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewEventTargetExpression(pos), nil
-}
-
-// parseNewAgentBody parses `new Agent(options?)` / `new http.Agent(options?)`.
-func (p *Parser) parseNewAgentBody(pos ast.Pos) (*ast.NewHTTPAgentExpression, error) {
-	p.advance() // consume 'Agent'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var options ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		options, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewHTTPAgentExpression(options, pos), nil
-}
-
-// parseNewWebviewBody parses `new Webview(options?)` (TDD-00142) — the system
-// webview window. Options is an optional `{ title, width, height, debug }`
-// object literal, validated in codegen.
-func (p *Parser) parseNewWebviewBody(pos ast.Pos) (*ast.NewWebviewExpression, error) {
-	p.advance() // consume 'Webview'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var options ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		options, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewWebviewExpression(options, pos), nil
-}
-
-// parseNewEventBody parses `new Event(type)` (TDD-00081). A second init argument
-// (`{ cancelable, bubbles }`) is accepted but ignored in V1.
-func (p *Parser) parseNewEventBody(pos ast.Pos) (*ast.NewEventExpression, error) {
-	p.advance() // consume 'Event'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	typeArg, err := p.parseAssignment()
-	if err != nil {
-		return nil, err
-	}
-	var cancelable ast.Expression
-	if p.match(lexer.COMMA) {
-		initExpr, err := p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-		if obj, ok := initExpr.(*ast.ObjectLiteral); ok {
-			for _, prop := range obj.Properties {
-				if prop.Key == "cancelable" {
-					cancelable = prop.Value
-				}
-			}
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	if cancelable != nil {
-		return ast.NewNewEventExpressionWithInit(typeArg, cancelable, pos), nil
-	}
-	return ast.NewNewEventExpression(typeArg, pos), nil
-}
-
-// parseNewCustomEventBody parses `new CustomEvent(type, { detail })` (TDD-00081).
-// The `detail` property is pulled from the init object literal at parse time; any
-// other init properties are accepted but ignored in V1.
-func (p *Parser) parseNewCustomEventBody(pos ast.Pos) (*ast.NewCustomEventExpression, error) {
-	p.advance() // consume 'CustomEvent'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	typeArg, err := p.parseAssignment()
-	if err != nil {
-		return nil, err
-	}
-	var detail, cancelable ast.Expression
-	if p.match(lexer.COMMA) {
-		initExpr, err := p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-		if obj, ok := initExpr.(*ast.ObjectLiteral); ok {
-			for _, prop := range obj.Properties {
-				if prop.Key == "detail" {
-					detail = prop.Value
-				}
-				if prop.Key == "cancelable" {
-					cancelable = prop.Value
-				}
-			}
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	if cancelable != nil {
-		return ast.NewNewCustomEventExpressionWithInit(typeArg, detail, cancelable, pos), nil
-	}
-	return ast.NewNewCustomEventExpression(typeArg, detail, pos), nil
-}
-
-func (p *Parser) parseNewEventSourceBody(pos ast.Pos) (*ast.NewEventSourceExpression, error) {
-	p.advance() // consume 'EventSource'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	url, err := p.parseAssignment()
-	if err != nil {
-		return nil, err
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewEventSourceExpression(url, pos), nil
-}
-
-func (p *Parser) parseNewWebSocketBody(pos ast.Pos) (*ast.NewWebSocketExpression, error) {
-	p.advance() // consume 'WebSocket'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	url, err := p.parseAssignment()
-	if err != nil {
-		return nil, err
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewWebSocketExpression(url, pos), nil
-}
-
-// parseNewWorkerBody parses `new Worker('./file.ts')` and
-// `new Worker('./file.ts', { workerData: expr })` (TDD-00098). The path must
-// be a string literal — the worker file is compiled into the same binary, so
-// a runtime-computed path has nothing to load. Only the `workerData`
-// property is recognized in the options object.
-func (p *Parser) parseNewWorkerBody(pos ast.Pos) (*ast.NewWorkerExpression, error) {
-	p.advance() // consume 'Worker'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	pathTok := p.peek()
-	if pathTok.Type != lexer.STRING {
-		return nil, fmt.Errorf("%d:%d: new Worker(...) requires a compile-time string-literal path — the worker file is compiled into the binary, so a runtime-computed path cannot be loaded", pathTok.Line, pathTok.Col)
-	}
-	p.advance()
-	var workerData ast.Expression
-	if p.check(lexer.COMMA) {
-		p.advance()
-		obj, err := p.parsePrimary()
-		if err != nil {
-			return nil, err
-		}
-		lit, ok := obj.(*ast.ObjectLiteral)
-		if !ok {
-			return nil, fmt.Errorf("%d:%d: new Worker's second argument must be an object literal (e.g. { workerData: ... })", pos.Line, pos.Col)
-		}
-		for _, prop := range lit.Properties {
-			if prop.Key != "workerData" {
-				return nil, fmt.Errorf("%d:%d: new Worker options: only 'workerData' is supported (found '%s')", pos.Line, pos.Col, prop.Key)
-			}
-			workerData = prop.Value
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	p.workerPaths = append(p.workerPaths, pathTok.Literal)
-	return ast.NewNewWorkerExpression(pathTok.Literal, workerData, pos), nil
-}
-
-func (p *Parser) parseNewURLSearchParamsBody(pos ast.Pos) (*ast.NewURLSearchParamsExpression, error) {
-	p.advance() // consume 'URLSearchParams'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var init ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		init, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewURLSearchParamsExpression(init, pos), nil
-}
-
-// parseNewURLPatternBody parses `new URLPattern()` / `new URLPattern(init)`
-// (TDD-00100). The init's object-literal shape is validated by codegen, which
-// owns the supported-component list; a second (baseURL) argument is rejected
-// here since it's a constructor-form scope cut, not a component question.
-func (p *Parser) parseNewURLPatternBody(pos ast.Pos) (*ast.NewURLPatternExpression, error) {
-	p.advance() // consume 'URLPattern'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var init ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		init, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-		if p.check(lexer.COMMA) {
-			return nil, fmt.Errorf("%d:%d: new URLPattern does not take a baseURL second argument (single object-init form only)", pos.Line, pos.Col)
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewURLPatternExpression(init, pos), nil
-}
-
-func (p *Parser) parseNewHeadersBody(pos ast.Pos) (*ast.NewHeadersExpression, error) {
-	p.advance() // consume 'Headers'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var init ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		init, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewHeadersExpression(init, pos), nil
-}
-
-func (p *Parser) parseNewRequestBody(pos ast.Pos) (*ast.NewRequestExpression, error) {
-	p.advance() // consume 'Request'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	url, err := p.parseAssignment()
-	if err != nil {
-		return nil, err
-	}
-	var init ast.Expression
-	if p.match(lexer.COMMA) {
-		init, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewRequestExpression(url, init, pos), nil
-}
-
-func (p *Parser) parseNewXMLHttpRequestBody(pos ast.Pos) (*ast.NewXMLHttpRequestExpression, error) {
-	p.advance() // consume 'XMLHttpRequest'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewXMLHttpRequestExpression(pos), nil
-}
-
-func (p *Parser) parseNewTextEncoderBody(pos ast.Pos) (*ast.NewTextEncoderExpression, error) {
-	p.advance() // consume 'TextEncoder'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewTextEncoderExpression(pos), nil
-}
-
-func (p *Parser) parseNewTextDecoderBody(pos ast.Pos) (*ast.NewTextDecoderExpression, error) {
-	p.advance() // consume 'TextDecoder'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var label ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		label, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewTextDecoderExpression(label, pos), nil
-}
-
-func (p *Parser) parseNewRegExpBody(pos ast.Pos) (*ast.NewRegExpExpression, error) {
-	p.advance() // consume 'RegExp'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	pattern, err := p.parseAssignment()
-	if err != nil {
-		return nil, err
-	}
-	var flags ast.Expression
-	if p.match(lexer.COMMA) {
-		flags, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewRegExpExpression(pattern, flags, pos), nil
-}
-
-// parseNewDataViewBody parses `new DataView(buffer, byteOffset?, byteLength?)`.
-func (p *Parser) parseNewDataViewBody(pos ast.Pos) (*ast.NewDataViewExpression, error) {
-	p.advance() // consume 'DataView'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	buffer, err := p.parseAssignment()
-	if err != nil {
-		return nil, err
-	}
-	var byteOffset, byteLength ast.Expression
-	if p.match(lexer.COMMA) {
-		byteOffset, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-		if p.match(lexer.COMMA) {
-			byteLength, err = p.parseAssignment()
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewDataViewExpression(buffer, byteOffset, byteLength, pos), nil
-}
-
-// parseNewBlobBody parses `new Blob(parts?, options?)` (TDD-00102).
-func (p *Parser) parseNewBlobBody(pos ast.Pos) (*ast.NewBlobExpression, error) {
-	p.advance() // consume 'Blob'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var parts, options ast.Expression
-	var err error
-	if !p.check(lexer.RPAREN) {
-		if parts, err = p.parseAssignment(); err != nil {
-			return nil, err
-		}
-		if p.match(lexer.COMMA) {
-			if options, err = p.parseAssignment(); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewBlobExpression(parts, options, pos), nil
-}
-
-func (p *Parser) parseNewArrayBufferBody(pos ast.Pos) (*ast.NewArrayBufferExpression, error) {
-	shared := p.peek().Literal == "SharedArrayBuffer"
-	p.advance() // consume 'ArrayBuffer' / 'SharedArrayBuffer'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	byteLength, err := p.parseAssignment()
-	if err != nil {
-		return nil, err
-	}
-	// Optional options literal: `{maxByteLength: m}` marks the buffer
-	// growable (ADR-00494).
-	var maxByteLength ast.Expression
-	if p.peek().Type == lexer.COMMA {
-		p.advance()
-		lit, err := p.parseObjectLiteral()
-		if err != nil {
-			return nil, err
-		}
-		if len(lit.Properties) != 1 || lit.Properties[0].Key != "maxByteLength" {
-			return nil, fmt.Errorf("%d:%d: the buffer options literal supports exactly {maxByteLength: n}", pos.Line, pos.Col)
-		}
-		maxByteLength = lit.Properties[0].Value
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	ex := ast.NewNewArrayBufferExpression(byteLength, pos)
-	ex.Shared = shared
-	ex.MaxByteLength = maxByteLength
-	return ex, nil
-}
-
-// parseNewBroadcastChannelBody parses `new BroadcastChannel('name')` — the
-// name must be a string literal (it keys the compile-time channel-type
-// registry; TDD-00099).
-func (p *Parser) parseNewBroadcastChannelBody(pos ast.Pos) (*ast.NewBroadcastChannelExpression, error) {
-	p.advance() // consume 'BroadcastChannel'
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	nameTok, err := p.expect(lexer.STRING)
-	if err != nil {
-		return nil, fmt.Errorf("%d:%d: new BroadcastChannel(...) requires a string-literal channel name", pos.Line, pos.Col)
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewBroadcastChannelExpression(nameTok.Literal, pos), nil
-}
-
-// parseNewChannelBody parses `new Channel<T>(capacity?)` (TDD-00143) — a
-// klain:sync CSP channel. The optional <T> gives the element type; the
-// optional capacity argument gives the buffer size (0/unbuffered by default).
-func (p *Parser) parseNewChannelBody(pos ast.Pos) (*ast.NewChannelExpression, error) {
-	p.advance() // consume 'Channel'
-	var typeArg *ast.TypeAnnotation
-	if p.check(lexer.LT) {
-		p.advance() // consume '<'
-		arg, err := p.parseTypeAnnotation("ts")
-		if err != nil {
-			return nil, err
-		}
-		typeArg = arg
-		if err := p.expectGT("Channel<T>"); err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var capacity ast.Expression
-	if !p.check(lexer.RPAREN) {
-		cap, err := p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-		capacity = cap
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewChannelExpression(typeArg, capacity, pos), nil
-}
-
-// parseNewMessageChannelBody parses `new MessageChannel<T>()` (TDD-00099).
-func (p *Parser) parseNewMessageChannelBody(pos ast.Pos) (*ast.NewMessageChannelExpression, error) {
-	p.advance() // consume 'MessageChannel'
-	var typeArg *ast.TypeAnnotation
-	if p.check(lexer.LT) {
-		p.advance() // consume '<'
-		arg, err := p.parseTypeAnnotation("ts")
-		if err != nil {
-			return nil, err
-		}
-		typeArg = arg
-		if err := p.expectGT("MessageChannel<T>"); err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewMessageChannelExpression(typeArg, pos), nil
-}
-
-// parseNewTypedArrayBody parses `new Int8Array(...)`/.../`new
-// Float64Array(...)` — a single argument whose meaning (size / existing
-// ArrayBuffer / array-like to copy) is only knowable at codegen time, once
-// static types are available (see docs/tdd/TDD-00018.md), so the parser
-// just captures the one expression generically.
-func (p *Parser) parseNewTypedArrayBody(pos ast.Pos, elemKind string) (*ast.NewTypedArrayExpression, error) {
-	p.advance() // consume the constructor name (e.g. 'Uint8Array')
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	arg, err := p.parseAssignment()
-	if err != nil {
-		return nil, err
-	}
-	nta := ast.NewNewTypedArrayExpression(elemKind, arg, pos)
-	// Optional 2nd/3rd arguments: the sub-range view form
-	// `new XArray(buffer, byteOffset, length?)`.
-	if p.check(lexer.COMMA) {
-		p.advance()
-		if nta.ByteOffset, err = p.parseAssignment(); err != nil {
-			return nil, err
-		}
-		if p.check(lexer.COMMA) {
-			p.advance()
-			if nta.Length, err = p.parseAssignment(); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return nta, nil
-}
-
-func (p *Parser) parseNewArrayBody(pos ast.Pos) (*ast.NewArrayExpression, error) {
-	p.advance() // consume 'Array'
-
-	var elemType *ast.TypeAnnotation
-	if p.check(lexer.LT) {
-		p.advance() // consume '<'
-		var err error
-		elemType, err = p.parseTypeAnnotation("ts")
-		if err != nil {
-			return nil, err
-		}
-		if _, err := p.expect(lexer.GT); err != nil {
-			return nil, err
-		}
-	}
-
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	// Zero-arg `new Array<T>()` is an empty array (ADR-00463) — size 0.
-	var size ast.Expression = ast.NewNumberLiteral("0", pos)
-	if !p.check(lexer.RPAREN) {
-		var err error
-		size, err = p.parseExpression()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-
-	return ast.NewNewArrayExpression(elemType, size, pos), nil
-}
-
-func (p *Parser) parseNewMapBody(pos ast.Pos) (*ast.NewMapExpression, error) {
-	p.advance() // consume 'Map'
-
-	var keyType, valType *ast.TypeAnnotation
-	if p.check(lexer.LT) {
-		p.advance() // consume '<'
-		var err error
-		keyType, err = p.parseTypeAnnotation("ts")
-		if err != nil {
-			return nil, err
-		}
-		if p.match(lexer.COMMA) {
-			valType, err = p.parseTypeAnnotation("ts")
-			if err != nil {
-				return nil, err
-			}
-		}
-		if _, err := p.expect(lexer.GT); err != nil {
-			return nil, err
-		}
-	}
-
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	// Optional initial-entries argument (`new Map([[k, v], ...])`) — an
-	// iterable of [K, V] pairs per the real spec, narrowed here to "an array
-	// of 2-tuples" (this compiler's own array + tuple machinery, TDD-00066,
-	// is the only iterable/pair concept it has for a general expression here).
-	var init ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		init, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-
-	return ast.NewNewMapExpression(keyType, valType, init, pos), nil
-}
-
-func (p *Parser) parseNewWeakMapBody(pos ast.Pos) (*ast.NewWeakMapExpression, error) {
-	p.advance() // consume 'WeakMap'
-	var keyType, valType *ast.TypeAnnotation
-	if p.check(lexer.LT) {
-		p.advance() // consume '<'
-		var err error
-		keyType, err = p.parseTypeAnnotation("ts")
-		if err != nil {
-			return nil, err
-		}
-		if p.match(lexer.COMMA) {
-			valType, err = p.parseTypeAnnotation("ts")
-			if err != nil {
-				return nil, err
-			}
-		}
-		if _, err := p.expect(lexer.GT); err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	// WeakMap's initial-entries argument is out of V1 scope (an iterable of
-	// [obj, V] pairs) — a bare `new WeakMap()` only.
-	if !p.check(lexer.RPAREN) {
-		return nil, fmt.Errorf("%d:%d: new WeakMap() does not accept arguments", pos.Line, pos.Col)
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewWeakMapExpression(keyType, valType, pos), nil
-}
-
-func (p *Parser) parseNewWeakSetBody(pos ast.Pos) (*ast.NewWeakSetExpression, error) {
-	p.advance() // consume 'WeakSet'
-	var elemType *ast.TypeAnnotation
-	if p.check(lexer.LT) {
-		p.advance() // consume '<'
-		var err error
-		elemType, err = p.parseTypeAnnotation("ts")
-		if err != nil {
-			return nil, err
-		}
-		if _, err := p.expect(lexer.GT); err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	if !p.check(lexer.RPAREN) {
-		return nil, fmt.Errorf("%d:%d: new WeakSet() does not accept arguments", pos.Line, pos.Col)
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewWeakSetExpression(elemType, pos), nil
-}
-
-func (p *Parser) parseNewWeakRefBody(pos ast.Pos) (*ast.NewWeakRefExpression, error) {
-	p.advance() // consume 'WeakRef'
-	var elemType *ast.TypeAnnotation
-	if p.check(lexer.LT) {
-		p.advance() // consume '<'
-		var err error
-		elemType, err = p.parseTypeAnnotation("ts")
-		if err != nil {
-			return nil, err
-		}
-		if _, err := p.expect(lexer.GT); err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	// The referent argument is required.
-	init, err := p.parseAssignment()
-	if err != nil {
-		return nil, err
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewWeakRefExpression(elemType, init, pos), nil
-}
-
-func (p *Parser) parseNewSetBody(pos ast.Pos) (*ast.NewSetExpression, error) {
-	p.advance() // consume 'Set'
-
-	var elemType *ast.TypeAnnotation
-	if p.check(lexer.LT) {
-		p.advance() // consume '<'
-		var err error
-		elemType, err = p.parseTypeAnnotation("ts")
-		if err != nil {
-			return nil, err
-		}
-		if _, err := p.expect(lexer.GT); err != nil {
-			return nil, err
-		}
-	}
-
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	// Optional initial-elements argument (`new Set([1, 2, 3])`) — an
-	// iterable per the real spec, narrowed here to "an array expression"
-	// (this compiler's own array/HOF machinery is the only iterable
-	// concept it has for a general expression in this position).
-	var init ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		init, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-
-	return ast.NewNewSetExpression(elemType, init, pos), nil
-}
-
-func (p *Parser) parseNewEventEmitterBody(pos ast.Pos) (*ast.NewEventEmitterExpression, error) {
-	p.advance() // consume 'EventEmitter'
-
-	var payloadType *ast.TypeAnnotation
-	if p.check(lexer.LT) {
-		p.advance() // consume '<'
-		var err error
-		payloadType, err = p.parseTypeAnnotation("ts")
-		if err != nil {
-			return nil, err
-		}
-		if _, err := p.expect(lexer.GT); err != nil {
-			return nil, err
-		}
-	}
-
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	if !p.check(lexer.RPAREN) {
-		return nil, fmt.Errorf("%d:%d: new EventEmitter() does not accept arguments", pos.Line, pos.Col)
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-
-	return ast.NewNewEventEmitterExpression(payloadType, pos), nil
-}
-
-// parseNewReadableStreamBody parses `new ReadableStream<T>(source?, strategy?)`
-// (TDD-00097 Stage 1). Both arguments are ordinary expressions here — codegen
-// validates that the source is an object literal and destructures it.
-func (p *Parser) parseNewWritableStreamBody(pos ast.Pos) (*ast.NewWritableStreamExpression, error) {
-	chunkType, sink, strategy, err := p.parseNewStreamArgs()
-	if err != nil {
-		return nil, err
-	}
-	return ast.NewNewWritableStreamExpression(chunkType, sink, strategy, pos), nil
-}
-
-func (p *Parser) parseNewReadableStreamBody(pos ast.Pos) (*ast.NewReadableStreamExpression, error) {
-	chunkType, source, strategy, err := p.parseNewStreamArgs()
-	if err != nil {
-		return nil, err
-	}
-	return ast.NewNewReadableStreamExpression(chunkType, source, strategy, pos), nil
-}
-
-// parseNewTransformStreamBody parses `new TransformStream<I, O>(transformer?,
-// writableStrategy?, readableStrategy?)` (TDD-00097 Stage 3).
-func (p *Parser) parseNewTransformStreamBody(pos ast.Pos) (*ast.NewTransformStreamExpression, error) {
-	p.advance() // consume 'TransformStream'
-	var inTy, outTy *ast.TypeAnnotation
-	if p.check(lexer.LT) {
-		p.advance()
-		var err error
-		inTy, err = p.parseTypeAnnotation("ts")
-		if err != nil {
-			return nil, err
-		}
-		if p.match(lexer.COMMA) {
-			outTy, err = p.parseTypeAnnotation("ts")
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			outTy = inTy
-		}
-		if _, err := p.expect(lexer.GT); err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var exprs []ast.Expression
-	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
-		ex, err := p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-		exprs = append(exprs, ex)
-		if !p.match(lexer.COMMA) {
-			break
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	if len(exprs) > 3 {
-		return nil, fmt.Errorf("%d:%d: new TransformStream takes at most 3 arguments", pos.Line, pos.Col)
-	}
-	var transformer, wstrat, rstrat ast.Expression
-	if len(exprs) > 0 {
-		transformer = exprs[0]
-	}
-	if len(exprs) > 1 {
-		wstrat = exprs[1]
-	}
-	if len(exprs) > 2 {
-		rstrat = exprs[2]
-	}
-	return ast.NewNewTransformStreamExpression(inTy, outTy, transformer, wstrat, rstrat, pos), nil
-}
-
-// parseNewNodeStreamBody parses `new Readable<T>(opts?)` / `new
-// Writable<T>(opts?)` / `new Transform<I, O>(opts?)` (TDD-00097 Stage 8).
-func (p *Parser) parseNewNodeStreamBody(pos ast.Pos, kind string) (*ast.NewNodeStreamExpression, error) {
-	p.advance() // consume the constructor name
-	var inTy, outTy *ast.TypeAnnotation
-	if p.check(lexer.LT) {
-		p.advance()
-		var err error
-		first, err := p.parseTypeAnnotation("ts")
-		if err != nil {
-			return nil, err
-		}
-		if p.match(lexer.COMMA) {
-			second, err := p.parseTypeAnnotation("ts")
-			if err != nil {
-				return nil, err
-			}
-			inTy, outTy = first, second
-		} else if kind == "readable" {
-			outTy = first
-		} else {
-			inTy = first
-			if kind == "transform" || kind == "passthrough" {
-				outTy = first
-			}
-		}
-		if _, err := p.expect(lexer.GT); err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	var options ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		options, err = p.parseAssignment()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewNodeStreamExpression(kind, inTy, outTy, options, pos), nil
-}
-
-// parseNewCompressionStreamBody parses `new CompressionStream(format)` /
-// `new DecompressionStream(format)` (TDD-00097 Stage 6).
-func (p *Parser) parseNewCompressionStreamBody(pos ast.Pos, decompress bool) (*ast.NewCompressionStreamExpression, error) {
-	p.advance() // consume the constructor name
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, err
-	}
-	format, err := p.parseAssignment()
-	if err != nil {
-		return nil, err
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
-	}
-	return ast.NewNewCompressionStreamExpression(decompress, format, pos), nil
-}
-
-// parseNewStreamArgs parses the shared `<T>(sourceOrSink?, strategy?)` tail
-// of both stream constructors (the constructor name token is still current).
-func (p *Parser) parseNewStreamArgs() (*ast.TypeAnnotation, ast.Expression, ast.Expression, error) {
-	p.advance() // consume the constructor name
-
-	var chunkType *ast.TypeAnnotation
-	if p.check(lexer.LT) {
-		p.advance() // consume '<'
-		var err error
-		chunkType, err = p.parseTypeAnnotation("ts")
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		if _, err := p.expect(lexer.GT); err != nil {
-			return nil, nil, nil, err
-		}
-	}
-
-	if _, err := p.expect(lexer.LPAREN); err != nil {
-		return nil, nil, nil, err
-	}
-	var source, strategy ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		source, err = p.parseAssignment()
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		if p.match(lexer.COMMA) {
-			strategy, err = p.parseAssignment()
-			if err != nil {
-				return nil, nil, nil, err
-			}
-		}
-	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, nil, nil, err
-	}
-
-	return chunkType, source, strategy, nil
 }
 
 func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
@@ -1589,7 +361,7 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 		// destructuring position uses.
 		if p.check(lexer.LBRACE) || p.check(lexer.LBRACKET) {
 			if rest {
-				return nil, fmt.Errorf("%d:%d: a rest parameter cannot be a destructuring pattern", p.peek().Line, p.peek().Col)
+				return nil, p.errAt(p.peek(), diag.RestParamPattern)
 			}
 			var arrPat []ast.ArrayPatternElem
 			var objPat []ast.DestructProp
@@ -1621,7 +393,7 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 			// element type flows through the `hints []Type` channel into
 			// emitArrowFunctionWithHints, which fills p.Type == nil params.
 			if p.check(lexer.ASSIGN) {
-				return nil, fmt.Errorf("%d:%d: a default value on a destructured parameter is not yet supported", p.peek().Line, p.peek().Col)
+				return nil, p.errAt(p.peek(), diag.DestructuredParamDefault)
 			}
 			syntheticName := fmt.Sprintf("__param%d", len(params))
 			params = append(params, ast.Param{Name: syntheticName, Type: pty, ArrayPattern: arrPat, ObjectPattern: objPat})
@@ -1670,6 +442,10 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 		}
 	}
 
+	// restricted production: no line terminator between the parameters and `=>`
+	if t := p.peek(); t.Type == lexer.ARROW && t.HasPrecedingLineBreak() {
+		return nil, p.errAt(t, diag.LineBreakBeforeArrow)
+	}
 	if _, err := p.expect(lexer.ARROW); err != nil {
 		return nil, err
 	}
@@ -1680,7 +456,9 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 		if err != nil {
 			return nil, err
 		}
-		return ast.NewArrowFunction(params, retType, nil, block, pos), nil
+		arrow := ast.NewArrowFunction(params, retType, nil, block, pos)
+		p.bareArrow = arrow
+		return arrow, nil
 	}
 	body, err := p.parseAssignment()
 	if err != nil {
@@ -1704,6 +482,32 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 // lookahead cheap — no re-lexing, just array indexing. An un-annotated
 // pattern param leaves its type to contextual typing from the HOF call site
 // (emitArrowFunctionWithHints); see parseArrowFunction's pattern branch.
+// parenGroupFollowedByArrow reports whether the parenthesized group starting
+// at the current `(` is closed by a `)` immediately followed by `=>` or by a
+// `:` return-type annotation — i.e. whether it is an arrow parameter list.
+func (p *Parser) parenGroupFollowedByArrow() bool { return p.parenGroupFollowedByArrowAt(0) }
+
+// parenGroupFollowedByArrowAt is parenGroupFollowedByArrow for a `(` at the
+// k-th token ahead.
+func (p *Parser) parenGroupFollowedByArrowAt(k int) bool {
+	depth := 0
+	for i := k; ; i++ {
+		t := p.peekNth(i)
+		switch t.Type {
+		case lexer.EOF:
+			return false
+		case lexer.LPAREN, lexer.LBRACE, lexer.LBRACKET:
+			depth++
+		case lexer.RPAREN, lexer.RBRACE, lexer.RBRACKET:
+			depth--
+			if depth == 0 {
+				next := p.peekNth(i + 1).Type
+				return next == lexer.ARROW || next == lexer.COLON
+			}
+		}
+	}
+}
+
 func (p *Parser) destructuredArrowParamLookahead() bool {
 	open := p.peekNth(1).Type
 	closeType := lexer.RBRACE
@@ -1807,7 +611,7 @@ func (p *Parser) parseTemplateRestRaw(headQuasi, headRaw string) ([]string, []st
 			p.advance()
 			return quasis, rawQuasis, exprs, nil
 		default:
-			return nil, nil, nil, fmt.Errorf("%d:%d: expected template continuation, got %s", next.Line, next.Col, next.Type)
+			return nil, nil, nil, p.errAt(next, diag.ExpectedTemplateCont, next.Type)
 		}
 	}
 }
@@ -1840,8 +644,12 @@ func (p *Parser) parseArgList() ([]ast.Expression, error) {
 	return args, nil
 }
 
+// reservedWords are the ECMAScript reserved words the scanner reads as
+// identifiers (the rest are keyword tokens): never an identifier reference.
+var reservedWords = map[string]bool{"in": true, "with": true, "debugger": true, "delete": true, "enum": true}
+
 func (p *Parser) parsePrimary() (ast.Expression, error) {
-	tok := p.peek()
+	tok := p.peekPrimary()
 
 	switch tok.Type {
 	case lexer.NUMBER:
@@ -1870,7 +678,7 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		// ast.NewRegExpExpression's doc comment.
 		return ast.NewNewRegExpExpression(
 			ast.NewStringLiteral(tok.Literal, posOf(tok)),
-			ast.NewStringLiteral(tok.Flags, posOf(tok)),
+			ast.NewStringLiteral(tok.RegexFlags, posOf(tok)),
 			posOf(tok),
 		), nil
 
@@ -1891,8 +699,19 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		return ast.NewNullLiteral(true, posOf(tok)), nil
 
 	case lexer.IDENT:
+		if p.asyncFunctionAhead() {
+			return p.parseAsyncFunctionOrArrow(tok)
+		}
+		if reservedWords[tok.Literal] {
+			// A reserved word the scanner leaves an identifier (`in`, `with`,
+			// …) cannot be an identifier reference.
+			return nil, p.errAt(tok, diag.ReservedWordIdent, tok.Literal)
+		}
 		p.advance()
 		// Bare arrow function: x => expr  or  x => { ... }
+		if t := p.peek(); t.Type == lexer.ARROW && t.HasPrecedingLineBreak() {
+			return nil, p.errAt(t, diag.LineBreakBeforeArrow)
+		}
 		if p.check(lexer.ARROW) {
 			p.advance() // consume '=>'
 			pos := posOf(tok)
@@ -1902,7 +721,9 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 				if err != nil {
 					return nil, err
 				}
-				return ast.NewArrowFunction(params, nil, nil, block, pos), nil
+				arrow := ast.NewArrowFunction(params, nil, nil, block, pos)
+				p.bareArrow = arrow
+				return arrow, nil
 			}
 			body, err := p.parseAssignment()
 			if err != nil {
@@ -1932,7 +753,11 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			// parenthesized expression can never begin with `...`, so this is
 			// unambiguously an arrow (`(...xs) => …`, `(a, ...xs) => …`).
 			(t1.Type == lexer.ELLIPSIS) ||
-			((t1.Type == lexer.LBRACE || t1.Type == lexer.LBRACKET) && p.destructuredArrowParamLookahead())
+			((t1.Type == lexer.LBRACE || t1.Type == lexer.LBRACKET) && p.destructuredArrowParamLookahead()) ||
+			// A defaulted first parameter `(p = '!') => …` reads like a
+			// parenthesized assignment until the matching `)` — an arrow only
+			// when `=>` (or a `: T` return annotation) follows it.
+			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.ASSIGN && p.parenGroupFollowedByArrow())
 		if isArrow {
 			return p.parseArrowFunction()
 		}
@@ -1961,6 +786,7 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
+		p.bareArrow = nil // `(() => {})()` calls the parenthesized arrow
 		// Parentheses end an optional chain: `(a?.b).c` reads `.c` off the
 		// chain's *result*, where `a?.b.c` short-circuits as a whole.
 		switch n := expr.(type) {
@@ -2024,13 +850,20 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		if err != nil {
 			return nil, err
 		}
-		fe := ast.NewFunctionExpression(name, fd.Params, fd.ReturnType, fd.Body, false, fPos)
+		eraseTypeParams(fd)
+		fe := p.newFuncExpr(name, fd, false, fPos)
 		fe.IsGenerator = isGen
 		return fe, nil
 
-	case lexer.ASYNC:
-		// async (params) => expr / async (params): RetType => { ... }
-		// async function(x) { ... } — function expression variant
+	}
+
+	return nil, p.errAt(tok, diag.UnexpectedTokenInExpr, tok.Type)
+}
+
+// parseAsyncFunctionOrArrow parses `async function (…) {…}` or an async arrow
+// (`async (params) => …`, `async x => …`); the current token is `async`.
+func (p *Parser) parseAsyncFunctionOrArrow(tok lexer.Token) (ast.Expression, error) {
+	{
 		p.advance() // consume 'async'
 		if p.check(lexer.FUNCTION) {
 			p.advance() // consume 'function'
@@ -2044,7 +877,8 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			if err != nil {
 				return nil, err
 			}
-			fe := ast.NewFunctionExpression(name, fd.Params, fd.ReturnType, fd.Body, true, fPos)
+			eraseTypeParams(fd)
+			fe := p.newFuncExpr(name, fd, true, fPos)
 			fe.IsGenerator = isGen
 			return fe, nil
 		}
@@ -2055,6 +889,90 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		af.IsAsync = true
 		return af, nil
 	}
+}
 
-	return nil, fmt.Errorf("%d:%d: unexpected token %s in expression", tok.Line, tok.Col, tok.Type)
+// genericArrowAhead reports whether the `<` at the current token opens a
+// generic arrow's type parameters (`<T>(x: T) => x`, `<K, V extends C>(…) =>`)
+// rather than a `<T>expr` assertion: a name, then a balanced `<…>`, then a
+// parenthesized group followed by `=>` or a return type, as tsc reads a
+// .ts file.
+func (p *Parser) genericArrowAhead() bool {
+	if p.peekNth(1).Type != lexer.IDENT {
+		return false
+	}
+	switch p.peekNth(2).Type {
+	case lexer.COMMA, lexer.GT, lexer.EXTENDS, lexer.ASSIGN:
+	default:
+		return false
+	}
+	depth := 0
+	for i := 0; ; i++ {
+		switch p.peekNth(i).Type {
+		case lexer.EOF, lexer.SEMICOLON, lexer.LBRACE, lexer.RBRACE:
+			return false
+		case lexer.LT:
+			depth++
+		case lexer.GT:
+			depth--
+		case lexer.RSHIFT:
+			depth -= 2
+		case lexer.URSHIFT:
+			depth -= 3
+		}
+		if depth <= 0 {
+			return depth == 0 && p.peekNth(i+1).Type == lexer.LPAREN && p.parenGroupFollowedByArrowAt(i+1)
+		}
+	}
+}
+
+// parseGenericArrow parses `<T, …>(params) => body`. The type parameters are
+// erased to any in the arrow's annotations, as a generic method's are
+// (codegen types it as any); its type nodes keep them.
+func (p *Parser) parseGenericArrow() (ast.Expression, error) {
+	tps, err := p.parseTypeParameterNodes("generic arrow function")
+	if err != nil {
+		return nil, err
+	}
+	af, err := p.parseArrowFunction()
+	if err != nil {
+		return nil, err
+	}
+	set := map[string]bool{}
+	for _, tp := range tps {
+		set[tp.Name] = true
+		af.TypeParams = append(af.TypeParams, tp.Name)
+	}
+	for i := range af.Params {
+		ast.EraseTypeParams(af.Params[i].Type, set)
+	}
+	ast.EraseTypeParams(af.RetType, set)
+	return af, nil
+}
+
+// eraseTypeParams erases a function's type parameters to any in its
+// annotations, as a generic method's are: a generic function expression or
+// object-literal method is typed as any in codegen; its type nodes keep them.
+func eraseTypeParams(fd *ast.FunctionDeclaration) {
+	if len(fd.TypeParams) == 0 {
+		return
+	}
+	set := map[string]bool{}
+	for _, tp := range fd.TypeParams {
+		set[tp] = true
+	}
+	for i := range fd.Params {
+		ast.EraseTypeParams(fd.Params[i].Type, set)
+	}
+	ast.EraseTypeParams(fd.ReturnType, set)
+}
+
+// newFuncExpr is the function expression fd was parsed for; a `this: T`
+// parameter recorded against fd moves to it.
+func (p *Parser) newFuncExpr(name string, fd *ast.FunctionDeclaration, isAsync bool, pos ast.Pos) *ast.FunctionExpression {
+	fe := ast.NewFunctionExpression(name, fd.Params, fd.ReturnType, fd.Body, isAsync, pos)
+	if ta, ok := p.thisParams[fd]; ok {
+		delete(p.thisParams, fd)
+		p.thisParams[fe] = ta
+	}
+	return fe
 }

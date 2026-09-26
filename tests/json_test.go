@@ -135,8 +135,8 @@ try {
   const c: C = JSON.parse("{oops}")
   console.log("NOT REACHED")
 } catch (e) {
-  console.log(e.name)
-  console.log(e.message)
+  console.log((e as Error).name)
+  console.log((e as Error).message)
 }
 `, "SyntaxError\nUnexpected token in JSON at position 1")
 }
@@ -208,7 +208,7 @@ try {
   const c: C = JSON.parse('`+b.String()+`')
   console.log("NOT REACHED")
 } catch (e) {
-  console.log(e.name)
+  console.log((e as Error).name)
 }
 `, "SyntaxError")
 }
@@ -364,4 +364,13 @@ console.log(JSON.stringify(data, null, 2).length)
 	if strings.Contains(got, "AddressSanitizer") || strings.Contains(got, "runtime error") {
 		t.Fatalf("sanitizer error:\n%s", got)
 	}
+}
+
+// An `any` nested in a statically typed value keeps its depth when
+// JSON.stringify pretty-prints.
+func TestE2EJSONStringifyPrettyNestedAny(t *testing.T) {
+	assertOutput(t, `
+const x: any = { k: [1] };
+console.log(JSON.stringify({ a: x }, null, 2))
+`, "{\n  \"a\": {\n    \"k\": [\n      1\n    ]\n  }\n}")
 }

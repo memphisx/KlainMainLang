@@ -1,7 +1,9 @@
-// Event-map EventEmitter (TDD-00097 Stage 7): one emitter, per-event payload
-// types — including payload-less `void` events — declared as an object type
-// argument, checked at compile time against string-literal event names.
-class Downloader extends EventEmitter<{ progress: number; chunk: string; done: void; error: Error }> {
+// Event-map EventEmitter (TDD-00097 Stage 7): one emitter, per-event argument
+// tuples — `[]` for an event with no arguments — declared as an object type
+// argument, @types/node's EventMap shape, checked at compile time against
+// string-literal event names.
+import { EventEmitter } from 'events';
+class Downloader extends EventEmitter<{ progress: [pct: number]; chunk: [part: string]; done: []; error: [err: Error] }> {
   fetchAll(): void {
     this.emit("progress", 0);
     this.emit("chunk", "first part");

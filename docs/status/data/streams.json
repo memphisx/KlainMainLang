@@ -33,7 +33,7 @@
             "caveats": [
               "No BYOB readers / byte controllers (`type: 'bytes'` rejected at compile time)",
               "`ReadableStream.from()` accepts arrays only, not async iterables",
-              "Source callbacks must be arrow/function-expression/method-shorthand literals; a cancel callback can't take a reason parameter; *async* method shorthand (`{ async pull(c) {…} }`) doesn't parse — use `pull: async (c) => …`",
+              "Source callbacks must be arrow/function-expression/method-shorthand literals; a cancel callback can't take a reason parameter",
               "`read()` on a closed stream whose chunk type is an **array/tuple** (`ReadableStream<number[]>`) yields the chunk's zero-shaped value, not `undefined` (an array slot has no spare absent state — [ADR-00246](../adr/ADR-00246.md))",
               "`releaseLock()` leaves queued pending reads pending instead of rejecting them",
               "`values()` returns a reader usable in `for await` only (no standalone `.next()`)",
@@ -96,56 +96,39 @@
             "feature": "`stream.Readable` / `.Writable` / `.Duplex` / `.Transform` / `.PassThrough`",
             "status": "implemented",
             "caveats": [
-              "All five constructors default to **string chunks** (`<T>` overrides)",
-              "`new PassThrough()` takes `highWaterMark`/`objectMode` options only; `new Duplex(...)` accepts only `read`/`write`/`final` callbacks plus the shared options",
-              "No `_flush` override for class-form `Transform` subclasses",
-              "The options-form `read`/`write` callback receives the stream as a parameter, not as `this` (object-literal callbacks have no `this` binding); the class form has the real `this`",
-              "The options-form `write` completion `cb()` can't defer completion past the call — the write is treated as complete when the sink returns (same V1 limit as class-form `_write`)",
-              "A two-parameter `write(chunk, x)` shape is ambiguous (encoding vs. callback) and rejected; the three-param `write(chunk, encoding, callback)` form's `encoding`/`callback` params must be annotated (`enc: string`, `cb: () => void`)",
-              "No options-form `transform` callback for a `Transform` (`new Transform({ transform(chunk, enc, cb) {…} })` rejected) — use the class-form `_transform(chunk, enc, cb)` override instead",
-              "`class X extends Transform<In, Out>` (two type arguments) is a parse error — only `extends Transform<T>` parses in an `extends` clause (the two-arg form still parses in `new Transform<In, Out>(…)`)",
-              "`objectMode` is accepted but has no effect (chunks are already typed by `<T>`, effectively object-mode)",
-              "A class-form `super({ highWaterMark })` must be a literal/construction-scope constant — it can't reference a constructor parameter",
-              "A class-form `_write` completion callback is treated as fired when `_write` returns — it can't defer the write past the call",
-              "Event names must be string literals; supported events are `data`/`end`/`error`/`close`/`finish`/`drain`",
-              "Synchronous `.read([size])` ignores `size` (empty → null); `.destroy([err])` drops the error argument (no `'error'` re-emission); `.setEncoding('utf8')` is a no-op on the string-chunk default",
-              "Event delivery can lag Node's synchronous re-entrancy by a microtask (emissions ride the reaction queue)",
-              "`fs` `createReadStream`/`createWriteStream` don't return Node streams (surfaces stay WHATWG-based or buffered), unlike the HTTP server's `req`"
+              "An omitted error argument reaches a callback declared `(err?: Error | null)` as `null`; Node passes `undefined` (the `write`/`end` callbacks, `finished`, `pipeline`)",
+              "`Readable.from` takes an array, a string or a Buffer; a generator or other iterable is not supported",
+              "The HTTP server's `req`/`res` are separate runtime handles, not instances of these classes: `instanceof Readable`, a subclass's methods and piping into one of these classes do not apply to them",
+              "`Readable.toWeb` enqueues each chunk as it arrives, without the web stream's pull backpressure; `Duplex.toWeb`/`Duplex.fromWeb` are missing",
+              "Not ported: `compose`, `addAbortSignal`, the readable operators (`map`/`filter`/`toArray`/…), `Readable.wrap`, `Duplex.from`, `stream.isReadable`/`isErrored`/`setDefaultHighWaterMark`, and the `signal` option",
+              "A method replaced on an instance (`this._read = fn`) is not supported; pass it in the options"
             ],
             "notes": [
-              "Wrappers over the WHATWG internals: rstream/wstream sides + the EventEmitter listener-list runtime; flowing mode is a reaction-driven read→emit loop started by the first `'data'` listener; `Readable.from`/`.fromWeb`/`.toWeb` bridge both worlds ([ADR-00304](../adr/ADR-00304.md))",
-              "The class form is a synthetic-root model mirroring `extends EventEmitter`: a hidden Node-stream handle field, the runtime pull/sink routed to the subclass's `_read`/`_write` method ([ADR-00393](../adr/ADR-00393.md)). `class X extends Readable/Writable/Duplex/Transform` supports `this`-based `_read`/`_write(chunk, enc, cb)`/`_transform(chunk, enc, cb)` overrides (a `Transform`'s `this.push` feeds its readable side; `<T>` names both chunk types); the options form (`new Readable({ read })`) also stays",
-              "Chunk-type defaults, constructor/option shapes, and the options-form `write` callback forms: see [ADR-00449](../adr/ADR-00449.md), [ADR-00422](../adr/ADR-00422.md), [ADR-00493](../adr/ADR-00493.md), [ADR-00982](../adr/ADR-00982.md), [ADR-00483](../adr/ADR-00483.md), [ADR-00484](../adr/ADR-00484.md), [ADR-00824](../adr/ADR-00824.md)"
+              "Node v24's `lib/internal/streams` ported to TypeScript (`lib/node/stream.ts`) and compiled with the program: the same states, event order and `process.nextTick` deferrals, the options form with `this`, class overrides, `setEncoding` via a `string_decoder`-like decoder, object mode, `highWaterMark` defaults (64 KiB, 16 objects), `destroy`/`autoDestroy`, `for await` ([ADR-01161](../adr/ADR-01161.md))"
             ]
           },
           {
             "feature": "`stream.pipeline()` / `.finished()`",
             "status": "implemented",
             "caveats": [
-              "The callback forms' callback takes zero parameters or one (the error) — no `(err, value)` extras",
-              "`finished(s, cb)` returns nothing, not Node's cleanup function",
-              "Function-stage pipelines (`pipeline(src, async function* …)`) are not supported — stages must be streams"
+              "Function stages (`pipeline(src, async function* …)`) and the `signal` option are not supported — every stage is a stream"
             ],
             "notes": [
-              "Both forms: the `stream/promises` promise-returning ones ([ADR-00304](../adr/ADR-00304.md)) and the callback-style `stream.pipeline(a, b, cb)`/`stream.finished(s, cb)` named exports — a per-site runner on the destination's closed promise calls the callback with `null`/the error; `pipeline`'s callback form returns the destination stream ([ADR-00422](../adr/ADR-00422.md))"
+              "Node's `pipelineImpl`/`destroyer` and end-of-stream (`willEmitClose`): the callback runs once the last stream has finished, or with the first error, every stream then destroyed; `finished` returns its cleanup function ([ADR-01161](../adr/ADR-01161.md))"
             ]
           },
           {
             "feature": "`stream/promises`",
             "status": "implemented",
             "notes": [
-              "`import { pipeline, finished } from 'stream/promises'` ([ADR-00304](../adr/ADR-00304.md))"
+              "`import { pipeline, finished } from 'stream/promises'`, over the callback forms ([ADR-01161](../adr/ADR-01161.md))"
             ]
           },
           {
             "feature": "`stream.duplexPair()`",
             "status": "implemented",
-            "caveats": [
-              "String chunks only (no `<T>` form)",
-              "The sides are Duplex *handles* (`write`/`end`/`on`/`pipe`/…), not `Duplex` class instances — no `instanceof Duplex`, `cork`/`uncork`, `.read()`, or `'readable'` events"
-            ],
             "notes": [
-              "Two cross-wired identity-transform sides: each side's sink enqueues into the peer's readable (backpressure parks on the peer's capacity); ending one side ends the other's readable. Returned as a 2-element array, so `const [a, b] = duplexPair()` and `pair[0]` both work ([ADR-00422](../adr/ADR-00422.md))"
+              "Two `Duplex` instances cross-wired as Node's `DuplexSide`: a write completes when the peer reads it, and `end()` finishes once the peer has ended ([ADR-01161](../adr/ADR-01161.md))"
             ]
           }
         ]

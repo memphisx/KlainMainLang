@@ -5,8 +5,9 @@
 interface User { name: string; manager?: User }
 
 function managerName(u: User): string {
-  // `u.manager` may be absent; reading `.name` off it throws.
-  return u.manager.name
+  // `u.manager` may be absent; the `!` tells TypeScript to trust it, and
+  // reading `.name` off an absent one throws.
+  return u.manager!.name
 }
 
 const boss: User = { name: "Ada" }
@@ -22,7 +23,7 @@ try {
 }
 
 function shout(s: string | null): string {
-  return s.toUpperCase()
+  return s!.toUpperCase()
 }
 
 try {

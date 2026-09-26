@@ -5,12 +5,12 @@
   "statusPage": "NUMBER-MATH.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "35/35",
+    "loose": "36/36",
     "loosePct": 100,
-    "strict": "32/35",
-    "strictPct": 86
+    "strict": "30/36",
+    "strictPct": 83
   },
-  "lede": "Number, Math, and the two global parse helpers, backed by IEEE-754 doubles with an exact-i64 fast path where the inputs are integers. The remaining divergences are narrow: toString's fractional expansion in a non-power-of-two base can differ from V8 in the trailing digits (base 10 and power-of-two bases are exact), and toPrecision picks exponential-vs-fixed notation at C `%g`'s threshold rather than JS's. Everything else — exponent formatting (now min-digit, `e+5`), the constants, parseFloat's `\"0x10\"` → `0` hex-prefix rule, parseInt's hex auto-detect, the trig/log/hyperbolic family, and the bit ops — matches real JS.",
+  "lede": "Number, Math, and the two global parse helpers, backed by IEEE-754 doubles with an exact-i64 fast path where the inputs are integers. The remaining divergence is narrow: the trig/log/hyperbolic family comes from the platform libm, which can differ from V8's fdlibm in the last binary digit. Everything else — toFixed/toPrecision/toExponential and every toString radix, exponent formatting (min-digit, `e+5`), the constants, parseFloat's `\"0x10\"` → `0` hex-prefix rule, parseInt's hex auto-detect, and the bit ops — matches real JS.",
   "entries": [
     {
       "id": "number.isInteger",
@@ -229,7 +229,7 @@
       "statusRow": "Number.prototype.toFixed(n)",
       "signature": "(x: number).toFixed(digits?: number): string",
       "badge": "exact",
-      "description": "Formats x with a fixed number of digits after the decimal point. The digits argument is optional and defaults to 0, rounding to the nearest integer ((3.7).toFixed() is \"4\").",
+      "description": "Formats x with a fixed number of digits after the decimal point, by the spec's algorithm over the exact value: an exact tie rounds to the larger value ((2.5).toFixed(0) is \"3\"), |x| ≥ 1e21 gives String(x), and a digit count outside 0..100 throws a RangeError. The digits argument is optional and defaults to 0.",
       "seeAlso": [
         "number.toPrecision",
         "number.toExponential"
@@ -243,11 +243,8 @@
       "name": "Number.prototype.toString(radix?)",
       "statusRow": "Number.prototype.toString(radix?)",
       "signature": "(x: number).toString(radix?: number): string",
-      "badge": "caveats",
-      "description": "Renders x as a string. The default (and radix 10) is exactly String(x) — the shortest round-trip decimal, fractional part included; any other base runs a hand-rolled integer-digit loop plus a repeated-multiply fractional expansion. A radix outside 2..36 throws a RangeError, as in real JS.",
-      "differences": [
-        "For a non-power-of-two base, a repeating fractional expansion is capped at 1100 digits and the double-precision multiply can differ from V8's exact-bignum result in the trailing digits; base 10 and power-of-two bases are exact."
-      ],
+      "badge": "exact",
+      "description": "Renders x as a string. The default (and radix 10) is exactly String(x) — the shortest round-trip decimal; any other base runs V8's own algorithm, the fraction to the double's precision, matching Node digit for digit. A radix outside 2..36 throws a RangeError.",
       "seeAlso": [
         "number.toPrecision",
         "number.toExponential"
@@ -261,11 +258,8 @@
       "name": "Number.prototype.toPrecision(n)",
       "statusRow": "Number.prototype.toPrecision(n)",
       "signature": "(x: number).toPrecision(precision?: number): string",
-      "badge": "caveats",
-      "description": "Formats x to the given number of significant digits via sprintf(\"%#.*g\", ...); the exponent is normalized to JS's minimum-digit form (e+5, not e+05). The precision argument is optional; with it omitted, toPrecision() is exactly String(x).",
-      "differences": [
-        "Chooses exponential vs fixed notation at C `%g`'s threshold (exponent < -4) rather than JS's (exponent < -6), so `0.0000123` renders `1.23e-5` where real JS gives `0.0000123`."
-      ],
+      "badge": "exact",
+      "description": "Formats x to the given number of significant digits by the spec's algorithm: exact rounding with ties to the larger value, exponential notation below 1e-6 or at 10^precision and up, and a RangeError outside 1..100. With the precision omitted, toPrecision() is exactly String(x).",
       "seeAlso": [
         "number.toExponential",
         "number.toFixed"
@@ -279,8 +273,8 @@
       "name": "Number.prototype.toExponential(n?)",
       "statusRow": "Number.prototype.toExponential(n?)",
       "signature": "(x: number).toExponential(fractionDigits?: number): string",
-      "badge": "supported",
-      "description": "Formats x in exponential notation. With a fractionDigits argument, via sprintf(\"%.*e\", ...) with the exponent normalized to JS's minimum-digit form (1.23e+4, not 1.23e+04); with no argument, using the shortest round-trip mantissa (12345 → 1.2345e+4), as in Node.",
+      "badge": "exact",
+      "description": "Formats x in exponential notation by the spec's algorithm over the exact value (ties to the larger value, e+4 minimum-digit exponents); with no argument, the shortest round-trip mantissa (12345 → 1.2345e+4), as in Node.",
       "seeAlso": [
         "number.toPrecision",
         "number.toFixed"
@@ -405,7 +399,7 @@
       "name": "Math.log/log2/log10",
       "statusRow": "Math.log/log2/log10",
       "signature": "Math.log(x); Math.log2(x); Math.log10(x)",
-      "badge": "exact",
+      "badge": "caveats",
       "description": "Natural, base-2, and base-10 logarithms.",
       "exampleKey": "math/math_methods",
       "snippet": "console.log(Math.floor(Math.log2(8.0)))     // 3\nconsole.log(Math.floor(Math.log10(1000.0))) // 3",
@@ -422,7 +416,7 @@
       "name": "Math.sin/cos/tan",
       "statusRow": "Math.sin/cos/tan",
       "signature": "Math.sin(x); Math.cos(x); Math.tan(x)",
-      "badge": "exact",
+      "badge": "caveats",
       "description": "The primary trigonometric functions (radians).",
       "exampleKey": "math/math_methods",
       "snippet": "const sinHalf = Math.sin(Math.PI / 2.0)\nconsole.log(Math.round(sinHalf))   // 1",
@@ -506,7 +500,7 @@
       "name": "Math.cbrt/expm1/log1p",
       "statusRow": "Math.cbrt/expm1/log1p",
       "signature": "Math.cbrt(x); Math.expm1(x); Math.log1p(x)",
-      "badge": "exact",
+      "badge": "caveats",
       "description": "cbrt uses a deterministic, correctly-rounded fdlibm implementation (@__kml_cbrt) rather than platform libm, whose runtime cbrt is not reliably correctly-rounded and diverged by OS (glibc cbrt(27) gave 3.0000000000000004); expm1/log1p delegate to libm.",
       "exampleKey": "math/math_methods",
       "snippet": "console.log(Math.cbrt(27.0))   // 3\nconsole.log(Math.expm1(0.0))   // 0\nconsole.log(Math.log1p(0.0))   // 0",
@@ -523,7 +517,7 @@
       "name": "Math.asin/acos/atan/atan2",
       "statusRow": "Math.asin/acos/atan/atan2",
       "signature": "Math.asin(x); Math.acos(x); Math.atan(x); Math.atan2(y, x)",
-      "badge": "exact",
+      "badge": "caveats",
       "description": "The inverse trigonometric functions.",
       "exampleKey": "math/math_methods",
       "snippet": "console.log(Math.acos(1.0))                     // 0\nconsole.log(Math.round(Math.atan2(1.0, 1.0) * 4.0))  // 3",
@@ -540,7 +534,7 @@
       "name": "Math.sinh/cosh/tanh",
       "statusRow": "Math.sinh/cosh/tanh",
       "signature": "Math.sinh(x); Math.cosh(x); Math.tanh(x)",
-      "badge": "exact",
+      "badge": "caveats",
       "description": "The hyperbolic functions.",
       "exampleKey": "math/math_methods",
       "snippet": "console.log(Math.sinh(0.0))   // 0\nconsole.log(Math.cosh(0.0))   // 1\nconsole.log(Math.tanh(0.0))   // 0",
@@ -550,6 +544,23 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sinh"
+      }
+    },
+    {
+      "id": "math.expHyperbolicInverse",
+      "name": "Math.exp and Math.asinh/acosh/atanh",
+      "statusRow": "Math.exp and Math.asinh/acosh/atanh",
+      "signature": "Math.exp(x); Math.asinh(x); Math.acosh(x); Math.atanh(x)",
+      "badge": "caveats",
+      "description": "The exponential function and the inverse hyperbolic functions.",
+      "exampleKey": "math/math_methods",
+      "snippet": "console.log(Math.exp(0))     // 1\nconsole.log(Math.acosh(1))   // 0\nconsole.log(Math.atanh(0))   // 0",
+      "seeAlso": [
+        "math.hyperbolic",
+        "math.logFamily"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/exp"
       }
     },
     {

@@ -30,7 +30,7 @@ func (e *Emitter) ensureClusterRuntime() {
 	e.usedClusterRuntime = true
 	e.ensureHTTPClusterFork() // declares @__kml_cluster_worker_id + fork()
 	e.ensureCPForkRuntime()   // socketpair + __kml_cp_wrap_ipc (worker IPC channel)
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		e.ensureUnsetenv() // clusterForkIR clears the worker env vars after spawning
 	}
 	e.ensureMalloc()
@@ -45,7 +45,7 @@ func (e *Emitter) ensureClusterRuntime() {
 	e.ensureExecvDecl()
 	e.ensureExitRawDecl()
 	e.ensureWaitpidDecl()
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		e.emitGlobal("declare i32 @_NSGetExecutablePath(ptr noundef, ptr noundef)")
 	} else {
 		e.ensureReadlinkDecl()
@@ -85,7 +85,7 @@ func (e *Emitter) ensureClusterRuntime() {
 	idFmt := e.internString("%lld")
 
 	// __kml_cluster_seed_id(): a re-exec'd worker carries its id in the env;
-	// read it into @__kml_cluster_worker_id so isPrimary/isWorker/workerId work.
+	// read it into @__kml_cluster_worker_id so isPrimary/isWorker/worker work.
 	// The primary (env unset) leaves the global at 0. Called first thing in
 	// main. Also arms the cross-runtime hooks in every process: the worker's
 	// listening announcement, and the primary's reap/disconnect/control hooks
@@ -110,7 +110,7 @@ done:
 }`, envName))
 
 	// __kml_cluster_self_exe(): path to the running executable, for re-exec.
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		e.emitGlobal(`
 define ptr @__kml_cluster_self_exe() {
 entry:
@@ -377,6 +377,9 @@ ret:
 	// "__kml:listening:<port>" announcement fires the cluster-level
 	// 'listening' relay with the Worker and the port.
 	lstPrefix := e.internString("__kml:listening:")
+	e.ensureStrchr()
+	e.ensureStrlen()
+	e.ensureStrHeaderRuntime()
 	e.ensureStrncmp()
 	e.ensureAtoll()
 	e.emitGlobal(fmt.Sprintf(`
@@ -396,13 +399,25 @@ findw:
 fire:
   %%portp = getelementptr i8, ptr %%msg, i64 16
   %%port = call i64 @atoll(ptr %%portp)
+  %%colon = call ptr @strchr(ptr %%portp, i32 58)
+  %%hascolon = icmp ne ptr %%colon, null
+  br i1 %%hascolon, label %%hosted, label %%nohost
+hosted:
+  %%hostp = getelementptr i8, ptr %%colon, i64 1
+  %%hostc = load i8, ptr %%hostp, align 1
+  %%hostset = icmp ne i8 %%hostc, 0
+  %%hostdup = call ptr @__kml_str_from_cstr(ptr %%hostp)
+  %%hostv = select i1 %%hostset, ptr %%hostdup, ptr null
+  br label %%nohost
+nohost:
+  %%host = phi ptr [ null, %%fire ], [ %%hostv, %%hosted ]
   %%hdr = load ptr, ptr @__kml_cluster_relay_listening_hdr, align 8
   %%pair = call ptr @malloc(i64 16)
   %%ph = getelementptr { ptr, ptr }, ptr %%pair, i32 0, i32 0
   store ptr %%hdr, ptr %%ph, align 8
   %%pw = getelementptr { ptr, ptr }, ptr %%pair, i32 0, i32 1
   store ptr %%w, ptr %%pw, align 8
-  call void %%fn(ptr %%pair, i64 %%port)
+  call void %%fn(ptr %%pair, i64 %%port, ptr %%host)
   br label %%ret
 ret:
   ret void
@@ -412,22 +427,33 @@ ret:
 	// @__kml_http_listening_announce by the startup seed: tell the primary
 	// this worker's server bound.
 	e.ensureListeningAnnounceHook()
-	lstFmt := e.internString("__kml:listening:%lld")
+	lstFmt := e.internString("__kml:listening:%lld:%s")
+	emptyStr := e.internString("")
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_cluster_announce_listening(i32 %%port) {
+entry:
+  call void @__kml_cluster_announce_listening_at(i32 %%port, ptr null)
+  ret void
+}
+
+define void @__kml_cluster_announce_listening_at(i32 %%port, ptr %%host) {
 entry:
   %%fd = call i32 @__kml_ipcc_fd()
   %%has = icmp sgt i32 %%fd, 0
   br i1 %%has, label %%send, label %%ret
 send:
-  %%buf = call ptr @malloc(i64 32)
+  %%hasHost = icmp ne ptr %%host, null
+  %%h = select i1 %%hasHost, ptr %%host, ptr %s
+  %%hlen = call i64 @strlen(ptr %%h)
+  %%size = add i64 %%hlen, 48
+  %%buf = call ptr @malloc(i64 %%size)
   %%port64 = sext i32 %%port to i64
-  call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, i64 %%port64)
+  call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, i64 %%port64, ptr %%h)
   call i1 @__kml_ipcc_send(ptr %%buf)
   br label %%ret
 ret:
   ret void
-}`, lstFmt))
+}`, emptyStr, lstFmt))
 
 	// __kml_cluster_disconnect_all(): cluster.disconnect() — close every
 	// worker's IPC channel (each worker's channel-read loop then winds down,
@@ -534,7 +560,7 @@ fireo:
   br label %%afto
 afto:
   ret ptr %%w
-}`, clusterSilentEntryIR(), e.clusterForkIR(idFmt, envName, idFmt, chanEnvName), clusterSilentParentIR(), clusterWorkerIR, clusterWorkerIR, clusterWorkerIR))
+}`, clusterSilentEntryIR(), e.clusterForkIR(idFmt, envName, idFmt, chanEnvName), e.clusterSilentParentIR(), clusterWorkerIR, clusterWorkerIR, clusterWorkerIR))
 
 	// __kml_cluster_wait_all(): the primary blocks until every forked worker
 	// exits (keeping the primary alive while workers serve, like Node). A
@@ -601,8 +627,8 @@ pipesdone:
 // ends (non-blocking) to the Worker's ChildProcess handle — the event loop
 // then streams them like a spawned child's stdio ('data' listeners on
 // worker.process.stdout/stderr) — and drop the write ends.
-func clusterSilentParentIR() string {
-	nonblock := httpNonblockFlag()
+func (e *Emitter) clusterSilentParentIR() string {
+	nonblock := e.httpNonblockFlag()
 	return fmt.Sprintf(`  br i1 %%dosilent, label %%pwire, label %%pnowire
 pwire:
   call i32 @close(i32 %%out_w)

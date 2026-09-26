@@ -6,8 +6,8 @@
   "coversRows": "all",
   "coverageScope": "subset",
   "coverage": {
-    "loose": "31/31",
-    "strict": "14/31"
+    "loose": "32/32",
+    "strict": "14/32"
   },
   "lede": "TypeScript's type surface reinterpreted for whole-program AOT compilation, so the divergences are about what a static native target can and can't model. Advanced type-level machinery — mapped/utility/conditional types, generics, intersections, typeof queries — is evaluated at compile time via monomorphization, then erased, and assertions (`as T`, `as const`, `satisfies`) and modifiers (`readonly`) are likewise erased rather than enforcing. The primitives are JS-faithful (`number` is an IEEE-754 double; `bigint` is arbitrary-precision), with the extended integer/float JSDoc types as the escape hatch for real fixed-width integer semantics.",
   "entries": [
@@ -167,12 +167,11 @@
       "statusRow": "symbol",
       "signature": "const s = Symbol(\"desc\")",
       "badge": "caveats",
-      "description": "V1 opaque unique values — Symbol()/Symbol(\"desc\") (no new, Symbol is not a constructor), ===/!==, typeof, .description, .toString(). Uniqueness comes from the value's own heap-pointer identity, so two Symbol() calls with the same description are never equal.",
-      "snippet": "const a = Symbol(\"id\")\nconst b = Symbol(\"id\")\nconsole.log(a === b)   // 0",
+      "description": "Opaque unique values — Symbol()/Symbol(\"desc\") (no new, Symbol is not a constructor), ===/!==, typeof, .description, .toString(), and the Symbol.for/Symbol.keyFor registry (keyFor gives undefined for a symbol not in it). Uniqueness comes from the value's own heap-pointer identity, so two Symbol() calls with the same description are never equal.",
+      "snippet": "const a = Symbol(\"id\")\nconst b = Symbol(\"id\")\nconsole.log(a === b)                  // false\nconsole.log(Symbol.keyFor(Symbol.for(\"app\")))  // app",
       "differences": [
         "No dynamic property keys",
-        "No well-known symbols as runtime values (`Symbol.iterator`, etc.); the exceptions are `[Symbol.asyncIterator]` and `[Symbol.iterator]` recognized purely syntactically as class/object-literal computed-member keys, not evaluable `Symbol` values",
-        "No `Symbol.for`/`Symbol.keyFor` registry"
+        "No well-known symbols as runtime values (`Symbol.iterator`, etc.); the exceptions are `[Symbol.asyncIterator]` and `[Symbol.iterator]` recognized purely syntactically as class/object-literal computed-member keys, not evaluable `Symbol` values"
       ],
       "seeAlso": [],
       "spec": {
@@ -342,10 +341,10 @@
       "statusRow": "Tuple types",
       "signature": "const point: [number, number]",
       "badge": "caveats",
-      "description": "A fixed-arity, heterogeneous, positional value stored as a fixed-shape struct. Supports the tuple literal, constant-index read and assignment, .length (compile-time constant), destructuring (including nested and for-of), and array-shaped rendering. Map/Array/Object.entries() return real [K, V] tuples.",
+      "description": "A fixed-arity, heterogeneous, positional value stored as a fixed-shape struct. Supports labelled elements ([min: number, max: number]), the tuple literal, constant-index read and assignment, .length (compile-time constant), destructuring (including nested and for-of), and array-shaped rendering. Map/Array/Object.entries() return real [K, V] tuples.",
       "snippet": "const point: [number, number] = [3, 4]\nconsole.log(point[0])              // 3\nconst [name, value] = point",
       "differences": [
-        "No rest/optional/named elements",
+        "No rest/optional elements",
         "Constant index only — no non-constant index; compound assignment to an element (`t[0] += x`) is a clean rejection",
         "No array methods (`.map`/`.filter`/…) on a tuple (`.length` works)",
         "Not supported nested in `any` or a union"
@@ -409,7 +408,6 @@
       "description": "V1 (default) is monomorphization — one specialized implementation per distinct combination of concrete types actually used. Covers function identity<T>, interface Box<T>, class Box<T>, and multiple type parameters <K, V>. <T extends X> constraints are parsed and enforced (structural width subtyping). V2 /** @erased */ compiles a generic function's body once, with no name mangling.",
       "snippet": "function identity<T>(x: T): T {\n  return x;\n}\nconsole.log(identity(42));       // 42\nconsole.log(identity(\"hello\"));  // hello",
       "differences": [
-        "No explicit call-site type arguments for a *function* (`identity<number>(5)`) — inference-only, blocked by the `a<b>(c)` grammar ambiguity (a generic class still takes an explicit `new Box<T>(...)` list)",
         "A generic function needs an inferable `T`/`T[]`-typed parameter for each of its type parameters",
         "Map/Set/Promise/closure/dynamic type arguments are a clean rejection (scalars, arrays, and object/interface/class types are supported)",
         "V2 `@erased` covers functions only (not interfaces/classes) and bare `T` positions only — `T[]` or `T` nested in an object field is a clean compile error",
@@ -432,9 +430,10 @@
       "description": "A string index signature types a dictionary of arbitrary string keys, backed by a map.",
       "snippet": "interface Scores {\n  [player: string]: number;\n}\nconst scores: Scores = { alice: 10, bob: 7 };\nscores[\"carol\"] = 12;",
       "differences": [
-        "String key only, map-backed — `d[key]` read/write, an object-literal initializer, and `Object.keys/values/entries` + `for…of` all work",
-        "A numeric index (`[i: number]: T`) and a mixed named+index shape (`{ id: number; [k: string]: T }`) are clean rejections",
-        "`JSON.stringify` of an index-signature dict is a clean rejection (no field table to walk) — build it from `Object.keys(...)`; a map-iterating stringify path is deferred"
+        "String or number key, map-backed — `d[key]` read/write, an object-literal initializer, and `Object.keys/values/entries` + `for…of` all work; a missing key reads `undefined`",
+        "Named properties beside the signature (`{ id: number; [k: string]: number }`) keep their declared types",
+        "`JSON.stringify` of an index-signature dict is compact output only (the `space` argument is not applied)",
+        "The class-body form (`class C { [n: number]: T }`) is dropped"
       ],
       "seeAlso": [
         "types.object",
@@ -526,6 +525,24 @@
       "seeAlso": [],
       "spec": {
         "mdn": "https://www.typescriptlang.org/docs/handbook/declaration-files/by-example.html"
+      }
+    },
+    {
+      "id": "types.typeerrors",
+      "name": "TypeScript type errors",
+      "statusRow": "TypeScript type errors (assignability, calls, operators, properties, assignment targets)",
+      "signature": "let n: number = \"x\"  // TS2322",
+      "badge": "caveats",
+      "description": "The default strict lane rejects a program TypeScript rejects for these type errors, reporting tsc's code, message and position. -compat=js compiles the same program as JavaScript.",
+      "snippet": "let n: number = \"x\"\n// klainmain: type error: main.ts: 1:1: type 'string' is not assignable to type 'number'\n//   hint: TypeScript rejects this program; -compat=js compiles it as JavaScript",
+      "differences": [
+        "Reported so far: assignability, arguments and argument counts, arithmetic operands, comparisons with no overlap, missing and excess properties, calls no overload matches, possibly-null, possibly-undefined and unknown operands, and stores to constants, functions, classes and enums; a missing name and a read of a partly assigned variable are not",
+        "Calls to generic functions and to builtins are not checked yet",
+        "A function type in a message names its parameters p0, p1, … instead of their declared names"
+      ],
+      "seeAlso": [],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html"
       }
     }
   ]

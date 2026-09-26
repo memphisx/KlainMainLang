@@ -47,11 +47,6 @@ char **__kml_win_argv(int *out_argc) {
 	return argv;
 }
 
-// ---- stdin handle -----------------------------------------------------
-// The IR loads a `FILE*` from a global (glibc: `stdin`, macOS: `__stdinp`);
-// the UCRT has no such data symbol — `stdin` is a macro over
-// __acrt_iob_func(0) — so expose one under this project's own name.
-FILE *__kml_win_stdin;
 // Saved console code pages, restored at exit (see kml_win_shim_init).
 static UINT kml_saved_out_cp, kml_saved_in_cp;
 static void kml_restore_console_cp(void) {
@@ -59,7 +54,6 @@ static void kml_restore_console_cp(void) {
 	if (kml_saved_in_cp) SetConsoleCP(kml_saved_in_cp);
 }
 __attribute__((constructor)) static void kml_win_shim_init(void) {
-	__kml_win_stdin = stdin;
 	// Node's process.stdout is synchronous — writes reach the pipe/file as they
 	// happen, not withheld until exit. C stdio full-buffers a non-TTY stream, and
 	// the UCRT ignores _IOLBF (treats it as full buffering), so line-buffering

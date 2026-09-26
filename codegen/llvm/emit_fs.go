@@ -12,6 +12,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -20,14 +21,15 @@ func (e *Emitter) emitFsReadFileSync(args []ast.Expression, pos ast.Pos) (Value,
 	if len(args) < 1 || len(args) > 2 {
 		return Value{}, fmt.Errorf("%d:%d: fs.readFileSync takes (path[, encoding | { encoding, flag }])", pos.Line, pos.Col)
 	}
-	// The optional encoding/options argument is accepted for `'utf8'` (this
-	// compiler's strings are already UTF-8, so it is a faithful no-op and the
-	// result stays a string) — the canonical `readFileSync(p, 'utf8')` idiom.
-	// The read `flag` is parsed but not acted on (a plain read). Without any
-	// encoding this still returns a string, not a Buffer (documented divergence
-	// — use readFileSyncBytes for the byte form).
-	if len(args) == 2 {
-		if _, _, err := fsTextOption(args[1], pos, "fs.readFileSync", false); err != nil {
+	// With an encoding (`'utf8'`, `{ encoding: 'utf8' }`) the result is a
+	// string: this compiler's strings are UTF-8, so the decode is a no-op.
+	// Without one it is a Buffer of the file's bytes, as in Node, read
+	// byte-exactly (an embedded null byte included). The read `flag` is
+	// parsed but not acted on (a plain read).
+	enc := ""
+	if len(args) == 2 && !isNullLiteralExpr(args[1]) {
+		var err error
+		if enc, err = fsReadOptions(args[1], pos, "fs.readFileSync"); err != nil {
 			return Value{}, err
 		}
 	}
@@ -35,12 +37,62 @@ func (e *Emitter) emitFsReadFileSync(args []ast.Expression, pos ast.Pos) (Value,
 	if err != nil {
 		return Value{}, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if isNumberTy(pathVal.Ty) {
+		// A file descriptor (`readFileSync(0)` is stdin): read it to its end.
+		fd := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", fd, e.coerce(pathVal, TypeI64).Ref))
+		e.ensureFsReadFd()
+		raw := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_fs_read_fd_all(i32 %s)", raw, fd))
+		if !readFileHasEncoding(args) {
+			return Value{Ref: raw, Ty: BufferType()}, nil
+		}
+		p, n := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", p, raw))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", n, raw))
+		return e.emitBufferEncodeString(p, n, enc), nil
+	}
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, err
+	}
 
+	if !readFileHasEncoding(args) || enc != "utf8" {
+		e.ensureFsReadFileRaw()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_fs_read_file_raw(ptr %s)", r, pathVal.Ref))
+		if !readFileHasEncoding(args) {
+			return Value{Ref: r, Ty: BufferType()}, nil
+		}
+		// Another encoding: the bytes decoded as a Buffer's toString(enc).
+		p, n := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", p, r))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", n, r))
+		return e.emitBufferEncodeString(p, n, enc), nil
+	}
 	e.ensureFsReadFile()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fs_read_file(ptr %s)", r, pathVal.Ref))
 	return Value{Ref: r, Ty: TypePtr}, nil
+}
+
+// readFileHasEncoding reports whether readFileSync's arguments name an
+// encoding (a string, or an options object with `encoding`), which makes
+// the result a string rather than a Buffer.
+func readFileHasEncoding(args []ast.Expression) bool {
+	if len(args) < 2 {
+		return false
+	}
+	switch a := args[1].(type) {
+	case *ast.StringLiteral:
+		return true
+	case *ast.ObjectLiteral:
+		for _, p := range a.Properties {
+			if p.Key == "encoding" && !isNullLiteralExpr(p.Value) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // fsTextOption parses the optional trailing encoding/options argument shared by
@@ -97,28 +149,6 @@ func fsTextOption(arg ast.Expression, pos ast.Pos, what string, allowMode bool) 
 	}
 }
 
-// emitFsReadFileSyncBytes implements fs.readFileSyncBytes(path): Uint8Array
-// (ADR-00094) — the null-byte-safe sibling of readFileSync, going through
-// __kml_fs_read_file_raw directly instead of the string-returning
-// __kml_fs_read_file wrapper. __kml_fs_read_file_raw's {ptr, i64} return is
-// already the exact SSA aggregate shape a first-class TypedArray value
-// uses (see emit_arraybuffer.go's .subarray()), so no repacking is needed.
-func (e *Emitter) emitFsReadFileSyncBytes(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: fs.readFileSyncBytes takes exactly 1 argument (path)", pos.Line, pos.Col)
-	}
-	pathVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	pathVal = e.coerce(pathVal, TypePtr)
-
-	e.ensureFsReadFileRaw()
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_fs_read_file_raw(ptr %s)", r, pathVal.Ref))
-	return Value{Ref: r, Ty: TypedArrayType("uint8")}, nil
-}
-
 func (e *Emitter) emitFsWriteFileSync(args []ast.Expression, pos ast.Pos) (Value, error) {
 	return e.emitFsWriteLikeCall(args, pos, "fs.writeFileSync", "@__kml_fs_write_file")
 }
@@ -138,6 +168,11 @@ func (e *Emitter) emitFsAppendFileSync(args []ast.Expression, pos ast.Pos) (Valu
 func (e *Emitter) emitFsWriteLikeCall(args []ast.Expression, pos ast.Pos, name, runtimeFn string) (Value, error) {
 	if len(args) < 2 || len(args) > 3 {
 		return Value{}, fmt.Errorf("%d:%d: %s takes (path, data[, encoding | { encoding, flag }])", pos.Line, pos.Col, name)
+	}
+	// A file descriptor: the data is written at the descriptor's position,
+	// as writeSync writes it (Node's writeFileSync/appendFileSync on an fd).
+	if t := e.inferExprType(args[0]); isScalarNonString(t) && t.IR != "i1" {
+		return e.emitFsWriteSync(args[:2], pos)
 	}
 	// Optional encoding/options argument. `'utf8'` is a no-op (strings are
 	// UTF-8); a `flag` beginning with `'a'` (`'a'`/`'a+'`/`'as'`) turns a
@@ -160,7 +195,9 @@ func (e *Emitter) emitFsWriteLikeCall(args []ast.Expression, pos ast.Pos, name, 
 	if err != nil {
 		return Value{}, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, err
+	}
 
 	// `{ mode }` (ADR-00988): a POSIX permission bitmask applied only when the
 	// write *creates* the file — matching Node (and open(2)'s own mode arg,
@@ -191,28 +228,12 @@ func (e *Emitter) emitFsWriteLikeCall(args []ast.Expression, pos ast.Pos, name, 
 
 	switch {
 	case dataTy.IsArrayBuffer:
-		bufVal, err := e.emitExpr(args[1])
-		if err != nil {
+		// Node takes a string, Buffer, TypedArray or DataView, never a bare
+		// ArrayBuffer: it throws, as here (tsc rejects it at compile time).
+		if _, err := e.emitExpr(args[1]); err != nil {
 			return Value{}, err
 		}
-		lenVal, err := e.emitArrayBufferByteLength(bufVal)
-		if err != nil {
-			return Value{}, err
-		}
-		dataSlot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, bufVal.Ref))
-		dataReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataReg, dataSlot))
-
-		bytesFn := "@__kml_fs_write_file_bytes"
-		if isWrite {
-			e.ensureFsWriteFileBytes()
-		} else {
-			bytesFn = "@__kml_fs_append_file_bytes"
-			e.ensureFsAppendFileBytes()
-		}
-		e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s, i64 %s)", bytesFn, pathVal.Ref, dataReg, lenVal.Ref))
-		applyMode()
+		e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_TYPE", e.internString(`The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of ArrayBuffer`))
 		return Value{Ty: TypeVoid}, nil
 
 	case dataTy.IsTypedArray:
@@ -254,6 +275,41 @@ func (e *Emitter) emitFsWriteLikeCall(args []ast.Expression, pos ast.Pos, name, 
 	}
 }
 
+// isScalarNonString reports whether t is a number or boolean: a value no
+// path argument can be.
+func isScalarNonString(t Type) bool {
+	return !t.IsDynamic && (t.Float || t.IR == "i1" || t.IR == "i8" || t.IR == "i16" || t.IR == "i32" || t.IR == "i64")
+}
+
+// fsPath is a path argument as a C string. A number or boolean path is
+// Node's ERR_INVALID_ARG_TYPE, thrown when the call runs (`The "path"
+// argument must be of type string or an instance of Buffer or URL. Received
+// type number (1)`).
+func (e *Emitter) fsPath(v Value, pos ast.Pos) (Value, error) {
+	if isScalarNonString(v.Ty) {
+		kind := "number"
+		if v.Ty.IR == "i1" {
+			kind = "boolean"
+		}
+		shown, err := e.emitValueToString(v)
+		if err != nil {
+			return Value{}, err
+		}
+		head := e.internString(`The "path" argument must be of type string or an instance of Buffer or URL. Received type ` + kind + ` (`)
+		msg, err := e.emitStringConcat(Value{Ref: head, Ty: TypePtr}, shown)
+		if err != nil {
+			return Value{}, err
+		}
+		msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(")"), Ty: TypePtr})
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitFFIThrowWhen("true", "TypeError", "ERR_INVALID_ARG_TYPE", msg.Ref)
+		return Value{Ref: "null", Ty: TypePtr}, nil
+	}
+	return e.coerce(v, TypePtr), nil
+}
+
 func (e *Emitter) emitFsExistsSync(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: fs.existsSync takes exactly 1 argument (path)", pos.Line, pos.Col)
@@ -262,7 +318,12 @@ func (e *Emitter) emitFsExistsSync(args []ast.Expression, pos ast.Pos) (Value, e
 	if err != nil {
 		return Value{}, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if isScalarNonString(pathVal.Ty) {
+		return Value{Ref: "false", Ty: TypeBool}, nil // Node: an invalid path does not exist
+	}
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, err
+	}
 
 	e.ensureFsExists()
 	r := e.freshReg()
@@ -278,7 +339,9 @@ func (e *Emitter) emitFsUnlinkSync(args []ast.Expression, pos ast.Pos) (Value, e
 	if err != nil {
 		return Value{}, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, err
+	}
 
 	e.ensureFsUnlink()
 	e.emitInstr(fmt.Sprintf("call void @__kml_fs_unlink(ptr %s)", pathVal.Ref))
@@ -307,7 +370,9 @@ func (e *Emitter) emitFsMkdirSync(args []ast.Expression, pos ast.Pos) (Value, er
 	if err != nil {
 		return Value{}, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, err
+	}
 
 	if recursive {
 		e.ensureFsMkdirP()
@@ -342,7 +407,9 @@ func (e *Emitter) emitFsRmdirSync(args []ast.Expression, pos ast.Pos) (Value, er
 	if err != nil {
 		return Value{}, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, err
+	}
 
 	if recursive {
 		// Reuse rmSync's recursive tree-removal; force=false so a missing path
@@ -364,12 +431,16 @@ func (e *Emitter) emitFsRenameSync(args []ast.Expression, pos ast.Pos) (Value, e
 	if err != nil {
 		return Value{}, err
 	}
-	oldVal = e.coerce(oldVal, TypePtr)
+	if oldVal, err = e.fsPath(oldVal, pos); err != nil {
+		return Value{}, err
+	}
 	newVal, err := e.emitExpr(args[1])
 	if err != nil {
 		return Value{}, err
 	}
-	newVal = e.coerce(newVal, TypePtr)
+	if newVal, err = e.fsPath(newVal, pos); err != nil {
+		return Value{}, err
+	}
 
 	e.ensureFsRename()
 	e.emitInstr(fmt.Sprintf("call void @__kml_fs_rename(ptr %s, ptr %s)", oldVal.Ref, newVal.Ref))
@@ -392,12 +463,16 @@ func (e *Emitter) emitFsCopyFileSync(args []ast.Expression, pos ast.Pos) (Value,
 	if err != nil {
 		return Value{}, err
 	}
-	srcVal = e.coerce(srcVal, TypePtr)
+	if srcVal, err = e.fsPath(srcVal, pos); err != nil {
+		return Value{}, err
+	}
 	destVal, err := e.emitExpr(args[1])
 	if err != nil {
 		return Value{}, err
 	}
-	destVal = e.coerce(destVal, TypePtr)
+	if destVal, err = e.fsPath(destVal, pos); err != nil {
+		return Value{}, err
+	}
 
 	// Optional `mode`: a bitmask of COPYFILE_EXCL (1), COPYFILE_FICLONE (2),
 	// COPYFILE_FICLONE_FORCE (4). Only EXCL has observable semantics (fail if
@@ -420,7 +495,7 @@ func (e *Emitter) emitFsCopyFileSync(args []ast.Expression, pos ast.Pos) (Value,
 	e.ensureFsCopyFileGuard()
 	e.emitInstr(fmt.Sprintf("call void @__kml_fs_copy_file_guard(ptr %s, ptr %s, i1 %s)", srcVal.Ref, destVal.Ref, exclRef))
 
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		// The OS copy (libuv's fs__copyfile is CopyFileW): it carries the
 		// attributes, timestamps and alternate streams a read-then-write drops.
 		// The guard above has already produced Node's error for a bad end, and
@@ -457,7 +532,9 @@ func (e *Emitter) emitFsReaddirSync(args []ast.Expression, pos ast.Pos) (Value, 
 	if err != nil {
 		return Value{}, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, err
+	}
 
 	r := e.freshReg()
 	if recursive && withTypes {
@@ -529,7 +606,9 @@ func (e *Emitter) emitFsStatSync(args []ast.Expression, pos ast.Pos) (Value, err
 	if err != nil {
 		return Value{}, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, err
+	}
 	e.ensureFsStat()
 	e.ensureMalloc()
 	trip := e.freshReg()
@@ -589,7 +668,9 @@ func (e *Emitter) emitFsLstatSync(args []ast.Expression, pos ast.Pos) (Value, er
 	if err != nil {
 		return Value{}, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, err
+	}
 	e.ensureFsLstat()
 	e.ensureMalloc()
 	trip := e.freshReg()
@@ -662,7 +743,7 @@ func (e *Emitter) emitFsPathOp(method string, args []ast.Expression, pos ast.Pos
 			if err != nil {
 				return Value{}, err
 			}
-			if targetGOOS() == "windows" {
+			if e.opts.Target.OS() == "windows" {
 				if !e.usedWinSymlinkType {
 					e.usedWinSymlinkType = true
 					e.emitGlobal("declare i32 @__kml_win_symlink_type(ptr)")
@@ -689,7 +770,6 @@ func (e *Emitter) emitFsPathOp(method string, args []ast.Expression, pos ast.Pos
 }
 
 // emitFsRmSync implements fs.rmSync(path[, {recursive, force}]) (ADR-00497).
-// Options must be a literal, same as mkdirSync's {recursive: true}.
 func (e *Emitter) emitFsRmSync(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) < 1 || len(args) > 2 {
 		return Value{}, fmt.Errorf("%d:%d: fs.rmSync takes (path[, options])", pos.Line, pos.Col)
@@ -698,30 +778,45 @@ func (e *Emitter) emitFsRmSync(args []ast.Expression, pos ast.Pos) (Value, error
 	if err != nil {
 		return Value{}, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, err
+	}
+	// The options' `recursive` and `force`, each by truthiness; `maxRetries`
+	// and `retryDelay` are accepted (Node retries only on Windows' EBUSY).
 	recursive, force := "false", "false"
 	if len(args) == 2 {
-		ol, ok := args[1].(*ast.ObjectLiteral)
-		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: fs.rmSync options must be an object literal", pos.Line, pos.Col)
-		}
-		for _, prop := range ol.Properties {
-			bl, isBool := prop.Value.(*ast.BooleanLiteral)
-			if !isBool {
-				return Value{}, fmt.Errorf("%d:%d: fs.rmSync option '%s' must be a boolean literal", pos.Line, pos.Col, prop.Key)
+		if ol, ok := args[1].(*ast.ObjectLiteral); ok {
+			for _, prop := range ol.Properties {
+				v, err := e.emitExpr(prop.Value)
+				if err != nil {
+					return Value{}, err
+				}
+				switch prop.Key {
+				case "recursive":
+					recursive = e.toBool(v).Ref
+				case "force":
+					force = e.toBool(v).Ref
+				}
 			}
-			val := "false"
-			if bl.Value {
-				val = "true"
+		} else {
+			ov, err := e.emitExpr(args[1])
+			if err != nil {
+				return Value{}, err
 			}
-			switch prop.Key {
-			case "recursive":
-				recursive = val
-			case "force":
-				force = val
-			default:
-				return Value{}, fmt.Errorf("%d:%d: unknown fs.rmSync option '%s'", pos.Line, pos.Col, prop.Key)
+			ot := e.canonicalizeClassTy(ov.Ty)
+			if !ot.IsObject {
+				return Value{}, fmt.Errorf("%d:%d: fs.rmSync options must be an object", pos.Line, pos.Col)
 			}
+			read := func(name string) string {
+				idx, fty, ok := ot.FieldIndex(name)
+				if !ok {
+					return "false"
+				}
+				g := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, ot.StructIR(), ov.Ref, idx))
+				return e.toBool(e.loadScalarOrNullableField(g, fty)).Ref
+			}
+			recursive, force = read("recursive"), read("force")
 		}
 	}
 	e.ensureFsRm()
@@ -740,11 +835,13 @@ func (e *Emitter) emitFsOpenSync(args []ast.Expression, pos ast.Pos) (Value, err
 	if err != nil {
 		return Value{}, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, err
+	}
 	flagsRef := "0"
 	if len(args) >= 2 {
 		if lit, ok := args[1].(*ast.StringLiteral); ok {
-			bits, known := openFlagBits(lit.Value)
+			bits, known := e.openFlagBits(lit.Value)
 			if !known {
 				return Value{}, fmt.Errorf("%d:%d: fs.openSync: unsupported flags '%s' (r, r+, w, w+, a, a+, wx, ax)", pos.Line, pos.Col, lit.Value)
 			}
@@ -812,7 +909,9 @@ func (e *Emitter) emitFsWatch(args []ast.Expression, pos ast.Pos) (Value, error)
 	if err != nil {
 		return Value{}, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, err
+	}
 	e.ensureFsWatchRuntime()
 	w := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fs_watch(ptr %s)", w, pathVal.Ref))
@@ -881,7 +980,9 @@ func (e *Emitter) emitFsUtimesSync(args []ast.Expression, pos ast.Pos) (Value, e
 	if err != nil {
 		return Value{}, err
 	}
-	pathVal = e.coerce(pathVal, TypePtr)
+	if pathVal, err = e.fsPath(pathVal, pos); err != nil {
+		return Value{}, err
+	}
 	// A [4 x i64] holding two timeval-shaped {sec, usec} pairs (atime, mtime);
 	// 16-byte stride matches struct timeval on every 64-bit target here.
 	buf := e.freshReg()
@@ -1140,7 +1241,9 @@ func (e *Emitter) emitFsStatfsSync(args []ast.Expression, pos ast.Pos) (Value, e
 	if err != nil {
 		return Value{}, err
 	}
-	pv = e.coerce(pv, TypePtr)
+	if pv, err = e.fsPath(pv, pos); err != nil {
+		return Value{}, err
+	}
 	e.ensureFsStatfs()
 	e.ensureMalloc()
 	ty := StatFsType()
@@ -1161,7 +1264,7 @@ func (e *Emitter) emitProcessUmask(args []ast.Expression, pos ast.Pos) (Value, e
 	}
 	if !e.usedUmask {
 		e.usedUmask = true
-		e.emitGlobal(fmt.Sprintf("declare i32 @%s(i32 noundef)", umaskSymbol()))
+		e.emitGlobal(fmt.Sprintf("declare i32 @%s(i32 noundef)", e.umaskSymbol()))
 	}
 	if len(args) == 1 {
 		mv, err := e.emitExpr(args[0])
@@ -1171,14 +1274,14 @@ func (e *Emitter) emitProcessUmask(args []ast.Expression, pos ast.Pos) (Value, e
 		m32 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", m32, e.coerce(mv, TypeI64).Ref))
 		old := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @%s(i32 %s)", old, umaskSymbol(), m32))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @%s(i32 %s)", old, e.umaskSymbol(), m32))
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = zext i32 %s to i64", r, old))
 		return Value{Ref: r, Ty: TypeI64}, nil
 	}
 	old := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @%s(i32 0)", old, umaskSymbol()))
-	e.emitInstr(fmt.Sprintf("call i32 @%s(i32 %s)", umaskSymbol(), old))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @%s(i32 0)", old, e.umaskSymbol()))
+	e.emitInstr(fmt.Sprintf("call i32 @%s(i32 %s)", e.umaskSymbol(), old))
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = zext i32 %s to i64", r, old))
 	return Value{Ref: r, Ty: TypeI64}, nil
@@ -1186,8 +1289,8 @@ func (e *Emitter) emitProcessUmask(args []ast.Expression, pos ast.Pos) (Value, e
 
 // umaskSymbol is the C symbol of umask on the build host: the UCRT exports
 // only the underscore form.
-func umaskSymbol() string {
-	if targetGOOS() == "windows" {
+func (e *Emitter) umaskSymbol() string {
+	if e.opts.Target.OS() == "windows" {
 		return "_umask"
 	}
 	return "umask"
@@ -1208,4 +1311,68 @@ func (e *Emitter) emitFsFstatSync(args []ast.Expression, pos ast.Pos) (Value, er
 	trip := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call %s @__kml_fs_fstat(i64 %s)", trip, statResultIR, fd.Ref))
 	return e.buildStatsObject(trip), nil
+}
+
+// fsReadOptions parses readFile's options argument: an encoding string
+// literal or `{ encoding, flag }`. It returns the Buffer codec the content is
+// decoded with ("utf8", "hex", "base64", "base64url", "latin1", "utf16le"),
+// or "" for none (a Buffer result). The read `flag` is accepted and not acted
+// on (a plain read).
+func fsReadOptions(arg ast.Expression, pos ast.Pos, what string) (string, error) {
+	canon := func(s *ast.StringLiteral) (string, error) {
+		if c, ok := bufferCodecName(s.Value); ok {
+			return c, nil
+		}
+		return "", fmt.Errorf("%d:%d: %s: unknown encoding '%s'", pos.Line, pos.Col, what, s.Value)
+	}
+	switch a := arg.(type) {
+	case *ast.StringLiteral:
+		return canon(a)
+	case *ast.ObjectLiteral:
+		enc := ""
+		for _, p := range a.Properties {
+			switch p.Key {
+			case "encoding":
+				if isNullLiteralExpr(p.Value) {
+					continue
+				}
+				s, ok := p.Value.(*ast.StringLiteral)
+				if !ok {
+					return "", fmt.Errorf("%d:%d: %s `encoding` must be a string literal (the codec is chosen at compile time)", pos.Line, pos.Col, what)
+				}
+				c, err := canon(s)
+				if err != nil {
+					return "", err
+				}
+				enc = c
+			case "flag", "signal":
+			default:
+				return "", fmt.Errorf("%d:%d: %s options support only { encoding, flag } (not '%s')", pos.Line, pos.Col, what, p.Key)
+			}
+		}
+		return enc, nil
+	}
+	return "", fmt.Errorf("%d:%d: %s options must be an encoding string or an object literal", pos.Line, pos.Col, what)
+}
+
+// bufferCodecName maps a Node encoding name to the Buffer codec that
+// implements it.
+func bufferCodecName(name string) (string, bool) {
+	switch strings.ToLower(name) {
+	case "utf8", "utf-8":
+		return "utf8", true
+	case "hex":
+		return "hex", true
+	case "base64":
+		return "base64", true
+	case "base64url":
+		return "base64url", true
+	case "latin1", "binary":
+		return "latin1", true
+	case "ascii":
+		return "ascii", true
+	case "utf16le", "utf-16le", "ucs2", "ucs-2":
+		return "utf16le", true
+	}
+	return "", false
 }

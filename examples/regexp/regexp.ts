@@ -40,7 +40,7 @@ try {
   const bad = new RegExp("(unterminated", "")
   console.log("no throw")
 } catch (e) {
-  console.log(e.name) // SyntaxError
+  console.log((e as Error).name) // SyntaxError
 }
 
 // .test(str): boolean — Stage 1's one method, a real PCRE2 match under the

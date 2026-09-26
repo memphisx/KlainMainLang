@@ -60,7 +60,7 @@ console.log(10n < 20n)
 console.log(20n <= 20n)
 console.log(30n > 20n)
 console.log(10n === 10n)
-console.log(10n !== 11n)
+console.log((10n as bigint) !== 11n)
 `, "true\ntrue\ntrue\ntrue\ntrue")
 }
 
@@ -124,8 +124,8 @@ func TestE2EBigIntDivByZeroThrows(t *testing.T) {
 	// Division/modulo by zero is a catchable Error, not a process abort.
 	assertOutput(t, `
 const z = 0n
-try { console.log(10n / z) } catch (e) { console.log("div: " + e.message) }
-try { console.log(10n % z) } catch (e) { console.log("mod: " + e.message) }
+try { console.log(10n / z) } catch (e) { console.log("div: " + (e as Error).message) }
+try { console.log(10n % z) } catch (e) { console.log("mod: " + (e as Error).message) }
 console.log("survived")
 `, "div: Division by zero\nmod: Division by zero\nsurvived")
 }
@@ -144,14 +144,17 @@ console.log((64n).toString(r))
 func TestE2EBigIntCrossTypeComparison(t *testing.T) {
 	// bigint vs an integer number compares exactly, both operand orders; ===/!==
 	// across types stay type-distinct (a bigint is never === a number).
+	// TypeScript allows an equality between them only through a type that
+	// admits both.
 	assertOutput(t, `
+const b = 10n as bigint | number
 console.log(10n < 5)
 console.log(10n > 5)
-console.log(10n == 10)
-console.log(10n != 11)
+console.log(b == 10)
+console.log(b != 11)
 console.log(5 < 10n)
-console.log(10n === 10)
-console.log(10n !== 10)
+console.log(b === 10)
+console.log(b !== 10)
 const x = 100
 console.log(50n < x)
 `, "false\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue")
@@ -202,14 +205,14 @@ func TestE2EBigIntNumberComparisonIsExact(t *testing.T) {
 	assertOutput(t, `
 console.log(10n < 5.5)
 console.log(10n > 5.5)
-console.log(10n == 10)
+console.log((10n as bigint | number) == 10)
 console.log(10n < 10.5)
 `, "false\ntrue\ntrue\ntrue")
 }
 
 func TestE2EBigIntMixingIsError(t *testing.T) {
 	mustCompileError(t, `const a = 5n
-console.log(a + 1)`, "mix BigInt")
+console.log(a + 1)`, "operator '+' cannot be applied to types '5n' and '1'")
 }
 
 func TestE2EBigIntUnsignedShiftIsError(t *testing.T) {
@@ -242,4 +245,12 @@ console.log(BigInt.asUintN(8, -1n))
 console.log(BigInt.asIntN(64, 12345678901234567890n))
 console.log(BigInt.asUintN(4, 31n) + 1n)
 `, "0n\n-1n\n-128n\n255n\n255n\n-6101065172474983726n\n16n")
+}
+
+// `BigInt(x)` is a bigint receiver, not a number one.
+func TestE2EBigIntCallResultMethods(t *testing.T) {
+	assertSameAsNode(t, `
+console.log(BigInt(0).toString(), BigInt(255).toString(16), BigInt("12") + 1n, typeof BigInt(3))
+console.log(String(BigInt(9)), BigInt(0n).toString())
+`)
 }

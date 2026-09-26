@@ -22,7 +22,7 @@ console.log(e3.cause instanceof Error)
 console.log(String(e3.cause))
 const plain = new Error("nocause")
 console.log(plain.cause)
-try { throw e } catch (err) { console.log(err.cause) }
+try { throw e } catch (err) { console.log((err as Error).cause) }
 `, "boom\nroot\n42\ntrue\nError: inner\nundefined\nroot")
 }
 

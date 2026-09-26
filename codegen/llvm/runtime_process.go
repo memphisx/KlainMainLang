@@ -6,318 +6,32 @@ import (
 	"strings"
 )
 
-// stdinGlobalName returns the actual external symbol backing C's `stdin`
-// macro on whatever OS is running this compiler right now (and will
-// therefore also run clang moments later). Verified directly rather than
-// guessed: on Darwin, `stdin` expands (via the preprocessor) to `__stdinp`,
-// a differently-named global `FILE*` — not literally "stdin" at the link
-// level at all. glibc (Linux) exposes it as the plain symbol `stdin`
-// itself, a long-stable convention. The same class of platform check as
-// errnoAccessor/monotonicClockID.
-func stdinGlobalName() string {
-	if targetGOOS() == "darwin" {
-		return "__stdinp"
-	}
-	if targetGOOS() == "windows" {
-		return "__kml_win_stdin" // defined by win32shim.c
-	}
-	return "stdin"
-}
-
-// ensureReadLineSync declares __kml_read_line_sync: reads one line from
-// stdin via POSIX getline() (handles arbitrarily long lines, unlike a
-// fixed-size fgets buffer), strips a trailing "\n" (and a preceding "\r",
-// for input from CRLF-terminated sources), and returns null at EOF — the
-// same "possibly-null string, check with ?? or an explicit comparison"
-// convention already used for process.env (emit_process.go).
-func (e *Emitter) ensureReadLineSync() {
-	if e.usedReadLineSync {
-		return
-	}
-	e.usedReadLineSync = true
-	e.ensureStrlen()
-	e.ensureStrHeaderRuntime()
-	e.ensureFree()
-	stdinName := stdinGlobalName()
-	e.emitGlobal(fmt.Sprintf("@%s = external global ptr", stdinName))
-	e.emitGlobal("declare i64 @getline(ptr noundef, ptr noundef, ptr noundef)")
-	e.emitGlobal(fmt.Sprintf(`
-define ptr @__kml_read_line_sync() {
-entry:
-  %%lineptr = alloca ptr, align 8
-  %%n = alloca i64, align 8
-  store ptr null, ptr %%lineptr, align 8
-  store i64 0, ptr %%n, align 8
-  %%stdinval = load ptr, ptr @%s, align 8
-  %%r = call i64 @getline(ptr %%lineptr, ptr %%n, ptr %%stdinval)
-  %%iseof = icmp slt i64 %%r, 0
-  br i1 %%iseof, label %%eof, label %%ok
-
-eof:
-  ret ptr null
-
-ok:
-  %%buf = load ptr, ptr %%lineptr, align 8
-  %%len = call i64 @strlen(ptr %%buf)
-  %%haslen = icmp sgt i64 %%len, 0
-  br i1 %%haslen, label %%checknl, label %%done
-
-checknl:
-  %%lastidx = sub i64 %%len, 1
-  %%lastp = getelementptr i8, ptr %%buf, i64 %%lastidx
-  %%lastch = load i8, ptr %%lastp, align 1
-  %%isnl = icmp eq i8 %%lastch, 10
-  br i1 %%isnl, label %%stripnl, label %%done
-
-stripnl:
-  store i8 0, ptr %%lastp, align 1
-  %%haslen2 = icmp sgt i64 %%lastidx, 0
-  br i1 %%haslen2, label %%checkcr, label %%done
-
-checkcr:
-  %%cridx = sub i64 %%lastidx, 1
-  %%crp = getelementptr i8, ptr %%buf, i64 %%cridx
-  %%crch = load i8, ptr %%crp, align 1
-  %%iscr = icmp eq i8 %%crch, 13
-  br i1 %%iscr, label %%stripcr, label %%done
-
-stripcr:
-  store i8 0, ptr %%crp, align 1
-  br label %%done
-
-done:
-  %%bufh = call ptr @__kml_str_from_cstr(ptr %%buf)
-  call void @free(ptr %%buf)
-  ret ptr %%bufh
-}`, stdinName))
-}
-
-// ensureExecFileSync declares __kml_exec_file_sync: fork()s a child process,
-// execvp()s it with argv = [file, ...args], captures the child's stdout via
-// a pipe into a malloc'd, null-terminated string (grown via realloc
-// doubling — the same growable-{ptr,i64,i64}-buffer shape __kml_fetch's
-// curl write callback already uses), and waitpid()s for it to finish.
-//
-// V1 scope, narrowed the same way every other builtin here started narrow:
-// stderr is inherited (visible on the terminal live, not captured —
-// capturing both streams at once without deadlocking needs select()/poll()
-// over two pipes, real complexity for a first pass); a non-zero exit status
-// or a signal death throws a plain Error via the existing __kml_throw
-// mechanism (same as fs's and fetch's failure paths), not a rich error
-// object with .status/.stdout/.stderr fields like real Node's.
-//
-// The wait-status decoding (low 7 bits == 0 means "exited normally", exit
-// code in bits 8-15; otherwise the low 7 bits are the killing signal) is
-// the traditional Unix wait-status encoding, valid on both Linux and
-// Darwin/BSD, and exhaustive here since waitpid is called with no WUNTRACED
-// flag — a child can only ever be reported as exited or signaled, never
-// stopped, so there's no third case to get wrong.
-func (e *Emitter) ensureExecFileSync() {
-	if e.usedExecFileSync {
-		return
-	}
-	e.usedExecFileSync = true
-	e.ensureMalloc()
-	e.ensureRealloc()
-	e.ensureMemcpy()
-	e.ensureStrlen()
-	e.ensureSprintf()
-	e.ensureExceptionHelpers()
-	e.ensureStrHeaderRuntime() // TDD-00120: header-copy the returned stdout string
-
-	e.emitGlobal("declare i32 @pipe(ptr noundef)")
-	e.ensureForkDecl()
-	e.emitGlobal("declare i32 @dup2(i32 noundef, i32 noundef)")
-	e.ensureCloseDecl()
-	e.ensureChdirDecl() // for the optional cwd option
-	e.ensureExecvpDecl()
-	e.ensureExitRawDecl()
-	e.ensureReadDecl()
-	e.ensureWaitpidDecl()
-
-	fmtExit := e.internString("Command failed with exit code %d: %s")
-	fmtSig := e.internString("Command was terminated by signal %d: %s")
-	errNamePtr := e.internString("Error")
-
-	part1 := `
-define ptr @__kml_exec_file_sync(ptr %file, ptr %argsdata, i64 %argslen, ptr %cwd) {
-entry:
-  %argvlen = add i64 %argslen, 2
-  %argvbytes = mul i64 %argvlen, 8
-  %argv = call ptr @malloc(i64 %argvbytes)
-  store ptr %file, ptr %argv, align 8
-  %argvoff1 = getelementptr ptr, ptr %argv, i64 1
-  %hasargs = icmp sgt i64 %argslen, 0
-  br i1 %hasargs, label %copyargs, label %setnull
-
-copyargs:
-  %copybytes = mul i64 %argslen, 8
-  call ptr @memcpy(ptr %argvoff1, ptr %argsdata, i64 %copybytes)
-  br label %setnull
-
-setnull:
-  %nullidx = add i64 %argslen, 1
-  %nullslot = getelementptr ptr, ptr %argv, i64 %nullidx
-  store ptr null, ptr %nullslot, align 8
-
-  %pipefd = alloca [2 x i32], align 4
-  %pipeptr = getelementptr [2 x i32], ptr %pipefd, i32 0, i32 0
-  %piperes = call i32 @pipe(ptr %pipeptr)
-  %readfdp = getelementptr [2 x i32], ptr %pipefd, i32 0, i32 0
-  %writefdp = getelementptr [2 x i32], ptr %pipefd, i32 0, i32 1
-  %readfd = load i32, ptr %readfdp, align 4
-  %writefd = load i32, ptr %writefdp, align 4
-
-` + e.execSyncForkIR() + `
-parent:
-  call i32 @close(i32 %writefd)
-  %bufslot = call ptr @malloc(i64 24)
-  %data_p = getelementptr { ptr, i64, i64 }, ptr %bufslot, i32 0, i32 0
-  %len_p = getelementptr { ptr, i64, i64 }, ptr %bufslot, i32 0, i32 1
-  %cap_p = getelementptr { ptr, i64, i64 }, ptr %bufslot, i32 0, i32 2
-  store ptr null, ptr %data_p, align 8
-  store i64 0, ptr %len_p, align 8
-  store i64 0, ptr %cap_p, align 8
-  %chunk = alloca [4096 x i8], align 1
-  %chunkptr = getelementptr [4096 x i8], ptr %chunk, i32 0, i32 0
-  br label %readloop
-
-readloop:
-  %n = call i64 @read(i32 %readfd, ptr %chunkptr, i64 4096)
-  %hasdata = icmp sgt i64 %n, 0
-  br i1 %hasdata, label %append, label %readdone
-
-append:
-  %curdata = load ptr, ptr %data_p, align 8
-  %curlen = load i64, ptr %len_p, align 8
-  %curcap = load i64, ptr %cap_p, align 8
-  %needed = add i64 %curlen, %n
-  %neededp1 = add i64 %needed, 1
-  %needgrow = icmp sgt i64 %neededp1, %curcap
-  br i1 %needgrow, label %grow, label %copy
-
-grow:
-  %cap2 = mul i64 %curcap, 2
-  %pick1 = icmp sgt i64 %neededp1, %cap2
-  %newcap_a = select i1 %pick1, i64 %neededp1, i64 %cap2
-  %atleast64 = icmp sgt i64 %newcap_a, 64
-  %newcap = select i1 %atleast64, i64 %newcap_a, i64 64
-  %newdata = call ptr @realloc(ptr %curdata, i64 %newcap)
-  store ptr %newdata, ptr %data_p, align 8
-  store i64 %newcap, ptr %cap_p, align 8
-  br label %copy
-
-copy:
-  %dataNow = load ptr, ptr %data_p, align 8
-  %destptr = getelementptr i8, ptr %dataNow, i64 %curlen
-  call ptr @memcpy(ptr %destptr, ptr %chunkptr, i64 %n)
-  %newlen = add i64 %curlen, %n
-  store i64 %newlen, ptr %len_p, align 8
-  %termptr = getelementptr i8, ptr %dataNow, i64 %newlen
-  store i8 0, ptr %termptr, align 1
-  br label %readloop
-
-readdone:
-  call i32 @close(i32 %readfd)
-  %statusslot = alloca i32, align 4
-  store i32 0, ptr %statusslot, align 4
-  call i32 @waitpid(i32 %pid, ptr %statusslot, i32 0)
-  %status = load i32, ptr %statusslot, align 4
-  %lowbyte = and i32 %status, 127
-  %exitednormally = icmp eq i32 %lowbyte, 0
-  br i1 %exitednormally, label %checkexitcode, label %signaled
-
-checkexitcode:
-  %exitcode = lshr i32 %status, 8
-  %exitcode8 = and i32 %exitcode, 255
-  %failed = icmp ne i32 %exitcode8, 0
-  br i1 %failed, label %throwexit, label %success
-
-throwexit:
-  %msgbuf1len = call i64 @strlen(ptr %file)
-  %msgbuf1size = add i64 %msgbuf1len, 64
-  %msgbuf1 = call ptr @__kml_str_alloc(i64 %msgbuf1size)
-  call i32 (ptr, ptr, ...) @sprintf(ptr %msgbuf1, ptr `
-
-	part2 := `, i32 %exitcode8, ptr %file)
-  call void @__kml_str_finalize(ptr %msgbuf1)
-  %errobj1 = call ptr @malloc(i64 24)
-  %errobj1.kind = getelementptr { i64, ptr, ptr }, ptr %errobj1, i32 0, i32 0
-  store i64 281474976710656, ptr %errobj1.kind, align 8
-  %errobj1.msg = getelementptr { i64, ptr, ptr }, ptr %errobj1, i32 0, i32 1
-  store ptr %msgbuf1, ptr %errobj1.msg, align 8
-  %errobj1.name = getelementptr { i64, ptr, ptr }, ptr %errobj1, i32 0, i32 2
-  store ptr ` + errNamePtr + `, ptr %errobj1.name, align 8
-  call void @__kml_throw(ptr %errobj1)
-  unreachable
-
-signaled:
-  %sig = and i32 %status, 127
-  %msgbuf2len = call i64 @strlen(ptr %file)
-  %msgbuf2size = add i64 %msgbuf2len, 64
-  %msgbuf2 = call ptr @__kml_str_alloc(i64 %msgbuf2size)
-  call i32 (ptr, ptr, ...) @sprintf(ptr %msgbuf2, ptr `
-
-	part3 := `, i32 %sig, ptr %file)
-  call void @__kml_str_finalize(ptr %msgbuf2)
-  %errobj2 = call ptr @malloc(i64 24)
-  %errobj2.kind = getelementptr { i64, ptr, ptr }, ptr %errobj2, i32 0, i32 0
-  store i64 281474976710656, ptr %errobj2.kind, align 8
-  %errobj2.msg = getelementptr { i64, ptr, ptr }, ptr %errobj2, i32 0, i32 1
-  store ptr %msgbuf2, ptr %errobj2.msg, align 8
-  %errobj2.name = getelementptr { i64, ptr, ptr }, ptr %errobj2, i32 0, i32 2
-  store ptr ` + errNamePtr + `, ptr %errobj2.name, align 8
-  call void @__kml_throw(ptr %errobj2)
-  unreachable
-
-success:
-  %finaldata = load ptr, ptr %data_p, align 8
-  %isnull = icmp eq ptr %finaldata, null
-  br i1 %isnull, label %emptyresult, label %havebody
-
-emptyresult:
-  %emptystr = call ptr @malloc(i64 1)
-  store i8 0, ptr %emptystr, align 1
-  br label %done
-
-havebody:
-  br label %done
-
-done:
-  %result = phi ptr [ %emptystr, %emptyresult ], [ %finaldata, %havebody ]
-  %resulth = call ptr @__kml_str_from_cstr(ptr %result)
-  ret ptr %resulth
-}`
-
-	e.emitGlobal(part1 + fmtExit + part2 + fmtSig + part3)
-}
-
 // nodePlatformName maps the Go compiler's own runtime.GOOS to the string
 // Node's process.platform would report on that host — a pure compile-time
 // mapping, no runtime code at all, following the same "check the Go
 // compiler's own OS, since it also runs clang moments later" reasoning as
-// errnoAccessor/monotonicClockID/stdinGlobalName.
+// errnoAccessor/monotonicClockID.
 
-func nodePlatformName() string {
-	switch targetGOOS() {
+func (e *Emitter) nodePlatformName() string {
+	switch e.opts.Target.OS() {
 	case "windows":
 		return "win32"
 	default:
-		return targetGOOS() // "darwin", "linux", "freebsd", etc. already match Node's own strings
+		return e.opts.Target.OS() // "darwin", "linux", "freebsd", etc. already match Node's own strings
 	}
 }
 
 // nodeArchName maps Go's GOARCH to Node's process.arch strings (amd64 → x64,
 // 386 → ia32); arm64/arm/ppc64/s390x already match. This compiler builds for
 // the host arch, so the value is a compile-time constant.
-func nodeArchName() string {
-	switch targetGOARCH() {
+func (e *Emitter) nodeArchName() string {
+	switch e.opts.Target.Arch() {
 	case "amd64":
 		return "x64"
 	case "386":
 		return "ia32"
 	default:
-		return targetGOARCH() // "arm64", "arm", "ppc64", "s390x", ... already match Node
+		return e.opts.Target.Arch() // "arm64", "arm", "ppc64", "s390x", ... already match Node
 	}
 }
 
@@ -331,7 +45,7 @@ func (e *Emitter) ensureProcessUptime() {
 	e.usedProcessUptime = true
 	e.ensureClockGettime()
 	e.emitGlobal("@__kml_proc_start_ns = internal global i64 0, align 8")
-	clk := monotonicClockID()
+	clk := e.monotonicClockID()
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_proc_uptime_init() {
 entry:
@@ -444,7 +158,7 @@ func (e *Emitter) ensureProcessHrtime() {
 	e.usedProcessHrtime = true
 	e.ensureClockGettime()
 	e.ensureMalloc()
-	clk := monotonicClockID()
+	clk := e.monotonicClockID()
 	e.emitGlobal(fmt.Sprintf(`
 define ptr @__kml_process_hrtime() {
 entry:
@@ -541,7 +255,7 @@ func (e *Emitter) ensureExecPath() {
 	// A program that reads process.execPath can spawn itself. Guard against the
 	// interpreter-flag self-fork bomb (see ensureNodeInterpFlagGuard).
 	e.ensureNodeInterpFlagGuard()
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		e.emitGlobal("declare i32 @_NSGetExecutablePath(ptr, ptr)")
 		e.emitGlobal("declare ptr @realpath(ptr, ptr)")
 		e.emitGlobal(`
@@ -615,7 +329,7 @@ func (e *Emitter) ensureProcessKill() {
 	e.ensureStrerror()
 	e.ensureCalloc()
 	e.ensureErrnoCode()
-	accessor := errnoAccessor()
+	accessor := e.errnoAccessor()
 	e.ensureCPKill() // single owner of `declare i32 @kill` (shared with child.kill)
 	fmtPtr := e.internString("kill(pid=%lld, signal=%lld): %s")
 	killErrNamePtr := e.internString("Error")
@@ -704,15 +418,15 @@ ok:
 // macOS. Node rejects a name outside that table with ERR_UNKNOWN_SIGNAL, which
 // the compile-time rejection / runtime -1 mirror.
 //
-// A function, not a package-level var: `targetGOOS()` answers from the
+// A function, not a package-level var: `e.opts.Target.OS()` answers from the
 // `--target` flag, which is parsed long after package initialisation would have
 // frozen the table to the *host*. As a var, a macOS→Linux cross-compile
 // ([ADR-00813](../../docs/adr/ADR-00813.md)) emitted Darwin's numbers into a
 // Linux binary — SIGCHLD 20 for 17, so the child-exit self-pipe
 // ([ADR-01023](../../docs/adr/ADR-01023.md)) would have watched a signal the
 // kernel never raises.
-func signalNumbers() map[string]int {
-	switch targetGOOS() {
+func (e *Emitter) signalNumbers() map[string]int {
+	switch e.opts.Target.OS() {
 	case "windows":
 		return map[string]int{"SIGHUP": 1, "SIGINT": 2, "SIGILL": 4, "SIGABRT": 6, "SIGFPE": 8, "SIGKILL": 9, "SIGSEGV": 11, "SIGTERM": 15, "SIGBREAK": 21, "SIGWINCH": 28}
 	case "darwin":
@@ -732,7 +446,7 @@ func (e *Emitter) ensureSignalFromName() {
 	}
 	e.usedSignalFromName = true
 	e.ensureStrcmp()
-	table := signalNumbers()
+	table := e.signalNumbers()
 	names := make([]string, 0, len(table))
 	for n := range table {
 		names = append(names, n)
@@ -846,7 +560,7 @@ func (e *Emitter) ensureSignalRegisteredSigbreak() {
 	}
 	e.usedSignalSigbreak = true
 	e.ensureSignalHandlerRuntime()
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		e.emitInstr("call ptr @signal(i32 21, ptr @__kml_sig_handler)")
 	}
 }

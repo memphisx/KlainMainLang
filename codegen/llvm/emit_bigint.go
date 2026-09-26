@@ -77,6 +77,29 @@ func (e *Emitter) emitBigIntLiteral(lit *ast.NumberLiteral) (Value, error) {
 func (e *Emitter) emitBigIntToString(val Value, suffix bool) (Value, error) {
 	e.ensureBigInt()
 	e.ensureStrHeaderRuntime()
+	// A `bigint | undefined` / `bigint | null` slot holding no bigint is a
+	// null pointer: render its keyword instead of handing null to the digit
+	// conversion (a segfault — `console.log(map.get(missing))`, TDD-00229).
+	if val.Ty.Nullable || val.Ty.IsUndefined {
+		absent := "null"
+		if val.Ty.IsUndefined {
+			absent = "undefined"
+		}
+		bare := val
+		bare.Ty.Nullable, bare.Ty.IsUndefined = false, false
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
+		res, err := e.emitStrBranch(isNull,
+			func() (string, error) { return e.internString(absent), nil },
+			func() (string, error) {
+				s, err := e.emitBigIntToString(bare, suffix)
+				return s.Ref, err
+			})
+		if err != nil {
+			return Value{}, err
+		}
+		return Value{Ref: res, Ty: TypePtr}, nil
+	}
 	raw := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_to_str(ptr %s, i32 10)", raw, val.Ref))
 	reg := e.freshReg() // TDD-00120: header-copy the foreign bigint digit string
@@ -93,6 +116,76 @@ func (e *Emitter) emitBigIntToString(val Value, suffix bool) (Value, error) {
 // a new bigint; comparisons return i1 via cmp.
 func (e *Emitter) emitBigIntBinary(op string, left, right Value, pos ast.Pos) (Value, error) {
 	e.ensureBigInt()
+	// An operand typed `bigint | undefined` (a missing Map entry, an absent
+	// index-signature key) may hold no bigint at run time: JS orders
+	// `undefined` against a bigint as false, finds it unequal, and throws on
+	// arithmetic — never hand the null to the bigint runtime (TDD-00229).
+	lN := left.Ty.Nullable || left.Ty.IsUndefined
+	rN := right.Ty.Nullable || right.Ty.IsUndefined
+	if lN || rN {
+		present := func(v Value, nullable bool) string {
+			if !nullable {
+				return "true"
+			}
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", r, v.Ref))
+			return r
+		}
+		lp, rp := present(left, lN), present(right, rN)
+		both := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", both, lp, rp))
+		bare := func(v Value) Value {
+			v.Ty.Nullable, v.Ty.IsUndefined = false, false
+			return v
+		}
+		if _, arith := bigIntBinFn[op]; arith {
+			notBoth := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notBoth, both))
+			throwL := e.freshLabel("bigint.mix")
+			okL := e.freshLabel("bigint.ok")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", notBoth, throwL, okL))
+			e.emitLabel(throwL)
+			e.emitThrowTypeError("Cannot mix BigInt and other types, use explicit conversions")
+			e.emitLabel(okL)
+			return e.emitBigIntBinary(op, bare(left), bare(right), pos)
+		}
+		// Comparison: computed only when both hold a bigint.
+		var absentRes string
+		switch op {
+		case "==", "===":
+			// Both absent: undefined === undefined.
+			nl := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", nl, lp))
+			nr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", nr, rp))
+			absentRes = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", absentRes, nl, nr))
+		case "!=", "!==":
+			eqBoth := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i1 %s, %s", eqBoth, lp, rp))
+			absentRes = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", absentRes, eqBoth))
+		default:
+			absentRes = "false"
+		}
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
+		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", absentRes, slot))
+		cmpL := e.freshLabel("bigint.cmp")
+		doneL := e.freshLabel("bigint.cmpdone")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", both, cmpL, doneL))
+		e.emitLabel(cmpL)
+		r, err := e.emitBigIntBinary(op, bare(left), bare(right), pos)
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", r.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		out := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", out, slot))
+		return Value{Ref: out, Ty: TypeBool}, nil
+	}
 	if fn, ok := bigIntBinFn[op]; ok {
 		if op == "/" || op == "%" {
 			e.emitBigIntDivZeroGuard(right)

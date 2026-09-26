@@ -253,7 +253,7 @@ func (e *Emitter) emitForOfChannel(s *ast.ForOfStatement, objTy Type, condL, bod
 	e.emitLabel(bodyL)
 	val := e.chanSlotToValue(raw, elemTy)
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, varPtr, elemTy.Align()))
-	if err := e.emitStmt(s.Body); err != nil {
+	if err := e.emitForOfBody(s); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))

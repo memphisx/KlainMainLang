@@ -27,65 +27,83 @@
             "feature": "`new EventEmitter<T>()` / extending it via `class X extends EventEmitter<T>`",
             "status": "implemented",
             "caveats": [
-              "An override's declared signature isn't checked for compatibility against the built-in method it replaces (matching TS's base-declaration-only override checking and this compiler's erased-`as` stance) — a wildly-wrong override signature is the author's problem ([ADR-00631](../adr/ADR-00631.md))"
+              "An override's declared signature isn't checked for compatibility against the method it replaces (tsc's TS2416) — a wildly-wrong override signature is the author's problem ([ADR-00631](../adr/ADR-00631.md))",
+              "The checker types every event as taking `...args: any[]`: @types/node types a typed map's listeners through conditional types (`Key`/`Args`/`Listener`), which it does not model yet. A typed map's event names and argument types are checked by code generation instead, not reported as TypeScript errors",
+              "`EventEmitter`'s constructor options (`captureRejections`) are a clean rejection"
             ],
             "notes": [
+              "Import it from `events` (named, default or namespace): it is not a global. With no type argument every event takes any arguments (@types/node's default event map); a type argument is an event map of argument tuples (`EventEmitter<{ data: [chunk: string]; end: [] }>`). A subclass constructor calls `super()`",
               "A class in an EventEmitter-rooted tree may **override** any EventEmitter method (`on`/`once`/`emit`/`off`/`removeListener`/`removeAllListeners`/`listenerCount`/`eventNames`) by declaring it — the override wins at every call site (statically and virtually through the vtable), and `super.<method>(...)` reaches the underlying behavior (the nearest ancestor override, else the built-in dispatch), including multi-level `B extends A extends EventEmitter` chains ([TDD-00157](../tdd/TDD-00157.md)/[ADR-00631](../adr/ADR-00631.md))",
-              "`EventEmitter<T>` is a compiler-recognized generic built-in (same monomorphized-per-`T` pattern as `Map<K,V>`/`Set<T>`/`Promise<T>`), never itself a registered class (no vtable slot); `x instanceof EventEmitter` answers as a compile-time constant, true for emitters and classes extending one ([ADR-00303](../adr/ADR-00303.md)). See LANGUAGE-CONSTRUCTS.md's `class`/`extends` note",
-              "Single inheritance, not composition: a class can extend `EventEmitter<T>` *or* another base, never both — real JS/TS has the same single-inheritance constraint, so this isn't specific to this compiler"
+              "`x instanceof EventEmitter` answers as a compile-time constant, true for emitters and classes extending one ([ADR-00303](../adr/ADR-00303.md)). See LANGUAGE-CONSTRUCTS.md's `class`/`extends` note",
+              "Single inheritance, not composition: a class can extend `EventEmitter` *or* another base, never both — real JS/TS has the same single-inheritance constraint, so this isn't specific to this compiler"
             ]
           },
           {
             "feature": "`.on(event, listener)` / `.once(event, listener)`",
             "status": "implemented",
             "caveats": [
-              "No open-ended `(...args)` beyond a declared tuple payload",
-              "A map-typed emitter requires a string-literal event name at every call site"
+              "A map-typed emitter requires a string-literal event name at every call site",
+              "A `function` listener can't read `this` (the emitter, in Node): a compile error",
+              "A listener parameter holding an array with a default value is a clean rejection"
             ],
             "notes": [
               "Chainable (`.on(...).on(...)`)",
-              "A **tuple** payload `[A, B, …]` is Node's multi-argument event — the listener takes one parameter per element (`(a, b) => …`); a non-tuple payload is a single argument (or none, for `void`) ([ADR-00392](../adr/ADR-00392.md))",
-              "Per-event payload typing via an event-map type argument (`EventEmitter<{ data: string; progress: [number, number]; end: void }>`, [ADR-00303](../adr/ADR-00303.md)/[ADR-00392](../adr/ADR-00392.md)); a scalar/`Error` type argument keeps the single-payload-for-every-event form"
+              "Every listener is held as a dynamic function, so emitters of any event map share one representation; a listener's parameters are typed from its event's tuple (or `any` on an untyped emitter), and it may take fewer parameters than the event passes ([ADR-00392](../adr/ADR-00392.md))"
             ]
           },
           {
             "feature": "`.emit(event, ...args)`",
             "status": "implemented",
             "caveats": [
-              "Open-ended untyped varargs beyond a declared tuple aren't supported",
               "A map-typed emitter requires a string-literal event name"
             ],
             "notes": [
-              "Synchronously invokes every registered listener for `event`, in registration order; returns whether any listener ran",
-              "Multi-argument `emit(event, a, b, …)` for a tuple `[A, B, …]` payload; a non-tuple payload takes one data argument ([ADR-00392](../adr/ADR-00392.md))"
+              "Synchronously invokes every registered listener for `event`, in registration order; returns whether any listener ran; a `once` listener is removed before it runs",
+              "`emit(event, a, b, …)` passes each argument; a typed map's event takes exactly its tuple's arguments ([ADR-00392](../adr/ADR-00392.md))"
             ]
           },
           {
             "feature": "`.off(event, listener)` / `.removeListener(...)` / `.removeAllListeners(...)`",
             "status": "implemented",
             "notes": [
-              "`removeAllListeners()` (no arg) clears every event; `removeAllListeners(event)` clears just that one"
+              "`off`/`removeListener` removes the most recently added matching listener and keeps the others in order; `removeAllListeners()` (no arg) clears every event; `removeAllListeners(event)` clears just that one"
+            ]
+          },
+          {
+            "feature": "`.addListener(...)` / `.prependListener(...)` / `.prependOnceListener(...)`",
+            "status": "implemented",
+            "caveats": [
+              "A map-typed emitter requires a string-literal event name"
+            ],
+            "notes": [
+              "`prepend*` puts the listener before the existing ones ([ADR-01162](../adr/ADR-01162.md))"
             ]
           },
           {
             "feature": "`.listenerCount(event)` / `.eventNames()`",
             "status": "implemented",
             "notes": [
-              "`eventNames()` returns registration order (an implementation detail of the underlying map, not a documented ordering guarantee)"
+              "`eventNames()` returns registration order; an event whose last listener is removed leaves the list, as in Node"
+            ],
+            "caveats": [
+              "Event names are strings; a symbol event name is not supported"
             ]
           },
           {
             "feature": "`EventEmitter.prototype.emit('error', ...)` special-cases (throws if no `'error'` listener)",
             "status": "implemented",
             "notes": [
-              "Resolved entirely at the `.emit()` call site — no runtime cost when the event name isn't `'error'` beyond the `strcmp` itself"
+              "An unlistened `'error'` throws its argument when it is an Error, and otherwise an Error reading `Unhandled error. (<value>)`, as Node does. Resolved at the `.emit()` call site — no runtime cost when the event name isn't `'error'` beyond the `strcmp` itself"
+            ],
+            "caveats": [
+              "A non-Error, non-string argument is rendered with `String()` in the `Unhandled error. (…)` message, where Node uses `util.inspect`"
             ]
           },
           {
             "feature": "`events.once(emitter, name)` (static helper)",
             "status": "implemented",
             "caveats": [
-              "Single-value and homogeneous multi-argument events → `Promise<args[]>`; a mixed-type multi-argument event is a clean rejection (homogeneous arrays only), and payload-less events are deferred ([ADR-00675](../adr/ADR-00675.md))"
+              "On a typed map, a mixed-type multi-argument event is a clean rejection (homogeneous arrays only) and a payload-less one is deferred ([ADR-00675](../adr/ADR-00675.md)); on an untyped emitter the result is the `any[]` arguments"
             ],
             "notes": [
               "Returns a Promise that resolves with the event's argument array the first time it fires; `const arr = await once(ee, 'x')`"
@@ -95,7 +113,7 @@
             "feature": "`events.on(emitter, name)` (async iterator)",
             "status": "implemented",
             "caveats": [
-              "Same payload rules as `once`: single-value / homogeneous multi-argument events; mixed-type multi-argument, payload-less, and non-scalar payloads are clean rejections",
+              "Same payload rules as `once`: on a typed map, mixed-type multi-argument, payload-less, and non-scalar payloads are clean rejections; on an untyped emitter each item is the `any[]` arguments",
               "The buffer is unbounded (Node's default); iterator `.return()`/`.throw()` unregistering the listener is a deferred follow-up ([ADR-00677](../adr/ADR-00677.md))"
             ],
             "notes": [

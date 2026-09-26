@@ -120,8 +120,6 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		return e.emitNewTransformStream(ex)
 	case *ast.NewCompressionStreamExpression:
 		return e.emitNewCompressionStream(ex)
-	case *ast.NewNodeStreamExpression:
-		return e.emitNewNodeStream(ex)
 	case *ast.NewErrorExpression:
 		return e.emitNewError(ex)
 	case *ast.NewDateExpression:
@@ -170,13 +168,9 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		return e.emitAwait(ex)
 	case *ast.YieldExpression:
 		// TDD-00061/ADR-00172: gated on e.currentGenerator, set only while
-		// emitting a generator function's own body (emitGeneratorFunctionDecl)
-		// — reached directly (not via that path) for a `yield` with no
-		// enclosing generator function at all, since this compiler's parser
-		// doesn't restrict `yield` to a generator body's own context (no
-		// per-function context tracking to check that against at parse
-		// time; see ADR-00171's own Investigation for why that was deferred
-		// to codegen).
+		// emitting a generator function's own body (emitGeneratorFunctionDecl).
+		// The parser rejects a `yield` outside any generator body (TS1163);
+		// this is the backstop for a generator form codegen lowers apart.
 		if e.currentGenerator == nil {
 			return Value{}, fmt.Errorf("%d:%d: 'yield' is only valid inside a generator function body", ex.GetPos().Line, ex.GetPos().Col)
 		}
@@ -350,12 +344,23 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// mangled name. Only after the local lookup miss, so any local
 		// shadows the sibling.
 		if m := e.nsSibling(id.Name); m != "" {
+			e.shadowReference(id, true)
 			return e.emitIdent(ast.NewIdentifier(m, id.GetPos()))
 		}
 		// Bare NaN/Infinity globals (real JS also has these outside the
 		// Number.* namespace) — only after a local lookup miss, so a
 		// user-declared variable of the same name still shadows them.
 		switch id.Name {
+		case "NaN", "Infinity", "workerData", "isMainThread":
+			e.shadowReference(id, false)
+		}
+		switch id.Name {
+		case "isMainThread":
+			// worker_threads.isMainThread: false in a worker module's code.
+			if e.currentWorkerMod != "" {
+				return Value{Ref: "false", Ty: TypeBool}, nil
+			}
+			return Value{Ref: "true", Ty: TypeBool}, nil
 		case "NaN":
 			return Value{Ref: "0x7FF8000000000000", Ty: TypeF64}, nil
 		case "Infinity":
@@ -376,10 +381,12 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// there too (with only Gen info, no callable Sig), and the plain
 		// funcref wrapper would emit a return-typeless function.
 		if info, found := e.lookupGenerator(id.Name); found {
-			return e.emitGeneratorCtorClosure(info, id.GetPos())
+			e.shadowReference(id, true)
+			return e.emitGeneratorCtorClosure(info, id.Name, id.GetPos())
 		}
 		if mangled, sig, found := e.resolveFuncRef(id.Name); found {
-			return e.emitNamedFuncValue(mangled, sig), nil
+			e.shadowReference(id, true)
+			return e.emitNamedFuncValue(mangled, sig, id.Name), nil
 		}
 		// A built-in error constructor in value position (`assert.throws(
 		// TypeError, fn)`, `x === RangeError`): a boxed funcref carrying the
@@ -387,12 +394,14 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// `e instanceof TypeError` never reach here — both have their own
 		// dedicated paths.
 		if isErrorKindName(id.Name) {
+			e.shadowReference(id, false)
 			return Value{Ref: e.emitNbTagPtr(e.internString(id.Name), kmlTagFuncRef), Ty: TypeAny}, nil
 		}
 		// A builtin-module marker reaching the generic identifier path means
 		// an unhandled member/usage of that module leaked past its dispatch —
 		// name the module instead of the internal marker.
 		if mod, ok := strings.CutSuffix(id.Name, "__kml_builtin"); ok {
+			e.shadowReference(id, true)
 			return Value{}, fmt.Errorf("%d:%d: this usage of the built-in '%s' module is not supported", id.GetPos().Line, id.GetPos().Col, mod)
 		}
 		// TDD-00129 Stage 2: a capturing nested function declaration referenced
@@ -405,8 +414,10 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 				return e.emitExpr(id) // re-enter: the binding now exists
 			}
 		}
+		e.shadowReference(id, false)
 		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", id.GetPos().Line, id.GetPos().Col, id.Name)
 	}
+	e.shadowReference(id, true)
 	if sym.NarrowedTo != nil {
 		// A union-typed local flow-narrowed in this region (TDD-00114): load the
 		// { i8, i64 } box and unbox it to the concrete narrowed type, so the
@@ -464,5 +475,13 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 	}
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
+	if t, ok := e.checkerNarrowed(id, sym.Ty); ok {
+		// An `any` the checker narrows to a primitive reads unboxed; a box
+		// narrowed to an array (or Buffer) member unboxes to its header.
+		if sym.Ty.IsDynamic && (t.IsArray || isNullableScalar(t)) {
+			return e.emitUnboxBoxToType(reg, t), nil
+		}
+		return e.coerce(Value{Ref: reg, Ty: sym.Ty}, t), nil
+	}
 	return Value{Ref: reg, Ty: sym.Ty}, nil
 }

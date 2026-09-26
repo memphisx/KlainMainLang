@@ -12,19 +12,19 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3957 files total: **54 passed**, 2532 failed, 1371 skipped (out of scope).
+3957 files total: **162 passed**, 2424 failed, 1371 skipped (out of scope).
 
-Of the 2586 files that compiled far enough to run, **54 passed (2.1%)**.
+Of the 2586 files that compiled far enough to run, **162 passed (6.3%)**.
 
 ## By suite
 
 | Suite | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|
-| parallel | 50 | 2422 | 1071 | 3543 |
-| sequential | 0 | 31 | 90 | 121 |
-| es-module | 2 | 57 | 116 | 175 |
+| parallel | 153 | 2319 | 1071 | 3543 |
+| sequential | 1 | 30 | 90 | 121 |
+| es-module | 3 | 56 | 116 | 175 |
 | message | 1 | 8 | 2 | 11 |
-| internet | 1 | 14 | 23 | 38 |
+| internet | 4 | 11 | 23 | 38 |
 | pummel | 0 | 0 | 52 | 52 |
 | known_issues | 0 | 0 | 17 | 17 |
 
@@ -32,26 +32,26 @@ Of the 2586 files that compiled far enough to run, **54 passed (2.1%)**.
 
 | Module | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|
-| http | 0 | 348 | 41 | 389 |
+| http | 33 | 315 | 41 | 389 |
 | http2 | 0 | 210 | 48 | 258 |
-| fs | 1 | 160 | 88 | 249 |
-| tls | 0 | 130 | 71 | 201 |
-| stream | 0 | 153 | 20 | 173 |
-| net | 5 | 121 | 44 | 170 |
+| fs | 9 | 152 | 88 | 249 |
+| tls | 1 | 129 | 71 | 201 |
+| stream | 31 | 122 | 20 | 173 |
+| net | 15 | 111 | 44 | 170 |
 | worker | 0 | 118 | 19 | 137 |
-| esm | 0 | 48 | 80 | 128 |
+| esm | 1 | 47 | 80 | 128 |
 | child | 1 | 64 | 46 | 111 |
 | crypto | 0 | 60 | 42 | 102 |
 | vm | 0 | 75 | 19 | 94 |
-| process | 6 | 63 | 21 | 90 |
+| process | 8 | 61 | 21 | 90 |
 | dgram | 1 | 59 | 26 | 86 |
-| cluster | 2 | 61 | 22 | 85 |
+| cluster | 5 | 58 | 22 | 85 |
 | repl | 0 | 37 | 41 | 78 |
-| https | 0 | 53 | 15 | 68 |
+| https | 1 | 52 | 15 | 68 |
 | inspector | 0 | 2 | 64 | 66 |
 | whatwg | 0 | 24 | 39 | 63 |
-| buffer | 2 | 45 | 15 | 62 |
-| timers | 5 | 38 | 16 | 59 |
+| buffer | 5 | 42 | 15 | 62 |
+| timers | 7 | 36 | 16 | 59 |
 | zlib | 1 | 46 | 6 | 53 |
 | domain | 0 | 28 | 22 | 50 |
 | require | 2 | 4 | 42 | 48 |
@@ -64,10 +64,10 @@ Of the 2586 files that compiled far enough to run, **54 passed (2.1%)**.
 | module | 0 | 17 | 12 | 29 |
 | snapshot | 0 | 12 | 17 | 29 |
 | webcrypto | 0 | 19 | 10 | 29 |
-| event | 0 | 22 | 6 | 28 |
+| event | 1 | 21 | 6 | 28 |
 | permission | 0 | 18 | 10 | 28 |
-| util | 1 | 10 | 17 | 28 |
-| stream2 | 0 | 24 | 3 | 27 |
+| util | 0 | 11 | 17 | 28 |
+| stream2 | 1 | 23 | 3 | 27 |
 | eslint | 0 | 0 | 24 | 24 |
 | internal | 0 | 1 | 21 | 22 |
 | readline | 0 | 15 | 6 | 21 |
@@ -79,46 +79,46 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 229 | COMPILE_ERROR: a number has no method '%s' |
-| 219 | COMPILE_ERROR: slice is only supported on strings |
-| 135 | COMPILE_ERROR: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method |
-| 132 | COMPILE_ERROR: undefined variable '%s' |
-| 114 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
-| 93 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
+| 289 | COMPILE_ERROR: a number has no method '%s' |
+| 212 | COMPILE_ERROR: undefined variable '%s' |
+| 144 | RUNTIME_NONZERO_EXIT:  |
 | 84 | MODULE_NOT_IMPLEMENTED: vm |
-| 65 | COMPILE_ERROR: field access on non-object (no field '%s') |
-| 56 | COMPILE_ERROR: no field '%s' |
+| 79 | COMPILE_ERROR: no field '%s' |
+| 73 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
+| 53 | COMPILE_ERROR: object has no field '%s' |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
-| 49 | COMPILE_ERROR: unknown class '%s' |
+| 47 | COMPILE_ERROR: field access on non-object (no field '%s') |
+| 45 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 42 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
-| 41 | RUNTIME_NONZERO_EXIT:  |
-| 40 | COMPILE_ERROR: undefined function or closure '%s' |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
-| 26 | COMPILE_ERROR: process has no method '%s' |
-| 24 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
+| 34 | COMPILE_ERROR: process has no method '%s' |
+| 34 | COMPILE_ERROR: unknown class '%s' |
+| 30 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
+| 28 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
+| 28 | COMPILE_ERROR: undefined function or closure '%s' |
+| 27 | COMPILE_ERROR: child_process.fork supports self-fork only — the path must be __filename or process… |
+| 27 | COMPILE_ERROR: child_process.spawnSync's args argument must be a string[] |
 | 23 | MODULE_NOT_IMPLEMENTED: perf_hooks |
-| 22 | COMPILE_ERROR: a net socket supports '%s', '%s', '%s', and '%s'/'%s' (got '%s') |
-| 20 | COMPILE_ERROR: field assignment on non-object |
-| 20 | COMPILE_ERROR: fs has no method '%s' |
+| 22 | RUN_TIMEOUT |
+| 20 | COMPILE_ERROR: only simple function calls are supported (the callee is not a named function, a funct… |
+| 20 | COMPILE_ERROR: type mismatch in array element — a value of one type cannot be used where an incomp… |
 | 20 | MODULE_NOT_IMPLEMENTED: v8 |
-| 19 | COMPILE_ERROR: type mismatch in array element — a value of one type cannot be used where an incomp… |
-| 19 | COMPILE_ERROR: unexpected token + in expression |
-| 18 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
+| 18 | COMPILE_ERROR: assert.throws's first argument must be a function |
+| 18 | COMPILE_ERROR: method '%s' on class '%s' overrides an inherited method with an incompatible signatur… |
 | 18 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
-| 17 | COMPILE_ERROR: only simple function calls are supported (the callee is not a named function, a funct… |
 | 17 | MODULE_NOT_IMPLEMENTED: module |
-| 16 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
-| 15 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
+| 16 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
+| 16 | COMPILE_ERROR: an EventEmitter has no method '%s' |
+| 15 | COMPILE_ERROR: '%s' is not an object |
+| 15 | COMPILE_ERROR: child_process.spawn's args argument must be a string[] |
 | 15 | COMPILE_ERROR: http.createServer's listener must be (req: IncomingMessage, res: ServerResponse) => v… |
-| 15 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
-| 13 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s'|'%s'|'%s'|'%s'|'%s'|'%s', listener) (got '… |
+| 14 | COMPILE_ERROR: '%s' has no exported member '%s' |
+| 14 | COMPILE_ERROR: a ChildProcess stream supports only .on('%s'|'%s', cb) |
+| 14 | COMPILE_ERROR: an Http2Stream supports .respond(headers), .write(chunk), .end(chunk?), .on('%s'|'%s'… |
 | 13 | COMPILE_ERROR: expected }, got : |
-| 13 | COMPILE_ERROR: new Worker options: only '%s' is supported (found '%s') |
-| 12 | COMPILE_ERROR: a ReadableStream's read callback must be an arrow function or function expression |
-| 12 | COMPILE_ERROR: on'%s's payload type |
-| 11 | COMPILE_ERROR: '%s' is not an object |
-| 11 | COMPILE_ERROR: a ChildProcess stream supports only .on('%s'|'%s', cb) |
+| 12 | COMPILE_ERROR: a ChildProcess has no method '%s' |
+| 11 | COMPILE_ERROR: fs has no method '%s' |
 
 ## Top skip reasons
 
@@ -152,63 +152,171 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 12 | requires Node common harness (common.spawnPromisified) |
 | 11 | Node-internal harness file require('../common/dns') |
 
-## Passing files (54)
+## Passing files (162)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
 | File | Module | Default-only |
 |---|---|---|
+| `es-module/test-esm-fs-promises.mjs` | esm |  |
 | `es-module/test-require-module-detect-entry-point-aou.js` | require |  |
 | `es-module/test-require-module-detect-entry-point.js` | require |  |
 | `internet/test-dns-regress-6244.js` | dns |  |
+| `internet/test-http-dns-fail.js` | http |  |
+| `internet/test-net-connect-timeout.js` | net |  |
+| `internet/test-net-connect-unref.js` | net |  |
 | `message/console_assert.js` | console_assert |  |
 | `parallel/test-assert-checktag.js` | assert |  |
+| `parallel/test-assert-fail.js` | assert |  |
+| `parallel/test-buffer-ascii.js` | buffer |  |
 | `parallel/test-buffer-badhex.js` | buffer |  |
 | `parallel/test-buffer-nopendingdep-map.js` | buffer |  |
+| `parallel/test-buffer-prototype-inspect.js` | buffer |  |
+| `parallel/test-buffer-zero-fill-reset.js` | buffer |  |
 | `parallel/test-child-process-set-blocking.js` | child |  |
+| `parallel/test-cluster-bind-privileged-port.js` | cluster |  |
+| `parallel/test-cluster-dgram-reuse.js` | cluster |  |
 | `parallel/test-cluster-disconnect-with-no-workers.js` | cluster |  |
+| `parallel/test-cluster-listening-port.js` | cluster |  |
 | `parallel/test-cluster-worker-death.js` | cluster |  |
 | `parallel/test-dgram-abort-closed.js` | dgram |  |
 | `parallel/test-diagnostics-channel-has-subscribers.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-sync-unsubscribe.js` | diagnostics |  |
 | `parallel/test-eval.js` | eval |  |
+| `parallel/test-event-emitter-num-args.js` | event |  |
 | `parallel/test-eventsource.js` | eventsource |  |
+| `parallel/test-fs-operations-with-surrogate-pairs.js` | fs |  |
 | `parallel/test-fs-read-file-sync-hostname.js` | fs |  |
+| `parallel/test-fs-read-stream-double-close.js` | fs |  |
+| `parallel/test-fs-readdir-recursive.js` | fs |  |
+| `parallel/test-fs-rmdir-recursive-sync-warns-not-found.js` | fs |  |
+| `parallel/test-fs-rmdir-recursive-warns-not-found.js` | fs |  |
+| `parallel/test-fs-truncate-clear-file-zero.js` | fs |  |
+| `parallel/test-fs-watch-recursive-linux-parallel-remove.js` | fs |  |
+| `parallel/test-fs-write-stream-close-without-callback.js` | fs |  |
 | `parallel/test-global-customevent-disabled.js` | global |  |
 | `parallel/test-global-domexception.js` | global |  |
 | `parallel/test-global-webcrypto-disbled.js` | global |  |
+| `parallel/test-http-abort-before-end.js` | http |  |
+| `parallel/test-http-agent-maxsockets-respected.js` | http |  |
+| `parallel/test-http-allow-req-after-204-res.js` | http |  |
+| `parallel/test-http-chunked-304.js` | http |  |
+| `parallel/test-http-chunked-smuggling.js` | http |  |
+| `parallel/test-http-client-agent-abort-close-event.js` | http |  |
+| `parallel/test-http-client-close-event.js` | http |  |
+| `parallel/test-http-client-invalid-path.js` | http |  |
+| `parallel/test-http-client-keep-alive-release-before-finish.js` | http |  |
+| `parallel/test-http-client-res-destroyed.js` | http |  |
+| `parallel/test-http-header-obstext.js` | http |  |
+| `parallel/test-http-invalid-te.js` | http |  |
+| `parallel/test-http-listening.js` | http |  |
+| `parallel/test-http-methods.js` | http |  |
+| `parallel/test-http-outgoing-writableFinished.js` | http |  |
+| `parallel/test-http-request-invalid-method-error.js` | http |  |
+| `parallel/test-http-request-method-delete-payload.js` | http |  |
+| `parallel/test-http-request-smuggling-content-length.js` | http |  |
+| `parallel/test-http-response-add-header-after-sent.js` | http |  |
+| `parallel/test-http-server-close-idle-wait-response.js` | http |  |
+| `parallel/test-http-server-de-chunked-trailer.js` | http |  |
+| `parallel/test-http-server-headers-timeout-interrupted-headers.js` | http |  |
+| `parallel/test-http-server-non-utf8-header.js` | http |  |
+| `parallel/test-http-server-reject-chunked-with-content-length.js` | http |  |
+| `parallel/test-http-server-reject-cr-no-lf.js` | http |  |
+| `parallel/test-http-server-request-timeout-interrupted-headers.js` | http |  |
+| `parallel/test-http-transfer-encoding-smuggling.js` | http |  |
+| `parallel/test-http-wget.js` | http |  |
+| `parallel/test-http-write-head-2.js` | http |  |
+| `parallel/test-http-write-head-after-set-header.js` | http |  |
+| `parallel/test-http-zerolengthbuffer.js` | http |  |
+| `parallel/test-https-agent-constructor.js` | https |  |
 | `parallel/test-kill-segfault-freebsd.js` | kill |  |
+| `parallel/test-microtask-queue-run-immediate.js` | microtask |  |
+| `parallel/test-microtask-queue-run.js` | microtask |  |
+| `parallel/test-net-better-error-messages-listen-path.js` | net |  |
+| `parallel/test-net-better-error-messages-listen.js` | net |  |
 | `parallel/test-net-connect-after-destroy.js` | net |  |
-| `parallel/test-net-connect-options-invalid.js` | net |  |
+| `parallel/test-net-connect-destroy.js` | net |  |
+| `parallel/test-net-connect-immediate-destroy.js` | net |  |
+| `parallel/test-net-end-without-connect.js` | net |  |
 | `parallel/test-net-isipv4.js` | net |  |
 | `parallel/test-net-isipv6.js` | net |  |
-| `parallel/test-net-socket-connect-invalid-autoselectfamily.js` | net |  |
+| `parallel/test-net-listen-close-server.js` | net |  |
+| `parallel/test-net-listen-error.js` | net |  |
+| `parallel/test-net-listening.js` | net |  |
+| `parallel/test-net-socket-destroy-twice.js` | net |  |
+| `parallel/test-net-socket-no-halfopen-enforcer.js` | net |  |
 | `parallel/test-next-tick-doesnt-hang.js` | next |  |
+| `parallel/test-next-tick-fixed-queue-regression.js` | next |  |
 | `parallel/test-no-node-snapshot.js` | no |  |
+| `parallel/test-outgoing-message-destroy.js` | outgoing |  |
 | `parallel/test-path-basename.js` | path | −4 |
 | `parallel/test-path-dirname.js` | path | −9 |
 | `parallel/test-path-relative.js` | path | −1 |
+| `parallel/test-pipe-abstract-socket-http.js` | pipe |  |
+| `parallel/test-pipe-address.js` | pipe |  |
+| `parallel/test-pipe-return-val.js` | pipe |  |
 | `parallel/test-process-chdir-errormessage.js` | process |  |
 | `parallel/test-process-env-delete.js` | process |  |
 | `parallel/test-process-env-deprecation.js` | process |  |
+| `parallel/test-process-env-windows-error-reset.js` | process |  |
 | `parallel/test-process-exit-recursive.js` | process |  |
 | `parallel/test-process-exit.js` | process |  |
+| `parallel/test-process-hrtime-bigint.js` | process |  |
 | `parallel/test-process-uptime.js` | process |  |
+| `parallel/test-promise-unhandled-issue-43655.js` | promise |  |
 | `parallel/test-promises-unhandled-proxy-rejections.js` | promises |  |
 | `parallel/test-promises-unhandled-symbol-rejections.js` | promises |  |
+| `parallel/test-readable-large-hwm.js` | readable |  |
+| `parallel/test-readable-single-end.js` | readable |  |
+| `parallel/test-regression-object-prototype.js` | regression |  |
 | `parallel/test-runner-subtest-after-hook.js` | runner |  |
 | `parallel/test-stdin-hang.js` | stdin |  |
+| `parallel/test-stream-backpressure.js` | stream |  |
+| `parallel/test-stream-base-typechecking.js` | stream |  |
+| `parallel/test-stream-destroy-event-order.js` | stream |  |
+| `parallel/test-stream-duplex-props.js` | stream |  |
+| `parallel/test-stream-duplex-readable-end.js` | stream |  |
+| `parallel/test-stream-error-once.js` | stream |  |
+| `parallel/test-stream-objectmode-undefined.js` | stream |  |
+| `parallel/test-stream-passthrough-drain.js` | stream |  |
+| `parallel/test-stream-pipe-flow-after-unpipe.js` | stream |  |
+| `parallel/test-stream-pipe-needDrain.js` | stream |  |
+| `parallel/test-stream-readable-aborted.js` | stream |  |
+| `parallel/test-stream-readable-data.js` | stream |  |
+| `parallel/test-stream-readable-emit-readable-short-stream.js` | stream |  |
+| `parallel/test-stream-readable-end-destroyed.js` | stream |  |
+| `parallel/test-stream-readable-error-end.js` | stream |  |
+| `parallel/test-stream-readable-from-web-termination.js` | stream |  |
+| `parallel/test-stream-readable-hwm-0-async.js` | stream |  |
+| `parallel/test-stream-readable-hwm-0.js` | stream |  |
+| `parallel/test-stream-readable-needReadable.js` | stream |  |
+| `parallel/test-stream-readable-reading-readingMore.js` | stream |  |
+| `parallel/test-stream-readable-resume-hwm.js` | stream |  |
+| `parallel/test-stream-readable-resumeScheduled.js` | stream |  |
+| `parallel/test-stream-readableListening-state.js` | stream |  |
+| `parallel/test-stream-toWeb-allows-server-response.js` | stream |  |
+| `parallel/test-stream-writable-aborted.js` | stream |  |
+| `parallel/test-stream-writable-final-destroy.js` | stream |  |
+| `parallel/test-stream-writable-finish-destroyed.js` | stream |  |
+| `parallel/test-stream-writable-properties.js` | stream |  |
+| `parallel/test-stream-writable-writable.js` | stream |  |
+| `parallel/test-stream-write-drain.js` | stream |  |
+| `parallel/test-stream-write-final.js` | stream |  |
+| `parallel/test-stream2-decode-partial.js` | stream2 |  |
 | `parallel/test-timers-clear-object-does-not-throw-error.js` | timers |  |
 | `parallel/test-timers-clear-timeout-interval-equivalent.js` | timers |  |
 | `parallel/test-timers-immediate-queue.js` | timers |  |
 | `parallel/test-timers-non-integer-delay.js` | timers |  |
 | `parallel/test-timers-same-timeout-wrong-list-deleted.js` | timers |  |
+| `parallel/test-timers-setimmediate-infinite-loop.js` | timers |  |
+| `parallel/test-timers-timeout-with-non-integer.js` | timers |  |
+| `parallel/test-tls-client-abort2.js` | tls |  |
 | `parallel/test-url-domain-ascii-unicode.js` | url |  |
 | `parallel/test-url-format-whatwg.js` | url |  |
 | `parallel/test-url-format.js` | url |  |
 | `parallel/test-url-parse-format.js` | url |  |
 | `parallel/test-utf8-scripts.js` | utf8 |  |
-| `parallel/test-util-inspect-long-running.js` | util |  |
 | `parallel/test-v8-flag-pool-size-0.js` | v8 |  |
 | `parallel/test-websocket.js` | websocket |  |
 | `parallel/test-zlib-no-stream.js` | zlib |  |
+| `sequential/test-http-server-keep-alive-timeout-slow-server.js` | http |  |

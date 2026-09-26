@@ -12,6 +12,7 @@ the same number of files.
 |---|---|
 | `emitter.go` | `Emitter` struct, `freshReg`/`freshLabel`, `emitInstr`/`emitAlloca`/`emitTerminator`/`emitLabel`, scope stack |
 | `types.go` | `Type` struct, `ArrayOf`, `ObjectOf`, IR helpers, `Align()` |
+| `shadow.go` + `shadow_binder.go` | The shadow comparison (`KML_SHADOW`, `make shadow-report`): hooks on the old type deciders and `emitIdent` ask the new front end the same question and record disagreements; the binder is the registered oracle |
 | `emit_exprs.go` (core dispatch `emitExpr`/literals) + `emit_exprs_operators.go` (binary/unary/update/ternary/`??`) + `emit_exprs_assign.go` (`emitAssign`) + `emit_exprs_member.go` (`emitIndexPtr`, `emitMember`, `?.`) + `emit_exprs_types.go` (`inferExprType` and friends) + `emit_exprs_coerce.go` (`coerce`/`toBool`) + `emit_exprs_vardecl.go` (`emitVarDecl`) | Expression evaluation, member/index access, static type inference, scalar coercion, variable declarations |
 | `emit_stmts.go` | Statement dispatch (`emitStmt`), all loop forms, break/continue stacks |
 | `emit_call.go` (dispatch router only) + `emit_call_console.go` + `emit_call_json.go` + `emit_call_math.go` + `emit_call_number.go` + `emit_call_encoding.go` + `emit_structured_clone.go` | Call dispatch router (routes to every other domain's own call implementation) plus console.\*/JSON.\*/Math.\*/Number.\*/btoa-atob-encodeURI-crypto-TextEncoder/TextDecoder/structuredClone, the built-ins with nowhere else to live |
@@ -36,6 +37,7 @@ the same number of files.
 | `emit_url.go` | `URL`/`URLSearchParams` (backed by libcurl's URL API + the existing `Map<string,string>` machinery), plus `emitMapStrToQueryString` (shared with `emit_querystring.go`) |
 | `emit_querystring.go` | `querystring.parse`/`.stringify` — thin wrappers over `emit_url.go`'s query-string machinery |
 | `emit_assert.go` | `assert` module (`.ok`/bare `assert(...)`/`.equal`/`.strictEqual`/`.notEqual`/`.notStrictEqual`/`.fail`/`.throws`) — reuses `emit_exceptions.go`'s throw machinery and `emit_exprs_operators.go`'s `emitBinary` for comparisons |
+| `emit_node_stream.go` + `runtime_node_stream.go` | The runtime stream handles behind `fs.createReadStream`/`createWriteStream` and the HTTP server's `req`/`res`. Node's `stream` module itself is TypeScript: `lib/node/stream.ts`, compiled with the importing program ([ADR-01161](adr/ADR-01161.md)) |
 | `emit_arraybuffer.go` | `ArrayBuffer` + TypedArrays (`Int8Array`…`Float64Array`) — construction, `.set()`/`.subarray()`/`.byteLength`; everything else reuses `emit_arrays_*.go` unchanged |
 | `emit_memory.go` | `Memory.free` (manual memory-management escape hatch) |
 | `emit_timers.go` | `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval`, plus their `ensureTimerRuntime` C-runtime backing store (kept together, not under `runtime_*.go`, since this domain's runtime queue has only ever had one caller) |

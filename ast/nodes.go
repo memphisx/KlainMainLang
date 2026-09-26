@@ -27,6 +27,10 @@ type Expression interface {
 
 type Program struct {
 	Body []Statement
+	// ResolvedModules maps a module-specifier string literal (a `new Worker`
+	// path) to the canonical file the resolver resolved it to, relative to the
+	// file it was written in.
+	ResolvedModules map[*StringLiteral]string
 	// Namespaces records TS `namespace X { ... }` / `module X { ... }`
 	// declarations (TDD-00095, extended by TDD-00148): namespace name →
 	// value-member name → exported. The members themselves were desugared by
@@ -38,28 +42,79 @@ type Program struct {
 	// interface/type/enum) desugar to bare-name declarations and are not
 	// recorded here. Nil when a program declares none.
 	Namespaces map[string]map[string]bool
+	// NamespaceGroups records, for each namespace (nested ones by their
+	// dotted name), the top-level statements its members desugared to, in
+	// order — the same statements Body holds. The binder makes each group a
+	// namespace scope around its members, so a member's body resolves a bare
+	// sibling name to that sibling (TDD-00230 P2.1).
+	NamespaceGroups []NamespaceGroup
+	// Assertions records the type assertions the parser erases (`e as
+	// const`, `e satisfies T`, `<T>e`) by the expression they apply to. Codegen sees
+	// the bare expression; the checker reads them (TDD-00230 P2.7).
+	Assertions map[Expression]Assertion
+	// ThisParams records a function's `this: T` parameter annotation, which
+	// the parser drops from its parameters (it is no runtime argument).
+	ThisParams map[Node]*TypeAnnotation
+	// EntryIsModule marks a program whose entry file is an ES module (it
+	// imports or exports), recorded before the resolver strips its imports:
+	// its top level's promise jobs run before its ticks.
+	EntryIsModule bool
+	// AmbientNames are the names of the ambient declarations the parser
+	// erases (`declare class C {…}`, `declare type T = …`): bindings a
+	// program may use that no statement of Body declares.
+	AmbientNames []string
+	// TypeParamNames is every type parameter name the program declares
+	// anywhere (a function's, a method's, an arrow's, a type's, `infer U`,
+	// a mapped type's key), for the type-position TS2304 check.
+	TypeParamNames map[string]bool
+	// BuiltinMarkers is filled by the resolver on the merged program: each
+	// builtin module's marker name (the identifier its imports' uses are
+	// rewritten through, `path__kml_builtin`) to the module's specifier.
+	BuiltinMarkers map[string]string
+	// LibDeclNames is filled by the resolver on the merged program: the
+	// (renamed) top-level names the builtin modules written in TypeScript
+	// declare. A program reaches them only through an import.
+	LibDeclNames map[string]bool
+	// LibStatements are the merged program's top-level statements that come
+	// from the builtin modules written in TypeScript: they compile in the
+	// strict lane whatever lane the program's own code uses.
+	LibStatements map[Statement]bool
+	// CallableClasses are the (renamed) classes of the builtin modules
+	// written in TypeScript that Node implements as plain functions
+	// constructing when called without `new` (`http.Server(…)`), marked
+	// `// kml:callable <Name>` in the module's source.
+	CallableClasses map[string]bool
+	// NodeTypeImports is filled by the resolver per file: each local a
+	// named import of a builtin module binds to a name Node's module
+	// exports but this compiler implements only as a type (`import {
+	// IncomingMessage } from 'http'`), mapped to its module. The import is
+	// erased; a value use is an error.
+	NodeTypeImports map[string]string
+	// BuiltinImports is filled by the resolver on the merged program: the
+	// local names imports from builtin modules bind (`import { readFileSync }
+	// from 'fs'`), whose import statements the merged program drops.
+	BuiltinImports map[string]bool
+	// BuiltinImportRefs maps each of those local names a named or default
+	// import binds to its module (without `node:`) and exported name, so
+	// the checker types it from that module's declaration. A default import
+	// names "default".
+	BuiltinImportRefs map[string]BuiltinImportRef
 	// NSAliases records TS import-equals alias declarations
 	// (`import X = Y.Z`, and `[export] import X = N` inside a namespace —
 	// TDD-00148/ADR-00456). Targets are recorded as written; codegen
 	// resolves them against the namespace table (scope-relative, innermost
 	// outward) once every namespace is known.
 	NSAliases []NSAliasDecl
-	// WorkerPaths is filled by the parser for a single file's program: the
-	// raw string-literal path of every `new Worker('...')` in the file, so
-	// the resolver can resolve worker entry files as dependencies without a
-	// full-AST walk (TDD-00098). Empty in the merged program.
+	// WorkerPaths is filled by the resolver for a single file's program: the
+	// raw string-literal path of every `new Worker('...')` of the builtin in
+	// the file — its worker entry files, which are dependencies (TDD-00098).
+	// Empty in the merged program.
 	WorkerPaths []string
-	// DynamicImportPaths is filled by the parser for a single file's program:
-	// the raw string-literal specifier of every dynamic `import('...')` with a
-	// literal argument, so the resolver can resolve dynamic-import targets as
-	// dependencies without a full-AST walk (TDD-00055/TDD-00056), mirroring
-	// WorkerPaths. A non-literal `import(expr)` is not recorded here (it is a
-	// clean codegen-time error). Empty in the merged program.
-	DynamicImportPaths []string
-	// DynamicImportNodes is the parser-filled list of the actual dynamic
-	// `import('...')` AST nodes with a literal specifier (same objects that end
-	// up in the merged Body), so the resolver can annotate each with its
-	// ResolvedPath in the per-file pass where the importing directory is known.
+	// DynamicImportNodes is filled by the resolver for a single file's
+	// program: the dynamic `import('...')` nodes with a literal specifier
+	// (the same objects that end up in the merged Body), so each can be
+	// resolved as a dependency and annotated with its ResolvedPath in the
+	// per-file pass where the importing directory is known.
 	DynamicImportNodes []*ImportCallExpression
 	// UsesDynamicImport is set by the resolver on the merged program when the
 	// program contains at least one dynamic `import('...')` — used by main.go to
@@ -128,8 +183,22 @@ type WorkerModule struct {
 // convention other internal manglings rely on. A nested/dotted namespace
 // ("A.B", TDD-00148 V3) flattens its dots through the same infix, so
 // `A.B` member `f` becomes `A__kmlns_B__kmlns_f`.
+// NamespaceGroup is one namespace's desugared members (see
+// Program.NamespaceGroups).
+type NamespaceGroup struct {
+	Name    string // dotted for a nested namespace ("A.B")
+	Members []Statement
+}
+
 func NamespaceMangle(ns, member string) string {
 	return strings.ReplaceAll(ns, ".", "__kmlns_") + "__kmlns_" + member
+}
+
+// Assertion is an erased type assertion on an expression.
+type Assertion struct {
+	Const     bool            // `as const`
+	Satisfies *TypeAnnotation // `satisfies T`
+	Cast      *TypeAnnotation // `<T>expr`
 }
 
 func (*Program) nodeMarker() {}
@@ -155,6 +224,9 @@ type VarDeclaration struct {
 	Name      string
 	TypeAnnot *TypeAnnotation // nil if absent
 	Init      Expression      // nil if absent
+	// Ambient marks a `declare var` (or an ambient namespace's variable):
+	// without an annotation its type is any, never an evolving one.
+	Ambient bool
 	// Free/Owned (TDD-00173): `/** @free */` requests a compiler-inserted
 	// free at every exit of the declaring block; `/** @owned */` requests it
 	// at the statically-determined last use instead. Both are gated by the
@@ -209,6 +281,10 @@ type FunctionDeclaration struct {
 	// every bare-T parameter/return position treated as TypeAny instead.
 	// Meaningless (always false) unless len(TypeParams) > 0.
 	Erased bool
+	// ErasedMethod marks a generic class method whose annotations the
+	// parser erased for code generation (each type parameter to its plain
+	// constraint, else any); TypeParams stay for the checker.
+	ErasedMethod bool
 	// Pure is set by a `/** @pure */` JSDoc annotation (TDD-00128): the function
 	// is asserted side-effect-free, and a front-end pass (codegen/llvm/
 	// pure_check.go) ENFORCES it — rejecting parameter/captured/global mutation,
@@ -218,7 +294,10 @@ type FunctionDeclaration struct {
 	Params     []Param
 	ReturnType *TypeAnnotation
 	Body       *BlockStatement // nil for an abstract method (IsAbstract true) — signature only
-	IsAsync    bool
+	// Ambient marks a `declare function` signature: Body is the synthesized
+	// throwing stub (ADR-00471), not code the program wrote.
+	Ambient bool
+	IsAsync bool
 	// IsStatic/Visibility/IsAbstract are TDD-00009 Stage 4 class-member
 	// modifiers, meaningful only for a class's Constructor/Methods entries
 	// — always zero-value for a plain top-level function, same "harmless
@@ -226,6 +305,10 @@ type FunctionDeclaration struct {
 	IsStatic   bool
 	Visibility string // "private" / "protected" / "" (public, default)
 	IsAbstract bool
+	// IsOptional marks an optional method (`m?(): T;`): a signature with no
+	// body that a subclass may implement; on a class that does not, the
+	// member is undefined.
+	IsOptional bool
 	// AccessorKind is "get" / "set" / "" (a plain method or top-level
 	// function, the default) — TDD-00030. A getter/setter is otherwise a
 	// perfectly ordinary FunctionDeclaration (a zero-arg method for "get",
@@ -248,6 +331,10 @@ type FunctionDeclaration struct {
 	// verifies an implementation follows and returns only the
 	// implementation, so codegen never sees this flag set.
 	IsOverloadSig bool
+	// Overloads are an implementation's overload signatures, in source order
+	// (the checker resolves calls against them). They carry no code, so no
+	// walker visits them, and codegen still sees only the implementation.
+	Overloads []*FunctionDeclaration
 	// Decorators are `@expr` prefixes on a class method/accessor (TDD-00161
 	// Stage 1), in source order (outermost/topmost first). Empty for a plain
 	// function or an undecorated method. Applied bottom-up at class-init time
@@ -908,7 +995,10 @@ func NewMemberExpression(obj Expression, prop string, pos Pos) *MemberExpression
 
 type ArrayLiteral struct {
 	Elements []Expression
-	pos      Pos
+	// RestTrailingComma marks `[...x,]`: a comma after a spread element, an
+	// early error when the literal is an assignment pattern.
+	RestTrailingComma bool
+	pos               Pos
 }
 
 func (*ArrayLiteral) nodeMarker()   {}
@@ -967,6 +1057,11 @@ type ObjectProperty struct {
 	// class-member AccessorKind. A desugar pass lowers an accessor-bearing
 	// literal to a synthetic class instance.
 	AccessorKind string
+	// CoverInit marks a shorthand property with a default, `{ x = 1 }`
+	// (Value is `x = 1`): valid only in an assignment pattern.
+	CoverInit bool
+	// Shorthand marks `{ x }` (and `{ x = 1 }`): Value is the reference x.
+	Shorthand bool
 }
 
 type ObjectLiteral struct {
@@ -1011,13 +1106,16 @@ func (o *ObjectLiteral) HasAccessors() bool {
 // from its enclosing scope (closure). Body holds an expression body `=> expr`;
 // Block holds a block body `=> { stmts }`. Exactly one is non-nil.
 type ArrowFunction struct {
-	Params  []Param
-	RetType *TypeAnnotation // nil = infer
-	Body    Expression      // non-nil for `=> expr`
-	Block   *BlockStatement // non-nil for `=> { stmts }`
-	IsAsync bool
-	Pure    bool // `/** @pure */` on the binding (TDD-00128) — see FunctionDeclaration.Pure
-	pos     Pos
+	// TypeParams are a generic arrow's (`<T>(x: T) => x`): erased to any in
+	// its annotations, as a method's are; the type nodes keep them.
+	TypeParams []string
+	Params     []Param
+	RetType    *TypeAnnotation // nil = infer
+	Body       Expression      // non-nil for `=> expr`
+	Block      *BlockStatement // non-nil for `=> { stmts }`
+	IsAsync    bool
+	Pure       bool // `/** @pure */` on the binding (TDD-00128) — see FunctionDeclaration.Pure
+	pos        Pos
 }
 
 func (*ArrowFunction) nodeMarker()   {}
@@ -1112,7 +1210,9 @@ type TaggedTemplateExpression struct {
 	Quasis    []string
 	RawQuasis []string // undecoded source of each quasi (parallel to Quasis); backs String.raw
 	Exprs     []Expression
-	pos       Pos
+	// TypeArgs are explicit type arguments (`` tag<T>`…` ``).
+	TypeArgs []*TypeAnnotation
+	pos      Pos
 }
 
 func (*TaggedTemplateExpression) nodeMarker()   {}
@@ -1294,24 +1394,6 @@ func NewNewCompressionStreamExpression(decompress bool, format Expression, pos P
 	return &NewCompressionStreamExpression{Decompress: decompress, Format: format, pos: pos}
 }
 
-// NewNodeStreamExpression — `new Readable<T>(opts?)` / `new Writable<T>(opts?)`
-// / `new Transform<I, O>(opts?)` (TDD-00097 Stage 8, Node's stream module).
-type NewNodeStreamExpression struct {
-	Kind    string // "readable" | "writable" | "transform"
-	InType  *TypeAnnotation
-	OutType *TypeAnnotation
-	Options Expression // object literal, or nil
-	pos     Pos
-}
-
-func (*NewNodeStreamExpression) nodeMarker()   {}
-func (*NewNodeStreamExpression) exprMarker()   {}
-func (n *NewNodeStreamExpression) GetPos() Pos { return n.pos }
-
-func NewNewNodeStreamExpression(kind string, in, out *TypeAnnotation, options Expression, pos Pos) *NewNodeStreamExpression {
-	return &NewNodeStreamExpression{Kind: kind, InType: in, OutType: out, Options: options, pos: pos}
-}
-
 // EnumMember is one member of an enum declaration.
 type EnumMember struct {
 	Name  string
@@ -1366,6 +1448,8 @@ func NewTryStatement(body *BlockStatement, catch *CatchClause, finally *BlockSta
 
 type CatchClause struct {
 	Param string
+	// ParamType is the variable's annotation (`catch (e: unknown)`), or nil.
+	ParamType *TypeAnnotation
 	// ObjectPattern is non-nil for a destructured catch binding
 	// (`catch ({ message, name }) { ... }`) — Param is unused in that case.
 	// No array-pattern form: the caught value's static shape (errorObjType)
@@ -1874,6 +1958,10 @@ func NewNewRegExpExpression(pattern, flags Expression, pos Pos) *NewRegExpExpres
 // any `new <Name>` where Name isn't one of those builtins.
 type NewExpression struct {
 	ClassName string
+	// Qualified marks `new mod.Class(…)`: ClassName is the last segment and
+	// Qualifier the namespace before it.
+	Qualified bool
+	Qualifier string
 	// TypeArgs is non-nil only for `new ClassName<T>(args)` against a generic
 	// class (TDD-00010 V1) — nil for every non-generic `new`. Unlike a bare
 	// generic function call, `new` unambiguously starts a constructor call,
@@ -1910,9 +1998,20 @@ type InterfaceDeclaration struct {
 	// Extends lists the simple (unqualified, non-generic) base-interface
 	// names of an `extends A, B` clause — merged field/method-wise at
 	// registration (ADR-00451 batch). Generic/qualified bases are parsed
-	// but dropped (not listed here).
-	Extends []string
-	pos     Pos
+	// but dropped (not listed here); ExtendsDropped records that one was.
+	Extends        []string
+	ExtendsDropped bool
+	// Members, TypeParameters and Heritage are the declaration as written
+	// (the checker reads these): every member, type parameters with their
+	// constraints and defaults, and each `extends` type. Fields, Methods,
+	// IndexSig and CallSig are derived from them for code generation;
+	// LegacyErr is the first member shape code generation cannot represent
+	// (reported there, not while parsing, since the program is valid).
+	Members        []TypeMember
+	TypeParameters []*TypeParameter
+	Heritage       []TypeNode
+	LegacyErr      error
+	pos            Pos
 }
 
 func (*InterfaceDeclaration) nodeMarker()   {}
@@ -1946,6 +2045,8 @@ type ClassDeclaration struct {
 	TypeParams           []string // e.g. ["T"] for `class Box<T>` — TDD-00010 V1, single param only
 	TypeParamConstraints []*TypeAnnotation
 	BaseClass            string // "" if no `extends` clause (TDD-00009 Stage 3)
+	BaseQualified        bool   // `extends mod.Base`: BaseClass is the last segment
+	BaseQualifier        string // and `mod` the namespace before it
 	// BaseTypeArgs is non-nil only for `extends EventEmitter<T>` (TDD-00023)
 	// — the sole generic `extends` target this compiler currently supports.
 	BaseTypeArgs []*TypeAnnotation
@@ -2009,8 +2110,11 @@ type TypeAliasDeclaration struct {
 	Name                 string
 	TypeParams           []string
 	TypeParamConstraints []*TypeAnnotation
-	Type                 *TypeAnnotation
-	pos                  Pos
+	// TypeParameters are the type parameter nodes as written, defaults
+	// included (`type A<T = string>`), for the checker.
+	TypeParameters []*TypeParameter
+	Type           *TypeAnnotation
+	pos            Pos
 }
 
 func (*TypeAliasDeclaration) nodeMarker()   {}
@@ -2032,6 +2136,24 @@ func NewTypeAliasDeclaration(name string, ta *TypeAnnotation, pos Pos) *TypeAlia
 // function/class or a wrapped expression — see resolver.go's
 // mangleFileDecls), and the resolver additionally exposes it under the
 // export key "default" alongside whatever its own name is.
+// AmbientModuleDeclaration is `declare module "name" { … }` in a
+// declaration file: a module's declarations (Node's `path`, …), bound as that
+// module's exports.
+type AmbientModuleDeclaration struct {
+	Name string
+	Body []Statement
+	pos  Pos
+}
+
+func (*AmbientModuleDeclaration) nodeMarker()   {}
+func (*AmbientModuleDeclaration) stmtMarker()   {}
+func (m *AmbientModuleDeclaration) GetPos() Pos { return m.pos }
+
+// NewAmbientModuleDeclaration returns an ambient module declaration.
+func NewAmbientModuleDeclaration(name string, body []Statement, pos Pos) *AmbientModuleDeclaration {
+	return &AmbientModuleDeclaration{Name: name, Body: body, pos: pos}
+}
+
 type ExportDeclaration struct {
 	Decl      Statement
 	IsDefault bool
@@ -2053,6 +2175,14 @@ func NewExportDeclaration(decl Statement, isDefault bool, pos Pos) *ExportDeclar
 type ImportSpecifier struct {
 	Imported string
 	Local    string
+	// TypeOnly marks `type X` in a list, or every entry of `import type`/
+	// `export type`: the name is a type, erased with the statement.
+	TypeOnly bool
+}
+
+// BuiltinImportRef is one binding of an import from a builtin module.
+type BuiltinImportRef struct {
+	Module, Name string
 }
 
 // ImportDeclaration — `import { a, b as c } from './path'`, a default
@@ -2068,6 +2198,7 @@ type ImportDeclaration struct {
 	Specifiers []ImportSpecifier
 	Namespace  string // local alias for `import * as ns`; empty unless this is a namespace import
 	Source     string
+	TypeOnly   bool // `import type …`: every binding is a type (TS1361 on a value use)
 	pos        Pos
 }
 
@@ -2092,8 +2223,11 @@ func NewImportDeclaration(specs []ImportSpecifier, namespace, source string, pos
 type ExportFromDeclaration struct {
 	Specifiers []ImportSpecifier
 	All        bool
-	Source     string
-	pos        Pos
+	// Source is the module re-exported from; "" for a local export list
+	// (`export { a, b as c }`), whose Imported names are this file's own
+	// declarations.
+	Source string
+	pos    Pos
 }
 
 func (*ExportFromDeclaration) nodeMarker()   {}
@@ -2211,8 +2345,12 @@ type AnnotField struct {
 // KeyType is non-nil only for Map<K,V> — its key type; ElemType holds the value type.
 // IsFuncType is true for function type annotations like (x: number) => number.
 type TypeAnnotation struct {
-	Name       string // e.g. "number", "string", "int32", "uint8", "float64"
-	Source     string // "ts" or "jsdoc"
+	// IsThis marks the polymorphic `this` type inside a class (its Name is
+	// the class's): a method returning it returns its receiver's type.
+	IsThis     bool
+	Name       string   // e.g. "number", "string", "int32", "uint8", "float64"
+	Qualifier  []string // a qualified name's namespace path (`NodeJS` in `NodeJS.Platform`); Name is the last segment
+	Source     string   // "ts" or "jsdoc"
 	Fields     []AnnotField
 	ElemType   *TypeAnnotation   // non-nil for { ... }[], or Promise<T>/Array<T>/Set<T>'s T, or Map<K,V>'s V
 	KeyType    *TypeAnnotation   // non-nil only for Map<K,V> — the key type K
@@ -2230,7 +2368,10 @@ type TypeAnnotation struct {
 	// stored type is the collected array type (number[]), matching the codegen
 	// Type.FuncHasRest convention.
 	FuncHasRest bool
-	Nullable    bool // true for T | null or T | undefined
+	// FuncThis marks a function type with a `this: T` parameter: T is
+	// FuncParams[0], the receiver a call passes first.
+	FuncThis bool
+	Nullable bool // true for T | null or T | undefined
 	// Undefined records that the nullish member of the union was spelled
 	// `undefined` (or that the type comes from a `?:` optional field), so the
 	// resolved Type carries IsUndefined and an absent value renders/compares
@@ -2248,6 +2389,8 @@ type TypeAnnotation struct {
 	// (`[T0, T1, ...]`), in order — non-nil (and non-empty) exactly for a
 	// tuple. See TDD-00066.
 	TupleElems []*TypeAnnotation
+	// EmptyTuple marks the empty tuple type `[]`, which has no elements.
+	EmptyTuple bool
 	// IntersectionMembers holds every member of an A & B & ... intersection
 	// with 2+ members (TDD-00078). nil for the common non-intersection case.
 	// Directly parallels UnionMembers, and follows the same head-copy
@@ -2311,7 +2454,16 @@ type TypeAnnotation struct {
 	// `{ [k: string]: V }` (TDD-00130). Non-nil marks the object type as a
 	// map-backed dynamic object; V1 disallows it combining with named Fields.
 	IndexSig *TypeAnnotation
+	// node is the parsed type this annotation was converted from (see
+	// TypeAnnotationOf); nil for an annotation code generation synthesised.
+	// Unexported so the reflective AST walkers never descend into type
+	// syntax through it.
+	node TypeNode
 }
+
+// TypeNode returns the parsed type this annotation was converted from, or nil
+// for an annotation code generation synthesised.
+func (ta *TypeAnnotation) TypeNode() TypeNode { return ta.node }
 
 // NewHTTPAgentExpression is `new http.Agent(options?)` / `new Agent(options?)`
 // (ADR-00432): an inert connection-pool config token — this compiler's client

@@ -247,48 +247,10 @@ func (e *Emitter) emitDynAnyMemberGetNamed(objVal Value, keyRef, propName string
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", p, gep))
 		return e.emitNbTagPtr(p, kmlTagString)
 	}
-	var errBoxed string
-	// Any other fixed errorObjType field (code/errno/syscall/path/dest/cause/
-	// address/port, ADR-01080) reads and boxes per its type — a null string
-	// field is `undefined`, as the property is absent on Node's plain errors.
-	fixedIdx, fixedTy, isFixed := errorObjType.FieldIndex(propName)
-	switch {
-	case propName == "message":
-		errBoxed = readField(1)
-	case propName == "name":
-		errBoxed = readField(2)
-	case isFixed && propName != "kind" && propName != "extra" && propName != "errcode" && propName != "errstr":
-		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, errorObjType.StructIR(), errPtr, fixedIdx))
-		raw := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", raw, StructFieldIR(fixedTy), gep))
-		if fixedTy.IsDynamic {
-			errBoxed = raw
-		} else if fixedTy.IR == "ptr" {
-			isNull := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, raw))
-			tagged := e.emitNbTagPtr(raw, kmlTagString)
-			sel := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", sel, isNull, nbUndefined, tagged))
-			errBoxed = sel
-		} else {
-			bv, berr := e.emitBoxValue(Value{Ref: raw, Ty: fixedTy})
-			if berr != nil {
-				return Value{}, berr
-			}
-			errBoxed = bv.Ref
-		}
-	case propName == "stack":
-		// No real stack is retained; `err.stack` is approximated by the
-		// `name: message` toString form, a faithful subset of Node's string.
-		s, serr := e.emitErrorToString(Value{Ref: errPtr, Ty: TypePtr})
-		if serr != nil {
-			return Value{}, serr
-		}
-		errBoxed = e.emitNbTagPtr(s.Ref, kmlTagString)
-	default:
-		// The `extra` bag (field 13, ADR-01080): an own property beyond the
-		// fixed fields — execSync's `status`/`stdout`/… — or undefined.
+	// The `extra` bag (field 13, ADR-01080): an own property beyond the
+	// fixed fields — execSync's `status`/`stdout`/… — or undefined.
+	bagEnd := ""
+	bagGet := func() string {
 		xIdx, _, _ := errorObjType.FieldIndex("extra")
 		xGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", xGep, errorObjType.StructIR(), errPtr, xIdx))
@@ -309,7 +271,85 @@ func (e *Emitter) emitDynAnyMemberGetNamed(objVal Value, keyRef, propName string
 		e.emitLabel(xJoinL)
 		sel := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %d, %%%s ]", sel, xGet, xGetL, nbUndefined, xNoneL))
-		errBoxed = sel
+		bagEnd = xJoinL
+		return sel
+	}
+	// orBag reads the bag where an optional fixed field is absent (a value
+	// of another kind set through `any` lives there).
+	orBag := func(present, boxedField string) string {
+		hereL := e.freshLabel("dynget.errfix")
+		bagL := e.freshLabel("dynget.errfixbag")
+		joinL := e.freshLabel("dynget.errfixjoin")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, hereL, bagL))
+		e.emitLabel(hereL)
+		e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+		e.emitLabel(bagL)
+		fromBag := bagGet()
+		e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+		e.emitLabel(joinL)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %s, %%%s ]", r, boxedField, hereL, fromBag, bagEnd))
+		return r
+	}
+	var errBoxed string
+	// Any other fixed errorObjType field (code/errno/syscall/path/dest/cause/
+	// address/port, ADR-01080) reads and boxes per its type — a null string
+	// field is `undefined`, as the property is absent on Node's plain errors.
+	fixedIdx, fixedTy, isFixed := errorObjType.FieldIndex(propName)
+	switch {
+	case propName == "message":
+		errBoxed = readField(1)
+	case propName == "name":
+		errBoxed = readField(2)
+	case propName == "constructor":
+		// The error's constructor as a built-in constructor reference (tag 8,
+		// payload = its interned name): `e.constructor.name`, and
+		// `e.constructor === TypeError` compares the same interned name
+		// (TDD-00229).
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", gep, errorObjType.StructIR(), errPtr))
+		np := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", np, gep))
+		errBoxed = e.emitNbTagPtr(np, kmlTagFuncRef)
+	case isFixed && propName != "kind" && propName != "extra" && propName != "errcode" && propName != "errstr":
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, errorObjType.StructIR(), errPtr, fixedIdx))
+		raw := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", raw, StructFieldIR(fixedTy), gep))
+		if fixedTy.IsDynamic {
+			errBoxed = raw
+		} else if fixedTy.IR == "ptr" {
+			isNull := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, raw))
+			tagged := e.emitNbTagPtr(raw, kmlTagString)
+			present := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", present, isNull))
+			errBoxed = orBag(present, tagged)
+		} else {
+			v := Value{Ref: raw, Ty: fixedTy}
+			optional := errorOptionalNumber(errorObjType, propName)
+			bv, berr := e.emitBoxValue(v)
+			if berr != nil {
+				return Value{}, berr
+			}
+			errBoxed = bv.Ref
+			if optional {
+				// Unset (0): absent, as on Node's plain errors.
+				present := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = fcmp une double %s, 0.0", present, raw))
+				errBoxed = orBag(present, bv.Ref)
+			}
+		}
+	case propName == "stack":
+		// No real stack is retained; `err.stack` is approximated by the
+		// `name: message` toString form, a faithful subset of Node's string.
+		s, serr := e.emitErrorToString(Value{Ref: errPtr, Ty: TypePtr})
+		if serr != nil {
+			return Value{}, serr
+		}
+		errBoxed = e.emitNbTagPtr(s.Ref, kmlTagString)
+	default:
+		errBoxed = bagGet()
 	}
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", errBoxed, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
@@ -338,6 +378,78 @@ func (e *Emitter) emitDynAnyMemberGetNamed(objVal Value, keyRef, propName string
 	e.emitLabel(notSymL)
 	e.emitThrowTypeError("dynamic property access on a statically-typed value is not supported")
 	e.emitLabel(nextL)
+
+	// A function value's `name` / `length` (TDD-00229): a dynamic record reads
+	// the code-pointer metadata; a built-in Error constructor reference carries
+	// its name as the payload (every one has length 1). Other properties of a
+	// function read undefined.
+	{
+		fnVal := func(dyn bool) string {
+			switch propName {
+			case "name":
+				if !dyn {
+					return e.emitNbTagPtr(e.emitIntToPtr(payload), kmlTagString)
+				}
+				e.ensureFnMeta()
+				r := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fn_name_dyn(ptr %s)", r, e.emitIntToPtr(payload)))
+				return e.emitNbTagPtr(r, kmlTagString)
+			case "length":
+				if !dyn {
+					return e.emitNbEncodeDouble("1.0")
+				}
+				e.ensureFnMeta()
+				r := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_fn_length_dyn(ptr %s)", r, e.emitIntToPtr(payload)))
+				d := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", d, r))
+				return e.emitNbEncodeDouble(d)
+			}
+			if !dyn {
+				return fmt.Sprintf("%d", nbUndefined)
+			}
+			// An extended record (a node:ffi bound function) has an own-property
+			// bag at +32 — `fn.pointer` through `any`; any other function reads
+			// undefined.
+			rec := e.emitIntToPtr(payload)
+			ap := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", ap, rec))
+			ar := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", ar, ap))
+			ext := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", ext, ar, ffiRecExtFlag))
+			isExt := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isExt, ext))
+			extL := e.freshLabel("dynget.fnprops")
+			noL := e.freshLabel("dynget.fnnoprops")
+			joinL := e.freshLabel("dynget.fnjoin")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isExt, extL, noL))
+			e.emitLabel(extL)
+			pp := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 32", pp, rec))
+			props := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", props, pp))
+			got := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get(ptr %s, ptr %s)", got, props, keyRef))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+			e.emitLabel(noL)
+			e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+			e.emitLabel(joinL)
+			sel := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %d, %%%s ]", sel, got, extL, nbUndefined, noL))
+			return sel
+		}
+		for _, t := range []struct {
+			tag int
+			dyn bool
+		}{{kmlTagDynFunc, true}, {kmlTagFuncRef, false}} {
+			matchL, nextL = e.emitTagCheck(tag, t.tag, "dynget.fn")
+			e.emitLabel(matchL)
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", fnVal(t.dyn), resPtr))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+			e.emitLabel(nextL)
+		}
+	}
 
 	// Primitives (int/float/string/boolean) read as undefined; a
 	// statically-shaped reference (object/array/funcRef/stream) has no runtime
@@ -440,6 +552,115 @@ func (e *Emitter) emitDynAnyMemberSetNamed(objVal Value, keyRef, propName string
 	matchL, nextL = e.emitTagCheck(tag, kmlTagUndefined, "dynset.undef")
 	e.emitLabel(matchL)
 	e.emitThrowTypeError("Cannot set properties of undefined" + setting)
+	e.emitLabel(nextL)
+
+	// A boxed Error: a fixed field (`code`, `syscall`, `errno`, …) of its own
+	// type is stored in place; any other own property goes to its `extra`
+	// bag, which a read consults (emitDynAnyMemberGetNamed's error arm).
+	matchL, nextL = e.emitTagCheck(tag, kmlTagObject, "dynset.errobj")
+	e.emitLabel(matchL)
+	errPtr, errIsErr := e.emitBoxedErrorProbe(payload)
+	errSetL := e.freshLabel("dynset.err")
+	notErrL := e.freshLabel("dynset.noterr")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", errIsErr, errSetL, notErrL))
+	e.emitLabel(errSetL)
+	fixedIdx, fixedTy, isFixed := errorObjType.FieldIndex(propName)
+	storedFixed := false
+	if isFixed && propName != "kind" && propName != "extra" {
+		var v Value
+		switch {
+		case fixedTy.IsDynamic:
+			v, storedFixed = boxed, true
+		case fixedTy.IR == "ptr" && isStringTy(rhs.Ty) && !rhs.Ty.IsDynamic:
+			v, storedFixed = rhs, true
+		case fixedTy.Float && isNumberTy(rhs.Ty) && !rhs.Ty.IsDynamic && !isNullableScalar(rhs.Ty):
+			v, storedFixed = e.coerce(rhs, TypeF64), true
+		}
+		if storedFixed {
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, errorObjType.StructIR(), errPtr, fixedIdx))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", StructFieldIR(fixedTy), v.Ref, gep))
+		} else if fixedTy.Float || (fixedTy.IR == "ptr" && isStringTy(fixedTy)) {
+			// A value known only at run time (`T | undefined`, any): one of
+			// the field's kind is stored there, undefined as the absent 0 or
+			// null; any other value clears the field and goes to the bag,
+			// which a read of an absent field consults.
+			tag, pay := e.emitUnboxTagPayload(boxed)
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, errorObjType.StructIR(), errPtr, fixedIdx))
+			isUndef := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
+			var fits, val, zero string
+			if fixedTy.Float {
+				isF := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isF, tag, kmlTagFloat))
+				isI := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isI, tag, kmlTagInt))
+				fd := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", fd, pay))
+				id := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", id, pay))
+				val = e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, double %s, double %s", val, isF, fd, id))
+				fits = e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", fits, isF, isI))
+				zero = "0.0"
+			} else {
+				fits = e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", fits, tag, kmlTagString))
+				val = e.emitIntToPtr(pay)
+				zero = "null"
+			}
+			stored := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s %s", stored, fits, StructFieldIR(fixedTy), val, StructFieldIR(fixedTy), zero))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", StructFieldIR(fixedTy), stored, gep))
+			inField := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", inField, fits, isUndef))
+			bagL := e.freshLabel("dynset.errfixbag")
+			clearL := e.freshLabel("dynset.errfixclear")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inField, clearL, bagL))
+			// The field holds it now: an earlier value in the bag goes.
+			e.emitLabel(clearL)
+			cxIdx, _, _ := errorObjType.FieldIndex("extra")
+			cxGep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", cxGep, errorObjType.StructIR(), errPtr, cxIdx))
+			cxBag := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cxBag, cxGep))
+			cxNull := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", cxNull, cxBag))
+			delL := e.freshLabel("dynset.errfixdel")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cxNull, doneL, delL))
+			e.emitLabel(delL)
+			e.emitInstr(fmt.Sprintf("call i1 @__kml_dynobj_delete(ptr %s, ptr %s)", cxBag, keyRef))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(bagL)
+		}
+	}
+	if !storedFixed {
+		xIdx, _, _ := errorObjType.FieldIndex("extra")
+		xGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", xGep, errorObjType.StructIR(), errPtr, xIdx))
+		xBag := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", xBag, xGep))
+		xNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", xNull, xBag))
+		mkL := e.freshLabel("dynset.errbag")
+		haveL := e.freshLabel("dynset.errhave")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", xNull, mkL, haveL))
+		e.emitLabel(mkL)
+		fresh := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_new()", fresh))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", fresh, xGep))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", haveL))
+		e.emitLabel(haveL)
+		bag2 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bag2, xGep))
+		st := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_setv(ptr %s, ptr %s, i64 %s)", st, bag2, keyRef, boxed.Ref))
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(notErrL)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
 	e.emitLabel(nextL)
 
 	e.emitThrowTypeError("Cannot set properties of a non-object value")
@@ -567,6 +788,38 @@ func (e *Emitter) emitDynAnyKeys(objVal Value, pos ast.Pos) (Value, error) {
 	ak := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_dynarr_keys(ptr %s)", ak, arrHdr))
 	e.emitInstr(fmt.Sprintf("store { ptr, i64 } %s, ptr %s, align 8", ak, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(nextL)
+
+	// A function's own enumerable keys: an extended record (a node:ffi bound
+	// function) enumerates its own-property bag (TDD-00229); any other
+	// function has none.
+	matchL, nextL = e.emitTagCheck(tag, kmlTagDynFunc, "dynkeys.fn")
+	e.emitLabel(matchL)
+	fnRec := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", fnRec, payload))
+	arP := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", arP, fnRec))
+	arW := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", arW, arP))
+	extB := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", extB, arW, ffiRecExtFlag))
+	isExt := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isExt, extB))
+	extL := e.freshLabel("dynkeys.fnprops")
+	noPropsL := e.freshLabel("dynkeys.fnnone")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isExt, extL, noPropsL))
+	e.emitLabel(extL)
+	propsP := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 32", propsP, fnRec))
+	props := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", props, propsP))
+	pk := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_dynobj_keys_enum(ptr %s)", pk, props))
+	e.emitInstr(fmt.Sprintf("store { ptr, i64 } %s, ptr %s, align 8", pk, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(noPropsL)
+	e.emitInstr(fmt.Sprintf("store { ptr, i64 } { ptr null, i64 0 }, ptr %s, align 8", resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	e.emitLabel(nextL)
 
@@ -847,6 +1100,8 @@ func (e *Emitter) emitObjectCreate(args []ast.Expression, pos ast.Pos) (Value, e
 	bag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_new()", bag))
 	if protoVal.Ty.IsNull {
+		// set_proto(null) marks the bag NULLPROTO (`[Object: null prototype]`).
+		e.emitDynSetProtoChecked(bag, "null")
 		return e.emitDynObjBox(bag), nil
 	}
 	protoReg, _, err := e.emitDynProtoOperand(protoVal, true)
@@ -1039,7 +1294,7 @@ func (e *Emitter) emitJSONStringifyDynamic(val Value, ind jsonIndent, pos ast.Po
 	errSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", errSlot))
 	s := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynjson_stringify(i64 %s, i64 %s, ptr %s, ptr %s)", s, tagW, payload, indentArg, errSlot))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynjson_stringify_at(i64 %s, i64 %s, ptr %s, i64 %d, ptr %s)", s, tagW, payload, indentArg, ind.depth, errSlot))
 	errv := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", errv, errSlot))
 
@@ -1060,6 +1315,15 @@ func (e *Emitter) emitJSONStringifyDynamic(val Value, ind jsonIndent, pos ast.Po
 	e.emitLabel(staticL)
 	e.emitThrowTypeError("JSON.stringify of a statically-typed value in a dynamic position is not supported")
 	e.emitLabel(next2)
+
+	bigL := e.freshLabel("dynjson.bigint")
+	next3 := e.freshLabel("dynjson.next3")
+	isBig := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 3", isBig, errv))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBig, bigL, next3))
+	e.emitLabel(bigL)
+	e.emitThrowTypeError("Do not know how to serialize a BigInt")
+	e.emitLabel(next3)
 
 	// NULL with err==0: the JS result is undefined; otherwise a string box.
 	isNull := e.freshReg()
@@ -1511,4 +1775,69 @@ func (e *Emitter) emitDynObjLiteral(lit *ast.ObjectLiteral) (Value, error) {
 		e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_set(ptr %s, ptr %s, i64 %s)", bag, keyRef, boxed.Ref))
 	}
 	return e.emitDynObjBox(bag), nil
+}
+
+// emitDictToBag snapshots a string-keyed dictionary (an index-signature
+// object) into a dynamic bag, keys in insertion order and each value boxed:
+// what inspect and JSON.stringify render, with an object's key formatting.
+func (e *Emitter) emitDictToBag(v Value) (Value, error) {
+	e.ensureDynObj()
+	e.ensureMapStrHelpers()
+	valTy := TypePtr
+	if v.Ty.MapVal != nil {
+		valTy = *v.Ty.MapVal
+	}
+	bag := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_new()", bag))
+	// A null-prototype dictionary (Object.create(null)) renders as one.
+	flagsP, flags, nullProto := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 56", flagsP, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", flags, flagsP))
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i1", nullProto, flags))
+	npL, npDone := e.freshLabel("dict2bag.nullproto"), e.freshLabel("dict2bag.proto")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", nullProto, npL, npDone))
+	e.emitLabel(npL)
+	e.emitInstr(fmt.Sprintf("call i1 @__kml_dynobj_set_proto(ptr %s, ptr null)", bag))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", npDone))
+	e.emitLabel(npDone)
+	keys := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_keys(ptr %s)", keys, v.Ref))
+	kPtr, kLen := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", kPtr, keys))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", kLen, keys))
+	idx := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idx))
+	condL, bodyL, doneL := e.freshLabel("dict2bag.cond"), e.freshLabel("dict2bag.body"), e.freshLabel("dict2bag.done")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	i := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, idx))
+	more := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, i, kLen))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, doneL))
+	e.emitLabel(bodyL)
+	kg, key := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", kg, kPtr, i))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", key, kg))
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", raw, v.Ref, key))
+	var boxed Value
+	if valTy.IsDynamic {
+		boxed = Value{Ref: raw, Ty: TypeAny}
+	} else {
+		var err error
+		boxed, err = e.emitBoxValue(e.mapValFromI64(raw, valTy))
+		if err != nil {
+			return Value{}, err
+		}
+	}
+	st := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_setv(ptr %s, ptr %s, i64 %s)", st, bag, key, boxed.Ref))
+	nx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nx, i))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nx, idx))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(doneL)
+	return Value{Ref: e.emitNbTagPtr(bag, kmlTagDynObject), Ty: TypeAny}, nil
 }

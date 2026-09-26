@@ -4,8 +4,8 @@
   "kind": "node",
   "statusPage": "STREAMS.md",
   "coversRows": "all",
-  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "1/9", "strictPct": 11 },
-  "lede": "Two stream worlds live here. The WHATWG classes (ReadableStream/WritableStream/TransformStream, plus Compression/Decompression) are the backbone, and Node's older stream module (Readable/Writable/Transform/PassThrough, pipeline/finished, duplexPair) wraps the same internals. In-memory pipelines run on the promise/microtask runtime alone — no fibers or libcurl. The recurring divergences are edge-semantic rather than shape: a synchronously-throwing pull/start/write propagates to the caller instead of erroring the stream, an array/tuple-chunk closed-stream read still yields a zero-shaped value rather than undefined (scalar/string/object chunks read a real undefined), and fs/http don't yet hand out Node streams. new Duplex remains rejected — duplexPair() is the one Duplex producer.",
+  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "2/9", "strictPct": 22 },
+  "lede": "Two stream worlds live here. The WHATWG classes (ReadableStream/WritableStream/TransformStream, plus Compression/Decompression) run on the promise/microtask runtime alone — no fibers or libcurl for in-memory pipelines. Node's stream module (Readable/Writable/Duplex/Transform/PassThrough, pipeline/finished, duplexPair) is Node v24's own implementation ported to TypeScript and compiled with the program, so its event order follows Node's. The recurring divergences: a synchronously-throwing pull/start/write of a web stream propagates to the caller instead of erroring the stream, an array/tuple-chunk closed-stream read still yields a zero-shaped value rather than undefined, an omitted error argument to a Node stream callback arrives as null rather than undefined, and fs/http hand out their own stream handles rather than instances of the Node classes.",
   "entries": [
     {
       "id": "streams.readablestream",
@@ -20,7 +20,7 @@
       "differences": [
         "No BYOB readers / byte controllers (`type: 'bytes'` rejected at compile time) — byte data flows as `Uint8Array` chunks through default readers",
         "`ReadableStream.from()` accepts arrays only, not async iterables",
-        "Source callbacks must be arrow/function-expression/method-shorthand literals; a cancel callback can't take a reason parameter; *async* method shorthand (`{ async pull(c) {…} }`) doesn't parse — use `pull: async (c) => …`",
+        "Source callbacks must be arrow/function-expression/method-shorthand literals; a cancel callback can't take a reason parameter",
         "`read()` on a closed stream whose chunk type is an **array/tuple** still yields the chunk's zero-shaped value, not `undefined` (an array slot has no spare absent state); a scalar/string/object chunk reads a real `undefined`, and `controller.desiredSize` is `null` once errored",
         "`releaseLock()` leaves queued pending reads pending instead of rejecting them",
         "`values()` returns a reader usable in `for await` only (no standalone `.next()`)",
@@ -102,22 +102,19 @@
       "id": "streams.nodestreams",
       "name": "stream.Readable / .Writable / .Duplex / .Transform / .PassThrough",
       "statusRow": "stream.Readable / .Writable / .Duplex / .Transform / .PassThrough",
-      "signature": "class X extends Readable<T> { _read() {} }; new Writable<T>({ write }); new PassThrough()",
+      "signature": "new Readable({ read() { this.push(chunk) } }); class X extends Writable { _write(chunk, encoding, callback) {} }",
       "badge": "caveats",
-      "description": "Node's stream classes over the WHATWG internals, with 'data'/'end'/'error'/'close'/'finish'/'drain' events, .pipe(), and the flowing-mode read→emit loop started by the first 'data' listener. Both the options form (new Readable({ read })) and the class form (class X extends Readable with a this-based _read/_write) work; Readable.from/.fromWeb/.toWeb bridge to and from the web streams.",
+      "description": "Node's stream classes, ported from Node v24's own implementation to TypeScript and compiled with the program: the same states, event order and process.nextTick deferrals. The options form binds this to the stream, subclasses override _read/_write/_transform/_final/_destroy, chunks are Buffers (or strings with setEncoding, or any value in object mode), and Readable.from/.toWeb/.fromWeb bridge to arrays and web streams.",
       "returns": { "type": "Readable | Writable | Transform | PassThrough", "desc": "A Node stream." },
       "exampleKey": "streams/class_extends",
-      "snippet": "class Greeter extends Readable<string> {\n  words: string[] = [\"kalimera\", \"kosme\", \"apo\", \"thessaloniki\"]\n  i: number = 0\n  _read() {\n    if (this.i >= this.words.length) { this.push(null) }\n    else { this.push(this.words[this.i]); this.i = this.i + 1 }\n  }\n}",
+      "snippet": "class Greeter extends Readable {\n  words: string[] = [\"kalimera\", \"kosme\", \"apo\", \"thessaloniki\"]\n  i: number = 0\n  constructor() { super({ objectMode: true }) }\n  _read() {\n    if (this.i >= this.words.length) { this.push(null) }\n    else { this.push(this.words[this.i]); this.i = this.i + 1 }\n  }\n}",
       "differences": [
-        "`new PassThrough()` is the identity Transform — string chunks by default (`<T>` overrides), `highWaterMark`/`objectMode` options only. `new Duplex({ read, write })` and `class X extends Duplex` both work; `duplexPair()` is also available",
-        "`class X extends Readable/Writable/Duplex/Transform` with a `this`-based `_read()` / `_write(chunk, enc, cb)` / `_transform(chunk, enc, cb)` override is supported (a `Duplex` drives both sides independently; a `Transform` routes each write through `_transform`, whose `this.push` feeds the readable side; `<T>` names both chunk types, or `Transform<In, Out>` names each). No `_flush` override yet. Options form (`new Readable({ read })`) also stays",
-        "The options-form `read`/`write` callback receives the stream as a parameter, not as `this` (object-literal callbacks have no `this` binding); the class form has the real `this`",
-        "`highWaterMark` (options form and class-form `super({ highWaterMark })`) sets the queue watermark; `objectMode` is accepted but has no effect (chunks are already typed by `<T>`, effectively object-mode). A `super(options)` `highWaterMark` must be a literal/construction-scope constant — it can't reference a constructor parameter",
-        "A class-form `_write` completion callback is treated as fired when `_write` returns — it can't defer the write past the call",
-        "Event names must be string literals; supported events are `data`/`end`/`error`/`close`/`finish`/`drain`",
-        "No `.read()`/`.unshift()`/`.destroy()`/`.setEncoding()`",
-        "Event delivery can lag Node's synchronous re-entrancy by a microtask (emissions ride the reaction queue)",
-        "`fs`/`http` still don't hand out Node streams (their surfaces are WHATWG-based or buffered)"
+        "An omitted error argument reaches a callback declared `(err?: Error | null)` as `null`; Node passes `undefined`",
+        "`Readable.from` takes an array, a string or a Buffer; a generator or other iterable is not supported",
+        "The fs streams and the HTTP server's `req`/`res` are separate runtime handles, not instances of these classes",
+        "`Readable.toWeb` has no pull backpressure; `Duplex.toWeb`/`fromWeb` are missing",
+        "Not ported: `compose`, `addAbortSignal`, the readable operators (`map`/`filter`/`toArray`/…), `Readable.wrap`, `Duplex.from`, `isReadable`/`isErrored`/`setDefaultHighWaterMark`, the `signal` option",
+        "A method replaced on an instance (`this._read = fn`) is not supported; pass it in the options"
       ],
       "seeAlso": ["streams.streampipeline", "streams.duplexpair", "streams.readablestream"],
       "spec": { "mdn": "https://nodejs.org/api/stream.html#class-streamreadable" }
@@ -128,14 +125,12 @@
       "statusRow": "stream.pipeline() / .finished()",
       "signature": "pipeline(src, ...stages, cb); finished(stream, cb)",
       "badge": "caveats",
-      "description": "The callback-style named exports: pipeline(a, b, cb) wires streams and calls the callback with null or the error (returning the destination stream), and finished(s, cb) fires when a stream closes. Their Promise twins live in stream/promises.",
-      "returns": { "type": "Writable | void", "desc": "pipeline returns the destination stream; finished returns nothing." },
+      "description": "The callback forms: pipeline(a, ...b, cb) pipes each stream into the next and calls cb once the last has finished, or with the first error, destroying every stream; finished(s, [options,] cb) calls cb when the stream has ended, finished and closed, and returns a function removing its listeners. Their promise twins live in stream/promises.",
+      "returns": { "type": "Stream | () => void", "desc": "pipeline returns the last stream; finished returns its cleanup function." },
       "exampleKey": "streams/named_exports",
-      "snippet": "finished(echo, (err) => { console.log(\"echo finished, clean:\", err === null) })\npipeline(src, new PassThrough(), sink, () => { console.log(\"pipeline done\") })",
+      "snippet": "finished(echo, (err) => { console.log(\"echo finished, clean:\", !err) })\npipeline(src, new PassThrough(), sink, (err) => { console.log(\"pipeline done\", err ? err.message : \"ok\") })",
       "differences": [
-        "The callback forms' callback takes zero parameters or one (the error) — no `(err, value)` extras",
-        "`finished(s, cb)` returns nothing, not Node's cleanup function",
-        "Function-stage pipelines (`pipeline(src, async function* …)`) are not supported — stages must be streams"
+        "Function stages (`pipeline(src, async function* …)`) and the `signal` option are not supported — every stage is a stream"
       ],
       "seeAlso": ["streams.streampromises", "streams.nodestreams"],
       "spec": { "mdn": "https://nodejs.org/api/stream.html#streampipelinesource-transforms-destination-callback" }
@@ -146,7 +141,7 @@
       "statusRow": "stream/promises",
       "signature": "import { pipeline, finished } from 'stream/promises'",
       "badge": "exact",
-      "description": "The promise-returning pipeline and finished, awaitable directly. pipeline resolves when the pipe drains; finished resolves when the stream closes.",
+      "description": "The promise-returning pipeline and finished, over the callback forms: pipeline resolves once the last stream has finished, finished once the stream has ended and closed; either rejects with the stream's error.",
       "returns": { "type": "Promise<void>", "desc": "Resolves on completion, rejects on error." },
       "exampleKey": "streams/node_stream",
       "snippet": "import { pipeline, finished } from 'stream/promises'\nawait pipeline(numbers, square, sink)\nawait finished(words)",
@@ -158,15 +153,11 @@
       "name": "stream.duplexPair()",
       "statusRow": "stream.duplexPair()",
       "signature": "duplexPair(): [Duplex, Duplex]",
-      "badge": "caveats",
-      "description": "Two cross-wired identity-transform sides: what one side writes, the other reads (backpressure parks on the peer's capacity), and ending one side ends the other's readable. Returned as a 2-element array, so both destructuring and index access work.",
-      "returns": { "type": "[Duplex, Duplex]", "desc": "A pair of cross-wired duplex handles." },
+      "badge": "exact",
+      "description": "Two Duplex instances wired to each other: what one side writes, the other reads. A write completes when the peer reads it, and end() finishes once the peer has ended, as Node's DuplexSide does. Returned as a two-element array.",
+      "returns": { "type": "[Duplex, Duplex]", "desc": "A pair of cross-wired Duplex streams." },
       "exampleKey": "streams/named_exports",
-      "snippet": "const [clientSide, serverSide] = duplexPair()\nserverSide.on(\"data\", (d) => { console.log(\"server saw:\", d) })\nclientSide.end(\"hello over the pair\")",
-      "differences": [
-        "String chunks only (no `<T>` form)",
-        "The sides are Duplex *handles* (`write`/`end`/`on`/`pipe`/…), not `Duplex` class instances — no `instanceof Duplex`, `cork`/`uncork`, `.read()`, or `'readable'` events"
-      ],
+      "snippet": "const [clientSide, serverSide] = duplexPair()\nserverSide.on(\"data\", (d) => { console.log(\"server saw:\", d.toString()) })\nclientSide.end(\"hello over the pair\")",
       "seeAlso": ["streams.nodestreams"],
       "spec": { "mdn": "https://nodejs.org/api/stream.html#streamduplexpairoptions" }
     }

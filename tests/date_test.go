@@ -11,7 +11,7 @@ import (
 // arithmetic (the A1 invalid-IR cluster; same fix as ADR-00882/00883).
 func TestE2EDateNonNumericArgRejected(t *testing.T) {
 	mustCompileError(t, `const d = new Date(2020, Symbol("x"))`, "Date component")
-	mustCompileError(t, `const d = new Date(0); d.setFullYear(Symbol("x"))`, "Date setter argument")
+	mustCompileError(t, `const d = new Date(0); d.setFullYear(Symbol("x"))`, "argument of type 'symbol' is not assignable")
 }
 
 func TestE2EDateEpoch(t *testing.T) {
@@ -298,42 +298,50 @@ console.log(d.getHours(), d.getMinutes(), d.getSeconds(), d.getMilliseconds());
 `, "2021 5 15\n10 30 45 500")
 }
 
+// JavaScript's Date - Date is the difference in milliseconds (-compat=js;
+// TypeScript rejects it).
 func TestE2EDateMinusDateGivesMillisDifference(t *testing.T) {
-	assertOutput(t, `
-const d1: Date = new Date(1000)
-const d2: Date = new Date(3000)
-const diff: number = d1 - d2
+	assertOutputCompatJS(t, `
+const d1 = new Date(1000)
+const d2 = new Date(3000)
+const diff = d1 - d2
 console.log(diff)
 console.log(d2 - d1)
 `, "-2000\n2000")
 }
 
 func TestE2EDatePlusNumberGivesNewDate(t *testing.T) {
-	assertOutput(t, `
+	mustCompileError(t, `
 const d1: Date = new Date(1000)
-console.log((d1 + 500).getTime())
-console.log((500 + d1).getTime())
-console.log((d1 + 86400000).toISOString())
-`, "1500\n1500\n1970-01-02T00:00:01.000Z")
+console.log(d1 + 500)
+`, "operator '+' cannot be applied to types 'Date' and 'number'")
 }
 
 func TestE2EDateMinusNumberGivesNewDate(t *testing.T) {
-	assertOutput(t, `
+	mustCompileError(t, `
 const d1: Date = new Date(10000)
-console.log((d1 - 500).getTime())
-console.log((d1 - 10000).toISOString())
-`, "9500\n1970-01-01T00:00:00.000Z")
+console.log(d1 - 500)
+`, "the left-hand side of an arithmetic operation")
 }
 
+// Arithmetic on a Date is a TypeScript error (TS2362, TS2365); its
+// millisecond count is getTime(). (Under -compat=js, `date ± n` diverges
+// from JavaScript: BACKLOG §0 item 0c.)
 func TestE2EDateArithmeticUntypedInference(t *testing.T) {
-	assertOutput(t, `
+	mustCompileError(t, `
 const d1: Date = new Date(0)
 const later = d1 + 86400000
+`, "operator '+' cannot be applied to types 'Date' and 'number'")
+	mustCompileError(t, `
+const d1: Date = new Date(0)
+const diff = d1 - d1
+`, "the left-hand side of an arithmetic operation")
+	assertOutput(t, `
+const d1: Date = new Date(0)
+const later = new Date(d1.getTime() + 86400000)
 console.log(later.getFullYear())
 console.log(later.toISOString())
-
-const diff = later - d1
-console.log(diff)
+console.log(later.getTime() - d1.getTime())
 `, "1970\n1970-01-02T00:00:00.000Z\n86400000")
 }
 

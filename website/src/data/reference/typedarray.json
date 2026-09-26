@@ -150,15 +150,13 @@
       "statusRow": "Node Buffer (Buffer.from/.alloc/.toString(encoding)/.write/etc.)",
       "signature": "Buffer.from(...) / Buffer.alloc(n) / buf.toString(enc)",
       "badge": "caveats",
-      "description": "A Buffer IS a Uint8Array — indexing, .length, .slice/.subarray, numeric .fill/.indexOf/.includes, HOFs, for-of, .set, .byteLength, and fs.writeFileSync(buffer) all share the TypedArray machinery; Buffer.from(...)/.alloc(...) are general expressions (call syntax, no vardecl restriction). Codecs both directions — utf8, hex, base64, base64url, latin1/binary/ascii — plus full read/write{U}Int{8,16,32}{LE,BE} + Float/Double + BigInt64/BigUInt64 accessors with catchable RangeError bounds checks.",
+      "description": "A Buffer IS a Uint8Array — indexing, .length, .slice/.subarray, numeric .fill/.indexOf/.includes, HOFs, for-of, .set, .byteLength, and fs.writeFileSync(buffer) all share the TypedArray machinery; Buffer.from(...)/.alloc(...) are general expressions (call syntax, no vardecl restriction). Codecs both directions — utf8, utf16le/ucs2, hex, base64, base64url, latin1/binary/ascii — plus full read/write{U}Int{8,16,32}{LE,BE} + Float/Double + BigInt64/BigUInt64 accessors with catchable RangeError bounds checks.",
       "returns": { "type": "Buffer", "desc": "A Uint8Array-backed buffer." },
       "exampleKey": "buffer/buffer",
       "snippet": "const hello = Buffer.from(\"Hello\");            // utf8 bytes\nconsole.log(Buffer.from(\"4869\", \"hex\").toString())      // Hi\nconsole.log(hello.toString(\"base64\"))          // SGVsbG8=\nconst pkt = Buffer.alloc(12)\npkt.writeBigInt64BE(9007199254740993n, 4)",
       "differences": [
-        "No `utf16le`/`ucs2` encodings (the compiler's strings are UTF-8-native)",
-        "Encoding arguments must be compile-time string literals",
-        "`Buffer.from(arrayBuffer)` **copies** (Node views); `Buffer.concat`'s list must be an inline array literal",
-        "String-valued `.indexOf`/`.includes`/`.lastIndexOf` search the needle's UTF-8 bytes, and `.fill(string, offset?, end?)` repeats the needle's bytes (all no byteOffset/encoding); no 4-arg `.write(string, offset, length, encoding)` form; no `.swap16/32/64`, `.toJSON`, `Buffer.of`, `Buffer.isAscii`/`Buffer.isUtf8`, arbitrary-width `readIntLE(offset, byteLength)`, `poolSize`/`allocUnsafeSlow`",
+        "`Buffer.from(arrayBuffer)` **copies** (Node views)",
+        "String-valued `.indexOf`/`.includes`/`.lastIndexOf` search the needle's UTF-8 bytes, and `.fill(string, offset?, end?)` repeats the needle's bytes (all no byteOffset/encoding); no 4-arg `.write(string, offset, length, encoding)` form; no `.swap16/32/64`, `.toJSON`, `Buffer.of`, `Buffer.isAscii`/`Buffer.isUtf8`, arbitrary-width `readIntLE(offset, byteLength)`, `poolSize`",
         "`.toString()` (utf8/latin1) truncates at an embedded null byte"
       ],
       "seeAlso": ["typedarray.uint8arrayint8arrayuint1", "typedarray.blob"],

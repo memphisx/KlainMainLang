@@ -33,15 +33,15 @@ func (e *Emitter) ensureFsWatchRuntime() {
 @__kml_fswatch_reg_cap = internal global i64 0, align 8
 @__kml_fswatch_open = internal global i64 0, align 8`)
 
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		e.emitFsWatchWindows()
 		return
 	}
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		e.emitFsWatchDarwin()
 		return
 	}
-	if targetGOOS() != "linux" {
+	if e.opts.Target.OS() != "linux" {
 		// Other BSDs etc.: no backend — watch throws, hooks inert.
 		notYet := e.internString("cannot watch path")
 		e.emitGlobal(fmt.Sprintf(`

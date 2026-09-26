@@ -2,6 +2,7 @@ package tests
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -23,7 +24,7 @@ func TestE2EFsAsyncCallbackRoundTrip(t *testing.T) {
 import fs from 'fs'
 fs.writeFile(%q, "hello world", (err) => {
   if (err) { console.log("write err"); return }
-  fs.readFile(%q, (err2, data: string) => {
+  fs.readFile(%q, "utf8", (err2, data) => {
     if (err2) { console.log("read err"); return }
     console.log("read: " + data)
     fs.unlink(%q, (err3) => { console.log(err3 ? "unlink err" : "unlinked") })
@@ -36,7 +37,7 @@ fs.writeFile(%q, "hello world", (err) => {
 func TestE2EFsAsyncCallbackErrorFirst(t *testing.T) {
 	src := `
 import fs from 'fs'
-fs.readFile("/definitely/does/not/exist/kml-fs-async.txt", (err, data: string) => {
+fs.readFile("/definitely/does/not/exist/kml-fs-async.txt", "utf8", (err, data) => {
   console.log(err ? "ENOENT caught" : "unexpected ok")
 })
 `
@@ -50,7 +51,7 @@ func TestE2EFsPromisesAwaitRoundTrip(t *testing.T) {
 import fs from 'fs'
 async function main(): Promise<void> {
   await fs.promises.writeFile(%q, "promise data")
-  const s: string = await fs.promises.readFile(%q)
+  const s: string = await fs.promises.readFile(%q, "utf8")
   console.log("read: " + s)
   await fs.promises.unlink(%q)
   console.log("done")
@@ -65,7 +66,7 @@ func TestE2EFsPromisesRejectionCaught(t *testing.T) {
 import fs from 'fs'
 async function main(): Promise<void> {
   try {
-    const s: string = await fs.promises.readFile("/definitely/does/not/exist/kml-fs-async2.txt")
+    const s: string = await fs.promises.readFile("/definitely/does/not/exist/kml-fs-async2.txt", "utf8")
     console.log(s)
   } catch (e) {
     console.log("rejected caught")
@@ -93,9 +94,9 @@ async function main(): Promise<void> {
   await fs.promises.writeFile(%q, "B")
   await fs.promises.writeFile(%q, "C")
   const parts: string[] = await Promise.all([
-    fs.promises.readFile(%q),
-    fs.promises.readFile(%q),
-    fs.promises.readFile(%q),
+    fs.promises.readFile(%q, "utf8"),
+    fs.promises.readFile(%q, "utf8"),
+    fs.promises.readFile(%q, "utf8"),
   ])
   console.log(parts[0] + parts[1] + parts[2])
 }
@@ -118,7 +119,7 @@ async function main(): Promise<void> {
   await fs.promises.writeFile(%q, "payload" + "x".repeat(8 << 20))
   let timerFired: boolean = false
   setTimeout(() => { timerFired = true }, 0)
-  const s: string = await fs.promises.readFile(%q)
+  const s: string = await fs.promises.readFile(%q, "utf8")
   await fs.promises.readFile(%q)
   console.log((timerFired ? "timer-ran" : "timer-missed") + ":" + s.slice(0, 7))
 }
@@ -142,8 +143,8 @@ async function main(): Promise<void> {
   await fs.promises.appendFile(%q, "-beta")
   await fs.promises.copyFile(%q, %q)
   await fs.promises.rename(%q, %q)
-  const a: string = await fs.promises.readFile(%q)
-  const c: string = await fs.promises.readFile(%q)
+  const a: string = await fs.promises.readFile(%q, "utf8")
+  const c: string = await fs.promises.readFile(%q, "utf8")
   const entries: string[] = await fs.promises.readdir(%q)
   console.log(a + "|" + c + "|" + entries.length)
   await fs.promises.unlink(%q)
@@ -210,7 +211,7 @@ func TestE2EFsPromisesNamedImport(t *testing.T) {
 import { readFile, writeFile, unlink } from 'fs/promises'
 async function main(): Promise<void> {
   await writeFile(%q, "fs/promises works")
-  const s: string = await readFile(%q)
+  const s: string = await readFile(%q, "utf8")
   console.log(s)
   await unlink(%q)
 }
@@ -247,10 +248,10 @@ func TestE2EFsPromisesWriteBinaryPooledEmbeddedNull(t *testing.T) {
 import fs from 'fs'
 async function main(): Promise<void> {
   await fs.promises.writeFile(%q, new Uint8Array([65, 66, 0, 67, 68]))
-  const back: string = await fs.promises.readFile(%q)
+  const back = await fs.promises.readFile(%q)
   console.log("len:" + back.length)
   await fs.promises.appendFile(%q, new Uint8Array([69, 70]))
-  const back2: string = await fs.promises.readFile(%q)
+  const back2 = await fs.promises.readFile(%q)
   console.log("len2:" + back2.length)
   await fs.promises.unlink(%q)
 }
@@ -267,7 +268,7 @@ func TestE2EFsAsyncCallbackWriteBinaryEmbeddedNull(t *testing.T) {
 import fs from 'fs'
 fs.writeFile(%q, new Uint8Array([65, 66, 0, 67, 68]), (err) => {
   if (err) { console.log("werr"); return }
-  fs.readFile(%q, (e2, d: string) => {
+  fs.readFile(%q, "utf8", (e2, d) => {
     if (e2) { console.log("rerr"); return }
     console.log("len:" + d.length)
     fs.unlink(%q, (e3) => {})
@@ -308,11 +309,139 @@ fs.writeFileSync(%q, "x".repeat(8 << 20))
 let timerFirst: boolean = false
 let done: boolean = false
 setTimeout(() => { if (!done) { timerFirst = true } }, 0)
-fs.readFile(%q, (err, data: string) => {
+fs.readFile(%q, "utf8", (err, data) => {
   done = true
   console.log(timerFirst ? "nonblocking" : "blocked")
   fs.unlink(%q, (e) => {})
 })
 `, path, path, path)
 	assertOutputImports(t, src, "nonblocking")
+}
+
+// readFile as Node's: a Buffer without an encoding, a string with one (any
+// Buffer encoding), options on every async op, and `undefined` data on an
+// error. Expected output from Node v24.
+func TestE2EFsAsyncReadFileBufferAndEncodings(t *testing.T) {
+	dir := tempDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("hello\xce\xb1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := fmt.Sprintf(`import * as fs from 'fs';
+const D = %q;
+import { readFile, writeFile, mkdir, readdir } from 'fs/promises';
+const b = await readFile(D + '/f.txt');
+console.log(b, b.length);
+console.log(await readFile(D + '/f.txt', 'utf8'), await readFile(D + '/f.txt', { encoding: 'hex' }), await fs.promises.readFile(D + '/f.txt', { encoding: 'base64' }));
+console.log(JSON.stringify(fs.readFileSync(D + '/f.txt', 'latin1')), fs.readFileSync(D + '/f.txt', { encoding: 'ascii' }));
+await writeFile(D + '/g.txt', 'kalimera', 'utf8');
+await writeFile(D + '/h.txt', 'x', { encoding: 'utf8' });
+await mkdir(D + '/a/b/c', { recursive: true });
+console.log((await readdir(D)).sort().join(','));
+const ents = await readdir(D, { withFileTypes: true });
+console.log(ents.map((d) => d.name + (d.isDirectory() ? '/' : '')).sort().join(','));
+fs.readFile(D + '/g.txt', (err, data) => {
+  console.log('cb', err, data);
+  fs.readFile(D + '/g.txt', 'utf8', (err2, s) => {
+    console.log('cb2', err2, s);
+    fs.readFile(D + '/missing.txt', (err3, d3) => console.log('cb3', err3 !== null, (err3 as NodeJS.ErrnoException).code, d3));
+  });
+});
+`, dir)
+	assertOutputImports(t, src, "<Buffer 68 65 6c 6c 6f ce b1> 7\nhelloα 68656c6c6fceb1 aGVsbG/OsQ==\n\"helloÎ±\" helloN1\na,f.txt,g.txt,h.txt\na/,f.txt,g.txt,h.txt\ncb null <Buffer 6b 61 6c 69 6d 65 72 61>\ncb2 null kalimera\ncb3 true ENOENT undefined\n")
+}
+
+// The callback forms of stat, lstat, realpath, mkdtemp, truncate, access,
+// chmod, link, symlink, readlink and rm, and a two-path error's message.
+func TestE2EFsCallbackForms(t *testing.T) {
+	assertOutputImports(t, `
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
+let order = "sync"
+fs.stat('/nope', (err) => {
+  console.log('stat err', order, err!.code, err!.message)
+  fs.mkdtemp(path.join(os.tmpdir(), 'kml-'), (err, d) => {
+    console.log('mkdtemp', err, d.includes('kml-'))
+    const f = path.join(d, 'a.txt')
+    fs.writeFileSync(f, 'hello')
+    fs.truncate(f, 2, (err) => {
+      console.log('truncate', err, fs.readFileSync(f, 'utf8'))
+      fs.chmod(f, 0o600, (err) => {
+        console.log('chmod', err, (fs.statSync(f).mode & 0o777).toString(8))
+        fs.link(f, path.join(d, 'b.txt'), (err) => {
+          fs.symlink(f, path.join(d, 'c.txt'), (err2) => {
+            fs.readlink(path.join(d, 'c.txt'), (err3, target) => {
+              console.log('links', err, err2, err3, target === f)
+              fs.lstat(path.join(d, 'c.txt'), (err, st) => {
+                console.log('lstat', err, st.isSymbolicLink())
+                fs.link('/nx-a', '/nx-b', (err) => {
+                  console.log(err!.message)
+                  fs.rm(d, { recursive: true }, (err) => { console.log('rm', err, fs.existsSync(d)) })
+                })
+              })
+            })
+          })
+        })
+      })
+    })
+  })
+})
+order = "async"
+`, `stat err async ENOENT ENOENT: no such file or directory, stat '/nope'
+mkdtemp null true
+truncate null he
+chmod null 600
+links null null null true
+lstat null true
+ENOENT: no such file or directory, link '/nx-a' -> '/nx-b'
+rm null false`)
+}
+
+// The Promise forms of stat, lstat, realpath and access (fs.promises and
+// fs/promises).
+func TestE2EFsPromiseStatForms(t *testing.T) {
+	assertOutputImports(t, `
+import fs from 'fs'
+import { stat, realpath, access } from 'fs/promises'
+async function main(): Promise<void> {
+  const s = await fs.promises.stat('.')
+  console.log(s.isDirectory())
+  console.log((await stat('.')).isDirectory(), (await realpath('.')).length > 0)
+  try { await access('/nope') } catch (e) { console.log((e as NodeJS.ErrnoException).code) }
+  try { await fs.promises.lstat('/nope') } catch (e) { console.log((e as Error).message) }
+}
+main()
+`, "true\ntrue true\nENOENT\nENOENT: no such file or directory, lstat '/nope'")
+}
+
+// `import { promises } from 'fs'` is fs/promises' namespace.
+func TestE2EFsPromisesMemberImport(t *testing.T) {
+	assertOutputImports(t, `
+import { promises } from 'fs'
+import { promises as fsp } from 'node:fs'
+async function main(): Promise<void> {
+  const s = await promises.stat('.')
+  console.log(s.isDirectory(), (await fsp.readdir('.')).length > 0)
+}
+main()
+`, "true true")
+}
+
+// A number or boolean path is Node's ERR_INVALID_ARG_TYPE when the call runs;
+// writeFileSync/appendFileSync on a descriptor write at its position.
+func TestE2EFsPathTypeAndDescriptorWrites(t *testing.T) {
+	assertOutputImports(t, `
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
+try { fs.mkdirSync(123 as any) } catch (e) { const err = e as NodeJS.ErrnoException; console.log(err.code, err.message) }
+const p = path.join(os.tmpdir(), 'kml-fdw-' + process.pid + '.txt')
+const fd = fs.openSync(p, 'w')
+fs.writeFileSync(fd, 'hello ')
+fs.appendFileSync(fd, 'world')
+fs.closeSync(fd)
+console.log(fs.readFileSync(p, 'utf8'))
+fs.unlinkSync(p)
+`, `ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received type number (123)
+hello world`)
 }

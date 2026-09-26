@@ -163,7 +163,7 @@ func (e *Emitter) classifyChainGuard(link ast.Expression) (guard optionalChainGu
 		case optCalleePresent:
 			return chainGuardNone, false
 		case optCalleeHostDependent:
-			if targetGOOS() == "windows" {
+			if e.opts.Target.OS() == "windows" {
 				return chainGuardAbsent, true
 			}
 			return chainGuardNone, true

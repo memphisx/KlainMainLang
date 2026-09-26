@@ -168,9 +168,10 @@ console.log(s.has(9));
 }
 
 func TestE2ENewEventEmitterAsReturnValue(t *testing.T) {
-	assertOutput(t, `
-function makeEmitter(): EventEmitter<string> {
-  return new EventEmitter<string>();
+	assertOutputImports(t, `
+import { EventEmitter } from 'events'
+function makeEmitter(): EventEmitter {
+  return new EventEmitter();
 }
 const e = makeEmitter();
 e.on("msg", (data: string): void => {

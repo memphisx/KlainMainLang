@@ -20,7 +20,11 @@
 // codegen here actually handles — see the guards in emit_func.go/emitter.go.
 package llvm
 
-import "fmt"
+import (
+	"fmt"
+
+	"KlainMainLang/ast"
+)
 
 // isUnconstrainedDynamic reports whether ty is bare any/unknown — IsDynamic
 // with no UnionMembers set. A *constrained* union (IsDynamic with a non-nil
@@ -43,7 +47,8 @@ func isSelfDescribingBox(ty Type) bool {
 		return false
 	}
 	for _, m := range ty.UnionMembers {
-		if scalarTypeKind(m) == "" {
+		// An array member's box carries its element kind, as an any's does.
+		if scalarTypeKind(m) == "" && !m.IsArray {
 			return false
 		}
 	}
@@ -153,6 +158,7 @@ func validateUnionMembers(ty Type, line, col int) error {
 		return nil
 	}
 	var objectMembers []Type
+	arrays, byteArrays := 0, 0
 	for _, m := range ty.UnionMembers {
 		if scalarTypeKind(m) != "" {
 			continue
@@ -161,6 +167,21 @@ func validateUnionMembers(ty Type, line, col int) error {
 		// (kmlTagStream), so it is runtime-distinguishable on its own and does not
 		// count toward the "2+ object members need a discriminant" rule below.
 		if m.IsReadableStream {
+			continue
+		}
+		// One array member: boxed under the array tag, so runtime-distinguishable
+		// too (`string | string[]`, narrowed by Array.isArray or the checker).
+		if m.IsArray {
+			// A plain array and a byte array (`string[] | Buffer`) box apart
+			// (the box's typed byte); two of either kind do not.
+			if m.IsTypedArray || m.IsBuffer {
+				byteArrays++
+			} else {
+				arrays++
+			}
+			if arrays > 1 || byteArrays > 1 {
+				return fmt.Errorf("%d:%d: a union with two or more array members of one kind is not supported yet", line, col)
+			}
 			continue
 		}
 		// An object/interface/class member is allowed (TDD-00115), boxed as tag 6.
@@ -234,6 +255,11 @@ func unionDiscriminant(members []Type) (string, bool) {
 // object/interface/class type (boxable as tag 6, usable via narrowing) — as
 // opposed to an array, Map/Set, or other non-boxable aggregate.
 func isUnionObjectMember(m Type) bool {
+	// An index-signature dictionary is a plain object too (its box holds
+	// the map pointer).
+	if m.IsDynamicObject && !m.IsArray {
+		return true
+	}
 	return m.IsObject && !m.IsArray && !m.IsMap && !m.IsSet && !m.IsTuple &&
 		!m.IsDynamicObject && !m.IsGroupMap
 }
@@ -249,7 +275,15 @@ func isUnionObjectMember(m Type) bool {
 // error, the actual type-safety win a union has over bare any/unknown.
 func unionAllowsAssignmentFrom(unionTy Type, valTy Type) bool {
 	if valTy.IsNull || valTy.IsUndefined {
-		return unionTy.Nullable
+		if unionTy.Nullable {
+			return true
+		}
+		if !valTy.Nullable || valTy.IR == "" || valTy.IR == "void" {
+			return false
+		}
+		// A possibly-absent T (`T | undefined`, narrowed where the checker
+		// proved it present): T is what must be a member.
+		valTy.Nullable, valTy.IsNull, valTy.IsUndefined = false, false, false
 	}
 	// A value that's already boxed dynamic (e.g. assigning one union-typed
 	// variable to another, or a bare any/unknown expression) can't be
@@ -263,6 +297,15 @@ func unionAllowsAssignmentFrom(unionTy Type, valTy Type) bool {
 	if valKind != "" {
 		for _, m := range unionTy.UnionMembers {
 			if scalarTypeKind(m) == valKind {
+				return true
+			}
+		}
+		return false
+	}
+	// An array value matches the union's array member.
+	if valTy.IsArray {
+		for _, m := range unionTy.UnionMembers {
+			if m.IsArray {
 				return true
 			}
 		}
@@ -284,12 +327,36 @@ func unionAllowsAssignmentFrom(unionTy Type, valTy Type) bool {
 	// for generic constraints (TDD-00115).
 	if isUnionObjectMember(valTy) {
 		for _, m := range unionTy.UnionMembers {
-			if isUnionObjectMember(m) && objectStructurallyAssignable(valTy, m) {
+			if isUnionObjectMember(m) && (objectStructurallyAssignable(valTy, m) || needsObjectRelayoutBoxing(valTy, m)) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// relayoutForUnion copies an object value into the layout of the union's
+// object member it is assigned to, when the two layouts differ (`{cert, key}`
+// passed as a `TlsOptions | fn`): the box carries the member's layout, which
+// is how every read of the union's object member sees it.
+func (e *Emitter) relayoutForUnion(v Value, unionTy Type) Value {
+	if !isUnionObjectMember(v.Ty) {
+		return v
+	}
+	for _, m := range unionTy.UnionMembers {
+		if !isUnionObjectMember(m) {
+			continue
+		}
+		if plainRecordType(m) && sameFieldLayout(v.Ty, m) {
+			return v
+		}
+	}
+	for _, m := range unionTy.UnionMembers {
+		if isUnionObjectMember(m) && needsObjectRelayoutBoxing(v.Ty, m) {
+			return e.emitObjectRelayout(v, m)
+		}
+	}
+	return v
 }
 
 // objectStructurallyAssignable reports whether an object value of type val may
@@ -398,17 +465,29 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 	if v.Ty.IR == "void" {
 		return Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeAny}, nil
 	}
+	// A caught value (TypeCaught, TDD-00202) is a { i8 tag, i64 payload }
+	// record: pack it (an Error becomes an object box) — the numeric default
+	// below read the aggregate as a number, so a caught error passed to an
+	// `any` parameter arrived as `typeof "number"` (TDD-00229).
+	if v.Ty.IsCaught {
+		return e.emitCaughtToAny(v), nil
+	}
 	// A nullable scalar (`number | null`, …) is a { i1, T } aggregate, not a bare
 	// scalar — box the payload (recursively, as its own scalar) when present, or
-	// `undefined` when absent (TDD-00123).
+	// its absence when absent: `undefined` for a `T | undefined`, `null` for a
+	// `T | null` (TDD-00123).
 	if isNullableScalar(v.Ty) {
 		present, payload := e.nullableScalarAggParts(v)
 		boxedVal, err := e.emitBoxValue(payload)
 		if err != nil {
 			return Value{}, err
 		}
+		absent := int64(nbUndefined)
+		if !v.Ty.IsUndefined {
+			absent = nbNull
+		}
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", r, present, boxedVal.Ref, nbUndefined))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", r, present, boxedVal.Ref, absent))
 		return Value{Ref: r, Ty: TypeAny}, nil
 	}
 	// An array value is a { ptr, i64 } aggregate (data pointer + length), which
@@ -458,7 +537,9 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		// closure header, the adapter unboxes arguments to the concrete
 		// parameter types and boxes the result.
 		return e.emitDynClosureAdapter(v)
-	case v.Ty.IsObject:
+	case v.Ty.IsObject || v.Ty.IsDynamicObject:
+		// An index-signature dictionary boxes as its map pointer, as an object
+		// does: a union holding it unboxes it back.
 		tagged := e.emitNbTagPtr(v.Ref, kmlTagObject)
 		// A nullable object (`C | null`) that is null at runtime must box as the
 		// nbNull sentinel, not an object-tagged 0 payload; otherwise `x === null`
@@ -474,6 +555,14 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		return Value{Ref: tagged, Ty: TypeAny}, nil
 	case v.Ty.IsReadableStream:
 		return Value{Ref: e.emitNbTagPtr(v.Ref, kmlTagStream), Ty: TypeAny}, nil
+	case v.Ty.IsFFIFunction:
+		// A bound native function is already a dynamic-ABI function object
+		// (an extended tag-12 record, TDD-00229).
+		return Value{Ref: e.emitNbTagPtr(v.Ref, kmlTagDynFunc), Ty: TypeAny}, nil
+	case v.Ty.IsBigInt:
+		// A bigint boxes as a { magic, ptr } cell (emit_bigint_box.go) — the
+		// string-kind fall-through below read it as a string (TDD-00229).
+		return e.emitBoxBigInt(v), nil
 	case v.Ty.IR == "ptr":
 		// String: kind bits 0 — the value IS the pointer.
 		r := e.freshReg()
@@ -523,7 +612,38 @@ const (
 	anyArrayPlain   = 0
 	anyArrayTyped   = 1
 	anyArrayClamped = 2
+	anyArrayBuffer  = 3 // a Node Buffer (a Uint8Array to the element walker)
 )
+
+// emitBoxIsTypedArray is an i1 that the boxed value v is a static array box
+// whose typed byte is typed (a Buffer, anyArrayBuffer). The box is read only
+// when its tag says it is one.
+func (e *Emitter) emitBoxIsTypedArray(v Value, typed int) string {
+	tag, payload := e.emitUnboxTagPayload(v)
+	isArr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isArr, tag, kmlTagArray))
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resPtr))
+	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", resPtr))
+	readL := e.freshLabel("boxtyped.read")
+	mergeL := e.freshLabel("boxtyped.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isArr, readL, mergeL))
+	e.emitLabel(readL)
+	box := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", box, payload))
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", gep, anyArrayBoxTy, box))
+	b := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", b, gep))
+	is := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", is, b, typed))
+	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", is, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(mergeL)
+	res := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", res, resPtr))
+	return res
+}
 
 // arrayElemKind maps a static array element type to the descriptor
 // __kml_array_join strides/formats by, or (-1, false) when the kind isn't a flat
@@ -585,6 +705,8 @@ func anyArrayBoxBytes(t Type) (kind, typed int) {
 	}
 	typed = anyArrayPlain
 	switch {
+	case t.IsBuffer:
+		typed = anyArrayBuffer
 	case t.Clamped:
 		typed = anyArrayClamped
 	case t.IsTypedArray && !t.IsBuffer:
@@ -817,7 +939,13 @@ func (e *Emitter) emitDynamicRenderAt(v Value, inspect bool, depth int) (Value, 
 	fnName := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", fnName, payload))
 	fnBuf := e.emitStringScratch(64) // TDD-00120
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s)", fnBuf, e.internString("function %s() { [native code] }"), fnName))
+	// console.log inspects (`[Function: TypeError]`); String() gives the
+	// native-function source form.
+	fnFmt := "function %s() { [native code] }"
+	if inspect {
+		fnFmt = "[Function: %s]"
+	}
+	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s)", fnBuf, e.internString(fnFmt), fnName))
 	e.emitStringFinalizeLen(fnBuf)
 	store(fnBuf)
 	e.emitLabel(nextL)
@@ -826,7 +954,17 @@ func (e *Emitter) emitDynamicRenderAt(v Value, inspect bool, depth int) (Value, 
 	// function — the source text isn't retained.
 	matchL, nextL = e.emitTagCheck(tag, kmlTagDynFunc, "dynstr.dynfn")
 	e.emitLabel(matchL)
-	store(e.internString("function () { [native code] }"))
+	if inspect {
+		// util.inspect's `[Function: name]` form (TDD-00229).
+		e.ensureFnMeta()
+		rec := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", rec, payload))
+		fs := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fn_inspect_dyn(ptr %s, i64 %d)", fs, rec, depth))
+		store(fs)
+	} else {
+		store(e.internString("function () { [native code] }"))
+	}
 	e.emitLabel(nextL)
 
 	// A dynamic array stringifies as its JS Array join ("1,hi,true"), matching
@@ -871,6 +1009,28 @@ func (e *Emitter) emitDynamicRenderAt(v Value, inspect bool, depth int) (Value, 
 	// error-subclass instance, whose fields don't line up) keeps the default.
 	matchL, nextL = e.emitTagCheck(tag, kmlTagObject, "dynstr.obj")
 	e.emitLabel(matchL)
+	// A boxed bigint (emit_bigint_box.go): its digits, with console.log's
+	// trailing `n` (TDD-00229).
+	bigCell, isBig := e.emitBoxedBigIntProbe(payload)
+	bigL := e.freshLabel("dynstr.obj.bigint")
+	notBigL := e.freshLabel("dynstr.obj.notbig")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBig, bigL, notBigL))
+	e.emitLabel(bigL)
+	// Through the finalize-time hook, so rendering an `any` never drags the
+	// bigint runtime into a program that has no bigints.
+	e.ensureBoxedBigIntHooks()
+	bigDigits := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_boxed_bigint_str(ptr %s)", bigDigits, bigCell))
+	bigStr := Value{Ref: bigDigits, Ty: TypePtr}
+	if inspect {
+		var err error
+		bigStr, err = e.emitStringConcat(bigStr, Value{Ref: e.internString("n"), Ty: TypePtr})
+		if err != nil {
+			return Value{}, err
+		}
+	}
+	store(bigStr.Ref)
+	e.emitLabel(notBigL)
 	errObjPtr, errIsErr := e.emitBoxedErrorProbe(payload)
 	errL := e.freshLabel("dynstr.obj.err")
 	plainL := e.freshLabel("dynstr.obj.plain")
@@ -975,6 +1135,13 @@ func (e *Emitter) emitDynamicTypeof(v Value) (Value, error) {
 	// symbolTypeIDFlag (ADR-01059) — "symbol", not "object".
 	matchL, nextL = e.emitTagCheck(tag, kmlTagObject, "dyntypeof.obj")
 	e.emitLabel(matchL)
+	_, isBig := e.emitBoxedBigIntProbe(payload)
+	bigL := e.freshLabel("dyntypeof.bigint")
+	notBigL := e.freshLabel("dyntypeof.notbig")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBig, bigL, notBigL))
+	e.emitLabel(bigL)
+	store("bigint")
+	e.emitLabel(notBigL)
 	_, isSym := e.emitBoxedSymbolProbe(payload)
 	symL := e.freshLabel("dyntypeof.symbol")
 	plainL := e.freshLabel("dyntypeof.plainobj")
@@ -1016,4 +1183,32 @@ func (e *Emitter) emitAnyEquals(a, b Value, negate bool) (Value, error) {
 		return Value{Ref: neg, Ty: TypeBool}, nil
 	}
 	return Value{Ref: result, Ty: TypeBool}, nil
+}
+
+// emitArrayBufferIsView implements ArrayBuffer.isView(x): whether x is a
+// typed array (a Buffer included) or a DataView — from its type, or for an
+// `any`, from its box's array kind.
+func (e *Emitter) emitArrayBufferIsView(arg ast.Expression) (Value, error) {
+	v, err := e.emitExpr(arg)
+	if err != nil {
+		return Value{}, err
+	}
+	if isSelfDescribingBox(v.Ty) {
+		plain := e.emitBoxIsTypedArray(v, anyArrayPlain)
+		isArr := e.emitBoxIsArrayTag(v)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", r, plain))
+		out := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", out, r, isArr))
+		return Value{Ref: out, Ty: TypeBool}, nil
+	}
+	return Value{Ref: fmt.Sprint(v.Ty.IsTypedArray || v.Ty.IsDataView), Ty: TypeBool}, nil
+}
+
+// emitBoxIsArrayTag is whether an `any` holds a static array's box.
+func (e *Emitter) emitBoxIsArrayTag(v Value) string {
+	tag, _ := e.emitUnboxTagPayload(v)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", r, tag, kmlTagArray))
+	return r
 }

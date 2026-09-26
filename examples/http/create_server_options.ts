@@ -12,6 +12,7 @@
 // backpressure threshold), so any positive value is accepted and threaded into
 // every response this server mints (default 16384).
 import http from 'http';
+import type { AddressInfo } from 'net';
 
 const server = http.createServer(
   {
@@ -24,14 +25,14 @@ const server = http.createServer(
     insecureHTTPParser: false,
     requireHostHeader: false,
   },
-  (req: IncomingMessage, res: ServerResponse) => {
+  (req: http.IncomingMessage, res: http.ServerResponse) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("ok from " + req.path);
+    res.end("ok from " + req.url);
   },
 );
 
 server.listen(0, () => {
-  const port: number = server.address().port;
+  const port: number = (server.address() as AddressInfo).port;
   console.log("listening on port", port);
   setTimeout(() => { server.close(); }, 100);
 });

@@ -2,6 +2,8 @@
 // Run with extra args to see them printed, e.g.:
 //   ./process hello world
 
+import { readFileSync } from 'fs'
+
 // --- process.argv ---
 // argv[0] is always the compiled binary's own path (like C's argv, not
 // Node's two-prefix convention); anything after that is user-supplied args.
@@ -22,17 +24,17 @@ console.log(pathAgain === path)  // true
 const missing = process.env.KML_EXAMPLE_DOES_NOT_EXIST ?? "default"
 console.log(missing)  // default
 
-// --- process.readLineSync ---
-// Reads one line from stdin, or null at EOF — try it with:
+// --- reading stdin synchronously ---
+// readFileSync(0) reads file descriptor 0, stdin, to its end — try it with:
 //   echo "hi there" | ./process
 // With no piped input (or under `make examples`, which redirects stdin from
-// /dev/null so this never blocks waiting on a real terminal), this hits EOF
-// immediately and prints "no input" below.
-const line = process.readLineSync()
-if (line === null) {
+// /dev/null so this never blocks waiting on a real terminal), stdin is empty
+// and this prints "no input" below.
+const input: string = readFileSync(0, "utf8")
+if (input.length === 0) {
     console.log("no input")
 } else {
-    console.log("read: " + line)
+    console.log("read: " + input.split("\n")[0])
 }
 
 // --- process.cwd / process.chdir ---

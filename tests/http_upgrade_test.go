@@ -20,7 +20,7 @@ import (
 const upgradeEchoServer = `
 import http from 'http'
 interface Res { status: number; body: string }
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end('plain http')
 })
 server.on('upgrade', (req, socket, head) => {
@@ -159,7 +159,7 @@ func TestE2EWSSServerKlainWS(t *testing.T) {
 	certLit, keyLit := genSelfSignedPEM(t)
 	src := fmt.Sprintf(`
 import https from 'https'
-import { WebSocketServer } from 'klain:ws'
+import { WebSocketServer, WSConnection } from 'klain:ws'
 const cert = "%s"
 const key = "%s"
 const server = https.createServer({ cert: cert, key: key }, (req, res) => {
@@ -199,7 +199,7 @@ func TestE2EHandRolledUpgradeAcceptKey(t *testing.T) {
 	src := `
 import http from 'http'
 import crypto from 'crypto'
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end('http')
 })
 server.on('upgrade', (req, socket, head) => {
@@ -220,4 +220,23 @@ server.listen(8965)
 	}
 	defer conn.Close()
 	wsHandshake(t, conn, "/") // verifies the accept key is spec-correct
+}
+
+// An 'upgrade' registration inside a class method is found by the whole-
+// program pre-scan (the generated AST traversal, ADR-01102); the former hand
+// walker never entered class bodies and the program failed with an internal
+// "not detected by the upgrade pre-scan" error.
+func TestE2EHTTPUpgradeRegisteredInClassMethod(t *testing.T) {
+	assertOutputImports(t, `
+import http from 'node:http'
+class Gateway {
+  server = http.createServer((req, res) => { res.end('ok') })
+  wire(): void {
+    this.server.on('upgrade', (req, socket, head) => { socket.end() })
+  }
+}
+const g = new Gateway()
+g.wire()
+console.log('wired')
+`, "wired")
 }

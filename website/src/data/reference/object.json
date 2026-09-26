@@ -197,7 +197,7 @@
       "statusRow": "Reflect.get/set/has/deleteProperty/ownKeys/getPrototypeOf/setPrototypeOf/isExtensible/preventExtensions/defineProperty + defineMetadata/getMetadata/hasMetadata",
       "signature": "Reflect.get(o, \"a\");\nReflect.set(o, \"b\", 2);\nReflect.ownKeys(o);\nReflect.defineProperty(o, \"c\", { value: 3 });\nReflect.defineMetadata(\"k\", v, o, \"prop\");\nReflect.getMetadata(\"k\", o, \"prop\");",
       "badge": "caveats",
-      "description": "The Reflect surface mapped 1:1 onto the dynamic-object runtime: get, set, has, deleteProperty, ownKeys, getPrototypeOf, setPrototypeOf, isExtensible, preventExtensions and defineProperty. The boolean-returning forms (set, deleteProperty, setPrototypeOf) return the success flag instead of throwing, per spec. A metadata API — defineMetadata/getMetadata/getOwnMetadata/hasMetadata/hasOwnMetadata — stores on a dynamic-object target (no prototype-chain walk, so get == getOwn); it also backs -emit-decorator-metadata's design:* metadata. Reflect.apply, Reflect.construct, and Reflect.metadata-as-a-decorator-factory are missing; targets must be dynamic objects."
+      "description": "The Reflect surface mapped 1:1 onto the dynamic-object runtime: get, set, has, deleteProperty, ownKeys, getPrototypeOf, setPrototypeOf, isExtensible, preventExtensions and defineProperty. The boolean-returning forms (set, deleteProperty, setPrototypeOf) return the success flag instead of throwing, per spec. A metadata API — defineMetadata/getMetadata/getOwnMetadata/hasMetadata/hasOwnMetadata — stores on a dynamic-object target (no prototype-chain walk, so get == getOwn); it also backs -emit-decorator-metadata's design:* metadata. Reflect.apply(f, thisArg, args) calls a function value with an argument array. Reflect.construct and Reflect.metadata-as-a-decorator-factory are missing; the object methods' targets must be dynamic objects."
     },
     {
       "id": "object.create",
@@ -236,7 +236,7 @@
       "statusRow": "Object.seal(obj)",
       "signature": "Object.seal(obj): obj",
       "badge": "exact",
-      "description": "A genuine no-op, not a scope-narrowed approximation: seal's guarantee (\"no new/deleted fields\") is already structurally impossible for this compiler's fixed-shape objects, so there's nothing further to enforce — existing fields stay freely writable.",
+      "description": "A static object's shape is fixed at compile time, so seal has nothing further to enforce — existing fields stay freely writable. It records the object's integrity level, so Object.isSealed/isFrozen/isExtensible answer as JS does (as they do after Object.freeze and Object.preventExtensions).",
       "exampleKey": "objects/object_static",
       "snippet": "Object.seal(sealed)\nsealed.port = 2\nconsole.log(sealed.port)  // 2 (seal never blocked the value write)",
       "seeAlso": [
@@ -354,8 +354,8 @@
       "exampleKey": "objects/objects",
       "snippet": "const calculator = {\n  add(a: number, b: number): number {\n    return a + b\n  },\n  label: \"calc\"\n}\nconsole.log(calculator.add(2, 3))   // 5",
       "differences": [
-        "No `this` binding at all — `this` inside a method-shorthand body is a clean compile-time rejection (an object literal has no nominal type to give `this` a shape, and no dynamic call-site binding machinery exists), not silently wrong",
-        "No `async`/generator method shorthand either, matching this compiler's class methods"
+        "`this` in a method-shorthand body is bound only when the literal's contextual type gives the method a `this: T` parameter; otherwise it is a clean compile-time rejection, where TypeScript types it as the object literal",
+        "No generator method shorthand (`*g() {}`): rejected like a generator expression used as a value"
       ],
       "seeAlso": [
         "object.shorthand",

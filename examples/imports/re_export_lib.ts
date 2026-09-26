@@ -8,3 +8,11 @@
 export { add } from './re_export_core'
 export { mul as multiply } from './re_export_core'
 export { default as greet } from './re_export_core'
+
+// A local export list exports this file's own declarations, here under
+// an alias too; `export {}` exports nothing and only marks the file a
+// module.
+const VERSION = "1.0"
+function shout(s: string): string { return s.toUpperCase() + "!" }
+export { VERSION, shout as loud }
+export {}

@@ -222,12 +222,13 @@ func assertMultiFileOutputGC(t *testing.T, files map[string]string, entryName, w
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
+	clangArgs = appendFnMeta(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
 			t.Skipf("bdw-gc not installed: %v", err)
 		}
-		t.Fatalf("clang: %v\n%s", err, out)
+		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
 	result, err := exec.Command(binFile).Output()
 	if err != nil {
@@ -415,4 +416,38 @@ w.on('exit', (code: number) => { console.log("exit " + code); });
 w.postMessage(5);
 `,
 	}, "main.ts", "got 15\nexit 1")
+}
+
+// worker_threads.isMainThread: true in the program, false in a worker.
+func TestE2EWorkerIsMainThread(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"w.ts": `
+import { parentPort, isMainThread } from 'worker_threads';
+parentPort.postMessage("worker isMainThread " + isMainThread);
+`,
+		"main.ts": `
+import { Worker, isMainThread } from 'worker_threads';
+console.log("main isMainThread " + isMainThread);
+const w = new Worker('./w.ts');
+w.on('message', (m: string) => { console.log(m); w.terminate(); });
+`,
+	}, "main.ts", "main isMainThread true\nworker isMainThread false")
+}
+
+// A program that is its own worker (`new Worker(__filename)`, split on
+// isMainThread), as Node's own tests are written.
+func TestE2EWorkerSelfFilename(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"main.ts": `
+import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
+const shared = "top-level";
+if (isMainThread) {
+  const w = new Worker(__filename, { workerData: 20 });
+  w.on('message', (m: string) => { console.log('main got', m, isMainThread, shared); w.terminate(); });
+} else {
+  const n: number = workerData;
+  parentPort.postMessage('worker ' + isMainThread + ' ' + (n + 1) + ' ' + shared);
+}
+`,
+	}, "main.ts", "main got worker false 21 top-level true top-level")
 }

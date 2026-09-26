@@ -7,13 +7,13 @@
 // silently colliding with it.
 //
 // Everything here is synchronous and blocking — there's no event loop in
-// this compiler, so there's no non-blocking variant to offer. readFileSync
-// itself is still text-only (a file containing embedded null bytes reads
-// back shorter than its real size via readFileSync's plain, strlen-based
-// string) — but readFileSyncBytes, and writeFileSync/appendFileSync given
-// an ArrayBuffer/TypedArray instead of a string, are binary-safe (ADR-00094,
-// see the bottom of this file). The same split exists on the fetch() side —
-// see examples/fetch/fetch.ts's .arrayBuffer() section.
+// this compiler, so there's no non-blocking variant to offer.
+// readFileSync(path) returns a Buffer of the file's bytes, as in Node, and
+// readFileSync(path, 'utf8') a string. The Buffer read, and writeFileSync/
+// appendFileSync given an ArrayBuffer/TypedArray instead of a string, are
+// binary-safe (ADR-00094, see the bottom of this file). The same split
+// exists on the fetch() side — see examples/fetch/fetch.ts's .arrayBuffer()
+// section.
 
 import fs from 'fs'
 
@@ -24,17 +24,17 @@ console.log(fs.existsSync(path))   // false — nothing there yet
 fs.writeFileSync(path, 'first line')
 console.log(fs.existsSync(path))   // true
 
-const content: string = fs.readFileSync(path)
+const content: string = fs.readFileSync(path, 'utf8')
 console.log(content)               // first line
 console.log(content.length)        // 10
 
 // writeFileSync truncates — a second write replaces the content entirely
 fs.writeFileSync(path, 'replaced')
-console.log(fs.readFileSync(path)) // replaced
+console.log(fs.readFileSync(path, 'utf8')) // replaced
 
 // appendFileSync adds on, creating the file if it doesn't exist yet
 fs.appendFileSync(path, '\nsecond line')
-console.log(fs.readFileSync(path)) // replaced\nsecond line
+console.log(fs.readFileSync(path, 'utf8')) // replaced\nsecond line
 
 // The canonical text-I/O idiom: an 'utf8' encoding (a bare string or an
 // { encoding: 'utf8' } object) on read/write/append. This compiler's strings
@@ -63,12 +63,12 @@ fs.unlinkSync(secret)
 try {
     fs.readFileSync('/definitely/does/not/exist/kml-example.txt')
 } catch (e) {
-    console.log('caught: ' + e.message)
+    console.log('caught: ' + (e as Error).message)
     // The Error also carries Node's fs-error surface: err.code (the errno
     // name), err.errno (the negated errno, -2 for ENOENT), err.syscall (the
     // bare syscall — 'open' here), and err.path (the offending path). A plain
     // `new Error()` leaves syscall/path null and errno 0.
-    console.log(e.code + ' ' + e.errno + ' ' + e.syscall + ' ' + e.path)  // ENOENT -2 open /definitely/...
+    console.log((e as NodeJS.ErrnoException).code + ' ' + (e as NodeJS.ErrnoException).errno + ' ' + (e as NodeJS.ErrnoException).syscall + ' ' + (e as NodeJS.ErrnoException).path)  // ENOENT -2 open /definitely/...
 }
 
 // existsSync itself never throws for a missing path — it's one of the few
@@ -141,7 +141,7 @@ console.log(fs.existsSync(dir + '/a_renamed.txt'))    // 1
 // copyFileSync — reads the source fully, then writes it to dest; both files
 // exist independently afterward with the same content
 fs.copyFileSync(dir + '/a_renamed.txt', dir + '/a_copy.txt')
-console.log(fs.readFileSync(dir + '/a_copy.txt'))   // file a
+console.log(fs.readFileSync(dir + '/a_copy.txt', 'utf8'))   // file a
 // fs.constants gives the copyFile flags and POSIX access modes by name, so
 // there's no need to spell the raw numbers. COPYFILE_EXCL makes the copy fail
 // if dest already exists.
@@ -179,7 +179,7 @@ console.log(fs.existsSync(dir + "/nested"))   // false — tree removed
 fs.rmdirSync(dir)
 console.log(fs.existsSync(dir))   // false — cleaned up
 
-// --- readFileSyncBytes / binary-safe writeFileSync & appendFileSync (ADR-00094) ---
+// --- Buffer reads / binary-safe writeFileSync & appendFileSync (ADR-00094) ---
 
 const binPath: string = '/tmp/kml_fs_example.bin'
 
@@ -189,22 +189,22 @@ const binPath: string = '/tmp/kml_fs_example.bin'
 const bytes = new Uint8Array([104, 105, 0, 98, 121, 101])
 fs.writeFileSync(binPath, bytes)
 
-const readBack = fs.readFileSyncBytes(binPath)
-console.log(readBack.length)   // 6 — not 2, unlike readFileSync's strlen-based .length would give
+const readBack = fs.readFileSync(binPath)
+console.log(readBack.length)   // 6 — the Buffer keeps the null byte
 
 // appendFileSync accepts the same ArrayBuffer/TypedArray forms
 fs.appendFileSync(binPath, bytes)
-console.log(fs.readFileSyncBytes(binPath).length)   // 12
+console.log(fs.readFileSync(binPath).length)   // 12
 
-// An ArrayBuffer works too (writeFileSync/appendFileSync accept either an
-// ArrayBuffer or any TypedArray view over one)
+// A view over an ArrayBuffer writes its bytes (Node takes a string, Buffer,
+// TypedArray or DataView — a bare ArrayBuffer throws ERR_INVALID_ARG_TYPE)
 const buf = new ArrayBuffer(3)
 const view = new Uint8Array(buf)
 view[0] = 1
 view[1] = 0
 view[2] = 2
-fs.writeFileSync(binPath, buf)
-console.log(fs.readFileSyncBytes(binPath).length)   // 3
+fs.writeFileSync(binPath, view)
+console.log(fs.readFileSync(binPath).length)   // 3
 
 fs.unlinkSync(binPath)
 
@@ -236,7 +236,7 @@ try {
   console.log(fs.lstatSync(tmpd + '/alias').isSymbolicLink())  // true
   console.log(fs.readlinkSync(tmpd + '/alias') === tmpd + '/data.txt')  // true
 } catch (e) {
-  console.log('symlink skipped (needs Developer Mode on Windows): ' + e.code)
+  console.log('symlink skipped (needs Developer Mode on Windows): ' + (e as NodeJS.ErrnoException).code)
 }
 // linkSync makes a hard link — a second name for the same inode (no Developer
 // Mode needed on Windows, unlike symlinkSync). nlink counts the names.

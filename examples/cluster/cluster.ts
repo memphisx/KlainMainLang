@@ -13,5 +13,5 @@ if (cluster.isPrimary) {
     console.log("primary: started worker " + w.id);
   }
 } else {
-  console.log("worker " + cluster.workerId + ": doing work, then exiting");
+  console.log("worker " + cluster.worker!.id + ": doing work, then exiting");
 }

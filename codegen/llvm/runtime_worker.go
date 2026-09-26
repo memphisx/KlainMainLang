@@ -51,7 +51,7 @@ const workerCtrlBytes = 112
 // the next collection would scan from the live SP into unrelated memory. There
 // the statement records the stack actually running, read from the TEB.
 func (e *Emitter) gcSBStore(val string) string {
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		e.ensureGCStackBottomCurrent()
 		return "call void @__kml_gc_sb_cur()"
 	}
@@ -68,7 +68,7 @@ func (e *Emitter) gcSBStore(val string) string {
 // GC_get_my_stackbottom. On Windows gcSBStore ignores its operand (it reads the
 // TEB), so any defined value serves.
 func (e *Emitter) gcSBLoad(reg string) string {
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		return fmt.Sprintf("%s = load ptr, ptr @__kml_gc_orig_stackbottom, align 8", reg)
 	}
 	if e.hasWorkers {
@@ -102,8 +102,8 @@ func (e *Emitter) ensureGCStackBottomCurrent() {
 
 // sigBlockFlag returns SIG_BLOCK's numeric value — glibc defines it as 0,
 // Darwin as 1. Same per-OS-constant pattern as httpNonblockFlag.
-func sigBlockFlag() int {
-	if targetGOOS() == "darwin" {
+func (e *Emitter) sigBlockFlag() int {
+	if e.opts.Target.OS() == "darwin" {
 		return 1
 	}
 	return 0
@@ -213,8 +213,7 @@ entry:
   %%tid_p = getelementptr %s, ptr %%ctrl, i32 0, i32 0
   call i32 @pthread_create(ptr %%tid_p, ptr null, ptr @__kml_worker_main, ptr %%ctrl)
   ret ptr %%ctrl
-}`, ctrlAlloc, httpNonblockFlag(), httpNonblockFlag(),
-		workerCtrlIR, workerCtrlIR, workerCtrlIR, workerCtrlIR, workerCtrlIR, workerCtrlIR, workerCtrlIR, workerCtrlIR))
+}`, ctrlAlloc, e.httpNonblockFlag(), e.httpNonblockFlag(), workerCtrlIR, workerCtrlIR, workerCtrlIR, workerCtrlIR, workerCtrlIR, workerCtrlIR, workerCtrlIR, workerCtrlIR))
 
 	// __kml_workers_register: append ctrl to the calling thread's growable
 	// worker array (same doubling growth every other runtime array uses).
@@ -308,7 +307,7 @@ entry:%s
   %%w2pw = load i32, ptr %%w2pw_p, align 4
   call void @__kml_worker_send_env(i32 %%w2pw, i64 1, i64 %%code, i64 0)%s
   ret ptr null
-}`, gcRegister, sigBlockFlag(), workerCtrlIR, workerCtrlIR, workerCtrlIR, gcUnregister))
+}`, gcRegister, e.sigBlockFlag(), workerCtrlIR, workerCtrlIR, workerCtrlIR, gcUnregister))
 
 	// __kml_worker_send_env: malloc an envelope and write its pointer into
 	// the pipe (atomic for 8 bytes; blocks only if 64K of envelopes are

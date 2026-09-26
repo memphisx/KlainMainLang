@@ -151,9 +151,58 @@ func (e *Emitter) ensureAnyLooseEq() {
 	e.ensureAnyEq()
 	e.ensureAnyOps() // __kml_any_tonum
 	e.ensureAnyToPrimitive()
+	e.ensureBoxedBigIntHooks()
+	e.emitGlobal(fmt.Sprintf(`
+; __kml_bigint_cell: the bigint cell a box holds, or null.
+define ptr @__kml_bigint_cell(i64 %%v) {
+entry:
+  %%t = call i8 @__kml_nb_tag(i64 %%v)
+  %%isobj = icmp eq i8 %%t, %d
+  br i1 %%isobj, label %%probe, label %%none
+probe:
+  %%p = call i64 @__kml_nb_pay(i64 %%v)
+  %%cell = inttoptr i64 %%p to ptr
+  %%f0 = load i64, ptr %%cell, align 8
+  %%big = icmp eq i64 %%f0, %d
+  br i1 %%big, label %%yes, label %%none
+yes:
+  ret ptr %%cell
+none:
+  ret ptr null
+}`, kmlTagObject, kmlBoxedBigIntMagic))
 	e.emitGlobal(`
 define i1 @__kml_any_loose_eq(i64 %a0, i64 %b0) {
 entry:
+  ; A bigint against a bigint, a number or a string compares by value.
+  %biga = call ptr @__kml_bigint_cell(i64 %a0)
+  %bigb = call ptr @__kml_bigint_cell(i64 %b0)
+  %hasa = icmp ne ptr %biga, null
+  %hasb = icmp ne ptr %bigb, null
+  %anybig = or i1 %hasa, %hasb
+  br i1 %anybig, label %bigcase, label %plain
+bigcase:
+  %bothbig = and i1 %hasa, %hasb
+  br i1 %bothbig, label %bigbig, label %bignum
+bigbig:
+  %bbe = call i1 @__kml_boxed_bigint_eq(ptr %biga, ptr %bigb)
+  ret i1 %bbe
+bignum:
+  %cell = select i1 %hasa, ptr %biga, ptr %bigb
+  %other = select i1 %hasa, i64 %b0, i64 %a0
+  %to = call i8 @__kml_nb_tag(i64 %other)
+  %on4 = icmp eq i8 %to, 4
+  %on5 = icmp eq i8 %to, 5
+  %onull = or i1 %on4, %on5
+  %oobj = icmp uge i8 %to, 6
+  %noconv = or i1 %onull, %oobj
+  br i1 %noconv, label %bigno, label %bigconv
+bigno:
+  ret i1 false
+bigconv:
+  %od = call double @__kml_any_tonum(i64 %other)
+  %bne = call i1 @__kml_boxed_bigint_eq_num(ptr %cell, double %od)
+  ret i1 %bne
+plain:
   %ta0 = call i8 @__kml_nb_tag(i64 %a0)
   %tb0 = call i8 @__kml_nb_tag(i64 %b0)
   %aobj = icmp uge i8 %ta0, 6

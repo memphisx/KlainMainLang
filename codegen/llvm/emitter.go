@@ -2,9 +2,15 @@ package llvm
 
 import (
 	"KlainMainLang/ast"
+	"KlainMainLang/checker"
+	"KlainMainLang/options"
+	"KlainMainLang/sema"
+	"KlainMainLang/shadow"
 	"fmt"
+	"os"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,6 +74,10 @@ type Symbol struct {
 	// the shadow, restoring the union view. Generalizes NarrowedNonNull from a
 	// bool to a target type.
 	NarrowedTo *Type
+	// ForwardName is set on the cell of a closure an earlier closure
+	// captured before its declaration ran (forwardClosureSym): a call
+	// through it checks the cell, as JavaScript's temporal dead zone does.
+	ForwardName string
 }
 
 // isNullableScalarLocal reports whether this binding is a nullable non-pointer
@@ -89,11 +99,16 @@ type scope struct {
 
 // Emitter walks an AST and produces LLVM IR text.
 type Emitter struct {
-	globals   strings.Builder // global declarations (string constants, printf decl, …)
-	functions strings.Builder // emitted user-defined function bodies
-	allocas   strings.Builder // alloca instructions for the current function
-	body      strings.Builder // body instructions for the current function
-	scopes    []scope
+	switchDiscCount int // synthetic `switch` discriminant bindings (bindSwitchDiscriminant)
+	// shadowOracle and shadowRec drive the old-vs-new decider comparison
+	// (shadow.go); both nil outside a KML_SHADOW run.
+	shadowOracle ShadowOracle
+	shadowRec    *shadow.Recorder
+	globals      strings.Builder // global declarations (string constants, printf decl, …)
+	functions    strings.Builder // emitted user-defined function bodies
+	allocas      strings.Builder // alloca instructions for the current function
+	body         strings.Builder // body instructions for the current function
+	scopes       []scope
 	// moduleGlobals holds top-level `const`/`let` bindings promoted to LLVM
 	// module globals so a named `function` declaration (emitted with a fresh,
 	// separate scope) can read them — not just an arrow/closure that captures
@@ -121,6 +136,13 @@ type Emitter struct {
 	// restored) per function body, exactly like e.allocas. See capturedLocalNames
 	// and boxHoistedCapture.
 	hoistedCaptures map[string]bool
+	// forwardClosures names the current body's `const`/`let` closures that a
+	// closure written before the declaration calls (`const a = () => b();
+	// const b = () => 1;`), and forwardBoxes the entry-block cell each gets
+	// once that earlier closure captures it: the declaration then stores into
+	// the same cell. Installed with hoistedCaptures.
+	forwardClosures map[string]*ast.VarDeclaration
+	forwardBoxes    map[*ast.VarDeclaration]Symbol
 	// forInitDepth is len(e.scopes) while a `for` statement's init clause is
 	// emitted (0 otherwise). The init runs whenever the loop statement itself
 	// is reached, so a `var` there is as definitely-initialized as one in the
@@ -151,59 +173,69 @@ type Emitter struct {
 	// newCollectionHint carries a redeclared `var`'s already-decided Map/Set
 	// type into the bare `new Map()`/`new Set()` its initializer emits
 	// (emitVarRedeclaration → emitExpr, ADR-01061). Consumed on first use.
-	newCollectionHint     *Type
-	regCtr                int
-	labelCtr              int
-	strConsts             map[string]string // Go string value → @.s<n> name
-	strIdx                int
-	arrLitIdx             int             // @.arrlit<n> static array-literal images (ADR-01064)
-	linkLibs              map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
-	memMode               string          // "" (== "manual", the default) or "gc" — see SetMemMode
-	dynamicImportMode     string          // "eager" (default) or "lazy" — see SetDynamicImportMode (TDD-00055/TDD-00056)
-	usesDynamicImport     bool            // set when an import(...) call is emitted
-	islandHash            string          // non-empty when compiling a shared-library island (TDD-00056): its stable hash
-	dynImportShimDeclared bool            // guards the one-time @__kml_dynimport_run declaration
-	usedDynImportWatch    bool            // the import() watcher runtime + loop hooks are emitted (TDD-00225)
-	importSettleCtr       int             // per-site @__kml_dynimport_settle_<n> counter
-	regexMode             string          // "" (== the default, resolving to the highest implemented ES stage) or "pcre"/"es-ascii"/"es-unicode" — see SetRegexMode / TDD-00067
-	bigintBackend         string          // "" (== "libtommath", the default) or "gmp" — the __kml_bigint_* ABI implementation to link. See SetBigIntBackend / TDD-00074
-	compatMode            string          // "" (== "strict", the default) or "js" — the whole-program compatibility axis. See SetCompatMode / TDD-00075
-	noAny                 bool            // --no-any (strict lane only): ban any/unknown. See SetNoAny / TDD-00209
-	noAnyErr              error           // first --no-any violation seen during type resolution; surfaced by EmitProgram
-	cryptoBackend         string          // "" (== "openssl", the default) or "commoncrypto" — the __kml_crypto_* ABI implementation to compile+link. See SetCryptoBackend / TDD-00104
-	webviewBackend        string          // "" (== "system", the default) or cef/qt/sailfish — which webview_* shim to compile+link. See SetWebviewBackend / TDD-00144
-	usesCrypto            bool            // set the first time any crypto.subtle operation is emitted (drives backend compile+link in main.go)
-	usesBigInt            bool            // set the first time any bigint operation is emitted (drives backend compile+link in main.go)
-	declaredBigInt        bool            // the __kml_bigint_* declares have been emitted once
-	usesJSONParse         bool            // set the first time JSON.parse/Response.json() is emitted (drives json_parse.c compile+link in main.go — TDD-00077 Track P)
-	declaredJSONParseTree bool            // the __kml_json_* parse-tree declares have been emitted once
-	usesPathWin32         bool            // set the first time a win32-flavoured path call is emitted (drives path_win32.c compile+link — TDD-00178)
-	declaredPathWin32     bool            // the __kml_path_win32_* declares have been emitted once
-	usesURLPattern        bool            // set the first time a URLPattern is constructed (drives urlpattern.c compile+link in main.go — TDD-00100)
-	declaredURLPattern    bool            // the __kml_urlpattern_* declares have been emitted once
-	usesURLSearchParams   bool            // set the first time a URLSearchParams (or URL.searchParams) is built (drives urlsearchparams.c compile — TDD-00203)
-	declaredURLSearchP    bool            // the __kml_usp_* declares have been emitted once
-	urlUSPWritebackEmit   bool            // @__kml_url_usp_writeback has been emitted once
-	usesFloatFmt          bool            // set the first time a float is printed (drives dtoa.c compile+link in main.go — TDD-00080)
-	declaredDtoa          bool            // the __kml_dtoa declare has been emitted once
-	usedSignalAborted     bool            // the __kml_signal_aborted helper has been emitted (TDD-00081 Stage 3c)
-	usedAbortTimeout      bool            // AbortSignal.timeout used → the background abort-timeout dispatcher + register are emitted (TDD-00216)
-	usedAbortPropagate    bool            // abort propagation to AbortSignal.any followers emitted (@__kml_abort_propagate)
-	usedAbortRegistry     bool            // the always-present abort-timeout registry globals + soonest/fire_due have been emitted (TDD-00216)
+	newCollectionHint *Type
+	regCtr            int
+	labelCtr          int
+	strConsts         map[string]string // Go string value → @.s<n> name
+	strIdx            int
+	arrLitIdx         int             // @.arrlit<n> static array-literal images (ADR-01064)
+	linkLibs          map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
+	opts              options.Options // the compile modes, set once (SetOptions)
+	// The front end over the program being emitted (TDD-00230 P3.2): the
+	// checker the lowered calls read, built on first use; fnDecls are the
+	// functions declared once.
+	frontChecker          *checker.Checker
+	frontBuilt            bool
+	fnDecls               map[string]bool
+	usesDynamicImport     bool   // set when an import(...) call is emitted
+	islandHash            string // non-empty when compiling a shared-library island (TDD-00056): its stable hash
+	dynImportShimDeclared bool   // guards the one-time @__kml_dynimport_run declaration
+	usedDynImportWatch    bool   // the import() watcher runtime + loop hooks are emitted (TDD-00225)
+	importSettleCtr       int    // per-site @__kml_dynimport_settle_<n> counter
+	noAnyErr              error  // first --no-any violation seen during type resolution; surfaced by EmitProgram
+	usesCrypto            bool   // set the first time any crypto.subtle operation is emitted (drives backend compile+link in main.go)
+	usesBigInt            bool   // set the first time any bigint operation is emitted (drives backend compile+link in main.go)
+	declaredBigInt        bool   // the __kml_bigint_* declares have been emitted once
+	usesJSONParse         bool   // set the first time JSON.parse/Response.json() is emitted (drives json_parse.c compile+link in main.go — TDD-00077 Track P)
+	declaredJSONParseTree bool   // the __kml_json_* parse-tree declares have been emitted once
+	usesPathWin32         bool   // set the first time a win32-flavoured path call is emitted (drives path_win32.c compile+link — TDD-00178)
+	declaredPathWin32     bool   // the __kml_path_win32_* declares have been emitted once
+	usesURLPattern        bool   // set the first time a URLPattern is constructed (drives urlpattern.c compile+link in main.go — TDD-00100)
+	declaredURLPattern    bool   // the __kml_urlpattern_* declares have been emitted once
+	usesURLSearchParams   bool   // set the first time a URLSearchParams (or URL.searchParams) is built (drives urlsearchparams.c compile — TDD-00203)
+	declaredURLSearchP    bool   // the __kml_usp_* declares have been emitted once
+	urlUSPWritebackEmit   bool   // @__kml_url_usp_writeback has been emitted once
+	usesFloatFmt          bool   // set the first time a float is printed (drives dtoa.c compile+link in main.go — TDD-00080)
+	declaredDtoa          bool   // the __kml_dtoa declare has been emitted once
+	usedSignalAborted     bool   // the __kml_signal_aborted helper has been emitted (TDD-00081 Stage 3c)
+	usedAbortTimeout      bool   // AbortSignal.timeout used → the background abort-timeout dispatcher + register are emitted (TDD-00216)
+	usedAbortPropagate    bool   // abort propagation to AbortSignal.any followers emitted (@__kml_abort_propagate)
+	usedAbortRegistry     bool   // the always-present abort-timeout registry globals + soonest/fire_due have been emitted (TDD-00216)
 	usedPrintf            bool
 	usedDprintf           bool
 	usedStdoutGlobal      bool // the libc `stdout` FILE* extern global is declared (ADR-00867)
 	usedMalloc            bool
 	usedCalloc            bool
 	usedNullDerefThrow    bool
+	usedRangeErrorThrow   bool
 	usedAbsentArrayCell   bool
 	// pendingDeref: base nodes whose value emitExpr must null-guard (emit_nullderef.go).
-	pendingDeref        map[ast.Expression]derefGuard
-	usedRealloc         bool
-	usedMemmove         bool
-	usedStripExpZeros   bool
-	usedTableHelpers    bool
-	funcs               map[string]FuncSig            // registered function signatures
+	pendingDeref      map[ast.Expression]derefGuard
+	usedRealloc       bool
+	usedMemmove       bool
+	usedStripExpZeros bool
+	usedTableHelpers  bool
+	funcs             map[string]FuncSig // registered function signatures
+	// libStmts are the builtin library's top-level statements (the
+	// program's LibStatements); inLib is set while one is registered or
+	// emitted (compatJS).
+	libStmts map[ast.Statement]bool
+	inLib    bool
+	// callableClasses: the program's CallableClasses.
+	callableClasses map[string]bool
+	// forcedGlobalTypes: a top-level declaration promoted on the checker's
+	// agreement with the inferred type (registerModuleGlobals).
+	forcedGlobalTypes   map[*ast.VarDeclaration]Type
 	interfaces          map[string]Type               // named interface, type alias, and class registry
 	interfaceMethodSigs map[string]map[string]FuncSig // interface name → method name → signature (TDD-00009 Stage 4, `implements` conformance only — not used for dispatch)
 	classes             map[string]ClassInfo          // named class registry (fields/ctor/methods) — see emit_classes.go
@@ -344,6 +376,12 @@ type Emitter struct {
 	// type inferred for the variable slot matches the emitted value);
 	// objLitEmitted tracks which synthetic classes' method bodies were emitted.
 	objLitClassCtr int
+	// recvTempCtr names receiverTemp's locals.
+	recvTempCtr int
+	// dynToStaticCtr names emitDynToStaticThunk's thunks.
+	dynToStaticCtr int
+	// receiverPassed are the calls receiverlessThisCall built.
+	receiverPassed map[*ast.CallExpression]bool
 	objLitClasses  map[*ast.ObjectLiteral]string
 	objLitEmitted  map[string]bool
 	// currentCtorClass is the class whose constructor body is being emitted
@@ -387,13 +425,28 @@ type Emitter struct {
 	// which would recurse forever at compile time (cf. ADR-00221). A class
 	// name present here is mid-serialization; re-entry serializes it as a
 	// plain object instead of re-dispatching toJSON.
-	jsonToJSONActive    map[string]bool
-	usedAnyEq           bool
-	usedDynObj          bool
-	usedDynArr          bool
-	usedArrLitRows      bool         // __kml_arr_lit_rows (ADR-01064)
-	usedInspectReduce   bool         // inspect_reduce.c (ADR-01067)
-	usedCasemap         bool         // casemap.c — Unicode toUpperCase/toLowerCase
+	jsonToJSONActive  map[string]bool
+	usedAnyEq         bool
+	usedDynObj        bool
+	usedDynArr        bool
+	usedArrLitRows    bool // __kml_arr_lit_rows (ADR-01064)
+	usedInspectReduce bool // inspect_reduce.c (ADR-01067)
+	usedCasemap       bool // casemap.c — Unicode toUpperCase/toLowerCase
+	usedStringC       bool // string.c — lowered String.prototype methods
+	usedNumberC       bool // number.c — lowered Number.prototype methods
+	// fnmeta.go (TDD-00229 Stage A): function-value metadata keyed by code
+	// pointer, the NamedEvaluation names of anonymous literals, and whether
+	// fnmeta.c + its table are needed.
+	usedFnMeta         bool
+	usedBigIntBoxHooks bool // emit_bigint_box.go: boxed-bigint hooks the dynamic runtime calls
+	// emit_ffi_runtime.go (TDD-00229): the node:ffi registry is linked; one
+	// dynamic-ABI thunk per signature identity; the last validated name length.
+	usedFFIRegistry     bool
+	ffiDynThunks        map[string]string
+	ffiLastLen          string
+	fnMetas             []fnMetaEntry
+	fnMetaSeen          map[string]bool
+	fnLitNames          map[ast.Node]string
 	usedOSInfo          bool         // osinfo.c — os.type/release/…/networkInterfaces, process.env enumeration
 	usedOSInfoBags      bool         // the IR bag builders over osinfo.c (process.env value, networkInterfaces)
 	usedDynObjEntries   bool         // @__kml_dynobj_entries — Object.entries/values on a dynamic object
@@ -438,28 +491,18 @@ type Emitter struct {
 	// of `context.addInitializer` callbacks, run per-instance in the constructor
 	// tail with `this` as receiver.
 	standardInitListGlobals map[string]string
-	// emitDecoratorMetadata is TypeScript's emitDecoratorMetadata flag
-	// (TDD-00161 Stage 3): when set, decorated members get design:type /
-	// design:paramtypes / design:returntype reflection metadata.
-	emitDecoratorMetadata bool
-	// decoratorDialect selects the decorator semantics (TDD-00161 Stage 5):
-	// "experimental" (the legacy `(target, key, descriptor)` dialect, Stages
-	// 1-4, the default) or "standard" (the TC39 `(value, context)` dialect).
-	// TypeScript 5.0 defaults to standard; this compiler defaults to
-	// experimental (the dialect it shipped first) — a documented divergence.
-	decoratorDialect       string
-	usedClockGettime       bool
-	usedDateNow            bool
-	usedPerformanceNow     bool
-	usedPerformanceMarkMap bool
-	usedDateDecompose      bool
-	usedSscanf             bool
-	usedDaysFromCivil      bool
-	usedDateParse          bool
-	usedDateCompose        bool
-	usedDateNameTables     bool
-	usedFetch              bool
-	usedFetchAsync         bool
+	usedClockGettime        bool
+	usedDateNow             bool
+	usedPerformanceNow      bool
+	usedPerformanceMarkMap  bool
+	usedDateDecompose       bool
+	usedSscanf              bool
+	usedDaysFromCivil       bool
+	usedDateParse           bool
+	usedDateCompose         bool
+	usedDateNameTables      bool
+	usedFetch               bool
+	usedFetchAsync          bool
 	// TDD-00098: Worker (worker_threads) state. workerEntries maps a worker
 	// module's canonical path to its entry symbol + statically-declared
 	// channel types; currentWorkerMod is non-empty while a worker module's
@@ -644,6 +687,8 @@ type Emitter struct {
 	usedHTTPFireClose            bool
 	usedFsReadFile               bool
 	usedFsReadFileRaw            bool
+	usedFsReadFd                 bool
+	optRecvCtr                   int
 	usedFsOpenRead               bool
 	usedFread                    bool
 	usedFsWriteStream            bool
@@ -674,8 +719,6 @@ type Emitter struct {
 	usedCryptoRandomBytes        bool
 	usedCryptoFillNumArray       bool
 	usedCryptoRandomUUID         bool
-	usedReadLineSync             bool
-	usedExecFileSync             bool
 	usedProcessGetID             bool
 	usedChdirDecl                bool
 	usedPemFromDer               bool
@@ -896,11 +939,16 @@ type Emitter struct {
 	// WebSocketServer emit up to the enclosing var declaration, which records it.
 	// extraWSUpGlobalsEmitted dedups the suffixed @__kml_listen_{ws,upgrade}_handler_N
 	// global declarations.
-	httpServerVarSfx        map[string]string
-	httpWSVarSfx            map[string]string
-	pendingServerSfx        string
-	pendingServerCreated    bool
-	pendingWSSfx            string
+	httpServerVarSfx     map[string]string
+	httpWSVarSfx         map[string]string
+	pendingServerSfx     string
+	pendingServerCreated bool
+	pendingWSSfx         string
+	// mustCallFnHint is the function type a mustCall(fn) result goes to:
+	// fn is built against it (emitExprWithObjectHint).
+	mustCallFnHint *Type
+	// usedTLSHandles: the TypeScript tls module's primitives (tlshandle.c).
+	usedTLSHandles          bool
 	pendingWSCreated        bool
 	extraWSUpGlobalsEmitted map[string]bool
 	// pendingServerTLSCtx carries an https.createServer's SSL_CTX* register from
@@ -966,12 +1014,11 @@ type Emitter struct {
 	// anywhere, so Memory.free sites — possibly emitted before the construction
 	// — include the finalizer-lookup hook (TDD-00163 Stage 2).
 	programUsesFinReg       bool
-	usedFinRegHelpers       bool   // ensureFinalizationHelpers emit-once guard
-	finregCount             int    // unique-name counter for per-site trampoline/report fns
-	finalizersMode          string // -finalizers: "off" (default) or "report" (leak lines at exit)
-	declaredAtexit          bool   // `declare i32 @atexit(ptr)` emitted (shared with the h2 flush hook)
-	declaredGCInvokeFin     bool   // `declare i32 @GC_invoke_finalizers()` emitted
-	hasMaySuspend           bool   // any async fn classified may-suspend (TDD-00083 Stage 2)
+	usedFinRegHelpers       bool // ensureFinalizationHelpers emit-once guard
+	finregCount             int  // unique-name counter for per-site trampoline/report fns
+	declaredAtexit          bool // `declare i32 @atexit(ptr)` emitted (shared with the h2 flush hook)
+	declaredGCInvokeFin     bool // `declare i32 @GC_invoke_finalizers()` emitted
+	hasMaySuspend           bool // any async fn classified may-suspend (TDD-00083 Stage 2)
 	usedCbrt                bool
 	usedCtlz32              bool
 	usedArc4Random          bool
@@ -1022,6 +1069,7 @@ type Emitter struct {
 	usedNodeStreamRuntime   bool
 	usedPromiseAddReaction  bool
 	streamSiteCtr           int
+	lowerInvCtr             int // emitLoweredInvoker thunks
 	noopCallbackEmitted     bool
 	usedOSReadProcFile      bool
 	usedOSCpusLinux         bool
@@ -1050,11 +1098,12 @@ type Emitter struct {
 	usedRegexSourceNorm     bool
 	breakStack              []string // end labels for enclosing loops / switch
 	continueStack           []string // continue-target labels for enclosing loops
-	// pendingFinallys is the stack of enclosing `finally` block bodies, innermost
-	// last. A `return` (or `break`/`continue`) that exits a try/catch runs these
-	// inline — innermost first — before its own terminator, so `finally` still
-	// executes on an early exit. See emitPendingFinallys / emitTry.
-	pendingFinallys [][]ast.Statement
+	// pendingFinallys is the stack of what leaving an enclosing try/catch (or a
+	// for-of over a generator) must do, innermost last. A `return` (or
+	// `break`/`continue`) that exits one runs these inline — innermost first —
+	// before its own terminator: pop the try's handler (its jmpbuf), then run
+	// its `finally`. See emitPendingFinallys / emitTry.
+	pendingFinallys []pendingExit
 	// breakFinallyDepth / continueFinallyDepth record len(pendingFinallys) at
 	// each loop/switch entry, in lockstep with breakStack / continueStack, so a
 	// `break`/`continue` runs only the finallys nested inside its target
@@ -1083,7 +1132,6 @@ type Emitter struct {
 	// pendingStackAllocLit marks the exact literal node while its declaration
 	// is being emitted; stackAllocatedLits records the literals actually
 	// stack-emitted (so maybeRegisterAutoFree never frees an alloca).
-	optimizeMemory bool
 	// wantTupleAggregate is the one-shot handshake between the tuple
 	// destructuring fast path and emitCallToFuncSig (TDD-00134 Stage 3):
 	// set right before emitting a direct call to a TupleByVal function,
@@ -1143,9 +1191,11 @@ type Emitter struct {
 
 func NewEmitter() *Emitter {
 	e := &Emitter{
+		fnDecls:                 make(map[string]bool),
 		strConsts:               make(map[string]string),
 		moduleGlobals:           make(map[string]Symbol),
 		promotedGlobalDecls:     make(map[*ast.VarDeclaration]bool),
+		forcedGlobalTypes:       make(map[*ast.VarDeclaration]Type),
 		varsBeingInitialized:    make(map[string]bool),
 		funcs:                   make(map[string]FuncSig),
 		interfaces:              make(map[string]Type),
@@ -1199,15 +1249,27 @@ func (e *Emitter) varRedeclarationTarget(name string) (Symbol, bool) {
 	return Symbol{}, false
 }
 
+// SetOptions sets every compile mode at once (TDD-00230 P2.6): the CLI
+// builds one options.Options and hands the same value to the program's
+// emitter and to each dynamic-import island's. The Set* methods below each
+// change one mode, for tests.
+func (e *Emitter) SetOptions(o options.Options) { e.opts = o }
+
+// Options returns the compile modes.
+func (e *Emitter) Options() options.Options { return e.opts }
+
+// Toolchain is the clang invocation for this program's compile target.
+func (e *Emitter) Toolchain() Toolchain { return Toolchain{Target: e.opts.Target} }
+
 // SetMemMode selects the compile-wide memory-management mode ("manual", the
 // zero-value default, or "gc"). Called by main.go right after NewEmitter()
 // — not a constructor argument, so every existing zero-arg NewEmitter() call
 // site (mainly tests/compiler_test.go) keeps working unchanged.
-func (e *Emitter) SetMemMode(mode string) { e.memMode = mode }
+func (e *Emitter) SetMemMode(mode string) { e.opts.MemMode = mode }
 
 // SetDynamicImportMode selects the dynamic import() backend: "eager" (default,
 // TDD-00055) or "lazy" (shared-library islands, TDD-00056).
-func (e *Emitter) SetDynamicImportMode(mode string) { e.dynamicImportMode = mode }
+func (e *Emitter) SetDynamicImportMode(mode string) { e.opts.DynamicImport = mode }
 
 // UsesDynamicImport reports whether the emitted program contained a dynamic
 // import() — for main.go's post-emit build steps.
@@ -1219,12 +1281,12 @@ func (e *Emitter) UsesDynamicImport() bool { return e.usesDynamicImport }
 // linked with `clang -shared` instead of as an executable.
 func (e *Emitter) SetIslandHash(hash string) { e.islandHash = hash }
 
-func (e *Emitter) isGCMode() bool { return e.memMode == "gc" }
+func (e *Emitter) isGCMode() bool { return e.opts.MemMode == "gc" }
 
 // isAutoMode reports the -mm=auto mode (TDD-00173): plain malloc/free like
 // manual, but the compiler inserts frees at proven-safe points and
 // Memory.free is a compile error (the compiler owns every free).
-func (e *Emitter) isAutoMode() bool { return e.memMode == "auto" }
+func (e *Emitter) isAutoMode() bool { return e.opts.MemMode == "auto" }
 
 // SetRegexMode selects the compile-wide RegExp dialect mode (TDD-00067's
 // `-regex=` flag): "pcre" (raw PCRE2, today's behavior), "es-ascii" (Option
@@ -1234,33 +1296,33 @@ func (e *Emitter) isAutoMode() bool { return e.memMode == "auto" }
 // highest implemented ES stage — see resolveRegexMode. Called by main.go
 // right after NewEmitter(), like SetMemMode, so zero-arg NewEmitter() call
 // sites (tests) keep the default without threading a mode through.
-func (e *Emitter) SetRegexMode(mode string) { e.regexMode = mode }
+func (e *Emitter) SetRegexMode(mode string) { e.opts.Regex = mode }
 
 // SetBigIntBackend selects the compile-wide bigint backend library (TDD-00074),
 // called by main.go from the -bigint flag. "" resolves to the default,
 // libtommath (public domain); "gmp" opts into GMP.
-func (e *Emitter) SetBigIntBackend(mode string) { e.bigintBackend = mode }
+func (e *Emitter) SetBigIntBackend(mode string) { e.opts.BigInt = mode }
 
 // BigIntBackend returns the resolved backend name ("" → the libtommath default).
 func (e *Emitter) BigIntBackend() string {
-	if e.bigintBackend == "" {
+	if e.opts.BigInt == "" {
 		return "libtommath"
 	}
-	return e.bigintBackend
+	return e.opts.BigInt
 }
 
 // SetCryptoBackend selects the compile-wide crypto backend (TDD-00104),
 // called by main.go from the -crypto flag. "" resolves to the default,
 // openssl (libcrypto, all platforms); "commoncrypto" opts into Apple
 // CommonCrypto + Security.framework (macOS only).
-func (e *Emitter) SetCryptoBackend(mode string) { e.cryptoBackend = mode }
+func (e *Emitter) SetCryptoBackend(mode string) { e.opts.Crypto = mode }
 
 // CryptoBackend returns the resolved backend name ("" → the openssl default).
 func (e *Emitter) CryptoBackend() string {
-	if e.cryptoBackend == "" {
+	if e.opts.Crypto == "" {
 		return "openssl"
 	}
-	return e.cryptoBackend
+	return e.opts.Crypto
 }
 
 // SetWebviewBackend selects the compile-wide webview backend (TDD-00144),
@@ -1268,14 +1330,14 @@ func (e *Emitter) CryptoBackend() string {
 // system (WebKitGTK/WKWebView/WebView2, per-platform); cef/qt/sailfish are
 // the opt-in Chromium/Gecko backends. Only system is built today; the others
 // are recognized so the flag validates, and rejected cleanly at link time.
-func (e *Emitter) SetWebviewBackend(mode string) { e.webviewBackend = mode }
+func (e *Emitter) SetWebviewBackend(mode string) { e.opts.Webview = mode }
 
 // WebviewBackend returns the resolved backend name ("" → the system default).
 func (e *Emitter) WebviewBackend() string {
-	if e.webviewBackend == "" {
+	if e.opts.Webview == "" {
 		return "system"
 	}
-	return e.webviewBackend
+	return e.opts.Webview
 }
 
 // UsesCrypto reports whether the emitted program actually used crypto.subtle,
@@ -1303,40 +1365,65 @@ func (e *Emitter) UsesFFIDl() bool { return e.usedFFIDl }
 // semantics) or "js" (best-effort JS-faithful). Governs behaviors with a
 // genuine strict-vs-JS tradeoff; global-shadowing (the old -globals flag) is
 // handled resolver-side, so this drives the emitter-side inhabitants.
-func (e *Emitter) SetCompatMode(mode string) { e.compatMode = mode }
+func (e *Emitter) SetCompatMode(mode string) { e.opts.Compat = mode }
 
 // SetNoAny enables --no-any (TDD-00209): the any/unknown escape hatch is banned.
 // The CLI only sets it under the strict lane (ignored with a warning under
 // -compat=js), so noAnyMode need not re-check the mode.
-func (e *Emitter) SetNoAny(on bool) { e.noAny = on }
+func (e *Emitter) SetNoAny(on bool) { e.opts.NoAny = on }
 
 // noAnyMode reports whether the any/unknown ban is active.
-func (e *Emitter) noAnyMode() bool { return e.noAny }
+func (e *Emitter) noAnyMode() bool { return e.opts.NoAny }
 
 // SetOptimizeMemory toggles TDD-00134's allocation optimizations (Stage 1:
 // escape analysis → stack allocation of non-escaping object literals).
-func (e *Emitter) SetOptimizeMemory(on bool) { e.optimizeMemory = on }
+func (e *Emitter) SetOptimizeMemory(on bool) { e.opts.OptimizeMemory = on }
 
 // SetFinalizersMode selects the FinalizationRegistry exit diagnostics
 // (TDD-00163 Stage 4): "off" (default) or "report" (one leak line per
 // registration still live at exit under -mm=manual).
-func (e *Emitter) SetFinalizersMode(mode string) { e.finalizersMode = mode }
+func (e *Emitter) SetFinalizersMode(mode string) { e.opts.Finalizers = mode }
 
 // SetEmitDecoratorMetadata toggles TypeScript's emitDecoratorMetadata behavior
 // (TDD-00161 Stage 3): design:type/paramtypes/returntype metadata for decorated
 // members.
-func (e *Emitter) SetEmitDecoratorMetadata(on bool) { e.emitDecoratorMetadata = on }
+func (e *Emitter) SetEmitDecoratorMetadata(on bool) { e.opts.EmitDecoratorMetadata = on }
 
 // SetDecoratorDialect selects the decorator dialect (TDD-00161 Stage 5):
 // "experimental" (default) or "standard" (TC39). Empty means experimental.
-func (e *Emitter) SetDecoratorDialect(d string) { e.decoratorDialect = d }
+func (e *Emitter) SetDecoratorDialect(d string) { e.opts.Decorators = d }
 
 // standardDecorators reports whether the TC39 `(value, context)` dialect is
 // selected.
-func (e *Emitter) standardDecorators() bool { return e.decoratorDialect == "standard" }
+func (e *Emitter) standardDecorators() bool { return e.opts.Decorators == "standard" }
 
 // compatJS reports whether JS-faithful compatibility mode is active.
-func (e *Emitter) compatJS() bool { return e.compatMode == "js" }
+func (e *Emitter) compatJS() bool { return e.opts.CompatJS() && !e.inLib }
+
+// libScope marks the code emitted from here on as the builtin library's (a
+// statement of a module written in TypeScript), which compiles in the strict
+// lane whatever lane the program uses; the returned func restores.
+func (e *Emitter) libScope(st ast.Statement) func() {
+	saved := e.inLib
+	e.inLib = e.libStmts[st]
+	return func() { e.inLib = saved }
+}
+
+// userStatements is prog's body without the builtin library's statements:
+// what the js lane's whole-program inference passes read.
+func (e *Emitter) userStatements(prog *ast.Program) *ast.Program {
+	if len(e.libStmts) == 0 {
+		return prog
+	}
+	cp := *prog
+	cp.Body = nil
+	for _, st := range prog.Body {
+		if !e.libStmts[st] {
+			cp.Body = append(cp.Body, st)
+		}
+	}
+	return &cp
+}
 
 // resolveRegexMode maps the raw flag (including "" for unset) to the
 // concrete mode actually used for codegen. The default resolves to the
@@ -1347,10 +1434,10 @@ func (e *Emitter) compatJS() bool { return e.compatMode == "js" }
 // .slice — ADR-00208); a program wanting spec-exact offsets selects it
 // explicitly. This is the single place the default is defined.
 func (e *Emitter) resolveRegexMode() string {
-	if e.regexMode == "" {
+	if e.opts.Regex == "" {
 		return "ecmascript"
 	}
-	return e.regexMode
+	return e.opts.Regex
 }
 
 // --- Scope ---
@@ -1365,6 +1452,11 @@ func (e *Emitter) popScope() {
 }
 
 func (e *Emitter) define(name string, sym Symbol) {
+	// A class type captured before the class's fields were registered (a
+	// signature built during registration) binds as the live class.
+	if sym.Ty.IsClass && !sym.Ty.IsArray {
+		sym.Ty = e.canonicalizeClassTy(sym.Ty)
+	}
 	e.scopes[len(e.scopes)-1].syms[name] = sym
 	e.inferMemoDefined()
 	if e.tryDepth > 0 {
@@ -1507,8 +1599,8 @@ func (e *Emitter) freshLabel(prefix string) string {
 
 // --- Emission helpers ---
 
-func (e *Emitter) emitGlobal(line string) { e.globals.WriteString(line + "\n") }
-func (e *Emitter) emitAlloca(line string) { e.allocas.WriteString("  " + line + "\n") }
+func (e *Emitter) emitGlobal(line string) { e.globals.WriteString(withSite(line) + "\n") }
+func (e *Emitter) emitAlloca(line string) { e.allocas.WriteString("  " + withSite(line) + "\n") }
 
 // emitGuardPanic is the sentinel a codegen invariant guard panics with; it is
 // recovered at the EmitProgram boundary and turned into a clean compile error
@@ -1579,9 +1671,12 @@ func (e *Emitter) emitInstr(line string) {
 		// scalar zero/constant) is kept, e.g. a mismatched generator `.next(x)`
 		// value whose element type is a union the coerce mis-represents. A clean
 		// rejection at the emitter rather than shipping the bad store to clang.
+		if os.Getenv("KML_GUARD_STACK") != "" {
+			fmt.Fprintln(os.Stderr, "guard:", line)
+		}
 		panic(emitGuardPanic{msg: "unsupported operation: a non-matching value was coerced to an aggregate-typed slot (array/tuple/union) — this construct is not yet supported"})
 	}
-	e.body.WriteString("  " + line + "\n")
+	e.body.WriteString("  " + withSite(line) + "\n")
 }
 
 // emitTerminator emits a terminator instruction and marks the block as done.
@@ -1589,7 +1684,7 @@ func (e *Emitter) emitTerminator(line string) {
 	if e.blockDone {
 		return
 	}
-	e.body.WriteString("  " + line + "\n")
+	e.body.WriteString("  " + withSite(line) + "\n")
 	e.blockDone = true
 }
 
@@ -1745,9 +1840,7 @@ func (e *Emitter) resolveValueType(name string) (Type, bool) {
 				}
 				if declName == name && len(d.TypeParams) == 0 {
 					sig := e.buildFunctionSig(d)
-					tt := FuncType(sig.ParamTypes, sig.RetType)
-					tt.FuncHasRest = sig.HasRest
-					return tt, true
+					return funcTypeFromSig(sig), true
 				}
 			}
 		}
@@ -1759,9 +1852,7 @@ func (e *Emitter) resolveValueType(name string) (Type, bool) {
 		return sym.Ty, true
 	}
 	if _, sig, ok := e.resolveFuncRef(name); ok {
-		tt := FuncType(sig.ParamTypes, sig.RetType)
-		tt.FuncHasRest = sig.HasRest
-		return tt, true
+		return funcTypeFromSig(sig), true
 	}
 	return Type{}, false
 }
@@ -1795,18 +1886,76 @@ func (e *Emitter) resolveTypeofType(ta *ast.TypeAnnotation) Type {
 // index signature `{ [k: string]: V }` (TDD-00130), matching
 // inferDynamicObjectType's shape so the shared read/write/iterate machinery
 // (TDD-00012) applies unchanged.
+// mergeByteArrayMembers keeps one byte array of a union's members: a Buffer
+// is a Uint8Array, one representation (`string | Buffer | Uint8Array`).
+func mergeByteArrayMembers(members []Type) []Type {
+	isBytes := func(t Type) bool {
+		return t.IsTypedArray && t.ElemType != nil && t.ElemType.IR == "i8" && !t.ElemType.Signed || t.IsBuffer
+	}
+	keep := -1
+	for i, m := range members {
+		if isBytes(m) && (keep < 0 || m.IsBuffer) {
+			keep = i
+		}
+	}
+	if keep < 0 {
+		return members
+	}
+	var out []Type
+	for i, m := range members {
+		if isBytes(m) && i != keep {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// withDictFields attaches an index-signature dictionary's named properties.
+func (e *Emitter) withDictFields(t Type, fields []ast.AnnotField) Type {
+	for _, f := range fields {
+		ft := e.resolveType(f.Type)
+		if f.Optional {
+			ft = undefinedableElem(ft)
+		}
+		t.DictFields = append(t.DictFields, Field{Name: f.Name, Ty: ft})
+	}
+	return t
+}
+
 func (e *Emitter) indexSignatureType(valAnnot *ast.TypeAnnotation) Type {
 	keyTy := TypePtr
 	valTy := e.resolveType(valAnnot)
+
 	return Type{IR: "ptr", IsMap: true, IsDynamicObject: true, MapKey: &keyTy, MapVal: &valTy}
 }
 
 func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
+	t := e.decideAnnotationType(ta)
+	if e.shadowOracle != nil && ta != nil {
+		e.shadowAnnotationType(ta, t)
+	}
+	return t
+}
+
+// decideAnnotationType is resolveType's decider: the representation of an
+// annotation.
+func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 	if ta == nil {
 		return TypeI64 // default for untyped numeric variables
 	}
-	if e.noAny {
+	if e.opts.NoAny {
 		e.checkNoAnyAnnotation(ta)
+	}
+	// @types/node's `NodeJS.Dict<T>` / `NodeJS.ReadOnlyDict<T>` (`{ [key:
+	// string]: T | undefined }`, the qualifier dropped): a string-keyed
+	// dictionary of T, unless the program declares its own.
+	if (ta.Name == "Dict" || ta.Name == "ReadOnlyDict") && len(ta.TypeArgs) == 1 {
+		if _, own := e.genericInterfaces[ta.Name]; !own {
+			if _, alias := e.genericTypeAliases[ta.Name]; !alias {
+				return e.indexSignatureType(ta.TypeArgs[0])
+			}
+		}
 	}
 	// Depth guard against a self-referential type (`type T = { next: T }`, a
 	// recursive generic alias, a recursive index signature) — a fixed-shape
@@ -1861,10 +2010,12 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	// Pick/Omit/Record key collection, not here.
 	// Numeric-literal type (`1`, ADR-00459): as a value type it is just a
 	// number, mirroring the string-literal stance below.
-	if ta.IsNumberLiteral {
+	// A union's head carries its first member's flags: a union is read by
+	// the union branch below, whatever its first member.
+	if ta.IsNumberLiteral && ta.UnionMembers == nil {
 		return TypeF64
 	}
-	if ta.IsStringLiteral {
+	if ta.IsStringLiteral && ta.UnionMembers == nil {
 		// String-shaped, but carry the literal value so a discriminated-union
 		// tag field can be matched at compile time (TDD-00116). Behaves as
 		// string everywhere else (isStringTy checks IR "ptr").
@@ -1894,10 +2045,49 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	// number/string/boolean members — see validateUnionMembers, called by
 	// this Type's actual usage sites, not here, since resolveType has no
 	// error return).
+	// One member beside null/undefined (`{ [k: string]: V } | null`) is that
+	// member, nullable, as `T | null` on a named T is.
+	if len(ta.UnionMembers) == 1 && ta.UnionMembers[0] != nil && ta.UnionMembers[0].UnionMembers == nil {
+		one := *ta.UnionMembers[0]
+		one.Nullable = one.Nullable || ta.Nullable
+		one.Undefined = one.Undefined || ta.Undefined
+		return e.resolveType(&one)
+	}
 	if ta.UnionMembers != nil {
 		members := make([]Type, len(ta.UnionMembers))
 		for i, m := range ta.UnionMembers {
 			members[i] = e.resolveType(m)
+		}
+		members = mergeByteArrayMembers(members)
+		// Members of one primitive kind (`'dir' | 'file'`, `1 | 2`) are that
+		// primitive: a union of one representation collapses to it.
+		if kind := primitiveAnnotKind(ta.UnionMembers[0]); kind != "" && len(members) == len(ta.UnionMembers) {
+			same := true
+			for _, m := range ta.UnionMembers[1:] {
+				if primitiveAnnotKind(m) != kind {
+					same = false
+					break
+				}
+			}
+			if same {
+				one := members[0]
+				if one.IsStrLiteral {
+					one = TypePtr
+				}
+				if ta.Nullable {
+					one = undefinedableElem(one)
+					one.IsUndefined = ta.Undefined
+				}
+				return one
+			}
+		}
+		if len(members) == 1 {
+			one := members[0]
+			if ta.Nullable {
+				one = undefinedableElem(one)
+				one.IsUndefined = ta.Undefined
+			}
+			return one
 		}
 		return Type{IR: TypeAny.IR, IsDynamic: true, UnionMembers: members, Nullable: ta.Nullable}
 	}
@@ -1932,6 +2122,7 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		}
 		ft := FuncType(params, ret)
 		ft.FuncHasRest = ta.FuncHasRest
+		ft.FuncThis = ta.FuncThis
 		if len(ta.FuncParamOptional) > 0 {
 			opt := make([]bool, len(params))
 			for i := range opt {
@@ -2080,8 +2271,11 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		}
 		return ChannelType(TypeI64)
 	}
-	if ta.Name == "EventEmitter" && ta.ElemType != nil {
-		return EventEmitterType(e.resolveEventEmitterPayloadType(ta.ElemType))
+	if ta.Name == "EventEmitter" {
+		if ta.ElemType != nil {
+			return EventEmitterType(e.resolveEventEmitterPayloadType(ta.ElemType))
+		}
+		return EventEmitterType(TypeAny) // @types/node's DefaultEventMap
 	}
 	// ReadableStream<T> and its reader/controller (TDD-00097 Stage 1). A bare
 	// `ReadableStream` annotation (no type arg) defaults its chunk to number,
@@ -2123,6 +2317,9 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	}
 	// Tuple type `[T0, T1, ...]` (TDD-00066) — checked before the generic
 	// ElemType/array fallback below.
+	if ta.EmptyTuple {
+		return TupleType(nil) // `[]`: an event with no arguments, a zero-length tuple
+	}
 	if len(ta.TupleElems) > 0 {
 		elems := make([]Type, len(ta.TupleElems))
 		for i, et := range ta.TupleElems {
@@ -2141,7 +2338,7 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	// existing map-backed dynamic-object representation (TDD-00012), giving it
 	// `d[key]` read/write sugar and map iteration for free.
 	if ta.IndexSig != nil {
-		return e.indexSignatureType(ta.IndexSig)
+		return e.withDictFields(e.indexSignatureType(ta.IndexSig), ta.Fields)
 	}
 	if len(ta.Fields) > 0 {
 		fields := make([]Field, len(ta.Fields))
@@ -2163,6 +2360,15 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		return ty
 	}
 
+	// A `NodeJS.*` type, before the registries below: its last segment alone
+	// (`Platform`) may name a user type.
+	if ty, ok := nodeJSNamespaceType(ta); ok {
+		if ta.Nullable {
+			ty.Nullable = true
+			ty.IsUndefined = ta.Undefined
+		}
+		return ty
+	}
 	// Named type: check interface registry before falling back to built-ins.
 	name := ta.Name
 	// Handle T[] where T is a named interface (e.g. "User[]") or enum
@@ -2221,6 +2427,28 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		ty.IsUndefined = ta.Undefined
 	}
 	return ty
+}
+
+// nodeJSNamespaceType is the representation of a `NodeJS.*` type from
+// lib/node.d.ts: the same one the matching `process` member infers to.
+// `NodeJS.Process` is absent, since `process` is not a first-class value.
+func nodeJSNamespaceType(ta *ast.TypeAnnotation) (Type, bool) {
+	if len(ta.Qualifier) != 1 || ta.Qualifier[0] != "NodeJS" {
+		return Type{}, false
+	}
+	switch ta.Name {
+	case "Platform", "Architecture":
+		return TypePtr, true
+	case "ProcessEnv":
+		return TypeAny, true
+	case "MemoryUsage":
+		return memoryUsageType(), true
+	case "Timeout", "Immediate":
+		return TypeI64, true // the timer's id (see setTimeout's inferred type)
+	case "ErrnoException":
+		return errorObjType, true // an Error with its code, errno, syscall and path
+	}
+	return Type{}, false
 }
 
 // --- Top-level entry ---
@@ -2287,12 +2515,43 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if g, ok := r.(emitGuardPanic); ok {
+				if os.Getenv("KML_GUARD_STACK") != "" {
+					debug.PrintStack()
+				}
 				ir, err = "", fmt.Errorf("%s", g.msg)
 				return
 			}
 			panic(r)
 		}
 	}()
+	// The semantic passes between parsing and codegen (TDD-00230): today,
+	// deciding which `new X(…)` constructs a builtin. Every entry into codegen
+	// comes through here, so every compile path runs them exactly once.
+	if err := sema.Prepare(prog); err != nil {
+		return "", err
+	}
+	e.libStmts = prog.LibStatements
+	e.callableClasses = prog.CallableClasses
+	// An interface member shape this code generation cannot represent (a
+	// call signature beside properties, an index signature keyed by a type
+	// alias, …) is valid TypeScript the checker reads; it is rejected here.
+	var legacyErr error
+	ast.Inspect(prog, func(n ast.Node) bool {
+		if d, ok := n.(*ast.InterfaceDeclaration); ok && d.LegacyErr != nil && legacyErr == nil {
+			legacyErr = d.LegacyErr
+		}
+		return legacyErr == nil
+	})
+	if legacyErr != nil {
+		return "", legacyErr
+	}
+	// TDD-00230 P0.2: with KML_SHADOW set and a new pass registered, every
+	// old decider's answer is compared with the new pass's.
+	stopShadow, err := e.startShadow(prog)
+	if err != nil {
+		return "", err
+	}
+	defer stopShadow()
 	// TDD-00128: enforce `/** @pure */` before any codegen. A front-end-only
 	// check with zero effect on the emitted IR — a violation is a compile error.
 	if err := e.checkPurity(prog); err != nil {
@@ -2403,6 +2662,7 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	e.registerClassNamePlaceholders(prog)
 
 	// Pass 0: register interfaces and type aliases so they're available to function signatures.
+	e.registerLibraryStringAliases(prog)
 	e.registerInterfaces(prog)
 
 	// Pass 0.5: register classes (fields/layout + constructor/method
@@ -2414,7 +2674,7 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// inference and the constructor sig see real types instead of the
 	// number default.
 	if e.compatJS() {
-		if err := e.jsCollectCtorParamTypes(prog); err != nil {
+		if err := e.jsCollectCtorParamTypes(e.userStatements(prog)); err != nil {
 			return "", err
 		}
 	}
@@ -2432,7 +2692,7 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// registration (so class-instance arguments infer to real class types)
 	// and before registerFunctions, which consumes the slots.
 	if e.compatJS() {
-		if err := e.jsCollectFuncParamTypes(prog); err != nil {
+		if err := e.jsCollectFuncParamTypes(e.userStatements(prog)); err != nil {
 			return "", err
 		}
 	}
@@ -2447,7 +2707,7 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// `-compat=js` (TDD-00155 Stage 4): recognize vanilla-JS prototype
 	// constructors — after function sigs exist, before any body is emitted.
 	if e.compatJS() {
-		e.jsCollectProtoCtors(prog)
+		e.jsCollectProtoCtors(e.userStatements(prog))
 	}
 	// Mark async functions that can actually suspend (TDD-00083 Stage 2), so the
 	// emitter compiles them as coroutine tasks; the rest keep the synchronous
@@ -2464,7 +2724,7 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// reliableGlobalType can promote a widened binding as an any-box global
 	// (matching emitVarDecl's own widened typing). Recomputed for each function
 	// body in emit_func.go; this sets the module-scope set.
-	e.widenedBindings = e.crossTypeWidenedBindings(prog.Body)
+	e.widenedBindings = e.crossTypeWidenedBindings(e.userStatements(prog).Body)
 	e.emptyArrayElems = e.inferEmptyArrayElemTypes(prog.Body)
 	e.emptyMapKV = e.inferEmptyMapKVTypes(prog.Body)
 
@@ -2473,6 +2733,10 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// function has its own fresh scope and can't see a `main()` local). Must run
 	// before Pass 2 emits any function body.
 	e.registerModuleGlobals(prog)
+
+	// Pass 1.75: NamedEvaluation names for anonymous function literals
+	// (TDD-00229), read when each literal's code is emitted.
+	e.inferFunctionNames(prog)
 
 	// Pass 1.8: pre-register `const { subtle } = globalThis.crypto` aliases
 	// (ADR-00434) so function bodies emitted in Pass 2 — before the top-level
@@ -2506,17 +2770,22 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 		if lastDeclFor[fd.Name] != stmt {
 			continue
 		}
+		restore := e.libScope(stmt)
 		if fd.IsGenerator {
-			if err := e.emitGeneratorFunctionDecl(fd, e.generators[fd.Name]); err != nil {
+			err := e.emitGeneratorFunctionDecl(fd, e.generators[fd.Name])
+			restore()
+			if err != nil {
 				return "", err
 			}
 			continue
 		}
 		if len(fd.TypeParams) == 0 || fd.Erased {
 			if err := e.emitFunctionDecl(fd); err != nil {
+				restore()
 				return "", err
 			}
 		}
+		restore()
 	}
 
 	// Pass 2b: emit each class's constructor and methods. A generic class
@@ -2526,7 +2795,10 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// (emit_generics.go).
 	for _, stmt := range prog.Body {
 		if cd, ok := stmt.(*ast.ClassDeclaration); ok && len(cd.TypeParams) == 0 {
-			if err := e.emitClassDecl(cd); err != nil {
+			restore := e.libScope(stmt)
+			err := e.emitClassDecl(cd)
+			restore()
+			if err != nil {
 				return "", err
 			}
 		}
@@ -2543,14 +2815,17 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 		if !ok || len(cd.TypeParams) > 0 {
 			continue
 		}
+		restore := e.libScope(stmt)
 		e.emitClassVTable(cd.Name)
 		e.emitClassStaticFieldGlobals(cd.Name)
 		if len(cd.StaticBlocks) > 0 || classHasStaticFieldInit(cd) {
 			if err := e.emitClassStaticInit(cd); err != nil {
+				restore()
 				return "", err
 			}
 			staticInitClasses = append(staticInitClasses, cd.Name)
 		}
+		restore()
 	}
 
 	// Pass 2d (TDD-00098): emit every worker module's entry function before
@@ -2572,7 +2847,7 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	argc64 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = zext i32 %%argc to i64", argc64))
 	argvSrc := "%argv"
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		// The CRT's argv is ANSI-code-page decoded, so a non-ASCII argument
 		// arrives as '?'. Reconstruct it as UTF-8 from GetCommandLineW at
 		// startup, as Node does (ADR-00745). Falls back to the CRT argv/argc
@@ -2670,6 +2945,7 @@ entry:
 	// excluded at the declaration site (emit_exprs_vardecl.go) — a global already
 	// dominates everything and is resolved directly, never captured.
 	e.hoistedCaptures = capturedLocalNames(prog.Body, nil)
+	e.setForwardClosures(prog.Body)
 	// TDD-00224: with a top-level await the statements below go into the module
 	// task's body instead of main(). Islands keep the main-stack wait (Stage 2).
 	var modSplit *moduleBodySplit
@@ -2683,7 +2959,10 @@ entry:
 		if _, ok := stmt.(*ast.FunctionDeclaration); ok {
 			continue
 		}
-		if err := e.emitStmt(stmt); err != nil {
+		restore := e.libScope(stmt)
+		err := e.emitStmt(stmt)
+		restore()
+		if err != nil {
 			return "", err
 		}
 		e.emitOwnedFreesAfter(stmt)
@@ -2727,6 +3006,11 @@ entry:
 	// Microtasks run after the top-level synchronous script, before any timer or
 	// task macrotask (TDD-00083 Stage 3).
 	if e.usedMicrotasks {
+		if e.entryIsModule(prog) {
+			// An ES module's top level is itself a promise job: the jobs it
+			// queued run before the ticks, as in Node.
+			e.emitInstr("call void @__kml_drain_promise_jobs()")
+		}
 		e.emitInstr("call void @__kml_drain_microtasks()")
 	}
 	// TDD-00084 Part B: a program mixing coroutine tasks with timers or
@@ -2873,6 +3157,11 @@ done:
 	// defined now.
 	e.emitFFICbFinalize()
 
+	// Function-value metadata (TDD-00229): the code-pointer table spans every
+	// function the program emitted, so it is defined last.
+	e.emitFnMetaFinalize()
+	e.emitBoxedBigIntHooksFinalize()
+
 	// Line-buffer stdout at startup (ADR-00867). C stdio full-buffers a stream
 	// that is not a TTY, so `console.log`/`printf` to a pipe or file withholds
 	// all output until exit — a program piped to `tee`/`grep` or a Docker log
@@ -2882,14 +3171,14 @@ done:
 	// withhold-until-exit. The `stdout` FILE* is a libc extern global whose
 	// symbol differs by platform (glibc `stdout`, macOS `__stdoutp`); Windows is
 	// left to its own stdio path (UCRT treats _IOLBF as full buffering anyway).
-	if targetGOOS() != "windows" {
+	if e.opts.Target.OS() != "windows" {
 		e.emitGlobal("declare i32 @setvbuf(ptr, ptr, i32, i64)")
 		e.ensureStdoutGlobal()
 	}
 
 	var out strings.Builder
 	out.WriteString("; Generated by KlainMainLang\n\n")
-	if ct := CrossTargetTriple(); ct != "" {
+	if ct := e.opts.Target.Triple; ct != "" {
 		// A cross-compilation target (TDD-00146 Stage 1) stamps its own triple
 		// so the IR and the clang --target agree; LLVM derives the data layout
 		// from the triple, matching the Windows precedent below (triple only,
@@ -2919,12 +3208,12 @@ done:
 	if e.usedNodeInterpGuard {
 		out.WriteString("  call void @__kml_reject_node_interp_flags(i32 %argc, ptr %argv)\n")
 	}
-	if targetGOOS() != "windows" {
+	if e.opts.Target.OS() != "windows" {
 		// Line-buffer stdout before any output (see the decl above).
-		fmt.Fprintf(&out, "  %%__kml_stdout_fp = load ptr, ptr @%s, align 8\n", stdoutGlobalSymbol())
+		fmt.Fprintf(&out, "  %%__kml_stdout_fp = load ptr, ptr @%s, align 8\n", e.stdoutGlobalSymbol())
 		out.WriteString("  call i32 @setvbuf(ptr %__kml_stdout_fp, ptr null, i32 1, i64 0)\n")
 	}
-	if targetGOOS() == "windows" {
+	if e.opts.Target.OS() == "windows" {
 		// The UCRT opens stdin/stdout/stderr in text mode, translating every
 		// "\n" to "\r\n" on write (and back on read). Node on Windows does no
 		// such translation: console.log("a") writes the bytes "a\n". Switch
@@ -3111,7 +3400,13 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 			// A string index signature interface (TDD-00130) registers as the
 			// map-backed dynamic-object type.
 			if s.IndexSig != nil {
-				e.interfaces[s.Name] = e.indexSignatureType(s.IndexSig)
+				e.interfaces[s.Name] = e.withDictFields(e.indexSignatureType(s.IndexSig), s.Fields)
+				continue
+			}
+			// So does one extending a dictionary (`interface ParsedUrlQuery
+			// extends NodeJS.Dict<string | string[]> {}`).
+			if base, ok := e.dictHeritage(s); ok {
+				e.interfaces[s.Name] = e.withDictFields(base, s.Fields)
 				continue
 			}
 			// A callable interface (lone call signature — ADR-00455)
@@ -3195,8 +3490,59 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 	}
 	var pending []ifaceExt
 	for _, stmt := range prog.Body {
-		if s, ok := stmt.(*ast.InterfaceDeclaration); ok && len(s.Extends) > 0 && len(s.TypeParams) == 0 && s.IndexSig == nil {
-			pending = append(pending, ifaceExt{s.Name, s.Extends})
+		s, ok := stmt.(*ast.InterfaceDeclaration)
+		if !ok || len(s.TypeParams) > 0 || s.IndexSig != nil {
+			continue
+		}
+		// The bases as the resolver left them: a namespace-qualified base
+		// (`net.ServerOpts`) is renamed to its declaration, unqualified.
+		bases := append([]string(nil), s.Extends...)
+		for _, h := range s.Heritage {
+			if ref, ok := h.(*ast.TypeReference); ok && len(ref.Qualifier) == 0 && len(ref.TypeArgs) == 0 {
+				dup := false
+				for _, b := range bases {
+					if b == ref.Name {
+						dup = true
+					}
+				}
+				if !dup {
+					bases = append(bases, ref.Name)
+				}
+			}
+		}
+		if len(bases) > 0 {
+			pending = append(pending, ifaceExt{s.Name, bases})
+		}
+	}
+	// An interface extending Error (or NodeJS.ErrnoException) whose own
+	// members are fields every Error has (`address?: string; port?:
+	// number`) is the Error representation, as its base is.
+	for _, stmt := range prog.Body {
+		s, ok := stmt.(*ast.InterfaceDeclaration)
+		if !ok || len(s.Heritage) != 1 || len(s.TypeParams) > 0 {
+			continue
+		}
+		ref, ok := s.Heritage[0].(*ast.TypeReference)
+		if !ok || len(ref.TypeArgs) > 0 {
+			continue
+		}
+		q := strings.Join(ref.Qualifier, ".")
+		if !(len(ref.Qualifier) == 0 && ref.Name == "Error") && !(q == "NodeJS" && ref.Name == "ErrnoException") {
+			continue
+		}
+		ie := ifaceExt{name: s.Name}
+		own, ok := e.interfaces[ie.name]
+		if !ok || !own.IsObject {
+			continue
+		}
+		fits := len(e.interfaceMethodSigs[ie.name]) == 0
+		for _, f := range own.Fields {
+			if _, _, fixed := errorObjType.FieldIndex(f.Name); !fixed || f.Name == "kind" || f.Name == "extra" {
+				fits = false
+			}
+		}
+		if fits {
+			e.interfaces[ie.name] = errorObjType
 		}
 	}
 	for pass := 0; pass < len(pending)+1; pass++ {
@@ -3269,11 +3615,14 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 // their signatures so calls can be resolved before the function body is emitted.
 func (e *Emitter) registerFunctions(prog *ast.Program) error {
 	var unannotated []*ast.FunctionDeclaration
+	savedInLib := e.inLib
+	defer func() { e.inLib = savedInLib }()
 	for _, stmt := range prog.Body {
 		fd, ok := stmt.(*ast.FunctionDeclaration)
 		if !ok {
 			continue
 		}
+		e.inLib = e.libStmts[stmt]
 		// `-compat=js`: call sites disagreeing on an unannotated parameter's
 		// kind used to be a hard error; with implicit-`any` (TDD-00076 A1)
 		// a genuinely polymorphic parameter simply becomes a boxed `any` —
@@ -3420,11 +3769,12 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 	// definition site and every call site agree on the variadic arity
 	// (TDD-00210 Stage 1). Idempotent — re-inference sweeps re-enter this.
 	maybeAddArgumentsRestParam(fd)
+	thisTaking := e.maybeAddThisParam(fd)
 	retType := TypeVoid
 	if fd.ReturnType != nil {
 		retType = e.resolveType(fd.ReturnType)
 	}
-	sig := FuncSig{RetType: retType, IsAsync: fd.IsAsync}
+	sig := FuncSig{RetType: retType, IsAsync: fd.IsAsync, This: thisTaking}
 	jsOverride := e.jsFuncParamTy[fd.Name] // nil outside -compat=js
 	for i, p := range fd.Params {
 		var pty Type
@@ -3442,6 +3792,9 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 			// the call sites actually pass. Applied here (not post-hoc) so
 			// the fixed-point re-inference sweep rebuilds with it too.
 			pty = jsOverride[i].ty
+		} else if dt, ok := e.paramDefaultType(p); ok {
+			// Typed by its literal default, as TS does (`p = '!'` is a string).
+			pty = dt
 		} else if e.compatJS() {
 			// TDD-00076 A1 (implicit-`any`): under `-compat=js`, an
 			// unannotated parameter no call site can type — or whose call
@@ -3572,4 +3925,55 @@ func (e *Emitter) registerNSAliases(decls []ast.NSAliasDecl) {
 			}
 		}
 	}
+}
+
+// entryIsModule reports whether the program's entry file is an ES module
+// (it imports or exports; the resolver records it before stripping imports).
+func (e *Emitter) entryIsModule(prog *ast.Program) bool {
+	if prog.EntryIsModule {
+		return true
+	}
+	for _, st := range prog.Body {
+		switch st.(type) {
+		case *ast.ImportDeclaration, *ast.ExportDeclaration, *ast.ExportFromDeclaration:
+			return true
+		}
+	}
+	return false
+}
+
+// dictHeritage is the dictionary type an interface extends (a generic base
+// such as `NodeJS.Dict<T>` whose instance is a string-keyed dictionary).
+func (e *Emitter) dictHeritage(s *ast.InterfaceDeclaration) (Type, bool) {
+	for _, h := range s.Heritage {
+		ref, ok := h.(*ast.TypeReference)
+		if !ok || len(ref.TypeArgs) == 0 {
+			continue
+		}
+		ta, err := ast.TypeAnnotationOf(h, "ts")
+		if err != nil || ta == nil {
+			continue
+		}
+		if t := e.resolveType(ta); t.IsDynamicObject && t.IsMap {
+			return t, true
+		}
+	}
+	return Type{}, false
+}
+
+// primitiveAnnotKind is the primitive a union member's annotation names —
+// the keyword or a literal of it (`string`, `'dir'`, `1`, `true`) — or "".
+func primitiveAnnotKind(ta *ast.TypeAnnotation) string {
+	if ta == nil || ta.UnionMembers != nil || ta.ElemType != nil || len(ta.TypeArgs) > 0 {
+		return ""
+	}
+	switch {
+	case ta.IsStringLiteral || ta.Name == "string":
+		return "string"
+	case ta.IsNumberLiteral || ta.Name == "number":
+		return "number"
+	case ta.Name == "boolean" || ta.Name == "true" || ta.Name == "false":
+		return "boolean"
+	}
+	return ""
 }

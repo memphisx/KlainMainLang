@@ -177,12 +177,13 @@ echo "WPT corpus stats: $(tr '\n' ' ' < "$WPT_STATS")"
 
 # --- TypeScript acceptance-oracle corpus (TDD-00121 Track C) ------------------
 # A pinned, sparse, blobless checkout of Microsoft's compiler/conformance test
-# cases plus their reference baselines. A case with a `*.errors.txt` baseline is
+# cases plus their reference baselines, and the library declarations
+# (src/lib) the builtin declarations are diffed against (TDD-00230 P3.1). A case with a `*.errors.txt` baseline is
 # expected to be rejected; one without is expected to compile clean — an
 # accept/reject oracle for this compiler's front-end (parse+resolve, no run).
 # Not vendored (.ts-tests/ is gitignored). Pinned by release tag for a stable
 # denominator (TypeScript is a versioned language).
-TS_TAG="v5.6.3"
+TS_TAG="v7.0.2"
 TS_URL="https://github.com/microsoft/TypeScript.git"
 TS_DEST="$SCRIPT_DIR/../../.ts-tests"
 
@@ -208,9 +209,29 @@ if [ ! -d "$TS_DEST/.git" ]; then
     'tests/cases/compiler/**' \
     'tests/cases/conformance/**' \
     'tests/baselines/reference/*.errors.txt' \
+    'src/lib/*.d.ts' \
     > "$TS_DEST/.git/info/sparse-checkout"
   git -C "$TS_DEST" fetch --depth 1 --filter=blob:none origin "refs/tags/$TS_TAG"
   git -C "$TS_DEST" checkout -q FETCH_HEAD
   echo "$TS_TAG" > "$TS_MARKER"
   echo "Fetched TypeScript tests @ $TS_TAG into $TS_DEST"
+fi
+
+# --- Node's type declarations (TDD-00230 P3.1) --------------------------------
+# @types/node, pinned: with TypeScript's src/lib above, the global names a
+# program may use without tsc's TS2304 (tools/libconform -globals). Fetched
+# from the npm registry as the published tarball. Not vendored (.types-node/
+# is gitignored).
+TYPES_NODE_VERSION="24.13.6"
+TYPES_NODE_DEST="$SCRIPT_DIR/../../.types-node"
+TYPES_NODE_MARKER="$TYPES_NODE_DEST/.kml-version"
+if [ "$(cat "$TYPES_NODE_MARKER" 2>/dev/null || echo none)" = "$TYPES_NODE_VERSION" ]; then
+  echo "@types/node already at pinned version $TYPES_NODE_VERSION — nothing to do."
+else
+  rm -rf "$TYPES_NODE_DEST"
+  mkdir -p "$TYPES_NODE_DEST"
+  curl -fsSL "https://registry.npmjs.org/@types/node/-/node-$TYPES_NODE_VERSION.tgz" |
+    tar -xz -C "$TYPES_NODE_DEST" --strip-components=1
+  echo "$TYPES_NODE_VERSION" > "$TYPES_NODE_MARKER"
+  echo "Fetched @types/node @ $TYPES_NODE_VERSION into $TYPES_NODE_DEST"
 fi

@@ -11,7 +11,7 @@ setTimeout(() => {
   process.exit(0)
 }, 300)
 
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.setHeader("X-Powered-By", "KlainMainLang")
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" })

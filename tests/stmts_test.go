@@ -298,8 +298,8 @@ LABEL1: do {
 	if err == nil {
 		t.Fatal("expected a compile error for a labeled break crossing a function boundary, got none")
 	}
-	if !strings.Contains(err.Error(), "undefined label") {
-		t.Fatalf("expected 'undefined label', got: %v", err)
+	if !strings.Contains(err.Error(), "can only jump to a label of an enclosing statement") {
+		t.Fatalf("expected the undefined-label early error, got: %v", err)
 	}
 }
 
@@ -314,8 +314,8 @@ LABEL1: do {
 	if err == nil {
 		t.Fatal("expected a compile error for a labeled continue crossing a function boundary, got none")
 	}
-	if !strings.Contains(err.Error(), "undefined label") {
-		t.Fatalf("expected 'undefined label', got: %v", err)
+	if !strings.Contains(err.Error(), "can only jump to a label of an enclosing statement") {
+		t.Fatalf("expected the undefined-label early error, got: %v", err)
 	}
 }
 

@@ -145,7 +145,7 @@
             "feature": "Tuple types",
             "status": "implemented",
             "caveats": [
-              "No rest/optional/named elements; constant index only; no array methods; not nestable in `any`/union → [Type system](TYPE-SYSTEM.md)"
+              "No rest/optional elements; constant index only; no array methods; not nestable in `any`/union → [Type system](TYPE-SYSTEM.md)"
             ]
           },
           {
@@ -215,7 +215,7 @@
             "feature": "`Function.prototype.call`/`apply`/`bind`",
             "status": "implemented",
             "caveats": [
-              "`thisArg` evaluated then ignored (no rebindable `this`, so no method-borrowing); first-class function values only, not builtins → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
+              "`thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); first-class function values only, not builtins → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
             ]
           },
           {

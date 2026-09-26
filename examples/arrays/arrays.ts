@@ -102,8 +102,8 @@ const parts = new Array<number>();
 parts.push(1);
 console.log(parts.concat([2, 3], 4).join("+"));
 
-// Elisions: holes read as undefined (zero value) and count in the length.
-const holes: number[] = [1, , 3];
+// Elisions: holes read as undefined and count in the length.
+const holes: (number | undefined)[] = [1, , 3];
 console.log(holes.length);
 
 // Array.from over a Set and a string.

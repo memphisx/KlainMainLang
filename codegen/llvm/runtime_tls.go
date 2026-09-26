@@ -18,8 +18,8 @@ func (e *Emitter) ensureTLSRuntime() {
 	e.usedTLS = true     // triggers tlssrc/tls.c compile + -lssl (main.go) and the extern decls
 	e.ensureNetRuntime() // socket/connect/register/dns decls + the socket struct + event loop
 
-	fam0, fam1 := httpSockaddrFamilyBytes()
-	nonblock := httpNonblockFlag()
+	fam0, fam1 := e.httpSockaddrFamilyBytes()
+	nonblock := e.httpNonblockFlag()
 	sock := netSocketIR
 
 	// __kml_tls_connect(port, host, reject_unauthorized) -> socket ptr (null on

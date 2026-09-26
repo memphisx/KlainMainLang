@@ -19,9 +19,11 @@ const p = functions.malloc(64n);
 console.log('malloc(64) returned a non-null pointer:', p > 0n);
 functions.free(p);
 
-// Bind one symbol at a time with getFunction; .pointer is its raw address.
+// Bind one symbol at a time with getFunction; .pointer is its raw address. A
+// `string` return is pointer-like in node:ffi — you get the raw char* as a
+// bigint, then read it with ffi.toString (Node does not auto-marshal it).
 const strchr = lib.getFunction('strchr', { arguments: ['string', 'int32'], return: 'string' });
-console.log("strchr('hello', 'l') =", strchr('hello', 108));
+console.log("strchr('hello', 'l') →", ffi.toString(strchr('hello', 108)));
 console.log('shared libraries here end in', ffi.suffix);
 
 // Raw memory helpers: peek/poke native memory through a bigint pointer.
@@ -29,7 +31,7 @@ const mem = functions.malloc(32n);
 ffi.setInt32(mem, 0, 1234);
 ffi.setFloat64(mem, 8, 2.5);
 console.log('read back:', ffi.getInt32(mem, 0), ffi.getFloat64(mem, 8));
-ffi.exportString('written from TS', mem, 32n);
+ffi.exportString('written from TS', mem, 32);
 console.log('C string in native memory:', ffi.toString(mem));
 const bytes = ffi.toBuffer(mem, 7); // a copied Buffer of the first 7 bytes
 console.log('first byte:', bytes[0]);
@@ -51,4 +53,16 @@ console.log('qsort via a native-callable closure:', sorted.trim());
 lib.unregisterCallback(cmp);
 functions.free(nums);
 
+// A bound function is a real function object, exactly as in Node: a name,
+// a length, an own `pointer`, and one identity per symbol per library.
+console.log(functions.pow, typeof functions.pow, functions.pow.length);
+console.log(functions.strlen === lib.getFunction('strlen', { arguments: ['string'], return: 'uint64' }));
+// `lib.symbols` lists every address resolved so far (in Node's own order).
+console.log('resolved so far:', Object.keys(lib.symbols).length, 'symbols');
+
 lib.close();
+try {
+  functions.strlen('after close');
+} catch (e: any) {
+  console.log(e.code, '-', e.message);
+}

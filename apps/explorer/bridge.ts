@@ -3,7 +3,7 @@
 // real `fs`/`path`. Kept apart from the window wiring (main.ts) so the file-IO
 // half is readable and testable on its own.
 
-import { readdirSync, readFileSync, readFileSyncBytes, statSync } from "fs";
+import { readdirSync, readFileSync, statSync } from "fs";
 import { join, extname } from "path";
 import { Entry } from "./types";
 
@@ -40,15 +40,15 @@ export function readText(args: string): string {
   const parsed: string[] = JSON.parse(args);
   const path = parsed[0];
   try {
-    return JSON.stringify({ text: readFileSync(path) });
+    return JSON.stringify({ text: readFileSync(path, "utf8") });
   } catch (e) {
     return JSON.stringify({ error: "could not read " + path });
   }
 }
 
 // readImage(path): the image as a base64 data URL the <img> can show directly.
-// readFileSyncBytes is the binary-safe read (a NUL byte won't truncate it);
-// Buffer base64-encodes the bytes.
+// readFileSync with no encoding is the binary-safe read (a NUL byte won't
+// truncate it), a Buffer that base64-encodes the bytes.
 export function readImage(args: string): string {
   const parsed: string[] = JSON.parse(args);
   const path = parsed[0];
@@ -61,8 +61,7 @@ export function readImage(args: string): string {
   else if (ext === ".bmp") mime = "image/bmp";
   else if (ext === ".ico") mime = "image/x-icon";
   try {
-    const bytes = readFileSyncBytes(path);
-    const b64: string = Buffer.from(bytes).toString("base64");
+    const b64: string = readFileSync(path).toString("base64");
     return JSON.stringify({ dataUrl: "data:" + mime + ";base64," + b64 });
   } catch (e) {
     return JSON.stringify({ error: "could not read " + path });

@@ -279,12 +279,12 @@ async function grab(u: string): Promise<number> {
 async function main2(): Promise<void> {
     const p1 = bad("A")
     const p2 = grab("%s/flat")
-    try { const s = await p1; console.log("no throw " + s) } catch (e) { console.log("caught: " + e.message) }
+    try { const s = await p1; console.log("no throw " + s) } catch (e) { console.log("caught: " + (e as Error).message) }
     console.log("sibling ok: " + (await p2))
     try {
         const xs: number[] = await Promise.all([grab("%s/flat"), bad("B")])
         console.log("all no throw")
-    } catch (e) { console.log("all caught: " + e.message) }
+    } catch (e) { console.log("all caught: " + (e as Error).message) }
 }
 main2()
 `, srv.URL, srv.URL, srv.URL)
@@ -330,9 +330,9 @@ async function main2(): Promise<void> {
         const t: number = await Promise.any([bad("%s/flat"), bad("%s/flat")])
         console.log("no throw")
     } catch (e) {
-        console.log("name:" + e.name)
-        console.log("count:" + e.errors.length)
-        console.log("first:" + e.errors[0].message)
+        console.log("name:" + (e as Error).name)
+        console.log("count:" + (e as AggregateError).errors.length)
+        console.log("first:" + (e as AggregateError).errors[0].message)
     }
 }
 main2()
@@ -1071,35 +1071,49 @@ main2()
 	assertOutput(t, src, "200\n200")
 }
 
-// TDD-00138 Stage 1: the Node http client — http.get(url, cb) hands the callback
-// an IncomingMessage (statusCode + 'data'/'end' events), built on the same
-// libcurl primitive as fetch.
+// https.get over a real TLS upstream (a self-signed httptest TLS server,
+// hence rejectUnauthorized: false), reading the IncomingMessage stream.
 func TestE2EHTTPSClientGet(t *testing.T) {
-	// The https module's get/request ride the same libcurl client as http's —
-	// TLS comes from the URL scheme at curl's layer (verified manually against
-	// a live https host; this test pins the module wiring itself against a
-	// local upstream).
-	srv := newFetchTestServer(t)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"title":"hello"}`)
+	}))
+	defer srv.Close()
 	src := fmt.Sprintf(`
 import https from 'https'
-https.get("%s/flat", (res) => {
+https.get("%s/flat", { rejectUnauthorized: false }, (res) => {
   console.log("status", res.statusCode)
+  let body = ""
+  res.on("data", (c: Buffer) => { body += c.toString() })
+  res.on("end", () => { console.log(body) })
 })
 `, srv.URL)
-	assertOutputImports(t, src, `status 200`)
+	assertOutputImports(t, src, "status 200\n{\"title\":\"hello\"}")
 }
 
-func TestE2EHTTPSCreateServerNeedsCertKey(t *testing.T) {
-	// https.createServer is a TLS server (TDD-00111): the { cert, key } options
-	// object is required — the bare-listener form is a clean rejection, never a
-	// silently non-TLS server.
-	_, err := parseAndCompileImports(t, `
+// https.get of an http: URL is Node's ERR_INVALID_PROTOCOL, thrown by the call.
+func TestE2EHTTPSClientGetRejectsHTTPURL(t *testing.T) {
+	assertOutputImports(t, `
 import https from 'https'
-https.createServer((req, res) => { res.end("x") })
-`)
-	if err == nil || !strings.Contains(err.Error(), "cert, key") {
-		t.Fatalf("want clean https.createServer { cert, key } rejection, got %v", err)
-	}
+try {
+  https.get("http://127.0.0.1:1/", () => {})
+} catch (e) {
+  const err = e as NodeJS.ErrnoException
+  console.log(err.code, err.message)
+}
+`, `ERR_INVALID_PROTOCOL Protocol "http:" not supported. Expected "https:"`)
+}
+
+// https.createServer without cert/key is a TLS server all the same (Node
+// accepts it; a client's handshake then fails for want of a certificate).
+func TestE2EHTTPSCreateServerWithoutCertKey(t *testing.T) {
+	assertOutputImports(t, `
+import https from 'https'
+const server = https.createServer((req, res) => { res.end("x") })
+server.listen(0, () => {
+  console.log("listening")
+  server.close()
+})
+`, "listening")
 }
 
 func TestE2EStreamWebReExports(t *testing.T) {
@@ -1146,7 +1160,7 @@ http.get("%s/notfound", (res) => {
 func TestE2EHTTPClientInProcessRoundTrip(t *testing.T) {
 	assertOutputImports(t, `
 import http from 'http'
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
   res.end("pong")
 }).listen(18499, () => {

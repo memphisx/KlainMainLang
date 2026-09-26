@@ -17,7 +17,7 @@
 // exits (a real server omits the self-request and the shutdown timer).
 import http from 'http';
 
-http.createServer((req: IncomingMessage, res: ServerResponse) => {
+http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("ok");
 }).listen(18641, () => {
   http.get("http://127.0.0.1:18641/", (res) => {

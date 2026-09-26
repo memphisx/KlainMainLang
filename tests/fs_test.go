@@ -21,10 +21,10 @@ const path: string = %q
 console.log(fs.existsSync(path))
 fs.writeFileSync(path, "hello")
 console.log(fs.existsSync(path))
-const content: string = fs.readFileSync(path)
+const content: string = fs.readFileSync(path, 'utf8')
 console.log(content)
 fs.appendFileSync(path, " world")
-console.log(fs.readFileSync(path))
+console.log(fs.readFileSync(path, 'utf8'))
 fs.unlinkSync(path)
 console.log(fs.existsSync(path))
 `, path)
@@ -38,7 +38,7 @@ func TestE2EFsWriteFileSyncOverwritesExistingContent(t *testing.T) {
 import fs from 'fs'
 fs.writeFileSync(%q, "first")
 fs.writeFileSync(%q, "second")
-console.log(fs.readFileSync(%q))
+console.log(fs.readFileSync(%q, 'utf8'))
 `, path, path, path)
 	assertOutputImports(t, src, "second")
 }
@@ -115,7 +115,7 @@ func TestE2EFsReadFileSyncNonexistentThrows(t *testing.T) {
 	src := `
 import fs from 'fs'
 try {
-    const content: string = fs.readFileSync("/definitely/does/not/exist/kml-test-file.txt")
+    const content: string = fs.readFileSync("/definitely/does/not/exist/kml-test-file.txt", 'utf8')
     console.log(content)
 } catch (e) {
     console.log("caught")
@@ -137,7 +137,7 @@ import fs from 'fs'
 try {
     fs.readFileSync("/definitely/does/not/exist/kml-test-file.txt")
 } catch (e) {
-    const m: string = e.message
+    const m: string = (e as Error).message
     console.log(m.includes("kml-test-file.txt"))
     console.log(("caught: " + m).length === 8 + m.length)
 }
@@ -148,7 +148,7 @@ try {
 func TestE2EFsReadFileSyncNonexistentUncaughtExitsNonZero(t *testing.T) {
 	_, exitCode := compileAndRunExpectExitImports(t, `
 import fs from 'fs'
-const content: string = fs.readFileSync("/definitely/does/not/exist/kml-test-file.txt")
+const content: string = fs.readFileSync("/definitely/does/not/exist/kml-test-file.txt", 'utf8')
 console.log(content)
 `)
 	if exitCode == 0 {
@@ -221,9 +221,9 @@ console.log(fs.readFileSync(%q, "utf8"))
 
 func TestE2EFsReadFileSyncBadEncodingRejected(t *testing.T) {
 	_, err := parseAndCompileImports(t, `import fs from 'fs'
-fs.readFileSync("a", "latin1")`)
+fs.readFileSync("a", "nope")`)
 	if err == nil {
-		t.Fatal("expected a compile error for a non-utf8 encoding, got none")
+		t.Fatal("expected a compile error for an unknown encoding, got none")
 	}
 }
 
@@ -243,7 +243,7 @@ fs.writeFileSync("a", "d", { signal: null })`)
 // this test is exercising the read side only. The null is NOT at the end
 // (byte 2 of 6), so an off-by-one in the length threading can't hide behind
 // a null-at-the-end body.
-func TestE2EFsReadFileSyncBytesPreservesEmbeddedNullByte(t *testing.T) {
+func TestE2EFsReadFileSyncBufferPreservesEmbeddedNullByte(t *testing.T) {
 	dir := tempDir(t)
 	path := filepath.Join(dir, "binary.bin")
 	if err := os.WriteFile(path, []byte{'h', 'i', 0, 'b', 'y', 'e'}, 0o644); err != nil {
@@ -251,7 +251,7 @@ func TestE2EFsReadFileSyncBytesPreservesEmbeddedNullByte(t *testing.T) {
 	}
 	src := fmt.Sprintf(`
 import fs from 'fs'
-const arr = fs.readFileSyncBytes(%q)
+const arr = fs.readFileSync(%q)
 console.log(arr.length)
 for (let i = 0; i < arr.length; i++) {
     console.log(arr[i])
@@ -260,25 +260,17 @@ for (let i = 0; i < arr.length; i++) {
 	assertOutputImports(t, src, "6\n104\n105\n0\n98\n121\n101")
 }
 
-func TestE2EFsReadFileSyncBytesNonexistentThrows(t *testing.T) {
+func TestE2EFsReadFileSyncBufferNonexistentThrows(t *testing.T) {
 	src := `
 import fs from 'fs'
 try {
-    const arr = fs.readFileSyncBytes("/definitely/does/not/exist/kml-test-file.bin")
+    const arr = fs.readFileSync("/definitely/does/not/exist/kml-test-file.bin")
     console.log(arr.length)
 } catch (e) {
     console.log("caught")
 }
 `
 	assertOutputImports(t, src, "caught")
-}
-
-func TestE2EFsReadFileSyncBytesWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompileImports(t, `import fs from 'fs'
-fs.readFileSyncBytes("a", "b")`)
-	if err == nil {
-		t.Fatal("expected a compile error for fs.readFileSyncBytes with the wrong argument count, got none")
-	}
 }
 
 // TestE2EFsWriteFileSyncUint8ArrayRoundTripsEmbeddedNullByte exercises the
@@ -327,32 +319,22 @@ fs.appendFileSync(%q, arr)
 	}
 }
 
-// TestE2EFsWriteFileSyncArrayBufferRoundTripsEmbeddedNullByte covers the
-// ArrayBuffer branch specifically (as opposed to the TypedArray-view branch
-// the tests above already cover) — data written through a Uint8Array view
-// but passed to writeFileSync as the underlying ArrayBuffer itself.
-func TestE2EFsWriteFileSyncArrayBufferRoundTripsEmbeddedNullByte(t *testing.T) {
-	dir := tempDir(t)
-	path := filepath.Join(dir, "out.bin")
+// A bare ArrayBuffer is not writable data in Node (a string, Buffer,
+// TypedArray or DataView is): writeFileSync throws ERR_INVALID_ARG_TYPE,
+// and tsc rejects the call, so this runs under -compat=js.
+func TestE2EFsWriteFileSyncArrayBufferThrows(t *testing.T) {
+	path := filepath.Join(tempDir(t), "out.bin")
 	src := fmt.Sprintf(`
 import fs from 'fs'
 const buf = new ArrayBuffer(3)
-const view = new Uint8Array(buf)
-view[0] = 5
-view[1] = 0
-view[2] = 6
-fs.writeFileSync(%q, buf)
+try {
+  fs.writeFileSync(%q, buf)
+  console.log("written")
+} catch (e) {
+  console.log((e as any).code, e instanceof TypeError)
+}
 `, path)
-	assertOutputImports(t, src, "")
-
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("os.ReadFile: %v", err)
-	}
-	want := []byte{5, 0, 6}
-	if string(got) != string(want) {
-		t.Errorf("got %v, want %v", got, want)
-	}
+	assertMultiFileOutputPermissive(t, map[string]string{"main.ts": src}, "main.ts", "ERR_INVALID_ARG_TYPE true")
 }
 
 // TestE2EFsWriteFileSyncStringPathUnchanged pins down that the existing
@@ -366,9 +348,9 @@ func TestE2EFsWriteFileSyncStringPathUnchanged(t *testing.T) {
 import fs from 'fs'
 const path: string = %q
 fs.writeFileSync(path, "hello")
-console.log(fs.readFileSync(path))
+console.log(fs.readFileSync(path, 'utf8'))
 fs.appendFileSync(path, " world")
-console.log(fs.readFileSync(path))
+console.log(fs.readFileSync(path, 'utf8'))
 `, path)
 	assertOutputImports(t, src, "hello\nhello world")
 }
@@ -399,7 +381,7 @@ try {
     fs.mkdirSync(%q)
     console.log("should not print")
 } catch (e) {
-    console.log(e.message === "EEXIST: file already exists, mkdir '%s'")
+    console.log((e as Error).message === "EEXIST: file already exists, mkdir '%s'")
 }
 `, sub, sub)
 	assertOutputImports(t, src, "true")
@@ -486,7 +468,7 @@ fs.writeFileSync(%q, "content")
 fs.renameSync(%q, %q)
 console.log(fs.existsSync(%q))
 console.log(fs.existsSync(%q))
-console.log(fs.readFileSync(%q))
+console.log(fs.readFileSync(%q, 'utf8'))
 `, oldPath, oldPath, newPath, oldPath, newPath, newPath)
 	assertOutputImports(t, src, "false\ntrue\ncontent")
 }
@@ -524,8 +506,8 @@ import fs from 'fs'
 fs.writeFileSync(%q, "copy me")
 fs.copyFileSync(%q, %q)
 console.log(fs.existsSync(%q))
-console.log(fs.readFileSync(%q))
-console.log(fs.readFileSync(%q))
+console.log(fs.readFileSync(%q, 'utf8'))
+console.log(fs.readFileSync(%q, 'utf8'))
 `, src, src, dest, src, src, dest)
 	assertOutputImports(t, code, "true\ncopy me\ncopy me")
 }
@@ -903,7 +885,7 @@ console.log(st.isFile())
 console.log(st.isDirectory())
 console.log(st.mtimeMs > 1500000000000)
 console.log(fs.statSync("%s").isDirectory())
-try { fs.statSync("%s/absent") } catch (e) { console.log("caught:", e.message.indexOf(", stat '") > -1 && (e as any).code === 'ENOENT') }
+try { fs.statSync("%s/absent") } catch (e) { console.log("caught:", (e as Error).message.indexOf(", stat '") > -1 && (e as any).code === 'ENOENT') }
 `, file, file, dir, dir)
 	assertOutputImports(t, src, "6\ntrue\nfalse\ntrue\ntrue\ncaught: true")
 }
@@ -1035,12 +1017,12 @@ func TestE2EFsLinkSync(t *testing.T) {
 import * as fs from 'fs'
 fs.writeFileSync("%s", "shared")
 fs.linkSync("%s", "%s")
-console.log(fs.readFileSync("%s"))
+console.log(fs.readFileSync("%s", 'utf8'))
 console.log(fs.statSync("%s").nlink)
 fs.writeFileSync("%s", "CHANGED")
-console.log(fs.readFileSync("%s"))
+console.log(fs.readFileSync("%s", 'utf8'))
 fs.unlinkSync("%s")
-console.log(fs.readFileSync("%s"))
+console.log(fs.readFileSync("%s", 'utf8'))
 try { fs.linkSync("%s/absent", "%s/x") } catch (e: any) { console.log("caught:", e.code) }
 `, a, a, b, b, b, a, b, a, b, dir, dir)
 	assertOutputImports(t, src, "shared\n2\nCHANGED\nCHANGED\ncaught: ENOENT")
@@ -1066,7 +1048,7 @@ console.log(buf[0])
 console.log(fs.readSync(rfd, buf, 0, 5, 6))
 console.log(buf[0])
 fs.closeSync(rfd)
-try { fs.openSync("%s/absent/f", 'r') } catch (e) { console.log("caught:", e.message.indexOf(", open '") > -1 && (e as any).code === 'ENOENT') }
+try { fs.openSync("%s/absent/f", 'r') } catch (e) { console.log("caught:", (e as Error).message.indexOf(", open '") > -1 && (e as any).code === 'ENOENT') }
 `, p, p, dir)
 	assertOutputImports(t, src, "11\n11\ntrue\n5\n104\n5\n119\ncaught: true")
 }
@@ -1125,7 +1107,7 @@ fs.ftruncateSync(fd, 5)
 fs.fsyncSync(fd)
 fs.closeSync(fd)
 console.log(fs.statSync("%s").size)
-console.log(fs.readFileSync("%s"))
+console.log(fs.readFileSync("%s", 'utf8'))
 const g = fs.openSync("%s", 'r+')
 fs.ftruncateSync(g, 8)
 fs.closeSync(g)
@@ -1182,7 +1164,7 @@ stat stat /no/such/f
 unlink unlink /no/such/f
 mkdir mkdir /no/deep/f
 scandir scandir /no/such/f
-plain null null`)
+plain undefined undefined`)
 }
 
 // ADR-00770: fs errors carry Node's numeric `err.errno` — libuv's errno. On

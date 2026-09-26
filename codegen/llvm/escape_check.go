@@ -1082,6 +1082,18 @@ func (c *escChecker) expr(expr ast.Expression) *escViolation {
 		return c.expr(x.Arg)
 	case *ast.CallExpression:
 		return c.call(x)
+	case *ast.NewExpression:
+		// A constructor may keep an argument; a read through the value
+		// (`t[0]`) is a copy.
+		for _, a := range x.Args {
+			if c.leaks(a) {
+				return &escViolation{reason: "passed to a constructor", pos: x.GetPos()}
+			}
+			if v := c.expr(a); v != nil {
+				return v
+			}
+		}
+		return nil
 	case *ast.MemberExpression:
 		return c.expr(x.Object)
 	case *ast.IndexExpression:

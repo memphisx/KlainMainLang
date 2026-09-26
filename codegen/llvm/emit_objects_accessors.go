@@ -50,29 +50,25 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 
 	e.objLitClassCtr++
 	className := fmt.Sprintf("__kml_objlit_%d", e.objLitClassCtr)
-	ty := ClassType(className, nil, ownFields, false, false, false)
+	ty := ClassType(className, nil, ownFields, false, false)
 	e.interfaces[className] = ty
 
 	info := ClassInfo{
-		Ty:                        ty,
-		OwnFields:                 ownFields,
-		FlatFields:                ownFields,
-		Methods:                   make(map[string]*ast.FunctionDeclaration),
-		MethodSigs:                make(map[string]FuncSig),
-		MethodImplementor:         make(map[string]string),
-		MethodDispatchSlot:        make(map[string]*MethodSlot),
-		TagID:                     e.nextClassTagID,
-		RootClass:                 className,
-		FieldOrigin:               make(map[string]string),
-		OwnFieldVisibility:        make(map[string]string),
-		OwnMethodVisibility:       make(map[string]string),
-		StaticFieldTypes:          make(map[string]Type),
-		OwnStaticFieldTypes:       make(map[string]Type),
-		StaticFieldOwner:          make(map[string]string),
-		OwnStaticFieldVisibility:  make(map[string]string),
-		StaticMethodSigs:          make(map[string]FuncSig),
-		StaticMethodImplementor:   make(map[string]string),
-		OwnStaticMethodVisibility: make(map[string]string),
+		Ty:                      ty,
+		OwnFields:               ownFields,
+		FlatFields:              ownFields,
+		Methods:                 make(map[string]*ast.FunctionDeclaration),
+		MethodSigs:              make(map[string]FuncSig),
+		MethodImplementor:       make(map[string]string),
+		MethodDispatchSlot:      make(map[string]*MethodSlot),
+		TagID:                   e.nextClassTagID,
+		RootClass:               className,
+		FieldOrigin:             make(map[string]string),
+		StaticFieldTypes:        make(map[string]Type),
+		OwnStaticFieldTypes:     make(map[string]Type),
+		StaticFieldOwner:        make(map[string]string),
+		StaticMethodSigs:        make(map[string]FuncSig),
+		StaticMethodImplementor: make(map[string]string),
 	}
 	e.nextClassTagID++
 	for _, f := range ownFields {

@@ -3,6 +3,7 @@
 // straight back to the client with no explicit chunk handling. The request body
 // streams in and the response streams out, chunk for chunk.
 import http from 'http';
+import type { AddressInfo } from 'net';
 
 async function send(port: number): Promise<void> {
   const res = await fetch("http://127.0.0.1:" + port + "/", {
@@ -14,13 +15,13 @@ async function send(port: number): Promise<void> {
   process.exit(0);
 }
 
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "application/octet-stream" });
   req.pipe(res);
 });
 
 server.listen(0, () => {
-  const port: number = server.address().port;
+  const port: number = (server.address() as AddressInfo).port;
   console.log("listening:", port > 0);
   setTimeout(() => { send(port); }, 50);
 });

@@ -35,7 +35,7 @@ const empty: number[] = []
 try {
   empty.reduce((acc, n) => acc + n)
 } catch (e) {
-  console.log(e.message)  // Reduce of empty array with no initial value
+  console.log((e as Error).message)  // Reduce of empty array with no initial value
 }
 
 // ── reduceRight ─────────────────────────────────────────────────────────────

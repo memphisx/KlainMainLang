@@ -64,7 +64,7 @@ try {
   throw new AError("from A");
 } catch (e) {
   console.log(e instanceof AError, e instanceof BError, e instanceof Error);
-  console.log(e.message);
+  console.log((e as Error).message);
 }
 `, "true false true\nfrom A")
 }

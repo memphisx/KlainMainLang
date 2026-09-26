@@ -456,7 +456,7 @@ func (e *Emitter) emitFetchBodyPromRunner(method string, pos ast.Pos, jsonTarget
 		sj := e.freshReg()
 		thr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jb))
-		e.emitInstr(fmt.Sprintf("%s = %s", sj, setjmpCall(jb)))
+		e.emitInstr(fmt.Sprintf("%s = %s", sj, e.setjmpCall(jb)))
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", thr, sj))
 		tryL := e.freshLabel("fbp.try")
 		catchL := e.freshLabel("fbp.catch")

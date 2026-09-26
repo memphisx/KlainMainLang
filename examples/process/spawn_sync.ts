@@ -7,8 +7,8 @@ const r = spawnSync("echo", ["kalimera", "kosme"]);
 console.log("status:", r.status);
 console.log("stdout:", r.stdout.trim());
 
-console.log("shell math:", execSync("echo $((6 * 7))").trim());
-console.log("no shell:", execFileSync("printf", ["%s!", "Thessaloniki"]));
+console.log("shell math:", execSync("echo $((6 * 7))", { encoding: "utf8" }).trim());
+console.log("no shell:", execFileSync("printf", ["%s!", "Thessaloniki"], { encoding: "utf8" }));
 
 const failing = spawnSync("false");
 console.log("failing status:", failing.status);

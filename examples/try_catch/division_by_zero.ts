@@ -4,13 +4,13 @@
 try {
   console.log(10 / 0)
 } catch (e) {
-  console.log('caught: ' + e.message)
+  console.log('caught: ' + (e as Error).message)
 }
 
 try {
   console.log(10 % 0)
 } catch (e) {
-  console.log('caught: ' + e.message)
+  console.log('caught: ' + (e as Error).message)
 }
 
 console.log(10 / 2)

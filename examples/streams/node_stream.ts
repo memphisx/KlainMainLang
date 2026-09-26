@@ -1,25 +1,26 @@
-// Node's stream module (TDD-00097 Stage 8): Readable/Writable/Transform over
-// the same WHATWG internals, with 'data'/'end'/'error'/'finish' events,
-// .pipe(), the stream/promises pipeline, and the web-stream bridges.
+// Node's stream module: Readable/Writable/Transform with 'data'/'end'/
+// 'finish' events, .pipe(), the stream/promises pipeline, and the bridges
+// to web streams.
 import { Readable, Writable, Transform } from 'stream';
 import { pipeline, finished } from 'stream/promises';
 
-// A pull-driven Readable: the read callback receives the stream itself
-// (this compiler has no `this` binding in object-literal callbacks).
+// A pull-driven Readable: read() pushes through `this`, the stream.
 let n = 0;
-const numbers = new Readable<number>({
-  read: (self) => {
+const numbers = new Readable({
+  objectMode: true,
+  read() {
     n = n + 1;
-    if (n > 4) { self.push(null); } else { self.push(n); }
+    if (n > 4) { this.push(null); } else { this.push(n); }
   }
 });
 
-const square = new Transform<number, number>({
-  transform: (v, out) => { out.enqueue(v * v); }
+const square = new Transform({
+  objectMode: true,
+  transform(v: number, _enc, cb) { cb(null, v * v); }
 });
 
 const seen: number[] = [];
-const sink = new Writable<number>({ write: (v) => { seen.push(v); } });
+const sink = new Writable({ objectMode: true, write(v: number, _enc, cb) { seen.push(v); cb(); } });
 
 await pipeline(numbers, square, sink);
 console.log("squares:", seen.join(" "));
@@ -30,19 +31,17 @@ words.on("data", (w) => { console.log("word:", w); });
 words.once("end", () => { console.log("all words delivered"); });
 await finished(words);
 
-// An options-form sink can take Node's full write(chunk, encoding, callback)
-// signature — the sink calls cb() when done (completion is on return here).
+// write(chunk[, encoding][, callback]) and end([chunk][, encoding][, callback]):
+// each callback runs once its chunk is written, after the synchronous code.
 const captured: string[] = [];
-const log = new Writable<string>({
-  write: (line: string, enc: string, cb: () => void) => { captured.push(line); cb(); }
+const log = new Writable({
+  decodeStrings: false,
+  write(line: string, _enc, cb) { captured.push(line); cb(); }
 });
-// write(chunk[, encoding][, callback]) and end([chunk][, encoding][, callback])
-// on the instance: the 'utf8' encoding is accepted and the completion callback
-// fires after the current synchronous run (Node's next-tick delivery), in order.
 log.write("first", "utf8", () => { console.log("wrote first"); });
 log.write("second", () => { console.log("wrote second"); });
 log.end("last", () => { console.log("captured: " + captured.join(",")); });
 
-// Bridging to and from WHATWG streams.
-const web = Readable.from(["bridge"]).toWeb();
+// Bridging to and from web streams.
+const web = Readable.toWeb(Readable.from(["bridge"]));
 for await (const s of web) { console.log("via web stream:", s); }

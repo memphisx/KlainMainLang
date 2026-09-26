@@ -18,11 +18,11 @@
 //     ws.on('message',(m,isBin)=>console.log('got',isBin,[...m]))"
 
 import http from 'http'
-import { WebSocketServer } from 'klain:ws'
+import { WebSocketServer, WSConnection } from 'klain:ws'
 
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
-  res.end('plain HTTP: ' + req.method + ' ' + req.path)
+  res.end('plain HTTP: ' + req.method + ' ' + req.url)
 })
 
 const wss = new WebSocketServer({ server })

@@ -20,7 +20,8 @@ import (
 // reserved-name collision check), always hand-written codegen dispatched by
 // name from emit_call.go.
 var eventEmitterMethodNames = map[string]bool{
-	"on": true, "once": true, "emit": true, "off": true,
+	"on": true, "once": true, "emit": true, "off": true, "addListener": true,
+	"prependListener": true, "prependOnceListener": true,
 	"removeListener": true, "removeAllListeners": true,
 	"listenerCount": true, "eventNames": true,
 }
@@ -59,18 +60,6 @@ func classEventEmitterFieldIndex(classTy Type) int {
 	return 1
 }
 
-// classNodeStreamFieldIndex returns the hidden Node-stream-handle field's
-// struct index for a HasNodeStream class (TDD-00132) — right after the tag
-// and the optional vtable pointer. A stream class never also sets
-// HasEventEmitter (its listener surface is the Node-stream runtime's own),
-// so only the vtable pointer can shift it.
-func classNodeStreamFieldIndex(classTy Type) int {
-	if classTy.HasVTable {
-		return 2
-	}
-	return 1
-}
-
 // emitEventEmitterVarDecl handles `const e = new EventEmitter<T>()`.
 func (e *Emitter) emitEventEmitterVarDecl(v *ast.VarDeclaration, init *ast.NewEventEmitterExpression) error {
 	val, err := e.emitNewEventEmitterValue(init)
@@ -85,7 +74,7 @@ func (e *Emitter) emitEventEmitterVarDecl(v *ast.VarDeclaration, init *ast.NewEv
 // (TDD-00028) — builds `new EventEmitter<T>()` as a plain ptr Value, usable
 // as a general expression, not just a var-decl initializer.
 func (e *Emitter) emitNewEventEmitterValue(init *ast.NewEventEmitterExpression) (Value, error) {
-	payload := TypePtr
+	payload := TypeAny // @types/node's DefaultEventMap
 	if init.PayloadType != nil {
 		payload = e.resolveEventEmitterPayloadType(init.PayloadType)
 	}
@@ -119,20 +108,19 @@ func (e *Emitter) resolveEventEmitterForCall(objExpr ast.Expression, pos ast.Pos
 	return val.Ty, val.Ref, nil
 }
 
-// resolveEventPayload resolves the effective payload type for one on/once/
-// emit/off call (TDD-00097 Stage 7). A scalar/Error payload type keeps the
-// original single-T semantics for every event. An object-typed payload is an
-// **event map** (`EventEmitter<{ data: Uint8Array; error: Error; end: void }>`):
-// the event-name argument must be a string literal naming one of its fields,
-// and that field's type is the event's own payload — `void` meaning a
-// payload-less event (zero-arg listeners, one-argument emit).
+// resolveEventPayload resolves one on/once/emit/off call's event payload
+// against the emitter's event map, @types/node's `EventEmitter<T extends
+// EventMap<T>>`: each property of the map is an event whose value is its
+// argument tuple (`{ data: [chunk: string]; end: [] }`), and the event-name
+// argument must be a string literal naming one. The result is the tuple, or
+// isVoid for an event that takes no arguments. A dynamic emitter (no type
+// argument) is handled by the callers before this.
 func (e *Emitter) resolveEventPayload(payloadTy Type, eventArg ast.Expression, pos ast.Pos) (Type, bool, error) {
-	// Map mode is only a plain structural object-literal type — an Error /
-	// class / tuple payload keeps whole-payload single-T semantics.
-	isMap := payloadTy.IsObject && !payloadTy.IsError && !payloadTy.IsClass && !payloadTy.IsTuple
-	if !isMap {
-		isVoid := payloadTy.IR == "void" || payloadTy.IR == ""
-		return payloadTy, isVoid, nil
+	if eeDynamic(payloadTy) {
+		return TypeAny, false, nil
+	}
+	if !payloadTy.IsObject || payloadTy.IsError || payloadTy.IsClass || payloadTy.IsTuple {
+		return Type{}, false, fmt.Errorf("%d:%d: EventEmitter's type argument must be an event map of argument tuples (`{ data: [chunk: string] }`)", pos.Line, pos.Col)
 	}
 	lit, ok := eventArg.(*ast.StringLiteral)
 	if !ok {
@@ -142,8 +130,13 @@ func (e *Emitter) resolveEventPayload(payloadTy Type, eventArg ast.Expression, p
 	if !found {
 		return Type{}, false, fmt.Errorf("%d:%d: event '%s' is not declared in this EventEmitter's event map", pos.Line, pos.Col, lit.Value)
 	}
-	isVoid := fieldTy.IR == "void" || fieldTy.IR == ""
-	return fieldTy, isVoid, nil
+	if !fieldTy.IsTuple {
+		return Type{}, false, fmt.Errorf("%d:%d: event '%s' in this EventEmitter's event map must be an argument tuple (`%s: [value: T]`)", pos.Line, pos.Col, lit.Value, lit.Value)
+	}
+	if len(fieldTy.Fields) == 0 {
+		return fieldTy, true, nil
+	}
+	return fieldTy, false, nil
 }
 
 // resolveEventEmitterListenerArg evaluates and validates arg as a
@@ -165,28 +158,6 @@ func tupleElemTypes(t Type) []Type {
 		elems[i] = f.Ty
 	}
 	return elems
-}
-
-// emitBuildTuple packs N argument expressions into a fresh tuple value of type
-// tupleTy (TDD-00131 multi-argument events) — one heap struct with each arg
-// coerced to and stored at its positional field.
-func (e *Emitter) emitBuildTuple(argExprs []ast.Expression, tupleTy Type) (Value, error) {
-	e.ensureMalloc()
-	structIR := tupleTy.StructIR()
-	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", reg, tupleTy.StructSize()))
-	for i, ae := range argExprs {
-		idx, fieldTy, _ := tupleTy.FieldIndex(fmt.Sprintf("%d", i))
-		v, err := e.emitExprWithObjectHint(ae, fieldTy)
-		if err != nil {
-			return Value{}, err
-		}
-		v = e.coerce(v, fieldTy)
-		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, reg, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, v.Ref, gep, fieldTy.Align()))
-	}
-	return Value{Ref: reg, Ty: tupleTy}, nil
 }
 
 // listenerTypeName maps an event payload Type to a source-level type name a
@@ -261,8 +232,8 @@ func (e *Emitter) resolveEventEmitterListenerArg(arg ast.Expression, payloadTy T
 		}
 	} else if payloadTy.IsTuple {
 		elems := tupleElemTypes(payloadTy)
-		if len(val.Ty.FuncParams) != len(elems) {
-			return "", fmt.Errorf("%d:%d: %s's listener must take %d arguments (one per tuple-payload element)", pos.Line, pos.Col, fnName, len(elems))
+		if len(val.Ty.FuncParams) > len(elems) {
+			return "", fmt.Errorf("%d:%d: %s's listener takes more than the event's %d arguments", pos.Line, pos.Col, fnName, len(elems))
 		}
 		for i, p := range val.Ty.FuncParams {
 			if p.IR != elems[i].IR {
@@ -338,55 +309,69 @@ func (e *Emitter) eventEmitterListPtr(listenersMapPtr, eventRef string) string {
 // a standalone receiver, the class instance pointer for the embedded case —
 // so both callers get correct chaining semantics from one implementation.
 func (e *Emitter) emitEventEmitterCall(payloadTy Type, listenersMapPtr string, method string, args []ast.Expression, pos ast.Pos, chainVal Value) (Value, error) {
+	dynamic := eeDynamic(payloadTy)
+	// eventArgs resolves a mapped event's argument types (nil when it takes
+	// none); a dynamic emitter's events take any arguments.
+	eventArgs := func(ev ast.Expression) ([]Type, error) {
+		if dynamic {
+			return nil, nil
+		}
+		evTy, evVoid, err := e.resolveEventPayload(payloadTy, ev, pos)
+		if err != nil || evVoid {
+			return nil, err
+		}
+		return tupleElemTypes(evTy), nil
+	}
 	switch method {
-	case "on", "once":
+	case "on", "once", "off", "removeListener", "addListener", "prependListener", "prependOnceListener":
 		if len(args) != 2 {
 			return Value{}, fmt.Errorf("%d:%d: %s() requires 2 arguments (event, listener)", pos.Line, pos.Col, method)
+		}
+		argTys, err := eventArgs(args[0])
+		if err != nil {
+			return Value{}, err
 		}
 		eventVal, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
 		}
 		eventVal = e.coerce(eventVal, TypePtr)
-		evTy, evVoid, err := e.resolveEventPayload(payloadTy, args[0], pos)
+		rec, err := e.resolveDynListener(args[1], argTys, dynamic, method, pos)
 		if err != nil {
 			return Value{}, err
-		}
-		listenerPtr, err := e.resolveEventEmitterListenerArg(args[1], evTy, evVoid, method, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		listPtr := e.emitEventEmitterGetOrCreateList(listenersMapPtr, eventVal.Ref)
-		once := "0"
-		if method == "once" {
-			once = "1"
 		}
 		e.ensureEventEmitterRuntime()
-		e.emitInstr(fmt.Sprintf("call void @__kml_ee_list_push(ptr %s, ptr %s, i64 %s)", listPtr, listenerPtr, once))
+		if method != "off" && method != "removeListener" {
+			listPtr := e.emitEventEmitterGetOrCreateList(listenersMapPtr, eventVal.Ref)
+			once := "0"
+			if method == "once" || method == "prependOnceListener" {
+				once = "1"
+			}
+			fn := "__kml_ee_list_push"
+			if method == "prependListener" || method == "prependOnceListener" {
+				fn = "__kml_ee_list_prepend"
+			}
+			e.emitInstr(fmt.Sprintf("call void @%s(ptr %s, ptr %s, i64 %s)", fn, listPtr, rec, once))
+		} else {
+			listPtr := e.eventEmitterListPtr(listenersMapPtr, eventVal.Ref)
+			e.emitInstr(fmt.Sprintf("call void @__kml_ee_list_remove_dyn(ptr %s, ptr %s)", listPtr, rec))
+			e.eePrune(listenersMapPtr, eventVal.Ref, listPtr)
+		}
 		return chainVal, nil
-
-	case "off", "removeListener":
-		if len(args) != 2 {
-			return Value{}, fmt.Errorf("%d:%d: %s() requires 2 arguments (event, listener)", pos.Line, pos.Col, method)
+	case "emit":
+		if len(args) < 1 {
+			return Value{}, fmt.Errorf("%d:%d: emit() takes (event, ...args)", pos.Line, pos.Col)
 		}
-		eventVal, err := e.emitExpr(args[0])
+		argTys, err := eventArgs(args[0])
 		if err != nil {
 			return Value{}, err
 		}
-		eventVal = e.coerce(eventVal, TypePtr)
-		evTy, evVoid, err := e.resolveEventPayload(payloadTy, args[0], pos)
-		if err != nil {
-			return Value{}, err
+		if !dynamic && len(args)-1 != len(argTys) {
+			return Value{}, fmt.Errorf("%d:%d: emit() for this event takes %d data arguments", pos.Line, pos.Col, len(argTys))
 		}
-		listenerPtr, err := e.resolveEventEmitterListenerArg(args[1], evTy, evVoid, method, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		listPtr := e.eventEmitterListPtr(listenersMapPtr, eventVal.Ref)
-		e.ensureEventEmitterRuntime()
-		e.emitInstr(fmt.Sprintf("call void @__kml_ee_list_remove(ptr %s, ptr %s)", listPtr, listenerPtr))
-		return chainVal, nil
-
+		return e.emitEventEmitterEmit(listenersMapPtr, args, argTys, pos, chainVal)
+	}
+	switch method {
 	case "removeAllListeners":
 		if len(args) > 1 {
 			return Value{}, fmt.Errorf("%d:%d: removeAllListeners() takes at most 1 argument (event?)", pos.Line, pos.Col)
@@ -412,6 +397,7 @@ func (e *Emitter) emitEventEmitterCall(payloadTy Type, listenersMapPtr string, m
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, zeroL))
 		e.emitLabel(zeroL)
 		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", listPtr))
+		e.eePrune(listenersMapPtr, eventVal.Ref, listPtr)
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
 		return chainVal, nil
@@ -454,74 +440,128 @@ func (e *Emitter) emitEventEmitterCall(payloadTy Type, listenersMapPtr string, m
 		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_keys(ptr %s)", res, listenersMapPtr))
 		return Value{Ref: res, Ty: ArrayOf(TypePtr)}, nil
 
-	case "emit":
-		return e.emitEventEmitterEmit(payloadTy, listenersMapPtr, args, pos)
 	}
 	return Value{}, fmt.Errorf("%d:%d: unknown EventEmitter method '%s'", pos.Line, pos.Col, method)
 }
 
-// emitEventEmitterEmit implements `.emit(event, data)`: snapshot-copies the
-// event's listener list (so a `.once()` entry removing itself mid-loop
-// can't perturb indices not yet visited), invokes every entry via the
-// standard closure-call trampoline (emitCBCall), removes once-flagged
-// entries from the *real* list after invoking them, and — if zero listeners
-// were invoked and event is exactly "error" — throws instead of returning,
-// matching real Node's one specially-treated event name. Returns whether
-// any listener was invoked.
-func (e *Emitter) emitEventEmitterEmit(payloadTy Type, listenersMapPtr string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 {
-		return Value{}, fmt.Errorf("%d:%d: emit() takes (event, ...args)", pos.Line, pos.Col)
+// eeDynamic reports whether an emitter uses @types/node's default event map
+// (`EventEmitter` with no type argument, or `EventEmitter<any>`): every
+// event takes any arguments, and each listener is held as a dynamic
+// function record called through the dynamic ABI.
+func eeDynamic(payloadTy Type) bool { return payloadTy.IsDynamic }
+
+// resolveDynListener evaluates a listener for a dynamic-mode emitter and
+// returns its function record (untagged). An untyped parameter is `any`, as
+// tsc types it against `(...args: any[]) => void`.
+func (e *Emitter) resolveDynListener(arg ast.Expression, argTys []Type, dynamic bool, fnName string, pos ast.Pos) (string, error) {
+	// A dynamic emitter's listener parameters are `any`, as tsc types them
+	// against `(...args: any[]) => void`; a mapped event's are its tuple's.
+	anyHints := func(params []ast.Param) []Type {
+		if !dynamic {
+			return argTys
+		}
+		hs := make([]Type, len(params))
+		for i, p := range params {
+			hs[i] = TypeAny
+			if p.Rest {
+				hs[i] = ArrayOf(TypeAny)
+			}
+		}
+		return hs
 	}
+	var val Value
+	var err error
+	switch fn := arg.(type) {
+	case *ast.ArrowFunction:
+		val, err = e.emitArrowFunctionWithHints(fn, anyHints(fn.Params))
+	case *ast.FunctionExpression:
+		val, err = e.emitFunctionExpression(fn, anyHints(fn.Params))
+	default:
+		val, err = e.emitExpr(arg)
+	}
+	if err != nil {
+		return "", err
+	}
+	if val.Ty.IsFunc && !dynamic {
+		if len(val.Ty.FuncParams) > len(argTys) && !val.Ty.FuncHasRest {
+			return "", fmt.Errorf("%d:%d: %s's listener takes more than the event's %d arguments", pos.Line, pos.Col, fnName, len(argTys))
+		}
+	}
+	box := val
+	if val.Ty.IsFunc {
+		if box, err = e.emitDynClosureAdapter(val); err != nil {
+			return "", fmt.Errorf("%d:%d: %s's listener: %v", pos.Line, pos.Col, fnName, err)
+		}
+	} else if !val.Ty.IsDynamic {
+		return "", fmt.Errorf("%d:%d: %s's listener must be a function", pos.Line, pos.Col, fnName)
+	}
+	e.ensureNanBox()
+	pay := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", pay, box.Ref))
+	rec := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", rec, pay))
+	return rec, nil
+}
+
+// emitEventEmitterEmit is emit() for a dynamic-mode emitter: the data
+// arguments are boxed once into an argv, and each listener is called
+// through the dynamic ABI with the emitter as `this`. An unlistened
+// 'error' event throws its argument when that is an Error, and otherwise
+// an Error reading "Unhandled error. (<value>)", as Node does.
+func (e *Emitter) emitEventEmitterEmit(listenersMapPtr string, args []ast.Expression, argTys []Type, pos ast.Pos, self Value) (Value, error) {
 	eventVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
 	}
 	eventVal = e.coerce(eventVal, TypePtr)
-	evTy, evVoid, err := e.resolveEventPayload(payloadTy, args[0], pos)
-	if err != nil {
-		return Value{}, err
+	data := args[1:]
+	vals := make([]Value, len(data))
+	for i, a := range data {
+		if i < len(argTys) {
+			if vals[i], err = e.emitExprWithObjectHint(a, argTys[i]); err != nil {
+				return Value{}, err
+			}
+			vals[i] = e.coerce(vals[i], argTys[i])
+		} else if vals[i], err = e.emitExprWithObjectHint(a, TypeAny); err != nil {
+			// A listener of a dynamic emitter takes `any` arguments: an
+			// object literal is built as the dynamic object it reads as.
+			return Value{}, err
+		}
 	}
-	var dataVal Value
-	if evVoid {
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: emit() for a payload-less event takes only the event name", pos.Line, pos.Col)
+	e.ensureMalloc()
+	e.ensureNanBox()
+	argv := "null"
+	if len(vals) > 0 {
+		argv = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", argv, 8*len(vals)))
+		for i, v := range vals {
+			b, err := e.emitBoxValue(v)
+			if err != nil {
+				return Value{}, err
+			}
+			slot := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", slot, argv, i))
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", b.Ref, slot))
 		}
-	} else if evTy.IsTuple {
-		// Node's multi-argument event: emit(event, a, b, …) packs the tuple.
-		elems := tupleElemTypes(evTy)
-		if len(args) != 1+len(elems) {
-			return Value{}, fmt.Errorf("%d:%d: emit() for this event requires %d data arguments (one per tuple-payload element)", pos.Line, pos.Col, len(elems))
+	}
+	recv := fmt.Sprintf("%d", nbUndefined)
+	if self.Ref != "" {
+		if b, err := e.emitBoxValue(self); err == nil {
+			recv = b.Ref
 		}
-		dataVal, err = e.emitBuildTuple(args[1:], evTy)
-		if err != nil {
-			return Value{}, err
-		}
-	} else {
-		if len(args) != 2 {
-			return Value{}, fmt.Errorf("%d:%d: emit() for this event requires a data argument", pos.Line, pos.Col)
-		}
-		dataVal, err = e.emitExprWithObjectHint(args[1], evTy)
-		if err != nil {
-			return Value{}, err
-		}
-		dataVal = e.coerce(dataVal, evTy)
 	}
 
 	e.ensureMapStrHelpers()
 	e.ensureEventEmitterRuntime()
 	e.ensureMemcpy()
-	e.ensureMalloc()
-
 	listPtr := e.eventEmitterListPtr(listenersMapPtr, eventVal.Ref)
-
 	countAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", countAlloca))
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", countAlloca))
-
 	isNull := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, listPtr))
-	hasListL := e.freshLabel("ee.emit.haslist")
-	afterListL := e.freshLabel("ee.emit.afterlist")
+	hasListL := e.freshLabel("ee.demit.haslist")
+	afterListL := e.freshLabel("ee.demit.afterlist")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, afterListL, hasListL))
 
 	e.emitLabel(hasListL)
@@ -537,14 +577,12 @@ func (e *Emitter) emitEventEmitterEmit(payloadTy Type, listenersMapPtr string, a
 	snapData := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", snapData, snapBytes))
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", snapData, origData, snapBytes))
-
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
-
-	condL := e.freshLabel("ee.emit.cond")
-	bodyL := e.freshLabel("ee.emit.body")
-	doneLoopL := e.freshLabel("ee.emit.doneloop")
+	condL := e.freshLabel("ee.demit.cond")
+	bodyL := e.freshLabel("ee.demit.body")
+	doneLoopL := e.freshLabel("ee.demit.doneloop")
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(condL)
@@ -557,45 +595,31 @@ func (e *Emitter) emitEventEmitterEmit(payloadTy Type, listenersMapPtr string, a
 	e.emitLabel(bodyL)
 	lp := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i64 %s, i32 0", lp, snapData, idxVal))
-	listenerPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", listenerPtr, lp))
+	rec := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rec, lp))
 	op := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i64 %s, i32 1", op, snapData, idxVal))
 	onceFlag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", onceFlag, op))
-
-	cbParams := []Type{evTy}
-	cbArgs := []Value{dataVal}
-	if evVoid {
-		cbParams = nil
-		cbArgs = nil
-	} else if evTy.IsTuple {
-		// Unpack the tuple payload into one listener argument per element
-		// (TDD-00131 multi-argument events).
-		elems := tupleElemTypes(evTy)
-		cbParams = elems
-		cbArgs = nil
-		for i, et := range elems {
-			idx, ft, _ := evTy.FieldIndex(fmt.Sprintf("%d", i))
-			cbArgs = append(cbArgs, e.loadFieldValue(dataVal, idx, ft))
-			_ = et
-		}
-	}
-	cb := Callback{kind: cbClosure, hdrPtr: listenerPtr, ty: FuncType(cbParams, TypeVoid)}
-	if _, err := e.emitCBCall(cb, cbArgs); err != nil {
-		return Value{}, err
-	}
-
+	// A once listener is removed before it runs, as Node's once wrapper does.
 	isOnce := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isOnce, onceFlag))
-	isOnceL := e.freshLabel("ee.emit.isonce")
-	notOnceL := e.freshLabel("ee.emit.notonce")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isOnce, isOnceL, notOnceL))
+	isOnceL := e.freshLabel("ee.demit.isonce")
+	callL := e.freshLabel("ee.demit.call")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isOnce, isOnceL, callL))
 	e.emitLabel(isOnceL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_ee_list_remove(ptr %s, ptr %s)", listPtr, listenerPtr))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", notOnceL))
-	e.emitLabel(notOnceL)
-
+	e.emitInstr(fmt.Sprintf("call void @__kml_ee_list_remove(ptr %s, ptr %s)", listPtr, rec))
+	e.eePrune(listenersMapPtr, eventVal.Ref, listPtr)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", callL))
+	e.emitLabel(callL)
+	fp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, rec))
+	envSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", envSlot, rec))
+	env := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", env, envSlot))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %s, i64 %s, i64 %d, ptr %s)", r, fp, env, recv, len(vals), argv))
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
@@ -609,38 +633,42 @@ func (e *Emitter) emitEventEmitterEmit(payloadTy Type, listenersMapPtr string, a
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", count, countAlloca))
 	noneCalled := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", noneCalled, count))
-
-	// 'error'-unlistened-throws special case: resolved entirely here, no
-	// runtime round-trip needed — a strcmp against the literal "error",
-	// gated on "zero listeners were invoked".
 	e.ensureStrcmp()
 	cmpResult := e.freshReg()
-	errLit := e.internString("error")
-	e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", cmpResult, eventVal.Ref, errLit))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", cmpResult, eventVal.Ref, e.internString("error")))
 	isErrorEvent := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isErrorEvent, cmpResult))
 	shouldThrow := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", shouldThrow, noneCalled, isErrorEvent))
-
-	throwL := e.freshLabel("ee.emit.throw")
-	retL := e.freshLabel("ee.emit.ret")
+	throwL := e.freshLabel("ee.demit.throw")
+	retL := e.freshLabel("ee.demit.ret")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", shouldThrow, throwL, retL))
 
 	e.emitLabel(throwL)
 	e.ensureExceptionHelpers()
-	if evVoid {
-		errPtr := e.buildErrorObj(0, e.internString("Unhandled 'error' event"), e.internString("Error"))
+	switch {
+	case len(vals) > 0 && vals[0].Ty.IsError:
+		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", e.coerce(vals[0], TypePtr).Ref))
+	case len(vals) == 0:
+		errPtr := e.buildErrorObj(0, e.internString("Unhandled error. (undefined)"), e.internString("Error"))
 		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errPtr))
-	} else if evTy.IsError {
-		// The payload is already an errorObjType-shaped pointer — rethrow
-		// it directly rather than re-wrapping/stringifying it.
-		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", dataVal.Ref))
-	} else {
-		strVal, err := e.emitValueToString(dataVal)
-		if err != nil {
-			return Value{}, err
+	default:
+		shown := vals[0]
+		var inner Value
+		if isStringTy(shown.Ty) {
+			// Node renders the value with util.inspect: a string is quoted.
+			inner, _ = e.emitStringConcat(Value{Ref: e.internString("'"), Ty: TypePtr}, e.coerce(shown, TypePtr))
+			inner, _ = e.emitStringConcat(inner, Value{Ref: e.internString("'"), Ty: TypePtr})
+		} else {
+			str, err := e.emitValueToString(shown)
+			if err != nil {
+				return Value{}, err
+			}
+			inner = str
 		}
-		errPtr := e.buildErrorObj(0, strVal.Ref, e.internString("Error"))
+		s, _ := e.emitStringConcat(Value{Ref: e.internString("Unhandled error. ("), Ty: TypePtr}, inner)
+		s, _ = e.emitStringConcat(s, Value{Ref: e.internString(")"), Ty: TypePtr})
+		errPtr := e.buildErrorObj(0, s.Ref, e.internString("Error"))
 		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errPtr))
 	}
 	e.emitTerminator("unreachable")
@@ -649,4 +677,13 @@ func (e *Emitter) emitEventEmitterEmit(payloadTy Type, listenersMapPtr string, a
 	anyCalled := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", anyCalled, noneCalled))
 	return Value{Ref: anyCalled, Ty: TypeBool}, nil
+}
+
+// eePrune drops an event's entry once its listener list is empty, so
+// eventNames() no longer reports it and a later listener re-adds the name at
+// the end, as Node deletes the key with its last listener.
+func (e *Emitter) eePrune(listenersMapPtr, eventRef, listPtr string) {
+	e.ensureMapStrHelpers()
+	e.ensureEventEmitterRuntime()
+	e.emitInstr(fmt.Sprintf("call void @__kml_ee_prune(ptr %s, ptr %s, ptr %s)", listenersMapPtr, eventRef, listPtr))
 }

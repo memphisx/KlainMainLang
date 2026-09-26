@@ -128,6 +128,27 @@ func TestE2EDynamicImportNonLiteralRejected(t *testing.T) {
 	}
 }
 
+// TestE2EDynamicImportLazyIslandNoAny: a lazy island compiles under the
+// program's own modes, so --no-any rejects an `any` in the imported module
+// exactly as it would in the entry file.
+func TestE2EDynamicImportLazyIslandNoAny(t *testing.T) {
+	cli := buildCLI(t)
+	dir := tempDir(t)
+	writeFile(t, filepath.Join(dir, "mod.ts"), "let x: any = 1;\nexport const answer: number = 42;\nconsole.log(x);\n")
+	writeFile(t, filepath.Join(dir, "entry.ts"),
+		"async function main(): Promise<void> {\n"+
+			"  const m = await import('./mod');\n"+
+			"  console.log(m.answer);\n"+
+			"}\nmain();\n")
+	out, err := exec.Command(cli, "--no-any", "-dynamic-import=lazy", filepath.Join(dir, "entry.ts")).CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected --no-any to reject the island's any, got success:\n%s", out)
+	}
+	if !strings.Contains(string(out), "banned under --no-any") || !strings.Contains(string(out), "mod.ts") {
+		t.Errorf("expected the island's --no-any error, got: %s", out)
+	}
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
@@ -208,7 +229,7 @@ func TestE2EDynamicImportLazyIslandThrowRejectsImport(t *testing.T) {
 			"await new Promise<void>((r) => setTimeout(r, 5));\n" +
 			"throw new RangeError(\"island exploded\");\n",
 		"entry.ts": "try {\n  const m = await import('./mod');\n  console.log(\"unexpected\", m.x);\n} catch (e) {\n" +
-			"  console.log(\"caught:\", e.name, e.message, e instanceof RangeError);\n}\nconsole.log(\"after\");\n",
+			"  console.log(\"caught:\", (e as Error).name, (e as Error).message, e instanceof RangeError);\n}\nconsole.log(\"after\");\n",
 	})
 	want := "caught: RangeError island exploded true\nafter\n"
 	if out != want || code != 0 {

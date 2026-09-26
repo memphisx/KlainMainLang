@@ -16,7 +16,7 @@ async function delay(ms: number): Promise<void> {
   return await new Promise<void>((r) => setTimeout(() => r(), ms))
 }
 
-http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
+http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
   await delay(20) // yield the connection fiber to the loop, then respond
   res.writeHead(200, { "Content-Type": "text/plain" })
   res.end("kalimera from the server")

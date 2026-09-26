@@ -27,11 +27,19 @@ func (e *Emitter) ensureBufferCodecs() {
 	e.declaredBufferCodecs = true
 	for _, d := range []string{
 		"declare ptr @__kml_buf_hex_enc(ptr, i64)",
+		"declare ptr @__kml_buf_utf8_str(ptr, i64)",
+		"declare ptr @__kml_buf_ascii_str(ptr, i64)",
 		"declare i64 @__kml_buf_hex_dec(ptr, ptr)",
 		"declare ptr @__kml_buf_b64_enc(ptr, i64, i32)",
 		"declare i64 @__kml_buf_b64_dec(ptr, ptr)",
 		"declare ptr @__kml_buf_latin1_str(ptr, i64)",
 		"declare i64 @__kml_buf_latin1_bytes(ptr, ptr)",
+		"declare ptr @__kml_buf_utf16le_str(ptr, i64)",
+		"declare i64 @__kml_buf_utf16le_bytes(ptr, ptr)",
+		"declare i64 @__kml_buf_decode_enc(ptr, ptr, ptr)",
+		"declare ptr @__kml_buf_encode_enc(ptr, i64, ptr)",
+		"declare i64 @__kml_buf_byte_length(ptr, ptr)",
+		"declare ptr @__kml_buf_concat(ptr, i64, i64, ptr)",
 	} {
 		e.emitGlobal(d)
 	}

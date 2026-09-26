@@ -74,146 +74,122 @@ console.log(missing)
 	}
 }
 
-// --- process.readLineSync ---
+// --- reading stdin synchronously: readFileSync(0) ---
 
-func TestE2EProcessReadLineSync(t *testing.T) {
+func TestE2EProcessReadStdinSync(t *testing.T) {
 	src := `
-const line1 = process.readLineSync()
-console.log("got: " + line1)
-const line2 = process.readLineSync()
-console.log("got: " + line2)
-const line3 = process.readLineSync()
-console.log(line3 === null)
+import { readFileSync } from 'fs'
+const lines = readFileSync(0, "utf8").split("\n")
+console.log("got: " + lines[0])
+console.log("got: " + lines[1])
+console.log(lines.length)
 `
-	got := compileAndRunWithStdin(t, src, "hello\nworld\n")
-	compareLines(t, got, "got: hello\ngot: world\ntrue")
-}
-func TestE2EProcessReadLineSyncNoTrailingNewline(t *testing.T) {
-	src := `
-const line1 = process.readLineSync()
-console.log("got: " + line1)
-const line2 = process.readLineSync()
-console.log(line2 === null)
-`
-	got := compileAndRunWithStdin(t, src, "last line no newline")
-	compareLines(t, got, "got: last line no newline\ntrue")
+	got := compileAndRunWithStdinImports(t, src, "hello\nworld\n")
+	compareLines(t, got, "got: hello\ngot: world\n3")
 }
 
-// --- process.execFileSync ---
+// --- child_process.execFileSync ---
 //
 // Spawns real child processes via fork+execvp — /bin/echo, /bin/sh, and
 // PATH-resolved bare names are used since they're present on every POSIX
 // system this compiler targets (macOS, Linux), unlike httpbin.org-style
-// external-network tests which stay in examples/, not here.
+// external-network tests which stay in examples/, not here. Expectations are
+// Node's output for the same programs.
 
 func TestE2EExecFileSyncCapturesStdout(t *testing.T) {
 	skipPOSIXToolsOnWindows(t, "/bin/echo absolute path")
-	assertOutput(t, `
+	assertOutputImports(t, `
+import { execFileSync } from 'child_process'
 const args: string[] = ["hello", "world"]
-const out: string = process.execFileSync("/bin/echo", args)
+const out: string = execFileSync("/bin/echo", args, { encoding: "utf8" })
 console.log(out)
-`, "hello world\n")
+`, "hello world")
 }
 
 func TestE2EExecFileSyncNoArgs(t *testing.T) {
 	skipPOSIXToolsOnWindows(t, "/bin/echo absolute path")
-	assertOutput(t, `
-const out: string = process.execFileSync("/bin/echo")
+	assertOutputImports(t, `
+import { execFileSync } from 'child_process'
+const out: string = execFileSync("/bin/echo", [], { encoding: "utf8" })
 console.log(out.length)
 `, "1")
 }
 
-// ADR-00589: the { cwd } option runs the child in a different directory.
 func TestE2EExecFileSyncCwd(t *testing.T) {
 	skipPOSIXToolsOnWindows(t, "pwd with cwd /")
-	assertOutput(t, `
-const out: string = process.execFileSync("pwd", [], { cwd: "/" })
+	assertOutputImports(t, `
+import { execFileSync } from 'child_process'
+const out: string = execFileSync("pwd", [], { cwd: "/", encoding: "utf8" })
 console.log(out.trim())
 `, "/")
 }
 
 func TestE2EExecFileSyncResolvesViaPath(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import { execFileSync } from 'child_process'
 const args: string[] = ["via", "path"]
-const out: string = process.execFileSync("echo", args)
+const out: string = execFileSync("echo", args, { encoding: "utf8" })
 console.log(out)
-`, "via path\n")
+`, "via path")
 }
 
 func TestE2EExecFileSyncDoesNotInvokeAShell(t *testing.T) {
 	skipPOSIXToolsOnWindows(t, "/bin/echo absolute path")
-	// Real execFileSync semantics: argv is passed straight to execvp, no
-	// shell involved — shell metacharacters must come back out verbatim,
-	// not get expanded/interpreted.
-	assertOutput(t, `
+	assertOutputImports(t, `
+import { execFileSync } from 'child_process'
 const args: string[] = ["$(echo pwned); ls"]
-const out: string = process.execFileSync("/bin/echo", args)
+const out: string = execFileSync("/bin/echo", args, { encoding: "utf8" })
 console.log(out)
-`, "$(echo pwned); ls\n")
+`, "$(echo pwned); ls")
 }
 
 func TestE2EExecFileSyncNonZeroExitThrows(t *testing.T) {
 	skipPOSIXToolsOnWindows(t, "/usr/bin/false absolute path")
-	assertOutput(t, `
+	assertOutputImports(t, `
+import { execFileSync } from 'child_process'
 try {
-    process.execFileSync("/usr/bin/false")
+    execFileSync("/usr/bin/false")
     console.log("should not print")
 } catch (e) {
-    console.log(e.message)
+    console.log((e as Error).message, (e as any).status)
 }
-`, "Command failed with exit code 1: /usr/bin/false")
+`, "Command failed: /usr/bin/false 1")
 }
 
 func TestE2EExecFileSyncSignalDeathThrows(t *testing.T) {
 	skipPOSIXToolsOnWindows(t, "/bin/sh killed by SIGKILL")
-	assertOutput(t, `
+	assertOutputImports(t, `
+import { execFileSync } from 'child_process'
 const args: string[] = ["-c", "kill -9 $$"]
 try {
-    process.execFileSync("/bin/sh", args)
+    execFileSync("/bin/sh", args)
     console.log("should not print")
 } catch (e) {
-    console.log(e.message)
+    console.log((e as Error).message, (e as any).signal)
 }
-`, "Command was terminated by signal 9: /bin/sh")
+`, "Command failed: /bin/sh -c kill -9 $$ SIGKILL")
 }
 
 func TestE2EExecFileSyncMissingBinaryThrows(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import { execFileSync } from 'child_process'
 try {
-    process.execFileSync("/no/such/binary/at/all")
+    execFileSync("/no/such/binary/at/all")
     console.log("should not print")
 } catch (e) {
-    console.log(e.message)
+    console.log((e as any).code)
 }
-`, "Command failed with exit code 127: /no/such/binary/at/all")
+`, "ENOENT")
 }
 
 func TestE2EExecFileSyncLargeOutputGrowsBuffer(t *testing.T) {
 	skipPOSIXToolsOnWindows(t, "/bin/sh for-loop with seq")
-	// Forces output past a single pipe read (and the growable buffer's
-	// initial capacity), exercising the realloc-doubling path.
-	assertOutput(t, `
+	assertOutputImports(t, `
+import { execFileSync } from 'child_process'
 const args: string[] = ["-c", "for i in $(seq 1 5000); do printf '0123456789'; done"]
-const out: string = process.execFileSync("/bin/sh", args)
+const out = execFileSync("/bin/sh", args)
 console.log(out.length)
 `, "50000")
-}
-
-func TestE2EExecFileSyncWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`process.execFileSync()`)
-	if err == nil {
-		t.Fatal("expected a compile error for process.execFileSync() with no arguments, got none")
-	}
-}
-
-func TestE2EExecFileSyncNonStringArrayArgsRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-const args: number[] = [1, 2, 3]
-process.execFileSync("/bin/echo", args)
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for process.execFileSync with a non-string[] args argument, got none")
-	}
 }
 
 // --- process.cwd/chdir/pid/platform/kill ---
@@ -240,7 +216,7 @@ try {
     process.chdir("/definitely/does/not/exist/kml-test-dir")
     console.log("should not print")
 } catch (e) {
-    console.log(e.message === "ENOENT: no such file or directory, chdir '/definitely/does/not/exist/kml-test-dir'" && (e as any).code === "ENOENT")
+    console.log((e as Error).message === "ENOENT: no such file or directory, chdir '/definitely/does/not/exist/kml-test-dir'" && (e as any).code === "ENOENT")
 }
 `, "true")
 }
@@ -314,7 +290,7 @@ try {
     process.kill(999999999, 0)
     console.log("should not print")
 } catch (e) {
-    console.log(e.message.startsWith("kill(pid=999999999, signal=0): "))
+    console.log((e as Error).message.startsWith("kill(pid=999999999, signal=0): "))
 }
 `, "true")
 }
@@ -347,7 +323,7 @@ try {
     process.kill(999999999, 'SIGTERM')
     console.log("should not print")
 } catch (e) {
-    console.log(e.message.startsWith("kill(pid=999999999, signal=15): "))
+    console.log((e as Error).message.startsWith("kill(pid=999999999, signal=15): "))
 }
 `, "true")
 }
@@ -360,7 +336,7 @@ for (const n of names) {
     process.kill(999999999, n)
     console.log("should not print")
   } catch (e) {
-    console.log(e.message.split(":")[0])
+    console.log((e as Error).message.split(":")[0])
   }
 }
 `, "kill(pid=999999999, signal=2)\nkill(pid=999999999, signal=9)")
@@ -494,8 +470,10 @@ console.log(typeof a === "bigint")
 // A missing env value is the null pointer that stands for undefined; comparing
 // it with a string used to dereference it (ADR-00724). JS semantics: equal only
 // to undefined/null, never to a string, and every ordering compare is false.
+// A JavaScript program (tsc rejects the number store and the
+// possibly-undefined reads), so the -compat=js lane.
 func TestE2EProcessEnvMissingCompare(t *testing.T) {
-	assertOutput(t, `
+	assertOutputCompatJS(t, `
 console.log("a" === process.env.KML_DEFINITELY_UNSET_VAR)
 console.log(process.env.KML_DEFINITELY_UNSET_VAR === "a")
 console.log(process.env.KML_DEFINITELY_UNSET_VAR !== "a")
@@ -520,9 +498,10 @@ console.log(process.env["KML_DYN"])
 
 // A written env var is inherited by a child process (the real use case).
 func TestE2EProcessEnvWriteInheritedByChild(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import { execFileSync } from 'child_process'
 process.env.KML_CHILD_SEES = "yes"
-const out = process.execFileSync("printenv", ["KML_CHILD_SEES"])
+const out = execFileSync("printenv", ["KML_CHILD_SEES"], { encoding: "utf8" })
 console.log(out.trim())
 `, "yes")
 }
@@ -714,13 +693,13 @@ console.log(process.argv[50] === "child");
 `, "undefined\ntrue\nnone\nfalse\nfalsy\nfalse")
 }
 
+// `process.env` is a `string | undefined` dictionary (TS2322 into a bare
+// string); `process.argv[2]` is a `string`, as tsc types an array element.
 func TestE2EStrictRejectsEnvIntoBareString(t *testing.T) {
-	for _, src := range []string{
-		`const p: string = process.env.PATH;`,
-		`const a: string = process.argv[2];`,
-	} {
-		if _, err := parseAndCompile(src); err == nil {
-			t.Fatalf("expected a strict-mode compile error for: %s", src)
-		}
+	if _, err := parseAndCompile(`const p: string = process.env.PATH;`); err == nil || !strings.Contains(err.Error(), "not assignable") {
+		t.Fatalf("expected TS2322, got %v", err)
+	}
+	if _, err := parseAndCompile(`const a: string = process.argv[2];`); err != nil {
+		t.Fatalf("process.argv[2] is a string: %v", err)
 	}
 }

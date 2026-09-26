@@ -54,10 +54,10 @@
             "caveats": []
           },
           {
-            "feature": "Reading stdin (sync line read)",
+            "feature": "Reading stdin synchronously (`fs.readFileSync(0)`)",
             "status": "implemented",
             "notes": [
-              "`process.readLineSync()` — one line via POSIX `getline()` (handles arbitrarily long lines), stripped of its trailing `\\n`/`\\r\\n`. Returns `null` at EOF (same possibly-null convention as `process.env`). See [ADR-00024](../adr/ADR-00024.md)."
+              "`readFileSync(0, 'utf8')` reads all of stdin (fd 0) to its end, as in Node; a line-at-a-time read is the `readline` module below"
             ],
             "caveats": []
           },
@@ -68,18 +68,6 @@
               "See [FILE-SYSTEM.md](FILE-SYSTEM.md)"
             ],
             "caveats": []
-          },
-          {
-            "feature": "`process.execFileSync(file, args?, options?)`",
-            "status": "implemented",
-            "caveats": [
-              "Options support only `{ cwd, encoding: 'utf8' }` ([ADR-00589](../adr/ADR-00589.md)) — `cwd` chdir's the child before exec; `env`/`timeout`/`stdio` overrides are still deferred",
-              "stderr is inherited (visible on the terminal live), not captured"
-            ],
-            "notes": [
-              "Node's `child_process.execFileSync`, not `execSync`: `fork()`+`execvp()`s `file` directly with no shell involved, so shell metacharacters in `args` are never interpreted",
-              "Returns captured stdout as a string; throws a catchable `Error` on a non-zero exit status or a signal death. See [ADR-00025](../adr/ADR-00025.md)."
-            ]
           },
           {
             "feature": "`process.cwd()`",
@@ -169,9 +157,12 @@
             "feature": "`process.stdout.columns` / `.rows` (terminal size)",
             "status": "implemented",
             "notes": [
-              "`number \\| undefined` — off a non-TTY (piped/redirected) the value is a real `undefined`, matching Node ([TDD-00187](../tdd/TDD-00187.md) Stage 4, [ADR-00781](../adr/ADR-00781.md)); `?? 80` is the idiomatic fallback, and strict mode requires narrowing/`??`/`!` before bare-number use",
+              "Off a non-TTY (piped/redirected) the value is a real `undefined`, matching Node ([TDD-00187](../tdd/TDD-00187.md) Stage 4, [ADR-00781](../adr/ADR-00781.md)), and arithmetic on it is `NaN`; `?? 80` is the idiomatic fallback. Typed `number`, as `@types/node` has it, so the strict lane accepts a bare use as tsc does ([ADR-01160](../adr/ADR-01160.md))",
               "A live `ioctl(TIOCGWINSZ)` read on each access (never cached, matching Node); pair with `process.on('SIGWINCH')` to repaint on resize",
               "Available on both `process.stdout` and `process.stderr`"
+            ],
+            "caveats": [
+              "Stored into a declared `number` binding off a TTY (`const c: number = process.stdout.columns`), the value reads `0`, not `undefined`"
             ]
           },
           {
@@ -316,7 +307,7 @@
             ]
           },
           {
-            "feature": "`process.stdin` (streamed reads, not just `readLineSync()`)",
+            "feature": "`process.stdin` (streamed reads)",
             "status": "implemented",
             "caveats": [
               "`'data'` delivers each read chunk as a UTF-8 string, not a `Buffer` — `setEncoding('utf8')` is a faithful no-op but a non-utf8 encoding is rejected (no binary mode)",
@@ -324,7 +315,7 @@
               "One listener per event, arrow/function-expression literal only; callbacks fire synchronously from the dispatch, not via a microtask"
             ],
             "notes": [
-              "`process.stdin.on('data'/'end')` over a non-blocking fd 0 folded into the same `select()` loop as `readline`/`child_process` ([ADR-00339](../adr/ADR-00339.md)); `'data'` per read chunk, `'end'` once on EOF. Distinct from the blocking `process.readLineSync()` and the line-oriented `readline` module above",
+              "`process.stdin.on('data'/'end')` over a non-blocking fd 0 folded into the same `select()` loop as `readline`/`child_process` ([ADR-00339](../adr/ADR-00339.md)); `'data'` per read chunk, `'end'` once on EOF. Distinct from the blocking `fs.readFileSync(0)` and the line-oriented `readline` module above",
               "`setEncoding('utf8')` and the stream methods return the stream, so the idiomatic `process.stdin.setEncoding('utf8').on('data', …).on('end', …)` chain works ([ADR-00793](../adr/ADR-00793.md))"
             ]
           },
@@ -337,7 +328,7 @@
               "The `createInterface` options object is accepted but ignored — input is always stdin, output always stdout; one active interface at a time"
             ],
             "notes": [
-              "Non-blocking stdin (fd 0) folded into the same `select()` loop as `child_process` ([ADR-00323](../adr/ADR-00323.md)); emits one `'line'` per newline (CR stripped), flushes an unterminated final line on EOF then fires `'close'`. Distinct from the blocking `process.readLineSync()` above"
+              "Non-blocking stdin (fd 0) folded into the same `select()` loop as `child_process` ([ADR-00323](../adr/ADR-00323.md)); emits one `'line'` per newline (CR stripped), flushes an unterminated final line on EOF then fires `'close'`. Distinct from the blocking `fs.readFileSync(0)` above"
             ]
           },
           {
@@ -388,7 +379,7 @@
             "feature": "`child_process.spawnSync()` / `.execSync()` / `.execFileSync()` (blocking)",
             "status": "implemented",
             "caveats": [
-              "Results are strings (the `encoding: 'utf8'` shape), not Buffers; `encoding` accepts `'utf8'` only",
+              "`spawnSync`'s `stdout`/`stderr`/`output` are strings (the `encoding: 'utf8'` shape), not Buffers; `encoding` accepts `'utf8'` or `'buffer'` only",
               "`stdio`, `shell`, `killSignal`, `windowsHide` and `windowsVerbatimArguments` must be literals (they change what is emitted); `env` must be an object literal of string values; `uid`/`gid` are not supported",
               "An absent `stdout`/`stderr` (never started, or `stdio: 'inherit'`/`'ignore'`) stays typed `string`, as in Node's typings: read directly it is `undefined`/`null` and a method call on it throws Node's `TypeError` ([ADR-01081](../adr/ADR-01081.md)), but once stored in a binding declared `string` the absence is lost (`=== undefined` is false, it prints `null`) — the general declared-slot gap an out-of-range array read shares"
             ],
@@ -397,7 +388,7 @@
               "Node's full options set ([ADR-01080](../adr/ADR-01080.md)): `cwd`, `env` (replaces the child's), `input` (a string or `Uint8Array` fed to stdin without blocking the drain), `argv0`, `stdio` (`'pipe'`/`'inherit'`/`'ignore'`, string or 3-element array), `timeout` + `killSignal` (the child is killed and `error.code` is `ETIMEDOUT`), `maxBuffer` (1 MiB default; overrun kills and gives `ENOBUFS`), `shell` (`true`, or a shell path — a `cmd`-shaped one takes `/d /s /c`, others `-c`; the args join the command with spaces), `windowsHide`, `windowsVerbatimArguments`",
               "`spawnSync` returns Node's `{ error?, status, signal, output, pid, stdout, stderr }` in that key order (`error` first when present, [ADR-01081](../adr/ADR-01081.md)): `status` is `number | null` (null on a signal death or a never-started child), `signal` the name or null, `output` `[null, stdout, stderr]` (null for a never-started child), and `error` an `Error` with `code`/`errno`/`syscall: 'spawnSync <file>'`/`path` for a failed spawn (`ENOENT` → `status: null`, `pid: 0`, `output: null`, `stdout`/`stderr` `undefined`, as Node) or the timeout/maxBuffer kill",
               "`execSync`/`execFileSync` return stdout on success and throw otherwise ([ADR-00753](../adr/ADR-00753.md)): the spawn/timeout/maxBuffer error itself, or `Command failed: <command>` followed by the captured stderr on a non-zero exit — either way the thrown Error carries Node's ExecException own properties `status`, `signal`, `output`, `pid`, `stdout`, `stderr` (readable through `catch (e: any)`); without an explicit `stdio` the child's stderr is also mirrored to ours, as Node does ([ADR-01080](../adr/ADR-01080.md))",
-              "Distinct from the bespoke `process.execFileSync` above (which throws on failure and inherits stderr)"
+              "`execSync`/`execFileSync` return a `Buffer` of stdout without an encoding and a string with `encoding: 'utf8'`, as in Node; `execFileSync`'s failure message names the file and its arguments"
             ]
           }
         ]

@@ -103,7 +103,7 @@ func (e *Emitter) ensureWSClientRuntime() {
 
 	e.emitGlobal("declare i32 @inet_pton(i32 noundef, ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @connect(i32 noundef, ptr noundef, i32 noundef)")
-	if targetGOOS() != "darwin" {
+	if e.opts.Target.OS() != "darwin" {
 		e.ensureGetaddrinfo()
 	}
 
@@ -130,7 +130,7 @@ func (e *Emitter) ensureWSClientRuntime() {
 // emitWSClientConnect declares __kml_ws_client_connect — see this file's
 // own doc comment for the full design.
 func (e *Emitter) emitWSClientConnect() {
-	fam0, fam1 := httpSockaddrFamilyBytes()
+	fam0, fam1 := e.httpSockaddrFamilyBytes()
 
 	resolveIR := `
   %ptonrc = call i32 @inet_pton(i32 2, ptr %host, ptr %ipbuf)
@@ -138,7 +138,7 @@ func (e *Emitter) emitWSClientConnect() {
   br i1 %ptonok, label %haveaddr, label %tryresolve
 
 tryresolve:`
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		// Hostname resolution (getaddrinfo) is deliberately not attempted
 		// on Darwin yet: struct addrinfo's own layout (as opposed to
 		// sockaddr_in's, which IS POSIX-stable and already used elsewhere
@@ -167,7 +167,7 @@ tryresolve:`
 
 extractaddr:
   %res = load ptr, ptr %resslot, align 8
-  %ai_addr_p = getelementptr i8, ptr %res, i64 ` + fmt.Sprintf("%d", dnsAiAddrOffset()) + `
+  %ai_addr_p = getelementptr i8, ptr %res, i64 ` + fmt.Sprintf("%d", e.dnsAiAddrOffset()) + `
   %ai_addr = load ptr, ptr %ai_addr_p, align 8
   %sin_addr_p = getelementptr i8, ptr %ai_addr, i64 4
   call ptr @memcpy(ptr %ipbuf, ptr %sin_addr_p, i64 4)
@@ -397,7 +397,7 @@ func (e *Emitter) emitWSClientOpen() {
 	acceptHeaderName := "Sec-WebSocket-Accept:"
 	acceptHeaderNameRef := e.internString(acceptHeaderName)
 	acceptHeaderNameLen := len(acceptHeaderName)
-	nonblockFlag := httpNonblockFlag()
+	nonblockFlag := e.httpNonblockFlag()
 
 	closedEntryIR := func(uniq string) string {
 		entryReg := "%" + uniq + "entry"
@@ -836,9 +836,7 @@ scandone:
 		onerrorIdx,
 		e.wsClientCallCallback("fe", "%fe_onerror", emptyStr, "false", "null", "0"),
 		oncloseIdx,
-		e.wsClientCallCallback("co1", "%co1_onclose", emptyStr, "false", "null", "0"),
-		errnoAccessor(), httpEagainErrno(),
-		onmessageIdx,
+		e.wsClientCallCallback("co1", "%co1_onclose", emptyStr, "false", "null", "0"), e.errnoAccessor(), e.httpEagainErrno(), onmessageIdx,
 		e.wsClientCallCallback("dm", "%dm_onmsg", "%dstrbuf", "%disbinary", "%dstrbuf", "%dpayloadlen"),
 		e.wsClientCallCallback("co2", "%dc_onclose", emptyStr, "false", "null", "0"),
 	))

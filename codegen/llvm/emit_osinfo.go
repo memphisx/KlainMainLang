@@ -360,7 +360,7 @@ func (e *Emitter) emitOSCall(name string, args []ast.Expression, pos ast.Pos) (V
 		if len(args) != 0 {
 			return Value{}, true, fmt.Errorf("%d:%d: os.arch() takes no arguments", pos.Line, pos.Col)
 		}
-		return Value{Ref: e.internString(nodeArchName()), Ty: TypePtr}, true, nil
+		return Value{Ref: e.internString(e.nodeArchName()), Ty: TypePtr}, true, nil
 	case "endianness":
 		if len(args) != 0 {
 			return Value{}, true, fmt.Errorf("%d:%d: os.endianness() takes no arguments", pos.Line, pos.Col)
@@ -368,7 +368,7 @@ func (e *Emitter) emitOSCall(name string, args []ast.Expression, pos ast.Pos) (V
 		// Every host this compiler targets (x86-64, arm64, …) is little-endian;
 		// s390x/ppc64 (big-endian) are the only Go targets that differ.
 		end := "LE"
-		if arch := targetGOARCH(); arch == "s390x" || arch == "ppc64" || arch == "mips" || arch == "mips64" {
+		if arch := e.opts.Target.Arch(); arch == "s390x" || arch == "ppc64" || arch == "mips" || arch == "mips64" {
 			end = "BE"
 		}
 		return Value{Ref: e.internString(end), Ty: TypePtr}, true, nil
@@ -392,8 +392,8 @@ func (e *Emitter) emitOSCall(name string, args []ast.Expression, pos ast.Pos) (V
 }
 
 // osDevNull is os.devNull for the build host.
-func osDevNull() string {
-	if targetGOOS() == "windows" {
+func (e *Emitter) osDevNull() string {
+	if e.opts.Target.OS() == "windows" {
 		return `\\.\nul`
 	}
 	return "/dev/null"

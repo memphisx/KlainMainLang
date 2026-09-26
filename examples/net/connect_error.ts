@@ -13,7 +13,13 @@ sock.on('connect', () => {
   console.log("connected (unexpected for a refused port)");
 });
 
-sock.on('error', (err) => {
+// A system error: NodeJS.ErrnoException plus the address it failed on.
+interface ConnectError extends NodeJS.ErrnoException {
+  address?: string;
+  port?: number;
+}
+
+sock.on('error', (err: ConnectError) => {
   // err carries Node's full connect-error surface.
   console.log("error.code:", err.code);          // ECONNREFUSED
   console.log("error.syscall:", err.syscall);     // connect

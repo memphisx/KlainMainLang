@@ -7,6 +7,7 @@
 // asynchronously to resume it. The full 8 MiB body comes back intact across all
 // the false/'drain' cycles — proving the producer never stalls.
 import http from 'http';
+import type { AddressInfo } from 'net';
 
 const CHUNK = "0123456789ABCDEF".repeat(4096); // 64 KiB
 const TOTAL = 128; // 8 MiB
@@ -22,7 +23,7 @@ async function consume(port: number): Promise<void> {
   process.exit(0);
 }
 
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "application/octet-stream" });
   let n = 0;
   const pump = () => {
@@ -41,7 +42,7 @@ const server = http.createServer((req: IncomingMessage, res: ServerResponse) => 
 });
 
 server.listen(0, () => {
-  const port: number = server.address().port;
+  const port: number = (server.address() as AddressInfo).port;
   console.log("listening:", port > 0);
   setTimeout(() => { consume(port); }, 50);
 });

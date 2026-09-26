@@ -12,8 +12,8 @@ package llvm
 // Linux and 0x4 on macOS (both are the default there anyway — passed
 // explicitly so the emitted IR states the intended semantics). Windows's shim
 // ignores the flags (LoadLibrary has no lazy/global-scope knobs), so 0.
-func ffiRTLDFlags() int {
-	switch targetGOOS() {
+func (e *Emitter) ffiRTLDFlags() int {
+	switch e.opts.Target.OS() {
 	case "darwin":
 		return 0x2 | 0x4
 	case "windows":
@@ -30,7 +30,7 @@ func (e *Emitter) ensureFFIDl() {
 		return
 	}
 	e.usedFFIDl = true
-	if targetGOOS() == "linux" {
+	if e.opts.Target.OS() == "linux" {
 		e.requireLink("dl")
 	}
 	e.ensureStrHeaderRuntime() // __kml_str_from_cstr for dlerror()/string returns

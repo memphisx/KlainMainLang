@@ -11,7 +11,7 @@ import (
 // --- Node `cluster` (TDD-00105 / ADR-00331) ---
 //
 // cluster.fork() re-execs the program as a worker (KML_CLUSTER_WORKER_ID env);
-// cluster.isPrimary/isWorker/workerId read the seeded id. Workers each bind the
+// cluster.isPrimary/isWorker/worker read the seeded id. Workers each bind the
 // same port via SO_REUSEPORT. The Go test drives a clustered HTTP server; the
 // process-group cleanup helper (startHTTPClusterServer) reaps the forked
 // workers.
@@ -22,8 +22,8 @@ func TestE2EClusterSingleProcessIsPrimary(t *testing.T) {
 import cluster from 'cluster'
 console.log("isPrimary:", cluster.isPrimary)
 console.log("isWorker:", cluster.isWorker)
-console.log("workerId:", cluster.workerId)
-`, "isPrimary: true\nisWorker: false\nworkerId: 0")
+console.log("worker:", cluster.worker)
+`, "isPrimary: true\nisWorker: false\nworker: undefined")
 }
 
 // A clustered HTTP server: the primary forks workers, each re-execs and binds
@@ -37,7 +37,7 @@ if (cluster.isPrimary) {
   for (let i = 0; i < 3; i++) { cluster.fork() }
 } else {
   http.listen(8793, (req: HttpRequest): Res => {
-    return { status: 200, body: "served by worker " + cluster.workerId }
+    return { status: 200, body: "served by worker " + (cluster.worker?.id ?? 0) }
   })
 }
 `
@@ -70,7 +70,7 @@ if (cluster.isPrimary) {
   }))
   worker.on('exit', mustCall((code) => { console.log("worker exit: " + code) }))
 } else {
-  process.send("hi from worker " + cluster.workerId)
+  process.send("hi from worker " + cluster.worker!.id)
   process.on('message', (msg) => {
     if (msg === "shutdown") { process.exit(0) }
   })
@@ -192,5 +192,5 @@ if (cluster.isPrimary) {
   const server = http.createServer((req, res) => { res.end("hi") })
   server.listen(8153)
 }
-`, "settings --mode beta true\ncaptured argv --mode beta\nlistening 1 8153 0.0.0.0")
+`, "settings --mode beta true\ncaptured argv --mode beta\nlistening 1 8153 null")
 }

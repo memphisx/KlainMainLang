@@ -15,18 +15,19 @@ import (
 
 // A non-numeric, non-string index/count argument (e.g. a Symbol or object) has
 // no sound conversion to an integer slot — arrayIndexToI64 / the splice & search
-// numeric-arg sites now reject it cleanly instead of leaving a `ptr` where an
-// i64 is required (the A1 invalid-IR cluster; same fix as ADR-00882/00883). The
-// rejection matches tsc, which refuses a non-number index type.
+// numeric-arg sites reject it cleanly instead of leaving a `ptr` where an
+// i64 is required (the A1 invalid-IR cluster; same fix as ADR-00882/00883). A
+// Symbol argument to a builtin's number parameter is the checker's TS2345, as
+// tsc reports it; an object index is codegen's rejection.
 func TestE2EArrayNonNumericIndexRejected(t *testing.T) {
 	cases := []struct{ src, want string }{
-		{`const a=[1,2,3]; a.slice(Symbol("x"))`, "array index"},
-		{`const a=[1,2,3]; a.at(Symbol("x"))`, "array index"},
-		{`const a=[1,2,3]; a.fill(0, Symbol("x"))`, "array index"},
-		{`const a=[1,2,3]; a.copyWithin(Symbol("x"), 0)`, "array index"},
+		{`const a=[1,2,3]; a.slice(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`const a=[1,2,3]; a.at(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`const a=[1,2,3]; a.fill(0, Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`const a=[1,2,3]; a.copyWithin(Symbol("x"), 0)`, "argument of type 'symbol' is not assignable"},
 		{`const a=[1,2,3]; const o={v:1}; a[o]`, "array index"},
-		{`const a=[1,2,3]; a.splice(0, Symbol("x"))`, "splice deleteCount"},
-		{`const a=[1,2,3]; a.indexOf(1, Symbol("x"))`, "indexOf fromIndex"},
+		{`const a=[1,2,3]; a.splice(0, Symbol("x"))`, "argument of type 'symbol' is not assignable"},
+		{`const a=[1,2,3]; a.indexOf(1, Symbol("x"))`, "argument of type 'symbol' is not assignable"},
 	}
 	for _, c := range cases {
 		mustCompileError(t, c.src, c.want)

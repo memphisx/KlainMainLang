@@ -27,7 +27,8 @@
             "feature": "`setTimeout(fn, ms)` / `clearTimeout(id)`",
             "status": "implemented",
             "caveats": [
-              "Callback is restricted to a zero-argument, `void`-returning function — an arrow/function-expression closure, or a bare reference to a top-level named function ([ADR-00200](../adr/ADR-00200.md))"
+              "Callback is restricted to a zero-argument, `void`-returning function — an arrow/function-expression closure, or a bare reference to a top-level named function ([ADR-00200](../adr/ADR-00200.md))",
+              "The handle is the timer's numeric id, not Node's `Timeout` object: `typeof` reads `\"number\"`, and `ref`/`unref`/`hasRef`/`refresh`/`close` are compile errors"
             ],
             "notes": [
               "Bare global functions, matching real JS (not a namespace)",
@@ -51,7 +52,8 @@
             "feature": "`setImmediate(fn)` / `clearImmediate(id)`",
             "status": "implemented",
             "caveats": [
-              "Real Node guarantees `setImmediate` fires before a same-tick `setTimeout(fn, 0)` when scheduled from inside an I/O callback, because its event loop has distinct phases (check vs. timers); this compiler's `__kml_timer_drain` is a single flat fire-time-ordered queue with no phase concept, so the two are genuinely indistinguishable here (both fire at \"now\")"
+              "Real Node guarantees `setImmediate` fires before a same-tick `setTimeout(fn, 0)` when scheduled from inside an I/O callback, because its event loop has distinct phases (check vs. timers); this compiler's `__kml_timer_drain` is a single flat fire-time-ordered queue with no phase concept, so the two are genuinely indistinguishable here (both fire at \"now\")",
+              "The handle is the timer's numeric id, not Node's `Immediate` object: `typeof` reads `\"number\"`, and `ref`/`unref`/`hasRef` are compile errors"
             ],
             "notes": [
               "Reuses the exact same timer queue as delay-0 `setTimeout` (`clearImmediate` is `clearTimeout` under another name)",

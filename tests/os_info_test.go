@@ -80,8 +80,10 @@ console.log(Object.keys(process.env).includes("KML_ENUM_A"))
 `, "true true true\n2\n1 two 3\ntwo 1 undefined\nfalse")
 }
 
+// A JavaScript program (tsc rejects the number store and the
+// possibly-undefined reads), so the -compat=js lane.
 func TestE2EProcessEnvValuesAreStrings(t *testing.T) {
-	assertOutput(t, `
+	assertOutputCompatJS(t, `
 process.env.KML_ENUM_N = 42
 const env = process.env
 console.log(typeof env.KML_ENUM_N, env.KML_ENUM_N.length)

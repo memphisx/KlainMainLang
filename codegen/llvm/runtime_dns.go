@@ -19,11 +19,11 @@ import (
 // glibc order: flags,family,socktype,protocol,addrlen,ai_addr,... → 24.
 // Darwin order: ...,addrlen,ai_canonname,ai_addr,... (swapped) → 32. Both
 // verified via a compiled offsetof probe.
-func dnsAiAddrOffset() int {
-	if targetGOOS() == "windows" {
+func (e *Emitter) dnsAiAddrOffset() int {
+	if e.opts.Target.OS() == "windows" {
 		return 32 // ws2tcpip.h: ai_canonname precedes ai_addr, like Darwin
 	}
-	if targetGOOS() == "darwin" {
+	if e.opts.Target.OS() == "darwin" {
 		return 32
 	}
 	return 24
@@ -54,7 +54,7 @@ func (e *Emitter) ensureDNSRuntime() {
 
 	e.ensureGetaddrinfo()
 
-	aiAddr := dnsAiAddrOffset()
+	aiAddr := e.dnsAiAddrOffset()
 	fmtIP := e.internString("%u.%u.%u.%u")
 
 	// @__kml_dns_lookup(host): getaddrinfo(host, NULL, {AF_INET, SOCK_STREAM}),

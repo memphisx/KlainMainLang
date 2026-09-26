@@ -4,7 +4,7 @@ import "testing"
 
 // --- `&&`/`||` value-preserving under -compat=js (TDD-00075/ADR-00220):
 // `a && b` yields `b` or the falsy `a`; `a || b` yields `a` or `b` — the actual
-// operand values, not a bool. Under -compat=strict (default) they stay bool. ---
+// operand values, not a bool — in both lanes (ADR-01169). ---
 
 func TestE2ELogicalValuePreservingCompatJS(t *testing.T) {
 	assertOutputCompatJS(t, `
@@ -20,13 +20,13 @@ console.log(true && false)
 `, "3\n7\n5\n0\nfallback\nworld\n30\nfalse")
 }
 
-func TestE2ELogicalStayBoolStrict(t *testing.T) {
-	// -compat=strict (default) is unchanged: `&&`/`||` yield a bool (ADR-00186).
+func TestE2ELogicalValuePreservingStrict(t *testing.T) {
+	// -compat=strict (default) keeps the operand too, as TypeScript types it.
 	assertOutput(t, `
 console.log(5 && 3)
 console.log(0 || 7)
 console.log(true && false)
-`, "true\ntrue\nfalse")
+`, "3\n7\nfalse")
 }
 
 // Operands of different kinds (ADR-01054): the result is their union `L | R`

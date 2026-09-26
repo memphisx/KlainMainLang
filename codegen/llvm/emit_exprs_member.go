@@ -32,6 +32,30 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, objVal.Ref))
 		return e.wrapUndefinedable(e.countToNumber(Value{Ref: lenReg, Ty: TypeI64}), present), nil
 	}
+	if isUnconstrainedDynamic(objVal.Ty) && objVal.Ty.DynPropTy == nil {
+		// `x?.p` on an `any`: undefined where x holds null or undefined.
+		tag, _ := e.emitUnboxTagPayload(objVal)
+		isNull, isUndef, nullish := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNull, tag, kmlTagNull))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", nullish, isNull, isUndef))
+		res := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", res))
+		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, res))
+		getL, doneL := e.freshLabel("optany.get"), e.freshLabel("optany.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", nullish, doneL, getL))
+		e.emitLabel(getL)
+		v, err := e.emitDynAnyMemberGetNamed(objVal, e.internString(ex.Property), ex.Property, ex.GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v.Ref, res))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, res))
+		return Value{Ref: r, Ty: TypeAny}, nil
+	}
 	if objVal.Ty.IR != "ptr" || objVal.Ty.IsArray {
 		plain := &ast.MemberExpression{Object: ex.Object, Property: ex.Property}
 		return e.emitMemberUnguarded(plain)
@@ -43,6 +67,10 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 	// Field, so FieldIndex would otherwise report "no field" for it.
 	var resultTy Type
 	isAccessor := false
+	// viaMember is the plain access the non-null branch emits for a handle
+	// whose members are dispatched rather than stored as fields (a cluster
+	// Worker's `.id`): the checked object bound to a temporary.
+	var viaMember *ast.MemberExpression
 	if ex.Property == "length" && !objVal.Ty.IsObject {
 		resultTy = TypeI64
 	} else if objVal.Ty.IsClass {
@@ -57,17 +85,26 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 			if !ok {
 				return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
 			}
-			if err := e.checkFieldVisibility(objVal.Ty.ClassName, ex.Property, ex.GetPos()); err != nil {
-				return Value{}, err
-			}
 			resultTy = e.canonicalizeClassTy(fieldTy)
 		}
 	} else if objVal.Ty.IsObject {
-		_, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property)
-		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
+		if _, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property); ok {
+			resultTy = e.canonicalizeClassTy(fieldTy)
+		} else {
+			recvTy := objVal.Ty
+			recvTy.Nullable, recvTy.IsUndefined = false, false
+			name := fmt.Sprintf("__kml_optrecv_%d", e.optRecvCtr)
+			e.optRecvCtr++
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", objVal.Ref, slot))
+			e.define(name, Symbol{Ptr: slot, Ty: recvTy})
+			viaMember = ast.NewMemberExpression(ast.NewIdentifier(name, ex.GetPos()), ex.Property, ex.GetPos())
+			resultTy = e.inferExprType(viaMember)
+			if resultTy.IR == "" || resultTy.IR == "void" {
+				return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
+			}
 		}
-		resultTy = e.canonicalizeClassTy(fieldTy)
 	} else {
 		return Value{}, fmt.Errorf("%d:%d: optional chaining '?.' does not support property '%s' on type %s",
 			ex.GetPos().Line, ex.GetPos().Col, ex.Property, objVal.Ty.IR)
@@ -122,7 +159,13 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 	// non-null branch: perform the property access on objVal
 	e.emitLabel(noNullL)
 	var propVal Value
-	if ex.Property == "length" {
+	if viaMember != nil {
+		v, err := e.emitMemberUnguarded(viaMember)
+		if err != nil {
+			return Value{}, err
+		}
+		propVal = v
+	} else if ex.Property == "length" {
 		e.ensureStrlen()
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", r, objVal.Ref))
@@ -149,7 +192,8 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 	}
 	propVal = e.coerce(propVal, resultTy)
 	presentRef := propVal.Ref
-	if isNullableScalar(undefTy) {
+	if isNullableScalar(undefTy) && !isNullableScalar(resultTy) {
+		// (An optional field's value is already the { i1, T } aggregate.)
 		presentRef = e.makeNullableScalarAgg(undefTy, "true", propVal.Ref)
 	}
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, presentRef, resPtr, undefTy.Align()))
@@ -351,7 +395,7 @@ func (e *Emitter) emitIndexRead(ex *ast.IndexExpression) (Value, error) {
 // emitIndexBase evaluates the array and index operands of `a[i]`, returning the
 // backing-buffer pointer, the length, the index as an i64 and the element type.
 func (e *Emitter) emitIndexBase(ex *ast.IndexExpression) (dataPtrReg, lenReg, idxRef string, elemTy Type, err error) {
-	if id, ok := ex.Object.(*ast.Identifier); ok {
+	if id, ok := ex.Object.(*ast.Identifier); ok && !e.isDynamicBinding(id.Name) {
 		sym, ok := e.lookup(id.Name)
 		if !ok {
 			return "", "", "", TypeVoid, fmt.Errorf("%d:%d: undefined variable '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name)
@@ -644,15 +688,32 @@ func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 				return Value{}, fmt.Errorf("%d:%d: a Map<string, …> bracket index must be a string", ex.GetPos().Line, ex.GetPos().Col)
 			}
 		}
+		e.ensureMapStrHelpers()
 		raw := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", raw, objVal.Ref, keyVal.Ref))
 		valTy := TypePtr
 		if objTy.MapVal != nil {
 			valTy = *objTy.MapVal
 		}
+		if valTy.IsArray {
+			// The slot holds the array's shared header (null on a miss).
+			v := e.mapValFromI64(raw, valTy)
+			v.Ty.Nullable = true
+			if ft, ok := dictFieldType(objTy, ex.Index); ok {
+				return e.coerce(v, ft), nil
+			}
+			return v, nil
+		}
 		if valTy.IR == "ptr" {
 			p := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, raw))
+			if ft, ok := dictFieldType(objTy, ex.Index); ok {
+				return e.coerce(Value{Ref: p, Ty: valTy}, ft), nil
+			}
+			if dictMissReadsUndefined(valTy) {
+				// A missing key is undefined: the null pointer, typed so.
+				return Value{Ref: p, Ty: indexReadType(valTy)}, nil
+			}
 			return Value{Ref: p, Ty: valTy}, nil
 		}
 		if valTy.IR == "double" {
@@ -660,7 +721,29 @@ func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 			// i64 slot — reinterpret, never numerically convert.
 			d := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", d, raw))
+			if ft, ok := dictFieldType(objTy, ex.Index); ok {
+				return e.coerce(Value{Ref: d, Ty: valTy}, ft), nil
+			}
+			if dictMissReadsUndefined(valTy) {
+				// A missing key is undefined: { present, value }.
+				has := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", has, objVal.Ref, keyVal.Ref))
+				nt := indexReadType(valTy)
+				return Value{Ref: e.makeNullableScalarAgg(nt, has, d), Ty: nt}, nil
+			}
 			return Value{Ref: d, Ty: valTy}, nil
+		}
+		if valTy.IsDynamic {
+			// The slot holds the box itself; a missing key is undefined.
+			has := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", has, objVal.Ref, keyVal.Ref))
+			sel := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", sel, has, raw, nbUndefined))
+			v := Value{Ref: sel, Ty: valTy}
+			if ft, ok := dictFieldType(objTy, ex.Index); ok {
+				return e.coerce(v, ft), nil
+			}
+			return v, nil
 		}
 		out := e.coerce(Value{Ref: raw, Ty: TypeI64}, valTy)
 		return out, nil
@@ -694,7 +777,11 @@ func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		return e.emitDynAnyMemberGet(objVal, keyRef, ex.GetPos())
+		v, err := e.emitDynAnyMemberGet(objVal, keyRef, ex.GetPos())
+		if err != nil || baseTy.DynPropTy == nil {
+			return v, err
+		}
+		return e.coerce(v, *baseTy.DynPropTy), nil
 	}
 	// String indexing: s[i] returns a single-character string.
 	if id, ok := ex.Object.(*ast.Identifier); ok {
@@ -702,6 +789,17 @@ func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 			strPtr := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", strPtr, sym.Ptr))
 			return e.emitStringCharAt(strPtr, ex.Index)
+		}
+	}
+	// Any other string-typed base (`s![i]`, `o.name[i]`, `f()[i]`) indexes
+	// the same way.
+	if _, isID := ex.Object.(*ast.Identifier); !isID {
+		if objTy := e.inferExprType(ex.Object); isPlainStringType(objTy) {
+			strVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitStringCharAt(strVal.Ref, ex.Index)
 		}
 	}
 	// Tuple constant-index access: t[0] -> field "0" (TDD-00066). A tuple is a
@@ -729,11 +827,6 @@ func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 			idx, fieldTy, found := objVal.Ty.FieldIndex(key)
 			if !found {
 				return Value{}, fmt.Errorf("%d:%d: object has no field '%s'", ex.GetPos().Line, ex.GetPos().Col, key)
-			}
-			if objVal.Ty.IsClass {
-				if err := e.checkFieldVisibility(objVal.Ty.ClassName, key, ex.GetPos()); err != nil {
-					return Value{}, err
-				}
 			}
 			gepReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
@@ -792,6 +885,18 @@ func (e *Emitter) unwrapGlobalThis(expr ast.Expression) ast.Expression {
 }
 
 func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
+	v, err := e.emitMemberRaw(ex)
+	if err != nil || !v.Ty.IsDynamic || len(v.Ty.UnionMembers) == 0 {
+		return v, err
+	}
+	// A union-typed property read the checker narrows reads as that member.
+	if nt, ok := e.checkerNarrowedUnion(ex, v.Ty); ok {
+		return e.coerce(v, nt), nil
+	}
+	return v, nil
+}
+
+func (e *Emitter) emitMemberRaw(ex *ast.MemberExpression) (Value, error) {
 	if unwrapped := e.unwrapGlobalThis(ex); unwrapped != ast.Expression(ex) {
 		return e.emitExpr(unwrapped)
 	}
@@ -816,6 +921,46 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	// desugared name.
 	if bare := e.stripNSTypeQualifier(ex.Object); bare != nil {
 		return e.emitMember(&ast.MemberExpression{Object: bare, Property: ex.Property})
+	}
+	// `Object.prototype`: the shared null-prototype bag every ordinary
+	// object's [[Prototype]] reads as (TDD-00229).
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Object" && ex.Property == "prototype" && !e.isShadowedByLocal("Object") {
+		e.ensureDynObj()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_object_prototype()", r))
+		return e.emitDynObjBox(r), nil
+	}
+	// A function value's `name` / `length` (TDD-00229): read from the
+	// code-pointer metadata table.
+	if ex.Property == "name" || ex.Property == "length" {
+		if ot := e.inferExprType(ex.Object); ot.IsFFIFunction {
+			fv, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			e.ensureFnMeta()
+			r := e.freshReg()
+			if ex.Property == "name" {
+				e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fn_name_dyn(ptr %s)", r, fv.Ref))
+				return Value{Ref: r, Ty: TypePtr}, nil
+			}
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_fn_length_dyn(ptr %s)", r, fv.Ref))
+			return e.countToNumber(Value{Ref: r, Ty: TypeI64}), nil
+		}
+		if ot := e.inferExprType(ex.Object); ot.IsFunc {
+			fv, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			e.ensureFnMeta()
+			r := e.freshReg()
+			if ex.Property == "name" {
+				e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fn_name_hdr(ptr %s)", r, fv.Ref))
+				return Value{Ref: r, Ty: TypePtr}, nil
+			}
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_fn_length_hdr(ptr %s)", r, fv.Ref))
+			return e.countToNumber(Value{Ref: r, Ty: TypeI64}), nil
+		}
 	}
 	// http2.constants members are compile-time literals (TDD-00139 Stage 4);
 	// `http2.constants` itself binds as a flagged namespace value.
@@ -1010,9 +1155,9 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 		case "pid":
 			return e.emitProcessPid()
 		case "platform":
-			return Value{Ref: e.internString(nodePlatformName()), Ty: TypePtr}, nil
+			return Value{Ref: e.internString(e.nodePlatformName()), Ty: TypePtr}, nil
 		case "arch":
-			return Value{Ref: e.internString(nodeArchName()), Ty: TypePtr}, nil
+			return Value{Ref: e.internString(e.nodeArchName()), Ty: TypePtr}, nil
 		case "execPath":
 			return e.emitProcessExecPath()
 		case "version":
@@ -1053,8 +1198,8 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			return e.emitClusterIsPrimary()
 		case "isWorker":
 			return e.emitClusterIsWorker()
-		case "workerId":
-			return e.emitClusterWorkerID()
+		case "worker":
+			return e.emitClusterSelfWorker()
 		case "workers":
 			return e.emitClusterWorkers()
 		case "settings":
@@ -1066,7 +1211,7 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	}
 	// path.sep / path.delimiter per flavour (TDD-00178): the host's for a
 	// bare `path`, or the one `path.posix` / `path.win32` names.
-	if pf, ok := pathFlavorOf(ex.Object); ok {
+	if pf, ok := e.pathFlavorOf(ex.Object); ok {
 		switch ex.Property {
 		case "sep":
 			return Value{Ref: e.internString(pathFlavorSep(pf)), Ty: TypePtr}, nil
@@ -1078,7 +1223,7 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	// shared-library filename suffix; ffi.types.X are the type-name strings.
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "ffi__kml_builtin" {
 		if ex.Property == "suffix" {
-			return Value{Ref: e.internString(ffiSuffix()), Ty: TypePtr}, nil
+			return Value{Ref: e.internString(e.ffiSuffix()), Ty: TypePtr}, nil
 		}
 	}
 	if inner, ok := ex.Object.(*ast.MemberExpression); ok && inner.Property == "types" {
@@ -1104,7 +1249,14 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
-			return e.ffiPtrToBigInt(fv.Ref), nil
+			// record → env (the registry entry) → its C address.
+			ep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", ep, fv.Ref))
+			fn := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fn, ep))
+			cfn := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cfn, fn))
+			return e.ffiPtrToBigInt(cfn), nil
 		}
 	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "test__kml_builtin" {
@@ -1112,11 +1264,11 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 		// compile host; hasCrypto/hasIntl reflect the built-in surface.
 		switch ex.Property {
 		case "isWindows":
-			return Value{Ref: testHostBool(targetGOOS() == "windows"), Ty: TypeBool}, nil
+			return Value{Ref: testHostBool(e.opts.Target.OS() == "windows"), Ty: TypeBool}, nil
 		case "isLinux":
-			return Value{Ref: testHostBool(targetGOOS() == "linux"), Ty: TypeBool}, nil
+			return Value{Ref: testHostBool(e.opts.Target.OS() == "linux"), Ty: TypeBool}, nil
 		case "isMacOS":
-			return Value{Ref: testHostBool(targetGOOS() == "darwin"), Ty: TypeBool}, nil
+			return Value{Ref: testHostBool(e.opts.Target.OS() == "darwin"), Ty: TypeBool}, nil
 		case "hasCrypto":
 			return Value{Ref: "1", Ty: TypeBool}, nil
 		case "hasIntl":
@@ -1130,12 +1282,12 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 		case "EOL":
 			// "\r\n" on Windows, "\n" elsewhere — a compile-time constant like
 			// process.platform (TDD-00177 Stage 1).
-			if targetGOOS() == "windows" {
+			if e.opts.Target.OS() == "windows" {
 				return Value{Ref: e.internString("\r\n"), Ty: TypePtr}, nil
 			}
 			return Value{Ref: e.internString("\n"), Ty: TypePtr}, nil
 		case "devNull":
-			return Value{Ref: e.internString(osDevNull()), Ty: TypePtr}, nil
+			return Value{Ref: e.internString(e.osDevNull()), Ty: TypePtr}, nil
 		}
 	}
 	// Bare `process.env` (not a keyed read): the enumerable environment object.
@@ -1351,7 +1503,7 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			return e.countToNumber(bl), nil
 		}
 	}
-	if ex.Property == "length" {
+	if ex.Property == "length" && !hasLengthField(e.inferExprType(ex.Object)) {
 		// Named array variable: load length from its LenPtr alloca.
 		if id, ok := ex.Object.(*ast.Identifier); ok {
 			if sym, found := e.lookup(id.Name); found {
@@ -1394,6 +1546,15 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 		// (TDD-00155 Stage 2), a boxed string/primitive per the Stage-1 rules.
 		if isUnconstrainedDynamic(objVal.Ty) {
 			return e.emitDynAnyMemberGetNamed(objVal, e.internString("length"), "length", ex.GetPos())
+		}
+		// A union of strings and arrays (`string | string[]`): its box answers
+		// at run time, a number.
+		if objVal.Ty.IsDynamic && unionAllHaveLength(objVal.Ty) {
+			n, err := e.emitDynAnyMemberGetNamed(Value{Ref: objVal.Ref, Ty: TypeAny}, e.internString("length"), "length", ex.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			return e.coerce(n, TypeF64), nil
 		}
 		return Value{}, fmt.Errorf("%d:%d: .length is only supported on arrays and strings", ex.GetPos().Line, ex.GetPos().Col)
 	}
@@ -1444,6 +1605,9 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", val, objptr))
 			return Value{Ref: val, Ty: dTy}, nil
 		}
+		if v, ok, err := e.emitUnionSoleObjectMemberRead(objVal, ex.Property, ex.GetPos()); ok || err != nil {
+			return v, err
+		}
 		return Value{}, fmt.Errorf("%d:%d: '%s' can't be read on an un-narrowed union — narrow it first (e.g. `if (x.%s === ...)` or `typeof`)", ex.GetPos().Line, ex.GetPos().Col, ex.Property, ex.Property)
 	}
 	// A property read on a caught value (TypeCaught ≈ `unknown`, TDD-00202):
@@ -1455,7 +1619,12 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	// A property read on a bare any/unknown value is a runtime tag dispatch
 	// into the D1 dynamic object model (TDD-00155 Stage 1).
 	if isUnconstrainedDynamic(objVal.Ty) {
-		return e.emitDynAnyMemberGetNamed(objVal, e.internString(ex.Property), ex.Property, ex.GetPos())
+		v, err := e.emitDynAnyMemberGetNamed(objVal, e.internString(ex.Property), ex.Property, ex.GetPos())
+		if err != nil || objVal.Ty.DynPropTy == nil {
+			return v, err
+		}
+		// An index-signature view (DynPropTy): the read has the declared type.
+		return e.coerce(v, *objVal.Ty.DynPropTy), nil
 	}
 	if !objVal.Ty.IsObject {
 		return Value{}, fmt.Errorf("%d:%d: field access on non-object (no field '%s')", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
@@ -1479,14 +1648,19 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			return e.emitClassCall(objVal.Ty, objVal, accessorMethodName("get", ex.Property), nil, ex.GetPos(), false)
 		}
 	}
+	// A class or interface type captured before its fields were registered
+	// (a type alias's function type naming it): its live shape.
+	if len(objVal.Ty.Fields) == 0 {
+		objVal.Ty = e.canonicalizeClassTy(objVal.Ty)
+	}
 	idx, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property)
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
-	}
-	if objVal.Ty.IsClass {
-		if err := e.checkFieldVisibility(objVal.Ty.ClassName, ex.Property, ex.GetPos()); err != nil {
-			return Value{}, err
+		if objVal.Ty.IsClass {
+			if v, ok := e.optionalMethodPresence(objVal, ex.Property); ok {
+				return v, nil
+			}
 		}
+		return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
 	}
 	fieldTy = e.canonicalizeClassTy(fieldTy)
 	gepReg := e.freshReg()
@@ -1499,5 +1673,106 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	}
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
+	if e.isErrorOptionalNumber(objVal.Ty, ex.Property) {
+		present := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fcmp une double %s, 0.0", present, result))
+		return e.wrapUndefinedable(Value{Ref: result, Ty: fieldTy}, present), nil
+	}
 	return Value{Ref: result, Ty: fieldTy}, nil
+}
+
+// isErrorOptionalNumber is errorOptionalNumber for a builtin error value.
+func (e *Emitter) isErrorOptionalNumber(objTy Type, name string) bool {
+	return objTy.IsError && !objTy.IsClass && errorOptionalNumber(objTy, name)
+}
+
+// hasLengthField reports whether t is an object or class instance declaring
+// its own `length` field, which `.length` then reads like any other field.
+func hasLengthField(t Type) bool {
+	if !t.IsObject || t.IsArray || t.IsTuple {
+		return false
+	}
+	_, _, ok := t.FieldIndex("length")
+	return ok
+}
+
+// unionAllHaveLength reports whether every member of the union u is a string
+// or an array.
+func unionAllHaveLength(u Type) bool {
+	if len(u.UnionMembers) == 0 {
+		return false
+	}
+	for _, m := range u.UnionMembers {
+		if !m.IsArray && !(isForOfStringTy(m) && !m.IsClass) {
+			return false
+		}
+	}
+	return true
+}
+
+// emitUnionSoleObjectMemberRead reads a property of a union whose one object
+// member declares it (`server.address().port` on `AddressInfo | string |
+// null`, JavaScript's read): the member's field when the box holds an object,
+// JavaScript's TypeError on null or undefined, else the primitive's property
+// (undefined for most). The result is any.
+func (e *Emitter) emitUnionSoleObjectMemberRead(u Value, prop string, pos ast.Pos) (Value, bool, error) {
+	var obj Type
+	n := 0
+	for _, m := range u.Ty.UnionMembers {
+		if unionMemberTag(m) == "object" {
+			obj = m
+			n++
+		}
+	}
+	if n != 1 {
+		return Value{}, false, nil
+	}
+	obj = e.canonicalizeClassTy(obj)
+	idx, fty, ok := obj.FieldIndex(prop)
+	if !ok {
+		return Value{}, false, nil
+	}
+	tag, payload := e.emitUnboxTagPayload(Value{Ref: u.Ref, Ty: TypeAny})
+	res := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", res))
+	objL, restL, doneL := e.freshLabel("uread.obj"), e.freshLabel("uread.rest"), e.freshLabel("uread.done")
+	isObj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, objL, restL))
+	e.emitLabel(objL)
+	p := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, payload))
+	g := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, obj.StructIR(), p, idx))
+	fv := e.loadScalarOrNullableField(g, fty)
+	boxed, err := e.emitBoxValue(fv)
+	if err != nil {
+		return Value{}, true, err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, res))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(restL)
+	nullishL, primL := e.freshLabel("uread.nullish"), e.freshLabel("uread.prim")
+	isNull, isUndef, nullish := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNull, tag, kmlTagNull))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", nullish, isNull, isUndef))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", nullish, nullishL, primL))
+	e.emitLabel(nullishL)
+	nullMsg := e.internString("Cannot read properties of null (reading '" + prop + "')")
+	undefMsg := e.internString("Cannot read properties of undefined (reading '" + prop + "')")
+	msg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", msg, isNull, nullMsg, undefMsg))
+	e.emitThrowTypeErrorValue(msg)
+	e.emitLabel(primL)
+	pv, err := e.emitDynAnyMemberGetNamed(Value{Ref: u.Ref, Ty: TypeAny}, e.internString(prop), prop, pos)
+	if err != nil {
+		return Value{}, true, err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", pv.Ref, res))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, res))
+	return Value{Ref: out, Ty: TypeAny}, true, nil
 }

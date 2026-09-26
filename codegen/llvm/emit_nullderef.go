@@ -66,6 +66,39 @@ func (e *Emitter) ensureNullDerefThrow() {
 	e.emitGlobal(b.String())
 }
 
+// ensureRangeErrorThrow defines @__kml_throw_range_error(ptr msg): throw a
+// RangeError with the (headered) message — the C runtime's way to raise one
+// (string.c's "Invalid string length").
+func (e *Emitter) ensureRangeErrorThrow() {
+	if e.usedRangeErrorThrow {
+		return
+	}
+	e.usedRangeErrorThrow = true
+	e.ensureExceptionHelpers()
+	e.ensureMalloc()
+	e.ensureMemset()
+	sir := errorObjType.StructIR()
+	kindIdx, _, _ := errorObjType.FieldIndex("kind")
+	msgIdx, _, _ := errorObjType.FieldIndex("message")
+	nameIdx, _, _ := errorObjType.FieldIndex("name")
+	causeIdx, _, _ := errorObjType.FieldIndex("cause")
+	name := e.internString("RangeError")
+	var b strings.Builder
+	b.WriteString("define void @__kml_throw_range_error(ptr %msg) cold noreturn {\nentry:\n")
+	fmt.Fprintf(&b, "  %%o = call ptr @malloc(i64 %d)\n", errorObjType.StructSize())
+	fmt.Fprintf(&b, "  call ptr @memset(ptr %%o, i32 0, i64 %d)\n", errorObjType.StructSize())
+	fmt.Fprintf(&b, "  %%k = getelementptr %s, ptr %%o, i32 0, i32 %d\n", sir, kindIdx)
+	fmt.Fprintf(&b, "  store i64 %d, ptr %%k, align 8\n", errorTypeIDStored(errorKindIDs["RangeError"]))
+	fmt.Fprintf(&b, "  %%m = getelementptr %s, ptr %%o, i32 0, i32 %d\n", sir, msgIdx)
+	b.WriteString("  store ptr %msg, ptr %m, align 8\n")
+	fmt.Fprintf(&b, "  %%n = getelementptr %s, ptr %%o, i32 0, i32 %d\n", sir, nameIdx)
+	fmt.Fprintf(&b, "  store ptr %s, ptr %%n, align 8\n", name)
+	fmt.Fprintf(&b, "  %%c = getelementptr %s, ptr %%o, i32 0, i32 %d\n", sir, causeIdx)
+	fmt.Fprintf(&b, "  store i64 %d, ptr %%c, align 8\n", nbUndefined)
+	b.WriteString("  call void @__kml_throw(ptr %o)\n  unreachable\n}")
+	e.emitGlobal(b.String())
+}
+
 // derefGuardable reports whether an absent value of type ty is observable as a
 // null pointer / cleared presence flag that a member access would trip over.
 // A declared-nullable type always is: null *is* its absent state. A

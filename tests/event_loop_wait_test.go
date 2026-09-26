@@ -139,9 +139,10 @@ fetch("%s/slow").then((r) => r.text()).then((b: string) => { done(b) })
 func TestE2EFetchOwnServerFromCallback(t *testing.T) {
 	assertOutputImports(t, `
 import http from 'http'
+import type { AddressInfo } from 'net'
 const server = http.createServer((req, res) => { res.end('pong:' + req.url) })
 server.listen(0, () => {
-  const addr = server.address()
+  const addr = server.address() as AddressInfo
   fetch('http://127.0.0.1:' + addr.port + '/ping')
     .then((r) => r.text())
     .then((body: string) => { console.log(body); server.close() })

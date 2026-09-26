@@ -96,7 +96,7 @@ const r = bad.getReader();
 try {
   await r.read();
 } catch (e) {
-  console.log("caught:", e.message);
+  console.log("caught:", (e as Error).message);
 }
 `, "caught: boom")
 }
@@ -173,7 +173,7 @@ const r1 = rs.getReader();
 try {
   rs.getReader();
 } catch (e) {
-  console.log("locked:", e.message);
+  console.log("locked:", (e as Error).message);
 }
 `, "locked: ReadableStream is already locked to a reader")
 }
@@ -186,7 +186,7 @@ const rs = new ReadableStream<number>({
     try {
       c.enqueue(1);
     } catch (e) {
-      console.log("throws:", e.message);
+      console.log("throws:", (e as Error).message);
     }
   }
 });
@@ -284,12 +284,12 @@ const w = bad.getWriter();
 try {
   await w.write(1);
 } catch (e) {
-  console.log("write rejected:", e.message);
+  console.log("write rejected:", (e as Error).message);
 }
 try {
   await w.closed;
 } catch (e) {
-  console.log("closed rejected:", e.message);
+  console.log("closed rejected:", (e as Error).message);
 }
 `, "write rejected: sinkfail\nclosed rejected: sinkfail")
 }
@@ -402,7 +402,7 @@ const d1 = new WritableStream<number>({
 try {
   await badSrc.pipeTo(d1);
 } catch (e) {
-  console.log("pipe rejected:", e.message, "sinkAborted:", sinkAborted);
+  console.log("pipe rejected:", (e as Error).message, "sinkAborted:", sinkAborted);
 }
 let srcCancelled = false;
 const s2 = new ReadableStream<number>({
@@ -415,7 +415,7 @@ const badDst = new WritableStream<number>({
 try {
   await s2.pipeTo(badDst);
 } catch (e) {
-  console.log("pipe rejected:", e.message, "srcCancelled:", srcCancelled);
+  console.log("pipe rejected:", (e as Error).message, "srcCancelled:", srcCancelled);
 }
 let aborted2 = false;
 const badSrc2 = new ReadableStream<number>({
@@ -678,7 +678,7 @@ async function handle(req: HttpRequest): Promise<string> {
     const leftover = req.body;
     return "no-throw:" + leftover;
   } catch (e) {
-    return "threw:" + e.name;
+    return "threw:" + (e as Error).name;
   }
 }
 http.listen(18654, async (req: HttpRequest) => {
@@ -902,513 +902,6 @@ console.log("done");
 `, "small 1\ng 2\ndone")
 }
 
-// TDD-00097 Stage 8: Node's stream module.
-
-func TestE2ENodeStreamReadableWritableEvents(t *testing.T) {
-	assertOutputImports(t, `
-import { Readable, Writable } from 'stream';
-const r = new Readable<string>();
-r.on("data", (chunk) => { console.log("data:", chunk); });
-r.on("end", () => { console.log("end"); });
-r.push("alpha");
-r.push("beta");
-r.push(null);
-const w = new Writable<number>({ write: (n) => { console.log("sink:", n * 2); } });
-w.on("finish", () => { console.log("finished"); });
-w.write(1);
-w.end(3);
-setTimeout(() => { console.log("done"); }, 30);
-`, "sink: 2\nsink: 6\ndata: alpha\nfinished\ndata: beta\nend\ndone")
-}
-
-// Node writable.write(chunk[, encoding][, callback]) and end([chunk][,
-// encoding][, callback]) (ADR-00981): the trailing 'utf8' encoding is accepted,
-// and the completion callback fires (via the microtask queue) after the current
-// synchronous run, in write/end order.
-func TestE2ENodeStreamWriteEndCallbacks(t *testing.T) {
-	assertOutputImports(t, `
-import { Writable } from 'stream';
-const w = new Writable<string>({ write: (s) => {} });
-console.log("sync-start");
-w.write("a", "utf8", () => { console.log("cb-a"); });
-w.write("b", () => { console.log("cb-b"); });
-w.end("c", "utf8", () => { console.log("cb-end"); });
-console.log("sync-end");
-`, "sync-start\nsync-end\ncb-a\ncb-b\ncb-end")
-}
-
-// An options-form Writable whose sink takes Node's full write(chunk, encoding,
-// callback) signature (ADR-00982): the chunk is delivered, cb() runs, and the
-// write is treated as complete on return (V1). The one-parameter form still
-// works; a two-parameter shape is a clean rejection.
-func TestE2ENodeStreamOptionsFormThreeArgSink(t *testing.T) {
-	assertOutputImports(t, `
-import { Writable } from 'stream';
-const got: string[] = [];
-const w = new Writable<string>({
-  write: (chunk: string, enc: string, cb: () => void) => { got.push(chunk.toUpperCase()); cb(); }
-});
-w.on("finish", () => { console.log("finish: " + got.join(",")); });
-w.write("alpha");
-w.end("beta");
-`, "finish: ALPHA,BETA")
-}
-
-func TestE2ENodeStreamOptionsFormTwoArgSinkRejected(t *testing.T) {
-	_, err := parseAndCompileImports(t, `import { Writable } from 'stream';
-const w = new Writable<string>({ write: (chunk: string, enc: string) => {} });
-w.write("x");`)
-	if err == nil {
-		t.Fatal("expected an ambiguous two-parameter sink write callback to be rejected, got none")
-	}
-}
-
-// A non-utf8 encoding on write()/end() is a clean rejection.
-func TestE2ENodeStreamWriteBadEncodingRejected(t *testing.T) {
-	_, err := parseAndCompileImports(t, `import { Writable } from 'stream';
-const w = new Writable<string>({ write: (s) => {} });
-w.write("a", "latin1");`)
-	if err == nil {
-		t.Fatal("expected a non-utf8 write() encoding to be rejected, got none")
-	}
-}
-
-func TestE2ENodeStreamPipelineTransform(t *testing.T) {
-	assertOutputImports(t, `
-import { Readable, Writable, Transform } from 'stream';
-import { pipeline } from 'stream/promises';
-const src = new Readable<string>();
-src.push("hello");
-src.push("world");
-src.push(null);
-const upper = new Transform<string, string>({
-  transform: (chunk, ctrl) => { ctrl.enqueue(chunk.toUpperCase()); }
-});
-const collected: string[] = [];
-const sink = new Writable<string>({ write: (s) => { collected.push(s); } });
-await pipeline(src, upper, sink);
-console.log("pipeline:", collected.join(" "));
-`, "pipeline: HELLO WORLD")
-}
-
-func TestE2ENodeStreamPipeFromFinished(t *testing.T) {
-	assertOutputImports(t, `
-import { Readable, Writable } from 'stream';
-import { finished } from 'stream/promises';
-const src = Readable.from([10, 20, 30]);
-let sum = 0;
-const sink = new Writable<number>({ write: (n) => { sum = sum + n; } });
-src.pipe(sink);
-await finished(sink);
-console.log("sum:", sum);
-`, "sum: 60")
-}
-
-func TestE2ENodeStreamWebBridges(t *testing.T) {
-	assertOutputImports(t, `
-import { Readable } from 'stream';
-import { finished } from 'stream/promises';
-const webRs = new ReadableStream<string>({
-  start: (c) => { c.enqueue("bridged"); c.close(); }
-});
-const nodeR = Readable.fromWeb(webRs);
-nodeR.on("data", (s) => { console.log("from web:", s); });
-await finished(nodeR);
-const back = Readable.from(["to web"]).toWeb();
-for await (const s of back) { console.log("to web:", s); }
-`, "from web: bridged\nto web: to web")
-}
-
-func TestE2ENodeStreamErrorsPauseResumeOnce(t *testing.T) {
-	assertOutputImports(t, `
-import { Readable, Writable } from 'stream';
-import { pipeline } from 'stream/promises';
-const src = Readable.from([1, 2, 3]);
-const bad = new Writable<number>({
-  write: async (n) => { if (n === 2) { await Promise.resolve(); throw new Error("sink died"); } }
-});
-bad.on("error", (e) => { console.log("error event:", e.message); });
-try {
-  await pipeline(src, bad);
-} catch (e) {
-  console.log("pipeline rejected:", e.message);
-}
-const r2 = new Readable<number>();
-let seen = 0;
-r2.on("data", (n) => { seen = seen + 1; });
-r2.once("end", () => { console.log("once end, seen:", seen); });
-r2.push(1);
-r2.pause();
-r2.push(2);
-r2.resume();
-r2.push(3);
-r2.push(null);
-setTimeout(() => { console.log("done"); }, 30);
-`, "error event: sink died\npipeline rejected: sink died\nonce end, seen: 3\ndone")
-}
-
-func TestE2ENodeStreamReadCallbackPull(t *testing.T) {
-	assertOutputImports(t, `
-import { Readable } from 'stream';
-import { finished } from 'stream/promises';
-let n = 0;
-const r = new Readable<number>({
-  read: (self) => {
-    n = n + 1;
-    if (n > 3) { self.push(null); } else { self.push(n * 10); }
-  }
-});
-r.on("data", (v) => { console.log("v", v); });
-await finished(r);
-console.log("pulled", n, "times");
-`, "v 10\nv 20\nv 30\npulled 4 times")
-}
-
-// TDD-00132 Stage A/B: Node streams as real classes — `class X extends
-// Readable` with a `this`-based `_read()` override, and `class Y extends
-// Writable` with an `_write(chunk, enc, cb)` override.
-func TestE2ENodeStreamQualifiedNewReadable(t *testing.T) {
-	// `new stream.Readable(...)` — the qualified (namespace-import) constructor
-	// form Node code uses everywhere; parses and behaves exactly like the bare
-	// `new Readable(...)`.
-	assertOutputImports(t, `
-import stream from 'stream';
-let n: number = 0;
-const r = new stream.Readable<number>({
-  read: (self) => {
-    n = n + 1;
-    if (n > 2) { self.push(null); } else { self.push(n); }
-  }
-});
-r.on("data", (v) => { console.log("q", v); });
-r.on("end", () => { console.log("qdone"); });
-`, "q 1\nq 2\nqdone")
-}
-
-func TestE2ENodeStreamClassExtendsReadable(t *testing.T) {
-	assertOutputImports(t, `
-import { Readable } from 'stream';
-import { finished } from 'stream/promises';
-class Counter extends Readable<number> {
-  n: number = 0;
-  _read() {
-    this.n = this.n + 1;
-    if (this.n > 3) { this.push(null); } else { this.push(this.n * 10); }
-  }
-}
-const c = new Counter();
-c.on("data", (v) => { console.log("v", v); });
-await finished(c);
-console.log("done", c.n);
-`, "v 10\nv 20\nv 30\ndone 4")
-}
-
-func TestE2ENodeStreamClassExtendsWritable(t *testing.T) {
-	assertOutputImports(t, `
-import { Writable } from 'stream';
-class Collector extends Writable<string> {
-  items: string[] = [];
-  _write(chunk: string, enc: string, cb: () => void) {
-    this.items.push(chunk);
-    cb();
-  }
-}
-const sink = new Collector();
-sink.on("finish", () => { console.log("collected:", sink.items.join(",")); });
-sink.write("alpha");
-sink.write("beta");
-sink.end();
-`, "collected: alpha,beta")
-}
-
-// TDD-00132 Stage C1: `class X extends Duplex` — two independent sides on one
-// instance, a `_read()` push loop and a `_write(chunk)` sink, sharing the
-// hidden Node-stream handle. `<T>` names both the readable-out and writable-in
-// chunk type.
-func TestE2ENodeStreamClassExtendsDuplex(t *testing.T) {
-	assertOutputImports(t, `
-import { Duplex } from 'stream';
-import { finished } from 'stream/promises';
-class Echo extends Duplex<string> {
-  queue: string[] = ["one", "two", "three"];
-  i: number = 0;
-  received: string[] = [];
-  _read() {
-    if (this.i >= this.queue.length) { this.push(null); }
-    else { this.push(this.queue[this.i]); this.i = this.i + 1; }
-  }
-  _write(chunk: string, enc: string, cb: () => void) {
-    this.received.push(chunk);
-    cb();
-  }
-}
-const d = new Echo();
-const out: string[] = [];
-d.on("data", (c) => { out.push(c); });
-d.on("finish", () => { console.log("wrote:", d.received.join(",")); });
-d.write("alpha");
-d.write("beta");
-d.end();
-await finished(d);
-console.log("read:", out.join(" "));
-`, "wrote: alpha,beta\nread: one two three")
-}
-
-// TDD-00132 Stage C2: `class X extends Transform` — the writable sink routes
-// each chunk through a `_transform(chunk, enc, cb)` override whose `this.push`
-// feeds the readable side. Reuses the TransformStream TSCTX sink/pull machine.
-func TestE2ENodeStreamClassExtendsTransform(t *testing.T) {
-	assertOutputImports(t, `
-import { Transform } from 'stream';
-import { finished } from 'stream/promises';
-class Upper extends Transform<string> {
-  _transform(chunk: string, enc: string, cb: () => void) {
-    this.push(chunk.toUpperCase());
-    cb();
-  }
-}
-const up = new Upper();
-const out: string[] = [];
-up.on("data", (c) => { out.push(c); });
-up.write("kalimera");
-up.write("thessaloniki");
-up.end();
-await finished(up);
-console.log("out:", out.join(" "));
-`, "out: KALIMERA THESSALONIKI")
-}
-
-// TDD-00132 Stage C2: a class-form Transform as a `.pipe()` destination, with a
-// small highWaterMark exercising the TSCTX chunk-parking backpressure path.
-func TestE2ENodeStreamClassTransformPipe(t *testing.T) {
-	assertOutputImports(t, `
-import { Readable, Transform } from 'stream';
-import { finished } from 'stream/promises';
-class Doubler extends Transform<number> {
-  constructor() { super({ highWaterMark: 2 }); }
-  _transform(n: number, enc: string, cb: () => void) {
-    this.push(n * 2);
-    cb();
-  }
-}
-const src = Readable.from([1, 2, 3, 4, 5]);
-const d = new Doubler();
-const out: number[] = [];
-d.on("data", (v) => { out.push(v); });
-src.pipe(d);
-await finished(d);
-console.log("doubled:", out.join(","));
-`, "doubled: 2,4,6,8,10")
-}
-
-// TDD-00132: `super({ highWaterMark, objectMode })` threading into a stream
-// subclass's hidden handle, plus options-form highWaterMark.
-func TestE2ENodeStreamClassSuperOptions(t *testing.T) {
-	assertOutputImports(t, `
-import { Readable } from 'stream';
-import { finished } from 'stream/promises';
-class Counter extends Readable<string> {
-  n: number = 0;
-  constructor() {
-    super({ highWaterMark: 2, objectMode: true });
-  }
-  _read() {
-    this.n = this.n + 1;
-    if (this.n > 3) { this.push(null); } else { this.push("chunk" + this.n); }
-  }
-}
-const c = new Counter();
-const seen: string[] = [];
-c.on("data", (v) => { seen.push(v); });
-await finished(c);
-console.log("read:", seen.join(","));
-`, "read: chunk1,chunk2,chunk3")
-}
-
-func TestE2ENodeStreamOptionsHighWaterMark(t *testing.T) {
-	assertOutputImports(t, `
-import { Readable } from 'stream';
-import { finished } from 'stream/promises';
-let m = 0;
-const r = new Readable<number>({
-  highWaterMark: 8,
-  read: (self) => { m = m + 1; if (m > 2) { self.push(null); } else { self.push(m); } }
-});
-const seen: number[] = [];
-r.on("data", (v) => { seen.push(v); });
-await finished(r);
-console.log("hwm ok", seen.join(","));
-`, "hwm ok 1,2")
-}
-
-func TestE2ENodeStreamQualifiedExtends(t *testing.T) {
-	// `class X extends stream.Readable<T>` — qualified base through a
-	// namespace import, same treatment as qualified `new` (ADR-00408).
-	assertOutputImports(t, `
-import stream from 'stream';
-class Counter extends stream.Readable<number> {
-  n: number = 0;
-  _read() {
-    this.n = this.n + 1;
-    if (this.n > 2) { this.push(null); } else { this.push(this.n * 5); }
-  }
-}
-const c = new Counter();
-c.on("data", (v) => { console.log("qe", v); });
-`, "qe 5\nqe 10")
-}
-
-// stream named exports batch: PassThrough, callback finished()/pipeline(),
-// duplexPair().
-
-func TestE2ENodeStreamPassThrough(t *testing.T) {
-	// Identity Transform; string chunks by default (no <T> needed).
-	assertOutputImports(t, `
-import { PassThrough } from 'stream';
-const p = new PassThrough();
-p.on("data", (chunk) => { console.log("got: " + chunk); });
-p.on("end", () => { console.log("ended"); });
-p.write("hello");
-p.end("world");
-`, "got: hello\ngot: world\nended")
-}
-
-func TestE2ENodeStreamPassThroughQualifiedTyped(t *testing.T) {
-	// Qualified `new stream.PassThrough()`, a typed `<number>` variant with
-	// options, and piping into a Writable.
-	assertOutputImports(t, `
-import stream from 'stream';
-const s2 = new stream.PassThrough();
-const sink = new stream.Writable<string>({
-  write: (chunk: string) => { console.log("sink: " + chunk); }
-});
-s2.pipe(sink);
-s2.write("a");
-s2.end("b");
-const nums = new stream.PassThrough<number>({ highWaterMark: 4 });
-nums.on("data", (n) => { console.log(n * 2); });
-nums.write(21);
-nums.end();
-`, "sink: a\n42\nsink: b")
-}
-
-func TestE2ENodeStreamFinishedCallback(t *testing.T) {
-	// The callback form from 'stream' (the Promise form lives in
-	// 'stream/promises'): fires with a null error on clean completion.
-	assertOutputImports(t, `
-import { PassThrough, finished } from 'stream';
-const p = new PassThrough();
-finished(p, (err) => { console.log("finished, err null: " + (err === null)); });
-p.on("data", (c) => { console.log("data: " + c); });
-p.write("x");
-p.end();
-`, "data: x\nfinished, err null: true")
-}
-
-func TestE2ENodeStreamFinishedMustCall(t *testing.T) {
-	// The corpus idiom: qualified stream.finished with a mustCall-wrapped
-	// callback (counted at exit) on a resumed, ended stream.
-	assertOutputImports(t, `
-import stream from 'stream';
-import { mustCall } from 'test';
-const p = new stream.PassThrough();
-stream.finished(p, mustCall((err) => { console.log("done"); }));
-p.resume();
-p.end();
-`, "done")
-}
-
-func TestE2ENodeStreamPipelineCallback(t *testing.T) {
-	// Callback pipeline() from 'stream' across three stages.
-	assertOutputImports(t, `
-import { PassThrough, Writable, pipeline } from 'stream';
-const src = new PassThrough();
-const mid = new PassThrough();
-const sink = new Writable<string>({
-  write: (chunk: string) => { console.log("sink: " + chunk); }
-});
-pipeline(src, mid, sink, () => { console.log("pipeline done"); });
-src.write("a");
-src.end("b");
-`, "sink: a\nsink: b\npipeline done")
-}
-
-func TestE2ENodeStreamDuplexPair(t *testing.T) {
-	// duplexPair(): cross-wired sides (a write on one surfaces as 'data' on
-	// the other), array destructuring and indexing, end propagation, and
-	// mustCall/mustNotCall-wrapped listeners (exit-verified).
-	assertOutputImports(t, `
-import { duplexPair } from 'stream';
-import { mustCall, mustNotCall } from 'test';
-const [clientSide, serverSide] = duplexPair();
-clientSide.on("data", mustCall((d) => { console.log("client got: " + d); }));
-clientSide.on("end", mustNotCall());
-serverSide.write("foo");
-const pair2 = duplexPair();
-pair2[1].on("data", (d) => { console.log("side2 got: " + d); });
-pair2[1].on("end", () => { console.log("side2 ended"); });
-pair2[0].end("bar");
-`, "client got: foo\nside2 got: bar\nside2 ended")
-}
-
-func TestE2ENodeReadableDefaultStringChunks(t *testing.T) {
-	// The un-parameterized `new Readable()` defaults to string chunks
-	// (ADR-00449) — previously the i64 default silently coerced a pushed
-	// string's pointer into the numeric chunk and printed garbage.
-	assertOutputImports(t, `
-import stream from 'stream';
-const r = new stream.Readable({ read() {} });
-r.push("hello");
-r.push(null);
-r.on('data', (c) => { console.log(c.toString()); });
-`, "hello")
-}
-
-func TestE2ENodeStreamDestroyAndSetEncoding(t *testing.T) {
-	// ADR-00483: destroy() closes both sides (pending data still flushes
-	// through the reaction queue, then 'close' fires); setEncoding('utf8')
-	// is an accepted no-op on the string-chunk default.
-	assertOutputImports(t, `
-import stream from 'stream';
-const r = new stream.Readable({ read() {} });
-r.setEncoding("utf8");
-r.push("one");
-r.on('data', (c) => { console.log(c.toString()); });
-r.on('close', () => { console.log("closed"); });
-r.destroy();
-console.log("done");
-`, "done\none\nclosed")
-}
-
-func TestE2ENodeReadableSyncRead(t *testing.T) {
-	// ADR-00484: synchronous read() pops one queued chunk; empty → null.
-	assertOutputImports(t, `
-import stream from 'stream';
-const r = new stream.Readable({ read() {} });
-r.push("first");
-r.push("second");
-console.log(r.read());
-console.log(r.read());
-console.log(r.read() === null);
-`, "first\nsecond\ntrue")
-}
-
-func TestE2ENodeReadableUnshift(t *testing.T) {
-	// ADR-00485: unshift() puts a chunk back at the FRONT of the queue —
-	// the peek-then-put-back pairing with read().
-	assertOutputImports(t, `
-import stream from 'stream';
-const r = new stream.Readable({ read() {} });
-r.push("b");
-r.unshift("a");
-console.log(r.read(), r.read(), r.read() === null);
-r.push("x");
-const got = r.read();
-r.unshift(got);
-console.log(r.read());
-`, "a b true\nx")
-}
-
 func TestE2ERecordStringBracketParity(t *testing.T) {
 	// ADR-00485: Record<string, V> is the index-signature dict — bracket
 	// read/write, Object.keys, and JSON.stringify all work.
@@ -1419,27 +912,6 @@ r["j"] = 2;
 console.log(r["k"], Object.keys(r).length);
 console.log(JSON.stringify(r));
 `, "1 2\n{\"k\":1,\"j\":2}")
-}
-
-// new Duplex({read, write, final}) — two independent sides on one handle
-// (ADR-00493): the read callback feeds 'data' consumers while write/final
-// consume the writable side, with no cross-feeding (unlike Transform).
-func TestE2ENodeDuplexConstructor(t *testing.T) {
-	assertOutputImports(t, `
-import { Duplex } from 'stream'
-const seen: string[] = []
-const d = new Duplex({
-    read: (s) => { s.push("r1"); s.push(null) },
-    write: (chunk: string) => { seen.push("w:" + chunk) },
-    final: () => { seen.push("finished") },
-})
-d.on('data', (c: string) => { console.log("data:" + c) })
-d.write("hello")
-d.end()
-setTimeout(() => {
-    console.log(seen.join(","))
-}, 10)
-`, "data:r1\nw:hello,finished")
 }
 
 // --- TDD-00195 Stage 1: server req as a Node Readable ---
@@ -1517,7 +989,7 @@ http.listen(18663, async (req: HttpRequest) => {
     ws.on('finish', () => { resolve(); });
     req.pipe(ws);
   });
-  const back: string = fs.readFileSync(%q);
+  const back: string = fs.readFileSync(%q, 'utf8');
   return { status: 200, body: "piped=" + back.length };
 });
 `, out, out)

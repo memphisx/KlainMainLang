@@ -5,6 +5,7 @@
 // own endpoint and consumes the chunks incrementally through fetch's streaming
 // Response.body, proving the response streams rather than arriving whole.
 import http from 'http';
+import type { AddressInfo } from 'net';
 
 async function consume(port: number): Promise<void> {
   const res = await fetch("http://127.0.0.1:" + port + "/");
@@ -17,7 +18,7 @@ async function consume(port: number): Promise<void> {
   process.exit(0);
 }
 
-const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.write("alpha ");
   res.write("beta ");
@@ -26,7 +27,7 @@ const server = http.createServer((req: IncomingMessage, res: ServerResponse) => 
 });
 
 server.listen(0, () => {
-  const port: number = server.address().port;
+  const port: number = (server.address() as AddressInfo).port;
   console.log("listening:", port > 0);
   setTimeout(() => { consume(port); }, 50);
 });

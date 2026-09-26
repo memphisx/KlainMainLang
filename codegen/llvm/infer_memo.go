@@ -80,6 +80,21 @@ func (e *Emitter) inferMemoDefined() {
 
 // inferExprType: compile-time type of expr, no codegen.
 func (e *Emitter) inferExprType(expr ast.Expression) Type {
+	ty := e.inferExprTypeMemo(expr)
+	// A union-typed property read the checker narrows (`typeof o.v ===
+	// "object" ? o.v.slice() : …`) reads as that member (mirrors emitMember).
+	if m, ok := expr.(*ast.MemberExpression); ok && ty.IsDynamic && len(ty.UnionMembers) > 0 {
+		if nt, ok := e.checkerNarrowedUnion(m, ty); ok {
+			ty = nt
+		}
+	}
+	if e.shadowOracle != nil {
+		e.shadowExprType(expr, ty)
+	}
+	return ty
+}
+
+func (e *Emitter) inferExprTypeMemo(expr ast.Expression) Type {
 	// Only the nodes that carry the receiver recursion are memoised.
 	switch expr.(type) {
 	case *ast.CallExpression, *ast.MemberExpression:

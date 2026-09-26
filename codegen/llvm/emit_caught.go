@@ -111,15 +111,11 @@ func (e *Emitter) emitCaughtMemberGet(v Value, propName string, pos ast.Pos) (Va
 	}
 
 	// A known Error field (message/name/code/errno/syscall/path) returns that
-	// field's real type (string/number) rather than `any`, so existing lenient
-	// catch code — `e.message.length`, `"caught " + e.message` — keeps working
-	// exactly as when the catch variable was typed errorObjType. A caught value
-	// that is NOT an Error reads the field's zero value (empty string / 0); real
-	// JS yields undefined there, a minor divergence for the rare non-Error throw
-	// that is no worse than the prior errorObjType-assumed behavior.
+	// field's real type (string/number) rather than `any`, so lenient catch
+	// code — `e.message.length`, `"caught " + e.message` — keeps working. A
+	// caught value that is not an Error has no such field: it reads
+	// undefined, so the type is `T | undefined`.
 	if idx, fieldTy, ok := errorObjType.FieldIndex(propName); ok && propName != "kind" {
-		resPtr := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, fieldTy.IR, fieldTy.Align()))
 		errL := e.freshLabel("caught.errfld")
 		elseL := e.freshLabel("caught.nofld")
 		mergeL := e.freshLabel("caught.fldmerge")
@@ -131,19 +127,25 @@ func (e *Emitter) emitCaughtMemberGet(v Value, propName string, pos ast.Pos) (Va
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, errorObjType.StructIR(), errObj, idx))
 		fld := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", fld, StructFieldIR(fieldTy), gep, fieldTy.Align()))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, fld, resPtr, fieldTy.Align()))
+		errEnd := e.freshLabel("caught.errfldend")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", errEnd))
+		e.emitLabel(errEnd)
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 		e.emitLabel(elseL)
-		zero := zeroRef(fieldTy)
-		if fieldTy.IR == "ptr" {
-			zero = e.internString("") // empty string rather than a null deref downstream
-		}
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, zero, resPtr, fieldTy.Align()))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 		e.emitLabel(mergeL)
-		res := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", res, fieldTy.IR, resPtr, fieldTy.Align()))
-		return Value{Ref: res, Ty: fieldTy}, nil
+		if fieldTy.IR == "ptr" {
+			res := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ null, %%%s ]", res, fld, errEnd, elseL))
+			return Value{Ref: res, Ty: undefinedableElem(fieldTy)}, nil
+		}
+		val := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", val, fieldTy.IR, fld, errEnd, zeroRef(fieldTy), elseL))
+		nt := undefinedableElem(fieldTy)
+		if !isNullableScalar(nt) {
+			return Value{Ref: val, Ty: fieldTy}, nil
+		}
+		return Value{Ref: e.makeNullableScalarAgg(nt, isErr, val), Ty: nt}, nil
 	}
 
 	// Unknown property: dynamic member access on the packed value — a primitive
@@ -177,8 +179,7 @@ func (e *Emitter) emitCaughtInstanceOfError(v Value, kindName string, kindID int
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kgep, errorObjType.StructIR(), errObj))
 	kval := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", kval, kgep))
-	km := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", km, kval, errorTypeIDStored(kindID)))
+	km := e.errorKindMatch(kval, kindName, kindID)
 	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", km, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	e.emitLabel(mergeL)

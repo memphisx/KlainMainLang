@@ -1,13 +1,14 @@
-// Qualified constructor form: `new stream.Readable(...)` through a namespace
+// Qualified constructor form: `new stream.Readable(...)` through the default
 // import — the shape most Node code uses — behaves exactly like the bare
-// `new Readable(...)`.
+// `new Readable(...)`. `read()` pushes through `this`, the stream.
 import stream from 'stream';
 
 let n = 0;
-const numbers = new stream.Readable<number>({
-  read: (self) => {
+const numbers = new stream.Readable({
+  objectMode: true,
+  read() {
     n = n + 1;
-    if (n > 3) { self.push(null); } else { self.push(n * 7); }
+    if (n > 3) { this.push(null); } else { this.push(n * 7); }
   }
 });
 

@@ -570,7 +570,7 @@ func (e *Emitter) emitNetSocketSockOpt(objVal Value, args []ast.Expression, whic
 	if which == "nodelay" {
 		level, optname = 6, 1 // IPPROTO_TCP, TCP_NODELAY
 	} else {
-		level, optname = netKeepAliveConst()
+		level, optname = e.netKeepAliveConst()
 	}
 	e.emitInstr(fmt.Sprintf("call i32 @setsockopt(i32 %s, i32 %d, i32 %d, ptr %s, i32 4)", fd32, level, optname, valp))
 
@@ -605,7 +605,7 @@ func (e *Emitter) emitNetSocketSockOpt(objVal Value, args []ast.Expression, whic
 		secp := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", secp))
 		e.emitInstr(fmt.Sprintf("store i32 %s, ptr %s, align 4", sec32, secp))
-		idleLevel, idleOpt := netKeepIdleConst()
+		idleLevel, idleOpt := e.netKeepIdleConst()
 		e.emitInstr(fmt.Sprintf("call i32 @setsockopt(i32 %s, i32 %d, i32 %d, ptr %s, i32 4)", fd32, idleLevel, idleOpt, secp))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)

@@ -93,7 +93,7 @@ try {
   const v: Int32Array = new Int32Array(buf)
   console.log(v.length)
 } catch (e) {
-  console.log("caught: " + e.message)
+  console.log("caught: " + (e as Error).message)
 }
 `, "caught: ArrayBuffer length is not a multiple of the element size")
 }
@@ -145,7 +145,7 @@ try {
   a.set(b, 0)
   console.log(a[0])
 } catch (e) {
-  console.log("caught: " + e.message, e instanceof RangeError, e.name)
+  console.log("caught: " + (e as Error).message, e instanceof RangeError, (e as Error).name)
 }
 `, "caught: offset is out of bounds true RangeError")
 }
@@ -465,10 +465,10 @@ console.log(ta);
 const plain: any = [9.5, true];
 ta.set(plain);
 console.log(ta);
-ta.set(5);
-try { ta.set(null); } catch (e) { console.log((e as Error).message); }
-try { ta.set(undefined); } catch (e) { console.log((e as Error).message); }
-ta.set("4");
+ta.set(5 as any);
+try { ta.set(null as any); } catch (e) { console.log((e as Error).message); }
+try { ta.set(undefined as any); } catch (e) { console.log((e as Error).message); }
+ta.set("4" as any);
 console.log(ta);
 ta.set({ length: 2, 0: 6, 1: 5 }, 1);
 const named = { length: 1, 0: 3 };
@@ -513,9 +513,9 @@ const named = [[1], [2, 3]]; const viaNamed: any = named;
 console.log(viaNamed[1], viaNamed[1][0], JSON.stringify(viaNamed), String(viaNamed));
 const ta = new Int32Array(3);
 ta.set(y); console.log(ta);
-ta.set("12x"); console.log(ta);
-ta.set({ length: 2, 0: 7, 1: "8" }, 1); console.log(ta);
-try { ta.set(null); } catch (e) { console.log((e as Error).message); }
+ta.set("12x" as any); console.log(ta);
+ta.set({ length: 2, 0: 7, 1: "8" } as any, 1); console.log(ta);
+try { ta.set(null as any); } catch (e) { console.log((e as Error).message); }
 `)
 }
 

@@ -240,6 +240,40 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 	if isNullableScalar(val.Ty) {
 		return e.emitConsoleNullableScalarAgg(val, fd, term)
 	}
+	// An Error (a builtin one, or a subclass's instance typed as Error) prints
+	// as its boxed form does: `Name: message`, its own properties after.
+	if val.Ty.IsError && !val.Ty.IsDynamic && !val.Ty.IsClass {
+		// An absent one (a callback's `err` on success) prints its keyword.
+		isNull := e.ptrIsNull(val.Ref)
+		absentL, errL, doneL := e.freshLabel("clog.errnull"), e.freshLabel("clog.err"), e.freshLabel("clog.errdone")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, absentL, errL))
+		e.emitLabel(absentL)
+		e.emitConsolePrintVal(Value{Ref: e.internString(absentLiteral(val.Ty)), Ty: TypePtr}, e.internString("%s"+term), fd)
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(errL)
+		present := val
+		present.Ty.Nullable, present.Ty.IsUndefined = false, false
+		boxed, err := e.emitBoxValue(present)
+		if err != nil {
+			return err
+		}
+		if err := e.emitConsolePrintValueToken(boxed, fd, term); err != nil {
+			return err
+		}
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		return nil
+	}
+	// A function value renders util.inspect's `[Function: name]` form
+	// (TDD-00229); before this it fell through to a `%s` of the header.
+	if val.Ty.IsFunc {
+		e.emitConsolePrintVal(e.emitInspectFunc(val), e.internString("%s"+term), fd)
+		return nil
+	}
+	if val.Ty.IsFFIFunction {
+		e.emitConsolePrintVal(e.emitInspectFFIFunc(val, 0), e.internString("%s"+term), fd)
+		return nil
+	}
 	// A bare `null`/`undefined` value renders its keyword (Node shows
 	// `undefined`, not a blank line). Routed through emitValueToString, which
 	// already distinguishes the two via IsUndefined.
@@ -255,11 +289,27 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 	// a plain Uint8Array shows — checked before the array branch, since a
 	// Buffer is structurally a Uint8Array (IsArray also set).
 	if val.Ty.IsBuffer {
+		// An absent `Buffer | undefined` prints its keyword, as an array's.
+		doneL := ""
+		if val.Ty.Nullable {
+			isAbsent := e.emitArrayIsAbsent(val)
+			absentL, bufL := e.freshLabel("clog.bufnull"), e.freshLabel("clog.buf")
+			doneL = e.freshLabel("clog.bufdone")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAbsent, absentL, bufL))
+			e.emitLabel(absentL)
+			e.emitConsolePrintVal(Value{Ref: e.internString(absentLiteral(val.Ty)), Ty: TypePtr}, e.internString("%s"+term), fd)
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(bufL)
+		}
 		strVal, err := e.emitInspectBuffer(val)
 		if err != nil {
 			return err
 		}
 		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		if doneL != "" {
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(doneL)
+		}
 		return nil
 	}
 	// URLSearchParams inspects as `URLSearchParams { 'a' => '1', … }` (TDD-00203),
@@ -270,6 +320,19 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		s := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_usp_inspect(ptr %s)", s, val.Ref))
 		e.emitConsolePrintVal(Value{Ref: s, Ty: TypePtr}, e.internString("%s"+term), fd)
+		return nil
+	}
+	// An index-signature dictionary inspects as the plain object it is.
+	if val.Ty.IsDynamicObject {
+		bag, err := e.emitDictToBag(val)
+		if err != nil {
+			return err
+		}
+		strVal, err := e.emitInspectField(bag, 0)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 		return nil
 	}
 	// Map / Set inspect as `Map(1) { 'a' => 1 }` / `Set(2) { 1, 2 }`.

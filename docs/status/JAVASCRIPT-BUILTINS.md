@@ -12,6 +12,7 @@ Format: [Status page format](README.md#status-page-format). ✅ = the built-in w
 |---|---|---|---|
 | `Object` (literals, `keys`/`values`/`entries`/`assign`/`freeze`/`seal`/`fromEntries`/`hasOwn`/`groupBy`/`create`/`defineProperty`/`getOwnPropertyDescriptor`/`get`·`setPrototypeOf`) | ✅ | | • → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
 | `Function` — `.call`/`.apply`/`.bind`, overloads, arrows, closures (first-class values) | ✅ | | • → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
+| `Function` instances — `name`, `length`, util.inspect form (`[Function: f]`, `[AsyncFunction: f]`, `bound f`, …) | ✅ | • `toString()` / `String(f)` has no source text (a compile error on a statically-typed function)<br>• Own properties on a user function (`f.x = 1`) are unsupported<br>• Boxing the same closure into `any` twice yields two values that are not `===`<br>• A class value has no `[class X]` rendering | • Names follow ECMAScript NamedEvaluation (binding, property key, assignment target, default, class field); `length` counts the parameters before the first default/rest one; the same holds through `any` and for built-in Error constructors ([ADR-01093](../adr/ADR-01093.md)) |
 | `Boolean` / `Boolean(x)` | ✅ | | • → [Global functions](GLOBAL-FUNCTIONS.md) |
 | `Number` (all statics/constants, `toFixed`/`toString`/`toPrecision`/`toExponential`) | ✅ | | • `toExponential()` with no argument uses the shortest round-trip mantissa (`(12345).toExponential()` → `1.2345e+4`), as in Node ([ADR-00832](../adr/ADR-00832.md))<br>• → [Number & Math](NUMBER-MATH.md) |
 | `Math` (full surface incl. `cbrt`/`clz32`/`fround`/`imul`/`hypot`/`expm1`/`log1p`) | ✅ | | • `Math.max`/`Math.min` accept any arity: zero args give the JS identity (`-Infinity`/`+Infinity`), one arg returns that value, as in Node ([ADR-00831](../adr/ADR-00831.md))<br>• → [Number & Math](NUMBER-MATH.md) |
@@ -51,10 +52,10 @@ Each compiles and runs for its core case but carries a limitation, mostly driven
 | `String` | ✅ | • `.normalize()` **missing** (no Unicode tables); `.at()` OOB returns `""` not `undefined`; `.codePointAt()` == `.charCodeAt()` (byte strings, correct only ASCII/Latin-1); `.matchAll()` eager not lazy; `.localeCompare()` is byte-order → [String methods](STRING-METHODS.md) |
 | `Array` | ✅ | • length-mutating methods propagate to caller only for plain **variable** params (not object-field/array-element receivers); `a.length = n` truncation compile-errors; `.keys`/`values`/`entries` materialized not lazy; `.flat(depth)` needs a constant depth → [Array methods](ARRAY-METHODS.md) |
 | `Object` / dynamic model | ✅ | • prototype machinery, descriptors, accessors exist on **`any`-typed / js-mode dynamic objects only**; static structs are fixed-shape (no dynamic add/delete, no prototype); `Object.assign` can't graft new fields; `hasOwn` needs string-literal keys → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
-| `Reflect` | ✅ | • missing `apply`/`construct`; requires a dynamic target → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
+| `Reflect` | ✅ | • missing `construct`; the object methods require a dynamic target → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
 | `Proxy` | ✅ | • only `get`/`set`/`has`/`deleteProperty` traps; dynamic target only → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
 | `Number` | ✅ | • `toString(radix)` non-power-of-two fractional trailing-digit divergence; `toPrecision` fixed/exp threshold differs → [Number & Math](NUMBER-MATH.md) |
-| `Function` `.call`/`.apply`/`.bind` | ✅ | • forward args but **ignore `thisArg`** (no method-borrowing); `.bind` scalar-param only; first-class function values, not built-ins → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
+| `Function` `.call`/`.apply`/`.bind` | ✅ | • `thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); `.bind` scalar-param only; first-class function values, not built-ins → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | `Symbol` | ✅ | • no well-known symbols as runtime values; only `[Symbol.iterator]`/`[Symbol.asyncIterator]` recognized syntactically → [Type system](TYPE-SYSTEM.md) |
 | `RegExp` | ✅ | • `u`/`d` flags **missing** (accepted, not implemented); `exec` result lacks `index`/`input`/`groups`; unmatched groups become `""` not `null` → [RegExp](REGEXP.md) |
 | `JSON` | ✅ | • statically-typed heterogeneous-array `stringify` **missing** (use a tuple/`any`); function/array `replacer` rejected; `space` must be literal → [JSON](JSON.md) |
@@ -77,7 +78,7 @@ Standard built-ins that fit the model and would add value, not yet built.
 | `String.prototype.normalize()` | ❌ | • Deliberately deferred (needs NFC/NFD/NFKC/NFKD tables) → [String methods](STRING-METHODS.md) |
 | `RegExp` `u`/`v`/`d` flag semantics | ❌ | • Accepted but not implemented → [RegExp](REGEXP.md) |
 | `Iterator` / `AsyncIterator` helpers (`Iterator.prototype.map`/`filter`/`take`/`drop`/…) | ❌ | • No general lazy-iterator protocol exists yet (materialized iteration across Array/Map/Set/`matchAll`) |
-| `Reflect.apply` / `Reflect.construct` | ❌ | • Explicitly missing → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
+| `Reflect.construct` | ❌ | • Explicitly missing → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
 | Dynamic `eval` (arbitrary strings) | ❌ | • The opt-in embedded JS engine is not started (only the static-subset eval works) → [Global functions](GLOBAL-FUNCTIONS.md) |
 
 ## Out of scope (by the whole-program AOT / no-runtime / fixed-shape model)

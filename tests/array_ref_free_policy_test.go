@@ -167,8 +167,9 @@ func buildArrayRefASanAuto(t *testing.T, src string, optMem bool) string {
 		}
 		args = append(args, f)
 	}
+	args = appendFnMeta(t, em, dir, args)
 	if out, err := llvm.ClangCommand(args...).CombinedOutput(); err != nil {
-		t.Fatalf("clang: %v\n%s", err, out)
+		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
 	return binFile
 }

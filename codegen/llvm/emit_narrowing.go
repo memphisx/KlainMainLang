@@ -52,6 +52,10 @@ func unionMemberForTypeof(u Type, typ string) (Type, bool) {
 // true for i1 (it only excludes pointers/dates).
 func unionMemberTag(m Type) string {
 	switch {
+	case m.IsArray:
+		return "array"
+	case m.IsFunc:
+		return "function"
 	case isUnionObjectMember(m):
 		return "object"
 	case isStringTy(m):
@@ -321,10 +325,14 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca {ptr, i64}, align 8", slot))
 		e.emitInstr(fmt.Sprintf("store {ptr, i64} {ptr null, i64 0}, ptr %s, align 8", slot))
+		hdrSlot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", hdrSlot))
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", hdrSlot))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, mergeL, loadL))
 		e.emitLabel(loadL)
 		hdr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, box))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, hdrSlot))
 		agg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, hdr))
 		e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", agg, slot))
@@ -332,7 +340,11 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 		e.emitLabel(mergeL)
 		out := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", out, slot))
-		return Value{Ref: out, Ty: target}
+		// The header rides along (null for an empty box), so a store of
+		// the unboxed array aliases the boxed one.
+		outHdr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", outHdr, hdrSlot))
+		return Value{Ref: out, Ty: target, ArrayHeader: outHdr}
 	case isNullableScalar(target):
 		// Unbox into a { i1, T } nullable scalar (ADR-00478): a null/
 		// undefined tag is the absent aggregate; anything else unboxes the
@@ -348,6 +360,38 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", present, absent))
 		bare := e.emitUnboxBoxToType(boxRef, target.withoutNullable())
 		return Value{Ref: e.makeNullableScalarAgg(target, present, bare.Ref), Ty: target}
+	case target.IsBigInt:
+		// A boxed bigint cell (emit_bigint_box.go) yields its bigint; any
+		// other box reads as null (TDD-00229).
+		isObj := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tagReg, kmlTagObject))
+		probeL := e.freshLabel("unbig.probe")
+		loadL := e.freshLabel("unbig.load")
+		mergeL := e.freshLabel("unbig.merge")
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, probeL, mergeL))
+		e.emitLabel(probeL)
+		cell, isBig := e.emitBoxedBigIntProbe(payload)
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBig, loadL, mergeL))
+		e.emitLabel(loadL)
+		b := e.emitBoxedBigIntLoad(cell)
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", b.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+		e.emitLabel(mergeL)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+		return Value{Ref: r, Ty: target}
+	case target.IsFunc:
+		// A boxed function is a dynamic function record: a closure of the
+		// target's type calls through it.
+		if v, ok := e.emitAnyToClosure(Value{Ref: boxRef, Ty: TypeAny}, target); ok {
+			return v
+		}
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, payload))
+		return Value{Ref: r, Ty: target}
 	case target.IR == "ptr":
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, payload))
@@ -361,7 +405,13 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i1", r, payload))
 		return Value{Ref: r, Ty: target}
 	default:
-		// An integer member: the payload already holds the i64 value.
-		return Value{Ref: payload, Ty: target}
+		// An integer target. Every JS number is boxed as a double (TDD-00156),
+		// so the payload is the double's bits, not the integer: convert with
+		// ToNumber (booleans/null included) and the ordinary number→integer
+		// coercion — reading the bits raw handed a closure called through
+		// `any` 4607182418800017408 for 1 (TDD-00229). A Date is an i64
+		// epoch boxed the same way.
+		d := e.emitAnyToNum(Value{Ref: boxRef, Ty: TypeAny})
+		return e.coerce(Value{Ref: d, Ty: TypeF64}, target)
 	}
 }

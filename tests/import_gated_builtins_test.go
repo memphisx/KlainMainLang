@@ -24,7 +24,7 @@ func TestE2EImportGatedFsDefaultImportWorks(t *testing.T) {
 import fs from 'fs'
 
 fs.writeFileSync("kml_test_import_fs.txt", "hello")
-console.log(fs.readFileSync("kml_test_import_fs.txt"))
+console.log(fs.readFileSync("kml_test_import_fs.txt", 'utf8'))
 fs.unlinkSync("kml_test_import_fs.txt")
 `,
 	}, "main.ts", "hello")
@@ -36,7 +36,7 @@ func TestE2EImportGatedNamespaceStarFormWorks(t *testing.T) {
 import * as fs from 'fs'
 
 fs.writeFileSync("kml_test_import_fs_ns.txt", "namespace form")
-console.log(fs.readFileSync("kml_test_import_fs_ns.txt"))
+console.log(fs.readFileSync("kml_test_import_fs_ns.txt", 'utf8'))
 fs.unlinkSync("kml_test_import_fs_ns.txt")
 `,
 	}, "main.ts", "namespace form")
@@ -50,7 +50,7 @@ func TestE2EImportGatedAliasedLocalNameWorks(t *testing.T) {
 import myFileSystem from 'fs'
 
 myFileSystem.writeFileSync("kml_test_import_fs_alias.txt", "aliased")
-console.log(myFileSystem.readFileSync("kml_test_import_fs_alias.txt"))
+console.log(myFileSystem.readFileSync("kml_test_import_fs_alias.txt", 'utf8'))
 myFileSystem.unlinkSync("kml_test_import_fs_alias.txt")
 `,
 	}, "main.ts", "aliased")
@@ -133,7 +133,7 @@ function useFakeFs(): void {
 }
 
 fs.writeFileSync("kml_test_import_fs_coexist.txt", "real-fs")
-console.log(fs.readFileSync("kml_test_import_fs_coexist.txt"))
+console.log(fs.readFileSync("kml_test_import_fs_coexist.txt", "utf8"))
 useFakeFs()
 fs.unlinkSync("kml_test_import_fs_coexist.txt")
 `,
@@ -172,7 +172,7 @@ func TestE2EImportGatedNamedImportFunctionMemberWorks(t *testing.T) {
 import { readFileSync, writeFileSync, unlinkSync } from 'fs'
 
 writeFileSync("kml_test_named_fn.txt", "hello named import")
-console.log(readFileSync("kml_test_named_fn.txt"))
+console.log(readFileSync("kml_test_named_fn.txt", "utf8"))
 unlinkSync("kml_test_named_fn.txt")
 `,
 	}, "main.ts", "hello named import")
@@ -200,7 +200,7 @@ func TestE2EImportGatedNamedImportAliasedWorks(t *testing.T) {
 import { readFileSync as rfs, writeFileSync as wfs, unlinkSync as del } from 'fs'
 
 wfs("kml_test_named_alias.txt", "aliased named import")
-console.log(rfs("kml_test_named_alias.txt"))
+console.log(rfs("kml_test_named_alias.txt", "utf8"))
 del("kml_test_named_alias.txt")
 `,
 	}, "main.ts", "aliased named import")

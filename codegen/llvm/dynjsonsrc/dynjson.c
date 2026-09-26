@@ -21,6 +21,15 @@
 #include <stdio.h>
 
 extern void __kml_dtoa(char *buf, double v);
+extern char *__kml_fn_inspect_dyn(void **rec, long long depth); /* fnmeta.c (TDD-00229) */
+/* A boxed bigint is a { magic, bigint* } cell (emit_bigint_box.go); its
+   digits come from an IR hook that exists whether or not the program links
+   the bigint runtime (TDD-00229). */
+#define KML_BOXED_BIGINT_MAGIC 0x7FF40000B1616B16LL
+extern char *__kml_boxed_bigint_str(void *cell);
+static int is_boxed_bigint(long long pay) {
+    return pay && *(long long *)pay == KML_BOXED_BIGINT_MAGIC;
+}
 /* util.inspect layout + quoting (inspectsrc/inspect_reduce.c, ADR-01067):
    entries collected into a list, laid out on one line or one per line. */
 #define KML_INSPECT_MAX_ARRAY 100 /* util.inspect's maxArrayLength default */
@@ -194,6 +203,7 @@ static void sb_json_string(Sb *b, const char *s) { sb_json_bytes(b, s, (long lon
 struct KjBoxS;
 static void kj_box_info(const void *box, long long *len, int *kind, int *typed);
 static long long kj_elem_box(const struct KjBoxS *b, long long i);
+static const unsigned char *kj_bytes(const struct KjBoxS *bx);
 
 static void sb_number(Sb *b, long long tag, long long pay) {
     char tmp[40];
@@ -215,9 +225,14 @@ static void sb_number(Sb *b, long long tag, long long pay) {
 /* sb_indent writes a newline followed by `depth` copies of the indent unit —
    the pretty-print gap JSON.stringify(x, null, space) inserts before each
    nested element. Only called when an indent unit is active. */
+/* kj_json_base is the nesting depth of the statically typed value a dynamic
+   one is serialized inside (`JSON.stringify({ a: anyValue }, null, 2)`): it
+   indents only, the cycle check counting from the dynamic value itself. */
+static _Thread_local int kj_json_base;
+
 static void sb_indent(Sb *b, const char *indent, int depth) {
     sb_ch(b, '\n');
-    for (int i = 0; i < depth; i++) sb_cstr(b, indent);
+    for (int i = 0; i < depth + kj_json_base; i++) sb_cstr(b, indent);
 }
 
 /* err: 0 ok, 1 circular, 2 statically-typed value in a dynamic position.
@@ -246,6 +261,12 @@ static int stringify_val(Sb *b, long long tag, long long pay,
     case 12:
         return 0; /* undefined / function-ish: skipped (object) or null (array) */
     case 6: {
+        /* JSON has no bigint: Node throws "Do not know how to serialize a
+           BigInt" (err 3). */
+        if (is_boxed_bigint(pay)) {
+            *err = 3;
+            return 0;
+        }
         /* A boxed Error (field-0 type-id flag, KlainMainLang TDD-00222) has no
            enumerable own properties, so JSON.stringify(new Error(...)) is "{}"
            — matching Node. Any other boxed object (a plain class instance) has
@@ -271,6 +292,26 @@ static int stringify_val(Sb *b, long long tag, long long pay,
         }
         int pretty7 = indent && indent[0];
         char key[32];
+        if (typed == 3) {
+            /* A Buffer's toJSON: {"type":"Buffer","data":[…bytes]}. */
+            const unsigned char *d = kj_bytes((const struct KjBoxS *)pay);
+            sb_ch(b, '{');
+            if (pretty7) sb_indent(b, indent, depth + 1);
+            sb_cstr(b, pretty7 ? "\"type\": \"Buffer\"," : "\"type\":\"Buffer\",");
+            if (pretty7) sb_indent(b, indent, depth + 1);
+            sb_cstr(b, pretty7 ? "\"data\": [" : "\"data\":[");
+            for (long long i = 0; i < n; i++) {
+                if (i) sb_ch(b, ',');
+                if (pretty7) sb_indent(b, indent, depth + 2);
+                snprintf(key, sizeof key, "%d", d[i]);
+                sb_cstr(b, key);
+            }
+            if (pretty7 && n) sb_indent(b, indent, depth + 1);
+            sb_ch(b, ']');
+            if (pretty7) sb_indent(b, indent, depth);
+            sb_ch(b, '}');
+            return 1;
+        }
         sb_ch(b, typed ? '{' : '[');
         for (long long i = 0; i < n; i++) {
             long long etag, epay;
@@ -387,18 +428,26 @@ static int stringify_val(Sb *b, long long tag, long long pay,
    NULL result with err==0 means the JS result is undefined (top-level
    undefined/function).
    err: 1 = circular structure, 2 = statically-typed value in the tree. */
-char *__kml_dynjson_stringify(long long tag, long long pay,
-                              const char *indent, int *err) {
+char *__kml_dynjson_stringify_at(long long tag, long long pay,
+                                 const char *indent, long long base, int *err) {
     void *parents[KML_DYN_MAX_DEPTH];
     *err = 0;
     Sb b;
     sb_init(&b);
+    int saved = kj_json_base;
+    kj_json_base = (int)base;
     int ok = stringify_val(&b, tag, pay, indent, parents, 0, err);
+    kj_json_base = saved;
     if (*err || !ok) {
         free(b.d);
         return NULL;
     }
     return sb_finish(&b);
+}
+
+char *__kml_dynjson_stringify(long long tag, long long pay,
+                              const char *indent, int *err) {
+    return __kml_dynjson_stringify_at(tag, pay, indent, 0, err);
 }
 
 /* ---- Array toString (String(arr) / `${arr}` / console.log) ---- */
@@ -503,9 +552,12 @@ static void inspect_obj(Sb *b, char *o, int depth) {
         long long i = order ? order[oi] : oi;
         if (obj_attrs(o, i) & 2) visible++;
     }
-    /* Node prints an empty object as `{}` even past the depth cap. */
-    if (visible == 0) { free(order); sb_cstr(b, "{}"); return; }
-    if (depth > 2) { free(order); sb_cstr(b, "[Object]"); return; }
+    /* A null-prototype object (flag 1<<34) is prefixed the way util.inspect
+       does; past the depth cap it collapses to the bare tag. Node prints an
+       empty object as `{}` even past the depth cap. */
+    int nullproto = (*(long long *)o & (1LL << 34)) != 0;
+    if (visible == 0) { free(order); sb_cstr(b, nullproto ? "[Object: null prototype] {}" : "{}"); return; }
+    if (depth > 2) { free(order); sb_cstr(b, nullproto ? "[Object: null prototype]" : "[Object]"); return; }
     void *list = __kml_inspect_begin(depth, 1);
     for (long long oi = 0; oi < n; oi++) {
         long long i = order ? order[oi] : oi;
@@ -514,7 +566,11 @@ static void inspect_obj(Sb *b, char *o, int depth) {
         Sb eb;
         sb_init(&eb);
         const char *k = obj_key(o, i);
-        if (key_is_ident(k)) {
+        if (k && strcmp(k, "__proto__") == 0) {
+            /* An own `__proto__` key (computed / JSON-parsed) is quoted in
+               brackets so it can't read as the prototype setter. */
+            sb_cstr(&eb, "['__proto__']");
+        } else if (key_is_ident(k)) {
             sb_cstr(&eb, k);
         } else {
             sb_ch(&eb, '\'');
@@ -533,7 +589,9 @@ static void inspect_obj(Sb *b, char *o, int depth) {
         __kml_inspect_push(list, sb_finish(&eb));
     }
     free(order);
-    char *out = __kml_inspect_end(list, "{", "}", 2 * depth, depth, 0, 0);
+    /* The prefix is part of the opening brace, so it counts toward the
+       80-column single-line budget exactly as Node's braces[0] does. */
+    char *out = __kml_inspect_end(list, nullproto ? "[Object: null prototype] {" : "{", "}", 2 * depth, depth, 0, 0);
     sb_cstr(b, out);
     free(out - 8);
 }
@@ -602,8 +660,25 @@ static void inspect_val(Sb *b, long long tag, long long pay, int depth) {
     case 11:
         inspect_arr(b, (char *)pay, depth);
         break;
+    case 6:
+        if (is_boxed_bigint(pay)) {
+            sb_cstr(b, __kml_boxed_bigint_str((void *)pay));
+            sb_ch(b, 'n');
+        } else {
+            sb_cstr(b, "[Object]");
+        }
+        break;
+    case 8: /* a boxed built-in constructor reference: payload is its name */
+        sb_cstr(b, "[Function: ");
+        sb_cstr(b, (const char *)pay);
+        sb_ch(b, ']');
+        break;
     case 12:
-        sb_cstr(b, "[Function (anonymous)]");
+        {
+            char *fs = __kml_fn_inspect_dyn((void **)pay, depth);
+            sb_cstr(b, fs);
+            free(fs - 8);
+        }
         break;
     case 7:
         kj_inspect(b, (const struct KjBoxS *)pay, depth);
@@ -653,6 +728,7 @@ typedef struct KjBoxS {
 
 static char *kj_data(const KjBox *b) { return *(char **)b->hdr; }
 static long long kj_len(const KjBox *b) { return *(long long *)(b->hdr + 8); }
+static const unsigned char *kj_bytes(const struct KjBoxS *bx) { return (const unsigned char *)kj_data((const KjBox *)bx); }
 static void kj_box_info(const void *box, long long *len, int *kind, int *typed) {
     const KjBox *b = (const KjBox *)box;
     *len = kj_len(b);
@@ -899,6 +975,11 @@ static void kj_elem_render(Sb *b, const KjBox *bx, long long i, int inspect, int
    the honest `[object Array]` stand-in. Returns a length-prefixed heap
    string. */
 static void kj_join(Sb *b, const KjBox *bx, int depth) {
+    if (bx->typed == 3) {
+        /* String(buf) is buf.toString(): its bytes as UTF-8. */
+        sb_raw(b, kj_data(bx), kj_len(bx));
+        return;
+    }
     if (bx->kind < 0 || depth >= KML_DYN_MAX_DEPTH) { sb_cstr(b, "[object Array]"); return; }
     long long len = kj_len(bx);
     for (long long i = 0; i < len; i++) {
@@ -922,7 +1003,37 @@ char *__kml_array_join(void *box) {
    (element kind not representable at box time) yields the `[Array]` placeholder,
    matching util.inspect's depth behaviour. Numbers/bools format exactly as the
    join helper does. Returns a length-prefixed heap string. */
+/* kj_buffer_inspect renders a Buffer as util.inspect does: `<Buffer 68 69>`,
+   at most INSPECT_MAX_BYTES (50) bytes, then ` ... N more bytes`. */
+static void kj_buffer_inspect(Sb *b, const unsigned char *d, long long len) {
+    char tmp[48];
+    long long shown = len < 50 ? len : 50;
+    sb_cstr(b, "<Buffer ");
+    for (long long i = 0; i < shown; i++) {
+        snprintf(tmp, sizeof tmp, i ? " %02x" : "%02x", d[i]);
+        sb_cstr(b, tmp);
+    }
+    if (len > shown) {
+        snprintf(tmp, sizeof tmp, " ... %lld more byte%s", len - shown, len - shown == 1 ? "" : "s");
+        sb_cstr(b, tmp);
+    }
+    sb_ch(b, '>');
+}
+
+/* __kml_buffer_inspect is kj_buffer_inspect as a length-prefixed heap
+   string, for a statically typed Buffer. */
+char *__kml_buffer_inspect(const unsigned char *d, long long len) {
+    Sb b;
+    sb_init(&b);
+    kj_buffer_inspect(&b, d, len);
+    return sb_finish(&b);
+}
+
 static void kj_inspect(Sb *b, const KjBox *bx, int depth) {
+    if (bx->typed == 3) {
+        kj_buffer_inspect(b, (const unsigned char *)kj_data(bx), kj_len(bx));
+        return;
+    }
     if (bx->kind < 0 || depth >= KML_DYN_MAX_DEPTH) {
         /* util.inspect's depth placeholder; a TypedArray of an unrenderable
            kind (BigInt64Array) still names itself. */

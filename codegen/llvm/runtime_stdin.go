@@ -29,7 +29,7 @@ func (e *Emitter) ensureStdinRuntime() {
 	e.ensureFcntlDecl()
 	e.ensureWorkerFdSetbit() // shared @__kml_worker_fd_setbit
 
-	nonblock := httpNonblockFlag()
+	nonblock := e.httpNonblockFlag()
 
 	e.emitGlobal("@__kml_stdin_active = internal global ptr null, align 8")
 

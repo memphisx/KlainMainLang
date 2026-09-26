@@ -10,6 +10,7 @@
 // 0 (or an omitted option) disables that timeout, exactly as in Node. V1 closes a
 // timed-out connection silently (no 408 body); the connection is still bounded.
 import http from 'http';
+import type { AddressInfo } from 'net';
 
 const server = http.createServer(
   {
@@ -17,14 +18,14 @@ const server = http.createServer(
     requestTimeout: 30000,
     keepAliveTimeout: 5000,
   },
-  (req: IncomingMessage, res: ServerResponse) => {
+  (req: http.IncomingMessage, res: http.ServerResponse) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("ok from " + req.path);
+    res.end("ok from " + req.url);
   },
 );
 
 server.listen(0, () => {
-  const port: number = server.address().port;
+  const port: number = (server.address() as AddressInfo).port;
   console.log("listening with connection timeouts on port", port);
   setTimeout(() => { server.close(); }, 100);
 });

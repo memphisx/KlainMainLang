@@ -194,8 +194,8 @@ func (e *Emitter) emitSymbolStatic(method string, args []ast.Expression, pos ast
 		}
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_symbol_keyfor(ptr %s)", r, sv.Ref))
-		nt := TypePtr
-		nt.Nullable = true
+		nt := TypePtr // string | undefined: a symbol not in the registry
+		nt.Nullable, nt.IsUndefined = true, true
 		return Value{Ref: r, Ty: nt}, nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: Symbol.%s is not supported", pos.Line, pos.Col, method)

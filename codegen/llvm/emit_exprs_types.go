@@ -40,8 +40,29 @@ func (e *Emitter) emitTemplateLiteral(tl *ast.TemplateLiteral) (Value, error) {
 // "false"; `s.indexOf(123)` searches for "123"). Without it a non-string arg
 // left a non-`ptr` word where a `ptr` is required — invalid IR.
 func (e *Emitter) emitArgToString(v Value) (Value, error) {
+	if v.Ty.IsNull && !v.Ty.IsDynamic {
+		// The null or undefined literal's type (TypeNull, TypeUndefined).
+		word := "null"
+		if v.Ty.IsUndefined {
+			word = "undefined"
+		}
+		return Value{Ref: e.internString(word), Ty: TypePtr}, nil
+	}
 	if isStringTy(v.Ty) {
-		return e.coerce(v, TypePtr), nil
+		s := e.coerce(v, TypePtr)
+		if !v.Ty.Nullable {
+			return s, nil
+		}
+		// An absent string (a null or undefined literal, `string | null`)
+		// converts to the word, as ToString does.
+		word := "null"
+		if v.Ty.IsUndefined {
+			word = "undefined"
+		}
+		isNull, r := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, s.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isNull, e.internString(word), s.Ref))
+		return Value{Ref: r, Ty: TypePtr}, nil
 	}
 	if v.Ty.IsUndefined || v.Ty.IR == "void" {
 		return Value{Ref: e.internString("undefined"), Ty: TypePtr}, nil
@@ -52,6 +73,14 @@ func (e *Emitter) emitArgToString(v Value) (Value, error) {
 // emitValueToString converts any value to a null-terminated string ptr.
 // Strings pass through; numbers and bools are formatted via sprintf into a 32-byte scratch buffer.
 func (e *Emitter) emitValueToString(v Value) (Value, error) {
+	if v.Ty.IsBuffer && !v.Ty.Nullable {
+		// Buffer.prototype.toString decodes (utf8), overriding the
+		// TypedArray join: `String(buf)`, `buf + ""`.
+		p, n := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", p, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", n, v.Ref))
+		return e.emitBufferEncodeString(p, n, "utf8"), nil
+	}
 	if v.Ty.IsURLSearchParams {
 		// `params + ''` / `${params}` serialize via the pair-list stringifier
 		// (TDD-00203), matching WHATWG's URLSearchParams `toString`.
@@ -375,7 +404,7 @@ func (e *Emitter) inferObjectType(lit *ast.ObjectLiteral) Type {
 	if lit.HasComputedKey() {
 		return e.inferDynamicObjectType(lit)
 	}
-	if e.hasDynamicSpread(lit) {
+	if e.hasDynamicSpread(lit) || hasProtoKey(lit) {
 		return TypeAny
 	}
 	if lit.HasAccessors() {
@@ -406,6 +435,19 @@ func (e *Emitter) inferObjectType(lit *ast.ObjectLiteral) Type {
 		upsert(Field{Name: prop.Key, Ty: e.inferExprType(prop.Value)})
 	}
 	return ObjectType(fields)
+}
+
+// hasProtoKey reports whether an object literal uses the `__proto__: p`
+// special form (a non-computed key): it sets the prototype rather than
+// defining a field, so the literal builds as a D1 dynamic object, whose
+// literal path implements the form (TDD-00229).
+func hasProtoKey(lit *ast.ObjectLiteral) bool {
+	for _, prop := range lit.Properties {
+		if prop.KeyExpr == nil && prop.Key == "__proto__" && prop.AccessorKind == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // hasDynamicSpread reports whether an object literal spreads a bare any/
@@ -618,11 +660,16 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			if sym.NarrowedTo != nil {
 				return *sym.NarrowedTo
 			}
+			if t, ok := e.checkerNarrowed(ex, sym.Ty); ok && !sym.Ty.IsArray && !sym.isNullableScalarLocal() {
+				return t
+			}
 			return sym.Ty
 		}
 		switch ex.Name {
 		case "NaN", "Infinity":
 			return TypeF64
+		case "isMainThread":
+			return TypeBool
 		}
 		if _, sig, ok := e.resolveFuncRef(ex.Name); ok {
 			// Carry the resolved signature's parameter and return types onto the
@@ -631,10 +678,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			// named function used as `f.apply()` in value position otherwise
 			// inferred void while emit produced the real typed call, mismatching
 			// the enclosing function's signature (invalid IR).
-			ft := Type{IR: "ptr", IsFunc: true, FuncParams: sig.ParamTypes, FuncHasRest: sig.HasRest}
-			ret := sig.RetType
-			ft.FuncRetType = &ret
-			return ft
+			return funcTypeFromSig(sig)
 		}
 		if isErrorKindName(ex.Name) {
 			// Built-in error constructor in value position — a boxed funcref
@@ -654,9 +698,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			for fd := range e.nestedFuncScopes[len(e.nestedFuncScopes)-1].capturing {
 				if fd.Name == ex.Name {
 					nsig := e.buildFunctionSig(fd)
-					lt := FuncType(nsig.ParamTypes, nsig.RetType)
-					lt.FuncHasRest = nsig.HasRest
-					return lt
+					return funcTypeFromSig(nsig)
 				}
 			}
 		}
@@ -702,8 +744,12 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 		}
 		objTy := e.inferExprType(ex.Object)
 		// A bracket read off a bare any/unknown base is itself dynamic
-		// (TDD-00155): the runtime tag dispatch yields another box.
+		// (TDD-00155): the runtime tag dispatch yields another box — unless
+		// the base is an index-signature view (DynPropTy).
 		if isUnconstrainedDynamic(objTy) {
+			if objTy.DynPropTy != nil {
+				return *objTy.DynPropTy
+			}
 			return TypeAny
 		}
 		// `/** @value */` flat array: an index read is the element (a view).
@@ -712,8 +758,17 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 		}
 		// String-keyed Map bracket access yields the value type (TDD-00139).
 		if objTy.IsMap && objTy.MapKey != nil && isPlainStringType(*objTy.MapKey) {
+			if ft, ok := dictFieldType(objTy, ex.Index); ok {
+				return ft
+			}
 			if objTy.MapVal != nil {
-				return *objTy.MapVal
+				v := *objTy.MapVal
+				if v.IsArray {
+					v.Nullable = true // a missing key's array is absent (mirrors the read)
+				} else if dictMissReadsUndefined(v) {
+					v = indexReadType(v) // a missing key is undefined (mirrors the read)
+				}
+				return v
 			}
 			return TypePtr
 		}
@@ -754,11 +809,11 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 		// the bigint check already forced both anyway.
 		lt := e.inferExprType(ex.Left)
 		rt := e.inferExprType(ex.Right)
-		// A dynamic operand under `-compat=js` makes an arithmetic result
-		// dynamic — the runtime dispatch (TDD-00076 A2) yields a NaN-boxed
-		// word (`+` may concatenate, others produce a boxed number); a
-		// comparison stays a bool.
-		if e.compatJS() && (isUnconstrainedDynamic(lt) || isUnconstrainedDynamic(rt)) {
+		// A dynamic operand makes an arithmetic result dynamic — the runtime
+		// dispatch (TDD-00076 A2) yields a NaN-boxed word (`+` may
+		// concatenate, others produce a boxed number); a comparison stays a
+		// bool. TypeScript allows every operator on `any`.
+		if isUnconstrainedDynamic(lt) || isUnconstrainedDynamic(rt) {
 			switch ex.Op {
 			case "===", "!==", "==", "!=", "<", ">", "<=", ">=":
 				return TypeBool
@@ -868,15 +923,12 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			}
 			return TypeI64
 		case "&&", "||":
-			// -compat=js mirrors emitShortCircuit exactly: the value-preserving
-			// type when there is one, else the bool the emitter falls back to.
-			if e.compatJS() {
-				if ty, ok := shortCircuitValueType(lt, rt); ok {
-					return ty
-				}
-				return TypeBool
+			// Mirrors emitShortCircuit exactly: the value-preserving type when
+			// there is one, else the bool the emitter falls back to.
+			if ty, ok := shortCircuitValueType(lt, rt); ok {
+				return ty
 			}
-			return lt
+			return TypeBool
 		case "??":
 			// Operands of different scalar kinds yield their union — mirror
 			// emitNullCoalesce / emitNullCoalesceScalar.
@@ -909,6 +961,9 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 				if isNullableScalar(rt) {
 					return rt
 				}
+				if resTy, ok := nullCoalesceNullishRight(lt.withoutNullable(), rt); ok {
+					return resTy
+				}
 				return lt.withoutNullable()
 			}
 			return lt
@@ -932,6 +987,32 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			}
 			return inner
 		}
+		// An optional method read as a value: its code, or undefined
+		// (optionalMethodPresence).
+		if ot := e.inferExprType(ex.Object); ot.IsClass && e.isOptionalMethod(ot.ClassName, ex.Property) {
+			if _, _, isField := ot.FieldIndex(ex.Property); !isField {
+				ty := TypePtr
+				ty.Nullable, ty.IsUndefined = true, true
+				return ty
+			}
+		}
+		// A named property of an index-signature dictionary has its declared type.
+		if ot := e.inferExprType(ex.Object); ot.IsDynamicObject {
+			for _, f := range ot.DictFields {
+				if f.Name == ex.Property {
+					return f.Ty
+				}
+			}
+			// Any other key reads the index signature's type (a box, for a
+			// union: emitDynamicObjectGet).
+			if ot.MapVal != nil && ot.MapVal.IsDynamic {
+				return *ot.MapVal
+			}
+		}
+		// An index-signature view (DynPropTy): every property has its type.
+		if ot := e.inferExprType(ex.Object); isUnconstrainedDynamic(ot) && ot.DynPropTy != nil {
+			return *ot.DynPropTy
+		}
 		// A member read off a caught value (TDD-00202/00207) mirrors
 		// emitCaughtMemberGet's result type: a known Error field keeps its real
 		// type, `.errors` is an errorObj array, anything else is `any`. This must
@@ -942,6 +1023,9 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 				return ArrayOf(errorObjType)
 			}
 			if _, fieldTy, ok := errorObjType.FieldIndex(ex.Property); ok && ex.Property != "kind" {
+				if nt := undefinedableElem(fieldTy); fieldTy.IR == "ptr" || isNullableScalar(nt) {
+					return nt
+				}
 				return fieldTy
 			}
 			return TypeAny
@@ -1008,7 +1092,8 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 		}
 		if ex.Property == "functions" || ex.Property == "symbols" {
 			if ot := e.inferExprType(ex.Object); ot.IsFFILibrary {
-				return ffiLibAccumulatorType(ot.FFILibReg, ex.Property == "functions")
+				// A runtime-built null-prototype object (TDD-00229).
+				return ffiAccumulatorType(ex.Property == "functions")
 			}
 		}
 		// res.statusCode (ServerResponse, TDD-00131) — the response status,
@@ -1047,17 +1132,24 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 		// named `length` is resolved by the field-lookup path further below.)
 		if ex.Property == "length" {
 			ot := e.inferExprType(ex.Object)
-			if ot.IsArray || ot.IsFlatArray || ot.IsTuple || ot.IsTypedArray || isStringTy(ot) {
+			if ot.IsArray || ot.IsFlatArray || ot.IsTuple || ot.IsTypedArray || isStringTy(ot) || ot.IsFunc || ot.IsFFIFunction {
 				return TypeF64
 			}
 		}
-		// cluster.isPrimary/isWorker (bool), cluster.workerId (i64).
+		if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Object" && ex.Property == "prototype" && !e.isShadowedByLocal("Object") {
+			return TypeAny
+		}
+		// A function value's `name` is a string (TDD-00229).
+		if ot := e.inferExprType(ex.Object); ex.Property == "name" && (ot.IsFunc || ot.IsFFIFunction) {
+			return TypePtr
+		}
+		// cluster.isPrimary/isWorker (bool), cluster.worker (Worker | undefined).
 		if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "cluster__kml_builtin" {
 			switch ex.Property {
 			case "isPrimary", "isWorker":
 				return TypeBool
-			case "workerId":
-				return TypeI64
+			case "worker":
+				return clusterSelfWorkerType()
 			case "workers":
 				return ArrayOf(ClusterWorkerType())
 			case "settings":
@@ -1234,7 +1326,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 		// path.posix.sep / path.win32.sep (TDD-00178): a two-level member whose
 		// object is itself a member of the path marker.
 		if _, ok := ex.Object.(*ast.MemberExpression); ok {
-			if _, isPath := pathFlavorOf(ex.Object); isPath {
+			if _, isPath := e.pathFlavorOf(ex.Object); isPath {
 				switch ex.Property {
 				case "sep", "delimiter":
 					return TypePtr
@@ -1305,6 +1397,9 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 				}
 			}
 			if _, fieldTy, ok := objTy.FieldIndex(ex.Property); ok {
+				if e.isErrorOptionalNumber(objTy, ex.Property) {
+					return undefinedableElem(fieldTy)
+				}
 				return e.canonicalizeClassTy(fieldTy)
 			}
 		}
@@ -1414,6 +1509,25 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 		}
 		return e.inferExprType(desugarTaggedTemplate(ex))
 	case *ast.CallExpression:
+		if m := indexCalleeAsMember(ex); m != nil {
+			return e.inferExprType(m)
+		}
+		// A function-style constructor called without `new` (mirrors emitCall).
+		if id, ok := ex.Callee.(*ast.Identifier); ok && e.callableClasses[id.Name] {
+			if _, local := e.lookup(id.Name); !local {
+				if _, _, fn := e.resolveFuncRef(id.Name); !fn {
+					return e.inferExprType(ast.NewNewExpression(id.Name, ex.Args, ex.GetPos()))
+				}
+			}
+		}
+		if c := e.receiverlessThisCall(ex); c != nil {
+			return e.inferExprType(c)
+		}
+		// A call through a builtin declaration's @lower target: the same
+		// decider emission reads (TDD-00230 P3.2).
+		if l, ok := e.loweredCall(ex); ok {
+			return l.resultType()
+		}
 		// Optional call `f?.(...)` — mirror emitOptionalCalleeCall.
 		if ex.Optional {
 			plain := *ex
@@ -1433,9 +1547,10 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			return inner
 		}
 		// An immediately-invoked arrow / function expression returns its own
-		// return type (`((x: number) => x === 1)(1)` is a boolean).
+		// return type (`((x: number) => x === 1)(1)` is a boolean), and so
+		// does a call of a call's function result (`mk()()`).
 		switch ex.Callee.(type) {
-		case *ast.ArrowFunction, *ast.FunctionExpression:
+		case *ast.ArrowFunction, *ast.FunctionExpression, *ast.CallExpression:
 			if ft := e.inferExprType(ex.Callee); ft.IsFunc {
 				if ft.FuncRetType == nil {
 					return TypeVoid
@@ -1453,7 +1568,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 				}
 				if mem.Property == "keyFor" {
 					nt := TypePtr
-					nt.Nullable = true
+					nt.Nullable, nt.IsUndefined = true, true
 					return nt
 				}
 			}
@@ -1573,17 +1688,17 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 				switch mem.Property {
 				case "getFunction":
 					if len(ex.Args) == 2 {
-						if sig, err := ffiParseSignature(ex.Args[1]); err == nil {
+						if sig, _, err := ffiParseSignatureRT(ex.Args[1]); err == nil {
 							return FFIFunctionType(sig)
 						}
 					}
 					return TypePtr
 				case "getFunctions":
 					if len(ex.Args) == 0 {
-						return ffiLibAccumulatorType(ot.FFILibReg, true)
+						return ffiAccumulatorType(true)
 					}
 					if len(ex.Args) == 1 {
-						if defs, ok := ex.Args[0].(*ast.ObjectLiteral); ok {
+						if defs, ok := ffiStripTS(ex.Args[0]).(*ast.ObjectLiteral); ok {
 							if t, err := ffiDefinitionsType(defs); err == nil {
 								return t
 							}
@@ -1591,7 +1706,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 					}
 					return TypePtr
 				case "getSymbols":
-					return ffiLibAccumulatorType(ot.FFILibReg, false)
+					return ffiAccumulatorType(false)
 				case "getSymbol", "registerCallback":
 					return BigIntType()
 				case "close", "unregisterCallback", "refCallback", "unrefCallback":
@@ -1623,7 +1738,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			if objTy := e.inferExprType(mem.Object); objTy.IsClass {
 				if info, ok := e.classes[objTy.ClassName]; ok {
 					if sig, ok := info.MethodSigs[mem.Property]; ok {
-						return taskTaggedRet(sig)
+						return e.genericMethodResult(ex, objTy, mem.Property, e.thisRetType(sig, objTy))
 					}
 					// EventEmitter-embedded chainable methods (TDD-00023)
 					// return the *class* type (not a bare EventEmitterType),
@@ -1631,7 +1746,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 					// both type-check correctly after chaining.
 					if info.HasEventEmitter {
 						switch mem.Property {
-						case "on", "once", "off", "removeListener", "removeAllListeners":
+						case "on", "once", "off", "removeListener", "removeAllListeners", "addListener", "prependListener", "prependOnceListener":
 							return objTy
 						case "emit":
 							return TypeBool
@@ -1717,10 +1832,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 		// with the leading bound parameters removed.
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Property == "bind" {
 			if objTy := e.inferExprType(mem.Object); objTy.IsFunc && !objTy.FuncHasRest {
-				boundCount := len(ex.Args) - 1
-				if boundCount < 0 {
-					boundCount = 0
-				}
+				boundCount := bindBoundCount(objTy, len(ex.Args))
 				if boundCount <= len(objTy.FuncParams) {
 					ret := TypeVoid
 					if objTy.FuncRetType != nil {
@@ -2024,6 +2136,8 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 				}
 			case "Symbol":
 				return SymbolType()
+			case "BigInt":
+				return BigIntType()
 			case "assert__kml_builtin":
 				return TypeVoid
 			}
@@ -2111,9 +2225,12 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 					return TypeF64
 				}
 			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "ArrayBuffer" && mem.Property == "isView" && !e.isShadowedByLocal(id.Name) {
+				return TypeBool
+			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Buffer" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
-				case "from", "alloc", "allocUnsafe", "concat":
+				case "from", "alloc", "allocUnsafe", "allocUnsafeSlow", "concat":
 					return BufferType()
 				case "compare", "byteLength":
 					return TypeI64
@@ -2149,8 +2266,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Math" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
-				case "random", "sqrt", "pow", "hypot", "log", "log2", "log10", "sin", "cos", "tan",
-					"asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "cbrt", "expm1", "log1p", "fround":
+				case "random", "pow", "hypot", "cbrt", "fround":
 					return TypeF64
 				case "clz32", "imul":
 					return TypeI64
@@ -2187,10 +2303,6 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 						}
 					}
 					return TypeI64
-				case "clamp":
-					if len(ex.Args) > 0 {
-						return e.inferExprType(ex.Args[0])
-					}
 				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "JSON" && !e.isShadowedByLocal(id.Name) {
@@ -2238,9 +2350,10 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "fs__kml_builtin" {
 				switch mem.Property {
 				case "readFileSync":
+					if !readFileHasEncoding(ex.Args) {
+						return BufferType()
+					}
 					return TypePtr
-				case "readFileSyncBytes":
-					return TypedArrayType("uint8")
 				case "existsSync":
 					return TypeBool
 				case "readdirSync":
@@ -2260,10 +2373,10 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 					return TypeI64
 				case "realpathSync", "mkdtempSync", "readlinkSync":
 					return TypePtr
-				case "createReadStream":
-					return NodeReadableType(TypePtr)
-				case "createWriteStream":
-					return NodeWritableType(TypePtr)
+				case "writeFileSync", "appendFileSync", "unlinkSync", "mkdirSync", "rmdirSync", "renameSync",
+					"copyFileSync", "fchmodSync", "linkSync", "utimesSync", "futimesSync", "closeSync", "fsyncSync",
+					"fdatasyncSync", "ftruncateSync", "accessSync", "chmodSync", "truncateSync", "symlinkSync", "rmSync":
+					return TypeVoid
 				}
 				// Async callback form (TDD-00107): fs.readFile(path, cb) etc.
 				// return void — the result is delivered through the callback.
@@ -2275,19 +2388,19 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			// fs/promises named import both return a settled task Promise.
 			if inner, ok2 := mem.Object.(*ast.MemberExpression); ok2 {
 				if id, ok3 := inner.Object.(*ast.Identifier); ok3 && id.Name == "fs__kml_builtin" && inner.Property == "promises" {
-					if qt, ok := fsAsyncPromiseResult(mem.Property); ok {
+					if qt, ok := e.fsAsyncPromiseResult(mem.Property, ex.Args); ok {
 						return qt
 					}
 				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "fspromises__kml_builtin" {
-				if qt, ok := fsAsyncPromiseResult(mem.Property); ok {
+				if qt, ok := e.fsAsyncPromiseResult(mem.Property, ex.Args); ok {
 					return qt
 				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
-				case "readLineSync", "execFileSync", "cwd":
+				case "cwd":
 					return TypePtr
 				case "uptime":
 					return TypeF64
@@ -2342,7 +2455,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 					return BigIntType()
 				}
 			}
-			if _, ok2 := pathFlavorOf(mem.Object); ok2 {
+			if _, ok2 := e.pathFlavorOf(mem.Object); ok2 {
 				switch mem.Property {
 				case "join", "resolve", "dirname", "basename", "extname", "format", "normalize", "relative", "toNamespacedPath":
 					return TypePtr
@@ -2363,14 +2476,6 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 				}
 				if t, ok := osInfoCallType(mem.Property); ok {
 					return t
-				}
-			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "querystring__kml_builtin" {
-				switch mem.Property {
-				case "parse":
-					return MapType(TypePtr, TypePtr)
-				case "stringify":
-					return TypePtr
 				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "events__reexport_kml_builtin" && mem.Property == "once" {
@@ -2437,7 +2542,10 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 				case "spawnSync":
 					return cpSpawnSyncResultType(e.cpSyncStdioModesOf(ex.Args))
 				case "execSync", "execFileSync":
-					return TypePtr
+					if cpSyncHasEncoding(ex.Args) {
+						return TypePtr
+					}
+					return BufferType()
 				}
 				return ChildProcessType()
 			}
@@ -2784,7 +2892,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Reflect" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
-				case "get", "getPrototypeOf":
+				case "get", "getPrototypeOf", "apply":
 					return TypeAny
 				case "ownKeys":
 					return ArrayOf(TypePtr)
@@ -2883,14 +2991,11 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 					// V comes from the [string, V][] entries' tuple field 1.
 					valTy := TypeI64
 					if len(ex.Args) >= 1 {
-						if elemTy := e.inferExprType(ex.Args[0]); elemTy.IsArray && elemTy.ElemType != nil &&
-							elemTy.ElemType.IsTuple && len(elemTy.ElemType.Fields) == 2 {
-							valTy = elemTy.ElemType.Fields[1].Ty
-						}
+						valTy, _ = e.fromEntriesTypes(ex.Args[0])
 					}
 					keyTy := TypePtr
 					return Type{IR: "ptr", IsMap: true, IsDynamicObject: true, MapKey: &keyTy, MapVal: &valTy}
-				case "assign", "freeze", "seal":
+				case "assign", "freeze", "seal", "preventExtensions":
 					if len(ex.Args) >= 1 {
 						return e.inferExprType(ex.Args[0])
 					}
@@ -2999,7 +3104,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			}
 			if haveObjTy && objTy.IsEventEmitter {
 				switch mem.Property {
-				case "on", "once", "off", "removeListener", "removeAllListeners":
+				case "on", "once", "off", "removeListener", "removeAllListeners", "addListener", "prependListener", "prependOnceListener":
 					return objTy
 				case "emit":
 					return TypeBool
@@ -3023,7 +3128,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 				if e.inferExprType(mem.Object).IsDate {
 					return TypeI64
 				}
-			case "toISOString", "toDateString", "toLocaleDateString":
+			case "toISOString", "toDateString", "toLocaleDateString", "toUTCString", "toGMTString":
 				if e.inferExprType(mem.Object).IsDate {
 					return TypePtr
 				}
@@ -3124,7 +3229,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 				return regExpExecResultType()
 			case "matchAll":
 				return ArrayOf(ArrayOf(TypePtr))
-			case "substring", "substr", "trim", "toUpperCase", "toLowerCase", "replace":
+			case "replace":
 				if isStringTy(e.inferExprType(mem.Object)) {
 					return TypePtr
 				}
@@ -3132,18 +3237,9 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 				// JS index/count results are Numbers (doubles) — TDD-00123
 				// Stage 3. Must mirror the emit sites, which sitofp to double.
 				return TypeF64
-			case "charCodeAt":
-				// A double so an out-of-range index can be NaN — must match
-				// emitStringCharCodeAt.
-				return TypeF64
-			case "codePointAt":
-				// `number | undefined` — Node returns undefined (not NaN) for
-				// an out-of-range index, so this is a real absent value
-				// (TDD-00187). Must mirror emitStringCodePointAt.
-				return undefinedableElem(TypeI64)
-			case "includes", "startsWith", "endsWith", "some", "every":
+			case "includes", "some", "every":
 				return TypeBool
-			case "join", "repeat", "padStart", "padEnd", "toFixed", "charAt", "toPrecision", "toExponential", "toLocaleString":
+			case "join", "toLocaleString":
 				return TypePtr
 			case "at", "findLast":
 				// `T | undefined` — an out-of-range index / predicate miss
@@ -3332,9 +3428,21 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 		// asserted concrete type (`x as number` where `x: any` → number, so the
 		// binding/operand it flows into is typed concretely); every other
 		// assertion stays erased — the operand keeps its own type (ADR-00371).
+		if _, lit := ex.Expr.(*ast.ArrayLiteral); lit && ex.TypeAnnot != nil {
+			if t := e.resolveType(ex.TypeAnnot); t.IsArray && t.ElemType != nil && t.ElemType.IsDynamic {
+				return t // mirrors emitAsExpression
+			}
+		}
 		inner := e.inferExprType(ex.Expr)
-		if isUnconstrainedDynamic(inner) && ex.TypeAnnot != nil {
-			return e.resolveType(ex.TypeAnnot)
+		if inner.IsDynamic && ex.TypeAnnot != nil {
+			// A box (any, or a union) asserted to a concrete type unboxes to it
+			// (mirrors emitAsExpression).
+			if isUnconstrainedDynamic(inner) {
+				return e.resolveType(ex.TypeAnnot)
+			}
+			if t := e.resolveType(ex.TypeAnnot); !t.IsDynamic || isUnconstrainedDynamic(t) {
+				return t // a member, or `any`: the same box, retyped
+			}
 		}
 		return inner
 	case *ast.UnaryExpression:
@@ -3379,6 +3487,9 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 		if uTy, ok := ternaryUnion(e.inferExprType(ex.Consequent), e.inferExprType(ex.Alternate)); ok {
 			return uTy
 		}
+		if nty, ok := ternaryNullablePointerType(e.inferExprType(ex.Consequent), e.inferExprType(ex.Alternate)); ok {
+			return nty
+		}
 		return e.inferExprType(ex.Consequent)
 	case *ast.SequenceExpression:
 		// The comma operator's value (and type) is its last operand's.
@@ -3386,24 +3497,6 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			return e.inferExprType(ex.Exprs[len(ex.Exprs)-1])
 		}
 		return TypeI64
-	case *ast.NewNodeStreamExpression:
-		// Mirrors emitNewNodeStream: every Node-stream constructor defaults to
-		// string chunks (Node's non-objectMode streams carry strings/Buffers);
-		// `<T>` overrides.
-		inTy, outTy := TypePtr, TypePtr
-		if ex.InType != nil {
-			inTy = e.resolveType(ex.InType)
-		}
-		if ex.OutType != nil {
-			outTy = e.resolveType(ex.OutType)
-		}
-		switch ex.Kind {
-		case "readable":
-			return NodeReadableType(outTy)
-		case "writable":
-			return NodeWritableType(inTy)
-		}
-		return NodeTransformType(inTy, outTy)
 	case *ast.NewCompressionStreamExpression:
 		u8i := TypedArrayType("uint8")
 		u8o := TypedArrayType("uint8")
@@ -3517,7 +3610,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 	case *ast.NewRegExpExpression:
 		return RegExpType()
 	case *ast.NewEventEmitterExpression:
-		payload := TypePtr
+		payload := TypeAny // @types/node's DefaultEventMap
 		if ex.PayloadType != nil {
 			payload = e.resolveEventEmitterPayloadType(ex.PayloadType)
 		}
@@ -3582,6 +3675,8 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 				// below) needs to agree, not fall into the bare-scalar
 				// unannotated-param default just below.
 				params[i] = ArrayOf(TypeI64)
+			} else if dt, ok := e.paramDefaultType(p); ok {
+				params[i] = dt // mirrors emitArrowFunctionWithHints
 			} else if p.Type == nil {
 				params[i] = TypeI64
 				params[i].Inferred = true // no annotation — see docs/adr/ADR-00042.md
@@ -3608,7 +3703,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 			}
 			ret = e.inferExprType(ex.Body)
 			e.popScope()
-		} else if blockHasReturn(ex.Block) {
+		} else if hasReturn(ex.Block) {
 			// Same best-effort inference emitArrowFunctionWithHints uses when
 			// actually emitting this closure — this duplicate exists because
 			// inferExprType has to answer "what type is this arrow function"
@@ -3648,6 +3743,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 		// Mirror emitFunctionExpression's implicit `arguments` rest (TDD-00210)
 		// so the inferred type's arity matches the emitted function's.
 		ex.Params = maybeAddArgumentsRestParams(ex.Params, ex.Body.Body)
+		thisTaking := e.maybeAddThisParamExpr(ex)
 		params := make([]Type, len(ex.Params))
 		for i, p := range ex.Params {
 			if p.Rest && p.Name == argumentsRestParam {
@@ -3666,7 +3762,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 		var ret Type
 		if ex.RetType != nil {
 			ret = e.resolveType(ex.RetType)
-		} else if blockHasReturn(ex.Body) {
+		} else if hasReturn(ex.Body) {
 			paramNames := make([]string, len(ex.Params))
 			for i, p := range ex.Params {
 				paramNames[i] = p.Name
@@ -3685,6 +3781,7 @@ func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
 		if len(ex.Params) > 0 && ex.Params[len(ex.Params)-1].Rest {
 			fty.FuncHasRest = true
 		}
+		fty.FuncThis = thisTaking
 		setFuncParamDefaults(&fty, ex.Params)
 		return fty
 	case *ast.UpdateExpression:

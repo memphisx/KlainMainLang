@@ -1,6 +1,10 @@
 package lexer
 
-import "fmt"
+import (
+	"fmt"
+
+	"KlainMainLang/diag"
+)
 
 type TokenType int
 
@@ -38,7 +42,6 @@ const (
 	CATCH
 	FINALLY
 	DO
-	ASYNC
 	AWAIT
 	YIELD
 	IMPORT
@@ -53,7 +56,6 @@ const (
 	PRIVATE
 	PROTECTED
 	PUBLIC
-	ABSTRACT
 	IMPLEMENTS
 
 	// Operators
@@ -131,7 +133,7 @@ const (
 
 	REGEX // /pattern/flags
 
-	JSDOC // /** ... */
+	ILLEGAL // input the scanner could not tokenize; Literal carries the error text
 	EOF
 )
 
@@ -143,14 +145,14 @@ var tokenNames = map[TokenType]string{
 	NEW: "new", TYPEOF: "typeof", VOID: "void",
 	SWITCH: "switch", CASE: "case", DEFAULT: "default", BREAK: "break", CONTINUE: "continue",
 	THROW: "throw", TRY: "try", CATCH: "catch", FINALLY: "finally", DO: "do",
-	ASYNC: "async", AWAIT: "await", YIELD: "yield",
+	AWAIT: "await", YIELD: "yield",
 	IMPORT: "import", EXPORT: "export",
 	ELLIPSIS: "...",
 	CLASS:    "class", THIS: "this", INSTANCEOF: "instanceof",
 	EXTENDS: "extends", SUPER: "super",
 	STATIC: "static", PRIVATE: "private", PROTECTED: "protected", PUBLIC: "public",
-	ABSTRACT: "abstract", IMPLEMENTS: "implements",
-	PLUS: "+", MINUS: "-", STAR: "*", POW: "**", SLASH: "/", PERCENT: "%",
+	IMPLEMENTS: "implements",
+	PLUS:       "+", MINUS: "-", STAR: "*", POW: "**", SLASH: "/", PERCENT: "%",
 	ASSIGN: "=", EQ: "==", NEQ: "!=", STRICT_EQ: "===", STRICT_NEQ: "!==",
 	LT: "<", GT: ">", LTE: "<=", GTE: ">=",
 	AND: "&&", OR: "||", NOT: "!",
@@ -166,8 +168,8 @@ var tokenNames = map[TokenType]string{
 	SEMICOLON: ";", COLON: ":", COMMA: ",", DOT: ".", QUESTION: "?", NULLISH: "??", OPTIONAL_DOT: "?.", ARROW: "=>", AT: "@",
 	TEMPLATE_NO_SUB: "TEMPLATE_NO_SUB", TEMPLATE_HEAD: "TEMPLATE_HEAD",
 	TEMPLATE_MIDDLE: "TEMPLATE_MIDDLE", TEMPLATE_TAIL: "TEMPLATE_TAIL",
-	REGEX: "REGEX",
-	JSDOC: "JSDOC", EOF: "EOF",
+	REGEX:   "REGEX",
+	ILLEGAL: "ILLEGAL", EOF: "EOF",
 }
 
 func (t TokenType) String() string {
@@ -184,12 +186,12 @@ var keywords = map[string]TokenType{
 	"new": NEW, "typeof": TYPEOF, "void": VOID,
 	"switch": SWITCH, "case": CASE, "default": DEFAULT, "break": BREAK, "continue": CONTINUE,
 	"throw": THROW, "try": TRY, "catch": CATCH, "finally": FINALLY, "do": DO,
-	"async": ASYNC, "await": AWAIT, "yield": YIELD,
+	"await": AWAIT, "yield": YIELD,
 	"import": IMPORT, "export": EXPORT,
 	"class": CLASS, "this": THIS, "instanceof": INSTANCEOF,
 	"extends": EXTENDS, "super": SUPER,
 	"static": STATIC, "private": PRIVATE, "protected": PROTECTED, "public": PUBLIC,
-	"abstract": ABSTRACT, "implements": IMPLEMENTS,
+	"implements": IMPLEMENTS,
 }
 
 func LookupIdent(s string) TokenType {
@@ -213,14 +215,36 @@ var keywordTypes = func() map[TokenType]bool {
 // itself as its Literal (see readIdent).
 func IsKeyword(t TokenType) bool { return keywordTypes[t] }
 
+// TokenFlags carries facts about a token's surroundings the grammar needs but
+// its type cannot express.
+type TokenFlags uint8
+
+const (
+	// PrecedingLineBreak: a line terminator (LF, CR, U+2028, U+2029) — possibly
+	// inside a comment — separates this token from the previous one. Automatic
+	// semicolon insertion and the restricted productions read it.
+	PrecedingLineBreak TokenFlags = 1 << iota
+)
+
 type Token struct {
-	Type    TokenType
-	Literal string
-	Flags   string // regex literal flags only (Type == REGEX); empty for every other token
-	Raw     string // undecoded source text of a template segment (template tokens only); backs String.raw
-	Line    int
-	Col     int
+	Type       TokenType
+	Literal    string
+	RegexFlags string // regex literal flags only (Type == REGEX); empty for every other token
+	Raw        string // undecoded source text of a template segment (template tokens only); backs String.raw
+	Line       int
+	Col        int
+	// Pos/End are the token's byte offsets in the source, [Pos, End).
+	Pos, End int
+	Flags    TokenFlags
+	// Doc is the text of the last `/** … */` comment between the previous token
+	// and this one (empty when there is none).
+	Doc string
+	// Err is the scanning error of an ILLEGAL token.
+	Err *diag.Diagnostic
 }
+
+// HasPrecedingLineBreak reports whether a line terminator precedes t.
+func (t Token) HasPrecedingLineBreak() bool { return t.Flags&PrecedingLineBreak != 0 }
 
 func (t Token) String() string {
 	return fmt.Sprintf("Token{%s %q %d:%d}", t.Type, t.Literal, t.Line, t.Col)

@@ -26,6 +26,29 @@ func (e *Emitter) emitReflectCall(method string, args []ast.Expression, pos ast.
 		return nil
 	}
 	switch method {
+	case "apply":
+		// Reflect.apply(f, thisArg, args): f called with thisArg and the
+		// elements of args.
+		if err := need(3); err != nil {
+			return Value{}, err
+		}
+		fv, err := e.emitExprWithObjectHint(args[0], TypeAny)
+		if err != nil {
+			return Value{}, err
+		}
+		fb, err := e.emitBoxValue(fv)
+		if err != nil {
+			return Value{}, err
+		}
+		tv, err := e.emitExprWithObjectHint(args[1], TypeAny)
+		if err != nil {
+			return Value{}, err
+		}
+		argv, n, err := e.emitDynArgv([]ast.Expression{ast.NewSpreadElement(args[2], args[2].GetPos())}, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynFnBoxCallN(fb, tv, argv, n, "Function.prototype.apply was called on a value that is not a function", pos)
 	case "get":
 		if len(args) != 2 && len(args) != 3 {
 			return Value{}, fmt.Errorf("%d:%d: Reflect.get takes 2 or 3 arguments", pos.Line, pos.Col)

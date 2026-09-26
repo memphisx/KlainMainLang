@@ -38,7 +38,7 @@ async function run(): Promise<void> {
   try {
     await mightFail(true)
   } catch (e) {
-    console.log("awaited reject: " + e.message) // awaited reject: computation failed
+    console.log("awaited reject: " + (e as Error).message) // awaited reject: computation failed
   }
 
   // Promise.resolve / Promise.reject build settled promises directly — awaitable

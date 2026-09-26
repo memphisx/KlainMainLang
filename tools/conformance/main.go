@@ -12,6 +12,8 @@
 package main
 
 import (
+	"KlainMainLang/diag"
+	"KlainMainLang/options"
 	"bytes"
 	"context"
 	"flag"
@@ -223,7 +225,10 @@ func normalizeReason(kind, msg string) string {
 	msg = reFilePosPrefix.ReplaceAllString(msg, "")
 	msg = rePos.ReplaceAllString(msg, "")
 	msg = reAbsPath.ReplaceAllString(msg, "<path>")
-	msg = reQuoted.ReplaceAllString(msg, "'%s'")
+	// KML_RAW_REASONS keeps the quoted names, for a triage run's fail list.
+	if os.Getenv("KML_RAW_REASONS") == "" {
+		msg = reQuoted.ReplaceAllString(msg, "'%s'")
+	}
 	if len(msg) > 120 {
 		msg = msg[:120] + "…"
 	}
@@ -332,7 +337,13 @@ func main() {
 	// 10–30s-runtime Node tests and re-introduces flapping). A genuine hang is
 	// still caught at 5s; the rare slow-but-terminating test that wants more can
 	// pass `-timeout`.
-	perFileTimeout := flag.Duration("timeout", 5*time.Second, "timeout for clang and for running each compiled test binary")
+	perFileTimeout := flag.Duration("timeout", 5*time.Second, "timeout for running each compiled test binary")
+	// clang only ever runs slow, never hangs, so its budget is separate and
+	// generous: at 5s a loaded machine (endpoint-security scanning of every
+	// spawned process, a parallel build) turned dozens of valid modules into
+	// CLANG_TIMEOUTs. Concurrency stays capped by -workers, so a longer budget
+	// does not raise peak memory.
+	flag.DurationVar(&clangTimeout, "clang-timeout", 30*time.Second, "timeout for clang compiling and linking one test")
 	workDir := flag.String("workdir", ".conformance-out", "scratch directory for generated .ll/binaries")
 	// A compiled test that spawns a detached child (child_process detached:true →
 	// setsid, a new session that escapes the per-file kill(-pgid)) or a re-exec'd
@@ -719,6 +730,11 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		full += string(content) + "\n"
 	}
 	full += string(src)
+	if hasFlag(fm, "onlyStrict") {
+		// INTERPRETING.md: an onlyStrict file runs as strict code, with a
+		// "use strict" directive before everything.
+		full = "\"use strict\";\n" + full
+	}
 
 	// Parse + emit run *in-process*, so a pathological input that makes the
 	// parser or emitter spin forever would wedge this worker indefinitely — the
@@ -765,7 +781,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 			out.err = werr
 			return
 		}
-		prog, perr := resolver.ResolveProgramWithOptions(srcFile, laneCompat == "js", false)
+		prog, perr := resolver.ResolveProgramWithOptions(srcFile, options.Options{Compat: laneCompat})
 		if perr != nil {
 			out.err = perr
 			return
@@ -795,7 +811,9 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	}
 
 	if fm.NegativePhase == "parse" {
-		res.Pass = compileErr != nil
+		// A checker type error is not the syntax error a parse-negative
+		// test expects.
+		res.Pass = compileErr != nil && !typeErrorOnly(compileErr)
 		if !res.Pass {
 			res.Reason = "expected a parse-phase rejection but this compiled"
 		}
@@ -812,11 +830,11 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		// regression. Detected on the raw (untruncated) message, since the hint
 		// clause sits past normalizeReason's 120-char cut.
 		kind := "COMPILE_ERROR"
-		if strings.Contains(compileErr.Error(), "-compat=js") {
+		if strings.Contains(compileErr.Error(), "-compat=js") || typeErrorOnly(compileErr) {
 			kind = "STRICT_REJECT"
 		}
-		res.Reason = normalizeReason(kind, compileErr.Error())
-		res.Blocker = blockerOf(compileErr.Error())
+		res.Reason = normalizeReason(kind, firstLine(compileErr.Error()))
+		res.Blocker = blockerOf(firstLine(compileErr.Error()))
 		return res
 	}
 
@@ -861,7 +879,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		clangArgs = append(clangArgs, asmPath)
 	}
 
-	cctx, cancel := context.WithTimeout(context.Background(), timeout)
+	cctx, cancel := context.WithTimeout(context.Background(), clangTimeout)
 	defer cancel()
 	var clangOut bytes.Buffer
 	clangCmd := killableCommand(cctx, "clang", llvm.HostClangArgv(clangArgs...)...)
@@ -872,6 +890,17 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 			res.Reason = "CLANG_TIMEOUT"
 		} else {
 			res.Reason = normalizeReason("CLANG_ERROR", firstLine(clangOut.String()))
+			// Built with KML_IR_SITES, the rejected line names the codegen site
+			// that emitted it: bucket by that site too, so the histogram ranks
+			// emitters rather than clang messages.
+			annotated := llvm.AnnotateClangOutput(clangOut.Bytes())
+			if i := strings.Index(annotated, "\n  emitted by "); i >= 0 {
+				site := annotated[i+len("\n  emitted by "):]
+				if j := strings.IndexByte(site, '\n'); j >= 0 {
+					site = site[:j]
+				}
+				res.Reason += " @ " + site
+			}
 			// IR clang rejects is a codegen bug by definition, and the worker's
 			// .ll is overwritten by its next file: keep this one, with clang's full
 			// output, so the bucket can be worked without re-deriving each input.
@@ -879,7 +908,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 			if os.MkdirAll(keep, 0755) == nil {
 				base := filepath.Join(keep, strings.NewReplacer("/", "__", "\\", "__").Replace(res.Path))
 				_ = os.WriteFile(base+".ll", []byte(ir), 0644)
-				_ = os.WriteFile(base+".clang.txt", clangOut.Bytes(), 0644)
+				_ = os.WriteFile(base+".clang.txt", []byte(annotated), 0644)
 			}
 		}
 		return res
@@ -967,6 +996,9 @@ var categoryDesc = map[string]string{
 	"harness":   "Self-tests of Test262's own assertion harness (sta.js/assert.js/propertyHelper) — needs this repo's harness-shim.",
 }
 
+// clangTimeout bounds one clang compile+link (-clang-timeout).
+var clangTimeout = 30 * time.Second
+
 // phaseOf maps a normalized failure reason to the pipeline phase it died in,
 // so the report can separate genuine near-misses (compiled + ran, wrong
 // result) from front-end parse gaps, bad-IR codegen bugs, wrongly-accepted
@@ -979,8 +1011,10 @@ func phaseOf(reason string) string {
 		return "runtime (timeout)"
 	case strings.HasPrefix(reason, "CODEGEN_TIMEOUT"):
 		return "codegen (in-process hang — emitter/parser spin)"
-	case strings.HasPrefix(reason, "CLANG_ERROR") || strings.HasPrefix(reason, "CLANG_TIMEOUT"):
+	case strings.HasPrefix(reason, "CLANG_ERROR"):
 		return "clang (invalid IR — codegen bug)"
+	case strings.HasPrefix(reason, "CLANG_TIMEOUT"):
+		return "clang (timeout — slow compile, not invalid IR)"
 	case strings.HasPrefix(reason, "STRICT_REJECT"):
 		return "strict typed-rejection (recoverable under -compat=js)"
 	case strings.HasPrefix(reason, "COMPILE_ERROR"):
@@ -1006,6 +1040,8 @@ func phaseShort(phase string) string {
 		return "run-timeout"
 	case strings.HasPrefix(phase, "codegen (in-process hang"):
 		return "codegen-hang"
+	case strings.HasPrefix(phase, "clang (timeout"):
+		return "clang-timeout"
 	case strings.HasPrefix(phase, "clang"):
 		return "clang"
 	case strings.HasPrefix(phase, "strict typed-rejection"):
@@ -1033,6 +1069,7 @@ var phaseOrder = []string{
 	"strict typed-rejection (recoverable under -compat=js)",
 	"compile (front-end parse/resolve/codegen)",
 	"runtime (timeout)",
+	"clang (timeout — slow compile, not invalid IR)",
 	"skipped (unsupported harness include)",
 	"infra (I/O)",
 	"other",
@@ -1256,4 +1293,19 @@ func writeReport(path string, all []result) error {
 		return err
 	}
 	return os.WriteFile(path, []byte(b.String()), 0644)
+}
+
+// typeErrorOnly reports a rejection by the strict lane's checker alone:
+// TypeScript's type errors (TDD-00230 P2.7), which -compat=js compiles.
+func typeErrorOnly(err error) bool {
+	ds := diag.As(err)
+	if len(ds) == 0 {
+		return false
+	}
+	for _, d := range ds {
+		if d.Message.Kind != diag.TypeScriptError {
+			return false
+		}
+	}
+	return true
 }

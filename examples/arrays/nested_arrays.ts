@@ -42,8 +42,8 @@ console.log(first[0])           // 1
 console.log(second[0])          // 7
 
 // .at()/.with() on the outer array
-console.log(matrix.at(0)[0])    // 1
-console.log(matrix.at(-1)[1])   // 8
+console.log(matrix.at(0)![0])   // 1
+console.log(matrix.at(-1)![1])  // 8
 const replaced: number[][] = matrix.with(0, [0, 0])
 console.log(replaced[0][0])     // 0
 console.log(matrix[0][0])       // 1 (with() doesn't mutate)
@@ -51,7 +51,7 @@ console.log(matrix[0][0])       // 1 (with() doesn't mutate)
 // push/pop of a whole inner array
 matrix.push([10, 11])
 console.log(matrix.length)      // 3
-console.log(matrix.pop()[0])    // 10
+console.log(matrix.pop()![0])   // 10
 console.log(matrix.length)      // 2
 
 // JSON.stringify recurses into nested arrays

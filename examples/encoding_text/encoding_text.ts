@@ -34,5 +34,5 @@ console.log(decoder.decode(buf))
 try {
     atob("not base64!");
 } catch (e) {
-    console.log(e.name);
+    console.log((e as Error).name);
 }

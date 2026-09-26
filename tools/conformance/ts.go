@@ -218,8 +218,8 @@ func runOneTS(path, group string, hasErrorsBaseline map[string]bool, workDir str
 	default: // !expectReject && !accepted
 		res.Status = "MISMATCH_FALSE_REJECT" // TS accepts, we rejected — usually an unsupported-feature scope gap
 		if cerr != nil {
-			res.Reason = normalizeReason("REJECTED", cerr.Error())
-			res.Blocker = blockerOf(cerr.Error())
+			res.Reason = normalizeReason("REJECTED", firstLine(cerr.Error()))
+			res.Blocker = blockerOf(firstLine(cerr.Error()))
 		}
 	}
 	return res

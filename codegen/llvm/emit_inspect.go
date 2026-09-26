@@ -68,6 +68,14 @@ func (e *Emitter) emitInspectObject(val Value, depth int) (Value, error) {
 		// internal `__kml_objlit_N` name.
 		name = inspectClassName(val.Ty.ClassName) + " "
 	}
+	if val.Ty.IsNullProtoObject {
+		name = "[Object: null prototype] "
+	}
+	// A DynamicLibrary shows Node's own-accessor form (its path/symbols are
+	// getters on the instance).
+	if val.Ty.IsFFILibrary {
+		return Value{Ref: e.internString("DynamicLibrary { path: [Getter], symbols: [Getter] }"), Ty: TypePtr}, nil
+	}
 	fields := esOrderedFields(val.Ty.VisibleFields()) // ES key order (Node)
 	if len(fields) == 0 {
 		return Value{Ref: e.internString(name + "{}"), Ty: TypePtr}, nil
@@ -328,72 +336,20 @@ func typedArrayConstructorName(ty Type) string {
 }
 
 // emitInspectBuffer renders a Node Buffer as `<Buffer 68 69>` — each byte as a
-// two-digit lowercase hex pair, space-separated, wrapped in `<Buffer …>` (an
-// empty buffer is `<Buffer >`). This is Node's own console/util.inspect form for
-// a Buffer, distinct from the `[ 104, 105 ]` a plain Uint8Array shows.
+// two-digit lowercase hex pair, space-separated, at most 50 of them (Node's
+// INSPECT_MAX_BYTES) then ` ... N more bytes`. This is Node's own
+// console/util.inspect form for a Buffer, distinct from the `[ 104, 105 ]` a
+// plain Uint8Array shows; a Buffer boxed into `any` renders through the same
+// C function (dynjson.c).
 func (e *Emitter) emitInspectBuffer(val Value) (Value, error) {
-	e.ensureSprintf()
-	e.ensureMalloc()
-	e.ensureStrHeaderRuntime() // __kml_str_from_cstr — sprintf yields a bare C string
-	elemTy := TypeU8
-	if val.Ty.ElemType != nil {
-		elemTy = *val.Ty.ElemType
-	}
+	e.ensureDynJSONC()
 	ptrReg := e.freshReg()
 	lenReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-
-	accAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accAlloca))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("<Buffer"), accAlloca))
-	idxAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
-
-	condL := e.freshLabel("inspbuf.cond")
-	bodyL := e.freshLabel("inspbuf.body")
-	doneL := e.freshLabel("inspbuf.done")
-	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
-	e.emitLabel(condL)
-	idxVal := e.freshReg()
-	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
-
-	e.emitLabel(bodyL)
-	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
-	elem := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elem, elemTy.IR, gep, elemTy.Align()))
-	byteI32 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = zext %s %s to i32", byteI32, elemTy.IR, elem))
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", buf))
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i32 %s)", buf, e.internString(" %02x"), byteI32))
-	hexStr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", hexStr, buf))
-	cur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cur, accAlloca))
-	next, err := e.emitStringConcat(Value{Ref: cur, Ty: TypePtr}, Value{Ref: hexStr, Ty: TypePtr})
-	if err != nil {
-		return Value{}, err
-	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", next.Ref, accAlloca))
-	idxNext := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
-
-	e.emitLabel(doneL)
-	accF := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", accF, accAlloca))
-	isEmpty := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmpty, lenReg))
-	closeStr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", closeStr, isEmpty, e.internString(" >"), e.internString(">")))
-	return e.emitStringConcat(Value{Ref: accF, Ty: TypePtr}, Value{Ref: closeStr, Ty: TypePtr})
+	res := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_buffer_inspect(ptr %s, i64 %s)", res, ptrReg, lenReg))
+	return Value{Ref: res, Ty: TypePtr}, nil
 }
 
 // emitInspectMap renders a Map as `Map(N) { 'a' => 1, ... }` (empty: `Map(0)
@@ -571,6 +527,13 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 			return e.emitInspectNullablePtr(v, func(b Value) (Value, error) { return e.emitInspectTuple(b, depth) })
 		}
 		return e.emitInspectTuple(v, depth)
+	case v.Ty.IsDynamicObject:
+		// An index-signature dictionary is a plain object.
+		bag, err := e.emitDictToBag(v)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitInspectField(bag, depth)
 	case v.Ty.IsMap:
 		if depth > e.effectiveInspectDepth() {
 			return Value{Ref: e.internString("[Map]"), Ty: TypePtr}, nil
@@ -619,7 +582,9 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 		}
 		return e.emitInspectArray(v, depth)
 	case v.Ty.IsFunc:
-		return Value{Ref: e.internString("[Function]"), Ty: TypePtr}, nil
+		return e.emitInspectFunc(v), nil
+	case v.Ty.IsFFIFunction:
+		return e.emitInspectFFIFunc(v, depth), nil
 	case v.Ty.IsNull:
 		return e.emitValueToString(v) // null / undefined, unquoted
 	case isStringTy(v.Ty):

@@ -28,14 +28,13 @@ func CasemapSource() string {
 // build knows to compile+link the case-mapping C file.
 func (e *Emitter) UsesCasemap() bool { return e.usedCasemap }
 
-// ensureCasemap declares the two entry points exactly once and marks the
-// program as needing the C file compiled in.
+// ensureCasemap marks the program as needing the C file compiled in (the
+// `@link casemap` of String's toUpperCase/toLowerCase declarations, which
+// declare their own entry points).
 func (e *Emitter) ensureCasemap() {
 	if e.usedCasemap {
 		return
 	}
 	e.usedCasemap = true
-	e.ensureStrHeaderRuntime() // @__kml_str_len for the header length
-	e.emitGlobal(`declare ptr @__kml_str_toupper(ptr, i64)`)
-	e.emitGlobal(`declare ptr @__kml_str_tolower(ptr, i64)`)
+	e.ensureStrHeaderRuntime() // the header runtime the C file allocates through
 }
