@@ -20,6 +20,8 @@ package llvm
 import (
 	"fmt"
 	"strings"
+
+	"KlainMainLang/ast"
 )
 
 // funcTypeFromSig is the closure/function Type a named function is seen as when
@@ -73,6 +75,35 @@ func (e *Emitter) ensureFuncValueTrampoline(mangled string, sig FuncSig) string 
 	}
 
 	ret := sig.RetType.LLVMRetType()
+	if sig.MaySuspend {
+		// A may-suspend async function is a task body (`void f(ptr args)`):
+		// its value spawns it, as a direct call does (emitSpawnCall).
+		restore := e.beginDetachedFunc()
+		argVals := make([]Value, len(sig.ParamTypes))
+		n := 0
+		for i, pty := range sig.ParamTypes {
+			if pty.IsArray {
+				agg0, agg1 := e.freshReg(), e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %%a%d, 0", agg0, n))
+				e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %%a%d, 1", agg1, agg0, n+1))
+				argVals[i] = Value{Ref: agg1, Ty: pty}
+				n += 2
+				continue
+			}
+			argVals[i] = Value{Ref: fmt.Sprintf("%%a%d", n), Ty: pty}
+			n++
+		}
+		promise, err := e.emitSpawnCall(llvmSafeSymbol(mangled), sig, argVals)
+		if err == nil {
+			e.emitTerminator(fmt.Sprintf("ret %s %s", ret, promise.Ref))
+		} else {
+			e.emitTerminator(fmt.Sprintf("ret %s null", ret))
+		}
+		body := e.allocas.String() + e.body.String()
+		restore()
+		e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n%s}\n", ret, sym, strings.Join(decls, ", "), body))
+		return sym
+	}
 	call := fmt.Sprintf("call %s @%s(%s)", ret, llvmSafeSymbol(mangled), strings.Join(fwd, ", "))
 
 	var b strings.Builder
@@ -100,8 +131,8 @@ func fnValueHeaderName(mangled string) string {
 // nothing, and this header is never mutated). Emitting it once as a global
 // constant — rather than malloc'ing a fresh copy at every reference — gives the
 // function a *stable* value identity across references, so a later
-// `removeEventListener(f)`/`EventEmitter.off(f)` (which compare header
-// pointers) match the `addEventListener(f)` header. As a static value it is not
+// `removeEventListener(f)`/`emitter.off(f)` matches the `addEventListener(f)`
+// registration. As a static value it is not
 // heap-owned, so `Memory.free`-ing a bare function reference is undefined in
 // the same way freeing a string literal already is (see freeResolvedPointer).
 func (e *Emitter) emitNamedFuncValue(mangled string, sig FuncSig, displayName string) Value {
@@ -116,5 +147,24 @@ func (e *Emitter) emitNamedFuncValue(mangled string, sig FuncSig, displayName st
 			"%s = private unnamed_addr constant {ptr, ptr} { ptr %s, ptr null }",
 			sym, tramp))
 	}
-	return Value{Ref: sym, Ty: funcTypeFromSig(sig)}
+	return Value{Ref: sym, Ty: funcValueType(sig)}
+}
+
+// funcValueType is the type of a named function taken by value: its
+// signature, with its defaults filling an omitted argument when it is called
+// as a value (a first-class or dynamic call). A declaration's default sees
+// only module globals and earlier parameters, so each is a call-site fill.
+func funcValueType(sig FuncSig) Type {
+	ty := funcTypeFromSig(sig)
+	for i, d := range sig.Defaults {
+		if d == nil {
+			continue
+		}
+		if ty.FuncParamDefaults == nil {
+			ty.FuncParamDefaults = make([]ast.Expression, len(sig.Defaults))
+			ty.FuncParamNames = sig.ParamNames
+		}
+		ty.FuncParamDefaults[i] = d
+	}
+	return ty
 }

@@ -37,6 +37,7 @@ func (e *Emitter) ensurePromiseAdopt() {
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_promise_attach(ptr %%p, ptr %%clo) {
 entry:
+  call void @__kml_promise_mark_handled(ptr %%p)
   %%res_p = getelementptr %[1]s, ptr %%p, i32 0, i32 0
   %%res = load i64, ptr %%res_p, align 8
   %%settled = icmp ne i64 %%res, 0
@@ -142,6 +143,7 @@ make:
   ; the coroutine's own task promise is bookkeeping only: the bridge settles
   ; %prom itself (fulfilled with the Response, or rejected on a transport error)
   %taskprom = call ptr @__kml_task_alloc_promise()
+  call void @__kml_promise_mark_handled(ptr %taskprom)
   %t = call ptr @__kml_spawn_task(ptr @__kml_fetch_drive_run, ptr %env, ptr %taskprom)
   ret ptr %prom
 }`)

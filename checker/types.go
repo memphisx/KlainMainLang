@@ -100,6 +100,7 @@ type Type struct {
 	Member     string
 	EnumSize   int
 	Constraint *Type  // TypeParam: its `extends` bound, or nil
+	Default    *Type  // TypeParam: its `= T` default, or nil
 	optionals  []bool // Function: optional parameters
 	restParam  bool   // Function: the last parameter is a rest
 	// Calls and Constructs are an interface's call and construct
@@ -444,6 +445,26 @@ func (in *interner) indexed(props []*Property, str, num *Type) *Type {
 	})
 }
 
+// withSignatures is o with call and construct signatures (a type literal's
+// `(…): R` and `new (…): R` members), interned by them.
+func (in *interner) withSignatures(o *Type, calls, constructs []*Type) *Type {
+	if len(calls) == 0 && len(constructs) == 0 {
+		return o
+	}
+	key := "g" + strconv.Itoa(o.ID)
+	for _, t := range calls {
+		key += "c" + strconv.Itoa(t.ID)
+	}
+	for _, t := range constructs {
+		key += "k" + strconv.Itoa(t.ID)
+	}
+	return in.intern(key, func() *Type {
+		c := *o
+		c.Calls, c.Constructs = calls, constructs
+		return &c
+	})
+}
+
 // object interns an anonymous object type by its properties' names, types
 // and optionality, in declaration order.
 func (in *interner) object(props []*Property) *Type { return in.objectOf(props, false, false) }
@@ -611,3 +632,9 @@ func (in *interner) overloaded(sigs []*Type) *Type {
 		return &f
 	})
 }
+
+// HasRestParam reports whether a function type's last parameter is a rest.
+func (t *Type) HasRestParam() bool { return t.restParam }
+
+// OptionalParam reports whether a function type's parameter i is optional.
+func (t *Type) OptionalParam(i int) bool { return i < len(t.optionals) && t.optionals[i] }

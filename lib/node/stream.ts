@@ -10,10 +10,11 @@
 // exports (`stream.Readable`), as Node's default export carries them.
 import { EventEmitter } from 'events';
 
-export type Callback = (error?: Error | null) => void;
+export type Callback = (error?: any) => void;
 export type TransformCallback = (error?: Error | null, data?: any) => void;
 
 export interface StreamOptions {
+    signal?: AbortSignal;
     highWaterMark?: number;
     objectMode?: boolean;
     autoDestroy?: boolean;
@@ -68,7 +69,26 @@ class StreamError extends Error {
     }
 }
 
-function nop(error?: Error | null): void {}
+// Node's AbortError (internal/errors): what an aborted stream operation
+// rejects or errors with.
+class AbortError extends Error {
+    code: string;
+    cause: any;
+    constructor(message: string = 'The operation was aborted', cause?: any) {
+        super(message);
+        this.name = 'AbortError';
+        this.code = 'ABORT_ERR';
+        this.cause = cause;
+    }
+}
+
+export interface OperatorOptions {
+    signal?: AbortSignal;
+    concurrency?: number;
+    highWaterMark?: number;
+}
+
+function nop(error?: any): void {}
 
 function defaultHighWaterMark(objectMode: boolean): number {
     if (objectMode) return 16;
@@ -494,6 +514,7 @@ export class Readable extends Stream {
         this.readImpl = options?.read;
         this.destroyImpl = options?.destroy;
         if (options?.construct) this._kmlConstructImpl = options.construct as (this: Stream, callback: (error?: Error | null) => void) => void;
+        if (options?.signal) addAbortSignal(options.signal, this);
         if (!this._kmlIsDuplex()) {
             construct(this, () => {
                 const s = this._readableState!;
@@ -504,6 +525,99 @@ export class Readable extends Stream {
 
     static from(iterable: any, options?: ReadableOptions): Readable {
         return readableFrom(iterable, options);
+    }
+
+    // ---- operators.js: the stream-returning operators wrap their async
+    // generator in Readable.from, as Node's Readable.prototype versions do.
+    map(fn: any, options?: OperatorOptions): Readable {
+        return Readable.from(mapOperator(this, fn, options));
+    }
+    filter(fn: any, options?: OperatorOptions): Readable {
+        return Readable.from(mapOperator(this, filterFn(fn), options));
+    }
+    flatMap(fn: any, options?: OperatorOptions): Readable {
+        return Readable.from(flatMapGen(mapOperator(this, fn, options)));
+    }
+    drop(number: any, options?: OperatorOptions): Readable {
+        validateOperatorOptions(options);
+        return Readable.from(dropGen(this, toIntegerOrInfinity(number), options));
+    }
+    take(number: any, options?: OperatorOptions): Readable {
+        validateOperatorOptions(options);
+        return Readable.from(takeGen(this, toIntegerOrInfinity(number), options));
+    }
+    async forEach(fn: any, options?: OperatorOptions): Promise<void> {
+        validateFunction(fn, 'fn');
+        const each = async (value: any, opts: any): Promise<any> => {
+            await fn(value, opts);
+            return kEmpty;
+        };
+        for await (const unused of mapOperator(this, each, options)) {
+            // drained for its side effects
+        }
+    }
+    async toArray(options?: OperatorOptions): Promise<any[]> {
+        validateOperatorOptions(options);
+        const result: any[] = [];
+        for await (const val of this) {
+            if (options?.signal?.aborted) throw new AbortError(undefined, options.signal.reason);
+            result.push(val);
+        }
+        return result;
+    }
+    async some(fn: any, options?: OperatorOptions): Promise<boolean> {
+        for await (const unused of mapOperator(this, filterFn(fn), options)) {
+            return true;
+        }
+        return false;
+    }
+    async every(fn: any, options?: OperatorOptions): Promise<boolean> {
+        validateFunction(fn, 'fn');
+        const not = async (value: any, opts: any): Promise<boolean> => !(await fn(value, opts));
+        return !(await this.some(not, options));
+    }
+    async find(fn: any, options?: OperatorOptions): Promise<any> {
+        for await (const result of mapOperator(this, filterFn(fn), options)) {
+            return result;
+        }
+        return undefined;
+    }
+    async reduce(reducer: any, ...rest: any[]): Promise<any> {
+        validateFunction(reducer, 'reducer');
+        const options: OperatorOptions | undefined = rest.length > 1 ? rest[1] : undefined;
+        validateOperatorOptions(options);
+        let hasInitialValue = rest.length > 0;
+        let initialValue: any = hasInitialValue ? rest[0] : undefined;
+        if (options?.signal?.aborted) {
+            const err = new AbortError(undefined, options.signal.reason);
+            this.once('error', () => {});
+            this.destroy(err);
+            throw err;
+        }
+        const ac = new AbortController();
+        const signal = ac.signal;
+        if (options?.signal) {
+            options.signal.addEventListener('abort', () => { ac.abort(); }, { once: true });
+        }
+        let gotAnyItemFromStream = false;
+        try {
+            for await (const value of this) {
+                gotAnyItemFromStream = true;
+                if (options?.signal?.aborted) throw new AbortError();
+                if (!hasInitialValue) {
+                    initialValue = value;
+                    hasInitialValue = true;
+                } else {
+                    initialValue = await reducer(initialValue, value, { signal });
+                }
+            }
+            if (!gotAnyItemFromStream && !hasInitialValue) {
+                throw new StreamError('ERR_MISSING_ARGS', 'Reduce of an empty stream requires an initial value');
+            }
+        } finally {
+            ac.abort();
+        }
+        return initialValue;
     }
 
     _read(size: number): void {
@@ -530,7 +644,7 @@ export class Readable extends Stream {
     get readableHighWaterMark(): number { return this._readableState!.highWaterMark; }
     get readableLength(): number { return this._readableState!.length; }
     get readableObjectMode(): boolean { return this._readableState!.objectMode; }
-    get readableEncoding(): string | null { return this._readableState!.encoding; }
+    get readableEncoding(): BufferEncoding | null { return this._readableState!.encoding as BufferEncoding | null; }
     get readableEnded(): boolean { return this._readableState!.endEmitted; }
     get readableFlowing(): boolean | null {
         const r = this._readableState!;
@@ -1245,84 +1359,376 @@ function isStdio(dest: Stream): boolean {
 // otherwise) over an array's elements, each pushed as the stream asks for
 // it; a value that is a promise is awaited first. A string or a Buffer is
 // one chunk.
-function readableFrom(iterable: any, options?: ReadableOptions): Readable {
+// ---- operators.js ----
+
+const kEmpty: any = Symbol('kEmpty');
+const kEof: any = Symbol('kEof');
+
+function validateFunction(fn: any, name: string): void {
+    if (typeof fn !== 'function') {
+        throw new StreamError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type function. Received ' + describeReceived(fn));
+    }
+}
+
+function validateOperatorOptions(options: any): void {
+    if (options !== null && options !== undefined && typeof options !== 'object') {
+        throw new StreamError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object. Received ' + describeReceived(options));
+    }
+}
+
+function toIntegerOrInfinity(number: any): number {
+    const n = Number(number);
+    if (Number.isNaN(n)) return 0;
+    if (n < 0) {
+        throw new StreamError('ERR_OUT_OF_RANGE', 'The value of "number" is out of range. It must be >= 0. Received ' + String(n));
+    }
+    return n;
+}
+
+function filterFn(fn: any): any {
+    validateFunction(fn, 'fn');
+    return async (value: any, opts: any): Promise<any> => {
+        if (await fn(value, opts)) return value;
+        return kEmpty;
+    };
+}
+
+// mapOperator validates map's arguments eagerly (a bad concurrency throws at
+// the call, as Node's does) and returns the async generator that runs fn
+// over the stream with up to `concurrency` calls in flight.
+function mapOperator(stream: Readable, fn: any, options: OperatorOptions | undefined): AsyncGenerator<any> {
+    validateFunction(fn, 'fn');
+    validateOperatorOptions(options);
+    let concurrency = 1;
+    if (options?.concurrency !== undefined && options?.concurrency !== null) concurrency = Math.floor(options.concurrency);
+    let highWaterMark = concurrency - 1;
+    if (options?.highWaterMark !== undefined && options?.highWaterMark !== null) highWaterMark = Math.floor(options.highWaterMark);
+    if (!(concurrency >= 1)) {
+        throw new StreamError('ERR_OUT_OF_RANGE', 'The value of "options.concurrency" is out of range. It must be >= 1 && <= 4294967295. Received ' + String(concurrency));
+    }
+    if (!(highWaterMark >= 0)) {
+        throw new StreamError('ERR_OUT_OF_RANGE', 'The value of "options.highWaterMark" is out of range. It must be >= 0 && <= 4294967295. Received ' + String(highWaterMark));
+    }
+    highWaterMark += concurrency;
+    return mapGen(stream, fn, options, concurrency, highWaterMark);
+}
+
+async function* mapGen(stream: Readable, fn: any, options: OperatorOptions | undefined, concurrency: number, highWaterMark: number): AsyncGenerator<any> {
+    const signal: AbortSignal = options?.signal ?? new AbortController().signal;
+    const queue: any[] = [];
+    const signalOpt = { signal };
+    let next: any = null;
+    let resume: any = null;
+    let done = false;
+    let cnt = 0;
+
+    const maybeResume = (): void => {
+        if (resume !== null && !done && cnt < concurrency && queue.length < highWaterMark) {
+            const r = resume;
+            resume = null;
+            r();
+        }
+    };
+    const afterItemProcessed = (): void => {
+        cnt -= 1;
+        maybeResume();
+    };
+    const onCatch = (): void => {
+        done = true;
+        afterItemProcessed();
+    };
+    const wakeNext = (): void => {
+        if (next !== null) {
+            const n = next;
+            next = null;
+            n();
+        }
+    };
+
+    const pump = async (): Promise<void> => {
+        try {
+            for await (const item of stream) {
+                if (done) return;
+                if (signal.aborted) throw new AbortError();
+                let val: any;
+                try {
+                    val = fn(item, signalOpt);
+                    if (val === kEmpty) continue;
+                    val = Promise.resolve(val);
+                } catch (err) {
+                    val = Promise.reject(err);
+                }
+                cnt += 1;
+                val.then(afterItemProcessed, onCatch);
+                queue.push(val);
+                wakeNext();
+                if (!done && (queue.length >= highWaterMark || cnt >= concurrency)) {
+                    await new Promise<void>((resolve) => { resume = resolve; });
+                }
+            }
+            queue.push(kEof);
+        } catch (err) {
+            const val: any = Promise.reject(err);
+            val.then(afterItemProcessed, onCatch);
+            queue.push(val);
+        } finally {
+            done = true;
+            wakeNext();
+        }
+    };
+
+    pump();
+
+    try {
+        while (true) {
+            while (queue.length > 0) {
+                const val = await queue[0];
+                if (val === kEof) return;
+                if (signal.aborted) throw new AbortError();
+                if (val !== kEmpty) yield val;
+                queue.shift();
+                maybeResume();
+            }
+            await new Promise<void>((resolve) => { next = resolve; });
+        }
+    } finally {
+        done = true;
+        if (resume !== null) {
+            const r = resume;
+            resume = null;
+            r();
+        }
+    }
+}
+
+async function* flatMapGen(values: any): AsyncGenerator<any> {
+    for await (const val of values) {
+        const inner: any = val;
+        for await (const v of inner) yield v;
+    }
+}
+
+async function* dropGen(stream: Readable, number: number, options: OperatorOptions | undefined): AsyncGenerator<any> {
+    if (options?.signal?.aborted) throw new AbortError();
+    let n = number;
+    for await (const val of stream) {
+        if (options?.signal?.aborted) throw new AbortError();
+        if (n-- <= 0) yield val;
+    }
+}
+
+async function* takeGen(stream: Readable, number: number, options: OperatorOptions | undefined): AsyncGenerator<any> {
+    if (options?.signal?.aborted) throw new AbortError();
+    let n = number;
+    for await (const val of stream) {
+        if (options?.signal?.aborted) throw new AbortError();
+        if (n-- > 0) yield val;
+        // Don't take another item once the count is reached.
+        if (n <= 0) return;
+    }
+}
+
+// FromDuplexOptions: from(Duplexify, iterable, opts) — the writable half of
+// a duplex whose readable half the iterable feeds (duplexify.js).
+interface FromDuplexOptions {
+    writable?: boolean;
+    write?: (chunk: any, encoding: BufferEncoding, callback: Callback) => void;
+    final?: (callback: Callback) => void;
+    destroy?: (error: Error | null, callback: Callback) => void;
+}
+
+function readableFrom(iterable: any, options?: ReadableOptions, duplex?: FromDuplexOptions): Readable {
     if (typeof iterable === 'string' || Buffer.isBuffer(iterable)) {
         return new Readable({
             objectMode: options?.objectMode ?? true,
             highWaterMark: options?.highWaterMark,
+            encoding: options?.encoding,
+            autoDestroy: options?.autoDestroy,
+            emitClose: options?.emitClose,
             read() {
                 this.push(iterable);
                 this.push(null);
             },
         });
     }
-    if (iterable === null || iterable === undefined || typeof iterable.length !== 'number') {
-        throw new StreamError('ERR_INVALID_ARG_TYPE', 'The "iterable" argument must be an instance of Iterable. Received ' + String(iterable));
+
+    let isAsync = false;
+    let iterator: any;
+    if (iterable?.[Symbol.asyncIterator]) {
+        isAsync = true;
+        iterator = iterable[Symbol.asyncIterator]();
+    } else if (iterable?.[Symbol.iterator]) {
+        isAsync = false;
+        iterator = iterable[Symbol.iterator]();
+    } else {
+        throw new StreamError('ERR_INVALID_ARG_TYPE', 'The "iterable" argument must be an instance of Iterable. Received ' + describeReceived(iterable));
     }
-    const n: number = iterable.length;
-    let index = 0;
+
+    // Flag to protect against _read being called before the last iteration
+    // completes.
     let reading = false;
     let isAsyncValues = false;
-    const readable = new Readable({
-        objectMode: options?.objectMode ?? true,
-        highWaterMark: options?.highWaterMark ?? 1,
-        read() {
-            if (!reading) {
-                reading = true;
-                if (isAsyncValues) nextWithAsyncValues();
-                else nextSyncWithSyncValues();
-            }
-        },
-    });
-    const pushValue = (value: any): boolean => {
-        if (value === null) {
-            reading = false;
-            readable.destroy(new StreamError('ERR_STREAM_NULL_VALUES', 'May not write null values to stream'));
-            return false;
+
+    const close = async (error: Error | null): Promise<void> => {
+        const hadError = error !== undefined && error !== null;
+        const hasThrow = typeof iterator.throw === 'function';
+        if (hadError && hasThrow) {
+            const res = await iterator.throw(error);
+            await res.value;
+            if (res.done) return;
         }
-        if (readable.push(value)) return true;
-        reading = false;
-        return false;
-    };
-    const nextSyncWithSyncValues = (): void => {
-        while (true) {
-            if (index >= n) {
-                readable.push(null);
-                return;
-            }
-            const value = iterable[index];
-            index++;
-            if (value && typeof value.then === 'function') {
-                isAsyncValues = true;
-                awaitValue(value);
-                return;
-            }
-            if (!pushValue(value)) return;
+        if (typeof iterator.return === 'function') {
+            const res = await iterator.return();
+            await res.value;
         }
     };
-    const awaitValue = (value: any): void => {
-        Promise.resolve(value).then((res: any) => {
-            if (pushValue(res)) nextWithAsyncValues();
-        }, (err: any) => {
-            readable.destroy(err as Error);
+
+    const read = (): void => {
+        if (!reading) {
+            reading = true;
+            if (isAsync) nextAsync();
+            else if (isAsyncValues) nextSyncWithAsyncValues();
+            else nextSyncWithSyncValues();
+        }
+    };
+    // Node replaces _destroy with one that runs the original first, then
+    // closes the iterator.
+    const destroyWith = (error: Error | null, cb: Callback): void => {
+        const afterOriginal = (destroyError?: Error | null): void => {
+            const combined = destroyError || error;
+            close(combined ?? null).then(
+                () => { process.nextTick(() => { cb(combined); }); },
+                (closeError: any) => { process.nextTick(() => { cb(aggregateTwoErrors(combined ?? null, closeError as Error)); }); },
+            );
+        };
+        if (duplex?.destroy) duplex.destroy(error, afterOriginal);
+        else afterOriginal(error);
+    };
+    const readable: Readable = duplex !== undefined
+        ? new Duplex({
+            objectMode: options?.objectMode ?? true,
+            highWaterMark: options?.highWaterMark ?? 1,
+            writable: duplex.writable,
+            read() { read(); },
+            write(chunk: any, encoding: BufferEncoding, cb: Callback) { duplex.write!(chunk, encoding, cb); },
+            final(cb: Callback) { duplex.final!(cb); },
+            destroy(error: Error | null, cb: Callback) { destroyWith(error, cb); },
+        })
+        : new Readable({
+            objectMode: options?.objectMode ?? true,
+            highWaterMark: options?.highWaterMark ?? 1,
+            encoding: options?.encoding,
+            autoDestroy: options?.autoDestroy,
+            emitClose: options?.emitClose,
+            read() { read(); },
+            destroy(error: Error | null, cb: Callback) { destroyWith(error, cb); },
         });
+
+    const nullValues = (): Error => new StreamError('ERR_STREAM_NULL_VALUES', 'May not write null values to stream');
+
+    // The duplication below is Node's, on purpose: no await where none is
+    // needed.
+    const nextSyncWithSyncValues = (): void => {
+        for (;;) {
+            try {
+                const res = iterator.next();
+                if (res.done) {
+                    readable.push(null);
+                    return;
+                }
+                const value = res.value;
+                if (value && typeof value.then === 'function') {
+                    changeToAsyncValues(value);
+                    return;
+                }
+                if (value === null) {
+                    reading = false;
+                    throw nullValues();
+                }
+                if (readable.push(value)) continue;
+                reading = false;
+            } catch (err) {
+                readable.destroy(err as Error);
+            }
+            break;
+        }
     };
-    const nextWithAsyncValues = (): void => {
-        while (true) {
-            if (index >= n) {
-                readable.push(null);
+
+    const changeToAsyncValues = async (value: any): Promise<void> => {
+        isAsyncValues = true;
+        try {
+            const res = await value;
+            if (res === null) {
+                reading = false;
+                throw nullValues();
+            }
+            if (readable.push(res)) {
+                nextSyncWithAsyncValues();
                 return;
             }
-            const value = iterable[index];
-            index++;
-            if (value && typeof value.then === 'function') {
-                awaitValue(value);
-                return;
+            reading = false;
+        } catch (err) {
+            readable.destroy(err as Error);
+        }
+    };
+
+    const nextSyncWithAsyncValues = async (): Promise<void> => {
+        for (;;) {
+            try {
+                const r = iterator.next();
+                if (r.done) {
+                    readable.push(null);
+                    return;
+                }
+                const value = r.value;
+                const res = value && typeof value.then === 'function' ? await value : value;
+                if (res === null) {
+                    reading = false;
+                    throw nullValues();
+                }
+                if (readable.push(res)) continue;
+                reading = false;
+            } catch (err) {
+                readable.destroy(err as Error);
             }
-            if (!pushValue(value)) return;
+            break;
+        }
+    };
+
+    const nextAsync = async (): Promise<void> => {
+        for (;;) {
+            try {
+                const r = await iterator.next();
+                if (r.done) {
+                    readable.push(null);
+                    return;
+                }
+                const value = r.value;
+                if (value === null) {
+                    reading = false;
+                    throw nullValues();
+                }
+                if (readable.push(value)) continue;
+                reading = false;
+            } catch (err) {
+                readable.destroy(err as Error);
+            }
+            break;
         }
     };
     return readable;
+}
+
+// describeReceived is the "Received …" tail of Node's ERR_INVALID_ARG_TYPE.
+function describeReceived(value: any): string {
+    if (value === null) return 'null';
+    if (value === undefined) return 'undefined';
+    if (typeof value === 'function') return 'function ' + value.name;
+    if (typeof value === 'object') return 'an instance of Object';
+    let s = String(value);
+    if (s.length > 28) s = s.slice(0, 25) + '...';
+    if (typeof value === 'string') return "type string ('" + s + "')";
+    return 'type ' + typeof value + ' (' + s + ')';
 }
 
 // ---- writable.js ----
@@ -1340,6 +1746,7 @@ export class Writable extends Stream {
         this.finalImpl = options?.final;
         this.destroyImpl = options?.destroy;
         if (options?.construct) this._kmlConstructImpl = options.construct as (this: Stream, callback: (error?: Error | null) => void) => void;
+        if (options?.signal) addAbortSignal(options.signal, this);
         construct(this, () => { writableConstructed(this, this._writableState!); });
     }
 
@@ -1741,6 +2148,12 @@ function callFinishedCallbacks(s: WritableState, err: Error | null): void {
 
 // kml:callable Duplex — Node's is a function that constructs when called without `new`
 export class Duplex extends Readable {
+    // Duplex.from (duplexify.js): a Duplex from a stream, an iterable, an
+    // async generator function, a promise or a { readable, writable } pair.
+    static from(body: any, options?: ReadableOptions): Duplex {
+        return duplexify(body, 'body');
+    }
+
     private dWriteImpl?: (this: Duplex, chunk: any, encoding: BufferEncoding, callback: Callback) => void;
     private dFinalImpl?: (this: Duplex, callback: Callback) => void;
     allowHalfOpen: boolean;
@@ -1768,6 +2181,7 @@ export class Duplex extends Readable {
         this.dWriteImpl = options?.write;
         this.dFinalImpl = options?.final;
         if (options?.construct) this._kmlConstructImpl = options.construct as (this: Stream, callback: (error?: Error | null) => void) => void;
+        if (options?.signal) addAbortSignal(options.signal, this);
         construct(this, () => {
             const r = this._readableState!;
             if (r.needReadable) maybeReadMore(this, r);
@@ -1857,11 +2271,18 @@ export class Transform extends Duplex {
     private flushImpl?: (this: Transform, callback: TransformCallback) => void;
     private pendingCallback: Callback | null = null;
 
+    // Whether Transform's own `_final` ran; a subclass that overrides it
+    // (zlib's) has the flush run at 'prefinish' instead, as Node's does.
+    private ownFinalRan = false;
+
     constructor(options?: TransformOptions) {
         super(options);
         this._readableState!.sync = false;
         this.transformImpl = options?.transform;
         this.flushImpl = options?.flush;
+        this.on('prefinish', () => {
+            if (!this.ownFinalRan) this.transformFinal(undefined);
+        });
     }
 
     _transform(chunk: any, encoding: BufferEncoding, callback: TransformCallback): void {
@@ -1881,19 +2302,25 @@ export class Transform extends Duplex {
     }
 
     _final(callback: Callback): void {
+        this.ownFinalRan = true;
+        this.transformFinal(callback);
+    }
+
+    private transformFinal(callback: Callback | undefined): void {
         if (!this.destroyed) {
             this._flush((er?: Error | null, data?: any) => {
                 if (er) {
-                    callback(er);
+                    if (callback) callback(er);
+                    else this.destroy(er);
                     return;
                 }
                 if (data !== undefined && data !== null) this.push(data);
                 this.push(null);
-                callback();
+                if (callback) callback();
             });
         } else {
             this.push(null);
-            callback();
+            if (callback) callback();
         }
     }
 
@@ -2084,73 +2511,317 @@ function isReadableSide(stream: Stream): boolean {
 // pipeline(source, ...transforms, destination, callback): pipes each stream
 // into the next; the callback runs once the last has finished, or with the
 // first error, every stream then destroyed. Returns the last stream.
-export function pipeline(...args: any[]): Stream {
-    const callback = args[args.length - 1] as (err?: Error | null) => void;
-    const streams: Stream[] = [];
-    for (let i = 0; i < args.length - 1; i++) streams.push(args[i] as Stream);
-    return pipelineImpl(streams, callback);
+// _kmlFromWeb is Readable.fromWeb for code generation: klain:http's request
+// body (a web stream of Uint8Array chunks) as a Node Readable.
+export function _kmlFromWeb(web: ReadableStream<Uint8Array>): any {
+    const reader = web.getReader();
+    const r: Readable = new Readable({
+        read() {
+            reader.read().then((res) => {
+                if (res.done) r.push(null);
+                else r.push(res.value);
+            }, (err: any) => { r.destroy(err as Error); });
+        },
+    });
+    return r;
 }
 
-function pipelineImpl(streams: Stream[], callback: (err?: Error | null) => void): Stream {
-    if (streams.length < 2) throw new StreamError('ERR_MISSING_ARGS', 'The "streams" argument must be specified');
+// ---- add-abort-signal.js ----
+
+// addAbortSignal destroys stream with an AbortError when signal aborts
+// (at once when it already has).
+export function addAbortSignal(signal: any, stream: any): any {
+    if (signal === null || typeof signal !== 'object' || signal.aborted === undefined) {
+        throw new StreamError('ERR_INVALID_ARG_TYPE', 'The "signal" argument must be an instance of AbortSignal. Received ' + describeReceived(signal));
+    }
+    if (!(stream instanceof Stream)) {
+        throw new StreamError('ERR_INVALID_ARG_TYPE', 'The "stream" argument must be an instance of ReadableStream, WritableStream, or Stream. Received ' + describeReceived(stream));
+    }
+    return addAbortSignalNoValidate(signal, stream);
+}
+
+function addAbortSignalNoValidate(signal: AbortSignal, stream: Stream): Stream {
+    const onAbort = (): void => {
+        stream.destroy(new AbortError(undefined, signal.reason));
+    };
+    if (signal.aborted) {
+        onAbort();
+    } else {
+        signal.addEventListener('abort', onAbort, { once: true });
+        finished(stream, () => { signal.removeEventListener('abort', onAbort); });
+    }
+    return stream;
+}
+
+// ---- pipeline.js ----
+
+// isStreamValue / isIterableValue / isReadableValue / isWritableValue are
+// Node's internal/streams/utils predicates over any value.
+function isStreamValue(v: any): boolean {
+    return v instanceof Stream;
+}
+
+function isIterableValue(v: any, asyncOnly?: boolean): boolean {
+    if (v === null || v === undefined || typeof v !== 'object' && typeof v !== 'function' && typeof v !== 'string') return false;
+    if (asyncOnly === true) return typeof v[Symbol.asyncIterator] === 'function';
+    return typeof v[Symbol.asyncIterator] === 'function' || typeof v[Symbol.iterator] === 'function';
+}
+
+function isReadableValue(v: any): boolean {
+    if (!isStreamValue(v)) return false;
+    const s: Stream = v;
+    if (streamDestroyed(s)) return false;
+    return isReadableNodeStream(s) && s._readableState!.readable && !isReadableFinished(s, false);
+}
+
+function isWritableValue(v: any): boolean {
+    if (!isStreamValue(v)) return false;
+    const s: Stream = v;
+    if (streamDestroyed(s)) return false;
+    const w = s._writableState;
+    return isWritableNodeStream(s) && w !== null && w.writable && !w.ending;
+}
+
+// destroyStreamWith is destroy.js's destroyer: destroy a stream with err.
+function destroyStreamWith(stream: any, err: Error | null): void {
+    if (stream === null || stream === undefined) return;
+    if (isStreamValue(stream)) {
+        const s: Stream = stream;
+        s.destroy(err);
+    }
+}
+
+interface StreamDestroyer {
+    destroy: (err: Error | null | undefined) => void;
+    cleanup: () => void;
+}
+
+function destroyer(stream: Stream, reading: boolean, writing: boolean): StreamDestroyer {
+    let done = false;
+    stream.on('close', () => { done = true; });
+    const cleanup = finished(stream, { readable: reading, writable: writing }, (err?: Error | null) => { done = !err; });
+    return {
+        destroy: (err: Error | null | undefined) => {
+            if (done) return;
+            done = true;
+            stream.destroy(err ?? new StreamError('ERR_STREAM_DESTROYED', 'Cannot call pipe after a stream was destroyed'));
+        },
+        cleanup,
+    };
+}
+
+async function* fromReadableGen(val: Readable): AsyncGenerator<any> {
+    for await (const chunk of val) yield chunk;
+}
+
+function makeAsyncIterable(val: any): any {
+    if (isIterableValue(val)) return val;
+    if (isStreamValue(val) && isReadableNodeStream(val)) return fromReadableGen(val);
+    throw new StreamError('ERR_INVALID_ARG_TYPE', 'The "val" argument must be an instance of Readable, Iterable, or AsyncIterable. Received ' + describeReceived(val));
+}
+
+async function pumpToNode(iterable: any, writable: Writable, finish: (err?: Error | null) => void, end: boolean): Promise<void> {
     let error: Error | null = null;
-    const destroys: ((err: Error | null) => void)[] = [];
-    let finishCount = 0;
-    const finishImpl = (err: Error | null | undefined, final: boolean) => {
-        if (err && (error === null || (error as StreamError).code === 'ERR_STREAM_PREMATURE_CLOSE')) error = err;
-        if (error === null && !final) return;
-        while (destroys.length > 0) destroys.shift()!(error);
-        if (final) {
-            const e = error;
-            process.nextTick(() => {
-                if (e) callback(e);
-                else callback();
-            });
+    let onresolve: (() => void) | null = null;
+    const resume = (err?: Error | null): void => {
+        if (err) error = err;
+        if (onresolve !== null) {
+            const callback = onresolve;
+            onresolve = null;
+            callback();
         }
     };
-    const finish = (err?: Error | null) => { finishImpl(err, --finishCount === 0); };
-    const finishOnlyHandleError = (err?: Error | null) => { finishImpl(err, false); };
-    let ret: Stream = streams[0];
+    const wait = (): Promise<void> => new Promise<void>((resolve, reject) => {
+        if (error) {
+            reject(error);
+        } else {
+            onresolve = () => {
+                if (error) reject(error);
+                else resolve();
+            };
+        }
+    });
+    writable.on('drain', resume);
+    const cleanup = finished(writable, { readable: false }, resume);
+    try {
+        if (writable.writableNeedDrain) await wait();
+        for await (const chunk of iterable) {
+            if (!writable.write(chunk)) await wait();
+        }
+        if (end) {
+            writable.end();
+            await wait();
+        }
+        finish();
+    } catch (err) {
+        const e = err as Error;
+        finish(error !== e ? aggregateTwoErrors(error, e) : e);
+    } finally {
+        cleanup();
+        writable.off('drain', resume);
+    }
+}
+
+export interface PipelineOptions {
+    signal?: AbortSignal;
+    end?: boolean;
+}
+
+// pipeline(...streams, callback): each stage a stream, an (async) iterable, an
+// async generator function, or — last — a function returning a promise.
+export function pipeline(...args: any[]): any {
+    const callback = args[args.length - 1];
+    validateFunction(callback, 'streams[stream.length - 1]');
+    let called = false;
+    const once = (err?: Error, value?: any): void => {
+        if (called) return;
+        called = true;
+        callback(err, value);
+    };
+    return pipelineImpl(args.slice(0, args.length - 1), once, undefined);
+}
+
+function pipelineImpl(streamsIn: any[], callback: (err?: Error, value?: any) => void, opts: PipelineOptions | undefined): any {
+    let streams: any[] = streamsIn;
+    if (streams.length === 1 && Array.isArray(streams[0])) streams = streams[0];
+    if (streams.length < 2) throw new StreamError('ERR_MISSING_ARGS', 'The "streams" argument must be specified');
+    const ac = new AbortController();
+    const signal = ac.signal;
+    const outerSignal = opts?.signal;
+    const lastStreamCleanup: (() => void)[] = [];
+    let error: Error | undefined = undefined;
+    let value: any = undefined;
+    const destroys: ((err: Error | null | undefined) => void)[] = [];
+    let finishCount = 0;
+
+    const finishImpl = (err: Error | null | undefined, final: boolean): void => {
+        if (err && (!error || (error as StreamError).code === 'ERR_STREAM_PREMATURE_CLOSE' || error.name === 'AbortError')) error = err;
+        if (!error && !final) return;
+        while (destroys.length > 0) destroys.shift()!(error);
+        if (outerSignal) outerSignal.removeEventListener('abort', abort);
+        ac.abort();
+        if (final) {
+            if (!error) for (const fn of lastStreamCleanup) fn();
+            const e = error;
+            const v = value;
+            process.nextTick(() => { callback(e, v); });
+        }
+    };
+    const finish = (err?: Error | null): void => { finishImpl(err, --finishCount === 0); };
+    const finishOnlyHandleError = (err?: Error | null): void => { finishImpl(err, false); };
+    const abort = (): void => { finishImpl(new AbortError(undefined, outerSignal?.reason), false); };
+    if (outerSignal) outerSignal.addEventListener('abort', abort, { once: true });
+
+    let ret: any = undefined;
     for (let i = 0; i < streams.length; i++) {
-        const stream = streams[i];
+        const stream: any = streams[i];
         const reading = i < streams.length - 1;
         const writing = i > 0;
-        destroys.push(destroyer(stream, reading, writing));
-        stream.on('error', (err: Error) => {
-            if (err && (err as StreamError).code !== 'ERR_STREAM_PREMATURE_CLOSE') finishOnlyHandleError(err);
-        });
-        if (i > 0) {
-            finishCount += 2;
-            pipeWithFinish(ret, stream, finish, finishOnlyHandleError);
-            ret = stream;
+        const next: any = i + 1 < streams.length ? streams[i + 1] : null;
+        const end = reading || opts?.end !== false;
+        const isLastStream = i === streams.length - 1;
+
+        if (isStreamValue(stream)) {
+            const st: Stream = stream;
+            if (next !== null && isStreamValue(next) && (streamDestroyed(next) || (next as Stream)._readableState?.closed || (next as Stream)._writableState?.closed)) {
+                throw new StreamError('ERR_STREAM_UNABLE_TO_PIPE', 'Cannot pipe to a closed or destroyed stream');
+            }
+            if (end) {
+                const d = destroyer(st, reading, writing);
+                destroys.push(d.destroy);
+                if (isReadableValue(st) && isLastStream) lastStreamCleanup.push(d.cleanup);
+            }
+            // Stream errors after the pipe has completed.
+            const onError = (err: any): void => {
+                if (err && err.name !== 'AbortError' && err.code !== 'ERR_STREAM_PREMATURE_CLOSE') finishOnlyHandleError(err as Error);
+            };
+            st.on('error', onError);
+            if (isReadableValue(st) && isLastStream) lastStreamCleanup.push(() => { st.removeListener('error', onError); });
+        }
+
+        if (i === 0) {
+            if (typeof stream === 'function') {
+                ret = stream({ signal });
+                if (!isIterableValue(ret)) {
+                    throw new StreamError('ERR_INVALID_RETURN_VALUE', 'Expected Iterable, AsyncIterable or Stream to be returned from the "source" function.');
+                }
+            } else if (isIterableValue(stream) || (isStreamValue(stream) && isReadableNodeStream(stream))) {
+                ret = stream;
+            } else {
+                ret = Duplex.from(stream);
+            }
+        } else if (typeof stream === 'function') {
+            ret = makeAsyncIterable(ret);
+            ret = stream(ret, { signal });
+            if (reading) {
+                if (!isIterableValue(ret, true)) {
+                    throw new StreamError('ERR_INVALID_RETURN_VALUE', 'Expected AsyncIterable to be returned from the "transform[' + String(i - 1) + ']" function.');
+                }
+            } else {
+                // The last stage is not a stream: a proxy stream, so pipeline()
+                // always returns a stream.
+                const pt = new PassThrough({ objectMode: true });
+                const then = ret?.then;
+                if (typeof then === 'function') {
+                    finishCount++;
+                    const endPt = end;
+                    ret.then((val: any) => {
+                        value = val;
+                        if (val !== null && val !== undefined) pt.write(val);
+                        if (endPt) pt.end();
+                        process.nextTick(() => { finish(); });
+                    }, (err: any) => {
+                        pt.destroy(err as Error);
+                        process.nextTick(() => { finish(err as Error); });
+                    });
+                } else if (isIterableValue(ret, true)) {
+                    finishCount++;
+                    pumpToNode(ret, pt, finish, end);
+                } else {
+                    throw new StreamError('ERR_INVALID_RETURN_VALUE', 'Expected AsyncIterable or Promise to be returned from the "destination" function.');
+                }
+                ret = pt;
+                const d = destroyer(pt, false, true);
+                destroys.push(d.destroy);
+                if (isLastStream) lastStreamCleanup.push(d.cleanup);
+            }
+        } else if (isStreamValue(stream)) {
+            const dst: Stream = stream;
+            if (isStreamValue(ret) && isReadableNodeStream(ret)) {
+                finishCount += 2;
+                const cleanup = pipeWithFinish(ret, dst, finish, finishOnlyHandleError, end);
+                if (isReadableValue(dst) && isLastStream) lastStreamCleanup.push(cleanup);
+            } else if (isIterableValue(ret)) {
+                finishCount++;
+                pumpToNode(ret, dst as Writable, finish, end);
+            } else {
+                throw new StreamError('ERR_INVALID_ARG_TYPE', 'The "val" argument must be an instance of Readable, Iterable, AsyncIterable, ReadableStream, or TransformStream. Received ' + describeReceived(ret));
+            }
+            ret = dst;
+        } else {
+            ret = Duplex.from(stream);
         }
     }
+    if (signal.aborted || outerSignal?.aborted) process.nextTick(abort);
     return ret;
 }
 
-function destroyer(stream: Stream, reading: boolean, writing: boolean): (err: Error | null) => void {
-    let done = false;
-    stream.on('close', () => { done = true; });
-    finished(stream, { readable: reading, writable: writing }, (err?: Error | null) => { done = !err; });
-    return (err: Error | null) => {
-        if (done) return;
-        done = true;
-        stream.destroy(err ?? new StreamError('ERR_STREAM_DESTROYED', 'Cannot call pipe after a stream was destroyed'));
-    };
-}
-
-function pipeWithFinish(src: Stream, dst: Stream, finish: (err?: Error | null) => void, finishOnlyHandleError: (err?: Error | null) => void): void {
+function pipeWithFinish(src: Stream, dst: Stream, finish: (err?: Error | null) => void, finishOnlyHandleError: (err?: Error | null) => void, end: boolean): () => void {
     let ended = false;
     dst.on('close', () => {
         if (!ended) finishOnlyHandleError(new StreamError('ERR_STREAM_PREMATURE_CLOSE', 'Premature close'));
     });
     src._kmlPipe(dst, false);
-    const endFn = () => {
-        ended = true;
-        dst._kmlEnd();
-    };
-    if (isReadableFinished(src, true)) process.nextTick(endFn);
-    else src.once('end', endFn);
+    if (end) {
+        const endFn = () => {
+            ended = true;
+            dst._kmlEnd();
+        };
+        if (isReadableFinished(src, true)) process.nextTick(endFn);
+        else src.once('end', endFn);
+    } else {
+        finish();
+    }
     finished(src, { readable: true, writable: false }, (err?: Error | null) => {
         const r = src._readableState;
         if (err && (err as StreamError).code === 'ERR_STREAM_PREMATURE_CLOSE' && r !== null && r.ended && !r.errored && !r.errorEmitted) {
@@ -2160,7 +2831,294 @@ function pipeWithFinish(src: Stream, dst: Stream, finish: (err?: Error | null) =
             finish(err);
         }
     });
-    finished(dst, { readable: false, writable: true }, finish);
+    return finished(dst, { readable: false, writable: true }, finish);
+}
+
+// ---- duplexify.js ----
+
+// A duplexify/from promise-with-resolvers state: the feed between a
+// Duplex's writable half and the async generator a function body consumes.
+class AsyncGenFeed {
+    promise: Promise<any> | null = null;
+    resolve: ((v: any) => void) | null = null;
+    ac: AbortController = new AbortController();
+    constructor() { this.reset(); }
+    reset(): void {
+        this.promise = new Promise<any>((resolve) => { this.resolve = resolve; });
+    }
+    send(msg: any): void {
+        const r = this.resolve;
+        this.resolve = null;
+        if (r !== null) r(msg);
+    }
+}
+
+async function* feedSource(feed: AsyncGenFeed): AsyncGenerator<any> {
+    while (true) {
+        const p = feed.promise;
+        feed.promise = null;
+        const msg: any = await p;
+        const cb: any = msg.cb;
+        process.nextTick(() => { cb(); });
+        if (msg.done) return;
+        if (feed.ac.signal.aborted) throw new AbortError(undefined, feed.ac.signal.reason);
+        feed.reset();
+        yield msg.chunk;
+    }
+}
+
+export function duplexify(body: any, name: string): Duplex {
+    if (body instanceof Duplex) return body;
+    if (isStreamValue(body) && isReadableNodeStream(body)) return duplexifyPair(body, undefined);
+    if (isStreamValue(body) && isWritableNodeStream(body)) return duplexifyPair(undefined, body);
+    if (isStreamValue(body)) return new Duplex({ writable: false, readable: false });
+    if (typeof body === 'function') {
+        const feed = new AsyncGenFeed();
+        const value: any = body(feedSource(feed), { signal: feed.ac.signal });
+        const write = (chunk: any, encoding: BufferEncoding, cb: Callback): void => { feed.send({ chunk, done: false, cb }); };
+        const final = (cb: Callback): void => { feed.send({ done: true, cb }); };
+        const destroy = (err: Error | null, cb: Callback): void => {
+            feed.ac.abort(err);
+            // Unblock a source waiting for the next write, so the readable
+            // side sees the abort.
+            if (feed.resolve !== null) feed.send({ done: true, cb: () => {} });
+            cb(err);
+        };
+        if (value instanceof Duplex) return value;
+        if (isIterableValue(value)) {
+            return readableFrom(value, { objectMode: true }, { write, final, destroy }) as Duplex;
+        }
+        const then = value?.then;
+        if (typeof then === 'function') {
+            let d: Duplex | null = null;
+            const promise: Promise<any> = value.then((val: any) => {
+                if (val !== null && val !== undefined) {
+                    throw new StreamError('ERR_INVALID_RETURN_VALUE', 'Expected nully to be returned from the "' + name + '" function.');
+                }
+            }, (err: any) => {
+                destroyStreamWith(d, err as Error);
+            });
+            d = new Duplex({
+                objectMode: true,
+                readable: false,
+                write(chunk: any, encoding: BufferEncoding, cb: Callback) { write(chunk, encoding, cb); },
+                final(cb: Callback) {
+                    final(async () => {
+                        try {
+                            await promise;
+                            process.nextTick(() => { cb(null); });
+                        } catch (err) {
+                            process.nextTick(() => { cb(err as Error); });
+                        }
+                    });
+                },
+                destroy(err: Error | null, cb: Callback) { destroy(err, cb); },
+            });
+            return d;
+        }
+        throw new StreamError('ERR_INVALID_RETURN_VALUE', 'Expected Iterable, AsyncIterable or AsyncFunction to be returned from the "' + name + '" function.');
+    }
+    if (isIterableValue(body)) {
+        return readableFrom(body, { objectMode: true }, { writable: false }) as Duplex;
+    }
+    if (body !== null && body !== undefined && (typeof body.writable === 'object' || typeof body.readable === 'object')) {
+        const readable = body.readable ? (isStreamValue(body.readable) && isReadableNodeStream(body.readable) ? body.readable : duplexify(body.readable, name)) : undefined;
+        const writable = body.writable ? (isStreamValue(body.writable) && isWritableNodeStream(body.writable) ? body.writable : duplexify(body.writable, name)) : undefined;
+        return duplexifyPair(readable, writable);
+    }
+    const then = body?.then;
+    if (typeof then === 'function') {
+        let d: Duplex | null = null;
+        body.then((val: any) => {
+            if (val !== null && val !== undefined) d!.push(val);
+            d!.push(null);
+        }, (err: any) => {
+            destroyStreamWith(d, err as Error);
+        });
+        d = new Duplex({ objectMode: true, writable: false, read() {} });
+        return d;
+    }
+    throw new StreamError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type Blob, ReadableStream, WritableStream, Stream, Iterable, AsyncIterable, Function, { readable, writable } pair, or Promise. Received ' + describeReceived(body));
+}
+
+function duplexifyPair(rIn: any, wIn: any): Duplex {
+    const r: any = rIn;
+    const w: any = wIn;
+    let readable = isReadableValue(r);
+    let writable = isWritableValue(w);
+    let ondrain: Callback | null = null;
+    let onfinish: Callback | null = null;
+    let onreadable: (() => void) | null = null;
+    let onclose: Callback | null = null;
+    let d: Duplex | null = null;
+    const onfinished = (err?: Error | null): void => {
+        const cb = onclose;
+        onclose = null;
+        if (cb !== null) cb(err);
+        else if (err) d!.destroy(err);
+    };
+    const doRead = (): void => {
+        while (true) {
+            const buf = (r as Readable).read();
+            if (buf === null) {
+                onreadable = doRead;
+                return;
+            }
+            if (!d!.push(buf)) return;
+        }
+    };
+    d = new Duplex({
+        readableObjectMode: !!r?.readableObjectMode,
+        writableObjectMode: !!w?.writableObjectMode,
+        readable,
+        writable,
+        write(chunk: any, encoding: BufferEncoding, callback: Callback) {
+            if ((w as Writable).write(chunk, encoding)) callback();
+            else ondrain = callback;
+        },
+        final(callback: Callback) {
+            (w as Writable).end();
+            onfinish = callback;
+        },
+        read() { doRead(); },
+        destroy(err: Error | null, callback: Callback) {
+            let e = err;
+            if (!e && onclose !== null) e = new AbortError();
+            onreadable = null;
+            ondrain = null;
+            onfinish = null;
+            if (onclose === null) {
+                callback(e);
+            } else {
+                onclose = callback;
+                destroyStreamWith(w, e);
+                destroyStreamWith(r, e);
+            }
+        },
+    });
+    if (writable) {
+        finished(w as Stream, (err?: Error | null) => {
+            writable = false;
+            if (err) destroyStreamWith(r, err);
+            onfinished(err);
+        });
+        (w as Stream).on('drain', () => {
+            if (ondrain !== null) {
+                const cb = ondrain;
+                ondrain = null;
+                cb();
+            }
+        });
+        (w as Stream).on('finish', () => {
+            if (onfinish !== null) {
+                const cb = onfinish;
+                onfinish = null;
+                cb();
+            }
+        });
+    }
+    if (readable) {
+        finished(r as Stream, (err?: Error | null) => {
+            readable = false;
+            if (err) destroyStreamWith(w, err);
+            onfinished(err);
+        });
+        (r as Stream).on('readable', () => {
+            if (onreadable !== null) {
+                const cb = onreadable;
+                onreadable = null;
+                cb();
+            }
+        });
+        (r as Stream).on('end', () => { d!.push(null); });
+    }
+    return d;
+}
+
+// ---- compose.js ----
+
+// compose(...streams): one Duplex writing into the first stage and reading
+// from the last, the stages piped together.
+export function compose(...streamsIn: any[]): Duplex {
+    if (streamsIn.length === 0) throw new StreamError('ERR_MISSING_ARGS', 'The "streams" argument must be specified');
+    if (streamsIn.length === 1) return Duplex.from(streamsIn[0]);
+    const orgStreams = streamsIn.slice();
+    const streams: any[] = streamsIn.slice();
+    if (typeof streams[0] === 'function') streams[0] = Duplex.from(streams[0]);
+    if (typeof streams[streams.length - 1] === 'function') streams[streams.length - 1] = Duplex.from(streams[streams.length - 1]);
+    for (let n = 0; n < streams.length; ++n) {
+        if (!isStreamValue(streams[n])) continue;
+        if (n < streams.length - 1 && !isReadableValue(streams[n])) {
+            throw new StreamError('ERR_INVALID_ARG_VALUE', "The argument 'streams[" + String(n) + "]' must be readable. Received " + describeReceived(orgStreams[n]));
+        }
+        if (n > 0 && !isWritableValue(streams[n])) {
+            throw new StreamError('ERR_INVALID_ARG_VALUE', "The argument 'streams[" + String(n) + "]' must be writable. Received " + describeReceived(orgStreams[n]));
+        }
+    }
+    let ondrain: Callback | null = null;
+    let onfinish: Callback | null = null;
+    let onclose: Callback | null = null;
+    let d: Duplex | null = null;
+    const head: any = streams[0];
+    let readable = false;
+    let writable = false;
+    const onfinished = (err?: Error | null): void => {
+        const cb = onclose;
+        onclose = null;
+        if (cb !== null) cb(err);
+        else if (err) d!.destroy(err);
+        else if (!readable && !writable) d!.destroy(null);
+    };
+    const tail: any = pipelineImpl(streams, onfinished, undefined);
+    writable = isWritableValue(head);
+    readable = isReadableValue(tail);
+    d = new Duplex({
+        writableObjectMode: !!head?.writableObjectMode,
+        readableObjectMode: !!tail?.readableObjectMode,
+        writable,
+        readable,
+        write(chunk: any, encoding: BufferEncoding, callback: Callback) {
+            if ((head as Writable).write(chunk, encoding)) callback();
+            else ondrain = callback;
+        },
+        final(callback: Callback) {
+            (head as Writable).end();
+            onfinish = callback;
+        },
+        read() { (tail as Readable).resume(); },
+        destroy(err: Error | null, callback: Callback) {
+            let e = err;
+            if (!e && onclose !== null) e = new AbortError();
+            ondrain = null;
+            onfinish = null;
+            if (isStreamValue(tail)) destroyStreamWith(tail, e);
+            if (onclose === null) callback(e);
+            else onclose = callback;
+        },
+    });
+    if (writable) {
+        (head as Stream).on('drain', () => {
+            if (ondrain !== null) {
+                const cb = ondrain;
+                ondrain = null;
+                cb();
+            }
+        });
+        finished(tail as Stream, () => {
+            if (onfinish !== null) {
+                const cb = onfinish;
+                onfinish = null;
+                cb();
+            }
+        });
+    }
+    if (readable) {
+        (tail as Stream).on('data', (chunk: any) => {
+            if (!d!.push(chunk)) (tail as Readable).pause();
+        });
+        (tail as Stream).on('end', () => { d!.push(null); });
+    }
+    return d;
 }
 
 export function duplexPair(options?: DuplexOptions): [Duplex, Duplex] {
@@ -2202,12 +3160,17 @@ class PairSide extends Duplex {
 
 // stream/promises.
 export const promises = {
-    pipeline(...streams: Stream[]): Promise<void> {
-        return new Promise<void>((resolve, reject) => {
-            pipelineImpl(streams, (err?: Error | null) => {
+    pipeline(...streams: any[]): Promise<any> {
+        return new Promise<any>((resolve, reject) => {
+            let opts: PipelineOptions | undefined = undefined;
+            const last: any = streams[streams.length - 1];
+            if (last !== null && last !== undefined && typeof last === 'object' && !isStreamValue(last) && !isIterableValue(last)) {
+                opts = streams.pop();
+            }
+            pipelineImpl(streams, (err?: Error, value?: any) => {
                 if (err) reject(err);
-                else resolve();
-            });
+                else resolve(value);
+            }, opts);
         });
     },
     finished(stream: Stream, options?: FinishedOptions): Promise<void> {

@@ -351,7 +351,11 @@ func (e *Emitter) emitDataViewSet(mem *ast.MemberExpression, kind string, args [
 	var narrow string
 	if spec.bigint {
 		// Spec: setBigInt64/setBigUint64 take a BigInt, not a Number
-		// (TypeError otherwise) — enforced at compile time here.
+		// (TypeError otherwise) — enforced at compile time here; an `any`
+		// holding one is unboxed.
+		if isUnconstrainedDynamic(rawVal.Ty) {
+			rawVal = e.coerce(rawVal, BigIntType())
+		}
 		if !rawVal.Ty.IsBigInt {
 			return Value{}, fmt.Errorf("%d:%d: DataView.set%s expects a bigint value (e.g. 1n)", pos.Line, pos.Col, kind)
 		}

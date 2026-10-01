@@ -25,26 +25,7 @@ import (
 
 // UsesTtyShim reports whether the program used any terminal-control primitive,
 // so the CLI driver links the embedded C shim (EmbeddedCSources).
-func (e *Emitter) UsesTtyShim() bool { return e.usedTtyRead || e.usedTermiosRaw || e.usedWinSize }
-
-// ensureTtySetRaw declares the raw-mode toggle once.
-func (e *Emitter) ensureTtySetRaw() {
-	if e.usedTermiosRaw {
-		return
-	}
-	e.usedTermiosRaw = true
-	e.emitGlobal("declare void @__kml_tty_set_raw(i32)")
-}
-
-// ensureTtyWinSize declares the winsize getters once.
-func (e *Emitter) ensureTtyWinSize() {
-	if e.usedWinSize {
-		return
-	}
-	e.usedWinSize = true
-	e.emitGlobal("declare i32 @__kml_tty_cols(i32)")
-	e.emitGlobal("declare i32 @__kml_tty_rows(i32)")
-}
+func (e *Emitter) UsesTtyShim() bool { return e.usedTtyRead }
 
 // ensureTtyRead declares the raw stdin readers once.
 func (e *Emitter) ensureTtyRead() {
@@ -54,51 +35,6 @@ func (e *Emitter) ensureTtyRead() {
 	e.usedTtyRead = true
 	e.emitGlobal("declare i32 @__kml_tty_read_byte()")
 	e.emitGlobal("declare ptr @__kml_tty_read_key(i32)")
-}
-
-// emitProcessSetRawMode implements process.stdin.setRawMode(enabled): the
-// libuv UV_TTY_MODE_RAW termios transform on fd 0 (disables canonical mode,
-// echo, and signal generation — Ctrl-C stops delivering SIGINT and must be
-// watched for as the raw 0x03 byte, exactly as Node behaves). Passing false
-// restores the terminal to the state captured on the first enable.
-func (e *Emitter) emitProcessSetRawMode(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: process.stdin.setRawMode takes exactly 1 argument (enabled)", pos.Line, pos.Col)
-	}
-	v, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	v = e.coerce(v, TypeBool)
-	flag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i32", flag, v.Ref))
-	e.ensureTtySetRaw()
-	e.emitInstr(fmt.Sprintf("call void @__kml_tty_set_raw(i32 %s)", flag))
-	return Value{Ty: TypeVoid}, nil
-}
-
-// emitProcessWinSize implements process.stdout/.stderr `.columns` / `.rows`:
-// a live ioctl(TIOCGWINSZ) read (never cached, matching Node). The result is
-// `number | undefined` (TDD-00187 Stage 4): when the fd isn't a terminal
-// (piped/redirected) the shim returns -1 and the value is a real absent
-// `{ i1, i64 }` — Node's `undefined`, retiring the old 80x24 stand-in
-// divergence.
-func (e *Emitter) emitProcessWinSize(fd int, field string) Value {
-	e.ensureTtyWinSize()
-	fn := "__kml_tty_cols"
-	if field == "rows" {
-		fn = "__kml_tty_rows"
-	}
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @%s(i32 %d)", r, fn, fd))
-	w := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", w, r))
-	present := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", present, w))
-	// Absent payload stays a deterministic zero (the { i1, T } convention).
-	payload := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", payload, present, w))
-	return e.wrapUndefinedable(Value{Ref: payload, Ty: TypeI64}, present)
 }
 
 // emitTtyModuleCall dispatches `tty__kml_builtin.<member>(...)` — the

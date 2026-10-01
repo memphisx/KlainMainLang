@@ -5,12 +5,12 @@
   "statusPage": "PERFORMANCE-TIMING.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "10/10",
-    "loosePct": 100,
-    "strict": "2/10",
-    "strictPct": 20
+    "loose": "11/12",
+    "loosePct": 92,
+    "strict": "6/12",
+    "strictPct": 50
   },
-  "lede": "Wall-clock and monotonic timing grouped together, the way real JS/Node group them. The recurring divergence is UTC-everywhere Date: construction, getters, and formatting all ignore local time for deterministic output regardless of machine/CI timezone, and the plain-number Date representation means `-1` stands in for an unparseable date (no NaN) and arithmetic does numeric durations rather than string coercion. performance.now() is a CLOCK_MONOTONIC reading relative to a process-start time origin, and performance.mark/measure are a Map-backed last-write-wins pair with no PerformanceObserver/getEntriesByName machinery behind them.",
+  "lede": "Wall-clock and monotonic timing grouped together, the way real JS/Node group them. Date follows the host's time zone as Node's does (local getters, the component constructor, toString), with Invalid Date for an unparseable string; the remaining divergence is the plain-number Date representation, so a setter needs a named variable and a zone outside the built-in name table prints its abbreviation in toString. performance and perf_hooks are Node's own user-timing code ported to TypeScript: marks and measures are entries on a timeline, observers receive them on a later turn of the loop, and histograms time the event loop.",
   "entries": [
     {
       "id": "performance.now",
@@ -18,7 +18,7 @@
       "statusRow": "performance.now()",
       "signature": "performance.now(): number",
       "badge": "exact",
-      "description": "Milliseconds since the program's time origin (process start), as a double (sub-millisecond precision). The origin is captured once at process start (an llvm.global_ctors constructor), matching the spec's origin-relative reading. Unlike Date.now(), it is not tied to wall-clock time.",
+      "description": "Milliseconds since the program's time origin (process start), as a double. The origin is captured once at process start, matching the spec's origin-relative reading; the clock is monotonic and nanosecond-grained, like libuv's uv_hrtime. Unlike Date.now(), it is not tied to wall-clock time.",
       "returns": {
         "type": "number",
         "desc": "Milliseconds since process start, as a double."
@@ -36,21 +36,18 @@
     },
     {
       "id": "performance.mark",
-      "name": "performance.mark(name) / performance.measure(name, start, end?)",
-      "statusRow": "performance.mark(name) / performance.measure(name, start, end?)",
-      "signature": "performance.mark(name: string): void; performance.measure(name: string, startMark: string, endMark?: string): number",
-      "badge": "caveats",
-      "description": "Named timing marks on top of performance.now(), backed by a Map<string, number>. mark(name) records \"now\" under a name; measure(label, startMark, endMark?) returns the elapsed milliseconds between two marks as a plain number. endMark defaults to the current performance.now() reading when omitted, and measuring against a name that was never marked throws — matching real performance.measure().",
+      "name": "performance.mark / measure / getEntries* / clearMarks / clearMeasures / timerify / timeOrigin",
+      "statusRow": "performance.mark / measure / getEntries* / clearMarks / clearMeasures / timerify / timeOrigin",
+      "signature": "performance.mark(name: string, options?: PerformanceMarkOptions): PerformanceMark; performance.measure(name: string, startMark?: string, endMark?: string): PerformanceMeasure; performance.measure(name: string, options: PerformanceMeasureOptions): PerformanceMeasure",
+      "badge": "exact",
+      "description": "User timing as Node keeps it. mark(name) records a PerformanceMark (with an optional structured-cloned detail and startTime); measure(name, start?, end?) or measure(name, options) records a PerformanceMeasure spanning two marks or timestamps, through now when the end is omitted. getEntries/getEntriesByName/getEntriesByType read the timeline in start order; a mark that was never set throws a SyntaxError DOMException.",
       "returns": {
-        "type": "number",
-        "desc": "Elapsed milliseconds from measure(); mark() returns nothing."
+        "type": "PerformanceMark | PerformanceMeasure",
+        "desc": "The recorded entry."
       },
       "exampleKey": "globals/globals",
-      "snippet": "performance.mark(\"loop-start\")\nfor (let i = 0; i < 200000; i++) { arr2.push(i) }\nperformance.mark(\"loop-end\")\nconst loopMs: number = performance.measure(\"loop\", \"loop-start\", \"loop-end\")",
-      "differences": [
-        "Re-marking a name overwrites its timestamp — last-write-wins, not a full ordered entries list",
-        "`measure()` returns the elapsed milliseconds directly as a plain number rather than a `PerformanceMeasure` object, and its own `name` argument is evaluated but not stored anywhere"
-      ],
+      "snippet": "performance.mark(\"loop-start\")\nfor (let i = 0; i < 200000; i++) { arr2.push(i) }\nperformance.mark(\"loop-end\")\nconst loopMs: number = performance.measure(\"loop\", \"loop-start\", \"loop-end\").duration",
+      "differences": [],
       "seeAlso": [
         "performance.now"
       ],
@@ -64,7 +61,7 @@
       "statusRow": "Date",
       "signature": "new Date(); new Date(ms); new Date(isoString); new Date(year, month, day?, hours?, minutes?, seconds?, ms?)",
       "badge": "caveats",
-      "description": "A thin wrapper over milliseconds-since-epoch. Constructs from no argument (now), a millisecond number, an ISO string, or year/month/day/... fields (month 0-indexed, omitted trailing fields defaulting like real JS). Provides getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds, getTime/valueOf, and toISOString.",
+      "description": "A thin wrapper over milliseconds-since-epoch. Constructs from no argument (now), a millisecond number, an ISO string, or year/month/day/... fields (month 0-indexed, omitted trailing fields defaulting like real JS). Provides the local getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds and their getUTC* forms, getTimezoneOffset, getTime/valueOf, toISOString and toString, in the host's time zone as Node's are. An unparseable string makes an Invalid Date (getTime() is NaN).",
       "returns": {
         "type": "Date",
         "desc": "A Date value (a plain number under the hood)."
@@ -72,7 +69,7 @@
       "exampleKey": "date/date",
       "snippet": "const epoch: Date = new Date(0)\nconsole.log(epoch.getFullYear())       // 1970\nconst later: Date = new Date(1700000000000)\nconsole.log(later.toISOString())",
       "differences": [
-        "UTC-only everywhere (construction, getters, formatting) — a deliberate deviation from real JS's local-time default, for deterministic output regardless of the machine/CI timezone; the multi-argument constructor form is a special case of this: real JS treats its fields as *local* time, this compiler always treats them as UTC"
+        "toString's zone name comes from a built-in table of the common zones' abbreviations; a zone outside it prints the C library's abbreviation (GMT-0300 (-03) where Node says (Brasilia Standard Time))"
       ],
       "seeAlso": [
         "Date.now",
@@ -110,17 +107,15 @@
       "name": "Date.parse(string)",
       "statusRow": "Date.parse(string)",
       "signature": "Date.parse(string: string): number",
-      "badge": "caveats",
-      "description": "Parses ISO 8601 strings, with or without milliseconds: Z (UTC), a +HH:MM/-HH:MM timezone offset (converted to UTC), or a bare YYYY-MM-DD date.",
+      "badge": "exact",
+      "description": "Parses the ECMAScript date-time format (a date-only form as UTC, a date-time without an offset as local time, Z or a +HH:MM/-HH:MM offset) and V8's legacy forms: toString and toUTCString output, \"Jul 15 2024\", \"2024/07/15 10:30\".",
       "returns": {
         "type": "number",
-        "desc": "Milliseconds since epoch, or -1 if unparseable."
+        "desc": "Milliseconds since epoch, or NaN if unparseable."
       },
       "exampleKey": "date/date",
-      "snippet": "console.log(Date.parse('2023-11-14T22:13:20.000Z'))   // 1700000000000\nconsole.log(Date.parse('2023-11-14'))                 // 1699920000000\nconsole.log(Date.parse('not a date'))                 // -1",
-      "differences": [
-        "Unparseable input returns `-1` (a documented sentinel — this compiler's Date has no NaN representation)"
-      ],
+      "snippet": "console.log(Date.parse('2023-11-14T22:13:20.000Z'))   // 1700000000000\nconsole.log(Date.parse('2023-11-14'))                 // 1699920000000\nconsole.log(Date.parse('not a date'))                 // NaN",
+      "differences": [],
       "seeAlso": [
         "Date"
       ],
@@ -159,15 +154,15 @@
       "statusRow": "Date arithmetic (date ± durationMs, date - date, date += durationMs)",
       "signature": "date + durationMs; date - durationMs; date - date; date += durationMs",
       "badge": "caveats",
-      "description": "TypeScript rejects arithmetic on a Date, and so does the default strict lane: the millisecond count is getTime(). Under -compat=js, Date - Date gives the difference in milliseconds (a number), matching real JS.",
+      "description": "TypeScript rejects arithmetic on a Date, and so does the default strict lane: the millisecond count is getTime(). Under -compat=js, date + x concatenates the date string and date - x reads its millisecond count, matching real JS.",
       "returns": {
-        "type": "Date | number",
-        "desc": "A new Date for ± duration; a number for Date - Date."
+        "type": "string | number",
+        "desc": "A string for +; a number for -, *, / and %."
       },
       "exampleKey": "date/date",
       "snippet": "const start: Date = new Date(0)\nconst tomorrow: Date = new Date(start.getTime() + oneDayMs)\nconst elapsedMs: number = tomorrow.getTime() - start.getTime()\nconsole.log(elapsedMs)                      // 86400000",
       "differences": [
-        "Under -compat=js, `Date ± number` gives a new Date; JavaScript converts the Date to a string for `+` (concatenation) and to its millisecond count for `-` (a number)"
+        "Under -compat=js, a compound `date += n` / `date -= n` keeps the variable a Date; JavaScript turns it into a string / a number (the plain `+`/`-` follow JavaScript)"
       ],
       "seeAlso": [
         "Date",
@@ -182,17 +177,15 @@
       "name": "Date.prototype.toDateString()",
       "statusRow": "Date.prototype.toDateString()",
       "signature": "date.toDateString(): string",
-      "badge": "caveats",
-      "description": "A fixed \"Www Mon DD YYYY\" shape (e.g. \"Thu Jan 01 1970\"), matching real JS exactly except for the UTC deviation.",
+      "badge": "exact",
+      "description": "A fixed \"Www Mon DD YYYY\" shape (e.g. \"Thu Jan 01 1970\") in local time, as real JS gives it.",
       "returns": {
         "type": "string",
         "desc": "The date as a \"Www Mon DD YYYY\" string."
       },
       "exampleKey": "date/date",
       "snippet": "const launch: Date = new Date(1700000000000)\nconsole.log(launch.toDateString())          // Tue Nov 14 2023",
-      "differences": [
-        "Always UTC, not local time"
-      ],
+      "differences": [],
       "seeAlso": [
         "Date",
         "Date.toLocaleDateString"
@@ -215,7 +208,7 @@
       "exampleKey": "date/date",
       "snippet": "const launch: Date = new Date(1700000000000)\nconsole.log(launch.toLocaleDateString())    // 11/14/2023",
       "differences": [
-        "One fixed `\"M/D/YYYY\"` format (the default en-US shape), always UTC; no locale argument or full `Intl`-style locale support"
+        "One fixed `\"M/D/YYYY\"` format (the default en-US shape) in local time; no locale argument or full `Intl`-style locale support"
       ],
       "seeAlso": [
         "Date",
@@ -230,8 +223,8 @@
       "name": "PerformanceObserver",
       "statusRow": "PerformanceObserver",
       "signature": "new PerformanceObserver(callback: (list) => void)",
-      "badge": "caveats",
-      "description": "Observes performance entries (mark/measure). observe({ entryTypes }) registers; the callback's list yields PerformanceEntry objects via getEntries().",
+      "badge": "exact",
+      "description": "Observes performance entries. observe({ entryTypes }) or observe({ type, buffered }) subscribes; the callback receives a PerformanceObserverEntryList (sorted by start time) on a later turn of the event loop, as in Node. disconnect() and takeRecords() work, and supportedEntryTypes lists the known types.",
       "params": [
         {
           "name": "callback",
@@ -244,10 +237,7 @@
         "desc": "The observer handle."
       },
       "snippet": "import { PerformanceObserver } from 'perf_hooks'\nconst obs = new PerformanceObserver((list) => {\n  for (const e of list.getEntries()) console.log(e.name, e.duration)\n})\nobs.observe({ entryTypes: ['measure'] })\nperformance.mark('a'); performance.mark('b')\nperformance.measure('a-b', 'a', 'b')",
-      "differences": [
-        "Dispatch is synchronous (during mark/measure), not Node's async batched next-microtask delivery",
-        "Entry types mark/measure only; buffered/takeRecords/single-type/getEntriesBy* deferred"
-      ],
+      "differences": [],
       "seeAlso": [
         "performance.mark",
         "performance.measure"
@@ -255,6 +245,26 @@
       "spec": {
         "mdn": "https://nodejs.org/api/perf_hooks.html#class-performanceobserver"
       }
+    },
+    {
+      "id": "createHistogram",
+      "name": "createHistogram / monitorEventLoopDelay",
+      "statusRow": "createHistogram / monitorEventLoopDelay",
+      "signature": "createHistogram(options?: CreateHistogramOptions): RecordableHistogram; monitorEventLoopDelay(options?: EventLoopMonitorOptions): IntervalHistogram",
+      "badge": "caveats",
+      "description": "perf_hooks histograms: a RecordableHistogram takes record(value)/recordDelta()/add(other); monitorEventLoopDelay samples how late an interval timer runs while enabled. Both report count, min, max, mean, stddev, exceeds and percentiles, with BigInt forms.",
+      "returns": {
+        "type": "RecordableHistogram | IntervalHistogram",
+        "desc": "The histogram."
+      },
+      "exampleKey": "perf/observer",
+      "snippet": "import { createHistogram } from 'perf_hooks'\nconst h = createHistogram()\nh.record(5); h.record(10); h.record(15)\nconsole.log(h.count, h.min, h.max, h.percentile(50))   // 3 5 15 10",
+      "differences": [
+        "A histogram keeps exact samples, not Node's HDR histogram (3 significant figures): a percentile of large values can differ in its last digits"
+      ],
+      "seeAlso": [
+        "PerformanceObserver"
+      ]
     }
   ]
 }

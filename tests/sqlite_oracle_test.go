@@ -59,7 +59,7 @@ const db = new DatabaseSync(':memory:');
 db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, num REAL, txt TEXT, blb BLOB)');
 db.exec("INSERT INTO t (num, txt, blb) VALUES (1.5, 'hi', x'01ff')");
 db.exec('INSERT INTO t (num, txt, blb) VALUES (NULL, NULL, NULL)');
-const rows = db.prepare('SELECT id, num, txt, blb FROM t ORDER BY id').all<{ id: number; num: number | null; txt: string | null; blb: Uint8Array | null }>();
+const rows = db.prepare('SELECT id, num, txt, blb FROM t ORDER BY id').all();
 for (const r of rows) {
   if (r.num === null) console.log('num=null'); else console.log('num=' + r.num);
   if (r.txt === null) console.log('txt=null'); else console.log('txt=' + r.txt);
@@ -91,7 +91,7 @@ const ins = db.prepare('INSERT INTO t (name, age) VALUES (:name, :age)');
 const a = ins.run({ name: 'Ada', age: 36 });
 console.log('changes=' + a.changes + ' rowid=' + a.lastInsertRowid);
 ins.run({ name: 'Bob', age: 42 });
-const rows = db.prepare('SELECT name, age FROM t WHERE age > ? ORDER BY id').all<{ name: string; age: number }>(40);
+const rows = db.prepare('SELECT name, age FROM t WHERE age > ? ORDER BY id').all(40);
 for (const r of rows) console.log(r.name + ':' + r.age);
 `
 	mjs := `
@@ -113,7 +113,7 @@ func TestOracleSqliteErrorCode(t *testing.T) {
 import { DatabaseSync } from 'node:sqlite';
 const db = new DatabaseSync(':memory:');
 try {
-  db.prepare('SELECT * FROM nope').all<{ x: number }>();
+  db.prepare('SELECT * FROM nope').all();
 } catch (e) {
   const err = e as { code: string; errcode: number; errstr: string; message: string };
   console.log(err.code);
@@ -144,7 +144,7 @@ const db = new DatabaseSync(':memory:');
 db.function('triple', (x: number) => x * 3);
 db.exec('CREATE TABLE t (n INTEGER)');
 db.exec('INSERT INTO t VALUES (1),(2),(3)');
-const r = db.prepare('SELECT SUM(triple(n)) AS v FROM t').get<{ v: number }>();
+const r = db.prepare('SELECT SUM(triple(n)) AS v FROM t').get();
 if (r !== null) console.log(r.v);
 `
 	mjs := `

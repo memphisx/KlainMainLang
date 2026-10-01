@@ -308,12 +308,24 @@ func (c *Checker) flowType(f *binder.FlowNode, r ref, declared *Type, w *flowWal
 			if c.neverReturning(call) {
 				return c.neverT, nil // no path continues past it
 			}
+			if !c.callMayNarrow(call, r) {
+				f = f.Antecedent // as tsc, past a call that cannot assert r
+				continue
+			}
 			t, deps := c.flowType(f.Antecedent, r, declared, w)
 			return c.narrowByAssertion(t, r, call), deps
 		case f.Flags&binder.FlowSwitchClause != 0:
+			if sw := f.Node.(*ast.SwitchStatement); !c.switchMayNarrow(sw, r) {
+				f = f.Antecedent // as tsc, past a switch that cannot narrow r
+				continue
+			}
 			t, deps := c.flowType(f.Antecedent, r, declared, w)
 			return c.narrowBySwitch(t, r, f.Node.(*ast.SwitchStatement), f.Clause), deps
 		case f.Flags&(binder.FlowTrueCondition|binder.FlowFalseCondition) != 0:
+			if !c.condMayNarrow(f.Node.(ast.Expression), r, 0) {
+				f = f.Antecedent // as tsc, past a condition that cannot narrow r
+				continue
+			}
 			t, deps := c.flowType(f.Antecedent, r, declared, w)
 			return c.narrowBy(t, r, f.Node.(ast.Expression), f.Flags&binder.FlowTrueCondition != 0), deps
 		case f.Flags&binder.FlowScopeStart != 0:
@@ -493,6 +505,9 @@ func compoundLike(a *ast.AssignmentExpression) bool {
 func (c *Checker) assignmentReduced(declared, assigned *Type) *Type {
 	if assigned.Flags&Never != 0 {
 		return assigned // a recursion cut: this path adds nothing
+	}
+	if c.Unanswered(assigned) && declared.Flags&Union != 0 {
+		return assigned // which members the value keeps is unknown, never guessed
 	}
 	if declared.Flags&Union == 0 || c.Unanswered(assigned) || assigned.Flags&(Any|Unknown) != 0 {
 		return declared
@@ -761,7 +776,10 @@ func (c *Checker) narrowByEquality(t *Type, r ref, ref, other ast.Expression, eq
 	if !c.refersTo(ref, r) {
 		return nil
 	}
-	ot := c.TypeOf(other)
+	ot, ok := c.comparedType(other)
+	if !ok {
+		return nil
+	}
 	if ot.Flags&(Null|Undefined) != 0 && ot.Flags&Union == 0 && t.Flags&Unknown != 0 {
 		// unknown is {} | null | undefined here.
 		switch {
@@ -993,6 +1011,22 @@ func (c *Checker) filter(t *Type, keep func(*Type) bool) *Type {
 	return c.in.union(out...)
 }
 
+// comparedType is the type of the other side of a comparison that narrows
+// a reference. Typing it may walk back to this very comparison (a loop
+// comparing two references): that recursive query narrows nothing, as tsc's
+// circularity answer is the declared type.
+func (c *Checker) comparedType(other ast.Expression) (*Type, bool) {
+	if c.comparing[other] {
+		return nil, false
+	}
+	if c.comparing == nil {
+		c.comparing = map[ast.Expression]bool{}
+	}
+	c.comparing[other] = true
+	defer delete(c.comparing, other)
+	return c.TypeOf(other), true
+}
+
 // narrowByDiscriminant narrows a union of objects by `sym.p === lit` (equal)
 // or its negation: the members whose p can (or cannot only) be lit. An
 // optional chain `sym?.p === lit` also proves sym non-nullish.
@@ -1004,7 +1038,13 @@ func (c *Checker) narrowByDiscriminant(t *Type, r ref, ref, other ast.Expression
 	if !c.refersTo(m.Object, r) {
 		return nil
 	}
-	ot := c.TypeOf(other)
+	if !m.Optional && !isDiscriminant(t, m.Property) {
+		return nil // as tsc, the other side is not typed for a non-discriminant
+	}
+	ot, ok := c.comparedType(other)
+	if !ok {
+		return nil
+	}
 	if ot.Flags&(Literal|Null|Undefined) == 0 || ot.Flags&Union != 0 {
 		return nil
 	}
@@ -1133,8 +1173,13 @@ func (c *Checker) narrowByInstanceof(t *Type, r ref, e *ast.BinaryExpression, tr
 	csym, ok := c.b.Resolve(cls)
 	if ok && csym != nil && csym.Flags&binder.Class == 0 {
 		// A constructor value (`declare var Error: ErrorConstructor`): the
-		// instance is what its construct signature makes.
-		if inst := c.constructedType(c.TypeOf(cls)); inst != nil {
+		// instance is what its construct signature makes. Its declared type,
+		// since the reference may not have been checked yet.
+		ctor := c.TypeOf(cls)
+		if ctor == nil || ctor.Flags&Object == 0 {
+			ctor = c.typeOfSymbol(csym)
+		}
+		if inst := c.constructedType(ctor); inst != nil {
 			if truthy {
 				return c.narrowToType(t, inst)
 			}
@@ -1286,14 +1331,129 @@ func (c *Checker) dottedType(e ast.Expression) *Type {
 			return c.typeOfSymbol(m)
 		}
 		obj := c.dottedType(x.Object)
-		if c.Unanswered(obj) || obj.Flags&Object == 0 || obj.Flags&Union != 0 {
+		if c.Unanswered(obj) {
 			return c.unanswered
 		}
-		if p := obj.Prop(x.Property); p != nil {
-			return p.Type
+		// As TypeOf reads a member: through the apparent type (Array<T>'s,
+		// String's), and of a union only when every member declares it. A
+		// member nothing declares makes the call no guard, as for tsc.
+		var ts []*Type
+		for _, m := range members(obj) {
+			if am := c.apparentType(m); am != nil {
+				m = am
+			}
+			if m.Flags&Object == 0 || (m.Kind != Anonymous && m.Kind != Instance && m.Kind != Interface) {
+				if m.Flags&(Null|Undefined|Any) != 0 {
+					return c.anyT
+				}
+				return c.unanswered
+			}
+			p := m.Prop(x.Property)
+			if p == nil {
+				if m.partial && !declaredNoGuard(m, x.Property) {
+					return c.unanswered
+				}
+				return c.anyT
+			}
+			ts = append(ts, p.Type)
 		}
+		if len(ts) == 1 {
+			return ts[0]
+		}
+		return c.anyT // a union of methods is no one guard
 	}
 	return c.unanswered
+}
+
+// condMayNarrow reports whether cond could narrow r: it mentions r (or a
+// path r is under), or is an aliased condition whose initializer does.
+func (c *Checker) condMayNarrow(cond ast.Expression, r ref, depth int) bool {
+	if c.mentions(cond, r) {
+		return true
+	}
+	if depth >= 5 {
+		return false
+	}
+	found := false
+	ast.Inspect(cond, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch x := n.(type) {
+		case *ast.ArrowFunction, *ast.FunctionExpression:
+			return false
+		case *ast.Identifier:
+			if init := c.aliasedCondition(x); init != nil && c.condMayNarrow(init, r, depth+1) {
+				found = true
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// switchMayNarrow reports whether a clause of sw could narrow r: its
+// discriminant or a case test (`switch (true)`) mentions r.
+func (c *Checker) switchMayNarrow(sw *ast.SwitchStatement, r ref) bool {
+	if c.condMayNarrow(sw.Discriminant, r, 0) {
+		return true
+	}
+	for _, cs := range sw.Cases {
+		if cs.Test != nil && c.condMayNarrow(cs.Test, r, 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// callMayNarrow reports whether call could assert something of r: an
+// argument, or a method's receiver (`asserts this is T`), mentions it.
+func (c *Checker) callMayNarrow(call *ast.CallExpression, r ref) bool {
+	if call.Optional {
+		return false
+	}
+	if m, ok := call.Callee.(*ast.MemberExpression); ok && c.mentions(m.Object, r) {
+		ft := c.dottedType(call.Callee)
+		if c.Unanswered(ft) {
+			return true
+		}
+		if ft.Flags&Object != 0 && ft.Kind == Function && ft.Predicate != nil && ft.Predicate.Index == -1 {
+			return true
+		}
+	}
+	for _, a := range call.Args {
+		if c.mentions(a, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// declaredNoGuard reports whether interface m declares method name, the
+// checker not modelling it, with no signature a type predicate: a call to it
+// is no guard or assertion, as tsc reads it from the declaration.
+func declaredNoGuard(m *Type, name string) bool {
+	if m.Kind != Interface || m.Symbol == nil {
+		return false
+	}
+	found := false
+	for _, d := range m.Symbol.Declarations {
+		id, ok := d.Node.(*ast.InterfaceDeclaration)
+		if !ok {
+			continue
+		}
+		for _, mem := range id.Members {
+			ms, ok := mem.(*ast.MethodSignature)
+			if !ok || ms.Name != name {
+				continue
+			}
+			if _, pred := ms.Type.(*ast.TypePredicate); pred || ms.Type == nil {
+				return false
+			}
+			found = true
+		}
+	}
+	return found
 }
 
 // unknownGuard reports a call the checker cannot type whose arguments
@@ -1317,18 +1477,38 @@ func (c *Checker) unknownGuard(ft *Type, e *ast.CallExpression, r ref) bool {
 	return false
 }
 
-// mentions reports whether e reads r or a path under it.
+// mentions reports whether e reads r, a path under it, or one r is under
+// (what an assertion on e could narrow r by): `this.a` mentions neither
+// `this.b` nor its paths.
 func (c *Checker) mentions(e ast.Expression, r ref) bool {
 	found := false
 	ast.Inspect(e, func(n ast.Node) bool {
-		if x, ok := n.(ast.Expression); ok && !found {
-			if er, _, ok := c.refOf(x); ok && er.sym == r.sym {
-				found = true
+		if found {
+			return false
+		}
+		switch n.(type) {
+		case *ast.ArrowFunction, *ast.FunctionExpression:
+			return false // a function argument is never the guarded subject
+		}
+		if x, ok := n.(ast.Expression); ok {
+			if er, _, ok := c.refOf(x); ok {
+				found = er.sym == r.sym && pathsOverlap(er.path, r.path)
+				return false // its object is part of this reference
 			}
 		}
-		return !found
+		return true
 	})
 	return found
+}
+
+// pathsOverlap reports whether one of a and b is a prefix of the other.
+func pathsOverlap(a, b []string) bool {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // narrowToType narrows t to the members that are candidates, or to
@@ -1486,6 +1666,9 @@ func (c *Checker) narrowByAssertion(t *Type, r ref, e *ast.CallExpression) *Type
 	ft := c.dottedType(e.Callee)
 	if c.unknownGuard(ft, e, r) {
 		return c.unanswered
+	}
+	if !c.Unanswered(ft) && ft.Flags&Object != 0 && ft.Kind == Anonymous && len(ft.Calls) == 1 {
+		ft = ft.Calls[0] // a callable object (`assert`, the module)
 	}
 	if ft.Flags&Object == 0 || ft.Kind != Function || ft.Predicate == nil || !ft.Predicate.Asserts {
 		return t
@@ -1758,6 +1941,10 @@ func (c *Checker) namespaceMember(e *ast.MemberExpression) *binder.Symbol {
 	switch x := e.Object.(type) {
 	case *ast.Identifier:
 		ns, _ = c.b.Resolve(x)
+		if ns == nil && x.Name == "globalThis" && c.b.Globals != nil {
+			// `globalThis.X` is the global X itself.
+			return c.b.Globals.Symbols.Get(e.Property)
+		}
 	case *ast.MemberExpression:
 		ns = c.namespaceMember(x)
 	}

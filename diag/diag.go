@@ -139,10 +139,6 @@ func (l *List) Add(d *Diagnostic) bool {
 // Len is the number of diagnostics collected.
 func (l *List) Len() int { return len(l.items) }
 
-// Truncate drops every diagnostic after the first n (a speculative parse
-// that is rewound takes its diagnostics with it).
-func (l *List) Truncate(n int) { l.items = l.items[:n] }
-
 // Items returns the diagnostics in report order.
 func (l *List) Items() []*Diagnostic { return l.items }
 

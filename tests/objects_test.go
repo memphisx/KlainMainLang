@@ -652,7 +652,7 @@ console.log(destructured.length)
 destructured.push(40)
 console.log(destructured.length)
 console.log(c.items.length)
-`, "3\n4\n3")
+`, "3\n4\n4")
 }
 
 func TestE2EArrayTypedFieldObjectAssign(t *testing.T) {
@@ -1022,13 +1022,18 @@ console.log(b.x, b.y);
 // non-nullable (including merely-optional `?:`) field has no signal at
 // all — both are a clean compile-time rejection instead.
 
-func TestE2EObjectDestructuringDefaultUsedWhenNull(t *testing.T) {
+func TestE2EObjectDestructuringDefaultSkipsNull(t *testing.T) {
+	// A default applies to undefined only; a null field keeps its null.
 	assertOutput(t, `
 interface User { name: string | null }
 let u: User = { name: null };
 let { name = "anon" } = u;
 console.log(name);
-`, "anon")
+interface Named { name?: string }
+let w: Named = {};
+let { name: n2 = "anon" } = w;
+console.log(n2);
+`, "null\nanon")
 }
 
 func TestE2EObjectDestructuringDefaultNotUsedWhenPresent(t *testing.T) {
@@ -1058,21 +1063,18 @@ function f({ label = "default" }: Opts): void {
 }
 f({ label: null });
 f({ label: "set" });
-`, "default\nset")
+`, "null\nset")
 }
 
-func TestE2EObjectDestructuringDefaultOnNonNullableFieldRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EObjectDestructuringDefaultOnNonNullableField(t *testing.T) {
+	// TypeScript accepts a default on a field that is never undefined; it
+	// simply never applies.
+	assertOutput(t, `
 interface Point { x: number }
 let p: Point = { x: 1 };
 let { x = 5 } = p;
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a destructuring default on a non-nullable field")
-	}
-	if !strings.Contains(err.Error(), "nullable/optional") {
-		t.Errorf("unexpected error message: %v", err)
-	}
+console.log(x);
+`, "1")
 }
 
 func TestE2EObjectDestructuringDefaultOnNullableScalarField(t *testing.T) {
@@ -1088,7 +1090,7 @@ console.log(x, y);
 let q: Point = { x: null, y: 3 };
 let { x: x2 = 5, y: y2 = 7 } = q;
 console.log(x2, y2);
-`, "0 7\n5 3")
+`, "0 7\nnull 3")
 }
 
 // --- Object destructuring with string/numeric-literal keys (TDD-00065 Stage 3a) ---

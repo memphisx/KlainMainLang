@@ -3,7 +3,6 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
-	"strings"
 )
 
 // emit_decorators_standard.go — the TC39 standard decorator dialect (TDD-00161
@@ -419,21 +418,7 @@ func (e *Emitter) emitAddInitializerFn(className string) (Value, error) {
 	fnName := fmt.Sprintf("@__kml_addinit_%s", llvmSafeSymbol(className))
 	e.ensureDynArr()
 
-	savedAllocas := e.allocas
-	savedBody := e.body
-	savedRegCtr := e.regCtr
-	savedLabelCtr := e.labelCtr
-	savedScopes := e.scopes
-	savedRetType := e.currentRetType
-	savedBlockDone := e.blockDone
-	e.allocas = strings.Builder{}
-	e.body = strings.Builder{}
-	e.regCtr = 0
-	e.labelCtr = 0
-	e.scopes = nil
-	e.blockDone = false
-	e.currentRetType = TypeAny
-	e.pushScope()
+	restoreFn := e.beginDetachedFunc()
 	e.ensureNanBox()
 
 	// fn = argv[0] (the callback)
@@ -475,7 +460,7 @@ func (e *Emitter) emitAddInitializerFn(className string) (Value, error) {
 	e.functions.WriteString(e.allocas.String())
 	e.functions.WriteString(e.body.String())
 	e.functions.WriteString("}\n")
-	e.restoreDynFnState(savedAllocas, savedBody, savedRegCtr, savedLabelCtr, savedScopes, savedRetType, savedBlockDone)
+	restoreFn()
 
 	e.ensureMalloc()
 	rec := e.freshReg()

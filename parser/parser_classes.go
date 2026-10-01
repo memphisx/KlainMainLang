@@ -111,6 +111,11 @@ func wellKnownSymbolMemberName(expr ast.Expression) (string, bool) {
 	if me.Property == "toPrimitive" {
 		return "@@toPrimitive", true
 	}
+	// [Symbol.dispose]() / [Symbol.asyncDispose]() — explicit resource
+	// management's disposers.
+	if me.Property == "dispose" || me.Property == "asyncDispose" {
+		return "@@" + me.Property, true
+	}
 	return "", false
 }
 
@@ -132,14 +137,15 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 	defer func() { p.thisClass = savedThis }()
 	// Optional `<T>` type-parameter list (TDD-00010 V1).
 	var typeParams []string
-	var typeParamConstraints []*ast.TypeAnnotation
+	var typeParamConstraints, typeParamDefaults []*ast.TypeAnnotation
 	if p.check(lexer.LT) {
-		tp, tc, err := p.parseTypeParamList(name + "<T>")
+		tp, tc, td, err := p.parseTypeParamList(name + "<T>")
 		if err != nil {
 			return nil, err
 		}
 		typeParams = tp
 		typeParamConstraints = tc
+		typeParamDefaults = td
 	}
 	var baseClass string
 	baseQualified := false
@@ -478,12 +484,14 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 						ast.EraseTypeParamsTo(fn.Params[i].Type, to)
 					}
 					ast.EraseTypeParamsTo(fn.ReturnType, to)
+					ast.EraseTypeParamsInBody(fn.Body, to)
 					fn.ErasedMethod = true
 				}
 
 				// A body-less overload signature: erase it and hold the group open
 				// until the implementation (same name, with a body) arrives.
 				if fn.IsOverloadSig {
+					fn.CallSite = doc != nil && doc.HasTag("callsite")
 					if pendingOverload == "" {
 						pendingSigs = nil
 					}
@@ -493,6 +501,10 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 				}
 				if pendingOverload != "" {
 					fn.Overloads = pendingSigs
+					// `@callsite` on the signatures marks the method.
+					for _, sig := range pendingSigs {
+						fn.CallSite = fn.CallSite || sig.CallSite
+					}
 				}
 				pendingOverload, pendingSigs = "", nil
 				// A class body is always strict mode, so `eval`/`arguments` can
@@ -567,6 +579,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 					ctor = fn
 				} else {
 					fn.Decorators = memberDecorators
+					fn.CallSite = fn.CallSite || (doc != nil && doc.HasTag("callsite"))
 					methods = append(methods, fn)
 				}
 				return nil
@@ -686,6 +699,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 	decl.BaseQualifier = baseQualifier
 	decl.TypeParams = typeParams
 	decl.TypeParamConstraints = typeParamConstraints
+	decl.TypeParamDefaults = typeParamDefaults
 	decl.AutoAccessors = autoAccessors
 	return decl, nil
 }

@@ -7,7 +7,7 @@
   "coverage": {
     "loose": "2/2",
     "strict": "1/2",
-    "strictPct": 0
+    "strictPct": 50
   },
   "lede": "Web-standard TextEncoder/TextDecoder for converting between strings and raw bytes. The single divergence from the browser API is scope: this is UTF-8 only. Because this compiler's strings are already raw UTF-8 byte sequences, encode/decode are direct byte copies with no real transcoding, and TextDecoder's optional label argument is validated against the UTF-8 aliases (a non-UTF-8 label throws a RangeError, since only UTF-8 is decodable). (atob/btoa and encodeURI(Component) live under global functions, not here.)",
   "entries": [

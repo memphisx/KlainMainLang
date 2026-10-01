@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "9/9",
     "loosePct": 100,
-    "strict": "1/9",
-    "strictPct": 11
+    "strict": "7/9",
+    "strictPct": 78
   },
   "lede": "Node's classic EventEmitter, imported from events (it is no global), not the WHATWG EventTarget/Event trio. With no type argument every event takes any arguments, @types/node's default event map; a type argument is an event map of argument tuples. The on/once/emit/off surface is compiled by the compiler rather than a registered class, so instanceof answers as a compile-time constant, and every listener is held as a dynamic function. A subclass can still override any of those methods (the override wins at every call site, and super.<method>(...) reaches the built-in).",
   "entries": [
@@ -43,8 +43,8 @@
       "name": ".on(event, listener) / .once(event, listener)",
       "statusRow": ".on(event, listener) / .once(event, listener)",
       "signature": ".on(event: string, listener: (...args) => void): this; .once(event, listener): this",
-      "badge": "caveats",
-      "description": "Registers a listener for an event; once fires at most once then detaches itself. Both are chainable, returning the emitter. The listener's parameters come from the event's declared payload type — one parameter per tuple element, a single parameter for a scalar payload, or none for a void event.",
+      "badge": "exact",
+      "description": "Registers a listener for an event; once fires at most once then detaches itself. Both are chainable, returning the emitter. A listener may take fewer parameters than the event passes: one it isn't passed is undefined or its default.",
       "params": [
         {
           "name": "event",
@@ -80,8 +80,8 @@
       "name": ".emit(event, ...args)",
       "statusRow": ".emit(event, ...args)",
       "signature": ".emit(event: string, ...args): boolean",
-      "badge": "caveats",
-      "description": "Synchronously invokes every listener registered for event, in registration order, passing along the arguments. Returns whether any listener ran. On a typed map an event takes exactly its tuple's arguments.",
+      "badge": "exact",
+      "description": "Synchronously invokes every listener registered for event, in registration order, with the emitter as this, passing along the arguments. Returns whether any listener ran.",
       "params": [
         {
           "name": "event",
@@ -149,7 +149,7 @@
       "name": ".addListener / .prependListener / .prependOnceListener",
       "statusRow": ".addListener(...) / .prependListener(...) / .prependOnceListener(...)",
       "signature": ".addListener(event, listener): this; .prependListener(event, listener): this; .prependOnceListener(event, listener): this",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "addListener is on under its other name. prependListener adds the listener before the ones already registered, so it runs first; prependOnceListener does the same for a one-shot listener.",
       "params": [
         {
@@ -214,8 +214,8 @@
       "name": "emit('error', ...) special-case",
       "statusRow": "EventEmitter.prototype.emit('error', ...) special-cases (throws if no 'error' listener)",
       "signature": ".emit('error', payload): boolean  // throws if no 'error' listener",
-      "badge": "caveats",
-      "description": "Matches Node's one specially treated event name: emitting 'error' with no registered 'error' listener throws — the argument itself when it is an Error, otherwise an Error reading \"Unhandled error. (<value>)\" — so a forgotten handler fails loudly. Resolved entirely at the emit call site.",
+      "badge": "exact",
+      "description": "Matches Node's one specially treated event name: emitting 'error' with no registered 'error' listener throws — the argument itself when it is an Error, otherwise an Error reading \"Unhandled error. (<value>)\", the value rendered by util.inspect.",
       "returns": {
         "type": "boolean",
         "desc": "As emit — but throws when 'error' has no listener."
@@ -237,8 +237,8 @@
       "name": "events.once()",
       "statusRow": "events.once(emitter, name) (static helper)",
       "signature": "once(emitter: EventEmitter, name: string): Promise<args[]>",
-      "badge": "caveats",
-      "description": "Returns a Promise that resolves with the event's argument array the first time it fires.",
+      "badge": "exact",
+      "description": "Returns a Promise that resolves with the event's argument array the first time it fires; an 'error' first rejects it, and an AbortSignal option cancels it.",
       "params": [
         {
           "name": "emitter",
@@ -272,8 +272,8 @@
       "name": "events.on()",
       "statusRow": "events.on(emitter, name) (async iterator)",
       "signature": "on(emitter: EventEmitter, name: string): AsyncIterableIterator<args[]>",
-      "badge": "caveats",
-      "description": "Registers a listener for an event; once fires at most once then detaches itself. Both are chainable, returning the emitter. The listener's parameters are any on an untyped emitter, or come from the event's argument tuple; it may take fewer parameters than the event passes.",
+      "badge": "exact",
+      "description": "An async iterator yielding each emission's argument array (for await (const [x] of on(ee, 'data'))), buffering events between iterations; leaving the loop removes its listeners.",
       "params": [
         {
           "name": "emitter",
@@ -292,8 +292,7 @@
       },
       "snippet": "import { EventEmitter, on } from 'events'\nconst ee = new EventEmitter<{ tick: [number] }>()\nsetTimeout(() => { ee.emit('tick', 1); ee.emit('tick', 2) }, 0)\nfor await (const [n] of on(ee, 'tick')) {\n  console.log(n)\n  if (n >= 2) break\n}",
       "differences": [
-        "A map-typed emitter requires a string-literal event name at every call site",
-        "A `function` listener can't read `this` (the emitter, in Node)"
+        "A map-typed emitter requires a string-literal event name at every call site"
       ],
       "seeAlso": [
         "EventEmitter",

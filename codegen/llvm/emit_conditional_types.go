@@ -46,6 +46,14 @@ func substituteAnnotation(ta *ast.TypeAnnotation, subs map[string]*ast.TypeAnnot
 			for i := 0; i < arrays; i++ {
 				result = &ast.TypeAnnotation{Source: ta.Source, ElemType: result}
 			}
+			// `T | undefined` / `T | null`: the reference's own absence
+			// carries over to the argument substituted for it.
+			if ta.Nullable && !(result.Nullable && (result.Undefined || !ta.Undefined)) {
+				cp := *result
+				cp.Nullable = true
+				cp.Undefined = cp.Undefined || ta.Undefined
+				result = &cp
+			}
 			return result
 		}
 	}
@@ -69,7 +77,8 @@ func substituteAnnotation(ta *ast.TypeAnnotation, subs map[string]*ast.TypeAnnot
 	if ta.Fields != nil {
 		cp.Fields = make([]ast.AnnotField, len(ta.Fields))
 		for i, f := range ta.Fields {
-			cp.Fields[i] = ast.AnnotField{Name: f.Name, Type: substituteAnnotation(f.Type, subs)}
+			cp.Fields[i] = f
+			cp.Fields[i].Type = substituteAnnotation(f.Type, subs)
 		}
 	}
 	if ta.FuncParams != nil {
@@ -170,7 +179,7 @@ func (e *Emitter) assignable(a, b Type) bool {
 		if !a.IsObject {
 			return false
 		}
-		for _, bf := range b.Fields {
+		for _, bf := range b.UserFields() {
 			found := false
 			for _, af := range a.Fields {
 				if af.Name == bf.Name && e.assignable(af.Ty, bf.Ty) {

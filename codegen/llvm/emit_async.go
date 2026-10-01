@@ -134,18 +134,27 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 	e.emitLabel(e.coroRetLabel)
 	e.emitInstr("call void @__kml_pop_jmpbuf()")
 	pty := e.currentPromiseTy
-	if pty.IR != "void" && pty.IR != "" {
-		if pty.IsArray {
-			// The return-value slot holds a header pointer (TDD-00213 Stage 2);
-			// deref it to the aggregate before decomposing into the promise value.
-			e.storePromiseValue(prom, e.loadArraySlotAggregate(e.coroHdl, pty))
-		} else {
-			valReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, StructFieldIR(pty), e.coroHdl, pty.Align()))
-			e.storePromiseValue(prom, Value{Ref: valReg, Ty: pty})
+	if isUnconstrainedDynamic(pty) {
+		// A dynamic result may hold a promise, which the returned promise
+		// adopts (an async function resolves its promise with its result).
+		e.ensurePromiseResolveAny()
+		valReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", valReg, e.coroHdl))
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %s, i64 %s)", prom, valReg))
+	} else {
+		if pty.IR != "void" && pty.IR != "" {
+			if pty.IsArray {
+				// The return-value slot holds a header pointer (TDD-00213 Stage 2);
+				// deref it to the aggregate before decomposing into the promise value.
+				e.storePromiseValue(prom, e.loadArraySlotAggregate(e.coroHdl, pty))
+			} else {
+				valReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, StructFieldIR(pty), e.coroHdl, pty.Align()))
+				e.storePromiseValue(prom, Value{Ref: valReg, Ty: pty})
+			}
 		}
+		setResolved(1)
 	}
-	setResolved(1)
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", e.coroHdl))
 	e.emitTerminator(fmt.Sprintf("ret ptr %s", prom))
 
@@ -162,19 +171,10 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_get_thrown_pay()", payR))
 	e.storeRejectReasonI64Tag(prom, tagW, payR)
 	setResolved(2)
+	e.ensureUnhandledRejections()
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_note_rejected(ptr %s)", prom))
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", e.coroHdl))
 	e.emitTerminator(fmt.Sprintf("ret ptr %s", prom))
-}
-
-// buildResponseFromStatusBody builds a Response object (ADR-00021's
-// {status, ok, body} struct, plus ADR-00094's bodyLength) from a completed
-// fetch's raw status (i64), body (ptr), and bodyLen (i64) SSA registers —
-// factored out of emitAwait's IsResponse branch below so Promise.all/.race
-// (emit_promise.go, ADR-00073) can build the same shape per member of a
-// group of concurrently-awaited fetches, without duplicating this
-// struct-building code a third time.
-func (e *Emitter) buildResponseFromStatusBody(status, body, bodyLen string) Value {
-	return e.buildResponseWithPending(status, body, bodyLen, "null")
 }
 
 // buildResponseWithPending is the TDD-00097 Stage 4 core: a Response that
@@ -191,7 +191,7 @@ func (e *Emitter) buildResponseWithPending(status, body, bodyLen, pendingRef str
 	respTy := ResponseType()
 	e.ensureMalloc()
 	respReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", respReg, respTy.StructSize()))
+	e.emitObjAllocInto(respReg, respTy)
 	structIR := respTy.StructIR()
 	storeField := func(name, ir, ref string, align int) {
 		idx, _, _ := respTy.FieldIndex(name)
@@ -237,6 +237,10 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	// context (an async generator's fiber has no current task to park) the
 	// plain identity return stands.
 	argTy := e.inferExprType(ex.Argument)
+	// A dynamic value may hold a promise: await it, or the value itself.
+	if hdlVal.Ty.IsDynamic && !argTy.IsPromise && (e.isAsync || e.inModuleTask || e.currentGenerator != nil) {
+		return e.emitAwaitAny(hdlVal)
+	}
 	if !hdlVal.Ty.IsPromise && !argTy.IsPromise {
 		inAsyncGenBody := e.currentGenerator != nil && e.currentGenerator.genTy.GeneratorIsAsync
 		if ((e.isAsync || e.inModuleTask) && e.currentGenerator == nil && e.hasMaySuspend) || inAsyncGenBody {

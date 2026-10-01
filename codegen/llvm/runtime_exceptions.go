@@ -1,6 +1,9 @@
 package llvm
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ensureExceptionHelpers hand-writes @__kml_throw's uncaught-error path
 // against errorObjType's layout directly ({ i64 kind, ptr message, ptr name
@@ -141,13 +144,14 @@ other:
   ret ptr @.kml_unc_thrown
 }`)
 
-	e.emitGlobal(fmt.Sprintf(`define void @__kml_throw_any(i8 %%tag, i64 %%pay) {
+	// __kml_caught_tag(tag, pay): the tag a thrown or rejected value keeps.
+	// An object box whose field-0 carries the boxed-object Error type-id
+	// (TDD-00222: flag bit set, low bits below the subclass tag base) IS a
+	// built-in Error — it becomes tag 13 so a catch handler sees the full
+	// Error shape (.name/.message/instanceof), exactly as if it had been
+	// thrown unboxed. Subclass instances (different struct layout) stay boxed.
+	e.emitGlobal(fmt.Sprintf(`define i8 @__kml_caught_tag(i8 %%tag, i64 %%pay) {
 entry:
-  ; A thrown object box whose field-0 carries the boxed-object Error type-id
-  ; (TDD-00222: flag bit set, low bits below the subclass tag base) IS a
-  ; built-in Error — restore it to a tag-13 throw so catch handlers see the
-  ; full Error shape (.name/.message/instanceof), exactly as if it had been
-  ; thrown unboxed. Subclass instances (different struct layout) stay boxed.
   %%isobj = icmp eq i8 %%tag, %d
   br i1 %%isobj, label %%probe, label %%keep
 probe:
@@ -162,8 +166,15 @@ probe:
 keep:
   %%iserrph = phi i1 [ %%iserrbox, %%probe ], [ 0, %%entry ]
   %%tag2 = select i1 %%iserrph, i8 13, i8 %%tag
-  store i8 %%tag2, ptr @__kml_thrown_tag, align 1
-  store i64 %%pay, ptr @__kml_thrown_pay, align 8`, kmlTagObject, errorTypeIDFlag, errorTypeIDFlag-1, errorSubclassTagBase) + `
+  ret i8 %%tag2
+}`, kmlTagObject, errorTypeIDFlag, errorTypeIDFlag-1, errorSubclassTagBase))
+
+	e.emitGlobal(strings.NewReplacer("call void @exit(i32 1)", e.exitCall("1")).Replace(`define void @__kml_throw_any(i8 %tag, i64 %pay) {
+entry:
+  %tag2 = call i8 @__kml_caught_tag(i8 %tag, i64 %pay)
+  store i8 %tag2, ptr @__kml_thrown_tag, align 1
+  store i64 %pay, ptr @__kml_thrown_pay, align 8
+
   ; Keep @__kml_thrown pointing at the Error object for tag 13 (internal
   ; Error-only catch paths + the uncaught printer read it); null otherwise.
   %isErr = icmp eq i8 %tag2, 13
@@ -174,22 +185,21 @@ keep:
   %iszero = icmp eq i32 %top, 0
   br i1 %iszero, label %uncaught, label %jump
 uncaught:
-  ; process.on('uncaughtException', ...) hook (passed the Error object, or null
-  ; for a non-Error throw): if a listener runs it returns 1 and we skip the
-  ; default print — but still exit (the stack has unwound to the top-level
-  ; catch-all). Runs the 'exit' listener on the way out, like Node.
-  %prochandled = call i1 @__kml_process_uncaught(ptr %thrownPtr)
+  ; The process 'uncaughtException' event (passed the thrown value): if a
+  ; listener runs it returns 1 and we skip the default print — but still exit
+  ; (the stack has unwound to the top-level catch-all). Emits 'exit' on the
+  ; way out, like Node.
+  %prochandled = call i1 @__kml_process_uncaught(i8 %tag2, i64 %pay, i1 0)
   br i1 %prochandled, label %procunc, label %defunc
 procunc:
   call void @__kml_run_exit_handlers(i64 1)
   call void @exit(i32 1)
   unreachable
 defunc:
+  ; On a worker thread this call does not return: the error goes to the
+  ; parent's 'error' listener and only that thread ends.
+  call void @__kml_worker_uncaught(i8 %tag2, i64 %pay)
   %msg = call ptr @__kml_caught_unc_msg(i8 %tag2, i64 %pay)
-  ; TDD-00098 stage 5: on a worker thread this call does NOT return — it
-  ; reports 'error' (the Error object itself, or null for a non-Error throw,
-  ; plus the rendered message) + exit(1) to the parent and ends only that thread.
-  call void @__kml_worker_uncaught(ptr %msg, ptr %thrownPtr)
   call i32 (ptr, ...) @printf(ptr @.kml_unc_fmt, ptr %msg)
   call void @exit(i32 1)
   unreachable
@@ -204,7 +214,7 @@ jump:
   %slot = getelementptr i8, ptr %stk, i64 %off64
   call void @longjmp(ptr %slot, i32 1)
   unreachable
-}`)
+}`))
 }
 
 // setjmpCall returns the IR call that saves a catch frame into buf. On

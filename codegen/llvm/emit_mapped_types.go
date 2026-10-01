@@ -50,14 +50,15 @@ func (e *Emitter) resolveMappedType(ta *ast.TypeAnnotation) Type {
 		name     string
 		fieldTy  Type
 		hasField bool
+		optional bool
 	}
 	var entries []keyEntry
 	switch {
 	case src != nil && src.IsKeyof:
 		// Homomorphic over T's fields — the common `keyof T` source.
 		obj := e.resolveType(src.KeyofOperand)
-		for _, f := range obj.Fields {
-			entries = append(entries, keyEntry{f.Name, f.Ty, true})
+		for _, f := range obj.UserFields() {
+			entries = append(entries, keyEntry{f.Name, f.Ty, true, f.Optional})
 		}
 	default:
 		// A string-literal-union source (`{ [K in "a" | "b"]: V }`) — no source
@@ -67,15 +68,19 @@ func (e *Emitter) resolveMappedType(ta *ast.TypeAnnotation) Type {
 			return ObjectType(nil) // unsupported source in V1
 		}
 		for _, k := range keys {
-			entries = append(entries, keyEntry{k, Type{}, false})
+			entries = append(entries, keyEntry{k, Type{}, false, false})
 		}
 	}
 	fields := make([]Field, 0, len(entries))
 	for _, ke := range entries {
-		fields = append(fields, Field{
-			Name: ke.name,
-			Ty:   e.resolveMappedValue(ta.MappedValue, ta.MappedKeyVar, ke.fieldTy, ke.hasField),
-		})
+		fty := e.resolveMappedValue(ta.MappedValue, ta.MappedKeyVar, ke.fieldTy, ke.hasField)
+		// `?` makes each member optional; a homomorphic mapping keeps the
+		// source member's own optionality, as TypeScript does.
+		optional := ta.MappedOptional || ke.optional
+		if optional && !fty.IsFunc {
+			fty = optionalFieldType(fty)
+		}
+		fields = append(fields, Field{Name: ke.name, Ty: fty, Optional: optional})
 	}
 	return ObjectType(fields)
 }

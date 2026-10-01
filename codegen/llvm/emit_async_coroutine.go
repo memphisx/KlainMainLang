@@ -161,6 +161,9 @@ func (e *Emitter) writeAsyncDefinition(name, paramStr string, awaited bool) {
 		args = append(args, fmt.Sprintf("%s %%__co_a%d", ty, i))
 	}
 	fmt.Fprintf(&w, "  %%__co_h = call ptr %s(%s)\n", inner, strings.Join(args, ", "))
+	// H is this trampoline's to read: never an unhandled rejection (ADR-01192).
+	e.ensureUnhandledRejections()
+	w.WriteString("  call void @__kml_promise_mark_handled(ptr %__co_h)\n")
 	// inner returned, so its promise H is settled. Adopt it into this task's
 	// promise P: value/reason words first, then the state through the task's own
 	// finish (fulfilled — by returning to the trampoline) or reject path.

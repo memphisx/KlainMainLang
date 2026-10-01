@@ -44,7 +44,7 @@
               "Construction forms: from a size (`new Uint8Array(10)`, own new buffer), an existing `ArrayBuffer` (`new Uint8Array(buf)`, a **view** sharing the same memory — writes through one view are visible through any other view over the same buffer, including a differently-typed one reinterpreting the same bytes), the sub-range view form `new Uint8Array(buf, byteOffset, length?)` (RangeError for a negative/misaligned/out-of-bounds offset or over-long length — [ADR-00312](../adr/ADR-00312.md)), or a `number[]`/array literal/another TypedArray (`new Uint8Array([1,2,3])`, copy-construct). Construction is a general expression, usable anywhere an array value is — function argument, return value, object field, method-chain head — not only a variable declaration's initializer ([ADR-00512](../adr/ADR-00512.md))",
               "Indexing, `.length`, `.fill`/`.slice`/`.reverse`/`.at`/`.indexOf`/`.includes`/`.map`/`.filter`/`.reduce`/`.forEach`/`.some`/`.every`, for-of, and `.keys()`/`.values()`/`.entries()` all come from the same machinery a plain `number[]` uses; `.set(source, offset?)` (the offset is `ToIntegerOrInfinity`'d — a string/object/NaN converts, a negative or infinite offset is a `RangeError`, a Symbol a `TypeError`; [ADR-01057](../adr/ADR-01057.md); the source may be any array-like — an `any` holding an array/TypedArray, a string, `{ length, 0, 1 }`, a dynamic array — with `null`/`undefined` a `TypeError`, [ADR-01059](../adr/ADR-01059.md)), `.subarray(start?, end?)` (a view, not a copy — unlike `.slice()`), and `.byteLength` are TypedArray-specific additions",
               "Non-clamped writes wrap (mod 2^width, e.g. `new Uint8Array([300])[0] === 44`), matching real JS",
-              "A TypedArray keeps its identity through `any`: `console.log` prints `Int32Array(2) [ 8, 9 ]`, `Array.isArray` is `false` (statically too), `JSON.stringify` gives the index-keyed object, `x.length`/`x[i]` read through the box; a mixed literal (`[[7], new Int32Array([8])]`) is an `any[]` under `-compat=js` and a clean rejection in strict — never a reinterpreted buffer ([ADR-01059](../adr/ADR-01059.md))",
+              "A TypedArray keeps its identity through `any`: `console.log` prints `Int32Array(2) [ 8, 9 ]`, `Array.isArray` is `false` (statically too), `JSON.stringify` gives the index-keyed object, `x.length`/`x.byteLength`/`x.BYTES_PER_ELEMENT`/`x[i]` read through the box, and `ArrayBuffer.isView` is true for it (and a boxed `DataView`); a mixed literal (`[[7], new Int32Array([8])]`) is an `any[]` under `-compat=js` and a clean rejection in strict — never a reinterpreted buffer ([ADR-01059](../adr/ADR-01059.md))",
               "See [ADR-00078](../adr/ADR-00078.md)/[TDD-00018](../tdd/TDD-00018.md)"
             ]
           },
@@ -87,10 +87,11 @@
             "caveats": [
               "`.stream()` delivers the whole blob as one `Uint8Array` chunk, not incrementally ([ADR-00341](../adr/ADR-00341.md))",
               "The parts argument is an inline array literal or a `string[]` variable ([ADR-00489](../adr/ADR-00489.md)); no `endings` option; the `type` string is stored as-is (no spec lowercasing)",
-              "`.text()` truncates at an embedded null byte (the standard string-boundary caveat)"
+              "`.text()` truncates at an embedded null byte (the standard string-boundary caveat)",
+              "A Blob built from several parts is one buffer: its readers settle as a one-part Blob's do, where Node's reader takes two more microtask hops per extra part"
             ],
             "notes": [
-              "`new Blob(parts?, { type }?)` over mixed string/TypedArray/ArrayBuffer/Blob parts — a general expression; `.size`/`.type`, `.slice(start?, end?, contentType?)` (copy; type never inherited, per spec), awaitable `.text()`/`.arrayBuffer()`/`.bytes()` returning copies, and `.stream()` → `ReadableStream<Uint8Array>` ([TDD-00102](../tdd/TDD-00102.md)/[ADR-00314](../adr/ADR-00314.md))",
+              "`new Blob(parts?, { type }?)` over mixed string/TypedArray/ArrayBuffer/Blob parts — a general expression; `.size`/`.type`, `.slice(start?, end?, contentType?)` (copy; type never inherited, per spec), `.text()`/`.arrayBuffer()`/`.bytes()` returning promises of copies, settled as Node's reader settles them ([ADR-01198](../adr/ADR-01198.md)), and `.stream()` → `ReadableStream<Uint8Array>` ([TDD-00102](../tdd/TDD-00102.md)/[ADR-00314](../adr/ADR-00314.md))",
               "A user-declared `class Blob` shadows the builtin"
             ]
           },

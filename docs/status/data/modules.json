@@ -101,7 +101,7 @@
               "See [ADR-01146](../adr/ADR-01146.md)"
             ],
             "caveats": [
-              "A Node class of a module code generation implements (`ChildProcess`, `Hash`, `readline`'s `Interface`, `Http2ServerRequest`, …) is a type only: a value use is a compile error; the classes of the modules written in TypeScript (`net`, `tls`, `http`, `https`, `stream`, `events`) are values"
+              "A Node class of a module code generation implements (`Hash`, `Http2ServerRequest`, …) is a type only: a value use is a compile error; the classes of the modules written in TypeScript (`net`, `tls`, `http`, `https`, `stream`, `events`, `child_process`, `tty`, `readline`, `string_decoder`) are values"
             ]
           },
           {

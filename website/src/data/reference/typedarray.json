@@ -95,14 +95,15 @@
       "statusRow": "Blob",
       "signature": "new Blob(parts?, { type }?)",
       "badge": "caveats",
-      "description": "An immutable binary value with a MIME type, built from mixed string/TypedArray/ArrayBuffer/Blob parts — a general expression. Exposes .size/.type, .slice(start?, end?, contentType?) (a copy; type never inherited, per spec), awaitable .text()/.arrayBuffer()/.bytes() returning copies, and .stream() → ReadableStream<Uint8Array>.",
+      "description": "An immutable binary value with a MIME type, built from mixed string/TypedArray/ArrayBuffer/Blob parts — a general expression. Exposes .size/.type, .slice(start?, end?, contentType?) (a copy; type never inherited, per spec), .text()/.arrayBuffer()/.bytes() returning promises of copies (settled as Node's reader settles them), and .stream() → ReadableStream<Uint8Array>.",
       "returns": { "type": "Blob", "desc": "An immutable binary blob." },
       "exampleKey": "blob/blob",
       "snippet": "const greeting = new Blob([\"Hello, \", \"world\", \"!\"], { type: \"text/plain\" })\nconsole.log(greeting.size, greeting.type) // 13 text/plain\nconsole.log(await greeting.text())        // Hello, world!",
       "differences": [
         "`.stream()` delivers the whole blob as one `Uint8Array` chunk, not incrementally",
-        "The parts argument must be an inline array literal; no `endings` option; the `type` string is stored as-is (no spec lowercasing)",
-        "`.text()` truncates at an embedded null byte (the standard string-boundary caveat)"
+        "The parts argument must be an inline array literal or a `string[]` variable; no `endings` option; the `type` string is stored as-is (no spec lowercasing)",
+        "`.text()` truncates at an embedded null byte (the standard string-boundary caveat)",
+        "A Blob built from several parts is one buffer: its readers settle as a one-part Blob's do, where Node's reader takes two more microtask hops per extra part"
       ],
       "seeAlso": ["typedarray.uint8arrayint8arrayuint1", "typedarray.arraybuffer"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Blob" }

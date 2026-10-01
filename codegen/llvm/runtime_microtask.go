@@ -141,6 +141,9 @@ loop:
   %again = icmp slt i64 %th, %tl
   br i1 %again, label %loop, label %done
 done:
+  ; The checkpoint's end: report what is still unhandled (Node's
+  ; processPromiseRejections).
+  call void @__kml_unhandled_check()
   ret void
 }`)
 
@@ -228,13 +231,22 @@ define void @__kml_promise_drain_reactions(ptr %%p) {
 entry:
   %%rx_p = getelementptr %s, ptr %%p, i32 0, i32 4
   %%head0 = load ptr, ptr %%rx_p, align 8
+  ; A rejection nothing consumes is queued for the checkpoint's report.
+  %%st_p = getelementptr %s, ptr %%p, i32 0, i32 0
+  %%st = load i64, ptr %%st_p, align 8
+  %%rej = icmp eq i64 %%st, 2
+  br i1 %%rej, label %%noterej, label %%start
+noterej:
+  call void @__kml_promise_note_rejected(ptr %%p)
+  br label %%start
+start:
   br label %%rev
 rev:
   ; The list is pushed at its head, so it holds the reactions newest-first;
   ; they must run in the order they were registered (p.then(A); p.then(B) runs
   ; A then B). Reverse it in place before enqueueing.
-  %%rprev = phi ptr [ null, %%entry ], [ %%rcur, %%revbody ]
-  %%rcur = phi ptr [ %%head0, %%entry ], [ %%rnext, %%revbody ]
+  %%rprev = phi ptr [ null, %%start ], [ %%rcur, %%revbody ]
+  %%rcur = phi ptr [ %%head0, %%start ], [ %%rnext, %%revbody ]
   %%rdone = icmp eq ptr %%rcur, null
   br i1 %%rdone, label %%revdone, label %%revbody
 revbody:
@@ -258,5 +270,5 @@ body:
 done:
   store ptr null, ptr %%rx_p, align 8
   ret void
-}`, promiseStructIR))
+}`, promiseStructIR, promiseStructIR))
 }

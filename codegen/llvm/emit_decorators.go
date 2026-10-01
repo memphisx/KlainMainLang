@@ -3,7 +3,6 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
-	"strings"
 )
 
 // emitClassDecoratorApplications runs a class's observe-only decorators
@@ -235,7 +234,7 @@ func (e *Emitter) registerDecoratedMethodSlots(prog *ast.Program) error {
 				continue
 			}
 			slot := "@" + llvmSafeSymbol(cd.Name+"_"+m.Name+"__decslot")
-			e.emitGlobal(fmt.Sprintf("%s = global i64 0", slot))
+			e.emitGlobal(fmt.Sprintf("%s = %sglobal i64 0", slot, e.isolateTLS()))
 			if e.decoratedMethodSlots[cd.Name] == nil {
 				e.decoratedMethodSlots[cd.Name] = map[string]string{}
 			}
@@ -252,7 +251,7 @@ func (e *Emitter) registerDecoratedMethodSlots(prog *ast.Program) error {
 				continue
 			}
 			slot := "@" + llvmSafeSymbol(cd.Name+"_"+f.Name+"__fieldinit")
-			e.emitGlobal(fmt.Sprintf("%s = global i64 %d", slot, nbUndefined))
+			e.emitGlobal(fmt.Sprintf("%s = %sglobal i64 %d", slot, e.isolateTLS(), nbUndefined))
 			if e.standardFieldInitSlots[cd.Name] == nil {
 				e.standardFieldInitSlots[cd.Name] = map[string]string{}
 			}
@@ -267,7 +266,7 @@ func (e *Emitter) registerDecoratedMethodSlots(prog *ast.Program) error {
 			}
 			key := accessorMethodName(m.AccessorKind, m.Name)
 			slot := "@" + llvmSafeSymbol(cd.Name+"_"+key+"__decslot")
-			e.emitGlobal(fmt.Sprintf("%s = global i64 0", slot))
+			e.emitGlobal(fmt.Sprintf("%s = %sglobal i64 0", slot, e.isolateTLS()))
 			if e.decoratedMethodSlots[cd.Name] == nil {
 				e.decoratedMethodSlots[cd.Name] = map[string]string{}
 			}
@@ -280,14 +279,14 @@ func (e *Emitter) registerDecoratedMethodSlots(prog *ast.Program) error {
 			for _, kind := range []string{"get", "set"} {
 				key := accessorMethodName(kind, aa.Name)
 				slot := "@" + llvmSafeSymbol(cd.Name+"_"+key+"__decslot")
-				e.emitGlobal(fmt.Sprintf("%s = global i64 0", slot))
+				e.emitGlobal(fmt.Sprintf("%s = %sglobal i64 0", slot, e.isolateTLS()))
 				if e.decoratedMethodSlots[cd.Name] == nil {
 					e.decoratedMethodSlots[cd.Name] = map[string]string{}
 				}
 				e.decoratedMethodSlots[cd.Name][key] = slot
 			}
 			bslot := "@" + llvmSafeSymbol(cd.Name+"_"+aa.Backing+"__fieldinit")
-			e.emitGlobal(fmt.Sprintf("%s = global i64 %d", bslot, nbUndefined))
+			e.emitGlobal(fmt.Sprintf("%s = %sglobal i64 %d", bslot, e.isolateTLS(), nbUndefined))
 			if e.standardFieldInitSlots[cd.Name] == nil {
 				e.standardFieldInitSlots[cd.Name] = map[string]string{}
 			}
@@ -295,7 +294,7 @@ func (e *Emitter) registerDecoratedMethodSlots(prog *ast.Program) error {
 		}
 		if classHasStandardDecorators(cd) || len(cd.AutoAccessors) > 0 {
 			g := "@" + llvmSafeSymbol(cd.Name+"__initlist")
-			e.emitGlobal(fmt.Sprintf("%s = global i64 %d", g, nbUndefined))
+			e.emitGlobal(fmt.Sprintf("%s = %sglobal i64 %d", g, e.isolateTLS(), nbUndefined))
 			e.standardInitListGlobals[cd.Name] = g
 		}
 	}
@@ -345,22 +344,7 @@ func (e *Emitter) emitMethodBoxAdapter(className, methodName string, pos ast.Pos
 	llvmName := llvmSafeSymbol(info.MethodImplementor[methodName] + "_" + methodName)
 	fnName := fmt.Sprintf("@__kml_methadapt_%s", llvmSafeSymbol(className+"_"+methodName))
 
-	savedAllocas := e.allocas
-	savedBody := e.body
-	savedRegCtr := e.regCtr
-	savedLabelCtr := e.labelCtr
-	savedScopes := e.scopes
-	savedRetType := e.currentRetType
-	savedBlockDone := e.blockDone
-
-	e.allocas = strings.Builder{}
-	e.body = strings.Builder{}
-	e.regCtr = 0
-	e.labelCtr = 0
-	e.scopes = nil
-	e.blockDone = false
-	e.currentRetType = TypeAny
-	e.pushScope()
+	restoreFn := e.beginDetachedFunc()
 
 	// Receiver: unbox %p_this (a boxed class instance) to the raw instance ptr.
 	_, thisPay := e.emitUnboxTagPayload(Value{Ref: "%p_this", Ty: TypeAny})
@@ -412,7 +396,7 @@ func (e *Emitter) emitMethodBoxAdapter(className, methodName string, pos ast.Pos
 	e.functions.WriteString(e.body.String())
 	e.functions.WriteString("}\n")
 
-	e.restoreDynFnState(savedAllocas, savedBody, savedRegCtr, savedLabelCtr, savedScopes, savedRetType, savedBlockDone)
+	restoreFn()
 	if boxFailed {
 		return Value{}, fmt.Errorf("%d:%d: a method decorator on '%s.%s' is not supported yet — its return type can't be boxed", pos.Line, pos.Col, className, methodName)
 	}

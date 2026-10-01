@@ -39,7 +39,7 @@
             "feature": "`Object.keys(obj)`",
             "status": "implemented",
             "notes": [
-              "On a bare `any` value: runtime key enumeration of the D1 dynamic object's bag, `[]` for a boxed primitive, TypeError for null/undefined — matching JS ([TDD-00155](../tdd/TDD-00155.md) Stage 1)",
+              "On a bare `any` value: runtime key enumeration of the D1 dynamic object's bag, the index keys of a boxed array or TypedArray ([ADR-01284](../adr/ADR-01284.md)), `[]` for a boxed primitive, TypeError for null/undefined — matching JS ([TDD-00155](../tdd/TDD-00155.md) Stage 1)",
               "Keys enumerate in ES own-property order (array-index keys ascending numeric first, then insertion order) across `Object.keys`/`values`/`entries`, `for...in`, spread and `JSON.stringify`, for static and dynamic objects alike ([ADR-00996](../adr/ADR-00996.md))",
               "An omitted optional field (`x?: T`) is not a key — filtered at runtime by its presence, as `JSON.stringify` already did ([ADR-01063](../adr/ADR-01063.md))"
             ],
@@ -51,7 +51,6 @@
             "feature": "`Object.values(obj)`",
             "status": "implemented",
             "caveats": [
-              "A heterogeneous object's values are stringified ([ADR-00492](../adr/ADR-00492.md)); a homogeneous shape returns a real typed `V[]`",
               "On a *static* array (`Object.values([7, 8])`) it is a clean rejection; a bare `any` holding an array answers its elements"
             ],
             "notes": [
@@ -62,11 +61,10 @@
             "feature": "`Object.entries(obj)`",
             "status": "implemented",
             "caveats": [
-              "A heterogeneous object's values are stringified — its value union is representable only as `any`, whose operators aren't dispatched yet ([ADR-00492](../adr/ADR-00492.md)); a homogeneous shape returns real typed `[string, V]` tuples",
               "On a *static* array (`Object.entries([7, 8])`) it is a clean rejection; a bare `any` holding an array answers `[\"0\", v0], …`"
             ],
             "notes": [
-              "Returns a real `[string, string][]` tuple array; destructure with `for (const [k, v] of Object.entries(obj))`",
+              "Returns real `[string, V]` tuples (`[string, any]` for a heterogeneous shape or a structural type, as TypeScript types it); destructure with `for (const [k, v] of Object.entries(obj))`",
               "On a bare `any` value: a dynamic array of `[key, value]` pairs — the dynamic object's enumerable own entries in ES order, or an array's index/element pairs — TypeError for null/undefined, `[]` for a boxed primitive ([ADR-01077](../adr/ADR-01077.md))"
             ]
           },
@@ -78,10 +76,12 @@
             "feature": "`Object.assign(target, ...src)`",
             "status": "implemented",
             "caveats": [
-              "Every field a source contributes must already exist on `target`'s struct type — a source field `target`'s type doesn't have is a clean compile error (fixed-shape heap structs), not grafted on as in real JS ([ADR-00054](../adr/ADR-00054.md))"
+              "Between statically typed objects, every field a source contributes must already exist on `target`'s struct type — a source field `target`'s type doesn't have is a clean compile error (fixed-shape heap structs), not grafted on as in real JS ([ADR-00054](../adr/ADR-00054.md))",
+              "Through `any`, symbol keys are not copied; an array target is a compile error"
             ],
             "notes": [
-              "Mutates and returns `target`"
+              "Mutates and returns `target`",
+              "With an `any` target or source, the copy runs on run-time properties (getters run; null and undefined sources skipped), and the result is `any` ([ADR-01237](../adr/ADR-01237.md))"
             ]
           },
           {
@@ -102,10 +102,11 @@
             "status": "implemented",
             "caveats": [
               "Dynamic (`any`-typed / js-mode-literal) objects only — statically-typed structs have no descriptor table",
-              "`Object.defineProperties` and the descriptor-aware `Object.assign` form are follow-ons"
+              "`Object.defineProperties` defines string keys only, not symbol keys"
             ],
             "notes": [
-              "Real property descriptors ([TDD-00155](../tdd/TDD-00155.md) Stage 5, [ADR-00629](../adr/ADR-00629.md)): spec create-defaults (absent attributes are false), non-configurable redefinition rules, data and accessor descriptor forms. Object-literal `get`/`set` compile to dynamic-ABI functions invoked with the original receiver (inherited getters through the prototype chain included); `Object.keys`/`for...in`/`JSON.stringify` honor enumerability (stringify and spread invoke getters); rejected writes/deletes throw module-strict JS TypeErrors"
+              "Real property descriptors ([TDD-00155](../tdd/TDD-00155.md) Stage 5, [ADR-00629](../adr/ADR-00629.md)): spec create-defaults (absent attributes are false), non-configurable redefinition rules, data and accessor descriptor forms. Object-literal `get`/`set` compile to dynamic-ABI functions invoked with the original receiver (inherited getters through the prototype chain included); `Object.keys`/`for...in`/`JSON.stringify` honor enumerability (stringify and spread invoke getters); rejected writes/deletes throw module-strict JS TypeErrors",
+              "`Object.defineProperties`; a function's own properties take descriptors too ([ADR-01237](../adr/ADR-01237.md), [ADR-01232](../adr/ADR-01232.md))"
             ]
           },
           {
@@ -123,7 +124,7 @@
             "feature": "`Reflect.get/set/has/deleteProperty/ownKeys/getPrototypeOf/setPrototypeOf/isExtensible/preventExtensions/defineProperty` + `defineMetadata`/`getMetadata`/`hasMetadata`",
             "status": "implemented",
             "caveats": [
-              "`Reflect.construct` is missing; `Reflect.apply` takes a function value (a code-generated builtin such as `Math.max` is not one)",
+              "`Reflect.construct` is missing",
               "The metadata API (`defineMetadata`/`getMetadata`/`getOwnMetadata`/`hasMetadata`/`hasOwnMetadata`, TDD-00161 Stage 3) stores on a dynamic-object target and does not walk the prototype chain (so `get` == `getOwn`); `Reflect.metadata` as a decorator factory is rejected",
               "Boolean-returning forms (`set`/`deleteProperty`/`setPrototypeOf`) return the success flag rather than throwing, per spec",
               "Every form requires a dynamic (`any`-typed, or `-compat=js`) target: a statically-typed object operand is a clean compile-time rejection (strict mode does not widen a typed struct to a bag, [ADR-00630](../adr/ADR-00630.md)), including `get`/`has`"
@@ -177,11 +178,12 @@
             "caveats": [
               "`V` is inferred from the first property only",
               "`...spread` combined with a computed key isn't supported yet",
-              "The declared-type form (`{ [key: string]: T }`) isn't supported yet"
+              "The declared-type form (`{ [key: string]: T }`) isn't supported yet",
+              "A literal with a non-constant key is a `Map` inside: a function-valued property can't be called as a method, and the literal can't be held in `any`"
             ],
             "notes": [
               "A *dynamic object* — storage-wise a real `Map<string,V>` reusing `new Map<K,V>()`'s runtime, with `.field`/`[expr]` sugar layered on top ([TDD-00012](../tdd/TDD-00012.md) / [ADR-00066](../adr/ADR-00066.md))",
-              "Exception: a well-known-symbol key (`[Symbol.asyncIterator]`/`[Symbol.iterator]`, colon or method-shorthand form) desugars to a reserved *static* key, so the literal stays a static struct and the member drives `for...of`/`for await...of` iteration ([ADR-00279](../adr/ADR-00279.md))"
+              "A well-known-symbol key (`[Symbol.iterator]`, `[Symbol.asyncIterator]`, `[Symbol.toPrimitive]`, …) in the colon, method, generator (`*[Symbol.iterator]()`) or async form desugars to a reserved *static* key, so the literal stays a static struct and the member drives iteration and conversion ([ADR-00279](../adr/ADR-00279.md), [ADR-01292](../adr/ADR-01292.md)); a computed name takes the method forms too (`{ [name]() {} }`, `async [name]() {}`)"
             ]
           },
           {
@@ -216,7 +218,7 @@
             "feature": "`Map.entries()`",
             "status": "implemented",
             "notes": [
-              "Returns a real `[K, V][]` tuple array ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/ADR-00201.md)); iterate with `for (const [k, v] of m.entries())`; replaced the earlier object-shaped stand-in ([ADR-00053](../adr/ADR-00053.md))"
+              "`keys()`, `values()` and `entries()` of a `Map` or `Set` return live iterators (`next()`, `toArray()`, `for...of`, spread, `Array.from`): an entry added before the iterator reaches it is visited, a deleted one is not, and `console.log` shows the entries still to come (`[Map Iterator] { 'a' }`) ([ADR-01313](../adr/ADR-01313.md))"
             ]
           },
           {
@@ -236,18 +238,15 @@
           {
             "feature": "`new Map(entries)`",
             "status": "implemented",
-            "caveats": [
-              "Accepts only a `[K, V][]` array of 2-tuples, narrowed from the spec's `Iterable<[K, V]>` — the only iterable/pair concept a general expression has here ([ADR-00347](../adr/ADR-00347.md))"
-            ],
             "notes": [
-              "K/V are inferred from the entries when no `<K, V>` is given; duplicate keys resolve last-wins; the entries source may be a bare literal or an already-declared `[K, V][]` variable ([TDD-00066](../tdd/TDD-00066.md))"
+              "Takes any iterable of `[key, value]` pairs — an array, another `Map`, an iterator, a generator or an object with `[Symbol.iterator]` ([ADR-01313](../adr/ADR-01313.md)); K/V are inferred from the entries when no `<K, V>` is given; duplicate keys resolve last-wins ([TDD-00066](../tdd/TDD-00066.md))"
             ]
           },
           {
             "feature": "`new Set(iterable)`",
             "status": "implemented",
-            "caveats": [
-              "Accepts only an array expression, narrowed from the spec's `Iterable<T>` — the only iterable concept a general expression has here ([ADR-00159](../adr/ADR-00159.md))"
+            "notes": [
+              "Takes any iterable: an array, another `Set`, an iterator, a generator or an object with `[Symbol.iterator]` ([ADR-01313](../adr/ADR-01313.md))"
             ]
           },
           {

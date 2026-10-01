@@ -5,7 +5,7 @@
   "segments": [
     {
       "kind": "block",
-      "text": "> Part of the [Implementation Status](README.md) index. Node's `path` module — portable filesystem path manipulation, in both of Node's flavours: a bare `path` is the host's flavour (`path.win32` on Windows, `path.posix` elsewhere), and `path.posix` / `path.win32` name one explicitly on any host ([TDD-00178](../tdd/TDD-00178.md)). Import-gated (`import path from 'path'`, `import { join, win32 } from 'path'`) — see [TDD-00049](../tdd/TDD-00049.md)/[ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md)."
+      "text": "> Part of the [Implementation Status](README.md) index. Node's `path` module — portable filesystem path manipulation, in both of Node's flavours: a bare `path` is the host's flavour (`path.win32` on Windows, `path.posix` elsewhere), and `path.posix` / `path.win32` name one explicitly on any host ([TDD-00178](../tdd/TDD-00178.md)). Node's own lib/path.js in TypeScript (`lib/node/path.ts`, [ADR-01290](../adr/ADR-01290.md)), with `path/posix` and `path/win32`; import-gated (`import path from 'path'`, `import { join, win32 } from 'path'`)."
     },
     {
       "kind": "coverage",
@@ -30,7 +30,9 @@
               "posix: skips empty segments, joins the rest with `/`, then normalizes (collapses repeated slashes, drops `.` segments, resolves `..` against segments already seen in the same call, and preserves a trailing slash the last segment carries — `path.join('foo', 'bar/')` is `'foo/bar/'`, matching Node)",
               "win32: Node's `join` — mixed `/`/`\\` accepted and normalised to `\\`, UNC roots (`\\\\server\\share`) preserved, drive roots (`C:\\`) never escaped by `..`, trailing separator kept, reserved device names (`CON`, `COM1:`) left un-normalised"
             ],
-            "caveats": []
+            "caveats": [
+              "A non-string argument held in `any` is converted to a string at the call instead of throwing Node's `ERR_INVALID_ARG_TYPE` (the parameters are typed `string`)"
+            ]
           },
           {
             "feature": "`path.resolve(...segments)`",
@@ -88,17 +90,16 @@
             "feature": "`path.sep` / `path.delimiter`",
             "status": "implemented",
             "notes": [
-              "Compile-time constants for the host's flavour: `/` and `:` on Linux/macOS, `\\` and `;` on Windows; `path.posix.sep` / `path.win32.sep` (and `delimiter`) name a flavour explicitly"
+              "The host's flavour: `/` and `:` on Linux/macOS, `\\\\` and `;` on Windows; `path.posix.sep` / `path.win32.sep` (and `delimiter`) name a flavour explicitly"
             ]
           },
           {
             "feature": "`path.posix` / `path.win32`",
             "status": "implemented",
             "notes": [
-              "Both flavour objects exist on every host, as in Node: `path.posix.join(...)`, `path.win32.parse(...)`, `import { win32 } from 'path'`. The win32 algorithms are a C port of Node's `lib/path.js` (`codegen/llvm/pathsrc/path_win32.c`), compiled in only when a program uses them; the posix algorithms are the emitted-IR runtime ([TDD-00178](../tdd/TDD-00178.md), [ADR-00722](../adr/ADR-00722.md))"
+              "Both flavour objects exist on every host, as in Node, and are values: `path.posix.join(...)`, `const p = path.win32`, a `PlatformPath` or `typeof path.posix` parameter, `import { win32 } from 'path'`, and the `path/posix` / `path/win32` modules"
             ],
             "caveats": [
-              "The flavour objects are dispatch targets, not values: `const p = path.win32` and then `p.join(...)` is not supported — call through `path.win32.join(...)` or a named import (`import { win32 } from 'path'`).",
               "`matchesGlob` is missing from both flavours (it needs Node's glob matcher)."
             ]
           },

@@ -27,6 +27,11 @@ type Expression interface {
 
 type Program struct {
 	Body []Statement
+	// LibExports maps "<module file>:<name>" (`stream:_kmlFromWeb`) to the
+	// merged name of a top-level declaration of a builtin module written in
+	// TypeScript that the program includes, so code generation can call into
+	// the library.
+	LibExports map[string]string
 	// ResolvedModules maps a module-specifier string literal (a `new Worker`
 	// path) to the canonical file the resolver resolved it to, relative to the
 	// file it was written in.
@@ -59,6 +64,9 @@ type Program struct {
 	// imports or exports), recorded before the resolver strips its imports:
 	// its top level's promise jobs run before its ticks.
 	EntryIsModule bool
+	// EntryPath is the entry file's absolute path (Node's
+	// require.main.filename): the module a self-fork runs.
+	EntryPath string
 	// AmbientNames are the names of the ambient declarations the parser
 	// erases (`declare class C {…}`, `declare type T = …`): bindings a
 	// program may use that no statement of Body declares.
@@ -84,6 +92,10 @@ type Program struct {
 	// constructing when called without `new` (`http.Server(…)`), marked
 	// `// kml:callable <Name>` in the module's source.
 	CallableClasses map[string]bool
+	// GlobalLinks maps each global a global module implements (TDD-00232)
+	// that the program names without declaring to the module's (renamed)
+	// class; sema links the free references after checking.
+	GlobalLinks map[string]string
 	// NodeTypeImports is filled by the resolver per file: each local a
 	// named import of a builtin module binds to a name Node's module
 	// exports but this compiler implements only as a type (`import {
@@ -148,16 +160,6 @@ type Program struct {
 	// checks — and only then, so a program that never imports the module is
 	// wholly untouched and links none of the runtime.
 	UsesKlainSync bool
-	// UsesKlainWS is set by the resolver when any file imports `klain:ws`
-	// (TDD-00158). Known before codegen so the HTTP dispatcher can decide up
-	// front whether to emit the WebSocket handshake + frame loop; a program
-	// that never imports it is wholly untouched.
-	UsesKlainWS bool
-	// UsesNodeFFI is set by the resolver when any file imports `node:ffi`
-	// (TDD-00164). Known before codegen so `new DynamicLibrary(...)` can be
-	// recognized as the builtin constructor only in programs that actually
-	// imported the module; a program that never imports it is wholly untouched.
-	UsesNodeFFI bool
 }
 
 // NSAliasDecl is one `import X = Y.Z` alias declaration (ADR-00456).
@@ -169,11 +171,16 @@ type NSAliasDecl struct {
 }
 
 // WorkerModule is one worker entry file's diverted top-level statement list
-// (TDD-00098). Path is the canonical absolute file path — the same key a
-// NewWorkerExpression's ResolvedPath carries, which is how codegen matches a
-// `new Worker(...)` site to its entry function.
+// (TDD-00098). Path is the canonical absolute file path — the path a
+// `new Worker(...)` site's literal is rewritten to, which the worker
+// registry keys its entry function by.
 type WorkerModule struct {
 	Path string
+	// Deps are the executable top-level statements of the modules the
+	// worker evaluates on its own thread before Body: every builtin module
+	// and the user modules it imports (the same nodes Body of the program
+	// holds, emitted a second time into the worker's entry).
+	Deps []Statement
 	Body []Statement
 }
 
@@ -275,6 +282,8 @@ type FunctionDeclaration struct {
 	// TypeParamConstraints[i] is the `extends X` bound on TypeParams[i] (nil if
 	// unconstrained), e.g. `function pluck<T extends HasId>(...)` — TDD-00113.
 	TypeParamConstraints []*TypeAnnotation
+	// TypeParamDefaults[i] is the `= T` default of TypeParams[i] (nil if none).
+	TypeParamDefaults []*TypeAnnotation
 	// Erased is TDD-00010 V2: set when a `/** @erased */` JSDoc annotation
 	// precedes the declaration, opting a generic function out of V1's
 	// default monomorphization into compiling its body exactly once, with
@@ -290,7 +299,14 @@ type FunctionDeclaration struct {
 	// pure_check.go) ENFORCES it — rejecting parameter/captured/global mutation,
 	// I/O, nondeterminism, and calls to non-@pure functions. Zero codegen effect;
 	// a violation is a compile error. `async`/generator are rejected at parse time.
-	Pure       bool
+	Pure bool
+	// Intrinsic is `/** @intrinsic name */` on a builtin `declare
+	// function`: the call is emitted inline (TDD-00230 P3.2).
+	Intrinsic string
+	// CallSite is set by a `/** @callsite */` JSDoc annotation: a call of
+	// the function receives the call's source text (CallExpression.Source)
+	// as a hidden last argument (assert.ok's message quotes it).
+	CallSite   bool
 	Params     []Param
 	ReturnType *TypeAnnotation
 	Body       *BlockStatement // nil for an abstract method (IsAbstract true) — signature only
@@ -946,6 +962,12 @@ func NewAssignmentExpression(op string, left, right Expression, pos Pos) *Assign
 type CallExpression struct {
 	Callee Expression
 	Args   []Expression
+	// Source is the call's source text, its type syntax blanked (as Node's
+	// type stripping shows it): assert.ok quotes it.
+	Source string
+	// PassSource marks a call of assert's ok (or `assert`, `strict`): the
+	// callee receives Source as a hidden last argument.
+	PassSource bool
 	// TypeArgs holds explicit call-site type arguments (`id<string>(x)` —
 	// ADR-00473); nil for ordinary calls. Consumed by the generic-function
 	// dispatch; ignored (erased) on non-generic callees.
@@ -1303,22 +1325,6 @@ func NewNewWeakRefExpression(elem *TypeAnnotation, init Expression, pos Pos) *Ne
 	return &NewWeakRefExpression{ElemType: elem, Init: init, pos: pos}
 }
 
-// NewEventEmitterExpression — `new EventEmitter<T>()` (TDD-00023). Like
-// NewMapExpression/NewSetExpression, restricted to a variable declaration's
-// initializer, not a general expression.
-type NewEventEmitterExpression struct {
-	PayloadType *TypeAnnotation
-	pos         Pos
-}
-
-func (*NewEventEmitterExpression) nodeMarker()   {}
-func (*NewEventEmitterExpression) exprMarker()   {}
-func (n *NewEventEmitterExpression) GetPos() Pos { return n.pos }
-
-func NewNewEventEmitterExpression(payload *TypeAnnotation, pos Pos) *NewEventEmitterExpression {
-	return &NewEventEmitterExpression{PayloadType: payload, pos: pos}
-}
-
 // NewReadableStreamExpression — `new ReadableStream<T>(underlyingSource?,
 // strategy?)` (TDD-00097 Stage 1). The underlying source must be an object
 // literal (its start/pull/cancel members are destructured at compile time);
@@ -1529,24 +1535,6 @@ func NewNewURLExpressionWithBase(url, base Expression, pos Pos) *NewURLExpressio
 	return &NewURLExpression{URL: url, Base: base, pos: pos}
 }
 
-// NewDatabaseSyncExpression is `new DatabaseSync(path, options?)` from
-// node:sqlite (ADR-00540). Path is a required string; Options is an optional
-// `{ readOnly, open, enableForeignKeyConstraints, timeout }` object literal,
-// validated in codegen.
-type NewDatabaseSyncExpression struct {
-	Path    Expression
-	Options Expression // nil when omitted
-	pos     Pos
-}
-
-func (*NewDatabaseSyncExpression) nodeMarker()   {}
-func (*NewDatabaseSyncExpression) exprMarker()   {}
-func (n *NewDatabaseSyncExpression) GetPos() Pos { return n.pos }
-
-func NewNewDatabaseSyncExpression(path, options Expression, pos Pos) *NewDatabaseSyncExpression {
-	return &NewDatabaseSyncExpression{Path: path, Options: options, pos: pos}
-}
-
 // NewURLPatternExpression is `new URLPattern()` / `new URLPattern(init)` —
 // init, when present, must be an object literal with any subset of the six
 // supported component patterns (protocol/hostname/port/pathname/search/hash);
@@ -1563,68 +1551,6 @@ func (n *NewURLPatternExpression) GetPos() Pos { return n.pos }
 
 func NewNewURLPatternExpression(init Expression, pos Pos) *NewURLPatternExpression {
 	return &NewURLPatternExpression{Init: init, pos: pos}
-}
-
-// NewEventSourceExpression is `new EventSource(url)` — a single required
-// string argument, matching the real Web platform's own narrow constructor
-// (a `{ withCredentials }` second argument is the only other thing real
-// EventSource accepts, and has no meaning without cookies/credentialed
-// requests in this compiler's fetch model either — see docs/tdd/TDD-00038.md).
-type NewEventSourceExpression struct {
-	URL Expression
-	pos Pos
-}
-
-func (*NewEventSourceExpression) nodeMarker()   {}
-func (*NewEventSourceExpression) exprMarker()   {}
-func (n *NewEventSourceExpression) GetPos() Pos { return n.pos }
-
-func NewNewEventSourceExpression(url Expression, pos Pos) *NewEventSourceExpression {
-	return &NewEventSourceExpression{URL: url, pos: pos}
-}
-
-// NewWebSocketExpression is `new WebSocket(url)` (TDD-00039 Stage 3) — a
-// single required string argument (`ws://host:port/path` only; `wss://` is
-// rejected at construction, see emit_websocket_client.go), matching the
-// real Web platform's own constructor shape (a `protocols` second argument
-// negotiates a subprotocol, which has no equivalent in this compiler's
-// model and is simply omitted rather than accepted-and-ignored, the same
-// choice NewEventSourceExpression's own doc comment made for EventSource's
-// second argument).
-type NewWebSocketExpression struct {
-	URL Expression
-	pos Pos
-}
-
-func (*NewWebSocketExpression) nodeMarker()   {}
-func (*NewWebSocketExpression) exprMarker()   {}
-func (n *NewWebSocketExpression) GetPos() Pos { return n.pos }
-
-// NewWorkerExpression is `new Worker('./file.ts', { workerData: v })`
-// (TDD-00098) — the path must be a compile-time string literal (there is no
-// interpreter to load code at runtime; the worker file is compiled into the
-// same binary as its own entry function), resolved relative to the file
-// containing this expression. The optional second argument is an object
-// literal whose only recognized property is `workerData`.
-type NewWorkerExpression struct {
-	Path string // raw literal as written
-	// ResolvedPath is the canonical absolute path, set by the resolver's
-	// rename walk — the key that matches a WorkerModule.Path.
-	ResolvedPath string
-	WorkerData   Expression // nil when no { workerData } option is given
-	pos          Pos
-}
-
-func (*NewWorkerExpression) nodeMarker()   {}
-func (*NewWorkerExpression) exprMarker()   {}
-func (n *NewWorkerExpression) GetPos() Pos { return n.pos }
-
-func NewNewWorkerExpression(path string, workerData Expression, pos Pos) *NewWorkerExpression {
-	return &NewWorkerExpression{Path: path, WorkerData: workerData, pos: pos}
-}
-
-func NewNewWebSocketExpression(url Expression, pos Pos) *NewWebSocketExpression {
-	return &NewWebSocketExpression{URL: url, pos: pos}
 }
 
 // NewURLSearchParamsExpression is `new URLSearchParams()` (empty) or
@@ -1657,74 +1583,6 @@ func (n *NewHeadersExpression) GetPos() Pos { return n.pos }
 
 func NewNewHeadersExpression(init Expression, pos Pos) *NewHeadersExpression {
 	return &NewHeadersExpression{Init: init, pos: pos}
-}
-
-// NewAbortControllerExpression is `new AbortController()` (TDD-00081 Stage 3).
-type NewAbortControllerExpression struct {
-	pos Pos
-}
-
-func (*NewAbortControllerExpression) nodeMarker()   {}
-func (*NewAbortControllerExpression) exprMarker()   {}
-func (n *NewAbortControllerExpression) GetPos() Pos { return n.pos }
-
-func NewNewAbortControllerExpression(pos Pos) *NewAbortControllerExpression {
-	return &NewAbortControllerExpression{pos: pos}
-}
-
-// NewEventTargetExpression is `new EventTarget()` (WHATWG event bus, TDD-00081
-// Stage 2).
-type NewEventTargetExpression struct {
-	pos Pos
-}
-
-func (*NewEventTargetExpression) nodeMarker()   {}
-func (*NewEventTargetExpression) exprMarker()   {}
-func (n *NewEventTargetExpression) GetPos() Pos { return n.pos }
-
-func NewNewEventTargetExpression(pos Pos) *NewEventTargetExpression {
-	return &NewEventTargetExpression{pos: pos}
-}
-
-// NewEventExpression is `new Event(type)` (WHATWG Event, TDD-00081 Stage 1).
-type NewEventExpression struct {
-	TypeArg    Expression // the event type string
-	Cancelable Expression // the init object's `cancelable` value; nil if absent (defaults false)
-	pos        Pos
-}
-
-func (*NewEventExpression) nodeMarker()   {}
-func (*NewEventExpression) exprMarker()   {}
-func (n *NewEventExpression) GetPos() Pos { return n.pos }
-
-func NewNewEventExpression(typeArg Expression, pos Pos) *NewEventExpression {
-	return &NewEventExpression{TypeArg: typeArg, pos: pos}
-}
-
-func NewNewEventExpressionWithInit(typeArg, cancelable Expression, pos Pos) *NewEventExpression {
-	return &NewEventExpression{TypeArg: typeArg, Cancelable: cancelable, pos: pos}
-}
-
-// NewCustomEventExpression is `new CustomEvent(type, { detail })` (TDD-00081
-// Stage 1). Detail is the value of the init object's `detail` property (nil if
-// absent), extracted at parse time so codegen doesn't re-inspect the literal.
-type NewCustomEventExpression struct {
-	TypeArg    Expression
-	Detail     Expression // nil if the init object omitted `detail`
-	Cancelable Expression // the init object's `cancelable` value; nil if absent (defaults false)
-	pos        Pos
-}
-
-func (*NewCustomEventExpression) nodeMarker()   {}
-func (*NewCustomEventExpression) exprMarker()   {}
-func (n *NewCustomEventExpression) GetPos() Pos { return n.pos }
-
-func NewNewCustomEventExpression(typeArg, detail Expression, pos Pos) *NewCustomEventExpression {
-	return &NewCustomEventExpression{TypeArg: typeArg, Detail: detail, pos: pos}
-}
-
-func NewNewCustomEventExpressionWithInit(typeArg, detail, cancelable Expression, pos Pos) *NewCustomEventExpression {
-	return &NewCustomEventExpression{TypeArg: typeArg, Detail: detail, Cancelable: cancelable, pos: pos}
 }
 
 // NewRequestExpression is `new Request(url)` or `new Request(url, init)`
@@ -1819,40 +1677,6 @@ func (n *NewArrayBufferExpression) GetPos() Pos { return n.pos }
 
 func NewNewArrayBufferExpression(byteLength Expression, pos Pos) *NewArrayBufferExpression {
 	return &NewArrayBufferExpression{ByteLength: byteLength, pos: pos}
-}
-
-// NewBroadcastChannelExpression is `new BroadcastChannel('name')`
-// (TDD-00099) — a process-wide pub/sub endpoint. The channel name must be a
-// compile-time string literal: it keys the compile-time per-name message
-// type, the same posture as new Worker's path literal.
-type NewBroadcastChannelExpression struct {
-	Name string
-	pos  Pos
-}
-
-func (*NewBroadcastChannelExpression) nodeMarker()   {}
-func (*NewBroadcastChannelExpression) exprMarker()   {}
-func (n *NewBroadcastChannelExpression) GetPos() Pos { return n.pos }
-
-func NewNewBroadcastChannelExpression(name string, pos Pos) *NewBroadcastChannelExpression {
-	return &NewBroadcastChannelExpression{Name: name, pos: pos}
-}
-
-// NewMessageChannelExpression is `new MessageChannel<T>()` (TDD-00099) — a
-// linked pair of MessagePorts. The explicit type argument declares the
-// (single, symmetric) message type both ports carry; omitted, it defaults to
-// number.
-type NewMessageChannelExpression struct {
-	TypeArg *TypeAnnotation // nil when omitted
-	pos     Pos
-}
-
-func (*NewMessageChannelExpression) nodeMarker()   {}
-func (*NewMessageChannelExpression) exprMarker()   {}
-func (n *NewMessageChannelExpression) GetPos() Pos { return n.pos }
-
-func NewNewMessageChannelExpression(typeArg *TypeAnnotation, pos Pos) *NewMessageChannelExpression {
-	return &NewMessageChannelExpression{TypeArg: typeArg, pos: pos}
 }
 
 // NewChannelExpression is `new Channel<T>(capacity)` — a klain:sync CSP channel
@@ -2031,6 +1855,10 @@ type InterfaceMethodSig struct {
 	Name       string
 	Params     []Param
 	ReturnType *TypeAnnotation
+	// Optional marks `m?(…)`; Type is the signature as a function type —
+	// the member a value of the interface has (TDD-00233).
+	Optional bool
+	Type     *TypeAnnotation
 }
 
 // ClassDeclaration — `class Name { field: type; ...; constructor(...) {...} method(...) {...} }`.
@@ -2044,9 +1872,10 @@ type ClassDeclaration struct {
 	Name                 string
 	TypeParams           []string // e.g. ["T"] for `class Box<T>` — TDD-00010 V1, single param only
 	TypeParamConstraints []*TypeAnnotation
-	BaseClass            string // "" if no `extends` clause (TDD-00009 Stage 3)
-	BaseQualified        bool   // `extends mod.Base`: BaseClass is the last segment
-	BaseQualifier        string // and `mod` the namespace before it
+	TypeParamDefaults    []*TypeAnnotation // `class C<T = any>`: nil entries have none
+	BaseClass            string            // "" if no `extends` clause (TDD-00009 Stage 3)
+	BaseQualified        bool              // `extends mod.Base`: BaseClass is the last segment
+	BaseQualifier        string            // and `mod` the namespace before it
 	// BaseTypeArgs is non-nil only for `extends EventEmitter<T>` (TDD-00023)
 	// — the sole generic `extends` target this compiler currently supports.
 	BaseTypeArgs []*TypeAnnotation
@@ -2142,7 +1971,10 @@ func NewTypeAliasDeclaration(name string, ta *TypeAnnotation, pos Pos) *TypeAlia
 type AmbientModuleDeclaration struct {
 	Name string
 	Body []Statement
-	pos  Pos
+	// ExportEquals names the declaration `export = X;` makes the module
+	// itself (a function merged with a namespace, as `assert` is), or "".
+	ExportEquals string
+	pos          Pos
 }
 
 func (*AmbientModuleDeclaration) nodeMarker()   {}
@@ -2377,6 +2209,9 @@ type TypeAnnotation struct {
 	// resolved Type carries IsUndefined and an absent value renders/compares
 	// as `undefined`, not `null` (TDD-00187). Only meaningful with Nullable.
 	Undefined bool
+	// HasNull records a `null` member: with Undefined, the union holds both
+	// (`T | null | undefined`), which a pointer represents in three states.
+	HasNull bool
 	// UnionMembers holds every non-null/undefined member of a T | U | ...
 	// union with more than one such member (TDD-00043). nil for the common
 	// single-type case (with or without Nullable) — this field only becomes

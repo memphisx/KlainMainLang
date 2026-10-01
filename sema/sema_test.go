@@ -95,7 +95,6 @@ func TestUserBindingsShadowBuiltins(t *testing.T) {
 func TestBuiltinConstructorArity(t *testing.T) {
 	for src, want := range map[string]string{
 		"new WeakMap(1)":            "does not accept arguments",
-		"new EventSource()":         "takes 1 argument",
 		"new Worker(path)":          "string-literal path",
 		`new Error("x", { y: 1 })`:  "{ cause: <expr> }",
 		"new Date(1,2,3,4,5,6,7,8)": "at most 7 arguments",

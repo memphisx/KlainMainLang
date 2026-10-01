@@ -372,7 +372,7 @@ class N { id: number; constructor(id: number) { this.id = id } }
 const b = new N(42)
 const ref = new WeakRef(b)
 const got = ref.deref()
-console.log(got.id)
+console.log(got!.id)
 `, "42")
 }
 
@@ -380,7 +380,7 @@ func TestE2EWeakMapPrimitiveKeyRejected(t *testing.T) {
 	mustCompileError(t, `
 const wm = new WeakMap<string, number>()
 wm.set('x', 1)
-`, "must be an object")
+`, "type 'string' does not satisfy the constraint 'object'")
 }
 
 func TestE2EWeakMapDynamicObjectKeyCompatJS(t *testing.T) {
@@ -564,15 +564,16 @@ for (const v of s) {
 }
 `, "a\nb")
 }
-func TestE2EForOfMapValues(t *testing.T) {
+func TestE2EForOfMapYieldsEntries(t *testing.T) {
+	// A Map iterates its [key, value] entries, as its [Symbol.iterator] does.
 	assertOutput(t, `
 const m = new Map<string, number>()
 m.set('x', 1)
 m.set('y', 2)
-for (const v of m) {
-    console.log(v)
+for (const e of m) {
+    console.log(e)
 }
-`, "1\n2")
+`, "[ 'x', 1 ]\n[ 'y', 2 ]")
 }
 func TestE2EForOfMapValuesExplicit(t *testing.T) {
 	assertOutput(t, `
@@ -602,7 +603,7 @@ const m = new Map<string, number>()
 m.set('a', 1)
 m.set('b', 2)
 m.set('c', 3)
-outer: for (const v of m) {
+outer: for (const [, v] of m) {
     if (v === 2) break outer;
     console.log(v)
 }
@@ -770,9 +771,8 @@ console.log(c.scores.size)
 }
 
 func TestE2EForOfMapEntriesDecomposition(t *testing.T) {
-	// ADR-00481: `for (const [k, v] of map)` decomposes entries (clearing
-	// the ADR-00011 values-only caveat); bare-variable iteration still
-	// yields values.
+	// ADR-00481: `for (const [k, v] of map)` decomposes entries; a bare
+	// variable binds each [key, value] entry.
 	assertOutput(t, `
 const m = new Map<string, number>();
 m.set("a", 1);
@@ -782,7 +782,7 @@ const n = new Map<number, string>();
 n.set(10, "x");
 for (const [key, val] of n) { console.log(key, val); }
 for (const v of m) { console.log("val", v); }
-`, "a 1\nb 2\n10 x\nval 1\nval 2")
+`, "a 1\nb 2\n10 x\nval [ 'a', 1 ]\nval [ 'b', 2 ]")
 }
 
 func TestE2EMapFromHeterogeneousEntriesRejected(t *testing.T) {
@@ -950,7 +950,7 @@ for (const k of m.keys()) { console.log('k', k.x) }
 for (const v of m.values()) { console.log('v', v) }
 for (const [k, v] of m.entries()) { console.log('e', k.x, v) }
 m.forEach((v, k) => { console.log('f', v, k.x) })
-console.log(m.keys()[0] === a)
+console.log([...m.keys()][0] === a)
 `, "k 1\nk 2\nv 10\nv 20\ne 1 10\ne 2 20\nf 10 1\nf 20 2\ntrue")
 }
 
@@ -1023,4 +1023,24 @@ mo.set('a', { x: 1 })
 console.log(mo.get('a') ? 'obj-truthy' : 'WRONG')
 console.log(mo.get('z') ? 'WRONG' : 'obj-miss-falsy')
 `, "present-truthy\nmiss-falsy\nempty-falsy\nobj-truthy\nobj-miss-falsy")
+}
+
+// A Map/Set parameter typed `| undefined` compares against undefined at run
+// time, and a collection captured by a closure in one branch is shared by
+// the code after it.
+func TestE2ECollectionOrUndefinedAndBranchCapture(t *testing.T) {
+	assertOutput(t, `
+function has(p: Map<string, number> | undefined): number { return p !== undefined ? 1 : 0; }
+function hasSet(p: Set<string> | null): number { return p !== null ? 1 : 0; }
+function copy(prior: Map<string, number> | undefined): Map<string, number> {
+  const frame = new Map<string, number>();
+  if (prior !== undefined) {
+    prior.forEach((v, k) => { frame.set(k, v); });
+  }
+  frame.set('z', 26);
+  return frame;
+}
+console.log(has(undefined), has(new Map()), hasSet(null), hasSet(new Set()));
+console.log(copy(new Map([['a', 1]])), copy(undefined));
+`, "0 1 0 1\nMap(2) { 'a' => 1, 'z' => 26 } Map(1) { 'z' => 26 }")
 }

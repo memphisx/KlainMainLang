@@ -6,8 +6,8 @@
   "coverage": {
     "loose": "37/37",
     "loosePct": 100,
-    "strict": "28/37",
-    "strictPct": 76
+    "strict": "29/37",
+    "strictPct": 78
   },
   "lede": "Every Array method is present, and arrays are full reference values: a length change (push/pop/splice) inside a callee is visible to the caller for every argument shape — a plain variable, an object-field or array-element array, or a HOF-callback element. The remaining recurring caveat is structural: the element-comparing helpers (indexOf/includes/join/sort) reject a nested-array element.",
   "entries": [
@@ -643,14 +643,12 @@
     {
       "id": "array.keys",
       "name": ".keys() / .values() / .entries()",
-      "signature": "keys(): number[]; values(): T[]; entries(): [number, T][]",
-      "badge": "caveats",
-      "description": ".entries() returns a real [number, T][] tuple array — destructure with for (const [i, v] of arr.entries()).",
+      "signature": "keys(): ArrayIterator<number>; values(): ArrayIterator<T>; entries(): ArrayIterator<[number, T]>",
+      "badge": "exact",
+      "description": "Return an Array Iterator over the array itself — next(), toArray(), for...of, spread and Array.from — which sees a later push, as in Node. entries() yields [index, value] tuples.",
       "exampleKey": "arrays/array_methods",
       "snippet": "for (const [i, v] of arr.entries()) { /* ... */ }",
-      "differences": [
-        "All return materialized arrays, not lazy iterators — this compiler has no general iterator protocol (the same convention `Map`/`Set` use)."
-      ],
+      "differences": [],
       "seeAlso": [
         "array.forEach"
       ],
@@ -699,14 +697,14 @@
       "name": "Array.from(iterable, mapFn?)",
       "signature": "Array.from(source, mapFn?: (v: T, i: number) => U): T[] | U[]",
       "badge": "caveats",
-      "description": "Builds an array from a plain array, a Set, a Map (as entries), a string (its characters), a class implementing next(): T | null, or an array-like { length: n } object (filled with undefined). An optional mapFn transforms each element by value and index. Static method on Array.",
+      "description": "Builds an array from an array, a Set, a Map (as entries), a string (its characters), a generator, any iterable (a [Symbol.iterator]() method, a value held in `any`), a class implementing next(): T | null, or an array-like object (its length, then its indexed properties). An optional mapFn transforms each element by value and index. Static method on Array.",
       "returns": {
         "type": "T[] | U[]",
         "desc": "The constructed array (the mapped type when mapFn is given)."
       },
       "exampleKey": "arrays/array_from_arraylike",
       "differences": [
-        "`thisArg` is not supported; generators are not iterated; an array-like's indexed properties (`{ length: 2, 0: 'a' }`) are not read — the `{ length: n }` form fills with `undefined`."
+        "`thisArg` (the third argument) is not supported."
       ],
       "seeAlso": [
         "array.of",

@@ -103,7 +103,7 @@ func (e *Emitter) ensureProtoBag(ctorName string) string {
 	e.protoBagEmitted[ctorName] = true
 	e.ensureDynObj()
 	global := "@__kml_proto_" + ctorName
-	e.emitGlobal(fmt.Sprintf("%s = internal global ptr null, align 8", global))
+	e.emitGlobal(fmt.Sprintf("%s = internal %sglobal ptr null, align 8", global, e.isolateTLS()))
 	e.emitGlobal(fmt.Sprintf(`
 define ptr %s() {
 entry:

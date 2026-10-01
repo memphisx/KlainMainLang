@@ -21,7 +21,7 @@
         "`res` surface: `writeHead`/`setHeader`/`appendHeader`/`getHeader(s)`/`removeHeader`/`hasHeader`/`write`/`end`/`flushHeaders`/`writeContinue`, `statusCode`/`statusMessage` (default reason phrase from `http.STATUS_CODES`). The body is chunked or `Content-Length` as Node decides; `res.write` returns `false` past `highWaterMark` and `'drain'` follows, over HTTP and HTTPS alike.",
         "Keep-alive and pipelining, the `Date` header, and `requireHostHeader`'s 400 behave as in Node; an `async` handler is an ordinary callback — the server keeps serving while it awaits.",
         "Several http and https servers run on different ports in one program, all on the same event loop.",
-        "Windows keeps the earlier code-generated server (its TCP handles are POSIX sockets)."
+        "On Windows the TCP handles are compile-checked, not yet run."
       ],
       "seeAlso": ["http.server", "http.listen"],
       "spec": { "mdn": "https://nodejs.org/api/http.html#httpcreateserveroptions-requestlistener" }

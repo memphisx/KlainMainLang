@@ -69,10 +69,10 @@ for (const n of new CountTo3()) {
 function isBig(x: number) {
     if (x > 100) return true
 }
-function describe(x: number) {
+function spell(x: number) {
     if (x === 1) return "one"
     if (x === 2) return
     return "many"
 }
 console.log(isBig(500), isBig(5), isBig(5) === undefined)   // true undefined true
-console.log(describe(1), describe(2), describe(3))          // one undefined many
+console.log(spell(1), spell(2), spell(3))                   // one undefined many

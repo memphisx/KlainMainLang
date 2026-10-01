@@ -50,7 +50,7 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 
 	e.objLitClassCtr++
 	className := fmt.Sprintf("__kml_objlit_%d", e.objLitClassCtr)
-	ty := ClassType(className, nil, ownFields, false, false)
+	ty := ClassType(className, nil, ownFields, false)
 	e.interfaces[className] = ty
 
 	info := ClassInfo{
@@ -61,7 +61,7 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 		MethodSigs:              make(map[string]FuncSig),
 		MethodImplementor:       make(map[string]string),
 		MethodDispatchSlot:      make(map[string]*MethodSlot),
-		TagID:                   e.nextClassTagID,
+		TagID:                   e.allocTypeID(),
 		RootClass:               className,
 		FieldOrigin:             make(map[string]string),
 		StaticFieldTypes:        make(map[string]Type),
@@ -70,7 +70,6 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 		StaticMethodSigs:        make(map[string]FuncSig),
 		StaticMethodImplementor: make(map[string]string),
 	}
-	e.nextClassTagID++
 	for _, f := range ownFields {
 		info.FieldOrigin[f.Name] = className
 	}
@@ -169,7 +168,7 @@ func (e *Emitter) emitObjectLiteralWithAccessors(lit *ast.ObjectLiteral) (Value,
 	// Construct: calloc, stamp the runtime tag, store each data field.
 	e.ensureCalloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dataReg, ty.StructSize()))
+	e.emitObjAllocInto(dataReg, ty)
 	structIR := ty.StructIR()
 	tagGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", tagGep, structIR, dataReg))

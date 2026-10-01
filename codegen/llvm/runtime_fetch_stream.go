@@ -29,7 +29,7 @@ func (e *Emitter) ensureFetchBodyStream() {
 	e.ensureAwaitFetchHeaders()
 	e.ensureMemcpy()
 	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
-	errName := e.internString("Error")
+	errName := e.internString("TypeError")
 
 	pendIR := "{ ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }"
 	e.emitGlobal("declare i32 @curl_easy_pause(ptr noundef, i32 noundef)")
@@ -84,11 +84,11 @@ ck:
   br i1 %%failed, label %%err, label %%close
 err:
   %%result32 = trunc i64 %%result to i32
-  %%errstr = call ptr @curl_easy_strerror(i32 %%result32)
+  %%errstr = call ptr @__kml_fetch_errstr(i32 %%result32)
   %%errstr_hdr = call ptr @__kml_str_from_cstr(ptr %%errstr)
   %%eo = call ptr @malloc(i64 24)
   %%eo_kind = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 0
-  store i64 281474976710656, ptr %%eo_kind, align 8
+  store i64 281474976710657, ptr %%eo_kind, align 8
   %%eo_msg = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 1
   store ptr %%errstr_hdr, ptr %%eo_msg, align 8
   %%eo_name = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 2
@@ -98,6 +98,21 @@ err:
   ret void
 close:
   %%ign = call i64 @__kml_rs_close(ptr %%bs)
+  ret void
+ret:
+  ret void
+}
+
+; An aborted fetch errors its body stream with the abort reason.
+define void @__kml_fetch_body_abort(ptr %%pending, ptr %%err) {
+entry:
+  %%bs_p = getelementptr %s, ptr %%pending, i32 0, i32 7
+  %%bs = load ptr, ptr %%bs_p, align 8
+  %%nostream = icmp eq ptr %%bs, null
+  br i1 %%nostream, label %%ret, label %%do
+do:
+  %%ebits = ptrtoint ptr %%err to i64
+  call void @__kml_rs_error(ptr %%bs, i64 %%ebits)
   ret void
 ret:
   ret void
@@ -173,5 +188,5 @@ finish:
   ret ptr %%s
 ret:
   ret ptr %%s
-}`, pendIR, rstreamStructIR, rstreamStructIR, rstreamStructIR, pendIR, pendIR, pendIR, errName, pendIR, pendIR, pendIR, pendIR, pendIR, pendIR))
+}`, pendIR, rstreamStructIR, rstreamStructIR, rstreamStructIR, pendIR, pendIR, pendIR, errName, pendIR, pendIR, pendIR, pendIR, pendIR, pendIR, pendIR))
 }

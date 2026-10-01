@@ -148,3 +148,20 @@ const fx: any = Symbol.for("k");
 console.log(typeof fx, fx === Symbol.for("k"), fx.description);
 `)
 }
+
+// A top-level `const k = Symbol(…)` is a module global: functions and class
+// members read it (it was a main() local, "undefined variable").
+func TestE2ESymbolConstVisibleInFunctionsAndClasses(t *testing.T) {
+	assertSameAsNode(t, `
+const k = Symbol('k')
+const g = Symbol.for('app')
+function f(): boolean { return k === k }
+class C {
+  #token: symbol
+  constructor(t?: symbol) { this.#token = t ?? k }
+  isK(): boolean { return this.#token === k }
+  m(): string { return String(k) + " " + (g === Symbol.for('app')) + " " + k.description }
+}
+console.log(f(), new C().m(), new C().isK(), new C(Symbol('x')).isK(), typeof k)
+`)
+}

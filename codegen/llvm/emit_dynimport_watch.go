@@ -251,9 +251,9 @@ func (e *Emitter) emitImportSettleFn(hash string, objTy Type) string {
 
 	e.ensureCalloc()
 	obj := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", obj, objTy.StructSize()))
+	e.emitObjAllocInto(obj, objTy)
 	structIR := objTy.StructIR()
-	for _, f := range objTy.Fields {
+	for _, f := range objTy.UserFields() {
 		symName := fmt.Sprintf("__kml_dynmod_%s_%s", hash, f.Name)
 		fp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynimport_sym(ptr %%handle, ptr %s)", fp, e.internString(symName)))

@@ -25,6 +25,12 @@ func (e *Emitter) timerCallbackPtr(arg ast.Expression, fnName string, pos ast.Po
 	if err != nil {
 		return "", err
 	}
+	if val.Ty.IsDynamic {
+		// A function held in `any`: called with no arguments, like any
+		// other; anything else is Node's validateFunction TypeError.
+		e.emitThrowUnlessFunction(val, "callback")
+		val = e.coerce(val, FuncType(nil, TypeVoid))
+	}
 	if !val.Ty.IsFunc {
 		return "", fmt.Errorf("%d:%d: %s's first argument must be a function", pos.Line, pos.Col, fnName)
 	}
@@ -243,21 +249,12 @@ scandone:
   %none = icmp eq i64 %fb, -1
   br i1 %none, label %retfalse, label %havebest
 havebest:
-  ; TDD-00216: fold any background AbortSignal.timeout deadline into the wait, but
-  ; keep %tf as the timer's own deadline; after waking, fire due aborts and — if
-  ; only an abort was due — return 1 (progress) without firing the timer early, so
-  ; the caller's await loop re-checks and calls again.
   %tf = load i64, ptr %bestfire, align 8
-  %fnabso = call i64 @__kml_abort_to_soonest()
-  %fnabsnz = icmp ne i64 %fnabso, 0
-  %fnabsooner = icmp slt i64 %fnabso, %tf
-  %fnuseabs = and i1 %fnabsnz, %fnabsooner
-  %fntarget = select i1 %fnuseabs, i64 %fnabso, i64 %tf
   %now = call i64 @__kml_monotonic_ns()
-  %need = icmp sgt i64 %fntarget, %now
+  %need = icmp sgt i64 %tf, %now
   br i1 %need, label %dosleep, label %fnabortcheck
 dosleep:
-  %wait = sub i64 %fntarget, %now
+  %wait = sub i64 %tf, %now
   %sec = sdiv i64 %wait, 1000000000
   %nsr = srem i64 %wait, 1000000000
   %ts_s = getelementptr { i64, i64 }, ptr %ts, i32 0, i32 0
@@ -267,7 +264,6 @@ dosleep:
   %src = call i32 @nanosleep(ptr %ts, ptr null)
   br label %fnabortcheck
 fnabortcheck:
-  call void @__kml_abort_to_fire_due()
   %fnnow = call i64 @__kml_monotonic_ns()
   %fntdue = icmp sle i64 %tf, %fnnow
   br i1 %fntdue, label %dofire, label %rettrue
@@ -318,12 +314,6 @@ func (e *Emitter) ensureTimerRuntime() {
 	// feature is used" reasoning ensureHTTPRuntime already documents for
 	// ensureFetchAsync/ensurePromiseCombinators.
 	e.ensureSignalHandlerRuntime()
-	// TDD-00216: the timer drain / fire-next loops below fold in and fire due
-	// background AbortSignal.timeout aborts via these always-present helpers
-	// (no-ops on an empty registry). Emitted here so the loop IR resolves whether
-	// or not AbortSignal.timeout is used; the event loop pulls them in the same
-	// way (it also ensures the timer runtime).
-	e.ensureAbortRegistryGlobals()
 	clockID := e.monotonicClockID()
 	e.emitGlobal("declare i32 @nanosleep(ptr noundef, ptr noundef)")
 	e.emitGlobal("@__kml_timer_data = internal thread_local global ptr null, align 8")
@@ -522,83 +512,9 @@ entry:
   br label %outerloop
 
 outerloop:
-  ; TDD-00019: identical signal-check block to __kml_event_loop_run's own
-  ; (runtime_http.go) — a signal interrupting nanosleep() below just
-  ; returns early with no fd_set-style staleness concern, so no return-
-  ; value check is needed here the way select() needed one.
-  %sigintp = load volatile i8, ptr @__kml_sigint_pending, align 1
-  %sigintset = icmp ne i8 %sigintp, 0
-  br i1 %sigintset, label %sigintfire, label %checksigterm
-
-sigintfire:
-  store volatile i8 0, ptr @__kml_sigint_pending, align 1
-  %sigintclos = load ptr, ptr @__kml_sigint_closure, align 8
-  %hassigint = icmp ne ptr %sigintclos, null
-  br i1 %hassigint, label %sigintcall, label %checksigterm
-
-sigintcall:
-  %sigintfp_p = getelementptr { ptr, ptr }, ptr %sigintclos, i32 0, i32 0
-  %sigintep_p = getelementptr { ptr, ptr }, ptr %sigintclos, i32 0, i32 1
-  %sigintfp = load ptr, ptr %sigintfp_p, align 8
-  %sigintep = load ptr, ptr %sigintep_p, align 8
-  call void %sigintfp(ptr %sigintep)
-  br label %checksigterm
-
-checksigterm:
-  %sigtermp = load volatile i8, ptr @__kml_sigterm_pending, align 1
-  %sigtermset = icmp ne i8 %sigtermp, 0
-  br i1 %sigtermset, label %sigtermfire, label %checksigwinch
-
-sigtermfire:
-  store volatile i8 0, ptr @__kml_sigterm_pending, align 1
-  %sigtermclos = load ptr, ptr @__kml_sigterm_closure, align 8
-  %hassigterm = icmp ne ptr %sigtermclos, null
-  br i1 %hassigterm, label %sigtermcall, label %checksigwinch
-
-sigtermcall:
-  %sigtermfp_p = getelementptr { ptr, ptr }, ptr %sigtermclos, i32 0, i32 0
-  %sigtermep_p = getelementptr { ptr, ptr }, ptr %sigtermclos, i32 0, i32 1
-  %sigtermfp = load ptr, ptr %sigtermfp_p, align 8
-  %sigtermep = load ptr, ptr %sigtermep_p, align 8
-  call void %sigtermfp(ptr %sigtermep)
-  br label %checksigwinch
-
-checksigwinch:
-  %sigwinchp = load volatile i8, ptr @__kml_sigwinch_pending, align 1
-  %sigwinchset = icmp ne i8 %sigwinchp, 0
-  br i1 %sigwinchset, label %sigwinchfire, label %checksigbreak
-
-sigwinchfire:
-  store volatile i8 0, ptr @__kml_sigwinch_pending, align 1
-  %sigwinchclos = load ptr, ptr @__kml_sigwinch_closure, align 8
-  %hassigwinch = icmp ne ptr %sigwinchclos, null
-  br i1 %hassigwinch, label %sigwinchcall, label %checksigbreak
-
-sigwinchcall:
-  %sigwinchfp_p = getelementptr { ptr, ptr }, ptr %sigwinchclos, i32 0, i32 0
-  %sigwinchep_p = getelementptr { ptr, ptr }, ptr %sigwinchclos, i32 0, i32 1
-  %sigwinchfp = load ptr, ptr %sigwinchfp_p, align 8
-  %sigwinchep = load ptr, ptr %sigwinchep_p, align 8
-  call void %sigwinchfp(ptr %sigwinchep)
-  br label %checksigbreak
-
-checksigbreak:
-  %sigbreakp = load volatile i8, ptr @__kml_sigbreak_pending, align 1
-  %sigbreakset = icmp ne i8 %sigbreakp, 0
-  br i1 %sigbreakset, label %sigbreakfire, label %timerscan
-
-sigbreakfire:
-  store volatile i8 0, ptr @__kml_sigbreak_pending, align 1
-  %sigbreakclos = load ptr, ptr @__kml_sigbreak_closure, align 8
-  %hassigbreak = icmp ne ptr %sigbreakclos, null
-  br i1 %hassigbreak, label %sigbreakcall, label %timerscan
-
-sigbreakcall:
-  %sigbreakfp_p = getelementptr { ptr, ptr }, ptr %sigbreakclos, i32 0, i32 0
-  %sigbreakep_p = getelementptr { ptr, ptr }, ptr %sigbreakclos, i32 0, i32 1
-  %sigbreakfp = load ptr, ptr %sigbreakfp_p, align 8
-  %sigbreakep = load ptr, ptr %sigbreakep_p, align 8
-  call void %sigbreakfp(ptr %sigbreakep)
+  ; A pending signal's watcher runs first each iteration (a signal that
+  ; interrupts the blocking wait below is seen on looping back).
+  call void @__kml_signal_dispatch()
   br label %timerscan
 
 timerscan:
@@ -653,29 +569,19 @@ scandone:
   br i1 %nomore, label %alldone, label %havebest
 
 havebest:
-  ; TDD-00216: wake by the soonest of the timer's deadline and any background
-  ; AbortSignal.timeout deadline (soonest()==0 ⇒ none), but keep %bestfire as the
-  ; timer's own deadline so the post-wake recheck fires the timer only when it is
-  ; actually due (not merely because we woke early for an abort).
   %timerfire = load i64, ptr %bestfire, align 8
-  %abso = call i64 @__kml_abort_to_soonest()
-  %absnonzero = icmp ne i64 %abso, 0
-  %absooner = icmp slt i64 %abso, %timerfire
-  %useabs = and i1 %absnonzero, %absooner
-  %targetfire = select i1 %useabs, i64 %abso, i64 %timerfire
   %now1 = call i64 @__kml_monotonic_ns()
-  %needwait = icmp sgt i64 %targetfire, %now1
+  %needwait = icmp sgt i64 %timerfire, %now1
   br i1 %needwait, label %dosleep, label %abortcheck
 
 abortcheck:
-  call void @__kml_abort_to_fire_due()
   %acnow = call i64 @__kml_monotonic_ns()
   %actimer = load i64, ptr %bestfire, align 8
   %actimerdue = icmp sle i64 %actimer, %acnow
   br i1 %actimerdue, label %dofire, label %outerloop
 
 dosleep:
-  %waitns = sub i64 %targetfire, %now1
+  %waitns = sub i64 %timerfire, %now1
   %waitsec = sdiv i64 %waitns, 1000000000
   %waitnsrem = srem i64 %waitns, 1000000000
   %ts_sec = getelementptr { i64, i64 }, ptr %ts, i32 0, i32 0
@@ -785,9 +691,9 @@ scandone:
   %nomore = icmp eq i64 %foundbest, -1
   br i1 %nomore, label %tickret, label %checkdue
 checkdue:
-  %targetfire = load i64, ptr %bestfire, align 8
+  %timerfire = load i64, ptr %bestfire, align 8
   %now1 = call i64 @__kml_monotonic_ns()
-  %notdue = icmp sgt i64 %targetfire, %now1
+  %notdue = icmp sgt i64 %timerfire, %now1
   br i1 %notdue, label %tickret, label %dofire
 dofire:
   %data2 = load ptr, ptr @__kml_timer_data, align 8
@@ -888,4 +794,27 @@ entry:
 	ty := val.Ty
 	ty.FuncRetType = &voidTy
 	return Value{Ref: clo, Ty: ty}
+}
+
+// emitThrowUnlessFunction throws Node's ERR_INVALID_ARG_TYPE for argument
+// name when the box v holds no function.
+func (e *Emitter) emitThrowUnlessFunction(v Value, name string) {
+	tag, _ := e.emitUnboxTagPayload(v)
+	isDyn, isFn, ok := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isDyn, tag, kmlTagDynFunc))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isFn, tag, kmlTagFuncRef))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", ok, isDyn, isFn))
+	throwL, contL := e.freshLabel("fnarg.throw"), e.freshLabel("fnarg.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, contL, throwL))
+	e.emitLabel(throwL)
+	e.ensureDynJSONC()
+	suffix := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_received(i64 %s)", suffix, v.Ref))
+	msg, err := e.emitStringConcat(Value{Ref: e.internString("The \"" + name + "\" argument must be of type function."), Ty: TypePtr}, Value{Ref: suffix, Ty: TypePtr})
+	if err == nil {
+		e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_TYPE", msg.Ref)
+	} else {
+		e.emitTerminator("unreachable")
+	}
+	e.emitLabel(contL)
 }

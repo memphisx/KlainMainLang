@@ -169,6 +169,9 @@ func (e *Emitter) endModuleBody(s *moduleBodySplit) string {
 	prom := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_module_promise, align 8", prom))
+	// The runtime consumes the module's promise (the loop's wait, or the
+	// importer polling an island): never an unhandled rejection (ADR-01192).
+	e.emitMarkPromiseHandled(prom)
 	// An island's top-level throw rejects its module promise — and with it the
 	// importer's import() (TDD-00225) — so its task keeps the ordinary
 	// trampoline's catch-all; the entry program's throw is an uncaught exception.

@@ -20,13 +20,11 @@ var builtinConstructors = map[string]builder{
 	"WeakMap":             buildWeakMap,
 	"WeakSet":             buildWeakSet,
 	"WeakRef":             buildWeakRef,
-	"EventEmitter":        buildEventEmitter,
 	"ReadableStream":      buildReadableStream,
 	"WritableStream":      buildWritableStream,
 	"TransformStream":     buildTransformStream,
 	"Agent":               optionsOnly(func(o ast.Expression, p ast.Pos) ast.Expression { return ast.NewNewHTTPAgentExpression(o, p) }),
 	"Webview":             optionsOnly(func(o ast.Expression, p ast.Pos) ast.Expression { return ast.NewNewWebviewExpression(o, p) }),
-	"DatabaseSync":        buildDatabaseSync,
 	"CompressionStream":   compressionStream(false),
 	"DecompressionStream": compressionStream(true),
 	"Error":               errorKind("Error"),
@@ -40,13 +38,6 @@ var builtinConstructors = map[string]builder{
 	"AggregateError":      buildAggregateError,
 	"Date":                buildDate,
 	"URL":                 buildURL,
-	"EventSource":         oneArg("EventSource(url)", func(a ast.Expression, p ast.Pos) ast.Expression { return ast.NewNewEventSourceExpression(a, p) }),
-	"EventTarget":         noArgs("EventTarget", func(p ast.Pos) ast.Expression { return ast.NewNewEventTargetExpression(p) }),
-	"AbortController":     noArgs("AbortController", func(p ast.Pos) ast.Expression { return ast.NewNewAbortControllerExpression(p) }),
-	"Event":               buildEvent,
-	"CustomEvent":         buildCustomEvent,
-	"WebSocket":           oneArg("WebSocket(url)", func(a ast.Expression, p ast.Pos) ast.Expression { return ast.NewNewWebSocketExpression(a, p) }),
-	"Worker":              buildWorker,
 	"URLSearchParams":     optionsOnly(func(o ast.Expression, p ast.Pos) ast.Expression { return ast.NewNewURLSearchParamsExpression(o, p) }),
 	"URLPattern":          buildURLPattern,
 	"Headers":             optionsOnly(func(o ast.Expression, p ast.Pos) ast.Expression { return ast.NewNewHeadersExpression(o, p) }),
@@ -54,8 +45,6 @@ var builtinConstructors = map[string]builder{
 	"XMLHttpRequest":      noArgs("XMLHttpRequest", func(p ast.Pos) ast.Expression { return ast.NewNewXMLHttpRequestExpression(p) }),
 	"ArrayBuffer":         arrayBuffer(false),
 	"SharedArrayBuffer":   arrayBuffer(true),
-	"BroadcastChannel":    buildBroadcastChannel,
-	"MessageChannel":      buildMessageChannel,
 	"Channel":             buildChannel,
 	"DataView":            buildDataView,
 	"TextEncoder":         noArgs("TextEncoder", func(p ast.Pos) ast.Expression { return ast.NewNewTextEncoderExpression(p) }),
@@ -128,15 +117,6 @@ func noArgs(name string, mk func(ast.Pos) ast.Expression) builder {
 	}
 }
 
-func oneArg(sig string, mk func(ast.Expression, ast.Pos) ast.Expression) builder {
-	return func(e *ast.NewExpression) (ast.Expression, error) {
-		if err := arity(e, sig, 1, 1); err != nil {
-			return nil, err
-		}
-		return mk(e.Args[0], e.GetPos()), nil
-	}
-}
-
 func optionsOnly(mk func(ast.Expression, ast.Pos) ast.Expression) builder {
 	return func(e *ast.NewExpression) (ast.Expression, error) {
 		if err := arity(e, e.ClassName+"(options?)", 0, 1); err != nil {
@@ -193,13 +173,6 @@ func buildWeakRef(e *ast.NewExpression) (ast.Expression, error) {
 	return ast.NewNewWeakRefExpression(typeArg(e, 0), e.Args[0], e.GetPos()), nil
 }
 
-func buildEventEmitter(e *ast.NewExpression) (ast.Expression, error) {
-	if err := arity(e, "EventEmitter", 0, 0); err != nil {
-		return nil, err
-	}
-	return ast.NewNewEventEmitterExpression(typeArg(e, 0), e.GetPos()), nil
-}
-
 func buildReadableStream(e *ast.NewExpression) (ast.Expression, error) {
 	if err := arity(e, "ReadableStream(source?, strategy?)", 0, 2); err != nil {
 		return nil, err
@@ -223,13 +196,6 @@ func buildTransformStream(e *ast.NewExpression) (ast.Expression, error) {
 		out = in
 	}
 	return ast.NewNewTransformStreamExpression(in, out, arg(e, 0), arg(e, 1), arg(e, 2), e.GetPos()), nil
-}
-
-func buildDatabaseSync(e *ast.NewExpression) (ast.Expression, error) {
-	if err := arity(e, "DatabaseSync(path, options?)", 1, 2); err != nil {
-		return nil, err
-	}
-	return ast.NewNewDatabaseSyncExpression(e.Args[0], arg(e, 1), e.GetPos()), nil
 }
 
 func compressionStream(decompress bool) builder {
@@ -315,55 +281,6 @@ func objectProp(ex ast.Expression, key string) ast.Expression {
 	return v
 }
 
-func buildEvent(e *ast.NewExpression) (ast.Expression, error) {
-	if err := arity(e, "Event(type, init?)", 1, 2); err != nil {
-		return nil, err
-	}
-	if c := objectProp(arg(e, 1), "cancelable"); c != nil {
-		return ast.NewNewEventExpressionWithInit(e.Args[0], c, e.GetPos()), nil
-	}
-	return ast.NewNewEventExpression(e.Args[0], e.GetPos()), nil
-}
-
-func buildCustomEvent(e *ast.NewExpression) (ast.Expression, error) {
-	if err := arity(e, "CustomEvent(type, init?)", 1, 2); err != nil {
-		return nil, err
-	}
-	detail := objectProp(arg(e, 1), "detail")
-	if c := objectProp(arg(e, 1), "cancelable"); c != nil {
-		return ast.NewNewCustomEventExpressionWithInit(e.Args[0], detail, c, e.GetPos()), nil
-	}
-	return ast.NewNewCustomEventExpression(e.Args[0], detail, e.GetPos()), nil
-}
-
-func buildWorker(e *ast.NewExpression) (ast.Expression, error) {
-	if len(e.Args) == 0 {
-		return nil, errAt(e.GetPos(), "new Worker(...) requires a compile-time string-literal path — the worker file is compiled into the binary, so a runtime-computed path cannot be loaded")
-	}
-	path, ok := e.Args[0].(*ast.StringLiteral)
-	if !ok {
-		p := e.Args[0].GetPos()
-		return nil, errAt(p, "new Worker(...) requires a compile-time string-literal path — the worker file is compiled into the binary, so a runtime-computed path cannot be loaded")
-	}
-	if len(e.Args) > 2 {
-		return nil, errAt(e.GetPos(), "new Worker takes a path and an optional options object")
-	}
-	var workerData ast.Expression
-	if len(e.Args) == 2 {
-		lit, ok := e.Args[1].(*ast.ObjectLiteral)
-		if !ok {
-			return nil, errAt(e.GetPos(), "new Worker's second argument must be an object literal (e.g. { workerData: ... })")
-		}
-		for _, prop := range lit.Properties {
-			if prop.Key != "workerData" {
-				return nil, errAt(e.GetPos(), "new Worker options: only 'workerData' is supported (found '%s')", prop.Key)
-			}
-			workerData = prop.Value
-		}
-	}
-	return ast.NewNewWorkerExpression(path.Value, workerData, e.GetPos()), nil
-}
-
 func buildURLPattern(e *ast.NewExpression) (ast.Expression, error) {
 	if len(e.Args) > 1 {
 		return nil, errAt(e.GetPos(), "new URLPattern does not take a baseURL second argument (single object-init form only)")
@@ -395,24 +312,6 @@ func arrayBuffer(shared bool) builder {
 		}
 		return ex, nil
 	}
-}
-
-func buildBroadcastChannel(e *ast.NewExpression) (ast.Expression, error) {
-	var name *ast.StringLiteral
-	if len(e.Args) == 1 {
-		name, _ = e.Args[0].(*ast.StringLiteral)
-	}
-	if name == nil {
-		return nil, errAt(e.GetPos(), "new BroadcastChannel(...) requires a string-literal channel name")
-	}
-	return ast.NewNewBroadcastChannelExpression(name.Value, e.GetPos()), nil
-}
-
-func buildMessageChannel(e *ast.NewExpression) (ast.Expression, error) {
-	if err := arity(e, "MessageChannel", 0, 0); err != nil {
-		return nil, err
-	}
-	return ast.NewNewMessageChannelExpression(typeArg(e, 0), e.GetPos()), nil
 }
 
 func buildChannel(e *ast.NewExpression) (ast.Expression, error) {

@@ -231,43 +231,6 @@ done:
 }`)
 }
 
-func (e *Emitter) ensureStringToUpper() {
-	if e.usedStringToUpper {
-		return
-	}
-	e.usedStringToUpper = true
-	e.ensureStrlen()
-	e.ensureMalloc()
-	e.ensureStrHeaderRuntime()
-	e.emitGlobal(`
-define ptr @__kml_toupper(ptr %s) {
-entry:
-  %len = call i64 @strlen(ptr %s)
-  %buf = call ptr @__kml_str_alloc(i64 %len)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %entry ], [ %i_next, %body ]
-  %done = icmp eq i64 %i, %len
-  br i1 %done, label %exit, label %body
-body:
-  %srcp = getelementptr i8, ptr %s, i64 %i
-  %c = load i8, ptr %srcp, align 1
-  %ge_a = icmp uge i8 %c, 97
-  %le_z = icmp ule i8 %c, 122
-  %is_lower = and i1 %ge_a, %le_z
-  %upper_c = add i8 %c, -32
-  %out_c = select i1 %is_lower, i8 %upper_c, i8 %c
-  %dstp = getelementptr i8, ptr %buf, i64 %i
-  store i8 %out_c, ptr %dstp, align 1
-  %i_next = add i64 %i, 1
-  br label %loop
-exit:
-  %nullp = getelementptr i8, ptr %buf, i64 %len
-  store i8 0, ptr %nullp, align 1
-  ret ptr %buf
-}`)
-}
-
 func (e *Emitter) ensureStringToLower() {
 	if e.usedStringToLower {
 		return

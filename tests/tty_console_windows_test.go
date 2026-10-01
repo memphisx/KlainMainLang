@@ -113,6 +113,7 @@ console.log("alen=" + a.length + " b=" + b)
 // console input via the CRT code page) in the same move.
 func TestE2EStdinConsoleReaderUTF8(t *testing.T) {
 	bin := buildBinary(t, `
+process.stdin.setEncoding('utf8')
 process.stdin.on('data', (chunk: string) => {
   const s = chunk.trim()
   if (s.length > 0) console.log("got[" + s + "]")

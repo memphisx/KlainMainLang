@@ -1,154 +1,249 @@
 {
-  "surface": "ffi",
-  "title": "node:ffi",
-  "kind": "node",
-  "statusPage": "FFI.md",
-  "coversRows": "all",
-  "coverage": { "loose": "11/12", "loosePct": 92, "strict": "6/12", "strictPct": 50 },
-  "lede": "Node's experimental node:ffi module (v26.1.0+) — call C functions from shared libraries, or from the process itself, with plain-object signatures, and peek/poke native memory through bigint pointers. Because this is an AOT compiler, a signature written at the call site is resolved at compile time and lowered to a direct, correctly-typed C-ABI call through the dlsym'd pointer — no libffi, no generic marshalling tier, so every call takes what Node documents as the fast path. 64-bit integers and pointers travel as bigint, strings pass as NUL-terminated UTF-8, and Buffers/typed arrays/ArrayBuffers pass their backing data pointer, exactly as in Node. dlopen(null) opens the current process image, so libc is callable with zero setup. The raw-memory helper set (getInt8…setFloat64, toString/toBuffer/toArrayBuffer with zero-copy views, exportString/exportBuffer, getRawPointer) is in. registerCallback hands a closure to C as a real function pointer — statically-emitted trampoline families per signature, so a KlainMainLang comparator can drive libc's qsort. Runs on POSIX and Windows — the latter over a LoadLibrary/GetProcAddress shim, where dlopen(null) resolves against the loaded UCRT + core system modules.",
-  "entries": [
-    {
-      "id": "ffi.dlopen",
-      "name": "ffi.dlopen(path, definitions?)",
-      "statusRow": "`ffi.dlopen(path, definitions?)` → `{ lib, functions }`",
-      "signature": "dlopen(path: string | null, definitions?: Record<string, { arguments?: string[], return?: string }>): { lib: DynamicLibrary, functions: Record<string, Function> }",
-      "badge": "caveats",
-      "description": "Loads a shared library (or the current process image for null) and resolves every function in definitions in one step. The definitions map must be an object literal — each signature is resolved at compile time and the call lowers to a direct C-ABI call. The path may be any runtime string. Failures throw an Error carrying dlerror().",
-      "returns": { "type": "{ lib, functions }", "desc": "The library handle plus one callable per definition." },
-      "exampleKey": "ffi/ffi",
-      "snippet": "const { lib, functions } = ffi.dlopen(null, {\n  strlen: { arguments: ['string'], return: 'uint64' },\n});",
-      "seeAlso": ["ffi.getFunction", "ffi.DynamicLibrary"],
-      "spec": { "mdn": "https://nodejs.org/api/ffi.html#ffidlopenpath-definitions" }
-    },
-    {
-      "id": "ffi.DynamicLibrary",
-      "name": "new DynamicLibrary(path) / lib.close() / ffi.dlclose(lib)",
-      "statusRow": "`new DynamicLibrary(path)` / `lib.close()` / `ffi.dlclose(lib)`",
-      "signature": "new DynamicLibrary(path: string | null); close(): void; dlclose(lib: DynamicLibrary): void",
-      "badge": "caveats",
-      "description": "Opens a library without resolving anything yet; lib.path reads the path back. close() releases the handle and is idempotent, as in Node. `using` declarations and [Symbol.dispose]() are not supported yet — explicit close() is the disposal path.",
-      "returns": { "type": "DynamicLibrary", "desc": "A library handle." },
-      "exampleKey": "ffi/ffi",
-      "snippet": "const lib = new DynamicLibrary(`./libtest.${ffi.suffix}`);\nlib.close();",
-      "seeAlso": ["ffi.dlopen"],
-      "spec": { "mdn": "https://nodejs.org/api/ffi.html#class-dynamiclibrary" }
-    },
-    {
-      "id": "ffi.getFunction",
-      "name": "lib.getFunction(name, signature) / lib.getFunctions(definitions)",
-      "statusRow": "`lib.getFunction(name, signature)` / `lib.getFunctions(definitions)`",
-      "signature": "getFunction(name: string, signature: { arguments?: string[], return?: string }): Function; getFunctions(definitions: object): Record<string, Function>",
-      "badge": "caveats",
-      "description": "Binds one native symbol (or a map of them) to a directly-callable function. The signature must be a compile-time object literal; type names accept every Node alias spelling (i32, ptr, str, double, …) and the ffi.types constants. The result is a real function object, as in Node: typeof 'function', name and length, an own pointer property (the raw address as a bigint), one identity per symbol per library, and util.inspect's [Function: abs] { pointer: … } form. Re-requesting a symbol with a different signature throws Node's ERR_INVALID_ARG_VALUE; an invalid static signature is Node's runtime TypeError; keys other than arguments/return are ignored.",
-      "returns": { "type": "Function", "desc": "A callable lowered to a direct C-ABI call." },
-      "exampleKey": "ffi/ffi",
-      "snippet": "const strchr = lib.getFunction('strchr', { arguments: ['string', 'int32'], return: 'string' });",
-      "seeAlso": ["ffi.dlopen", "ffi.getSymbol"],
-      "spec": { "mdn": "https://nodejs.org/api/ffi.html#librarygetfunctionname-signature" }
-    },
-    {
-      "id": "ffi.getSymbol",
-      "name": "lib.getSymbol(name) / ffi.dlsym(lib, name)",
-      "statusRow": "`lib.getSymbol(name)` / `ffi.dlsym(lib, name)` → `bigint`",
-      "signature": "getSymbol(name: string): bigint; dlsym(lib: DynamicLibrary, name: string): bigint",
-      "badge": "exact",
-      "description": "Resolves a symbol to its raw address as a bigint. A missing symbol throws a catchable Error carrying dlerror().",
-      "returns": { "type": "bigint", "desc": "The symbol's address." },
-      "exampleKey": "ffi/ffi",
-      "snippet": "const addr = lib.getSymbol('strlen');",
-      "seeAlso": ["ffi.getFunction"],
-      "spec": { "mdn": "https://nodejs.org/api/ffi.html#librarygetsymbolname" }
-    },
-    {
-      "id": "ffi.marshalling",
-      "name": "Typed calls + marshalling",
-      "statusRow": "Typed calls + marshalling (all scalar types, `string`, `pointer`, `buffer`, `arraybuffer`, 64-bit ↔ `bigint`)",
-      "signature": "functions.name(...args)",
-      "badge": "exact",
-      "description": "Arguments convert per the declared type: numbers for ints up to 32 bits and floats, bigint for int64/uint64 and pointers, strings pass NUL-terminated UTF-8, and Buffer/typed-array/ArrayBuffer arguments pass their backing data pointer. Returns widen back the same way; pointer returns are bigint addresses and a string return is pointer-like too — the raw char* as a bigint, not an auto-marshalled JS string (read it with ffi.toString), exactly as Node exposes it. function-typed values pass as raw bigint addresses; creating one from a closure needs registerCallback. Arguments are validated exactly as Node does, for direct calls and calls through any: in-range integers (-0 rejected only by the 32-bit kinds), an in-range bigint for 64-bit types, any number for floats, and a bigint in [0, 2^64), string, buffer/view/ArrayBuffer, null or undefined for the pointer family; bool is uint8 and char the platform char. A wrong argument count throws.",
-      "returns": { "type": "number | bigint | string | void", "desc": "Per the signature's return type." },
-      "exampleKey": "ffi/ffi",
-      "snippet": "functions.pow(2, 16);        // 65536\nfunctions.strlen('hello');   // 5n",
-      "seeAlso": ["ffi.getFunction"],
-      "spec": { "mdn": "https://nodejs.org/api/ffi.html#calling-native-functions" }
-    },
-    {
-      "id": "ffi.symbols",
-      "name": "lib.functions / lib.symbols / lib.getFunctions() / lib.getSymbols()",
-      "statusRow": "`library.functions` / `library.symbols` / no-arg `getFunctions()` / `getSymbols()`",
-      "badge": "caveats",
-      "signature": "functions: Record<string, Function>; symbols: Record<string, bigint>; getFunctions(): Record<string, Function>; getSymbols(): Record<string, bigint>",
-      "description": "Node's accumulators of everything previously resolved through the library: functions holds the callable typed wrappers (dlopen definitions plus getFunction registrations), symbols every resolved address as a bigint. Each read is a fresh null-prototype object in Node's own enumeration order — Node keeps these tables in a std::unordered_map, and so does the runtime here (libc++ on macOS, libstdc++ on Linux, identical to Node by construction; an MSVC-STL port on Windows, not yet checked against a Windows Node). Every resolution is recorded, runtime-computed names included; after close() the accessors throw ERR_FFI_LIBRARY_CLOSED.",
-      "returns": { "type": "object", "desc": "Callable wrappers or bigint addresses, keyed by name." },
-      "exampleKey": "ffi/ffi",
-      "snippet": "lib.getSymbol('getpid');\nObject.keys(lib.symbols); // ['strlen', 'getpid', ...]\nlib.functions.strlen('hi'); // 2n",
-      "seeAlso": ["ffi.getFunction", "ffi.getSymbol"],
-      "spec": { "mdn": "https://nodejs.org/api/ffi.html#librarysymbols" }
-    },
-    {
-      "id": "ffi.registerCallback",
-      "name": "lib.registerCallback / unregisterCallback / refCallback / unrefCallback",
-      "statusRow": "`library.registerCallback([sig,] cb)` / `unregisterCallback(ptr)` / `refCallback` / `unrefCallback`",
-      "signature": "registerCallback(signature: { arguments?: string[], return?: string }, callback: Function): bigint; unregisterCallback(pointer: bigint): void; refCallback(pointer: bigint): void; unrefCallback(pointer: bigint): void",
-      "badge": "caveats",
-      "description": "Hands a closure to C as a raw function pointer: the returned bigint is a real C-callable address whose invocations marshal the C arguments into your callback's declared types and the return back out (64-bit, pointer and string parameters must be declared bigint — a string callback parameter is the raw char* pointer, as in Node). Implemented as statically-emitted per-signature trampoline families over a registration table — no runtime code generation — which caps concurrently-live callbacks at 16 per signature shape (exceeding it throws; unregistered slots recycle). Node's libffi closures have no such limit — this is a deliberate divergence-by-necessity of the no-runtime-codegen design. refCallback/unrefCallback are validated no-ops (registered callbacks are always strongly referenced), and close() does not invalidate callbacks — unregister explicitly.",
-      "returns": { "type": "bigint", "desc": "The C-callable function-pointer address." },
-      "exampleKey": "ffi/ffi",
-      "snippet": "const cmp = lib.registerCallback(\n  { arguments: ['pointer', 'pointer'], return: 'int32' },\n  (a: bigint, b: bigint): number => ffi.getInt32(a) - ffi.getInt32(b)\n);\nfunctions.qsort(ptr, 5n, 4n, cmp);",
-      "seeAlso": ["ffi.getFunction", "ffi.accessors"],
-      "spec": { "mdn": "https://nodejs.org/api/ffi.html#libraryregistercallbacksignature-callback" }
-    },
-    {
-      "id": "ffi.accessors",
-      "name": "ffi.getInt8…getFloat64 / ffi.setInt8…setFloat64",
-      "statusRow": "Primitive accessors (`ffi.getInt8`…`getFloat64(ptr, offset?)`, `ffi.setInt8`…`setFloat64(ptr, offset, value)`)",
-      "signature": "getInt32(pointer: bigint, offset?: number): number; setInt32(pointer: bigint, offset: number, value: number): void; getInt64(...): bigint; setInt64(..., value: bigint): void",
-      "badge": "exact",
-      "description": "Read and write native memory at a bigint address plus a byte offset. All ten widths in both directions: 8/16/32-bit values are numbers, 64-bit values are bigint (exact — values above 2^53 round-trip), float32 narrows through double. Getter offsets are optional (default 0); setter offsets are required, matching Node. No bounds checking — the module's documented unsafe posture.",
-      "returns": { "type": "number | bigint | void", "desc": "The read value; setters return nothing." },
-      "exampleKey": "ffi/ffi",
-      "snippet": "ffi.setInt32(p, 0, 1234);\nffi.getInt32(p, 0); // 1234",
-      "seeAlso": ["ffi.toString", "ffi.getSymbol"],
-      "spec": { "mdn": "https://nodejs.org/api/ffi.html#ffigetint8pointer-offset" }
-    },
-    {
-      "id": "ffi.toString",
-      "name": "ffi.toString / toBuffer / toArrayBuffer / getRawPointer",
-      "statusRow": "`ffi.toString(ptr)` / `ffi.toBuffer(ptr, len, copy?)` / `ffi.toArrayBuffer(ptr, len, copy?)` / `ffi.getRawPointer(src)`",
-      "signature": "toString(pointer: bigint): string | null; toBuffer(pointer: bigint, length: number, copy?: boolean): Buffer; toArrayBuffer(pointer: bigint, length: number, copy?: boolean): ArrayBuffer; getRawPointer(src: Buffer | ArrayBuffer | ArrayBufferView): bigint",
-      "badge": "exact",
-      "description": "Bring native memory into JS values. toString reads a NUL-terminated UTF-8 C string (null for 0n). toBuffer/toArrayBuffer take length bytes — copied by default, or as a zero-copy view with copy: false (the caller keeps the memory valid, Node's contract). getRawPointer goes the other way: the backing data pointer of a Buffer/ArrayBuffer/view as a bigint address.",
-      "returns": { "type": "string | Buffer | ArrayBuffer | bigint", "desc": "Per helper." },
-      "exampleKey": "ffi/ffi",
-      "snippet": "const s = ffi.toString(ptr);\nconst view = ffi.toBuffer(ptr, 16, false); // zero-copy",
-      "seeAlso": ["ffi.exportString", "ffi.accessors"],
-      "spec": { "mdn": "https://nodejs.org/api/ffi.html#ffitostringpointer" }
-    },
-    {
-      "id": "ffi.exportString",
-      "name": "ffi.exportString / exportBuffer / exportArrayBuffer / exportArrayBufferView",
-      "statusRow": "`ffi.exportString/exportBuffer/exportArrayBuffer/exportArrayBufferView(src, ptr, length)`",
-      "signature": "exportString(str: string, pointer: bigint, length: number, encoding?: 'utf8'): void; exportBuffer(src: Buffer, pointer: bigint, length: number): void; exportArrayBuffer(src: ArrayBuffer, pointer: bigint, length: number): void; exportArrayBufferView(src: ArrayBufferView, pointer: bigint, length: number): void",
-      "badge": "exact",
-      "description": "Copy JS data into caller-provided native memory. exportString encodes with any Buffer encoding (utf8 by default; utf16le/ucs2 get a 2-byte terminator) and, as in Node, throws ERR_OUT_OF_RANGE when length cannot hold the encoded string plus its terminator, ERR_INVALID_ARG_TYPE for a bigint length, and ERR_UNKNOWN_ENCODING for an unknown encoding. The byte-export forms copy the source's bytes and throw a RangeError when length is smaller than the source's byteLength.",
-      "returns": { "type": "void", "desc": "Nothing." },
-      "exampleKey": "ffi/ffi",
-      "snippet": "ffi.exportString('written from TS', ptr, 32);",
-      "seeAlso": ["ffi.toString"],
-      "spec": { "mdn": "https://nodejs.org/api/ffi.html#ffiexportstringstring-pointer-length-encoding" }
-    },
-    {
-      "id": "ffi.suffix",
-      "name": "ffi.suffix / ffi.types",
-      "statusRow": "`ffi.suffix` / `ffi.types` constants",
-      "signature": "suffix: 'dylib' | 'so' | 'dll'; types: Record<string, string>",
-      "badge": "exact",
-      "description": "suffix is the host's shared-library filename suffix ('dylib' on macOS, 'so' on Linux, 'dll' on Windows), a compile-time constant. ffi.types holds the type-name string constants (ffi.types.INT_32 === 'int32', …) usable anywhere a type name goes in a signature.",
-      "returns": { "type": "string", "desc": "The constant string." },
-      "exampleKey": "ffi/ffi",
-      "snippet": "const path = `libsqlite3.${ffi.suffix}`;",
-      "seeAlso": ["ffi.dlopen"],
-      "spec": { "mdn": "https://nodejs.org/api/ffi.html#ffisuffix" }
-    }
-  ]
+ "surface": "ffi",
+ "title": "node:ffi",
+ "kind": "node",
+ "statusPage": "FFI.md",
+ "coversRows": "all",
+ "coverage": {
+  "loose": "11/12",
+  "loosePct": 92,
+  "strict": "8/12",
+  "strictPct": 67
+ },
+ "lede": "Node's experimental node:ffi module (v26.1.0+) — call C functions from shared libraries, or from the process itself, with plain-object signatures, and peek/poke native memory through bigint pointers. Ported from Node's own lib/ffi.js and node_ffi.cc over libffi: a signature is an ordinary value checked when a function is requested, calls and callbacks go through libffi call interfaces and closures, and argument checks, error codes and the symbols/functions order are Node's. 64-bit integers and pointers travel as bigint, strings pass as NUL-terminated UTF-8, and Buffers/typed arrays/ArrayBuffers pass their data pointer.",
+ "entries": [
+  {
+   "id": "ffi.dlopen",
+   "name": "ffi.dlopen(path, definitions?)",
+   "statusRow": "`ffi.dlopen(path, definitions?)` → `{ lib, functions }`",
+   "signature": "dlopen(path: string | null, definitions?: Record<string, { arguments?: string[], return?: string }>): { lib: DynamicLibrary, functions: Record<string, Function> }",
+   "badge": "exact",
+   "description": "Loads a shared library (or the current process image for null) and resolves every function in definitions in one step. The definitions are ordinary values, checked like Node's; a failing definition closes the library before the error propagates. The path may be any runtime string. Failures throw an Error carrying dlerror().",
+   "returns": {
+    "type": "{ lib, functions }",
+    "desc": "The library handle plus one callable per definition."
+   },
+   "exampleKey": "ffi/ffi",
+   "snippet": "const { lib, functions } = ffi.dlopen(null, {\n  strlen: { arguments: ['string'], return: 'uint64' },\n});",
+   "seeAlso": [
+    "ffi.getFunction",
+    "ffi.DynamicLibrary"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/ffi.html#ffidlopenpath-definitions"
+   }
+  },
+  {
+   "id": "ffi.DynamicLibrary",
+   "name": "new DynamicLibrary(path) / lib.close() / ffi.dlclose(lib)",
+   "statusRow": "`new DynamicLibrary(path)` / `lib.close()` / `ffi.dlclose(lib)`",
+   "signature": "new DynamicLibrary(path: string | null); close(): void; dlclose(lib: DynamicLibrary): void",
+   "badge": "caveats",
+   "description": "Opens a library without resolving anything yet; lib.path reads the path back. close() and [Symbol.dispose]() release the handle and are idempotent, as in Node; afterwards every call and lookup throws ERR_FFI_LIBRARY_CLOSED.",
+   "returns": {
+    "type": "DynamicLibrary",
+    "desc": "A library handle."
+   },
+   "exampleKey": "ffi/ffi",
+   "snippet": "const lib = new DynamicLibrary(`./libtest.${ffi.suffix}`);\nlib.close();",
+   "seeAlso": [
+    "ffi.dlopen"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/ffi.html#class-dynamiclibrary"
+   },
+   "differences": [
+    "console.log(lib) shows DynamicLibrary {} where Node shows its own accessors ({ path: [Getter], symbols: [Getter] })",
+    "using declarations are not parsed yet"
+   ]
+  },
+  {
+   "id": "ffi.getFunction",
+   "name": "lib.getFunction(name, signature) / lib.getFunctions(definitions)",
+   "statusRow": "`lib.getFunction(name, signature)` / `lib.getFunctions(definitions)`",
+   "signature": "getFunction(name: string, signature: { arguments?: string[], return?: string }): Function; getFunctions(definitions: object): Record<string, Function>",
+   "badge": "exact",
+   "description": "Binds one native symbol (or a map of them) to a directly-callable function. The signature is an ordinary object; type names accept every Node alias spelling (i32, ptr, str, double, …) and the ffi.types constants. The result is a real function object, as in Node: typeof 'function', name and length, an own pointer property (the raw address as a bigint), one identity per symbol per library, and util.inspect's [Function: abs] { pointer: … }.",
+   "returns": {
+    "type": "Function",
+    "desc": "A callable lowered to a direct C-ABI call."
+   },
+   "exampleKey": "ffi/ffi",
+   "snippet": "const strchr = lib.getFunction('strchr', { arguments: ['string', 'int32'], return: 'string' });",
+   "seeAlso": [
+    "ffi.dlopen",
+    "ffi.getSymbol"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/ffi.html#librarygetfunctionname-signature"
+   }
+  },
+  {
+   "id": "ffi.getSymbol",
+   "name": "lib.getSymbol(name) / ffi.dlsym(lib, name)",
+   "statusRow": "`lib.getSymbol(name)` / `ffi.dlsym(lib, name)` → `bigint`",
+   "signature": "getSymbol(name: string): bigint; dlsym(lib: DynamicLibrary, name: string): bigint",
+   "badge": "exact",
+   "description": "Resolves a symbol to its raw address as a bigint. A missing symbol throws a catchable Error carrying dlerror().",
+   "returns": {
+    "type": "bigint",
+    "desc": "The symbol's address."
+   },
+   "exampleKey": "ffi/ffi",
+   "snippet": "const addr = lib.getSymbol('strlen');",
+   "seeAlso": [
+    "ffi.getFunction"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/ffi.html#librarygetsymbolname"
+   }
+  },
+  {
+   "id": "ffi.marshalling",
+   "name": "Typed calls + marshalling",
+   "statusRow": "Typed calls + marshalling (all scalar types, `string`, `pointer`, `buffer`, `arraybuffer`, 64-bit ↔ `bigint`)",
+   "signature": "functions.name(...args)",
+   "badge": "exact",
+   "description": "Arguments convert per the declared type: numbers for ints up to 32 bits and floats, bigint for int64/uint64 and pointers, strings pass NUL-terminated UTF-8, and Buffer/typed-array/ArrayBuffer arguments pass their backing data pointer. Returns widen back the same way; pointer returns are bigint addresses and a string return is pointer-like too — the raw char* as a bigint, not an auto-marshalled JS string (read it with ffi.toString), exactly as Node exposes it. function-typed values pass as raw bigint addresses; creating one from a closure needs registerCallback. Arguments are validated exactly as Node does, for direct calls and calls through any: in-range integers (-0 rejected only by the 32-bit kinds), an in-range bigint for 64-bit types, any number for floats, and a bigint in [0, 2^64), string, buffer/view/ArrayBuffer, null or undefined for the pointer family; bool is uint8 and char the platform char. A wrong argument count throws.",
+   "returns": {
+    "type": "number | bigint | string | void",
+    "desc": "Per the signature's return type."
+   },
+   "exampleKey": "ffi/ffi",
+   "snippet": "functions.pow(2, 16);        // 65536\nfunctions.strlen('hello');   // 5n",
+   "seeAlso": [
+    "ffi.getFunction"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/ffi.html#calling-native-functions"
+   }
+  },
+  {
+   "id": "ffi.symbols",
+   "name": "lib.functions / lib.symbols / lib.getFunctions() / lib.getSymbols()",
+   "statusRow": "`library.functions` / `library.symbols` / no-arg `getFunctions()` / `getSymbols()`",
+   "badge": "caveats",
+   "signature": "functions: Record<string, Function>; symbols: Record<string, bigint>; getFunctions(): Record<string, Function>; getSymbols(): Record<string, bigint>",
+   "description": "Node's accumulators of everything previously resolved through the library: functions holds the callable typed wrappers (dlopen definitions plus getFunction registrations), symbols every resolved address as a bigint. Each read is a fresh null-prototype object in Node's own enumeration order — Node keeps these tables in a std::unordered_map, and so does the runtime here (libc++ on macOS, libstdc++ on Linux, identical to Node by construction; an MSVC-STL port on Windows, not yet checked against a Windows Node). Every resolution is recorded, runtime-computed names included; after close() the accessors throw ERR_FFI_LIBRARY_CLOSED.",
+   "returns": {
+    "type": "object",
+    "desc": "Callable wrappers or bigint addresses, keyed by name."
+   },
+   "exampleKey": "ffi/ffi",
+   "snippet": "lib.getSymbol('getpid');\nObject.keys(lib.symbols); // ['strlen', 'getpid', ...]\nlib.functions.strlen('hi'); // 2n",
+   "seeAlso": [
+    "ffi.getFunction",
+    "ffi.getSymbol"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/ffi.html#librarysymbols"
+   }
+  },
+  {
+   "id": "ffi.registerCallback",
+   "name": "lib.registerCallback / unregisterCallback / refCallback / unrefCallback",
+   "statusRow": "`library.registerCallback([sig,] cb)` / `unregisterCallback(ptr)` / `refCallback` / `unrefCallback`",
+   "signature": "registerCallback(signature: { arguments?: string[], return?: string }, callback: Function): bigint; unregisterCallback(pointer: bigint): void; refCallback(pointer: bigint): void; unrefCallback(pointer: bigint): void",
+   "badge": "caveats",
+   "description": "Hands a closure to C as a raw function pointer: the returned bigint is a real C-callable address (a libffi closure) whose invocations marshal the C arguments to the callback and its return value back out; any number may be live at once. unregisterCallback frees it.",
+   "returns": {
+    "type": "bigint",
+    "desc": "The C-callable function-pointer address."
+   },
+   "exampleKey": "ffi/ffi",
+   "snippet": "const cmp = lib.registerCallback(\n  { arguments: ['pointer', 'pointer'], return: 'int32' },\n  (a: bigint, b: bigint): number => ffi.getInt32(a) - ffi.getInt32(b)\n);\nfunctions.qsort(ptr, 5n, 4n, cmp);",
+   "seeAlso": [
+    "ffi.getFunction",
+    "ffi.accessors"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/ffi.html#libraryregistercallbacksignature-callback"
+   },
+   "differences": [
+    "refCallback/unrefCallback are validated no-ops, and library.close() does not invalidate callbacks — unregister explicitly; an exception a callback throws is reported as uncaught once the foreign call returns"
+   ]
+  },
+  {
+   "id": "ffi.accessors",
+   "name": "ffi.getInt8…getFloat64 / ffi.setInt8…setFloat64",
+   "statusRow": "Primitive accessors (`ffi.getInt8`…`getFloat64(ptr, offset?)`, `ffi.setInt8`…`setFloat64(ptr, offset, value)`)",
+   "signature": "getInt32(pointer: bigint, offset?: number): number; setInt32(pointer: bigint, offset: number, value: number): void; getInt64(...): bigint; setInt64(..., value: bigint): void",
+   "badge": "exact",
+   "description": "Read and write native memory at a bigint address plus a byte offset. All ten widths in both directions: 8/16/32-bit values are numbers, 64-bit values are bigint (exact — values above 2^53 round-trip), float32 narrows through double. Getter offsets are optional (default 0); setter offsets are required, matching Node. No bounds checking — the module's documented unsafe posture.",
+   "returns": {
+    "type": "number | bigint | void",
+    "desc": "The read value; setters return nothing."
+   },
+   "exampleKey": "ffi/ffi",
+   "snippet": "ffi.setInt32(p, 0, 1234);\nffi.getInt32(p, 0); // 1234",
+   "seeAlso": [
+    "ffi.toString",
+    "ffi.getSymbol"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/ffi.html#ffigetint8pointer-offset"
+   }
+  },
+  {
+   "id": "ffi.toString",
+   "name": "ffi.toString / toBuffer / toArrayBuffer / getRawPointer",
+   "statusRow": "`ffi.toString(ptr)` / `ffi.toBuffer(ptr, len, copy?)` / `ffi.toArrayBuffer(ptr, len, copy?)` / `ffi.getRawPointer(src)`",
+   "signature": "toString(pointer: bigint): string | null; toBuffer(pointer: bigint, length: number, copy?: boolean): Buffer; toArrayBuffer(pointer: bigint, length: number, copy?: boolean): ArrayBuffer; getRawPointer(src: Buffer | ArrayBuffer | ArrayBufferView): bigint",
+   "badge": "exact",
+   "description": "Bring native memory into JS values. toString reads a NUL-terminated UTF-8 C string (null for 0n). toBuffer/toArrayBuffer take length bytes — copied by default, or as a zero-copy view with copy: false (the caller keeps the memory valid, Node's contract). getRawPointer goes the other way: the backing data pointer of a Buffer/ArrayBuffer/view as a bigint address.",
+   "returns": {
+    "type": "string | Buffer | ArrayBuffer | bigint",
+    "desc": "Per helper."
+   },
+   "exampleKey": "ffi/ffi",
+   "snippet": "const s = ffi.toString(ptr);\nconst view = ffi.toBuffer(ptr, 16, false); // zero-copy",
+   "seeAlso": [
+    "ffi.exportString",
+    "ffi.accessors"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/ffi.html#ffitostringpointer"
+   }
+  },
+  {
+   "id": "ffi.exportString",
+   "name": "ffi.exportString / exportBuffer / exportArrayBuffer / exportArrayBufferView",
+   "statusRow": "`ffi.exportString/exportBuffer/exportArrayBuffer/exportArrayBufferView(src, ptr, length)`",
+   "signature": "exportString(str: string, pointer: bigint, length: number, encoding?: 'utf8'): void; exportBuffer(src: Buffer, pointer: bigint, length: number): void; exportArrayBuffer(src: ArrayBuffer, pointer: bigint, length: number): void; exportArrayBufferView(src: ArrayBufferView, pointer: bigint, length: number): void",
+   "badge": "exact",
+   "description": "Copy JS data into caller-provided native memory. exportString encodes with any Buffer encoding (utf8 by default; utf16le/ucs2 get a 2-byte terminator) and, as in Node, throws ERR_OUT_OF_RANGE when length cannot hold the encoded string plus its terminator, ERR_INVALID_ARG_TYPE for a bigint length, and ERR_UNKNOWN_ENCODING for an unknown encoding. The byte-export forms copy the source's bytes and throw a RangeError when length is smaller than the source's byteLength.",
+   "returns": {
+    "type": "void",
+    "desc": "Nothing."
+   },
+   "exampleKey": "ffi/ffi",
+   "snippet": "ffi.exportString('written from TS', ptr, 32);",
+   "seeAlso": [
+    "ffi.toString"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/ffi.html#ffiexportstringstring-pointer-length-encoding"
+   }
+  },
+  {
+   "id": "ffi.suffix",
+   "name": "ffi.suffix / ffi.types",
+   "statusRow": "`ffi.suffix` / `ffi.types` constants",
+   "signature": "suffix: 'dylib' | 'so' | 'dll'; types: Record<string, string>",
+   "badge": "exact",
+   "description": "suffix is the host's shared-library filename suffix ('dylib' on macOS, 'so' on Linux, 'dll' on Windows), a compile-time constant. ffi.types holds the type-name string constants (ffi.types.INT_32 === 'int32', …) usable anywhere a type name goes in a signature.",
+   "returns": {
+    "type": "string",
+    "desc": "The constant string."
+   },
+   "exampleKey": "ffi/ffi",
+   "snippet": "const path = `libsqlite3.${ffi.suffix}`;",
+   "seeAlso": [
+    "ffi.dlopen"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/ffi.html#ffisuffix"
+   }
+  }
+ ]
 }

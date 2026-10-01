@@ -88,6 +88,14 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			ty = nt
 		}
 	}
+	// A call answered `any` (an implementation signature behind overloads)
+	// whose overload the checker resolves to a primitive is that primitive
+	// (mirrors emitExpr's call result).
+	if call, ok := expr.(*ast.CallExpression); ok && isUnconstrainedDynamic(ty) && ty.DynPropTy == nil {
+		if pt, ok := e.checkerPrimitive(call); ok {
+			ty = pt
+		}
+	}
 	if e.shadowOracle != nil {
 		e.shadowExprType(expr, ty)
 	}

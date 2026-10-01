@@ -13,6 +13,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -80,7 +81,7 @@ func streamReadResultType(chunkTy Type) Type {
 func (e *Emitter) buildStreamReadRecord(resultTy, chunkTy Type, chunk Value, doneI1, presentI1 string) string {
 	e.ensureMalloc()
 	rec := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", rec, resultTy.StructSize()))
+	e.emitObjMallocInto(rec, resultTy)
 	vIdx, valTy, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), rec, vIdx))
@@ -148,8 +149,8 @@ func (e *Emitter) emitStreamFulfillThunk(chunkTy Type) string {
 }
 
 // streamCallbackClosure evaluates an underlying-source callback expression
-// (arrow / function expression only, like EventEmitter listeners — .emit-style
-// later invocation needs a real closure header) with the given param hints.
+// (arrow / function expression only — a later invocation needs a real
+// closure header) with the given param hints.
 func (e *Emitter) streamCallbackClosure(arg ast.Expression, hints []Type, what string, pos ast.Pos) (Value, error) {
 	var val Value
 	var err error
@@ -213,6 +214,8 @@ func (e *Emitter) emitStreamPullWrap(userTy Type) string {
 	if isAsync {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr (%s) %s(%s)", r, sig, fp, args))
+		// The stream reacts to it (the spec's uponPromise): handled.
+		e.emitMarkPromiseHandled(r)
 		e.emitInstr(fmt.Sprintf("ret ptr %s", r))
 	} else {
 		e.emitInstr(fmt.Sprintf("call void (%s) %s(%s)", sig, fp, args))
@@ -246,6 +249,7 @@ func (e *Emitter) emitStreamCancelWrap(userTy Type) string {
 	if isAsync {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr (ptr) %s(ptr %s)", r, fp, ep))
+		e.emitMarkPromiseHandled(r) // the stream reacts to it (uponPromise)
 		e.emitInstr(fmt.Sprintf("ret ptr %s", r))
 	} else {
 		e.emitInstr(fmt.Sprintf("call void (ptr) %s(ptr %s)", fp, ep))
@@ -332,17 +336,6 @@ func (e *Emitter) storeStreamField(s string, idx int, val string) {
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, rstreamStructIR, s, idx))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val, gep))
-}
-
-// objectLiteralProp returns the value expression for key in an object literal,
-// or nil.
-func objectLiteralProp(ol *ast.ObjectLiteral, key string) ast.Expression {
-	for _, p := range ol.Properties {
-		if p.Key == key {
-			return p.Value
-		}
-	}
-	return nil
 }
 
 // resolveStreamStrategy destructures a queuing-strategy argument —
@@ -583,7 +576,7 @@ func (e *Emitter) emitStreamProperty(ex *ast.MemberExpression, objTy Type) (Valu
 }
 
 // resolveStreamForCall resolves a stream/reader/controller receiver expression
-// to its loaded heap pointer — resolveEventEmitterForCall's sibling.
+// to its loaded heap pointer.
 func (e *Emitter) resolveStreamForCall(objExpr ast.Expression, pos ast.Pos) (Type, string, error) {
 	if id, ok := objExpr.(*ast.Identifier); ok {
 		sym, found := e.lookup(id.Name)
@@ -612,7 +605,13 @@ func (e *Emitter) streamThrowTypeError(flagReg, msg string) {
 	okL := e.freshLabel("rs.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, throwL, okL))
 	e.emitLabel(throwL)
-	errPtr := e.buildErrorObj(errorKindIDs["TypeError"], e.internString(msg), e.internString("TypeError"))
+	var errPtr string
+	if strings.HasPrefix(msg, "Invalid state: ") {
+		// Node's stream state errors carry code ERR_INVALID_STATE.
+		errPtr = e.buildErrorObjWithCode(errorKindIDs["TypeError"], e.internString(msg), e.internString("TypeError"), e.internString("ERR_INVALID_STATE"), "0.0", "null")
+	} else {
+		errPtr = e.buildErrorObj(errorKindIDs["TypeError"], e.internString(msg), e.internString("TypeError"))
+	}
 	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errPtr))
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
@@ -658,7 +657,7 @@ func (e *Emitter) emitStreamMethodCall(objExpr ast.Expression, method string, ar
 			}
 			ok := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_lock(ptr %s)", ok, ptr))
-			e.streamThrowTypeError(ok, "ReadableStream is already locked to a reader")
+			e.streamThrowTypeError(ok, "Invalid state: ReadableStream is locked")
 			return Value{Ref: ptr, Ty: StreamReaderType(chunkTy)}, nil
 		case "cancel":
 			bits, err := e.streamReasonBits(args, pos)
@@ -806,7 +805,7 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 		// Lock like getReader() does; an already-locked stream throws.
 		ok := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_lock(ptr %s)", ok, streamVal.Ref))
-		e.streamThrowTypeError(ok, "ReadableStream is already locked to a reader")
+		e.streamThrowTypeError(ok, "Invalid state: ReadableStream is locked")
 	}
 
 	isPattern := s.ArrayPattern != nil || s.ObjectPattern != nil

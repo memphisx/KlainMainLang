@@ -349,7 +349,7 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, fty.IR, gep, fty.Align()))
 			return Value{Ref: r, Ty: fty}, true
 		}
-		for _, f := range objVal.Ty.Fields {
+		for _, f := range objVal.Ty.UserFields() {
 			switch f.Name {
 			case "port", "path", "host", "hostname", "agent", "method":
 			default:
@@ -558,7 +558,7 @@ func (e *Emitter) emitHTTPCompletionThunk() string {
 
 	ty := IncomingMessageType()
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", res, ty.StructSize()))
+	e.emitObjAllocInto(res, ty)
 	statusD := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", statusD, status))
 	e.storeIncomingField(res, ty, "statusCode", "double", statusD)

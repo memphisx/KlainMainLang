@@ -87,6 +87,10 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		cflags, libs := LocateHTTP2()
 		out = append(out, CSource{"http2", HTTP2ServerSource(), cflags, libs, ""})
 	}
+	if e.UsesH2Node() {
+		cflags, libs := LocateHTTP2()
+		out = append(out, CSource{"h2node", H2NodeSource(), cflags, libs, ""})
+	}
 	if e.UsesSpawnSync() {
 		out = append(out, CSource{"spawnsync", SpawnSyncSource(), nil, nil, ""})
 	}
@@ -130,16 +134,19 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if e.UsesDynJSON() {
 		out = append(out, CSource{"dynjson", DynJSONSource(), nil, nil, ""})
 	}
+	if e.UsesShapes() {
+		out = append(out, CSource{"shape", ShapeSource(), nil, nil, ""})
+	}
 	if e.UsesCasemap() {
 		// Unicode case mapping for toUpperCase/toLowerCase. Tables + code,
 		// libc only.
 		out = append(out, CSource{"casemap", CasemapSource(), nil, nil, ""})
 	}
 	if e.UsesStringC() {
-		out = append(out, CSource{"string", StringSource(), nil, nil, ""})
+		out = append(out, CSource{"string", StringSource(), nil, LibmLibs(), ""})
 	}
 	if e.UsesNumberC() {
-		out = append(out, CSource{"number", NumberSource(), nil, nil, ""})
+		out = append(out, CSource{"number", NumberSource(), nil, LibmLibs(), ""})
 	}
 	if e.UsesFnMeta() {
 		out = append(out, CSource{"fnmeta", FnMetaSource(), nil, nil, ""})
@@ -198,11 +205,6 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 			cflags = []string{"-DKLAIN_GC=1"}
 		}
 		out = append(out, CSource{"procmem", ProcMemSource(), cflags, nil, ""})
-	}
-	if e.UsesOSHomedirPw() {
-		// os.homedir()'s POSIX passwd-database fallback (getpwuid). No extra
-		// libs — pwd.h/unistd.h live in libc. Windows never sets this flag.
-		out = append(out, CSource{"oshomedirpw", OSHomedirPwSource(), nil, nil, ""})
 	}
 	if e.UsesTtyShim() {
 		// TDD-00031: termios/ioctl/raw-read shim. No extra libs — termios and
@@ -269,4 +271,14 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		}
 	}
 	return out, nil
+}
+
+// LibmLibs is the link flag a C runtime file calling libm (trunc, floor, …)
+// needs: glibc and mingw keep the math functions in libm; macOS has them in
+// libSystem, which is always linked.
+func LibmLibs() []string {
+	if runtime.GOOS == "darwin" {
+		return nil
+	}
+	return []string{"-lm"}
 }

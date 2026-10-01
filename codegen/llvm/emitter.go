@@ -207,10 +207,7 @@ type Emitter struct {
 	urlUSPWritebackEmit   bool   // @__kml_url_usp_writeback has been emitted once
 	usesFloatFmt          bool   // set the first time a float is printed (drives dtoa.c compile+link in main.go — TDD-00080)
 	declaredDtoa          bool   // the __kml_dtoa declare has been emitted once
-	usedSignalAborted     bool   // the __kml_signal_aborted helper has been emitted (TDD-00081 Stage 3c)
-	usedAbortTimeout      bool   // AbortSignal.timeout used → the background abort-timeout dispatcher + register are emitted (TDD-00216)
-	usedAbortPropagate    bool   // abort propagation to AbortSignal.any followers emitted (@__kml_abort_propagate)
-	usedAbortRegistry     bool   // the always-present abort-timeout registry globals + soonest/fire_due have been emitted (TDD-00216)
+	usedSignalAborted     bool   // the AbortSignal accessors are emitted (emit_signal.go)
 	usedPrintf            bool
 	usedDprintf           bool
 	usedStdoutGlobal      bool // the libc `stdout` FILE* extern global is declared (ADR-00867)
@@ -220,12 +217,11 @@ type Emitter struct {
 	usedRangeErrorThrow   bool
 	usedAbsentArrayCell   bool
 	// pendingDeref: base nodes whose value emitExpr must null-guard (emit_nullderef.go).
-	pendingDeref      map[ast.Expression]derefGuard
-	usedRealloc       bool
-	usedMemmove       bool
-	usedStripExpZeros bool
-	usedTableHelpers  bool
-	funcs             map[string]FuncSig // registered function signatures
+	pendingDeref     map[ast.Expression]derefGuard
+	usedRealloc      bool
+	usedMemmove      bool
+	usedTableHelpers bool
+	funcs            map[string]FuncSig // registered function signatures
 	// libStmts are the builtin library's top-level statements (the
 	// program's LibStatements); inLib is set while one is registered or
 	// emitted (compatJS).
@@ -257,6 +253,8 @@ type Emitter struct {
 	// Stage 3), instantiated on demand at each use site by substituting concrete
 	// type arguments into the alias body, then resolving the result.
 	genericTypeAliases map[string]*ast.TypeAliasDeclaration
+	// ambientGenericMiss caches names registerAmbientGeneric found nothing for.
+	ambientGenericMiss map[string]bool
 	genericClasses     map[string]*ast.ClassDeclaration
 	// generators holds one entry per top-level `function*` declaration
 	// (TDD-00061/ADR-00172), keyed by its bare source name — deliberately
@@ -265,10 +263,6 @@ type Emitter struct {
 	// function the way an ordinary named-function call does; see
 	// emit_generators.go.
 	generators map[string]*GeneratorInfo
-	// eventsOnHelpers memoizes the synthesized setup+iterator function pair
-	// backing `events.on(emitter, name)` (TDD-00167), keyed by element
-	// type + arity — see emit_events_helpers.go.
-	eventsOnHelpers map[string]*eventsOnHelper
 	// alsBindTramps memoizes the monomorphic AsyncLocalStorage.bind trampolines
 	// by closure-signature key (TDD-00168 Stage 4) — see emit_asynchooks.go.
 	alsBindTramps map[string]bool
@@ -288,6 +282,10 @@ type Emitter struct {
 	// Box<number> instance can never collide with an unrelated real class's
 	// runtime identity tag.
 	nextClassTagID int64
+	// layoutIDs/layouts: the object layouts given a type id for their header
+	// word (objheader.go), interned by layoutKey.
+	layoutIDs      map[string]int64
+	layouts        []registeredLayout
 	enums          map[string]map[string]Value // enum name → member name → constant value
 	enumBacking    map[string]Type             // enum name → backing value type (i64 numeric, ptr string)
 	currentRetType Type                        // return type of the function being emitted
@@ -297,12 +295,14 @@ type Emitter struct {
 	// named function taken by value (`const g = f`), keyed by its mangled LLVM
 	// name — see emit_func_value.go.
 	fnValueTrampolines map[string]bool
+	intrinsicSigs      map[string]FuncSig // an intrinsic used as a value (emit_intrinsics.go)
+	usedHypot          bool
 	// fnValueHeaders memoizes the static `{trampoline, null}` closure header
 	// emitted once per named function taken by value, keyed by its mangled LLVM
 	// name. Emitting it once (as a global constant) rather than malloc'ing a
 	// fresh header at every reference gives a named function a *stable* value
-	// identity, so `removeEventListener(f)`/`EventEmitter.off(f)`, which compare
-	// header pointers, match an earlier `addEventListener(f)` — see
+	// identity, so a listener removal (`removeEventListener(f)`,
+	// `emitter.off(f)`) matches an earlier registration — see
 	// emit_func_value.go.
 	fnValueHeaders map[string]bool
 	// nestedFuncScopes/nestedFuncCtr — TDD-00057. One nestedFuncScope frame
@@ -395,12 +395,8 @@ type Emitter struct {
 	// depth of 0 is distinguishable from "no override").
 	inspectDepthCap      int
 	inspectDepthSet      bool
-	usedIsatty           bool
-	usedTermiosRaw       bool // TDD-00031: process.stdin.setRawMode termios machinery
-	usedWinSize          bool // TDD-00031: process.stdout.columns/.rows ioctl(TIOCGWINSZ)
 	usedTtyRead          bool // TDD-00031: klain:tty readByte/readKey blocking fd-0 reads
 	usedTui              bool // TDD-00150: klain:tui — Yoga layout + ANSI diff painter
-	usedSignalSigwinch   bool // TDD-00031: process.on('SIGWINCH') registration
 	usedMemcpy           bool
 	usedMemset           bool
 	usedStrcmp           bool
@@ -411,7 +407,6 @@ type Emitter struct {
 	usedStringTrim       bool
 	usedStringTrimStart  bool
 	usedStringTrimEnd    bool
-	usedStringToUpper    bool
 	usedStringToLower    bool
 	usedStringReplace    bool
 	usedStringReplaceAll bool
@@ -441,22 +436,33 @@ type Emitter struct {
 	usedBigIntBoxHooks bool // emit_bigint_box.go: boxed-bigint hooks the dynamic runtime calls
 	// emit_ffi_runtime.go (TDD-00229): the node:ffi registry is linked; one
 	// dynamic-ABI thunk per signature identity; the last validated name length.
-	usedFFIRegistry     bool
-	ffiDynThunks        map[string]string
-	ffiLastLen          string
-	fnMetas             []fnMetaEntry
-	fnMetaSeen          map[string]bool
-	fnLitNames          map[ast.Node]string
-	usedOSInfo          bool         // osinfo.c — os.type/release/…/networkInterfaces, process.env enumeration
-	usedOSInfoBags      bool         // the IR bag builders over osinfo.c (process.env value, networkInterfaces)
-	usedDynObjEntries   bool         // @__kml_dynobj_entries — Object.entries/values on a dynamic object
-	closureBoxOnEntry   map[int]bool // the closure being emitted: params annotated `any` whose ABI is the hint type (boxed on entry, ADR-01080)
-	usedDynJSONFromNode bool
-	usedDynJSONC        bool
-	usedNanBox          bool
-	usedAnyOps          bool
-	usedAnyToPrimitive  bool
-	usedAnyLooseEq      bool
+	usedFFIRegistry       bool
+	ffiDynThunks          map[string]string
+	fnMetas               []fnMetaEntry
+	fnMetaSeen            map[string]bool
+	fnLitNames            map[ast.Node]string
+	usedOSInfo            bool         // osinfo.c — os.type/release/…/networkInterfaces, process.env enumeration
+	usedOSInfoBags        bool         // the IR bag builders over osinfo.c (process.env value, networkInterfaces)
+	usedDynObjEntries     bool         // @__kml_dynobj_entries — Object.entries/values on a dynamic object
+	closureBoxOnEntry     map[int]bool // the closure being emitted: params annotated `any` whose ABI is the hint type (boxed on entry, ADR-01080)
+	usedDynJSONFromNode   bool
+	usedDynJSONC          bool
+	usedShapeRuntime      bool // the layout table + shape.c (emit_shape.go)
+	usedShapeSpread       bool
+	libExports            map[string]string // "<module>:<name>" → merged name of a builtin TS module declaration
+	shapeMethodRecs       map[string]string // class.method → its dynamic-function record
+	boxedLayouts          map[int64]bool    // type ids of layouts boxed into a dynamic value
+	promiseBoxRunners     map[string]string // element representation → its Promise<any> reaction
+	wkSymbols             map[string]bool   // well-known symbols emitted (emit_symbol.go)
+	usedPromiseResolveAny bool
+	usedPromiseWrapperOf  bool
+	genExprCtr            int // generator expressions compiled as values
+	promiseConvRunners    map[string]string
+	anyToLayoutFns        map[int64]string // layout header → its any→layout conversion (emit_shape.go)
+	usedNanBox            bool
+	usedAnyOps            bool
+	usedAnyToPrimitive    bool
+	usedAnyLooseEq        bool
 	// jsCtorParamTy is `-compat=js` call-site-inferred constructor parameter
 	// types (class name → per-index type; zero Type = no site could infer),
 	// filled by jsCollectCtorParamTypes and consumed in registerClasses.
@@ -494,7 +500,6 @@ type Emitter struct {
 	usedClockGettime        bool
 	usedDateNow             bool
 	usedPerformanceNow      bool
-	usedPerformanceMarkMap  bool
 	usedDateDecompose       bool
 	usedSscanf              bool
 	usedDaysFromCivil       bool
@@ -503,56 +508,46 @@ type Emitter struct {
 	usedDateNameTables      bool
 	usedFetch               bool
 	usedFetchAsync          bool
-	// TDD-00098: Worker (worker_threads) state. workerEntries maps a worker
-	// module's canonical path to its entry symbol + statically-declared
-	// channel types; currentWorkerMod is non-empty while a worker module's
-	// entry function is being emitted (gates parentPort/workerData).
-	usedConnPokeGlobal     bool
-	usedChildProcRuntime   bool
-	usedCPExitWake         bool // runtime_childprocess_exit.go: the child-exit loop wake
-	usedGCSBCur            bool // @__kml_gc_sb_cur declared (Windows gc mode, runtime_worker.go)
-	usedGCSBGet            bool // @__kml_gc_get_sb defined (gc mode + Workers, runtime_worker.go gcSBLoad)
-	usedLoopTurn           bool // emitted code references __kml_loop_turn/__kml_top_await (runtime_loop_turn.go)
-	usedLoopTurnDefs       bool
-	moduleTask             bool // the entry program has a top-level await: its module body is a coroutine task (TDD-00224)
-	inModuleTask           bool // emitting @__kml_module_body
-	usedModuleTaskRuntime  bool
-	usedPromiseAdopt       bool            // runtime_promise_adopt.go
-	fetchBodyPromTypedCtr  int             // per-call-site typed json() runners (emit_fetch.go)
-	discardAdapterCtr      int             // emitDiscardReturnAdapter (emit_timers.go)
-	topLevelNames          map[string]bool // every name bound at module top level (registerModuleGlobals)
-	usedFetchSlotToPromise bool
-	sawAwait               bool // set by emitAwait/for-await while a function body is emitted; saved/restored per body
-	usedUsleepDecl         bool
-	usedFsWatchRuntime     bool
-	usedThreadPool         bool
-	usedReadlineRuntime    bool
-	usedStdinRuntime       bool
-	usedNetRuntime         bool
-	usedNetSockIO          bool
-	usedDgramRuntime       bool
-	usedClusterRuntime     bool
-	usedCPListenerAppend   bool
+	usedConnPokeGlobal      bool
+	usedChildProcRuntime    bool
+	usedCPExitWake          bool // runtime_childprocess_exit.go: the child-exit loop wake
+	usedGCSBCur             bool // @__kml_gc_sb_cur declared (Windows gc mode, runtime_worker.go)
+	usedGCSBGet             bool // @__kml_gc_get_sb defined (gc mode + Workers, runtime_worker.go gcSBLoad)
+	usedLoopTurn            bool // emitted code references __kml_loop_turn/__kml_top_await (runtime_loop_turn.go)
+	usedLoopTurnDefs        bool
+	moduleTask              bool // the entry program has a top-level await: its module body is a coroutine task (TDD-00224)
+	inModuleTask            bool // emitting @__kml_module_body
+	usedModuleTaskRuntime   bool
+	usedPromiseAdopt        bool            // runtime_promise_adopt.go
+	fetchBodyPromTypedCtr   int             // per-call-site typed json() runners (emit_fetch.go)
+	discardAdapterCtr       int             // emitDiscardReturnAdapter (emit_timers.go)
+	topLevelNames           map[string]bool // every name bound at module top level (registerModuleGlobals)
+	usedFetchSlotToPromise  bool
+	sawAwait                bool // set by emitAwait/for-await while a function body is emitted; saved/restored per body
+	usedUsleepDecl          bool
+	usedFsWatchRuntime      bool
+	usedThreadPool          bool
+	usedNetRuntime          bool
+	usedNetSockIO           bool
+	usedCPListenerAppend    bool
 	// usedListeningAnnounceHook: @__kml_http_listening_announce defined once,
 	// shared by the HTTP bind (call site) and cluster (armer) runtimes.
 	usedListeningAnnounceHook bool
 	usedProcessUptime         bool
-	usedProcessHrtime         bool
-	usedGetrusage             bool
-	usedCurrentRSS            bool
-	usedProcessLifecycle      bool
-	usedTestRuntime           bool // TDD-00122: the `test` module's mustCall registry + exit verifier
-	testTrampolines           map[string]bool
-	testSkipFmtEmitted        bool
-	testMustNotCallEmitted    bool
-	dnsDeclared               bool
-	getaddrinfoDeclared       bool
-	usedCPKill                bool
-	usedWorkerRuntime         bool
-	hasWorkers                bool // set at EmitProgram start from Program.WorkerModules
-	workerEntries             map[string]*workerEntryInfo
-	currentWorkerMod          string
-	workerAdaptCtr            int
+	// refiningCall marks a call emitCall is converting to the checker's
+	// function type (checkerRefinedCallType), so the inner emit is plain.
+	refiningCall         map[*ast.CallExpression]bool
+	usedCurrentRSS       bool
+	usedProcessLifecycle bool
+	testTrampolines      map[string]bool
+	usedCPKill           bool
+	usedWorkerRuntime    bool
+	hasWorkers           bool // set at EmitProgram start from Program.WorkerModules
+	// currentWorkerMod is non-empty while a worker module's entry function
+	// is being emitted; workerRegistry is main's start-up registration of
+	// the worker modules (emit_worker.go).
+	currentWorkerMod string
+	workerRegistry   string
 	// genericDepth counts nested generic interface/alias instantiations in
 	// resolveType — the cap that turns an infinitely expanding generic
 	// (`interface Foo<T> { x: Foo<Foo<T>> }`) into an opaque tail instead of
@@ -635,25 +630,17 @@ type Emitter struct {
 	// so the dispatcher can't detect it inline; the flag gates the upgrade
 	// detection + net.Socket + generic-read-loop machinery it emits.
 	usedHTTPUpgrade bool
-	// usedKlainWS marks the klain:ws WebSocket-server convenience (TDD-00158
-	// Stage 2). Gates the dispatcher's WebSocket handshake + frame loop, now
-	// decoupled from the removed http.listen({ws}) option.
-	usedKlainWS bool
 	// emittedHTTPSConnShims guards the one-time emission of the fd→SSL registry
 	// and the conn_recv/conn_send/conn_close I/O shims (emitHTTPSConnShims).
 	emittedHTTPSConnShims bool
-	// usedNodeTestRuntime: the node:test runner bookkeeping (TDD-00140).
-	usedNodeTestRuntime bool
-	// usedDiagChRuntime: diagnostics_channel pub/sub core.
-	usedDiagChRuntime bool
 	// nodeTestPrefix is the compile-time describe/suite name stack.
 	nodeTestPrefix           []string // the generic __kml_h2c_on_* IR callbacks http2.c references
 	usedAtomicsRuntime       bool
-	usedChanRuntime          bool
-	usedPipeDecl             bool
+	usedSqliteNatives        bool
+	usedFFINatives           bool
+	usedAnyBigIntRel         bool
 	usedPthreadMutex         bool
 	usedWorkerFdSetbit       bool
-	bcChannels               map[string]*bcChannelInfo
 	usedPromiseCombinators   bool
 	usedPendingFinishSettled bool
 	usedFetchAwaitSettled    bool
@@ -661,47 +648,19 @@ type Emitter struct {
 	usedCurlURL              bool
 	usedSQLite3              bool
 	// usedFFIDl guards the one-time libdl decls (TDD-00164, runtime_ffi.go).
-	usedFFIDl bool
-	// FFI callback trampolines (TDD-00164 Stage C, emit_ffi_callback.go):
-	// wrapper families emitted so far, their deterministic order for the
-	// finalize-time unregister definition, and whether unregister was called.
-	ffiCbEmitted   map[string]bool
-	ffiCbKeys      []string
-	ffiCbUnregUsed bool
-	// usedNodeFFI marks a program that imports node:ffi (TDD-00164) — gates
-	// recognizing `new DynamicLibrary(...)` as the builtin constructor.
-	usedNodeFFI                  bool
-	sqliteUDFCtr                 int
+	usedFFIDl                    bool
 	usedFopen                    bool
 	usedFclose                   bool
-	usedFwrite                   bool
 	usedFsThrow                  bool
 	usedErrnoCode                bool
 	usedErrnoDesc                bool
 	usedFsErrmsg                 bool
 	usedHTTPBindErrorFire        bool
-	usedStatDecl                 bool
-	usedQuerystringParse         bool
 	usedHTTPDate                 bool
 	usedHTTPKeepAlive            bool
 	usedHTTPFireClose            bool
-	usedFsReadFile               bool
-	usedFsReadFileRaw            bool
-	usedFsReadFd                 bool
 	optRecvCtr                   int
-	usedFsOpenRead               bool
-	usedFread                    bool
-	usedFsWriteStream            bool
 	usedTLS                      bool
-	usedTLSRuntime               bool
-	usedFsWriteFile              bool
-	usedFsAppendFile             bool
-	usedFsWriteFileBytes         bool
-	usedFsAppendFileBytes        bool
-	usedFsExists                 bool
-	usedFsUnlink                 bool
-	usedChmodDecl                bool
-	usedFsChmodCreated           bool
 	usedBase64Encode             bool
 	usedBase64Decode             bool
 	usedUtf8LabelCheck           bool
@@ -713,7 +672,6 @@ type Emitter struct {
 	usedEncodeURI                bool
 	usedEncodeFileURLPath        bool
 	usedDecodeURIComponent       bool
-	usedDecodeURI                bool
 	usedDecodeURIComponentStrict bool
 	usedDecodeURIStrict          bool
 	usedCryptoRandomBytes        bool
@@ -721,16 +679,12 @@ type Emitter struct {
 	usedCryptoRandomUUID         bool
 	usedProcessGetID             bool
 	usedChdirDecl                bool
-	usedPemFromDer               bool
 	cryptoSubtleAliases          map[string]bool
 	usedHTTPCThunk               bool
 	usedHTTPCBegin               bool
 	usedExecvDecl                bool
 	usedAtoiDecl                 bool
 	usedReadlinkDecl             bool
-	usedSignalFromName           bool
-	usedSignalSigbreak           bool
-	usedOSCpufreqKHz             bool
 	usedFscanfDecl               bool
 	usedExecvpDecl               bool
 	usedExitRawDecl              bool
@@ -744,16 +698,10 @@ type Emitter struct {
 	usedStrHeaderRuntime         bool
 	usedMemmem                   bool
 	usedWinSpawn                 bool
-	usedOSTmpdirWin              bool
-	usedOSHomedirWin             bool // declared @__kml_os_homedir (Windows shim)
-	usedWinSymlinkType           bool // declared @__kml_win_symlink_type (Windows shim)
-	usedFsCopyFileOS             bool // defined @__kml_fs_copy_file_os (Windows CopyFileW)
-	usedOSHomedirPw              bool
 	usedHeapStats                bool
 	usedHTTPClusterSeed          bool
 	usedWinInheritedListener     bool
 	usedListenFdGlobal           bool
-	usedOSCpusWin                bool
 	usedSetenvDecl               bool
 	usedReadDecl                 bool
 	usedWriteDecl                bool
@@ -761,25 +709,19 @@ type Emitter struct {
 	usedFflushDecl               bool
 	usedHTTPClusterFork          bool
 	usedProcessCwd               bool
-	usedProcessChdir             bool
 	usedGetpid                   bool
-	usedGetppid                  bool // the cluster worker's orphan poll (httpClusterOrphanIR)
 	needMicrotaskTick            bool // emitted code calls @__kml_microtask_tick (a top-level await's tick)
 	inferDepth                   int  // nesting of memoised inferExprType calls (infer_memo.go)
 	inferMemo                    []inferMemoLayer
 	usedExecPath                 bool
 	usedNodeInterpGuard          bool
 	usedReexecGuard              bool
-	usedProcessWarning           bool
 	usedHTTPClientReactions      bool
 	usedHTTPCFlushHook           bool // post-event-loop client-reaction flush hook global
 	usedNtohs                    bool // shared ntohs libc declaration (net + dgram)
-	usedProcessKill              bool
 	usedSignalHandler            bool
 	usedSignalDecl               bool // shared `declare ptr @signal` (handler runtime + SIGPIPE ignore)
 	usedSigpipeIgnored           bool // TDD-00214: SIGPIPE ignored once at reactor start
-	usedSignalSigint             bool
-	usedSignalSigterm            bool
 	usedErrnoAccessor            bool
 	usedCryptoCheck              bool
 	usedCryptoDigest             bool
@@ -798,29 +740,11 @@ type Emitter struct {
 	usedCryptoJwkMapSet          bool
 	usedCryptoDerive             bool
 	usedStrerror                 bool
-	usedFsMkdir                  bool
-	usedFsMkdirP                 bool
 	usedUnsetenv                 bool
 	usedSymbolRegistry           bool
 	usedFetchHeadersMap          bool
 	usedXHRHeadersAll            bool
-	usedFsStat                   bool
-	usedFsLstat                  bool
-	usedFsPathOps                bool
-	usedFsRm                     bool
-	usedFsFdOps                  bool
-	usedFsFchmod                 bool // __kml_fs_fchmod (fs.fchmodSync)
-	usedFsStatfs                 bool // __kml_fs_statfs_checked (fs.statfsSync)
-	usedUmask                    bool // umask decl (process.umask)
 	usedOpenDecl                 bool
-	usedFsUtimes                 bool
-	usedFsRmdir                  bool
-	usedFsRename                 bool
-	usedFsReaddir                bool
-	usedFsReaddirRecursive       bool
-	usedFsReaddirRecursiveTypes  bool
-	usedFsCopyExclGuard          bool
-	usedFsFutimes                bool
 	usedConsoleGroupDepth        bool
 	usedConsoleTimer             bool
 	usedConsoleCountMap          bool
@@ -837,51 +761,6 @@ type Emitter struct {
 	// (The bespoke `http.listen` stays blocking: its `{workers}` cluster fork
 	// relies on children never running post-listen top-level code.)
 	usedHTTPListen bool
-	// usedEventSource marks whether the *program* actually constructs an
-	// EventSource — distinct from ensureEventSourceRuntime's own internal
-	// idempotency flag (usedEventSourceRuntime, runtime_eventsource.go),
-	// which is set unconditionally by ensureHTTPRuntime regardless of
-	// whether EventSource is ever used (see that function's own doc
-	// comment on why every symbol __kml_event_loop_run's IR references must
-	// always be defined). This one only decides Pass 3's own tail: prefer
-	// the full __kml_event_loop_run() over the narrower __kml_timer_drain()
-	// so a plain top-level `new EventSource(...)` with no http.listen still
-	// gets its transfer driven and the process stays alive for it.
-	usedEventSource bool
-	// usedEventSourceRuntime is ensureEventSourceRuntime's own internal
-	// idempotency guard (runtime_eventsource.go) — separate from
-	// usedEventSource above, since this one is also set unconditionally by
-	// ensureHTTPRuntime regardless of whether the program ever constructs
-	// an EventSource.
-	usedEventSourceRuntime bool
-	// WebSocket runtime helpers (TDD-00039 Stage 0) — no AST/emit_* hook
-	// exists yet, these are only ever invoked directly by
-	// codegen/llvm's own internal tests until Stage 1/3 wire them up to
-	// http.listen({ws})/new WebSocket(url). usedWSFshl32 guards the shared
-	// llvm.fshl.i32 intrinsic declaration (SHA-1's rotates); the others
-	// guard the SHA-1 digest, the shared mask/unmask XOR helper (used by
-	// both frame directions, per the TDD's "one loop, not two copies"
-	// decision), and the frame encode/decode pair.
-	usedWSFshl32      bool
-	usedWSSHA1        bool
-	usedWSMaskApply   bool
-	usedWSFrameEncode bool
-	usedWSFrameDecode bool
-	// usedWSClient marks whether the *program* actually constructs a
-	// `new WebSocket(url)` (TDD-00039 Stage 3) — distinct from
-	// usedWSClientRuntime's own internal idempotency flag, mirroring
-	// usedEventSource/usedEventSourceRuntime's own split exactly (see that
-	// pair's doc comment above): this one only decides EmitProgram's Pass 3
-	// tail (prefer the full event-loop drain over the narrower timer-only
-	// one so a plain top-level `new WebSocket(...)` stays alive for its
-	// onmessage/onclose callbacks).
-	usedWSClient bool
-	// usedWSClientRuntime is ensureWSClientRuntime's own internal
-	// idempotency guard (runtime_websocket_client.go) — set unconditionally
-	// by ensureHTTPRuntime regardless of whether the program ever
-	// constructs a WebSocket client, same reasoning usedEventSourceRuntime
-	// documents.
-	usedWSClientRuntime bool
 	// httpListenCallSeen is not a "runtime machinery emitted" flag like the
 	// usedX fields around it — it tracks whether an http.listen(...) call
 	// site has already been compiled, so a second one (only reachable at
@@ -962,52 +841,88 @@ type Emitter struct {
 	// (http2.createSecureServer) so the handle builder records its @__kml_h2_vtbl
 	// in the handle (slot 5) for the extra-listener table's ALPN h2 drive
 	// (TDD-00191 Stage 4). Reset with pendingServerTLSCtx.
-	pendingServerH2           bool
-	usedHTTPThrow             bool
-	usedSplitFirst            bool
-	usedHTTPParseHeaders      bool
-	usedHTTPParseQuery        bool
-	usedHTTPSerializeHeaders  bool
-	usedFiber                 bool
-	usedGeneratorRuntime      bool
-	chunkHdrAdapterEmitted    bool
-	dgramMsgHdrAdapterEmitted bool
-	generatorBodyCtr          int
-	usedMathFuncs             bool
-	usedFptosiSat             bool
-	usedFloatMinMax           bool
-	usedToNumber              bool
-	usedBswap16               bool
-	usedBswap32               bool
-	usedBswap64               bool
-	usedRoundEven             bool
-	usesBufferCodecs          bool
-	usedMemcmp                bool
-	declaredBufferCodecs      bool
-	usedWsSpan                bool
-	usedJsPow                 bool
-	namespaces                map[string]map[string]bool
+	pendingServerH2          bool
+	usedHTTPThrow            bool
+	usedSplitFirst           bool
+	usedHTTPParseHeaders     bool
+	usedHTTPParseQuery       bool
+	usedHTTPSerializeHeaders bool
+	usedFiber                bool
+	usedGeneratorRuntime     bool
+	chunkHdrAdapterEmitted   bool
+	generatorBodyCtr         int
+	usedMathFuncs            bool
+	usedFptosiSat            bool
+	usedFloatMinMax          bool
+	usedToNumber             bool
+	usedBswap16              bool
+	usedBswap32              bool
+	usedBswap64              bool
+	usedRoundEven            bool
+	usesBufferCodecs         bool
+	usedMemcmp               bool
+	declaredBufferCodecs     bool
+	usedWsSpan               bool
+	usedJsPow                bool
+	namespaces               map[string]map[string]bool
 	// nsAliases maps a fully-resolved alias name (dotted for a namespace-
 	// scoped `export import`) to the dotted namespace it targets (ADR-00456).
-	nsAliases              map[string]string
-	usedTaskRuntime        bool
-	usedPromiseRuntime     bool // the promise struct + __kml_task_alloc_promise, without the fiber scheduler (TDD-00084 Part A)
-	usedPromiseSettle      bool // @__kml_promise_settle — bare-promise settle+wake+drain for new Promise(executor) (TDD-00087)
-	usedFetchDriveRunner   bool // @__kml_fetch_drive_run — deferred raw-fetch drive microtask for .then on a fetch
-	usedPromiseAdoptRunner bool // @__kml_promise_adopt_runner — thenable adoption for resolve(aPromise) (TDD-00091)
-	usedAwaitTimerDrive    bool // a lightweight await references @__kml_timer_fire_next (TDD-00087)
-	usedMicrotasks         bool
-	thenCtr                int // unique-name counter for .then/.catch/.finally reaction runners
-	fsCbCtr                int // unique-name counter for pooled fs callback-form reaction runners
-	newPromiseCtr          int // unique-name counter for new Promise(executor) resolve/reject thunks (TDD-00087)
-	usedCurrentTaskGlobal  bool
-	usedAsyncLocalStorage  bool
-	usedAsyncCtxAccessors  bool
-	// programUsesALS is a whole-program pre-scan result (set in EmitProgram
-	// before Pass 2): true when the program constructs an AsyncLocalStorage
-	// anywhere, so timer callbacks are wrapped to carry the async context across
-	// the schedule→fire boundary (TDD-00168 Stage 3). Distinct from
-	// usedAsyncLocalStorage (the emit-time ensure guard).
+	nsAliases            map[string]string
+	usedTaskRuntime      bool
+	usedPromiseRuntime   bool              // the promise struct + __kml_task_alloc_promise, without the fiber scheduler (TDD-00084 Part A)
+	usedUnhandledRuntime bool              // unhandled-rejection tracking (emit_unhandled.go)
+	globalLinks          map[string]string // TDD-00232: a linked global's name -> its module's class
+	usedURLWSDefaultPort bool              // @__kml_url_ws_default_port emitted (emit_url.go)
+	recordFns            map[string]bool   // record-view read/write routines emitted (emit_record_view.go)
+	recordFnList         []recordFn        // their bodies, written at finalize
+	usedObjExtensible    bool              // @__kml_obj_extensible is called (emitObjExtensibleFinalize)
+	usedStrFromCodes     bool
+	usedElemKindWidth    bool            // @__kml_elem_kind_width (emit_fetch_body.go)
+	ambientMiss          map[string]bool // names with no usable builtin-declaration interface (emit_ambient.go)
+	usedObjExtra         bool            // @__kml_obj_has_extra and its hooks are called (emitObjExtraFinalize)
+	objExtraEmitted      bool
+	errorGetKeyDone      bool
+	dynGetInline         bool              // emitting a dynGetHelper body
+	dynGetHelpers        map[string]string // property name → its dynamic-get routine
+	dynSetInline         bool
+	dynSetHelpers        map[string]string
+	extraTypes           []Type // static types whose added properties a whole-object operation reads
+	usedShapeKeysArray   bool
+	// Host handles boxed into `any` (emit_hostbox.go).
+	hostLayouts             []hostLayout
+	hostRendered            int
+	hostIterated            int
+	hostIterUsed            bool
+	hostIterFns             map[int64]string
+	classRefs               map[string]string // class → its constructor reference payload (emit_classref.go)
+	declaredTime            bool              // libc time(3) declared (ensureTime)
+	declaredClassRefInspect bool              // __kml_classref_inspect_at declared
+	usedDynInstanceof       bool
+	usedCtorKind            bool
+	usedHostBox             bool
+	usedPromiseBox          bool                 // a promise was boxed (emitPromiseInspectHook)
+	declaredAnyArrView      bool                 // __kml_anyarr_view/sync declared (emitDynArrayMethodCall)
+	anyArrElemFns           map[string][2]string // KJ_BOXED routines by element type (anyArrayElemRoutines)
+	typeOnlyGenerics        map[string]bool      // classes whose type parameters codegen erased (eraseTypeOnlyGenerics)
+	hostInstanceofUsed      map[string]bool
+	respCollectDefined      bool // @__kml_resp_collect defined (emit_response_new.go)
+	respCollectCalled       bool // a body method calls @__kml_resp_collect
+	usedZeroCell            bool // @__kml_zero_cell (emit_fetch.go)
+	usedStrcasecmp          bool
+	combinatorCtr           int  // Promise combinator runners (emit_promise_combinators.go)
+	usedPromiseSettle       bool // @__kml_promise_settle — bare-promise settle+wake+drain for new Promise(executor) (TDD-00087)
+	usedFetchDriveRunner    bool // @__kml_fetch_drive_run — deferred raw-fetch drive microtask for .then on a fetch
+	usedPromiseAdoptRunner  bool // @__kml_promise_adopt_runner — thenable adoption for resolve(aPromise) (TDD-00091)
+	usedAwaitTimerDrive     bool // a lightweight await references @__kml_timer_fire_next (TDD-00087)
+	usedMicrotasks          bool
+	thenCtr                 int // unique-name counter for .then/.catch/.finally reaction runners
+	newPromiseCtr           int // unique-name counter for new Promise(executor) resolve/reject thunks (TDD-00087)
+	usedCurrentTaskGlobal   bool
+	usedAsyncCtxAccessors   bool
+	// programUsesALS is set in EmitProgram before Pass 2: true when the
+	// program has async_hooks (lib/node/async_hooks.ts), so timer callbacks
+	// are wrapped to carry the async context across the schedule→fire
+	// boundary (TDD-00168 Stage 3).
 	programUsesALS bool
 	// programUsesFinReg is a whole-program pre-scan result (set in EmitProgram
 	// before Pass 2): true when the program constructs a FinalizationRegistry
@@ -1029,10 +944,8 @@ type Emitter struct {
 	usedStrtodParseFloat    bool
 	usedGroupMapHelpers     bool
 	usedQsort               bool
-	usedSortCmpI64          bool
 	usedSortCmpI64Lex       bool
 	usedSortCmpF64Lex       bool
-	usedSortCmpF64          bool
 	usedSortCmpStr          bool
 	usedSortTrampolineI64   bool
 	usedSortTrampolineF64   bool
@@ -1049,8 +962,12 @@ type Emitter struct {
 	usedMapSvz              bool
 	usedMapAnyHash          bool
 	usedMapClear            bool
+	usedMapIters            bool
+	usedNullRef             bool
+	usedDateLocal           bool
+	declaredDateParseStr    bool
+	declaredRegexGroups     bool
 	usedJSONConcat2         bool
-	usedEventEmitterRuntime bool
 	usedStreamRuntime       bool
 	usedWStreamRuntime      bool
 	usedStreamPipeRuntime   bool
@@ -1064,28 +981,21 @@ type Emitter struct {
 	usedReqBodyStream       bool
 	usedReqBodyDrain        bool
 	usedZlibStreamRuntime   bool
-	usedZlibOneshot         bool
 	usedZlibExterns         bool
-	usedNodeStreamRuntime   bool
 	usedPromiseAddReaction  bool
 	streamSiteCtr           int
-	lowerInvCtr             int // emitLoweredInvoker thunks
-	noopCallbackEmitted     bool
-	usedOSReadProcFile      bool
-	usedOSCpusLinux         bool
-	usedOSCpusDarwin        bool
-	usedGethostname         bool
-	usedSysconf             bool
-	usedSysctlbyname        bool
-	usedMachVM              bool
+	lowerInvCtr             int             // emitLoweredInvoker thunks
+	usedAnyIterCollect      bool            // __kml_any_iter_collect (emit_iter_collect.go)
+	usedZlibNatives         bool            // klainzlib.c compiled into the pool (-DKLAINPOOL_ZLIB)
+	usedFsNatives           bool            // klainfs.c compiled into the pool (-DKLAINPOOL_FS)
+	usedH2Node              bool            // http2src/h2node.c (lib/node/http2.ts's natives)
+	inDynBufferCall         bool            // emitDynBufferMethodCall's non-Buffer branch
+	inDynNumberCall         bool            // emitDynNumberToString's non-number branch
+	topLevelCallables       map[string]bool // top-level function and class names (initRefsCallable)
+	usedAnyArrayLikeCollect bool            // __kml_any_arraylike_collect (emit_iter_collect.go)
 	usedExceptionHelpers    bool
 	usedFrozenSet           bool
 	usedPathNormalize       bool
-	usedPathJoinSegs        bool
-	usedPerfObsRegistry     bool
-	usedPathDirname         bool
-	usedPathBasename        bool
-	usedPathExtname         bool
 	usedRegexCompile        bool
 	usedRegexCompileContext bool
 	usedRegexParseFlags     bool
@@ -1172,13 +1082,6 @@ type Emitter struct {
 	// accumulated response off `res` (a ServerResponseType object) — otherwise
 	// identical to the bespoke return-object path.
 	httpResMode bool
-	// httpStreamMode marks the dispatcher as the http2 core-streams shape:
-	// handler(stream, headers) with the response read off the stream object
-	// (TDD-00139 Stage 2).
-	httpStreamMode bool
-	// httpStreamHandlerArity: 2 or 3 — whether the stream listener declares
-	// Node's optional third `flags` parameter.
-	httpStreamHandlerArity int
 	// httpHandlerNode pins WHICH arrow/function-expression is the handler:
 	// the bare-slot model applies to it alone — an async callback nested
 	// inside the handler (e.g. a streaming body's pull, TDD-00097 Stage 5)
@@ -1192,6 +1095,7 @@ type Emitter struct {
 func NewEmitter() *Emitter {
 	e := &Emitter{
 		fnDecls:                 make(map[string]bool),
+		refiningCall:            make(map[*ast.CallExpression]bool),
 		strConsts:               make(map[string]string),
 		moduleGlobals:           make(map[string]Symbol),
 		promotedGlobalDecls:     make(map[*ast.VarDeclaration]bool),
@@ -1213,10 +1117,10 @@ func NewEmitter() *Emitter {
 		genericTypeAliases:      make(map[string]*ast.TypeAliasDeclaration),
 		genericClasses:          make(map[string]*ast.ClassDeclaration),
 		generators:              make(map[string]*GeneratorInfo),
-		eventsOnHelpers:         make(map[string]*eventsOnHelper),
 		alsBindTramps:           make(map[string]bool),
 		asyncGenStepFns:         make(map[string]string),
 		fnValueTrampolines:      make(map[string]bool),
+		intrinsicSigs:           make(map[string]FuncSig),
 		fnValueHeaders:          make(map[string]bool),
 		testTrampolines:         make(map[string]bool),
 		currentRetType:          TypeI32, // main returns i32
@@ -1267,14 +1171,6 @@ func (e *Emitter) Toolchain() Toolchain { return Toolchain{Target: e.opts.Target
 // site (mainly tests/compiler_test.go) keeps working unchanged.
 func (e *Emitter) SetMemMode(mode string) { e.opts.MemMode = mode }
 
-// SetDynamicImportMode selects the dynamic import() backend: "eager" (default,
-// TDD-00055) or "lazy" (shared-library islands, TDD-00056).
-func (e *Emitter) SetDynamicImportMode(mode string) { e.opts.DynamicImport = mode }
-
-// UsesDynamicImport reports whether the emitted program contained a dynamic
-// import() — for main.go's post-emit build steps.
-func (e *Emitter) UsesDynamicImport() bool { return e.usesDynamicImport }
-
 // SetIslandHash marks this compile as a shared-library island (TDD-00056) with
 // the given stable hash; EmitProgram then appends the island's run-once init
 // and per-export accessor functions (`__kml_dynmod_<hash>_*`) and the output is
@@ -1298,11 +1194,6 @@ func (e *Emitter) isAutoMode() bool { return e.opts.MemMode == "auto" }
 // sites (tests) keep the default without threading a mode through.
 func (e *Emitter) SetRegexMode(mode string) { e.opts.Regex = mode }
 
-// SetBigIntBackend selects the compile-wide bigint backend library (TDD-00074),
-// called by main.go from the -bigint flag. "" resolves to the default,
-// libtommath (public domain); "gmp" opts into GMP.
-func (e *Emitter) SetBigIntBackend(mode string) { e.opts.BigInt = mode }
-
 // BigIntBackend returns the resolved backend name ("" → the libtommath default).
 func (e *Emitter) BigIntBackend() string {
 	if e.opts.BigInt == "" {
@@ -1324,13 +1215,6 @@ func (e *Emitter) CryptoBackend() string {
 	}
 	return e.opts.Crypto
 }
-
-// SetWebviewBackend selects the compile-wide webview backend (TDD-00144),
-// called by main.go from the -webview flag. "" resolves to the default,
-// system (WebKitGTK/WKWebView/WebView2, per-platform); cef/qt/sailfish are
-// the opt-in Chromium/Gecko backends. Only system is built today; the others
-// are recognized so the flag validates, and rejected cleanly at link time.
-func (e *Emitter) SetWebviewBackend(mode string) { e.opts.Webview = mode }
 
 // WebviewBackend returns the resolved backend name ("" → the system default).
 func (e *Emitter) WebviewBackend() string {
@@ -1356,6 +1240,25 @@ func (e *Emitter) UsesBigInt() bool { return e.usesBigInt }
 // — main.go adds -pthread to the clang invocation when it does.
 func (e *Emitter) UsesWorkers() bool { return e.usedWorkerRuntime }
 
+// exitCall is the call that ends the program with code (an i32 operand): on
+// a Worker's thread it ends only that worker (runtime_worker.go).
+func (e *Emitter) exitCall(code string) string {
+	if e.hasWorkers {
+		return "call void @__kml_thread_exit(i32 " + code + ")"
+	}
+	return "call void @exit(i32 " + code + ")"
+}
+
+// isolateTLS qualifies a global holding program state: a program with
+// Workers gives each thread its own copy, as each Node Worker is its own
+// isolate that evaluates its modules afresh.
+func (e *Emitter) isolateTLS() string {
+	if e.hasWorkers {
+		return "thread_local "
+	}
+	return ""
+}
+
 // UsesFFIDl reports whether the program uses node:ffi (dlopen/dlsym, TDD-00164).
 // main.go adds the FFI link flags (see FFILinkFlags) when it does.
 func (e *Emitter) UsesFFIDl() bool { return e.usedFFIDl }
@@ -1371,9 +1274,6 @@ func (e *Emitter) SetCompatMode(mode string) { e.opts.Compat = mode }
 // The CLI only sets it under the strict lane (ignored with a warning under
 // -compat=js), so noAnyMode need not re-check the mode.
 func (e *Emitter) SetNoAny(on bool) { e.opts.NoAny = on }
-
-// noAnyMode reports whether the any/unknown ban is active.
-func (e *Emitter) noAnyMode() bool { return e.opts.NoAny }
 
 // SetOptimizeMemory toggles TDD-00134's allocation optimizations (Stage 1:
 // escape analysis → stack allocation of non-escaping object literals).
@@ -1810,7 +1710,7 @@ func (e *Emitter) resolveValueType(name string) (Type, bool) {
 			if i := strings.LastIndex(declName, "__kml_mod"); i > 0 {
 				declName = declName[:i]
 			}
-			if declName != name {
+			if declName != name && vd.Name != name {
 				return Type{}, false
 			}
 			if vd.TypeAnnot != nil {
@@ -1840,7 +1740,7 @@ func (e *Emitter) resolveValueType(name string) (Type, bool) {
 				}
 				if declName == name && len(d.TypeParams) == 0 {
 					sig := e.buildFunctionSig(d)
-					return funcTypeFromSig(sig), true
+					return funcValueType(sig), true
 				}
 			}
 		}
@@ -1852,7 +1752,7 @@ func (e *Emitter) resolveValueType(name string) (Type, bool) {
 		return sym.Ty, true
 	}
 	if _, sig, ok := e.resolveFuncRef(name); ok {
-		return funcTypeFromSig(sig), true
+		return funcValueType(sig), true
 	}
 	return Type{}, false
 }
@@ -1932,6 +1832,16 @@ func (e *Emitter) indexSignatureType(valAnnot *ast.TypeAnnotation) Type {
 
 func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	t := e.decideAnnotationType(ta)
+	if ta != nil && ta.Nullable && ta.Undefined && ta.HasNull && threeStateEligible(t) {
+		t = withNullAndUndef(t)
+	}
+	// `Map<K, V> | undefined`, `Set<T> | null`, `T | undefined` for an object
+	// T: a possibly-absent collection or object is its null pointer (the
+	// Map/Set arms and a type parameter's substitution build the type alone).
+	if ta != nil && ta.Nullable && (t.IsMap || t.IsSet || t.IsObject || t.IsClass) && t.IR == "ptr" && !t.IsArray && !t.Nullable {
+		t.Nullable = true
+		t.IsUndefined = ta.Undefined
+	}
 	if e.shadowOracle != nil && ta != nil {
 		e.shadowAnnotationType(ta, t)
 	}
@@ -1946,6 +1856,39 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 	}
 	if e.opts.NoAny {
 		e.checkNoAnyAnnotation(ta)
+	}
+	// A global a global module implements (TDD-00232) names the module's
+	// class; its declaration's type arguments are erased (`CustomEvent<T>`).
+	if base := strings.TrimRight(ta.Name, "[]"); base != "" {
+		if m, ok := e.globalLinks[base]; ok && !e.userTypeName(base) {
+			linked := *ta
+			linked.Name = m + ta.Name[len(base):]
+			linked.TypeArgs = nil
+			return e.decideAnnotationType(&linked)
+		}
+	}
+	// An iteration-protocol interface outside a generator's own signature
+	// (`it: AsyncIterable<T>`, `(): Generator<T>`) is any object with the
+	// protocol's members — a generator of any shape, a class, a user object:
+	// held as a dynamic value and driven by the run-time protocol (TDD-00230
+	// phase 5). A generator declaration's own return annotation is read by
+	// generatorElemAnnotation instead.
+	if generatorWrapperNames[ta.Name] && len(ta.UnionMembers) == 0 && len(ta.TupleElems) == 0 {
+		if _, own := e.genericInterfaces[ta.Name]; !own {
+			if _, own := e.interfaces[ta.Name]; !own {
+				return TypeAny
+			}
+		}
+	}
+	// TypeScript's `Function` (the interface of every callable): any
+	// function, held as a dynamic value, so it calls through the dynamic path
+	// and keeps its identity, `name` and own properties.
+	if base := strings.TrimRight(ta.Name, "[]"); base == "Function" && len(ta.UnionMembers) == 0 && len(ta.TypeArgs) == 0 && ta.ElemType == nil && !e.userTypeName("Function") {
+		t := TypeAny
+		for i := 0; i < (len(ta.Name)-len(base))/2; i++ {
+			t = ArrayOf(t)
+		}
+		return t
 	}
 	// @types/node's `NodeJS.Dict<T>` / `NodeJS.ReadOnlyDict<T>` (`{ [key:
 	// string]: T | undefined }`, the qualifier dropped): a string-keyed
@@ -2059,6 +2002,15 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 			members[i] = e.resolveType(m)
 		}
 		members = mergeByteArrayMembers(members)
+		// A member that is itself unconstrained (`object`, `any`, `unknown`)
+		// makes the union the plain NaN box: any value may be in it.
+		for _, m := range members {
+			if isUnconstrainedDynamic(m) && !m.IsDynamicObject && !m.IsNull && !m.IsUndefined {
+				any := TypeAny
+				any.Nullable = ta.Nullable
+				return any
+			}
+		}
 		// Members of one primitive kind (`'dir' | 'file'`, `1 | 2`) are that
 		// primitive: a union of one representation collapses to it.
 		if kind := primitiveAnnotKind(ta.UnionMembers[0]); kind != "" && len(members) == len(ta.UnionMembers) {
@@ -2136,6 +2088,11 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 			}
 			ft.FuncParamOptional = opt
 		}
+		// `(() => void) | undefined`: a function that may be absent (a null
+		// closure pointer).
+		if ta.Nullable {
+			ft.Nullable, ft.IsUndefined = true, ta.Undefined
+		}
 		return ft
 	}
 	// Promise<T>/Map<K,V>/Set<T> must be checked before the generic ElemType
@@ -2163,12 +2120,67 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 			keyTy = e.resolveType(ta.KeyType)
 		}
 		valTy := e.resolveType(ta.ElemType)
-		return MapType(keyTy, valTy)
+		return MapType(keyTy, forceAnyMapVal(keyTy, valTy))
+	}
+	// An instance of a generic class, `Box<number>`: the type its
+	// `new Box<number>(…)` has.
+	if genDecl, ok := e.genericClasses[ta.Name]; ok {
+		explicit := ta.TypeArgs
+		if len(explicit) == 0 && ta.ElemType != nil {
+			explicit = []*ast.TypeAnnotation{ta.ElemType}
+		}
+		if targs, ok := classTypeArgs(genDecl, explicit); ok {
+			if ty, err := e.genericClassInstanceType(genDecl, e.buildTypeArgSubs(genDecl.TypeParams, targs)); err == nil {
+				return ty
+			}
+		}
 	}
 	// A registered generic interface (TDD-00010 V1 / TDD-00037), e.g.
 	// Box<number> or Box<number, string> — must also be checked before the
 	// generic ElemType fallback below, same reasoning as
-	// Promise/Map/Set/EventEmitter above.
+	// Promise/Map/Set above.
+	if genDecl, ok := e.genericInterfaces[ta.Name]; ok && len(ta.TypeArgs) < len(genDecl.TypeParams) {
+		// Type arguments left out take the parameters' defaults (`A` is
+		// `A<any>` for `interface A<T = any>`); one without a default is any.
+		args := append([]*ast.TypeAnnotation{}, ta.TypeArgs...)
+		for i := len(args); i < len(genDecl.TypeParams); i++ {
+			var def *ast.TypeAnnotation
+			if i < len(genDecl.TypeParameters) && genDecl.TypeParameters[i].Default != nil {
+				if conv, err := ast.TypeAnnotationOf(genDecl.TypeParameters[i].Default, ""); err == nil {
+					def = conv
+				}
+			}
+			if def == nil {
+				def = &ast.TypeAnnotation{Name: "any"}
+			}
+			args = append(args, def)
+		}
+		filled := *ta
+		filled.TypeArgs = args
+		ta = &filled
+	}
+	if len(ta.TypeArgs) > 0 {
+		e.registerAmbientGeneric(ta.Name)
+	}
+	if aliasDecl, ok := e.genericTypeAliases[ta.Name]; ok && len(ta.TypeArgs) < len(aliasDecl.TypeParams) {
+		// The same for a generic alias (`type A<T = string> = T[]`).
+		args := append([]*ast.TypeAnnotation{}, ta.TypeArgs...)
+		for i := len(args); i < len(aliasDecl.TypeParams); i++ {
+			var def *ast.TypeAnnotation
+			if i < len(aliasDecl.TypeParameters) && aliasDecl.TypeParameters[i].Default != nil {
+				if conv, err := ast.TypeAnnotationOf(aliasDecl.TypeParameters[i].Default, ""); err == nil {
+					def = conv
+				}
+			}
+			if def == nil {
+				def = &ast.TypeAnnotation{Name: "any"}
+			}
+			args = append(args, def)
+		}
+		filled := *ta
+		filled.TypeArgs = args
+		ta = &filled
+	}
 	if genDecl, ok := e.genericInterfaces[ta.Name]; ok && len(ta.TypeArgs) > 0 {
 		// Depth cap for infinitely expanding generics (`interface Foo<T> {
 		// x: Foo<Foo<T>> }`) — TS handles these lazily, this eager
@@ -2246,17 +2258,6 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 		}
 		return WeakRefType(referentTy)
 	}
-	// MessagePort<T> (TDD-00099) — the worker-side annotation for a port
-	// received through workerData/postMessage.
-	if ta.Name == "MessagePort" {
-		if ta.ElemType != nil {
-			return MessagePortType(e.resolveType(ta.ElemType))
-		}
-		if len(ta.TypeArgs) > 0 {
-			return MessagePortType(e.resolveType(ta.TypeArgs[0]))
-		}
-		return MessagePortType(TypeI64)
-	}
 	// klain:sync `Channel<T>` as an annotation — so a channel passed as a
 	// function parameter or stored in a typed field still dispatches
 	// .send()/.receive()/.close() and `for..of` (all keyed on
@@ -2270,12 +2271,6 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 			return ChannelType(e.resolveType(ta.TypeArgs[0]))
 		}
 		return ChannelType(TypeI64)
-	}
-	if ta.Name == "EventEmitter" {
-		if ta.ElemType != nil {
-			return EventEmitterType(e.resolveEventEmitterPayloadType(ta.ElemType))
-		}
-		return EventEmitterType(TypeAny) // @types/node's DefaultEventMap
 	}
 	// ReadableStream<T> and its reader/controller (TDD-00097 Stage 1). A bare
 	// `ReadableStream` annotation (no type arg) defaults its chunk to number,
@@ -2332,7 +2327,11 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 		return ty
 	}
 	if ta.ElemType != nil {
-		return ArrayOf(e.resolveType(ta.ElemType))
+		arr := ArrayOf(e.resolveType(ta.ElemType))
+		if ta.Nullable { // `(() => void)[] | null`, `Array<T> | undefined`
+			arr.Nullable, arr.IsUndefined = true, ta.Undefined
+		}
+		return arr
 	}
 	// A string index signature `{ [k: string]: V }` (TDD-00130) resolves to the
 	// existing map-backed dynamic-object representation (TDD-00012), giving it
@@ -2349,9 +2348,9 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 			// pointer keeps null-as-absent — either way the calloc-zeroed
 			// slot of an omitted field reads back as a real absent value.
 			if af.Optional {
-				fty = undefinedableElem(fty)
+				fty = optionalFieldType(fty)
 			}
-			fields[i] = Field{Name: af.Name, Ty: fty}
+			fields[i] = Field{Name: af.Name, Ty: fty, Optional: af.Optional}
 		}
 		ty := ObjectType(fields)
 		if ta.Nullable { // `{ … } | null` / `| undefined` (ADR-01063)
@@ -2422,6 +2421,18 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 		return ty
 	}
 	ty := ResolveTypeName(ta.Name)
+	// A name no builtin table knows may be an interface the builtin
+	// declarations declare (`RequestInit`): its object type.
+	if name != "int64" && len(ta.Qualifier) == 0 && reflect.DeepEqual(ty, TypeI64) {
+		if at, ok := e.ambientInterfaceType(name); ok {
+			ty = at
+		}
+	}
+	// A qualified builtin name no table knows (`NodeJS.ExitListener`): a box,
+	// which holds whatever it names, rather than the numeric default.
+	if len(ta.Qualifier) > 0 && reflect.DeepEqual(ty, TypeI64) {
+		ty = TypeAny
+	}
 	if ta.Nullable {
 		ty.Nullable = true
 		ty.IsUndefined = ta.Undefined
@@ -2447,6 +2458,9 @@ func nodeJSNamespaceType(ta *ast.TypeAnnotation) (Type, bool) {
 		return TypeI64, true // the timer's id (see setTimeout's inferred type)
 	case "ErrnoException":
 		return errorObjType, true // an Error with its code, errno, syscall and path
+	case "ArrayBufferView", "TypedArray":
+		// Any TypedArray or a DataView: several representations, boxed.
+		return TypeAny, true
 	}
 	return Type{}, false
 }
@@ -2532,6 +2546,10 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	}
 	e.libStmts = prog.LibStatements
 	e.callableClasses = prog.CallableClasses
+	e.globalLinks = prog.GlobalLinks
+	if e.compatJS() {
+		jsThisFunctionsAsBindings(prog, e.libStmts)
+	}
 	// An interface member shape this code generation cannot represent (a
 	// call signature beside properties, an index signature keyed by a type
 	// alias, …) is valid TypeScript the checker reads; it is rejected here.
@@ -2577,6 +2595,7 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// mangled declarations; the member table is what use sites resolve
 	// through (emitCall/emitMember/inferExprType).
 	e.namespaces = prog.Namespaces
+	e.libExports = prog.LibExports
 	e.registerNSAliases(prog.NSAliases)
 
 	// TDD-00098: known before any emission (the resolver recorded worker
@@ -2606,17 +2625,13 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	if programUsesHTTPS1Server(prog) {
 		e.ensureHTTPS1Server()
 	}
-	// TDD-00191 Stage 4: same pre-scan for an h2-over-TLS server, so the
-	// extra-listener accept path is emitted with its ALPN h2 drive.
-	if programUsesH2TLSServer(prog) {
-		e.ensureH2TLSServer()
-	}
 
-	// TDD-00168 Stage 3: does the program construct an AsyncLocalStorage
-	// anywhere? A pre-scan (before Pass 2) so a timer callback scheduled inside
-	// an `als.run(...)` — possibly from a function body emitted before the
-	// top-level construction — is wrapped to carry the async context to its fire.
-	e.programUsesALS = programUsesAsyncLocalStorage(prog)
+	// TDD-00168 Stage 3: does the program have async_hooks? Decided before
+	// Pass 2 so a timer callback scheduled inside an `als.run(...)` — possibly
+	// from a function body emitted before the store's construction — is
+	// wrapped to carry the async context to its fire.
+	_, hasALS := e.libExports["async_hooks:AsyncLocalStorage"]
+	e.programUsesALS = hasALS
 
 	// TDD-00163 Stage 2: does the program construct a FinalizationRegistry
 	// anywhere? A pre-scan for the same emission-order reason as ALS above —
@@ -2629,10 +2644,8 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// dispatcher emits the WebSocket handshake + frame loop (TLS-aware), guarded
 	// at runtime by the connection-handler global a `new WebSocketServer(
 	// {server}).on('connection', …)` populates.
-	e.usedKlainWS = prog.UsesKlainWS
 
 	// TDD-00164: node:ffi. Gates DynamicLibrary constructor recognition.
-	e.usedNodeFFI = prog.UsesNodeFFI
 
 	// TDD-00143 Stage 2: if the program imports klain:sync, the safepoint pass
 	// emits cooperative preempt checks (function entry + loop back-edges). Force
@@ -2659,6 +2672,7 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// ptr type rather than the i64 unknown-name default (which silently
 	// mis-stored the instance pointer). The full class type is filled in by
 	// registerClasses below; field access canonicalizes the placeholder to it.
+	e.eraseTypeOnlyGenerics(prog)
 	e.registerClassNamePlaceholders(prog)
 
 	// Pass 0: register interfaces and type aliases so they're available to function signatures.
@@ -2984,19 +2998,7 @@ entry:
 		e.ensureHTTPRuntime() // the island's own loop, turned by its poll export
 		e.ensureLoopTurn()    // @__kml_loop_oneshot / _nowait / _idle
 	}
-	// If the program ever constructed an EventSource, prefer the full
-	// __kml_event_loop_run() over the narrower __kml_timer_drain() below —
-	// it already generalizes plain timer draining (see its own doc comment
-	// in runtime_http.go) while also driving libcurl's multi-interface and
-	// the EventSource scan every iteration, keeping the process alive for
-	// as long as any EventSource is still open (TDD-00038 Stage 0). If the
-	// program also called http.listen(...), that call's own inline
-	// __kml_event_loop_run() invocation already terminates this block
-	// (never returns), making this one dead code — same "skipped via
-	// emitInstr's own dead-code check" reasoning the usedTimers branch below
-	// already relies on.
-	//
-	// Otherwise, if the program ever called setTimeout/setInterval/
+	// If the program ever called setTimeout/setInterval/
 	// clearTimeout/clearInterval, drain any still-pending timers after the
 	// top-level script finishes — the same place real Node keeps the
 	// process alive for. Skipped entirely (via emitInstr's own dead-code
@@ -3013,13 +3015,19 @@ entry:
 		}
 		e.emitInstr("call void @__kml_drain_microtasks()")
 	}
-	// TDD-00084 Part B: a program mixing coroutine tasks with timers or
-	// EventSource/WebSocket drives all of them under the single task-aware event
+	// The structural view's routines (TDD-00233) may use any runtime
+	// (exceptions, the dynamic object model): written before the finalize
+	// steps that decide which runtimes are linked.
+	e.emitRecordFnsFinalize()
+	e.emitObjExtraFinalize()
+
+	// TDD-00084 Part B: a program mixing coroutine tasks with timers
+	// drives all of them under the single task-aware event
 	// loop (__kml_event_loop_run). A pure-task program (fetch only) keeps the
 	// lighter task_run_all drive; a pure-timer program keeps timer_drain.
 	// TDD-00098: a program that spawned workers must keep driving the full
 	// loop — it is what delivers worker messages and joins exited workers.
-	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedFsWatchRuntime || e.usedThreadPool || e.usedReadlineRuntime || e.usedStdinRuntime || e.usedNetRuntime || e.usedDgramRuntime || e.usedIPCChildRuntime || e.usedHTTPListen
+	useFullLoop := (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChildProcRuntime || e.usedFsWatchRuntime || e.usedThreadPool || e.usedNetRuntime || e.usedIPCChildRuntime || e.usedHTTPListen
 	// TDD-00223: anything that waits from the main stack takes turns of the real
 	// loop, and a program with coroutine tasks or async fetch sleeps in its
 	// select() instead of spinning a private scheduler drive.
@@ -3060,6 +3068,11 @@ entry:
 	// TDD-00084 Part B: if the event loop was emitted but the task/microtask
 	// runtimes were not, define no-op stubs for the symbols it references.
 	e.emitLoopTaskStubs()
+	// The crypto backend's pooled natives reference the pool's job entry; a
+	// program using only crypto.subtle never calls them.
+	if e.usesCrypto && !e.usedThreadPool {
+		e.emitGlobal("define void @__kml_pool_job(ptr %work, ptr %job, ptr %inv, ptr %clo) {\nentry:\n  ret void\n}")
+	}
 	e.emitCPRuntimeStubs()
 	// TDD-00109: the net runtime's read/write/close branch on a socket's SSL*
 	// and call the __kml_tls_* ABI. Declare it (libssl provides it via tlssrc/
@@ -3070,7 +3083,7 @@ entry:
 	// @__kml_worker_uncaught unconditionally, and the task runtime's swap sites
 	// reference @__kml_worker_abort_check; no-op stubs without workers.
 	if e.usedExceptionHelpers && !e.usedWorkerRuntime {
-		e.emitGlobal("define void @__kml_worker_uncaught(ptr %msg, ptr %err) {\nentry:\n  ret void\n}")
+		e.emitGlobal("define void @__kml_worker_uncaught(i8 %tag, i64 %pay) {\nentry:\n  ret void\n}")
 	}
 	if e.usedTaskRuntime && !e.usedWorkerRuntime {
 		e.emitGlobal("define void @__kml_worker_abort_check() {\nentry:\n  ret void\n}")
@@ -3120,18 +3133,12 @@ done:
 	if (e.usedFetch || e.usedFetchAsync) && !e.usedFetchBodyStream {
 		e.emitGlobal("define i64 @__kml_fetch_body_write(ptr %p, ptr %c, i64 %t) {\n  ret i64 0\n}")
 		e.emitGlobal("define void @__kml_fetch_body_on_done(ptr %p) {\n  ret void\n}")
+		e.emitGlobal("define void @__kml_fetch_body_abort(ptr %p, ptr %e) {\n  ret void\n}")
 	}
 	// The lazy Response-body-promise drain hook (TDD-00186), referenced by the
 	// curl drain; a no-op stub unless a body accessor built one.
 	if (e.usedFetch || e.usedFetchAsync) && !e.usedFetchBodyProm {
 		e.emitGlobal("define void @__kml_fetch_bodyprom_on_done(ptr %p) {\n  ret void\n}")
-	}
-	// cluster (TDD-00105): the primary blocks until every forked worker exits,
-	// keeping it alive while workers serve (a worker's own table is empty, so
-	// this is a no-op there — and a worker is normally still inside its event
-	// loop and never reaches here anyway).
-	if e.usedClusterRuntime {
-		e.emitInstr("call void @__kml_cluster_wait_all()")
 	}
 	// The process-lifecycle runtime (ADR-00334) is emitted whenever exceptions
 	// (whose uncaught path calls the hooks) or any process.on('exit')/
@@ -3145,22 +3152,44 @@ done:
 		ec := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_process_exit_code, align 8", ec))
 		e.emitInstr(fmt.Sprintf("call void @__kml_run_exit_handlers(i64 %s)", ec))
+		// An 'exit' listener may set process.exitCode.
+		ecAfter := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_process_exit_code, align 8", ecAfter))
 		ec32 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", ec32, ec))
+		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", ec32, ecAfter))
 		e.emitTerminator(fmt.Sprintf("ret i32 %s", ec32))
 	} else {
 		e.emitTerminator("ret i32 0")
 	}
 
-	// node:ffi Stage C (TDD-00164): the generic callback-unregister definition
-	// spans every wrapper family the whole program emitted, so it can only be
-	// defined now.
-	e.emitFFICbFinalize()
+	// The unhandled-rejection report (or the checkpoint's no-op).
+	e.emitResponseCollectFinalize()
+
+	// The layout table (TDD-00230 phase 5) spans every class and object layout
+	// the program built; its method adapters register function metadata.
+	e.emitRecordFnsFinalize() // any a finalize step requested since
+	// Before the shape table: boxing a class's static object registers its
+	// layout.
+	e.emitClassRefFinalize()
+	if e.usedDynJSONC {
+		e.ensureShapeRuntime() // dynjson.c reads static objects' rows (emitObjHooksFinalize)
+	}
+	e.emitHostInspectRoutines()
+	e.emitShapeFinalize()
+	e.emitRecordFnsFinalize() // the host rows' typed reads may request view routines
+	e.emitHostBoxFinalize()
+	e.emitHostToPrimFinalize()
+	e.emitObjExtraFinalize() // one a finalize routine above first needed
+	// The unhandled-rejection report (or the checkpoint's no-op), after
+	// every routine that can reach a promise has been generated.
+	e.emitUnhandledFinalize()
 
 	// Function-value metadata (TDD-00229): the code-pointer table spans every
 	// function the program emitted, so it is defined last.
 	e.emitFnMetaFinalize()
 	e.emitBoxedBigIntHooksFinalize()
+	e.emitObjHooksFinalize()
+	e.emitObjExtensibleFinalize()
 
 	// Line-buffer stdout at startup (ADR-00867). C stdio full-buffers a stream
 	// that is not a TTY, so `console.log`/`printf` to a pipe or file withholds
@@ -3190,6 +3219,8 @@ done:
 		// its default MSVC triple and warns on every compile. Linux/macOS keep
 		// relying on clang's host default, so their output is unchanged.
 		out.WriteString("target triple = \"x86_64-w64-windows-gnu\"\n\n")
+	}
+	if e.opts.Target.OS() == "windows" {
 		out.WriteString("declare i32 @_setmode(i32, i32)\n\n")
 	}
 	out.WriteString(e.globals.String())
@@ -3202,6 +3233,7 @@ done:
 	}
 	out.WriteString("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n")
 	out.WriteString(e.allocas.String())
+	out.WriteString(e.workerRegistry)
 	// A binary that reads process.execPath can be spawned as `execPath -p <expr>`
 	// (a Node interpreter re-exec). It cannot honor that; reject such flags up
 	// front so a self-spawning program fails cleanly instead of fork-bombing.
@@ -3222,11 +3254,6 @@ done:
 		for fd := 0; fd < 3; fd++ {
 			fmt.Fprintf(&out, "  call i32 @_setmode(i32 %d, i32 32768)\n", fd)
 		}
-	}
-	// cluster (TDD-00105): a re-exec'd worker carries its id in the environment;
-	// seed @__kml_cluster_worker_id from it before any cluster.isPrimary read.
-	if e.usedClusterRuntime {
-		out.WriteString("  call void @__kml_cluster_seed_id()\n")
 	}
 	if e.usedHTTPClusterSeed {
 		// Windows http.listen({ workers }) re-spawn: seed the worker id from
@@ -3421,10 +3448,11 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 				// `name?: T` widens to `T | undefined` (TDD-00187 Stage 2) —
 				// same rule as resolveType's inline object-shape path.
 				if f.Optional {
-					fty = undefinedableElem(fty)
+					fty = optionalFieldType(fty)
 				}
-				fields[i] = Field{Name: f.Name, Ty: fty}
+				fields[i] = Field{Name: f.Name, Ty: fty, Optional: f.Optional}
 			}
+			fields = e.withMethodFields(fields, s.Methods, e.resolveType)
 			// interface+interface declaration merging (ADR-00479): a second
 			// same-name interface unions its members into the first (first
 			// declaration wins on a member-name collision, mirroring TS's
@@ -3536,8 +3564,8 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 			continue
 		}
 		fits := len(e.interfaceMethodSigs[ie.name]) == 0
-		for _, f := range own.Fields {
-			if _, _, fixed := errorObjType.FieldIndex(f.Name); !fixed || f.Name == "kind" || f.Name == "extra" {
+		for _, f := range own.UserFields() {
+			if _, _, fixed := errorObjType.FieldIndex(f.Name); !fixed || f.Name == ClassTagField || f.Name == "extra" {
 				fits = false
 			}
 		}
@@ -3976,4 +4004,19 @@ func primitiveAnnotKind(ta *ast.TypeAnnotation) string {
 		return "boolean"
 	}
 	return ""
+}
+
+// userTypeName reports whether the program itself declares a class,
+// interface or type alias named name.
+func (e *Emitter) userTypeName(name string) bool {
+	if _, ok := e.classes[name]; ok {
+		return true
+	}
+	if _, ok := e.interfaces[name]; ok {
+		return true
+	}
+	if _, ok := e.genericClasses[name]; ok {
+		return true
+	}
+	return false
 }

@@ -113,9 +113,9 @@ func (e *Emitter) emitCaughtMemberGet(v Value, propName string, pos ast.Pos) (Va
 	// A known Error field (message/name/code/errno/syscall/path) returns that
 	// field's real type (string/number) rather than `any`, so lenient catch
 	// code — `e.message.length`, `"caught " + e.message` — keeps working. A
-	// caught value that is not an Error has no such field: it reads
-	// undefined, so the type is `T | undefined`.
-	if idx, fieldTy, ok := errorObjType.FieldIndex(propName); ok && propName != "kind" {
+	// caught value that is not an Error reads the property dynamically,
+	// undefined unless it holds one of that type: `T | undefined`.
+	if idx, fieldTy, ok := errorObjType.FieldIndex(propName); ok && caughtTypedField(propName) {
 		errL := e.freshLabel("caught.errfld")
 		elseL := e.freshLabel("caught.nofld")
 		mergeL := e.freshLabel("caught.fldmerge")
@@ -132,13 +132,25 @@ func (e *Emitter) emitCaughtMemberGet(v Value, propName string, pos ast.Pos) (Va
 		e.emitLabel(errEnd)
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 		e.emitLabel(elseL)
-		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-		e.emitLabel(mergeL)
 		if fieldTy.IR == "ptr" {
+			// Any other value reads the property as `any` does: a string, or
+			// undefined for anything else.
+			got, gerr := e.emitDynAnyMemberGetNamed(e.emitCaughtToAny(v), e.internString(propName), propName, pos)
+			if gerr != nil {
+				return Value{}, gerr
+			}
+			other := e.emitAnyStringOrNull(got)
+			elseEnd := e.freshLabel("caught.nofldend")
+			e.emitTerminator(fmt.Sprintf("br label %%%s", elseEnd))
+			e.emitLabel(elseEnd)
+			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+			e.emitLabel(mergeL)
 			res := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ null, %%%s ]", res, fld, errEnd, elseL))
+			e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", res, fld, errEnd, other, elseEnd))
 			return Value{Ref: res, Ty: undefinedableElem(fieldTy)}, nil
 		}
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+		e.emitLabel(mergeL)
 		val := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", val, fieldTy.IR, fld, errEnd, zeroRef(fieldTy), elseL))
 		nt := undefinedableElem(fieldTy)
@@ -152,6 +164,15 @@ func (e *Emitter) emitCaughtMemberGet(v Value, propName string, pos ast.Pos) (Va
 	// reads undefined, a static object hits the Stage-6 TypeError (same as any).
 	anyVal := e.emitCaughtToAny(v)
 	return e.emitDynAnyMemberGetNamed(anyVal, e.internString(propName), propName, pos)
+}
+
+// caughtTypedField reports an Error field a caught value's read keeps typed
+// (`message`, `name`: every Error has them as strings). Every other one —
+// `code`, `errno`, … which a program may have set to any value, kept in the
+// error's own-property bag when it does not fit the field — reads through the
+// dynamic path, as any.
+func caughtTypedField(name string) bool {
+	return name == "message" || name == "name"
 }
 
 // emitCaughtInstanceOfError implements `e instanceof Error` / a built-in subtype:
@@ -256,4 +277,21 @@ func (e *Emitter) emitCaughtToString(v Value) (Value, error) {
 	res := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", res, resPtr))
 	return Value{Ref: res, Ty: TypePtr}, nil
+}
+
+// emitAnyStringOrNull is a boxed value's string, or null (undefined) when it
+// holds anything else.
+func (e *Emitter) emitAnyStringOrNull(v Value) string {
+	e.ensureNanBox()
+	tag := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_nb_tag(i64 %s)", tag, v.Ref))
+	pay := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", pay, v.Ref))
+	isStr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isStr, tag, kmlTagString))
+	p := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, pay))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", r, isStr, p))
+	return r
 }

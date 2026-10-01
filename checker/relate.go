@@ -2,6 +2,7 @@ package checker
 
 import (
 	"strconv"
+	"strings"
 
 	"KlainMainLang/binder"
 )
@@ -291,6 +292,17 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 			if len(t.Props) == 0 {
 				return yes
 			}
+			if s.Kind != Function {
+				// An array has its apparent type's members (Array<T>'s): a
+				// required property it lacks is a mismatch.
+				if at := c.apparentType(s); at != nil {
+					for _, tp := range t.Props {
+						if !tp.Optional && at.Prop(tp.Name) == nil {
+							return no
+						}
+					}
+				}
+			}
 			return maybe // an array's or a function's apparent members
 		}
 		if t.Kind == Instance {
@@ -469,15 +481,13 @@ func setOf(names ...string) map[string]bool {
 	return m
 }
 
-// primitiveLacksLibraryMember reports a primitive s going to a library
-// object type t (Buffer, URL, Promise, …) that requires a member s's
-// apparent type does not have in TypeScript: 42 is not a Buffer.
+// primitiveLacksLibraryMember reports a primitive s going to an object type
+// t that requires a member s's apparent type does not have in TypeScript:
+// 42 is not a Buffer, "buffer" is not a `{ encoding: string }`. A
+// symbol-keyed member is left to the apparent type's declaration.
 func (c *Checker) primitiveLacksLibraryMember(s, t *Type) bool {
-	if t.Symbol == nil || !c.inLibrary(t.Symbol.Scope) || t.Kind == Anonymous {
-		return false
-	}
 	at := c.apparentType(s)
-	if at == nil || at.Symbol == nil || at.Symbol == t.Symbol {
+	if at == nil || at.Symbol == nil || (t.Symbol != nil && at.Symbol == t.Symbol) {
 		return false
 	}
 	own := apparentMembers[at.Symbol.Name]
@@ -485,7 +495,7 @@ func (c *Checker) primitiveLacksLibraryMember(s, t *Type) bool {
 		return false
 	}
 	for _, p := range t.Props {
-		if p.Optional || own[p.Name] || apparentMembers["Object"][p.Name] || at.Prop(p.Name) != nil {
+		if p.Optional || own[p.Name] || apparentMembers["Object"][p.Name] || at.Prop(p.Name) != nil || strings.HasPrefix(p.Name, "__@") || strings.HasPrefix(p.Name, "[") {
 			continue
 		}
 		return true

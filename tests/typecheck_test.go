@@ -59,3 +59,32 @@ func TestE2ETypeErrorCLI(t *testing.T) {
 		}
 	}
 }
+
+// A generic class named without type arguments takes its parameters'
+// defaults (`class G<T = any>`: `G` is `G<any>`), not an unchecked type.
+func TestE2ETypeErrorClassDefaultTypeArgs(t *testing.T) {
+	_, err := resolveAndCompile(t, "class G<T = any> { x = 1 }\nfunction f(): G { return new G() }\nconst s: number = f\n")
+	if err == nil || !strings.Contains(err.Error(), "type '() => G<any>' is not assignable to type 'number'") {
+		t.Fatalf("expected TS2322, got %v", err)
+	}
+}
+
+// Two implementations of one function are TS2393; overload signatures
+// followed by one implementation are not.
+func TestE2ETypeErrorDuplicateFunctionImplementation(t *testing.T) {
+	_, err := resolveAndCompile(t, "function f() { return 1 }\nfunction f() { return 2 }\nconsole.log(f())\n")
+	if err == nil || !strings.Contains(err.Error(), "duplicate function implementation of 'f'") {
+		t.Fatalf("expected TS2393, got %v", err)
+	}
+	assertOutput(t, "function g(a: number): number;\nfunction g(a: string): string;\nfunction g(a: any): any { return a }\nconsole.log(g(1))\n", "1")
+}
+
+// `let m: RegExpExecArray | null; m = re.exec(s)` is exec's result type.
+func TestE2ERegExpExecArrayAnnotation(t *testing.T) {
+	assertOutput(t, "let m: RegExpExecArray | null;\nif ((m = /a(b)/.exec('xab')) !== null) console.log(m[1])\nconst k: RegExpMatchArray | null = 'cd'.match(/(d)/)\nconsole.log(k![1])\n", "b\nd")
+}
+
+// A namespace merged into a function declares members the function has.
+func TestE2EFunctionNamespaceMergeMembers(t *testing.T) {
+	assertOutput(t, "function d(km: number): string { return km + 'km' }\nnamespace d { export const unit = 'km'; export function miles(k: number): number { return k * 0.62 } }\nconsole.log(d(5), d.unit, d.miles(10))\n", "5km km 6.2")
+}

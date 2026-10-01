@@ -171,7 +171,7 @@ func (e *Emitter) spillTupleAggregate(aggReg string, tupleTy Type) Value {
 	e.ensureMalloc()
 	structIR := tupleTy.StructIR()
 	heap := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", heap, tupleTy.StructSize()))
+	e.emitObjMallocInto(heap, tupleTy)
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", structIR, aggReg, heap))
 	tupleTy.TupleByVal = false
 	return Value{Ref: heap, Ty: tupleTy}

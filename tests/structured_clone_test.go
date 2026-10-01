@@ -139,3 +139,31 @@ console.log(clone.x)
 		t.Fatal("expected a compile error for structuredClone(class instance) — not yet supported")
 	}
 }
+
+// structuredClone of a value typed any/unknown clones by its run-time shape
+// (lib/node/internal_structured_clone.ts): plain objects, arrays, errors and
+// typed arrays are copied, a cycle clones to the copy, a function throws
+// DataCloneError.
+func TestE2EStructuredCloneAny(t *testing.T) {
+	assertOutputImports(t, `
+const o: any = { a: 1, b: 'x', c: [1, 2, { d: true }], n: null }
+o.self = o
+const c: any = structuredClone(o)
+console.log(c.a, c.b, c.c, c.n, c.self === c, c !== o, c.c !== o.c)
+c.c[2].d = false
+console.log(o.c[2].d)
+try { structuredClone((() => 1) as any) } catch (e: any) { console.log(e.name) }
+const u: unknown = [1, 'two']
+console.log(structuredClone(u))
+const e: any = new RangeError('r')
+const ec: any = structuredClone(e)
+console.log(ec instanceof RangeError, ec.message, ec !== e)
+const b: any = new Uint8Array([1, 2, 3])
+const bc: any = structuredClone(b)
+bc[0] = 9
+console.log(b, bc)
+class P { x = 1 }
+const pc: any = structuredClone(new P() as any)
+console.log(pc, pc instanceof P)
+`, "1 x [ 1, 2, { d: true } ] null true true true\ntrue\nDataCloneError\n[ 1, 'two' ]\ntrue r true\nUint8Array(3) [ 1, 2, 3 ] Uint8Array(3) [ 9, 2, 3 ]\n{ x: 1 } false")
+}

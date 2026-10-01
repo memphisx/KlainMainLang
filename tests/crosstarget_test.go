@@ -122,12 +122,30 @@ func TestCrossTargetRejectsForeignOS(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		foreign = "x86_64-w64-windows-gnu"
 	}
-	out, err := exec.Command(bin, "--target", foreign, "--sysroot", dir, "-emit-llvm", src).CombinedOutput()
+	out, err := exec.Command(bin, "--target", foreign, "--sysroot", dir, "-o", filepath.Join(dir, "prog"), src).CombinedOutput()
 	if err == nil {
 		t.Fatalf("a cross-OS target (%s on %s host) should be rejected, got success:\n%s", foreign, runtime.GOOS, out)
 	}
 	if !strings.Contains(string(out), "is not supported yet") {
 		t.Fatalf("expected a cross-OS not-supported message, got:\n%s", out)
+	}
+}
+
+// -emit-llvm links nothing, so it takes any target: the module carries the
+// target's triple.
+func TestCrossTargetEmitLLVMAnyOS(t *testing.T) {
+	bin := buildCLI(t)
+	dir, src := writeTinyTS(t)
+	foreign := "x86_64-apple-darwin"
+	if runtime.GOOS == "darwin" {
+		foreign = "x86_64-w64-windows-gnu"
+	}
+	out, err := exec.Command(bin, "--target", foreign, "--sysroot", dir, "-emit-llvm", src).CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-llvm for %s: %v\n%s", foreign, err, out)
+	}
+	if !strings.Contains(string(out), `target triple = "`+foreign+`"`) {
+		t.Fatalf("expected the %s triple in the module, got:\n%.400s", foreign, out)
 	}
 }
 

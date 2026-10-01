@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "32/33",
     "loosePct": 97,
-    "strict": "20/33",
-    "strictPct": 61
+    "strict": "21/33",
+    "strictPct": 64
   },
   "lede": "The String surface is nearly complete. Comparison and substring search are binary-safe (length-headed, NUL-tolerant); the open edges are real Unicode — normalization, surrogate-pair code points, and locale collation — which this compiler has no tables for and does not fake.",
   "entries": [
@@ -545,7 +545,7 @@
       "exampleKey": "strings/char_code",
       "snippet": "console.log('Hello'.codePointAt(0))   // 72\nconsole.log('Hello'.codePointAt(99) ?? -1)   // -1",
       "differences": [
-        "This compiler's strings are plain byte sequences, not real UTF-16 — no surrogate-pair/multi-byte decoding, so an in-range result is exactly `.charCodeAt(i)`'s byte value under a second name; correct only for ASCII/Latin-1 text.",
+        "Positions are byte offsets in this compiler's UTF-8 strings: at the first byte of a character the result is that character's code point, at a continuation byte that byte; Node indexes UTF-16 code units.",
         "An out-of-range index returns a real `undefined` (as in Node), so the type is `number | undefined` — narrow, `?? n`, or `!` before use; `.charCodeAt`'s out-of-range `NaN` is a separate, already-faithful behavior."
       ],
       "seeAlso": [
@@ -652,8 +652,8 @@
       "id": "string.fromCharCode",
       "name": "String.fromCharCode(n)",
       "signature": "String.fromCharCode(...codes: number[]): string",
-      "badge": "exact",
-      "description": "Builds a string from one or more byte-space code units. Static method on String.",
+      "badge": "caveats",
+      "description": "Builds a string from UTF-16 code units (each argument's ToUint16), stored as UTF-8; a high/low surrogate pair among the arguments is one character. Static method on String.",
       "returns": {
         "type": "string",
         "desc": "The constructed string."
@@ -666,14 +666,17 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/fromCharCode"
-      }
+      },
+      "differences": [
+        "An unpaired surrogate is encoded on its own, so halves from two calls concatenated don't join into one character as in Node."
+      ]
     },
     {
       "id": "string.fromCodePoint",
       "name": "String.fromCodePoint(n)",
       "signature": "String.fromCodePoint(...codes: number[]): string",
       "badge": "exact",
-      "description": "Builds a string from code points. In this compiler's byte-space strings this is a BMP alias of fromCharCode.",
+      "description": "Builds a string from code points, encoded as UTF-8; a value that is not an integer in [0, 0x10FFFF] throws RangeError: Invalid code point.",
       "returns": {
         "type": "string",
         "desc": "The constructed string."

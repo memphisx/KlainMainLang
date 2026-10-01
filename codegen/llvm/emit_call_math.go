@@ -22,7 +22,7 @@ func (e *Emitter) emitMathCall(property string, args []ast.Expression, pos ast.P
 		e.ensureJsPow()
 		return e.emitMathBinaryFloat("__kml_js_pow", args, pos)
 	case "hypot":
-		return e.emitMathBinaryFloat("hypot", args, pos)
+		return e.emitMathHypot(args, pos)
 	case "min":
 		return e.emitMathMinMax("min", args, pos)
 	case "max":
@@ -57,6 +57,9 @@ func (e *Emitter) emitMathOperand(arg ast.Expression) (Value, error) {
 	}
 	if isNullableScalar(v.Ty) {
 		v = e.nullableScalarPayloadOf(v)
+	}
+	if v.Ty.IsDynamic || !isNumberTy(v.Ty) {
+		return e.emitUnaryPlus(v, arg.GetPos()) // ToNumber (`Math.max("3")`)
 	}
 	return v, nil
 }
@@ -325,8 +328,8 @@ func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast
 			if elemTy.IsArray || elemTy.IsObject {
 				return Value{}, fmt.Errorf("%d:%d: Math.%s cannot spread an array of arrays or objects", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col, fn)
 			}
-			if elemTy.Float {
-				anyFloat = true
+			if elemTy.Float || elemTy.IsDynamic || !isNumberTy(elemTy) {
+				anyFloat = true // an `any`/string element ToNumbers to a double
 			}
 			items = append(items, mmItem{spread: true, ptr: ptrReg, length: lenReg, elemTy: elemTy})
 		} else {
@@ -410,6 +413,16 @@ func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, it.elemTy.IR, it.ptr, idxVal))
 		elem := e.loadArrayElem(gep, it.elemTy)
+		if isNullableScalar(elem.Ty) {
+			elem = e.nullableScalarPayloadOf(elem)
+		}
+		if elem.Ty.IsDynamic || !isNumberTy(elem.Ty) {
+			nv, err := e.emitUnaryPlus(elem, pos)
+			if err != nil {
+				return Value{}, err
+			}
+			elem = nv
+		}
 		ev := e.coerce(elem, resTy)
 		combine(ev.Ref)
 		idxNext := e.freshReg()
@@ -494,4 +507,161 @@ func (e *Emitter) emitMathRandom(_ ast.Pos) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = call double @__klain_math_random()", result))
 		return Value{Ref: result, Ty: TypeF64}, nil
 	}
+}
+
+// emitNumberArgsBuffer is a variadic builtin's arguments ToNumber'd into a
+// buffer of doubles and their count: a stack array for a fixed list, a heap
+// one filled at run time when an argument is a spread.
+func (e *Emitter) emitNumberArgsBuffer(args []ast.Expression, pos ast.Pos) (string, string, error) {
+	toCode := func(val Value, pos ast.Pos) (Value, error) {
+		if isNullableScalar(val.Ty) {
+			val = e.nullableScalarPayloadOf(val)
+		}
+		if val.Ty.IsDynamic || !isNumberTy(val.Ty) {
+			return e.emitUnaryPlus(val, pos)
+		}
+		return val, nil
+	}
+	var codes, n string
+	if anySpread(args) {
+		// A spread (`fromCharCode(...units)`): the arguments as one array,
+		// converted element by element into a heap buffer.
+		ptr, length, elemTy, err := e.resolveArrayForHOF(ast.NewArrayLiteral(args, pos), pos)
+		if err != nil {
+			return "", "", err
+		}
+		e.ensureMalloc()
+		bytes := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, length))
+		codes, n = e.freshReg(), length
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", codes, bytes))
+		idx := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idx))
+		condL, bodyL, doneL := e.freshLabel("fromcodes.cond"), e.freshLabel("fromcodes.body"), e.freshLabel("fromcodes.done")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(condL)
+		i, done := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, idx))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, i, length))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
+		e.emitLabel(bodyL)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptr, i))
+		v, err := toCode(e.loadArrayElem(gep, elemTy), pos)
+		if err != nil {
+			return "", "", err
+		}
+		d := e.coerce(v, TypeF64)
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr double, ptr %s, i64 %s", slot, codes, i))
+		e.emitInstr(fmt.Sprintf("store double %s, ptr %s, align 8", d.Ref, slot))
+		next := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idx))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(doneL)
+	} else {
+		codes, n = e.freshReg(), fmt.Sprint(len(args))
+		e.emitAlloca(fmt.Sprintf("%s = alloca [%d x double], align 8", codes, len(args)))
+		for i, arg := range args {
+			val, err := e.emitExpr(arg)
+			if err != nil {
+				return "", "", err
+			}
+			if val, err = toCode(val, arg.GetPos()); err != nil {
+				return "", "", err
+			}
+			d := e.coerce(val, TypeF64)
+			slot := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr [%s x double], ptr %s, i64 0, i64 %d", slot, n, codes, i))
+			e.emitInstr(fmt.Sprintf("store double %s, ptr %s, align 8", d.Ref, slot))
+		}
+	}
+	return codes, n, nil
+}
+
+// emitMathHypot is Math.hypot over any number of arguments (a spread
+// included), computed as V8 does: scaled by the largest magnitude with a
+// compensated sum, so the last digit matches Node's.
+func (e *Emitter) emitMathHypot(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) == 0 {
+		return Value{Ref: "0.0", Ty: TypeF64}, nil
+	}
+	codes, n, err := e.emitNumberArgsBuffer(args, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureHypot()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call double @__kml_hypot(ptr %s, i64 %s)", r, codes, n))
+	return Value{Ref: r, Ty: TypeF64}, nil
+}
+
+// ensureHypot defines @__kml_hypot(xs, n): an infinite operand wins, then a
+// NaN one; otherwise sqrt(Σ(|x|/max)²)·max with Kahan compensation.
+func (e *Emitter) ensureHypot() {
+	if e.usedHypot {
+		return
+	}
+	e.usedHypot = true
+	e.ensureMathFuncs()
+	e.emitGlobal(`define double @__kml_hypot(ptr %xs, i64 %n) {
+entry:
+  br label %scan
+scan:
+  %i = phi i64 [ 0, %entry ], [ %i1, %scanbody ]
+  %max = phi double [ 0.0, %entry ], [ %max1, %scanbody ]
+  %nan = phi i1 [ false, %entry ], [ %nan1, %scanbody ]
+  %sdone = icmp eq i64 %i, %n
+  br i1 %sdone, label %decide, label %scanbody
+scanbody:
+  %p = getelementptr double, ptr %xs, i64 %i
+  %x = load double, ptr %p, align 8
+  %ax = call double @llvm.fabs.f64(double %x)
+  %isnan = fcmp uno double %ax, %ax
+  %nan1 = or i1 %nan, %isnan
+  %gt = fcmp ogt double %ax, %max
+  %max1 = select i1 %gt, double %ax, double %max
+  %i1 = add i64 %i, 1
+  br label %scan
+decide:
+  %isinf = fcmp oeq double %max, 0x7FF0000000000000
+  br i1 %isinf, label %retinf, label %chknan
+retinf:
+  ret double 0x7FF0000000000000
+chknan:
+  br i1 %nan, label %retnan, label %chkzero
+retnan:
+  ret double 0x7FF8000000000000
+chkzero:
+  %zero = fcmp oeq double %max, 0.0
+  br i1 %zero, label %retzero, label %sum
+retzero:
+  ret double 0.0
+sum:
+  %j = phi i64 [ 0, %chkzero ], [ %j1, %sumbody ]
+  %acc = phi double [ 0.0, %chkzero ], [ %pre, %sumbody ]
+  %comp = phi double [ 0.0, %chkzero ], [ %comp1, %sumbody ]
+  %jdone = icmp eq i64 %j, %n
+  br i1 %jdone, label %done, label %sumbody
+sumbody:
+  %q = getelementptr double, ptr %xs, i64 %j
+  %y = load double, ptr %q, align 8
+  %ay = call double @llvm.fabs.f64(double %y)
+  %s = fdiv double %ay, %max
+  %sq = fmul double %s, %s
+  %summand = fsub double %sq, %comp
+  %pre = fadd double %acc, %summand
+  %d = fsub double %pre, %acc
+  %comp1 = fsub double %d, %summand
+  %j1 = add i64 %j, 1
+  br label %sum
+done:
+  %rt = call double @llvm.sqrt.f64(double %acc)
+  %res = fmul double %rt, %max
+  ret double %res
+}
+declare double @llvm.fabs.f64(double)
+declare double @llvm.sqrt.f64(double)`)
 }

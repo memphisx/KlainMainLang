@@ -10,6 +10,7 @@ import { EventEmitter } from 'events';
 import { createHash } from 'crypto';
 import type { Server, IncomingMessage } from 'http';
 import type { Socket } from 'net';
+import { encodeFrame, parseFrame } from './internal_websocket_frame';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
@@ -73,54 +74,17 @@ export class WSConnection {
     }
 
     private writeFrame(opcode: number, payload: Buffer): void {
-        const len = payload.length;
-        let head: Buffer;
-        if (len < 126) {
-            head = Buffer.alloc(2);
-            head[1] = len;
-        } else if (len < 65536) {
-            head = Buffer.alloc(4);
-            head[1] = 126;
-            head.writeUInt16BE(len, 2);
-        } else {
-            head = Buffer.alloc(10);
-            head[1] = 127;
-            head.writeUInt32BE(Math.floor(len / 4294967296), 2);
-            head.writeUInt32BE(len % 4294967296, 6);
-        }
-        head[0] = 0x80 | opcode;
-        this.socket.write(Buffer.concat([head, payload]));
+        this.socket.write(encodeFrame(opcode, payload, false));
     }
 
     // Parse every complete frame buffered so far.
     feed(chunk: Buffer): void {
         this.pending = this.pending.length === 0 ? chunk : Buffer.concat([this.pending, chunk]);
         while (this.readyState === 1 || this.readyState === 2) {
-            const buf = this.pending;
-            if (buf.length < 2) return;
-            const fin = (buf[0] & 0x80) !== 0;
-            const opcode = buf[0] & 0x0f;
-            const masked = (buf[1] & 0x80) !== 0;
-            let len = buf[1] & 0x7f;
-            let off = 2;
-            if (len === 126) {
-                if (buf.length < 4) return;
-                len = buf.readUInt16BE(2);
-                off = 4;
-            } else if (len === 127) {
-                if (buf.length < 10) return;
-                len = buf.readUInt32BE(2) * 4294967296 + buf.readUInt32BE(6);
-                off = 10;
-            }
-            const maskOff = off;
-            if (masked) off += 4;
-            if (buf.length < off + len) return;
-            const payload = Buffer.alloc(len);
-            for (let i = 0; i < len; i++) {
-                payload[i] = masked ? buf[off + i] ^ buf[maskOff + (i % 4)] : buf[off + i];
-            }
-            this.pending = buf.subarray(off + len);
-            this.frame(fin, opcode, payload);
+            const parsed = parseFrame(this.pending);
+            if (parsed === null) return;
+            this.pending = parsed.rest;
+            this.frame(parsed.frame.fin, parsed.frame.opcode, parsed.frame.payload);
         }
     }
 

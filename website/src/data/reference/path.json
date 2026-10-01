@@ -7,7 +7,7 @@
   "coverage": {
     "loose": "10/10",
     "loosePct": 100,
-    "strict": "8/10",
+    "strict": "7/10",
     "strictPct": 70
   },
   "lede": "Node's `path` module for portable filesystem path manipulation, import-gated as a virtual built-in (`import path from 'path'`). Both of Node's flavours exist on every host: a bare `path` is the host's flavour (`path.win32` on Windows — backslashes, `;`, drive letters, UNC roots — and `path.posix` on Linux/macOS), while `path.posix.*` and `path.win32.*` name one explicitly. join, resolve, dirname, basename, extname, parse/format and isAbsolute follow real Node's algorithms in both flavours, including its asymmetric `basename` extension-stripping rule; the win32 flavour is a C port of Node's own `lib/path.js`.",
@@ -17,7 +17,7 @@
       "name": "path.join(...segments)",
       "statusRow": "path.join(...segments)",
       "signature": "join(...segments: string[]): string",
-      "badge": "exact",
+      "badge": "caveats",
       "description": "Joins segments with the flavour's separator, then normalizes the result: collapses repeated separators, drops `.` segments, and resolves `..` against segments already seen in the same call. The win32 flavour accepts mixed `/` and `\\`, keeps UNC and drive roots intact, and never lets `..` escape a drive root.",
       "returns": {
         "type": "string",
@@ -30,7 +30,10 @@
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/path.html#pathjoinpaths"
-      }
+      },
+      "differences": [
+        "A non-string argument held in `any` is converted to a string at the call instead of throwing `ERR_INVALID_ARG_TYPE`"
+      ]
     },
     {
       "id": "path.resolve",
@@ -180,8 +183,7 @@
       "exampleKey": "path/path_win32",
       "snippet": "console.log(path.win32.join('C:\\\\Users', 'me', '..', 'you')) // C:\\Users\\you\nconsole.log(path.win32.resolve('C:\\\\home', 'D:\\\\x', 'y'))    // D:\\x\\y\nconsole.log(path.posix.join('/a', 'b', '../c'))            // /a/c",
       "differences": [
-        "The flavour objects are dispatch targets, not first-class values — call `path.win32.join(...)` or import the object by name (`import { win32 } from 'path'`); binding it to a variable first is not supported.",
-        "`normalize`, `relative`, `toNamespacedPath` and `matchesGlob` are missing from both flavours."
+        "`matchesGlob` is missing from both flavours."
       ],
       "seeAlso": [
         "path.join",

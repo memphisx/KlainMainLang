@@ -23,102 +23,6 @@ interface Console {
 
 declare var console: Console;
 
-// Node's `path` module (@types/node's PlatformPath, as exported functions).
-declare module "path" {
-    interface ParsedPath {
-        root: string;
-        dir: string;
-        base: string;
-        ext: string;
-        name: string;
-    }
-    interface FormatInputPathObject {
-        root?: string | undefined;
-        dir?: string | undefined;
-        base?: string | undefined;
-        ext?: string | undefined;
-        name?: string | undefined;
-    }
-    export function normalize(path: string): string;
-    export function join(...paths: string[]): string;
-    export function resolve(...paths: string[]): string;
-    export function isAbsolute(path: string): boolean;
-    export function relative(from: string, to: string): string;
-    export function dirname(path: string): string;
-    export function basename(path: string, suffix?: string): string;
-    export function extname(path: string): string;
-    export const sep: "\\" | "/";
-    export const delimiter: ";" | ":";
-    export function parse(path: string): ParsedPath;
-    export function format(pathObject: FormatInputPathObject): string;
-    export function toNamespacedPath(path: string): string;
-}
-
-// Node's `os` module (@types/node's os.d.ts, without `constants`,
-// `getPriority`/`setPriority` and the Buffer-encoded `userInfo`).
-declare module "os" {
-    interface CpuInfo {
-        model: string;
-        speed: number;
-        times: {
-            user: number;
-            nice: number;
-            sys: number;
-            idle: number;
-            irq: number;
-        };
-    }
-    interface NetworkInterfaceBase {
-        address: string;
-        netmask: string;
-        mac: string;
-        internal: boolean;
-        cidr: string | null;
-        scopeid?: number;
-    }
-    interface NetworkInterfaceInfoIPv4 extends NetworkInterfaceBase {
-        family: "IPv4";
-    }
-    interface NetworkInterfaceInfoIPv6 extends NetworkInterfaceBase {
-        family: "IPv6";
-        scopeid: number;
-    }
-    interface UserInfo<T> {
-        username: T;
-        uid: number;
-        gid: number;
-        shell: T | null;
-        homedir: T;
-    }
-    interface UserInfoOptions {
-        encoding?: BufferEncoding | "buffer" | undefined;
-    }
-    interface UserInfoOptionsWithStringEncoding extends UserInfoOptions {
-        encoding?: BufferEncoding | undefined;
-    }
-    type NetworkInterfaceInfo = NetworkInterfaceInfoIPv4 | NetworkInterfaceInfoIPv6;
-    export function hostname(): string;
-    export function loadavg(): number[];
-    export function uptime(): number;
-    export function freemem(): number;
-    export function totalmem(): number;
-    export function cpus(): CpuInfo[];
-    export function availableParallelism(): number;
-    export function type(): string;
-    export function release(): string;
-    export function networkInterfaces(): NodeJS.Dict<NetworkInterfaceInfo[]>;
-    export function homedir(): string;
-    export function userInfo(options?: UserInfoOptionsWithStringEncoding): UserInfo<string>;
-    export const devNull: string;
-    export const EOL: string;
-    export function arch(): string;
-    export function version(): string;
-    export function platform(): NodeJS.Platform;
-    export function machine(): string;
-    export function tmpdir(): string;
-    export function endianness(): "BE" | "LE";
-}
-
 // @types/node's Buffer (buffer.d.ts, and buffer.buffer.d.ts for TypeScript
 // 5.7 and later). Buffer.from's arguments are plain ArrayLike, ArrayBuffer
 // and string types: @types/node's WithImplicitCoercion and
@@ -261,7 +165,7 @@ declare var URL: {
     prototype: URL;
     new (url: string | URL, base?: string | URL): URL;
     canParse(url: string | URL, base?: string | URL): boolean;
-    createObjectURL(obj: Blob | MediaSource): string;
+    createObjectURL(blob: Blob): string;
     parse(url: string | URL, base?: string | URL): URL | null;
     revokeObjectURL(url: string): void;
 };
@@ -289,8 +193,13 @@ type AllowSharedBuffer = Buffer<ArrayBufferLike>;
 type BufferEncoding = "ascii" | "utf8" | "utf-8" | "utf16le" | "utf-16le" | "ucs2" | "ucs-2" | "base64" | "base64url" | "latin1" | "binary" | "hex";
 
 // Node's `process` (@types/node's NodeJS.Process: the members this compiler
-// implements with a plain type; streams and events are not declared yet).
+// implements with a plain type; the streams are not declared yet).
 declare namespace NodeJS {
+    type Signals =
+        | "SIGABRT" | "SIGALRM" | "SIGBUS" | "SIGCHLD" | "SIGCONT" | "SIGFPE" | "SIGHUP" | "SIGILL" | "SIGINT" | "SIGIO"
+        | "SIGIOT" | "SIGKILL" | "SIGPIPE" | "SIGPOLL" | "SIGPROF" | "SIGPWR" | "SIGQUIT" | "SIGSEGV" | "SIGSTKFLT"
+        | "SIGSTOP" | "SIGSYS" | "SIGTERM" | "SIGTRAP" | "SIGTSTP" | "SIGTTIN" | "SIGTTOU" | "SIGUNUSED" | "SIGURG"
+        | "SIGUSR1" | "SIGUSR2" | "SIGVTALRM" | "SIGWINCH" | "SIGXCPU" | "SIGXFSZ" | "SIGBREAK" | "SIGLOST" | "SIGINFO";
     interface Dict<T> {
         [key: string]: T | undefined;
     }
@@ -304,9 +213,115 @@ declare namespace NodeJS {
         external: number;
         arrayBuffers: number;
     }
+    type BeforeExitListener = (code: number) => void;
+    type DisconnectListener = () => void;
+    type ExitListener = (code: number) => void;
+    type RejectionHandledListener = (promise: Promise<unknown>) => void;
+    type UncaughtExceptionOrigin = "uncaughtException" | "unhandledRejection";
+    type UncaughtExceptionListener = (error: Error, origin: UncaughtExceptionOrigin) => void;
+    type UnhandledRejectionListener = (reason: unknown, promise: Promise<unknown>) => void;
+    type WarningListener = (warning: Error) => void;
+    type MessageListener = (message: unknown, sendHandle: unknown) => void;
+    type SignalsListener = (signal: Signals) => void;
+    interface EmitWarningOptions {
+        type?: string | undefined;
+        code?: string | undefined;
+        ctor?: Function | undefined;
+        detail?: string | undefined;
+    }
+    interface Control {
+        ref(): void;
+        unref(): void;
+    }
+    // Process is an EventEmitter; its members are declared here, as
+    // @types/node's own overloads are.
     interface Process {
+        addListener(event: "beforeExit", listener: BeforeExitListener): this;
+        addListener(event: "disconnect", listener: DisconnectListener): this;
+        addListener(event: "exit", listener: ExitListener): this;
+        addListener(event: "rejectionHandled", listener: RejectionHandledListener): this;
+        addListener(event: "uncaughtException", listener: UncaughtExceptionListener): this;
+        addListener(event: "uncaughtExceptionMonitor", listener: UncaughtExceptionListener): this;
+        addListener(event: "unhandledRejection", listener: UnhandledRejectionListener): this;
+        addListener(event: "warning", listener: WarningListener): this;
+        addListener(event: "message", listener: MessageListener): this;
+        addListener(event: Signals, listener: SignalsListener): this;
+        addListener(event: string | symbol, listener: (...args: any[]) => void): this;
+        on(event: "beforeExit", listener: BeforeExitListener): this;
+        on(event: "disconnect", listener: DisconnectListener): this;
+        on(event: "exit", listener: ExitListener): this;
+        on(event: "rejectionHandled", listener: RejectionHandledListener): this;
+        on(event: "uncaughtException", listener: UncaughtExceptionListener): this;
+        on(event: "uncaughtExceptionMonitor", listener: UncaughtExceptionListener): this;
+        on(event: "unhandledRejection", listener: UnhandledRejectionListener): this;
+        on(event: "warning", listener: WarningListener): this;
+        on(event: "message", listener: MessageListener): this;
+        on(event: Signals, listener: SignalsListener): this;
+        on(event: string | symbol, listener: (...args: any[]) => void): this;
+        once(event: "beforeExit", listener: BeforeExitListener): this;
+        once(event: "disconnect", listener: DisconnectListener): this;
+        once(event: "exit", listener: ExitListener): this;
+        once(event: "rejectionHandled", listener: RejectionHandledListener): this;
+        once(event: "uncaughtException", listener: UncaughtExceptionListener): this;
+        once(event: "uncaughtExceptionMonitor", listener: UncaughtExceptionListener): this;
+        once(event: "unhandledRejection", listener: UnhandledRejectionListener): this;
+        once(event: "warning", listener: WarningListener): this;
+        once(event: "message", listener: MessageListener): this;
+        once(event: Signals, listener: SignalsListener): this;
+        once(event: string | symbol, listener: (...args: any[]) => void): this;
+        prependListener(event: "beforeExit", listener: BeforeExitListener): this;
+        prependListener(event: "disconnect", listener: DisconnectListener): this;
+        prependListener(event: "exit", listener: ExitListener): this;
+        prependListener(event: "rejectionHandled", listener: RejectionHandledListener): this;
+        prependListener(event: "uncaughtException", listener: UncaughtExceptionListener): this;
+        prependListener(event: "uncaughtExceptionMonitor", listener: UncaughtExceptionListener): this;
+        prependListener(event: "unhandledRejection", listener: UnhandledRejectionListener): this;
+        prependListener(event: "warning", listener: WarningListener): this;
+        prependListener(event: "message", listener: MessageListener): this;
+        prependListener(event: Signals, listener: SignalsListener): this;
+        prependListener(event: string | symbol, listener: (...args: any[]) => void): this;
+        prependOnceListener(event: "beforeExit", listener: BeforeExitListener): this;
+        prependOnceListener(event: "disconnect", listener: DisconnectListener): this;
+        prependOnceListener(event: "exit", listener: ExitListener): this;
+        prependOnceListener(event: "rejectionHandled", listener: RejectionHandledListener): this;
+        prependOnceListener(event: "uncaughtException", listener: UncaughtExceptionListener): this;
+        prependOnceListener(event: "uncaughtExceptionMonitor", listener: UncaughtExceptionListener): this;
+        prependOnceListener(event: "unhandledRejection", listener: UnhandledRejectionListener): this;
+        prependOnceListener(event: "warning", listener: WarningListener): this;
+        prependOnceListener(event: "message", listener: MessageListener): this;
+        prependOnceListener(event: Signals, listener: SignalsListener): this;
+        prependOnceListener(event: string | symbol, listener: (...args: any[]) => void): this;
+        emit(event: "beforeExit", code: number): boolean;
+        emit(event: "disconnect"): boolean;
+        emit(event: "exit", code: number): boolean;
+        emit(event: "rejectionHandled", promise: Promise<unknown>): boolean;
+        emit(event: "uncaughtException", error: Error): boolean;
+        emit(event: "uncaughtExceptionMonitor", error: Error): boolean;
+        emit(event: "unhandledRejection", reason: unknown, promise: Promise<unknown>): boolean;
+        emit(event: "warning", warning: Error): boolean;
+        emit(event: "message", message: unknown, sendHandle: unknown): this;
+        emit(event: Signals, signal?: Signals): boolean;
+        emit(event: string | symbol, ...args: any[]): boolean;
+        off(event: string | symbol, listener: (...args: any[]) => void): this;
+        removeListener(event: string | symbol, listener: (...args: any[]) => void): this;
+        removeAllListeners(eventName?: string | symbol): this;
+        setMaxListeners(n: number): this;
+        getMaxListeners(): number;
+        listeners(eventName: string | symbol): Function[];
+        rawListeners(eventName: string | symbol): Function[];
+        listenerCount(eventName: string | symbol, listener?: Function): number;
+        eventNames(): Array<string | symbol>;
+        emitWarning(warning: string | Error, ctor?: Function): void;
+        emitWarning(warning: string | Error, type?: string, ctor?: Function): void;
+        emitWarning(warning: string | Error, type?: string, code?: string, ctor?: Function): void;
+        emitWarning(warning: string | Error, options?: EmitWarningOptions): void;
+        send?(message: any, sendHandle?: any, options?: { keepOpen?: boolean | undefined }, callback?: (error: Error | null) => void): boolean;
+        disconnect?(): void;
+        connected: boolean;
+        channel?: Control;
         argv: string[];
         argv0: string;
+        execArgv: string[];
         execPath: string;
         env: ProcessEnv;
         exitCode: number | string | null | undefined;
@@ -363,336 +378,32 @@ declare function clearInterval(timeout: NodeJS.Timeout | string | number | undef
 declare function clearImmediate(immediate: NodeJS.Immediate | undefined): void;
 declare function queueMicrotask(callback: () => void): void;
 
-// Node's `fs` module, its synchronous functions (@types/node's fs.d.ts).
-// Stats has no Date-valued times and Dirent no `path`: neither is
-// implemented. Buffer, URL and the typed-array views are not declared yet,
-// so a path or data argument is not checked against them.
-declare module "fs" {
-    type PathLike = string | Buffer | URL;
-    type PathOrFileDescriptor = PathLike | number;
-    type TimeLike = string | number | Date;
-    type Mode = number | string;
-    type OpenMode = number | string;
-    interface ObjectEncodingOptions {
-        encoding?: BufferEncoding | null | undefined;
+// Node's `url` module, its code-generated part (@types/node's url.d.ts);
+// the legacy API is lib/node/internal_url.ts.
+declare module "url" {
+    interface FileUrlToPathOptions {
+        windows?: boolean | undefined;
     }
-    type EncodingOption = ObjectEncodingOptions | BufferEncoding | undefined | null;
-    type WriteFileOptions =
-        | (ObjectEncodingOptions & {
-            mode?: Mode | undefined;
-            flag?: string | undefined;
-            flush?: boolean | undefined;
-        })
-        | BufferEncoding
-        | null;
-    interface RmOptions {
-        force?: boolean | undefined;
-        maxRetries?: number | undefined;
-        recursive?: boolean | undefined;
-        retryDelay?: number | undefined;
+    interface PathToFileUrlOptions {
+        windows?: boolean | undefined;
     }
-    interface RmDirOptions {
-        maxRetries?: number | undefined;
-        recursive?: boolean | undefined;
-        retryDelay?: number | undefined;
+    interface HttpOptions {
+        protocol: string;
+        hostname: string;
+        hash: string;
+        search: string;
+        pathname: string;
+        path: string;
+        href: string;
+        port?: number;
+        auth?: string;
     }
-    interface MakeDirectoryOptions {
-        recursive?: boolean | undefined;
-        mode?: Mode | undefined;
-    }
-    interface StatOptions {
-        bigint?: boolean | undefined;
-    }
-    interface StatSyncOptions extends StatOptions {
-        throwIfNoEntry?: boolean | undefined;
-    }
-    interface StatFsOptions {
-        bigint?: boolean | undefined;
-    }
-    interface StatsBase<T> {
-        isFile(): boolean;
-        isDirectory(): boolean;
-        isSymbolicLink(): boolean;
-        dev: T;
-        ino: T;
-        mode: T;
-        nlink: T;
-        uid: T;
-        gid: T;
-        rdev: T;
-        size: T;
-        blksize: T;
-        blocks: T;
-        atimeMs: T;
-        mtimeMs: T;
-        ctimeMs: T;
-        birthtimeMs: T;
-    }
-    interface Stats extends StatsBase<number> {}
-    interface StatsFsBase<T> {
-        type: T;
-        bsize: T;
-        blocks: T;
-        bfree: T;
-        bavail: T;
-        files: T;
-        ffree: T;
-    }
-    interface StatsFs extends StatsFsBase<number> {}
-    interface Dirent {
-        isFile(): boolean;
-        isDirectory(): boolean;
-        isBlockDevice(): boolean;
-        isCharacterDevice(): boolean;
-        isSymbolicLink(): boolean;
-        isFIFO(): boolean;
-        isSocket(): boolean;
-        name: string;
-        parentPath: string;
-    }
-    export function readFileSync(path: PathOrFileDescriptor, options?: { encoding?: null | undefined; flag?: string | undefined } | null): NonSharedBuffer;
-    export function readFileSync(path: PathOrFileDescriptor, options: { encoding: BufferEncoding; flag?: string | undefined } | BufferEncoding): string;
-    export function readFileSync(path: PathOrFileDescriptor, options?: (ObjectEncodingOptions & { flag?: string | undefined }) | BufferEncoding | null): string | NonSharedBuffer;
-    export function writeFileSync(file: PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView, options?: WriteFileOptions): void;
-    export function appendFileSync(path: PathOrFileDescriptor, data: string | Uint8Array, options?: WriteFileOptions): void;
-    export function existsSync(path: PathLike): boolean;
-    export function statSync(path: PathLike, options?: StatSyncOptions & { bigint?: false | undefined }): Stats;
-    export function lstatSync(path: PathLike, options?: StatSyncOptions & { bigint?: false | undefined }): Stats;
-    export function fstatSync(fd: number, options?: StatOptions & { bigint?: false | undefined }): Stats;
-    export function statfsSync(path: PathLike, options?: StatFsOptions & { bigint?: false | undefined }): StatsFs;
-    export function rmSync(path: PathLike, options?: RmOptions): void;
-    export function realpathSync(path: PathLike, options?: EncodingOption): string;
-    export function mkdtempSync(prefix: string, options?: EncodingOption): string;
-    export function symlinkSync(target: PathLike, path: PathLike, type?: "dir" | "file" | "junction" | null): void;
-    export function linkSync(existingPath: PathLike, newPath: PathLike): void;
-    export function readlinkSync(path: PathLike, options?: EncodingOption): string;
-    export function chmodSync(path: PathLike, mode: Mode): void;
-    export function fchmodSync(fd: number, mode: Mode): void;
-    export function truncateSync(path: PathLike, len?: number): void;
-    export function ftruncateSync(fd: number, len?: number): void;
-    export function accessSync(path: PathLike, mode?: number): void;
-    export function openSync(path: PathLike, flags: OpenMode, mode?: Mode | null): number;
-    export function closeSync(fd: number): void;
-    export function fsyncSync(fd: number): void;
-    export function fdatasyncSync(fd: number): void;
-    export function writeSync(fd: number, string: string, position?: number | null, encoding?: BufferEncoding | null): number;
-    export function unlinkSync(path: PathLike): void;
-    export function mkdirSync(path: PathLike, options: MakeDirectoryOptions & { recursive: true }): string | undefined;
-    export function mkdirSync(path: PathLike, options?: Mode | (MakeDirectoryOptions & { recursive?: false | undefined }) | null): void;
-    export function mkdirSync(path: PathLike, options?: Mode | MakeDirectoryOptions | null): string | undefined;
-    export function rmdirSync(path: PathLike, options?: RmDirOptions): void;
-    export function readdirSync(path: PathLike, options?: { encoding: BufferEncoding | null; withFileTypes?: false | undefined; recursive?: boolean | undefined } | BufferEncoding | null): string[];
-    export function readdirSync(path: PathLike, options?: (ObjectEncodingOptions & { withFileTypes?: false | undefined; recursive?: boolean | undefined }) | BufferEncoding | null): string[] | NonSharedBuffer[];
-    export function readdirSync(path: PathLike, options: ObjectEncodingOptions & { withFileTypes: true; recursive?: boolean | undefined }): Dirent[];
-    export function renameSync(oldPath: PathLike, newPath: PathLike): void;
-    export function copyFileSync(src: PathLike, dest: PathLike, mode?: number): void;
-    export function utimesSync(path: PathLike, atime: TimeLike, mtime: TimeLike): void;
-    export function futimesSync(fd: number, atime: TimeLike, mtime: TimeLike): void;
-
-    // The callback forms (fs.d.ts). A callback's error is null on success.
-    type NoParamCallback = (err: NodeJS.ErrnoException | null) => void;
-    export function readFile(path: PathOrFileDescriptor, options: { encoding?: null | undefined; flag?: string | undefined } | undefined | null, callback: (err: NodeJS.ErrnoException | null, data: NonSharedBuffer) => void): void;
-    export function readFile(path: PathOrFileDescriptor, options: { encoding: BufferEncoding; flag?: string | undefined } | BufferEncoding, callback: (err: NodeJS.ErrnoException | null, data: string) => void): void;
-    export function readFile(path: PathOrFileDescriptor, options: (ObjectEncodingOptions & { flag?: string | undefined }) | BufferEncoding | undefined | null, callback: (err: NodeJS.ErrnoException | null, data: string | NonSharedBuffer) => void): void;
-    export function readFile(path: PathOrFileDescriptor, callback: (err: NodeJS.ErrnoException | null, data: NonSharedBuffer) => void): void;
-    export function writeFile(file: PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView, options: WriteFileOptions, callback: NoParamCallback): void;
-    export function writeFile(path: PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView, callback: NoParamCallback): void;
-    export function appendFile(path: PathOrFileDescriptor, data: string | Uint8Array, options: WriteFileOptions, callback: NoParamCallback): void;
-    export function appendFile(file: PathOrFileDescriptor, data: string | Uint8Array, callback: NoParamCallback): void;
-    export function unlink(path: PathLike, callback: NoParamCallback): void;
-    export function mkdir(path: PathLike, options: Mode | MakeDirectoryOptions | null | undefined, callback: (err: NodeJS.ErrnoException | null, path?: string) => void): void;
-    export function mkdir(path: PathLike, callback: NoParamCallback): void;
-    export function rmdir(path: PathLike, callback: NoParamCallback): void;
-    export function rmdir(path: PathLike, options: RmDirOptions, callback: NoParamCallback): void;
-    export function rename(oldPath: PathLike, newPath: PathLike, callback: NoParamCallback): void;
-    export function copyFile(src: PathLike, dest: PathLike, callback: NoParamCallback): void;
-    export function copyFile(src: PathLike, dest: PathLike, mode: number, callback: NoParamCallback): void;
-    export function readdir(path: PathLike, options: { encoding: BufferEncoding | null; withFileTypes?: false | undefined; recursive?: boolean | undefined } | BufferEncoding | undefined | null, callback: (err: NodeJS.ErrnoException | null, files: string[]) => void): void;
-    export function readdir(path: PathLike, callback: (err: NodeJS.ErrnoException | null, files: string[]) => void): void;
-    export function readdir(path: PathLike, options: ObjectEncodingOptions & { withFileTypes: true; recursive?: boolean | undefined }, callback: (err: NodeJS.ErrnoException | null, files: Dirent[]) => void): void;
-    export function stat(path: PathLike, callback: (err: NodeJS.ErrnoException | null, stats: Stats) => void): void;
-    export function stat(path: PathLike, options: (StatOptions & { bigint?: false | undefined }) | undefined, callback: (err: NodeJS.ErrnoException | null, stats: Stats) => void): void;
-    export function lstat(path: PathLike, callback: (err: NodeJS.ErrnoException | null, stats: Stats) => void): void;
-    export function lstat(path: PathLike, options: (StatOptions & { bigint?: false | undefined }) | undefined, callback: (err: NodeJS.ErrnoException | null, stats: Stats) => void): void;
-    export function fstat(fd: number, callback: (err: NodeJS.ErrnoException | null, stats: Stats) => void): void;
-    export function fstat(fd: number, options: (StatOptions & { bigint?: false | undefined }) | undefined, callback: (err: NodeJS.ErrnoException | null, stats: Stats) => void): void;
-    export function statfs(path: PathLike, callback: (err: NodeJS.ErrnoException | null, stats: StatsFs) => void): void;
-    export function statfs(path: PathLike, options: (StatFsOptions & { bigint?: false | undefined }) | undefined, callback: (err: NodeJS.ErrnoException | null, stats: StatsFs) => void): void;
-    export function rm(path: PathLike, callback: NoParamCallback): void;
-    export function rm(path: PathLike, options: RmOptions, callback: NoParamCallback): void;
-    export function utimes(path: PathLike, atime: TimeLike, mtime: TimeLike, callback: NoParamCallback): void;
-    export function futimes(fd: number, atime: TimeLike, mtime: TimeLike, callback: NoParamCallback): void;
-    export function ftruncate(fd: number, callback: NoParamCallback): void;
-    export function ftruncate(fd: number, len: number | undefined | null, callback: NoParamCallback): void;
-    export function fchmod(fd: number, mode: Mode, callback: NoParamCallback): void;
-    export function realpath(path: PathLike, callback: (err: NodeJS.ErrnoException | null, resolvedPath: string) => void): void;
-    export function mkdtemp(prefix: string, callback: (err: NodeJS.ErrnoException | null, folder: string) => void): void;
-    export function readlink(path: PathLike, callback: (err: NodeJS.ErrnoException | null, linkString: string) => void): void;
-    export function link(existingPath: PathLike, newPath: PathLike, callback: NoParamCallback): void;
-    export function symlink(target: PathLike, path: PathLike, callback: NoParamCallback): void;
-    export function symlink(target: PathLike, path: PathLike, type: "dir" | "file" | "junction" | undefined | null, callback: NoParamCallback): void;
-    export function chmod(path: PathLike, mode: Mode, callback: NoParamCallback): void;
-    export function truncate(path: PathLike, callback: NoParamCallback): void;
-    export function truncate(path: PathLike, len: number | undefined | null, callback: NoParamCallback): void;
-    export function access(path: PathLike, callback: NoParamCallback): void;
-    export function access(path: PathLike, mode: number | undefined, callback: NoParamCallback): void;
-
-    // `fs.promises` (fs/promises.d.ts's functions, as its members).
-    interface FsPromises {
-        readFile(path: PathLike, options?: { encoding?: null | undefined; flag?: string | undefined } | null): Promise<NonSharedBuffer>;
-        readFile(path: PathLike, options: { encoding: BufferEncoding; flag?: string | undefined } | BufferEncoding): Promise<string>;
-        readFile(path: PathLike, options?: (ObjectEncodingOptions & { flag?: string | undefined }) | BufferEncoding | null): Promise<string | NonSharedBuffer>;
-        writeFile(file: PathLike, data: string | NodeJS.ArrayBufferView, options?: WriteFileOptions): Promise<void>;
-        appendFile(path: PathLike, data: string | NodeJS.ArrayBufferView, options?: WriteFileOptions): Promise<void>;
-        unlink(path: PathLike): Promise<void>;
-        mkdir(path: PathLike, options: MakeDirectoryOptions & { recursive: true }): Promise<string | undefined>;
-        mkdir(path: PathLike, options?: Mode | (MakeDirectoryOptions & { recursive?: false | undefined }) | null): Promise<void>;
-        mkdir(path: PathLike, options?: Mode | MakeDirectoryOptions | null): Promise<string | undefined>;
-        rmdir(path: PathLike, options?: RmDirOptions): Promise<void>;
-        rename(oldPath: PathLike, newPath: PathLike): Promise<void>;
-        copyFile(src: PathLike, dest: PathLike, mode?: number): Promise<void>;
-        readdir(path: PathLike, options?: (ObjectEncodingOptions & { withFileTypes?: false | undefined; recursive?: boolean | undefined }) | BufferEncoding | null): Promise<string[]>;
-        readdir(path: PathLike, options: ObjectEncodingOptions & { withFileTypes: true; recursive?: boolean | undefined }): Promise<Dirent[]>;
-        stat(path: PathLike, opts?: StatOptions & { bigint?: false | undefined }): Promise<Stats>;
-        lstat(path: PathLike, opts?: StatOptions & { bigint?: false | undefined }): Promise<Stats>;
-        statfs(path: PathLike, opts?: StatFsOptions & { bigint?: false | undefined }): Promise<StatsFs>;
-        rm(path: PathLike, options?: RmOptions): Promise<void>;
-        utimes(path: PathLike, atime: TimeLike, mtime: TimeLike): Promise<void>;
-        realpath(path: PathLike): Promise<string>;
-        mkdtemp(prefix: string): Promise<string>;
-        readlink(path: PathLike): Promise<string>;
-        link(existingPath: PathLike, newPath: PathLike): Promise<void>;
-        symlink(target: PathLike, path: PathLike, type?: string | null): Promise<void>;
-        chmod(path: PathLike, mode: Mode): Promise<void>;
-        truncate(path: PathLike, len?: number): Promise<void>;
-        access(path: PathLike, mode?: number): Promise<void>;
-    }
-    export const promises: FsPromises;
-}
-
-// Node's `fs/promises` module (@types/node's fs/promises.d.ts, the functions
-// this compiler implements).
-declare module "fs/promises" {
-    type PathLike = string | Buffer | URL;
-    type Mode = number | string;
-    interface ObjectEncodingOptions {
-        encoding?: BufferEncoding | null | undefined;
-    }
-    type WriteFileOptions =
-        | (ObjectEncodingOptions & {
-            mode?: Mode | undefined;
-            flag?: string | undefined;
-            flush?: boolean | undefined;
-        })
-        | BufferEncoding
-        | null;
-    interface MakeDirectoryOptions {
-        recursive?: boolean | undefined;
-        mode?: Mode | undefined;
-    }
-    interface RmDirOptions {
-        maxRetries?: number | undefined;
-        recursive?: boolean | undefined;
-        retryDelay?: number | undefined;
-    }
-    interface Dirent {
-        isFile(): boolean;
-        isDirectory(): boolean;
-        isBlockDevice(): boolean;
-        isCharacterDevice(): boolean;
-        isSymbolicLink(): boolean;
-        isFIFO(): boolean;
-        isSocket(): boolean;
-        name: string;
-        parentPath: string;
-    }
-    export function readFile(path: PathLike, options?: { encoding?: null | undefined; flag?: string | undefined } | null): Promise<NonSharedBuffer>;
-    export function readFile(path: PathLike, options: { encoding: BufferEncoding; flag?: string | undefined } | BufferEncoding): Promise<string>;
-    export function readFile(path: PathLike, options?: (ObjectEncodingOptions & { flag?: string | undefined }) | BufferEncoding | null): Promise<string | NonSharedBuffer>;
-    export function writeFile(file: PathLike, data: string | NodeJS.ArrayBufferView, options?: WriteFileOptions): Promise<void>;
-    export function appendFile(path: PathLike, data: string | NodeJS.ArrayBufferView, options?: WriteFileOptions): Promise<void>;
-    export function unlink(path: PathLike): Promise<void>;
-    export function mkdir(path: PathLike, options: MakeDirectoryOptions & { recursive: true }): Promise<string | undefined>;
-    export function mkdir(path: PathLike, options?: Mode | (MakeDirectoryOptions & { recursive?: false | undefined }) | null): Promise<void>;
-    export function mkdir(path: PathLike, options?: Mode | MakeDirectoryOptions | null): Promise<string | undefined>;
-    export function rmdir(path: PathLike, options?: RmDirOptions): Promise<void>;
-    export function rename(oldPath: PathLike, newPath: PathLike): Promise<void>;
-    export function copyFile(src: PathLike, dest: PathLike, mode?: number): Promise<void>;
-    export function readdir(path: PathLike, options?: (ObjectEncodingOptions & { withFileTypes?: false | undefined; recursive?: boolean | undefined }) | BufferEncoding | null): Promise<string[]>;
-    export function readdir(path: PathLike, options: ObjectEncodingOptions & { withFileTypes: true; recursive?: boolean | undefined }): Promise<Dirent[]>;
-    type TimeLike = string | number | Date;
-    interface RmOptions {
-        force?: boolean | undefined;
-        maxRetries?: number | undefined;
-        recursive?: boolean | undefined;
-        retryDelay?: number | undefined;
-    }
-    interface StatOptions {
-        bigint?: boolean | undefined;
-    }
-    interface StatFsOptions {
-        bigint?: boolean | undefined;
-    }
-    interface Stats {
-        isFile(): boolean;
-        isDirectory(): boolean;
-        isSymbolicLink(): boolean;
-        isBlockDevice(): boolean;
-        isCharacterDevice(): boolean;
-        isFIFO(): boolean;
-        isSocket(): boolean;
-        dev: number; ino: number; mode: number; nlink: number; uid: number; gid: number; rdev: number;
-        size: number; blksize: number; blocks: number;
-        atimeMs: number; mtimeMs: number; ctimeMs: number; birthtimeMs: number;
-        atime: Date; mtime: Date; ctime: Date; birthtime: Date;
-    }
-    interface StatsFs {
-        type: number; bsize: number; blocks: number; bfree: number; bavail: number; files: number; ffree: number;
-    }
-    export function stat(path: PathLike, opts?: StatOptions & { bigint?: false | undefined }): Promise<Stats>;
-    export function lstat(path: PathLike, opts?: StatOptions & { bigint?: false | undefined }): Promise<Stats>;
-    export function statfs(path: PathLike, opts?: StatFsOptions & { bigint?: false | undefined }): Promise<StatsFs>;
-    export function rm(path: PathLike, options?: RmOptions): Promise<void>;
-    export function utimes(path: PathLike, atime: TimeLike, mtime: TimeLike): Promise<void>;
-    export function realpath(path: PathLike): Promise<string>;
-    export function mkdtemp(prefix: string): Promise<string>;
-    export function readlink(path: PathLike): Promise<string>;
-    export function link(existingPath: PathLike, newPath: PathLike): Promise<void>;
-    export function symlink(target: PathLike, path: PathLike, type?: string | null): Promise<void>;
-    export function chmod(path: PathLike, mode: Mode): Promise<void>;
-    export function truncate(path: PathLike, len?: number): Promise<void>;
-    export function access(path: PathLike, mode?: number): Promise<void>;
-}
-
-// Node's `events` module (@types/node's events.d.ts). @types/node types
-// each listener and emit() through conditional types over the event map
-// (Key, Args, Listener), which the checker does not model yet: every event
-// here takes `...args: any[]`, the default map's shape, whatever the map.
-// EventEmitter is a class there; here it is the interface and constructor
-// pair TypeScript's own library uses for Map.
-declare module "events" {
-    interface EventEmitterOptions {
-        captureRejections?: boolean | undefined;
-    }
-    type DefaultEventMap = [never];
-    type AnyRest = [...args: any[]];
-    interface EventEmitter<T = any> {
-        on(eventName: string | symbol, listener: (...args: any[]) => void): this;
-        once(eventName: string | symbol, listener: (...args: any[]) => void): this;
-        off(eventName: string | symbol, listener: (...args: any[]) => void): this;
-        removeListener(eventName: string | symbol, listener: (...args: any[]) => void): this;
-        removeAllListeners(eventName?: string | symbol): this;
-        emit(eventName: string | symbol, ...args: any[]): boolean;
-        listenerCount(eventName: string | symbol, listener?: Function): number;
-        eventNames(): (string | symbol)[];
-    }
-    interface EventEmitterConstructor {
-        new <T = any>(options?: EventEmitterOptions): EventEmitter<T>;
-        readonly prototype: EventEmitter;
-    }
-    var EventEmitter: EventEmitterConstructor;
-    export function once(emitter: EventEmitter, eventName: string | symbol): Promise<any[]>;
-    export function on(emitter: EventEmitter, eventName: string | symbol): AsyncIterableIterator<any[]>;
+    export function fileURLToPath(url: string | URL, options?: FileUrlToPathOptions): string;
+    export function pathToFileURL(path: string, options?: PathToFileUrlOptions): URL;
+    export function urlToHttpOptions(url: URL): HttpOptions;
+    export function domainToASCII(domain: string): string;
+    export function domainToUnicode(domain: string): string;
+    export { URL, URLSearchParams };
 }
 
 // The fetch API: Node's (undici-types' fetch.d.ts, through @types/node's
@@ -801,6 +512,255 @@ declare var Response: {
     redirect(url: string | URL, status?: number): Response;
 };
 declare function fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+/** @intrinsic btoa */
+declare function btoa(data: string): string;
+/** @intrinsic atob */
+declare function atob(data: string): string;
+
+// The WHATWG streams (@types/node's stream/web.d.ts globals, TypeScript's
+// lib.dom.d.ts shapes): ReadableStream, WritableStream, TransformStream,
+// their readers, writers and controllers, the queuing strategies and
+// CompressionStream/DecompressionStream. Byte streams (BYOB readers,
+// ReadableByteStreamController) are not implemented, so not declared.
+interface QueuingStrategySize<T = any> {
+    (chunk: T): number;
+}
+interface QueuingStrategy<T = any> {
+    highWaterMark?: number;
+    size?: QueuingStrategySize<T>;
+}
+interface QueuingStrategyInit {
+    highWaterMark: number;
+}
+interface ByteLengthQueuingStrategy extends QueuingStrategy<ArrayBufferView> {
+    readonly highWaterMark: number;
+    readonly size: QueuingStrategySize<ArrayBufferView>;
+}
+declare var ByteLengthQueuingStrategy: {
+    prototype: ByteLengthQueuingStrategy;
+    new (init: QueuingStrategyInit): ByteLengthQueuingStrategy;
+};
+interface CountQueuingStrategy extends QueuingStrategy {
+    readonly highWaterMark: number;
+    readonly size: QueuingStrategySize;
+}
+declare var CountQueuingStrategy: {
+    prototype: CountQueuingStrategy;
+    new (init: QueuingStrategyInit): CountQueuingStrategy;
+};
+type ReadableStreamType = "bytes";
+type ReadableStreamController<T> = ReadableStreamDefaultController<T>;
+type ReadableStreamReader<T> = ReadableStreamDefaultReader<T>;
+interface UnderlyingSourceCancelCallback {
+    (reason?: any): void | PromiseLike<void>;
+}
+interface UnderlyingSourcePullCallback<R> {
+    (controller: ReadableStreamController<R>): void | PromiseLike<void>;
+}
+interface UnderlyingSourceStartCallback<R> {
+    (controller: ReadableStreamController<R>): any;
+}
+interface UnderlyingDefaultSource<R = any> {
+    cancel?: UnderlyingSourceCancelCallback;
+    pull?: (controller: ReadableStreamDefaultController<R>) => void | PromiseLike<void>;
+    start?: (controller: ReadableStreamDefaultController<R>) => any;
+    type?: undefined;
+}
+interface UnderlyingSource<R = any> {
+    autoAllocateChunkSize?: number;
+    cancel?: UnderlyingSourceCancelCallback;
+    pull?: UnderlyingSourcePullCallback<R>;
+    start?: UnderlyingSourceStartCallback<R>;
+    type?: ReadableStreamType;
+}
+interface UnderlyingSinkAbortCallback {
+    (reason?: any): void | PromiseLike<void>;
+}
+interface UnderlyingSinkCloseCallback {
+    (): void | PromiseLike<void>;
+}
+interface UnderlyingSinkStartCallback {
+    (controller: WritableStreamDefaultController): any;
+}
+interface UnderlyingSinkWriteCallback<W> {
+    (chunk: W, controller: WritableStreamDefaultController): void | PromiseLike<void>;
+}
+interface UnderlyingSink<W = any> {
+    abort?: UnderlyingSinkAbortCallback;
+    close?: UnderlyingSinkCloseCallback;
+    start?: UnderlyingSinkStartCallback;
+    type?: undefined;
+    write?: UnderlyingSinkWriteCallback<W>;
+}
+interface TransformerFlushCallback<O> {
+    (controller: TransformStreamDefaultController<O>): void | PromiseLike<void>;
+}
+interface TransformerStartCallback<O> {
+    (controller: TransformStreamDefaultController<O>): any;
+}
+interface TransformerTransformCallback<I, O> {
+    (chunk: I, controller: TransformStreamDefaultController<O>): void | PromiseLike<void>;
+}
+interface Transformer<I = any, O = any> {
+    flush?: TransformerFlushCallback<O>;
+    readableType?: undefined;
+    start?: TransformerStartCallback<O>;
+    transform?: TransformerTransformCallback<I, O>;
+    writableType?: undefined;
+}
+interface StreamPipeOptions {
+    preventAbort?: boolean;
+    preventCancel?: boolean;
+    preventClose?: boolean;
+    signal?: AbortSignal;
+}
+interface ReadableWritablePair<R = any, W = any> {
+    readable: ReadableStream<R>;
+    writable: WritableStream<W>;
+}
+interface ReadableStreamIteratorOptions {
+    preventCancel?: boolean;
+}
+interface ReadableStreamReadDoneResult<T> {
+    done: true;
+    value: T | undefined;
+}
+interface ReadableStreamReadValueResult<T> {
+    done: false;
+    value: T;
+}
+type ReadableStreamReadResult<T> = ReadableStreamReadValueResult<T> | ReadableStreamReadDoneResult<T>;
+interface ReadableStreamAsyncIterator<T> extends AsyncIterableIterator<T> {
+    [Symbol.asyncIterator](): ReadableStreamAsyncIterator<T>;
+}
+interface ReadableStream<R = any> {
+    readonly locked: boolean;
+    cancel(reason?: any): Promise<void>;
+    getReader(): ReadableStreamDefaultReader<R>;
+    pipeThrough<T>(transform: ReadableWritablePair<T, R>, options?: StreamPipeOptions): ReadableStream<T>;
+    pipeTo(destination: WritableStream<R>, options?: StreamPipeOptions): Promise<void>;
+    tee(): [ReadableStream<R>, ReadableStream<R>];
+    values(options?: ReadableStreamIteratorOptions): ReadableStreamAsyncIterator<R>;
+    [Symbol.asyncIterator](options?: ReadableStreamIteratorOptions): ReadableStreamAsyncIterator<R>;
+}
+declare var ReadableStream: {
+    prototype: ReadableStream;
+    from<T>(iterable: Iterable<T> | AsyncIterable<T>): ReadableStream<T>;
+    new <R = any>(underlyingSource: UnderlyingDefaultSource<R>, strategy?: QueuingStrategy<R>): ReadableStream<R>;
+    new <R = any>(underlyingSource?: UnderlyingSource<R>, strategy?: QueuingStrategy<R>): ReadableStream<R>;
+};
+interface ReadableStreamGenericReader {
+    readonly closed: Promise<void>;
+    cancel(reason?: any): Promise<void>;
+}
+interface ReadableStreamDefaultReader<R = any> extends ReadableStreamGenericReader {
+    read(): Promise<ReadableStreamReadResult<R>>;
+    releaseLock(): void;
+}
+declare var ReadableStreamDefaultReader: {
+    prototype: ReadableStreamDefaultReader;
+    new <R = any>(stream: ReadableStream<R>): ReadableStreamDefaultReader<R>;
+};
+interface ReadableStreamDefaultController<R = any> {
+    readonly desiredSize: number | null;
+    close(): void;
+    enqueue(chunk: R): void;
+    error(e?: any): void;
+}
+declare var ReadableStreamDefaultController: {
+    prototype: ReadableStreamDefaultController;
+    new (): ReadableStreamDefaultController;
+};
+interface WritableStream<W = any> {
+    readonly locked: boolean;
+    abort(reason?: any): Promise<void>;
+    close(): Promise<void>;
+    getWriter(): WritableStreamDefaultWriter<W>;
+}
+declare var WritableStream: {
+    prototype: WritableStream;
+    new <W = any>(underlyingSink?: UnderlyingSink<W>, strategy?: QueuingStrategy<W>): WritableStream<W>;
+};
+interface WritableStreamDefaultWriter<W = any> {
+    readonly closed: Promise<void>;
+    readonly desiredSize: number | null;
+    readonly ready: Promise<void>;
+    abort(reason?: any): Promise<void>;
+    close(): Promise<void>;
+    releaseLock(): void;
+    write(chunk?: W): Promise<void>;
+}
+declare var WritableStreamDefaultWriter: {
+    prototype: WritableStreamDefaultWriter;
+    new <W = any>(stream: WritableStream<W>): WritableStreamDefaultWriter<W>;
+};
+interface WritableStreamDefaultController {
+    readonly signal: AbortSignal;
+    error(e?: any): void;
+}
+declare var WritableStreamDefaultController: {
+    prototype: WritableStreamDefaultController;
+    new (): WritableStreamDefaultController;
+};
+interface TransformStream<I = any, O = any> {
+    readonly readable: ReadableStream<O>;
+    readonly writable: WritableStream<I>;
+}
+declare var TransformStream: {
+    prototype: TransformStream;
+    new <I = any, O = any>(transformer?: Transformer<I, O>, writableStrategy?: QueuingStrategy<I>, readableStrategy?: QueuingStrategy<O>): TransformStream<I, O>;
+};
+interface TransformStreamDefaultController<O = any> {
+    readonly desiredSize: number | null;
+    enqueue(chunk?: O): void;
+    error(reason?: any): void;
+    terminate(): void;
+}
+declare var TransformStreamDefaultController: {
+    prototype: TransformStreamDefaultController;
+    new (): TransformStreamDefaultController;
+};
+interface GenericTransformStream {
+    readonly readable: ReadableStream;
+    readonly writable: WritableStream;
+}
+type CompressionFormat = "deflate" | "deflate-raw" | "gzip";
+interface CompressionStream extends GenericTransformStream {
+    readonly readable: ReadableStream<Uint8Array<ArrayBuffer>>;
+    readonly writable: WritableStream<BufferSource>;
+}
+declare var CompressionStream: {
+    prototype: CompressionStream;
+    new (format: CompressionFormat): CompressionStream;
+};
+interface DecompressionStream extends GenericTransformStream {
+    readonly readable: ReadableStream<Uint8Array<ArrayBuffer>>;
+    readonly writable: WritableStream<BufferSource>;
+}
+declare var DecompressionStream: {
+    prototype: DecompressionStream;
+    new (format: CompressionFormat): DecompressionStream;
+};
+
+// Blob (TypeScript's lib.dom.d.ts). The `endings` option is not
+// implemented, so not declared.
+type BlobPart = BufferSource | Blob | string;
+interface BlobPropertyBag {
+    type?: string;
+}
+interface Blob {
+    readonly size: number;
+    readonly type: string;
+    arrayBuffer(): Promise<ArrayBuffer>;
+    bytes(): Promise<Uint8Array<ArrayBuffer>>;
+    slice(start?: number, end?: number, contentType?: string): Blob;
+    stream(): ReadableStream<Uint8Array<ArrayBuffer>>;
+    text(): Promise<string>;
+}
+declare var Blob: {
+    prototype: Blob;
+    new (blobParts?: BlobPart[], options?: BlobPropertyBag): Blob;
+};
 
 // TextEncoder and TextDecoder (TypeScript's lib.dom.d.ts).
 type AllowSharedBufferSource = ArrayBufferLike | ArrayBufferView<ArrayBufferLike>;
@@ -838,6 +798,89 @@ interface TextEncoder extends TextEncoderCommon {
 declare var TextEncoder: {
     prototype: TextEncoder;
     new (): TextEncoder;
+};
+
+// performance and the user-timing entry classes (@types/node's
+// perf_hooks globals).
+interface PerformanceEntry {
+    readonly duration: number;
+    readonly entryType: string;
+    readonly name: string;
+    readonly startTime: number;
+    toJSON(): any;
+}
+declare var PerformanceEntry: {
+    prototype: PerformanceEntry;
+    new (): PerformanceEntry;
+};
+interface PerformanceMark extends PerformanceEntry {
+    readonly detail: any;
+}
+declare var PerformanceMark: {
+    prototype: PerformanceMark;
+    new (name: string, options?: PerformanceMarkOptions): PerformanceMark;
+};
+interface PerformanceMeasure extends PerformanceEntry {
+    readonly detail: any;
+}
+declare var PerformanceMeasure: {
+    prototype: PerformanceMeasure;
+    new (): PerformanceMeasure;
+};
+interface PerformanceMarkOptions {
+    detail?: unknown | undefined;
+    startTime?: number | undefined;
+}
+interface PerformanceMeasureOptions {
+    detail?: unknown | undefined;
+    duration?: number | undefined;
+    end?: number | string | undefined;
+    start?: number | string | undefined;
+}
+interface Performance {
+    readonly timeOrigin: number;
+    clearMarks(name?: string): void;
+    clearMeasures(name?: string): void;
+    clearResourceTimings(): void;
+    getEntries(): PerformanceEntry[];
+    getEntriesByName(name: string, type?: string): PerformanceEntry[];
+    getEntriesByType(type: string): PerformanceEntry[];
+    mark(name: string, options?: PerformanceMarkOptions): PerformanceMark;
+    measure(name: string, startMark?: string, endMark?: string): PerformanceMeasure;
+    measure(name: string, options: PerformanceMeasureOptions): PerformanceMeasure;
+    now(): number;
+    timerify<T extends (...params: any[]) => any>(fn: T, options?: { histogram?: any }): T;
+    toJSON(): any;
+}
+declare var Performance: {
+    prototype: Performance;
+    new (): Performance;
+};
+declare var performance: Performance;
+interface PerformanceObserverEntryList {
+    getEntries(): PerformanceEntry[];
+    getEntriesByName(name: string, type?: string): PerformanceEntry[];
+    getEntriesByType(type: string): PerformanceEntry[];
+}
+declare var PerformanceObserverEntryList: {
+    prototype: PerformanceObserverEntryList;
+    new (): PerformanceObserverEntryList;
+};
+type PerformanceObserverCallback = (list: PerformanceObserverEntryList, observer: PerformanceObserver) => void;
+interface PerformanceObserverInit {
+    entryTypes?: ReadonlyArray<string> | undefined;
+    type?: string | undefined;
+    buffered?: boolean | undefined;
+}
+interface PerformanceObserver {
+    disconnect(): void;
+    observe(options?: PerformanceObserverInit): void;
+    takeRecords(): PerformanceEntry[];
+}
+declare var PerformanceObserver: {
+    prototype: PerformanceObserver;
+    new (callback: PerformanceObserverCallback): PerformanceObserver;
+    readonly supportedstrings: ReadonlyArray<string>;
 };
 
 // EventTarget, Event, CustomEvent, AbortController and AbortSignal
@@ -944,25 +987,130 @@ declare var AbortSignal: {
     timeout(milliseconds: number): AbortSignal;
 };
 
+// MessageEvent, CloseEvent, ErrorEvent, WebSocket and EventSource
+// (TypeScript's lib.dom.d.ts; Node's are undici's: lib/node/kml_event_target.ts,
+// kml_websocket.ts and kml_eventsource.ts implement them). A message's
+// ports and source are `any`: MessagePort is not declared yet.
+interface MessageEventInit<T = any> extends EventInit {
+    data?: T;
+    lastEventId?: string;
+    origin?: string;
+    ports?: any[];
+    source?: any;
+}
+interface MessageEvent<T = any> extends Event {
+    readonly data: T;
+    readonly lastEventId: string;
+    readonly origin: string;
+    readonly ports: ReadonlyArray<any>;
+    readonly source: any;
+}
+declare var MessageEvent: {
+    prototype: MessageEvent;
+    new <T>(type: string, eventInitDict?: MessageEventInit<T>): MessageEvent<T>;
+};
+interface CloseEventInit extends EventInit {
+    code?: number;
+    reason?: string;
+    wasClean?: boolean;
+}
+interface CloseEvent extends Event {
+    readonly code: number;
+    readonly reason: string;
+    readonly wasClean: boolean;
+}
+declare var CloseEvent: {
+    prototype: CloseEvent;
+    new (type: string, eventInitDict?: CloseEventInit): CloseEvent;
+};
+interface ErrorEventInit extends EventInit {
+    colno?: number;
+    error?: any;
+    filename?: string;
+    lineno?: number;
+    message?: string;
+}
+interface ErrorEvent extends Event {
+    readonly colno: number;
+    readonly error: any;
+    readonly filename: string;
+    readonly lineno: number;
+    readonly message: string;
+}
+declare var ErrorEvent: {
+    prototype: ErrorEvent;
+    new (type: string, eventInitDict?: ErrorEventInit): ErrorEvent;
+};
+type BinaryType = "arraybuffer" | "blob";
+interface WebSocketEventMap {
+    "close": CloseEvent;
+    "error": Event;
+    "message": MessageEvent;
+    "open": Event;
+}
+interface WebSocket extends EventTarget {
+    binaryType: BinaryType;
+    readonly bufferedAmount: number;
+    readonly extensions: string;
+    onclose: ((this: WebSocket, ev: CloseEvent) => any) | null;
+    onerror: ((this: WebSocket, ev: Event) => any) | null;
+    onmessage: ((this: WebSocket, ev: MessageEvent) => any) | null;
+    onopen: ((this: WebSocket, ev: Event) => any) | null;
+    readonly protocol: string;
+    readonly readyState: 0 | 1 | 2 | 3;
+    readonly url: string;
+    close(code?: number, reason?: string): void;
+    send(data: BufferSource | Blob | string): void;
+    readonly CONNECTING: 0;
+    readonly OPEN: 1;
+    readonly CLOSING: 2;
+    readonly CLOSED: 3;
+    addEventListener<K extends keyof WebSocketEventMap>(type: K, listener: (this: WebSocket, ev: WebSocketEventMap[K]) => any, options?: boolean | AddEventListenerOptions): void;
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void;
+    removeEventListener<K extends keyof WebSocketEventMap>(type: K, listener: (this: WebSocket, ev: WebSocketEventMap[K]) => any, options?: boolean | EventListenerOptions): void;
+    removeEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions): void;
+}
+declare var WebSocket: {
+    prototype: WebSocket;
+    new (url: string | URL, protocols?: string | string[]): WebSocket;
+    readonly CONNECTING: 0;
+    readonly OPEN: 1;
+    readonly CLOSING: 2;
+    readonly CLOSED: 3;
+};
+interface EventSourceInit {
+    withCredentials?: boolean;
+}
+interface EventSourceEventMap {
+    "error": Event;
+    "message": MessageEvent;
+    "open": Event;
+}
+interface EventSource extends EventTarget {
+    onerror: ((this: EventSource, ev: Event) => any) | null;
+    onmessage: ((this: EventSource, ev: MessageEvent) => any) | null;
+    onopen: ((this: EventSource, ev: Event) => any) | null;
+    readonly readyState: number;
+    readonly url: string;
+    readonly withCredentials: boolean;
+    close(): void;
+    readonly CONNECTING: 0;
+    readonly OPEN: 1;
+    readonly CLOSED: 2;
+    addEventListener<K extends keyof EventSourceEventMap>(type: K, listener: (this: EventSource, ev: EventSourceEventMap[K]) => any, options?: boolean | AddEventListenerOptions): void;
+    addEventListener(type: string, listener: (this: EventSource, event: MessageEvent) => any, options?: boolean | AddEventListenerOptions): void;
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void;
+    removeEventListener<K extends keyof EventSourceEventMap>(type: K, listener: (this: EventSource, ev: EventSourceEventMap[K]) => any, options?: boolean | EventListenerOptions): void;
+    removeEventListener(type: string, listener: (this: EventSource, event: MessageEvent) => any, options?: boolean | EventListenerOptions): void;
+    removeEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions): void;
+}
+declare var EventSource: {
+    prototype: EventSource;
+    new (url: string | URL, eventSourceInitDict?: EventSourceInit): EventSource;
+    readonly CONNECTING: 0;
+    readonly OPEN: 1;
+    readonly CLOSED: 2;
+};
+
 // Node's `util` module: the code-generated part (@types/node's util.d.ts
 // `format` and `inspect`); `promisify` is lib/node/internal_util.ts.
-declare module "util" {
-    export interface InspectOptions {
-        showHidden?: boolean | undefined;
-        depth?: number | null | undefined;
-        colors?: boolean | undefined;
-        customInspect?: boolean | undefined;
-        showProxy?: boolean | undefined;
-        maxArrayLength?: number | null | undefined;
-        maxStringLength?: number | null | undefined;
-        breakLength?: number | undefined;
-        compact?: boolean | number | undefined;
-        sorted?: boolean | ((a: string, b: string) => number) | undefined;
-        getters?: "get" | "set" | boolean | undefined;
-        numericSeparator?: boolean | undefined;
-    }
-    export function format(format?: any, ...param: any[]): string;
-    export function inspect(object: any, showHidden?: boolean, depth?: number | null, color?: boolean): string;
-    export function inspect(object: any, options?: InspectOptions): string;
-}
-

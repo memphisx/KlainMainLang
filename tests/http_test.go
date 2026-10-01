@@ -257,7 +257,7 @@ func TestE2EHTTPCreateServerNodeShape(t *testing.T) {
 	src := `
 import http from 'http'
 http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
-  res.setHeader("X-Method", req.method)
+  res.setHeader("X-Method", req.method!)
   res.writeHead(201, { "Content-Type": "text/plain" })
   res.write("part1;")
   res.end("part2")
@@ -2432,7 +2432,7 @@ async function proxy(path: string): Promise<string> {
   return await r.text()
 }
 const server = http2.createServer(async (req, res) => {
-  const v = await proxy(req.path)
+  const v = await proxy(req.url)
   res.writeHead(200)
   res.end("front:" + v)
 })
@@ -3462,7 +3462,7 @@ func TestE2EHTTP2ModuleCreateServer(t *testing.T) {
 import http2 from 'http2'
 const server = http2.createServer((req, res) => {
   res.writeHead(200)
-  res.end("h2mod:" + req.path)
+  res.end("h2mod:" + req.url)
 })
 server.listen(8983)
 `
@@ -3488,8 +3488,8 @@ func TestE2EHTTP2MultiInstanceH2C(t *testing.T) {
 	pa, pb := freePort(t), freePort(t)
 	src := `
 import http2 from 'http2'
-const a = http2.createServer((req, res) => { res.writeHead(200); res.end("A:" + req.path) })
-const b = http2.createServer((req, res) => { res.writeHead(200); res.end("B:" + req.path) })
+const a = http2.createServer((req, res) => { res.writeHead(200); res.end("A:" + req.url) })
+const b = http2.createServer((req, res) => { res.writeHead(200); res.end("B:" + req.url) })
 a.listen(19901, () => { b.listen(19902, () => { console.log("ready") }) })
 `
 	src = strings.ReplaceAll(src, "19901", fmt.Sprintf("%d", pa))
@@ -3594,7 +3594,7 @@ const cert = "%s"
 const key = "%s"
 const server = http2.createSecureServer({ cert: cert, key: key }, (req, res) => {
   res.writeHead(200)
-  res.end("h2tls:" + req.method + ":" + req.path)
+  res.end("h2tls:" + req.method + ":" + req.url)
 })
 server.listen(8985)
 `, certLit, keyLit)
@@ -3609,13 +3609,14 @@ server.listen(8985)
 		t.Errorf("h2-tls GET: got %q, want %q", got, "h2tls:GET:/hello|2")
 	}
 
-	// A 1.1-only TLS client offers no h2 ALPN — createSecureServer is h2-only
-	// (Node's allowHTTP1:false default), so the connection is dropped without a
-	// response. curl exits non-zero; the server must survive to serve h2 again.
-	_, err = exec.Command(nativeCurl(), "-sk", "--http1.1", "--max-time", "3",
+	// A 1.1-only TLS client negotiates no ALPN protocol — createSecureServer
+	// is h2-only (Node's allowHTTP1:false default), so the connection gets
+	// Node's `403 Forbidden` explanation and ends; the server must survive
+	// to serve h2 again.
+	out, err = exec.Command(nativeCurl(), "-sk", "--http1.1", "--max-time", "3",
 		fmt.Sprintf("https://127.0.0.1:%d/one", port)).CombinedOutput()
-	if err == nil {
-		t.Errorf("1.1-only TLS client: want rejection, got success")
+	if !strings.Contains(string(out), "Missing ALPN Protocol, expected `h2` to be available.") {
+		t.Errorf("1.1-only TLS client: want Node's 403 explanation, got %q (%v)", out, err)
 	}
 	out, err = exec.Command(nativeCurl(), "-sk", "--http2",
 		fmt.Sprintf("https://127.0.0.1:%d/after", port), "-w", "|%{http_version}").CombinedOutput()
@@ -3949,7 +3950,7 @@ const cert = "%s"
 const key = "%s"
 const server = http2.createSecureServer({ cert: cert, key: key, allowHTTP1: true }, (req, res) => {
   res.writeHead(200)
-  res.end("both:" + req.method + ":" + req.path)
+  res.end("both:" + req.method + ":" + req.url)
 })
 server.listen(8988)
 `, certLit, keyLit)
@@ -4064,7 +4065,7 @@ server.on('stream', mustCall((stream, headers) => {
   stream.end("srv:" + headers[':path'])
 }))
 server.listen(0, mustCall(() => {
-  const client = http2.connect("http://127.0.0.1:" + server.address().port)
+  const client = http2.connect("http://127.0.0.1:" + (server.address() as any).port)
   const req = client.request({ ':path': '/from-client' })
   let data = ""
   req.on('response', mustCall((headers) => {
@@ -4098,7 +4099,7 @@ server.on('stream', (stream, headers) => {
   stream.end("tok=" + headers['x-token'])
 })
 server.listen(0, () => {
-  const client = http2.connect("http://127.0.0.1:" + server.address().port)
+  const client = http2.connect("http://127.0.0.1:" + (server.address() as any).port)
   const req = client.request({ ':path': '/t', 'x-token': 'abc123' })
   req.on('data', (c: string) => { console.log("body", c) })
   req.on('end', () => { client.close(); server.close() })

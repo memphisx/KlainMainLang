@@ -61,8 +61,8 @@ func restElem(rest Type) Type {
 // passed to a fixed parameter of type sp: the same scalar storage, or a
 // dynamic element unboxed (or a concrete one boxed) across the boundary.
 func spreadConvertible(te, sp Type) bool {
-	if sp.IsArray && te.IsDynamic {
-		return true // the box's array (emitUnboxBoxToType)
+	if (sp.IsArray || isNullableScalar(sp)) && te.IsDynamic {
+		return true // the box's array or optional scalar (emitUnboxBoxToType)
 	}
 	if sp.IsArray || te.IsArray || isNullableScalar(sp) || isNullableScalar(te) {
 		return false
@@ -106,16 +106,30 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 		// target rest tail can supply them (`(a, b) => …` where `(...args:
 		// any[]) => void` is expected), each spread from it by position.
 		if tRest == nil || sRest != nil {
-			return false, false
+			// Not spreadable by the direct adapter; the calling conventions
+			// still differ, so the conversion goes through the box.
+			return true, false
 		}
 		needed = true
 		te := restElem(*tRest)
-		for _, sp := range sFixed[len(tFixed):] {
+		for j, sp := range sFixed[len(tFixed):] {
 			if !spreadConvertible(te, sp) {
+				supported = false
+			}
+			// A parameter the tail may not supply, with a default: the boxed
+			// closure's call fills it (with the earlier parameters in scope).
+			k := len(tFixed) + j
+			if (k < len(src.FuncParamDefaults) && src.FuncParamDefaults[k] != nil) ||
+				(k < len(src.FuncBodyDefaults) && src.FuncBodyDefaults[k] != nil) {
 				supported = false
 			}
 		}
 		sFixed = sFixed[:len(tFixed)]
+	}
+	if len(sFixed) < len(tFixed) && sRest != nil {
+		// The target passes fixed arguments the source takes in its rest
+		// tail: packed through the box.
+		return true, false
 	}
 	for i := range sFixed {
 		sp, tp := sFixed[i], tFixed[i]
@@ -128,6 +142,12 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 			if !adapterConvertible(concrete) {
 				supported = false
 			}
+		} else if funcParamNeedsAdapt(sp, tp) {
+			// A callback parameter whose function type differs (the caller
+			// passes a `(err?) => void` where the source takes `() => void`):
+			// the argument is converted in turn (coerce, through the box when
+			// the direct adapter does not take it).
+			needed = true
 		} else if storageIR(sp) != storageIR(tp) || sp.IsArray != tp.IsArray {
 			// A concrete-vs-concrete shape mismatch isn't this adapter's job
 			// (and shouldn't type-check upstream anyway).
@@ -182,6 +202,16 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 	return needed, supported
 }
 
+// funcParamNeedsAdapt reports a function-typed parameter pair whose argument
+// (of the target's parameter type tp) needs converting to the source's sp.
+func funcParamNeedsAdapt(sp, tp Type) bool {
+	if !sp.IsFunc || !tp.IsFunc || sp.IsDynamic || tp.IsDynamic {
+		return false
+	}
+	needed, _ := funcAdapterPlan(tp, sp)
+	return needed
+}
+
 // adapterSigParams appends the LLVM parameter declarations for ty at
 // position i (arrays split into ptr+len; a rest slot is its (ptr, len)
 // buffer) and returns the value-reference strings for reading them back.
@@ -201,25 +231,67 @@ func adapterSigParams(sig *[]string, ty Type, i int, isRest bool) (refs []string
 // {adapter, originalHeader}, returning the adapted Value typed as tgt.
 // ok=false (nothing emitted into the caller's body) when a conversion turns
 // out unsupported mid-build — the caller falls back to passthrough.
+// emitBoxedClosureAs is orig as a closure of type tgt through its box: the
+// dynamic ABI converts every parameter kind, so this serves a conversion the
+// direct adapter does not take.
+func (e *Emitter) emitBoxedClosureAs(orig Value, tgt Type) (Value, bool) {
+	if orig.Ty.IsDynamic || tgt.IsDynamic {
+		return Value{}, false
+	}
+	boxed, err := e.emitBoxValue(orig)
+	if err != nil {
+		return Value{}, false
+	}
+	return e.emitAnyToClosure(boxed, tgt)
+}
+
 func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 	src := orig.Ty
+	// A `this: T` function into a function type without `this` (a listener
+	// slot): its box, which keeps the receiver a dynamic call passes (an
+	// emitter's `this`), behind a thunk of the target type; boxing the thunk
+	// again gives back that same function.
+	if src.FuncThis && !tgt.FuncThis {
+		if c, ok := e.emitBoxedClosureAs(orig, tgt); ok {
+			return c, true
+		}
+	}
 	e.closureAdaptCtr++
 	name := fmt.Sprintf("@__kml_fnadapt_%d", e.closureAdaptCtr)
 	// The adapter's env is the original header: it is that function (TDD-00229).
 	e.registerFnMeta(name, "", 0, fnFlagThroughEnv)
 
+	// Unpack the original closure header (our env).
+	callee := func() (string, string) {
+		fpp, fp := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", fpp))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpp))
+		epp, ep := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", epp))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
+		return fp, ep
+	}
+	if !e.emitAdapterFunc(name, src, tgt, callee) {
+		return Value{}, false
+	}
+
+	e.ensureMalloc()
+	hdr := e.buildBuiltinClosure(name, orig.Ref)
+	return Value{Ref: hdr, Ty: tgt}, true
+}
+
+// emitAdapterFunc emits function name with the target type's caller ABI
+// (`ptr %env` first), converting each argument to the source type's callee
+// ABI and its result back. callee emits the callee and the first argument
+// it takes (a closure's code and env, or a method and its receiver);
+// false when a conversion is not one the adapter takes.
+func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp string, first string)) bool {
 	sFixed, sRest := restOf(src)
 	tFixed, tRest := restOf(tgt)
 
 	restore := e.beginThunkEmit()
 
-	// Unpack the original closure header (our env).
-	fpp, fp := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", fpp))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpp))
-	epp, ep := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", epp))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
+	fp, ep := callee()
 
 	// Adapter signature (the target type's caller ABI) + converted call
 	// arguments (the source type's callee ABI).
@@ -233,6 +305,9 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 		}
 		sp := sFixed[i]
 		switch {
+		case funcParamNeedsAdapt(sp, tp):
+			v := e.coerce(Value{Ref: refs[0], Ty: tp}, sp)
+			argParts = append(argParts, "ptr "+v.Ref)
 		case sp.IsDynamic == tp.IsDynamic:
 			if sp.IsArray {
 				argParts = append(argParts, "ptr "+refs[0], "i64 "+refs[1])
@@ -365,15 +440,12 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 	body := e.allocas.String() + e.body.String()
 	restore()
 	if !buildOK {
-		return Value{}, false
+		return false
 	}
 
 	e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n%s}\n",
 		tr.LLVMRetType(), name, strings.Join(sigParts, ", "), body))
-
-	e.ensureMalloc()
-	hdr := e.buildBuiltinClosure(name, orig.Ref)
-	return Value{Ref: hdr, Ty: tgt}, true
+	return true
 }
 
 // spreadRestArg reads element k of a rest tail (header pointer hdr holding

@@ -265,8 +265,8 @@ func (e *Emitter) emitBlobProp(blobVal Value, prop string, pos ast.Pos) (Value, 
 
 // emitBlobCall dispatches blob.<method>(...). All results are copies — the
 // Blob itself is immutable. .arrayBuffer()/.bytes()/.text() return
-// already-resolved values (awaiting them is the non-promise identity
-// pass-through, the same shape Response's body readers use).
+// promises of the copy, settled as Node's reader settles them
+// (emitBlobReadPromise).
 func (e *Emitter) emitBlobCall(mem *ast.MemberExpression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	blobVal, err := e.emitExpr(mem.Object)
 	if err != nil {
@@ -332,7 +332,7 @@ func (e *Emitter) emitBlobCall(mem *ast.MemberExpression, method string, args []
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", slot, abData))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", copyRef, slot))
-		return Value{Ref: abData, Ty: ArrayBufferType()}, nil
+		return e.emitBlobReadPromise(Value{Ref: abData, Ty: ArrayBufferType()}, size, 0), nil
 
 	case "bytes":
 		copyRef := e.emitBlobCopyData(size, data)
@@ -340,22 +340,20 @@ func (e *Emitter) emitBlobCall(mem *ast.MemberExpression, method string, args []
 		r1 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, copyRef))
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, size))
-		return Value{Ref: r1, Ty: TypedArrayType("uint8")}, nil
+		return e.emitBlobReadPromise(Value{Ref: r1, Ty: TypedArrayType("uint8")}, size, 1), nil
 
 	case "text":
 		// Copy + NUL-terminate (an embedded NUL truncates the string — the
 		// same caveat every string boundary in this compiler has).
-		e.ensureMalloc()
+		e.ensureStrHeaderRuntime()
 		e.ensureMemcpy()
 		buf := e.freshReg()
-		n1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", n1, size))
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, n1))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_alloc(i64 %s)", buf, size))
 		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, data, size))
 		nulSlot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", nulSlot, buf, size))
 		e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", nulSlot))
-		return Value{Ref: buf, Ty: TypePtr}, nil
+		return e.emitBlobReadPromise(Value{Ref: buf, Ty: TypePtr}, size, 1), nil
 
 	case "stream":
 		// A ReadableStream<Uint8Array> over the blob's bytes: a single owned-copy
@@ -404,4 +402,34 @@ func (e *Emitter) emitBlobCopyData(sizeRef, dataRef string) string {
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", c, sizeRef))
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", c, dataRef, sizeRef))
 	return c
+}
+
+// emitBlobReadPromise is the promise a Blob reader returns, fulfilled with
+// v when Node's would be: arrayBuffer() pulls the blob through its reader,
+// one microtask hop per chunk read before the end (one chunk here, none for
+// an empty blob); text() and bytes() are that promise's `.then`, one hop
+// more (extra).
+func (e *Emitter) emitBlobReadPromise(v Value, size string, extra int64) Value {
+	e.ensurePromiseSettle()
+	e.ensurePromiseDeferSettle()
+	q := e.emitAllocSettledPromise()
+	e.storePromiseValue(q, v)
+	empty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", empty, size))
+	hops := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %d", hops, empty, extra, 1+extra))
+	now := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", now, hops))
+	nowL, laterL, doneL := e.freshLabel("blob.settle"), e.freshLabel("blob.defer"), e.freshLabel("blob.read")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", now, nowL, laterL))
+	e.emitLabel(nowL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(laterL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_defer_settle(ptr %s, i64 1, i64 %s)", q, hops))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	t := PromiseOf(v.Ty)
+	t.PromiseTask = true
+	return Value{Ref: q, Ty: t}
 }

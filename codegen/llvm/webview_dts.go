@@ -78,8 +78,8 @@ func tsTypeString(ty Type) string {
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
 	case ty.IsObject:
-		parts := make([]string, len(ty.Fields))
-		for i, f := range ty.Fields {
+		parts := make([]string, len(ty.UserFields()))
+		for i, f := range ty.UserFields() {
 			parts[i] = fmt.Sprintf("%s: %s", f.Name, tsTypeString(f.Ty))
 		}
 		return "{ " + strings.Join(parts, "; ") + " }"

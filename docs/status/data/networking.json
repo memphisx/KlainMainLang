@@ -27,40 +27,55 @@
             "feature": "`fetch(url)` / `fetch(url, init)` / `fetch(request)`",
             "status": "implemented",
             "caveats": [
-              "Setting a `body` without an explicit `method` sends it as `POST` (libcurl's `CURLOPT_POSTFIELDS` implies `POST` unless overridden); an explicit `method` always wins over that default",
-              "A fetch carrying an `AbortSignal` resolves at completion, not headers ([ADR-00299](../adr/ADR-00299.md))"
+              "A network failure rejects with a `TypeError` whose message is libcurl's (`Couldn't connect to server`); Node's is `fetch failed`, with the reason as its `cause`"
             ],
             "notes": [
-              "`init` is any value with some subset of `method: string` / `headers: Map<string,string> \\| Headers` / `body: string` fields; a real `Request` object works as the sole argument too, destructured the same way",
+              "`init` is a `RequestInit`: a literal, an options object of another shape, or an `init?: RequestInit` parameter. `body` is any BodyInit, read as undici reads it — a string, `URLSearchParams`, `Blob`, `ArrayBuffer` or TypedArray/Buffer, with the Content-Type each implies (none for bytes); `headers` is any HeadersInit. A body on a GET/HEAD request rejects with Node's TypeError ([ADR-01217](../adr/ADR-01217.md)); a real `Request` object works as the sole argument too",
               "Non-blocking I/O ([ADR-00050](../adr/ADR-00050.md)): uses libcurl's multi-interface, driven by the same `select()`-based event loop `http.listen` uses, so `await fetch(...)` inside a connection-handler fiber yields — a slow upstream call doesn't stall other connections or timers",
               "At module top level `await fetch(...)` takes turns of that same event loop until the response arrives — timers, sockets, child processes and an in-process server keep being served meanwhile, as when Node suspends a module at its `await` — and inside any async function, arrow or method it parks a coroutine; the loop sleeps in `select()` on libcurl's sockets either way ([TDD-00223](../tdd/TDD-00223.md)/[ADR-01023](../adr/ADR-01023.md))",
               "A network-level failure (DNS, connection refused, TLS, timeout) throws; a non-2xx HTTP status still resolves normally (`.ok` distinguishes it), matching real `fetch`",
-              "`await fetch(...)` resolves when the response **headers** arrive (as in real JS, [ADR-00299](../adr/ADR-00299.md)); the body is read lazily — `.text()`/`.json()`/`.arrayBuffer()` drive the transfer to completion, `.body` streams it. A signal-carrying fetch still resolves at completion (its abort machinery lives in the full await)"
+              "`await fetch(...)` resolves when the response **headers** arrive (as in real JS, [ADR-00299](../adr/ADR-00299.md)); the body is read lazily — `.text()`/`.json()`/`.arrayBuffer()` drive the transfer to completion, `.body` streams it. A signal-carrying fetch resolves at headers too, and an abort mid-body errors the body stream ([ADR-01205](../adr/ADR-01205.md))"
             ]
           },
           {
             "feature": "`Response` (`.status`, `.ok`, `.headers`, `.body`, `.text()`, `.json()`, `.arrayBuffer()`)",
             "status": "implemented",
             "caveats": [
-              "`.text()`/`.json()` are null-terminated strings — a binary body truncates at the first embedded null byte; use `.arrayBuffer()` for a binary body",
-              "`.text()` after consuming `.body` returns `\"\"` instead of the spec's already-disturbed TypeError; `Object.keys`/JSON of a Response expose an internal `__kml_pending` field"
+              "`.text()`/`.json()` are null-terminated strings — a binary body truncates at the first embedded null byte; use `.arrayBuffer()` for a binary body"
             ],
             "notes": [
-              "`.text()`/`.json()`/`.arrayBuffer()` return a real `Promise<T>` you `await` — a genuine thenable, so `.then(...)` and `Promise.all([...])` work on them ([ADR-00794](../adr/ADR-00794.md)); a typed declaration `const p: T = await r.json()` still parses straight into `T` (the shared `JSON.parse`-style projection carve-out)",
+              "`.text()`/`.json()`/`.arrayBuffer()` return a real `Promise<T>` you `await` — a genuine thenable, so `.then(...)` and `Promise.all([...])` work on them ([ADR-00794](../adr/ADR-00794.md)); a typed declaration `const p: T = await r.json()` parses into `T`",
               "`.json()` reuses `JSON.parse`'s full machinery: it validates the body (a non-JSON body throws a catchable `SyntaxError`) and projects nested objects, array/object-array fields, and top-level `T[]`; an `any`/`unknown` target keeps the whole tree dynamic. See [ADR-00223](../adr/ADR-00223.md), [ADR-00224](../adr/ADR-00224.md), [ADR-00622](../adr/ADR-00622.md)",
               "The body promise settles off the fetch reactor's completion ([ADR-00823](../adr/ADR-00823.md)): a `.json()` parse error is a promise *rejection* (reachable via `.then`'s onRejected / `.catch`), and the download overlaps intervening work rather than being driven to done at the accessor call",
-              "Plain object with `status`/`ok` fields plus `text()`/`json()`/`arrayBuffer()` methods; `.body` is a real `ReadableStream<Uint8Array>` fed incrementally from libcurl's write callback with backpressure via curl pause/unpause ([TDD-00097](../tdd/TDD-00097.md) Stage 4, [ADR-00299](../adr/ADR-00299.md)) — on an already-completed transfer it replays the buffered bytes as one chunk",
+              "Plain object with `status`/`ok` fields plus `text()`/`json()`/`arrayBuffer()` methods; `.body` is a real `ReadableStream<Uint8Array>` fed incrementally from libcurl's write callback with backpressure via curl pause/unpause ([TDD-00097](../tdd/TDD-00097.md) Stage 4, [ADR-00299](../adr/ADR-00299.md)); every read is the same stream, and after a body method it is the consumed (locked) one",
+              "`bodyUsed`; a used or locked body makes a body method reject with Node's \"Body is unusable\" TypeError ([ADR-01197](../adr/ADR-01197.md))",
               "`.arrayBuffer()` ([ADR-00094](../adr/ADR-00094.md)) carries the real byte count and comes back whole regardless of content",
+              "`.statusText` is the server's reason phrase, `.type` is `\"basic\"`; an untyped `await res.json()` is `any`; a Response has no own enumerable properties ([ADR-01190](../adr/ADR-01190.md))",
               "Every string in this compiler is a plain null-terminated C string (`.length` is `strlen`-based), so any string value with an embedded `\\0` reads as shorter than it actually is; `.text()`/`.json()` keep that behavior by design (JSON/text bodies aren't expected to legitimately contain embedded nulls) — use `.arrayBuffer()` for a binary body (see [BINARY-DATA-TYPED-ARRAYS.md](BINARY-DATA-TYPED-ARRAYS.md))"
+            ]
+          },
+          {
+            "feature": "`new Response(body, init)` / `Response.json()` / `Response.redirect()` / `Response.error()`",
+            "status": "implemented",
+            "caveats": [
+              "A stream body must be a `ReadableStream<Uint8Array>`: a stream of `any` chunks is rejected at compile time"
+            ],
+            "notes": [
+              "A string, typed array, ArrayBuffer, Blob or URLSearchParams body, with the content type it implies unless `init.headers` sets one; `init`'s `status` (a RangeError outside 200–599), `statusText` and `headers`; a body with a null-body status is Node's TypeError. `Response.json` sets `application/json`, `Response.redirect` validates the status and serializes the URL into `Location`, `Response.error()` is status 0 with type `\"error\"` ([ADR-01190](../adr/ADR-01190.md))",
+              "A `ReadableStream<Uint8Array>` body is `.body` itself and is read to its end by a body method; without a body `.body` is `null` ([ADR-01197](../adr/ADR-01197.md))"
             ]
           },
           {
             "feature": "`Request` / `Headers` objects",
             "status": "implemented",
+            "caveats": [
+              "`Headers` keeps names lowercased (console.log shows `'content-type'` where Node keeps the given case), iterates in insertion order rather than sorted by name, and joins repeated `set-cookie` values instead of listing them"
+            ],
             "notes": [
               "Real classes, not just `fetch`'s plain-object `init` (which still works unchanged)",
+              "`new Headers(init)` and the `headers` of fetch's, Request's and Response's `init` take a Headers, a `Map<string, string>`, a record of strings or `[name, value]` pairs ([ADR-01190](../adr/ADR-01190.md))",
               "`Headers` is a case-insensitive (lowercased-key) wrapper: `get`/`set`/`has`/`delete` behave like `Map<string,string>`'s own (because storage-wise it *is* one), plus `append(name, value)`, which combines with a comma if `name` is already present instead of overwriting",
-              "`new Request(url)` / `new Request(url, init)` builds a plain object (`url`/`method`/`headers`/`body`, all readable directly) — `method` defaults to `\"GET\"`, `headers` to an empty `Headers`, `body` to `null`",
+              "`new Request(url)` / `new Request(url, init)`: `url`/`method`/`headers` plus the Body members (`.body` stream, `bodyUsed`, `text()`/`json()`/`arrayBuffer()`) — `method` defaults to `\"GET\"` (standard methods case-normalized), `headers` to an empty `Headers`, `body` to `null`; the body is any BodyInit, copied, with the Content-Type it implies, and a GET/HEAD request with a body is a TypeError ([ADR-01197](../adr/ADR-01197.md), [ADR-01217](../adr/ADR-01217.md))",
               "Reverses [ADR-00074](../adr/ADR-00074.md)'s original decision to reject these — see [ADR-00130](../adr/ADR-00130.md)",
               "`http.listen`'s own server-side request-object type annotation is `HttpRequest`, not `Request` — freed up by this change (see the ADR for why)"
             ]
@@ -69,26 +84,24 @@
             "feature": "`WebSocket`",
             "status": "implemented",
             "caveats": [
-              "The client `wss://` handshake is blocking and verifies the cert (SNI on, no `rejectUnauthorized` opt-out) ([TDD-00039](../tdd/TDD-00039.md))",
-              "A binary message's `ev.data` is the `strlen`-terminated string view (truncates at an embedded NUL) — byte-exact payload via `ev.dataBytes(): ArrayBuffer`; the spec's `ev.data: string | ArrayBuffer` union isn't used (`ArrayBuffer` not yet an allowed union member)",
-              "`.close()` on either side doesn't wait for the peer's own echo back before actually closing (a deliberate simplification)",
-              "The client connect + handshake runs *synchronously* before the constructor returns; `.onopen`/`.onerror` are deferred to the first event-loop pass after construction rather than fired inline"
+              "The client offers no `permessage-deflate` extension (Node's does), so `extensions` is always `''`",
+              "klain:ws's server `.close()` ends the connection without waiting for the peer's close frame"
             ],
             "notes": [
               "Both server and client",
+              "Client: the global `WebSocket` as Node's (undici's), written in TypeScript over `net`/`tls` ([TDD-00232](../tdd/TDD-00232.md), [ADR-01208](../adr/ADR-01208.md)) — `CONNECTING` at construction and the handshake on the event loop, `binaryType` (`'blob'` by default, or `'arraybuffer'`), `MessageEvent`/`CloseEvent`/`ErrorEvent`, `addEventListener`, `protocol`/`extensions`/`bufferedAmount`, a protocol list, `send` of a string, an `ArrayBuffer`, a view or a `Blob` (in order), `close(code, reason)` with the spec's validation and the closing handshake (`wasClean`), UTF-8 checking of text frames, ping answered with pong",
               "Server: attach klain:ws's `new WebSocketServer({ server })` to an `http.createServer` (`ws://`) or `https.createServer` (**`wss://`**) server, then `wss.on('connection', socket => …)` gives a `WSConnection` (`.onmessage`/`.send(data)`/`.close()`) per upgraded connection, coexisting with ordinary HTTP; a client `ping` gets an automatic `pong` with identical payload (RFC 6455 §5.5.2), and both a peer `close` frame and `.close()` itself send a proper Close frame before the connection ends (RFC 6455 §5.5.1). `wss://` falls out because the frame I/O rides the TLS connection ([TDD-00158](../tdd/TDD-00158.md)). The raw Node `server.on('upgrade', (req, socket, head) => …)` event is available too, for a hand-rolled or non-WebSocket upgrade",
-              "Binary frames both directions ([TDD-00160](../tdd/TDD-00160.md)): `.send()` takes a `string` (text frame) or an `ArrayBuffer`/`Uint8Array` (binary frame); a received message carries `ev.isBinary` and a byte-exact `ev.dataBytes(): ArrayBuffer` alongside the `ev.data` string view",
-              "A failed connect never throws (`.onerror`/`.onclose` fire instead, matching real `WebSocket`)",
+              "klain:ws server binary frames ([TDD-00160](../tdd/TDD-00160.md)): `.send()` takes a `string` (text frame) or an `ArrayBuffer`/`Uint8Array` (binary frame); a received message carries `ev.isBinary` and a byte-exact `ev.dataBytes()` alongside the `ev.data` string",
+              "A failed connect never throws: `error`, then `close` with 1006, as Node's",
               "See [TDD-00039](../tdd/TDD-00039.md) and [TDD-00158](../tdd/TDD-00158.md)"
             ]
           },
           {
             "feature": "`EventSource`",
             "status": "implemented",
-            "caveats": [
-              "A `retry:`-driven reconnect replays the *full* stored `Last-Event-ID`, not a per-listener value"
-            ],
+            "caveats": [],
             "notes": [
+              "Node's (undici's) `EventSource` — behind `--experimental-eventsource` in Node — written in TypeScript over `fetch` ([TDD-00232](../tdd/TDD-00232.md), [ADR-01208](../adr/ADR-01208.md)); events are `MessageEvent`s (`data`, `lastEventId`, `origin`)",
               "Server-sent events (SSE) over HTTP — connection plumbing (`readyState`/`close()`), `onmessage`/`onopen`/`onerror`, `addEventListener`/`removeEventListener` for named (`event: name`) records (`data`/`event`/`id`/`retry` field parsing, multi-line `data:` concatenation), `\\n\\n`/`\\r\\n\\r\\n`/bare-`\\r\\r` record boundaries, and auto-reconnect (retries after a dropped connection or network-level connect failure, honoring a server-sent `retry:` delay — default 3000ms — and replaying `Last-Event-ID` as a request header) all work",
               "A response that *arrives* with the wrong shape (non-2xx status, or a 2xx with a `Content-Type` that isn't `text/event-stream`) fails permanently instead of retrying, matching the real spec's distinction between a network failure (retryable) and a malformed response (terminal); the `Content-Type` prefix match is case-insensitive, matching HTTP's case-insensitive header semantics ([ADR-00555](../adr/ADR-00555.md))",
               "See [TDD-00038](../tdd/TDD-00038.md)"

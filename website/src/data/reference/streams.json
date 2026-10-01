@@ -4,7 +4,7 @@
   "kind": "node",
   "statusPage": "STREAMS.md",
   "coversRows": "all",
-  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "2/9", "strictPct": 22 },
+  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "3/9", "strictPct": 33 },
   "lede": "Two stream worlds live here. The WHATWG classes (ReadableStream/WritableStream/TransformStream, plus Compression/Decompression) run on the promise/microtask runtime alone — no fibers or libcurl for in-memory pipelines. Node's stream module (Readable/Writable/Duplex/Transform/PassThrough, pipeline/finished, duplexPair) is Node v24's own implementation ported to TypeScript and compiled with the program, so its event order follows Node's. The recurring divergences: a synchronously-throwing pull/start/write of a web stream propagates to the caller instead of erroring the stream, an array/tuple-chunk closed-stream read still yields a zero-shaped value rather than undefined, an omitted error argument to a Node stream callback arrives as null rather than undefined, and fs/http hand out their own stream handles rather than instances of the Node classes.",
   "entries": [
     {
@@ -104,16 +104,15 @@
       "statusRow": "stream.Readable / .Writable / .Duplex / .Transform / .PassThrough",
       "signature": "new Readable({ read() { this.push(chunk) } }); class X extends Writable { _write(chunk, encoding, callback) {} }",
       "badge": "caveats",
-      "description": "Node's stream classes, ported from Node v24's own implementation to TypeScript and compiled with the program: the same states, event order and process.nextTick deferrals. The options form binds this to the stream, subclasses override _read/_write/_transform/_final/_destroy, chunks are Buffers (or strings with setEncoding, or any value in object mode), and Readable.from/.toWeb/.fromWeb bridge to arrays and web streams.",
+      "description": "Node's stream classes, ported from Node v24's own implementation to TypeScript and compiled with the program: the same states, event order and process.nextTick deferrals. The options form binds this to the stream, subclasses override _read/_write/_transform/_final/_destroy, chunks are Buffers (or strings with setEncoding, or any value in object mode), and Readable.from/.toWeb/.fromWeb bridge to iterables, async iterables and web streams. The readable operators (map with concurrency, filter, flatMap, drop, take, forEach, toArray, some, every, find, reduce), the signal option and addAbortSignal, Duplex.from and compose are Node's own.",
       "returns": { "type": "Readable | Writable | Transform | PassThrough", "desc": "A Node stream." },
       "exampleKey": "streams/class_extends",
       "snippet": "class Greeter extends Readable {\n  words: string[] = [\"kalimera\", \"kosme\", \"apo\", \"thessaloniki\"]\n  i: number = 0\n  constructor() { super({ objectMode: true }) }\n  _read() {\n    if (this.i >= this.words.length) { this.push(null) }\n    else { this.push(this.words[this.i]); this.i = this.i + 1 }\n  }\n}",
       "differences": [
         "An omitted error argument reaches a callback declared `(err?: Error | null)` as `null`; Node passes `undefined`",
-        "`Readable.from` takes an array, a string or a Buffer; a generator or other iterable is not supported",
         "The fs streams and the HTTP server's `req`/`res` are separate runtime handles, not instances of these classes",
         "`Readable.toWeb` has no pull backpressure; `Duplex.toWeb`/`fromWeb` are missing",
-        "Not ported: `compose`, `addAbortSignal`, the readable operators (`map`/`filter`/`toArray`/…), `Readable.wrap`, `Duplex.from`, `isReadable`/`isErrored`/`setDefaultHighWaterMark`, the `signal` option",
+        "Not ported: `Readable.wrap`, `isReadable`/`isErrored`/`setDefaultHighWaterMark`",
         "A method replaced on an instance (`this._read = fn`) is not supported; pass it in the options"
       ],
       "seeAlso": ["streams.streampipeline", "streams.duplexpair", "streams.readablestream"],
@@ -124,14 +123,11 @@
       "name": "stream.pipeline() / .finished()",
       "statusRow": "stream.pipeline() / .finished()",
       "signature": "pipeline(src, ...stages, cb); finished(stream, cb)",
-      "badge": "caveats",
-      "description": "The callback forms: pipeline(a, ...b, cb) pipes each stream into the next and calls cb once the last has finished, or with the first error, destroying every stream; finished(s, [options,] cb) calls cb when the stream has ended, finished and closed, and returns a function removing its listeners. Their promise twins live in stream/promises.",
+      "badge": "exact",
+      "description": "The callback forms: pipeline(a, ...b, cb) pipes each stream into the next and calls cb once the last has finished, or with the first error, destroying every stream; a stage may be an async generator function, the source any iterable, and the last stage may return a promise, with { signal, end } options; finished(s, [options,] cb) calls cb when the stream has ended, finished and closed, and returns a function removing its listeners. Their promise twins live in stream/promises.",
       "returns": { "type": "Stream | () => void", "desc": "pipeline returns the last stream; finished returns its cleanup function." },
       "exampleKey": "streams/named_exports",
       "snippet": "finished(echo, (err) => { console.log(\"echo finished, clean:\", !err) })\npipeline(src, new PassThrough(), sink, (err) => { console.log(\"pipeline done\", err ? err.message : \"ok\") })",
-      "differences": [
-        "Function stages (`pipeline(src, async function* …)`) and the `signal` option are not supported — every stage is a stream"
-      ],
       "seeAlso": ["streams.streampromises", "streams.nodestreams"],
       "spec": { "mdn": "https://nodejs.org/api/stream.html#streampipelinesource-transforms-destination-callback" }
     },

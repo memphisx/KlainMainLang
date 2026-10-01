@@ -552,7 +552,7 @@ class C {
 	}
 }
 
-// `` tag<T>`…` `` is a tagged template with type arguments, and `super<T>(…)`
+// “ tag<T>`…` “ is a tagged template with type arguments, and `super<T>(…)`
 // a call with them (which the checker rejects, TS2754).
 func TestTypeArgsBeforeTemplateAndSuper(t *testing.T) {
 	tt, ok := mustParseExpr(t, "tag<number>`a${1}b`").(*ast.TaggedTemplateExpression)

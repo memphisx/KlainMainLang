@@ -328,7 +328,7 @@ func (e *Emitter) emitNewServerResponse() string {
 	ty := ServerResponseType()
 	structIR := ty.StructIR()
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", res, ty.StructSize()))
+	e.emitObjMallocInto(res, ty)
 	store := func(field, valIR, val string) {
 		idx, _, _ := ty.FieldIndex(field)
 		gep := e.freshReg()
@@ -400,37 +400,20 @@ func (e *Emitter) emitChainedCreateServerListen(createArgs, listenArgs []ast.Exp
 	return e.emitHTTPServerListen(handle, listenArgs, pos)
 }
 
-// unwrapTestWrapper returns the callback wrapped by a `test` builtin counting
-// wrapper (`mustCall(fn)`/`mustCallAtLeast`/`mustSucceed` — whose value has
-// the wrapped callback's own function type), or expr itself when unwrapped.
-func unwrapTestWrapper(expr ast.Expression) ast.Expression {
-	call, ok := expr.(*ast.CallExpression)
-	if !ok || len(call.Args) < 1 {
-		return expr
-	}
-	m, ok := call.Callee.(*ast.MemberExpression)
-	if !ok {
-		return expr
-	}
-	id, ok := m.Object.(*ast.Identifier)
-	if !ok || id.Name != "test__kml_builtin" {
-		return expr
-	}
-	switch m.Property {
-	case "mustCall", "mustCallAtLeast", "mustSucceed":
-		return call.Args[0]
-	}
-	return expr
-}
-
 // contextTypeArrowParams contextually types an inline arrow callback the way
 // real Node infers it from the API signature: each un-annotated simple
-// parameter (up to len(names)) gets the corresponding type name. Sees through
-// a `test` counting wrapper. A no-op for anything that isn't an inline arrow
-// or already carries annotations/patterns.
+// parameter (up to len(names)) gets the corresponding type name. A no-op for
+// anything that isn't an inline arrow or already carries annotations/patterns.
 func contextTypeArrowParams(expr ast.Expression, names ...string) {
+	// Node's test-suite wrappers return their callback (`mustCall(fn)`):
+	// the literal inside takes the context.
+	if call, ok := expr.(*ast.CallExpression); ok && len(call.Args) > 0 {
+		if id, ok := call.Callee.(*ast.Identifier); ok && strings.HasPrefix(id.Name, "mustCall") {
+			expr = call.Args[0]
+		}
+	}
 	var params []ast.Param
-	switch fn := unwrapTestWrapper(expr).(type) {
+	switch fn := expr.(type) {
 	case *ast.ArrowFunction:
 		params = fn.Params
 	case *ast.FunctionExpression:
@@ -487,7 +470,10 @@ func (e *Emitter) emitHTTPCreateServerCore(cbExpr ast.Expression, pos ast.Pos, s
 	}
 	e.emittingHTTPHandler = true
 	e.httpHandlerNode = cbExpr
-	handlerVal, err := e.emitExpr(cbExpr)
+	if call, ok := cbExpr.(*ast.CallExpression); ok && len(call.Args) > 0 && e.isIdentityWrapperCall(call) {
+		e.httpHandlerNode = call.Args[0]
+	}
+	handlerVal, err := e.emitCallbackValue(cbExpr)
 	e.emittingHTTPHandler = false
 	e.httpHandlerNode = nil
 	if err != nil {
@@ -786,205 +772,6 @@ func (e *Emitter) emitHTTPCreateServer(args []ast.Expression, pos ast.Pos) (Valu
 	return Value{Ref: srv, Ty: HTTPServerType()}, nil
 }
 
-// emitNewH2ServerStream allocates a fresh Http2ServerStream (TDD-00139 Stage
-// 2): status 200 / empty body / empty headers (the response side, mirroring
-// ServerResponse) plus the request body for stream.on('data').
-func (e *Emitter) emitNewH2ServerStream(reqBody, reqBodyLen string) string {
-	ty := Http2ServerStreamType()
-	structIR := ty.StructIR()
-	st := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", st, ty.StructSize()))
-	store := func(field, valIR, val string) {
-		idx, _, _ := ty.FieldIndex(field)
-		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, st, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", valIR, val, gep))
-	}
-	store("status", "i64", "200")
-	store("body", "ptr", e.internString(""))
-	emptyMap := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", emptyMap))
-	store("headers", "ptr", emptyMap)
-	store("reqBody", "ptr", reqBody)
-	store("reqBodyLen", "i64", reqBodyLen)
-	return st
-}
-
-// emitHTTPStreamHandlerCore is emitHTTPCreateServerCore's http2 core-streams
-// twin (TDD-00139 Stage 2): validates and emits the `(stream, headers)`
-// handler, builds the dispatcher in stream mode, and registers it.
-func (e *Emitter) emitHTTPStreamHandlerCore(cbExpr ast.Expression, pos ast.Pos) error {
-	// Node's listener is (stream, headers, flags) — flags is a number most
-	// handlers omit.
-	contextTypeArrowParams(cbExpr, "__kml_h2_stream", "__kml_h2_headers", "number")
-	e.emittingHTTPHandler = true
-	e.httpHandlerNode = cbExpr
-	handlerVal, err := e.emitExpr(cbExpr)
-	e.emittingHTTPHandler = false
-	e.httpHandlerNode = nil
-	if err != nil {
-		return err
-	}
-	np := 0
-	if handlerVal.Ty.IsFunc {
-		np = len(handlerVal.Ty.FuncParams)
-	}
-	if !handlerVal.Ty.IsFunc || np < 2 || np > 3 || !handlerVal.Ty.FuncParams[0].IsH2ServerStream {
-		return fmt.Errorf("%d:%d: an http2 'stream' listener must be (stream, headers[, flags]) => void", pos.Line, pos.Col)
-	}
-	e.httpStreamHandlerArity = np
-	paramTy := handlerVal.Ty.FuncParams[0]
-	retTy := Http2ServerStreamType()
-
-	e.ensureHTTPRuntime()
-	e.usedHTTP2 = true
-	e.emitHTTP2ServerDecls()
-
-	e.httpStreamMode = true
-	dispErr := e.buildHTTPDispatcher(paramTy, retTy, false, "", true)
-	e.httpStreamMode = false
-	if dispErr != nil {
-		return dispErr
-	}
-
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_handler, align 8", handlerVal.Ref))
-	e.emitInstr("store ptr @__kml_http_dispatch, ptr @__kml_listen_dispatch, align 8")
-	return nil
-}
-
-// emitH2StreamMethod dispatches respond/end/write/on/close on a server-side
-// Http2Stream (TDD-00139 Stage 2).
-func (e *Emitter) emitH2StreamMethod(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	objVal, err := e.emitExpr(objExpr)
-	if err != nil {
-		return Value{}, err
-	}
-	ty := Http2ServerStreamType()
-	structIR := ty.StructIR()
-	fieldGEP := func(name string) string {
-		idx, _, _ := ty.FieldIndex(name)
-		g := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, structIR, objVal.Ref, idx))
-		return g
-	}
-	appendBody := func(chunkExpr ast.Expression) error {
-		cv, err := e.emitExpr(chunkExpr)
-		if err != nil {
-			return err
-		}
-		cur := e.freshReg()
-		bg := fieldGEP("body")
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cur, bg))
-		joined, err := e.emitStringConcat(Value{Ref: cur, Ty: TypePtr}, e.coerce(cv, TypePtr))
-		if err != nil {
-			return err
-		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", joined.Ref, bg))
-		return nil
-	}
-	switch method {
-	case "respond":
-		if len(args) > 1 {
-			return Value{}, fmt.Errorf("%d:%d: stream.respond takes one headers object", pos.Line, pos.Col)
-		}
-		if len(args) == 0 {
-			return Value{Ty: TypeVoid}, nil // respond() → the 200 default
-		}
-		lit, ok := args[0].(*ast.ObjectLiteral)
-		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: stream.respond's headers must be an object literal ({ ':status': …, name: value })", pos.Line, pos.Col)
-		}
-		for _, prop := range lit.Properties {
-			vv, err := e.emitExpr(prop.Value)
-			if err != nil {
-				return Value{}, err
-			}
-			if prop.Key == ":status" {
-				sv := e.coerce(vv, TypeI64)
-				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sv.Ref, fieldGEP("status")))
-				continue
-			}
-			if strings.HasPrefix(prop.Key, ":") {
-				return Value{}, fmt.Errorf("%d:%d: stream.respond supports the ':status' pseudo-header only (got '%s')", pos.Line, pos.Col, prop.Key)
-			}
-			hmap := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hmap, fieldGEP("headers")))
-			sv := e.coerce(vv, TypePtr)
-			vi := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", vi, sv.Ref))
-			e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", hmap, e.internString(prop.Key), vi))
-		}
-		return Value{Ty: TypeVoid}, nil
-	case "write":
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: stream.write takes one chunk", pos.Line, pos.Col)
-		}
-		if err := appendBody(args[0]); err != nil {
-			return Value{}, err
-		}
-		return Value{Ty: TypeVoid}, nil
-	case "end":
-		if len(args) > 1 {
-			return Value{}, fmt.Errorf("%d:%d: stream.end takes at most one chunk", pos.Line, pos.Col)
-		}
-		if len(args) == 1 {
-			if err := appendBody(args[0]); err != nil {
-				return Value{}, err
-			}
-		}
-		return Value{Ty: TypeVoid}, nil
-	case "on", "once":
-		evt, err := stringLiteralArg(args, 0, "stream.on", pos)
-		if err != nil {
-			return Value{}, err
-		}
-		if len(args) != 2 {
-			return Value{}, fmt.Errorf("%d:%d: stream.on takes (event, listener)", pos.Line, pos.Col)
-		}
-		switch evt {
-		case "data":
-			// V1 synchronous delivery: the whole request body as one chunk,
-			// fired at registration when non-empty (the handler runs after the
-			// request is fully assembled, so the body is complete here).
-			cb, err := e.resolveCallbackWithHints(args[1], []Type{TypePtr})
-			if err != nil {
-				return Value{}, err
-			}
-			lenReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, fieldGEP("reqBodyLen")))
-			nonEmpty := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", nonEmpty, lenReg))
-			fireL := e.freshLabel("h2s.data")
-			doneL := e.freshLabel("h2s.datadone")
-			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", nonEmpty, fireL, doneL))
-			e.emitLabel(fireL)
-			bodyReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bodyReg, fieldGEP("reqBody")))
-			if _, err := e.emitCBCall(cb, []Value{{Ref: bodyReg, Ty: TypePtr}}); err != nil {
-				return Value{}, err
-			}
-			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-			e.emitLabel(doneL)
-			return Value{Ty: TypeVoid}, nil
-		case "end":
-			cb, err := e.resolveCallback(args[1])
-			if err != nil {
-				return Value{}, err
-			}
-			if _, err := e.emitCBCall(cb, nil); err != nil {
-				return Value{}, err
-			}
-			return Value{Ty: TypeVoid}, nil
-		}
-		return Value{}, fmt.Errorf("%d:%d: an Http2Stream supports .on('data'|'end') (got '%s')", pos.Line, pos.Col, evt)
-	case "close", "setEncoding", "resume", "pause":
-		// Accepted no-ops in V1: the response is written when the handler
-		// returns; there is no mid-stream RST or flow control to express.
-		return Value{Ty: TypeVoid}, nil
-	}
-	return Value{}, fmt.Errorf("%d:%d: an Http2Stream supports .respond(headers), .write(chunk), .end(chunk?), .on('data'|'end'), .close() (got '%s')", pos.Line, pos.Col, method)
-}
-
 // emitHTTPServerMethod dispatches server.listen/close/closeAllConnections/
 // address on a variable-bound http.Server handle.
 func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
@@ -1175,8 +962,8 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_http_error_evt, align 8", cb.hdrPtr))
 			return Value{Ty: TypeVoid}, nil
 		}
-		if evt != "request" && evt != "stream" {
-			return Value{}, fmt.Errorf("%d:%d: an http.Server supports .on('request'|'stream'|'listening'|'upgrade'|'close'|'connection'|'clientError'|'error', listener) (got '%s')", pos.Line, pos.Col, evt)
+		if evt != "request" {
+			return Value{}, fmt.Errorf("%d:%d: an http.Server supports .on('request'|'listening'|'upgrade'|'close'|'connection'|'clientError'|'error', listener) (got '%s')", pos.Line, pos.Col, evt)
 		}
 		if len(args) != 2 {
 			return Value{}, fmt.Errorf("%d:%d: server.on takes (event, listener)", pos.Line, pos.Col)
@@ -1184,12 +971,7 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 		if !e.httpServerHandlerPending {
 			return Value{}, fmt.Errorf("%d:%d: this http.Server already has a request handler (one listener per server, V1)", pos.Line, pos.Col)
 		}
-		if evt == "stream" {
-			// TDD-00139 Stage 2: the http2 core-streams API.
-			if err := e.emitHTTPStreamHandlerCore(args[1], pos); err != nil {
-				return Value{}, err
-			}
-		} else if err := e.emitHTTPCreateServerCore(args[1], pos, "", true); err != nil {
+		if err := e.emitHTTPCreateServerCore(args[1], pos, "", true); err != nil {
 			return Value{}, err
 		}
 		e.httpServerHandlerPending = false
@@ -1370,12 +1152,11 @@ func parseIPv4ToNetworkWord(host string) (uint32, bool) {
 // slice), emit a runtime check on the handle's primary flag (slot 3) and abort
 // with a clear message when it is not the primary. The check runs once, at
 // registration, not per request. `handleRef` is the server handle pointer.
-// ensureExtraWSUpGlobals declares the suffixed ws/upgrade handler globals for an
-// additional server (TDD-00191 Stage 3), once per suffix. The primary's ""
-// globals come from ensureHTTPRuntime; a non-primary server that is itself the
-// ws/upgrade server needs its own @__kml_listen_ws_handler_N /
-// _upgrade_handler_N, read by its dispatcher (curDispatchSfx) and written by the
-// registration site. emitGlobal buffers into the module preamble, so declaring
+// ensureExtraWSUpGlobals declares the suffixed upgrade/connection handler
+// globals for an additional server (TDD-00191 Stage 3), once per suffix. The
+// primary's "" globals come from ensureHTTPRuntime; a non-primary server that
+// is itself the upgrade server needs its own @__kml_listen_upgrade_handler_N,
+// read by its dispatcher (curDispatchSfx) and written by the registration site. emitGlobal buffers into the module preamble, so declaring
 // lazily at first use — even mid-Pass-2 — is fine.
 func (e *Emitter) ensureExtraWSUpGlobals(sfx string) {
 	if sfx == "" {
@@ -1388,7 +1169,6 @@ func (e *Emitter) ensureExtraWSUpGlobals(sfx string) {
 		return
 	}
 	e.extraWSUpGlobalsEmitted[sfx] = true
-	e.emitGlobal(fmt.Sprintf("@__kml_listen_ws_handler%s = internal thread_local global ptr null, align 8", sfx))
 	e.emitGlobal(fmt.Sprintf("@__kml_listen_upgrade_handler%s = internal thread_local global ptr null, align 8", sfx))
 	e.emitGlobal(fmt.Sprintf("@__kml_listen_connection_handler%s = internal thread_local global ptr null, align 8", sfx))
 }
@@ -1752,17 +1532,6 @@ func (e *Emitter) emitResBegin(res string) {
 	e.emitInstr(fmt.Sprintf("call void @__kml_res_begin(ptr %s, i1 1)", res))
 }
 
-// emitResSinkWrite evaluates a chunk expression and frames it to the response's
-// streaming sink. emitResSinkWriteVal takes an already-evaluated chunk (so
-// res.end can evaluate its argument once, before its stream-vs-buffered branch).
-func (e *Emitter) emitResSinkWrite(res, wsinkGEP string, expr ast.Expression, pos ast.Pos) error {
-	cv, err := e.emitExpr(expr)
-	if err != nil {
-		return err
-	}
-	return e.emitResSinkWriteVal(res, wsinkGEP, cv, pos)
-}
-
 // binaryChunkToHeaderString returns chunk unchanged when it is not a binary
 // (TypedArray/Buffer) value; when it is, it copies the array's raw bytes into a
 // fresh length-headered string so the buffered response path frames the exact
@@ -1791,51 +1560,6 @@ func (e *Emitter) binaryChunkToHeaderString(chunk Value) Value {
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", nul, buf, byteLen))
 	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", nul))
 	return Value{Ref: buf, Ty: TypePtr}
-}
-
-func (e *Emitter) emitResSinkWriteVal(res, wsinkGEP string, chunk Value, pos ast.Pos) error {
-	// A binary chunk (Buffer/Uint8Array/any TypedArray) is framed as its raw
-	// bytes, not stringified: Node's res.write(buf) sends the buffer's exact
-	// byte range. Extract {ptr,len} straight from the array aggregate and push
-	// byteLength = len * elemSize through the sink. (req.pipe(res) already
-	// carries bytes; this is the direct-write path.)
-	if chunk.Ty.IsTypedArray {
-		elemTy := TypeI64
-		if chunk.Ty.ElemType != nil {
-			elemTy = *chunk.Ty.ElemType
-		}
-		dataPtr := e.freshReg()
-		count := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, chunk.Ref))
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", count, chunk.Ref))
-		byteLen := count
-		if elemTy.Align() != 1 {
-			byteLen = e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteLen, count, elemTy.Align()))
-		}
-		sink := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", sink, wsinkGEP))
-		v0 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", v0, dataPtr))
-		ign := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_write(ptr %s, i64 %s, i64 %s)", ign, sink, v0, byteLen))
-		return nil
-	}
-	// Coerce the chunk to a length-prefixed, binary-safe string (matching the
-	// buffered path's handling of a non-string chunk), then push its {ptr,len}
-	// through the WHATWG writable — the same entry point req.pipe(res) drives.
-	str, err := e.emitStringConcat(Value{Ref: e.internString(""), Ty: TypePtr}, chunk)
-	if err != nil {
-		return err
-	}
-	ln := e.emitStrLenHeader(str.Ref)
-	sink := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", sink, wsinkGEP))
-	v0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", v0, str.Ref))
-	ign := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_write(ptr %s, i64 %s, i64 %s)", ign, sink, v0, ln))
-	return nil
 }
 
 // emitResQWrite frames an already-evaluated chunk into the response's direct-
@@ -1907,26 +1631,6 @@ func (e *Emitter) emitResSetHeadersFromObject(headersGEP string, obj ast.Express
 	return nil
 }
 
-// emitClosureCallByPtrVoid invokes a zero-argument void closure value.
-func (e *Emitter) emitClosureCallByPtrVoid(cbVal Value) error {
-	// This zero-argument invocation path spells `void (ptr)` and cannot supply
-	// the trailing presence mask a body-filled-default closure's ABI requires
-	// (TDD-00206 Stage 2) — reject it cleanly rather than emit a mismatched call.
-	if cbVal.Ty.FuncHasDefaultMask {
-		return fmt.Errorf("a callback whose parameter default references a captured variable is not supported in this position — pass the argument explicitly or use a constant default")
-	}
-	fpSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 0", fpSlot, cbVal.Ref))
-	fp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpSlot))
-	epSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 1", epSlot, cbVal.Ref))
-	ep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epSlot))
-	e.emitInstr(fmt.Sprintf("call void (ptr) %s(ptr %s)", fp, ep))
-	return nil
-}
-
 // emitRequestBodyBytes implements req.bodyBytes(): ArrayBuffer (TDD-00026/
 // ADR-00106): the binary-safe counterpart to req.body: string, returning the
 // exact byte range buildHTTPDispatcher's Content-Length-aware read loop
@@ -1976,13 +1680,17 @@ func (e *Emitter) emitRequestStream(objVal Value, pos ast.Pos) (Value, error) {
 }
 
 // reqAsNodeReadable returns the request body as a Node Readable (TDD-00195
-// Stage 1), created once from req.stream() + wrapWebReadable and cached in the
-// request's __kml_noderd field — so `req.on('data')`, `for await (chunk of req)`
-// and `req.pipe(dest)` all share one underlying WHATWG stream (a second
-// req.stream() would throw "disturbed"). Chunks are Uint8Array.
+// Stage 1): `stream`'s Readable.fromWeb over req.stream(), made once and
+// cached in the request's __kml_noderd field — so `req.on('data')`,
+// `for await (chunk of req)` and `req.pipe(dest)` share one underlying web
+// stream (a second req.stream() would throw "disturbed"). The Readable is a
+// dynamic value; its methods dispatch through its class's layout. Chunks are
+// Uint8Array.
 func (e *Emitter) reqAsNodeReadable(objVal Value, pos ast.Pos) (Value, error) {
-	e.ensureNodeStreamRuntime() // wrapWebReadable emits __kml_ns_alloc
-	nrTy := NodeReadableType(TypedArrayType("uint8"))
+	fromWeb, ok := e.libExports["stream:_kmlFromWeb"]
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: a request's Node Readable view needs the stream module", pos.Line, pos.Col)
+	}
 	rdIdx, _, ok := objVal.Ty.FieldIndex("__kml_noderd")
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: not a HttpRequest", pos.Line, pos.Col)
@@ -1998,31 +1706,38 @@ func (e *Emitter) reqAsNodeReadable(objVal Value, pos ast.Pos) (Value, error) {
 	isNull := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, cached))
 	makeL := e.freshLabel("req.rd.make")
-	haveL := e.freshLabel("req.rd.have")
 	doneL := e.freshLabel("req.rd.done")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, makeL, haveL))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, makeL, doneL))
 
 	e.emitLabel(makeL)
 	ws, err := e.emitRequestStream(objVal, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	nr, err := e.wrapWebReadable(ws)
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ws.Ref, slot))
+	name := "__kml_req_webstream_" + e.freshReg()[1:]
+	e.define(name, Symbol{Ptr: slot, Ty: ws.Ty})
+	nr, err := e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(fromWeb, pos), []ast.Expression{ast.NewIdentifier(name, pos)}, pos))
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nr.Ref, fieldGEP()))
+	nrBox, err := e.emitBoxValue(nr)
+	if err != nil {
+		return Value{}, err
+	}
+	asPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", asPtr, nrBox.Ref))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", asPtr, fieldGEP()))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
-	e.emitLabel(haveL)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-
-	// Reload the (now-populated) field on the merge — avoids a cross-block phi
-	// over wrapWebReadable's own instruction sequence.
 	e.emitLabel(doneL)
 	final := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", final, fieldGEP()))
-	return Value{Ref: final, Ty: nrTy}, nil
+	word := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", word, final))
+	return Value{Ref: word, Ty: TypeAny}, nil
 }
 
 func (e *Emitter) emitRequestBodyBytes(objVal Value, pos ast.Pos) (Value, error) {
@@ -2151,16 +1866,11 @@ const maxHTTPRequestBytes = 10 * 1024 * 1024
 // in the same program is dead code). isAsyncHandler is true when the
 // handler itself is `async` (needed to `await fetch(...)` inside it, the
 // main reason to want one) — retTy is already unwrapped from Promise<T> to
-// T by the caller (emitHTTPListen) either way. When the program uses klain:ws
-// (e.usedKlainWS, TDD-00158) or a Node `'upgrade'` handler (e.usedHTTPUpgrade),
-// right after headers are parsed in parseL below a case-insensitive
-// Upgrade/Connection header check diverts a matching request into the
-// handshake + persistent WS read loop (emit_websocket.go) or the raw upgrade
-// socket loop (emit_http_upgrade.go)
-// instead of ever reaching the normal single-request/single-response path
-// — false means none of that extra branching is emitted at all, so a
-// program with no `ws` handler is byte-for-byte what it was before this
-// feature existed.
+// T by the caller (emitHTTPListen) either way. When the program has a Node
+// `'upgrade'` handler (e.usedHTTPUpgrade), right after headers are parsed in
+// parseL below a case-insensitive Upgrade/Connection header check diverts a
+// matching request into the raw upgrade socket loop (emit_http_upgrade.go)
+// instead of ever reaching the normal single-request/single-response path.
 // httpReqInputs carries the register names of a parsed request's parts — the
 // inputs to emitHTTPCallHandler. Both the HTTP/1.1 fiber dispatcher and (Stage 3)
 // the nghttp2 driver populate these their own way (socket parse vs nghttp2
@@ -2184,7 +1894,7 @@ type httpReqInputs struct {
 func (e *Emitter) emitHTTPCallHandler(paramTy, retTy Type, isAsyncHandler bool, in httpReqInputs) string {
 	reqTy := RequestType()
 	reqReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", reqReg, reqTy.StructSize()))
+	e.emitObjMallocInto(reqReg, reqTy)
 	reqStructIR := reqTy.StructIR()
 	storeReqField := func(name, ref string) {
 		idx, fieldTy, _ := reqTy.FieldIndex(name)
@@ -2212,32 +1922,6 @@ func (e *Emitter) emitHTTPCallHandler(paramTy, retTy Type, isAsyncHandler bool, 
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 1", epSlot, handlerPtr))
 	ep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epSlot))
-
-	// http2 core-streams shape (TDD-00139 Stage 2): the handler is
-	// `(stream, headers) => void`. The request's headers map gains the h2
-	// pseudo-headers, a fresh Http2ServerStream (whose first three fields
-	// mirror ServerResponse, so the same response-writing tail applies) carries
-	// the request body for `stream.on('data')`, and the handler mutates the
-	// stream via respond/end/write.
-	if e.httpStreamMode {
-		setHdr := func(key, valRef string) {
-			vi := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", vi, valRef))
-			e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", in.headers, e.internString(key), vi))
-		}
-		setHdr(":method", in.method)
-		setHdr(":path", in.path)
-		setHdr(":scheme", e.internString("http"))
-		stream := e.emitNewH2ServerStream(in.body, in.bodyLength)
-		if e.httpStreamHandlerArity == 3 {
-			e.emitInstr(fmt.Sprintf("call void (ptr, ptr, ptr, double) %s(ptr %s, ptr %s, ptr %s, double 0.0)",
-				fp, ep, stream, in.headers))
-		} else {
-			e.emitInstr(fmt.Sprintf("call void (ptr, ptr, ptr) %s(ptr %s, ptr %s, ptr %s)",
-				fp, ep, stream, in.headers))
-		}
-		return stream
-	}
 
 	// Node's http.createServer `(req, res) => void` shape (TDD-00131): build a
 	// fresh `res` (ServerResponseType) initialized to status 200 / empty body /
@@ -2805,39 +2489,6 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 
 	headersMapFinal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", headersMapFinal, headersMapA))
-
-	// WebSocket upgrade handling (TDD-00039 codec; TDD-00158 re-homed under
-	// klain:ws). Emitted when the program imports klain:ws (usedKlainWS); a
-	// matching `Upgrade: websocket` request diverts into the RFC 6455
-	// handshake + persistent frame loop and never returns to normal request
-	// handling. Guarded at runtime by the connection-handler global that
-	// `new WebSocketServer({server}).on('connection', …)` populates — so a
-	// websocket upgrade arriving before any handler was registered falls
-	// through to normal handling rather than calling a null closure. wss://
-	// falls out: emitWSHandshakeAndLoop routes its I/O through the TLS-aware
-	// conn shims when usedHTTPS1Server.
-	// TDD-00191 Stage 3: each dispatcher reads *its own* server's ws/upgrade
-	// handler global (curDispatchSfx — "" primary, "_N" additional), so an
-	// additional server can itself be the ws/upgrade server. A server with no
-	// such handler has a null global and falls through to normal handling.
-	if e.usedKlainWS {
-		e.ensureExtraWSUpGlobals(e.curDispatchSfx)
-		wsUpgradeL := e.freshLabel("http.wsupgrade")
-		wsNormalL := e.freshLabel("http.wsnormal")
-		wsHaveHandlerL := e.freshLabel("http.wshavehandler")
-		wsH := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_listen_ws_handler%s, align 8", wsH, e.curDispatchSfx))
-		wsHasH := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", wsHasH, wsH))
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", wsHasH, wsHaveHandlerL, wsNormalL))
-		e.emitLabel(wsHaveHandlerL)
-		e.emitWSUpgradeDetect(headersMapFinal, wsUpgradeL, wsNormalL)
-		e.emitLabel(wsUpgradeL)
-		if err := e.emitWSHandshakeAndLoop(headersMapFinal, fd32, fd64, fdPtr, noReqL); err != nil {
-			return err
-		}
-		e.emitLabel(wsNormalL)
-	}
 
 	// Node-faithful HTTP upgrade event (TDD-00158): emitted when the program
 	// registers a `server.on('upgrade', …)` handler anywhere (pre-scanned into
@@ -3590,215 +3241,6 @@ func (e *Emitter) buildHTTP2Bridge(paramTy, retTy Type, isAsyncHandler bool, sfx
 	}
 	e.emitStandaloneFunc("ptr @__kml_h2_resp_hdr_name"+sfx+"(ptr %resp, i64 %i)", hdrSlot(16))
 	e.emitStandaloneFunc("ptr @__kml_h2_resp_hdr_val"+sfx+"(ptr %resp, i64 %i)", hdrSlot(24))
-}
-
-// emitH2Connect implements http2.connect(authority[, listener]) — TDD-00139
-// Stage 3. h2c (http://) prior-knowledge only; a connect failure or an
-// https:// authority throws. The optional listener is Node's 'connect' event
-// callback, fired immediately (the TCP connect is blocking).
-func (e *Emitter) emitH2Connect(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: http2.connect takes (authority, listener?)", pos.Line, pos.Col)
-	}
-	e.ensureH2ClientRuntime()
-	auth, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	auth = e.coerce(auth, TypePtr)
-	sess := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_h2c_connect_url(ptr %s)", sess, auth.Ref))
-	isnull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isnull, sess))
-	okL := e.freshLabel("h2c.ok")
-	failL := e.freshLabel("h2c.fail")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isnull, failL, okL))
-	e.emitLabel(failL)
-	e.emitInternalThrow(e.internString("http2.connect failed — connection refused, or a non-http:// authority (TLS client sessions are not supported; use an http:// h2c authority)"))
-	e.emitLabel(okL)
-	// Flush at process exit so a client with no event loop still completes.
-	e.emitInstr(fmt.Sprintf("%s = call i32 @atexit(ptr @__kml_h2c_flush)", e.freshReg()))
-	obj := e.freshReg()
-	e.ensureCalloc()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 8)", obj))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sess, obj))
-	if len(args) == 2 {
-		cb, err := e.resolveCallback(args[1])
-		if err != nil {
-			return Value{}, err
-		}
-		if _, err := e.emitCBCall(cb, nil); err != nil {
-			return Value{}, err
-		}
-	}
-	return Value{Ref: obj, Ty: Http2ClientSessionType()}, nil
-}
-
-// emitH2ClientSessionMethod dispatches request/close/destroy/on on a
-// ClientHttp2Session handle.
-func (e *Emitter) emitH2ClientSessionMethod(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	objVal, err := e.emitExpr(objExpr)
-	if err != nil {
-		return Value{}, err
-	}
-	loadSess := func() string {
-		s := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", s, objVal.Ref))
-		return s
-	}
-	switch method {
-	case "request":
-		if len(args) > 1 {
-			return Value{}, fmt.Errorf("%d:%d: session.request takes one headers object", pos.Line, pos.Col)
-		}
-		methodRef := e.internString("GET")
-		pathRef := e.internString("/")
-		var extraNames []string
-		var extraVals []string
-		if len(args) == 1 {
-			lit, ok := args[0].(*ast.ObjectLiteral)
-			if !ok {
-				return Value{}, fmt.Errorf("%d:%d: session.request's headers must be an object literal", pos.Line, pos.Col)
-			}
-			for _, prop := range lit.Properties {
-				vv, err := e.emitExpr(prop.Value)
-				if err != nil {
-					return Value{}, err
-				}
-				sv := e.coerce(vv, TypePtr)
-				switch prop.Key {
-				case ":path":
-					pathRef = sv.Ref
-				case ":method":
-					methodRef = sv.Ref
-				case ":scheme", ":authority":
-					// fixed by the session (h2c + the connect authority)
-				default:
-					if strings.HasPrefix(prop.Key, ":") {
-						return Value{}, fmt.Errorf("%d:%d: session.request supports the ':path'/':method' pseudo-headers (got '%s')", pos.Line, pos.Col, prop.Key)
-					}
-					extraNames = append(extraNames, prop.Key)
-					extraVals = append(extraVals, sv.Ref)
-				}
-			}
-		}
-		namesPtr, valsPtr := "null", "null"
-		if n := len(extraNames); n > 0 {
-			e.ensureMalloc()
-			np := e.freshReg()
-			vp := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", np, n*8))
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", vp, n*8))
-			for i := range extraNames {
-				ns := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", ns, np, i))
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(extraNames[i]), ns))
-				vs := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", vs, vp, i))
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", extraVals[i], vs))
-			}
-			namesPtr, valsPtr = np, vp
-		}
-		// ctx: {cbResp, cbData, cbEnd, headersMap}
-		e.ensureCalloc()
-		ctx := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 32)", ctx))
-		hmap := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", hmap))
-		hslot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 24", hslot, ctx))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hmap, hslot))
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_h2c_request(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, i64 %d)",
-			e.freshReg(), loadSess(), ctx, methodRef, pathRef, namesPtr, valsPtr, len(extraNames)))
-		// Push the frames out promptly (preface/SETTINGS/HEADERS).
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_h2c_pump_all()", e.freshReg()))
-		return Value{Ref: ctx, Ty: Http2ClientStreamType()}, nil
-	case "close":
-		if len(args) > 1 {
-			return Value{}, fmt.Errorf("%d:%d: session.close takes (callback?)", pos.Line, pos.Col)
-		}
-		e.emitInstr(fmt.Sprintf("call void @__kml_h2c_close(ptr %s)", loadSess()))
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_h2c_pump_all()", e.freshReg()))
-		if len(args) == 1 {
-			cb, err := e.resolveCallback(args[0])
-			if err != nil {
-				return Value{}, err
-			}
-			if _, err := e.emitCBCall(cb, nil); err != nil {
-				return Value{}, err
-			}
-		}
-		return Value{Ty: TypeVoid}, nil
-	case "destroy":
-		e.emitInstr(fmt.Sprintf("call void @__kml_h2c_destroy(ptr %s)", loadSess()))
-		return Value{Ty: TypeVoid}, nil
-	case "on", "once":
-		// 'error'/'close'/'goaway' listeners are accepted no-ops in V1: a
-		// connect failure throws instead, and close is synchronous-ish.
-		if len(args) != 2 {
-			return Value{}, fmt.Errorf("%d:%d: session.on takes (event, listener)", pos.Line, pos.Col)
-		}
-		return Value{Ty: TypeVoid}, nil
-	case "ping", "settings", "setTimeout", "ref", "unref":
-		return Value{Ty: TypeVoid}, nil
-	}
-	return Value{}, fmt.Errorf("%d:%d: a ClientHttp2Session supports .request(headers?), .close(cb?), .destroy(), .on(event, cb) (got '%s')", pos.Line, pos.Col, method)
-}
-
-// emitH2ClientStreamMethod dispatches on/end/write/close on a
-// ClientHttp2Stream (the request handle).
-func (e *Emitter) emitH2ClientStreamMethod(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	objVal, err := e.emitExpr(objExpr)
-	if err != nil {
-		return Value{}, err
-	}
-	storeCB := func(offset int, cbExpr ast.Expression, hints []Type) error {
-		cb, err := e.resolveCallbackWithHints(cbExpr, hints)
-		if err != nil {
-			return err
-		}
-		if cb.kind != cbClosure {
-			return fmt.Errorf("%d:%d: a stream listener must be an arrow/function-expression literal", pos.Line, pos.Col)
-		}
-		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", slot, objVal.Ref, offset))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cb.hdrPtr, slot))
-		return nil
-	}
-	switch method {
-	case "on", "once":
-		evt, err := stringLiteralArg(args, 0, "stream.on", pos)
-		if err != nil {
-			return Value{}, err
-		}
-		if len(args) != 2 {
-			return Value{}, fmt.Errorf("%d:%d: stream.on takes (event, listener)", pos.Line, pos.Col)
-		}
-		switch evt {
-		case "response":
-			contextTypeArrowParams(args[1], "__kml_h2_headers")
-			return Value{Ty: TypeVoid}, storeCB(0, args[1], []Type{MapType(TypePtr, TypePtr)})
-		case "data":
-			contextTypeArrowParams(args[1], "string")
-			return Value{Ty: TypeVoid}, storeCB(8, args[1], []Type{TypePtr})
-		case "end":
-			return Value{Ty: TypeVoid}, storeCB(16, args[1], nil)
-		case "close", "error":
-			// accepted no-ops (V1): 'end' is the completion signal
-			return Value{Ty: TypeVoid}, nil
-		}
-		return Value{}, fmt.Errorf("%d:%d: a ClientHttp2Stream supports .on('response'|'data'|'end') (got '%s')", pos.Line, pos.Col, evt)
-	case "end":
-		if len(args) > 0 {
-			return Value{}, fmt.Errorf("%d:%d: request bodies are not supported yet — the request is sent (with END_STREAM) at session.request time; req.end() is a no-op", pos.Line, pos.Col)
-		}
-		return Value{Ty: TypeVoid}, nil
-	case "write":
-		return Value{}, fmt.Errorf("%d:%d: request bodies are not supported yet — the request is sent (with END_STREAM) at session.request time", pos.Line, pos.Col)
-	case "close", "setEncoding", "resume", "pause", "setTimeout":
-		return Value{Ty: TypeVoid}, nil
-	}
-	return Value{}, fmt.Errorf("%d:%d: a ClientHttp2Stream supports .on('response'|'data'|'end'), .end(), .close() (got '%s')", pos.Line, pos.Col, method)
 }
 
 // emitHTTPFireListeningSlot fires (once, then clears) the pending

@@ -4,11 +4,11 @@ import { parentPort, workerData } from 'worker_threads';
 
 const label: string = workerData;
 
-parentPort.on('message', (nums: number[]) => {
+parentPort!.on('message', (nums: number[]) => {
   let sum = 0;
   for (const n of nums) {
     sum += n;
   }
   console.log(label + " summed " + nums.length + " numbers");
-  parentPort.postMessage(sum);
+  parentPort!.postMessage(sum);
 });

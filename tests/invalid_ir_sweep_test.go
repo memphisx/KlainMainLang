@@ -455,21 +455,22 @@ f().then(() => console.log("resolved"));
 func TestE2EFuncRefApplyCallReturnType(t *testing.T) {
 	assertOutput(t, `
 function f(): boolean { return true; }
-const viaApply = function (): boolean { return f.apply(); };
-const viaCall = function (): boolean { return f.call(); };
+const viaApply = function (): boolean { return f.apply(null); };
+const viaCall = function (): boolean { return f.call(null); };
 console.log(viaApply());
 console.log(viaCall());
 `, "true\ntrue")
 }
 
-// Invalid-IR sweep: `f.call()` with no arguments at all (not even a thisArg)
+// Invalid-IR sweep: `f.call(null)` with no argument after the thisArg
 // indexed `args[1:]` on an empty slice and panicked in codegen. It now forwards
-// an empty argument list.
+// an empty argument list. (A call with no thisArg at all is TS2554, as tsc
+// says.)
 func TestE2EFuncCallZeroArgs(t *testing.T) {
 	assertOutput(t, `
 function greet(): string { return "hi"; }
-console.log(greet.call());
-console.log(greet.apply());
+console.log(greet.call(null));
+console.log(greet.apply(null));
 `, "hi\nhi")
 }
 

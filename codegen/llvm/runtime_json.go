@@ -90,7 +90,7 @@ nullstr:
   ret ptr %eb
 go:
   ; strlen-bounded: not every runtime string carries a length header (the
-  ; URL/crypto sidecars, EventSource and Blob.text() hand back bare C strings),
+  ; URL/crypto sidecars hand back bare C strings),
   ; so an embedded NUL still ends the string here — BACKLOG §0. Worst case is
   ; every byte as \u00XX: 6x, plus the quotes.
   %len = call i64 @strlen(ptr %s)

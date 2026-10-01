@@ -5,6 +5,9 @@
 # Main binary (go build)
 /klainmain
 /klainmain.exe
+# tools/tsdiag built in the repo root (go build ./tools/tsdiag)
+/tsdiag
+/tsdiag.exe
 
 # Release binaries built by the release workflow / a local `make dist`
 /dist/

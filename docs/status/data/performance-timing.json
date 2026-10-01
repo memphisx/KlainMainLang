@@ -28,37 +28,31 @@
             "status": "implemented",
             "notes": [
               "Milliseconds since the program's **time origin** (process start), as a `double` (sub-millisecond precision) — the origin is captured once at process start by an `llvm.global_ctors` constructor, matching the spec's origin-relative reading ([ADR-00568](../adr/ADR-00568.md))",
-              "`CLOCK_MONOTONIC`-based — unlike `Date.now()`, not tied to wall-clock time",
+              "Monotonic (`CLOCK_UPTIME_RAW` on macOS, nanosecond-grained like libuv's `uv_hrtime`; `CLOCK_MONOTONIC` on Linux) — unlike `Date.now()`, not tied to wall-clock time ([ADR-01270](../adr/ADR-01270.md))",
               "See [ADR-00024](../adr/ADR-00024.md)"
             ]
           },
           {
-            "feature": "`performance.mark(name)` / `performance.measure(name, start, end?)`",
+            "feature": "`performance.mark` / `measure` / `getEntries*` / `clearMarks` / `clearMeasures` / `timerify` / `timeOrigin`",
             "status": "implemented",
-            "caveats": [
-              "Re-marking a name overwrites its timestamp — last-write-wins, not a full ordered entries list",
-              "`measure()` returns the elapsed milliseconds directly as a plain number rather than a `PerformanceMeasure` object, and its own `name` argument is evaluated but not stored anywhere"
-            ],
             "notes": [
-              "Named timing marks backed by a `Map<string, number>`; no `getEntriesByName`/`PerformanceObserver` machinery exists for a `PerformanceMeasure` to belong to",
-              "`endMark` defaults to the current `performance.now()` reading when omitted",
-              "Measuring against a name that was never marked throws, matching real `performance.measure()`'s own behavior",
-              "See [ADR-00111](../adr/ADR-00111.md)"
+              "User-timing entries as Node v24 keeps them: `mark()` returns a `PerformanceMark` (its `detail` structured-cloned), `measure(name, start?, end?)` or `measure(name, options)` returns a `PerformanceMeasure`; a missing mark throws a `SyntaxError` `DOMException`",
+              "Written in TypeScript: `lib/node/perf_hooks.ts` ([ADR-01265](../adr/ADR-01265.md))"
             ]
           },
           {
             "feature": "`Date`",
             "status": "implemented",
-            "caveats": [
-              "UTC-only everywhere (construction, getters, formatting) — diverges from JS's local-time default",
-              "The multi-argument constructor treats its fields as UTC; JS treats them as *local* time"
-            ],
             "notes": [
-              "UTC-only is deliberate, for deterministic output regardless of the machine/CI timezone",
+              "Local time is not implemented: every local getter, the component constructor and `toString` work in UTC",
               "`new Date()` / `new Date(ms)` / `new Date(isoString)` (the string form parses via the same logic as `Date.parse`, including its `-1`-on-unparseable sentinel — see [ADR-00038](../adr/ADR-00038.md)) / `new Date(year, month, day?, hours?, minutes?, seconds?, ms?)` (month 0-indexed, matching `getMonth()`; omitted trailing fields default like real JS — day to 1, everything after that to 0; see [ADR-00039](../adr/ADR-00039.md))",
               "`getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds` (+ the `set*` setters), `getTime`/`valueOf`, `toISOString`",
               "The `getUTC*`/`setUTC*` accessors alias the field getters/setters — since the stored timestamp is UTC, these are fully faithful to Node's UTC methods (unlike the local `get*`/`set*`, which carry the UTC deviation above) ([ADR-00844](../adr/ADR-00844.md))",
-              "See [ADR-00014](../adr/ADR-00014.md)"
+              "See [ADR-00014](../adr/ADR-00014.md)",
+              "Local time follows the host's time zone, as Node's does: the local getters, the component constructor, the local setters, `toString` (`GMT+0300 (Eastern European Summer Time)`), `toDateString` and `getTimezoneOffset`; `Date.UTC` and the `getUTC*`/`setUTC*` accessors are UTC. An unparseable string or a `NaN` time value is an Invalid Date: `getTime()` is `NaN`, `toString()` is `Invalid Date`, `toISOString()` throws a `RangeError` and JSON gives `null` ([ADR-01315](../adr/ADR-01315.md))"
+            ],
+            "caveats": [
+              "`toString`'s zone name comes from a built-in table of the common zones' abbreviations; a zone outside it prints the C library's abbreviation (`GMT-0300 (-03)` where Node says `(Brasilia Standard Time)`)"
             ]
           },
           {
@@ -71,12 +65,10 @@
           {
             "feature": "`Date.parse(string)`",
             "status": "implemented",
-            "caveats": [
-              "Unparseable input returns `-1` (a documented sentinel — this compiler's Date has no NaN representation)"
-            ],
             "notes": [
               "ISO 8601 strings, with or without milliseconds: `Z` (UTC), a `+HH:MM`/`-HH:MM` timezone offset (converted to UTC), or a bare `YYYY-MM-DD` date",
-              "See [ADR-00015](../adr/ADR-00015.md) and [ADR-00017](../adr/ADR-00017.md)"
+              "See [ADR-00015](../adr/ADR-00015.md) and [ADR-00017](../adr/ADR-00017.md)",
+              "The ECMAScript date-time format (a date-only form is UTC, a date-time without an offset local time) and V8's legacy forms (`toString`/`toUTCString` output, `Jul 15 2024`, `2024/07/15 10:30`); unparseable input is `NaN` ([ADR-01315](../adr/ADR-01315.md))"
             ]
           },
           {
@@ -95,20 +87,17 @@
             "feature": "`Date` arithmetic (`date ± durationMs`, `date - date`, `date += durationMs`)",
             "status": "implemented",
             "caveats": [
-              "Under `-compat=js`, `Date ± number` gives a new Date; JavaScript converts the Date to a string for `+` (concatenation) and to its millisecond count for `-` (a number)"
+              "Under `-compat=js`, a compound `date += n` / `date -= n` keeps the variable a Date; JavaScript turns it into a string / a number (the plain `+`/`-` do)"
             ],
             "notes": [
               "The strict lane rejects arithmetic on a Date as TypeScript does (TS2362, TS2363, TS2365): the millisecond count is `getTime()` ([ADR-01134](../adr/ADR-01134.md))",
-              "`Date - Date` under `-compat=js` gives the difference in milliseconds (a number), matching real JS",
+              "Under `-compat=js`, `date + x` concatenates the date string and `date - x` (`*`, `/`, `%`, `**`, the relational operators) reads its millisecond count, as JavaScript does ([ADR-01310](../adr/ADR-01310.md))",
               "See [ADR-00018](../adr/ADR-00018.md)"
             ]
           },
           {
             "feature": "`Date.prototype.toDateString()`",
             "status": "implemented",
-            "caveats": [
-              "Always UTC, not local time"
-            ],
             "notes": [
               "Fixed `\"Www Mon DD YYYY\"` shape (e.g. `\"Thu Jan 01 1970\"`), matching real JS exactly except for the UTC deviation",
               "See [ADR-00019](../adr/ADR-00019.md)"
@@ -118,7 +107,7 @@
             "feature": "`Date.prototype.toLocaleDateString()`",
             "status": "implemented",
             "caveats": [
-              "One fixed `\"M/D/YYYY\"` format (the default en-US shape), always UTC; no locale argument or full `Intl`-style locale support"
+              "One fixed `\"M/D/YYYY\"` format (the default en-US shape) in local time; no locale argument or full `Intl`-style locale support"
             ],
             "notes": [
               "See [ADR-00019](../adr/ADR-00019.md)"
@@ -127,12 +116,25 @@
           {
             "feature": "`PerformanceObserver`",
             "status": "implemented",
+            "notes": [
+              "`observe({ entryTypes })` / `observe({ type, buffered })`, `disconnect()`, `takeRecords()`, `supportedEntryTypes`; entries arrive on a later turn of the loop, sorted by start time ([ADR-01265](../adr/ADR-01265.md))"
+            ]
+          },
+          {
+            "feature": "`createHistogram` / `monitorEventLoopDelay`",
+            "status": "implemented",
             "caveats": [
-              "Dispatch is **synchronous** (during `mark`/`measure`), not Node's async batched next-microtask delivery",
-              "Entry types `mark`/`measure` only; `buffered`, `takeRecords()`, the single-`type` form, and `getEntriesByName`/`getEntriesByType` are unsupported"
+              "A histogram keeps exact samples, not Node's HDR histogram (3 significant figures): a percentile of large values can differ in its last digits"
             ],
             "notes": [
-              "`new PerformanceObserver(cb)` + `observe({ entryTypes })` (the `entryTypes: []` array form) + `disconnect()`; the callback's list yields `PerformanceEntry` objects (`name`/`entryType`/`startTime`/`duration`) via `getEntries()`. Synchronous observer output precedes later straight-line output. See [ADR-00673](../adr/ADR-00673.md), [TDD-00166](../tdd/TDD-00166.md)"
+              "`RecordableHistogram` (`record`, `recordDelta`, `add`) and the event-loop-delay `IntervalHistogram` (`enable`/`disable`), with `min`/`max`/`mean`/`stddev`/`percentile(s)` and their BigInt forms ([ADR-01265](../adr/ADR-01265.md))"
+            ]
+          },
+          {
+            "feature": "`performance.eventLoopUtilization` / `performance.nodeTiming`",
+            "status": "missing",
+            "notes": [
+              "Not ported from Node's `lib/internal/perf`"
             ]
           }
         ]

@@ -39,6 +39,11 @@ const (
 	fnFlagBound = 0x100
 	// fnFlagThroughEnv: the env is the adapted function's closure header.
 	fnFlagThroughEnv = 0x200
+	// fnFlagThroughBox: the env is { tag, box } — a dynamic function's
+	// closure thunk (emitAnyToClosure).
+	fnFlagThroughBox = 0x400
+	// fnFlagBoundBox: a dynamic bound function (@__kml_dyn_bound).
+	fnFlagBoundBox = 0x800
 )
 
 type fnMetaEntry struct {
@@ -59,6 +64,10 @@ func (e *Emitter) registerFnMeta(sym, name string, length, kind int) {
 		return
 	}
 	e.fnMetaSeen[sym] = true
+	// A `[Symbol.x]` member (named "@@x") is named `[Symbol.x]`, as in JS.
+	if strings.HasPrefix(name, "@@") {
+		name = "[Symbol." + strings.TrimPrefix(name, "@@") + "]"
+	}
 	e.fnMetas = append(e.fnMetas, fnMetaEntry{sym: sym, name: name, length: length, kind: kind})
 }
 
@@ -117,6 +126,55 @@ func (e *Emitter) ensureFnMeta() {
 	e.emitGlobal("declare i64 @__kml_fn_length_hdr(ptr)")
 	e.emitGlobal("declare ptr @__kml_fn_name_dyn(ptr)")
 	e.emitGlobal("declare i64 @__kml_fn_length_dyn(ptr)")
+	e.emitGlobal("declare ptr @__kml_fn_props_dyn(ptr)")
+	e.emitGlobal("declare ptr @__kml_fn_props_dyn_make(ptr, ptr, ptr, ptr)")
+	e.emitGlobal("declare i1 @__kml_fn_has_builtin(ptr, i1)")
+	e.emitGlobal("declare i1 @__kml_array_has_key(i64, ptr, i1)")
+	e.emitGlobal("declare i64 @__kml_fn_thunk_box(ptr, ptr)")
+}
+
+// emitFnPropsBag returns the own-property bag of a boxed function's record
+// (a tag-12 payload pointer), creating it on first use.
+func (e *Emitter) emitFnPropsBag(rec string) string {
+	e.ensureFnMeta()
+	e.ensureDynObj()
+	e.ensureDynJSONC() // a function with properties renders them through the object inspector
+	e.ensureFnBagSeed()
+	bag := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fn_props_dyn_make(ptr %s, ptr @__kml_dynobj_new, ptr @__kml_dynobj_get, ptr @__kml_fn_bag_seed)", bag, rec))
+	return bag
+}
+
+// ensureFnBagSeed defines @__kml_fn_bag_seed(bag, rec): a function's new
+// property bag starts with its own `length` and `name`, as Node's function
+// has them — neither writable nor enumerable, but configurable.
+func (e *Emitter) ensureFnBagSeed() {
+	if e.fnDecls["__kml_fn_bag_seed"] {
+		return
+	}
+	e.fnDecls["__kml_fn_bag_seed"] = true
+	e.functions.WriteString(fmt.Sprintf(`
+define void @__kml_fn_bag_seed(ptr %%bag, ptr %%rec) {
+entry:
+  %%len = call i64 @__kml_fn_length_dyn(ptr %%rec)
+  %%lend = sitofp i64 %%len to double
+  %%lenb = bitcast double %%lend to i64
+  %%lenbox = add i64 %%lenb, %d
+  call void @__kml_dynobj_set(ptr %%bag, ptr %s, i64 %%lenbox)
+  %%li = call i64 @__kml_dynobj_find(ptr %%bag, ptr %s)
+  %%lt = call i64 @__kml_dynobj_rawtag_at(ptr %%bag, i64 %%li)
+  %%lp = call i64 @__kml_dynobj_rawpay_at(ptr %%bag, i64 %%li)
+  call void @__kml_dynobj_patch(ptr %%bag, i64 %%li, i64 %%lt, i64 %%lp, i64 %d)
+  %%nm = call ptr @__kml_fn_name_dyn(ptr %%rec)
+  %%nmbox = ptrtoint ptr %%nm to i64
+  call void @__kml_dynobj_set(ptr %%bag, ptr %s, i64 %%nmbox)
+  %%ni = call i64 @__kml_dynobj_find(ptr %%bag, ptr %s)
+  %%nt = call i64 @__kml_dynobj_rawtag_at(ptr %%bag, i64 %%ni)
+  %%np = call i64 @__kml_dynobj_rawpay_at(ptr %%bag, i64 %%ni)
+  call void @__kml_dynobj_patch(ptr %%bag, i64 %%ni, i64 %%nt, i64 %%np, i64 %d)
+  ret void
+}
+`, nbDoubleOffset, e.internString("length"), e.internString("length"), dynAttrConfigurable, e.internString("name"), e.internString("name"), dynAttrConfigurable))
 }
 
 // UsesFnMeta reports whether fnmeta.c must be linked.
@@ -300,15 +358,6 @@ func (e *Emitter) emitIntToPtr(i64Reg string) string {
 	p := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, i64Reg))
 	return p
-}
-
-// emitInspectFFIFunc renders a bound native function (an extended tag-12
-// record) at nesting depth: `[Function: abs] { pointer: 123n }` (TDD-00229).
-func (e *Emitter) emitInspectFFIFunc(v Value, depth int) Value {
-	e.ensureFnMeta()
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fn_inspect_dyn(ptr %s, i64 %d)", r, v.Ref, depth))
-	return Value{Ref: r, Ty: TypePtr}
 }
 
 // paramDefaultType is TypeScript's type for an unannotated parameter that has

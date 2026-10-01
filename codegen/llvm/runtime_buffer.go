@@ -40,6 +40,7 @@ func (e *Emitter) ensureBufferCodecs() {
 		"declare ptr @__kml_buf_encode_enc(ptr, i64, ptr)",
 		"declare i64 @__kml_buf_byte_length(ptr, ptr)",
 		"declare ptr @__kml_buf_concat(ptr, i64, i64, ptr)",
+		"declare i32 @__kml_buf_is_encoding(ptr)",
 	} {
 		e.emitGlobal(d)
 	}

@@ -93,6 +93,9 @@ const (
 	// UnsupportedMerge is a merge TypeScript allows (two enums) that this
 	// compiler does not implement.
 	UnsupportedMerge
+	// DuplicateImplementation is two function declarations of one name, each
+	// with a body (TypeScript's TS2393; overload signatures have none).
+	DuplicateImplementation
 )
 
 // clashes classifies two declarations of one name in one scope. With
@@ -143,7 +146,17 @@ func clashes(a, b Declaration, annexB bool) Clash {
 	if a.Kind == Lexical || b.Kind == Lexical {
 		return Redeclaration
 	}
+	if !annexB && functionImplementation(a) && functionImplementation(b) {
+		return DuplicateImplementation
+	}
 	return NoClash
+}
+
+// functionImplementation reports whether d is a function declaration with a
+// body the program wrote.
+func functionImplementation(d Declaration) bool {
+	fd, ok := d.Node.(*ast.FunctionDeclaration)
+	return ok && d.Flags&Function != 0 && fd.Body != nil && !fd.Ambient
 }
 
 // Symbol is one name declared in one scope, with every declaration of it.

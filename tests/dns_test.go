@@ -38,14 +38,15 @@ dns.lookup("no.such.host.invalid.example", (err, address, family) => {
 
 // --- dns extras: resolve4 + promises.lookup (ADR-00329) ---
 
+// resolve4 is a DNS query (c-ares in Node), not the hosts file: `localhost`
+// is ENOTFOUND there.
 func TestE2EDnsResolve4(t *testing.T) {
-	assertOutputImports(t, `
+	assertSameAsNodeImports(t, `
 import dns from 'dns'
 dns.resolve4("localhost", (err, addresses) => {
-  console.log("err null:", err === null)
-  console.log("has 127.0.0.1:", addresses.indexOf("127.0.0.1") >= 0)
+  console.log(err && err.code, err && err.syscall, addresses)
 })
-`, "err null: true\nhas 127.0.0.1: true")
+`)
 }
 
 func TestE2EDnsPromisesLookup(t *testing.T) {

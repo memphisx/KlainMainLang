@@ -27,7 +27,7 @@ console.log(a.some(x => { if (x > 2) return true }), a.every(x => { if (x > 0) r
 console.log(a.map(x => { if (x > 1) return "s" + x }))
 console.log(a.map(x => { if (x > 1) return { v: x } }))
 a.forEach(x => { if (x > 1) return; console.log("fe", x) })
-console.log([3, 1, 2].sort((p, q) => { if (p !== q) return p - q }))
+console.log([3, 1, 2].sort((p, q): any => { if (p !== q) return p - q }))
 console.log("abc".replace(/b/, (m) => { if (m === "b") return "B" }))
 console.log(Array.from([1, 2], x => { if (x > 1) return x }))
 const nested = (x: number) => { if (x > 1) { return [x] } }

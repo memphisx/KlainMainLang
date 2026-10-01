@@ -44,6 +44,14 @@ func (c *Checker) resolveOverload(e *ast.CallExpression, fn *Type) *Type {
 	if !ok {
 		return c.unanswered
 	}
+	for _, tp := range sig.TypeParams {
+		// A type parameter the arguments did not infer (no candidate, no
+		// explicit argument or default) leaves a result that mentions it
+		// unanswered, not a guess of unknown.
+		if len(e.TypeArgs) == 0 && m[tp] == c.unknownT && tp.Default == nil && occurs(tp, sig.Result) {
+			return c.unanswered
+		}
+	}
 	r := c.instantiate(sig.Result, m)
 	for _, tp := range sig.TypeParams {
 		if occurs(tp, r) {
@@ -61,7 +69,7 @@ func (c *Checker) resolveOverload(e *ast.CallExpression, fn *Type) *Type {
 // so a callback's own contextual type (contextualType) picks without it.
 func (c *Checker) pickOverload(e *ast.CallExpression, fn *Type, guards bool) (*Type, map[*Type]*Type, bool) {
 	for _, a := range e.Args {
-		if !contextSensitive(a) && c.Unanswered(c.TypeOf(a)) {
+		if !contextSensitive(a) && !isEmptyArrayLiteral(a) && c.Unanswered(c.TypeOf(a)) {
 			return nil, nil, false
 		}
 	}
@@ -75,9 +83,18 @@ func (c *Checker) pickOverload(e *ast.CallExpression, fn *Type, guards bool) (*T
 			// arguments only: typing the callback would ask for its context.
 			m = c.inferArgs(e.Args, e.TypeArgs, sig, guards)
 		}
-		fits := true
+		fits := c.satisfiesConstraints(sig, m)
 		for i, a := range e.Args {
+			if !fits {
+				break
+			}
 			if contextSensitive(a) {
+				// A function literal needs a parameter that can hold a
+				// function (`mustCall(fn)`, not `mustCall(exact?: number)`).
+				if isFunctionLiteral(a) && !c.mayHoldFunction(paramAt(sig, i)) {
+					fits = false
+					break
+				}
 				// A callback for a type-guard parameter must itself be a
 				// guard (`filter(x => x !== null)`), or the next overload
 				// is tried (`filter(x => x > 1)`).
@@ -105,6 +122,23 @@ func (c *Checker) pickOverload(e *ast.CallExpression, fn *Type, guards bool) (*T
 	return nil, nil, false
 }
 
+// satisfiesConstraints reports whether each type argument inferred for a
+// generic overload meets its type parameter's `extends` constraint: an
+// overload whose inference breaks a constraint does not fit, and the next
+// is tried (tsc's chooseOverload).
+func (c *Checker) satisfiesConstraints(sig *Type, m map[*Type]*Type) bool {
+	for _, tp := range sig.TypeParams {
+		arg, ok := m[tp]
+		if !ok || arg == nil || c.Unanswered(arg) || tp.Constraint == nil {
+			continue
+		}
+		if !c.assignable(arg, c.instantiate(tp.Constraint, m)) {
+			return false
+		}
+	}
+	return true
+}
+
 // arityFits reports whether n arguments fit sig's parameters: at least the
 // required ones, at most all of them unless the last is a rest.
 func arityFits(sig *Type, n int) bool {
@@ -130,10 +164,107 @@ func (c *Checker) assignable(a, p *Type) bool {
 // (`{ encoding: "utf8" }` fits `{ encoding: BufferEncoding }`), as tsc types
 // the literal in each signature's context (overloadArgType).
 func (c *Checker) argFits(a ast.Expression, p *Type) bool {
-	if _, ok := a.(*ast.ArrayLiteral); ok {
-		return c.assignable(c.argTypeFor(a, p), p)
+	if isEmptyArrayLiteral(a) {
+		return c.acceptsArray(p) // `[]` takes its element type from the context
 	}
-	return c.assignable(c.overloadArgType(a), p)
+	at := c.overloadArgType(a)
+	if _, ok := a.(*ast.ArrayLiteral); ok {
+		at = c.argTypeFor(a, p)
+	}
+	return !c.argMismatch(a, at, p, relation{missingIsNo: true})
+}
+
+// argMismatch reports argument a (of type at) definitely not fitting p:
+// an object literal's excess property, or no member of p it relates to.
+// Relating to a union is relating to one of its members, each with its
+// own weak type check: "nope" is none of `{ x?: T } | "u" | null`.
+func (c *Checker) argMismatch(a ast.Expression, at, p *Type, rel relation) bool {
+	if c.literalExcess(a, p) {
+		return true
+	}
+	if p != nil && p.Flags&Union != 0 && at != nil && at.Flags&Union == 0 && !c.Unanswered(at) {
+		for _, m := range p.Types {
+			if !c.weakMismatch(at, m) && c.relate(at, m, rel, 0) != no {
+				return false
+			}
+		}
+		return true
+	}
+	return c.weakMismatch(at, p) || c.relate(at, p, rel, 0) == no
+}
+
+// literalExcess is tsc's excess property check (TS2353) for an overload's
+// pick: an object literal naming a property no object member of p has
+// fits no signature taking p.
+func (c *Checker) literalExcess(a ast.Expression, p *Type) bool {
+	ol, ok := a.(*ast.ObjectLiteral)
+	if !ok || p == nil || c.Unanswered(p) {
+		return false
+	}
+	for _, pr := range ol.Properties {
+		if pr.KeyExpr != nil || pr.AccessorKind != "" || pr.Key == "" {
+			return false
+		}
+	}
+	var objs []*Type
+	for _, m := range members(p) {
+		if m.Flags&(Null|Undefined) != 0 || m == c.missingT || m.Flags&(StringLike|NumberLike|BooleanLike|BigIntLike|ESSymbol) != 0 {
+			continue
+		}
+		if m.Flags&Object == 0 || (m.Kind != Anonymous && m.Kind != Interface) || nominalOpen(m) || len(m.Props) == 0 || m.StringIndex != nil || m.NumberIndex != nil {
+			return false // a member that takes any property
+		}
+		objs = append(objs, m)
+	}
+	if len(objs) == 0 {
+		return false
+	}
+	for _, pr := range ol.Properties {
+		if objectProto[pr.Key] {
+			continue
+		}
+		known := false
+		for _, m := range objs {
+			if m.Prop(pr.Key) != nil {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return true
+		}
+	}
+	return false
+}
+
+// weakMismatch is tsc's weak type check (TS2559): a type whose properties
+// are all optional accepts no value that shares none of them, an array or
+// a primitive included (`["ab"]` is no ExecFileSyncOptions).
+func (c *Checker) weakMismatch(a, p *Type) bool {
+	if a == nil || p == nil || c.Unanswered(a) || c.Unanswered(p) {
+		return false
+	}
+	for _, m := range members(p) {
+		if m.Flags&Object == 0 || (m.Kind != Anonymous && m.Kind != Interface) || len(m.Props) == 0 ||
+			m.StringIndex != nil || m.NumberIndex != nil || len(m.Calls) > 0 || len(m.Constructs) > 0 {
+			if m.Flags&(Undefined|Null) == 0 {
+				return false // a member that is not weak
+			}
+			continue
+		}
+		for _, pr := range m.Props {
+			if !pr.Optional {
+				return false
+			}
+		}
+	}
+	switch {
+	case a.Flags&Object != 0 && (a.Kind == Array || a.Kind == Tuple):
+		return true
+	case a.Flags&(String|StringLiteral|Number|NumberLiteral|Boolean|BooleanLiteral) != 0 && a.Flags&Union == 0:
+		return true
+	}
+	return false
 }
 
 // argTypeFor is argument a's type where p is expected: an array literal
@@ -141,7 +272,46 @@ func (c *Checker) argFits(a ast.Expression, p *Type) bool {
 // it one), otherwise a's own type.
 func (c *Checker) argTypeFor(a ast.Expression, p *Type) *Type {
 	lit, ok := a.(*ast.ArrayLiteral)
-	if !ok || p == nil || p.Flags&Object == 0 || p.Kind != Tuple || len(p.Elems) != len(lit.Elements) || len(lit.Elements) == 0 {
+	if !ok || p == nil {
+		return c.TypeOf(a)
+	}
+	// A context that may be absent (`[K, V][] | null`): its array or tuple.
+	if p.Flags&Union != 0 {
+		var ctx *Type
+		for _, m := range p.Types {
+			if m.Flags&Object != 0 && (m.Kind == Tuple || m.Kind == Array || readonlyArrayElem(m) != nil) {
+				if ctx != nil {
+					return c.TypeOf(a)
+				}
+				ctx = m
+			}
+		}
+		if ctx == nil {
+			return c.TypeOf(a)
+		}
+		p = ctx
+	}
+	// An array of tuples (`[['a', 1]]` for `[K, V][]`): each element typed
+	// against the element context, so the tuples infer.
+	elemCtx := p.Elem
+	if ro := readonlyArrayElem(p); ro != nil {
+		elemCtx = ro
+	}
+	if p.Flags&Object != 0 && (p.Kind == Array || readonlyArrayElem(p) != nil) && elemCtx != nil && elemCtx.Flags&Object != 0 && elemCtx.Kind == Tuple && len(lit.Elements) > 0 {
+		elems := make([]*Type, 0, len(lit.Elements))
+		for _, x := range lit.Elements {
+			if _, spread := x.(*ast.SpreadElement); spread {
+				return c.TypeOf(a)
+			}
+			t := c.argTypeFor(x, elemCtx)
+			if c.Unanswered(t) {
+				return t
+			}
+			elems = append(elems, t)
+		}
+		return c.in.array(c.in.union(elems...))
+	}
+	if p.Flags&Object == 0 || p.Kind != Tuple || len(p.Elems) != len(lit.Elements) || len(lit.Elements) == 0 {
 		return c.TypeOf(a)
 	}
 	elems := make([]*Type, len(lit.Elements))
@@ -184,6 +354,8 @@ func (c *Checker) literalObjectType(ol *ast.ObjectLiteral) *Type {
 		var t *Type
 		if inner, ok := p.Value.(*ast.ObjectLiteral); ok {
 			t = c.literalObjectType(inner)
+		} else if arr, ok := p.Value.(*ast.ArrayLiteral); ok {
+			t = c.literalArrayType(arr)
 		} else {
 			t = c.TypeOf(p.Value)
 		}
@@ -224,6 +396,11 @@ func (c *Checker) argMisfit(e *ast.CallExpression, sig *Type) (int, *Type) {
 	}
 	for i, a := range e.Args {
 		if contextSensitive(a) {
+			// A function literal's annotated parameters still meet the
+			// callback's: `(e, a: number) => …` does not take a string `a`.
+			if p := paramAt(sig, i); p != nil && !hasTypeParam(p) && c.literalParamsMisfit(a, c.instantiate(p, m)) {
+				return i, c.instantiate(p, m)
+			}
 			continue
 		}
 		p := paramAt(sig, i)
@@ -238,7 +415,7 @@ func (c *Checker) argMisfit(e *ast.CallExpression, sig *Type) (int, *Type) {
 		if _, ok := a.(*ast.ArrayLiteral); ok {
 			at = c.argTypeFor(a, p)
 		}
-		if c.relate(at, p, relation{}, 0) == no {
+		if c.argMismatch(a, at, p, relation{}) {
 			return i, p
 		}
 	}
@@ -256,8 +433,13 @@ func (c *Checker) checkOverloadCall(e *ast.CallExpression, fn *Type) {
 		p   *Type
 	}
 	var candidates []misfit
+	arityMisses := 0
 	for _, sig := range fn.Overloads {
-		if !arityFits(sig, len(e.Args)) || len(e.TypeArgs) > len(sig.TypeParams) {
+		if !arityFits(sig, len(e.Args)) {
+			arityMisses++
+			continue
+		}
+		if len(e.TypeArgs) > len(sig.TypeParams) {
 			continue
 		}
 		i, p := c.argMisfit(e, sig)
@@ -268,8 +450,15 @@ func (c *Checker) checkOverloadCall(e *ast.CallExpression, fn *Type) {
 	}
 	switch n := len(candidates); {
 	case n == 0:
+		if arityMisses == len(fn.Overloads) {
+			c.reportOverloadArity(e, fn.Overloads)
+		}
 	case n == 1:
 		a := e.Args[candidates[0].arg]
+		if at := c.TypeOf(a); c.weakMismatch(at, candidates[0].p) {
+			c.report(diag.NoCommonProperties, a.GetPos(), at, c.nonNullable(candidates[0].p))
+			return
+		}
 		c.report(diag.ArgNotAssignable, a.GetPos(), widen(c, c.TypeOf(a)), candidates[0].p)
 	case n <= 3:
 		pos := startOf(e.Callee)
@@ -284,4 +473,166 @@ func (c *Checker) checkOverloadCall(e *ast.CallExpression, fn *Type) {
 	default:
 		c.report(diag.NoOverloadMatches, e.Args[candidates[n-1].arg].GetPos())
 	}
+}
+
+// literalArrayType is an array literal's type with its elements' literal
+// types unwidened (`["pipe", "inherit"]` as ("pipe" | "inherit")[], which a
+// candidate's contextual type would keep); its own type when an element is
+// spread or untyped.
+func (c *Checker) literalArrayType(arr *ast.ArrayLiteral) *Type {
+	if len(arr.Elements) == 0 {
+		return c.TypeOf(arr)
+	}
+	var elems []*Type
+	for _, x := range arr.Elements {
+		if _, spread := x.(*ast.SpreadElement); spread {
+			return c.TypeOf(arr)
+		}
+		var t *Type
+		if inner, ok := x.(*ast.ObjectLiteral); ok {
+			t = c.literalObjectType(inner)
+		} else {
+			t = c.TypeOf(x)
+		}
+		if t == nil || c.Unanswered(t) {
+			return c.TypeOf(arr)
+		}
+		elems = append(elems, t)
+	}
+	return c.in.array(c.in.union(elems...))
+}
+
+// isEmptyArrayLiteral reports `[]`.
+func isEmptyArrayLiteral(a ast.Expression) bool {
+	lit, ok := a.(*ast.ArrayLiteral)
+	return ok && len(lit.Elements) == 0
+}
+
+// acceptsArray reports whether p takes some array: an array, a tuple, a
+// ReadonlyArray, `any`, or a union with one of those.
+func (c *Checker) acceptsArray(p *Type) bool {
+	if p == nil || c.Unanswered(p) {
+		return false
+	}
+	for _, m := range members(p) {
+		switch {
+		case m.Flags&(Any|Unknown) != 0:
+			return true
+		case m.Flags&Object != 0 && (m.Kind == Array || m.Kind == Tuple):
+			return true
+		case m.Flags&Object != 0 && m.Kind == Interface && m.Symbol != nil && (m.Symbol.Name == "ReadonlyArray" || m.Symbol.Name == "Array"):
+			return true
+		}
+	}
+	return false
+}
+
+// readonlyArrayElem is T of a `ReadonlyArray<T>` (`readonly T[]`), or nil.
+func readonlyArrayElem(t *Type) *Type {
+	if t.Flags&Object != 0 && t.Kind == Interface && t.Symbol != nil && t.Symbol.Name == "ReadonlyArray" && len(t.TypeArgs) == 1 {
+		return t.TypeArgs[0]
+	}
+	return nil
+}
+
+// isFunctionLiteral reports an arrow function or function expression.
+func isFunctionLiteral(a ast.Expression) bool {
+	switch a.(type) {
+	case *ast.ArrowFunction, *ast.FunctionExpression:
+		return true
+	}
+	return false
+}
+
+// mayHoldFunction reports whether a parameter type admits a function: a
+// function or object type, a type parameter, any/unknown, or a union with
+// one of those.
+func (c *Checker) mayHoldFunction(p *Type) bool {
+	if p == nil {
+		return false
+	}
+	switch {
+	case p.Flags&(Any|Unknown|TypeParam|Object) != 0:
+		return true
+	case p.Flags&Union != 0:
+		for _, m := range p.Types {
+			if c.mayHoldFunction(m) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// reportOverloadArity is TS2554 for a call no overload takes that many
+// arguments of: the range the overloads span, as tsc words it.
+func (c *Checker) reportOverloadArity(e *ast.CallExpression, sigs []*Type) {
+	lo, hi := -1, 0
+	for _, sig := range sigs {
+		required := 0
+		for i := range sig.Params {
+			if (i < len(sig.optionals) && sig.optionals[i]) || (sig.restParam && i == len(sig.Params)-1) {
+				break
+			}
+			required++
+		}
+		if lo < 0 || required < lo {
+			lo = required
+		}
+		if sig.restParam {
+			hi = -1
+		} else if hi >= 0 && len(sig.Params) > hi {
+			hi = len(sig.Params)
+		}
+	}
+	if len(e.Args) < lo {
+		if hi < 0 {
+			c.report(diag.ArgCountAtLeast, e.Callee.GetPos(), lo, len(e.Args))
+		} else {
+			c.report(diag.ArgCount, e.Callee.GetPos(), arity(lo, hi), len(e.Args))
+		}
+		return
+	}
+	if hi >= 0 && len(e.Args) > hi {
+		c.report(diag.ArgCount, e.Args[hi].GetPos(), arity(lo, hi), len(e.Args))
+	}
+}
+
+// literalParamsMisfit reports whether a function literal's annotated
+// parameter cannot take what a callback of type p passes there (parameters
+// relate contravariantly).
+func (c *Checker) literalParamsMisfit(a ast.Expression, p *Type) bool {
+	var params []ast.Param
+	switch f := a.(type) {
+	case *ast.ArrowFunction:
+		params = f.Params
+	case *ast.FunctionExpression:
+		params = f.Params
+	default:
+		return false
+	}
+	if p == nil || p.Flags&Object == 0 || p.Kind != Function || len(p.Overloads) > 0 {
+		return false
+	}
+	target := p
+	scope := c.b.ScopeOf(a)
+	if scope == nil {
+		scope = c.b.Module
+	}
+	for i, prm := range params {
+		if prm.Rest || prm.Type == nil || prm.Type.TypeNode() == nil || i >= len(target.Params) {
+			continue
+		}
+		if i == len(target.Params)-1 && target.restParam {
+			continue
+		}
+		annotated := c.typeFromNode(prm.Type.TypeNode(), scope)
+		if c.Unanswered(annotated) {
+			continue
+		}
+		if c.relate(target.Params[i], annotated, relation{}, 0) == no {
+			return true
+		}
+	}
+	return false
 }

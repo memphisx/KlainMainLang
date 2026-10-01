@@ -320,7 +320,7 @@ import Cfg = App.Config
 declare class Ambient {}
 const e = new EventEmitter()
 console.log(e instanceof EventEmitter, join("a", "b"), Cfg.port, typeof setTimeout, typeof globalThis)
-`, "true a/b 8080 function object")
+`, "true "+nodeJoin("a", "b")+" 8080 function object")
 }
 
 // Node's `path` module declared in lib/node.d.ts: an import's uses type
@@ -332,7 +332,7 @@ import { join, basename } from "path"
 import path from "path"
 const p = path.parse("/home/u/f.txt")
 console.log(join("a", "b"), basename("/x/y.ts", ".ts"), path.dirname("/a/b/c"), path.extname("f.txt"), p.name)
-`, "a/b y /a/b .txt f")
+`, nodeJoin("a", "b")+" y /a/b .txt f")
 	_, err := parseAndCompileImports(t, `
 import path from "path"
 console.log(path.join("a", 1))
@@ -397,7 +397,7 @@ const text: string = fs.readFileSync(tmp, "utf8") + fs.readFileSync(tmp, { encod
 fs.unlinkSync(tmp)
 console.log(text === "abab")
 console.log(cpus().length > 0, JSON.stringify(EOL), typeof u.username, e.length, st.isDirectory(), names.length > 0, fs.existsSync("."))
-`, "true\ntrue \"\\n\" string 2 true true true\nimmediate")
+`, "true\ntrue "+nodeEOLJSON()+" string 2 true true true\nimmediate")
 	for _, c := range []struct{ src, want string }{
 		{"let n: number = setTimeout(() => {}, 1)", "type 'Timeout' is not assignable to type 'number'"},
 		{"import os from 'os'\nos.cpus(1)", "expected 0 arguments, but got 1"},

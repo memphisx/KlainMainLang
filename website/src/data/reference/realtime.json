@@ -7,36 +7,39 @@
   "coverage": {
     "loose": "3/3",
     "loosePct": 100,
-    "strict": "0/3",
-    "strictPct": 0
+    "strict": "1/3",
+    "strictPct": 33
   },
-  "lede": "The realtime and legacy corners of the Networking surface — WebSocket, EventSource (SSE), and XMLHttpRequest. Each diverges from its browser counterpart in a documented way: WebSocket's handshake is blocking and text-only, EventSource replays the whole stored Last-Event-ID on reconnect, and XMLHttpRequest is modeled as the spec's legacy synchronous mode. The fetch/Response/Request/Headers rows of this same status page are documented separately under the fetch surface.",
+  "lede": "The realtime and legacy corners of the Networking surface — WebSocket, EventSource (SSE), and XMLHttpRequest. WebSocket and EventSource are Node's own (undici's), written in TypeScript; XMLHttpRequest is modeled as the spec's legacy synchronous mode. The fetch/Response/Request/Headers rows of this same status page are documented separately under the fetch surface.",
   "entries": [
     {
       "id": "realtime.websocket",
       "name": "new WebSocket(url)",
       "statusRow": "WebSocket",
-      "signature": "new WebSocket(url: string): WebSocket",
+      "signature": "new WebSocket(url: string | URL, protocols?: string | string[]): WebSocket",
       "badge": "caveats",
-      "description": "Both a client and a server-side WebSocket. The client's connect and HTTP upgrade handshake run synchronously before the constructor returns; .onmessage/.send(data)/.close() then drive the connection under the event loop. Server-side, attach klain:ws's `new WebSocketServer({ server })` to an http.createServer (ws://) or https.createServer (wss://) server and `wss.on('connection', socket => …)` hands each upgraded connection a WSConnection that coexists with ordinary HTTP. A client ping gets an automatic pong reply, and both peer close frames and .close() send a proper Close frame. The raw Node `server.on('upgrade', (req, socket, head) => …)` event is also available for hand-rolled or non-WebSocket upgrades.",
+      "description": "Both a client and a server-side WebSocket. The client is the global WebSocket as Node's (undici's): the constructor returns CONNECTING and the handshake runs on the event loop; messages arrive as MessageEvents whose binary data is a Blob or an ArrayBuffer per binaryType, and close()/onclose carry a CloseEvent (code, reason, wasClean). Server-side, attach klain:ws's `new WebSocketServer({ server })` to an http.createServer (ws://) or https.createServer (wss://) server and `wss.on('connection', socket => …)` hands each upgraded connection a WSConnection that coexists with ordinary HTTP. The raw Node `server.on('upgrade', (req, socket, head) => …)` event is also available for hand-rolled or non-WebSocket upgrades.",
       "params": [
         {
           "name": "url",
-          "type": "string",
-          "desc": "The ws:// or wss:// endpoint to connect to."
+          "type": "string | URL",
+          "desc": "The ws:// or wss:// endpoint (http:/https: are rewritten, as Node does)."
+        },
+        {
+          "name": "protocols",
+          "type": "string | string[]",
+          "desc": "Subprotocols to offer; the server's choice is ws.protocol."
         }
       ],
       "returns": {
         "type": "WebSocket",
-        "desc": "The client socket, with onopen/onmessage/onclose/onerror handlers."
+        "desc": "The client socket, an EventTarget with onopen/onmessage/onclose/onerror handlers."
       },
       "exampleKey": "websocket/websocket_client",
       "snippet": "const ws = new WebSocket('ws://127.0.0.1:8083/')\nws.onopen = () => { ws.send('ping') }\nws.onmessage = (ev) => { console.log(ev.data); ws.close() }",
       "differences": [
-        "Client `new WebSocket(url)` supports **`wss://`** (TLS via libssl — same OpenSSL layer as `tls`); the handshake is blocking and verifies the cert (SNI on, no `rejectUnauthorized` opt-out). Server-side **`wss://`** works too — attach the klain:ws WebSocketServer (or a raw `'upgrade'` handler) to an `https.createServer` and the frame I/O rides the TLS connection.",
-        "Binary frames work both directions: `.send()` takes a `string` (text frame) or an `ArrayBuffer`/`Uint8Array` (binary frame), and a received message carries `ev.isBinary` plus a byte-exact `ev.dataBytes(): ArrayBuffer` alongside the `ev.data` string view. `ev.data` is still typed as a string (not the browser's `string | ArrayBuffer` union — `ArrayBuffer` isn't yet an allowed union member), but every byte of a binary payload is recoverable via `dataBytes()`.",
-        "`.close()` on either side doesn't wait for the peer's own echo back before actually closing (a deliberate simplification).",
-        "The client's connect + handshake runs *synchronously*, before the constructor returns, so `.onopen`/`.onerror` are deliberately deferred to the first event-loop pass after construction (giving assignment code a chance to run first) rather than fired inline."
+        "The client offers no `permessage-deflate` extension (Node's does), so `ws.extensions` is always `''`.",
+        "klain:ws's server-side `.close()` ends the connection without waiting for the peer's close frame. Its message events carry `ev.isBinary` and a byte-exact `ev.dataBytes()` (klain:ws's own API, not the client's)."
       ],
       "seeAlso": [
         "realtime.eventsource",
@@ -50,14 +53,19 @@
       "id": "realtime.eventsource",
       "name": "new EventSource(url)",
       "statusRow": "EventSource",
-      "signature": "new EventSource(url: string): EventSource",
-      "badge": "caveats",
-      "description": "Server-sent events (SSE) over HTTP as a non-blocking libcurl transfer sharing the same event loop fetch() uses. Covers connection plumbing (readyState/close()), onmessage/onopen/onerror, and addEventListener/removeEventListener for named (event: name) records — including data/event/id/retry field parsing, multi-line data: concatenation, the several record-boundary forms, and auto-reconnect honoring a server-sent retry: delay while replaying Last-Event-ID. A response that arrives with the wrong shape (non-2xx, or a 2xx without text/event-stream) fails permanently instead of retrying.",
+      "signature": "new EventSource(url: string | URL, init?: EventSourceInit): EventSource",
+      "badge": "exact",
+      "description": "Server-sent events (SSE) as Node's (undici's) EventSource, over fetch — behind `--experimental-eventsource` in Node. Covers readyState/close(), onmessage/onopen/onerror, and addEventListener/removeEventListener for named (event: name) records — data/event/id/retry field parsing, multi-line data: concatenation, the CRLF/LF/CR line endings, and auto-reconnect honoring a server-sent retry: delay while replaying Last-Event-ID. A response that arrives with the wrong shape (non-200, or without text/event-stream) fails permanently instead of retrying.",
       "params": [
         {
           "name": "url",
-          "type": "string",
+          "type": "string | URL",
           "desc": "The SSE endpoint to connect to."
+        },
+        {
+          "name": "init",
+          "type": "EventSourceInit",
+          "desc": "`{ withCredentials }`."
         }
       ],
       "returns": {
@@ -66,9 +74,7 @@
       },
       "exampleKey": "eventsource/eventsource",
       "snippet": "const messages = new EventSource('http://127.0.0.1:8765/stream')\nmessages.onopen = (ev) => { console.log(ev.type) }   // open\nmessages.onmessage = (ev) => { console.log(ev.data); messages.close() }",
-      "differences": [
-        "A `retry:`-driven reconnect replays the *full* stored `Last-Event-ID`, not a per-listener value."
-      ],
+      "differences": [],
       "seeAlso": [
         "realtime.websocket",
         "realtime.xmlhttprequest"

@@ -11,6 +11,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -51,7 +52,7 @@ func isDateMethodName(name string) bool {
 		return true
 	}
 	switch name {
-	case "getTime", "valueOf", "toISOString", "toDateString", "toLocaleDateString", "toUTCString", "toGMTString":
+	case "getTime", "valueOf", "toISOString", "toDateString", "toLocaleDateString", "toUTCString", "toGMTString", "toString", "getTimezoneOffset":
 		return true
 	}
 	return false
@@ -119,7 +120,11 @@ func (e *Emitter) emitNewDate(n *ast.NewDateExpression) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		return Value{Ref: parsed.Ref, Ty: TypeDate}, nil
+		return Value{Ref: e.emitTimeValueToDate(parsed.Ref), Ty: TypeDate}, nil
+	}
+	if val.Ty.Float && !val.Ty.IsDynamic {
+		// A double time value: NaN or one past the range is Invalid Date.
+		return Value{Ref: e.emitTimeValueToDate(e.coerce(val, TypeF64).Ref), Ty: TypeDate}, nil
 	}
 	return Value{Ref: e.coerce(val, TypeI64).Ref, Ty: TypeDate}, nil
 }
@@ -130,11 +135,20 @@ func (e *Emitter) emitNewDate(n *ast.NewDateExpression) (Value, error) {
 // month is 0-indexed here (matching real JS/getMonth()), but
 // __kml_date_compose expects a 1-indexed month (matching ISO date strings),
 // so 1 is added before the call — the same adjustment emitDateToISOString
-// already makes in the other direction. Deliberately does not replicate real
-// JS's "two-digit year (0-99) means 1900+year" historical quirk — not called
-// out anywhere this bug was tracked, and a surprising special case not worth
-// adding speculatively.
+// already makes in the other direction. A year of 0–99 is 1900+year
+// (MakeFullYear, ECMA-262 §21.4.2.1), as in real JS.
 func (e *Emitter) emitNewDateMulti(args []ast.Expression) (Value, error) {
+	v, err := e.emitDateFields(args)
+	if err != nil {
+		return Value{}, err
+	}
+	// The constructor reads its fields as local time.
+	return Value{Ref: e.emitLocalToUTC(v.Ref), Ty: TypeDate}, nil
+}
+
+// emitDateFields composes Date's year, month, … arguments into a time value,
+// reading them as UTC (Date.UTC; the constructor converts from local time).
+func (e *Emitter) emitDateFields(args []ast.Expression) (Value, error) {
 	defaults := [7]int64{0, 0, 1, 0, 0, 0, 0} // year, month, day, hour, min, sec, ms
 	vals := make([]string, 7)
 	for i := range vals {
@@ -152,12 +166,16 @@ func (e *Emitter) emitNewDateMulti(args []ast.Expression) (Value, error) {
 			vals[i] = fmt.Sprintf("%d", defaults[i])
 		}
 	}
+	inRange, lifted, year := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %s, 100", inRange, vals[0]))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1900", lifted, vals[0]))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", year, inRange, lifted, vals[0]))
 	month := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", month, vals[1]))
 	e.ensureDateCompose()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_date_compose(i64 %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s)",
-		r, vals[0], month, vals[2], vals[3], vals[4], vals[5], vals[6]))
+		r, year, month, vals[2], vals[3], vals[4], vals[5], vals[6]))
 	return Value{Ref: r, Ty: TypeDate}, nil
 }
 
@@ -175,17 +193,33 @@ func (e *Emitter) emitDateNow() (Value, error) {
 func (e *Emitter) emitDateCall(dateVal Value, method string, pos ast.Pos) (Value, error) {
 	switch method {
 	case "getTime", "valueOf":
-		return Value{Ref: dateVal.Ref, Ty: TypeI64}, nil
+		// An Invalid Date's time value is NaN.
+		f, r := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", f, dateVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0x7FF8000000000000, double %s", r, e.emitDateIsInvalid(dateVal.Ref), f))
+		return Value{Ref: r, Ty: TypeF64}, nil
 	case "toISOString":
+		e.emitDateThrowIfInvalid(dateVal.Ref)
 		return e.emitDateToISOString(dateVal)
 	case "toDateString":
-		return e.emitDateToDateString(dateVal)
+		return e.emitDateOrInvalid(dateVal, e.emitDateToDateString)
+	case "toString":
+		return e.emitDateOrInvalid(dateVal, e.emitDateToString)
 	case "toUTCString", "toGMTString":
 		return e.emitDateToUTCString(dateVal)
 	case "toLocaleDateString":
 		return e.emitDateToLocaleDateString(dateVal)
+	case "getTimezoneOffset":
+		// Minutes local time is behind UTC.
+		off, q, neg := e.emitTZOffset(dateVal.Ref), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sdiv i64 %s, 60000", q, off))
+		e.emitInstr(fmt.Sprintf("%s = sub i64 0, %s", neg, q))
+		return Value{Ref: neg, Ty: TypeI64}, nil
 	}
 	if idx, ok := dateDecomposeFieldIndex[method]; ok {
+		if !strings.HasPrefix(method, "getUTC") {
+			dateVal = e.emitDateLocal(dateVal)
+		}
 		decomposed := e.emitDateDecompose(dateVal)
 		result := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %s, %d", result, decomposed, idx))
@@ -258,7 +292,12 @@ func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, a
 
 	curReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curReg, sym.Ptr))
-	decomposed := e.emitDateDecompose(Value{Ref: curReg, Ty: TypeDate})
+	local := !strings.HasPrefix(method, "setUTC")
+	cur := Value{Ref: curReg, Ty: TypeDate}
+	if local {
+		cur = e.emitDateLocal(cur)
+	}
+	decomposed := e.emitDateDecompose(cur)
 	extract := func(idx int) string {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %s, %d", r, decomposed, idx))
@@ -292,6 +331,9 @@ func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, a
 	newMs := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_date_compose(i64 %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s)",
 		newMs, year, month1, day, hour, min, sec, millis))
+	if local {
+		newMs = e.emitLocalToUTC(newMs)
+	}
 
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newMs, sym.Ptr))
 	return Value{Ref: newMs, Ty: TypeI64}, nil
@@ -320,10 +362,14 @@ func (e *Emitter) emitDateParse(args []ast.Expression, pos ast.Pos) (Value, erro
 // emitNewDate for the new Date(aStringLiteral) constructor form, which
 // already has the argument evaluated and nothing left to re-evaluate.
 func (e *Emitter) emitDateParseValue(strVal Value) (Value, error) {
-	e.ensureDateParse()
+	e.ensureDateLocal()
+	if !e.declaredDateParseStr {
+		e.declaredDateParseStr = true
+		e.emitGlobal("declare double @__kml_date_parse_str(ptr)")
+	}
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_date_parse(ptr %s)", r, strVal.Ref))
-	return Value{Ref: r, Ty: TypeI64}, nil
+	e.emitInstr(fmt.Sprintf("%s = call double @__kml_date_parse_str(ptr %s)", r, strVal.Ref))
+	return Value{Ref: r, Ty: TypeF64}, nil
 }
 
 // emitDateDecompose calls __kml_date_decompose and returns the raw aggregate
@@ -407,7 +453,7 @@ var monthAbbrevs = []string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Au
 // day zero-padded to 2 digits), matching real JS's toDateString shape — but
 // always UTC, like every other Date method here, not local time.
 func (e *Emitter) emitDateToDateString(dateVal Value) (Value, error) {
-	decomposed := e.emitDateDecompose(dateVal)
+	decomposed := e.emitDateDecompose(e.emitDateLocal(dateVal))
 	extract := func(idx int) string {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %s, %d", r, decomposed, idx))
@@ -437,6 +483,41 @@ func (e *Emitter) emitDateToDateString(dateVal Value) (Value, error) {
 	e.emitInstr(fmt.Sprintf(
 		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, ptr %s, i64 %s, ptr %s, i64 %s)",
 		buf, fmtPtr, wdayName, monthName, day, sign, absYear))
+	e.emitStringFinalizeLen(buf)
+	return Value{Ref: buf, Ty: TypePtr}, nil
+}
+
+// emitDateToString is Date.prototype.toString: "Thu Jan 01 1970 00:00:00
+// GMT+0000 (Coordinated Universal Time)" — in UTC, the zone every Date
+// accessor here reads.
+func (e *Emitter) emitDateToString(dateVal Value) (Value, error) {
+	decomposed := e.emitDateDecompose(e.emitDateLocal(dateVal))
+	extract := func(idx int) string {
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %s, %d", r, decomposed, idx))
+		return r
+	}
+	year, month0, day, wday := extract(0), extract(1), extract(2), extract(3)
+	hour, min, sec := extract(4), extract(5), extract(6)
+	e.ensureDateNameTables()
+	wdayGep, wdayName := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr [7 x ptr], ptr @__kml_weekday_names, i64 0, i64 %s", wdayGep, wday))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", wdayName, wdayGep))
+	monthGep, monthName := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr [12 x ptr], ptr @__kml_month_names, i64 0, i64 %s", monthGep, month0))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", monthName, monthGep))
+	sign, absYear := e.emitDateYearSign(year, false)
+	e.ensureSprintf()
+	// The zone suffix (" GMT+0300 (Eastern European Summer Time)").
+	e.ensureDateLocal()
+	suffix := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca [80 x i8], align 1", suffix))
+	e.emitInstr(fmt.Sprintf("call void @__kml_tz_suffix(i64 %s, ptr %s)", dateVal.Ref, suffix))
+	buf := e.emitStringScratch(160)
+	fmtPtr := e.internString("%s %s %02lld %s%04lld %02lld:%02lld:%02lld%s")
+	e.emitInstr(fmt.Sprintf(
+		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, ptr %s, i64 %s, ptr %s, i64 %s, i64 %s, i64 %s, i64 %s, ptr %s)",
+		buf, fmtPtr, wdayName, monthName, day, sign, absYear, hour, min, sec, suffix))
 	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
@@ -480,7 +561,7 @@ func (e *Emitter) emitDateToUTCString(dateVal Value) (Value, error) {
 // locale argument is accepted. Deterministic and UTC, like every other Date
 // method here, rather than depending on the host's locale/timezone.
 func (e *Emitter) emitDateToLocaleDateString(dateVal Value) (Value, error) {
-	decomposed := e.emitDateDecompose(dateVal)
+	decomposed := e.emitDateDecompose(e.emitDateLocal(dateVal))
 	extract := func(idx int) string {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %s, %d", r, decomposed, idx))
@@ -503,160 +584,98 @@ func (e *Emitter) emitDateToLocaleDateString(dateVal Value) (Value, error) {
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
 
-// emitPerformanceMarkMapEnsure returns a register holding the lazily-
-// created performance.mark() backing map, creating it on first use — the
-// same alloca+store-in-each-branch+load-after-merge shape
-// emitConsoleCountMapEnsure already established.
-func (e *Emitter) emitPerformanceMarkMapEnsure() string {
-	e.ensurePerformanceMarkMap()
-	resPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
-	cur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_performance_mark_map, align 8", cur))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cur, resPtr))
-
-	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, cur))
-	createL := e.freshLabel("perfmark.create")
-	doneL := e.freshLabel("perfmark.done")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, createL, doneL))
-
-	e.emitLabel(createL)
-	newMap := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", newMap))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_performance_mark_map, align 8", newMap))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newMap, resPtr))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-
-	e.emitLabel(doneL)
-	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
-	return result
+// ensureDateLocal declares the local-time helpers (stringsrc/string.c).
+func (e *Emitter) ensureDateLocal() {
+	if e.usedDateLocal {
+		return
+	}
+	e.usedDateLocal = true
+	e.ensureStringC()
+	e.emitGlobal("declare i64 @__kml_tz_offset_ms(i64)")
+	e.emitGlobal("declare i64 @__kml_local_to_utc_ms(i64)")
+	e.emitGlobal("declare void @__kml_tz_suffix(i64, ptr)")
 }
 
-// emitPerformanceMarkLookup loads the mark map, calls __kml_map_str_get,
-// and bitcasts the returned i64 bit pattern back to a double timestamp.
-func (e *Emitter) emitPerformanceMarkLookup(mapReg, namePtr string) string {
-	bits := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", bits, mapReg, namePtr))
-	ts := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", ts, bits))
-	return ts
+// emitTZOffset is the local zone's offset from UTC, in milliseconds, at the
+// UTC time value t.
+func (e *Emitter) emitTZOffset(t string) string {
+	e.ensureDateLocal()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_tz_offset_ms(i64 %s)", r, t))
+	return r
 }
 
-// emitPerformanceMark implements performance.mark(name): records the
-// current performance.now() timestamp under name in a lazily-created
-// Map<string, number> (see ensurePerformanceMarkMap). V1 scope: returns
-// void — real performance.mark() returns a PerformanceMark object, not
-// modeled here since there's no getEntriesByName/PerformanceObserver
-// machinery for it to usefully belong to.
-func (e *Emitter) emitPerformanceMark(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: performance.mark() takes exactly 1 argument (name), got %d", pos.Line, pos.Col, len(args))
-	}
-	nameVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	nameVal = e.coerce(nameVal, TypePtr)
-
-	e.ensurePerformanceNow()
-	mapReg := e.emitPerformanceMarkMapEnsure()
-	nowReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call double @__kml_performance_now()", nowReg))
-	bits := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", bits, nowReg))
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapReg, nameVal.Ref, bits))
-	// TDD-00166: notify any PerformanceObserver watching 'mark' (duration 0).
-	e.emitPerfDispatch(nameVal.Ref, "mark", nowReg, "0.0", perfMaskMark)
-	return Value{Ty: TypeVoid}, nil
+// emitDateLocal is a Date's local wall-clock time, as a time value whose UTC
+// fields are the local ones.
+func (e *Emitter) emitDateLocal(v Value) Value {
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", r, v.Ref, e.emitTZOffset(v.Ref)))
+	return Value{Ref: r, Ty: v.Ty}
 }
 
-// emitPerformanceMeasure implements performance.measure(name, startMark,
-// endMark?): returns the elapsed milliseconds (as a plain number, not a
-// PerformanceMeasure object — same V1 narrowing as emitPerformanceMark
-// above) between two previously-recorded marks. name itself is evaluated
-// (matching real JS's own evaluation-order guarantee) but not stored
-// anywhere, since there's no entries list for it to identify — a
-// documented scope narrowing, not an oversight. endMark defaults to the
-// current performance.now() reading when omitted, matching real
-// performance.measure()'s own "no endMark means measure through now"
-// default. Throws (via the existing exception machinery) if startMark or
-// an explicit endMark was never marked — real performance.measure() throws
-// a SyntaxError for exactly this case, so this isn't a new error shape,
-// just reusing the generic internal-throw path rather than modeling a
-// distinct SyntaxError-vs-other-kind subtype for it.
-func (e *Emitter) emitPerformanceMeasure(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 2 && len(args) != 3 {
-		return Value{}, fmt.Errorf("%d:%d: performance.measure() takes 2 or 3 arguments (name, startMark, endMark?), got %d", pos.Line, pos.Col, len(args))
-	}
-	nameVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	nameStr := e.coerce(nameVal, TypePtr) // evaluated for ordering; also the entry name for observers (TDD-00166)
-
-	startVal, err := e.emitExpr(args[1])
-	if err != nil {
-		return Value{}, err
-	}
-	startVal = e.coerce(startVal, TypePtr)
-
-	e.ensurePerformanceNow()
-	mapReg := e.emitPerformanceMarkMapEnsure()
-
-	e.ensureMalloc()
-	startHas := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", startHas, mapReg, startVal.Ref))
-	e.emitMissingMarkGuard(startHas, startVal.Ref)
-	startTs := e.emitPerformanceMarkLookup(mapReg, startVal.Ref)
-
-	var endTs string
-	if len(args) == 3 {
-		endVal, err := e.emitExpr(args[2])
-		if err != nil {
-			return Value{}, err
-		}
-		endVal = e.coerce(endVal, TypePtr)
-		endHas := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", endHas, mapReg, endVal.Ref))
-		e.emitMissingMarkGuard(endHas, endVal.Ref)
-		endTs = e.emitPerformanceMarkLookup(mapReg, endVal.Ref)
-	} else {
-		endReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call double @__kml_performance_now()", endReg))
-		endTs = endReg
-	}
-
-	dur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", dur, endTs, startTs))
-	// TDD-00166: notify any PerformanceObserver watching 'measure'.
-	e.emitPerfDispatch(nameStr.Ref, "measure", startTs, dur, perfMaskMeasure)
-	return Value{Ref: dur, Ty: TypeF64}, nil
+// emitLocalToUTC is the UTC time value of a local wall-clock time value.
+func (e *Emitter) emitLocalToUTC(local string) string {
+	e.ensureDateLocal()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_local_to_utc_ms(i64 %s)", r, local))
+	return r
 }
 
-// emitMissingMarkGuard throws "performance.measure: no mark named '<name>'"
-// when has is false — the same sprintf-a-message-then-emitInternalThrow
-// shape emitDivZeroGuard's own static-message throw builds on, just with a
-// dynamic name interpolated in since the mark name is only known at
-// runtime.
-func (e *Emitter) emitMissingMarkGuard(has, namePtr string) {
-	okL := e.freshLabel("perfmeasure.ok")
-	missL := e.freshLabel("perfmeasure.missing")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, okL, missL))
+// dateInvalid is an Invalid Date's stored time value: the i64 no valid time
+// value (within ±8.64e15 ms) can be.
+const dateInvalid = "-9223372036854775808"
 
-	e.emitLabel(missL)
-	e.ensureSprintf()
-	e.ensureStrlen()
-	nameLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", nameLen, namePtr))
-	bufSize := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 48", bufSize, nameLen))
-	buf := e.emitStringScratchReg(bufSize) // TDD-00120
-	msgFmt := e.internString("performance.measure: no mark named '%s'")
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s)", buf, msgFmt, namePtr))
-	e.emitStringFinalizeLen(buf)
-	e.emitInternalThrow(buf) // ends with `unreachable`, so missL needs no branch of its own
+// emitDateIsInvalid tests a Date's time value for Invalid Date.
+func (e *Emitter) emitDateIsInvalid(t string) string {
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", r, t, dateInvalid))
+	return r
+}
 
+// emitTimeValueToDate stores a double time value as a Date's: NaN (or any
+// value past the time value range) is Invalid Date.
+func (e *Emitter) emitTimeValueToDate(d string) string {
+	ok, lo, hi, in, t, r := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp ord double %s, 0.0", ok, d))
+	e.emitInstr(fmt.Sprintf("%s = fcmp oge double %s, -8.64e15", lo, d))
+	e.emitInstr(fmt.Sprintf("%s = fcmp ole double %s, 8.64e15", hi, d))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", in, lo, hi))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double %s, double 0.0", t, in, d))
+	ti := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", ti, t))
+	both := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", both, ok, in))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", r, both, ti, dateInvalid))
+	return r
+}
+
+// emitDateThrowIfInvalid throws toISOString's RangeError for Invalid Date.
+func (e *Emitter) emitDateThrowIfInvalid(t string) {
+	e.ensureRangeErrorThrow()
+	badL, okL := e.freshLabel("date.invalid"), e.freshLabel("date.valid")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitDateIsInvalid(t), badL, okL))
+	e.emitLabel(badL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw_range_error(ptr %s)", e.internString("Invalid time value")))
+	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
+}
+
+// emitDateOrInvalid renders a Date through render, or "Invalid Date".
+func (e *Emitter) emitDateOrInvalid(v Value, render func(Value) (Value, error)) (Value, error) {
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("Invalid Date"), slot))
+	okL, doneL := e.freshLabel("date.str"), e.freshLabel("date.strdone")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitDateIsInvalid(v.Ref), doneL, okL))
+	e.emitLabel(okL)
+	s, err := render(v)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", s.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	return Value{Ref: r, Ty: TypePtr}, nil
 }

@@ -28,7 +28,7 @@ func (e *Emitter) emitNewXMLHttpRequestExpression(ex *ast.NewXMLHttpRequestExpre
 
 	ty := XMLHttpRequestType()
 	objReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", objReg, ty.StructSize()))
+	e.emitObjMallocInto(objReg, ty)
 	structIR := ty.StructIR()
 
 	storeField := func(name, ir, val string, align int) {

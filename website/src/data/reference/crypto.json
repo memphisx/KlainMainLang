@@ -4,7 +4,12 @@
   "kind": "web",
   "statusPage": "WEB-CRYPTO.md",
   "coversRows": "all",
-  "coverage": { "loose": "10/10", "loosePct": 100, "strict": "1/10", "strictPct": 10 },
+  "coverage": {
+    "loose": "13/14",
+    "loosePct": 93,
+    "strict": "2/14",
+    "strictPct": 14
+  },
   "lede": "Web Crypto here is compile-time dispatched: the algorithm argument must be a string literal or an object literal with a literal name: — a variable holding the name is a compile error, and bare crypto.subtle as a value is unsupported. Operational failures throw synchronously at the call site rather than rejecting the returned promise, though await/.then/.catch/.finally all work on the settled result. crypto.subtle.* delegates to a native backend picked with -crypto (OpenSSL libcrypto by default, Apple CommonCrypto on macOS); getRandomValues and randomUUID need only a CSPRNG and no external library.",
   "entries": [
     {
@@ -14,15 +19,28 @@
       "signature": "getRandomValues<T extends TypedArray>(view: T): T",
       "badge": "caveats",
       "description": "Fills an integer TypedArray's (or whole ArrayBuffer's) bytes in place from the in-house CSPRNG — arc4random_buf on macOS/BSD, getrandom() on Linux — and returns the same view. The spec's 65,536-byte quota is enforced (an oversize view throws QuotaExceededError), and a float TypedArray is a compile-time rejection matching the spec's TypeMismatchError. The legacy plain number[] form still works, writing one random byte value (0–255) per element.",
-      "params": [{ "name": "view", "type": "TypedArray | ArrayBuffer", "desc": "The buffer to fill in place." }],
-      "returns": { "type": "TypedArray", "desc": "The same view, now filled." },
+      "params": [
+        {
+          "name": "view",
+          "type": "TypedArray | ArrayBuffer",
+          "desc": "The buffer to fill in place."
+        }
+      ],
+      "returns": {
+        "type": "TypedArray",
+        "desc": "The same view, now filled."
+      },
       "exampleKey": "crypto/crypto",
       "snippet": "const bytes = new Uint8Array(16)\ncrypto.getRandomValues(bytes)",
       "differences": [
         "A whole `ArrayBuffer` is accepted as a deliberate extension (real JS throws `TypeMismatchError` — only integer TypedArrays are spec-legal)."
       ],
-      "seeAlso": ["crypto.randomUUID"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Crypto/getRandomValues" }
+      "seeAlso": [
+        "crypto.randomUUID"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Crypto/getRandomValues"
+      }
     },
     {
       "id": "crypto.randomUUID",
@@ -31,11 +49,18 @@
       "signature": "randomUUID(): string",
       "badge": "exact",
       "description": "Returns a standard RFC 4122 version-4 UUID string. The version nibble (4) and variant nibble (one of 8/9/a/b) are fixed by the spec's bit layout; the rest is CSPRNG-random.",
-      "returns": { "type": "string", "desc": "A 36-character v4 UUID." },
+      "returns": {
+        "type": "string",
+        "desc": "A 36-character v4 UUID."
+      },
       "exampleKey": "crypto/crypto",
       "snippet": "const id1: string = crypto.randomUUID()\nconst id2: string = crypto.randomUUID()",
-      "seeAlso": ["crypto.getRandomValues"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Crypto/randomUUID" }
+      "seeAlso": [
+        "crypto.getRandomValues"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Crypto/randomUUID"
+      }
     },
     {
       "id": "crypto.subtle.digest",
@@ -45,10 +70,21 @@
       "badge": "caveats",
       "description": "Hashes a TypedArray or ArrayBuffer with SHA-1, SHA-256, SHA-384, or SHA-512, returning a Promise<ArrayBuffer>. Known-answer-tested against the NIST vectors on both backends.",
       "params": [
-        { "name": "algo", "type": "string | { name: string }", "desc": "Hash name literal." },
-        { "name": "data", "type": "TypedArray | ArrayBuffer", "desc": "Bytes to hash." }
+        {
+          "name": "algo",
+          "type": "string | { name: string }",
+          "desc": "Hash name literal."
+        },
+        {
+          "name": "data",
+          "type": "TypedArray | ArrayBuffer",
+          "desc": "Bytes to hash."
+        }
       ],
-      "returns": { "type": "Promise<ArrayBuffer>", "desc": "The digest bytes." },
+      "returns": {
+        "type": "Promise<ArrayBuffer>",
+        "desc": "The digest bytes."
+      },
       "exampleKey": "crypto/crypto",
       "snippet": "const sha256 = new Uint8Array(await crypto.subtle.digest(\"SHA-256\", data))",
       "differences": [
@@ -56,8 +92,12 @@
         "Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise",
         "Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
       ],
-      "seeAlso": ["crypto.subtle.sign"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/digest" }
+      "seeAlso": [
+        "crypto.subtle.sign"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/digest"
+      }
     },
     {
       "id": "crypto.subtle.encrypt",
@@ -67,11 +107,26 @@
       "badge": "caveats",
       "description": "AES-GCM (iv, optional additionalData, optional tagLength default 128; auth failure → OperationError), AES-CBC (iv, PKCS#7), and RSA-OAEP (public encrypts / private decrypts, optional label), each returning a Promise<ArrayBuffer>.",
       "params": [
-        { "name": "algo", "type": "{ name: string, ... }", "desc": "Algorithm literal with its parameters (iv, label, …)." },
-        { "name": "key", "type": "CryptoKey", "desc": "The key to use." },
-        { "name": "data", "type": "TypedArray | ArrayBuffer", "desc": "Plaintext or ciphertext." }
+        {
+          "name": "algo",
+          "type": "{ name: string, ... }",
+          "desc": "Algorithm literal with its parameters (iv, label, …)."
+        },
+        {
+          "name": "key",
+          "type": "CryptoKey",
+          "desc": "The key to use."
+        },
+        {
+          "name": "data",
+          "type": "TypedArray | ArrayBuffer",
+          "desc": "Plaintext or ciphertext."
+        }
       ],
-      "returns": { "type": "Promise<ArrayBuffer>", "desc": "Ciphertext or plaintext bytes." },
+      "returns": {
+        "type": "Promise<ArrayBuffer>",
+        "desc": "Ciphertext or plaintext bytes."
+      },
       "exampleKey": "crypto/crypto",
       "snippet": "const ct = await crypto.subtle.encrypt({ name: \"AES-GCM\", iv: iv }, aesKey, secret)\nconst pt = await crypto.subtle.decrypt({ name: \"AES-GCM\", iv: iv }, aesKey, ct)",
       "differences": [
@@ -80,8 +135,13 @@
         "Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise",
         "Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
       ],
-      "seeAlso": ["crypto.subtle.generateKey", "crypto.subtle.importKey"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/encrypt" }
+      "seeAlso": [
+        "crypto.subtle.generateKey",
+        "crypto.subtle.importKey"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/encrypt"
+      }
     },
     {
       "id": "crypto.subtle.sign",
@@ -91,11 +151,26 @@
       "badge": "caveats",
       "description": "HMAC (constant-time verify), RSA-PSS (runtime saltLength), and ECDSA over P-256/P-384/P-521 (per-call literal hash, raw r‖s signatures). sign returns Promise<ArrayBuffer>, verify returns Promise<boolean>.",
       "params": [
-        { "name": "algo", "type": "string | { name: string, ... }", "desc": "Algorithm literal (hash/saltLength as needed)." },
-        { "name": "key", "type": "CryptoKey", "desc": "Signing or verifying key." },
-        { "name": "data", "type": "TypedArray | ArrayBuffer", "desc": "Message bytes (verify also takes the signature)." }
+        {
+          "name": "algo",
+          "type": "string | { name: string, ... }",
+          "desc": "Algorithm literal (hash/saltLength as needed)."
+        },
+        {
+          "name": "key",
+          "type": "CryptoKey",
+          "desc": "Signing or verifying key."
+        },
+        {
+          "name": "data",
+          "type": "TypedArray | ArrayBuffer",
+          "desc": "Message bytes (verify also takes the signature)."
+        }
       ],
-      "returns": { "type": "Promise<ArrayBuffer> | Promise<boolean>", "desc": "Signature bytes, or a verification result." },
+      "returns": {
+        "type": "Promise<ArrayBuffer> | Promise<boolean>",
+        "desc": "Signature bytes, or a verification result."
+      },
       "exampleKey": "crypto/crypto",
       "snippet": "const sig = new Uint8Array(await crypto.subtle.sign(\"HMAC\", hmacKey, msg))\nconsole.log(await crypto.subtle.verify(\"HMAC\", hmacKey, sig, msg)) // true",
       "differences": [
@@ -104,8 +179,13 @@
         "Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise",
         "Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
       ],
-      "seeAlso": ["crypto.subtle.digest", "crypto.subtle.generateKey"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/sign" }
+      "seeAlso": [
+        "crypto.subtle.digest",
+        "crypto.subtle.generateKey"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/sign"
+      }
     },
     {
       "id": "crypto.subtle.generateKey",
@@ -115,11 +195,26 @@
       "badge": "caveats",
       "description": "Generates AES-GCM/AES-CBC (length:), HMAC (hash:, spec-default length), RSA-OAEP/RSA-PSS (modulusLength, hash) and ECDSA (namedCurve) keys, returning a Promise<CryptoKey> or a Promise<CryptoKeyPair> (.publicKey/.privateKey). Usages are enforced and spec-split across a key pair.",
       "params": [
-        { "name": "algo", "type": "{ name: string, ... }", "desc": "Algorithm literal with its key parameters." },
-        { "name": "extractable", "type": "boolean", "desc": "Whether the key may be exported." },
-        { "name": "usages", "type": "string[]", "desc": "Permitted operations." }
+        {
+          "name": "algo",
+          "type": "{ name: string, ... }",
+          "desc": "Algorithm literal with its key parameters."
+        },
+        {
+          "name": "extractable",
+          "type": "boolean",
+          "desc": "Whether the key may be exported."
+        },
+        {
+          "name": "usages",
+          "type": "string[]",
+          "desc": "Permitted operations."
+        }
       ],
-      "returns": { "type": "Promise<CryptoKey | CryptoKeyPair>", "desc": "The generated key or key pair." },
+      "returns": {
+        "type": "Promise<CryptoKey | CryptoKeyPair>",
+        "desc": "The generated key or key pair."
+      },
       "exampleKey": "crypto/crypto",
       "snippet": "const aesKey = await crypto.subtle.generateKey(\n    { name: \"AES-GCM\", length: 256 }, false, [\"encrypt\", \"decrypt\"])",
       "differences": [
@@ -128,8 +223,13 @@
         "Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise",
         "Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
       ],
-      "seeAlso": ["crypto.subtle.importKey", "crypto.subtle.encrypt"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/generateKey" }
+      "seeAlso": [
+        "crypto.subtle.importKey",
+        "crypto.subtle.encrypt"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/generateKey"
+      }
     },
     {
       "id": "crypto.subtle.importKey",
@@ -139,11 +239,26 @@
       "badge": "caveats",
       "description": "raw (AES/HMAC bytes; EC public uncompressed points both ways), pkcs8 (private), spki (public), and jwk (oct/RSA/EC; object literal or Map in, Map out). Kind/format mismatches and non-extractable export throw InvalidAccessError.",
       "params": [
-        { "name": "format", "type": "\"raw\" | \"pkcs8\" | \"spki\" | \"jwk\"", "desc": "Key encoding." },
-        { "name": "keyData", "type": "TypedArray | Map<string,string> | object", "desc": "The key material (import only)." },
-        { "name": "usages", "type": "string[]", "desc": "Permitted operations (import only)." }
+        {
+          "name": "format",
+          "type": "\"raw\" | \"pkcs8\" | \"spki\" | \"jwk\"",
+          "desc": "Key encoding."
+        },
+        {
+          "name": "keyData",
+          "type": "TypedArray | Map<string,string> | object",
+          "desc": "The key material (import only)."
+        },
+        {
+          "name": "usages",
+          "type": "string[]",
+          "desc": "Permitted operations (import only)."
+        }
       ],
-      "returns": { "type": "Promise<CryptoKey | ArrayBuffer | Map<string,string>>", "desc": "A CryptoKey, or exported bytes / a JWK Map." },
+      "returns": {
+        "type": "Promise<CryptoKey | ArrayBuffer | Map<string,string>>",
+        "desc": "A CryptoKey, or exported bytes / a JWK Map."
+      },
       "exampleKey": "crypto/crypto",
       "snippet": "const hmacKey = await crypto.subtle.importKey(\"raw\", rawKey,\n    { name: \"HMAC\", hash: \"SHA-256\" }, true, [\"sign\", \"verify\"])\nconst jwk = await crypto.subtle.exportKey(\"jwk\", hmacKey)",
       "differences": [
@@ -154,43 +269,13 @@
         "Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise",
         "Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
       ],
-      "seeAlso": ["crypto.subtle.generateKey", "crypto.node"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/importKey" }
-    },
-    {
-      "id": "crypto.node",
-      "name": "Node crypto module: generateKeyPair/generateKeyPairSync, randomBytes",
-      "statusRow": "Node crypto module: generateKeyPair/generateKeyPairSync, randomBytes (+ randomUUID/getRandomValues re-exports)",
-      "signature": "import { generateKeyPair, generateKeyPairSync, randomBytes } from 'crypto'",
-      "badge": "caveats",
-      "description": "The Node crypto module surface: generateKeyPair/generateKeyPairSync assemble PEM over the same per-backend keygen ABI as subtle.generateKey, plus randomBytes and re-exports of randomUUID/getRandomValues. The callback shapes (err, publicKey, privateKey) are contextually typed.",
-      "returns": { "type": "void | { publicKey, privateKey } | Buffer", "desc": "PEM key pair, or random bytes." },
-      "differences": [
-        "`generateKeyPair` requires both encodings as `{ type: 'spki'/'pkcs8', format: 'pem' }` — KeyObject results, `pkcs1`/`sec1`/`der` formats, and `cipher`/`passphrase` are clean rejections; types are `'rsa'` (modulusLength, 65537 exponent) and `'ec'` (P-256/384/521) only — no `rsa-pss`/`dsa`/`dh`/`ed25519`",
-        "Generation is synchronous — the async form fires its callback inline (async-shaped, not offloaded)",
-        "`randomBytes(size, cb)`'s callback fires `cb(null, buf)` synchronously (async-shaped, not offloaded — generation never fails)",
-        "A namespace import's binding covers the module's own members (generateKeyPair(Sync)/randomBytes/randomUUID/getRandomValues/createHash) — `crypto.subtle` is reached via the ambient global, not the module"
+      "seeAlso": [
+        "crypto.subtle.generateKey",
+        "crypto.node"
       ],
-      "seeAlso": ["crypto.subtle.generateKey", "crypto.getRandomValues", "crypto.createhash"],
-      "spec": { "mdn": "https://nodejs.org/api/crypto.html#cryptogeneratekeypairtype-options-callback" }
-    },
-    {
-      "id": "crypto.createhash",
-      "name": "crypto.createHash(algorithm) / crypto.createHmac(algorithm, key)",
-      "statusRow": "Node `crypto` module: `createHash(algorithm)` / `createHmac(algorithm, key)` → `Hash`/`Hmac` (`.update(data).digest(encoding?)`)",
-      "signature": "import crypto from 'crypto'; crypto.createHash(algorithm): Hash; crypto.createHmac(algorithm, key): Hmac",
-      "badge": "caveats",
-      "description": "Node's Hash and Hmac objects: createHash(algorithm) / createHmac(algorithm, key) then .update(data).digest(encoding). Real streaming digests over OpenSSL EVP / CommonCrypto — no input buffering. The faithful way to compute a WebSocket Sec-WebSocket-Accept inside a server.on('upgrade') handler.",
-      "returns": { "type": "Hash | Hmac", "desc": "A handle with chainable .update(data) and .digest(encoding?)." },
-      "differences": [
-        "Algorithms: `md5`/`sha1`/`sha256`/`sha384`/`sha512` (a string literal); others are a clean rejection.",
-        "`.digest('hex')`/`'base64'`/`'base64url'` return a byte-exact string; `.digest()` returns a Buffer. `latin1`/`binary` work but share the UTF-8-only string caveat for non-ASCII bytes (like Buffer.toString('latin1')); other encodings are clean rejections.",
-        "`.update` (chainable) and createHmac's key take a string (UTF-8, binary-safe) or a Buffer/TypedArray/ArrayBuffer.",
-        "Real streaming (EVP_MD_CTX/EVP_MAC, CC_* /CCHmac) — arbitrarily large inputs, no buffering."
-      ],
-      "snippet": "import crypto from 'crypto'\nconst accept = crypto.createHash('sha1')\n  .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')\n  .digest('base64')\nconst sig = crypto.createHmac('sha256', secret).update(msg).digest('hex')",
-      "seeAlso": ["crypto.node", "crypto.subtle.digest"],
-      "spec": { "mdn": "https://nodejs.org/api/crypto.html#cryptocreatehashalgorithm-options" }
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/importKey"
+      }
     },
     {
       "id": "crypto.subtle.deriveKey",
@@ -200,10 +285,21 @@
       "badge": "caveats",
       "description": "PBKDF2 (salt, iterations, literal hash) and HKDF (salt, optional info, literal hash). deriveBits returns a Promise<ArrayBuffer>; deriveKey produces an AES-GCM/AES-CBC/HMAC Promise<CryptoKey>. Known-answer-tested against RFC 6070/5869 on both backends.",
       "params": [
-        { "name": "algo", "type": "{ name: string, ... }", "desc": "Derivation algorithm literal (salt, iterations, hash, …)." },
-        { "name": "baseKey", "type": "CryptoKey", "desc": "The imported base key material." }
+        {
+          "name": "algo",
+          "type": "{ name: string, ... }",
+          "desc": "Derivation algorithm literal (salt, iterations, hash, …)."
+        },
+        {
+          "name": "baseKey",
+          "type": "CryptoKey",
+          "desc": "The imported base key material."
+        }
       ],
-      "returns": { "type": "Promise<CryptoKey | ArrayBuffer>", "desc": "The derived key or raw bits." },
+      "returns": {
+        "type": "Promise<CryptoKey | ArrayBuffer>",
+        "desc": "The derived key or raw bits."
+      },
       "exampleKey": "crypto/crypto",
       "snippet": "const aes = await crypto.subtle.deriveKey(\n    { name: \"PBKDF2\", salt: salt, iterations: 100000, hash: \"SHA-256\" },\n    base, { name: \"AES-GCM\", length: 256 }, false, [\"encrypt\", \"decrypt\"])",
       "differences": [
@@ -212,8 +308,126 @@
         "Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise",
         "Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
       ],
-      "seeAlso": ["crypto.subtle.importKey", "crypto.subtle.generateKey"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/deriveKey" }
+      "seeAlso": [
+        "crypto.subtle.importKey",
+        "crypto.subtle.generateKey"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/deriveKey"
+      }
+    },
+    {
+      "id": "crypto.createhash",
+      "name": "crypto.createHash / createHmac / hash / getHashes",
+      "statusRow": "Node `crypto` module: `createHash`/`createHmac` (`Hash`/`Hmac`: `update`/`digest`/`copy`), `hash`, `getHashes`",
+      "signature": "createHash(algorithm, options?): Hash; createHmac(algorithm, key): Hmac; hash(algorithm, data, outputEncoding?): string",
+      "badge": "caveats",
+      "description": "Node's Hash and Hmac objects: .update(data) (chainable, string or bytes), .digest(encoding?) and Hash's .copy(). Every digest the crypto backend has is available, including shake128/shake256 with an outputLength. Validation and errors are Node's: a second digest throws ERR_CRYPTO_HASH_FINALIZED, and an unknown algorithm throws 'Digest method not supported'.",
+      "returns": {
+        "type": "Hash | Hmac | string",
+        "desc": "A digest handle, or the one-shot digest."
+      },
+      "snippet": "import crypto from 'crypto'\nconst accept = crypto.createHash('sha1')\n  .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')\n  .digest('base64')\nconst sig = crypto.createHmac('sha256', secret).update(msg).digest('hex')",
+      "seeAlso": [
+        "crypto.cipheriv",
+        "crypto.subtle.digest"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/crypto.html#cryptocreatehashalgorithm-options"
+      },
+      "differences": [
+        "On -crypto=commoncrypto only md5, sha1, sha224, sha256, sha384 and sha512 exist; SHAKE, SHA-3, SHA-512/t, RIPEMD-160 and BLAKE2 throw 'Digest method not supported'."
+      ]
+    },
+    {
+      "id": "crypto.cipheriv",
+      "name": "crypto.createCipheriv / createDecipheriv / getCiphers",
+      "statusRow": "Node `crypto` module: `createCipheriv`/`createDecipheriv` (`Cipheriv`/`Decipheriv`), `getCiphers`",
+      "signature": "createCipheriv(algorithm, key, iv, options?): Cipheriv; createDecipheriv(algorithm, key, iv, options?): Decipheriv",
+      "badge": "caveats",
+      "description": "Symmetric encryption with any cipher the backend has. update/final, setAutoPadding, and setAAD, getAuthTag and setAuthTag for AEAD modes such as GCM. A wrong key or IV length, a bad final block, and a failed authentication throw the errors Node throws.",
+      "returns": {
+        "type": "Cipheriv | Decipheriv",
+        "desc": "A cipher handle."
+      },
+      "snippet": "const e = crypto.createCipheriv('aes-256-gcm', key, iv)\nconst ct = Buffer.concat([e.update('hello'), e.final()])\nconst tag = e.getAuthTag()",
+      "seeAlso": [
+        "crypto.createhash",
+        "crypto.subtle.encrypt"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/crypto.html#cryptocreatecipherivalgorithm-key-iv-options"
+      },
+      "differences": [
+        "On -crypto=commoncrypto only AES-128/192/256 in CBC, ECB, CTR and GCM exist; other ciphers throw ERR_CRYPTO_UNKNOWN_CIPHER."
+      ]
+    },
+    {
+      "id": "crypto.kdf",
+      "name": "crypto.pbkdf2 / scrypt / hkdf (+ Sync)",
+      "statusRow": "Node `crypto` module: `pbkdf2`/`scrypt`/`hkdf` (+ `Sync`)",
+      "signature": "pbkdf2(password, salt, iterations, keylen, digest, callback); scrypt(password, salt, keylen, options?, callback); hkdf(digest, ikm, salt, info, keylen, callback)",
+      "badge": "caveats",
+      "description": "Key derivation. The Sync forms return a Buffer (hkdfSync an ArrayBuffer); the callback forms run on the thread pool and call back with (err, key), as Node's do.",
+      "returns": {
+        "type": "Buffer | ArrayBuffer | void",
+        "desc": "The derived key, or nothing for the callback form."
+      },
+      "snippet": "const key = crypto.scryptSync('password', 'salt', 32)",
+      "seeAlso": [
+        "crypto.subtle.deriveKey"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/crypto.html#cryptopbkdf2password-salt-iterations-keylen-digest-callback"
+      },
+      "differences": [
+        "On -crypto=commoncrypto the digests are the six createHash has there."
+      ]
+    },
+    {
+      "id": "crypto.random",
+      "name": "crypto.randomBytes / randomFill / randomInt / timingSafeEqual / constants",
+      "statusRow": "Node `crypto` module: `randomBytes`/`randomFill`/`randomFillSync`/`randomInt`/`randomUUID`/`getRandomValues`, `timingSafeEqual`, `constants`",
+      "signature": "randomBytes(size, callback?); randomFill(buf, offset?, size?, callback); randomInt(min?, max, callback?); timingSafeEqual(a, b)",
+      "badge": "exact",
+      "description": "CSPRNG bytes and integers. randomBytes and randomFill fill on the thread pool when given a callback; randomInt is Node's rejection-sampling draw. timingSafeEqual compares in constant time and throws Node's RangeError on a length mismatch. constants is Node's table.",
+      "returns": {
+        "type": "Buffer | number | boolean",
+        "desc": "Random bytes, a random integer, or the comparison."
+      },
+      "snippet": "const token = crypto.randomBytes(32).toString('hex')\nconst die = crypto.randomInt(1, 7)",
+      "seeAlso": [
+        "crypto.getRandomValues",
+        "crypto.randomUUID"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/crypto.html#cryptorandombytessize-callback"
+      }
+    },
+    {
+      "id": "crypto.node",
+      "name": "crypto.generateKeyPair / createSign / createVerify / sign / verify",
+      "statusRow": "Node `crypto` module: `generateKeyPair`/`generateKeyPairSync`, `createSign`/`createVerify`, `sign`/`verify`",
+      "signature": "generateKeyPair(type, options, callback); generateKeyPairSync(type, options): { publicKey, privateKey }; sign(algorithm, data, key); verify(algorithm, data, key, signature)",
+      "badge": "caveats",
+      "description": "rsa, ec, ed25519 and x25519 key pairs as PEM strings, and signatures over PEM keys: Sign/Verify streams and the one-shot sign/verify (null algorithm for Ed25519). The callback form of generateKeyPair runs on the thread pool.",
+      "returns": {
+        "type": "{ publicKey: string, privateKey: string } | Buffer | boolean",
+        "desc": "A PEM key pair, a signature, or the verification."
+      },
+      "differences": [
+        "Keys are PEM strings only: generateKeyPair needs publicKeyEncoding { type: 'spki', format: 'pem' } and privateKeyEncoding { type: 'pkcs8', format: 'pem' }. There are no KeyObject results, no pkcs1/sec1/der formats, and no cipher/passphrase.",
+        "An encrypted PEM key ({ key, passphrase }) is not decrypted.",
+        "On -crypto=commoncrypto: RSA keys of 1024 bits or more with exponent 65537, and EC keys on P-256/P-384/P-521 only."
+      ],
+      "snippet": "const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519', {\n  publicKeyEncoding: { type: 'spki', format: 'pem' },\n  privateKeyEncoding: { type: 'pkcs8', format: 'pem' },\n})\nconst sig = crypto.sign(null, Buffer.from('msg'), privateKey)",
+      "seeAlso": [
+        "crypto.subtle.generateKey",
+        "crypto.subtle.sign"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/crypto.html#cryptogeneratekeypairtype-options-callback"
+      }
     }
   ]
 }

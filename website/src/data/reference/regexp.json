@@ -4,8 +4,8 @@
   "kind": "language",
   "statusPage": "REGEXP.md",
   "coversRows": "all",
-  "coverage": { "loose": "14/15", "loosePct": 93, "strict": "7/15", "strictPct": 47 },
-  "lede": "PCRE2 under the hood, but aligned to the ECMAScript dialect by default so the everyday edge cases (`$` at the true end, an unset backreference matching empty, `\\uXXXX` escapes) behave as real JS does. The recurring divergences are structural: strings are byte-indexed, so match offsets are byte positions unless you opt into `-regex=es-utf16`; result arrays narrow a truly-`null` optional capture to `\"\"` and drop the `index`/`input`/`groups` extras; and `matchAll` is eager, not a lazy iterator. The whole-program `-regex=<mode>` flag trades fidelity for speed across five modes, and the `u`/`d` flags are out of scope for V1 (`y`/sticky is implemented).",
+  "coverage": { "loose": "14/15", "loosePct": 93, "strict": "9/15", "strictPct": 60 },
+  "lede": "PCRE2 under the hood, but aligned to the ECMAScript dialect by default so the everyday edge cases (`$` at the true end, an unset backreference matching empty, `\\uXXXX` escapes) behave as real JS does. The recurring divergences are structural: strings are byte-indexed, so match offsets are byte positions unless you opt into `-regex=es-utf16`; `exec` results carry `index`, `input` and `groups`, but `matchAll`'s do not, and `matchAll` is eager, not a lazy iterator. The whole-program `-regex=<mode>` flag trades fidelity for speed across five modes, and the `u`/`d` flags are out of scope for V1 (`y`/sticky is implemented).",
   "entries": [
     {
       "id": "regexp.construction",
@@ -96,17 +96,14 @@
       "id": "regexp.exec",
       "name": ".exec(str)",
       "statusRow": ".exec(str)",
-      "signature": "re.exec(str: string): string[] | null",
-      "badge": "caveats",
+      "signature": "re.exec(str: string): RegExpExecArray | null",
+      "badge": "exact",
       "description": "Returns string[] | null — index 0 is the full match, 1..N are the numbered capture groups; real, working m !== null / if (m) checks against the result. A global RegExp reads/writes .lastIndex exactly like real JS, so the while ((m = re.exec(s)) !== null) idiom works. All matching methods route through the one compiled PCRE2 handle, so the -regex dialect mode applies uniformly here and to match/matchAll/replace/replaceAll/split/search.",
       "params": [{ "name": "str", "type": "string", "desc": "The subject string." }],
       "returns": { "type": "string[] | null", "desc": "Match array, or null on no match." },
       "exampleKey": "regexp/regexp",
       "snippet": "const range = /(\\d+)-(\\d+)/\nconst m = range.exec(\"range: 12-34 end\")\nif (m !== null) { console.log(m[1]); console.log(m[2]) } // 12 / 34",
-      "differences": [
-        "An unmatched optional capture group becomes `\"\"` rather than a true per-element `null` (no per-element-nullable-string array exists)",
-        "Real JS's `index`/`input`/`groups` extra properties on the result aren't built"
-      ],
+      "differences": [],
       "seeAlso": ["regexp.match", "regexp.lastIndex", "regexp.test"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/exec" }
     },
@@ -122,7 +119,7 @@
       "exampleKey": "regexp/regexp",
       "snippet": "const allDigits = \"a1 b22 c333\".match(/\\d+/g)\nif (allDigits !== null) { console.log(allDigits.length) } // 3\nconsole.log(\"nothing\".match(/\\d+/g) === null) // true",
       "differences": [
-        "Shares `.exec()`'s result-array narrowing (an unmatched optional capture group becomes `\"\"`, not per-element `null`; no `index`/`input`/`groups`)"
+        "With a regex held in a variable (not a literal), the result has no `index`/`input`/`groups`; a non-global literal's result carries them, as `.exec()`'s does"
       ],
       "seeAlso": ["regexp.exec", "regexp.matchAll"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/match" }
@@ -139,7 +136,7 @@
       "exampleKey": "regexp/regexp",
       "snippet": "for (const each of \"a-1 b-22 c-333\".matchAll(/(\\w)-(\\d+)/g)) {\n  console.log(each[0])\n}",
       "differences": [
-        "Returns an eager `string[][]`, not a real lazy iterator (no lazy-iteration infrastructure exists anywhere in this compiler)"
+        "Returns an eager `string[][]`, not a lazy iterator"
       ],
       "seeAlso": ["regexp.match", "regexp.exec"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/matchAll" }
@@ -190,16 +187,13 @@
       "name": "str.split(regexp)",
       "statusRow": "str.split(regexp)",
       "signature": "str.split(regexp: RegExp): string[]",
-      "badge": "caveats",
-      "description": "Finds every match regardless of the g flag (its own local search loop, like real JS). A regex that never matches returns a single-element array holding the whole subject.",
+      "badge": "exact",
+      "description": "Finds every match regardless of the g flag (its own local search loop, like real JS), splicing the separator's capture groups in after each piece (an unmatched one as undefined). A regex that never matches returns a single-element array holding the whole subject.",
       "params": [{ "name": "regexp", "type": "RegExp", "desc": "The delimiter pattern." }],
       "returns": { "type": "string[]", "desc": "The split pieces." },
       "exampleKey": "regexp/regexp",
       "snippet": "const parts = \"a1b22c333d\".split(/\\d+/)\nconsole.log(parts.length) // 4",
-      "differences": [
-        "Only splits on a non-zero-length match — real JS's more intricate zero-length-match handling isn't replicated",
-        "Captured groups in the split pattern are never spliced into the result (out of scope from the start)"
-      ],
+      "differences": [],
       "seeAlso": ["regexp.search"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/split" }
     },

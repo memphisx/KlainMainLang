@@ -196,15 +196,14 @@ func (e *Emitter) emitQueueMicrotask(args []ast.Expression, pos ast.Pos) (Value,
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: queueMicrotask expects 1 argument", pos.Line, pos.Col)
 	}
-	cb, err := e.emitExpr(args[0])
+	// The callback shape timers take (called with no arguments, its result
+	// dropped), carrying the async context it was queued in.
+	cbPtr, err := e.timerCallbackPtr(args[0], "queueMicrotask", pos)
 	if err != nil {
 		return Value{}, err
 	}
-	if cb.Ty.IR != "ptr" {
-		return Value{}, fmt.Errorf("%d:%d: queueMicrotask expects a function", pos.Line, pos.Col)
-	}
 	e.ensureMicrotasks()
-	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", cb.Ref))
+	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", cbPtr))
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -321,7 +320,36 @@ func (e *Emitter) emitMaySuspendCall(name string, sig FuncSig, args []ast.Expres
 	}
 	for i := 0; i < regularCount; i++ {
 		if i >= len(args) {
-			return Value{}, fmt.Errorf("%d:%d: missing argument to '%s'", pos.Line, pos.Col, name)
+			// An omitted argument: its default, or an optional parameter's
+			// absent value (as emitCall's named-function path has them).
+			pty := sig.ParamTypes[i]
+			switch {
+			case i < len(sig.Defaults) && sig.Defaults[i] != nil:
+				v, err := e.emitExprWithObjectHint(sig.Defaults[i], pty)
+				if err != nil {
+					return Value{}, err
+				}
+				if pty.IsDynamic {
+					if v, err = e.emitBoxValue(v); err != nil {
+						return Value{}, err
+					}
+				}
+				argVals[i] = v
+			case i < len(sig.Optional) && sig.Optional[i]:
+				switch {
+				case pty.IsArray:
+					argVals[i] = Value{Ref: "{ptr null, i64 0}", Ty: pty}
+				case isNullableScalar(pty):
+					argVals[i] = Value{Ref: "zeroinitializer", Ty: pty}
+				case pty.IsDynamic:
+					argVals[i] = Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: pty}
+				default:
+					argVals[i] = Value{Ref: pty.zeroLiteral(), Ty: pty}
+				}
+			default:
+				return Value{}, fmt.Errorf("%d:%d: missing argument to '%s'", pos.Line, pos.Col, name)
+			}
+			continue
 		}
 		v, err := e.emitExprWithObjectHint(args[i], sig.ParamTypes[i])
 		if err != nil {

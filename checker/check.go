@@ -28,8 +28,7 @@ func (c *Checker) Check() []*diag.Diagnostic {
 
 // CheckFiles is Check over a program the resolver merged from several
 // files: fileOf names the file each top-level statement came from, and every
-// diagnostic is attributed to it. (A worker module's body is not bound yet,
-// so not checked.)
+// diagnostic is attributed to it.
 func (c *Checker) CheckFiles(fileOf func(ast.Statement) string) []*diag.Diagnostic {
 	if c.checked {
 		return c.diags
@@ -43,6 +42,13 @@ func (c *Checker) CheckFiles(fileOf func(ast.Statement) string) []*diag.Diagnost
 		c.file = fileOf(st)
 		c.checkNode(st, nil)
 		c.checkTypeNames(st)
+	}
+	for _, wm := range prog.WorkerModules {
+		for _, st := range wm.Body {
+			c.file = fileOf(st)
+			c.checkNode(st, nil)
+			c.checkTypeNames(st)
+		}
 	}
 	c.file = ""
 	return c.diags
@@ -112,6 +118,17 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 		if sym := c.b.NewTarget(n); sym != nil && sym.Flags&binder.Class != 0 {
 			c.checkConstructorAccess(n, sym)
 		}
+		if len(n.TypeArgs) > 0 {
+			if ctor := c.newCtor(n); ctor != nil {
+				c.typeArgConstraintError(n.TypeArgs, len(n.Args), ctor)
+			}
+		}
+	case *ast.NewDateExpression, *ast.NewMapExpression, *ast.NewSetExpression, *ast.NewWeakMapExpression, *ast.NewWeakSetExpression:
+		if name, args, targs, _ := builtinNewParts(n); len(targs) > 0 {
+			if ctor := c.builtinCtor(name); ctor != nil {
+				c.typeArgConstraintError(targs, len(args), ctor)
+			}
+		}
 	case *ast.VarDeclaration:
 		if n.TypeAnnot != nil && n.Init != nil {
 			if sym := c.symbolOf(n); sym != nil {
@@ -150,6 +167,9 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 		if ret != nil && n.Value != nil {
 			c.checkAssign(n.Value, ret, diag.NotAssignable, n.GetPos())
 		}
+	case *ast.ForOfStatement:
+		// tsc's checkForOfStatement: the iterable is checkNonNullExpression'd.
+		c.checkNonNull(n.Iterable)
 	case *ast.MemberExpression:
 		c.checkProperty(n)
 		c.checkAccessibility(n)
@@ -294,6 +314,12 @@ func (c *Checker) checkAssign(value ast.Expression, target *Type, m *diag.Messag
 		}
 		c.report(m, pos, src, target)
 	case maybe:
+		if c.weakMismatch(src, target) {
+			// A weak type (every property optional) takes no primitive or
+			// array: tsc's TS2559, for an argument as for any other target.
+			c.report(diag.NoCommonProperties, pos, src, c.nonNullable(target))
+			return
+		}
 		c.checkMissing(src, target, m, pos)
 	}
 }
@@ -472,6 +498,12 @@ func (c *Checker) checkProperty(e *ast.MemberExpression) {
 	}
 	switch obj.Kind {
 	case Anonymous, Interface, Instance:
+	case Function:
+		// A function declared here: its expando properties and Function's.
+		if c.expandoFunction(e.Object) && c.expandoType(e.Object, e.Property) == nil && c.functionMember(e.Property) == nil {
+			c.report(diag.PropertyNotExist, e.GetPos(), e.Property, obj)
+		}
+		return
 	default:
 		return
 	}
@@ -639,7 +671,7 @@ func (c *Checker) checkExcess(value ast.Expression, target *Type) {
 }
 
 // checkCall checks a call to a function type the checker models whole: no
-// type parameters, no overloads, no spread argument.
+// overloads, no spread argument; a generic one's argument count only.
 func (c *Checker) checkCall(e *ast.CallExpression) {
 	if e.Optional {
 		return
@@ -661,7 +693,7 @@ func (c *Checker) checkCall(e *ast.CallExpression) {
 	if c.Unanswered(fn) || fn.Flags&Object == 0 || fn.Kind != Function {
 		return
 	}
-	if c.typeArgArityError(e, fn) {
+	if c.typeArgArityError(e, fn) || c.typeArgConstraintError(e.TypeArgs, len(e.Args), fn) {
 		return
 	}
 	if id, ok := e.Callee.(*ast.Identifier); ok && len(fn.Overloads) == 0 {
@@ -673,10 +705,8 @@ func (c *Checker) checkCall(e *ast.CallExpression) {
 		c.checkOverloadCall(e, fn)
 		return
 	}
-	if len(fn.TypeParams) > 0 {
-		return
-	}
-	if fn.ThisType != nil {
+	generic := len(fn.TypeParams) > 0
+	if fn.ThisType != nil && !generic {
 		// The receiver must be the signature's `this` (TS2684); a call with
 		// none passes void.
 		if m, ok := skipOuter(e.Callee).(*ast.MemberExpression); ok {
@@ -706,6 +736,9 @@ func (c *Checker) checkCall(e *ast.CallExpression) {
 	if max >= 0 && len(e.Args) > max {
 		c.report(diag.ArgCount, e.Args[max].GetPos(), arity(min, max), len(e.Args))
 		return
+	}
+	if generic {
+		return // the arguments are checked against the inferred instantiation, not modelled here
 	}
 	for i, a := range e.Args {
 		if p := paramAt(fn, i); p != nil {
@@ -739,6 +772,140 @@ func (c *Checker) typeArgArityError(e *ast.CallExpression, fn *Type) bool {
 	}
 	c.report(diag.TypeArgCount, e.Callee.GetPos(), arity(lo, hi), len(e.TypeArgs))
 	return true
+}
+
+// checkRefTypeArgs reports a type reference's argument that does not
+// satisfy its type parameter's constraint (TS2344): `Holder<number>` for
+// `interface Holder<T extends object>`.
+func (c *Checker) checkRefTypeArgs(r *ast.TypeReference, scope *binder.Scope) {
+	if len(r.TypeArgs) == 0 {
+		return
+	}
+	sym := resolveTypeName(r.Name, scope)
+	if sym == nil {
+		return
+	}
+	var names []string
+	var cons []ast.TypeNode
+	for _, d := range sym.Declarations {
+		switch n := d.Node.(type) {
+		case *ast.InterfaceDeclaration:
+			if len(n.TypeParameters) == 0 {
+				continue
+			}
+			names, cons = nil, nil
+			for _, tp := range n.TypeParameters {
+				names, cons = append(names, tp.Name), append(cons, tp.Constraint)
+			}
+		case *ast.TypeAliasDeclaration:
+			names, cons = nil, nil
+			for _, tp := range n.TypeParameters {
+				names, cons = append(names, tp.Name), append(cons, tp.Constraint)
+			}
+		case *ast.ClassDeclaration:
+			names, cons = append([]string(nil), n.TypeParams...), nil
+			for i := range n.TypeParams {
+				var tn ast.TypeNode
+				if i < len(n.TypeParamConstraints) && n.TypeParamConstraints[i] != nil {
+					tn = n.TypeParamConstraints[i].TypeNode()
+				}
+				cons = append(cons, tn)
+			}
+		}
+		if names != nil {
+			break
+		}
+	}
+	if len(r.TypeArgs) > len(names) {
+		return // TS2314's arity, not a constraint
+	}
+	var args []*Type
+	for _, a := range r.TypeArgs {
+		args = append(args, c.typeFromNode(a, scope))
+	}
+	pop := c.declEnv(names[:len(args)], args)
+	defer pop()
+	for i, at := range args {
+		if cons[i] == nil || c.Unanswered(at) || hasTypeParam(at) {
+			continue
+		}
+		con := c.typeFromNode(cons[i], sym.Scope)
+		if c.Unanswered(con) || hasTypeParam(con) {
+			continue
+		}
+		if c.assignableTo(at, con) == no {
+			if !someMember(con, Literal) {
+				at = widen(c, at)
+			}
+			c.report(diag.TypeArgConstraint, r.TypeArgs[i].GetLoc().Pos, at, con)
+			return
+		}
+	}
+}
+
+// newCtor is the construct signature(s) a `new X(…)` calls: a class's
+// constructor, or a value's construct signatures (`declare var Map:
+// MapConstructor`); nil when neither is modelled.
+func (c *Checker) newCtor(n *ast.NewExpression) *Type {
+	sym := c.b.NewTarget(n)
+	if sym == nil {
+		sym = c.builtinImport(n.ClassName)
+	}
+	switch {
+	case sym == nil:
+		return nil
+	case sym.Flags&binder.Class != 0:
+		return c.constructorType(sym)
+	case sym.Flags&binder.Variable != 0:
+		ctor := c.signaturesOf(c.typeOfSymbol(sym), true)
+		if c.Unanswered(ctor) || ctor.Flags&Object == 0 || ctor.Kind != Function {
+			return nil
+		}
+		return ctor
+	}
+	return nil
+}
+
+// typeArgConstraintError reports an explicit type argument that does not
+// satisfy its type parameter's constraint (TS2344), the constraint
+// instantiated by the arguments given. An overloaded fn is checked against
+// its first signature taking that many type and value arguments.
+func (c *Checker) typeArgConstraintError(typeArgs []*ast.TypeAnnotation, nargs int, fn *Type) bool {
+	if len(typeArgs) == 0 {
+		return false
+	}
+	sig := fn
+	if len(fn.Overloads) > 0 {
+		sig = nil
+		for _, s := range fn.Overloads {
+			if len(s.TypeParams) >= len(typeArgs) && (s.restParam || nargs <= len(s.Params)) {
+				sig = s
+				break
+			}
+		}
+		if sig == nil {
+			return false
+		}
+	}
+	m := c.inferArgs(nil, typeArgs, sig, false)
+	for i, tp := range sig.TypeParams {
+		if i >= len(typeArgs) || tp.Constraint == nil {
+			continue
+		}
+		at, con := m[tp], c.instantiate(tp.Constraint, m)
+		if at == nil || c.Unanswered(at) || c.Unanswered(con) || hasTypeParam(con) {
+			continue
+		}
+		if c.assignableTo(at, con) == no {
+			if !someMember(con, Literal) {
+				at = widen(c, at) // tsc names `1` as number against string
+			}
+			pos := typeArgs[i].TypeNode().GetLoc().Pos
+			c.report(diag.TypeArgConstraint, pos, at, con)
+			return true
+		}
+	}
+	return false
 }
 
 func hasKey(o *ast.ObjectLiteral, key string) bool {
@@ -975,6 +1142,10 @@ func (c *Checker) checkTypeNames(n ast.Node) {
 		return
 	}
 	ast.Inspect(n, func(x ast.Node) bool {
+		if t, ok := x.(*ast.ThisExpression); ok && !c.ImplicitThis && !c.implicitThis[t] && c.thisImplicitlyAny(t) {
+			c.implicitThis[t] = true
+			c.report(diag.ThisImplicitlyAny, t.GetPos())
+		}
 		if call, ok := x.(*ast.CallExpression); ok {
 			if _, super := call.Callee.(*ast.SuperExpression); super && len(call.TypeArgs) > 0 {
 				return true // `super<T>(…)` is TS2754; its type arguments resolve nothing
@@ -984,9 +1155,14 @@ func (c *Checker) checkTypeNames(n ast.Node) {
 			if ta.Source == "jsdoc" || ta.TypeNode() == nil {
 				return
 			}
+			scope := c.b.LookupScope(x)
+			if scope == nil {
+				scope = c.b.Module
+			}
 			ast.Inspect(ta.TypeNode(), func(tn ast.Node) bool {
 				if r, ok := tn.(*ast.TypeReference); ok && len(r.Qualifier) == 0 {
 					c.cannotFindType(r.Name, r.Range.Pos)
+					c.checkRefTypeArgs(r, scope)
 				}
 				return true
 			})
@@ -1074,8 +1250,8 @@ func (c *Checker) cannotFindType(name string, pos ast.Pos) {
 // (ResolveTypeName) that neither TypeScript's library nor Node declares:
 // this compiler's own surfaces', and `intrinsic` (tsc's `Uppercase` body).
 var compilerTypeNames = map[string]bool{
-	"ClusterAddress": true, "ClusterWorker": true, "HttpRequest": true, "WSConnection": true,
-	"WSMessageEvent": true, "URLPattern": true, "intrinsic": true,
+	"ClusterAddress": true, "ClusterWorker": true, "HttpRequest": true,
+	"URLPattern": true, "intrinsic": true,
 }
 
 // nearKnownName reports whether name is within tsc's spelling-suggestion

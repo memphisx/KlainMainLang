@@ -40,7 +40,38 @@ var utilityTypeNames = map[string]bool{
 // registry (emitter.go), so a user type of the same name still wins.
 func (e *Emitter) resolveUtilityType(name string, args []*ast.TypeAnnotation) (Type, bool) {
 	switch name {
-	case "Partial", "Required", "Readonly":
+	case "Partial":
+		// Partial<T>: T's properties, each optional (`x?: T[x]`) — a plain
+		// object type's fields become undefinedable, as a declared optional
+		// member is. Any other T keeps its own layout.
+		if len(args) != 1 || args[0] == nil {
+			return Type{}, false
+		}
+		base := e.resolveType(args[0])
+		if !base.IsObject || base.IsClass || base.IsTuple || base.IsDynamicObject || isHostHandle(base) || hostCellObject(base) {
+			return base, true
+		}
+		fields := make([]Field, 0, len(base.Fields))
+		changed := false
+		for _, f := range base.Fields {
+			if !f.Ty.IsFunc && !jsonFieldSkippable(f.Ty) {
+				f.Ty = undefinedableElem(f.Ty)
+				changed = true
+			}
+			if !f.Ty.IsFunc && !f.Optional && f.Name != ClassTagField {
+				f.Optional = true
+				changed = true
+			}
+			fields = append(fields, f)
+		}
+		if !changed {
+			return base, true
+		}
+		ty := base
+		ty.Fields = fields
+		ty.RefName = ""
+		return ty, true
+	case "Required", "Readonly":
 		// Structural no-ops over the argument's shape in the current object
 		// model (see file comment). Resolving to the argument's own type is
 		// correct where it matters — the shape — and honest about the rest.

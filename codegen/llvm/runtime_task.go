@@ -52,8 +52,10 @@ const (
 	// rejected (v0 holds the error object pointer's bits) — TDD-00083 Stage 2.
 	// Field 4 (reactions) is the head of a { ptr closure, ptr next } list of
 	// .then/.catch/.finally reactions, enqueued as microtasks when it settles.
-	promiseStructIR   = "{ i64, ptr, i64, i64, ptr }"
-	promiseStructSize = 40
+	// Field 5 (promiseBoxedSlot) caches the promise's box wrapper once it has
+	// been held in a dynamic value (emit_anyprom.go).
+	promiseStructIR   = "{ i64, ptr, i64, i64, ptr, ptr, i64 }"
+	promiseStructSize = 56
 	// per-task jmpbuf stack: 16 frames * 512 bytes/frame.
 	taskJmpStkBytes = 16 * 512
 	// async-task fiber stacks are far shallower than the HTTP path's 1 MiB
@@ -78,6 +80,7 @@ func (e *Emitter) ensurePromiseRuntime() {
 	e.usedPromiseRuntime = true
 	e.ensureMalloc()
 	e.ensureFree()
+	e.ensureUnhandledRejections()
 	e.ensureExceptionHelpers() // setjmp / __kml_throw / __kml_get_thrown for the catch-and-settle wrapper
 	e.ensureMicrotasks()       // .then/.catch/.finally reactions + __kml_promise_drain_reactions
 
@@ -92,6 +95,10 @@ entry:
   store ptr null, ptr %%w_p, align 8
   %%rx_p = getelementptr %s, ptr %%p, i32 0, i32 4
   store ptr null, ptr %%rx_p, align 8
+  %%bx_p = getelementptr %s, ptr %%p, i32 0, i32 5
+  store ptr null, ptr %%bx_p, align 8
+  %%fl_p = getelementptr %s, ptr %%p, i32 0, i32 6
+  store i64 0, ptr %%fl_p, align 8
   ; v1 (slot 3) doubles as the rejection reason's caught-value tag (TDD-00207);
   ; default it to kmlTagError so every legacy path that rejects with just an
   ; errorObj ptr in v0 reads back as a caught Error. A non-Error reject overrides
@@ -99,7 +106,7 @@ entry:
   %%tag_p = getelementptr %s, ptr %%p, i32 0, i32 3
   store i64 %d, ptr %%tag_p, align 8
   ret ptr %%p
-}`, promiseStructSize, promiseStructIR, promiseStructIR, promiseStructIR, promiseStructIR, kmlTagError))
+}`, promiseStructSize, promiseStructIR, promiseStructIR, promiseStructIR, promiseStructIR, promiseStructIR, promiseStructIR, kmlTagError))
 
 	// @__kml_promise_first_fulfilled(members, count) -> i64: the scheduler-free
 	// scan for Promise.any over already-settled task promises (TDD-00084 Part A,
@@ -192,12 +199,6 @@ func (e *Emitter) emitLoopTaskStubs() {
 		e.emitGlobal("define i1 @__kml_worker_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define void @__kml_worker_dispatch() {\nentry:\n  ret void\n}")
 	}
-	// TDD-00099: channel (BroadcastChannel/MessagePort) hooks likewise.
-	if !e.usedChanRuntime {
-		e.emitGlobal("define i1 @__kml_chan_keepalive() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_chan_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define void @__kml_chan_dispatch() {\nentry:\n  ret void\n}")
-	}
 	// child_process hooks the event loop references unconditionally.
 	if !e.usedChildProcRuntime {
 		e.emitGlobal("define i1 @__kml_cp_keepalive() {\nentry:\n  ret i1 0\n}")
@@ -210,12 +211,6 @@ func (e *Emitter) emitLoopTaskStubs() {
 		e.emitGlobal("define i1 @__kml_dynimport_keepalive() {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define void @__kml_dynimport_dispatch() {\nentry:\n  ret void\n}")
 		e.emitGlobal("define i64 @__kml_dynimport_next_deadline_ns() {\nentry:\n  ret i64 0\n}")
-	}
-	// readline hooks likewise.
-	if !e.usedReadlineRuntime {
-		e.emitGlobal("define i1 @__kml_rl_keepalive() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_rl_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define void @__kml_rl_dispatch() {\nentry:\n  ret void\n}")
 	}
 	// fs.watch hooks likewise (TDD-00181).
 	if !e.usedFsWatchRuntime {
@@ -233,24 +228,11 @@ func (e *Emitter) emitLoopTaskStubs() {
 		e.emitGlobal("define i1 @__kml_tcp_fdset_add(ptr %fdset, ptr %wfdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define zeroext i1 @__kml_tcp_dispatch() {\nentry:\n  ret i1 0\n}")
 	}
-	// process.stdin streaming hooks likewise.
-	if !e.usedStdinRuntime {
-		e.emitGlobal("define i1 @__kml_stdin_keepalive() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_stdin_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define void @__kml_stdin_dispatch() {\nentry:\n  ret void\n}")
-	}
 	// net (TCP server) hooks likewise.
 	if !e.usedNetRuntime {
 		e.emitGlobal("define i1 @__kml_net_keepalive() {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define i1 @__kml_net_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_net_conn_wset_add(ptr %wfdset, ptr %efdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define void @__kml_net_dispatch() {\nentry:\n  ret void\n}")
-	}
-	// dgram (UDP socket) hooks likewise.
-	if !e.usedDgramRuntime {
-		e.emitGlobal("define i1 @__kml_dgram_keepalive() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_dgram_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define void @__kml_dgram_dispatch() {\nentry:\n  ret void\n}")
 	}
 }
 
@@ -377,6 +359,7 @@ entry:
   store i64 %%errbits, ptr %%v0_p, align 8
   %%res_p = getelementptr %s, ptr %%prom, i32 0, i32 0
   store i64 2, ptr %%res_p, align 8
+  call void @__kml_promise_note_rejected(ptr %%prom)
   %%w_p = getelementptr %s, ptr %%prom, i32 0, i32 1
   %%w = load ptr, ptr %%w_p, align 8
   %%haswaiter = icmp ne ptr %%w, null
@@ -1260,6 +1243,7 @@ entry:
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_task_await_ready(ptr %%promise) {
 entry:
+  call void @__kml_promise_mark_handled(ptr %%promise)
   %%ct = load ptr, ptr @__kml_current_task, align 8
   %%topq = icmp eq ptr %%ct, null
   br i1 %%topq, label %%checkconn, label %%ontask

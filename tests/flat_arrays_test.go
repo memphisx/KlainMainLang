@@ -88,10 +88,11 @@ f()
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}
-	if !strings.Contains(ir, "@malloc(i64 32)") {
-		t.Errorf("expected one 2*16-byte inline buffer malloc:\n%s", ir)
+	// Each element is the object's layout, header word included (24 bytes).
+	if !strings.Contains(ir, "@malloc(i64 48)") {
+		t.Errorf("expected one 2*24-byte inline buffer malloc:\n%s", ir)
 	}
-	if !strings.Contains(ir, "getelementptr { double, double }, ptr") {
+	if !strings.Contains(ir, "getelementptr { i64, double, double }, ptr") {
 		t.Errorf("expected struct-strided element GEPs")
 	}
 }

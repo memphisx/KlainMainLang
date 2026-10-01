@@ -30,8 +30,16 @@ import "fmt"
 // value, valid at the call site — computed before any internal branching)
 // plus the match's start/end byte offsets (-1/-1 on no match).
 func (e *Emitter) emitRegexMatchAt(handleReg string, strVal Value, startOffsetReg string) (matchedReg, startReg, endReg string) {
+	matched, start, end, md := e.emitRegexMatchAtData(handleReg, strVal, startOffsetReg)
+	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8(ptr %s)", md))
+	return matched, start, end
+}
+
+// emitRegexMatchAtData is emitRegexMatchAt keeping the match data, whose
+// ovector holds the capture groups; the caller frees it.
+func (e *Emitter) emitRegexMatchAtData(handleReg string, strVal Value, startOffsetReg string) (matchedReg, startReg, endReg, matchDataReg string) {
 	e.ensureRegexMatch()
-	matchDataReg := e.freshReg()
+	matchDataReg = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_match_data_create_from_pattern_8(ptr %s, ptr null)", matchDataReg, handleReg))
 	rcReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @pcre2_match_8(ptr %s, ptr %s, i64 %d, i64 %s, i32 0, ptr %s, ptr null)",
@@ -62,11 +70,9 @@ func (e *Emitter) emitRegexMatchAt(handleReg string, strVal Value, startOffsetRe
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", e1, e1Gep))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", s0, startSlot))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e1, endSlot))
-	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8(ptr %s)", matchDataReg))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(nomatchL)
-	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8(ptr %s)", matchDataReg))
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", startSlot))
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", endSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
@@ -76,7 +82,7 @@ func (e *Emitter) emitRegexMatchAt(handleReg string, strVal Value, startOffsetRe
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalStart, startSlot))
 	finalEnd := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalEnd, endSlot))
-	return matched, finalStart, finalEnd
+	return matched, finalStart, finalEnd, matchDataReg
 }
 
 // emitRegexSearch implements `str.search(regexp): number`, replacing the
@@ -101,12 +107,10 @@ func (e *Emitter) emitRegexSearch(strVal, regexVal Value) Value {
 }
 
 // emitRegexSplitScan runs str.split()'s own local search loop once,
-// calling onSegment(gapStartReg, gapEndReg) for each real (non-zero-
-// length) match found — the boundaries of the *text between* the previous
-// split point and this match, not the match itself. Zero-length matches
-// are skipped entirely (never produce a split) rather than replicating
-// real JS's own more intricate zero-length-match handling — a documented
-// V1 narrowing (see emitRegexSplit's doc comment). Stateless with respect
+// calling onSegment(gapStartReg, gapEndReg) for each split point — the
+// boundaries of the *text between* the previous split point and this
+// match, not the match itself. An empty match splits as @@split does:
+// unless it ends where the previous piece ended, or at the end. Stateless with respect
 // to the RegExp instance (emitRegexMatchAt touches no object state at
 // all), so calling this twice (a count pass, then a build pass) is safe —
 // the same established two-pass convention every other multi-match stage
@@ -114,7 +118,7 @@ func (e *Emitter) emitRegexSearch(strVal, regexVal Value) Value {
 // caller can handle the trailing segment (from there to the end of the
 // subject) uniformly, the same way every real match loop's tail segment
 // works.
-func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenReg string, onSegment func(gapStartReg, gapEndReg string)) (finalLastSplitReg string) {
+func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenReg string, onSegment func(gapStartReg, gapEndReg, matchDataReg string)) (finalLastSplitReg string) {
 	searchAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", searchAlloca))
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", searchAlloca))
@@ -135,12 +139,13 @@ func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenR
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", tooFar, doneL, bodyL))
 
 	e.emitLabel(bodyL)
-	matched, mStart, mEnd := e.emitRegexMatchAt(handleReg, strVal, searchPos)
+	matched, mStart, mEnd, md := e.emitRegexMatchAtData(handleReg, strVal, searchPos)
 	noMatchL := e.freshLabel("regex.split.nomatch")
 	checkZeroL := e.freshLabel("regex.split.checkzero")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", matched, checkZeroL, noMatchL))
 
 	e.emitLabel(noMatchL)
+	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8(ptr %s)", md))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(checkZeroL)
@@ -151,6 +156,25 @@ func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenR
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isZero, zeroL, realL))
 
 	e.emitLabel(zeroL)
+	// An empty match splits too (@@split), unless it ends where the last
+	// piece ended or sits at the end of the string.
+	zeroLast := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", zeroLast, lastSplitAlloca))
+	atLast := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", atLast, mStart, zeroLast))
+	atEnd := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, %s", atEnd, mStart, subjectLenReg))
+	noSplit := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", noSplit, atLast, atEnd))
+	zeroSplitL := e.freshLabel("regex.split.zerosplit")
+	zeroAdvL := e.freshLabel("regex.split.zeroadv")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", noSplit, zeroAdvL, zeroSplitL))
+	e.emitLabel(zeroSplitL)
+	onSegment(zeroLast, mStart, md)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", mStart, lastSplitAlloca))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", zeroAdvL))
+	e.emitLabel(zeroAdvL)
+	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8(ptr %s)", md))
 	// Step past the zero-length match by a whole code point in the UTF-matching
 	// modes (a mid-code-point start offset makes PCRE2_UTF reject the next
 	// match and truncate the scan early), a single byte in the raw-byte modes.
@@ -169,7 +193,8 @@ func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenR
 	e.emitLabel(realL)
 	lastSplit := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lastSplit, lastSplitAlloca))
-	onSegment(lastSplit, mStart)
+	onSegment(lastSplit, mStart, md)
+	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8(ptr %s)", md))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", mEnd, lastSplitAlloca))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", mEnd, searchAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
@@ -181,13 +206,8 @@ func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenR
 }
 
 // emitRegexSplit implements `str.split(regexp): string[]` (TDD-00035
-// Stage 5). Scope, beyond the already-decided "no capture-group splicing
-// into the result" narrowing: only non-zero-length matches produce a
-// split (see emitRegexSplitScan) — real JS does split on some zero-length
-// matches (e.g. a lookahead-only pattern), a genuine, documented V1
-// divergence traded for materially simpler loop logic, matching this
-// stage's "smallest remaining surface" framing in docs/tdd/TDD-00035.md.
-// A regex that never matches returns a single-element array containing
+// Stage 5). The separator's capture groups follow each piece they end. A
+// regex that never matches returns a single-element array containing
 // the whole subject, matching real JS.
 func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 	e.ensureStrlen()
@@ -198,15 +218,27 @@ func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 	subjectLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", subjectLen, strVal.Ref))
 
-	// --- pass 1: count real (non-zero-length) matches ---
+	// Each split point also contributes the separator's capture groups
+	// (@@split), an unmatched one as undefined.
+	capSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", capSlot))
+	e.emitInstr(fmt.Sprintf("call i32 @pcre2_pattern_info_8(ptr %s, i32 %d, ptr %s)", handleReg, pcre2InfoCaptureCount, capSlot))
+	cap32 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", cap32, capSlot))
+	nCap := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = zext i32 %s to i64", nCap, cap32))
+	perSplit := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", perSplit, nCap))
+
+	// --- pass 1: count the split points ---
 	countAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", countAlloca))
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", countAlloca))
-	e.emitRegexSplitScan(handleReg, strVal, subjectLen, func(gapStartReg, gapEndReg string) {
+	e.emitRegexSplitScan(handleReg, strVal, subjectLen, func(gapStartReg, gapEndReg, _ string) {
 		cur := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, countAlloca))
 		next := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, cur))
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", next, cur, perSplit))
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, countAlloca))
 	})
 	matchCount := e.freshReg()
@@ -224,7 +256,59 @@ func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
 
-	storeSegment := func(startReg, endReg string) {
+	var storeSegment func(startReg, endReg string)
+	storePtr := func(p string) {
+		curIdx := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curIdx, idxAlloca))
+		dstGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", dstGep, data, curIdx))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, dstGep))
+		nextIdx := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nextIdx, curIdx))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nextIdx, idxAlloca))
+	}
+	// storeCaptures appends groups 1..nCap of a split point's match.
+	storeCaptures := func(md string) {
+		ov := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_get_ovector_pointer_8(ptr %s)", ov, md))
+		gi := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", gi))
+		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", gi))
+		condL, bodyL, setL, unsetL, nextL, doneL := e.freshLabel("split.cap.cond"), e.freshLabel("split.cap.body"), e.freshLabel("split.cap.set"), e.freshLabel("split.cap.unset"), e.freshLabel("split.cap.next"), e.freshLabel("split.cap.done")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(condL)
+		g := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", g, gi))
+		over := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ugt i64 %s, %s", over, g, nCap))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", over, doneL, bodyL))
+		e.emitLabel(bodyL)
+		i0, i1 := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 2", i0, g))
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", i1, i0))
+		p0, p1, s, en := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", p0, ov, i0))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", s, p0))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", p1, ov, i1))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", en, p1))
+		unset := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, -1", unset, s)) // PCRE2_UNSET
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", unset, unsetL, setL))
+		e.emitLabel(setL)
+		storeSegment(s, en)
+		e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
+		e.emitLabel(unsetL)
+		storePtr("null") // undefined
+		e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
+		e.emitLabel(nextL)
+		gn := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", gn, g))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", gn, gi))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(doneL)
+	}
+
+	storeSegment = func(startReg, endReg string) {
 		segLen := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", segLen, endReg, startReg))
 		buf := e.emitStringAlloc(segLen) // TDD-00120: length-prefixed
@@ -234,23 +318,27 @@ func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 		termGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termGep, buf, segLen))
 		e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", termGep))
-
-		curIdx := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curIdx, idxAlloca))
-		dstGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", dstGep, data, curIdx))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", buf, dstGep))
-		nextIdx := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nextIdx, curIdx))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nextIdx, idxAlloca))
+		storePtr(buf)
 	}
 
-	finalLastSplit := e.emitRegexSplitScan(handleReg, strVal, subjectLen, storeSegment)
+	finalLastSplit := e.emitRegexSplitScan(handleReg, strVal, subjectLen, func(gs, ge, md string) {
+		storeSegment(gs, ge)
+		storeCaptures(md)
+	})
 	storeSegment(finalLastSplit, subjectLen) // trailing segment
+
+	// The empty string splits into no pieces when the separator matches it.
+	matchedEmpty, _, _ := e.emitRegexMatchAt(handleReg, strVal, "0")
+	isEmpty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmpty, subjectLen))
+	noPieces := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", noPieces, isEmpty, matchedEmpty))
+	length := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", length, noPieces, totalCount))
 
 	r0 := e.freshReg()
 	r1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, data))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, totalCount))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, length))
 	return Value{Ref: r1, Ty: ArrayOf(TypePtr)}
 }

@@ -517,3 +517,54 @@ console.log(b < c && c > a);
 console.log(a > (b));
 `, "false\ntrue\ntrue")
 }
+
+// A generic class's static methods (which cannot name its type
+// parameters) compile once and are called on the class; an annotation
+// naming an instance (`Box<number>`) is that instance's type.
+func TestE2EGenericClassStaticMethod(t *testing.T) {
+	assertOutput(t, `
+class Box<T> {
+  v: T;
+  constructor(v: T) { this.v = v; }
+  static of(n: number): Box<number> { return new Box<number>(n); }
+  static label(): string { return 'box'; }
+  get(): T { return this.v; }
+}
+console.log(Box.of(4).get(), Box.label(), new Box<string>('s').get());
+`, "4 box s")
+}
+
+// `T | undefined` keeps its absence when T is an object type.
+func TestE2EGenericOptionalObjectReturn(t *testing.T) {
+	assertOutput(t, `
+class Holder<T> {
+  private v: any = undefined;
+  get(): T | undefined { return this.v; }
+  set(x: any): void { this.v = x; }
+}
+const h = new Holder<{ id: number }>();
+console.log(h.get() === undefined, h.get());
+h.set({ id: 3 });
+console.log(h.get()?.id);
+const n = new Holder<number>();
+console.log(n.get());
+`, "true undefined\n3\nundefined")
+}
+
+// A type parameter nothing at the call site infers takes its default, and a
+// `void` parameter, binding or return holds undefined; typeof a generic
+// function is "function".
+func TestE2EGenericDefaultVoidAndTypeof(t *testing.T) {
+	assertOutput(t, `
+function wrap<T = void>(v?: T): T | undefined { return v }
+function f(v?: void, n: number = 1): number { return n }
+function q(): void {}
+async function p(): Promise<void> {}
+wrap()
+console.log(wrap<string>('s'), f(), f(undefined, 2))
+const a: void = undefined
+const b: void = await p()
+const c: any = q()
+console.log(a, b, c, typeof wrap)
+`, "s 1 2\nundefined undefined undefined function")
+}

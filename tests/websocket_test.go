@@ -474,15 +474,10 @@ func runClientWithTimeout(t *testing.T, src string, timeout time.Duration) strin
 	return strings.TrimRight(string(out), "\n")
 }
 
-// TestE2EWebSocketClientAgainstServer is TDD-00039 Stage 3's own end-to-end
-// check: a real `new WebSocket(url)` client (compiled and run as its own
-// process, not a hand-rolled Go test client the way every earlier test in
-// this file drives the server) against a real compiled server, covering
-// the full round trip: synchronous connect + handshake, the deferred
-// onopen notification (WebSocketClientType's own documented ordering
-// requirement — onopen must fire only after the constructor call has
-// already returned and user code has had a chance to assign it),
-// .send()/.onmessage, and .close()/.onclose ending the process cleanly.
+// TestE2EWebSocketClientAgainstServer: the global WebSocket (TDD-00232
+// Stage 2, lib/node/kml_websocket.ts) against a compiled server — CONNECTING
+// after construction, onopen once the handshake completes on the event loop,
+// send/onmessage, and close/onclose.
 func TestE2EWebSocketClientAgainstServer(t *testing.T) {
 	serverSrc := `
 import http from 'http'
@@ -530,9 +525,9 @@ setTimeout(() => {
 // TestE2EWebSocketBinaryRoundTrip verifies binary frames (TDD-00160) end to
 // end: the client sends a Uint8Array (a masked binary frame, opcode 2), the
 // server reads it byte-exact via ev.dataBytes() — the embedded 0 byte proves
-// the payload survives past a NUL, unlike the strlen `ev.data` view — and
-// echoes those raw bytes back as its own (unmasked) binary frame; the client
-// then sees ev.isBinary true and reads the four bytes back verbatim.
+// the payload survives past a NUL — and echoes those raw bytes back as its
+// own (unmasked) binary frame; with binaryType "arraybuffer" the client's
+// ev.data is an ArrayBuffer holding the four bytes verbatim.
 func TestE2EWebSocketBinaryRoundTrip(t *testing.T) {
 	serverSrc := `
 import http from 'http'
@@ -552,13 +547,14 @@ server.listen(8983)
 
 	clientSrc := `
 const ws = new WebSocket("ws://127.0.0.1:8983/")
+ws.binaryType = "arraybuffer"
 ws.onopen = () => {
   const payload = new Uint8Array([1, 0, 2, 255])
   ws.send(payload)
 }
 ws.onmessage = (ev) => {
-  const bytes = new Uint8Array(ev.dataBytes())
-  console.log("isBinary: " + ev.isBinary)
+  const bytes = new Uint8Array(ev.data)
+  console.log("isBinary: " + (ev.data instanceof ArrayBuffer))
   console.log("len: " + bytes.length)
   console.log("bytes: " + bytes[0] + "," + bytes[1] + "," + bytes[2] + "," + bytes[3])
   ws.close()
@@ -579,11 +575,8 @@ setTimeout(() => {
 }
 
 // TestE2EWebSocketClientConnectionRefused verifies a failed connect (no
-// server listening) never throws synchronously from `new WebSocket(url)`
-// — matching real WebSocket, which always reports a network-level failure
-// via onerror/onclose, never a thrown exception from the constructor
-// itself — and that both fire, deferred to the first event-loop pass, the
-// same as a successful onopen would.
+// server listening) never throws from `new WebSocket(url)`: onerror, then
+// onclose with readyState CLOSED (3), as Node's.
 func TestE2EWebSocketClientConnectionRefused(t *testing.T) {
 	clientSrc := `
 const ws = new WebSocket("ws://127.0.0.1:1/")
@@ -604,7 +597,7 @@ setTimeout(() => {
 }, 4000)
 `
 	out := runClientWithTimeout(t, clientSrc, 8*time.Second)
-	want := "onerror\nonclose\nreadyState: 2"
+	want := "onerror\nonclose\nreadyState: 3"
 	if out != want {
 		t.Errorf("client output:\ngot:\n%s\nwant:\n%s", out, want)
 	}

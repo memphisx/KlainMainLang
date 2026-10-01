@@ -121,7 +121,7 @@
             "feature": "`.toString()`",
             "status": "implemented",
             "notes": [
-              "Identity on a string, matching JS — kept because Node code habitually calls it on values that are Buffers there but strings here (spawnSync results, stream chunks)"
+              "Identity on a string, matching JS"
             ]
           },
           {
@@ -188,7 +188,7 @@
             "feature": "`.codePointAt(i)`",
             "status": "implemented",
             "caveats": [
-              "This compiler's strings are plain byte sequences, not real UTF-16 — no surrogate-pair/multi-byte decoding, so this is exactly `.charCodeAt(i)`'s byte value under a second name; correct only for ASCII/Latin-1 text ([ADR-00028](../adr/ADR-00028.md))"
+              "Positions are byte offsets in this compiler's UTF-8 strings: at the first byte of a character it reads that character's code point, at a continuation byte that byte; Node indexes UTF-16 code units, so an index past a non-ASCII character differs and a surrogate half is never returned ([ADR-01224](../adr/ADR-01224.md), [ADR-00028](../adr/ADR-00028.md))"
             ],
             "notes": [
               "An out-of-range index returns a real `undefined` (as in Node), so the result type is `number \\| undefined` — narrow, `?? n`, or `!` before use. See [ADR-00782](../adr/ADR-00782.md), [TDD-00187](../tdd/TDD-00187.md)"
@@ -241,14 +241,18 @@
             "feature": "`String.fromCharCode(n)`",
             "status": "implemented",
             "caveats": [
-              "Each argument is truncated to one byte (0–255), not encoded as a UTF-16 code unit — `String.fromCharCode(0x263A)` is `':'` (Node: `'☺'`)."
+              "An unpaired surrogate is encoded on its own, so two calls' halves concatenated (`fromCharCode(0xD83D) + fromCharCode(0xDE00)`) do not join into one character as Node's UTF-16 strings do ([ADR-01224](../adr/ADR-01224.md))"
+            ],
+            "notes": [
+              "ToUint16 of each argument, encoded as UTF-8; a high/low surrogate pair among the arguments is one character ([ADR-01224](../adr/ADR-01224.md))"
             ]
           },
           {
             "feature": "`String.fromCodePoint(n)`",
             "status": "implemented",
-            "caveats": [
-              "Shares `fromCharCode`'s one-byte truncation — no astral/surrogate encoding — a code point above `0xFF` is mangled (`String.fromCodePoint(0x263A)` → `':'`, Node: `'☺'`)."
+            "caveats": [],
+            "notes": [
+              "Each code point encoded as UTF-8; a value that is not an integer in [0, 0x10FFFF] throws Node's `RangeError: Invalid code point <n>` ([ADR-01224](../adr/ADR-01224.md))"
             ]
           },
           {

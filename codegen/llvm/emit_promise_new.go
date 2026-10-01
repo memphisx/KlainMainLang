@@ -32,6 +32,12 @@ entry:
   br i1 %%settled, label %%ret, label %%do
 do:
   store i64 %%state, ptr %%res_p, align 8
+  %%isrej = icmp eq i64 %%state, 2
+  br i1 %%isrej, label %%noterej, label %%waiter
+noterej:
+  call void @__kml_promise_note_rejected(ptr %%p)
+  br label %%waiter
+waiter:
   %%w_p = getelementptr %s, ptr %%p, i32 0, i32 1
   %%w = load ptr, ptr %%w_p, align 8
   %%haswaiter = icmp ne ptr %%w, null
@@ -59,11 +65,7 @@ func (e *Emitter) emitNewPromise(ex *ast.NewExpression) (Value, error) {
 		return Value{}, fmt.Errorf("%d:%d: new Promise expects a single executor argument", ex.GetPos().Line, ex.GetPos().Col)
 	}
 
-	// T = the resolved value type (new Promise<T>), defaulting to number.
-	valTy := TypeI64
-	if len(ex.TypeArgs) == 1 {
-		valTy = e.resolveType(ex.TypeArgs[0])
-	}
+	valTy := e.newPromiseValueType(ex)
 
 	e.ensurePromiseSettle()
 	e.ensureExceptionHelpers()
@@ -210,6 +212,7 @@ func (e *Emitter) emitPromiseAdopt(tgtRef, srcRef string) {
 
 	// If src already settled → enqueue now; else attach a reaction node onto
 	// src.reactions (the same pattern emitPromiseThen uses).
+	e.emitMarkPromiseHandled(srcRef)
 	res := e.freshReg()
 	resP := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", resP, promiseStructIR, srcRef))
@@ -313,10 +316,19 @@ func (e *Emitter) emitResolveThunk(fn string, valTy Type) {
 			e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %%vlen, 1", a1, a0))
 			v = Value{Ref: a1, Ty: valTy}
 		}
-		e.storePromiseValue("%p", v)
+		if isUnconstrainedDynamic(valTy) {
+			// resolve(x) with a promise adopts it.
+			e.ensurePromiseResolveAny()
+			e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %%p, i64 %s)", v.Ref))
+			e.emitTerminator("ret void")
+		} else {
+			e.storePromiseValue("%p", v)
+		}
 	}
-	e.emitInstr("call void @__kml_promise_settle(ptr %p, i64 1)")
-	e.emitInstr("ret void")
+	if !e.blockDone {
+		e.emitInstr("call void @__kml_promise_settle(ptr %p, i64 1)")
+		e.emitInstr("ret void")
+	}
 	params := "ptr %p"
 	if !isVoid {
 		if valTy.IsArray {
@@ -390,4 +402,22 @@ func (e *Emitter) beginThunkEmit() func() {
 		e.labelCtr = savedLabelCtr
 		e.blockDone = savedBlockDone
 	}
+}
+
+// newPromiseValueType is T of `new Promise<T>(executor)`: the type argument,
+// else the checker's (a contextual `Promise<number>`), else `any` — the
+// value an untyped promise resolves with.
+func (e *Emitter) newPromiseValueType(ex *ast.NewExpression) Type {
+	if len(ex.TypeArgs) == 1 {
+		return e.resolveType(ex.TypeArgs[0])
+	}
+	if c := e.front(); c != nil {
+		t := c.TypeOf(ex)
+		if !c.Unanswered(t) && len(t.TypeArgs) == 1 {
+			if r, ok := lowerRepr(t.TypeArgs[0]); ok && !r.IsArray && !r.IsObject {
+				return r
+			}
+		}
+	}
+	return TypeAny
 }

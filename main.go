@@ -128,8 +128,9 @@ func main() {
 		// ELF under an arm64 Linux container). The other directions stay rejected:
 		// a Windows target needs the mingw link toolchain (not wired for cross),
 		// and Linux→macOS cannot be execution-verified here so it is not claimed.
-		// Cross-*arch* within one OS is unaffected (the guard only concerns OS).
-		if tgtOS := targetOSFromTriple(triple); tgtOS != "" && tgtOS != runtime.GOOS {
+		// Cross-*arch* within one OS is unaffected (the guard only concerns OS),
+		// and -emit-llvm links nothing, so it takes any target.
+		if tgtOS := targetOSFromTriple(triple); tgtOS != "" && tgtOS != runtime.GOOS && !*emitLLVM {
 			if !(runtime.GOOS == "darwin" && tgtOS == "linux") {
 				fatal("cross-compiling from %s to a %s target is not supported yet: only macOS→Linux cross-OS builds are enabled (the fully execution-verifiable direction). A Windows target needs the mingw link toolchain; a macOS target can't be produced from a non-macOS host. Cross-compiling to a different CPU architecture on the same OS always works — so build a %s target by running klainmain on a %s host", runtime.GOOS, tgtOS, tgtOS, tgtOS)
 			}

@@ -52,3 +52,24 @@ undefined
 3`)
 	assertSameAsNodeCompatJS(t, src)
 }
+
+// An omitted optional scalar parameter is undefined, not its zero, for
+// equality too: `copy === false` is false when `copy?: boolean` is omitted.
+func TestE2EOmittedOptionalScalarEquality(t *testing.T) {
+	assertOutput(t, `
+function f(a: number, b: number | bigint, copy?: boolean, n?: number): string {
+  return String(copy) + ' ' + (copy === false) + ' ' + (copy === undefined) + ' ' + (n === 0) + ' ' + (n !== 0);
+}
+console.log(f(1, 2), f(1, 2, false, 0), f(1, 2, true, 3));
+`, "undefined false true false true false true false true false true false false false true")
+}
+
+// A Date operand converts as JavaScript does: `+` concatenates its date
+// string, `-`/`*`/`/`/`%` and the relational operators read its time value.
+func TestE2EDateOperandsConvertAsJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const d = new Date(0), e = new Date(1000);
+console.log(typeof (d + 1), typeof (d - 1), d - 1, e - d, 1 - e, e * 2, e / 10, e % 7, d < 0.5, e > 999.5, (d + '').length > 10);
+console.log(d + 1 === String(d) + '1', d + e === String(d) + String(e));
+`)
+}

@@ -10,6 +10,11 @@ import (
 type Field struct {
 	Name string
 	Ty   Type
+	// Optional marks a `name?: T` member: its key may be missing from an
+	// object, so an undefined value there means no property. Any other
+	// field always has its key, an undefined value included (a class
+	// field, an object literal's property, `name: T | undefined`).
+	Optional bool
 }
 
 // Type represents an LLVM IR type.
@@ -107,6 +112,11 @@ type Type struct {
 	// Nullable marks T | null / T | undefined type annotations.
 	IsNull      bool
 	IsUndefined bool
+	// NullAndUndef marks a string or object pointer that may hold both null
+	// and undefined (`T | null | undefined`, `x?: T | null`): the null
+	// pointer is undefined (a missing field reads it), and nullRef, a
+	// zeroed sentinel cell, is null (TDD-00230 P3.3's three states).
+	NullAndUndef bool
 	// IsNever marks the bottom type — the value type of a `Promise.reject(...)`
 	// (`Promise<never>`), which never actually produces a value (await re-throws).
 	// It assigns to any target: coerce turns it into a zero of the target type,
@@ -251,30 +261,6 @@ type Type struct {
 
 	// IsIncomingMessage marks Node's http client response object (TDD-00138).
 	IsIncomingMessage bool
-	// IsSQLiteDatabase marks node:sqlite's `new DatabaseSync(...)` result
-	// (ADR-00540): a heap object holding the raw `sqlite3*` handle (__kml_handle)
-	// plus an `isOpen` bool field (a plain field read via the object machinery);
-	// exec/prepare/close dispatch on this flag in emit_call.go. See emit_sqlite.go.
-	IsSQLiteDatabase bool
-	// IsSQLiteStatement marks a StatementSync returned by db.prepare() (ADR-00540):
-	// a heap object holding the `sqlite3_stmt*` handle, a back-pointer to the
-	// owning database (for changes()/last_insert_rowid()), and a `sourceSQL`
-	// field. get/all/run dispatch on this flag.
-	IsSQLiteStatement bool
-	// IsFFILibrary marks a node:ffi DynamicLibrary (TDD-00164): a heap object
-	// holding the raw dlopen handle (__kml_handle) plus the `path` string as a
-	// plain field. getFunction/getSymbol/close dispatch on this flag in
-	// emit_call.go. See emit_ffi.go.
-	IsFFILibrary bool
-	// IsFFIFunction marks a native function bound via node:ffi's
-	// library.getFunction / dlopen definitions (TDD-00164): the runtime value
-	// is the raw C symbol pointer (IR "ptr"), and FFISig carries the
-	// compile-time signature that types the indirect call. Calling a value of
-	// this type emits a direct C-ABI `call` through the pointer.
-	IsFFIFunction bool
-	// FFISig is the statically-resolved node:ffi signature of an IsFFIFunction
-	// value: canonical node:ffi type names (aliases already normalized).
-	FFISig *FFISignature
 	// DynPropTy, on a dynamic (`any`) object, is the declared type of every
 	// property it holds — an index-signature view (`{ [k: string]: bigint }`,
 	// node:ffi's `lib.symbols`, TDD-00229): a member/bracket read unboxes to
@@ -294,12 +280,6 @@ type Type struct {
 	// machinery, no dispatched methods of its own) built by parsing through
 	// libcurl's URL API. See emit_url.go.
 	IsURL bool
-	// IsPerfObserver marks a `new PerformanceObserver(cb)` handle (TDD-00166):
-	// a heap object holding the callback closure and its registry node, with
-	// dispatched `.observe`/`.disconnect` methods. IsPerfEntryList marks the
-	// list object the callback receives (dispatched `.getEntries`).
-	IsPerfObserver  bool
-	IsPerfEntryList bool
 	// IsURLPattern marks `new URLPattern(...)`'s result (TDD-00100): a heap
 	// object whose six visible fields are the (defaulted) component pattern
 	// strings, plus a hidden __kml_handle ptr to the C-side compiled state
@@ -334,24 +314,11 @@ type Type struct {
 	// and console.log — is re-owned against the `__kml_usp_*` ABI; this flag is
 	// how those dispatch sites recognize the type (TDD-00203). See emit_usp.go.
 	IsURLSearchParams bool
-	// IsEventEmitter marks `new EventEmitter<T>()`'s result (TDD-00023):
-	// storage-wise it's a ptr to a Map<string,ptr> handle (event name →
-	// listener-list heap struct), but deliberately does NOT set IsMap —
-	// unlike IsURLSearchParams, EventEmitter's method surface (on/once/emit/
-	// off/removeListener/removeAllListeners/listenerCount/eventNames) shares
-	// no names with Map's, and letting .get()/.set()/.forEach() leak onto an
-	// EventEmitter value would be a real, silent correctness gap. The
-	// underlying __kml_map_str_* helpers are called directly by name from
-	// emit_eventemitter.go instead. EventEmitterPayload is the T in
-	// EventEmitter<T> — every listener/emit call site needs it to know the
-	// payload's IR shape. See emit_eventemitter.go and docs/tdd/TDD-00023.md.
-	IsEventEmitter      bool
-	EventEmitterPayload *Type
 	// IsGenerator marks a `function* name(): T {}`'s instance value (the
 	// result of calling the generator function, TDD-00061/ADR-00172) — a
 	// ptr to a heap struct carrying its own fiber (ucontext_t + stack),
 	// yield/sent value slots, and its own declared parameters. Deliberately
-	// does NOT set IsObject, same reasoning IsEventEmitter's own doc
+	// does NOT set IsObject, same opaque-handle reasoning
 	// comment gives: the struct's fields are internal plumbing (accessed by
 	// codegen via GeneratorType's own Fields, built with ObjectType purely
 	// to reuse its StructIR/StructSize/FieldIndex machinery), not a
@@ -362,12 +329,19 @@ type Type struct {
 	IsGenerator       bool
 	GeneratorIsAsync  bool // an `async function*` — .next() returns Promise<{value,done}> (TDD-00085)
 	GeneratorElemType *Type
-	// HasEventEmitter marks a class whose instances carry a hidden
-	// listener-map-handle field (TDD-00023) — set for a class that directly
-	// `extends EventEmitter<T>`, and propagated to every descendant the same
-	// way HasVTable propagates across an inheritance tree. See
-	// ClassEventEmitterField and registerClasses.
-	HasEventEmitter bool
+
+	// IsCollIter marks an Array, Map or Set iterator (`arr.values()`,
+	// `m.keys()`, `s.entries()`): a ptr to a {next, pos, source} node
+	// (ensureMapIters). IterSrc is the iterated collection's type and
+	// IterKind what each step yields (mapIterKeys/Values/Entries).
+	// ExecArray marks a RegExp exec() result: an array whose header carries
+	// index, input and groups after its {data, len} (40 bytes: data, len,
+	// index i64, input ptr, groups ptr).
+	ExecArray bool
+
+	IsCollIter bool
+	IterKind   mapIterKind
+	IterSrc    *Type
 
 	// IsArrayBuffer marks `new ArrayBuffer(byteLength)`: a fixed-length,
 	// zero-initialized raw byte buffer. Deliberately not IsObject — the
@@ -386,18 +360,6 @@ type Type struct {
 	// the allocation (GC_malloc_uncollectable, since the only live
 	// reference may be on another thread).
 	IsSharedArrayBuffer bool
-	// IsStats marks fs.statSync's result (ADR-00495): a plain heap object
-	// whose hidden first field is the raw st_mode word, backing the
-	// isFile()/isDirectory() method dispatch.
-	IsStats bool
-	// IsDirent marks a fs.readdirSync(path, { withFileTypes: true }) element
-	// (ADR-00752): a heap object of {name, mode} where `mode` carries the
-	// S_IFMT bits (from the dirent d_type), backing isFile()/isDirectory()/
-	// isSymbolicLink() the same way IsStats does.
-	IsDirent bool
-	// IsFSWatcher marks fs.watch's result (TDD-00181): an opaque handle whose
-	// .on('change'|'rename', cb)/.close() are method-dispatched.
-	IsFSWatcher bool
 	// BufferGrowable marks a buffer constructed with `{maxByteLength}`
 	// (ADR-00494): its header is the 24-byte {len, data, max} shape, so
 	// `.growable`/`.maxByteLength`/`.grow()` may read word 2. Buffers from
@@ -484,59 +446,6 @@ type Type struct {
 	// pcre2_code* handle, never exposed via Object.keys/JSON. See
 	// RegExpType and docs/tdd/TDD-00035.md.
 	IsRegExp bool
-	// IsEventSource marks `new EventSource(url)`'s result (TDD-00038,
-	// staged — Stage 0 only so far: connection plumbing/readyState/close,
-	// no SSE parsing/dispatch yet). Storage-wise a real heap object like
-	// Response/URL/RegExp, with a hidden field (EventSourceHandleField, same
-	// convention RegExpType's hidden handle uses) pointing at the runtime's
-	// own entry struct — the two-way link the event loop's per-iteration
-	// scan (__kml_eventsource_scan, runtime_eventsource.go) needs to write
-	// readyState transitions back into this object. See emit_eventsource.go.
-	IsEventSource bool
-	// IsEvent marks a WHATWG Event/CustomEvent object (TDD-00081): a plain
-	// fixed-shape object (type/detail/defaultPrevented fields) plus the
-	// preventDefault/stop* method surface. CustomEvent carries an extra `detail`
-	// field whose type varies, so the object type itself is the source of truth
-	// for its fields; this flag only enables method dispatch.
-	IsEvent bool
-	// IsEventTarget marks a WHATWG EventTarget (TDD-00081 Stage 2): under the
-	// hood a `Map<string, listener-list>` pointer (the same registry EventEmitter
-	// uses), reached only through addEventListener/removeEventListener/
-	// dispatchEvent.
-	IsEventTarget bool
-	// IsAbortSignal / IsAbortController mark the WHATWG cancellation token
-	// (TDD-00081 Stage 3). An AbortSignal is an object with `aborted`/`reason`
-	// fields plus a hidden `listeners` map (so it behaves as an EventTarget that
-	// fires "abort"); an AbortController wraps one in its `signal` field.
-	IsAbortSignal     bool
-	IsAbortController bool
-	// IsWSConnection marks the object passed to an `http.listen(port,
-	// handler, { ws })` upgrade handler (TDD-00039 Stage 1) — a real heap
-	// object like EventSource, with a hidden field (WSConnFdField) holding
-	// the raw socket fd `.send()`/`.close()` write to directly, independent
-	// of the connection-fiber array's own bookkeeping (see
-	// emit_websocket.go). Never constructed via a `new` expression — the
-	// compiler builds one internally right after a successful upgrade
-	// handshake and passes it to the user's `ws` callback exactly once,
-	// mirroring how a Request object is built and passed to the ordinary
-	// HTTP handler.
-	IsWSConnection bool
-	// IsWebSocketClient marks `new WebSocket(url)`'s result (TDD-00039
-	// Stage 3, `ws://` only — `wss://` is rejected at construction) — a
-	// real heap object like EventSource/WSConnection, with a hidden field
-	// (WebSocketClientHandleField) pointing at the runtime's own client
-	// entry struct in the new client-scan array (mirroring EventSource's
-	// own "fourth scanned resource" pattern, this one a fifth) the event
-	// loop walks each iteration to deliver `.onmessage`/`.onclose`/
-	// `.onerror`. See emit_websocket_client.go.
-	IsWebSocketClient bool
-	// IsWorker marks `new Worker(path)`'s result (TDD-00098): a ptr to the
-	// runtime control block (runtime_worker.go's workerCtrlIR). WorkerPath
-	// is the worker module's canonical file path — the key into
-	// e.workerEntries that carries the statically-declared channel types,
-	// which is how each parent-side postMessage/on site is type-checked.
-	IsWorker   bool
-	WorkerPath string
 	// child_process handles: IsChildProcess marks a spawn()/exec()/execFile()
 	// ChildProcess value (a ptr to runtime_childprocess.go's cpStructIR);
 	// IsCPStream marks child.stdout/child.stderr (CPWhich 0/1 picks the
@@ -545,16 +454,6 @@ type Type struct {
 	IsCPStream     bool
 	IsCPStdin      bool
 	CPWhich        int
-	// IsReadline marks a readline.createInterface() handle (a ptr to
-	// runtime_readline.go's rlStructIR), for .on/.question/.close dispatch.
-	IsReadline bool
-	// IsStdin marks the process.stdin streaming handle (a ptr to
-	// runtime_stdin.go's stdinStructIR), for .on('data'|'end') dispatch.
-	IsStdin bool
-	// IsNetServer marks a net.createServer() handle and IsNetSocket a TCP
-	// connection socket (both ptr to runtime_net.go structs), for .listen/
-	// .on/.write/.end/.close dispatch.
-	IsNetServer bool
 	// IsHTTPServer marks a variable-bound http.createServer() handle
 	// (.listen/.close/.closeAllConnections/.address).
 	IsHTTPServer bool
@@ -570,29 +469,6 @@ type Type struct {
 	// methods (navigate/html/setTitle/setSize/init/eval/run/terminate/
 	// destroy/bind/unbind).
 	IsWebview bool
-	// IsH2ServerStream marks the http2 server-side stream object
-	// (.respond/.end/.write/.on('data'|'end'), TDD-00139 Stage 2).
-	IsH2ServerStream bool
-	// IsH2ClientSession / IsH2ClientStream mark the http2 client surface
-	// (http2.connect / session.request, TDD-00139 Stage 3).
-	IsH2ClientSession bool
-	IsH2ClientStream  bool
-	// IsH2Constants marks a binding of the compile-time http2.constants
-	// namespace (TDD-00139 Stage 4).
-	IsH2Constants bool
-	// IsFsConstants marks a binding of the compile-time fs.constants
-	// namespace (ADR-00795).
-	IsFsConstants bool
-	// IsTestContext marks the node:test runner's `t` (TDD-00140).
-	IsTestContext bool
-	// IsDCChannel marks a diagnostics_channel Channel handle.
-	IsDCChannel bool
-	// IsAsyncLocalStorage marks an async_hooks AsyncLocalStorage<T> handle
-	// (TDD-00168); the store element type T lives in ElemType.
-	IsAsyncLocalStorage bool
-	// IsAsyncResource marks an async_hooks AsyncResource handle (TDD-00168
-	// Stage 4): a captured async context replayed by runInAsyncScope.
-	IsAsyncResource bool
 	// IsFinalizationRegistry marks a FinalizationRegistry<T> handle
 	// (TDD-00163); the held-value type T lives in ElemType.
 	IsFinalizationRegistry bool
@@ -618,35 +494,6 @@ type Type struct {
 	// spilled back to a pointer there unless destructured directly).
 	TupleByVal  bool
 	IsNetSocket bool
-	// IsWebSocketServer marks a klain:ws `new WebSocketServer({server})` handle
-	// (TDD-00158 Stage 2). The http server is a process-singleton, so the
-	// handle carries no per-instance state — its only role is to route
-	// `.on('connection', …)` to the WSConnection-handler global.
-	IsWebSocketServer bool
-	// IsHash marks a `crypto.createHash(algo)` Hash handle (TDD-00159): an
-	// opaque ptr to the backend's streaming digest context (EVP_MD_CTX /
-	// CommonCrypto), with `.update(data)` / `.digest(encoding?)` methods.
-	IsHash bool
-	// IsHmac marks a `crypto.createHmac(algo, key)` Hmac handle (ADR-00637):
-	// an opaque ptr to the backend's streaming HMAC context, same
-	// `.update`/`.digest` surface as a Hash.
-	IsHmac bool
-	// IsDgramSocket marks a dgram.createSocket() handle (a ptr to
-	// runtime_dgram.go's dgramSocketIR), for .bind/.on('message')/.send/.close.
-	IsDgramSocket bool
-	// IsClusterWorker marks a cluster.fork() Worker handle (a ptr to
-	// runtime_cluster.go's clusterWorkerIR { id, pid }), for .id access.
-	IsClusterWorker bool
-	// IsBroadcastChannel / IsMessageChannel / IsMessagePort (TDD-00099):
-	// each is a ptr to a runtime channel-endpoint block (runtime_chan.go's
-	// chanEpIR; a MessageChannel value is the port1 half, port1/port2
-	// resolved by member access). BCName is the BroadcastChannel's
-	// compile-time name — the key into e.bcChannels' per-name message type.
-	// A MessagePort's message type lives in ElemType (like Set<T>).
-	IsBroadcastChannel bool
-	IsMessageChannel   bool
-	IsMessagePort      bool
-	BCName             string
 	// IsChannel marks a klain:sync `new Channel<T>(cap)` handle (TDD-00143):
 	// a ptr to the C runtime's hchan. The element type T lives in ElemType
 	// (like MessagePort/Set<T>); channel elements are a fixed 8-byte slot, so
@@ -676,12 +523,11 @@ type Type struct {
 	// but are otherwise unconnected types. See emit_fetch_request.go.
 	IsFetchRequest bool
 	// IsXHR marks `new XMLHttpRequest()`'s result (TDD-00040): a real heap
-	// object like EventSource/WebSocketClient, with hidden fields (method/
+	// object, with hidden fields (method/
 	// url/headers, built up by open()/setRequestHeader()) plus visible
 	// readyState/status/responseText/response and three zero-argument
 	// callback fields (onreadystatechange/onload/onerror — deliberately
-	// zero-arg, unlike EventSource/WebSocket's payload-carrying onmessage,
-	// since a self-referential FuncType field isn't representable here; see
+	// zero-arg, since a self-referential FuncType field isn't representable here; see
 	// the TDD's Design section). send() is synchronous-looking but reuses
 	// fetch()'s own non-blocking __kml_fetch_async primitive underneath, so
 	// it still yields the current fiber rather than blocking when called
@@ -692,7 +538,7 @@ type Type struct {
 	// runtime_streams.go — state machine, chunk queue with high-water mark,
 	// pending-read promise FIFO, underlying-source closures, a per-site
 	// "fulfill thunk" that builds typed {value,done} records). Deliberately
-	// NOT IsObject, same opaque-handle reasoning IsEventEmitter's doc comment
+	// NOT IsObject, the same opaque-handle reasoning
 	// gives. StreamChunk is the T — every enqueue/read site needs it to know
 	// the chunk's IR shape (array-shaped chunks span the two queue words).
 	// The reader, controller, and stream are all the SAME runtime pointer,
@@ -718,14 +564,8 @@ type Type struct {
 	// the readable (chunk O) and writable (chunk I) stream pointers.
 	// StreamChunk carries I, StreamOut carries O.
 	IsTransformStream bool
-	// IsNodeReadable / IsNodeWritable mark Node's `stream` classes (TDD-00097
-	// Stage 8): a ptr to the %kml.nodestream wrapper over the WHATWG
-	// internals. A Transform sets both. StreamChunk carries the writable-in
-	// type, StreamOut the readable-out type.
-	IsNodeReadable bool
-	IsNodeWritable bool
-	StreamChunk    *Type
-	StreamOut      *Type
+	StreamChunk       *Type
+	StreamOut         *Type
 }
 
 // ArrayOf returns an array type whose elements are of the given type.
@@ -765,9 +605,37 @@ func (t Type) staticIndexType() Type {
 	return t
 }
 
-// ObjectType returns an object type with the given fields.
+// ObjectType returns an object type with the given fields, behind the header
+// word every object layout starts with (TDD-00230 phase 5): field 0, named
+// ClassTagField, holds the layout's type id (see objHeaderWord). Fields that
+// already start with the header (a class, or a type rebuilt from another
+// type's Fields) are not given a second one.
 func ObjectType(fields []Field) Type {
+	if len(fields) == 0 || fields[0].Name != ClassTagField {
+		withHdr := make([]Field, 0, len(fields)+1)
+		withHdr = append(withHdr, Field{Name: ClassTagField, Ty: TypeI64})
+		fields = append(withHdr, fields...)
+	}
 	return Type{IR: "ptr", IsObject: true, Fields: fields}
+}
+
+// hostObjectType is ObjectType for a host class's layout (an Is*-flagged
+// runtime object whose fields the hand-written runtime reads at fixed
+// offsets): headerless until the host classes move to declared layouts
+// (TDD-00230 P3.4), when their header is added with the runtime's readers.
+// Boxed into `any`, one reads as "no shape".
+func hostObjectType(fields []Field) Type {
+	return Type{IR: "ptr", IsObject: true, Fields: fields}
+}
+
+// UserFields returns t's fields after the header word: the layout's own
+// fields, in declaration order (a tuple's elements are UserFields()[i]).
+// Struct indices of these fields are one more than their position here.
+func (t Type) UserFields() []Field {
+	if len(t.Fields) > 0 && t.Fields[0].Name == ClassTagField {
+		return t.Fields[1:]
+	}
+	return t.Fields
 }
 
 // TupleType returns a tuple type `[T0, T1, ...]` (TDD-00066): an object struct
@@ -777,9 +645,9 @@ func TupleType(elems []Type) Type {
 	for i, ety := range elems {
 		fields[i] = Field{Name: fmt.Sprintf("%d", i), Ty: ety}
 	}
-	ty := ObjectType(fields)
-	ty.IsTuple = true
-	return ty
+	// Headerless: a tuple is value-like data (TDD-00230 phase 5); boxed into
+	// `any` it becomes an array box, not an object with a shape.
+	return Type{IR: "ptr", IsObject: true, IsTuple: true, Fields: fields}
 }
 
 // MapType returns a Map<key,val> type.
@@ -854,22 +722,6 @@ func WSControllerType(chunk Type) Type {
 	return Type{IR: "ptr", IsWSController: true, StreamChunk: &c}
 }
 
-// NodeReadableType / NodeWritableType / NodeTransformType (TDD-00097 St. 8).
-func NodeReadableType(out Type) Type {
-	o := out
-	return Type{IR: "ptr", IsNodeReadable: true, StreamOut: &o}
-}
-
-func NodeWritableType(in Type) Type {
-	i := in
-	return Type{IR: "ptr", IsNodeWritable: true, StreamChunk: &i}
-}
-
-func NodeTransformType(in, out Type) Type {
-	i, o := in, out
-	return Type{IR: "ptr", IsNodeReadable: true, IsNodeWritable: true, StreamChunk: &i, StreamOut: &o}
-}
-
 // ResponseType returns fetch()'s Response object type: a plain heap object
 // with status/ok/body fields (readable via the ordinary object field-access
 // path — no special dispatch needed for those three), plus IsResponse set so
@@ -879,7 +731,7 @@ func NodeTransformType(in, out Type) Type {
 // — an implementation-only field feeding .arrayBuffer(), not part of the
 // documented public surface (real Fetch has no such field either).
 func ResponseType() Type {
-	ty := ObjectType([]Field{
+	ty := hostObjectType([]Field{
 		{Name: "status", Ty: TypeF64}, // a `number` (TDD-00123)
 		{Name: "ok", Ty: TypeBool},
 		{Name: "body", Ty: TypePtr},
@@ -889,6 +741,22 @@ func ResponseType() Type {
 		// .text()/.json()/.arrayBuffer() drive the rest of the transfer and
 		// .body can stream it. Null on combinator-built Responses.
 		{Name: "__kml_pending", Ty: TypePtr},
+		// A constructed Response's headers (a Headers) and statusText;
+		// null on a fetched one, whose are read from its captured header
+		// text.
+		{Name: "__kml_headers", Ty: TypePtr},
+		{Name: "__kml_status_text", Ty: TypePtr},
+		// A constructed Response's type ("default", "error"); null on a
+		// fetched one ("basic").
+		{Name: "__kml_type", Ty: TypePtr},
+		// The ReadableStream `.body` returns, once built (a constructed
+		// Response's stream body from the start), so every read is the same
+		// stream.
+		{Name: "__kml_stream", Ty: TypePtr},
+		// responseNullBody: `.body` is null (a constructed Response without
+		// a body); responseStreamBody: the body is __kml_stream's bytes,
+		// not yet read into body/bodyLength.
+		{Name: "__kml_bodyflags", Ty: TypeI64},
 	})
 	ty.IsResponse = true
 	return ty
@@ -915,7 +783,7 @@ func URLSearchParamsType() Type {
 // case it — field reads go through the ordinary object machinery exactly
 // like Response's status/ok/body already do.
 func URLType() Type {
-	ty := ObjectType([]Field{
+	ty := hostObjectType([]Field{
 		{Name: "href", Ty: TypePtr},
 		{Name: "protocol", Ty: TypePtr},
 		{Name: "host", Ty: TypePtr},
@@ -930,65 +798,6 @@ func URLType() Type {
 		{Name: "searchParams", Ty: URLSearchParamsType()},
 	})
 	ty.IsURL = true
-	return ty
-}
-
-// LegacyUrlType returns the object `url.parse()` produces (TDD-00165 Stage 4) —
-// Node's legacy `Url` shape, distinct from the WHATWG URLType above. Its fields
-// are the legacy names (`auth`/`path`/`query`, plus the shared
-// href/protocol/host/hostname/port/pathname/search/hash). Every field is a
-// string; an absent component is the empty string (matching how URLType already
-// represents an absent part, rather than Node's `null` — a documented
-// divergence). `slashes` and the `parseQueryString` object form of `query` are
-// deferred.
-func LegacyUrlType() Type {
-	return ObjectType([]Field{
-		{Name: "href", Ty: TypePtr},
-		{Name: "protocol", Ty: TypePtr},
-		{Name: "auth", Ty: TypePtr},
-		{Name: "host", Ty: TypePtr},
-		{Name: "port", Ty: TypePtr},
-		{Name: "hostname", Ty: TypePtr},
-		{Name: "hash", Ty: TypePtr},
-		{Name: "search", Ty: TypePtr},
-		{Name: "query", Ty: TypePtr},
-		{Name: "pathname", Ty: TypePtr},
-		{Name: "path", Ty: TypePtr},
-	})
-}
-
-// PerformanceEntryType is one observed entry (TDD-00166): the plain-field
-// object a PerformanceObserver's list yields.
-func PerformanceEntryType() Type {
-	return ObjectType([]Field{
-		{Name: "name", Ty: TypePtr},
-		{Name: "entryType", Ty: TypePtr},
-		{Name: "startTime", Ty: TypeF64},
-		{Name: "duration", Ty: TypeF64},
-	})
-}
-
-// PerfEntryListType is the list object a PerformanceObserver callback receives
-// (TDD-00166): the entries buffer as a (data ptr, length) pair, rebuilt into the
-// `{ptr, i64}` array aggregate by the dispatched `.getEntries()` method.
-func PerfEntryListType() Type {
-	ty := ObjectType([]Field{
-		{Name: "__kml_data", Ty: TypePtr},
-		{Name: "__kml_len", Ty: TypeI64},
-	})
-	ty.IsPerfEntryList = true
-	return ty
-}
-
-// PerfObserverType is a `new PerformanceObserver(cb)` handle (TDD-00166): the
-// callback closure plus its registry-node pointer (set on `.observe`, cleared on
-// `.disconnect`).
-func PerfObserverType() Type {
-	ty := ObjectType([]Field{
-		{Name: "__kml_cb", Ty: TypePtr},
-		{Name: "__kml_node", Ty: TypePtr},
-	})
-	ty.IsPerfObserver = true
 	return ty
 }
 
@@ -1007,67 +816,6 @@ func HttpOptionsType() Type {
 		{Name: "port", Ty: TypePtr},
 		{Name: "auth", Ty: TypePtr},
 	})
-}
-
-// SQLiteDatabaseType returns node:sqlite's `new DatabaseSync(...)` result type
-// (ADR-00540): the raw sqlite3* handle in a hidden __kml_handle field plus a
-// plain `isOpen` bool read through the ordinary object machinery. exec/prepare/
-// close dispatch on IsSQLiteDatabase in emit_call.go.
-func SQLiteDatabaseType() Type {
-	ty := ObjectType([]Field{
-		{Name: "__kml_handle", Ty: TypePtr},
-		{Name: "isOpen", Ty: TypeBool},
-		{Name: "__kml_path", Ty: TypePtr},
-		{Name: "__kml_flags", Ty: TypeI32},
-	})
-	ty.IsSQLiteDatabase = true
-	return ty
-}
-
-// SQLiteStatementType returns a StatementSync's type (ADR-00540): the
-// sqlite3_stmt* handle, a back-pointer to the owning database's sqlite3* (for
-// changes()/last_insert_rowid() after run()), and the source SQL string as a
-// plain field. get/all/run dispatch on IsSQLiteStatement.
-func SQLiteStatementType() Type {
-	ty := ObjectType([]Field{
-		{Name: "__kml_handle", Ty: TypePtr},
-		{Name: "__kml_db", Ty: TypePtr},
-		{Name: "sourceSQL", Ty: TypePtr},
-	})
-	ty.IsSQLiteStatement = true
-	return ty
-}
-
-// FFISignature is a statically-resolved node:ffi call signature (TDD-00164):
-// the `{ arguments: [...], return: '...' }` object from source, with every
-// type name normalized to its canonical spelling (i32→int32, ptr→pointer, …).
-type FFISignature struct {
-	Args []string
-	Ret  string
-}
-
-// FFILibraryType returns node:ffi's DynamicLibrary handle type (TDD-00164):
-// a pointer to the runtime registry (ffisrc/ffi_registry.c, TDD-00229) whose
-// first two words are the raw dlopen handle (hidden __kml_handle) and the
-// `path` string, read through the ordinary object machinery.
-func FFILibraryType() Type {
-	ty := ObjectType([]Field{
-		{Name: "__kml_handle", Ty: TypePtr},
-		{Name: "path", Ty: TypePtr},
-	})
-	ty.IsFFILibrary = true
-	return ty
-}
-
-// FFIFunctionType returns the type of a bound native function (TDD-00164): at
-// runtime a function object (an extended tag-12 record, TDD-00229) whose env
-// is the registry entry; the signature travels at compile time and lowers a
-// direct call to an inline validated C-ABI call.
-func FFIFunctionType(sig *FFISignature) Type {
-	t := TypePtr
-	t.IsFFIFunction = true
-	t.FFISig = sig
-	return t
 }
 
 // SQLiteColumnMetaType is one entry of stmt.columns() (ADR-00540): the
@@ -1105,7 +853,7 @@ func SQLiteRunResultType() Type {
 // "*" default), plus the hidden __kml_handle carrying the compiled per-
 // component PCRE2 state, same hidden-field trick as Response.__kml_pending.
 func URLPatternType() Type {
-	ty := ObjectType([]Field{
+	ty := hostObjectType([]Field{
 		{Name: "protocol", Ty: TypePtr},
 		{Name: "hostname", Ty: TypePtr},
 		{Name: "port", Ty: TypePtr},
@@ -1131,7 +879,7 @@ func SymbolType() Type {
 	// `=== "symbol"` narrowing tell it apart from a plain object at runtime —
 	// the same field-0 probe Errors use, on a different bit. Every allocation
 	// site (Symbol(), Symbol.for) stores it.
-	ty := ObjectType([]Field{{Name: "__kml_typeid", Ty: TypeI64}, {Name: "description", Ty: TypePtr}})
+	ty := ObjectType([]Field{{Name: "description", Ty: TypePtr}})
 	ty.IsSymbol = true
 	return ty
 }
@@ -1159,11 +907,18 @@ func HeadersType() Type {
 // choice (avoiding the pre-existing, unrelated IsRequest/RequestType) and
 // emit_fetch_request.go.
 func FetchRequestType() Type {
-	ty := ObjectType([]Field{
+	ty := hostObjectType([]Field{
 		{Name: "url", Ty: TypePtr},
 		{Name: "method", Ty: TypePtr},
 		{Name: "headers", Ty: HeadersType()},
+		// The body's bytes (null without a body) and the Body members'
+		// state, as Response has them (emitResponseCall and
+		// emitResponseBodyStream serve both).
 		{Name: "body", Ty: TypePtr},
+		{Name: "bodyLength", Ty: TypeI64},
+		{Name: "__kml_pending", Ty: TypePtr}, // always null
+		{Name: "__kml_stream", Ty: TypePtr},
+		{Name: "__kml_bodyflags", Ty: TypeI64},
 	})
 	ty.IsFetchRequest = true
 	return ty
@@ -1173,7 +928,7 @@ func FetchRequestType() Type {
 // fields every `new XMLHttpRequest()` instance carries at indices 0-2 —
 // written by open()/setRequestHeader(), read by send() — never exposed via
 // VisibleFields()/Object.keys/JSON, the same convention
-// EventSourceHandleField/WSConnFdField already use.
+// RegexHandleField uses.
 const (
 	XHRMethodField  = "__kml_xhr_method"
 	XHRURLField     = "__kml_xhr_url"
@@ -1188,16 +943,13 @@ const (
 // (TDD-00040). readyState/status/responseText/response are plain visible
 // fields (readyState: 0 UNSENT, 1 OPENED, 4 DONE — this implementation
 // skips the real spec's 2 HEADERS_RECEIVED/3 LOADING, which have no
-// meaning for a send() that runs to completion before returning, matching
-// EventSourceType's own "simplified state model" precedent).
+// meaning for a send() that runs to completion before returning).
 // onreadystatechange/onload/onerror are zero-argument callback fields (see
-// IsXHR's doc comment for why, unlike EventSource/WebSocket's
-// payload-carrying onmessage) — assigning to any of them is a plain
-// FuncType field assignment needing no dedicated codegen, same as
-// EventSource/WSConnection's own onmessage.
+// IsXHR's doc comment for why) — assigning to any of them is a plain
+// FuncType field assignment needing no dedicated codegen.
 func XMLHttpRequestType() Type {
 	cb := FuncType(nil, TypeVoid)
-	ty := ObjectType([]Field{
+	ty := hostObjectType([]Field{
 		{Name: XHRMethodField, Ty: TypePtr},
 		{Name: XHRURLField, Ty: TypePtr},
 		{Name: XHRHeadersField, Ty: TypePtr},
@@ -1214,15 +966,6 @@ func XMLHttpRequestType() Type {
 	return ty
 }
 
-// EventEmitterType returns `new EventEmitter<T>()`'s result type — see
-// IsEventEmitter's doc comment for why this is a fully independent flag
-// rather than a flavor of Map, despite reusing Map's runtime helpers under
-// the hood. See docs/tdd/TDD-00023.md.
-func EventEmitterType(payload Type) Type {
-	payloadCopy := payload
-	return Type{IR: "ptr", IsEventEmitter: true, EventEmitterPayload: &payloadCopy}
-}
-
 // Generator instance struct field names (TDD-00061/ADR-00172) — a fixed
 // prologue shared by every generator, followed by one field per the
 // generator function's own declared parameter (named "__param0",
@@ -1235,7 +978,7 @@ const (
 	GeneratorStartedField    = "__started"    // false until the first .next() call
 	GeneratorDoneField       = "__done"       // true once the body has returned or fallen off the end
 	GeneratorYieldedField    = "__yielded"    // what the most recent yield/return produced
-	GeneratorSentField       = "__sent"       // what the current .next(value)/.return(value) call is passing in
+	GeneratorSentField       = "__sent"       // what the current .next(value)/.return(value) call is passing in, boxed (TNext is its own type, `any` by default)
 	GeneratorResumeModeField = "__resumeMode" // how the current resume behaves: 0 next (return __sent), 1 throw __thrown, 2 return __sent (TDD-00086)
 	GeneratorThrownField     = "__thrown"     // the error object a .throw(e) injects at the suspension point (ptr, TDD-00086)
 	GeneratorJmpStkField     = "__jmpStk"     // this generator's own isolated jmpbuf stack (ptr, so caller/body try-frames never interleave — TDD-00086)
@@ -1243,6 +986,7 @@ const (
 	GeneratorGenErrorField   = "__genError"   // an uncaught body throw the outer catch-all captured, re-thrown on the caller side (ptr, TDD-00086)
 	GeneratorThisField       = "__this"       // a generator method's receiver (ptr), bound to `this` at body entry (TDD-00063 Stage 2b)
 	GeneratorEnvField        = "__env"        // a nested generator's closure environment (ptr to the captured-cell struct, null when it captures nothing) — TDD-00094
+	GeneratorHasRetField     = "__hasret"     // true once the body completed with a value (`return expr`) not yet handed to a caller's next()
 
 	// Async-generator step state (the spec-faithful step model: synchronous
 	// body start, park-at-await, request queueing). Present on every
@@ -1259,6 +1003,13 @@ const (
 // paramTypes is the generator function's own declared parameter types, in
 // order, stored as trailing fields so construction can populate them once
 // and the generator body can read them back on its own fiber stack.
+// CollIterType is the type of an iterator over src (an array, Map or Set)
+// yielding kind.
+func CollIterType(src Type, kind mapIterKind) Type {
+	srcCopy := src
+	return Type{IR: "ptr", IsCollIter: true, IterKind: kind, IterSrc: &srcCopy}
+}
+
 func GeneratorType(elem Type, paramTypes []Type, thisTy *Type, isAsync bool) Type {
 	elemCopy := elem
 	fields := []Field{
@@ -1268,13 +1019,14 @@ func GeneratorType(elem Type, paramTypes []Type, thisTy *Type, isAsync bool) Typ
 		{Name: GeneratorStartedField, Ty: TypeBool},
 		{Name: GeneratorDoneField, Ty: TypeBool},
 		{Name: GeneratorYieldedField, Ty: elem},
-		{Name: GeneratorSentField, Ty: elem},
+		{Name: GeneratorSentField, Ty: TypeAny},
 		{Name: GeneratorResumeModeField, Ty: TypeI64},
 		{Name: GeneratorThrownField, Ty: TypePtr},
 		{Name: GeneratorJmpStkField, Ty: TypePtr},
 		{Name: GeneratorJmpTopField, Ty: TypeI64},
 		{Name: GeneratorGenErrorField, Ty: TypePtr},
 		{Name: GeneratorEnvField, Ty: TypePtr},
+		{Name: GeneratorHasRetField, Ty: TypeBool},
 		{Name: GeneratorPendingQField, Ty: TypePtr},
 		{Name: GeneratorParkedField, Ty: TypeI64},
 		{Name: GeneratorReqHeadField, Ty: TypePtr},
@@ -1316,25 +1068,6 @@ func CryptoKeyPairType() Type {
 	return Type{IR: "ptr", IsCryptoKeyPair: true}
 }
 
-// BroadcastChannelType returns `new BroadcastChannel(name)`'s result type
-// (TDD-00099).
-func BroadcastChannelType(name string) Type {
-	return Type{IR: "ptr", IsBroadcastChannel: true, BCName: name}
-}
-
-// MessagePortType returns a MessagePort<msg> type (TDD-00099).
-func MessagePortType(msg Type) Type {
-	m := msg
-	return Type{IR: "ptr", IsMessagePort: true, ElemType: &m}
-}
-
-// MessageChannelType returns `new MessageChannel<msg>()`'s result type
-// (TDD-00099).
-func MessageChannelType(msg Type) Type {
-	m := msg
-	return Type{IR: "ptr", IsMessageChannel: true, ElemType: &m}
-}
-
 // ChannelType returns `new Channel<T>(cap)`'s result type (TDD-00143); the
 // element type T lives in ElemType.
 func ChannelType(elem Type) Type {
@@ -1344,64 +1077,6 @@ func ChannelType(elem Type) Type {
 
 // SharedArrayBufferType returns `new SharedArrayBuffer(...)`'s result type —
 // the ArrayBuffer representation plus the shared-across-workers flag.
-// StatsType returns fs.statSync's result type (ADR-00495/ADR-00565): the full
-// Stats numeric surface, in Node's own-property order (dev, mode, nlink, uid,
-// gid, rdev, blksize, ino, size, blocks, atimeMs, mtimeMs, ctimeMs,
-// birthtimeMs). `mode` doubles as the isFile()/isDirectory()/isSymbolicLink()
-// backing (masked with S_IFMT). All fields are integer milliseconds/counts —
-// the Date-valued `atime`/`mtime`/`ctime`/`birthtime` accessors are a disclosed
-// gap. birthtimeMs is 0 on Linux (no birthtime in struct stat without statx).
-func StatsType() Type {
-	ty := ObjectType([]Field{
-		{Name: "dev", Ty: TypeI64},
-		{Name: "mode", Ty: TypeI64},
-		{Name: "nlink", Ty: TypeI64},
-		{Name: "uid", Ty: TypeI64},
-		{Name: "gid", Ty: TypeI64},
-		{Name: "rdev", Ty: TypeI64},
-		{Name: "blksize", Ty: TypeI64},
-		{Name: "ino", Ty: TypeI64},
-		{Name: "size", Ty: TypeI64},
-		{Name: "blocks", Ty: TypeI64},
-		{Name: "atimeMs", Ty: TypeI64},
-		{Name: "mtimeMs", Ty: TypeI64},
-		{Name: "ctimeMs", Ty: TypeI64},
-		{Name: "birthtimeMs", Ty: TypeI64},
-	})
-	ty.IsStats = true
-	return ty
-}
-
-// DirentType returns the element type of fs.readdirSync(path, { withFileTypes:
-// true }) (ADR-00752/ADR-00787). `name` and `parentPath` (the directory the
-// entry was read from) are Node's own-enumerable Dirent properties; `mode` is a
-// hidden S_IFMT word (from the dirent d_type) backing the kind predicates
-// isFile()/isDirectory()/isSymbolicLink()/isFIFO()/isCharacterDevice()/
-// isBlockDevice()/isSocket(). `mode` is placed last so the enumeration/JSON
-// strip keeps the two leading real properties, the way Stats keeps its own
-// fields but Dirent does not expose `mode`.
-func DirentType() Type {
-	ty := ObjectType([]Field{
-		{Name: "name", Ty: TypePtr},
-		{Name: "parentPath", Ty: TypePtr},
-		{Name: "mode", Ty: TypeI64},
-	})
-	ty.IsDirent = true
-	return ty
-}
-
-// FSWatcherType is fs.watch's result (TDD-00181): an opaque handle (a pointer
-// to the runtime FSWatcher struct) whose .on/.close are method-dispatched.
-func FSWatcherType() Type {
-	ty := ObjectType([]Field{{Name: "__handle", Ty: TypePtr}})
-	ty.IsFSWatcher = true
-	return ty
-}
-
-// statFieldOrder is the field order StatsType/__kml_fs_stat share, used to fill
-// the object from the runtime's 14-i64 result.
-var statFieldOrder = []string{"dev", "mode", "nlink", "uid", "gid", "rdev", "blksize", "ino", "size", "blocks", "atimeMs", "mtimeMs", "ctimeMs", "birthtimeMs"}
-
 func SharedArrayBufferType() Type {
 	return Type{IR: "ptr", IsArrayBuffer: true, IsSharedArrayBuffer: true}
 }
@@ -1441,7 +1116,7 @@ const RegexHandleField = "__kml_regex_handle"
 // u/d are deferred; `y` since ADR-01062) so no method needs to re-parse the flags string;
 // lastIndex is mutable, `g`-flag iteration state.
 func RegExpType() Type {
-	ty := ObjectType([]Field{
+	ty := hostObjectType([]Field{
 		{Name: RegexHandleField, Ty: TypePtr},
 		{Name: "source", Ty: TypePtr},
 		{Name: "flags", Ty: TypePtr},
@@ -1456,298 +1131,11 @@ func RegExpType() Type {
 	return ty
 }
 
-// EventSourceHandleField is the name of the hidden ptr field every
-// EventSource instance carries at index 0, pointing at the runtime's own
-// entry struct (`{ ptr pending, ptr instance, i64 consumedOffset, i64
-// state }`, runtime_eventsource.go) — never exposed via VisibleFields()/
-// Object.keys/JSON, same convention RegexHandleField uses.
-const EventSourceHandleField = "__kml_es_handle"
-
-// EventSourceLastEventIdField is the name of the hidden ptr field (index 1,
-// right after EventSourceHandleField) holding the SSE "last event ID"
-// buffer (TDD-00038 Stage 1) — persists across dispatched records (an `id:`
-// field updates it; a record with none leaves it unchanged), read into
-// each dispatched MessageEvent's own lastEventId field. Hidden, not a
-// visible property on EventSource itself, matching the real spec (only
-// each individual event carries lastEventId — the source object doesn't
-// expose it as a readable property).
-const EventSourceLastEventIdField = "__kml_es_last_event_id"
-
-// EventSourceType returns `new EventSource(url)`'s result type. url/
-// readyState/onmessage are plain visible fields (readyState: 0 CONNECTING,
-// 1 OPEN, 2 CLOSED), mirroring how Response's status/ok/body are plain
-// field reads via the ordinary object machinery, no dispatched getter
-// needed — including for `onmessage`'s assignment (`es.onmessage = (ev) =>
-// ...`), which goes through the same generic object-field-assignment path
-// as any other FuncType-typed field. readyState is written from two
-// places: the event loop's own per-iteration scan (a CONNECTING->OPEN/
-// ->CLOSED transition observed asynchronously) and emitEventSourceClose
-// (synchronously, matching real EventSource's own close() setting
-// readyState immediately rather than waiting for the next scan).
-// `onmessage`, when non-null, is called directly from the runtime's own
-// per-iteration SSE record parser (__kml_eventsource_dispatch_record,
-// runtime_eventsource.go) — TDD-00038 Stage 1.
-func EventSourceType() Type {
-	ty := ObjectType([]Field{
-		{Name: EventSourceHandleField, Ty: TypePtr},
-		{Name: EventSourceLastEventIdField, Ty: TypePtr},
-		{Name: "url", Ty: TypePtr},
-		{Name: "readyState", Ty: TypeI64},
-		{Name: "onmessage", Ty: FuncType([]Type{MessageEventType()}, TypeVoid)},
-		// onopen/onerror (TDD-00038 Stage 2) — appended after onmessage
-		// rather than interleaved with the hidden fields, so every existing
-		// field's index stays exactly what it was in Stage 0/1 (only
-		// VisibleFields()'s hidden-prefix count would need to change for an
-		// interleaved insertion; a trailing append needs no such change).
-		// Both fire with a MessageEventType() payload (data/lastEventId
-		// left empty, type "open"/"error") for closure-call ABI uniformity
-		// with onmessage, even though real EventSource passes a plain,
-		// data-less Event for these two — see runtime_eventsource.go's
-		// __kml_eventsource_scan for where each actually fires.
-		{Name: "onopen", Ty: FuncType([]Type{MessageEventType()}, TypeVoid)},
-		{Name: "onerror", Ty: FuncType([]Type{MessageEventType()}, TypeVoid)},
-	})
-	ty.IsEventSource = true
-	return ty
-}
-
-// MessageEventType returns the fixed, concrete payload type every
-// EventSource listener is called with (TDD-00038 Stage 1) — data/type/
-// lastEventId, all strings, matching the real MessageEvent shape SSE
-// actually needs (no generic type parameter the way EventEmitter<T> has,
-// since the payload shape never varies by user code — see the TDD's own
-// Design section on why this is simpler than EventEmitter<T> in exactly
-// this one respect).
-func MessageEventType() Type {
-	return ObjectType([]Field{
-		{Name: "data", Ty: TypePtr},
-		{Name: "type", Ty: TypePtr},
-		{Name: "lastEventId", Ty: TypePtr},
-	})
-}
-
-// EventType is the WHATWG Event object (TDD-00081): a fixed-shape object with a
-// type string, a defaultPrevented flag, and an internal stopImmediate flag,
-// tagged IsEvent so preventDefault/stop* dispatch on it.
-func EventType() Type {
-	t := ObjectType([]Field{
-		{Name: "type", Ty: TypePtr},
-		{Name: "defaultPrevented", Ty: TypeBool},
-		{Name: "stopImmediate", Ty: TypeBool},
-		{Name: "cancelable", Ty: TypeBool},
-	})
-	t.IsEvent = true
-	return t
-}
-
-// EventTargetType is a WHATWG EventTarget: a bare `Map<string, listener-list>`
-// pointer, tagged IsEventTarget (TDD-00081 Stage 2).
-func EventTargetType() Type {
-	return Type{IR: "ptr", IsEventTarget: true}
-}
-
-// AbortSignalType is a WHATWG AbortSignal (TDD-00081 Stage 3): an object with an
-// aborted flag, a reason, and a hidden listener registry so it dispatches "abort"
-// like an EventTarget.
-func AbortSignalType() Type {
-	t := ObjectType([]Field{
-		{Name: "aborted", Ty: TypeBool},
-		// reason is `any` (a NaN-boxed i64): abort(reason) accepts any value, and
-		// a default/timeout DOMException boxes as kmlTagObject whose field-0
-		// type-id lets the render/member/instanceof paths recover the Error
-		// shape. A never-aborted signal's reason reads back as undefined.
-		{Name: "reason", Ty: TypeAny},
-		{Name: "listeners", Ty: TypePtr},
-		// deadlineNs: a monotonic-ns deadline for AbortSignal.timeout(ms) (0 =
-		// none). The fetch await loop / event loop fold this in via
-		// __kml_signal_aborted so a slow request is cancelled at the deadline.
-		{Name: "deadlineNs", Ty: TypeI64},
-		// onabort: the event-handler-property listener slot (`signal.onabort =
-		// cb`), a closure header ptr or null. Kept LAST so aborted (field 0) and
-		// deadlineNs (field 3) keep the fixed indices __kml_signal_aborted relies
-		// on. Fired alongside the addEventListener listeners in
-		// emitAbortControllerAbort (ADR-00983).
-		{Name: "onabort", Ty: TypePtr},
-		// followers: head of a linked list of { ptr composite, ptr next } nodes —
-		// the AbortSignal.any composites that follow this signal, so a source
-		// aborted AFTER the composite is built still propagates to it
-		// (emitAbortPropagateFn). null when nothing follows. Trailing field, so
-		// the fixed indices the runtime GEP literals rely on are untouched.
-		{Name: "followers", Ty: TypePtr},
-	})
-	t.IsAbortSignal = true
-	return t
-}
-
-// AbortControllerType wraps an AbortSignal in its `signal` field.
-func AbortControllerType() Type {
-	t := ObjectType([]Field{
-		{Name: "signal", Ty: AbortSignalType()},
-	})
-	t.IsAbortController = true
-	return t
-}
-
-// CustomEventType is EventType plus a `detail` field of the given type.
-func CustomEventType(detailTy Type) Type {
-	t := ObjectType([]Field{
-		{Name: "type", Ty: TypePtr},
-		{Name: "detail", Ty: detailTy},
-		{Name: "defaultPrevented", Ty: TypeBool},
-		{Name: "stopImmediate", Ty: TypeBool},
-		{Name: "cancelable", Ty: TypeBool},
-	})
-	t.IsEvent = true
-	return t
-}
-
-// WSConnFdField is the name of the hidden i64 field every WSConnection
-// carries at index 0, holding the raw accepted-socket fd — set once, right
-// after the upgrade handshake, and read directly by `.send()`/`.close()`
-// (emit_websocket.go). A plain fd copy rather than a pointer back into the
-// connection-fiber array (`@__kml_conn_data`, runtime_http.go) deliberately:
-// that array's backing storage can move (realloc) whenever another
-// connection is accepted, but the fd value itself never changes for the
-// life of this connection, so copying it once is simpler and avoids any
-// dangling-pointer risk from a WSConnection outliving a fiber-array growth.
-const WSConnFdField = "__kml_ws_conn_fd"
-
-// WSConnectionType returns the type of the object passed to
-// `http.listen(port, handler, { ws })`'s upgrade handler (TDD-00039 Stage
-// 1) — see IsWSConnection's doc comment for why this is a real heap object
-// built internally rather than something user code ever constructs.
-// `onmessage`, like EventSource's own field of the same name, is a plain
-// FuncType-typed field — assigning to it (`socket.onmessage = (ev) =>
-// ...`) needs no dedicated codegen at all, since MemberExpression
-// assignment already threads the field's declared type through as a hint
-// (emitExprWithObjectHint, emit_exprs_assign.go), correctly resolving an
-// unannotated `ev` to WSMessageEventType() the same way it already does for
-// EventSource's `.onmessage`. Read directly from the runtime's own
-// persistent per-connection read loop (emit_websocket.go) whenever a
-// complete text/binary frame is decoded — no listener-list/EventEmitter
-// machinery needed, since (like EventSource) there's exactly one callback
-// slot, not an accumulating list.
-func WSConnectionType() Type {
-	ty := ObjectType([]Field{
-		{Name: WSConnFdField, Ty: TypeI64},
-		{Name: "onmessage", Ty: FuncType([]Type{WSMessageEventType()}, TypeVoid)},
-	})
-	ty.IsWSConnection = true
-	return ty
-}
-
-// WSMsgBytesField / WSMsgLenField are the two hidden fields backing
-// `ev.dataBytes()` — the raw frame payload pointer and its exact byte length,
-// carried alongside the strlen-terminated `data` string view so a binary
-// frame is recoverable byte-exact past an embedded NUL (TDD-00160). Hidden
-// (`__kml_` prefix) so they never surface via VisibleFields()/Object.keys/
-// JSON, the same convention WSConnFdField uses.
-const (
-	WSMsgBytesField = "__kml_ws_msg_bytes"
-	WSMsgLenField   = "__kml_ws_msg_len"
-)
-
-// WSMessageEventType returns the fixed, concrete payload type an `onmessage`
-// listener is called with (TDD-00039 Stage 1, extended for binary frames in
-// TDD-00160). Unlike MessageEventType's SSE-specific `type`/`lastEventId`
-// (no WebSocket-frame equivalent), it carries:
-//   - `data` — a string view of the payload. For a text frame, the message;
-//     for a binary frame, the same strlen-terminated view (truncating at an
-//     embedded NUL, exactly like `req.body`) — no longer the *only* reader.
-//   - `isBinary` — `true` for a binary frame (opcode 2), `false` for text
-//     (opcode 1); the Node `ws` `('message', (data, isBinary) => …)`
-//     discriminant, exposed as a field to keep the browser-style single
-//     `onmessage` callback ABI.
-//   - `dataBytes()` — a method (wired in emit_call.go, not a field) wrapping
-//     the hidden WSMsgBytesField/WSMsgLenField into an `ArrayBuffer`,
-//     byte-exact, no NUL truncation — mirrors `req.bodyBytes()`.
-//
-// The browser-faithful `data: string | ArrayBuffer` union is deliberately
-// not used: `ArrayBuffer` is not an allowed union member (emit_dynamic.go),
-// so a union-typed `data` is a separate type-system arc; observable
-// semantics (every byte recoverable) are faithful regardless.
-func WSMessageEventType() Type {
-	return ObjectType([]Field{
-		{Name: "data", Ty: TypePtr},
-		{Name: "isBinary", Ty: TypeBool},
-		{Name: WSMsgBytesField, Ty: TypePtr},
-		{Name: WSMsgLenField, Ty: TypeI64},
-	})
-}
-
-// WebSocketClientHandleField is the name of the hidden ptr field every
-// `new WebSocket(url)` instance carries at index 0, pointing at the
-// runtime's own client entry struct (`{ i64 fd, i64 state, i64
-// pendingNotify, ptr buf, i64 consumedOffset, ptr instance }`,
-// runtime_websocket_client.go) — never exposed via VisibleFields()/
-// Object.keys/JSON, same convention EventSourceHandleField/WSConnFdField
-// use.
-const WebSocketClientHandleField = "__kml_wsc_handle"
-
-// WebSocketClientType returns `new WebSocket(url)`'s result type
-// (TDD-00039 Stage 3). url/readyState are plain visible fields (readyState:
-// 0 CONNECTING, 1 OPEN, 2 CLOSED — EventSource's own simplified 3-state
-// model, skipping the real spec's CLOSING, same choice EventSourceType
-// already made). `onopen`/`onmessage`/`onclose`/`onerror` all share
-// WSMessageEventType() as their payload shape (data left "" for the three
-// that carry no real message, matching EventSourceType's own onopen/onerror
-// precedent — "closure-call ABI uniformity" over a payload-per-event-kind
-// design) — assigning to any of them is a plain FuncType field assignment,
-// needing no dedicated codegen (see WSConnectionType's own doc comment on
-// why the hint-propagation this depends on already exists generically).
-//
-// Unlike EventSource (whose connection is asynchronous by construction —
-// `new EventSource(url)` never blocks), `new WebSocket(url)` performs its
-// TCP connect + HTTP upgrade handshake *synchronously*, before the
-// constructor even returns (emit_websocket_client.go) — a deliberate V1
-// simplification avoiding new non-blocking-connect machinery in the event
-// loop's hand-rolled select() call (see TDD-00039's own Design section
-// noting this exact sequencing was left as an implementation detail, not a
-// design fork). This creates a real ordering problem: `.onopen` can only be
-// assigned *after* `new WebSocket(url)` returns, but by then the connection
-// has already succeeded or failed. Solved by never invoking
-// `.onopen`/`.onerror` synchronously during construction at all — readyState
-// is set immediately (reflecting the real, already-known outcome), but the
-// *callback* firing is deferred to this client's first event-loop scan
-// pass (the `pendingNotify` field on the runtime entry), by which point
-// user code has had a chance to assign `.onopen`/`.onmessage`/`.onerror`.
-// A failed connect/handshake never throws for this same reason (matching
-// real WebSocket, which also never throws synchronously for a network-level
-// failure) — it fires `.onerror` then `.onclose` on that same deferred
-// first pass instead. Only a malformed URL/unsupported scheme (`wss://`) is
-// a synchronous throw, a programmer-facing contract issue, not a network
-// failure.
-func WebSocketClientType() Type {
-	msgTy := WSMessageEventType()
-	ty := ObjectType([]Field{
-		{Name: WebSocketClientHandleField, Ty: TypePtr},
-		{Name: "url", Ty: TypePtr},
-		{Name: "readyState", Ty: TypeI64},
-		{Name: "onopen", Ty: FuncType([]Type{msgTy}, TypeVoid)},
-		{Name: "onmessage", Ty: FuncType([]Type{msgTy}, TypeVoid)},
-		{Name: "onclose", Ty: FuncType([]Type{msgTy}, TypeVoid)},
-		{Name: "onerror", Ty: FuncType([]Type{msgTy}, TypeVoid)},
-	})
-	ty.IsWebSocketClient = true
-	return ty
-}
-
-// WorkerType is `new Worker(path)`'s result (TDD-00098): a bare pointer to
-// the runtime control block, flag-tagged so method dispatch and the string
-// heuristics never mistake it for anything else. path keys the compile-time
-// channel record in e.workerEntries.
-func WorkerType(path string) Type {
-	ty := ObjectType([]Field{{Name: "__worker_ctrl", Ty: TypePtr}})
-	ty.IsWorker = true
-	ty.WorkerPath = path
-	return ty
-}
-
 // ChildProcessType is a spawn()/exec()/execFile() ChildProcess handle: a bare
 // pointer to runtime_childprocess.go's cpStructIR, flag-tagged for method and
 // property dispatch (.stdout/.stderr/.stdin/.on/.pid/.kill).
 func ChildProcessType() Type {
-	ty := ObjectType([]Field{{Name: "__cp", Ty: TypePtr}})
+	ty := hostObjectType([]Field{{Name: "__cp", Ty: TypePtr}})
 	ty.IsChildProcess = true
 	return ty
 }
@@ -1771,29 +1159,13 @@ func CPStdinType() Type {
 	return ty
 }
 
-// ReadlineType is a readline.createInterface() handle: a bare pointer to
-// runtime_readline.go's rlStructIR, flag-tagged for .on/.question/.close.
-func ReadlineType() Type {
-	ty := ObjectType([]Field{{Name: "__rl", Ty: TypePtr}})
-	ty.IsReadline = true
-	return ty
-}
-
-// StdinType is the process.stdin streaming handle: a bare pointer to
-// runtime_stdin.go's stdinStructIR, flag-tagged for .on('data'|'end') dispatch.
-func StdinType() Type {
-	ty := ObjectType([]Field{{Name: "__stdin", Ty: TypePtr}})
-	ty.IsStdin = true
-	return ty
-}
-
 // HTTPServerType is an http.createServer() handle bound to a variable (the
 // standard Node idiom, as opposed to the chained
 // `http.createServer(cb).listen(port)` expression): a pointer to a single i64
 // slot holding the listen fd (-1 before .listen()), flag-tagged for
 // .listen/.close/.closeAllConnections/.address.
 func HTTPServerType() Type {
-	ty := ObjectType([]Field{{Name: "__httpsrv", Ty: TypePtr}})
+	ty := hostObjectType([]Field{{Name: "__httpsrv", Ty: TypePtr}})
 	ty.IsHTTPServer = true
 	return ty
 }
@@ -1802,7 +1174,7 @@ func HTTPServerType() Type {
 // pointer to { ptr url, ptr userCb, i64 state } (state 0 pending · 1 fired ·
 // 2 aborted). `request` fires on .end(); `get` is returned already fired.
 func ClientRequestType() Type {
-	ty := ObjectType([]Field{{Name: "__clientreq", Ty: TypePtr}})
+	ty := hostObjectType([]Field{{Name: "__clientreq", Ty: TypePtr}})
 	ty.IsClientRequest = true
 	return ty
 }
@@ -1811,7 +1183,7 @@ func ClientRequestType() Type {
 // single heap byte — the client opens one connection per request, so an
 // Agent carries configuration with no behavior; .destroy() is a no-op.
 func HTTPAgentType() Type {
-	ty := ObjectType([]Field{{Name: "__httpagent", Ty: TypePtr}})
+	ty := hostObjectType([]Field{{Name: "__httpagent", Ty: TypePtr}})
 	ty.IsHTTPAgent = true
 	return ty
 }
@@ -1819,7 +1191,7 @@ func HTTPAgentType() Type {
 // EmbeddedAssetsType is an `embedDir(...)` handle (TDD-00142 Stage 7): a ptr to
 // the packed blob linked into the binary, dispatching `.get(path)`.
 func EmbeddedAssetsType() Type {
-	ty := ObjectType([]Field{{Name: "__embedassets", Ty: TypePtr}})
+	ty := hostObjectType([]Field{{Name: "__embedassets", Ty: TypePtr}})
 	ty.IsEmbeddedAssets = true
 	return ty
 }
@@ -1828,52 +1200,17 @@ func EmbeddedAssetsType() Type {
 // `{ ptr webview_t, ptr boundListHead }` struct, flag-tagged for the window
 // method dispatch in emit_webview.go.
 func WebviewType() Type {
-	ty := ObjectType([]Field{{Name: "__webview", Ty: TypePtr}})
+	ty := hostObjectType([]Field{{Name: "__webview", Ty: TypePtr}})
 	ty.IsWebview = true
-	return ty
-}
-
-// NetServerType is a net.createServer() handle: a bare pointer to
-// runtime_net.go's netServerIR, flag-tagged for .listen/.on/.close.
-func NetServerType() Type {
-	ty := ObjectType([]Field{{Name: "__netsrv", Ty: TypePtr}})
-	ty.IsNetServer = true
 	return ty
 }
 
 // NetSocketType is a TCP connection socket: a bare pointer to runtime_net.go's
 // netSocketIR, flag-tagged for .on('data'|'end')/.write/.end.
 func NetSocketType() Type {
-	ty := ObjectType([]Field{{Name: "__netsock", Ty: TypePtr}})
+	ty := hostObjectType([]Field{{Name: "__netsock", Ty: TypePtr}})
 	ty.IsNetSocket = true
 	return ty
-}
-
-// DgramSocketType is a dgram.createSocket() handle: a bare pointer to
-// runtime_dgram.go's dgramSocketIR, flag-tagged for .bind/.on/.send/.close.
-func DgramSocketType() Type {
-	ty := ObjectType([]Field{{Name: "__dgram", Ty: TypePtr}})
-	ty.IsDgramSocket = true
-	return ty
-}
-
-// ClusterWorkerType is a cluster.fork() Worker handle: a bare pointer to
-// runtime_cluster.go's clusterWorkerIR { i64 id, i64 pid }, flag-tagged for
-// `.id` access.
-func ClusterWorkerType() Type {
-	ty := ObjectType([]Field{{Name: "__worker", Ty: TypePtr}})
-	ty.IsClusterWorker = true
-	return ty
-}
-
-// clusterAddressType is the cluster 'listening' event's address object —
-// Node's { address, port, addressType } shape (workers bind INADDR_ANY, IPv4).
-func clusterAddressType() Type {
-	return ObjectType([]Field{
-		{Name: "address", Ty: TypePtr},
-		{Name: "port", Ty: TypeF64},
-		{Name: "addressType", Ty: TypeF64},
-	})
 }
 
 // BufferType returns a Node Buffer's type (TDD-00103): a Uint8Array
@@ -1968,24 +1305,13 @@ const ClassTagField = "__kml_tag"
 // user-declared field with this name is a compile-time error.
 const ClassVTableField = "__kml_vtable"
 
-// ClassEventEmitterField is the name of the hidden ptr field a class carries
-// (TDD-00023) when HasEventEmitter is set — positioned right after the tag
-// (and vtable pointer, if present). Holds a Map<string,ptr> handle (event
-// name → listener-list heap struct). Set for a class that directly `extends
-// EventEmitter<T>`, and every descendant down its inheritance chain.
-// Reserved the same way ClassTagField/ClassVTableField are: a user-declared
-// field with this name is a compile-time error.
-const ClassEventEmitterField = "__kml_ee_listeners"
-
 // ClassType returns a user-defined class's instance type: an ordinary
 // object type (see IsObject's doc comment on why this is enough for field
 // access, JSON, Object.* etc. to work unmodified) plus IsClass/ClassName so
 // method-call dispatch can find the class's registered method table.
 //
 // Field order is: hidden tag (always, index 0) → hidden vtable pointer
-// (only when hasVTable, index 1) → hidden EventEmitter listener-map handle
-// (only when hasEventEmitter, TDD-00023 — index 1 or 2 depending on
-// hasVTable) → inherited fields (already-flattened, base-first, empty for a
+// (only when hasVTable, index 1) → inherited fields (already-flattened, base-first, empty for a
 // root class — TDD-00009 Stage 3) → this class's own newly-declared fields.
 // FieldIndex/StructIR/StructSize all derive from Fields' order generically,
 // so every named field access shifts for free with no changes needed at any
@@ -1995,14 +1321,11 @@ const ClassEventEmitterField = "__kml_ee_listeners"
 // Callers that enumerate *all* fields for reflection (Object.keys/values/
 // entries, JSON, for...in, spread) must use VisibleFields() instead of
 // Fields directly, or the hidden fields leak out as fake user-visible ones.
-func ClassType(name string, inherited []Field, own []Field, hasVTable, hasEventEmitter bool) Type {
+func ClassType(name string, inherited []Field, own []Field, hasVTable bool) Type {
 	tagged := make([]Field, 0, 4+len(inherited)+len(own))
 	tagged = append(tagged, Field{Name: ClassTagField, Ty: TypeI64})
 	if hasVTable {
 		tagged = append(tagged, Field{Name: ClassVTableField, Ty: TypePtr})
-	}
-	if hasEventEmitter {
-		tagged = append(tagged, Field{Name: ClassEventEmitterField, Ty: TypePtr})
 	}
 	tagged = append(tagged, inherited...)
 	tagged = append(tagged, own...)
@@ -2010,15 +1333,12 @@ func ClassType(name string, inherited []Field, own []Field, hasVTable, hasEventE
 	ty.IsClass = true
 	ty.ClassName = name
 	ty.HasVTable = hasVTable
-	ty.HasEventEmitter = hasEventEmitter
 	return ty
 }
 
 // VisibleFields returns the fields a user should ever see: identical to
 // Fields for every non-class/non-error object type, but with the hidden
-// leading fields (tag, plus vtable pointer when HasVTable, plus the
-// EventEmitter listener-map handle when HasEventEmitter — TDD-00023)
-// stripped, and (TDD-00021) any `#`-named private field/method filtered out
+// leading fields (tag, plus vtable pointer when HasVTable) stripped, and (TDD-00021) any `#`-named private field/method filtered out
 // regardless of position — real JS reflection never sees a private name at
 // all, unlike `private`/`protected` (a TypeScript-only, compile-time-erased
 // concept real JS reflection doesn't know exists). Use this instead of
@@ -2028,38 +1348,23 @@ func ClassType(name string, inherited []Field, own []Field, hasVTable, hasEventE
 // using Fields (via FieldIndex) unchanged, since the hidden fields'
 // presence is what makes those indices correct in the first place.
 func (t Type) VisibleFields() []Field {
-	fields := t.Fields
+	fields := t.UserFields()
 	switch {
 	case t.IsClass && len(fields) > 0:
-		skip := 1
+		skip := 0
 		if t.HasVTable {
 			skip++
 		}
-		if t.HasEventEmitter {
-			skip++
-		}
 		fields = fields[skip:]
-	case t.IsError && len(fields) > 0:
-		fields = fields[1:]
-	case t.IsSymbol && len(fields) > 0:
-		fields = fields[1:] // the hidden type-id word (ADR-01059)
 	case t.IsRegExp && len(fields) > 0:
-		fields = fields[1:]
-	case t.IsEventSource && len(fields) > 1:
-		fields = fields[2:]
-	case t.IsWSConnection && len(fields) > 0:
-		fields = fields[1:]
-	case t.IsWebSocketClient && len(fields) > 0:
 		fields = fields[1:]
 	case t.IsXHR && len(fields) > 3:
 		fields = fields[4:]
-	case t.IsStats:
-		// Every Stats field (mode included) is a real Node own-enumerable
-		// property, so nothing is stripped (ADR-00565).
-	case t.IsDirent && len(fields) > 2:
-		// `name` and `parentPath` are Node own-enumerable Dirent properties; the
-		// trailing `mode` is our hidden kind-predicate backing (ADR-00752/00787).
-		fields = fields[:2]
+	case t.IsResponse || t.IsFetchRequest:
+		// A Response's and a Request's properties are accessors on their
+		// prototypes: no own enumerable ones (`Object.keys(res)` is `[]`,
+		// JSON `{}`).
+		fields = nil
 	case t.IsRequest && len(fields) > 5:
 		// HttpRequest's first five fields (method/path/query/headers/body) are
 		// the user-facing surface; the trailing bodyLength + __kml_bodyctx +
@@ -2110,7 +1415,7 @@ func (t Type) VisibleFields() []Field {
 // `end`/etc. have mutated them, the same response-writing path applies. status
 // is an integer (the HTTP status code); body accumulates written chunks.
 func ServerResponseType() Type {
-	ty := ObjectType([]Field{
+	ty := hostObjectType([]Field{
 		{Name: "status", Ty: TypeI64},
 		{Name: "body", Ty: TypePtr},
 		{Name: "headers", Ty: MapType(TypePtr, TypePtr)},
@@ -2155,43 +1460,6 @@ func ServerResponseType() Type {
 	return ty
 }
 
-// Http2ServerStreamType is the server-side Http2Stream (TDD-00139 Stage 2)
-// handed to `server.on('stream', (stream, headers) => …)`. Its first three
-// fields deliberately mirror ServerResponseType — status/body/headers are what
-// the shared response-writing tail reads after the handler returns — with the
-// request body appended so `stream.on('data')` can deliver it.
-func Http2ServerStreamType() Type {
-	ty := ObjectType([]Field{
-		{Name: "status", Ty: TypeI64},
-		{Name: "body", Ty: TypePtr},
-		{Name: "headers", Ty: MapType(TypePtr, TypePtr)},
-		{Name: "reqBody", Ty: TypePtr},
-		{Name: "reqBodyLen", Ty: TypeI64},
-	})
-	ty.IsH2ServerStream = true
-	return ty
-}
-
-// DiagChannelType is a diagnostics_channel Channel handle: a pointer to the
-// runtime channel record (runtime_diagch.go's layout).
-func DiagChannelType() Type {
-	ty := ObjectType([]Field{{Name: "__dcchan", Ty: TypePtr}})
-	ty.IsDCChannel = true
-	return ty
-}
-
-// AsyncLocalStorageType is an async_hooks AsyncLocalStorage<T> handle
-// (TDD-00168): a pointer to the runtime record { i64 id, i64 disabled }. The
-// store element type T is carried in ElemType so getStore() types as
-// T | undefined and run(store, …) type-checks its store argument.
-func AsyncLocalStorageType(elem Type) Type {
-	el := elem
-	ty := ObjectType([]Field{{Name: "__als", Ty: TypePtr}})
-	ty.IsAsyncLocalStorage = true
-	ty.ElemType = &el
-	return ty
-}
-
 // FlatArrayType is a `/** @value */` flat value-type array of elem (TDD-00134
 // Stage 2) — see Type.IsFlatArray.
 func FlatArrayType(elem Type) Type {
@@ -2205,43 +1473,9 @@ func FlatArrayType(elem Type) Type {
 // type-checks its held argument against the cleanup callback's parameter.
 func FinalizationRegistryType(held Type) Type {
 	h := held
-	ty := ObjectType([]Field{{Name: "__finreg", Ty: TypePtr}})
+	ty := hostObjectType([]Field{{Name: "__finreg", Ty: TypePtr}})
 	ty.IsFinalizationRegistry = true
 	ty.ElemType = &h
-	return ty
-}
-
-// AsyncResourceType is an async_hooks AsyncResource handle (TDD-00168 Stage 4):
-// a pointer to the runtime record { ptr capturedCtx } — the async context head
-// captured at construction and reinstalled by runInAsyncScope.
-func AsyncResourceType() Type {
-	ty := ObjectType([]Field{{Name: "__asyncres", Ty: TypePtr}})
-	ty.IsAsyncResource = true
-	return ty
-}
-
-// TestContextType is the node:test runner's `t` (TDD-00140): a pointer to
-// the per-test record {aftersRoot, aftersN, aftersCap, skipped, todo}.
-func TestContextType() Type {
-	ty := ObjectType([]Field{{Name: "__testctx", Ty: TypePtr}})
-	ty.IsTestContext = true
-	return ty
-}
-
-// Http2ClientSessionType is a ClientHttp2Session handle from http2.connect
-// (TDD-00139 Stage 3): one pointer slot holding the C driver session.
-func Http2ClientSessionType() Type {
-	ty := ObjectType([]Field{{Name: "__h2sess", Ty: TypePtr}})
-	ty.IsH2ClientSession = true
-	return ty
-}
-
-// Http2ClientStreamType is a ClientHttp2Stream from session.request: the
-// 32-byte callback context the driver's response frames fire into
-// (cbResponse/cbData/cbEnd/headersMap — see ensureH2ClientRuntime).
-func Http2ClientStreamType() Type {
-	ty := ObjectType([]Field{{Name: "__h2creq", Ty: TypePtr}})
-	ty.IsH2ClientStream = true
 	return ty
 }
 
@@ -2249,7 +1483,7 @@ func Http2ClientStreamType() Type {
 // (TDD-00138) handed to the callback: `res.statusCode`, `res.on('data'|'end')`,
 // with the buffered body + listener slots hidden behind the event surface.
 func IncomingMessageType() Type {
-	ty := ObjectType([]Field{
+	ty := hostObjectType([]Field{
 		{Name: "statusCode", Ty: TypeF64},
 		{Name: incomingBodyField, Ty: TypePtr},
 		{Name: incomingDataListenerField, Ty: TypePtr},
@@ -2266,7 +1500,7 @@ const (
 )
 
 func RequestType() Type {
-	ty := ObjectType([]Field{
+	ty := hostObjectType([]Field{
 		{Name: "method", Ty: TypePtr},
 		{Name: "path", Ty: TypePtr},
 		{Name: "query", Ty: MapType(TypePtr, TypePtr)},
@@ -2287,20 +1521,6 @@ func RequestType() Type {
 	return ty
 }
 
-// PathParsedType returns path.parse(p)'s result type: a plain heap object
-// with root/dir/base/ext/name string fields, recomposed by path.format(obj)
-// — no PATH-specific dispatch needed for field reads, same as Response's
-// status/ok/body.
-func PathParsedType() Type {
-	return ObjectType([]Field{
-		{Name: "root", Ty: TypePtr},
-		{Name: "dir", Ty: TypePtr},
-		{Name: "base", Ty: TypePtr},
-		{Name: "ext", Ty: TypePtr},
-		{Name: "name", Ty: TypePtr},
-	})
-}
-
 // EncodeIntoResultType returns TextEncoder.encodeInto's result shape,
 // { read, written }: the number of source code units read and the number of
 // bytes written into the destination. A plain heap object read through the
@@ -2309,34 +1529,6 @@ func EncodeIntoResultType() Type {
 	return ObjectType([]Field{
 		{Name: "read", Ty: TypeI64},
 		{Name: "written", Ty: TypeI64},
-	})
-}
-
-// CPUTimesType returns os.cpus()'s per-core `times` field: cumulative
-// milliseconds spent in each state since boot, matching real Node's
-// {user, nice, sys, idle, irq} shape (a subset of /proc/stat's own fields —
-// `iowait` is read but not reported, matching libuv's own field selection).
-func CPUTimesType() Type {
-	return ObjectType([]Field{
-		{Name: "user", Ty: TypeI64},
-		{Name: "nice", Ty: TypeI64},
-		{Name: "sys", Ty: TypeI64},
-		{Name: "idle", Ty: TypeI64},
-		{Name: "irq", Ty: TypeI64},
-	})
-}
-
-// CPUInfoType returns os.cpus()'s per-core element type — a plain heap
-// object (readable via the ordinary object field-access path — no
-// dispatched methods), the same "nested object as a field" shape
-// SettlementType's `reason: errorObjType` field already establishes.
-// speed is MHz (0 on Apple Silicon, where there's no fixed clock-speed
-// sysctl — a documented Node.js behavior on M-series Macs too, not a gap).
-func CPUInfoType() Type {
-	return ObjectType([]Field{
-		{Name: "model", Ty: TypePtr},
-		{Name: "speed", Ty: TypeI64},
-		{Name: "times", Ty: CPUTimesType()},
 	})
 }
 
@@ -2674,28 +1866,9 @@ func ResolveTypeName(name string) Type {
 		return TypeF64
 	case "string":
 		return TypePtr
-	case "boolean":
+	case "boolean", "true", "false":
+		// A boolean literal type (`(): true`) is a boolean.
 		return TypeBool
-	case "ClusterWorker":
-		// A cluster.fork() Worker handle — the name cluster.on(...) listeners
-		// are context-typed with (Node types it as cluster's own `Worker`,
-		// which would collide with worker_threads' here).
-		return ClusterWorkerType()
-	case "ClusterAddress":
-		// The cluster 'listening' event's address object.
-		return clusterAddressType()
-	case "EventTarget":
-		return EventTargetType()
-	case "AbortController":
-		return AbortControllerType()
-	case "AbortSignal":
-		return AbortSignalType()
-	case "Event":
-		return EventType()
-	case "CustomEvent":
-		// A bare `CustomEvent` annotation types detail as a ptr; `CustomEvent<T>`
-		// (with a resolved detail type) is handled by the generic path (TDD-00081).
-		return CustomEventType(TypePtr)
 	case "void":
 		return TypeVoid
 	case "null":
@@ -2706,7 +1879,7 @@ func ResolveTypeName(name string) Type {
 		return SymbolType()
 	case "bigint":
 		return BigIntType()
-	case "any", "unknown":
+	case "any", "unknown", "object":
 		return TypeAny
 	case "Date":
 		return TypeDate
@@ -2714,15 +1887,6 @@ func ResolveTypeName(name string) Type {
 		return ResponseType()
 	case "HttpRequest", "IncomingMessage":
 		return RequestType()
-	case "__kml_test_ctx":
-		// Internal-only: the node:test runner's TestContext parameter.
-		return TestContextType()
-	case "__kml_h2_stream":
-		// Internal-only: synthesized for the http2 stream handler's first param.
-		return Http2ServerStreamType()
-	case "__kml_h2_headers":
-		// Internal-only: the http2 stream handler's headers map.
-		return MapType(TypePtr, TypePtr)
 	case "__kml_client_response":
 		// Internal-only name synthesized by contextTypeArrowParams for the
 		// http client's response callback — Node calls both the server request
@@ -2746,16 +1910,11 @@ func ResolveTypeName(name string) Type {
 		return URLPatternType()
 	case "RegExp":
 		return RegExpType()
-	case "EventSource":
-		return EventSourceType()
-	case "MessageEvent":
-		return MessageEventType()
-	case "WSConnection":
-		return WSConnectionType()
-	case "WSMessageEvent":
-		return WSMessageEventType()
-	case "WebSocket":
-		return WebSocketClientType()
+	case "RegExpExecArray":
+		// What `exec` returns (`| null` is the nullable form).
+		return execArrayType()
+	case "RegExpMatchArray":
+		return regExpExecResultType()
 	case "ArrayBuffer":
 		return ArrayBufferType()
 	case "SharedArrayBuffer":
@@ -2805,27 +1964,9 @@ func ResolveTypeName(name string) Type {
 	case "float64":
 		return TypeF64
 	// The objects of the code-generated Node modules, by @types/node's names
-	// (`fs.Stats`, `crypto.Hash`, `child_process.ChildProcess`).
-	case "Stats":
-		return StatsType()
-	case "Dirent":
-		return DirentType()
-	case "StatsFs":
-		return StatFsType()
-	case "FSWatcher":
-		return FSWatcherType()
-	case "Hash":
-		return HashType()
-	case "Hmac":
-		return HmacType()
+	// (`child_process.ChildProcess`).
 	case "ChildProcess":
 		return ChildProcessType()
-	case "PerformanceEntry":
-		return PerformanceEntryType()
-	case "PerformanceObserver":
-		return PerfObserverType()
-	case "PerformanceObserverEntryList":
-		return PerfEntryListType()
 	case "DataView":
 		return DataViewType()
 	case "TextEncoder":

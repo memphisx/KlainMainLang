@@ -28,7 +28,7 @@
             "status": "implemented",
             "caveats": [
               "Callback is restricted to a zero-argument, `void`-returning function — an arrow/function-expression closure, or a bare reference to a top-level named function ([ADR-00200](../adr/ADR-00200.md))",
-              "The handle is the timer's numeric id, not Node's `Timeout` object: `typeof` reads `\"number\"`, and `ref`/`unref`/`hasRef`/`refresh`/`close` are compile errors"
+              "The handle is the timer's numeric id, not Node's `Timeout` object: `typeof` reads `\"number\"`; `refresh` is a compile error, and `ref`/`unref`/`hasRef`/`close` work only on a typed handle, not through `any`"
             ],
             "notes": [
               "Bare global functions, matching real JS (not a namespace)",
@@ -53,7 +53,7 @@
             "status": "implemented",
             "caveats": [
               "Real Node guarantees `setImmediate` fires before a same-tick `setTimeout(fn, 0)` when scheduled from inside an I/O callback, because its event loop has distinct phases (check vs. timers); this compiler's `__kml_timer_drain` is a single flat fire-time-ordered queue with no phase concept, so the two are genuinely indistinguishable here (both fire at \"now\")",
-              "The handle is the timer's numeric id, not Node's `Immediate` object: `typeof` reads `\"number\"`, and `ref`/`unref`/`hasRef` are compile errors"
+              "The handle is the timer's numeric id, not Node's `Immediate` object: `typeof` reads `\"number\"`; `ref`/`unref`/`hasRef` work only on a typed handle, not through `any`"
             ],
             "notes": [
               "Reuses the exact same timer queue as delay-0 `setTimeout` (`clearImmediate` is `clearTimeout` under another name)",
@@ -65,6 +65,13 @@
             "status": "implemented",
             "notes": [
               "A real microtask FIFO distinct from the timer queue, drained after the synchronous script and before timers ([TDD-00083](../tdd/TDD-00083.md) Stage 3)"
+            ]
+          },
+          {
+            "feature": "`timers/promises` (`setTimeout`/`setImmediate`/`setInterval`/`scheduler`)",
+            "status": "implemented",
+            "notes": [
+              "Node's lib/timers/promises.js in TypeScript: promise timers that resolve with their value, `setInterval` as an async iterator, an `AbortSignal` rejecting with `AbortError`, `ref: false`, and Node's option validation ([ADR-01271](../adr/ADR-01271.md))"
             ]
           }
         ]

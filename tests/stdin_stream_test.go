@@ -3,6 +3,7 @@ package tests
 import (
 	"bufio"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -34,6 +35,7 @@ func runStdinStream(t *testing.T, src, stdin string) string {
 func TestE2EStdinDataAndEnd(t *testing.T) {
 	got := runStdinStream(t, `
 let total = 0
+process.stdin.setEncoding('utf8')
 process.stdin.on('data', (chunk: string) => { total = total + chunk.length })
 process.stdin.on('end', () => { console.log("bytes " + total) })
 `, "hello\nworld\n")
@@ -46,6 +48,7 @@ process.stdin.on('end', () => { console.log("bytes " + total) })
 // pipe/filter shape). Piped input arrives in one read here.
 func TestE2EStdinTransform(t *testing.T) {
 	got := runStdinStream(t, `
+process.stdin.setEncoding('utf8')
 process.stdin.on('data', (c: string) => { process.stdout.write(c.toUpperCase()) })
 `, "abc\ndef")
 	if got != "ABC\nDEF" {
@@ -56,6 +59,7 @@ process.stdin.on('data', (c: string) => { process.stdout.write(c.toUpperCase()) 
 // EOF on empty input still fires 'end'.
 func TestE2EStdinEmptyEnd(t *testing.T) {
 	got := runStdinStream(t, `
+process.stdin.setEncoding('utf8')
 process.stdin.on('data', (c: string) => { process.stdout.write(c) })
 process.stdin.on('end', () => { console.log("done") })
 `, "")
@@ -68,6 +72,7 @@ process.stdin.on('end', () => { console.log("done") })
 func TestE2EStdinMultiChunk(t *testing.T) {
 	got := runStdinStream(t, `
 let bytes = 0
+process.stdin.setEncoding('utf8')
 process.stdin.on('data', (c: string) => { bytes = bytes + c.length })
 process.stdin.on('end', () => { console.log(bytes) })
 `, strings.Repeat("x", 100000))
@@ -116,6 +121,7 @@ func TestE2EStdinDoesNotBlockLoop(t *testing.T) {
 console.error("READY")
 let ticks = 0
 const iv = setInterval(() => { ticks = ticks + 1; console.log("tick " + ticks) }, 15)
+process.stdin.setEncoding('utf8')
 process.stdin.on('data', (c: string) => {
   const s = c.trim()
   if (s.length > 0) console.log("chunk " + s + " ticks=" + ticks)
@@ -276,21 +282,22 @@ process.stdin.setEncoding('utf8')
 	}
 }
 
-// A non-utf8 encoding is a clean compile error, not a silently wrong decode
-// (there is no Buffer chunk to re-decode).
-func TestE2EStdinSetEncodingNonUtf8Rejected(t *testing.T) {
-	_, err := parseAndCompile(`process.stdin.setEncoding('latin1')`)
-	if err == nil {
-		t.Fatal("expected a compile error for a non-utf8 process.stdin.setEncoding, got none")
-	}
-}
-
-// An unsupported event is a clean compile error.
-func TestE2EStdinUnsupportedEventRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-process.stdin.on('close', () => {})
+// stdin from /dev/null (a character device macOS poll() does not support)
+// ends at once, as in Node.
+func TestE2EStdinDevNullEnds(t *testing.T) {
+	bin := buildBinary(t, `
+process.stdin.on('data', (d: any) => console.log('data', d.length))
+process.stdin.on('end', () => console.log('end'))
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for an unsupported process.stdin event, got none")
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	cmd := exec.Command(bin)
+	cmd.Stdin = f
+	out, err := cmd.Output()
+	if err != nil || strings.TrimSpace(string(out)) != "end" {
+		t.Fatalf("got %q, %v", out, err)
 	}
 }

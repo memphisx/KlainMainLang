@@ -20,6 +20,7 @@ import (
 // a bodiless `function`/`type` ends at a `;` or a line break (ASI).
 func (p *Parser) parseAmbientDeclaration() (ast.Statement, error) {
 	pos := posOf(p.peek())
+	doc := p.takeDoc()
 	p.advance() // consume 'declare'
 
 	// `declare [export] import X = Y.Z;` is the alias itself (tsc rejects the
@@ -53,6 +54,13 @@ func (p *Parser) parseAmbientDeclaration() (ast.Statement, error) {
 		if fd.Body == nil {
 			fd = ambientFunction(fd)
 		}
+		if doc != nil {
+			for _, a := range doc.Annotations {
+				if a.Tag == "intrinsic" {
+					fd.Intrinsic = a.Value // a builtin inlined at its call (TDD-00230 P3.2)
+				}
+			}
+		}
 		return fd, nil
 	}
 	// `declare namespace X {}` / `declare module X {}` (identifier-named —
@@ -73,7 +81,22 @@ func (p *Parser) parseAmbientDeclaration() (ast.Statement, error) {
 		name := p.advance().Literal
 		p.advance() // '{'
 		var body []ast.Statement
+		exportEquals := ""
 		for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+			if p.check(lexer.EXPORT) && p.peekNth(1).Type == lexer.ASSIGN {
+				// `export = X;`: the module is X.
+				p.advance()
+				p.advance()
+				id, err := p.expect(lexer.IDENT)
+				if err != nil {
+					return nil, err
+				}
+				exportEquals = id.Literal
+				if p.check(lexer.SEMICOLON) {
+					p.advance()
+				}
+				continue
+			}
 			st, err := p.parseStatement()
 			if err != nil {
 				return nil, err
@@ -81,11 +104,16 @@ func (p *Parser) parseAmbientDeclaration() (ast.Statement, error) {
 			if st != nil {
 				body = append(body, st)
 			}
+			// A namespace's other members belong to the module too.
+			body = append(body, p.pendingTopLevel...)
+			p.pendingTopLevel = nil
 		}
 		if _, err := p.expect(lexer.RBRACE); err != nil {
 			return nil, err
 		}
-		return ast.NewAmbientModuleDeclaration(name, body, pos), nil
+		m := ast.NewAmbientModuleDeclaration(name, body, pos)
+		m.ExportEquals = exportEquals
+		return m, nil
 	}
 
 	// `declare [const] enum E { … }` is a real enum (ADR-00476) — members
@@ -262,10 +290,16 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 	// Contextual keywords parsed as identifiers by the lexer.
 	if p.peek().Type == lexer.IDENT {
 		switch p.peek().Literal {
+		// `interface`/`type` start a declaration only before a name:
+		// `type = x` assigns a variable named type.
 		case "interface":
-			return p.parseInterfaceDecl()
+			if p.peekNth(1).Type == lexer.IDENT {
+				return p.parseInterfaceDecl()
+			}
 		case "type":
-			return p.parseTypeAliasDecl()
+			if p.peekNth(1).Type == lexer.IDENT {
+				return p.parseTypeAliasDecl()
+			}
 		case "enum":
 			return p.parseEnumDeclaration()
 		case "namespace":
@@ -837,6 +871,7 @@ func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.Funct
 		}
 		fd.Pure = true
 	}
+	fd.CallSite = doc != nil && doc.HasTag("callsite")
 	// TDD-00173: `/** @owned name */` marks a parameter the callee frees after
 	// its last use. Validated here so a typo'd name errors at the declaration,
 	// the same shape as every other JSDoc annotation's validation above.
@@ -950,14 +985,15 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 	// but isn't specially instantiated yet (same "parse ahead of codegen"
 	// shape parseNewGenericBody already uses for classes).
 	var typeParams []string
-	var typeParamConstraints []*ast.TypeAnnotation
+	var typeParamConstraints, typeParamDefaults []*ast.TypeAnnotation
 	if p.check(lexer.LT) {
-		tp, tc, err := p.parseTypeParamList(name + "<T>")
+		tp, tc, td, err := p.parseTypeParamList(name + "<T>")
 		if err != nil {
 			return nil, nil, err
 		}
 		typeParams = tp
 		typeParamConstraints = tc
+		typeParamDefaults = td
 	}
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, nil, err
@@ -985,7 +1021,7 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 	if bodyOptional && !p.check(lexer.LBRACE) && p.canParseSemicolon() {
 		p.match(lexer.SEMICOLON)
 		fd := &ast.FunctionDeclaration{
-			Name: name, TypeParams: typeParams, TypeParamConstraints: typeParamConstraints, Params: params, ReturnType: retType, Body: nil, IsAsync: isAsync, IsAbstract: true,
+			Name: name, TypeParams: typeParams, TypeParamConstraints: typeParamConstraints, TypeParamDefaults: typeParamDefaults, Params: params, ReturnType: retType, Body: nil, IsAsync: isAsync, IsAbstract: true,
 		}
 		fd.SetPos(pos)
 		return fd, thisTA, nil
@@ -996,7 +1032,7 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 	if overloadOK && !bodyOptional && !p.check(lexer.LBRACE) && p.canParseSemicolon() {
 		p.match(lexer.SEMICOLON)
 		fd := &ast.FunctionDeclaration{
-			Name: name, TypeParams: typeParams, TypeParamConstraints: typeParamConstraints, Params: params, ReturnType: retType, Body: nil, IsAsync: isAsync, IsOverloadSig: true,
+			Name: name, TypeParams: typeParams, TypeParamConstraints: typeParamConstraints, TypeParamDefaults: typeParamDefaults, Params: params, ReturnType: retType, Body: nil, IsAsync: isAsync, IsOverloadSig: true,
 		}
 		fd.SetPos(pos)
 		return fd, thisTA, nil
@@ -1032,7 +1068,7 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 	}
 
 	fd := &ast.FunctionDeclaration{
-		Name: name, TypeParams: typeParams, TypeParamConstraints: typeParamConstraints, Params: params, ReturnType: retType, Body: body, IsAsync: isAsync,
+		Name: name, TypeParams: typeParams, TypeParamConstraints: typeParamConstraints, TypeParamDefaults: typeParamDefaults, Params: params, ReturnType: retType, Body: body, IsAsync: isAsync,
 	}
 	fd.SetPos(pos)
 	return fd, thisTA, nil

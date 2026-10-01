@@ -317,6 +317,22 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 		return e.emitJSONStringifyDynamic(val, ind, pos)
 	}
 
+	// A caught value (`catch (e)`): whatever was thrown, boxed.
+	if argTy.IsCaught {
+		val, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitJSONStringifyDynamic(val, ind, pos)
+	}
+	if e.isErrorValueTy(argTy) {
+		val, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitJSONStringifyError(val, ind)
+	}
+
 	// A `T[] | undefined` argument (a nested-array element absence, TDD-00221):
 	// JSON.stringify(undefined) is the value `undefined` (console.log prints it as
 	// "undefined"); a present array serializes normally. Branch on the null
@@ -577,6 +593,17 @@ func (e *Emitter) emitJSONStringifyObjectOptional(val Value, fields []Field, acc
 		bt := field.Ty
 		bt.Nullable, bt.IsUndefined, bt.IsNull = false, false, false
 		switch {
+		case field.Ty.NullAndUndef:
+			// Three-state: emitted unless undefined; a null renders as null.
+			if isNullableScalar(field.Ty) {
+				p, payload := e.nullableScalarAggParts(fieldVal)
+				present = e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", present, p, e.triPayloadIsMarker(payload.Ref, field.Ty)))
+			} else {
+				present = e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, fieldVal.Ref))
+			}
+			baseVal = fieldVal
 		case isNullableScalar(field.Ty):
 			p, payload := e.nullableScalarAggParts(fieldVal)
 			present, baseVal = p, payload
@@ -735,7 +762,67 @@ func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value,
 
 // emitJSONStringifyValue returns a ptr string with the JSON encoding of val.
 // Handles strings (quoted), numbers, booleans, and nested objects recursively.
+// isErrorValueTy reports whether t is an Error or an Error subclass
+// instance: JSON serializes its own enumerable properties only (a boxed
+// error lists them), never the layout's internal fields.
+func (e *Emitter) isErrorValueTy(t Type) bool {
+	if t.Nullable || t.IsDynamic {
+		return false
+	}
+	if t.IsError {
+		return true
+	}
+	if canon := e.canonicalizeClassTy(t); canon.IsClass {
+		if info, ok := e.classes[canon.ClassName]; ok {
+			return info.IsErrorSubclass && !e.classHasToJSON(t)
+		}
+	}
+	return false
+}
+
+// emitJSONStringifyError serializes an Error through the dynamic walker; an
+// error is never `undefined`, so the result is its string.
+func (e *Emitter) emitJSONStringifyError(val Value, ind jsonIndent) (Value, error) {
+	v, err := e.emitJSONStringifyDynamic(val, ind, ast.Pos{})
+	if err != nil {
+		return Value{}, err
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, v.Ref))
+	return Value{Ref: r, Ty: TypePtr}, nil
+}
+
 func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, error) {
+	if val.Ty.NullAndUndef {
+		return e.renderThreeState(val, func(p Value) (Value, error) { return e.emitJSONStringifyValue(p, ind) })
+	}
+	if e.isErrorValueTy(val.Ty) {
+		return e.emitJSONStringifyError(val, ind)
+	}
+	// An object of another layout behind a structural type serializes as
+	// the object it is (TDD-00233).
+	if isRecordView(val.Ty) && !val.Ty.Nullable {
+		return e.emitRecordSplit(val, TypePtr,
+			func(v Value) (Value, error) { return e.emitJSONStringifyValueOwn(v, ind) },
+			func(box Value) (Value, error) { return e.emitJSONStringifyValueOwn(box, ind) })
+	}
+	if extraCandidate(val.Ty) && !e.classHasToJSON(val.Ty) {
+		indentArg := "null"
+		if ind.unit != "" {
+			indentArg = e.internString(ind.unit)
+		}
+		return e.emitExtraSplit(val, TypePtr,
+			func(v Value) (Value, error) { return e.emitJSONStringifyValueOwn(v, ind) },
+			func(obj string) string {
+				return fmt.Sprintf("call ptr @__kml_obj_json_dyn(ptr %s, ptr %s, i64 %d)", obj, indentArg, ind.depth)
+			})
+	}
+	return e.emitJSONStringifyValueOwn(val, ind)
+}
+
+// emitJSONStringifyValueOwn is emitJSONStringifyValue reading val at its
+// static type's layout.
+func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, error) {
 	// Must be checked before the generic IsObject branch below — Symbol
 	// reuses IsObject's struct representation (see IsSymbol's doc comment,
 	// types.go), so without this it would silently serialize as
@@ -765,7 +852,7 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 	// number. In this value position (array element / object field) an
 	// undefined box renders as JSON `null`, matching real JSON.stringify of an
 	// array hole / present-but-undefined element.
-	if isSelfDescribingBox(val.Ty) {
+	if isSelfDescribingBox(val.Ty) || inspectsByTag(val.Ty) {
 		dyn, err := e.emitJSONStringifyDynamic(val, ind, ast.Pos{})
 		if err != nil {
 			return Value{}, err
@@ -950,6 +1037,15 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 			// stringification instead of serializing the raw ms timestamp;
 			// reuse the existing formatter and JSON-quote its result like any
 			// other string.
+			// An Invalid Date's toJSON is null.
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+			okL, badL, doneL := e.freshLabel("jsondate.ok"), e.freshLabel("jsondate.bad"), e.freshLabel("jsondate.done")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitDateIsInvalid(val.Ref), badL, okL))
+			e.emitLabel(badL)
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(okL)
 			iso, err := e.emitDateToISOString(val)
 			if err != nil {
 				return Value{}, err
@@ -957,7 +1053,12 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 			e.ensureJSONStringifyStr()
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_str(ptr %s)", r, iso.Ref))
-			return Value{Ref: r, Ty: TypePtr}, nil
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", r, slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(doneL)
+			out := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+			return Value{Ref: out, Ty: TypePtr}, nil
 		}
 		if val.Ty.Float {
 			// JS serializes a non-finite number (NaN / ±Infinity) as `null`
@@ -1141,4 +1242,19 @@ func (e *Emitter) emitJSONStringifyMapDict(mapVal Value, ind jsonIndent) (Value,
 	preClose := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", preClose, accAlloca))
 	return e.jsonConcatFree(Value{Ref: preClose, Ty: TypePtr}, Value{Ref: e.internString("}"), Ty: TypePtr}, true, false)
+}
+
+// classHasToJSON reports a class type with its own toJSON(), which
+// JSON.stringify serializes through instead of its fields.
+func (e *Emitter) classHasToJSON(t Type) bool {
+	canon := e.canonicalizeClassTy(t)
+	if !canon.IsClass {
+		return false
+	}
+	info, ok := e.classes[canon.ClassName]
+	if !ok {
+		return false
+	}
+	_, has := info.MethodSigs["toJSON"]
+	return has
 }

@@ -137,17 +137,38 @@ func (e *Emitter) emitWeakRefCall(ty Type, box, method string, args []ast.Expres
 // object reference (a ptr that isn't a string) — a primitive key is meaningless
 // for identity-keyed weak storage and a clean compile error.
 func (e *Emitter) weakObjectKey(keyExpr ast.Expression, pos ast.Pos) (string, error) {
+	return e.weakObjectKeyFor(keyExpr, pos, "Invalid value used as weak map key")
+}
+
+// weakObjectKeyFor is weakObjectKey with the TypeError a primitive run-time
+// key throws (a WeakSet's differs from a WeakMap's).
+func (e *Emitter) weakObjectKeyFor(keyExpr ast.Expression, pos ast.Pos, weakKeyError string) (string, error) {
 	kVal, err := e.emitExpr(keyExpr)
 	if err != nil {
 		return "", err
 	}
-	// An any/unknown key under -compat=js may hold an object reference at
-	// runtime; the object-key requirement can't be decided statically, so unbox
-	// the NaN box's payload pointer and proceed. (A primitive value at runtime
-	// is a -compat=js divergence, not invalid IR — strict still rejects a
-	// statically-primitive key below.)
-	if kVal.Ty.IsDynamic && e.compatJS() {
-		return e.coerce(kVal, TypePtr).Ref, nil
+	if as, ok := keyExpr.(*ast.AsExpression); ok && !kVal.Ty.IsDynamic && as.TypeAnnot != nil && e.resolveType(as.TypeAnnot).IsDynamic {
+		// `5 as any`: the static type is any, whatever its representation.
+		if kVal, err = e.emitBoxValue(kVal); err != nil {
+			return "", err
+		}
+	}
+	// An any/unknown key holds an object at run time or not: a primitive
+	// throws Node's TypeError, an object keys by its reference.
+	if kVal.Ty.IsDynamic {
+		tag, _ := e.emitUnboxTagPayload(kVal)
+		// Tags above undefined are the object kinds.
+		ok := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ugt i8 %s, %d", ok, tag, kmlTagUndefined))
+		goodL, badL := e.freshLabel("weak.key.ok"), e.freshLabel("weak.key.bad")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, goodL, badL))
+		e.emitLabel(badL)
+		e.emitThrowTypeError(weakKeyError)
+		e.emitLabel(goodL)
+		_, payload := e.emitUnboxTagPayload(kVal)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, payload))
+		return r, nil
 	}
 	if kVal.Ty.IR != "ptr" || isStringTy(kVal.Ty) {
 		return "", fmt.Errorf("%d:%d: a WeakMap/WeakSet key must be an object (not a primitive)", pos.Line, pos.Col)
@@ -163,6 +184,7 @@ func (e *Emitter) emitWeakCall(ty Type, ptr, method string, args []ast.Expressio
 	if ty.IsSet {
 		kind = "WeakSet"
 	}
+	e.ensureWeakHelpers()
 
 	switch method {
 	case "set":
@@ -184,6 +206,9 @@ func (e *Emitter) emitWeakCall(ty Type, ptr, method string, args []ast.Expressio
 		if err != nil {
 			return Value{}, err
 		}
+		if vVal.Ty.IsDynamic && !valTy.IsDynamic {
+			vVal = e.coerce(vVal, valTy)
+		}
 		vRef := e.valueToMapVal(vVal, valTy)
 		e.emitInstr(fmt.Sprintf("call void @__kml_weak_set(ptr %s, ptr %s, i64 %s)", ptr, kRef, vRef))
 		return Value{Ref: ptr, Ty: ty}, nil
@@ -195,7 +220,7 @@ func (e *Emitter) emitWeakCall(ty Type, ptr, method string, args []ast.Expressio
 		if len(args) != 1 {
 			return Value{}, fmt.Errorf("%d:%d: WeakSet.add() requires 1 argument", pos.Line, pos.Col)
 		}
-		kRef, err := e.weakObjectKey(args[0], pos)
+		kRef, err := e.weakObjectKeyFor(args[0], pos, "Invalid value used in weak set")
 		if err != nil {
 			return Value{}, err
 		}

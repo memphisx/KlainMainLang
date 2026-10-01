@@ -37,3 +37,21 @@ console.log(forIn.join(','))                             // a,b
 // Object.freeze applies to a symbol-keyed object too.
 Object.freeze(obj)
 console.log(Object.isFrozen(obj))   // true
+
+// A well-known symbol set at run time: Symbol.toPrimitive drives conversion.
+const money: any = { cents: 1250 }
+money[Symbol.toPrimitive] = (hint: string) => hint === 'number' ? money.cents / 100 : '$' + (money.cents / 100).toFixed(2)
+console.log(`${money}`, +money)          // $12.50 12.5
+console.log(Object.keys(money).join(','))  // cents
+
+// A function's own Symbol.toPrimitive, too.
+function version() { return '1.2.3' }
+(version as any)[Symbol.toPrimitive] = () => version()
+console.log(`v${version}`)                 // v1.2.3
+
+// Computed-key methods: a generator iterator, and a computed name.
+const range = { *[Symbol.iterator]() { for (let i = 1; i <= 3; i++) yield i } }
+for (const n of range) console.log(n)     // 1 2 3
+const verb = 'greet'
+const greeter: any = { [verb](name: string) { return 'hi ' + name } }
+console.log(greeter.greet('Thessaloniki')) // hi Thessaloniki

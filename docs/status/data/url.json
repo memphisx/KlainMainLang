@@ -41,7 +41,7 @@
               "See [ADR-00076](../adr/ADR-00076.md)"
             ],
             "caveats": [
-              "libcurl-backed, so a non-special scheme is rejected where WHATWG accepts it (`new URL('foo:bar')` throws; Node: valid with `pathname` `'bar'`) — faithful non-special-scheme parsing needs a hand-written WHATWG parser rather than libcurl ([TDD-00203](../tdd/TDD-00203.md))."
+              "A non-ASCII hostname is case-folded and punycoded, without the rest of UTS 46's mapping: a full-width `ＥＸＡＭＰＬＥ.com` punycodes where Node reads `example.com`"
             ]
           },
           {
@@ -73,26 +73,22 @@
             ]
           },
           {
-            "feature": "`url.parse(urlString)` (legacy)",
+            "feature": "`url.parse(urlString[, parseQueryString[, slashesDenoteHost]])` (legacy)",
             "status": "implemented",
             "caveats": [
-              "Absolute URLs only — a malformed/relative input throws `Invalid URL` (like `new URL()`), rather than Node's never-throw lenient object ([ADR-00669](../adr/ADR-00669.md)/[TDD-00165](../tdd/TDD-00165.md) Stage 4)",
-              "An absent component is `\"\"`, not Node's `null` (same representation as the WHATWG `URL` object above)",
-              "`slashes` and the `parseQueryString`-object form of `query` are not produced yet; `url.format`/`fileURLToPath` and the other legacy helpers are separate follow-ons"
+              "The `parseQueryString` object form of `query` is a dictionary held in a union field: reading it after narrowing works, but `console.log`/`JSON.stringify` of it through `any` do not see its keys ([ADR-01225](../adr/ADR-01225.md))"
             ],
             "notes": [
-              "The legacy `Url` shape (`protocol`/`auth`/`host`/`port`/`hostname`/`hash`/`search`/`query`/`pathname`/`path`/`href`), distinct from the WHATWG `URL`; importable named (`import { parse } from 'url'`), via namespace (`import * as url from 'url'`), and via default (`import url from 'node:url'`)"
+              "Node's own lib/url.js, in TypeScript (`lib/node/internal_url.ts`): the lenient never-throw parse, `null` for an absent component, `slashes`, backslash handling, auto-escaping, and the DEP0169 warning once per process ([ADR-01221](../adr/ADR-01221.md))",
+              "Importable named (`import { parse } from 'url'`), via namespace, and via default; `Url` and its `parse`/`format`/`resolve`/`resolveObject` methods are exported too"
             ]
           },
           {
-            "feature": "`url.format(urlObject)` (legacy)",
+            "feature": "`url.format(urlObject[, options])` (legacy)",
             "status": "implemented",
-            "caveats": [
-              "The `options` argument (`auth`/`fragment`/`search`/`unicode` toggles) is not supported; components are taken verbatim, no re-encoding ([ADR-00670](../adr/ADR-00670.md))",
-              "Reconstructs `protocol // [auth@] host pathname (search|?query) hash`; a WHATWG `URL` argument serializes to its `href`"
-            ],
+            "caveats": [],
             "notes": [
-              "The inverse of `url.parse` — round-trips a legacy `Url` object back to a string, and also accepts a plain object with the legacy fields; importable named, via namespace, or via default"
+              "lib/url.js's `urlFormat`: a `Url`-shaped object (slashed protocols, `[ipv6]` hosts, `query` objects through `querystring.stringify`, `#`/`?` escaping in the pathname), a string (parsed then formatted), or a WHATWG `URL` with the `auth`/`fragment`/`search`/`unicode` options ([ADR-01221](../adr/ADR-01221.md))"
             ]
           },
           {
@@ -115,11 +111,8 @@
           {
             "feature": "`url.resolve(from, to)` (legacy)",
             "status": "implemented",
-            "caveats": [
-              "Absolute bases only — a scheme-less/malformed base throws `Invalid URL`, the same leniency gap as `url.parse` ([ADR-00672](../adr/ADR-00672.md))"
-            ],
             "notes": [
-              "Resolves `to` against the base `from` (the `new URL(to, from)` resolution), returning the resulting URL string"
+              "lib/url.js's `urlResolve`/`resolveObject`: relative paths, `..`/`.` segments, protocol-relative and cross-protocol targets, non-slashed schemes (`mailto:`), with `url.resolveObject` alongside ([ADR-01221](../adr/ADR-01221.md))"
             ]
           },
           {
@@ -139,7 +132,7 @@
               "IDN conversion of a **non-ASCII** domain requires the libcurl build to include an IDN backend (libidn2) — present on typical Linux, **absent on the Mac build** where a non-ASCII domain returns `\"\"` (Node's own failure contract). ASCII domains pass through everywhere ([ADR-00672](../adr/ADR-00672.md))"
             ],
             "notes": [
-              "Punycode/IDN conversion via libcurl (`CURLU_PUNYCODE`/`CURLU_PUNY2IDN`); returns `\"\"` on failure, matching Node"
+              "Punycode/IDN conversion via libcurl (`CURLU_PUNYCODE`/`CURLU_PUNY2IDN`), ASCII letters lowercased as the WHATWG host parser does; returns `\"\"` on failure, matching Node ([ADR-01221](../adr/ADR-01221.md))"
             ]
           }
         ]

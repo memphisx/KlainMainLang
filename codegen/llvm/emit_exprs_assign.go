@@ -199,58 +199,12 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		defer undo()
 	}
 
-	// TDD-00098 stage 6, browser Worker surface. Parent side:
-	// `w.onmessage = ...` / `w.onerror = ...` on a Worker-typed receiver.
-	// Worker side: a bare (or self.) `onmessage = ...` at the module top
-	// level. All gated behind shadowing checks so a user binding wins.
-	if ex.Op == "=" {
-		if memEx, ok := ex.Left.(*ast.MemberExpression); ok {
-			if memEx.Property == "onmessage" || memEx.Property == "onerror" {
-				if id, ok := memEx.Object.(*ast.Identifier); ok && id.Name == "self" && !e.isShadowedByLocal("self") && e.currentWorkerMod != "" {
-					if memEx.Property == "onerror" {
-						return Value{}, fmt.Errorf("%d:%d: self.onerror is not supported inside a worker — an uncaught worker exception is reported to the parent", ex.GetPos().Line, ex.GetPos().Col)
-					}
-					return e.emitWorkerSideOnMessageAssign(ex.Right, ex.GetPos())
-				}
-				if e.inferExprType(memEx.Object).IsWorker {
-					return e.emitWorkerHandlerAssign(memEx.Object, memEx.Property, ex.Right, ex.GetPos())
-				}
-				// TDD-00099: BroadcastChannel / MessagePort onmessage.
-				if memEx.Property == "onmessage" {
-					if objTy := e.inferExprType(memEx.Object); objTy.IsBroadcastChannel || objTy.IsMessagePort {
-						return e.emitChanOnMessageAssign(memEx.Object, ex.Right, ex.GetPos())
-					}
-				}
-			}
-			// ADR-00978: `signal.onabort = cb` — the AbortSignal event-handler
-			// property. A listener slot fired alongside addEventListener('abort')
-			// listeners; `= null` clears it.
-			if memEx, ok := ex.Left.(*ast.MemberExpression); ok && memEx.Property == "onabort" {
-				if e.inferExprType(memEx.Object).IsAbortSignal {
-					return e.emitAbortSignalOnabortAssign(memEx.Object, ex.Right, ex.GetPos())
-				}
-			}
-		}
-		if id, ok := ex.Left.(*ast.Identifier); ok && id.Name == "onmessage" && e.currentWorkerMod != "" && !e.isShadowedByLocal("onmessage") {
-			if _, bound := e.lookup("onmessage"); !bound {
-				return e.emitWorkerSideOnMessageAssign(ex.Right, ex.GetPos())
-			}
-		}
-	}
-	// process.exitCode = N → store the deferred exit code (ADR-00334).
+	// process.exitCode = v: setExitCode(v) (lib/node/internal_process_methods.ts).
 	if memEx, ok := ex.Left.(*ast.MemberExpression); ok && memEx.Property == "exitCode" {
-		if id, ok := memEx.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
-			if ex.Op != "=" {
-				return Value{}, fmt.Errorf("%d:%d: compound assignment to process.exitCode is not supported", ex.GetPos().Line, ex.GetPos().Col)
+		if id, ok := memEx.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) && ex.Op == "=" {
+			if call, ok := e.processEnvCall("setExitCode", ex.GetPos(), ex.Right); ok {
+				return e.emitExpr(call)
 			}
-			val, err := e.emitExpr(ex.Right)
-			if err != nil {
-				return Value{}, err
-			}
-			val = e.coerce(val, TypeI64)
-			e.usedProcessLifecycle = true
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__kml_process_exit_code, align 8", val.Ref))
-			return val, nil
 		}
 	}
 	// res.statusCode = N → store into the ServerResponse's `status` field
@@ -278,27 +232,10 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			return val, nil
 		}
 	}
-	// process.env.KEY = val / process.env["KEY"] = val → setenv (ADR-00333).
-	// Checked before the generic member/index assignment paths, since
-	// `process.env` is a pseudo-namespace, not a real object. Only plain `=`
-	// (a compound op on an env var is rejected — read-modify-write of a
-	// possibly-unset getenv result is a footgun better made explicit).
-	if memEx, ok := ex.Left.(*ast.MemberExpression); ok && e.isProcessEnvExpr(memEx.Object) {
-		if ex.Op != "=" {
-			return Value{}, fmt.Errorf("%d:%d: compound assignment to process.env is not supported — read process.env.%s and assign explicitly", ex.GetPos().Line, ex.GetPos().Col, memEx.Property)
-		}
-		return e.emitProcessEnvSet(e.internString(memEx.Property), ex.Right, ex.GetPos())
-	}
-	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok && e.isProcessEnvExpr(idxEx.Object) {
-		if ex.Op != "=" {
-			return Value{}, fmt.Errorf("%d:%d: compound assignment to process.env is not supported", ex.GetPos().Line, ex.GetPos().Col)
-		}
-		keyVal, err := e.emitExpr(idxEx.Index)
-		if err != nil {
-			return Value{}, err
-		}
-		keyVal = e.coerce(keyVal, TypePtr)
-		return e.emitProcessEnvSet(keyVal.Ref, ex.Right, ex.GetPos())
+	// process.env.KEY = v / process.env[key] = v: envSet(key, v); a compound
+	// assignment reads the variable first (lib/node/internal_process_methods.ts).
+	if call, ok := e.processEnvAssign(ex); ok {
+		return e.emitExpr(call)
 	}
 	// `F.prototype = value` on a recognized vanilla-JS constructor function
 	// (TDD-00155 Stage 4, `-compat=js`) re-points the prototype bag.
@@ -347,10 +284,19 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	// Bracket assignment on a bare any/unknown base: runtime-keyed write into
 	// the D1 dynamic object model (TDD-00155 Stage 1).
 	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
-		if baseTy := e.inferExprType(idxEx.Object); isUnconstrainedDynamic(baseTy) {
+		baseTy := e.inferExprType(idxEx.Object)
+		fnObj := baseTy.IsFunc && !baseTy.IsDynamic
+		if isUnconstrainedDynamic(baseTy) || fnObj {
 			objVal, err := e.emitExpr(idxEx.Object)
 			if err != nil {
 				return Value{}, err
+			}
+			if fnObj {
+				// A function's own property: its boxed function object's
+				// bag (TDD-00229).
+				if objVal, err = e.emitBoxValue(objVal); err != nil {
+					return Value{}, err
+				}
 			}
 			keyRef, err := e.dynAnyKeyRef(idxEx.Index, ex.GetPos())
 			if err != nil {
@@ -561,6 +507,11 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			if !val.Ty.IsArray {
 				return Value{}, fmt.Errorf("%d:%d: cannot assign a non-array value to array variable '%s'", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
 			}
+			// A concrete array into an `any[]` binding (or the reverse): its
+			// elements converted, in a copy.
+			if conv, ok := e.coerceArrayElems(val, sym.Ty); ok {
+				val = conv
+			}
 			// Reference semantics (TDD-00213 Stage 1): if the RHS is an existing
 			// header-backed array (`a = b`), rebind this slot to the SAME header
 			// cell so `a` and `b` alias — a later `push` through either is visible
@@ -595,6 +546,16 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		}
 		// Property write on a bare any/unknown base: a runtime tag dispatch
 		// into the D1 dynamic object model (TDD-00155 Stage 1).
+		// A function's own property (a TypeScript expando on a function
+		// declaration): written to its boxed function object's bag
+		// (TDD-00229).
+		if objVal.Ty.IsFunc && !objVal.Ty.IsDynamic {
+			boxed, err := e.emitBoxValue(objVal)
+			if err != nil {
+				return Value{}, err
+			}
+			objVal = boxed
+		}
 		if isUnconstrainedDynamic(objVal.Ty) {
 			if ex.Op != "=" {
 				// Read-modify-write through the runtime dispatch (`this.x *= k`,
@@ -607,8 +568,11 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			}
 			return e.emitDynAnyMemberSetNamed(objVal, e.internString(memEx.Property), memEx.Property, rhs, ex.GetPos())
 		}
+		if objVal.Ty.IsArray && !objVal.Ty.IsTypedArray && memEx.Property == "length" && ex.Op == "=" {
+			return e.emitArrayLengthAssign(memEx, ex.Right)
+		}
 		if !objVal.Ty.IsObject {
-			return Value{}, fmt.Errorf("field assignment on non-object")
+			return Value{}, fmt.Errorf("%d:%d: field assignment on non-object", ex.GetPos().Line, ex.GetPos().Col)
 		}
 		// A URL's components are derived from one parse, so a component setter
 		// re-parses the URL and re-derives every field (ADR-00572) rather than a
@@ -643,6 +607,19 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		e.emitFrozenCheck(objVal.Ref)
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
+		// A structural type's value may have another layout (TDD-00233): the
+		// member is written into a temporary, then through the layout table.
+		view := isRecordView(objVal.Ty)
+		var viewForeign string
+		if view {
+			gepReg, viewForeign = e.emitRecordFieldSlot(objVal, gepReg, fieldTy, memEx.Property, ex.Op != "=")
+		}
+		finish := func(v Value, err error) (Value, error) {
+			if err == nil && view {
+				e.emitRecordWriteBack(objVal, gepReg, viewForeign, fieldTy, memEx.Property)
+			}
+			return v, err
+		}
 		if isLogicalAssignOp(ex.Op) {
 			// A nullable-scalar field's { i1, T } presence-flagged slot needs the
 			// dedicated present-bit path (TDD-00064 Stage 3); the generic
@@ -650,9 +627,9 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			// value and would no-op `??=` (it can never equal null). Every other
 			// field type uses the generic path unchanged.
 			if isNullableScalar(fieldTy) {
-				return e.emitNullableScalarNullishOrLogicalAssignAt(gepReg, fieldTy, ex.Op, ex.Right)
+				return finish(e.emitNullableScalarNullishOrLogicalAssignAt(gepReg, fieldTy, ex.Op, ex.Right))
 			}
-			return e.emitLogicalCompoundAssign(ex.Op, gepReg, fieldTy, ex.Right)
+			return finish(e.emitLogicalCompoundAssign(ex.Op, gepReg, fieldTy, ex.Right))
 		}
 		// A plain `=` into a nullable-scalar field boxes straight from the RHS
 		// expression, preserving a null-valued source lvalue's null-ness
@@ -662,7 +639,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			if err := e.storeScalarOrNullableFieldExpr(gepReg, fieldTy, ex.Right); err != nil {
 				return Value{}, err
 			}
-			return e.loadScalarOrNullableField(gepReg, fieldTy), nil
+			return finish(e.loadScalarOrNullableField(gepReg, fieldTy), nil)
 		}
 		var rhs Value
 		if ex.Op == "=" {
@@ -711,7 +688,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			}
 		}
 		e.storeScalarOrNullableField(gepReg, fieldTy, rhs)
-		return rhs, nil
+		return finish(rhs, nil)
 	}
 
 	// Array destructuring assignment: [a, b] = expr (ADR-00160), extended
@@ -1070,10 +1047,12 @@ func (e *Emitter) emitDestructAssignObjectProps(objPtr string, objTy Type, props
 			if fieldTy.IsArray || sym.Ty.IsArray {
 				return fmt.Errorf("%d:%d: destructuring assignment into/from an array-typed field is not yet supported", pos.Line, pos.Col)
 			}
+			if def != nil && !fieldTy.IsUndefined {
+				def = nil // a default replaces only undefined, which this field never holds
+			}
 			if def != nil {
-				// An object-field default fires when the field is null — so it
-				// needs the field to be a nullable reference (the only shape with
-				// a reliable "not provided" signal), matching the declaration form.
+				// An object-field default fires when the field is undefined — a
+				// nullable reference's null slot (the declaration form's rule).
 				if !(fieldTy.Nullable && fieldTy.IR == "ptr") {
 					return fmt.Errorf("%d:%d: a destructuring default requires field '%s' to be a nullable reference type (string | null, T[] | null, an interface/class type | null) — no other field type has a reliable way to tell a real value apart from 'not provided'", pos.Line, pos.Col, prop.Key)
 				}
@@ -1277,4 +1256,37 @@ func (e *Emitter) emitDynAnyCompoundAssign(objVal Value, keyRef, propName, op st
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, slot))
 	return Value{Ref: r, Ty: TypeAny}, nil
+}
+
+// processEnvAssign is an assignment to `process.env.KEY` / `process.env[key]`
+// as envSet(key, value), `op=` reading envGet(key) first.
+func (e *Emitter) processEnvAssign(ex *ast.AssignmentExpression) (ast.Expression, bool) {
+	var key ast.Expression
+	switch l := ex.Left.(type) {
+	case *ast.MemberExpression:
+		if !e.isProcessEnvExpr(l.Object) {
+			return nil, false
+		}
+		key = ast.NewStringLiteral(l.Property, l.GetPos())
+	case *ast.IndexExpression:
+		if !e.isProcessEnvExpr(l.Object) {
+			return nil, false
+		}
+		key = l.Index
+	default:
+		return nil, false
+	}
+	value := ex.Right
+	if ex.Op != "=" {
+		op := strings.TrimSuffix(ex.Op, "=")
+		if op == "&&" || op == "||" || op == "??" {
+			return nil, false
+		}
+		cur, ok := e.processEnvCall("envGet", ex.GetPos(), key)
+		if !ok {
+			return nil, false
+		}
+		value = ast.NewBinaryExpression(op, cur, ex.Right, ex.GetPos())
+	}
+	return e.processEnvCall("envSet", ex.GetPos(), key, value)
 }

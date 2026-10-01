@@ -733,3 +733,56 @@ ret:
   ret void
 }`, watchDesc, e.internString("watch"), sw, sw, sw, sw, sw, sw, sw, sw, sw, sw, sw, sw, sw, renameStr, changeStr))
 }
+
+// ensureNativeFsWatch defines the natives lib/node/fs.ts's FSWatcher runs
+// on: __kml_native_fs_watch(path, inv, clo) starts a watcher whose every
+// event calls inv(clo, isRename, 0) with the file name as the last string,
+// and returns the watcher's handle; __kml_native_fs_watch_close(handle)
+// stops it.
+func (e *Emitter) ensureNativeFsWatch() {
+	if e.fnDecls["__kml_native_fs_watch"] {
+		return
+	}
+	e.fnDecls["__kml_native_fs_watch"] = true
+	e.ensureFsWatchRuntime()
+	e.ensureNativePool()
+	e.ensureMalloc()
+	e.declareFn("__kml_native_set_last_string", "declare void @__kml_native_set_last_string(ptr)")
+	e.emitGlobal(`
+define internal void @__kml_fswatch_tramp(ptr %env, ptr %evstr, ptr %fn) {
+entry:
+  %inv = load ptr, ptr %env, align 8
+  %clo_p = getelementptr ptr, ptr %env, i64 1
+  %clo = load ptr, ptr %clo_p, align 8
+  call void @__kml_native_set_last_string(ptr %fn)
+  %c = load i8, ptr %evstr, align 1
+  %isr = icmp eq i8 %c, 114
+  %k = uitofp i1 %isr to double
+  call void %inv(ptr %clo, double %k, double 0.0)
+  ret void
+}
+define double @__kml_native_fs_watch(ptr %path, ptr %inv, ptr %clo) {
+entry:
+  %w = call ptr @__kml_fs_watch(ptr %path)
+  %env = call ptr @malloc(i64 16)
+  store ptr %inv, ptr %env, align 8
+  %clo_p = getelementptr ptr, ptr %env, i64 1
+  store ptr %clo, ptr %clo_p, align 8
+  %cl = call ptr @malloc(i64 16)
+  store ptr @__kml_fswatch_tramp, ptr %cl, align 8
+  %env_p = getelementptr ptr, ptr %cl, i64 1
+  store ptr %env, ptr %env_p, align 8
+  call void @__kml_fswatch_on(ptr %w, i64 0, ptr %cl)
+  call void @__kml_fswatch_on(ptr %w, i64 1, ptr %cl)
+  %i = ptrtoint ptr %w to i64
+  %d = uitofp i64 %i to double
+  ret double %d
+}
+define void @__kml_native_fs_watch_close(double %h) {
+entry:
+  %i = fptoui double %h to i64
+  %w = inttoptr i64 %i to ptr
+  call void @__kml_fswatch_close(ptr %w)
+  ret void
+}`)
+}

@@ -56,6 +56,7 @@ func (e *Emitter) ensurePromiseAddReaction() {
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_promise_add_reaction(ptr %%p, ptr %%clo) {
 entry:
+  call void @__kml_promise_mark_handled(ptr %%p)
   %%st_p = getelementptr %s, ptr %%p, i32 0, i32 0
   %%st = load i64, ptr %%st_p, align 8
   %%settled = icmp ne i64 %%st, 0
@@ -130,6 +131,8 @@ entry:
   %%rl_p = getelementptr %s, ptr %%s, i32 0, i32 15
   store i64 0, ptr %%rl_p, align 8
   %%cp = call ptr @__kml_task_alloc_promise()
+  ; The closed promise is marked handled (the spec's SetPromiseIsHandledToTrue).
+  call void @__kml_promise_mark_handled(ptr %%cp)
   %%cp_p = getelementptr %s, ptr %%s, i32 0, i32 16
   store ptr %%cp, ptr %%cp_p, align 8
   %%ff_p = getelementptr %s, ptr %%s, i32 0, i32 17

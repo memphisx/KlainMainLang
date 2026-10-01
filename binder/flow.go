@@ -185,33 +185,30 @@ func functionOf(s *Scope) *Scope {
 // (missed). fact says whether an assignment node establishes it.
 func walkBack(f *FlowNode, sym *Symbol, fact func(*FlowNode) bool) (found, missed bool) {
 	home := containerOf(sym.Scope)
-	onPath := map[*FlowNode]bool{}
-	memo := map[*FlowNode][2]bool{}
-	// walk returns found, missed, and whether a loop back into the current
-	// path cut the answer short (such an answer is not cached: another path
-	// may reach the same label without the cut).
-	var walk func(f *FlowNode) (bool, bool, bool)
-	walk = func(f *FlowNode) (bool, bool, bool) {
-		for {
-			if f == nil || f.Flags&FlowUnreachable != 0 {
-				return false, false, false
-			}
-			if onPath[f] {
-				return false, false, true
-			}
-			if r, ok := memo[f]; ok {
-				return r[0], r[1], false
-			}
+	// Both answers are reachability over the predecessor graph (a fact
+	// node and a scope start end a path), so each node is visited once;
+	// a loop back to a visited node adds no new path end.
+	seen := map[*FlowNode]bool{}
+	stack := []*FlowNode{f}
+	for len(stack) > 0 && !(found && missed) {
+		f := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for f != nil && f.Flags&FlowUnreachable == 0 && !seen[f] {
+			seen[f] = true
 			switch {
 			case f.Flags&FlowAssignment != 0:
 				if f.Symbol == sym && fact(f) {
-					return true, false, false
+					found = true
+					f = nil
+					continue
 				}
 				f = f.Antecedent
 				continue
 			case f.Flags&FlowScopeStart != 0:
 				if f.Scope == sym.Scope {
-					return false, true, false
+					missed = true
+					f = nil
+					continue
 				}
 				f = f.Antecedent
 				continue
@@ -221,23 +218,17 @@ func walkBack(f *FlowNode, sym *Symbol, fact func(*FlowNode) bool) (found, misse
 			case f.Flags&FlowStart != 0:
 				// The start of the binding's own function or module: nothing
 				// on this path set it.
-				return false, f.Scope == home, false
+				if f.Scope == home {
+					missed = true
+				}
+				f = nil
+				continue
 			}
 			// A label: any predecessor path.
-			onPath[f] = true
-			var fd, ms, cut bool
-			for _, a := range f.Antecedents {
-				a1, a2, a3 := walk(a)
-				fd, ms, cut = fd || a1, ms || a2, cut || a3
-			}
-			delete(onPath, f)
-			if !cut {
-				memo[f] = [2]bool{fd, ms}
-			}
-			return fd, ms, cut
+			stack = append(stack, f.Antecedents...)
+			f = nil
 		}
 	}
-	found, missed, _ = walk(f)
 	return found, missed
 }
 

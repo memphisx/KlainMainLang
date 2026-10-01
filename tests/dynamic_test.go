@@ -405,14 +405,17 @@ f({ a: 5, b: "hi" })
 `, "5\nhi")
 }
 
-func TestE2EUnionTwoUndiscriminatedObjectsRejected(t *testing.T) {
-	// Two object members without a common literal tag aren't a discriminated
-	// union — a clean rejection (TDD-00116).
-	mustCompileError(t, `
+func TestE2EUnionTwoUndiscriminatedObjects(t *testing.T) {
+	// Two object members without a common literal tag: each value is told
+	// apart by its layout, narrowed by `in` (ADR-01219).
+	assertSameAsNode(t, `
 interface A { x: number }
 interface B { y: number }
 let v: A | B = { x: 1 }
-`, "discriminated union")
+if ("x" in v) console.log("A", v.x); else console.log("B", v.y)
+v = { y: 2 }
+if ("x" in v) console.log("A", v.x); else console.log("B", v.y)
+`)
 }
 
 func TestE2EDiscriminatedUnion(t *testing.T) {

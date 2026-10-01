@@ -316,4 +316,7 @@ clean:
 
 ## help: list available targets
 help:
-	@grep -E '^## ' Makefile | sed 's/^## /  /'
+	@awk '/^## [A-Za-z0-9_-]+: / { t = $$2; sub(/:$$/, "", t); d = substr($$0, index($$0, ": ") + 2); \
+		u = ""; if (match(d, /\(usage: [^)]*\)/)) u = "  " substr(d, RSTART + 8, RLENGTH - 9); \
+		sub(/ *\(usage:.*/, "", d); sub(/ *\(.*$$/, "", d); sub(/ — .*$$/, "", d); sub(/[.;] .*$$/, "", d); sub(/\.$$/, "", d); \
+		if (length(d) > 72) d = substr(d, 1, 69) "..."; printf "  %-20s %s%s\n", t, d, u }' Makefile

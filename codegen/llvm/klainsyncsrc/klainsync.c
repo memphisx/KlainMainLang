@@ -1,17 +1,19 @@
-/* klainsync — Go-fidelity goroutine runtime (TDD-00143, Stage 1).
+/* klainsync — Go-fidelity goroutine runtime (TDD-00143).
  *
- * A GMP work-stealing scheduler with cooperative goroutines, fixed
- * guard-paged stacks over ucontext, and CSP channels whose blocking send/
- * receive park the *G* (the M keeps running other Gs), not the OS thread.
+ * A GMP work-stealing scheduler: goroutines run in parallel on one M
+ * (pthread) per P, fixed guard-paged stacks over ucontext, and CSP channels
+ * whose blocking send/receive park the *G* (the M keeps running other Gs),
+ * not the OS thread.
  *
  * This is the `klain:sync` embedded runtime: an explicitly-non-Node opt-in.
  * A program that never imports `klain:sync` links none of this and pays
  * nothing. Nothing here touches async/await, Promises, or Worker.
  *
- * Scope of THIS file (Stage 1): the scheduler, `go`, buffered/unbuffered
- * channels, and a function-entry cooperative safepoint hook. Loop-back-edge
- * safepoints, sysmon preempt-flagging, `select`, blocking-syscall P-handoff,
- * signal-based async preemption, and growable stacks are later stages.
+ * Preemption: sysmon flags a G that overruns its time slice, and the
+ * compiler's safepoints (every function entry and loop back-edge) switch it
+ * out, so a goroutine that never yields is preempted anyway. A G blocked in
+ * a C call has its P's work taken over by a rescue M (P-handoff). Also here:
+ * `select`, channel range. Growable stacks wait on precise stack maps.
  *
  * Channel elements are a fixed 8-byte slot (i64/f64/ptr all fit) — the
  * compiler bitcasts every Channel<T> element through an i64. That covers

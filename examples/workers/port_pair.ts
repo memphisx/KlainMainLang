@@ -1,15 +1,13 @@
-// MessageChannel: a typed port pair; port2 crosses to the worker as
-// workerData (shared by reference, like a SharedArrayBuffer) and the two
-// sides talk directly over it.
-import { Worker } from 'worker_threads';
+// MessageChannel: a port pair; port2 moves to the worker (in the transfer
+// list, with workerData naming it) and the two sides talk directly over it.
+import { Worker, MessageChannel } from 'worker_threads';
 
-const ch = new MessageChannel<string>();
-const w = new Worker('./port_worker.ts', { workerData: ch.port2 });
+const ch = new MessageChannel();
+const w = new Worker('./port_worker.ts', { workerData: ch.port2, transferList: [ch.port2] });
 
-ch.port1.onmessage = (e: { data: string }) => {
+ch.port1.onmessage = (e: MessageEvent) => {
   console.log("shouted back: " + e.data);
   ch.port1.close();
-  ch.port2.close();
   w.terminate();
 };
 setTimeout(() => { ch.port1.postMessage("hello ports"); }, 100);

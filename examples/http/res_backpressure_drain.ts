@@ -15,7 +15,7 @@ const TOTAL = 128; // 8 MiB
 async function consume(port: number): Promise<void> {
   const res = await fetch("http://127.0.0.1:" + port + "/");
   let total = 0;
-  for await (const piece of res.body) {
+  for await (const piece of res.body!) {
     total = total + piece.length;
   }
   console.log("streamed-bytes:", total);

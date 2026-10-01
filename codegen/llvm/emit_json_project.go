@@ -83,9 +83,12 @@ func (e *Emitter) emitJSONProjectObject(node string, targetTy Type, pos ast.Pos)
 	e.ensureMalloc()
 	structIR := targetTy.StructIR()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, targetTy.StructSize()))
+	e.emitObjMallocInto(dataReg, targetTy)
 
 	for i, f := range targetTy.Fields {
+		if f.Name == ClassTagField {
+			continue
+		}
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, dataReg, i))
 		fieldIR := StructFieldIR(f.Ty)
@@ -142,7 +145,7 @@ func (e *Emitter) emitJSONProjectTuple(node string, targetTy Type, pos ast.Pos) 
 	e.ensureMalloc()
 	structIR := targetTy.StructIR()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, targetTy.StructSize()))
+	e.emitObjMallocInto(dataReg, targetTy)
 
 	for i, f := range targetTy.Fields {
 		gep := e.freshReg()
@@ -202,7 +205,41 @@ func (e *Emitter) emitJSONFieldFound(child string, fieldTy Type, pos ast.Pos) (s
 		if err != nil {
 			return "", err
 		}
-		return e.makeNullableScalarAgg(fieldTy, present, payload.Ref), nil
+		pl := payload.Ref
+		if fieldTy.NullAndUndef {
+			// A JSON null in a three-state field is null, not a missing key.
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s %s", r, isNull, fieldTy.IR, triMarker(fieldTy), fieldTy.IR, pl))
+			pl = r
+		}
+		return e.makeNullableScalarAgg(fieldTy, present, pl), nil
+	}
+	if fieldTy.Nullable && fieldTy.IR == "ptr" && !fieldTy.IsArray && !fieldTy.IsDynamic {
+		// A JSON null in a `T | null` (or optional) string or object field
+		// is the absent pointer, not an empty string or object.
+		kind, isNull := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_json_kind(ptr %s)", kind, child))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isNull, kind)) // KJSON_NULL == 0
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		nullRef := "null"
+		if fieldTy.NullAndUndef {
+			nullRef = e.nullRef() // null, distinct from a missing key's undefined
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nullRef, slot))
+		valL, doneL := e.freshLabel("jsonp.nonnull"), e.freshLabel("jsonp.nulldone")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, valL))
+		e.emitLabel(valL)
+		v, err := e.emitJSONProject(child, fieldTy.withoutNullable(), pos)
+		if err != nil {
+			return "", err
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", v.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+		return r, nil
 	}
 	v, err := e.emitJSONProject(child, fieldTy, pos)
 	if err != nil {
@@ -225,6 +262,9 @@ func (e *Emitter) jsonDefaultRef(ty Type) string {
 		r1 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", r1, r0))
 		return r1
+	case isStringTy(ty) && ty.Nullable:
+		// A missing `name?: string` (or `string | null`) field is absent.
+		return "null"
 	case isStringTy(ty):
 		// Under -mm=auto the projected tree may be deep-freed (TDD-00175
 		// Stage 1), and __kml_str_free on an interned global corrupts the

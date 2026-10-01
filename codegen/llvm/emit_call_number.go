@@ -42,6 +42,40 @@ func (e *Emitter) emitNumberPredicateOperand(arg ast.Expression) (val Value, pre
 	return val, present, absentIsUndefined, nil
 }
 
+// numberOperand is a Number.isX operand as a double, and whether it is a
+// number at all (Number's predicates convert nothing: `Number.isInteger('5')`
+// is false). isNum is "1" for a concrete number, "0" for any other concrete
+// type, and the box's tag test for an `any`.
+func (e *Emitter) numberOperand(val Value) (num Value, isNum string) {
+	switch {
+	case val.Ty.Float:
+		return val, "1"
+	case val.Ty.IsDynamic:
+		tag, _ := e.emitUnboxTagPayload(val)
+		isF, isI, either := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isF, tag, kmlTagFloat))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isI, tag, kmlTagInt))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, isF, isI))
+		return e.coerce(val, TypeF64), either
+	case isNumericScalar(val.Ty):
+		return e.coerce(val, TypeF64), "1"
+	}
+	return Value{Ref: "0.0", Ty: TypeF64}, "0"
+}
+
+// andBool is a && b over i1 operands ("0"/"1" constants fold).
+func (e *Emitter) andBool(a, b string) string {
+	if a == "1" {
+		return b
+	}
+	if a == "0" || b == "0" {
+		return "0"
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", r, a, b))
+	return r
+}
+
 // numberPredicateResult is r for a present operand and the constant absent for
 // an absent one (present == "" means the operand cannot be absent).
 func (e *Emitter) numberPredicateResult(r Value, present string, absent bool) Value {
@@ -65,8 +99,10 @@ func (e *Emitter) emitNumberIsInteger(args []ast.Expression, pos ast.Pos) (Value
 	if err != nil {
 		return Value{}, err
 	}
-	if !val.Ty.Float {
-		return e.numberPredicateResult(Value{Ref: "1", Ty: TypeBool}, present, false), nil
+	var isNum string
+	val, isNum = e.numberOperand(val)
+	if isNum == "0" {
+		return e.numberPredicateResult(Value{Ref: "0", Ty: TypeBool}, present, false), nil
 	}
 	e.ensureMathFuncs()
 	floored := e.freshReg()
@@ -85,7 +121,7 @@ func (e *Emitter) emitNumberIsInteger(args []ast.Expression, pos ast.Pos) (Value
 	e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", sub, val.Ref, val.Ref))
 	e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, 0.0", finite, sub))
 	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", r, isWhole, finite))
-	return e.numberPredicateResult(Value{Ref: r, Ty: TypeBool}, present, false), nil
+	return e.numberPredicateResult(Value{Ref: e.andBool(isNum, r), Ty: TypeBool}, present, false), nil
 }
 
 // global selects the global `isNaN` (which ToNumbers its argument) over
@@ -101,6 +137,15 @@ func (e *Emitter) emitNumberIsNaN(args []ast.Expression, pos ast.Pos, global boo
 		return Value{}, err
 	}
 	absent := global && absentIsUndefined
+	if !global {
+		num, isNum := e.numberOperand(val)
+		if isNum == "0" {
+			return e.numberPredicateResult(Value{Ref: "0", Ty: TypeBool}, present, absent), nil
+		}
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fcmp uno double %s, %s", r, num.Ref, num.Ref))
+		return e.numberPredicateResult(Value{Ref: e.andBool(isNum, r), Ty: TypeBool}, present, absent), nil
+	}
 	if !val.Ty.Float {
 		// Global `isNaN` applies `ToNumber` to its argument (unlike `Number.isNaN`),
 		// so a non-numeric operand — reachable through `any`, or through an erased
@@ -111,14 +156,13 @@ func (e *Emitter) emitNumberIsNaN(args []ast.Expression, pos ast.Pos, global boo
 		// `isNaN('42' as any)` → false). An integer or boolean always `ToNumber`s to a
 		// finite value, so those keep the fast trivial false.
 		switch {
-		case val.Ty.IsDynamic:
-			val = e.coerce(val, TypeF64)
-		case toNumberCanBeNaN(val.Ty):
-			boxed, err := e.emitBoxValue(val)
+		case val.Ty.IsDynamic || toNumberCanBeNaN(val.Ty):
+			// ToNumber, an object's ToPrimitive included (`isNaN([1])` is false).
+			n, err := e.emitUnaryPlus(val, pos)
 			if err != nil {
 				return Value{}, err
 			}
-			val = e.coerce(boxed, TypeF64)
+			val = e.coerce(n, TypeF64)
 		default:
 			return e.numberPredicateResult(Value{Ref: "0", Ty: TypeBool}, present, absent), nil
 		}
@@ -154,6 +198,16 @@ func (e *Emitter) emitNumberIsFinite(args []ast.Expression, pos ast.Pos, global 
 		return Value{}, err
 	}
 	absent := global && !absentIsUndefined
+	if !global {
+		num, isNum := e.numberOperand(val)
+		if isNum == "0" {
+			return e.numberPredicateResult(Value{Ref: "0", Ty: TypeBool}, present, absent), nil
+		}
+		diff, r := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", diff, num.Ref, num.Ref))
+		e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, 0.0", r, diff))
+		return e.numberPredicateResult(Value{Ref: e.andBool(isNum, r), Ty: TypeBool}, present, absent), nil
+	}
 	if !val.Ty.Float {
 		// Global `isFinite` applies `ToNumber` first (ADR-00902): a boxed `any`, or a
 		// concrete string/object/undefined reachable through an erased `as any`
@@ -161,14 +215,13 @@ func (e *Emitter) emitNumberIsFinite(args []ast.Expression, pos ast.Pos, global 
 		// defaulted to finite. Integers and booleans always convert to a finite value,
 		// so they keep the trivial true.
 		switch {
-		case val.Ty.IsDynamic:
-			val = e.coerce(val, TypeF64)
-		case toNumberCanBeNaN(val.Ty):
-			boxed, err := e.emitBoxValue(val)
+		case val.Ty.IsDynamic || toNumberCanBeNaN(val.Ty):
+			// ToNumber, an object's ToPrimitive included (`isNaN([1])` is false).
+			n, err := e.emitUnaryPlus(val, pos)
 			if err != nil {
 				return Value{}, err
 			}
-			val = e.coerce(boxed, TypeF64)
+			val = e.coerce(n, TypeF64)
 		default:
 			return e.numberPredicateResult(Value{Ref: "1", Ty: TypeBool}, present, absent), nil
 		}
@@ -190,6 +243,21 @@ func (e *Emitter) emitNumberIsSafeInteger(args []ast.Expression, pos ast.Pos) (V
 		return Value{}, err
 	}
 	const maxSafe = "9007199254740991"
+	if val.Ty.IsDynamic || !isNumericScalar(val.Ty) && !val.Ty.Float {
+		// An `any`, or a concrete non-number: a number only, then as a double.
+		num, isNum := e.numberOperand(val)
+		if isNum == "0" {
+			return e.numberPredicateResult(Value{Ref: "0", Ty: TypeBool}, present, false), nil
+		}
+		e.ensureMathFuncs()
+		fl, whole, ab, inRange, r1 := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call double @floor(double %s)", fl, num.Ref))
+		e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, %s", whole, num.Ref, fl))
+		e.emitInstr(fmt.Sprintf("%s = call double @fabs(double %s)", ab, num.Ref))
+		e.emitInstr(fmt.Sprintf("%s = fcmp ole double %s, %s.0", inRange, ab, maxSafe))
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", r1, whole, inRange))
+		return e.numberPredicateResult(Value{Ref: e.andBool(isNum, r1), Ty: TypeBool}, present, false), nil
+	}
 	if !val.Ty.Float {
 		neg := e.freshReg()
 		cmpNeg := e.freshReg()
@@ -271,7 +339,7 @@ func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Valu
 		}
 		return Value{Ref: "0", Ty: TypeI64}, nil
 	}
-	v, err := e.emitExprKeepNullable(args[0])
+	v, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
 	}

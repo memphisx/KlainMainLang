@@ -409,12 +409,17 @@ static int kml_enc_id(const char *enc) {
 	return -1;
 }
 
+/* Buffer.isEncoding(enc): a non-empty name Node's normalizeEncoding knows. */
+int32_t __kml_buf_is_encoding(const char *enc) {
+	return enc && *enc && kml_enc_id(enc) >= 0;
+}
+
 /* A string's bytes in the encoding named enc: their count, the buffer in
  * *out; -1 when enc names no encoding. */
 int64_t __kml_buf_decode_enc(const char *s, const char *enc, unsigned char **out) {
 	switch (kml_enc_id(enc)) {
 	case KML_ENC_UTF8: {
-		int64_t n = (int64_t)strlen(s);
+		int64_t n = *(const int64_t *)(s - 8); /* the header's length: NULs included */
 		unsigned char *b = (unsigned char *)malloc((size_t)n + 1);
 		memcpy(b, s, (size_t)n);
 		*out = b;

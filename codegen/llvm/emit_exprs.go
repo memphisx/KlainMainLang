@@ -63,7 +63,16 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 	case *ast.AssignmentExpression:
 		return e.emitAssign(ex)
 	case *ast.CallExpression:
-		return e.emitCall(ex)
+		v, err := e.emitCall(ex)
+		if err == nil && isUnconstrainedDynamic(v.Ty) && v.Ty.DynPropTy == nil {
+			// A call answered `any` (an implementation signature behind
+			// overloads) whose overload the checker resolves to a primitive:
+			// that primitive, mirroring inferExprType.
+			if pt, ok := e.checkerPrimitive(ex); ok {
+				return e.coerce(v, pt), nil
+			}
+		}
+		return v, err
 	case *ast.TaggedTemplateExpression:
 		if e.isStringRawTag(ex.Tag) {
 			return e.emitStringRaw(ex)
@@ -72,6 +81,9 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 	case *ast.IndexExpression:
 		return e.emitIndex(ex)
 	case *ast.MemberExpression:
+		if b, ok := e.builtinRef(ex); ok {
+			return e.emitBuiltinValue(b) // `const f = Math.floor`
+		}
 		return e.emitMember(ex)
 	case *ast.SpreadElement:
 		return Value{}, fmt.Errorf("%d:%d: a spread (...) is only supported inside an array literal or as a single array filling a function's rest parameter (e.g. f(...arr)) — not here", ex.GetPos().Line, ex.GetPos().Col)
@@ -110,8 +122,6 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		return e.emitNewWeakSetValue(ex)
 	case *ast.NewWeakRefExpression:
 		return e.emitNewWeakRefValue(ex)
-	case *ast.NewEventEmitterExpression:
-		return e.emitNewEventEmitterValue(ex)
 	case *ast.NewReadableStreamExpression:
 		return e.emitNewReadableStream(ex)
 	case *ast.NewWritableStreamExpression:
@@ -187,10 +197,6 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		return e.emitNewURLPatternExpression(ex)
 	case *ast.NewArrayBufferExpression:
 		return e.emitNewArrayBufferExpression(ex)
-	case *ast.NewBroadcastChannelExpression:
-		return e.emitNewBroadcastChannelExpression(ex)
-	case *ast.NewMessageChannelExpression:
-		return e.emitNewMessageChannelExpression(ex)
 	case *ast.NewChannelExpression:
 		return e.emitNewChannelExpression(ex)
 	case *ast.NewTypedArrayExpression:
@@ -203,26 +209,10 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		return e.emitNewTextDecoderExpression(ex)
 	case *ast.NewRegExpExpression:
 		return e.emitNewRegExpExpression(ex)
-	case *ast.NewEventSourceExpression:
-		return e.emitNewEventSourceExpression(ex)
-	case *ast.NewEventTargetExpression:
-		return e.emitNewEventTargetExpression()
 	case *ast.NewHTTPAgentExpression:
 		return e.emitNewHTTPAgent(ex)
 	case *ast.NewWebviewExpression:
 		return e.emitNewWebview(ex)
-	case *ast.NewDatabaseSyncExpression:
-		return e.emitNewDatabaseSync(ex)
-	case *ast.NewAbortControllerExpression:
-		return e.emitNewAbortControllerExpression()
-	case *ast.NewEventExpression:
-		return e.emitNewEventExpression(ex)
-	case *ast.NewCustomEventExpression:
-		return e.emitNewCustomEventExpression(ex)
-	case *ast.NewWebSocketExpression:
-		return e.emitNewWebSocketClientExpression(ex)
-	case *ast.NewWorkerExpression:
-		return e.emitNewWorkerExpression(ex)
 	case *ast.NewHeadersExpression:
 		return e.emitNewHeadersExpression(ex)
 	case *ast.NewDataViewExpression:
@@ -351,24 +341,14 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// Number.* namespace) — only after a local lookup miss, so a
 		// user-declared variable of the same name still shadows them.
 		switch id.Name {
-		case "NaN", "Infinity", "workerData", "isMainThread":
+		case "NaN", "Infinity":
 			e.shadowReference(id, false)
 		}
 		switch id.Name {
-		case "isMainThread":
-			// worker_threads.isMainThread: false in a worker module's code.
-			if e.currentWorkerMod != "" {
-				return Value{Ref: "false", Ty: TypeBool}, nil
-			}
-			return Value{Ref: "true", Ty: TypeBool}, nil
 		case "NaN":
 			return Value{Ref: "0x7FF8000000000000", Ty: TypeF64}, nil
 		case "Infinity":
 			return Value{Ref: "0x7FF0000000000000", Ty: TypeF64}, nil
-		case "workerData":
-			// TDD-00098: only meaningful inside a worker module; a local
-			// binding of the same name shadows it via the lookup above.
-			return e.emitWorkerDataRead(id.GetPos())
 		}
 		// A bare reference to a named function in a value position (`const g =
 		// f`, `apply(f, ...)`) — materialize a closure value wrapping it via an
@@ -387,6 +367,16 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		if mangled, sig, found := e.resolveFuncRef(id.Name); found {
 			e.shadowReference(id, true)
 			return e.emitNamedFuncValue(mangled, sig, id.Name), nil
+		}
+		// A builtin function by value (`arr.map(parseFloat)`).
+		if b, ok := e.builtinRef(id); ok {
+			return e.emitBuiltinValue(b)
+		}
+		// A class in value position (`assert.throws(fn, MyError)`): a
+		// constructor reference (emit_classref.go).
+		if _, isClass := e.classes[id.Name]; isClass {
+			e.shadowReference(id, false)
+			return e.emitClassRef(id.Name), nil
 		}
 		// A built-in error constructor in value position (`assert.throws(
 		// TypeError, fn)`, `x === RangeError`): a boxed funcref carrying the
@@ -414,6 +404,12 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 				return e.emitExpr(id) // re-enter: the binding now exists
 			}
 		}
+		// `process` as a value: its emitter object (lib/node/internal_process.ts).
+		if id.Name == "process" {
+			if obj, ok := e.processEmitterValue(id.GetPos()); ok {
+				return e.emitExpr(obj)
+			}
+		}
 		e.shadowReference(id, false)
 		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", id.GetPos().Line, id.GetPos().Col, id.Name)
 	}
@@ -424,7 +420,7 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// value reads as a real string/number/boolean (or a smaller union).
 		box := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", box, sym.Ptr))
-		return e.emitUnboxBoxToType(box, *sym.NarrowedTo), nil
+		return e.emitUnboxBoxToType(box, e.canonicalizeClassTy(*sym.NarrowedTo)), nil
 	}
 	if sym.Ty.IsArray {
 		// A named array variable is stored as two separate allocas
@@ -449,29 +445,38 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", header, sym.Ptr))
 			return e.arrayValueFromHeaderSlotGuarded(header, sym.Ty), nil
 		}
-		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
+		// A binding typed as an array can still hold undefined at run time
+		// (a callback's data argument on error, passed through `any`): its
+		// header is null. The read goes through a shared empty header then,
+		// and the Value carries the null header, so it prints and boxes as
+		// undefined.
+		hdr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, sym.Ptr))
+		readHdr := e.nullSafeArrayHeader(hdr)
+		lenSlot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lenSlot, arrayHeaderTy, readHdr))
 		ptrReg := e.freshReg()
 		lenReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, dataSlot))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, readHdr))
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
 		r0 := e.freshReg()
 		r1 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
-		// dataSlot is the live header pointer (arrayDataLenSlots returns the header
-		// itself as the data slot — field 0 is at offset 0). Carry it so boxing
-		// this array into `any` shares the live header rather than snapshotting the
-		// {data,len} aggregate, keeping a post-box push visible (TDD-00212 Stage 3).
-		return Value{Ref: r1, Ty: sym.Ty, ArrayHeader: dataSlot}, nil
+		// Carry the live header so boxing this array into `any` shares it
+		// rather than snapshotting the {data,len} aggregate, keeping a
+		// post-box push visible (TDD-00212 Stage 3).
+		return Value{Ref: r1, Ty: sym.Ty, ArrayHeader: hdr}, nil
 	}
 	if sym.isNullableScalarLocal() {
-		// A nullable scalar is stored as { i1 present, T value }. Reading the
-		// identifier into an ordinary expression auto-unwraps to the bare
-		// payload (Nullable cleared) — the presence bit is consulted only at
-		// the null-aware operators (emitNullCoalesce / the `=== null` path),
-		// which read it straight from storage. See emit_nullable_scalar.go.
-		payload := e.loadNullableScalarPayload(sym.Ptr, sym.Ty)
-		return Value{Ref: payload, Ty: sym.Ty.withoutNullable()}, nil
+		// A nullable scalar is stored as { i1 present, T value } and reads
+		// as that aggregate, like any nullable value; a read flow analysis
+		// proved present is the bare payload.
+		if sym.NarrowedNonNull {
+			payload := e.loadNullableScalarPayload(sym.Ptr, sym.Ty)
+			return Value{Ref: payload, Ty: sym.Ty.withoutNullable()}, nil
+		}
+		return e.loadNullableScalarAgg(sym.Ptr, sym.Ty), nil
 	}
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))

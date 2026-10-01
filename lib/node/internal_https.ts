@@ -133,15 +133,17 @@ _kmlSetHttpsGlobalAgent(globalAgent);
 
 export interface RequestOptions extends HttpRequestOptions {}
 
-function httpsOptions(url: string | RequestOptions): RequestOptions {
-    if (typeof url === 'string') {
-        const u = new URL(url);
-        const o: RequestOptions = { protocol: u.protocol, hostname: u.hostname.startsWith('[') ? u.hostname.slice(1, -1) : u.hostname,
-            path: u.pathname + u.search, defaultPort: 443 };
-        if (u.port !== '') o.port = Number(u.port);
-        if (u.username || u.password) o.auth = decodeURIComponent(u.username) + ':' + decodeURIComponent(u.password);
-        return o;
-    }
+function urlOptions(u: URL): RequestOptions {
+    const o: RequestOptions = { protocol: u.protocol, hostname: u.hostname.startsWith('[') ? u.hostname.slice(1, -1) : u.hostname,
+        path: u.pathname + u.search, defaultPort: 443 };
+    if (u.port !== '') o.port = Number(u.port);
+    if (u.username || u.password) o.auth = decodeURIComponent(u.username) + ':' + decodeURIComponent(u.password);
+    return o;
+}
+
+function httpsOptions(url: string | URL | RequestOptions): RequestOptions {
+    if (typeof url === 'string') return urlOptions(new URL(url));
+    if (url instanceof URL) return urlOptions(url);
     const o: RequestOptions = { protocol: url.protocol ?? 'https:', hostname: url.hostname, host: url.host, port: url.port,
         path: url.path, method: url.method, headers: url.headers, auth: url.auth, agent: url.agent,
         defaultPort: url.defaultPort ?? 443, family: url.family, localAddress: url.localAddress,
@@ -151,14 +153,14 @@ function httpsOptions(url: string | RequestOptions): RequestOptions {
     return o;
 }
 
-export function request(url: string | RequestOptions, options?: RequestOptions | ResponseListener, cb?: ResponseListener): ClientRequest {
+export function request(url: string | URL | RequestOptions, options?: RequestOptions | ResponseListener, cb?: ResponseListener): ClientRequest {
     const base = httpsOptions(url);
     if (typeof options === 'function') return new ClientRequest(base, options);
     if (options !== undefined) return new ClientRequest(base, httpsOptions(options), cb);
     return new ClientRequest(base, cb);
 }
 
-export function get(url: string | RequestOptions, options?: RequestOptions | ResponseListener, cb?: ResponseListener): ClientRequest {
+export function get(url: string | URL | RequestOptions, options?: RequestOptions | ResponseListener, cb?: ResponseListener): ClientRequest {
     const req = request(url, options, cb);
     req.end();
     return req;

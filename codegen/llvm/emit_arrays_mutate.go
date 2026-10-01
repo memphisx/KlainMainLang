@@ -3,6 +3,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"strings"
 )
 
 // resolveArrayMutLoc resolves the *storage location* of a mutable array —
@@ -41,6 +42,7 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 		// through these addresses updates the one header every alias — including a
 		// callee this array was passed to — observes, giving JS reference
 		// semantics (push/splice inside a callee grow the caller's array).
+		e.emitArrayBindingGuard(sym, undefinedAccessMessage(verb))
 		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 		return dataSlot, lenSlot, *sym.Ty.ElemType, nil
 
@@ -62,6 +64,11 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 		}
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slot, objVal.Ty.StructIR(), objVal.Ref, idx))
+		// Another layout behind a structural type (TDD-00233): the field's
+		// live header, read through the layout table.
+		if isRecordView(objVal.Ty) {
+			slot, _ = e.emitRecordFieldSlot(objVal, slot, fieldTy, obj.Property, true)
+		}
 		// The field slot holds a POINTER to the array's shared header (TDD-00213
 		// Stage 2); load it, then take the header's data/len field addresses — so a
 		// mutator writes a new data ptr/len *through the shared header*, visible to
@@ -531,7 +538,10 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 		// numeric default and mis-decode when later called.
 		var v Value
 		var err error
-		if elemTy.IsFunc || elemTy.IsDynamic {
+		if lit, ok := arg.(*ast.ArrayLiteral); ok && elemTy.IsTuple && !elemTy.IsArray {
+			// A tuple element (`[number, string][]`): the literal is that tuple.
+			v, err = e.emitTupleLiteral(lit, lit.Elements, elemTy)
+		} else if elemTy.IsFunc || elemTy.IsDynamic {
 			// A boxed-element array (`any[]`, TDD-00200): route object/array
 			// literals through the object-hint path so they lower to
 			// self-describing D1 dynamic values (dynobj/dynarr) rather than a
@@ -612,7 +622,10 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 		// numeric default and mis-decode when later called.
 		var v Value
 		var err error
-		if elemTy.IsFunc || elemTy.IsDynamic {
+		if lit, ok := arg.(*ast.ArrayLiteral); ok && elemTy.IsTuple && !elemTy.IsArray {
+			// A tuple element (`[number, string][]`): the literal is that tuple.
+			v, err = e.emitTupleLiteral(lit, lit.Elements, elemTy)
+		} else if elemTy.IsFunc || elemTy.IsDynamic {
 			// A boxed-element array (`any[]`, TDD-00200): route object/array
 			// literals through the object-hint path so they lower to
 			// self-describing D1 dynamic values (dynobj/dynarr) rather than a
@@ -666,6 +679,109 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 	return e.countToNumber(Value{Ref: newLen, Ty: TypeI64}), nil
 }
 
+// emitArrayLengthAssign implements `arr.length = n`: a shorter length drops
+// the tail, a longer one grows the array (a new slot reads as undefined in a
+// boxed-element array, as its kind's zero value otherwise — a hole has no
+// representation in the typed element model). A length that is no array
+// length (negative, fractional, ≥ 2^32) is Node's RangeError. The header is
+// shared, so every alias sees the change.
+func (e *Emitter) emitArrayLengthAssign(mem *ast.MemberExpression, rhs ast.Expression) (Value, error) {
+	ptrPtr, lenPtr, elemTy, err := e.resolveArrayMutLoc(mem.Object, "length assignment", mem.GetPos())
+	if err != nil {
+		return Value{}, err
+	}
+	v, err := e.emitExpr(rhs)
+	if err != nil {
+		return Value{}, err
+	}
+	num, err := e.coerceChecked(v, TypeF64, rhs.GetPos(), "array length")
+	if err != nil {
+		return Value{}, err
+	}
+	// The range check comes first: converting a negative or huge double
+	// would be poison.
+	inRange := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp olt double %s, 4294967296.0", inRange, num.Ref))
+	nonNeg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp oge double %s, 0.0", nonNeg, num.Ref))
+	ranged := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", ranged, inRange, nonNeg))
+	badL, rangedL, goodL := e.freshLabel("arrlen.bad"), e.freshLabel("arrlen.ranged"), e.freshLabel("arrlen.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ranged, rangedL, badL))
+	e.emitLabel(rangedL)
+	n := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fptoui double %s to i64", n, num.Ref))
+	back := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = uitofp i64 %s to double", back, n))
+	exact := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, %s", exact, back, num.Ref))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", exact, goodL, badL))
+	e.emitLabel(badL)
+	e.ensureExceptionHelpers()
+	errObj := e.buildErrorObj(errorKindIDs["RangeError"], e.internString("Invalid array length"), e.internString("RangeError"))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+	e.emitTerminator("unreachable")
+	e.emitLabel(goodL)
+
+	curPtr, curLen := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
+	grow := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ugt i64 %s, %s", grow, n, curLen))
+	growL, doneL := e.freshLabel("arrlen.grow"), e.freshLabel("arrlen.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", grow, growL, doneL))
+
+	e.emitLabel(growL)
+	width := elemTy.Align()
+	bytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, n, width))
+	e.ensureRealloc()
+	newPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", newPtr, curPtr, bytes))
+	tail := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", tail, newPtr, e.mulConst(curLen, width)))
+	tailBytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", tailBytes, bytes, e.mulConst(curLen, width)))
+	e.ensureMemset()
+	e.emitInstr(fmt.Sprintf("call ptr @memset(ptr %s, i32 0, i64 %s)", tail, tailBytes))
+	if elemTy.IsDynamic && elemTy.IR == "i64" {
+		// Boxed elements: each new slot holds undefined.
+		idx := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", curLen, idx))
+		condL, bodyL, endL := e.freshLabel("arrlen.fill"), e.freshLabel("arrlen.fillb"), e.freshLabel("arrlen.fille")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(condL)
+		i := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, idx))
+		more := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %s, %s", more, i, n))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, endL))
+		e.emitLabel(bodyL)
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", slot, newPtr, i))
+		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, slot))
+		next := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idx))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(endL)
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(doneL)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", n, lenPtr))
+	return num, nil
+}
+
+// mulConst is reg * k as a fresh register.
+func (e *Emitter) mulConst(reg string, k int) string {
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", r, reg, k))
+	return r
+}
+
 // emitArrayIndexAssignGrow implements JS's append-by-index idiom for a plain
 // `arr[i] = v` store: an index equal to the current length grows the array by
 // one (the same realloc-append emitPush uses, through the shared header, so
@@ -678,7 +794,11 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 // resolvable mutable array location (e.g. an rvalue receiver) and the caller
 // should fall back to the fixed-bounds path.
 func (e *Emitter) emitArrayIndexAssignGrow(idxEx *ast.IndexExpression, rhs ast.Expression) (Value, bool, error) {
-	ptrPtr, lenPtr, elemTy, err := e.resolveArrayMutLoc(idxEx.Object, "indexed assignment", idxEx.GetPos())
+	verb := "indexed assignment"
+	if lit, ok := idxEx.Index.(*ast.NumberLiteral); ok && strings.Trim(lit.Value, "0123456789") == "" {
+		verb = "set:" + lit.Value
+	}
+	ptrPtr, lenPtr, elemTy, err := e.resolveArrayMutLoc(idxEx.Object, verb, idxEx.GetPos())
 	if err != nil {
 		return Value{}, false, nil
 	}
@@ -754,4 +874,18 @@ func (e *Emitter) emitArrayIndexAssignGrow(idxEx *ast.IndexExpression, rhs ast.E
 
 	e.emitLabel(doneL)
 	return val, true, nil
+}
+
+// undefinedAccessMessage is Node's TypeError for a mutation of undefined:
+// a method read (`xs.push`), or a property set (`xs.length = 0`, `xs[0] = 1`).
+func undefinedAccessMessage(verb string) string {
+	switch {
+	case verb == "length assignment":
+		return "Cannot set properties of undefined (setting 'length')"
+	case strings.HasPrefix(verb, "set:"):
+		return "Cannot set properties of undefined (setting '" + strings.TrimPrefix(verb, "set:") + "')"
+	case verb == "indexed assignment":
+		return "Cannot set properties of undefined"
+	}
+	return "Cannot read properties of undefined (reading '" + verb + "')"
 }

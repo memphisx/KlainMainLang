@@ -153,7 +153,7 @@ func TestRedeclarations(t *testing.T) {
 		{"let x = 1\nlet x = 2", "x"},
 		{"var x = 1\nvar x = 2", ""},
 		{"function f() {}\nvar f = 1", ""},
-		{"function h() {}\nfunction h() {}", ""},
+		{"function h() {}\nfunction h() {}", "duplicate function implementation of 'h'"},
 		{"let x = 1\n{ var x = 2 }", "x"},
 		{"{ var x = 2 }\nlet x = 1", "x"},
 		{"function f(a: number) { let a = 1 }", "a"},

@@ -368,27 +368,8 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 		if present(n.Base) && !visit(n.Base) {
 			return false
 		}
-	case *NewDatabaseSyncExpression:
-		if present(n.Path) && !visit(n.Path) {
-			return false
-		}
-		if present(n.Options) && !visit(n.Options) {
-			return false
-		}
 	case *NewURLPatternExpression:
 		if present(n.Init) && !visit(n.Init) {
-			return false
-		}
-	case *NewEventSourceExpression:
-		if present(n.URL) && !visit(n.URL) {
-			return false
-		}
-	case *NewWebSocketExpression:
-		if present(n.URL) && !visit(n.URL) {
-			return false
-		}
-	case *NewWorkerExpression:
-		if present(n.WorkerData) && !visit(n.WorkerData) {
 			return false
 		}
 	case *NewURLSearchParamsExpression:
@@ -397,23 +378,6 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 		}
 	case *NewHeadersExpression:
 		if present(n.Init) && !visit(n.Init) {
-			return false
-		}
-	case *NewEventExpression:
-		if present(n.TypeArg) && !visit(n.TypeArg) {
-			return false
-		}
-		if present(n.Cancelable) && !visit(n.Cancelable) {
-			return false
-		}
-	case *NewCustomEventExpression:
-		if present(n.TypeArg) && !visit(n.TypeArg) {
-			return false
-		}
-		if present(n.Detail) && !visit(n.Detail) {
-			return false
-		}
-		if present(n.Cancelable) && !visit(n.Cancelable) {
 			return false
 		}
 	case *NewRequestExpression:
@@ -667,6 +631,9 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 			if n.Parameters[i] != nil && !visit(n.Parameters[i]) {
 				return false
 			}
+		}
+		if present(n.This) && !visit(n.This) {
+			return false
 		}
 		if present(n.Type) && !visit(n.Type) {
 			return false
@@ -1108,28 +1075,9 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 		if present(n.Base) {
 			n.Base = rewrite(n.Base).(Expression)
 		}
-	case *NewDatabaseSyncExpression:
-		if present(n.Path) {
-			n.Path = rewrite(n.Path).(Expression)
-		}
-		if present(n.Options) {
-			n.Options = rewrite(n.Options).(Expression)
-		}
 	case *NewURLPatternExpression:
 		if present(n.Init) {
 			n.Init = rewrite(n.Init).(Expression)
-		}
-	case *NewEventSourceExpression:
-		if present(n.URL) {
-			n.URL = rewrite(n.URL).(Expression)
-		}
-	case *NewWebSocketExpression:
-		if present(n.URL) {
-			n.URL = rewrite(n.URL).(Expression)
-		}
-	case *NewWorkerExpression:
-		if present(n.WorkerData) {
-			n.WorkerData = rewrite(n.WorkerData).(Expression)
 		}
 	case *NewURLSearchParamsExpression:
 		if present(n.Init) {
@@ -1138,23 +1086,6 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 	case *NewHeadersExpression:
 		if present(n.Init) {
 			n.Init = rewrite(n.Init).(Expression)
-		}
-	case *NewEventExpression:
-		if present(n.TypeArg) {
-			n.TypeArg = rewrite(n.TypeArg).(Expression)
-		}
-		if present(n.Cancelable) {
-			n.Cancelable = rewrite(n.Cancelable).(Expression)
-		}
-	case *NewCustomEventExpression:
-		if present(n.TypeArg) {
-			n.TypeArg = rewrite(n.TypeArg).(Expression)
-		}
-		if present(n.Detail) {
-			n.Detail = rewrite(n.Detail).(Expression)
-		}
-		if present(n.Cancelable) {
-			n.Cancelable = rewrite(n.Cancelable).(Expression)
 		}
 	case *NewRequestExpression:
 		if present(n.URL) {
@@ -1399,6 +1330,9 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 			if n.Parameters[i] != nil {
 				n.Parameters[i] = rewrite(n.Parameters[i]).(*SignatureParameter)
 			}
+		}
+		if present(n.This) {
+			n.This = rewrite(n.This).(TypeNode)
 		}
 		if present(n.Type) {
 			n.Type = rewrite(n.Type).(TypeNode)
@@ -1738,6 +1672,11 @@ func visitSwitchCase(x *SwitchCase, visit func(Node) bool) bool {
 }
 
 func rewriteWorkerModule(x *WorkerModule, rewrite func(Node) Node) {
+	for i := range x.Deps {
+		if present(x.Deps[i]) {
+			x.Deps[i] = rewrite(x.Deps[i]).(Statement)
+		}
+	}
 	for i := range x.Body {
 		if present(x.Body[i]) {
 			x.Body[i] = rewrite(x.Body[i]).(Statement)
@@ -1746,6 +1685,11 @@ func rewriteWorkerModule(x *WorkerModule, rewrite func(Node) Node) {
 }
 
 func visitWorkerModule(x *WorkerModule, visit func(Node) bool) bool {
+	for i := range x.Deps {
+		if present(x.Deps[i]) && !visit(x.Deps[i]) {
+			return false
+		}
+	}
 	for i := range x.Body {
 		if present(x.Body[i]) && !visit(x.Body[i]) {
 			return false
@@ -1755,4 +1699,4 @@ func visitWorkerModule(x *WorkerModule, visit func(Node) bool) bool {
 }
 
 // nodeKinds is every node type the walker knows, for tests.
-var nodeKinds = []string{"Program", "BlockStatement", "VarDeclaration", "VarDeclarationList", "FunctionDeclaration", "ReturnStatement", "ForStatement", "ForOfStatement", "WhileStatement", "DoWhileStatement", "ForInStatement", "IfStatement", "SwitchStatement", "BreakStatement", "ContinueStatement", "LabeledStatement", "ArrayDestructuring", "ObjectDestructuring", "ExpressionStatement", "NumberLiteral", "StringLiteral", "BooleanLiteral", "NullLiteral", "AwaitExpression", "YieldExpression", "Identifier", "ThisExpression", "BinaryExpression", "ConditionalExpression", "SequenceExpression", "NonNullExpression", "AsExpression", "SpreadElement", "UnaryExpression", "UpdateExpression", "AssignmentExpression", "CallExpression", "MemberExpression", "ArrayLiteral", "IndexExpression", "NewArrayExpression", "ObjectLiteral", "ArrowFunction", "FunctionExpression", "ClassExpression", "TemplateLiteral", "TaggedTemplateExpression", "NewMapExpression", "NewSetExpression", "NewWeakMapExpression", "NewWeakSetExpression", "NewWeakRefExpression", "NewEventEmitterExpression", "NewReadableStreamExpression", "NewWritableStreamExpression", "NewTransformStreamExpression", "NewCompressionStreamExpression", "EnumDeclaration", "ThrowStatement", "TryStatement", "NewErrorExpression", "NewDateExpression", "NewURLExpression", "NewDatabaseSyncExpression", "NewURLPatternExpression", "NewEventSourceExpression", "NewWebSocketExpression", "NewWorkerExpression", "NewURLSearchParamsExpression", "NewHeadersExpression", "NewAbortControllerExpression", "NewEventTargetExpression", "NewEventExpression", "NewCustomEventExpression", "NewRequestExpression", "NewXMLHttpRequestExpression", "NewDataViewExpression", "NewBlobExpression", "NewArrayBufferExpression", "NewBroadcastChannelExpression", "NewMessageChannelExpression", "NewChannelExpression", "NewTypedArrayExpression", "NewTextEncoderExpression", "NewTextDecoderExpression", "NewRegExpExpression", "NewExpression", "InterfaceDeclaration", "ClassDeclaration", "SuperExpression", "TypeAliasDeclaration", "AmbientModuleDeclaration", "ExportDeclaration", "ImportDeclaration", "ExportFromDeclaration", "ImportMetaUrl", "ImportCallExpression", "NewHTTPAgentExpression", "NewWebviewExpression", "KeywordType", "TypeReference", "ArrayType", "TupleType", "NamedTupleMember", "OptionalType", "RestType", "UnionType", "IntersectionType", "ParenthesizedType", "TypeParameter", "SignatureParameter", "FunctionType", "ConstructorType", "TypeLiteral", "PropertySignature", "MethodSignature", "CallSignature", "ConstructSignature", "IndexSignature", "MappedType", "ConditionalType", "InferType", "TypeOperator", "IndexedAccessType", "ImportType", "TypeQuery", "LiteralType", "TemplateLiteralType", "TemplateLiteralTypeSpan", "TypePredicate"}
+var nodeKinds = []string{"Program", "BlockStatement", "VarDeclaration", "VarDeclarationList", "FunctionDeclaration", "ReturnStatement", "ForStatement", "ForOfStatement", "WhileStatement", "DoWhileStatement", "ForInStatement", "IfStatement", "SwitchStatement", "BreakStatement", "ContinueStatement", "LabeledStatement", "ArrayDestructuring", "ObjectDestructuring", "ExpressionStatement", "NumberLiteral", "StringLiteral", "BooleanLiteral", "NullLiteral", "AwaitExpression", "YieldExpression", "Identifier", "ThisExpression", "BinaryExpression", "ConditionalExpression", "SequenceExpression", "NonNullExpression", "AsExpression", "SpreadElement", "UnaryExpression", "UpdateExpression", "AssignmentExpression", "CallExpression", "MemberExpression", "ArrayLiteral", "IndexExpression", "NewArrayExpression", "ObjectLiteral", "ArrowFunction", "FunctionExpression", "ClassExpression", "TemplateLiteral", "TaggedTemplateExpression", "NewMapExpression", "NewSetExpression", "NewWeakMapExpression", "NewWeakSetExpression", "NewWeakRefExpression", "NewReadableStreamExpression", "NewWritableStreamExpression", "NewTransformStreamExpression", "NewCompressionStreamExpression", "EnumDeclaration", "ThrowStatement", "TryStatement", "NewErrorExpression", "NewDateExpression", "NewURLExpression", "NewURLPatternExpression", "NewURLSearchParamsExpression", "NewHeadersExpression", "NewRequestExpression", "NewXMLHttpRequestExpression", "NewDataViewExpression", "NewBlobExpression", "NewArrayBufferExpression", "NewChannelExpression", "NewTypedArrayExpression", "NewTextEncoderExpression", "NewTextDecoderExpression", "NewRegExpExpression", "NewExpression", "InterfaceDeclaration", "ClassDeclaration", "SuperExpression", "TypeAliasDeclaration", "AmbientModuleDeclaration", "ExportDeclaration", "ImportDeclaration", "ExportFromDeclaration", "ImportMetaUrl", "ImportCallExpression", "NewHTTPAgentExpression", "NewWebviewExpression", "KeywordType", "TypeReference", "ArrayType", "TupleType", "NamedTupleMember", "OptionalType", "RestType", "UnionType", "IntersectionType", "ParenthesizedType", "TypeParameter", "SignatureParameter", "FunctionType", "ConstructorType", "TypeLiteral", "PropertySignature", "MethodSignature", "CallSignature", "ConstructSignature", "IndexSignature", "MappedType", "ConditionalType", "InferType", "TypeOperator", "IndexedAccessType", "ImportType", "TypeQuery", "LiteralType", "TemplateLiteralType", "TemplateLiteralTypeSpan", "TypePredicate"}

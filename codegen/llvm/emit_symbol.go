@@ -34,7 +34,7 @@ func (e *Emitter) emitSymbolConstructor(args []ast.Expression, pos ast.Pos) (Val
 	ty := SymbolType()
 	e.ensureMalloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, ty.StructSize()))
+	e.emitObjMallocInto(dataReg, ty)
 	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", symbolTypeIDFlag, dataReg))
 	idx, fieldTy, _ := ty.FieldIndex("description")
 	gepReg := e.freshReg()
@@ -100,7 +100,7 @@ func (e *Emitter) ensureSymbolRegistry() {
 	e.ensureMalloc()
 	ty := SymbolType()
 	idx, _, _ := ty.FieldIndex("description")
-	e.emitGlobal("@__kml_sym_registry = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_sym_registry = internal " + e.isolateTLS() + "global ptr null, align 8")
 	e.emitGlobal(fmt.Sprintf(`
 define ptr @__kml_symbol_for(ptr %%key) {
 entry:
@@ -199,4 +199,29 @@ func (e *Emitter) emitSymbolStatic(method string, args []ast.Expression, pos ast
 		return Value{Ref: r, Ty: nt}, nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: Symbol.%s is not supported", pos.Line, pos.Col, method)
+}
+
+// wellKnownSymbols are the ECMAScript well-known symbols (`Symbol.iterator`,
+// …). Each is one static Symbol; used as a property key, the two iteration
+// protocols' map to the member names a class's `[Symbol.iterator]()` /
+// `[Symbol.asyncIterator]()` compile to (`@@iterator`, `@@asyncIterator`).
+var wellKnownSymbols = map[string]bool{
+	"asyncIterator": true, "hasInstance": true, "isConcatSpreadable": true,
+	"iterator": true, "match": true, "matchAll": true, "replace": true,
+	"search": true, "species": true, "split": true, "toPrimitive": true,
+	"toStringTag": true, "unscopables": true, "dispose": true, "asyncDispose": true,
+}
+
+// wellKnownSymbol returns the static Symbol for `Symbol.name`.
+func (e *Emitter) wellKnownSymbol(name string) string {
+	g := "@__kml_wksym_" + name
+	if e.wkSymbols == nil {
+		e.wkSymbols = map[string]bool{}
+	}
+	if !e.wkSymbols[name] {
+		e.wkSymbols[name] = true
+		ty := SymbolType()
+		e.emitGlobal(fmt.Sprintf("%s = internal global %s { i64 %d, ptr %s }, align 8", g, ty.StructIR(), symbolTypeIDFlag, e.internString("Symbol."+name)))
+	}
+	return g
 }

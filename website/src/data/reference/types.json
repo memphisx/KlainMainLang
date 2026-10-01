@@ -170,8 +170,7 @@
       "description": "Opaque unique values — Symbol()/Symbol(\"desc\") (no new, Symbol is not a constructor), ===/!==, typeof, .description, .toString(), and the Symbol.for/Symbol.keyFor registry (keyFor gives undefined for a symbol not in it). Uniqueness comes from the value's own heap-pointer identity, so two Symbol() calls with the same description are never equal.",
       "snippet": "const a = Symbol(\"id\")\nconst b = Symbol(\"id\")\nconsole.log(a === b)                  // false\nconsole.log(Symbol.keyFor(Symbol.for(\"app\")))  // app",
       "differences": [
-        "No dynamic property keys",
-        "No well-known symbols as runtime values (`Symbol.iterator`, etc.); the exceptions are `[Symbol.asyncIterator]` and `[Symbol.iterator]` recognized purely syntactically as class/object-literal computed-member keys, not evaluable `Symbol` values"
+        "Of the well-known symbols the runtime honors `Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive` (own properties, class and object-literal members); `toStringTag`, `hasInstance`, `species` and the rest are values only."
       ],
       "seeAlso": [],
       "spec": {
@@ -303,8 +302,8 @@
       "description": "The same runtime box as any/unknown with a checked member set on top, statically restricted to the declared members at every assignment/call/return boundary. A narrowed local unboxes to the concrete member; an object member to its typed pointer. Usable for a variable, parameter, return value, object field and array element ((number | string)[], and (number | undefined)[] whose absent elements are real undefineds); every write is checked against the member set.",
       "snippet": "let x: string | number = \"hello\"\nconsole.log(typeof x)    // string\nx = 42\nconsole.log(typeof x)    // number",
       "differences": [
-        "Scalar members (`number`/`string`/`boolean` + `null`/`undefined`), object/interface/class members (one object member, or ≥2 as a **discriminated union** sharing a first-position string-literal tag), and a `ReadableStream` member; array/`ArrayBuffer` members, number-literal tags, and a non-first-position tag aren't supported",
-        "Flow narrowing is for a union **local** via `typeof`/truthiness/`==null` (if/else branches + early return); a field/element, discriminated-union tag, `switch (typeof x)`, and `as` casts aren't narrowed; an un-narrowed object union has no field access"
+        "Scalar members (`number`/`string`/`boolean` + `null`/`undefined`), object members (classes, plain object types, one headerless host object such as `URL`, or a discriminated union), and a `ReadableStream` member; two array members of one kind, number-literal tags, and a non-first-position tag aren't supported",
+        "Flow narrowing is for a union **local** via `typeof`/truthiness/`==null`/`instanceof`/`in`/a tag (if/else branches + early return); a field/element, `switch (typeof x)`, and `as` casts aren't narrowed; before narrowing an object union reads only a member all its object members declare"
       ],
       "seeAlso": [
         "types.nullable",

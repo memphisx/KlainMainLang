@@ -106,7 +106,7 @@ console.log("done")
 
 func TestE2EFinRegHeldEqualsTargetRejected(t *testing.T) {
 	mustCompileError(t, `
-const reg = new FinalizationRegistry((held: string) => {})
+const reg = new FinalizationRegistry((held: object) => {})
 const a = { v: 1 }
 reg.register(a, a)
 `, "must not be the target itself")
@@ -116,7 +116,7 @@ func TestE2EFinRegPrimitiveTargetRejected(t *testing.T) {
 	mustCompileError(t, `
 const reg = new FinalizationRegistry((held: string) => {})
 reg.register("prim", "h")
-`, "must be an object")
+`, "not assignable to parameter of type 'object'")
 }
 
 // buildBinaryFinalizersReport mirrors buildBinary with -finalizers=report set

@@ -817,16 +817,16 @@ performance.mark("start")
 let arr: number[] = []
 for (let i = 0; i < 200000; i++) { arr.push(i) }
 performance.mark("end")
-const d1: number = performance.measure("work", "start", "end")
+const d1: number = performance.measure("work", "start", "end").duration
 console.log(d1 >= 0)
-const d2: number = performance.measure("work-to-now", "start")
-console.log(d2 >= d1)
-`, "true\ntrue")
+const m = performance.measure("work-to-now", "start")
+console.log(m.duration >= d1, m.name, m.entryType)
+`, "true\ntrue work-to-now measure")
 }
 
 func TestE2EPerformanceMarkOverwrite(t *testing.T) {
-	// Re-marking "m" overwrites its timestamp (last-write-wins, documented
-	// V1 scope) — a measure taken right after the second mark() spans ~no time,
+	// A measure from a mark name uses its latest timestamp (Node's
+	// markTimings map) — a measure taken right after the second mark() spans ~no time,
 	// while one spanning the whole loop before it spans the loop's duration, so
 	// d2 must not exceed d1. Uses `<=`, not `<`: on a coarse monotonic clock
 	// (some virtualized/CI environments) a fast loop can measure as 0, making
@@ -838,9 +838,9 @@ func TestE2EPerformanceMarkOverwrite(t *testing.T) {
 performance.mark("m")
 let arr: number[] = []
 for (let i = 0; i < 200000; i++) { arr.push(i) }
-const d1: number = performance.measure("first", "m")
+const d1: number = performance.measure("first", "m").duration
 performance.mark("m")
-const d2: number = performance.measure("second", "m")
+const d2: number = performance.measure("second", "m").duration
 console.log(d2 <= d1)
 `, "true")
 }
@@ -858,9 +858,9 @@ func TestE2EPerformanceMarkOverwriteMeasuredSpan(t *testing.T) {
 performance.mark("m")
 const spinStart: number = performance.now()
 while (performance.now() - spinStart < 8.0) { }
-const d1: number = performance.measure("first", "m")
+const d1: number = performance.measure("first", "m").duration
 performance.mark("m")
-const d2: number = performance.measure("second", "m")
+const d2: number = performance.measure("second", "m").duration
 console.log(d2 < d1)
 `, "true")
 }
@@ -870,10 +870,24 @@ func TestE2EPerformanceMeasureMissingMarkThrows(t *testing.T) {
 try {
   performance.measure("bad", "never-marked")
 } catch (e) {
-  console.log("caught")
-  console.log((e as Error).message)
+  console.log((e as Error).name, (e as Error).message, e instanceof DOMException)
 }
-`, "caught\nperformance.measure: no mark named 'never-marked'")
+`, `SyntaxError The "never-marked" performance mark has not been set true`)
+}
+
+// performance's user-timing entries (lib/node/perf_hooks.ts): marks carry a
+// structured-cloned detail, getEntries* read the timeline in start order.
+func TestE2EPerformanceEntries(t *testing.T) {
+	assertOutput(t, `
+performance.mark('a')
+const m = performance.mark('b', { detail: { k: 1 } })
+console.log(m.name, m.entryType, m.duration, m.detail)
+performance.measure('ab', 'a', 'b')
+console.log(performance.getEntriesByType('mark').map((e) => e.name))
+console.log(performance.getEntries().length, performance.timeOrigin > 1.7e12)
+performance.clearMarks('a')
+console.log(performance.getEntriesByType('mark').length)
+`, "b mark 0 { k: 1 }\n[ 'a', 'b' ]\n3 true\n1")
 }
 
 func TestE2EBtoaAtob(t *testing.T) {

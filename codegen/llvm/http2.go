@@ -18,6 +18,23 @@ var http2ServerSource string
 // HTTP2ServerSource returns the C source implementing the __kml_h2_* ABI.
 func HTTP2ServerSource() string { return http2ServerSource }
 
+//go:embed http2src/h2node.c
+var h2NodeSource string
+
+// H2NodeSource returns the nghttp2 session natives lib/node/http2.ts calls
+// (`@link http2`).
+func H2NodeSource() string { return h2NodeSource }
+
+// UsesH2Node reports whether the program links the http2 module's natives.
+func (e *Emitter) UsesH2Node() bool { return e.usedH2Node }
+
+// ensureH2Natives compiles h2node.c in; it reports strings through the
+// pool's lastString.
+func (e *Emitter) ensureH2Natives() {
+	e.ensureNativePool()
+	e.usedH2Node = true
+}
+
 // UsesHTTP2 reports whether the program uses the h2 server path, so main.go only
 // compiles http2.c + links nghttp2 when needed (mirrors UsesTLS/UsesCrypto).
 func (e *Emitter) UsesHTTP2() bool { return e.usedHTTP2 }
@@ -90,31 +107,6 @@ func LocateHTTP2() (cflags, libs []string) {
 		libs = []string{"-lnghttp2"}
 	}
 	return cflags, libs
-}
-
-// ensureH2ClientRuntime (TDD-00139 Stage 3) declares the client-session C ABI
-// and defines the four generic IR callbacks the driver fires as response
-// frames arrive. The stream context is a fixed 32-byte layout: cbResponse@0,
-// cbData@8, cbEnd@16, headersMap@24 — independent of any user types, so these
-// emit once regardless of handler shapes.
-func (e *Emitter) ensureH2ClientRuntime() {
-	if e.usedH2Client {
-		return
-	}
-	e.usedH2Client = true
-	e.usedHTTP2 = true // links http2.c + nghttp2
-	e.ensureStrHeaderRuntime()
-	e.ensureMapStrHelpers()
-	e.ensureMemcpy()
-	e.emitGlobal(`declare ptr @__kml_h2c_connect_url(ptr)
-declare i32 @__kml_h2c_request(ptr, ptr, ptr, ptr, ptr, ptr, i64)
-declare void @__kml_h2c_pump_tick()
-declare i64 @__kml_h2c_pump_all()
-declare void @__kml_h2c_flush()
-declare void @__kml_h2c_close(ptr)
-declare void @__kml_h2c_destroy(ptr)`)
-	e.ensureAtexitDecl()
-	e.ensureH2ClientBridge()
 }
 
 // ensureH2ClientBridge defines the four generic callbacks http2.c fires as

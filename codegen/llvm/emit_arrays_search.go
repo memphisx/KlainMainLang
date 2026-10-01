@@ -248,7 +248,7 @@ func (e *Emitter) emitArrayFindIndex(mem *ast.MemberExpression, args []ast.Expre
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -278,10 +278,7 @@ func (e *Emitter) emitArrayFindIndex(mem *ast.MemberExpression, args []ast.Expre
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
 	elemVal := e.loadArrayElem(gep, elemTy)
-	cbArgs := []Value{elemVal}
-	if cb.acceptsArgAt(1) {
-		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
-	}
+	cbArgs := e.hofCBArgs(cb, []Value{elemVal}, idxVal, ptrReg, lenReg, elemTy)
 	predVal, err := e.emitCBCall(cb, cbArgs)
 	if err != nil {
 		return Value{}, err
@@ -317,7 +314,7 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -353,10 +350,7 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
 	elemVal := e.loadArrayElem(gep, elemTy)
-	cbArgs := []Value{elemVal}
-	if cb.acceptsArgAt(1) {
-		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
-	}
+	cbArgs := e.hofCBArgs(cb, []Value{elemVal}, idxVal, ptrReg, lenReg, elemTy)
 	predVal, err := e.emitCBCall(cb, cbArgs)
 	if err != nil {
 		return Value{}, err
@@ -396,7 +390,7 @@ func (e *Emitter) emitArrayFindLastIndex(mem *ast.MemberExpression, args []ast.E
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -428,10 +422,7 @@ func (e *Emitter) emitArrayFindLastIndex(mem *ast.MemberExpression, args []ast.E
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
 	elemVal := e.loadArrayElem(gep, elemTy)
-	cbArgs := []Value{elemVal}
-	if cb.acceptsArgAt(1) {
-		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
-	}
+	cbArgs := e.hofCBArgs(cb, []Value{elemVal}, idxVal, ptrReg, lenReg, elemTy)
 	predVal, err := e.emitCBCall(cb, cbArgs)
 	if err != nil {
 		return Value{}, err

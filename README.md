@@ -495,5 +495,12 @@ PURPOSE. The AGPL's §13 additionally requires that anyone who runs a modified
 version to interact with users over a network make the modified source
 available to those users.
 
-As the sole copyright holder, the author reserves the right to offer the
-software under separate commercial terms as well.
+Parts of the project are derived from Node.js, `@types/node` and
+TypeScript's library declarations, under their own permissive licences (MIT
+and Apache-2.0); their notices, and which files they cover, are in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+As the copyright holder of the rest, the author reserves the right to offer
+the software under separate commercial terms as well; the third-party
+licences allow that for the parts they cover, provided their notices go
+with it.

@@ -315,34 +315,14 @@ setInterval(() => { console.log("tick"); }, 100000);
 	}
 }
 
-// TestE2ESignalDynamicEventNameRejected confirms process.on's event-name
-// argument must be a compile-time string literal, the same precedent
-// Object.hasOwn's dynamic-key rejection already sets.
-func TestE2ESignalDynamicEventNameRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-const name: string = "SIGINT";
-process.on(name, () => { console.log("x"); });
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a dynamic event name, got none")
-	}
-	if !strings.Contains(err.Error(), "string literal") {
-		t.Errorf("error = %q, want it to mention requiring a string literal event name", err.Error())
-	}
-}
-
-// TestE2ESignalUnsupportedEventNameRejected confirms an event name other
-// than 'SIGINT'/'SIGTERM' is a clean compile error, not silently ignored.
-func TestE2ESignalUnsupportedEventNameRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-process.on('beforeExit', () => { console.log("x"); });
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for an unsupported event name, got none")
-	}
-	if !strings.Contains(err.Error(), "SIGINT") {
-		t.Errorf("error = %q, want it to mention the supported event names", err.Error())
-	}
+// TestE2ESignalKillRefused: a signal the host refuses to catch is Node's
+// ErrnoException from the listener's registration, and no listener is added.
+func TestE2ESignalKillRefused(t *testing.T) {
+	skipSignalDeliveryOnWindows(t)
+	assertOutput(t, `
+try { process.on('SIGKILL', () => {}); } catch (e: any) { console.log(e.code, e.syscall, e.message); }
+console.log(process.listenerCount('SIGKILL'));
+`, "EINVAL uv_signal_start uv_signal_start EINVAL\n0")
 }
 
 // skipSignalDeliveryOnWindows: Go's os.Process.Signal cannot deliver SIGINT

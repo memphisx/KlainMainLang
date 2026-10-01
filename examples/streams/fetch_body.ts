@@ -7,7 +7,7 @@ console.log("status:", res.status);
 const decoder = new TextDecoder();
 let text = "";
 let chunks = 0;
-for await (const chunk of res.body) {
+for await (const chunk of res.body!) {
   chunks = chunks + 1;
   text = text + decoder.decode(chunk);
 }

@@ -13,15 +13,14 @@ func (e *Emitter) ensureClockGettime() {
 	e.emitGlobal("declare i32 @clock_gettime(i32 noundef, ptr noundef)")
 }
 
-// monotonicClockID returns the CLOCK_MONOTONIC numeric value for whatever
-// OS is running this compiler right now (and will therefore also run clang
-// moments later — this project doesn't cross-compile). Verified directly
-// against the system header rather than trusted from memory: Darwin's is 6
-// (confirmed in <_time.h>); glibc's is the well-known, decades-stable
-// kernel UAPI value 1. The same class of platform check as errnoAccessor.
+// monotonicClockID returns the monotonic clock libuv's uv_hrtime reads on
+// the target: Darwin's CLOCK_UPTIME_RAW, 8 in <_time.h> (mach_absolute_time,
+// nanosecond resolution — Darwin's CLOCK_MONOTONIC, 6, only counts
+// microseconds); elsewhere CLOCK_MONOTONIC, the kernel UAPI value 1. The
+// same class of platform check as errnoAccessor.
 func (e *Emitter) monotonicClockID() string {
 	if e.opts.Target.OS() == "darwin" {
-		return "6"
+		return "8"
 	}
 	return "1"
 }
@@ -72,6 +71,7 @@ func (e *Emitter) ensurePerformanceNow() {
 	e.usedPerformanceNow = true
 	e.ensureClockGettime()
 	e.emitGlobal("@__kml_perf_origin = internal global double 0.0, align 8")
+	e.emitGlobal("@__kml_perf_origin_wall = internal global double 0.0, align 8")
 	e.emitGlobal(`@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @__kml_perf_init, ptr null }]`)
 	e.emitGlobal(fmt.Sprintf(`
 define double @__kml_perf_raw_ms() {
@@ -94,6 +94,18 @@ define void @__kml_perf_init() {
 entry:
   %%o = call double @__kml_perf_raw_ms()
   store double %%o, ptr @__kml_perf_origin, align 8
+  %%wts = alloca { i64, i64 }, align 8
+  %%wr = call i32 @clock_gettime(i32 0, ptr %%wts)
+  %%wsec_p = getelementptr { i64, i64 }, ptr %%wts, i32 0, i32 0
+  %%wnsec_p = getelementptr { i64, i64 }, ptr %%wts, i32 0, i32 1
+  %%wsec = load i64, ptr %%wsec_p, align 8
+  %%wnsec = load i64, ptr %%wnsec_p, align 8
+  %%wsec_f = sitofp i64 %%wsec to double
+  %%wnsec_f = sitofp i64 %%wnsec to double
+  %%wsec_ms = fmul double %%wsec_f, 1000.0
+  %%wnsec_ms = fdiv double %%wnsec_f, 1000000.0
+  %%wall = fadd double %%wsec_ms, %%wnsec_ms
+  store double %%wall, ptr @__kml_perf_origin_wall, align 8
   ret void
 }
 
@@ -106,22 +118,26 @@ entry:
 }`, e.monotonicClockID()))
 }
 
-// ensurePerformanceMarkMap declares the hidden global backing
-// performance.mark()/.measure() — a lazily-created Map<string, number>,
-// reusing the exact same __kml_map_str_* helpers console.count() already
-// uses (ensureMapStrHelpers), just never exposed as a KML-level value. The
-// map's i64 value slot holds a double mark timestamp's raw bit pattern
-// (bitcast, not a lossy numeric conversion — the same 64-bit width means no
-// precision is lost). Marking the same name twice overwrites the previous
-// timestamp (last-write-wins, V1 scope: this compiler tracks one timestamp
-// per name, not real performance's full ordered entries-by-name list).
-func (e *Emitter) ensurePerformanceMarkMap() {
-	if e.usedPerformanceMarkMap {
+// ensureNativePerf defines lib/native.d.ts's perfNow and perfTimeOrigin:
+// performance.now() and the wall-clock time (epoch ms) of the time origin,
+// both captured by __kml_perf_init at process start.
+func (e *Emitter) ensureNativePerf() {
+	if e.fnDecls["__kml_native_perf_now"] {
 		return
 	}
-	e.usedPerformanceMarkMap = true
-	e.ensureMapStrHelpers()
-	e.emitGlobal("@__kml_performance_mark_map = internal thread_local global ptr null, align 8")
+	e.fnDecls["__kml_native_perf_now"] = true
+	e.ensurePerformanceNow()
+	e.emitGlobal(`
+define double @__kml_native_perf_now() {
+entry:
+  %r = call double @__kml_performance_now()
+  ret double %r
+}
+define double @__kml_native_perf_time_origin() {
+entry:
+  %r = load double, ptr @__kml_perf_origin_wall, align 8
+  ret double %r
+}`)
 }
 
 // ensureDateDecompose declares __kml_date_decompose: converts a milliseconds-

@@ -1,7 +1,4 @@
-// The part of Node's `util` written in TypeScript: promisify, ported from
-// Node v24's lib/internal/util.js. The rest of `util` is the compiler's own;
-// a program importing `util` imports this module too, and `util.X` names its
-// export X when it has one.
+// Node's lib/internal/util.js: promisify, which `util` exports.
 
 class NodeTypeError extends TypeError {
     code: string;
@@ -18,6 +15,8 @@ function received(v: any): string {
     return ' Received type ' + typeof v + ' (' + String(v) + ')';
 }
 
+const kCustomPromisifiedSymbol: unique symbol = Symbol.for('nodejs.util.promisify.custom');
+
 // The @types/node overloads: a callback-last function of up to four
 // arguments, typed; any other function, untyped.
 export function promisify<TResult>(fn: (callback: (err: any, result: TResult) => void) => void): () => Promise<TResult>;
@@ -33,7 +32,15 @@ export function promisify(original: any): (...args: any[]) => Promise<any> {
     if (typeof original !== 'function') {
         throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "original" argument must be of type function.' + received(original));
     }
-    return (...args: any[]): Promise<any> => new Promise<any>((resolve, reject) => {
+    const custom = original[kCustomPromisifiedSymbol];
+    if (custom) {
+        if (typeof custom !== 'function') {
+            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "util.promisify.custom" argument must be of type function.' + received(custom));
+        }
+        Object.defineProperty(custom, kCustomPromisifiedSymbol, { value: custom, enumerable: false, writable: false, configurable: true });
+        return custom;
+    }
+    const fn = (...args: any[]): Promise<any> => new Promise<any>((resolve, reject) => {
         original(...args, (err: any, value: any) => {
             if (err) {
                 reject(err);
@@ -42,4 +49,9 @@ export function promisify(original: any): (...args: any[]) => Promise<any> {
             resolve(value);
         });
     });
+    const fnAny: any = fn;
+    Object.defineProperty(fnAny, kCustomPromisifiedSymbol, { value: fn, enumerable: false, writable: false, configurable: true });
+    return fn;
 }
+
+promisify.custom = kCustomPromisifiedSymbol;

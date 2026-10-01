@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"KlainMainLang/ast"
+	"KlainMainLang/checker"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,9 +12,43 @@ import (
 // null check; a null object yields the zero value for the property's type.
 // Supports: string `.length` → i64; object fields → field type.
 func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
+	// `m?.index` on an exec() result that may be null: undefined then.
+	if ty, off, ok := execArrayMemberType(ex.Property); ok && e.inferExprType(ex.Object).ExecArray {
+		v, err := e.emitExpr(ex.Object)
+		if err != nil {
+			return Value{}, err
+		}
+		if v.ArrayHeader != "" {
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, ty.IR))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ty.IR, zeroRef(ty), slot))
+			present := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, v.ArrayHeader))
+			readL, doneL := e.freshLabel("execm.read"), e.freshLabel("execm.done")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, readL, doneL))
+			e.emitLabel(readL)
+			gep, r := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", gep, v.ArrayHeader, off))
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", r, ty.IR, gep))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ty.IR, r, slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(doneL)
+			out := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", out, ty.IR, slot))
+			if ty.IR != "ptr" {
+				return e.wrapUndefinedable(Value{Ref: out, Ty: ty}, present), nil
+			}
+			res := ty
+			res.Nullable, res.IsUndefined = true, true
+			return Value{Ref: out, Ty: res}, nil
+		}
+	}
 	objVal, err := e.emitExpr(ex.Object)
 	if err != nil {
 		return Value{}, err
+	}
+	if objVal.Ty.NullAndUndef {
+		objVal = e.fromThreeState(objVal) // either absence short-circuits
 	}
 
 	// Non-ptr types cannot be a null pointer; fall back to a regular
@@ -87,8 +122,8 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 			}
 			resultTy = e.canonicalizeClassTy(fieldTy)
 		}
-	} else if objVal.Ty.IsObject {
-		if _, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property); ok {
+	} else if objVal.Ty.IsObject || objVal.Ty.IsDynamicObject {
+		if _, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property); ok && !objVal.Ty.IsDynamicObject {
 			resultTy = e.canonicalizeClassTy(fieldTy)
 		} else {
 			recvTy := objVal.Ty
@@ -101,6 +136,9 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 			e.define(name, Symbol{Ptr: slot, Ty: recvTy})
 			viaMember = ast.NewMemberExpression(ast.NewIdentifier(name, ex.GetPos()), ex.Property, ex.GetPos())
 			resultTy = e.inferExprType(viaMember)
+			if objVal.Ty.IsDynamicObject && objVal.Ty.MapVal != nil {
+				resultTy = *objVal.Ty.MapVal // a dictionary's entry
+			}
 			if resultTy.IR == "" || resultTy.IR == "void" {
 				return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
 			}
@@ -181,6 +219,10 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
 			gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
+		if isRecordView(objVal.Ty) {
+			// Another layout behind a structural type (TDD-00233).
+			gepReg, _ = e.emitRecordFieldSlot(objVal, gepReg, fieldTy, ex.Property, true)
+		}
 		if fieldTy.IsArray {
 			propVal = e.loadArrayFieldValue(gepReg, fieldTy) // header-pointer slot (TDD-00213 S2)
 		} else {
@@ -411,6 +453,13 @@ func (e *Emitter) emitIndexBase(ex *ast.IndexExpression) (dataPtrReg, lenReg, id
 			// the value.
 			elemTy = flatElemView(elemTy)
 		}
+		if !ex.Optional {
+			key := ""
+			if lit, ok := ex.Index.(*ast.NumberLiteral); ok {
+				key = " (reading '" + lit.Value + "')"
+			}
+			e.emitArrayBindingGuard(sym, "Cannot read properties of undefined"+key)
+		}
 		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 		dataPtrReg = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, dataSlot))
@@ -524,7 +573,7 @@ func (e *Emitter) emitOptionalIndex(ex *ast.IndexExpression) (Value, error) {
 	recvTy.IsUndefined = false
 	e.define(recvName, Symbol{Ptr: slot, Ty: recvTy})
 	through := ast.NewIndexExpression(ast.NewIdentifier(recvName, ex.Object.GetPos()), ex.Index, ex.GetPos())
-	return e.emitNullGuardedExpr(e.ptrIsNull(objVal.Ref), through)
+	return e.emitNullGuardedExpr(e.isAbsentPtr(objVal.Ref, objVal.Ty), through)
 }
 
 func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
@@ -543,22 +592,6 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 // emitIndexUnguarded is emitIndex without the absent-base TypeError (see
 // emitMemberUnguarded).
 func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
-	// cluster.workers[id] is Node's ID-keyed lookup (the workers "object" is
-	// keyed by worker id, not position): a registry scan for .id == id,
-	// null when the worker exited or never existed.
-	if mem, ok := ex.Object.(*ast.MemberExpression); ok && mem.Property == "workers" {
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "cluster__kml_builtin" {
-			e.ensureClusterRuntime()
-			idxVal, err := e.emitExpr(ex.Index)
-			if err != nil {
-				return Value{}, err
-			}
-			idx := e.coerce(idxVal, TypeI64)
-			w := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_cluster_worker_by_id(i64 %s)", w, idx.Ref))
-			return Value{Ref: w, Ty: ClusterWorkerType()}, nil
-		}
-	}
 	// Enum bracket access (ADR-00480): `E["B"]` with a literal string key is
 	// the member's value; `E[0]` / `E[expr]` with a numeric key is the
 	// *reverse* mapping (value → member name string), resolved at compile
@@ -616,46 +649,9 @@ func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 			return Value{Ref: out, Ty: TypePtr}, nil
 		}
 	}
-	// process.env["KEY"]: dynamic-key environment variable lookup.
-	if e.isProcessEnvExpr(ex.Object) {
-		return e.emitProcessEnvGetDynamic(ex.Index)
-	}
-	// process.argv[i]: an out-of-range read yields `undefined` (a null string
-	// with the type flagged `string | undefined`, TDD-00187 Stage 3) instead
-	// of the general array bounds throw, matching Node. The ubiquitous
-	// `process.argv[2] === 'child'` / `if (!process.argv[2])` branching
-	// (child_process.fork self-fork files, TDD-00141) stays safe: string
-	// truthiness and comparison are both null-aware (ADR-00724).
-	if mem, ok := ex.Object.(*ast.MemberExpression); ok && mem.Property == "argv" {
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
-			idxVal, err := e.emitExpr(ex.Index)
-			if err != nil {
-				return Value{}, err
-			}
-			idxVal = e.coerce(idxVal, TypeI64)
-			dataReg := e.freshReg()
-			lenReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__process_argv_ptr, align 8", dataReg))
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__process_argv_len, align 8", lenReg))
-			inb := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %s, %s", inb, idxVal.Ref, lenReg))
-			inL := e.freshLabel("argv.in")
-			outL := e.freshLabel("argv.out")
-			doneL := e.freshLabel("argv.done")
-			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inb, inL, outL))
-			e.emitLabel(inL)
-			gep := e.freshReg()
-			elem := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", gep, dataReg, idxVal.Ref))
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", elem, gep))
-			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-			e.emitLabel(outL)
-			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-			e.emitLabel(doneL)
-			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ null, %%%s ]", r, elem, inL, outL))
-			return Value{Ref: r, Ty: undefinedableElem(TypePtr)}, nil
-		}
+	// process.env[key] (lib/node/internal_process_methods.ts).
+	if r, ok := e.processEnvIndexRewrite(ex); ok {
+		return e.emitExpr(r)
 	}
 	// Group map access: grouped["key"] → sub-array.
 	if id, ok := ex.Object.(*ast.Identifier); ok {
@@ -783,6 +779,30 @@ func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 		}
 		return e.coerce(v, *baseTy.DynPropTy), nil
 	}
+	// Bracket read of a function's own property (TDD-00229): its boxed
+	// function object's bag.
+	if baseTy := e.inferExprType(ex.Object); baseTy.IsFunc && !baseTy.IsDynamic {
+		objVal, err := e.emitExpr(ex.Object)
+		if err != nil {
+			return Value{}, err
+		}
+		boxed, err := e.emitBoxValue(objVal)
+		if err != nil {
+			return Value{}, err
+		}
+		keyRef, err := e.dynAnyKeyRef(ex.Index, ex.GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		v, err := e.emitDynAnyMemberGet(boxed, keyRef, ex.GetPos())
+		if err != nil {
+			return v, err
+		}
+		if pt, ok := e.checkerPrimitive(ex); ok {
+			return e.coerce(v, pt), nil
+		}
+		return v, nil
+	}
 	// String indexing: s[i] returns a single-character string.
 	if id, ok := ex.Object.(*ast.Identifier); ok {
 		if sym, found := e.lookup(id.Name); found && isStringTy(sym.Ty) {
@@ -885,6 +905,12 @@ func (e *Emitter) unwrapGlobalThis(expr ast.Expression) ast.Expression {
 }
 
 func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
+	if id, ok := ex.Object.(*ast.Identifier); ok && !ex.Optional {
+		if target, ok := e.identClassAlias(id); ok {
+			// `K.x` after `const K = C` reads C's static x.
+			ex = ast.NewMemberExpression(ast.NewIdentifier(target, id.GetPos()), ex.Property, ex.GetPos())
+		}
+	}
 	v, err := e.emitMemberRaw(ex)
 	if err != nil || !v.Ty.IsDynamic || len(v.Ty.UnionMembers) == 0 {
 		return v, err
@@ -896,7 +922,180 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	return v, nil
 }
 
+// processStdioGetter is the stdio module's getter (TDD-00235) that
+// `process.stdin`, `process.stdout` or `process.stderr` reads, when ex is one.
+func (e *Emitter) processStdioGetter(ex *ast.MemberExpression) (string, bool) {
+	id, ok := ex.Object.(*ast.Identifier)
+	if !ok || id.Name != "process" || e.isShadowedByLocal(id.Name) || ex.Optional {
+		return "", false
+	}
+	var name string
+	switch ex.Property {
+	case "stdin":
+		name = "_kmlStdin"
+	case "stdout":
+		name = "_kmlStdout"
+	case "stderr":
+		name = "_kmlStderr"
+	default:
+		return "", false
+	}
+	m, ok := e.libExports["internal_process_stdio:"+name]
+	return m, ok
+}
+
+// processEmitterMembers are the members of `process` its emitter object
+// holds (lib/node/internal_process.ts): EventEmitter's, and the fork
+// channel's.
+var processEmitterMembers = map[string]bool{
+	"on": true, "once": true, "off": true, "addListener": true, "removeListener": true,
+	"prependListener": true, "prependOnceListener": true, "emit": true, "listenerCount": true,
+	"listeners": true, "rawListeners": true, "removeAllListeners": true, "setMaxListeners": true,
+	"getMaxListeners": true, "eventNames": true,
+	"send": true, "disconnect": true, "connected": true, "channel": true,
+}
+
+// processMethodExports are the methods of `process` a TypeScript module
+// implements (lib/node/internal_process_methods.ts, internal_process_env.ts).
+var processMethodExports = map[string]string{
+	"cwd": "internal_process_methods:cwd", "chdir": "internal_process_methods:chdir",
+	"uptime": "internal_process_methods:uptime", "hrtime": "internal_process_hrtime:hrtime",
+	"kill": "internal_process_methods:kill", "memoryUsage": "internal_process_methods:memoryUsage",
+	"umask": "internal_process_methods:umask", "exit": "internal_process_env:exit",
+	"getuid": "internal_process_methods:getuid", "geteuid": "internal_process_methods:geteuid",
+	"getgid": "internal_process_methods:getgid", "getegid": "internal_process_methods:getegid",
+}
+
+// processPropertyExports are the properties of `process` a TypeScript
+// module reads through a function of the same name.
+var processPropertyExports = map[string]string{
+	"pid": "internal_process_methods:pid", "ppid": "internal_process_methods:ppid",
+	"argv": "internal_process_env:argv", "argv0": "internal_process_env:argv0",
+	"execPath": "internal_process_env:execPath", "version": "internal_process_env:version",
+	"versions": "internal_process_env:versions", "execArgv": "internal_process_env:execArgv",
+}
+
+// processEnvCall is a call to one of internal_process_env.ts's functions,
+// when the program has the module.
+func (e *Emitter) processEnvCall(name string, pos ast.Pos, args ...ast.Expression) (ast.Expression, bool) {
+	m, ok := e.libExports["internal_process_env:"+name]
+	if !ok {
+		return nil, false
+	}
+	return ast.NewCallExpression(ast.NewIdentifier(m, pos), args, pos), true
+}
+
+// processEnvIndexRewrite is `process.env[key]` read: envGet(key).
+func (e *Emitter) processEnvIndexRewrite(ix *ast.IndexExpression) (ast.Expression, bool) {
+	if ix.Optional || !e.isProcessEnvExpr(ix.Object) {
+		return nil, false
+	}
+	return e.processEnvCall("envGet", ix.GetPos(), ix.Index)
+}
+
+// processCredentialReads are the methods Node defines only on POSIX.
+var processCredentialReads = map[string]bool{"getuid": true, "geteuid": true, "getgid": true, "getegid": true}
+
+// processEmitterValue is the call that makes (or returns) the process
+// emitter object, when the program has its module.
+func (e *Emitter) processEmitterValue(pos ast.Pos) (ast.Expression, bool) {
+	m, ok := e.libExports["internal_process:_kmlProcess"]
+	if !ok {
+		return nil, false
+	}
+	return ast.NewCallExpression(ast.NewIdentifier(m, pos), nil, pos), true
+}
+
+// processIsValue reports whether id is `process` read as a value: its
+// emitter object (lib/node/internal_process.ts).
+func (e *Emitter) processIsValue(id *ast.Identifier) bool {
+	if id.Name != "process" || e.isShadowedByLocal(id.Name) {
+		return false
+	}
+	_, ok := e.processEmitterValue(id.GetPos())
+	return ok
+}
+
+// processMemberRewrite is what `process.<name>` reads when a TypeScript
+// module implements that member: the emitter object's member, or
+// emitWarning's function (lib/node/internal_process_warning.ts).
+func (e *Emitter) processMemberRewrite(ex *ast.MemberExpression) (ast.Expression, bool) {
+	// process.env.KEY: envGet("KEY").
+	if e.isProcessEnvExpr(ex.Object) {
+		return e.processEnvCall("envGet", ex.GetPos(), ast.NewStringLiteral(ex.Property, ex.GetPos()))
+	}
+	// process.hrtime.bigint, process.memoryUsage.rss.
+	if inner, ok := ex.Object.(*ast.MemberExpression); ok && !inner.Optional {
+		if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
+			name := ""
+			switch {
+			case inner.Property == "hrtime" && ex.Property == "bigint":
+				name = "hrtimeBigint"
+			case inner.Property == "memoryUsage" && ex.Property == "rss":
+				name = "memoryUsageRss"
+			}
+			mod := "internal_process_methods:"
+			if name == "hrtimeBigint" {
+				mod = "internal_process_hrtime:"
+			}
+			if m, ok := e.libExports[mod+name]; ok && name != "" {
+				return ast.NewIdentifier(m, ex.GetPos()), true
+			}
+		}
+	}
+	id, ok := ex.Object.(*ast.Identifier)
+	if !ok || id.Name != "process" || e.isShadowedByLocal(id.Name) {
+		return nil, false
+	}
+	if key, ok := processPropertyExports[ex.Property]; ok {
+		m, ok := e.libExports[key]
+		if !ok {
+			return nil, false
+		}
+		return ast.NewCallExpression(ast.NewIdentifier(m, ex.GetPos()), nil, ex.GetPos()), true
+	}
+	if ex.Property == "exitCode" {
+		return e.processEnvCall("getExitCode", ex.GetPos())
+	}
+	if name, ok := processMethodExports[ex.Property]; ok {
+		if e.opts.Target.OS() == "windows" && processCredentialReads[ex.Property] {
+			// Node defines no credential reads on Windows.
+			return nil, false
+		}
+		m, ok := e.libExports[name]
+		if !ok {
+			return nil, false
+		}
+		return ast.NewIdentifier(m, ex.GetPos()), true
+	}
+	if ex.Property == "emitWarning" {
+		m, ok := e.libExports["internal_process_warning:emitWarning"]
+		if !ok {
+			return nil, false
+		}
+		return ast.NewIdentifier(m, ex.GetPos()), true
+	}
+	if !processEmitterMembers[ex.Property] {
+		return nil, false
+	}
+	obj, ok := e.processEmitterValue(ex.GetPos())
+	if !ok {
+		return nil, false
+	}
+	m := ast.NewMemberExpression(obj, ex.Property, ex.GetPos())
+	m.Optional = ex.Optional
+	return m, true
+}
+
 func (e *Emitter) emitMemberRaw(ex *ast.MemberExpression) (Value, error) {
+	// process.stdin/stdout/stderr: the stream, made on first use
+	// (lib/node/internal_process_stdio.ts).
+	if getter, ok := e.processStdioGetter(ex); ok {
+		return e.emitCall(ast.NewCallExpression(ast.NewIdentifier(getter, ex.GetPos()), nil, ex.GetPos()))
+	}
+	if r, ok := e.processMemberRewrite(ex); ok {
+		return e.emitExpr(r)
+	}
 	if unwrapped := e.unwrapGlobalThis(ex); unwrapped != ast.Expression(ex) {
 		return e.emitExpr(unwrapped)
 	}
@@ -915,6 +1114,9 @@ func (e *Emitter) emitMemberRaw(ex *ast.MemberExpression) (Value, error) {
 // emitMemberUnguarded is emitMember without the absent-base TypeError — the
 // access `?.` falls back to for a base it has already established the shape of.
 func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
+	if v, ok, err := e.emitExecArrayMember(ex); ok || err != nil {
+		return v, err
+	}
 	// A namespace-qualified type-member chain (`X.Color.Red`,
 	// `X.C.staticField` — ADR-00480): drop the namespace qualifier up
 	// front — a pure AST rewrite — so every dispatch below sees the bare
@@ -933,20 +1135,6 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	// A function value's `name` / `length` (TDD-00229): read from the
 	// code-pointer metadata table.
 	if ex.Property == "name" || ex.Property == "length" {
-		if ot := e.inferExprType(ex.Object); ot.IsFFIFunction {
-			fv, err := e.emitExpr(ex.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			e.ensureFnMeta()
-			r := e.freshReg()
-			if ex.Property == "name" {
-				e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fn_name_dyn(ptr %s)", r, fv.Ref))
-				return Value{Ref: r, Ty: TypePtr}, nil
-			}
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_fn_length_dyn(ptr %s)", r, fv.Ref))
-			return e.countToNumber(Value{Ref: r, Ty: TypeI64}), nil
-		}
 		if ot := e.inferExprType(ex.Object); ot.IsFunc {
 			fv, err := e.emitExpr(ex.Object)
 			if err != nil {
@@ -960,28 +1148,6 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			}
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_fn_length_hdr(ptr %s)", r, fv.Ref))
 			return e.countToNumber(Value{Ref: r, Ty: TypeI64}), nil
-		}
-	}
-	// http2.constants members are compile-time literals (TDD-00139 Stage 4);
-	// `http2.constants` itself binds as a flagged namespace value.
-	if e.isH2ConstantsExpr(ex.Object) {
-		return e.emitH2Constant(ex.Property, ex.GetPos())
-	}
-	// fs.constants members are compile-time numeric literals (ADR-00795);
-	// `fs.constants` itself binds as a flagged namespace value.
-	if e.isFsConstantsExpr(ex.Object) {
-		return e.emitFsConstant(ex.Property, ex.GetPos())
-	}
-	if ex.Property == "constants" {
-		if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "http2__kml_builtin" {
-			ty := TypeI64
-			ty.IsH2Constants = true
-			return Value{Ref: "0", Ty: ty}, nil
-		}
-		if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "fs__kml_builtin" {
-			ty := TypeI64
-			ty.IsFsConstants = true
-			return Value{Ref: "0", Ty: ty}, nil
 		}
 	}
 	// DataView properties (byteLength/byteOffset/buffer) — dedicated reads
@@ -1015,16 +1181,6 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 				return Value{}, err
 			}
 			return e.emitDataViewProp(objVal, ex.Property, ex.GetPos())
-		}
-	}
-	// diagnostics_channel Channel properties (hasSubscribers/name).
-	if ex.Property == "hasSubscribers" || ex.Property == "name" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsDCChannel {
-			objVal, err := e.emitExpr(ex.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			return e.emitDiagChannelMember(objVal, ex.Property, ex.GetPos())
 		}
 	}
 	// Blob properties (size/type, TDD-00102) — same dedicated-read pattern.
@@ -1079,6 +1235,10 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			return e.emitIdent(ast.NewIdentifier(ast.NamespaceMangle(nsName, ex.Property), ex.GetPos()))
 		}
 	}
+	// A well-known symbol (`Symbol.iterator`, `Symbol.asyncIterator`, …).
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Symbol" && !e.isShadowedByLocal(id.Name) && wellKnownSymbols[ex.Property] {
+		return Value{Ref: e.wellKnownSymbol(ex.Property), Ty: SymbolType()}, nil
+	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Number" && !e.isShadowedByLocal(id.Name) {
 		switch ex.Property {
 		case "MAX_SAFE_INTEGER":
@@ -1117,177 +1277,15 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: "4.342944819032518e-01", Ty: TypeF64}, nil
 		}
 	}
-	// process.stdout/.stderr/.stdin `.isTTY` — a nested two-level member chain
-	// (process.<stdio> is a pseudo-namespace, not a bindable value), same
-	// shape check as process.stdout.write in emit_call.go.
-	if ex.Property == "isTTY" {
-		if inner, ok := ex.Object.(*ast.MemberExpression); ok {
-			if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
-				switch inner.Property {
-				case "stdin":
-					return e.emitProcessStreamIsTTY(0), nil
-				case "stdout":
-					return e.emitProcessStreamIsTTY(1), nil
-				case "stderr":
-					return e.emitProcessStreamIsTTY(2), nil
-				}
-			}
-		}
-	}
-	// process.stdout/.stderr `.columns` / `.rows` — TDD-00031, a live
-	// ioctl(TIOCGWINSZ) read, same nested pseudo-namespace shape as isTTY.
-	if ex.Property == "columns" || ex.Property == "rows" {
-		if inner, ok := ex.Object.(*ast.MemberExpression); ok {
-			if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
-				switch inner.Property {
-				case "stdout":
-					return e.emitProcessWinSize(1, ex.Property), nil
-				case "stderr":
-					return e.emitProcessWinSize(2, ex.Property), nil
-				}
-			}
-		}
-	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
+		// The rest of process is internal_process_methods.ts's
+		// (processMemberRewrite); platform and arch are the target's,
+		// compile-time constants.
 		switch ex.Property {
-		case "argv":
-			return e.emitProcessArgv()
-		case "pid":
-			return e.emitProcessPid()
 		case "platform":
 			return Value{Ref: e.internString(e.nodePlatformName()), Ty: TypePtr}, nil
 		case "arch":
 			return Value{Ref: e.internString(e.nodeArchName()), Ty: TypePtr}, nil
-		case "execPath":
-			return e.emitProcessExecPath()
-		case "version":
-			return e.emitProcessVersion()
-		case "versions":
-			return e.emitProcessVersions(ex.GetPos())
-		case "exitCode":
-			e.usedProcessLifecycle = true
-			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_process_exit_code, align 8", r))
-			return Value{Ref: r, Ty: TypeI64}, nil
-		case "stdin":
-			// The streaming process.stdin handle (.on('data'|'end')). Idempotent:
-			// every access returns the one active handle (runtime_stdin.go).
-			e.ensureStdinRuntime()
-			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_stdin_create()", r))
-			return Value{Ref: r, Ty: StdinType()}, nil
-		case "send":
-			// Bare `process.send` (not a call) is the corpus's forked-child
-			// probe (`if (process.send) …`): a boolean "was this process
-			// forked with an IPC channel" (TDD-00141). Node's value is the
-			// function-or-undefined; the truthiness use is what matters here.
-			e.ensureIPCChildRuntime()
-			fd := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_ipcc_fd()", fd))
-			b := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp sgt i32 %s, 0", b, fd))
-			return Value{Ref: b, Ty: TypeBool}, nil
-		}
-	}
-	if e.isProcessEnvExpr(ex.Object) {
-		return e.emitProcessEnvGetStatic(ex.Property)
-	}
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "cluster__kml_builtin" {
-		switch ex.Property {
-		case "isPrimary":
-			return e.emitClusterIsPrimary()
-		case "isWorker":
-			return e.emitClusterIsWorker()
-		case "worker":
-			return e.emitClusterSelfWorker()
-		case "workers":
-			return e.emitClusterWorkers()
-		case "settings":
-			return e.emitClusterSettings()
-		}
-	}
-	if e.inferExprType(ex.Object).IsClusterWorker {
-		return e.emitClusterWorkerMember(ex.Object, ex.Property, ex.GetPos())
-	}
-	// path.sep / path.delimiter per flavour (TDD-00178): the host's for a
-	// bare `path`, or the one `path.posix` / `path.win32` names.
-	if pf, ok := e.pathFlavorOf(ex.Object); ok {
-		switch ex.Property {
-		case "sep":
-			return Value{Ref: e.internString(pathFlavorSep(pf)), Ty: TypePtr}, nil
-		case "delimiter":
-			return Value{Ref: e.internString(pathFlavorDelimiter(pf)), Ty: TypePtr}, nil
-		}
-	}
-	// node:ffi compile-time constants (TDD-00164): ffi.suffix is the host's
-	// shared-library filename suffix; ffi.types.X are the type-name strings.
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "ffi__kml_builtin" {
-		if ex.Property == "suffix" {
-			return Value{Ref: e.internString(e.ffiSuffix()), Ty: TypePtr}, nil
-		}
-	}
-	if inner, ok := ex.Object.(*ast.MemberExpression); ok && inner.Property == "types" {
-		if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "ffi__kml_builtin" {
-			if c, present := ffiTypesConstants[ex.Property]; present {
-				return Value{Ref: e.internString(c), Ty: TypePtr}, nil
-			}
-			return Value{}, fmt.Errorf("%d:%d: unknown ffi.types constant '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
-		}
-	}
-	// A DynamicLibrary's accumulator properties (TDD-00164): the previously
-	// resolved functions/symbol addresses, rebuilt from the compile-time
-	// registration record.
-	if ex.Property == "functions" || ex.Property == "symbols" {
-		if e.inferExprType(ex.Object).IsFFILibrary {
-			return e.emitFFILibraryProperty(ex.Object, ex.Property, ex.GetPos())
-		}
-	}
-	// A bound native function's .pointer (TDD-00164): the raw symbol address.
-	if ex.Property == "pointer" {
-		if e.inferExprType(ex.Object).IsFFIFunction {
-			fv, err := e.emitExpr(ex.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			// record → env (the registry entry) → its C address.
-			ep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", ep, fv.Ref))
-			fn := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fn, ep))
-			cfn := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cfn, fn))
-			return e.ffiPtrToBigInt(cfn), nil
-		}
-	}
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "test__kml_builtin" {
-		// Environment probes (TDD-00122) — constant booleans reflecting the
-		// compile host; hasCrypto/hasIntl reflect the built-in surface.
-		switch ex.Property {
-		case "isWindows":
-			return Value{Ref: testHostBool(e.opts.Target.OS() == "windows"), Ty: TypeBool}, nil
-		case "isLinux":
-			return Value{Ref: testHostBool(e.opts.Target.OS() == "linux"), Ty: TypeBool}, nil
-		case "isMacOS":
-			return Value{Ref: testHostBool(e.opts.Target.OS() == "darwin"), Ty: TypeBool}, nil
-		case "hasCrypto":
-			return Value{Ref: "1", Ty: TypeBool}, nil
-		case "hasIntl":
-			return Value{Ref: "0", Ty: TypeBool}, nil
-		case "isMainThread":
-			return Value{Ref: "1", Ty: TypeBool}, nil
-		}
-	}
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "os__kml_builtin" {
-		switch ex.Property {
-		case "EOL":
-			// "\r\n" on Windows, "\n" elsewhere — a compile-time constant like
-			// process.platform (TDD-00177 Stage 1).
-			if e.opts.Target.OS() == "windows" {
-				return Value{Ref: e.internString("\r\n"), Ty: TypePtr}, nil
-			}
-			return Value{Ref: e.internString("\n"), Ty: TypePtr}, nil
-		case "devNull":
-			return Value{Ref: e.internString(e.osDevNull()), Ty: TypePtr}, nil
 		}
 	}
 	// Bare `process.env` (not a keyed read): the enumerable environment object.
@@ -1306,42 +1304,6 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			}
 			idx, fieldTy, _ := objVal.Ty.FieldIndex("path")
 			return e.loadFieldValue(objVal, idx, fieldTy), nil
-		}
-	}
-	// node:sqlite computed properties (ADR-00540): db.isTransaction reads the
-	// live autocommit state; stmt.expandedSQL renders the SQL with bound values.
-	if ex.Property == "isTransaction" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsSQLiteDatabase {
-			objVal, err := e.emitExpr(ex.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			e.ensureSQLite3()
-			h := e.loadFieldValue(objVal, e.sqliteFieldIdx(objVal.Ty, "__kml_handle"), TypePtr).Ref
-			ac := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i32 @sqlite3_get_autocommit(ptr %s)", ac, h))
-			// autocommit == 0 means a transaction is open.
-			b := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", b, ac))
-			return Value{Ref: b, Ty: TypeBool}, nil
-		}
-	}
-	if ex.Property == "expandedSQL" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsSQLiteStatement {
-			objVal, err := e.emitExpr(ex.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			e.ensureSQLite3()
-			h := e.loadFieldValue(objVal, e.sqliteFieldIdx(objVal.Ty, "__kml_handle"), TypePtr).Ref
-			raw := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @sqlite3_expanded_sql(ptr %s)", raw, h))
-			s := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", s, raw))
-			// sqlite3_expanded_sql returns a sqlite3_malloc'd buffer; free it now
-			// that we've copied into a KML string.
-			e.emitInstr(fmt.Sprintf("call void @sqlite3_free(ptr %s)", raw))
-			return Value{Ref: s, Ty: TypePtr}, nil
 		}
 	}
 	// res.statusCode (ServerResponse, TDD-00131) reads the `status` field —
@@ -1372,8 +1334,69 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	// dispatched ahead of the generic object-field read that would otherwise
 	// surface the internal buffered-body string field.
 	if ex.Property == "body" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsResponse {
+		if objTy := e.inferExprType(ex.Object); hasBodyMixin(objTy) {
 			return e.emitResponseBodyStream(ex)
+		}
+	}
+	if ex.Property == "bodyUsed" {
+		if objTy := e.inferExprType(ex.Object); hasBodyMixin(objTy) {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return Value{Ref: e.emitResponseBodyUsed(objVal), Ty: TypeBool}, nil
+		}
+	}
+	// Response.type: a constructed Response's own, else "basic".
+	if ex.Property == "type" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsResponse {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			if idx, fty, ok := objVal.Ty.FieldIndex("__kml_type"); ok {
+				own := e.loadFieldValue(objVal, idx, fty)
+				has := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", has, own.Ref))
+				r := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, has, own.Ref, e.internString("basic")))
+				return Value{Ref: r, Ty: TypePtr}, nil
+			}
+		}
+	}
+	// Response.statusText: a constructed Response's own, else the reason
+	// phrase of a fetched one's status line.
+	if ex.Property == "statusText" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsResponse {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			pendIdx, pendTy, ok1 := objVal.Ty.FieldIndex("__kml_pending")
+			stIdx, stTy, ok2 := objVal.Ty.FieldIndex("__kml_status_text")
+			if ok1 && ok2 {
+				own := e.loadFieldValue(objVal, stIdx, stTy)
+				hasOwn := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasOwn, own.Ref))
+				ownL, fetchL, doneL := e.freshLabel("resp.st.own"), e.freshLabel("resp.st.fetch"), e.freshLabel("resp.st.done")
+				slot := e.freshReg()
+				e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasOwn, ownL, fetchL))
+				e.emitLabel(ownL)
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", own.Ref, slot))
+				e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+				e.emitLabel(fetchL)
+				pend := e.loadFieldValue(objVal, pendIdx, pendTy)
+				e.ensureFetchStatusText()
+				st := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_status_text(ptr %s)", st, pend.Ref))
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", st, slot))
+				e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+				e.emitLabel(doneL)
+				r := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+				return Value{Ref: r, Ty: TypePtr}, nil
+			}
 		}
 	}
 	// Response.headers (ADR-00490): lazily parse the raw header text the
@@ -1387,12 +1410,19 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 				return Value{}, err
 			}
 			pendIdx, pendTy, ok := objVal.Ty.FieldIndex("__kml_pending")
-			if ok {
+			hIdx, hTy, okH := objVal.Ty.FieldIndex("__kml_headers")
+			if ok && okH {
+				// A constructed Response keeps its own Headers.
+				own := e.loadFieldValue(objVal, hIdx, hTy)
 				pend := e.loadFieldValue(objVal, pendIdx, pendTy)
 				e.ensureFetchHeadersMap()
 				m := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_headers_map(ptr %s)", m, pend.Ref))
-				return Value{Ref: m, Ty: HeadersType()}, nil
+				hasOwn := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasOwn, own.Ref))
+				r := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, hasOwn, own.Ref, m))
+				return Value{Ref: r, Ty: HeadersType()}, nil
 			}
 		}
 	}
@@ -1438,16 +1468,6 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			result := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, objVal.Ref))
 			return Value{Ref: result, Ty: TypeI64}, nil
-		}
-	}
-	if ex.Property == "port1" || ex.Property == "port2" {
-		// TDD-00099: `ch.port1` / `ch.port2` off a MessageChannel pair.
-		if objTy := e.inferExprType(ex.Object); objTy.IsMessageChannel {
-			objVal, err := e.emitExpr(ex.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			return e.emitMessageChannelPortRead(objVal, ex.Property)
 		}
 	}
 	// Growable-buffer properties (ADR-00494).
@@ -1512,6 +1532,9 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 					return e.countToNumber(Value{Ref: fmt.Sprintf("%d", len(sym.Ty.Fields)), Ty: TypeI64}), nil
 				}
 				if sym.Ty.IsArray || sym.Ty.IsFlatArray {
+					if sym.Ty.IsArray && !sym.Ty.IsFlatArray {
+						e.emitArrayBindingGuard(sym, "Cannot read properties of undefined (reading 'length')")
+					}
 					_, lenSlot := e.arrayDataLenSlots(sym)
 					reg := e.freshReg()
 					e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", reg, lenSlot))
@@ -1594,19 +1617,34 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	}
 	// Discriminant read on an un-narrowed discriminated union (TDD-00116): the
 	// only field readable before narrowing is the shared first-position tag. All
-	// members hold it at offset 0 (a string), so unbox the tag-6 pointer and load
-	// field 0. Every other field is member-specific and needs narrowing first.
+	// members hold it as their first field, right after the header word (a
+	// string), so unbox the tag-6 pointer and load it. Every other field is
+	// member-specific and needs narrowing first.
 	if objVal.Ty.IsDynamic && len(objVal.Ty.UnionMembers) > 0 {
 		if name, dTy, ok := unionDiscriminantField(objVal.Ty); ok && ex.Property == name {
 			_, payload := e.emitUnboxTagPayload(objVal)
 			objptr := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", objptr, payload))
+			tagp := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", tagp, objptr))
 			val := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", val, objptr))
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", val, tagp))
 			return Value{Ref: val, Ty: dTy}, nil
 		}
 		if v, ok, err := e.emitUnionSoleObjectMemberRead(objVal, ex.Property, ex.GetPos()); ok || err != nil {
 			return v, err
+		}
+		// A member every object member has (`x.name` on `A | B`): read by
+		// name through the layout rows, as the member type all declare.
+		if ft, ok := unionCommonMember(objVal.Ty, ex.Property); ok {
+			v, err := e.emitDynAnyMemberGetNamed(Value{Ref: objVal.Ref, Ty: TypeAny}, e.internString(ex.Property), ex.Property, ex.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			if ft.IsDynamic {
+				return v, nil
+			}
+			return e.coerce(v, ft), nil
 		}
 		return Value{}, fmt.Errorf("%d:%d: '%s' can't be read on an un-narrowed union — narrow it first (e.g. `if (x.%s === ...)` or `typeof`)", ex.GetPos().Line, ex.GetPos().Col, ex.Property, ex.Property)
 	}
@@ -1620,11 +1658,34 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	// into the D1 dynamic object model (TDD-00155 Stage 1).
 	if isUnconstrainedDynamic(objVal.Ty) {
 		v, err := e.emitDynAnyMemberGetNamed(objVal, e.internString(ex.Property), ex.Property, ex.GetPos())
-		if err != nil || objVal.Ty.DynPropTy == nil {
+		if err != nil {
 			return v, err
+		}
+		if objVal.Ty.DynPropTy == nil {
+			// A property the checker knows to be a primitive reads as one.
+			if pt, ok := e.checkerPrimitive(ex); ok {
+				return e.coerce(v, pt), nil
+			}
+			return v, nil
 		}
 		// An index-signature view (DynPropTy): the read has the declared type.
 		return e.coerce(v, *objVal.Ty.DynPropTy), nil
+	}
+	// A function's own property (`f.custom`, a TypeScript expando on a
+	// function declaration): its boxed function object's bag (TDD-00229).
+	if objVal.Ty.IsFunc && !objVal.Ty.IsDynamic {
+		boxed, err := e.emitBoxValue(objVal)
+		if err != nil {
+			return Value{}, err
+		}
+		v, err := e.emitDynAnyMemberGetNamed(boxed, e.internString(ex.Property), ex.Property, ex.GetPos())
+		if err != nil {
+			return v, err
+		}
+		if pt, ok := e.checkerPrimitive(ex); ok {
+			return e.coerce(v, pt), nil
+		}
+		return v, nil
 	}
 	if !objVal.Ty.IsObject {
 		return Value{}, fmt.Errorf("%d:%d: field access on non-object (no field '%s')", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
@@ -1650,7 +1711,7 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	}
 	// A class or interface type captured before its fields were registered
 	// (a type alias's function type naming it): its live shape.
-	if len(objVal.Ty.Fields) == 0 {
+	if len(objVal.Ty.UserFields()) == 0 {
 		objVal.Ty = e.canonicalizeClassTy(objVal.Ty)
 	}
 	idx, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property)
@@ -1665,6 +1726,10 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	fieldTy = e.canonicalizeClassTy(fieldTy)
 	gepReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
+	// A structural type's value may have another layout (TDD-00233).
+	if isRecordView(objVal.Ty) {
+		gepReg, _ = e.emitRecordFieldSlot(objVal, gepReg, fieldTy, ex.Property, true)
+	}
 	// An array field slot holds a shared header pointer (TDD-00213 Stage 2) — deref
 	// it into the {ptr,i64} aggregate, carrying the live header so `let x = obj.arr`
 	// aliases and a mutation through `obj.arr` is visible through x.
@@ -1775,4 +1840,68 @@ func (e *Emitter) emitUnionSoleObjectMemberRead(u Value, prop string, pos ast.Po
 	out := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, res))
 	return Value{Ref: out, Ty: TypeAny}, true, nil
+}
+
+// unionCommonMember is the type of member prop when every member of union u
+// is a self-identifying object declaring it with one representation
+// (`any` when the declared types differ).
+func unionCommonMember(u Type, prop string) (Type, bool) {
+	var ft Type
+	for i, m := range u.UnionMembers {
+		if !selfIdentifyingObjects([]Type{m}) {
+			return Type{}, false
+		}
+		_, t, ok := m.FieldIndex(prop)
+		if !ok {
+			return Type{}, false
+		}
+		if i == 0 {
+			ft = t
+		} else if StructFieldIR(t) != StructFieldIR(ft) || t.IsDynamic != ft.IsDynamic {
+			ft = TypeAny
+		}
+	}
+	return ft, len(u.UnionMembers) > 0
+}
+
+// checkerPrimitive is the string, number or boolean type the checker gives
+// expr, when it gives exactly one of those; false otherwise (and under
+// -compat=js, where the checker does not type the program).
+func (e *Emitter) checkerPrimitive(expr ast.Expression) (Type, bool) {
+	c := e.front()
+	if c == nil || e.compatJS() {
+		return Type{}, false
+	}
+	t := c.TypeOf(expr)
+	if call, ok := expr.(*ast.CallExpression); ok && c.Unanswered(t) {
+		// An argument the checker cannot type (a codegen-only form): the
+		// result the overloads the call may resolve to agree on.
+		if fn := c.TypeOf(call.Callee); !c.Unanswered(fn) && fn.Kind == checker.Function && len(fn.Overloads) > 0 {
+			if r := c.OverloadResult(call, fn); r != nil {
+				t = r
+			}
+		}
+	}
+	if c.Unanswered(t) || t.Flags&(checker.Union|checker.Any|checker.Unknown) != 0 {
+		return Type{}, false
+	}
+	switch {
+	case t.Flags&(checker.String|checker.StringLiteral) != 0:
+		// Not converted: a declared string reached through `any` may be
+		// absent at run time (null or undefined, which a string can't tell
+		// apart); its methods dispatch on its tag (emitDynStringMethodCall).
+		return Type{}, false
+	case t.Flags&(checker.Number|checker.NumberLiteral) != 0:
+		return TypeF64, true
+	case t.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
+		return TypeBool, true
+	case t.Symbol != nil && t.Symbol.Name == "Buffer" && (t.Kind == checker.Instance || t.Kind == checker.Interface):
+		// A Buffer-returning overload (zlib's `gzipSync`). Only a call: a
+		// property declared Buffer may hold null at run time (spawnSync's
+		// `stdout` with inherited stdio), which the box keeps.
+		if _, ok := expr.(*ast.CallExpression); ok {
+			return BufferType(), true
+		}
+	}
+	return Type{}, false
 }

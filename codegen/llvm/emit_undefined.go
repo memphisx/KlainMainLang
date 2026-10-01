@@ -67,6 +67,12 @@ func (e *Emitter) emitFieldPresent(objRef string, objTy Type, field Field) (pres
 	idx, _, _ := objTy.FieldIndex(field.Name)
 	gepReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objTy.StructIR(), objRef, idx))
+	return e.emitFieldPresentAt(gepReg, field)
+}
+
+// emitFieldPresentAt is emitFieldPresent for the field at address gepReg
+// (a record view's slot, emitRecordGep).
+func (e *Emitter) emitFieldPresentAt(gepReg string, field Field) (present string, val Value) {
 	if field.Ty.IsArray {
 		val = e.loadArrayFieldValue(gepReg, field.Ty) // header-pointer slot (TDD-00213 S2)
 	} else {
@@ -76,10 +82,16 @@ func (e *Emitter) emitFieldPresent(objRef string, objTy Type, field Field) (pres
 	}
 	// An UncheckedIndex field (a spawnSync result's stdout, typed plain `T`
 	// by tsc) always has its key; only its value may be undefined.
-	if !jsonFieldSkippable(field.Ty) || field.Ty.UncheckedIndex {
+	// A field that is not optional always has its key, whatever its value.
+	if !jsonFieldSkippable(field.Ty) || field.Ty.UncheckedIndex || !field.Optional {
 		return "true", val
 	}
 	switch {
+	case isNullableScalar(field.Ty) && field.Ty.NullAndUndef:
+		// A null has its key; only undefined (a missing member) has none.
+		p, payload := e.nullableScalarAggParts(val)
+		present = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", present, p, e.triPayloadIsMarker(payload.Ref, field.Ty)))
 	case isNullableScalar(field.Ty):
 		present, _ = e.nullableScalarAggParts(val)
 	case field.Ty.IsArray:
@@ -137,11 +149,16 @@ func isNullishLiteralTy(t Type) bool {
 // itself passes array/tuple/dynamic/already-nullable element types through
 // (their zero-arg form stays an empty/zero value with no spare absent state).
 func optionalParamType(p ast.Param, pty Type) Type {
+	if pty.IR == "void" {
+		// A `void` parameter (written, or a type argument `T = void`) holds
+		// only undefined.
+		return TypeUndefined
+	}
 	if !p.Optional || p.Default != nil ||
 		p.ArrayPattern != nil || p.ObjectPattern != nil {
 		return pty
 	}
-	return undefinedableElem(pty)
+	return optionalFieldType(pty)
 }
 
 // contextualParamOptionality reconciles a closure parameter's ABI with the
@@ -155,8 +172,8 @@ func optionalParamType(p ast.Param, pty Type) Type {
 // aggregate the caller marshals. Only the nullable/undefined dimension of a
 // scalar param is adjusted — the base type stays the closure's own.
 func contextualParamOptionality(paramTy, ctx Type) Type {
-	if ctx.IR == "" || ctx.Inferred {
-		return paramTy // no authoritative context
+	if ctx.IR == "" || ctx.Inferred || ctx.IsDynamic {
+		return paramTy // no authoritative context (an `any` argument may be null)
 	}
 	ctxOptional := isNullableScalar(ctx)
 	if isNullableScalar(paramTy) == ctxOptional {
@@ -308,9 +325,25 @@ func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
 			return e.emitExprWithObjectHint(lit, target)
 		}
 	}
+	if t, ok := e.nullAssertedType(ex); ok {
+		// `undefined as number | undefined`, `[1] as number[] | undefined`:
+		// the value in the asserted type, which can also hold the absence.
+		v, err := e.emitExpr(ex.Expr)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.coerce(v, t), nil
+	}
 	v, err := e.emitExpr(ex.Expr)
 	if err != nil {
 		return Value{}, err
+	}
+	if ex.TypeAnnot != nil && v.Ty.IsFunc && !v.Ty.IsDynamic {
+		// A function asserted to `any` is the boxed function object, whose
+		// own properties the dynamic paths read and write (TDD-00229).
+		if t := e.resolveType(ex.TypeAnnot); isUnconstrainedDynamic(t) {
+			return e.emitBoxValue(v)
+		}
 	}
 	if ex.TypeAnnot == nil || !v.Ty.IsDynamic {
 		return v, nil
@@ -329,6 +362,16 @@ func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
 	if target.IsArray || isNullableScalar(target) {
 		return e.emitUnboxBoxToType(v.Ref, target), nil
 	}
+	// A union's object member asserted as another shape (`address() as
+	// { port: number }` over `AddressInfo | string | null`): the member,
+	// then its fields by name.
+	if plainRecordType(target) {
+		for _, m := range v.Ty.UnionMembers {
+			if plainRecordType(m) && !sameFieldLayout(m, target) && needsObjectRelayout(m, target) {
+				return e.coerce(e.coerce(v, m), target), nil
+			}
+		}
+	}
 	return e.coerce(v, target), nil
 }
 
@@ -340,4 +383,252 @@ func dictMissReadsUndefined(v Type) bool {
 		return false
 	}
 	return v.IR == "ptr" || (v.IR == "double" && v.Float)
+}
+
+// nullAssertedType is the type a `null`/`undefined` literal asserted to a type
+// that holds it (`undefined as number | undefined`, `null as T[] | null`)
+// takes: the asserted one, so a binding or field typed from it can hold both.
+func (e *Emitter) nullAssertedType(ex *ast.AsExpression) (Type, bool) {
+	if ex.TypeAnnot == nil {
+		return Type{}, false
+	}
+	nl, ok := ex.Expr.(*ast.NullLiteral)
+	if !ok {
+		// A value asserted to its own type widened with null or undefined
+		// (`[1] as number[] | undefined`) is typed as the widened one.
+		t := e.resolveType(ex.TypeAnnot)
+		if !t.Nullable || t.IsDynamic {
+			return Type{}, false
+		}
+		inner := e.inferExprType(ex.Expr)
+		strip := func(t Type) Type {
+			t.Nullable, t.IsUndefined, t.IsNull = false, false, false
+			return t
+		}
+		b, ib := strip(t), strip(inner)
+		if inner.IsDynamic || b.IR != ib.IR || b.IsArray != ib.IsArray || b.IsObject || ib.IsObject || b.IsFunc || ib.IsFunc ||
+			b.IsArray && (b.ElemType == nil || ib.ElemType == nil || b.ElemType.IR != ib.ElemType.IR || b.IsTypedArray != ib.IsTypedArray) {
+			return Type{}, false
+		}
+		return t, true
+	}
+	t := e.resolveType(ex.TypeAnnot)
+	switch {
+	case t.IsDynamic:
+		return t, true // a union or any: the boxed null/undefined
+	case isNullableScalar(t) && (t.IsUndefined == nl.IsUndefined || !t.IsUndefined && !nl.IsUndefined):
+		return t, true
+	case t.Nullable && t.IR == "ptr":
+		return t, true
+	}
+	return Type{}, false
+}
+
+// threeStateEligible reports whether t represents `T | null | undefined` in
+// three states: a string, object, class instance, Map or Set pointer (null
+// is nullRef), or a number or boolean in its { i1, T } slot (null is the
+// absent slot with the triMarker payload).
+func threeStateEligible(t Type) bool {
+	if t.IR == "ptr" {
+		return !t.IsArray && !t.IsDynamic && !t.IsFunc && !t.IsNull && !t.IsTuple &&
+			(isStringTy(t) || t.IsObject || t.IsClass || t.IsMap || t.IsSet)
+	}
+	return triScalar(t)
+}
+
+// triScalar reports a number or boolean representation that holds a three-
+// state payload marker.
+func triScalar(t Type) bool {
+	if t.IsDynamic || t.IsBigInt || t.IsDate || t.IsArray || t.IsObject || t.IsNull {
+		return false
+	}
+	switch t.IR {
+	case "double", "i64", "i32", "i16", "i8", "i1":
+		return true
+	}
+	return false
+}
+
+// triMarker is the payload of a three-state scalar holding null: the
+// absent slot with the integer bits 1 (an absent slot's payload is
+// otherwise ignored, and a missing field's calloc zero reads undefined).
+func triMarker(t Type) string {
+	switch t.IR {
+	case "double":
+		return "0x0000000000000001"
+	case "i1":
+		return "true"
+	}
+	return "1"
+}
+
+// withNullAndUndef is t able to hold null and undefined both.
+func withNullAndUndef(t Type) Type {
+	t.Nullable, t.IsUndefined, t.NullAndUndef = true, true, true
+	return t
+}
+
+// optionalFieldType is the storage type of an optional (`x?: T`) member:
+// T | undefined, and three-state when T already holds null.
+func optionalFieldType(t Type) Type {
+	if t.Nullable && !t.IsUndefined && !t.IsNull && threeStateEligible(t) {
+		return withNullAndUndef(t)
+	}
+	return undefinedableElem(t)
+}
+
+// nullRef is the null of a three-state pointer: the address of a zeroed
+// cell with a string header, so a read that skipped the null check sees an
+// empty string or zeroed fields rather than faulting.
+func (e *Emitter) nullRef() string {
+	if !e.usedNullRef {
+		e.usedNullRef = true
+		e.emitGlobal("@__kml_nullref_cell = internal global { i64, [248 x i8] } zeroinitializer, align 8")
+	}
+	return "getelementptr inbounds ({ i64, [248 x i8] }, ptr @__kml_nullref_cell, i32 0, i32 1)"
+}
+
+// toThreeState converts a value into a three-state target: a null that
+// meant null becomes nullRef (or the scalar marker), and the null pointer or
+// absent slot stays undefined.
+func (e *Emitter) toThreeState(v Value, target Type) Value {
+	if target.IR != "ptr" {
+		return e.toThreeStateScalar(v, target)
+	}
+	switch {
+	case v.Ty.IsNull && !v.Ty.IsUndefined:
+		return Value{Ref: e.nullRef(), Ty: target}
+	case v.Ty.IsNull || v.Ty.IsUndefined && !v.Ty.Nullable:
+		return Value{Ref: "null", Ty: target}
+	case v.Ty.Nullable && !v.Ty.IsUndefined:
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, e.ptrIsNull(v.Ref), e.nullRef(), v.Ref))
+		return Value{Ref: r, Ty: target}
+	}
+	return Value{Ref: v.Ref, Ty: target}
+}
+
+// toThreeStateScalar is toThreeState for a number or boolean target.
+func (e *Emitter) toThreeStateScalar(v Value, target Type) Value {
+	agg := nullableScalarStorageIR(target)
+	plainTarget := target
+	plainTarget.NullAndUndef = false
+	switch {
+	case v.Ty.IsNull && !v.Ty.IsUndefined:
+		return Value{Ref: e.makeNullableScalarAgg(target, "false", triMarker(target)), Ty: target}
+	case v.Ty.IsNull || v.Ty.IR == "void":
+		return Value{Ref: fmt.Sprintf("%s zeroinitializer", agg)[len(agg)+1:], Ty: target}
+	}
+	w := e.coerce(v, plainTarget)
+	if !isNullableScalar(w.Ty) {
+		return Value{Ref: w.Ref, Ty: target}
+	}
+	if !v.Ty.IsUndefined && v.Ty.Nullable {
+		// A `T | null` value's absence is null.
+		present, payload := e.nullableScalarAggParts(w)
+		pl := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s %s", pl, present, target.IR, payload.Ref, target.IR, triMarker(target)))
+		return Value{Ref: e.makeNullableScalarAgg(target, present, pl), Ty: target}
+	}
+	return Value{Ref: w.Ref, Ty: target}
+}
+
+// fromThreeState turns a three-state value into a plain nullable one: both
+// null and undefined become the null pointer (a scalar keeps its absent
+// slot), typed as the value's own absence would read.
+func (e *Emitter) fromThreeState(v Value) Value {
+	t := v.Ty
+	t.NullAndUndef = false
+	if v.Ty.IR != "ptr" {
+		return Value{Ref: v.Ref, Ty: t}
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", r, e.isNullRef(v.Ref), v.Ref))
+	return Value{Ref: r, Ty: t}
+}
+
+// isTriNull tests a three-state value for null: a pointer against nullRef,
+// a scalar slot for absence with the marker payload.
+func (e *Emitter) isTriNull(v Value) string {
+	if v.Ty.IR == "ptr" {
+		return e.isNullRef(v.Ref)
+	}
+	present, payload := e.nullableScalarAggParts(v)
+	marked := e.triPayloadIsMarker(payload.Ref, v.Ty)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ugt i1 %s, %s", r, marked, present)) // marked && !present
+	return r
+}
+
+// triPayloadIsMarker tests a three-state scalar's payload for triMarker.
+func (e *Emitter) triPayloadIsMarker(payload string, t Type) string {
+	r := e.freshReg()
+	if t.IR == "double" {
+		bits := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", bits, payload))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 1", r, bits))
+		return r
+	}
+	e.emitInstr(fmt.Sprintf("%s = icmp eq %s %s, %s", r, t.IR, payload, triMarker(t)))
+	return r
+}
+
+// isNullRef tests a three-state pointer for null.
+func (e *Emitter) isNullRef(ref string) string {
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", r, ref, e.nullRef()))
+	return r
+}
+
+// isAbsentPtr tests a pointer of type t for null or undefined: the null
+// pointer, and for a three-state one nullRef as well.
+func (e *Emitter) isAbsentPtr(ref string, t Type) string {
+	isNull := e.ptrIsNull(ref)
+	if !t.NullAndUndef {
+		return isNull
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", r, isNull, e.isNullRef(ref)))
+	return r
+}
+
+// absentWordRef is the keyword an absent pointer of type t renders as:
+// for a three-state one, "null" for nullRef and "undefined" otherwise.
+func (e *Emitter) absentWordRef(ref string, t Type) string {
+	if !t.NullAndUndef {
+		return e.internString(absentLiteral(t))
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, e.isNullRef(ref), e.internString("null"), e.internString("undefined")))
+	return r
+}
+
+// renderThreeState renders a three-state pointer through render: its null
+// (nullRef) as the null literal, anything else as a plain nullable pointer
+// whose null reads as undefined. Each branch renders on its own, so a
+// renderer that returns an owned string keeps ownership.
+func (e *Emitter) renderThreeState(v Value, render func(Value) (Value, error)) (Value, error) {
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	isNull := e.isTriNull(v)
+	nullL, plainL, doneL := e.freshLabel("tri.null"), e.freshLabel("tri.plain"), e.freshLabel("tri.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, plainL))
+	e.emitLabel(nullL)
+	nv, err := render(Value{Ref: "null", Ty: TypeNull})
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nv.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(plainL)
+	pv, err := render(e.fromThreeState(v))
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", pv.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	return Value{Ref: r, Ty: pv.Ty}, nil
 }

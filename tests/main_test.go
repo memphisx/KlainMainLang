@@ -34,6 +34,12 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+	// Every program, and Node beside it, runs in one known time zone, so an
+	// expectation of a Date's local fields holds on any machine. A test of
+	// local time sets its own zone.
+	if os.Getenv("TZ") == "" {
+		os.Setenv("TZ", "UTC")
+	}
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, os.Interrupt)
 	go func() {

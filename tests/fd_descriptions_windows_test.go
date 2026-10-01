@@ -60,18 +60,19 @@ func TestWin32FdDescriptions(t *testing.T) {
 func TestE2EWindowsManySockets(t *testing.T) {
 	assertOutputImports(t, `
 import dgram from 'dgram'
-const first = dgram.createSocket('udp4')
-first.bind(0)
-const socks = [first]
-let bound = first.address().port > 0 ? 1 : 0
-for (let i = 1; i < 450; i++) {
+const socks: dgram.Socket[] = []
+let bound = 0
+for (let i = 0; i < 450; i++) {
   const s = dgram.createSocket('udp4')
-  s.bind(0)
-  if (s.address().port > 0) bound = bound + 1
+  s.bind(0, () => {
+    if (s.address().port > 0) bound = bound + 1
+    if (bound === 450) {
+      console.log("bound", bound)
+      for (const t of socks) t.close()
+      console.log("closed")
+    }
+  })
   socks.push(s)
 }
-console.log("bound", bound)
-for (const s of socks) s.close()
-console.log("closed")
 `, "bound 450\nclosed")
 }

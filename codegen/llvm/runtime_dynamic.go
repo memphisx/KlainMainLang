@@ -1,6 +1,6 @@
 package llvm
 
-import ()
+import "fmt"
 
 // ensureAnyEq declares __kml_any_eq over two NaN-boxed words (TDD-00156),
 // backing === / !== on dynamic values. Two numbers compare as doubles
@@ -14,6 +14,8 @@ func (e *Emitter) ensureAnyEq() {
 	e.usedAnyEq = true
 	e.ensureStrcmp()
 	e.ensureBoxedBigIntHooks()
+	e.ensureFnMeta()
+	e.declareFn("__kml_fn_identity_dyn", "declare ptr @__kml_fn_identity_dyn(ptr)")
 	e.emitGlobal(`
 define i1 @__kml_any_eq(i64 %a, i64 %b) {
 entry:
@@ -58,6 +60,25 @@ not_string:
   %botharr = and i1 %aarr, %barr
   br i1 %botharr, label %cmp_array, label %not_array
 not_array:
+  ; both dynamic-function records (kind bits 7): one function boxed twice
+  ; (each boxing builds its own adapter record around the same closure
+  ; header) is one function — compare the records' identities
+  %afn0 = icmp eq i64 %ak, 7
+  %bfn0 = icmp eq i64 %bk, 7
+  %afn = and i1 %aptr, %afn0
+  %bfn = and i1 %bptr, %bfn0
+  %bothfn = and i1 %afn, %bfn
+  br i1 %bothfn, label %cmp_fn, label %not_fn
+cmp_fn:
+  %ra = and i64 %a, -8
+  %rb = and i64 %b, -8
+  %rap = inttoptr i64 %ra to ptr
+  %rbp = inttoptr i64 %rb to ptr
+  %ida = call ptr @__kml_fn_identity_dyn(ptr %rap)
+  %idb = call ptr @__kml_fn_identity_dyn(ptr %rbp)
+  %fn_eq = icmp eq ptr %ida, %idb
+  ret i1 %fn_eq
+not_fn:
   ; both object-kind (kind bits 1) boxed bigint cells (field 0 = the exact
   ; magic word, emit_bigint_box.go): bigints compare by value (TDD-00229)
   %aobj0 = icmp eq i64 %ak, 1
@@ -76,7 +97,22 @@ cmp_obj:
   %abig = icmp eq i64 %fa, 9219994340110199574
   %bbig = icmp eq i64 %fb, 9219994340110199574
   %bothbig = and i1 %abig, %bbig
-  br i1 %bothbig, label %cmp_big, label %not_equal
+  br i1 %bothbig, label %cmp_big, label %host_chk
+host_chk:
+  ; two host boxes (emit_hostbox.go) of one handle are one value
+  %ham = and i64 %fa, ` + fmt.Sprint(kmlHdrMagicMask|hostTypeIDFlag) + `
+  %hbm = and i64 %fb, ` + fmt.Sprint(kmlHdrMagicMask|hostTypeIDFlag) + `
+  %ahost = icmp eq i64 %ham, ` + fmt.Sprint(kmlHdrMagic|hostTypeIDFlag) + `
+  %bhost = icmp eq i64 %hbm, ` + fmt.Sprint(kmlHdrMagic|hostTypeIDFlag) + `
+  %bothhost = and i1 %ahost, %bhost
+  br i1 %bothhost, label %cmp_host, label %not_equal
+cmp_host:
+  %hpa = getelementptr { i64, ptr }, ptr %oap, i32 0, i32 1
+  %hpb = getelementptr { i64, ptr }, ptr %obp, i32 0, i32 1
+  %hva = load ptr, ptr %hpa, align 8
+  %hvb = load ptr, ptr %hpb, align 8
+  %host_eq = icmp eq ptr %hva, %hvb
+  ret i1 %host_eq
 cmp_big:
   %big_eq = call i1 @__kml_boxed_bigint_eq(ptr %oap, ptr %obp)
   ret i1 %big_eq
@@ -100,4 +136,37 @@ ret_true:
 not_equal:
   ret i1 false
 }`)
+}
+
+// ensureObjectIs defines Object.is (lib/es.d.ts): SameValue over two boxed
+// values — a number is itself (NaN is NaN, +0 is not -0), anything else is
+// strict equality.
+func (e *Emitter) ensureObjectIs() {
+	if e.fnDecls["__kml_Object_is"] {
+		return
+	}
+	e.fnDecls["__kml_Object_is"] = true
+	e.ensureAnyEq()
+	e.emitGlobal(fmt.Sprintf(`
+define zeroext i1 @__kml_Object_is(i64 %%a, i64 %%b) {
+entry:
+  %%anum = icmp uge i64 %%a, %[1]d
+  %%bnum = icmp uge i64 %%b, %[1]d
+  %%bothnum = and i1 %%anum, %%bnum
+  br i1 %%bothnum, label %%num, label %%other
+num:
+  %%samebits = icmp eq i64 %%a, %%b
+  %%abits = sub i64 %%a, %[1]d
+  %%bbits = sub i64 %%b, %[1]d
+  %%ad = bitcast i64 %%abits to double
+  %%bd = bitcast i64 %%bbits to double
+  %%anan = fcmp uno double %%ad, %%ad
+  %%bnan = fcmp uno double %%bd, %%bd
+  %%bothnan = and i1 %%anan, %%bnan
+  %%r = or i1 %%samebits, %%bothnan
+  ret i1 %%r
+other:
+  %%eq = call i1 @__kml_any_eq(i64 %%a, i64 %%b)
+  ret i1 %%eq
+}`, nbDoubleOffset))
 }

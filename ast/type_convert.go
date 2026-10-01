@@ -2,6 +2,7 @@ package ast
 
 import (
 	"fmt"
+	"reflect"
 
 	"KlainMainLang/diag"
 )
@@ -310,7 +311,7 @@ func (c typeConverter) convUnion(n *UnionType) (*TypeAnnotation, error) {
 	if err != nil {
 		return nil, err
 	}
-	nullable, undef := first.Nullable, first.Undefined
+	nullable, undef, hasNull := first.Nullable, first.Undefined, first.HasNull
 	var members []*TypeAnnotation
 	for i, t := range n.Types {
 		ta := first
@@ -324,23 +325,28 @@ func (c typeConverter) convUnion(n *UnionType) (*TypeAnnotation, error) {
 		if ta.Name == "null" || ta.Name == "undefined" || ta.Name == "void" && len(n.Types) > 1 {
 			nullable = true
 			undef = undef || ta.Name != "null"
+			hasNull = hasNull || ta.Name == "null"
 			continue
 		}
+		hasNull = hasNull || ta.HasNull
 		members = append(members, ta)
 	}
 	switch len(members) {
 	case 0:
 		first.Nullable = true
 		first.Undefined = undef
+		first.HasNull = hasNull
 		return first, nil
 	case 1:
 		members[0].Nullable = nullable
 		members[0].Undefined = undef
+		members[0].HasNull = hasNull
 		return members[0], nil
 	}
 	head := *members[0]
 	head.Nullable = nullable
 	head.Undefined = undef
+	head.HasNull = hasNull
 	head.UnionMembers = members
 	return &head, nil
 }
@@ -383,6 +389,24 @@ func (c typeConverter) convSignature(ps []*SignatureParameter, ret TypeNode) (*T
 		}
 	}
 	return &TypeAnnotation{Source: c.source, IsFuncType: true, FuncParams: params, FuncParamOptional: optional, FuncRetType: retType, FuncHasRest: rest}, nil
+}
+
+// withThis makes ta (a function type) take `this: T` as its leading
+// parameter, as a FunctionType's This does.
+func (c typeConverter) withThis(ta *TypeAnnotation, this TypeNode) (*TypeAnnotation, error) {
+	if this == nil || ta == nil {
+		return ta, nil
+	}
+	tt, err := c.conv(this)
+	if err != nil {
+		return nil, err
+	}
+	ta.FuncParams = append([]TypeAnnotation{*tt}, ta.FuncParams...)
+	if len(ta.FuncParamOptional) > 0 {
+		ta.FuncParamOptional = append([]bool{false}, ta.FuncParamOptional...)
+	}
+	ta.FuncThis = true
+	return ta, nil
 }
 
 // convGeneric converts a signature with a type-parameter list. The
@@ -433,12 +457,6 @@ func (c typeConverter) convIndexSignature(n *IndexSignature) (*TypeAnnotation, e
 	return c.conv(n.Type)
 }
 
-// SignatureMember returns the function-type annotation of a call, construct
-// or method signature member.
-func SignatureMember(m TypeMember, source string) (*TypeAnnotation, error) {
-	return typeConverter{source: source}.convSignatureMember(m)
-}
-
 func (c typeConverter) convSignatureMember(m TypeMember) (*TypeAnnotation, error) {
 	var ta *TypeAnnotation
 	var err error
@@ -448,7 +466,13 @@ func (c typeConverter) convSignatureMember(m TypeMember) (*TypeAnnotation, error
 	case *ConstructSignature:
 		ta, err = c.convSignature(m.Parameters, m.Type)
 	case *MethodSignature:
-		ta, err = c.convGeneric(m.TypeParameters, func() (*TypeAnnotation, error) { return c.convSignature(m.Parameters, m.Type) })
+		ta, err = c.convGeneric(m.TypeParameters, func() (*TypeAnnotation, error) {
+			sig, err := c.convSignature(m.Parameters, m.Type)
+			if err != nil {
+				return nil, err
+			}
+			return c.withThis(sig, m.This)
+		})
 	default:
 		return nil, fmt.Errorf("%d:%d: not a signature member", m.GetPos().Line, m.GetPos().Col)
 	}
@@ -552,6 +576,74 @@ func EraseTypeParamsTo(ta *TypeAnnotation, params map[string]string) {
 	for i := range ta.Fields {
 		EraseTypeParamsTo(ta.Fields[i].Type, params)
 	}
+}
+
+// EraseTypeParamsInBody applies EraseTypeParamsTo to every type annotation
+// inside a function body (a local's annotation, `new Promise<T>`, an arrow's
+// parameter types, `x as T`, …): an erased generic method compiles its body
+// with the same replacements as its signature. A nested function that
+// declares a type parameter of the same name keeps its own.
+func EraseTypeParamsInBody(body *BlockStatement, params map[string]string) {
+	if body == nil || len(params) == 0 {
+		return
+	}
+	seen := map[uintptr]bool{}
+	taType := reflect.TypeOf(&TypeAnnotation{})
+	var walk func(v reflect.Value)
+	walk = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.Ptr:
+			if v.IsNil() {
+				return
+			}
+			if v.Type() == taType {
+				EraseTypeParamsTo(v.Interface().(*TypeAnnotation), params)
+				return
+			}
+			if seen[v.Pointer()] {
+				return
+			}
+			seen[v.Pointer()] = true
+			if fd, ok := v.Interface().(*FunctionDeclaration); ok && shadowsTypeParam(fd.TypeParams, params) {
+				return
+			}
+			walk(v.Elem())
+		case reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem())
+			}
+		case reflect.Struct:
+			if v.Type() == reflect.TypeOf(TypeAnnotation{}) {
+				if v.CanAddr() {
+					EraseTypeParamsTo(v.Addr().Interface().(*TypeAnnotation), params)
+				}
+				return
+			}
+			for i := 0; i < v.NumField(); i++ {
+				if v.Type().Field(i).IsExported() {
+					walk(v.Field(i))
+				}
+			}
+		case reflect.Slice, reflect.Array:
+			for i := 0; i < v.Len(); i++ {
+				walk(v.Index(i))
+			}
+		case reflect.Map:
+			for _, k := range v.MapKeys() {
+				walk(v.MapIndex(k))
+			}
+		}
+	}
+	walk(reflect.ValueOf(body))
+}
+
+func shadowsTypeParam(tps []string, params map[string]string) bool {
+	for _, tp := range tps {
+		if _, ok := params[tp]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // InterfaceLegacy derives the member shapes code generation reads (Fields,
@@ -674,5 +766,17 @@ func (c typeConverter) legacyMethod(m *MethodSignature) (InterfaceMethodSig, err
 		}
 		EraseTypeParams(ms.ReturnType, tps)
 	}
+	ms.Optional = m.Optional
+	ft, err := c.convSignature(m.Parameters, m.Type)
+	if err == nil {
+		ft, err = c.withThis(ft, m.This)
+	}
+	if err != nil {
+		return ms, err
+	}
+	if len(tps) > 0 {
+		EraseTypeParams(ft, tps)
+	}
+	ms.Type = ft
 	return ms, nil
 }

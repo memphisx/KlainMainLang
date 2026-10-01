@@ -1,13 +1,9 @@
-// emit_net.go — codegen for Node's `net` TCP server: net.createServer plus the
-// Server surface (server.listen/on('connection')/close) and the connection
-// Socket surface (socket.on('data'|'end'), socket.write, socket.end). Backed by
-// runtime_net.go.
-//
-// Listener registration mirrors the child_process posture (emit_childprocess.go):
-// a connection/data/end listener is an arrow/function-expression literal, stored
-// as a raw closure header the runtime dispatch invokes directly. The connection
-// listener receives the connection socket (typed NetSocket via the hint below),
-// so its body's socket.on(...)/write(...) dispatch through inferExprType.
+// emit_net.go — the net socket the HTTP server's 'upgrade'/'connection'/
+// 'clientError' events hand out (socket.on('data'|'end'), write, end,
+// destroy, setNoDelay/setKeepAlive, address), the { address, family, port }
+// object `server.address()` and dgram share, and the closure adapters
+// child_process and dgram listeners use. Backed by runtime_net.go. (Node's
+// `net` module itself is lib/node/net.ts.)
 package llvm
 
 import (
@@ -16,232 +12,11 @@ import (
 	"KlainMainLang/ast"
 )
 
-// emitNetModuleCall dispatches net.createServer.
-func (e *Emitter) emitNetModuleCall(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	e.ensureNetRuntime()
-	switch method {
-	case "createServer":
-		return e.emitNetCreateServer(args, pos)
-	case "connect", "createConnection":
-		return e.emitNetConnect(args, pos)
-	case "isIP", "isIPv4", "isIPv6":
-		return e.emitNetIsIP(method, args, pos)
-	}
-	return Value{}, fmt.Errorf("%d:%d: net.%s is not supported", pos.Line, pos.Col, method)
-}
-
-// emitNetIsIP implements net.isIP / isIPv4 / isIPv6: parse the string via
-// inet_pton. isIP returns a `number` (0/4/6); isIPv4/isIPv6 return a boolean.
-func (e *Emitter) emitNetIsIP(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: net.%s takes one string argument", pos.Line, pos.Col, method)
-	}
-	sv, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	if sv.Ty.IR != "ptr" {
-		return Value{}, fmt.Errorf("%d:%d: net.%s takes a string argument", pos.Line, pos.Col, method)
-	}
-	fam := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_net_is_ip(ptr %s)", fam, sv.Ref))
-	switch method {
-	case "isIPv4":
-		b := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 4", b, fam))
-		return Value{Ref: b, Ty: TypeBool}, nil
-	case "isIPv6":
-		b := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 6", b, fam))
-		return Value{Ref: b, Ty: TypeBool}, nil
-	default: // isIP → a number (0/4/6)
-		d := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = sitofp i32 %s to double", d, fam))
-		return Value{Ref: d, Ty: TypeF64}, nil
-	}
-}
-
-// emitNetConnect implements net.connect(port, host, connectListener?) (and its
-// alias net.createConnection): an asynchronous connect that returns a NetSocket
-// immediately (ADR-01021). The connect listener, if given, fires once the
-// connection completes on a later event-loop pass; a failed connection surfaces
-// as an async 'error' event (with a coded Error), never a synchronous throw.
-func (e *Emitter) emitNetConnect(args []ast.Expression, pos ast.Pos) (Value, error) {
-	// Two call shapes: positional `(port, host, cb?)` or options-object
-	// `({ port, host? }, cb?)` (Node's IPC `{ path }` form is not supported —
-	// this is TCP only). `host` defaults to "localhost".
-	var portExpr, hostExpr, cbExpr, pathExpr ast.Expression
-	if len(args) >= 1 {
-		if ol, ok := args[0].(*ast.ObjectLiteral); ok {
-			// IPC form: `{ path }` connects to a Unix-domain socket.
-			pathExpr = objectLiteralProp(ol, "path")
-			portExpr = objectLiteralProp(ol, "port")
-			if pathExpr == nil && portExpr == nil {
-				return Value{}, fmt.Errorf("%d:%d: net.connect's options object requires a 'port' or a 'path'", pos.Line, pos.Col)
-			}
-			if pathExpr != nil && portExpr != nil {
-				return Value{}, fmt.Errorf("%d:%d: net.connect's options object takes 'port' or 'path', not both", pos.Line, pos.Col)
-			}
-			hostExpr = objectLiteralProp(ol, "host")
-			if len(args) > 2 {
-				return Value{}, fmt.Errorf("%d:%d: net.connect(options, connectListener?) takes at most two arguments", pos.Line, pos.Col)
-			}
-			if len(args) == 2 {
-				cbExpr = args[1]
-			}
-		} else {
-			if len(args) > 3 {
-				return Value{}, fmt.Errorf("%d:%d: net.connect takes (port[, host][, connectListener]) or (options, connectListener?)", pos.Line, pos.Col)
-			}
-			portExpr = args[0]
-			// `(port)`, `(port, cb)`, `(port, host)`, `(port, host, cb)` —
-			// disambiguate the second argument by its static type, as Node does
-			// dynamically. host defaults to "localhost".
-			if len(args) >= 2 {
-				if e.inferExprType(args[1]).IsFunc || isInlineCallback(args[1]) {
-					cbExpr = args[1]
-					if len(args) == 3 {
-						return Value{}, fmt.Errorf("%d:%d: net.connect's connectListener must be the last argument", pos.Line, pos.Col)
-					}
-				} else {
-					hostExpr = args[1]
-					if len(args) == 3 {
-						cbExpr = args[2]
-					}
-				}
-			}
-		}
-	} else {
-		return Value{}, fmt.Errorf("%d:%d: net.connect takes (port, host, connectListener?) or (options, connectListener?)", pos.Line, pos.Col)
-	}
-
-	sk := e.freshReg()
-	if pathExpr != nil {
-		// IPC: connect to a Unix-domain socket at `path`.
-		pv, err := e.emitExpr(pathExpr)
-		if err != nil {
-			return Value{}, err
-		}
-		pathVal := e.coerce(pv, TypePtr)
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_net_connect_unix(ptr %s)", sk, pathVal.Ref))
-		return e.finishNetConnect(sk, cbExpr, pos)
-	}
-
-	portVal, err := e.emitExpr(portExpr)
-	if err != nil {
-		return Value{}, err
-	}
-	port := e.coerce(portVal, TypeI64)
-	port32 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", port32, port.Ref))
-	var hostVal Value
-	if hostExpr != nil {
-		hv, err := e.emitExpr(hostExpr)
-		if err != nil {
-			return Value{}, err
-		}
-		hostVal = e.coerce(hv, TypePtr)
-	} else {
-		hostVal = Value{Ref: e.internString("localhost"), Ty: TypePtr}
-	}
-
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_net_connect(i32 %s, ptr %s)", sk, port32, hostVal.Ref))
-	return e.finishNetConnect(sk, cbExpr, pos)
-}
-
-// finishNetConnect handles the post-connect tail shared by the TCP and Unix
-// (IPC) forms: store the optional 'connect' listener and return the NetSocket.
-// net.connect is asynchronous (ADR-01021) — it always returns a socket and never
-// throws; a connection failure surfaces later as an async 'error' event, matching
-// Node (a socket with no 'error' listener throws uncaught, as Node also does).
-func (e *Emitter) finishNetConnect(sk string, cbExpr ast.Expression, pos ast.Pos) (Value, error) {
-	// The optional 'connect' listener (Node's, taking no arguments) is stored in
-	// the socket's field 4 and fired once when the connect completes — after
-	// net.connect returns and the `const sock = ...` binding is assigned. A
-	// listener closing over that binding therefore sees the real socket (closure
-	// capture of a not-yet-initialized binding is handled by ADR-00330).
-	if cbExpr != nil {
-		cb, err := e.netArrowClosure(cbExpr, nil, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		e.netStorePtrField(sk, netSocketIR, 4, cb)
-	}
-	return Value{Ref: sk, Ty: NetSocketType()}, nil
-}
-
-// emitNetCreateServer implements net.createServer(connectionListener?): a
-// Server handle whose connection listener (if given) is stored as a closure
-// header the dispatch fires with each accepted socket.
-func (e *Emitter) emitNetCreateServer(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) > 1 {
-		return Value{}, fmt.Errorf("%d:%d: net.createServer takes (connectionListener?)", pos.Line, pos.Col)
-	}
-	srv := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", srv, netServerStructSize))
-	// field 0 listenfd = -1 (calloc zeroed it; set explicitly for clarity)
-	lfd := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", lfd, netServerIR, srv))
-	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", lfd))
-	if len(args) == 1 {
-		if err := e.netStoreConnListener(srv, args[0], pos); err != nil {
-			return Value{}, err
-		}
-	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_net_srv_register(ptr %s)", srv))
-	return Value{Ref: srv, Ty: NetServerType()}, nil
-}
-
-// netStoreConnListener resolves a (socket) => ... listener and stores its
-// closure header into the server's field 1.
-func (e *Emitter) netStoreConnListener(srv string, arg ast.Expression, pos ast.Pos) error {
-	cb, err := e.resolveCallbackWithHints(arg, []Type{NetSocketType()})
-	if err != nil {
-		return err
-	}
-	if cb.kind != cbClosure {
-		return fmt.Errorf("%d:%d: a net connection listener must be an arrow function literal", pos.Line, pos.Col)
-	}
-	e.netStorePtrField(srv, netServerIR, 1, cb.hdrPtr)
-	return nil
-}
-
 // netStorePtrField GEPs struct field idx and stores a ptr into it.
 func (e *Emitter) netStorePtrField(base, structIR string, idx int, val string) {
 	slot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slot, structIR, base, idx))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val, slot))
-}
-
-// emitNetServerMethod dispatches server.listen/on/close.
-func (e *Emitter) emitNetServerMethod(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	objVal, err := e.emitExpr(objExpr)
-	if err != nil {
-		return Value{}, err
-	}
-	switch method {
-	case "listen":
-		return e.emitNetServerListen(objVal, args, pos)
-	case "on":
-		return e.emitNetServerOn(objVal, args, pos)
-	case "close":
-		lfd := e.freshReg()
-		fd64 := e.freshReg()
-		fd32 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", lfd, netServerIR, objVal.Ref))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", fd64, lfd))
-		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", fd32, fd64))
-		e.ensureCloseDecl()
-		e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))
-		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", lfd))
-		closed := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", closed, netServerIR, objVal.Ref))
-		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", closed))
-		return Value{Ty: TypeVoid}, nil
-	case "address":
-		return e.emitNetServerAddress(objVal, pos)
-	}
-	return Value{}, fmt.Errorf("%d:%d: a net.Server has no method '%s'", pos.Line, pos.Col, method)
 }
 
 // netAddressType is the shape net.Server.address() returns — Node's
@@ -271,16 +46,17 @@ func (e *Emitter) emitNetAddressObject(fd32 string) Value {
 	ty := netAddressType()
 	e.ensureCalloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dataReg, ty.StructSize()))
+	e.emitObjAllocInto(dataReg, ty)
 	structIR := ty.StructIR()
-	store := func(idx int, ir, val string) {
+	store := func(name, ir, val string) {
+		idx, _, _ := ty.FieldIndex(name)
 		g := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, structIR, dataReg, idx))
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ir, val, g))
 	}
-	store(0, "ptr", addrStr)
-	store(1, "ptr", e.internString("IPv4"))
-	store(2, "double", portD)
+	store("address", "ptr", addrStr)
+	store("family", "ptr", e.internString("IPv4"))
+	store("port", "double", portD)
 	return Value{Ref: dataReg, Ty: ty}
 }
 
@@ -295,124 +71,11 @@ func (e *Emitter) netFieldFd32(ref, structIR string) string {
 	return fd32
 }
 
-// emitNetServerAddress implements server.address(): getsockname on the listen
-// fd for the actual bound address+port (the crux of the `listen(0)`
-// ephemeral-port idiom). The server binds IPv4 `0.0.0.0` (ADR-00324/00358), so
-// it reports `{ family: "IPv4", address: "0.0.0.0", port }` rather than Node's
-// dual-stack `::`/`IPv6` default.
-func (e *Emitter) emitNetServerAddress(objVal Value, pos ast.Pos) (Value, error) {
-	return e.emitNetAddressObject(e.netFieldFd32(objVal.Ref, netServerIR)), nil
-}
-
 // emitNetSocketAddress implements socket.address(): the socket's local
 // address+port (e.g. a loopback connection reports `127.0.0.1` + the local
 // ephemeral port), via getsockname on the socket fd.
 func (e *Emitter) emitNetSocketAddress(objVal Value, pos ast.Pos) (Value, error) {
 	return e.emitNetAddressObject(e.netFieldFd32(objVal.Ref, netSocketIR)), nil
-}
-
-// emitNetServerListen implements server.listen(port, listeningCallback?).
-func (e *Emitter) emitNetServerListen(objVal Value, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: server.listen takes (port, callback?)", pos.Line, pos.Col)
-	}
-	portVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	port := e.coerce(portVal, TypeI64)
-	port32 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", port32, port.Ref))
-	fd := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_net_bind_and_listen(i32 %s)", fd, port32))
-	fd64 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", fd64, fd))
-	slot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", slot, netServerIR, objVal.Ref))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", fd64, slot))
-	// Optional 'listening' callback fires synchronously once bound (Node treats
-	// listen()'s callback as a one-time 'listening' listener).
-	if len(args) == 2 {
-		cb, err := e.resolveCallback(args[1])
-		if err != nil {
-			return Value{}, err
-		}
-		if _, err := e.emitCBCall(cb, nil); err != nil {
-			return Value{}, err
-		}
-	}
-	// Fire any listener registered earlier via server.on('listening', …).
-	e.emitNetFireListeningListener(objVal.Ref)
-	return Value{Ty: TypeVoid}, nil
-}
-
-// emitNetFireListeningListener invokes the server's stored 'listening' listener
-// (field 4, a zero-arg closure header) if present, then clears it so it fires at
-// most once (Node's 'listening' fires once per listen()).
-func (e *Emitter) emitNetFireListeningListener(srv string) {
-	slot := e.freshReg()
-	hdr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", slot, netServerIR, srv))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, slot))
-	isnull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isnull, hdr))
-	fireL := e.freshLabel("netlisten.fire")
-	doneL := e.freshLabel("netlisten.done")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isnull, doneL, fireL))
-	e.emitLabel(fireL)
-	fp := e.freshReg()
-	ep := e.freshReg()
-	fpp := e.freshReg()
-	epp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpp, hdr))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpp))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epp, hdr))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
-	e.emitInstr(fmt.Sprintf("call void %s(ptr %s)", fp, ep))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-	e.emitLabel(doneL)
-}
-
-// emitNetServerOn implements server.on('connection'|'listening', listener).
-func (e *Emitter) emitNetServerOn(objVal Value, args []ast.Expression, pos ast.Pos) (Value, error) {
-	evt, err := stringLiteralArg(args, 0, "server.on", pos)
-	if err != nil {
-		return Value{}, err
-	}
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: server.on takes (event, listener)", pos.Line, pos.Col)
-	}
-	switch evt {
-	case "connection":
-		if err := e.netStoreConnListener(objVal.Ref, args[1], pos); err != nil {
-			return Value{}, err
-		}
-	case "listening":
-		cb, err := e.netArrowClosure(args[1], nil, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		e.netStorePtrField(objVal.Ref, netServerIR, 4, cb)
-		// If the server is already listening (fd >= 0), fire now — the
-		// listener was registered after listen() bound.
-		fdSlot := e.freshReg()
-		fd := e.freshReg()
-		isBound := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", fdSlot, netServerIR, objVal.Ref))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", fd, fdSlot))
-		e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", isBound, fd))
-		nowL := e.freshLabel("netlisten.now")
-		afterL := e.freshLabel("netlisten.after")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBound, nowL, afterL))
-		e.emitLabel(nowL)
-		e.emitNetFireListeningListener(objVal.Ref)
-		e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
-		e.emitLabel(afterL)
-	default:
-		return Value{}, fmt.Errorf("%d:%d: a net.Server supports .on('connection'|'listening', listener) (got '%s')", pos.Line, pos.Col, evt)
-	}
-	return Value{Ty: TypeVoid}, nil
 }
 
 // emitNetSocketMethod dispatches socket.on/write/end on a connection socket.
@@ -480,7 +143,7 @@ func (e *Emitter) emitNetSocketMethod(objExpr ast.Expression, method string, arg
 		if len(args) != 1 {
 			return Value{}, fmt.Errorf("%d:%d: socket.write takes (data)", pos.Line, pos.Col)
 		}
-		ptrRef, lenRef, err := e.zlibResolveInput(args[0], pos)
+		ptrRef, lenRef, err := e.bytesResolveInput(args[0], pos)
 		if err != nil {
 			return Value{}, err
 		}
@@ -489,7 +152,7 @@ func (e *Emitter) emitNetSocketMethod(objExpr ast.Expression, method string, arg
 	case "end":
 		e.ensureNetSockIO()
 		if len(args) == 1 {
-			ptrRef, lenRef, err := e.zlibResolveInput(args[0], pos)
+			ptrRef, lenRef, err := e.bytesResolveInput(args[0], pos)
 			if err != nil {
 				return Value{}, err
 			}
@@ -669,49 +332,4 @@ func (e *Emitter) ensureChunkHeaderAdapter() string {
 func (e *Emitter) chunkHeaderAdapterClosure(realCloHdr string) string {
 	fn := e.ensureChunkHeaderAdapter()
 	return e.buildBuiltinClosure(fn, realCloHdr)
-}
-
-// ensureDgramMsgHeaderAdapter is ensureChunkHeaderAdapter's sibling for dgram's
-// 4-word message ABI `void(ptr %env, ptr %buf, i64 %n, ptr %rinfo)` — it boxes
-// (%buf, %n) into a header and forwards (realEnv, header, %n, %rinfo).
-func (e *Emitter) ensureDgramMsgHeaderAdapter() string {
-	fn := "@__kml_dgram_msg_hdr_adapter"
-	if e.dgramMsgHdrAdapterEmitted {
-		return fn
-	}
-	e.dgramMsgHdrAdapterEmitted = true
-	e.ensureMalloc()
-	restore := e.beginThunkEmit()
-	rfpp := e.freshReg()
-	rfp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", rfpp))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rfp, rfpp))
-	repp := e.freshReg()
-	rep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", repp))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rep, repp))
-	hdr := e.newArrayHeader("%buf", "%n")
-	e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s, i64 %%n, ptr %%rinfo)", rfp, rep, hdr))
-	body := e.allocas.String() + e.body.String()
-	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%env, ptr %%buf, i64 %%n, ptr %%rinfo) {\nentry:\n%sret void\n}\n", fn, body))
-	return fn
-}
-
-// dgramMsgHeaderAdapterClosure wraps a Uint8Array dgram 'message' listener so
-// the raw (ptr,len) message is boxed into a header (see the adapter above).
-func (e *Emitter) dgramMsgHeaderAdapterClosure(realCloHdr string) string {
-	fn := e.ensureDgramMsgHeaderAdapter()
-	return e.buildBuiltinClosure(fn, realCloHdr)
-}
-
-// isInlineCallback reports whether expr is a callback literal (arrow or
-// function expression), possibly inside a `test` counting wrapper — the
-// static stand-in for Node's dynamic typeof-function argument shuffling.
-func isInlineCallback(expr ast.Expression) bool {
-	switch unwrapTestWrapper(expr).(type) {
-	case *ast.ArrowFunction, *ast.FunctionExpression:
-		return true
-	}
-	return false
 }

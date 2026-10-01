@@ -69,7 +69,7 @@ func TestE2EDateFromInvalidStringLiteral(t *testing.T) {
 	assertOutput(t, `
 const d: Date = new Date("not a date")
 console.log(d.getTime())
-`, "-1")
+`, "NaN")
 }
 
 func TestE2EDateMultiArgConstructor(t *testing.T) {
@@ -163,7 +163,7 @@ console.log(Date.parse("2023-11-14"))
 func TestE2EDateParseInvalid(t *testing.T) {
 	assertOutput(t, `
 console.log(Date.parse("not a date"))
-`, "-1")
+`, "NaN")
 }
 
 func TestE2EDateParseRoundTrip(t *testing.T) {
@@ -451,4 +451,12 @@ func TestE2EDatePreEpochAndExpandedYears(t *testing.T) {
 
 func TestE2EDatePreEpochAndExpandedYearsSameAsNode(t *testing.T) {
 	assertSameAsNode(t, datePreEpochSrc)
+}
+
+// A year of 0–99 in the component constructor is 1900+year (MakeFullYear),
+// as in Node.
+func TestE2EDateTwoDigitYear(t *testing.T) {
+	assertOutput(t, `
+console.log(new Date(99, 0, 1).getFullYear(), new Date(5, 0).getFullYear(), new Date(100, 0).getFullYear(), new Date(-1, 0).getFullYear(), new Date(2024, 1).getFullYear())
+`, "1999 1905 100 -1 2024")
 }

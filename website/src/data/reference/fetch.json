@@ -28,7 +28,7 @@
         {
           "name": "init?",
           "type": "RequestInit",
-          "desc": "Any value with a subset of method: string / headers: Map<string,string> | Headers / body: string."
+          "desc": "A RequestInit: method, headers (any HeadersInit) and body (any BodyInit — a string, URLSearchParams, Blob, ArrayBuffer or TypedArray/Buffer, sent with the Content-Type undici implies), signal."
         }
       ],
       "returns": {
@@ -38,8 +38,7 @@
       "exampleKey": "fetch/fetch_init",
       "snippet": "const r = await fetch('http://127.0.0.1:8765/get')\nconsole.log(r.status, r.ok)   // 200 true",
       "differences": [
-        "Setting a `body` without an explicit `method` sends it as `POST` (libcurl's `CURLOPT_POSTFIELDS` implies `POST` unless overridden); an explicit `method` always wins over that default.",
-        "A fetch carrying an `AbortSignal` resolves at completion, not when headers arrive."
+        "A network failure rejects with a TypeError whose message is libcurl's (\"Couldn't connect to server\"); Node's is \"fetch failed\", with the reason as its cause."
       ],
       "seeAlso": [
         "fetch.response.status",
@@ -85,8 +84,7 @@
       "exampleKey": "fetch/fetch",
       "snippet": "const r = await fetch('http://127.0.0.1:8765/get')\nconst body: string = await r.text()",
       "differences": [
-        "The result is a null-terminated string: a binary body with an embedded null byte truncates at the first one — use `.arrayBuffer()` for binary.",
-        "`.text()` after consuming `.body` returns `\"\"` instead of the spec's already-disturbed `TypeError`."
+        "The result is a null-terminated string: a binary body with an embedded null byte truncates at the first one — use `.arrayBuffer()` for binary."
       ],
       "seeAlso": [
         "fetch.response.json",
@@ -136,9 +134,6 @@
         "desc": "Resolves to the complete response body as bytes."
       },
       "snippet": "const binary = await fetch('http://127.0.0.1:8765/bytes/16')\nconst bytes = new Uint8Array(await binary.arrayBuffer())",
-      "differences": [
-        "The body is buffered eagerly at the call, not lazily off the transfer."
-      ],
       "seeAlso": [
         "fetch.response.text",
         "fetch.response.body"
@@ -151,22 +146,42 @@
       "id": "fetch.response.body",
       "name": "Response.body",
       "statusRow": "Response (.status, .ok, .body, .text(), .json(), .arrayBuffer())",
-      "signature": "readonly body: ReadableStream<Uint8Array>",
+      "signature": "readonly body: ReadableStream<Uint8Array> | null; readonly bodyUsed: boolean",
       "badge": "caveats",
-      "description": "A real ReadableStream<Uint8Array> fed incrementally from libcurl's write callback with backpressure via curl pause/unpause. On an already-completed transfer it replays the buffered bytes as one chunk.",
+      "description": "A real ReadableStream<Uint8Array> fed incrementally from libcurl's write callback with backpressure via curl pause/unpause. Every read is the same stream; a constructed Response without a body has a null body. bodyUsed turns true once a body method runs or the stream is read, and a body method on a used or locked body rejects with a TypeError (\"Body is unusable\"), as in Node.",
       "returns": {
-        "type": "ReadableStream<Uint8Array>",
+        "type": "ReadableStream<Uint8Array> | null",
         "desc": "The streaming body."
       },
-      "differences": [
-        "Reading `.text()` after consuming `.body` returns `\"\"` rather than the spec's already-disturbed `TypeError`; `Object.keys`/JSON of a Response expose an internal `__kml_pending` field."
-      ],
       "seeAlso": [
         "fetch.response.arrayBuffer",
         "fetch.response.text"
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Response/body"
+      }
+    },
+    {
+      "id": "fetch.response.ctor",
+      "name": "new Response(body, init) / Response.json() / .redirect() / .error()",
+      "statusRow": "new Response(body, init) / Response.json() / Response.redirect() / Response.error()",
+      "signature": "new Response(body?: string | Uint8Array | ArrayBuffer | Blob | URLSearchParams | ReadableStream<Uint8Array> | null, init?: { status?: number, statusText?: string, headers?: HeadersInit }); Response.json(data, init?); Response.redirect(url, status?); Response.error()",
+      "badge": "caveats",
+      "description": "Builds a Response without a request: the body with the content type it implies (text/plain;charset=UTF-8 for a string, a Blob's own type) unless the headers set one, init's status, statusText and headers. Response.json serializes data as application/json, Response.redirect sets Location from the parsed URL, Response.error() is status 0 with type 'error'. text(), json(), arrayBuffer() and .body read it as they read a fetched Response; a ReadableStream body is .body itself, read to its end by a body method, and no body makes .body null.",
+      "returns": {
+        "type": "Response",
+        "desc": "A Response with the given body and init."
+      },
+      "snippet": "const res = new Response('hello', { status: 201, headers: { 'X-Id': '7' } })\nconsole.log(res.status, res.headers.get('content-type'), await res.text())\nconst j = Response.json({ ok: true })",
+      "differences": [
+        "A stream body must be a `ReadableStream<Uint8Array>`: a stream of `any` chunks is rejected at compile time."
+      ],
+      "seeAlso": [
+        "fetch.response.status",
+        "fetch.response.json"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Response/Response"
       }
     },
     {
@@ -189,8 +204,8 @@
       "name": "new Request(url, init?)",
       "statusRow": "Request / Headers objects",
       "signature": "new Request(url: string, init?: RequestInit): Request",
-      "badge": "exact",
-      "description": "A real Request class bundling a URL with method/headers/body — all readable directly (.url/.method/.headers/.body). method defaults to \"GET\", headers to an empty Headers, body to null. Works as fetch's sole argument, or supply a plain-object init to fetch directly.",
+      "badge": "caveats",
+      "description": "A real Request class bundling a URL with method/headers/body: .url/.method/.headers, and Fetch's Body members (.body as a ReadableStream, bodyUsed, text()/json()/arrayBuffer()). method defaults to \"GET\" (standard methods case-normalized), headers to an empty Headers, body to null; a string body implies text/plain;charset=UTF-8, and a GET/HEAD request with a body is a TypeError. Works as fetch's sole argument, or supply a plain-object init to fetch directly.",
       "params": [
         {
           "name": "url",
@@ -209,6 +224,9 @@
       },
       "exampleKey": "fetch/fetch_request_headers",
       "snippet": "const req = new Request('http://127.0.0.1:8765/post', {\n  method: 'POST', headers: headers, body: JSON.stringify({ hello: 'world' })\n})\nconst posted = await fetch(req)",
+      "differences": [
+        "Its Headers keeps names lowercased, iterates in insertion order, and joins repeated set-cookie values."
+      ],
       "seeAlso": [
         "fetch.fetch",
         "fetch.headers"

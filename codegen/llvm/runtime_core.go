@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 )
 
 func (e *Emitter) ensureFree() {
@@ -146,13 +147,6 @@ func (e *Emitter) ensureCalloc() {
 	}
 }
 
-func (e *Emitter) ensureGetrusage() {
-	if !e.usedGetrusage {
-		e.emitGlobal("declare i32 @getrusage(i32 noundef, ptr noundef)")
-		e.usedGetrusage = true
-	}
-}
-
 // ensureCurrentRSS declares __kml_current_rss_bytes() -> i64: the process's
 // *instantaneous* resident set size in bytes, matching real Node's
 // process.memoryUsage().rss (ADR-00570) — not getrusage's ru_maxrss peak.
@@ -243,79 +237,6 @@ func (e *Emitter) ensureMemmove() {
 	}
 }
 
-// ensureStripExpZeros defines @__kml_strip_exp_zeros: rewrites a C printf-style
-// exponent ("1.23e+03") in place to JS's minimum-digit form ("1.23e+3"), and
-// returns the new string length. It finds the first 'e'/'E', skips an optional
-// sign, then drops leading '0' digits from the exponent while keeping at least
-// one digit ("e+00" → "e+0"), memmove-ing the tail (including the NUL) left.
-// No 'e'/'E' → the string is returned unchanged. Shared by
-// toExponential/toPrecision, whose only remaining deviation from real JS was
-// this two-digit zero-padded exponent (ADR-00551).
-func (e *Emitter) ensureStripExpZeros() {
-	if e.usedStripExpZeros {
-		return
-	}
-	e.usedStripExpZeros = true
-	e.ensureStrlen()
-	e.ensureMemmove()
-	e.emitGlobal(`
-define i64 @__kml_strip_exp_zeros(ptr %s) {
-entry:
-  %len0 = call i64 @strlen(ptr %s)
-  br label %find
-find:
-  %i = phi i64 [ 0, %entry ], [ %in, %adv ]
-  %atend = icmp sge i64 %i, %len0
-  br i1 %atend, label %noe, label %chk
-chk:
-  %p = getelementptr i8, ptr %s, i64 %i
-  %c = load i8, ptr %p, align 1
-  %ise = icmp eq i8 %c, 101
-  %isE = icmp eq i8 %c, 69
-  %isexp = or i1 %ise, %isE
-  br i1 %isexp, label %founde, label %adv
-adv:
-  %in = add i64 %i, 1
-  br label %find
-founde:
-  %s1 = add i64 %i, 1
-  %sp = getelementptr i8, ptr %s, i64 %s1
-  %sc = load i8, ptr %sp, align 1
-  %isplus = icmp eq i8 %sc, 43
-  %isminus = icmp eq i8 %sc, 45
-  %issign = or i1 %isplus, %isminus
-  %signadj = select i1 %issign, i64 1, i64 0
-  %digstart = add i64 %s1, %signadj
-  br label %zloop
-zloop:
-  %z = phi i64 [ %digstart, %founde ], [ %zn, %zadv ]
-  %zp = getelementptr i8, ptr %s, i64 %z
-  %zc = load i8, ptr %zp, align 1
-  %isz = icmp eq i8 %zc, 48
-  %z1 = add i64 %z, 1
-  %hasnext = icmp slt i64 %z1, %len0
-  %cond = and i1 %isz, %hasnext
-  br i1 %cond, label %zadv, label %zdone
-zadv:
-  %zn = add i64 %z, 1
-  br label %zloop
-zdone:
-  %drop = sub i64 %z, %digstart
-  %nodrop = icmp eq i64 %drop, 0
-  br i1 %nodrop, label %noe, label %shift
-shift:
-  %movelen0 = sub i64 %len0, %z
-  %movelen = add i64 %movelen0, 1
-  %dst = getelementptr i8, ptr %s, i64 %digstart
-  %src = getelementptr i8, ptr %s, i64 %z
-  call ptr @memmove(ptr %dst, ptr %src, i64 %movelen)
-  %newlen = sub i64 %len0, %drop
-  ret i64 %newlen
-noe:
-  ret i64 %len0
-}`)
-}
-
 func (e *Emitter) ensureStrlen() {
 	if !e.usedStrlen {
 		e.emitGlobal("declare i64 @strlen(ptr noundef)")
@@ -341,6 +262,13 @@ func (e *Emitter) ensureMemset() {
 	if !e.usedMemset {
 		e.emitGlobal("declare ptr @memset(ptr noundef, i32 noundef, i64 noundef)")
 		e.usedMemset = true
+	}
+}
+
+func (e *Emitter) ensureStrcasecmp() {
+	if !e.usedStrcasecmp {
+		e.emitGlobal("declare i32 @strcasecmp(ptr noundef, ptr noundef)")
+		e.usedStrcasecmp = true
 	}
 }
 
@@ -669,6 +597,15 @@ func (e *Emitter) ensureRandS() {
 // ensureRandRandom emits a self-contained @__klain_math_random helper in LLVM IR
 // that uses C89 rand()/srand()/time() — available on every libc — as the portable
 // fallback for Math.random() on non-BSD platforms.
+// ensureTime declares libc's time(3) once.
+func (e *Emitter) ensureTime() {
+	if e.declaredTime {
+		return
+	}
+	e.declaredTime = true
+	e.emitGlobal("declare i64 @time(ptr)")
+}
+
 func (e *Emitter) ensureRandRandom() {
 	if e.usedArc4Random { // reuse flag slot; only one path is ever taken
 		return
@@ -678,7 +615,7 @@ func (e *Emitter) ensureRandRandom() {
 	// C89 declarations needed by the helper.
 	e.emitGlobal("declare i32  @rand()")
 	e.emitGlobal("declare void @srand(i32 noundef)")
-	e.emitGlobal("declare i64  @time(ptr)")
+	e.ensureTime()
 
 	// One-time seeded flag (thread-unsafe but fine for single-threaded scripts).
 	e.emitGlobal("@__klain_rand_seeded = private thread_local global i1 false, align 1")
@@ -1118,4 +1055,21 @@ func (e *Emitter) ensureChdirDecl() {
 		e.emitGlobal("declare i32 @chdir(ptr noundef)")
 		e.usedChdirDecl = true
 	}
+}
+
+// llvmCStrConst renders a `<sym> = private constant [N x i8] c"..."` global for a
+// printf format string, appending a trailing newline + NUL and computing N (and
+// the \XX escaping) from the actual bytes — so the length is never hand-counted.
+func llvmCStrConst(sym, text string) string {
+	raw := text + "\n\x00"
+	var b strings.Builder
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c == '\\' || c == '"' || c < 0x20 || c >= 0x7f {
+			b.WriteString(fmt.Sprintf("\\%02X", c))
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return fmt.Sprintf("%s = private unnamed_addr constant [%d x i8] c\"%s\", align 1", sym, len(raw), b.String())
 }

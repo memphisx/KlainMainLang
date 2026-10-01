@@ -21,6 +21,8 @@ static void tls_attach_fd(SSL *ssl, int fd) {
 	SSL_set_fd(ssl, (int)__kml_win_fd_socket(fd));
 }
 #else
+#include <sys/socket.h>
+#include <arpa/inet.h>
 static void tls_attach_fd(SSL *ssl, int fd) { SSL_set_fd(ssl, fd); }
 #endif
 
@@ -259,11 +261,16 @@ double __kml_native_tls_start(double handle, double ctxId, _Bool server, const c
 	if (!server) {
 		SSL_set_verify(s->ssl, SSL_VERIFY_NONE, NULL);
 		if (servername && *servername) {
+			// The identity checked: an IP literal against the certificate's IP
+			// addresses (and never sent as SNI, RFC 6066), a name against its
+			// DNS names.
 			s->servername = strdup(servername);
-			SSL_set_tlsext_host_name(s->ssl, servername);
 			X509_VERIFY_PARAM *param = SSL_get0_param(s->ssl);
 			X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-			if (!X509_VERIFY_PARAM_set1_host(param, servername, 0)) X509_VERIFY_PARAM_set1_ip_asc(param, servername);
+			if (!X509_VERIFY_PARAM_set1_ip_asc(param, servername)) {
+				SSL_set_tlsext_host_name(s->ssl, servername);
+				X509_VERIFY_PARAM_set1_host(param, servername, 0);
+			}
 		}
 		SSL_set_connect_state(s->ssl);
 	} else {
@@ -333,6 +340,50 @@ double __kml_native_tls_info(double handle, double which) {
 	case 6: {
 		const SSL_CIPHER *c = SSL_get_current_cipher(s->ssl);
 		__kml_native_set_last_string(c ? SSL_CIPHER_get_name(c) : "");
+		return 0;
+	}
+	case 7:
+	case 8: {
+		// 7: the peer certificate's subjectaltname as Node prints it
+		// ("DNS:a, IP Address:127.0.0.1"); 8: its subject CN.
+		char buf[2048] = {0};
+		X509 *cert = SSL_get1_peer_certificate(s->ssl);
+		if (cert && (int)which == 8) {
+			X509_NAME_get_text_by_NID(X509_get_subject_name(cert), NID_commonName, buf, sizeof buf);
+		} else if (cert) {
+			GENERAL_NAMES *names = X509_get_ext_d2i(cert, NID_subject_alt_name, NULL, NULL);
+			size_t len = 0;
+			for (int i = 0; names && i < sk_GENERAL_NAME_num(names); i++) {
+				const GENERAL_NAME *g = sk_GENERAL_NAME_value(names, i);
+				char item[300] = {0};
+				if (g->type == GEN_DNS) {
+					snprintf(item, sizeof item, "DNS:%.*s", ASN1_STRING_length(g->d.dNSName), (const char *)ASN1_STRING_get0_data(g->d.dNSName));
+				} else if (g->type == GEN_IPADD) {
+					const unsigned char *ip = ASN1_STRING_get0_data(g->d.iPAddress);
+					int n = ASN1_STRING_length(g->d.iPAddress);
+					char addr[64] = {0};
+					if (n == 4) {
+						inet_ntop(AF_INET, ip, addr, sizeof addr);
+					} else if (n == 16) {
+						// Node's PrintGeneralName: eight uppercase groups, uncompressed.
+						size_t al = 0;
+						for (int j = 0; j < 8; j++)
+							al += snprintf(addr + al, sizeof addr - al, j ? ":%X" : "%X", (ip[2 * j] << 8) | ip[2 * j + 1]);
+					}
+					snprintf(item, sizeof item, "IP Address:%s", addr);
+				} else {
+					continue;
+				}
+				size_t il = strlen(item);
+				if (len + il + 3 >= sizeof buf) break;
+				if (len) { memcpy(buf + len, ", ", 2); len += 2; }
+				memcpy(buf + len, item, il);
+				len += il;
+			}
+			if (names) GENERAL_NAMES_free(names);
+		}
+		if (cert) X509_free(cert);
+		__kml_native_set_last_string(buf);
 		return 0;
 	}
 	}

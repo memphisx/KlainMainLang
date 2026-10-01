@@ -60,6 +60,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -137,7 +138,6 @@ func ResolveProgram(entryPath string) (*ast.Program, error) {
 // `-dynamic-import=lazy` makes each dynamic import target an island.
 func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Program, error) {
 	allowGlobalShadowing, lazyDynamicImport := opts.CompatJS(), opts.DynamicImport == "lazy"
-	windowsTarget = opts.Target.OS() == "windows"
 	entryAbs, err := filepath.Abs(entryPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolving entry path: %w", err)
@@ -180,6 +180,9 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 	importTargets := map[string]bool{}
 	workerTargets := map[string]bool{}
 	dynamicImportTargets := map[string]bool{}
+	// userEdges: a file's static (and eagerly merged dynamic) imports of
+	// user files — the graph a worker re-evaluates on its own thread.
+	userEdges := map[string][]string{}
 
 	var visit func(path string, isEntry bool) error
 	visit = func(path string, isEntry bool) error {
@@ -215,14 +218,89 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		if err != nil {
 			return diag.InFile(err, path)
 		}
-		if opts.Target.OS() == "windows" {
-			redirectWindowsModules(prog)
-		}
 		defaultImportsAsNamespaces(prog)
+		markAssertCallSites(prog)
 		selfWorker := rewriteSelfWorker(prog, path)
+		if !strings.HasPrefix(path, lib.ModuleRoot) {
+			rewriteFileGlobals(prog, path)
+		}
 		prog.WorkerPaths = workerPaths(prog)
 		prog.DynamicImportNodes = dynamicImports(prog)
 		eraseBuiltinTypeImports(prog)
+
+		// TDD-00232: a global a global module implements, named here and not
+		// declared here, brings the module in; the name links to its class
+		// after checking (sema).
+		idents := codeIdents(src)
+		for _, name := range sortedGlobalNames() {
+			gpath := lib.GlobalModuleNames()[name]
+			if gpath == path || !idents[name] || declaresTopLevel(prog, name) {
+				continue
+			}
+			importTargets[gpath] = true
+			if err := visit(gpath, false); err != nil {
+				return err
+			}
+		}
+
+		// structuredClone of a value typed only at run time is a TypeScript
+		// module's.
+		if sc := lib.ModuleRoot + "internal_structured_clone.ts"; path != sc && idents["structuredClone"] && !declaresTopLevel(prog, "structuredClone") {
+			importTargets[sc] = true
+			if err := visit(sc, false); err != nil {
+				return err
+			}
+		}
+
+		// TDD-00235: `process.stdin`/`stdout`/`stderr` are the stdio
+		// module's streams.
+		if sp := lib.ModuleRoot + "internal_process_stdio.ts"; path != sp && idents["process"] && (idents["stdin"] || idents["stdout"] || idents["stderr"]) {
+			importTargets[sp] = true
+			if err := visit(sp, false); err != nil {
+				return err
+			}
+		}
+
+		// `process`'s emitter members, `process` as a value, and
+		// process.emitWarning are TypeScript modules'.
+		if idents["process"] && !declaresTopLevel(prog, "process") {
+			members, bare := processUses(src)
+			pp := lib.ModuleRoot + "internal_process.ts"
+			if path != pp && (members["emitter"] || (bare && !strings.HasPrefix(path, lib.ModuleRoot))) {
+				importTargets[pp] = true
+				if err := visit(pp, false); err != nil {
+					return err
+				}
+			}
+			mp := lib.ModuleRoot + "internal_process_methods.ts"
+			if path != mp && members["methods"] {
+				importTargets[mp] = true
+				if err := visit(mp, false); err != nil {
+					return err
+				}
+			}
+			hp := lib.ModuleRoot + "internal_process_hrtime.ts"
+			if path != hp && members["hrtime"] {
+				importTargets[hp] = true
+				if err := visit(hp, false); err != nil {
+					return err
+				}
+			}
+			ep := lib.ModuleRoot + "internal_process_env.ts"
+			if path != ep && members["env"] {
+				importTargets[ep] = true
+				if err := visit(ep, false); err != nil {
+					return err
+				}
+			}
+			wp := lib.ModuleRoot + "internal_process_warning.ts"
+			if path != wp && members["emitWarning"] {
+				importTargets[wp] = true
+				if err := visit(wp, false); err != nil {
+					return err
+				}
+			}
+		}
 
 		dir := filepath.Dir(path)
 		for _, stmt := range prog.Body {
@@ -252,10 +330,20 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			if _, isVirtual := virtualBuiltinMarkers[source]; isVirtual {
 				// TDD-00049: a built-in module, never a real file to visit —
 				// but its part written in TypeScript is one (TDD-00231).
-				if cp, ok := companionPath(source); ok && cp != path {
+				if cp, ok := lib.CompanionPath(source); ok && cp != path {
 					importTargets[cp] = true
 					if err := visit(cp, false); err != nil {
 						return err
+					}
+				}
+				// klain:http's request is a Node Readable over its body
+				// stream: `stream`'s Readable.fromWeb makes it.
+				if strings.TrimPrefix(source, "node:") == "klain:http" {
+					if sp, ok := lib.ModulePath("stream"); ok && sp != path {
+						importTargets[sp] = true
+						if err := visit(sp, false); err != nil {
+							return err
+						}
 					}
 				}
 				continue
@@ -265,6 +353,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				return fmt.Errorf("%d:%d: %w", stmt.GetPos().Line, stmt.GetPos().Col, err)
 			}
 			importTargets[resolved] = true
+			userEdges[path] = append(userEdges[path], resolved)
 			if err := visit(resolved, false); err != nil {
 				return err
 			}
@@ -321,6 +410,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 			// Eager backend (TDD-00055): merge the target like a static import
 			// (its top-level runs unconditionally at startup).
+			userEdges[path] = append(userEdges[path], resolved)
 			if err := visit(resolved, false); err != nil {
 				return err
 			}
@@ -344,12 +434,6 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		self := files[wf].selfWorker && onlySelfWorker(files[wf].prog, wf)
 		if wf == entryAbs && !self {
 			return nil, fmt.Errorf("%s: the program's own entry file cannot be used as a worker module", wf)
-		}
-		if importTargets[wf] {
-			return nil, fmt.Errorf("%s: a worker module cannot also be imported — its top level runs on the worker thread, not at import time", wf)
-		}
-		if len(files[wf].prog.WorkerPaths) > 0 && !self {
-			return nil, fmt.Errorf("%s: a worker module cannot spawn workers of its own (nested workers are not supported)", wf)
 		}
 	}
 
@@ -494,7 +578,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			})
 			return nil, diag.InFile(diag.Errors(ds), path)
 		}
-		mangled, err := mangleFileDecls(path, info.prog, info.index, allowGlobalShadowing)
+		mangled, err := mangleFileDecls(path, info.prog, info.index, allowGlobalShadowing || strings.HasPrefix(path, lib.ModuleRoot))
 		if err != nil {
 			return nil, err
 		}
@@ -553,14 +637,11 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 					}
 					builtinImports[spec.Local] = true
 					mod, name := strings.TrimPrefix(imp.Source, "node:"), spec.Imported
-					if d, ok := defaultReexportName[mod]; ok && name == "default" {
-						name = d // `import EventEmitter from 'events'`
-					}
 					builtinImportRefs[spec.Local] = ast.BuiltinImportRef{Module: mod, Name: name}
 					if parseTimeReexports[spec.Imported] && spec.Local != spec.Imported {
-						// The rename pass rebuilds `new EE()` under the
-						// canonical name (`EventEmitter`), which is then the
-						// name in the program.
+						// The rename pass rebuilds `new U()` under the
+						// canonical name (`URL`), which is then the name in
+						// the program.
 						builtinImports[spec.Imported] = true
 						builtinImportRefs[spec.Imported] = ast.BuiltinImportRef{Module: mod, Name: name}
 					}
@@ -580,6 +661,24 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				// not recording a local binding.
 				marker := virtualBuiltinMarkers[imp.Source]
 				funcs := moduleFunctionMembers[imp.Source]
+				// The module's part written in TypeScript (`url`'s legacy
+				// API): its exports resolve to the companion's declarations.
+				companion := companionMangled(files, imp.Source)
+				bindNS := func(local string) {
+					lookup[local] = marker
+					// Through the namespace, the companion's exports are its
+					// declarations and the primary exports are the globals
+					// (`buffer.Buffer` is `Buffer`).
+					members := map[string]string{}
+					for k, v := range companion {
+						members[k] = v
+					}
+					for r := range reexports {
+						members[r] = r
+					}
+					ns[marker] = members
+					ns[local] = members
+				}
 				dupCheck := func(local string) error {
 					if _, dup := lookup[local]; dup {
 						return fmt.Errorf("%d:%d: '%s' is already declared in this file", imp.GetPos().Line, imp.GetPos().Col, local)
@@ -599,7 +698,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 					// primaries aren't reachable this way (they're globals, not marker
 					// members); a module with no function members keeps the Stage 1
 					// rejection.
-					if len(funcs) == 0 {
+					if len(funcs) == 0 && companion == nil {
 						var example string
 						for m := range reexports {
 							if example == "" || m < example {
@@ -612,23 +711,18 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 					if err := dupCheck(imp.Namespace); err != nil {
 						return nil, err
 					}
-					lookup[imp.Namespace] = marker
+					bindNS(imp.Namespace)
 					continue
 				}
 				for _, spec := range imp.Specifiers {
 					if spec.Imported == "default" {
-						if def, hasDefault := defaultReexportName[imp.Source]; hasDefault {
-							// A reexport-primary default (`events` → `EventEmitter`):
-							// fall through to the named-export handling below with the
-							// canonical name.
-							spec = ast.ImportSpecifier{Imported: def, Local: spec.Local}
-						} else if len(funcs) > 0 {
+						if len(funcs) > 0 || companion != nil {
 							// A module-namespace default (`import url from 'url'`): bind
 							// the marker so `url.parse(…)` dispatches, like a namespace.
 							if err := dupCheck(spec.Local); err != nil {
 								return nil, err
 							}
-							lookup[spec.Local] = marker
+							bindNS(spec.Local)
 							continue
 						} else {
 							return nil, fmt.Errorf("%d:%d: built-in module '%s' has no default export — import its named export (e.g. `import { %s } from '%s'`)",
@@ -638,6 +732,10 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 					want := spec.Imported
 					if err := dupCheck(spec.Local); err != nil {
 						return nil, err
+					}
+					if m, ok := companion[want]; ok {
+						lookup[spec.Local] = m
+						continue
 					}
 					if funcs[want] {
 						// Stage 4: a module-only function member — dispatch via the
@@ -657,7 +755,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 					// Aliased import (local name differs from the global's).
 					if parseTimeReexports[want] {
 						// Stage 3: a parse-time constructor (`URL`/`URLSearchParams`/
-						// `Blob`/`EventEmitter`). The parser produced a generic
+						// `Blob`). The parser produced a generic
 						// `new <alias>(...)`; record the alias so the rename pass
 						// rebuilds it as the specialized built-in node under the
 						// canonical name.
@@ -686,16 +784,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				// The module's part written in TypeScript (TDD-00231): its
 				// exports resolve to the companion's declarations, by name
 				// or through the module's namespace.
-				var companion map[string]string
-				if cp, ok := companionPath(imp.Source); ok {
-					companion = map[string]string{}
-					for name := range files[cp].exported {
-						if strings.HasPrefix(name, "_kml") {
-							continue // shared among the builtin modules only
-						}
-						companion[name], _ = files[cp].publicMangled(name)
-					}
-				}
+				companion := companionMangled(files, imp.Source)
 				for _, spec := range imp.Specifiers {
 					if spec.Imported == "default" {
 						continue // handled by virtualImportLocal below
@@ -706,15 +795,6 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 								imp.GetPos().Line, imp.GetPos().Col, spec.Local)
 						}
 						lookup[spec.Local] = m
-						continue
-					}
-					// `import { promises } from 'fs'` is `fs/promises`' namespace.
-					if strings.TrimPrefix(imp.Source, "node:") == "fs" && spec.Imported == "promises" {
-						if _, dup := lookup[spec.Local]; dup {
-							return nil, fmt.Errorf("%d:%d: '%s' is already declared in this file — use 'as' to import it under a different local name",
-								imp.GetPos().Line, imp.GetPos().Col, spec.Local)
-						}
-						lookup[spec.Local] = virtualBuiltinMarkers["fs/promises"]
 						continue
 					}
 					if !members[spec.Imported] {
@@ -797,7 +877,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			nodeTypes:            info.prog.NodeTypeImports,
 			parseTimeAliases:     parseTimeAliases,
 			allowGlobalShadowing: allowGlobalShadowing, reservedErr: &reservedErr,
-			filePath: path,
+			filePath: path, workerLits: stringSet(info.prog.WorkerPaths),
 		})
 		if reservedErr != nil {
 			return nil, reservedErr
@@ -809,14 +889,12 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			if err != nil {
 				return nil, diag.InFile(err, path)
 			}
-			if opts.Target.OS() == "windows" {
-				redirectWindowsModules(cp)
-			}
 			defaultImportsAsNamespaces(cp)
+			markAssertCallSites(cp)
 			rewriteSelfWorker(cp, path)
 			cp.WorkerPaths = workerPaths(cp)
 			eraseBuiltinTypeImports(cp)
-			if _, err := mangleFileDecls(path, cp, info.index, allowGlobalShadowing); err != nil {
+			if _, err := mangleFileDecls(path, cp, info.index, allowGlobalShadowing || strings.HasPrefix(path, lib.ModuleRoot)); err != nil {
 				return nil, err
 			}
 			renameFile(cp, lookupTable{
@@ -826,7 +904,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				nodeTypes:            info.prog.NodeTypeImports,
 				parseTimeAliases:     parseTimeAliases,
 				allowGlobalShadowing: allowGlobalShadowing, reservedErr: &reservedErr,
-				filePath: path,
+				filePath: path, workerLits: stringSet(cp.WorkerPaths),
 			})
 			if reservedErr != nil {
 				return nil, reservedErr
@@ -890,6 +968,21 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 	merged.UsesDynamicImport = len(dynamicImportTargets) > 0
 	if ei, ok := files[entryAbs]; ok {
 		merged.EntryIsModule = IsModule(ei.prog)
+	}
+	merged.EntryPath = entryAbs
+	// Each builtin module written in TypeScript: its top-level names, for
+	// code generation to call into the library (`stream:_kmlFromWeb`).
+	for path, fi := range files {
+		if !strings.HasPrefix(path, lib.ModuleRoot) {
+			continue
+		}
+		mod := strings.TrimSuffix(strings.TrimPrefix(path, lib.ModuleRoot), ".ts")
+		for n, m := range fi.mangled {
+			if merged.LibExports == nil {
+				merged.LibExports = map[string]string{}
+			}
+			merged.LibExports[mod+":"+n] = m
+		}
 	}
 	if ei, ok := files[entryAbs]; ok {
 		m := make(map[string]string, len(ei.exported))
@@ -968,9 +1061,14 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			// declarations are hoisted into the shared program body (they're
 			// pure definitions — emitted as functions, callable from any
 			// thread), while its var declarations and executable statements
-			// become the worker's entry-function body.
+			// become the worker's entry-function body. A worker module the
+			// program also imports runs at import time too, as in Node.
 			decls, body := splitWorkerBody(unwrap(files[path].prog.Body))
-			merged.Body = append(merged.Body, decls...)
+			if importTargets[path] {
+				merged.Body = append(merged.Body, unwrap(files[path].prog.Body)...)
+			} else {
+				merged.Body = append(merged.Body, decls...)
+			}
 			merged.WorkerModules = append(merged.WorkerModules, ast.WorkerModule{Path: path, Body: body})
 			mergeNamespaces(files[path].prog)
 			continue
@@ -984,6 +1082,31 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		// The entry is also its own worker (`new Worker(__filename)`).
 		_, body := splitWorkerBody(unwrap(cp.Body))
 		merged.WorkerModules = append(merged.WorkerModules, ast.WorkerModule{Path: entryAbs, Body: body})
+	}
+	// A worker is its own isolate, as in Node: on its thread it evaluates
+	// every builtin module and the user modules it imports afresh, before
+	// its own statements. Deps holds those modules' executable top-level
+	// statements, in dependency order.
+	for i := range merged.WorkerModules {
+		wm := &merged.WorkerModules[i]
+		reach := map[string]bool{}
+		var walk func(string)
+		walk = func(p string) {
+			for _, d := range userEdges[p] {
+				if !reach[d] {
+					reach[d] = true
+					walk(d)
+				}
+			}
+		}
+		walk(wm.Path)
+		for _, path := range order {
+			if path == wm.Path || !(reach[path] || strings.HasPrefix(path, lib.ModuleRoot)) {
+				continue
+			}
+			_, body := splitWorkerBody(unwrap(files[path].prog.Body))
+			wm.Deps = append(wm.Deps, body...)
+		}
 	}
 	// Each top-level statement's file, for the checker's diagnostics.
 	stmtFile := map[ast.Statement]string{}
@@ -1006,6 +1129,20 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			merged.LibStatements[st] = true
 		}
 	}
+	// Every class of an included global module links (a program naming
+	// AbortController reaches AbortSignal through it).
+	for name, gpath := range lib.GlobalModuleNames() {
+		f, included := files[gpath]
+		if !included {
+			continue
+		}
+		if m, ok := f.mangled[name]; ok {
+			if merged.GlobalLinks == nil {
+				merged.GlobalLinks = map[string]string{}
+			}
+			merged.GlobalLinks[name] = m
+		}
+	}
 	for path, f := range files {
 		if !strings.HasPrefix(path, lib.ModuleRoot) {
 			continue
@@ -1025,12 +1162,6 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				}
 				merged.CallableClasses[m] = true
 			}
-		}
-	}
-	for _, f := range files {
-		if fileImportsModule(f.prog, "node:ffi") {
-			merged.UsesNodeFFI = true
-			break
 		}
 	}
 	// The strict lane is TypeScript's: a program tsc rejects for a type
@@ -1317,6 +1448,28 @@ func mangleFileDecls(path string, prog *ast.Program, fileIdx int, allowGlobalSha
 			sawDefault = true
 			mangled["default"] = lastNewName
 		}
+	}
+	// `export default X;` naming a class or function this file declares:
+	// the default export is that declaration itself, not a `const default`
+	// holding it (a class is no value here).
+	for i, stmt := range prog.Body {
+		exp, ok := stmt.(*ast.ExportDeclaration)
+		if !ok || !exp.IsDefault {
+			continue
+		}
+		vd, ok := exp.Decl.(*ast.VarDeclaration)
+		if !ok || vd.Init == nil {
+			break
+		}
+		id, ok := vd.Init.(*ast.Identifier)
+		if !ok {
+			break
+		}
+		if kind := seenKind[id.Name]; kind == "class" || kind == "function" {
+			mangled["default"] = mangled[id.Name]
+			prog.Body = append(prog.Body[:i:i], prog.Body[i+1:]...)
+		}
+		break
 	}
 	return mangled, nil
 }
@@ -1669,6 +1822,55 @@ func rewriteSelfWorker(prog *ast.Program, path string) bool {
 	return found
 }
 
+// rewriteFileGlobals turns `__filename` and `__dirname` into the file's own
+// absolute path and directory, as Node's CommonJS module wrapper binds them,
+// unless the file declares a binding of that name itself.
+func rewriteFileGlobals(prog *ast.Program, path string) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return
+	}
+	declared := map[string]bool{}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch d := n.(type) {
+		case *ast.VarDeclaration:
+			declared[d.Name] = true
+		case *ast.FunctionDeclaration:
+			declared[d.Name] = true
+			for _, p := range d.Params {
+				declared[p.Name] = true
+			}
+		case *ast.ArrowFunction:
+			for _, p := range d.Params {
+				declared[p.Name] = true
+			}
+		}
+		return true
+	})
+	values := map[string]string{}
+	if !declared["__filename"] {
+		values["__filename"] = abs
+	}
+	if !declared["__dirname"] {
+		values["__dirname"] = filepath.Dir(abs)
+	}
+	if len(values) == 0 {
+		return
+	}
+	var rewrite func(ast.Node) ast.Node
+	rewrite = func(n ast.Node) ast.Node {
+		if id, ok := n.(*ast.Identifier); ok {
+			if v, ok := values[id.Name]; ok {
+				return ast.NewStringLiteral(v, id.GetPos())
+			}
+			return n
+		}
+		ast.RewriteChildren(n, rewrite)
+		return n
+	}
+	ast.RewriteChildren(prog, rewrite)
+}
+
 // onlySelfWorker reports whether every worker the file starts is itself.
 func onlySelfWorker(prog *ast.Program, path string) bool {
 	for _, wp := range prog.WorkerPaths {
@@ -1693,4 +1895,204 @@ func callableMarkers(src string) []string {
 		}
 	}
 	return out
+}
+
+// sortedGlobalNames is lib.GlobalModuleNames' names in order, so a
+// program's modules are visited deterministically.
+func sortedGlobalNames() []string {
+	var names []string
+	for n := range lib.GlobalModuleNames() {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// codeIdents returns the identifier-shaped words of src outside comments and
+// quoted strings (a template literal's text counts: its substitutions are
+// code), so a name a comment mentions brings nothing in.
+func codeIdents(src []byte) map[string]bool {
+	out := map[string]bool{}
+	for i := 0; i < len(src); {
+		c := src[i]
+		switch {
+		case c == '/' && i+1 < len(src) && src[i+1] == '/':
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < len(src) && src[i+1] == '*':
+			end := strings.Index(string(src[i+2:]), "*/")
+			if end < 0 {
+				return out
+			}
+			i += end + 4
+		case c == '\'' || c == '"':
+			for i++; i < len(src) && src[i] != c && src[i] != '\n'; i++ {
+				if src[i] == '\\' {
+					i++
+				}
+			}
+			i++
+		case isIdentByte(c):
+			start := i
+			for i < len(src) && isIdentByte(src[i]) {
+				i++
+			}
+			out[string(src[start:i])] = true
+		default:
+			i++
+		}
+	}
+	return out
+}
+
+func isIdentByte(c byte) bool {
+	return c == '_' || c == '$' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// declaresTopLevel reports whether prog declares or imports name at its top
+// level.
+func declaresTopLevel(prog *ast.Program, name string) bool {
+	for _, st := range prog.Body {
+		for _, r := range declRefsOf(st) {
+			if r.Name == name {
+				return true
+			}
+		}
+		if imp, ok := st.(*ast.ImportDeclaration); ok {
+			if imp.Namespace == name {
+				return true
+			}
+			for _, sp := range imp.Specifiers {
+				if sp.Local == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// companionMangled maps each export of the TypeScript companion of the
+// builtin module spec (lib.CompanionPath) to its name in the merged
+// program, or is nil when the module has none.
+func companionMangled(files map[string]*fileInfo, spec string) map[string]string {
+	cp, ok := lib.CompanionPath(spec)
+	if !ok || files[cp] == nil {
+		return nil
+	}
+	companion := map[string]string{}
+	for name := range files[cp].exported {
+		if strings.HasPrefix(name, "_kml") {
+			continue // shared among the builtin modules only
+		}
+		companion[name], _ = files[cp].publicMangled(name)
+	}
+	return companion
+}
+
+var (
+	processMemberRE = regexp.MustCompile(`\bprocess\s*\??\.\s*([A-Za-z_$][\w$]*)`)
+	processWordRE   = regexp.MustCompile(`(^|[^.\w$])process\b(\s*\??\.)?`)
+	// Members lib/node/internal_process_methods.ts implements.
+	processMethods = map[string]bool{
+		"cwd": true, "chdir": true, "uptime": true, "kill": true, "memoryUsage": true,
+		"umask": true, "getuid": true, "geteuid": true, "getgid": true, "getegid": true, "pid": true, "ppid": true,
+	}
+	// Members lib/node/internal_process_env.ts implements.
+	processEnvMembers = map[string]bool{
+		"argv": true, "argv0": true, "execPath": true, "version": true, "versions": true, "exitCode": true,
+		"exit": true, "env": true,
+	}
+	processEmitter = map[string]bool{
+		"on": true, "once": true, "off": true, "addListener": true, "removeListener": true,
+		"prependListener": true, "prependOnceListener": true, "emit": true, "listenerCount": true,
+		"listeners": true, "rawListeners": true, "removeAllListeners": true, "setMaxListeners": true,
+		"getMaxListeners": true, "eventNames": true,
+		"send": true, "disconnect": true, "connected": true, "channel": true,
+	}
+)
+
+// processUses reports which of process's TypeScript-implemented members src
+// reads ("emitter" for any of the emitter object's, "emitWarning"), and
+// whether it uses `process` itself as a value.
+func processUses(src []byte) (map[string]bool, bool) {
+	out := map[string]bool{}
+	for _, m := range processMemberRE.FindAllSubmatch(src, -1) {
+		name := string(m[1])
+		if processEmitter[name] {
+			out["emitter"] = true
+		} else if name == "hrtime" {
+			out["hrtime"] = true
+		} else if processMethods[name] {
+			out["methods"] = true
+		} else if processEnvMembers[name] {
+			out["env"] = true
+		} else if name == "emitWarning" {
+			out["emitWarning"] = true
+		}
+	}
+	bare := false
+	for _, m := range processWordRE.FindAllSubmatch(src, -1) {
+		if len(m[2]) == 0 {
+			bare = true
+			break
+		}
+	}
+	return out, bare
+}
+
+// assertModules are the specifiers whose ok quotes its call's source.
+var assertModules = map[string]bool{"assert": true, "node:assert": true, "assert/strict": true, "node:assert/strict": true}
+
+// markAssertCallSites marks the calls of assert's ok in prog — through the
+// module's default export, a namespace import, or an imported `ok` or
+// `strict` — so their callee receives the call's source (assert.ok's
+// generated message quotes it, as Node reads it off the stack).
+func markAssertCallSites(prog *ast.Program) {
+	roots := map[string]bool{} // the module itself: `assert(x)`, `assert.ok(x)`
+	fns := map[string]bool{}   // an imported ok or strict: `ok(x)`
+	for _, st := range prog.Body {
+		imp, ok := st.(*ast.ImportDeclaration)
+		if !ok || !assertModules[imp.Source] {
+			continue
+		}
+		if imp.Namespace != "" {
+			roots[imp.Namespace] = true
+		}
+		for _, sp := range imp.Specifiers {
+			switch sp.Imported {
+			case "default":
+				roots[sp.Local] = true
+			case "ok", "strict":
+				fns[sp.Local] = true
+			}
+		}
+	}
+	if len(roots) == 0 && len(fns) == 0 {
+		return
+	}
+	isRoot := func(e ast.Expression) bool {
+		id, ok := e.(*ast.Identifier)
+		return ok && roots[id.Name]
+	}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpression)
+		if !ok {
+			return true
+		}
+		switch c := call.Callee.(type) {
+		case *ast.Identifier:
+			call.PassSource = roots[c.Name] || fns[c.Name]
+		case *ast.MemberExpression:
+			if c.Property == "ok" || c.Property == "strict" {
+				if isRoot(c.Object) {
+					call.PassSource = true
+				} else if inner, ok := c.Object.(*ast.MemberExpression); ok && inner.Property == "strict" && isRoot(inner.Object) {
+					call.PassSource = true
+				}
+			}
+		}
+		return true
+	})
 }

@@ -40,3 +40,19 @@ console.log(b, b.length, b.toString('utf16le'), b.toString('ucs2'));
 console.log(Buffer.from('ok', 'UCS-2' as BufferEncoding));
 `)
 }
+
+// Relational operators on an `any` holding a bigint compare values, against
+// a bigint or a number; bigint Map/Set keys compare and hash by value.
+func TestE2EBigIntAnyRelationalAndKeys(t *testing.T) {
+	assertOutput(t, `
+const x: any = 4310067882n;
+const y: any = 5n;
+console.log(x > 0n, y > 0n, x < 0n, 0n < x, x > 0, x >= 1n, x === 4310067882n);
+const a: bigint[] = [1n, 2n, 2n, 3n, 10n ** 20n, 10n ** 20n];
+const s = new Set(a);
+console.log(s.size, s.has(2n), s.has(4n), s.has(100000000000000000000n));
+const m = new Map<bigint, string>();
+m.set(5n, 'five'); m.set(5n, 'FIVE');
+console.log(m.size, m.get(5n), [...m.keys()], [...s]);
+`, "true true false true true true true\n4 true false true\n1 FIVE [ 5n ] [ 1n, 2n, 3n, 100000000000000000000n ]")
+}

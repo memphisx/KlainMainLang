@@ -217,7 +217,8 @@ func TestE2ENestedFunctionErrorInsideTryFinallyIsNotAPanic(t *testing.T) {
 		`function(resolve, reject) { resolve("override"); }`,
 		`(resolve, reject) => { resolve("override"); }`,
 	} {
-		assertCodegenError(t, `
+		// A finally's return overrides the try's, with the promise's value.
+		assertOutput(t, `
 async function f() {
   try {
     return "early-return";
@@ -226,7 +227,7 @@ async function f() {
   }
 }
 f().then(function(value) { console.log(value); });
-`, "incompatible with the parameter's declared type")
+`, "override")
 	}
 }
 
@@ -247,7 +248,7 @@ console.log("w: after await", v);
 p.then(() => console.log("w: reaction 2"));
 await null;
 console.log("w: after await null");
-parentPort.postMessage(v);
+parentPort!.postMessage(v);
 `,
 		"main.ts": `
 import { Worker } from 'worker_threads';
@@ -326,7 +327,7 @@ for (let round = 0; round < 3; round++) {
     keep.push("round" + round + ":" + acc);
     await later(5);
 }
-parentPort.postMessage(keep.join(","));
+parentPort!.postMessage(keep.join(","));
 `,
 		"main.ts": `
 import { Worker } from 'worker_threads';

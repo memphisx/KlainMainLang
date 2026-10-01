@@ -252,12 +252,13 @@ Animal("y")
 }
 
 func TestStrictModeProtoClassesOff(t *testing.T) {
-	// Strict mode is untouched: `this` in a plain function stays an error.
+	// Strict mode is untouched: `this` in a plain function stays an error —
+	// tsc's TS2683.
 	_, err := parseAndCompile(`
 function Animal(name) { this.name = name }
 new Animal("x")
 `)
-	if err == nil || !strings.Contains(err.Error(), "'this' is only valid") {
+	if err == nil || !strings.Contains(err.Error(), "'this' implicitly has type 'any'") {
 		t.Fatalf("expected strict-mode this rejection, got: %v", err)
 	}
 }

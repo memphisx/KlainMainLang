@@ -9,4 +9,7 @@ w.on('message', (line: string) => {
 });
 
 const bc = new BroadcastChannel('news');
-setTimeout(() => { bc.postMessage("markets up in Thessaloniki"); }, 100);
+setTimeout(() => {
+  bc.postMessage("markets up in Thessaloniki");
+  bc.close();
+}, 100);

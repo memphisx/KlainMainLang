@@ -2432,12 +2432,14 @@ export class ClientRequest extends OutgoingMessage {
     private maxHeaderSizeOpt: number;
     private error: Error | null = null;
 
-    constructor(url: string | RequestOptions, options?: RequestOptions | ResponseListener, cb?: ResponseListener) {
+    constructor(url: string | URL | RequestOptions, options?: RequestOptions | ResponseListener, cb?: ResponseListener) {
         super();
         let opts: RequestOptions = {};
         let listener: ResponseListener | null = null;
         if (typeof url === 'string') {
             opts = urlToHttpOptions(new URL(url));
+        } else if (url instanceof URL) {
+            opts = urlToHttpOptions(url);
         } else {
             opts = url;
         }
@@ -2998,11 +3000,11 @@ function httpsGlobalAgent(): Agent {
     return httpsAgent ?? globalAgent;
 }
 
-export function request(url: string | RequestOptions, options?: RequestOptions | ResponseListener, cb?: ResponseListener): ClientRequest {
+export function request(url: string | URL | RequestOptions, options?: RequestOptions | ResponseListener, cb?: ResponseListener): ClientRequest {
     return new ClientRequest(url, options, cb);
 }
 
-export function get(url: string | RequestOptions, options?: RequestOptions | ResponseListener, cb?: ResponseListener): ClientRequest {
+export function get(url: string | URL | RequestOptions, options?: RequestOptions | ResponseListener, cb?: ResponseListener): ClientRequest {
     const req = request(url, options, cb);
     req.end();
     return req;

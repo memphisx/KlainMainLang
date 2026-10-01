@@ -420,19 +420,21 @@ generateKeyPair('rsa', {
   privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
 }, mustCall((err, publicKey, privateKey) => {
   console.log("async:", err === null, publicKey.includes("PUBLIC KEY"), privateKey.trim().endsWith("-----END PRIVATE KEY-----"))
-}))
-generateKeyPair('ec', {
-  namedCurve: 'P-384',
-  publicKeyEncoding: { type: 'spki', format: 'pem' },
-  privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
-}, mustSucceed((publicKey, privateKey) => {
-  console.log("mustSucceed:", publicKey.includes("PUBLIC KEY"))
+  // One at a time: the pool finishes concurrent requests in any order.
+  generateKeyPair('ec', {
+    namedCurve: 'P-384',
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+  }, mustSucceed((publicKey, privateKey) => {
+    console.log("mustSucceed:", publicKey.includes("PUBLIC KEY"))
+  }))
 }))
 console.log("randomBytes:", randomBytes(16).length)
-`, "sync pub: true\nsync priv: true\nasync: true true true\nmustSucceed: true\nrandomBytes: 16")
+`, "sync pub: true\nsync priv: true\nrandomBytes: 16\nasync: true true true\nmustSucceed: true")
 }
 
-// ADR-00590: crypto.randomBytes(size, cb) fires cb(null, buf) synchronously.
+// crypto.randomBytes(size, cb) fills on the thread pool and calls back
+// cb(null, buf) afterwards, as Node does.
 func TestE2ECryptoRandomBytesCallback(t *testing.T) {
 	assertOutputImports(t, `
 import { randomBytes } from 'crypto'
@@ -441,7 +443,7 @@ randomBytes(16, (err: Error, buf: Uint8Array) => {
   console.log("len:", buf.length)
 })
 console.log("sync:", randomBytes(8).length)
-`, "err null: true\nlen: 16\nsync: 8")
+`, "sync: 8\nerr null: true\nlen: 16")
 }
 
 func TestE2ECryptoSubtleDestructuredAlias(t *testing.T) {

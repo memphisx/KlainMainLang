@@ -11,7 +11,7 @@ async function consume(port: number): Promise<void> {
   const res = await fetch("http://127.0.0.1:" + port + "/");
   const decoder = new TextDecoder();
   let text = "";
-  for await (const piece of res.body) {
+  for await (const piece of res.body!) {
     text = text + decoder.decode(piece);
   }
   console.log("streamed:", text);

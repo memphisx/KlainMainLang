@@ -18,4 +18,4 @@ warmup.then(() => { console.log("worker: then-after"); });
 
 // A second await; the worker's own timers keep running in between.
 const extra = await later(5, 2);
-parentPort.postMessage(base + extra);
+parentPort!.postMessage(base + extra);

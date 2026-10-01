@@ -19,7 +19,7 @@ import "fmt"
 // shadowing is cheap here: `-compat=js` lifts these.
 var reservedTier1 = map[string]bool{
 	"Math": true, "JSON": true, "console": true, "process": true,
-	"crypto": true, "performance": true, "Object": true, "Array": true,
+	"crypto": true, "Object": true, "Array": true,
 	"String": true, "Number": true, "Infinity": true, "NaN": true,
 	"parseInt": true, "parseFloat": true, "isNaN": true, "isFinite": true,
 	"fetch": true, "btoa": true, "atob": true, "encodeURIComponent": true,
@@ -42,10 +42,10 @@ var reservedTier1 = map[string]bool{
 // virtualModuleMembers already established.
 var reservedTier2 = map[string]bool{
 	"Map": true, "Set": true, "WeakMap": true, "WeakSet": true, "WeakRef": true,
-	"Date": true, "EventEmitter": true,
+	"Date":  true,
 	"Error": true, "TypeError": true, "RangeError": true, "SyntaxError": true,
 	"EvalError": true, "URIError": true, "ReferenceError": true,
-	"RegExp": true, "URL": true, "EventSource": true, "WebSocket": true,
+	"RegExp": true, "URL": true,
 	"URLSearchParams": true, "URLPattern": true, "Headers": true, "Request": true,
 	"XMLHttpRequest": true, "ArrayBuffer": true, "TextEncoder": true,
 	"TextDecoder": true,

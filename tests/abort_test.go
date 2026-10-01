@@ -60,7 +60,8 @@ console.log("noabort", f3)
 // TDD-00216: AbortSignal.timeout fires its abort in the background at the
 // deadline — aborted becomes true and onabort + addEventListener('abort')
 // listeners run — while the loop is alive for other work (here a later timer).
-// onabort fires before the addEventListener listeners (shared event).
+// onabort holds its place among the listeners from its first assignment, as
+// Node's event handler attributes do.
 func TestE2EAbortSignalTimeoutBackgroundDispatch(t *testing.T) {
 	assertOutput(t, `
 const sig = AbortSignal.timeout(20)
@@ -68,7 +69,7 @@ let order = ""
 sig.addEventListener("abort", () => { order += "L" })
 sig.onabort = () => { order += "O" }
 setTimeout(() => { console.log(order + " aborted=" + sig.aborted) }, 150)
-`, "OL aborted=true")
+`, "LO aborted=true")
 }
 
 // TDD-00216: a lone AbortSignal.timeout keeps nothing alive (Node unref parity) —

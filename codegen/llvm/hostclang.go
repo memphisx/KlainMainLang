@@ -32,6 +32,10 @@ type Toolchain struct{ Target options.Target }
 
 // Argv is HostClangArgv for tc's target.
 func (tc Toolchain) Argv(args ...string) []string {
+	if runtime.GOOS != "windows" && tc.Target.Triple == "" {
+		// The host's sidecar sources link as cached objects.
+		args = cacheSidecars(args)
+	}
 	full := tc.Args()
 	if runtime.GOOS == "windows" {
 		// The shim objects go *before* the caller's arguments: they shadow a
@@ -68,15 +72,6 @@ func ClangCommand(args ...string) *exec.Cmd { return Toolchain{}.Command(args...
 func (tc Toolchain) Command(args ...string) *exec.Cmd {
 	return exec.Command("clang", tc.Argv(args...)...)
 }
-
-// RunClangLink runs a linking clang invocation with the driver's stdio. On
-// Windows the mingw linker opens its output through the narrow (ANSI) file API,
-// so an output path holding characters outside the active code page fails with
-// "cannot open output file … Invalid argument" — a project under a non-ASCII
-// directory could not be built at all. There the link goes to an ASCII-named
-// temp file and is moved into place (Go's rename is wide); the import library
-// and PDB-less mingw output carry no path back to the temp name.
-func RunClangLink(args ...string) error { return Toolchain{}.RunLink(args...) }
 
 // RunLink is RunClangLink for tc's target.
 func (tc Toolchain) RunLink(args ...string) error {
@@ -165,9 +160,6 @@ var staticLinkMode bool
 
 // SetStaticLink records whether --static was requested (main.go, once at startup).
 func SetStaticLink(v bool) { staticLinkMode = v }
-
-// StaticLink reports the current --static mode.
-func StaticLink() bool { return staticLinkMode }
 
 // ParseTarget is the compile target a --target triple and --sysroot name
 // (TDD-00146): the triple's OS and arch parsed to Go's spelling ("" when

@@ -67,7 +67,6 @@
           {
             "feature": "`.lastIndex`",
             "status": "implemented",
-            "caveats": [],
             "notes": [
               "Mutated by `.exec()`/`.test()`/global `str.match()`/`str.matchAll()`/`str.replace()`/`str.replaceAll()` (advances on a successful `g`-flagged match, resets to `0` after a failed one) — see [ADR-00116](../adr/ADR-00116.md)/[ADR-00117](../adr/ADR-00117.md)/[ADR-00118](../adr/ADR-00118.md)/[ADR-00526](../adr/ADR-00526.md)",
               "Deliberately untouched by `str.split()`/`str.search()`, matching real JS ([ADR-00119](../adr/ADR-00119.md): `.search()` explicitly saves/restores it; `.split()` never reads or writes it at all)"
@@ -76,7 +75,6 @@
           {
             "feature": "`.test(str)`",
             "status": "implemented",
-            "caveats": [],
             "notes": [
               "A `g`-flagged RegExp reads/advances `.lastIndex` exactly as `.exec()` does, so `while (re.test(s))` steps through every match; a non-global RegExp always matches from offset 0 and never touches `.lastIndex` — see [ADR-00115](../adr/ADR-00115.md)/[ADR-00526](../adr/ADR-00526.md)"
             ]
@@ -84,20 +82,17 @@
           {
             "feature": "`.exec(str)`",
             "status": "implemented",
-            "caveats": [
-              "An unmatched optional capture group becomes `\"\"` rather than a true per-element `null` (no per-element-nullable-string array exists)",
-              "Real JS's `index`/`input`/`groups` extra properties on the result aren't built"
-            ],
             "notes": [
               "Returns `string[] \\| null` — real, working `m !== null`/`if (m)` checks against the result. See [ADR-00116](../adr/ADR-00116.md)",
-              "All matching methods route through the one compiled PCRE2 handle, so the `-regex` dialect mode and its Known-limitations dialect caveats apply uniformly here and to `.match`/`.matchAll`/`.replace`/`.replaceAll`/`.split`/`.search`"
+              "All matching methods route through the one compiled PCRE2 handle, so the `-regex` dialect mode and its Known-limitations dialect caveats apply uniformly here and to `.match`/`.matchAll`/`.replace`/`.replaceAll`/`.split`/`.search`",
+              "The result carries `index`, `input` and `groups` (a null-prototype dictionary of the named groups, `undefined` without any), as in Node ([ADR-01316](../adr/ADR-01316.md))"
             ]
           },
           {
             "feature": "`str.match(regexp)`",
             "status": "implemented",
             "caveats": [
-              "Shares `.exec()`'s result-array narrowing (an unmatched optional capture group becomes `\"\"`, not per-element `null`; no `index`/`input`/`groups`)"
+              "With a regex held in a variable (not a literal), the result has no `index`/`input`/`groups`; a non-global literal's result carries them, as `.exec()`'s does"
             ],
             "notes": [
               "Without `g`: identical to `regexp.exec(str)`. With `g`: full-match-only strings, `null` (not `[]`) on zero matches — matches real JS exactly. See [ADR-00117](../adr/ADR-00117.md)"
@@ -107,7 +102,7 @@
             "feature": "`str.matchAll(regexp)`",
             "status": "implemented",
             "caveats": [
-              "Returns an eager `string[][]`, not a real lazy iterator (no lazy-iteration infrastructure exists anywhere in this compiler)"
+              "Returns an eager `string[][]`, not a lazy iterator"
             ],
             "notes": [
               "One `.exec()`-shaped match array per match; throws `TypeError` without `g`. See [ADR-00117](../adr/ADR-00117.md)"
@@ -137,12 +132,9 @@
           {
             "feature": "`str.split(regexp)`",
             "status": "implemented",
-            "caveats": [
-              "Only splits on a non-zero-length match — real JS's more intricate zero-length-match handling isn't replicated (see [ADR-00119](../adr/ADR-00119.md))",
-              "Captured groups in the split pattern are never spliced into the result (out of scope from the start)"
-            ],
             "notes": [
-              "Finds every match regardless of `g` (its own local search loop, like real JS)"
+              "The separator's capture groups are spliced in after each piece, an unmatched one as `undefined` ([ADR-01307](../adr/ADR-01307.md))",
+              "Finds every match regardless of `g` (its own local search loop, like real JS); an empty match splits as `@@split` does ([ADR-01277](../adr/ADR-01277.md))"
             ]
           },
           {

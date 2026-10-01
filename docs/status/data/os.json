@@ -5,7 +5,7 @@
   "segments": [
     {
       "kind": "block",
-      "text": "> Part of the [Implementation Status](README.md) index. Node's `os` module — operating-system information. See [TDD-00024](../tdd/TDD-00024.md)/[ADR-00090](../adr/ADR-00090.md)."
+      "text": "> Part of the [Implementation Status](README.md) index. Node's `os` module — operating-system information: Node's `lib/os.js` in TypeScript over the host reads of `osinfo.c` ([ADR-01291](../adr/ADR-01291.md)). See [TDD-00024](../tdd/TDD-00024.md)/[ADR-00090](../adr/ADR-00090.md)."
     },
     {
       "kind": "coverage",
@@ -27,7 +27,7 @@
             "feature": "`os.platform()`",
             "status": "implemented",
             "notes": [
-              "Reuses `process.platform`'s existing `runtime.GOOS`-constant mechanism"
+              "`process.platform`, as Node's `platform()` returns"
             ]
           },
           {
@@ -41,15 +41,15 @@
             "feature": "`os.tmpdir()`",
             "status": "implemented",
             "notes": [
-              "POSIX: `process.env.TMPDIR || \"/tmp\"` (an unset *or empty* `TMPDIR` falls back), then a single trailing `/` stripped unless the path is just `\"/\"` — Node's `lib/os.js` algorithm; `TMPDIR=/foo/` yields `'/foo'` ([ADR-00777](../adr/ADR-00777.md)). Consulting only `$TMPDIR` (not `$TMP`/`$TEMP`) is itself faithful — POSIX Node does the same; those are the Windows variables. Never throws",
-              "On Windows: `TEMP`, then `TMP`, then `<SystemRoot|windir>\\temp`, with one trailing backslash stripped unless it names a drive root — Node's exact algorithm ([ADR-00739](../adr/ADR-00739.md))"
+              "POSIX: Node's `getTempDir` — `TMPDIR`, then `TMP`, then `TEMP` (the first set, non-empty one), one trailing `/` stripped, else `/tmp`",
+              "On Windows: `TEMP`, then `TMP`, then `<SystemRoot|windir>\\temp`, with one trailing backslash stripped unless it names a drive root — Node's exact algorithm"
             ]
           },
           {
             "feature": "`os.hostname()`",
             "status": "implemented",
             "notes": [
-              "POSIX `gethostname()`"
+              "`gethostname()`; a failure throws `ERR_SYSTEM_ERROR`"
             ]
           },
           {
@@ -73,7 +73,7 @@
             "feature": "`os.EOL`",
             "status": "implemented",
             "notes": [
-              "`\"\\r\\n\"` on Windows, `\"\\n\"` on POSIX — matching Node, resolved as a compile-time constant baked to the build host ([TDD-00177](../tdd/TDD-00177.md) Stage 1), since this compiler targets the host it runs on rather than cross-compiling"
+              "`\"\\r\\n\"` on Windows, `\"\\n\"` on POSIX"
             ]
           },
           {
@@ -87,7 +87,7 @@
             "feature": "`os.arch()` / `os.endianness()` / `os.devNull`",
             "status": "implemented",
             "notes": [
-              "Compile-time constants of the build host, like `process.arch`; `devNull` is `\\\\.\\nul` on Windows, `/dev/null` elsewhere ([ADR-01077](../adr/ADR-01077.md))"
+              "`process.arch`; the host's byte order; `devNull` is `\\\\.\\nul` on Windows, `/dev/null` elsewhere"
             ]
           },
           {
@@ -101,17 +101,32 @@
             "feature": "`os.userInfo()`",
             "status": "implemented",
             "notes": [
-              "`{ uid, gid, username, homedir, shell }` from the effective uid's passwd entry; Windows reports `uid`/`gid` `-1`, `GetUserNameW`, `os.homedir()` and `shell: null`, as Node does ([ADR-01077](../adr/ADR-01077.md)); a failed lookup throws"
+              "`{ uid, gid, username, homedir, shell }` from the effective uid's passwd entry; Windows reports `uid`/`gid` `-1`, `GetUserNameW`, `os.homedir()` and `shell: null`, as Node does ([ADR-01077](../adr/ADR-01077.md)); `{ encoding: 'buffer' }` gives Buffers and another encoding re-encodes the strings; a failed lookup throws `ERR_SYSTEM_ERROR`"
             ]
           },
           {
             "feature": "`os.networkInterfaces()`",
             "status": "implemented",
             "notes": [
-              "An object keyed by interface name (a dynamic object — the keys exist only at run time), each an array of `{ address, netmask, family, mac, internal, cidr, scopeid }` records with `scopeid` on IPv6 entries only; `getifaddrs` (up+running interfaces, MAC from the link-layer entry) / `GetAdaptersAddresses` (operational adapters, `FriendlyName`, `OnLinkPrefixLength`); `cidr` is `null` for a non-contiguous netmask — verified byte-identical to Node's walk and JSON on Windows ([ADR-01077](../adr/ADR-01077.md))"
+              "An object keyed by interface name, each an array of `{ address, netmask, family, mac, internal, cidr, scopeid }` records with `scopeid` on IPv6 entries only; `getifaddrs` (up+running interfaces, MAC from the link-layer entry) / `GetAdaptersAddresses` (operational adapters, `FriendlyName`, `OnLinkPrefixLength`); `cidr` is Node's own `getCIDR` over the netmask"
+            ]
+          },
+          {
+            "feature": "`os.getPriority()` / `os.setPriority()`",
+            "status": "implemented",
+            "notes": [
+              "`getpriority`/`setpriority` (Windows: the priority class, mapped as libuv does); Node's argument validation, and `ERR_SYSTEM_ERROR` with the failed call's `info` on failure"
             ],
             "caveats": [
-              "Typed `any` rather than `NodeJS.Dict<NetworkInterfaceInfo[]>`: the entries read through the dynamic paths (`for…of`, `Object.keys`, destructuring), so array *methods* on a per-interface list (`.filter`, `.map`) are the D1 method-through-`any` residue"
+              "The error's `errno`/`syscall` are copies of `info`'s, not accessors over it",
+              "Windows' priority-class mapping is compile-checked only"
+            ]
+          },
+          {
+            "feature": "`os.constants`",
+            "status": "implemented",
+            "notes": [
+              "Null-prototype `dlopen`/`errno`/`signals`/`priority` groups, `signals` frozen, the host's values in `node_constants.cc`'s order (`WSA*` codes in `errno` on Windows)"
             ]
           }
         ]

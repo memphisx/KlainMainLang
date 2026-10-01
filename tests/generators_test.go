@@ -31,11 +31,10 @@ console.log(r3.value, r3.done);
 `, "1 false\n2 false\n3 true")
 }
 
-func TestE2EGeneratorNextAfterDoneReturnsZeroValue(t *testing.T) {
-	// Calling .next() again on an already-finished generator is a no-op in
-	// real JS returning {value: undefined, done: true} — this compiler's
-	// own zero-value stand-in (no general "undefined" sentinel for a
-	// concrete scalar type), not the last real yielded/returned value.
+func TestE2EGeneratorNextAfterDoneReturnsUndefined(t *testing.T) {
+	// Calling .next() again on an already-finished generator is a no-op
+	// returning {value: undefined, done: true}, as in JavaScript — not the
+	// last real yielded/returned value.
 	assertOutput(t, `
 function* gen(): number {
     yield 1;
@@ -47,7 +46,7 @@ const r2 = g.next();
 console.log(r2.value, r2.done);
 const r3 = g.next();
 console.log(r3.value, r3.done);
-`, "2 true\n0 true")
+`, "2 true\nundefined true")
 }
 
 func TestE2EGeneratorSentValue(t *testing.T) {
@@ -1351,16 +1350,6 @@ for (const m of mixed()) { console.log(m); }
 `, "9\n1\n2.5")
 }
 
-func TestE2EGeneratorExpressionAsValueRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-function take(f: () => void): void {}
-take(function* () { yield 1; });
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a generator expression used as a value")
-	}
-}
-
 // --- Array element type (ADR-00676) ---
 //
 // A generator whose element type is an array yields/sends arrays that
@@ -1434,17 +1423,26 @@ main2();
 // `iter.next(false)`) previously emitted `store {ptr, i64} 0` into the
 // array-typed sent-value slot (ADR-00892). Backstopped by the emitter's
 // scalar-const-into-aggregate store guard.
-func TestE2EGeneratorMismatchedNextValueRejected(t *testing.T) {
-	// The element type is annotated array-typed directly rather than derived from
-	// a `yield [...yield]` spread: a `yield` *expression* now evaluates to `any`
-	// (TypeScript's TNext default, ADR-00954), so `[...yield]` spreads a dynamic
-	// value and would reject at the spread ("not an array") before ever reaching
-	// this `.next()`-value store guard — the thing this test actually exercises.
-	mustCompileError(t, `
-const gen = function* (): number[] { yield [1]; };
+func TestE2EGeneratorNextValueIsYieldResult(t *testing.T) {
+	// `.next(v)` delivers v as the `yield` expression's value (TNext, its own
+	// type), whatever the yielded type is.
+	assertOutput(t, `
+function* g(): Generator<undefined, void, string> {
+  while (true) {
+    let s: string = yield;
+    s += (yield) as string;
+    console.log('got', s)
+  }
+}
+const it = g()
+it.next()
+it.next('a')
+it.next('b')
+const gen = function* (): Generator<number[], void, any> { const x = yield [1]; console.log('sent', x) };
 const iter = gen();
+iter.next();
 iter.next(false);
-`, "aggregate")
+`, "got ab\nsent false")
 }
 
 // A `yield` expression evaluates to TypeScript's TNext (defaults to `any`), so a
@@ -1489,4 +1487,24 @@ async function run() {
 }
 run()
 `, "a\n2\n{ k: 1 }")
+}
+
+// A generator parameter typed `T | undefined` keeps its presence bit, and a
+// local a closure made in one branch captures is boxed where it is declared
+// (the capture used to be boxed in the branch, invalid IR).
+func TestE2EGeneratorNullableParamAndBranchCapture(t *testing.T) {
+	assertOutput(t, `
+function* gen(limit: number | undefined, flag: boolean): Generator<string> {
+  let seen: number | undefined = undefined
+  if (flag) {
+    const show = () => { if (seen !== undefined) console.log('seen', seen) }
+    show()
+  }
+  seen = 3
+  yield String(limit)
+  yield String(seen)
+}
+for (const v of gen(undefined, true)) console.log(v)
+for (const v of gen(7, false)) console.log(v)
+`, "undefined\n3\n7\n3")
 }

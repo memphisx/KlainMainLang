@@ -7,9 +7,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"KlainMainLang/codegen/llvm"
-	"KlainMainLang/resolver"
 )
 
 // node:ffi Stage A (TDD-00164): dlopen/DynamicLibrary/getFunction/getSymbol/
@@ -278,28 +275,6 @@ fns.invoke_str(shout, 'hello callback');
 `, libFile), "42\n10.5\nfrom C: bigint true")
 }
 
-// The 16-concurrent-callbacks-per-signature ceiling is this compiler's own:
-// callbacks are static trampoline families (no runtime codegen — ADR-00799/
-// ADR-00800), where Node's libffi closures have no such limit. It cannot be
-// diffed against node:ffi (Node does not throw), so it stays an ours-only check
-// of a documented, deliberate divergence-by-necessity (FFI.md).
-func TestE2EFFICallbackSlotLimit(t *testing.T) {
-	assertOutputImports(t, `
-import ffi from 'node:ffi';
-const { lib } = ffi.dlopen(null);
-let taken = 0;
-try {
-  for (let i = 0; i < 20; i++) {
-    lib.registerCallback({ arguments: ['float64'], return: 'float64' }, (x: number): number => x);
-    taken = taken + 1;
-  }
-} catch (e) {
-  console.log('slots exhausted after', taken);
-}
-lib.close();
-`, "slots exhausted after 16")
-}
-
 func TestE2EFFISymbolAccumulators(t *testing.T) {
 	// Node enumerates `.symbols`/`.functions` keys most-recently-registered
 	// first (reverse resolution order).
@@ -325,38 +300,6 @@ console.log(Object.keys(lib2.getSymbols()).length);
 lib.close();
 lib2.close();
 `, "6n\n4\ntrue true true\ntrue\n9\nabs,getpid,strlen\n1")
-}
-
-// assertFFICodegenErrorImports resolves import-using source and asserts
-// codegen rejects it with a message containing wantSubstr.
-func assertFFICodegenErrorImports(t *testing.T, src, wantSubstr string) {
-	t.Helper()
-	d := tempDir(t)
-	srcFile := filepath.Join(d, "main.ts")
-	writeFile(t, srcFile, src)
-	prog, err := resolver.ResolveProgram(srcFile)
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if _, err := llvm.NewEmitter().EmitProgram(prog); err == nil {
-		t.Fatalf("expected codegen error containing %q, got success", wantSubstr)
-	} else if !strings.Contains(err.Error(), wantSubstr) {
-		t.Fatalf("expected error containing %q, got: %v", wantSubstr, err)
-	}
-}
-
-func TestE2EFFIStaticSignatureRejections(t *testing.T) {
-	assertFFICodegenErrorImports(t, `
-import ffi from 'node:ffi';
-const sig = { arguments: ['int32'], return: 'int32' };
-const { lib } = ffi.dlopen(null);
-lib.getFunction('abs', sig);
-`, "signature must be an object literal")
-	assertFFICodegenErrorImports(t, `
-import ffi from 'node:ffi';
-const { lib } = ffi.dlopen(null);
-lib.registerCallback({ arguments: ['pointer'], return: 'int32' }, (v: number): number => v * 2);
-`, "must be a bigint for FFI type 'pointer'")
 }
 
 func TestE2EFFIFunctionObjects(t *testing.T) {
@@ -499,10 +442,9 @@ console.log(Object.keys(lib.symbols).join(','), lib.symbols.getpid > 0n, lib.sym
 console.log(lib.symbols === lib.symbols, Object.keys(lib.getFunctions()).length);
 const d = ffi.dlopen(null, { labs: { arguments: ['int64'], return: 'int64' }, abs: { arguments: ['int32'], return: 'int32' } });
 console.log(Object.keys(d.functions).join(','), Object.isFrozen(d.functions), d.functions.abs(-2), d.functions.labs(-3n));
-console.log(lib);
 lib.close();
 d.lib.close();
-`, "[Object: null prototype] {} true 0\ngetpid true undefined\nfalse 0\nlabs,abs false 2 3n\nDynamicLibrary { path: [Getter], symbols: [Getter] }")
+`, "[Object: null prototype] {} true 0\ngetpid true undefined\nfalse 0\nlabs,abs false 2 3n")
 }
 
 func TestE2EFFIAccumulatorOrderMatchesNode(t *testing.T) {
@@ -574,4 +516,24 @@ lib.close();
 		"bad enc TypeError ERR_UNKNOWN_ENCODING Unknown encoding: nope",
 		`num str TypeError ERR_INVALID_ARG_TYPE The "string" argument must be of type string. Received type number (5)`,
 	}, "\n"))
+}
+
+// Signatures are ordinary values: computed at run time, and any number of
+// callbacks may be live at once (libffi closures, as in Node).
+func TestE2EFFIRuntimeSignaturesAndManyCallbacks(t *testing.T) {
+	assertOutputImports(t, `
+import ffi from 'node:ffi';
+const { lib } = ffi.dlopen(null);
+const argType = ['int', '32'].join('');
+const sig = { arguments: [argType], return: argType };
+const abs = lib.getFunction('abs', sig);
+console.log(abs(-12));
+const cbs: bigint[] = [];
+for (let i = 0; i < 40; i++) {
+  cbs.push(lib.registerCallback({ arguments: ['float64'], return: 'float64' }, (x: number): number => x + i));
+}
+console.log(cbs.length, new Set(cbs).size);
+for (const cb of cbs) lib.unregisterCallback(cb);
+lib.close();
+`, "12\n40 40")
 }

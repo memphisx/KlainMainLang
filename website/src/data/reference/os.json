@@ -5,12 +5,12 @@
   "statusPage": "OS.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "12/12",
+    "loose": "14/14",
     "loosePct": 100,
-    "strict": "11/12",
-    "strictPct": 92
+    "strict": "13/14",
+    "strictPct": 93
   },
-  "lede": "Node-os-shaped operating-system information for portable CLI and microservice programs. The functions map onto real syscalls, /proc parsing and the Win32 APIs libuv itself uses rather than a fixed table, so os.cpus() returns live per-core tick counters, os.networkInterfaces() walks the real adapters, and os.release()/version() answer what Node answers on the same machine. os.cpus() speed reports the fixed 2400 MHz libuv nominal on Apple Silicon (where hw.cpufrequency is unavailable), cpufreq's scaling_max_freq or 0 on Linux (VMs and containers have no cpufreq), and Darwin times.irq is 0 — all exactly what real Node reports on that hardware; os.EOL is \"\\n\" on POSIX hosts and \"\\r\\n\" on Windows.",
+  "lede": "Node's own lib/os.js, in TypeScript, over the host reads libuv makes: os.cpus() returns live per-core tick counters, os.networkInterfaces() walks the real adapters, os.release()/version() answer what Node answers on the same machine, and a failed call throws Node's ERR_SYSTEM_ERROR. os.cpus() speed reports the fixed 2400 MHz libuv nominal on Apple Silicon (where hw.cpufrequency is unavailable), cpufreq's scaling_max_freq or 0 on Linux (VMs and containers have no cpufreq), and Darwin times.irq is 0 — all exactly what real Node reports on that hardware. As in Node, the functions convert to their result: `${os.hostname}` is the host name.",
   "entries": [
     {
       "id": "os.platform",
@@ -18,7 +18,7 @@
       "statusRow": "os.platform()",
       "signature": "platform(): string",
       "badge": "exact",
-      "description": "Returns the operating-system platform string. Reuses process.platform's existing runtime.GOOS-constant mechanism, so the two always agree.",
+      "description": "Returns the operating-system platform string — process.platform, as Node's platform() returns.",
       "returns": {
         "type": "string",
         "desc": "The platform identifier (e.g. \"darwin\", \"linux\")."
@@ -38,7 +38,7 @@
       "statusRow": "os.homedir()",
       "signature": "homedir(): string",
       "badge": "exact",
-      "description": "Returns the current user's home directory, mirroring libuv's uv_os_homedir: a set HOME wins (an empty one included, matching Node's \"\"); on POSIX an unset HOME falls back to the passwd database (getpwuid), throwing a catchable Error only if that fails too. Windows reads USERPROFILE, falling back to the process token's profile directory.",
+      "description": "Returns the current user's home directory, mirroring libuv's uv_os_homedir: a set HOME wins (an empty one included, matching Node's \"\"); on POSIX an unset HOME falls back to the passwd database, and only a failed lookup throws ERR_SYSTEM_ERROR. Windows reads USERPROFILE, else the process token's profile directory.",
       "returns": {
         "type": "string",
         "desc": "The home directory path."
@@ -58,7 +58,7 @@
       "statusRow": "os.tmpdir()",
       "signature": "tmpdir(): string",
       "badge": "exact",
-      "description": "Returns the default temporary-file directory: on POSIX, process.env.TMPDIR (an unset or empty value falls back to \"/tmp\"), with a single trailing slash stripped unless the path is just \"/\". Never throws.",
+      "description": "Returns the default temporary-file directory: on POSIX the first set, non-empty one of TMPDIR, TMP and TEMP (Node's getTempDir) with one trailing slash stripped, else \"/tmp\"; on Windows TEMP, TMP, then <SystemRoot|windir>\\temp. Never throws.",
       "returns": {
         "type": "string",
         "desc": "The temp directory path."
@@ -78,7 +78,7 @@
       "statusRow": "os.hostname()",
       "signature": "hostname(): string",
       "badge": "exact",
-      "description": "Returns the host name of the operating system via POSIX gethostname().",
+      "description": "Returns the host name of the operating system (gethostname); a failure throws ERR_SYSTEM_ERROR.",
       "returns": {
         "type": "string",
         "desc": "The host name."
@@ -139,7 +139,7 @@
       "statusRow": "os.EOL",
       "signature": "EOL: string",
       "badge": "exact",
-      "description": "The operating-system-specific end-of-line marker: \"\\r\\n\" on Windows, \"\\n\" on POSIX, resolved as a compile-time constant of the build host (this compiler targets the host it runs on).",
+      "description": "The operating-system-specific end-of-line marker: \"\\r\\n\" on Windows, \"\\n\" on POSIX.",
       "returns": {
         "type": "string",
         "desc": "\"\\r\\n\" on Windows, \"\\n\" elsewhere."
@@ -177,7 +177,7 @@
       "statusRow": "os.arch() / os.endianness() / os.devNull",
       "signature": "arch(): string; endianness(): 'BE' | 'LE'; devNull: string",
       "badge": "exact",
-      "description": "Compile-time constants of the build host, like process.arch: the Node architecture name (\"x64\", \"arm64\"), the byte order, and the null device (\"\\\\\\\\.\\\\nul\" on Windows, \"/dev/null\" elsewhere).",
+      "description": "process.arch; the host's byte order (\"LE\" or \"BE\"); and the null device (\"\\\\\\\\.\\\\nul\" on Windows, \"/dev/null\" elsewhere).",
       "snippet": "console.log(os.arch(), os.endianness(), os.devNull);",
       "seeAlso": [
         "os.type"
@@ -205,9 +205,9 @@
       "id": "os.userInfo",
       "name": "os.userInfo()",
       "statusRow": "os.userInfo()",
-      "signature": "userInfo(): { uid: number; gid: number; username: string; homedir: string; shell: string | null }",
+      "signature": "userInfo(options?: { encoding?: BufferEncoding | 'buffer' }): { uid: number; gid: number; username: string; homedir: string; shell: string | null }",
       "badge": "exact",
-      "description": "The effective user's passwd entry on POSIX (uv_os_get_passwd); on Windows uid and gid are -1, username comes from GetUserNameW, homedir is os.homedir() and shell is null — exactly what Node reports. A failed lookup throws.",
+      "description": "The effective user's passwd entry on POSIX (uv_os_get_passwd); on Windows uid and gid are -1, username comes from GetUserNameW, homedir is os.homedir() and shell is null — exactly what Node reports. { encoding: 'buffer' } gives Buffers; a failed lookup throws ERR_SYSTEM_ERROR.",
       "returns": {
         "type": "object",
         "desc": "{ uid, gid, username, homedir, shell }."
@@ -225,17 +225,52 @@
       "name": "os.networkInterfaces()",
       "statusRow": "os.networkInterfaces()",
       "signature": "networkInterfaces(): any",
-      "badge": "caveats",
-      "description": "An object keyed by interface name — a dynamic object, since the keys exist only at run time — each an array of { address, netmask, family, mac, internal, cidr, scopeid } records in libuv's order, with scopeid on IPv6 entries only. getifaddrs (up + running interfaces, MAC from the link-layer entry) on POSIX, GetAdaptersAddresses (operational adapters, FriendlyName, OnLinkPrefixLength) on Windows; cidr is null for a non-contiguous netmask. Verified byte-identical to Node's walk and JSON on Windows.",
-      "differences": [
-        "Typed `any` rather than `NodeJS.Dict<NetworkInterfaceInfo[]>`: entries read through the dynamic paths (`for…of`, `Object.keys`, destructuring), so array methods on a per-interface list (`.filter`, `.map`) are the D1 method-through-`any` residue."
-      ],
+      "badge": "exact",
+      "description": "An object keyed by interface name, each an array of { address, netmask, family, mac, internal, cidr, scopeid } records in libuv's order, with scopeid on IPv6 entries only. getifaddrs (up + running interfaces, MAC from the link-layer entry) on POSIX, GetAdaptersAddresses on Windows; cidr is Node's own getCIDR over the netmask.",
       "snippet": "const nis = os.networkInterfaces();\nfor (const name of Object.keys(nis)) {\n  for (const ni of nis[name]) console.log(name, ni.family, ni.address, ni.cidr);\n}",
       "seeAlso": [
         "os.hostname"
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/os.html#osnetworkinterfaces"
+      }
+    },
+    {
+      "id": "os.getPriority",
+      "name": "os.getPriority() / os.setPriority()",
+      "statusRow": "os.getPriority() / os.setPriority()",
+      "signature": "getPriority(pid?: number): number\nsetPriority(pid: number, priority: number): void\nsetPriority(priority: number): void",
+      "badge": "caveats",
+      "description": "A process's scheduling priority (-20 highest to 19 lowest; pid 0 is this process) through getpriority/setpriority — on Windows the priority class, mapped as libuv maps it. Node's argument validation; a failure throws ERR_SYSTEM_ERROR with the failed call's info ({ errno, code, message, syscall }).",
+      "differences": [
+        "The error's `errno`/`syscall` are copies of `info`'s, not accessors over it.",
+        "Windows' priority-class mapping is compile-checked only."
+      ],
+      "snippet": "os.setPriority(10);\nconsole.log(os.getPriority()); // 10\ntry { os.getPriority(999999) } catch (e: any) { console.log(e.info.code) } // ESRCH",
+      "seeAlso": [
+        "os.constants"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/os.html#osgetprioritypid"
+      }
+    },
+    {
+      "id": "os.constants",
+      "name": "os.constants",
+      "statusRow": "os.constants",
+      "signature": "constants: { UV_UDP_REUSEADDR: number; dlopen: {...}; errno: {...}; signals: {...}; priority: {...} }",
+      "badge": "exact",
+      "description": "The host's dlopen flags, errno codes, signal numbers and priority levels as null-prototype objects, signals frozen, in Node's own order (node_constants.cc); on Windows errno also carries the WSA* codes.",
+      "returns": {
+        "type": "object",
+        "desc": "{ UV_UDP_REUSEADDR, dlopen, errno, signals, priority }."
+      },
+      "snippet": "console.log(os.constants.signals.SIGTERM, os.constants.errno.ENOENT, os.constants.priority.PRIORITY_HIGHEST);",
+      "seeAlso": [
+        "os.getPriority"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/os.html#os-constants"
       }
     }
   ]

@@ -1,5 +1,10 @@
 package llvm
 
+import (
+	"fmt"
+	"strings"
+)
+
 // runtime_dynobj.go — the D1 dynamic object runtime (TDD-00155 Stage 1): a
 // per-instance property bag behind box tag 10 (kmlTagDynObject). Layout:
 //
@@ -58,6 +63,7 @@ func (e *Emitter) ensureDynObj() {
 	e.ensureMemmove()
 	e.ensureStrcmp()
 	e.ensureStrlen()
+	e.emitWellKnownKeyTest()
 	e.emitGlobal(`
 define ptr @__kml_dynobj_new() {
 entry:
@@ -812,10 +818,9 @@ loop:
   br i1 %done, label %out, label %body
 body:
   %key = call ptr @__kml_dynobj_key_at(ptr %o, i64 %i)
-  ; Skip symbol-keyed properties (0x01 sentinel first byte) — getOwnPropertyNames
+  ; Skip symbol-keyed properties (__kml_key_is_symbol) — getOwnPropertyNames
   ; returns string keys only (symbols are getOwnPropertySymbols' domain).
-  %b0 = load i8, ptr %key, align 1
-  %issym = icmp eq i8 %b0, 1
+  %issym = call i1 @__kml_key_is_symbol(ptr %key)
   br i1 %issym, label %skip, label %take
 take:
   %slot = getelementptr ptr, ptr %arr, i64 %n
@@ -881,11 +886,10 @@ body:
   %attrs = call i64 @__kml_dynobj_attrs_at(ptr %o, i64 %i)
   %eb = and i64 %attrs, 2
   %isenum = icmp ne i64 %eb, 0
-  ; A symbol-keyed property (synthetic key with the 0x01 sentinel first byte) is
+  ; A symbol-keyed property (__kml_key_is_symbol) is
   ; never returned by the string enumeration (Object.keys / for...in / JSON).
   %kchk = call ptr @__kml_dynobj_key_at(ptr %o, i64 %i)
-  %b0 = load i8, ptr %kchk, align 1
-  %issym = icmp eq i8 %b0, 1
+  %issym = call i1 @__kml_key_is_symbol(ptr %kchk)
   %notsym = xor i1 %issym, true
   %keep = and i1 %isenum, %notsym
   br i1 %keep, label %take, label %skip
@@ -1069,4 +1073,40 @@ entry:
   %r = call i64 @__kml_nb_pack(i8 %tag8, i64 %pay)
   ret i64 %r
 }`)
+}
+
+// wellKnownMemberKeys are the well-known symbols a `[Symbol.x]` member name
+// compiles to "@@x" for (parser_classes.go), on classes and object literals
+// alike; a bag keys them the same way (emitSymbolPropertyKey).
+var wellKnownMemberKeys = []string{"iterator", "asyncIterator", "toPrimitive", "dispose", "asyncDispose"}
+
+// emitWellKnownKeyTest defines @__kml_key_is_symbol(key): whether a bag key
+// is a symbol's — a Symbol's "\x01@@sym:%p" key, or a well-known symbol's
+// "@@x" — so the string enumerations skip it.
+func (e *Emitter) emitWellKnownKeyTest() {
+	var b strings.Builder
+	b.WriteString(`
+define i1 @__kml_key_is_symbol(ptr %k) {
+entry:
+  %b0 = load i8, ptr %k, align 1
+  %soh = icmp eq i8 %b0, 1
+  br i1 %soh, label %yes, label %at0
+at0:
+  %at = icmp eq i8 %b0, 64
+  br i1 %at, label %at1, label %no
+at1:
+  %p1 = getelementptr i8, ptr %k, i64 1
+  %b1 = load i8, ptr %p1, align 1
+  %at2 = icmp eq i8 %b1, 64
+  br i1 %at2, label %wk0, label %no
+`)
+	for i, name := range wellKnownMemberKeys {
+		next := fmt.Sprintf("wk%d", i+1)
+		if i == len(wellKnownMemberKeys)-1 {
+			next = "no"
+		}
+		fmt.Fprintf(&b, "wk%d:\n  %%c%d = call i32 @strcmp(ptr %%k, ptr %s)\n  %%m%d = icmp eq i32 %%c%d, 0\n  br i1 %%m%d, label %%yes, label %%%s\n", i, i, e.internString("@@"+name), i, i, i, next)
+	}
+	b.WriteString("yes:\n  ret i1 true\nno:\n  ret i1 false\n}")
+	e.emitGlobal(b.String())
 }

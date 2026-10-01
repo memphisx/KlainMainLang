@@ -21,7 +21,7 @@
         "countsTowardParity": false,
         "rows": [
           {
-            "feature": "`Object` (literals, `keys`/`values`/`entries`/`assign`/`freeze`/`seal`/`fromEntries`/`hasOwn`/`groupBy`/`create`/`defineProperty`/`getOwnPropertyDescriptor`/`get`·`setPrototypeOf`)",
+            "feature": "`Object` (literals, `keys`/`values`/`entries`/`assign`/`freeze`/`seal`/`fromEntries`/`hasOwn`/`groupBy`/`create`/`defineProperty`/`defineProperties`/`getOwnPropertyDescriptor`/`get`·`setPrototypeOf`/`is`)",
             "status": "implemented",
             "notes": [
               "→ [Object, Map & Set](OBJECT-COLLECTIONS.md)"
@@ -39,12 +39,12 @@
             "status": "implemented",
             "caveats": [
               "`toString()` / `String(f)` has no source text (a compile error on a statically-typed function)",
-              "Own properties on a user function (`f.x = 1`) are unsupported",
-              "Boxing the same closure into `any` twice yields two values that are not `===`",
+              "A function unboxed from `any` into a typed slot is a new function (`promisify(p) === p` is false)",
               "A class value has no `[class X]` rendering"
             ],
             "notes": [
-              "Names follow ECMAScript NamedEvaluation (binding, property key, assignment target, default, class field); `length` counts the parameters before the first default/rest one; the same holds through `any` and for built-in Error constructors ([ADR-01093](../adr/ADR-01093.md))"
+              "Names follow ECMAScript NamedEvaluation (binding, property key, assignment target, default, class field); `length` counts the parameters before the first default/rest one; the same holds through `any` and for built-in Error constructors ([ADR-01093](../adr/ADR-01093.md))",
+              "Own properties (`f.x = 1`, `Object.defineProperty(f, …)`, a TypeScript expando declaration), through `any` too, and in its inspect form (`[Function: f] { x: 1 }`) ([ADR-01232](../adr/ADR-01232.md))"
             ]
           },
           {
@@ -242,11 +242,6 @@
             "notes": [
               "→ [Performance timing](PERFORMANCE-TIMING.md)",
               "The `getUTC*`/`setUTC*` instance accessors work. See [ADR-00844](../adr/ADR-00844.md)"
-            ],
-            "caveats": [
-              "`Date` is a plain i64 epoch with no `NaN` — an invalid date is a `-1` sentinel (`new Date('bad').getTime()` is `-1`, Node: `NaN`)",
-              "Out-of-range date fields wrap rather than invalidating (`Date.parse('2020-13-45')` is a valid timestamp, Node: `NaN`)",
-              "No `Date.UTC` static, `getTimezoneOffset`, or `Date.prototype.toString` — each is a compile error"
             ]
           },
           {
@@ -304,14 +299,14 @@
             "feature": "`Array`",
             "status": "implemented",
             "caveats": [
-              "length-mutating methods propagate to caller only for plain **variable** params (not object-field/array-element receivers); `a.length = n` truncation compile-errors; `.keys`/`values`/`entries` materialized not lazy; `.flat(depth)` needs a constant depth → [Array methods](ARRAY-METHODS.md)"
+              "length-mutating methods propagate to caller only for plain **variable** params (not object-field/array-element receivers); `.flat(depth)` needs a constant depth → [Array methods](ARRAY-METHODS.md)"
             ]
           },
           {
             "feature": "`Object` / dynamic model",
             "status": "implemented",
             "caveats": [
-              "prototype machinery, descriptors, accessors exist on **`any`-typed / js-mode dynamic objects only**; static structs are fixed-shape (no dynamic add/delete, no prototype); `Object.assign` can't graft new fields; `hasOwn` needs string-literal keys → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+              "prototype machinery, descriptors, accessors exist on **`any`-typed / js-mode dynamic objects only**; static structs are fixed-shape (no dynamic add/delete, no prototype); `Object.assign` between static objects can't graft new fields; `hasOwn` needs string-literal keys → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
             ]
           },
           {
@@ -339,28 +334,28 @@
             "feature": "`Function` `.call`/`.apply`/`.bind`",
             "status": "implemented",
             "caveats": [
-              "`thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); `.bind` scalar-param only; first-class function values, not built-ins → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
+              "`thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); `.bind` not over an array/nullable/rest parameter; not on a Node module's functions → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
             ]
           },
           {
             "feature": "`Symbol`",
             "status": "implemented",
             "caveats": [
-              "no well-known symbols as runtime values; only `[Symbol.iterator]`/`[Symbol.asyncIterator]` recognized syntactically → [Type system](TYPE-SYSTEM.md)"
+              "Of the well-known symbols the runtime honors `Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive`; `toStringTag`, `hasInstance`, `species` and the rest are values only → [Type system](TYPE-SYSTEM.md)"
             ]
           },
           {
             "feature": "`RegExp`",
             "status": "implemented",
             "caveats": [
-              "`u`/`d` flags **missing** (accepted, not implemented); `exec` result lacks `index`/`input`/`groups`; unmatched groups become `\"\"` not `null` → [RegExp](REGEXP.md)"
+              "`u`/`d` flags **missing** (accepted, not implemented) → [RegExp](REGEXP.md)"
             ]
           },
           {
             "feature": "`JSON`",
             "status": "implemented",
             "caveats": [
-              "statically-typed heterogeneous-array `stringify` **missing** (use a tuple/`any`); function/array `replacer` rejected; `space` must be literal → [JSON](JSON.md)"
+              "a strict-lane literal mixing two object types is rejected; function/array `replacer` rejected; `space` must be literal → [JSON](JSON.md)"
             ]
           },
           {
@@ -388,7 +383,7 @@
             "feature": "`EventTarget` / `Event` / `AbortSignal`",
             "status": "implemented",
             "caveats": [
-              "single-target dispatch (no capture/bubble/propagation); reduced Event property set; `AbortSignal` isn't wired into `setTimeout` → [Events & cancellation](EVENTS-CANCELLATION.md)"
+              "`AbortSignal` isn't wired into `setTimeout` → [Events & cancellation](EVENTS-CANCELLATION.md)"
             ]
           },
           {
@@ -402,14 +397,14 @@
             "feature": "`Date`",
             "status": "implemented",
             "caveats": [
-              "UTC-only everywhere (deliberate); `parse` returns a `-1` sentinel not `NaN`; setters need a named-variable receiver; no locale/Intl formatting → [Performance timing](PERFORMANCE-TIMING.md)"
+              "Setters need a named-variable receiver; no locale/`Intl` formatting; `toString`'s zone name covers the common zones only → [Performance timing](PERFORMANCE-TIMING.md)"
             ]
           },
           {
             "feature": "`performance`",
             "status": "implemented",
             "caveats": [
-              "`mark`/`measure` last-write-wins; `measure` returns a plain number; no `PerformanceObserver`/entries → [Performance timing](PERFORMANCE-TIMING.md)"
+              "`eventLoopUtilization`/`nodeTiming` missing → [Performance timing](PERFORMANCE-TIMING.md)"
             ]
           },
           {
@@ -461,7 +456,7 @@
             "feature": "`Iterator` / `AsyncIterator` helpers (`Iterator.prototype.map`/`filter`/`take`/`drop`/…)",
             "status": "missing",
             "notes": [
-              "No general lazy-iterator protocol exists yet (materialized iteration across Array/Map/Set/`matchAll`)"
+              "Array, Map and Set iterators have `toArray()`; the lazy helpers (`map`, `filter`, `take`, `drop`, `flatMap`, `reduce`, `forEach`, `some`, `every`, `find`) and `Iterator.from` are missing"
             ]
           },
           {
@@ -530,10 +525,10 @@
             ]
           },
           {
-            "feature": "Well-known symbols as runtime protocol dispatch (`Symbol.hasInstance`/`toPrimitive`/`toStringTag`/`species`/…)",
+            "feature": "Well-known symbols as runtime protocol dispatch (`Symbol.hasInstance`/`toStringTag`/`species`/…)",
             "status": "missing",
             "notes": [
-              "No runtime protocol-dispatch point; only `Symbol.iterator`/`asyncIterator` are honored, syntactically"
+              "`Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive` are honored — as own properties, class members and object-literal members; the others are not consulted"
             ]
           }
         ]

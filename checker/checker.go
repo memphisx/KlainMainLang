@@ -23,6 +23,9 @@ type Checker struct {
 	// value any, as TypeScript does without noImplicitAny (--strict sets
 	// it: such a variable evolves by its assignments).
 	ImplicitAnyVariables bool
+	// ImplicitThis is TypeScript's noImplicitThis off: a `this` with no type
+	// is not TS2683 (the strict lane never sets it).
+	ImplicitThis bool
 	// LegacyClassFields checks class fields as TypeScript does for a target
 	// before ES2022 (or without useDefineForClassFields): an instance
 	// field's initializer runs in the constructor, and may not read the
@@ -78,6 +81,8 @@ type Checker struct {
 	memberDecls map[*ast.MemberExpression]*Property
 	// cannotFound are the TS2304 reports made, one per name and position.
 	cannotFound map[cannotFindKey]bool
+	// implicitThis holds the `this` expressions TS2683 was reported for.
+	implicitThis map[*ast.ThisExpression]bool
 	// knownTypeNames are the names checkTypeNames takes as declared (built
 	// on first use).
 	knownTypeNames map[string]bool
@@ -95,6 +100,8 @@ type Checker struct {
 	initializing map[*binder.Symbol]bool
 	// parents maps each node to its parent, built on first use.
 	parents map[ast.Node]ast.Node
+	// expandoCache: a function's expando assignments by property (expando.go).
+	expandoCache map[*binder.Symbol]map[string][]ast.Expression
 	// declSyms maps each declaration node to its symbol, built on first use.
 	declSyms map[ast.Node]*binder.Symbol
 	// env names the type arguments of the generic declaration being typed.
@@ -126,6 +133,9 @@ type Checker struct {
 	// still being computed (deps): reused while every one of them is still
 	// open, so a cycle of assignments is walked once, not once per path.
 	provisional map[ast.Expression]provisional
+	// comparing marks the other sides of comparisons being typed to narrow
+	// a reference (comparedType).
+	comparing map[ast.Expression]bool
 	// depth is TypeOf's nesting; steps counts the flow steps of the
 	// outermost query, and exhausted marks it past flowBudget.
 	depth, steps int
@@ -148,7 +158,7 @@ func New(b *binder.Binding) *Checker { return NewWith(b, options.Options{}) }
 func NewWith(b *binder.Binding, opts options.Options) *Checker {
 	c := &Checker{b: b, opts: opts, in: interner{byKey: map[string]*Type{}},
 		nodeTypes: map[ast.Node]*Type{}, symTypes: map[*binder.Symbol]*Type{}, resolving: map[*binder.Symbol]bool{},
-		assigning: map[ast.Expression]bool{}, storage: map[ast.Expression]*Type{}, evolving: map[*binder.Symbol]bool{}, tupleCtx: map[*ast.ArrayLiteral]bool{}, initializing: map[*binder.Symbol]bool{}, building: map[*Type]bool{}, failedNominal: map[*Type]bool{}, exhaustive: map[*ast.SwitchStatement]bool{}, memberDecls: map[*ast.MemberExpression]*Property{}, cannotFound: map[cannotFindKey]bool{}, modules: map[string]*Type{},
+		assigning: map[ast.Expression]bool{}, storage: map[ast.Expression]*Type{}, evolving: map[*binder.Symbol]bool{}, tupleCtx: map[*ast.ArrayLiteral]bool{}, initializing: map[*binder.Symbol]bool{}, building: map[*Type]bool{}, failedNominal: map[*Type]bool{}, exhaustive: map[*ast.SwitchStatement]bool{}, memberDecls: map[*ast.MemberExpression]*Property{}, cannotFound: map[cannotFindKey]bool{}, implicitThis: map[*ast.ThisExpression]bool{}, modules: map[string]*Type{},
 		aliases: map[string]*Type{}, aliasing: map[string]bool{}, enums: map[*binder.Symbol][]*Type{}, classing: map[*binder.Symbol]bool{}, ctorChain: map[*binder.Symbol]bool{}, nesting: map[*binder.Symbol]int{}, contextualizing: map[ast.Node]bool{}, flowCache: map[flowKey]*Type{}, provisional: map[ast.Expression]provisional{}}
 	c.anyT = c.in.intrinsic(Any)
 	c.unknownT = c.in.intrinsic(Unknown)
@@ -453,6 +463,10 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 		return c.in.object(props)
 	case *ast.MemberExpression:
 		if m := c.namespaceMember(e); m != nil {
+			if id, ok := e.Object.(*ast.Identifier); ok && id.Name == "globalThis" && len(m.Declarations) > 0 {
+				// A builtin reached through globalThis keeps its declaration.
+				c.memberDecls[e] = &Property{Name: e.Property, Decl: m.Declarations[len(m.Declarations)-1].Node}
+			}
 			return c.typeOfSymbol(m) // a namespace's member
 		}
 		obj := c.TypeOf(e.Object)
@@ -476,6 +490,16 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 				recv := m
 				if am := c.apparentType(m); am != nil {
 					m = am
+				}
+				if m.Flags&Object != 0 && m.Kind == Function && len(members(obj)) == 1 {
+					// A function's expando property, else Function's member.
+					if t := c.expandoType(e.Object, e.Property); t != nil {
+						return t
+					}
+					if t := c.functionMember(e.Property); t != nil {
+						return t
+					}
+					return c.unanswered
 				}
 				if m.Flags&Object == 0 || (m.Kind != Anonymous && m.Kind != Instance && m.Kind != Interface) {
 					return c.unanswered
@@ -565,6 +589,23 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 				return c.instantiate(callee.Result, c.inferArgs(e.Args, e.TypeArgs, callee, true))
 			}
 			return callee.Result
+		}
+		return c.unanswered
+	case *ast.NewDateExpression, *ast.NewMapExpression, *ast.NewSetExpression, *ast.NewWeakMapExpression, *ast.NewWeakSetExpression:
+		// The parser's own `new Date(…)`, `new Map<K, V>(…)`, …: as a `new`
+		// through the global's construct signatures.
+		name, args, targs, _ := builtinNewParts(e)
+		return c.newBuiltinType(name, args, targs, e.GetPos())
+	case *ast.NewRegExpExpression:
+		// `/re/flags` and `new RegExp(…)`: the RegExp interface.
+		c.TypeOf(e.Pattern)
+		if e.Flags != nil {
+			c.TypeOf(e.Flags)
+		}
+		if c.b.Globals != nil {
+			if sym := c.b.Globals.Symbols.Get("RegExp"); sym != nil && sym.Flags&binder.Interface != 0 {
+				return c.interfaceOf(sym, nil)
+			}
 		}
 		return c.unanswered
 	case *ast.NewExpression:
@@ -1055,6 +1096,40 @@ func (c *Checker) MemberOverloadDecls(e *ast.MemberExpression) []ast.Node {
 	return nil
 }
 
+// OverloadResult is the result type every overload of fn that a call may
+// resolve to agrees on, taking an argument the checker cannot type as
+// fitting any parameter; nil when they differ or none fits.
+func (c *Checker) OverloadResult(e *ast.CallExpression, fn *Type) *Type {
+	var result *Type
+	for _, sig := range fn.Overloads {
+		if !arityFits(sig, len(e.Args)) || len(sig.TypeParams) > 0 {
+			continue
+		}
+		fits := true
+		for j, a := range e.Args {
+			if contextSensitive(a) {
+				continue
+			}
+			t := c.TypeOf(a)
+			if c.Unanswered(t) || t.Flags&(Any|Unknown) != 0 {
+				continue
+			}
+			if p := paramAt(sig, j); p == nil || !c.assignable(t, p) {
+				fits = false
+				break
+			}
+		}
+		if !fits {
+			continue
+		}
+		if result != nil && result != sig.Result {
+			return nil
+		}
+		result = sig.Result
+	}
+	return result
+}
+
 // OverloadIndex is the overload of fn a call resolves to (the first its
 // arguments fit, as TypeScript picks it), or -1.
 func (c *Checker) OverloadIndex(e *ast.CallExpression, fn *Type) int {
@@ -1190,7 +1265,62 @@ func (c *Checker) builtinImport(name string) *binder.Symbol {
 	if scope == nil {
 		return nil
 	}
+	if eq := c.exportEquals(ref.Module); eq != nil {
+		// `export = X`: the module's members are X's namespace's.
+		if ref.Name == "default" {
+			return eq
+		}
+		if ns := c.b.NamespaceScope(eq); ns != nil {
+			return ns.Symbols.Get(ref.Name)
+		}
+		return nil
+	}
 	return scope.Symbols.Get(ref.Name)
+}
+
+// exportEquals is the symbol a builtin module's `export = X;` makes the
+// module, or nil.
+func (c *Checker) exportEquals(spec string) *binder.Symbol {
+	name := c.b.AmbientExportEquals[spec]
+	scope := c.b.AmbientModules[spec]
+	if name == "" || scope == nil {
+		return nil
+	}
+	return scope.Symbols.Get(name)
+}
+
+// valueWithNamespace is the type of the value sym names when a namespace
+// merges into it (`function assert(…)` + `namespace assert { … }`): its
+// call signatures, and the namespace's exported values as properties.
+func (c *Checker) valueWithNamespace(sym *binder.Symbol) *Type {
+	base := c.typeOfSymbol(sym)
+	ns := c.b.NamespaceScope(sym)
+	if ns == nil {
+		return base
+	}
+	t := &Type{Flags: Object, Kind: Anonymous, partial: true, ID: -2}
+	if !c.Unanswered(base) && base.Flags&Object != 0 && base.Kind == Function {
+		if len(base.Overloads) > 0 {
+			t.Calls = append(t.Calls, base.Overloads...)
+		} else {
+			t.Calls = append(t.Calls, base)
+		}
+	}
+	ns.Symbols.Each(func(m *binder.Symbol) {
+		if m.Flags&binder.Value == 0 {
+			return
+		}
+		var decls []ast.Node
+		for _, d := range m.Declarations {
+			decls = append(decls, d.Node)
+		}
+		p := &Property{Name: m.Name, Type: c.typeOfSymbol(m), Decls: decls}
+		if len(decls) > 0 {
+			p.Decl = decls[len(decls)-1]
+		}
+		t.setProp(p)
+	})
+	return t
 }
 
 // ambientName reports whether name is an erased ambient declaration's.
@@ -1240,6 +1370,11 @@ func (c *Checker) moduleType(spec string) *Type {
 	if scope == nil {
 		c.modules[spec] = c.unanswered
 		return c.unanswered
+	}
+	if eq := c.exportEquals(spec); eq != nil {
+		t := c.valueWithNamespace(eq)
+		c.modules[spec] = t
+		return t
 	}
 	t := &Type{Flags: Object, Kind: Anonymous, partial: true, ID: -2}
 	c.modules[spec] = t
@@ -1436,4 +1571,124 @@ func (c *Checker) awaited(t *Type, depth int) *Type {
 		}
 	}
 	return t
+}
+
+// GlobalInterface is the type of the global interface name declares (the
+// builtin declarations' `interface RegExp`), its type parameters left as
+// they are, or nil when there is none.
+func (c *Checker) GlobalInterface(name string) *Type {
+	if c.b.Globals == nil {
+		return nil
+	}
+	sym := c.b.Globals.Symbols.Get(name)
+	if sym == nil || sym.Flags&binder.Interface == 0 {
+		return nil
+	}
+	// A generic interface (`Map<K, V>`): its members over its own type
+	// parameters, `any` for one the checker cannot name.
+	var args []*Type
+	for _, d := range sym.Declarations {
+		if id, ok := d.Node.(*ast.InterfaceDeclaration); ok {
+			scope := c.b.ScopeOf(id)
+			for _, name := range id.TypeParams {
+				arg := c.anyT
+				if scope != nil {
+					if tps := scope.Symbols.Get(name); tps != nil && tps.Flags&binder.TypeParameter != 0 {
+						arg = c.typeParamType(tps)
+					}
+				}
+				args = append(args, arg)
+			}
+			break
+		}
+	}
+	t := c.interfaceOf(sym, args)
+	if t == nil || c.Unanswered(t) {
+		return nil
+	}
+	return t
+}
+
+// newBuiltinType types `new Name(args)` for a builtin the parser gives its
+// own node (`new Date`, `new Map`, `new Set`, `new WeakMap`, `new WeakSet`):
+// through the global's construct signatures, as a NewExpression is.
+// builtinCtor is the construct signatures of the global name (`Map`), nil
+// when it has none.
+func (c *Checker) builtinCtor(name string) *Type {
+	if c.b.Globals == nil {
+		return nil
+	}
+	sym := c.b.Globals.Symbols.Get(name)
+	if sym == nil || sym.Flags&binder.Variable == 0 {
+		return nil
+	}
+	ctor := c.signaturesOf(c.typeOfSymbol(sym), true)
+	if c.Unanswered(ctor) || ctor.Flags&Object == 0 || ctor.Kind != Function {
+		return nil
+	}
+	return ctor
+}
+
+// builtinNewParts is a builtin `new` node's global, arguments and explicit
+// type arguments.
+func builtinNewParts(e ast.Node) (string, []ast.Expression, []*ast.TypeAnnotation, bool) {
+	switch e := e.(type) {
+	case *ast.NewDateExpression:
+		if e.Millis != nil {
+			return "Date", []ast.Expression{e.Millis}, nil, true
+		}
+		return "Date", e.Args, nil, true
+	case *ast.NewMapExpression:
+		var args []ast.Expression
+		if e.Init != nil {
+			args = []ast.Expression{e.Init}
+		}
+		var targs []*ast.TypeAnnotation
+		if e.KeyType != nil && e.ValType != nil {
+			targs = []*ast.TypeAnnotation{e.KeyType, e.ValType}
+		}
+		return "Map", args, targs, true
+	case *ast.NewSetExpression:
+		var args []ast.Expression
+		if e.Init != nil {
+			args = []ast.Expression{e.Init}
+		}
+		var targs []*ast.TypeAnnotation
+		if e.ElemType != nil {
+			targs = []*ast.TypeAnnotation{e.ElemType}
+		}
+		return "Set", args, targs, true
+	case *ast.NewWeakMapExpression:
+		var targs []*ast.TypeAnnotation
+		if e.KeyType != nil && e.ValType != nil {
+			targs = []*ast.TypeAnnotation{e.KeyType, e.ValType}
+		}
+		return "WeakMap", nil, targs, true
+	case *ast.NewWeakSetExpression:
+		var targs []*ast.TypeAnnotation
+		if e.ElemType != nil {
+			targs = []*ast.TypeAnnotation{e.ElemType}
+		}
+		return "WeakSet", nil, targs, true
+	}
+	return "", nil, nil, false
+}
+
+func (c *Checker) newBuiltinType(name string, args []ast.Expression, typeArgs []*ast.TypeAnnotation, pos ast.Pos) *Type {
+	for _, a := range args {
+		c.TypeOf(a)
+	}
+	ctor := c.builtinCtor(name)
+	if ctor == nil {
+		return c.unanswered
+	}
+	fake := ast.NewCallExpression(ast.NewIdentifier(name, pos), args, pos)
+	fake.TypeArgs = typeArgs
+	switch {
+	case len(ctor.Overloads) > 0:
+		return c.resolveOverload(fake, ctor)
+	case len(ctor.TypeParams) > 0:
+		return c.instantiate(ctor.Result, c.inferArgs(args, typeArgs, ctor, true))
+	}
+	return ctor.Result
 }

@@ -34,34 +34,30 @@ console.log(arr.length)    // 200000
 console.log(t2 >= t1)      // true
 
 // ── performance.mark() / performance.measure() ──────────────────────────────
-// Named timing marks on top of performance.now() above. mark(name) records
-// "now" under a name; measure(label, startMark, endMark?) returns the
-// elapsed milliseconds between two marks as a plain number — not a
-// PerformanceMeasure object (this compiler has no getEntriesByName/
-// PerformanceObserver machinery for one to belong to), and label itself
-// isn't stored anywhere for the same reason. endMark defaults to right now
-// when omitted.
+// Named timing marks on top of performance.now() above. mark(name) records a
+// PerformanceMark; measure(name, startMark, endMark?) returns a
+// PerformanceMeasure whose duration spans the two marks (through now when
+// endMark is omitted).
 performance.mark("loop-start")
 let arr2: number[] = []
 for (let i = 0; i < 200000; i++) { arr2.push(i) }
 performance.mark("loop-end")
-const loopMs: number = performance.measure("loop", "loop-start", "loop-end")
+const loopMs: number = performance.measure("loop", "loop-start", "loop-end").duration
 console.log(loopMs >= 0)                                  // true
-const sinceStartMs: number = performance.measure("since-start", "loop-start")
-console.log(sinceStartMs >= loopMs)                        // true — endMark omitted means "through now"
+const sinceStart = performance.measure("since-start", "loop-start")
+console.log(sinceStart.duration >= loopMs, sinceStart.entryType)   // true measure
 
-// Re-marking a name overwrites its timestamp (last-write-wins) rather than
-// keeping every mark ever recorded under that name.
+// A measure from a mark name uses that name's latest mark.
 performance.mark("loop-start")
-const freshMs: number = performance.measure("fresh", "loop-start")
-console.log(freshMs < loopMs)                               // true — measured from the just-overwritten mark
+const freshMs: number = performance.measure("fresh", "loop-start").duration
+console.log(freshMs < loopMs)                               // true — measured from the newer mark
 
-// Measuring against a name that was never marked throws, matching real
-// performance.measure()'s own SyntaxError-on-unknown-mark behavior.
+// Measuring against a name that was never marked throws a SyntaxError
+// DOMException.
 try {
   performance.measure("bad", "never-marked")
 } catch (e) {
-  console.log((e as Error).message)    // performance.measure: no mark named 'never-marked'
+  console.log((e as Error).message)    // The "never-marked" performance mark has not been set
 }
 
 // ── btoa / atob — base64 ─────────────────────────────────────────────────────

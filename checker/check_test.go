@@ -41,6 +41,9 @@ func TestCheck(t *testing.T) {
 		{"let b: number\nb = 'y'", "2:TS2322"},
 		{"function f(): number { return 'z' }", "1:TS2322"},
 		{"function g(n: number, s?: string) { return n }\ng('w')", "2:TS2345"},
+		{"interface O { ref?: boolean }\nfunction g(o?: O) {}\ng(5)", "3:TS2559"},
+		{"interface O { ref?: boolean }\nconst o: O = 'x'", "2:TS2559"},
+		{"interface O { ref?: boolean }\nfunction g(o?: O): void;\nfunction g(o?: any) {}\ng([1])", "4:TS2559"},
 		{"function g(n: number, s?: string) { return n }\ng()", "2:TS2554"},
 		{"function g(n: number, s?: string) { return n }\ng(1, 'a', 3)", "2:TS2554"},
 		{"function r(a: number, ...b: number[]) { return a }\nr()", "2:TS2555"},
@@ -186,6 +189,19 @@ func TestAwaited(t *testing.T) {
 		{"async function g(p: Promise<number>) { const n: number = await p; const m: number = await 3 }", ""},
 		{"interface Obj { key: \"value\" }\nasync function g() { const o: Obj = await { key: \"value\" } }", ""},
 		{"async function g() { const v = await Promise.resolve(41); return v + 1 }", ""},
+		// A generic construct signature's result is instantiated (`new
+		// Promise<number>(…)` is a Promise<number>, not a Promise<T>).
+		{"interface PC { new <T>(x: T): Promise<T> }\ndeclare var Q: PC\nconst p = new Q<number>(1)\nconst s: string = p", "4:TS2322"},
+		{"interface PC { new <T>(x: T): Promise<T> }\ndeclare var Q: PC\nasync function g() { const v = await new Q(1); return v + 1 }", ""},
+		// Tuples inside an array context infer (`new Map([['a', 1]])` is a
+		// Map<string, number>); a type argument breaking its constraint
+		// makes the overload not fit.
+		{"declare function mk<K, V>(e?: readonly (readonly [K, V])[] | null): Map<K, V>\nconst m = mk([['a', 1]])\nconst s: string = m", "3:TS2322"},
+		{"declare function mk<K, V>(e?: readonly (readonly [K, V])[] | null): Map<K, V>\nconst m: Map<string, number> = mk([['a', 1]])", ""},
+		{"interface B<T> { t: T }\ndeclare function f<T extends number>(x: T): B<T>\ndeclare function f(x: string): B<string>\nconst b: B<string> = f('s')", ""},
+		// Return type inference: T of wrap<T>(fn: T): T is take's parameter.
+		{"declare function wrap<T>(fn: T): T\ndeclare function take(cb: (a: string) => void): void\ntake(wrap((x) => { const n: number = x }))", "3:TS2322"},
+		{"declare function wrap(n?: number): () => void\ndeclare function wrap<T extends (...a: any[]) => any>(fn: T): T\ndeclare function take(cb: (a: string) => void): void\ntake(wrap((x) => { const s: string = x }))", ""},
 	} {
 		if got := checkCodesLib(t, tc.src); got != tc.want {
 			t.Errorf("%s:\n got  %q\n want %q", tc.src, got, tc.want)

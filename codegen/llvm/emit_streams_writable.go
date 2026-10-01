@@ -60,6 +60,8 @@ func (e *Emitter) emitStreamWriteWrap(userTy, chunkTy Type) string {
 	if isAsync {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr (%s) %s(%s)", r, sig, fp, args))
+		// The stream reacts to it (the spec's uponPromise): handled.
+		e.emitMarkPromiseHandled(r)
 		e.emitInstr(fmt.Sprintf("ret ptr %s", r))
 	} else {
 		e.emitInstr(fmt.Sprintf("call void (%s) %s(%s)", sig, fp, args))
@@ -91,6 +93,7 @@ func (e *Emitter) emitStreamCloseWrap(userTy Type) string {
 	if isAsync {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr (ptr) %s(ptr %s)", r, fp, ep))
+		e.emitMarkPromiseHandled(r) // the stream reacts to it (uponPromise)
 		e.emitInstr(fmt.Sprintf("ret ptr %s", r))
 	} else {
 		e.emitInstr(fmt.Sprintf("call void (ptr) %s(ptr %s)", fp, ep))
@@ -290,7 +293,7 @@ func (e *Emitter) emitWStreamMethodCall(objExpr ast.Expression, method string, a
 		case "getWriter":
 			ok := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ws_lock(ptr %s)", ok, ptr))
-			e.streamThrowTypeError(ok, "WritableStream is already locked to a writer")
+			e.streamThrowTypeError(ok, "Invalid state: WritableStream is locked")
 			return Value{Ref: ptr, Ty: WSWriterType(chunkTy)}, nil
 		case "abort":
 			bits, err := e.streamReasonBits(args, pos)

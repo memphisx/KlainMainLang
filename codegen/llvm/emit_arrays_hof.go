@@ -13,7 +13,7 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -70,10 +70,7 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	inVal := e.loadArrayElem(inGep, elemTy)
 
-	cbArgs := []Value{inVal}
-	if cb.acceptsArgAt(1) {
-		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
-	}
+	cbArgs := e.hofCBArgs(cb, []Value{inVal}, idxVal, ptrReg, lenReg, elemTy)
 	resultVal, err := e.emitCBCall(cb, cbArgs)
 	if err != nil {
 		return Value{}, err
@@ -114,8 +111,9 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, outPtr))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
 	resultTy := ArrayOf(retElemTy)
-	resultTy.IsTypedArray = isTypedArray
-	resultTy.Clamped = recvTy.Clamped
+	if isTypedArray {
+		resultTy = typedArrayResultType(recvTy) // the receiver's kind: a Buffer maps to a Buffer
+	}
 	return Value{Ref: r1, Ty: resultTy}, nil
 }
 
@@ -159,20 +157,7 @@ func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Express
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	inVal := e.loadArrayElem(inGep, elemTy)
 
-	cbArgs := []Value{inVal}
-	if cb.acceptsArgAt(1) {
-		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
-	}
-	if cb.acceptsArgAt(2) {
-		// The 3rd `array` argument is the source array as a {ptr,i64} value
-		// aggregate over the same data (the array value shape every HOF returns);
-		// element reads through it are live, the length a snapshot.
-		agg0 := e.freshReg()
-		agg1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", agg0, ptrReg))
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", agg1, agg0, lenReg))
-		cbArgs = append(cbArgs, Value{Ref: agg1, Ty: arrTy})
-	}
+	cbArgs := e.hofCBArgs(cb, []Value{inVal}, idxVal, ptrReg, lenReg, elemTy)
 	if _, err := e.emitCBCall(cb, cbArgs); err != nil {
 		return Value{}, err
 	}
@@ -196,7 +181,7 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -233,10 +218,7 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	inVal := e.loadArrayElem(inGep, elemTy)
 
-	cbArgs := []Value{inVal}
-	if cb.acceptsArgAt(1) {
-		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
-	}
+	cbArgs := e.hofCBArgs(cb, []Value{inVal}, idxVal, ptrReg, lenReg, elemTy)
 	predVal, err := e.emitCBCall(cb, cbArgs)
 	if err != nil {
 		return Value{}, err
@@ -268,6 +250,9 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 	r1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, outPtr))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, finalCnt))
+	if recvTy := e.inferExprType(mem.Object); recvTy.IsTypedArray {
+		return Value{Ref: r1, Ty: typedArrayResultType(recvTy)}, nil // a typed array filters to its own kind
+	}
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
 
@@ -313,7 +298,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	if hasInitial {
 		accTyHint = e.inferExprType(args[1])
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{accTyHint, elemTy})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{accTyHint, elemTy, TypeI64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -326,7 +311,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	accWidened := false
 	if rt := cb.retType(); e.compatJS() && hasInitial && rt.Nullable && rt.IsUndefined && reduceAccWidenable(accTyHint) {
 		accTyHint = undefinedableElem(accTyHint)
-		if cb, err = e.resolveCallbackWithHints(args[0], []Type{accTyHint, elemTy}); err != nil {
+		if cb, err = e.resolveCallbackWithHints(args[0], []Type{accTyHint, elemTy, TypeI64, ArrayOf(elemTy)}); err != nil {
 			return Value{}, err
 		}
 		accWidened = true
@@ -434,7 +419,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	inVal := e.loadArrayElem(inGep, elemTy)
 
-	newAcc, err := e.emitCBCall(cb, []Value{{Ref: accCur, Ty: accTy}, inVal})
+	newAcc, err := e.emitCBCall(cb, e.hofCBArgs(cb, []Value{{Ref: accCur, Ty: accTy}, inVal}, idxVal, ptrReg, lenReg, elemTy))
 	if err != nil {
 		return Value{}, err
 	}
@@ -491,7 +476,7 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -527,7 +512,7 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 	inGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	inVal := e.loadArrayElem(inGep, elemTy)
-	predVal, err := e.emitCBCall(cb, []Value{inVal})
+	predVal, err := e.emitCBCall(cb, e.hofCBArgs(cb, []Value{inVal}, idxVal, ptrReg, lenReg, elemTy))
 	if err != nil {
 		return Value{}, err
 	}
@@ -565,7 +550,7 @@ func (e *Emitter) emitArraySome(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -596,7 +581,7 @@ func (e *Emitter) emitArraySome(mem *ast.MemberExpression, args []ast.Expression
 	inGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	inVal := e.loadArrayElem(inGep, elemTy)
-	predVal, err := e.emitCBCall(cb, []Value{inVal})
+	predVal, err := e.emitCBCall(cb, e.hofCBArgs(cb, []Value{inVal}, idxVal, ptrReg, lenReg, elemTy))
 	if err != nil {
 		return Value{}, err
 	}
@@ -628,7 +613,7 @@ func (e *Emitter) emitArrayEvery(mem *ast.MemberExpression, args []ast.Expressio
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -659,7 +644,7 @@ func (e *Emitter) emitArrayEvery(mem *ast.MemberExpression, args []ast.Expressio
 	inGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	inVal := e.loadArrayElem(inGep, elemTy)
-	predVal, err := e.emitCBCall(cb, []Value{inVal})
+	predVal, err := e.emitCBCall(cb, e.hofCBArgs(cb, []Value{inVal}, idxVal, ptrReg, lenReg, elemTy))
 	if err != nil {
 		return Value{}, err
 	}
@@ -684,3 +669,29 @@ func (e *Emitter) emitArrayEvery(mem *ast.MemberExpression, args []ast.Expressio
 
 // emitArrayJoin implements arr.join(sep?): concatenates elements into a string,
 // separated by sep (default ","). Non-string elements are converted via sprintf.
+
+// hofCBArgs is an array method's callback arguments: the leading ones (the
+// element, or the accumulator and element), then the index and the array
+// itself when the callback takes them. The array is a {ptr,i64} aggregate
+// over the same data (the array value shape every HOF returns): element
+// reads through it are live, the length a snapshot (ADR-00573).
+func (e *Emitter) hofCBArgs(cb Callback, lead []Value, idx, ptrReg, lenReg string, elemTy Type) []Value {
+	args := lead
+	if cb.acceptsArgAt(len(lead)) {
+		args = append(args, Value{Ref: idx, Ty: TypeI64})
+	}
+	if cb.acceptsArgAt(len(lead) + 1) {
+		agg0, agg1 := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", agg0, ptrReg))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", agg1, agg0, lenReg))
+		args = append(args, Value{Ref: agg1, Ty: ArrayOf(elemTy)})
+	}
+	return args
+}
+
+// typedArrayResultType is the type of a new typed array a method of recv
+// returns: the receiver's own kind (%TypedArray%'s species), not nullable.
+func typedArrayResultType(recv Type) Type {
+	recv.Nullable, recv.IsUndefined = false, false
+	return recv
+}

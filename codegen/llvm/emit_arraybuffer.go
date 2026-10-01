@@ -370,10 +370,16 @@ func (e *Emitter) emitNewTypedArrayVarDecl(nta *ast.NewTypedArrayExpression, ptr
 		return e.emitTypedArrayFromArrayLiteral(lit, ptrName, lenName, taTy)
 	}
 	argTy := e.inferExprType(nta.Arg)
+	if nta.ByteOffset != nil && argTy.IsDynamic {
+		// An untyped buffer with an offset: the ArrayBuffer its box holds.
+		return e.emitTypedArrayFromBuffer(nta, ptrName, lenName, elemTy)
+	}
 	if nta.ByteOffset != nil && !argTy.IsArrayBuffer {
 		return fmt.Errorf("%d:%d: the (buffer, byteOffset, length?) constructor form requires an ArrayBuffer first argument", nta.GetPos().Line, nta.GetPos().Col)
 	}
 	switch {
+	case argTy.IsDynamic && nta.ByteOffset == nil:
+		return e.emitTypedArrayFromDynamic(nta, ptrName, lenName, taTy)
 	case argTy.IsArrayBuffer:
 		return e.emitTypedArrayFromBuffer(nta, ptrName, lenName, elemTy)
 	case argTy.IsArray:
@@ -381,6 +387,116 @@ func (e *Emitter) emitNewTypedArrayVarDecl(nta *ast.NewTypedArrayExpression, ptr
 	default:
 		return e.emitTypedArrayFromSize(nta, ptrName, lenName, elemTy)
 	}
+}
+
+// emitTypedArrayFromDynamic handles `new XArray(v)` for a boxed v, choosing
+// the constructor form at run time as the spec does: an ArrayBuffer is
+// viewed, any other object is copied as an array-like (each element
+// ToNumber'd), and a primitive is a length (ToIndex).
+func (e *Emitter) emitTypedArrayFromDynamic(nta *ast.NewTypedArrayExpression, ptrName, lenName string, taTy Type) error {
+	elemTy := *taTy.ElemType
+	if taTy.BigIntElem {
+		return fmt.Errorf("%d:%d: a BigInt64Array/BigUint64Array cannot be constructed from an untyped value", nta.GetPos().Line, nta.GetPos().Col)
+	}
+	v, err := e.emitExpr(nta.Arg)
+	if err != nil {
+		return err
+	}
+	tag, _ := e.emitUnboxTagPayload(v)
+	doneL := e.freshLabel("tadyn.done")
+	// An object (a static or dynamic one, an array, a host box)?
+	isObj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp uge i8 %s, %d", isObj, tag, kmlTagObject))
+	objL, primL := e.freshLabel("tadyn.obj"), e.freshLabel("tadyn.prim")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, objL, primL))
+
+	e.emitLabel(primL)
+	n := e.coerce(Value{Ref: e.emitAnyToNum(v), Ty: TypeF64}, TypeI64)
+	neg, nonNeg := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, n.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", nonNeg, neg, n.Ref))
+	e.ensureCalloc()
+	zero := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 %d)", zero, nonNeg, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", zero, ptrName))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nonNeg, lenName))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(objL)
+	isAB := e.emitDynHostInstanceOf(v, "ArrayBuffer")
+	isSAB := e.emitDynHostInstanceOf(v, "SharedArrayBuffer")
+	either := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, isAB.Ref, isSAB.Ref))
+	abL, likeL := e.freshLabel("tadyn.ab"), e.freshLabel("tadyn.like")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", either, abL, likeL))
+
+	e.emitLabel(abL)
+	buf := e.emitUnboxHost(v, ArrayBufferType())
+	byteLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", byteLen, buf.Ref))
+	dGep, data := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dGep, buf.Ref))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, dGep))
+	elemSize := int64(elemTy.Align())
+	rem := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = srem i64 %s, %d", rem, byteLen, elemSize))
+	misfit := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", misfit, rem))
+	badL, viewL := e.freshLabel("tadyn.badlen"), e.freshLabel("tadyn.view")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", misfit, badL, viewL))
+	e.emitLabel(badL)
+	e.emitInternalThrow(e.internString("ArrayBuffer length is not a multiple of the element size"))
+	e.emitLabel(viewL)
+	cnt := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sdiv i64 %s, %d", cnt, byteLen, elemSize))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", data, ptrName))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", cnt, lenName))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(likeL)
+	e.ensureDynJSONC()
+	lp := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lp))
+	f64s := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_any_arraylike_f64(i64 %s, ptr %s)", f64s, v.Ref, lp))
+	cnt2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cnt2, lp))
+	e.ensureMalloc()
+	out := e.freshReg()
+	bytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, cnt2, elemSize))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", out, bytes))
+	idx := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idx))
+	condL, bodyL, endL := e.freshLabel("tadyn.cond"), e.freshLabel("tadyn.body"), e.freshLabel("tadyn.end")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	i, fin := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, idx))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", fin, i, cnt2))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", fin, endL, bodyL))
+	e.emitLabel(bodyL)
+	sg, sv := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr double, ptr %s, i64 %s", sg, f64s, i))
+	e.emitInstr(fmt.Sprintf("%s = load double, ptr %s, align 8", sv, sg))
+	c, err := e.coerceTypedArrayStore(Value{Ref: sv, Ty: TypeF64}, taTy, nta.GetPos())
+	if err != nil {
+		return err
+	}
+	dg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dg, elemTy.IR, out, i))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, c.Ref, dg, elemTy.Align()))
+	nx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nx, i))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nx, idx))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(endL)
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", out, ptrName))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", cnt2, lenName))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	return nil
 }
 
 // emitTypedArrayFromArrayLiteral handles `new XArray([e1, e2, ...])` —
@@ -446,6 +562,9 @@ func (e *Emitter) emitTypedArrayFromBuffer(nta *ast.NewTypedArrayExpression, ptr
 	bufVal, err := e.emitExpr(nta.Arg)
 	if err != nil {
 		return err
+	}
+	if bufVal.Ty.IsDynamic {
+		bufVal = e.emitUnboxHost(bufVal, ArrayBufferType())
 	}
 
 	byteLenReg := e.freshReg()

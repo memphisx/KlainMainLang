@@ -61,7 +61,7 @@
         {
           "category": "Functions & closures",
           "pageFile": "LANGUAGE-CONSTRUCTS.md",
-          "caveats": "• The `arguments` object reflects the values actually passed — declared parameters plus any overflow (a function reading `arguments` gains an implicit boxed rest, [ADR-00928](../adr/ADR-00928.md)/[TDD-00210](../tdd/TDD-00210.md)); elements are `any` (heterogeneous → NaN-boxed, so `arguments[i]` needs an `as T` cast under strict / operates directly under `-compat=js`), and `.length`/indexing/`for…of`/callback replacers ([ADR-00387](../adr/ADR-00387.md)) all work; a rest/destructured parameter combined with `arguments` and arrow functions stay clean rejections (use the `...rest` directly; arrows have no own `arguments`); class method bodies get boxed declared parameters, non-variadic ([ADR-00464](../adr/ADR-00464.md)) (a leading `this` parameter is parsed and erased — [ADR-00373](../adr/ADR-00373.md))<br>• Function overload signatures are parsed and **erased** — call sites type-check against the implementation's parameter list only ([ADR-00446](../adr/ADR-00446.md))<br>• Nested function declarations capture enclosing locals (by reference, [TDD-00129](../tdd/TDD-00129.md) — array captures share the enclosing header cell, [TDD-00213](../tdd/TDD-00213.md) Stage 3; loop variables get per-iteration `let` cells), hoist letrec-style (usable before the declaration statement), and escape by name — capturing generators included — with an inferred closure type ([ADR-01013](../adr/ADR-01013.md)/[ADR-01014](../adr/ADR-01014.md)); two mutually-recursive capturing siblings stay a clean compile error ([ADR-01016](../adr/ADR-01016.md))<br>• Tagged template literals have no `.raw` property on the `strings` array (real `String.raw` stays separately out of scope, see [ADR-00028](../adr/ADR-00028.md)) — see [TDD-00059](../tdd/TDD-00059.md)/[ADR-00152](../adr/ADR-00152.md)<br>• A top-level named function can't reference a sibling top-level binding whose value is a connection handle (`Worker`/`WebSocket`/`EventSource`/channels/`XMLHttpRequest`), a `Promise`, or an inferred-type-argument/nested generic instance (scalars/strings/arrays/`TypedArray`s/objects/`Map`/`Set`/class instances incl. `new Box<number>()`, the value/event handles — `Blob`/`Date`/`URL`/`RegExp`/`Headers`/`Request`/`AbortController`/`Event`/… — and streams + `EventEmitter` — plus `http.createServer` handles ([ADR-00426](../adr/ADR-00426.md)) — are promoted to module globals and work — [ADR-00342](../adr/ADR-00342.md)); a default parameter can't reference an earlier parameter ([ADR-00166](../adr/ADR-00166.md))<br>• A named function expression whose name shadows a top-level function of the same name is a clean compile error — rename one ([TDD-00060](../tdd/TDD-00060.md)/[ADR-00178](../adr/ADR-00178.md))<br>• A free `function*` generator may be top-level **or nested** (a nested one captures enclosing state by reference, including arrays — [TDD-00213](../tdd/TDD-00213.md) Stage 3); a generator *expression* works as a top-level `const G = function* ...` binding with the element type inferred from yields, other positions stay clean rejections ([TDD-00096](../tdd/TDD-00096.md)/[ADR-00293](../adr/ADR-00293.md))"
+          "caveats": "• The `arguments` object reflects the values actually passed — declared parameters plus any overflow (a function reading `arguments` gains an implicit boxed rest, [ADR-00928](../adr/ADR-00928.md)/[TDD-00210](../tdd/TDD-00210.md)); elements are `any` (heterogeneous → NaN-boxed, so `arguments[i]` needs an `as T` cast under strict / operates directly under `-compat=js`), and `.length`/indexing/`for…of`/callback replacers ([ADR-00387](../adr/ADR-00387.md)) all work; a rest/destructured parameter combined with `arguments` and arrow functions stay clean rejections (use the `...rest` directly; arrows have no own `arguments`); class method bodies get boxed declared parameters, non-variadic ([ADR-00464](../adr/ADR-00464.md)) (a leading `this` parameter is parsed and erased — [ADR-00373](../adr/ADR-00373.md))<br>• Function overload signatures are parsed and **erased** — call sites type-check against the implementation's parameter list only ([ADR-00446](../adr/ADR-00446.md))<br>• Nested function declarations capture enclosing locals (by reference, [TDD-00129](../tdd/TDD-00129.md) — array captures share the enclosing header cell, [TDD-00213](../tdd/TDD-00213.md) Stage 3; loop variables get per-iteration `let` cells), hoist letrec-style (usable before the declaration statement), and escape by name — capturing generators included — with an inferred closure type ([ADR-01013](../adr/ADR-01013.md)/[ADR-01014](../adr/ADR-01014.md)); two mutually-recursive capturing siblings stay a clean compile error ([ADR-01016](../adr/ADR-01016.md))<br>• Tagged template literals have no `.raw` property on the `strings` array (real `String.raw` stays separately out of scope, see [ADR-00028](../adr/ADR-00028.md)) — see [TDD-00059](../tdd/TDD-00059.md)/[ADR-00152](../adr/ADR-00152.md)<br>• A top-level named function can't reference a sibling top-level binding whose value is a connection handle (`Worker`/`WebSocket`/`EventSource`/channels/`XMLHttpRequest`), a `Promise`, or an inferred-type-argument/nested generic instance (scalars/strings/arrays/`TypedArray`s/objects/`Map`/`Set`/class instances incl. `new Box<number>()`, the value/event handles — `Blob`/`Date`/`URL`/`RegExp`/`Headers`/`Request`/`AbortController`/`Event`/… — and streams + `EventEmitter` — plus `http.createServer` handles ([ADR-00426](../adr/ADR-00426.md)) — are promoted to module globals and work — [ADR-00342](../adr/ADR-00342.md)); a default parameter can't reference an earlier parameter ([ADR-00166](../adr/ADR-00166.md))<br>• A named function expression whose name shadows a top-level function of the same name is a clean compile error — rename one ([TDD-00060](../tdd/TDD-00060.md)/[ADR-00178](../adr/ADR-00178.md))<br>• A free `function*` generator may be top-level **or nested** (a nested one captures enclosing state by reference, including arrays — [TDD-00213](../tdd/TDD-00213.md) Stage 3); a generator *expression* bound by a top-level `const G = function* ...` has its element type inferred from yields; in any other position it is a value held as `any` ([TDD-00096](../tdd/TDD-00096.md)/[ADR-00293](../adr/ADR-00293.md))"
         },
         {
           "category": "Type primitives",
@@ -195,12 +195,12 @@
         {
           "category": "Performance & Timing (incl. Date)",
           "pageFile": "PERFORMANCE-TIMING.md",
-          "caveats": "`Date` is UTC-only, never local time"
+          "caveats": "`Date` setters need a named-variable receiver"
         },
         {
           "category": "Networking (fetch, WebSocket, SSE)",
           "pageFile": "NETWORKING.md",
-          "caveats": "• `WebSocket` (server and client, [TDD-00039](../tdd/TDD-00039.md)): `ev.data` is typed `string` (a binary payload's bytes are recoverable via `ev.dataBytes()`), and `.close()` doesn't await the peer's echo; both `ws://` and `wss://` work in each direction, binary frames included — the server speaks `wss://` when attached to an `https.createServer` ([TDD-00158](../tdd/TDD-00158.md))<br>• `XMLHttpRequest` ([TDD-00040](../tdd/TDD-00040.md)) is legacy-synchronous-mode only<br>• `.text()`/`.json()` truncate at an embedded null byte — use `.arrayBuffer()` for binary bodies ([ADR-00094](../adr/ADR-00094.md))"
+          "caveats": "• `WebSocket`: the client offers no `permessage-deflate`, and klain:ws's server `.close()` doesn't await the peer's close frame; both `ws://` and `wss://` work in each direction, binary frames included — the server speaks `wss://` when attached to an `https.createServer` ([TDD-00158](../tdd/TDD-00158.md))<br>• `XMLHttpRequest` ([TDD-00040](../tdd/TDD-00040.md)) is legacy-synchronous-mode only<br>• `.text()`/`.json()` truncate at an embedded null byte — use `.arrayBuffer()` for binary bodies ([ADR-00094](../adr/ADR-00094.md))"
         },
         {
           "category": "Streams",
@@ -210,7 +210,7 @@
         {
           "category": "Events & Cancellation",
           "pageFile": "EVENTS-CANCELLATION.md",
-          "caveats": "• Single-target dispatch — no capture/bubble/propagation (`stopPropagation` is a no-op)<br>• `removeEventListener` matches by listener identity (a const-bound closure or a named-function reference, [ADR-00969](../adr/ADR-00969.md)); no `class X extends EventTarget`<br>• `Event`/`CustomEvent` expose only `type`/`defaultPrevented`/`detail`; the fuller WHATWG properties and `new Event` init options are absent/ignored<br>• `AbortSignal` `timeout` latches only when an await loop checks it and isn't wired into `setTimeout`; `DOMException` carries no numeric `.code`"
+          "caveats": "• `AbortSignal` isn't wired into `setTimeout`; `DOMException` carries no numeric `.code`"
         },
         {
           "category": "Workers / Concurrency",
@@ -255,7 +255,7 @@
         {
           "category": "Process / CLI I/O",
           "pageFile": "PROCESS-CLI.md",
-          "caveats": "• `process.on(...)` covers `'SIGINT'`/`'SIGTERM'`/`'exit'`/`'uncaughtException'` but not `'unhandledRejection'`; an `'uncaughtException'` handler runs then still exits (can't resume)<br>• `process.version`/`versions` report the pinned Node baseline + `klain`; real linked-lib versions (`openssl`/`zlib`) and a `--node-compat` floor are follow-ons<br>• `process.memoryUsage()`'s `external`/`arrayBuffers` are always 0 (no off-heap accounting), and `heapTotal`/`heapUsed` measure this compiler's own heap, not a V8 heap ([ADR-00791](../adr/ADR-00791.md))<br>• `child_process.fork()` is self-fork only — forking a different module stays out"
+          "caveats": "• An `'uncaughtException'` handler runs then still exits after a synchronous throw (can't resume)<br>• `process.version`/`versions` report the pinned Node baseline + `klain`; real linked-lib versions (`openssl`/`zlib`) and a `--node-compat` floor are follow-ons<br>• `process.memoryUsage()`'s `external`/`arrayBuffers` are always 0 (no off-heap accounting), and `heapTotal`/`heapUsed` measure this compiler's own heap, not a V8 heap ([ADR-00791](../adr/ADR-00791.md))<br>• `child_process.fork()` is self-fork only — forking a different module stays out"
         },
         {
           "category": "HTTP Server",
@@ -265,12 +265,12 @@
         {
           "category": "`path`",
           "pageFile": "PATH.md",
-          "caveats": "Host-flavoured — a bare `path` is `path.win32` on Windows and `path.posix` elsewhere, with `path.posix`/`path.win32` naming one explicitly on any host ([TDD-00178](../tdd/TDD-00178.md)); the posix flavour's `join`/`normalize` drops a trailing slash where Node keeps it"
+          "caveats": "• A non-string argument held in `any` is converted instead of throwing `ERR_INVALID_ARG_TYPE`<br>• No `matchesGlob`"
         },
         {
           "category": "`os`",
           "pageFile": "OS.md",
-          "caveats": ""
+          "caveats": "• A `SystemError`'s `errno`/`syscall` are copies of its `info`, not accessors<br>• Windows' priority-class mapping is compile-checked only"
         },
         {
           "category": "`events` (`EventEmitter`)",
@@ -280,7 +280,7 @@
         {
           "category": "SQLite (`node:sqlite`)",
           "pageFile": "SQLITE.md",
-          "caveats": "• Result rows need an explicit shape (`.all<T>()`/`.get<T>()`); untyped `SELECT *` awaits a dynamic-object mode<br>• `db.aggregate()`, error `.code`, and a lazy iterator are later stages; sessions/changesets, extension loading, and async `backup()` are rejected with a clear message (unavailable in the system libsqlite3 / out of scope)"
+          "caveats": "• Sessions and extension loading depend on the system libsqlite3 (Node bundles its own)"
         },
         {
           "category": "FFI (`node:ffi`)",
@@ -290,7 +290,7 @@
         {
           "category": "Other core modules (`querystring`, `assert`, `test`, `zlib`, `net`, `util`, `dns`, `dgram`, `cluster`, `tls`, `http` client, `https`, `stream/web`, `vm`, `http2`)",
           "pageFile": "NODE-CORE-MODULES.md",
-          "caveats": "`querystring`/`assert`/`zlib`/`net`/`util`/`dns`/`dgram`/`cluster`/`tls` done (`tls` = client + server); `https` = client (`get`/`request` over libcurl) + server (`https.createServer`, HTTPS/1.1, [ADR-00505](../adr/ADR-00505.md)); `stream/web` re-exports the WHATWG classes; `diagnostics_channel` pub/sub (string messages); `http2` ships all four stages — `createServer` (h2c) + `createSecureServer` (h2 over TLS, `allowHTTP1` 1.1 fallback), compat + `.on('stream')` APIs, client sessions, constants/settings ([TDD-00139](../tdd/TDD-00139.md)/[TDD-00111](../tdd/TDD-00111.md)); `vm` not started"
+          "caveats": "`querystring`/`assert`/`zlib`/`net`/`util`/`dns`/`dgram`/`cluster`/`tls` done (`tls` = client + server); `https` = client (`get`/`request` over libcurl) + server (`https.createServer`, HTTPS/1.1, [ADR-00505](../adr/ADR-00505.md)); `stream/web` re-exports the WHATWG classes; `diagnostics_channel` (channels and tracing channels); `http2` = Node's lib/internal/http2 in TypeScript over nghttp2 — servers (h2c, TLS + `allowHTTP1`), clients (h2c, TLS), compat + `'stream'` APIs, push ([ADR-01301](../adr/ADR-01301.md)); `vm` not started"
         },
         {
           "category": "**Built-in module index**",
@@ -409,7 +409,7 @@
     },
     {
       "kind": "block",
-      "text": "| Feature | Notes |\n|---|---|\n| Spread into a fixed-arity function, a fixed parameter slot, or an uncommon variadic builtin | `f(...arr)` where `f` has no rest parameter, `f(...arr)` where the spread would land on a fixed slot of a rest function, and `Math.hypot(...a)`/`String.fromCharCode(...a)`. The first two need a per-slot unpack against this compiler's static arity; the third needs bespoke per-builtin array handling. A clean compile error today, not a miscompile. ([TDD-00106](../tdd/TDD-00106.md)) |"
+      "text": "| Feature | Notes |\n|---|---|\n| Spread into a fixed-arity function or a fixed parameter slot | `f(...arr)` where `f` has no rest parameter, and `f(...arr)` where the spread would land on a fixed slot of a rest function. Both need a per-slot unpack against this compiler's static arity. A clean compile error today, not a miscompile. ([TDD-00106](../tdd/TDD-00106.md)) |"
     },
     {
       "kind": "block",
@@ -492,7 +492,7 @@
         },
         "218": {
           "title": "Asynchronous HTTP/2 request handlers",
-          "notes": "Async h2 handlers already work — the nghttp2 session is driven inside the connection fiber, so an `await` yields and resumes exactly as on HTTP/1.1 ([ADR-00985](../adr/ADR-00985.md)). What remains is HTTP/2-specific request/response streaming: `stream.on('data')` delivers the body as one buffered chunk at `END_STREAM` rather than per `on_data_chunk_recv`, and there is no `res.write` flow-control parity (`NGHTTP2_ERR_DEFERRED`/`nghttp2_session_resume_data` against the reactor). Split out of the `http.createServer` edges bullet"
+          "notes": "The `http2` module delivers request data per DATA frame and runs async handlers on the event loop ([ADR-01301](../adr/ADR-01301.md)). What remains is write flow control: `stream.write` always returns `true` and buffers, with no `'drain'` tied to the peer's window (`NGHTTP2_ERR_DEFERRED`/`nghttp2_session_resume_data`)"
         },
         "215": {
           "title": "HTTP server `'clientError'` and `'error'` events",
@@ -528,11 +528,11 @@
         },
         "200": {
           "title": "Statically-typed heterogeneous / union-element arrays",
-          "notes": "The array half of [TDD-00076](../tdd/TDD-00076.md)'s deferred Bucket B, and the concrete realization of the `any[]`/`{x:any}` hole parked in [TDD-00062](../tdd/TDD-00062.md) and the union-inside-array case deferred in [TDD-00043](../tdd/TDD-00043.md). A `(A | B)[]` annotation or an inferred mixed literal (`[1, \"two\", true]`) has no uniform element type to store, so both are rejected today. Design ([TDD-00075](../tdd/TDD-00075.md) `-compat` inhabitant, sibling of 00076): under `-compat=js` lower to a **NaN-boxed-element array** (reusing the single-word box + D1 dynamic walker) so `JSON.stringify`/`typeof`/`.map`/spread all follow; under strict keep the clean rejection but with one **recognizable, actionable** error naming the escape hatches (a fixed-length **tuple**, or opt into `-compat=js`). Unblocks `JSON.stringify(mixedTypeArray)` (its status row's documented representation gap)"
+          "notes": "The array half of [TDD-00076](../tdd/TDD-00076.md)'s deferred Bucket B, and the concrete realization of the `any[]`/`{x:any}` hole parked in [TDD-00062](../tdd/TDD-00062.md) and the union-inside-array case deferred in [TDD-00043](../tdd/TDD-00043.md). A `(A | B)[]` annotation and an unannotated mixed literal (`[new P(), 2]`, [ADR-01214](../adr/ADR-01214.md)) store boxed elements; a strict-lane literal mixing two object types, or an untyped `[]` grown with mixed values, is still rejected. Design ([TDD-00075](../tdd/TDD-00075.md) `-compat` inhabitant, sibling of 00076): under `-compat=js` lower to a **NaN-boxed-element array** (reusing the single-word box + D1 dynamic walker) so `JSON.stringify`/`typeof`/`.map`/spread all follow; under strict keep the clean rejection but with one **recognizable, actionable** error naming the escape hatches (a fixed-length **tuple**, or opt into `-compat=js`). Unblocks `JSON.stringify(mixedTypeArray)` (its status row's documented representation gap)"
         },
         "195": {
           "title": "http req/res bodies as Node `Readable`/`Writable`",
-          "notes": "**Stage 1 shipped** ([ADR-00824](../adr/ADR-00824.md)): the server `req` is a Node `Readable` — `for await (const chunk of req)`, `req.on('data'|'end')`, and `req.pipe(dest)` share one cached stream (`wrapWebReadable` over `req.stream()`). **Stage 2's flush-model core shipped** ([ADR-00825](../adr/ADR-00825.md)): the response flush is driven by `res.end()` rather than by handler return — the connection fiber parks after a void handler returns until `res.end()`, so a fire-and-forget `(req,res)` handler that ends the response from `req.on('end')` works (reusing the poke-and-recheck mechanism the loop already has, no new connection-slot field). **Remaining:** a fully incremental `res` `Writable` — `res.write` streaming to the socket mid-handler with real backpressure/`'drain'` and `req.pipe(res)` (the response is still buffered, one flush at `res.end`), driving the existing `%kml.hws` chunked writer imperatively — the part [TDD-00131](../tdd/TDD-00131.md) deferred as disproportionate"
+          "notes": "**Stage 1 shipped** ([ADR-00824](../adr/ADR-00824.md)): the server `req` is a Node `Readable` — `for await (const chunk of req)`, `req.on('data'|'end')`, and `req.pipe(dest)` share one cached stream (`stream`'s `Readable.fromWeb` over `req.stream()`). **Stage 2's flush-model core shipped** ([ADR-00825](../adr/ADR-00825.md)): the response flush is driven by `res.end()` rather than by handler return — the connection fiber parks after a void handler returns until `res.end()`, so a fire-and-forget `(req,res)` handler that ends the response from `req.on('end')` works (reusing the poke-and-recheck mechanism the loop already has, no new connection-slot field). **Remaining:** a fully incremental `res` `Writable` — `res.write` streaming to the socket mid-handler with real backpressure/`'drain'` and `req.pipe(res)` (the response is still buffered, one flush at `res.end`), driving the existing `%kml.hws` chunked writer imperatively — the part [TDD-00131](../tdd/TDD-00131.md) deferred as disproportionate"
         },
         "194": {
           "title": "Native platform capabilities — web-standard proxies (Notifications first) + `klain:sailfish`",
@@ -728,11 +728,11 @@
         },
         "151": {
           "title": "`node:sqlite` — a real synchronous SQLite API",
-          "notes": "The one database surface that is also a built-in Node API, so implemented faithfully under its real specifier (synchronous like `fs.readFileSync`; libsqlite3 links like libcurl). Remaining: the dynamic-row mode for untyped `SELECT *` (rows currently need an explicit `.all<T>()` shape), `db.aggregate()`, error `.code`, and a lazy `iterate()`; sessions/changesets, extension loading, and async `backup()` are rejected as out of scope. Not the KV-for-IndexedDB use [TDD-00011](../tdd/TDD-00011.md) set aside"
+          "notes": "The one database surface that is also a built-in Node API, implemented under its real specifier as Node's src/node_sqlite.cc ported to TypeScript ([ADR-01304](../adr/ADR-01304.md)). Remaining: sessions and extension loading follow the system libsqlite3. Not the KV-for-IndexedDB use [TDD-00011](../tdd/TDD-00011.md) set aside"
         },
         "155": {
           "title": "The native dynamic object model (D1)",
-          "notes": "Stages 1–5 shipped; Stage 6 (static bridge) and Stage 7 (`Proxy`/`Reflect`) in part — method-carrying classes and aliased bindings into `any` still reject, only the `get`/`set`/`has`/`deleteProperty` traps on dynamic targets. The widening analysis moves to [TDD-00230](../tdd/TDD-00230.md)"
+          "notes": "Stages 1–5 shipped; Stage 6 (static bridge) in part — a property added to a static object through `any` is invisible to its statically typed binding ([ADR-01212](../adr/ADR-01212.md)); Stage 7 (`Proxy`/`Reflect`) in part — only the `get`/`set`/`has`/`deleteProperty` traps on dynamic targets. The widening analysis moves to [TDD-00230](../tdd/TDD-00230.md)"
         },
         "161": {
           "title": "Decorators (`@decorator` on classes, members, parameters)",
@@ -764,11 +764,11 @@
         },
         "165": {
           "title": "Importable specifiers for the Web-global-backed Node modules (`url`/`timers`/`perf_hooks`/`buffer`/`events`)",
-          "notes": "Remaining (Stage 4): new feature surfaces on the now-importable Web-global-backed modules, ranked by leverage — `PerformanceObserver` extensions ([TDD-00166](../tdd/TDD-00166.md)) and `timers/promises`. The import wiring itself (same-name/`node:`/default/aliased specifiers) is complete"
+          "notes": "Complete: the import wiring (same-name/`node:`/default/aliased specifiers) and the module-only extras, `timers/promises` last ([ADR-01271](../adr/ADR-01271.md))"
         },
         "166": {
           "title": "`PerformanceObserver` (perf_hooks)",
-          "notes": "Observe `mark`/`measure` performance entries. **V1 shipped** ([ADR-00673](../adr/ADR-00673.md)): `new PerformanceObserver(cb)` + `observe({entryTypes})`/`disconnect()`, a global observer registry `performance.mark`/`measure` walk, and `getEntries()` yielding `PerformanceEntry` objects — **synchronous** dispatch. Follow-ups: async batched delivery (the load-bearing fidelity gap), `buffered`/`takeRecords`/single-`type` form, `getEntriesBy*`"
+          "notes": "Observe `mark`/`measure` performance entries — shipped with the TypeScript `perf_hooks` port ([ADR-01265](../adr/ADR-01265.md)): entries delivered on a later turn of the loop, `buffered`, `takeRecords`, the single-`type` form, `getEntriesBy*`"
         },
         "167": {
           "title": "`events` async helpers (`once`/`on`)",
@@ -796,19 +796,19 @@
         },
         "120": {
           "title": "Length-carrying (binary-safe) strings",
-          "notes": "Stages 1–4 shipped; `Blob.text()` still returns a headerless string and EventSource data / WebCrypto string outputs are unchecked, so the length-driven `console.log`/`JSON.stringify` paths stay `strlen`-bounded"
+          "notes": "Stages 1–4 shipped; WebCrypto string outputs are unchecked, so the length-driven `console.log`/`JSON.stringify` paths stay `strlen`-bounded"
         },
         "229": {
           "title": "Function objects, null-prototype objects, and a runtime node:ffi library registry",
-          "notes": "Stages B (null-prototype objects, `Object.prototype`, integrity levels — [ADR-01094](../adr/ADR-01094.md)) and C (the `node:ffi` registry in Node's `std::unordered_map` order, function objects, validation — [ADR-01095](../adr/ADR-01095.md)) shipped, with Stage A's rendering/`name`/`length` via code-pointer metadata ([ADR-01093](../adr/ADR-01093.md)). Left of Stage A: `===` identity of a closure boxed twice, a reverse adapter for a tag-12 value in a typed function slot, own properties on user functions, `Function.prototype.toString` source text, `[class X]`"
+          "notes": "Stages B (null-prototype objects, `Object.prototype`, integrity levels — [ADR-01094](../adr/ADR-01094.md)) and C (the `node:ffi` registry in Node's `std::unordered_map` order, function objects, validation — [ADR-01095](../adr/ADR-01095.md)) shipped, with Stage A's rendering/`name`/`length` via code-pointer metadata ([ADR-01093](../adr/ADR-01093.md)). Own properties on every function since [ADR-01232](../adr/ADR-01232.md). Left of Stage A: a function unboxed from `any` into a typed slot keeps its identity (it is a new thunk), `Function.prototype.toString` source text, `[class X]`"
         },
         "230": {
           "title": "Compiler restructure — scanner/parser, binder, checker, declaration-driven builtins, libuv runtime",
           "notes": "Phase 0 (IR site attribution, shadow-mode agreement harness) → 1 (on-demand scanner, real ASI, error recovery, schema-generated traversal, no builtin names in the parser) → 2 (binder + flow graph + checker; every `infer*` decider deleted) → 3 (`lib/*.d.ts` builtins with `@lower`, closed `reprOf`/`convert`, no `Is*` flags) → 4 (runtime in C on libuv, own TDD) → 5 (uniform heap header). Absorbs [TDD-00226](../tdd/TDD-00226.md), [TDD-00227](../tdd/TDD-00227.md), [TDD-00228](../tdd/TDD-00228.md)"
         },
-        "231": {
-          "title": "Builtin modules written in TypeScript, Node's `stream` first",
-          "notes": "An embedded-module loader compiles `lib/node/*.ts` with the program; `stream` is Node v24's implementation ported to TypeScript (stages 1–3 shipped); the HTTP request/response and fs streams move onto it next (stage 4)"
+        "235": {
+          "title": "process stdio, tty and readline as TypeScript modules",
+          "notes": "Stage 1 shipped ([ADR-01239](../adr/ADR-01239.md)): `process.stdin`/`stdout`/`stderr` as Node's tty/net streams over fd stream handles, `tty` ported. Left: `readline` (and `readline/promises`) over any Readable, a file stdin as `fs.ReadStream`, deleting the code-generated readline (`klain:tty`'s deletion is post-restructure cleanup, BACKLOG 117)"
         }
       }
     },

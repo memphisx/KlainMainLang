@@ -24,6 +24,7 @@ import (
 func TestE2EStdoutFlushesIncrementally(t *testing.T) {
 	bin := buildBinary(t, `
 process.stdout.write("MARKER")
+process.stdin.setEncoding('utf8')
 process.stdin.on('data', (c: string) => {
   if (c.trim().length > 0) { console.log("\nDONE"); }
 })

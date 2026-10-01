@@ -34,6 +34,8 @@ func (e *Emitter) ensureInspectReduce() {
 	e.emitGlobal(`declare void @__kml_inspect_push_more(ptr, i64)`)
 	e.emitGlobal(`declare ptr @__kml_inspect_end(ptr, ptr, ptr, i64, i64, i64, i64)`)
 	e.emitGlobal(`declare ptr @__kml_inspect_quote(ptr)`)
+	e.emitGlobal(`declare ptr @__kml_inspect_key(ptr)`)
+	e.emitGlobal(`declare ptr @__kml_inspect_hex(ptr, i64)`)
 }
 
 // inspectBegin opens an entry list for a container at nesting depth `depth`;

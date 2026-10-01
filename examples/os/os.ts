@@ -1,8 +1,8 @@
-// os module (TDD-00024): operating-system information — platform, user/
-// temp directories, hostname, memory, and per-core CPU info. Import-gated
-// (TDD-00049) — a virtual built-in module, not a real file. Most values
-// here are environment-dependent, so this example checks properties
-// (non-empty, positive, consistent) rather than exact values.
+// os module: operating-system information — platform, user/temp
+// directories, hostname, memory, per-core CPU info, process priority and
+// os.constants. Most values here are environment-dependent, so this example
+// checks properties (non-empty, positive, consistent) rather than exact
+// values.
 
 import os from 'os'
 import path from 'path'
@@ -38,3 +38,21 @@ console.log(totalIdleMs > 0); // true
 const configPath = path.join(home, ".config", "klainmain-example.json");
 console.log(configPath.length > home.length); // true
 console.log(configPath.indexOf(".config") >= 0); // true
+
+// Scheduling priority: this process's, raised niceness, and a failure.
+console.log(typeof os.getPriority()); // number
+os.setPriority(10);
+console.log(os.getPriority()); // 10
+try {
+  os.getPriority(999999);
+} catch (e: any) {
+  console.log(e.code, e.info.code); // ERR_SYSTEM_ERROR ESRCH
+}
+
+// os.constants: signal numbers and errno codes of the host.
+console.log(os.constants.signals.SIGTERM > 0); // true
+console.log(os.constants.errno.ENOENT > 0); // true
+console.log(os.constants.priority.PRIORITY_HIGHEST); // -20
+
+// The functions convert to their result, as in Node.
+console.log(`${os.platform}` === os.platform()); // true

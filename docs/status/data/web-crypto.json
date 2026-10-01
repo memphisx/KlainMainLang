@@ -113,29 +113,64 @@
             ]
           },
           {
-            "feature": "Node `crypto` module: `generateKeyPair`/`generateKeyPairSync`, `randomBytes` (+ `randomUUID`/`getRandomValues` re-exports)",
+            "feature": "Node `crypto` module: `createHash`/`createHmac` (`Hash`/`Hmac`: `update`/`digest`/`copy`), `hash`, `getHashes`",
             "status": "implemented",
-            "caveats": [
-              "`generateKeyPair` requires both encodings as `{ type: 'spki'/'pkcs8', format: 'pem' }` — KeyObject results, `pkcs1`/`sec1`/`der` formats, and `cipher`/`passphrase` are clean rejections; types are `'rsa'` (modulusLength, 65537 exponent) and `'ec'` (P-256/384/521) only — no `rsa-pss`/`dsa`/`dh`/`ed25519`",
-              "Generation is synchronous — the async form fires its callback inline (async-shaped, not offloaded)",
-              "`randomBytes(size, cb)`'s callback fires `cb(null, buf)` synchronously (async-shaped, not offloaded — generation never fails) ([ADR-00590](../adr/ADR-00590.md))",
-              "A namespace import's binding covers the module's own members (`generateKeyPair`(`Sync`)/`randomBytes`/`randomUUID`/`getRandomValues`/`createHash`/`createHmac`) — `crypto.subtle` is reached via the ambient global, not the module"
-            ],
             "notes": [
-              "`import { generateKeyPair } from 'crypto'` ([ADR-00434](../adr/ADR-00434.md)): PEM assembly (`__kml_pem_from_der`, Node's 64-column shape) over the same per-backend keygen ABI as `subtle.generateKey`; callback shapes `(err, publicKey, privateKey)` and mustSucceed's `(publicKey, privateKey)` both contextually typed",
-              "`const { subtle } = globalThis.crypto` binds a compile-time subtle alias ([ADR-00435](../adr/ADR-00435.md)); `globalThis.crypto.subtle` chains dispatch directly"
+              "Node's lib/internal/crypto/hash.js in TypeScript over the backend's incremental digest contexts: every digest the backend has (`shake128`/`shake256` with `outputLength`), Node's argument validation and error codes (`ERR_CRYPTO_HASH_FINALIZED`, `ERR_INVALID_ARG_TYPE`, `Digest method not supported`)",
+              "See [ADR-01300](../adr/ADR-01300.md)"
+            ],
+            "caveats": [
+              "On `-crypto=commoncrypto`: `md5`/`sha1`/`sha224`/`sha256`/`sha384`/`sha512` only — SHAKE, SHA-3, SHA-512/t, RIPEMD-160 and BLAKE2 throw `Digest method not supported`"
             ]
           },
           {
-            "feature": "Node `crypto` module: `createHash(algorithm)` / `createHmac(algorithm, key)` → `Hash`/`Hmac` (`.update(data).digest(encoding?)`)",
+            "feature": "Node `crypto` module: `createCipheriv`/`createDecipheriv` (`Cipheriv`/`Decipheriv`), `getCiphers`",
+            "status": "implemented",
+            "notes": [
+              "Every cipher the backend has, with `setAutoPadding`, and `setAAD`/`getAuthTag`/`setAuthTag` for AEAD modes; key/IV length errors and `bad decrypt`/`Unsupported state or unable to authenticate data` as Node reports them",
+              "See [ADR-01300](../adr/ADR-01300.md)"
+            ],
+            "caveats": [
+              "On `-crypto=commoncrypto`: AES-128/192/256 in CBC, ECB, CTR and GCM only — other ciphers throw `ERR_CRYPTO_UNKNOWN_CIPHER`"
+            ]
+          },
+          {
+            "feature": "Node `crypto` module: `pbkdf2`/`scrypt`/`hkdf` (+ `Sync`)",
+            "status": "implemented",
+            "notes": [
+              "The callback forms run on the thread pool, as Node's do",
+              "See [ADR-01300](../adr/ADR-01300.md)"
+            ],
+            "caveats": [
+              "On `-crypto=commoncrypto`: the digests are the six `createHash` has there"
+            ]
+          },
+          {
+            "feature": "Node `crypto` module: `randomBytes`/`randomFill`/`randomFillSync`/`randomInt`/`randomUUID`/`getRandomValues`, `timingSafeEqual`, `constants`",
+            "status": "implemented",
+            "notes": [
+              "`randomBytes`/`randomFill` callbacks run on the thread pool; `randomInt` is Node's rejection-sampling loop",
+              "See [ADR-01300](../adr/ADR-01300.md)"
+            ]
+          },
+          {
+            "feature": "Node `crypto` module: `generateKeyPair`/`generateKeyPairSync`, `createSign`/`createVerify`, `sign`/`verify`",
             "status": "implemented",
             "caveats": [
-              "Algorithms limited to `md5`/`sha1`/`sha256`/`sha384`/`sha512` (a string literal); other names are a clean rejection",
-              "`.digest('latin1')`/`'binary'` share the UTF-8-only string caveat for non-ASCII bytes (same as `Buffer.toString('latin1')` — [TDD-00034](../tdd/TDD-00034.md)); encodings other than `hex`/`base64`/`base64url`/`latin1`/`binary` are clean rejections"
+              "Keys are PEM strings only: `generateKeyPair` needs `publicKeyEncoding: { type: 'spki', format: 'pem' }` and `privateKeyEncoding: { type: 'pkcs8', format: 'pem' }` (no `KeyObject` results, `pkcs1`/`sec1`/`der`, or `cipher`/`passphrase`); key types `rsa`, `ec`, `ed25519`, `x25519`",
+              "An encrypted PEM key (`{ key, passphrase }`) is not decrypted",
+              "On `-crypto=commoncrypto`: RSA keys of 1024 bits or more with exponent 65537, and EC keys on P-256/P-384/P-521 only"
             ],
             "notes": [
-              "Real streaming digests — `.update` feeds the backend's incremental context (OpenSSL `EVP_MD_CTX`/`EVP_MAC`, CommonCrypto `CC_*`/`CCHmac`), no input buffering ([TDD-00159](../tdd/TDD-00159.md)/[ADR-00636](../adr/ADR-00636.md)/[ADR-00637](../adr/ADR-00637.md)). Makes the hand-rolled Node WebSocket handshake (`server.on('upgrade', …)` + `createHash('sha1').…digest('base64')`) faithful end to end",
-              "`.digest('hex')`/`'base64'`/`'base64url'` return a byte-exact string, `.digest()` a `Buffer`; `.update` (chainable) and `createHmac`'s key take a `string` (UTF-8, binary-safe via the length header) or a `Buffer`/`TypedArray`/`ArrayBuffer`"
+              "Generation runs on the thread pool in the callback form",
+              "See [ADR-01300](../adr/ADR-01300.md)"
+            ]
+          },
+          {
+            "feature": "Node `crypto` module: `KeyObject`/`createPrivateKey`/`createPublicKey`/`createSecretKey`, `generateKey`, Diffie-Hellman/ECDH, `publicEncrypt`/`privateDecrypt`, `X509Certificate`, `Certificate`, `generatePrime`/`checkPrime`, `argon2`, `getCipherInfo`/`getCurves`, the `webcrypto`/`subtle` exports",
+            "status": "missing",
+            "notes": [
+              "The global `crypto.subtle` works; the module does not re-export it"
             ]
           },
           {

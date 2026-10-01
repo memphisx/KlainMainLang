@@ -930,3 +930,611 @@ long long __kml_crypto_aes_cbc(long long encrypt, const unsigned char *key,
     EVP_CIPHER_CTX_free(ctx);
     return rc;
 }
+
+/* ---- node:crypto natives (lib/node/crypto.ts) ---------------------------------
+ * Node's crypto module over libcrypto, as node_crypto's bindings are: hash and
+ * HMAC handles by name, ciphers, the KDFs, random fill, key-pair generation and
+ * PEM-key signing. A handle is an id into a table the module frees. A pooled
+ * form runs its work on the thread pool (__kml_pool_job) and calls back with
+ * (status, result) on the loop thread; its output region stays reachable
+ * through the callback's closure. */
+
+#include <stdint.h>
+#include <stdio.h>
+#include <openssl/rand.h>
+#include <openssl/pem.h>
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/objects.h>
+
+extern void __kml_pool_job(void (*work)(void *, long long *, double *), void *job, void *inv, void *clo);
+extern char *__kml_str_alloc(long long n);
+extern void __kml_str_finalize(char *s);
+
+static char *kml_ncrypto_str(const char *s) {
+    long long n = (long long)strlen(s);
+    char *out = __kml_str_alloc(n + 1);
+    memcpy(out, s, (size_t)n + 1);
+    __kml_str_finalize(out);
+    return out;
+}
+
+/* A hash, an HMAC or a cipher, by id. */
+enum { KNC_FREE = 0, KNC_HASH, KNC_HMAC, KNC_CIPHER };
+typedef struct {
+    int kind;
+    EVP_MD_CTX *md;
+    EVP_MAC_CTX *mac;
+    EVP_CIPHER_CTX *cipher;
+    size_t xof_len;   /* a hash's outputLength (XOF), or 0 */
+} knc_handle;
+
+static knc_handle *knc_tab = NULL;
+static long long knc_cap = 0;
+
+static long long knc_alloc(void) {
+    for (long long i = 0; i < knc_cap; i++)
+        if (knc_tab[i].kind == KNC_FREE) return i;
+    long long ncap = knc_cap ? knc_cap * 2 : 16;
+    knc_handle *t = (knc_handle *)realloc(knc_tab, (size_t)ncap * sizeof *t);
+    if (!t) return -1;
+    memset(t + knc_cap, 0, (size_t)(ncap - knc_cap) * sizeof *t);
+    long long id = knc_cap;
+    knc_tab = t;
+    knc_cap = ncap;
+    return id;
+}
+
+static knc_handle *knc_get(double id) {
+    long long i = (long long)id;
+    if (i < 0 || i >= knc_cap || knc_tab[i].kind == KNC_FREE) return NULL;
+    return &knc_tab[i];
+}
+
+static void knc_release(knc_handle *h) {
+    if (h->md) EVP_MD_CTX_free(h->md);
+    if (h->mac) EVP_MAC_CTX_free(h->mac);
+    if (h->cipher) EVP_CIPHER_CTX_free(h->cipher);
+    memset(h, 0, sizeof *h);
+}
+
+void __kml_native_crypto_free(double id) {
+    knc_handle *h = knc_get(id);
+    if (h) knc_release(h);
+}
+
+/* createHash(algorithm[, { outputLength }]): the id, or -1 for a digest
+ * libcrypto does not know. */
+double __kml_native_crypto_hash_new(const char *alg, double xofLen) {
+    const EVP_MD *md = EVP_get_digestbyname(alg ? alg : "");
+    if (!md) return -1;
+    long long id = knc_alloc();
+    if (id < 0) return -1;
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    if (!ctx || !EVP_DigestInit_ex(ctx, md, NULL)) {
+        EVP_MD_CTX_free(ctx);
+        return -1;
+    }
+    knc_tab[id].kind = KNC_HASH;
+    knc_tab[id].md = ctx;
+    knc_tab[id].xof_len = xofLen > 0 ? (size_t)xofLen : 0;
+    return (double)id;
+}
+
+/* createHmac(algorithm, key): the id, or -1 for an unknown digest. */
+double __kml_native_crypto_hmac_new(const char *alg, void *key, long long keyLen) {
+    if (!alg || !EVP_get_digestbyname(alg)) return -1;
+    EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+    if (!mac) return -1;
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    EVP_MAC_free(mac);
+    if (!ctx) return -1;
+    const EVP_MD *md = EVP_get_digestbyname(alg);
+    OSSL_PARAM params[2];
+    params[0] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, (char *)EVP_MD_get0_name(md), 0);
+    params[1] = OSSL_PARAM_construct_end();
+    static const unsigned char empty = 0;
+    if (!EVP_MAC_init(ctx, keyLen > 0 ? (const unsigned char *)key : &empty, (size_t)keyLen, params)) {
+        EVP_MAC_CTX_free(ctx);
+        return -1;
+    }
+    long long id = knc_alloc();
+    if (id < 0) {
+        EVP_MAC_CTX_free(ctx);
+        return -1;
+    }
+    knc_tab[id].kind = KNC_HMAC;
+    knc_tab[id].mac = ctx;
+    return (double)id;
+}
+
+double __kml_native_crypto_hash_update(double id, void *data, long long len) {
+    knc_handle *h = knc_get(id);
+    if (!h) return 0;
+    if (h->kind == KNC_HASH) return EVP_DigestUpdate(h->md, data, (size_t)len) ? 1 : 0;
+    if (h->kind == KNC_HMAC) return EVP_MAC_update(h->mac, data, (size_t)len) ? 1 : 0;
+    return 0;
+}
+
+/* The digest's size: an XOF's requested length, else the algorithm's. */
+double __kml_native_crypto_hash_size(double id) {
+    knc_handle *h = knc_get(id);
+    if (!h) return 0;
+    if (h->kind == KNC_HASH) {
+        if (h->xof_len) return (double)h->xof_len;
+        return (double)EVP_MD_CTX_get_size(h->md);
+    }
+    if (h->kind == KNC_HMAC) return (double)EVP_MAC_CTX_get_mac_size(h->mac);
+    return 0;
+}
+
+/* The digest into out; its length, or -1. The handle is spent. */
+double __kml_native_crypto_hash_digest(double id, void *out, long long outLen) {
+    knc_handle *h = knc_get(id);
+    if (!h) return -1;
+    double r = -1;
+    if (h->kind == KNC_HASH) {
+        if (h->xof_len) {
+            if ((long long)h->xof_len <= outLen && EVP_DigestFinalXOF(h->md, out, h->xof_len)) r = (double)h->xof_len;
+        } else {
+            unsigned char buf[EVP_MAX_MD_SIZE];
+            unsigned int n = 0;
+            if (EVP_DigestFinal_ex(h->md, buf, &n) && (long long)n <= outLen) {
+                memcpy(out, buf, n);
+                r = n;
+            }
+        }
+    } else if (h->kind == KNC_HMAC) {
+        unsigned char buf[EVP_MAX_MD_SIZE];
+        size_t n = 0;
+        if (EVP_MAC_final(h->mac, buf, &n, sizeof buf) && (long long)n <= outLen) {
+            memcpy(out, buf, n);
+            r = (double)n;
+        }
+    }
+    knc_release(h);
+    return r;
+}
+
+/* hash.copy(): a new handle in the same state, or -1. */
+double __kml_native_crypto_hash_copy(double id) {
+    knc_handle *h = knc_get(id);
+    if (!h || h->kind != KNC_HASH) return -1;
+    size_t xof = h->xof_len;
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    if (!ctx || !EVP_MD_CTX_copy_ex(ctx, h->md)) {
+        EVP_MD_CTX_free(ctx);
+        return -1;
+    }
+    long long nid = knc_alloc();
+    if (nid < 0) {
+        EVP_MD_CTX_free(ctx);
+        return -1;
+    }
+    knc_tab[nid].kind = KNC_HASH;
+    knc_tab[nid].md = ctx;
+    knc_tab[nid].xof_len = xof;
+    return (double)nid;
+}
+
+/* getHashes()/getCiphers(): the names, joined by ','. */
+typedef struct { char *buf; size_t len, cap; } knc_names;
+
+static void knc_names_add(knc_names *n, const char *name) {
+    size_t l = strlen(name);
+    if (n->len + l + 2 > n->cap) {
+        size_t nc = (n->cap ? n->cap * 2 : 1024) + l;
+        char *b = (char *)realloc(n->buf, nc);
+        if (!b) return;
+        n->buf = b;
+        n->cap = nc;
+    }
+    if (n->len) n->buf[n->len++] = ',';
+    memcpy(n->buf + n->len, name, l);
+    n->len += l;
+    n->buf[n->len] = 0;
+}
+
+static void knc_md_name(const OBJ_NAME *o, void *arg) {
+    knc_names_add((knc_names *)arg, o->name);
+}
+
+/* which: 0 digests, 1 ciphers, 2 the linked OpenSSL's version number. */
+char *__kml_native_crypto_names(double which) {
+    if (which == 2) {
+        char v[32];
+        snprintf(v, sizeof v, "%lu", (unsigned long)OpenSSL_version_num());
+        return kml_ncrypto_str(v);
+    }
+    knc_names n = {0};
+    OBJ_NAME_do_all_sorted(which == 0 ? OBJ_NAME_TYPE_MD_METH : OBJ_NAME_TYPE_CIPHER_METH, knc_md_name, &n);
+    char *out = kml_ncrypto_str(n.buf ? n.buf : "");
+    free(n.buf);
+    return out;
+}
+
+/* crypto.randomFillSync: size bytes of the CSPRNG at offset. */
+double __kml_native_crypto_random_fill(void *data, long long size, double offset, double length) {
+    long long off = (long long)offset, len = (long long)length;
+    if (off < 0 || len < 0 || off + len > size) return -1;
+    return RAND_bytes((unsigned char *)data + off, (int)len) == 1 ? 0 : -1;
+}
+
+typedef struct { unsigned char *p; long long len; } knc_rand_job;
+
+static void knc_rand_work(void *job, long long *err, double *res) {
+    knc_rand_job *j = (knc_rand_job *)job;
+    *err = RAND_bytes(j->p, (int)j->len) == 1 ? 0 : 1;
+    *res = 0;
+    free(j);
+}
+
+void __kml_native_crypto_random_fill_async(void *data, long long size, double offset, double length, void *inv, void *clo) {
+    long long off = (long long)offset, len = (long long)length;
+    knc_rand_job *j = (knc_rand_job *)malloc(sizeof *j);
+    if (off < 0 || len < 0 || off + len > size) len = 0, off = 0;
+    j->p = (unsigned char *)data + off;
+    j->len = len;
+    __kml_pool_job(knc_rand_work, j, inv, clo);
+}
+
+/* ---- key derivation: pbkdf2, scrypt, hkdf (sync or pooled) ---------------- */
+enum { KNC_PBKDF2 = 0, KNC_SCRYPT, KNC_HKDF };
+typedef struct {
+    int op;
+    unsigned char *a, *b, *c;  /* password/salt/(info), copied */
+    long long alen, blen, clen;
+    double n1, n2, n3, n4;     /* iterations | N r p maxmem */
+    char digest[64];
+    unsigned char *out;
+    long long outlen;
+} knc_kdf;
+
+static long long knc_kdf_run(knc_kdf *k) {
+    switch (k->op) {
+    case KNC_PBKDF2: {
+        const EVP_MD *md = EVP_get_digestbyname(k->digest);
+        if (!md) return 2;
+        return PKCS5_PBKDF2_HMAC((const char *)k->a, (int)k->alen, k->b, (int)k->blen, (int)k->n1, md, (int)k->outlen, k->out) == 1 ? 0 : 1;
+    }
+    case KNC_SCRYPT:
+        return EVP_PBE_scrypt((const char *)k->a, (size_t)k->alen, k->b, (size_t)k->blen, (uint64_t)k->n1,
+                              (uint64_t)k->n2, (uint64_t)k->n3, (uint64_t)k->n4, k->out, (size_t)k->outlen) == 1 ? 0 : 1;
+    case KNC_HKDF: {
+        const EVP_MD *md = EVP_get_digestbyname(k->digest);
+        if (!md) return 2;
+        EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+        size_t outlen = (size_t)k->outlen;
+        long long rc = 1;
+        if (pctx && EVP_PKEY_derive_init(pctx) > 0 && EVP_PKEY_CTX_set_hkdf_md(pctx, md) > 0 &&
+            EVP_PKEY_CTX_set1_hkdf_key(pctx, k->a, (int)k->alen) > 0 &&
+            EVP_PKEY_CTX_set1_hkdf_salt(pctx, k->b, (int)k->blen) > 0 &&
+            EVP_PKEY_CTX_add1_hkdf_info(pctx, k->c, (int)k->clen) > 0 &&
+            EVP_PKEY_derive(pctx, k->out, &outlen) > 0)
+            rc = 0;
+        EVP_PKEY_CTX_free(pctx);
+        return rc;
+    }
+    }
+    return 1;
+}
+
+static unsigned char *knc_dup(const void *p, long long n) {
+    unsigned char *d = (unsigned char *)malloc((size_t)(n > 0 ? n : 1));
+    if (n > 0) memcpy(d, p, (size_t)n);
+    return d;
+}
+
+static knc_kdf *knc_kdf_new(double op, void *a, long long alen, void *b, long long blen, void *c, long long clen,
+                            double n1, double n2, double n3, double n4, const char *digest, void *out, long long outlen) {
+    knc_kdf *k = (knc_kdf *)calloc(1, sizeof *k);
+    k->op = (int)op;
+    k->a = knc_dup(a, alen); k->alen = alen;
+    k->b = knc_dup(b, blen); k->blen = blen;
+    k->c = knc_dup(c, clen); k->clen = clen;
+    k->n1 = n1; k->n2 = n2; k->n3 = n3; k->n4 = n4;
+    snprintf(k->digest, sizeof k->digest, "%s", digest ? digest : "");
+    k->out = (unsigned char *)out;
+    k->outlen = outlen;
+    return k;
+}
+
+static void knc_kdf_free(knc_kdf *k) {
+    free(k->a); free(k->b); free(k->c); free(k);
+}
+
+/* 0 ok, 1 failed, 2 an unknown digest. */
+double __kml_native_crypto_kdf(double op, void *a, long long alen, void *b, long long blen, void *c, long long clen,
+                               double n1, double n2, double n3, double n4, const char *digest, void *out, long long outlen) {
+    knc_kdf *k = knc_kdf_new(op, a, alen, b, blen, c, clen, n1, n2, n3, n4, digest, out, outlen);
+    long long rc = knc_kdf_run(k);
+    knc_kdf_free(k);
+    return (double)rc;
+}
+
+static void knc_kdf_work(void *job, long long *err, double *res) {
+    knc_kdf *k = (knc_kdf *)job;
+    *err = knc_kdf_run(k);
+    *res = 0;
+    knc_kdf_free(k);
+}
+
+void __kml_native_crypto_kdf_async(double op, void *a, long long alen, void *b, long long blen, void *c, long long clen,
+                                   double n1, double n2, double n3, double n4, const char *digest, void *out, long long outlen,
+                                   void *inv, void *clo) {
+    knc_kdf *k = knc_kdf_new(op, a, alen, b, blen, c, clen, n1, n2, n3, n4, digest, out, outlen);
+    __kml_pool_job(knc_kdf_work, k, inv, clo);
+}
+
+/* ---- ciphers ---------------------------------------------------------------- */
+
+/* createCipheriv/createDecipheriv: the id, or -1 unknown cipher, -2 invalid
+ * key length, -3 invalid IV length. */
+double __kml_native_crypto_cipher_new(const char *alg, void *key, long long keyLen, void *iv, long long ivLen,
+                                      double encrypt, double authTagLen) {
+    const EVP_CIPHER *c = EVP_get_cipherbyname(alg ? alg : "");
+    if (!c) return -1;
+    if (keyLen != EVP_CIPHER_get_key_length(c)) return -2;
+    int mode = EVP_CIPHER_get_mode(c);
+    int aead = mode == EVP_CIPH_GCM_MODE || mode == EVP_CIPH_CCM_MODE || mode == EVP_CIPH_OCB_MODE ||
+               EVP_CIPHER_get_nid(c) == NID_chacha20_poly1305;
+    int ivl = EVP_CIPHER_get_iv_length(c);
+    if (!aead && ivLen != ivl && !(ivl == 0 && ivLen == 0)) return -3;
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx || !EVP_CipherInit_ex(ctx, c, NULL, NULL, NULL, encrypt != 0)) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    if (aead && ivLen != ivl && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, (int)ivLen, NULL) <= 0) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -3;
+    }
+    if (aead && mode == EVP_CIPH_CCM_MODE && authTagLen > 0)
+        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, (int)authTagLen, NULL);
+    if (!EVP_CipherInit_ex(ctx, NULL, NULL, (const unsigned char *)key, ivLen > 0 ? (const unsigned char *)iv : NULL, encrypt != 0)) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    long long id = knc_alloc();
+    if (id < 0) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    knc_tab[id].kind = KNC_CIPHER;
+    knc_tab[id].cipher = ctx;
+    return (double)id;
+}
+
+double __kml_native_crypto_cipher_block_size(double id) {
+    knc_handle *h = knc_get(id);
+    return h && h->kind == KNC_CIPHER ? (double)EVP_CIPHER_CTX_get_block_size(h->cipher) : 0;
+}
+
+/* update: the bytes written to out (sized input + block size), or -1. */
+double __kml_native_crypto_cipher_update(double id, void *in, long long inLen, void *out, long long outLen) {
+    knc_handle *h = knc_get(id);
+    if (!h || h->kind != KNC_CIPHER) return -1;
+    int n = 0;
+    if (inLen + EVP_CIPHER_CTX_get_block_size(h->cipher) > outLen) return -1;
+    if (!EVP_CipherUpdate(h->cipher, (unsigned char *)out, &n, (const unsigned char *)in, (int)inLen)) return -1;
+    return n;
+}
+
+/* final: the last bytes into out, or -1 (a bad decrypt / auth failure). */
+double __kml_native_crypto_cipher_final(double id, void *out, long long outLen) {
+    knc_handle *h = knc_get(id);
+    if (!h || h->kind != KNC_CIPHER) return -1;
+    int n = 0;
+    if (outLen < EVP_CIPHER_CTX_get_block_size(h->cipher)) return -1;
+    return EVP_CipherFinal_ex(h->cipher, (unsigned char *)out, &n) ? n : -1;
+}
+
+double __kml_native_crypto_cipher_set_padding(double id, double on) {
+    knc_handle *h = knc_get(id);
+    return h && h->kind == KNC_CIPHER && EVP_CIPHER_CTX_set_padding(h->cipher, on != 0) ? 1 : 0;
+}
+
+double __kml_native_crypto_cipher_set_aad(double id, void *aad, long long len) {
+    knc_handle *h = knc_get(id);
+    int n = 0;
+    return h && h->kind == KNC_CIPHER && EVP_CipherUpdate(h->cipher, NULL, &n, (const unsigned char *)aad, (int)len) ? 1 : 0;
+}
+
+/* getAuthTag (after final): the tag's length written to out, or -1. */
+double __kml_native_crypto_cipher_get_tag(double id, void *out, long long len) {
+    knc_handle *h = knc_get(id);
+    return h && h->kind == KNC_CIPHER && EVP_CIPHER_CTX_ctrl(h->cipher, EVP_CTRL_AEAD_GET_TAG, (int)len, out) > 0 ? len : -1;
+}
+
+double __kml_native_crypto_cipher_set_tag(double id, void *tag, long long len) {
+    knc_handle *h = knc_get(id);
+    return h && h->kind == KNC_CIPHER && EVP_CIPHER_CTX_ctrl(h->cipher, EVP_CTRL_AEAD_SET_TAG, (int)len, tag) > 0 ? 1 : 0;
+}
+
+/* ---- key pairs and PEM keys -------------------------------------------------- */
+
+/* generateKeyPair: type 0 rsa (bits, exponent), 1 ec (curve name), 2
+ * ed25519, 3 x25519. The result is both halves' PEM in one string: the
+ * public key's (SPKI), then the private key's (PKCS#8). */
+static EVP_PKEY *knc_keygen(double type, double bits, double exponent, const char *curve) {
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *ctx = NULL;
+    int t = (int)type;
+    if (t == 0) {
+        ctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA", NULL);
+        if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0) goto done;
+        if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, (int)bits) <= 0) goto done;
+        if (exponent > 0) {
+            BIGNUM *e = BN_new();
+            BN_set_word(e, (unsigned long)exponent);
+            EVP_PKEY_CTX_set1_rsa_keygen_pubexp(ctx, e);
+            BN_free(e);
+        }
+    } else if (t == 1) {
+        ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
+        if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0) goto done;
+        int nid = OBJ_txt2nid(curve ? curve : "");
+        if (nid == NID_undef) nid = EC_curve_nist2nid(curve ? curve : "");
+        if (nid == NID_undef || EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, nid) <= 0) goto done;
+    } else if (t == 2 || t == 3) {
+        ctx = EVP_PKEY_CTX_new_from_name(NULL, t == 2 ? "ED25519" : "X25519", NULL);
+        if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0) goto done;
+    } else {
+        goto done;
+    }
+    EVP_PKEY_keygen(ctx, &pkey);
+done:
+    EVP_PKEY_CTX_free(ctx);
+    return pkey;
+}
+
+static char *knc_pem_pair(EVP_PKEY *pkey) {
+    BIO *pub = BIO_new(BIO_s_mem()), *priv = BIO_new(BIO_s_mem());
+    char *out = NULL;
+    if (pub && priv && PEM_write_bio_PUBKEY(pub, pkey) && PEM_write_bio_PKCS8PrivateKey(priv, pkey, NULL, NULL, 0, NULL, NULL)) {
+        char *a, *b;
+        long al = BIO_get_mem_data(pub, &a), bl = BIO_get_mem_data(priv, &b);
+        out = (char *)malloc((size_t)(al + bl + 1));
+        memcpy(out, a, (size_t)al);
+        memcpy(out + al, b, (size_t)bl);
+        out[al + bl] = 0;
+    }
+    BIO_free(pub);
+    BIO_free(priv);
+    return out;
+}
+
+/* The PEM pair (public then private), or "" when generation fails. */
+char *__kml_native_crypto_keygen(double type, double bits, double exponent, const char *curve) {
+    EVP_PKEY *pkey = knc_keygen(type, bits, exponent, curve);
+    char *pem = pkey ? knc_pem_pair(pkey) : NULL;
+    EVP_PKEY_free(pkey);
+    char *out = kml_ncrypto_str(pem ? pem : "");
+    free(pem);
+    return out;
+}
+
+typedef struct { double type, bits, exponent; char curve[64]; } knc_keygen_job;
+
+static void knc_keygen_work(void *job, long long *err, double *res) {
+    knc_keygen_job *j = (knc_keygen_job *)job;
+    EVP_PKEY *pkey = knc_keygen(j->type, j->bits, j->exponent, j->curve);
+    char *pem = pkey ? knc_pem_pair(pkey) : NULL;
+    EVP_PKEY_free(pkey);
+    /* The PEM rides back as the result's address; the loop reads it. */
+    *err = pem ? 0 : 1;
+    *res = (double)(intptr_t)pem;
+    free(j);
+}
+
+void __kml_native_crypto_keygen_async(double type, double bits, double exponent, const char *curve, void *inv, void *clo) {
+    knc_keygen_job *j = (knc_keygen_job *)calloc(1, sizeof *j);
+    j->type = type; j->bits = bits; j->exponent = exponent;
+    snprintf(j->curve, sizeof j->curve, "%s", curve ? curve : "");
+    __kml_pool_job(knc_keygen_work, j, inv, clo);
+}
+
+/* The PEM a pooled keygen produced (its callback's result), freed. */
+char *__kml_native_crypto_keygen_take(double result) {
+    char *pem = (char *)(intptr_t)result;
+    char *out = kml_ncrypto_str(pem ? pem : "");
+    free(pem);
+    return out;
+}
+
+/* An encrypted key's passphrase, as Node's PasswordCallback supplies it:
+ * none fails the read ("interrupted or cancelled") rather than prompting. */
+static int knc_pass_cb(char *buf, int size, int rwflag, void *u) {
+    (void)rwflag;
+    const char *pass = (const char *)u;
+    if (!pass) return -1;
+    int n = (int)strlen(pass);
+    if (n > size) n = size;
+    memcpy(buf, pass, (size_t)n);
+    return n;
+}
+
+/* passLen < 0: no passphrase. */
+static EVP_PKEY *knc_read_key(const char *pem, int priv, const char *pass, long long passLen) {
+    BIO *bio = BIO_new_mem_buf(pem, -1);
+    EVP_PKEY *k = NULL;
+    if (!bio) return NULL;
+    char *pw = NULL;
+    if (passLen >= 0) {
+        pw = malloc((size_t)passLen + 1);
+        memcpy(pw, pass, (size_t)passLen);
+        pw[passLen] = 0;
+    }
+    if (priv) {
+        k = PEM_read_bio_PrivateKey(bio, NULL, knc_pass_cb, pw);
+    } else {
+        k = PEM_read_bio_PUBKEY(bio, NULL, knc_pass_cb, pw);
+        if (!k) {
+            /* A private key also verifies (its public half), as in Node. */
+            ERR_clear_error();
+            BIO_free(bio);
+            bio = BIO_new_mem_buf(pem, -1);
+            k = PEM_read_bio_PrivateKey(bio, NULL, knc_pass_cb, pw);
+        }
+    }
+    free(pw);
+    BIO_free(bio);
+    return k;
+}
+
+/* sign: the signature's length in out, or -1 (a bad key), -2 (out too
+ * small; the needed size is then the negated result - 2). digest "" for a
+ * one-shot key type (Ed25519). */
+double __kml_native_crypto_sign(const char *digest, const char *pem, void *pass, long long passLen, double hasPass,
+                                void *data, long long len, void *out, long long outLen) {
+    EVP_PKEY *k = knc_read_key(pem, 1, (const char *)pass, hasPass != 0 ? passLen : -1);
+    if (!k) return -1;
+    const EVP_MD *md = digest && *digest ? EVP_get_digestbyname(digest) : NULL;
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    size_t n = 0;
+    double r = -1;
+    if (ctx && EVP_DigestSignInit(ctx, NULL, md, NULL, k) > 0 && EVP_DigestSign(ctx, NULL, &n, data, (size_t)len) > 0) {
+        if ((long long)n > outLen) {
+            r = -2 - (double)n;
+        } else if (EVP_DigestSign(ctx, out, &n, data, (size_t)len) > 0) {
+            r = (double)n;
+        }
+    }
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(k);
+    return r;
+}
+
+/* verify: 1 valid, 0 invalid, -1 a bad key. */
+double __kml_native_crypto_verify(const char *digest, const char *pem, void *pass, long long passLen, double hasPass,
+                                  void *data, long long len, void *sig, long long sigLen) {
+    EVP_PKEY *k = knc_read_key(pem, 0, (const char *)pass, hasPass != 0 ? passLen : -1);
+    if (!k) return -1;
+    const EVP_MD *md = digest && *digest ? EVP_get_digestbyname(digest) : NULL;
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    double r = 0;
+    if (ctx && EVP_DigestVerifyInit(ctx, NULL, md, NULL, k) > 0)
+        r = EVP_DigestVerify(ctx, sig, (size_t)sigLen, data, (size_t)len) == 1 ? 1 : 0;
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(k);
+    ERR_clear_error();
+    return r;
+}
+
+/* timingSafeEqual over two equal-length regions. */
+double __kml_native_crypto_timing_equal(void *a, long long alen, void *b, long long blen) {
+    if (alen != blen) return 0;
+    return CRYPTO_memcmp(a, b, (size_t)alen) == 0 ? 1 : 0;
+}
+
+/* The libcrypto error, as Node reports it ("error:1C800064:Provider
+ * routines::bad decrypt"), or "" when there is none; the queue is cleared. */
+char *__kml_native_crypto_last_error(void) {
+    /* The queue's earliest error, as Node's ThrowCryptoError(ERR_get_error()). */
+    unsigned long e = ERR_peek_error();
+    char buf[256];
+    buf[0] = 0;
+    if (e) ERR_error_string_n(e, buf, sizeof buf);
+    ERR_clear_error();
+    return kml_ncrypto_str(buf);
+}

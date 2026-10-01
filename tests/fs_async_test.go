@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -350,6 +351,15 @@ fs.readFile(D + '/g.txt', (err, data) => {
 	assertOutputImports(t, src, "<Buffer 68 65 6c 6c 6f ce b1> 7\nhelloα 68656c6c6fceb1 aGVsbG/OsQ==\n\"helloÎ±\" helloN1\na,f.txt,g.txt,h.txt\na/,f.txt,g.txt,h.txt\ncb null <Buffer 6b 61 6c 69 6d 65 72 61>\ncb2 null kalimera\ncb3 true ENOENT undefined\n")
 }
 
+// chmodMode600 is what Node's stat reports after chmod 0o600: on Windows
+// chmod only toggles the read-only attribute, so a writable file stays 666.
+func chmodMode600() string {
+	if runtime.GOOS == "windows" {
+		return "666"
+	}
+	return "600"
+}
+
 // The callback forms of stat, lstat, realpath, mkdtemp, truncate, access,
 // chmod, link, symlink, readlink and rm, and a two-path error's message.
 func TestE2EFsCallbackForms(t *testing.T) {
@@ -390,7 +400,7 @@ order = "async"
 `, `stat err async ENOENT ENOENT: no such file or directory, stat '/nope'
 mkdtemp null true
 truncate null he
-chmod null 600
+chmod null `+chmodMode600()+`
 links null null null true
 lstat null true
 ENOENT: no such file or directory, link '/nx-a' -> '/nx-b'

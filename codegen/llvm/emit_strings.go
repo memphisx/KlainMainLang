@@ -6,6 +6,8 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"reflect"
+	"strings"
 )
 
 // coerceNumArgRef coerces a string/number method's numeric argument to target,
@@ -27,8 +29,36 @@ func (e *Emitter) coerceNumArgRef(v Value, target Type, pos ast.Pos, what string
 // isStringTy returns true for a plain string (ptr, not object/array/closure).
 func isStringTy(ty Type) bool {
 	return ty.IR == "ptr" && !ty.IsObject && !ty.IsArray && !ty.IsFlatArray && !ty.IsFunc && !ty.IsBigInt &&
-		!ty.IsURLSearchParams && // a URLSearchParams is a pair-list handle, not a string (TDD-00203)
-		!ty.IsFFIFunction // a bound native function is a function object (TDD-00229)
+		!ty.IsURLSearchParams // a URLSearchParams is a pair-list handle, not a string (TDD-00203)
+}
+
+// stringFlags are the Type flags a string itself can carry; every other
+// `Is*` flag marks a representation that is not a string.
+var stringFlags = map[string]bool{"IsStrLiteral": true, "IsNull": true, "IsUndefined": true, "IsNever": true}
+
+// handleFlagFields are the indices of Type's `Is*` flags outside stringFlags.
+var handleFlagFields = func() []int {
+	var out []int
+	rt := reflect.TypeOf(Type{})
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		if f.Type.Kind() == reflect.Bool && strings.HasPrefix(f.Name, "Is") && !stringFlags[f.Name] {
+			out = append(out, i)
+		}
+	}
+	return out
+}()
+
+// hasHandleFlag reports a `ptr` value that is a host handle (a Map, a
+// stream, a Promise, a Blob, …), not a string: its equality is identity.
+func hasHandleFlag(t Type) bool {
+	v := reflect.ValueOf(t)
+	for _, i := range handleFlagFields {
+		if v.Field(i).Bool() {
+			return true
+		}
+	}
+	return false
 }
 
 // isForOfStringTy is the strict "this is really a plain string" test, for
@@ -40,7 +70,7 @@ func isForOfStringTy(ty Type) bool {
 	return isStringTy(ty) && !ty.IsMap && !ty.IsSet && !ty.IsRegExp && !ty.IsPromise &&
 		!ty.IsDate && !ty.IsURL && !ty.IsURLPattern && !ty.IsSymbol && !ty.IsBlob &&
 		!ty.IsTypedArray && !ty.IsArrayBuffer && !ty.IsReadableStream && !ty.IsStreamReader &&
-		!ty.IsNodeReadable && !ty.IsGenerator && !ty.IsDynamic && !ty.Nullable
+		!ty.IsGenerator && !ty.IsDynamic && !ty.Nullable
 }
 
 // isNumberTy returns true for a plain numeric scalar (any int/float width,
@@ -324,6 +354,9 @@ func (e *Emitter) emitStringLocaleCompare(mem *ast.MemberExpression, args []ast.
 	if err != nil {
 		return Value{}, err
 	}
+	if isUnconstrainedDynamic(objVal.Ty) {
+		return e.emitDynAnyMethodCall(objVal, "localeCompare", args, pos) // dispatched on its tag
+	}
 	if !isStringTy(objVal.Ty) {
 		return Value{}, fmt.Errorf("%d:%d: localeCompare is only supported on strings", pos.Line, pos.Col)
 	}
@@ -356,6 +389,9 @@ func (e *Emitter) emitStringReplace(mem *ast.MemberExpression, args []ast.Expres
 	objVal, err := e.emitExpr(mem.Object)
 	if err != nil {
 		return Value{}, err
+	}
+	if isUnconstrainedDynamic(objVal.Ty) {
+		return e.emitDynAnyMethodCall(objVal, "replace", args, pos) // dispatched on its tag
 	}
 	if !isStringTy(objVal.Ty) {
 		return Value{}, fmt.Errorf("%d:%d: replace is only supported on strings", pos.Line, pos.Col)
@@ -401,6 +437,9 @@ func (e *Emitter) emitStringReplaceAll(mem *ast.MemberExpression, args []ast.Exp
 	if err != nil {
 		return Value{}, err
 	}
+	if isUnconstrainedDynamic(objVal.Ty) {
+		return e.emitDynAnyMethodCall(objVal, "replaceAll", args, pos) // dispatched on its tag
+	}
 	if !isStringTy(objVal.Ty) {
 		return Value{}, fmt.Errorf("%d:%d: replaceAll is only supported on strings", pos.Line, pos.Col)
 	}
@@ -445,6 +484,9 @@ func (e *Emitter) emitStringSplit(mem *ast.MemberExpression, args []ast.Expressi
 	if err != nil {
 		return Value{}, err
 	}
+	if isUnconstrainedDynamic(objVal.Ty) {
+		return e.emitDynAnyMethodCall(objVal, "split", args, pos) // dispatched on its tag
+	}
 	if !isStringTy(objVal.Ty) {
 		return Value{}, fmt.Errorf("%d:%d: split is only supported on strings", pos.Line, pos.Col)
 	}
@@ -472,16 +514,48 @@ func (e *Emitter) emitStringSplit(mem *ast.MemberExpression, args []ast.Expressi
 		if err != nil {
 			return Value{}, err
 		}
-		// ToString an object separator (TDD-00201); the regex path is handled above.
-		if sepVal, err = e.coerceStringArg(sepVal); err != nil {
+		objVal = e.coerce(objVal, TypePtr)
+		stringSplit := func(sepVal Value) (Value, error) {
+			// ToString an object separator (TDD-00201).
+			sepVal, err := e.coerceStringArg(sepVal)
+			if err != nil {
+				return Value{}, err
+			}
+			// The string runtime's split, which the declaration's string
+			// overload lowers to (an empty separator splits code points).
+			e.ensureStringC()
+			e.declareFn("__kml_String_split", "declare ptr @__kml_String_split(ptr noundef, ptr noundef, i1 zeroext, double noundef)")
+			h := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_String_split(ptr %s, ptr %s, i1 zeroext false, double 0.0)", h, objVal.Ref, sepVal.Ref))
+			return e.arrayValueFromHeaderReg(h, ArrayOf(TypePtr)), nil
+		}
+		if sepVal.Ty.IsDynamic {
+			// A `string | RegExp` (or `any`) separator: which split is
+			// decided by what the box holds.
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca {ptr, i64}, align 8", slot))
+			isRe := e.emitDynHostInstanceOf(sepVal, "RegExp")
+			reL, strL, doneL := e.freshLabel("split.re"), e.freshLabel("split.str"), e.freshLabel("split.done")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isRe.Ref, reL, strL))
+			e.emitLabel(reL)
+			re := e.emitUnboxHost(sepVal, RegExpType())
+			rv := e.emitRegexSplit(objVal, re)
+			e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", rv.Ref, slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(strL)
+			sv, err := stringSplit(sepVal)
+			if err != nil {
+				return Value{}, err
+			}
+			e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", sv.Ref, slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(doneL)
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", r, slot))
+			result = Value{Ref: r, Ty: ArrayOf(TypePtr)}
+		} else if result, err = stringSplit(sepVal); err != nil {
 			return Value{}, err
 		}
-		e.ensureStringSplit()
-		sLen := e.emitStrLenHeader(objVal.Ref)
-		sepLen := e.emitStrLenHeader(sepVal.Ref)
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_split(ptr %s, i64 %s, ptr %s, i64 %s)", r, objVal.Ref, sLen, sepVal.Ref, sepLen))
-		result = Value{Ref: r, Ty: ArrayOf(TypePtr)}
 	}
 	// Optional `limit`: cap the result to the first `limit` segments (JS
 	// `split(sep, limit)`). We split fully, then clamp the reported length — the
@@ -548,44 +622,58 @@ func (e *Emitter) emitStringCharAt(strPtr string, indexExpr ast.Expression) (Val
 func (e *Emitter) emitStringStaticCall(property string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	switch property {
 	case "fromCharCode", "fromCodePoint":
-		return e.emitStringFromCharCode(args, pos)
+		return e.emitStringFromCharCode(args, property == "fromCodePoint", pos)
 	}
 	return Value{}, fmt.Errorf("%d:%d: String.%s is not supported", pos.Line, pos.Col, property)
 }
 
-// emitStringFromCharCode implements String.fromCharCode(c1, c2, ...) and
-// String.fromCodePoint(c1, c2, ...) for the Basic Multilingual Plane.
-// Each code is truncated to a single byte (i8) and stored consecutively.
-func (e *Emitter) emitStringFromCharCode(args []ast.Expression, pos ast.Pos) (Value, error) {
+// emitStringFromCharCode implements String.fromCharCode(c1, c2, ...) (UTF-16
+// code units, a surrogate pair joined into its code point) and
+// String.fromCodePoint(c1, c2, ...) (code points; a RangeError for one that
+// is not an integer in [0, 0x10FFFF]): the arguments as doubles, encoded to
+// UTF-8 by @__kml_String_fromCodes.
+func (e *Emitter) emitStringFromCharCode(args []ast.Expression, codePoint bool, pos ast.Pos) (Value, error) {
 	if len(args) == 0 {
 		return Value{Ref: e.internString(""), Ty: TypePtr}, nil
 	}
-	n := int64(len(args))
-	buf := e.emitStringAlloc(fmt.Sprintf("%d", n)) // TDD-00120: n-char length-prefixed
-	for i, arg := range args {
-		val, err := e.emitExpr(arg)
-		if err != nil {
-			return Value{}, err
-		}
-		// The code units must be numeric. A non-number argument (e.g. a
-		// string, as in `String.fromCharCode("0")`) would otherwise reach
-		// the `trunc i64 <ptr> to i8` below and emit invalid IR — this
-		// compiler doesn't do JS's implicit string→number coercion, so
-		// reject it cleanly at compile time instead. See ADR-00195.
-		if !isNumberTy(val.Ty) {
-			return Value{}, fmt.Errorf("%d:%d: String.fromCharCode/fromCodePoint expects numeric arguments, got a non-number (this compiler does not implicitly coerce)", arg.GetPos().Line, arg.GetPos().Col)
-		}
-		coerced := e.coerce(val, TypeI64)
-		ch := e.freshReg()
-		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i8", ch, coerced.Ref))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", slot, buf, i))
-		e.emitInstr(fmt.Sprintf("store i8 %s, ptr %s, align 1", ch, slot))
+	// Each argument is ToNumber'd (`fromCharCode("65")` is "A").
+	codes, n, err := e.emitNumberArgsBuffer(args, pos)
+	if err != nil {
+		return Value{}, err
 	}
-	nullSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", nullSlot, buf, n))
-	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", nullSlot))
-	return Value{Ref: buf, Ty: TypePtr}, nil
+	e.ensureStrFromCodes()
+	errSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", errSlot))
+	cp := 0
+	if codePoint {
+		cp = 1
+	}
+	res := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_String_fromCodes(ptr %s, i64 %s, i32 %d, ptr %s)", res, codes, n, cp, errSlot))
+	if codePoint {
+		bad := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", bad, res))
+		badL := e.freshLabel("fromcodepoint.bad")
+		okL := e.freshLabel("fromcodepoint.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
+		e.emitLabel(badL)
+		msg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", msg, errSlot))
+		e.ensureExceptionHelpers()
+		e.emitInternalThrowKind("RangeError", msg)
+		e.emitLabel(okL)
+	}
+	return Value{Ref: res, Ty: TypePtr}, nil
+}
+
+// ensureStrFromCodes declares @__kml_String_fromCodes, from the casemap C
+// file (which it compiles in).
+func (e *Emitter) ensureStrFromCodes() {
+	e.ensureCasemap()
+	if !e.usedStrFromCodes {
+		e.emitGlobal("declare ptr @__kml_String_fromCodes(ptr, i64, i32, ptr)")
+		e.usedStrFromCodes = true
+	}
 }
 
 // emitStringConcatMethod implements `str.concat(...values)`: the receiver

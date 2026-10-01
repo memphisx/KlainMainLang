@@ -18,8 +18,24 @@
 #include <string.h>
 #include <math.h>
 
-#define KML_INSPECT_BREAK_LENGTH 80
-#define KML_INSPECT_COMPACT 3
+
+/* util.inspect's options that change the layout, set for one inspect call
+   (__kml_inspect_opts): `compact` (3, or 0 for false: one entry per line),
+   `sorted` (object entries in sort order), `depth` (2), `breakLength` (80)
+   and `maxArrayLength` (100). */
+long long __kml_inspect_opt_compact = 3;
+long long __kml_inspect_opt_sorted = 0;
+long long __kml_inspect_opt_depth = 2;
+long long __kml_inspect_opt_break = 80;    /* breakLength */
+long long __kml_inspect_opt_maxarr = 100;  /* maxArrayLength */
+/* A host value's routines render at a depth shifted to honour a run-time
+   `depth` option (__kml_host_inspect); its indentation is shifted back. */
+long long __kml_inspect_indent_shift = 0;
+#define KML_INSPECT_BREAK_LENGTH __kml_inspect_opt_break
+
+static int entry_cmp(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
 
 typedef struct {
     char **items;
@@ -168,7 +184,7 @@ static KmlInspectList *group_array(KmlInspectList *l, long long indent, long lon
         long long columns = (long long)floor(sqrt(approxCharHeights * biasedMax * (double)n) / biasedMax + 0.5);
         long long c2 = (KML_INSPECT_BREAK_LENGTH - indent) / actualMax;
         if (c2 < columns) columns = c2;
-        if (KML_INSPECT_COMPACT * 4 < columns) columns = KML_INSPECT_COMPACT * 4;
+        if (__kml_inspect_opt_compact * 4 < columns) columns = __kml_inspect_opt_compact * 4;
         if (15 < columns) columns = 15;
         if (columns > 1) {
             long long *maxLineLength = (long long *)malloc(sizeof(long long) * (size_t)columns);
@@ -222,6 +238,8 @@ char *__kml_inspect_end(void *lp, const char *open, const char *close,
                         long long indent, long long depth, long long is_array, long long numeric) {
     KmlInspectList *l = (KmlInspectList *)lp;
     Sb b = {0, 0, 0};
+    indent -= 2 * __kml_inspect_indent_shift;
+    if (indent < 0) indent = 0;
     if (l->n == 0) {
         sb_str(&b, open);
         sb_str(&b, close);
@@ -230,11 +248,14 @@ char *__kml_inspect_end(void *lp, const char *open, const char *close,
     }
     long long entries = l->n;
     KmlInspectList *output = l, *grouped = NULL;
-    if (is_array && entries > 6) {
+    /* sorted: an object's, Map's or Set's entries in sort order. */
+    if (__kml_inspect_opt_sorted && !is_array)
+        qsort(l->items, (size_t)(l->extra ? l->n - 1 : l->n), sizeof(char *), entry_cmp);
+    if (__kml_inspect_opt_compact >= 1 && is_array && entries > 6) {
         grouped = group_array(l, indent, numeric);
         if (grouped) output = grouped;
     }
-    if (kml_inspect_cur_depth - depth < KML_INSPECT_COMPACT && entries == output->n) {
+    if (__kml_inspect_opt_compact >= 1 && kml_inspect_cur_depth - depth < __kml_inspect_opt_compact && entries == output->n) {
         /* isBelowBreakLength: entries + separators + braces within 80 columns
            and no entry spanning lines. */
         long long start = output->n + indent + (long long)strlen(open) + 10;
@@ -316,5 +337,44 @@ char *__kml_inspect_quote(const char *s) {
         } else sb_put(&b, (const char *)&c, 1);
     }
     sb_put(&b, &q, 1);
+    return sb_finish(&b);
+}
+
+/* __kml_inspect_key renders a property key as util.inspect does: bare when
+   it is an identifier (`x`), quoted otherwise (`'content-type'`). */
+char *__kml_inspect_key(const char *k) {
+    if (!k) return str_alloc_lit("''");
+    long long n = *(const long long *)(k - 8);
+    int ident = n > 0 && !(k[0] >= '0' && k[0] <= '9');
+    for (long long i = 0; ident && i < n; i++) {
+        char c = k[i];
+        ident = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == '_' || c == '$';
+    }
+    if (!ident) return __kml_inspect_quote(k);
+    char *out = str_alloc(n);
+    memcpy(out, k, (size_t)n);
+    return out;
+}
+
+/* __kml_inspect_hex renders an ArrayBuffer's contents as util.inspect's
+   `<00 01 ff>`: at most 100 bytes, then ` ... N more byte(s)`. */
+char *__kml_inspect_hex(const unsigned char *p, long long n) {
+    static const char hex[] = "0123456789abcdef";
+    long long shown = n > 100 ? 100 : n;
+    Sb b = {0, 0, 0};
+    sb_put(&b, "<", 1);
+    for (long long i = 0; i < shown; i++) {
+        char two[3] = {hex[p[i] >> 4], hex[p[i] & 15], ' '};
+        sb_put(&b, two, 2);
+        if (i + 1 < shown) sb_put(&b, " ", 1);
+    }
+    if (n > shown) {
+        char more[48];
+        long long rest = n - shown;
+        snprintf(more, sizeof more, " ... %lld more byte%s", rest, rest == 1 ? "" : "s");
+        sb_str(&b, more);
+    }
+    sb_put(&b, ">", 1);
     return sb_finish(&b);
 }

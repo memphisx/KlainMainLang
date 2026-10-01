@@ -30,6 +30,10 @@ func mapRuntime(keyTy Type) (suffix, keyIR string) {
 		return "any", "i64"
 	case isStringTy(keyTy):
 		return "str", "ptr"
+	case keyTy.IsBigInt:
+		// A bigint key compares by value (SameValueZero): boxed, the any-keyed
+		// runtime's equality compares the cells' bigints.
+		return "any", "i64"
 	case isReferenceKeyTy(keyTy):
 		// Object/array keys carry reference identity (two distinct
 		// arrays/objects are different keys — SameValueZero). They have no
@@ -65,7 +69,7 @@ func (e *Emitter) ensureMapFamily(suffix string) {
 // an already-evaluated NaN is an i64 box coerce's shortcut would leave
 // unboxed, the TDD-00210 gotcha); str/num keys go through valueToMapKey.
 func (e *Emitter) mapKeyRef(kVal Value, keyTy Type) (string, error) {
-	if keyTy.IsDynamic || isReferenceKeyTy(keyTy) {
+	if keyTy.IsDynamic || isReferenceKeyTy(keyTy) || keyTy.IsBigInt {
 		boxed, err := e.emitBoxValue(kVal)
 		if err != nil {
 			return "", err
@@ -143,6 +147,7 @@ func (e *Emitter) emitNewMapValueTyped(init *ast.NewMapExpression, keyTy, valTy 
 // string-key/number-value defaults stand.
 func (e *Emitter) mapKVTypes(keyAnn, valAnn *ast.TypeAnnotation, entries ast.Expression) (keyTy, valTy Type) {
 	keyTy, valTy = TypePtr, TypeI64 // defaults: string keys, number values
+	entries = e.iterableArraySource(entries)
 	if keyAnn == nil && valAnn == nil && entries != nil {
 		if lit, ok := entries.(*ast.ArrayLiteral); ok && len(lit.Elements) > 0 {
 			if pair, ok := lit.Elements[0].(*ast.ArrayLiteral); ok && len(pair.Elements) == 2 {
@@ -177,6 +182,11 @@ func (e *Emitter) mapKVTypes(keyAnn, valAnn *ast.TypeAnnotation, entries ast.Exp
 // "any"-suffix branch in the get case) (ADR-00948).
 func forceAnyMapVal(keyTy, valTy Type) Type {
 	if keyTy.IsDynamic {
+		return TypeAny
+	}
+	// A value slot is one word, so a number or boolean that may be null or
+	// undefined both rides a box, which keeps the two apart.
+	if valTy.NullAndUndef && valTy.IR != "ptr" {
 		return TypeAny
 	}
 	return valTy
@@ -222,7 +232,9 @@ func (e *Emitter) resolveMapEntriesArray(entries ast.Expression, keyTy, valTy Ty
 			if kt.IR != refKey.IR && !refKey.IsArray && !refKey.IsDynamic && !isNullableScalar(refKey) {
 				return "", "", Type{}, fmt.Errorf("%d:%d: new Map(...) entries must share one key type — a heterogeneous-key map is not supported", pair.Elements[0].GetPos().Line, pair.Elements[0].GetPos().Col)
 			}
-			if vt.IR != refVal.IR && !refVal.IsArray && !refVal.IsDynamic && !isNullableScalar(refVal) {
+			// A nullable value type takes null and undefined beside its values.
+			if vt.IR != refVal.IR && !refVal.IsArray && !refVal.IsDynamic && !isNullableScalar(refVal) &&
+				!valTy.IsDynamic && !(valTy.Nullable && (vt.IsNull || refVal.IsNull)) {
 				return "", "", Type{}, fmt.Errorf("%d:%d: new Map(...) entries must share one value type — a heterogeneous-value map is not supported", pair.Elements[1].GetPos().Line, pair.Elements[1].GetPos().Col)
 			}
 		}
@@ -250,12 +262,13 @@ func (e *Emitter) resolveMapEntriesArray(entries ast.Expression, keyTy, valTy Ty
 // a 2-tuple whose fields match the map's K/V; anything else is a clean
 // compile error.
 func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, keyTy, valTy Type, pos ast.Pos) error {
-	srcPtr, srcLen, elemTy, err := e.resolveMapEntriesArray(entries, keyTy, valTy, pos)
+	srcPtr, srcLen, elemTy, err := e.resolveMapEntriesArray(e.iterableArraySource(entries), keyTy, valTy, pos)
 	if err != nil {
 		return err
 	}
 	pairArray := elemTy.IsArray && elemTy.ElemType != nil && !elemTy.ElemType.IsArray
-	if !pairArray && (!elemTy.IsTuple || len(elemTy.Fields) != 2) {
+	dynEntry := isUnconstrainedDynamic(elemTy)
+	if !pairArray && !dynEntry && (!elemTy.IsTuple || len(elemTy.Fields) != 2) {
 		return fmt.Errorf("%d:%d: new Map(...) expects a [key, value][] array of 2-tuples", pos.Line, pos.Col)
 	}
 	suffix, keyIR := mapRuntime(keyTy)
@@ -282,7 +295,19 @@ func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, 
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slotGep, elemTy.IR, srcPtr, idxReg))
 	entry := e.loadArrayElem(slotGep, elemTy)
 	var kVal, vVal Value
-	if pairArray {
+	if dynEntry {
+		// An entry of a user iterable, read as Map's constructor does:
+		// its "0" and "1" properties.
+		k, kerr := e.emitDynAnyMemberGet(entry, e.internString("0"), pos)
+		if kerr != nil {
+			return kerr
+		}
+		v, verr := e.emitDynAnyMemberGet(entry, e.internString("1"), pos)
+		if verr != nil {
+			return verr
+		}
+		kVal, vVal = e.coerce(k, keyTy), e.coerce(v, valTy)
+	} else if pairArray {
 		// A `T[]` entry (`[["a", "b"]]`): its elements 0 and 1, a missing one
 		// reading as the element type's zero.
 		kVal = e.coerce(e.arrayEntryElemOrZero(entry, *elemTy.ElemType, 0), keyTy)
@@ -477,6 +502,15 @@ func (e *Emitter) resolveMapOrSetForCall(objExpr ast.Expression, pos ast.Pos) (T
 // expression (a field access, an array index, another call's result) that
 // itself produces the pointer directly.
 func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if kind, ok := collIterMethod(method); ok && len(args) == 0 && mapIterable(ty) {
+		return e.emitMapIterOpen(ty, mapPtr, kind), nil
+	}
+	return e.emitMapMethod(ty, mapPtr, method, args, pos)
+}
+
+// emitMapMethod is a Map method call; keys(), values() and entries() give
+// arrays, for the callers that consume every entry at once.
+func (e *Emitter) emitMapMethod(ty Type, mapPtr string, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	keyTy := TypePtr
 	valTy := TypeI64
 	if ty.MapKey != nil {
@@ -672,12 +706,21 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 // itself (resolveMapOrSetForCall handles both the named-variable and
 // arbitrary-expression cases uniformly).
 func (e *Emitter) emitSetCall(ty Type, setPtr string, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if kind, ok := collIterMethod(method); ok && len(args) == 0 && mapIterable(ty) {
+		return e.emitMapIterOpen(ty, setPtr, kind), nil
+	}
+	return e.emitSetMethod(ty, setPtr, method, args, pos)
+}
+
+// emitSetMethod is a Set method call; values() gives an array.
+func (e *Emitter) emitSetMethod(ty Type, setPtr string, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	elemTy := TypePtr
 	if ty.MapKey != nil {
 		elemTy = *ty.MapKey
 	}
 	strElem := isStringTy(elemTy)
 	suffix, keyIR := mapRuntime(elemTy)
+	e.ensureMapFamily(suffix)
 
 	switch method {
 	case "add":
@@ -911,7 +954,7 @@ func (e *Emitter) valueToMapVal(v Value, valTy Type) string {
 // preserved through iteration, matching JS). For a scalar/string/any keyTy the
 // boxes already ARE the presentation form, so the raw aggregate passes through.
 func (e *Emitter) materializeKeysAggregate(rawAgg string, keyTy Type) string {
-	if !isReferenceKeyTy(keyTy) {
+	if !isReferenceKeyTy(keyTy) && !keyTy.IsBigInt {
 		return rawAgg
 	}
 	dataReg := e.freshReg()
@@ -940,9 +983,33 @@ func (e *Emitter) materializeKeysAggregate(rawAgg string, keyTy Type) string {
 	box := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", boxGep, dataReg, idxVal))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", box, boxGep))
+	elemRef := e.mapKeyFromSlot(box, keyTy)
+	e.storeArrayElement(outPtr, idxVal, elemRef, keyTy)
+
+	idxNext := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	r0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, outPtr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", out, r0, lenReg))
+	return out
+}
+
+// mapKeyFromSlot is a reference or bigint key as its own type, from the
+// boxed i64 its map slot holds.
+func (e *Emitter) mapKeyFromSlot(box string, keyTy Type) string {
 	_, payload := e.emitUnboxTagPayload(Value{Ref: box})
 	var elemRef string
-	if keyTy.IsArray {
+	if keyTy.IsBigInt {
+		// A bigint key's box is a { magic, bigint } cell.
+		cell := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", cell, payload))
+		elemRef = e.emitBoxedBigIntLoad(cell).Ref
+	} else if keyTy.IsArray {
 		// An array box's payload points to the any-array box cell (anyArrayBoxTy)
 		// whose field 0 is the live array header pointer; array elements are stored
 		// as header pointers (TDD-00213), so store that header directly.
@@ -957,19 +1024,7 @@ func (e *Emitter) materializeKeysAggregate(rawAgg string, keyTy Type) string {
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", objPtr, payload))
 		elemRef = objPtr
 	}
-	e.storeArrayElement(outPtr, idxVal, elemRef, keyTy)
-
-	idxNext := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
-
-	e.emitLabel(doneL)
-	out := e.freshReg()
-	r0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, outPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", out, r0, lenReg))
-	return out
+	return elemRef
 }
 
 func (e *Emitter) mapKeysAndVals(mapPtr string, suffix string, keyTy Type) (keysPtr, keysLen, valsPtr string) {

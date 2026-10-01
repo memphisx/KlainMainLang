@@ -33,31 +33,13 @@ import (
 // scope-aware rename pass ([TDD-00041]) that already handles real
 // file-to-file imports, so shadowing "just works" for free.
 var virtualBuiltinMarkers = map[string]string{
-	"fs":            "fs__kml_builtin",
-	"fs/promises":   "fspromises__kml_builtin",
-	"path":          "path__kml_builtin",
-	"os":            "os__kml_builtin",
-	"zlib":          "zlib__kml_builtin",
 	"child_process": "childprocess__kml_builtin",
-	"readline":      "readline__kml_builtin",
-	"net":           "net__kml_builtin",
-	"tls":           "tls__kml_builtin",
-	"util":          "util__kml_builtin",
-	"dns":           "dns__kml_builtin",
-	"dgram":         "dgram__kml_builtin",
-	"assert":        "assert__kml_builtin",
 	"http":          "http__kml_builtin",
 	// https shares the libcurl-backed client (get/request speak TLS for free);
 	// https.createServer is a clean codegen rejection until the http accept
 	// loop is TLS-wrapped.
 	"https":      "https__kml_builtin",
 	"stream/web": "streamweb__kml_builtin",
-	// TDD-00139 Stage 1: the explicit http2 module. createServer shares the
-	// http server core (which already speaks h2c on the same port); the
-	// client/session surface arrives in later stages.
-	"http2":               "http2__kml_builtin",
-	"diagnostics_channel": "diagch__kml_builtin",
-	"async_hooks":         "asynchooks__kml_builtin",
 	// TDD-00131: the `klain:` namespace holds this project's own bespoke
 	// re-imaginings, distinct from the Node-faithful module names. `klain:http`
 	// is the current `http.listen(handler ⇒ response)` server model, which is
@@ -90,42 +72,7 @@ var virtualBuiltinMarkers = map[string]string{
 	// (marker-dispatched); `Channel` binds as identity (a parse-time
 	// constructor, like Webview / stream class names).
 	"klain:sync": "sync__kml_builtin",
-	// TDD-00158: the WebSocket-server convenience (the ergonomic WSConnection
-	// frame layer the `ws` npm package occupies in Node — non-Node, so under
-	// klain:). `WebSocketServer` binds as identity (a parse-time constructor,
-	// like Webview / Channel / stream class names); it attaches to a Node
-	// http/https server and rides the faithful `'upgrade'` event.
-	"klain:ws": "ws__kml_builtin",
-	"cluster":  "cluster__kml_builtin",
-	"memory":   "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
-	// TDD-00097 Stage 8: Node's stream module. The class names bind as
-	// identity (see resolver.go's stream special-case) — `new Readable(...)`
-	// is recognized by name at parse time like every other builtin
-	// constructor; pipeline/finished live under 'stream/promises'.
-	"stream":          "stream__kml_builtin",
-	"stream/promises": "streampromises__kml_builtin",
-	// TDD-00098: worker_threads. All three members bind as identity (the
-	// same posture as stream's class names): `new Worker(...)` is recognized
-	// by name at parse time like every other builtin constructor, and
-	// `parentPort`/`workerData` are reserved identifiers codegen only
-	// accepts inside a worker entry module.
-	"worker_threads": "workerthreads__kml_builtin",
-	// TDD-00122: native testing helpers (`import { mustCall } from 'test'`).
-	"test": "test__kml_builtin",
-	// ADR-00434: the Node crypto *module* (generateKeyPair etc.), distinct
-	// from (and re-exporting parts of) the ambient WebCrypto global.
-	"crypto": "nodecrypto__kml_builtin",
-	// ADR-00540: Node's built-in SQLite module. DatabaseSync/StatementSync
-	// bind as identity (parse-time constructors, like stream's class names);
-	// registered only under the real `node:sqlite` specifier — there is no
-	// bare Node `sqlite` module, so the init() auto-prefixer leaves it alone.
-	"node:sqlite": "sqlite__kml_builtin",
-	// TDD-00164: Node's experimental FFI module (v26.1.0+). Registered only
-	// under the real `node:ffi` specifier, same posture as node:sqlite —
-	// there is no bare `ffi` core module in Node. `DynamicLibrary` binds as
-	// identity (a builtin constructor via the generic NewExpression path,
-	// like AsyncLocalStorage); everything else is marker-dispatched.
-	"node:ffi": "ffi__kml_builtin",
+	"memory":     "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
 	// TDD-00165: Web-global-backed Node modules. Their primary exports are
 	// spec-identical re-exports of an ambient global (`URL`, `setTimeout`,
 	// `performance`, `Buffer`, `EventEmitter`), so a same-name import is
@@ -134,11 +81,8 @@ var virtualBuiltinMarkers = map[string]string{
 	// machinery (member validation, `node:` aliasing, not-a-file); they are never
 	// bound (globalReexportModules is handled before the generic marker path in
 	// resolver.go), so they must not collide with a real dispatch marker.
-	"url":        "url__reexport_kml_builtin",
-	"timers":     "timers__reexport_kml_builtin",
-	"perf_hooks": "perfhooks__reexport_kml_builtin",
-	"buffer":     "buffer__reexport_kml_builtin",
-	"events":     "events__reexport_kml_builtin",
+	"url":    "url__reexport_kml_builtin",
+	"buffer": "buffer__reexport_kml_builtin",
 }
 
 // firstKey returns the lexicographically-smallest key of a set, for a stable,
@@ -163,11 +107,8 @@ func firstKey(set map[string]bool) string {
 // NOT listed — they have no same-named global and are separate future surface,
 // so they keep the standard "no exported member" rejection.
 var globalReexportModules = map[string]map[string]bool{
-	"url":        {"URL": true, "URLSearchParams": true},
-	"timers":     {"setTimeout": true, "setInterval": true, "setImmediate": true, "clearTimeout": true, "clearInterval": true, "clearImmediate": true},
-	"perf_hooks": {"performance": true, "PerformanceObserver": true},
-	"buffer":     {"Buffer": true, "Blob": true, "atob": true, "btoa": true},
-	"events":     {"EventEmitter": true},
+	"url":    {"URL": true, "URLSearchParams": true},
+	"buffer": {"Buffer": true, "Blob": true, "atob": true, "btoa": true},
 }
 
 // moduleFunctionMembers (TDD-00165 Stage 4) are the *module-only* function
@@ -177,8 +118,7 @@ var globalReexportModules = map[string]map[string]bool{
 // import of the module bind the marker (so `import * as url from 'url'; url.parse(…)`
 // works). A named import of one records an ordinary builtin-member reference.
 var moduleFunctionMembers = map[string]map[string]bool{
-	"url":    {"parse": true, "format": true, "fileURLToPath": true, "pathToFileURL": true, "resolve": true, "urlToHttpOptions": true, "domainToASCII": true, "domainToUnicode": true},
-	"events": {"once": true, "on": true},
+	"url": {"fileURLToPath": true, "pathToFileURL": true, "urlToHttpOptions": true, "domainToASCII": true, "domainToUnicode": true},
 }
 
 // parseTimeReexports are the global-reexport members recognized by the **parser**
@@ -190,16 +130,7 @@ var moduleFunctionMembers = map[string]map[string]bool{
 // reexport member is resolved in codegen by its bare name (`setTimeout(...)`,
 // `performance.now()`, `atob(...)`), so aliasing it is just a rename (Stage 2).
 var parseTimeReexports = map[string]bool{
-	"URL": true, "URLSearchParams": true, "Blob": true, "EventEmitter": true,
-}
-
-// defaultReexportName is the canonical name a *default* import of a global-reexport
-// module binds to — set only where Node gives the module a meaningful default
-// (`events`' default export is `EventEmitter`). For the others a default import is
-// the namespace object, not a single primary export, so it has no entry and is
-// rejected.
-var defaultReexportName = map[string]string{
-	"events": "EventEmitter",
+	"URL": true, "URLSearchParams": true, "Blob": true,
 }
 
 // virtualModuleMembers is Stage 2's addition: the real "exported member"
@@ -211,77 +142,7 @@ var defaultReexportName = map[string]string{
 // source of truth to derive this from automatically, since the built-in
 // dispatch tables live in Go source, not data.
 var virtualModuleMembers = map[string]map[string]bool{
-	"fs": {
-		"readFileSync": true, "writeFileSync": true,
-		"appendFileSync": true, "existsSync": true, "unlinkSync": true,
-		"mkdirSync": true, "rmdirSync": true, "renameSync": true,
-		"copyFileSync": true, "readdirSync": true,
-		"createReadStream": true, "createWriteStream": true, "watch": true,
-		// Stat/handle family — implemented in codegen (inferExprType) and long
-		// usable via the `fs.` namespace form; also valid as named imports.
-		"statSync": true, "lstatSync": true, "fstatSync": true, "fchmodSync": true, "statfsSync": true,
-		"realpathSync": true, "mkdtempSync": true, "readlinkSync": true, "linkSync": true, "utimesSync": true, "futimesSync": true,
-		"openSync": true, "closeSync": true, "writeSync": true, "readSync": true,
-		"fsyncSync": true, "fdatasyncSync": true, "ftruncateSync": true,
-		// Real Node exports with existing codegen dispatch, previously usable
-		// only via the `fs.` namespace form — also valid as named imports.
-		"accessSync": true, "chmodSync": true, "truncateSync": true, "symlinkSync": true, "rmSync": true,
-		// fs.constants namespace (ADR-00795) — also valid as `import { constants }`.
-		"constants": true,
-		// Async callback form (TDD-00107): fs.readFile(path, cb), etc.
-		"readFile": true, "writeFile": true, "appendFile": true, "unlink": true,
-		"mkdir": true, "rmdir": true, "rename": true, "copyFile": true,
-		"readdir": true, "stat": true, "lstat": true, "fstat": true, "statfs": true,
-		"rm": true, "utimes": true, "futimes": true, "ftruncate": true, "fchmod": true,
-		"realpath": true, "mkdtemp": true, "readlink": true, "link": true,
-		"symlink": true, "chmod": true, "truncate": true, "access": true,
-	},
-	// Async Promise form (TDD-00107): import { readFile } from 'fs/promises'.
-	"fs/promises": {
-		"readFile": true, "writeFile": true, "appendFile": true, "unlink": true,
-		"mkdir": true, "rmdir": true, "rename": true, "copyFile": true,
-		"readdir": true, "stat": true, "lstat": true, "statfs": true, "rm": true,
-		"utimes": true, "realpath": true, "mkdtemp": true, "readlink": true,
-		"link": true, "symlink": true, "chmod": true, "truncate": true, "access": true,
-	},
-	"path": {
-		"join": true, "resolve": true, "dirname": true, "basename": true,
-		"extname": true, "isAbsolute": true, "parse": true, "format": true,
-		"normalize": true, "relative": true, "toNamespacedPath": true,
-		"sep": true, "delimiter": true,
-		// TDD-00178: the explicit flavour objects (Node exposes both on every
-		// platform; bare `path` is the host's flavour).
-		"posix": true, "win32": true,
-	},
-	"os": {
-		"platform": true, "homedir": true, "tmpdir": true, "hostname": true,
-		"totalmem": true, "freemem": true, "cpus": true, "EOL": true,
-		"type": true, "release": true, "version": true, "machine": true,
-		"arch": true, "endianness": true, "uptime": true, "loadavg": true,
-		"userInfo": true, "availableParallelism": true, "networkInterfaces": true,
-		"devNull": true,
-	},
-	"zlib": {
-		"gzipSync": true, "gunzipSync": true,
-		"deflateSync": true, "inflateSync": true,
-		"deflateRawSync": true, "inflateRawSync": true,
-		"unzipSync": true,
-		"gzip":      true, "gunzip": true,
-		"deflate": true, "inflate": true,
-		"deflateRaw": true, "inflateRaw": true,
-		"unzip": true,
-	},
 	"child_process": {"spawn": true, "exec": true, "execFile": true, "fork": true, "spawnSync": true, "execSync": true, "execFileSync": true},
-	"readline":      {"createInterface": true},
-	"net":           {"createServer": true, "connect": true, "createConnection": true, "isIP": true, "isIPv4": true, "isIPv6": true},
-	"tls":           {"connect": true, "createServer": true},
-	"util":          {"inspect": true, "format": true},
-	"dns":           {"lookup": true, "resolve4": true, "resolve": true},
-	"dgram":         {"createSocket": true},
-	"assert": {
-		"ok": true, "equal": true, "strictEqual": true, "notEqual": true,
-		"notStrictEqual": true, "fail": true, "throws": true,
-	},
 	// The Node `http` namespace exposes only Node-real members. The bespoke
 	// `listen`/`close`/`closeAllConnections` module-level functions (Node has
 	// these as `Server` methods, not `http.*` functions) live solely under
@@ -293,80 +154,18 @@ var virtualModuleMembers = map[string]map[string]bool{
 	"klain:assets":  {"embedDir": true},
 	"klain:tty":     {"readByte": true, "readKey": true},
 	"klain:sync":    {"go": true, "Channel": true, "select": true, "defaultCase": true},
-	"klain:ws":      {"WebSocketServer": true},
 	"klain:tui": {
 		"Box": true, "Text": true, "List": true, "Spinner": true,
 		"Progress": true, "TextInput": true,
 		"render": true, "enter": true, "leave": true,
 	},
-	"cluster": {"isPrimary": true, "worker": true, "isWorker": true, "fork": true},
-	"memory":  {"free": true},
-	"stream": {
-		"Readable": true, "Writable": true, "Duplex": true, "Transform": true,
-		"PassThrough": true,
-		// Function members (callback forms; the Promise forms live under
-		// 'stream/promises'). Dispatched via the marker, not identity.
-		"pipeline": true, "finished": true, "duplexPair": true,
-	},
-	"https": {"get": true, "request": true, "Agent": true},
-	"crypto": {
-		"generateKeyPair": true, "generateKeyPairSync": true,
-		"randomBytes": true, "randomUUID": true, "getRandomValues": true,
-		"createHash": true, "createHmac": true,
-	},
-	"diagnostics_channel": {"channel": true, "subscribe": true, "unsubscribe": true, "hasSubscribers": true, "tracingChannel": true},
-	"async_hooks":         {"AsyncLocalStorage": true, "AsyncResource": true},
-	"http2": {
-		"createServer": true, "createSecureServer": true, "connect": true,
-		"constants": true, "getDefaultSettings": true,
-		"getPackedSettings": true, "getUnpackedSettings": true,
-	},
+	"memory": {"free": true},
+	"https":  {"get": true, "request": true, "Agent": true},
 	// stream/web re-exports the WHATWG stream classes that already exist as
-	// parse-time constructors — the names bind as identity, like stream's.
+	// parse-time constructors — the names bind as identity.
 	"stream/web": {
 		"ReadableStream": true, "WritableStream": true, "TransformStream": true,
 		"CompressionStream": true, "DecompressionStream": true,
-	},
-	"stream/promises": {"pipeline": true, "finished": true},
-	// MessageChannel/MessagePort/BroadcastChannel are the ambient TDD-00099
-	// constructors re-exported under their Node module name — identity, like
-	// Worker.
-	"worker_threads": {
-		"Worker": true, "parentPort": true, "workerData": true, "isMainThread": true,
-		"MessageChannel": true, "MessagePort": true, "BroadcastChannel": true,
-	},
-	"test": {
-		// node:test runner surface (TDD-00140)
-		"test": true, "it": true, "describe": true, "suite": true,
-		"before": true, "after": true, "beforeEach": true, "afterEach": true,
-		// call helpers
-		"mustCall": true, "mustCallAtLeast": true, "mustNotCall": true,
-		"mustSucceed": true, "skip": true, "expectsError": true, "expectWarning": true,
-		// value probes
-		"isWindows": true, "isLinux": true, "isMacOS": true, "hasCrypto": true,
-		"hasIntl": true, "isMainThread": true,
-	},
-	// ADR-00540: node:sqlite. Both are parse-time constructors bound as
-	// identity (StatementSync is only ever returned from db.prepare(), never
-	// user-constructed, but it is a valid named import).
-	"node:sqlite": {"DatabaseSync": true, "StatementSync": true},
-	// TDD-00164 (all three stages): load + typed calls (dlopen/DynamicLibrary/
-	// dlsym/dlclose/suffix/types), the raw-memory helpers, and the
-	// registerCallback trampoline surface (methods on DynamicLibrary, so not
-	// module exports — they need no entry here).
-	"node:ffi": {
-		"dlopen": true, "dlclose": true, "dlsym": true,
-		"suffix": true, "types": true, "DynamicLibrary": true,
-		"toString": true, "toBuffer": true, "toArrayBuffer": true,
-		"exportString": true, "exportBuffer": true,
-		"exportArrayBuffer": true, "exportArrayBufferView": true,
-		"getRawPointer": true,
-		"getInt8":       true, "getUint8": true, "getInt16": true, "getUint16": true,
-		"getInt32": true, "getUint32": true, "getInt64": true, "getUint64": true,
-		"getFloat32": true, "getFloat64": true,
-		"setInt8": true, "setUint8": true, "setInt16": true, "setUint16": true,
-		"setInt32": true, "setUint32": true, "setInt64": true, "setUint64": true,
-		"setFloat32": true, "setFloat64": true,
 	},
 }
 
@@ -434,19 +233,6 @@ func init() {
 		}
 		moduleFunctionMembers["node:"+name] = funcs
 	}
-	for name, def := range defaultReexportName {
-		if strings.HasPrefix(name, "node:") {
-			continue
-		}
-		defaultReexportName["node:"+name] = def
-	}
-	// A module written in TypeScript whose native primitives are POSIX-only
-	// keeps its code-generated form on Windows, under a private specifier the
-	// resolver rewrites a Windows program's import to (windowsCodegenModule).
-	for name, alias := range windowsCodegenModules {
-		virtualBuiltinMarkers[alias] = virtualBuiltinMarkers[name]
-		virtualModuleMembers[alias] = virtualModuleMembers[name]
-	}
 	// A module written in TypeScript (TDD-00231) is an import of a real
 	// file, not a virtual module.
 	for name := range virtualBuiltinMarkers {
@@ -455,7 +241,6 @@ func init() {
 			delete(virtualModuleMembers, name)
 			delete(globalReexportModules, name)
 			delete(moduleFunctionMembers, name)
-			delete(defaultReexportName, name)
 		}
 	}
 }
@@ -476,7 +261,7 @@ var (
 // companionExports is every name the TypeScript companion of the builtin
 // module spec exports (lib.CompanionPath), or nil when it has none.
 func companionExports(spec string) map[string]bool {
-	path, ok := companionPath(spec)
+	path, ok := lib.CompanionPath(spec)
 	if !ok {
 		return nil
 	}
@@ -599,38 +384,4 @@ func typeOnlyLocals(prog *ast.Program) map[string]bool {
 		}
 	}
 	return out
-}
-
-// windowsCodegenModules maps a module written in TypeScript over POSIX-only
-// native primitives (the TCP handles) to the private specifier of its
-// code-generated form, which a Windows program imports instead.
-var windowsCodegenModules = map[string]string{
-	"net":      "klain:codegen-net",
-	"tls":      "klain:codegen-tls",
-	"klain:ws": "klain:codegen-ws",
-}
-
-// windowsTarget is set while a Windows program resolves: its builtin
-// modules keep their code-generated forms, the companions written in
-// TypeScript included (lib.CompanionPath's), since they stand on net.
-var windowsTarget bool
-
-// companionPath is lib.CompanionPath for the program being resolved.
-func companionPath(spec string) (string, bool) {
-	if windowsTarget {
-		return "", false
-	}
-	return lib.CompanionPath(spec)
-}
-
-// redirectWindowsModules points a Windows program's imports of such a module
-// at its code-generated form.
-func redirectWindowsModules(prog *ast.Program) {
-	for _, st := range prog.Body {
-		if imp, ok := st.(*ast.ImportDeclaration); ok {
-			if alias, ok := windowsCodegenModules[strings.TrimPrefix(imp.Source, "node:")]; ok {
-				imp.Source = alias
-			}
-		}
-	}
 }

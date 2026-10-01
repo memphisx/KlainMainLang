@@ -64,6 +64,9 @@ func (o frontOracle) Reference(id *ast.Identifier) (bool, bool) {
 // cut of TDD-00230 P3.3's closed set: the primitives, the native widths and
 // arrays of them. A type outside it has no answer yet.
 func reprOf(t *checker.Type) (Type, bool) {
+	if t.Flags&checker.Union != 0 {
+		return reprOfUnion(t)
+	}
 	switch {
 	case t.Flags&(checker.Any|checker.Unknown) != 0:
 		return TypeAny, true
@@ -103,4 +106,64 @@ func itoa(n int) string {
 		return "32"
 	}
 	return "64"
+}
+
+// reprOfUnion is a union's representation: `T | null`/`T | undefined` is T's
+// nullable form; two or more primitive kinds (`number | bigint`,
+// `string | number`) are a NaN-boxed union naming its members.
+func reprOfUnion(t *checker.Type) (Type, bool) {
+	var parts []Type
+	seen := map[string]bool{}
+	null, undef := false, false
+	for _, m := range t.Types {
+		var r Type
+		switch {
+		case m.Flags&checker.Undefined != 0:
+			undef = true
+			continue
+		case m.Flags&checker.Null != 0:
+			null = true
+			continue
+		case m.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
+			r = TypeBool
+		default:
+			var ok bool
+			if r, ok = reprOf(m); !ok || r.IsDynamic || r.IsNull || r.IsUndefined || r.IR == "void" {
+				return Type{}, false
+			}
+		}
+		if k := reprKey(r); !seen[k] {
+			seen[k] = true
+			parts = append(parts, r)
+		}
+	}
+	switch {
+	case len(parts) == 0 && undef:
+		return TypeUndefined, true
+	case len(parts) == 0:
+		return TypeNull, true
+	case len(parts) == 1:
+		p := parts[0]
+		if !null && !undef {
+			return p, true
+		}
+		if null && undef && threeStateEligible(p) {
+			return withNullAndUndef(p), true
+		}
+		if p.IR == "ptr" || p.IsArray {
+			p.Nullable, p.IsUndefined = true, undef
+			return p, true
+		}
+		if undef {
+			return undefinedableElem(p), true
+		}
+		p.Nullable = true // `T | null`
+		return p, true
+	}
+	for _, p := range parts {
+		if p.IsArray || p.IsObject || p.IsFunc {
+			return Type{}, false // members a box cannot name without a layout
+		}
+	}
+	return Type{IR: TypeAny.IR, IsDynamic: true, UnionMembers: parts, Nullable: null || undef, IsUndefined: undef}, true
 }

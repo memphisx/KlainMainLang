@@ -1,10 +1,8 @@
-// EventSource (Server-Sent Events) — TDD-00038 Stages 0-2: connection
-// plumbing (readyState/close), SSE record parsing, onmessage/onopen/
-// onerror, and addEventListener/removeEventListener for named events; Stage
-// 3: auto-reconnect (retry:/Last-Event-ID replay) and terminal (no-retry)
-// failure on a non-2xx/wrong-Content-Type response. `new EventSource(url)`
-// opens a real, non-blocking libcurl transfer (reusing the same event loop
-// and multi-interface machinery fetch() already uses).
+// EventSource (Server-Sent Events), as Node's (undici's, over fetch):
+// readyState/close, SSE record parsing, onmessage/onopen/onerror,
+// addEventListener/removeEventListener for named events, auto-reconnect
+// (retry:/Last-Event-ID replay) and terminal (no-retry) failure on a
+// non-200/wrong-Content-Type response.
 //
 // Talks to local fixture server endpoints (tools/httpbin-lite/'s /stream
 // and /stream-named, started by `make examples` — see ADR-00096) instead

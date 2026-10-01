@@ -83,10 +83,14 @@ entry:
   %%fl_p = getelementptr %s, ptr %%s, i32 0, i32 12
   store i64 0, ptr %%fl_p, align 8
   %%rdy = call ptr @__kml_task_alloc_promise()
+  ; The ready and closed promises are marked handled (the spec's
+  ; SetPromiseIsHandledToTrue).
+  call void @__kml_promise_mark_handled(ptr %%rdy)
   call void @__kml_promise_settle(ptr %%rdy, i64 1)
   %%rdy_p = getelementptr %s, ptr %%s, i32 0, i32 13
   store ptr %%rdy, ptr %%rdy_p, align 8
   %%cp = call ptr @__kml_task_alloc_promise()
+  call void @__kml_promise_mark_handled(ptr %%cp)
   %%cp_p = getelementptr %s, ptr %%s, i32 0, i32 14
   store ptr %%cp, ptr %%cp_p, align 8
   %%clp_p = getelementptr %s, ptr %%s, i32 0, i32 15
@@ -178,6 +182,7 @@ wantPending:
   br i1 %%settled, label %%rearm, label %%ret
 rearm:
   %%np = call ptr @__kml_task_alloc_promise()
+  call void @__kml_promise_mark_handled(ptr %%np)
   store ptr %%np, ptr %%rdy_p, align 8
   ret void
 wantReady:

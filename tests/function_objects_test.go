@@ -79,11 +79,11 @@ console.log(read());
 }
 
 func TestE2EBooleanAmongNumbersIsHeterogeneous(t *testing.T) {
-	// `[true, 5]` used to coerce silently to `[true, true]`; strict rejects it
-	// like any other heterogeneous literal, -compat=js boxes it (TDD-00229).
-	assertCodegenError(t, `const a = [true, 5];
-console.log(a);
-`, "element 1 is a number, not a boolean")
+	// `[true, 5]` used to coerce silently to `[true, true]`; it is a
+	// `(boolean | number)[]` (ADR-01214), -compat=js boxes it (TDD-00229).
+	assertSameAsNode(t, `const a = [true, 5];
+console.log(a, typeof a[0], typeof a[1]);
+`)
 	assertSameAsNodeCompatJS(t, `const a = [true, 5, false];
 console.log(a);
 `)
@@ -113,4 +113,24 @@ console.log(greet('A'), dg('A'), dg('B', '?'), dg('C', undefined));
 console.log(tail(1), dt(1), dt(1, 5), dt(1, undefined, '!'));
 console.log(plain(1, 2), dp(1, 2));
 `)
+}
+
+// Object.defineProperty of a function's name/length is what .name/.length
+// and inspect read; the builtin ones are non-writable, non-enumerable and
+// configurable, as in Node.
+func TestE2EFunctionNameLengthDefineProperty(t *testing.T) {
+	assertOutput(t, `
+function make(name: string, n: number, ptr: bigint): (...args: any[]) => any {
+  const f = (...args: any[]): any => args.length;
+  Object.defineProperty(f, 'name', { value: name, configurable: true });
+  Object.defineProperty(f, 'length', { value: n, configurable: true });
+  (f as any).pointer = ptr;
+  return f;
+}
+const abs = make('abs', 1, 1234n);
+console.log(typeof abs, abs.name, abs.length, (abs as any).pointer, Object.keys(abs as any).join(','));
+console.log(abs);
+function g(a: number, b: number): number { return a + b; }
+console.log(Object.getOwnPropertyDescriptor(g, 'name'), Object.getOwnPropertyDescriptor(g, 'length'));
+`, "function abs 1 1234n pointer\n[Function: abs] { pointer: 1234n }\n{ value: 'g', writable: false, enumerable: false, configurable: true } { value: 2, writable: false, enumerable: false, configurable: true }")
 }

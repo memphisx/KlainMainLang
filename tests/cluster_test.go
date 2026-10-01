@@ -8,26 +8,28 @@ import (
 	"testing"
 )
 
-// --- Node `cluster` (TDD-00105 / ADR-00331) ---
+// --- Node `cluster` (lib/node/cluster.ts, Node's lib/internal/cluster) ---
 //
-// cluster.fork() re-execs the program as a worker (KML_CLUSTER_WORKER_ID env);
-// cluster.isPrimary/isWorker/worker read the seeded id. Workers each bind the
-// same port via SO_REUSEPORT. The Go test drives a clustered HTTP server; the
-// process-group cleanup helper (startHTTPClusterServer) reaps the forked
-// workers.
+// cluster.fork() forks this program with NODE_UNIQUE_ID set and the IPC
+// channel open; a worker's server listen goes through the primary, which
+// accepts and hands connections round (SCHED_RR) or sends the listening
+// socket itself (SCHED_NONE). Each program also runs under Node and must
+// print the same; only the primary prints, in an order its own events fix.
 
-// A single process with no fork is the primary: isPrimary true, isWorker false.
+// A single process with no fork is the primary.
 func TestE2EClusterSingleProcessIsPrimary(t *testing.T) {
-	assertOutputImports(t, `
+	assertSameAsNodeImports(t, `
 import cluster from 'cluster'
-console.log("isPrimary:", cluster.isPrimary)
+console.log("isPrimary:", cluster.isPrimary, cluster.isMaster)
 console.log("isWorker:", cluster.isWorker)
 console.log("worker:", cluster.worker)
-`, "isPrimary: true\nisWorker: false\nworker: undefined")
+console.log("workers:", cluster.workers)
+console.log("policy:", cluster.schedulingPolicy === cluster.SCHED_RR, cluster.SCHED_NONE, cluster.SCHED_RR)
+`)
 }
 
-// A clustered HTTP server: the primary forks workers, each re-execs and binds
-// the shared port; a request is served by one of the workers.
+// klain:http's http.listen inside Node cluster workers: each worker binds
+// the shared port itself (SO_REUSEPORT), as http.listen({ workers }) does.
 func TestE2EClusterHTTPServed(t *testing.T) {
 	src := `
 import cluster from 'cluster'
@@ -53,144 +55,157 @@ if (cluster.isPrimary) {
 	}
 }
 
+// Worker messages both ways; 'online', 'message' and 'exit' on the Worker.
 func TestE2EClusterWorkerIPCMessaging(t *testing.T) {
-	// cluster.fork() workers now carry the TDD-00141 IPC channel
-	// (ADR-00427): primary sees 'online' (microtask-deferred), receives the
-	// worker's message, replies, and observes the worker's exit — all
-	// mustCall-verified at exit on both sides.
-	assertOutputImports(t, `
+	assertSameAsNodeImports(t, `
 import cluster from 'cluster'
-import { mustCall } from 'test'
 if (cluster.isPrimary) {
   const worker = cluster.fork()
-  worker.on('online', mustCall(() => { console.log("online") }))
-  worker.on('message', mustCall((msg) => {
+  worker.on('online', () => { console.log("online") })
+  worker.on('message', (msg) => {
     console.log("primary got: " + msg)
     worker.send("shutdown")
-  }))
-  worker.on('exit', mustCall((code) => { console.log("worker exit: " + code) }))
+  })
+  worker.on('exit', (code, signal) => { console.log("worker exit: " + code + " " + signal) })
 } else {
-  process.send("hi from worker " + cluster.worker!.id)
+  process.send!("hi from worker " + cluster.worker!.id)
   process.on('message', (msg) => {
     if (msg === "shutdown") { process.exit(0) }
   })
 }
-`, "online\nprimary got: hi from worker 1\nworker exit: 0")
+`)
 }
 
+// Cluster-level events carry the Worker first; cluster.workers is keyed by
+// id and loses a worker before its 'exit' listeners run.
 func TestE2EClusterLevelEventsAndWorkers(t *testing.T) {
-	// Cluster-level events (TDD-00105 remainder): cluster.on('fork'/'online'/
-	// 'message'/'exit') fire with the Worker as the first argument — 'fork'
-	// synchronously inside cluster.fork(), 'online' from a queued microtask,
-	// 'message'/'exit' relayed off each worker's IPC/reap path (armed for
-	// workers forked before OR after the registration). cluster.workers lists
-	// the forked Worker handles.
-	assertOutputImports(t, `
+	assertSameAsNodeImports(t, `
 import cluster from 'cluster'
-import { mustCall } from 'test'
 if (cluster.isPrimary) {
-  cluster.on('fork', mustCall((w) => { console.log("fork " + w.id) }))
-  cluster.on('online', mustCall((w) => { console.log("online " + w.id) }))
-  cluster.fork()
-  console.log("workers: " + cluster.workers.length)
-  for (const w of cluster.workers) { console.log("listed " + w.id) }
-  cluster.on('message', mustCall((w, msg: string) => {
-    console.log("msg " + w.id + " " + msg)
-    w.send("shutdown")
-  }))
-  cluster.on('exit', mustCall((w, code) => { console.log("exit " + w.id + " " + code) }))
+  cluster.on('fork', (w) => { console.log("fork " + w.id) })
+  cluster.on('online', (w) => { console.log("online " + w.id + " " + w.state) })
+  cluster.on('setup', (s) => { console.log("setup " + s.silent + " " + s.args!.length) })
+  const w1 = cluster.fork()
+  console.log("workers: " + Object.keys(cluster.workers!).join(","))
+  console.log("byid " + (cluster.workers![1] === w1) + " " + (cluster.workers![9] === undefined))
+  cluster.on('message', (w, msg: any) => {
+    console.log("msg " + w.id + " " + JSON.stringify(msg))
+    w.send({ reply: msg.n + 1 })
+  })
+  cluster.on('exit', (w, code) => {
+    console.log("exit " + w.id + " " + code + " left " + Object.keys(cluster.workers!).length + " dead " + w.isDead())
+  })
 } else {
-  process.send("hello")
-  process.on('message', (msg) => {
-    if (msg === "shutdown") { process.exit(7) }
+  process.send!({ cmd: "add", n: 41 })
+  process.on('message', (m: any) => {
+    process.exit(m.reply === 42 ? 7 : 1)
   })
 }
-`, "fork 1\nworkers: 1\nlisted 1\nonline 1\nmsg 1 hello\nexit 1 7")
+`)
 }
 
+// cluster.disconnect(cb): every worker's channel closes; each exits with
+// exitedAfterDisconnect set.
 func TestE2EClusterDisconnectAll(t *testing.T) {
-	// cluster.disconnect() closes every worker's IPC channel; the workers
-	// observe the closed channel and exit their message loops.
-	assertOutputImports(t, `
+	assertSameAsNodeImports(t, `
 import cluster from 'cluster'
-import { mustCall } from 'test'
 if (cluster.isPrimary) {
-  cluster.fork()
-  cluster.fork()
-  cluster.on('exit', (w, code) => { console.log("exit " + code) })
-  cluster.disconnect()
-  console.log("disconnected")
-} else {
-  process.on('message', (msg) => {})
-  process.exit(0)
-}
-`, "disconnected\nexit 0\nexit 0")
-}
-
-func TestE2EClusterFidelitySurface(t *testing.T) {
-	// The full module-level fidelity set (TDD-00105 closeout): cluster.workers
-	// drops exited workers BEFORE the 'exit' listener runs (Node deletes then
-	// emits), cluster.workers[id] is the ID-keyed lookup, object messages
-	// cross the channel as themselves (json serialization mode, both
-	// directions), several listeners per event coexist (worker-level twice +
-	// the cluster-level relay), and cluster.disconnect(cb) flushes in-flight
-	// messages before closing and runs its completion callback.
-	assertOutputImports(t, `
-import cluster from 'cluster'
-import { mustCall } from 'test'
-if (cluster.isPrimary) {
-  cluster.on('message', mustCall((w, msg) => {
-    if (typeof msg === "object") {
-      console.log("obj cmd " + msg.cmd + " n " + msg.n)
-      w.send({ reply: (msg.n as number) + 1 })
-    } else {
-      console.log("str " + msg)
-    }
-  }, 2))
-  cluster.on('exit', mustCall((w, code) => {
-    console.log("exit " + w.id + " " + code + " left " + cluster.workers.length)
-  }))
-  const w = cluster.fork()
-  w.on('exit', mustCall((code) => { console.log("w-exit-a " + code) }))
-  w.on('exit', mustCall((code) => { console.log("w-exit-b " + code) }))
-  console.log("byid " + (cluster.workers[1] ? cluster.workers[1].id : -1) + " " + (cluster.workers[9] ? 1 : 0))
-} else {
-  process.send("hello")
-  process.send({ cmd: "add", n: 41 })
-  process.on('message', (m) => {
-    console.log("worker reply " + m.reply)
-    process.exit(0)
+  let online = 0
+  cluster.on('online', () => {
+    if (++online < 2) return
+    cluster.disconnect(() => { console.log("all disconnected") })
   })
+  let exits = 0
+  cluster.on('exit', (w, code) => {
+    if (++exits === 2) console.log("exits " + code + " " + w.exitedAfterDisconnect)
+  })
+  cluster.fork()
+  cluster.fork()
+} else {
+  process.on('message', () => {})
 }
-`, "byid 1 0\nstr hello\nobj cmd add n 41\nworker reply 42\nexit 1 0 left 0\nw-exit-a 0\nw-exit-b 0")
+`)
 }
 
+// A worker's net server behind the primary, under both scheduling
+// policies: round-robin (the primary accepts and hands each connection to
+// a worker) and shared (each worker accepts on the socket the primary
+// sent); 'listening' reports the worker's address; worker.disconnect()
+// closes its server and exits it.
+func TestE2EClusterNetServerPolicies(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
+	for _, policy := range []string{"rr", "none"} {
+		t.Run(policy, func(t *testing.T) {
+			t.Setenv("NODE_CLUSTER_SCHED_POLICY", policy)
+			assertSameAsNodeImports(t, `
+import cluster from 'cluster'
+import * as net from 'net'
+if (cluster.isPrimary) {
+  let listening = 0
+  const replies: string[] = []
+  cluster.on('listening', (w, addr) => {
+    console.log("listening " + addr.port + " " + addr.address + " " + addr.addressType)
+    if (++listening < 2) return
+    for (let i = 0; i < 4; i++) {
+      const c = net.connect(8159, '127.0.0.1')
+      c.setEncoding('utf8')
+      let b = ''
+      c.on('data', (d: string) => { b += d })
+      c.on('end', () => {
+        replies.push(b)
+        if (replies.length < 4) return
+        console.log("replies " + replies.every((r) => r === 'w1' || r === 'w2'))
+        for (const id in cluster.workers) cluster.workers[id]!.send('bye')
+      })
+    }
+  })
+  let exits = 0
+  cluster.on('exit', (w, code) => {
+    if (++exits === 2) console.log("exited " + code + " " + w.exitedAfterDisconnect)
+  })
+  cluster.fork()
+  cluster.fork()
+} else {
+  const server = net.createServer((s) => { s.end('w' + cluster.worker!.id) })
+  server.listen(8159)
+  process.on('message', (m) => { if (m === 'bye') cluster.worker!.disconnect() })
+}
+`)
+		})
+	}
+}
+
+// An HTTP server in each worker; setupPrimary's args and silent reach the
+// worker; worker.kill() ends it with SIGTERM.
 func TestE2EClusterListeningAndSetupPrimary(t *testing.T) {
-	// cluster.on('listening') fires with (worker, { address, port,
-	// addressType }) when a worker's server binds; setupPrimary honors args
-	// (worker argv tail) and silent (worker stdio piped to the Worker
-	// handle); cluster.settings reads the stored values back. `exec` stays a
-	// compile-time rejection (the re-exec-self model has no other file).
-	assertOutputImports(t, `
+	skipIfLoopbackTrafficFiltered(t)
+	assertSameAsNodeImports(t, `
 import cluster from 'cluster'
 import http from 'http'
-import { mustCall } from 'test'
 if (cluster.isPrimary) {
   cluster.setupPrimary({ args: ["--mode", "beta"], silent: true })
-  console.log("settings " + cluster.settings.args.join(" ") + " " + cluster.settings.silent)
-  cluster.on('listening', mustCall((w, addr) => {
-    console.log("listening " + w.id + " " + addr.port + " " + addr.address)
-    for (const ww of cluster.workers) ww.kill()
-  }))
-  cluster.on('exit', (w, code) => {})
-  const w = cluster.fork()
-  w.process.stdout.on('data', (chunk: string) => {
-    console.log("captured " + chunk.trim())
+  console.log("settings " + cluster.settings.args!.join(" ") + " " + cluster.settings.silent)
+  cluster.on('listening', (w, addr) => {
+    http.get('http://127.0.0.1:8153/x', (res) => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (c: string) => { body += c })
+      res.on('end', () => {
+        console.log("listening " + w.id + " " + addr.port + " " + addr.address + " body " + body)
+        w.kill()
+      })
+    })
   })
+  cluster.on('exit', (w, code, signal) => { console.log("exit " + code + " " + signal) })
+  const w = cluster.fork()
+  let out = ''
+  w.process.stdout!.setEncoding('utf8')
+  w.process.stdout!.on('data', (chunk: string) => { out += chunk })
+  w.process.stdout!.on('end', () => { console.log("captured " + out.trim()) })
 } else {
   console.log("argv " + process.argv[2] + " " + process.argv[3])
-  const server = http.createServer((req, res) => { res.end("hi") })
+  const server = http.createServer((req, res) => { res.end("hi " + req.url) })
   server.listen(8153)
 }
-`, "settings --mode beta true\ncaptured argv --mode beta\nlistening 1 8153 null")
+`)
 }

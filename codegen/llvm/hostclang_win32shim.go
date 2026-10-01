@@ -110,16 +110,6 @@ func win32LinkArgs(args []string) []string {
 	return extra
 }
 
-// hasArg reports whether args already carries flag (exact match).
-func hasArg(args []string, flag string) bool {
-	for _, a := range args {
-		if strings.EqualFold(a, flag) {
-			return true
-		}
-	}
-	return false
-}
-
 // win32ShimDir is the per-user cache directory holding the compiled shim
 // objects and kml_posix_compat.h; HostClangArgs passes it with -I so the
 // embedded C helpers' `#ifdef _WIN32` include resolves.

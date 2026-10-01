@@ -7,44 +7,44 @@
  "coverage": {
   "loose": "4/4",
   "loosePct": 100,
-  "strict": "0/4",
-  "strictPct": 0
+  "strict": "2/4",
+  "strictPct": 50
  },
- "lede": "Real OS threads with cross-thread messaging, offered under two surfaces at once: Node's worker_threads and the browser Worker/onmessage shape. The pervasive divergence is rigidity: messaging is statically typed and monomorphic — one message type per direction, one listener per event, arrow-function literals only — and worker paths must be string literals because each worker file compiles into the same binary as its own entry function. Payloads are structured-clone-safe values (no arrays through onmessage), with SharedArrayBuffer/Atomics and MessagePort crossing by reference for shared-memory work.",
+ "lede": "Real OS threads with cross-thread messaging: Node's worker_threads, ported from Node's own lib/internal/worker, plus the web's Worker/onmessage shape. Each Worker is an isolate — on its own thread it evaluates its modules afresh — and messages are structured clones of any value, with SharedArrayBuffer/Atomics for shared memory and MessagePorts moving between threads in a transfer list. The one structural difference: a worker's file is compiled into the program, so new Worker takes a path literal.",
  "entries": [
   {
    "id": "workers.worker",
    "name": "Worker",
    "statusRow": "Worker",
-   "signature": "new Worker(path: string, opts?: { workerData?: T }): Worker",
+   "signature": "new Worker(filename: string | URL, options?: WorkerOptions): Worker",
    "badge": "caveats",
-   "description": "Spawns a real OS thread running a worker module, exposing both the Node worker_threads API (w.on('message', ...), import { Worker } from 'worker_threads') and the ambient browser shape (new Worker, w.onmessage, e.data). The worker file compiles into the same binary as its own entry function; each thread runs its own event loop with thread-local runtime singletons, and messages travel over pipes as pointer envelopes deep-copied at the boundary. SharedArrayBuffer + Atomics (add/load/wait/notify/isLockFree) give lock-free shared-memory counters without messages carrying the value.",
+   "description": "Spawns a real OS thread running one of the program's worker modules as an isolate: on its thread it evaluates every builtin module and the modules the file imports afresh, then the file. The Worker is Node's (an EventEmitter with 'online', 'message', 'error', 'exit', postMessage, terminate() resolving the exit code, ref/unref, threadId); the web's onmessage/onerror shape and a worker's self.onmessage/self.postMessage work too. Messages are structured clones of any value; a SharedArrayBuffer keeps its memory, and a MessagePort in the transfer list moves to the other thread. An uncaught error in the worker reaches the parent's 'error', then 'exit' with code 1.",
    "params": [
     {
-     "name": "path",
-     "type": "string",
-     "desc": "String literal path to the worker module."
+     "name": "filename",
+     "type": "string | URL",
+     "desc": "A path literal (or __filename) naming a worker module; resolved relative to the file it is written in."
     },
     {
-     "name": "opts",
-     "type": "{ workerData?: T }",
-     "desc": "Optional initial data (structured-clone-safe, or a SharedArrayBuffer/MessagePort by reference)."
+     "name": "options",
+     "type": "WorkerOptions",
+     "desc": "workerData (any cloneable value), transferList, name."
     }
    ],
    "returns": {
     "type": "Worker",
-    "desc": "A handle exposing postMessage, on/onmessage, and terminate."
+    "desc": "An EventEmitter with postMessage, terminate, ref/unref and threadId."
    },
    "exampleKey": "workers/parallel_sum",
    "snippet": "const a = new Worker('./sum_worker.ts', { workerData: \"left\" });\na.on('message', (partial: number) => { total += partial; a.terminate(); });\na.postMessage(left);",
    "differences": [
-    "One listener per event, arrow-function literals only",
-    "One message type per direction, declared by annotation",
-    "Payloads: structured-clone-safe values only (plus `SharedArrayBuffer`/`MessagePort`, which cross by reference); strings share their buffer across threads; no arrays through `onmessage`/`e.data`",
-    "`'error'` carries the message string, not an Error object; no `self.onerror`",
-    "`terminate()` is cooperative, keeps queued messages, always exits 1",
-    "Worker path must be a string literal or `__filename` (a program that is its own worker, split on `isMainThread`); a worker module can't also be imported, can't spawn workers, and its named functions can't read its own top-level bindings",
-    "`-mm=manual` leaks per message; no combining with `http.listen({workers:N})`"
+    "A worker's file is compiled in: `new Worker` takes a path literal (resolved relative to the file it is written in) or `__filename`; a computed path or `eval: true` code fails at `new Worker`",
+    "`terminate()` takes effect at the worker's next event-loop turn: a worker busy in synchronous code runs on until it yields",
+    "A TypedArray view over a `SharedArrayBuffer` is copied, not shared: send the buffer and re-view it",
+    "A transferred `ArrayBuffer` is copied, not detached",
+    "A worker shares `process.env` with its parent and writes `stdout`/`stderr` directly; the stdio/env/resourceLimits/argv/execArgv options and `getHeapSnapshot()` are not ported",
+    "An `'uncaughtException'` listener in a worker runs but the worker still ends with code 1",
+    "No combining with `http.listen({workers:N})`"
    ],
    "seeAlso": [
     "workers.broadcastchannel",
@@ -59,28 +59,22 @@
    "name": "BroadcastChannel",
    "statusRow": "BroadcastChannel",
    "signature": "new BroadcastChannel(name: string): BroadcastChannel",
-   "badge": "caveats",
-   "description": "Name-keyed pub/sub across threads via a process-wide registry: every subscriber to a channel name gets its own deep copy of each posted message (a synthesized clone thunk, called once per subscriber). Delivery rides each thread's select() loop over per-endpoint pipes, works same-thread and across workers, and a registered onmessage holds its thread's loop alive until close() (Node ref semantics).",
+   "badge": "exact",
+   "description": "Name-keyed pub/sub across threads through a process-wide registry: each other open channel of the name gets its own structured clone of the message, delivered on its own thread's loop. An open channel holds the loop until close(), as Node's does; onmessage, addEventListener/removeEventListener and ref()/unref() work same-thread and across workers.",
    "params": [
     {
      "name": "name",
      "type": "string",
-     "desc": "String literal channel name; fixes one message type program-wide."
+     "desc": "The channel name (any string)."
     }
    ],
    "returns": {
     "type": "BroadcastChannel",
-    "desc": "An endpoint with postMessage, onmessage, and close."
+    "desc": "An endpoint with postMessage, onmessage, addEventListener and close."
    },
    "exampleKey": "workers/broadcast",
-   "snippet": "const bc = new BroadcastChannel('news');\nsetTimeout(() => { bc.postMessage(\"markets up in Thessaloniki\"); }, 100);",
-   "differences": [
-    "Channel name must be a string literal; one message type per channel name, program-wide (first `postMessage` or annotated `onmessage` fixes it)",
-    "`onmessage` property only (arrow-function literal, `(e: { data: T })`); no `addEventListener`, no `'messageerror'`",
-    "Array payloads not supported through `onmessage`",
-    "`close()` leaks the endpoint's two pipe fds by design (closes a race against an in-flight post)",
-    "`-mm=manual` leaks per delivery (payload ownership passes to the listener)"
-   ],
+   "snippet": "const bc = new BroadcastChannel('news');\nsetTimeout(() => {\n  bc.postMessage(\"markets up in Thessaloniki\");\n  bc.close();\n}, 100);",
+   "differences": [],
    "seeAlso": [
     "workers.worker",
     "workers.messageport"
@@ -93,28 +87,17 @@
    "id": "workers.messageport",
    "name": "MessageChannel / MessagePort",
    "statusRow": "MessageChannel / MessagePort",
-   "signature": "new MessageChannel<T = number>(): { port1: MessagePort<T>, port2: MessagePort<T> }",
-   "badge": "caveats",
-   "description": "A typed port pair whose two ports talk directly over one shared endpoint runtime (a pipe per endpoint, peer-linked halves). A port crosses a worker boundary whole — as workerData or as an entire postMessage payload — and is shared, not neutered: the sender must stop using a sent port. Whichever thread registers a port's onmessage drains it, so no adoption protocol is needed when a port moves to a worker. Importable under Node's module name (import { MessageChannel, MessagePort, BroadcastChannel } from 'worker_threads').",
-   "params": [
-    {
-     "name": "T",
-     "type": "type param",
-     "desc": "Message type fixed at construction (default number), symmetric for both ports."
-    }
-   ],
+   "signature": "new MessageChannel(): { port1: MessagePort, port2: MessagePort }",
+   "badge": "exact",
+   "description": "An entangled port pair. A port is Node's NodeEventTarget: on('message') or onmessage starts it, addEventListener works, close() closes both ends and each emits 'close', and ref()/unref()/hasRef() control whether it holds the loop. A port moves to another thread in a postMessage transfer list or a Worker's transferList, and is detached on the sending side; one outside the transfer list is a DataCloneError. Globals, and importable from worker_threads.",
+   "params": [],
    "returns": {
     "type": "{ port1, port2 }",
-    "desc": "A pair of peer-linked MessagePorts."
+    "desc": "A pair of entangled MessagePorts."
    },
    "exampleKey": "workers/port_pair",
-   "snippet": "const ch = new MessageChannel<string>();\nconst w = new Worker('./port_worker.ts', { workerData: ch.port2 });\nch.port1.onmessage = (e: { data: string }) => { console.log(\"shouted back: \" + e.data); };",
-   "differences": [
-    "Message type fixed at construction (`new MessageChannel<T>()`, default `number`), symmetric for both ports",
-    "A port crosses a worker boundary only whole — as `workerData` or as the entire `postMessage` payload — and is **shared, not neutered**: the sender must stop using a sent port (unsynchronized use from two threads is memory-safe but unordered); the `MessageChannel` pair box itself never crosses",
-    "`onmessage` property only (arrow literal); no `on('message')`, no `start()`/`'close'` event, no array payloads via `onmessage`",
-    "`close()` leaks two pipe fds; `-mm=manual` leaks per message"
-   ],
+   "snippet": "const ch = new MessageChannel();\nconst w = new Worker('./port_worker.ts', { workerData: ch.port2, transferList: [ch.port2] });\nch.port1.onmessage = (e: MessageEvent) => { console.log(\"shouted back: \" + e.data); };",
+   "differences": [],
    "seeAlso": [
     "workers.worker",
     "workers.broadcastchannel"

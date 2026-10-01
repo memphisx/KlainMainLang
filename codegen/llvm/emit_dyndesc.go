@@ -8,6 +8,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -23,24 +24,49 @@ const (
 // emitDynBagOrThrow unboxes a dynamic-object argument for a descriptor
 // static, throwing the JS TypeError for anything else.
 func (e *Emitter) emitDynBagOrThrow(arg ast.Expression, what string, pos ast.Pos) (string, error) {
+	bag, _, err := e.emitDynOwnBag(arg, what, false, pos)
+	return bag, err
+}
+
+// emitDynOwnBag is emitDynBagOrThrow for the Object statics that act on a
+// value's own properties: a function's are its bag (TDD-00229) when fn is
+// set. It also returns the argument boxed.
+func (e *Emitter) emitDynOwnBag(arg ast.Expression, what string, fn bool, pos ast.Pos) (string, Value, error) {
 	v, err := e.emitExprWithObjectHint(arg, TypeAny)
 	if err != nil {
-		return "", err
+		return "", Value{}, err
+	}
+	if fn && !v.Ty.IsDynamic && v.Ty.IsFunc {
+		if v, err = e.emitBoxValue(v); err != nil {
+			return "", Value{}, err
+		}
 	}
 	if !v.Ty.IsDynamic {
-		return "", fmt.Errorf("%d:%d: %s requires a dynamic (any-typed) object", pos.Line, pos.Col, what)
+		return "", Value{}, fmt.Errorf("%d:%d: %s requires a dynamic (any-typed) object", pos.Line, pos.Col, what)
 	}
 	tag, payload := e.emitUnboxTagPayload(v)
-	okL, badL := e.emitTagCheck(tag, kmlTagDynObject, "dyndesc.obj")
 	contL := e.freshLabel("dyndesc.cont")
+	var incoming []string
+	if fn {
+		fnL, notFnL := e.emitTagCheck(tag, kmlTagDynFunc, "dyndesc.fn")
+		e.emitLabel(fnL)
+		fnBag := e.emitFnPropsBag(e.emitIntToPtr(payload))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+		incoming = append(incoming, fmt.Sprintf("[ %s, %%%s ]", fnBag, fnL))
+		e.emitLabel(notFnL)
+	}
+	okL, badL := e.emitTagCheck(tag, kmlTagDynObject, "dyndesc.obj")
 	e.emitLabel(okL)
+	objBag := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", objBag, payload))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+	incoming = append(incoming, fmt.Sprintf("[ %s, %%%s ]", objBag, okL))
 	e.emitLabel(badL)
 	e.emitThrowTypeError(what + " called on non-object")
 	e.emitLabel(contL)
 	bag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", bag, payload))
-	return bag, nil
+	e.emitInstr(fmt.Sprintf("%s = phi ptr %s", bag, strings.Join(incoming, ", ")))
+	return bag, v, nil
 }
 
 // descFieldBool reads a boolean-ish descriptor field: returns (present i1,
@@ -88,7 +114,7 @@ func (e *Emitter) emitObjectDefineProperty(args []ast.Expression, pos ast.Pos) (
 	}
 	e.ensureDynObj()
 	e.ensureAnyOps()
-	bag, err := e.emitDynBagOrThrow(args[0], "Object.defineProperty", pos)
+	bag, obj, err := e.emitDynOwnBag(args[0], "Object.defineProperty", true, pos)
 	if err != nil {
 		return Value{}, err
 	}
@@ -100,7 +126,67 @@ func (e *Emitter) emitObjectDefineProperty(args []ast.Expression, pos ast.Pos) (
 	if err != nil {
 		return Value{}, err
 	}
+	e.emitDefinePropertyOn(bag, keyRef, descBag)
+	return obj, nil
+}
 
+// emitObjectDefineProperties is Object.defineProperties(o, props): each of
+// props' own enumerable keys defined on o by its descriptor, as
+// Object.defineProperty does; the result is o.
+func (e *Emitter) emitObjectDefineProperties(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("%d:%d: Object.defineProperties takes 2 arguments", pos.Line, pos.Col)
+	}
+	e.ensureDynObj()
+	e.ensureAnyOps()
+	bag, obj, err := e.emitDynOwnBag(args[0], "Object.defineProperties", true, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	props, err := e.emitDynBagOrThrow(args[1], "Object.defineProperties (properties)", pos)
+	if err != nil {
+		return Value{}, err
+	}
+	keys := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_dynobj_keys_enum(ptr %s)", keys, props))
+	data, n := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", data, keys))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", n, keys))
+	iSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", iSlot))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", iSlot))
+	condL, bodyL, endL := e.freshLabel("defprops.cond"), e.freshLabel("defprops.body"), e.freshLabel("defprops.end")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	i := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, iSlot))
+	more := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, i, n))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, endL))
+	e.emitLabel(bodyL)
+	kp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", kp, data, i))
+	key := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", key, kp))
+	desc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get(ptr %s, ptr %s)", desc, props, key))
+	dtag, dpay := e.emitUnboxTagPayload(Value{Ref: desc, Ty: TypeAny})
+	okL, badL := e.emitTagCheck(dtag, kmlTagDynObject, "defprops.desc")
+	e.emitLabel(badL)
+	e.emitThrowTypeError("Property description must be an object")
+	e.emitLabel(okL)
+	e.emitDefinePropertyOn(bag, key, e.emitIntToPtr(dpay))
+	i2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", i2, i))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i2, iSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(endL)
+	return obj, nil
+}
+
+// emitDefinePropertyOn applies descriptor descBag to property keyRef of the
+// dynamic-object bag.
+func (e *Emitter) emitDefinePropertyOn(bag, keyRef, descBag string) {
 	// Read the descriptor once.
 	gPresent, gRec := e.descFieldRec(descBag, "get")
 	sPresent, sRec := e.descFieldRec(descBag, "set")
@@ -248,8 +334,6 @@ func (e *Emitter) emitObjectDefineProperty(args []ast.Expression, pos ast.Pos) (
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(doneL)
-	bagBox := e.emitDynObjBox(bag)
-	return bagBox, nil
 }
 
 // emitObjectGetOwnPropertyDescriptor builds the descriptor object for an own
@@ -259,7 +343,7 @@ func (e *Emitter) emitObjectGetOwnPropertyDescriptor(args []ast.Expression, pos 
 		return Value{}, fmt.Errorf("%d:%d: Object.getOwnPropertyDescriptor takes 2 arguments", pos.Line, pos.Col)
 	}
 	e.ensureDynObj()
-	bag, err := e.emitDynBagOrThrow(args[0], "Object.getOwnPropertyDescriptor", pos)
+	bag, _, err := e.emitDynOwnBag(args[0], "Object.getOwnPropertyDescriptor", true, pos)
 	if err != nil {
 		return Value{}, err
 	}
@@ -352,7 +436,7 @@ func (e *Emitter) emitObjectGetOwnPropertyNames(args []ast.Expression, pos ast.P
 		return Value{}, fmt.Errorf("%d:%d: Object.getOwnPropertyNames takes 1 argument", pos.Line, pos.Col)
 	}
 	e.ensureDynObj()
-	bag, err := e.emitDynBagOrThrow(args[0], "Object.getOwnPropertyNames", pos)
+	bag, _, err := e.emitDynOwnBag(args[0], "Object.getOwnPropertyNames", true, pos)
 	if err != nil {
 		return Value{}, err
 	}

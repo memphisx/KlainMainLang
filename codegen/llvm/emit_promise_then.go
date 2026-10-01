@@ -53,6 +53,17 @@ func (e *Emitter) emitRejectCallback(arg ast.Expression) (Value, error) {
 	// reason. If the handler's parameter is annotated (string / Error / any / an
 	// object shape) the TypeCaught hint was overridden, so its closure expects a
 	// different ABI — wrap it in an adapter that coerces the reason (TDD-00207).
+	// A function taking its arguments as a rest: called with the one
+	// reason, so its rest holds that reason.
+	if v.Ty.IsFunc && v.Ty.FuncHasRest && len(v.Ty.FuncParams) == 1 {
+		ret := TypeVoid
+		if v.Ty.FuncRetType != nil {
+			ret = *v.Ty.FuncRetType
+		}
+		if adapted, ok := e.emitBoxedClosureAs(v, FuncType([]Type{TypeCaught}, ret)); ok {
+			return adapted, nil
+		}
+	}
 	if v.Ty.IsFunc && !(len(v.Ty.FuncParams) >= 1 && v.Ty.FuncParams[0].IsCaught) {
 		return e.emitRejectAdapter(v), nil
 	}
@@ -73,7 +84,22 @@ func (e *Emitter) emitFulfillCallback(arg ast.Expression, valueTy Type) (Value, 
 			return e.emitFunctionExpression(fe, []Type{valueTy})
 		}
 	}
-	return e.emitExpr(arg)
+	v, err := e.emitExpr(arg)
+	if err != nil {
+		return Value{}, err
+	}
+	// A function taking its arguments as a rest (`(...a) => …`): called
+	// with the one value, so its rest holds that value.
+	if v.Ty.IsFunc && v.Ty.FuncHasRest && len(v.Ty.FuncParams) == 1 && valueTy.IR != "void" && valueTy.IR != "" {
+		ret := TypeVoid
+		if v.Ty.FuncRetType != nil {
+			ret = *v.Ty.FuncRetType
+		}
+		if adapted, ok := e.emitBoxedClosureAs(v, FuncType([]Type{valueTy}, ret)); ok {
+			return adapted, nil
+		}
+	}
+	return v, nil
 }
 
 // isAbsentCallback reports whether a `.then` argument is a literal `undefined`
@@ -138,6 +164,7 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	// Evaluate callbacks into closure pointers ("null" when absent) and decide the
 	// returned promise Q's value type U (the type Q settles to).
 	onF, onR, onFin := "null", "null", "null"
+	finAwait := false
 	retTy := TypeVoid
 	switch kind {
 	case "then":
@@ -192,6 +219,12 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 		}
 		onFin = v.Ref
 		retTy = innerTy // finally passes the source value through unchanged
+		// An onFinally returning a promise is waited for (and its rejection
+		// taken), as the spec's thenFinally does.
+		if v.Ty.IsFunc && v.Ty.FuncRetType != nil && v.Ty.FuncRetType.IsPromise {
+			rt := *v.Ty.FuncRetType
+			finAwait = rt.PromiseTask || rt.PromiseType == nil || !rt.PromiseType.IsResponse
+		}
 	}
 
 	// A callback that returns a promise resolves Q *with* that promise: Q settles
@@ -229,7 +262,7 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	storeEnv(3, onFin)
 	storeEnv(4, q)
 
-	e.emitThenRunner(runner, innerTy, retTy, adopt)
+	e.emitThenRunner(runner, innerTy, retTy, adopt, finAwait)
 	if adopt != 0 {
 		// Q's value type is what the returned promise resolves to.
 		if retTy.PromiseType != nil {
@@ -262,6 +295,12 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 // __kml_promise_drain_reactions fires at settle time. Shared by .then/.catch/
 // .finally and the stream finished()/pipeline() callback forms.
 func (e *Emitter) emitAttachPromiseReaction(prom, clo string) {
+	e.emitMarkPromiseHandled(prom)
+	// The reaction runs in the async context it was registered in, as Node's
+	// does (TDD-00168): the reaction is a `void (env)` closure like a timer's.
+	if e.programUsesALS {
+		clo = e.wrapTimerClosureWithAsyncCtx(clo)
+	}
 	res := e.freshReg()
 	resP := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", resP, promiseStructIR, prom))
@@ -316,6 +355,7 @@ func (e *Emitter) ensureFetchDriveRunner() {
 	e.ensureExceptionHelpers()
 	e.ensureMalloc()
 	e.ensurePromiseSettle()
+	e.ensureCalloc()
 
 	respTy := ResponseType()
 	structIR := respTy.StructIR()
@@ -345,7 +385,9 @@ try:
   %%okhigh = icmp slt i64 %%status, 300
   %%ok = and i1 %%oklow, %%okhigh
   %%statusd = sitofp i64 %%status to double
-  %%resp = call ptr @malloc(i64 %d)
+  ; Zeroed: the constructed-Response slots (headers, statusText, type,
+  ; stream) are null on a fetched one.
+  %%resp = call ptr @calloc(i64 1, i64 %d)
 %s%s%s%s%s  %%bits = ptrtoint ptr %%resp to i64
   %%v0_p = getelementptr %s, ptr %%prom, i32 0, i32 2
   store i64 %%bits, ptr %%v0_p, align 8
@@ -507,7 +549,7 @@ func thenPassThroughIR(sfx string) string {
 // settled state, invokes the right callback, settles Q with its result (or
 // passes the source settlement through for finally / a missing callback), then
 // drains Q's own reactions so a chained `.then` fires.
-func (e *Emitter) emitThenRunner(runner string, argTy, retTy Type, adopt int) {
+func (e *Emitter) emitThenRunner(runner string, argTy, retTy Type, adopt int, finAwait bool) {
 	valLoad, argIR := thenValLoadIR(argTy)
 	produceF, storeSettleF := thenStoreResultIR(retTy, "f")
 	produceR, storeSettleR := thenStoreResultIR(retTy, "r")
@@ -553,7 +595,21 @@ func (e *Emitter) emitThenRunner(runner string, argTy, retTy Type, adopt int) {
 		produceR(fmt.Sprintf("call %s %%rfp(ptr %%rep, { i8, i64 } %%erragg)", thenCallRetIR(retTy)))
 
 	// Pass-through blocks (finally, and a missing fulfillment callback).
-	passThroughD := thenPassThroughIR("d")
+	// finally's result settles two microtasks after its callback, as Node's
+	// does: its thenFinally resolves Q with PromiseResolve(onFinally()).then(
+	// () => value) — a reaction, then the adoption of that promise.
+	e.ensurePromiseDeferSettle()
+	finCall := "  call void (ptr) %finfp(ptr %finep)\n"
+	if finAwait {
+		e.ensurePromiseFinallyWait()
+		finCall = "  %finr = call ptr (ptr) %finfp(ptr %finep)\n" +
+			"  call void @__kml_promise_finally_wait(ptr %finr, ptr %q, i64 %res, i64 %v0, i64 %v1)\n  ret void\n"
+	}
+	passThroughD := "  %qv0fd = getelementptr " + promiseStructIR + ", ptr %q, i32 0, i32 2\n" +
+		"  store i64 %v0, ptr %qv0fd, align 8\n" +
+		"  %qv1fd = getelementptr " + promiseStructIR + ", ptr %q, i32 0, i32 3\n" +
+		"  store i64 %v1, ptr %qv1fd, align 8\n" +
+		"  call void @__kml_promise_defer_settle(ptr %q, i64 %res, i64 2)\n  ret void\n"
 	passThroughF := thenPassThroughIR("pf")
 	// Propagate a rejection (no onR): Q rejects with the same reason — both the
 	// payload (v0) and the tag (v1) carry over (TDD-00207).
@@ -568,7 +624,15 @@ func (e *Emitter) emitThenRunner(runner string, argTy, retTy Type, adopt int) {
 	// The callback branches either settle Q with the returned value and drain, or
 	// — when the callback returned a promise — hand Q to the adoption job and
 	// leave it pending (draining a pending promise would fire its reactions early).
+	dynRet := adopt == 0 && retTy.IsDynamic && !retTy.IsArray && StructFieldIR(retTy) == "i64"
+	if dynRet {
+		e.ensurePromiseResolveAny()
+	}
 	cbTail := func(storeSettle, sfx string) string {
+		if dynRet {
+			// A dynamic result may hold a promise: resolve Q with it (adopting).
+			return "  call void @__kml_promise_resolve_any(ptr %q, i64 %rv" + sfx + ")\n  ret void\n"
+		}
 		if adopt == 0 {
 			return storeSettle + drainRet
 		}
@@ -607,7 +671,6 @@ dofin:
   %%finfp = load ptr, ptr %%finfp_p, align 8
   %%finep_p = getelementptr { ptr, ptr }, ptr %%onFin, i32 0, i32 1
   %%finep = load ptr, ptr %%finep_p, align 8
-  call void (ptr) %%finfp(ptr %%finep)
 %s%s
 branch:
   %%isful = icmp eq i64 %%res, 1
@@ -627,7 +690,7 @@ callR:
 propR:
 %s%s
 }`, runner, promiseStructIR, promiseStructIR, promiseStructIR,
-		passThroughD, drainRet,
+		finCall, passThroughD,
 		fCall, cbTail(storeSettleF, "f"),
 		passThroughF, drainRet,
 		rCall, cbTail(storeSettleR, "r"),
@@ -649,4 +712,117 @@ func thenCallRetIR(retTy Type) string {
 		return nullableScalarStorageIR(retTy)
 	}
 	return retTy.IR
+}
+
+// ensurePromiseDeferSettle defines @__kml_promise_defer_settle(q, state,
+// hops): settle q with state after hops more microtasks.
+func (e *Emitter) ensurePromiseDeferSettle() {
+	if e.fnDecls["__kml_promise_defer_settle"] {
+		return
+	}
+	e.fnDecls["__kml_promise_defer_settle"] = true
+	e.ensurePromiseSettle()
+	e.ensureMicrotasks()
+	e.ensureMalloc()
+	e.emitGlobal(`define void @__kml_promise_defer_settle(ptr %q, i64 %state, i64 %hops) {
+entry:
+  %env = call ptr @malloc(i64 32)
+  store ptr %q, ptr %env, align 8
+  %sp = getelementptr i8, ptr %env, i64 8
+  store i64 %state, ptr %sp, align 8
+  %hp = getelementptr i8, ptr %env, i64 16
+  store i64 %hops, ptr %hp, align 8
+  %clo = call ptr @malloc(i64 16)
+  store ptr @__kml_promise_defer_step, ptr %clo, align 8
+  %ce = getelementptr i8, ptr %clo, i64 8
+  store ptr %env, ptr %ce, align 8
+  %cp = getelementptr i8, ptr %env, i64 24
+  store ptr %clo, ptr %cp, align 8
+  call void @__kml_microtask_enqueue(ptr %clo)
+  ret void
+}
+define void @__kml_promise_defer_step(ptr %env) {
+entry:
+  %hp = getelementptr i8, ptr %env, i64 16
+  %h = load i64, ptr %hp, align 8
+  %more = icmp sgt i64 %h, 1
+  br i1 %more, label %again, label %settle
+again:
+  %h1 = sub i64 %h, 1
+  store i64 %h1, ptr %hp, align 8
+  %cp = getelementptr i8, ptr %env, i64 24
+  %clo = load ptr, ptr %cp, align 8
+  call void @__kml_microtask_enqueue(ptr %clo)
+  ret void
+settle:
+  %q = load ptr, ptr %env, align 8
+  %sp = getelementptr i8, ptr %env, i64 8
+  %st = load i64, ptr %sp, align 8
+  call void @__kml_promise_settle(ptr %q, i64 %st)
+  ret void
+}`)
+}
+
+// ensurePromiseFinallyWait defines @__kml_promise_finally_wait(r, q, res,
+// v0, v1): once onFinally's promise r settles, q takes r's rejection, or
+// else the source's settlement (res, v0, v1) — one microtask after r's
+// reaction, as the spec's adoption of `r.then(() => value)` does.
+func (e *Emitter) ensurePromiseFinallyWait() {
+	if e.fnDecls["__kml_promise_finally_wait"] {
+		return
+	}
+	e.fnDecls["__kml_promise_finally_wait"] = true
+	e.ensurePromiseDeferSettle()
+	e.ensurePromiseAdopt() // @__kml_promise_attach
+	e.emitGlobal(fmt.Sprintf(`define void @__kml_promise_finally_wait(ptr %%r, ptr %%q, i64 %%res, i64 %%v0, i64 %%v1) {
+entry:
+  %%env = call ptr @malloc(i64 40)
+  store ptr %%q, ptr %%env, align 8
+  %%rp = getelementptr i8, ptr %%env, i64 8
+  store i64 %%res, ptr %%rp, align 8
+  %%v0p = getelementptr i8, ptr %%env, i64 16
+  store i64 %%v0, ptr %%v0p, align 8
+  %%v1p = getelementptr i8, ptr %%env, i64 24
+  store i64 %%v1, ptr %%v1p, align 8
+  %%pp = getelementptr i8, ptr %%env, i64 32
+  store ptr %%r, ptr %%pp, align 8
+  %%clo = call ptr @malloc(i64 16)
+  store ptr @__kml_promise_finally_step, ptr %%clo, align 8
+  %%ce = getelementptr i8, ptr %%clo, i64 8
+  store ptr %%env, ptr %%ce, align 8
+  call void @__kml_promise_attach(ptr %%r, ptr %%clo)
+  ret void
+}
+define void @__kml_promise_finally_step(ptr %%env) {
+entry:
+  %%q = load ptr, ptr %%env, align 8
+  %%pp = getelementptr i8, ptr %%env, i64 32
+  %%r = load ptr, ptr %%pp, align 8
+  %%rs_p = getelementptr %[1]s, ptr %%r, i32 0, i32 0
+  %%rs = load i64, ptr %%rs_p, align 8
+  %%rrej = icmp eq i64 %%rs, 2
+  %%qv0 = getelementptr %[1]s, ptr %%q, i32 0, i32 2
+  %%qv1 = getelementptr %[1]s, ptr %%q, i32 0, i32 3
+  br i1 %%rrej, label %%takerej, label %%takesrc
+takerej:
+  %%rv0p = getelementptr %[1]s, ptr %%r, i32 0, i32 2
+  %%rv0 = load i64, ptr %%rv0p, align 8
+  %%rv1p = getelementptr %[1]s, ptr %%r, i32 0, i32 3
+  %%rv1 = load i64, ptr %%rv1p, align 8
+  store i64 %%rv0, ptr %%qv0, align 8
+  store i64 %%rv1, ptr %%qv1, align 8
+  call void @__kml_promise_defer_settle(ptr %%q, i64 2, i64 1)
+  ret void
+takesrc:
+  %%rp = getelementptr i8, ptr %%env, i64 8
+  %%res = load i64, ptr %%rp, align 8
+  %%v0p = getelementptr i8, ptr %%env, i64 16
+  %%v0 = load i64, ptr %%v0p, align 8
+  %%v1p = getelementptr i8, ptr %%env, i64 24
+  %%v1 = load i64, ptr %%v1p, align 8
+  store i64 %%v0, ptr %%qv0, align 8
+  store i64 %%v1, ptr %%qv1, align 8
+  call void @__kml_promise_defer_settle(ptr %%q, i64 %%res, i64 1)
+  ret void
+}`, promiseStructIR))
 }

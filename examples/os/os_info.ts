@@ -22,7 +22,7 @@ console.log(me.username.length > 0, me.homedir === os.homedir()); // true true
 const nis = os.networkInterfaces();
 let loopbacks = 0;
 for (const name of Object.keys(nis)) {
-  for (const ni of nis[name]) {
+  for (const ni of nis[name]!) {
     if (ni.internal) loopbacks++;
   }
 }

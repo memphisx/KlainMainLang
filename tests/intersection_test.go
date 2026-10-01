@@ -153,15 +153,14 @@ console.log(xs.length)
 `, "object type")
 }
 
-// `&` binds tighter than `|`: A & B | C parses as (A & B) | C, so C makes it a
-// union whose members include an object — outside union V1's scalar-only scope,
-// a clean rejection that also proves the precedence.
+// `&` binds tighter than `|`: A & B | C parses as (A & B) | C — a union of
+// two object members, the first the merged A & B.
 func TestE2EIntersectionPrecedenceOverUnion(t *testing.T) {
-	mustCompileError(t, `
+	assertSameAsNode(t, `
 interface A { a: number }
 interface B { b: number }
 interface C { c: number }
 const v: A & B | C = { a: 1, b: 2 }
-console.log(1)
-`, "discriminated union")
+if ("a" in v) console.log(v.a + v.b); else console.log(v.c)
+`)
 }

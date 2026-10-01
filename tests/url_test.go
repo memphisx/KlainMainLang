@@ -350,3 +350,37 @@ console.log(new URLSearchParams([["a", "1"], ["b", "2"], ["a", "3"]]).toString()
 console.log(new URLSearchParams({ x: "9", y: "8" }).toString())
 `, "a=1&b=2&a=3\nx=9&y=8")
 }
+
+// A URL is read as the WHATWG parser reads it: spaces, non-ASCII bytes and
+// each component's encode set percent-encoded; an opaque URL (`mailto:`)
+// parsed without the hierarchical parser, with its setters; origin "null"
+// for any scheme without a tuple origin.
+func TestE2EURLWhatwgEncodingAndOpaque(t *testing.T) {
+	assertSameAsNode(t, `
+console.log(new URL("http://example.com/a b").href, new URL("http://example.com/p?q=a b#f g").href);
+console.log(new URL('https://u:p@h.com:8080/a/b%20c/é?x=1&y=é#h').href, new URL('http://h.com/[x]{y}~|^`+"`"+`').href);
+console.log(new URL('/p q?x y#z w', 'http://h.com/base/').href, new URL('x y', 'http://h.com/d/').href);
+for (const s of ['mailto:ab@c.d', 'MAILTO:a b@c.d?subject=hi%20there&x=1#frag', 'urn:isbn:123', 'data:text/plain,hi', 'x:?', 'x:#']) {
+  const u = new URL(s);
+  console.log(u.href, u.protocol, JSON.stringify([u.host, u.pathname, u.search, u.hash, u.origin]), [...u.searchParams]);
+}
+const a = new URL('foo://h.x/p q?r#s'); console.log(a.href, a.origin, new URL('file:///x').origin, new URL('ws://h/').origin);
+const c = new URL('mailto:x@y'); c.search = '?s=1'; c.hash = 'h'; console.log(c.href, c.toString(), c.toJSON());
+const d = new URL('urn:x'); d.searchParams.append('k', 'v w'); console.log(d.href);
+const f = new URL('http://a.b/'); f.href = 'news:comp.lang'; console.log(f.href, f.pathname, f.origin);
+console.log(URL.canParse('mailto:x@y'), URL.canParse('ht tp:x'), URL.parse('urn:a:b')?.pathname, URL.parse('bad url'));
+`)
+}
+
+// A non-ASCII host is case-folded and punycoded (the WHATWG host parser's
+// domain-to-ASCII) on every platform, and decoded back by domainToUnicode.
+func TestE2EURLIdnaHosts(t *testing.T) {
+	assertSameAsNodeImports(t, `
+import url from 'node:url';
+console.log(new URL('http://bücher.de/x').host, new URL('https://MÜNCHEN.example:8080/').href, new URL('http://user:pw@日本語.jp/').hostname);
+console.log(new URL('foo://bücher.de/').host, URL.parse('http://παράδειγμα.δοκιμή/')?.host, new URL('http://a.bücher.de').origin);
+console.log(url.domainToASCII('bücher.de'), url.domainToASCII('Example.COM'), url.domainToASCII('日本語.jp'));
+console.log(url.domainToUnicode('xn--bcher-kva.de'), url.domainToUnicode('xn--wgv71a119e.jp'), url.domainToUnicode('example.com'));
+console.log(url.format(new URL('http://bücher.de/'), { unicode: true }));
+`)
+}

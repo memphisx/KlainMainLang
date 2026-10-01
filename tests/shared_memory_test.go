@@ -47,10 +47,10 @@ func TestE2ESharedArrayBufferAcrossWorker(t *testing.T) {
 		"adder.ts": `
 import { parentPort, workerData } from 'worker_threads';
 const sab: SharedArrayBuffer = workerData;
-parentPort.on('message', (delta: number) => {
+parentPort!.on('message', (delta: number) => {
     const view = new Int32Array(sab);
     view[0] = view[0] + delta;
-    parentPort.postMessage(1);
+    parentPort!.postMessage(1);
 });
 `,
 		"main.ts": `
@@ -116,10 +116,10 @@ func TestE2EAtomicsWaitNotifyAcrossWorker(t *testing.T) {
 		"waiter.ts": `
 import { parentPort, workerData } from 'worker_threads';
 const sab: SharedArrayBuffer = workerData;
-parentPort.on('message', (go: number) => {
+parentPort!.on('message', (go: number) => {
     const ta = new Int32Array(sab);
     const r: string = Atomics.wait(ta, 0, 0);
-    parentPort.postMessage(r + ":" + Atomics.load(ta, 0));
+    parentPort!.postMessage(r + ":" + Atomics.load(ta, 0));
 });
 `,
 		"main.ts": `
@@ -147,6 +147,7 @@ const b = new BroadcastChannel('room');
 const other = new BroadcastChannel('elsewhere');
 b.onmessage = (e: { data: number }) => {
     console.log("b got " + e.data);
+    a.close();
     b.close();
     other.close();
 };
@@ -161,10 +162,10 @@ func TestE2EBroadcastChannelAcrossWorker(t *testing.T) {
 import { parentPort } from 'worker_threads';
 const bc = new BroadcastChannel('news');
 bc.onmessage = (e: { data: string }) => {
-    parentPort.postMessage("worker got: " + e.data);
+    parentPort!.postMessage("worker got: " + e.data);
     bc.close();
 };
-parentPort.on('message', (go: number) => {});
+parentPort!.on('message', (go: number) => {});
 `,
 		"main.ts": `
 import { Worker } from 'worker_threads';
@@ -174,15 +175,15 @@ w.on('message', (r: string) => {
     w.terminate();
 });
 const bc = new BroadcastChannel('news');
-setTimeout(() => { bc.postMessage("flash"); }, 100);
+setTimeout(() => { bc.postMessage("flash"); bc.close(); }, 100);
 `,
 	}, "main.ts", "worker got: flash")
 }
 
 func TestE2EMessageChannelSameThread(t *testing.T) {
 	assertOutput(t, `
-const ch = new MessageChannel<string>();
-ch.port1.onmessage = (e: { data: string }) => {
+const ch = new MessageChannel();
+ch.port1.onmessage = (e: MessageEvent) => {
     console.log("port1 got: " + e.data);
     ch.port1.close();
     ch.port2.close();
@@ -194,21 +195,20 @@ ch.port2.postMessage("ping");
 func TestE2EMessagePortAcrossWorker(t *testing.T) {
 	assertMultiFileOutput(t, map[string]string{
 		"echoer.ts": `
-import { parentPort, workerData } from 'worker_threads';
-const port: MessagePort<string> = workerData;
-port.onmessage = (e: { data: string }) => {
+import { workerData } from 'worker_threads';
+import type { MessagePort } from 'worker_threads';
+const port: MessagePort = workerData;
+port.onmessage = (e: MessageEvent) => {
     port.postMessage("echo: " + e.data);
 };
-parentPort.on('message', (go: number) => {});
 `,
 		"main.ts": `
 import { Worker } from 'worker_threads';
-const ch = new MessageChannel<string>();
-const w = new Worker('./echoer.ts', { workerData: ch.port2 });
-ch.port1.onmessage = (e: { data: string }) => {
+const ch = new MessageChannel();
+const w = new Worker('./echoer.ts', { workerData: ch.port2, transferList: [ch.port2] });
+ch.port1.onmessage = (e: MessageEvent) => {
     console.log("main got: " + e.data);
     ch.port1.close();
-    ch.port2.close();
     w.terminate();
 };
 setTimeout(() => { ch.port1.postMessage("over the wall"); }, 100);
@@ -228,15 +228,6 @@ func TestE2EAtomicsWaitRequiresInt32Array(t *testing.T) {
 const ta = new Uint8Array(4);
 Atomics.wait(ta, 0, 0);
 `, "Int32Array")
-}
-
-func TestE2EBroadcastChannelTypeMismatch(t *testing.T) {
-	assertChanCompileError(t, `
-const a = new BroadcastChannel('room');
-const b = new BroadcastChannel('room');
-a.postMessage(1);
-b.postMessage("nope");
-`, "one message type per channel name")
 }
 
 // The free-variable-scanner fix found while wiring SharedArrayBuffer views
@@ -261,7 +252,7 @@ func TestE2EMessageChannelWorkerThreadsImport(t *testing.T) {
 	// Worker.
 	assertOutputImports(t, `
 import { MessageChannel } from 'worker_threads'
-const ch = new MessageChannel<string>()
+const ch = new MessageChannel()
 ch.port1.onmessage = (e: { data: string }) => {
   console.log("got: " + e.data)
   ch.port1.close()

@@ -825,7 +825,7 @@ func (e *Emitter) ensureHTTPDate() {
 		return
 	}
 	e.usedHTTPDate = true
-	e.emitGlobal("declare i64 @time(ptr)")
+	e.ensureTime()
 	e.emitGlobal("declare ptr @gmtime(ptr noundef)")
 	e.emitGlobal("declare i64 @strftime(ptr noundef, i64 noundef, ptr noundef, ptr noundef)")
 	dateFmt := e.internString("%a, %d %b %Y %H:%M:%S GMT")
@@ -947,16 +947,6 @@ define void @__kml_reactor_thread_lock() {
 	// fiber's pendingGroup field, whether or not this program ever calls
 	// Promise.all/.race/.allSettled.
 	e.ensurePromiseCombinators()
-	// Same reasoning a third time (TDD-00038 Stage 0): __kml_event_loop_run
-	// below unconditionally calls @__kml_eventsource_scan and reads
-	// @__kml_es_active, whether or not this program ever constructs an
-	// EventSource.
-	e.ensureEventSourceRuntime()
-	// Same reasoning a fourth time (TDD-00039 Stage 3): __kml_event_loop_run
-	// below unconditionally calls @__kml_wsclient_scan and reads
-	// @__kml_wsc_active, whether or not this program ever constructs a
-	// `new WebSocket(url)`.
-	e.ensureWSClientRuntime()
 	e.ensureMalloc()
 	e.ensureRealloc()
 	e.ensureMemset()
@@ -1000,14 +990,6 @@ define void @__kml_reactor_thread_lock() {
 	e.ensureHTTPFireClose() // the loop calls __kml_http_fire_close() each iteration
 	e.emitGlobal("@__kml_listen_dispatch = internal thread_local global ptr null, align 8")
 	e.emitGlobal("@__kml_listen_handler = internal thread_local global ptr null, align 8")
-	// @__kml_listen_ws_handler (TDD-00039 Stage 1): the optional `ws`
-	// closure from `http.listen(port, handler, { ws })`, null when omitted
-	// — declared unconditionally, same "always pull in the full machinery"
-	// reasoning as every other global here (ensureFetchAsync's own doc
-	// comment above), so a program with no `ws` handler just never
-	// populates or reads it, rather than needing its own conditional
-	// declaration path.
-	e.emitGlobal("@__kml_listen_ws_handler = internal thread_local global ptr null, align 8")
 	// @__kml_listen_upgrade_handler (TDD-00158): the Node-faithful `'upgrade'`
 	// event handler closure from `server.on('upgrade', …)`, null when none —
 	// declared unconditionally like the others; the dispatcher's upgrade block
@@ -1032,6 +1014,11 @@ define void @__kml_reactor_thread_lock() {
 
 	e.ensureListeningAnnounceHook()
 
+	// A worker of Node's cluster (lib/node/cluster.ts) shares the port the
+	// same way as one of http.listen({ workers })'s.
+	e.ensureGetenv()
+	nodeUniqueID := e.internString("NODE_UNIQUE_ID")
+
 	e.emitGlobal(fmt.Sprintf(`
 define i32 @__kml_http_bind_and_listen(i32 %%port, i32 %%hostaddr, i32 %%backlog) {
 entry:
@@ -1052,7 +1039,10 @@ setopt:
   ; deliberately NOT set for an ordinary single server, where a second bind to
   ; an in-use port must still fail (that failure is a real, thrown error).
   %%wid = load i64, ptr @__kml_cluster_worker_id, align 8
-  %%isworker = icmp ne i64 %%wid, 0
+  %%isworkerid = icmp ne i64 %%wid, 0
+  %%nodeuid = call ptr @getenv(ptr `+nodeUniqueID+`)
+  %%isnodeworker = icmp ne ptr %%nodeuid, null
+  %%isworker = or i1 %%isworkerid, %%isnodeworker
   br i1 %%isworker, label %%reuseport, label %%afteropt
 reuseport:
   call i32 @setsockopt(i32 %%fd, i32 %d, i32 %d, ptr %%one, i32 4)
@@ -1869,95 +1859,14 @@ oneshotarm:
   %oneshot_armed = icmp eq i8 %oneshot, 1
   %oneshot_next = select i1 %oneshot_armed, i8 2, i8 %oneshot
   store i8 %oneshot_next, ptr @__kml_loop_oneshot, align 1
-  ; TDD-00216: fire any background AbortSignal.timeout abort whose deadline has
-  ; elapsed (no-op on an empty registry). Its deadline is folded into select()'s
-  ; wait below (fdfolddone), so select wakes by the deadline and this fires it on
-  ; the next spin — dispatching listeners/onabort without keeping the loop alive.
-  call void @__kml_abort_to_fire_due()
   ; TDD-00217: shutdown() any connection whose request/keep-alive timeout has
   ; elapsed (no-op when no server configured a timeout). Placed here, before this
   ; iteration's fd_set is built, so an expired connection's now-EOF socket is
   ; added to the read set and its fiber is resumed to unwind this same iteration.
   call void @__kml_http_conn_sweep_timeouts()
-  ; TDD-00019: check for a pending signal before anything else this
-  ; iteration — this single check point, re-entered after every iteration,
-  ; covers both a signal that arrived since the last check (seen before
-  ; computing select()'s timeout below) and a signal that interrupts a
-  ; blocking select() call directly (seen immediately on looping back
-  ; after EINTR — see the afterselect: fix further down).
-  %sigintp = load volatile i8, ptr @__kml_sigint_pending, align 1
-  %sigintset = icmp ne i8 %sigintp, 0
-  br i1 %sigintset, label %sigintfire, label %checksigterm
-
-sigintfire:
-  store volatile i8 0, ptr @__kml_sigint_pending, align 1
-  %sigintclos = load ptr, ptr @__kml_sigint_closure, align 8
-  %hassigint = icmp ne ptr %sigintclos, null
-  br i1 %hassigint, label %sigintcall, label %checksigterm
-
-sigintcall:
-  %sigintfp_p = getelementptr { ptr, ptr }, ptr %sigintclos, i32 0, i32 0
-  %sigintep_p = getelementptr { ptr, ptr }, ptr %sigintclos, i32 0, i32 1
-  %sigintfp = load ptr, ptr %sigintfp_p, align 8
-  %sigintep = load ptr, ptr %sigintep_p, align 8
-  call void %sigintfp(ptr %sigintep)
-  br label %checksigterm
-
-checksigterm:
-  %sigtermp = load volatile i8, ptr @__kml_sigterm_pending, align 1
-  %sigtermset = icmp ne i8 %sigtermp, 0
-  br i1 %sigtermset, label %sigtermfire, label %checksigwinch
-
-sigtermfire:
-  store volatile i8 0, ptr @__kml_sigterm_pending, align 1
-  %sigtermclos = load ptr, ptr @__kml_sigterm_closure, align 8
-  %hassigterm = icmp ne ptr %sigtermclos, null
-  br i1 %hassigterm, label %sigtermcall, label %checksigwinch
-
-sigtermcall:
-  %sigtermfp_p = getelementptr { ptr, ptr }, ptr %sigtermclos, i32 0, i32 0
-  %sigtermep_p = getelementptr { ptr, ptr }, ptr %sigtermclos, i32 0, i32 1
-  %sigtermfp = load ptr, ptr %sigtermfp_p, align 8
-  %sigtermep = load ptr, ptr %sigtermep_p, align 8
-  call void %sigtermfp(ptr %sigtermep)
-  br label %checksigwinch
-
-checksigwinch:
-  %sigwinchp = load volatile i8, ptr @__kml_sigwinch_pending, align 1
-  %sigwinchset = icmp ne i8 %sigwinchp, 0
-  br i1 %sigwinchset, label %sigwinchfire, label %checksigbreak
-
-sigwinchfire:
-  store volatile i8 0, ptr @__kml_sigwinch_pending, align 1
-  %sigwinchclos = load ptr, ptr @__kml_sigwinch_closure, align 8
-  %hassigwinch = icmp ne ptr %sigwinchclos, null
-  br i1 %hassigwinch, label %sigwinchcall, label %checksigbreak
-
-sigwinchcall:
-  %sigwinchfp_p = getelementptr { ptr, ptr }, ptr %sigwinchclos, i32 0, i32 0
-  %sigwinchep_p = getelementptr { ptr, ptr }, ptr %sigwinchclos, i32 0, i32 1
-  %sigwinchfp = load ptr, ptr %sigwinchfp_p, align 8
-  %sigwinchep = load ptr, ptr %sigwinchep_p, align 8
-  call void %sigwinchfp(ptr %sigwinchep)
-  br label %checksigbreak
-
-checksigbreak:
-  %sigbreakp = load volatile i8, ptr @__kml_sigbreak_pending, align 1
-  %sigbreakset = icmp ne i8 %sigbreakp, 0
-  br i1 %sigbreakset, label %sigbreakfire, label %timerscan
-
-sigbreakfire:
-  store volatile i8 0, ptr @__kml_sigbreak_pending, align 1
-  %sigbreakclos = load ptr, ptr @__kml_sigbreak_closure, align 8
-  %hassigbreak = icmp ne ptr %sigbreakclos, null
-  br i1 %hassigbreak, label %sigbreakcall, label %timerscan
-
-sigbreakcall:
-  %sigbreakfp_p = getelementptr { ptr, ptr }, ptr %sigbreakclos, i32 0, i32 0
-  %sigbreakep_p = getelementptr { ptr, ptr }, ptr %sigbreakclos, i32 0, i32 1
-  %sigbreakfp = load ptr, ptr %sigbreakfp_p, align 8
-  %sigbreakep = load ptr, ptr %sigbreakep_p, align 8
-  call void %sigbreakfp(ptr %sigbreakep)
+  ; A pending signal's watcher runs first each iteration (a signal that
+  ; interrupts the blocking wait below is seen on looping back).
+  call void @__kml_signal_dispatch()
   br label %timerscan
 
 timerscan:
@@ -1981,16 +1890,9 @@ timerscan:
   store i64 -1, ptr %besti, align 8
   store i64 0, ptr %bestfire, align 8
   store i64 0, ptr %scani, align 8
-  ; TDD-00039 Stage 3: reset every iteration, set by wscsetloop below if any
-  ; WebSocket client entry still needs its deferred onopen/onerror+onclose
-  ; notification fired — forces this iteration's select() to return
-  ; immediately (see the timeoutpath/notimeoutpath branch further down)
-  ; rather than potentially blocking for a real timer's entire remaining
-  ; wait (or indefinitely, with no timer at all) with a notification
-  ; already sitting there ready to deliver. Found the hard way as a real
-  ; bug: onopen only fired once select() happened to return for some other
-  ; reason (a real timer elsewhere in the program firing), which is not a
-  ; bound a WebSocket-client-only program can rely on at all.
+  ; Reset every iteration; set below when a source (a worker/channel pipe,
+  ; buffered stdin, …) already holds work, forcing this iteration's select()
+  ; to return immediately instead of blocking with that work ready.
   store i1 0, ptr %forcezero, align 1
   br label %scanloop
 
@@ -2031,33 +1933,12 @@ scannext:
 scandone:
   %foundbest = load i64, ptr %besti, align 8
   %havetimer_js = icmp ne i64 %foundbest, -1
-  ; Stage 3 bug fix (see __kml_eventsource_next_reconnect_ms's own doc
-  ; comment, runtime_eventsource.go): a waiting-to-reconnect EventSource's
-  ; own deadline is pure runtime state, never entered into
-  ; @__kml_timer_data — without folding it into %bestfire/%havetimer here
-  ; too, a program with no other JS timer to incidentally bound the wait
-  ; would block in select() with a NULL timeout forever, never live long
-  ; enough to reach the reconnect deadline __kml_eventsource_scan itself
-  ; checks right after select() returns (checkes below).
-  %esreconnectms = call i64 @__kml_eventsource_next_reconnect_ms()
-  %hasesreconnect = icmp sge i64 %esreconnectms, 0
   ; %cmdlabs is the shared extra-deadline slot (0 = none): the soonest of
-  ; the EventSource reconnect deadline, any fetch AbortSignal deadline, and
-  ; libcurl's internal timeout. Kept OUT of %bestfire deliberately —
+  ; any fetch AbortSignal deadline and libcurl's internal timeout. Kept OUT of %bestfire deliberately —
   ; checktimerfire fires the soonest JS timer whenever now >= %bestfire, so
   ; a sooner non-timer deadline folded in there fired pending timers early.
   ; %bestfire now holds JS-timer fire times only.
   store i64 0, ptr %cmdlabs, align 8
-  br i1 %hasesreconnect, label %esconsiderreconnect, label %afteresreconnect
-
-esconsiderreconnect:
-  %esreconnectns0 = mul i64 %esreconnectms, 1000000
-  %esdlz = icmp eq i64 %esreconnectns0, 0
-  %esdl = select i1 %esdlz, i64 1, i64 %esreconnectns0
-  store i64 %esdl, ptr %cmdlabs, align 8
-  br label %afteresreconnect
-
-afteresreconnect:
   ; TDD-00117: a sibling worker in a {workers:N} cluster may have called
   ; http.close(), which sets the shared MAP_SHARED flag. Poll it each iteration;
   ; if set and this worker still holds its listener, run the same local teardown
@@ -2095,7 +1976,6 @@ ccclose:
   br label %ccdone
 
 ccdone:
-  %havetimer = or i1 %havetimer_js, %hasesreconnect
   %listenfd = load i32, ptr @__kml_listen_fd, align 4
   %haslistener = icmp sge i32 %listenfd, 0
   ; TDD-00027: http.close() clears @__kml_listen_fd immediately but leaves
@@ -2113,40 +1993,13 @@ ccdone:
   ; Placed here (after draining is computed, before the keep-alive/exit decision)
   ; so a close handler's own newly-scheduled work is still seen this iteration.
   call void @__kml_http_fire_close()
-  ; TDD-00038 Stage 0: an open (not yet closed) EventSource must also keep
-  ; the loop running, the same "don't exit out from under still-live work"
-  ; reasoning hasactiveconns already established for an in-flight
-  ; connection — otherwise a plain top-level "new EventSource(url)" with no
-  ; other pending work would fall straight through to alldone/process exit
-  ; the very first time this loop ran, never actually reading anything the
-  ; server sends.
-  %esactive = load i64, ptr @__kml_es_active, align 8
-  %hasopenes = icmp sgt i64 %esactive, 0
-  ; TDD-00039 Stage 3: an open (not yet closed) new WebSocket(url) must
-  ; also keep the loop running -- same reasoning hasopenes documents above,
-  ; one level up (a fifth scanned resource now, not a fourth).
-  %wscactive = load i64, ptr @__kml_wsc_active, align 8
-  %hasopenwsc = icmp sgt i64 %wscactive, 0
-  ; TDD-00098: a live (not yet exited) Worker keeps the parent's loop
-  ; running, and a worker thread's own loop instance stays alive while its
-  ; parentPort message listener is registered — both folded in via one hook
-  ; (a no-op stub when the program never uses workers, same mechanism as
-  ; the task/microtask stubs).
+  ; Workers and MessagePorts hold a loop open through the pool's in-flight
+  ; count (klainpool.c); this hook is a no-op kept for the loop's shape.
   %wkeep = call i1 @__kml_worker_keepalive()
-  ; TDD-00099: a channel endpoint (BroadcastChannel/MessagePort) with a
-  ; registered onmessage handler holds this thread's loop alive until
-  ; close() — same no-op-stub mechanism as the worker hook above.
-  %ckeep = call i1 @__kml_chan_keepalive()
   ; child_process: an unfinalized spawned child keeps this loop alive.
   %cpkeep = call i1 @__kml_cp_keepalive()
-  ; readline: an open interface keeps this loop alive.
-  %rlkeep = call i1 @__kml_rl_keepalive()
   ; net: a listening TCP server or an open connection keeps this loop alive.
   %netkeep = call i1 @__kml_net_keepalive()
-  ; dgram: a bound UDP socket keeps this loop alive.
-  %dgkeep = call i1 @__kml_dgram_keepalive()
-  ; process.stdin: an open stream with a 'data' listener keeps this loop alive.
-  %sdkeep = call i1 @__kml_stdin_keepalive()
   ; fork IPC (child side): an open channel with a 'message' listener.
   %ipcckeep = call i1 @__kml_ipcc_keepalive()
   ; fs.watch: an open FSWatcher keeps this loop alive (TDD-00181).
@@ -2166,18 +2019,15 @@ ccdone:
   ; keep it by itself.
   %anytimerref = call i1 @__kml_timer_any_ref()
   %havetimerref = and i1 %havetimer_js, %anytimerref
-  %havetimerkeep = or i1 %havetimerref, %hasesreconnect
-  %anywork0 = or i1 %havetimerkeep, %haslistener
+  %anywork0 = or i1 %havetimerref, %haslistener
   %anywork1 = or i1 %anywork0, %hasactiveconns
-  %anywork2 = or i1 %anywork1, %hasopenes
-  %anywork3 = or i1 %anywork2, %hasopenwsc
-  %anywork4 = or i1 %anywork3, %wkeep
-  %anywork5 = or i1 %anywork4, %ckeep
+  %anywork4 = or i1 %anywork1, %wkeep
+  %anywork5 = or i1 %anywork4, false
   %anywork6 = or i1 %anywork5, %cpkeep
-  %anywork6b = or i1 %anywork6, %rlkeep
+  %anywork6b = or i1 %anywork6, false
   %anywork6c = or i1 %anywork6b, %netkeep
-  %anywork6d = or i1 %anywork6c, %dgkeep
-  %anywork6e = or i1 %anywork6d, %sdkeep
+  %anywork6d = or i1 %anywork6c, false
+  %anywork6e = or i1 %anywork6d, false
   %anywork6f = or i1 %anywork6e, %ipcckeep
   %anywork6g = or i1 %anywork6f, %fwkeep
   %anywork6h = or i1 %anywork6g, %plkeep
@@ -2301,80 +2151,14 @@ fsetnext:
   br label %fsetloop
 
 fsetdone:
-  ; TDD-00039 Stage 3: add every OPEN new WebSocket(url) client's own fd
-  ; into the same read fd_set -- without this, select() below would never
-  ; be told to watch that fd at all, and a plain top-level script with only
-  ; a WebSocket client (no http.listen, no timers) could block in select()
-  ; forever even with data already waiting on the socket. Reuses %fsi (the
-  ; connection-array loop above is already done with it by this point).
-  store i64 0, ptr %fsi, align 8
-  br label %wscsetloop
-
-wscsetloop:
-  %wsi = load i64, ptr %fsi, align 8
-  %wsclen = load i64, ptr @__kml_wsc_len, align 8
-  %wsinb = icmp slt i64 %wsi, %wsclen
-  br i1 %wsinb, label %wscsetbody, label %wscsetdone
-
-wscsetbody:
-  %wscdata = load ptr, ptr @__kml_wsc_data, align 8
-  %wscslot = getelementptr ptr, ptr %wscdata, i64 %wsi
-  %wscentryp = load ptr, ptr %wscslot, align 8
-  %wscstate_p = getelementptr { i64, i64, i64, ptr, i64, ptr }, ptr %wscentryp, i32 0, i32 1
-  %wscstate = load i64, ptr %wscstate_p, align 8
-  %wscpending_p = getelementptr { i64, i64, i64, ptr, i64, ptr }, ptr %wscentryp, i32 0, i32 2
-  %wscpending = load i64, ptr %wscpending_p, align 8
-  %wschaspending = icmp eq i64 %wscpending, 1
-  br i1 %wschaspending, label %wscmarkforce, label %wscafterforce
-
-wscmarkforce:
-  store i1 1, ptr %forcezero, align 1
-  br label %wscafterforce
-
-wscafterforce:
-  %wscisopen = icmp eq i64 %wscstate, 1
-  br i1 %wscisopen, label %wscsetbit, label %wscsetnext
-
-wscsetbit:
-  %wscfd_p = getelementptr { i64, i64, i64, ptr, i64, ptr }, ptr %wscentryp, i32 0, i32 0
-  %wscfd = load i64, ptr %wscfd_p, align 8
-  %wscfddiv8 = sdiv i64 %wscfd, 8
-  %wscfdmod8 = srem i64 %wscfd, 8
-  %wscbyteptr = getelementptr i8, ptr %fdset, i64 %wscfddiv8
-  %wscmod8_8 = trunc i64 %wscfdmod8 to i8
-  %wscmask = shl i8 1, %wscmod8_8
-  %wscoldbyte = load i8, ptr %wscbyteptr, align 1
-  %wscnewbyte = or i8 %wscoldbyte, %wscmask
-  store i8 %wscnewbyte, ptr %wscbyteptr, align 1
-  %wscfd32 = trunc i64 %wscfd to i32
-  %wsccurmax = load i32, ptr %maxfd, align 4
-  %wscisbigger = icmp sgt i32 %wscfd32, %wsccurmax
-  br i1 %wscisbigger, label %wscupdatemax, label %wscsetnext
-
-wscupdatemax:
-  store i32 %wscfd32, ptr %maxfd, align 4
-  br label %wscsetnext
-
-wscsetnext:
-  %wsinext = add i64 %wsi, 1
-  store i64 %wsinext, ptr %fsi, align 8
-  br label %wscsetloop
-
-wscsetdone:
   ; TDD-00098: add the worker message pipes into the read fd_set — on the
   ; parent thread, every live child worker's worker→parent pipe; on a worker
   ; thread, its own parent→worker pipe. Returns true when a message envelope
-  ; may already be buffered, folding into %forcezero the same way the
-  ; WebSocket-client scan above does. No-op stub when workers are unused.
+  ; may already be buffered, folding into %forcezero. No-op stub when workers are unused.
   %wfdforce = call i1 @__kml_worker_fdset_add(ptr %fdset, ptr %maxfd)
   %wfz0 = load i1, ptr %forcezero, align 1
   %wfz1 = or i1 %wfz0, %wfdforce
   store i1 %wfz1, ptr %forcezero, align 1
-  ; TDD-00099: fold this thread's channel-endpoint pipes in likewise.
-  %cfdforce = call i1 @__kml_chan_fdset_add(ptr %fdset, ptr %maxfd)
-  %cfz0 = load i1, ptr %forcezero, align 1
-  %cfz1 = or i1 %cfz0, %cfdforce
-  store i1 %cfz1, ptr %forcezero, align 1
   ; child_process: add every live spawned child's stdout/stderr read pipes;
   ; force a zero timeout when a child is EOF-on-both but not yet reaped.
   %cpfdforce = call i1 @__kml_cp_fdset_add(ptr %fdset, ptr %maxfd)
@@ -2397,33 +2181,11 @@ wscsetdone:
   %tcpfz0 = load i1, ptr %forcezero, align 1
   %tcpfz1 = or i1 %tcpfz0, %tcpforce
   store i1 %tcpfz1, ptr %forcezero, align 1
-  ; readline: add stdin (fd 0) while an interface is open.
-  %rlfdforce = call i1 @__kml_rl_fdset_add(ptr %fdset, ptr %maxfd)
-  %rlfz0 = load i1, ptr %forcezero, align 1
-  %rlfz1 = or i1 %rlfz0, %rlfdforce
-  store i1 %rlfz1, ptr %forcezero, align 1
-  ; process.stdin: add stdin (fd 0) while the stream is open and flowing.
-  %sdfdforce = call i1 @__kml_stdin_fdset_add(ptr %fdset, ptr %maxfd)
-  %sdfz0 = load i1, ptr %forcezero, align 1
-  %sdfz1 = or i1 %sdfz0, %sdfdforce
-  store i1 %sdfz1, ptr %forcezero, align 1
   ; net: add the listen fd and every open connection fd.
   %netfdforce = call i1 @__kml_net_fdset_add(ptr %fdset, ptr %maxfd)
   %netfz0 = load i1, ptr %forcezero, align 1
   %netfz1 = or i1 %netfz0, %netfdforce
   store i1 %netfz1, ptr %forcezero, align 1
-  ; net: add every still-connecting client fd to the write + except sets so an
-  ; async connect completes (writable) or reports failure (excepted); a resolved
-  ; error forces a zero-timeout pass to deliver its 'error' event (ADR-01021).
-  %netwforce = call i1 @__kml_net_conn_wset_add(ptr %wfdset, ptr %efdset, ptr %maxfd)
-  %netwfz0 = load i1, ptr %forcezero, align 1
-  %netwfz1 = or i1 %netwfz0, %netwforce
-  store i1 %netwfz1, ptr %forcezero, align 1
-  ; dgram: add every bound UDP socket fd.
-  %dgfdforce = call i1 @__kml_dgram_fdset_add(ptr %fdset, ptr %maxfd)
-  %dgfz0 = load i1, ptr %forcezero, align 1
-  %dgfz1 = or i1 %dgfz0, %dgfdforce
-  store i1 %dgfz1, ptr %forcezero, align 1
   ; TDD-00191 Stage 1: add every additional http server's listening fd.
   %xlfdadd = call i1 @__kml_http_xl_fdset_add(ptr %fdset, ptr %maxfd)
   ; Merge libcurl's own fd_sets (its in-flight transfers' sockets) into the
@@ -2451,33 +2213,12 @@ skipmergecurlfds:
   %maxfdv = load i32, ptr %maxfd, align 4
   %nfds = add i32 %maxfdv, 1
 
-  ; Stage 3 bug fix (see __kml_eventsource_has_pending_work's own doc
-  ; comment, runtime_eventsource.go): an EventSource reconnect can have its
-  ; response already fully buffered by the time this iteration reaches
-  ; select() (delivered by __kml_eventsource_connect's own synchronous
-  ; curl_multi_perform, entirely outside this select()-then-perform cycle) —
-  ; with no *new* socket readability event ever coming for already-drained
-  ; bytes, select() blocking on this iteration's real fdset alone can wait
-  ; forever for data that already arrived. Same %forcezero mechanism
-  ; wscsetloop above already established for the equivalent WebSocket-client
-  ; hazard.
-  %eshaswork = call i1 @__kml_eventsource_has_pending_work()
-  br i1 %eshaswork, label %esmarkforce, label %esafterforce
-
-esmarkforce:
-  store i1 1, ptr %forcezero, align 1
-  br label %esafterforce
-
-esafterforce:
-  ; TDD-00039 Stage 3: %forcezero (set above by wscsetloop, or just now by
-  ; the EventSource check) routes into timeoutpath even with no real timer
-  ; pending — %bestfire's own already-existing default of 0 (timerscan,
-  ; never overwritten when no real timer exists) makes timeoutpath's wait
-  ; computation naturally collapse to zero in that case, so no other change
-  ; is needed there.
+  ; %forcezero routes into timeoutpath even with no real timer pending —
+  ; %bestfire's own default of 0 (never overwritten when no real timer
+  ; exists) makes timeoutpath's wait collapse to zero.
   ; Fold any live fetch AbortSignal.timeout deadline into %bestfire so select()
   ; wakes by the soonest deadline (TDD-00081 Stage 3c) — the resume scan then
-  ; aborts the timed-out fetch. Mirrors the EventSource-reconnect fold above.
+  ; aborts the timed-out fetch.
   store i1 0, ptr %havefetchdl, align 1
   store i64 0, ptr %fdsi, align 8
   br label %fdfoldloop
@@ -2503,7 +2244,7 @@ fdchksig:
   br i1 %fdhassig, label %fdchkdl, label %fdfoldnext
 
 fdchkdl:
-  %fddl_p = getelementptr { i1, i64, ptr, i64 }, ptr %fdsig, i32 0, i32 3
+  %fddl_p = getelementptr { i64, i1, i64, ptr, i64 }, ptr %fdsig, i32 0, i32 4
   %fddl = load i64, ptr %fddl_p, align 8
   %fdhasdl = icmp ne i64 %fddl, 0
   br i1 %fdhasdl, label %fdfold, label %fdfoldnext
@@ -2526,21 +2267,6 @@ fdfoldnext:
   br label %fdfoldloop
 
 fdfolddone:
-  ; TDD-00216: fold the soonest background AbortSignal.timeout deadline into the
-  ; select() wait so it wakes by the deadline; outerloop then fires it. This never
-  ; keeps the loop alive on its own (soonest()==0 ⇒ no constraint) — it only
-  ; bounds a wait the loop was already going to make for other pending work.
-  %atso = call i64 @__kml_abort_to_soonest()
-  %atsonz = icmp ne i64 %atso, 0
-  br i1 %atsonz, label %atfold, label %atfolddone
-atfold:
-  %atcur = load i64, ptr %cmdlabs, align 8
-  %atempty = icmp eq i64 %atcur, 0
-  %atsooner = icmp slt i64 %atso, %atcur
-  %attake = or i1 %atempty, %atsooner
-  br i1 %attake, label %attakeit, label %atfolddone
-attakeit:
-  store i64 %atso, ptr %cmdlabs, align 8
   br label %atfolddone
 atfolddone:
   ; Fold libcurl's own internal deadline into the extra-deadline slot.
@@ -2584,8 +2310,7 @@ cmstore:
 cmtodone:
   ; Fold the soonest spawn timeout deadline (ADR-00764) into the extra-
   ; deadline slot so a silent slow child is still killed on time even when no
-  ; other timer/fd bounds the select() wait — the same shape as the curl and
-  ; EventSource-reconnect folds above.
+  ; other timer/fd bounds the select() wait — the same shape as the curl fold above.
   %cptons = call i64 @__kml_cp_next_timeout_ns()
   %cptohas = icmp ne i64 %cptons, 0
   br i1 %cptohas, label %cptofold, label %cptodone
@@ -2665,7 +2390,7 @@ ctodone:
   %nowaitp = icmp ne i8 %nowaitv, 0
   %needimmediate1 = or i1 %needimmediate0, %pend0
   %needimmediate = or i1 %needimmediate1, %nowaitp
-  %usetimer0 = or i1 %havetimer, %needimmediate
+  %usetimer0 = or i1 %havetimer_js, %needimmediate
   %havefetchdlv = load i1, ptr %havefetchdl, align 1
   %usetimer1 = or i1 %usetimer0, %havefetchdlv
   %cmdlv0 = load i64, ptr %cmdlabs, align 8
@@ -2697,13 +2422,8 @@ timeoutpath:
   %cmwait = select i1 %hascm2, i64 %cmwait0, i64 9223372036854775807
   %cmsooner = icmp slt i64 %cmwait, %waitbase
   %waitns0 = select i1 %cmsooner, i64 %cmwait, i64 %waitbase
-  ; TDD-00039 Stage 3: a pending WebSocket-client notification always wins
-  ; over a real timer's own (possibly much longer) remaining wait — found
-  ; as a real bug where %usetimer's own %forcezero routing into this same
-  ; timeoutpath wasn't enough on its own, since a real timer already
-  ; present (e.g. this exact program's own setTimeout) sets %bestfire to
-  ; its own real, distant fire time, silently overriding the "wait zero"
-  ; intent by the time this path's normal wait computation runs.
+  ; A pending %forcezero wins over a real timer's (possibly much longer)
+  ; remaining wait.
   ; TDD-00117: cap the wait at 200ms in cluster mode so an idle worker re-polls
   ; the shared close flag promptly (%clustermode computed above the branch).
   %clustercap = select i1 %clustermode, i64 200000000, i64 9223372036854775807
@@ -2738,24 +2458,9 @@ afterselect:
   br i1 %selfailed, label %outerloop, label %afterselectok
 
 afterselectok:
-  ; TDD-00039 Stage 3: scan every open WebSocket client for a deferred
-  ; onopen/onerror+onclose notification or newly-arrived frame data —
-  ; called unconditionally, unlike checkes below, since a WebSocket client
-  ; is plain POSIX sockets with no libcurl involvement at all: a program
-  ; using only new WebSocket(url) (no fetch, no EventSource) never
-  ; initializes @__kml_curl_multi, so gating this behind %hascurl the way
-  ; checkes own scan calls are gated would make it unreachable for that
-  ; program -- found the hard way as a real bug (onopen/onmessage never
-  ; firing) when %hascurl was false for a WebSocket-client-only program.
-  call void @__kml_wsclient_scan()
-  ; TDD-00098: drain any worker message envelopes that arrived — child
-  ; workers' messages/exit notices on the parent thread, parent-posted
-  ; messages on a worker thread. Unconditional like the WebSocket scan
-  ; (workers are plain pipes, no libcurl involvement); no-op stub when the
-  ; program never uses workers.
+  ; A terminated worker's thread ends here (runtime_worker.go); a no-op
+  ; stub without workers.
   call void @__kml_worker_dispatch()
-  ; TDD-00099: drain channel-endpoint envelopes for this thread likewise.
-  call void @__kml_chan_dispatch()
   ; child_process: drain spawned children's stdout/stderr and finalize exits.
   call void @__kml_cp_dispatch()
   ; TDD-00225: poll pending dynamic-import islands (one turn of each island's
@@ -2775,14 +2480,8 @@ afterselectok:
   %plpoke0 = load i8, ptr @__kml_conn_poke, align 1
   %plpoke1 = select i1 %plran, i8 1, i8 %plpoke0
   store i8 %plpoke1, ptr @__kml_conn_poke, align 1
-  ; readline: drain stdin and emit 'line'/'close' events.
-  call void @__kml_rl_dispatch()
-  ; process.stdin: drain stdin and emit 'data'/'end' events.
-  call void @__kml_stdin_dispatch()
   ; net: accept new TCP connections and drain readable connection sockets.
   call void @__kml_net_dispatch()
-  ; dgram: drain readable UDP sockets and fire 'message' listeners.
-  call void @__kml_dgram_dispatch()
   ; TDD-00191 Stage 1: accept new connections on every additional http server.
   call void @__kml_http_xl_accept(ptr %fdset)
   br i1 %hascurl, label %docurlperform, label %checklistener
@@ -2791,18 +2490,6 @@ docurlperform:
   call i32 @curl_multi_perform(ptr %curlmulti, ptr %runningp2)
   call void @__kml_curl_drain_messages()
   call void @__kml_httpc_fire_ready()
-  br label %checkes
-
-checkes:
-  ; TDD-00038 Stage 0: scan every open EventSource for a readyState
-  ; transition — right after drain_messages above, so pending->done/buf are
-  ; already fresh this iteration for every entry, EventSource or plain
-  ; fetch alike. Called unconditionally (mirroring docurlperform's own
-  ; %hascurl guard doesn't apply here — @__kml_es_len is simply 0, so the
-  ; scan's own loop is a cheap no-op, when no EventSource has ever been
-  ; constructed) — unlike __kml_wsclient_scan above, EventSource itself
-  ; can't exist without curl, so this gate is harmless for it specifically.
-  call void @__kml_eventsource_scan()
   br label %checklistener
 
 checklistener:
@@ -2965,12 +2652,8 @@ rscannext:
 checktimerfire:
   ; The poke snapshot was consumed at scanconn (cleared BEFORE the scan, see
   ; there) — no clear here, so a poke set during the scan stays pending.
-  ; %havetimer_js (not the merged %havetimer, which also goes true whenever
-  ; only an EventSource reconnect deadline bounded the wait, see scandone
-  ; above) — %besti below indexes into @__kml_timer_data and is -1 whenever
-  ; no real JS timer exists, so branching on the merged flag here would
-  ; index that array at -1 the moment a reconnect-only wait's deadline
-  ; comes due.
+  ; %besti below indexes into @__kml_timer_data and is -1 whenever no real
+  ; JS timer exists.
   br i1 %havetimer_js, label %checkdue, label %outerloop
 
 checkdue:

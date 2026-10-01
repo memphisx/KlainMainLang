@@ -36,7 +36,11 @@ func (e *Emitter) promiseArrayElemType(expr ast.Expression, name string, pos ast
 	}
 	elemTy := *arrTy.ElemType
 	if !elemTy.IsPromise {
-		return Type{}, fmt.Errorf("%d:%d: %s takes an array of promises", pos.Line, pos.Col, name)
+		// Plain values: each is Promise.resolve(value) (combinatorMembers).
+		if isUnconstrainedDynamic(elemTy) {
+			return TypeAny, nil
+		}
+		return elemTy, nil
 	}
 	innerTy := TypeVoid
 	if elemTy.PromiseType != nil {
@@ -87,40 +91,6 @@ func (e *Emitter) promiseArrayIsTask(expr ast.Expression) bool {
 	// promise — its runtime value is a settled/pending task promise, not the old
 	// bare value slot the already-resolved combinator path would misread.
 	return el.IsPromise && (el.PromiseType == nil || !el.PromiseType.IsResponse)
-}
-
-// emitTaskCombinatorCollect awaits each member task-promise in array order
-// (which drives the shared scheduler, so all members progress concurrently) and
-// invokes store(idxVal, value) per resolved member — the shared loop body of the
-// task-promise branch of Promise.all / .allSettled.
-//
-// The member slot is *not* freed: a Promise is a reusable value in JS, so a
-// combinator reads its inputs the way `.map`/`.filter` read a source array —
-// without consuming them. This keeps `const p = f(); await Promise.all([p]);
-// await p` correct (the earlier free made the second await a use-after-free) and
-// `Promise.all([p, p])` from double-freeing. An inline-temporary member
-// (`Promise.all([f(1)])`) leaks its slot, the same ambient behavior manual mode
-// has for every unreclaimed allocation (collected under `-mm=gc`).
-func (e *Emitter) emitTaskCombinatorAwaitEach(ptrReg, lenReg string, innerTy Type, store func(idxVal string, val Value)) {
-	// With no may-suspend fns in the program (TDD-00084 Part A), every member is
-	// a settled task promise — read it directly, no scheduler (keeps a pure-async
-	// program free of the fiber runtime + libcurl). Otherwise wait via the loop.
-	e.ensurePromiseRuntime()
-	if e.hasMaySuspend {
-		e.ensureTaskRuntime()
-	}
-	e.emitPromiseLoop(lenReg, func(idxVal string) {
-		slotGep := e.freshReg()
-		ph := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotGep, ptrReg, idxVal))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ph, slotGep))
-		if e.hasMaySuspend {
-			e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready(ptr %s)", ph))
-		}
-		e.emitTaskRethrowIfRejected(ph) // Promise.all rejects on the first rejected member
-		val := e.loadPromiseValue(ph, innerTy)
-		store(idxVal, val)
-	})
 }
 
 // emitPromiseLoop emits a Go-side "for i in 0..lenReg" loop (same
@@ -199,41 +169,6 @@ func (e *Emitter) wrapArrayAggregate(outPtr, lenReg string, elemTy Type) Value {
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}
 }
 
-// wrapResolvedPromise mallocs a Promise slot for val and stores it — every
-// builtin below does its real waiting (if any) synchronously and then
-// wraps an already-resolved value in a Promise using the exact same
-// convention emitAsyncPrologue/emitReturn use for an ordinary async
-// function's return, so a later `await` on the result reads it back via
-// emitAwait's generic branch. Uses StructFieldSize/StructFieldIR (not
-// Align()/.IR) so an array-typed val (Promise<Array<T>>, .all's/
-// .allSettled's own return shape) gets the correct 16-byte {ptr,i64} slot —
-// see emit_async.go's ADR-00073 fix this depends on. When val is itself a
-// Response (.race's Response branch — the only caller that can hit this;
-// .all/.allSettled always wrap an Array, never a bare Response), the
-// resulting PromiseType is additionally marked PromiseResolved so
-// emitAwait knows this slot holds the finished Response object itself, not
-// a still-pending fetch handle to wait on — see PromiseResolved's own doc
-// comment in types.go for the corruption this prevents.
-func (e *Emitter) wrapResolvedPromise(val Value) Value {
-	e.ensureMalloc()
-	size := StructFieldSize(val.Ty)
-	slotReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", slotReg, size))
-	if val.Ty.IsArray {
-		// The resolved-value buffer holds a header pointer for an array (TDD-00213
-		// Stage 2, StructFieldSize == 8); emitAwait derefs it back to the aggregate.
-		e.storeArrayFieldHeader(slotReg, val)
-	} else {
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
-			StructFieldIR(val.Ty), val.Ref, slotReg, val.Ty.Align()))
-	}
-	promiseTy := PromiseOf(val.Ty)
-	if val.Ty.IsResponse && promiseTy.PromiseType != nil {
-		promiseTy.PromiseType.PromiseResolved = true
-	}
-	return Value{Ref: slotReg, Ty: promiseTy}
-}
-
 // emitPromiseResolve implements `Promise.resolve(v)` — a settled (fulfilled)
 // task-shaped promise, so `.then`/`.catch`/`.finally`/`await` all work on it. An
 // already-promise argument is returned as-is (JS flattens a thenable);
@@ -253,6 +188,11 @@ func (e *Emitter) emitPromiseResolve(args []ast.Expression, pos ast.Pos, hint Ty
 	}
 	if val.Ty.IsPromise {
 		return val, nil
+	}
+	// A dynamic value holding a promise resolves as that promise
+	// (PromiseResolve); anything else is a fulfilled Promise<any>.
+	if isUnconstrainedDynamic(val.Ty) {
+		return e.emitAnyToPromiseAny(val), nil
 	}
 	// Honor a contextual `Promise<any>` hint (e.g. `const p: Promise<any> =
 	// Promise.resolve(42)`): the promise's value slot is read back at `.then`/
@@ -335,7 +275,7 @@ func (e *Emitter) emitSetPromiseState(q string, state int) {
 func (e *Emitter) buildSettlement(settleTy Type, statusStr, valueRef, reasonRef string) string {
 	e.ensureMalloc()
 	obj := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", obj, settleTy.StructSize()))
+	e.emitObjMallocInto(obj, settleTy)
 	structIR := settleTy.StructIR()
 	storeField := func(name, ref string) {
 		idx, fieldTy, _ := settleTy.FieldIndex(name)
@@ -370,371 +310,30 @@ func (e *Emitter) buildSettlement(settleTy Type, statusStr, valueRef, reasonRef 
 	return obj
 }
 
-// buildPendingMembersArr derefs each array element's Promise<Response>
-// slot to its pending-fetch handle (same deref emitAwait's IsResponse
-// branch already does), collects them into a malloc'd ptr[n] "members"
-// array, builds the 24-byte group struct ({ptr membersArr, i64 count, i64
-// mode}) around it, and waits on the whole group via
-// __kml_await_group_wait before returning — so by the time this returns,
-// every member this group cares about (all of them, for mode 0; the first
-// one to finish, for mode 1) is done. The element's own Promise slot is *not*
-// freed (a fetch Promise<Response> is a reusable value — TDD-00090): the slot
-// keeps pointing at the pending struct (which is never freed), so a later
-// `await member` re-reads the finished Response through the same short-circuit
-// path emitAwait uses, instead of a freed slot.
-func (e *Emitter) buildPendingMembersArr(ptrReg, lenReg string, mode int64) (membersArr, group string) {
-	e.ensurePromiseCombinators()
-
-	bytesReg := e.freshReg()
-	membersArr = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytesReg, lenReg))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", membersArr, bytesReg))
-
-	e.emitPromiseLoop(lenReg, func(idxVal string) {
-		slotGep := e.freshReg()
-		promiseHandle := e.freshReg()
-		pendingPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotGep, ptrReg, idxVal))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", promiseHandle, slotGep))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pendingPtr, promiseHandle))
-
-		memberGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", memberGep, membersArr, idxVal))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", pendingPtr, memberGep))
-	})
-
-	group = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 24)", group))
-	membersFieldGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, i64, i64 }, ptr %s, i32 0, i32 0", membersFieldGep, group))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", membersArr, membersFieldGep))
-	countFieldGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, i64, i64 }, ptr %s, i32 0, i32 1", countFieldGep, group))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenReg, countFieldGep))
-	modeFieldGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, i64, i64 }, ptr %s, i32 0, i32 2", modeFieldGep, group))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", mode, modeFieldGep))
-
-	e.emitInstr(fmt.Sprintf("call void @__kml_await_group_wait(ptr %s)", group))
-	return membersArr, group
-}
-
-// emitPromiseAll implements Promise.all(promises).
+// emitPromiseAll / Race / Any / AllSettled implement the four combinators:
+// the members become task promises (combinatorMembers), then the spec's
+// algorithm runs over them (emit_promise_combinators.go, ADR-01193).
 func (e *Emitter) emitPromiseAll(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Promise.all takes exactly 1 argument", pos.Line, pos.Col)
-	}
-	innerTy, err := e.promiseArrayElemType(args[0], "Promise.all", pos)
-	if err != nil {
-		return Value{}, err
-	}
-	ptrReg, lenReg, _, err := e.resolveArrayForHOF(args[0], pos)
-	if err != nil {
-		return Value{}, err
-	}
-
-	var outTy Type
-	var outPtr string
-	if innerTy.IsResponse {
-		outTy = ResponseType()
-		membersArr, _ := e.buildPendingMembersArr(ptrReg, lenReg, 0)
-		outPtr = e.mallocArrayBuffer(lenReg, outTy)
-		e.emitPromiseLoop(lenReg, func(idxVal string) {
-			memberGep := e.freshReg()
-			pendingPtr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", memberGep, membersArr, idxVal))
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pendingPtr, memberGep))
-			// Throws (via __kml_pending_finish's own @__kml_throw/unreachable)
-			// on the first array-order transport failure it hits — matching
-			// real Promise.all rejecting the whole combinator on any member
-			// failing, with "first in array order" standing in for "first to
-			// be processed" once every member is already known to be settled
-			// (see buildPendingMembersArr's own group-wait above).
-			raw := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call { i64, ptr, i64 } @__kml_pending_finish(ptr %s)", raw, pendingPtr))
-			status := e.freshReg()
-			body := e.freshReg()
-			bodyLen := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 0", status, raw))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 1", body, raw))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 2", bodyLen, raw))
-			respVal := e.buildResponseFromStatusBody(status, body, bodyLen)
-			e.storeArrayElement(outPtr, idxVal, respVal.Ref, outTy)
-		})
-	} else if e.promiseArrayIsTask(args[0]) {
-		// Array of task promises (may-suspend async fns, TDD-00083 Stage 2): the
-		// tasks are already running concurrently; await each in order — the
-		// await drives the whole scheduler, so they overlap — and collect.
-		outTy = innerTy
-		outPtr = e.mallocArrayBuffer(lenReg, outTy)
-		e.emitTaskCombinatorAwaitEach(ptrReg, lenReg, innerTy, func(idxVal string, val Value) {
-			e.storeArrayElementValue(outPtr, idxVal, val, outTy)
-		})
-	} else {
-		// Nothing to parallelize: every element is already resolved by
-		// construction (see this file's own header comment) — .all's
-		// honest behavior here is a plain, order-preserving collection. The
-		// member slot is read, not freed (a Promise is a reusable value — see
-		// emitTaskCombinatorAwaitEach).
-		outTy = innerTy
-		outPtr = e.mallocArrayBuffer(lenReg, outTy)
-		e.emitPromiseLoop(lenReg, func(idxVal string) {
-			slotGep := e.freshReg()
-			promiseHandle := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotGep, ptrReg, idxVal))
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", promiseHandle, slotGep))
-			if innerTy.IsArray {
-				// The resolved-value buffer holds a header pointer (TDD-00213 S2);
-				// store the array element as its header pointer, not the {ptr,i64}
-				// aggregate (which does not fit the "ptr"-shaped result slot).
-				val := e.loadArraySlotAggregate(promiseHandle, innerTy)
-				e.storeArrayElementValue(outPtr, idxVal, val, outTy)
-			} else {
-				valReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
-					valReg, StructFieldIR(innerTy), promiseHandle, innerTy.Align()))
-				e.storeArrayElement(outPtr, idxVal, valReg, outTy)
-			}
-		})
-	}
-
-	resultArr := e.wrapArrayAggregate(outPtr, lenReg, outTy)
-	return e.wrapResolvedPromise(resultArr), nil
+	return e.emitCombinator("all", "Promise.all", args, pos)
 }
 
-// emitPromiseRace implements Promise.race(promises).
 func (e *Emitter) emitPromiseRace(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Promise.race takes exactly 1 argument", pos.Line, pos.Col)
-	}
-	innerTy, err := e.promiseArrayElemType(args[0], "Promise.race", pos)
-	if err != nil {
-		return Value{}, err
-	}
-	ptrReg, lenReg, _, err := e.resolveArrayForHOF(args[0], pos)
-	if err != nil {
-		return Value{}, err
-	}
-
-	if innerTy.IsResponse {
-		// Real race: whichever of the N fetches settles first (success or
-		// transport failure) decides the result — matching real
-		// Promise.race settling to whichever input settles first,
-		// regardless of fulfilled/rejected. Note: a runtime-empty array
-		// here hangs forever, exactly like real Promise.race([]) never
-		// settling — a compile-time-unknowable array length means this
-		// can't be rejected any earlier than that (documented in
-		// TDD-00016, not silently guarded against).
-		membersArr, group := e.buildPendingMembersArr(ptrReg, lenReg, 1)
-		winnerIdx := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_first_done_index(ptr %s)", winnerIdx, group))
-		winnerGep := e.freshReg()
-		winnerPending := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", winnerGep, membersArr, winnerIdx))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", winnerPending, winnerGep))
-		raw := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call { i64, ptr, i64 } @__kml_pending_finish(ptr %s)", raw, winnerPending))
-		status := e.freshReg()
-		body := e.freshReg()
-		bodyLen := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 0", status, raw))
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 1", body, raw))
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 2", bodyLen, raw))
-		respVal := e.buildResponseFromStatusBody(status, body, bodyLen)
-		return e.wrapResolvedPromise(respVal), nil
-	}
-
-	if e.promiseArrayIsTask(args[0]) {
-		// Task promises are already running concurrently; the winner is the first
-		// to settle. With may-suspend fns, wait via the scheduler; with none
-		// (Part A) every member already settled, so the winner is index 0 (its
-		// reaction would fire first) — no scheduler, no libcurl.
-		e.ensurePromiseRuntime()
-		winnerIdx := "0"
-		if e.hasMaySuspend {
-			e.ensureTaskRuntime()
-			w := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_task_await_any_of(ptr %s, i64 %s)", w, ptrReg, lenReg))
-			winnerIdx = w
-		}
-		winnerGep := e.freshReg()
-		winnerProm := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", winnerGep, ptrReg, winnerIdx))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", winnerProm, winnerGep))
-		e.emitTaskRethrowIfRejected(winnerProm) // race settles to the winner's rejection too
-		val := e.loadPromiseValue(winnerProm, innerTy)
-		return e.wrapResolvedPromise(val), nil
-	}
-
-	// Nothing to race: every promise is already resolved by construction
-	// (see this file's own header comment) — the first element's value is,
-	// honestly, the first one "settled." Documented limitation, not a fake
-	// race; matches real Promise.race([]) hanging forever for an
-	// (unsupported-here) empty array the same way the Response branch does.
-	// The slot is read, not freed (a Promise is a reusable value — see
-	// emitTaskCombinatorAwaitEach).
-	firstGep := e.freshReg()
-	promiseHandle := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 0", firstGep, ptrReg))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", promiseHandle, firstGep))
-	valReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
-		valReg, StructFieldIR(innerTy), promiseHandle, innerTy.Align()))
-	return e.wrapResolvedPromise(Value{Ref: valReg, Ty: innerTy}), nil
+	return e.emitCombinator("race", "Promise.race", args, pos)
 }
 
-// emitPromiseAny implements Promise.any(promises) — resolves to the first
-// fulfilled member's value (TDD-00083 Stage 2). Over task promises this is the
-// first to resolve (this async model has no rejection state, so every member
-// fulfills and the all-rejected AggregateError path is unreachable); over an
-// already-resolved array it is the first element. The raw-fetch Response case —
-// which needs "first *successful* transfer, else AggregateError" — is a clean
-// rejection for now; use Promise.race/all over the fetches instead.
 func (e *Emitter) emitPromiseAny(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Promise.any takes exactly 1 argument", pos.Line, pos.Col)
-	}
-	innerTy, err := e.promiseArrayElemType(args[0], "Promise.any", pos)
-	if err != nil {
-		return Value{}, err
-	}
-	ptrReg, lenReg, _, err := e.resolveArrayForHOF(args[0], pos)
-	if err != nil {
-		return Value{}, err
-	}
-
-	if innerTy.IsResponse {
-		// Promise.any over raw fetches (TDD-00084 Part C): the fetches run
-		// concurrently; settle to the first transport-successful one (mode 2),
-		// else — every fetch failed at the transport level — throw an
-		// AggregateError carrying each failure. An HTTP error status (404/500) is
-		// a *fulfilled* fetch in the WHATWG model, so it counts as a success here.
-		membersArr, group := e.buildPendingMembersArr(ptrReg, lenReg, 2)
-		winnerIdx := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_first_success_index(ptr %s)", winnerIdx, group))
-		allFailed := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, -1", allFailed, winnerIdx))
-		rejL := e.freshLabel("any.fetch.allreject")
-		okL := e.freshLabel("any.fetch.ok")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", allFailed, rejL, okL))
-		e.emitLabel(rejL)
-		e.emitInstr(fmt.Sprintf("call void @__kml_group_throw_aggregate(ptr %s)", group))
-		e.emitTerminator("unreachable")
-		e.emitLabel(okL)
-		winnerGep := e.freshReg()
-		winnerPending := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", winnerGep, membersArr, winnerIdx))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", winnerPending, winnerGep))
-		raw := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call { i64, ptr, i64 } @__kml_pending_finish(ptr %s)", raw, winnerPending))
-		status := e.freshReg()
-		body := e.freshReg()
-		bodyLen := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 0", status, raw))
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 1", body, raw))
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 2", bodyLen, raw))
-		respVal := e.buildResponseFromStatusBody(status, body, bodyLen)
-		return e.wrapResolvedPromise(respVal), nil
-	}
-
-	if e.promiseArrayIsTask(args[0]) {
-		// Skip rejected members to the first *fulfilled* one; -1 means every
-		// member rejected, so throw an AggregateError carrying them. With
-		// may-suspend fns, wait via the scheduler; with none (Part A) every member
-		// already settled, so a scheduler-free scan suffices (no libcurl).
-		e.ensurePromiseRuntime()
-		winnerIdx := e.freshReg()
-		if e.hasMaySuspend {
-			e.ensureTaskRuntime()
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_task_await_first_fulfilled(ptr %s, i64 %s)", winnerIdx, ptrReg, lenReg))
-		} else {
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_promise_first_fulfilled(ptr %s, i64 %s)", winnerIdx, ptrReg, lenReg))
-		}
-		allRej := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, -1", allRej, winnerIdx))
-		rejL := e.freshLabel("any.allreject")
-		okL := e.freshLabel("any.fulfilled")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", allRej, rejL, okL))
-
-		e.emitLabel(rejL)
-		e.emitAggregateErrorThrowFromMembers(ptrReg, lenReg)
-		// emitAggregateErrorThrowFromMembers ends in `unreachable`.
-
-		e.emitLabel(okL)
-		winnerGep := e.freshReg()
-		winnerProm := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", winnerGep, ptrReg, winnerIdx))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", winnerProm, winnerGep))
-		val := e.loadPromiseValue(winnerProm, innerTy)
-		return e.wrapResolvedPromise(val), nil
-	}
-
-	// Already-resolved array: the first element is the first fulfilled. The slot
-	// is read, not freed (a Promise is a reusable value — see
-	// emitTaskCombinatorAwaitEach).
-	firstGep := e.freshReg()
-	promiseHandle := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 0", firstGep, ptrReg))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", promiseHandle, firstGep))
-	valReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
-		valReg, StructFieldIR(innerTy), promiseHandle, innerTy.Align()))
-	return e.wrapResolvedPromise(Value{Ref: valReg, Ty: innerTy}), nil
+	return e.emitCombinator("any", "Promise.any", args, pos)
 }
 
-// emitAggregateErrorThrowFromMembers builds an errors array from every member
-// task-promise's rejection reason (field 2, the stored error ptr), constructs an
-// AggregateError with the standard "All promises were rejected" message, and
-// throws it. Ends the current block in `unreachable`. Used by Promise.any when
-// every member rejected (TDD-00083).
-func (e *Emitter) emitAggregateErrorThrowFromMembers(ptrReg, lenReg string) {
-	e.ensureExceptionHelpers()
-	e.ensureMalloc()
-	// errArr: lenReg ptr-sized slots holding each member's rejection reason.
-	byteCount := e.freshReg()
-	errArr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", byteCount, lenReg))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", errArr, byteCount))
-	e.emitPromiseLoop(lenReg, func(idxVal string) {
-		memberGep := e.freshReg()
-		member := e.freshReg()
-		reasonP := e.freshReg()
-		reasonBits := e.freshReg()
-		reasonPtr := e.freshReg()
-		dstGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", memberGep, ptrReg, idxVal))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", member, memberGep))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", reasonP, promiseStructIR, member))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", reasonBits, reasonP))
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", reasonPtr, reasonBits))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", dstGep, errArr, idxVal))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", reasonPtr, dstGep))
-	})
-	msgPtr := e.internString("All promises were rejected")
-	namePtr := e.internString("AggregateError")
-	aggErr := e.buildAggregateErrorObj(msgPtr, namePtr, errArr, lenReg)
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", aggErr))
-	e.emitTerminator("unreachable")
-}
-
-// loadErrorMessage reads an errorObjType instance's `message` string pointer
-// (field index 1). Used by allSettled to report a rejection's raw value string
-// as `reason` rather than the whole synthetic Error wrapper.
-func (e *Emitter) loadErrorMessage(errPtr string) string {
-	idx, _, _ := errorObjType.FieldIndex("message")
-	gep := e.freshReg()
-	msg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, errorObjType.StructIR(), errPtr, idx))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", msg, gep))
-	return msg
-}
-
-// emitPromiseAllSettled implements Promise.allSettled(promises).
 func (e *Emitter) emitPromiseAllSettled(args []ast.Expression, pos ast.Pos) (Value, error) {
+	return e.emitCombinator("allSettled", "Promise.allSettled", args, pos)
+}
+
+func (e *Emitter) emitCombinator(kind, name string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Promise.allSettled takes exactly 1 argument", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: %s takes exactly 1 argument", pos.Line, pos.Col, name)
 	}
-	innerTy, err := e.promiseArrayElemType(args[0], "Promise.allSettled", pos)
+	innerTy, err := e.promiseArrayElemType(args[0], name, pos)
 	if err != nil {
 		return Value{}, err
 	}
@@ -742,139 +341,89 @@ func (e *Emitter) emitPromiseAllSettled(args []ast.Expression, pos ast.Pos) (Val
 	if err != nil {
 		return Value{}, err
 	}
+	members, innerTy := e.combinatorMembers(args[0], ptrReg, lenReg, innerTy)
+	return e.emitAsyncCombinator(kind, members, lenReg, innerTy), nil
+}
 
-	fulfilledStr := e.internString("fulfilled")
-	var settleTy Type
-	var outPtr string
-
-	if innerTy.IsResponse {
-		settleTy = SettlementType(ResponseType())
-		rejectedStr := e.internString("rejected")
-		membersArr, _ := e.buildPendingMembersArr(ptrReg, lenReg, 0)
-		outPtr = e.mallocArrayBuffer(lenReg, settleTy)
-		e.emitPromiseLoop(lenReg, func(idxVal string) {
-			memberGep := e.freshReg()
-			pendingPtr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", memberGep, membersArr, idxVal))
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pendingPtr, memberGep))
-			raw := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call { i1, i64, ptr, ptr, i64 } @__kml_pending_finish_settled(ptr %s)", raw, pendingPtr))
-			failed := e.freshReg()
-			status := e.freshReg()
-			body := e.freshReg()
-			reasonMsg := e.freshReg()
-			bodyLen := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = extractvalue { i1, i64, ptr, ptr, i64 } %s, 0", failed, raw))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue { i1, i64, ptr, ptr, i64 } %s, 1", status, raw))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue { i1, i64, ptr, ptr, i64 } %s, 2", body, raw))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue { i1, i64, ptr, ptr, i64 } %s, 3", reasonMsg, raw))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue { i1, i64, ptr, ptr, i64 } %s, 4", bodyLen, raw))
-
-			okL := e.freshLabel("settled.ok")
-			failL := e.freshLabel("settled.fail")
-			mergeL := e.freshLabel("settled.merge")
-			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", failed, failL, okL))
-
-			e.emitLabel(okL)
-			respVal := e.buildResponseFromStatusBody(status, body, bodyLen)
-			settleOk := e.buildSettlement(settleTy, fulfilledStr, respVal.Ref, "null")
-			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-
-			e.emitLabel(failL)
-			// The reason is a transport-failure message string — wrap it in a real
-			// errorObjType so the `.reason` slot is always a valid Error object
-			// (`.reason.message` reads the message field, no crash), then box it as
-			// a kmlTagObject `any` so the `reason: any` slot (TDD-00169) recovers
-			// the Error shape via its field-0 type-id (TDD-00222).
-			reasonErr := e.buildErrorObj(0, reasonMsg, e.internString("Error"))
-			reasonAny := e.emitNbTagPtr(reasonErr, kmlTagObject)
-			settleFail := e.buildSettlement(settleTy, rejectedStr, "null", reasonAny)
-			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-
-			e.emitLabel(mergeL)
-			merged := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", merged, settleOk, okL, settleFail, failL))
-			e.storeArrayElement(outPtr, idxVal, merged, settleTy)
-		})
-	} else if e.promiseArrayIsTask(args[0]) {
-		// Task promises: await each (drives the scheduler, so they overlap) and
-		// report each as fulfilled or rejected (TDD-00083 Stage 2).
-		settleTy = SettlementType(innerTy)
-		rejectedStr := e.internString("rejected")
-		outPtr = e.mallocArrayBuffer(lenReg, settleTy)
-		e.ensurePromiseRuntime()
-		if e.hasMaySuspend {
-			e.ensureTaskRuntime()
-		}
-		e.ensureFree()
-		e.emitPromiseLoop(lenReg, func(idxVal string) {
-			slotGep := e.freshReg()
-			ph := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotGep, ptrReg, idxVal))
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ph, slotGep))
-			if e.hasMaySuspend {
-				e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready(ptr %s)", ph))
-			}
-			resP := e.freshReg()
-			res := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", resP, promiseStructIR, ph))
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", res, resP))
-			rej := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 2", rej, res))
-			okL := e.freshLabel("settled.ok")
-			failL := e.freshLabel("settled.fail")
-			mergeL := e.freshLabel("settled.merge")
-			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", rej, failL, okL))
-			e.emitLabel(okL)
-			val := e.loadPromiseValue(ph, innerTy)
-			settleOk := e.buildSettlement(settleTy, fulfilledStr, val.Ref, "null")
-			okEndL := e.freshLabel("settled.okend")
-			e.emitTerminator(fmt.Sprintf("br label %%%s", okEndL))
-			e.emitLabel(okEndL)
-			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-			e.emitLabel(failL)
-			// The rejection reason is a caught value (TDD-00207) — box it as the
-			// original value into `reason: any` (TDD-00169): a non-Error keeps its
-			// true type (`reject(42)` → `typeof reason === "number"`, JSON `42`),
-			// and an Error boxes to kmlTagObject whose field-0 type-id (TDD-00222)
-			// lets `.reason.message`/`.name`/`String`/JSON recover its shape at the
-			// consuming site. No coercion to a stringified Error — the former lossy
-			// path (and its segfault) is gone.
-			reasonC := e.loadRejectReasonCaught(ph)
-			reasonAny := e.emitCaughtToAny(reasonC)
-			settleFail := e.buildSettlement(settleTy, rejectedStr, innerTy.zeroLiteral(), reasonAny.Ref)
-			// emitCaughtToAny added blocks, so pin the phi predecessor with an
-			// explicit trailing label rather than the stale failL.
-			failEndL := e.freshLabel("settled.failend")
-			e.emitTerminator(fmt.Sprintf("br label %%%s", failEndL))
-			e.emitLabel(failEndL)
-			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-			e.emitLabel(mergeL)
-			merged := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", merged, settleOk, okEndL, settleFail, failEndL))
-			// The member slot is read, not freed (a Promise is a reusable value
-			// — see emitTaskCombinatorAwaitEach).
-			e.storeArrayElement(outPtr, idxVal, merged, settleTy)
-		})
-	} else {
-		// Nothing to parallelize, and nothing that can fail either (see
-		// this file's own header comment) — every element is, honestly,
-		// always "fulfilled." The slot is read, not freed (reusable value).
-		settleTy = SettlementType(innerTy)
-		outPtr = e.mallocArrayBuffer(lenReg, settleTy)
-		e.emitPromiseLoop(lenReg, func(idxVal string) {
-			slotGep := e.freshReg()
-			promiseHandle := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotGep, ptrReg, idxVal))
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", promiseHandle, slotGep))
-			valReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
-				valReg, StructFieldIR(innerTy), promiseHandle, innerTy.Align()))
-			settled := e.buildSettlement(settleTy, fulfilledStr, valReg, "null")
-			e.storeArrayElement(outPtr, idxVal, settled, settleTy)
-		})
+// combinatorMembers is the list as task promises, and their value type:
+// task promises as they are, a raw fetch promise through its bridge, a
+// plain value as a fulfilled promise (the spec's PromiseResolve), a value
+// held in `any` through Promise.resolve of it.
+func (e *Emitter) combinatorMembers(arr ast.Expression, ptrReg, lenReg string, innerTy Type) (string, Type) {
+	el := innerTy
+	if at := e.inferExprType(arr); at.IsArray && at.ElemType != nil {
+		el = *at.ElemType
 	}
+	switch {
+	case !el.IsPromise:
+		return e.wrapValueMembers(ptrReg, lenReg, el)
+	case e.promiseArrayIsTask(arr):
+		return ptrReg, innerTy
+	case innerTy.IsResponse:
+		return e.bridgeFetchMembers(ptrReg, lenReg), innerTy
+	}
+	return ptrReg, innerTy
+}
 
-	resultArr := e.wrapArrayAggregate(outPtr, lenReg, settleTy)
-	return e.wrapResolvedPromise(resultArr), nil
+// wrapValueMembers is an array of promises fulfilled with each value of
+// (ptrReg, lenReg) — or, for `any` values, Promise.resolve of each (a
+// promise held in `any` is itself).
+func (e *Emitter) wrapValueMembers(ptrReg, lenReg string, el Type) (string, Type) {
+	e.ensurePromiseRuntime()
+	e.ensureMalloc()
+	dyn := isUnconstrainedDynamic(el)
+	bytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, lenReg))
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", out, bytes))
+	e.emitPromiseLoop(lenReg, func(idxVal string) {
+		g := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", g, StructFieldIR(el), ptrReg, idxVal))
+		var v Value
+		if el.IsArray {
+			v = e.loadArraySlotAggregate(g, el)
+		} else {
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, StructFieldIR(el), g, el.Align()))
+			v = Value{Ref: r, Ty: el}
+		}
+		var p string
+		if dyn {
+			p = e.emitAnyToPromiseAny(v).Ref
+		} else {
+			p = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", p))
+			e.storePromiseValue(p, v)
+			e.emitSetPromiseState(p, 1)
+		}
+		d := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", d, out, idxVal))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, d))
+	})
+	if dyn {
+		return out, TypeAny
+	}
+	return out, el
+}
+
+// bridgeFetchMembers is an array of the task promises bridging each raw
+// fetch promise of (ptrReg, lenReg) (@__kml_fetch_slot_to_promise).
+func (e *Emitter) bridgeFetchMembers(ptrReg, lenReg string) string {
+	e.ensureFetchSlotToPromise()
+	e.ensureMalloc()
+	bytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, lenReg))
+	arr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", arr, bytes))
+	e.emitPromiseLoop(lenReg, func(idxVal string) {
+		g, slot := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", g, ptrReg, idxVal))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", slot, g))
+		p := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_slot_to_promise(ptr %s)", p, slot))
+		d := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", d, arr, idxVal))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, d))
+	})
+	return arr
 }

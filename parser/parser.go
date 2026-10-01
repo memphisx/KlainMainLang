@@ -12,6 +12,9 @@ import (
 )
 
 type Parser struct {
+	// sigThis is the last parsed signature's leading `this: T` type
+	// (parseSignatureTail).
+	sigThis ast.TypeNode
 	// The scanner runs on demand: tokens holds what has been scanned so far
 	// (filled by at()), states[i] the scanner state just before tokens[i], so
 	// the parser can re-read a token under another ScanMode (rescanAt) and
@@ -75,10 +78,50 @@ type Parser struct {
 	// TDD-00230 P3.1): its annotations stay type nodes, which only the
 	// checker reads, so every TypeScript type form parses.
 	declarations bool
+	// src is the source text; blanks are the byte ranges of its type syntax
+	// (annotations, `as T`, `!`, type arguments), which a call's Source shows
+	// as spaces, as Node's type stripping leaves them.
+	src    string
+	blanks [][2]int
 }
 
 func New(src string) *Parser {
-	return &Parser{lx: lexer.New(src), docAt: -1, noInFrom: -1}
+	return &Parser{lx: lexer.New(src), docAt: -1, noInFrom: -1, src: src}
+}
+
+// blank records [start, end) as type syntax.
+func (p *Parser) blank(start, end int) {
+	if start < end {
+		p.blanks = append(p.blanks, [2]int{start, end})
+	}
+}
+
+// callSource is the source text of a call spanning [start, end), its type
+// syntax blanked.
+func (p *Parser) callSource(start, end int) string {
+	if start < 0 || end > len(p.src) || start >= end {
+		return ""
+	}
+	raw := p.src[start:end]
+	var out []byte
+	for _, b := range p.blanks {
+		lo, hi := max(b[0], start), min(b[1], end)
+		if lo >= hi {
+			continue
+		}
+		if out == nil {
+			out = []byte(raw)
+		}
+		for i := lo; i < hi; i++ {
+			if out[i-start] != '\n' {
+				out[i-start] = ' '
+			}
+		}
+	}
+	if out == nil {
+		return raw
+	}
+	return string(out)
 }
 
 // inExcluded reports whether a relational `in` at the current token is
@@ -173,6 +216,15 @@ func (p *Parser) rescanAt(i int, mode lexer.ScanMode) lexer.Token {
 // parse re-read under another mode are dropped, so the next attempt scans
 // them afresh.
 func (p *Parser) rewind(i int) {
+	if i < len(p.tokens) {
+		// Type syntax recorded past the rewound point was a guess.
+		cut := p.tokens[i].Pos
+		k := len(p.blanks)
+		for k > 0 && p.blanks[k-1][0] >= cut {
+			k--
+		}
+		p.blanks = p.blanks[:k]
+	}
 	p.pos = i
 	k := sort.SearchInts(p.rescans, i)
 	if k == len(p.rescans) {
@@ -251,16 +303,16 @@ func (p *Parser) expectGT(context string) error {
 // type-parameter list — shared by function/interface/class/type-alias
 // declarations (TDD-00010 V1, extended to N parameters by TDD-00037). Assumes
 // the caller has already checked the current token is '<'. A type parameter may
-// carry a `extends X` constraint (TDD-00113); the returned constraints slice is
-// positionally aligned with names (a nil entry means unconstrained).
-func (p *Parser) parseTypeParamList(context string) ([]string, []*ast.TypeAnnotation, error) {
+// carry a `extends X` constraint (TDD-00113) and a `= T` default; the returned
+// constraints and defaults are positionally aligned with names (nil: none).
+func (p *Parser) parseTypeParamList(context string) ([]string, []*ast.TypeAnnotation, []*ast.TypeAnnotation, error) {
 	p.advance() // consume '<'
 	var names []string
-	var constraints []*ast.TypeAnnotation
+	var constraints, defaults []*ast.TypeAnnotation
 	for {
 		nameTok, err := p.expect(lexer.IDENT)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		names = append(names, nameTok.Literal)
 		p.declareTypeParam(nameTok.Literal)
@@ -269,25 +321,27 @@ func (p *Parser) parseTypeParamList(context string) ([]string, []*ast.TypeAnnota
 			p.advance() // consume 'extends'
 			constraint, err = p.parseTypeAnnotation("ts")
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 		constraints = append(constraints, constraint)
+		var def *ast.TypeAnnotation
 		if p.match(lexer.ASSIGN) {
-			// A default (`<T = string>`): parsed; a missing type argument is
-			// erased here as before.
-			if _, err := p.parseType(); err != nil {
-				return nil, nil, err
+			// A default (`<T = string>`): the type a missing type argument
+			// takes.
+			if def, err = p.parseTypeAnnotation("ts"); err != nil {
+				return nil, nil, nil, err
 			}
 		}
+		defaults = append(defaults, def)
 		if !p.match(lexer.COMMA) || p.check(lexer.GT) {
 			break // a trailing comma may end the list
 		}
 	}
 	if err := p.expectGT(context); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return names, constraints, nil
+	return names, constraints, defaults, nil
 }
 
 // parseSemicolon ends a statement: an explicit `;`, or — automatic semicolon

@@ -27,7 +27,7 @@
             "feature": "`console.log(...)`",
             "status": "implemented",
             "caveats": [
-              "A bare string argument with an embedded null byte truncates *on display* at the first `\\0` (`printf` `\"%s\"`); the stored string is intact, and inside a container it renders as `'a\\x00b'`. A length-driven write needs every runtime string to carry its length header first — the URL/crypto sidecars, EventSource and `Blob.text()` do not yet ([ADR-01075](../adr/ADR-01075.md)). Use `process.stdout.write` for binary output"
+              "A bare string argument with an embedded null byte truncates *on display* at the first `\\0` (`printf` `\"%s\"`); the stored string is intact, and inside a container it renders as `'a\\x00b'`. A length-driven write needs every runtime string to carry its length header first — the URL/crypto sidecars do not yet ([ADR-01075](../adr/ADR-01075.md)). Use `process.stdout.write` for binary output"
             ],
             "notes": [
               "An array shows at most 100 elements then `... n more items`, `-0` prints as `-0` inside a container too, and the column layout measures a full-width glyph as 2 cells and a combining mark as 0 — Node's `getStringWidth` ([ADR-01076](../adr/ADR-01076.md))",

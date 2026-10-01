@@ -165,6 +165,7 @@ int inet_pton(int af, const char *src, void *dst);
 const char *inet_ntop(int af, const void *src, char *dst, size_t size);
 int getaddrinfo(const char *node, const char *svc, const void *hints, struct addrinfo **res);
 void freeaddrinfo(struct addrinfo *ai);
+int getnameinfo(const void *sa, int salen, char *host, size_t hostlen, char *serv, size_t servlen, int flags);
 #endif
 
 #ifdef __cplusplus

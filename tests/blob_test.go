@@ -94,3 +94,23 @@ async function show(): Promise<void> {
 show();
 `, "10 text/plain\nhello blob")
 }
+
+// Blob's readers return promises settled as Node's reader settles them, and
+// text() is a whole string (length, concatenation).
+func TestE2EBlobReadersArePromises(t *testing.T) {
+	assertSameAsNode(t, `
+const b = new Blob(["hello"], { type: "text/plain" })
+const t = await b.text()
+console.log(t.length, t + "!", t.toUpperCase())
+const log: string[] = []
+const one = new Blob(["abc"])
+const none = new Blob([])
+one.text().then((s) => log.push("one.text " + s))
+one.arrayBuffer().then((ab) => log.push("one.ab " + ab.byteLength))
+one.bytes().then((u) => log.push("one.bytes " + u[0]))
+none.text().then((s) => log.push("none.text " + s.length))
+none.arrayBuffer().then(() => log.push("none.ab"))
+Promise.resolve().then(() => log.push("t1")).then(() => log.push("t2")).then(() => log.push("t3"))
+setTimeout(() => console.log(log.join(" | ")), 10)
+`)
+}

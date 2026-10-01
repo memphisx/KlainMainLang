@@ -53,11 +53,19 @@ func (e *Emitter) structAlloc(lit ast.Expression, ty Type) (dataReg string) {
 		dataReg = e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", dataReg, structIR))
 		e.emitInstr(fmt.Sprintf("store %s zeroinitializer, ptr %s, align 8", structIR, dataReg))
+		e.emitStoreObjHeader(dataReg, ty)
 		return dataReg
 	}
+	return e.emitObjAlloc(ty)
+}
+
+// emitObjAlloc is the one heap allocation of an object layout (TDD-00230
+// P3.3a): zeroed storage for ty with its header word stored.
+func (e *Emitter) emitObjAlloc(ty Type) string {
 	e.ensureCalloc()
-	dataReg = e.freshReg()
+	dataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dataReg, ty.StructSize()))
+	e.emitStoreObjHeader(dataReg, ty)
 	return dataReg
 }
 
@@ -358,4 +366,19 @@ func collectFinRegNames(prog *ast.Program) map[string]bool {
 		}
 	}
 	return out
+}
+
+// emitObjAllocInto is emitObjAlloc into a register the caller already named.
+func (e *Emitter) emitObjAllocInto(reg string, ty Type) {
+	e.ensureCalloc()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", reg, ty.StructSize()))
+	e.emitStoreObjHeader(reg, ty)
+}
+
+// emitObjMallocInto is emitObjAllocInto without the zeroing, for a caller
+// that stores every field itself.
+func (e *Emitter) emitObjMallocInto(reg string, ty Type) {
+	e.ensureMalloc()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", reg, ty.StructSize()))
+	e.emitStoreObjHeader(reg, ty)
 }

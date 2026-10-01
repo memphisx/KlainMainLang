@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 37/37 (100%) · **Strict Coverage**: 28/37 (~76%).
+**Coverage**: 37/37 (100%) · **Strict Coverage**: 29/37 (~78%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -12,7 +12,7 @@ Format: [Status page format](README.md#status-page-format).
 |---|---|---|---|
 | Literal `[a, b, c]` | ✅ | | |
 | `new Array<T>(n?)` | ✅ | • A preallocated `new Array<T>(n)` fills real zero-valued slots, not holes — `new Array<number>(3)[0]` is `0` (Node: `undefined`), and `map`/`forEach` visit those slots instead of skipping holes. | • Zero-arg `new Array<T>()` is an empty array ([ADR-00463](../adr/ADR-00463.md)) |
-| `.length` | ✅ | • `a.length = 2` (real JS's array-truncation idiom) hard compile-errors with "field assignment on non-object" — length is read-only in practice ([ADR-00166](../adr/ADR-00166.md)) | |
+| `.length` | ✅ | • Growing `a.length` fills zero-valued slots in a typed-element array, not holes (a boxed-element `any[]` reads `undefined`, as Node) | • `a.length = n` truncates or grows through the shared header; an invalid length is `RangeError: Invalid array length` ([ADR-01268](../adr/ADR-01268.md)) |
 | `.push(...items)` | ✅ | | • Variadic (incl. the zero-argument call), and works on any mutable receiver — a variable, an object/class array field (`this.items.push(x)`), or a nested-array element (`matrix[0].push(x)`) — see [ADR-00284](../adr/ADR-00284.md) |
 | `.pop()` | ✅ | | • Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens<br>• Works on any mutable receiver (variable, object/class field, nested-array element — [ADR-00284](../adr/ADR-00284.md)). See [ADR-00167](../adr/ADR-00167.md) |
 | `.shift()` | ✅ | | • Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens<br>• Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md)). See [ADR-00167](../adr/ADR-00167.md) |
@@ -42,10 +42,10 @@ Format: [Status page format](README.md#status-page-format).
 | `.findLast(fn)` / `.findLastIndex(fn)` | ✅ | | • Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens<br>• Genuine reverse iteration, not a forward scan keeping the last match — the callback is invoked starting from the last element, matching real JS's reverse call order, observable via side effects ([ADR-00057](../adr/ADR-00057.md)) |
 | `.toSorted()` / `.toReversed()` / `.toSpliced()` | ✅ | | • Non-mutating counterparts of `.sort()`/`.reverse()`/`.splice()` — sort/reverse a fresh copy, or build a fresh spliced result, leaving the original array untouched ([ADR-00057](../adr/ADR-00057.md)) |
 | `.with(i, val)` | ✅ | | • Returns a fresh copy with the element at `i` replaced; negative indices count from the end like `.at()`; an index still out of range after normalization throws a catchable Error, matching real JS's `RangeError` ([ADR-00057](../adr/ADR-00057.md)) |
-| `.keys()` / `.values()` / `.entries()` | ✅ | • All return materialized arrays, not lazy iterators — this compiler has no general iterator protocol (the same convention `Map`/`Set`'s own `.keys()`/`.values()`/`Map.entries()` use) ([ADR-00057](../adr/ADR-00057.md)) | • `.entries()` returns a real `[number, T][]` tuple array ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/ADR-00201.md)) — destructure with `for (const [i, v] of arr.entries())` |
+| `.keys()` / `.values()` / `.entries()` | ✅ | | • Return an Array Iterator over the array itself — `next()`, `toArray()`, `for...of`, spread and `Array.from` — which sees a later `push` as Node's does; `.entries()` yields `[index, value]` tuples ([ADR-01313](../adr/ADR-01313.md)) |
 | `.copyWithin(target, start?, end?)` | ✅ | | • In-place, overlap-safe via `memmove` — a self-overlapping copy such as `arr.copyWithin(0, 3)` on a 5-element array, the same overlap concern `.shift()`/`.unshift()`/`.splice()`'s tail shifts already handle ([ADR-00057](../adr/ADR-00057.md)) |
 | `Array.isArray(x)` | ✅ | | |
-| `Array.from(iterable, mapFn?)` | ✅ | • Generators, `thisArg`, and indexed array-like properties (`{ length: 2, 0: 'a' }`) are not supported | • Iterates arrays, Sets, Maps (entries), strings, and classes implementing `next(): T \| null`; the array-like `{ length: n }` overload builds an `any[]` of `undefined`. See [ADR-00957](../adr/ADR-00957.md), [ADR-00482](../adr/ADR-00482.md), [ADR-00491](../adr/ADR-00491.md) |
+| `Array.from(iterable, mapFn?)` | ✅ | • `thisArg` (the third argument) is not supported | • Iterates arrays, Sets, Maps (entries), strings, and classes implementing `next(): T \| null`; the array-like `{ length: n }` overload builds an `any[]` of `undefined`. See [ADR-00957](../adr/ADR-00957.md), [ADR-00482](../adr/ADR-00482.md), [ADR-00491](../adr/ADR-00491.md) |
 | `Array.of(...items)` | ✅ | | • A plain call expression, usable anywhere an array literal `[...]` also is ([TDD-00028](../tdd/TDD-00028.md)/[ADR-00104](../adr/ADR-00104.md)); element type inferred from the first argument, the same rule `[...]` literals use ([ADR-00057](../adr/ADR-00057.md)) |
 
 ## Known limitations

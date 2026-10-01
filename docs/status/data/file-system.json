@@ -24,245 +24,178 @@
         "countsTowardParity": true,
         "rows": [
           {
-            "feature": "`fs.readFileSync(path[, 'utf8'])`",
+            "feature": "`fs.readFileSync(path[, options])`",
+            "status": "implemented",
+            "notes": [
+              "Node's `lib/fs.js` in TypeScript over one native request per operation (open, fstat, read, close — `lib/node/internal_fs.ts`, `threadpoolsrc/klainfs.c`) ([ADR-01298](../adr/ADR-01298.md))",
+              "With no encoding a `Buffer` of the file's exact bytes; with one (a string or `{ encoding, flag }`, any Buffer encoding, a variable included) the bytes decoded, embedded null bytes kept",
+              "A file descriptor in place of the path reads it to its end (`readFileSync(0)` is stdin); a file whose stat size is 0 (`/proc`, `/sys`) is read to EOF",
+              "Errors are Node's: `ENOENT: no such file or directory, open '<path>'`, `EISDIR: illegal operation on a directory, read`, with `code`/`errno`/`syscall`/`path`"
+            ]
+          },
+          {
+            "feature": "`fs.writeFileSync` / `fs.appendFileSync`",
+            "status": "implemented",
+            "notes": [
+              "`data` a string (any encoding) or any `ArrayBufferView`; a path or a descriptor; `{ encoding, mode, flag, flush }` ([ADR-01298](../adr/ADR-01298.md))",
+              "`mode` applies when the file is created (umask-reduced); `flush` fsyncs before closing; any other `data` is Node's `ERR_INVALID_ARG_TYPE`"
+            ]
+          },
+          {
+            "feature": "`fs.existsSync(path)` / `fs.accessSync(path[, mode])`",
+            "status": "implemented",
+            "notes": [
+              "`existsSync` never throws; an argument of another type is `false` with Node's DEP0187 warning. `accessSync`'s mode is validated to 0–7 as Node's is ([ADR-01298](../adr/ADR-01298.md))"
+            ]
+          },
+          {
+            "feature": "`fs.statSync` / `lstatSync` / `fstatSync` → `Stats`",
             "status": "implemented",
             "caveats": [
-              "With an encoding the string is strlen-based: a file with an embedded null byte reads back truncated there (the Buffer form keeps every byte) ([ADR-00785](../adr/ADR-00785.md))"
+              "`{ bigint: true }` (`BigIntStats`) is not implemented: the option is ignored"
             ],
             "notes": [
-              "With no encoding the result is a `Buffer` of the file's exact bytes, as in Node; with an encoding (a bare string or `{ encoding }`: utf8, hex, base64, base64url, latin1, ascii, utf16le) it is the bytes decoded as `buf.toString(encoding)` ([ADR-00785](../adr/ADR-00785.md), [ADR-01163](../adr/ADR-01163.md))",
-              "A file descriptor in place of the path reads it to its end: `readFileSync(0)` is stdin",
-              "Throws a catchable `Error` (built from `strerror(errno)`) if the file can't be opened; its `.message` is byte-exact to Node's `ENOENT: …, open '<path>'` form, and `err.code`/`syscall`/`path`/`errno` all match ([ADR-00768](../adr/ADR-00768.md), [ADR-01000](../adr/ADR-01000.md))",
-              "Pseudo-files under `/proc` and `/sys` (which report `st_size` 0 yet stream real bytes) read correctly — the read grows to EOF rather than trusting the stat size ([ADR-00811](../adr/ADR-00811.md))",
-              "See [ADR-00023](../adr/ADR-00023.md), [ADR-00094](../adr/ADR-00094.md)"
+              "Node's `Stats`: the 14 numeric fields as own properties, `atime`/`mtime`/`ctime`/`birthtime` Date getters on the prototype, and the kind predicates; `throwIfNoEntry: false` returns `undefined` for `ENOENT`/`ENOTDIR` ([ADR-01298](../adr/ADR-01298.md))",
+              "On Linux the stat is `statx`, as libuv's, so `birthtimeMs` is the file system's birth time (the ctime where it has none)"
             ]
           },
           {
-            "feature": "`fs.writeFileSync(path, data[, opts])`",
-            "status": "implemented",
-            "notes": [
-              "Creates or truncates the file with `data`. Throws on failure",
-              "`data` may be a string (the `strlen`-based path) or a Buffer/TypedArray (binary-safe, writes the real byte count via `fwrite` directly — [ADR-00094](../adr/ADR-00094.md)), dispatched on `data`'s inferred type; a bare `ArrayBuffer` throws Node's `ERR_INVALID_ARG_TYPE` `TypeError`",
-              "Optional third argument: `'utf8'` (or `{ encoding: 'utf8', flag, mode }`); `{ flag: 'a' }` appends instead of truncating, `{ flag: 'w' }` (default) truncates ([ADR-00785](../adr/ADR-00785.md))",
-              "`{ mode }` sets the permission bits when the write creates the file — applied only on creation and reduced by the umask, matching Node/`open(2)` (ignored for a file that already exists) ([ADR-00988](../adr/ADR-00988.md))"
-            ],
-            "caveats": [
-              "The options argument supports only `{ encoding: 'utf8', flag, mode }` — a non-`'utf8'` encoding is a clean rejection ([ADR-00785](../adr/ADR-00785.md), [ADR-00988](../adr/ADR-00988.md)).",
-              "A file descriptor in place of the path (`fs.writeFileSync(fd, …)`) is a compile error"
-            ]
-          },
-          {
-            "feature": "`fs.appendFileSync(path, data[, opts])`",
-            "status": "implemented",
-            "notes": [
-              "Like `writeFileSync`, but appends instead of truncating (creates the file if it doesn't exist). Throws on failure",
-              "Same string/Buffer/TypedArray dispatch as `writeFileSync` (a bare `ArrayBuffer` throws)",
-              "Optional third argument `'utf8'` / `{ encoding: 'utf8', flag, mode }` accepted (the flag is a no-op — it always appends); `{ mode }` sets the permission bits when the append creates the file (umask-reduced, only on creation — [ADR-00988](../adr/ADR-00988.md)) ([ADR-00785](../adr/ADR-00785.md))"
-            ],
-            "caveats": [
-              "The options argument supports only `{ encoding: 'utf8', flag, mode }` — a non-`'utf8'` encoding is a clean rejection ([ADR-00785](../adr/ADR-00785.md), [ADR-00988](../adr/ADR-00988.md)).",
-              "A file descriptor in place of the path (`fs.appendFileSync(fd, …)`) is a compile error"
-            ]
-          },
-          {
-            "feature": "`fs.existsSync(path)`",
-            "status": "implemented",
-            "notes": [
-              "Plain existence check via POSIX `access()`",
-              "Deliberately does **not** throw for a missing path — matches real Node's own `existsSync`, one of the few `fs` functions that reports \"doesn't exist\" as `false` rather than an error"
-            ]
-          },
-          {
-            "feature": "`fs.statSync(path)` / `fs.lstatSync(path)`",
+            "feature": "`fs.statfsSync(path)` → `StatFs`",
             "status": "implemented",
             "caveats": [
-              "No Date-valued `atime`/`mtime`/`ctime`/`birthtime` accessors — times are integer milliseconds only ([ADR-00495](../adr/ADR-00495.md)/[ADR-00497](../adr/ADR-00497.md))",
-              "`birthtimeMs` is `0` on Linux — glibc's `struct stat` carries no creation time (it needs `statx`); Darwin reports the real `st_birthtimespec`"
+              "`{ bigint: true }` is ignored: the fields are numbers"
             ],
             "notes": [
-              "The full numeric Stats surface is exposed — `dev`/`mode`/`nlink`/`uid`/`gid`/`rdev`/`blksize`/`ino`/`size`/`blocks`/`atimeMs`/`mtimeMs`/`ctimeMs`/`birthtimeMs` plus `isFile()`/`isDirectory()`/`isSymbolicLink()` ([ADR-00565](../adr/ADR-00565.md))"
+              "`{ type, bsize, frsize, blocks, bfree, bavail, files, ffree }`: `statfs(2)` on POSIX; on Windows `GetDiskFreeSpaceW` of the path's volume with `type`/`files`/`ffree` 0, as in Node ([ADR-01078](../adr/ADR-01078.md))"
             ]
           },
           {
-            "feature": "`fs.rmSync` / `realpathSync` / `mkdtempSync` / `symlinkSync` / `linkSync` / `readlinkSync` / `chmodSync` / `truncateSync` / `accessSync`",
-            "status": "implemented",
-            "notes": [
-              "`linkSync(existing, newPath)` makes a hard link — a second name for one inode, so `nlink` rises and the content outlives unlinking the original; on Windows it is `CreateHardLinkW` (unprivileged, unlike `symlinkSync` which needs Developer Mode) ([ADR-00751](../adr/ADR-00751.md))",
-              "`realpathSync` on Windows resolves like Node's readlink walk when the kernel's final-path query can't answer — a volume with no DOS device name (a RAM disk), or a relative link target stored with forward slashes ([ADR-01058](../adr/ADR-01058.md))",
-              "`readlinkSync` reads targets of any length (a growing buffer — [ADR-00788](../adr/ADR-00788.md)); `accessSync`'s mode defaults to existence-only (F_OK) and `fs.constants.F_OK`/`R_OK`/`W_OK`/`X_OK` name the others ([ADR-00795](../adr/ADR-00795.md))",
-              "`rmSync`'s options are any object (`{ recursive, force }` read by truthiness); `linkSync`/`symlinkSync` errors name both paths (`link 'a' -> 'b'`), as Node's do ([ADR-01176](../adr/ADR-01176.md))",
-              "`symlinkSync(target, path[, type])` takes Node's `type` (`'file'` \\| `'dir'` \\| `'junction'` \\| `null`): ignored on POSIX, as in Node; on Windows `'junction'` makes an NTFS junction — a directory link that needs no privilege, its relative target resolved against the link's directory — and `readlinkSync` reports a link's target from the name the kernel follows, with `\\??\\UNC\\…` read back as `\\\\server\\share` ([ADR-01030](../adr/ADR-01030.md))"
-            ],
-            "caveats": [
-              "`rmSync`'s `maxRetries`/`retryDelay` are accepted and unused (Node retries only on Windows' `EBUSY`/`ENOTEMPTY`/`EPERM`); not verified on Windows"
-            ]
-          },
-          {
-            "feature": "`fs.openSync` / `closeSync` / `readSync` / `writeSync` / `fstatSync`",
-            "status": "implemented",
-            "notes": [
-              "On Windows, files open through `CreateFileW` with `FILE_SHARE_DELETE`, so a file this process holds open can still be unlinked or renamed (matching POSIX/Node); `a`/`a+` use a kernel append (`FILE_APPEND_DATA`), not a CRT seek-then-write ([ADR-00743](../adr/ADR-00743.md))",
-              "On Windows, a path at/over `MAX_PATH` gets the `\\\\?\\` extended-length prefix (after `GetFullPathNameW` normalization), so fs ops on paths longer than 260 chars work instead of failing path-too-long — across every fs call, not just `openSync` ([ADR-00748](../adr/ADR-00748.md))",
-              "On Windows an unlinked or renamed-over file's name is released at once even while another descriptor holds it open (POSIX-semantics delete/rename, libuv's approach), a cross-volume `renameSync` is `EXDEV`, `err.code` follows libuv's Win32→errno table (access denied is `EPERM`; an unmapped error is `UNKNOWN`), `err.errno` is libuv's Windows numbering (`ENOENT` → `-4058`), `process.chdir` maintains the per-drive `=X:` directories, and `stat.blocks` is the allocation size ([ADR-01030](../adr/ADR-01030.md), [ADR-01031](../adr/ADR-01031.md))",
-              "A numeric `openSync` flag mask can be built from `fs.constants`' `O_*` members (`O_RDONLY`/`O_WRONLY`/`O_RDWR`/`O_CREAT`/`O_TRUNC`/`O_APPEND`/`O_EXCL`/… ), each resolved to the target OS's `<fcntl.h>` bits — the same bits the string flags expand to ([ADR-00987](../adr/ADR-00987.md))"
-            ],
-            "caveats": [
-              "`openSync` flags must be a string literal (`r r+ w w+ a a+ wx ax`) or a raw numeric mask — not a runtime-computed flag string ([ADR-00795](../adr/ADR-00795.md))",
-              "`writeSync` writes string data only (no Buffer/offset/length variant); `readSync`'s buffer must be a `Uint8Array`/`Buffer` ([ADR-00498](../adr/ADR-00498.md))"
-            ]
-          },
-          {
-            "feature": "`fs.fsyncSync(fd)` / `fdatasyncSync(fd)` / `ftruncateSync(fd[, len])`",
-            "status": "implemented",
-            "notes": [
-              "`fsyncSync`/`fdatasyncSync` flush an open fd to disk; `ftruncateSync` resizes it (shrinks or zero-fill-grows), `len` defaulting to 0 as in Node",
-              "On POSIX these are the `fsync`/`ftruncate` syscalls; on Windows they are Win32 shims (`FlushFileBuffers` / `SetFilePointerEx`+`SetEndOfFile`), so the same code works on every host ([ADR-00750](../adr/ADR-00750.md))"
-            ],
-            "caveats": [
-              "`fdatasyncSync` is an alias for `fsyncSync` (the data-only optimization isn't observable in the file's contents)"
-            ]
-          },
-          {
-            "feature": "`fs.fchmodSync(fd, mode)`",
-            "status": "implemented",
-            "notes": [
-              "`fchmod(2)` on POSIX; on Windows the same read-only-bit model as `chmodSync`, applied through the handle (`FileBasicInfo`, libuv's `fs__fchmod`); a socket/pipe fd is `EBADF`, and the thrown error is Node's fd-shaped `EBADF: bad file descriptor, fchmod` ([ADR-01078](../adr/ADR-01078.md))"
-            ]
-          },
-          {
-            "feature": "`fs.statfsSync(path)`",
-            "status": "implemented",
-            "notes": [
-              "A `{ type, bsize, frsize, blocks, bfree, bavail, files, ffree }` object: `statfs(2)` read against the platform's own struct on POSIX (Darwin's `frsize` is `bsize`, as libuv reports); on Windows `GetDiskFreeSpaceW` of the path's volume, with `type`/`files`/`ffree` `0` as in Node, after the path itself is probed so a missing file is `ENOENT: no such file or directory, statfs '<path>'` ([ADR-01078](../adr/ADR-01078.md))"
-            ],
-            "caveats": [
-              "The `{ bigint: true }` option is accepted and ignored — the fields are always numbers"
-            ]
-          },
-          {
-            "feature": "`fs.utimesSync(path, …)` / `fs.futimesSync(fd, …)`",
-            "status": "implemented",
-            "notes": [
-              "Set the access/modification times, by path (`utimesSync`) or open fd (`futimesSync` — [ADR-00788](../adr/ADR-00788.md)). `atime`/`mtime` are a number of seconds (Node's number form) or a `Date` (its epoch); sub-second precision is carried as microseconds",
-              "On POSIX these are `utimes(2)`/`futimes(2)`; on Windows a `SetFileTime` shim (Unix time → the 1601-epoch `FILETIME`, keyed on the path or `_get_osfhandle(fd)`), so the same code works on every host ([ADR-00755](../adr/ADR-00755.md), [ADR-00788](../adr/ADR-00788.md))"
-            ],
-            "caveats": [
-              "`atime`/`mtime` accept a number or `Date` only — a numeric string (which Node also coerces) is not supported"
-            ]
-          },
-          {
-            "feature": "`fs.unlinkSync(path)`",
-            "status": "implemented",
-            "notes": [
-              "Deletes a file. Throws on failure — the `Error`'s `.message` is byte-exact to Node's `ENOENT: …, unlink '<path>'` form, with `err.code`/`syscall`/`path`/`errno` all matching ([ADR-00768](../adr/ADR-00768.md), [ADR-01000](../adr/ADR-01000.md))",
-              "A directory throws as Node does per host (`EISDIR` on Linux, `EPERM` on macOS/Windows) instead of being silently removed ([ADR-00736](../adr/ADR-00736.md))"
-            ]
-          },
-          {
-            "feature": "`fs.mkdirSync(path)`",
+            "feature": "`fs.mkdirSync` / `mkdtempSync` / `rmdirSync` / `rmSync` / `unlinkSync`",
             "status": "implemented",
             "caveats": [
-              "Options support only the literal `{ recursive: true }` (creates every missing prefix, idempotent — [ADR-00487](../adr/ADR-00487.md)); the plain form still throws on an existing path or missing parent"
+              "`rmSync`'s `maxRetries`/`retryDelay` are validated and unused (Node retries `EBUSY`/`ENOTEMPTY`/`EPERM`)"
             ],
             "notes": [
-              "Creates a directory via POSIX `mkdir()`, mode `0777` reduced by the process umask as usual",
-              "See [ADR-00027](../adr/ADR-00027.md)"
+              "`mkdirSync` takes a mode or `{ recursive, mode }`; a recursive one returns the first directory it made. `rmSync` removes a tree with `{ recursive }`, a missing path quietly with `{ force }`, and a directory without `recursive` is Node's `ERR_FS_EISDIR` `SystemError`; `rmdirSync`'s `recursive` works with Node's DEP0147 warning ([ADR-01298](../adr/ADR-01298.md))",
+              "A directory given to `unlinkSync` throws as Node does per host (`EISDIR` on Linux, `EPERM` on macOS/Windows)"
             ]
           },
           {
-            "feature": "`fs.rmdirSync(path[, { recursive: true }])`",
-            "status": "implemented",
-            "notes": [
-              "Removes an *empty* directory via POSIX `rmdir()` — deliberately directory-only (fails on a plain file, unlike `remove()`/`unlinkSync`)",
-              "`{ recursive: true }` removes the whole tree by routing to `rmSync`'s recursive removal ([ADR-00578](../adr/ADR-00578.md)); Node deprecated the option on `rmdirSync` in favor of `rmSync` but still honors it, and a missing path still throws (no `force`)",
-              "See [ADR-00027](../adr/ADR-00027.md)"
-            ]
-          },
-          {
-            "feature": "`fs.readdirSync(path[, { withFileTypes, recursive }])`",
-            "status": "implemented",
-            "notes": [
-              "Lists a directory's entries (excluding `.`/`..`) as a `string[]`, sorted by name as libuv's `scandir` sorts them for Node",
-              "Built from `struct dirent`'s `d_name` field at a `runtime.GOOS`-conditional byte offset, independently verified by a compiled `offsetof` probe on both Darwin and (via Docker, see [ADR-00051](../adr/ADR-00051.md)) x86-64 Linux",
-              "`{ withFileTypes: true }` returns `Dirent[]` — each with `.name`, `.parentPath` (the directory it was read from), and the full kind-predicate set `.isFile()`/`.isDirectory()`/`.isSymbolicLink()`/`.isFIFO()`/`.isCharacterDevice()`/`.isBlockDevice()`/`.isSocket()`, all classified from the entry's `d_type` (from the `FindFirstFile` attributes on Windows, whose `dirent` has none) with no per-file `stat` ([ADR-00752](../adr/ADR-00752.md), [ADR-00787](../adr/ADR-00787.md))",
-              "`{ recursive: true }` walks the whole subtree, returning every nested entry as a `'/'`-joined path relative to the start directory (a genuine recursive descent; only the top-level open throws) ([ADR-00786](../adr/ADR-00786.md))",
-              "`{ recursive: true, withFileTypes: true }` together walks the whole subtree as `Dirent[]`, each entry carrying its basename `.name`, the full path of its containing directory as `.parentPath`, and the kind predicates ([ADR-00980](../adr/ADR-00980.md))",
-              "See [ADR-00027](../adr/ADR-00027.md)"
-            ],
-            "caveats": [
-              "No `.path` alias on `Dirent` (Node removed it in v24) — reading `dirent.path` is a compile-time error, not a silent `undefined`",
-              "A filesystem returning `DT_UNKNOWN` (rare) reports all kind predicates `false` rather than falling back to `lstat`, and is not descended under `{ recursive: true }`",
-              "`encoding: 'buffer'` unsupported; recursive paths join with `'/'` (Node uses the platform separator)"
-            ]
-          },
-          {
-            "feature": "`fs.renameSync(oldPath, newPath)`",
-            "status": "implemented",
-            "notes": [
-              "Renames/moves a file via POSIX `rename()`. Throws on failure — the `Error`'s `.message` is byte-exact to Node's two-path `ENOENT: …, rename '<old>' -> '<new>'` form, with `err.code`/`syscall`/`path`/`errno`/`dest` all matching ([ADR-00768](../adr/ADR-00768.md), [ADR-01000](../adr/ADR-01000.md))",
-              "See [ADR-00027](../adr/ADR-00027.md)"
-            ]
-          },
-          {
-            "feature": "`fs.copyFileSync(src, dest[, mode])`",
+            "feature": "`fs.readdirSync(path[, options])` → names or `Dirent[]`",
             "status": "implemented",
             "caveats": [
-              "`COPYFILE_FICLONE`/`FICLONE_FORCE` mode bits are accepted but a best-effort no-op (no reflink); `fs.constants.COPYFILE_EXCL`/`COPYFILE_FICLONE`/`COPYFILE_FICLONE_FORCE` name all three ([ADR-00795](../adr/ADR-00795.md))"
+              "No `.path` alias on `Dirent` (Node v24 removed it): reading `dirent.path` is a compile-time error, not `undefined`"
             ],
             "notes": [
-              "Binary-safe: composes the raw `__kml_fs_read_file_raw`/`__kml_fs_write_file_bytes` helpers ([ADR-00094](../adr/ADR-00094.md)), threading the source's exact byte count, so a file with an embedded null byte copies back whole — no new C-level I/O code",
-              "The optional `mode` bitmask is honoured for `COPYFILE_EXCL` (bit `1`): the copy fails with `EEXIST` if `dest` already exists (an atomic `O_EXCL` guard), instead of the default overwrite ([ADR-00788](../adr/ADR-00788.md))",
-              "A failure surfaces as Node's two-path `copyfile` error (a pre-flight guard probes both ends), so the `.message` (`ENOENT: …, copyfile '<src>' -> '<dest>'`), `err.syscall` (`'copyfile'`), `err.path` (source), and `err.dest` (destination) all match ([ADR-01000](../adr/ADR-01000.md))",
-              "On Windows the transfer is the OS copy (`CopyFileW`, as libuv's), so the destination carries the source's attributes, timestamps and alternate data streams — a read-only source yields a read-only copy, as in Node ([ADR-01030](../adr/ADR-01030.md))",
-              "See [ADR-00027](../adr/ADR-00027.md)/[ADR-00525](../adr/ADR-00525.md)"
+              "Sorted as libuv's scandir sorts; `withFileTypes` gives `Dirent`s (`name`, `parentPath`, the kind predicates, an unknown `d_type` resolved by `lstat`); `recursive` is Node's breadth-first walk with platform-joined paths; `encoding: 'buffer'` gives Buffers ([ADR-01298](../adr/ADR-01298.md))"
             ]
           },
           {
-            "feature": "Async variants — callback (`fs.readFile(path, cb)`) + Promise (`fs.promises.readFile` / `import from 'fs/promises'`)",
+            "feature": "`fs.renameSync` / `copyFileSync` / `linkSync` / `symlinkSync` / `readlinkSync` / `realpathSync`",
             "status": "implemented",
             "caveats": [
-              "An op the pool has no worker for runs on the loop thread (its callback and Promise still settle on a later turn): `stat`/`lstat`/`fstat`/`statfs`/`realpath`/`mkdtemp`/`readlink`/`link`/`symlink`/`utimes`/`futimes`/`ftruncate`/`truncate`/`access`/`chmod`/`fchmod`/`rm`, and an op given options other than a utf8 encoding (a `flag`, a `mode`, `recursive`, `withFileTypes`, a non-utf8 `readFile` encoding)",
-              "`realpath`/`mkdtemp`/`readlink` take no options argument (their `encoding`)"
+              "`COPYFILE_FICLONE_FORCE` fails with `ENOTSUP`: there is no copy-on-write clone (`COPYFILE_FICLONE` copies)"
             ],
             "notes": [
-              "Covers `readFile`/`writeFile`/`appendFile`/`unlink`/`mkdir`/`rmdir`/`rename`/`copyFile`/`readdir`/`stat`/`lstat`/`fstat`/`statfs`/`rm`/`utimes`/`futimes`/`ftruncate`/`fchmod`/`realpath`/`mkdtemp`/`readlink`/`link`/`symlink`/`chmod`/`truncate`/`access`, with their options ([ADR-01176](../adr/ADR-01176.md)). `readFile` resolves to a `Buffer`, or a string with an encoding (any Buffer encoding). Callback gets `(err[, data])`, `data` `undefined` on an error; the Promise rejects with the same `Error` the sync form throws",
-              "The callback form (firing from a GC-safe settle reaction) and binary `writeFile`/`appendFile` (`ArrayBuffer`/`TypedArray` body, copied raw at submit) run on the pool, off the loop thread ([ADR-00820](../adr/ADR-00820.md))",
-              "Reuses each `*Sync` runtime helper verbatim, catching its throw via the compiler's own `setjmp` catch primitive — no parallel non-throwing I/O code"
+              "Two-path errors name both (`rename 'a' -> 'b'`, with `dest`); `copyFileSync` gives the copy the source's mode, and `COPYFILE_EXCL` fails with `EEXIST`; on Windows the copy is `CopyFileW`, as libuv's ([ADR-01298](../adr/ADR-01298.md), [ADR-01030](../adr/ADR-01030.md))",
+              "`realpathSync` is Node's lstat walk (an error names the missing component); `realpathSync.native` is `realpath(3)`. `symlinkSync` takes Node's `type`: a junction on Windows ([ADR-01030](../adr/ADR-01030.md))"
             ]
           },
           {
-            "feature": "`fs.open` / `close` / `read` / `write` / `writev` / `fsync` (callback form)",
+            "feature": "`fs.openSync` / `closeSync` / `readSync` / `writeSync` / `readvSync` / `writevSync`",
+            "status": "implemented",
+            "notes": [
+              "Flags as any string Node accepts (validated at run time) or a numeric mask from `fs.constants`; `readSync`/`writeSync` take a buffer with offset/length/position or an options object, `writeSync` a string with position and encoding ([ADR-01298](../adr/ADR-01298.md))",
+              "On Windows files open through `CreateFileW` with `FILE_SHARE_DELETE` and long paths get the `\\\\?\\` prefix ([ADR-00743](../adr/ADR-00743.md), [ADR-00748](../adr/ADR-00748.md))"
+            ]
+          },
+          {
+            "feature": "`fs.fsyncSync` / `fdatasyncSync` / `ftruncateSync` / `truncateSync`",
+            "status": "implemented",
+            "notes": [
+              "`fdatasync` on Linux, `fsync` elsewhere; `truncateSync` opens the file `r+` and truncates it, as Node does ([ADR-01298](../adr/ADR-01298.md))"
+            ]
+          },
+          {
+            "feature": "`fs.chmodSync` / `fchmodSync` / `chownSync` / `fchownSync` / `lchownSync`",
+            "status": "implemented",
+            "notes": [
+              "A mode as a number or an octal string; the chown family does nothing on Windows, as libuv's ([ADR-01298](../adr/ADR-01298.md), [ADR-01078](../adr/ADR-01078.md))"
+            ]
+          },
+          {
+            "feature": "`fs.utimesSync` / `futimesSync` / `lutimesSync`",
+            "status": "implemented",
+            "notes": [
+              "Times as seconds, a numeric string or a `Date` (Node's `toUnixTimestamp`), with sub-second precision ([ADR-01298](../adr/ADR-01298.md))"
+            ]
+          },
+          {
+            "feature": "Callback forms (`fs.readFile(path, cb)` and the other operations)",
+            "status": "implemented",
+            "notes": [
+              "Every operation above has its callback form, each request on the thread pool with the callback on the loop thread, as libuv's; `readFile`/`writeFile` take `signal` ([ADR-01298](../adr/ADR-01298.md))",
+              "A callback's `data` is `undefined` on an error; `fs.exists` is the deprecated boolean form"
+            ]
+          },
+          {
+            "feature": "`fs.promises` / `fs/promises`",
+            "status": "implemented",
+            "notes": [
+              "Node's functions, each its callback form's request settling a promise; `readFile`/`writeFile`/`appendFile` also take a `FileHandle`; `realpath` is the native one ([ADR-01298](../adr/ADR-01298.md))"
+            ]
+          },
+          {
+            "feature": "`fs.open` / `close` / `read` / `write` / `writev` / `readv` / `fsync` (callback form)",
             "status": "implemented",
             "caveats": [
               "On Windows a positioned read or write seeks, then transfers — not atomic against another operation on the same descriptor; not verified on Windows"
             ],
             "notes": [
-              "Node's argument forms (`open(path[, flags[, mode]], cb)`; `read`'s buffer, options and bare forms; `write`'s Buffer and string forms), validation errors and `uvException` errors, ported from Node's `lib/fs.js` to TypeScript (`lib/node/internal_fs.ts`); each operation runs on the thread pool and calls back from the loop ([ADR-01166](../adr/ADR-01166.md), [ADR-01167](../adr/ADR-01167.md))"
+              "Node's argument forms, validation errors and `uvException` errors ([ADR-01166](../adr/ADR-01166.md), [ADR-01298](../adr/ADR-01298.md))"
+            ]
+          },
+          {
+            "feature": "`fs.promises.open` → `FileHandle`",
+            "status": "implemented",
+            "caveats": [
+              "Not ported: `chown`, `readv`, `readLines`, `readableWebStream`, `[Symbol.asyncDispose]`"
+            ],
+            "notes": [
+              "Node's `lib/internal/fs/promises.js` FileHandle: `fd`, `read`, `write`, `writev`, `sync`, `datasync`, `stat`, `truncate`, `chmod`, `utimes`, `readFile`, `writeFile`, `appendFile`, `createReadStream`/`createWriteStream`, and `close` waiting for the streams that hold it ([ADR-01183](../adr/ADR-01183.md))"
             ]
           },
           {
             "feature": "`fs.createReadStream` / `fs.createWriteStream` / `ReadStream` / `WriteStream`",
             "status": "implemented",
-            "caveats": [
-              "The `fs` (custom operations) and `signal` options, and a `FileHandle` as `fd`, are not supported"
-            ],
             "notes": [
-              "Node's `lib/internal/fs/streams.js` ported to TypeScript over the `stream` module: `Buffer` chunks (strings with an `encoding`), `start`/`end`, `flags`, `mode`, `fd`, `autoClose`, `emitClose`, `flush`, `highWaterMark`; `'open'`/`'ready'`, errors as `'error'` events, `bytesRead`/`bytesWritten`, `close(cb)` ([ADR-01167](../adr/ADR-01167.md))"
+              "Node's `lib/internal/fs/streams.js` over the `stream` module: `start`/`end`, `flags`, `mode`, `fd` (a descriptor or a `FileHandle`), `fs`, `signal`, `autoClose`, `emitClose`, `flush`, `highWaterMark` ([ADR-01167](../adr/ADR-01167.md), [ADR-01183](../adr/ADR-01183.md))"
             ]
           },
           {
-            "feature": "`fs.watch(path, listener)` → `FSWatcher`",
+            "feature": "`fs.watch(path[, options][, listener])` → `FSWatcher`",
             "status": "implemented",
             "caveats": [
-              "`filename` is the **watched path**, not the changed child, on macOS — kqueue/`EVFILT_VNODE` watches an fd, not a directory's entries (Linux inotify names the entry faithfully) ([ADR-00758](../adr/ADR-00758.md))",
-              "One listener slot per event (`.on('change'|'rename', …)`, arrow-literal only) — the `Worker`/`ChildProcess` posture, not the full `EventEmitter`",
-              "`recursive` is honoured natively where the OS supports it (macOS/Windows); on Linux (inotify) it watches only the named path — not the subtree",
-              "`encoding` accepts only `'utf8'`; no coalescing/ordering guarantees (as in Node, event streams are platform-dependent)"
+              "On macOS a directory's event names the directory, not the changed entry: kqueue watches a descriptor, not entries ([ADR-00758](../adr/ADR-00758.md))",
+              "`recursive` and `persistent: false` are validated and not applied"
             ],
             "notes": [
-              "The faithful, event-driven watch — a native OS change source folded into the `select()` loop via the standard hook trio (keepalive/fdset/dispatch), no `stat`-poll. Linux `inotify` and macOS `kqueue`/`EVFILT_VNODE` are readable fds (no thread); Windows `ReadDirectoryChangesW` runs on a watcher thread that signals a loopback wakeup socket",
-              "`.close()` removes the wait fd and drops the keepalive so a watch-only program can exit; `{ persistent }` maps to the keepalive",
-              "See [TDD-00181](../tdd/TDD-00181.md)"
+              "Node's `FSWatcher`, an EventEmitter: `'change'` with `(eventType, filename)` in the requested encoding, `'close'`, `close()`, `signal`; a watched file reports its own base name ([ADR-01298](../adr/ADR-01298.md))",
+              "A native change source in the event loop: inotify (Linux), kqueue (macOS), `ReadDirectoryChangesW` (Windows) ([TDD-00181](../tdd/TDD-00181.md))"
+            ]
+          },
+          {
+            "feature": "`fs.constants`",
+            "status": "implemented",
+            "notes": [
+              "Node's per-platform table (`O_*`, `S_*`, `UV_*`, `COPYFILE_*`, the access modes) as a real object ([ADR-01298](../adr/ADR-01298.md))"
+            ]
+          },
+          {
+            "feature": "`fs.cp` / `opendir` → `Dir` / `glob` / `watchFile` / `openAsBlob` / `lchmod`",
+            "status": "missing",
+            "notes": [
+              "Not ported yet ([ADR-01298](../adr/ADR-01298.md))"
             ]
           },
           {

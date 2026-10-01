@@ -131,7 +131,6 @@ import fs from 'fs';
 const rs = fs.createReadStream('/nonexistent/kml-stream-dir/missing.txt');
 console.log('created');
 rs.on('error', (e: NodeJS.ErrnoException) => { console.log('error', e.code, e.errno === undefined ? 'no errno' : 'errno', e.syscall, e.message); });
-rs.on('close', () => { console.log('close'); });
 async function main(): Promise<void> {
     try {
         for await (const c of fs.createReadStream('/nonexistent/kml-stream-dir/missing.txt')) { console.log(c); }
@@ -139,7 +138,9 @@ async function main(): Promise<void> {
         console.log('caught', e.code);
     }
 }
-main();
+// The second stream starts once the first is done: two opens racing on the
+// thread pool finish in either order, in Node as here.
+rs.on('close', () => { console.log('close'); main(); });
 `, "created\nerror ENOENT errno open ENOENT: no such file or directory, open '/nonexistent/kml-stream-dir/missing.txt'\nclose\ncaught ENOENT\n")
 }
 

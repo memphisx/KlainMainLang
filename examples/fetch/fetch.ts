@@ -39,10 +39,11 @@ console.log(ipText.length > 0)         // true
 // .json() parses the body into a declared type (flat objects with primitive
 // fields only, JSON.parse's own scope — see examples/json/json_methods.ts).
 // A typed `const x: T = ...` binding parses straight into T, so the projection
-// carries through the await.
+// carries through the await. A body is read once: a second read rejects.
 interface Ip { origin: string }
-const ipAwaited: Ip = await ipRes.json()
+const ipAwaited: Ip = await (await fetch('http://127.0.0.1:8765/ip')).json()
 console.log(ipAwaited.origin.length > 0)  // true
+console.log(ipRes.bodyUsed)               // true
 
 // ── a network-level failure throws, same as any other Error ────────────────
 try {

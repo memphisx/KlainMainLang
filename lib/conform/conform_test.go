@@ -35,7 +35,7 @@ func allowlist(t *testing.T) map[string]bool {
 	out := map[string]bool{}
 	for _, l := range splitLines(string(data)) {
 		if l != "" && l[0] != '#' {
-			out[l] = true
+			out[strings.Fields(l)[0]] = true // "name  reason"
 		}
 	}
 	return out

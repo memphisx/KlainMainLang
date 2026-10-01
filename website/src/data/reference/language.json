@@ -7,7 +7,7 @@
   "coverageScope": "subset",
   "coverage": {
     "loose": "75/76",
-    "strict": "48/76"
+    "strict": "47/76"
   },
   "lede": "The core TypeScript surface this compiler lowers to native code: control flow, operators, declarations, functions and closures, async/Promise, and classes. Most of it matches JS/TS exactly, but the recurring divergences are worth knowing up front — strings are NUL-terminated (an embedded null truncates), a nullable scalar's null is often an in-band presence bit rather than a real undefined, `-compat` governs whether `&&`/`||` are value-preserving, and a top-level `const`/`let` is only readable from a named function when its type is knowable before main() runs (an arrow closure captures anything regardless). The whole surface is statically typed and structurally shaped — there is no dynamic property add/delete and no runtime eval.",
   "entries": [
@@ -76,10 +76,8 @@
       "statusRow": "for…of over arrays, strings, Map, Set, a bare any, and a class implementing next(): T | null",
       "signature": "for (const x of iterable) { … }",
       "badge": "caveats",
-      "description": "Iterates arrays, a string (its characters), Map (values), Set (elements), generators, a bare any holding a dynamic or boxed array (by its runtime length, with an any loop variable; anything else throws Node's 'is not iterable' TypeError), and both the structural next(): T | null shape and the spec's real [Symbol.iterator]() protocol. The loop variable may be a destructuring pattern, including nested. A scalar next() returns a presence-flagged aggregate so a yielded 0/false doesn't end iteration.",
+      "description": "Iterates arrays, a string (its code points), Map (its [key, value] entries, live: an entry added during the loop is visited, a deleted one is not), Set (elements), generators, a bare any holding a string, a dynamic or boxed array (by its runtime length), or any iterable through its [Symbol.iterator]() (an any loop variable; anything else throws Node's 'is not iterable' TypeError), and both the structural next(): T | null shape and the spec's real [Symbol.iterator]() protocol. The loop variable may be a destructuring pattern, including nested. A scalar next() returns a presence-flagged aggregate so a yielded 0/false doesn't end iteration.",
       "differences": [
-        "A bare `for (const v of map)` iterates values (use `.keys()` for keys); the two-name pattern `for (const [k, v] of map)` decomposes entries.",
-        "A string iterates per byte, not per Unicode code point — correct for ASCII/Latin-1.",
         "Over a bare `any`, each element is read through a numeric-string key — a per-tag element walk is the perf follow-up."
       ],
       "seeAlso": [
@@ -808,9 +806,9 @@
       "snippet": "const add = (a: number, b: number): number => a + b;\nconsole.log(add.call(null, 3, 4));\nconsole.log(add.apply(null, [5, 6]));",
       "differences": [
         "`thisArg` is the receiver only of a function with a `this: T` parameter (declared, or from its contextual type); for any other function it is evaluated then ignored, so borrowing a class method against another receiver is unsupported.",
-        "Only on a first-class function **value** (a closure, function parameter, arrow/function expression, or named function) — call/apply/bind on a built-in isn't supported.",
+        "call/apply/bind on a Node module's function isn't supported (it isn't a function value); the ECMAScript builtins (`parseInt`, `Math.max`, `encodeURIComponent`, …) are function values.",
         "`.apply` takes either a literal array or a runtime array spread into a **rest** parameter; a runtime array into a fixed-arity function is the usual spread-into-fixed-arity rejection.",
-        "`.bind` is V1-scoped to functions whose parameters are plain scalar/string/pointer types with no rest slot — an array/nullable-scalar/rest parameter is a clean compile error."
+        "`.bind` is V1-scoped to functions whose parameters are plain scalar/string/pointer/`any` types with no rest slot — an array/nullable-scalar/rest parameter is a clean compile error."
       ],
       "seeAlso": [
         "lang.fnexpr",
@@ -1239,8 +1237,11 @@
       "name": "class static members / visibility / abstract / implements",
       "statusRow": "class static members/static {} blocks, private/protected visibility, abstract classes/methods, implements",
       "signature": "class C { static x = 1; static {} private y; abstract m(); }",
-      "badge": "exact",
+      "badge": "caveats",
       "description": "static members are inherited through extends (a non-redeclared static field shares its base's storage). private/protected are compile-time-only (zero runtime check, matching TS erasure), checked with tsc's own diagnostics (including super.privateMethod() and private or protected constructors); o[\"p\"] reaches a private member, as in TypeScript. abstract reuses override-detection; implements is a compile-time structural self-check.",
+      "differences": [
+        "A plain object passed where another plain object type is expected is copied into that type's layout, so writes through the copy do not reach the original (a class instance keeps its identity)."
+      ],
       "seeAlso": [
         "lang.class",
         "lang.privatefield"
@@ -1289,7 +1290,7 @@
       "statusRow": "instanceof (against user-defined classes)",
       "signature": "x instanceof C",
       "badge": "caveats",
-      "description": "Every instance carries a hidden runtime type tag. A class-typed variable whose static class is T or an ancestor of T folds to a compile-time constant; one whose static class is an ancestor of the right-hand class needs a real runtime tag read. instanceof against Array/Map/Set/Date/RegExp is a compile-time constant.",
+      "description": "Every instance carries a hidden runtime type tag. A class-typed variable whose static class is T or an ancestor of T folds to a compile-time constant; one whose static class is an ancestor of the right-hand class needs a real runtime tag read. instanceof against Array/Map/Set/Date/RegExp is a compile-time constant for a statically typed value; a value held in any is tested at run time.",
       "differences": [
         "`x instanceof Object` is a compile-time constant — true for any non-primitive (class instance, object, array, function, Date, Map/Set, RegExp, …), false for a primitive. Only an undecidable static type (any/union/nullable) is a clean rejection."
       ],

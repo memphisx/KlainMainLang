@@ -19,6 +19,12 @@
 #if defined(__linux__)
 #include <link.h> // dl_iterate_phdr, for this thread's TLS blocks
 #endif
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>   // the main image's header, for its TLS block
+#include <mach-o/getsect.h>
+#include <pthread.h>
+#include <stdint.h>
+#endif
 #ifndef _WIN32
 #include <sys/mman.h> // mmap/munmap, for coroutine stacks
 #endif
@@ -242,11 +248,43 @@ static int kml_tls_phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
 }
 void __kml_gc_tls_register(void) { int add = 1; dl_iterate_phdr(kml_tls_phdr_cb, &add); }
 void __kml_gc_tls_unregister(void) { int add = 0; dl_iterate_phdr(kml_tls_phdr_cb, &add); }
-#elif !defined(_WIN32)
-// macOS: thread-local variables are allocated lazily by dyld per thread; not
-// covered here (unverified on this platform).
-void __kml_gc_tls_register(void) {}
-void __kml_gc_tls_unregister(void) {}
+#elif defined(__APPLE__)
+// macOS has the same hole: dyld allocates each thread's copy of the image's
+// thread-local sections lazily, as one block under the image's pthread key,
+// and Boehm never scans it. The key is in the image's TLV descriptors
+// (__thread_vars: thunk, key, offset — the low 32 bits; the rest of the
+// word is not part of it on current dyld); the block spans __thread_data
+// and __thread_bss. Touching a variable of our own makes dyld allocate this
+// thread's block first, and its address checks the block found.
+struct kml_tlv_desc { void *thunk; unsigned long key; unsigned long offset; };
+static __thread char kml_tls_anchor;
+static void kml_tls_bounds(char **lo, char **hi) {
+	*lo = *hi = NULL;
+	volatile char *anchor = &kml_tls_anchor;
+	(void)*anchor;
+	const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(0);
+	unsigned long nv = 0, nd = 0, nb = 0;
+	struct kml_tlv_desc *v = (struct kml_tlv_desc *)getsectiondata(mh, "__DATA", "__thread_vars", &nv);
+	char *d = (char *)getsectiondata(mh, "__DATA", "__thread_data", &nd);
+	char *b = (char *)getsectiondata(mh, "__DATA", "__thread_bss", &nb);
+	if (!v || nv < sizeof *v) return;
+	char *start = d && nd ? d : b, *end = b && nb ? b + nb : d + nd;
+	if (!start || end <= start) return;
+	char *blk = (char *)pthread_getspecific((pthread_key_t)(v->key & 0xffffffffUL));
+	if (!blk || (char *)&kml_tls_anchor < blk || (char *)&kml_tls_anchor >= blk + (end - start)) return;
+	*lo = blk;
+	*hi = blk + (end - start);
+}
+void __kml_gc_tls_register(void) {
+	char *lo, *hi;
+	kml_tls_bounds(&lo, &hi);
+	if (lo && lo < hi) GC_add_roots(lo, hi);
+}
+void __kml_gc_tls_unregister(void) {
+	char *lo, *hi;
+	kml_tls_bounds(&lo, &hi);
+	if (lo && lo < hi) GC_remove_roots(lo, hi);
+}
 #endif
 
 __attribute__((constructor))

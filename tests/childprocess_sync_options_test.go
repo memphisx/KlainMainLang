@@ -174,3 +174,13 @@ const outer = spawnSync(node, ['-e', "require('child_process').execSync(process.
 console.log(outer.status, outer.stderr)
 `)
 }
+
+// spawnSync's output: Buffers without an encoding, strings with one, and a
+// null stdin slot (only the pipes the child writes have output).
+func TestE2ESpawnSyncOutputShape(t *testing.T) {
+	assertSameAsNodeImports(t, `
+import { spawnSync } from 'node:child_process';
+const r = spawnSync('echo', ['hi']); console.log(Buffer.isBuffer(r.stdout), r.stdout, r.output, r.stderr.length);
+const s = spawnSync('echo', ['hi'], { encoding: 'utf8' }); console.log(typeof s.stdout, JSON.stringify(s.stdout), s.output);
+`)
+}

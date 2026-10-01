@@ -137,17 +137,6 @@ func NodeTypeName(name string) bool {
 	return false
 }
 
-// AnyGlobal reports whether some global name KnownGlobal accepts satisfies f.
-func AnyGlobal(f func(string) bool) bool {
-	KnownGlobal("") // load the table
-	for n := range globals {
-		if f(n) {
-			return true
-		}
-	}
-	return false
-}
-
 // GlobalNames returns every global name KnownGlobal accepts, sorted, each
 // with whether it is a value's (GlobalValue).
 func GlobalNames() (names []string, values []bool) {
@@ -182,7 +171,18 @@ func ModulePath(spec string) (string, bool) {
 	}
 	// `klain:ws` is klain_ws.ts, `stream/promises` stream_promises.ts.
 	file := strings.NewReplacer("/", "_", ":", "_").Replace(name) + ".ts"
-	if _, err := nodeModuleFiles.Open("node/" + file); err != nil {
+	// Node has `test` only as `node:test`; the bare specifier is Node's
+	// own test-suite helpers (test/common).
+	if spec == "test" {
+		file = "test_common.ts"
+	}
+	src, err := nodeModuleFiles.ReadFile("node/" + file)
+	if err != nil || !importable(file, src) {
+		// A global module (kml_websocket.ts) is no importable module.
+		return "", false
+	}
+	// A module Node exposes only under the scheme (`node:sqlite`).
+	if !strings.HasPrefix(spec, "node:") && strings.Contains(string(src), "kml:scheme-only") {
 		return "", false
 	}
 	return ModuleRoot + file, true
@@ -244,8 +244,8 @@ func tsModuleTypeNames() map[string]bool {
 				continue
 			}
 			src, err := nodeModuleFiles.ReadFile("node/" + en.Name())
-			if err != nil {
-				continue
+			if err != nil || !importable(en.Name(), src) {
+				continue // a global module's names are globals, not imports
 			}
 			for _, m := range exportedTypeDecl.FindAllStringSubmatch(string(src), -1) {
 				tsTypeNames[m[1]] = true
@@ -253,4 +253,57 @@ func tsModuleTypeNames() map[string]bool {
 		}
 	})
 	return tsTypeNames
+}
+
+// globalModuleMarker starts a global module's source: a builtin module
+// written in TypeScript whose exported classes implement globals
+// (TDD-00232), reached without an import.
+const globalModuleMarker = "// kml:global"
+
+func isGlobalModule(src []byte) bool {
+	return strings.HasPrefix(string(src), globalModuleMarker)
+}
+
+// importable reports whether a builtin module file is a module a program
+// can import: any but a global module of this project's own (kml_*.ts); a
+// global module named for a Node module (perf_hooks.ts, whose `performance`
+// is a global) is both.
+func importable(file string, src []byte) bool {
+	return !isGlobalModule(src) || !strings.HasPrefix(file, "kml_")
+}
+
+var exportedClassDecl = regexp.MustCompile(`(?m)^export (?:declare )?(?:abstract )?class ([A-Za-z_$][A-Za-z0-9_$]*)`)
+
+// exportedGlobalConst is a global module's exported constant marked as a
+// global of its own (`performance`): `export const X = …; // kml:global`.
+var exportedGlobalConst = regexp.MustCompile(`(?m)^export const ([A-Za-z_$][A-Za-z0-9_$]*)\b.*// kml:global$`)
+
+var (
+	globalModulesOnce sync.Once
+	globalModules     map[string]string
+)
+
+// GlobalModuleNames maps each global a global module implements (one of its
+// exported classes, or a constant marked global) to the module's pseudo-path.
+func GlobalModuleNames() map[string]string {
+	globalModulesOnce.Do(func() {
+		globalModules = map[string]string{}
+		entries, _ := nodeModuleFiles.ReadDir("node")
+		for _, en := range entries {
+			if !strings.HasSuffix(en.Name(), ".ts") {
+				continue
+			}
+			src, err := nodeModuleFiles.ReadFile("node/" + en.Name())
+			if err != nil || !isGlobalModule(src) {
+				continue
+			}
+			for _, m := range exportedClassDecl.FindAllStringSubmatch(string(src), -1) {
+				globalModules[m[1]] = ModuleRoot + en.Name()
+			}
+			for _, m := range exportedGlobalConst.FindAllStringSubmatch(string(src), -1) {
+				globalModules[m[1]] = ModuleRoot + en.Name()
+			}
+		}
+	})
+	return globalModules
 }

@@ -78,9 +78,32 @@ func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal V
 	inGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	elemVal := e.loadArrayElem(inGep, elemTy)
-	elemStrVal, err := e.emitValueToString(elemVal)
-	if err != nil {
-		return Value{}, err
+	var elemStrVal Value
+	if elemVal.Ty.IR == "ptr" && !elemVal.Ty.IsDynamic && !elemVal.Ty.IsArray {
+		// A null or undefined element (a null reference) joins as "".
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(""), slot))
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, elemVal.Ref))
+		convL, joinL := e.freshLabel("join.conv"), e.freshLabel("join.str")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, joinL, convL))
+		e.emitLabel(convL)
+		conv, err := e.emitValueToString(elemVal)
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", conv.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+		e.emitLabel(joinL)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+		elemStrVal = Value{Ref: r, Ty: TypePtr}
+	} else {
+		var err error
+		if elemStrVal, err = e.emitValueToString(elemVal); err != nil {
+			return Value{}, err
+		}
 	}
 	isFirst := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isFirst, idxVal))

@@ -145,7 +145,7 @@ func (e *Emitter) emitHTTPUpgradeBlock(headersMapFinal, methodPtr, pathOnly, que
 	// --- req: an HttpRequest/IncomingMessage over the parsed request line ---
 	reqTy := RequestType()
 	reqReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", reqReg, reqTy.StructSize()))
+	e.emitObjMallocInto(reqReg, reqTy)
 	reqIR := reqTy.StructIR()
 	storeReqField := func(name, ir, ref string) {
 		idx, fieldTy, _ := reqTy.FieldIndex(name)
@@ -430,23 +430,6 @@ func isHTTPSCreateServerCall(ex *ast.CallExpression) bool {
 
 func programUsesHTTPS1Server(prog *ast.Program) bool {
 	return programContainsCall(prog, isHTTPSCreateServerCall)
-}
-
-// isHTTP2SecureServerCall reports whether ex is `http2.createSecureServer(...)` —
-// the h2-over-TLS server whose per-listener drive (TDD-00191 Stage 4) the event
-// loop's extra-accept path must know about ahead of Pass 2, same ordering reason
-// as isHTTPSCreateServerCall.
-func isHTTP2SecureServerCall(ex *ast.CallExpression) bool {
-	mem, ok := ex.Callee.(*ast.MemberExpression)
-	if !ok || mem.Property != "createSecureServer" {
-		return false
-	}
-	id, ok := mem.Object.(*ast.Identifier)
-	return ok && id.Name == "http2__kml_builtin"
-}
-
-func programUsesH2TLSServer(prog *ast.Program) bool {
-	return programContainsCall(prog, isHTTP2SecureServerCall)
 }
 
 // isUpgradeOnCall reports whether ex is `<obj>.on("upgrade", …)` or

@@ -27,36 +27,25 @@
             "feature": "`new EventEmitter<T>()` / extending it via `class X extends EventEmitter<T>`",
             "status": "implemented",
             "caveats": [
-              "An override's declared signature isn't checked for compatibility against the method it replaces (tsc's TS2416) — a wildly-wrong override signature is the author's problem ([ADR-00631](../adr/ADR-00631.md))",
-              "The checker types every event as taking `...args: any[]`: @types/node types a typed map's listeners through conditional types (`Key`/`Args`/`Listener`), which it does not model yet. A typed map's event names and argument types are checked by code generation instead, not reported as TypeScript errors",
-              "`EventEmitter`'s constructor options (`captureRejections`) are a clean rejection"
+              "An override's declared signature isn't checked for compatibility against the method it replaces (tsc's TS2416)",
+              "The checker types every event as taking `...args: any[]`: @types/node types a typed map's listeners through conditional types (`Key`/`Args`/`Listener`), which it does not model yet, so a typed map's event names and argument types are not checked"
             ],
             "notes": [
-              "Import it from `events` (named, default or namespace): it is not a global. With no type argument every event takes any arguments (@types/node's default event map); a type argument is an event map of argument tuples (`EventEmitter<{ data: [chunk: string]; end: [] }>`). A subclass constructor calls `super()`",
-              "A class in an EventEmitter-rooted tree may **override** any EventEmitter method (`on`/`once`/`emit`/`off`/`removeListener`/`removeAllListeners`/`listenerCount`/`eventNames`) by declaring it — the override wins at every call site (statically and virtually through the vtable), and `super.<method>(...)` reaches the underlying behavior (the nearest ancestor override, else the built-in dispatch), including multi-level `B extends A extends EventEmitter` chains ([TDD-00157](../tdd/TDD-00157.md)/[ADR-00631](../adr/ADR-00631.md))",
-              "`x instanceof EventEmitter` answers as a compile-time constant, true for emitters and classes extending one ([ADR-00303](../adr/ADR-00303.md)). See LANGUAGE-CONSTRUCTS.md's `class`/`extends` note",
-              "Single inheritance, not composition: a class can extend `EventEmitter` *or* another base, never both — real JS/TS has the same single-inheritance constraint, so this isn't specific to this compiler"
+              "Node's `lib/events.js`, ported to TypeScript ([TDD-00230](../tdd/TDD-00230.md) P3.1): an ordinary class, imported from `events` (named, default or namespace), not a global. With no type argument every event takes any arguments (@types/node's default event map); a type argument is an event map of argument tuples (`EventEmitter<{ data: [chunk: string]; end: [] }>`)",
+              "A subclass may override any method and reach the original through `super`; `captureRejections` (the constructor option and the static default) routes an async listener's rejection to `'error'`, as in Node"
             ]
           },
           {
             "feature": "`.on(event, listener)` / `.once(event, listener)`",
             "status": "implemented",
-            "caveats": [
-              "A map-typed emitter requires a string-literal event name at every call site",
-              "A `function` listener can't read `this` (the emitter, in Node): a compile error",
-              "A listener parameter holding an array with a default value is a clean rejection"
-            ],
             "notes": [
               "Chainable (`.on(...).on(...)`)",
-              "Every listener is held as a dynamic function, so emitters of any event map share one representation; a listener's parameters are typed from its event's tuple (or `any` on an untyped emitter), and it may take fewer parameters than the event passes ([ADR-00392](../adr/ADR-00392.md))"
+              "A listener may take fewer parameters than the event passes; one it isn't passed is `undefined` or its default, and an async listener's promise is what `captureRejections` watches"
             ]
           },
           {
             "feature": "`.emit(event, ...args)`",
             "status": "implemented",
-            "caveats": [
-              "A map-typed emitter requires a string-literal event name"
-            ],
             "notes": [
               "Synchronously invokes every registered listener for `event`, in registration order; returns whether any listener ran; a `once` listener is removed before it runs",
               "`emit(event, a, b, …)` passes each argument; a typed map's event takes exactly its tuple's arguments ([ADR-00392](../adr/ADR-00392.md))"
@@ -72,9 +61,6 @@
           {
             "feature": "`.addListener(...)` / `.prependListener(...)` / `.prependOnceListener(...)`",
             "status": "implemented",
-            "caveats": [
-              "A map-typed emitter requires a string-literal event name"
-            ],
             "notes": [
               "`prepend*` puts the listener before the existing ones ([ADR-01162](../adr/ADR-01162.md))"
             ]
@@ -86,38 +72,28 @@
               "`eventNames()` returns registration order; an event whose last listener is removed leaves the list, as in Node"
             ],
             "caveats": [
-              "Event names are strings; a symbol event name is not supported"
+              "`eventNames()` leaves out symbol event names (`Reflect.ownKeys` omits an object's symbol keys); `on`/`emit`/`listenerCount` with a symbol work"
             ]
           },
           {
             "feature": "`EventEmitter.prototype.emit('error', ...)` special-cases (throws if no `'error'` listener)",
             "status": "implemented",
             "notes": [
-              "An unlistened `'error'` throws its argument when it is an Error, and otherwise an Error reading `Unhandled error. (<value>)`, as Node does. Resolved at the `.emit()` call site — no runtime cost when the event name isn't `'error'` beyond the `strcmp` itself"
-            ],
-            "caveats": [
-              "A non-Error, non-string argument is rendered with `String()` in the `Unhandled error. (…)` message, where Node uses `util.inspect`"
+              "An unlistened `'error'` throws its argument when it is an Error, and otherwise an Error reading `Unhandled error. (<value>)` with the value rendered by `util.inspect`, as Node does"
             ]
           },
           {
             "feature": "`events.once(emitter, name)` (static helper)",
             "status": "implemented",
-            "caveats": [
-              "On a typed map, a mixed-type multi-argument event is a clean rejection (homogeneous arrays only) and a payload-less one is deferred ([ADR-00675](../adr/ADR-00675.md)); on an untyped emitter the result is the `any[]` arguments"
-            ],
             "notes": [
-              "Returns a Promise that resolves with the event's argument array the first time it fires; `const arr = await once(ee, 'x')`"
+              "Returns a Promise that resolves with the event's argument array the first time it fires (`const [x] = await once(ee, 'x')`); an `'error'` first rejects it, and an `AbortSignal` option cancels it"
             ]
           },
           {
             "feature": "`events.on(emitter, name)` (async iterator)",
             "status": "implemented",
-            "caveats": [
-              "Same payload rules as `once`: on a typed map, mixed-type multi-argument, payload-less, and non-scalar payloads are clean rejections; on an untyped emitter each item is the `any[]` arguments",
-              "The buffer is unbounded (Node's default); iterator `.return()`/`.throw()` unregistering the listener is a deferred follow-up ([ADR-00677](../adr/ADR-00677.md))"
-            ],
             "notes": [
-              "An async iterator yielding the event's argument array on each emission (`for await (const [x] of on(ee, 'data'))`), buffering events between iterations and parking the consumer when the queue drains; the listener attaches eagerly at the `on(...)` call. Built on the array-yielding generators of [ADR-00676](../adr/ADR-00676.md)"
+              "An async iterator yielding each emission's argument array (`for await (const [x] of on(ee, 'data'))`), buffering events between iterations; leaving the loop (`break`, `return()`) removes its listeners, as in Node"
             ]
           }
         ]

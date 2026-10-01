@@ -236,7 +236,7 @@ func (e *Emitter) emitTextEncoderEncodeInto(objExpr ast.Expression, args []ast.E
 	structIR := ty.StructIR()
 	e.ensureMalloc()
 	objReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", objReg, ty.StructSize()))
+	e.emitObjMallocInto(objReg, ty)
 	storeField := func(name, ref string) {
 		idx, fieldTy, _ := ty.FieldIndex(name)
 		gep := e.freshReg()

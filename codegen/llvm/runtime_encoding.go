@@ -491,7 +491,7 @@ func (e *Emitter) ensureUtf8LabelCheck() {
 	}
 	e.usedUtf8LabelCheck = true
 	e.ensureStrlen()
-	e.emitGlobal(`declare i32 @strcmp(ptr, ptr)`)
+	e.ensureStrcmp()
 	e.emitGlobal(`@.utf8lbl0 = private unnamed_addr constant [6 x i8] c"utf-8\00"`)
 	e.emitGlobal(`@.utf8lbl1 = private unnamed_addr constant [5 x i8] c"utf8\00"`)
 	e.emitGlobal(`@.utf8lbl2 = private unnamed_addr constant [18 x i8] c"unicode-1-1-utf-8\00"`)
@@ -945,10 +945,6 @@ done:
 
 func (e *Emitter) ensureDecodeURIComponent() {
 	e.ensurePercentDecode(&e.usedDecodeURIComponent, "__kml_decode_uri_component", false)
-}
-
-func (e *Emitter) ensureDecodeURI() {
-	e.ensurePercentDecode(&e.usedDecodeURI, "__kml_decode_uri", true)
 }
 
 // The strict variants back the global decodeURIComponent()/decodeURI()

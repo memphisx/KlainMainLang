@@ -41,7 +41,7 @@ import (
 var pureCheckImpureNamespaces = map[string]bool{
 	"console": true, "process": true, "fs": true, "fsPromises": true,
 	"child_process": true, "http": true, "https": true, "net": true,
-	"dgram": true, "dns": true, "os": true, "cluster": true, "readline": true,
+	"dns": true, "os": true, "cluster": true, "readline": true,
 }
 
 // Bare function names that perform I/O or schedule effects.

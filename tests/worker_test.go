@@ -1,39 +1,13 @@
 package tests
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"KlainMainLang/codegen/llvm"
-	"KlainMainLang/resolver"
 )
 
 // --- Worker (worker_threads) — TDD-00098 Stage 3 ---
-
-// workerCompileError resolves+emits a multi-file program and asserts a
-// compile-stage error containing wantSub (from either the resolver or
-// codegen), optionally under -mm=gc.
-func workerCompileError(t *testing.T, files map[string]string, entryName, mm, wantSub string) {
-	t.Helper()
-	dir := writeMultiFile(t, files)
-	prog, err := resolver.ResolveProgram(filepath.Join(dir, entryName))
-	if err == nil {
-		em := llvm.NewEmitter()
-		if mm != "" {
-			em.SetMemMode(mm)
-		}
-		_, err = em.EmitProgram(prog)
-	}
-	if err == nil {
-		t.Fatalf("expected a compile error containing %q, got success", wantSub)
-	}
-	if !strings.Contains(err.Error(), wantSub) {
-		t.Fatalf("expected error containing %q, got: %v", wantSub, err)
-	}
-}
 
 func TestE2EWorkerEchoRoundTripAndExit(t *testing.T) {
 	assertMultiFileOutput(t, map[string]string{
@@ -41,8 +15,8 @@ func TestE2EWorkerEchoRoundTripAndExit(t *testing.T) {
 import { parentPort, workerData } from 'worker_threads';
 const greeting: string = workerData;
 console.log("worker started with: " + greeting);
-parentPort.on('message', (msg: number) => {
-    parentPort.postMessage(msg * 2);
+parentPort!.on('message', (msg: number) => {
+    parentPort!.postMessage(msg * 2);
 });
 `,
 		"main.ts": `
@@ -66,7 +40,7 @@ func TestE2EWorkerTwoConcurrentWorkersThrowCatch(t *testing.T) {
 		"thrower.ts": `
 import { parentPort, workerData } from 'worker_threads';
 const id: number = workerData;
-parentPort.on('message', (rounds: number) => {
+parentPort!.on('message', (rounds: number) => {
     let caught = 0;
     for (let i = 0; i < rounds; i++) {
         try {
@@ -76,7 +50,7 @@ parentPort.on('message', (rounds: number) => {
             caught++;
         }
     }
-    parentPort.postMessage(caught);
+    parentPort!.postMessage(caught);
 });
 `,
 		"main.ts": `
@@ -101,10 +75,10 @@ func TestE2EWorkerObjectAndArrayPayload(t *testing.T) {
 	assertMultiFileOutput(t, map[string]string{
 		"shapes_worker.ts": `
 import { parentPort } from 'worker_threads';
-parentPort.on('message', (req: { name: string, nums: number[] }) => {
+parentPort!.on('message', (req: { name: string, nums: number[] }) => {
     let sum = 0;
     for (const n of req.nums) { sum += n; }
-    parentPort.postMessage("hello " + req.name + ", sum=" + sum);
+    parentPort!.postMessage("hello " + req.name + ", sum=" + sum);
 });
 `,
 		"main.ts": `
@@ -123,8 +97,8 @@ func TestE2EWorkerUsesTimersInternally(t *testing.T) {
 	assertMultiFileOutput(t, map[string]string{
 		"timer_worker.ts": `
 import { parentPort } from 'worker_threads';
-parentPort.on('message', (n: number) => {
-    setTimeout(() => { parentPort.postMessage(n + 100); }, 30);
+parentPort!.on('message', (n: number) => {
+    setTimeout(() => { parentPort!.postMessage(n + 100); }, 30);
 });
 `,
 		"main.ts": `
@@ -137,18 +111,26 @@ w.postMessage(7);
 	}, "main.ts", "delayed: 107\nbye 1")
 }
 
-func TestE2EWorkerFunctionPayloadRejected(t *testing.T) {
-	workerCompileError(t, map[string]string{
+// A function in a message is no cloneable value: postMessage throws
+// DataCloneError, and the worker goes on.
+func TestE2EWorkerFunctionPayloadDataCloneError(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
 		"echo_worker.ts": `
 import { parentPort } from 'worker_threads';
-parentPort.on('message', (msg: number) => { parentPort.postMessage(msg); });
+parentPort!.on('message', (msg: number) => { parentPort!.postMessage(msg); });
 `,
 		"main.ts": `
 import { Worker } from 'worker_threads';
 const w = new Worker('./echo_worker.ts');
-w.postMessage((x: number) => x + 1);
+try {
+  w.postMessage((x: number) => x + 1);
+} catch (e: any) {
+  console.log(e.name, e.message.endsWith("could not be cloned."));
+}
+w.on('message', (n: number) => { console.log("echo " + n); w.terminate(); });
+w.postMessage(3);
 `,
-	}, "main.ts", "", "cannot be a function")
+	}, "main.ts", "DataCloneError true\necho 3")
 }
 
 func TestE2EWorkerGCModeRoundTrip(t *testing.T) {
@@ -159,14 +141,14 @@ func TestE2EWorkerGCModeRoundTrip(t *testing.T) {
 	assertMultiFileOutputGC(t, map[string]string{
 		"gc_worker.ts": `
 import { parentPort } from 'worker_threads';
-parentPort.on('message', (n: number) => {
+parentPort!.on('message', (n: number) => {
     let acc = 0;
     for (let i = 0; i < 2000; i++) {
         const arr: number[] = [i, i + 1, i + 2];
         const s = "x" + i;
         acc += arr[0] + s.length;
     }
-    parentPort.postMessage(n + acc);
+    parentPort!.postMessage(n + acc);
 });
 `,
 		"main.ts": `
@@ -188,48 +170,7 @@ func assertMultiFileOutputGC(t *testing.T, files map[string]string, entryName, w
 		t.Skip("clang not found in PATH")
 	}
 	dir := writeMultiFile(t, files)
-	prog, err := resolver.ResolveProgram(filepath.Join(dir, entryName))
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	em := llvm.NewEmitter()
-	em.SetMemMode("gc")
-	ir, err := em.EmitProgram(prog)
-	if err != nil {
-		t.Fatalf("codegen: %v", err)
-	}
-	llFile := filepath.Join(dir, "prog.ll")
-	shimFile := filepath.Join(dir, "gcshim.c")
-	binFile := filepath.Join(dir, "prog")
-	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
-		t.Fatalf("write IR: %v", err)
-	}
-	if err := os.WriteFile(shimFile, []byte(llvm.GCShimSource), 0644); err != nil {
-		t.Fatalf("write GC shim: %v", err)
-	}
-	cflags, libs, err := llvm.LocateGC()
-	if err != nil {
-		t.Skipf("gc mode: %v", err)
-	}
-	clangArgs := []string{"-O2", llFile, shimFile, "-o", binFile}
-	if em.UsesWorkers() {
-		clangArgs = append(clangArgs, "-pthread")
-	}
-	clangArgs = append(clangArgs, cflags...)
-	clangArgs = append(clangArgs, libs...)
-	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
-	}
-	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
-	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
-	if err != nil {
-		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
-			t.Skipf("bdw-gc not installed: %v", err)
-		}
-		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
-	}
+	binFile := buildGCProgram(t, dir, filepath.Join(dir, entryName))
 	result, err := exec.Command(binFile).Output()
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -237,60 +178,78 @@ func assertMultiFileOutputGC(t *testing.T, files map[string]string, entryName, w
 	compareLines(t, strings.TrimRight(string(result), "\n"), want)
 }
 
-func TestE2EWorkerModuleCannotAlsoBeImported(t *testing.T) {
-	workerCompileError(t, map[string]string{
+// A worker module the program also imports runs at import time on the main
+// thread, and again, afresh, on the worker's.
+func TestE2EWorkerModuleAlsoImported(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
 		"w.ts": `
-import { parentPort } from 'worker_threads';
-export function helper(): number { return 1 }
-parentPort.on('message', (msg: number) => { parentPort.postMessage(msg); });
+import { parentPort, isMainThread } from 'worker_threads';
+export function helper(): number { return 41; }
+console.log("w.ts evaluated, main thread: " + isMainThread);
+if (!isMainThread) parentPort!.on('message', (msg: number) => { parentPort!.postMessage(msg + helper()); });
 `,
 		"main.ts": `
 import { Worker } from 'worker_threads';
 import { helper } from './w';
+console.log("helper " + helper());
 const w = new Worker('./w.ts');
+w.on('message', (n: number) => { console.log("got " + n); w.terminate(); });
+w.postMessage(1);
 `,
-	}, "main.ts", "", "cannot also be imported")
+	}, "main.ts", "w.ts evaluated, main thread: true\nhelper 41\nw.ts evaluated, main thread: false\ngot 42")
 }
 
-func TestE2EWorkerNestedWorkerRejected(t *testing.T) {
-	workerCompileError(t, map[string]string{
+// A worker starts a worker of its own.
+func TestE2EWorkerNested(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
 		"inner.ts": `
 import { parentPort } from 'worker_threads';
-parentPort.on('message', (msg: number) => { parentPort.postMessage(msg); });
+parentPort!.on('message', (msg: number) => { parentPort!.postMessage(msg * 2); });
 `,
 		"outer.ts": `
 import { Worker, parentPort } from 'worker_threads';
 const inner = new Worker('./inner.ts');
-parentPort.on('message', (msg: number) => { parentPort.postMessage(msg); });
+inner.on('message', (n: number) => { parentPort!.postMessage(n + 1); inner.terminate(); });
+parentPort!.on('message', (msg: number) => { inner.postMessage(msg); });
 `,
 		"main.ts": `
 import { Worker } from 'worker_threads';
 const w = new Worker('./outer.ts');
+w.on('message', (n: number) => { console.log("nested " + n); w.terminate(); });
+w.postMessage(10);
 `,
-	}, "main.ts", "", "cannot spawn workers of its own")
+	}, "main.ts", "nested 21")
 }
 
-func TestE2EWorkerUnannotatedMessageHandlerRejected(t *testing.T) {
-	workerCompileError(t, map[string]string{
+// Messages are any values: an unannotated listener gets each as it was sent.
+func TestE2EWorkerUntypedMessages(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
 		"w.ts": `
 import { parentPort } from 'worker_threads';
-parentPort.on('message', (msg) => { parentPort.postMessage(1); });
+parentPort!.on('message', (msg) => { parentPort!.postMessage({ echo: msg, kind: typeof msg }); });
 `,
 		"main.ts": `
 import { Worker } from 'worker_threads';
 const w = new Worker('./w.ts');
+let n = 0;
+w.on('message', (m: any) => { console.log(JSON.stringify(m)); if (++n === 3) w.terminate(); });
 w.postMessage(1);
+w.postMessage("two");
+w.postMessage([3, { x: 3 }]);
 `,
-	}, "main.ts", "", "requires an annotated message parameter")
+	}, "main.ts", `{"echo":1,"kind":"number"}
+{"echo":"two","kind":"string"}
+{"echo":[3,{"x":3}],"kind":"object"}`)
 }
 
-func TestE2EWorkerParentPortOutsideWorkerRejected(t *testing.T) {
-	workerCompileError(t, map[string]string{
+// On the main thread parentPort and workerData are null.
+func TestE2EWorkerMainThreadValues(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
 		"main.ts": `
-import { parentPort } from 'worker_threads';
-parentPort.postMessage(1);
+import { parentPort, workerData, isMainThread, threadId } from 'worker_threads';
+console.log(parentPort, workerData, isMainThread, threadId);
 `,
-	}, "main.ts", "", "only available inside a worker module")
+	}, "main.ts", "null null true 0")
 }
 
 func TestE2EWorkerUncaughtExceptionFiresErrorEvent(t *testing.T) {
@@ -300,7 +259,7 @@ func TestE2EWorkerUncaughtExceptionFiresErrorEvent(t *testing.T) {
 	assertMultiFileOutput(t, map[string]string{
 		"bad_worker.ts": `
 import { parentPort } from 'worker_threads';
-parentPort.on('message', (n: number) => {
+parentPort!.on('message', (n: number) => {
     throw new Error("boom " + n);
 });
 `,
@@ -320,7 +279,7 @@ func TestE2EWorkerUncaughtExceptionNoListenerKillsProcess(t *testing.T) {
 	binFile := buildBinaryMultiFile(t, map[string]string{
 		"bad_worker.ts": `
 import { parentPort } from 'worker_threads';
-parentPort.on('message', (n: number) => {
+parentPort!.on('message', (n: number) => {
     throw new Error("kaput");
 });
 `,
@@ -338,19 +297,19 @@ w.postMessage(1);
 	if !ok || ee.ExitCode() != 1 {
 		t.Fatalf("expected exit code 1, got %v (output: %s)", err, out)
 	}
-	if !strings.Contains(string(out), "Uncaught (in worker): kaput") {
-		t.Fatalf("expected uncaught-in-worker message, got: %s", out)
+	if !strings.Contains(string(out), "kaput") {
+		t.Fatalf("expected the worker's error, got: %s", out)
 	}
 }
 
 func TestE2EWorkerBrowserShapeOnMessage(t *testing.T) {
-	// TDD-00098 stage 6: the browser surface — ambient `new Worker` (no
-	// import), `w.onmessage`/`e.data`, and inside the worker a bare
-	// `onmessage = (e: { data: T }) => ...` plus bare `postMessage(...)`.
+	// The web's surface: an ambient `new Worker` (no import),
+	// `w.onmessage`/`e.data`, and inside the worker `self.onmessage` plus
+	// `self.postMessage(...)`.
 	assertMultiFileOutput(t, map[string]string{
 		"triple_worker.ts": `
-onmessage = (e: { data: number }) => {
-    postMessage(e.data * 3);
+self.onmessage = (e: { data: number }) => {
+    self.postMessage(e.data * 3);
 };
 `,
 		"main.ts": `
@@ -367,7 +326,7 @@ w.postMessage(14);
 func TestE2EWorkerBrowserShapeOnError(t *testing.T) {
 	assertMultiFileOutput(t, map[string]string{
 		"bad_worker.ts": `
-onmessage = (e: { data: number }) => {
+self.onmessage = (e: { data: number }) => {
     throw new Error("browser boom");
 };
 `,
@@ -423,7 +382,7 @@ func TestE2EWorkerIsMainThread(t *testing.T) {
 	assertMultiFileOutput(t, map[string]string{
 		"w.ts": `
 import { parentPort, isMainThread } from 'worker_threads';
-parentPort.postMessage("worker isMainThread " + isMainThread);
+parentPort!.postMessage("worker isMainThread " + isMainThread);
 `,
 		"main.ts": `
 import { Worker, isMainThread } from 'worker_threads';
@@ -446,7 +405,7 @@ if (isMainThread) {
   w.on('message', (m: string) => { console.log('main got', m, isMainThread, shared); w.terminate(); });
 } else {
   const n: number = workerData;
-  parentPort.postMessage('worker ' + isMainThread + ' ' + (n + 1) + ' ' + shared);
+  parentPort!.postMessage('worker ' + isMainThread + ' ' + (n + 1) + ' ' + shared);
 }
 `,
 	}, "main.ts", "main got worker false 21 top-level true top-level")

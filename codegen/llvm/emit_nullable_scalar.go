@@ -27,6 +27,7 @@ func (t Type) withoutNullable() Type {
 	// would make downstream null-aware paths (`??`'s statically-nullish check,
 	// string rendering) misread the bare payload as `undefined` itself.
 	t.IsUndefined = false
+	t.NullAndUndef = false
 	return t
 }
 
@@ -124,20 +125,6 @@ func (e *Emitter) nullableScalarLValue(expr ast.Expression) (sym Symbol, ok bool
 		}
 	}
 	return Symbol{}, false
-}
-
-// emitExprKeepNullable is emitExpr for a consumer that must see a
-// nullable-scalar local's absence: an identifier read normally auto-unwraps
-// to the bare payload (emitIdentifier), so an un-narrowed nullable-scalar
-// local is read here as its { i1, T } aggregate instead. Everything else is a
-// plain emitExpr.
-func (e *Emitter) emitExprKeepNullable(expr ast.Expression) (Value, error) {
-	if sym, ok := e.nullableScalarLValue(expr); ok && !sym.NarrowedNonNull {
-		present := e.loadNullableScalarPresent(sym.Ptr, sym.Ty)
-		payload := e.loadNullableScalarPayload(sym.Ptr, sym.Ty)
-		return Value{Ref: e.makeNullableScalarAgg(sym.Ty, present, payload), Ty: sym.Ty}, nil
-	}
-	return e.emitExpr(expr)
 }
 
 // --- Stage 3: nullable-scalar aggregate *values* -------------------------
@@ -247,10 +234,17 @@ func (e *Emitter) jsUndefinedLocalOperand(expr ast.Expression, cur Value, op str
 // nested call already returning T | null) is forwarded with its presence bit
 // intact; any other value boxes as present.
 func (e *Emitter) emitNullableScalarBoxedValue(expr ast.Expression, ty Type) (string, error) {
+	if ty.NullAndUndef {
+		v, err := e.emitExpr(expr)
+		if err != nil {
+			return "", err
+		}
+		return e.toThreeState(v, ty).Ref, nil
+	}
 	if _, ok := expr.(*ast.NullLiteral); ok {
 		return e.makeNullableScalarAgg(ty, "false", zeroRef(ty.withoutNullable())), nil
 	}
-	if sym, ok := e.nullableScalarLValue(expr); ok {
+	if sym, ok := e.nullableScalarLValue(expr); ok && nullableScalarStorageIR(sym.Ty) == nullableScalarStorageIR(ty) {
 		agg := nullableScalarStorageIR(ty)
 		reg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, agg, sym.Ptr, storageAlign(ty)))
@@ -266,6 +260,12 @@ func (e *Emitter) emitNullableScalarBoxedValue(expr ast.Expression, ty Type) (st
 // boxNullableScalarFromValue boxes an already-evaluated Value into a { i1, T }
 // aggregate of type ty. See emitNullableScalarBoxedValue for the cases.
 func (e *Emitter) boxNullableScalarFromValue(v Value, ty Type) string {
+	if ty.NullAndUndef {
+		if v.Ty.NullAndUndef {
+			return v.Ref
+		}
+		return e.toThreeState(v, ty).Ref
+	}
 	if v.Ty.IsNull {
 		return e.makeNullableScalarAgg(ty, "false", zeroRef(ty.withoutNullable()))
 	}
@@ -321,6 +321,14 @@ func (e *Emitter) defineNullableScalarParam(name, ptrName string, pty Type) {
 // undefined literal, another nullable-scalar local, or a plain bare-T value).
 // See the file header for why the bare-T fallback marks the result present.
 func (e *Emitter) storeNullableScalar(ptr string, ty Type, init ast.Expression) error {
+	if ty.NullAndUndef {
+		agg, err := e.emitNullableScalarBoxedValue(init, ty)
+		if err != nil {
+			return err
+		}
+		e.storeNullableScalarAggregate(ptr, ty, agg)
+		return nil
+	}
 	if _, isNull := init.(*ast.NullLiteral); isNull {
 		e.storeNullableScalarAbsent(ptr, ty)
 		return nil
@@ -460,7 +468,7 @@ func (e *Emitter) storeNullableScalarAggregate(ptr string, ty Type, aggRef strin
 // member. Shared by emission and inferExprType so the two cannot disagree.
 func nullCoalesceUnion(leftBare, right Type) (Type, bool) {
 	kind := func(t Type) string {
-		if t.IR == "ptr" && !isStringTy(t) {
+		if t.IR == "ptr" && !isStringTy(t) && !t.IsSymbol && !t.IsBigInt {
 			return ""
 		}
 		return scalarTypeKind(t)
@@ -670,7 +678,47 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 	// strict kinds can't match, the result is a compile-time constant (never
 	// equal), regardless of the presence bit.
 	strict := ex.Op == "===" || ex.Op == "!=="
-	valUndef := e.inferExprType(scalarExpr).IsUndefined
+	vt := e.inferExprType(scalarExpr)
+	if vt.NullAndUndef && vt.IR == "ptr" {
+		return Value{}, false, nil // either absence, tested at run time (emitBinary)
+	}
+	if vt.NullAndUndef {
+		// A three-state scalar: its slot says which absence it holds.
+		agg, err := e.emitExpr(scalarExpr)
+		if err != nil {
+			return Value{}, false, err
+		}
+		if !isNullableScalar(agg.Ty) {
+			return Value{}, false, nil
+		}
+		agg.Ty.NullAndUndef = true
+		present, _ := e.nullableScalarAggParts(agg)
+		var cond string
+		switch {
+		case !strict:
+			cond = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", cond, present))
+		case litUndef:
+			isNull := e.isTriNull(agg)
+			cond = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ugt i1 %s, %s", cond, e.boolNot(present), isNull)) // absent && !null
+		default:
+			cond = e.isTriNull(agg)
+		}
+		if ex.Op == "!=" || ex.Op == "!==" {
+			neg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", neg, cond))
+			cond = neg
+		}
+		return Value{Ref: cond, Ty: TypeBool}, true, nil
+	}
+	valUndef := vt.IsUndefined
+	if vt.Nullable && !isNullableScalar(vt) && !vt.IsNull && !vt.IsUndefined {
+		// A pointer that may be absent (a `(() => void) | undefined`, an
+		// object or string): its flags don't say which absence it holds, so
+		// no constant; the pointer compare decides.
+		return Value{}, false, nil
+	}
 	if strict && litUndef != valUndef {
 		switch ex.Op {
 		case "===":
@@ -999,4 +1047,11 @@ func (e *Emitter) emitNullableScalarUpdate(sym Symbol, ex *ast.UpdateExpression)
 		return Value{Ref: newReg, Ty: base}, nil
 	}
 	return Value{Ref: oldReg, Ty: base}, nil
+}
+
+// boolNot is the i1 negation of b.
+func (e *Emitter) boolNot(b string) string {
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", r, b))
+	return r
 }

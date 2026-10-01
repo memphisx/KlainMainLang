@@ -547,6 +547,7 @@ func (p *Parser) assert(e ast.Expression, set func(*ast.Assertion)) {
 }
 
 func (p *Parser) parseCallMember() (ast.Expression, error) {
+	chainStart := p.peek().Pos
 	expr, err := p.parsePrimary()
 	if err != nil {
 		return nil, err
@@ -570,10 +571,12 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 				if err != nil {
 					return nil, err
 				}
-				if _, err := p.expect(lexer.RPAREN); err != nil {
+				rp, err := p.expect(lexer.RPAREN)
+				if err != nil {
 					return nil, err
 				}
 				call := ast.NewCallExpression(expr, args, posOf(lparen))
+				call.Source = p.callSource(chainStart, rp.End)
 				call.Optional = true
 				expr = call
 				continue
@@ -623,6 +626,7 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 			// the assertion (`!=`/`!==` lex as their own tokens), and it binds
 			// like the member chain itself so `a!.b` and `f()!.c` work.
 			tok := p.advance()
+			p.blank(tok.Pos, tok.End)
 			expr = ast.NewNonNullExpression(expr, posOf(tok))
 		case lexer.LT:
 			// Explicit call-site type arguments `f<string>(x)` (ADR-00473).
@@ -655,6 +659,8 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 			if okParse {
 				if err := p.expectGT("call-site type arguments"); err != nil {
 					okParse = false
+				} else {
+					p.blank(p.at(save).Pos, p.at(p.pos-1).End)
 				}
 			}
 			p.speculating--
@@ -682,10 +688,12 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 			if err != nil {
 				return nil, err
 			}
-			if _, err := p.expect(lexer.RPAREN); err != nil {
+			rp, err := p.expect(lexer.RPAREN)
+			if err != nil {
 				return nil, err
 			}
 			call := ast.NewCallExpression(expr, args, posOf(lparen))
+			call.Source = p.callSource(chainStart, rp.End)
 			call.TypeArgs = targs
 			expr = call
 		case lexer.LPAREN:
@@ -694,10 +702,13 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 			if err != nil {
 				return nil, err
 			}
-			if _, err := p.expect(lexer.RPAREN); err != nil {
+			rp, err := p.expect(lexer.RPAREN)
+			if err != nil {
 				return nil, err
 			}
-			expr = ast.NewCallExpression(expr, args, posOf(lparen))
+			call := ast.NewCallExpression(expr, args, posOf(lparen))
+			call.Source = p.callSource(chainStart, rp.End)
+			expr = call
 		case lexer.TEMPLATE_NO_SUB:
 			// `` tag`plain text, no ${} `` — a tagged template with a
 			// single quasi and no interpolated expressions.

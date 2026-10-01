@@ -75,36 +75,9 @@ function dnsException(status: number, hostname: string): Error {
     return e;
 }
 
-// ---- lib/internal/net.js ----
-
-const v4Seg = '(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])';
-const v4Str = '(?:' + v4Seg + '\\.){3}' + v4Seg;
-const IPv4Reg = new RegExp('^' + v4Str + '$');
-const v6Seg = '(?:[0-9a-fA-F]{1,4})';
-const IPv6Reg = new RegExp('^(?:' +
-    '(?:' + v6Seg + ':){7}(?:' + v6Seg + '|:)|' +
-    '(?:' + v6Seg + ':){6}(?:' + v4Str + '|:' + v6Seg + '|:)|' +
-    '(?:' + v6Seg + ':){5}(?::' + v4Str + '|(?::' + v6Seg + '){1,2}|:)|' +
-    '(?:' + v6Seg + ':){4}(?:(?::' + v6Seg + '){0,1}:' + v4Str + '|(?::' + v6Seg + '){1,3}|:)|' +
-    '(?:' + v6Seg + ':){3}(?:(?::' + v6Seg + '){0,2}:' + v4Str + '|(?::' + v6Seg + '){1,4}|:)|' +
-    '(?:' + v6Seg + ':){2}(?:(?::' + v6Seg + '){0,3}:' + v4Str + '|(?::' + v6Seg + '){1,5}|:)|' +
-    '(?:' + v6Seg + ':){1}(?:(?::' + v6Seg + '){0,4}:' + v4Str + '|(?::' + v6Seg + '){1,6}|:)|' +
-    '(?::(?:(?::' + v6Seg + '){0,5}:' + v4Str + '|(?::' + v6Seg + '){1,7}|:))' +
-    ')(?:%[0-9a-zA-Z-.:]{1,})?$');
-
-export function isIPv4(input: string): boolean {
-    return IPv4Reg.test(input);
-}
-
-export function isIPv6(input: string): boolean {
-    return IPv6Reg.test(input);
-}
-
-export function isIP(input: string): number {
-    if (isIPv4(input)) return 4;
-    if (isIPv6(input)) return 6;
-    return 0;
-}
+// lib/internal/net.js
+export { isIP, isIPv4, isIPv6 } from './internal_net';
+import { isIP, isIPv4, isIPv6 } from './internal_net';
 
 export interface AddressInfo {
     address: string;
@@ -118,6 +91,58 @@ function handleAddress(handle: number, peer: boolean): AddressInfo | null {
     if (r < 0) return null;
     const family = Math.floor(r / 65536);
     return { address: __kml_native.lastString(), family: family === 6 ? 'IPv6' : 'IPv4', port: r - family * 65536 };
+}
+
+// A native handle outside a Socket or Server, as child_process and cluster
+// pass Node's TCP/Pipe wrap objects around: a handle id here, or a
+// descriptor received over IPC and not yet opened.
+export class _KmlNativeHandle {
+    handle: number;
+    fd: number;
+    // The net.Server listening on it (cluster's owner_symbol), and a hook
+    // its close runs first (cluster tells the primary).
+    _kmlOwner: any = null;
+    onClose: (() => void) | null = null;
+
+    constructor(handle: number, fd: number) {
+        this.handle = handle;
+        this.fd = fd;
+    }
+
+    // The handle id, a received descriptor opened as a stream on first use.
+    open(): number {
+        if (this.handle < 0 && this.fd >= 0) {
+            this.handle = __kml_native.streamOpen(this.fd, true);
+            this.fd = -1;
+        }
+        return this.handle;
+    }
+
+    close(cb?: () => void): void {
+        const hook = this.onClose;
+        this.onClose = null;
+        if (hook !== null) hook();
+        const h = this.open();
+        this.handle = -1;
+        if (h >= 0) {
+            __kml_native.tcpClose(h, (s: number, u: number) => { if (cb !== undefined) cb(); });
+        } else if (cb !== undefined) {
+            process.nextTick(cb);
+        }
+    }
+}
+
+export function _kmlHandleAddress(handle: number): AddressInfo | null {
+    return handleAddress(handle, false);
+}
+
+// cluster's _getServer, registered by the cluster module in a worker: a
+// server's listen goes through the primary there (listenInCluster).
+type ClusterGetServer = (server: Server, options: any, cb: (errno: number, handle: any) => void) => void;
+let clusterGetServer: ClusterGetServer | null = null;
+
+export function _kmlSetClusterGetServer(f: ClusterGetServer): void {
+    clusterGetServer = f;
 }
 
 // ---- Socket ----
@@ -169,7 +194,11 @@ export class Socket extends Duplex {
     private sockname: AddressInfo | null = null;
     private endedByPeer = false;
 
-    constructor(options?: SocketConstructorOpts & { handle?: number; pauseOnCreate?: boolean }) {
+    // A descriptor written with blocking writes (Node's
+    // `_handle.setBlocking(true)`: the process's stdout and stderr), or -1.
+    _kmlSyncFd = -1;
+
+    constructor(options?: SocketConstructorOpts & { handle?: number; pauseOnCreate?: boolean; manualStart?: boolean }) {
         const dopts: DuplexOptions = {
             allowHalfOpen: options?.allowHalfOpen === true,
             // For backwards compat do not emit close on destroy: the handle's
@@ -178,6 +207,8 @@ export class Socket extends Duplex {
             autoDestroy: true,
             // Handle strings directly.
             decodeStrings: false,
+            readable: options?.readable !== false,
+            writable: options?.writable !== false,
         };
         super(dopts);
         this.noDelayWanted = options?.noDelay === true;
@@ -191,7 +222,7 @@ export class Socket extends Duplex {
                 if (options.pauseOnCreate) {
                     this.reading = false;
                     this.pause();
-                } else {
+                } else if (!options.manualStart) {
                     this.read(0);
                 }
             }
@@ -324,6 +355,16 @@ export class Socket extends Duplex {
         }
         this.refreshTimer();
         const buf: Buffer = typeof data === 'string' ? Buffer.from(data as string, encoding) : data as Buffer;
+        if (this._kmlSyncFd >= 0) {
+            const w = __kml_native.writeSync(this._kmlSyncFd, buf, 0, buf.length);
+            if (w < 0) {
+                cb(errnoException(-w, 'write'));
+                return;
+            }
+            this.bytesWrittenCount += buf.length;
+            cb(null);
+            return;
+        }
         const r = __kml_native.tcpWrite(this._handle, buf, 0, buf.length, (status: number, unused: number) => {
             if (status !== 0) {
                 cb(errnoException(status, 'write'));
@@ -376,6 +417,15 @@ export class Socket extends Duplex {
         if (server !== null) {
             server._connections--;
             server._emitCloseIfDrained();
+        }
+    }
+
+    // Stops reading when the stream is paused, so a paused stdin lets the
+    // process exit (Node's getStdin onpause).
+    _kmlReadStopIfPaused(): void {
+        if (this._handle >= 0 && this.reading && !this.readableFlowing) {
+            this.reading = false;
+            __kml_native.tcpReadStop(this._handle);
         }
     }
 
@@ -606,6 +656,8 @@ export interface ListenOptions {
     host?: string;
     path?: string;
     backlog?: number;
+    fd?: number;
+    exclusive?: boolean;
 }
 
 export interface DropArgument {
@@ -621,6 +673,9 @@ export interface DropArgument {
 export class Server extends EventEmitter {
     _connections = 0;
     _handle: number = -1;
+    // The handle cluster hands a worker's listen: a shared descriptor's
+    // (whose close tells the primary) or round-robin's faux handle.
+    _kmlClusterHandle: any = null;
     private listeningId = 1;
     private unrefd = false;
     private pipeName: string | null = null;
@@ -673,7 +728,7 @@ export class Server extends EventEmitter {
     }
 
     get listening(): boolean {
-        return this._handle >= 0;
+        return this._handle >= 0 || this._kmlClusterHandle !== null;
     }
 
     listen(port?: number, hostname?: string, backlog?: number, listeningListener?: () => void): this;
@@ -683,9 +738,15 @@ export class Server extends EventEmitter {
     listen(path: string, backlog?: number, listeningListener?: () => void): this;
     listen(path: string, listeningListener?: () => void): this;
     listen(options: ListenOptions, listeningListener?: () => void): this;
-    listen(arg0?: number | string | ListenOptions, arg1?: string | number | Listener, arg2?: number | Listener, arg3?: Listener): this {
+    listen(handle: any, backlog?: number, listeningListener?: () => void): this;
+    listen(handle: any, listeningListener?: () => void): this;
+    listen(arg0?: any, arg1?: string | number | Listener, arg2?: number | Listener, arg3?: Listener): this {
         let options: ListenOptions;
-        if (typeof arg0 === 'string') {
+        let native: _KmlNativeHandle | null = null;
+        if (arg0 instanceof _KmlNativeHandle) {
+            native = arg0;
+            options = {};
+        } else if (typeof arg0 === 'string') {
             options = { path: arg0 };
         } else if (typeof arg0 === 'number' || arg0 === undefined) {
             options = { port: arg0 };
@@ -697,27 +758,77 @@ export class Server extends EventEmitter {
         if (typeof arg3 === 'function') cb = arg3;
         else if (typeof arg2 === 'function') cb = arg2;
         else if (typeof arg1 === 'function') cb = arg1;
-        if (this._handle >= 0) {
+        if (this._handle >= 0 || this._kmlClusterHandle !== null) {
             throw new NodeError('ERR_SERVER_ALREADY_LISTEN', 'Listen method has been called more than once without closing.');
         }
         if (cb !== null) this.once('listening', cb);
         const backlog = (typeof arg1 === 'number' ? arg1 : 0) || (typeof arg2 === 'number' ? arg2 : 0) || options.backlog || 511;
         this.listeningId++;
+        const onConnection = (status: number, client: number): void => { this._kmlOnConnection(status, client); };
+        if (native !== null) {
+            // listen(handle): a server handle received over IPC.
+            const nh = native.fd >= 0 ? __kml_native.tcpListenOpen(native.fd, onConnection) : native.handle;
+            native.fd = -1;
+            native.handle = -1;
+            this.afterListen(nh, '::', 0);
+            return this;
+        }
+        if (options.fd !== undefined) {
+            this.afterListen(__kml_native.tcpListenOpen(options.fd, onConnection), '::', 0);
+            return this;
+        }
         const path = options.path;
+        if (clusterGetServer !== null && options.exclusive !== true) {
+            this.listenInCluster(clusterGetServer, options, backlog);
+            return this;
+        }
         if (path !== undefined) {
-            const ph = __kml_native.pipeListen(path, backlog, (status: number, client: number) => {
-                this.onConnection(status, client);
-            });
+            const ph = __kml_native.pipeListen(path, backlog, onConnection);
             this.afterListen(ph, path, -1);
             return this;
         }
         const port = options.port === undefined ? 0 : validatePort(options.port);
         const host: string = options.host ?? '';
-        const h = __kml_native.tcpListen(host, port, backlog, (status: number, client: number) => {
-            this.onConnection(status, client);
-        });
+        const h = __kml_native.tcpListen(host, port, backlog, onConnection);
         this.afterListen(h, host === '' ? '::' : host, port);
         return this;
+    }
+
+    // A cluster worker's listen (net.js listenInCluster): the primary
+    // answers with a shared listening descriptor or, round-robin, a faux
+    // handle it delivers accepted connections through.
+    private listenInCluster(getServer: ClusterGetServer, options: ListenOptions, backlog: number): void {
+        const path = options.path;
+        const port = path !== undefined ? -1 : options.port === undefined ? 0 : validatePort(options.port);
+        const host = options.host;
+        const address: string | null = path !== undefined ? path : host !== undefined && host !== '' ? host : null;
+        const addressType = path !== undefined ? -1 : address !== null && isIP(address) === 6 ? 6 : 4;
+        const query = { address, port, addressType, fd: undefined, flags: 0, backlog };
+        getServer(this, query, (errno: number, handle: any): void => {
+            if (errno) {
+                this.emit('error', errnoException(errno, 'bind', address === null ? undefined : address, port));
+                return;
+            }
+            this._kmlClusterHandle = handle;
+            if (handle instanceof _KmlNativeHandle) {
+                // A shared listening descriptor: accepted on here.
+                const h = __kml_native.tcpListenOpen(handle.fd, (status: number, client: number) => {
+                    this._kmlOnConnection(status, client);
+                });
+                handle.fd = -1;
+                handle.handle = h;
+                handle._kmlOwner = this;
+                this._handle = h;
+                if (this.unrefd && h >= 0) __kml_native.tcpRef(h, false);
+            } else {
+                handle.onconnection = (status: number, client: any): void => { this._kmlOnConnection(status, client); };
+                handle._kmlOwner = this;
+                if (this.unrefd) handle.unref();
+            }
+            process.nextTick(() => {
+                if (this._kmlClusterHandle !== null) this.emit('listening');
+            });
+        });
     }
 
     private afterListen(h: number, address: string, port: number): void {
@@ -735,7 +846,8 @@ export class Server extends EventEmitter {
         });
     }
 
-    private onConnection(status: number, client: number): void {
+    _kmlOnConnection(status: number, from: number | _KmlNativeHandle): void {
+        const client = typeof from === 'number' ? from : from.open();
         if (status !== 0) {
             this.emit('error', errnoException(status, 'accept'));
             return;
@@ -766,6 +878,13 @@ export class Server extends EventEmitter {
     }
 
     address(): AddressInfo | string | null {
+        const ch = this._kmlClusterHandle;
+        if (this._handle < 0 && ch !== null) {
+            if (typeof ch.getsockname !== 'function') return null;
+            const out: any = {};
+            ch.getsockname(out);
+            return out;
+        }
         if (this._handle < 0) return null;
         if (this.pipeName !== null) return this.pipeName;
         const a = handleAddress(this._handle, false);
@@ -784,7 +903,12 @@ export class Server extends EventEmitter {
                 this.once('close', () => { cb(); });
             }
         }
-        if (this._handle >= 0) {
+        const ch = this._kmlClusterHandle;
+        if (ch !== null) {
+            this._kmlClusterHandle = null;
+            this._handle = -1;
+            ch.close();
+        } else if (this._handle >= 0) {
             __kml_native.tcpClose(this._handle, (s: number, u: number) => {});
             this._handle = -1;
         }
@@ -793,7 +917,7 @@ export class Server extends EventEmitter {
     }
 
     _emitCloseIfDrained(): void {
-        if (this._handle >= 0 || this._connections) return;
+        if (this._handle >= 0 || this._kmlClusterHandle !== null || this._connections) return;
         process.nextTick(() => { this.emit('close'); });
     }
 
@@ -806,12 +930,14 @@ export class Server extends EventEmitter {
     ref(): this {
         this.unrefd = false;
         if (this._handle >= 0) __kml_native.tcpRef(this._handle, true);
+        else if (this._kmlClusterHandle !== null) this._kmlClusterHandle.ref();
         return this;
     }
 
     unref(): this {
         this.unrefd = true;
         if (this._handle >= 0) __kml_native.tcpRef(this._handle, false);
+        else if (this._kmlClusterHandle !== null) this._kmlClusterHandle.unref();
         return this;
     }
 }

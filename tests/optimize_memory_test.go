@@ -42,10 +42,11 @@ function f(i: number): number {
 }
 console.log(f(1))
 `)
-	if strings.Contains(ir, "@calloc(i64 1, i64 16)") {
+	// The layout is the header word plus the two fields (24 bytes).
+	if strings.Contains(ir, "@calloc(i64 1, i64 24)") {
 		t.Errorf("non-escaping literal still calloc'd:\n%s", ir)
 	}
-	if !strings.Contains(ir, "alloca { double, double }") {
+	if !strings.Contains(ir, "alloca { i64, double, double }") {
 		t.Errorf("expected a stack alloca for the literal")
 	}
 }
@@ -67,7 +68,7 @@ console.log(make(1).x)
 stash(2)
 console.log(keep.length)
 `)
-	if c := strings.Count(ir, "call ptr @calloc(i64 1, i64 16)"); c != 2 {
+	if c := strings.Count(ir, "call ptr @calloc(i64 1, i64 24)"); c != 2 {
 		t.Errorf("expected both escaping literals on the heap (2 callocs), got %d", c)
 	}
 }

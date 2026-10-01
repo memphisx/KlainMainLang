@@ -1546,15 +1546,21 @@ class Foo {
 	}
 }
 
-func TestE2EClassStaticAccessorIsError(t *testing.T) {
-	_, err := parseAndCompile(`
-class Foo {
-  static get x(): number { return 1 }
+// Static accessors: `C.x` reads the getter, `C.x = v` (and a compound
+// assignment) calls the setter.
+func TestE2EClassStaticAccessors(t *testing.T) {
+	assertSameAsNode(t, `
+let store = 3;
+class K {
+  static get level(): number { return store; }
+  static set level(v: number) { if (v < 0) throw new RangeError("neg"); store = v; }
 }
+console.log(K.level);
+K.level = 7;
+K.level += 2;
+console.log(K.level, store);
+try { K.level = -1; } catch (e) { console.log((e as Error).message); }
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for a static accessor (not yet supported)")
-	}
 }
 
 func TestE2EClassGetSetTypeDisagreementIsError(t *testing.T) {
@@ -1727,9 +1733,10 @@ Check.eq(true, false);
 
 // The `| null` member of a static method's union parameter accepts both
 // `null` and `undefined` arguments (union V1's Nullable branch) — the
-// `assert.sameValue(x, undefined)` / `..., null)` comparison shape.
+// `assert.sameValue(x, undefined)` / `..., null)` comparison shape. tsc
+// rejects the `undefined` argument (TS2345), so this is JavaScript.
 func TestE2EStaticMethodUnionParamNullMember(t *testing.T) {
-	assertOutput(t, `
+	assertOutputCompatJS(t, `
 class Check {
     static eq(actual: number | string | boolean | null, expected: number | string | boolean | null): void {
         if (actual === expected) { console.log("same"); return; }
@@ -2446,7 +2453,7 @@ fns[0]("mem", 2);
 const m = new Map<string, (name: string, value: number) => void>();
 m.set("k", (name, value) => console.log("map " + name + "=" + value));
 const g = m.get("k");
-g("disk", 3);
+g!("disk", 3);
 `, "static cpu=1\npush mem=2\nmap disk=3")
 }
 
@@ -2627,4 +2634,85 @@ class W {
 new W().finish();
 new W((cb) => { console.log("hooked"); cb() }).finish();
 `, "done\nhooked\ndone")
+}
+
+// `const self = this` in a method takes the receiver's type.
+func TestE2EThisAliasLocal(t *testing.T) {
+	assertOutput(t, `
+class R {
+  v = 5;
+  get(): number { const self = this; return self.v; }
+  later(): () => number { const self = this; return () => self.v + 1; }
+}
+console.log(new R().get(), new R().later()());
+`, "5 6")
+}
+
+// A class method call leaving out the optional parameter before a rest
+// parameter passes an empty rest.
+func TestE2EOptionalBeforeRestOmitted(t *testing.T) {
+	assertOutput(t, `
+class C {
+  run(fn: (...a: any[]) => any, thisArg?: any, ...args: any[]): number { return args.length + fn(); }
+}
+console.log(new C().run(() => 10), new C().run(() => 10, undefined, 1, 2));
+`, "10 12")
+}
+
+// A dictionary or Map field of a class whose layout completes later (here
+// an EventEmitter subclass, its base from another module) reads the
+// finished layout, not the placeholder the field type captured.
+func TestE2EClassDictFieldOfLaterClass(t *testing.T) {
+	assertSameAsNodeImports(t, `
+import { EventEmitter } from 'events'
+class H { ws?: NodeJS.Dict<W>; m = new Map<string, W>(); constructor() { this.ws = {} } }
+class W extends EventEmitter { id: number; state = 'none'; constructor(id: number) { super(); this.id = id } }
+const h = new H()
+h.ws!['1'] = new W(1)
+h.m.set('2', new W(2))
+const ws = h.ws!
+for (const k in ws) console.log(k, ws[k]!.id, ws[k]!.state)
+console.log(h.m.get('2')!.id, h.m.get('2')!.state)
+`)
+}
+
+// ADR-01317: a static method read as a value (`const f = C.m`), and an
+// unannotated defaulted parameter of a method (`p = '!'` is a string), whose
+// default fills an omitted argument through a function value too.
+func TestE2EStaticMethodValueAndDefaultParams(t *testing.T) {
+	assertSameAsNode(t, `
+class Ev {
+  static b(t: number): number { return t * 2 }
+  static greet(name: string, p = '!'): string { return 'hi ' + name + p }
+  hello(name: string, p = '.'): string { return name + p }
+}
+class Sub extends Ev {}
+const f = Ev.b
+const g = Ev.greet
+console.log(f(21), g('a'), g('b', '?'), f === Ev.b, f.name, f.length, typeof f, Sub.b === Ev.b)
+console.log([1, 2].map(Ev.b), Ev.greet('c'), new Ev().hello('d'), new Ev().hello('e', '!'))
+function h(name: string, p = '!'): string { return name + p }
+const k = h
+console.log(k('x'), k('y', '?'))
+`)
+}
+
+// ADR-01317: a class through constants bound to it (`const K = C; new K()`),
+// a class's `name` and `length`, and util.inspect's `[class B extends A]`.
+func TestE2EClassConstAliasAndInspect(t *testing.T) {
+	assertSameAsNode(t, `
+class C { n: number; constructor(n: number, m = 2) { this.n = n + m } static s = 5 }
+class D extends C { }
+const K = C
+const J = K
+const c = new J(3)
+console.log(c.n, c instanceof C, K === C, K.name, C.name, C.length, D.name, J.s, typeof K)
+const A: any = D
+console.log(A, K, [K], { K }, TypeError)
+class E { static t = 'x'; static #p = 1; static o = { a: [1] } }
+const B: any = E
+console.log(B, [B])
+E.t = 'y'
+console.log(B)
+`)
 }

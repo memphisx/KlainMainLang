@@ -40,13 +40,12 @@ try {
 }
 
 func TestE2EErrorSubtypeDefaultMessage(t *testing.T) {
-	// No-arg new XError() defaults .message to the kind's own name, the same
-	// way plain new Error() has always defaulted .message to "Error".
+	// No-arg new XError() has an empty message, as in Node.
 	assertOutput(t, `
 const e = new RangeError()
-console.log(e.message)
+console.log(JSON.stringify(e.message))
 console.log(e.name)
-`, "RangeError\nRangeError")
+`, "\"\"\nRangeError")
 }
 
 func TestE2EPlainErrorNameField(t *testing.T) {

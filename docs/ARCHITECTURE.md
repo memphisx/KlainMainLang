@@ -27,6 +27,8 @@ the same number of files.
 | `emit_process.go` | `process.argv`, `process.exit(code)`, `process.env.KEY` / `process.env["KEY"]` |
 | `emit_date.go` | `Date`: construction, getters/setters, `parse`, arithmetic, formatting |
 | `emit_dynamic.go` | `any`/`unknown` as a runtime-tagged `{tag, payload}` value |
+| `objheader.go` + `emit_shape.go` + `shapesrc/shape.c` | The header word every object layout starts with (a type id) and the layout table built from it: generated per-layout get/set routines, class methods as dynamic functions, generator and promise protocols — dynamic access to a static object held in `any` (TDD-00230 phase 5) |
+| `emit_anyprom.go` | A Promise held in `any`: its box wrapper, `await`/`then`/`catch`/`finally` and promise resolution through `any`, and the Promise<any> ↔ Promise<T> conversion |
 | `emit_async.go` | `async`/`await`, `Promise<T>` (over the `select()`-based event loop / reactor) |
 | `emit_promise.go` | `Promise.all`/`.race`/`.allSettled` |
 | `emit_fetch.go` | `fetch(url)`/`fetch(url, init)`/`fetch(request)` and `Response` (backed by libcurl) |
@@ -36,13 +38,12 @@ the same number of files.
 | `emit_fs.go` | `fs.readFileSync`/`writeFileSync`/`appendFileSync`/`existsSync`/`unlinkSync` |
 | `emit_url.go` | `URL`/`URLSearchParams` (backed by libcurl's URL API + the existing `Map<string,string>` machinery), plus `emitMapStrToQueryString` (shared with `emit_querystring.go`) |
 | `emit_querystring.go` | `querystring.parse`/`.stringify` — thin wrappers over `emit_url.go`'s query-string machinery |
-| `emit_assert.go` | `assert` module (`.ok`/bare `assert(...)`/`.equal`/`.strictEqual`/`.notEqual`/`.notStrictEqual`/`.fail`/`.throws`) — reuses `emit_exceptions.go`'s throw machinery and `emit_exprs_operators.go`'s `emitBinary` for comparisons |
-| `emit_node_stream.go` + `runtime_node_stream.go` | The runtime stream handles behind `fs.createReadStream`/`createWriteStream` and the HTTP server's `req`/`res`. Node's `stream` module itself is TypeScript: `lib/node/stream.ts`, compiled with the importing program ([ADR-01161](adr/ADR-01161.md)) |
+| `emit_classref.go` | A class used as a value (a boxed constructor reference) and `x instanceof C` with `C` held in a value (a run-time dispatch to the static test) |
 | `emit_arraybuffer.go` | `ArrayBuffer` + TypedArrays (`Int8Array`…`Float64Array`) — construction, `.set()`/`.subarray()`/`.byteLength`; everything else reuses `emit_arrays_*.go` unchanged |
 | `emit_memory.go` | `Memory.free` (manual memory-management escape hatch) |
 | `emit_timers.go` | `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval`, plus their `ensureTimerRuntime` C-runtime backing store (kept together, not under `runtime_*.go`, since this domain's runtime queue has only ever had one caller) |
 | `emit_http.go` | `http.listen`, request/response handling — the server-side request-object type annotation is `HttpRequest` (not `Request`, which is the client-side `fetch` class, see `emit_fetch_request.go`) |
-| `emit_os.go` | `os.platform`/`.homedir`/`.tmpdir`/`.hostname`/`.totalmem`/`.freemem`/`.cpus`/`.EOL` — platform selection (Linux vs. Darwin) is a Go-side `runtime.GOOS` branch, not runtime IR |
+| `emit_iter_collect.go` | The iteration protocol over non-arrays, collected: `__kml_any_iter_collect` (spread, destructuring, `Array.from`), the array-like reading, and an Error's own enumerable fields for the object walkers |
 | `emit_tui.go` (builders/render dispatch) + `emit_tui_props.go` (style-prop object-literal lowering) | `klain:tui` native TUI framework (TDD-00150): `Box`/`Text`/`List`/`Spinner`/`Progress`/`TextInput`/`render`/`enter`/`leave`. Builders map onto Yoga layout nodes carrying paint attributes; nodes are opaque `ptr` handles |
 | `tui.go` | The `tui.c` painter runtime string: Yoga bridge + per-node paint model + double-buffered ANSI diff painter (UTF-8-decoded text). Plain C over Yoga's extern-"C" ABI |
 | `yoga.go` / `yogasrc/` | Vendored Yoga flexbox engine (`//go:embed`, pinned): extracted per-version and compiled per-`.cpp` to objects (C++20), linked only when a program uses `klain:tui` — see [ADR-00519](adr/ADR-00519.md) for why prebuilt objects rather than a shared-line `.cc` |
@@ -63,4 +64,5 @@ the same number of files.
 | `runtime_url.go` | libcurl URL API declarations (`curl_url*`) |
 | `runtime_misc.go` | console group/timer/count-map state, closure/map-free helpers |
 | `runtime_http.go` | HTTP server + fiber-scheduler C-runtime helpers |
-| `runtime_os.go` | `os` module's substantial C-runtime helpers: growable procfs reading, and the Linux (`/proc/cpuinfo`/`/proc/stat` parsing)/Darwin (Mach `host_processor_info`) implementations of `os.cpus()` |
+| `threadpoolsrc/klaindns.c` | The dns module's natives, in the pool's unit: getaddrinfo/getnameinfo and the DNS client standing in for c-ares (servers, UDP/TCP queries, the answer's records as JSON) |
+| `runtime_os.go` | `process.env`'s libc helpers (`unsetenv`); the `os` module is `lib/node/os.ts` over `osinfosrc/osinfo.c` |

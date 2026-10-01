@@ -59,8 +59,8 @@ typedef struct kml_hp {
     const char *err_code, *err_reason;
 } kml_hp;
 
-static kml_hp **hp_tab = NULL;
-static int hp_cap = 0, hp_n = 0;
+static __thread kml_hp **hp_tab = NULL;
+static __thread int hp_cap = 0, hp_n = 0;
 
 static kml_hp *hp_get(double id) {
     int i = (int)id;

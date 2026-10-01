@@ -387,7 +387,7 @@ func TestE2EChildProcessSpawnSync(t *testing.T) {
 	// spawnSync blocks and returns { status, stdout, stderr, pid }.
 	assertOutputImports(t, `
 import { spawnSync } from 'child_process'
-const r = spawnSync("echo", ["hello", "world"])
+const r = spawnSync("echo", ["hello", "world"], { encoding: "utf8" })
 console.log("status", r.status)
 console.log("stdout", r.stdout.trim())
 const bad = spawnSync("false")
@@ -465,7 +465,7 @@ func TestE2EChildProcessSpawnSyncLargeInterleavedOutput(t *testing.T) {
 	// complete.
 	assertOutputImports(t, `
 import { spawnSync } from 'child_process'
-const r = spawnSync("/bin/sh", ["-c", "for i in $(seq 1 3000); do echo out$i; echo err$i 1>&2; done"])
+const r = spawnSync("/bin/sh", ["-c", "for i in $(seq 1 3000); do echo out$i; echo err$i 1>&2; done"], { encoding: "utf8" })
 console.log("outlines:", r.stdout.split("\n").length - 1)
 console.log("errlines:", r.stderr.split("\n").length - 1)
 `, "outlines: 3000\nerrlines: 3000")
@@ -477,9 +477,9 @@ func TestE2EChildProcessSyncOptionsCwdEncoding(t *testing.T) {
 	// (results are already strings); other options are clean rejections.
 	assertOutputImports(t, `
 import { spawnSync, execSync } from 'child_process'
-console.log("a", spawnSync("pwd", [], { cwd: "/" }).stdout.trim())
+console.log("a", spawnSync("pwd", [], { cwd: "/", encoding: "utf8" }).stdout.trim())
 console.log("b", execSync("pwd", { cwd: "/", encoding: "utf8" }).trim())
-console.log("c", spawnSync("pwd", { cwd: "/" }).stdout.trim())
+console.log("c", spawnSync("pwd", { cwd: "/", encoding: "utf8" }).stdout.trim())
 `, "a /\nb /\nc /")
 }
 
@@ -493,8 +493,8 @@ import { fork } from 'child_process'
 import { mustCall } from 'test'
 if (process.send) {
   process.on('message', (msg) => {
-    process.send("echo:" + msg)
-    process.disconnect()
+    process.send!("echo:" + msg)
+    process.disconnect!()
   })
 } else {
   const child = fork(__filename)
@@ -513,8 +513,8 @@ func TestE2EChildProcessForkArgvBranch(t *testing.T) {
 import cp from 'child_process'
 import { mustCall } from 'test'
 if (process.argv[2] === 'child') {
-  process.send("hello from child")
-  process.disconnect()
+  process.send!("hello from child")
+  process.disconnect!()
 } else {
   const child = cp.fork(process.argv[1], ['child'])
   child.on('message', mustCall((msg) => { console.log("got: " + msg) }))
@@ -523,11 +523,11 @@ if (process.argv[2] === 'child') {
 }
 
 func TestE2EChildProcessSendUnforked(t *testing.T) {
-	// process.send in a non-forked process: falsy probe, false return.
+	// process.send in a non-forked process: undefined, as in Node.
 	assertOutput(t, `
 if (process.send) { console.log("forked") } else { console.log("not forked") }
-console.log(process.send("x"))
-`, "not forked\nfalse")
+console.log(process.send?.("x"), process.connected)
+`, "not forked\nundefined undefined")
 }
 
 func TestE2EChildProcessSpawnOptions(t *testing.T) {
@@ -552,4 +552,11 @@ p.on('close', (code: number) => {
   p2.on('close', (code2: number) => { console.log("echo:", out2.trim(), code2) })
 })
 `, "cwd ok: true 0\necho: hi 0")
+}
+
+// A handle over the fork channel (SCM_RIGHTS): a listening net.Server the
+// child accepts on.
+func TestE2EChildProcessForkSendHandle(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
+	assertSameAsNodeImports(t, "import { fork } from 'child_process';\nimport * as net from 'net';\nimport type { AddressInfo } from 'net';\nif (process.argv[2] === 'child') {\n    process.on('message', (m: any, handle: any) => {\n        if (m === 'server') {\n            const server = handle as net.Server;\n            console.log('child got server', server instanceof net.Server, server.listening);\n            server.on('connection', (s: net.Socket) => {\n                s.end('hello from child');\n                server.close();\n                process.disconnect!();\n            });\n            process.send!('ready');\n        } else if (m === 'socket') {\n            const s = handle as net.Socket;\n            s.end('socket via child');\n        }\n    });\n} else {\n    const child = fork(process.argv[1], ['child']);\n    const server = net.createServer();\n    server.listen(0, () => {\n        const port = (server.address() as AddressInfo).port;\n        child.send('server', server, (err) => { console.log('sent server', err); server.close(); });\n        child.on('message', (m: any) => {\n            if (m !== 'ready') return;\n            const c = net.connect(port, '127.0.0.1');\n            let body = '';\n            c.setEncoding('utf8');\n            c.on('data', (d: string) => { body += d; });\n            c.on('end', () => { console.log('client got', body); });\n        });\n    });\n    child.on('exit', (code) => { console.log('child exit', code); });\n}\n")
 }

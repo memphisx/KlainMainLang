@@ -165,7 +165,7 @@ export class TLSSocket extends net.Socket {
             if (this.server !== null) this.server.emit('secureConnection', this);
             return;
         }
-        this.servername = this.requestedServername === '' ? false : this.requestedServername;
+        this.servername = this.requestedServername === '' || net.isIP(this.requestedServername) !== 0 ? false : this.requestedServername;
         const ok = __kml_native.tlsInfo(this._handle, 0) === 1;
         if (!ok) {
             __kml_native.tlsInfo(this._handle, 1);
@@ -175,7 +175,7 @@ export class TLSSocket extends net.Socket {
             this.authorizationError = code;
             if (this.rejectUnauthorized) {
                 this.destroy(new TlsError(code, code === 'ERR_TLS_CERT_ALTNAME_INVALID'
-                    ? "Hostname/IP does not match certificate's altnames: Host: " + this.requestedServername + '.'
+                    ? "Hostname/IP does not match certificate's altnames: " + this.altnameReason()
                     : message));
                 return;
             }
@@ -183,6 +183,26 @@ export class TLSSocket extends net.Socket {
             this.authorized = true;
         }
         this.emit('secureConnect');
+    }
+
+    // Why the peer's names do not cover the requested one, as Node's
+    // checkServerIdentity words it.
+    private altnameReason(): string {
+        const host = this.requestedServername;
+        __kml_native.tlsInfo(this._handle, 7);
+        const altNames = __kml_native.lastString();
+        if (net.isIP(host) !== 0) {
+            const ips: string[] = [];
+            for (const n of altNames.split(', ')) {
+                if (n.startsWith('IP Address:')) ips.push(canonicalizeIP(n.substring(11)));
+            }
+            return `IP: ${host} is not in the cert's list: ` + ips.join(', ');
+        }
+        if (altNames.indexOf('DNS:') >= 0) return `Host: ${host}. is not in the cert's altnames: ${altNames}`;
+        __kml_native.tlsInfo(this._handle, 8);
+        const cn = __kml_native.lastString();
+        if (cn !== '') return `Host: ${host}. is not cert's CN: ${cn}`;
+        return 'Cert does not contain a DNS name';
     }
 
     getProtocol(): string | null {
@@ -285,7 +305,8 @@ export function connect(arg0: ConnectionOptions | number, arg1?: string | Connec
         if (typeof arg1 === 'function') cb = arg1;
     }
     const host = options.host ?? 'localhost';
-    const servername = options.servername ?? (net.isIP(host) === 0 ? host : '');
+    // An IP host is checked against the certificate's IP addresses.
+    const servername = options.servername ?? host;
     const socket = new TLSSocket(options.socket ?? null, {
         isServer: false,
         secureContext: options.secureContext,
@@ -309,6 +330,28 @@ function mergeOptions(o: ConnectionOptions, port: number, host: string | undefin
         family: o.family, ca: o.ca, cert: o.cert, key: o.key, ALPNProtocols: o.ALPNProtocols,
     };
     return out;
+}
+
+// canonicalizeIP writes an IPv6 address in its shortest form (lowercase,
+// no leading zeros, the longest run of zero groups as `::`); IPv4 is kept.
+function canonicalizeIP(ip: string): string {
+    if (ip.indexOf(':') < 0) return ip;
+    const groups = ip.split(':').map((g: string) => parseInt(g, 16).toString(16));
+    let best = -1;
+    let bestLen = 0;
+    for (let i = 0; i < groups.length; i++) {
+        let j = i;
+        while (j < groups.length && groups[j] === '0') j++;
+        if (j - i > bestLen && j - i >= 2) {
+            best = i;
+            bestLen = j - i;
+        }
+        if (j > i) i = j - 1;
+    }
+    if (best < 0) return groups.join(':');
+    const head = groups.slice(0, best).join(':');
+    const tail = groups.slice(best + bestLen).join(':');
+    return head + '::' + tail;
 }
 
 export function checkServerIdentity(hostname: string, cert: any): Error | undefined {

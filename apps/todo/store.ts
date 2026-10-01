@@ -16,7 +16,7 @@ export function load(): Task[] {
     ];
   }
   const out: Task[] = [];
-  const lines = readFileSync(FILE).split("\n");
+  const lines = readFileSync(FILE, "utf8").split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (line.length < 2) continue;

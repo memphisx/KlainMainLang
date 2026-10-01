@@ -73,9 +73,9 @@ entry:
 }`, unknown))
 }
 
-// ensureNativeFsError defines __kml_native_fs_error(errno, syscall, path?):
+// ensureNativeFsError defines __kml_native_fs_error(errno, syscall, path?, dest?):
 // the Error Node's fs raises for a failed syscall (`ENOENT: no such file or
-// directory, open 'x'`, with its code, errno, syscall and path).
+// directory, rename 'x' -> 'y'`, with its code, errno, syscall, path and dest).
 func (e *Emitter) ensureNativeFsError() {
 	if e.fnDecls["__kml_native_fs_error"] {
 		return
@@ -83,11 +83,12 @@ func (e *Emitter) ensureNativeFsError() {
 	e.fnDecls["__kml_native_fs_error"] = true
 	e.ensureFsThrow()
 	e.emitGlobal(`
-define ptr @__kml_native_fs_error(double %errno, ptr %syscall, i1 zeroext %has_path, ptr %path) {
+define ptr @__kml_native_fs_error(double %errno, ptr %syscall, i1 zeroext %has_path, ptr %path, i1 zeroext %has_dest, ptr %dest) {
 entry:
   %n = fptosi double %errno to i32
   %p = select i1 %has_path, ptr %path, ptr null
-  %err = call ptr @__kml_fs_error_new(i32 %n, ptr %syscall, ptr %p, ptr null)
+  %d = select i1 %has_dest, ptr %dest, ptr null
+  %err = call ptr @__kml_fs_error_new(i32 %n, ptr %syscall, ptr %p, ptr %d)
   ret ptr %err
 }`)
 }

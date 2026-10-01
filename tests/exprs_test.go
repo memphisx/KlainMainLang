@@ -1857,3 +1857,20 @@ const a: any = 5; const b: any = "3"; console.log(~a, ~b, a | 0, b << 1, 1 << a)
 	}
 	assertOutputCompatJS(t, src, strings.TrimSuffix(want, "\n"))
 }
+
+// Optional chains and calls on an `any` short-circuit where it holds null or
+// undefined — a member, a method call, an optional call of a missing method —
+// and evaluate the rest (and its arguments) only otherwise.
+func TestE2EOptionalChainingOnAny(t *testing.T) {
+	assertOutput(t, `
+function mk(v: number): any { return v === 0 ? null : v === 1 ? undefined : { f: { g: 7 }, h() { return "H"; } }; }
+let calls = 0;
+function arg(): number { calls++; return calls; }
+for (const i of [0, 1, 2]) {
+  const n = mk(i);
+  console.log(n?.f, n?.f?.g, n?.f.g, n?.h?.(), n?.h(), n?.zz?.(arg()), calls);
+}
+const o: any = { h(x: number) { return x + 1; } };
+console.log(o.f?.("x"), o.h?.(1));
+`, "undefined undefined undefined undefined undefined undefined 0\nundefined undefined undefined undefined undefined undefined 0\n{ g: 7 } 7 7 H H undefined 0\nundefined 2")
+}

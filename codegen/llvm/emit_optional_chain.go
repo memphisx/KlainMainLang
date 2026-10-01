@@ -149,6 +149,7 @@ const (
 	chainGuardNone   optionalChainGuard = iota // never nullish: the chain is plain
 	chainGuardPtr                              // a pointer: null check
 	chainGuardScalar                           // a `{ i1, T }` nullable scalar: presence bit
+	chainGuardAny                              // an `any`: null or undefined tag
 	chainGuardAbsent                           // statically undefined on this host
 )
 
@@ -175,6 +176,8 @@ func (e *Emitter) classifyChainGuard(link ast.Expression) (guard optionalChainGu
 		return chainGuardScalar, false
 	case bt.IR == "ptr" && !bt.IsArray:
 		return chainGuardPtr, false
+	case isUnconstrainedDynamic(bt):
+		return chainGuardAny, false
 	}
 	return chainGuardNone, false
 }
@@ -240,6 +243,9 @@ func (e *Emitter) emitOptionalChain(top ast.Expression) (v Value, handled bool, 
 	if err != nil {
 		return Value{}, true, err
 	}
+	if bv.Ty.NullAndUndef {
+		bv = e.fromThreeState(bv) // either absence short-circuits
+	}
 	e.optionalCallCtr++
 	tmpName := fmt.Sprintf("__optc_chain_%d", e.optionalCallCtr)
 	tmpTy := bv.Ty.withoutNullable()
@@ -261,6 +267,12 @@ func (e *Emitter) emitOptionalChain(top ast.Expression) (v Value, handled bool, 
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", bv.Ref, slot))
 		e.define(tmpName, Symbol{Ptr: slot, Ty: tmpTy})
+	case isUnconstrainedDynamic(bv.Ty):
+		isNull = e.anyIsNullish(bv)
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bv.Ref, slot))
+		e.define(tmpName, Symbol{Ptr: slot, Ty: bv.Ty})
 	default:
 		// Inference promised a nullable base and emission produced a value that
 		// cannot be absent: the base is already evaluated and cannot be bound

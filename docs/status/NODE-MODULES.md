@@ -20,7 +20,7 @@ Format: [Status page format](README.md#status-page-format). ✅ = the module wor
 | `console` | ✅ | • Ambient global (no import needed) → [console](CONSOLE.md) |
 | `assert` | ✅ | • → [Other Node core modules](NODE-CORE-MODULES.md) |
 | `querystring` | ✅ | • → [Other Node core modules](NODE-CORE-MODULES.md) |
-| `util` | ✅ | • `.inspect`/`.format` → [Other Node core modules](NODE-CORE-MODULES.md) |
+| `util` | ✅ | • → [Other Node core modules](NODE-CORE-MODULES.md) |
 | `net` | ✅ | • → [Other Node core modules](NODE-CORE-MODULES.md) |
 | `dgram` | ✅ | • → [Other Node core modules](NODE-CORE-MODULES.md) |
 | `dns` | ✅ | • → [Other Node core modules](NODE-CORE-MODULES.md) |
@@ -33,24 +33,24 @@ Format: [Status page format](README.md#status-page-format). ✅ = the module wor
 | `diagnostics_channel` | ✅ | • → [Other Node core modules](NODE-CORE-MODULES.md) |
 | `crypto` / `node:crypto` | ✅ | • WebCrypto global + node crypto hashes/HMAC/keygen → [Web Crypto](WEB-CRYPTO.md) |
 | `worker_threads` | ✅ | • → [Concurrency & workers](CONCURRENCY-WORKERS.md) |
-| `events` (`EventEmitter`) | ✅ | • `EventEmitter` exists only through an import of `events` (named, default or namespace): it is no global, in Node or the web platform (the web's is `EventTarget`). The static helpers `events.once` and `events.on` (async iterator) work too → [EventEmitter](EVENT-EMITTER.md) |
+| `events` (`EventEmitter`) | ✅ | • Node's `lib/events.js` ported to TypeScript ([TDD-00230](../tdd/TDD-00230.md) P3.1). `EventEmitter` exists only through an import of `events` (named, default or namespace): it is no global, in Node or the web platform (the web's is `EventTarget`). `once`, `on` (async iterator), `getEventListeners`, `getMaxListeners`, `setMaxListeners`, `listenerCount` and `EventEmitter.defaultMaxListeners`/`captureRejections` work too → [EventEmitter](EVENT-EMITTER.md) |
 | `stream` | ✅ | • → [Streams](STREAMS.md) |
 | `stream/promises` | ✅ | • → [Streams](STREAMS.md) |
 | `stream/web` | ✅ | • → [Streams](STREAMS.md) |
 | `node:sqlite` | ✅ | • → [node:sqlite](SQLITE.md) |
-| `test` / `node:test` | ✅ | • Runner + native helpers → [Other Node core modules](NODE-CORE-MODULES.md) |
+| `test` / `node:test` | ✅ | • Runner and Node's test-suite helpers, in TypeScript → [Other Node core modules](NODE-CORE-MODULES.md) |
 | `async_hooks` | ✅ | • `AsyncLocalStorage` + `AsyncResource` → [Other Node core modules](NODE-CORE-MODULES.md) |
 
 ## Web-global-backed — primary exports fully importable, module extras pending
 
-The primary export of each is a spec-identical re-export of an ambient global, and as of [TDD-00165](../tdd/TDD-00165.md) (Stages 1–3, [ADR-00666](../adr/ADR-00666.md)–[ADR-00668](../adr/ADR-00668.md)) it is **fully importable in every common form** — same-name (`import { URL } from 'url'`), `node:` (`import { setTimeout } from 'node:timers'`), and **aliased** (`import { URL as U } from 'url'`, `{ setTimeout as later }`, `{ Buffer as B }`) — validated and either erased to the global or renamed/rebuilt onto it (using the global directly still works too). What remains is **Stage 4**: the genuinely module-only *extras* with no same-named global — legacy `url.parse`/`format`/`fileURLToPath`, `perf_hooks.PerformanceObserver`, `timers/promises` — which are separate not-yet-built feature surfaces. `Buffer` is a Node-*specific* global (not a Web API).
+The primary export of each is a spec-identical re-export of an ambient global, and as of [TDD-00165](../tdd/TDD-00165.md) (Stages 1–3, [ADR-00666](../adr/ADR-00666.md)–[ADR-00668](../adr/ADR-00668.md)) it is **fully importable in every common form** — same-name (`import { URL } from 'url'`), `node:` (`import { Buffer } from 'node:buffer'`), and **aliased** (`import { URL as U } from 'url'`, `{ Buffer as B }`) — validated and either erased to the global or renamed/rebuilt onto it (using the global directly still works too). `Buffer` is a Node-*specific* global (not a Web API).
 
 | Module | Status | Caveats | Notes |
 |---|---|---|---|
-| `buffer` (`Buffer`) | ✅ | | • A Node-specific global; `import { Buffer } from 'buffer'`/`'node:buffer'` works, same-name and aliased (`Buffer.from` member call → Stage 2 rename). `Blob`/`atob`/`btoa` importable too → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md) |
-| `timers` | ✅ | • Pending: `timers/promises` | • `import { setTimeout }`/`setInterval`/`setImmediate`/`clear*` from 'timers'/'node:timers' works, same-name and aliased; the Web globals also work without import → [Timers](TIMERS.md) |
+| `buffer` (`Buffer`) | ✅ | • `File` and `resolveObjectURL` are not exported (no `File` global, no object-URL registry) | • A Node-specific global; `import { Buffer } from 'buffer'`/`'node:buffer'` works, same-name and aliased (`Buffer.from` member call → Stage 2 rename). `Blob`/`atob`/`btoa` importable too → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)<br>• The module's own exports are TypeScript (`lib/node/internal_buffer.ts`, [ADR-01281](../adr/ADR-01281.md)): `constants`, `kMaxLength`, `kStringMaxLength`, `INSPECT_MAX_BYTES`, `isUtf8`, `isAscii`, `transcode`, `SlowBuffer`; namespace and default imports reach them and the globals |
+| `timers` | ✅ | • The module's timer functions wrap the globals rather than being them: `timers.setTimeout === setTimeout` is `false` (Node: `true`) | • Written in TypeScript (`lib/node/timers.ts`, [ADR-01280](../adr/ADR-01280.md)): named, aliased, default and namespace imports from 'timers'/'node:timers'; extra arguments reach the callback, `clear*` ignore `undefined`/`null`, and `timers.promises` is `timers/promises` → [Timers](TIMERS.md) |
 | `url` | ✅ | • IDN conversion is libcurl-backend-gated<br>• Lenient relative parsing deferred | • `import { URL, URLSearchParams } from 'url'` works (same-name + aliased); the legacy `url`-module functions (`parse`/`format`/`fileURLToPath`/`pathToFileURL`/`resolve`/…) work too → [URL](URL.md) |
-| `perf_hooks` | ✅ | • `PerformanceObserver` is synchronous V1 (no async-batched observer delivery)<br>• Pending: `monitorEventLoopDelay`/`createHistogram` | • `import { performance } from 'perf_hooks'` works, same-name and aliased; `PerformanceObserver` works → [Performance & Timing](PERFORMANCE-TIMING.md) |
+| `perf_hooks` | ✅ | • Histograms keep exact samples (not HDR); `eventLoopUtilization`/`nodeTiming` missing | • Written in TypeScript (`lib/node/perf_hooks.ts`, [ADR-01265](../adr/ADR-01265.md)): `performance`, the entry classes, `PerformanceObserver`, `createHistogram`, `monitorEventLoopDelay` → [Performance & Timing](PERFORMANCE-TIMING.md) |
 
 ## Not started (in scope)
 
@@ -58,12 +58,12 @@ Modules that fit the compiler's model and would add value — ranked and pulled 
 
 | Module | Status | Notes |
 |---|---|---|
-| `string_decoder` | ❌ | • Incremental UTF-8 decoder — no global equivalent; useful for streaming byte→text. Not started |
-| `util/types` | ❌ | • Runtime type predicates (`isDate`, `isMap`, …) — not started |
-| `assert/strict` | ❌ | • The strict-mode `assert` entrypoint (`assert` itself ships; this alias is a thin follow-on) |
-| `dns/promises` | ❌ | • Promise form of `dns` (the callback/`dns.promises` surface ships) — the dedicated subpath specifier is not wired |
-| `readline/promises` | ❌ | • Promise form of `readline` — not started |
-| `timers/promises` | ❌ | • `setTimeout`/`setInterval` as awaitables — not started |
+| `string_decoder` | ✅ | • Node's `StringDecoder`, ported to TypeScript: `write` holds back a character split across Buffers (UTF-8, UTF-16LE, base64) and `end` flushes it (a partial UTF-8 character as U+FFFD); other encodings decode each Buffer whole |
+| `util/types` | ✅ | • The type predicates `util.types` carries (`lib/node/util_types.ts`, [ADR-01289](../adr/ADR-01289.md)); the boxed-primitive, external, proxy and module-namespace ones are always false, as no such value exists here |
+| `assert/strict` | ✅ | • `assert.strict`: `equal` is `strictEqual`, and so on (`lib/node/assert_strict.ts`, [ADR-01288](../adr/ADR-01288.md)) |
+| `dns/promises` | ✅ | • `dns.promises`'s module: `lookup`, `lookupService`, the `resolve*` family, `reverse`, `Resolver`, `getServers`/`setServers` ([ADR-01294](../adr/ADR-01294.md)) |
+| `readline/promises` | ✅ | • `createInterface` and an `Interface` whose `question` returns a promise (with an `AbortSignal`); `Readline` queues cursor moves and clears until `commit()` → [Process & CLI](PROCESS-CLI.md) |
+| `timers/promises` | ✅ | • Written in TypeScript (`lib/node/timers_promises.ts`, [ADR-01271](../adr/ADR-01271.md)) → [Timers](TIMERS.md) |
 | `stream/consumers` | ❌ | • `text`/`json`/`buffer`/`arrayBuffer` stream collectors — not started |
 | `node:tty` | ❌ | • The `tty` module surface (`tty.isatty`, `ReadStream`/`WriteStream`); the primitives exist as `process.stdin.isTTY`/`setRawMode`/`columns` and the bespoke [`klain:tty`](../guides) reads, but the Node `tty` module is not exposed |
 | `constants` | ❌ | • Legacy aggregate of `os`/`fs`/`crypto` constants (superseded by per-module `.constants`) — not started |

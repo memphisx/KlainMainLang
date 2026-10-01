@@ -122,6 +122,77 @@ cmp:
   %eq = icmp eq i32 %c, 0
   ret i1 %eq
 }`)
+		e.emitAnyBigIntRel(`; The bigint in a boxed word, or null when it holds none.
+define ptr @__kml_any_bigint_of(i64 %v) {
+entry:
+  %small = icmp ult i64 %v, 65536
+  %num = icmp uge i64 %v, ` + fmt.Sprint(nbDoubleOffset) + `
+  %lo = and i64 %v, 7
+  %obj = icmp eq i64 %lo, 1
+  %bad0 = or i1 %small, %num
+  %notobj = xor i1 %obj, true
+  %bad = or i1 %bad0, %notobj
+  br i1 %bad, label %none, label %probe
+probe:
+  %pi = and i64 %v, -8
+  %cell = inttoptr i64 %pi to ptr
+  %f0 = load i64, ptr %cell, align 8
+  %isbig = icmp eq i64 %f0, ` + fmt.Sprint(kmlBoxedBigIntMagic) + `
+  br i1 %isbig, label %big, label %none
+big:
+  %slot = getelementptr i8, ptr %cell, i64 8
+  %b = load ptr, ptr %slot, align 8
+  ret ptr %b
+none:
+  ret ptr null
+}
+
+; A relational comparison with a bigint on either side (JS's IsLessThan):
+; 0 when neither is one (compare as numbers), else 1 less, 2 equal,
+; 3 greater, 4 unordered (the other side is NaN).
+define i32 @__kml_any_bigint_rel(i64 %a, i64 %b) {
+entry:
+  %ba = call ptr @__kml_any_bigint_of(i64 %a)
+  %bb = call ptr @__kml_any_bigint_of(i64 %b)
+  %na = icmp eq ptr %ba, null
+  %nb = icmp eq ptr %bb, null
+  %neither = and i1 %na, %nb
+  br i1 %neither, label %none, label %some
+none:
+  ret i32 0
+some:
+  %both0 = or i1 %na, %nb
+  br i1 %both0, label %mixed, label %both
+both:
+  %c = call i32 @__kml_bigint_cmp(ptr %ba, ptr %bb)
+  br label %map
+mixed:
+  br i1 %na, label %numleft, label %numright
+numright:
+  %rd = call double @__kml_any_tonum(i64 %b)
+  %rnan = fcmp uno double %rd, %rd
+  br i1 %rnan, label %unord, label %rcmp
+rcmp:
+  %c2 = call i32 @__kml_bigint_cmp_double(ptr %ba, double %rd)
+  br label %map
+numleft:
+  %ld = call double @__kml_any_tonum(i64 %a)
+  %lnan = fcmp uno double %ld, %ld
+  br i1 %lnan, label %unord, label %lcmp
+lcmp:
+  %c3 = call i32 @__kml_bigint_cmp_double(ptr %bb, double %ld)
+  %c3n = sub i32 0, %c3
+  br label %map
+map:
+  %cc = phi i32 [ %c, %both ], [ %c2, %rcmp ], [ %c3n, %lcmp ]
+  %lt = icmp slt i32 %cc, 0
+  %gt = icmp sgt i32 %cc, 0
+  %r1 = select i1 %gt, i32 3, i32 2
+  %r = select i1 %lt, i32 1, i32 %r1
+  ret i32 %r
+unord:
+  ret i32 4
+}`)
 		return
 	}
 	e.emitGlobal(`
@@ -139,4 +210,16 @@ define i1 @__kml_boxed_bigint_eq_num(ptr %cell, double %d) {
 entry:
   ret i1 false
 }`)
+	e.emitAnyBigIntRel(`define i32 @__kml_any_bigint_rel(i64 %a, i64 %b) {
+entry:
+  ret i32 0
+}`)
+}
+
+// emitAnyBigIntRel defines @__kml_any_bigint_rel when a dynamic relational
+// comparison used it.
+func (e *Emitter) emitAnyBigIntRel(ir string) {
+	if e.usedAnyBigIntRel {
+		e.emitGlobal(ir)
+	}
 }

@@ -7,21 +7,6 @@ package llvm
 // Windows has no libdl, so FFIWinDlShimSource provides these four symbols on
 // top of LoadLibrary/GetProcAddress (wired in below).
 
-// ffiRTLDFlags returns the host's RTLD_NOW|RTLD_LOCAL value for dlopen(2).
-// RTLD_NOW is 0x2 on both Linux (glibc/musl) and macOS; RTLD_LOCAL is 0 on
-// Linux and 0x4 on macOS (both are the default there anyway — passed
-// explicitly so the emitted IR states the intended semantics). Windows's shim
-// ignores the flags (LoadLibrary has no lazy/global-scope knobs), so 0.
-func (e *Emitter) ffiRTLDFlags() int {
-	switch e.opts.Target.OS() {
-	case "darwin":
-		return 0x2 | 0x4
-	case "windows":
-		return 0
-	}
-	return 0x2
-}
-
 // ensureFFIDl declares the libdl surface exactly once. On Windows the four
 // symbols are provided by FFIWinDlShimSource (flagged for linking here); on
 // POSIX they come from libdl/libSystem.

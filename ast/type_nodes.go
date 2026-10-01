@@ -174,12 +174,17 @@ type MethodSignature struct {
 	// Lower is a builtin declaration's `/** @lower symbol */`: the runtime
 	// entry point a call compiles to (TDD-00230 P3.2); Link are its
 	// `@link lib` libraries.
-	Lower          string
-	Link           []string
+	Lower string
+	Link  []string
+	// Intrinsic is `/** @intrinsic Owner.name */`: the call is emitted
+	// inline by the backend's intrinsic of that name (TDD-00230 P3.2).
+	Intrinsic      string
 	TypeParameters []*TypeParameter
 	Parameters     []*SignatureParameter
-	Type           TypeNode
-	Range          Loc
+	// This is a leading `this: T` parameter's type (nil without one).
+	This  TypeNode
+	Type  TypeNode
+	Range Loc
 }
 
 // CallSignature is `(params): R`. Type is nil when the return type is omitted.

@@ -209,22 +209,6 @@ func (e *Emitter) ensureSortClosGlobal() {
 	}
 }
 
-func (e *Emitter) ensureSortCmpI64() {
-	if e.usedSortCmpI64 {
-		return
-	}
-	e.usedSortCmpI64 = true
-	e.emitGlobal(`define i32 @__kml_cmp_i64(ptr %pa, ptr %pb) {
-  %a = load i64, ptr %pa, align 8
-  %b = load i64, ptr %pb, align 8
-  %lt = icmp slt i64 %a, %b
-  %gt = icmp sgt i64 %a, %b
-  %r0 = select i1 %lt, i32 -1, i32 0
-  %r1 = select i1 %gt, i32 1, i32 %r0
-  ret i32 %r1
-}`)
-}
-
 // ensureSortCmpI64Lex is the JS-faithful DEFAULT (no-comparator) integer sort:
 // real Array.prototype.sort with no comparator converts every element to a
 // string and compares lexicographically — even for numbers — so [10,1,21,2]
@@ -270,22 +254,6 @@ func (e *Emitter) ensureSortCmpF64Lex() {
   call void @__kml_dtoa(ptr %bb, double %b)
   %r = call i32 @strcmp(ptr %ba, ptr %bb)
   ret i32 %r
-}`)
-}
-
-func (e *Emitter) ensureSortCmpF64() {
-	if e.usedSortCmpF64 {
-		return
-	}
-	e.usedSortCmpF64 = true
-	e.emitGlobal(`define i32 @__kml_cmp_f64(ptr %pa, ptr %pb) {
-  %a = load double, ptr %pa, align 8
-  %b = load double, ptr %pb, align 8
-  %lt = fcmp olt double %a, %b
-  %gt = fcmp ogt double %a, %b
-  %r0 = select i1 %lt, i32 -1, i32 0
-  %r1 = select i1 %gt, i32 1, i32 %r0
-  ret i32 %r1
 }`)
 }
 
@@ -526,13 +494,15 @@ func (e *Emitter) ensureSortTrampolineStr() {
 //                      -2 (tombstone), or an index into keys/vals
 //   +48  i64  used   — occupied + tombstone idx slots (rehash trigger)
 //   +40  i64  idxcap — index capacity, power of two (starts 16)
+//   +56  i64  flags  — string-keyed only (bit 0: a null-prototype dictionary)
+//   +64  ptr  iters  — the open iterators (ensureMapIters), a linked list
 //
 // keys/vals stay dense and insertion-ordered (JS Map iteration order;
 // keys()/values()/iteration read them directly), while every lookup goes
 // through the open-addressing index — linear probing, xor-fold multiply
-// hash for number keys, FNV-1a for string keys. delete swap-removes the
-// entry (repointing the moved entry's idx slot) and tombstones its own
-// slot; the index rehashes at 3/4 load (occupied+tombstones), which also
+// hash for number keys, FNV-1a for string keys. delete removes the entry
+// in place, keeping the rest in insertion order (__kml_map_remove_at), and
+// tombstones its own slot; the index rehashes at 3/4 load (occupied+tombstones), which also
 // purges tombstones, so probes always terminate at an empty slot.
 //
 // Set reuses the exact same layout; elements are stored as keys. vals is
@@ -548,9 +518,11 @@ func (e *Emitter) ensureMapClear() {
 	}
 	e.usedMapClear = true
 	e.ensureMemset()
+	e.ensureMapIters()
 	e.emitGlobal(`
 define void @__kml_map_clear(ptr %map) {
 entry:
+  call void @__kml_map_iters_reset(ptr %map)
   store i64 0, ptr %map, align 8
   %used_p = getelementptr i8, ptr %map, i64 48
   store i64 0, ptr %used_p, align 8
@@ -564,11 +536,157 @@ entry:
 }`)
 }
 
+// ensureMapIters declares the live iteration of a Map or Set. As in
+// SpiderMonkey's OrderedHashTable, each open iterator is a node on the map's
+// list at +64 — {next ptr, pos i64, map ptr} — so a removal before an
+// iterator's position shifts it back and clear() rewinds it to the start.
+// An iterator walks the dense entries by pos and so sees an entry added
+// during the walk, as a Map iterator does. It leaves the list when it
+// reaches the end (__kml_map_iter_close).
+func (e *Emitter) ensureMapIters() {
+	if e.usedMapIters {
+		return
+	}
+	e.usedMapIters = true
+	e.ensureMalloc()
+	e.ensureMemmove()
+	e.emitGlobal(`
+define ptr @__kml_map_iter_open(ptr %map) {
+entry:
+  %n = call ptr @malloc(i64 24)
+  %lp = getelementptr i8, ptr %map, i64 64
+  %head = load ptr, ptr %lp, align 8
+  store ptr %head, ptr %n, align 8
+  %pp = getelementptr i8, ptr %n, i64 8
+  store i64 0, ptr %pp, align 8
+  %mp = getelementptr i8, ptr %n, i64 16
+  store ptr %map, ptr %mp, align 8
+  store ptr %n, ptr %lp, align 8
+  ret ptr %n
+}
+
+; Unlinks an iterator node from its map's list; closing twice is harmless.
+define void @__kml_map_iter_close(ptr %n) {
+entry:
+  %mp = getelementptr i8, ptr %n, i64 16
+  %map = load ptr, ptr %mp, align 8
+  %none = icmp eq ptr %map, null
+  br i1 %none, label %done, label %find
+find:
+  store ptr null, ptr %mp, align 8
+  %lp = getelementptr i8, ptr %map, i64 64
+  br label %loop
+loop:
+  %link = phi ptr [ %lp, %find ], [ %cur, %step ]
+  %cur = load ptr, ptr %link, align 8
+  %end = icmp eq ptr %cur, null
+  br i1 %end, label %done, label %chk
+chk:
+  %hit = icmp eq ptr %cur, %n
+  br i1 %hit, label %unlink, label %step
+step:
+  br label %loop
+unlink:
+  %nx = load ptr, ptr %n, align 8
+  store ptr %nx, ptr %link, align 8
+  br label %done
+done:
+  ret void
+}
+
+define void @__kml_map_iters_reset(ptr %map) {
+entry:
+  %lp = getelementptr i8, ptr %map, i64 64
+  %head = load ptr, ptr %lp, align 8
+  br label %loop
+loop:
+  %n = phi ptr [ %head, %entry ], [ %nx, %body ]
+  %end = icmp eq ptr %n, null
+  br i1 %end, label %done, label %body
+body:
+  %pp = getelementptr i8, ptr %n, i64 8
+  store i64 0, ptr %pp, align 8
+  %nx = load ptr, ptr %n, align 8
+  br label %loop
+done:
+  ret void
+}
+
+; Removes entry %idx, keeping the others in insertion order: the entries
+; after it move down one, the index slots naming them follow, and an open
+; iterator past it steps back. The caller has tombstoned its own slot.
+define void @__kml_map_remove_at(ptr %map, i64 %idx) {
+entry:
+  %size = load i64, ptr %map, align 8
+  %last = sub i64 %size, 1
+  %n = sub i64 %last, %idx
+  %nb = mul i64 %n, 8
+  %kp = getelementptr i8, ptr %map, i64 16
+  %ka = load ptr, ptr %kp, align 8
+  %kd = getelementptr i64, ptr %ka, i64 %idx
+  %ks = getelementptr i64, ptr %kd, i64 1
+  call ptr @memmove(ptr %kd, ptr %ks, i64 %nb)
+  %vp = getelementptr i8, ptr %map, i64 24
+  %va = load ptr, ptr %vp, align 8
+  %vd = getelementptr i64, ptr %va, i64 %idx
+  %vs = getelementptr i64, ptr %vd, i64 1
+  call ptr @memmove(ptr %vd, ptr %vs, i64 %nb)
+  store i64 %last, ptr %map, align 8
+  %moved = icmp sgt i64 %n, 0
+  br i1 %moved, label %reindex, label %iters
+reindex:
+  %ip = getelementptr i8, ptr %map, i64 32
+  %ia = load ptr, ptr %ip, align 8
+  %icp = getelementptr i8, ptr %map, i64 40
+  %icap = load i64, ptr %icp, align 8
+  br label %rloop
+rloop:
+  %s = phi i64 [ 0, %reindex ], [ %s2, %rnext ]
+  %rdone = icmp sge i64 %s, %icap
+  br i1 %rdone, label %iters, label %rbody
+rbody:
+  %sp = getelementptr i64, ptr %ia, i64 %s
+  %ev = load i64, ptr %sp, align 8
+  %after = icmp sgt i64 %ev, %idx
+  br i1 %after, label %rdec, label %rnext
+rdec:
+  %ev1 = sub i64 %ev, 1
+  store i64 %ev1, ptr %sp, align 8
+  br label %rnext
+rnext:
+  %s2 = add i64 %s, 1
+  br label %rloop
+iters:
+  %lp = getelementptr i8, ptr %map, i64 64
+  %head = load ptr, ptr %lp, align 8
+  br label %iloop
+iloop:
+  %it = phi ptr [ %head, %iters ], [ %inx, %inext ]
+  %idone = icmp eq ptr %it, null
+  br i1 %idone, label %done, label %ibody
+ibody:
+  %pp = getelementptr i8, ptr %it, i64 8
+  %pos = load i64, ptr %pp, align 8
+  %past = icmp sgt i64 %pos, %idx
+  br i1 %past, label %idec, label %inext
+idec:
+  %pos1 = sub i64 %pos, 1
+  store i64 %pos1, ptr %pp, align 8
+  br label %inext
+inext:
+  %inx = load ptr, ptr %it, align 8
+  br label %iloop
+done:
+  ret void
+}`)
+}
+
 func (e *Emitter) ensureMapStrHelpers() {
 	if e.usedMapStrHelpers {
 		return
 	}
 	e.usedMapStrHelpers = true
+	e.ensureMapIters()
 	e.ensureMalloc()
 	e.ensureRealloc()
 	e.ensureStrcmp()
@@ -578,7 +696,9 @@ func (e *Emitter) ensureMapStrHelpers() {
 	e.emitGlobal(`
 define ptr @__kml_map_str_create() {
 entry:
-  %h = call ptr @malloc(i64 64)
+  %h = call ptr @malloc(i64 72)
+  %iters_p = getelementptr i8, ptr %h, i64 64
+  store ptr null, ptr %iters_p, align 8
   ; offset 56: flags (bit 0: a null-prototype dictionary, Object.create(null))
   %flags_p = getelementptr i8, ptr %h, i64 56
   store i64 0, ptr %flags_p, align 8
@@ -852,31 +972,7 @@ do_del:
   %idxa = load ptr, ptr %idxa_p, align 8
   %sl_p = getelementptr i64, ptr %idxa, i64 %slot
   store i64 -2, ptr %sl_p, align 8
-  %size = load i64, ptr %map, align 8
-  %last = sub i64 %size, 1
-  %is_last = icmp eq i64 %idx, %last
-  br i1 %is_last, label %shrink, label %swap
-swap:
-  %kp = getelementptr i8, ptr %map, i64 16
-  %ka = load ptr, ptr %kp, align 8
-  %dst_k = getelementptr ptr, ptr %ka, i64 %idx
-  %src_k = getelementptr ptr, ptr %ka, i64 %last
-  %lk = load ptr, ptr %src_k, align 8
-  store ptr %lk, ptr %dst_k, align 8
-  %vp = getelementptr i8, ptr %map, i64 24
-  %va = load ptr, ptr %vp, align 8
-  %dst_v = getelementptr i64, ptr %va, i64 %idx
-  %src_v = getelementptr i64, ptr %va, i64 %last
-  %lv = load i64, ptr %src_v, align 8
-  store i64 %lv, ptr %dst_v, align 8
-  ; the moved (former last) entry's idx slot still points at %last — repoint it
-  %pr2 = call {i64, i64} @__kml_map_str_probe(ptr %map, ptr %lk)
-  %slot2 = extractvalue {i64, i64} %pr2, 0
-  %sl2_p = getelementptr i64, ptr %idxa, i64 %slot2
-  store i64 %idx, ptr %sl2_p, align 8
-  br label %shrink
-shrink:
-  store i64 %last, ptr %map, align 8
+  call void @__kml_map_remove_at(ptr %map, i64 %idx)
   ret i1 true
 }
 
@@ -912,6 +1008,7 @@ func (e *Emitter) ensureMapNumHelpers() {
 		return
 	}
 	e.usedMapNumHelpers = true
+	e.ensureMapIters()
 	e.ensureMalloc()
 	e.ensureRealloc()
 	e.ensureMemcpy()
@@ -920,7 +1017,9 @@ func (e *Emitter) ensureMapNumHelpers() {
 	e.emitGlobal(`
 define ptr @__kml_map_num_create() {
 entry:
-  %h = call ptr @malloc(i64 56)
+  %h = call ptr @malloc(i64 72)
+  %iters_p = getelementptr i8, ptr %h, i64 64
+  store ptr null, ptr %iters_p, align 8
   store i64 0, ptr %h, align 8
   %cap_p = getelementptr i8, ptr %h, i64 8
   store i64 8, ptr %cap_p, align 8
@@ -1161,31 +1260,7 @@ do_del:
   %idxa = load ptr, ptr %idxa_p, align 8
   %sl_p = getelementptr i64, ptr %idxa, i64 %slot
   store i64 -2, ptr %sl_p, align 8
-  %size = load i64, ptr %map, align 8
-  %last = sub i64 %size, 1
-  %is_last = icmp eq i64 %idx, %last
-  br i1 %is_last, label %shrink, label %swap
-swap:
-  %kp = getelementptr i8, ptr %map, i64 16
-  %ka = load ptr, ptr %kp, align 8
-  %dst_k = getelementptr i64, ptr %ka, i64 %idx
-  %src_k = getelementptr i64, ptr %ka, i64 %last
-  %lk = load i64, ptr %src_k, align 8
-  store i64 %lk, ptr %dst_k, align 8
-  %vp = getelementptr i8, ptr %map, i64 24
-  %va = load ptr, ptr %vp, align 8
-  %dst_v = getelementptr i64, ptr %va, i64 %idx
-  %src_v = getelementptr i64, ptr %va, i64 %last
-  %lv = load i64, ptr %src_v, align 8
-  store i64 %lv, ptr %dst_v, align 8
-  ; the moved (former last) entry's idx slot still points at %last — repoint it
-  %pr2 = call {i64, i64} @__kml_map_num_probe(ptr %map, i64 %lk)
-  %slot2 = extractvalue {i64, i64} %pr2, 0
-  %sl2_p = getelementptr i64, ptr %idxa, i64 %slot2
-  store i64 %idx, ptr %sl2_p, align 8
-  br label %shrink
-shrink:
-  store i64 %last, ptr %map, align 8
+  call void @__kml_map_remove_at(ptr %map, i64 %idx)
   ret i1 true
 }
 
@@ -1327,7 +1402,8 @@ chk:
 // @__kml_map_svz: string-kind boxes hash by content (so equal-content distinct
 // pointers collide), array-kind boxes hash by their inner data pointer (two
 // boxings of one array carry distinct headers but a stable inner pointer — the
-// identity @__kml_any_eq compares), the numeric-zero box is normalized (-0 ->
+// identity @__kml_any_eq compares), a function box by its identity (one
+// closure boxed twice), the numeric-zero box is normalized (-0 ->
 // +0 bits) so map.set(-0,…)/map.get(0) agree, and every other box hashes by its
 // raw i64 bits. The final multiply-shift mix matches __kml_map_num_probe's.
 func (e *Emitter) ensureMapAnyHash() {
@@ -1336,6 +1412,9 @@ func (e *Emitter) ensureMapAnyHash() {
 	}
 	e.usedMapAnyHash = true
 	e.ensureMapStrHelpers() // __kml_map_str_hash
+	e.ensureFnMeta()
+	e.ensureBoxedBigIntHooks() // __kml_boxed_bigint_str: a bigint key hashes by value
+	e.declareFn("__kml_fn_identity_dyn", "declare ptr @__kml_fn_identity_dyn(ptr)")
 	e.emitGlobal(`
 define i64 @__kml_map_any_hash(i64 %key) {
 entry:
@@ -1363,7 +1442,40 @@ str:
   br label %mix
 arrchk:
   %isarr = icmp eq i64 %kind, 2
-  br i1 %isarr, label %arr, label %raw
+  br i1 %isarr, label %arr, label %fnchk
+fnchk:
+  ; a dynamic-function record hashes by its identity (@__kml_any_eq's)
+  %isfn = icmp eq i64 %kind, 7
+  br i1 %isfn, label %fn, label %objchk
+objchk:
+  ; a host box hashes by its handle (@__kml_any_eq's)
+  %isobj = icmp eq i64 %kind, 1
+  br i1 %isobj, label %obj, label %raw
+obj:
+  %ob = and i64 %key, -8
+  %op = inttoptr i64 %ob to ptr
+  %oh = load i64, ptr %op, align 8
+  ; a bigint cell hashes by its value's digits (@__kml_any_eq compares values)
+  %isbig = icmp eq i64 %oh, ` + fmt.Sprint(kmlBoxedBigIntMagic) + `
+  br i1 %isbig, label %big, label %host
+big:
+  %bs = call ptr @__kml_boxed_bigint_str(ptr %op)
+  %bh = call i64 @__kml_map_str_hash(ptr %bs)
+  br label %mix
+host:
+  %ohm = and i64 %oh, ` + fmt.Sprint(kmlHdrMagicMask|hostTypeIDFlag) + `
+  %ohost = icmp eq i64 %ohm, ` + fmt.Sprint(kmlHdrMagic|hostTypeIDFlag) + `
+  %ohp = getelementptr { i64, ptr }, ptr %op, i32 0, i32 1
+  %ohv = load ptr, ptr %ohp, align 8
+  %ohbits = ptrtoint ptr %ohv to i64
+  %obits = select i1 %ohost, i64 %ohbits, i64 %key
+  br label %mix
+fn:
+  %fb = and i64 %key, -8
+  %fp = inttoptr i64 %fb to ptr
+  %fid = call ptr @__kml_fn_identity_dyn(ptr %fp)
+  %fbits = ptrtoint ptr %fid to i64
+  br label %mix
 arr:
   %hb = and i64 %key, -8
   %hp = inttoptr i64 %hb to ptr
@@ -1373,7 +1485,7 @@ arr:
 raw:
   br label %mix
 mix:
-  %k = phi i64 [ %norm, %num ], [ %sh, %str ], [ %dbits, %arr ], [ %key, %raw ]
+  %k = phi i64 [ %norm, %num ], [ %sh, %str ], [ %dbits, %arr ], [ %fbits, %fn ], [ %obits, %host ], [ %bh, %big ], [ %key, %raw ]
   %h0 = mul i64 %k, -7046029254386353131
   %h1 = lshr i64 %h0, 33
   %h2 = xor i64 %h0, %h1
@@ -1391,6 +1503,7 @@ func (e *Emitter) ensureMapAnyHelpers() {
 		return
 	}
 	e.usedMapAnyHelpers = true
+	e.ensureMapIters()
 	e.ensureMalloc()
 	e.ensureRealloc()
 	e.ensureMemcpy()
@@ -1401,7 +1514,9 @@ func (e *Emitter) ensureMapAnyHelpers() {
 	e.emitGlobal(`
 define ptr @__kml_map_any_create() {
 entry:
-  %h = call ptr @malloc(i64 56)
+  %h = call ptr @malloc(i64 72)
+  %iters_p = getelementptr i8, ptr %h, i64 64
+  store ptr null, ptr %iters_p, align 8
   store i64 0, ptr %h, align 8
   %cap_p = getelementptr i8, ptr %h, i64 8
   store i64 8, ptr %cap_p, align 8
@@ -1634,30 +1749,7 @@ do_del:
   %idxa = load ptr, ptr %idxa_p, align 8
   %sl_p = getelementptr i64, ptr %idxa, i64 %slot
   store i64 -2, ptr %sl_p, align 8
-  %size = load i64, ptr %map, align 8
-  %last = sub i64 %size, 1
-  %is_last = icmp eq i64 %idx, %last
-  br i1 %is_last, label %shrink, label %swap
-swap:
-  %kp = getelementptr i8, ptr %map, i64 16
-  %ka = load ptr, ptr %kp, align 8
-  %dst_k = getelementptr i64, ptr %ka, i64 %idx
-  %src_k = getelementptr i64, ptr %ka, i64 %last
-  %lk = load i64, ptr %src_k, align 8
-  store i64 %lk, ptr %dst_k, align 8
-  %vp = getelementptr i8, ptr %map, i64 24
-  %va = load ptr, ptr %vp, align 8
-  %dst_v = getelementptr i64, ptr %va, i64 %idx
-  %src_v = getelementptr i64, ptr %va, i64 %last
-  %lv = load i64, ptr %src_v, align 8
-  store i64 %lv, ptr %dst_v, align 8
-  %pr2 = call {i64, i64} @__kml_map_any_probe(ptr %map, i64 %lk)
-  %slot2 = extractvalue {i64, i64} %pr2, 0
-  %sl2_p = getelementptr i64, ptr %idxa, i64 %slot2
-  store i64 %idx, ptr %sl2_p, align 8
-  br label %shrink
-shrink:
-  store i64 %last, ptr %map, align 8
+  call void @__kml_map_remove_at(ptr %map, i64 %idx)
   ret i1 true
 }
 

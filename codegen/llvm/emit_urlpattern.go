@@ -125,7 +125,7 @@ func (e *Emitter) emitNewURLPatternExpression(ex *ast.NewURLPatternExpression) (
 	upTy := URLPatternType()
 	structIR := upTy.StructIR()
 	objReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", objReg, upTy.StructSize()))
+	e.emitObjMallocInto(objReg, upTy)
 	storeField := func(name, ref string) {
 		idx, fieldTy, _ := upTy.FieldIndex(name)
 		gep := e.freshReg()

@@ -210,7 +210,14 @@ no:
 ; for...in over a dynamic array).
 define { ptr, i64 } @__kml_dynarr_keys(ptr %a) {
 entry:
-  %len = load i64, ptr %a, align 8
+  %n = load i64, ptr %a, align 8
+  %r = call { ptr, i64 } @__kml_index_keys(i64 %n)
+  ret { ptr, i64 } %r
+}
+
+; The array index keys "0".."len-1", as Object.keys lists an array's.
+define { ptr, i64 } @__kml_index_keys(i64 %len) {
+entry:
   %bytes = mul i64 %len, 8
   %arr = call ptr @malloc(i64 %bytes)
   br label %loop

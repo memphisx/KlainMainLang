@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -178,4 +180,28 @@ server.listen(8982, () => {})
 	if got, want := string(buf[:n]), "v:ok"; got != want {
 		t.Errorf("echo: got %q, want %q", got, want)
 	}
+}
+
+// A certificate that does not name the requested host: Node's
+// ERR_TLS_CERT_ALTNAME_INVALID message, listing the certificate's names
+// (for a name) or its IP addresses (for an IP).
+func TestE2ETLSAltnameMismatchMessage(t *testing.T) {
+	srv, port := newTLSTestServer(t)
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0644); err != nil {
+		t.Fatal(err)
+	}
+	src := strings.NewReplacer("PORT", port, "CAFILE", caFile).Replace(`
+import tls from 'tls'
+import fs from 'fs'
+const ca = fs.readFileSync("CAFILE", "utf8")
+function tryName(names: string[]): void {
+  if (names.length === 0) return
+  const sock = tls.connect({ port: PORT, host: "127.0.0.1", servername: names[0], ca })
+  sock.on("error", (e: any) => { console.log(e.code + " | " + e.message); tryName(names.slice(1)) })
+  sock.on("secureConnect", () => { console.log("unexpected connect"); sock.end() })
+}
+tryName(["wrong.test", "10.0.0.9"])
+`)
+	assertSameAsNodeImports(t, src)
 }

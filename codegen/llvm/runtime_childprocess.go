@@ -730,7 +730,7 @@ done:
 	// __kml_cp_next_timeout_ns(): the soonest spawn-`timeout` deadline (absolute
 	// monotonic ns) among live children, or 0 if none — folded into the event
 	// loop's select() wait so a silent slow child is still killed on time
-	// (ADR-00764; the same shape as __kml_eventsource_next_reconnect_ms).
+	// (ADR-00764).
 	e.emitGlobal(fmt.Sprintf(`
 define i64 @__kml_cp_next_timeout_ns() {
 entry:

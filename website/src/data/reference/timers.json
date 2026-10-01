@@ -5,12 +5,12 @@
   "statusPage": "TIMERS.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "4/4",
+    "loose": "5/5",
     "loosePct": 100,
-    "strict": "1/4",
-    "strictPct": 25
+    "strict": "2/5",
+    "strictPct": 40
   },
-  "lede": "WHATWG/browser-standard timer functions as bare globals, matching real JS rather than a namespace. The one recurring divergence is that a timer callback must be a zero-argument, void-returning closure value — a bare reference to a top-level named function isn't accepted yet. Under the hood there's no phased event loop: setTimeout, setInterval, and setImmediate share a single flat fire-time-ordered queue that drains after the synchronous script, while queueMicrotask has its own FIFO drained before that queue.",
+  "lede": "WHATWG/browser-standard timer functions as bare globals, matching real JS rather than a namespace. The one recurring divergence is that a timer callback must be a zero-argument, void-returning closure value. Under the hood there's no phased event loop: setTimeout, setInterval, and setImmediate share a single flat fire-time-ordered queue that drains after the synchronous script, while queueMicrotask has its own FIFO drained before that queue.",
   "entries": [
     {
       "id": "timers.setTimeout",
@@ -137,6 +137,45 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/queueMicrotask"
+      }
+    },
+    {
+      "id": "timers.promises",
+      "name": "timers/promises",
+      "statusRow": "timers/promises (setTimeout/setImmediate/setInterval/scheduler)",
+      "signature": "setTimeout<T = void>(delay?: number, value?: T, options?: TimerOptions): Promise<T>; setImmediate<T = void>(value?: T, options?: TimerOptions): Promise<T>; setInterval<T = void>(delay?: number, value?: T, options?: TimerOptions): AsyncGenerator<T>",
+      "badge": "exact",
+      "description": "The promise forms of the timers. setTimeout and setImmediate resolve with their value; setInterval is an async iterator that yields its value on every tick until the loop breaks. An AbortSignal in options rejects the pending timer with an AbortError, and ref: false lets the process exit while it waits. scheduler.wait and scheduler.yield are setTimeout and setImmediate without a value.",
+      "params": [
+        {
+          "name": "delay",
+          "type": "number",
+          "desc": "Milliseconds to wait (1 when omitted)."
+        },
+        {
+          "name": "value",
+          "type": "T",
+          "desc": "What the promise resolves with, or the iterator yields."
+        },
+        {
+          "name": "options",
+          "type": "TimerOptions",
+          "desc": "{ signal?: AbortSignal, ref?: boolean }, validated as Node does."
+        }
+      ],
+      "returns": {
+        "type": "Promise<T> | AsyncGenerator<T>",
+        "desc": "Settles when the timer fires or its signal aborts."
+      },
+      "exampleKey": "timers/promises",
+      "snippet": "import { setTimeout as sleep } from 'timers/promises'\nconsole.log(await sleep(10, 'kalimera'))",
+      "differences": [],
+      "seeAlso": [
+        "timers.setTimeout",
+        "timers.setImmediate"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/timers.html#timers-promises-api"
       }
     }
   ]

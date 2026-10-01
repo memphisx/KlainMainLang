@@ -215,3 +215,19 @@ console.log([..."abc"].map(c => c.toUpperCase()).join(""))
 console.log([..."abc"].length)
 `, "a-b-c\nh.i\nabcd\nx,a,b,y\nABC\n3")
 }
+
+// Spreading an object copies only its own properties: an absent optional
+// field leaves the value an earlier property gave.
+func TestE2EObjectSpreadSkipsAbsentOptional(t *testing.T) {
+	assertSameAsNodeImports(t, `
+interface S { exec?: string; args?: string[]; silent?: boolean; n?: number }
+let base: S = { silent: true }
+function setup(options?: S): S {
+  return { exec: 'main', args: ['a'], silent: false, n: 1, ...base, ...options }
+}
+const r = setup()
+console.log(r.exec, r.args, r.silent, r.n)
+const q = setup({ n: 2 })
+console.log(q.exec, q.silent, q.n)
+`)
+}

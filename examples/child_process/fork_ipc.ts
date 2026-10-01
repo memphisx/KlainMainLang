@@ -7,14 +7,14 @@ import { mustCall } from 'test'
 
 if (process.send) {
   // child: greet, echo one message, hang up
-  process.send("child up")
+  process.send!("child up")
   process.on('message', (msg) => {
-    process.send("echo:" + msg)
-    process.disconnect()
+    process.send!("echo:" + msg)
+    process.disconnect!()
   })
 } else {
   const child = fork(__filename)
-  console.log("forked pid > 0:", child.pid > 0)
+  console.log("forked pid > 0:", child.pid !== undefined && child.pid > 0)
   child.on('message', mustCall((msg) => {
     console.log("from child:", msg)
     if (msg === "child up") {

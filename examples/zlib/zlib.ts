@@ -1,13 +1,12 @@
-// zlib — Node's one-shot compression module: gzip/gunzip, deflate/inflate,
-// deflateRaw/inflateRaw, and unzip, in both the *Sync and (err, result)
-// callback forms. Import-gated (a virtual built-in module, not a real file).
+// zlib — Node's compression module: gzip/gunzip, deflate/inflate,
+// deflateRaw/inflateRaw and unzip, as one-shot calls (*Sync and (err, result)
+// callbacks) and as streams (createGzip() and friends), plus crc32.
 //
-// The same libz backend that powers CompressionStream/DecompressionStream —
-// here exposed as whole-buffer calls. Input can be a string (encoded as UTF-8),
-// a Buffer/Uint8Array, an ArrayBuffer, or a DataView; the result is always a
-// Buffer.
+// Input can be a string (encoded as UTF-8), a Buffer/Uint8Array, an
+// ArrayBuffer, or a DataView; the result is always a Buffer.
 
 import zlib from 'zlib'
+import { pipeline, Readable, Writable } from 'stream'
 
 const dec = new TextDecoder()
 const text = "Klain compresses well. ".repeat(20)
@@ -35,3 +34,16 @@ zlib.gzip(text, (err, out) => {
     console.log("callback roundtrip:", dec.decode(back) === text)
   })
 })
+
+// ── streams: gzip then gunzip through a pipeline ──────────────────────────
+const chunks: Buffer[] = []
+pipeline(
+  Readable.from([text.slice(0, 200), text.slice(200)]),
+  zlib.createGzip({ level: 6 }),
+  zlib.createGunzip(),
+  new Writable({ write(c: Buffer, _e: string, cb: () => void) { chunks.push(c); cb() } }),
+  (err) => console.log("stream roundtrip:", err, Buffer.concat(chunks).toString() === text),
+)
+
+// ── crc32 ─────────────────────────────────────────────────────────────────
+console.log("crc32:", zlib.crc32("hello"), zlib.crc32("world", zlib.crc32("hello ")))

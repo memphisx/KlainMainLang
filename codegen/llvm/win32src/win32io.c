@@ -142,6 +142,7 @@ typedef struct { int32_t tv_sec; int32_t tv_usec; } ws_timeval;
 static int (WINAPI *p_select)(int, ws_big_fd_set *, ws_big_fd_set *, ws_big_fd_set *, const ws_timeval *);
 static int (WINAPI *p_getaddrinfo)(const char *, const char *, const ws_addrinfo *, ws_addrinfo **);
 static void (WINAPI *p_freeaddrinfo)(ws_addrinfo *);
+static int (WINAPI *p_getnameinfo)(const void *, int, char *, DWORD, char *, DWORD, int);
 static int (WINAPI *p_inet_pton)(int, const char *, void *);
 static const char *(WINAPI *p_inet_ntop)(int, const void *, char *, size_t);
 static int (WINAPI *p_gethostname)(char *, int);
@@ -158,7 +159,7 @@ void ws_init(void) {
 	B(WSAStartup); B(WSAGetLastError); B(socket); B(bind); B(listen); B(accept);
 	B(connect); B(recv); B(send); B(recvfrom); B(sendto); B(closesocket);
 	B(shutdown); B(setsockopt); B(getsockopt); B(getsockname); B(getpeername);
-	B(ioctlsocket); B(WSAIoctl); B(WSAPoll); B(WSADuplicateSocketW); B(WSASocketW); B(WSARecv); B(WSARecvFrom); B(WSAGetOverlappedResult); B(select); B(getaddrinfo); B(freeaddrinfo); B(inet_pton);
+	B(ioctlsocket); B(WSAIoctl); B(WSAPoll); B(WSADuplicateSocketW); B(WSASocketW); B(WSARecv); B(WSARecvFrom); B(WSAGetOverlappedResult); B(select); B(getaddrinfo); B(freeaddrinfo); B(getnameinfo); B(inet_pton);
 	B(inet_ntop); B(gethostname); B(htons); B(ntohs);
 #undef B
 	ws_WSADATA d;
@@ -1386,6 +1387,50 @@ static void kfd_classify(int fd) {
 	}
 }
 
+// Node's guessHandleType for fd (klainpool.c): 0 unknown, 1 file, 2 pipe,
+// 3 tty, 4 tcp.
+int __kml_win_fd_kind(int fd) {
+	if (kfd_is(fd, KFD_SOCKET) || kfd_is(fd, KFD_FOREIGN)) return 4;
+	if (kfd_is(fd, KFD_CONSOLE)) return 3;
+	if (kfd_is(fd, KFD_PIPE)) return 2;
+	HANDLE h = kfd_handle(fd);
+	if (h == INVALID_HANDLE_VALUE) return 0;
+	DWORD mode;
+	switch (GetFileType(h)) {
+	case FILE_TYPE_DISK: return 1;
+	case FILE_TYPE_PIPE: return 2;
+	case FILE_TYPE_CHAR: return GetConsoleMode(h, &mode) ? 3 : 1;
+	default: return 0;
+	}
+}
+
+// A console's raw mode (uv_tty_set_mode): line input, echo and processed
+// input off, VT input on, so keys arrive as a POSIX terminal sends them; the
+// original mode back when raw is 0. 0, or -errno.
+static DWORD kml_tty_saved_in;
+static int kml_tty_saved = 0;
+int __kml_win_tty_set_raw(int fd, int raw) {
+	HANDLE h = kfd_handle(fd);
+	DWORD in;
+	if (h == INVALID_HANDLE_VALUE || !GetConsoleMode(h, &in)) return -L_EBADF;
+	if (!kml_tty_saved) {
+		kml_tty_saved_in = in;
+		kml_tty_saved = 1;
+	}
+	DWORD m = kml_tty_saved_in;
+	if (raw) m = (m & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT;
+	return SetConsoleMode(h, m) ? 0 : -L_EINVAL;
+}
+
+// A console's window size: 0, or -1 when fd is not a console.
+int __kml_win_tty_size(int fd, int *cols, int *rows) {
+	CONSOLE_SCREEN_BUFFER_INFO i;
+	if (!GetConsoleScreenBufferInfo(kfd_handle(fd), &i)) return -1;
+	*cols = i.srWindow.Right - i.srWindow.Left + 1;
+	*rows = i.srWindow.Bottom - i.srWindow.Top + 1;
+	return 0;
+}
+
 static int map_wsa_errno(int e) {
 	switch (e) {
 	// Mirrors libuv's uv_translate_sys_error, mapped to Linux errno numbers
@@ -1817,6 +1862,14 @@ int connect(int fd, const void *addr, int len) {
 	errno = map_wsa_errno(e);
 	return -1;
 }
+// Whether a socket's connect is still in flight (the pool's TCP handles ask
+// before reading SO_ERROR; readiness itself is consumed by select()).
+int __kml_win_connect_pending(int fd) {
+	if (!kfd_is(fd, KFD_SOCKET)) return 0;
+	if (KD(fd)->conn_op && kml_port) kml_port_drain(0);
+	return KD(fd)->connecting != 0;
+}
+
 // The socket-API calls a net.Socket makes on its descriptor, once that
 // descriptor is a named pipe. A pipe has no half-close: libuv's shutdown drains
 // the writes and then lets the handle go (its EOF timer), which is how the peer
@@ -2004,6 +2057,11 @@ int getaddrinfo(const char *node, const char *svc, const void *hints, void **res
 	return p_getaddrinfo(node, svc, (const ws_addrinfo *)hints, (ws_addrinfo **)res);
 }
 void freeaddrinfo(void *ai) { if (p_freeaddrinfo) p_freeaddrinfo((ws_addrinfo *)ai); }
+int getnameinfo(const void *sa, int salen, char *host, size_t hostlen, char *serv, size_t servlen, int flags) {
+	ws_init();
+	if (!p_getnameinfo) return -1;
+	return p_getnameinfo(sa, salen, host, (DWORD)hostlen, serv, (DWORD)servlen, flags);
+}
 
 // ---- pipes ---------------------------------------------------------------------
 // pipe(): fds[0] is an overlapped read end, fds[1] a synchronous write end.

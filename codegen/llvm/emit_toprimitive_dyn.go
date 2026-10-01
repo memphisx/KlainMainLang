@@ -14,7 +14,10 @@ package llvm
 // literal "[object Object]". A non-object box passes through unchanged, so the
 // helper is safe to apply to every dynamic operand.
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 func (e *Emitter) ensureAnyToPrimitive() {
 	if e.usedAnyToPrimitive {
@@ -23,11 +26,14 @@ func (e *Emitter) ensureAnyToPrimitive() {
 	e.usedAnyToPrimitive = true
 	e.ensureNanBox()
 	e.ensureDynObj()
+	e.ensureFnMeta()   // __kml_fn_props_dyn: a function's own properties
+	e.ensureDynJSONC() // an array's toString: the array joins
 	keyVO := e.internString("valueOf")
 	keyTS := e.internString("toString")
 	keyTP := e.internString("@@toPrimitive")
 	strNum := e.internString("number")
 	strStr := e.internString("string")
+	strDef := e.internString("default")
 	objObj := e.internString("[object Object]")
 
 	// Two tag-12 invoke shims (0-arg valueOf/toString; 1-arg @@toPrimitive(hint)).
@@ -59,16 +65,55 @@ entry:
 
 	// The ladder. Keys/strings are interned constants spliced in as ptr operands.
 	e.emitGlobal(fmt.Sprintf(`
-define i64 @__kml_toprimitive(i64 %%v, i1 %%strHint) {
+define i64 @__kml_toprimitive(i64 %%v, i8 %%hint) {
 entry:
+  %%strHint = icmp eq i8 %%hint, 1
   %%tag = call i8 @__kml_nb_tag(i64 %%v)
   %%isobj = icmp eq i8 %%tag, 10
-  br i1 %%isobj, label %%obj, label %%pass
+  br i1 %%isobj, label %%obj, label %%static
+static:
+  %%isst = icmp eq i8 %%tag, 6
+  br i1 %%isst, label %%host, label %%arrcheck
+arrcheck:
+  ; An array's primitive is its toString, Array.prototype.join (a string's
+  ; box is its pointer).
+  %%arrpay = call i64 @__kml_nb_pay(i64 %%v)
+  %%arrp = inttoptr i64 %%arrpay to ptr
+  %%isarr = icmp eq i8 %%tag, 7
+  br i1 %%isarr, label %%arrjoin, label %%dyncheck
+arrjoin:
+  %%aj = call ptr @__kml_array_join(ptr %%arrp)
+  %%ajv = ptrtoint ptr %%aj to i64
+  ret i64 %%ajv
+dyncheck:
+  %%isdyn = icmp eq i8 %%tag, 11
+  br i1 %%isdyn, label %%dynjoin, label %%fncheck
+dynjoin:
+  %%dj = call ptr @__kml_dynarr_join(ptr %%arrp)
+  %%djv = ptrtoint ptr %%dj to i64
+  ret i64 %%djv
+host:
+  %%hr = call i64 @__kml_host_toprim(i64 %%v, i8 %%hint)
+  ret i64 %%hr
+fncheck:
+  ; A function's own properties (Symbol.toPrimitive, valueOf, toString) take
+  ; part as an object's do; without one it converts as a function.
+  %%isfn = icmp eq i8 %%tag, 12
+  br i1 %%isfn, label %%fnobj, label %%pass
+fnobj:
+  %%rec64 = call i64 @__kml_nb_pay(i64 %%v)
+  %%rec = inttoptr i64 %%rec64 to ptr
+  %%props = call ptr @__kml_fn_props_dyn(ptr %%rec)
+  %%noprops = icmp eq ptr %%props, null
+  br i1 %%noprops, label %%pass, label %%lookup
 pass:
   ret i64 %%v
 obj:
   %%bag64 = call i64 @__kml_nb_pay(i64 %%v)
-  %%bag = inttoptr i64 %%bag64 to ptr
+  %%objbag = inttoptr i64 %%bag64 to ptr
+  br label %%lookup
+lookup:
+  %%bag = phi ptr [ %%objbag, %%obj ], [ %%props, %%fnobj ]
   %%tp = call i64 @__kml_dynobj_get(ptr %%bag, ptr %s)
   %%tptag = call i8 @__kml_nb_tag(i64 %%tp)
   %%tpfn = icmp eq i8 %%tptag, 12
@@ -76,7 +121,10 @@ obj:
 ctp:
   %%hn = ptrtoint ptr %s to i64
   %%hs = ptrtoint ptr %s to i64
-  %%hb = select i1 %%strHint, i64 %%hs, i64 %%hn
+  %%hd = ptrtoint ptr %s to i64
+  %%isdef = icmp eq i8 %%hint, 2
+  %%hb0 = select i1 %%strHint, i64 %%hs, i64 %%hn
+  %%hb = select i1 %%isdef, i64 %%hd, i64 %%hb0
   %%rtp = call i64 @__kml_tp_invoke1(i64 %%tp, i64 %%v, i64 %%hb)
   ret i64 %%rtp
 pick:
@@ -130,9 +178,11 @@ cvf2:
 retvf2:
   ret i64 %%rvf2
 deflt:
+  br i1 %%isobj, label %%plainobj, label %%pass
+plainobj:
   %%oo = ptrtoint ptr %s to i64
   ret i64 %%oo
-}`, keyTP, strNum, strStr, keyVO, keyTS, keyTS, keyVO, objObj))
+}`, keyTP, strNum, strStr, strDef, keyVO, keyTS, keyTS, keyVO, objObj))
 }
 
 // ensureAnyLooseEq emits @__kml_any_loose_eq — JS's Abstract Equality (`==`)
@@ -215,13 +265,13 @@ refeq:
 coerce:
   br i1 %aobj, label %ca, label %aok
 ca:
-  %apc = call i64 @__kml_toprimitive(i64 %a0, i1 0)
+  %apc = call i64 @__kml_toprimitive(i64 %a0, i8 2)
   br label %aok
 aok:
   %a = phi i64 [ %a0, %coerce ], [ %apc, %ca ]
   br i1 %bobj, label %cb, label %bok
 cb:
-  %bpc = call i64 @__kml_toprimitive(i64 %b0, i1 0)
+  %bpc = call i64 @__kml_toprimitive(i64 %b0, i8 2)
   br label %bok
 bok:
   %b = phi i64 [ %b0, %aok ], [ %bpc, %cb ]
@@ -278,12 +328,70 @@ func (e *Emitter) emitAnyLooseEquals(a, b Value, negate bool) (Value, error) {
 // returning a boxed primitive (a non-object box passes through). strHint selects
 // the string-hint method order.
 func (e *Emitter) emitAnyToPrimitive(boxRef string, strHint bool) string {
-	e.ensureAnyToPrimitive()
-	hint := "0"
 	if strHint {
-		hint = "1"
+		return e.emitAnyToPrimitiveHint(boxRef, hintString)
 	}
+	return e.emitAnyToPrimitiveHint(boxRef, hintNumber)
+}
+
+// ToPrimitive's hints: the i8 @__kml_toprimitive takes.
+const (
+	hintNumber  = 0
+	hintString  = 1
+	hintDefault = 2
+)
+
+// emitAnyToPrimitiveHint is emitAnyToPrimitive with an explicit hint
+// ("default" for `+` and `==`, where a Date converts to its string).
+func (e *Emitter) emitAnyToPrimitiveHint(boxRef string, hint int) string {
+	e.ensureAnyToPrimitive()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_toprimitive(i64 %s, i1 %s)", r, boxRef, hint))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_toprimitive(i64 %s, i8 %d)", r, boxRef, hint))
 	return r
+}
+
+// emitHostToPrimFinalize defines @__kml_host_toprim(box, hint): a Date host
+// box's primitive (its time value for the number hint, its toString
+// otherwise); any other box as itself.
+func (e *Emitter) emitHostToPrimFinalize() {
+	if !e.usedAnyToPrimitive {
+		return
+	}
+	var b, fns strings.Builder
+	b.WriteString("\ndefine i64 @__kml_host_toprim(i64 %v, i8 %hint) {\nentry:\n")
+	if e.usedHostBox {
+		b.WriteString("  %pay = call i64 @__kml_nb_pay(i64 %v)\n  %cell = inttoptr i64 %pay to ptr\n  %nn = icmp ne ptr %cell, null\n  br i1 %nn, label %load, label %none\nload:\n  %hdr = load i64, ptr %cell, align 8\n")
+		for i, h := range e.hostLayouts {
+			if h.class != "Date" {
+				continue
+			}
+			restore := e.beginDetachedFunc()
+			t := e.emitHostCellLoad("%cell", h.ty)
+			isNum := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %%hint, %d", isNum, hintNumber))
+			numL, strL := e.freshLabel("date.prim.num"), e.freshLabel("date.prim.str")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNum, numL, strL))
+			e.emitLabel(numL)
+			d := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", d, t))
+			e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbEncodeDouble(d)))
+			e.emitLabel(strL)
+			s, err := e.emitDateOrInvalid(Value{Ref: t, Ty: h.ty}, e.emitDateToString)
+			if err != nil {
+				e.emitTerminator("ret i64 %v")
+			} else {
+				bx, _ := e.emitBoxValue(s)
+				e.emitTerminator(fmt.Sprintf("ret i64 %s", bx.Ref))
+			}
+			body := e.allocas.String() + e.body.String()
+			restore()
+			fn := fmt.Sprintf("@__kml_host_toprim_%d", h.id&kmlHdrIDMask)
+			fmt.Fprintf(&fns, "\ndefine internal i64 %s(ptr %%cell, i64 %%v, i8 %%hint) {\nentry:\n%s}\n", fn, body)
+			fmt.Fprintf(&b, "  %%m%d = icmp eq i64 %%hdr, %d\n  br i1 %%m%d, label %%hit%d, label %%next%d\nhit%d:\n  %%r%d = call i64 %s(ptr %%cell, i64 %%v, i8 %%hint)\n  ret i64 %%r%d\nnext%d:\n", i, h.id, i, i, i, i, i, fn, i, i)
+		}
+		b.WriteString("  br label %none\nnone:\n")
+	}
+	b.WriteString("  ret i64 %v\n}\n")
+	e.functions.WriteString(fns.String())
+	e.functions.WriteString(b.String())
 }

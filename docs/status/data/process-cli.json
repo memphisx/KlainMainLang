@@ -26,30 +26,25 @@
           {
             "feature": "Command-line arguments (`process.argv`)",
             "status": "implemented",
-            "caveats": [
-              "Mirrors C's `argv` directly (`argv[0]` is the binary's own path), not Node's two-prefix convention — see [ADR-00002](../adr/ADR-00002.md)",
-              "`typeof process.argv[99]` reports `'string'` when absent (Node: `'undefined'`) — `typeof` reads the static kind"
-            ],
+            "caveats": [],
             "notes": [
-              "An out-of-range read is a real `undefined` (`string \\| undefined`, [TDD-00187](../tdd/TDD-00187.md) Stage 3, [ADR-00780](../adr/ADR-00780.md)) — falsy, `=== undefined` true, never the general array bounds throw; strict mode requires narrowing/`??`/`!` before bare-string use, `-compat=js` auto-widens"
+              "Node's shape: `argv[0]` and `argv[1]` are the executable's absolute path (a compiled program is its own script), the arguments follow; an out-of-range read is `undefined`, and `process.argv0` is the operating system's `argv[0]` ([ADR-01278](../adr/ADR-01278.md))"
             ]
           },
           {
             "feature": "Environment variables (`process.env.KEY` / `process.env[\"KEY\"]`)",
             "status": "implemented",
             "notes": [
-              "Both dot and bracket notation; returns `string \\| undefined` — `process.env.X ?? \"default\"`, `=== undefined`, printing, string compares, and narrowing all behave as in Node ([ADR-00724](../adr/ADR-00724.md)/[ADR-00780](../adr/ADR-00780.md))",
+              "Both dot and bracket notation; a missing variable is `undefined` (`typeof` included), so `process.env.X ?? \"default\"` and narrowing behave as in Node ([ADR-01278](../adr/ADR-01278.md))",
               "On Windows it is the live Win32 environment read and written through the wide API (libuv's `uv_os_getenv`/`setenv`), not the C runtime's startup snapshot: non-ASCII values round-trip as UTF-8, lookup is case-insensitive as the OS's is, and a child spawned later inherits every write ([ADR-01032](../adr/ADR-01032.md))"
             ],
-            "caveats": [
-              "`typeof process.env.MISSING` is `'string'` (Node: `'undefined'`) — `typeof` reads the static kind, not the runtime absence"
-            ]
+            "caveats": []
           },
           {
             "feature": "Exit codes (`process.exit(code)`)",
             "status": "implemented",
             "notes": [
-              "Calls C `exit()`; never returns, code after it is correctly unreachable"
+              "Node's `process.exit`: the code (validated like `exitCode`, or `process.exitCode` when omitted) becomes the exit code, `'exit'` fires once, then C `exit()`; code after it is unreachable ([ADR-01278](../adr/ADR-01278.md))"
             ],
             "caveats": []
           },
@@ -81,7 +76,7 @@
             "feature": "`process.chdir(path)`",
             "status": "implemented",
             "notes": [
-              "Changes the current working directory via POSIX `chdir()`. Throws a catchable `Error` (same \"`<opDesc>` '`<path>`': `<strerror>`\" shape `fs.*`'s failures already use) if the path doesn't exist or isn't a directory. See [ADR-00026](../adr/ADR-00026.md)."
+              "Changes the current working directory via POSIX `chdir()`; a failure throws Node's error (`ENOENT: no such file or directory, chdir '<cwd>' -> '<dir>'`, with `errno`, `code`, `syscall`, `path`, `dest`) ([ADR-01278](../adr/ADR-01278.md))"
             ],
             "caveats": []
           },
@@ -118,14 +113,13 @@
             "caveats": []
           },
           {
-            "feature": "`process.emitWarning(message, type?\\|options?)`",
+            "feature": "`process.emitWarning(warning, type?\\|options?, code?, ctor?)`",
             "status": "implemented",
             "caveats": [
-              "The one-shot `--trace-warnings` hint line Node prints is deliberately omitted, and the `'warning'`-event `Error` carries only `name`/`message` (not `code`/`detail`) — the fixed error-object shape ([ADR-00580](../adr/ADR-00580.md))"
+              "The one-shot `(Use \\`node --trace-warnings ...\\`)` hint Node prints is omitted: a compiled program has no `--trace-warnings` flag"
             ],
             "notes": [
-              "Writes `(node:<pid>) [<code>] <type>: <message>` to stderr (the `[code]` only when a `code` is given), `type` defaulting to `\"Warning\"`, then a `<detail>` line when a `detail` is given; the options-object form is `{ type?, code?, detail? }` ([ADR-00580](../adr/ADR-00580.md))",
-              "Like Node's always-on default printer, additionally invokes any `process.on('warning', …)` listener with the warning as an `Error` ([ADR-00395](../adr/ADR-00395.md)/[ADR-00401](../adr/ADR-00401.md))"
+              "Node's lib/internal/process/warning.js in TypeScript ([ADR-01250](../adr/ADR-01250.md)): a string or an `Error`; the `Error` made carries `name` (the type, `\"Warning\"` by default), `code` and `detail`; the `'warning'` event is emitted on the next tick, and the default listener prints `(node:<pid>) [<code>] <name>: <message>` and a `<detail>` line to stderr"
             ]
           },
           {
@@ -133,49 +127,43 @@
             "status": "implemented",
             "notes": [
               "Sends `signal` (defaults to `15`/`SIGTERM`, matching real Node) to `pid` via POSIX `kill()`. Throws a catchable `Error` if the target process doesn't exist or the signal can't be sent; signal `0` is the standard POSIX \"does this process exist\" check and never actually delivers a signal. See [ADR-00026](../adr/ADR-00026.md).",
-              "The signal may be a name (`'SIGTERM'`, `'SIGINT'`, …) as in Node — a literal resolves at compile time against the host's `os.constants.signals` table, a dynamic string at run time; an unknown literal name is a compile error, the counterpart of Node's `ERR_UNKNOWN_SIGNAL` ([ADR-00729](../adr/ADR-00729.md))",
+              "The signal may be a name (`'SIGTERM'`, `'SIGINT'`, …) or a number, as in Node; an unknown name throws `ERR_UNKNOWN_SIGNAL`, a failure `kill <code>` with `errno`/`code`/`syscall`, and the call returns `true` ([ADR-01278](../adr/ADR-01278.md))",
               "On Windows `SIGTERM`/`SIGKILL`/`SIGINT`/`SIGQUIT` terminate the target unconditionally (libuv's `TerminateProcess`), exit code 1 — a `SIGTERM` listener in the target never runs, as in Node — and any other signal throws `ENOSYS` instead of killing it ([ADR-00728](../adr/ADR-00728.md), [ADR-01033](../adr/ADR-01033.md)); the thrown `Error` carries `code`/`errno`/`syscall: 'kill'` on every host"
             ],
-            "caveats": [
-              "The thrown message carries the signal number (`kill(pid=…, signal=15)`), not the name Node prints"
-            ]
+            "caveats": []
           },
           {
             "feature": "`process.stdout.write(s)` / `process.stderr.write(s)` (raw write, no auto-newline)",
             "status": "implemented",
             "caveats": [
-              "Text-only (byte-string, not binary-safe past an embedded null — same scope narrowing `console.log`'s own string formatting already has)",
-              "No stream surface beyond `.write`/`.isTTY`/`.columns`/`.rows` (no `'drain'`)"
+              "`process.stdin`/`stdout`/`stderr` are typed `any` to the checker until `process` itself is typed from its module ([TDD-00230](../tdd/TDD-00230.md) P3.2), so a wrong call (`process.stdout.write()` with no argument) is not reported as a TypeScript error"
             ],
             "notes": [
-              "`process.stdout`/`stderr` also expose `.isTTY` (a real `isatty(fd)` probe on all three stdio handles — [ADR-00424](../adr/ADR-00424.md)) and `.columns`/`.rows` (a live `ioctl(TIOCGWINSZ)` read — [ADR-00518](../adr/ADR-00518.md))",
-              "Unlike `console.log`/`.error` (always a trailing newline), a plain write of exactly `s` with nothing appended — useful for a progress indicator or assembling one line from several pieces",
-              "`stdout` goes through buffered `printf` (matching `console.log`'s own fd=1 convention, so output ordering against `console.log` calls elsewhere in the same program stays correct); `stderr` goes through unbuffered `dprintf` (matching `console.error`'s own fd=2 convention)"
+              "`process.stdout`/`stderr` are Node's streams, made on first use by what the descriptor is ([TDD-00235](../tdd/TDD-00235.md)): a terminal's is a `tty.WriteStream`, a pipe's or socket's a `net.Socket`, a file's a synchronous Writable. Writes take a string or a `Buffer`, an encoding and a callback, return `write()`'s backpressure flag, and `pipe()` into them works",
+              "Writes to a terminal, a file or a POSIX pipe are synchronous, as in Node, so output stays ordered with `console.log`",
+              "Unlike `console.log`/`.error` (always a trailing newline), a plain write of exactly `s` with nothing appended"
             ]
           },
           {
             "feature": "`process.stdout.columns` / `.rows` (terminal size)",
             "status": "implemented",
             "notes": [
-              "Off a non-TTY (piped/redirected) the value is a real `undefined`, matching Node ([TDD-00187](../tdd/TDD-00187.md) Stage 4, [ADR-00781](../adr/ADR-00781.md)), and arithmetic on it is `NaN`; `?? 80` is the idiomatic fallback. Typed `number`, as `@types/node` has it, so the strict lane accepts a bare use as tsc does ([ADR-01160](../adr/ADR-01160.md))",
-              "A live `ioctl(TIOCGWINSZ)` read on each access (never cached, matching Node); pair with `process.on('SIGWINCH')` to repaint on resize",
+              "Off a TTY the stream is not a `tty.WriteStream` and has no `columns`/`rows`: a real `undefined`, as in Node; `?? 80` is the idiomatic fallback. Typed `number`, as `@types/node` has it",
+              "On a terminal, read at creation and refreshed on `SIGWINCH`, which emits `'resize'` when the size changed, as Node's `tty.WriteStream` does",
               "Available on both `process.stdout` and `process.stderr`"
             ],
             "caveats": [
-              "Stored into a declared `number` binding off a TTY (`const c: number = process.stdout.columns`), the value reads `0`, not `undefined`"
+              "Stored into a declared `number` binding off a TTY (`const c: number = process.stdout.columns`), the value reads `NaN`, not `undefined`"
             ]
           },
           {
             "feature": "`process.stdin.setRawMode(enabled)` (raw terminal input)",
             "status": "implemented",
-            "caveats": [
-              "A no-op when fd 0 is not a terminal (`tcgetattr` fails; on Windows, `GetConsoleMode` fails) — guard on `process.stdin.isTTY` first, as every TUI does"
-            ],
             "notes": [
-              "Raw mode disables signal generation (`ISIG`), so Ctrl-C stops delivering `SIGINT` and arrives as the raw byte `3` for the program to handle — matching Node/libuv `UV_TTY_MODE_RAW` exactly",
-              "Auto-restore on a crash/uncaught exception is the application's responsibility (same footgun as Node); `setRawMode(false)` restores the state captured on the first enable",
-              "Routes through an embedded C shim compiled against the platform's own `<termios.h>`, so the glibc/Darwin `struct termios` layout difference is sidestepped by construction ([ADR-00518](../adr/ADR-00518.md)); on Windows the same shim uses the console-mode API (line input/echo/processed input off, VT input on, so arrow keys arrive as ESC `[` A there too) ([ADR-00727](../adr/ADR-00727.md))",
-              "Pair with `process.stdin.on('data')` (event-driven, the Node-idiomatic raw loop) or with `klain:tty` `readByte`/`readKey` (synchronous)"
+              "A method of `tty.ReadStream`: when fd 0 is not a terminal, `process.stdin` is a `net.Socket` and has no `setRawMode`, as in Node — guard on `process.stdin.isTTY` first, as every TUI does. `isRaw` reports the mode",
+              "Raw mode disables signal generation (`ISIG`), so Ctrl-C stops delivering `SIGINT` and arrives as the raw byte `3` for the program to handle — matching Node/libuv `UV_TTY_MODE_RAW`",
+              "The terminal is read through its own descriptor (`ttyname`), as libuv's `uv_tty_init` does, so the shell's terminal mode is left alone; the original mode is restored at exit",
+              "On Windows the console-mode API is used (line input/echo/processed input off, VT input on) ([ADR-00727](../adr/ADR-00727.md))"
             ]
           },
           {
@@ -193,12 +181,9 @@
           {
             "feature": "Writing `process.env` (`process.env.KEY = val` / `process.env[\"KEY\"] = val`)",
             "status": "implemented",
-            "caveats": [
-              "Compound assignment (`process.env.X += …`) is a clean rejection"
-            ],
+            "caveats": [],
             "notes": [
-              "`setenv(key, String(val), overwrite)` ([ADR-00333](../adr/ADR-00333.md)); a written variable is inherited by child processes",
-              "`delete process.env.KEY` unsets the variable for real ([ADR-00487](../adr/ADR-00487.md))"
+              "Stores `String(value)` through `setenv` (a `Symbol` throws `TypeError`), compound assignment included (`process.env.X += …`); a written variable is inherited by child processes; `delete process.env.KEY` unsets it ([ADR-01278](../adr/ADR-01278.md))"
             ]
           },
           {
@@ -212,32 +197,27 @@
             ]
           },
           {
-            "feature": "`process.on('SIGINT'/'SIGTERM'/'SIGWINCH'/'SIGBREAK', handler)` (signal handlers)",
+            "feature": "`process.on(signal, listener)` (signal listeners)",
             "status": "implemented",
             "caveats": [
-              "The handler runs from ordinary control flow at the top of the event loop's own iteration, never from real async signal context (on Windows the console control callback queues the signal and ends the loop's wait with a completion packet, so it is delivered on the main thread at once — [ADR-00728](../adr/ADR-00728.md), [ADR-01022](../adr/ADR-01022.md))",
-              "Event name must be a compile-time string literal, exactly `'SIGINT'`/`'SIGTERM'`/`'SIGWINCH'`/`'SIGBREAK'` (dynamic event names are a clean compile error, matching `Object.hasOwn`'s dynamic-key rejection)",
-              "Windows, as in Node: `'SIGINT'` fires on Ctrl+C, `'SIGBREAK'` on Ctrl+Break, `'SIGTERM'` is accepted but never fires (`process.kill` terminates unconditionally); `'SIGBREAK'` is accepted on POSIX hosts and never raised there",
-              "Handler must be a zero-argument `() => void` closure, same shape `setTimeout`'s own callback requires",
-              "One handler slot per signal — registering the same signal twice overwrites the previous handler",
-              "Only fires while a `http.listen`-driven or timer-driven event loop is actively iterating; a plain synchronous script with neither has no loop to check from"
+              "Windows delivery through the signal table ([ADR-01250](../adr/ADR-01250.md)) is compile-checked only; the watcher path was run on macOS"
             ],
             "notes": [
-              "Lets a running program (e.g. an `http.listen` server) intercept a signal and shut down gracefully instead of dying immediately. See [TDD-00019](../tdd/TDD-00019.md)/[ADR-00079](../adr/ADR-00079.md), [HTTP-SERVER.md](HTTP-SERVER.md).",
-              "`'SIGWINCH'` (terminal resize) lets a TUI re-read `process.stdout.columns`/`.rows` and repaint on a window resize ([ADR-00518](../adr/ADR-00518.md)); on Windows (no `SIGWINCH` signal) a read-only console-size watcher thread delivers it through the same loop path as the other signals, ~200 ms poll latency ([ADR-00749](../adr/ADR-00749.md))"
+              "Any signal is an event name, dynamic names included: the first listener starts a watcher and removing the last restores the default disposition, as Node's per_thread.js does; a signal the host refuses (`SIGKILL`, `SIGSTOP`) throws `uv_signal_start EINVAL`, and a watcher never holds the process open ([ADR-01250](../adr/ADR-01250.md))",
+              "The listener runs from ordinary control flow at the top of the event loop's iteration, never from real signal context (on Windows the console control callback queues the signal and ends the loop's wait — [ADR-00728](../adr/ADR-00728.md), [ADR-01022](../adr/ADR-01022.md)); Windows raises `'SIGINT'` (Ctrl+C), `'SIGBREAK'` (Ctrl+Break), `'SIGHUP'` and `'SIGWINCH'`, and accepts other listeners that never fire, as in Node",
+              "`'SIGWINCH'` (terminal resize) lets a TUI re-read `process.stdout.columns`/`.rows` ([ADR-00518](../adr/ADR-00518.md)); on Windows a read-only console-size watcher thread delivers it, ~200 ms poll latency ([ADR-00749](../adr/ADR-00749.md)). See [TDD-00019](../tdd/TDD-00019.md), [HTTP-SERVER.md](HTTP-SERVER.md)"
             ]
           },
           {
-            "feature": "`process.on('exit'/'uncaughtException'/'warning', ...)` + `process.exitCode`",
+            "feature": "`process` as an `EventEmitter` (`on`/`once`/`off`/`emit`/…, `'exit'`/`'uncaughtException'`/`'unhandledRejection'`/`'warning'`) + `process.exitCode`",
             "status": "implemented",
             "caveats": [
-              "`'uncaughtException'` runs the listener (suppressing the default `Uncaught:` print) but the process still exits (code 1) — the setjmp/longjmp exception model has already unwound to the top-level catch-all, so it can't resume execution like Node does",
-              "`'warning'` fires (with the warning as an `Error`) when `process.emitWarning` is called; the stderr print still happens too",
-              "No `'unhandledRejection'` yet (needs rejected-promise tracking)",
-              "One listener slot per event, arrow-literal only"
+              "`'uncaughtException'` runs the listener (suppressing the default `Uncaught:` print) but, after a synchronous throw, the process still exits (code 1) — the setjmp/longjmp exception model has already unwound to the top-level catch-all, so it can't resume execution like Node does (a rejection reported to it does go on)"
             ],
             "notes": [
-              "`'exit'` fires at normal end and from `process.exit()`, receiving the exit code; `process.exitCode = N` sets the deferred code a bare program returns; `process.exit()` with no argument uses it ([ADR-00334](../adr/ADR-00334.md)/[ADR-00401](../adr/ADR-00401.md))"
+              "`process` is an `EventEmitter` in TypeScript, and a value of its own: every `EventEmitter` method, any event name, Node's `newListener`/`removeListener` hooks and default `'warning'` printer ([ADR-01250](../adr/ADR-01250.md))",
+              "`'exit'` fires at normal end and from `process.exit()` with the exit code, and a listener may set `process.exitCode`; `process.exitCode` starts `undefined`, takes an integer or an integer string (`ERR_INVALID_ARG_TYPE`/`ERR_OUT_OF_RANGE` otherwise), and is the code a program ends with ([ADR-01278](../adr/ADR-01278.md))",
+              "`'uncaughtException'` receives the thrown value and its origin; a rejection nothing consumes is reported after the microtask checkpoint, as Node's default does: `'unhandledRejection'` receives `(reason, promise)`, else it is an uncaught exception (a non-Error reason wrapped as `UnhandledPromiseRejection`), else the `Uncaught:` print and exit code 1 ([ADR-01192](../adr/ADR-01192.md))"
             ]
           },
           {
@@ -245,7 +225,7 @@
             "status": "implemented",
             "notes": [
               "`CLOCK_MONOTONIC` via the same layer as `performance.now()` ([ADR-00332](../adr/ADR-00332.md)); `hrtime()` → a `[seconds, nanoseconds]` tuple, `.bigint()` → total-nanoseconds bigint",
-              "`hrtime(prev)` returns the elapsed diff from a prior `[seconds, nanoseconds]` reading, applying Node's borrow when the nanosecond field would go negative ([ADR-00582](../adr/ADR-00582.md))"
+              "`hrtime(prev)` returns the elapsed diff from a prior `[seconds, nanoseconds]` reading, applying Node's borrow when the nanosecond field would go negative ([ADR-00582](../adr/ADR-00582.md)); a non-array or wrong-length argument throws Node's `ERR_INVALID_ARG_TYPE`/`ERR_OUT_OF_RANGE` ([ADR-01278](../adr/ADR-01278.md))"
             ]
           },
           {
@@ -303,92 +283,72 @@
             "feature": "`process.umask([mask])`",
             "status": "implemented",
             "notes": [
-              "No argument reads the mask the way libuv does (set 0, restore); with one it sets it and returns the previous. POSIX `umask(2)` — a file created afterwards carries the mask; on Windows the CRT's `_umask`, which Node's own answer is too (`0` by default, and it never affects a created file's attributes) ([ADR-01078](../adr/ADR-01078.md))"
+              "No argument reads the mask the way libuv does (set 0, restore); with one (a number, or an octal string) it sets it and returns the previous. POSIX `umask(2)` — a file created afterwards carries the mask; on Windows the CRT's `_umask`, which Node's own answer is too (`0` by default, and it never affects a created file's attributes) ([ADR-01078](../adr/ADR-01078.md))"
             ]
           },
           {
             "feature": "`process.stdin` (streamed reads)",
             "status": "implemented",
             "caveats": [
-              "`'data'` delivers each read chunk as a UTF-8 string, not a `Buffer` — `setEncoding('utf8')` is a faithful no-op but a non-utf8 encoding is rejected (no binary mode)",
-              "Flowing mode only (attaching `'data'` starts it) — no `.pause()`/`.resume()`/`.read()`/`'readable'`",
-              "One listener per event, arrow/function-expression literal only; callbacks fire synchronously from the dispatch, not via a microtask"
+              "`process.stdin`/`stdout`/`stderr` are typed `any` to the checker until `process` itself is typed from its module ([TDD-00230](../tdd/TDD-00230.md) P3.2), so a wrong call (`process.stdout.write()` with no argument) is not reported as a TypeScript error"
             ],
             "notes": [
-              "`process.stdin.on('data'/'end')` over a non-blocking fd 0 folded into the same `select()` loop as `readline`/`child_process` ([ADR-00339](../adr/ADR-00339.md)); `'data'` per read chunk, `'end'` once on EOF. Distinct from the blocking `fs.readFileSync(0)` and the line-oriented `readline` module above",
-              "`setEncoding('utf8')` and the stream methods return the stream, so the idiomatic `process.stdin.setEncoding('utf8').on('data', …).on('end', …)` chain works ([ADR-00793](../adr/ADR-00793.md))"
+              "Node's stdin stream ([TDD-00235](../tdd/TDD-00235.md)): a `tty.ReadStream` on a terminal, otherwise a `net.Socket` over the descriptor (a pipe, a socket or a file). It starts paused; a `'data'` listener, `resume()`, `pipe()` or `for await` starts it, and `pause()` stops reading so the process can exit",
+              "`'data'` delivers `Buffer`s unless `setEncoding` is called; `read()`/`'readable'`, several listeners per event and async iteration work as on any Readable"
             ]
           },
           {
             "feature": "`readline` module (`createInterface`, `'line'`/`'close'` events, `question()`, `close()`)",
             "status": "implemented",
             "caveats": [
-              "The listener callbacks fire synchronously from the event loop's dispatch, not deferred through a microtask queue (same as `child_process`)",
-              "One listener per event, an arrow/function-expression literal only; no line history/editing, no `SIGINT`/`'pause'`/`'resume'`, no completer",
-              "The `createInterface` options object is accepted but ignored — input is always stdin, output always stdout; one active interface at a time"
+              "`readline.promises` holds `createInterface` only; its `Interface` and `Readline` classes are imported from `readline/promises` (a class is not yet a value)",
+              "`util.promisify(rl.question)` is not the promise form: `question` has no `util.promisify.custom` (a class's `prototype` is not reachable yet); `readline/promises`' `question` is",
+              "Display widths use Node's non-ICU `getStringWidth` table, so a few wide or emoji code points can take a different column count than an ICU build of Node"
             ],
             "notes": [
-              "Non-blocking stdin (fd 0) folded into the same `select()` loop as `child_process` ([ADR-00323](../adr/ADR-00323.md)); emits one `'line'` per newline (CR stripped), flushes an unterminated final line on EOF then fires `'close'`. Distinct from the blocking `fs.readFileSync(0)` above"
+              "Node's `lib/readline.js` and `lib/internal/readline/*.js`, ported to TypeScript ([TDD-00235](../tdd/TDD-00235.md)): an Interface over any Readable input (stdin, a file stream, a child's stdout, a socket) and optional Writable output, with `'line'`, `'close'`, `'pause'`, `'resume'`, `'SIGINT'`, `'history'`, `question` (with an `AbortSignal`), `prompt`/`setPrompt`/`getPrompt`, `write`, `crlfDelay` and `for await (const line of rl)`",
+              "On a terminal (or `terminal: true`) keys are decoded and the line is edited as in Node: cursor movement, word and line deletion, kill ring, undo/redo, history navigation, tab completion (`completer`)",
+              "`cursorTo`, `moveCursor`, `clearLine`, `clearScreenDown` and `emitKeypressEvents` are exported"
             ]
           },
           {
             "feature": "`child_process.spawn()` / `.exec()` / `.execFile()` (async, event-driven)",
             "status": "implemented",
             "caveats": [
-              "The listener callbacks fire synchronously from the event loop's dispatch, not deferred through the microtask queue (`process.nextTick` — see the row above)",
-              "One listener per event, an arrow/function-expression literal only (the same posture as `Worker`); no `removeListener`",
-              "`shell` must be a literal `true` or a literal shell path (the command as one string); a dynamic value, or a shell with an args array, are clean rejections",
-              "The `exec`/`execFile` callback Error's `code` is null — Node's is the numeric exit code, which the string-typed `code` slot cannot carry; `killed`/`signal` are on it, `cmd` is not",
-              "`env` must be an object literal of string values (fully replaces the child env, Node's non-merging semantics)",
-              "`stdio` fd numbers, `'ipc'`, and streams are clean rejections (only `'pipe'`/`'inherit'`/`'ignore'`, as a string or a 3-element array)",
-              "`timeout`'s `killSignal` must be a literal name/number",
-              "The `'error'` Error's `.syscall`/`.path`/`.spawnargs` and Node's `spawn <file> <CODE>` message wording are unset",
-              "A legacy `'exit'`/`'close'` listener that declares one non-nullable `number` param sees `0` (not `null`) on a signal death — a plain `number` can't hold `null`; type the param `number | null` for the faithful `null` ([ADR-00761](../adr/ADR-00761.md))",
-              "`child.kill` takes a signal *name* string only as a **literal** (resolved to the host's signal number at compile time) or a number; a dynamic signal-name string is a clean rejection",
-              "Handles and their buffered output are never freed (`-mm=manual`)"
+              "Handle passing over the IPC channel and `serialization: 'advanced'` are not ported",
+              "On Windows the process handles are compile-checked, not yet run",
+              "`-mm=manual`: a process handle's table slot is never reused"
             ],
             "notes": [
-              "fork()+execvp() with three pipes; the two read ends are non-blocking and fold into the same `select()` event loop as Worker/channel pipes ([ADR-00322](../adr/ADR-00322.md))",
-              "spawn options: `cwd` (child chdir), `shell: true` (platform shell `/bin/sh -c` / `cmd.exe /d /s /c`, honouring `%ComSpec%`), `env` (replaces the child env), `windowsHide` (Windows `CREATE_NO_WINDOW`, no-op on POSIX), `timeout`+`killSignal` (kills via the loop, default SIGTERM, surfacing as `(null, '<signal>')`), `detached` (new session/group leader — `setsid` / `DETACHED_PROCESS`), `stdio` (`'pipe'`/`'inherit'`/`'ignore'` string or 3-element array). See [ADR-00433](../adr/ADR-00433.md), [ADR-00740](../adr/ADR-00740.md), [ADR-00762](../adr/ADR-00762.md), [ADR-00763](../adr/ADR-00763.md), [ADR-00764](../adr/ADR-00764.md), [ADR-00765](../adr/ADR-00765.md), [ADR-00766](../adr/ADR-00766.md)",
-              "On Windows the program is resolved as libuv does — against the **child's** `cwd` and the **child's** `PATH` (so a custom `env.PATH` redirects the lookup), trying the name, then `.com`, then `.exe` — and a custom `env` reaches the child sorted, de-duplicated case-insensitively (first spelling wins) and with the variables Windows programs cannot start without (`SystemRoot`, `PATH`, `TEMP`, `USERPROFILE`, …) carried over when omitted ([ADR-01033](../adr/ADR-01033.md))",
-              "`exec`/`execSync` pass the command line to the shell **verbatim** (embedded quotes survive), matching Node; on Windows a `.bat`/`.cmd` spawned *without* a shell is refused (spawn `'error'`, `EINVAL`) rather than run through an implicit `cmd.exe`, closing the CVE-2024-27980 argument-injection path ([ADR-00740](../adr/ADR-00740.md)/[ADR-00754](../adr/ADR-00754.md))",
-              "The `'error'` Error carries `.message` (`spawn <reason>`), `.code` (`ENOENT` for a missing command) and `.errno` (negative libuv-style errno, `-2` on POSIX) ([ADR-00784](../adr/ADR-00784.md))",
-              "`exec(cmd[, options], cb)` / `execFile(file[, args][, options], cb)` take the spawn options plus `maxBuffer` (Node's 1 MiB default): past it the child is killed with `killSignal` and the callback's error is Node's `RangeError [ERR_CHILD_PROCESS_STDIO_MAXBUFFER]: stdout maxBuffer length exceeded`; a timeout/kill error carries `killed: true` and the `signal` name; an `(err: any)` callback parameter sees a real boxed Error (`err?.code`, `err?.message`), as does every closure whose `any` parameter is called with a concrete value ([ADR-01080](../adr/ADR-01080.md))",
-              "`spawn` streams (`child.stdout`/`stderr` `'data'`/`'end'`, `child.on('close'/'exit'/'error')`, `child.stdin.write`/`.end`, `child.pid`, `child.kill`, `child.unref()`/`ref()` — the loop-keepalive opt-out, [ADR-00767](../adr/ADR-00767.md)); `exec` runs via `/bin/sh -c` and `execFile` execvp's directly, both buffering into a single `(err, stdout, stderr)` callback",
-              "A spawn that fails to start (a missing command → `ENOENT`) emits the `'error'` event with an `Error` and **not** `'exit'` — detected via a close-on-exec status pipe on POSIX and `CreateProcessW`'s failure on Windows ([ADR-00754](../adr/ADR-00754.md))",
-              "The `'exit'`/`'close'` exit `code` is the child's real width: on Windows the full 32-bit value (`cmd /c exit 300` → `300`, an access violation → `3221225477`), on POSIX the 8-bit wait-status field (`300 & 0xff = 44`, as Node also reports there) ([ADR-00759](../adr/ADR-00759.md))",
-              "`'exit'`/`'close'` fire as `(code, signal)` like Node: a signal death gives `code = null` and the signal **name** (`'SIGTERM'`), a normal exit the integer code and `signal = null`. POSIX recovers the signal from the wait status (`WIFSIGNALED`/`WTERMSIG`); Windows from the signal `child.kill` recorded, since `TerminateProcess` leaves no signalled bit ([ADR-00761](../adr/ADR-00761.md), [TDD-00184](../tdd/TDD-00184.md))",
-              "`'exit'` and `'close'` are separate events, as in Node: `'exit'` fires the moment the process ends — even while a grandchild still holds its stdio pipes open — and `'close'` once the process has ended **and** its stdio streams have closed, in either order. The loop is woken by the exit itself (a `SIGCHLD` self-pipe on POSIX, a registered wait on the process handle on Windows), never by polling `waitpid` ([TDD-00223](../tdd/TDD-00223.md)/[ADR-01023](../adr/ADR-01023.md))"
+              "Node's `lib/child_process.js` in TypeScript (`lib/node/child_process.ts`, [ADR-01228](../adr/ADR-01228.md)): a `ChildProcess` is an `EventEmitter` (any number of listeners, `once`/`off`, `'spawn'`/`'exit'`/`'close'`/`'error'`/`'disconnect'`/`'message'`), its `stdin`/`stdout`/`stderr` are `net.Socket` streams over socketpairs (`pipe()`, `setEncoding`, async iteration, back-pressure), and every option is read at run time: `cwd`, `env`, `argv0`, `stdio` (strings, arrays, fd numbers, `'ipc'`), `detached`, `uid`/`gid`, `shell`, `timeout` + `killSignal`, `signal` (AbortSignal), `windowsHide`/`windowsVerbatimArguments`",
+              "`exec`/`execFile` buffer the output with `maxBuffer` (1 MiB default, `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`), `encoding` (`'buffer'` gives Buffers) and Node's ExecException (`code`, `killed`, `signal`, `cmd`); a spawn failure is the `'error'` event with Node's `spawn <file> ENOENT` shape (`errno`, `code`, `syscall`, `path`, `spawnargs`)",
+              "`'exit'`/`'close'` give `(code, signal)` with `code` null on a signal death; `kill()` takes names or numbers and throws `ERR_UNKNOWN_SIGNAL`; `unref()` releases the loop as libuv's unref'd child watcher does (the exit is not reported once nothing else holds the loop, [ADR-01231](../adr/ADR-01231.md))",
+              "Spawning this program's own binary marks the child, which refuses to rerun the program body (exit 9, [ADR-00972](../adr/ADR-00972.md))"
             ]
           },
           {
             "feature": "`child_process.fork()` (self-fork + IPC channel)",
             "status": "implemented",
             "caveats": [
-              "Self-fork only: the path must be `__filename` or `process.argv[1]` (forking a *different* module would need a second compiled program — clean rejection); the options object must be an empty `{}`",
-              "Bare `process.send` reads as a *boolean* forked-ness probe, not Node's function-or-undefined — `assert.strictEqual(process.send, undefined)`-style tests type-mismatch cleanly"
+              "Self-fork only: the module must be this program's entry (a different module is a second compiled program: `ERR_CHILD_PROCESS_FORK_MODULE`)",
+              "`serialization: 'advanced'` is not ported: messages always cross as json",
+              "A `dgram` socket cannot be sent as a handle; on Windows no handle can (descriptor passing is POSIX-only)"
             ],
             "notes": [
-              "Node's own mechanism ([TDD-00141](../tdd/TDD-00141.md)/[ADR-00425](../adr/ADR-00425.md)): socketpair + re-exec of the current binary with `NODE_CHANNEL_FD` set; child argv layout `[exe, modulePath, ...args]` so extra args land at `argv[2]`; NDJSON string frames (embedded C, linked only when used)",
-              "Parent: `child.send(msg)→bool`, `child.on('message'/'exit'/'close')` (several listeners per event, fired in registration order — [ADR-01015](../adr/ADR-01015.md)), `child.disconnect()` (flushes in-flight messages), inherited stdio; child: `process.send(msg)→bool` (false unforked), `process.on('message')` (holds the event loop open while connected), `process.disconnect()`; `mustCall`-wrapped listeners contextually typed",
-              "Messages cross as themselves — strings, and objects/arrays/numbers/booleans via Node's json serialization mode ([ADR-01015](../adr/ADR-01015.md)); an untyped `'message'` parameter is `any` (the sent value), `msg: string` keeps the plain-text fast path",
-              "`process.argv[i]` out-of-range reads are a real `undefined` ([ADR-00780](../adr/ADR-00780.md)) — the `argv[2] === 'child'` / `if (!argv[2])` idioms and `=== undefined` all behave as in Node"
+              "The parent's side is TypeScript ([ADR-01228](../adr/ADR-01228.md)) over TDD-00141's wire: json serialization, newline-framed, on a socketpair at `NODE_CHANNEL_FD`; `send(msg, cb?)`, `'message'`, `disconnect()`, `connected`; `silent`, `stdio`, `execArgv`, `env`, `cwd` options; the child's own arguments start at `process.argv[2]`",
+              "The child's side is the process emitter's ([ADR-01250](../adr/ADR-01250.md)): `process.send`, `disconnect()`, `connected`, `channel`, `'message'`/`'disconnect'`, the channel holding the process open only while those have listeners; `process.send` is undefined in a program that was not forked",
+              "Handles cross the channel as Node sends them: `send(msg, server | socket, { keepOpen }, cb)` passes the descriptor with the message (SCM_RIGHTS), acknowledged by the receiver, which gets a `net.Server` or `net.Socket` of its own; internal `NODE_` messages go to `'internalMessage'`, and messages wait for a `'message'` listener ([ADR-01302](../adr/ADR-01302.md))"
             ]
           },
           {
             "feature": "`child_process.spawnSync()` / `.execSync()` / `.execFileSync()` (blocking)",
             "status": "implemented",
             "caveats": [
-              "`spawnSync`'s `stdout`/`stderr`/`output` are strings (the `encoding: 'utf8'` shape), not Buffers; `encoding` accepts `'utf8'` or `'buffer'` only",
-              "`stdio`, `shell`, `killSignal`, `windowsHide` and `windowsVerbatimArguments` must be literals (they change what is emitted); `env` must be an object literal of string values; `uid`/`gid` are not supported",
-              "An absent `stdout`/`stderr` (never started, or `stdio: 'inherit'`/`'ignore'`) stays typed `string`, as in Node's typings: read directly it is `undefined`/`null` and a method call on it throws Node's `TypeError` ([ADR-01081](../adr/ADR-01081.md)), but once stored in a binding declared `string` the absence is lost (`=== undefined` is false, it prints `null`) — the general declared-slot gap an out-of-range array read shares"
+              "On Windows the blocking spawn is compile-checked, not yet run"
             ],
             "notes": [
-              "One embedded C core ([ADR-00411](../adr/ADR-00411.md)): fork + execvp with the piped stdio poll-multiplexed to completion (no deadlock when a child fills stderr while stdout drains), then a blocking waitpid; `execSync` runs via `/bin/sh -c` (`%ComSpec% /d /s /c` on Windows)",
-              "Node's full options set ([ADR-01080](../adr/ADR-01080.md)): `cwd`, `env` (replaces the child's), `input` (a string or `Uint8Array` fed to stdin without blocking the drain), `argv0`, `stdio` (`'pipe'`/`'inherit'`/`'ignore'`, string or 3-element array), `timeout` + `killSignal` (the child is killed and `error.code` is `ETIMEDOUT`), `maxBuffer` (1 MiB default; overrun kills and gives `ENOBUFS`), `shell` (`true`, or a shell path — a `cmd`-shaped one takes `/d /s /c`, others `-c`; the args join the command with spaces), `windowsHide`, `windowsVerbatimArguments`",
-              "`spawnSync` returns Node's `{ error?, status, signal, output, pid, stdout, stderr }` in that key order (`error` first when present, [ADR-01081](../adr/ADR-01081.md)): `status` is `number | null` (null on a signal death or a never-started child), `signal` the name or null, `output` `[null, stdout, stderr]` (null for a never-started child), and `error` an `Error` with `code`/`errno`/`syscall: 'spawnSync <file>'`/`path` for a failed spawn (`ENOENT` → `status: null`, `pid: 0`, `output: null`, `stdout`/`stderr` `undefined`, as Node) or the timeout/maxBuffer kill",
-              "`execSync`/`execFileSync` return stdout on success and throw otherwise ([ADR-00753](../adr/ADR-00753.md)): the spawn/timeout/maxBuffer error itself, or `Command failed: <command>` followed by the captured stderr on a non-zero exit — either way the thrown Error carries Node's ExecException own properties `status`, `signal`, `output`, `pid`, `stdout`, `stderr` (readable through `catch (e: any)`); without an explicit `stdio` the child's stderr is also mirrored to ours, as Node does ([ADR-01080](../adr/ADR-01080.md))",
-              "`execSync`/`execFileSync` return a `Buffer` of stdout without an encoding and a string with `encoding: 'utf8'`, as in Node; `execFileSync`'s failure message names the file and its arguments"
+              "A native blocking spawn (Node's `spawn_sync.cc` is native too) under TypeScript `spawnSync`/`execSync`/`execFileSync` ([ADR-01228](../adr/ADR-01228.md)): `input` fed to a piped stdin, piped output collected by poll, `timeout` + `killSignal` (`ETIMEDOUT`), `maxBuffer` (`ENOBUFS`), `stdio`, `env`, `cwd`, `argv0`, `shell`, `uid`/`gid`",
+              "Results are Node's: Buffers without an `encoding`, strings with one; `{ error?, status, signal, output, pid, stdout, stderr }` in Node's key order; `execSync`/`execFileSync` throw `Command failed: …` with the result's properties on a non-zero exit, and write the child's stderr to ours when no `stdio` is given"
             ]
           }
         ]

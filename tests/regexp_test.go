@@ -13,7 +13,8 @@ import (
 // expected — which previously emitted invalid IR (the RegExp A1 invalid-IR
 // files; a void value from a no-return `(function(){})()` reads as undefined).
 func TestE2ERegExpNonStringArgs(t *testing.T) {
-	assertOutput(t, `
+	// JavaScript only: tsc rejects the non-string arguments.
+	assertOutputCompatJS(t, `
 console.log(/2/.test(123))
 console.log(/9/.test(123))
 console.log(/n/.test((function(){})()))
@@ -266,7 +267,7 @@ console.log(re.lastIndex)
 func TestE2ERegExpExecMatchWithCaptureGroups(t *testing.T) {
 	assertOutput(t, `
 const r = /(\d+)-(\d+)/
-const m = r.exec("range: 12-34 end")
+const m = r.exec("range: 12-34 end")!
 console.log(m !== null)
 console.log(m.length)
 console.log(m[0])
@@ -287,13 +288,13 @@ if (m === null) {
 `, "null as expected")
 }
 
-func TestE2ERegExpExecUnmatchedOptionalGroupIsEmptyString(t *testing.T) {
+func TestE2ERegExpExecUnmatchedOptionalGroupIsUndefined(t *testing.T) {
 	assertOutput(t, `
 const r = /a(b)?c/
-const m = r.exec("ac")
+const m = r.exec("ac")!
 console.log(m[0])
 console.log(m[1])
-`, "ac\n")
+`, "ac\nundefined")
 }
 
 func TestE2ERegExpExecGlobalFlagAdvancesLastIndex(t *testing.T) {
@@ -827,7 +828,7 @@ func TestE2ERegExpUTF16IndexMode(t *testing.T) {
 		{"lastindex/es-utf16-units", "es-utf16", `const r=/1/g; r.exec("é1"); console.log(r.lastIndex)`, "2"},
 		// A hand-set UTF-16 lastIndex is converted back to a byte start offset,
 		// so the next global match resumes at the right code point.
-		{"lastindex-roundtrip/es-utf16", "es-utf16", `const r=/\d/g; r.lastIndex=2; console.log(r.exec("é1é2")[0])`, "2"},
+		{"lastindex-roundtrip/es-utf16", "es-utf16", `const r=/\d/g; r.lastIndex=2; console.log(r.exec("é1é2")![0])`, "2"},
 		// Empty-capable global match terminates in es-utf16 too: an empty match
 		// at end-of-string advances to a byte start > strlen (utf16_to_byte
 		// extends past the terminator), so PCRE2 rejects it and the loop ends
@@ -893,4 +894,23 @@ console.log("a1b2".replaceAll(/\d/gy, "#"), "1a2".replaceAll(/\d/gy, "#"))
 `
 	assertOutput(t, src, "true y false\nfalse 0\ntrue 6\nfalse 0\n[ 'aa' ]\nb 2\nabc Xbc\nfalse 0\n-1 0\n2;\na1b2 #a2")
 	assertSameAsNode(t, src)
+}
+
+// An empty match splits as RegExp.prototype[@@split] does: between
+// characters (by code point under /u), not where the last piece ended nor
+// at the end; the empty string splits into no pieces when matched.
+func TestE2ERegexSplitEmptyMatches(t *testing.T) {
+	assertOutput(t, `
+console.log(JSON.stringify('ab'.split(/(?:)/)))
+console.log(JSON.stringify(''.split(/x/)), JSON.stringify(''.split(/(?:)/)))
+console.log(JSON.stringify('abc'.split(/(?=b)/)))
+console.log(JSON.stringify('😀x😀'.split(/(?:)/u)))
+console.log(JSON.stringify('a1b'.split(/\d*/)))
+console.log(JSON.stringify('xaxbx'.split(/x*/)))
+`, `["a","b"]
+[""] []
+["a","bc"]
+["😀","x","😀"]
+["a","b"]
+["","a","b",""]`)
 }

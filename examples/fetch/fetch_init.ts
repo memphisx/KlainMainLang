@@ -6,13 +6,10 @@
 // see ADR-00096) instead of a real external website, so this file needs no
 // real network access and gives deterministic results.
 //
-// init is any value with some subset of method: string /
-// headers: Map<string,string> | Headers / body: string fields — a plain
-// object works fine here with no Request/Headers class needed, matching how
-// this compiler already represents every other bag of string headers
-// (http.listen's req.headers, a handler's own optional response headers
-// field) as a plain Map<string,string>. Real Request/Headers classes also
-// exist (TDD-00040) for when you want them — see
+// init is a RequestInit: method, headers (a Headers, a Map, a record or
+// [name, value] pairs) and body (a string, URLSearchParams, Blob, ArrayBuffer
+// or bytes). examples/fetch/fetch_request_init.ts passes it through a typed
+// wrapper; real Request/Headers classes also exist (TDD-00040) — see
 // examples/fetch/fetch_request_headers.ts.
 
 // ── a POST with a JSON body ─────────────────────────────────────────────────
@@ -33,12 +30,14 @@ console.log((await withHeaders.text()).indexOf('kml-value') > -1)  // true — t
 const deleted = await fetch('http://127.0.0.1:8765/delete', { method: 'DELETE' })
 console.log(deleted.status)  // 200
 
-// ── setting a body without an explicit method sends it as POST ─────────────
-// (real, well-known libcurl behavior — CURLOPT_POSTFIELDS implies POST
-// unless overridden by an explicit method; confirmed directly, not assumed
-// — see ADR-00074's Investigation)
-const bodyOnly = await fetch('http://127.0.0.1:8765/post', { body: 'raw-body-text' })
-console.log((await bodyOnly.text()).indexOf('raw-body-text') > -1)  // true
+// ── a body needs a method that takes one ────────────────────────────────────
+// (the default method is GET, and a GET or HEAD request cannot carry a body:
+// the fetch rejects with Node's TypeError and nothing is sent)
+try {
+    await fetch('http://127.0.0.1:8765/post', { body: 'raw-body-text' })
+} catch (e) {
+    console.log((e as Error).name, (e as Error).message)  // TypeError Request with GET/HEAD method cannot have body.
+}
 
 // ── fetch(url) with no init argument still works exactly as before ─────────
 const plain = await fetch('http://127.0.0.1:8765/get')

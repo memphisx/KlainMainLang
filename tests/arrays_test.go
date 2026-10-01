@@ -122,18 +122,19 @@ console.log(a[2].x, a[2].y)
 `, "[1,\"two\",{\"x\":5,\"y\":\"z\"}]\n5 z")
 }
 
-// A literal mixing an object element with a nested-array element (`[a, [b]]`)
-// is heterogeneous: its element type infers to the first element's object type,
-// so the nested array's `{ptr,i64}` aggregate has no matching slot. An array
-// value reports Ty.IR=="ptr" just like an object, so the IR-equality element
-// guard cannot see the mismatch — the array-vs-non-array shape check catches it
-// and rejects cleanly (strict), instead of emitting an invalid aggregate store.
-func TestE2EArrayObjectNestedArrayLiteralRejected(t *testing.T) {
-	mustCompileError(t, `
+// A literal mixing objects and arrays holds boxed elements; flat() splices
+// the elements that are Arrays at run time, as Array.prototype.flat does.
+func TestE2EArrayObjectNestedArrayLiteralFlat(t *testing.T) {
+	assertSameAsNode(t, `
 const a = {}, b = {}
 const r = [a, [b]].flat()
-console.log(r.length)
-`, "heterogeneous array")
+console.log(r.length, JSON.stringify(r))
+const deep = [1, 'a', [2, ['b', [3]]], new Uint8Array(2)]
+console.log(JSON.stringify(deep.flat()), JSON.stringify(deep.flat(2)), JSON.stringify(deep.flat(Infinity)), deep.flat(0).length)
+const dyn: any = JSON.parse('[1,[2,[3]]]')
+const mix = [dyn, 'z', { k: 1 }]
+console.log(JSON.stringify(mix.flat()), JSON.stringify(mix.flat(3)))
+`)
 }
 
 // -compat=js: the same mixed object/nested-array literal lowers to a boxed
@@ -692,8 +693,8 @@ undefined undefined dflt
 // the property-read TypeError.
 func TestE2EAbsentArrayNotIterable(t *testing.T) {
 	src := `
-function sum(xs?: number[]): number { let s = 0; for (const x of xs) s += x; return s }
-function spread(xs?: number[]) { return [...xs] }
+function sum(xs?: number[]): number { let s = 0; for (const x of xs!) s += x; return s }
+function spread(xs?: number[]) { return [...xs!] }
 function head(xs?: number[]) { return xs![0] }
 try { console.log(sum()) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
 try { console.log(spread()) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
@@ -715,13 +716,13 @@ interface Opt { name: string; tags?: string[]; pair?: [number, string] }
 const o1: Opt = { name: "a" }
 const o3: Opt = { name: "c", tags: ["x", "y"] }
 console.log(o1.tags, o1.tags === undefined, o1.tags?.length, o1.tags ?? ["dflt"], o1.pair)
-try { for (const t of o1.tags) console.log(t) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
-try { console.log([...o1.tags]) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
-for (const t of o3.tags) console.log(t)
-console.log([...o3.tags], o3.tags!.map(t => t + "!"))
+try { for (const t of o1.tags!) console.log(t) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+try { console.log([...o1.tags!]) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+for (const t of o3.tags!) console.log(t)
+console.log([...o3.tags!], o3.tags!.map(t => t + "!"))
 function get(f: boolean): number[] | null { return f ? [1] : null }
-try { for (const n of get(false)) console.log(n) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
-for (const n of get(true)) console.log(n)
+try { for (const n of get(false)!) console.log(n) } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+for (const n of get(true)!) console.log(n)
 const v = ((x: number) => x === 1)(1)
 console.log(v, typeof v)
 `
@@ -1809,7 +1810,10 @@ let v = "x";
 const rec: { field: string | null } = { field: null };
 ({ field: v = "keyed" } = rec);
 console.log(v);
-`, "fallback\nreal\nkeyed")
+const obj3: { name?: string } = {};
+({ name = "fallback" } = obj3);
+console.log(name);
+`, "null\nreal\nnull\nfallback")
 }
 
 func TestE2EArrayDestructuringAssignmentAtTopLevel(t *testing.T) {
@@ -2341,4 +2345,67 @@ console.log([0, 1, 2, 0, 3].filter(Boolean).join(","))
 console.log(["", "a", "", "b"].filter(Boolean).join(","))
 console.log([true, false, true].map(String).join(","))
 `, "1|2|3\n6\n1,2,3\na,b\ntrue,false,true")
+}
+
+// An unannotated mixed literal is an array of the union of its element
+// types, as TypeScript infers it (`(P | number)[]`, `(string | number |
+// boolean)[]`, `(number | number[])[]`).
+func TestE2EMixedArrayLiteralInfersUnion(t *testing.T) {
+	assertSameAsNode(t, `
+class P { x = 1 }
+const a = [new P(), 2]
+const b = ["a", 1, true]
+const c = [1, "x", null]
+console.log(a, b, c, a.length, b[0], typeof b[1])
+for (const v of b) console.log(typeof v)
+const d = [1, [2, 3]]
+console.log(d, JSON.stringify([new P(), 2, null]), JSON.stringify(b))
+const tbl = [["a", "A"], []]
+console.log(tbl, tbl[1].length, [1, []])
+`)
+}
+
+// arr.length = n truncates or extends the array through its shared header; an
+// invalid length is Node's RangeError.
+func TestE2EArrayLengthAssign(t *testing.T) {
+	assertOutput(t, `
+const a: number[] = [1, 2, 3]
+const b = a
+a.length = 1
+console.log(a, b, b.length)
+a.length = 3
+console.log(a.length, a[0])
+const s: string[] = ['x', 'y']
+s.length = 0
+s.push('z')
+console.log(s)
+const d: any[] = [1]
+d.length = 3
+console.log(d.length, d[2])
+const o = { list: [1, 2, 3] }
+o.list.length = 2
+console.log(o.list)
+try { a.length = -1 } catch (e: any) { console.log(e.name, e.message) }
+try { a.length = 1.5 } catch (e: any) { console.log(e.name, e.message) }
+`, "[ 1 ] [ 1 ] 1\n3 1\n[ 'z' ]\n3 undefined\n[ 1, 2 ]\nRangeError Invalid array length\nRangeError Invalid array length")
+}
+
+// An un-annotated local initialized from a call takes the callee's declared
+// or inferred return type — a double, a boolean — not an integer slot.
+func TestE2ELocalFromCallKeepsReturnType(t *testing.T) {
+	assertOutput(t, `
+function g(): number { return 2.5 }
+function g2() { return 1.25 }
+function b(): boolean { return true }
+function h() {
+  const t = g()
+  const u = g2()
+  const v = b()
+  console.log(t, t / 2, u, v)
+}
+h()
+class B { readonly t: number; constructor(t: number) { this.t = t } }
+class D extends B { constructor() { const t = g(); super(t) } }
+console.log(new D().t)
+`, "2.5 1.25 1.25 true\n2.5")
 }

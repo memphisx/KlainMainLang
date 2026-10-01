@@ -4,12 +4,12 @@
   "kind": "language",
   "statusPage": "JSON.md",
   "coverage": {
-    "loose": "14/15",
+    "loose": "15/15",
     "strict": "10/15",
     "strictPct": 67
   },
   "coversRows": "all",
-  "lede": "Typed and dynamic JSON. JSON.stringify covers numbers, strings, booleans, uniform arrays, objects, pretty-printing, a class toJSON() override, and whole dynamic trees; JSON.parse projects the parse tree onto a declared target type when one is annotated, and otherwise keeps the tree fully dynamic — objects as runtime property bags, arrays as dynamic arrays — so untyped `const data = JSON.parse(s)` works like JS. A few literal-only argument restrictions remain on the pretty-printer.",
+  "lede": "Typed and dynamic JSON. JSON.stringify covers numbers, strings, booleans, arrays (mixed ones included), objects, pretty-printing, a class toJSON() override, and whole dynamic trees; JSON.parse projects the parse tree onto a declared target type when one is annotated, and otherwise keeps the tree fully dynamic — objects as runtime property bags, arrays as dynamic arrays — so untyped `const data = JSON.parse(s)` works like JS. A few literal-only argument restrictions remain on the pretty-printer.",
   "entries": [
     {
       "id": "json.stringify.number",
@@ -208,9 +208,13 @@
       "id": "json.stringify.mixed-array",
       "name": "JSON.stringify(mixedTypeArray)",
       "statusRow": "JSON.stringify(mixedTypeArray)",
-      "signature": "// not supported",
-      "badge": "missing",
-      "description": "Heterogeneous arrays aren't supported: array literals and their inferred element type are uniform-type only, so a mixed-type array has no single element type to stringify against.",
+      "signature": "JSON.stringify(value: (A | B | ...)[]): string",
+      "badge": "caveats",
+      "description": "A mixed literal is an array of the union of its element types, as TypeScript infers it; each element serializes by its run-time kind, class instances and plain objects included.",
+      "snippet": "class P { x = 1 }\nconsole.log(JSON.stringify([new P(), 2, null]))   // [{\"x\":1},2,null]",
+      "differences": [
+        "Strict lane: a literal mixing two object types, or an untyped [] grown with values of different types, is rejected"
+      ],
       "seeAlso": [
         "json.stringify.object-array"
       ],

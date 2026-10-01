@@ -75,7 +75,7 @@ func TestDynjsonBoxLayoutMatchesEmitter(t *testing.T) {
 #include <stdio.h>
 #include "` + filepath.ToSlash(src) + `"
 void __kml_dtoa(char *buf, double v) { (void)buf; (void)v; }
-long long __kml_toprimitive(long long v, _Bool h) { (void)h; return v; }
+long long __kml_toprimitive(long long v, signed char h) { (void)h; return v; }
 double __kml_any_tonum(long long v) { (void)v; return 0; }
 long long __kml_dynobj_get(char *o, const char *k) { (void)o; (void)k; return 10; }
 void *__kml_inspect_begin(long long d, long long n) { (void)d; (void)n; return 0; }
@@ -83,13 +83,27 @@ void __kml_inspect_push(void *l, char *e) { (void)l; (void)e; }
 void __kml_inspect_push_more(void *l, long long r) { (void)l; (void)r; }
 char *__kml_inspect_end(void *l, const char *o, const char *c, long long i, long long d, long long a, long long n) { (void)l; (void)o; (void)c; (void)i; (void)d; (void)a; (void)n; return 0; }
 char *__kml_inspect_quote(const char *s) { (void)s; return 0; }
+_Bool __kml_key_is_symbol(const char *k) { (void)k; return 0; }
 char *__kml_fn_inspect_dyn(void **r, long long d) { (void)r; (void)d; return 0; }
 char *__kml_boxed_bigint_str(void *c) { (void)c; return 0; }
+long long __kml_obj_nkeys(void *o) { (void)o; return -1; }
+const char *__kml_obj_key(void *o, long long i) { (void)o; (void)i; return 0; }
+long long __kml_obj_get(void *o, const char *k) { (void)o; (void)k; return 10; }
+int __kml_obj_has(void *o, const char *k) { (void)o; (void)k; return 0; }
+const char *__kml_obj_name(void *o) { (void)o; return 0; }
+char *__kml_host_inspect(void *c, long long d) { (void)c; (void)d; return 0; }
+char *__kml_host_tojson(void *c) { (void)c; return 0; }
+long long __kml_inspect_opt_compact = 3, __kml_inspect_opt_sorted = 0, __kml_inspect_opt_depth = 2, __kml_inspect_opt_break = 80, __kml_inspect_opt_maxarr = 100;
+char *__kml_host_class_tag(void *c) { (void)c; return 0; }
+void *__kml_dynobj_get_proto(void *o) { (void)o; return 0; }
+long long __kml_promise_inspect_parts(void *o, long long *out) { (void)o; (void)out; return -1; }
+char *__kml_error_inspect(void *o) { (void)o; return 0; }
 int main(void) {
-    printf("kjbox %zu %zu %zu %zu %zu %zu\n", sizeof(KjBox), offsetof(KjBox, hdr), offsetof(KjBox, kind),
-           offsetof(KjBox, typed), offsetof(KjBox, ikind), offsetof(KjBox, ityped));
+    printf("kjbox %zu %zu %zu %zu %zu %zu %zu %zu %zu\n", sizeof(KjBox), offsetof(KjBox, hdr), offsetof(KjBox, kind),
+           offsetof(KjBox, typed), offsetof(KjBox, ikind), offsetof(KjBox, ityped), offsetof(KjBox, esize),
+           offsetof(KjBox, boxer), offsetof(KjBox, unboxer));
     struct { void *data; long long len; } hdr = { (void *)0x10, 7 };
-    KjBox b = { (char *)&hdr, 0, 0, -1, 0 };
+    KjBox b = { (char *)&hdr, 0, 0, -1, 0, 0, 0, 0 };
     printf("hdr %lld %p\n", kj_len(&b), (void *)kj_data(&b));
     printf("nb %lld %lld %lld %lld %lld\n", nb_pack(5, 0), nb_pack(4, 0), nb_pack(3, 0), nb_pack(3, 1), nb_double(1.5));
     printf("kinds %d %d %d %d %d\n", KJ_F64, KJ_STRING, KJ_ANY, KJ_ARRAY, KJ_I32);
@@ -125,9 +139,9 @@ int main(void) {
 	if strings.Join(got["kjbox"], " ") != strings.Join(want, " ") {
 		t.Errorf("KjBox layout: C says %v, anyArrayBoxTy %q gives %v", got["kjbox"], anyArrayBoxTy, want)
 	}
-	// The 16-byte malloc in boxAnyArray must hold the whole box.
-	if size > 16 {
-		t.Errorf("anyArrayBoxTy is %d bytes; boxAnyArray mallocs 16", size)
+	// The allocation in boxAnyArray must hold the whole box.
+	if size != anyArrayBoxSize {
+		t.Errorf("anyArrayBoxTy is %d bytes; boxAnyArray allocates %d", size, anyArrayBoxSize)
 	}
 	// arrayHeaderTy ↔ kj_data/kj_len: data at field 0, len at field 1.
 	hOffs, _ := llvmStructOffsets(t, arrayHeaderTy)
@@ -163,8 +177,8 @@ var sidecarExterns = map[string]struct {
 	externs  []string // symbols the C file declares extern, sorted
 }{
 	"dynjsonsrc/dynjson.c": {
-		provider: "ensureDynJSONC (dynjson_c.go): ensureDtoa, ensureAnyOps, ensureAnyToPrimitive, ensureDynObj, ensureInspectReduce, ensureFnMeta, ensureBoxedBigIntHooks",
-		externs:  []string{"__kml_any_tonum", "__kml_boxed_bigint_str", "__kml_dtoa", "__kml_dynobj_get", "__kml_fn_inspect_dyn", "__kml_inspect_begin", "__kml_inspect_end", "__kml_inspect_push", "__kml_inspect_push_more", "__kml_inspect_quote", "__kml_toprimitive"},
+		provider: "ensureDynJSONC (dynjson_c.go): ensureDtoa, ensureAnyOps, ensureAnyToPrimitive, ensureDynObj, ensureInspectReduce, ensureFnMeta, ensureBoxedBigIntHooks; the __kml_obj_* hooks, __kml_promise_inspect_parts and __kml_error_inspect, __kml_host_inspect and __kml_host_tojson at finalize (emitObjHooksFinalize, emitHostBoxFinalize)",
+		externs:  []string{"__kml_any_tonum", "__kml_boxed_bigint_str", "__kml_dtoa", "__kml_dynobj_get", "__kml_dynobj_get_proto", "__kml_error_inspect", "__kml_fn_inspect_dyn", "__kml_host_class_tag", "__kml_host_inspect", "__kml_host_tojson", "__kml_inspect_begin", "__kml_inspect_end", "__kml_inspect_push", "__kml_inspect_push_more", "__kml_inspect_quote", "__kml_key_is_symbol", "__kml_obj_get", "__kml_obj_has", "__kml_obj_key", "__kml_obj_name", "__kml_obj_nkeys", "__kml_promise_inspect_parts", "__kml_toprimitive"},
 	},
 }
 

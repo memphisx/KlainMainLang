@@ -1,6 +1,7 @@
 package checker
 
 import (
+	"fmt"
 	"strconv"
 
 	"KlainMainLang/ast"
@@ -91,6 +92,8 @@ func (c *Checker) computeSymbolType(sym *binder.Symbol) *Type {
 		return c.contextualOr(n, sym, n.Params)
 	case *ast.ArrowFunction:
 		return c.contextualOr(n, sym, n.Params)
+	case *ast.ClassDeclaration:
+		return c.classObject(sym, n)
 	case *ast.EnumDeclaration:
 		if sym.Flags&binder.EnumMember != 0 {
 			// A member read unqualified in an initializer: its literal type.
@@ -129,6 +132,8 @@ func (c *Checker) computeSymbolType(sym *binder.Symbol) *Type {
 		}
 		it := c.TypeOf(n.Iterable)
 		switch {
+		case it.Flags&Object != 0 && it.Kind == Array && n.Await:
+			return c.awaited(it.Elem, 0) // `for await` awaits each element
 		case it.Flags&Object != 0 && it.Kind == Array:
 			return it.Elem
 		case isStringLike(it):
@@ -418,6 +423,10 @@ func (c *Checker) predicate(tp *ast.TypePredicate, params []ast.Param, scope *bi
 	return nil
 }
 
+// BodyReturnType is the type a function body returns without an
+// annotation (returnType), for codegen's return-type decision.
+func (c *Checker) BodyReturnType(body *ast.BlockStatement) *Type { return c.returnType(body, nil) }
+
 // returnType is the type a function body returns, as TypeScript infers it
 // without an annotation: the union of its return expressions' types with
 // literals widened, void when no return has a value, or an expression body's
@@ -577,7 +586,29 @@ func classDecl(sym *binder.Symbol) *ast.ClassDeclaration {
 // members, and its base's type arguments (`extends Base<T[]>`), are typed.
 func (c *Checker) instanceOf(sym *binder.Symbol, args []*Type) *Type {
 	decl := classDecl(sym)
-	if decl == nil || len(decl.TypeParams) != len(args) {
+	if decl == nil {
+		return nil
+	}
+	if n := len(decl.TypeParams); len(args) < n && len(decl.TypeParamDefaults) == n {
+		// Omitted arguments take their parameters' defaults (`EventEmitter`
+		// is `EventEmitter<any>`), each typed with the ones before it.
+		full := append([]*Type(nil), args...)
+		for i := len(args); i < n; i++ {
+			d := decl.TypeParamDefaults[i]
+			if d == nil || d.TypeNode() == nil {
+				return nil
+			}
+			pop := c.declEnv(decl.TypeParams[:i], full)
+			dt := c.typeFromNode(d.TypeNode(), sym.Scope)
+			pop()
+			if c.Unanswered(dt) {
+				return nil
+			}
+			full = append(full, dt)
+		}
+		args = full
+	}
+	if len(decl.TypeParams) != len(args) {
 		return nil
 	}
 	generic := len(args) > 0
@@ -682,7 +713,7 @@ func (c *Checker) instanceOf(sym *binder.Symbol, args []*Type) *Type {
 		if m.IsOptional && !c.Unanswered(mt) {
 			mt = c.in.union(mt, c.missingT) // `m?(): T` is absent unless implemented
 		}
-		t.setProp(&Property{Name: m.Name, Type: mt, Optional: m.IsOptional, Visibility: m.Visibility, Owner: sym})
+		t.setProp(&Property{Name: m.Name, Type: mt, Optional: m.IsOptional, Visibility: m.Visibility, Owner: sym, Decl: m})
 	}
 	return t
 }
@@ -699,9 +730,6 @@ func (t *Type) setProp(p *Property) {
 	}
 	t.Props = append(t.Props, p)
 }
-
-// interfaceType is the type an interface declares.
-func (c *Checker) interfaceType(sym *binder.Symbol) *Type { return c.interfaceOf(sym, nil) }
 
 // interfaceOf is the type interface sym declares with type arguments args
 // (nil for a non-generic interface).
@@ -947,6 +975,20 @@ func (c *Checker) signatureOfNodes(key string, tps []*ast.TypeParameter, params 
 		names = append(names, name)
 	}
 	defer c.pushEnv(names, tpTypes)()
+	// Each type parameter's `extends` constraint, read once the parameters
+	// are named (a constraint may name another: `<K, V extends K>`).
+	for i, tp := range tps {
+		if tp.Constraint != nil && tpTypes[i].Constraint == nil {
+			if ct := c.typeFromNode(tp.Constraint, scope); !c.Unanswered(ct) {
+				tpTypes[i].Constraint = ct
+			}
+		}
+		if tp.Default != nil && tpTypes[i].Default == nil {
+			if dt := c.typeFromNode(tp.Default, scope); !c.Unanswered(dt) {
+				tpTypes[i].Default = dt
+			}
+		}
+	}
 	var ps []*Type
 	var opts []bool
 	rest := false
@@ -1084,9 +1126,27 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 			}
 			return c.falseT
 		}
+	case *ast.TemplateLiteralType:
+		return c.templateLiteralType(n, scope)
 	case *ast.TypeOperator:
 		if n.Operator == "unique" {
 			return c.symT // `unique symbol`: a symbol, its identity not modelled
+		}
+		if n.Operator == "readonly" {
+			// `readonly T[]` is ReadonlyArray<T>; a readonly tuple is the
+			// tuple (its elements' writability is not modelled).
+			inner := c.typeFromNode(n.Type, scope)
+			if c.Unanswered(inner) || inner.Flags&Object == 0 {
+				return inner
+			}
+			if inner.Kind == Array && c.b.Globals != nil {
+				if sym := c.b.Globals.Symbols.Get("ReadonlyArray"); sym != nil && sym.Flags&binder.Interface != 0 {
+					if ro := c.interfaceOf(sym, []*Type{inner.Elem}); !c.Unanswered(ro) {
+						return ro
+					}
+				}
+			}
+			return inner
 		}
 		return c.unanswered
 	case *ast.ParenthesizedType:
@@ -1218,6 +1278,7 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 	case *ast.TypeLiteral:
 		var props []*Property
 		var strIdx, numIdx *Type
+		var calls, constructs []*Type
 		for _, m := range n.Members {
 			if ix, ok := m.(*ast.IndexSignature); ok {
 				kind, vt := c.indexSignature(ix, scope)
@@ -1231,6 +1292,38 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 				default:
 					return c.unanswered
 				}
+				continue
+			}
+			// A method, call or construct signature (`declare var URL:
+			// { new (url: string): URL; parse(…): URL | null }`), as an
+			// interface's members are.
+			switch sm := m.(type) {
+			case *ast.MethodSignature:
+				if sm.Computed {
+					return c.unanswered
+				}
+				mt := c.signatureOfNodes(fmt.Sprintf("lit%p", sm), sm.TypeParameters, sm.Parameters, sm.Type, scope)
+				if c.Unanswered(mt) {
+					return mt
+				}
+				if sm.Optional {
+					mt = c.in.union(mt, c.missingT)
+				}
+				props = append(props, &Property{Name: sm.Name, Type: mt, Optional: sm.Optional, Decl: sm, Decls: []ast.Node{sm}})
+				continue
+			case *ast.CallSignature:
+				st := c.signatureOfNodes(fmt.Sprintf("lit%p", sm), sm.TypeParameters, sm.Parameters, sm.Type, scope)
+				if c.Unanswered(st) {
+					return st
+				}
+				calls = append(calls, st)
+				continue
+			case *ast.ConstructSignature:
+				st := c.signatureOfNodes(fmt.Sprintf("lit%p", sm), sm.TypeParameters, sm.Parameters, sm.Type, scope)
+				if c.Unanswered(st) {
+					return st
+				}
+				constructs = append(constructs, st)
 				continue
 			}
 			p, ok := m.(*ast.PropertySignature)
@@ -1272,7 +1365,7 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 			}
 			props = append(props, &Property{Name: p.Name, Type: t, Optional: p.Optional, Readonly: p.Readonly})
 		}
-		return c.in.indexed(props, strIdx, numIdx)
+		return c.in.withSignatures(c.in.indexed(props, strIdx, numIdx), calls, constructs)
 	case *ast.TypeReference:
 		if len(n.Qualifier) > 0 {
 			// `NS.T` / `NS.T<A>`: T among the namespace's own declarations.
@@ -1357,9 +1450,6 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 	}
 	return c.unanswered
 }
-
-// aliasType is the type a type alias names.
-func (c *Checker) aliasType(sym *binder.Symbol) *Type { return c.aliasOf(sym, nil) }
 
 // aliasOf is the type alias sym names with type arguments args (nil for a
 // non-generic alias), memoised per argument list.
@@ -1471,7 +1561,30 @@ func (c *Checker) lookupEnv(name string) *Type {
 // classTypeParam is a generic class's type parameter as a type, while its
 // type arguments are being inferred from a `new`.
 func (c *Checker) classTypeParam(sym *binder.Symbol, name string) *Type {
-	return c.in.intern("q"+strconv.Itoa(sym.ID)+":"+name, func() *Type { return &Type{Flags: TypeParam, Value: name} })
+	t, fresh := c.in.intern2("q"+strconv.Itoa(sym.ID)+":"+name, func() *Type { return &Type{Flags: TypeParam, Value: name} })
+	if !fresh {
+		return t
+	}
+	// Its `extends` constraint and `= T` default.
+	if decl := classDecl(sym); decl != nil {
+		for i, n := range decl.TypeParams {
+			if n != name {
+				continue
+			}
+			read := func(as []*ast.TypeAnnotation) *Type {
+				if i >= len(as) || as[i] == nil || as[i].TypeNode() == nil {
+					return nil
+				}
+				if rt := c.typeFromNode(as[i].TypeNode(), sym.Scope); !c.Unanswered(rt) {
+					return rt
+				}
+				return nil
+			}
+			t.Constraint = read(decl.TypeParamConstraints)
+			t.Default = read(decl.TypeParamDefaults)
+		}
+	}
+	return t
 }
 
 // constructorType is the signature `new C(…)` calls: the constructor's
@@ -1527,6 +1640,104 @@ func (c *Checker) constructorType(sym *binder.Symbol) *Type {
 		return nil
 	}
 	return c.in.function(sig.Params, sig.optionals, sig.restParam, inst, nil, tps)
+}
+
+// classObject is a class's value, TypeScript's `typeof C`: its static
+// fields, methods and accessors (a base class's too), its `prototype`, and
+// its construct signature.
+func (c *Checker) classObject(sym *binder.Symbol, decl *ast.ClassDeclaration) *Type {
+	var props []*Property
+	partial := false
+	add := func(p *Property) {
+		for _, q := range props {
+			if q.Name == p.Name {
+				return // a duplicate, or an inherited static the class redeclares
+			}
+		}
+		props = append(props, p)
+	}
+	for _, f := range decl.Fields {
+		if !f.Static {
+			continue
+		}
+		ft := c.unanswered
+		switch {
+		case f.Type != nil && f.Type.TypeNode() != nil:
+			ft = c.typeFromNode(f.Type.TypeNode(), sym.Scope)
+		case f.Initializer != nil:
+			ft = c.widenFrom(f.Initializer, c.TypeOf(f.Initializer))
+		}
+		if f.Optional && !c.Unanswered(ft) {
+			ft = c.in.union(ft, c.missingT)
+		}
+		add(&Property{Name: f.Name, Type: ft, Optional: f.Optional, Readonly: f.Readonly, Visibility: f.Visibility, Owner: sym})
+	}
+	for _, m := range decl.Methods {
+		if !m.IsStatic {
+			continue
+		}
+		if m.AccessorKind != "" {
+			at := c.unanswered
+			if !m.IsAsync && !m.IsGenerator {
+				if sig := c.signatureType(m, m.Params, m.ReturnType, m.Body, nil, sym.Scope); !c.Unanswered(sig) {
+					switch {
+					case m.AccessorKind == "get":
+						at = sig.Result
+					case len(sig.Params) == 1:
+						at = sig.Params[0]
+					}
+				}
+			}
+			for i, q := range props {
+				if q.Name == m.Name && q.Accessor {
+					if m.AccessorKind == "get" {
+						props[i] = &Property{Name: m.Name, Type: at, Accessor: true, Visibility: m.Visibility, Owner: sym}
+					}
+					at = nil
+				}
+			}
+			if at != nil {
+				add(&Property{Name: m.Name, Type: at, Accessor: true, Visibility: m.Visibility, Owner: sym})
+			}
+			continue
+		}
+		mt := c.unanswered
+		if len(m.Overloads) > 0 && !m.IsAsync && !m.IsGenerator {
+			mt = c.overloadsType(strconv.Itoa(sym.ID)+".static."+m.Name, sym.Scope, m.Overloads)
+		} else if !m.IsAsync && !m.IsGenerator {
+			mt = c.signatureType(m, m.Params, m.ReturnType, m.Body, nil, sym.Scope)
+		}
+		add(&Property{Name: m.Name, Type: mt, Visibility: m.Visibility, Owner: sym, Decl: m})
+	}
+	if decl.BaseClass != "" {
+		// A base class's statics are the derived class's too; a builtin
+		// base's (Error.captureStackTrace) are not modelled.
+		bsym := resolveTypeName(decl.BaseClass, sym.Scope)
+		if bt := (*Type)(nil); bsym != nil && bsym.Flags&binder.Class != 0 {
+			if bt = c.typeOfSymbol(bsym); bt.Flags&Object != 0 && !c.Unanswered(bt) {
+				for _, p := range bt.Props {
+					if p.Name != "prototype" {
+						add(p)
+					}
+				}
+				partial = partial || bt.partial
+			} else {
+				partial = true
+			}
+		} else {
+			partial = true
+		}
+	}
+	if len(decl.TypeParams) == 0 {
+		if inst := c.instanceOf(sym, nil); inst != nil {
+			add(&Property{Name: "prototype", Type: inst, Readonly: true})
+		}
+	}
+	t := c.in.objectOf(props, partial, false)
+	if ctor := c.constructorType(sym); ctor != nil {
+		t = c.in.withSignatures(t, nil, []*Type{ctor})
+	}
+	return t
 }
 
 // baseInstance is the instance type of decl's base class, with the
@@ -1854,4 +2065,48 @@ func (c *Checker) indexSignature(ix *ast.IndexSignature, scope *binder.Scope) (s
 		return "", c.unanswered
 	}
 	return kind, c.typeFromNode(ix.Type, scope)
+}
+
+// templateLiteralType is a template literal type (`${A}-x`): the string
+// literals it spells when every hole is a literal type (or a union of them),
+// else string. (A pattern type is not modelled: any string satisfies it.)
+func (c *Checker) templateLiteralType(n *ast.TemplateLiteralType, scope *binder.Scope) *Type {
+	if len(n.Spans) == 0 {
+		return c.in.literal(StringLiteral, n.Head)
+	}
+	texts := []string{n.Head}
+	for _, sp := range n.Spans {
+		t := c.typeFromNode(sp.Type, scope)
+		if c.Unanswered(t) {
+			return c.strT
+		}
+		var parts []string
+		for _, m := range members(t) {
+			switch {
+			case m.Flags&(StringLiteral|NumberLiteral) != 0:
+				parts = append(parts, m.Value)
+			case m == c.trueT:
+				parts = append(parts, "true")
+			case m == c.falseT:
+				parts = append(parts, "false")
+			default:
+				return c.strT
+			}
+		}
+		if len(parts) == 0 || len(texts)*len(parts) > 256 {
+			return c.strT
+		}
+		var next []string
+		for _, pre := range texts {
+			for _, p := range parts {
+				next = append(next, pre+p+sp.Literal)
+			}
+		}
+		texts = next
+	}
+	var lits []*Type
+	for _, s := range texts {
+		lits = append(lits, c.in.literal(StringLiteral, s))
+	}
+	return c.in.union(lits...)
 }

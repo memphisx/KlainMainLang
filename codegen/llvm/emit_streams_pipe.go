@@ -90,11 +90,12 @@ func (e *Emitter) resolvePipeOptions(opt ast.Expression, pos ast.Pos) (flagsRef,
 			if err != nil {
 				return "", "", "", err
 			}
-			if !sv.Ty.IsAbortSignal {
+			if !e.isAbortSignalType(sv.Ty) {
 				return "", "", "", fmt.Errorf("%d:%d: pipe option 'signal' must be an AbortSignal", pos.Line, pos.Col)
 			}
-			aIdx, _, _ := sv.Ty.FieldIndex("aborted")
-			rIdx, _, _ := sv.Ty.FieldIndex("reason")
+			// The class's private #aborted flag and #reason (emit_signal.go).
+			aIdx, _, _ := sv.Ty.FieldIndex("#aborted")
+			rIdx, _, _ := sv.Ty.FieldIndex("#reason")
 			ag := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", ag, sv.Ty.StructIR(), sv.Ref, aIdx))
 			rg := e.freshReg()
@@ -132,10 +133,10 @@ func (e *Emitter) emitStreamPipeTo(srcPtr string, chunkTy Type, args []ast.Expre
 	// Lock both ends like the spec does.
 	l1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_lock(ptr %s)", l1, srcPtr))
-	e.streamThrowTypeError(l1, "pipeTo: source ReadableStream is already locked")
+	e.streamThrowTypeError(l1, "Invalid state: The ReadableStream is locked")
 	l2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ws_lock(ptr %s)", l2, dv.Ref))
-	e.streamThrowTypeError(l2, "pipeTo: destination WritableStream is already locked")
+	e.streamThrowTypeError(l2, "Invalid state: The WritableStream is locked")
 	decode := e.emitStreamDecodeThunk(chunkTy)
 	prom := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_pipe_to(ptr %s, ptr %s, ptr %s, i64 %s, ptr %s, ptr %s)",
@@ -169,7 +170,7 @@ func (e *Emitter) emitStreamPipeThrough(srcPtr string, chunkTy Type, args []ast.
 	}
 	l1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_lock(ptr %s)", l1, srcPtr))
-	e.streamThrowTypeError(l1, "pipeThrough: source ReadableStream is already locked")
+	e.streamThrowTypeError(l1, "Invalid state: The ReadableStream is locked")
 	// transform value is the ts ctx: field 0 readable, field 1 writable.
 	wGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", wGep, tv.Ref))
@@ -177,7 +178,7 @@ func (e *Emitter) emitStreamPipeThrough(srcPtr string, chunkTy Type, args []ast.
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", wPtr, wGep))
 	l2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ws_lock(ptr %s)", l2, wPtr))
-	e.streamThrowTypeError(l2, "pipeThrough: the transform's writable side is already locked")
+	e.streamThrowTypeError(l2, "Invalid state: The WritableStream is locked")
 	decode := e.emitStreamDecodeThunk(chunkTy)
 	ign := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_pipe_to(ptr %s, ptr %s, ptr %s, i64 %s, ptr %s, ptr %s)",
@@ -199,7 +200,7 @@ func (e *Emitter) emitStreamTee(srcPtr string, chunkTy Type, pos ast.Pos) (Value
 	e.ensureStreamPipeRuntime()
 	l1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_lock(ptr %s)", l1, srcPtr))
-	e.streamThrowTypeError(l1, "tee: ReadableStream is already locked")
+	e.streamThrowTypeError(l1, "Invalid state: ReadableStream is locked")
 
 	fulfill := e.emitStreamFulfillThunk(chunkTy)
 	decode := e.emitStreamDecodeThunk(chunkTy)
@@ -442,10 +443,45 @@ func (e *Emitter) emitTransformStreamProperty(ex *ast.MemberExpression, objTy Ty
 	return Value{}, fmt.Errorf("%d:%d: property '%s' is not available on a TransformStream", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
 }
 
+// emitLockUsedBodyStream marks stream s disturbed and locked (the state a
+// body method leaves its body stream in) when the Response's body is used.
+func (e *Emitter) emitLockUsedBodyStream(objVal Value, s string) {
+	fIdx, _, _ := objVal.Ty.FieldIndex("__kml_bodyflags")
+	flags := e.loadFieldValue(objVal, fIdx, TypeI64)
+	u := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", u, flags.Ref, responseBodyUsed))
+	used := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", used, u))
+	e.emitLockStreamIf(used, s)
+}
+
+// emitLockStreamIf sets stream s's disturbed and locked flags when cond
+// holds (s may be null).
+func (e *Emitter) emitLockStreamIf(cond, s string) {
+	nn := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", nn, s))
+	do := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", do, cond, nn))
+	lockL, skipL := e.freshLabel("rs.lockused"), e.freshLabel("rs.lockused.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", do, lockL, skipL))
+	e.emitLabel(lockL)
+	fp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 11", fp, rstreamStructIR, s))
+	f := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", f, fp))
+	f2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i64 %s, 48", f2, f))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", f2, fp))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", skipL))
+	e.emitLabel(skipL)
+}
+
 // emitResponseBodyStream implements `res.body` (TDD-00097 Stage 4): a
 // ReadableStream<Uint8Array> fed by libcurl's write callback for a still-live
 // transfer (pausing at the high-water mark, unpausing on pull), or a one-chunk
-// replay of the buffered body for an already-finished Response.
+// replay of the buffered body for an already-finished Response. The stream
+// is kept in __kml_stream, so every read is the same stream; a Response
+// constructed without a body has a null `.body`.
 func (e *Emitter) emitResponseBodyStream(ex *ast.MemberExpression) (Value, error) {
 	objVal, err := e.emitExpr(ex.Object)
 	if err != nil {
@@ -454,6 +490,28 @@ func (e *Emitter) emitResponseBodyStream(ex *ast.MemberExpression) (Value, error
 	e.ensureFetchBodyStream()
 	chunkTy := TypedArrayType("uint8")
 	fulfill := e.emitStreamFulfillThunk(chunkTy)
+	sIdx, _, _ := objVal.Ty.FieldIndex("__kml_stream")
+	sGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", sGep, objVal.Ty.StructIR(), objVal.Ref, sIdx))
+	cached := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cached, sGep))
+	fIdx, _, _ := objVal.Ty.FieldIndex("__kml_bodyflags")
+	flags := e.loadFieldValue(objVal, fIdx, TypeI64)
+	nb := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", nb, flags.Ref, responseNullBody))
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isNull, nb))
+	have := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", have, cached))
+	done := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", done, isNull, have))
+	fromL := e.freshLabel("resp.body.cached")
+	buildL := e.freshLabel("resp.body.build")
+	joinL := e.freshLabel("resp.body.join")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, fromL, buildL))
+	e.emitLabel(fromL)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(buildL)
 	s := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 1.0, ptr %s)", s, fulfill))
 
@@ -476,7 +534,17 @@ func (e *Emitter) emitResponseBodyStream(ex *ast.MemberExpression) (Value, error
 	actual := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_body_stream(ptr %s, ptr %s, ptr %s, i64 %s)",
 		actual, pending, s, bVal.Ref, lVal.Ref))
-	return Value{Ref: actual, Ty: ReadableStreamType(chunkTy)}, nil
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", actual, sGep))
+	// After a body method the stream is the consumed one: locked, read.
+	e.emitLockUsedBodyStream(objVal, actual)
+	buildEnd := e.freshLabel("resp.body.built")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", buildEnd))
+	e.emitLabel(buildEnd)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(joinL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", r, cached, fromL, actual, buildEnd))
+	return Value{Ref: r, Ty: ReadableStreamType(chunkTy)}, nil
 }
 
 // emitNewCompressionStream implements `new CompressionStream(format)` /

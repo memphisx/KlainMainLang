@@ -75,8 +75,17 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			}
 			continue
 		}
+		// Async / generator method shorthand: `async m() {}`, `*m() {}`,
+		// `async *m() {}`, `*[Symbol.iterator]() {}`. `async` is contextual —
+		// a modifier only when a member name, `[` or `*` follows on the same
+		// line (`{ async: 1 }`, `{ async() {} }` keep their plain meaning).
+		isAsyncMethod := p.isWord(0, "async") && p.sameLine(1) && objectMethodNameStart(p.peekNth(1))
+		if isAsyncMethod {
+			p.advance() // 'async'
+		}
+		isGeneratorMethod := p.match(lexer.STAR)
 		if p.check(lexer.LBRACKET) {
-			// Computed property key `{ [expr]: value }`.
+			// Computed property key `{ [expr]: value }` or method `{ [expr]() {} }`.
 			p.advance() // '['
 			keyExpr, err := p.parseAssignment()
 			if err != nil {
@@ -92,16 +101,26 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			// typed field) instead of collapsing to a dynamic Map. Both the
 			// `[Symbol.x]: fn` and the `[Symbol.x]() {...}` method-shorthand
 			// forms are accepted.
+			isMethod := isAsyncMethod || isGeneratorMethod || p.check(lexer.LPAREN) || p.check(lexer.LT)
+			methodValue := func() (ast.Expression, error) {
+				fnPos := posOf(p.peek())
+				fd, err := p.parseFunctionRest("", isAsyncMethod, false, false)
+				if err != nil {
+					return nil, err
+				}
+				eraseTypeParams(fd)
+				fe := p.newFuncExpr("", fd, isAsyncMethod, fnPos)
+				fe.IsGenerator = isGeneratorMethod
+				return fe, nil
+			}
 			if wk, wkOk := wellKnownSymbolMemberName(keyExpr); wkOk {
 				var val ast.Expression
-				if p.check(lexer.LPAREN) {
-					fnPos := posOf(p.peek())
-					fd, err := p.parseFunctionRest("", false, false, false)
+				if isMethod {
+					fe, err := methodValue()
 					if err != nil {
 						return nil, err
 					}
-					eraseTypeParams(fd)
-					val = p.newFuncExpr("", fd, false, fnPos)
+					val = fe
 				} else {
 					if _, err := p.expect(lexer.COLON); err != nil {
 						return nil, err
@@ -118,10 +137,15 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 				}
 				continue
 			}
-			if _, err := p.expect(lexer.COLON); err != nil {
-				return nil, err
+			var val ast.Expression
+			if isMethod {
+				val, err = methodValue()
+			} else {
+				if _, err := p.expect(lexer.COLON); err != nil {
+					return nil, err
+				}
+				val, err = p.parseAssignment()
 			}
-			val, err := p.parseAssignment()
 			if err != nil {
 				return nil, err
 			}
@@ -153,15 +177,6 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			}
 			continue
 		}
-		// Async / generator method shorthand: `async m() {}`, `*m() {}`,
-		// `async *m() {}`. `async` is contextual — a modifier only when a
-		// member name or `*` follows on the same line (`{ async: 1 }`,
-		// `{ async() {} }` keep their plain meaning).
-		isAsyncMethod := p.isWord(0, "async") && p.sameLine(1) && objectMethodNameStart(p.peekNth(1))
-		if isAsyncMethod {
-			p.advance() // 'async'
-		}
-		isGeneratorMethod := p.match(lexer.STAR)
 		if isAsyncMethod || isGeneratorMethod {
 			keyTok := p.advance()
 			if keyTok.Type != lexer.IDENT && keyTok.Type != lexer.STRING && keyTok.Type != lexer.NUMBER && !lexer.IsKeyword(keyTok.Type) {
@@ -252,7 +267,7 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 // object literal: a member name or the generator `*`.
 func objectMethodNameStart(t lexer.Token) bool {
 	return t.Type == lexer.IDENT || t.Type == lexer.STRING || t.Type == lexer.NUMBER ||
-		t.Type == lexer.STAR || lexer.IsKeyword(t.Type)
+		t.Type == lexer.STAR || t.Type == lexer.LBRACKET || lexer.IsKeyword(t.Type)
 }
 
 func (p *Parser) parseNew() (ast.Expression, error) {

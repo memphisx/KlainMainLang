@@ -619,16 +619,13 @@ console.log(add(1, 2))
 	}
 }
 
-func TestE2EReExportFromBuiltinModuleRejected(t *testing.T) {
-	_, err := resolveMultiFile(t, map[string]string{
-		"main.ts": `
-export { readFileSync } from 'fs'
-console.log("unused")
-`,
-	}, "main.ts")
-	if err == nil {
-		t.Fatal("expected a compile error re-exporting from a built-in module, got none")
-	}
+// A builtin module's export re-exported, as any module's (`fs` is written
+// in TypeScript).
+func TestE2EReExportFromBuiltinModule(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"lib.ts":  "export { existsSync } from 'fs'\n",
+		"main.ts": "import { existsSync } from './lib'\nconsole.log(existsSync('/definitely/not/here'))\n",
+	}, "main.ts", "false\n")
 }
 
 func TestE2EReExportNamespaceStarNotSupported(t *testing.T) {

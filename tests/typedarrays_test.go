@@ -1,9 +1,6 @@
 package tests
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 // --- ArrayBuffer / TypedArrays (see docs/adr/ADR-00078.md, docs/tdd/TDD-00018.md) ---
 
@@ -421,20 +418,13 @@ try { ta.set([1], Symbol()); console.log("no throw"); } catch (e) { console.log(
 `, "60 Int32Array(4) [ 0, 0, 0, 0 ]\n0\ntrue\ntrue")
 }
 
-// ADR-01059: a mixed array literal never reinterprets a buffer — strict
-// rejects it cleanly, -compat=js boxes it to any[] keeping each element's
-// identity (Node prints `Int32Array(1) [ 8 ]`, and set() reads the i32s).
-func TestE2EMixedArrayLiteralStrictRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// ADR-01059: a mixed array literal never reinterprets a buffer — it is a
+// `(number[] | Int32Array)[]` (ADR-01214), each element keeping its identity.
+func TestE2EMixedArrayLiteralStrictUnion(t *testing.T) {
+	assertSameAsNode(t, `
 const mixed = [[7], new Int32Array([8])];
-console.log(mixed);
+console.log(mixed, mixed.length);
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for a number[] / Int32Array mixed literal, got none")
-	}
-	if !strings.Contains(err.Error(), "element 1 is a Int32Array, not a number[]") {
-		t.Fatalf("unexpected error: %v", err)
-	}
 }
 
 func TestE2EMixedArrayLiteralJSBoxes(t *testing.T) {

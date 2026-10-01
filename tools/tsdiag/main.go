@@ -335,6 +335,7 @@ func main() {
 			module := reModule.MatchString(string(src))
 			c := checker.New(binder.BindWith(prog, binder.Options{AnnexB: sloppy, Script: !module, Lib: libProgs}))
 			c.ImplicitAnyVariables = !strictFamily("noimplicitany")
+			c.ImplicitThis = !strictFamily("noimplicitthis")
 			c.CatchVariablesAny = !strictFamily("useunknownincatchvariables")
 			c.LibGlobal = libGlobals(dirs)
 			switch dirs["target"] {

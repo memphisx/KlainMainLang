@@ -71,9 +71,7 @@ console.log(intContainer.get());         // 200 (unchanged)
 // ── Object type arguments (TDD-00069): a generic over a record type ──────────
 interface Point { x: number; y: number; }
 
-function identity<T>(x: T): T { return x; }
-function first<T>(xs: T[]): T { return xs[0]; }
-
+// identity and first (above) are generic over any T, a record type included.
 const p: Point = { x: 3, y: 4 };
 console.log(identity(p).x);      // 3
 

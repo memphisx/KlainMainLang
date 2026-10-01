@@ -1,6 +1,5 @@
-// readline — interactive line-by-line stdin. Import-gated (a virtual built-in
-// module, not a real file). createInterface returns an EventEmitter-style
-// Interface:
+// readline — interactive line-by-line stdin, Node's readline module.
+// createInterface returns an EventEmitter Interface:
 //
 //   rl.on('line', (line) => ...)   fires once per input line (CR stripped)
 //   rl.question(query, (answer) => ...)  writes the prompt, routes the next
@@ -8,8 +7,8 @@
 //   rl.close()                     stop reading; fires the 'close' event
 //   rl.on('close', () => ...)      also fires on end-of-input (EOF)
 //
-// Stdin is folded into the same event loop as timers/child_process, so the
-// callbacks fire as input arrives rather than blocking.
+// On a terminal the line can be edited (arrows, Ctrl-A/E, history) as in
+// Node. Reading a file line by line is lines.ts.
 //
 // Run it and type lines, then Ctrl-D (EOF):  ./readline
 // Or pipe input:  printf 'Ada\n2\n4\n' | ./readline

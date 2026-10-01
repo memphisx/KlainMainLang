@@ -366,6 +366,20 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		return nil
 	}
 
+	// `return v` from a function returning void (a `T | undefined` return
+	// with T = void): v can only be undefined; it is evaluated for its
+	// effects.
+	if e.currentRetType.IR == "void" {
+		if _, err := e.emitExpr(r.Value); err != nil {
+			return err
+		}
+		if err := e.emitReturnCleanups(); err != nil {
+			return err
+		}
+		e.emitValuelessRet()
+		return nil
+	}
+
 	// A nullable-scalar return value (TDD-00064 Stage 3) is boxed into its
 	// { i1, T } aggregate so the caller can tell a real value from null.
 	if isNullableScalar(e.currentRetType) {
@@ -396,12 +410,25 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		// caller aliases the same array; a transient/new array expression has no
 		// header, so a fresh one is minted. arrayReturnHeader encodes exactly that
 		// share-or-mint split (the return analogue of storeArrayFieldHeader).
-		arrVal, err := e.emitExpr(r.Value)
+		var arrVal Value
+		var err error
+		if lit, ok := r.Value.(*ast.ArrayLiteral); ok && e.currentRetType.ElemType != nil {
+			// A literal takes the declared element type (`[1, 'x']` in an
+			// `any[]` function boxes each element).
+			arrVal, err = e.emitArrayLiteralAggregate(lit, e.currentRetType.ElemType)
+		} else {
+			arrVal, err = e.emitExpr(r.Value)
+		}
 		if err != nil {
 			return err
 		}
 		if arrVal.Ty.IsDynamic {
 			arrVal = e.emitUnboxBoxToType(arrVal.Ref, e.currentRetType)
+		}
+		// A concrete array returned as `any[]` (or the reverse): its elements
+		// converted, in a copy.
+		if conv, ok := e.coerceArrayElems(arrVal, e.currentRetType); ok {
+			arrVal = conv
 		}
 		if !arrVal.Ty.IsArray && !arrVal.Ty.IsNull {
 			return fmt.Errorf("%d:%d: expression is not an array", r.Value.GetPos().Line, r.Value.GetPos().Col)
@@ -707,6 +734,14 @@ func (e *Emitter) splitArrayAggregate(arrVal Value) (dataPtrAlloca, lenAlloca st
 // produces a {ptr, i64} array aggregate (e.g. Object.keys(obj), arr.slice(1),
 // map.values()).
 func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
+	// `xs!` is erased at run time: iterating it is iterating xs, whose
+	// absence is Node's "xs is not iterable".
+	if nn, ok := s.Iterable.(*ast.NonNullExpression); ok && e.inferExprType(nn.Arg).IsArray {
+		saved := s.Iterable
+		s.Iterable = nn.Arg
+		defer func() { s.Iterable = saved }()
+		return e.emitForOf(s)
+	}
 	condL := e.freshLabel("forof.cond")
 	bodyL := e.freshLabel("forof.body")
 	incL := e.freshLabel("forof.inc")
@@ -819,26 +854,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			if err != nil {
 				return err
 			}
-			chunkTy := TypedArrayType("uint8")
-			rsTy := ReadableStreamType(chunkTy)
-			rsPtr := e.nodeStreamSide(nr.Ref, 0)
-			return e.emitForAwaitOfStream(s, rsTy, Value{Ref: rsPtr, Ty: rsTy}, condL, bodyL, incL, endL)
-		}
-		// A Node Readable (fs.createReadStream, Readable.from, …) — unwrap to its
-		// inner WHATWG rstream (field 0) and reuse the stream for-await path
-		// (TDD-00108). Its chunk type is StreamOut.
-		if objTy.IsNodeReadable {
-			nsVal, err := e.emitExpr(s.Iterable)
-			if err != nil {
-				return err
-			}
-			chunkTy := TypeI64
-			if objTy.StreamOut != nil {
-				chunkTy = *objTy.StreamOut
-			}
-			rsTy := ReadableStreamType(chunkTy)
-			rsPtr := e.nodeStreamSide(nsVal.Ref, 0)
-			return e.emitForAwaitOfStream(s, rsTy, Value{Ref: rsPtr, Ty: rsTy}, condL, bodyL, incL, endL)
+			return e.emitForOfAnyValue(s, nr, condL, bodyL, incL, endL)
 		}
 		if objTy.IsClass {
 			if info, ok := e.classes[objTy.ClassName]; ok {
@@ -908,6 +924,10 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrR, valsVal.Ref))
 			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenR, valsVal.Ref))
 			return e.emitForAwaitOfArrayCore(s, *valsVal.Ty.ElemType, ptrR, lenR, condL, bodyL, incL, endL)
+		}
+		// A bare any/unknown: the run-time protocol (emit_stmts_forof_any.go).
+		if isUnconstrainedDynamic(objTy) {
+			return e.emitForOfAny(s, condL, bodyL, incL, endL)
 		}
 		return fmt.Errorf("%d:%d: 'for await...of' requires an async generator, a sync generator, a class with a [Symbol.asyncIterator]() method, an array, a Map, or a Set (TDD-00089/TDD-00092)", s.GetPos().Line, s.GetPos().Col)
 	}
@@ -986,83 +1006,9 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		return e.emitForOfGenerator(s, objTy, genVal, condL, bodyL, incL, endL)
 	}
 
-	// `for (const [k, v] of map)` decomposes ENTRIES (ADR-00481, clearing
-	// the ADR-00011 caveat): a two-plain-name array pattern over a Map
-	// iterates the keys and values arrays in parallel (the runtime emits
-	// both in one insertion order). Anything else keeps the values-only
-	// iteration below.
-	if len(s.ArrayPattern) == 2 && s.ObjectPattern == nil {
-		plain := s.ArrayPattern[0].Name != "" && s.ArrayPattern[1].Name != "" &&
-			s.ArrayPattern[0].SubArray == nil && s.ArrayPattern[0].SubObject == nil &&
-			s.ArrayPattern[1].SubArray == nil && s.ArrayPattern[1].SubObject == nil &&
-			!s.ArrayPattern[0].Rest && !s.ArrayPattern[1].Rest
-		if iterTy := e.inferExprType(s.Iterable); plain && iterTy.IsMap && !iterTy.IsSet && !iterTy.IsDynamicObject {
-			mapVal, err := e.emitExpr(s.Iterable)
-			if err != nil {
-				return err
-			}
-			keysVal, err := e.emitMapCall(iterTy, mapVal.Ref, "keys", nil, s.GetPos())
-			if err != nil {
-				return err
-			}
-			valsVal, err := e.mapOrSetValuesArray(iterTy, mapVal.Ref)
-			if err != nil {
-				return err
-			}
-			keyTy, valTy := *keysVal.Ty.ElemType, *valsVal.Ty.ElemType
-			kData, kLen := e.splitArrayAggregate(keysVal)
-			vData, _ := e.splitArrayAggregate(valsVal)
-
-			idxPtr := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
-			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
-			kPtr := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", kPtr, keyTy.IR, keyTy.Align()))
-			vPtr := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", vPtr, valTy.IR, valTy.Align()))
-			e.define(s.ArrayPattern[0].Name, Symbol{Ptr: kPtr, Ty: keyTy})
-			e.define(s.ArrayPattern[1].Name, Symbol{Ptr: vPtr, Ty: valTy})
-
-			e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
-			e.emitLabel(condL)
-			e.emitSafepoint() // loop back-edge preempt check (TDD-00143 Stage 2)
-			idxV, lenV, cond := e.freshReg(), e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxV, idxPtr))
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenV, kLen))
-			e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", cond, idxV, lenV))
-			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cond, bodyL, endL))
-
-			e.emitLabel(bodyL)
-			idx2 := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idx2, idxPtr))
-			kd, kg := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", kd, kData))
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", kg, keyTy.IR, kd, idx2))
-			kv := e.loadArrayElem(kg, keyTy)
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", keyTy.IR, kv.Ref, kPtr, keyTy.Align()))
-			vd, vg := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", vd, vData))
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", vg, valTy.IR, vd, idx2))
-			vv := e.loadArrayElem(vg, valTy)
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", valTy.IR, vv.Ref, vPtr, valTy.Align()))
-			end := e.beginLoopIteration(s.Kind, forOfLoopVars(s), s.Body)
-			for _, st := range s.Body.Body {
-				if err := e.emitStmt(st); err != nil {
-					end()
-					return err
-				}
-			}
-			end()
-			e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
-			e.emitLabel(incL)
-			idx3, idx4 := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idx3, idxPtr))
-			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idx4, idx3))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idx4, idxPtr))
-			e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
-			e.emitLabel(endL)
-			return nil
-		}
+	// A Map or Set, or its keys()/values()/entries(), is walked live.
+	if coll, collTy, kind, ok := e.liveMapIterable(s.Iterable); ok {
+		return e.emitForOfMapLive(s, coll, collTy, kind, condL, bodyL, incL, endL)
 	}
 
 	// A bare any/unknown iterable (a D1 dynamic array, or a static array boxed
@@ -1082,11 +1028,8 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	var iterTaTy Type
 
 	if strTy := e.inferExprType(s.Iterable); isForOfStringTy(strTy) {
-		// A string iterates its characters — one 1-byte character string per
-		// element, this compiler's byte-string model (ADR-00535). Materialize a
-		// char array and drive the shared array-iteration loop below. Faithful
-		// for ASCII/Latin-1; real JS iterates by code point, the same documented
-		// Unicode narrowing the rest of the string layer carries.
+		// A string iterates its code points (ADR-01188). Materialize them as
+		// an array and drive the shared array-iteration loop below.
 		sv, err := e.emitExpr(s.Iterable)
 		if err != nil {
 			return err
@@ -1108,17 +1051,6 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			e.emitNotIterableGuard(id.Name, iterSym) // `for (… of undefined)`
 			dataPtrAlloca, lenAlloca = e.arrayDataLenSlots(iterSym)
 			elemTy = *iterSym.Ty.ElemType
-		case found && (iterSym.Ty.IsMap || iterSym.Ty.IsSet):
-			// A Set iterates its elements; a Map iterates its values (not
-			// [key,value] entries — see mapOrSetValuesArray).
-			mapPtr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", mapPtr, iterSym.Ptr))
-			valsVal, err := e.mapOrSetValuesArray(iterSym.Ty, mapPtr)
-			if err != nil {
-				return err
-			}
-			elemTy = *valsVal.Ty.ElemType
-			dataPtrAlloca, lenAlloca = e.splitArrayAggregate(valsVal)
 		default:
 			return fmt.Errorf("%d:%d: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method", s.GetPos().Line, s.GetPos().Col, id.Name)
 		}
@@ -1133,16 +1065,6 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			e.emitNotIterableValueGuard(s.Iterable, arrVal) // `for (… of o.tags)` with no array
 			elemTy = *arrVal.Ty.ElemType
 			dataPtrAlloca, lenAlloca = e.splitArrayAggregate(arrVal)
-		case arrVal.Ty.IsMap || arrVal.Ty.IsSet:
-			// Same non-named-variable case emitMapCall/emitSetCall/.size
-			// already handle — a Map/Set-typed field access, array index,
-			// or call result (e.g. `for (const t of c.tags)`).
-			valsVal, err := e.mapOrSetValuesArray(arrVal.Ty, arrVal.Ref)
-			if err != nil {
-				return err
-			}
-			elemTy = *valsVal.Ty.ElemType
-			dataPtrAlloca, lenAlloca = e.splitArrayAggregate(valsVal)
 		default:
 			return fmt.Errorf("%d:%d: for...of requires an array, Map, Set, generator, or class-with-next() value", s.GetPos().Line, s.GetPos().Col)
 		}
@@ -1163,23 +1085,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// binding here at all — the per-iteration element is unpacked in the
 	// body below, through the same unpack*PatternInto core every other
 	// destructuring position shares.
-	isPattern := s.ArrayPattern != nil || s.ObjectPattern != nil
-	bindTy := elemTy
-	if iterTaTy.BigIntElem {
-		bindTy = BigIntType()
-	}
-	varPtr := e.freshReg()
-	if isPattern {
-		// no pre-loop binding
-	} else if elemTy.IsArray {
-		// Object-reference model (TDD-00127): a stable slot holding a pointer to
-		// the current element's {data, len} header, rebuilt each iteration.
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
-		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: elemTy})
-	} else {
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, bindTy.IR, bindTy.Align()))
-		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: bindTy})
-	}
+	varPtr, bindTy := e.defineForOfVar(s, elemTy, iterTaTy)
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
@@ -1200,7 +1106,62 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, dataPtrAlloca))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal2, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, elemTy.IR, dataPtr, idxVal2))
-	elemVal := e.loadArrayElem(gepReg, elemTy)
+	if elemTy.IsArray && !elemTy.Inline && s.ArrayPattern == nil && s.ObjectPattern == nil {
+		// The loop variable aliases the element: its slot takes the header
+		// the outer array holds, so a push through it reaches the element.
+		header := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", header, gepReg))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, varPtr))
+	} else if err := e.bindForOfElem(s, e.loadArrayElem(gepReg, elemTy), elemTy, bindTy, varPtr, iterTaTy); err != nil {
+		return err
+	}
+
+	if err := e.emitForOfBody(s); err != nil {
+		return err
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
+
+	e.emitLabel(incL)
+	idxVal3 := e.freshReg()
+	newIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal3, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newIdx, idxVal3))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newIdx, idxPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(endL)
+	return nil
+}
+
+// defineForOfVar declares a for-of loop's single binding (none for a
+// destructuring head). An array-typed element (nested array, TDD-00029)
+// binds a slot holding its header (object-reference model, TDD-00127); a
+// destructuring head (TDD-00065 Stage 1) is unpacked per iteration by
+// bindForOfElem instead.
+func (e *Emitter) defineForOfVar(s *ast.ForOfStatement, elemTy, iterTaTy Type) (varPtr string, bindTy Type) {
+	isPattern := s.ArrayPattern != nil || s.ObjectPattern != nil
+	bindTy = elemTy
+	if iterTaTy.BigIntElem {
+		bindTy = BigIntType()
+	}
+	varPtr = e.freshReg()
+	if isPattern {
+		// no pre-loop binding
+	} else if elemTy.IsArray {
+		// Object-reference model (TDD-00127): a stable slot holding a pointer to
+		// the current element's {data, len} header, rebuilt each iteration.
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
+		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: elemTy})
+	} else {
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, bindTy.IR, bindTy.Align()))
+		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: bindTy})
+	}
+
+	return varPtr, bindTy
+}
+
+// bindForOfElem binds one iteration's element to the loop head.
+func (e *Emitter) bindForOfElem(s *ast.ForOfStatement, elemVal Value, elemTy, bindTy Type, varPtr string, iterTaTy Type) error {
 	switch {
 	case s.ObjectPattern != nil:
 		// The element is unpacked as an object — its fields become the
@@ -1242,20 +1203,6 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", bindTy.IR, elemVal.Ref, varPtr, bindTy.Align()))
 	}
 
-	if err := e.emitForOfBody(s); err != nil {
-		return err
-	}
-	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
-
-	e.emitLabel(incL)
-	idxVal3 := e.freshReg()
-	newIdx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal3, idxPtr))
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newIdx, idxVal3))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newIdx, idxPtr))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
-
-	e.emitLabel(endL)
 	return nil
 }
 
@@ -1370,6 +1317,9 @@ func (e *Emitter) emitFinallysToDepth(depth int) error {
 			// Leaving the try (or protected catch): its handler goes first,
 			// so a throw from the finally reaches the handlers outside it.
 			e.emitInstr("call void @__kml_pop_jmpbuf()")
+		}
+		if saved[i].native != nil {
+			saved[i].native()
 		}
 		e.pushScope()
 		for _, stmt := range saved[i].body {
@@ -1680,7 +1630,7 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 		if err != nil {
 			return err
 		}
-		keysVal, err = e.emitMapCall(objVal.Ty, objVal.Ref, "keys", nil, s.GetPos())
+		keysVal, err = e.emitMapMethod(objVal.Ty, objVal.Ref, "keys", nil, s.GetPos())
 		if err != nil {
 			return err
 		}
@@ -1694,13 +1644,27 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 		// fields lists only the present ones, as Object.keys does (ADR-01066).
 		ordered := esOrderedFields(fields)
 		var err error
-		if hasSkippableField(ordered) {
+		switch {
+		case isRecordView(objTy) && !objTy.Nullable:
+			// Another layout behind a structural type: the object's own keys
+			// (TDD-00233).
+			objVal, oerr := e.emitExpr(s.Object)
+			if oerr != nil {
+				return oerr
+			}
+			keysVal, err = e.emitRecordSplit(objVal, ArrayOf(TypePtr), func(v Value) (Value, error) {
+				if hasSkippableField(ordered) {
+					return e.emitObjectPresentFieldNames(v, ordered)
+				}
+				return e.emitObjectFieldNames(ordered, s.GetPos())
+			}, func(box Value) (Value, error) { return e.emitDynAnyKeys(box, s.GetPos()) })
+		case hasSkippableField(ordered):
 			objVal, oerr := e.emitExpr(s.Object)
 			if oerr != nil {
 				return oerr
 			}
 			keysVal, err = e.emitObjectPresentFieldNames(objVal, ordered)
-		} else {
+		default:
 			keysVal, err = e.emitObjectFieldNames(ordered, s.GetPos())
 		}
 		if err != nil {

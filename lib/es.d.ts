@@ -30,6 +30,7 @@ interface ObjectConstructor {
     setPrototypeOf(o: any, proto: object | null): any;
     create(o: object | null, properties?: any): any;
     getOwnPropertyNames(o: any): string[];
+    /** @lower __kml_Object_is */
     is(value1: any, value2: any): boolean;
     fromEntries(entries: Iterable<readonly any[]>): any;
 }
@@ -66,6 +67,7 @@ interface String {
     startsWith(searchString: string, position?: number): boolean;
     /** @lower __kml_String_endsWith @link string */
     endsWith(searchString: string, endPosition?: number): boolean;
+    /** @intrinsic String.prototype.localeCompare */
     localeCompare(that: string, locales?: string | string[], options?: any): number;
     normalize(form?: string): string;
     /** @lower __kml_String_padStart @link string */
@@ -74,16 +76,23 @@ interface String {
     padEnd(maxLength: number, fillString?: string): string;
     /** @lower __kml_String_repeat @link string */
     repeat(count: number): string;
+    /** @intrinsic String.prototype.replace */
     replace(searchValue: string | RegExp, replaceValue: string): string;
+    /** @intrinsic String.prototype.replace */
     replace(searchValue: string | RegExp, replacer: (substring: string, ...args: any[]) => string): string;
+    /** @intrinsic String.prototype.replaceAll */
     replaceAll(searchValue: string | RegExp, replaceValue: string): string;
+    /** @intrinsic String.prototype.replaceAll */
     replaceAll(searchValue: string | RegExp, replacer: (substring: string, ...args: any[]) => string): string;
+    /** @intrinsic String.prototype.search */
     search(regexp: string | RegExp): number;
     /** @lower __kml_String_slice @link string */
     slice(start?: number, end?: number): string;
     /** @lower __kml_String_split @link string */
     split(separator: string, limit?: number): string[];
+    /** @intrinsic String.prototype.split */
     split(separator: RegExp, limit?: number): string[];
+    /** @intrinsic String.prototype.split */
     split(separator: string | RegExp, limit?: number): string[];
     /** @lower __kml_String_substring @link string */
     substring(start: number, end?: number): string;
@@ -110,7 +119,9 @@ interface StringConstructor {
     new (value?: any): String;
     (value?: any): string;
     readonly prototype: String;
+    /** @intrinsic String.fromCharCode */
     fromCharCode(...codes: number[]): string;
+    /** @intrinsic String.fromCodePoint */
     fromCodePoint(...codePoints: number[]): string;
     raw(template: { raw: readonly string[] }, ...substitutions: any[]): string;
 }
@@ -170,20 +181,27 @@ interface NumberConstructor {
     readonly EPSILON: number;
     readonly MAX_SAFE_INTEGER: number;
     readonly MIN_SAFE_INTEGER: number;
+    /** @intrinsic Number.isFinite */
     isFinite(number: unknown): boolean;
+    /** @intrinsic Number.isInteger */
     isInteger(number: unknown): boolean;
+    /** @intrinsic Number.isNaN */
     isNaN(number: unknown): boolean;
+    /** @intrinsic Number.isSafeInteger */
     isSafeInteger(number: unknown): boolean;
+    /** @intrinsic parseFloat */
     parseFloat(string: string): number;
+    /** @intrinsic parseInt */
     parseInt(string: string, radix?: number): number;
 }
 
 declare var Number: NumberConstructor;
 
 // A method with `@lower f` compiles to a call of the libm function f, whose
-// result is the one ECMAScript's Math specifies (TDD-00230 P3.2); the others
-// have JavaScript semantics of their own (Math.round's ties, pow's NaN
-// cases, …) and keep their own lowering.
+// result is the one ECMAScript's Math specifies (TDD-00230 P3.2); one with
+// `@intrinsic Math.f` has JavaScript semantics of its own (Math.round's
+// ties, pow's NaN cases, an integer kept an integer, …) and is emitted
+// inline (emit_intrinsics.go).
 interface Math {
     readonly E: number;
     readonly LN10: number;
@@ -193,6 +211,7 @@ interface Math {
     readonly PI: number;
     readonly SQRT1_2: number;
     readonly SQRT2: number;
+    /** @intrinsic Math.abs */
     abs(x: number): number;
     /** @lower acos @link m */
     acos(x: number): number;
@@ -208,8 +227,11 @@ interface Math {
     atanh(x: number): number;
     /** @lower atan2 @link m */
     atan2(y: number, x: number): number;
+    /** @intrinsic Math.cbrt */
     cbrt(x: number): number;
+    /** @intrinsic Math.ceil */
     ceil(x: number): number;
+    /** @intrinsic Math.clz32 */
     clz32(x: number): number;
     /** @lower cos @link m */
     cos(x: number): number;
@@ -219,9 +241,13 @@ interface Math {
     exp(x: number): number;
     /** @lower expm1 @link m */
     expm1(x: number): number;
+    /** @intrinsic Math.floor */
     floor(x: number): number;
+    /** @intrinsic Math.fround */
     fround(x: number): number;
+    /** @intrinsic Math.hypot */
     hypot(...values: number[]): number;
+    /** @intrinsic Math.imul */
     imul(x: number, y: number): number;
     /** @lower log @link m */
     log(x: number): number;
@@ -231,11 +257,17 @@ interface Math {
     log1p(x: number): number;
     /** @lower log2 @link m */
     log2(x: number): number;
+    /** @intrinsic Math.max */
     max(...values: number[]): number;
+    /** @intrinsic Math.min */
     min(...values: number[]): number;
+    /** @intrinsic Math.pow */
     pow(x: number, y: number): number;
+    /** @intrinsic Math.random */
     random(): number;
+    /** @intrinsic Math.round */
     round(x: number): number;
+    /** @intrinsic Math.sign */
     sign(x: number): number;
     /** @lower sin @link m */
     sin(x: number): number;
@@ -247,6 +279,7 @@ interface Math {
     tan(x: number): number;
     /** @lower tanh @link m */
     tanh(x: number): number;
+    /** @intrinsic Math.trunc */
     trunc(x: number): number;
 }
 
@@ -265,68 +298,140 @@ interface TemplateStringsArray extends ReadonlyArray<string> {
 }
 
 interface ReadonlyArray<T> {
+    [Symbol.iterator](): ArrayIterator<T>;
+    /** @intrinsic Array.prototype.entries */
+    entries(): ArrayIterator<[number, T]>;
+    /** @intrinsic Array.prototype.keys */
+    keys(): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.values */
+    values(): ArrayIterator<T>;
     readonly length: number;
+    readonly [n: number]: T;
     toString(): string;
+    /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
+    /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): T[];
+    /** @intrinsic Array.prototype.indexOf */
     indexOf(searchElement: T, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.lastIndexOf */
     lastIndexOf(searchElement: T, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.includes */
     includes(searchElement: T, fromIndex?: number): boolean;
+    /** @intrinsic Array.prototype.every */
     every<S extends T>(predicate: (value: T, index: number, array: readonly T[]) => value is S, thisArg?: any): this is readonly S[];
+    /** @intrinsic Array.prototype.every */
     every(predicate: (value: T, index: number, array: readonly T[]) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.some */
     some(predicate: (value: T, index: number, array: readonly T[]) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.forEach */
     forEach(callbackfn: (value: T, index: number, array: readonly T[]) => void, thisArg?: any): void;
+    /** @intrinsic Array.prototype.map */
     map<U>(callbackfn: (value: T, index: number, array: readonly T[]) => U, thisArg?: any): U[];
+    /** @intrinsic Array.prototype.filter */
     filter<S extends T>(predicate: (value: T, index: number, array: readonly T[]) => value is S, thisArg?: any): S[];
+    /** @intrinsic Array.prototype.filter */
     filter(predicate: (value: T, index: number, array: readonly T[]) => unknown, thisArg?: any): T[];
+    /** @intrinsic Array.prototype.find */
     find<S extends T>(predicate: (value: T, index: number, obj: readonly T[]) => value is S, thisArg?: any): S | undefined;
+    /** @intrinsic Array.prototype.find */
     find(predicate: (value: T, index: number, obj: readonly T[]) => unknown, thisArg?: any): T | undefined;
+    /** @intrinsic Array.prototype.findIndex */
     findIndex(predicate: (value: T, index: number, obj: readonly T[]) => unknown, thisArg?: any): number;
+    /** @intrinsic Array.prototype.at */
     at(index: number): T | undefined;
 }
 
 interface Array<T> {
     length: number;
+    [n: number]: T;
+    [Symbol.iterator](): ArrayIterator<T>;
+    /** @intrinsic Array.prototype.entries */
+    entries(): ArrayIterator<[number, T]>;
+    /** @intrinsic Array.prototype.keys */
+    keys(): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.values */
+    values(): ArrayIterator<T>;
     toString(): string;
+    /** @intrinsic Array.prototype.pop */
     pop(): T | undefined;
+    /** @intrinsic Array.prototype.push */
     push(...items: T[]): number;
+    /** @intrinsic Array.prototype.concat */
     concat(...items: (T | T[])[]): T[];
+    /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
+    /** @intrinsic Array.prototype.reverse */
     reverse(): T[];
+    /** @intrinsic Array.prototype.shift */
     shift(): T | undefined;
+    /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): T[];
+    /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: T, b: T) => number): this;
+    /** @intrinsic Array.prototype.splice */
     splice(start: number, deleteCount?: number, ...items: T[]): T[];
+    /** @intrinsic Array.prototype.unshift */
     unshift(...items: T[]): number;
+    /** @intrinsic Array.prototype.indexOf */
     indexOf(searchElement: T, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.lastIndexOf */
     lastIndexOf(searchElement: T, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.includes */
     includes(searchElement: T, fromIndex?: number): boolean;
+    /** @intrinsic Array.prototype.every */
     every<S extends T>(predicate: (value: T, index: number, array: T[]) => value is S, thisArg?: any): this is S[];
+    /** @intrinsic Array.prototype.every */
     every(predicate: (value: T, index: number, array: T[]) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.some */
     some(predicate: (value: T, index: number, array: T[]) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.forEach */
     forEach(callbackfn: (value: T, index: number, array: T[]) => void, thisArg?: any): void;
+    /** @intrinsic Array.prototype.map */
     map<U>(callbackfn: (value: T, index: number, array: T[]) => U, thisArg?: any): U[];
+    /** @intrinsic Array.prototype.filter */
     filter<S extends T>(predicate: (value: T, index: number, array: T[]) => value is S, thisArg?: any): S[];
+    /** @intrinsic Array.prototype.filter */
     filter(predicate: (value: T, index: number, array: T[]) => unknown, thisArg?: any): T[];
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: T, currentValue: T, currentIndex: number, array: T[]) => T): T;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: T, currentValue: T, currentIndex: number, array: T[]) => T, initialValue: T): T;
+    /** @intrinsic Array.prototype.reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: T, currentIndex: number, array: T[]) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: T, currentValue: T, currentIndex: number, array: T[]) => T): T;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: T, currentValue: T, currentIndex: number, array: T[]) => T, initialValue: T): T;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: T, currentIndex: number, array: T[]) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.find */
     find<S extends T>(predicate: (value: T, index: number, obj: T[]) => value is S, thisArg?: any): S | undefined;
+    /** @intrinsic Array.prototype.find */
     find(predicate: (value: T, index: number, obj: T[]) => unknown, thisArg?: any): T | undefined;
+    /** @intrinsic Array.prototype.findIndex */
     findIndex(predicate: (value: T, index: number, obj: T[]) => unknown, thisArg?: any): number;
+    /** @intrinsic Array.prototype.findLast */
     findLast<S extends T>(predicate: (value: T, index: number, array: T[]) => value is S, thisArg?: any): S | undefined;
+    /** @intrinsic Array.prototype.findLast */
     findLast(predicate: (value: T, index: number, obj: T[]) => unknown, thisArg?: any): T | undefined;
+    /** @intrinsic Array.prototype.findLastIndex */
     findLastIndex(predicate: (value: T, index: number, obj: T[]) => unknown, thisArg?: any): number;
+    /** @intrinsic Array.prototype.fill */
     fill(value: T, start?: number, end?: number): this;
+    /** @intrinsic Array.prototype.copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
+    /** @intrinsic Array.prototype.flatMap */
     flatMap<U>(callback: (value: T, index: number, array: T[]) => U | readonly U[], thisArg?: any): U[];
+    /** @intrinsic Array.prototype.at */
     at(index: number): T | undefined;
+    /** @intrinsic Array.prototype.toReversed */
     toReversed(): T[];
+    /** @intrinsic Array.prototype.toSorted */
     toSorted(compareFn?: (a: T, b: T) => number): T[];
+    /** @intrinsic Array.prototype.toSpliced */
     toSpliced(start: number, deleteCount?: number, ...items: T[]): T[];
+    /** @intrinsic Array.prototype.with */
     with(index: number, value: T): T[];
 }
 
@@ -340,6 +445,10 @@ interface ArrayConstructor {
     readonly prototype: any[];
     isArray(arg: any): arg is any[];
     of<T>(...items: T[]): T[];
+    from<T>(arrayLike: ArrayLike<T>): T[];
+    from<T, U>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => U, thisArg?: any): U[];
+    from<T>(iterable: Iterable<T> | ArrayLike<T>): T[];
+    from<T, U>(iterable: Iterable<T> | ArrayLike<T>, mapfn: (v: T, k: number) => U, thisArg?: any): U[];
 }
 
 declare var Array: ArrayConstructor;
@@ -418,42 +527,88 @@ interface AggregateErrorConstructor {
 declare var AggregateError: AggregateErrorConstructor;
 
 interface Date {
+    /** @intrinsic Date.prototype.toString */
     toString(): string;
+    /** @intrinsic Date.prototype.toDateString */
     toDateString(): string;
     toTimeString(): string;
     toLocaleString(locales?: string | string[], options?: any): string;
+    /** @intrinsic Date.prototype.toLocaleDateString */
     toLocaleDateString(locales?: string | string[], options?: any): string;
     toLocaleTimeString(locales?: string | string[], options?: any): string;
+    /** @intrinsic Date.prototype.valueOf */
     valueOf(): number;
+    /** @intrinsic Date.prototype.getTime */
     getTime(): number;
+    /** @intrinsic Date.prototype.getFullYear */
     getFullYear(): number;
+    /** @intrinsic Date.prototype.getUTCFullYear */
     getUTCFullYear(): number;
+    /** @intrinsic Date.prototype.getMonth */
     getMonth(): number;
+    /** @intrinsic Date.prototype.getUTCMonth */
     getUTCMonth(): number;
+    /** @intrinsic Date.prototype.getDate */
     getDate(): number;
+    /** @intrinsic Date.prototype.getUTCDate */
     getUTCDate(): number;
+    /** @intrinsic Date.prototype.getDay */
     getDay(): number;
+    /** @intrinsic Date.prototype.getUTCDay */
     getUTCDay(): number;
+    /** @intrinsic Date.prototype.getHours */
     getHours(): number;
+    /** @intrinsic Date.prototype.getUTCHours */
     getUTCHours(): number;
+    /** @intrinsic Date.prototype.getMinutes */
     getMinutes(): number;
+    /** @intrinsic Date.prototype.getUTCMinutes */
     getUTCMinutes(): number;
+    /** @intrinsic Date.prototype.getSeconds */
     getSeconds(): number;
+    /** @intrinsic Date.prototype.getUTCSeconds */
     getUTCSeconds(): number;
+    /** @intrinsic Date.prototype.getMilliseconds */
     getMilliseconds(): number;
+    /** @intrinsic Date.prototype.getUTCMilliseconds */
     getUTCMilliseconds(): number;
+    /** @intrinsic Date.prototype.getTimezoneOffset */
     getTimezoneOffset(): number;
+    /** @intrinsic Date.prototype.setTime */
     setTime(time: number): number;
+    /** @intrinsic Date.prototype.setMilliseconds */
     setMilliseconds(ms: number): number;
+    /** @intrinsic Date.prototype.setSeconds */
     setSeconds(sec: number, ms?: number): number;
+    /** @intrinsic Date.prototype.setMinutes */
     setMinutes(min: number, sec?: number, ms?: number): number;
+    /** @intrinsic Date.prototype.setHours */
     setHours(hours: number, min?: number, sec?: number, ms?: number): number;
+    /** @intrinsic Date.prototype.setDate */
     setDate(date: number): number;
+    /** @intrinsic Date.prototype.setMonth */
     setMonth(month: number, date?: number): number;
+    /** @intrinsic Date.prototype.setFullYear */
     setFullYear(year: number, month?: number, date?: number): number;
+    /** @intrinsic Date.prototype.toUTCString */
     toUTCString(): string;
+    /** @intrinsic Date.prototype.toISOString */
     toISOString(): string;
     toJSON(key?: any): string;
+    /** @intrinsic Date.prototype.setUTCMilliseconds */
+    setUTCMilliseconds(ms: number): number;
+    /** @intrinsic Date.prototype.setUTCSeconds */
+    setUTCSeconds(sec: number, ms?: number): number;
+    /** @intrinsic Date.prototype.setUTCMinutes */
+    setUTCMinutes(min: number, sec?: number, ms?: number): number;
+    /** @intrinsic Date.prototype.setUTCHours */
+    setUTCHours(hours: number, min?: number, sec?: number, ms?: number): number;
+    /** @intrinsic Date.prototype.setUTCDate */
+    setUTCDate(date: number): number;
+    /** @intrinsic Date.prototype.setUTCMonth */
+    setUTCMonth(month: number, date?: number): number;
+    /** @intrinsic Date.prototype.setUTCFullYear */
+    setUTCFullYear(year: number, month?: number, date?: number): number;
 }
 
 interface DateConstructor {
@@ -476,10 +631,13 @@ interface RegExpMatchArray extends Array<string> {
 interface RegExpExecArray extends Array<string> {
     index: number;
     input: string;
+    groups?: { [key: string]: string };
 }
 
 interface RegExp {
+    /** @intrinsic RegExp.prototype.exec */
     exec(string: string): RegExpExecArray | null;
+    /** @intrinsic RegExp.prototype.test */
     test(string: string): boolean;
     readonly source: string;
     readonly global: boolean;
@@ -499,9 +657,42 @@ interface RegExpConstructor {
 
 declare var RegExp: RegExpConstructor;
 
+interface IteratorYieldResult<TYield> {
+    done?: false;
+    value: TYield;
+}
+interface IteratorReturnResult<TReturn> {
+    done: true;
+    value: TReturn;
+}
+type IteratorResult<T, TReturn = any> = IteratorYieldResult<T> | IteratorReturnResult<TReturn>;
+
 interface Iterable<T> {}
-interface Iterator<T> {}
+interface Iterator<T, TReturn = any, TNext = any> {
+    next(...[value]: [] | [TNext]): IteratorResult<T, TReturn>;
+    return?(value?: TReturn): IteratorResult<T, TReturn>;
+    throw?(e?: any): IteratorResult<T, TReturn>;
+}
 interface IterableIterator<T> extends Iterator<T> {}
+
+interface IteratorObject<T, TReturn = unknown, TNext = unknown> extends Iterator<T, TReturn, TNext> {
+    [Symbol.iterator](): IteratorObject<T, TReturn, TNext>;
+    toArray(): T[];
+}
+
+type BuiltinIteratorReturn = any;
+
+interface ArrayIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
+    [Symbol.iterator](): ArrayIterator<T>;
+}
+
+interface MapIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
+    [Symbol.iterator](): MapIterator<T>;
+}
+
+interface SetIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
+    [Symbol.iterator](): SetIterator<T>;
+}
 interface AsyncIterable<T> {}
 interface AsyncIterator<T> {}
 interface AsyncIterableIterator<T> extends AsyncIterator<T> {}
@@ -529,13 +720,26 @@ declare var Promise: PromiseConstructor;
 type Awaited<T> = T;
 
 interface Map<K, V> {
+    /** @intrinsic Map.prototype.clear */
     clear(): void;
+    /** @intrinsic Map.prototype.delete */
     delete(key: K): boolean;
+    /** @intrinsic Map.prototype.forEach */
     forEach(callbackfn: (value: V, key: K, map: Map<K, V>) => void, thisArg?: any): void;
+    /** @intrinsic Map.prototype.get */
     get(key: K): V | undefined;
+    /** @intrinsic Map.prototype.has */
     has(key: K): boolean;
+    /** @intrinsic Map.prototype.set */
     set(key: K, value: V): this;
     readonly size: number;
+    [Symbol.iterator](): MapIterator<[K, V]>;
+    /** @intrinsic Map.prototype.entries */
+    entries(): MapIterator<[K, V]>;
+    /** @intrinsic Map.prototype.keys */
+    keys(): MapIterator<K>;
+    /** @intrinsic Map.prototype.values */
+    values(): MapIterator<V>;
 }
 
 interface MapConstructor {
@@ -548,12 +752,24 @@ interface MapConstructor {
 declare var Map: MapConstructor;
 
 interface Set<T> {
+    /** @intrinsic Set.prototype.add */
     add(value: T): this;
+    /** @intrinsic Set.prototype.clear */
     clear(): void;
+    /** @intrinsic Set.prototype.delete */
     delete(value: T): boolean;
+    /** @intrinsic Set.prototype.forEach */
     forEach(callbackfn: (value: T, value2: T, set: Set<T>) => void, thisArg?: any): void;
+    /** @intrinsic Set.prototype.has */
     has(value: T): boolean;
     readonly size: number;
+    [Symbol.iterator](): SetIterator<T>;
+    /** @intrinsic Set.prototype.entries */
+    entries(): SetIterator<[T, T]>;
+    /** @intrinsic Set.prototype.keys */
+    keys(): SetIterator<T>;
+    /** @intrinsic Set.prototype.values */
+    values(): SetIterator<T>;
 }
 
 interface SetConstructor {
@@ -565,9 +781,13 @@ interface SetConstructor {
 declare var Set: SetConstructor;
 
 interface WeakMap<K extends object, V> {
+    /** @intrinsic WeakMap.prototype.delete */
     delete(key: K): boolean;
+    /** @intrinsic WeakMap.prototype.get */
     get(key: K): V | undefined;
+    /** @intrinsic WeakMap.prototype.has */
     has(key: K): boolean;
+    /** @intrinsic WeakMap.prototype.set */
     set(key: K, value: V): this;
 }
 
@@ -580,8 +800,11 @@ interface WeakMapConstructor {
 declare var WeakMap: WeakMapConstructor;
 
 interface WeakSet<T extends object> {
+    /** @intrinsic WeakSet.prototype.add */
     add(value: T): this;
+    /** @intrinsic WeakSet.prototype.delete */
     delete(value: T): boolean;
+    /** @intrinsic WeakSet.prototype.has */
     has(value: T): boolean;
 }
 
@@ -593,15 +816,63 @@ interface WeakSetConstructor {
 
 declare var WeakSet: WeakSetConstructor;
 
+interface WeakRef<T extends object> {
+    deref(): T | undefined;
+}
+interface WeakRefConstructor {
+    readonly prototype: WeakRef<any>;
+    new <T extends object>(target: T): WeakRef<T>;
+}
+declare var WeakRef: WeakRefConstructor;
+
+interface FinalizationRegistry<T> {
+    register(target: object, heldValue: T, unregisterToken?: object): void;
+    unregister(unregisterToken: object): boolean;
+}
+interface FinalizationRegistryConstructor {
+    readonly prototype: FinalizationRegistry<any>;
+    new <T>(cleanupCallback: (heldValue: T) => void): FinalizationRegistry<T>;
+}
+declare var FinalizationRegistry: FinalizationRegistryConstructor;
+
+interface ProxyHandler<T extends object> {
+    apply?(target: T, thisArg: any, argArray: any[]): any;
+    construct?(target: T, argArray: any[], newTarget: Function): object;
+    defineProperty?(target: T, property: string | symbol, attributes: PropertyDescriptor): boolean;
+    deleteProperty?(target: T, p: string | symbol): boolean;
+    get?(target: T, p: string | symbol, receiver: any): any;
+    getOwnPropertyDescriptor?(target: T, p: string | symbol): PropertyDescriptor | undefined;
+    getPrototypeOf?(target: T): object | null;
+    has?(target: T, p: string | symbol): boolean;
+    isExtensible?(target: T): boolean;
+    ownKeys?(target: T): ArrayLike<string | symbol>;
+    preventExtensions?(target: T): boolean;
+    set?(target: T, p: string | symbol, newValue: any, receiver: any): boolean;
+    setPrototypeOf?(target: T, v: object | null): boolean;
+}
+interface ProxyConstructor {
+    revocable<T extends object>(target: T, handler: ProxyHandler<T>): { proxy: T; revoke: () => void; };
+    new <T extends object>(target: T, handler: ProxyHandler<T>): T;
+}
+declare var Proxy: ProxyConstructor;
+
 declare var NaN: number;
 declare var Infinity: number;
+/** @intrinsic parseInt */
 declare function parseInt(string: string, radix?: number): number;
+/** @intrinsic parseFloat */
 declare function parseFloat(string: string): number;
+/** @intrinsic isNaN */
 declare function isNaN(number: number): boolean;
+/** @intrinsic isFinite */
 declare function isFinite(number: number): boolean;
+/** @intrinsic decodeURI */
 declare function decodeURI(encodedURI: string): string;
+/** @intrinsic decodeURIComponent */
 declare function decodeURIComponent(encodedURIComponent: string): string;
+/** @intrinsic encodeURI */
 declare function encodeURI(uri: string): string;
+/** @intrinsic encodeURIComponent */
 declare function encodeURIComponent(uriComponent: string | number | boolean): string;
 declare function escape(string: string): string;
 declare function unescape(string: string): string;
@@ -645,28 +916,49 @@ interface Int8Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
     readonly byteOffset: number;
+    /** @intrinsic Array.prototype.copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
+    /** @intrinsic Array.prototype.every */
     every(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.fill */
     fill(value: number, start?: number, end?: number): this;
+    /** @intrinsic Array.prototype.filter */
     filter(predicate: (value: number, index: number, array: this) => any, thisArg?: any): Int8Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.find */
     find(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number | undefined;
+    /** @intrinsic Array.prototype.findIndex */
     findIndex(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number;
+    /** @intrinsic Array.prototype.forEach */
     forEach(callbackfn: (value: number, index: number, array: this) => void, thisArg?: any): void;
+    /** @intrinsic Array.prototype.indexOf */
     indexOf(searchElement: number, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
+    /** @intrinsic Array.prototype.lastIndexOf */
     lastIndexOf(searchElement: number, fromIndex?: number): number;
     readonly length: number;
+    /** @intrinsic Array.prototype.map */
     map(callbackfn: (value: number, index: number, array: this) => number, thisArg?: any): Int8Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reverse */
     reverse(): this;
     set(array: ArrayLike<number>, offset?: number): void;
+    /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Int8Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.some */
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
     subarray(begin?: number, end?: number): Int8Array<TArrayBuffer>;
     toLocaleString(): string;
@@ -692,28 +984,49 @@ interface Uint8Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
     readonly byteOffset: number;
+    /** @intrinsic Array.prototype.copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
+    /** @intrinsic Array.prototype.every */
     every(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.fill */
     fill(value: number, start?: number, end?: number): this;
+    /** @intrinsic Array.prototype.filter */
     filter(predicate: (value: number, index: number, array: this) => any, thisArg?: any): Uint8Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.find */
     find(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number | undefined;
+    /** @intrinsic Array.prototype.findIndex */
     findIndex(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number;
+    /** @intrinsic Array.prototype.forEach */
     forEach(callbackfn: (value: number, index: number, array: this) => void, thisArg?: any): void;
+    /** @intrinsic Array.prototype.indexOf */
     indexOf(searchElement: number, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
+    /** @intrinsic Array.prototype.lastIndexOf */
     lastIndexOf(searchElement: number, fromIndex?: number): number;
     readonly length: number;
+    /** @intrinsic Array.prototype.map */
     map(callbackfn: (value: number, index: number, array: this) => number, thisArg?: any): Uint8Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reverse */
     reverse(): this;
     set(array: ArrayLike<number>, offset?: number): void;
+    /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Uint8Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.some */
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
     subarray(begin?: number, end?: number): Uint8Array<TArrayBuffer>;
     toLocaleString(): string;
@@ -739,28 +1052,49 @@ interface Uint8ClampedArray<TArrayBuffer extends ArrayBufferLike = ArrayBufferLi
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
     readonly byteOffset: number;
+    /** @intrinsic Array.prototype.copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
+    /** @intrinsic Array.prototype.every */
     every(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.fill */
     fill(value: number, start?: number, end?: number): this;
+    /** @intrinsic Array.prototype.filter */
     filter(predicate: (value: number, index: number, array: this) => any, thisArg?: any): Uint8ClampedArray<ArrayBuffer>;
+    /** @intrinsic Array.prototype.find */
     find(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number | undefined;
+    /** @intrinsic Array.prototype.findIndex */
     findIndex(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number;
+    /** @intrinsic Array.prototype.forEach */
     forEach(callbackfn: (value: number, index: number, array: this) => void, thisArg?: any): void;
+    /** @intrinsic Array.prototype.indexOf */
     indexOf(searchElement: number, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
+    /** @intrinsic Array.prototype.lastIndexOf */
     lastIndexOf(searchElement: number, fromIndex?: number): number;
     readonly length: number;
+    /** @intrinsic Array.prototype.map */
     map(callbackfn: (value: number, index: number, array: this) => number, thisArg?: any): Uint8ClampedArray<ArrayBuffer>;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reverse */
     reverse(): this;
     set(array: ArrayLike<number>, offset?: number): void;
+    /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Uint8ClampedArray<ArrayBuffer>;
+    /** @intrinsic Array.prototype.some */
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
     subarray(begin?: number, end?: number): Uint8ClampedArray<TArrayBuffer>;
     toLocaleString(): string;
@@ -786,28 +1120,49 @@ interface Int16Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
     readonly byteOffset: number;
+    /** @intrinsic Array.prototype.copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
+    /** @intrinsic Array.prototype.every */
     every(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.fill */
     fill(value: number, start?: number, end?: number): this;
+    /** @intrinsic Array.prototype.filter */
     filter(predicate: (value: number, index: number, array: this) => any, thisArg?: any): Int16Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.find */
     find(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number | undefined;
+    /** @intrinsic Array.prototype.findIndex */
     findIndex(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number;
+    /** @intrinsic Array.prototype.forEach */
     forEach(callbackfn: (value: number, index: number, array: this) => void, thisArg?: any): void;
+    /** @intrinsic Array.prototype.indexOf */
     indexOf(searchElement: number, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
+    /** @intrinsic Array.prototype.lastIndexOf */
     lastIndexOf(searchElement: number, fromIndex?: number): number;
     readonly length: number;
+    /** @intrinsic Array.prototype.map */
     map(callbackfn: (value: number, index: number, array: this) => number, thisArg?: any): Int16Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reverse */
     reverse(): this;
     set(array: ArrayLike<number>, offset?: number): void;
+    /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Int16Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.some */
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
     subarray(begin?: number, end?: number): Int16Array<TArrayBuffer>;
     toLocaleString(): string;
@@ -833,28 +1188,49 @@ interface Uint16Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
     readonly byteOffset: number;
+    /** @intrinsic Array.prototype.copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
+    /** @intrinsic Array.prototype.every */
     every(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.fill */
     fill(value: number, start?: number, end?: number): this;
+    /** @intrinsic Array.prototype.filter */
     filter(predicate: (value: number, index: number, array: this) => any, thisArg?: any): Uint16Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.find */
     find(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number | undefined;
+    /** @intrinsic Array.prototype.findIndex */
     findIndex(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number;
+    /** @intrinsic Array.prototype.forEach */
     forEach(callbackfn: (value: number, index: number, array: this) => void, thisArg?: any): void;
+    /** @intrinsic Array.prototype.indexOf */
     indexOf(searchElement: number, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
+    /** @intrinsic Array.prototype.lastIndexOf */
     lastIndexOf(searchElement: number, fromIndex?: number): number;
     readonly length: number;
+    /** @intrinsic Array.prototype.map */
     map(callbackfn: (value: number, index: number, array: this) => number, thisArg?: any): Uint16Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reverse */
     reverse(): this;
     set(array: ArrayLike<number>, offset?: number): void;
+    /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Uint16Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.some */
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
     subarray(begin?: number, end?: number): Uint16Array<TArrayBuffer>;
     toLocaleString(): string;
@@ -880,28 +1256,49 @@ interface Int32Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
     readonly byteOffset: number;
+    /** @intrinsic Array.prototype.copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
+    /** @intrinsic Array.prototype.every */
     every(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.fill */
     fill(value: number, start?: number, end?: number): this;
+    /** @intrinsic Array.prototype.filter */
     filter(predicate: (value: number, index: number, array: this) => any, thisArg?: any): Int32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.find */
     find(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number | undefined;
+    /** @intrinsic Array.prototype.findIndex */
     findIndex(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number;
+    /** @intrinsic Array.prototype.forEach */
     forEach(callbackfn: (value: number, index: number, array: this) => void, thisArg?: any): void;
+    /** @intrinsic Array.prototype.indexOf */
     indexOf(searchElement: number, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
+    /** @intrinsic Array.prototype.lastIndexOf */
     lastIndexOf(searchElement: number, fromIndex?: number): number;
     readonly length: number;
+    /** @intrinsic Array.prototype.map */
     map(callbackfn: (value: number, index: number, array: this) => number, thisArg?: any): Int32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reverse */
     reverse(): this;
     set(array: ArrayLike<number>, offset?: number): void;
+    /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Int32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.some */
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
     subarray(begin?: number, end?: number): Int32Array<TArrayBuffer>;
     toLocaleString(): string;
@@ -927,28 +1324,49 @@ interface Uint32Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
     readonly byteOffset: number;
+    /** @intrinsic Array.prototype.copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
+    /** @intrinsic Array.prototype.every */
     every(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.fill */
     fill(value: number, start?: number, end?: number): this;
+    /** @intrinsic Array.prototype.filter */
     filter(predicate: (value: number, index: number, array: this) => any, thisArg?: any): Uint32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.find */
     find(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number | undefined;
+    /** @intrinsic Array.prototype.findIndex */
     findIndex(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number;
+    /** @intrinsic Array.prototype.forEach */
     forEach(callbackfn: (value: number, index: number, array: this) => void, thisArg?: any): void;
+    /** @intrinsic Array.prototype.indexOf */
     indexOf(searchElement: number, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
+    /** @intrinsic Array.prototype.lastIndexOf */
     lastIndexOf(searchElement: number, fromIndex?: number): number;
     readonly length: number;
+    /** @intrinsic Array.prototype.map */
     map(callbackfn: (value: number, index: number, array: this) => number, thisArg?: any): Uint32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reverse */
     reverse(): this;
     set(array: ArrayLike<number>, offset?: number): void;
+    /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Uint32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.some */
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
     subarray(begin?: number, end?: number): Uint32Array<TArrayBuffer>;
     toLocaleString(): string;
@@ -974,28 +1392,49 @@ interface Float32Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
     readonly byteOffset: number;
+    /** @intrinsic Array.prototype.copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
+    /** @intrinsic Array.prototype.every */
     every(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.fill */
     fill(value: number, start?: number, end?: number): this;
+    /** @intrinsic Array.prototype.filter */
     filter(predicate: (value: number, index: number, array: this) => any, thisArg?: any): Float32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.find */
     find(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number | undefined;
+    /** @intrinsic Array.prototype.findIndex */
     findIndex(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number;
+    /** @intrinsic Array.prototype.forEach */
     forEach(callbackfn: (value: number, index: number, array: this) => void, thisArg?: any): void;
+    /** @intrinsic Array.prototype.indexOf */
     indexOf(searchElement: number, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
+    /** @intrinsic Array.prototype.lastIndexOf */
     lastIndexOf(searchElement: number, fromIndex?: number): number;
     readonly length: number;
+    /** @intrinsic Array.prototype.map */
     map(callbackfn: (value: number, index: number, array: this) => number, thisArg?: any): Float32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reverse */
     reverse(): this;
     set(array: ArrayLike<number>, offset?: number): void;
+    /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Float32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.some */
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
     subarray(begin?: number, end?: number): Float32Array<TArrayBuffer>;
     toLocaleString(): string;
@@ -1021,28 +1460,49 @@ interface Float64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
     readonly byteOffset: number;
+    /** @intrinsic Array.prototype.copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
+    /** @intrinsic Array.prototype.every */
     every(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.fill */
     fill(value: number, start?: number, end?: number): this;
+    /** @intrinsic Array.prototype.filter */
     filter(predicate: (value: number, index: number, array: this) => any, thisArg?: any): Float64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.find */
     find(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number | undefined;
+    /** @intrinsic Array.prototype.findIndex */
     findIndex(predicate: (value: number, index: number, obj: this) => boolean, thisArg?: any): number;
+    /** @intrinsic Array.prototype.forEach */
     forEach(callbackfn: (value: number, index: number, array: this) => void, thisArg?: any): void;
+    /** @intrinsic Array.prototype.indexOf */
     indexOf(searchElement: number, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
+    /** @intrinsic Array.prototype.lastIndexOf */
     lastIndexOf(searchElement: number, fromIndex?: number): number;
     readonly length: number;
+    /** @intrinsic Array.prototype.map */
     map(callbackfn: (value: number, index: number, array: this) => number, thisArg?: any): Float64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: number, currentValue: number, currentIndex: number, array: this) => number, initialValue: number): number;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reverse */
     reverse(): this;
     set(array: ArrayLike<number>, offset?: number): void;
+    /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Float64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.some */
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
     subarray(begin?: number, end?: number): Float64Array<TArrayBuffer>;
     toLocaleString(): string;
@@ -1068,34 +1528,57 @@ interface BigInt64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> 
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
     readonly byteOffset: number;
+    /** @intrinsic Array.prototype.copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
+    /** @intrinsic Array.prototype.entries */
     entries(): ArrayIterator<[number, bigint]>;
+    /** @intrinsic Array.prototype.every */
     every(predicate: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => boolean, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.fill */
     fill(value: bigint, start?: number, end?: number): this;
+    /** @intrinsic Array.prototype.filter */
     filter(predicate: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => any, thisArg?: any): BigInt64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.find */
     find(predicate: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => boolean, thisArg?: any): bigint | undefined;
+    /** @intrinsic Array.prototype.findIndex */
     findIndex(predicate: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => boolean, thisArg?: any): number;
+    /** @intrinsic Array.prototype.forEach */
     forEach(callbackfn: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => void, thisArg?: any): void;
+    /** @intrinsic Array.prototype.includes */
     includes(searchElement: bigint, fromIndex?: number): boolean;
+    /** @intrinsic Array.prototype.indexOf */
     indexOf(searchElement: bigint, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
+    /** @intrinsic Array.prototype.keys */
     keys(): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.lastIndexOf */
     lastIndexOf(searchElement: bigint, fromIndex?: number): number;
     readonly length: number;
+    /** @intrinsic Array.prototype.map */
     map(callbackfn: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => bigint, thisArg?: any): BigInt64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: bigint, currentValue: bigint, currentIndex: number, array: BigInt64Array<TArrayBuffer>) => bigint): bigint;
+    /** @intrinsic Array.prototype.reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: bigint, currentIndex: number, array: BigInt64Array<TArrayBuffer>) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: bigint, currentValue: bigint, currentIndex: number, array: BigInt64Array<TArrayBuffer>) => bigint): bigint;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: bigint, currentIndex: number, array: BigInt64Array<TArrayBuffer>) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reverse */
     reverse(): this;
     set(array: ArrayLike<bigint>, offset?: number): void;
+    /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): BigInt64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.some */
     some(predicate: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => boolean, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: bigint, b: bigint) => number | bigint): this;
     subarray(begin?: number, end?: number): BigInt64Array<TArrayBuffer>;
     toLocaleString(locales?: string | string[], options?: Intl.NumberFormatOptions): string;
     toString(): string;
     valueOf(): BigInt64Array<TArrayBuffer>;
+    /** @intrinsic Array.prototype.values */
     values(): ArrayIterator<bigint>;
     [Symbol.iterator](): ArrayIterator<bigint>;
     readonly [Symbol.toStringTag]: "BigInt64Array";
@@ -1121,34 +1604,57 @@ interface BigUint64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike>
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
     readonly byteOffset: number;
+    /** @intrinsic Array.prototype.copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
+    /** @intrinsic Array.prototype.entries */
     entries(): ArrayIterator<[number, bigint]>;
+    /** @intrinsic Array.prototype.every */
     every(predicate: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => boolean, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.fill */
     fill(value: bigint, start?: number, end?: number): this;
+    /** @intrinsic Array.prototype.filter */
     filter(predicate: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => any, thisArg?: any): BigUint64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.find */
     find(predicate: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => boolean, thisArg?: any): bigint | undefined;
+    /** @intrinsic Array.prototype.findIndex */
     findIndex(predicate: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => boolean, thisArg?: any): number;
+    /** @intrinsic Array.prototype.forEach */
     forEach(callbackfn: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => void, thisArg?: any): void;
+    /** @intrinsic Array.prototype.includes */
     includes(searchElement: bigint, fromIndex?: number): boolean;
+    /** @intrinsic Array.prototype.indexOf */
     indexOf(searchElement: bigint, fromIndex?: number): number;
+    /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
+    /** @intrinsic Array.prototype.keys */
     keys(): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.lastIndexOf */
     lastIndexOf(searchElement: bigint, fromIndex?: number): number;
     readonly length: number;
+    /** @intrinsic Array.prototype.map */
     map(callbackfn: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => bigint, thisArg?: any): BigUint64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.reduce */
     reduce(callbackfn: (previousValue: bigint, currentValue: bigint, currentIndex: number, array: BigUint64Array<TArrayBuffer>) => bigint): bigint;
+    /** @intrinsic Array.prototype.reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: bigint, currentIndex: number, array: BigUint64Array<TArrayBuffer>) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight(callbackfn: (previousValue: bigint, currentValue: bigint, currentIndex: number, array: BigUint64Array<TArrayBuffer>) => bigint): bigint;
+    /** @intrinsic Array.prototype.reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: bigint, currentIndex: number, array: BigUint64Array<TArrayBuffer>) => U, initialValue: U): U;
+    /** @intrinsic Array.prototype.reverse */
     reverse(): this;
     set(array: ArrayLike<bigint>, offset?: number): void;
+    /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): BigUint64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.some */
     some(predicate: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => boolean, thisArg?: any): boolean;
+    /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: bigint, b: bigint) => number | bigint): this;
     subarray(begin?: number, end?: number): BigUint64Array<TArrayBuffer>;
     toLocaleString(locales?: string | string[], options?: Intl.NumberFormatOptions): string;
     toString(): string;
     valueOf(): BigUint64Array<TArrayBuffer>;
+    /** @intrinsic Array.prototype.values */
     values(): ArrayIterator<bigint>;
     [Symbol.iterator](): ArrayIterator<bigint>;
     readonly [Symbol.toStringTag]: "BigUint64Array";
@@ -1200,8 +1706,11 @@ interface Float64Array<TArrayBuffer extends ArrayBufferLike> {
 }
 interface Int8Array<TArrayBuffer extends ArrayBufferLike> {
     [Symbol.iterator](): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.entries */
     entries(): ArrayIterator<[number, number]>;
+    /** @intrinsic Array.prototype.keys */
     keys(): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.values */
     values(): ArrayIterator<number>;
 }
 interface Int8ArrayConstructor {
@@ -1211,8 +1720,11 @@ interface Int8ArrayConstructor {
 }
 interface Uint8Array<TArrayBuffer extends ArrayBufferLike> {
     [Symbol.iterator](): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.entries */
     entries(): ArrayIterator<[number, number]>;
+    /** @intrinsic Array.prototype.keys */
     keys(): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.values */
     values(): ArrayIterator<number>;
 }
 interface Uint8ArrayConstructor {
@@ -1222,8 +1734,11 @@ interface Uint8ArrayConstructor {
 }
 interface Uint8ClampedArray<TArrayBuffer extends ArrayBufferLike> {
     [Symbol.iterator](): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.entries */
     entries(): ArrayIterator<[number, number]>;
+    /** @intrinsic Array.prototype.keys */
     keys(): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.values */
     values(): ArrayIterator<number>;
 }
 interface Uint8ClampedArrayConstructor {
@@ -1233,8 +1748,11 @@ interface Uint8ClampedArrayConstructor {
 }
 interface Int16Array<TArrayBuffer extends ArrayBufferLike> {
     [Symbol.iterator](): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.entries */
     entries(): ArrayIterator<[number, number]>;
+    /** @intrinsic Array.prototype.keys */
     keys(): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.values */
     values(): ArrayIterator<number>;
 }
 interface Int16ArrayConstructor {
@@ -1244,8 +1762,11 @@ interface Int16ArrayConstructor {
 }
 interface Uint16Array<TArrayBuffer extends ArrayBufferLike> {
     [Symbol.iterator](): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.entries */
     entries(): ArrayIterator<[number, number]>;
+    /** @intrinsic Array.prototype.keys */
     keys(): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.values */
     values(): ArrayIterator<number>;
 }
 interface Uint16ArrayConstructor {
@@ -1255,8 +1776,11 @@ interface Uint16ArrayConstructor {
 }
 interface Int32Array<TArrayBuffer extends ArrayBufferLike> {
     [Symbol.iterator](): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.entries */
     entries(): ArrayIterator<[number, number]>;
+    /** @intrinsic Array.prototype.keys */
     keys(): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.values */
     values(): ArrayIterator<number>;
 }
 interface Int32ArrayConstructor {
@@ -1266,8 +1790,11 @@ interface Int32ArrayConstructor {
 }
 interface Uint32Array<TArrayBuffer extends ArrayBufferLike> {
     [Symbol.iterator](): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.entries */
     entries(): ArrayIterator<[number, number]>;
+    /** @intrinsic Array.prototype.keys */
     keys(): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.values */
     values(): ArrayIterator<number>;
 }
 interface Uint32ArrayConstructor {
@@ -1277,8 +1804,11 @@ interface Uint32ArrayConstructor {
 }
 interface Float32Array<TArrayBuffer extends ArrayBufferLike> {
     [Symbol.iterator](): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.entries */
     entries(): ArrayIterator<[number, number]>;
+    /** @intrinsic Array.prototype.keys */
     keys(): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.values */
     values(): ArrayIterator<number>;
 }
 interface Float32ArrayConstructor {
@@ -1288,8 +1818,11 @@ interface Float32ArrayConstructor {
 }
 interface Float64Array<TArrayBuffer extends ArrayBufferLike> {
     [Symbol.iterator](): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.entries */
     entries(): ArrayIterator<[number, number]>;
+    /** @intrinsic Array.prototype.keys */
     keys(): ArrayIterator<number>;
+    /** @intrinsic Array.prototype.values */
     values(): ArrayIterator<number>;
 }
 interface Float64ArrayConstructor {
@@ -1325,30 +1858,39 @@ interface Float64Array<TArrayBuffer extends ArrayBufferLike> {
     readonly [Symbol.toStringTag]: "Float64Array";
 }
 interface Int8Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.includes */
     includes(searchElement: number, fromIndex?: number): boolean;
 }
 interface Uint8Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.includes */
     includes(searchElement: number, fromIndex?: number): boolean;
 }
 interface Uint8ClampedArray<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.includes */
     includes(searchElement: number, fromIndex?: number): boolean;
 }
 interface Int16Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.includes */
     includes(searchElement: number, fromIndex?: number): boolean;
 }
 interface Uint16Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.includes */
     includes(searchElement: number, fromIndex?: number): boolean;
 }
 interface Int32Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.includes */
     includes(searchElement: number, fromIndex?: number): boolean;
 }
 interface Uint32Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.includes */
     includes(searchElement: number, fromIndex?: number): boolean;
 }
 interface Float32Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.includes */
     includes(searchElement: number, fromIndex?: number): boolean;
 }
 interface Float64Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.includes */
     includes(searchElement: number, fromIndex?: number): boolean;
 }
 interface Int8ArrayConstructor {
@@ -1379,39 +1921,51 @@ interface Float64ArrayConstructor {
     new (): Float64Array<ArrayBuffer>;
 }
 interface Int8Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.at */
     at(index: number): number | undefined;
 }
 interface Uint8Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.at */
     at(index: number): number | undefined;
 }
 interface Uint8ClampedArray<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.at */
     at(index: number): number | undefined;
 }
 interface Int16Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.at */
     at(index: number): number | undefined;
 }
 interface Uint16Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.at */
     at(index: number): number | undefined;
 }
 interface Int32Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.at */
     at(index: number): number | undefined;
 }
 interface Uint32Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.at */
     at(index: number): number | undefined;
 }
 interface Float32Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.at */
     at(index: number): number | undefined;
 }
 interface Float64Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.at */
     at(index: number): number | undefined;
 }
 interface BigInt64Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.at */
     at(index: number): bigint | undefined;
 }
 interface BigUint64Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.at */
     at(index: number): bigint | undefined;
 }
 interface Int8Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.findLast */
     findLast<S extends number>(
         predicate: (
             value: number,
@@ -1420,19 +1974,25 @@ interface Int8Array<TArrayBuffer extends ArrayBufferLike> {
         ) => value is S,
         thisArg?: any,
     ): S | undefined;
+    /** @intrinsic Array.prototype.findLast */
     findLast(
         predicate: (value: number, index: number, array: this) => unknown,
         thisArg?: any,
     ): number | undefined;
+    /** @intrinsic Array.prototype.findLastIndex */
     findLastIndex(
         predicate: (value: number, index: number, array: this) => unknown,
         thisArg?: any,
     ): number;
+    /** @intrinsic Array.prototype.toReversed */
     toReversed(): Int8Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.toSorted */
     toSorted(compareFn?: (a: number, b: number) => number): Int8Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.with */
     with(index: number, value: number): Int8Array<ArrayBuffer>;
 }
 interface Uint8Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.findLast */
     findLast<S extends number>(
         predicate: (
             value: number,
@@ -1441,19 +2001,25 @@ interface Uint8Array<TArrayBuffer extends ArrayBufferLike> {
         ) => value is S,
         thisArg?: any,
     ): S | undefined;
+    /** @intrinsic Array.prototype.findLast */
     findLast(
         predicate: (value: number, index: number, array: this) => unknown,
         thisArg?: any,
     ): number | undefined;
+    /** @intrinsic Array.prototype.findLastIndex */
     findLastIndex(
         predicate: (value: number, index: number, array: this) => unknown,
         thisArg?: any,
     ): number;
+    /** @intrinsic Array.prototype.toReversed */
     toReversed(): Uint8Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.toSorted */
     toSorted(compareFn?: (a: number, b: number) => number): Uint8Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.with */
     with(index: number, value: number): Uint8Array<ArrayBuffer>;
 }
 interface Uint8ClampedArray<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.findLast */
     findLast<S extends number>(
         predicate: (
             value: number,
@@ -1462,6 +2028,7 @@ interface Uint8ClampedArray<TArrayBuffer extends ArrayBufferLike> {
         ) => value is S,
         thisArg?: any,
     ): S | undefined;
+    /** @intrinsic Array.prototype.findLast */
     findLast(
         predicate: (
             value: number,
@@ -1470,6 +2037,7 @@ interface Uint8ClampedArray<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): number | undefined;
+    /** @intrinsic Array.prototype.findLastIndex */
     findLastIndex(
         predicate: (
             value: number,
@@ -1478,11 +2046,15 @@ interface Uint8ClampedArray<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): number;
+    /** @intrinsic Array.prototype.toReversed */
     toReversed(): Uint8ClampedArray<ArrayBuffer>;
+    /** @intrinsic Array.prototype.toSorted */
     toSorted(compareFn?: (a: number, b: number) => number): Uint8ClampedArray<ArrayBuffer>;
+    /** @intrinsic Array.prototype.with */
     with(index: number, value: number): Uint8ClampedArray<ArrayBuffer>;
 }
 interface Int16Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.findLast */
     findLast<S extends number>(
         predicate: (
             value: number,
@@ -1491,19 +2063,25 @@ interface Int16Array<TArrayBuffer extends ArrayBufferLike> {
         ) => value is S,
         thisArg?: any,
     ): S | undefined;
+    /** @intrinsic Array.prototype.findLast */
     findLast(
         predicate: (value: number, index: number, array: this) => unknown,
         thisArg?: any,
     ): number | undefined;
+    /** @intrinsic Array.prototype.findLastIndex */
     findLastIndex(
         predicate: (value: number, index: number, array: this) => unknown,
         thisArg?: any,
     ): number;
+    /** @intrinsic Array.prototype.toReversed */
     toReversed(): Int16Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.toSorted */
     toSorted(compareFn?: (a: number, b: number) => number): Int16Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.with */
     with(index: number, value: number): Int16Array<ArrayBuffer>;
 }
 interface Uint16Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.findLast */
     findLast<S extends number>(
         predicate: (
             value: number,
@@ -1512,6 +2090,7 @@ interface Uint16Array<TArrayBuffer extends ArrayBufferLike> {
         ) => value is S,
         thisArg?: any,
     ): S | undefined;
+    /** @intrinsic Array.prototype.findLast */
     findLast(
         predicate: (
             value: number,
@@ -1520,6 +2099,7 @@ interface Uint16Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): number | undefined;
+    /** @intrinsic Array.prototype.findLastIndex */
     findLastIndex(
         predicate: (
             value: number,
@@ -1528,11 +2108,15 @@ interface Uint16Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): number;
+    /** @intrinsic Array.prototype.toReversed */
     toReversed(): Uint16Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.toSorted */
     toSorted(compareFn?: (a: number, b: number) => number): Uint16Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.with */
     with(index: number, value: number): Uint16Array<ArrayBuffer>;
 }
 interface Int32Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.findLast */
     findLast<S extends number>(
         predicate: (
             value: number,
@@ -1541,19 +2125,25 @@ interface Int32Array<TArrayBuffer extends ArrayBufferLike> {
         ) => value is S,
         thisArg?: any,
     ): S | undefined;
+    /** @intrinsic Array.prototype.findLast */
     findLast(
         predicate: (value: number, index: number, array: this) => unknown,
         thisArg?: any,
     ): number | undefined;
+    /** @intrinsic Array.prototype.findLastIndex */
     findLastIndex(
         predicate: (value: number, index: number, array: this) => unknown,
         thisArg?: any,
     ): number;
+    /** @intrinsic Array.prototype.toReversed */
     toReversed(): Int32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.toSorted */
     toSorted(compareFn?: (a: number, b: number) => number): Int32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.with */
     with(index: number, value: number): Int32Array<ArrayBuffer>;
 }
 interface Uint32Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.findLast */
     findLast<S extends number>(
         predicate: (
             value: number,
@@ -1562,6 +2152,7 @@ interface Uint32Array<TArrayBuffer extends ArrayBufferLike> {
         ) => value is S,
         thisArg?: any,
     ): S | undefined;
+    /** @intrinsic Array.prototype.findLast */
     findLast(
         predicate: (
             value: number,
@@ -1570,6 +2161,7 @@ interface Uint32Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): number | undefined;
+    /** @intrinsic Array.prototype.findLastIndex */
     findLastIndex(
         predicate: (
             value: number,
@@ -1578,11 +2170,15 @@ interface Uint32Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): number;
+    /** @intrinsic Array.prototype.toReversed */
     toReversed(): Uint32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.toSorted */
     toSorted(compareFn?: (a: number, b: number) => number): Uint32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.with */
     with(index: number, value: number): Uint32Array<ArrayBuffer>;
 }
 interface Float32Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.findLast */
     findLast<S extends number>(
         predicate: (
             value: number,
@@ -1591,6 +2187,7 @@ interface Float32Array<TArrayBuffer extends ArrayBufferLike> {
         ) => value is S,
         thisArg?: any,
     ): S | undefined;
+    /** @intrinsic Array.prototype.findLast */
     findLast(
         predicate: (
             value: number,
@@ -1599,6 +2196,7 @@ interface Float32Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): number | undefined;
+    /** @intrinsic Array.prototype.findLastIndex */
     findLastIndex(
         predicate: (
             value: number,
@@ -1607,11 +2205,15 @@ interface Float32Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): number;
+    /** @intrinsic Array.prototype.toReversed */
     toReversed(): Float32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.toSorted */
     toSorted(compareFn?: (a: number, b: number) => number): Float32Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.with */
     with(index: number, value: number): Float32Array<ArrayBuffer>;
 }
 interface Float64Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.findLast */
     findLast<S extends number>(
         predicate: (
             value: number,
@@ -1620,6 +2222,7 @@ interface Float64Array<TArrayBuffer extends ArrayBufferLike> {
         ) => value is S,
         thisArg?: any,
     ): S | undefined;
+    /** @intrinsic Array.prototype.findLast */
     findLast(
         predicate: (
             value: number,
@@ -1628,6 +2231,7 @@ interface Float64Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): number | undefined;
+    /** @intrinsic Array.prototype.findLastIndex */
     findLastIndex(
         predicate: (
             value: number,
@@ -1636,11 +2240,15 @@ interface Float64Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): number;
+    /** @intrinsic Array.prototype.toReversed */
     toReversed(): Float64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.toSorted */
     toSorted(compareFn?: (a: number, b: number) => number): Float64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.with */
     with(index: number, value: number): Float64Array<ArrayBuffer>;
 }
 interface BigInt64Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.findLast */
     findLast<S extends bigint>(
         predicate: (
             value: bigint,
@@ -1649,6 +2257,7 @@ interface BigInt64Array<TArrayBuffer extends ArrayBufferLike> {
         ) => value is S,
         thisArg?: any,
     ): S | undefined;
+    /** @intrinsic Array.prototype.findLast */
     findLast(
         predicate: (
             value: bigint,
@@ -1657,6 +2266,7 @@ interface BigInt64Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): bigint | undefined;
+    /** @intrinsic Array.prototype.findLastIndex */
     findLastIndex(
         predicate: (
             value: bigint,
@@ -1665,11 +2275,15 @@ interface BigInt64Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): number;
+    /** @intrinsic Array.prototype.toReversed */
     toReversed(): BigInt64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.toSorted */
     toSorted(compareFn?: (a: bigint, b: bigint) => number): BigInt64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.with */
     with(index: number, value: bigint): BigInt64Array<ArrayBuffer>;
 }
 interface BigUint64Array<TArrayBuffer extends ArrayBufferLike> {
+    /** @intrinsic Array.prototype.findLast */
     findLast<S extends bigint>(
         predicate: (
             value: bigint,
@@ -1678,6 +2292,7 @@ interface BigUint64Array<TArrayBuffer extends ArrayBufferLike> {
         ) => value is S,
         thisArg?: any,
     ): S | undefined;
+    /** @intrinsic Array.prototype.findLast */
     findLast(
         predicate: (
             value: bigint,
@@ -1686,6 +2301,7 @@ interface BigUint64Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): bigint | undefined;
+    /** @intrinsic Array.prototype.findLastIndex */
     findLastIndex(
         predicate: (
             value: bigint,
@@ -1694,8 +2310,11 @@ interface BigUint64Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): number;
+    /** @intrinsic Array.prototype.toReversed */
     toReversed(): BigUint64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.toSorted */
     toSorted(compareFn?: (a: bigint, b: bigint) => number): BigUint64Array<ArrayBuffer>;
+    /** @intrinsic Array.prototype.with */
     with(index: number, value: bigint): BigUint64Array<ArrayBuffer>;
 }
 

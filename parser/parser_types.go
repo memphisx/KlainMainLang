@@ -14,9 +14,26 @@ import (
 // generation reads. source is stamped into the annotation ("ts", "jsdoc",
 // "as").
 func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error) {
+	from := p.pos
 	n, err := p.parseType()
 	if err != nil {
 		return nil, err
+	}
+	if p.pos > from {
+		start := p.at(from).Pos
+		// The `:`, `?:`, `as` or `satisfies` that introduces the type.
+		if from > 0 {
+			switch prev := p.at(from - 1); {
+			case prev.Type == lexer.COLON:
+				start = prev.Pos
+				if from > 1 && p.at(from-2).Type == lexer.QUESTION {
+					start = p.at(from - 2).Pos
+				}
+			case prev.Literal == "as" || prev.Literal == "satisfies":
+				start = prev.Pos
+			}
+		}
+		p.blank(start, p.at(p.pos-1).End)
 	}
 	if p.declarations {
 		return ast.NodeAnnotation(n, source), nil
@@ -137,8 +154,10 @@ func (p *Parser) parseIndexSignature(source string) (*ast.TypeAnnotation, error)
 
 // parseSignatureTail parses the `(params): R` tail of a method, call or
 // construct signature, positioned at the opening `(`. The return type is nil
-// when omitted.
+// when omitted; a leading `this: T` is not a parameter and is recorded in
+// p.sigThis for the caller.
 func (p *Parser) parseSignatureTail() ([]*ast.SignatureParameter, ast.TypeNode, error) {
+	p.sigThis = nil
 	p.advance() // consume '('
 	var params []*ast.SignatureParameter
 	hasRest := false
@@ -191,6 +210,7 @@ func (p *Parser) parseSignatureTail() ([]*ast.SignatureParameter, ast.TypeNode, 
 		if prm.Name == "this" && len(params) == 0 && !prm.Rest {
 			// A leading `this: T` types the signature's `this`; it is not a
 			// parameter.
+			p.sigThis = prm.Type
 			p.match(lexer.COMMA)
 			continue
 		}
@@ -210,18 +230,6 @@ func (p *Parser) parseSignatureTail() ([]*ast.SignatureParameter, ast.TypeNode, 
 		}
 	}
 	return params, ret, nil
-}
-
-// parseObjectTypeSignatureTail parses a call-signature tail and returns the
-// equivalent function-type annotation (interfaces read members one at a
-// time).
-func (p *Parser) parseObjectTypeSignatureTail(source string) (*ast.TypeAnnotation, error) {
-	start := p.peek()
-	params, ret, err := p.parseSignatureTail()
-	if err != nil {
-		return nil, err
-	}
-	return ast.SignatureMember(&ast.CallSignature{Parameters: params, Type: ret, Range: p.loc(start)}, source)
 }
 
 // parseType parses a full type: the union level, plus the forms only a whole
@@ -1005,6 +1013,8 @@ func (p *Parser) parseTypeMembers() ([]ast.TypeMember, error) {
 					ms.Lower = a.Value
 				case "link":
 					ms.Link = append(ms.Link, a.Value)
+				case "intrinsic":
+					ms.Intrinsic = a.Value
 				}
 			}
 		}
@@ -1086,6 +1096,7 @@ func (p *Parser) parseTypeMember() (ast.TypeMember, error) {
 		if m.Parameters, m.Type, err = p.parseSignatureTail(); err != nil {
 			return nil, err
 		}
+		m.This = p.sigThis
 		m.Range = p.loc(start)
 		return m, nil
 	}

@@ -29,8 +29,8 @@ The honest middle column: each of these compiles and runs for its core case but 
 
 | Feature | Status | Caveats |
 |---|---|---|
-| `any` / `unknown` | ✅ | • Full only under `-compat=js` (NaN-boxed D1 dynamic objects/prototypes/descriptors); under `-compat=strict` arithmetic on `any` is a compile error. Gaps: primitive-member dispatch through `any`, `Object.values/entries` on dynamic objects, allocation-site widening of a boxed static object beyond a fresh `new C()` (aliased binding / method class / cyclic shape — [ADR-00990](../adr/ADR-00990.md)) → [Type system](TYPE-SYSTEM.md) |
-| Union types | ✅ | • Scalars, single-object, and first-position string-literal discriminated unions only; no array-element unions, non-first-position/number-literal tags; narrowing is local (`typeof`/truthiness/`==null`) — no `switch(typeof)`, `as`-narrowing, or tag narrowing → [Type system](TYPE-SYSTEM.md) |
+| `any` / `unknown` | ✅ | • `Object.assign` through `any` and `Object.defineProperties` copy and define string keys only, not symbol keys → [Type system](TYPE-SYSTEM.md) |
+| Union types | ✅ | • Scalars, objects (classes, plain object types, one headerless host object such as `URL`) and discriminated unions; no number-literal or non-first-position tags; narrowing is local (`typeof`/truthiness/`==null`/`instanceof`/`in`/a tag) — no `switch(typeof)` or `as`-narrowing → [Type system](TYPE-SYSTEM.md) |
 | Intersection types | ✅ | • Object-type members only; conflicting non-object fields rejected (TS `never`-field not modeled) → [Type system](TYPE-SYSTEM.md) |
 | Tuple types | ✅ | • No rest/optional elements; constant index only; no array methods; not nestable in `any`/union → [Type system](TYPE-SYSTEM.md) |
 | Mapped & utility types | ✅ | • Effective ones are `Pick`/`Omit`/`Record`; `Partial`/`Required`/`Readonly` are erased structural no-ops. No key remapping (`as`), no `-?`/`-readonly` modifier removal; compile-time-only → [Type system](TYPE-SYSTEM.md) |

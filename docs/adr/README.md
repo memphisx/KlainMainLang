@@ -1223,3 +1223,140 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [01178](ADR-01178.md) | Node's function-style constructors, called without `new` | `Extends [ADR-01170](ADR-01170.md)`, [ADR-01175](ADR-01175.md) |
 | [01179](ADR-01179.md) | A primitive is not a library object; a literal elaborates past a union's primitives | `Extends [ADR-01174](ADR-01174.md)`; `Implements [TDD-00230](../tdd/TDD-00230.md)` (P2.7) |
 | [01180](ADR-01180.md) | A method returning `this` returns its receiver; the js lane's top-level bindings a function reads; `createConnection` | `Extends [ADR-01171](ADR-01171.md)`, [ADR-01175](ADR-01175.md) |
+| [01181](ADR-01181.md) | Every object layout starts with a header word; a layout table serves dynamic access to static objects | `Implements [TDD-00230](../tdd/TDD-00230.md)` (phase 5, first step) |
+| [01182](ADR-01182.md) | Generators, promises and the iteration protocol through `any` | `Extends [ADR-01181](ADR-01181.md)`, `Implements [TDD-00230](../tdd/TDD-00230.md)` (phase 5, P3.3 convert) |
+| [01183](ADR-01183.md) | Stream operators, `Readable.from`, `signal`, `pipeline`/`compose`/`Duplex.from`, FileHandle, and the request stream on `Readable.fromWeb` | `Implements [TDD-00231](../tdd/TDD-00231.md)`, `Extends [ADR-01161](ADR-01161.md)`, [ADR-01166](ADR-01166.md) |
+| [01184](ADR-01184.md) | The C string and number runtime links libm | |
+| [01185](ADR-01185.md) | The TCP handles run on Windows; the code-generated `net`, `tls` and `klain:ws` server are deleted | `Implements [TDD-00231](../tdd/TDD-00231.md)`, `Extends [ADR-01170](ADR-01170.md)` |
+| [01186](ADR-01186.md) | Windows test expectations follow Node on Windows; `-emit-llvm` takes any target | `Extends [ADR-01185](ADR-01185.md)` |
+| [01187](ADR-01187.md) | A `function`'s own `this` is its caller's receiver in untyped JavaScript; TS2683 in the strict lane | `Extends [ADR-01181](ADR-01181.md)`, `Implements [TDD-00230](../tdd/TDD-00230.md)` (P2.7 diagnostics, phase 5) |
+| [01188](ADR-01188.md) | A string iterates its code points, also when held in `any` | `Supersedes [ADR-00535](ADR-00535.md)`, `Extends [ADR-00536](ADR-00536.md)`, `Extends [ADR-01182](ADR-01182.md)` |
+| [01189](ADR-01189.md) | A web stream of typed chunks read as `ReadableStream<any>` is converted | `Extends [ADR-01182](ADR-01182.md)`, `Implements [TDD-00230](../tdd/TDD-00230.md)` (P3.3 convert) |
+| [01190](ADR-01190.md) | `new Response`, its statics, `statusText`/`type`, and a HeadersInit as a record or pairs | `Extends [ADR-00490](ADR-00490.md)`, `Extends [ADR-00130](ADR-00130.md)` |
+| [01191](ADR-01191.md) | A union's object member asserted as another shape is read by field name | `Extends [ADR-00929](ADR-00929.md)` |
+| [01192](ADR-01192.md) | Unhandled promise rejections are reported, as Node's default does | `Extends [ADR-00334](ADR-00334.md)`, `Extends [ADR-00207](ADR-00207.md)` |
+| [01193](ADR-01193.md) | Promise combinators are the spec's algorithms | `Extends [ADR-00248](ADR-00248.md)`, `Extends [ADR-01192](ADR-01192.md)` |
+| [01194](ADR-01194.md) | `instanceof Promise`, and `instanceof Array`/`Promise` of a value held in `any` | `Extends [ADR-00162](ADR-00162.md)`, `Extends [ADR-01182](ADR-01182.md)` |
+| [01195](ADR-01195.md) | `.finally`'s promise settles as the spec's thenFinally does | `Extends [ADR-00248](ADR-00248.md)` |
+| [01196](ADR-01196.md) | The WHATWG streams are declared; `for…of` checks its iterable | `Implements [TDD-00230](../tdd/TDD-00230.md)`, `Extends [ADR-01134](ADR-01134.md)` |
+| [01197](ADR-01197.md) | Fetch's Body members: stream and null bodies, `bodyUsed`, Request | `Extends [ADR-01190](ADR-01190.md)` |
+| [01198](ADR-01198.md) | Blob's readers return promises; Blob is declared | `Extends [ADR-00314](ADR-00314.md)`, `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01199](ADR-01199.md) | Host handles compare by identity, not as strings | `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01200](ADR-01200.md) | `WeakRef`, `FinalizationRegistry` and `Proxy` are declared | `Implements [TDD-00230](../tdd/TDD-00230.md)`, `Extends [ADR-01134](ADR-01134.md)` |
+| [01201](ADR-01201.md) | A function boxed into `any` twice is one function | `Implements [TDD-00229](../tdd/TDD-00229.md)` |
+| [01202](ADR-01202.md) | Generic classes — defaults, `any` arguments, accessors, `T` in bodies | `Implements [TDD-00230](../tdd/TDD-00230.md)`, `Extends [TDD-00010](../tdd/TDD-00010.md)` |
+| [01203](ADR-01203.md) | Event, EventTarget and AbortSignal are a TypeScript global module | `Implements [TDD-00232](../tdd/TDD-00232.md)`, `Supersedes [ADR-00978](ADR-00978.md)`, `Supersedes [ADR-00979](ADR-00979.md)` |
+| [01204](ADR-01204.md) | A host handle boxed into `any` is an object | `Extends [ADR-01199](ADR-01199.md)` |
+| [01205](ADR-01205.md) | A fetch with a signal resolves at its headers | `Extends [ADR-01203](ADR-01203.md)` |
+| [01206](ADR-01206.md) | console.log of Blob, Headers, ArrayBuffer and the text codecs | |
+| [01207](ADR-01207.md) | URLs take any scheme; TLS checks an IP host against IP names | |
+| [01208](ADR-01208.md) | The WebSocket client and EventSource are TypeScript global modules | `Implements [TDD-00232](../tdd/TDD-00232.md)`, `Extends [ADR-01203](ADR-01203.md)` |
+| [01209](ADR-01209.md) | A top-level `const k = Symbol()` is a module global | |
+| [01210](ADR-01210.md) | A class instance behind an interface is read as itself | `Implements [TDD-00233](../tdd/TDD-00233.md)` |
+| [01211](ADR-01211.md) | Objects built outside their type's layout, and three emitter slips | `Extends [ADR-01210](ADR-01210.md)` |
+| [01212](ADR-01212.md) | A property added to a static object through `any` is its own | `Implements [TDD-00230](../tdd/TDD-00230.md)`, `Extends [ADR-01210](ADR-01210.md)` |
+| [01213](ADR-01213.md) | A static object in a union or `any` renders and enumerates from its row | `Implements [TDD-00230](../tdd/TDD-00230.md)`, `Extends [ADR-01210](ADR-01210.md)` |
+| [01214](ADR-01214.md) | An unannotated mixed array literal is an array of a union | `Implements [TDD-00200](../tdd/TDD-00200.md)` |
+| [01215](ADR-01215.md) | A plain object behind another plain type is the object itself | `Implements [TDD-00233](../tdd/TDD-00233.md)`, `Extends [ADR-01210](ADR-01210.md)` |
+| [01216](ADR-01216.md) | `this` in method signatures, their class types, assignment values | `Extends [ADR-01215](ADR-01215.md)` |
+| [01217](ADR-01217.md) | fetch reads its init as RequestInit, and sends every BodyInit | `Extends [ADR-01215](ADR-01215.md)` |
+| [01218](ADR-01218.md) | fs read options may be a variable | `Extends [ADR-01163](ADR-01163.md)` |
+| [01219](ADR-01219.md) | A union of object types needs no discriminant | `Extends [TDD-00116](../tdd/TDD-00116.md)`, `Extends [ADR-01215](ADR-01215.md)` |
+| [01220](ADR-01220.md) | The Web Crypto global and the crypto module are declared | `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01221](ADR-01221.md) | The legacy url API is Node's lib/url.js in TypeScript | `Implements [TDD-00230](../tdd/TDD-00230.md)`, `Implements [TDD-00231](../tdd/TDD-00231.md)` |
+| [01222](ADR-01222.md) | The definite-assignment walk visits each flow node once | `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01223](ADR-01223.md) | Regex literals are RegExp to the checker | `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01224](ADR-01224.md) | String.fromCharCode and fromCodePoint encode UTF-8 | `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01225](ADR-01225.md) | A boxed object converts to a dictionary type | `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01226](ADR-01226.md) | Declaration modules take `export =`; assert, dns and zlib are declared | `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01227](ADR-01227.md) | Buffer.from is binary-safe; isEncoding and the ranged ArrayBuffer form | `Implements [TDD-00234](../tdd/TDD-00234.md)` |
+| [01228](ADR-01228.md) | child_process is Node's lib/child_process.js in TypeScript | `Implements [TDD-00234](../tdd/TDD-00234.md)`, `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01229](ADR-01229.md) | Overload selection and contextual typing follow tsc more closely | `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01230](ADR-01230.md) | Closures, optional functions and `any` results take their real types in codegen | `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01231](ADR-01231.md) | process.cwd is a runtime string; `__filename`; libuv's active handles | `Implements [TDD-00234](../tdd/TDD-00234.md)` |
+| [01232](ADR-01232.md) | A function's own properties; TypeScript expando declarations | `Extends [ADR-01093](ADR-01093.md)` |
+| [01233](ADR-01233.md) | Array, string and number methods, `hasOwnProperty` and `in` through `any`; arrays of objects in `any` | `Extends [ADR-01059](ADR-01059.md)` |
+| [01234](ADR-01234.md) | Promises through `any`; util.inspect of promises and nested Errors | `Extends [ADR-01182](ADR-01182.md)` |
+| [01235](ADR-01235.md) | A caught error's own properties | |
+| [01236](ADR-01236.md) | util.promisify.custom; exec and execFile promisified | `Implements [TDD-00234](../tdd/TDD-00234.md)`; `Extends [ADR-01228](ADR-01228.md)` |
+| [01237](ADR-01237.md) | Object.defineProperties; Object.assign with `any` | `Extends [ADR-01232](ADR-01232.md)` |
+| [01238](ADR-01238.md) | `events` is a TypeScript module | `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01239](ADR-01239.md) | process.stdin, stdout and stderr are Node's streams; `tty` | `Implements [TDD-00235](../tdd/TDD-00235.md)` |
+| [01240](ADR-01240.md) | A generic class named without type arguments takes its defaults | `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01241](ADR-01241.md) | Parameter defaults through dynamic calls | `Extends [ADR-01238](ADR-01238.md)` |
+| [01242](ADR-01242.md) | Duplicate function implementations are TS2393 | `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01243](ADR-01243.md) | `readline` is a TypeScript module | `Implements [TDD-00235](../tdd/TDD-00235.md)`, `Extends [ADR-01238](ADR-01238.md), [ADR-01239](ADR-01239.md)` |
+| [01244](ADR-01244.md) | `string_decoder` is a TypeScript module | `Implements [TDD-00230](../tdd/TDD-00230.md)` |
+| [01245](ADR-01245.md) | `.next(v)` is the `yield` expression's value | `Extends [ADR-00954](ADR-00954.md)` |
+| [01246](ADR-01246.md) | A machine integer into `any` is boxed | |
+| [01247](ADR-01247.md) | `RegExpExecArray` and `RegExpMatchArray` annotations | |
+| [01248](ADR-01248.md) | An override with different parameters | `Extends [ADR-00631](ADR-00631.md), [ADR-01238](ADR-01238.md)` |
+| [01249](ADR-01249.md) | A stream handle on a device `poll()` rejects | `Extends [ADR-01239](ADR-01239.md)` |
+| [01250](ADR-01250.md) | `process` is an EventEmitter, in TypeScript | `Implements [TDD-00230](../tdd/TDD-00230.md)`, `Extends [ADR-01238](ADR-01238.md), [ADR-01239](ADR-01239.md), [ADR-01228](ADR-01228.md)`, `Supersedes [ADR-00079](ADR-00079.md)` (its fixed per-signal slots), `Supersedes [ADR-00580](ADR-00580.md)` (its code-generated `emitWarning`) |
+| [01251](ADR-01251.md) | The `object` type is a boxed value | |
+| [01252](ADR-01252.md) | A function-typed top-level binding is a module global | `Extends [ADR-01059](ADR-01059.md)` |
+| [01253](ADR-01253.md) | Optional chains and calls on `any` | `Extends [ADR-01037](ADR-01037.md)` |
+| [01254](ADR-01254.md) | `diagnostics_channel` in TypeScript | `Implements [TDD-00230](../tdd/TDD-00230.md)`, `Supersedes [ADR-00420](ADR-00420.md)` |
+| [01255](ADR-01255.md) | An omitted optional parameter before a rest parameter | |
+| [01256](ADR-01256.md) | A return's type sees the locals of the blocks around it | |
+| [01257](ADR-01257.md) | `async_hooks` in TypeScript | `Implements [TDD-00230](../tdd/TDD-00230.md)`, `Extends [ADR-00678](ADR-00678.md), [ADR-00679](ADR-00679.md), [ADR-00680](ADR-00680.md), [ADR-00782](ADR-00782.md)` |
+| [01258](ADR-01258.md) | Generic class statics, instance annotations, `new … .m()` | |
+| [01259](ADR-01259.md) | `const self = this` | |
+| [01260](ADR-01260.md) | A captured Map/Set is boxed at its declaration | `Extends [ADR-00619](ADR-00619.md)` |
+| [01261](ADR-01261.md) | `Map \| undefined` and generic `T \| undefined` keep their absence | |
+| [01262](ADR-01262.md) | Rest-parameter closures convert through the box | `Extends [ADR-00477](ADR-00477.md)` |
+| [01263](ADR-01263.md) | `dgram` in TypeScript | `Implements [TDD-00230](../tdd/TDD-00230.md)`, `Supersedes [ADR-00327](ADR-00327.md), [ADR-00581](ADR-00581.md)` |
+| [01264](ADR-01264.md) | An `any` holding a static array reads as `any[]` element by element | `Extends [ADR-01059](ADR-01059.md)` |
+| [01265](ADR-01265.md) | `perf_hooks` and `performance` are a TypeScript module | `Implements [TDD-00230](../tdd/TDD-00230.md)`, `Supersedes [ADR-00673](ADR-00673.md)` |
+| [01266](ADR-01266.md) | `structuredClone` of an `any` clones by run-time shape | `Extends [ADR-00574](ADR-00574.md)` |
+| [01267](ADR-01267.md) | Writes and TypedArray `instanceof` on an `any` array | `Extends [ADR-01059](ADR-01059.md)` |
+| [01268](ADR-01268.md) | `arr.length = n` | `Extends [ADR-00939](ADR-00939.md)` |
+| [01269](ADR-01269.md) | A local initialized from a call takes the call's return type | `Extends [ADR-00538](ADR-00538.md)` |
+| [01270](ADR-01270.md) | The monotonic clock is nanosecond-grained on macOS | `Extends [ADR-00568](ADR-00568.md)` |
+| [01271](ADR-01271.md) | timers/promises written in TypeScript | `Part of [TDD-00230](../tdd/TDD-00230.md)`, `Completes [TDD-00165](../tdd/TDD-00165.md)` |
+| [01272](ADR-01272.md) | Generator parameters: nullable scalars and captured locals | `Extends [ADR-00172](ADR-00172.md)`, `Extends [ADR-00619](ADR-00619.md)` |
+| [01273](ADR-01273.md) | void parameters, bindings and returns hold undefined | `Extends [ADR-00479](ADR-00479.md)` |
+| [01274](ADR-01274.md) | A generic call takes a type parameter's default | `Extends [TDD-00010](../tdd/TDD-00010.md)` |
+| [01275](ADR-01275.md) | typeof a generic function is "function" | `Extends [ADR-00607](ADR-00607.md)` |
+| [01276](ADR-01276.md) | Weak-type check (TS2559) for assignments and calls | `Extends [ADR-01132](ADR-01132.md)` |
+| [01277](ADR-01277.md) | split on empty RegExp matches, two-digit Date years | `Supersedes part of [ADR-00119](ADR-00119.md)`, `Supersedes part of [ADR-00039](ADR-00039.md)` |
+| [01278](ADR-01278.md) | process's methods, argv, env and exit in TypeScript | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Extends [ADR-01250](ADR-01250.md)` |
+| [01279](ADR-01279.md) | parameter defaults for arguments undefined at run time | `Extends [ADR-00598](ADR-00598.md)`, `Extends [ADR-00915](ADR-00915.md)` |
+| [01280](ADR-01280.md) | `timers` as a TypeScript module | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes part of [ADR-00666](ADR-00666.md)` |
+| [01281](ADR-01281.md) | `buffer`'s module-only exports | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Extends [ADR-00666](ADR-00666.md)` |
+| [01282](ADR-01282.md) | `node:test` and Node's test-suite helpers in TypeScript | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes part of [TDD-00140](../tdd/TDD-00140.md)`, `Supersedes part of [TDD-00122](../tdd/TDD-00122.md)` |
+| [01283](ADR-01283.md) | generic references instantiate; `new Promise`'s value type | `Extends [ADR-01132](ADR-01132.md)`, `Supersedes part of [TDD-00087](../tdd/TDD-00087.md)` |
+| [01284](ADR-01284.md) | `Object.is`; `Object.keys` of a boxed array | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.2) |
+| [01285](ADR-01285.md) | host values' members through `any` | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.3), `Extends [ADR-01204](ADR-01204.md)` |
+| [01286](ADR-01286.md) | checker inference — constraints, defaults, tuples in arrays | `Extends [ADR-01283](ADR-01283.md)`, `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P2) |
+| [01287](ADR-01287.md) | Dates, collections and weak collections held in `any` | `Extends [ADR-01285](ADR-01285.md)`, `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.3) |
+| [01288](ADR-01288.md) | `assert` as Node's lib/assert.js in TypeScript | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes [ADR-00140](ADR-00140.md)`, `Extends [ADR-01287](ADR-01287.md)` |
+| [01289](ADR-01289.md) | `util` as Node's lib/util.js in TypeScript | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes [ADR-00325](ADR-00325.md)`, `Extends [ADR-01288](ADR-01288.md)` |
+| [01290](ADR-01290.md) | `path` as Node's lib/path.js in TypeScript | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes [ADR-00722](ADR-00722.md)`, `Supersedes [ADR-00723](ADR-00723.md)` |
+| [01291](ADR-01291.md) | `os` as Node's lib/os.js in TypeScript | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes [ADR-00090](ADR-00090.md)`, `Supersedes [ADR-00777](ADR-00777.md)`, `Extends [ADR-01077](ADR-01077.md)` |
+| [01292](ADR-01292.md) | Conversion and iteration of objects, functions and `any` iterables | `Extends [ADR-01232](ADR-01232.md)`, `Extends [ADR-00279](ADR-00279.md)`, `Implements part of [TDD-00230](../tdd/TDD-00230.md)` |
+| [01293](ADR-01293.md) | An Error's own enumerable properties | `Extends [ADR-01080](ADR-01080.md)`, `Extends [ADR-01287](ADR-01287.md)` |
+| [01294](ADR-01294.md) | `dns` as Node's lib/dns.js over a native DNS client | `Implements [TDD-00236](../tdd/TDD-00236.md)`, `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes [ADR-00326](ADR-00326.md)`, `Supersedes [ADR-00329](ADR-00329.md)` |
+| [01295](ADR-01295.md) | Array element kinds across `any[]`, ternary types, promoted callables, and Number predicates | `Extends [ADR-00887](ADR-00887.md)`, `Extends [TDD-00213](../tdd/TDD-00213.md)`, `Implements part of [TDD-00230](../tdd/TDD-00230.md)` |
+| [01296](ADR-01296.md) | `zlib` as Node's lib/zlib.js over a native handle per stream | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes [ADR-00321](ADR-00321.md)`, `Supersedes [ADR-01006](ADR-01006.md)` |
+| [01297](ADR-01297.md) | Callback arity, function identity, dictionaries, overload results, and views through `any` | `Extends [ADR-00477](ADR-00477.md)`, `Extends [ADR-00478](ADR-00478.md)`, `Implements part of [TDD-00230](../tdd/TDD-00230.md)` |
+| [01298](ADR-01298.md) | `fs` as Node's lib/fs.js over one native request per operation | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes [ADR-00495](ADR-00495.md)`, `Supersedes [ADR-00795](ADR-00795.md)` |
+| [01299](ADR-01299.md) | Fixes found porting `fs` | `Extends [ADR-01298](ADR-01298.md)` |
+| [01300](ADR-01300.md) | `crypto` as Node's lib/crypto.js over the backend's natives | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes [ADR-00434](ADR-00434.md)`, `Supersedes [ADR-00590](ADR-00590.md)`, `Supersedes [ADR-00636](ADR-00636.md)`, `Supersedes [ADR-00637](ADR-00637.md)` |
+| [01301](ADR-01301.md) | `http2` as Node's lib/internal/http2 over an nghttp2 event queue | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes [ADR-00414](ADR-00414.md)`, `Supersedes [ADR-00415](ADR-00415.md)` |
+| [01302](ADR-01302.md) | `cluster` as Node's lib/internal/cluster, with handles over the fork channel | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes [ADR-00331](ADR-00331.md)`, `Extends [ADR-01228](ADR-01228.md)`, `Extends [ADR-01250](ADR-01250.md)` |
+| [01303](ADR-01303.md) | `worker_threads` as Node's lib/internal/worker, with a worker as an isolate | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes [ADR-00305](ADR-00305.md)`, `Supersedes [ADR-00306](ADR-00306.md)`, `Supersedes [ADR-00309](ADR-00309.md)`, `Supersedes [ADR-00431](ADR-00431.md)`, `Extends [ADR-01302](ADR-01302.md)` |
+| [01304](ADR-01304.md) | `node:sqlite` as Node's src/node_sqlite.cc, in TypeScript | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes [ADR-00540](ADR-00540.md)` |
+| [01305](ADR-01305.md) | zlib's Brotli and Zstd codecs | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Extends [ADR-01296](ADR-01296.md)` |
+| [01306](ADR-01306.md) | `node:ffi` as Node's lib/ffi.js over libffi | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.1), `Supersedes [ADR-00799](ADR-00799.md)`, `Supersedes [ADR-00800](ADR-00800.md)`, `Extends [ADR-01304](ADR-01304.md)` |
+| [01307](ADR-01307.md) | `@intrinsic` globals and builtin functions as values | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.2), `Extends [ADR-00573](ADR-00573.md)` |
+| [01308](ADR-01308.md) | WHATWG URL encoding, opaque URLs and origins | `Extends [ADR-00076](ADR-00076.md)`, `Extends [ADR-00874](ADR-00874.md)` |
+| [01309](ADR-01309.md) | spawnSync's stdin output slot, and stale BACKLOG items | `Extends [ADR-01228](ADR-01228.md)` |
+| [01310](ADR-01310.md) | Date operands convert as JavaScript does | `Supersedes [ADR-00018](ADR-00018.md)` |
+| [01311](ADR-01311.md) | The checker's return type when a function's returns disagree | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.3) |
+| [01312](ADR-01312.md) | Symbols and bigints keep their kind in unions | `Implements part of [TDD-00230](../tdd/TDD-00230.md)` (P3.3), `Extends [ADR-01059](ADR-01059.md)` |
+| [01313](ADR-01313.md) | Live Map, Set and Array iterators | `Implements [TDD-00230](../tdd/TDD-00230.md)` (P3.2); `Extends [ADR-00481](ADR-00481.md)`, `[ADR-00057](ADR-00057.md)` |
+| [01314](ADR-01314.md) | Three-state pointers and key presence | `Implements [TDD-00230](../tdd/TDD-00230.md)` (P3.3); `Extends [ADR-01063](ADR-01063.md)`, `[ADR-01117](ADR-01117.md)` |
+| [01315](ADR-01315.md) | Local-time Date, Date.parse, Invalid Date, and Map/Set/Date through their declarations | `Implements [TDD-00230](../tdd/TDD-00230.md)` (P3.2); `Extends [ADR-01307](ADR-01307.md)`; `Supersedes` the UTC-only rule of the Date ADRs ([ADR-00015](ADR-00015.md), [ADR-00016](ADR-00016.md), [ADR-00844](ADR-00844.md)) |
+| [01316](ADR-01316.md) | exec() results carry index, input and groups | `Implements [TDD-00230](../tdd/TDD-00230.md)` (P3.2, P3.3); `Extends [ADR-01307](ADR-01307.md)` |
+| [01317](ADR-01317.md) | A class's static side, TS2344, and tsc's flow shortcuts past calls and conditions | `Implements [TDD-00230](../tdd/TDD-00230.md)` (P3.2); `Extends [ADR-01315](ADR-01315.md)` |

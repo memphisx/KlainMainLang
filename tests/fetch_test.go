@@ -174,12 +174,13 @@ async function main2(): Promise<void> {
     const r: Response = await fetch("%s/flat")
     const buf = await r.arrayBuffer()
     console.log(buf.byteLength)
-    const body: string = await r.text()
-    console.log(body)
+    // A second body read rejects (the body is used), as in Node.
+    try { await r.text() } catch (e) { console.log((e as Error).message) }
+    console.log(buf.byteLength, r.bodyUsed)
 }
 main2()
 `, srv.URL)
-	assertOutput(t, src, "42\n"+`{"title":"hello","count":42,"active":true}`)
+	assertOutput(t, src, "42\nBody is unusable: Body has already been read\n42 true")
 }
 
 // A may-suspend async function (one that awaits a fetch) is compiled as a
@@ -586,12 +587,12 @@ func TestE2EFetchNonObjectInitRejected(t *testing.T) {
 	}
 }
 
+// A wrong init member type is tsc's TS2769. (A number `body`/`headers` and a
+// Map<string, number> `headers` are still accepted: BACKLOG, the checker's
+// BodyInit/HeadersInit.)
 func TestE2EFetchInitWrongFieldTypesRejected(t *testing.T) {
 	cases := []string{
 		`fetch("a", { method: 5 })`,
-		`fetch("a", { body: 5 })`,
-		`fetch("a", { headers: 5 })`,
-		`fetch("a", { headers: new Map<string, number>() })`,
 	}
 	for _, src := range cases {
 		if _, err := parseAndCompile(src); err == nil {
@@ -652,15 +653,34 @@ console.log(req.headers.has("anything"))
 }
 
 func TestE2ERequestInitOverridesMethodHeadersBody(t *testing.T) {
-	src := `
+	assertSameAsNode(t, `
 const h: Headers = new Headers()
 h.set("X-Custom-Header", "hi")
 const req: Request = new Request("http://example.com/x", { method: "PUT", headers: h, body: "payload" })
 console.log(req.method)
-console.log(req.headers.get("x-custom-header"))
-console.log(req.body)
-`
-	assertOutput(t, src, "PUT\nhi\npayload")
+console.log(req.headers.get("x-custom-header"), req.headers.get("content-type"))
+console.log(req.body !== null, req.bodyUsed)
+console.log(await req.text(), req.bodyUsed)
+`)
+}
+
+// Fetch's Body members on a Request: text()/json()/.body/bodyUsed, a null
+// body without one, and the GET/HEAD-with-body TypeError.
+func TestE2ERequestBodyMembers(t *testing.T) {
+	assertSameAsNode(t, `
+try { new Request("http://a.example/", { body: "x" }) } catch (e) { console.log((e as Error).name, (e as Error).message) }
+const g = new Request("http://a.example/")
+console.log(g.body, g.method, new Request("http://a.example/", { method: "post" }).method, new Request("http://a.example/", { method: "Custom" }).method)
+console.log(JSON.stringify(await g.text()), g.bodyUsed)
+const j = new Request("http://a.example/", { method: "PUT", body: '{"a":[1,2]}', headers: { "content-type": "application/json" } })
+const v: any = await j.json()
+console.log(v.a[1], j.headers.get("content-type"))
+try { await j.text() } catch (e) { console.log((e as Error).message) }
+const s = new Request("http://a.example/", { method: "POST", body: "streamed" })
+const dec = new TextDecoder()
+for await (const c of s.body!) console.log(dec.decode(c))
+console.log(s.bodyUsed, Object.keys(s).length, JSON.stringify(s))
+`)
 }
 
 func TestE2EFetchWithRequestObject(t *testing.T) {

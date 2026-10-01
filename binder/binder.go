@@ -72,6 +72,9 @@ type Binding struct {
 	// AmbientModules are the builtin declarations' modules (`declare module
 	// "path" { … }`), each its own scope of exports.
 	AmbientModules map[string]*Scope
+	// AmbientExportEquals names, for a module whose declaration ends in
+	// `export = X;`, the X that is the module itself.
+	AmbientExportEquals map[string]string
 	// Program is the program bound.
 	Program *ast.Program
 }
@@ -120,6 +123,9 @@ type scopeKey struct {
 type binder struct {
 	*Binding
 	declaring bool // pass 1 declares; pass 2 resolves
+	// ambientNS maps a declaration file's namespace members (inside its
+	// `declare module` blocks too) to their namespace, while it is bound.
+	ambientNS map[ast.Statement]*namespace
 	scopes    map[scopeKey]*Scope
 	cur       *Scope
 	// memberOf maps a top-level statement a namespace member desugared to
@@ -231,29 +237,30 @@ func BindWith(prog *ast.Program, opts Options) *Binding {
 	b := &binder{
 		annexB: opts.AnnexB,
 		Binding: &Binding{
-			Program:        prog,
-			refs:           map[*ast.Identifier]*Symbol{},
-			globals:        map[*ast.Identifier]bool{},
-			lookupScopes:   map[ast.Node]*Scope{},
-			newTargets:     map[*ast.NewExpression]*Symbol{},
-			refFlow:        map[*ast.Identifier]*FlowNode{},
-			written:        map[*ast.Identifier]bool{},
-			refContainer:   map[*ast.Identifier]*Scope{},
-			stores:         map[*Symbol][]ast.Node{},
-			endReachable:   map[*ast.BlockStatement]bool{},
-			fnScopes:       map[ast.Node]*Scope{},
-			refOrd:         map[*ast.Identifier]int{},
-			declOrd:        map[*Symbol]int{},
-			lastAssign:     map[*Symbol]int{},
-			exported:       map[ast.Node]bool{},
-			endFlow:        map[*ast.BlockStatement]*FlowNode{},
-			thisFlow:       map[ast.Expression]*FlowNode{},
-			thisOwner:      map[ast.Expression]*Symbol{},
-			thisLocal:      map[ast.Expression]bool{},
-			thisSyms:       map[*Scope]*Symbol{},
-			nsScopes:       map[*Symbol]*Scope{},
-			AmbientModules: map[string]*Scope{},
-			Script:         opts.Script,
+			Program:             prog,
+			refs:                map[*ast.Identifier]*Symbol{},
+			globals:             map[*ast.Identifier]bool{},
+			lookupScopes:        map[ast.Node]*Scope{},
+			newTargets:          map[*ast.NewExpression]*Symbol{},
+			refFlow:             map[*ast.Identifier]*FlowNode{},
+			written:             map[*ast.Identifier]bool{},
+			refContainer:        map[*ast.Identifier]*Scope{},
+			stores:              map[*Symbol][]ast.Node{},
+			endReachable:        map[*ast.BlockStatement]bool{},
+			fnScopes:            map[ast.Node]*Scope{},
+			refOrd:              map[*ast.Identifier]int{},
+			declOrd:             map[*Symbol]int{},
+			lastAssign:          map[*Symbol]int{},
+			exported:            map[ast.Node]bool{},
+			endFlow:             map[*ast.BlockStatement]*FlowNode{},
+			thisFlow:            map[ast.Expression]*FlowNode{},
+			thisOwner:           map[ast.Expression]*Symbol{},
+			thisLocal:           map[ast.Expression]bool{},
+			thisSyms:            map[*Scope]*Symbol{},
+			nsScopes:            map[*Symbol]*Scope{},
+			AmbientModules:      map[string]*Scope{},
+			AmbientExportEquals: map[string]string{},
+			Script:              opts.Script,
 		},
 		scopes: map[scopeKey]*Scope{},
 	}
@@ -270,6 +277,7 @@ func BindWith(prog *ast.Program, opts Options) *Binding {
 				// { interface Process … }`) scope their members, as the
 				// program's do.
 				members := namespacesOf(lp)
+				b.ambientNS = members
 				for _, st := range lp.Body {
 					if ns := members[st]; ns != nil {
 						b.inNamespace(ns, func() { b.visit(st) })
@@ -282,6 +290,7 @@ func BindWith(prog *ast.Program, opts Options) *Binding {
 		// The declarations' own references are no concern of the program's
 		// flow checks.
 		b.accesses = nil
+		b.ambientNS = nil
 	}
 	for _, declaring := range []bool{true, false} {
 		b.declaring = declaring
@@ -295,6 +304,20 @@ func BindWith(prog *ast.Program, opts Options) *Binding {
 				continue
 			}
 			b.visit(st)
+		}
+		// A worker module's top level runs as a function of its own on the
+		// worker's thread, seeing the program's declarations.
+		for i := range prog.WorkerModules {
+			wm := &prog.WorkerModules[i]
+			container, fnScope, flow := b.container, b.fnScope, b.flow
+			s := b.enter(wm, 0, FunctionScope)
+			b.container, b.fnScope = s, s
+			b.flow = &FlowNode{Flags: FlowStart, Scope: s}
+			for _, st := range wm.Body {
+				b.visit(st)
+			}
+			b.leave()
+			b.container, b.fnScope, b.flow = container, fnScope, flow
 		}
 		b.leave()
 		if declaring {
@@ -534,7 +557,15 @@ func (b *binder) visitNode(n ast.Node) {
 	case *ast.AmbientModuleDeclaration:
 		scope := b.enter(n, 0, ModuleScope)
 		b.AmbientModules[n.Name] = scope
+		if n.ExportEquals != "" {
+			b.AmbientExportEquals[n.Name] = n.ExportEquals
+		}
+		// The module's namespaces scope their members, as a program's do.
 		for _, st := range n.Body {
+			if ns := b.ambientNS[st]; ns != nil {
+				b.inNamespace(ns, func() { b.visit(st) })
+				continue
+			}
 			b.visit(st)
 		}
 		b.leave()
@@ -1218,6 +1249,8 @@ func (b *Binding) Diagnostics(offset func(line, col int) int) []*diag.Diagnostic
 		switch {
 		case c.Clash == UnsupportedMerge:
 			msg = diag.UnsupportedDeclarationMerge
+		case c.Clash == DuplicateImplementation:
+			msg = diag.DuplicateFunctionImpl
 		case c.Decl.Flags&BlockScopedVariable != 0 || c.Symbol.Flags&BlockScopedVariable != 0:
 			msg = diag.RedeclaredBlockScoped
 		}

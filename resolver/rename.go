@@ -80,14 +80,6 @@ type builtinMemberRef struct {
 	Marker, Member string
 }
 
-// streamClassNames are the 'stream' members that are parse-time constructor
-// names (bound as identity); every other stream member is a plain function
-// dispatched via the marker member-expression route.
-var streamClassNames = map[string]bool{
-	"Readable": true, "Writable": true, "Duplex": true,
-	"Transform": true, "PassThrough": true,
-}
-
 // lookupTable bundles the tables a file's rename pass needs: names (this
 // file's own mangled declarations plus its ordinary/default import
 // bindings — local name -> the mangled name it refers to, exactly what
@@ -120,6 +112,16 @@ type lookupTable struct {
 	// thisParams are the file's `this: T` parameter annotations
 	// (Program.ThisParams), rewritten with their functions' parameters.
 	thisParams map[ast.Node]*ast.TypeAnnotation
+	// workerLits is the file's `new Worker('…')` paths (Program.WorkerPaths).
+	workerLits map[string]bool
+}
+
+func stringSet(xs []string) map[string]bool {
+	m := make(map[string]bool, len(xs))
+	for _, x := range xs {
+		m[x] = true
+	}
+	return m
 }
 
 // checkBinding is TDD-00050's hook, called at every point a local binding
@@ -332,6 +334,8 @@ func rewriteInterfaceDecl(i *ast.InterfaceDeclaration, lu lookupTable) {
 		if i.Methods[mi].ReturnType != nil {
 			rewriteType(i.Methods[mi].ReturnType, sc, lu)
 		}
+		// The signature as a function type (its member's type).
+		rewriteType(i.Methods[mi].Type, sc, lu)
 		sc.pop()
 	}
 	sc.pop()
@@ -642,22 +646,6 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 			// check as every other lookup here, so a local variable that
 			// happens to share the imported name still shadows it.
 			if ref, ok := lu.builtinMembers[e.Name]; ok {
-				// The stream module's class names bind as identity — the
-				// constructors are recognized by name at parse time, and
-				// their statics (Readable.from) dispatch on the bare name
-				// (TDD-00097 Stage 8). Its *function* members (pipeline/
-				// finished/duplexPair) instead take the ordinary marker
-				// member-expression route below, dispatched in codegen like
-				// stream/promises' members.
-				if ref.Marker == "stream__kml_builtin" && streamClassNames[ref.Member] {
-					return ast.NewIdentifier(ref.Member, e.GetPos())
-				}
-				// worker_threads members likewise (TDD-00098): Worker is a
-				// parse-time constructor, parentPort/workerData are reserved
-				// identifiers dispatched by codegen inside worker modules.
-				if ref.Marker == "workerthreads__kml_builtin" {
-					return ast.NewIdentifier(ref.Member, e.GetPos())
-				}
 				// stream/web re-exports the ambient WHATWG stream constructors —
 				// identity, same as stream's class names.
 				if ref.Marker == "streamweb__kml_builtin" {
@@ -668,33 +656,10 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				if ref.Marker == "webview__kml_builtin" {
 					return ast.NewIdentifier(ref.Member, e.GetPos())
 				}
-				// node:sqlite's DatabaseSync/StatementSync are parse-time
-				// constructors — identity (ADR-00540), same as stream's.
-				if ref.Marker == "sqlite__kml_builtin" {
-					return ast.NewIdentifier(ref.Member, e.GetPos())
-				}
-				// node:ffi's DynamicLibrary is a builtin constructor — identity
-				// (TDD-00164), routed through the generic NewExpression like
-				// AsyncLocalStorage. The function members (dlopen/dlsym/…)
-				// take the marker member-expression route below.
-				if ref.Marker == "ffi__kml_builtin" && ref.Member == "DynamicLibrary" {
-					return ast.NewIdentifier(ref.Member, e.GetPos())
-				}
 				// klain:sync's Channel is a parse-time constructor — identity
 				// (TDD-00143). `go` is a function member and takes the marker
 				// member-expression route below.
 				if ref.Marker == "sync__kml_builtin" && ref.Member == "Channel" {
-					return ast.NewIdentifier(ref.Member, e.GetPos())
-				}
-				// async_hooks's AsyncLocalStorage is a parse-time constructor —
-				// identity, so `new AsyncLocalStorage<T>()` routes through the
-				// generic NewExpression (TDD-00168).
-				if ref.Marker == "asynchooks__kml_builtin" && (ref.Member == "AsyncLocalStorage" || ref.Member == "AsyncResource") {
-					return ast.NewIdentifier(ref.Member, e.GetPos())
-				}
-				// klain:ws's WebSocketServer is a parse-time constructor —
-				// identity (TDD-00158), same as stream's class names.
-				if ref.Marker == "ws__kml_builtin" {
 					return ast.NewIdentifier(ref.Member, e.GetPos())
 				}
 				return ast.NewMemberExpression(ast.NewIdentifier(ref.Marker, e.GetPos()), ref.Member, e.GetPos())
@@ -854,6 +819,7 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 			e.Exprs[i] = rewriteExpr(e.Exprs[i], sc, lu)
 		}
 	case *ast.NewExpression:
+		constructed := e.ClassName
 		// `new ns.C()` through a namespace import: that module's C.
 		if m, ok := lu.ns[e.Qualifier][e.ClassName]; ok && e.Qualifier != "" && !sc.bound(e.Qualifier) {
 			e.ClassName = m
@@ -874,12 +840,12 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		for i := range e.Args {
 			e.Args[i] = rewriteExpr(e.Args[i], sc, lu)
 		}
-		// TDD-00098: a `new Worker('./w.ts')` of the builtin names a worker
-		// module; canonicalize its path relative to this file, the same way
-		// visit() resolved it as a dependency edge — the key codegen matches
-		// against WorkerModule.Path.
-		if e.ClassName == "Worker" && !sc.bound("Worker") && len(e.Args) > 0 {
-			if lit, ok := e.Args[0].(*ast.StringLiteral); ok {
+		// TDD-00098: a `new Worker('./w.ts')` names a worker module;
+		// canonicalize its path relative to this file, the same way visit()
+		// resolved it as a dependency edge — the path its entry is
+		// registered by (WorkerModule.Path).
+		if constructed == "Worker" && len(e.Args) > 0 {
+			if lit, ok := e.Args[0].(*ast.StringLiteral); ok && lu.workerLits[lit.Value] {
 				lu.resolveWorkerPath(lit)
 			}
 		}
@@ -899,6 +865,12 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 func rewriteType(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
 	if ta == nil {
 		return
+	}
+	// `typeof ns.x` through a namespace import: that module's x.
+	if ta.IsTypeof && len(ta.TypeofPath) > 0 && !sc.bound(ta.TypeofName) {
+		if m, ok := lu.ns[ta.TypeofName][ta.TypeofPath[0]]; ok {
+			ta.TypeofName, ta.TypeofPath = m, ta.TypeofPath[1:]
+		}
 	}
 	rewriteTypeName(ta, sc, lu)
 	rewriteTypeNode(ta.TypeNode(), sc, lu)

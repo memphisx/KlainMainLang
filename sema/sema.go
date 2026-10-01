@@ -42,10 +42,9 @@ type walker struct {
 
 // moduleOnly are the builtin constructors no global declares: Node's and
 // this compiler's module exports, which exist only where an import of their
-// module brings them in (`import { EventEmitter } from 'events'`, or the
-// module's namespace for `new events.EventEmitter()`).
+// module brings them in (`import { Readable } from 'stream'`, or the
+// module's namespace for `new stream.Readable()`).
 var moduleOnly = map[string][]string{
-	"EventEmitter": {"events"},
 	"Readable":     {"stream"},
 	"Writable":     {"stream"},
 	"Transform":    {"stream"},
@@ -103,7 +102,18 @@ func (w *walker) rewrite(n ast.Node) ast.Node {
 		defer w.pop()
 	}
 	ast.RewriteChildren(n, w.rewrite)
+	w.link(n)
 	if ne, ok := n.(*ast.NewExpression); ok {
+		// A worker's path literal names the module file the resolver
+		// resolved it to (relative to the file it is written in), the path
+		// its entry is registered by.
+		if len(ne.Args) > 0 {
+			if lit, ok := ne.Args[0].(*ast.StringLiteral); ok {
+				if p, ok := w.resolved[lit]; ok {
+					lit.Value = p
+				}
+			}
+		}
 		if build, ok := builtinConstructors[ne.ClassName]; ok && !w.declared(ne.ClassName) && w.imported(ne.ClassName) {
 			out, err := build(ne)
 			if err != nil {
@@ -112,17 +122,37 @@ func (w *walker) rewrite(n ast.Node) ast.Node {
 				}
 				return n
 			}
-			// A worker's path literal was resolved to its module file by the
-			// resolver (relative to the file it is written in).
-			if nw, ok := out.(*ast.NewWorkerExpression); ok {
-				if lit, ok := ne.Args[0].(*ast.StringLiteral); ok {
-					nw.ResolvedPath = w.resolved[lit]
-				}
-			}
 			return out
 		}
 	}
 	return n
+}
+
+// link points a free reference to a global a global module implements at
+// the module's class (TDD-00232): the checker typed it from the global's
+// declaration; from here on it is that class.
+func (w *walker) link(n ast.Node) {
+	if w.prog == nil || len(w.prog.GlobalLinks) == 0 {
+		return
+	}
+	to := func(name string) (string, bool) {
+		m, ok := w.prog.GlobalLinks[name]
+		return m, ok && !w.declared(name)
+	}
+	switch n := n.(type) {
+	case *ast.Identifier:
+		if m, ok := to(n.Name); ok {
+			n.Name = m
+		}
+	case *ast.NewExpression:
+		if m, ok := to(n.ClassName); ok && !n.Qualified {
+			n.ClassName = m
+		}
+	case *ast.ClassDeclaration:
+		if m, ok := to(n.BaseClass); ok && !n.BaseQualified {
+			n.BaseClass = m
+		}
+	}
 }
 
 // functionScope is the set of names a function introduces: its parameters, a

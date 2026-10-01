@@ -100,3 +100,29 @@ push3(xs)
 console.log(xs.join(","))
 `, "1,2,3")
 }
+
+// An index write through `any` into a boxed static array stores into its
+// storage (converted to the element kind); past the end a plain array grows
+// and a TypedArray ignores the write. `instanceof` a TypedArray holds for
+// its own kind, a Buffer included.
+func TestE2EAnyArrayWriteAndTypedInstanceof(t *testing.T) {
+	assertOutput(t, `
+const a: any = [1, 2]
+a[1] = 5; a['0'] = 9; a[2] = 7
+console.log(a, a.length)
+const s: any = ['x']
+s[0] = 'y'; s[1] = 'z'
+console.log(s)
+const t: any = new Uint8Array(2)
+t[0] = 300; t[5] = 1
+console.log(t)
+const orig = [1, 2, 3]
+const view: any = orig
+view[0] = 42
+console.log(orig)
+const vals: any[] = [new Uint8Array(2), new Int32Array(1), [1, 2], Buffer.from('hi'), 3]
+for (const v of vals) console.log(v instanceof Uint8Array, v instanceof Int32Array)
+const i16 = new Int16Array(2)
+console.log(i16 instanceof Int16Array, i16 instanceof Uint8Array)
+`, "[ 9, 5, 7 ] 3\n[ 'y', 'z' ]\nUint8Array(2) [ 44, 0 ]\n[ 42, 2, 3 ]\ntrue false\nfalse true\nfalse false\ntrue false\nfalse false\ntrue false")
+}

@@ -581,6 +581,14 @@ func (e *Emitter) emitArrayFlat(mem *ast.MemberExpression, args []ast.Expression
 		return Value{}, err
 	}
 
+	if elemTy.IsDynamic && !elemTy.IsDynamicObject && elemTy.IR == TypeAny.IR {
+		// Boxed elements (`any`, a union): an element that is an Array at run time is
+		// spliced in (dynjson.c).
+		e.ensureDynJSONC()
+		hdr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_anyarr_flat(ptr %s, i64 %s, i64 %d)", hdr, ptrReg, lenReg, depth))
+		return e.arrayValueFromHeaderReg(hdr, ArrayOf(elemTy)), nil
+	}
 	curPtr, curLen, curElemTy := ptrReg, lenReg, elemTy
 	flattened := false
 	for i := 0; i < depth && curElemTy.IsArray; i++ {

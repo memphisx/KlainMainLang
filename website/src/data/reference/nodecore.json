@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "16/17",
     "loosePct": 94,
-    "strict": "2/17",
-    "strictPct": 12
+    "strict": "3/17",
+    "strictPct": 18
   },
   "lede": "The smaller Node built-ins, grouped here rather than each given a full page. net, tls, http and https are Node's own layering ported to TypeScript — a net.Socket is a Duplex over a native TCP handle, a TLSSocket a Socket whose handle carries a non-blocking OpenSSL session, and http/https build on them — all on one event loop with dgram and dns. Messages across process and channel boundaries (cluster, diagnostics_channel) are strings, and vm stays out of scope behind the same blocker as bare eval().",
   "entries": [
@@ -48,9 +48,9 @@
       "id": "nodecore.assert",
       "name": "assert (.ok, bare assert(cond, msg?), .equal/.strictEqual, .notEqual/.notStrictEqual, .deepEqual/.deepStrictEqual (+not*), .fail, .throws, .match/.doesNotMatch)",
       "statusRow": "assert (.ok, bare assert(cond, msg?), .equal/.strictEqual, .notEqual/.notStrictEqual, .deepEqual/.deepStrictEqual (+not*), .fail, .throws, .match/.doesNotMatch)",
-      "signature": "assert(cond: boolean, msg?: string): void; assert.strictEqual(a, b); assert.deepStrictEqual(a, b); assert.throws(fn)",
+      "signature": "assert(value: unknown, message?: string | Error): asserts value; assert.strictEqual(a, b); assert.deepStrictEqual(a, b); assert.throws(fn, error?); await assert.rejects(promise)",
       "badge": "caveats",
-      "description": "Node's real assertion library — distinct from console.assert, which logs and continues. A failure throws a catchable AssertionError (kind-tagged as a base Error, since this compiler's fixed error-kind enum has no dedicated slot), the shape scripts and tests actually use.",
+      "description": "Node's assertion library, ported from Node's own sources: the same checks, the same AssertionError (name, code, actual, expected, operator), and the same failure messages and diffs, including assert.ok quoting the failing call's source. Distinct from console.assert, which logs and continues.",
       "returns": {
         "type": "void",
         "desc": "Nothing, or throws AssertionError."
@@ -58,10 +58,9 @@
       "exampleKey": "assert/assert",
       "snippet": "assert.strictEqual(\"a\" + \"b\", \"ab\")\nassert.throws(() => { throw new Error(\"boom\") })",
       "differences": [
-        "`equal`/`strictEqual` and `deepEqual`/`deepStrictEqual` (and their `not*` counterparts) are aliases of each other — this compiler's `==` has no implicit coercion to distinguish them",
-        "`deepStrictEqual` covers scalars, strings, arrays, and objects (recursively, incl. nested); Map/Set/class instances, nullable-scalar members, and TypedArrays are a clean compile error (V1)",
-        "`.match`/`.doesNotMatch`'s regexp argument must be statically a RegExp",
-        "`.throws` only checks that *something* was thrown, not the thrown value's type/message"
+        "No `assert.CallTracker` (deprecated in Node)",
+        "Deep equality does not compare symbol-keyed properties, and a failure diff does not invoke getters",
+        "An uncaught `AssertionError` prints `Uncaught: <message>` rather than Node's name, stack and property block"
       ],
       "seeAlso": [
         "nodecore.test"
@@ -72,20 +71,19 @@
     },
     {
       "id": "nodecore.test",
-      "name": "test / node:test (the **runner**: test/it, describe/suite, TestContext t.test/t.after/t.skip/t.todo/t.diagnostic, hooks before/after/beforeEach/afterEach — plus the native helpers mustCall/mustCallAtLeast/mustNotCall/skip/expectsError + env probes)",
-      "statusRow": "test / node:test (the **runner**: test/it, describe/suite, TestContext t.test/t.after/t.skip/t.todo/t.diagnostic, hooks before/after/beforeEach/afterEach — plus the native helpers mustCall/mustCallAtLeast/mustNotCall/skip/expectsError + env probes)",
-      "signature": "import { test, describe, mustCall } from 'test'; test(name, fn); mustCall(fn, n=1)",
+      "name": "test / node:test",
+      "statusRow": "test / node:test",
+      "signature": "import test, { describe, it } from 'node:test'; test(name, options?, fn); import { mustCall } from 'test'",
       "badge": "caveats",
-      "description": "The node:test runner plus the native helpers. mustCall is a first-class builtin (not Node's internal ../common): it wraps fn so its invocation count is verified at process exit via the existing exit sink — an unmet or exceeded count prints a diagnostic and exits non-zero, giving examples and tests real async assertions instead of console.log.",
+      "description": "Node's test runner: tests run after the module, one at a time in registration order, with describe/it suites, skip/todo, the TestContext (t.test, t.skip, t.todo, t.diagnostic, t.plan) and before/after/beforeEach/afterEach hooks, reported in Node's spec format with its summary and a nonzero exit on failure. The bare 'test' specifier is Node's own test-suite helpers: mustCall/mustCallAtLeast (counts checked at exit), mustSucceed, mustNotCall, expectsError, expectWarning, skip, and the platform probes.",
       "returns": {
-        "type": "void | (...args) => void",
-        "desc": "Registration, or a counting-trampoline wrapper."
+        "type": "Promise<void> | T",
+        "desc": "Registration, or a counting wrapper of the callback."
       },
       "differences": [
-        "Runner: **run-at-registration** (top-level code after a `test()` runs after it here, before it in Node); `beforeEach`/`afterEach` are single slots (last wins) and also fire for subtests; no `mock.*`, `t.plan`, `run()`, concurrency, or snapshots",
-        "`mustCall` supports callbacks of **0–3 simple (scalar/pointer) parameters** — a rest param, >3 args, or an array/nullable-scalar param is a clean compile error (the counting trampoline is signature-parametric)",
-        "`mustNotCall()` returns a `() => void`; using it where a non-zero-arity callback is expected is a type mismatch",
-        "`mustSucceed` is count-only (the \"err is falsy\" check is deferred); `expectWarning` runs the thunk but doesn't capture warnings"
+        "A failing test's details omit Node's `test at <file>:<line>:<col>` line and the stack: the error prints as `Name [code]: message`.",
+        "No `mock.*`, `run()`, snapshots, concurrency, timeouts, `t.signal`/`t.assert`, or `only` filtering.",
+        "The spec reporter prints without colors on a terminal (Node colors it); no other reporter."
       ],
       "seeAlso": [
         "nodecore.assert"
@@ -98,14 +96,14 @@
       "id": "nodecore.util",
       "name": "util (.inspect, .format)",
       "statusRow": "util (.inspect, .format)",
-      "signature": "util.format(fmt: string, ...args): string; util.inspect(value): string",
+      "signature": "util.format(fmt?: any, ...args): string; util.inspect(value, options?): string; util.isDeepStrictEqual(a, b): boolean; util.promisify(fn); util.callbackify(fn)",
       "badge": "caveats",
-      "description": ".inspect reuses the same value formatter as console.log (strings single-quoted, ClassName { … }, arrays, 10n). .format handles %s/%d/%i/%f/%j/%o/%O/%%, appends excess args space-separated, and leaves unrecognized specifiers literal — matching Node.",
+      "description": "Node's util, ported from Node's own lib/util.js: format and formatWithOptions walk the specifiers at run time as Node does (%s calls a program's own toString), inspect takes depth, compact, sorted, breakLength and maxArrayLength, and callbackify, deprecate, debuglog, styleText, types and the system-error lookups behave as Node's.",
       "params": [
         {
           "name": "fmt",
           "type": "string",
-          "desc": "A string-literal format for .format."
+          "desc": "A format string for .format (any string, at run time)."
         },
         {
           "name": "value",
@@ -120,9 +118,10 @@
       "exampleKey": "util/format_inspect",
       "snippet": "console.log(util.format(\"%s = %d\", \"count\", 42))\nconsole.log(util.inspect({ name: \"kml\", tags: [\"ts\", \"native\"] }))",
       "differences": [
-        "No `.promisify` — the callback builtins (`zlib.gzip`, `child_process.exec`) are name-dispatched calls, not first-class function values to wrap; importing `promisify` fails cleanly",
-        "`.format` requires a string-**literal** format (compile-time walk); a runtime format string is a compile error",
-        "`.inspect`'s options object is accepted but ignored (no `depth`/`colors`)"
+        "`.promisify` wraps a function value and honours `promisify.custom`; a code-generated builtin (`fs.readFile`) is not a function value to pass it",
+        "`promisify(f) === f` is false for an already-promisified `f`",
+        "`.inspect` ignores `colors`, `showHidden`, `getters`, `maxStringLength`, `numericSeparator` and `[inspect.custom]` methods; `compact: true` is treated as 3",
+        "No `inherits`, `parseArgs`, `MIMEType` or `getCallSites`"
       ],
       "seeAlso": [],
       "spec": {
@@ -146,7 +145,7 @@
         "`connect`/`createConnection` take a port, an options object or `{ path }`; the connect is non-blocking and a failure arrives as an async `'error'` then `'close'`",
         "`listen`'s `'listening'` and `'error'` fire on the next tick, as in Node; `maxConnections` and `getConnections` are supported; `isIP`/`isIPv4`/`isIPv6`",
         "BlockList, SocketAddress and happy-eyeballs address selection (`autoSelectFamily`) are not ported",
-        "Windows keeps the earlier code-generated `net` (its TCP handles are POSIX sockets)"
+        "On Windows the TCP handles are compile-checked, not yet run"
       ],
       "seeAlso": [
         "nodecore.tls",
@@ -160,20 +159,19 @@
       "id": "nodecore.dgram",
       "name": "dgram (UDP sockets: createSocket('udp4'), bind, address(), setBroadcast(), on('message'), send, close)",
       "statusRow": "dgram (UDP sockets: createSocket('udp4'), bind, address(), setBroadcast(), on('message'), send, close)",
-      "signature": "dgram.createSocket('udp4'); socket.bind(port); socket.setBroadcast(flag); socket.send(msg, port, host)",
+      "signature": "dgram.createSocket('udp4' | 'udp6' | options, listener?); socket.bind(port?, address?, cb?); socket.send(msg, port, address, cb?)",
       "badge": "caveats",
-      "description": "UDP sockets. Each socket's fd folds into the same select() event loop as net/child_process. 'message' fires with a Buffer and an rinfo { address, port }; send(msg, port, host) resolves host (name or IP) via the dns helper. .address() reports the real bound { address, family, port } via getsockname; .setBroadcast(flag) is a real setsockopt(SO_BROADCAST). msg/send payloads take a string/Buffer/ArrayBuffer/DataView.",
+      "description": "Node's UDP sockets: udp4/udp6, bind with 'listening', send in every form (offset/length, lists, before the bind completes), connect/disconnect, the broadcast/TTL/multicast options and group membership, buffer sizes, ref/unref. 'message' receives a Buffer and { address, family, port, size }.",
       "returns": {
         "type": "dgram.Socket",
         "desc": "A UDP socket handle."
       },
       "exampleKey": "dgram/echo",
-      "snippet": "const server = dgram.createSocket('udp4');\nserver.on('message', (msg: Uint8Array, rinfo) => {\n  server.send('reply:' + dec.decode(msg), rinfo.port, rinfo.address);\n});\nserver.bind(9199);",
+      "snippet": "const server = dgram.createSocket('udp4');\nserver.on('message', (msg, rinfo) => {\n  server.send('reply:' + msg.toString(), rinfo.port, rinfo.address);\n});\nserver.bind(0, '127.0.0.1');",
       "differences": [
-        "`udp4` only — no `udp6`",
-        "No `'listening'`/`'error'` events, options object, or multicast",
-        "Message listeners must be arrow/function-expression literals",
-        "`socket.send(msg, port, host)` positional form only — no `(msg, offset, length, port, address, cb)` form; no `.setTTL()`/membership methods"
+        "Sends are synchronous, so getSendQueueSize()/getSendQueueCount() are always 0.",
+        "The lookup and block-list options, bind({ fd }) and cluster-shared sockets are not ported.",
+        "Windows: TTL/multicast options and membership apply to udp4 sockets only (compile-checked, not run)."
       ],
       "seeAlso": [
         "nodecore.net",
@@ -199,7 +197,7 @@
       "differences": [
         "OpenSSL-only (libssl) — a `-crypto=commoncrypto` build using `tls` is a clean compile error (Mac's CommonCrypto has no TLS API)",
         "Session resumption, OCSP, renegotiation, PSK and `getPeerCertificate()`'s certificate object are not ported",
-        "Windows keeps the earlier code-generated, blocking `tls`"
+        "On Windows the TCP handles are compile-checked, not yet run"
       ],
       "seeAlso": [
         "nodecore.net",
@@ -213,9 +211,9 @@
       "id": "nodecore.dns",
       "name": "dns (dns.lookup, dns.resolve4/resolve, dns.promises.lookup)",
       "statusRow": "dns (dns.lookup, dns.resolve4/resolve, dns.promises.lookup)",
-      "signature": "dns.lookup(host, cb); dns.resolve4(host, cb); await dns.promises.lookup(host)",
+      "signature": "dns.lookup(host, [options,] cb); dns.resolve4(host, [{ ttl }], cb); dns.resolveMx(host, cb); new dns.Resolver(options); await dns.promises.lookup(host)",
       "badge": "caveats",
-      "description": "getaddrinfo(3)-backed name resolution. lookup returns one dotted-quad, resolve4 all A records as a string[], promises.lookup a Promise<{address, family}>.",
+      "description": "Node's own lib/dns.js. lookup and lookupService run getaddrinfo/getnameinfo on the thread pool, as libuv does (all, family, hints, order); the resolve family — resolve4/6 with TTLs, MX, TXT, SRV, NS, CNAME, PTR, SOA, NAPTR, CAA, TLSA, ANY, reverse — is a native DNS client in c-ares' place: the system's servers, UDP with TCP on truncation, Resolver timeouts, tries, setServers, cancel and setLocalAddress, and Node's error codes (ENOTFOUND, ENODATA, ETIMEOUT, …). dns.promises and dns/promises are the promise forms.",
       "params": [
         {
           "name": "host",
@@ -224,16 +222,14 @@
         }
       ],
       "returns": {
-        "type": "void | Promise<{address, family}>",
-        "desc": "Callback delivery, or a Promise."
+        "type": "object | Promise<…>",
+        "desc": "The request (callbacks arrive on a later tick), or a Promise."
       },
       "exampleKey": "dns/lookup",
       "snippet": "dns.lookup(\"localhost\", (err, address, family) => {\n  console.log(\"localhost ->\", address, \"family\", family);\n});",
       "differences": [
-        "`dns.resolve4`/`resolve` use `getaddrinfo` (the OS resolver), not real DNS `A` queries — no `resolve6`/`resolveMx`/`resolveTxt`/`reverse`",
-        "IPv4 (`AF_INET`) only; `family` is always 4",
-        "The callback forms fire synchronously, not on a later event-loop tick",
-        "Failure passes a generic `Error` (`getaddrinfo ENOTFOUND`), not a `code`-tagged Node error"
+        "A resolve error has no `errno` key (Node's has `errno: undefined`)",
+        "The Windows server discovery and DNS client are compile-checked only"
       ],
       "seeAlso": [
         "nodecore.net"
@@ -246,27 +242,31 @@
       "id": "nodecore.zlib",
       "name": "zlib (gzip/gunzip, deflate/inflate, deflateRaw/inflateRaw, unzip, each *Sync + (err, result) callback)",
       "statusRow": "zlib (gzip/gunzip, deflate/inflate, deflateRaw/inflateRaw, unzip, each *Sync + (err, result) callback)",
-      "signature": "zlib.gzipSync(input): Buffer; zlib.gunzipSync(buf): Buffer; zlib.gzip(input, (err, out) => …)",
+      "signature": "zlib.gzipSync(input, options?): Buffer; zlib.gzip(input, options?, (err, out) => …); zlib.createGzip(options?): Gzip; zlib.crc32(data, value?): number",
       "badge": "caveats",
-      "description": "One-shot compression over the same libz backend as CompressionStream, driven by a shared @__kml_zlib_oneshot helper. Input may be a Buffer/TypedArray, ArrayBuffer, DataView, or string (UTF-8); output is always a Buffer.",
+      "description": "Node's zlib module: the Deflate/Inflate/Gzip/Gunzip/DeflateRaw/InflateRaw/Unzip streams and their create* functions, the one-shot methods (callback and *Sync), crc32, constants and codes, with every zlib option. Each stream owns a native zlib handle whose writes run on the thread pool. Input may be a Buffer/TypedArray, ArrayBuffer, DataView, or string (UTF-8); output is always a Buffer.",
       "params": [
         {
           "name": "input",
-          "type": "string | Buffer | ArrayBuffer | DataView",
+          "type": "string | Buffer | TypedArray | DataView | ArrayBuffer",
           "desc": "The data to compress or decompress."
+        },
+        {
+          "name": "options",
+          "type": "ZlibOptions",
+          "desc": "flush, finishFlush, chunkSize, windowBits, level, memLevel, strategy, dictionary, info, maxOutputLength, rejectGarbageAfterEnd."
         }
       ],
       "returns": {
         "type": "Buffer",
-        "desc": "The compressed/decompressed bytes."
+        "desc": "The compressed/decompressed bytes (a stream for create*)."
       },
       "exampleKey": "zlib/zlib",
-      "snippet": "const gz = zlib.gzipSync(text)\nconsole.log(\"gunzip:\", dec.decode(zlib.gunzipSync(gz)) === text)\nconst best = zlib.deflateSync(text, { level: 9 })",
+      "snippet": "const gz = zlib.gzipSync(text)\nconsole.log(\"gunzip:\", dec.decode(zlib.gunzipSync(gz)) === text)\npipeline(Readable.from(parts), zlib.createGzip({ level: 6 }), zlib.createGunzip(), sink, done)",
       "differences": [
-        "The callback form fires synchronously, not deferred to the next event-loop tick",
-        "No Brotli (`brotliCompress*`) — it would pull in `-lbrotli`, a new system dependency this binding deliberately avoids",
-        "No class/stream forms (`createGzip()`, `zlib.Gzip`, …) — the WHATWG `CompressionStream`/`DecompressionStream` cover the streaming case",
-        "`{ level }` is the only supported option and must be a compile-time constant"
+        "Brotli and Zstd load the system libbrotli/libzstd at run time (Node bundles them); where they are missing, a Brotli or Zstd stream is `ERR_ZLIB_INITIALIZATION_FAILED`",
+        "Compressed bytes are the system libz's, which can differ from Node's bundled zlib at the same level (each inflates the other's)",
+        "A `*Sync` call with `info: true` is typed `{ buffer, engine }` (@types types it `Buffer`)"
       ],
       "seeAlso": [
         "nodecore.streamweb"
@@ -289,20 +289,16 @@
     },
     {
       "id": "nodecore.diagnostics_channel",
-      "name": "diagnostics_channel (channel/subscribe/unsubscribe/hasSubscribers, Channel .publish/.hasSubscribers/.name)",
+      "name": "diagnostics_channel (channel/subscribe/unsubscribe/hasSubscribers/tracingChannel, Channel, TracingChannel)",
       "statusRow": "diagnostics_channel (channel/subscribe/unsubscribe/hasSubscribers, Channel .publish/.hasSubscribers/.name)",
-      "signature": "const ch = diagnostics_channel.channel(name); ch.subscribe(fn); ch.publish(msg)",
-      "badge": "caveats",
-      "description": "Name-keyed pub/sub: channel/subscribe/unsubscribe/hasSubscribers, with a Channel handle exposing .publish/.hasSubscribers/.name. Subscribers may be 0/1/2-arity, and unsubscribe is by pointer identity.",
+      "signature": "const ch = diagnostics_channel.channel(name); ch.subscribe(fn); ch.publish(message)",
+      "badge": "full",
+      "description": "Node's module: named channels whose subscribers receive any published value and the channel name; bound stores and runStores; tracing channels that publish start/end/asyncStart/asyncEnd/error around traceSync, tracePromise and traceCallback. A subscriber's throw is reported on the next tick without stopping the others.",
       "returns": {
-        "type": "Channel | boolean | void",
-        "desc": "A channel handle, subscription result, or nothing."
+        "type": "Channel | TracingChannel | boolean | void",
+        "desc": "A channel, a tracing channel, a subscription result, or nothing."
       },
-      "differences": [
-        "Messages are **strings** (serialize with `JSON.stringify`) — a typed subset can't hand arbitrary object shapes to unknown subscribers",
-        "Subscriber params must be string-typed (an untyped pre-wrapped subscriber is a clean rejection, never silent reinterpretation)",
-        "`tracingChannel` and the store bindings (`bindStore`/`runStores`) are clean rejections; a Channel handle isn't module-global-promotable (capture it in a closure, not a named top-level function)"
-      ],
+      "differences": [],
       "seeAlso": [],
       "spec": {
         "mdn": "https://nodejs.org/api/diagnostics_channel.html"
@@ -375,18 +371,18 @@
       "id": "nodecore.cluster",
       "name": "cluster (fork, worker messaging, isPrimary/isWorker/worker, Worker.id/.process)",
       "statusRow": "cluster (fork, worker messaging, isPrimary/isWorker/worker, Worker.id/.process)",
-      "signature": "cluster.fork(); cluster.on('exit', (worker, code) => {}); cluster.workers[id]; cluster.setupPrimary({ args, silent }); cluster.disconnect(cb?)",
+      "signature": "cluster.fork(env?); cluster.on('listening', (worker, address) => {}); cluster.workers[id]; cluster.setupPrimary(settings); cluster.disconnect(cb?)",
       "badge": "caveats",
-      "description": "Unifies with http.listen({ workers: N })'s worker-id global — the primary stays in the event loop while workers live (via their IPC handles), then blocks in waitpid as the backstop. Workers carry the fork IPC channel with Node's json serialization mode: strings AND objects/arrays/numbers/booleans cross as themselves, both directions. Cluster-level events mirror Node's — cluster.on('fork'/'online'/'message'/'exit'/'disconnect'/'listening'), each passing the Worker first ('listening' adds { address, port, addressType }), in either registration order. cluster.workers is live (a reaped worker is dropped before its 'exit' listeners run, like Node) with cluster.workers[id] lookup; several listeners per event coexist in registration order; cluster.disconnect(cb) flushes in-flight messages; setupPrimary honors args (worker argv tail) and silent (worker stdio piped to worker.process.stdout/stderr), read back as cluster.settings.",
+      "description": "Node's cluster module. The primary forks workers that run this same program; a worker's net or http server listens through the primary, which either accepts connections and hands them to the workers in turn (round-robin, the default outside Windows) or gives every worker the listening socket itself. Workers and the primary exchange messages, handles included, over the fork channel.",
       "returns": {
         "type": "cluster.Worker",
         "desc": "A worker handle."
       },
       "differences": [
-        "`setupPrimary`'s `exec`/`execArgv` are a compile-time rejection — workers re-exec this compiled program itself; there is no separate script file for a worker to run (a genuine impossibility of native compilation); `args` and `silent` work on every platform, Windows included",
-        "`'online'` fires from a queued microtask (the worker is exec'd by then), not a wire handshake; `cluster.workers` iterates and indexes by id but is not a real id-keyed *object* (no `Object.keys` over it)",
-        "Workers each bind the port via `SO_REUSEPORT`; on Linux the kernel load-balances accepts across them, on Darwin the distribution is uneven (often one worker) — correctness holds, balancing differs",
-        "Can't be combined with Worker threads (same restriction as `http.listen({workers})`)"
+        "`setupPrimary({ exec })` naming another file fails at `fork()`: a worker is this compiled program, so there is no other script for it to run",
+        "`inspectPort` and the inspector flags are ignored: a compiled program has no inspector",
+        "A `dgram` socket bound in a worker binds on its own, not through the primary",
+        "Windows: a worker's `listen` does not work yet — descriptor passing over the fork channel is POSIX-only"
       ],
       "seeAlso": [
         "nodecore.net"
@@ -399,9 +395,9 @@
       "id": "nodecore.http2",
       "name": "http2 **module** (http2.createServer/connect, Http2Session/Http2Stream)",
       "statusRow": "http2 **module** (http2.createServer/connect, Http2Session/Http2Stream)",
-      "signature": "http2.createServer().on('stream', (stream, headers) => …); http2.connect(url).request({ ':path' })",
+      "signature": "http2.createServer((req, res) => …) | .on('stream', (stream, headers) => …); http2.connect(url).request(headers)",
       "badge": "caveats",
-      "description": "The explicit http2 module, over the same nghttp2 h2c driver that http.listen already rides transparently. Server-side serves h2c (and still answers 1.1, a superset of Node); the client opens an h2c session and submits body-less requests.",
+      "description": "Node's http2 module: HTTP/2 servers (cleartext h2c and TLS with ALPN, optionally answering HTTP/1.1) and client sessions, with the compat request/response API, the core stream API, push streams, settings, ping and goaway.",
       "returns": {
         "type": "Http2Session | Http2Stream",
         "desc": "A session or stream handle."
@@ -409,12 +405,12 @@
       "exampleKey": "http2/client_session",
       "snippet": "const server = http2.createServer();\nserver.on('stream', (stream, headers) => {\n  stream.respond({ ':status': 200, 'content-type': 'text/plain' });\n  stream.end(\"hello \" + headers[':path'].slice(1));\n});",
       "differences": [
-        "**Server-side Stages 1–2**: `http2.createServer` on the http server handle, serving **h2c** (it also still answers 1.1, a superset of Node); compat `.on('request', (req, res))` **and** the core streams API — `.on('stream', (stream, headers))` with pseudo-headers on the map, `stream.respond({ ':status', … })` incl. response headers, `.end`/`.write`, request body via `.on('data'|'end')` (one synchronous chunk)",
-        "`stream.close()`/`setEncoding`/`resume`/`pause` are accepted no-ops; responses are written when the handler returns (no mid-stream RST/flow control)",
-        "**Client (Stage 3)**: `http2.connect(\"http://…\")` (h2c only — a TLS authority throws) → session `.request({ ':path', ':method', headers… })` → stream `.on('response'|'data'|'end')`; requests are **body-less** (END_STREAM at submit — `req.write`/`end(body)` are clean rejections); response `':status'` arrives as a *string* in the headers map (Node types it as a number); session/stream `'error'`/`'close'` listeners are accepted no-ops",
-        "**Stage 4**: `http2.constants` (compile-time namespace — header/method names, RFC 7540 error codes; unknown members reject cleanly) and `getDefaultSettings`/`getPackedSettings`/`getUnpackedSettings` (nghttp2 wire format; the invalid-value RangeError taxonomy is not modeled)",
-        "`createSecureServer` (needs a TLS server mode) and request bodies remain **clean rejections**",
-        "Sessions, streams, server/client push, settings frames, and the whole explicit-API surface are unimplemented — staged over the existing nghttp2 h2c driver; client-mode nghttp2 is the main new work"
+        "`respondWithFD`/`respondWithFile` read the whole file into memory before sending it, where Node streams it",
+        "`session.altsvc()`/`origin()` validate their arguments but send no frame; `setNextStreamID`/`setLocalWindowSize` validate only",
+        "`session.socket` is the raw socket, not Node's Proxy guarding the session-owned socket methods",
+        "The `Http2ServerRequest`/`Http2ServerResponse` subclass options are ignored",
+        "`stream.write` has no backpressure: it always returns `true` and buffers",
+        "Most session tuning options (`maxSessionMemory`, `paddingStrategy`, …) are accepted and ignored"
       ],
       "seeAlso": [
         "nodecore.httpclient",
@@ -428,14 +424,11 @@
       "id": "nodecore.async_hooks",
       "name": "async_hooks (AsyncLocalStorage, AsyncResource)",
       "statusRow": "async_hooks (AsyncLocalStorage, AsyncResource)",
-      "signature": "const als = new AsyncLocalStorage<T>(); als.run(store, () => als.getStore()); AsyncLocalStorage.bind(fn); new AsyncResource(name).runInAsyncScope(fn)",
+      "signature": "const als = new AsyncLocalStorage<T>(); als.run(store, () => als.getStore()); AsyncLocalStorage.snapshot(); new AsyncResource(type).runInAsyncScope(fn)",
       "badge": "caveats",
-      "description": "AsyncLocalStorage carries a typed store through an async call tree: run/getStore/exit/enterWith/disable, with real propagation across await (the store rides the coroutine task struct, so it survives an await/park/resume and a spawned task inherits it) and across a setTimeout/setInterval scheduled inside run(). Static AsyncLocalStorage.bind(fn) and AsyncResource.runInAsyncScope capture the current context and replay it later.",
+      "description": "AsyncLocalStorage carries a store through an async call tree: run/exit/enterWith/getStore/disable and the name/defaultValue options, with the context frame propagating across await (a spawned task inherits it) and into promise reactions and timer, setImmediate, nextTick and queueMicrotask callbacks scheduled inside run(). Static bind/snapshot and AsyncResource (runInAsyncScope, bind) capture the current context and replay it later.",
       "differences": [
-        "AsyncLocalStorage.snapshot() is a clean rejection — its runner is fully generic (parameter/return types vary per call site), needing generic first-class closures this compiler lacks",
-        "runInAsyncScope accepts thisArg but doesn't bind it (no dynamic this on closures); a run() callback that throws doesn't restore the frame yet",
-        ".then/.catch reactions and EventEmitter listeners don't propagate context yet (only await, task-spawn, and timers do)",
-        "The low-level createHook/executionAsyncId/async-id lifecycle is out of scope — a compiled AOT binary has no V8 promise-hooks or GC-tracked async-ids"
+        "createHook, executionAsyncId, triggerAsyncId and executionAsyncResource are not exported; asyncId() numbers resources in creation order with no lifecycle events behind it."
       ],
       "seeAlso": [
         "nodecore.diagnostics_channel"

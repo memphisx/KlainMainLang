@@ -19,7 +19,7 @@ import (
 // Maps/Sets (ADR-00574, with scalar/string/object key & value element
 // types) are heap-allocated and genuinely copied, recursing into every
 // element/field/entry. Anything with reference-like or non-trivial-identity
-// semantics (EventEmitter, URL, URLSearchParams, ArrayBuffer, functions,
+// semantics (URL, URLSearchParams, ArrayBuffer, functions,
 // class instances, Error, Promise, any/unknown) is rejected at compile
 // time rather than silently aliased — the correctness bug a shallow
 // pass-through would otherwise introduce (a "clone" that still shares the
@@ -30,11 +30,28 @@ func (e *Emitter) emitStructuredClone(args []ast.Expression, pos ast.Pos) (Value
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: structuredClone takes exactly 1 argument", pos.Line, pos.Col)
 	}
+	// A value whose shape is only known at run time is cloned by
+	// lib/node/internal_structured_clone.ts.
+	if e.clonesAtRunTime(args[0]) {
+		if m, ok := e.libExports["internal_structured_clone:structuredCloneAny"]; ok {
+			return e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(m, pos), args, pos))
+		}
+	}
 	val, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
 	}
 	return e.emitDeepClone(val, val.Ty, pos)
+}
+
+// clonesAtRunTime reports whether structuredClone(arg) clones arg by its
+// run-time shape: arg is typed any/unknown, or asserted to be (`x as any`,
+// an assertion inference otherwise sees through).
+func (e *Emitter) clonesAtRunTime(arg ast.Expression) bool {
+	if as, ok := arg.(*ast.AsExpression); ok && as.TypeAnnot != nil && isUnconstrainedDynamic(e.resolveType(as.TypeAnnot)) {
+		return true
+	}
+	return e.inferExprType(arg).IsDynamic
 }
 
 // structuredCloneUnsupportedKind names the first reference-like flag it
@@ -57,15 +74,6 @@ func structuredCloneUnsupportedKind(ty Type) string {
 		return "Headers"
 	// Map/Set are cloneable (ADR-00574) — validated in emitDeepCloneMap/Set,
 	// which reject only a nested-collection/array element type.
-	case ty.IsEventEmitter:
-		return "EventEmitter"
-	case ty.IsBroadcastChannel:
-		return "a BroadcastChannel"
-	case ty.IsMessageChannel:
-		// The pair box crosses nowhere; a MessagePort (either half alone)
-		// deliberately passes — it is shared by reference, like an SAB
-		// (TDD-00099).
-		return "a MessageChannel"
 	// ArrayBuffer (plain and shared) is handled in emitDeepClone: a plain one is
 	// byte-copied (ADR-00591), a SharedArrayBuffer passes by reference
 	// (share-not-copy, TDD-00099) — neither is rejected here.
@@ -135,7 +143,7 @@ func (e *Emitter) emitDeepCloneError(val Value, ty Type) (Value, error) {
 	dst := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dst, aggregateErrorStructSize))
 	structIR := errorObjType.StructIR()
-	for _, name := range []string{"kind", "message", "name"} {
+	for _, name := range []string{ClassTagField, "message", "name"} {
 		idx, fieldTy, _ := errorObjType.FieldIndex(name)
 		sgep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", sgep, structIR, val.Ref, idx))
@@ -243,7 +251,7 @@ func (e *Emitter) emitDeepCloneArray(val Value, ty Type, pos ast.Pos) (Value, er
 func (e *Emitter) emitDeepCloneObject(val Value, ty Type, pos ast.Pos) (Value, error) {
 	e.ensureMalloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, ty.StructSize()))
+	e.emitObjMallocInto(dataReg, ty)
 	structIR := ty.StructIR()
 
 	for _, f := range ty.VisibleFields() {

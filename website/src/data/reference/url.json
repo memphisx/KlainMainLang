@@ -7,10 +7,10 @@
   "coverage": {
     "loose": "10/10",
     "loosePct": 100,
-    "strict": "2/10",
-    "strictPct": 20
+    "strict": "4/10",
+    "strictPct": 40
   },
-  "lede": "WHATWG URL parsing, query-string building, and route matching — the natural companions to fetch() for the REST-client priority. Parsing reuses libcurl's already-linked URL API rather than a hand-rolled parser. The recurring divergence is single-value-per-key: URLSearchParams is backed by a plain Map<string,string>, so a repeated key keeps only its last value and getAll() never returns more than one element. URLPattern is object-literal init only, and its exec() returns a merged Map rather than the spec's per-component result object.",
+  "lede": "WHATWG URL parsing, query-string building, and route matching — the natural companions to fetch() for the REST-client priority. A URL string is read as the WHATWG parser reads it (percent-encoding, opaque mailto:/urn:/data: URLs, punycode hosts) before libcurl's already-linked URL API parses a hierarchical one. URLSearchParams is an ordered list of pairs, live on its URL. URLPattern is object-literal init only, and its exec() result is not readable yet.",
   "entries": [
     {
       "id": "url.URL",
@@ -39,7 +39,7 @@
       "snippet": "const u = new URL(\"https://example.com:8080/a/b?x=1&y=hello%20world#frag\")\nconsole.log(u.hostname)  // example.com\nconsole.log(new URL(\"/p\", \"http://h.com/a\").href)  // http://h.com/p",
       "differences": [
         "A default port is stripped and the host is lowercased (WHATWG normalization); `URL.parse`/`URL.canParse` statics and `JSON.stringify(url)` → `href` (toJSON) are supported",
-        "libcurl-backed, so a non-special scheme is rejected where WHATWG accepts it (`new URL('foo:bar')` throws; Node parses it with `pathname` `'bar'`)"
+        "A non-ASCII hostname is case-folded and punycoded, without the rest of UTS 46's mapping: a full-width `ＥＸＡＭＰＬＥ.com` punycodes where Node reads `example.com`"
       ],
       "seeAlso": [
         "url.URLSearchParams",
@@ -117,15 +117,25 @@
     {
       "id": "url.parse",
       "name": "url.parse()",
-      "statusRow": "url.parse(urlString) (legacy)",
-      "signature": "url.parse(urlString: string): Url",
+      "statusRow": "url.parse(urlString[, parseQueryString[, slashesDenoteHost]]) (legacy)",
+      "signature": "url.parse(urlString: string, parseQueryString?: boolean, slashesDenoteHost?: boolean): Url",
       "badge": "caveats",
-      "description": "Node's legacy URL parser. Returns a Url object with the legacy field names (protocol, auth, host, port, hostname, hash, search, query, pathname, path, href), distinct from the WHATWG URL. Importable named, via namespace, or as the default of the url module.",
+      "description": "Node's legacy URL parser, the lib/url.js algorithm itself: lenient (never throws on a relative or odd input), null for an absent component, with slashes, backslash handling and auto-escaping. Returns a Url object with the legacy field names, distinct from the WHATWG URL; the first call prints Node's DEP0169 deprecation warning. Importable named, via namespace, or as the default of the url module.",
       "params": [
         {
           "name": "urlString",
           "type": "string",
-          "desc": "An absolute URL to parse."
+          "desc": "The URL to parse, absolute or relative."
+        },
+        {
+          "name": "parseQueryString",
+          "type": "boolean",
+          "desc": "Parse query into an object with querystring.parse."
+        },
+        {
+          "name": "slashesDenoteHost",
+          "type": "boolean",
+          "desc": "Read //host/path as host and path."
         }
       ],
       "returns": {
@@ -134,9 +144,7 @@
       },
       "snippet": "import { parse } from 'url'\nconst u = parse('https://user:pw@example.com:8080/a?x=1#h')\nconsole.log(u.host)      // example.com:8080\nconsole.log(u.auth)      // user:pw\nconsole.log(u.query)     // x=1\nconsole.log(u.path)      // /a?x=1",
       "differences": [
-        "Absolute URLs only — a malformed/relative input throws `Invalid URL` (like `new URL()`), not Node's never-throw lenient object",
-        "An absent component is `\"\"`, not Node's `null`",
-        "`slashes` and the `parseQueryString`-object form of `query` are not produced yet; `url.format`/`fileURLToPath` are separate follow-ons"
+        "The parseQueryString object form of `query` is a dictionary: read it after narrowing; `console.log`/`JSON.stringify` of it through `any` don't see its keys"
       ],
       "seeAlso": [
         "URL",
@@ -149,10 +157,10 @@
     {
       "id": "url.format",
       "name": "url.format()",
-      "statusRow": "url.format(urlObject) (legacy)",
-      "signature": "url.format(urlObject: Url | URL | object): string",
-      "badge": "caveats",
-      "description": "The inverse of url.parse: serializes a legacy Url object (or a WHATWG URL, or a plain object with the legacy fields) back into a URL string.",
+      "statusRow": "url.format(urlObject[, options]) (legacy)",
+      "signature": "url.format(urlObject: URL | UrlObject | string, options?: URLFormatOptions): string",
+      "badge": "exact",
+      "description": "lib/url.js's formatter: serializes a legacy Url object or a plain object with the legacy fields (query objects through querystring.stringify), parses and reformats a string, or serializes a WHATWG URL with the auth/fragment/search/unicode options.",
       "params": [
         {
           "name": "urlObject",
@@ -165,10 +173,7 @@
         "desc": "The formatted URL string."
       },
       "snippet": "import { parse, format } from 'url'\nconst u = parse('https://a.com/x?q=1')\nconsole.log(format(u)) // https://a.com/x?q=1",
-      "differences": [
-        "The `options` argument is not supported; components are taken verbatim (no re-encoding)",
-        "A WHATWG URL argument serializes to its href"
-      ],
+      "differences": [],
       "seeAlso": [
         "url.parse",
         "URL"
@@ -246,8 +251,8 @@
       "name": "url.resolve()",
       "statusRow": "url.resolve(from, to) (legacy)",
       "signature": "url.resolve(from: string, to: string): string",
-      "badge": "caveats",
-      "description": "Resolves a target URL relative to a base URL (the new URL(to, from) resolution), returning the resulting string.",
+      "badge": "exact",
+      "description": "lib/url.js's resolution of a target against a base: relative paths, `.`/`..` segments, protocol-relative and cross-protocol targets, and non-slashed schemes like mailto:.",
       "params": [
         {
           "name": "from",
@@ -265,9 +270,6 @@
         "desc": "The resolved URL."
       },
       "snippet": "import { resolve } from 'url'\nconsole.log(resolve('http://a.com/x/', '../y')) // http://a.com/y",
-      "differences": [
-        "Absolute bases only; a scheme-less base throws Invalid URL"
-      ],
       "seeAlso": [
         "URL",
         "url.parse"

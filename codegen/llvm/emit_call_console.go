@@ -93,7 +93,7 @@ func (e *Emitter) emitConsoleEvalArg(arg ast.Expression) (Value, error) {
 	// An un-narrowed nullable-scalar local prints its value or the literal
 	// `null`/`undefined` (TDD-00064 Stage 2), rather than the payload 0 the bare
 	// representation used to surface for a null — read as its aggregate.
-	val, err := e.emitExprKeepNullable(arg)
+	val, err := e.emitExpr(arg)
 	if err != nil {
 		return Value{}, err
 	}
@@ -224,6 +224,20 @@ func (e *Emitter) emitConsolePrintArgToken(arg ast.Expression, fd int, term stri
 // (emitConsolePrintArgToken) and a spread array's elements
 // (emitConsolePrintSpread).
 func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) error {
+	if val.Ty.NullAndUndef {
+		nullL, plainL, doneL := e.freshLabel("clog.trinull"), e.freshLabel("clog.triplain"), e.freshLabel("clog.tridone")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.isTriNull(val), nullL, plainL))
+		e.emitLabel(nullL)
+		e.emitConsolePrintVal(Value{Ref: e.internString("null"), Ty: TypePtr}, e.internString("%s"+term), fd)
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(plainL)
+		if err := e.emitConsolePrintValueToken(e.fromThreeState(val), fd, term); err != nil {
+			return err
+		}
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		return nil
+	}
 	// A caught value (TypeCaught ≈ `unknown`, TDD-00202): an Error renders
 	// "Name: message", anything else via its string form — routed through the
 	// shared caught-to-string helper.
@@ -270,10 +284,6 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		e.emitConsolePrintVal(e.emitInspectFunc(val), e.internString("%s"+term), fd)
 		return nil
 	}
-	if val.Ty.IsFFIFunction {
-		e.emitConsolePrintVal(e.emitInspectFFIFunc(val, 0), e.internString("%s"+term), fd)
-		return nil
-	}
 	// A bare `null`/`undefined` value renders its keyword (Node shows
 	// `undefined`, not a blank line). Routed through emitValueToString, which
 	// already distinguishes the two via IsUndefined.
@@ -289,15 +299,16 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 	// a plain Uint8Array shows — checked before the array branch, since a
 	// Buffer is structurally a Uint8Array (IsArray also set).
 	if val.Ty.IsBuffer {
-		// An absent `Buffer | undefined` prints its keyword, as an array's.
+		// An absent `Buffer | undefined` prints its keyword, as an array's;
+		// so does a Buffer binding holding undefined (a null header).
 		doneL := ""
-		if val.Ty.Nullable {
+		if val.Ty.Nullable || val.ArrayHeader != "" {
 			isAbsent := e.emitArrayIsAbsent(val)
 			absentL, bufL := e.freshLabel("clog.bufnull"), e.freshLabel("clog.buf")
 			doneL = e.freshLabel("clog.bufdone")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAbsent, absentL, bufL))
 			e.emitLabel(absentL)
-			e.emitConsolePrintVal(Value{Ref: e.internString(absentLiteral(val.Ty)), Ty: TypePtr}, e.internString("%s"+term), fd)
+			e.emitConsolePrintVal(Value{Ref: e.internString(consoleAbsentLiteral(val.Ty)), Ty: TypePtr}, e.internString("%s"+term), fd)
 			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 			e.emitLabel(bufL)
 		}
@@ -312,14 +323,13 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		}
 		return nil
 	}
-	// URLSearchParams inspects as `URLSearchParams { 'a' => '1', … }` (TDD-00203),
-	// via the pair-list C formatter — checked before the Map case since it is no
-	// longer a Map.
-	if val.Ty.IsURLSearchParams {
-		e.ensureURLSearchParams()
-		s := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_usp_inspect(ptr %s)", s, val.Ref))
-		e.emitConsolePrintVal(Value{Ref: s, Ty: TypePtr}, e.internString("%s"+term), fd)
+	// A host class (Blob, Headers, ArrayBuffer, URLSearchParams, …) prints
+	// Node's form — checked before the Map case, since Headers is one.
+	if s, ok, err := e.emitInspectHost(val, 0); ok {
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(s, e.internString("%s"+term), fd)
 		return nil
 	}
 	// An index-signature dictionary inspects as the plain object it is.
@@ -329,6 +339,15 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 			return err
 		}
 		strVal, err := e.emitInspectField(bag, 0)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	// A WeakMap / WeakSet hides its entries, a WeakRef its target.
+	if val.Ty.Weak && (val.Ty.IsMap || val.Ty.IsSet) || val.Ty.IsWeakRef || val.Ty.IsCollIter {
+		strVal, err := e.emitInspectField(val, 0)
 		if err != nil {
 			return err
 		}
@@ -378,19 +397,19 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		// A `T[] | undefined` value (a nested-array element absence, TDD-00221)
 		// prints its keyword on a miss (null data-ptr), not `[]` — mirroring the
 		// absent-object case below.
-		if val.Ty.Nullable {
+		if val.Ty.Nullable || val.ArrayHeader != "" {
 			isAbsent := e.emitArrayIsAbsent(val)
 			absentL := e.freshLabel("clog.arrnull")
 			arrL := e.freshLabel("clog.arr")
 			doneL := e.freshLabel("clog.arrdone")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAbsent, absentL, arrL))
 			e.emitLabel(absentL)
-			e.emitConsolePrintVal(Value{Ref: e.internString(absentLiteral(val.Ty)), Ty: TypePtr}, e.internString("%s"+term), fd)
+			e.emitConsolePrintVal(Value{Ref: e.internString(consoleAbsentLiteral(val.Ty)), Ty: TypePtr}, e.internString("%s"+term), fd)
 			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 			e.emitLabel(arrL)
 			base := val.Ty
 			base.Nullable, base.IsUndefined = false, false
-			strVal, err := e.emitInspectArray(Value{Ref: val.Ref, Ty: base}, 0)
+			strVal, err := e.emitInspectArray(Value{Ref: val.Ref, Ty: base, ArrayHeader: val.ArrayHeader}, 0)
 			if err != nil {
 				return err
 			}
@@ -400,6 +419,14 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 			return nil
 		}
 		strVal, err := e.emitInspectArray(val, 0)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	if val.Ty.IsURL && !val.Ty.Nullable && !val.Ty.IsDynamic {
+		strVal, err := e.emitInspectURL(val, 0)
 		if err != nil {
 			return err
 		}
@@ -423,7 +450,11 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 			e.emitConsolePrintVal(Value{Ref: e.internString(absentLiteral(val.Ty)), Ty: TypePtr}, e.internString("%s"+term), fd)
 			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 			e.emitLabel(objL)
-			strVal, err := e.emitInspectObject(val, 0)
+			// Present: the object itself, which may be another layout's
+			// (a structural view, emitRecordSplit).
+			present := val
+			present.Ty.Nullable, present.Ty.IsUndefined, present.Ty.IsNull = false, false, false
+			strVal, err := e.emitInspectObject(present, 0)
 			if err != nil {
 				return err
 			}
@@ -443,6 +474,15 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		// console.log renders a boxed value in its util.inspect form (a boxed
 		// array as `[ 1, 2, 3 ]`, not the `1,2,3` String() join) — TDD-00212 S2.
 		strVal, err := e.emitDynamicInspect(val)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	if val.Ty.IsDate && val.Ty.IR == "i64" || val.Ty.IsRegExp && val.Ty.IsObject && !val.Ty.Nullable && !val.Ty.IsDynamic {
+		// console.log(date) shows its util.inspect form, the ISO string.
+		strVal, err := e.emitInspectField(val, 0)
 		if err != nil {
 			return err
 		}
@@ -1021,4 +1061,14 @@ func (e *Emitter) emitConsoleAssert(args []ast.Expression, pos ast.Pos) (Value, 
 
 	e.emitLabel(passL)
 	return Value{Ty: TypeVoid}, nil
+}
+
+// consoleAbsentLiteral is what an absent array prints: its type's keyword,
+// or undefined for a binding whose type has neither (a value that crossed
+// an `any` boundary).
+func consoleAbsentLiteral(ty Type) string {
+	if !ty.Nullable {
+		return "undefined"
+	}
+	return absentLiteral(ty)
 }

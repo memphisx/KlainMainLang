@@ -167,15 +167,27 @@ console.log("released", one.locked);
 }
 
 func TestE2EStreamsLockedGetReaderThrows(t *testing.T) {
-	assertOutput(t, `
+	assertSameAsNode(t, `
 const rs = ReadableStream.from([1]);
 const r1 = rs.getReader();
 try {
   rs.getReader();
 } catch (e) {
-  console.log("locked:", (e as Error).message);
+  console.log("locked:", (e as Error).name, (e as any).code, (e as Error).message);
 }
-`, "locked: ReadableStream is already locked to a reader")
+try {
+  rs.tee();
+} catch (e) {
+  console.log("tee:", (e as Error).message);
+}
+const w = new WritableStream<number>();
+w.getWriter();
+try {
+  w.getWriter();
+} catch (e) {
+  console.log("writer:", (e as any).code, (e as Error).message);
+}
+`)
 }
 
 func TestE2EStreamsEnqueueAfterCloseThrows(t *testing.T) {
@@ -303,6 +315,7 @@ const ab = new WritableStream<number>({
 });
 const aw = ab.getWriter();
 const p1 = aw.write(1);
+p1.catch(() => {}); // the in-flight write rejects too; unhandled, Node exits 1
 const p2 = aw.write(2);
 await aw.abort();
 console.log("aborted flag:", aborted);
@@ -468,7 +481,7 @@ console.log("status", res.status);
 const decoder = new TextDecoder();
 let text = "";
 let chunks = 0;
-for await (const chunk of res.body) {
+for await (const chunk of res.body!) {
   chunks = chunks + 1;
   text = text + decoder.decode(chunk);
 }
@@ -477,31 +490,33 @@ console.log("multiple chunks:", chunks >= 2, "text:", text);
 	assertOutput(t, src, "status 200\nmultiple chunks: true text: alpha beta gamma")
 }
 
-func TestE2EStreamsFetchBodyThenTextStillWorks(t *testing.T) {
+func TestE2EStreamsFetchBodyReadTwiceRejects(t *testing.T) {
 	srv := newFetchTestServer(t)
 	src := fmt.Sprintf(`
 const res = await fetch("%s/flat");
 console.log("ok", res.ok);
 const body = await res.text();
 console.log("len>0", body.length > 0);
-console.log("again", (await res.text()).length > 0);
+try { await res.text(); } catch (e) { console.log("again", (e as Error).name, (e as Error).message); }
 `, srv.URL)
-	assertOutput(t, src, "ok true\nlen>0 true\nagain true")
+	assertOutput(t, src, "ok true\nlen>0 true\nagain TypeError Body is unusable: Body has already been read")
 }
 
-func TestE2EStreamsFetchBodyReplayAfterText(t *testing.T) {
-	// .body on a Response whose transfer already completed (or was consumed
-	// buffered) replays the buffered bytes as one chunk.
+func TestE2EStreamsFetchBodyLockedAfterText(t *testing.T) {
+	// .body after a body method is the consumed stream: locked and read.
 	srv := newFetchTestServer(t)
 	src := fmt.Sprintf(`
 const res = await fetch("%s/flat");
 const t1 = await res.text();
-const decoder = new TextDecoder();
-let text = "";
-for await (const chunk of res.body) { text = text + decoder.decode(chunk); }
-console.log(text === t1);
-`, srv.URL)
-	assertOutput(t, src, "true")
+console.log(t1.length > 0, res.bodyUsed, res.body!.locked);
+try { for await (const chunk of res.body!) { console.log(chunk.length); } } catch (e) { console.log((e as Error).message); }
+const res2 = await fetch("%s/flat");
+const b2 = res2.body!;
+console.log(b2.locked, res2.bodyUsed);
+await res2.text();
+console.log(b2.locked, res2.bodyUsed, res2.body === b2);
+`, srv.URL, srv.URL)
+	assertOutput(t, src, "true true true\nInvalid state: ReadableStream is locked\nfalse false\ntrue true true")
 }
 
 // TDD-00097 Stage 5: chunked http responses from a ReadableStream body.
@@ -833,7 +848,7 @@ func TestE2EStreamsGunzipGoInterop(t *testing.T) {
 const res = await fetch("%s/gz");
 const dec = new TextDecoder();
 let out = "";
-for await (const chunk of res.body.pipeThrough(new DecompressionStream("gzip"))) {
+for await (const chunk of res.body!.pipeThrough(new DecompressionStream("gzip"))) {
   out = out + dec.decode(chunk);
 }
 console.log("lines:", out.split("\n").length - 1, "match:", out.length === %d);
@@ -1005,4 +1020,25 @@ http.listen(18663, async (req: HttpRequest) => {
 	if string(got) != want {
 		t.Fatalf("body = %q, want %q", got, want)
 	}
+}
+
+// zlib's Brotli and Zstd codecs: round trips, parameters, Node's error codes
+// and the callback forms (ADR-01305).
+func TestE2EZlibBrotliZstd(t *testing.T) {
+	assertOutputImports(t, `
+import * as zlib from 'zlib';
+const text = 'abc '.repeat(50);
+const br = zlib.brotliCompressSync(text, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 } });
+console.log(zlib.brotliDecompressSync(br).toString() === text);
+const zs = zlib.zstdCompressSync(text);
+console.log(zlib.zstdDecompressSync(zs).toString() === text);
+try { zlib.brotliDecompressSync(Buffer.from('garbage-garbage-garbage')); } catch (e: any) { console.log(e.code, e.errno, e.message); }
+try { zlib.brotliDecompressSync(zlib.brotliCompressSync('hello world').subarray(0, 5)); } catch (e: any) { console.log(e.code, e.message); }
+try { zlib.zstdDecompressSync(Buffer.from('garbage-garbage-garbage')); } catch (e: any) { console.log(e.code, e.errno, e.message); }
+try { zlib.brotliCompressSync('x', { params: { 99: 1 } }); } catch (e: any) { console.log(e.code, e.message); }
+try { zlib.zstdCompressSync('x', { params: { 999: 1 } }); } catch (e: any) { console.log(e.code, e.message); }
+zlib.brotliCompress('async', (err, res) => {
+  zlib.brotliDecompress(res, (err2, out) => console.log(err, err2, out.toString()));
+});
+`, "true\ntrue\nERR__ERROR_FORMAT_PADDING_1 -14 Decompression failed\nZ_BUF_ERROR unexpected end of file\nZSTD_error_prefix_unknown 10 Unknown frame descriptor\nERR_BROTLI_INVALID_PARAM 99 is not a valid Brotli parameter\nERR_ZSTD_INVALID_PARAM 999 is not a valid zstd parameter\nnull null async")
 }

@@ -12,7 +12,7 @@ func TestE2EChildProcessKillAfterExitThrowsESRCH(t *testing.T) {
 import { spawn } from 'child_process'
 const child = spawn("echo", ["x"])
 child.on('exit', (code: number) => {
-  try { process.kill(child.pid); console.log("killed") } catch (e) { console.log("threw") }
+  try { process.kill(child.pid!); console.log("killed") } catch (e) { console.log("threw") }
 })
 `, "threw")
 }

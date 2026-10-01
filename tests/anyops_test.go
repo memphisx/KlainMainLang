@@ -161,3 +161,16 @@ const g = new Greeter("T")
 console.log(g.nope === undefined, g.nope !== undefined)
 `, "true false\ntrue false\nfalse true false true\ntrue false")
 }
+
+// `any + string` is a string wherever its type is read, as an argument
+// taking any (Buffer.from) included.
+func TestE2EAnyPlusStringIsString(t *testing.T) {
+	assertSameAsNodeImports(t, `
+function f(message: any): number {
+  if (typeof message !== 'string' && typeof message !== 'object') throw new TypeError('bad')
+  return Buffer.from(JSON.stringify(message) + '\n', 'utf8').length
+}
+const v: any = 5
+console.log(f({ a: 1 }), f('x'), typeof (v + 'px'), (v + 'px').length)
+`)
+}

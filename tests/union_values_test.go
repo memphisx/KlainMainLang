@@ -151,3 +151,21 @@ console.log((m.get("k") ?? dflt).n, m.get("k") ?? null)
 		"null b true", "4 6", "0 null",
 	}, "\n"))
 }
+
+// The `object` type holds any non-primitive, as a boxed value: a parameter
+// of it, and a union member (the union is then any value's box).
+func TestE2EObjectKeywordType(t *testing.T) {
+	assertOutput(t, `
+function g(x: object): void { console.log(typeof x, JSON.stringify(x)); }
+g({ a: 1 });
+g([1, 2]);
+function f(x: string | object | number): void { console.log(typeof x); }
+f({ a: 1 });
+f("s");
+f(2);
+class C { a = 1 }
+f(new C());
+const o: object = { b: 2 };
+console.log(o);
+`, "object {\"a\":1}\nobject [1,2]\nobject\nstring\nnumber\nobject\n{ b: 2 }")
+}

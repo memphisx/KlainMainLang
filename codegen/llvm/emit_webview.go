@@ -375,6 +375,9 @@ func (e *Emitter) emitWebviewBindings(w, handle string, expr ast.Expression, pos
 	}
 	structIR := ty.StructIR()
 	for i, f := range ty.Fields {
+		if f.Name == ClassTagField {
+			continue
+		}
 		if !f.Ty.IsFunc {
 			return fmt.Errorf("%d:%d: bindings.%s must be a function, got a non-function field", pos.Line, pos.Col, f.Name)
 		}
@@ -574,6 +577,7 @@ func (e *Emitter) emitWebviewAsyncReturn(promiseRef, runnerFn string) {
 	// node onto its reaction list (field 4).
 	res := e.freshReg()
 	resP := e.freshReg()
+	e.emitMarkPromiseHandled(promiseRef)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", resP, promiseStructIR, promiseRef))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", res, resP))
 	settled := e.freshReg()
@@ -632,7 +636,7 @@ func (e *Emitter) emitWebviewBindThunk(cbTy Type, typed bool, pos ast.Pos) strin
 	cb := Callback{kind: cbClosure, hdrPtr: "%clo", ty: cbTy}
 	errJSON := e.internString(`"native handler threw"`)
 
-	err := e.emitFsGuarded(
+	err := e.emitSetjmpGuarded(
 		func() error {
 			// Typed bind (TDD-00142 Stage 5): decode the page's JSON-array
 			// arguments into the callback's declared parameter types, call it,
@@ -727,4 +731,39 @@ func (e *Emitter) emitWebviewBindThunk(cbTy Type, typed bool, pos ast.Pos) strin
 	e.functions.WriteString(e.body.String())
 	e.functions.WriteString("}\n")
 	return fn
+}
+
+// emitSetjmpGuarded emits a setjmp/catch scaffold: tryBody runs guarded and
+// delivers success; catchBody receives the caught error pointer and delivers
+// failure. __kml_throw already pops the jmpbuf on the throw path, so
+// catchBody must not pop it again — the mirror of emitTry.
+func (e *Emitter) emitSetjmpGuarded(tryBody func() error, catchBody func(errPtr string) error) error {
+	e.ensureExceptionHelpers()
+	tryL := e.freshLabel("guard.try")
+	catchL := e.freshLabel("guard.catch")
+	doneL := e.freshLabel("guard.done")
+	jb := e.freshReg()
+	sj := e.freshReg()
+	thr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jb))
+	e.emitInstr(fmt.Sprintf("%s = %s", sj, e.setjmpCall(jb)))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", thr, sj))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", thr, catchL, tryL))
+
+	e.emitLabel(tryL)
+	if err := tryBody(); err != nil {
+		return err
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(catchL)
+	errPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", errPtr))
+	if err := catchBody(errPtr); err != nil {
+		return err
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(doneL)
+	return nil
 }

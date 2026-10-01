@@ -41,4 +41,4 @@ console.log(active.has(alice)); // false
 // ── WeakRef<T>: hold a reference that doesn't keep the referent alive ─────────
 const ref = new WeakRef(bob);
 const got = ref.deref();
-console.log(got.id); // 2  (bob is still reachable, so deref() yields it)
+console.log(got?.id); // 2  (bob is still reachable, so deref() yields it)

@@ -41,8 +41,13 @@ func (e *Emitter) front() *checker.Checker {
 
 // lowering is a call resolved to a declaration with an @lower target.
 type lowering struct {
-	target string
-	links  []string
+	// intrinsic names the inline emitter of an `@intrinsic` declaration
+	// (intrinsics); the rest is unused then.
+	intrinsic string
+	e         *Emitter
+	ex        *ast.CallExpression
+	target    string
+	links     []string
 	// recv is the receiver's representation for a method of a primitive's
 	// apparent type (`s.trim()`), passed as the first argument; nil for a
 	// method of a global object (`Math.sin(x)`).
@@ -57,6 +62,9 @@ type lowering struct {
 
 // resultType is the type a lowered call's value has.
 func (l *lowering) resultType() Type {
+	if l.intrinsic != "" {
+		return intrinsics[l.intrinsic].ty(l.e, l.ex)
+	}
 	if l.resultOptional {
 		return undefinedableElem(l.result)
 	}
@@ -92,19 +100,35 @@ func (e *Emitter) loweredCall(ex *ast.CallExpression) (*lowering, bool) {
 	if ex.Optional || len(ex.TypeArgs) > 0 {
 		return nil, false
 	}
+	c := e.front()
+	if c == nil {
+		return nil, false
+	}
+	if id, ok := ex.Callee.(*ast.Identifier); ok && e.isBuiltinGlobal(c, id) {
+		// A builtin `declare function` (`parseInt`).
+		if sym, _ := c.Binding().Resolve(id); sym != nil {
+			for _, d := range sym.Declarations {
+				if fd, ok := d.Node.(*ast.FunctionDeclaration); ok && fd.Intrinsic != "" {
+					if _, known := intrinsics[fd.Intrinsic]; known {
+						return &lowering{intrinsic: fd.Intrinsic, e: e, ex: ex}, true
+					}
+				}
+			}
+		}
+		return nil, false
+	}
 	mem, ok := ex.Callee.(*ast.MemberExpression)
 	if !ok || mem.Optional {
 		return nil, false
 	}
-	c := e.front()
-	if c == nil {
-		return nil, false
+	if key, ok := e.methodIntrinsic(c, mem); ok {
+		return &lowering{intrinsic: key, e: e, ex: ex}, true
 	}
 	var recv *Type
 	var decl ast.Node
 	var overloads []ast.Node
 	var fn *checker.Type
-	if id, ok := mem.Object.(*ast.Identifier); ok && e.isBuiltinGlobal(c, id) && c.TypeOf(id).Flags&checker.Object != 0 {
+	if e.isBuiltinGlobalObject(c, mem.Object) {
 		// A method of a builtin global object (`Math.sin`; a primitive
 		// global such as `NaN` is a receiver instead).
 		decl, overloads, fn = c.MemberDecl(mem), c.MemberOverloadDecls(mem), c.TypeOf(mem)
@@ -134,6 +158,12 @@ func (e *Emitter) loweredCall(ex *ast.CallExpression) (*lowering, bool) {
 		decl, fn = overloads[i], fn.Overloads[i]
 	}
 	ms, ok := decl.(*ast.MethodSignature)
+	if ok && ms.Intrinsic != "" {
+		if e.intrinsicApplies(ms.Intrinsic, mem) {
+			return &lowering{intrinsic: ms.Intrinsic, e: e, ex: ex}, true
+		}
+		return nil, false // the named path, which rejects what the intrinsic cannot take
+	}
 	if !ok || ms.Lower == "" || len(ms.TypeParameters) > 0 {
 		return nil, false
 	}
@@ -185,6 +215,61 @@ func (e *Emitter) loweredCall(ex *ast.CallExpression) (*lowering, bool) {
 	return l, true
 }
 
+// methodIntrinsic is the intrinsic a method call's declaration names
+// (`arr.map(f)` through Array's `/** @intrinsic Array.prototype.map */`),
+// whatever declares it. A receiver the checker cannot type (or types `any`)
+// has no declaration: it takes the named paths.
+func (e *Emitter) methodIntrinsic(c *checker.Checker, mem *ast.MemberExpression) (string, bool) {
+	if c.MemberOverloadDecls(mem) != nil {
+		return "", false // an overloaded method: the overload the call resolves to decides
+	}
+	decl := c.MemberDecl(mem)
+	key := ""
+	switch d := decl.(type) {
+	case *ast.MethodSignature:
+		key = d.Intrinsic
+	case *ast.FunctionDeclaration:
+		key = d.Intrinsic // `globalThis.parseInt`
+	}
+	if !e.intrinsicApplies(key, mem) {
+		return "", false
+	}
+	return key, true
+}
+
+// intrinsicApplies reports whether a method's intrinsic takes this call: it
+// is known, and an Array one's inline loops read a regular array — a
+// `@value` array, a bigint typed array's unsupported method, or a receiver
+// codegen holds as something else take the named paths, which reject them.
+func (e *Emitter) intrinsicApplies(key string, mem *ast.MemberExpression) bool {
+	if _, known := intrinsics[key]; !known {
+		return false
+	}
+	if owner, _, ok := strings.Cut(key, ".prototype."); ok && collectionIntrinsics[owner] != nil {
+		// Codegen must hold the receiver as that collection (a dictionary,
+		// Headers or URLSearchParams keeps its own path).
+		ot := e.inferExprType(mem.Object)
+		weak := owner == "WeakMap" || owner == "WeakSet"
+		return (ot.IsMap || ot.IsSet) && ot.Weak == weak && !ot.IsDynamicObject && !ot.IsHeaders &&
+			!ot.IsURLSearchParams && !isUnconstrainedDynamic(ot)
+	}
+	if strings.HasPrefix(key, "RegExp.prototype.") {
+		ot := e.inferExprType(mem.Object)
+		return ot.IsRegExp && !ot.IsDynamic
+	}
+	if strings.HasPrefix(key, "Date.prototype.") {
+		ot := e.inferExprType(mem.Object)
+		return ot.IsDate && !ot.IsDynamic
+	}
+	if strings.HasPrefix(key, "Array.prototype.") {
+		ot := e.inferExprType(mem.Object)
+		if !ot.IsArray || isUnconstrainedDynamic(ot) || ot.IsFlatArray || ot.BigIntElem && bigIntElemRejectedMethods[mem.Property] {
+			return false
+		}
+	}
+	return true
+}
+
 // isBuiltinGlobal reports whether id names a builtin global object, not a
 // program binding that shadows it.
 func (e *Emitter) isBuiltinGlobal(c *checker.Checker, id *ast.Identifier) bool {
@@ -194,6 +279,29 @@ func (e *Emitter) isBuiltinGlobal(c *checker.Checker, id *ast.Identifier) bool {
 	b := c.Binding()
 	sym, _ := b.Resolve(id)
 	return sym != nil && b.Globals != nil && sym.Scope == b.Globals
+}
+
+// isBuiltinGlobalObject reports whether x is a builtin global object
+// (`Math`, or `globalThis.Math`) rather than a value of a primitive.
+func (e *Emitter) isBuiltinGlobalObject(c *checker.Checker, x ast.Expression) bool {
+	switch x := x.(type) {
+	case *ast.Identifier:
+		if x.Name == "globalThis" {
+			return !e.isShadowedByLocal("globalThis") // the global object itself
+		}
+		if !e.isBuiltinGlobal(c, x) {
+			return false
+		}
+	case *ast.MemberExpression:
+		id, ok := x.Object.(*ast.Identifier)
+		if !ok || id.Name != "globalThis" || e.isShadowedByLocal("globalThis") || x.Optional {
+			return false
+		}
+	default:
+		return false
+	}
+	t := c.TypeOf(x)
+	return !c.Unanswered(t) && t.Flags&checker.Object != 0
 }
 
 // loweredReceiver is the representation a method's receiver is passed in,
@@ -243,6 +351,8 @@ func isUndefinedLiteral(e *Emitter, a ast.Expression) bool {
 // boundary; the types this path represents so far.
 func lowerRepr(t *checker.Type) (Type, bool) {
 	switch {
+	case t.Flags&checker.Any != 0:
+		return TypeAny, true // a NaN-boxed word
 	case t.Flags&checker.Union != 0:
 		return Type{}, false
 	case t.Flags&(checker.Number|checker.NumberLiteral) != 0:
@@ -265,7 +375,7 @@ func lowerRepr(t *checker.Type) (Type, bool) {
 
 // lowerCallback is the parameters' representations of a callback parameter's
 // function type: one signature returning void, each parameter a scalar the
-// runtime passes (a number, a boolean, a string).
+// runtime passes (a number, a boolean, a string, an `any` word).
 func lowerCallback(t *checker.Type) ([]Type, bool) {
 	if t.Flags&checker.Object == 0 || t.Kind != checker.Function || len(t.Overloads) > 0 || len(t.TypeParams) > 0 {
 		return nil, false
@@ -275,6 +385,10 @@ func lowerCallback(t *checker.Type) ([]Type, bool) {
 	}
 	params := []Type{}
 	for _, pt := range t.Params {
+		if pt.Flags&checker.Any != 0 {
+			params = append(params, TypeAny) // a NaN-boxed word
+			continue
+		}
 		r, ok := lowerRepr(pt)
 		if !ok || r.IR == "void" || r.IsArray || r.IsError {
 			return nil, false
@@ -299,6 +413,9 @@ func isBytesType(t *checker.Type) bool {
 // argument is converted as JavaScript converts it for the declared type
 // (ToNumber, ToString); a missing required number is NaN, ToNumber(undefined).
 func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error) {
+	if l.intrinsic != "" {
+		return intrinsics[l.intrinsic].emit(e, ex)
+	}
 	mem := ex.Callee.(*ast.MemberExpression)
 	var args []string
 	if l.recv != nil {
@@ -485,6 +602,9 @@ func (e *Emitter) optionalPresence(v Value) (string, Value) {
 
 // lowerArg converts an argument to its parameter's representation.
 func (e *Emitter) lowerArg(v Value, ty Type) (Value, error) {
+	if ty.IsDynamic {
+		return e.emitBoxValue(v)
+	}
 	if ty.IR == "ptr" {
 		return e.emitArgToString(v) // ToString
 	}
@@ -602,7 +722,15 @@ var runtimeUnits = map[string]func(*Emitter){
 	"string":  (*Emitter).ensureStringC,
 	"number":  (*Emitter).ensureNumberC,
 	"pool":    (*Emitter).ensureNativePool,
+	"inspect": (*Emitter).ensureDynJSONC,
 	"tls":     (*Emitter).ensureNativeTLS,
+	"osinfo":  (*Emitter).ensureOSInfo,
+	"zlib":    (*Emitter).ensureZlibNatives,
+	"fs":      (*Emitter).ensureFsNatives,
+	"sqlite":  (*Emitter).ensureSqliteNatives,
+	"ffi":     (*Emitter).ensureFFINatives,
+	"crypto":  (*Emitter).ensureCryptoNatives,
+	"http2":   (*Emitter).ensureH2Natives,
 }
 
 // runtimeSymbols are the `@lower` targets the IR runtime defines, rather
@@ -612,10 +740,59 @@ var runtimeSymbols = map[string]func(*Emitter){
 	"__kml_trim_start": (*Emitter).ensureStringTrimStart,
 	"__kml_trim_end":   (*Emitter).ensureStringTrimEnd,
 	// lib/native.d.ts
-	"__kml_native_fs_error":   (*Emitter).ensureNativeFsError,
-	"__kml_native_errno_name": (*Emitter).ensureNativeErrno,
-	"__kml_native_errno_desc": (*Emitter).ensureNativeErrno,
-	"__kml_native_uv_errno":   (*Emitter).ensureNativeErrno,
+	"__kml_drain_microtasks":             (*Emitter).ensureMicrotasks,
+	"__kml_Object_is":                    (*Emitter).ensureObjectIs,
+	"__kml_ctor_kind":                    (*Emitter).ensureCtorKind,
+	"__kml_native_fs_error":              (*Emitter).ensureNativeFsError,
+	"__kml_native_fs_watch":              (*Emitter).ensureNativeFsWatch,
+	"__kml_native_fs_watch_close":        (*Emitter).ensureNativeFsWatch,
+	"__kml_native_errno_name":            (*Emitter).ensureNativeErrno,
+	"__kml_native_errno_desc":            (*Emitter).ensureNativeErrno,
+	"__kml_native_uv_errno":              (*Emitter).ensureNativeErrno,
+	"__kml_native_entry_path":            (*Emitter).ensureNativeEntryPath,
+	"__kml_native_signal_start":          (*Emitter).ensureNativeSignal,
+	"__kml_native_signal_stop":           (*Emitter).ensureNativeSignal,
+	"__kml_native_process_hook":          (*Emitter).ensureProcessHooks,
+	"__kml_native_process_unhook":        (*Emitter).ensureProcessHooks,
+	"__kml_native_ipc_child_claim":       (*Emitter).ensureNativeIPCChildClaim,
+	"__kml_native_async_context_get":     (*Emitter).ensureNativeAsyncContext,
+	"__kml_native_async_context_set":     (*Emitter).ensureNativeAsyncContext,
+	"__kml_native_perf_now":              (*Emitter).ensureNativePerf,
+	"__kml_native_perf_time_origin":      (*Emitter).ensureNativePerf,
+	"__kml_native_process_cwd":           (*Emitter).ensureNativeProcessCwd,
+	"__kml_native_process_chdir":         (*Emitter).ensureNativeProcessChdir,
+	"__kml_native_process_uptime":        (*Emitter).ensureNativeProcessUptime,
+	"__kml_native_process_hrtime":        (*Emitter).ensureNativeProcessHrtime,
+	"__kml_native_process_hrtime_read":   (*Emitter).ensureNativeProcessHrtime,
+	"__kml_native_kill_pid":              (*Emitter).ensureNativeKillPid,
+	"__kml_native_process_memory":        (*Emitter).ensureNativeProcessMemory,
+	"__kml_native_process_umask":         (*Emitter).ensureNativeProcessUmask,
+	"__kml_native_process_id":            (*Emitter).ensureNativeProcessIds,
+	"__kml_native_process_argc":          (*Emitter).ensureNativeProcessArgv,
+	"__kml_native_process_argv":          (*Emitter).ensureNativeProcessArgv,
+	"__kml_native_process_argv0":         (*Emitter).ensureNativeProcessArgv,
+	"__kml_native_process_exec_path":     (*Emitter).ensureNativeProcessExecPath,
+	"__kml_native_process_set_exit_code": (*Emitter).ensureNativeProcessExit,
+	"__kml_native_process_get_exit_code": (*Emitter).ensureNativeProcessExit,
+	"__kml_native_process_really_exit":   (*Emitter).ensureNativeProcessExit,
+	"__kml_native_process_version":       (*Emitter).ensureNativeProcessVersion,
+	"__kml_native_env_get":               (*Emitter).ensureNativeEnv,
+	"__kml_native_env_set":               (*Emitter).ensureNativeEnv,
+	"__kml_native_env_delete":            (*Emitter).ensureNativeEnv,
+}
+
+// ensureNativeEntryPath defines @__kml_native_entry_path: the program's
+// entry file (require.main.filename), the module a self-fork runs.
+func (e *Emitter) ensureNativeEntryPath() {
+	if e.fnDecls["__kml_native_entry_path"] {
+		return
+	}
+	e.fnDecls["__kml_native_entry_path"] = true
+	path := ""
+	if e.prog != nil {
+		path = e.prog.EntryPath
+	}
+	e.emitGlobal(fmt.Sprintf("define ptr @__kml_native_entry_path() {\nentry:\n  ret ptr %s\n}", e.internString(path)))
 }
 
 // declareFn emits a function declaration once per symbol: the lowered path
@@ -699,6 +876,20 @@ func (e *Emitter) checkerNarrowedUnion(id ast.Expression, ty Type) (Type, bool) 
 	}
 	var found Type
 	n := 0
+	// Several object members: the one the checker's narrowed type names
+	// (a class by its name, an interface or alias by its declared name).
+	if kind == "object" && t.Symbol != nil {
+		for _, m := range ty.UnionMembers {
+			if unionMemberTag(m) == "object" && objectMemberNamed(m, t.Symbol.Name) {
+				found = m
+				n++
+			}
+		}
+		if n == 1 {
+			return found, true
+		}
+		n = 0
+	}
 	for _, m := range ty.UnionMembers {
 		if unionMemberTag(m) != kind {
 			continue
@@ -764,7 +955,28 @@ func allStringLiterals(u *ast.UnionType) bool {
 // pointer, typed as the subclass). ret otherwise.
 func (e *Emitter) genericMethodResult(ex *ast.CallExpression, objTy Type, method string, ret Type) Type {
 	info, ok := e.classes[objTy.ClassName]
-	if !ok || !ret.IsClass {
+	if !ok {
+		return ret
+	}
+	// An erased method's `R` result (`run<R>(…): R`) is `any`; where the
+	// checker types the call as a class instance, the result is that
+	// instance (the caller unboxes it).
+	if isUnconstrainedDynamic(ret) {
+		m := info.Methods[method]
+		c := e.front()
+		if m == nil || !m.ErasedMethod || c == nil {
+			return ret
+		}
+		t := c.TypeOf(ex)
+		if c.Unanswered(t) || t.Flags&checker.Object == 0 || t.Kind != checker.Instance || t.Symbol == nil {
+			return ret
+		}
+		if ci, ok := e.classes[t.Symbol.Name]; ok && !ci.Ty.IsDynamic {
+			return ci.Ty
+		}
+		return ret
+	}
+	if !ret.IsClass {
 		return ret
 	}
 	m := info.Methods[method]
@@ -792,4 +1004,25 @@ func (e *Emitter) genericMethodResult(ex *ast.CallExpression, objTy Type, method
 		}
 	}
 	return ret
+}
+
+// objectMemberNamed reports whether union member m is the type the checker
+// calls name: a class (its codegen name carries a module suffix) or an
+// interface/alias (RefName).
+func objectMemberNamed(m Type, name string) bool {
+	if m.IsClass {
+		cn := m.ClassName
+		if i := strings.Index(cn, "__kml_mod"); i >= 0 {
+			cn = cn[:i]
+		}
+		return cn == name
+	}
+	if m.RefName != "" {
+		rn := m.RefName
+		if i := strings.Index(rn, "__kml_mod"); i >= 0 {
+			rn = rn[:i]
+		}
+		return rn == name
+	}
+	return hostClassName(m) == name
 }

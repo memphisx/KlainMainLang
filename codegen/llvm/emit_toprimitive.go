@@ -36,6 +36,36 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 	} else { // "number" and "default"
 		order = []string{"@@toPrimitive", "valueOf", "toString"}
 	}
+	// A class instance carries the ladder's methods as class methods.
+	if canon := e.canonicalizeClassTy(v.Ty); canon.IsClass {
+		if info, ok := e.classes[canon.ClassName]; ok {
+			for _, name := range order {
+				sig, has := info.MethodSigs[name]
+				if !has {
+					continue
+				}
+				if name != "@@toPrimitive" && !resultUsableForHint(sig.RetType, hint) && sig.RetType.IR != "void" && !sig.RetType.IsUndefined {
+					continue
+				}
+				var args []ast.Expression
+				if name == "@@toPrimitive" {
+					args = []ast.Expression{ast.NewStringLiteral(hint, ast.Pos{})}
+				}
+				res, err := e.emitClassCall(canon, Value{Ref: v.Ref, Ty: canon}, name, args, ast.Pos{}, false)
+				if err != nil {
+					return Value{}, false, err
+				}
+				if res.Ty.IR == "void" || res.Ty.IsUndefined {
+					if hint == "number" {
+						return Value{Ref: "0x7FF8000000000000", Ty: TypeF64}, true, nil // NaN
+					}
+					return Value{Ref: "null", Ty: TypeUndefined}, true, nil
+				}
+				return res, true, nil
+			}
+			return Value{}, false, nil
+		}
+	}
 	for _, name := range order {
 		idx, fieldTy, ok := v.Ty.FieldIndex(name)
 		if !ok || !fieldTy.IsFunc {

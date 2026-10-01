@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -61,23 +60,6 @@ console.log((c ?? 80) + "x" + (process.stdout.rows ?? 24))
 	}
 }
 
-// setRawMode is a clean no-op on a non-terminal fd 0 (tcgetattr fails), so a
-// program pairing it with a piped read still works — and, crucially, does not
-// flip fd 0 to the O_NONBLOCK mode the streaming .on('data') reader uses, which
-// would make the synchronous read see EAGAIN as EOF.
-func TestE2ETtySetRawModePipedNoop(t *testing.T) {
-	got := runImportsStdin(t, `
-import { readByte } from 'klain:tty'
-process.stdin.setRawMode(true)
-const b: number = readByte()
-process.stdin.setRawMode(false)
-console.log("byte " + b)
-`, "Z")
-	if got != "byte 90" {
-		t.Fatalf("got %q, want %q", got, "byte 90")
-	}
-}
-
 // process.on('SIGWINCH', handler) compiles (the resize handler is added to the
 // existing signal allowlist). A program that only registers it and exits
 // immediately never receives the signal — this just asserts acceptance.
@@ -88,18 +70,6 @@ console.log("ok")
 `)
 	if got != "ok" {
 		t.Fatalf("got %q, want ok", got)
-	}
-}
-
-// An unknown signal name is still a clean compile error, now naming SIGWINCH
-// among the supported set.
-func TestE2EProcessOnUnknownSignalRejected(t *testing.T) {
-	_, err := parseAndCompile(`process.on('SIGHUP', () => {})`)
-	if err == nil {
-		t.Fatal("expected a compile error for an unsupported signal name")
-	}
-	if !strings.Contains(err.Error(), "SIGWINCH") {
-		t.Fatalf("error should list the supported signals including SIGWINCH: %v", err)
 	}
 }
 

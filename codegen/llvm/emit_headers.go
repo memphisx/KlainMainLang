@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"KlainMainLang/ast"
+	"KlainMainLang/parser"
 )
 
 // emitNewHeadersExpression implements `new Headers()` (empty) and
@@ -28,10 +29,51 @@ func (e *Emitter) emitNewHeadersExpression(ex *ast.NewHeadersExpression) (Value,
 	if err != nil {
 		return Value{}, err
 	}
-	if !isHeaderMapType(initVal.Ty) {
-		return Value{}, fmt.Errorf("%d:%d: Headers' init argument must be a Map<string, string>", ex.GetPos().Line, ex.GetPos().Col)
+	return e.headersFromInit(initVal, ex.GetPos())
+}
+
+// headersFromInit is a fresh Headers from a HeadersInit, as the Fetch
+// standard's `fill` takes one: a Headers or Map<string, string> (copied), a
+// plain record of string fields (`{ "Content-Type": "text/plain" }`), or a
+// sequence of [name, value] pairs (appended in order). Names are lowercased.
+// Shared by `new Headers(init)` and the `headers` of fetch's, Request's and
+// Response's init.
+func (e *Emitter) headersFromInit(v Value, pos ast.Pos) (Value, error) {
+	strMap := MapType(TypePtr, TypePtr)
+	switch {
+	case isHeaderMapType(v.Ty):
+		return e.emitHeadersFromMapValue(v)
+	case plainRecordType(v.Ty):
+		for _, f := range v.Ty.UserFields() {
+			if !isStringTy(f.Ty) || f.Ty.IsArray || f.Ty.IsObject {
+				return Value{}, fmt.Errorf("%d:%d: a headers record's values must be strings (field '%s')", pos.Line, pos.Col, f.Name)
+			}
+		}
+		d := e.emitObjectToDict(v, strMap)
+		return e.emitHeadersFromMapValue(Value{Ref: d.Ref, Ty: strMap})
+	case v.Ty.IsArray:
+		// Pairs: each appended, as a Headers' own append does.
+		arr := "__kml_hinit_" + e.freshReg()[1:]
+		hdr := arr + "_h"
+		prog, err := parser.Parse(fmt.Sprintf("for (const p of %[1]s) %[2]s.append(p[0], p[1]);", arr, hdr))
+		if err != nil || len(prog.Body) != 1 {
+			return Value{}, fmt.Errorf("%d:%d: internal: headers pairs", pos.Line, pos.Col)
+		}
+		e.ensureMapStrHelpers()
+		m := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", m))
+		hslot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", hslot))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", m, hslot))
+		e.define(hdr, Symbol{Ptr: hslot, Ty: HeadersType()})
+		// Bound as a named array (its header in a slot).
+		e.define(arr, Symbol{Ptr: e.newArrayHeaderSlotFromAggregate(v), Ty: v.Ty})
+		if err := e.emitStmt(prog.Body[0]); err != nil {
+			return Value{}, err
+		}
+		return Value{Ref: m, Ty: HeadersType()}, nil
 	}
-	return e.emitHeadersFromMapValue(initVal)
+	return Value{}, fmt.Errorf("%d:%d: headers must be a Headers, a Map<string, string>, a record of strings or [name, value] pairs", pos.Line, pos.Col)
 }
 
 // isHeaderMapType reports whether ty is a Map<string,string> — the one

@@ -1,7 +1,7 @@
 // Node's `stream/promises`: pipeline and finished as promises.
 import { Stream, promises } from 'stream';
 
-export function pipeline(...streams: Stream[]): Promise<void> {
+export function pipeline(...streams: any[]): Promise<any> {
     return promises.pipeline(...streams);
 }
 

@@ -1251,11 +1251,6 @@ func nodeReason(kind, msg string) string {
 	return normalizeReason(kind, msg)
 }
 
-func compileAndRun(src, workDir, tag string, timeout time.Duration) (bool, string) {
-	ok, reason, _, _ := compileAndRunInDir(src, workDir, tag, timeout, "", "parallel")
-	return ok, reason
-}
-
 // compileAndRunInDir is compileAndRun with an explicit working directory for the
 // *run* phase: when runDir is non-empty the compiled binary executes with its
 // cwd set there, so a program that opens a relative path (the WPT suite's

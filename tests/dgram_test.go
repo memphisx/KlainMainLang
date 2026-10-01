@@ -49,19 +49,87 @@ server.bind(8961)
 	}
 }
 
-// ADR-00581: socket.setBroadcast(flag) is a real setsockopt(SO_BROADCAST); the
-// socket stays usable and .address() still reports the bound ephemeral port.
+// socket.setBroadcast(flag) is a real setsockopt(SO_BROADCAST) on the bound
+// socket; before the bind there is no socket yet (EBADF), as in Node.
 func TestE2EDgramSetBroadcast(t *testing.T) {
 	assertOutputImports(t, `
 import dgram from 'dgram'
 const s = dgram.createSocket('udp4')
-s.setBroadcast(true)
-s.bind(0)
-const a = s.address()
-console.log(a.family, a.port > 0)
-s.setBroadcast(false)
-s.close()
-`, "IPv4 true")
+try { s.setBroadcast(true) } catch (e: any) { console.log(e.code, e.syscall) }
+s.bind(0, () => {
+  s.setBroadcast(true)
+  const a = s.address()
+  console.log(a.family, a.port > 0)
+  s.setBroadcast(false)
+  s.close()
+})
+`, "EBADF setBroadcast\nIPv4 true")
+}
+
+// Node's lib/dgram.js in TypeScript: 'listening', a send before the bind
+// completes (queued), the offset/length and list forms, connect and
+// disconnect, remoteAddress, the error codes, and 'close'.
+func TestE2EDgramSendFormsAndConnect(t *testing.T) {
+	assertOutputImports(t, `
+import dgram from 'dgram'
+const server = dgram.createSocket('udp4')
+server.on('listening', () => {
+  const a = server.address()
+  console.log('listening', a.address, a.family)
+  const client = dgram.createSocket({ type: 'udp4' })
+  client.send('hello', a.port, '127.0.0.1', (err, bytes) => {
+    console.log('sent', err, bytes)
+    client.send(Buffer.from('xxabcxx'), 2, 3, a.port, 'localhost', () => {
+      client.connect(a.port, '127.0.0.1', () => {
+        console.log('connected', client.remoteAddress().port === a.port)
+        client.send(['multi', '-part'])
+        try { client.send('x', a.port) } catch (e: any) { console.log('err', e.code) }
+        client.disconnect()
+        try { client.remoteAddress() } catch (e: any) { console.log('err2', e.code, e.message) }
+        setTimeout(() => { client.close(() => console.log('client closed')) }, 20)
+      })
+    })
+  })
+})
+let n = 0
+server.on('message', (msg, rinfo) => {
+  console.log('message', msg.toString(), rinfo.address, rinfo.family, rinfo.size)
+  if (++n === 3) server.close(() => console.log('server closed'))
+})
+server.bind(0, '127.0.0.1')
+try { dgram.createSocket('udp5' as any) } catch (e: any) { console.log(e.code, e.message) }
+const s2 = dgram.createSocket('udp4')
+s2.bind(0)
+try { s2.bind(0) } catch (e: any) { console.log(e.code) }
+s2.close()
+try { s2.close() } catch (e: any) { console.log(e.code, e.message) }
+`, "ERR_SOCKET_BAD_TYPE Bad socket type specified. Valid types are: udp4, udp6\nERR_SOCKET_ALREADY_BOUND\nERR_SOCKET_DGRAM_NOT_RUNNING Not running\nlistening 127.0.0.1 IPv4\nsent null 5\nmessage hello 127.0.0.1 IPv4 5\nconnected true\nerr2 ERR_SOCKET_DGRAM_NOT_CONNECTED Not connected\nmessage abc 127.0.0.1 IPv4 3\nmessage multi-part 127.0.0.1 IPv4 10\nserver closed\nclient closed")
+}
+
+// udp6, the TTL/multicast options, membership, and a bind conflict.
+func TestE2EDgramUdp6AndOptions(t *testing.T) {
+	assertOutputImports(t, `
+import dgram from 'dgram'
+const s6 = dgram.createSocket('udp6')
+s6.on('message', (msg, rinfo) => { console.log('v6', msg.toString(), rinfo.family, rinfo.address); s6.close() })
+s6.bind(0, '::1', () => {
+  const a = s6.address()
+  console.log('v6 bound', a.family, a.address)
+  const c = dgram.createSocket('udp6')
+  c.send('six', a.port, '::1', () => c.close())
+})
+const s = dgram.createSocket('udp4')
+s.bind(0, () => {
+  console.log('ttl', s.setTTL(64), s.setMulticastTTL(2), s.setMulticastLoopback(true))
+  s.addMembership('239.1.2.3')
+  s.dropMembership('239.1.2.3')
+  try { s.addMembership('') } catch (e: any) { console.log(e.code) }
+  const port = s.address().port
+  const t2 = dgram.createSocket('udp4')
+  t2.on('error', (e: any) => { console.log('bind error', e.code, e.syscall); t2.close(); s.close() })
+  t2.bind(port)
+})
+`, "v6 bound IPv6 ::1\nttl 64 2 true\nERR_MISSING_ARGS\nbind error EADDRINUSE bind\nv6 six IPv6 ::1")
 }
 
 // startUDPServer compiles a dgram server and waits until it responds to a

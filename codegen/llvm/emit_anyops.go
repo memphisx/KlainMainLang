@@ -156,8 +156,12 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 	// before the concat/ToNumber logic below. A non-object box passes through
 	// unchanged, and the `+` concat detection then sees the resulting primitive
 	// (a string result concatenates, a number adds), matching JS.
-	lb = Value{Ref: e.emitAnyToPrimitive(lb.Ref, false), Ty: TypeAny}
-	rb = Value{Ref: e.emitAnyToPrimitive(rb.Ref, false), Ty: TypeAny}
+	hint := hintNumber
+	if op == "+" {
+		hint = hintDefault
+	}
+	lb = Value{Ref: e.emitAnyToPrimitiveHint(lb.Ref, hint), Ty: TypeAny}
+	rb = Value{Ref: e.emitAnyToPrimitiveHint(rb.Ref, hint), Ty: TypeAny}
 
 	if op == "+" {
 		// Runtime string check: pointer range with string kind bits on either
@@ -272,6 +276,40 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(numCmpL)
+		// A bigint on either side compares by value (JS's IsLessThan).
+		e.ensureBoxedBigIntHooks()
+		e.usedAnyBigIntRel = true
+		rel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_bigint_rel(i64 %s, i64 %s)", rel, lb.Ref, rb.Ref))
+		isBigRel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", isBigRel, rel))
+		bigL, plainL := e.freshLabel("anycmp.big"), e.freshLabel("anycmp.plain")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBigRel, bigL, plainL))
+		e.emitLabel(bigL)
+		var want string
+		switch op {
+		case "<":
+			want = "1"
+		case ">":
+			want = "3"
+		}
+		br := e.freshReg()
+		if want != "" {
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, %s", br, rel, want))
+		} else {
+			// <= is less or equal, >= greater or equal; unordered is false.
+			a, b := "1", "2"
+			if op == ">=" {
+				a = "3"
+			}
+			x, y := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, %s", x, rel, a))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, %s", y, rel, b))
+			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", br, x, y))
+		}
+		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", br, resPtr))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+		e.emitLabel(plainL)
 		ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
 		var fcond string
 		switch op {

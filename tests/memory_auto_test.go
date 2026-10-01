@@ -69,6 +69,7 @@ func buildBinaryAuto(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	clangArgs = appendShape(t, em, dir, clangArgs)
 	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
 	clangArgs = appendCasemap(t, em, dir, clangArgs)
 	clangArgs = appendStringC(t, em, dir, clangArgs)

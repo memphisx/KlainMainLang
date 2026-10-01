@@ -282,3 +282,14 @@ fs.writeSync(ofd, 'opened via O_ flags')
 fs.closeSync(ofd)
 console.log(fs.readFileSync('/tmp/kml_oflags.txt', 'utf8'))  // opened via O_ flags
 fs.unlinkSync('/tmp/kml_oflags.txt')
+
+// Stats carries Node's Date getters, a recursive mkdir returns the first
+// directory it made, and readdirSync walks a tree or returns Buffers.
+const walkRoot = '/tmp/kml_fs_walk'
+fs.rmSync(walkRoot, { recursive: true, force: true })
+console.log(fs.mkdirSync(walkRoot + '/a/b', { recursive: true }) === walkRoot)  // true
+fs.writeFileSync(walkRoot + '/a/b/leaf.txt', Buffer.from('aGk=', 'base64'))
+console.log(fs.readdirSync(walkRoot, { recursive: true }))  // [ 'a', 'a/b', 'a/b/leaf.txt' ]
+console.log(fs.readdirSync(walkRoot + '/a/b', 'buffer')[0].toString('hex'))  // 6c6561662e747874
+console.log(fs.statSync(walkRoot + '/a/b/leaf.txt').mtime instanceof Date)  // true
+fs.rmSync(walkRoot, { recursive: true })

@@ -1,8 +1,8 @@
-// The http2 client (TDD-00139 Stage 3): http2.connect opens an h2c session,
-// session.request sends a body-less request (END_STREAM at submit), and the
-// response comes back through 'response'/'data'/'end' — here against the same
-// process's own http2 server, the standard Node test shape.
+// The http2 client: http2.connect opens a session, session.request sends a
+// GET (which ends its stream at once), and the response arrives through
+// 'response'/'data'/'end', here from the same process's own http2 server.
 import http2 from 'http2';
+import type { AddressInfo } from 'net';
 
 const server = http2.createServer();
 server.on('stream', (stream, headers) => {
@@ -11,7 +11,7 @@ server.on('stream', (stream, headers) => {
 });
 
 server.listen(0, () => {
-  const client = http2.connect("http://127.0.0.1:" + server.address().port);
+  const client = http2.connect("http://127.0.0.1:" + (server.address() as AddressInfo).port);
   const req = client.request({ ':path': '/thessaloniki' });
   let body = "";
   req.on('response', (headers) => {

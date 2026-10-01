@@ -170,3 +170,33 @@ const x: any = Buffer.from("hi");
 console.log(hex(x, "hex"), hex(x, "utf8"))
 `, "6869 hi")
 }
+
+// `buffer` as a module (ADR-01281): the constants, isUtf8/isAscii/transcode,
+// and namespace and default imports reaching the globals.
+func TestE2EBufferModuleExtras(t *testing.T) {
+	assertOutputImports(t, `
+import { constants, kMaxLength, kStringMaxLength, INSPECT_MAX_BYTES, isUtf8, isAscii, transcode, Buffer as B } from 'buffer'
+import * as bns from 'node:buffer'
+import buffer from 'buffer'
+console.log(constants.MAX_LENGTH, constants.MAX_STRING_LENGTH, kMaxLength, kStringMaxLength, INSPECT_MAX_BYTES)
+console.log(isUtf8(Buffer.from([0xff])), isUtf8(Buffer.from('héllo')), isUtf8(new Uint8Array([0xed, 0xa0, 0x80])), isAscii(Buffer.from('é')), isAscii(new ArrayBuffer(2)))
+console.log(transcode(Buffer.from('é'), 'utf8', 'latin1'))
+try { isUtf8('x' as any) } catch (e: any) { console.log(e.code, e.message) }
+console.log(B.from('hi').toString('hex'), bns.Buffer.from('ok').length, buffer.kMaxLength, typeof bns.isAscii, bns.atob('aGk='))
+`, `9007199254740991 536870888 9007199254740991 536870888 50
+false true false false true
+<Buffer e9>
+ERR_INVALID_ARG_TYPE The "input" argument must be an instance of ArrayBuffer, Buffer, or TypedArray. Received type string ('x')
+6869 2 9007199254740991 function hi`)
+}
+
+// `instanceof Buffer`: a Buffer is a Uint8Array subclass, decided statically
+// or from a boxed value's typed tag.
+func TestE2EBufferInstanceOf(t *testing.T) {
+	assertSameAsNode(t, `
+const b = Buffer.alloc(2); const u = new Uint8Array(2);
+const a: any = b; const au: any = u; const n: any = [1];
+console.log(b instanceof Buffer, u instanceof Buffer, b instanceof Uint8Array);
+console.log(a instanceof Buffer, au instanceof Buffer, a instanceof Uint8Array, n instanceof Buffer);
+`)
+}

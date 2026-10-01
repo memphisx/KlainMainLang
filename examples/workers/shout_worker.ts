@@ -1,5 +1,6 @@
-// Browser-shaped worker module for browser_echo.ts — ambient onmessage/
-// postMessage, no imports (compiled into the spawning example's binary).
-onmessage = (e: { data: string }) => {
-  postMessage(e.data + "!!!");
+// Browser-shaped worker module for browser_echo.ts — the worker's `self`
+// (onmessage/postMessage), no imports (compiled into the spawning example's
+// binary).
+self.onmessage = (e: { data: string }) => {
+  self.postMessage(e.data + "!!!");
 };

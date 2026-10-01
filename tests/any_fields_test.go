@@ -1,9 +1,6 @@
 package tests
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 // TDD-00208: an `any`/`unknown`-typed object or class field is a boxed slot
 // (one NaN box, box-on-write / unbox-on-read) — the field-shaped counterpart of
@@ -65,16 +62,20 @@ console.log(o.get());
 `, "1\n1")
 }
 
-// An `any` field can only be structurally coerced to another `any` field — a
-// concrete field passed where an `any` field is wanted (or vice versa) is a
-// representation mismatch (box vs raw) and is rejected cleanly, not silently
-// mis-read (TDD-00208).
-func TestE2EAnyFieldBoxingMismatchRejected(t *testing.T) {
-	mustCompileError(t, `
-function take(o: { x: any }): void { console.log(o.x); }
+// An object whose field is concrete passed where the field is `any` (or the
+// reverse) is the object itself, read through the checked view (TDD-00233):
+// a value of another kind written through it is an own property shadowing
+// the field, so the object prints as Node's does.
+func TestE2EAnyFieldBoxingThroughView(t *testing.T) {
+	assertSameAsNode(t, `
+function take(o: { x: any }): void { console.log(o.x); o.x = "s" }
 const c = { x: 5 };
 take(c);
-`, "incompatible")
+console.log(c);
+function back(o: { x: number }): number { return o.x + 1 }
+const d: { x: any } = { x: 41 }
+console.log(back(d))
+`)
 }
 
 // ADR-01059/ADR-01060: an annotated `any` module binding is a real module
@@ -94,14 +95,12 @@ console.log(f(), g(), typeof later);
 `, "[ 3, 5, 2 ] set string")
 }
 
-func TestE2EAnyAnnotatedMapRejected(t *testing.T) {
-	for _, init := range []string{"new Map<string, number>()", "new Set<number>()", "new WeakMap<object, number>()"} {
-		_, err := parseAndCompile("const m: any = " + init + ";\nfunction f() { return m; }\nconsole.log(f());\n")
-		if err == nil {
-			t.Fatalf("expected a compile error for `const m: any = %s`, got none", init)
-		}
-		if !strings.Contains(err.Error(), "cannot be declared as `any`") {
-			t.Fatalf("unexpected error for %s: %v", init, err)
-		}
-	}
+func TestE2EAnyAnnotatedCollections(t *testing.T) {
+	assertOutput(t, `
+const m: any = new Map<string, number>();
+const s: any = new Set<number>();
+const w: any = new WeakMap<object, number>();
+function f() { return [m, s, w]; }
+console.log(f());
+`, "[ Map(0) {}, Set(0) {}, WeakMap { <items unknown> } ]")
 }

@@ -86,7 +86,7 @@ try {
   console.log((e as Error).name)
   console.log((e as Error).message)
 }
-`, "AssertionError\nthe expression evaluated to a falsy value")
+`, "AssertionError\nThe expression evaluated to a falsy value:\n\n  assert.ok((1          ) === 2)")
 }
 
 func TestE2EAssertOkThrowsWithCustomMessage(t *testing.T) {
@@ -117,7 +117,7 @@ try {
 } catch (e) {
   console.log((e as Error).message)
 }
-`, "values are not equal")
+`, "1 == 2")
 }
 
 func TestE2EAssertNotEqualPassesAndThrows(t *testing.T) {
@@ -129,7 +129,7 @@ try {
 } catch (e) {
   console.log((e as Error).message)
 }
-`, "values are equal")
+`, "Expected \"actual\" to be strictly unequal to: 5")
 }
 
 func TestE2EAssertFail(t *testing.T) {
@@ -145,7 +145,7 @@ try {
 } catch (e) {
   console.log((e as Error).message)
 }
-`, "AssertionError: boom\nfailed")
+`, "AssertionError: boom\nFailed")
 }
 
 func TestE2EAssertThrowsPassesWhenFunctionThrows(t *testing.T) {
@@ -164,7 +164,7 @@ try {
 } catch (e) {
   console.log((e as Error).message)
 }
-`, "missing expected exception")
+`, "Missing expected exception.")
 }
 
 func TestE2EAssertThrowsCustomMessageOnMissingException(t *testing.T) {
@@ -175,7 +175,7 @@ try {
 } catch (e) {
   console.log((e as Error).message)
 }
-`, "expected a throw")
+`, "Missing expected exception: expected a throw")
 }
 
 // TDD-00131: assert.deepStrictEqual — recursive structural equality over
@@ -205,7 +205,7 @@ try {
   console.log("caught: " + (e as Error).message)
 }
 console.log("ok")
-`, "caught: the input did not match the regular expression\nok")
+`, "caught: The input did not match the regular expression /nope/. Input:\n\n'abc'\n\nok")
 }
 
 // assert.ifError / assert.doesNotThrow (ADR-00499).
@@ -213,12 +213,11 @@ func TestE2EAssertIfErrorAndDoesNotThrow(t *testing.T) {
 	assertOutputImports(t, `
 import assert from 'assert'
 assert.ifError(null)
-assert.ifError(0)
 assert.doesNotThrow(() => { console.log("ran clean") })
 try { assert.ifError("boom") } catch (e) { console.log("caught:", (e as Error).message) }
 try { assert.doesNotThrow(() => { throw new Error("x") }) } catch (e) { console.log("caught:", (e as Error).message) }
 console.log("done")
-`, "ran clean\ncaught: ifError got unwanted exception\ncaught: got unwanted exception\ndone")
+`, "ran clean\ncaught: ifError got unwanted exception: 'boom'\ncaught: Got unwanted exception.\nActual message: \"x\"\ndone")
 }
 
 // --- TDD-00165: importable specifiers for the Web-global-backed modules
@@ -269,19 +268,12 @@ console.log(Buffer.from("ab").length)
 `, "/p\n2")
 }
 
-func TestE2EReexportNamespaceImportRejected(t *testing.T) {
-	if _, err := parseAndCompileImports(t, `import * as t from 'timers'`); err == nil {
-		t.Fatal("expected a compile error for a namespace reexport import, got none")
-	}
-}
-
 func TestE2EReexportModuleOnlyExtraRejected(t *testing.T) {
 	// A module-only extra that is not yet built (legacy url.format, or
 	// perf_hooks.PerformanceObserver) keeps the standard "no exported member"
 	// rejection. (the legacy url.* functions are all implemented — Stage 4.)
 	for _, src := range []string{
-		`import { transcode } from 'buffer'`,
-		`import { monitorEventLoopDelay } from 'perf_hooks'`,
+		`import { resolveObjectURL } from 'buffer'`,
 	} {
 		if _, err := parseAndCompileImports(t, src); err == nil {
 			t.Fatalf("expected a compile error for an unbuilt module-only extra: %s", src)
@@ -369,14 +361,6 @@ func TestE2EReexportAliasedBufferViaMemberCall(t *testing.T) {
 import { Buffer as B } from 'buffer'
 console.log(B.from("hi").length)
 `, "2")
-}
-
-func TestE2EReexportAliasedParseTimeCtorArgcountRejected(t *testing.T) {
-	// The rebuilt constructor still enforces the built-in's arg contract.
-	if _, err := parseAndCompileImports(t, `import { EventEmitter as EE } from 'events'
-const e = new EE(1)`); err == nil {
-		t.Fatal("expected a compile error for new EventEmitter(arg) via alias, got none")
-	}
 }
 
 func TestE2EReexportAliasedParseTimeCtorLocalShadowWins(t *testing.T) {
@@ -479,8 +463,8 @@ import { fileURLToPath } from 'url'
 console.log(fileURLToPath("file:///C:/foo/bar"))
 console.log(fileURLToPath("file:///C:/foo%20bar/baz.txt"))
 console.log(fileURLToPath("file://server/share/x/y"))
-try { fileURLToPath("file:///foo/bar") } catch (e) { console.log("threw:", e.message) }
-try { fileURLToPath("file:///C:/foo%2Fbar") } catch (e) { console.log("threw:", e.message) }
+try { fileURLToPath("file:///foo/bar") } catch (e) { console.log("threw:", (e as Error).message) }
+try { fileURLToPath("file:///C:/foo%2Fbar") } catch (e) { console.log("threw:", (e as Error).message) }
 `, "C:\\foo\\bar\nC:\\foo bar\\baz.txt\n\\\\server\\share\\x\\y\nthrew: File URL path must be absolute\nthrew: File URL path must not include encoded \\ or / characters")
 		return
 	}
@@ -622,9 +606,8 @@ console.log("[" + domainToASCII("") + "]")
 `, "[example.com]\n[]")
 }
 
-// --- TDD-00166 (ADR-00673): perf_hooks PerformanceObserver. V1 dispatch is
-// synchronous (during mark/measure), so the observer output precedes later
-// straight-line output. ---
+// --- perf_hooks PerformanceObserver: entries are delivered on a later turn
+// of the loop, after the straight-line output. ---
 
 func TestE2EPerformanceObserverMeasure(t *testing.T) {
 	assertOutputImports(t, `
@@ -637,7 +620,7 @@ performance.mark('A')
 performance.mark('B')
 performance.measure('A-to-B', 'A', 'B')
 console.log("done")
-`, "measure A-to-B true\ndone")
+`, "done\nmeasure A-to-B true")
 }
 
 func TestE2EPerformanceObserverMarkAndDisconnect(t *testing.T) {
@@ -650,10 +633,12 @@ const obs = new PerformanceObserver((list) => {
 obs.observe({ entryTypes: ['mark'] })
 performance.mark('m1')
 performance.mark('m2')
-obs.disconnect()
-performance.mark('m3')
-performance.measure('x', 'm1', 'm2')
-console.log("count", count)
+setTimeout(() => {
+  obs.disconnect()
+  performance.mark('m3')
+  performance.measure('x', 'm1', 'm2')
+  setTimeout(() => console.log("count", count), 0)
+}, 0)
 `, "saw m1\nsaw m2\ncount 2")
 }
 
@@ -663,15 +648,32 @@ import { PerformanceObserver as PO } from 'perf_hooks'
 const o = new PO((l) => { console.log("n", l.getEntries().length) })
 o.observe({ entryTypes: ['mark', 'measure'] })
 performance.mark('a')
-`, "n 1")
+console.log("sync")
+`, "sync\nn 1")
 }
 
-func TestE2EPerformanceObserverBadEntryTypeRejected(t *testing.T) {
-	if _, err := parseAndCompileImports(t, `import { PerformanceObserver } from 'perf_hooks'
-const o = new PerformanceObserver((l) => {})
-o.observe({ entryTypes: ['resource'] })`); err == nil {
-		t.Fatal("expected a compile error for an unsupported entryType, got none")
-	}
+// An entry type nothing records is observed silently, as in Node.
+func TestE2EPerformanceObserverUnrecordedEntryType(t *testing.T) {
+	assertOutputImports(t, `
+import { PerformanceObserver } from 'perf_hooks'
+const o = new PerformanceObserver(() => { console.log("never") })
+o.observe({ entryTypes: ['resource'] })
+performance.mark('a')
+console.log(PerformanceObserver.supportedEntryTypes.length)
+`, "9")
+}
+
+// createHistogram and monitorEventLoopDelay (lib/node/perf_hooks.ts).
+func TestE2EPerfHooksHistograms(t *testing.T) {
+	assertOutputImports(t, `
+import { createHistogram, monitorEventLoopDelay } from 'perf_hooks'
+const h = createHistogram()
+h.record(5); h.record(10); h.record(15)
+console.log(h.count, h.min, h.max, h.mean, h.percentile(50))
+const d = monitorEventLoopDelay({ resolution: 5 })
+d.enable()
+setTimeout(() => { d.disable(); console.log("samples", d.count > 0) }, 50)
+`, "3 5 15 10 10\nsamples true")
 }
 
 // --- TDD-00167 (ADR-00675): events.once — a Promise that resolves with the
@@ -892,15 +894,49 @@ console.log(als.getStore() === undefined)
 `, "true\n-1\n0\nfalse\n0\ntrue")
 }
 
-func TestE2EAsyncLocalStorageSnapshotRejected(t *testing.T) {
-	// snapshot() returns a fully generic runner — needs generic first-class
-	// closures this compiler lacks; a clean rejection, not the ALS feature.
-	_, err := parseAndCompile(`
+// AsyncLocalStorage.snapshot() runs a function in the context it was taken
+// in; the options' name and defaultValue; AsyncResource.bind; a
+// diagnostics_channel store binding (lib/node/async_hooks.ts).
+func TestE2EAsyncLocalStorageSnapshotAndOptions(t *testing.T) {
+	assertOutputImports(t, `
+import { AsyncLocalStorage, AsyncResource } from 'async_hooks'
+import dc from 'diagnostics_channel'
+const als = new AsyncLocalStorage<{ id: number }>()
+const named = new AsyncLocalStorage<string>({ name: 'req', defaultValue: 'none' })
+console.log(named.name, named.getStore(), als.getStore())
+als.run({ id: 2 }, () => {
+  const snap = AsyncLocalStorage.snapshot()
+  const res = new AsyncResource('X')
+  const bound = res.bind(() => als.getStore()?.id)
+  als.run({ id: 3 }, () => {
+    console.log('snapshot', snap(() => als.getStore()?.id), 'bound', bound(), 'current', als.getStore()?.id)
+  })
+})
+const store = new AsyncLocalStorage<string>()
+const ch = dc.channel('stored')
+ch.bindStore(store, (m: any) => 'ctx:' + m.id)
+ch.subscribe((m: unknown) => console.log('sub', store.getStore()))
+console.log('result', ch.runStores({ id: 7 }, () => store.getStore()), store.getStore())
+`, "req none undefined\nsnapshot 2 bound 2 current 3\nsub ctx:7\nresult ctx:7 undefined")
+}
+
+// The async context carries into promise reactions (registered inside run),
+// process.nextTick, setImmediate and queueMicrotask callbacks, as in Node.
+func TestE2EAsyncLocalStoragePromiseReactionsAndTicks(t *testing.T) {
+	assertOutputImports(t, `
 import { AsyncLocalStorage } from 'async_hooks'
 const als = new AsyncLocalStorage<number>()
-const run = AsyncLocalStorage.snapshot()
-`)
-	if err == nil {
-		t.Fatal("expected AsyncLocalStorage.snapshot() to be a clean rejection")
-	}
+const p = Promise.resolve(1)
+als.run(6, () => {
+  p.then(() => console.log('then', als.getStore()))
+  Promise.reject(new Error('x')).catch(() => console.log('catch', als.getStore())).finally(() => console.log('finally', als.getStore()))
+  process.nextTick(() => console.log('tick', als.getStore()))
+  setImmediate(() => console.log('immediate', als.getStore()))
+  queueMicrotask(() => console.log('microtask', als.getStore()))
+})
+als.run(7, () => {
+  new Promise<number>((r) => setTimeout(() => r(2), 5)).then((v) => console.log('later', v, als.getStore()))
+})
+p.then(() => console.log('outside', als.getStore()))
+`, "then 6\ncatch 6\nmicrotask 6\noutside undefined\nfinally 6\ntick 6\nimmediate 6\nlater 2 7")
 }

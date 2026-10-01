@@ -792,12 +792,15 @@ console.log(JSON.stringify(ents[0]).indexOf('mode') === -1 ? 'no-mode-leak' : 'L
 	assertOutputImports(t, src, "d:dir:parent-ok, f.txt:file:parent-ok\nparentPath-enumerable\nno-mode-leak")
 }
 
-func TestE2EFsReaddirSyncWithFileTypesBadOptionRejected(t *testing.T) {
-	_, err := parseAndCompileImports(t, `import fs from 'fs'
-fs.readdirSync('.', { encoding: 'buffer' })`)
-	if err == nil {
-		t.Fatal("expected a compile error for an unsupported readdirSync option, got none")
+// readdirSync's `{ encoding: 'buffer' }` names are Buffers, as Node's.
+func TestE2EFsReaddirSyncBufferEncoding(t *testing.T) {
+	dir := tempDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
 	}
+	assertOutputImports(t, fmt.Sprintf(`import fs from 'fs'
+const names = fs.readdirSync(%q, { encoding: 'buffer' })
+console.log(Buffer.isBuffer(names[0]), names[0].toString())`, dir), "true a.txt\n")
 }
 
 // Dirent's deprecated `.path` alias was removed in Node v24 (it reads
@@ -1205,5 +1208,5 @@ function main2(): void {
   try { throw new Error('plain') } catch (e: any) { console.log(e.errno) }
 }
 main2()
-`, uvENOENT()+"\n0")
+`, uvENOENT()+"\nundefined")
 }

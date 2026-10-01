@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "32/32",
     "loosePct": 100,
-    "strict": "17/32",
-    "strictPct": 53
+    "strict": "19/32",
+    "strictPct": 59
   },
   "lede": "A two-tier object model. Statically-typed objects are fixed-shape heap structs — compile-time field offsets, real per-heap-identity Object.freeze, compile-time Object.hasOwn. Dynamic objects (any-typed values, untyped JSON, js-mode literals) are real property bags with prototype chains (Object.create, __proto__), property descriptors (defineProperty, accessors, enumerability, descriptor-backed freeze/seal), and runtime add/delete. Map and Set carry the full core API; where JS says Iterable, this compiler narrows to a concrete array, and a missing Map key reads back as a real undefined (as in Node).",
   "entries": [
@@ -90,12 +90,12 @@
       "id": "object.values",
       "name": "Object.values(obj)",
       "statusRow": "Object.values(obj)",
-      "signature": "Object.values(obj): string[]",
+      "signature": "Object.values(obj): V[]",
       "badge": "exact",
-      "description": "Returns a string[] of each field value converted to a string, in declaration order.",
+      "description": "Returns each own field's value in declaration order: a typed V[] when every field has type V, an any[] for a mixed shape or an interface-typed value.",
       "returns": {
-        "type": "string[]",
-        "desc": "Field values, stringified."
+        "type": "V[]",
+        "desc": "Field values."
       },
       "exampleKey": "objects/object_static",
       "snippet": "for (const v of Object.values(person)) {\n  console.log(v)\n}",
@@ -111,17 +111,17 @@
       "id": "object.entries",
       "name": "Object.entries(obj)",
       "statusRow": "Object.entries(obj)",
-      "signature": "Object.entries(obj): [string, string][]",
+      "signature": "Object.entries(obj): [string, V][]",
       "badge": "caveats",
-      "description": "Returns a real [string, string][] tuple array; destructure with for (const [k, v] of Object.entries(obj)).",
+      "description": "Returns real [string, V] tuples ([string, any] for a mixed shape or an interface-typed value); destructure with for (const [k, v] of Object.entries(obj)).",
       "returns": {
-        "type": "[string, string][]",
+        "type": "[string, V][]",
         "desc": "Field name/value tuples."
       },
       "exampleKey": "objects/object_static",
       "snippet": "for (const [key, value] of Object.entries(dims)) {\n  console.log(key + ': ' + value)\n}",
       "differences": [
-        "Values are stringified — a heterogeneous object's value type is a union not yet representable"
+        "On a static array (Object.entries([7, 8])) it is a compile-time rejection"
       ],
       "seeAlso": [
         "object.keys",
@@ -174,7 +174,7 @@
       "statusRow": "Object.defineProperty / getOwnPropertyDescriptor / getOwnPropertyNames / accessors (dynamic objects)",
       "signature": "Object.defineProperty(o, \"k\", { value: 1, enumerable: false });\nconst d = Object.getOwnPropertyDescriptor(o, \"k\");\nconst t = { get x() { return this._x; }, set x(v) { this._x = v; } };",
       "badge": "implemented",
-      "description": "Real property descriptors on dynamic (any-typed, or js-mode untyped-literal) objects: defineProperty with the spec's create defaults and non-configurable redefinition rules, getOwnPropertyDescriptor in both data and accessor forms, getOwnPropertyNames including non-enumerables, and object-literal get/set accessors invoked with the original receiver — inherited getters through the prototype chain included. Object.keys, for...in, and JSON.stringify honor enumerability (stringify and spread invoke getters), and rejected writes or deletes throw the module-strict JS TypeErrors. Object.freeze/seal/preventExtensions enforce through the same attributes, with truthful isFrozen/isSealed/isExtensible. Statically-typed structs have no descriptor table; Object.defineProperties is a follow-on.",
+      "description": "Real property descriptors on dynamic (any-typed, or js-mode untyped-literal) objects: defineProperty with the spec's create defaults and non-configurable redefinition rules, getOwnPropertyDescriptor in both data and accessor forms, getOwnPropertyNames including non-enumerables, and object-literal get/set accessors invoked with the original receiver — inherited getters through the prototype chain included. Object.keys, for...in, and JSON.stringify honor enumerability (stringify and spread invoke getters), and rejected writes or deletes throw the module-strict JS TypeErrors. Object.freeze/seal/preventExtensions enforce through the same attributes, with truthful isFrozen/isSealed/isExtensible. Object.defineProperties defines each key of its second argument the same way, and functions carry descriptors too. Statically-typed structs have no descriptor table.",
       "seeAlso": [
         "object.create",
         "object.freeze"
@@ -408,12 +408,12 @@
       "id": "map.entries",
       "name": "Map.entries()",
       "statusRow": "Map.entries()",
-      "signature": "m.entries(): [K, V][]",
+      "signature": "m.entries(): MapIterator<[K, V]>",
       "badge": "exact",
-      "description": "Returns a real [K, V][] tuple array; iterate with for (const [k, v] of m.entries()).",
+      "description": "Returns a live Map Iterator of [K, V] tuples: next(), toArray(), for...of, spread and Array.from. An entry added before the iterator reaches it is visited, a deleted one is not; keys() and values() work the same way.",
       "returns": {
-        "type": "[K, V][]",
-        "desc": "Key/value tuples."
+        "type": "MapIterator<[K, V]>",
+        "desc": "A live iterator over the entries."
       },
       "exampleKey": "map/map",
       "snippet": "for (const [key, value] of lookup.entries()) {\n  console.log(key + \" = \" + value);\n}",
@@ -464,14 +464,12 @@
       "id": "map.new",
       "name": "new Map(entries)",
       "statusRow": "new Map(entries)",
-      "signature": "new Map(entries: [K, V][]): Map<K, V>",
-      "badge": "caveats",
-      "description": "K/V are inferred from the entries when no <K, V> is given; duplicate keys resolve last-wins; the entries source may be a bare literal or an already-declared [K, V][] variable.",
+      "signature": "new Map(iterable?: Iterable<[K, V]>): Map<K, V>",
+      "badge": "exact",
+      "description": "Takes any iterable of [key, value] pairs — an array, another Map, an iterator, a generator or an object with [Symbol.iterator]. K/V are inferred from the entries when no <K, V> is given; duplicate keys resolve last-wins.",
       "exampleKey": "map/map",
       "snippet": "const prices = new Map([[\"pen\", 2], [\"notebook\", 5], [\"eraser\", 1]]);\nconsole.log(prices.get(\"notebook\")); // 5",
-      "differences": [
-        "Accepts only a `[K, V][]` array of 2-tuples, narrowed from the spec's `Iterable<[K, V]>` — the only iterable/pair concept a general expression has here"
-      ],
+      "differences": [],
       "seeAlso": [
         "map.core",
         "set.new"
@@ -484,14 +482,12 @@
       "id": "set.new",
       "name": "new Set(iterable)",
       "statusRow": "new Set(iterable)",
-      "signature": "new Set(iterable: T[]): Set<T>",
-      "badge": "caveats",
-      "description": "Pre-populates a set from an array, collapsing duplicates. K/V type inferred from the elements, or given explicitly with <T>.",
+      "signature": "new Set(iterable?: Iterable<T>): Set<T>",
+      "badge": "exact",
+      "description": "Pre-populates a set from any iterable — an array, another Set, an iterator, a generator or an object with [Symbol.iterator] — collapsing duplicates. The element type is inferred from the elements, or given explicitly with <T>.",
       "exampleKey": "set/set",
       "snippet": "const fromLiteral = new Set([1, 2, 3, 2, 1]);\nconsole.log(fromLiteral.size); // 3",
-      "differences": [
-        "Accepts only an array expression, narrowed from the spec's `Iterable<T>` — the only iterable concept a general expression has here"
-      ],
+      "differences": [],
       "seeAlso": [
         "set.core",
         "map.new"

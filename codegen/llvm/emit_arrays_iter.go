@@ -9,6 +9,9 @@ func (e *Emitter) emitArrayKeys(mem *ast.MemberExpression, args []ast.Expression
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: keys takes no arguments", pos.Line, pos.Col)
 	}
+	if arrayIterable(e.inferExprType(mem.Object)) {
+		return e.emitArrayIterOpen(mem.Object, mapIterKeys)
+	}
 	_, lenReg, _, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
@@ -58,6 +61,9 @@ func (e *Emitter) emitArrayValues(mem *ast.MemberExpression, args []ast.Expressi
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: values takes no arguments", pos.Line, pos.Col)
 	}
+	if arrayIterable(e.inferExprType(mem.Object)) {
+		return e.emitArrayIterOpen(mem.Object, mapIterValues)
+	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
@@ -78,6 +84,9 @@ func (e *Emitter) emitArrayValues(mem *ast.MemberExpression, args []ast.Expressi
 func (e *Emitter) emitArrayEntries(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: entries takes no arguments", pos.Line, pos.Col)
+	}
+	if arrayIterable(e.inferExprType(mem.Object)) {
+		return e.emitArrayIterOpen(mem.Object, mapIterEntries)
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
@@ -191,10 +200,10 @@ func (e *Emitter) emitArrayOf(args []ast.Expression, pos ast.Pos) (Value, error)
 }
 
 // emitStringToCharArray materializes a string Value into a `string[]` whose
-// elements are its characters — one per byte, this compiler's string model
-// (ADR-00482). Shared by Array.from(string) and `for (const ch of str)`
-// (ADR-00535). Each character is a length-prefixed 1-byte string via
-// emitStringExtract.
+// elements are its code points, as a string's iterator yields them (each a
+// length-prefixed string of that code point's UTF-8 bytes, via
+// emitStringExtract). Shared by Array.from(string), `[...str]` and
+// `for (const ch of str)` (ADR-00535, ADR-01188).
 func (e *Emitter) emitStringToCharArray(v Value) Value {
 	e.ensureStrlen()
 	e.ensureMalloc()
@@ -207,6 +216,9 @@ func (e *Emitter) emitStringToCharArray(v Value) Value {
 	idxPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+	outPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", outPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", outPtr))
 	condL := e.freshLabel("strfrom.cond")
 	bodyL := e.freshLabel("strfrom.body")
 	endL := e.freshLabel("strfrom.end")
@@ -219,19 +231,59 @@ func (e *Emitter) emitStringToCharArray(v Value) Value {
 	e.emitLabel(bodyL)
 	i2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i2, idxPtr))
-	ch := e.emitStringExtract(v.Ref, i2, "1")
+	n := e.emitUTF8SeqLen(v.Ref, i2, sLen)
+	ch := e.emitStringExtract(v.Ref, i2, n)
+	j := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", j, outPtr))
 	slot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slot, buf, i2))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slot, buf, j))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ch.Ref, slot))
+	j2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", j2, j))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", j2, outPtr))
 	i3 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", i3, i2))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", i3, i2, n))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i3, idxPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(endL)
+	count := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", count, outPtr))
 	r0, r1 := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, buf))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, sLen))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, count))
 	return Value{Ref: r1, Ty: ArrayOf(TypePtr)}
+}
+
+// emitUTF8SeqLen is the byte length of the UTF-8 sequence starting at byte
+// i of s (length sLen): 1 for ASCII, 2–4 from the lead byte, 1 for a stray
+// continuation byte, never past the end — one code point, the unit a
+// string's iterator yields.
+func (e *Emitter) emitUTF8SeqLen(s, i, sLen string) string {
+	p := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", p, s, i))
+	b := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", b, p))
+	b32 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i64", b32, b))
+	m2, m3, m4 := e.freshReg(), e.freshReg(), e.freshReg()
+	t2, t3, t4 := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, 224", m2, b32))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 192", t2, m2))
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, 240", m3, b32))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 224", t3, m3))
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, 248", m4, b32))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 240", t4, m4))
+	s4, s3, s2 := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 4, i64 1", s4, t4))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 3, i64 %s", s3, t3, s4))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 2, i64 %s", s2, t2, s3))
+	rem := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", rem, sLen, i))
+	over := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", over, s2, rem))
+	n := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", n, over, rem, s2))
+	return n
 }
 
 // emitArrayFrom implements Array.from(iterable): the array-like overload
@@ -286,6 +338,33 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 	}
 
+	// An Array, Map or Set iterator: the rest of its elements.
+	if srcTy.IsCollIter {
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitCollIterDrain(v), nil
+	}
+
+	// A value held in `any`, or a static object or class instance with a
+	// [Symbol.iterator] member: its elements at run time.
+	if isUnconstrainedDynamic(srcTy) || e.hasIteratorMember(srcTy) || (srcTy.IsGenerator && !srcTy.GeneratorIsAsync) {
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		arr, err := e.emitAnyArrayFrom(v)
+		if err != nil {
+			return Value{}, err
+		}
+		// A generator's values have its declared element type.
+		if srcTy.IsGenerator && srcTy.GeneratorElemType != nil && !srcTy.GeneratorElemType.IsDynamic {
+			return e.emitUnboxAnyArray(arr, *srcTy.GeneratorElemType)
+		}
+		return arr, nil
+	}
+
 	// Map → entries ([K, V][] tuple array), Set → elements, string → its
 	// characters (per byte, this compiler's string model) — ADR-00482.
 	if srcTy.IsMap && !srcTy.IsSet {
@@ -293,7 +372,7 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		if err != nil {
 			return Value{}, err
 		}
-		return e.emitMapCall(srcTy, v.Ref, "entries", nil, pos)
+		return e.emitMapMethod(srcTy, v.Ref, "entries", nil, pos)
 	}
 	if srcTy.IsSet {
 		v, err := e.emitExpr(args[0])
@@ -315,16 +394,28 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 	// array of that many `undefined` elements — the ubiquitous
 	// `Array.from({ length: n }, (_, i) => …)` idiom (via the 2-arg desugar
 	// above, whose map callback sees each `undefined` element and its index).
-	// Indexed array-like properties (`{ length: 2, 0: 'a' }`) are NOT read —
-	// this is the undefined-fill subset (documented limitation); the element
-	// universe is the NaN-boxed `any` slot, so an omitted element is the boxed
-	// `undefined` sentinel, matching a real hole read.
+	// An object with other properties (`{ length: 2, 0: 'a' }`) is read
+	// through its indexes at run time; a bare `{ length }` fills with the
+	// boxed `undefined`, as a real hole read gives.
 	if srcTy.IsObject && !srcTy.IsArray && !srcTy.IsClass && !srcTy.IsTuple {
 		idx, lenFieldTy, ok := srcTy.FieldIndex("length")
 		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: Array.from argument is not iterable (an array-like object needs a numeric 'length' property)", pos.Line, pos.Col)
+			// No `length`: ToLength(undefined) is 0, an empty array.
+			if _, err := e.emitExpr(args[0]); err != nil {
+				return Value{}, err
+			}
+			return e.emitEmptyAnyArray(), nil
 		}
-		if lenFieldTy.IsArray || lenFieldTy.IR == "ptr" || lenFieldTy.IsDynamic {
+		// An array-like with properties besides `length` (`{ length: 2, 0:
+		// 'a' }`): its indexed reads, at run time.
+		if len(srcTy.Fields) > 1 || lenFieldTy.IsDynamic {
+			v, err := e.emitExpr(args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitAnyArrayFrom(v)
+		}
+		if lenFieldTy.IsArray || lenFieldTy.IR == "ptr" {
 			return Value{}, fmt.Errorf("%d:%d: Array.from array-like 'length' must be a number", pos.Line, pos.Col)
 		}
 		v, err := e.emitExpr(args[0])

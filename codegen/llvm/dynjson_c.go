@@ -26,6 +26,7 @@ func (e *Emitter) ensureDynJSONC() {
 		return
 	}
 	e.usedDynJSONC = true
+	e.ensureShapeRuntime()  // a static object renders through its layout row (TDD-00233)
 	e.ensureDtoa()          // dynjson.c calls __kml_dtoa for float rendering
 	e.ensureInspectReduce() // and the util.inspect layout/quote helpers (ADR-01067)
 	// The any-array element helpers (ADR-01059) call ToPrimitive/ToNumber and
@@ -45,5 +46,11 @@ func (e *Emitter) ensureDynJSONC() {
 	e.emitGlobal(`declare ptr @__kml_buffer_inspect(ptr, i64)`)    // a Buffer's `<Buffer 68 69>` form
 	// ADR-01059: element access through an `any` holding a boxed static array.
 	e.emitGlobal(`declare i64 @__kml_anyarr_get_by_key(ptr, ptr)`)
+	e.emitGlobal(`declare ptr @__kml_anyarr_words(ptr)`)
+	e.emitGlobal(`declare ptr @__kml_anyarr_flat(ptr, i64, i64)`)
+	e.emitGlobal(`declare ptr @__kml_received(i64)`)
+	e.emitGlobal(`declare i64 @__kml_anyarr_len(ptr)`)
+	e.emitGlobal(`declare i32 @__kml_anyarr_typed_is(ptr, ptr)`)
+	e.emitGlobal(`declare i32 @__kml_anyarr_set_by_key(ptr, ptr, i64)`)
 	e.emitGlobal(`declare ptr @__kml_any_arraylike_f64(i64, ptr)`)
 }

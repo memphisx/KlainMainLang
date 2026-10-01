@@ -210,7 +210,7 @@ func (e *Emitter) resolveRegexReplacer(args []ast.Expression, pos ast.Pos) (rege
 			hints = make([]Type, 0, nCap+3)
 			hints = append(hints, TypePtr) // match
 			for i := 0; i < nCap; i++ {
-				hints = append(hints, TypePtr) // capture group (string)
+				hints = append(hints, undefinedableElem(TypePtr)) // capture group: undefined when unmatched
 			}
 			hints = append(hints, TypeI64, TypePtr) // offset, whole string
 			maxArity = nCap + 3
@@ -294,7 +294,7 @@ func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, 
 			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", gep, matchPtr, i))
 			capReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", capReg, gep))
-			cbArgs = append(cbArgs, Value{Ref: capReg, Ty: TypePtr})
+			cbArgs = append(cbArgs, Value{Ref: capReg, Ty: undefinedableElem(TypePtr)}) // null: an unmatched group
 		}
 		if len(cbArgs) < arity {
 			cbArgs = append(cbArgs, offsetArg())
@@ -377,8 +377,9 @@ func (e *Emitter) emitRegexExpandTemplate(templateVal, match Value) (replPtr, re
 	e.emitLabel(sumBodyL)
 	sumElemGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", sumElemGep, dataPtr, sumIdx))
-	sumElemPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", sumElemPtr, sumElemGep))
+	sumElemRaw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", sumElemRaw, sumElemGep))
+	sumElemPtr := e.emitUnmatchedGroupAsEmpty(sumElemRaw)
 	sumElemLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", sumElemLen, sumElemPtr))
 	curSum := e.freshReg()
@@ -411,8 +412,9 @@ func (e *Emitter) emitRegexExpandTemplate(templateVal, match Value) (replPtr, re
 	copyGroup := func(groupIdxReg string) {
 		elemGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", elemGep, dataPtr, groupIdxReg))
-		elemPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", elemPtr, elemGep))
+		elemRaw := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", elemRaw, elemGep))
+		elemPtr := e.emitUnmatchedGroupAsEmpty(elemRaw)
 		elemLen := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", elemLen, elemPtr))
 		curDst := e.freshReg()
@@ -936,4 +938,13 @@ func (e *Emitter) emitRegexReplace(strVal Value, args []ast.Expression, pos ast.
 	final := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", final, resultSlot))
 	return Value{Ref: final, Ty: TypePtr}, nil
+}
+
+// emitUnmatchedGroupAsEmpty is a match array's group for a replacement
+// template: an unmatched group (null, undefined) splices as "".
+func (e *Emitter) emitUnmatchedGroupAsEmpty(p string) string {
+	isNull, r := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, p))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isNull, e.internString(""), p))
+	return r
 }

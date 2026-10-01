@@ -26,10 +26,8 @@
           {
             "feature": "`ffi.dlopen(path, definitions?)` → `{ lib, functions }`",
             "status": "implemented",
-            "caveats": [
-              "`definitions` must be an object literal — signatures are resolved at compile time (a runtime-computed signature has no AOT lowering)"
-            ],
             "notes": [
+              "`lib/node/ffi.ts` over libffi ([ADR-01306](../adr/ADR-01306.md)): definitions are ordinary values, checked when requested; a failing definition closes the library, as in Node",
               "The `path` may be any runtime string, or `null` for the current process image"
             ]
           },
@@ -37,7 +35,8 @@
             "feature": "`new DynamicLibrary(path)` / `lib.close()` / `ffi.dlclose(lib)`",
             "status": "implemented",
             "caveats": [
-              "`using` declarations and `[Symbol.dispose]()` are not supported yet — explicit `.close()` is the disposal path (close is idempotent, as in Node)"
+              "`console.log(lib)` shows `DynamicLibrary {}` where Node shows its own accessors (`{ path: [Getter], symbols: [Getter] }`): a class instance here cannot carry own accessor properties",
+              "`using` declarations are not parsed yet; `lib[Symbol.dispose]()` and `close()` dispose"
             ],
             "notes": [
               "`close()` is idempotent; afterwards every call, lookup and accumulator read throws `ERR_FFI_LIBRARY_CLOSED` (`path` still reads — `''` for a `null` open), as in Node"
@@ -46,9 +45,6 @@
           {
             "feature": "`lib.getFunction(name, signature)` / `lib.getFunctions(definitions)`",
             "status": "implemented",
-            "caveats": [
-              "`signature` must be a compile-time object literal (same reason as `dlopen` definitions)"
-            ],
             "notes": [
               "A bound function is a function object: `typeof` is `'function'`, `name`/`length`, an own `pointer` bigint, one identity per symbol per library (`getFunction`/`getFunctions`/`lib.functions` hand out the same one), and util.inspect's `[Function: abs] { pointer: … }`",
               "Re-requesting a symbol with a different libffi signature throws Node's `ERR_INVALID_ARG_VALUE`; aliases and the whole pointer family compare equal, as in Node. An invalid static signature (unknown type, a `void` argument, non-array `arguments`) is Node's runtime `TypeError`, and keys other than `arguments`/`return` are ignored"
@@ -85,9 +81,10 @@
             "feature": "`library.registerCallback([sig,] cb)` / `unregisterCallback(ptr)` / `refCallback` / `unrefCallback`",
             "status": "implemented",
             "caveats": [
-              "At most 16 concurrently-live callbacks per signature shape (static per-signature trampoline families — no runtime codegen); exceeding it throws, unregistered slots recycle. This is a deliberate divergence-by-necessity: Node's libffi closures have no such limit (verified against a real `--experimental-ffi` build), but an unbounded closure model needs runtime codegen this backend does not do",
-              "64-bit/pointer/`string` parameters must be declared `bigint` (a `string` callback parameter is the raw `char*` pointer, as in Node) — validated with a clear compile-time error",
-              "`refCallback`/`unrefCallback` are validated no-ops (a registered callback is always strongly referenced here), and `library.close()` does not invalidate callbacks — unregister explicitly; Node's same-thread/no-throw/no-promise runtime rules are not enforced"
+              "`refCallback`/`unrefCallback` are validated no-ops (a registered callback is always strongly referenced here), and `library.close()` does not invalidate callbacks — unregister explicitly; an exception a callback throws is reported as uncaught once the foreign call returns"
+            ],
+            "notes": [
+              "A libffi closure per callback (`ffi_closure_alloc`), any number live at once; arguments arrive and the result returns with the same marshalling as calls"
             ]
           },
           {

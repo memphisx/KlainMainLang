@@ -1,9 +1,10 @@
-// The http2 core streams API (TDD-00139 Stage 2): server.on('stream') hands
-// each request to a (stream, headers) handler — pseudo-headers read straight
-// off the headers map, stream.respond sets :status + response headers,
-// stream.end sends the body. Try it with:
+// The http2 core API: server.on('stream') hands each request to a
+// (stream, headers) handler, with the pseudo-headers in the headers object;
+// stream.respond sends :status and the response headers, stream.end the body.
+// Try it with:
 //   curl --http2-prior-knowledge http://127.0.0.1:8631/kalimera
 import http2 from 'http2';
+import type { AddressInfo } from 'net';
 
 const server = http2.createServer();
 
@@ -13,6 +14,6 @@ server.on('stream', (stream, headers) => {
 });
 
 server.listen(8631, () => {
-  console.log("h2 streams server on", server.address().port);
+  console.log("h2 streams server on", (server.address() as AddressInfo).port);
   setTimeout(() => { server.close(); }, 150);
 });

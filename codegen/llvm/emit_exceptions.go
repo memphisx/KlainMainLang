@@ -132,7 +132,7 @@ var errorObjType = func() Type {
 	optStr := TypePtr
 	optStr.Nullable, optStr.IsUndefined = true, true
 	ty := ObjectType([]Field{
-		{Name: "kind", Ty: TypeI64},
+		{Name: ClassTagField, Ty: TypeI64}, // the kind, flagged: the header word
 		{Name: "message", Ty: TypePtr},
 		{Name: "name", Ty: TypePtr},
 		{Name: "code", Ty: optStr},
@@ -205,7 +205,7 @@ func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
 	e.ensureExceptionHelpers()
 
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, errorObjType.StructSize()))
+	e.emitObjMallocInto(dataReg, errorObjType)
 
 	kindGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), dataReg))
@@ -372,20 +372,15 @@ func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 		return e.emitNewAggregateError(ne)
 	}
 
-	var msgPtr string
+	msgPtr := e.internString("")
 	if ne.Message != nil {
 		msgVal, err := e.emitExpr(ne.Message)
 		if err != nil {
 			return Value{}, err
 		}
-		msgVal = e.coerce(msgVal, TypePtr)
-		msgPtr = msgVal.Ref
-	} else if ne.Kind == "DOMException" {
-		// `new DOMException()` defaults message to the empty string, not the
-		// kind name (the other kinds default to their own name as the message).
-		msgPtr = e.internString("")
-	} else {
-		msgPtr = e.internString(ne.Kind)
+		if msgPtr, err = e.emitErrorMessage(msgVal); err != nil {
+			return Value{}, err
+		}
 	}
 
 	// DOMException's `.name` is the second constructor argument (default
@@ -501,6 +496,36 @@ func (e *Emitter) errorPtrFromValue(val Value) (string, error) {
 	if val.Ty.IsObject {
 		return val.Ref, nil
 	}
+	// A dynamic value holding an Error is that Error; any other value is
+	// wrapped as below.
+	if isUnconstrainedDynamic(val.Ty) {
+		tag, payload := e.emitUnboxTagPayload(val)
+		res := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", res))
+		isObj := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+		probeL, wrapL, doneL := e.freshLabel("errval.probe"), e.freshLabel("errval.wrap"), e.freshLabel("errval.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, probeL, wrapL))
+		e.emitLabel(probeL)
+		objPtr, isErr := e.emitBoxedErrorProbe(payload)
+		keepL := e.freshLabel("errval.keep")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isErr, keepL, wrapL))
+		e.emitLabel(keepL)
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", objPtr, res))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(wrapL)
+		strVal, err := e.emitValueToString(val)
+		if err != nil {
+			return "", err
+		}
+		w := e.buildErrorObj(0, strVal.Ref, e.internString("Error"))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", w, res))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		out := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, res))
+		return out, nil
+	}
 	strVal, err := e.emitValueToString(val)
 	if err != nil {
 		return "", err
@@ -570,6 +595,7 @@ func (e *Emitter) emitPendingFinallys() error {
 type pendingExit struct {
 	popHandler bool
 	body       []ast.Statement
+	native     func() // IR to emit instead of a body (a live Map/Set loop's iterator close)
 }
 
 // emitTry emits a try/catch/finally statement using setjmp/longjmp.
@@ -795,4 +821,53 @@ func flatCatchPattern(ps []ast.DestructProp) bool {
 		}
 	}
 	return true
+}
+
+// emitErrorMessage is an Error constructor's message argument as the
+// message it sets: `undefined` sets none (the empty string), anything else
+// its ToString (`null` is "null").
+func (e *Emitter) emitErrorMessage(v Value) (string, error) {
+	switch {
+	case v.Ty.IsUndefined && !v.Ty.Nullable:
+		return e.internString(""), nil
+	case v.Ty.IsDynamic:
+		tag, _ := e.emitUnboxTagPayload(v)
+		isU := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isU, tag, kmlTagUndefined))
+		s, err := e.emitValueToString(v)
+		if err != nil {
+			return "", err
+		}
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isU, e.internString(""), s.Ref))
+		return r, nil
+	case isStringTy(v.Ty) && v.Ty.Nullable:
+		// An absent `string | undefined` is undefined; a `string | null` null.
+		absent := "null"
+		if v.Ty.IsUndefined {
+			absent = ""
+		}
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, e.ptrIsNull(v.Ref), e.internString(absent), v.Ref))
+		return r, nil
+	case isStringTy(v.Ty):
+		return v.Ref, nil
+	}
+	s, err := e.emitValueToString(v)
+	if err != nil {
+		return "", err
+	}
+	return s.Ref, nil
+}
+
+// emitThrowCoded throws a new `kind` error (Error, TypeError, RangeError…)
+// with the message and Node's `code`.
+func (e *Emitter) emitThrowCoded(kind, code, msgPtr string) {
+	e.ensureExceptionHelpers()
+	errReg := e.buildErrorObj(errorKindIDs[kind], msgPtr, e.internString(kind))
+	codeGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", codeGep, errorObjType.StructIR(), errReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(code), codeGep))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.emitTerminator("unreachable")
 }

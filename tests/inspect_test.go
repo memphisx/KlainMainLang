@@ -67,13 +67,13 @@ console.log(deep)
 }
 
 func TestE2EInspectStringCoercionStrict(t *testing.T) {
-	// -compat=strict (default): string coercion uses the same useful view, never
-	// [object Object].
+	// -compat=strict (default) converts as JavaScript does: an object without
+	// its own toString is Object.prototype.toString's [object Object].
 	assertOutput(t, `
 class Foo { x: number = 1; }
 console.log(`+"`v=${new Foo()}`"+`)
 console.log("" + new Foo())
-`, "v=Foo { x: 1 }\nFoo { x: 1 }")
+`, "v=[object Object]\n[object Object]")
 }
 
 func TestE2EInspectArrays(t *testing.T) {

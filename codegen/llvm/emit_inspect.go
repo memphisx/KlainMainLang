@@ -46,8 +46,7 @@ func isInspectableObject(ty Type) bool {
 		!ty.IsMap && !ty.IsSet && !ty.IsGroupMap &&
 		!ty.IsURL && !ty.IsURLSearchParams && !ty.IsHeaders &&
 		!ty.IsResponse && !ty.IsRequest && !ty.IsFetchRequest && !ty.IsXHR &&
-		!ty.IsEventEmitter && !ty.IsEventSource && !ty.IsWebSocketClient &&
-		!ty.IsWSConnection && !ty.IsTextEncoder && !ty.IsTextDecoder &&
+		!ty.IsTextEncoder && !ty.IsTextDecoder &&
 		!ty.IsRegExp && !ty.IsTypedArray && !ty.IsArrayBuffer && !ty.IsDataView
 }
 
@@ -57,6 +56,26 @@ func isInspectableObject(ty Type) bool {
 // `[Array]`/`[Function]` placeholders (this compiler has no array-to-string yet
 // — console.log(array) is itself unsupported).
 func (e *Emitter) emitInspectObject(val Value, depth int) (Value, error) {
+	// An object of another layout behind a structural type prints as the
+	// object it is (TDD-00233).
+	if isRecordView(val.Ty) && !val.Ty.Nullable {
+		return e.emitRecordSplit(val, TypePtr,
+			func(v Value) (Value, error) { return e.emitInspectObjectOwn(v, depth) },
+			func(box Value) (Value, error) { return e.emitDynamicInspectAt(box, depth) })
+	}
+	if extraCandidate(val.Ty) {
+		return e.emitExtraSplit(val, TypePtr,
+			func(v Value) (Value, error) { return e.emitInspectObjectOwn(v, depth) },
+			func(obj string) string {
+				return fmt.Sprintf("call ptr @__kml_obj_inspect_dyn(ptr %s, i64 %d)", obj, depth)
+			})
+	}
+	return e.emitInspectObjectOwn(val, depth)
+}
+
+// emitInspectObjectOwn is emitInspectObject reading val at its static
+// type's layout.
+func (e *Emitter) emitInspectObjectOwn(val Value, depth int) (Value, error) {
 	// A class-typed field carries a name-only placeholder ClassType (no fields);
 	// canonicalize to the full field-bearing type so nested instances render
 	// their fields, not an empty `Point {}`.
@@ -70,11 +89,6 @@ func (e *Emitter) emitInspectObject(val Value, depth int) (Value, error) {
 	}
 	if val.Ty.IsNullProtoObject {
 		name = "[Object: null prototype] "
-	}
-	// A DynamicLibrary shows Node's own-accessor form (its path/symbols are
-	// getters on the instance).
-	if val.Ty.IsFFILibrary {
-		return Value{Ref: e.internString("DynamicLibrary { path: [Getter], symbols: [Getter] }"), Ty: TypePtr}, nil
 	}
 	fields := esOrderedFields(val.Ty.VisibleFields()) // ES key order (Node)
 	if len(fields) == 0 {
@@ -267,6 +281,32 @@ func (e *Emitter) emitInspectArray(val Value, depth int) (Value, error) {
 	e.emitInstr(fmt.Sprintf("call void @__kml_inspect_push_more(ptr %s, i64 %s)", list, rest))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", endL))
 	e.emitLabel(endL)
+	// An exec() result lists its own index, input and groups after its
+	// elements: `[ 'a', index: 0, input: 'ab', groups: undefined ]`.
+	if val.Ty.ExecArray && val.ArrayHeader != "" {
+		for _, prop := range []string{"index", "input", "groups"} {
+			ty, off, _ := execArrayMemberType(prop)
+			gep, r := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", gep, val.ArrayHeader, off))
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", r, ty.IR, gep))
+			var fv Value
+			var err error
+			if prop == "groups" {
+				// undefined when the pattern names no group.
+				fv, err = e.emitInspectNullablePtr(Value{Ref: r, Ty: ty}, func(g Value) (Value, error) { return e.emitInspectField(g, depth+1) })
+			} else {
+				fv, err = e.emitInspectField(Value{Ref: r, Ty: ty}, depth+1)
+			}
+			if err != nil {
+				return Value{}, err
+			}
+			entry, err := e.emitStringConcat(Value{Ref: e.internString(prop + ": "), Ty: TypePtr}, fv)
+			if err != nil {
+				return Value{}, err
+			}
+			e.inspectPush(list, entry)
+		}
+	}
 	// Node right-aligns the columns of a number/bigint array, left-aligns others.
 	numeric := (elemTy.Float || elemTy.IsInteger()) && elemTy.IR != "i1" && !elemTy.IsDynamic || val.Ty.BigIntElem || elemTy.IsBigInt
 	res := e.inspectEnd(list, e.internString("["), e.internString("]"), depth, true, numeric).Ref
@@ -397,13 +437,10 @@ func (e *Emitter) emitInspectSet(val Value, depth int) (Value, error) {
 	if val.Ty.MapKey != nil {
 		elemTy = *val.Ty.MapKey
 	}
-	strElem := isStringTy(elemTy)
+	suffix, _ := mapRuntime(elemTy)
 	keysRes := e.freshReg()
-	if strElem {
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_keys(ptr %s)", keysRes, val.Ref))
-	} else {
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_num_keys(ptr %s)", keysRes, val.Ref))
-	}
+	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", keysRes, suffix, val.Ref))
+	keysRes = e.materializeKeysAggregate(keysRes, elemTy)
 	keysPtr := e.freshReg()
 	keysLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", keysPtr, keysRes))
@@ -440,6 +477,12 @@ func (e *Emitter) emitInspectCollection(name, lenReg string, depth int, render f
 	if err != nil {
 		return Value{}, err
 	}
+	return e.emitInspectListBody(open, lenReg, depth, render)
+}
+
+// emitInspectListBody renders lenReg elements after open, as `open e0, e1 }`
+// (or `open}` when there are none).
+func (e *Emitter) emitInspectListBody(open Value, lenReg string, depth int, render func(idxVal string) (Value, error)) (Value, error) {
 	nonempty := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", nonempty, e.icmpNe(lenReg, "0")))
 	list := e.inspectBegin(depth, nonempty)
@@ -478,8 +521,11 @@ func (e *Emitter) emitInspectCollection(name, lenReg string, depth int, render f
 // strings single-quoted, bigints with the `n` suffix, nested objects recursed —
 // distinct from the top-level bare formatting emitValueToString produces.
 func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
+	if v.Ty.NullAndUndef {
+		return e.renderThreeState(v, func(p Value) (Value, error) { return e.emitInspectField(p, depth) })
+	}
 	switch {
-	case isSelfDescribingBox(v.Ty):
+	case isSelfDescribingBox(v.Ty) || inspectsByTag(v.Ty):
 		// A boxed element (`any[]`, `(number | string)[]`) renders by its run-time
 		// tag: a string is quoted like any other nested string, the rest inspect.
 		s, err := e.emitDynamicInspectAt(v, depth)
@@ -509,6 +555,11 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 		return Value{Ref: out, Ty: TypePtr}, nil
 	case v.Ty.IsBigInt:
 		return e.emitBigIntToString(v, true) // `10n`, like Node inspect
+	case v.Ty.IsRegExp && v.Ty.IsObject && !v.Ty.Nullable && !v.Ty.IsDynamic:
+		// util.inspect shows a RegExp as its toString, `/a+/g`.
+		return e.emitValueToString(v)
+	case v.Ty.IsURL && !v.Ty.Nullable && !v.Ty.IsDynamic:
+		return e.emitInspectURL(v, depth)
 	case isInspectableObject(v.Ty):
 		// Past the depth cap Node prints `[Object]` — except an empty object,
 		// whose `{}` early return precedes its depth check (ADR-01067).
@@ -527,6 +578,9 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 			return e.emitInspectNullablePtr(v, func(b Value) (Value, error) { return e.emitInspectTuple(b, depth) })
 		}
 		return e.emitInspectTuple(v, depth)
+	case isInspectHost(v.Ty):
+		s, _, err := e.emitInspectHost(v, depth)
+		return s, err
 	case v.Ty.IsDynamicObject:
 		// An index-signature dictionary is a plain object.
 		bag, err := e.emitDictToBag(v)
@@ -534,6 +588,18 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 			return Value{}, err
 		}
 		return e.emitInspectField(bag, depth)
+	case v.Ty.IsWeakRef:
+		if depth > e.effectiveInspectDepth() {
+			return Value{Ref: e.internString("[WeakRef]"), Ty: TypePtr}, nil
+		}
+		return Value{Ref: e.internString("WeakRef {}"), Ty: TypePtr}, nil
+	case v.Ty.Weak && (v.Ty.IsMap || v.Ty.IsSet):
+		// A weak collection's entries are not observable.
+		name := hostClassName(v.Ty)
+		if depth > e.effectiveInspectDepth() {
+			return Value{Ref: e.internString("[" + name + "]"), Ty: TypePtr}, nil
+		}
+		return Value{Ref: e.internString(name + " { <items unknown> }"), Ty: TypePtr}, nil
 	case v.Ty.IsMap:
 		if depth > e.effectiveInspectDepth() {
 			return Value{Ref: e.internString("[Map]"), Ty: TypePtr}, nil
@@ -544,6 +610,8 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 			return Value{Ref: e.internString("[Set]"), Ty: TypePtr}, nil
 		}
 		return e.emitInspectSet(v, depth)
+	case v.Ty.IsCollIter:
+		return e.emitInspectCollIter(v, depth)
 	case v.Ty.IsBuffer:
 		return e.emitInspectBuffer(v)
 	case v.Ty.IsObject:
@@ -571,7 +639,7 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 			isAbsent := e.emitArrayIsAbsent(v)
 			base := v.Ty
 			base.Nullable, base.IsUndefined = false, false
-			arr, err := e.emitInspectArray(Value{Ref: v.Ref, Ty: base}, depth)
+			arr, err := e.emitInspectArray(Value{Ref: v.Ref, Ty: base, ArrayHeader: v.ArrayHeader}, depth)
 			if err != nil {
 				return Value{}, err
 			}
@@ -583,8 +651,6 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 		return e.emitInspectArray(v, depth)
 	case v.Ty.IsFunc:
 		return e.emitInspectFunc(v), nil
-	case v.Ty.IsFFIFunction:
-		return e.emitInspectFFIFunc(v, depth), nil
 	case v.Ty.IsNull:
 		return e.emitValueToString(v) // null / undefined, unquoted
 	case isStringTy(v.Ty):
@@ -604,8 +670,11 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 		sel := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, e.ptrIsNull(v.Ref), e.internString(word), quoted.Ref))
 		return Value{Ref: sel, Ty: TypePtr}, nil
+	case v.Ty.IsDate && v.Ty.IR == "i64" && !v.Ty.Nullable:
+		// util.inspect shows a Date as its toISOString, Invalid Date as such.
+		return e.emitDateOrInvalid(v, e.emitDateToISOString)
 	default:
-		s, err := e.emitValueToString(v) // number / bool / symbol / date
+		s, err := e.emitValueToString(v) // number / bool / symbol
 		if err != nil {
 			return Value{}, err
 		}
@@ -626,4 +695,86 @@ func (e *Emitter) emitInspectArrayPastDepth(v Value) Value {
 	sel := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, e.icmpNe(lenReg, "0"), e.internString("[Array]"), e.internString("[]")))
 	return Value{Ref: sel, Ty: TypePtr}
+}
+
+// inspectsByTag reports a union whose every member renders from its box: a
+// scalar, an array, or an object with a header word (its layout row names
+// its fields, TDD-00230 phase 5).
+func inspectsByTag(ty Type) bool {
+	if !ty.IsDynamic || len(ty.UnionMembers) == 0 {
+		return false
+	}
+	for _, m := range ty.UnionMembers {
+		if scalarTypeKind(m) != "" || m.IsArray || m.IsNull || m.IsUndefined {
+			continue
+		}
+		if m.IsObject && hasObjHeader(m) && !m.IsError && !isInspectHost(m) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// urlInspectOrder is the order Node's URL [util.inspect.custom] lists its
+// properties in.
+var urlInspectOrder = []string{"href", "origin", "protocol", "username", "password", "host", "hostname",
+	"port", "pathname", "search", "searchParams", "hash"}
+
+// emitInspectURL renders a URL as Node does: `URL { href: '…', … }`.
+func (e *Emitter) emitInspectURL(v Value, depth int) (Value, error) {
+	if depth > e.effectiveInspectDepth() {
+		// Its [util.inspect.custom] returns the URL itself past the depth,
+		// which has no own properties.
+		return Value{Ref: e.internString("URL {}"), Ty: TypePtr}, nil
+	}
+	list := e.inspectBegin(depth, "1")
+	for _, name := range urlInspectOrder {
+		_, fty, ok := v.Ty.FieldIndex(name)
+		if !ok {
+			continue
+		}
+		_, fv := e.emitFieldPresent(v.Ref, v.Ty, Field{Name: name, Ty: fty})
+		var str Value
+		if name == "searchParams" {
+			// The custom inspector re-inspects its properties with the
+			// caller's `depth` option: below 1, the URLSearchParams is past it.
+			rendered, err := e.emitInspectField(fv, depth+1)
+			if err != nil {
+				return Value{}, err
+			}
+			e.ensureInspectReduce()
+			e.declareInspectOptDepth()
+			opt, low := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_inspect_opt_depth, align 8", opt))
+			e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 1", low, opt))
+			if e.effectiveInspectDepth() < 1 {
+				low = "true"
+			}
+			sel := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, low, e.internString("[Object]"), rendered.Ref))
+			str = Value{Ref: sel, Ty: TypePtr}
+		} else {
+			var err error
+			if str, err = e.emitInspectField(fv, depth+1); err != nil {
+				return Value{}, err
+			}
+		}
+		entry, err := e.emitStringConcat(Value{Ref: e.internString(name + ": "), Ty: TypePtr}, str)
+		if err != nil {
+			return Value{}, err
+		}
+		e.inspectPush(list, entry)
+	}
+	return e.inspectEnd(list, e.internString("URL {"), e.internString("}"), depth, false, false), nil
+}
+
+// declareInspectOptDepth declares util.inspect's run-time `depth` option
+// (inspect_reduce.c) exactly once.
+func (e *Emitter) declareInspectOptDepth() {
+	if e.fnDecls["@__kml_inspect_opt_depth"] {
+		return
+	}
+	e.fnDecls["@__kml_inspect_opt_depth"] = true
+	e.emitGlobal("@__kml_inspect_opt_depth = external global i64")
 }

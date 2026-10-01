@@ -3082,3 +3082,27 @@ show(2)
 		t.Fatalf("want TS2684, got %v", err)
 	}
 }
+
+// An assignment expression's value is the value stored, typed as its target
+// (`b += c` on a string is a string), so an arrow returning it returns that.
+func TestE2EAssignmentExpressionValueType(t *testing.T) {
+	assertSameAsNode(t, `
+let b = ""
+let n = 1
+const f = (c: any) => b += c
+const g = (x: number) => n *= x
+const h = (s: string) => (b = s)
+console.log(f("a"), g(3), h("z"), b, n)
+let o: string | undefined
+const k = () => o ??= "d"
+console.log(k(), o)
+`)
+	assertSameAsNodeImports(t, `
+import http from 'http'
+const srv = http.createServer((req, res) => { res.end("x") })
+srv.listen(0, () => {
+  const port = (srv.address() as { port: number }).port
+  http.get("http://127.0.0.1:" + port + "/", (r) => { let b = ""; r.on("data", (c) => b += c); r.on("end", () => { console.log(b); srv.close() }) })
+})
+`)
+}

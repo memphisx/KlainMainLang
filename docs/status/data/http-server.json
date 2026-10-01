@@ -31,7 +31,7 @@
             "feature": "`http.createServer((req, res) => …).listen(port[, cb])` — real Node shape",
             "status": "implemented",
             "caveats": [
-              "Windows keeps the earlier code-generated server (the TCP handles are POSIX sockets)"
+              "On Windows the TCP handles are compile-checked, not yet run"
             ],
             "notes": [
               "Node's `_http_common`/`_http_incoming`/`_http_outgoing`/`_http_server` ported to TypeScript (`lib/node/internal_http.ts`) over `net` and a native HTTP/1 parser with llhttp's strict rules and `HPE_*` codes: `req` is an `IncomingMessage` (a Readable — `'data'`/`'end'`, `pipe`, `for await`, `headers`/`rawHeaders`/`trailers`), `res` a `ServerResponse` (`writeHead`/`setHeader`/`appendHeader`/`getHeader(s)`/`write`/`end`/`flushHeaders`/`writeContinue`, chunked or `Content-Length`, back-pressure and `'drain'`), keep-alive and pipelining, `Date`, `requireHostHeader`'s 400 ([ADR-01170](../adr/ADR-01170.md))",

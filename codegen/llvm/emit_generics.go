@@ -56,6 +56,12 @@ func mangleTypeArg(t Type) (string, error) {
 	if t.IsObject && !t.IsDynamicObject && !t.IsMap && !t.IsSet && !t.IsGroupMap && !t.IsDynamic {
 		return mangleObjectStructural(t)
 	}
+	// `any` (and `unknown`): the instantiation's T slots are NaN-boxed values,
+	// as any `any`-typed code (`class C<T = any>` constructed without type
+	// arguments takes this).
+	if isUnconstrainedDynamic(t) {
+		return "any", nil
+	}
 	if t.IsMap || t.IsSet || t.IsPromise || t.IsFunc || t.IsDynamicObject || t.IsGroupMap || t.IsDynamic {
 		return "", fmt.Errorf("type argument is not supported in V1 (only number, string, boolean, arrays of these, and object/class types)")
 	}
@@ -139,11 +145,21 @@ func (e *Emitter) substituteGenericType(ta *ast.TypeAnnotation, subs map[string]
 		return TypeVoid
 	}
 	if concrete, ok := subs[ta.Name]; ok {
+		// `T | undefined`: the reference's own absence carries over.
+		// (as resolveType's type-parameter scope does).
+		if ta.Nullable {
+			concrete.Nullable = true
+			concrete.IsUndefined = ta.Undefined
+		}
 		return concrete
 	}
 	for typeParam, concrete := range subs {
 		if ta.Name == typeParam+"[]" {
-			return ArrayOf(concrete)
+			t := ArrayOf(concrete)
+			if ta.Nullable {
+				t.Nullable, t.IsUndefined = true, ta.Undefined
+			}
+			return t
 		}
 	}
 	// Anything deeper (`Promise<T>`, `Map<string, T>`, `T[][]`, a closure type
@@ -250,9 +266,15 @@ func genericFuncTypeParamIndex(decl *ast.FunctionDeclaration) map[string]generic
 func (e *Emitter) inferGenericCallConcreteTypes(decl *ast.FunctionDeclaration, args []ast.Expression) (subs map[string]Type, missing string, ok bool) {
 	positions := genericFuncTypeParamIndex(decl)
 	subs = make(map[string]Type, len(decl.TypeParams))
-	for _, typeParam := range decl.TypeParams {
+	for i, typeParam := range decl.TypeParams {
 		pos, found := positions[typeParam]
 		if !found || pos.Idx >= len(args) {
+			// Nothing at the call site infers it: its default, as in tsc
+			// (`function f<T = void>(v?: T)` called as `f()`).
+			if i < len(decl.TypeParamDefaults) && decl.TypeParamDefaults[i] != nil {
+				subs[typeParam] = e.resolveType(decl.TypeParamDefaults[i])
+				continue
+			}
 			return nil, typeParam, false
 		}
 		// inferExprType has no *ast.ArrayLiteral case of its own (see
@@ -446,11 +468,34 @@ func (e *Emitter) instantiateGenericInterface(decl *ast.InterfaceDeclaration, su
 		fty := e.substituteGenericType(f.Type, subs)
 		// `name?: T` widens to `T | undefined` (TDD-00187 Stage 2).
 		if f.Optional {
+			fty = optionalFieldType(fty)
+		}
+		fields[i] = Field{Name: f.Name, Ty: fty, Optional: f.Optional}
+	}
+	fields = e.withMethodFields(fields, decl.Methods, func(t *ast.TypeAnnotation) Type { return e.substituteGenericType(t, subs) })
+	return ObjectType(fields)
+}
+
+// withMethodFields appends an interface's method signatures as
+// function-typed members (TDD-00233), as TypeScript types them; a name a
+// property already has, or an overload's later signature, adds nothing.
+func (e *Emitter) withMethodFields(fields []Field, methods []ast.InterfaceMethodSig, resolve func(*ast.TypeAnnotation) Type) []Field {
+	seen := map[string]bool{}
+	for _, f := range fields {
+		seen[f.Name] = true
+	}
+	for _, m := range methods {
+		if seen[m.Name] || m.Type == nil {
+			continue
+		}
+		seen[m.Name] = true
+		fty := resolve(m.Type)
+		if m.Optional {
 			fty = undefinedableElem(fty)
 		}
-		fields[i] = Field{Name: f.Name, Ty: fty}
+		fields = append(fields, Field{Name: m.Name, Ty: fty, Optional: m.Optional})
 	}
-	return ObjectType(fields)
+	return fields
 }
 
 // genericClassMangledFields is the pure (no IR emission, no e.classes/
@@ -466,7 +511,7 @@ func (e *Emitter) genericClassMangledFields(decl *ast.ClassDeclaration, subs map
 	mangled := decl.Name + "__" + suffix
 	var ownFields []Field
 	for _, f := range decl.Fields {
-		if f.Name == ClassTagField || f.Name == ClassVTableField || f.Name == ClassEventEmitterField {
+		if f.Name == ClassTagField || f.Name == ClassVTableField {
 			return "", nil, fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal runtime state", decl.GetPos().Line, decl.GetPos().Col, decl.Name, f.Name)
 		}
 		// An unannotated field (`x = expr`, TDD-00063 Stage 1) has no type to
@@ -477,7 +522,7 @@ func (e *Emitter) genericClassMangledFields(decl *ast.ClassDeclaration, subs map
 			fty = e.substituteGenericType(f.Type, subs)
 			// `tag?: T` widens to `T | undefined` (TDD-00187 Stage 2).
 			if f.Optional {
-				fty = undefinedableElem(fty)
+				fty = optionalFieldType(fty)
 			}
 		} else {
 			fty = e.inferExprType(f.Initializer)
@@ -501,14 +546,14 @@ func (e *Emitter) genericClassInstanceType(decl *ast.ClassDeclaration, subs map[
 	if err != nil {
 		return Type{}, err
 	}
-	return ClassType(mangled, nil, ownFields, false, false), nil
+	return ClassType(mangled, nil, ownFields, false), nil
 }
 
 // instantiateGenericClass builds and emits (on first use) a full,
 // independent ClassInfo for decl specialized at subs, and returns its
 // mangled name. Memoized via e.classes. Scoped-down relative to a plain
-// class (registerClasses/emitClassDecl): no inheritance, vtable, static
-// members, or EventEmitter mixin — registerClasses already rejects those on
+// class (registerClasses/emitClassDecl): no inheritance, vtable or static
+// members — registerClasses already rejects those on
 // any generic class declaration before it ever reaches here (see its own
 // validation), so this only ever needs to handle fields + constructor +
 // instance methods.
@@ -520,7 +565,7 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 	if _, ok := e.classes[mangled]; ok {
 		return mangled, nil
 	}
-	ty := ClassType(mangled, nil, ownFields, false, false)
+	ty := ClassType(mangled, nil, ownFields, false)
 	e.interfaces[mangled] = ty
 
 	info := ClassInfo{
@@ -532,7 +577,7 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 		MethodSigs:              make(map[string]FuncSig),
 		MethodImplementor:       make(map[string]string),
 		MethodDispatchSlot:      make(map[string]*MethodSlot),
-		TagID:                   e.nextClassTagID,
+		TagID:                   e.allocTypeID(),
 		RootClass:               mangled,
 		FieldOrigin:             make(map[string]string),
 		StaticFieldTypes:        make(map[string]Type),
@@ -541,7 +586,6 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 		StaticMethodSigs:        make(map[string]FuncSig),
 		StaticMethodImplementor: make(map[string]string),
 	}
-	e.nextClassTagID++
 	for _, f := range decl.Fields {
 		info.FieldOrigin[f.Name] = mangled
 	}
@@ -578,11 +622,14 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 	}
 
 	for _, m := range decl.Methods {
-		if _, dup := info.MethodSigs[m.Name]; dup {
+		key := genericMethodKey(m)
+		if _, dup := info.MethodSigs[key]; dup {
 			return "", fmt.Errorf("%d:%d: class '%s' declares more than one method named '%s'", m.GetPos().Line, m.GetPos().Col, decl.Name, m.Name)
 		}
 		sig := e.buildGenericParamSig(m.Params, subs)
-		if m.ReturnType != nil {
+		if m.AccessorKind == "set" {
+			sig.RetType = TypeVoid // a setter's result is discarded
+		} else if m.ReturnType != nil {
 			sig.RetType = e.substituteGenericType(m.ReturnType, subs)
 		} else {
 			sig.RetType = TypeVoid
@@ -593,19 +640,23 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 			}
 			e.popScope()
 		}
-		info.MethodImplementor[m.Name] = mangled
-		info.MethodSigs[m.Name] = sig
-		info.Methods[m.Name] = m
-		info.MethodOrder = append(info.MethodOrder, m.Name)
+		info.MethodImplementor[key] = mangled
+		info.MethodSigs[key] = sig
+		info.Methods[key] = m
+		info.MethodOrder = append(info.MethodOrder, key)
 	}
 
 	// Register before emitting bodies — guards a method/constructor that
 	// constructs another instance of the same instantiation recursively,
 	// the same way instantiateGenericFunc registers its signature first.
 	e.classes[mangled] = info
-	if err := e.emitClassDeclAs(decl, mangled, info); err != nil {
+	// The members' bodies see the type arguments (`x as T`, a local's `T[]`),
+	// as a generic function's body does.
+	var emitErr error
+	e.withTypeParamScope(subs, func() { emitErr = e.emitClassDeclAs(decl, mangled, info) })
+	if emitErr != nil {
 		delete(e.classes, mangled)
-		return "", err
+		return "", emitErr
 	}
 	return mangled, nil
 }
@@ -634,8 +685,9 @@ func (e *Emitter) emitClassDeclAs(decl *ast.ClassDeclaration, llvmName string, i
 		if m.IsGenerator {
 			return fmt.Errorf("%d:%d: generator method '%s' on class '%s' is not yet supported", m.GetPos().Line, m.GetPos().Col, m.Name, decl.Name)
 		}
-		sig := info.MethodSigs[m.Name]
-		memberName := llvmSafeSymbol(llvmName + "_" + m.Name)
+		key := genericMethodKey(m)
+		sig := info.MethodSigs[key]
+		memberName := llvmSafeSymbol(llvmName + "_" + key)
 		if err := e.emitClassMember(memberName, info.Ty, m.Params, sig, m.Body, sig.RetType, m.GetPos(), false, m.IsAsync); err != nil {
 			return err
 		}
@@ -657,4 +709,34 @@ func (e *Emitter) explicitGenericSubs(decl *ast.FunctionDeclaration, typeArgs []
 		subs[tp] = e.resolveType(typeArgs[i])
 	}
 	return subs, true
+}
+
+// classTypeArgs is the type argument list a `new C<…>(…)` of the generic
+// class decl instantiates it with: the explicit ones, then each omitted
+// parameter's default (`class C<T = any>`). ok is false when an omitted
+// parameter has no default.
+func classTypeArgs(decl *ast.ClassDeclaration, explicit []*ast.TypeAnnotation) (args []*ast.TypeAnnotation, ok bool) {
+	args = explicit
+	for i := len(args); i < len(decl.TypeParams); i++ {
+		if i >= len(decl.TypeParamDefaults) || decl.TypeParamDefaults[i] == nil {
+			return nil, false
+		}
+		args = append(args[:i:i], decl.TypeParamDefaults[i])
+	}
+	return args, len(args) == len(decl.TypeParams)
+}
+
+// genericArgsOK reports whether classTypeArgs completes explicit.
+func genericArgsOK(decl *ast.ClassDeclaration, explicit []*ast.TypeAnnotation) bool {
+	_, ok := classTypeArgs(decl, explicit)
+	return ok
+}
+
+// genericMethodKey is a generic class member's dispatch key, as
+// registerClasses keys a class's: an accessor under accessorMethodName.
+func genericMethodKey(m *ast.FunctionDeclaration) string {
+	if m.AccessorKind != "" {
+		return accessorMethodName(m.AccessorKind, m.Name)
+	}
+	return m.Name
 }

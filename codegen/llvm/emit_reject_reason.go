@@ -129,7 +129,11 @@ func (e *Emitter) emitValueToCaughtParts(val Value) (tag, pay string, err error)
 		return "", "", berr
 	}
 	t, p := e.emitUnboxTagPayload(boxed)
-	return t, p, nil
+	// An Error held in `any` is the Error itself, as a throw of it is.
+	e.ensureExceptionHelpers()
+	t2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_caught_tag(i8 %s, i64 %s)", t2, t, p))
+	return t2, p, nil
 }
 
 // storeRejectReason writes a caught value's (tag, payload) into a task promise's

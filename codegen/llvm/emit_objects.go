@@ -96,6 +96,55 @@ func (e *Emitter) emitObjectLiteral(lit *ast.ObjectLiteral) (Value, error) {
 // `[1, 2, 3]` passed into a `float64[]`-typed slot gets every element
 // coerced to double rather than left as the literal's own self-inferred i64.
 func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value, error) {
+	// A wrapper returning its callback (`mustCall((req, res) => …)`) in a
+	// function slot: the literal takes the slot's parameter types, as tsc
+	// infers the wrapper's T from the context, and the result is that
+	// function again.
+	fnHint := hint
+	if !fnHint.IsFunc || fnHint.IsDynamic {
+		fnHint = Type{}
+		for _, m := range hint.UnionMembers {
+			if m.IsFunc && !m.IsDynamic {
+				fnHint = m
+			}
+		}
+	}
+	if call, ok := expr.(*ast.CallExpression); ok && fnHint.IsFunc && !fnHint.FuncHasRest && len(call.Args) > 0 && e.isIdentityWrapperCall(call) {
+		hint := fnHint
+		var inner Value
+		var err error
+		switch fn := call.Args[0].(type) {
+		case *ast.ArrowFunction:
+			inner, err = e.emitArrowFunctionWithHints(fn, hint.FuncParams)
+		case *ast.FunctionExpression:
+			inner, err = e.emitFunctionExpression(fn, hint.FuncParams)
+		default:
+			goto plain
+		}
+		if err != nil {
+			return Value{}, err
+		}
+		{
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", inner.Ref, slot))
+			name := "__kml_wrapped_cb" + slot[1:]
+			e.define(name, Symbol{Ptr: slot, Ty: inner.Ty})
+			args := append([]ast.Expression{ast.NewIdentifier(name, call.GetPos())}, call.Args[1:]...)
+			v, err := e.emitExpr(ast.NewCallExpression(call.Callee, args, call.GetPos()))
+			if err != nil {
+				return Value{}, err
+			}
+			if v.Ty.IsFunc {
+				return v, nil
+			}
+			if c, ok := e.emitAnyToClosure(e.coerce(v, TypeAny), hint); ok {
+				return c, nil
+			}
+			return v, nil
+		}
+	}
+plain:
 	// An array literal where a union with one array member is expected is
 	// built as that member (`["a", 2]` for `string | (string | number)[]`).
 	if lit, ok := expr.(*ast.ArrayLiteral); ok && hint.IsDynamic && len(hint.UnionMembers) > 0 {
@@ -142,33 +191,6 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 	if hint.IsDynamic {
 		if _, ok := e.nullableScalarLValue(expr); ok {
 			return e.emitPreserveNullableOperand(expr)
-		}
-	}
-	// `mustCall(fn)` (the test module) into a function slot: fn takes the
-	// slot's parameter types, as tsc infers mustCall's T from the context.
-	if call, ok := expr.(*ast.CallExpression); ok && len(call.Args) >= 1 {
-		if mem, ok := call.Callee.(*ast.MemberExpression); ok {
-			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "test__kml_builtin" {
-				switch mem.Property {
-				case "mustCall", "mustCallAtLeast", "mustSucceed", "mustNotCall":
-					fnHint := hint
-					if !fnHint.IsFunc {
-						fnHint = Type{}
-						for _, m := range hint.UnionMembers {
-							if m.IsFunc {
-								fnHint = m
-							}
-						}
-					}
-					if fnHint.IsFunc {
-						prev := e.mustCallFnHint
-						e.mustCallFnHint = &fnHint
-						v, err := e.emitExpr(expr)
-						e.mustCallFnHint = prev
-						return v, err
-					}
-				}
-			}
 		}
 	}
 	// A literal bound into a union slot is built as the union's member of
@@ -282,10 +304,10 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 	// literals, just for the one other literal-like expression kind
 	// (arrow functions) that can carry an unannotated parameter needing
 	// outside context to resolve correctly. Found missing while wiring
-	// EventSource's `.onmessage` handler (TDD-00038 Stage 1): without this,
+	// an `.onmessage` handler (TDD-00038 Stage 1): without this,
 	// an unannotated `ev` defaulted to plain `number` (ADR-00042), so
 	// `ev.data` failed to compile as "field access on non-object" — a real,
-	// pre-existing gap confirmed directly against a plain, EventSource-
+	// pre-existing gap confirmed directly against a plain, handler-
 	// unrelated `let cb: (b: Box) => void = (b) => b.value` snippet too.
 	if af, ok := expr.(*ast.ArrowFunction); ok && hint.IsFunc {
 		return e.emitClosureAgainstHint(e.emitArrowFunctionWithHints(af, contextParamHints(hint, af.Params)))(hint, af.GetPos())
@@ -303,7 +325,7 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 		v = e.emitUnboxBoxToType(v.Ref, hint)
 	}
 	if err == nil && needsObjectRelayout(v.Ty, hint) {
-		v = e.emitObjectRelayout(v, hint)
+		v = e.emitObjectAsRecord(v, hint)
 	}
 	return v, err
 }
@@ -324,6 +346,11 @@ func (e *Emitter) emitClosureAgainstHint(v Value, err error) func(hint Type, pos
 		// an adapter.
 		if needed, supported := funcAdapterPlan(v.Ty, hint); needed && supported {
 			if adapted, ok := e.emitClosureAdapter(v, hint); ok {
+				return adapted, nil
+			}
+		} else if needed || (v.Ty.FuncThis && !hint.FuncThis) {
+			// A conversion the direct adapter does not take: through the box.
+			if adapted, ok := e.emitBoxedClosureAs(v, hint); ok {
 				return adapted, nil
 			}
 		}
@@ -436,25 +463,43 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 			if !srcVal.Ty.IsObject {
 				return Value{}, fmt.Errorf("%d:%d: spread in object literal requires an object value", spread.GetPos().Line, spread.GetPos().Col)
 			}
-			srcStructIR := srcVal.Ty.StructIR()
+			// `{ ...undefined }` / `{ ...null }` copies nothing: an absent
+			// optional source leaves its (optional) fields absent.
+			skipL := ""
+			if srcVal.Ty.Nullable || srcVal.Ty.IsNull {
+				isNull := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, srcVal.Ref))
+				copyL := e.freshLabel("objspread.copy")
+				skipL = e.freshLabel("objspread.skip")
+				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, skipL, copyL))
+				e.emitLabel(copyL)
+			}
 			for _, f := range srcVal.Ty.VisibleFields() {
+				// Only the source's own properties are copied: an absent
+				// optional field leaves the target's value (an earlier
+				// property's) as it is. Object spread is a shallow copy, so an
+				// array field shares the same array (header), as in JS.
 				srcIdx, _, _ := srcVal.Ty.FieldIndex(f.Name)
-				srcGep := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", srcGep, srcStructIR, srcVal.Ref, srcIdx))
-				// An array field slot holds a header pointer (TDD-00213 Stage 2):
-				// deref for the aggregate + header. Object spread is a shallow copy,
-				// so the new object shares the same array (header) — matching JS.
-				var fv Value
-				if f.Ty.IsArray {
-					fv = e.loadArrayFieldValue(srcGep, f.Ty)
-				} else {
-					loadReg := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(f.Ty), srcGep, f.Ty.Align()))
-					fv = Value{Ref: loadReg, Ty: f.Ty}
+				srcGep := e.emitRecordGep(srcVal.Ref, srcVal.Ty, srcIdx, f.Ty, f.Name)
+				present, fv := e.emitFieldPresentAt(srcGep, f)
+				doneL := ""
+				if present != "true" {
+					storeL := e.freshLabel("objspread.field")
+					doneL = e.freshLabel("objspread.next")
+					e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, storeL, doneL))
+					e.emitLabel(storeL)
 				}
 				if err := storeField(f.Name, fv); err != nil {
 					return Value{}, err
 				}
+				if doneL != "" {
+					e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+					e.emitLabel(doneL)
+				}
+			}
+			if skipL != "" {
+				e.emitTerminator(fmt.Sprintf("br label %%%s", skipL))
+				e.emitLabel(skipL)
 			}
 			continue
 		}
@@ -679,8 +724,10 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 // var-decl emitters (scalar/object/array) share this one detector and each store
 // the returned value in their own slot format.
 func (e *Emitter) emitDeclJSONProjection(expr ast.Expression, ty Type) (Value, bool, error) {
+	awaited := false
 	if aw, ok := expr.(*ast.AwaitExpression); ok {
 		expr = aw.Argument
+		awaited = true
 	}
 	ce, ok := expr.(*ast.CallExpression)
 	if !ok {
@@ -694,7 +741,21 @@ func (e *Emitter) emitDeclJSONProjection(expr ast.Expression, ty Type) (Value, b
 		val, err := e.emitJSONParse(ce.Args, ty, ce.GetPos())
 		return val, true, err
 	}
-	if mem.Property == "json" && e.inferExprType(mem.Object).IsResponse {
+	if mem.Property == "json" && hasBodyMixin(e.inferExprType(mem.Object)) {
+		if awaited && len(ce.Args) == 0 {
+			// `await res.json()`: the lazy body promise parsed into ty, awaited
+			// — the body may still be arriving, or be a stream.
+			objVal, err := e.emitExpr(mem.Object)
+			if err != nil {
+				return Value{}, true, err
+			}
+			prom, err := e.emitResponseCall(objVal, "json", ce.GetPos(), ty)
+			if err != nil {
+				return Value{}, true, err
+			}
+			val, err := e.emitAwaitTaskPromise(prom.Ref, ty)
+			return val, true, err
+		}
 		val, err := e.emitResponseJSON(mem.Object, ty, ce.GetPos())
 		return val, true, err
 	}
@@ -820,6 +881,13 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		if err != nil {
 			return err
 		}
+		if ty.IsDynamicObject && plainRecordType(val.Ty) {
+			val = e.coerce(val, ty) // its fields become the dictionary's entries
+		} else if val.Ty.IsDynamic && ty.IsClass || ty.NullAndUndef {
+			// An `any` result (an implementation signature) into a class
+			// binding: the instance, unboxed; null into a three-state one.
+			val = e.coerce(val, ty)
+		}
 		storeObj(val.Ref)
 		return nil
 
@@ -843,6 +911,9 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		val, err := e.emitExprWithObjectHint(init, ty)
 		if err != nil {
 			return err
+		}
+		if val.Ty.IsDynamic && !ty.IsDynamic || ty.IsDynamicObject && plainRecordType(val.Ty) || ty.NullAndUndef {
+			val = e.coerce(val, ty) // converted to the declared layout
 		}
 		storeObj(val.Ref)
 		return nil
@@ -944,8 +1015,7 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			if prop.Default != nil {
 				return fmt.Errorf("%d:%d: a default value on a nested destructuring pattern is not yet supported", pos.Line, pos.Col)
 			}
-			fieldGep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", fieldGep, structIR, objPtr, idx))
+			fieldGep := e.emitRecordGep(objPtr, objTy, idx, fieldTy, prop.Key)
 			if prop.SubArray != nil {
 				if !fieldTy.IsArray || fieldTy.ElemType == nil {
 					return fmt.Errorf("%d:%d: cannot array-destructure non-array field '%s'", pos.Line, pos.Col, prop.Key)
@@ -971,11 +1041,15 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			continue
 		}
 
+		if prop.Default != nil && !fieldTy.IsUndefined {
+			// A default replaces only undefined, which this field never holds
+			// (a `T | null` field keeps its null); the default is not evaluated.
+			prop.Default = nil
+		}
 		if prop.Default != nil && !(fieldTy.Nullable && fieldTy.IR == "ptr") && !isNullableScalar(fieldTy) {
 			return fmt.Errorf("%d:%d: a destructuring default requires field '%s' to be nullable/optional (T | null, T | undefined, or `key?: T`) — no other field type has a reliable way to tell a real value apart from 'not provided'", pos.Line, pos.Col, prop.Key)
 		}
-		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, objPtr, idx))
+		gepReg := e.emitRecordGep(objPtr, objTy, idx, fieldTy, prop.Key)
 		if fieldTy.IsArray {
 			// A destructured array-typed field needs a real, named array
 			// Symbol (two allocas — Ptr/LenPtr) like any other array local
@@ -983,51 +1057,29 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			// itself — otherwise later uses of this binding (e.g. .push(),
 			// which needs LenPtr to write a resized length back to) would
 			// find no LenPtr at all. See docs/adr/ADR-00061.md.
-			aggReg := e.loadArrayFieldValue(gepReg, fieldTy).Ref // header-ptr slot (TDD-00213 S2)
-			dataPtrReg := e.freshReg()
-			lenValReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtrReg, aggReg))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenValReg, aggReg))
-			// Object-reference model (TDD-00127): a header whose data/len fields
-			// the branches below fill, referenced from a stable slot.
-			header := e.newArrayHeader("null", "0")
+			// The binding is the field's own array (one header: `w.push(x)`
+			// is `o.w.push(x)`), null when the field holds null.
+			header := e.loadArrayFieldValue(gepReg, fieldTy).ArrayHeader
 			hdrSlot := e.freshReg()
 			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", hdrSlot))
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, hdrSlot))
-			ptrAlloca := header
-			lenAlloca := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lenAlloca, arrayHeaderTy, header))
-
 			if prop.Default != nil {
 				isNullReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNullReg, dataPtrReg))
+				e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNullReg, header))
 				absentL := e.freshLabel("destr.absent")
-				presentL := e.freshLabel("destr.present")
 				afterL := e.freshLabel("destr.after")
-				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNullReg, absentL, presentL))
-
+				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNullReg, absentL, afterL))
 				e.emitLabel(absentL)
-				defVal, err := e.emitExpr(prop.Default)
+				defVal, err := e.emitExprWithObjectHint(prop.Default, fieldTy)
 				if err != nil {
 					return err
 				}
 				if !defVal.Ty.IsArray {
 					return fmt.Errorf("%d:%d: destructuring default must be an array to match field '%s'", prop.Default.GetPos().Line, prop.Default.GetPos().Col, prop.Key)
 				}
-				if err := e.storeArrayAggregateInto(defVal, ptrAlloca, lenAlloca); err != nil {
-					return err
-				}
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.arrayReturnHeader(defVal), hdrSlot))
 				e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
-
-				e.emitLabel(presentL)
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataPtrReg, ptrAlloca))
-				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenValReg, lenAlloca))
-				e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
-
 				e.emitLabel(afterL)
-			} else {
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataPtrReg, ptrAlloca))
-				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenValReg, lenAlloca))
 			}
 			e.define(prop.Local, Symbol{Ptr: hdrSlot, Ty: fieldTy})
 			continue
@@ -1044,6 +1096,13 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			e.copyNullableScalar(nsPtr, fieldTy, gepReg)
 			if prop.Default != nil {
 				present := e.loadNullableScalarPresent(nsPtr, fieldTy)
+				if fieldTy.NullAndUndef {
+					// A null keeps its value; only undefined takes the default.
+					marked := e.triPayloadIsMarker(e.loadNullableScalarPayload(nsPtr, fieldTy), fieldTy)
+					keep := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", keep, present, marked))
+					present = keep
+				}
 				absentL := e.freshLabel("destr.absent")
 				afterL := e.freshLabel("destr.after")
 				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, afterL, absentL))
@@ -1111,7 +1170,7 @@ func (e *Emitter) bindObjectRest(objPtr string, objTy Type, srcStructIR string, 
 		if named[f.Name] {
 			continue
 		}
-		residual = append(residual, Field{Name: f.Name, Ty: f.Ty})
+		residual = append(residual, f)
 	}
 	restTy := ObjectType(residual)
 
@@ -1121,16 +1180,16 @@ func (e *Emitter) bindObjectRest(objPtr string, objTy Type, srcStructIR string, 
 	// construction (ADR-00157).
 	e.ensureCalloc()
 	destReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", destReg, restTy.StructSize()))
+	e.emitObjAllocInto(destReg, restTy)
 	destStructIR := restTy.StructIR()
 
-	for destIdx, f := range residual {
+	for _, f := range residual {
 		srcIdx, _, _ := objTy.FieldIndex(f.Name)
+		destIdx, _, _ := restTy.FieldIndex(f.Name)
 		fieldIR := StructFieldIR(f.Ty)
-		srcGep := e.freshReg()
+		srcGep := e.emitRecordGep(objPtr, objTy, srcIdx, f.Ty, f.Name)
 		loadReg := e.freshReg()
 		destGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", srcGep, srcStructIR, objPtr, srcIdx))
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, fieldIR, srcGep, f.Ty.Align()))
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", destGep, destStructIR, destReg, destIdx))
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, loadReg, destGep, f.Ty.Align()))
@@ -1185,7 +1244,7 @@ func (e *Emitter) resolveObjectPtr(init ast.Expression, pos ast.Pos) (string, Ty
 		// malloc garbage.
 		e.ensureCalloc()
 		dataReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dataReg, ty.StructSize()))
+		e.emitObjAllocInto(dataReg, ty)
 		structIR := ty.StructIR()
 		for _, prop := range src.Properties {
 			idx, fieldTy, ok := ty.FieldIndex(prop.Key)
@@ -1331,15 +1390,12 @@ func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, err
 	if isUnconstrainedDynamic(val.Ty) {
 		return e.emitDynAnyKeys(val, pos)
 	}
+	// A caught value (`catch (e)`): whatever was thrown, boxed.
+	if val.Ty.IsCaught {
+		return e.emitDynAnyKeys(e.emitCaughtToAny(val), pos)
+	}
 	// A function's own enumerable keys (TDD-00229): a bound native function's
 	// own-property bag; a closure has none.
-	if val.Ty.IsFFIFunction {
-		boxed, err := e.emitBoxValue(val)
-		if err != nil {
-			return Value{}, err
-		}
-		return e.emitDynAnyKeys(boxed, pos)
-	}
 	if val.Ty.IsFunc {
 		return Value{Ref: "{ ptr null, i64 0 }", Ty: ArrayOf(TypePtr)}, nil
 	}
@@ -1350,19 +1406,32 @@ func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, err
 		if val.Ty.MapKey == nil || !isStringTy(*val.Ty.MapKey) {
 			return Value{}, fmt.Errorf("%d:%d: Object.keys requires a string-keyed Map or dynamic object", pos.Line, pos.Col)
 		}
-		return e.emitMapCall(val.Ty, val.Ref, "keys", nil, pos)
+		return e.emitMapMethod(val.Ty, val.Ref, "keys", nil, pos)
 	}
 	// A zero-field class (methods-only) has genuinely known, just-empty
 	// fields — unlike a plain object literal, whose Fields being empty means
 	// "unknown", so only the non-class case treats emptiness as an error.
-	if !val.Ty.IsObject || (!val.Ty.IsClass && !val.Ty.IsNullProtoObject && len(val.Ty.VisibleFields()) == 0) {
+	if !val.Ty.IsObject || (!val.Ty.IsClass && !val.Ty.IsNullProtoObject && !hasBodyMixin(val.Ty) && len(val.Ty.VisibleFields()) == 0) {
 		return Value{}, fmt.Errorf("%d:%d: Object.keys requires an object with known fields", pos.Line, pos.Col)
 	}
 	fields := esOrderedFields(val.Ty.VisibleFields())
-	if hasSkippableField(fields) {
-		return e.emitObjectPresentFieldNames(val, fields)
+	own := func(v Value) (Value, error) {
+		if hasSkippableField(fields) {
+			return e.emitObjectPresentFieldNames(v, fields)
+		}
+		return e.emitObjectFieldNames(fields, pos)
 	}
-	return e.emitObjectFieldNames(fields, pos)
+	// Another layout behind a structural type: the object's own keys
+	// (TDD-00233).
+	if isRecordView(val.Ty) && !val.Ty.Nullable {
+		return e.emitRecordSplit(val, ArrayOf(TypePtr), own, func(box Value) (Value, error) { return e.emitDynAnyKeys(box, pos) })
+	}
+	if extraCandidate(val.Ty) {
+		return e.emitExtraSplit(val, ArrayOf(TypePtr), own, func(obj string) string {
+			return fmt.Sprintf("call { ptr, i64 } @__kml_obj_keys_dyn(ptr %s)", obj)
+		})
+	}
+	return own(val)
 }
 
 // emitObjectFieldNames allocates a string[] of compile-time field names.
@@ -1439,7 +1508,7 @@ func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, e
 		if objVal.Ty.MapKey == nil || !isStringTy(*objVal.Ty.MapKey) {
 			return Value{}, fmt.Errorf("%d:%d: Object.values requires a string-keyed Map or dynamic object", pos.Line, pos.Col)
 		}
-		return e.emitMapCall(objVal.Ty, objVal.Ref, "values", nil, pos)
+		return e.emitMapMethod(objVal.Ty, objVal.Ref, "values", nil, pos)
 	}
 	// A bare any (D1 dynamic object / array): a dynamic array of the values.
 	if isUnconstrainedDynamic(objVal.Ty) {
@@ -1453,10 +1522,23 @@ func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, e
 	// rule Object.entries applies below; mixed shapes still stringify. An
 	// optional field counts by its present type: only present fields are
 	// listed (ADR-01066), so `{ x: number; y?: number }` values are `number[]`.
+	// A heterogeneous shape's values are `any` (TypeScript's `any[]`), and
+	// so are a structural type's: another layout behind it has its own
+	// members (TDD-00233).
 	valTy, homogeneous := homogeneousFieldType(presentFieldTypes(visFields))
-	if !homogeneous {
-		valTy = TypePtr
+	if !homogeneous || isRecordView(objVal.Ty) {
+		valTy, homogeneous = TypeAny, false
 	}
+	if isRecordView(objVal.Ty) && !objVal.Ty.Nullable {
+		return e.emitRecordSplit(objVal, ArrayOf(TypeAny),
+			func(v Value) (Value, error) { return e.emitObjectValuesOwn(v, visFields, valTy, homogeneous, pos) },
+			func(box Value) (Value, error) { return e.emitShapeValuesArray(box, false), nil })
+	}
+	return e.emitObjectValuesOwn(objVal, visFields, valTy, homogeneous, pos)
+}
+
+// emitObjectValuesOwn is Object.values over objVal's static layout.
+func (e *Emitter) emitObjectValuesOwn(objVal Value, visFields []Field, valTy Type, homogeneous bool, pos ast.Pos) (Value, error) {
 	visFields = esOrderedFields(visFields) // ES enumeration order (Node key order)
 	n := int64(len(visFields))
 	e.ensureMalloc()
@@ -1464,11 +1546,11 @@ func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, e
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(valTy.Align())))
 	count, err := e.forEachPresentField(objVal, visFields, func(f Field, idxRef string, elemVal Value) error {
 		if !homogeneous {
-			strVal, err := e.emitValueToString(elemVal)
+			boxed, err := e.emitBoxValue(elemVal)
 			if err != nil {
 				return fmt.Errorf("%d:%d: Object.values: field '%s': %w", pos.Line, pos.Col, f.Name, err)
 			}
-			elemVal = strVal
+			elemVal = boxed
 		}
 		slotReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slotReg, StructFieldIR(valTy), dataReg, idxRef))
@@ -1574,7 +1656,7 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 		if objVal.Ty.MapKey == nil || !isStringTy(*objVal.Ty.MapKey) {
 			return Value{}, fmt.Errorf("%d:%d: Object.entries requires a string-keyed Map or dynamic object", pos.Line, pos.Col)
 		}
-		return e.emitMapCall(objVal.Ty, objVal.Ref, "entries", nil, pos)
+		return e.emitMapMethod(objVal.Ty, objVal.Ref, "entries", nil, pos)
 	}
 	// A bare any (D1 dynamic object / array): a dynamic array of [key, value]
 	// pairs — JS's real tuple shape, since the elements are themselves dynamic.
@@ -1587,12 +1669,22 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 	}
 	// Each entry is a real [string, V] tuple (TDD-00066). When every visible
 	// field shares one type, V is that real type (ADR-00492); a heterogeneous
-	// object still stringifies its values (the union V would need is
-	// representable only as `any`, whose operators aren't dispatched yet).
+	// object's, and a structural type's (TDD-00233), are `any`.
 	valTy, homogeneous := homogeneousFieldType(presentFieldTypes(visFields))
-	if !homogeneous {
-		valTy = TypePtr
+	if !homogeneous || isRecordView(objVal.Ty) {
+		valTy, homogeneous = TypeAny, false
 	}
+	if isRecordView(objVal.Ty) && !objVal.Ty.Nullable {
+		entryTy := TupleType([]Type{TypePtr, TypeAny})
+		return e.emitRecordSplit(objVal, ArrayOf(entryTy),
+			func(v Value) (Value, error) { return e.emitObjectEntriesOwn(v, visFields, valTy, homogeneous, pos) },
+			func(box Value) (Value, error) { return e.emitShapeValuesArray(box, true), nil })
+	}
+	return e.emitObjectEntriesOwn(objVal, visFields, valTy, homogeneous, pos)
+}
+
+// emitObjectEntriesOwn is Object.entries over objVal's static layout.
+func (e *Emitter) emitObjectEntriesOwn(objVal Value, visFields []Field, valTy Type, homogeneous bool, pos ast.Pos) (Value, error) {
 	entryTy := TupleType([]Type{TypePtr, valTy})
 	entrySize := int64(entryTy.StructSize())
 	visFields = esOrderedFields(visFields) // ES enumeration order (Node key order)
@@ -1611,11 +1703,11 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", keySlot, entryTy.StructIR(), entryReg))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", keyPtr, keySlot))
 		if !homogeneous {
-			strVal, err := e.emitValueToString(entryVal)
+			boxed, err := e.emitBoxValue(entryVal)
 			if err != nil {
 				return fmt.Errorf("%d:%d: Object.entries: field '%s': %w", pos.Line, pos.Col, f.Name, err)
 			}
-			entryVal = strVal
+			entryVal = boxed
 		}
 		valSlot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", valSlot, entryTy.StructIR(), entryReg))
@@ -1750,6 +1842,9 @@ func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, e
 	if len(args) < 1 {
 		return Value{}, fmt.Errorf("%d:%d: Object.assign requires at least 1 argument", pos.Line, pos.Col)
 	}
+	if e.dynamicAssign(args) {
+		return e.emitDynObjectAssign(args, pos)
+	}
 	targetVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -1802,6 +1897,86 @@ func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, e
 		}
 	}
 	return targetVal, nil
+}
+
+// dynamicAssign reports an Object.assign whose target or a source is `any`:
+// the copy runs on the values' run-time properties, and the result is `any`
+// (as TypeScript types it).
+func (e *Emitter) dynamicAssign(args []ast.Expression) bool {
+	for _, a := range args {
+		if isUnconstrainedDynamic(e.inferExprType(a)) {
+			return true
+		}
+	}
+	return false
+}
+
+// emitDynObjectAssign is Object.assign over run-time properties: each
+// source's own enumerable string keys (null and undefined sources skipped)
+// read — getters run — and written to the target as an assignment through
+// `any` writes them. The result is the target.
+func (e *Emitter) emitDynObjectAssign(args []ast.Expression, pos ast.Pos) (Value, error) {
+	tv, err := e.emitExprWithObjectHint(args[0], TypeAny)
+	if err != nil {
+		return Value{}, err
+	}
+	target, err := e.emitBoxValue(tv)
+	if err != nil {
+		return Value{}, err
+	}
+	for _, a := range args[1:] {
+		sv, err := e.emitExprWithObjectHint(a, TypeAny)
+		if err != nil {
+			return Value{}, err
+		}
+		src, err := e.emitBoxValue(sv)
+		if err != nil {
+			return Value{}, err
+		}
+		isU, isN, absent := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, src.Ref, nbUndefined))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isN, src.Ref, nbNull))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", absent, isU, isN))
+		copyL, nextL := e.freshLabel("dynassign.copy"), e.freshLabel("dynassign.next")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", absent, nextL, copyL))
+		e.emitLabel(copyL)
+		keys, err := e.emitDynAnyKeys(src, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		data, n := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", data, keys.Ref))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", n, keys.Ref))
+		iSlot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", iSlot))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", iSlot))
+		condL, bodyL := e.freshLabel("dynassign.cond"), e.freshLabel("dynassign.body")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(condL)
+		i := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, iSlot))
+		more := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, i, n))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, nextL))
+		e.emitLabel(bodyL)
+		kp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", kp, data, i))
+		key := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", key, kp))
+		v, err := e.emitDynAnyMemberGet(src, key, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		if _, err := e.emitDynAnyMemberSet(target, key, v, pos); err != nil {
+			return Value{}, err
+		}
+		i2 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", i2, i))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i2, iSlot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(nextL)
+	}
+	return target, nil
 }
 
 // emitObjectFreeze implements Object.freeze(obj): marks obj's heap pointer
@@ -1863,12 +2038,13 @@ func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, callerName
 	}
 	// A bare any/unknown object is a runtime dynamic-object membership test
 	// (TDD-00155 Stage 1) — the one case where the key may be runtime-computed.
-	if isUnconstrainedDynamic(objVal.Ty) {
+	// So is a union's box (`"port" in x` on `A | P`): its object tells.
+	if isUnconstrainedDynamic(objVal.Ty) || (objVal.Ty.IsDynamic && len(objVal.Ty.UnionMembers) > 0) {
 		keyRef, err := e.dynAnyKeyRef(keyExpr, pos)
 		if err != nil {
 			return Value{}, err
 		}
-		return e.emitDynAnyHas(objVal, keyRef, ownOnly, pos)
+		return e.emitDynAnyHas(Value{Ref: objVal.Ref, Ty: TypeAny}, keyRef, ownOnly, pos)
 	}
 	if !objVal.Ty.IsObject {
 		return Value{}, fmt.Errorf("%d:%d: %s requires an object", pos.Line, pos.Col, callerName)
@@ -1882,7 +2058,14 @@ func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, callerName
 		// An optional field that was omitted has no key — `"age" in a` is a
 		// runtime presence test, not a static true (ADR-01063).
 		if jsonFieldSkippable(fieldTy) {
-			present, _ := e.emitFieldPresent(objVal.Ref, objVal.Ty, Field{Name: keyLit.Value, Ty: fieldTy})
+			f := Field{Name: keyLit.Value, Ty: fieldTy}
+			for _, vf := range objVal.Ty.VisibleFields() {
+				if vf.Name == keyLit.Value {
+					f = vf
+					break
+				}
+			}
+			present, _ := e.emitFieldPresent(objVal.Ref, objVal.Ty, f)
 			return Value{Ref: present, Ty: TypeBool}, nil
 		}
 		return Value{Ref: "true", Ty: TypeBool}, nil

@@ -25,6 +25,7 @@ func (e *Emitter) ensureFetch() {
 	e.usedFetch = true
 	e.requireLink("curl")
 	e.ensureMalloc()
+	e.ensureCalloc()
 	e.ensureRealloc()
 	e.ensureMemcpy()
 	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
@@ -37,6 +38,31 @@ func (e *Emitter) ensureFetch() {
 	e.emitGlobal("declare i32 @curl_easy_getinfo(ptr noundef, i32 noundef, ...)")
 	e.emitGlobal("declare void @curl_easy_cleanup(ptr noundef)")
 	e.emitGlobal("declare ptr @curl_easy_strerror(i32 noundef)")
+	// A fetch's failure message: curl's for a transfer error, or one of the
+	// request errors fetch settles with before any transfer (negative codes).
+	e.emitGlobal(`@.kml_fetch_getbody = private unnamed_addr constant [47 x i8] c"Request with GET/HEAD method cannot have body.\00"
+define ptr @__kml_fetch_errstr(i32 %code) {
+entry:
+  %getbody = icmp eq i32 %code, -2
+  br i1 %getbody, label %gb, label %curl
+gb:
+  ret ptr @.kml_fetch_getbody
+curl:
+  %s = call ptr @curl_easy_strerror(i32 %code)
+  ret ptr %s
+}
+
+; __kml_fetch_failed_pending is a fetch already settled with failure code
+; (no transfer): its await rejects with __kml_fetch_errstr(code).
+define ptr @__kml_fetch_failed_pending(i64 %code) {
+entry:
+  %p = call ptr @calloc(i64 1, i64 80)
+  %done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %p, i32 0, i32 2
+  store i64 1, ptr %done_p, align 8
+  %res_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %p, i32 0, i32 4
+  store i64 %code, ptr %res_p, align 8
+  ret ptr %p
+}`)
 	e.emitGlobal("@__kml_curl_inited = internal global i1 0, align 1")
 
 	// Write callback: libcurl calls this (possibly many times, once per
@@ -207,7 +233,8 @@ func (e *Emitter) ensureFetchAsync() {
 			"\n  %ty_sw = call i32 @swapcontext(ptr %ty_ctx, ptr %ty_rc)" + awfGCRestore +
 			"\n  br label %checkloop"
 	}
-	errNamePtr := e.internString("Error")
+	// A failed fetch rejects with a TypeError, as Node's does.
+	errNamePtr := e.internString("TypeError")
 	abortNamePtr := e.internString("AbortError")
 	abortMsgPtr := e.internString("The operation was aborted")
 	timeoutNamePtr := e.internString("TimeoutError")
@@ -232,6 +259,7 @@ func (e *Emitter) ensureFetchAsync() {
 	e.emitGlobal(`
 define i32 @__kml_curl_inflight() {
 entry:
+  call void @__kml_sigfetch_scan()
   %multi = load ptr, ptr @__kml_curl_multi, align 8
   %has = icmp ne ptr %multi, null
   br i1 %has, label %ask, label %none
@@ -251,6 +279,14 @@ none:
 
 	e.emitGlobal(e.withCurlNativeCA(`
 define ptr @__kml_fetch_async(ptr %url, ptr %method, ptr %headers, ptr %body, ptr %signal) {
+entry:
+  %r = call ptr @__kml_fetch_async_n(ptr %url, ptr %method, ptr %headers, ptr %body, i64 -1, ptr %signal)
+  ret ptr %r
+}
+
+; __kml_fetch_async_n is __kml_fetch_async with the body's byte length (-1:
+; a NUL-terminated string), so a binary body is sent whole.
+define ptr @__kml_fetch_async_n(ptr %url, ptr %method, ptr %headers, ptr %body, i64 %bodylen, ptr %signal) {
 entry:
   %inited = load i1, ptr @__kml_curl_inited, align 1
   br i1 %inited, label %skipinit, label %doinit
@@ -350,6 +386,15 @@ skipheaders:
   br i1 %hasbody, label %setbody, label %skipbody
 
 setbody:
+  %sized = icmp sge i64 %bodylen, 0
+  br i1 %sized, label %setbodylen, label %setbodyptr
+
+setbodylen:
+  ; CURLOPT_POSTFIELDSIZE_LARGE
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 30120, i64 %bodylen)
+  br label %setbodyptr
+
+setbodyptr:
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10015, ptr %body)
   br label %skipbody
 
@@ -372,6 +417,12 @@ skipbody:
   store i64 0, ptr %p_result, align 8
   %p_signal = getelementptr { ptr, ptr, i64, i64, i64, ptr }, ptr %pending, i32 0, i32 5
   store ptr %signal, ptr %p_signal, align 8
+  %hassignal = icmp ne ptr %signal, null
+  br i1 %hassignal, label %regsignal, label %regdone
+regsignal:
+  call void @__kml_sigfetch_add(ptr %pending)
+  br label %regdone
+regdone:
   %p_hdrs = getelementptr { ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }, ptr %pending, i32 0, i32 6
   store i64 0, ptr %p_hdrs, align 8
   %p_bstream = getelementptr { ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }, ptr %pending, i32 0, i32 7
@@ -449,6 +500,7 @@ done:
 	e.emitGlobal(`
 define i1 @__kml_fetch_pump() {
 entry:
+  call void @__kml_sigfetch_scan()
   %multi = load ptr, ptr @__kml_curl_multi, align 8
   %nomulti = icmp eq ptr %multi, null
   br i1 %nomulti, label %idle, label %pump
@@ -482,11 +534,11 @@ entry:
 
 neterror:
   %result32b = trunc i64 %result to i32
-  %errstr = call ptr @curl_easy_strerror(i32 %result32b)
+  %errstr = call ptr @__kml_fetch_errstr(i32 %result32b)
   %errstr_hdr = call ptr @__kml_str_from_cstr(ptr %errstr)
   %errobj = call ptr @malloc(i64 24)
   %errobj.kind = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 0
-  store i64 281474976710656, ptr %errobj.kind, align 8
+  store i64 281474976710657, ptr %errobj.kind, align 8
   %errobj.msg = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 1
   store ptr %errstr_hdr, ptr %errobj.msg, align 8
   %errobj.name = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 2
@@ -524,6 +576,8 @@ retdone:
   ret { i64, ptr, i64 } %r3
 }`)
 
+	e.emitFetchAbortRuntime(timeoutNamePtr, abortNamePtr, timeoutMsgPtr, abortMsgPtr, domExcKind)
+
 	e.emitGlobal(fmt.Sprintf(`
 define { i64, ptr, i64 } @__kml_await_fetch(ptr %%pending) {
 entry:
@@ -542,7 +596,14 @@ checkloop:
   %%done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 2
   %%done = load i64, ptr %%done_p, align 8
   %%isdone = icmp ne i64 %%done, 0
-  br i1 %%isdone, label %%finish, label %%chksignal
+  br i1 %%isdone, label %%chkaborted, label %%chksignal
+
+chkaborted:
+  ; A transfer torn down by its signal (__kml_fetch_abort_now) rejects.
+  %%res_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 4
+  %%res = load i64, ptr %%res_p, align 8
+  %%wasaborted = icmp eq i64 %%res, -1
+  br i1 %%wasaborted, label %%doabort, label %%finish
 
 chksignal:
   ; AbortSignal check each spin (TDD-00081 Stage 3c): the aborted flag or an
@@ -552,48 +613,8 @@ chksignal:
   br i1 %%isaborted, label %%doabort, label %%maybeyield
 
 doabort:
-  %%ab_easy_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 0
-  %%ab_easy = load ptr, ptr %%ab_easy_p, align 8
-  %%ab_multi = load ptr, ptr @__kml_curl_multi, align 8
-  call i32 @curl_multi_remove_handle(ptr %%ab_multi, ptr %%ab_easy)
-  call void @curl_easy_cleanup(ptr %%ab_easy)
-  ; Node rejects the fetch with signal.reason. The reason slot is a NaN-boxed
-  ; any: when it holds a value (a custom abort(reason), or the default/timeout
-  ; DOMException stored at abort time), unbox and throw it as-is — the same
-  ; (tag, payload) path a user-level throw of an any takes. The slot can still
-  ; read undefined here for an AbortSignal.timeout whose deadline the aborted
-  ; check latched before the background dispatcher stored the reason — fall
-  ; back to constructing the matching DOMException below.
-  %%ab_r_p = getelementptr { i1, i64, ptr, i64 }, ptr %%sig, i32 0, i32 1
-  %%ab_r = load i64, ptr %%ab_r_p, align 8
-  %%ab_isundef = icmp eq i64 %%ab_r, %d
-  br i1 %%ab_isundef, label %%abdefault, label %%abreason
-
-abreason:
-  %%ab_rtag = call i8 @__kml_nb_tag(i64 %%ab_r)
-  %%ab_rpay = call i64 @__kml_nb_pay(i64 %%ab_r)
-  call void @__kml_throw_any(i8 %%ab_rtag, i64 %%ab_rpay)
-  unreachable
-
-abdefault:
-  ; A non-zero deadline means this signal came from AbortSignal.timeout, whose
-  ; abort is a "TimeoutError" DOMException; a manual controller.abort() (no
-  ; deadline) is an "AbortError" DOMException. Both carry the DOMException kind
-  ; tag so 'e instanceof DOMException' (and, since DOMException inherits Error,
-  ; 'e instanceof Error') both hold in the catch handler.
-  %%ab_dl_p = getelementptr { i1, i64, ptr, i64 }, ptr %%sig, i32 0, i32 3
-  %%ab_dl = load i64, ptr %%ab_dl_p, align 8
-  %%ab_istimeout = icmp ne i64 %%ab_dl, 0
-  %%ab_name = select i1 %%ab_istimeout, ptr %s, ptr %s
-  %%ab_msg = select i1 %%ab_istimeout, ptr %s, ptr %s
-  %%aberr = call ptr @malloc(i64 24)
-  %%aberr.kind = getelementptr { i64, ptr, ptr }, ptr %%aberr, i32 0, i32 0
-  store i64 %d, ptr %%aberr.kind, align 8
-  %%aberr.msg = getelementptr { i64, ptr, ptr }, ptr %%aberr, i32 0, i32 1
-  store ptr %%ab_msg, ptr %%aberr.msg, align 8
-  %%aberr.name = getelementptr { i64, ptr, ptr }, ptr %%aberr, i32 0, i32 2
-  store ptr %%ab_name, ptr %%aberr.name, align 8
-  call void @__kml_throw(ptr %%aberr)
+  call void @__kml_fetch_abort_now(ptr %%pending)
+  call void @__kml_fetch_throw_abort(ptr %%sig)
   unreachable
 
 maybeyield:%s
@@ -633,7 +654,7 @@ rawspin:
 finish:
   %%raw = call { i64, ptr, i64 } @__kml_pending_finish(ptr %%pending)
   ret { i64, ptr, i64 } %%raw
-}`, nbUndefined, timeoutNamePtr, abortNamePtr, timeoutMsgPtr, abortMsgPtr, domExcKind, awfTaskCheck, awfTaskYield))
+}`, awfTaskCheck, awfTaskYield))
 }
 
 // ensureAwaitFetchHeaders emits @__kml_await_fetch_headers (TDD-00097
@@ -678,21 +699,30 @@ define i64 @__kml_await_fetch_headers(ptr %pending) {
 entry:
   %runningp = alloca i32, align 4
   %statusslot = alloca i64, align 8
-  ; A signal-carrying fetch keeps the full await (abort/timeout teardown
-  ; machinery lives there) and so resolves at completion, not headers.
   %sig_p = getelementptr { ptr, ptr, i64, i64, i64, ptr }, ptr %pending, i32 0, i32 5
   %sig = load ptr, ptr %sig_p, align 8
-  %hassig = icmp ne ptr %sig, null
-  br i1 %hassig, label %fullawait, label %checkloop
-fullawait:
-  %raw = call { i64, ptr, i64 } @__kml_await_fetch(ptr %pending)
-  %sst = extractvalue { i64, ptr, i64 } %raw, 0
-  ret i64 %sst
+  br label %checkloop
 checkloop:
   %done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 2
   %done = load i64, ptr %done_p, align 8
   %isdone = icmp ne i64 %done, 0
-  br i1 %isdone, label %fromdone, label %ckhdrs
+  br i1 %isdone, label %chkaborted, label %chksignal
+chkaborted:
+  ; A transfer torn down by its signal (__kml_fetch_abort_now) rejects.
+  %res_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 4
+  %res = load i64, ptr %res_p, align 8
+  %wasaborted = icmp eq i64 %res, -1
+  br i1 %wasaborted, label %doabort, label %fromdone
+chksignal:
+  ; The signal is checked while the headers are awaited; once they arrive the
+  ; Response resolves and the event loop's scan (__kml_sigfetch_scan) aborts
+  ; the transfer and errors its body stream.
+  %isaborted = call i1 @__kml_signal_aborted(ptr %sig)
+  br i1 %isaborted, label %doabort, label %ckhdrs
+doabort:
+  call void @__kml_fetch_abort_now(ptr %pending)
+  call void @__kml_fetch_throw_abort(ptr %sig)
+  unreachable
 ckhdrs:
   %hd_p = getelementptr { ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }, ptr %pending, i32 0, i32 6
   %hd = load i64, ptr %hd_p, align 8
@@ -952,7 +982,7 @@ notfound:
 	// per member carrying that fetch's transport-failure message, then throw it.
 	{
 		e.ensureExceptionHelpers()
-		errName := e.internString("Error")
+		errName := e.internString("TypeError")
 		aggName := e.internString("AggregateError")
 		aggMsg := e.internString("All promises were rejected")
 		aggID := errorTypeIDStored(errorKindIDs["AggregateError"]) // field-0 Error type-id (TDD-00222)
@@ -976,11 +1006,11 @@ body:
   %%res_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%m, i32 0, i32 4
   %%res = load i64, ptr %%res_p, align 8
   %%res32 = trunc i64 %%res to i32
-  %%errstr = call ptr @curl_easy_strerror(i32 %%res32)
+  %%errstr = call ptr @__kml_fetch_errstr(i32 %%res32)
   %%errstr_hdr = call ptr @__kml_str_from_cstr(ptr %%errstr)
   %%eo = call ptr @malloc(i64 24)
   %%eo_k = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 0
-  store i64 281474976710656, ptr %%eo_k, align 8
+  store i64 281474976710657, ptr %%eo_k, align 8
   %%eo_m = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 1
   store ptr %%errstr_hdr, ptr %%eo_m, align 8
   %%eo_n = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 2
@@ -1097,7 +1127,7 @@ entry:
 
 neterror:
   %result32b = trunc i64 %result to i32
-  %errstr = call ptr @curl_easy_strerror(i32 %result32b)
+  %errstr = call ptr @__kml_fetch_errstr(i32 %result32b)
   %errstr_hdr = call ptr @__kml_str_from_cstr(ptr %errstr)
   %rf1 = insertvalue { i1, i64, ptr, ptr, i64 } undef, i1 1, 0
   %rf2 = insertvalue { i1, i64, ptr, ptr, i64 } %rf1, i64 0, 1
@@ -1349,6 +1379,153 @@ ret:
 }`)
 }
 
+// ensureFetchStatusText declares __kml_fetch_status_text: a fetched
+// Response's statusText, the reason phrase of the last status line in its
+// captured header text ("HTTP/1.1 404 Not Found" → "Not Found"; after a
+// redirect, the final response's), or "" when there is none (HTTP/2 sends
+// no reason phrase) or the Response was not fetched.
+func (e *Emitter) ensureFetchStatusText() {
+	if e.fnDecls["__kml_fetch_status_text"] {
+		return
+	}
+	e.fnDecls["__kml_fetch_status_text"] = true
+	e.ensureFetch()
+	e.ensureStrHeaderRuntime()
+	e.ensureMalloc()
+	e.ensureMemcpy()
+	e.emitGlobal(`
+define ptr @__kml_fetch_status_text(ptr %pending) {
+entry:
+  %pnull = icmp eq ptr %pending, null
+  br i1 %pnull, label %empty, label %getbuf
+getbuf:
+  %bufp = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 1
+  %buf = load ptr, ptr %bufp, align 8
+  %bnull = icmp eq ptr %buf, null
+  br i1 %bnull, label %empty, label %gethb
+gethb:
+  %hbpp = getelementptr ptr, ptr %buf, i64 4
+  %hbuf = load ptr, ptr %hbpp, align 8
+  %hnull = icmp eq ptr %hbuf, null
+  br i1 %hnull, label %empty, label %getraw
+getraw:
+  %rawp = getelementptr { ptr, i64, i64 }, ptr %hbuf, i32 0, i32 0
+  %raw = load ptr, ptr %rawp, align 8
+  %rnull = icmp eq ptr %raw, null
+  br i1 %rnull, label %empty, label %scan
+scan:
+  %i = phi i64 [ 0, %getraw ], [ %in, %next ]
+  %last = phi i64 [ -1, %getraw ], [ %last2, %next ]
+  %bol = phi i1 [ 1, %getraw ], [ %bol2, %next ]
+  %cp = getelementptr i8, ptr %raw, i64 %i
+  %c = load i8, ptr %cp, align 1
+  %atend = icmp eq i8 %c, 0
+  br i1 %atend, label %found, label %chk
+chk:
+  br i1 %bol, label %chkh, label %next0
+chkh:
+  %isH = icmp eq i8 %c, 72
+  br i1 %isH, label %chkt1, label %next0
+chkt1:
+  %p1 = getelementptr i8, ptr %cp, i64 1
+  %c1 = load i8, ptr %p1, align 1
+  %isT1 = icmp eq i8 %c1, 84
+  br i1 %isT1, label %chkt2, label %next0
+chkt2:
+  %p2 = getelementptr i8, ptr %cp, i64 2
+  %c2 = load i8, ptr %p2, align 1
+  %isT2 = icmp eq i8 %c2, 84
+  br i1 %isT2, label %chkp, label %next0
+chkp:
+  %p3 = getelementptr i8, ptr %cp, i64 3
+  %c3 = load i8, ptr %p3, align 1
+  %isP = icmp eq i8 %c3, 80
+  br i1 %isP, label %chks, label %next0
+chks:
+  %p4 = getelementptr i8, ptr %cp, i64 4
+  %c4 = load i8, ptr %p4, align 1
+  %isS = icmp eq i8 %c4, 47
+  br i1 %isS, label %mark, label %next0
+mark:
+  br label %next
+next0:
+  br label %next
+next:
+  %last2 = phi i64 [ %i, %mark ], [ %last, %next0 ]
+  %bol2 = icmp eq i8 %c, 10
+  %in = add i64 %i, 1
+  br label %scan
+found:
+  %none = icmp slt i64 %last, 0
+  br i1 %none, label %empty, label %sp1
+sp1:
+  %a = phi i64 [ %last, %found ], [ %an, %sp1c ]
+  %ap = getelementptr i8, ptr %raw, i64 %a
+  %ac = load i8, ptr %ap, align 1
+  %aSp = icmp eq i8 %ac, 32
+  br i1 %aSp, label %code, label %sp1e
+sp1e:
+  %aEnd0 = icmp eq i8 %ac, 0
+  %aEnd1 = icmp eq i8 %ac, 13
+  %aEnd2 = icmp eq i8 %ac, 10
+  %aE01 = or i1 %aEnd0, %aEnd1
+  %aEnd = or i1 %aE01, %aEnd2
+  br i1 %aEnd, label %empty, label %sp1c
+sp1c:
+  %an = add i64 %a, 1
+  br label %sp1
+code:
+  %b0 = add i64 %a, 1
+  br label %sp2
+sp2:
+  %b = phi i64 [ %b0, %code ], [ %bn, %sp2c ]
+  %bp = getelementptr i8, ptr %raw, i64 %b
+  %bc = load i8, ptr %bp, align 1
+  %bSp = icmp eq i8 %bc, 32
+  br i1 %bSp, label %reason, label %sp2e
+sp2e:
+  %bEnd0 = icmp eq i8 %bc, 0
+  %bEnd1 = icmp eq i8 %bc, 13
+  %bEnd2 = icmp eq i8 %bc, 10
+  %bE01 = or i1 %bEnd0, %bEnd1
+  %bEnd = or i1 %bE01, %bEnd2
+  br i1 %bEnd, label %empty, label %sp2c
+sp2c:
+  %bn = add i64 %b, 1
+  br label %sp2
+reason:
+  %r0 = add i64 %b, 1
+  br label %rscan
+rscan:
+  %r = phi i64 [ %r0, %reason ], [ %rn, %rcont ]
+  %rp = getelementptr i8, ptr %raw, i64 %r
+  %rc = load i8, ptr %rp, align 1
+  %rEnd0 = icmp eq i8 %rc, 0
+  %rEnd1 = icmp eq i8 %rc, 13
+  %rEnd2 = icmp eq i8 %rc, 10
+  %rE01 = or i1 %rEnd0, %rEnd1
+  %rEnd = or i1 %rE01, %rEnd2
+  br i1 %rEnd, label %rfin, label %rcont
+rcont:
+  %rn = add i64 %r, 1
+  br label %rscan
+rfin:
+  %len = sub i64 %r, %r0
+  %len1 = add i64 %len, 1
+  %out = call ptr @malloc(i64 %len1)
+  %src = getelementptr i8, ptr %raw, i64 %r0
+  call ptr @memcpy(ptr %out, ptr %src, i64 %len)
+  %term = getelementptr i8, ptr %out, i64 %len
+  store i8 0, ptr %term, align 1
+  %hs = call ptr @__kml_str_from_cstr(ptr %out)
+  ret ptr %hs
+empty:
+  %e = call ptr @__kml_str_from_cstr(ptr @.kml_fetch_empty_st)
+  ret ptr %e
+}
+@.kml_fetch_empty_st = private unnamed_addr constant [1 x i8] c"\00"`)
+}
+
 // ensureXHRHeadersAll declares __kml_xhr_headers_all (ADR-00490):
 // serializes a parsed response-header map into the "name: value\r\n"
 // concatenation getAllResponseHeaders() returns, in stored (arrival)
@@ -1489,4 +1666,178 @@ func (e *Emitter) withCurlNativeCA(ir string) string {
 	}
 	const initLine = "  %curl = call ptr @curl_easy_init()\n"
 	return strings.Replace(ir, initLine, initLine+"  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 216, i64 16)\n", 1)
+}
+
+// emitFetchAbortRuntime emits a signal-carrying fetch's abort machinery:
+// @__kml_sigfetch_add/scan (the in-flight fetches whose signal the event loop
+// checks every turn — an abort lands between turns, from JavaScript),
+// @__kml_fetch_abort_now (tear the transfer down once and error its body
+// stream with the signal's reason) and @__kml_fetch_throw_abort (throw that
+// reason from an await).
+func (e *Emitter) emitFetchAbortRuntime(timeoutNamePtr, abortNamePtr, timeoutMsgPtr, abortMsgPtr string, domExcKind int64) {
+	e.ensureMalloc()
+	e.ensureRealloc()
+	e.ensureMemmove()
+	e.emitGlobal("@__kml_sigfetch_data = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_sigfetch_len = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_sigfetch_cap = internal thread_local global i64 0, align 8")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_sigfetch_add(ptr %%pending) {
+entry:
+  %%len = load i64, ptr @__kml_sigfetch_len, align 8
+  %%cap = load i64, ptr @__kml_sigfetch_cap, align 8
+  %%full = icmp eq i64 %%len, %%cap
+  br i1 %%full, label %%grow, label %%put
+grow:
+  %%c2 = mul i64 %%cap, 2
+  %%c3 = add i64 %%c2, 4
+  %%bytes = mul i64 %%c3, 8
+  %%old = load ptr, ptr @__kml_sigfetch_data, align 8
+  %%new = call ptr @realloc(ptr %%old, i64 %%bytes)
+  store ptr %%new, ptr @__kml_sigfetch_data, align 8
+  store i64 %%c3, ptr @__kml_sigfetch_cap, align 8
+  br label %%put
+put:
+  %%d = load ptr, ptr @__kml_sigfetch_data, align 8
+  %%slot = getelementptr ptr, ptr %%d, i64 %%len
+  store ptr %%pending, ptr %%slot, align 8
+  %%len1 = add i64 %%len, 1
+  store i64 %%len1, ptr @__kml_sigfetch_len, align 8
+  ret void
+}
+
+; Drops finished fetches and aborts those whose signal has fired. An abort
+; settles promises (queued reactions only), and a fetch added meanwhile lands
+; past %%len: it is carried over.
+define void @__kml_sigfetch_scan() {
+entry:
+  %%len = load i64, ptr @__kml_sigfetch_len, align 8
+  %%none = icmp eq i64 %%len, 0
+  br i1 %%none, label %%ret, label %%loop
+loop:
+  %%i = phi i64 [ 0, %%entry ], [ %%inext, %%next ]
+  %%j = phi i64 [ 0, %%entry ], [ %%jnext, %%next ]
+  %%d = load ptr, ptr @__kml_sigfetch_data, align 8
+  %%slot = getelementptr ptr, ptr %%d, i64 %%i
+  %%p = load ptr, ptr %%slot, align 8
+  %%done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%p, i32 0, i32 2
+  %%done = load i64, ptr %%done_p, align 8
+  %%isdone = icmp ne i64 %%done, 0
+  br i1 %%isdone, label %%drop, label %%chk
+chk:
+  %%sig_p = getelementptr { ptr, ptr, i64, i64, i64, ptr }, ptr %%p, i32 0, i32 5
+  %%sig = load ptr, ptr %%sig_p, align 8
+  %%ab = call i1 @__kml_signal_aborted(ptr %%sig)
+  br i1 %%ab, label %%abort, label %%keep
+abort:
+  call void @__kml_fetch_abort_now(ptr %%p)
+  br label %%drop
+keep:
+  %%d2 = load ptr, ptr @__kml_sigfetch_data, align 8
+  %%kslot = getelementptr ptr, ptr %%d2, i64 %%j
+  store ptr %%p, ptr %%kslot, align 8
+  %%j1 = add i64 %%j, 1
+  br label %%next
+drop:
+  br label %%next
+next:
+  %%jnext = phi i64 [ %%j1, %%keep ], [ %%j, %%drop ]
+  %%inext = add i64 %%i, 1
+  %%more = icmp slt i64 %%inext, %%len
+  br i1 %%more, label %%loop, label %%fin
+fin:
+  %%cur = load i64, ptr @__kml_sigfetch_len, align 8
+  %%added = sub i64 %%cur, %%len
+  %%d3 = load ptr, ptr @__kml_sigfetch_data, align 8
+  %%src = getelementptr ptr, ptr %%d3, i64 %%len
+  %%dst = getelementptr ptr, ptr %%d3, i64 %%jnext
+  %%nbytes = mul i64 %%added, 8
+  call ptr @memmove(ptr %%dst, ptr %%src, i64 %%nbytes)
+  %%newlen = add i64 %%jnext, %%added
+  store i64 %%newlen, ptr @__kml_sigfetch_len, align 8
+  br label %%ret
+ret:
+  ret void
+}
+
+; The error an aborted fetch's body stream reports: the signal's reason when
+; it is an Error, else the AbortError/TimeoutError DOMException.
+define ptr @__kml_fetch_abort_error(ptr %%sig) {
+entry:
+  %%r = call i64 @__kml_signal_reason(ptr %%sig)
+  %%rtag = call i8 @__kml_nb_tag(i64 %%r)
+  %%isobj = icmp eq i8 %%rtag, %[6]d
+  br i1 %%isobj, label %%probe, label %%default
+probe:
+  %%rpay = call i64 @__kml_nb_pay(i64 %%r)
+  %%robj = inttoptr i64 %%rpay to ptr
+  %%hdr = load i64, ptr %%robj, align 8
+  %%flag = and i64 %%hdr, %[7]d
+  %%iserr = icmp ne i64 %%flag, 0
+  br i1 %%iserr, label %%useit, label %%default
+useit:
+  ret ptr %%robj
+default:
+  %%istimeout = call i1 @__kml_signal_timeout(ptr %%sig)
+  %%name = select i1 %%istimeout, ptr %[1]s, ptr %[2]s
+  %%msg = select i1 %%istimeout, ptr %[3]s, ptr %[4]s
+  %%err = call ptr @malloc(i64 24)
+  %%err.kind = getelementptr { i64, ptr, ptr }, ptr %%err, i32 0, i32 0
+  store i64 %[5]d, ptr %%err.kind, align 8
+  %%err.msg = getelementptr { i64, ptr, ptr }, ptr %%err, i32 0, i32 1
+  store ptr %%msg, ptr %%err.msg, align 8
+  %%err.name = getelementptr { i64, ptr, ptr }, ptr %%err, i32 0, i32 2
+  store ptr %%name, ptr %%err.name, align 8
+  ret ptr %%err
+}
+
+; Tears a signal-aborted transfer down once: result -1 marks it, done lets
+; every waiter see it.
+define void @__kml_fetch_abort_now(ptr %%pending) {
+entry:
+  %%res_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 4
+  %%res = load i64, ptr %%res_p, align 8
+  %%already = icmp eq i64 %%res, -1
+  br i1 %%already, label %%ret, label %%chkdone
+chkdone:
+  %%done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 2
+  %%done = load i64, ptr %%done_p, align 8
+  %%isdone = icmp ne i64 %%done, 0
+  br i1 %%isdone, label %%ret, label %%teardown
+teardown:
+  %%easy_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 0
+  %%easy = load ptr, ptr %%easy_p, align 8
+  %%multi = load ptr, ptr @__kml_curl_multi, align 8
+  call i32 @curl_multi_remove_handle(ptr %%multi, ptr %%easy)
+  call void @curl_easy_cleanup(ptr %%easy)
+  store i64 -1, ptr %%res_p, align 8
+  store i64 1, ptr %%done_p, align 8
+  %%sig_p = getelementptr { ptr, ptr, i64, i64, i64, ptr }, ptr %%pending, i32 0, i32 5
+  %%sig = load ptr, ptr %%sig_p, align 8
+  %%err = call ptr @__kml_fetch_abort_error(ptr %%sig)
+  call void @__kml_fetch_body_abort(ptr %%pending, ptr %%err)
+  br label %%ret
+ret:
+  ret void
+}
+
+; Node rejects the fetch with signal.reason: a stored reason is thrown as-is
+; (the same (tag, payload) path a user-level throw of an any takes); none yet
+; (an AbortSignal.timeout whose deadline the check latched first) throws the
+; matching DOMException.
+define void @__kml_fetch_throw_abort(ptr %%sig) {
+entry:
+  %%r = call i64 @__kml_signal_reason(ptr %%sig)
+  %%isundef = icmp eq i64 %%r, %[8]d
+  br i1 %%isundef, label %%default, label %%reason
+reason:
+  %%rtag = call i8 @__kml_nb_tag(i64 %%r)
+  %%rpay = call i64 @__kml_nb_pay(i64 %%r)
+  call void @__kml_throw_any(i8 %%rtag, i64 %%rpay)
+  unreachable
+default:
+  %%err = call ptr @__kml_fetch_abort_error(ptr %%sig)
+  call void @__kml_throw(ptr %%err)
+  unreachable
+}`, timeoutNamePtr, abortNamePtr, timeoutMsgPtr, abortMsgPtr, domExcKind, kmlTagObject, errorTypeIDFlag, nbUndefined))
 }

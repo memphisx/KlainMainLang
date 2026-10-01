@@ -118,6 +118,7 @@ var (
 	ImportRequireAssignment   = syntax(1202, "`import %s = require(...)` is not supported — use an ES import declaration instead")
 	RedeclaredBlockScoped     = syntax(2451, "identifier '%s' has already been declared")
 	DuplicateIdentifier       = syntax(2300, "identifier '%s' has already been declared")
+	DuplicateFunctionImpl     = syntax(2393, "duplicate function implementation of '%s'")
 	UsedBeforeDeclaration     = &Message{Code: 2448, Kind: ReferenceError, Phase: PhaseCheck, Text: "cannot access '%s' before initialization"}
 	UsedBeforeAssigned        = &Message{Code: 2454, Kind: Unsupported, Phase: PhaseCheck, Text: "variable '%s' is used before being assigned"}
 	// The checker's type errors (TDD-00230 P2.7).
@@ -125,6 +126,8 @@ var (
 	NotAssignable         = &Message{Code: 2322, Kind: TypeScriptError, Phase: PhaseCheck, Text: "type '%s' is not assignable to type '%s'"}
 	ClassNotCallable      = &Message{Code: 2348, Kind: TypeScriptError, Phase: PhaseCheck, Text: "value of type '%s' is not callable; did you mean to include 'new'?"}
 	ObjectToFewTypes      = &Message{Code: 2696, Kind: TypeScriptError, Phase: PhaseCheck, Text: "the 'Object' type is assignable to very few other types; did you mean to use the 'any' type instead?"}
+	NoCommonProperties    = &Message{Code: 2559, Kind: TypeScriptError, Phase: PhaseCheck, Text: "type '%s' has no properties in common with type '%s'"}
+	TypeArgConstraint     = &Message{Code: 2344, Kind: TypeScriptError, Phase: PhaseCheck, Text: "type '%s' does not satisfy the constraint '%s'"}
 	ArgNotAssignable      = &Message{Code: 2345, Kind: TypeScriptError, Phase: PhaseCheck, Text: "argument of type '%s' is not assignable to parameter of type '%s'"}
 	ArgCount              = &Message{Code: 2554, Kind: TypeScriptError, Phase: PhaseCheck, Text: "expected %s arguments, but got %d"}
 	ArgCountAtLeast       = &Message{Code: 2555, Kind: TypeScriptError, Phase: PhaseCheck, Text: "expected at least %d arguments, but got %d"}
@@ -163,6 +166,7 @@ var (
 	TypeArgCount          = &Message{Code: 2558, Kind: TypeScriptError, Phase: PhaseCheck, Text: "expected %s type arguments, but got %d"}
 	NoOverloadMatches     = &Message{Code: 2769, Kind: TypeScriptError, Phase: PhaseCheck, Text: "no overload matches this call"}
 	CannotFindName        = &Message{Code: 2304, Kind: TypeScriptError, Phase: PhaseCheck, Text: "cannot find name '%s'"}
+	ThisImplicitlyAny     = &Message{Code: 2683, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'this' implicitly has type 'any' because it does not have a type annotation"}
 	// The forms of TS2304 tsc gives when it knows more about the name.
 	CannotFindNameDidYouMean = &Message{Code: 2552, Kind: TypeScriptError, Phase: PhaseCheck, Text: "cannot find name '%s'; did you mean '%s'?"}
 	MissingStaticPrefix      = &Message{Code: 2662, Kind: TypeScriptError, Phase: PhaseCheck, Text: "cannot find name '%s'; did you mean the static member '%s.%[1]s'?"}
