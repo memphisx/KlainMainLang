@@ -40,7 +40,6 @@
    "differences": [
     "A worker's file is compiled in: `new Worker` takes a path literal (resolved relative to the file it is written in) or `__filename`; a computed path or `eval: true` code fails at `new Worker`",
     "`terminate()` takes effect at the worker's next event-loop turn: a worker busy in synchronous code runs on until it yields",
-    "A TypedArray view over a `SharedArrayBuffer` is copied, not shared: send the buffer and re-view it",
     "A transferred `ArrayBuffer` is copied, not detached",
     "A worker shares `process.env` with its parent and writes `stdout`/`stderr` directly; the stdio/env/resourceLimits/argv/execArgv options and `getHeapSnapshot()` are not ported",
     "An `'uncaughtException'` listener in a worker runs but the worker still ends with code 1",

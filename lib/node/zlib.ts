@@ -8,30 +8,7 @@ import { Transform, finished } from 'stream';
 import type { TransformOptions, TransformCallback } from 'stream';
 import { isArrayBufferView, isAnyArrayBuffer, isUint8Array } from './util_types';
 import { received } from './internal_dns_utils';
-
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
 const kMaxLength = 9007199254740991;
 

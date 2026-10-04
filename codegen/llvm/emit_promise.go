@@ -243,9 +243,7 @@ func (e *Emitter) emitPromiseReject(args []ast.Expression, pos ast.Pos) (Value, 
 		pay = "0"
 	}
 	q := e.emitAllocSettledPromise()
-	e.storeRejectReason(q, tag, pay)
-	e.ensurePromiseSettle()
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 2)", q))
+	e.emitRejectPromise(q, tag, true, pay)
 	qt := PromiseOf(TypeNever)
 	qt.PromiseTask = true
 	return Value{Ref: q, Ty: qt}, nil

@@ -92,13 +92,6 @@ console.log(`+"`${bare}`"+`);
 `, "ValidationError\nValidationError on email\nValidationError: invalid email\nValidationError")
 }
 
-func TestE2EExtendsErrorSubSubclassRejected(t *testing.T) {
-	assertCodegenError(t, `
-class AError extends Error {}
-class BError extends AError {}
-`, "extending an Error subclass")
-}
-
 func TestE2EProxyGetSetTraps(t *testing.T) {
 	assertOutputCompatJS(t, `
 const target = { a: 1 }

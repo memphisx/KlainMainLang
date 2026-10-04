@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "33/33",
     "loosePct": 100,
-    "strict": "18/33",
-    "strictPct": 55
+    "strict": "19/33",
+    "strictPct": 58
   },
   "lede": "What a CLI tool or containerized service needs day-to-day: argv, environment, exit codes, stdin, signals, timing, and child processes. The recurring divergence: every event/handler API here takes one listener slot per event, an arrow/function-literal only, firing synchronously from the event loop's dispatch rather than through a microtask queue. child_process (spawn/exec/fork/spawnSync) lives here too — it is what a process orchestrator actually reaches for.",
   "entries": [
@@ -293,7 +293,7 @@
       "name": "process.stdout.columns / .rows",
       "statusRow": "process.stdout.columns / .rows (terminal size)",
       "signature": "process.stdout.columns: number; process.stdout.rows: number",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "The terminal's width and height, on a tty.WriteStream: read at creation and refreshed on SIGWINCH, which emits 'resize' when the size changed. Off a TTY (piped/redirected) the stream has no columns/rows: a real undefined, as in Node; ?? 80 is the idiomatic fallback.",
       "differences": [
         "Stored into a declared `number` binding off a TTY, the value reads 0, not `undefined`."

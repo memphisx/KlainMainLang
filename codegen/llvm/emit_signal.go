@@ -18,11 +18,17 @@ import "fmt"
 // abortSignalClass is the program's AbortSignal class type, or false when
 // the program does not include the global module.
 func (e *Emitter) abortSignalClass() (Type, bool) {
-	name, ok := e.globalLinks["AbortSignal"]
+	return e.globalClass("AbortSignal")
+}
+
+// globalClass is the class type a global module implements global name with
+// (TDD-00232), or false when the program does not include the module.
+func (e *Emitter) globalClass(name string) (Type, bool) {
+	linked, ok := e.globalLinks[name]
 	if !ok {
 		return Type{}, false
 	}
-	info, ok := e.classes[name]
+	info, ok := e.classes[linked]
 	if !ok {
 		return Type{}, false
 	}
@@ -71,10 +77,10 @@ entry:
 		return
 	}
 	e.ensurePerformanceNow()
+	abIdx, abTy, sig, _ := e.classField(sig, "#aborted")
+	rIdx, _, _, _ := e.classField(sig, "#reason")
+	dlIdx, dlTy, _, _ := e.classField(sig, "#deadline")
 	structIR := sig.StructIR()
-	abIdx, abTy, _ := sig.FieldIndex("#aborted")
-	rIdx, _, _ := sig.FieldIndex("#reason")
-	dlIdx, dlTy, _ := sig.FieldIndex("#deadline")
 	// The deadline as a double (a `number` field is either width).
 	dlLoad := "  %dl = load double, ptr %dl_p, align 8"
 	if dlTy.IR != "double" {
@@ -116,4 +122,20 @@ entry:
   %%t = fcmp ogt double %%dl, 0.0
   ret i1 %%t
 }`, structIR, abIdx, abTy.IR, dlIdx, dlLoad, rIdx))
+}
+
+// isGlobalClassInstance reports t an instance of the class a global module
+// implements global name with, or of a class derived from it.
+func (e *Emitter) isGlobalClassInstance(t Type, name string) bool {
+	cls, ok := e.globalClass(name)
+	if !ok || !t.IsClass || t.IsDynamic {
+		return false
+	}
+	for c, i := t.ClassName, 0; c != "" && i < 64; i++ {
+		if c == cls.ClassName {
+			return true
+		}
+		c = e.classes[c].BaseClass
+	}
+	return false
 }

@@ -21,18 +21,11 @@ import { _kmlOnWarning, _kmlSetWarningSink } from './internal_process_warning';
 import * as methods from './internal_process_methods';
 import * as penv from './internal_process_env';
 import * as phr from './internal_process_hrtime';
+import { NodeError } from './internal_errors';
 
 const kExit = 0;
 const kUncaughtException = 1;
 const kUnhandledRejection = 2;
-
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
 
 // ErrnoException: `${syscall} ${code}`, with errno, code, syscall.
 function errnoException(errnoIn: number, syscall: string): Error {

@@ -58,17 +58,9 @@ function getValidMode(mode: any, type: string): number {
     if (mode === null || mode === undefined) return def;
     validateInteger(mode, 'mode', -Number.MAX_SAFE_INTEGER);
     if (mode < 0 || mode > 7) {
-        throw new NodeRangeErrorRaw('ERR_OUT_OF_RANGE', 'mode is out of range: >= 0 && <= 7');
+        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'mode is out of range: >= 0 && <= 7');
     }
     return mode;
-}
-
-class NodeRangeErrorRaw extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
 }
 
 function validatePosition(position: any, name: string): void {

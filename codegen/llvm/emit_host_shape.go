@@ -23,10 +23,20 @@ type hostMember struct {
 	name     string
 	method   bool
 	readonly bool
+	// optional marks a member the declaration makes optional (an
+	// iterator's `return?()`): a host value without it reads undefined.
+	optional bool
 	sig      *checker.Type // a method's signature (the longest overload)
 	// paramTypeNames are the declared parameters' type names (`K` of
 	// `get(key: K)`), for the type parameters the concrete host type binds.
 	paramTypeNames []string
+}
+
+// iteratorInterfaces are the declarations of the iterator classes, which
+// carry a display name (`Array Iterator`) rather than their interface's.
+var iteratorInterfaces = map[string]string{
+	"Array Iterator": "ArrayIterator", "Map Iterator": "MapIterator", "Set Iterator": "SetIterator",
+	"RegExp String Iterator": "RegExpStringIterator",
 }
 
 // hostMembers lists the members the declaration of class declares.
@@ -34,6 +44,9 @@ func (e *Emitter) hostMembers(class string) []hostMember {
 	c := e.front()
 	if c == nil {
 		return nil
+	}
+	if decl, ok := iteratorInterfaces[class]; ok {
+		class = decl
 	}
 	t := c.GlobalInterface(class)
 	if t == nil {
@@ -44,7 +57,7 @@ func (e *Emitter) hostMembers(class string) []hostMember {
 		if p.Name == "" || strings.HasPrefix(p.Name, "__") || strings.ContainsAny(p.Name, "[]@ ") {
 			continue
 		}
-		m := hostMember{name: p.Name, readonly: p.Readonly}
+		m := hostMember{name: p.Name, readonly: p.Readonly, optional: p.Optional}
 		ft := p.Type
 		if ft != nil && ft.Flags&checker.Object != 0 && ft.Kind == checker.Function && !p.Accessor {
 			m.method = true
@@ -146,7 +159,10 @@ func (e *Emitter) emitHostShapeGetter(name string, h hostLayout, members []hostM
 				bv, err = e.emitBoxValue(v)
 			}
 			if err != nil || bv.Ref == "" {
-				if !e.blockDone {
+				if !e.blockDone && m.optional {
+					// An optional member this value does not implement.
+					e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
+				} else if !e.blockDone {
 					e.emitThrowTypeError("the property '" + m.name + "' can't be read through a dynamic value")
 				}
 			} else {

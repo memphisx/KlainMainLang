@@ -224,9 +224,6 @@
       },
       "exampleKey": "fetch/fetch_request_headers",
       "snippet": "const req = new Request('http://127.0.0.1:8765/post', {\n  method: 'POST', headers: headers, body: JSON.stringify({ hello: 'world' })\n})\nconst posted = await fetch(req)",
-      "differences": [
-        "Its Headers keeps names lowercased, iterates in insertion order, and joins repeated set-cookie values."
-      ],
       "seeAlso": [
         "fetch.fetch",
         "fetch.headers"
@@ -239,15 +236,15 @@
       "id": "fetch.headers",
       "name": "new Headers()",
       "statusRow": "Request / Headers objects",
-      "signature": "new Headers(): Headers",
+      "signature": "new Headers(init?: HeadersInit): Headers",
       "badge": "exact",
-      "description": "A case-insensitive (lowercased-key) header bag. get/set/has/delete behave like Map<string,string>'s own — because storage-wise it is one. A real Headers instance is accepted anywhere fetch takes headers, alongside a plain Map<string,string>.",
+      "description": "The Fetch standard's header list, as Node's undici has it: case-insensitive names that console.log shows as given, validated names and values, iteration sorted by name with values combined and set-cookie values listed apart (getSetCookie()). Accepted anywhere fetch, Request or Response take headers; it can be subclassed.",
       "returns": {
         "type": "Headers",
-        "desc": "An empty header bag."
+        "desc": "A header list, filled from init (a Headers, [name, value] pairs or a record)."
       },
-      "exampleKey": "fetch/fetch_request_headers",
-      "snippet": "const headers = new Headers()\nheaders.set('Content-Type', 'application/json')\nconsole.log(headers.get('content-type'))   // application/json",
+      "exampleKey": "fetch/headers",
+      "snippet": "const h = new Headers({ 'Content-Type': 'text/plain' })\nh.append('Set-Cookie', 'a=1')\nh.append('Set-Cookie', 'b=2')\nconsole.log(h.getSetCookie())   // [ 'a=1', 'b=2' ]",
       "seeAlso": [
         "fetch.headers.append",
         "fetch.request"

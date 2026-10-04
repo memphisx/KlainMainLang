@@ -285,6 +285,16 @@ func (c *Checker) flowType(f *binder.FlowNode, r ref, declared *Type, w *flowWal
 			if len(r.path) > 0 {
 				return declared, nil // the root was replaced
 			}
+			if declared.Flags&Union == 0 && !c.evolving[r.sym] && !c.Unanswered(declared) {
+				// Only a union narrows by assignment (tsc's
+				// getTypeAtFlowAssignment): the stored value's type is not
+				// needed, and computing it re-walks every binding it reads.
+				if _, pattern := f.Node.(*ast.Identifier); !pattern {
+					if a, ok := f.Node.(*ast.AssignmentExpression); !ok || !compoundLike(a) {
+						return declared, nil
+					}
+				}
+			}
 			at := c.assignedType(f, declared)
 			if _, pattern := f.Node.(*ast.Identifier); pattern && c.Unanswered(at) {
 				return at, nil // a destructured value the checker cannot type

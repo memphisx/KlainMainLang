@@ -2,13 +2,7 @@
 // `Buffer`, `Blob`, `atob` and `btoa` are the globals; this file holds the
 // constants, isUtf8, isAscii, transcode and SlowBuffer.
 
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeTypeError } from './internal_errors';
 
 export const kMaxLength = 9007199254740991;
 export const kStringMaxLength = 536870888;

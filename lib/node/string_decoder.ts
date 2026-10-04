@@ -3,13 +3,7 @@
 // (the JavaScript implementation Node shipped before moving it to C++; the
 // observable behaviour is the same).
 
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeTypeError } from './internal_errors';
 
 function normalizeEncoding(enc: any): string | undefined {
     const e = enc === undefined || enc === null || enc === '' ? 'utf8' : String(enc).toLowerCase();

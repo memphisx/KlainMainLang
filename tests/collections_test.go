@@ -1044,3 +1044,19 @@ console.log(has(undefined), has(new Map()), hasSet(null), hasSet(new Set()));
 console.log(copy(new Map([['a', 1]])), copy(undefined));
 `, "0 1 0 1\nMap(2) { 'a' => 1, 'z' => 26 } Map(1) { 'z' => 26 }")
 }
+
+// WeakRef is the global module's class (ADR-01366): its targets, its error,
+// its inspect output and typed arrays of it, as Node has them.
+func TestE2EWeakRefGlobalClassParity(t *testing.T) {
+	assertSameAsNode(t, `
+class Box { v = 3; }
+const o = new Box();
+const w = new WeakRef(o);
+console.log(w.deref() === o, w.deref()!.v, w, String(w), Object.prototype.toString.call(w), Object.keys(w));
+try { new WeakRef(1 as any); } catch (e) { console.log((e as Error).name, (e as Error).message); }
+const s = Symbol('s'); console.log(new WeakRef(s as any).deref() === s);
+try { new WeakRef(Symbol.for('x') as any); } catch (e) { console.log((e as Error).name, (e as Error).message); }
+const ws: WeakRef<Box>[] = [w]; console.log(ws[0].deref()?.v, [w], w instanceof WeakRef);
+const fw = new WeakRef(() => 1); console.log(typeof fw.deref());
+`)
+}

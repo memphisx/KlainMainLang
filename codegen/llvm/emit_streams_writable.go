@@ -14,8 +14,6 @@ import (
 // %v1)` — env is a {userClosure, stream} pair: rebuild the typed chunk, invoke
 // the sink's write(chunk, controller?), return its promise or null.
 func (e *Emitter) emitStreamWriteWrap(userTy, chunkTy Type) string {
-	e.streamSiteCtr++
-	fn := fmt.Sprintf("@__kml_ws_writewrap_%d", e.streamSiteCtr)
 	isAsync := callbackReturnsPromise(userTy)
 	nParams := len(userTy.FuncParams)
 
@@ -70,15 +68,13 @@ func (e *Emitter) emitStreamWriteWrap(userTy, chunkTy Type) string {
 	body := e.allocas.String() + e.body.String()
 	restore()
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine ptr %s(ptr %%env, i64 %%v0, i64 %%v1) {\nentry:\n%s}\n", fn, body))
+	fn := e.defineContentNamed("@__kml_ws_writewrap.", "ptr", "ptr %env, i64 %v0, i64 %v1", body)
 	return fn
 }
 
 // emitStreamCloseWrap emits `ptr @__kml_ws_closewrap_N(ptr %env)` — env is
 // the user closure header; zero-parameter close callback.
 func (e *Emitter) emitStreamCloseWrap(userTy Type) string {
-	e.streamSiteCtr++
-	fn := fmt.Sprintf("@__kml_ws_closewrap_%d", e.streamSiteCtr)
 	isAsync := callbackReturnsPromise(userTy)
 
 	restore := e.beginThunkEmit()
@@ -102,7 +98,7 @@ func (e *Emitter) emitStreamCloseWrap(userTy Type) string {
 	body := e.allocas.String() + e.body.String()
 	restore()
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine ptr %s(ptr %%env) {\nentry:\n%s}\n", fn, body))
+	fn := e.defineContentNamed("@__kml_ws_closewrap.", "ptr", "ptr %env", body)
 	return fn
 }
 

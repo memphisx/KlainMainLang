@@ -155,8 +155,10 @@ try { Atomics.load(ta, -1) } catch (e) { console.log((e as Error).name) }
 try { Atomics.store(ta, NaN, 7); console.log(Atomics.load(ta, 0)) } catch (e) { console.log((e as Error).name) }
 console.log(Atomics.add(ta, 2, 5), Atomics.load(ta, 2))
 `
-	assertOutput(t, src, "not-equal timed-out timed-out not-equal\nRangeError\nRangeError\n7\n0 5")
-	assertSameAsNode(t, src)
+	// A string index is a TypeScript error (no Atomics overload takes it):
+	// the JavaScript lane runs it.
+	assertOutputCompatJS(t, src, "not-equal timed-out timed-out not-equal\nRangeError\nRangeError\n7\n0 5")
+	assertSameAsNodeCompatJS(t, src)
 }
 
 func TestE2EAtomicsWaitGrowableLengthReadFirst(t *testing.T) {

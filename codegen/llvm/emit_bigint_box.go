@@ -1,6 +1,37 @@
 package llvm
 
-import "fmt"
+import (
+	_ "embed"
+	"fmt"
+)
+
+//go:embed boxsrc/bigintbox.c
+var bigintBoxSource string
+
+//go:embed boxsrc/bigintrel.c
+var bigintRelSource string
+
+// bigintBoxDefines are the constants the boxed-bigint C files share with
+// the emitter.
+func bigintBoxDefines() string {
+	return fmt.Sprintf("#define KML_BIGINT_MAGIC %dLL\n#define KML_NB_DOUBLE_OFFSET %dLL\n", kmlBoxedBigIntMagic, nbDoubleOffset)
+}
+
+// BigIntBoxSource is the boxed-bigint hooks' C source (boxsrc/bigintbox.c).
+func BigIntBoxSource() string { return bigintBoxSource }
+
+// BigIntRelSource is the dynamic relational comparison's C source
+// (boxsrc/bigintrel.c).
+func BigIntRelSource() string { return bigintBoxDefines() + bigintRelSource }
+
+// UsesBigIntBoxC reports whether the program links the boxed-bigint hooks:
+// they exist (as C) only with the bigint runtime; without it they are
+// stubs defined in the module.
+func (e *Emitter) UsesBigIntBoxC() bool { return e.usedBigIntBoxHooks && e.UsesBigInt() }
+
+// UsesBigIntRelC reports whether the program links the dynamic relational
+// comparison with a bigint (boxsrc/bigintrel.c).
+func (e *Emitter) UsesBigIntRelC() bool { return e.usedAnyBigIntRel && e.UsesBigInt() }
 
 // emit_bigint_box.go — a bigint held in an `any` (TDD-00229, a slice of
 // TDD-00228's "a handle boxes as a typed heap cell"). A bigint is a bare
@@ -80,119 +111,21 @@ func (e *Emitter) ensureBoxedBigIntHooks() {
 	// both hooks are defined at finalize.
 }
 
-// emitBoxedBigIntHooksFinalize defines @__kml_boxed_bigint_str (decimal
-// digits of a cell's bigint, or "" without a bigint runtime) and
-// @__kml_boxed_bigint_eq (value equality of two cells' bigints).
+// emitBoxedBigIntHooksFinalize declares the C hooks (boxsrc/bigintbox.c:
+// decimal digits of a cell's bigint, value equality of two cells' bigints)
+// or, without a bigint runtime, defines them as stubs.
 func (e *Emitter) emitBoxedBigIntHooksFinalize() {
 	if !e.usedBigIntBoxHooks {
 		return
 	}
 	if e.UsesBigInt() {
-		e.emitGlobal(`
-define ptr @__kml_boxed_bigint_str(ptr %cell) {
-entry:
-  %slot = getelementptr i8, ptr %cell, i64 8
-  %b = load ptr, ptr %slot, align 8
-  %raw = call ptr @__kml_bigint_to_str(ptr %b, i32 10)
-  %s = call ptr @__kml_str_from_cstr(ptr %raw)
-  ret ptr %s
-}
-
-define i1 @__kml_boxed_bigint_eq(ptr %ca, ptr %cb) {
-entry:
-  %sa = getelementptr i8, ptr %ca, i64 8
-  %ba = load ptr, ptr %sa, align 8
-  %sb = getelementptr i8, ptr %cb, i64 8
-  %bb = load ptr, ptr %sb, align 8
-  %c = call i32 @__kml_bigint_cmp(ptr %ba, ptr %bb)
-  %eq = icmp eq i32 %c, 0
-  ret i1 %eq
-}
-
-define i1 @__kml_boxed_bigint_eq_num(ptr %cell, double %d) {
-entry:
-  %nan = fcmp uno double %d, %d
-  br i1 %nan, label %no, label %cmp
-no:
-  ret i1 false
-cmp:
-  %slot = getelementptr i8, ptr %cell, i64 8
-  %b = load ptr, ptr %slot, align 8
-  %c = call i32 @__kml_bigint_cmp_double(ptr %b, double %d)
-  %eq = icmp eq i32 %c, 0
-  ret i1 %eq
-}`)
-		e.emitAnyBigIntRel(`; The bigint in a boxed word, or null when it holds none.
-define ptr @__kml_any_bigint_of(i64 %v) {
-entry:
-  %small = icmp ult i64 %v, 65536
-  %num = icmp uge i64 %v, ` + fmt.Sprint(nbDoubleOffset) + `
-  %lo = and i64 %v, 7
-  %obj = icmp eq i64 %lo, 1
-  %bad0 = or i1 %small, %num
-  %notobj = xor i1 %obj, true
-  %bad = or i1 %bad0, %notobj
-  br i1 %bad, label %none, label %probe
-probe:
-  %pi = and i64 %v, -8
-  %cell = inttoptr i64 %pi to ptr
-  %f0 = load i64, ptr %cell, align 8
-  %isbig = icmp eq i64 %f0, ` + fmt.Sprint(kmlBoxedBigIntMagic) + `
-  br i1 %isbig, label %big, label %none
-big:
-  %slot = getelementptr i8, ptr %cell, i64 8
-  %b = load ptr, ptr %slot, align 8
-  ret ptr %b
-none:
-  ret ptr null
-}
-
-; A relational comparison with a bigint on either side (JS's IsLessThan):
-; 0 when neither is one (compare as numbers), else 1 less, 2 equal,
-; 3 greater, 4 unordered (the other side is NaN).
-define i32 @__kml_any_bigint_rel(i64 %a, i64 %b) {
-entry:
-  %ba = call ptr @__kml_any_bigint_of(i64 %a)
-  %bb = call ptr @__kml_any_bigint_of(i64 %b)
-  %na = icmp eq ptr %ba, null
-  %nb = icmp eq ptr %bb, null
-  %neither = and i1 %na, %nb
-  br i1 %neither, label %none, label %some
-none:
-  ret i32 0
-some:
-  %both0 = or i1 %na, %nb
-  br i1 %both0, label %mixed, label %both
-both:
-  %c = call i32 @__kml_bigint_cmp(ptr %ba, ptr %bb)
-  br label %map
-mixed:
-  br i1 %na, label %numleft, label %numright
-numright:
-  %rd = call double @__kml_any_tonum(i64 %b)
-  %rnan = fcmp uno double %rd, %rd
-  br i1 %rnan, label %unord, label %rcmp
-rcmp:
-  %c2 = call i32 @__kml_bigint_cmp_double(ptr %ba, double %rd)
-  br label %map
-numleft:
-  %ld = call double @__kml_any_tonum(i64 %a)
-  %lnan = fcmp uno double %ld, %ld
-  br i1 %lnan, label %unord, label %lcmp
-lcmp:
-  %c3 = call i32 @__kml_bigint_cmp_double(ptr %bb, double %ld)
-  %c3n = sub i32 0, %c3
-  br label %map
-map:
-  %cc = phi i32 [ %c, %both ], [ %c2, %rcmp ], [ %c3n, %lcmp ]
-  %lt = icmp slt i32 %cc, 0
-  %gt = icmp sgt i32 %cc, 0
-  %r1 = select i1 %gt, i32 3, i32 2
-  %r = select i1 %lt, i32 1, i32 %r1
-  ret i32 %r
-unord:
-  ret i32 4
-}`)
+		// Defined in boxsrc/bigintbox.c and bigintrel.c.
+		e.emitGlobal(`declare ptr @__kml_boxed_bigint_str(ptr)
+declare zeroext i1 @__kml_boxed_bigint_eq(ptr, ptr)
+declare zeroext i1 @__kml_boxed_bigint_eq_num(ptr, double)`)
+		if e.usedAnyBigIntRel {
+			e.emitGlobal("declare i32 @__kml_any_bigint_rel(i64, i64)")
+		}
 		return
 	}
 	e.emitGlobal(`

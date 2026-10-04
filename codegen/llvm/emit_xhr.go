@@ -373,3 +373,40 @@ func (e *Emitter) emitXHRGetAllResponseHeaders(objExpr ast.Expression, args []as
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_xhr_headers_all(ptr %s)", res, mapVal.Ref))
 	return Value{Ref: res, Ty: TypePtr}, nil
 }
+
+// emitLoweredHeaderName evaluates nameExpr, lowercased.
+func (e *Emitter) emitLoweredHeaderName(nameExpr ast.Expression) (string, error) {
+	nameVal, err := e.emitExpr(nameExpr)
+	if err != nil {
+		return "", err
+	}
+	nameVal = e.coerce(nameVal, TypePtr)
+	e.ensureStringToLower()
+	lowered := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_tolower(ptr %s)", lowered, nameVal.Ref))
+	return lowered, nil
+}
+
+// The XMLHttpRequest methods, reached through their `@intrinsic`
+// declarations.
+func init() {
+	for name, emit := range map[string]func(e *Emitter, obj ast.Expression, args []ast.Expression, pos ast.Pos) (Value, error){
+		"open":                  (*Emitter).emitXHROpen,
+		"setRequestHeader":      (*Emitter).emitXHRSetRequestHeader,
+		"send":                  (*Emitter).emitXHRSend,
+		"abort":                 (*Emitter).emitXHRAbort,
+		"getResponseHeader":     (*Emitter).emitXHRGetResponseHeader,
+		"getAllResponseHeaders": (*Emitter).emitXHRGetAllResponseHeaders,
+	} {
+		emit := emit
+		intrinsics["XMLHttpRequest.prototype."+name] = intrinsic{
+			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+				return emit(e, ex.Callee.(*ast.MemberExpression).Object, ex.Args, ex.GetPos())
+			},
+			ty: func(e *Emitter, ex *ast.CallExpression) Type {
+				t, _ := e.inferMethodNameType(ex, ex.Callee.(*ast.MemberExpression))
+				return t
+			},
+		}
+	}
+}

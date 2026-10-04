@@ -121,6 +121,58 @@ func (e *Emitter) emitReflectCall(method string, args []ast.Expression, pos ast.
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_dynobj_delete(ptr %s, ptr %s)", r, bag, keyRef))
 		return Value{Ref: r, Ty: TypeBool}, nil
+	case "construct":
+		// Reflect.construct(C, args): `new C(...args)` through the run-time
+		// constructor dispatch.
+		if len(args) != 2 && len(args) != 3 {
+			return Value{}, fmt.Errorf("%d:%d: Reflect.construct takes 2 or 3 arguments", pos.Line, pos.Col)
+		}
+		cv, err := e.emitExprWithObjectHint(args[0], TypeAny)
+		if err != nil {
+			return Value{}, err
+		}
+		cb, err := e.emitBoxValue(cv)
+		if err != nil {
+			return Value{}, err
+		}
+		if len(args) == 3 {
+			// A newTarget other than the target itself (or undefined) would
+			// give the instance another constructor's prototype, which a
+			// class instance here cannot take: a TypeError, never a silent
+			// instance of the target.
+			nv, err := e.emitExprWithObjectHint(args[2], TypeAny)
+			if err != nil {
+				return Value{}, err
+			}
+			nb, err := e.emitBoxValue(nv)
+			if err != nil {
+				return Value{}, err
+			}
+			e.ensureAnyEq()
+			undef, same, ok := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", undef, nb.Ref, nbUndefined))
+			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_any_eq(i64 %s, i64 %s)", same, nb.Ref, cb.Ref))
+			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", ok, undef, same))
+			okL, badL := e.freshLabel("refl.nt.ok"), e.freshLabel("refl.nt.bad")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, okL, badL))
+			e.emitLabel(badL)
+			e.emitThrowTypeError("Reflect.construct with a newTarget other than the target is not supported")
+			e.emitLabel(okL)
+		}
+		argv, n, err := e.emitDynArgv([]ast.Expression{ast.NewSpreadElement(args[1], args[1].GetPos())}, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureNanBox()
+		e.usedDynConstruct = true
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dyn_construct(i64 %s, ptr %s, i64 %s, ptr %s)", r, cb.Ref, argv, n, e.internString("Reflect.construct target is not a constructor")))
+		return Value{Ref: r, Ty: TypeAny}, nil
+	case "getOwnPropertyDescriptor":
+		if err := need(2); err != nil {
+			return Value{}, err
+		}
+		return e.emitObjectGetOwnPropertyDescriptor(args, pos)
 	case "ownKeys":
 		if err := need(1); err != nil {
 			return Value{}, err

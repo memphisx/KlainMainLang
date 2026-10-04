@@ -42,9 +42,9 @@ func (e *Emitter) liveMapIterable(expr ast.Expression) (coll ast.Expression, ty 
 }
 
 // mapIterable reports whether t is a Map or Set with the ordered, iterable
-// runtime (not a WeakMap, Headers, URLSearchParams or dictionary).
+// runtime (not a WeakMap or dictionary).
 func mapIterable(t Type) bool {
-	return (t.IsMap || t.IsSet) && !t.Weak && !t.IsHeaders && !t.IsURLSearchParams && !t.IsDynamicObject && !t.IsDynamic
+	return (t.IsMap || t.IsSet) && !t.Weak && !t.IsDynamicObject && !t.IsDynamic
 }
 
 // collIterMethod maps an iterator-returning method name to what it yields.
@@ -176,10 +176,18 @@ func (e *Emitter) emitCollIterNext(it Value) Value {
 	case isNullableScalar(vTy):
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", StructFieldIR(vTy), e.makeNullableScalarAgg(vTy, more, raw), vGep))
 	default:
-		// A pointer value (string, object, array header) is null when done.
+		// A pointer value (string, object, array header) is null when done,
+		// a boxed one the undefined word, any other its zero.
+		ir, absent := StructFieldIR(elemTy), "null"
+		switch {
+		case elemTy.IsDynamic:
+			absent = fmt.Sprintf("%d", nbUndefined)
+		case ir != "ptr":
+			absent = zeroRef(elemTy)
+		}
 		sel := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", sel, more, raw))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sel, vGep))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s %s", sel, more, ir, raw, ir, absent))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ir, sel, vGep))
 	}
 	dIdx, _, _ := resTy.FieldIndex("done")
 	dGep, done := e.freshReg(), e.freshReg()
@@ -387,6 +395,14 @@ func (e *Emitter) emitMapSlotHeader(mapPtr string, off int, pos string, ty Type)
 // emitCollIterCall is a method call on an Array, Map or Set iterator: next(),
 // toArray() (ES2025's iterator helper) and [Symbol.iterator]'s self.
 func (e *Emitter) emitCollIterCall(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if _, helper := iteratorHelperArity[mem.Property]; helper {
+		// An Iterator.prototype helper reached without its declaration (a
+		// host adapter's synthesized call): its TypeScript function, the
+		// receiver first.
+		if fn, ok := e.globalLinks["__kml_Iterator_"+mem.Property]; ok {
+			return e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(fn, pos), append([]ast.Expression{mem.Object}, args...), pos))
+		}
+	}
 	it, err := e.emitExpr(mem.Object)
 	if err != nil {
 		return Value{}, err
@@ -410,6 +426,8 @@ func (e *Emitter) emitCollIterCall(mem *ast.MemberExpression, args []ast.Express
 func collIterName(t Type) string {
 	src := *t.IterSrc
 	switch {
+	case t.IterRegExp:
+		return "RegExp String Iterator"
 	case src.IsSet:
 		return "Set Iterator"
 	case src.IsMap:
@@ -526,6 +544,12 @@ func (e *Emitter) emitArrayIterOpen(arr ast.Expression, kind mapIterKind) (Value
 	if err != nil {
 		return Value{}, err
 	}
+	return e.emitArrayIterOpenValue(v, kind, false), nil
+}
+
+// emitArrayIterOpenValue is an iterator over the array v; regexp marks
+// matchAll's RegExp String Iterator, which walks its steps the same way.
+func (e *Emitter) emitArrayIterOpenValue(v Value, kind mapIterKind, regexp bool) Value {
 	header := e.arrayReturnHeader(v)
 	e.ensureMalloc()
 	node := e.freshReg()
@@ -536,7 +560,9 @@ func (e *Emitter) emitArrayIterOpen(arr ast.Expression, kind mapIterKind) (Value
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", pp))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", sp, node))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, sp))
-	return Value{Ref: node, Ty: CollIterType(v.Ty, kind)}, nil
+	ty := CollIterType(v.Ty, kind)
+	ty.IterRegExp = regexp
+	return Value{Ref: node, Ty: ty}
 }
 
 // emitArrayIterElemRaw is an Array Iterator's element at pos, as a field

@@ -356,6 +356,8 @@ func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Valu
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", r, v.Ref))
 		return Value{Ref: r, Ty: TypeI64}, nil
+	case v.Ty.IR == "double":
+		return e.emitUnaryPlus(v, pos) // the slot's undefined is NaN (TDD-00241)
 	case v.Ty.Float || v.Ty.IsInteger() || v.Ty.IR == "i64":
 		return v, nil
 	case v.Ty.IsBigInt:
@@ -392,7 +394,8 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 	}
 	strVal = e.nullSafeParseInput(strVal)
 	radixRef := ""
-	autoRadixReg := "" // non-empty only in the omitted-radix (auto-detect) path
+	autoRadixReg := "" // the base the "0x" check applies to
+	badRadix := ""     // set when an explicit radix is outside 2..36
 	if len(args) == 2 {
 		rv, err := e.emitExpr(args[1])
 		if err != nil {
@@ -414,7 +417,23 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 		default:
 			r32 = e.coerce(rv, TypeI32)
 		}
-		radixRef = r32.Ref
+		// Spec: a radix of 0 (also NaN or absent) auto-detects; outside 2..36
+		// the result is NaN. libc differs here (glibc's strtoll parses base 1
+		// as 0), so both are settled before strtoll sees the base.
+		e.ensureParseIntBase()
+		auto, isZero := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_parseint_base(ptr %s)", auto, strVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isZero, r32.Ref))
+		radixRef = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i32 %s, i32 %s", radixRef, isZero, auto, r32.Ref))
+		autoRadixReg = radixRef
+		lo, hi := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i32 %s, 2", lo, radixRef))
+		e.emitInstr(fmt.Sprintf("%s = icmp sgt i32 %s, 36", hi, radixRef))
+		badRadix = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", badRadix, lo, hi))
+		radixRef = e.freshReg() // a base strtoll accepts; the result is discarded
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i32 10, i32 %s", radixRef, badRadix, autoRadixReg))
 	} else {
 		// No radix argument: real JS auto-detects base 16 for a "0x"/"0X"
 		// prefix and base 10 otherwise (no octal auto-detect) — computed at
@@ -458,6 +477,11 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", hexStuck, isHex, stuckOnX))
 		merged := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", merged, noDigits, hexStuck))
+		noDigits = merged
+	}
+	if badRadix != "" {
+		merged := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", merged, noDigits, badRadix))
 		noDigits = merged
 	}
 	asF := e.freshReg()

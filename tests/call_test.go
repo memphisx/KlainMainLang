@@ -950,16 +950,21 @@ console.log(decodeURI("path%2Ftest"))
 }
 
 func TestE2ECryptoGetRandomValues(t *testing.T) {
+	// An integer TypedArray is filled in place and returned; any other
+	// argument (a plain array, a float TypedArray, a value held in any that
+	// is neither) is Node's TypeMismatchError.
 	assertOutput(t, `
-let buf: number[] = new Array<number>(16)
-crypto.getRandomValues(buf)
-console.log(buf.length)
-let allInRange = true
-for (const b of buf) {
-    if (b < 0 || b > 255) { allInRange = false }
+const buf = new Uint8Array(16)
+const same = crypto.getRandomValues(buf)
+console.log(same === buf, buf.length)
+const words = crypto.getRandomValues(new Uint32Array(4))
+console.log(words.length)
+const held: any = new Int16Array(3)
+console.log(crypto.getRandomValues(held).length)
+for (const bad of [[1, 2] as any, new Float64Array(2) as any, new DataView(new ArrayBuffer(2)) as any]) {
+    try { crypto.getRandomValues(bad); console.log("filled") } catch (e: any) { console.log(e.name, e.code) }
 }
-console.log(allInRange)
-`, "16\ntrue")
+`, "true 16\n4\n3\nTypeMismatchError 17\nTypeMismatchError 17\nTypeMismatchError 17")
 }
 
 func TestE2ECryptoRandomUUID(t *testing.T) {
@@ -1077,4 +1082,23 @@ console.log("a".concat(absent as string), "xnull".indexOf(absent as string), "b"
 const o = { toString() { return "T" }, valueOf() { return 7 } }
 console.log("a".concat(1, true, null, undefined, o, [1, 2]), "anull".indexOf(null), "xundefined".includes(undefined))
 `, "a1truenullundefinedT1,2 1 true")
+}
+
+// The builtin constructors called as functions dispatch through their
+// declarations' call signatures; each is a function value too, and a
+// constant bound to one reads the builtin's own statics.
+func TestE2EBuiltinConstructorCallsAndValues(t *testing.T) {
+	assertOutput(t, `
+console.log(String(12), Number("3.5"), Number(7), Boolean(0), BigInt(5), typeof Symbol("d"), Symbol("q").description)
+const xs = ["1", "2"].map(Number)
+console.log(xs, [0, 1].filter(Boolean), [1, 2].map(String), xs[0] + 1)
+const r = [4, 9].map(Math.sqrt)
+console.log(r, ["1.5"].map(parseFloat))
+const n = Number
+console.log(n("4"), n.EPSILON > 0, typeof n.isNaN, n.isNaN(NaN), n === Number, n.name)
+const s = String
+console.log(s(true), s.fromCharCode(66), String.fromCharCode(65).toLowerCase())
+const of = Array.of
+console.log(of(1, 2), Array.of.call(null, 3), Array.of(...[5, 6]))
+`, "12 3.5 7 false 5n symbol q\n[ 1, 2 ] [ 1 ] [ '1', '2' ] 2\n[ 2, 3 ] [ 1.5 ]\n4 true function true true Number\ntrue B a\n[ 1, 2 ] [ 3 ] [ 5, 6 ]")
 }

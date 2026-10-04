@@ -1,6 +1,6 @@
 // emit_promise_then.go — Promise.prototype.then / .catch / .finally over a task
 // promise (TDD-00083 Stage 3, value-chaining added in a follow-on). A reaction is
-// a 0-arg closure {runner, env} where the runner is a per-call-site,
+// a 0-arg closure {runner, env} where the runner is a per-signature,
 // type-specialized function that reads the settled source promise's value/reason,
 // invokes the callback, and settles the *returned* promise Q with the callback's
 // result — so `p.then(f).then(g)` chains. The runner runs as a microtask, so
@@ -17,9 +17,40 @@ package llvm
 
 import (
 	"KlainMainLang/ast"
+	_ "embed"
 	"fmt"
 	"strings"
 )
+
+// The deferred settle, the finally wait and the fetch bridge live in
+// promisesrc/ (TDD-00240).
+//
+//go:embed promisesrc/defer.c
+var promiseDeferSource string
+
+//go:embed promisesrc/finally.c
+var promiseFinallySource string
+
+//go:embed promisesrc/fetchdrive.c
+var fetchDriveSource string
+
+// PromiseDeferSource is defer.c, behind kml_layout.h.
+func PromiseDeferSource() string { return layoutHeader() + promiseDeferSource }
+
+// PromiseFinallySource is finally.c, behind kml_layout.h.
+func PromiseFinallySource() string { return layoutHeader() + promiseFinallySource }
+
+// FetchDriveSource is fetchdrive.c, behind kml_layout.h.
+func FetchDriveSource() string { return layoutHeader() + fetchDriveSource }
+
+// UsesPromiseDefer reports whether the program links defer.c.
+func (e *Emitter) UsesPromiseDefer() bool { return e.fnDecls["__kml_promise_defer_settle"] }
+
+// UsesPromiseFinally reports whether the program links finally.c.
+func (e *Emitter) UsesPromiseFinally() bool { return e.fnDecls["__kml_promise_finally_wait"] }
+
+// UsesFetchDrive reports whether the program links fetchdrive.c.
+func (e *Emitter) UsesFetchDrive() bool { return e.usedFetchDriveRunner }
 
 // emitRejectCallback emits a `.catch`/onRejected callback, hinting an
 // arrow-function parameter to the shared error object shape so `e.message`/
@@ -77,11 +108,34 @@ func (e *Emitter) emitRejectCallback(arg ast.Expression) (Value, error) {
 // unchanged.
 func (e *Emitter) emitFulfillCallback(arg ast.Expression, valueTy Type) (Value, error) {
 	if valueTy.IR != "void" && valueTy.IR != "" {
-		if af, ok := arg.(*ast.ArrowFunction); ok {
-			return e.emitArrowFunctionWithHints(af, []Type{valueTy})
+		var v Value
+		var err error
+		lit := true
+		switch fn := arg.(type) {
+		case *ast.ArrowFunction:
+			v, err = e.emitArrowFunctionWithHints(fn, []Type{valueTy})
+		case *ast.FunctionExpression:
+			v, err = e.emitFunctionExpression(fn, []Type{valueTy})
+		default:
+			lit = false
 		}
-		if fe, ok := arg.(*ast.FunctionExpression); ok {
-			return e.emitFunctionExpression(fe, []Type{valueTy})
+		if lit {
+			if err != nil {
+				return Value{}, err
+			}
+			// An annotated parameter (`(buf: ArrayBuffer) => …`) over a
+			// promise of `any`: the runner passes the boxed value, which an
+			// adapter unboxes to the parameter's type.
+			if isUnconstrainedDynamic(valueTy) && v.Ty.IsFunc && len(v.Ty.FuncParams) >= 1 && !v.Ty.FuncParams[0].IsDynamic {
+				ret := TypeVoid
+				if v.Ty.FuncRetType != nil {
+					ret = *v.Ty.FuncRetType
+				}
+				if adapted, ok := e.emitBoxedClosureAs(v, FuncType([]Type{valueTy}, ret)); ok {
+					return adapted, nil
+				}
+			}
+			return v, nil
 		}
 	}
 	v, err := e.emitExpr(arg)
@@ -246,11 +300,9 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	q := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
 
-	// env = { ptr p, ptr onF, ptr onR, ptr onFin, ptr q }
-	e.thenCtr++
-	runner := fmt.Sprintf("@__kml_then_run_%d", e.thenCtr)
+	// env = { ptr p, ptr onF, ptr onR, ptr onFin, ptr q, ptr runner }
 	env := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 40)", env))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 48)", env))
 	storeEnv := func(idx int, ref string) {
 		gp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr, ptr, ptr, ptr }, ptr %s, i32 0, i32 %d", gp, env, idx))
@@ -262,7 +314,12 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	storeEnv(3, onFin)
 	storeEnv(4, q)
 
-	e.emitThenRunner(runner, innerTy, retTy, adopt, finAwait)
+	runner := e.emitThenRunner(innerTy, retTy, adopt, finAwait)
+	// The reaction runs the runner under __kml_then_guard, which rejects Q
+	// when a handler throws.
+	runnerSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 5", runnerSlot, env))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", runner, runnerSlot))
 	if adopt != 0 {
 		// Q's value type is what the returned promise resolves to.
 		if retTy.PromiseType != nil {
@@ -278,7 +335,7 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	cep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", clo))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", cfp, clo))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", runner, cfp))
+	e.emitInstr(fmt.Sprintf("store ptr @__kml_then_guard, ptr %s, align 8", cfp))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", cep, clo))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, cep))
 
@@ -333,7 +390,7 @@ func (e *Emitter) emitAttachPromiseReaction(prom, clo string) {
 	e.emitLabel(doneL)
 }
 
-// ensureFetchDriveRunner emits @__kml_fetch_drive_run(ptr %env) exactly once —
+// ensureFetchDriveRunner declares @__kml_fetch_drive_run(ptr %env) exactly once —
 // the deferred microtask step that bridges a raw fetch handle to a task promise.
 // env = { ptr slot, ptr prom }: it drives the fetch (`__kml_await_fetch`, the
 // same drive `await` uses), builds the Response, stores it into prom's value
@@ -357,62 +414,7 @@ func (e *Emitter) ensureFetchDriveRunner() {
 	e.ensurePromiseSettle()
 	e.ensureCalloc()
 
-	respTy := ResponseType()
-	structIR := respTy.StructIR()
-	fieldStore := func(name, ir, ref string, align int) string {
-		idx, _, _ := respTy.FieldIndex(name)
-		return fmt.Sprintf("  %%%s_gep = getelementptr %s, ptr %%resp, i32 0, i32 %d\n  store %s %s, ptr %%%s_gep, align %d\n",
-			name, structIR, idx, ir, ref, name, align)
-	}
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_fetch_drive_run(ptr %%env) {
-entry:
-  %%slot_p = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0
-  %%slot = load ptr, ptr %%slot_p, align 8
-  %%prom_p = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1
-  %%prom = load ptr, ptr %%prom_p, align 8
-  %%jb = call ptr @__kml_push_jmpbuf()
-  %%sj = %s
-  %%threw = icmp ne i32 %%sj, 0
-  br i1 %%threw, label %%catch, label %%try
-try:
-  %%pending = load ptr, ptr %%slot, align 8
-  ; Resolve at headers-complete (TDD-00097 Stage 4), like await does — the
-  ; Response carries the pending handle; body reads drive the rest lazily.
-  %%status = call i64 @__kml_await_fetch_headers(ptr %%pending)
-  call void @__kml_pop_jmpbuf()
-  %%oklow = icmp sge i64 %%status, 200
-  %%okhigh = icmp slt i64 %%status, 300
-  %%ok = and i1 %%oklow, %%okhigh
-  %%statusd = sitofp i64 %%status to double
-  ; Zeroed: the constructed-Response slots (headers, statusText, type,
-  ; stream) are null on a fetched one.
-  %%resp = call ptr @calloc(i64 1, i64 %d)
-%s%s%s%s%s  %%bits = ptrtoint ptr %%resp to i64
-  %%v0_p = getelementptr %s, ptr %%prom, i32 0, i32 2
-  store i64 %%bits, ptr %%v0_p, align 8
-  call void @__kml_promise_settle(ptr %%prom, i64 1)
-  ret void
-catch:
-  ; Reject with the thrown value itself — payload in v0, tag in v1, the shape
-  ; every rejection reader expects. A fetch aborted with a non-Error reason
-  ; (abort(42), abort("stop")) rejects with exactly that value, not a pointer.
-  %%epay = call i64 @__kml_get_thrown_pay()
-  %%etag = call i8 @__kml_get_thrown_tag()
-  %%etag64 = zext i8 %%etag to i64
-  %%ev0_p = getelementptr %s, ptr %%prom, i32 0, i32 2
-  store i64 %%epay, ptr %%ev0_p, align 8
-  %%ev1_p = getelementptr `+promiseStructIR+`, ptr %%prom, i32 0, i32 3
-  store i64 %%etag64, ptr %%ev1_p, align 8
-  call void @__kml_promise_settle(ptr %%prom, i64 2)
-  ret void
-}`, e.setjmpCall("%jb"), respTy.StructSize(),
-		fieldStore("status", "double", "%statusd", 8),
-		fieldStore("ok", "i1", "%ok", 1),
-		fieldStore("body", "ptr", "null", 8),
-		fieldStore("bodyLength", "i64", "0", 8),
-		fieldStore("__kml_pending", "ptr", "%pending", 8),
-		promiseStructIR, promiseStructIR))
+	e.emitGlobal("declare void @__kml_fetch_drive_run(ptr)")
 }
 
 // emitFetchHandleToPendingPromise bridges a raw fetch()'s Promise<Response>
@@ -543,13 +545,14 @@ func thenPassThroughIR(sfx string) string {
 		"  store i64 %res, ptr %qrespt" + sfx + ", align 8\n"
 }
 
-// emitThenRunner emits the per-call-site reaction runner. argTy is the source
+// emitThenRunner emits a reaction runner and returns its symbol; call sites
+// with the same types share one. argTy is the source
 // promise's value type (the callback argument); retTy is the callback's return
 // type (what the returned promise Q settles to). The runner reads the source's
 // settled state, invokes the right callback, settles Q with its result (or
 // passes the source settlement through for finally / a missing callback), then
 // drains Q's own reactions so a chained `.then` fires.
-func (e *Emitter) emitThenRunner(runner string, argTy, retTy Type, adopt int, finAwait bool) {
+func (e *Emitter) emitThenRunner(argTy, retTy Type, adopt int, finAwait bool) string {
 	valLoad, argIR := thenValLoadIR(argTy)
 	produceF, storeSettleF := thenStoreResultIR(retTy, "f")
 	produceR, storeSettleR := thenStoreResultIR(retTy, "r")
@@ -645,7 +648,9 @@ func (e *Emitter) emitThenRunner(runner string, argTy, retTy Type, adopt int, fi
 		return pre + "  call void @__kml_promise_adopt(ptr %q, ptr " + h + ")\n  ret void\n"
 	}
 
-	e.emitGlobal(fmt.Sprintf(`
+	// Named by its text (the name left out), as defineContentNamed names.
+	const self = "@__kml_then_run"
+	text := fmt.Sprintf(`
 define void %s(ptr %%env) {
 entry:
   %%p_p = getelementptr { ptr, ptr, ptr, ptr, ptr }, ptr %%env, i32 0, i32 0
@@ -689,12 +694,21 @@ callR:
 %s%s
 propR:
 %s%s
-}`, runner, promiseStructIR, promiseStructIR, promiseStructIR,
+}`, self, promiseStructIR, promiseStructIR, promiseStructIR,
 		finCall, passThroughD,
 		fCall, cbTail(storeSettleF, "f"),
 		passThroughF, drainRet,
 		rCall, cbTail(storeSettleR, "r"),
-		propReject, drainRet))
+		propReject, drainRet)
+	name := contentSymbol(self+".", text)
+	if e.contentDefined == nil {
+		e.contentDefined = map[string]bool{}
+	}
+	if !e.contentDefined[name] {
+		e.contentDefined[name] = true
+		e.emitGlobal(strings.Replace(text, "define void "+self+"(", "define linkonce_odr hidden void "+name+"(", 1))
+	}
+	return name
 }
 
 // thenCallRetIR gives the LLVM return-type token for a `call` to a then/catch
@@ -714,7 +728,7 @@ func thenCallRetIR(retTy Type) string {
 	return retTy.IR
 }
 
-// ensurePromiseDeferSettle defines @__kml_promise_defer_settle(q, state,
+// ensurePromiseDeferSettle declares @__kml_promise_defer_settle(q, state,
 // hops): settle q with state after hops more microtasks.
 func (e *Emitter) ensurePromiseDeferSettle() {
 	if e.fnDecls["__kml_promise_defer_settle"] {
@@ -724,46 +738,13 @@ func (e *Emitter) ensurePromiseDeferSettle() {
 	e.ensurePromiseSettle()
 	e.ensureMicrotasks()
 	e.ensureMalloc()
-	e.emitGlobal(`define void @__kml_promise_defer_settle(ptr %q, i64 %state, i64 %hops) {
-entry:
-  %env = call ptr @malloc(i64 32)
-  store ptr %q, ptr %env, align 8
-  %sp = getelementptr i8, ptr %env, i64 8
-  store i64 %state, ptr %sp, align 8
-  %hp = getelementptr i8, ptr %env, i64 16
-  store i64 %hops, ptr %hp, align 8
-  %clo = call ptr @malloc(i64 16)
-  store ptr @__kml_promise_defer_step, ptr %clo, align 8
-  %ce = getelementptr i8, ptr %clo, i64 8
-  store ptr %env, ptr %ce, align 8
-  %cp = getelementptr i8, ptr %env, i64 24
-  store ptr %clo, ptr %cp, align 8
-  call void @__kml_microtask_enqueue(ptr %clo)
-  ret void
-}
-define void @__kml_promise_defer_step(ptr %env) {
-entry:
-  %hp = getelementptr i8, ptr %env, i64 16
-  %h = load i64, ptr %hp, align 8
-  %more = icmp sgt i64 %h, 1
-  br i1 %more, label %again, label %settle
-again:
-  %h1 = sub i64 %h, 1
-  store i64 %h1, ptr %hp, align 8
-  %cp = getelementptr i8, ptr %env, i64 24
-  %clo = load ptr, ptr %cp, align 8
-  call void @__kml_microtask_enqueue(ptr %clo)
-  ret void
-settle:
-  %q = load ptr, ptr %env, align 8
-  %sp = getelementptr i8, ptr %env, i64 8
-  %st = load i64, ptr %sp, align 8
-  call void @__kml_promise_settle(ptr %q, i64 %st)
-  ret void
-}`)
+	e.ensureExceptionHelpers()
+	e.emitGlobal(`declare void @__kml_promise_defer_settle(ptr, i64, i64)
+declare void @__kml_promise_defer_step(ptr)
+declare void @__kml_then_guard(ptr)`)
 }
 
-// ensurePromiseFinallyWait defines @__kml_promise_finally_wait(r, q, res,
+// ensurePromiseFinallyWait declares @__kml_promise_finally_wait(r, q, res,
 // v0, v1): once onFinally's promise r settles, q takes r's rejection, or
 // else the source's settlement (res, v0, v1) — one microtask after r's
 // reaction, as the spec's adoption of `r.then(() => value)` does.
@@ -774,55 +755,5 @@ func (e *Emitter) ensurePromiseFinallyWait() {
 	e.fnDecls["__kml_promise_finally_wait"] = true
 	e.ensurePromiseDeferSettle()
 	e.ensurePromiseAdopt() // @__kml_promise_attach
-	e.emitGlobal(fmt.Sprintf(`define void @__kml_promise_finally_wait(ptr %%r, ptr %%q, i64 %%res, i64 %%v0, i64 %%v1) {
-entry:
-  %%env = call ptr @malloc(i64 40)
-  store ptr %%q, ptr %%env, align 8
-  %%rp = getelementptr i8, ptr %%env, i64 8
-  store i64 %%res, ptr %%rp, align 8
-  %%v0p = getelementptr i8, ptr %%env, i64 16
-  store i64 %%v0, ptr %%v0p, align 8
-  %%v1p = getelementptr i8, ptr %%env, i64 24
-  store i64 %%v1, ptr %%v1p, align 8
-  %%pp = getelementptr i8, ptr %%env, i64 32
-  store ptr %%r, ptr %%pp, align 8
-  %%clo = call ptr @malloc(i64 16)
-  store ptr @__kml_promise_finally_step, ptr %%clo, align 8
-  %%ce = getelementptr i8, ptr %%clo, i64 8
-  store ptr %%env, ptr %%ce, align 8
-  call void @__kml_promise_attach(ptr %%r, ptr %%clo)
-  ret void
-}
-define void @__kml_promise_finally_step(ptr %%env) {
-entry:
-  %%q = load ptr, ptr %%env, align 8
-  %%pp = getelementptr i8, ptr %%env, i64 32
-  %%r = load ptr, ptr %%pp, align 8
-  %%rs_p = getelementptr %[1]s, ptr %%r, i32 0, i32 0
-  %%rs = load i64, ptr %%rs_p, align 8
-  %%rrej = icmp eq i64 %%rs, 2
-  %%qv0 = getelementptr %[1]s, ptr %%q, i32 0, i32 2
-  %%qv1 = getelementptr %[1]s, ptr %%q, i32 0, i32 3
-  br i1 %%rrej, label %%takerej, label %%takesrc
-takerej:
-  %%rv0p = getelementptr %[1]s, ptr %%r, i32 0, i32 2
-  %%rv0 = load i64, ptr %%rv0p, align 8
-  %%rv1p = getelementptr %[1]s, ptr %%r, i32 0, i32 3
-  %%rv1 = load i64, ptr %%rv1p, align 8
-  store i64 %%rv0, ptr %%qv0, align 8
-  store i64 %%rv1, ptr %%qv1, align 8
-  call void @__kml_promise_defer_settle(ptr %%q, i64 2, i64 1)
-  ret void
-takesrc:
-  %%rp = getelementptr i8, ptr %%env, i64 8
-  %%res = load i64, ptr %%rp, align 8
-  %%v0p = getelementptr i8, ptr %%env, i64 16
-  %%v0 = load i64, ptr %%v0p, align 8
-  %%v1p = getelementptr i8, ptr %%env, i64 24
-  %%v1 = load i64, ptr %%v1p, align 8
-  store i64 %%v0, ptr %%qv0, align 8
-  store i64 %%v1, ptr %%qv1, align 8
-  call void @__kml_promise_defer_settle(ptr %%q, i64 %%res, i64 1)
-  ret void
-}`, promiseStructIR))
+	e.emitGlobal(`declare void @__kml_promise_finally_wait(ptr, ptr, i64, i64, i64)`)
 }

@@ -1,0 +1,174 @@
+name: Test one platform
+
+# One platform's lane of release.yml: its parts run in parallel, and the
+# first failing part cancels the platform's others (fail-fast is per matrix,
+# and each platform calls this workflow with a matrix of its own). The other
+# platforms are not affected. Each passing part publishes a gate artifact;
+# release.yml attaches a binary for a platform whose every part passed.
+
+on:
+  workflow_call:
+    inputs:
+      name: { type: string, required: true }
+      os: { type: string, required: true }
+      goos: { type: string, required: true }
+      goarch: { type: string, required: true }
+      # The parts, as a JSON list: unit, examples, shard-0 … shard-N.
+      parts: { type: string, required: true }
+
+jobs:
+  part:
+    name: ${{ inputs.name }}, ${{ matrix.part }}
+    runs-on: ${{ inputs.os }}
+    # A shard or the examples fit well inside an hour; Windows (the MSYS2
+    # setup, Defender) gets more room. go test's own -timeout catches a hang
+    # before the job ceiling does.
+    timeout-minutes: ${{ inputs.goos == 'windows' && 90 || 60 }}
+    env:
+      # Keep in step with the shard-N parts release.yml passes and with the
+      # release job's gate count.
+      SHARDS: 6
+    strategy:
+      fail-fast: true
+      matrix:
+        part: ${{ fromJSON(inputs.parts) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false # stdlib-only project, no go.sum to key the module cache on
+
+      # The FFI differential oracle (assertSameAsNodeFFI) needs `node:ffi`, which
+      # only exists in Node >= 26.1.0 behind --experimental-ffi — a *separate*
+      # oracle from the general one below. Install it first (POSIX lanes: node:ffi
+      # is exercised through dlopen there), capture its absolute path into
+      # KML_FFI_NODE, *then* install the general oracle so 24.19.0 wins PATH. On
+      # Windows KML_FFI_NODE stays unset and the FFI oracle self-skips (the tests
+      # still check our own output against the pinned expectation).
+      - uses: actions/setup-node@v7
+        if: inputs.goos != 'windows'
+        with:
+          node-version: '26.10.0'
+      - name: Record the node:ffi oracle path
+        if: inputs.goos != 'windows'
+        shell: bash
+        run: echo "KML_FFI_NODE=$(command -v node)" >> "$GITHUB_ENV"
+
+      # The 23 `assertSameAsNode*` oracle test files diff our stdout against the
+      # Node on PATH, so the oracle must be one exact version across both dev
+      # machines and every CI lane — an unpinned runner Node drifts (its
+      # fs.statfsSync predated the `frsize` field, reading as a spurious diff).
+      # 24.19.0 is the pinned oracle (Active LTS); dev boxes run the same.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.19.0'
+
+      # --- Linux (x64 and arm64): clang + the optional libraries the suite links against ---
+      - name: Install clang + libcurl (fetch examples link against it) + libgc (-mm=gc tests link against it) + libtommath (default bigint backend links against it) + libpcre2 (RegExp tests link -lpcre2-8) + libssl (default crypto.subtle backend links -lcrypto) + libnghttp2 (HTTP/2 server path links -lnghttp2) + libsqlite3 (node:sqlite links -lsqlite3) + gtk3/webkit2gtk-4.1 (klain:webview compile-tier tests link against it; headless so the window never opens)
+        if: inputs.goos == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev libsqlite3-dev libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      # --- macOS (Intel and Apple Silicon): Apple's clang is the compiler; curl and WebKit ship with the OS ---
+      - name: Install the optional libraries via Homebrew (pcre2, libtommath, openssl@3, nghttp2, bdw-gc) and expose keg-only openssl@3 to clang
+        if: inputs.goos == 'darwin'
+        run: |
+          brew install pcre2 libtommath openssl@3 nghttp2 bdw-gc
+          prefix="$(brew --prefix)"
+          ssl="$(brew --prefix openssl@3)"
+          echo "PKG_CONFIG_PATH=$ssl/lib/pkgconfig:$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "CPATH=$ssl/include:$prefix/include" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$ssl/lib:$prefix/lib" >> "$GITHUB_ENV"
+
+      # --- Windows: the mingw-w64 UCRT toolchain from MSYS2, as the README's Windows section installs it ---
+      - name: Install the MSYS2 UCRT64 toolchain + the optional libraries (curl/sqlite3/pcre2/libtommath/openssl/nghttp2/gc/zlib) + the WebView2 SDK header (klain:webview compile tier; the windowed smoke tests stay gated) + clang/lld/llvm-rc
+        if: inputs.goos == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-lld
+            mingw-w64-ucrt-x86_64-llvm
+            mingw-w64-ucrt-x86_64-curl
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-pcre2
+            mingw-w64-ucrt-x86_64-libtommath
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-nghttp2
+            mingw-w64-ucrt-x86_64-gc
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-webview2-loader
+
+      # The suite writes and runs a fresh .exe per test; Defender's real-time
+      # scan of each one roughly doubled the run on the development box before
+      # the same exclusions were added there (TDD-00177's install record).
+      - name: Exclude the checkout and the temp directory from Defender's real-time scanning
+        if: inputs.goos == 'windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+          Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
+          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\Temp"
+          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\klainmain"
+
+      - name: Put the UCRT64 toolchain and MSYS2's coreutils on PATH, and point the compiler at the sysroot
+        if: inputs.goos == 'windows'
+        shell: pwsh
+        run: |
+          $root = (msys2 -c 'cygpath -w /').Trim()
+          "$root\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "$root\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "KLAIN_SYSROOT=$root\ucrt64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # --- The gate itself ---
+      - run: go build -o klainmain${{ runner.os == 'Windows' && '.exe' || '' }} .
+      - if: matrix.part == 'unit'
+        run: go vet ./...
+      # One real compile before the suite: a broken platform layer (the Win32
+      # shim failing against a new header set, ADR-00734) fails here in seconds
+      # instead of as 386 link errors fifty minutes later.
+      - name: Smoke-compile and run one program
+        if: matrix.part == 'unit'
+        shell: bash
+        run: ./klainmain examples/basics/basics.ts && ./examples/basics/basics
+      - name: docs/status pages must match their data/ JSON source (reference lane only)
+        if: matrix.part == 'unit' && inputs.name == 'linux-x64'
+        run: make status-check
+      # Every package's tests except tests/ — what `make test-unit` runs (no
+      # POSIX make on Windows, so the command itself).
+      - name: Unit packages
+        if: matrix.part == 'unit'
+        shell: bash
+        run: go test -timeout 50m $(go list ./... | grep -v '/tests$')
+      # One shard of tests/ — `make test-shard` (the command itself, for Windows).
+      - name: Suite shard
+        if: startsWith(matrix.part, 'shard-')
+        shell: bash
+        run: |
+          part='${{ matrix.part }}'
+          go run ./tools/testshard -shard "${part#shard-}" -shards "$SHARDS" -timeout 50m
+      - name: Compile and run every example
+        if: matrix.part == 'examples'
+        run: make examples
+      - name: The builtin library compiles the same everywhere, deterministically
+        if: matrix.part == 'examples'
+        run: make drift
+
+      - name: Publish this part's pass gate
+        if: success()
+        shell: bash
+        run: |
+          mkdir -p gate
+          echo "${{ inputs.goos }} ${{ inputs.goarch }} ${{ inputs.name }}" > "gate/${{ inputs.name }}--${{ matrix.part }}"
+      - if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-${{ inputs.name }}--${{ matrix.part }}
+          path: gate/${{ inputs.name }}--${{ matrix.part }}
+          retention-days: 1
+

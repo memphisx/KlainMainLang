@@ -66,16 +66,7 @@ func buildBinaryAuto(t *testing.T, src string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
-	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	clangArgs = appendShape(t, em, dir, clangArgs)
-	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
-	clangArgs = appendCasemap(t, em, dir, clangArgs)
-	clangArgs = appendStringC(t, em, dir, clangArgs)
-	clangArgs = appendNumberC(t, em, dir, clangArgs)
-	clangArgs = appendOSInfo(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
@@ -632,7 +623,20 @@ function run(): void {
 run()
 console.log('done')
 `
-	binFile := buildBinaryAuto(t, src)
+	// Blob is a global module's class: built through the CLI, which links
+	// it.
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found in PATH")
+	}
+	cli := buildCLI(t)
+	dir := tempDir(t)
+	srcFile, binFile := filepath.Join(dir, "prog.ts"), filepath.Join(dir, "prog")
+	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(cli, "-mm=auto", "-o", binFile, srcFile).CombinedOutput(); err != nil {
+		t.Fatalf("compile: %v\n%s", err, out)
+	}
 	out, err := exec.Command(binFile).Output()
 	if err != nil {
 		t.Fatalf("run (crash = a bad auto-free): %v", err)

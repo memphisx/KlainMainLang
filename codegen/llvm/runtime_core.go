@@ -1,9 +1,19 @@
 package llvm
 
 import (
+	_ "embed"
 	"fmt"
-	"strings"
 )
+
+//go:embed coresrc/core.c
+var coreSource string
+
+// CoreSource is the core numeric/string runtime's C source (TDD-00240), behind
+// kml_layout.h; its math calls need -lm (LibmLibs).
+func CoreSource() string { return layoutHeader() + coreSource }
+
+// UsesCoreC reports whether the program links coresrc/core.c.
+func (e *Emitter) UsesCoreC() bool { return e.usedCoreC }
 
 func (e *Emitter) ensureFree() {
 	if e.usedFree {
@@ -76,16 +86,6 @@ func (e *Emitter) ensureMmapDecl() {
 	if !e.usedMmapDecl {
 		e.emitGlobal("declare ptr @mmap(ptr noundef, i64 noundef, i32 noundef, i32 noundef, i32 noundef, i64 noundef)")
 		e.usedMmapDecl = true
-	}
-}
-
-// ensureWaitpidDecl declares waitpid(2) exactly once — shared by execFileSync
-// (runtime_process.go), child_process (runtime_childprocess.go), and cluster
-// (runtime_cluster.go), any two of which can co-occur in one program.
-func (e *Emitter) ensureWaitpidDecl() {
-	if !e.usedWaitpidDecl {
-		e.emitGlobal("declare i32 @waitpid(i32 noundef, ptr noundef, i32 noundef)")
-		e.usedWaitpidDecl = true
 	}
 }
 
@@ -170,57 +170,10 @@ func (e *Emitter) ensureCurrentRSS() {
 		e.emitGlobal("declare i64 @__kml_current_rss_bytes()")
 		return
 	}
-	if e.opts.Target.OS() == "darwin" {
-		e.emitGlobal("@mach_task_self_ = external global i32")
-		e.emitGlobal("declare i32 @task_info(i32, i32, ptr, ptr)")
-		e.emitGlobal(`
-define i64 @__kml_current_rss_bytes() {
-entry:
-  %info = alloca [48 x i8], align 8
-  %cnt = alloca i32, align 4
-  store i32 12, ptr %cnt, align 4
-  %port = load i32, ptr @mach_task_self_, align 4
-  %kr = call i32 @task_info(i32 %port, i32 20, ptr %info, ptr %cnt)
-  %ok = icmp eq i32 %kr, 0
-  br i1 %ok, label %read, label %fail
-read:
-  %rp = getelementptr i8, ptr %info, i64 8
-  %rss = load i64, ptr %rp, align 8
-  ret i64 %rss
-fail:
-  ret i64 0
-}`)
-		return
-	}
-	// Linux (and other non-Darwin POSIX): /proc/self/statm. fopen/fclose reuse
-	// the shared guarded declarations (fs streams already declare them); only
-	// fscanf is unique here.
-	e.ensureFopen()
-	e.ensureFclose()
-	e.ensureFscanfDecl()
-	e.emitGlobal(`@.kml_statm_path = private unnamed_addr constant [18 x i8] c"/proc/self/statm\00\00"`)
-	e.emitGlobal(`@.kml_statm_mode = private unnamed_addr constant [2 x i8] c"r\00"`)
-	e.emitGlobal(`@.kml_statm_fmt = private unnamed_addr constant [9 x i8] c"%*ld %ld\00"`)
-	e.emitGlobal(`
-define i64 @__kml_current_rss_bytes() {
-entry:
-  %f = call ptr @fopen(ptr @.kml_statm_path, ptr @.kml_statm_mode)
-  %isnull = icmp eq ptr %f, null
-  br i1 %isnull, label %fail, label %read
-read:
-  %pages_p = alloca i64, align 8
-  store i64 0, ptr %pages_p, align 8
-  %n = call i32 (ptr, ptr, ...) @fscanf(ptr %f, ptr @.kml_statm_fmt, ptr %pages_p)
-  call i32 @fclose(ptr %f)
-  %got = icmp eq i32 %n, 1
-  br i1 %got, label %scale, label %fail
-scale:
-  %pages = load i64, ptr %pages_p, align 8
-  %bytes = mul i64 %pages, 4096
-  ret i64 %bytes
-fail:
-  ret i64 0
-}`)
+	// Darwin: task_info(MACH_TASK_BASIC_INFO); Linux: /proc/self/statm x 4096.
+	// Both in coresrc/core.c; 0 on a read failure.
+	e.usedCoreC = true
+	e.emitGlobal("declare i64 @__kml_current_rss_bytes()")
 }
 
 func (e *Emitter) ensureRealloc() {
@@ -297,13 +250,6 @@ func (e *Emitter) ensureStrncmp() {
 	if !e.usedStrncmp {
 		e.emitGlobal("declare i32 @strncmp(ptr noundef, ptr noundef, i64 noundef)")
 		e.usedStrncmp = true
-	}
-}
-
-func (e *Emitter) ensureStrncasecmp() {
-	if !e.usedStrncasecmp {
-		e.emitGlobal("declare i32 @strncasecmp(ptr noundef, ptr noundef, i64 noundef)")
-		e.usedStrncasecmp = true
 	}
 }
 
@@ -411,18 +357,8 @@ func (e *Emitter) ensureJsPow() {
 	}
 	e.usedJsPow = true
 	e.ensureMathFuncs()
-	e.emitGlobal(`
-define double @__kml_js_pow(double %b, double %x) {
-entry:
-  %r = call double @pow(double %b, double %x)
-  %ab = call double @fabs(double %b)
-  %is1 = fcmp oeq double %ab, 1.0
-  %ax = call double @fabs(double %x)
-  %isinf = fcmp oeq double %ax, 0x7FF0000000000000
-  %nanify = and i1 %is1, %isinf
-  %res = select i1 %nanify, double 0x7FF8000000000000, double %r
-  ret double %res
-}`)
+	e.usedCoreC = true
+	e.emitGlobal("declare double @__kml_js_pow(double, double)")
 }
 
 // ensureFloatMinMaxIntrinsics declares the IEEE-754 minimum/maximum LLVM
@@ -450,30 +386,8 @@ func (e *Emitter) ensureIPow() {
 		return
 	}
 	e.usedIPow = true
-	e.emitGlobal(`
-define i64 @__kml_ipow(i64 %base, i64 %exp) {
-entry:
-  %neg = icmp slt i64 %exp, 0
-  br i1 %neg, label %retzero, label %header
-retzero:
-  ret i64 0
-header:
-  %result = phi i64 [ 1, %entry ], [ %result_next, %body ]
-  %b = phi i64 [ %base, %entry ], [ %b_sq, %body ]
-  %e = phi i64 [ %exp, %entry ], [ %e_half, %body ]
-  %more = icmp ne i64 %e, 0
-  br i1 %more, label %body, label %exit
-body:
-  %bit = and i64 %e, 1
-  %is_odd = icmp ne i64 %bit, 0
-  %rmul = mul i64 %result, %b
-  %result_next = select i1 %is_odd, i64 %rmul, i64 %result
-  %b_sq = mul i64 %b, %b
-  %e_half = lshr i64 %e, 1
-  br label %header
-exit:
-  ret i64 %result
-}`)
+	e.usedCoreC = true
+	e.emitGlobal("declare i64 @__kml_ipow(i64, i64)")
 }
 
 // ensureCtlz32 declares LLVM's own count-leading-zeros intrinsic for Math.clz32
@@ -501,82 +415,8 @@ func (e *Emitter) ensureCbrt() {
 		return
 	}
 	e.usedCbrt = true
-	// Constants: B1/B2 magic biases; P0..P4 the degree-4 1/cbrt approximation.
-	// Doubles are given as LLVM's exact-bit hex form (the fdlibm hex comments).
-	e.emitGlobal(`define double @__kml_cbrt(double %x) {
-entry:
-  %xi = bitcast double %x to i64
-  %hxsh = lshr i64 %xi, 32
-  %hxand = and i64 %hxsh, 2147483647
-  %hx = trunc i64 %hxand to i32
-  ; cbrt(NaN,Inf) is itself: hx >= 0x7ff00000
-  %isnaninf = icmp uge i32 %hx, 2146435072
-  br i1 %isnaninf, label %naninf, label %chksub
-naninf:
-  %sum = fadd double %x, %x
-  ret double %sum
-chksub:
-  ; zero or subnormal: hx < 0x00100000
-  %issub = icmp ult i32 %hx, 1048576
-  br i1 %issub, label %subn, label %normal
-subn:
-  ; scale by 2^54, re-extract hx; hx==0 means x is (signed) zero -> return x
-  %xs = fmul double %x, 0x4350000000000000
-  %xsi = bitcast double %xs to i64
-  %hxssh = lshr i64 %xsi, 32
-  %hxsand = and i64 %hxssh, 2147483647
-  %hxs = trunc i64 %hxsand to i32
-  %iszero = icmp eq i32 %hxs, 0
-  br i1 %iszero, label %retx, label %subcont
-retx:
-  ret double %x
-subcont:
-  %hxsdiv = udiv i32 %hxs, 3
-  %hxsb = add i32 %hxsdiv, 696219795
-  br label %recon
-normal:
-  %hxdiv = udiv i32 %hx, 3
-  %hxb = add i32 %hxdiv, 715094163
-  br label %recon
-recon:
-  %newhx = phi i32 [ %hxsb, %subcont ], [ %hxb, %normal ]
-  %sign = and i64 %xi, -9223372036854775808
-  %newhx64 = zext i32 %newhx to i64
-  %newhxsh = shl i64 %newhx64, 32
-  %t0i = or i64 %sign, %newhxsh
-  %t0 = bitcast i64 %t0i to double
-  ; r = (t*t)*(t/x)
-  %tt = fmul double %t0, %t0
-  %tx = fdiv double %t0, %x
-  %r = fmul double %tt, %tx
-  ; t = t*((P0 + r*(P1 + r*P2)) + ((r*r)*r)*(P3 + r*P4))
-  %rP2 = fmul double %r, 0x3FF9F1604A49D6C2
-  %P1p = fadd double 0xBFFE28E092F02420, %rP2
-  %rP1p = fmul double %r, %P1p
-  %poly1 = fadd double 0x3FFE03E60F61E692, %rP1p
-  %rr = fmul double %r, %r
-  %rrr = fmul double %rr, %r
-  %rP4 = fmul double %r, 0x3FC2B000D4E4EDD7
-  %P3p = fadd double 0xBFE844CBBEE751D9, %rP4
-  %term2 = fmul double %rrr, %P3p
-  %polysum = fadd double %poly1, %term2
-  %t1 = fmul double %t0, %polysum
-  ; round t to 23 bits: u.i = (u.i + 0x80000000) & 0xffffffffc0000000
-  %t1i = bitcast double %t1 to i64
-  %t1add = add i64 %t1i, 2147483648
-  %t1msk = and i64 %t1add, -1073741824
-  %t2 = bitcast i64 %t1msk to double
-  ; one Newton step to 53 bits: s=t*t; r=x/s; w=t+t; r=(r-t)/(w+r); t=t+t*r
-  %s = fmul double %t2, %t2
-  %rn = fdiv double %x, %s
-  %w = fadd double %t2, %t2
-  %rmt = fsub double %rn, %t2
-  %wpr = fadd double %w, %rn
-  %rfin = fdiv double %rmt, %wpr
-  %ttr = fmul double %t2, %rfin
-  %res = fadd double %t2, %ttr
-  ret double %res
-}`)
+	e.usedCoreC = true
+	e.emitGlobal("declare double @__kml_cbrt(double)")
 }
 
 func (e *Emitter) ensureArc4Random() {
@@ -594,8 +434,8 @@ func (e *Emitter) ensureRandS() {
 	}
 }
 
-// ensureRandRandom emits a self-contained @__klain_math_random helper in LLVM IR
-// that uses C89 rand()/srand()/time() — available on every libc — as the portable
+// ensureRandRandom declares @__klain_math_random (coresrc/core.c), which uses
+// C89 rand()/srand()/time() — available on every libc — as the portable
 // fallback for Math.random() on non-BSD platforms.
 // ensureTime declares libc's time(3) once.
 func (e *Emitter) ensureTime() {
@@ -612,31 +452,9 @@ func (e *Emitter) ensureRandRandom() {
 	}
 	e.usedArc4Random = true // mark as emitted so we don't emit it twice
 
-	// C89 declarations needed by the helper.
-	e.emitGlobal("declare i32  @rand()")
-	e.emitGlobal("declare void @srand(i32 noundef)")
-	e.ensureTime()
-
-	// One-time seeded flag (thread-unsafe but fine for single-threaded scripts).
-	e.emitGlobal("@__klain_rand_seeded = private thread_local global i1 false, align 1")
-
-	// The helper function itself — defined fully in IR, no external symbols beyond the above.
-	e.emitGlobal(`define private double @__klain_math_random() {
-entry:
-  %seeded = load i1, ptr @__klain_rand_seeded, align 1
-  br i1 %seeded, label %gen, label %do_seed
-do_seed:
-  %t = call i64 @time(ptr null)
-  %t32 = trunc i64 %t to i32
-  call void @srand(i32 %t32)
-  store i1 true, ptr @__klain_rand_seeded, align 1
-  br label %gen
-gen:
-  %r = call i32 @rand()
-  %rf = sitofp i32 %r to double
-  %result = fdiv double %rf, 2147483647.0
-  ret double %result
-}`)
+	// Defined in coresrc/core.c (rand/srand/time, seeded once per thread).
+	e.usedCoreC = true
+	e.emitGlobal("declare double @__klain_math_random()")
 }
 
 func (e *Emitter) ensureStrtoll() {
@@ -658,43 +476,8 @@ func (e *Emitter) ensureParseIntBase() {
 		return
 	}
 	e.usedParseIntBase = true
-	e.emitGlobal(`
-define i32 @__kml_parseint_base(ptr %s) {
-entry:
-  br label %wsloop
-wsloop:
-  %p = phi ptr [ %s, %entry ], [ %pnext, %wsadv ]
-  %c = load i8, ptr %p, align 1
-  %c_sp = icmp eq i8 %c, 32
-  %c_ge9 = icmp uge i8 %c, 9
-  %c_le13 = icmp ule i8 %c, 13
-  %c_ctl = and i1 %c_ge9, %c_le13
-  %c_ws = or i1 %c_sp, %c_ctl
-  br i1 %c_ws, label %wsadv, label %afterws
-wsadv:
-  %pnext = getelementptr i8, ptr %p, i64 1
-  br label %wsloop
-afterws:
-  %is_plus = icmp eq i8 %c, 43
-  %is_minus = icmp eq i8 %c, 45
-  %issign = or i1 %is_plus, %is_minus
-  %psign = getelementptr i8, ptr %p, i64 1
-  %p0 = select i1 %issign, ptr %psign, ptr %p
-  %c0 = load i8, ptr %p0, align 1
-  %is0 = icmp eq i8 %c0, 48
-  br i1 %is0, label %checkx, label %ret10
-checkx:
-  %p1 = getelementptr i8, ptr %p0, i64 1
-  %c1 = load i8, ptr %p1, align 1
-  %is_x = icmp eq i8 %c1, 120
-  %is_X = icmp eq i8 %c1, 88
-  %ishex = or i1 %is_x, %is_X
-  br i1 %ishex, label %ret16, label %ret10
-ret16:
-  ret i32 16
-ret10:
-  ret i32 10
-}`)
+	e.usedCoreC = true
+	e.emitGlobal("declare i32 @__kml_parseint_base(ptr)")
 }
 
 func (e *Emitter) ensureStrtod() {
@@ -722,49 +505,8 @@ func (e *Emitter) ensureStrtodJS() {
 	e.usedStrtodJS = true
 	e.ensureStrtod()
 	e.ensureStrncmp()
-	infPtr := e.internString("Infinity")
-	e.emitGlobal(fmt.Sprintf(`
-define double @__kml_strtod_js(ptr %%s, ptr %%endpp) {
-entry:
-  %%v = call double @strtod(ptr %%s, ptr %%endpp)
-  %%pinf = fcmp oeq double %%v, 0x7FF0000000000000
-  %%ninf = fcmp oeq double %%v, 0xFFF0000000000000
-  %%isinf = or i1 %%pinf, %%ninf
-  br i1 %%isinf, label %%wsloop, label %%keep
-wsloop:
-  %%p = phi ptr [ %%s, %%entry ], [ %%pnext, %%wsadv ]
-  %%c = load i8, ptr %%p, align 1
-  %%c_sp = icmp eq i8 %%c, 32
-  %%c_ge9 = icmp uge i8 %%c, 9
-  %%c_le13 = icmp ule i8 %%c, 13
-  %%c_ctl = and i1 %%c_ge9, %%c_le13
-  %%c_ws = or i1 %%c_sp, %%c_ctl
-  br i1 %%c_ws, label %%wsadv, label %%afterws
-wsadv:
-  %%pnext = getelementptr i8, ptr %%p, i64 1
-  br label %%wsloop
-afterws:
-  %%is_plus = icmp eq i8 %%c, 43
-  %%is_minus = icmp eq i8 %%c, 45
-  %%issign = or i1 %%is_plus, %%is_minus
-  %%psign = getelementptr i8, ptr %%p, i64 1
-  %%psig = select i1 %%issign, ptr %%psign, ptr %%p
-  %%csig = load i8, ptr %%psig, align 1
-  %%upper = and i8 %%csig, 223
-  %%ge_A = icmp uge i8 %%upper, 65
-  %%le_Z = icmp ule i8 %%upper, 90
-  %%isalpha = and i1 %%ge_A, %%le_Z
-  br i1 %%isalpha, label %%validate, label %%keep
-validate:
-  %%cmp = call i32 @strncmp(ptr %%psig, ptr %s, i64 8)
-  %%eq = icmp eq i32 %%cmp, 0
-  br i1 %%eq, label %%keep, label %%invalid
-invalid:
-  store ptr %%s, ptr %%endpp, align 8
-  br label %%keep
-keep:
-  ret double %%v
-}`, infPtr))
+	e.usedCoreC = true
+	e.emitGlobal("declare double @__kml_strtod_js(ptr, ptr)")
 }
 
 // ensureStrtodParseFloat defines @__kml_strtod_parsefloat, the parseFloat-only
@@ -782,45 +524,8 @@ func (e *Emitter) ensureStrtodParseFloat() {
 	}
 	e.usedStrtodParseFloat = true
 	e.ensureStrtodJS()
-	e.emitGlobal(`
-define double @__kml_strtod_parsefloat(ptr %s, ptr %endpp) {
-entry:
-  br label %wsloop
-wsloop:
-  %p = phi ptr [ %s, %entry ], [ %pnext, %wsadv ]
-  %c = load i8, ptr %p, align 1
-  %c_sp = icmp eq i8 %c, 32
-  %c_ge9 = icmp uge i8 %c, 9
-  %c_le13 = icmp ule i8 %c, 13
-  %c_ctl = and i1 %c_ge9, %c_le13
-  %c_ws = or i1 %c_sp, %c_ctl
-  br i1 %c_ws, label %wsadv, label %afterws
-wsadv:
-  %pnext = getelementptr i8, ptr %p, i64 1
-  br label %wsloop
-afterws:
-  %is_plus = icmp eq i8 %c, 43
-  %is_minus = icmp eq i8 %c, 45
-  %issign = or i1 %is_plus, %is_minus
-  %psign = getelementptr i8, ptr %p, i64 1
-  %p0 = select i1 %issign, ptr %psign, ptr %p
-  %c0 = load i8, ptr %p0, align 1
-  %is0 = icmp eq i8 %c0, 48
-  br i1 %is0, label %checkx, label %delegate
-checkx:
-  %p1 = getelementptr i8, ptr %p0, i64 1
-  %c1 = load i8, ptr %p1, align 1
-  %c1u = and i8 %c1, 223
-  %isx = icmp eq i8 %c1u, 88
-  br i1 %isx, label %hex, label %delegate
-hex:
-  store ptr %p1, ptr %endpp, align 8
-  %z = select i1 %is_minus, double -0.0, double 0.0
-  ret double %z
-delegate:
-  %v = call double @__kml_strtod_js(ptr %s, ptr %endpp)
-  ret double %v
-}`)
+	e.usedCoreC = true
+	e.emitGlobal("declare double @__kml_strtod_parsefloat(ptr, ptr)")
 }
 
 // ensureToNumber defines @__kml_to_number, JS's ToNumber for a string:
@@ -839,114 +544,8 @@ func (e *Emitter) ensureToNumber() {
 	e.usedToNumber = true
 	e.ensureStrtodJS()
 	e.ensureStrtoll()
-	// JS ToNumber accepts 0b/0B (binary) and 0o/0O (octal) prefixes, which C's
-	// strtod does not (it handles only 0x hex). Detect them past leading
-	// whitespace — with no sign, since `Number("-0b1")` is NaN — parse the
-	// digits with strtoll at the right base, and require the tail to be
-	// whitespace-only. Anything else (including a sign) falls through to strtod.
-	e.emitGlobal(`
-define double @__kml_to_number(ptr %s) {
-entry:
-  br label %rdx_ws
-rdx_ws:
-  %rp = phi ptr [ %s, %entry ], [ %rp_next, %rdx_ws_adv ]
-  %rc = load i8, ptr %rp, align 1
-  %rc_sp = icmp eq i8 %rc, 32
-  %rc_ge9 = icmp uge i8 %rc, 9
-  %rc_le13 = icmp ule i8 %rc, 13
-  %rc_ctl = and i1 %rc_ge9, %rc_le13
-  %rc_ws = or i1 %rc_sp, %rc_ctl
-  br i1 %rc_ws, label %rdx_ws_adv, label %rdx_check
-rdx_ws_adv:
-  %rp_next = getelementptr i8, ptr %rp, i64 1
-  br label %rdx_ws
-rdx_check:
-  %c0 = load i8, ptr %rp, align 1
-  %is0 = icmp eq i8 %c0, 48
-  br i1 %is0, label %rdx_c1, label %entry2
-rdx_c1:
-  %p1 = getelementptr i8, ptr %rp, i64 1
-  %c1 = load i8, ptr %p1, align 1
-  %c1l = or i8 %c1, 32
-  %isb = icmp eq i8 %c1l, 98
-  %iso = icmp eq i8 %c1l, 111
-  %isbo = or i1 %isb, %iso
-  br i1 %isbo, label %rdx_parse, label %entry2
-rdx_parse:
-  %base = select i1 %isb, i32 2, i32 8
-  %digits = getelementptr i8, ptr %rp, i64 2
-  %rendp = alloca ptr, align 8
-  %rn = call i64 @strtoll(ptr %digits, ptr %rendp, i32 %base)
-  %rend = load ptr, ptr %rendp, align 8
-  %nodig = icmp eq ptr %rend, %digits
-  br i1 %nodig, label %entry2, label %rdx_tail
-rdx_tail:
-  br label %rdx_tloop
-rdx_tloop:
-  %rtp = phi ptr [ %rend, %rdx_tail ], [ %rtp_next, %rdx_tws ]
-  %rtc = load i8, ptr %rtp, align 1
-  %rt_nul = icmp eq i8 %rtc, 0
-  br i1 %rt_nul, label %rdx_ok, label %rdx_tchk
-rdx_tchk:
-  %rt_sp = icmp eq i8 %rtc, 32
-  %rt_ge9 = icmp uge i8 %rtc, 9
-  %rt_le13 = icmp ule i8 %rtc, 13
-  %rt_ctl = and i1 %rt_ge9, %rt_le13
-  %rt_ws = or i1 %rt_sp, %rt_ctl
-  br i1 %rt_ws, label %rdx_tws, label %entry2
-rdx_tws:
-  %rtp_next = getelementptr i8, ptr %rtp, i64 1
-  br label %rdx_tloop
-rdx_ok:
-  %rdbl = sitofp i64 %rn to double
-  ret double %rdbl
-entry2:
-  %endp = alloca ptr, align 8
-  %v = call double @__kml_strtod_js(ptr %s, ptr %endp)
-  %end = load ptr, ptr %endp, align 8
-  %noconv = icmp eq ptr %end, %s
-  br i1 %noconv, label %scan_all, label %scan_tail
-scan_tail:                       ; converted: tail must be whitespace-only
-  br label %tail_loop
-tail_loop:
-  %tp = phi ptr [ %end, %scan_tail ], [ %tp_next, %tail_ws ]
-  %tc = load i8, ptr %tp, align 1
-  %t_nul = icmp eq i8 %tc, 0
-  br i1 %t_nul, label %ret_val, label %tail_check
-tail_check:
-  %t_sp = icmp eq i8 %tc, 32
-  %t_ge_tab = icmp uge i8 %tc, 9
-  %t_le_cr = icmp ule i8 %tc, 13
-  %t_ctlws = and i1 %t_ge_tab, %t_le_cr
-  %t_ws = or i1 %t_sp, %t_ctlws
-  br i1 %t_ws, label %tail_ws, label %ret_nan
-tail_ws:
-  %tp_next = getelementptr i8, ptr %tp, i64 1
-  br label %tail_loop
-scan_all:                        ; no conversion: whitespace-only → 0, else NaN
-  br label %all_loop
-all_loop:
-  %ap = phi ptr [ %s, %scan_all ], [ %ap_next, %all_ws ]
-  %ac = load i8, ptr %ap, align 1
-  %a_nul = icmp eq i8 %ac, 0
-  br i1 %a_nul, label %ret_zero, label %all_check
-all_check:
-  %a_sp = icmp eq i8 %ac, 32
-  %a_ge_tab = icmp uge i8 %ac, 9
-  %a_le_cr = icmp ule i8 %ac, 13
-  %a_ctlws = and i1 %a_ge_tab, %a_le_cr
-  %a_ws = or i1 %a_sp, %a_ctlws
-  br i1 %a_ws, label %all_ws, label %ret_nan
-all_ws:
-  %ap_next = getelementptr i8, ptr %ap, i64 1
-  br label %all_loop
-ret_val:
-  ret double %v
-ret_zero:
-  ret double 0.0
-ret_nan:
-  ret double 0x7FF8000000000000
-}`)
+	e.usedCoreC = true
+	e.emitGlobal("declare double @__kml_to_number(ptr)")
 }
 
 func (e *Emitter) ensureQsort() {
@@ -998,78 +597,13 @@ func (e *Emitter) ensureStrerror() {
 	e.emitGlobal("declare ptr @strerror(i32 noundef)")
 }
 
-// ensureExecvDecl / ensureExitRawDecl / ensureExecvpDecl: the exec-family +
-// _exit POSIX decls, shared so runtimes that co-occur (cluster + fork IPC +
-// child_process + process.execFileSync) never emit a duplicate declaration.
-func (e *Emitter) ensureExecvDecl() {
-	if !e.usedExecvDecl {
-		e.emitGlobal("declare i32 @execv(ptr noundef, ptr noundef)")
-		e.usedExecvDecl = true
+// ensureDOMExceptionCode declares __kml_domexc_code (coresrc/core.c): a
+// DOMException's legacy code from its name.
+func (e *Emitter) ensureDOMExceptionCode() {
+	if e.usedDOMExcCode {
+		return
 	}
-}
-
-// ensureAtoiDecl / ensureReadlinkDecl: one declaration each, shared by the
-// cluster, fs and process runtimes (ADR-00728) — they used to declare these
-// independently and collided when two of those modules met in one program.
-// ensureFscanfDecl: one declaration shared by the RSS reader and os.cpus()'s
-// cpufreq reader (ADR-00733).
-func (e *Emitter) ensureFscanfDecl() {
-	if !e.usedFscanfDecl {
-		e.emitGlobal("declare i32 @fscanf(ptr, ptr, ...)")
-		e.usedFscanfDecl = true
-	}
-}
-
-func (e *Emitter) ensureAtoiDecl() {
-	if !e.usedAtoiDecl {
-		e.emitGlobal("declare i32 @atoi(ptr noundef)")
-		e.usedAtoiDecl = true
-	}
-}
-
-func (e *Emitter) ensureReadlinkDecl() {
-	if !e.usedReadlinkDecl {
-		e.emitGlobal("declare i64 @readlink(ptr noundef, ptr noundef, i64 noundef)")
-		e.usedReadlinkDecl = true
-	}
-}
-
-func (e *Emitter) ensureExecvpDecl() {
-	if !e.usedExecvpDecl {
-		e.emitGlobal("declare i32 @execvp(ptr noundef, ptr noundef)")
-		e.usedExecvpDecl = true
-	}
-}
-
-func (e *Emitter) ensureExitRawDecl() {
-	if !e.usedExitRawDecl {
-		e.emitGlobal("declare void @_exit(i32 noundef) noreturn")
-		e.usedExitRawDecl = true
-	}
-}
-
-// ensureChdirDecl declares POSIX chdir once — shared by process.chdir and
-// child_process spawn's cwd option.
-func (e *Emitter) ensureChdirDecl() {
-	if !e.usedChdirDecl {
-		e.emitGlobal("declare i32 @chdir(ptr noundef)")
-		e.usedChdirDecl = true
-	}
-}
-
-// llvmCStrConst renders a `<sym> = private constant [N x i8] c"..."` global for a
-// printf format string, appending a trailing newline + NUL and computing N (and
-// the \XX escaping) from the actual bytes — so the length is never hand-counted.
-func llvmCStrConst(sym, text string) string {
-	raw := text + "\n\x00"
-	var b strings.Builder
-	for i := 0; i < len(raw); i++ {
-		c := raw[i]
-		if c == '\\' || c == '"' || c < 0x20 || c >= 0x7f {
-			b.WriteString(fmt.Sprintf("\\%02X", c))
-		} else {
-			b.WriteByte(c)
-		}
-	}
-	return fmt.Sprintf("%s = private unnamed_addr constant [%d x i8] c\"%s\", align 1", sym, len(raw), b.String())
+	e.usedDOMExcCode = true
+	e.usedCoreC = true
+	e.emitGlobal("declare double @__kml_domexc_code(ptr)")
 }

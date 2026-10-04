@@ -120,8 +120,8 @@
       "differences": [
         "`.promisify` wraps a function value and honours `promisify.custom`; a code-generated builtin (`fs.readFile`) is not a function value to pass it",
         "`promisify(f) === f` is false for an already-promisified `f`",
-        "`.inspect` ignores `colors`, `showHidden`, `getters`, `maxStringLength`, `numericSeparator` and `[inspect.custom]` methods; `compact: true` is treated as 3",
-        "No `inherits`, `parseArgs`, `MIMEType` or `getCallSites`"
+        "`.inspect` ignores `colors`, `showHidden`, `getters`, `maxStringLength` and `numericSeparator`; `compact: true` is treated as 3; a custom method's `depth` argument is `Infinity`, not `null`, when the depth is unlimited",
+        "No `inherits`, `MIMEType` or `getCallSites`"
       ],
       "seeAlso": [],
       "spec": {

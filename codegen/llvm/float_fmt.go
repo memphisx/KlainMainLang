@@ -19,7 +19,10 @@ func DtoaSource() string { return dtoaSource }
 
 // UsesFloatFmt reports whether any float print reached codegen, so main.go knows
 // to compile+link the dtoa C file.
-func (e *Emitter) UsesFloatFmt() bool { return e.usesFloatFmt }
+func (e *Emitter) UsesFloatFmt() bool {
+	// The string, case-mapping and Number runtimes format numbers through it.
+	return e.usesFloatFmt || e.UsesStringC() || e.UsesCasemap() || e.UsesNumberC()
+}
 
 // ensureDtoa declares @__kml_dtoa exactly once and marks the program as needing
 // the C file compiled in. Call it before every use of the helper.

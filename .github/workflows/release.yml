@@ -8,170 +8,30 @@ permissions:
   contents: write
 
 jobs:
-  # One lane per supported platform, all in parallel, none stopping the others
-  # (TDD-00179). A lane is a pure gate: it builds, vets and runs the suite, and
-  # on success publishes a tiny "gate" artifact naming its platform. The
-  # release job attaches a binary for exactly the platforms whose gate exists —
-  # a red lane drops that platform from the release until a fix lands, it does
-  # not block the others.
+  # One lane per platform, all in parallel, none stopping the others
+  # (TDD-00179). Each lane is test-platform.yml: the platform's parts (unit
+  # packages, examples, the tests/ suite in shards) run in parallel and fail
+  # fast within that platform only. The release job attaches a binary for each
+  # platform whose every part passed.
   test:
-    name: test (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    # Intel macOS needs ~75 min for suite + examples; Windows is the slow, less
-    # predictable lane (see the go test step) so it gets 120 min to fit its
-    # roomier 80m hang-catcher plus the slow MSYS2 setup. A genuine hang is still
-    # caught by go test's own per-lane timeout well before the job ceiling.
-    timeout-minutes: ${{ matrix.goos == 'windows' && 120 || 90 }}
+    name: ${{ matrix.platform.name }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: linux-x64
-            os: ubuntu-latest
-            goos: linux
-            goarch: amd64
-          - name: linux-arm64
-            os: ubuntu-24.04-arm
-            goos: linux
-            goarch: arm64
-          - name: macos-x64
-            os: macos-15-intel
-            goos: darwin
-            goarch: amd64
-          - name: macos-arm64
-            os: macos-15
-            goos: darwin
-            goarch: arm64
-          - name: windows-x64
-            os: windows-latest
-            goos: windows
-            goarch: amd64
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: false # stdlib-only project, no go.sum to key the module cache on
-
-      # The FFI differential oracle (assertSameAsNodeFFI) needs `node:ffi`, which
-      # only exists in Node >= 26.1.0 behind --experimental-ffi — a *separate*
-      # oracle from the general one below. Install it first (POSIX lanes: node:ffi
-      # is exercised through dlopen there), capture its absolute path into
-      # KML_FFI_NODE, *then* install the general oracle so 24.19.0 wins PATH. On
-      # Windows KML_FFI_NODE stays unset and the FFI oracle self-skips (the tests
-      # still check our own output against the pinned expectation).
-      - uses: actions/setup-node@v4
-        if: matrix.goos != 'windows'
-        with:
-          node-version: '26.10.0'
-      - name: Record the node:ffi oracle path
-        if: matrix.goos != 'windows'
-        shell: bash
-        run: echo "KML_FFI_NODE=$(command -v node)" >> "$GITHUB_ENV"
-
-      # The 23 `assertSameAsNode*` oracle test files diff our stdout against the
-      # Node on PATH, so the oracle must be one exact version across both dev
-      # machines and every CI lane — an unpinned runner Node drifts (its
-      # fs.statfsSync predated the `frsize` field, reading as a spurious diff).
-      # 24.19.0 is the pinned oracle (Active LTS); dev boxes run the same.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24.19.0'
-
-      # --- Linux (x64 and arm64): clang + the optional libraries the suite links against ---
-      - name: Install clang + libcurl (fetch examples link against it) + libgc (-mm=gc tests link against it) + libtommath (default bigint backend links against it) + libpcre2 (RegExp tests link -lpcre2-8) + libssl (default crypto.subtle backend links -lcrypto) + libnghttp2 (HTTP/2 server path links -lnghttp2) + libsqlite3 (node:sqlite links -lsqlite3) + gtk3/webkit2gtk-4.1 (klain:webview compile-tier tests link against it; headless so the window never opens)
-        if: matrix.goos == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev libsqlite3-dev libgtk-3-dev libwebkit2gtk-4.1-dev
-
-      # --- macOS (Intel and Apple Silicon): Apple's clang is the compiler; curl and WebKit ship with the OS ---
-      - name: Install the optional libraries via Homebrew (pcre2, libtommath, openssl@3, nghttp2, bdw-gc) and expose keg-only openssl@3 to clang
-        if: matrix.goos == 'darwin'
-        run: |
-          brew install pcre2 libtommath openssl@3 nghttp2 bdw-gc
-          prefix="$(brew --prefix)"
-          ssl="$(brew --prefix openssl@3)"
-          echo "PKG_CONFIG_PATH=$ssl/lib/pkgconfig:$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
-          echo "CPATH=$ssl/include:$prefix/include" >> "$GITHUB_ENV"
-          echo "LIBRARY_PATH=$ssl/lib:$prefix/lib" >> "$GITHUB_ENV"
-
-      # --- Windows: the mingw-w64 UCRT toolchain from MSYS2, as the README's Windows section installs it ---
-      - name: Install the MSYS2 UCRT64 toolchain + the optional libraries (curl/sqlite3/pcre2/libtommath/openssl/nghttp2/gc/zlib) + the WebView2 SDK header (klain:webview compile tier; the windowed smoke tests stay gated) + clang/lld/llvm-rc
-        if: matrix.goos == 'windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: true
-          install: >-
-            make
-            mingw-w64-ucrt-x86_64-toolchain
-            mingw-w64-ucrt-x86_64-clang
-            mingw-w64-ucrt-x86_64-lld
-            mingw-w64-ucrt-x86_64-llvm
-            mingw-w64-ucrt-x86_64-curl
-            mingw-w64-ucrt-x86_64-sqlite3
-            mingw-w64-ucrt-x86_64-pcre2
-            mingw-w64-ucrt-x86_64-libtommath
-            mingw-w64-ucrt-x86_64-openssl
-            mingw-w64-ucrt-x86_64-nghttp2
-            mingw-w64-ucrt-x86_64-gc
-            mingw-w64-ucrt-x86_64-zlib
-            mingw-w64-ucrt-x86_64-webview2-loader
-
-      # The suite writes and runs a fresh .exe per test; Defender's real-time
-      # scan of each one roughly doubled the run on the development box before
-      # the same exclusions were added there (TDD-00177's install record).
-      - name: Exclude the checkout and the temp directory from Defender's real-time scanning
-        if: matrix.goos == 'windows'
-        shell: pwsh
-        run: |
-          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
-          Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
-          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\Temp"
-          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\klainmain"
-
-      - name: Put the UCRT64 toolchain and MSYS2's coreutils on PATH, and point the compiler at the sysroot
-        if: matrix.goos == 'windows'
-        shell: pwsh
-        run: |
-          $root = (msys2 -c 'cygpath -w /').Trim()
-          "$root\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          "$root\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          "KLAIN_SYSROOT=$root\ucrt64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      # --- The gate itself ---
-      - run: go build -o klainmain${{ runner.os == 'Windows' && '.exe' || '' }} .
-      - run: go vet ./...
-      # One real compile before the suite: a broken platform layer (the Win32
-      # shim failing against a new header set, ADR-00734) fails here in seconds
-      # instead of as 386 link errors fifty minutes later.
-      - name: Smoke-compile and run one program
-        shell: bash
-        run: ./klainmain examples/basics/basics.ts && ./examples/basics/basics
-      - name: docs/status pages must match their data/ JSON source (reference lane only)
-        if: matrix.name == 'linux-x64'
-        run: make status-check
-      # Windows runners are consistently slower and less predictable than the
-      # others (MSYS2 toolchain + Defender scanning every compiled binary), so
-      # the hang-catcher gets extra headroom there to avoid a spurious timeout on
-      # a merely-slow run; the POSIX lanes keep the tighter 50m.
-      - run: go test -timeout ${{ matrix.goos == 'windows' && '80m' || '50m' }} ./...
-      - name: Compile and run every example (POSIX lanes; the example runner is a POSIX Makefile recipe)
-        if: matrix.goos != 'windows'
-        run: make examples
-
-      - name: Publish this platform's pass gate
-        if: success()
-        shell: bash
-        run: |
-          mkdir -p gate
-          echo "${{ matrix.goos }} ${{ matrix.goarch }} ${{ matrix.name }}" > "gate/${{ matrix.name }}"
-      - if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gate-${{ matrix.name }}
-          path: gate/${{ matrix.name }}
-          retention-days: 1
+        platform:
+          - { name: linux-x64, os: ubuntu-latest, goos: linux, goarch: amd64, parts: '["unit","examples","shard-0","shard-1","shard-2","shard-3","shard-4","shard-5"]' }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, goos: linux, goarch: arm64, parts: '["unit","examples","shard-0","shard-1","shard-2","shard-3","shard-4","shard-5"]' }
+          - { name: macos-x64, os: macos-15-intel, goos: darwin, goarch: amd64, parts: '["unit","examples","shard-0","shard-1","shard-2","shard-3","shard-4","shard-5"]' }
+          - { name: macos-arm64, os: macos-15, goos: darwin, goarch: arm64, parts: '["unit","examples","shard-0","shard-1","shard-2","shard-3","shard-4","shard-5"]' }
+          # The example runner is a POSIX Makefile recipe: no examples part.
+          - { name: windows-x64, os: windows-latest, goos: windows, goarch: amd64, parts: '["unit","shard-0","shard-1","shard-2","shard-3","shard-4","shard-5"]' }
+    uses: ./.github/workflows/test-platform.yml
+    with:
+      name: ${{ matrix.platform.name }}
+      os: ${{ matrix.platform.os }}
+      goos: ${{ matrix.platform.goos }}
+      goarch: ${{ matrix.platform.goarch }}
+      parts: ${{ matrix.platform.parts }}
 
   # Runs even when some lanes failed: cuts the release if at least one lane is
   # green, and attaches a binary for each green platform, cross-compiled here
@@ -187,7 +47,7 @@ jobs:
           fetch-depth: 0 # go-semantic-release needs full tag history, not a shallow clone
 
       - name: Collect the platform gates
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: gate-*
           path: gates
@@ -197,12 +57,18 @@ jobs:
         id: gates
         shell: bash
         run: |
-          passed=$(ls gates 2>/dev/null | sort | tr '\n' ' ')
-          echo "passed=$passed" >> "$GITHUB_OUTPUT"
-          all="linux-x64 linux-arm64 macos-x64 macos-arm64 windows-x64"
-          for p in $all; do
-            if [ -f "gates/$p" ]; then echo "PASS  $p"; else echo "FAIL  $p (no binary will be attached for it)"; fi
+          # A platform passed when every one of its parts published a gate:
+          # its unit packages, its shards and (POSIX) its examples.
+          shards=6 # keep in step with the test job's SHARDS
+          passed=""
+          for p in linux-x64 linux-arm64 macos-x64 macos-arm64 windows-x64; do
+            parts="unit"; for i in $(seq 0 $((shards-1))); do parts="$parts shard-$i"; done
+            [ "$p" = windows-x64 ] || parts="$parts examples"
+            ok=1; for part in $parts; do [ -f "gates/$p--$part" ] || ok=0; done
+            if [ $ok = 1 ]; then echo "PASS  $p"; cp "gates/$p--unit" "gates/$p"; passed="$passed $p"
+            else echo "FAIL  $p (no binary will be attached for it)"; fi
           done
+          echo "passed=${passed# }" >> "$GITHUB_OUTPUT"
           if [ -z "$passed" ]; then echo "::warning::no platform passed its tests — no release"; fi
 
       - name: Compute the next version and create the tag + GitHub Release

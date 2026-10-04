@@ -1,286 +1,48 @@
 // runtime_ipc.go — child_process.fork's self-fork spawn and both ends of its
 // IPC channel (TDD-00141). Wire framing (NDJSON string lines) lives in the
-// embedded C (ipcsrc/ipc.c); this file is the fd plumbing:
+// embedded C (ipcsrc/ipc.c); the fd plumbing is C too (TDD-00240):
 //
-//   - parent: __kml_cp_fork (socketpair + fork + re-exec of the current
-//     binary with NODE_CHANNEL_FD set), __kml_cp_ipc_drain (event-loop
-//     drain of a handle's channel, firing its 'message' listener),
-//     __kml_cp_send / __kml_cp_disconnect.
-//   - child: the __kml_ipcc_* event-loop hooks (keepalive/fdset_add/
-//     dispatch) plus __kml_ipcc_fd (NODE_CHANNEL_FD, parsed once),
-//     __kml_ipcc_send, and the single-slot process.on('message') listener.
+//   - parent (ipcsrc/cpipc.c): __kml_cp_wrap_ipc, __kml_cp_ipc_drain
+//     (event-loop drain of a handle's channel, firing its 'message'
+//     listeners), __kml_cp_send / __kml_cp_disconnect.
+//   - __kml_cp_fork (socketpair, fork, re-exec of the current binary with
+//     NODE_CHANNEL_FD set) stays IR here: its fork/spawn region differs per
+//     OS (runtime_spawn_win.go).
+//   - child (ipcsrc/ipcc.c): the __kml_ipcc_* event-loop hooks
+//     (keepalive/fdset_add/dispatch) plus __kml_ipcc_fd (NODE_CHANNEL_FD,
+//     parsed once), __kml_ipcc_send.
 //
-// A plain-spawn program never links the framing C: __kml_cp_dispatch calls
+// A plain-spawn program never links the channel C: __kml_cp_dispatch calls
 // @__kml_cp_ipc_drain unconditionally, so a no-op stub stands in when fork
 // was never used (emitCPRuntimeStubs, called from program finalization).
 package llvm
 
 import (
-	"fmt"
-	"strings"
+	_ "embed"
 )
 
-// ensureCPForkRuntime emits the parent-side fork machinery.
-func (e *Emitter) ensureCPForkRuntime() {
-	if e.usedCPForkRuntime {
-		return
-	}
-	e.usedCPForkRuntime = true
-	e.ensureChildProcRuntime()
-	e.ensureIPCDecls()
-	e.ensureSprintf()
-	e.ensureStrHeaderRuntime()
-	e.ensureSetenvDecl()
-	e.emitGlobal("declare i32 @socketpair(i32 noundef, i32 noundef, i32 noundef, ptr noundef)")
-	e.ensureExecvDecl()
+//go:embed ipcsrc/cpipc.c
+var cpIPCSource string
 
-	cp := cpStructIR
-	nonblock := e.httpNonblockFlag()
-	chanEnv := e.internString("NODE_CHANNEL_FD")
+//go:embed ipcsrc/ipcc.c
+var ipcChildSource string
 
-	// __kml_cp_fork(argsdata, argslen): socketpair + fork; the child dups
-	// nothing (stdio is inherited, Node fork's default), sets NODE_CHANNEL_FD
-	// to its socket end and re-execs the current executable (argv[0]) with
-	// the extra args appended — restarting the program from main() the way
-	// Node restarts the forked module. The parent gets a ChildProcess handle
-	// whose stdio fds are -1 (none) and whose ipcFd joins the select() loop.
-	e.emitGlobal(fmt.Sprintf(`
-define ptr @__kml_cp_fork(ptr %%argsdata, i64 %%argslen) {
-entry:
-  ; The child is exec'd with the NATURAL OS argv shape [exe, ...args, NULL];
-  ; the executable path is duplicated into process.argv[1] uniformly at the
-  ; child's own startup (__kml_argv_node_shape), so extra fork args land at
-  ; process.argv[2] exactly as Node's [exe, modulePath, ...args] does — without
-  ; this site pre-duplicating (which would double up under that transform).
-  %%argv0data = load ptr, ptr @__argv_ptr, align 8
-  %%argv0 = load ptr, ptr %%argv0data, align 8
-  %%argvlen = add i64 %%argslen, 2
-  %%argvbytes = mul i64 %%argvlen, 8
-  %%argv = call ptr @malloc(i64 %%argvbytes)
-  store ptr %%argv0, ptr %%argv, align 8
-  %%argvoff1 = getelementptr ptr, ptr %%argv, i64 1
-  %%hasargs = icmp sgt i64 %%argslen, 0
-  br i1 %%hasargs, label %%copyargs, label %%setnull
-copyargs:
-  %%copybytes = mul i64 %%argslen, 8
-  call ptr @memcpy(ptr %%argvoff1, ptr %%argsdata, i64 %%copybytes)
-  br label %%setnull
-setnull:
-  %%nullidx = add i64 %%argslen, 1
-  %%nullslot = getelementptr ptr, ptr %%argv, i64 %%nullidx
-  store ptr null, ptr %%nullslot, align 8
+// CPIPCSource is the parent-side channel C (cpipc.c), behind kml_layout.h.
+func CPIPCSource() string { return layoutHeader() + cpIPCSource }
 
-  %%sv = alloca [2 x i32], align 4
-  %%svp = getelementptr [2 x i32], ptr %%sv, i32 0, i32 0
-  call i32 @socketpair(i32 1, i32 1, i32 0, ptr %%svp)
-  %%p0_p = getelementptr [2 x i32], ptr %%sv, i32 0, i32 0
-  %%p1_p = getelementptr [2 x i32], ptr %%sv, i32 0, i32 1
-  %%pfd = load i32, ptr %%p0_p, align 4
-  %%cfd = load i32, ptr %%p1_p, align 4
+// IPCChildSource is the child-side channel C (ipcc.c), behind kml_layout.h.
+func IPCChildSource() string { return layoutHeader() + ipcChildSource }
 
-%sparent:
-  call i32 @close(i32 %%cfd)
-  %%pid64 = zext i32 %%pid to i64
-  %%cp = call ptr @__kml_cp_wrap_ipc(i64 %%pid64, i32 %%pfd)
-  ret ptr %%cp
-}`, e.cpForkIR(e.internString("%lld"), chanEnv)))
+// UsesCPIPC reports whether the program links cpipc.c (it forks).
+func (e *Emitter) UsesCPIPC() bool { return e.usedCPForkRuntime }
 
-	// __kml_cp_wrap_ipc(pid, fd): build + register a ChildProcess handle
-	// around an already-created IPC socket (parent end): inherited stdio (no
-	// pipes), fd made non-blocking, a fresh line-buffer channel. Shared by
-	// __kml_cp_fork and cluster.fork (runtime_cluster.go).
-	e.emitGlobal(strings.ReplaceAll(fmt.Sprintf(`
-define ptr @__kml_cp_wrap_ipc(i64 %%pid64, i32 %%pfd) {
-entry:
-  %%fl = call i32 (i32, i32, ...) @fcntl(i32 %%pfd, i32 3)
-  %%fln = or i32 %%fl, %d
-  call i32 (i32, i32, ...) @fcntl(i32 %%pfd, i32 4, i32 %%fln)
-  %%cp = call ptr @calloc(i64 1, i64 CPBYTES)
-  %%pid_p = getelementptr %s, ptr %%cp, i32 0, i32 0
-  store i64 %%pid64, ptr %%pid_p, align 8
-  ; stdio is inherited — no pipes on the handle
-  %%sin_p = getelementptr %s, ptr %%cp, i32 0, i32 1
-  store i32 -1, ptr %%sin_p, align 4
-  %%sout_p = getelementptr %s, ptr %%cp, i32 0, i32 2
-  store i32 -1, ptr %%sout_p, align 4
-  %%serr_p = getelementptr %s, ptr %%cp, i32 0, i32 3
-  store i32 -1, ptr %%serr_p, align 4
-  %%ipc_p = getelementptr %s, ptr %%cp, i32 0, i32 17
-  store i32 %%pfd, ptr %%ipc_p, align 4
-  %%chanv = call ptr @__kml_ipc_chan_new()
-  %%chan_p = getelementptr %s, ptr %%cp, i32 0, i32 19
-  store ptr %%chanv, ptr %%chan_p, align 8
-  call void @__kml_cp_register(ptr %%cp)
-  ret ptr %%cp
-}`, nonblock, cp, cp, cp, cp, cp, cp), "CPBYTES", fmt.Sprint(cpStructBytes)))
+// UsesIPCChild reports whether the program links ipcc.c (it reads the
+// channel as a forked child).
+func (e *Emitter) UsesIPCChild() bool { return e.usedIPCChildRuntime }
 
-	// Cluster hooks (null unless the cluster runtime arms them, at fork time):
-	// disc fires once when a handle's channel transitions open→closed (either
-	// end); ctrl intercepts a control-prefixed line ("__kml:...", e.g. a
-	// worker's listening announcement) instead of delivering it as 'message'.
-	e.emitGlobal("@__kml_cp_disc_hook = internal global ptr null, align 8")
-	e.emitGlobal("@__kml_cp_ctrl_hook = internal global ptr null, align 8")
-	e.ensureStrncmp()
-	ctrlPrefix := e.internString("__kml:")
-
-	// __kml_cp_ipc_drain(cp): read the channel until EAGAIN/EOF, feed the
-	// C-side line buffer, then fire the 'message' listener once per decoded
-	// line. EOF closes the fd (state -1) so finalize can proceed.
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_cp_ipc_drain(ptr %%cp) {
-entry:
-  %%chunk = alloca [4096 x i8], align 1
-  %%chunkptr = getelementptr [4096 x i8], ptr %%chunk, i32 0, i32 0
-  %%isstrslot = alloca i64, align 8
-  %%ipc_p = getelementptr %s, ptr %%cp, i32 0, i32 17
-  %%chan_p = getelementptr %s, ptr %%cp, i32 0, i32 19
-  %%chanv = load ptr, ptr %%chan_p, align 8
-  br label %%loop
-loop:
-  %%fd = load i32, ptr %%ipc_p, align 4
-  %%open = icmp sgt i32 %%fd, 0
-  br i1 %%open, label %%doread, label %%deliver
-doread:
-  %%n = call i64 @read(i32 %%fd, ptr %%chunkptr, i64 4096)
-  %%hasdata = icmp sgt i64 %%n, 0
-  br i1 %%hasdata, label %%feed, label %%ckeof
-feed:
-  call void @__kml_ipc_feed(ptr %%chanv, ptr %%chunkptr, i64 %%n)
-  br label %%loop
-ckeof:
-  %%iseof = icmp eq i64 %%n, 0
-  br i1 %%iseof, label %%oneof, label %%deliver
-oneof:
-  call i32 @close(i32 %%fd)
-  store i32 -1, ptr %%ipc_p, align 4
-  %%dh = load ptr, ptr @__kml_cp_disc_hook, align 8
-  %%dhset = icmp ne ptr %%dh, null
-  br i1 %%dhset, label %%discfire, label %%deliver
-discfire:
-  call void %%dh(ptr %%cp)
-  br label %%deliver
-deliver:
-  %%haschan = icmp ne ptr %%chanv, null
-  br i1 %%haschan, label %%take, label %%ret
-take:
-  %%msg = call ptr @__kml_ipc_take2(ptr %%chanv, ptr %%isstrslot)
-  %%hasmsg = icmp ne ptr %%msg, null
-  br i1 %%hasmsg, label %%fire, label %%ret
-fire:
-  %%isstr64 = load i64, ptr %%isstrslot, align 8
-  %%isstr = icmp ne i64 %%isstr64, 0
-  ; a "__kml:"-prefixed line is runtime control traffic (worker listening
-  ; announcements), routed to the ctrl hook instead of the 'message' listener
-  %%ctlcmp = call i32 @strncmp(ptr %%msg, ptr %s, i64 6)
-  %%isctl = icmp eq i32 %%ctlcmp, 0
-  br i1 %%isctl, label %%ctl, label %%norm
-ctl:
-  %%ch = load ptr, ptr @__kml_cp_ctrl_hook, align 8
-  %%chset = icmp ne ptr %%ch, null
-  br i1 %%chset, label %%ctlcall, label %%freemsg
-ctlcall:
-  call void %%ch(ptr %%cp, ptr %%msg)
-  br label %%freemsg
-norm:
-  ; field 18 is a listener LIST — fire each registered 'message' listener
-  %%mL_p = getelementptr %s, ptr %%cp, i32 0, i32 18
-  %%mL = load ptr, ptr %%mL_p, align 8
-  %%hasL = icmp ne ptr %%mL, null
-  br i1 %%hasL, label %%docall, label %%freemsg
-docall:
-  %%mlen = call i64 @strlen(ptr %%msg)
-  %%mstr = call ptr @__kml_str_alloc(i64 %%mlen)
-  call ptr @memcpy(ptr %%mstr, ptr %%msg, i64 %%mlen)
-  %%mnul = getelementptr i8, ptr %%mstr, i64 %%mlen
-  store i8 0, ptr %%mnul, align 1
-  br label %%mloop
-mloop:
-  %%mnode = phi ptr [ %%mL, %%docall ], [ %%mnext, %%mcall ]
-  %%mdone = icmp eq ptr %%mnode, null
-  br i1 %%mdone, label %%freemsg, label %%mcall
-mcall:
-  %%mhdr_p = getelementptr { ptr, ptr }, ptr %%mnode, i32 0, i32 0
-  %%mhdr = load ptr, ptr %%mhdr_p, align 8
-  %%fp_p = getelementptr { ptr, ptr }, ptr %%mhdr, i32 0, i32 0
-  %%fp = load ptr, ptr %%fp_p, align 8
-  %%ep_p = getelementptr { ptr, ptr }, ptr %%mhdr, i32 0, i32 1
-  %%ep = load ptr, ptr %%ep_p, align 8
-  call void %%fp(ptr %%ep, ptr %%mstr, i1 %%isstr)
-  %%mnext_p = getelementptr { ptr, ptr }, ptr %%mnode, i32 0, i32 1
-  %%mnext = load ptr, ptr %%mnext_p, align 8
-  br label %%mloop
-freemsg:
-  call void @free(ptr %%msg)
-  br label %%take
-ret:
-  ret void
-}`, cp, cp, ctrlPrefix, cp))
-
-	// __kml_cp_send(cp, s): JSON-quote + newline + write. false once closed.
-	// The _raw sibling frames an already-serialized JSON value verbatim (the
-	// non-string send path — Node's json serialization mode).
-	e.emitGlobal(fmt.Sprintf(`
-define i1 @__kml_cp_send(ptr %%cp, ptr %%s) {
-entry:
-  %%ipc_p = getelementptr %s, ptr %%cp, i32 0, i32 17
-  %%fd = load i32, ptr %%ipc_p, align 4
-  %%open = icmp sgt i32 %%fd, 0
-  br i1 %%open, label %%wr, label %%no
-wr:
-  %%fd64 = sext i32 %%fd to i64
-  %%ok = call i64 @__kml_ipc_send(i64 %%fd64, ptr %%s)
-  %%okb = icmp ne i64 %%ok, 0
-  ret i1 %%okb
-no:
-  ret i1 0
-}
-define i1 @__kml_cp_send_json(ptr %%cp, ptr %%s) {
-entry:
-  %%ipc_p = getelementptr %s, ptr %%cp, i32 0, i32 17
-  %%fd = load i32, ptr %%ipc_p, align 4
-  %%open = icmp sgt i32 %%fd, 0
-  br i1 %%open, label %%wr, label %%no
-wr:
-  %%fd64 = sext i32 %%fd to i64
-  %%ok = call i64 @__kml_ipc_send_raw(i64 %%fd64, ptr %%s)
-  %%okb = icmp ne i64 %%ok, 0
-  ret i1 %%okb
-no:
-  ret i1 0
-}
-define void @__kml_cp_disconnect(ptr %%cp) {
-entry:
-  %%ipc_p = getelementptr %s, ptr %%cp, i32 0, i32 17
-  %%fd = load i32, ptr %%ipc_p, align 4
-  %%open = icmp sgt i32 %%fd, 0
-  br i1 %%open, label %%cl, label %%ret
-cl:
-  ; deliver any message already in flight before closing (Node flushes the
-  ; channel on disconnect rather than dropping queued messages)
-  call void @__kml_cp_ipc_drain(ptr %%cp)
-  ; the drain's own EOF path (worker already closed) has closed the fd AND
-  ; fired the disc hook — don't fire it twice
-  %%fd2 = load i32, ptr %%ipc_p, align 4
-  %%still = icmp sgt i32 %%fd2, 0
-  br i1 %%still, label %%doclose, label %%ret
-doclose:
-  call i32 @close(i32 %%fd2)
-  store i32 -1, ptr %%ipc_p, align 4
-  br label %%hook
-hook:
-  %%dh = load ptr, ptr @__kml_cp_disc_hook, align 8
-  %%dhset = icmp ne ptr %%dh, null
-  br i1 %%dhset, label %%dhcall, label %%ret
-dhcall:
-  call void %%dh(ptr %%cp)
-  br label %%ret
-ret:
-  ret void
-}`, cp, cp, cp))
-}
-
-// ensureIPCChildRuntime emits the child-side channel: NODE_CHANNEL_FD
-// parsing, send, and the event-loop hooks that deliver 'message' events.
+// ensureIPCChildRuntime declares the child-side channel (ipcsrc/ipcc.c):
+// NODE_CHANNEL_FD parsing, send, and the event-loop hooks that deliver
+// 'message' events.
 func (e *Emitter) ensureIPCChildRuntime() {
 	if e.usedIPCChildRuntime {
 		return
@@ -299,124 +61,11 @@ func (e *Emitter) ensureIPCChildRuntime() {
 	e.ensureAtoll()
 	e.ensureGetenv()
 
-	// -2 = not yet probed · -1 = no channel · >0 = the channel fd
-	e.emitGlobal("@__kml_ipcc_fd_g = internal global i32 -2, align 4")
-	e.emitGlobal("@__kml_ipcc_chan = internal global ptr null, align 8")
-	// Set once the process emitter's channel (lib/node/internal_process.ts)
-	// reads the descriptor: this reader then leaves it alone, and the
-	// channel's sends (cluster's announcements) still go out.
-	e.emitGlobal("@__kml_ipcc_claimed = internal global i1 0, align 1")
-	chanEnv := e.internString("NODE_CHANNEL_FD")
-	nonblock := e.httpNonblockFlag()
-
-	e.emitGlobal(fmt.Sprintf(`
-define i32 @__kml_ipcc_fd() {
-entry:
-  %%cur = load i32, ptr @__kml_ipcc_fd_g, align 4
-  %%probed = icmp ne i32 %%cur, -2
-  br i1 %%probed, label %%have, label %%probe
-have:
-  ret i32 %%cur
-probe:
-  %%env = call ptr @getenv(ptr %s)
-  %%hasenv = icmp ne ptr %%env, null
-  br i1 %%hasenv, label %%parse, label %%none
-parse:
-  %%v = call i64 @atoll(ptr %%env)
-  %%fd = trunc i64 %%v to i32
-  %%valid = icmp sgt i32 %%fd, 0
-  br i1 %%valid, label %%init, label %%none
-init:
-  ; nonblocking + a line buffer, ready for the event loop
-  %%fl = call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 3)
-  %%fln = or i32 %%fl, %d
-  call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 4, i32 %%fln)
-  %%chanv = call ptr @__kml_ipc_chan_new()
-  store ptr %%chanv, ptr @__kml_ipcc_chan, align 8
-  store i32 %%fd, ptr @__kml_ipcc_fd_g, align 4
-  ret i32 %%fd
-none:
-  store i32 -1, ptr @__kml_ipcc_fd_g, align 4
-  ret i32 -1
-}`, chanEnv, nonblock))
-
-	e.emitGlobal(`
-define i1 @__kml_ipcc_send(ptr %s) {
-entry:
-  %fd = call i32 @__kml_ipcc_fd()
-  %open = icmp sgt i32 %fd, 0
-  br i1 %open, label %wr, label %no
-wr:
-  %fd64 = sext i32 %fd to i64
-  %ok = call i64 @__kml_ipc_send(i64 %fd64, ptr %s)
-  %okb = icmp ne i64 %ok, 0
-  ret i1 %okb
-no:
-  ret i1 0
-}
-define i1 @__kml_ipcc_keepalive() {
-entry:
-  ; the channel is unreferenced here: the process emitter's channel holds the
-  ; loop open while it has 'message' listeners, as Node's does.
-  ret i1 0
-}
-define i1 @__kml_ipcc_fdset_add(ptr %fdset, ptr %maxfd) {
-entry:
-  %fd = load i32, ptr @__kml_ipcc_fd_g, align 4
-  %claimed = load i1, ptr @__kml_ipcc_claimed, align 1
-  %pos = icmp sgt i32 %fd, 0
-  %unclaimed = xor i1 %claimed, 1
-  %open = and i1 %pos, %unclaimed
-  br i1 %open, label %add, label %ret
-add:
-  call void @__kml_worker_fd_setbit(i32 %fd, ptr %fdset, ptr %maxfd)
-  br label %ret
-ret:
-  ret i1 0
-}
-define void @__kml_ipcc_dispatch() {
-entry:
-  %chunk = alloca [4096 x i8], align 1
-  %chunkptr = getelementptr [4096 x i8], ptr %chunk, i32 0, i32 0
-  %isstrslot = alloca i64, align 8
-  %chanv = load ptr, ptr @__kml_ipcc_chan, align 8
-  %claimed = load i1, ptr @__kml_ipcc_claimed, align 1
-  br i1 %claimed, label %ret, label %loop
-loop:
-  %fd = load i32, ptr @__kml_ipcc_fd_g, align 4
-  %open = icmp sgt i32 %fd, 0
-  br i1 %open, label %doread, label %deliver
-doread:
-  %n = call i64 @read(i32 %fd, ptr %chunkptr, i64 4096)
-  %hasdata = icmp sgt i64 %n, 0
-  br i1 %hasdata, label %feed, label %ckeof
-feed:
-  call void @__kml_ipc_feed(ptr %chanv, ptr %chunkptr, i64 %n)
-  br label %loop
-ckeof:
-  %iseof = icmp eq i64 %n, 0
-  br i1 %iseof, label %oneof, label %deliver
-oneof:
-  call i32 @close(i32 %fd)
-  store i32 -1, ptr @__kml_ipcc_fd_g, align 4
-  br label %deliver
-deliver:
-  %haschan = icmp ne ptr %chanv, null
-  br i1 %haschan, label %take, label %ret
-take:
-  %msg = call ptr @__kml_ipc_take2(ptr %chanv, ptr %isstrslot)
-  %hasmsg = icmp ne ptr %msg, null
-  br i1 %hasmsg, label %fire, label %ret
-fire:
-  ; nothing here listens: a message is the process emitter's once it
-  ; claims the channel.
-  br label %freemsg
-freemsg:
-  call void @free(ptr %msg)
-  br label %take
-ret:
-  ret void
-}`)
+	e.emitGlobal(`declare i32 @__kml_ipcc_fd()
+declare i1 @__kml_ipcc_send(ptr)
+declare i1 @__kml_ipcc_keepalive()
+declare i1 @__kml_ipcc_fdset_add(ptr, ptr)
+declare void @__kml_ipcc_dispatch()`)
 }
 
 // emitCPRuntimeStubs finalizes the fork/IPC symbols other runtimes reference
@@ -445,11 +94,5 @@ func (e *Emitter) ensureNativeIPCChildClaim() {
 	}
 	e.fnDecls["__kml_native_ipc_child_claim"] = true
 	e.ensureIPCChildRuntime()
-	e.emitGlobal(`
-define void @__kml_native_ipc_child_claim() {
-entry:
-  %fd = call i32 @__kml_ipcc_fd()
-  store i1 1, ptr @__kml_ipcc_claimed, align 1
-  ret void
-}`)
+	e.emitGlobal("declare void @__kml_native_ipc_child_claim()")
 }

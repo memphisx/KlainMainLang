@@ -303,103 +303,12 @@ func (e *Emitter) emitObjHooksFinalize() {
 	if !e.usedDynJSONC {
 		return
 	}
-	e.emitGlobal(fmt.Sprintf(`
-; An Error's own enumerable fields beyond its layout (its system fields and
-; extra bag, __kml_error_nextra) follow the layout's keys.
-define i1 @__kml_obj_is_error(ptr %%o) {
-entry:
-  %%h = load i64, ptr %%o, align 8
-  %%f = and i64 %%h, %d
-  %%e = icmp ne i64 %%f, 0
-  ret i1 %%e
-}
-
-define i64 @__kml_obj_nkeys(ptr %%o) {
-entry:
-  %%n = call i64 @__kml_shape_nkeys(ptr %%o)
-  %%err = call i1 @__kml_obj_is_error(ptr %%o)
-  br i1 %%err, label %%error, label %%plain
-plain:
-  ret i64 %%n
-error:
-  %%x = call i64 @__kml_error_nextra(ptr %%o)
-  %%none = icmp eq i64 %%x, 0
-  br i1 %%none, label %%plain, label %%sum
-sum:
-  %%neg = icmp slt i64 %%n, 0
-  %%base = select i1 %%neg, i64 0, i64 %%n
-  %%t = add i64 %%base, %%x
-  ret i64 %%t
-}
-
-define ptr @__kml_obj_key(ptr %%o, i64 %%i) {
-entry:
-  %%n = call i64 @__kml_shape_nkeys(ptr %%o)
-  %%neg = icmp slt i64 %%n, 0
-  %%base = select i1 %%neg, i64 0, i64 %%n
-  %%own = icmp slt i64 %%i, %%base
-  br i1 %%own, label %%layout, label %%rest
-layout:
-  %%k = call ptr @__kml_shape_key(ptr %%o, i64 %%i)
-  ret ptr %%k
-rest:
-  %%err = call i1 @__kml_obj_is_error(ptr %%o)
-  br i1 %%err, label %%error, label %%none
-none:
-  ret ptr null
-error:
-  %%j = sub i64 %%i, %%base
-  %%ek = call ptr @__kml_error_extra_key(ptr %%o, i64 %%j)
-  ret ptr %%ek
-}
-
-define i64 @__kml_obj_get(ptr %%o, ptr %%k) {
-entry:
-  %%f = alloca i32, align 4
-  %%v = call i64 @__kml_shape_get(ptr %%o, ptr %%k, ptr %%f)
-  %%fv = load i32, ptr %%f, align 4
-  %%hit = icmp sgt i32 %%fv, 0
-  br i1 %%hit, label %%done, label %%miss
-done:
-  ret i64 %%v
-miss:
-  %%err = call i1 @__kml_obj_is_error(ptr %%o)
-  br i1 %%err, label %%error, label %%done
-error:
-  %%ev = call i64 @__kml_error_extra_get(ptr %%o, ptr %%k, ptr %%f)
-  %%efv = load i32, ptr %%f, align 4
-  %%ehit = icmp sgt i32 %%efv, 0
-  %%r = select i1 %%ehit, i64 %%ev, i64 %%v
-  ret i64 %%r
-}
-
-define i32 @__kml_obj_has(ptr %%o, ptr %%k) {
-entry:
-  %%f = alloca i32, align 4
-  %%v = call i64 @__kml_shape_get(ptr %%o, ptr %%k, ptr %%f)
-  %%fv = load i32, ptr %%f, align 4
-  %%h = icmp sgt i32 %%fv, 0
-  br i1 %%h, label %%yes, label %%miss
-yes:
-  ret i32 1
-miss:
-  %%err = call i1 @__kml_obj_is_error(ptr %%o)
-  br i1 %%err, label %%error, label %%no
-no:
-  ret i32 0
-error:
-  %%ev = call i64 @__kml_error_extra_get(ptr %%o, ptr %%k, ptr %%f)
-  %%efv = load i32, ptr %%f, align 4
-  %%eh = icmp sgt i32 %%efv, 0
-  %%er = zext i1 %%eh to i32
-  ret i32 %%er
-}
-
-define ptr @__kml_obj_name(ptr %%o) {
-entry:
-  %%n = call ptr @__kml_shape_class_name(ptr %%o)
-  ret ptr %%n
-}`, int64(1)<<48))
+	// Defined in shape.c (KML_OBJ_HOOKS).
+	e.emitGlobal("declare i64 @__kml_obj_nkeys(ptr)")
+	e.emitGlobal("declare ptr @__kml_obj_key(ptr, i64)")
+	e.emitGlobal("declare i64 @__kml_obj_get(ptr, ptr)")
+	e.emitGlobal("declare i32 @__kml_obj_has(ptr, ptr)")
+	e.emitGlobal("declare ptr @__kml_obj_name(ptr)")
 	e.emitErrorOwnKeysHooks()
 	if !e.usedHostBox {
 		e.emitGlobal(fmt.Sprintf("define ptr @__kml_host_inspect(ptr %%c, i64 %%d) {\nentry:\n  ret ptr %s\n}", e.internString("[Object]")))
@@ -409,6 +318,8 @@ entry:
 	}
 	e.emitPromiseInspectHook()
 	e.emitErrorInspectHook()
+	e.emitInspectCustomHook()
+	e.emitToStringTagHook()
 }
 
 // emitErrorInspectHook defines @__kml_error_inspect(obj): a boxed Error
@@ -508,39 +419,15 @@ func (e *Emitter) ensureShapeKeysArray() {
 	e.ensureShapeRuntime()
 	e.ensureDynJSONC() // the object hooks: an Error's own fields beyond its layout
 	e.ensureMalloc()
-	e.emitGlobal(`
-define { ptr, i64 } @__kml_shape_keys_array(ptr %o) {
+	// The body is shape.c's (KML_SHAPE_KEYS_ARRAY); the aggregate comes back
+	// through an out-slot.
+	e.emitGlobal("declare void @__kml_shape_keys_array_c(ptr, ptr)")
+	e.emitGlobal(`define { ptr, i64 } @__kml_shape_keys_array(ptr %o) {
 entry:
-  %n0 = call i64 @__kml_obj_nkeys(ptr %o)
-  %neg = icmp slt i64 %n0, 0
-  %n = select i1 %neg, i64 0, i64 %n0
-  %bytes0 = mul i64 %n, 8
-  %bytes = add i64 %bytes0, 8
-  %data = call ptr @malloc(i64 %bytes)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %entry ], [ %inext, %next ]
-  %w = phi i64 [ 0, %entry ], [ %wnext, %next ]
-  %done = icmp sge i64 %i, %n
-  br i1 %done, label %ret, label %body
-body:
-  %k = call ptr @__kml_obj_key(ptr %o, i64 %i)
-  %hv = call i32 @__kml_obj_has(ptr %o, ptr %k)
-  %has = icmp ne i32 %hv, 0
-  br i1 %has, label %keep, label %next
-keep:
-  %slot = getelementptr ptr, ptr %data, i64 %w
-  store ptr %k, ptr %slot, align 8
-  %w1 = add i64 %w, 1
-  br label %next
-next:
-  %wnext = phi i64 [ %w, %body ], [ %w1, %keep ]
-  %inext = add i64 %i, 1
-  br label %loop
-ret:
-  %r0 = insertvalue { ptr, i64 } undef, ptr %data, 0
-  %r1 = insertvalue { ptr, i64 } %r0, i64 %w, 1
-  ret { ptr, i64 } %r1
+  %out = alloca { ptr, i64 }, align 8
+  call void @__kml_shape_keys_array_c(ptr %o, ptr %out)
+  %r = load { ptr, i64 }, ptr %out, align 8
+  ret { ptr, i64 } %r
 }`)
 }
 
@@ -684,13 +571,28 @@ func extraCandidate(t Type) bool {
 		(t.IsClass || plainRecordType(t) || emptyRecordType(t))
 }
 
-// emitExtraSplit runs static(v) when the object has no added properties,
-// else the hook hookFn (returning resTy's storage) with extra arguments.
+// emitExtraSplit runs static(v) when the object has no added properties
+// and, for a class instance, is of exactly its static class (not a
+// subclass with fields of its own), else the hook hookFn (returning resTy's
+// storage) with extra arguments.
 func (e *Emitter) emitExtraSplit(v Value, resTy Type, static func(Value) (Value, error), hookCall func(obj string) string) (Value, error) {
 	e.usedObjExtra = true
 	e.extraTypes = append(e.extraTypes, v.Ty)
 	has := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_obj_has_extra(ptr %s)", has, v.Ref))
+	// A class with subclasses: an instance of one is read at its own
+	// layout. Library code is the same text in every program, so it never
+	// checks (whether a class has subclasses depends on the program).
+	if info, ok := e.classes[v.Ty.ClassName]; ok && v.Ty.IsClass && info.TagID != 0 && len(info.Descendants) > 0 && e.inLib == "" {
+		e.usedObjSubclassSplit = true
+		hdr, other, any := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, v.Ref))
+		masked := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", masked, hdr, kmlHdrMagicMask|kmlHdrIDMask))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", other, masked, info.TagID&(kmlHdrMagicMask|kmlHdrIDMask)))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", any, has, other))
+		has = any
+	}
 	slotIR := resTy.IR
 	if resTy.IsArray {
 		slotIR = "{ptr, i64}"
@@ -727,7 +629,7 @@ func (e *Emitter) emitObjExtraFinalize() {
 		return
 	}
 	e.objExtraEmitted = true
-	if !e.usedObjExtensible {
+	if !e.usedObjExtensible && !e.usedObjSubclassSplit {
 		// No property can be added: the static path is the whole answer.
 		e.emitGlobal(`define internal i1 @__kml_obj_has_extra(ptr %o) {
 entry:

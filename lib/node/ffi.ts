@@ -11,29 +11,7 @@
 // kml:default-namespace — `import ffi from 'node:ffi'` reads this module's
 // exports.
 
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
 function invalidValue(message: string): Error {
     return new NodeTypeError('ERR_INVALID_ARG_VALUE', message);
@@ -293,7 +271,10 @@ export class DynamicLibrary {
         return fn;
     }
 
-    getFunction(name: string, signature: FunctionSignature): any {
+    // The implementation takes the signature as given: Node validates its
+    // members at run time, and a typed parameter would convert them first.
+    getFunction(name: string, signature: FunctionSignature): any;
+    getFunction(name: string, signature: any): any {
         this._kmlCheck();
         const n = checkName(name, 'Function');
         const sig = parseSignature(n, signature, 'Function signature must be an object', 'ERR_INVALID_ARG_TYPE');

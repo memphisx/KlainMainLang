@@ -31,99 +31,8 @@ func (e *Emitter) ensureUnhandledRejections() {
 	e.ensurePromiseRuntime()
 	e.ensureMicrotasks()
 	e.ensureExceptionHelpers()
-	e.ensureRealloc()
-	e.emitGlobal("@__kml_unh_data = internal thread_local global ptr null, align 8")
-	e.emitGlobal("@__kml_unh_len = internal thread_local global i64 0, align 8")
-	e.emitGlobal("@__kml_unh_cap = internal thread_local global i64 0, align 8")
 	e.ensureProcessHooks()
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_promise_mark_handled(ptr %%p) {
-entry:
-  %%isnull = icmp eq ptr %%p, null
-  br i1 %%isnull, label %%ret, label %%mark
-mark:
-  %%fp = getelementptr %[1]s, ptr %%p, i32 0, i32 %[2]d
-  %%f = load i64, ptr %%fp, align 8
-  %%f2 = or i64 %%f, %[3]d
-  store i64 %%f2, ptr %%fp, align 8
-  br label %%ret
-ret:
-  ret void
-}
-define void @__kml_promise_note_rejected(ptr %%p) {
-entry:
-  %%fp = getelementptr %[1]s, ptr %%p, i32 0, i32 %[2]d
-  %%f = load i64, ptr %%fp, align 8
-  %%seen = and i64 %%f, %[5]d
-  %%skip0 = icmp ne i64 %%seen, 0
-  br i1 %%skip0, label %%ret, label %%chk
-chk:
-  %%rx_p = getelementptr %[1]s, ptr %%p, i32 0, i32 4
-  %%rx = load ptr, ptr %%rx_p, align 8
-  %%hasrx = icmp ne ptr %%rx, null
-  %%w_p = getelementptr %[1]s, ptr %%p, i32 0, i32 1
-  %%w = load ptr, ptr %%w_p, align 8
-  %%hasw = icmp ne ptr %%w, null
-  %%consumed = or i1 %%hasrx, %%hasw
-  br i1 %%consumed, label %%ret, label %%queue
-queue:
-  %%fq = or i64 %%f, %[4]d
-  store i64 %%fq, ptr %%fp, align 8
-  %%len = load i64, ptr @__kml_unh_len, align 8
-  %%cap = load i64, ptr @__kml_unh_cap, align 8
-  %%full = icmp sge i64 %%len, %%cap
-  br i1 %%full, label %%grow, label %%push
-grow:
-  %%c2 = mul i64 %%cap, 2
-  %%big = icmp sgt i64 %%c2, 8
-  %%nc = select i1 %%big, i64 %%c2, i64 8
-  %%old = load ptr, ptr @__kml_unh_data, align 8
-  %%bytes = mul i64 %%nc, 8
-  %%nd = call ptr @realloc(ptr %%old, i64 %%bytes)
-  store ptr %%nd, ptr @__kml_unh_data, align 8
-  store i64 %%nc, ptr @__kml_unh_cap, align 8
-  br label %%push
-push:
-  %%data = load ptr, ptr @__kml_unh_data, align 8
-  %%slot = getelementptr ptr, ptr %%data, i64 %%len
-  store ptr %%p, ptr %%slot, align 8
-  %%nl = add i64 %%len, 1
-  store i64 %%nl, ptr @__kml_unh_len, align 8
-  br label %%ret
-ret:
-  ret void
-}
-define void @__kml_unhandled_check() {
-entry:
-  %%n0 = load i64, ptr @__kml_unh_len, align 8
-  %%none = icmp eq i64 %%n0, 0
-  br i1 %%none, label %%ret, label %%loop
-loop:
-  %%i = phi i64 [ 0, %%entry ], [ %%in, %%next ]
-  %%len = load i64, ptr @__kml_unh_len, align 8
-  %%more = icmp slt i64 %%i, %%len
-  br i1 %%more, label %%body, label %%done
-body:
-  %%data = load ptr, ptr @__kml_unh_data, align 8
-  %%slot = getelementptr ptr, ptr %%data, i64 %%i
-  %%p = load ptr, ptr %%slot, align 8
-  %%fp = getelementptr %[1]s, ptr %%p, i32 0, i32 %[2]d
-  %%f = load i64, ptr %%fp, align 8
-  %%h = and i64 %%f, %[3]d
-  %%handled = icmp ne i64 %%h, 0
-  br i1 %%handled, label %%next, label %%report
-report:
-  call void @__kml_unhandled_report(ptr %%p)
-  br label %%next
-next:
-  %%in = add i64 %%i, 1
-  br label %%loop
-done:
-  store i64 0, ptr @__kml_unh_len, align 8
-  br label %%ret
-ret:
-  ret void
-}`, promiseStructIR, promiseFlagsSlot, promiseFlagHandled, promiseFlagQueued, promiseFlagHandled|promiseFlagQueued))
+	// The queue and the checkpoint are microtask.c's (TDD-00240).
 }
 
 // emitUnhandledFinalize defines @__kml_unhandled_report when rejections are
@@ -136,8 +45,8 @@ func (e *Emitter) emitUnhandledFinalize() {
 		return
 	}
 	if e.usedMicrotasks {
-		e.emitGlobal("define void @__kml_unhandled_check() {\nentry:\n  ret void\n}")
-		e.emitGlobal("define void @__kml_promise_note_rejected(ptr %p) {\nentry:\n  ret void\n}")
+		// microtask.c's checkpoint calls it; nothing is ever reported here.
+		e.emitGlobal("define void @__kml_unhandled_report(ptr %p) {\nentry:\n  ret void\n}")
 	}
 }
 
@@ -199,7 +108,7 @@ func (e *Emitter) emitUnhandledReport() {
 	e.emitTerminator("unreachable")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine internal void @__kml_unhandled_report(ptr %%p) {\nentry:\n%s}\n", body))
+	e.functions.WriteString(fmt.Sprintf("\ndefine void @__kml_unhandled_report(ptr %%p) {\nentry:\n%s}\n", body))
 }
 
 // emitMarkPromiseHandled marks promise p consumed (a reaction, an await, a

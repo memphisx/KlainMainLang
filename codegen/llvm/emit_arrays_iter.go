@@ -166,6 +166,11 @@ func (e *Emitter) emitArrayEntries(mem *ast.MemberExpression, args []ast.Express
 // first-element rule for `[...]` literals; an empty call defaults to
 // number[], same as an empty literal.
 func (e *Emitter) emitArrayOf(args []ast.Expression, pos ast.Pos) (Value, error) {
+	// `Array.of(...xs)` (and Array.of used as a value, which forwards its
+	// rest parameter) is the array literal `[...xs]`.
+	if hasSpreadElem(args) {
+		return e.emitExpr(ast.NewArrayLiteral(args, pos))
+	}
 	elemTy := TypeI64
 	if len(args) > 0 {
 		elemTy = e.inferExprType(args[0])
@@ -306,9 +311,7 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 	// can't arise for this compiler's dense, materialized arrays. thisArg
 	// stays unsupported.
 	if len(args) == 2 {
-		fromCall := ast.NewCallExpression(
-			ast.NewMemberExpression(ast.NewIdentifier("Array", pos), "from", pos),
-			args[:1], pos)
+		fromCall := arrayFromCall(pos, args[:1])
 		mapCall := ast.NewCallExpression(
 			ast.NewMemberExpression(fromCall, "map", pos),
 			args[1:2], pos)
@@ -570,6 +573,7 @@ func (e *Emitter) emitArrayCopyWithin(mem *ast.MemberExpression, args []ast.Expr
 	if err != nil {
 		return Value{}, err
 	}
+	e.emitArrayGuardFor(mem.Object, arrOpReorder, nil)
 
 	targetRaw, err := e.emitExpr(args[0])
 	if err != nil {

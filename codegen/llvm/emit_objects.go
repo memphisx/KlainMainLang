@@ -1,6 +1,7 @@
 package llvm
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -145,6 +146,15 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 		}
 	}
 plain:
+	// An array literal stored where any is expected is an array of anything
+	// (`const a: any = [1]; a.push({})`), not its elements' own type.
+	if lit, ok := expr.(*ast.ArrayLiteral); ok && isUnconstrainedDynamic(hint) && !hint.IsCaught {
+		v, err := e.emitExprWithObjectHint(lit, ArrayOf(TypeAny))
+		if err != nil {
+			return Value{}, err
+		}
+		return e.coerce(v, hint), nil
+	}
 	// An array literal where a union with one array member is expected is
 	// built as that member (`["a", 2]` for `string | (string | number)[]`).
 	if lit, ok := expr.(*ast.ArrayLiteral); ok && hint.IsDynamic && len(hint.UnionMembers) > 0 {
@@ -269,6 +279,12 @@ plain:
 		if fe, ok := expr.(*ast.FunctionExpression); ok {
 			return e.emitClosureAgainstHint(e.emitFunctionExpression(fe, contextParamHints(hint, fe.Params)))(hint, fe.GetPos())
 		}
+	}
+	// A ternary into an object or dictionary slot builds each branch against
+	// it (`const init: Init = c ? read() : {}`: the `{}` is the dictionary).
+	if ce, ok := expr.(*ast.ConditionalExpression); ok && (hint.IsObject || hint.IsDynamicObject) && hint.IR == "ptr" && !hint.IsDynamic &&
+		!hint.IsArray && e.ptrShapedBranch(ce.Consequent) && e.ptrShapedBranch(ce.Alternate) {
+		return e.emitConditionalHinted(ce, hint)
 	}
 	if lit, ok := expr.(*ast.ObjectLiteral); ok && (hint.IsObject || hint.IsDynamicObject) {
 		return e.emitObjectLiteralWithHint(lit, &hint)
@@ -640,7 +656,7 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 			cur = Value{Ref: sel, Ty: valTy}
 		}
 		// `??=` on a non-ptr value type can never trigger (no null to coalesce).
-		if op == "??=" && valTy.IR != "ptr" && !valTy.IsDynamic {
+		if op == "??=" && valTy.IR != "ptr" && !valTy.IsDynamic && !isF64Slot(valTy) {
 			return cur, nil
 		}
 		var cond Value
@@ -660,6 +676,10 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 				isUndef := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
 				e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", nullReg, isNull, isUndef))
+			} else if isF64Slot(valTy) {
+				b := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", b, cur.Ref))
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", nullReg, b, undefF64))
 			} else {
 				e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", nullReg, cur.Ref))
 			}
@@ -922,11 +942,11 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 
 func (e *Emitter) emitObjectDestructuring(s *ast.ObjectDestructuring) error {
 	// `const { subtle } = globalThis.crypto` / `= crypto` (the corpus's
-	// standard WebCrypto binding, ADR-00434): `subtle` is a compile-time
-	// pseudo-namespace, not a bindable value — register the local name as a
-	// subtle alias (isCryptoSubtle consults it) and emit nothing.
-	if src, ok := cryptoGlobalExpr(s.Init); ok && src {
-		if len(s.Props) == 1 && s.Props[0].Key == "subtle" && s.Props[0].Default == nil {
+	// standard Web Crypto binding): the name reads as the TypeScript
+	// SubtleCrypto's one instance wherever it is visible, a function body
+	// included (tsSubtleAlias).
+	if src, ok := cryptoGlobalExpr(s.Init); ok && src && e.tsSubtle() {
+		if len(s.Props) == 1 && s.Props[0].Key == "subtle" && s.Props[0].Default == nil && s.Props[0].SubObject == nil && s.Props[0].SubArray == nil {
 			if e.cryptoSubtleAliases == nil {
 				e.cryptoSubtleAliases = map[string]bool{}
 			}
@@ -1149,7 +1169,7 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 		} else {
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, valReg, localPtr, fieldTy.Align()))
 		}
-		e.define(prop.Local, Symbol{Ptr: localPtr, Ty: fieldTy})
+		e.definePatternLocal(prop.Local, Symbol{Ptr: localPtr, Ty: fieldTy})
 	}
 	return nil
 }
@@ -1220,7 +1240,9 @@ func (e *Emitter) resolveObjectPtr(init ast.Expression, pos ast.Pos) (string, Ty
 		if err != nil {
 			return "", Type{}, err
 		}
-		if !val.Ty.IsObject {
+		// A call held in `any` (an overload whose implementation returns
+		// any) destructures through the dynamic path.
+		if !val.Ty.IsObject && !isUnconstrainedDynamic(val.Ty) {
 			return "", Type{}, fmt.Errorf("%d:%d: function call does not return an object", pos.Line, pos.Col)
 		}
 		return val.Ref, val.Ty, nil
@@ -1232,7 +1254,7 @@ func (e *Emitter) resolveObjectPtr(init ast.Expression, pos ast.Pos) (string, Ty
 		if err != nil {
 			return "", Type{}, err
 		}
-		if !val.Ty.IsObject {
+		if !val.Ty.IsObject && !isUnconstrainedDynamic(val.Ty) {
 			return "", Type{}, fmt.Errorf("%d:%d: awaited value is not an object", pos.Line, pos.Col)
 		}
 		return val.Ref, val.Ty, nil
@@ -1277,7 +1299,8 @@ func (e *Emitter) resolveObjectPtr(init ast.Expression, pos ast.Pos) (string, Ty
 
 // emitConditional emits a ternary expression cond ? consequent : alternate.
 // Uses an alloca+store/load pattern so both branches can produce a single result.
-
+// emitObjectGroupBy is Object.groupBy(items, fn): a null-prototype object
+// whose own properties, in first-seen order, hold each key's elements.
 func (e *Emitter) emitObjectGroupBy(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 2 {
 		return Value{}, fmt.Errorf("%d:%d: Object.groupBy takes exactly 2 arguments", pos.Line, pos.Col)
@@ -1286,29 +1309,22 @@ func (e *Emitter) emitObjectGroupBy(args []ast.Expression, pos ast.Pos) (Value, 
 	if err != nil {
 		return Value{}, err
 	}
-	if err := e.rejectNestedArrayElem(elemTy, "groupBy", pos); err != nil {
-		return Value{}, err
-	}
 	cb, err := e.resolveCallbackWithHints(args[1], []Type{elemTy})
 	if err != nil {
 		return Value{}, err
 	}
-	if !isStringTy(cb.retType()) {
-		return Value{}, fmt.Errorf("%d:%d: Object.groupBy callback must return a string key", pos.Line, pos.Col)
-	}
-	e.ensureGroupMapHelpers()
-
-	mapReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_gmap_create()", mapReg))
+	e.ensureDynObj()
+	e.ensureDynArr()
+	bag := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_new()", bag))
+	e.emitDynSetProtoChecked(bag, "null")
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
-
 	condL := e.freshLabel("grpby.cond")
 	bodyL := e.freshLabel("grpby.body")
 	doneL := e.freshLabel("grpby.done")
-
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
@@ -1319,11 +1335,9 @@ func (e *Emitter) emitObjectGroupBy(args []ast.Expression, pos ast.Pos) (Value, 
 
 	e.emitLabel(bodyL)
 	elemGep := e.freshReg()
-	elemVal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", elemGep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elemVal, elemTy.IR, elemGep, elemTy.Align()))
-
-	cbArgs := []Value{{Ref: elemVal, Ty: elemTy}}
+	elem := e.loadArrayElem(elemGep, elemTy)
+	cbArgs := []Value{elem}
 	if cb.arity() >= 2 {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
 	}
@@ -1331,43 +1345,50 @@ func (e *Emitter) emitObjectGroupBy(args []ast.Expression, pos ast.Pos) (Value, 
 	if err != nil {
 		return Value{}, err
 	}
-
-	bucketIdx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_gmap_find_or_add(ptr %s, ptr %s)", bucketIdx, mapReg, keyVal.Ref))
-
-	// Convert element to i64 for uniform storage in the bucket.
-	var elemAsI64 string
-	switch elemTy.IR {
-	case "i64":
-		elemAsI64 = elemVal
-	case "ptr":
-		t := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", t, elemVal))
-		elemAsI64 = t
-	case "double":
-		t := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", t, elemVal))
-		elemAsI64 = t
-	case "i1":
-		t := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", t, elemVal))
-		elemAsI64 = t
-	default:
-		t := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = sext %s %s to i64", t, elemTy.IR, elemVal))
-		elemAsI64 = t
+	if !isStringTy(keyVal.Ty) {
+		// The key is a property key: ToString of what the callback returns.
+		if keyVal, err = e.emitValueToString(keyVal); err != nil {
+			return Value{}, err
+		}
 	}
-
-	e.emitInstr(fmt.Sprintf("call void @__kml_gmap_append(ptr %s, i64 %s, i64 %s)", mapReg, bucketIdx, elemAsI64))
-
+	boxed, err := e.emitBoxValue(elem)
+	if err != nil {
+		return Value{}, err
+	}
+	// The key's group: a dynamic array, created on its first element.
+	found := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_find(ptr %s, ptr %s)", found, bag, keyVal.Ref))
+	has := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", has, found))
+	oldL := e.freshLabel("grpby.old")
+	newL := e.freshLabel("grpby.new")
+	pushL := e.freshLabel("grpby.push")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, oldL, newL))
+	e.emitLabel(oldL)
+	word := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get_at(ptr %s, i64 %s)", word, bag, found))
+	untagged := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, -8", untagged, word))
+	oldArr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", oldArr, untagged))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", pushL))
+	e.emitLabel(newL)
+	newArr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynarr_new(i64 0)", newArr))
+	arrBox := e.emitNbTagPtr(newArr, kmlTagDynArray)
+	e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_set(ptr %s, ptr %s, i64 %s)", bag, keyVal.Ref, arrBox))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", pushL))
+	e.emitLabel(pushL)
+	arr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", arr, oldArr, oldL, newArr, newL))
+	e.emitInstr(fmt.Sprintf("call void @__kml_dynarr_push(ptr %s, i64 %s)", arr, boxed.Ref))
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
-	gmapTy := Type{IR: "ptr", IsGroupMap: true, ElemType: &elemTy}
-	return Value{Ref: mapReg, Ty: gmapTy}, nil
+	return e.emitDynObjBox(bag), nil
 }
 
 // emitObjectKeys implements Object.keys(obj | groupMap) → string[].
@@ -1379,12 +1400,6 @@ func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, err
 	if err != nil {
 		return Value{}, err
 	}
-	if val.Ty.IsGroupMap {
-		e.ensureGroupMapHelpers()
-		retReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_gmap_keys(ptr %s)", retReg, val.Ref))
-		return Value{Ref: retReg, Ty: ArrayOf(TypePtr)}, nil
-	}
 	// A bare any/unknown value: runtime key enumeration on a D1 dynamic object
 	// (TDD-00155 Stage 1) — [] for primitives, TypeError for null/undefined.
 	if isUnconstrainedDynamic(val.Ty) {
@@ -1393,6 +1408,15 @@ func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, err
 	// A caught value (`catch (e)`): whatever was thrown, boxed.
 	if val.Ty.IsCaught {
 		return e.emitDynAnyKeys(e.emitCaughtToAny(val), pos)
+	}
+	// An Error's own keys are not its layout's fields: its system fields that
+	// are set, its subclass's own, its added ones — the boxed walk's.
+	if e.isErrorValue(val.Ty) && !val.Ty.Nullable {
+		box, err := e.emitBoxValue(val)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyKeys(box, pos)
 	}
 	// A function's own enumerable keys (TDD-00229): a bound native function's
 	// own-property bag; a closure has none.
@@ -1845,6 +1869,9 @@ func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, e
 	if e.dynamicAssign(args) {
 		return e.emitDynObjectAssign(args, pos)
 	}
+	if lit, ok := assignAsSpread(args); ok {
+		return e.emitExpr(lit)
+	}
 	targetVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -2212,27 +2239,6 @@ func (e *Emitter) emitFrozenCheck(ptrRef string) {
 	e.emitLabel(okL)
 }
 
-// emitGroupMapIndex handles groupResult["stringKey"] → sub-array.
-func (e *Emitter) emitGroupMapIndex(sym Symbol, indexExpr ast.Expression, pos ast.Pos) (Value, error) {
-	e.ensureGroupMapHelpers()
-	mapPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", mapPtr, sym.Ptr))
-	keyVal, err := e.emitExpr(indexExpr)
-	if err != nil {
-		return Value{}, err
-	}
-	if !isStringTy(keyVal.Ty) {
-		return Value{}, fmt.Errorf("%d:%d: group map key must be a string", pos.Line, pos.Col)
-	}
-	retReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_gmap_get(ptr %s, ptr %s)", retReg, mapPtr, keyVal.Ref))
-	elemTy := TypeI64
-	if sym.Ty.ElemType != nil {
-		elemTy = *sym.Ty.ElemType
-	}
-	return Value{Ref: retReg, Ty: ArrayOf(elemTy)}, nil
-}
-
 // registerCryptoSubtleAliases pre-scans top-level statements for the
 // `const { subtle } = globalThis.crypto` binding (ADR-00434) so Pass 2
 // function bodies see the alias before the statement itself emits.
@@ -2266,7 +2272,7 @@ func (e *Emitter) dynObjectKeyExpr(keyExpr ast.Expression, pos ast.Pos) (ast.Exp
 		return keyExpr, nil
 	}
 	if kt.IR == "double" || kt.IR == "i64" || kt.IR == "i32" || kt.IR == "i16" || kt.IR == "i8" {
-		return ast.NewCallExpression(ast.NewIdentifier("String", pos), []ast.Expression{keyExpr}, pos), nil
+		return stringCall(keyExpr, pos), nil
 	}
 	return nil, fmt.Errorf("%d:%d: computed property key must be a string or number", pos.Line, pos.Col)
 }
@@ -2360,7 +2366,9 @@ func unionLiteralMember(expr ast.Expression, u Type) (Type, bool) {
 	var want func(Type) bool
 	switch expr.(type) {
 	case *ast.ObjectLiteral:
-		want = func(m Type) bool { return isUnionObjectMember(m) }
+		// An object literal is never a class's instance (`string | URL |
+		// RequestOptions`: the literal is the options).
+		want = func(m Type) bool { return isUnionObjectMember(m) && !m.IsClass }
 	case *ast.ArrowFunction, *ast.FunctionExpression:
 		want = func(m Type) bool { return m.IsFunc }
 	default:
@@ -2392,4 +2400,303 @@ func isObjectCreateNull(expr ast.Expression) bool {
 	}
 	nl, ok := call.Args[0].(*ast.NullLiteral)
 	return ok && !nl.IsUndefined
+}
+
+// assignAsSpread is `Object.assign({ …props }, a, b)` as the object literal
+// `{ …props, ...a, ...b }`: a fresh literal target is referenced by nothing
+// else, so filling it is building it, with every source's properties, typed
+// as tsc types the call (the intersection of target and sources).
+func assignAsSpread(args []ast.Expression) (*ast.ObjectLiteral, bool) {
+	target, ok := args[0].(*ast.ObjectLiteral)
+	if !ok || len(args) < 2 {
+		return nil, false
+	}
+	props := append([]ast.ObjectProperty{}, target.Properties...)
+	for _, src := range args[1:] {
+		if _, isSpread := src.(*ast.SpreadElement); isSpread {
+			return nil, false
+		}
+		props = append(props, ast.ObjectProperty{Value: ast.NewSpreadElement(src, src.GetPos())})
+	}
+	return ast.NewObjectLiteral(props, target.GetPos()), true
+}
+
+// emitObjectStatic is a call of an Object static (`Object.keys(o)`), the
+// Object.* intrinsics' one emitter. errNotObjectStatic: a form it does not
+// emit (the caller's remaining paths decide).
+func (e *Emitter) emitObjectStatic(prop string, ex *ast.CallExpression) (Value, error) {
+	switch prop {
+	case "freeze", "seal", "preventExtensions", "isFrozen", "isSealed", "isExtensible":
+		if len(ex.Args) == 1 {
+			if t := e.inferExprType(ex.Args[0]); t.IsArray && !t.IsFlatArray && !t.IsDynamic && !t.Nullable {
+				return e.emitArrayIntegrityOp(prop, ex.Args[0])
+			}
+		}
+	}
+	switch prop {
+	case "groupBy":
+		return e.emitObjectGroupBy(ex.Args, ex.GetPos())
+	case "keys":
+		return e.emitObjectKeys(ex.Args, ex.GetPos())
+	case "values":
+		return e.emitObjectValues(ex.Args, ex.GetPos())
+	case "entries":
+		return e.emitObjectEntries(ex.Args, ex.GetPos())
+	case "fromEntries":
+		return e.emitObjectFromEntries(ex.Args, ex.GetPos())
+	case "assign":
+		return e.emitObjectAssign(ex.Args, ex.GetPos())
+	case "freeze":
+		return e.emitObjectFreeze(ex.Args, ex.GetPos())
+	case "seal":
+		return e.emitObjectSeal(ex.Args, ex.GetPos())
+	case "hasOwn":
+		if len(ex.Args) != 2 {
+			return Value{}, fmt.Errorf("%d:%d: Object.hasOwn takes 2 arguments", ex.GetPos().Line, ex.GetPos().Col)
+		}
+		return e.emitHasOwnProperty(ex.Args[0], ex.Args[1], "Object.hasOwn", true, ex.GetPos())
+	case "create":
+		return e.emitObjectCreate(ex.Args, ex.GetPos())
+	case "getPrototypeOf":
+		return e.emitObjectGetPrototypeOf(ex.Args, ex.GetPos())
+	case "setPrototypeOf":
+		return e.emitObjectSetPrototypeOf(ex.Args, ex.GetPos())
+	case "defineProperty":
+		return e.emitObjectDefineProperty(ex.Args, ex.GetPos())
+	case "defineProperties":
+		return e.emitObjectDefineProperties(ex.Args, ex.GetPos())
+	case "getOwnPropertyDescriptor":
+		return e.emitObjectGetOwnPropertyDescriptor(ex.Args, ex.GetPos())
+	case "getOwnPropertyNames":
+		return e.emitObjectGetOwnPropertyNames(ex.Args, ex.GetPos())
+	case "preventExtensions", "isExtensible", "isSealed", "isFrozen":
+		// Dynamic-object forms (TDD-00155 Stage 5); the static-object
+		// freeze/seal paths keep their own handlers below.
+		if len(ex.Args) == 1 && isUnconstrainedDynamic(e.inferExprType(ex.Args[0])) {
+			v, err := e.emitExprWithObjectHint(ex.Args[0], TypeAny)
+			if err != nil {
+				return Value{}, err
+			}
+			switch prop {
+			case "preventExtensions":
+				return e.emitDynPrevent(v, 0)
+			case "isExtensible":
+				return e.emitDynFlagsTest(v, 0)
+			case "isSealed":
+				return e.emitDynFlagsTest(v, 1)
+			case "isFrozen":
+				return e.emitDynFlagsTest(v, 2)
+			}
+		}
+		// A static object's integrity level (TDD-00229).
+		if len(ex.Args) == 1 && e.inferExprType(ex.Args[0]).IsObject {
+			v, err := e.emitExpr(ex.Args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			if prop == "preventExtensions" {
+				e.emitStaticIntegrity(v.Ref, staticIntegrityNonExtensible)
+				return v, nil
+			}
+			return e.emitStaticIntegrityTest(v, prop), nil
+		}
+		// A primitive is frozen, sealed and not extensible.
+		if at := e.inferExprType(ex.Args[0]); len(ex.Args) == 1 && isPrimitiveIntegrityTy(at) {
+			v, err := e.emitExpr(ex.Args[0])
+			if err != nil || prop == "preventExtensions" {
+				return v, err
+			}
+			return Value{Ref: fmt.Sprint(prop != "isExtensible"), Ty: TypeBool}, nil
+		}
+	}
+	return Value{}, errNotObjectStatic
+}
+
+var errNotObjectStatic = errors.New("not an Object static")
+
+// isPrimitiveIntegrityTy reports a type whose values are primitives: a
+// number, string, boolean, bigint or symbol.
+func isPrimitiveIntegrityTy(t Type) bool {
+	if t.IsDynamic || t.IsObject || t.IsArray || t.IsClass || t.IsMap || t.IsSet || t.IsFunc || t.Nullable {
+		return false
+	}
+	return isNumberTy(t) || isStringTy(t) || t.IR == "i1" || t.IsBigInt || t.IsSymbol
+}
+
+// emitArrayIntegrityOp is Object.freeze, seal, preventExtensions, isFrozen,
+// isSealed or isExtensible of an array: its level lives in the frozen set,
+// keyed by its shared header (arrayguard.c), which every mutation checks. A
+// typed array with elements cannot be frozen or sealed (V8's TypeError).
+func (e *Emitter) emitArrayIntegrityOp(prop string, arg ast.Expression) (Value, error) {
+	v, err := e.emitExpr(arg)
+	if err != nil {
+		return Value{}, err
+	}
+	hdr, lenReg := e.arrayArgFromAggregate(v)
+	v.ArrayHeader = hdr
+	e.ensureArrayGuard()
+	level := map[string]int{"freeze": staticIntegrityFrozen, "seal": staticIntegritySealed, "preventExtensions": staticIntegrityNonExtensible}
+	if lvl, ok := level[prop]; ok {
+		if v.Ty.IsTypedArray && prop != "preventExtensions" {
+			has := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", has, lenReg))
+			badL, okL := e.freshLabel("ta.integrity.bad"), e.freshLabel("ta.integrity.ok")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, badL, okL))
+			e.emitLabel(badL)
+			verb := map[string]string{"freeze": "freeze", "seal": "seal"}[prop]
+			e.emitInternalThrowKind("TypeError", e.internString("Cannot "+verb+" array buffer views with elements"))
+			e.emitLabel(okL)
+		}
+		e.emitArraySetLevel(hdr, lvl)
+		return v, nil
+	}
+	which := map[string]int{"isFrozen": 0, "isSealed": 1, "isExtensible": 2}[prop]
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_array_integrity(ptr %s, i64 %d)", r, hdr, which))
+	b := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", b, r))
+	return Value{Ref: b, Ty: TypeBool}, nil
+}
+
+// emitArrayStatic is a call of an Array static (Array.isArray, Array.of,
+// Array.from), the Array.* intrinsics' one emitter.
+func (e *Emitter) emitArrayStatic(prop string, ex *ast.CallExpression) (Value, error) {
+	switch prop {
+	case "isArray":
+		if len(ex.Args) != 1 {
+			return Value{}, fmt.Errorf("%d:%d: Array.isArray takes exactly 1 argument", ex.GetPos().Line, ex.GetPos().Col)
+		}
+		// A dynamic (`any`) argument's array-ness is only known at
+		// runtime — a NaN-box can carry an array now and a plain object
+		// the next line. Consult the box tag (a static-array box is
+		// kmlTagArray, a D1 dynamic array kmlTagDynArray) rather than the
+		// compile-time IsArray, which is always false for `any` and made
+		// `Array.isArray(x)` wrongly return false for a genuine boxed
+		// array (ADR-00934).
+		argTy := e.inferExprType(ex.Args[0])
+		if argTy.IsDynamic {
+			v, err := e.emitExpr(ex.Args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			v, err = e.emitBoxValue(v)
+			if err != nil {
+				return Value{}, err
+			}
+			tag, payload := e.emitUnboxTagPayload(v)
+			isArr := e.freshReg()
+			isDyn := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isArr, tag, kmlTagArray))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isDyn, tag, kmlTagDynArray))
+			// A boxed TypedArray is kmlTagArray too, but `Array.isArray(new
+			// Int32Array(1))` is false — read the box's typed byte (ADR-01059).
+			// Only dereferenced when the tag says the payload is a box.
+			resPtr := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resPtr))
+			e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", isDyn, resPtr))
+			typedL := e.freshLabel("isarray.typed")
+			mergeL := e.freshLabel("isarray.merge")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isArr, typedL, mergeL))
+			e.emitLabel(typedL)
+			box := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", box, payload))
+			typedGep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", typedGep, anyArrayBoxTy, box))
+			typedB := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", typedB, typedGep))
+			plain := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", plain, typedB, anyArrayPlain))
+			e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", plain, resPtr))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+			e.emitLabel(mergeL)
+			res := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", res, resPtr))
+			return Value{Ref: res, Ty: TypeBool}, nil
+		}
+		if argTy.IsTypedArray || argTy.IsBuffer {
+			// A TypedArray/Buffer is IsArray storage-wise but not a JS Array.
+			return Value{Ref: "false", Ty: TypeBool}, nil
+		}
+		if argTy.IsArray {
+			// A `T[] | undefined` value (a nested-array element absence,
+			// TDD-00221): a miss is `undefined`, and `Array.isArray(undefined)`
+			// is false — decide at runtime on the null data-ptr.
+			if argTy.Nullable {
+				v, err := e.emitExpr(ex.Args[0])
+				if err != nil {
+					return Value{}, err
+				}
+				dataPtr := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, v.Ref))
+				isArr := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isArr, dataPtr))
+				return Value{Ref: isArr, Ty: TypeBool}, nil
+			}
+			return Value{Ref: "true", Ty: TypeBool}, nil
+		}
+		return Value{Ref: "false", Ty: TypeBool}, nil
+	case "of":
+		return e.emitArrayOf(ex.Args, ex.GetPos())
+	case "from":
+		return e.emitArrayFrom(ex.Args, ex.GetPos())
+	}
+	pos := ex.GetPos()
+	return Value{}, fmt.Errorf("%d:%d: Array.%s is not supported", pos.Line, pos.Col, prop)
+}
+
+// arrayFromCall is `Array.from(args)` as the compiler writes it: the call
+// names its intrinsic, since no declaration reaches synthesized source.
+// stringCall is a synthesized `String(x)`: the conversion, named directly.
+func stringCall(x ast.Expression, pos ast.Pos) *ast.CallExpression {
+	c := ast.NewCallExpression(ast.NewIdentifier("String", pos), []ast.Expression{x}, pos)
+	c.Intrinsic = "String"
+	return c
+}
+
+func arrayFromCall(pos ast.Pos, args []ast.Expression) *ast.CallExpression {
+	c := ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Array", pos), "from", pos), args, pos)
+	c.Intrinsic = "Array.from"
+	return c
+}
+
+// ptrShapedBranch reports whether a ternary branch is held in one pointer
+// (an object, a dictionary, a literal of either), not an array's aggregate.
+func (e *Emitter) ptrShapedBranch(x ast.Expression) bool {
+	switch x.(type) {
+	case *ast.ObjectLiteral:
+		return true
+	}
+	t := e.inferExprType(x)
+	return t.IR == "ptr" && !t.IsArray && !t.IsDynamic
+}
+
+// emitConditionalHinted is `c ? a : b` stored where an object of type hint
+// is expected: each branch built against hint, as each would be on its own.
+func (e *Emitter) emitConditionalHinted(ce *ast.ConditionalExpression, hint Type) (Value, error) {
+	thenL, elseL, mergeL := e.freshLabel("ternary.then"), e.freshLabel("ternary.else"), e.freshLabel("ternary.merge")
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	cond, err := e.emitExpr(ce.Test)
+	if err != nil {
+		return Value{}, err
+	}
+	cond = e.toBool(cond)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cond.Ref, thenL, elseL))
+	for _, br := range []struct {
+		label string
+		expr  ast.Expression
+	}{{thenL, ce.Consequent}, {elseL, ce.Alternate}} {
+		e.emitLabel(br.label)
+		v, err := e.emitExprWithObjectHint(br.expr, hint)
+		if err != nil {
+			return Value{}, err
+		}
+		v = e.coerce(v, hint)
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", v.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	}
+	e.emitLabel(mergeL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	return Value{Ref: r, Ty: hint}, nil
 }

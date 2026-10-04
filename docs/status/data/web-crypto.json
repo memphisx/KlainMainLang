@@ -5,7 +5,7 @@
   "segments": [
     {
       "kind": "block",
-      "text": "> Part of the [Implementation Status](README.md) index. `crypto.subtle.*` delegates to a native crypto library selected with `-crypto`: OpenSSL 3 libcrypto (default, all platforms) or Apple CommonCrypto + Security.framework (`-crypto=commoncrypto`, macOS only) — a per-backend C file implementing one shared `__kml_crypto_*` ABI, compiled+linked only when a program uses `crypto.subtle` ([TDD-00104](../tdd/TDD-00104.md)). `crypto.getRandomValues`/`randomUUID` need only a real CSPRNG (`arc4random_buf`/`getrandom()`), no external library."
+      "text": "> Part of the [Implementation Status](README.md) index. `crypto.subtle` is Node's own `lib/internal/crypto/webcrypto.js` in TypeScript (`lib/node/internal_crypto_webcrypto*.ts`), written over the `node:crypto` module, whose natives come from the crypto library selected with `-crypto`: OpenSSL 3 libcrypto (default, all platforms) or Apple CommonCrypto + Security.framework (`-crypto=commoncrypto`, macOS only, out of scope) ([TDD-00104](../tdd/TDD-00104.md)). `crypto.getRandomValues`/`randomUUID` need only a real CSPRNG (`arc4random_buf`/`getrandom()`), no external library."
     },
     {
       "kind": "coverage",
@@ -14,14 +14,6 @@
     {
       "kind": "block",
       "text": "Format: [Status page format](README.md#status-page-format)."
-    },
-    {
-      "kind": "block",
-      "text": "Shared `crypto.subtle` caveats (apply to every ✅ subtle row):"
-    },
-    {
-      "kind": "block",
-      "text": "- The algorithm argument must be a string literal or an object literal with a literal `name:` (a variable holding the name is a compile error — compile-time dispatch)\n- Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise\n- Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
     },
     {
       "kind": "table",
@@ -54,62 +46,53 @@
           {
             "feature": "`crypto.subtle.digest(algo, data)`",
             "status": "implemented",
-            "caveats": [
-              "Shared subtle caveats above only"
-            ],
             "notes": [
-              "SHA-1, SHA-256, SHA-384, SHA-512 over a TypedArray/`ArrayBuffer`, → `Promise<ArrayBuffer>`",
-              "See [ADR-00316](../adr/ADR-00316.md)"
+              "SHA-1, SHA-256, SHA-384, SHA-512 over any BufferSource → `Promise<ArrayBuffer>`; an unknown name rejects with `NotSupportedError`",
+              "See [ADR-00316](../adr/ADR-00316.md), [ADR-01347](../adr/ADR-01347.md)"
             ]
           },
           {
             "feature": "`crypto.subtle.encrypt` / `.decrypt`",
             "status": "implemented",
             "caveats": [
-              "On `-crypto=commoncrypto` only: a non-empty RSA-OAEP `label` throws `NotSupportedError` (SecKey has no label parameter)",
-              "Shared subtle caveats above"
+              "On `-crypto=commoncrypto` the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over `node:crypto`'s KeyObject, which that backend does not provide"
             ],
             "notes": [
-              "AES-GCM (`iv`, optional `additionalData`, optional `tagLength` default 128; auth failure → `OperationError`), AES-CBC (`iv`, PKCS#7), and RSA-OAEP (public encrypts / private decrypts, optional `label`), → `Promise<ArrayBuffer>`",
-              "See [ADR-00318](../adr/ADR-00318.md), [ADR-00319](../adr/ADR-00319.md)"
+              "AES-CTR (`counter`, `length`), AES-CBC, AES-GCM (`iv`, `additionalData`, `tagLength`) and RSA-OAEP (`label`), with Node's errors; a failure rejects with `OperationError`",
+              "See [ADR-01347](../adr/ADR-01347.md)"
             ]
           },
           {
             "feature": "`crypto.subtle.sign` / `.verify`",
             "status": "implemented",
             "caveats": [
-              "On `-crypto=commoncrypto` only: RSA-PSS `saltLength` must equal the hash length or `NotSupportedError` is thrown (SecKey fixes salt = digest size)",
-              "Shared subtle caveats above"
+              "On `-crypto=commoncrypto` the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over `node:crypto`'s KeyObject, which that backend does not provide"
             ],
             "notes": [
-              "HMAC (constant-time verify), RSA-PSS (runtime `saltLength`), ECDSA P-256/P-384/P-521 (per-call literal `hash`, raw `r‖s` signatures), → `Promise<ArrayBuffer>`/`Promise<boolean>`",
-              "See [ADR-00318](../adr/ADR-00318.md), [ADR-00319](../adr/ADR-00319.md)"
+              "HMAC, RSASSA-PKCS1-v1_5, RSA-PSS (`saltLength`), ECDSA (P-256/P-384/P-521, IEEE P1363 signatures) and Ed25519",
+              "See [ADR-01347](../adr/ADR-01347.md)"
             ]
           },
           {
             "feature": "`crypto.subtle.generateKey`",
             "status": "implemented",
             "caveats": [
-              "`publicExponent` restricted to 65537 (the literal `new Uint8Array([1, 0, 1])`, or omit it)",
-              "Shared subtle caveats above"
+              "On `-crypto=commoncrypto` the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over `node:crypto`'s KeyObject, which that backend does not provide"
             ],
             "notes": [
-              "AES-GCM/AES-CBC (`length:`), HMAC (`hash:`, spec-default length), RSA-OAEP/RSA-PSS (`modulusLength`, `hash`) and ECDSA (`namedCurve`) → `Promise<CryptoKey>` / `Promise<CryptoKeyPair>` (`.publicKey`/`.privateKey`); usages enforced and spec-split across the pair",
-              "See [ADR-00318](../adr/ADR-00318.md), [ADR-00319](../adr/ADR-00319.md)"
+              "AES-CTR/CBC/GCM/KW, HMAC, RSASSA-PKCS1-v1_5/RSA-PSS/RSA-OAEP (any `publicExponent`), ECDSA/ECDH, Ed25519 and X25519; usages checked and split across a pair as Node splits them",
+              "See [ADR-01347](../adr/ADR-01347.md)"
             ]
           },
           {
             "feature": "`crypto.subtle.importKey` / `.exportKey`",
             "status": "implemented",
             "caveats": [
-              "`jwk` is surfaced as a `Map<string,string>` (this compiler has no dynamic object model), key-material members only (`kty`/`k`/`crv`/`n`/`e`/`d`/…) — no `key_ops`/`ext`/`alg` members; import never validates `kty`",
-              "`CryptoKey.algorithm`/`.usages` property reads not implemented (`.type`/`.extractable` work)",
-              "`raw` export of a non-EC asymmetric key isn't rejected (yields the stored DER)",
-              "Shared subtle caveats above"
+              "On `-crypto=commoncrypto` the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over `node:crypto`'s KeyObject, which that backend does not provide"
             ],
             "notes": [
-              "`raw` (AES/HMAC bytes; EC public uncompressed points both ways), `pkcs8` (private), `spki` (public), `jwk` (oct/RSA/EC; object literal or Map in, Map out); kind/format mismatches and non-extractable export throw `InvalidAccessError`",
-              "See [ADR-00318](../adr/ADR-00318.md), [ADR-00319](../adr/ADR-00319.md)"
+              "`raw` (secret keys; EC points, compressed or not; Ed25519/X25519), `pkcs8`, `spki` and `jwk` for every algorithm, with Node's JWK checks (`kty`, `crv`, `alg`, `ext`, `key_ops`, `use`) and member order; `CryptoKey.type`/`extractable`/`algorithm`/`usages`",
+              "See [ADR-01347](../adr/ADR-01347.md)"
             ]
           },
           {
@@ -128,7 +111,8 @@
             "status": "implemented",
             "notes": [
               "Every cipher the backend has, with `setAutoPadding`, and `setAAD`/`getAuthTag`/`setAuthTag` for AEAD modes; key/IV length errors and `bad decrypt`/`Unsupported state or unable to authenticate data` as Node reports them",
-              "See [ADR-01300](../adr/ADR-01300.md)"
+              "`getCiphers`/`getHashes` list what the linked OpenSSL can fetch, as Node lists its own (so a system OpenSSL 3.0 lists `des3-wrap` where Node's bundled 3.5 lists the `-wrap-pad` aliases)",
+              "See [ADR-01300](../adr/ADR-01300.md), [ADR-01347](../adr/ADR-01347.md)"
             ],
             "caveats": [
               "On `-crypto=commoncrypto`: AES-128/192/256 in CBC, ECB, CTR and GCM only — other ciphers throw `ERR_CRYPTO_UNKNOWN_CIPHER`"
@@ -157,17 +141,40 @@
             "feature": "Node `crypto` module: `generateKeyPair`/`generateKeyPairSync`, `createSign`/`createVerify`, `sign`/`verify`",
             "status": "implemented",
             "caveats": [
-              "Keys are PEM strings only: `generateKeyPair` needs `publicKeyEncoding: { type: 'spki', format: 'pem' }` and `privateKeyEncoding: { type: 'pkcs8', format: 'pem' }` (no `KeyObject` results, `pkcs1`/`sec1`/`der`, or `cipher`/`passphrase`); key types `rsa`, `ec`, `ed25519`, `x25519`",
-              "An encrypted PEM key (`{ key, passphrase }`) is not decrypted",
-              "On `-crypto=commoncrypto`: RSA keys of 1024 bits or more with exponent 65537, and EC keys on P-256/P-384/P-521 only"
+              "`dh` key pairs are not generated (`rsa`, `rsa-pss`, `dsa`, `ec`, `ed25519`, `ed448`, `x25519`, `x448` are)",
+              "On `-crypto=commoncrypto`: RSA keys of 1024 bits or more with exponent 65537, EC keys on P-256/P-384/P-521, `ed25519` and `x25519` only; encodings other than SPKI/PKCS#8 PEM and the `padding`/`saltLength`/`dsaEncoding` sign options fail"
             ],
             "notes": [
+              "Without an encoding a pair is two `KeyObject`s; an encoding may be `pem`/`der`/`jwk` with `pkcs1`/`spki`/`pkcs8`/`sec1` and a `cipher`/`passphrase`. A key may be a `KeyObject`, PEM or `{ key, passphrase, padding, saltLength, dsaEncoding }`",
               "Generation runs on the thread pool in the callback form",
-              "See [ADR-01300](../adr/ADR-01300.md)"
+              "See [ADR-01300](../adr/ADR-01300.md), [ADR-01345](../adr/ADR-01345.md)"
             ]
           },
           {
-            "feature": "Node `crypto` module: `KeyObject`/`createPrivateKey`/`createPublicKey`/`createSecretKey`, `generateKey`, Diffie-Hellman/ECDH, `publicEncrypt`/`privateDecrypt`, `X509Certificate`, `Certificate`, `generatePrime`/`checkPrime`, `argon2`, `getCipherInfo`/`getCurves`, the `webcrypto`/`subtle` exports",
+            "feature": "Node `crypto` module: `KeyObject`, `createPrivateKey`/`createPublicKey`/`createSecretKey`",
+            "status": "implemented",
+            "caveats": [
+              "A `secp256k1` JWK cannot be imported (P-256/P-384/P-521 can; export covers all four)",
+              "On `-crypto=commoncrypto`, creating or exporting an asymmetric key fails"
+            ],
+            "notes": [
+              "PEM, DER (`pkcs1`/`spki`/`pkcs8`/`sec1`, encrypted PKCS#8 with a passphrase) and JWK (RSA, EC, OKP) input; `export` in each; `type`, `asymmetricKeyType`, `asymmetricKeyDetails`, `symmetricKeySize`, `equals`, Node's errors and `ERR_OSSL_*` codes",
+              "See [ADR-01345](../adr/ADR-01345.md)"
+            ]
+          },
+          {
+            "feature": "Node `crypto` module: `createECDH`/`ECDH`, `diffieHellman`, `publicEncrypt`/`privateDecrypt`/`privateEncrypt`/`publicDecrypt`, `getCurves`",
+            "status": "implemented",
+            "caveats": [
+              "On `-crypto=commoncrypto` each of these fails"
+            ],
+            "notes": [
+              "ECDH on every built-in curve with compressed/uncompressed/hybrid points and `ECDH.convertKey`; `diffieHellman` over EC, X25519 and X448 KeyObjects; the RSA functions with OAEP (`oaepHash`, `oaepLabel`), PKCS#1 and no padding, Node's errors and `ERR_OSSL_*` codes",
+              "See [ADR-01346](../adr/ADR-01346.md)"
+            ]
+          },
+          {
+            "feature": "Node `crypto` module: `generateKey`, `createDiffieHellman`/`getDiffieHellman` (finite-field Diffie-Hellman), `X509Certificate`, `Certificate`, `generatePrime`/`checkPrime`, `argon2`, `getCipherInfo`, the `webcrypto`/`subtle` exports",
             "status": "missing",
             "notes": [
               "The global `crypto.subtle` works; the module does not re-export it"
@@ -177,13 +184,27 @@
             "feature": "`crypto.subtle.deriveKey` / `.deriveBits`",
             "status": "implemented",
             "caveats": [
-              "The spec's extractable=false requirement on PBKDF2/HKDF base keys is not enforced",
-              "Shared subtle caveats above"
+              "On `-crypto=commoncrypto` the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over `node:crypto`'s KeyObject, which that backend does not provide"
             ],
             "notes": [
-              "PBKDF2 (`salt`, `iterations`, literal `hash`) and HKDF (`salt`, optional `info`, literal `hash`); deriveBits → `Promise<ArrayBuffer>`, deriveKey → AES-GCM/AES-CBC/HMAC `Promise<CryptoKey>`",
-              "See [ADR-00320](../adr/ADR-00320.md)"
+              "PBKDF2, HKDF (non-extractable base keys, as Node requires), ECDH and X25519; `deriveKey` to any key the algorithm can make",
+              "See [ADR-00320](../adr/ADR-00320.md), [ADR-01347](../adr/ADR-01347.md)"
             ]
+          },
+          {
+            "feature": "`crypto.subtle.wrapKey` / `.unwrapKey`",
+            "status": "implemented",
+            "caveats": [
+              "On `-crypto=commoncrypto` the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over `node:crypto`'s KeyObject, which that backend does not provide"
+            ],
+            "notes": [
+              "Any exportable key in any format, wrapped with AES-KW, AES-GCM/CBC/CTR or RSA-OAEP",
+              "See [ADR-01347](../adr/ADR-01347.md)"
+            ]
+          },
+          {
+            "feature": "`crypto.subtle.supports`, `getPublicKey`, `encapsulateKey`/`decapsulateKey` and the algorithms Node marks experimental (Ed448, X448, SHA-3, cSHAKE, KMAC, Argon2, AES-OCB, ChaCha20-Poly1305, ML-DSA, ML-KEM)",
+            "status": "missing"
           }
         ]
       }

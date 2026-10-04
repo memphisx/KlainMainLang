@@ -2,21 +2,7 @@
 // lib/internal/process/per_thread.js), a module of their own so that a
 // program not reading the clock this way compiles no bigint arithmetic.
 
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeTypeError, NodeRangeError } from './internal_errors';
 
 function received(value: any): string {
     if (value === null || value === undefined) return 'Received ' + String(value);

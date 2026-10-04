@@ -659,6 +659,13 @@ func (e *Emitter) emitTypedArrayFromBuffer(nta *ast.NewTypedArrayExpression, ptr
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", v, dataReg, offRef))
 		viewData = v
 	}
+	// The view remembers its buffer and offset (TDD-00243).
+	e.ensureViews()
+	shared := 0
+	if bufVal.Ty.IsSharedArrayBuffer {
+		shared = 1
+	}
+	e.emitInstr(fmt.Sprintf("call void @__kml_view_register(ptr %s, ptr %s, i64 %s, i64 %d)", viewData, bufVal.Ref, offRef, shared))
 
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", viewData, ptrName))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", elemCountReg, lenName))
@@ -979,6 +986,11 @@ func (e *Emitter) emitTypedArraySubarray(mem *ast.MemberExpression, args []ast.E
 
 	viewPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", viewPtr, elemTy.IR, ptrReg, startN))
+	// The subarray shares the receiver's buffer (TDD-00243).
+	parentBytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", parentBytes, lenReg, elemTy.Align()))
+	e.ensureViews()
+	e.emitInstr(fmt.Sprintf("call void @__kml_view_derive(ptr %s, i64 %s, ptr %s)", ptrReg, parentBytes, viewPtr))
 
 	r0 := e.freshReg()
 	r1 := e.freshReg()
@@ -994,6 +1006,28 @@ func (e *Emitter) emitTypedArraySubarray(mem *ast.MemberExpression, args []ast.E
 	ty.Clamped = recvTy.Clamped
 	ty.IsBuffer = recvTy.IsBuffer // Buffer.prototype.subarray returns a Buffer
 	return Value{Ref: r1, Ty: ty}, nil
+}
+
+// emitTypedArrayViewProp reads a typed array's `.buffer` or `.byteOffset`
+// from the view registry (TDD-00243).
+func (e *Emitter) emitTypedArrayViewProp(obj ast.Expression, prop string, pos ast.Pos) (Value, error) {
+	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(obj, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureViews()
+	r := e.freshReg()
+	if prop == "byteOffset" {
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_view_offset(ptr %s)", r, ptrReg))
+		return Value{Ref: r, Ty: TypeI64}, nil
+	}
+	// Whether the buffer is an ArrayBuffer or a SharedArrayBuffer is known
+	// only at run time: the value is the boxed host object, of its class.
+	bytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, lenReg, elemTy.Align()))
+	e.ensureBoxedViews()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_view_buffer_any(ptr %s, i64 %s)", r, ptrReg, bytes))
+	return Value{Ref: r, Ty: TypeAny}, nil
 }
 
 // emitBufferGrowableProps reads `.growable`/`.maxByteLength` off a buffer's
@@ -1047,7 +1081,9 @@ func (e *Emitter) emitBufferGrow(bufVal Value, args []ast.Expression, pos ast.Po
 	if err != nil {
 		return Value{}, err
 	}
-	nVal = e.coerce(nVal, TypeI64)
+	if nVal, err = e.coerceChecked(nVal, TypeI64, args[0].GetPos(), "argument"); err != nil {
+		return Value{}, err
+	}
 	maxSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, i64 }, ptr %s, i32 0, i32 2", maxSlot, bufVal.Ref))
 	maxReg := e.freshReg()
@@ -1080,4 +1116,46 @@ func (e *Emitter) emitBufferGrow(bufVal Value, args []ast.Expression, pos ast.Po
 	e.emitLabel(okL)
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nVal.Ref, bufVal.Ref))
 	return Value{Ty: TypeVoid}, nil
+}
+
+// emitBufSizeData loads (length, data) from an ArrayBuffer header — every
+// buffer header starts { i64 length, ptr data }.
+func (e *Emitter) emitBufSizeData(hdrRef string) (sizeRef, dataRef string) {
+	size := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", size, hdrRef))
+	slot := e.freshReg()
+	data := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", slot, hdrRef))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, slot))
+	return size, data
+}
+
+// emitCopyBytes mallocs a copy of size bytes at data.
+func (e *Emitter) emitCopyBytes(sizeRef, dataRef string) string {
+	e.ensureMalloc()
+	e.ensureMemcpy()
+	c := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", c, sizeRef))
+	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", c, dataRef, sizeRef))
+	return c
+}
+
+// emitRegisterView records that the typed array at data views buffer buf at
+// byte offset off (TDD-00243).
+func (e *Emitter) emitRegisterView(data string, buf Value, off string, shared bool) {
+	sh := 0
+	if shared {
+		sh = 1
+	}
+	e.ensureViews()
+	e.emitInstr(fmt.Sprintf("call void @__kml_view_register(ptr %s, ptr %s, i64 %s, i64 %d)", data, buf.Ref, off, sh))
+}
+
+// emitRegisterViewDyn is emitRegisterView with whether the buffer is shared
+// known at run time (an i1).
+func (e *Emitter) emitRegisterViewDyn(data string, buf Value, off, shared string) {
+	sh := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", sh, shared))
+	e.ensureViews()
+	e.emitInstr(fmt.Sprintf("call void @__kml_view_register(ptr %s, ptr %s, i64 %s, i64 %s)", data, buf.Ref, off, sh))
 }

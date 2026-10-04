@@ -66,19 +66,18 @@ console.log(dec.decode(buf))
 }
 
 func TestE2ETextDecoderLabelValidation(t *testing.T) {
-	// The label is WHATWG-normalized (trim + lowercase) and validated against
-	// the UTF-8 aliases (ADR-00567): a UTF-8 alias decodes; anything else — a
-	// recognized non-UTF-8 encoding (latin1) or a bogus label — throws a
-	// catchable RangeError. See docs/status/ENCODING-TEXT.md.
-	assertOutput(t, `
+	// The label is WHATWG-normalized (trim + lowercase): a UTF-8 alias decodes,
+	// latin1 names windows-1252, and a bogus label throws RangeError, as in
+	// Node (ADR-01348).
+	assertSameAsNode(t, `
 const enc = new TextEncoder()
 console.log(new TextDecoder("utf-8").decode(enc.encode("ok")))
 console.log(new TextDecoder("UTF-8").decode(enc.encode("A")))
 console.log(new TextDecoder("  utf8 ").decode(enc.encode("B")))
 console.log(new TextDecoder("unicode-1-1-utf-8").decode(enc.encode("C")))
-try { new TextDecoder("latin1"); console.log("no throw") } catch (e) { console.log((e as Error).name) }
+try { console.log(new TextDecoder("latin1").encoding) } catch (e) { console.log((e as Error).name) }
 try { new TextDecoder("bogus"); console.log("no throw") } catch (e) { console.log((e as Error).name) }
-`, "ok\nA\nB\nC\nRangeError\nRangeError")
+`)
 }
 
 func TestE2ETextDecoderDecodeUnsupportedArgIsError(t *testing.T) {

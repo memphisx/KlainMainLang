@@ -14,19 +14,6 @@ package llvm
 // linked (any child_process spawn path that can re-exec this binary).
 func (e *Emitter) UsesReexecGuard() bool { return e.usedReexecGuard }
 
-// ensureReexecGuardHelper declares the shared helper once (IR side) and flags the
-// C source for linking. Callers also arrange for the startup reject-guard to run
-// (ensureNodeInterpFlagGuard), which reads the marker this helper sets.
-func (e *Emitter) ensureReexecGuardHelper() {
-	if e.usedReexecGuard {
-		return
-	}
-	e.usedReexecGuard = true
-	e.emitGlobal("declare void @__kml_mark_child_if_self_spawn(ptr)")
-	// The reader side of the marker.
-	e.ensureNodeInterpFlagGuard()
-}
-
 // ReexecGuardSource is the embedded C implementation of the shared helper.
 func ReexecGuardSource() string {
 	return `#include <stdlib.h>

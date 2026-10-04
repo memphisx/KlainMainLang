@@ -14,7 +14,7 @@
 //   node scripts/check-conformance.mjs   check, exit 1 on drift (build gate)
 
 import { readFileSync } from 'node:fs'
-import { collectPlatforms, serialize, OUT } from './lib-conformance.mjs'
+import { collectPlatforms, serialize, OUT, PLATFORM_PRIORITY } from './lib-conformance.mjs'
 
 const expected = collectPlatforms()
 
@@ -24,6 +24,14 @@ if (expected.platforms.length === 0) {
   // existing copy in that case too.
   console.warn('[check-conformance] no docs/testing/<platform>/conformance-summary.json found — skipping drift check.')
   process.exit(0)
+}
+
+// Every supported platform has its report: a platform whose run never
+// reached docs/testing would otherwise just be absent from the site.
+const missing = PLATFORM_PRIORITY.filter((p) => !expected.platforms.some((x) => x.platform === p))
+if (missing.length > 0) {
+  console.error(`[check-conformance] ✗ no docs/testing/<platform>/conformance-summary.json for: ${missing.join(', ')}. Run \`make conformance\` (and the node/ts/wpt suites) on that platform and commit the reports.`)
+  process.exit(1)
 }
 
 let committed

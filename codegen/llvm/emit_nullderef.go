@@ -113,6 +113,9 @@ func derefGuardable(ty Type) bool {
 	if ty.Nullable {
 		return ty.IR != "void" && ty.IR != ""
 	}
+	if isF64Slot(ty) {
+		return true // it may hold undefined as its sentinel (TDD-00241)
+	}
 	return ty.IR == "ptr" && ty.IsObject && !ty.IsArray && !ty.IsFlatArray && !ty.IsTuple
 }
 
@@ -149,6 +152,10 @@ func (e *Emitter) emitNullDerefGuard(v Value, g derefGuard) error {
 		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", absent, v.ArrayHeader))
 	case v.Ty.IR == "ptr":
 		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", absent, v.Ref))
+	case isF64Slot(v.Ty):
+		b := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", b, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", absent, b, undefF64))
 	default:
 		return nil
 	}

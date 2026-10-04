@@ -447,11 +447,11 @@
       "name": "typeof type queries (type T = typeof x)",
       "statusRow": "typeof type queries (type T = typeof x)",
       "signature": "type Config = typeof config",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Derives a type from an existing value without restating its shape, usable as a type alias, an inline annotation, or a parameter/return type.",
       "snippet": "const config = { host: \"localhost\", port: 8080 };\ntype Config = typeof config;\nconst staging: Config = { host: \"staging\", port: 9090 };",
       "differences": [
-        "Resolves the referenced value's type (a variable's object/scalar/array type, or a function's type), walking a `typeof a.b` member path — usable as a `type` alias, an inline annotation, or a parameter/return type. A function-local binding shadowing a top-level one of the same name isn't distinguished (the top-level wins), and an unresolvable query degrades to the `number` default rather than erroring"
+        "Resolves the referenced value's type in the query's own scope, as tsc does (a `const` gives its literal type; an unknown name is TS2304), walking a `typeof a.b` member path; `typeof C` of a class is the class itself, usable as a value"
       ],
       "seeAlso": [
         "types.object"

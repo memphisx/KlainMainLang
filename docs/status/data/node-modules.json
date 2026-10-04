@@ -271,11 +271,10 @@
             "feature": "`url`",
             "status": "implemented",
             "caveats": [
-              "IDN conversion is libcurl-backend-gated",
               "Lenient relative parsing deferred"
             ],
             "notes": [
-              "`import { URL, URLSearchParams } from 'url'` works (same-name + aliased); the legacy `url`-module functions (`parse`/`format`/`fileURLToPath`/`pathToFileURL`/`resolve`/…) work too → [URL](URL.md)"
+              "Node's `url` module in TypeScript (`lib/node/url.ts`): `URL`/`URLSearchParams` (the globals' classes), the legacy `parse`/`format`/`resolve`/`resolveObject`/`Url`, `fileURLToPath`/`pathToFileURL`/`urlToHttpOptions`/`domainToASCII`/`domainToUnicode`; named, namespace and default imports → [URL](URL.md)"
             ]
           },
           {

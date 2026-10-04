@@ -112,8 +112,8 @@ interface P { x: number }
 const mo = new Map<string, P>()
 mo.set("p", { x: 1 })
 const mo2 = structuredClone(mo)
-mo2.get("p").x = 99
-console.log(mo.get("p").x, mo2.get("p").x)
+mo2.get("p")!.x = 99
+console.log(mo.get("p")!.x, mo2.get("p")!.x)
 `, "2 3 1 9\n1 99")
 }
 

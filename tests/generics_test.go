@@ -148,7 +148,7 @@ interface HasId { id: number; }
 function pluck<T extends HasId>(x: T): number { return x.id; }
 const bad = { name: "no id" };
 console.log(pluck(bad));
-`, "does not satisfy the constraint")
+`, "is not assignable to parameter of type 'HasId'") // tsc's TS2345
 }
 
 func TestE2EGenericConstraintViolatedClass(t *testing.T) {
@@ -172,17 +172,20 @@ console.log(pluckA(f));
 `, "1")
 }
 
-func TestE2EGenericFunctionUnsupportedConcreteTypeRejected(t *testing.T) {
-	// A Map (and other non-object heap handles) is still an unsupported type
-	// argument — a clean compile error, not a miscompile.
-	_, err := parseAndCompile(`
+// ADR-01318: a Map, a Set, a function or a promise is a type argument like
+// any other.
+func TestE2EGenericFunctionHeapHandleTypeArgs(t *testing.T) {
+	assertSameAsNode(t, `
 function identity<T>(x: T): T { return x; }
-const m = new Map<string, number>();
-console.log(identity(m));
+const m = new Map<string, number>([["a", 1]]);
+console.log(identity(m), identity(m).get("a"));
+console.log(identity(new Set([1, 2])).size);
+const f = identity((n: number) => n * 2);
+console.log(f(21));
+identity(Promise.resolve(3)).then((v) => console.log("p", v));
+function first<T>(xs: T[]): T { return xs[0]; }
+console.log(first([new Map([["k", 2]])]).get("k"));
 `)
-	if err == nil {
-		t.Fatal("expected a compile error instantiating a generic function with an unsupported (Map) type argument, got none")
-	}
 }
 
 func TestE2EGenericInterfaceMultipleInstantiations(t *testing.T) {
@@ -239,17 +242,19 @@ console.log(b.value);
 	}
 }
 
-func TestE2EGenericClassRequiresExplicitTypeArgument(t *testing.T) {
-	_, err := parseAndCompile(`
+// A generic class constructed without type arguments takes them from its
+// constructor's arguments, as tsc infers them (ADR-01367).
+func TestE2EGenericClassTypeArgumentInferred(t *testing.T) {
+	assertSameAsNode(t, `
 class Box<T> {
   value: T;
   constructor(v: T) { this.value = v; }
 }
+class Item { n = 4; }
 const b = new Box(5);
+const c = new Box(new Item());
+console.log(b.value + 1, c.value.n, b, c);
 `)
-	if err == nil {
-		t.Fatal("expected a compile error constructing a generic class with no explicit type argument, got none")
-	}
 }
 
 func TestE2EGenericClassExtendsRejected(t *testing.T) {
@@ -567,4 +572,35 @@ const b: void = await p()
 const c: any = q()
 console.log(a, b, c, typeof wrap)
 `, "s 1 2\nundefined undefined undefined function")
+}
+
+// A template literal argument of a generic call: typing it asked for its
+// contextual type, which inferred the call's type arguments, which typed the
+// template literal again — a checker stack overflow. And T infers from the
+// first argument that answers it, past an `any` one.
+func TestE2EGenericCallTemplateArgInference(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+function eq<T>(a: T[], b: T[], desc: string = ""): void { console.log(a.length === b.length, desc) }
+const output = new Float32Array(5)
+for (const from of ['f32']) {
+  eq(output as any, [0, 2, 3, 4, 0], `+"`copied in ${from}->${from} copy`"+`)
+}
+`)
+}
+
+// A generic class with two fields of its own instantiation (a doubly linked
+// list): typing List<number> rebuilt it once per such field and level, so
+// the compiler's memory grew without bound.
+func TestE2EGenericClassTwoSelfFields(t *testing.T) {
+	assertSameAsNode(t, `
+class List<T> {
+  next: List<T> | null = null
+  prev: List<T> | null = null
+  data: T
+  constructor(data: T) { this.data = data }
+}
+const a = new List<number>(1), b = new List<number>(2)
+a.next = b; b.prev = a
+console.log(a.next!.data, b.prev!.data, a.prev === null)
+`)
 }

@@ -16,29 +16,7 @@
 // kml:default-namespace — `import perf from 'perf_hooks'` reads this
 // module's exports, as Node's default export carries them.
 
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
 function received(value: any): string {
     if (value === null || value === undefined) return ' Received ' + String(value);

@@ -5,24 +5,10 @@
 // credential reads). Code generation binds `process.<name>` to these
 // exports; the process emitter object (internal_process.ts) holds them too.
 
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
 // lib/internal/errors.js determineSpecificType: how a received value reads
 // in an argument error.
+import { NodeTypeError, NodeRangeError } from './internal_errors';
+
 function received(value: any): string {
     if (value === null || value === undefined) return 'Received ' + String(value);
     if (typeof value === 'function') return 'Received function ' + (value as Function).name;

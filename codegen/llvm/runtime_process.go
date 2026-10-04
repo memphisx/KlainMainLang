@@ -1,8 +1,61 @@
 package llvm
 
 import (
+	_ "embed"
 	"fmt"
+	"strconv"
 )
+
+// The process runtime (hooks, uptime, cwd, ids, exec path, signals; TDD-00240)
+// lives in processsrc/process.c; the natives in runtime_process_native.go are
+// declared against it.
+//
+//go:embed processsrc/process.c
+var processSource string
+
+// ProcessSource is the process runtime's C source.
+func ProcessSource() string { return processSource }
+
+// processNativeKeys are the fnDecls entries (runtime_process_native.go,
+// ensureNativeSignal) whose use links process.c.
+var processNativeKeys = []string{
+	"__kml_native_process_cwd", "__kml_native_process_chdir", "__kml_native_process_uptime",
+	"__kml_native_process_hrtime", "__kml_native_kill_pid", "__kml_native_process_memory",
+	"__kml_native_process_umask", "__kml_native_process_id", "__kml_native_process_argc",
+	"__kml_native_process_exec_path", "__kml_native_process_set_exit_code", "__kml_native_env_get",
+	"__kml_native_signal_start", "__kml_process_hook_call",
+}
+
+// UsesProcessRuntime reports whether the program links process.c.
+func (e *Emitter) UsesProcessRuntime() bool {
+	if e.usedProcessLifecycle || e.usedProcessUptime || e.usedProcessCwd || e.usedExecPath ||
+		e.usedGetpid || e.usedSigpipeIgnored || e.usedSignalHandler {
+		return true
+	}
+	for _, k := range processNativeKeys {
+		if e.fnDecls[k] {
+			return true
+		}
+	}
+	return false
+}
+
+// ProcessCFlags are process.c's mode defines: the string-wrapping routines
+// (they need the string runtime, which their ensure* functions pull in), the
+// memory numbers, the worker exit, and the NaN-box constants.
+func (e *Emitter) ProcessCFlags() []string {
+	flags := []string{"-DKML_NB_UNDEFINED=" + strconv.Itoa(nbUndefined) + "LL", "-DKML_NB_DOUBLE_OFFSET=" + strconv.FormatInt(nbDoubleOffset, 10) + "LL"}
+	if e.usedProcessCwd || e.fnDecls["__kml_native_process_exec_path"] || e.fnDecls["__kml_native_env_get"] {
+		flags = append(flags, "-DKML_PROC_STR")
+	}
+	if e.fnDecls["__kml_native_process_memory"] {
+		flags = append(flags, "-DKML_PROC_MEM")
+	}
+	if e.hasWorkers {
+		flags = append(flags, "-DKML_PROC_WORKERS")
+	}
+	return flags
+}
 
 // nodePlatformName maps the Go compiler's own runtime.GOOS to the string
 // Node's process.platform would report on that host — a pure compile-time
@@ -33,47 +86,16 @@ func (e *Emitter) nodeArchName() string {
 	}
 }
 
-// ensureProcessUptime declares the process-start monotonic timestamp global,
-// its capture function (@__kml_proc_uptime_init, called once at main start),
-// and @__kml_process_uptime() → seconds-since-start as a double.
+// ensureProcessUptime declares @__kml_proc_uptime_init (called once at main
+// start, capturing the monotonic start time) and @__kml_process_uptime() →
+// seconds-since-start as a double (process.c).
 func (e *Emitter) ensureProcessUptime() {
 	if e.usedProcessUptime {
 		return
 	}
 	e.usedProcessUptime = true
-	e.ensureClockGettime()
-	e.emitGlobal("@__kml_proc_start_ns = internal global i64 0, align 8")
-	clk := e.monotonicClockID()
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_proc_uptime_init() {
-entry:
-  %%ts = alloca { i64, i64 }, align 8
-  call i32 @clock_gettime(i32 %s, ptr %%ts)
-  %%sp = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 0
-  %%np = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 1
-  %%s = load i64, ptr %%sp, align 8
-  %%n = load i64, ptr %%np, align 8
-  %%sns = mul i64 %%s, 1000000000
-  %%tot = add i64 %%sns, %%n
-  store i64 %%tot, ptr @__kml_proc_start_ns, align 8
-  ret void
-}
-define double @__kml_process_uptime() {
-entry:
-  %%ts = alloca { i64, i64 }, align 8
-  call i32 @clock_gettime(i32 %s, ptr %%ts)
-  %%sp = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 0
-  %%np = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 1
-  %%s = load i64, ptr %%sp, align 8
-  %%n = load i64, ptr %%np, align 8
-  %%sns = mul i64 %%s, 1000000000
-  %%now = add i64 %%sns, %%n
-  %%start = load i64, ptr @__kml_proc_start_ns, align 8
-  %%diff = sub i64 %%now, %%start
-  %%df = sitofp i64 %%diff to double
-  %%secs = fdiv double %%df, 1000000000.0
-  ret double %%secs
-}`, clk, clk))
+	e.emitGlobal(`declare void @__kml_proc_uptime_init()
+declare double @__kml_process_uptime()`)
 }
 
 // emitProcessLifecycleRuntime emits the process-lifecycle globals and the two
@@ -90,23 +112,8 @@ entry:
 // Emitted whenever exceptions or any process-lifecycle surface is used.
 func (e *Emitter) emitProcessLifecycleRuntime() {
 	e.ensureProcessHooks()
-	e.emitGlobal("@__kml_process_exit_code = internal " + e.isolateTLS() + "global i64 0, align 8")
-	e.emitGlobal("@__kml_exit_ran = internal " + e.isolateTLS() + "global i1 0, align 1")
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_run_exit_handlers(i64 %%code) {
-entry:
-  %%ran = load i1, ptr @__kml_exit_ran, align 1
-  br i1 %%ran, label %%done, label %%run
-run:
-  store i1 1, ptr @__kml_exit_ran, align 1
-  %%code_d = sitofp i64 %%code to double
-  %%bits = bitcast double %%code_d to i64
-  %%enc = add i64 %%bits, %d
-  %%r = call i1 @__kml_process_hook_call(i32 0, i64 %%enc, i64 %d)
-  br label %%done
-done:
-  ret void
-}`, nbDoubleOffset, nbUndefined))
+	e.emitGlobal(`@__kml_process_exit_code = external thread_local global i64, align 8
+declare void @__kml_run_exit_handlers(i64)`)
 	restore := e.beginDetachedFunc()
 	box := e.emitCaughtToAny(Value{Ref: "%rec", Ty: TypeCaught})
 	origin := e.freshReg()
@@ -126,7 +133,7 @@ entry:
 }
 
 // ensureProcessHooks defines the runtime's hooks for the process events it
-// raises — 0 'exit', 1 'uncaughtException', 2 'unhandledRejection' — and
+// raises (process.c) — 0 'exit', 1 'uncaughtException', 2 'unhandledRejection' — and
 // lib/native.d.ts's processHook/processUnhook, which the process emitter
 // (lib/node/internal_process.ts) registers them with. A hook takes two `any`
 // words; @__kml_process_hook_call runs one and reports whether it was set.
@@ -136,40 +143,9 @@ func (e *Emitter) ensureProcessHooks() {
 	}
 	e.fnDecls["__kml_process_hook_call"] = true
 	e.usedProcessLifecycle = true
-	e.emitGlobal("@__kml_phook_inv = internal " + e.isolateTLS() + "global [4 x ptr] zeroinitializer")
-	e.emitGlobal("@__kml_phook_clo = internal " + e.isolateTLS() + "global [4 x ptr] zeroinitializer")
-	e.emitGlobal(`
-define i1 @__kml_process_hook_call(i32 %which, i64 %a, i64 %b) {
-entry:
-  %i = zext i32 %which to i64
-  %ip = getelementptr [4 x ptr], ptr @__kml_phook_inv, i64 0, i64 %i
-  %inv = load ptr, ptr %ip, align 8
-  %has = icmp ne ptr %inv, null
-  br i1 %has, label %call, label %none
-call:
-  %cp = getelementptr [4 x ptr], ptr @__kml_phook_clo, i64 0, i64 %i
-  %clo = load ptr, ptr %cp, align 8
-  call void %inv(ptr %clo, i64 %a, i64 %b)
-  ret i1 1
-none:
-  ret i1 0
-}
-define void @__kml_native_process_hook(double %which, ptr %inv, ptr %clo) {
-entry:
-  %i = fptosi double %which to i64
-  %ip = getelementptr [4 x ptr], ptr @__kml_phook_inv, i64 0, i64 %i
-  %cp = getelementptr [4 x ptr], ptr @__kml_phook_clo, i64 0, i64 %i
-  store ptr %clo, ptr %cp, align 8
-  store ptr %inv, ptr %ip, align 8
-  ret void
-}
-define void @__kml_native_process_unhook(double %which) {
-entry:
-  %i = fptosi double %which to i64
-  %ip = getelementptr [4 x ptr], ptr @__kml_phook_inv, i64 0, i64 %i
-  store ptr null, ptr %ip, align 8
-  ret void
-}`)
+	e.emitGlobal(`declare zeroext i1 @__kml_process_hook_call(i32, i64, i64)
+declare void @__kml_native_process_hook(double, ptr, ptr)
+declare void @__kml_native_process_unhook(double)`)
 }
 
 // ensureProcessCwd declares __kml_process_cwd: the current working directory
@@ -184,18 +160,7 @@ func (e *Emitter) ensureProcessCwd() {
 	}
 	e.usedProcessCwd = true
 	e.ensureStrHeaderRuntime()
-	e.ensureFree()
-	e.emitGlobal("declare ptr @getcwd(ptr noundef, i64 noundef)")
-	e.emitGlobal(`
-define ptr @__kml_process_cwd() {
-entry:
-  ; getcwd's buffer is a C string: copied into a runtime string, whose
-  ; length header every string operation reads.
-  %r = call ptr @getcwd(ptr null, i64 0)
-  %s = call ptr @__kml_str_from_cstr(ptr %r)
-  call void @free(ptr %r)
-  ret ptr %s
-}`)
+	e.emitGlobal("declare ptr @__kml_process_cwd()")
 }
 
 // ensureGetpid declares __kml_getpid: the current process ID via POSIX
@@ -212,48 +177,10 @@ func (e *Emitter) ensureExecPath() {
 		return
 	}
 	e.usedExecPath = true
-	e.ensureMalloc()
 	// A program that reads process.execPath can spawn itself. Guard against the
 	// interpreter-flag self-fork bomb (see ensureNodeInterpFlagGuard).
 	e.ensureNodeInterpFlagGuard()
-	if e.opts.Target.OS() == "darwin" {
-		e.declareFn("_NSGetExecutablePath", "declare i32 @_NSGetExecutablePath(ptr noundef, ptr noundef)")
-		e.declareFn("realpath", "declare ptr @realpath(ptr noundef, ptr noundef)")
-		e.emitGlobal(`
-define ptr @__kml_execpath() {
-entry:
-  %sizep = alloca i32
-  store i32 4096, ptr %sizep
-  %buf = call ptr @malloc(i64 4096)
-  %rc = call i32 @_NSGetExecutablePath(ptr %buf, ptr %sizep)
-  %res = call ptr @realpath(ptr %buf, ptr null)
-  %isnull = icmp eq ptr %res, null
-  br i1 %isnull, label %fallback, label %ok
-fallback:
-  ret ptr %buf
-ok:
-  ret ptr %res
-}`)
-		return
-	}
-	// Linux and other /proc-bearing systems.
-	e.emitGlobal(`@__kml_procself_exe = private unnamed_addr constant [15 x i8] c"/proc/self/exe\00"`)
-	e.ensureReadlinkDecl()
-	e.emitGlobal(`
-define ptr @__kml_execpath() {
-entry:
-  %buf = call ptr @malloc(i64 4097)
-  %n = call i64 @readlink(ptr @__kml_procself_exe, ptr %buf, i64 4096)
-  %neg = icmp slt i64 %n, 0
-  br i1 %neg, label %fail, label %ok
-ok:
-  %endp = getelementptr i8, ptr %buf, i64 %n
-  store i8 0, ptr %endp
-  ret ptr %buf
-fail:
-  store i8 0, ptr %buf
-  ret ptr %buf
-}`)
+	e.emitGlobal("declare ptr @__kml_execpath()")
 }
 
 func (e *Emitter) ensureGetpid() {
@@ -261,50 +188,9 @@ func (e *Emitter) ensureGetpid() {
 		return
 	}
 	e.usedGetpid = true
+	// The cluster fork region reads getpid() directly.
 	e.emitGlobal("declare i32 @getpid()")
-	e.emitGlobal(`
-define i64 @__kml_getpid() {
-entry:
-  %r = call i32 @getpid()
-  %r64 = sext i32 %r to i64
-  ret i64 %r64
-}`)
-}
-
-// signalNumbers is the *target's* signal-name table for process.kill(pid, name)
-// (ADR-00728): the names Node's os.constants.signals exposes there, with the
-// numbers that platform's kill() takes — Linux's on Linux (and on Windows,
-// where the shim accepts Linux numbers; SIGBREAK is libuv's 21), Darwin's on
-// macOS. Node rejects a name outside that table with ERR_UNKNOWN_SIGNAL, which
-// the compile-time rejection / runtime -1 mirror.
-//
-// A function, not a package-level var: `e.opts.Target.OS()` answers from the
-// `--target` flag, which is parsed long after package initialisation would have
-// frozen the table to the *host*. As a var, a macOS→Linux cross-compile
-// ([ADR-00813](../../docs/adr/ADR-00813.md)) emitted Darwin's numbers into a
-// Linux binary — SIGCHLD 20 for 17, so the child-exit self-pipe
-// ([ADR-01023](../../docs/adr/ADR-01023.md)) would have watched a signal the
-// kernel never raises.
-func (e *Emitter) signalNumbers() map[string]int {
-	switch e.opts.Target.OS() {
-	case "windows":
-		return map[string]int{"SIGHUP": 1, "SIGINT": 2, "SIGILL": 4, "SIGABRT": 6, "SIGFPE": 8, "SIGKILL": 9, "SIGSEGV": 11, "SIGTERM": 15, "SIGBREAK": 21, "SIGWINCH": 28}
-	case "darwin":
-		return map[string]int{"SIGHUP": 1, "SIGINT": 2, "SIGQUIT": 3, "SIGILL": 4, "SIGTRAP": 5, "SIGABRT": 6, "SIGEMT": 7, "SIGFPE": 8, "SIGKILL": 9, "SIGBUS": 10, "SIGSEGV": 11, "SIGSYS": 12, "SIGPIPE": 13, "SIGALRM": 14, "SIGTERM": 15, "SIGURG": 16, "SIGSTOP": 17, "SIGTSTP": 18, "SIGCONT": 19, "SIGCHLD": 20, "SIGTTIN": 21, "SIGTTOU": 22, "SIGIO": 23, "SIGXCPU": 24, "SIGXFSZ": 25, "SIGVTALRM": 26, "SIGPROF": 27, "SIGWINCH": 28, "SIGINFO": 29, "SIGUSR1": 30, "SIGUSR2": 31}
-	default:
-		return map[string]int{"SIGHUP": 1, "SIGINT": 2, "SIGQUIT": 3, "SIGILL": 4, "SIGTRAP": 5, "SIGABRT": 6, "SIGBUS": 7, "SIGFPE": 8, "SIGKILL": 9, "SIGUSR1": 10, "SIGSEGV": 11, "SIGUSR2": 12, "SIGPIPE": 13, "SIGALRM": 14, "SIGTERM": 15, "SIGCHLD": 17, "SIGCONT": 18, "SIGSTOP": 19, "SIGTSTP": 20, "SIGTTIN": 21, "SIGTTOU": 22, "SIGURG": 23, "SIGXCPU": 24, "SIGXFSZ": 25, "SIGVTALRM": 26, "SIGPROF": 27, "SIGWINCH": 28, "SIGIO": 29, "SIGPWR": 30, "SIGSYS": 31}
-	}
-}
-
-// ensureSignalDecl emits the shared libc `signal` declaration exactly once —
-// both the process signal-handler runtime and the http reactor's SIGPIPE-ignore
-// (TDD-00214) reference @signal, so the decl is guarded independently of either.
-func (e *Emitter) ensureSignalDecl() {
-	if e.usedSignalDecl {
-		return
-	}
-	e.usedSignalDecl = true
-	e.emitGlobal("declare ptr @signal(i32 noundef, ptr noundef)")
+	e.emitGlobal("declare i64 @__kml_getpid()")
 }
 
 // ensureSigpipeIgnored emits __kml_ignore_sigpipe, which sets SIGPIPE (signal 13
@@ -317,13 +203,7 @@ func (e *Emitter) ensureSigpipeIgnored() {
 		return
 	}
 	e.usedSigpipeIgnored = true
-	e.ensureSignalDecl()
-	e.emitGlobal(`
-define void @__kml_ignore_sigpipe() {
-entry:
-  %ign = call ptr @signal(i32 13, ptr inttoptr(i64 1 to ptr))
-  ret void
-}`)
+	e.emitGlobal("declare void @__kml_ignore_sigpipe()")
 }
 
 // ensureSignalHandlerRuntime declares the machinery behind a process signal
@@ -358,56 +238,7 @@ func (e *Emitter) ensureSignalHandlerRuntime() {
 		return
 	}
 	e.usedSignalHandler = true
-	e.ensureSignalDecl()
-	// A watched signal's pending flag and its watcher (the invoker and closure
-	// signalStart registered), by signal number. The handler only sets the
-	// flag; the event loop's iteration runs the watcher (__kml_signal_dispatch).
-	e.emitGlobal("@__kml_sig_pending = internal thread_local global [65 x i8] zeroinitializer")
-	e.emitGlobal("@__kml_sig_inv = internal thread_local global [65 x ptr] zeroinitializer")
-	e.emitGlobal("@__kml_sig_clo = internal thread_local global [65 x ptr] zeroinitializer")
-	e.emitGlobal(`
-define void @__kml_sig_handler(i32 %signum) {
-entry:
-  %ok = icmp ult i32 %signum, 65
-  br i1 %ok, label %set, label %done
-set:
-  %i = zext i32 %signum to i64
-  %p = getelementptr [65 x i8], ptr @__kml_sig_pending, i64 0, i64 %i
-  store volatile i8 1, ptr %p, align 1
-  br label %done
-done:
-  ret void
-}
-define void @__kml_signal_dispatch() {
-entry:
-  br label %loop
-loop:
-  %i = phi i64 [ 1, %entry ], [ %inext, %next ]
-  %inb = icmp slt i64 %i, 65
-  br i1 %inb, label %body, label %done
-body:
-  %pp = getelementptr [65 x i8], ptr @__kml_sig_pending, i64 0, i64 %i
-  %pend = load volatile i8, ptr %pp, align 1
-  %isset = icmp ne i8 %pend, 0
-  br i1 %isset, label %fire, label %next
-fire:
-  store volatile i8 0, ptr %pp, align 1
-  %ip = getelementptr [65 x ptr], ptr @__kml_sig_inv, i64 0, i64 %i
-  %inv = load ptr, ptr %ip, align 8
-  %has = icmp ne ptr %inv, null
-  br i1 %has, label %call, label %next
-call:
-  %cp = getelementptr [65 x ptr], ptr @__kml_sig_clo, i64 0, i64 %i
-  %clo = load ptr, ptr %cp, align 8
-  %d = sitofp i64 %i to double
-  call void %inv(ptr %clo, double %d)
-  br label %next
-next:
-  %inext = add i64 %i, 1
-  br label %loop
-done:
-  ret void
-}`)
+	e.emitGlobal("declare void @__kml_signal_dispatch()")
 }
 
 // ensureNativeSignal defines lib/native.d.ts's signalStart and signalStop:
@@ -424,46 +255,6 @@ func (e *Emitter) ensureNativeSignal() {
 	}
 	e.fnDecls["__kml_native_signal_start"] = true
 	e.ensureSignalHandlerRuntime()
-	install := `  %old = call ptr @signal(i32 %n, ptr @__kml_sig_handler)
-  %bad = icmp eq ptr %old, inttoptr (i64 -1 to ptr)
-  br i1 %bad, label %einval, label %ok`
-	restore := `  %dfl = select i1 %pipe, ptr inttoptr (i64 1 to ptr), ptr null
-  %old = call ptr @signal(i32 %n, ptr %dfl)
-  br label %done`
-	e.emitGlobal(`
-define double @__kml_native_signal_start(double %signo, ptr %inv, ptr %clo) {
-entry:
-  %n = fptosi double %signo to i32
-  %lo = icmp slt i32 %n, 1
-  %hi = icmp sgt i32 %n, 64
-  %out = or i1 %lo, %hi
-  br i1 %out, label %einval, label %range
-range:
-  %i = zext i32 %n to i64
-  %ip = getelementptr [65 x ptr], ptr @__kml_sig_inv, i64 0, i64 %i
-  %cp = getelementptr [65 x ptr], ptr @__kml_sig_clo, i64 0, i64 %i
-  store ptr %clo, ptr %cp, align 8
-  store ptr %inv, ptr %ip, align 8
-` + install + `
-einval:
-  ret double -22.0
-ok:
-  ret double 0.0
-}
-define void @__kml_native_signal_stop(double %signo) {
-entry:
-  %n = fptosi double %signo to i32
-  %lo = icmp slt i32 %n, 1
-  %hi = icmp sgt i32 %n, 64
-  %out = or i1 %lo, %hi
-  br i1 %out, label %done, label %range
-range:
-  %i = zext i32 %n to i64
-  %ip = getelementptr [65 x ptr], ptr @__kml_sig_inv, i64 0, i64 %i
-  store ptr null, ptr %ip, align 8
-  %pipe = icmp eq i32 %n, 13
-` + restore + `
-done:
-  ret void
-}`)
+	e.emitGlobal(`declare double @__kml_native_signal_start(double, ptr, ptr)
+declare void @__kml_native_signal_stop(double)`)
 }

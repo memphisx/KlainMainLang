@@ -11,32 +11,9 @@
 
 import { EventEmitter } from 'events';
 import { isIP } from 'net';
+import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
 // ---- errors (lib/internal/errors.js) ----
-
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
 
 function received(value: any): string {
     if (value === null || value === undefined) return ' Received ' + String(value);

@@ -11,24 +11,12 @@ import * as types_ from './util_types';
 
 export { promisify } from './internal_util';
 export { inspect } from './internal_util_inspect';
+export { TextEncoder, TextDecoder } from './kml_encoding';
+export { parseArgs } from './internal_util_parse_args';
+export type { ParseArgsConfig, ParseArgsOptionConfig } from './internal_util_parse_args';
 import { inspect, inspectOption, colorCodes } from './internal_util_inspect';
+import { NodeTypeError, NodeRangeError } from './internal_errors';
 export type { InspectOptions } from './internal_util_inspect';
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
 
 // The " Received …" tail of Node's ERR_INVALID_ARG_TYPE messages.
 function received(value: any): string {

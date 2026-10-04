@@ -6,22 +6,7 @@
 // writes go to the native write queue directly, so a message carrying a
 // handle keeps its place among the others. dgram sockets are not passed.
 import { Server, Socket, _KmlNativeHandle } from 'net';
-
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeError, NodeTypeError } from './internal_errors';
 
 function errnoException(errno: number, syscall: string): Error {
     const code = __kml_native.errnoName(errno);
@@ -129,6 +114,7 @@ export class Channel {
         socket.setEncoding('utf8');
         socket.on('data', (chunk: string) => { this.onData(chunk); });
         const ended = (): void => { this.onEnd(); };
+        socket._kmlOnEof = ended;
         socket.on('end', ended);
         socket.on('error', ended);
         socket.on('close', () => {

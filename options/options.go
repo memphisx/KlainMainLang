@@ -23,8 +23,9 @@ type Options struct {
 	// MemMode is the memory-management mode: "manual" (default, also ""),
 	// "gc" or "auto" (TDD-00173).
 	MemMode string
-	// DynamicImport is the import() backend: "eager" (default, also "") or
-	// "lazy", shared-library islands (TDD-00056).
+	// DynamicImport is the import() backend: "bundled" (default, also ""),
+	// "lazy" (bundled semantics, code in a shared library) or "isolated"
+	// (shared-library islands with their own module instances, TDD-00056).
 	DynamicImport string
 	// Regex is the RegExp dialect (TDD-00067); "" resolves to the highest
 	// implemented ES stage.

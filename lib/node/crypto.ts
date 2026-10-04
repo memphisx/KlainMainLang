@@ -7,6 +7,7 @@
 // exports.
 import { Transform } from 'stream';
 import type { TransformOptions } from 'stream';
+import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
 export type BinaryLike = string | NodeJS.ArrayBufferView;
 export type BinaryToTextEncoding = 'base64' | 'base64url' | 'hex' | 'binary';
@@ -16,37 +17,14 @@ export type KeyFormat = 'pem' | 'der' | 'jwk';
 export type UUID = `${string}-${string}-${string}-${string}-${string}`;
 export type CipherKey = BinaryLike;
 
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
 function received(value: any): string {
     if (value === null) return 'Received null';
     if (value === undefined) return 'Received undefined';
     if (typeof value === 'function') return 'Received function ' + (value.name || '<anonymous>');
     if (typeof value === 'object') {
-        if (Array.isArray(value)) return 'Received an instance of Array';
-        return 'Received an instance of Object';
+        const ctor = value.constructor;
+        if (ctor !== undefined && ctor !== null && typeof ctor.name === 'string' && ctor.name !== '') return 'Received an instance of ' + ctor.name;
+        return 'Received ' + String(value);
     }
     let shown = String(value);
     if (typeof value === 'string') {
@@ -284,12 +262,31 @@ export function hash(algorithm: string, data: BinaryLike, outputEncoding?: Binar
     return h.digest((outputEncoding ?? 'hex') as any);
 }
 
+// lib/internal/util.js's filterDuplicateStrings: one name per lowercase
+// spelling (the last one seen), sorted.
+function filterDuplicateStrings(items: string[], low: boolean): string[] {
+    const map = new Map<string, string>();
+    for (const item of items) {
+        const key = item.toLowerCase();
+        map.set(key, low ? key : item);
+    }
+    return Array.from(map.values()).sort();
+}
+
 export function getHashes(): string[] {
-    return __kml_native.cryptoNames(0).split(',').filter((n: string) => n.length > 0);
+    return filterDuplicateStrings(__kml_native.cryptoNames(0).split(',').filter((n: string) => n.length > 0), false);
 }
 
 export function getCiphers(): string[] {
-    return __kml_native.cryptoNames(1).split(',').filter((n: string) => n.length > 0).map((n: string) => n.toLowerCase());
+    return filterDuplicateStrings(__kml_native.cryptoNames(1).split(',').filter((n: string) => n.length > 0), false);
+}
+
+// getCurves: the built-in EC curves' names, sorted and deduplicated.
+export function getCurves(): string[] {
+    const names = __kml_native.cryptoNames(3).split(',').filter((n: string) => n.length > 0);
+    const out: string[] = [];
+    for (const n of names.sort()) if (out.length === 0 || out[out.length - 1] !== n) out.push(n);
+    return out;
 }
 
 // ---- random values (lib/internal/crypto/random.js) ----
@@ -594,7 +591,12 @@ class CipherBase extends Transform {
         const inBytes = toBytes(data, 'data', inputEncoding);
         const outBytes = Buffer.alloc(inBytes.byteLength + __kml_native.cryptoCipherBlockSize(this._kmlHandle));
         const n = __kml_native.cryptoCipherUpdate(this._kmlHandle, inBytes, outBytes);
-        if (n < 0) throw opensslError('Trying to add data in unsupported state');
+        if (n < 0) {
+            // Node's CipherBase::Update pops the error queue before it
+            // throws, so the failure is always this message.
+            __kml_native.cryptoLastError();
+            throw new Error('Trying to add data in unsupported state');
+        }
         return this.out(outBytes, n, outputEncoding);
     }
 
@@ -687,39 +689,458 @@ export function createDecipheriv(algorithm: string, key: CipherKey, iv: BinaryLi
     return new Decipheriv(algorithm, key, iv, options);
 }
 
-// ---- Sign / Verify (lib/internal/crypto/sig.js), PEM keys ----
+// ---- KeyObject (lib/internal/crypto/keys.js) ----
 
-type KeyLike = string | Buffer | { key: string | Buffer; passphrase?: string | Buffer };
-
-function keyPem(key: any, name: string): string {
-    if (typeof key === 'string') return key;
-    if (Buffer.isBuffer(key)) return (key as Buffer).toString();
-    if (key !== null && typeof key === 'object' && key.key !== undefined) return keyPem(key.key, name);
-    throw invalidArgType(name, 'of type string or an instance of Buffer, TypedArray, DataView, or KeyObject', key);
+// A key's material: a secret key's bytes, or an asymmetric key's canonical
+// PEM (PKCS#8 private, SPKI public), which the natives read.
+class KeyObjectHandle {
+    bytes: Buffer;
+    pem: string;
+    constructor(bytes: Buffer, pem: string) {
+        this.bytes = bytes;
+        this.pem = pem;
+    }
 }
 
-// A `{ key, passphrase }` key's passphrase: [bytes, 1], or [empty, 0].
-function keyPassphrase(key: any): [Uint8Array, number] {
-    if (key === null || typeof key !== 'object' || Buffer.isBuffer(key) || key.passphrase === undefined) return [empty, 0];
-    return [toBytes(key.passphrase, 'key.passphrase'), 1];
+export interface AsymmetricKeyDetails {
+    modulusLength?: number | undefined;
+    publicExponent?: bigint | undefined;
+    hashAlgorithm?: string | undefined;
+    mgf1HashAlgorithm?: string | undefined;
+    saltLength?: number | undefined;
+    divisorLength?: number | undefined;
+    namedCurve?: string | undefined;
+}
+
+export type KeyObjectType = 'secret' | 'public' | 'private';
+export type KeyType = 'rsa' | 'rsa-pss' | 'dsa' | 'ec' | 'ed25519' | 'ed448' | 'x25519' | 'x448';
+
+export interface KeyExportOptions<T extends KeyFormat> {
+    type: 'pkcs1' | 'spki' | 'pkcs8' | 'sec1';
+    format: T;
+    cipher?: string | undefined;
+    passphrase?: string | Buffer | undefined;
+}
+
+export interface JwkKeyExportOptions {
+    format: 'jwk';
+}
+
+function invalidArgValue(name: string, value: any, reason?: string): NodeTypeError {
+    const shown = typeof value === 'string' ? "'" + value + "'" : String(value);
+    const kind = name.indexOf('.') >= 0 ? 'property' : 'argument';
+    return new NodeTypeError('ERR_INVALID_ARG_VALUE', 'The ' + kind + " '" + name + "' " + (reason ?? 'is invalid') + '. Received ' + shown);
+}
+
+function incompatibleKeyOptions(encoding: string, message: string): NodeError {
+    return new NodeError('ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS', 'The selected key encoding ' + encoding + ' ' + message + '.');
+}
+
+function validateObject(value: any, name: string): void {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw invalidArgType(name, 'of type object', value);
+}
+
+const kFormats: { [k: string]: number } = { pem: 0, der: 1 };
+const kEncodings: { [k: string]: number } = { pkcs1: 1, spki: 2, pkcs8: 3, sec1: 4 };
+
+export class KeyObject {
+    #type: KeyObjectType;
+    #handle: KeyObjectHandle;
+
+    constructor(type: KeyObjectType, handle: any) {
+        if (type !== 'secret' && type !== 'public' && type !== 'private') throw invalidArgValue('type', type);
+        if (!(handle instanceof KeyObjectHandle)) throw invalidArgType('handle', 'of type object', handle);
+        this.#type = type;
+        this.#handle = handle as KeyObjectHandle;
+    }
+
+    get type(): KeyObjectType {
+        return this.#type;
+    }
+
+    // The key's material, for this module (Node's kHandle).
+    _kmlHandle(): KeyObjectHandle {
+        return this.#handle;
+    }
+
+    get symmetricKeySize(): number | undefined {
+        return undefined;
+    }
+
+    get asymmetricKeyType(): KeyType | undefined {
+        return undefined;
+    }
+
+    get asymmetricKeyDetails(): AsymmetricKeyDetails | undefined {
+        return undefined;
+    }
+
+    get [Symbol.toStringTag](): string {
+        return 'KeyObject';
+    }
+
+    static from(key: any): KeyObject {
+        // A CryptoKey (lib/node/internal_crypto_webcrypto_keys.ts) holds its
+        // KeyObject's material.
+        if (key !== null && typeof key === 'object' && Object.prototype.toString.call(key) === '[object CryptoKey]' &&
+            typeof key._kmlKeyObject === 'function') {
+            return key._kmlKeyObject();
+        }
+        throw invalidArgType('key', 'an instance of CryptoKey', key);
+    }
+
+    equals(otherKeyObject: KeyObject): boolean;
+    equals(otherKeyObject: any): boolean {
+        if (!(otherKeyObject instanceof KeyObject)) throw invalidArgType('otherKeyObject', 'an instance of KeyObject', otherKeyObject);
+        const other = otherKeyObject as KeyObject;
+        if (other.#type !== this.#type) return false;
+        if (this.#type === 'secret') return this.#handle.bytes.equals(other.#handle.bytes);
+        return this.#handle.pem === other.#handle.pem;
+    }
+
+    export(options: KeyExportOptions<'pem'>): string | Buffer;
+    export(options?: KeyExportOptions<'der'>): Buffer;
+    export(options?: JwkKeyExportOptions): JsonWebKey;
+    export(options?: any): any {
+        throw new NodeError('ERR_METHOD_NOT_IMPLEMENTED', 'The export() method is not implemented');
+    }
+}
+
+function keyHandle(key: KeyObject): KeyObjectHandle {
+    return key._kmlHandle();
+}
+
+class SecretKeyObject extends KeyObject {
+    constructor(handle: KeyObjectHandle) {
+        super('secret', handle);
+    }
+
+    get symmetricKeySize(): number | undefined {
+        return this._kmlHandle().bytes.length;
+    }
+
+    export(options: KeyExportOptions<'pem'>): string | Buffer;
+    export(options?: KeyExportOptions<'der'>): Buffer;
+    export(options?: JwkKeyExportOptions): JsonWebKey;
+    export(options?: any): any {
+        if (options !== undefined) {
+            validateObject(options, 'options');
+            const format = options.format;
+            if (format !== undefined && format !== 'buffer' && format !== 'jwk') {
+                throw invalidArgValue('options.format', format, "must be one of: undefined, 'buffer', 'jwk'");
+            }
+            if (format === 'jwk') return { kty: 'oct', k: this._kmlHandle().bytes.toString('base64url') };
+        }
+        return Buffer.from(this._kmlHandle().bytes);
+    }
+}
+
+class AsymmetricKeyObject extends KeyObject {
+    #info: string[] | null = null;
+
+    constructor(type: KeyObjectType, handle: KeyObjectHandle) {
+        super(type, handle);
+    }
+
+    _kmlInfo(): string[] {
+        if (this.#info === null) this.#info = __kml_native.cryptoKeyInfo(this._kmlHandle().pem).split('\t');
+        return this.#info as string[];
+    }
+
+    get asymmetricKeyType(): KeyType | undefined {
+        const t = this._kmlInfo()[0];
+        return t === '' ? undefined : t as KeyType;
+    }
+
+    get asymmetricKeyDetails(): AsymmetricKeyDetails | undefined {
+        const [type, bits, exp, curve, hash, mgf1, salt, div] = this._kmlInfo();
+        switch (type) {
+            case 'rsa':
+                return { modulusLength: Number(bits), publicExponent: BigInt(exp) };
+            case 'rsa-pss': {
+                const d: AsymmetricKeyDetails = { modulusLength: Number(bits), publicExponent: BigInt(exp) };
+                if (hash !== '') {
+                    d.hashAlgorithm = hash;
+                    d.mgf1HashAlgorithm = mgf1;
+                    d.saltLength = Number(salt);
+                }
+                return d;
+            }
+            case 'dsa':
+                return { modulusLength: Number(bits), divisorLength: Number(div) };
+            case 'ec':
+                return { namedCurve: curve };
+        }
+        return {};
+    }
+
+    // export() for this key's own type: a JWK, or a PEM/DER encoding.
+    _kmlExport(options: any, isPrivate: boolean): any {
+        if (options !== undefined && options !== null && typeof options === 'object' && options.format === 'jwk') {
+            const text = __kml_native.cryptoKeyJwk(this._kmlHandle().pem, isPrivate ? 1 : 0);
+            if (text === '!curve') throw new NodeError('ERR_CRYPTO_JWK_UNSUPPORTED_CURVE', 'Unsupported JWK EC curve: ' + this.asymmetricKeyDetails!.namedCurve + '.');
+            if (text === '!type' || text === '') throw new NodeError('ERR_CRYPTO_JWK_UNSUPPORTED_KEY_TYPE', 'Unsupported JWK Key Type.');
+            const jwk: any = {};
+            for (const member of text.split('\t')) {
+                const at = member.indexOf('=');
+                jwk[member.slice(0, at)] = member.slice(at + 1);
+            }
+            return jwk;
+        }
+        validateObject(options, 'options');
+        const format = options.format;
+        if (format !== 'pem' && format !== 'der') throw invalidArgValue('options.format', format);
+        const type = options.type;
+        const allowed = isPrivate ? ['pkcs1', 'pkcs8', 'sec1'] : ['pkcs1', 'spki'];
+        if (typeof type !== 'string' || allowed.indexOf(type) < 0) throw invalidArgValue('options.type', type);
+        const keyType = this.asymmetricKeyType;
+        if (type === 'pkcs1' && keyType !== 'rsa') throw incompatibleKeyOptions('pkcs1', 'can only be used for RSA keys');
+        if (type === 'sec1' && keyType !== 'ec') throw incompatibleKeyOptions('sec1', 'can only be used for EC keys');
+        let cipher = '';
+        let pass: Uint8Array = empty;
+        let hasPass = 0;
+        if (isPrivate && options.cipher !== undefined) {
+            if (typeof options.cipher !== 'string') throw invalidArgValue('options.cipher', options.cipher);
+            if (format === 'der' && type !== 'pkcs8') throw incompatibleKeyOptions(type, 'does not support encryption');
+            if (options.passphrase === undefined) throw invalidArgValue('options.passphrase', options.passphrase);
+            cipher = options.cipher;
+            pass = toBytes(options.passphrase, 'options.passphrase');
+            hasPass = 1;
+        }
+        let out = Buffer.alloc(4096);
+        let n = __kml_native.cryptoKeyExport(this._kmlHandle().pem, isPrivate ? 1 : 0, kFormats[format], kEncodings[type], cipher, pass, hasPass, out);
+        if (n <= -2) {
+            out = Buffer.alloc(-n - 2);
+            n = __kml_native.cryptoKeyExport(this._kmlHandle().pem, isPrivate ? 1 : 0, kFormats[format], kEncodings[type], cipher, pass, hasPass, out);
+        }
+        if (n < 0) {
+            if (cipher !== '' && getCiphers().indexOf(cipher.toLowerCase()) < 0) throw new NodeTypeError('ERR_CRYPTO_UNKNOWN_CIPHER', 'Unknown cipher');
+            throw opensslError('Failed to encode key');
+        }
+        const bytes = out.subarray(0, n);
+        return format === 'pem' ? bytes.toString() : Buffer.from(bytes);
+    }
+}
+
+class PublicKeyObject extends AsymmetricKeyObject {
+    constructor(handle: KeyObjectHandle) {
+        super('public', handle);
+    }
+
+    export(options: KeyExportOptions<'pem'>): string | Buffer;
+    export(options?: KeyExportOptions<'der'>): Buffer;
+    export(options?: JwkKeyExportOptions): JsonWebKey;
+    export(options?: any): any {
+        return this._kmlExport(options, false);
+    }
+}
+
+class PrivateKeyObject extends AsymmetricKeyObject {
+    constructor(handle: KeyObjectHandle) {
+        super('private', handle);
+    }
+
+    export(options: KeyExportOptions<'pem'>): string | Buffer;
+    export(options?: KeyExportOptions<'der'>): Buffer;
+    export(options?: JwkKeyExportOptions): JsonWebKey;
+    export(options?: any): any {
+        return this._kmlExport(options, true);
+    }
+}
+
+function publicKeyFromPem(pem: string): PublicKeyObject {
+    return new PublicKeyObject(new KeyObjectHandle(empty, pem));
+}
+
+function privateKeyFromPem(pem: string): PrivateKeyObject {
+    return new PrivateKeyObject(new KeyObjectHandle(empty, pem));
+}
+
+function isStringOrView(v: any): boolean {
+    return typeof v === 'string' || isView(v) || v instanceof ArrayBuffer;
+}
+
+// A JWK's key (getKeyObjectHandleFromJwk): its canonical PEM.
+function pemFromJwk(jwk: any, wantPrivate: boolean): string {
+    validateObject(jwk, 'key.key');
+    const kty = jwk.kty;
+    const str = (v: any, name: string): string => {
+        if (typeof v !== 'string') throw invalidArgType('key.' + name, 'of type string', v);
+        return v;
+    };
+    const opt = (v: any): string => typeof v === 'string' ? v : '';
+    let pem = '';
+    if (kty === 'RSA') {
+        str(jwk.n, 'n');
+        str(jwk.e, 'e');
+        if (wantPrivate) for (const m of ['d', 'p', 'q', 'dp', 'dq', 'qi']) str(jwk[m], m);
+        pem = __kml_native.cryptoKeyFromJwk(0, '', jwk.n, jwk.e, opt(jwk.d), opt(jwk.p), opt(jwk.q), opt(jwk.dp), opt(jwk.dq), opt(jwk.qi), '', '', wantPrivate ? 1 : 0);
+        if (pem === '') throw new NodeTypeError('ERR_CRYPTO_INVALID_JWK', 'Invalid JWK RSA key');
+    } else if (kty === 'EC') {
+        if (['P-256', 'secp256k1', 'P-384', 'P-521'].indexOf(jwk.crv) < 0) throw invalidArgValue('key.crv', jwk.crv, "must be one of: 'P-256', 'secp256k1', 'P-384', 'P-521'");
+        str(jwk.x, 'x');
+        str(jwk.y, 'y');
+        if (wantPrivate) str(jwk.d, 'd');
+        pem = __kml_native.cryptoKeyFromJwk(1, jwk.crv, '', '', opt(jwk.d), '', '', '', '', '', jwk.x, jwk.y, wantPrivate ? 1 : 0);
+        if (pem === '') throw new NodeTypeError('ERR_CRYPTO_INVALID_JWK', 'Invalid JWK EC key');
+    } else if (kty === 'OKP') {
+        if (['Ed25519', 'Ed448', 'X25519', 'X448'].indexOf(jwk.crv) < 0) throw invalidArgValue('key.crv', jwk.crv, "must be one of: 'Ed25519', 'Ed448', 'X25519', 'X448'");
+        str(jwk.x, 'x');
+        if (wantPrivate) str(jwk.d, 'd');
+        pem = __kml_native.cryptoKeyFromJwk(2, jwk.crv, '', '', opt(jwk.d), '', '', '', '', '', jwk.x, '', wantPrivate ? 1 : 0);
+        if (pem === '') throw new NodeTypeError('ERR_CRYPTO_INVALID_JWK', 'Invalid JWK OKP key');
+    } else {
+        throw new NodeTypeError('ERR_CRYPTO_INVALID_JWK', String(kty) + ' is not a supported JWK key type');
+    }
+    return pem;
+}
+
+// prepareAsymmetricKey for createPrivateKey/createPublicKey and the sign
+// paths: the key's canonical PEM.
+function asymmetricPem(key: any, wantPrivate: boolean, name: string): string {
+    const expected = 'of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView';
+    if (isStringOrView(key)) return parsePem(toBytes(key, name), 0, 0, wantPrivate, empty, 0);
+    if (key === null || typeof key !== 'object') throw invalidArgType(name, expected, key);
+    if (key instanceof KeyObject) throw invalidArgType(name, expected, key);
+    const data = key.key;
+    if (data instanceof KeyObject) throw invalidArgType(name + '.key', expected, data);
+    const format = key.format ?? 'pem';
+    if (format === 'jwk') return pemFromJwk(data, wantPrivate);
+    if (format !== 'pem' && format !== 'der') throw invalidArgValue(name + '.format', format);
+    if (!isStringOrView(data)) throw invalidArgType(name + '.key', expected, data);
+    let type = 0;
+    if (format === 'der') {
+        const allowed = wantPrivate ? ['pkcs1', 'pkcs8', 'sec1'] : ['pkcs1', 'spki', 'pkcs8', 'sec1'];
+        if (typeof key.type !== 'string' || allowed.indexOf(key.type) < 0) throw invalidArgValue(name + '.type', key.type);
+        type = kEncodings[key.type];
+    }
+    let pass: Uint8Array = empty;
+    let hasPass = 0;
+    if (key.passphrase !== undefined && key.passphrase !== null) {
+        pass = toBytes(key.passphrase, name + '.passphrase');
+        hasPass = 1;
+    }
+    const bytes = typeof data === 'string' ? Buffer.from(data as string, (key.encoding || 'utf8') as BufferEncoding) : toBytes(data, name + '.key');
+    return parsePem(bytes, kFormats[format], type, wantPrivate, pass, hasPass);
+}
+
+function parsePem(bytes: Uint8Array, format: number, type: number, wantPrivate: boolean, pass: Uint8Array, hasPass: number): string {
+    const pem = __kml_native.cryptoKeyParse(bytes, format, type, wantPrivate ? 1 : 0, pass, hasPass);
+    if (pem === '') throw opensslError('Failed to read asymmetric key');
+    return pem;
+}
+
+export type KeyLike = string | Buffer | KeyObject;
+
+export interface PrivateKeyInput {
+    key: string | Buffer;
+    format?: KeyFormat | undefined;
+    type?: 'pkcs1' | 'pkcs8' | 'sec1' | undefined;
+    passphrase?: string | Buffer | undefined;
+    encoding?: string | undefined;
+}
+
+export interface PublicKeyInput {
+    key: string | Buffer;
+    format?: KeyFormat | undefined;
+    type?: 'pkcs1' | 'spki' | undefined;
+    encoding?: string | undefined;
+}
+
+export interface JsonWebKeyInput {
+    key: JsonWebKey;
+    format: 'jwk';
+}
+
+export function createSecretKey(key: NodeJS.ArrayBufferView | ArrayBuffer): KeyObject;
+export function createSecretKey(key: string, encoding: BufferEncoding): KeyObject;
+export function createSecretKey(key: any, encoding?: any): KeyObject {
+    let bytes: Uint8Array;
+    if (typeof key === 'string') bytes = Buffer.from(key as string, (encoding || 'utf8') as BufferEncoding);
+    else if (isView(key)) bytes = viewBytes(key);
+    else if (key instanceof ArrayBuffer) bytes = new Uint8Array(key as ArrayBuffer);
+    else throw invalidArgType('key', 'an instance of ArrayBuffer, Buffer, TypedArray, or DataView', key);
+    return new SecretKeyObject(new KeyObjectHandle(Buffer.from(bytes), ''));
+}
+
+export function createPrivateKey(key: PrivateKeyInput | string | Buffer | JsonWebKeyInput): KeyObject {
+    return privateKeyFromPem(asymmetricPem(key, true, 'key'));
+}
+
+export function createPublicKey(key: PublicKeyInput | string | Buffer | KeyObject | JsonWebKeyInput): KeyObject {
+    if (key instanceof KeyObject) {
+        const k = key as KeyObject;
+        if (k.type !== 'private') throw new NodeTypeError('ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE', 'Invalid key object type ' + k.type + ', expected private.');
+        return publicKeyFromPem(parsePem(Buffer.from(keyHandle(k).pem), 0, 0, false, empty, 0));
+    }
+    const k: any = key;
+    if (k !== null && typeof k === 'object' && k.key instanceof KeyObject) return createPublicKey(k.key as KeyObject);
+    return publicKeyFromPem(asymmetricPem(key, false, 'key'));
+}
+
+// ---- Sign / Verify (lib/internal/crypto/sig.js) ----
+
+// A sign/verify key: [pem, passphrase, hasPassphrase]. A KeyObject's own
+// PEM needs no passphrase.
+function signKey(key: any, wantPrivate: boolean): [string, Uint8Array, number] {
+    const k = key !== null && typeof key === 'object' && !(key instanceof KeyObject) && !isView(key) && key.key !== undefined ? key.key : key;
+    if (k instanceof KeyObject) {
+        const ko = k as KeyObject;
+        if (wantPrivate && ko.type !== 'private') throw new NodeTypeError('ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE', 'Invalid key object type ' + ko.type + ', expected private.');
+        if (ko.type === 'secret') throw new NodeTypeError('ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE', 'Invalid key object type secret, expected private.');
+        return [keyHandle(ko).pem, empty, 0];
+    }
+    if (typeof k === 'string') {
+        if (key !== null && typeof key === 'object' && key.passphrase !== undefined) return [k as string, toBytes(key.passphrase, 'key.passphrase'), 1];
+        return [k as string, empty, 0];
+    }
+    if (isView(k)) {
+        const pem = Buffer.from(viewBytes(k)).toString();
+        if (key !== null && typeof key === 'object' && key.passphrase !== undefined) return [pem, toBytes(key.passphrase, 'key.passphrase'), 1];
+        return [pem, empty, 0];
+    }
+    throw invalidArgType('key', 'of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, or KeyObject', key);
+}
+
+// The key's sign options: [padding, saltLength, dsaEncoding] (-1 and 1e9
+// for absent; dsaEncoding 0 DER, 1 IEEE P1363).
+function signOptions(key: any): [number, number, number] {
+    if (key === null || typeof key !== 'object' || key instanceof KeyObject || isView(key)) return [-1, 1e9, 0];
+    let padding = -1;
+    let salt = 1e9;
+    let dsa = 0;
+    if (key.padding !== undefined) {
+        if (typeof key.padding !== 'number' || !Number.isInteger(key.padding)) throw invalidArgValue('options.padding', key.padding);
+        padding = key.padding;
+    }
+    if (key.saltLength !== undefined) {
+        if (typeof key.saltLength !== 'number' || !Number.isInteger(key.saltLength)) throw invalidArgValue('options.saltLength', key.saltLength);
+        salt = key.saltLength;
+    }
+    if (key.dsaEncoding !== undefined) {
+        if (key.dsaEncoding !== 'der' && key.dsaEncoding !== 'ieee-p1363') throw invalidArgValue('options.dsaEncoding', key.dsaEncoding);
+        dsa = key.dsaEncoding === 'ieee-p1363' ? 1 : 0;
+    }
+    return [padding, salt, dsa];
 }
 
 function signBytes(digest: string, key: any, data: Uint8Array): Buffer {
-    const pem = keyPem(key, 'key');
-    const [pass, hasPass] = keyPassphrase(key);
+    const [pem, pass, hasPass] = signKey(key, true);
+    const [padding, salt, dsa] = signOptions(key);
     let out = Buffer.alloc(512);
-    let n = __kml_native.cryptoSign(digest, pem, pass, hasPass, data, out);
+    let n = __kml_native.cryptoSign(digest, pem, pass, hasPass, padding, salt, dsa, data, out);
     if (n <= -2) {
         out = Buffer.alloc(-n - 2);
-        n = __kml_native.cryptoSign(digest, pem, pass, hasPass, data, out);
+        n = __kml_native.cryptoSign(digest, pem, pass, hasPass, padding, salt, dsa, data, out);
     }
     if (n < 0) throw opensslError('Invalid key');
     return out.subarray(0, n);
 }
 
 function verifyBytes(digest: string, key: any, data: Uint8Array, sig: Uint8Array): boolean {
-    const [pass, hasPass] = keyPassphrase(key);
-    const r = __kml_native.cryptoVerify(digest, keyPem(key, 'key'), pass, hasPass, data, sig);
+    const [pem, pass, hasPass] = signKey(key, false);
+    const [padding, salt, dsa] = signOptions(key);
+    const r = __kml_native.cryptoVerify(digest, pem, pass, hasPass, padding, salt, dsa, data, sig);
     if (r < 0) throw opensslError('Invalid key');
     return r === 1;
 }
@@ -809,84 +1230,335 @@ export function verify(algorithm: any, data: any, key: any, signature: any, call
     process.nextTick(() => { callback(null, ok); });
 }
 
-// ---- generateKeyPair (lib/internal/crypto/keygen.js), PEM encodings ----
+// ---- publicEncrypt / privateDecrypt / privateEncrypt / publicDecrypt
+// (lib/internal/crypto/cipher.js's rsaFunctionFor) ----
+
+export interface RsaPublicKey {
+    key: KeyLike;
+    padding?: number | undefined;
+}
+
+export interface RsaPrivateKey {
+    key: KeyLike;
+    passphrase?: string | undefined;
+    oaepHash?: string | undefined;
+    oaepLabel?: NodeJS.TypedArray | undefined;
+    padding?: number | undefined;
+}
+
+function rsaCrypt(op: number, defaultPadding: number, options: any, buffer: any): Buffer {
+    const [pem, pass, hasPass] = signKey(options, op === 1 || op === 2);
+    const opts: any = options !== null && typeof options === 'object' && !(options instanceof KeyObject) && !isView(options) ? options : {};
+    const padding = opts.padding || defaultPadding;
+    let oaepHash = '';
+    if (opts.oaepHash !== undefined) {
+        validateString(opts.oaepHash, 'key.oaepHash');
+        oaepHash = opts.oaepHash;
+    }
+    const label = opts.oaepLabel !== undefined ? toBytes(opts.oaepLabel, 'key.oaepLabel', opts.encoding) : empty;
+    const data = toBytes(buffer, 'buffer', opts.encoding);
+    let out = Buffer.alloc(1024);
+    let n = __kml_native.cryptoPkeyCrypt(op, pem, pass, hasPass, padding, oaepHash, label, data, out);
+    if (n <= -4) {
+        out = Buffer.alloc(-n - 2);
+        n = __kml_native.cryptoPkeyCrypt(op, pem, pass, hasPass, padding, oaepHash, label, data, out);
+    }
+    if (n === -3) throw new NodeError('ERR_OSSL_EVP_INVALID_DIGEST', 'Invalid digest used');
+    if (n < 0) throw opensslError('RSA operation failed');
+    return Buffer.from(out.subarray(0, n));
+}
+
+export function publicEncrypt(key: RsaPublicKey | RsaPrivateKey | KeyLike, buffer: NodeJS.ArrayBufferView | string): Buffer;
+export function publicEncrypt(key: any, buffer: any): Buffer {
+    return rsaCrypt(0, constants.RSA_PKCS1_OAEP_PADDING, key, buffer);
+}
+
+export function privateDecrypt(privateKey: RsaPrivateKey | KeyLike, buffer: NodeJS.ArrayBufferView | string): Buffer;
+export function privateDecrypt(privateKey: any, buffer: any): Buffer {
+    return rsaCrypt(1, constants.RSA_PKCS1_OAEP_PADDING, privateKey, buffer);
+}
+
+export function privateEncrypt(privateKey: RsaPrivateKey | KeyLike, buffer: NodeJS.ArrayBufferView | string): Buffer;
+export function privateEncrypt(privateKey: any, buffer: any): Buffer {
+    return rsaCrypt(2, constants.RSA_PKCS1_PADDING, privateKey, buffer);
+}
+
+export function publicDecrypt(key: RsaPublicKey | RsaPrivateKey | KeyLike, buffer: NodeJS.ArrayBufferView | string): Buffer;
+export function publicDecrypt(key: any, buffer: any): Buffer {
+    return rsaCrypt(3, constants.RSA_PKCS1_PADDING, key, buffer);
+}
+
+// ---- ECDH and diffieHellman (lib/internal/crypto/diffiehellman.js) ----
+
+export type ECDHKeyFormat = 'compressed' | 'uncompressed' | 'hybrid';
+
+function ecdhFormat(format: any): number {
+    if (format) {
+        if (format === 'compressed') return constants.POINT_CONVERSION_COMPRESSED;
+        if (format === 'hybrid') return constants.POINT_CONVERSION_HYBRID;
+        if (format !== 'uncompressed') throw new NodeTypeError('ERR_CRYPTO_ECDH_INVALID_FORMAT', 'Invalid ECDH format: ' + format);
+    }
+    return constants.POINT_CONVERSION_UNCOMPRESSED;
+}
+
+// A native ECDH op's bytes, or the error it reports.
+function ecdhOp(op: number, curve: string, priv: Uint8Array, pub: Uint8Array, format: number): Buffer {
+    const out = Buffer.alloc(200);
+    const n = __kml_native.cryptoEcdh(op, curve, priv, pub, format, out);
+    if (n === -8) throw new NodeTypeError('ERR_CRYPTO_INVALID_CURVE', 'Invalid EC curve name');
+    if (n === -6) throw new NodeError('ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY', 'Public key is not valid for specified curve');
+    if (n === -7) throw new NodeRangeError('ERR_CRYPTO_INVALID_KEYTYPE', 'Private key is not valid for specified curve.');
+    if (n < 0) throw new NodeError('ERR_CRYPTO_OPERATION_FAILED', 'ECDH operation failed');
+    return Buffer.from(out.subarray(0, n));
+}
+
+export class ECDH {
+    #curve: string;
+    #privateKey: Buffer | null = null;
+    #publicKey: Buffer | null = null;
+
+    constructor(curve: string) {
+        validateString(curve, 'curve');
+        if (__kml_native.cryptoEcdh(4, curve, Buffer.alloc(1, 1), empty, 0, Buffer.alloc(0)) === -8) {
+            throw new NodeTypeError('ERR_CRYPTO_INVALID_CURVE', 'Invalid EC curve name');
+        }
+        this.#curve = curve;
+    }
+
+    static convertKey(key: BinaryLike, curve: string, inputEncoding?: BinaryToTextEncoding, outputEncoding?: 'latin1' | 'hex' | 'base64' | 'base64url', format?: 'uncompressed' | 'compressed' | 'hybrid'): Buffer | string;
+    static convertKey(key: any, curve: any, inputEncoding?: any, outputEncoding?: any, format?: any): any {
+        validateString(curve, 'curve');
+        const bytes = toBytes(key, 'key', inputEncoding);
+        return encodeOut(ecdhOp(3, curve, empty, bytes, ecdhFormat(format)), outputEncoding);
+    }
+
+    generateKeys(): Buffer;
+    generateKeys(encoding: BinaryToTextEncoding, format?: ECDHKeyFormat): string;
+    generateKeys(encoding?: any, format?: any): any {
+        const priv = ecdhOp(0, this.#curve, empty, empty, 0);
+        this.#privateKey = priv;
+        this.#publicKey = ecdhOp(1, this.#curve, priv, empty, constants.POINT_CONVERSION_UNCOMPRESSED);
+        return this.getPublicKey(encoding, format);
+    }
+
+    computeSecret(otherPublicKey: NodeJS.ArrayBufferView): Buffer;
+    computeSecret(otherPublicKey: string, inputEncoding: BinaryToTextEncoding): Buffer;
+    computeSecret(otherPublicKey: NodeJS.ArrayBufferView, outputEncoding: BinaryToTextEncoding): string;
+    computeSecret(otherPublicKey: string, inputEncoding: BinaryToTextEncoding, outputEncoding: BinaryToTextEncoding): string;
+    computeSecret(otherPublicKey: any, inputEncoding?: any, outputEncoding?: any): any {
+        const key = toBytes(otherPublicKey, 'key', inputEncoding);
+        if (this.#privateKey === null) throw new NodeError('ERR_CRYPTO_OPERATION_FAILED', 'Failed to get ECDH private key');
+        const secret = ecdhOp(2, this.#curve, this.#privateKey as Buffer, key, 0);
+        return typeof outputEncoding === 'string' && outputEncoding !== 'buffer' ? secret.toString(outputEncoding as BufferEncoding) : secret;
+    }
+
+    getPrivateKey(): Buffer;
+    getPrivateKey(encoding: BinaryToTextEncoding): string;
+    getPrivateKey(encoding?: any): any {
+        if (this.#privateKey === null) throw new NodeError('ERR_CRYPTO_OPERATION_FAILED', 'Failed to get ECDH private key');
+        return encodeOut(Buffer.from(this.#privateKey as Buffer), encoding);
+    }
+
+    getPublicKey(encoding?: null, format?: ECDHKeyFormat): Buffer;
+    getPublicKey(encoding: BinaryToTextEncoding, format?: ECDHKeyFormat): string;
+    getPublicKey(encoding?: any, format?: any): any {
+        const f = ecdhFormat(format);
+        if (this.#publicKey === null) throw new NodeError('ERR_CRYPTO_OPERATION_FAILED', 'Failed to get ECDH public key');
+        return encodeOut(ecdhOp(3, this.#curve, empty, this.#publicKey as Buffer, f), encoding);
+    }
+
+    setPrivateKey(privateKey: NodeJS.ArrayBufferView): this;
+    setPrivateKey(privateKey: string, encoding: BinaryToTextEncoding): this;
+    setPrivateKey(privateKey: any, encoding?: any): this {
+        const key = Buffer.from(toBytes(privateKey, 'key', encoding));
+        this.#publicKey = ecdhOp(1, this.#curve, key, empty, constants.POINT_CONVERSION_UNCOMPRESSED);
+        this.#privateKey = key;
+        return this;
+    }
+
+    setPublicKey(publicKey: NodeJS.ArrayBufferView): this;
+    setPublicKey(publicKey: string, encoding: BinaryToTextEncoding): this;
+    setPublicKey(publicKey: any, encoding?: any): this {
+        const key = Buffer.from(toBytes(publicKey, 'key', encoding));
+        this.#publicKey = ecdhOp(3, this.#curve, empty, key, constants.POINT_CONVERSION_UNCOMPRESSED);
+        return this;
+    }
+}
+
+export function createECDH(curveName: string): ECDH {
+    return new ECDH(curveName);
+}
+
+// crypto.diffieHellman({ privateKey, publicKey }): the secret two
+// KeyObjects of one type (ec on one curve, x25519, x448) share.
+export function diffieHellman(options: { privateKey: KeyObject; publicKey: KeyObject }): Buffer;
+export function diffieHellman(options: any): Buffer {
+    validateObject(options, 'options');
+    const priv = options.privateKey;
+    const pub = options.publicKey;
+    const [privPem] = signKey(priv, true);
+    const [pubPem] = signKey(pub, false);
+    if (priv instanceof KeyObject && pub instanceof KeyObject) {
+        const a = (priv as KeyObject).asymmetricKeyType;
+        const b = (pub as KeyObject).asymmetricKeyType;
+        if (a !== b) throw new NodeError('ERR_CRYPTO_INCOMPATIBLE_KEY', 'Incompatible key types for Diffie-Hellman: ' + a + ' and ' + b);
+    }
+    let out = Buffer.alloc(256);
+    let n = __kml_native.cryptoDeriveSecret(privPem, pubPem, out);
+    if (n <= -2) {
+        out = Buffer.alloc(-n - 2);
+        n = __kml_native.cryptoDeriveSecret(privPem, pubPem, out);
+    }
+    if (n < 0) throw opensslError('Failed to derive the shared secret');
+    return Buffer.from(out.subarray(0, n));
+}
+
+// ---- generateKeyPair (lib/internal/crypto/keygen.js) ----
 
 export interface KeyPairSyncResult<T1 extends string | Buffer, T2 extends string | Buffer> {
     publicKey: T1;
     privateKey: T2;
 }
 
-interface KeyEncoding {
-    type: string;
-    format: string;
+export interface KeyPairKeyObjectResult {
+    publicKey: KeyObject;
+    privateKey: KeyObject;
+}
+
+export interface BasePrivateKeyEncodingOptions<T extends KeyFormat> {
+    format: T;
     cipher?: string | undefined;
     passphrase?: string | undefined;
 }
 
-export interface RSAKeyPairOptions {
-    modulusLength: number;
+interface KeyEncodingOptions<T extends KeyFormat> {
+    type: string;
+    format: T;
+    cipher?: string | undefined;
+    passphrase?: string | undefined;
+}
+
+// Every key type's options in one shape: each type reads its own members
+// (modulusLength for RSA/RSA-PSS/DSA, namedCurve for EC, none for the
+// Edwards and Montgomery curves).
+interface KeyPairOptionsBase {
+    modulusLength?: number | undefined;
     publicExponent?: number | undefined;
-    publicKeyEncoding: KeyEncoding;
-    privateKeyEncoding: KeyEncoding;
+    hashAlgorithm?: string | undefined;
+    mgf1HashAlgorithm?: string | undefined;
+    saltLength?: number | undefined;
+    divisorLength?: number | undefined;
+    namedCurve?: string | undefined;
 }
 
-export interface ECKeyPairOptions {
-    namedCurve: string;
-    publicKeyEncoding: KeyEncoding;
-    privateKeyEncoding: KeyEncoding;
+export interface KeyPairOptions<PubF extends KeyFormat, PrivF extends KeyFormat> extends KeyPairOptionsBase {
+    publicKeyEncoding: KeyEncodingOptions<PubF>;
+    privateKeyEncoding: KeyEncodingOptions<PrivF>;
 }
 
-export interface ED25519KeyPairOptions {
-    publicKeyEncoding: KeyEncoding;
-    privateKeyEncoding: KeyEncoding;
+export interface KeyPairKeyObjectOptions extends KeyPairOptionsBase {
+    publicKeyEncoding?: undefined;
+    privateKeyEncoding?: undefined;
 }
 
-// The native keygen's arguments for (type, options): [kind, bits, exponent,
-// curve].
+export type RSAKeyPairOptions<PubF extends KeyFormat = 'pem', PrivF extends KeyFormat = 'pem'> = KeyPairOptions<PubF, PrivF>;
+export type ECKeyPairOptions<PubF extends KeyFormat = 'pem', PrivF extends KeyFormat = 'pem'> = KeyPairOptions<PubF, PrivF>;
+export type ED25519KeyPairOptions<PubF extends KeyFormat = 'pem', PrivF extends KeyFormat = 'pem'> = KeyPairOptions<PubF, PrivF>;
+
+const kKeygenKinds: { [k: string]: number } = { rsa: 0, ec: 1, ed25519: 2, x25519: 3, 'rsa-pss': 4, dsa: 5, ed448: 6, x448: 7 };
+
+function validateUint32(value: any, name: string): void {
+    if (typeof value !== 'number') throw invalidArgType(name, 'of type number', value);
+    if (!Number.isInteger(value)) throw outOfRange(name, 'an integer', value);
+    if (value < 0 || value > 4294967295) throw outOfRange(name, '>= 0 && <= 4294967295', value);
+}
+
+// The native keygen's arguments for (type, options): [kind, bits,
+// exponent, curve] — RSA-PSS's restrictions ride in curve as
+// "hash\tmgf1\tsalt", DSA's divisor length in exponent.
 function keygenArgs(type: any, options: any): [number, number, number, string] {
     validateString(type, 'type');
+    const kind = kKeygenKinds[type as string];
+    if (kind === undefined) {
+        throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'type' must be a supported key type. Received '" + type + "'");
+    }
     const o: any = options ?? {};
-    const pub = o.publicKeyEncoding;
-    const priv = o.privateKeyEncoding;
-    if (pub === undefined || priv === undefined) {
-        throw new NodeError('ERR_FEATURE_UNAVAILABLE_ON_PLATFORM', 'KeyObject results are not supported: pass publicKeyEncoding and privateKeyEncoding');
-    }
-    if (pub.format !== 'pem' || priv.format !== 'pem' || pub.type !== 'spki' || priv.type !== 'pkcs8' || priv.cipher !== undefined) {
-        throw new NodeError('ERR_FEATURE_UNAVAILABLE_ON_PLATFORM', "Only { type: 'spki', format: 'pem' } and { type: 'pkcs8', format: 'pem' } key encodings are supported");
-    }
+    if (options !== undefined) validateObject(options, 'options');
     switch (type) {
         case 'rsa':
-            validateInt32(o.modulusLength, 'options.modulusLength', 0, 2147483647);
-            return [0, o.modulusLength, o.publicExponent ?? 65537, ''];
+        case 'rsa-pss': {
+            validateUint32(o.modulusLength, 'options.modulusLength');
+            let exponent = 65537;
+            if (o.publicExponent !== undefined) {
+                validateUint32(o.publicExponent, 'options.publicExponent');
+                exponent = o.publicExponent;
+            }
+            if (type === 'rsa') return [kind, o.modulusLength, exponent, ''];
+            const hash = o.hashAlgorithm ?? '';
+            const mgf1 = o.mgf1HashAlgorithm ?? '';
+            if (typeof hash !== 'string') throw invalidArgType('options.hashAlgorithm', 'of type string', hash);
+            if (typeof mgf1 !== 'string') throw invalidArgType('options.mgf1HashAlgorithm', 'of type string', mgf1);
+            let salt = '';
+            if (o.saltLength !== undefined) {
+                validateInt32(o.saltLength, 'options.saltLength', 0, 2147483647);
+                salt = String(o.saltLength);
+            }
+            return [kind, o.modulusLength, exponent, hash + '\t' + mgf1 + '\t' + salt];
+        }
+        case 'dsa': {
+            validateUint32(o.modulusLength, 'options.modulusLength');
+            let divisor = 0;
+            if (o.divisorLength !== undefined && o.divisorLength !== null) {
+                validateInt32(o.divisorLength, 'options.divisorLength', 0, 2147483647);
+                divisor = o.divisorLength;
+            }
+            return [kind, o.modulusLength, divisor, ''];
+        }
         case 'ec':
             validateString(o.namedCurve, 'options.namedCurve');
-            return [1, 0, 0, o.namedCurve];
-        case 'ed25519':
-            return [2, 0, 0, ''];
-        case 'x25519':
-            return [3, 0, 0, ''];
+            return [kind, 0, 0, o.namedCurve];
     }
-    throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'type' must be a supported key type. Received '" + type + "'");
+    return [kind, 0, 0, ''];
 }
 
-function splitPemPair(pem: string): KeyPairSyncResult<string, string> {
+// One half of a generated pair in its requested encoding, or the KeyObject.
+// SPKI and unencrypted PKCS#8 PEM are the key's own canonical form.
+function encodeKeygenHalf(key: KeyObject, encoding: any, name: string): any {
+    if (encoding === undefined) return key;
+    validateObject(encoding, 'options.' + name);
+    const own = key.type === 'public' ? 'spki' : 'pkcs8';
+    if (encoding.format === 'pem' && encoding.type === own && encoding.cipher === undefined) return keyHandle(key).pem;
+    return key.export(encoding as any);
+}
+
+function keygenResult(pem: string, options: any): any {
     const at = pem.indexOf('-----BEGIN PRIVATE KEY-----');
-    return { publicKey: pem.slice(0, at), privateKey: pem.slice(at) };
+    const publicKey = publicKeyFromPem(pem.slice(0, at));
+    const privateKey = privateKeyFromPem(pem.slice(at));
+    const o: any = options ?? {};
+    return {
+        publicKey: encodeKeygenHalf(publicKey, o.publicKeyEncoding, 'publicKeyEncoding'),
+        privateKey: encodeKeygenHalf(privateKey, o.privateKeyEncoding, 'privateKeyEncoding'),
+    };
 }
 
-export function generateKeyPairSync(type: 'rsa', options: RSAKeyPairOptions): KeyPairSyncResult<string, string>;
-export function generateKeyPairSync(type: 'ec', options: ECKeyPairOptions): KeyPairSyncResult<string, string>;
-export function generateKeyPairSync(type: 'ed25519' | 'x25519', options: ED25519KeyPairOptions): KeyPairSyncResult<string, string>;
-export function generateKeyPairSync(type: any, options: any): KeyPairSyncResult<string, string> {
+export function generateKeyPairSync(type: KeyType, options: KeyPairOptions<'pem', 'pem'>): KeyPairSyncResult<string, string>;
+export function generateKeyPairSync(type: KeyType, options: KeyPairOptions<'pem', 'der'>): KeyPairSyncResult<string, Buffer>;
+export function generateKeyPairSync(type: KeyType, options: KeyPairOptions<'der', 'pem'>): KeyPairSyncResult<Buffer, string>;
+export function generateKeyPairSync(type: KeyType, options: KeyPairOptions<'der', 'der'>): KeyPairSyncResult<Buffer, Buffer>;
+export function generateKeyPairSync(type: KeyType, options?: KeyPairKeyObjectOptions): KeyPairKeyObjectResult;
+export function generateKeyPairSync(type: any, options?: any): any {
     const [kind, bits, exponent, curve] = keygenArgs(type, options);
     const pem = __kml_native.cryptoKeygen(kind, bits, exponent, curve);
     if (pem === '') throw keygenError(kind);
-    return splitPemPair(pem);
+    return keygenResult(pem, options);
 }
 
-export function generateKeyPair(type: 'rsa', options: RSAKeyPairOptions, callback: (err: Error | null, publicKey: string, privateKey: string) => void): void;
-export function generateKeyPair(type: 'ec', options: ECKeyPairOptions, callback: (err: Error | null, publicKey: string, privateKey: string) => void): void;
-export function generateKeyPair(type: 'ed25519' | 'x25519', options: ED25519KeyPairOptions, callback: (err: Error | null, publicKey: string, privateKey: string) => void): void;
+export function generateKeyPair(type: KeyType, options: KeyPairOptions<'pem', 'pem'>, callback: (err: Error | null, publicKey: string, privateKey: string) => void): void;
+export function generateKeyPair(type: KeyType, options: KeyPairOptions<'pem', 'der'>, callback: (err: Error | null, publicKey: string, privateKey: Buffer) => void): void;
+export function generateKeyPair(type: KeyType, options: KeyPairOptions<'der', 'pem'>, callback: (err: Error | null, publicKey: Buffer, privateKey: string) => void): void;
+export function generateKeyPair(type: KeyType, options: KeyPairOptions<'der', 'der'>, callback: (err: Error | null, publicKey: Buffer, privateKey: Buffer) => void): void;
+export function generateKeyPair(type: KeyType, options: KeyPairKeyObjectOptions | undefined, callback: (err: Error | null, publicKey: KeyObject, privateKey: KeyObject) => void): void;
 export function generateKeyPair(type: any, options: any, callback: any): void {
     validateFunction(callback, 'callback');
     const [kind, bits, exponent, curve] = keygenArgs(type, options);
@@ -896,7 +1568,13 @@ export function generateKeyPair(type: any, options: any, callback: any): void {
             callback(keygenError(kind), undefined, undefined);
             return;
         }
-        const pair = splitPemPair(pem);
+        let pair: any;
+        try {
+            pair = keygenResult(pem, options);
+        } catch (err) {
+            callback(err, undefined, undefined);
+            return;
+        }
         callback(null, pair.publicKey, pair.privateKey);
     });
 }

@@ -7,10 +7,10 @@
   "coverage": {
     "loose": "10/10",
     "loosePct": 100,
-    "strict": "4/10",
-    "strictPct": 40
+    "strict": "5/10",
+    "strictPct": 50
   },
-  "lede": "WHATWG URL parsing, query-string building, and route matching — the natural companions to fetch() for the REST-client priority. A URL string is read as the WHATWG parser reads it (percent-encoding, opaque mailto:/urn:/data: URLs, punycode hosts) before libcurl's already-linked URL API parses a hierarchical one. URLSearchParams is an ordered list of pairs, live on its URL. URLPattern is object-literal init only, and its exec() result is not readable yet.",
+  "lede": "WHATWG URL parsing, query-string building, and route matching — the natural companions to fetch() for the REST-client priority. URL is parsed by the URL Standard's own algorithm, written in TypeScript, as Node's ada implements it. URLSearchParams is an ordered list of pairs, live on its URL. URLPattern is the URL Pattern Standard, in TypeScript, as Node exposes it.",
   "entries": [
     {
       "id": "url.URL",
@@ -18,7 +18,7 @@
       "statusRow": "URL",
       "signature": "new URL(url: string, base?: string): URL",
       "badge": "exact",
-      "description": "Parses an absolute URL into its component fields. Fields — href, protocol, host, hostname, port, pathname, search, hash, origin, username, password, searchParams — are plain object field reads, no dispatched methods, and href/protocol/host/hostname/port/pathname/search/hash/username/password are all settable (a setter re-parses and re-derives every field, matching Node; the combined `host` splits on the first `:` into hostname + port). A part absent from the URL reads back as \"\", matching real URL's own default. A malformed URL throws a catchable Error (\"Invalid URL\"). Parsing goes through libcurl's URL API rather than a hand-rolled parser.",
+      "description": "Parses a URL, relative to an optional base, with the URL Standard's parser. Every component — href, origin, protocol, username, password, host, hostname, port, pathname, search, hash, searchParams — reads and (but origin) writes as the standard says, a setter running the parser from that component's state. A malformed URL throws Node's TypeError with code ERR_INVALID_URL; URL.parse returns null and URL.canParse false instead.",
       "params": [
         {
           "name": "url",
@@ -54,7 +54,7 @@
       "name": "URLSearchParams",
       "statusRow": "URLSearchParams",
       "signature": "new URLSearchParams(init?: string): URLSearchParams",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Reads and builds query strings. new URLSearchParams() starts empty; new URLSearchParams(init) parses a query string and tolerates a leading '?', so passing a URL's own .search straight through just works. Backed by an ordered name/value pair list (the WHATWG multi-value model), so duplicate keys and cross-key insertion order round-trip; get/set/has/delete/size/keys()/values()/entries()/forEach()/getAll()/sort() are all supported, plus toString() (application/x-www-form-urlencoded — a space is '+').",
       "params": [
         {
@@ -70,8 +70,7 @@
       "exampleKey": "url/url",
       "snippet": "const params = new URLSearchParams()\nparams.set(\"q\", \"hello world\")\nparams.set(\"page\", \"2\")\nconsole.log(params.toString())  // q=hello+world&page=2",
       "differences": [
-        "`url.searchParams` is live: mutating it (`append`/`set`/`delete`/`sort`) re-serializes the query back into `url.search`/`url.href`, matching the spec",
-        "Spreading a `URLSearchParams` directly (`[...params]`) yields an empty array (the same limitation as `[...map]`) — use `[...params.entries()]`"
+        "`url.searchParams` is live: mutating it (`append`/`set`/`delete`/`sort`) re-serializes the query back into `url.search`/`url.href`, matching the spec"
       ],
       "seeAlso": [
         "url.URL"
@@ -84,14 +83,19 @@
       "id": "url.URLPattern",
       "name": "URLPattern",
       "statusRow": "URLPattern",
-      "signature": "new URLPattern(init?: { protocol?; hostname?; port?; pathname?; search?; hash?; username?; password? }): URLPattern",
+      "signature": "new URLPattern(input?: string | URLPatternInit, baseURL?: string, options?: { ignoreCase?: boolean }): URLPattern",
       "badge": "caveats",
-      "description": "WHATWG route matching. Each component pattern compiles once at construction to an anchored PCRE2 regex; .test/.exec match a full URL string, which parses via libcurl's URL API. An omitted init component defaults to \"*\" and reads back as such from the component fields. An unparseable input is false/null, never a throw; an invalid pattern throws a catchable TypeError at construction.",
+      "description": "WHATWG route matching, the URL Pattern Standard as Node's ada implements it. A pattern is a constructor string or an init object, optionally relative to a base URL; the full pattern grammar is supported (named and regexp groups, wildcards, {} groups, ? + * modifiers). test() and exec() take a URL string or an init object; exec() returns the standard's URLPatternResult, its groups in the order Node lists them. An invalid pattern throws a TypeError.",
       "params": [
         {
-          "name": "init",
-          "type": "object",
-          "desc": "Object-literal init over protocol/hostname/port/pathname/search/hash/username/password."
+          "name": "input",
+          "type": "string | URLPatternInit",
+          "desc": "A constructor string, or an init over protocol/username/password/hostname/port/pathname/search/hash/baseURL."
+        },
+        {
+          "name": "baseURL",
+          "type": "string",
+          "desc": "The URL a relative pattern resolves against."
         }
       ],
       "returns": {
@@ -99,12 +103,9 @@
         "desc": "The compiled pattern."
       },
       "exampleKey": "url/urlpattern",
-      "snippet": "const pattern = new URLPattern({ pathname: \"/books/:id\" })\nconsole.log(pattern.test(\"https://example.com/books/123\"))  // true\nconst m = pattern.exec(\"https://example.com/books/123\")\nif (m !== null) { console.log(m.get(\"id\")) }  // 123",
+      "snippet": "const pattern = new URLPattern({ pathname: \"/books/:id\" })\nconsole.log(pattern.test(\"https://example.com/books/123\"))  // true\nconst m = pattern.exec(\"https://example.com/books/123\")\nif (m !== null) { console.log(m.pathname.groups.id) }  // 123",
       "differences": [
-        "Object-literal init only, over `protocol`/`hostname`/`port`/`pathname`/`search`/`hash`/`username`/`password` — no constructor-string form, no `baseURL`",
-        "Pattern grammar is literals, `\\` escapes, `*`, `:name`, and `:name?` — `{}` groups, `+` modifiers, and inline `(regex)` groups throw a `TypeError` at construction",
-        "`.exec()` returns a merged `Map<string, string> | null` of every named group across components (an unset optional group is absent), not the spec's per-component `URLPatternResult` object — needs the deferred dynamic object model",
-        "`*` wildcards aren't exposed as numbered groups; no `hasRegExpGroups`"
+        "Regexp groups run on PCRE2: an empty optional group iteration reads `\"\"` (JavaScript: `undefined`), `v`-flag set operations never match, and invalid `v`-mode syntax is accepted"
       ],
       "seeAlso": [
         "url.URL",
@@ -327,8 +328,7 @@
       },
       "snippet": "import { domainToASCII } from 'url'\nconsole.log(domainToASCII('example.com')) // example.com",
       "differences": [
-        "IDN conversion of a non-ASCII domain needs the libcurl IDN backend (libidn2) — present on typical Linux, absent on the Mac build (returns '')",
-        "ASCII domains pass through everywhere"
+        "A non-ASCII domain is lowercased and punycoded without the rest of UTS 46's mapping: a full-width `ＥＸＡＭＰＬＥ.com` punycodes where Node reads `example.com`"
       ],
       "seeAlso": [
         "URL"

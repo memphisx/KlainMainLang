@@ -57,11 +57,8 @@
           {
             "feature": "`JSON.stringify(value, null, space)` (pretty-printing)",
             "status": "implemented",
-            "caveats": [
-              "`space` must be a literal number (N spaces, capped at 10) or literal string — a runtime `space` value is a clean compile error ([ADR-00222](../adr/ADR-00222.md))",
-              "The `replacer` (2nd) argument is supported only as `null`/undefined — a function/array replacer is a clean compile error, not silently ignored"
-            ],
             "notes": [
+              "A replacer function or property list, a `space` known only at run time, and `JSON.parse`'s reviver run ECMA-262's SerializeJSONProperty / InternalizeJSONProperty over the run-time value ([ADR-01333](../adr/ADR-01333.md))",
               "A `jsonIndent{unit,depth}` threaded through the serializer; empty containers stay inline (`{}`/`[]`), an array's empty-vs-non-empty close is a runtime `select` on its length ([TDD-00077](../tdd/TDD-00077.md) Track S)"
             ]
           },

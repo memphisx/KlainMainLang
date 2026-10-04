@@ -69,12 +69,12 @@
             "feature": "`Request` / `Headers` objects",
             "status": "implemented",
             "caveats": [
-              "`Headers` keeps names lowercased (console.log shows `'content-type'` where Node keeps the given case), iterates in insertion order rather than sorted by name, and joins repeated `set-cookie` values instead of listing them"
+              "A `Headers` method called with too few arguments (through `any`) does not throw webidl's \"N argument(s) required\" TypeError: `arguments.length` counts every declared parameter"
             ],
             "notes": [
               "Real classes, not just `fetch`'s plain-object `init` (which still works unchanged)",
-              "`new Headers(init)` and the `headers` of fetch's, Request's and Response's `init` take a Headers, a `Map<string, string>`, a record of strings or `[name, value]` pairs ([ADR-01190](../adr/ADR-01190.md))",
-              "`Headers` is a case-insensitive (lowercased-key) wrapper: `get`/`set`/`has`/`delete` behave like `Map<string,string>`'s own (because storage-wise it *is* one), plus `append(name, value)`, which combines with a comma if `name` is already present instead of overwriting",
+              "`Headers` is undici's, in TypeScript ([ADR-01321](../adr/ADR-01321.md)): the Fetch standard's name and value validation and value normalization, `append`/`delete`/`get`/`getSetCookie`/`has`/`set`, iteration sorted by name with values combined and `set-cookie` listed apart, Node's inspect form, `immutable` headers on fetched, redirect and error responses; it can be subclassed and used as a value",
+              "`new Headers(init)` and the `headers` of fetch's, Request's and Response's `init` take any HeadersInit: a Headers or other iterable of `[name, value]` pairs, or a record",
               "`new Request(url)` / `new Request(url, init)`: `url`/`method`/`headers` plus the Body members (`.body` stream, `bodyUsed`, `text()`/`json()`/`arrayBuffer()`) — `method` defaults to `\"GET\"` (standard methods case-normalized), `headers` to an empty `Headers`, `body` to `null`; the body is any BodyInit, copied, with the Content-Type it implies, and a GET/HEAD request with a body is a TypeError ([ADR-01197](../adr/ADR-01197.md), [ADR-01217](../adr/ADR-01217.md))",
               "Reverses [ADR-00074](../adr/ADR-00074.md)'s original decision to reject these — see [ADR-00130](../adr/ADR-00130.md)",
               "`http.listen`'s own server-side request-object type annotation is `HttpRequest`, not `Request` — freed up by this change (see the ADR for why)"

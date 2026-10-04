@@ -98,7 +98,7 @@ func (e *Emitter) emitLogicalCompoundAssign(op, ptr string, ty Type, rhsExpr ast
 	// bare `ptr` (which may be null) or a dynamic any-box (whose tag may be
 	// null/undefined). Any other scalar type is never nullish, so the right side
 	// is never evaluated — exactly like bare `x ?? y`.
-	if op == "??=" && ty.IR != "ptr" && !ty.IsDynamic {
+	if op == "??=" && ty.IR != "ptr" && !ty.IsDynamic && !isF64Slot(ty) {
 		return cur, nil
 	}
 
@@ -121,6 +121,10 @@ func (e *Emitter) emitLogicalCompoundAssign(op, ptr string, ty Type, rhsExpr ast
 			nullishReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", nullishReg, isNull, isUndef))
 			cond = Value{Ref: nullishReg, Ty: TypeBool}
+			break
+		}
+		if isF64Slot(ty) {
+			cond = Value{Ref: e.emitF64IsUndefined(cur.Ref), Ty: TypeBool}
 			break
 		}
 		nullReg := e.freshReg()
@@ -347,6 +351,9 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 				}
 			}
 		}
+		if ex.Op != "=" {
+			e.emitArrayGuardFor(idxEx.Object, arrOpSet, idxEx.Index)
+		}
 		gepReg, elemTy, err := e.emitIndexPtr(idxEx)
 		if err != nil {
 			return Value{}, err
@@ -549,7 +556,9 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		// A function's own property (a TypeScript expando on a function
 		// declaration): written to its boxed function object's bag
 		// (TDD-00229).
-		if objVal.Ty.IsFunc && !objVal.Ty.IsDynamic {
+		// A write through `(x as any).p`: x is written as an `any` holding it
+		// is, a property it lacks added at run time.
+		if objVal.Ty.IsFunc && !objVal.Ty.IsDynamic || castToAny(memEx.Object) && !objVal.Ty.IsDynamic {
 			boxed, err := e.emitBoxValue(objVal)
 			if err != nil {
 				return Value{}, err
@@ -573,15 +582,6 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		}
 		if !objVal.Ty.IsObject {
 			return Value{}, fmt.Errorf("%d:%d: field assignment on non-object", ex.GetPos().Line, ex.GetPos().Col)
-		}
-		// A URL's components are derived from one parse, so a component setter
-		// re-parses the URL and re-derives every field (ADR-00572) rather than a
-		// bare field store that would desync them. Compound ops aren't supported.
-		if objVal.Ty.IsURL {
-			if ex.Op != "=" {
-				return Value{}, fmt.Errorf("%d:%d: compound assignment to a URL component ('%s') is not supported", ex.GetPos().Line, ex.GetPos().Col, memEx.Property)
-			}
-			return e.emitURLComponentSet(objVal, memEx.Property, ex.Right, ex.GetPos())
 		}
 		// TDD-00030: a class accessor (getter/setter) is checked before the
 		// plain-field FieldIndex path below — an accessor-only property
@@ -688,6 +688,12 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			}
 		}
 		e.storeScalarOrNullableField(gepReg, fieldTy, rhs)
+		if memEx.Property == "name" && e.isErrorValue(objVal.Ty) {
+			e.markErrorNameOwn(objVal)
+		}
+		if memEx.Property == "cause" && e.isErrorValue(objVal.Ty) {
+			e.markErrorCauseOwn(objVal)
+		}
 		return finish(rhs, nil)
 	}
 
@@ -722,8 +728,10 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if ex.Op != "=" {
 			return Value{}, fmt.Errorf("%d:%d: compound assignment is not supported in a destructuring assignment", ex.GetPos().Line, ex.GetPos().Col)
 		}
-		if objLit.HasComputedKey() {
-			return Value{}, fmt.Errorf("%d:%d: a computed key is not supported in a destructuring assignment", ex.GetPos().Line, ex.GetPos().Col)
+		if isUnconstrainedDynamic(e.inferExprType(ex.Right)) || objLit.HasComputedKey() {
+			// From a dynamic value, or by a computed key: each target is
+			// assigned its property, read off the (boxed) value once.
+			return e.emitDynDestructAssign(objLit, ex.Right, ex.GetPos())
 		}
 		objPtr, objTy, err := e.resolveObjectPtr(ex.Right, ex.GetPos())
 		if err != nil {
@@ -732,7 +740,8 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if err := e.emitDestructAssignObjectProps(objPtr, objTy, objLit.Properties, ex.GetPos()); err != nil {
 			return Value{}, err
 		}
-		return Value{Ty: TypeVoid}, nil
+		// The assignment's value is its right-hand side.
+		return Value{Ref: objPtr, Ty: objTy}, nil
 	}
 
 	// Scalar variable assignment
@@ -1289,4 +1298,66 @@ func (e *Emitter) processEnvAssign(ex *ast.AssignmentExpression) (ast.Expression
 		value = ast.NewBinaryExpression(op, cur, ex.Right, ex.GetPos())
 	}
 	return e.processEnvCall("envSet", ex.GetPos(), key, value)
+}
+
+// castToAny reports `x as any` / `x as unknown` (parenthesized or not).
+func castToAny(x ast.Expression) bool {
+	as, ok := x.(*ast.AsExpression)
+	return ok && as.TypeAnnot != nil && (as.TypeAnnot.Name == "any" || as.TypeAnnot.Name == "unknown")
+}
+
+// emitDynDestructAssign is `({ a, b: [c], d = 1, [k]: e } = v)` for a v held
+// in `any`: v is evaluated once into a temporary, and each target is assigned
+// that property of it, its default when the property reads undefined; a
+// nested pattern target is itself a destructuring assignment. The value is v.
+func (e *Emitter) emitDynDestructAssign(pat *ast.ObjectLiteral, rhs ast.Expression, pos ast.Pos) (Value, error) {
+	v, err := e.emitExprWithObjectHint(rhs, TypeAny)
+	if err != nil {
+		return Value{}, err
+	}
+	src, err := e.emitBoxValue(v)
+	if err != nil {
+		return Value{}, err
+	}
+	temp := func(word string) *ast.Identifier {
+		name := fmt.Sprintf("__kml_dtmp_%d", e.optRecvCtr)
+		e.optRecvCtr++
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", word, slot))
+		e.define(name, Symbol{Ptr: slot, Ty: TypeAny})
+		return ast.NewIdentifier(name, pos)
+	}
+	srcID := temp(src.Ref)
+	for _, p := range pat.Properties {
+		if _, rest := p.Value.(*ast.SpreadElement); rest {
+			return Value{}, fmt.Errorf("%d:%d: a rest element in a destructuring assignment from a dynamic value is not supported", pos.Line, pos.Col)
+		}
+		var read ast.Expression = ast.NewMemberExpression(srcID, p.Key, pos)
+		if p.KeyExpr != nil {
+			read = ast.NewIndexExpression(srcID, p.KeyExpr, pos)
+		}
+		target, dflt := p.Value, ast.Expression(nil)
+		if a, ok := p.Value.(*ast.AssignmentExpression); ok && a.Op == "=" {
+			target, dflt = a.Left, a.Right
+		}
+		var value ast.Expression = read
+		if dflt != nil {
+			got, err := e.emitExpr(read)
+			if err != nil {
+				return Value{}, err
+			}
+			gb, err := e.emitBoxValue(got)
+			if err != nil {
+				return Value{}, err
+			}
+			gotID := temp(gb.Ref)
+			value = ast.NewConditionalExpression(
+				ast.NewBinaryExpression("===", gotID, ast.NewNullLiteral(true, pos), pos), dflt, gotID, pos)
+		}
+		if _, err := e.emitExpr(ast.NewAssignmentExpression("=", target, value, pos)); err != nil {
+			return Value{}, err
+		}
+	}
+	return src, nil
 }

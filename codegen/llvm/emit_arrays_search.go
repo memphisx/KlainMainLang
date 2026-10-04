@@ -20,7 +20,7 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	if err != nil {
 		return Value{}, err
 	}
-	needleVal = e.coerce(needleVal, elemTy)
+	needleVal = e.searchNeedle(needleVal, elemTy)
 
 	resultAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", resultAlloca))
@@ -74,7 +74,10 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	elem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elem, elemTy.IR, gep, elemTy.Align()))
-	eqReg := e.emitElemEq(elemTy, elem, needleVal.Ref)
+	eqReg, err := e.emitSearchEq(elemTy, elem, needleVal)
+	if err != nil {
+		return Value{}, err
+	}
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", eqReg, matchL, incL))
 
 	e.emitLabel(matchL)
@@ -111,7 +114,7 @@ func (e *Emitter) emitArrayLastIndexOf(mem *ast.MemberExpression, args []ast.Exp
 	if err != nil {
 		return Value{}, err
 	}
-	needleVal = e.coerce(needleVal, elemTy)
+	needleVal = e.searchNeedle(needleVal, elemTy)
 
 	resultAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", resultAlloca))
@@ -142,7 +145,10 @@ func (e *Emitter) emitArrayLastIndexOf(mem *ast.MemberExpression, args []ast.Exp
 	elem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elem, elemTy.IR, gep, elemTy.Align()))
-	eqReg := e.emitElemEq(elemTy, elem, needleVal.Ref)
+	eqReg, err := e.emitSearchEq(elemTy, elem, needleVal)
+	if err != nil {
+		return Value{}, err
+	}
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", eqReg, matchL, decL))
 
 	e.emitLabel(matchL)
@@ -191,7 +197,7 @@ func (e *Emitter) emitArrayIncludes(mem *ast.MemberExpression, args []ast.Expres
 			return Value{}, fmt.Errorf("%d:%d: Array.includes search value of a type disjoint from the element type is always false — TypeScript reports an argument-type error; compile with -compat=js to evaluate it", pos.Line, pos.Col)
 		}
 	}
-	needleVal = e.coerce(needleVal, elemTy)
+	needleVal = e.searchNeedle(needleVal, elemTy)
 
 	foundAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", foundAlloca))
@@ -219,7 +225,10 @@ func (e *Emitter) emitArrayIncludes(mem *ast.MemberExpression, args []ast.Expres
 	elem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elem, elemTy.IR, gep, elemTy.Align()))
-	eqReg := e.emitElemEq(elemTy, elem, needleVal.Ref)
+	eqReg, err := e.emitSearchEq(elemTy, elem, needleVal)
+	if err != nil {
+		return Value{}, err
+	}
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", eqReg, matchL, incL))
 
 	e.emitLabel(matchL)
@@ -448,3 +457,51 @@ func (e *Emitter) emitArrayFindLastIndex(mem *ast.MemberExpression, args []ast.E
 
 // emitArrayConcat implements arr.concat(other): returns a new array containing
 // all elements of arr followed by all elements of other.
+
+// searchNeedle is indexOf's / includes' search value, coerced to the element
+// type, except an `any` value against scalar elements: equality never
+// coerces, so it stays boxed and emitSearchEq boxes each element instead.
+// A needle of another kind than the elements (an object, string or boolean
+// against numbers) is boxed the same way: it equals no element, and
+// converting it would make `[1].indexOf("1")` find one.
+func (e *Emitter) searchNeedle(needle Value, elemTy Type) Value {
+	if needle.Ty.IsDynamic && scalarTypeKind(elemTy) != "" {
+		return needle
+	}
+	if searchKind(needle.Ty) != "" && searchKind(elemTy) != "" && searchKind(needle.Ty) != searchKind(elemTy) {
+		if boxed, err := e.emitBoxValue(needle); err == nil {
+			return boxed
+		}
+	}
+	return e.coerce(needle, elemTy)
+}
+
+// searchKind is the strict-equality kind of a statically typed value (number,
+// boolean, string or object), "" for one searchNeedle leaves to coerce.
+func searchKind(t Type) string {
+	switch {
+	case t.IsDynamic || t.IsNull || t.IsUndefined || t.IsNever || isNullableScalar(t) || t.NullAndUndef || t.IsSymbol || t.IsBigInt:
+		return ""
+	case t.IR == "i1":
+		return "boolean"
+	case t.Float || t.IR == "i64" || t.IR == "i32" || t.IR == "i16" || t.IR == "i8":
+		return "number"
+	case isStringTy(t):
+		return "string"
+	case t.IsObject || t.IsArray || t.IsFunc || t.IsClass:
+		return "object"
+	}
+	return ""
+}
+
+// emitSearchEq compares the element elem with a needle from searchNeedle.
+func (e *Emitter) emitSearchEq(elemTy Type, elem string, needle Value) (string, error) {
+	if !needle.Ty.IsDynamic || elemTy.IsDynamic {
+		return e.emitElemEq(elemTy, elem, needle.Ref), nil
+	}
+	boxed, err := e.emitBoxValue(Value{Ref: elem, Ty: elemTy})
+	if err != nil {
+		return "", err
+	}
+	return e.emitElemEq(needle.Ty, boxed.Ref, needle.Ref), nil
+}

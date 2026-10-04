@@ -42,7 +42,7 @@ The honest middle column: each of these compiles and runs for its core case but 
 | Ambient declarations (`declare var`/`function`/`enum`/`class`/`module`/`namespace`/`global`) | ✅ | • `declare var`/`function`/`enum` are real bindings; brace-bodied ambient forms parsed and erased (no external link target under whole-program AOT) → [Type system](TYPE-SYSTEM.md) |
 | Namespaces | ✅ | • Top-level only; no `declare namespace`; members desugar to bare-name top-level decls (cross-namespace same-name class collides) → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | Function overloads | ✅ | • Signatures parsed and **erased**; call sites check the implementation only (no per-signature narrowing) → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
-| `Function.prototype.call`/`apply`/`bind` | ✅ | • `thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); first-class function values only, not builtins → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
+| `Function.prototype.call`/`apply`/`bind` | ✅ | • `thisArg` binds only a `this: T` parameter (no method-borrowing of a class method) → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | Decorators | ✅ | • Class-decorator **replacement** is a documented static-model divergence (refused at runtime), and standard static-field decorators are rejected → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | Symbols | ✅ | • V1 opaque unique values (`Symbol()`, `===`, `typeof`, `.description`, `Symbol.for`/`keyFor`); no dynamic property keys; only `[Symbol.iterator]`/`[Symbol.asyncIterator]` recognized as computed keys → [Type system](TYPE-SYSTEM.md) |
 

@@ -83,7 +83,7 @@ func usesOwnThis(body []ast.Statement) bool {
 // its caller supplies, as an expression does (emitFunctionExpression). A
 // top-level declaration moves to the top of the program — where a
 // function declaration is initialized — and a nested one stays in place.
-func jsThisFunctionsAsBindings(prog *ast.Program, lib map[ast.Statement]bool) {
+func jsThisFunctionsAsBindings(prog *ast.Program, lib map[ast.Statement]string) {
 	ctors := map[string]bool{}
 	ast.Inspect(prog, func(n ast.Node) bool {
 		switch x := n.(type) {
@@ -111,7 +111,7 @@ func jsThisFunctionsAsBindings(prog *ast.Program, lib map[ast.Statement]bool) {
 	}
 	var hoisted, rest []ast.Statement
 	for _, st := range prog.Body {
-		if lib[st] {
+		if lib[st] != "" {
 			rest = append(rest, st)
 			continue
 		}
@@ -274,7 +274,7 @@ func (e *Emitter) emitDynCallable(selfName, displayName string, params []ast.Par
 	// record's env (by shared heap cell, exactly like an arrow/closure), read
 	// back in the body below. Sorted for a deterministic env layout.
 	var capNames []string
-	for name := range refs {
+	for _, name := range sortedSet(refs) {
 		if name == selfName {
 			continue
 		}
@@ -302,12 +302,32 @@ func (e *Emitter) emitDynCallable(selfName, displayName string, params []ast.Par
 		caps = append(caps, CapturedVar{Name: name, Ty: sym.Ty, Sym: sym})
 	}
 
-	fnName := fmt.Sprintf("@__kml_dynfn_%d", e.dynFnCtr)
-	e.dynFnCtr++
+	fnName := e.literalSymbol("@__kml_dynfn", pos)
 	e.registerFnMeta(fnName, displayName, fnLengthFromParams(params), fnKindPlain)
 
 	// Save emitter state — the same discipline emitFunctionExpression uses.
 	restoreFn := e.beginDetachedFunc()
+	// The body's own captured locals and parameters (a nested closure's
+	// free variables), boxed where they are bound so every capture shares
+	// one cell, whichever branch creates the closure.
+	savedHoisted := e.hoistedCaptures
+	defer func() { e.hoistedCaptures = savedHoisted }()
+	{
+		names := make([]string, len(params))
+		for i, p := range params {
+			names[i] = p.Name
+		}
+		e.hoistedCaptures = capturedLocalNames(bodyStmts, names)
+	}
+	bindParam := func(name, slot string, ty Type) {
+		if !e.hoistedCaptures[name] {
+			e.define(name, Symbol{Ptr: slot, Ty: ty})
+			return
+		}
+		cur := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", cur, ty.IR, slot, ty.Align()))
+		e.boxHoistedCapture(name, ty, cur, false, false)
+	}
 
 	// Bind `this` (a boxed slot — emitThisExpression's IsDynamic arm);
 	// an arrow keeps lexical `this` and skips the binding.
@@ -384,7 +404,8 @@ func (e *Emitter) emitDynCallable(selfName, displayName string, params []ast.Par
 		// unannotated / `any` / `unknown` parameter stays a boxed `any`.
 		pty := TypeAny
 		if p.Type != nil {
-			pty = e.resolveType(p.Type)
+			// A `?` parameter reads undefined when omitted.
+			pty = optionalParamType(p, e.resolveType(p.Type))
 		}
 		// JS fills a default whenever the argument is `undefined`, omitted or
 		// passed, with the earlier parameters in scope (`(a, b = a) => …`).
@@ -427,15 +448,15 @@ func (e *Emitter) emitDynCallable(selfName, displayName string, params []ast.Par
 			arrSlot := "%v_" + p.Name + "_ptr"
 			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", arrSlot))
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, arrSlot))
-			e.define(p.Name, Symbol{Ptr: arrSlot, Ty: pty})
+			bindParam(p.Name, arrSlot, pty)
 		} else if pty.IsDynamic || pty.IR == "" || pty.IsArray || isNullableScalar(pty) {
-			e.define(p.Name, Symbol{Ptr: boxSlot, Ty: TypeAny})
+			bindParam(p.Name, boxSlot, TypeAny)
 		} else {
 			uv := e.unboxArgToParam(box, pty)
 			typedSlot := "%v_" + p.Name
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", typedSlot, pty.IR, pty.Align()))
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", pty.IR, uv.Ref, typedSlot, pty.Align()))
-			e.define(p.Name, Symbol{Ptr: typedSlot, Ty: pty})
+			bindParam(p.Name, typedSlot, pty)
 		}
 	}
 
@@ -516,12 +537,6 @@ func (e *Emitter) emitDynClosureAdapter(v Value) (Value, error) {
 	if v.Ty.FuncRetType != nil {
 		retTy = *v.Ty.FuncRetType
 	}
-
-	fnName := fmt.Sprintf("@__kml_dynadapt_%d", e.dynFnCtr)
-	e.dynFnCtr++
-	// The record's env is the adapted closure header: name/length/kind are
-	// that function's (TDD-00229).
-	e.registerFnMeta(fnName, "", 0, fnFlagThroughEnv)
 
 	restoreFn := e.beginDetachedFunc()
 
@@ -735,12 +750,12 @@ func (e *Emitter) emitDynClosureAdapter(v Value) (Value, error) {
 		}
 	}
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine i64 %s(ptr %%env, i64 %%p_this, i64 %%p_argc, ptr %%p_argv) {\nentry:\n", fnName))
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
-
+	body := e.allocas.String() + e.body.String()
 	restoreFn()
+	fnName := e.defineContentNamed("@__kml_dynadapt.", "i64", "ptr %env, i64 %p_this, i64 %p_argc, ptr %p_argv", body)
+	// The record's env is the adapted closure header: name/length/kind are
+	// that function's (TDD-00229).
+	e.registerFnMeta(fnName, "", 0, fnFlagThroughEnv)
 	if callFailed {
 		if boxErr != nil {
 			return Value{}, fmt.Errorf("a closure returning this value cannot be boxed into a dynamic value yet: %v", boxErr)
@@ -808,6 +823,15 @@ func joinArgs(parts []string) string {
 // through the tag-12 dynamic-function record with the receiver as `this` and
 // every argument boxed. A non-function property is the JS TypeError.
 func (e *Emitter) emitDynAnyMethodCall(objVal Value, propName string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if !objVal.Ty.IsDynamic {
+		// A receiver inferred dynamic but emitted static (a number constant
+		// under -compat=js): every path below reads a box.
+		b, err := e.emitBoxValue(objVal)
+		if err != nil {
+			return Value{}, err
+		}
+		objVal = b
+	}
 	if propName == "apply" || propName == "call" {
 		return e.emitDynApplyOrCall(objVal, propName, args, pos)
 	}
@@ -829,7 +853,66 @@ func (e *Emitter) emitDynAnyMethodCall(objVal Value, propName string, args []ast
 	if propName == "hasOwnProperty" && len(args) == 1 {
 		return e.emitDynHasOwnPropertyCall(objVal, args, pos)
 	}
+	if propName == "toString" && len(args) == 0 {
+		return e.emitDynToStringCall(objVal, pos)
+	}
 	return e.emitDynAnyMethodCallPlain(objVal, propName, args, pos)
+}
+
+// emitDynToStringCall is `x.toString()` on an `any`: the receiver's own
+// `toString` when it has one, else the prototype's, which for every value
+// but null and undefined (whose read throws) is ToString of it: a
+// primitive's String(x), an array's join, an object's "[object Object]".
+func (e *Emitter) emitDynToStringCall(objVal Value, pos ast.Pos) (Value, error) {
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", resPtr))
+	ownL, builtinL, doneL := e.freshLabel("dyntos.own"), e.freshLabel("dyntos.builtin"), e.freshLabel("dyntos.done")
+	// Only a dynamic object can carry a toString of its own (and a null or
+	// undefined receiver's read throws); every other value is ToString'd.
+	tag, _ := e.emitUnboxTagPayload(objVal)
+	lookL := e.freshLabel("dyntos.look")
+	isObj, isNull, isUndefTag, look := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagDynObject))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNull, tag, kmlTagNull))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndefTag, tag, kmlTagUndefined))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", look, isObj, isNull))
+	look2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", look2, look, isUndefTag))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", look2, lookL, builtinL))
+	e.emitLabel(lookL)
+	fnBox, err := e.emitDynAnyMemberGetNamed(objVal, e.internString("toString"), "toString", pos)
+	if err != nil {
+		return Value{}, err
+	}
+	isUndef := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isUndef, fnBox.Ref, nbUndefined))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isUndef, builtinL, ownL))
+	e.emitLabel(ownL)
+	argv, n, err := e.emitDynArgv(nil, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	r, err := e.emitDynFnBoxCallN(fnBox, objVal, argv, n, "toString is not a function", pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", r.Ref, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(builtinL)
+	sv, err := e.emitArgToString(Value{Ref: objVal.Ref, Ty: TypeAny})
+	if err != nil {
+		return Value{}, err
+	}
+	sb, err := e.emitBoxValue(sv)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sb.Ref, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, resPtr))
+	return Value{Ref: out, Ty: TypeAny}, nil
 }
 
 // emitDynHasOwnPropertyCall is `obj.hasOwnProperty(key)` on an `any`: the
@@ -943,8 +1026,8 @@ func (e *Emitter) emitDynArrayMethodCall(objVal Value, propName string, args []a
 	arrL, otherL, doneL := e.freshLabel("dynarrm.arr"), e.freshLabel("dynarrm.other"), e.freshLabel("dynarrm.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isArr, arrL, otherL))
 	e.emitLabel(arrL)
-	tmp := fmt.Sprintf("__kml_dynarr_%d", e.dynFnCtr)
-	e.dynFnCtr++
+	// Named by the call's position: unique per site, the same in every program.
+	tmp := fmt.Sprintf("__kml_dynarr_%d_%d", pos.Line, pos.Col)
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", view, slot))
@@ -1491,9 +1574,6 @@ func (e *Emitter) emitAnyToClosure(v Value, target Type) (Value, bool) {
 
 // emitDynToStaticThunk emits emitAnyToClosure's thunk for target.
 func (e *Emitter) emitDynToStaticThunk(target Type) string {
-	e.dynToStaticCtr++
-	name := fmt.Sprintf("@__kml_dyn2static_%d", e.dynToStaticCtr)
-	e.registerFnMeta(name, "", 0, fnFlagThroughBox)
 	restore := e.beginThunkEmit()
 	params := []string{"ptr %env"}
 	for i, p := range target.FuncParams {
@@ -1585,7 +1665,7 @@ func (e *Emitter) emitDynToStaticThunk(target Type) string {
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", env, envSlot))
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %s, i64 %d, i64 %s, ptr %s)", r, fp, env, nbUndefined, total, argv))
-		return e.finishDynToStaticThunk(name, target, params, r, restore)
+		return e.finishDynToStaticThunk(target, params, r, restore)
 	}
 	// A `this: T` parameter (FuncParams[0]) is the call's receiver.
 	first, recv := 0, fmt.Sprintf("%d", nbUndefined)
@@ -1619,12 +1699,12 @@ func (e *Emitter) emitDynToStaticThunk(target Type) string {
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bv.Ref, gep))
 	}
 	r := e.emitDynFnBoxCallUnchecked(box, recv, argv, n-first)
-	return e.finishDynToStaticThunk(name, target, params, r, restore)
+	return e.finishDynToStaticThunk(target, params, r, restore)
 }
 
 // finishDynToStaticThunk converts the dynamic call's result r to the
 // thunk's return type and writes the function out.
-func (e *Emitter) finishDynToStaticThunk(name string, target Type, params []string, r string, restore func()) string {
+func (e *Emitter) finishDynToStaticThunk(target Type, params []string, r string, restore func()) string {
 	ret := TypeVoid
 	if target.FuncRetType != nil {
 		ret = *target.FuncRetType
@@ -1643,7 +1723,8 @@ func (e *Emitter) finishDynToStaticThunk(name string, target Type, params []stri
 	}
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n%s}\n", retIR, name, strings.Join(params, ", "), body))
+	name := e.defineContentNamed("@__kml_dyn2static.", retIR, strings.Join(params, ", "), body)
+	e.registerFnMeta(name, "", 0, fnFlagThroughBox)
 	return name
 }
 
@@ -1764,8 +1845,8 @@ func (e *Emitter) emitDynStaticBranch(objVal Value, ty Type, propName string, ar
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, ty.IR, ty.Align()))
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, v.Ref, slot, ty.Align()))
 	}
-	name := fmt.Sprintf("__kml_dynrecv_%d", e.closureCtr)
-	e.closureCtr++
+	// Named by the call's position: the same in every program.
+	name := fmt.Sprintf("__kml_dynrecv_%d_%d", pos.Line, pos.Col)
 	e.pushScope()
 	e.define(name, Symbol{Ptr: slot, Ty: ty})
 	call := ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier(name, pos), propName, pos), args, pos)

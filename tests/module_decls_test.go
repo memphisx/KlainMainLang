@@ -65,3 +65,24 @@ dns.lookup("localhost", (err, address, family) => { console.log(err, typeof addr
 		}
 	}
 }
+
+// A function merged with a namespace stays one symbol through the
+// resolver's per-file rename: a call through the namespace narrows nothing
+// it cannot type, so a later argument error is still reported, as tsc does.
+func TestE2EFunctionNamespaceMergeKeepsChecking(t *testing.T) {
+	mustCompileError(t, `
+function a(m: any): void {}
+namespace a { export function s(x: any): void {} }
+const dv = new DataView(new ArrayBuffer(4), 0);
+a.s(dv.getInt8(1));
+a.s(dv.getInt8("r"));
+`, "6:16: argument of type 'string' is not assignable to parameter of type 'number'")
+	// Node strips types only and cannot run a namespace: its output is fixed.
+	assertOutput(t, `
+function a(m: number): number { return m * 2; }
+namespace a { export function s(x: number): number { return x + 1; } }
+const dv = new DataView(new ArrayBuffer(4), 0);
+dv.setInt8(0, 5);
+console.log(a(dv.getInt8(0)), a.s(dv.getInt8(0)));
+`, "10 6")
+}

@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"KlainMainLang/ast"
+	"KlainMainLang/checker"
 )
 
 // namedLabel is one entry in Emitter.namedLabelStack: a label name and the
@@ -94,6 +95,13 @@ func (e *Emitter) emitVarRedeclaration(v *ast.VarDeclaration) (bool, error) {
 }
 
 func (e *Emitter) emitStmt(stmt ast.Statement) error {
+	// A statement after a terminator (an unconditional throw, a `return`)
+	// opens a block of its own with no predecessor: the blocks it opens later
+	// may use the values it computes first, which the dead-code drop would
+	// otherwise discard. clang deletes the unreachable code.
+	if e.blockDone {
+		e.emitLabel(e.freshLabel("dead"))
+	}
 	switch s := stmt.(type) {
 	case *ast.VarDeclaration:
 		if done, err := e.emitVarRedeclaration(s); done || err != nil {
@@ -224,7 +232,17 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 		// pass; nothing is emitted here EXCEPT observe-only decorator
 		// applications (TDD-00161), which must run at the class's *source
 		// position* in top-level execution order — a decorator that mutates
-		// module state declared before the class must see it initialized.
+		// module state declared before the class must see it initialized —
+		// and, for a class declared in a function, its statics' re-run.
+		if why, ok := e.classCaptureRejects[s]; ok {
+			return fmt.Errorf("%d:%d: class '%s' names '%s', a local of its function, and %s; not supported yet", s.GetPos().Line, s.GetPos().Col, s.Name, why[0], why[1])
+		}
+		if e.classRecordSites[s] {
+			if err := e.emitClassRecord(s.Name); err != nil {
+				return err
+			}
+		}
+		e.emitClassReeval(s)
 		return e.emitClassDecoratorApplications(s)
 	case *ast.ThrowStatement:
 		return e.emitThrow(s)
@@ -263,6 +281,17 @@ func (e *Emitter) emitValuelessRet() {
 	}
 }
 
+// isNeverTyped reports whether the checker types x never (a call of a
+// function declared to return never).
+func (e *Emitter) isNeverTyped(x ast.Expression) bool {
+	c := e.front()
+	if c == nil {
+		return false
+	}
+	t := c.TypeOf(x)
+	return !c.Unanswered(t) && t.Flags&checker.Never != 0 && t.Flags&checker.Union == 0
+}
+
 func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	// Generator functions (TDD-00061/ADR-00172): a `return` inside a
 	// generator body never emits an ordinary `ret` at all — it suspends via
@@ -275,13 +304,37 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	if e.currentGenerator != nil {
 		return e.emitGeneratorReturn(r)
 	}
+	// `return fail()` of a call typed never: the call cannot return, so no
+	// value of the function's result type exists.
+	if r.Value != nil && e.isNeverTyped(r.Value) {
+		if _, err := e.emitExpr(r.Value); err != nil {
+			return err
+		}
+		e.emitTerminator("unreachable")
+		return nil
+	}
 	// Async functions: store result directly in the malloc'd promise slot, branch to async-ret.
 	if e.isAsync {
 		if r.Value != nil && e.currentPromiseTy.IR != "void" && e.currentPromiseTy.IR != "" {
 			// The promise's value type is the hint — without it a tuple-typed
 			// `return [a, b]` emits as an ARRAY literal ({ptr,i64} aggregate)
 			// and the store into the ptr result slot is invalid IR.
-			val, err := e.emitExprWithObjectHint(r.Value, e.currentPromiseTy)
+			valueExpr := r.Value
+			rt := e.inferExprType(r.Value)
+			if isUnconstrainedDynamic(e.currentPromiseTy) && (rt.IsPromise && !rt.PromiseTask || isUnconstrainedDynamic(rt)) {
+				// A returned promise settles this one with what it settles to
+				// (ADR-00265); in a `Promise<any>` function the value may be a
+				// promise held in an `any` (`return o.go()`), unwrapped as
+				// `await` unwraps a thenable.
+				valueExpr = ast.NewAwaitExpression(r.Value, r.Value.GetPos())
+			}
+			var val Value
+			var err error
+			if valueExpr != r.Value {
+				val, err = e.emitExpr(valueExpr) // the awaited value, converted below
+			} else {
+				val, err = e.emitExprWithObjectHint(valueExpr, e.currentPromiseTy)
+			}
 			if err != nil {
 				return err
 			}
@@ -290,7 +343,11 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 			// re-throw its rejection into this fn's own settle). Only when the fn's
 			// own value type isn't itself a promise (no double-unwrap).
 			if val.Ty.IsPromise && val.Ty.PromiseTask && !e.currentPromiseTy.IsPromise {
-				val, err = e.emitAwaitTaskPromise(val.Ref, e.currentPromiseTy)
+				inner := e.currentPromiseTy
+				if isUnconstrainedDynamic(inner) && val.Ty.PromiseType != nil && val.Ty.PromiseType.IR != "" && val.Ty.PromiseType.IR != "void" {
+					inner = *val.Ty.PromiseType // read at its own type, converted below
+				}
+				val, err = e.emitAwaitTaskPromise(val.Ref, inner)
 				if err != nil {
 					return err
 				}
@@ -325,7 +382,13 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	// not expressible under this void ABI — a documented limitation); returning a
 	// primitive is IGNORED in a base class but a TypeError in a DERIVED class.
 	if e.currentCtorClass != "" && r.Value != nil {
-		vt := e.inferExprType(r.Value)
+		// A cast changes the static type, not the value returned: classify the
+		// operand (`return 5 as any` returns a primitive).
+		operand := r.Value
+		for as, ok := operand.(*ast.AsExpression); ok; as, ok = operand.(*ast.AsExpression) {
+			operand = as.Expr
+		}
+		vt := e.inferExprType(operand)
 		// Evaluate the expression for its side effects regardless of how its value
 		// is treated (real JS runs the operand before the return-type check).
 		if _, err := e.emitExpr(r.Value); err != nil {
@@ -751,12 +814,6 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// — TDD-00203. Rewrite `for (… of params)` to `for (… of params.entries())`
 	// so the tuple-array loop below handles it, matching WHATWG (and Map, whose
 	// default iterator is likewise entries).
-	if objTy := e.inferExprType(s.Iterable); objTy.IsURLSearchParams {
-		sCopy := *s
-		sCopy.Iterable = ast.NewCallExpression(
-			ast.NewMemberExpression(s.Iterable, "entries", s.GetPos()), nil, s.GetPos())
-		s = &sCopy
-	}
 
 	e.pushScope()
 	defer e.popScope()
@@ -1482,13 +1539,10 @@ func (e *Emitter) emitSwitch(s *ast.SwitchStatement) error {
 
 		var eqReg string
 		if discIsStr {
-			// Binary-safe switch: __kml_str_cmp compares over header lengths, so a
+			// Binary-safe switch: compared over header lengths, so a
 			// discriminant or case label with an embedded NUL matches correctly.
 			e.ensureStrHeaderRuntime()
-			cmpRes := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp(ptr %s, ptr %s)", cmpRes, disc.Ref, caseVal.Ref))
-			eqReg = e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", eqReg, cmpRes))
+			eqReg = e.emitStrEq(disc.Ref, caseVal.Ref)
 		} else {
 			caseVal = e.coerce(caseVal, disc.Ty)
 			eqReg = e.freshReg()

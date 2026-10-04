@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 32/33 (~97%) · **Strict Coverage**: 21/33 (~64%).
+**Coverage**: 32/33 (~97%) · **Strict Coverage**: 22/33 (~67%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -36,13 +36,13 @@ Format: [Status page format](README.md#status-page-format).
 | `.charAt(i)` | ✅ | | • Never wraps a negative index from the end — always `""` for any out-of-range `i`, matching real JS's distinction from `.at()` ([ADR-00028](../adr/ADR-00028.md)) |
 | `.codePointAt(i)` | ✅ | • Positions are byte offsets in this compiler's UTF-8 strings: at the first byte of a character it reads that character's code point, at a continuation byte that byte; Node indexes UTF-16 code units, so an index past a non-ASCII character differs and a surrogate half is never returned ([ADR-01224](../adr/ADR-01224.md), [ADR-00028](../adr/ADR-00028.md)) | • An out-of-range index returns a real `undefined` (as in Node), so the result type is `number \| undefined` — narrow, `?? n`, or `!` before use. See [ADR-00782](../adr/ADR-00782.md), [TDD-00187](../tdd/TDD-00187.md) |
 | `.normalize()` | ❌ | | • Deliberately deferred, not attempted — needs real Unicode normalization tables (NFC/NFD/NFKC/NFKD) this compiler has no infrastructure for; a fake identity-only implementation would silently mis-normalize any non-ASCII composed/decomposed text |
-| `.match()` / `.matchAll()` | ✅ | • `.matchAll()` returns an eager `string[][]` rather than a lazy iterator ([REGEXP.md](REGEXP.md)) | • PCRE2-backed; `.match()` is real JS-shaped ([REGEXP.md](REGEXP.md)) |
+| `.match()` / `.matchAll()` | ✅ | | • PCRE2-backed; `.match()` is real JS-shaped and `.matchAll()` a `RegExp String Iterator` of exec results ([REGEXP.md](REGEXP.md)) |
 | `.search(pattern)` | ✅ | | • A plain-string `pattern` is coerced to a `RegExp` as in real JS — metacharacters are interpreted (`"a.b".search(".")` is `0`) ([ADR-00548](../adr/ADR-00548.md))<br>• A `RegExp` `pattern` runs a real PCRE2 search |
 | `.replaceAll()` | ✅ | | • An empty search matches JS's insert-between-every-char behavior — `"abc".replaceAll("", "-")` is `"-a-b-c-"` ([ADR-00003](../adr/ADR-00003.md)/[ADR-00547](../adr/ADR-00547.md))<br>• A function replacer is invoked once per occurrence with `(match, offset, string)` for a string-literal search as well as a RegExp search ([ADR-00697](../adr/ADR-00697.md)); the literal-search `offset` is a byte position (identity with the UTF-16 code-unit index for BMP/ASCII text), and an empty search string with a function replacer returns the subject unchanged |
 | `.localeCompare(other)` | ✅ | • Byte-order comparison, not real Unicode collation — no locale/`Intl` infrastructure | • Length-aware, normalized to exactly `-1`/`0`/`1`, binary-safe past an embedded NUL. See [TDD-00120](../tdd/TDD-00120.md), [ADR-00364](../adr/ADR-00364.md), [ADR-00028](../adr/ADR-00028.md) |
 | `String.fromCharCode(n)` | ✅ | • An unpaired surrogate is encoded on its own, so two calls' halves concatenated (`fromCharCode(0xD83D) + fromCharCode(0xDE00)`) do not join into one character as Node's UTF-16 strings do ([ADR-01224](../adr/ADR-01224.md)) | • ToUint16 of each argument, encoded as UTF-8; a high/low surrogate pair among the arguments is one character ([ADR-01224](../adr/ADR-01224.md)) |
 | `String.fromCodePoint(n)` | ✅ | | • Each code point encoded as UTF-8; a value that is not an integer in [0, 0x10FFFF] throws Node's `RangeError: Invalid code point <n>` ([ADR-01224](../adr/ADR-01224.md)) |
-| `String.raw` tag | ✅ | | • Interleaves the raw (undecoded) quasi text with the string-coerced interpolations — escape sequences appear verbatim (`` String.raw`a\nb` `` is `a\nb`), byte-for-byte the same as Node. The raw quasis are threaded from the lexer through the `TaggedTemplateExpression` ([ADR-00562](../adr/ADR-00562.md)) |
+| `String.raw` (tag and function) | ✅ | | • Interleaves the raw (undecoded) quasi text with the string-coerced interpolations — escape sequences appear verbatim (`` String.raw`a\nb` `` is `a\nb`), byte-for-byte the same as Node. Called as a function it takes any `{ raw }` whose `raw` is array-like ([ADR-00562](../adr/ADR-00562.md), [ADR-01344](../adr/ADR-01344.md)) |
 
 ## Known limitations
 

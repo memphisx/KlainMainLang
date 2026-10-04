@@ -122,13 +122,11 @@ func (e *Emitter) loadStreamResultValue(recPtr string, resultTy, chunkTy Type) V
 	return Value{Ref: loaded, Ty: chunkTy}
 }
 
-// emitStreamFulfillThunk emits the per-site `void @__kml_rs_fulfill_N(ptr %p,
-// i64 %v0, i64 %v1, i64 %done)` the runtime settles read() promises through:
-// rebuild the typed chunk, build the {value,done} record, store it as the
-// promise's value, settle fulfilled.
+// emitStreamFulfillThunk emits `void (ptr %p, i64 %v0, i64 %v1, i64 %done)`,
+// the routine the runtime settles read() promises through, and returns its
+// symbol (named by its content): rebuild the typed chunk, build the
+// {value,done} record, store it as the promise's value, settle fulfilled.
 func (e *Emitter) emitStreamFulfillThunk(chunkTy Type) string {
-	e.streamSiteCtr++
-	fn := fmt.Sprintf("@__kml_rs_fulfill_%d", e.streamSiteCtr)
 	resultTy := streamReadResultType(chunkTy)
 
 	restore := e.beginThunkEmit()
@@ -144,8 +142,7 @@ func (e *Emitter) emitStreamFulfillThunk(chunkTy Type) string {
 	body := e.allocas.String() + e.body.String()
 	restore()
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%p, i64 %%v0, i64 %%v1, i64 %%done) {\nentry:\n%s}\n", fn, body))
-	return fn
+	return e.defineContentNamed("@__kml_rs_fulfill.", "void", "ptr %p, i64 %v0, i64 %v1, i64 %done", body)
 }
 
 // streamCallbackClosure evaluates an underlying-source callback expression
@@ -183,8 +180,6 @@ func callbackReturnsPromise(ty Type) bool {
 // callback with the controller (the stream pointer itself) and return its
 // promise, or null for a synchronous callback.
 func (e *Emitter) emitStreamPullWrap(userTy Type) string {
-	e.streamSiteCtr++
-	fn := fmt.Sprintf("@__kml_rs_pullwrap_%d", e.streamSiteCtr)
 	isAsync := callbackReturnsPromise(userTy)
 	hasParam := len(userTy.FuncParams) > 0
 
@@ -224,7 +219,7 @@ func (e *Emitter) emitStreamPullWrap(userTy Type) string {
 	body := e.allocas.String() + e.body.String()
 	restore()
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine ptr %s(ptr %%env) {\nentry:\n%s}\n", fn, body))
+	fn := e.defineContentNamed("@__kml_rs_pullwrap.", "ptr", "ptr %env", body)
 	return fn
 }
 
@@ -233,8 +228,6 @@ func (e *Emitter) emitStreamPullWrap(userTy Type) string {
 // zero-parameter cancel callback (validated by the caller); the reason word is
 // accepted for ABI stability but not forwarded.
 func (e *Emitter) emitStreamCancelWrap(userTy Type) string {
-	e.streamSiteCtr++
-	fn := fmt.Sprintf("@__kml_rs_cancelwrap_%d", e.streamSiteCtr)
 	isAsync := callbackReturnsPromise(userTy)
 
 	restore := e.beginThunkEmit()
@@ -258,7 +251,7 @@ func (e *Emitter) emitStreamCancelWrap(userTy Type) string {
 	body := e.allocas.String() + e.body.String()
 	restore()
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine ptr %s(ptr %%env, i64 %%reason) {\nentry:\n%s}\n", fn, body))
+	fn := e.defineContentNamed("@__kml_rs_cancelwrap.", "ptr", "ptr %env, i64 %reason", body)
 	return fn
 }
 
@@ -273,8 +266,6 @@ func (e *Emitter) emitStreamSizeWrap(userTy, chunkTy Type, pos ast.Pos) (string,
 	if retTy.IR != "i64" && retTy.IR != "double" {
 		return "", fmt.Errorf("%d:%d: a queuing strategy's size() must return a number", pos.Line, pos.Col)
 	}
-	e.streamSiteCtr++
-	fn := fmt.Sprintf("@__kml_rs_sizewrap_%d", e.streamSiteCtr)
 
 	restore := e.beginThunkEmit()
 	fp := e.freshReg()
@@ -311,7 +302,7 @@ func (e *Emitter) emitStreamSizeWrap(userTy, chunkTy Type, pos ast.Pos) (string,
 	body := e.allocas.String() + e.body.String()
 	restore()
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine double %s(ptr %%env, i64 %%v0, i64 %%v1) {\nentry:\n%s}\n", fn, body))
+	fn := e.defineContentNamed("@__kml_rs_sizewrap.", "double", "ptr %env, i64 %v0, i64 %v1", body)
 	return fn, nil
 }
 
@@ -319,16 +310,7 @@ func (e *Emitter) emitStreamSizeWrap(userTy, chunkTy Type, pos ast.Pos) (string,
 // size: the chunk's element count (its {ptr,i64} length word) — for the byte
 // chunks (Uint8Array) it is meant for, that IS the byteLength.
 func (e *Emitter) emitStreamByteLengthSizeWrap() string {
-	e.streamSiteCtr++
-	fn := fmt.Sprintf("@__kml_rs_sizewrap_%d", e.streamSiteCtr)
-	e.functions.WriteString(fmt.Sprintf(`
-define double %s(ptr %%env, i64 %%v0, i64 %%v1) {
-entry:
-  %%d = sitofp i64 %%v1 to double
-  ret double %%d
-}
-`, fn))
-	return fn
+	return e.defineContentNamed("@__kml_rs_sizewrap.", "double", "ptr %env, i64 %v0, i64 %v1", "  %d = sitofp i64 %v1 to double\n  ret double %d\n")
 }
 
 // storeStreamField stores a ptr into the rstream struct field at idx.
@@ -880,4 +862,37 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 		e.emitInstr(fmt.Sprintf("call void @__kml_rs_unlock(ptr %s)", streamVal.Ref))
 	}
 	return nil
+}
+
+// The WHATWG stream methods, reached through their `@intrinsic`
+// declarations: the readable family's on emitStreamMethodCall, the
+// writable family's on emitWStreamMethodCall.
+func init() {
+	for owner, names := range map[string][]string{
+		"ReadableStream":                  {"cancel", "getReader", "pipeThrough", "pipeTo", "tee", "values"},
+		"ReadableStreamGenericReader":     {"cancel"},
+		"ReadableStreamDefaultReader":     {"read", "releaseLock"},
+		"ReadableStreamDefaultController": {"close", "enqueue", "error", "terminate"},
+		"WritableStream":                  {"abort", "close", "getWriter"},
+		"WritableStreamDefaultWriter":     {"abort", "close", "releaseLock", "write"},
+		"WritableStreamDefaultController": {"error"},
+	} {
+		writable := strings.HasPrefix(owner, "Writable")
+		for _, name := range names {
+			name := name
+			intrinsics[owner+".prototype."+name] = intrinsic{
+				emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+					mem := ex.Callee.(*ast.MemberExpression)
+					if writable {
+						return e.emitWStreamMethodCall(mem.Object, name, ex.Args, ex.GetPos())
+					}
+					return e.emitStreamMethodCall(mem.Object, name, ex.Args, ex.GetPos())
+				},
+				ty: func(e *Emitter, ex *ast.CallExpression) Type {
+					t, _ := e.streamCallType(ex, ex.Callee.(*ast.MemberExpression))
+					return t
+				},
+			}
+		}
+	}
 }

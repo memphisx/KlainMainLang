@@ -120,7 +120,7 @@
             ]
           },
           {
-            "feature": "`Error` + subtypes (`TypeError`/`RangeError`/`SyntaxError`/`EvalError`/`URIError`/`ReferenceError`/`AggregateError`/`DOMException`), `class X extends Error` (1 level)",
+            "feature": "`Error` + subtypes (`TypeError`/`RangeError`/`SyntaxError`/`EvalError`/`URIError`/`ReferenceError`/`AggregateError`/`DOMException`), `class X extends Error`",
             "status": "implemented",
             "notes": [
               "→ [Language constructs](LANGUAGE-CONSTRUCTS.md)",
@@ -144,9 +144,6 @@
             "status": "implemented",
             "notes": [
               "→ [Language constructs](LANGUAGE-CONSTRUCTS.md)"
-            ],
-            "caveats": [
-              "`JSON.stringify` of an **error-subclass instance** reason yields `{}` where Node serializes its own enumerable fields (an assigned `this.name`, extra declared fields) — needs per-field enumerability ([TDD-00222](../tdd/TDD-00222.md)). Everything else about a subclass reason is faithful — `.message`/`.name`, `String` (`Name: message`), precise `instanceof`; primitive and built-in-Error reasons fully so ([ADR-01003](../adr/ADR-01003.md))"
             ]
           },
           {
@@ -168,9 +165,6 @@
             "status": "implemented",
             "notes": [
               "→ [Global functions](GLOBAL-FUNCTIONS.md)"
-            ],
-            "caveats": [
-              "`globalThis` exists only inside `typeof globalThis` — used as a value (property access, assignment, identity), it fails compilation with `undefined variable 'globalThis'`."
             ]
           },
           {
@@ -334,7 +328,7 @@
             "feature": "`Function` `.call`/`.apply`/`.bind`",
             "status": "implemented",
             "caveats": [
-              "`thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); `.bind` not over an array/nullable/rest parameter; not on a Node module's functions → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
+              "`thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); not on a Node module's functions → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
             ]
           },
           {
@@ -355,7 +349,7 @@
             "feature": "`JSON`",
             "status": "implemented",
             "caveats": [
-              "a strict-lane literal mixing two object types is rejected; function/array `replacer` rejected; `space` must be literal → [JSON](JSON.md)"
+              "a strict-lane literal mixing two object types is rejected → [JSON](JSON.md)"
             ]
           },
           {
@@ -376,7 +370,7 @@
             "feature": "`URLSearchParams` / `URLPattern`",
             "status": "implemented",
             "caveats": [
-              "`URLSearchParams` keeps one value per key; `URLPattern` is object-init only with a reduced grammar and a merged-`Map` `.exec()` result → [URL](URL.md)"
+              "`URLPattern`'s regexp groups follow PCRE2 where ECMAScript differs → [URL](URL.md)"
             ]
           },
           {
@@ -390,7 +384,7 @@
             "feature": "`crypto.subtle`",
             "status": "implemented",
             "caveats": [
-              "literal-only algorithm dispatch; ops throw synchronously rather than rejecting; jwk as `Map<string,string>`; `CryptoKey.algorithm`/`.usages` unimplemented → [Web Crypto](WEB-CRYPTO.md)"
+              "literal-only algorithm dispatch; ops throw synchronously rather than rejecting; `CryptoKey.algorithm`/`.usages` unimplemented → [Web Crypto](WEB-CRYPTO.md)"
             ]
           },
           {
@@ -417,9 +411,8 @@
           {
             "feature": "`globalThis`",
             "status": "implemented",
-            "caveats": [
-              "member access to known globals only; no bare-value use, computed access, or new-global assignment → [Global functions](GLOBAL-FUNCTIONS.md)",
-              "`globalThis` exists only inside `typeof globalThis` — used as a value (property access, assignment, identity), it fails compilation with `undefined variable 'globalThis'`."
+            "notes": [
+              "→ [Global functions](GLOBAL-FUNCTIONS.md)"
             ]
           }
         ]
@@ -454,16 +447,22 @@
           },
           {
             "feature": "`Iterator` / `AsyncIterator` helpers (`Iterator.prototype.map`/`filter`/`take`/`drop`/…)",
-            "status": "missing",
+            "status": "implemented",
+            "caveats": [
+              "`Iterator.from` and the global `Iterator` constructor (`instanceof Iterator`, `extends Iterator`) are missing"
+            ],
             "notes": [
-              "Array, Map and Set iterators have `toArray()`; the lazy helpers (`map`, `filter`, `take`, `drop`, `flatMap`, `reduce`, `forEach`, `some`, `every`, `find`) and `Iterator.from` are missing"
+              "`map`, `filter`, `take`, `drop`, `flatMap` (lazy, closing the source on `return()`), `reduce`, `toArray`, `forEach`, `some`, `every` and `find` on generators and the Array, Map and Set iterators, also through `any`, written in TypeScript ([ADR-01373](../adr/ADR-01373.md)); Node has no `AsyncIterator` helpers"
             ]
           },
           {
             "feature": "`Reflect.construct`",
-            "status": "missing",
+            "status": "implemented",
+            "caveats": [
+              "a `newTarget` other than the target throws a TypeError rather than constructing with that prototype → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+            ],
             "notes": [
-              "Explicitly missing → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+              "Through the run-time constructor dispatch ([ADR-01333](../adr/ADR-01333.md))"
             ]
           },
           {

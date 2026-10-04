@@ -9,8 +9,22 @@
 package llvm
 
 import (
+	_ "embed"
 	"fmt"
 )
+
+// Resolving a promise with a dynamic value and the Promise<any> view live in
+// promisesrc/anyprom.c (TDD-00240); the reaction runner and attach stay
+// generated (the runner is built from the program's dynamic calls).
+//
+//go:embed promisesrc/anyprom.c
+var anyPromSource string
+
+// AnyPromSource is anyprom.c, behind kml_layout.h.
+func AnyPromSource() string { return layoutHeader() + anyPromSource }
+
+// UsesAnyProm reports whether the program links anyprom.c.
+func (e *Emitter) UsesAnyProm() bool { return e.usedPromiseResolveAny }
 
 // promiseBoxedSlot is the promise struct's trailing field: its box wrapper,
 // or null until the promise is first boxed.
@@ -103,8 +117,6 @@ func (e *Emitter) promiseValueBoxer(elem Type) string {
 	if name, ok := e.promiseBoxRunners[key]; ok {
 		return name
 	}
-	name := fmt.Sprintf("@__kml_pval_box_%d", len(e.promiseBoxRunners))
-	e.promiseBoxRunners[key] = name
 	restore := e.beginDetachedFunc()
 	boxed := fmt.Sprintf("%d", nbUndefined)
 	if elem.IR != "" && elem.IR != "void" && !elem.IsNever {
@@ -115,7 +127,8 @@ func (e *Emitter) promiseValueBoxer(elem Type) string {
 	e.emitTerminator(fmt.Sprintf("ret i64 %s", boxed))
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine internal i64 %s(ptr %%p) {\nentry:\n%s}\n", name, body))
+	name := e.defineContentNamed("@__kml_pval_box.", "i64", "ptr %p", body)
+	e.promiseBoxRunners[key] = name
 	return name
 }
 
@@ -268,14 +281,7 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 		return r
 	}
 	copyReject := func() {
-		for _, i := range []int{2, 3} {
-			a, b, c := e.freshReg(), e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", a, p, src, i))
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", b, a))
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", c, p, q, i))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", b, c))
-		}
-		e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 2)", q))
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_from(ptr %s, ptr %s)", q, src))
 	}
 	// callGuarded calls fn(args…) through the dynamic ABI; a throw rejects q.
 	// It leaves the current block at the call's normal return with the
@@ -306,8 +312,7 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 		e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_get_thrown_tag()", tp))
 		pp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_get_thrown_pay()", pp))
-		e.storeRejectReason(q, tp, pp)
-		e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 2)", q))
+		e.emitRejectPromise(q, tp, true, pp)
 		e.emitTerminator("ret void")
 		e.emitLabel(tryL)
 		r := e.emitDynFnBoxCallUnchecked(fn, fmt.Sprintf("%d", nbUndefined), argv, n)
@@ -419,72 +424,8 @@ later:
   ret void
 }
 
-; NewPromiseResolveThenableJob: register the pass-through reaction later.
-define void @__kml_pdyn_adopt_job(ptr %%env) {
-entry:
-  %%a0 = getelementptr { ptr, ptr, ptr }, ptr %%env, i32 0, i32 0
-  %%q = load ptr, ptr %%a0, align 8
-  %%a1 = getelementptr { ptr, ptr, ptr }, ptr %%env, i32 0, i32 1
-  %%src = load ptr, ptr %%a1, align 8
-  %%a2 = getelementptr { ptr, ptr, ptr }, ptr %%env, i32 0, i32 2
-  %%boxer = load ptr, ptr %%a2, align 8
-  call void @__kml_pdyn_attach(ptr %%src, i64 %[4]d, i64 %[4]d, i64 %[4]d, ptr %%q, ptr %%boxer, i64 %[5]d)
-  ret void
-}
-
-define void @__kml_promise_resolve_any(ptr %%q, i64 %%v) {
-entry:
-  %%w = call ptr @__kml_promise_wrapper_of(i64 %%v)
-  %%isp = icmp ne ptr %%w, null
-  br i1 %%isp, label %%adopt, label %%plain
-adopt:
-  %%sp = getelementptr %[3]s, ptr %%w, i32 0, i32 1
-  %%src = load ptr, ptr %%sp, align 8
-  %%bp = getelementptr %[3]s, ptr %%w, i32 0, i32 2
-  %%boxer = load ptr, ptr %%bp, align 8
-  %%env = call ptr @malloc(i64 24)
-  store ptr %%q, ptr %%env, align 8
-  %%s1 = getelementptr { ptr, ptr, ptr }, ptr %%env, i32 0, i32 1
-  store ptr %%src, ptr %%s1, align 8
-  %%s2 = getelementptr { ptr, ptr, ptr }, ptr %%env, i32 0, i32 2
-  store ptr %%boxer, ptr %%s2, align 8
-  %%clo = call ptr @malloc(i64 16)
-  store ptr @__kml_pdyn_adopt_job, ptr %%clo, align 8
-  %%cep = getelementptr { ptr, ptr }, ptr %%clo, i32 0, i32 1
-  store ptr %%env, ptr %%cep, align 8
-  call void @__kml_microtask_enqueue(ptr %%clo)
-  ret void
-plain:
-  %%v0 = getelementptr %[2]s, ptr %%q, i32 0, i32 2
-  store i64 %%v, ptr %%v0, align 8
-  call void @__kml_promise_settle(ptr %%q, i64 1)
-  ret void
-}
-
-; The Promise<any> view of a boxed typed promise (its wrapper w): JS has one
-; object, so a fulfilled one is viewed fulfilled at once; a pending or
-; rejected one settles the view from its own reaction.
-define ptr @__kml_promise_view_any(ptr %%w) {
-entry:
-  %%sp = getelementptr %[3]s, ptr %%w, i32 0, i32 1
-  %%src = load ptr, ptr %%sp, align 8
-  %%bp = getelementptr %[3]s, ptr %%w, i32 0, i32 2
-  %%boxer = load ptr, ptr %%bp, align 8
-  %%q = call ptr @__kml_task_alloc_promise()
-  %%stp = getelementptr %[2]s, ptr %%src, i32 0, i32 0
-  %%st = load i64, ptr %%stp, align 8
-  %%ful = icmp eq i64 %%st, 1
-  br i1 %%ful, label %%now, label %%later
-now:
-  %%v = call i64 %%boxer(ptr %%src)
-  %%v0 = getelementptr %[2]s, ptr %%q, i32 0, i32 2
-  store i64 %%v, ptr %%v0, align 8
-  call void @__kml_promise_settle(ptr %%q, i64 1)
-  ret ptr %%q
-later:
-  call void @__kml_pdyn_attach(ptr %%src, i64 %[4]d, i64 %[4]d, i64 %[4]d, ptr %%q, ptr %%boxer, i64 %[5]d)
-  ret ptr %%q
-}`, envIR, p, promiseBoxType().StructIR(), nbUndefined, pdynThen))
+declare void @__kml_promise_resolve_any(ptr, i64)
+declare ptr @__kml_promise_view_any(ptr)`, envIR, p))
 }
 
 // ensurePromiseResolveAny is the resolve half of the dynamic promise runtime.
@@ -641,8 +582,11 @@ func (e *Emitter) emitConvertPromise(v Value, target Type) Value {
 	e.emitInstr(fmt.Sprintf("call void %s(ptr %s)", runner, env))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(laterL)
+	// JS has one object: the converted view settles with the source, inside
+	// its settlement, not a job later.
 	clo := e.buildBuiltinClosure(runner, env)
-	e.emitAttachPromiseReaction(v.Ref, clo)
+	e.declareFn("__kml_promise_attach_sync", "declare void @__kml_promise_attach_sync(ptr, ptr)")
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_attach_sync(ptr %s, ptr %s)", v.Ref, clo))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	tt := target
@@ -659,8 +603,6 @@ func (e *Emitter) promiseConvertRunner(from, to Type) string {
 	if name, ok := e.promiseConvRunners[key]; ok {
 		return name
 	}
-	name := fmt.Sprintf("@__kml_pconv_run_%d", len(e.promiseConvRunners))
-	e.promiseConvRunners[key] = name
 	restore := e.beginDetachedFunc()
 	src := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%env, align 8", src))
@@ -696,18 +638,12 @@ func (e *Emitter) promiseConvertRunner(from, to Type) string {
 	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
 	e.emitTerminator("ret void")
 	e.emitLabel(rejL)
-	for _, i := range []int{2, 3} {
-		a, b, c := e.freshReg(), e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", a, promiseStructIR, src, i))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", b, a))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", c, promiseStructIR, q, i))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", b, c))
-	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 2)", q))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_from(ptr %s, ptr %s)", q, src))
 	e.emitTerminator("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine internal void %s(ptr %%env) {\nentry:\n%s}\n", name, body))
+	name := e.defineContentNamed("@__kml_pconv_run.", "void", "ptr %env", body)
+	e.promiseConvRunners[key] = name
 	return name
 }
 

@@ -796,7 +796,7 @@ class Derived extends Base {
 	if err == nil {
 		t.Fatal("expected a compile error for an incompatible override signature")
 	}
-	if !strings.Contains(err.Error(), "incompatible signature") {
+	if !strings.Contains(err.Error(), "is not assignable to the same property in base type") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -841,6 +841,8 @@ console.log(Counter.count)
 `, "1\n2\n2")
 }
 
+// Assigning an inherited static through the subclass gives the subclass its
+// own (ADR-01318), as in JavaScript.
 func TestE2EClassStaticMemberInheritance(t *testing.T) {
 	assertOutput(t, `
 class Base {
@@ -853,8 +855,8 @@ class Derived extends Base {
 console.log(Derived.tag)
 console.log(Derived.whoAmI())
 Derived.tag = "changed-via-derived"
-console.log(Base.tag)
-`, "base\nI am base\nchanged-via-derived")
+console.log(Base.tag, Derived.tag)
+`, "base\nI am base\nbase changed-via-derived")
 }
 
 func TestE2EClassStaticMemberOverride(t *testing.T) {
@@ -2124,15 +2126,16 @@ console.log(new Point(3, 4).sum());
 `, "7")
 }
 
-// A named class expression binds under the LHS name (the internal name is
-// dropped in V1); the class is usable as a type annotation too.
+// A named class expression binds under the LHS name, keeps its own name for
+// `.name` and its self-references; the class is usable as a type annotation
+// too.
 func TestE2EClassExpressionNamedAndAsType(t *testing.T) {
 	assertOutput(t, `
 const Box = class Impl {
   v: number;
   constructor(v: number) { this.v = v; }
 };
-function make(n: number): Box { return new Box(n); }
+function make(n: number): InstanceType<typeof Box> { return new Box(n); }
 console.log(make(9).v);
 `, "9")
 }
@@ -2147,19 +2150,37 @@ for (const n of new Seq().nums()) { console.log(n); }
 `, "1\n2\n3")
 }
 
-// A class expression used as a runtime value (an argument) is a clean,
-// specific rejection in V1.
-func TestE2EClassExpressionAsValueRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-function f(x: number): number { return x; }
-f(class {});
+// A class expression that reads a local of its enclosing function is a
+// clean, specific rejection.
+// A class expression reading a local is a class per evaluation (ADR-01336).
+func TestE2EClassExpressionCapturingLocal(t *testing.T) {
+	assertSameAsNode(t, `
+function f(n: number) { return class { v = n; }; }
+console.log(new (f(3))().v, new (f(4))().v, f(1) === f(1));
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for a class expression used as a value")
-	}
-	if !strings.Contains(err.Error(), "class expression is only supported") {
-		t.Errorf("unexpected error message: %v", err)
-	}
+}
+
+// ADR-01318: a class expression as a value — an argument, a return value, a
+// nested binding, an array element — named after itself or its binding.
+func TestE2EClassExpressionAsValue(t *testing.T) {
+	assertSameAsNode(t, `
+function make(C: new () => { x: number }) { return new C().x }
+console.log(make(class { x = 5 }))
+function f() {
+  const K = class { static tag = "k"; v = 1; static make() { return new K() } }
+  return K
+}
+const K1 = f()
+console.log(K1.name, new K1().v, K1.make().v, K1)
+const Named = class Inner { static self() { return Inner.name } }
+console.log(Named.name, Named.self(), new Named())
+const list = [class A1 {}, class {}]
+console.log(list[0].name, JSON.stringify(list[1].name), list)
+function g() { return class Gx extends Error { kode = 7 } }
+const E = g()
+const e = new E("m")
+console.log(e instanceof Error, e.kode, e.message)
+`)
 }
 
 // --- ADR-00373: a class with declared-but-uninitialized fields and no explicit
@@ -2714,5 +2735,129 @@ const B: any = E
 console.log(B, [B])
 E.t = 'y'
 console.log(B)
+`)
+}
+
+// ADR-01318: `new` through a class held in a value — a `typeof C` binding,
+// a parameter, an array element, a member, a call — and builtin
+// constructors as values.
+func TestE2ENewThroughClassValue(t *testing.T) {
+	assertSameAsNode(t, `
+class A { n: number; constructor(n: number) { this.n = n } hi() { return "A" + this.n } }
+class B extends A { hi() { return "B" + this.n } }
+let K: typeof A = A
+console.log(new K(1).hi())
+K = B
+console.log(new K(2).hi())
+function make(C: typeof A, n: number) { return new C(n) }
+console.log(make(B, 3).hi())
+const anyK: any = A
+console.log(new anyK(4).hi())
+const ks: (typeof A)[] = [A, B]
+for (const k of ks) console.log(new k(5).hi())
+class F { P: typeof A = B; m() { return new this.P(6) } }
+console.log(new F().m().hi())
+const reg = { A, B }
+console.log(new reg.B(7).hi(), new ks[0](8).hi())
+const pick = (b: boolean) => (b ? A : B)
+console.log(new (pick(false))(9).hi())
+function gen<T>(ctor: new () => T): T { return new ctor() }
+console.log(gen(Map).size, gen(Set) instanceof Set)
+try { const z: any = 5; new z() } catch (e) { console.log((e as Error).message) }
+try { const o: any = {}; new o.missing() } catch (e) { console.log((e as Error).message) }
+`)
+}
+
+// ADR-01318: builtin constructors as values, constructed through any.
+func TestE2EBuiltinConstructorValues(t *testing.T) {
+	assertSameAsNode(t, `
+const M = Map
+const m = new M<string, number>([["a", 1]])
+console.log(m.get("a"), M.name, typeof M)
+const ctors: any[] = [Map, Set, Date, Error, URL, TypeError]
+console.log(new ctors[0]([["k", 2]]).get("k"), new ctors[1]([1, 2, 2]).size)
+console.log(new ctors[2](0).toISOString(), new ctors[3]("boom").message)
+console.log(new ctors[4]("https://example.com/p").hostname, new ctors[5]("t") instanceof TypeError)
+const P: any = Promise
+new P((res: any) => res(5)).then((v: any) => console.log("p", v))
+`)
+}
+
+// ADR-01318: statics through a class value, and an inherited static field
+// assigned through a subclass becoming the subclass's own.
+func TestE2EStaticsThroughClassValueAndInheritance(t *testing.T) {
+	assertSameAsNode(t, `
+class S { static count = 0; static m = "x"; static make() { return new S() } constructor(a = 1, b?: number) { S.count++ } }
+class T extends S {}
+class U extends T {}
+const K: typeof S = T
+console.log(K.make() instanceof S, K.count, K.length, S.length)
+K.count = 10
+console.log(S.count, T.count, U.count)
+U.count += 5
+S.count ||= 9
+T.count &&= 7
+console.log(S.count, T.count, U.count)
+console.log(S, T, U)
+console.log(Object.keys(S), Object.keys(T), Object.keys(U))
+`)
+}
+
+func TestE2EClassValueThroughAny(t *testing.T) {
+	// A class held in any: instanceof, new, statics, inspect, and an
+	// instance's `constructor` read through any; `new` of a non-constructor
+	// names the callee with its type assertion erased.
+	assertSameAsNode(t, `
+class Animal { static count = 0; name: string; constructor(name: string) { this.name = name; Animal.count++; } }
+class Dog extends Animal { static legs = 4; }
+const C: any = Dog;
+const A: any = Animal;
+const d = new C("rex");
+console.log(d instanceof A, d instanceof C, new A("y") instanceof C, C.name, C.length, C.legs, A.count);
+A.count = 10;
+console.log(Animal.count, C, A, Object.keys(C), d.constructor === C, d.constructor.name);
+const E: any = TypeError;
+const e = new E("bad");
+console.log(e instanceof E, e instanceof (Error as any), E.length, e.message);
+try { new (5 as any)(); } catch (x: any) { console.log(x instanceof TypeError, x.message); }
+const M: any = Map;
+console.log(new M([["a", 1]]).get("a"));
+`)
+}
+
+// A subclass instance behind its base class's type serializes and inspects
+// as the object it is, with its own fields (Node renders the runtime class).
+func TestE2ESubclassInstanceThroughBaseType(t *testing.T) {
+	out := compileAndRun(t, `
+class Point { x: number; y: number; constructor(x: number, y: number) { this.x = x; this.y = y; } }
+class Tagged extends Point { tag: string; constructor(x: number, tag: string) { super(x, x); this.tag = tag; } }
+const made: Point[] = [new Tagged(3, 'a'), new Point(1, 2)];
+const p: Point = new Tagged(4, 'b');
+console.log(JSON.stringify(made));
+console.log(JSON.stringify(p), JSON.stringify(made[0]));
+console.log(p);
+console.log(made);
+console.log(made[0]);
+console.log(JSON.stringify({ first: made[0] }));
+`)
+	want := `[{"x":3,"y":3,"tag":"a"},{"x":1,"y":2}]
+{"x":4,"y":4,"tag":"b"} {"x":3,"y":3,"tag":"a"}
+Tagged { x: 4, y: 4, tag: 'b' }
+[ Tagged { x: 3, y: 3, tag: 'a' }, Point { x: 1, y: 2 } ]
+Tagged { x: 3, y: 3, tag: 'a' }
+{"first":{"x":3,"y":3,"tag":"a"}}`
+	if out != want {
+		t.Errorf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// `new obj.K()` reads K as a property of obj, even when a top-level class
+// is also named K.
+func TestE2ENewQualifiedPropertyNotClassName(t *testing.T) {
+	assertSameAsNode(t, `
+class Square { name = "square" }
+class Circle { name = "circle" }
+const reg = { Square: Circle };
+console.log(new reg.Square().name, new Square().name);
 `)
 }

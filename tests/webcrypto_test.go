@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -75,29 +74,23 @@ run();
 	compareLines(t, got, "32")
 }
 
-func TestSubtleDigestUnknownAlgoIsCompileError(t *testing.T) {
-	_, err := parseAndCompile(`
+// An unknown digest rejects with NotSupportedError, and an algorithm name
+// held in a variable works, as in Node (the algorithm is normalized at run
+// time).
+func TestE2ESubtleDigestAlgorithmAtRunTime(t *testing.T) {
+	assertSameAsNode(t, `
 async function run(): Promise<void> {
-  await crypto.subtle.digest("MD5", new Uint8Array(4));
-}
-run();
-`)
-	if err == nil || !strings.Contains(err.Error(), "unsupported digest algorithm") {
-		t.Fatalf("expected unsupported-algorithm compile error, got: %v", err)
-	}
-}
-
-func TestSubtleNonLiteralAlgoIsCompileError(t *testing.T) {
-	_, err := parseAndCompile(`
-async function run(): Promise<void> {
+  try {
+    await crypto.subtle.digest("MD5", new Uint8Array(4));
+  } catch (e: any) {
+    console.log(e.name, e.message);
+  }
   const algo = "SHA-256";
-  await crypto.subtle.digest(algo, new Uint8Array(4));
+  const d = await crypto.subtle.digest(algo, new Uint8Array(4));
+  console.log(d.byteLength);
 }
 run();
 `)
-	if err == nil || !strings.Contains(err.Error(), "string literal") {
-		t.Fatalf("expected literal-algorithm compile error, got: %v", err)
-	}
 }
 
 // HMAC-SHA256 known-answer (RFC 4231 test case 2) + verify + tamper-fails +
@@ -121,7 +114,7 @@ async function run(): Promise<void> {
   bad[0] = bad[0] ^ 1;
   console.log(await crypto.subtle.verify("HMAC", key, bad, data));
   const jwk = await crypto.subtle.exportKey("jwk", key);
-  console.log(jwk.get("kty"), jwk.get("k"));
+  console.log(jwk.kty, jwk.k);
   const key2 = await crypto.subtle.importKey("jwk", jwk, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const sig2 = new Uint8Array(await crypto.subtle.sign("HMAC", key2, data));
   console.log(toHex(sig2));
@@ -229,7 +222,7 @@ async function run(): Promise<void> {
   const pub2 = await crypto.subtle.importKey("raw", rawPub, { name: "ECDSA", namedCurve: "P-256" }, true, ["verify"]);
   console.log(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, pub2, ecSig, msg));
   const jwkPriv = await crypto.subtle.exportKey("jwk", ecPair.privateKey);
-  console.log(jwkPriv.get("kty"), jwkPriv.get("crv"));
+  console.log(jwkPriv.kty, jwkPriv.crv);
   const priv2 = await crypto.subtle.importKey("jwk", jwkPriv, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
   const sig2 = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, priv2, msg);
   console.log(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, ecPair.publicKey, sig2, msg));
@@ -245,11 +238,11 @@ async function run(): Promise<void> {
   const back2 = await crypto.subtle.decrypt({ name: "RSA-OAEP" }, priv3, ct);
   console.log(new TextDecoder().decode(back2));
   const pssPair = await crypto.subtle.generateKey(
-    { name: "RSA-PSS", modulusLength: 2048, hash: "SHA-256" }, true, ["sign", "verify"]);
+    { name: "RSA-PSS", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
   const pssSig = await crypto.subtle.sign({ name: "RSA-PSS", saltLength: 32 }, pssPair.privateKey, msg);
   console.log(await crypto.subtle.verify({ name: "RSA-PSS", saltLength: 32 }, pssPair.publicKey, pssSig, msg));
   const jwkPub = await crypto.subtle.exportKey("jwk", pssPair.publicKey);
-  console.log(jwkPub.get("kty"), jwkPub.get("e"));
+  console.log(jwkPub.kty, jwkPub.e);
   const pub3 = await crypto.subtle.importKey("jwk", jwkPub, { name: "RSA-PSS", hash: "SHA-256" }, false, ["verify"]);
   console.log(await crypto.subtle.verify({ name: "RSA-PSS", saltLength: 32 }, pub3, pssSig, msg));
 }
@@ -271,8 +264,10 @@ true
 RSA AQAB
 true`
 
+// OpenSSL only: crypto.subtle's asymmetric algorithms run over node:crypto's
+// KeyObject, which -crypto=commoncrypto does not provide (out of scope).
 func TestE2ESubtleAsymmetric(t *testing.T) {
-	for _, backend := range []string{"openssl", "commoncrypto"} {
+	for _, backend := range []string{"openssl"} {
 		t.Run(backend, func(t *testing.T) {
 			got := compileAndRunCryptoMode(t, subtleAsymSrc, backend)
 			compareLines(t, got, subtleAsymWant)
@@ -298,7 +293,7 @@ async function run(): Promise<void> {
 run();
 `
 	got := compileAndRun(t, src)
-	compareLines(t, got, "pkcs8-of-public: InvalidAccessError\nspki-of-private: InvalidAccessError")
+	compareLines(t, got, "pkcs8-of-public: NotSupportedError\nspki-of-private: NotSupportedError")
 }
 
 // deriveBits/deriveKey known answers: RFC 6070 PBKDF2 case 2 and RFC 5869
@@ -365,12 +360,10 @@ crypto.getRandomValues(u32);
 let sum32 = 0;
 for (let i = 0; i < u32.length; i++) sum32 += u32[i];
 console.log(u32.length, sum32 > 0 ? "filled" : "all-zero");
-const buf = new ArrayBuffer(16);
-crypto.getRandomValues(buf);
-console.log(buf.byteLength);
+console.log(ret === u8);
 `
 	got := compileAndRun(t, src)
-	compareLines(t, got, "32 32 filled\n8 filled\n16")
+	compareLines(t, got, "32 32 filled\n8 filled\ntrue")
 }
 
 // TestE2EGetRandomValuesQuota: a view larger than 65,536 bytes throws a
@@ -391,13 +384,17 @@ console.log("ok");
 	compareLines(t, got, "QuotaExceededError\nok")
 }
 
-// TestE2EGetRandomValuesFloatRejected: a float TypedArray is a compile error
-// (real JS throws a TypeMismatchError) — ADR-00554.
-func TestE2EGetRandomValuesFloatRejected(t *testing.T) {
-	_, err := parseAndCompile(`const f = new Float32Array(4); crypto.getRandomValues(f);`)
-	if err == nil {
-		t.Fatal("expected a compile error for getRandomValues on a Float32Array, got none")
-	}
+// TestE2EGetRandomValuesTypeMismatch: a float view and a bare ArrayBuffer
+// throw Node's TypeMismatchError (code 17) at run time (ADR-01333).
+func TestE2EGetRandomValuesTypeMismatch(t *testing.T) {
+	got := compileAndRun(t, `
+const vals: any[] = [new Float32Array(4), new ArrayBuffer(16)];
+try { crypto.getRandomValues(new Float64Array(2)); } catch (e) { console.log((e as any).name, (e as any).code); }
+for (const v of vals) {
+  try { crypto.getRandomValues(v); console.log("no throw"); } catch (e) { console.log((e as any).name, (e as any).code); }
+}
+`)
+	compareLines(t, got, "TypeMismatchError 17\nTypeMismatchError 17\nTypeMismatchError 17")
 }
 
 func TestE2ENodeCryptoGenerateKeyPair(t *testing.T) {
@@ -526,4 +523,27 @@ console.log(crypto.createHash('sha256').update('abc').digest('base64'))
 console.log(crypto.createHash('sha256').update('abc').digest('base64url'))
 `, "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=\n"+
 		"ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0")
+}
+
+// exportKey("jwk") returns a plain JsonWebKey object with Node's members and
+// order (key_ops, ext, alg, kty, …), and importKey takes one back.
+func TestE2ESubtleJwkIsAPlainObject(t *testing.T) {
+	assertSameAsNode(t, `
+async function run(): Promise<void> {
+  const raw = new TextEncoder().encode("0123456789abcdef");
+  const h = await crypto.subtle.importKey("raw", raw, { name: "HMAC", hash: "SHA-384" }, true, ["sign", "verify"]);
+  const hj = await crypto.subtle.exportKey("jwk", h);
+  console.log(hj, JSON.stringify(hj));
+  const back = await crypto.subtle.importKey("jwk", hj, { name: "HMAC", hash: "SHA-384" }, false, ["sign"]);
+  console.log(back.type, back.extractable);
+  const a = await crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
+  console.log(await crypto.subtle.exportKey("jwk", a));
+  const ec = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const ej = await crypto.subtle.exportKey("jwk", ec.publicKey);
+  console.log(Object.keys(ej), ej.kty, ej.crv, ej.key_ops, ej.ext, typeof ej.x);
+  const ek = await crypto.subtle.importKey("jwk", ej, { name: "ECDSA", namedCurve: "P-256" }, true, ["verify"]);
+  console.log(ek.type);
+}
+run();
+`)
 }

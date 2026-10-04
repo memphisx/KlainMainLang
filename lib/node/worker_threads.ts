@@ -20,22 +20,7 @@
 // module's exports, as Node's default export carries them.
 import { EventEmitter } from 'events';
 import { structuredCloneAny } from './internal_structured_clone';
-
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeError, NodeTypeError } from './internal_errors';
 
 function dataCloneError(message: string): Error {
     return new DOMException(message, 'DataCloneError');

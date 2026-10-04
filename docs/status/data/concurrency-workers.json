@@ -29,7 +29,6 @@
             "caveats": [
               "A worker's file is one of the program's own modules, compiled in: `new Worker` takes a path literal (resolved relative to the file it is written in, where Node resolves it against the working directory) or `__filename`; a computed path or `eval: true` code fails at `new Worker` (a genuine impossibility of native compilation)",
               "`terminate()` takes effect at the worker's next event-loop turn: a worker busy in synchronous code runs on until it yields, where Node interrupts it",
-              "A TypedArray view over a `SharedArrayBuffer` is copied, not shared (typed arrays carry no `.buffer`/`.byteOffset` here): send the buffer itself and re-view it on the other side",
               "A transferred `ArrayBuffer` is copied, not detached: the sender's stays usable",
               "A worker shares `process.env` with its parent (Node gives it a copy) and writes its `stdout`/`stderr` directly; the `stdin`/`stdout`/`stderr`/`env`/`resourceLimits`/`argv`/`execArgv` options, `worker.stdout`/`stdin`/`stderr` and `getHeapSnapshot()` are not ported",
               "An `'uncaughtException'` listener in a worker runs but the worker still ends with code 1",

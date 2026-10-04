@@ -64,10 +64,10 @@ func TestCheck(t *testing.T) {
 		{"declare function o(x?: { a?: number }): void\no({ a: 'x' })", "2:TS2322"},
 		{"declare function r(o?: { encoding?: null; flag?: string } | null): number\ndeclare function r(o: { encoding: 'utf8' | 'hex'; flag?: string } | 'utf8' | 'hex'): string\nconst t2: string = r({ encoding: 'utf8' })", ""},
 		{"let b: number | null = 3\nconst bump = () => { b = b === null ? 1 : b + 1 }", ""},
-		// A type name nothing declares (TS2304); a near miss is tsc's TS2552,
-		// not reported; every kind of type parameter resolves.
+		// A type name nothing declares (TS2304); a near miss is tsc's TS2552;
+		// every kind of type parameter resolves.
 		{"const x: Frobnicator = 1", "1:TS2304"},
-		{"interface Point { x: number }\nconst p: Piont = { x: 1 }", ""},
+		{"interface Point { x: number }\nconst p: Piont = { x: 1 }", "2:TS2552"},
 		{"const g = <U>(y: U): U => y\ntype M<K extends string> = { [P in K]: number }\ntype E<T> = T extends Array<infer I> ? I : never\nclass C<Z> { m<W>(w: W): Z | W { return w } }", ""},
 		// The forms of TS2304 tsc gives when it knows more (onFailedToResolveSymbol).
 		{"class C { static foo = 1; m() { return foo } }", "1:TS2662"},
@@ -129,6 +129,12 @@ func TestCheck(t *testing.T) {
 		{"class A1 { x = 1 }\nclass B1 { foo(this: A1) { return this.x } }", ""},
 		{"interface Element { tag: string }\ndeclare const el: Element\nel.textContent", ""},
 		{"class K { toString() { return '' } }\nnew K().valueOf()", ""},
+		// A generic call with a literal argument and a contextual type:
+		// inferred from the arguments, so the mismatch is reported (tsc:
+		// TS2322); the context still keeps a literal it can take.
+		{"declare function all2<T>(v: T[]): T[]\nconst q: string[] = all2([1])", "2:TS2322"},
+		{"interface Box<T> { v: T }\ndeclare function box<T>(v: T): Box<T>\nconst b: Box<'a' | 'b'> = box('a')", ""},
+		{"declare function all2<T>(v: T[]): T[]\nconst q: number[] = all2([1])", ""},
 		// Overloads declared without bodies are not checked by the first one.
 		{"declare function o(a: number): void\ndeclare function o(a: number, b: number): void\no(1, 2)", ""},
 	} {
@@ -205,6 +211,37 @@ func TestAwaited(t *testing.T) {
 	} {
 		if got := checkCodesLib(t, tc.src); got != tc.want {
 			t.Errorf("%s:\n got  %q\n want %q", tc.src, got, tc.want)
+		}
+	}
+}
+
+// TestTypeOperators: keyof, indexed access, mapped and conditional types,
+// the lib.es5 utility types and the Promise statics' signatures; each
+// expectation from tsc 5.9 --strict.
+func TestTypeOperators(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{`const r: Record<string, number> = { a: 1 }; const n: string = r.a`, "1:TS2322"},
+		{`const r: Record<"a" | "b", number> = { a: 1 }`, "1:TS2741"},
+		{`type P = Partial<{ a: number; b: string }>; const p: P = {}; const n: number = p.a`, "1:TS2322"},
+		{`type P = Required<{ a?: number }>; const p: P = {}`, "1:TS2741"},
+		{`type K = keyof { a: number; b: string }; const k: K = "c"`, "1:TS2322"},
+		{`type K = keyof { a: number; b: string }; const k: K = "b"`, ""},
+		{`type V = { a: number; b: string }["a"]; const v: V = "x"`, "1:TS2322"},
+		{`type E = Exclude<"a" | "b" | "c", "a">; const e: E = "a"`, "1:TS2322"},
+		{`type E = Extract<"a" | "b" | 1, string>; const e: E = "b"`, ""},
+		{`type R = ReturnType<() => string>; const r: R = 1`, "1:TS2322"},
+		{`type O = Omit<{ a: number; b: string }, "a">; const o: O = { b: "x" }; const n: number = o.b`, "1:TS2322"},
+		{`type A = Awaited<Promise<Promise<number>>>; const a: A = "x"`, "1:TS2322"},
+		{`type A = Awaited<Promise<number> | string>; const a: A = true`, "1:TS2322"},
+		{`declare const x: Awaited<Response>; const n: number = x`, "1:TS2322"},
+		{`type N = NonNullable<string | null | undefined>; const n: N = null`, "1:TS2322"},
+		{"async function m() {\nconst rs = await Promise.all([Promise.resolve(1), \"x\"])\nconst a: number = rs[0]\nconst b: number = rs[1]\n}", "4:TS2322"},
+		{"async function m() {\nconst ps: Promise<number>[] = []\nconst rs = await Promise.all(ps)\nconst s: string[] = rs\n}", "4:TS2322"},
+		{"async function m() {\nconst r = await Promise.race([Promise.resolve(1), \"x\"])\nconst b: boolean = r\n}", "3:TS2322"},
+		{"async function m() {\nconst r = await Promise.resolve(Promise.resolve(1))\nconst s: string = r\n}", "3:TS2322"},
+	} {
+		if got := checkCodesLib(t, tc.src); got != tc.want {
+			t.Errorf("%q: got %q, want %q", tc.src, got, tc.want)
 		}
 	}
 }

@@ -6,10 +6,23 @@ package llvm
 // generator, an object with a [Symbol.iterator]() method).
 
 import (
+	_ "embed"
 	"fmt"
 
 	"KlainMainLang/ast"
 )
+
+//go:embed boxsrc/errkeys.c
+var errKeysSource string
+
+// ErrKeysSource is the Error own-keys hooks' C source (boxsrc/errkeys.c),
+// behind kml_layout.h.
+func ErrKeysSource() string { return layoutHeader() + errKeysSource }
+
+// UsesErrKeysC reports whether the program links the Error own-keys hooks:
+// emitObjHooksFinalize (which declares them) runs with the dynamic JSON
+// runtime.
+func (e *Emitter) UsesErrKeysC() bool { return e.usedDynJSONC }
 
 // ensureAnyIterCollect defines @__kml_any_iter_collect(v): the values the
 // iteration protocol yields for v, as a boxed `any[]` — the routine is
@@ -239,162 +252,14 @@ func (e *Emitter) emitUnboxAnyArray(arr Value, elem Type) (Value, error) {
 	return Value{Ref: r1, Ty: ArrayOf(elem)}, nil
 }
 
-// errorOwnKeyOrder is the order Node's errors carry their own enumerable
-// system fields: uvException's errno, code, syscall, path, dest; the host
-// and port form's address and port; node:sqlite's errcode and errstr.
-var errorOwnKeyOrder = []string{"errno", "code", "syscall", "address", "port", "path", "dest", "errcode", "errstr"}
-
-// emitErrorOwnKeysHooks defines the hooks the object walkers (inspect's
+// emitErrorOwnKeysHooks declares the hooks the object walkers (inspect's
 // keys, JSON, Object.keys) use for an Error's own enumerable fields beyond
-// its layout: the system fields set on it (errorOwnKeyOrder, each only when
-// present), then the keys of its `extra` bag.
-//
-//	i64 @__kml_error_nextra(ptr o)
-//	ptr @__kml_error_extra_key(ptr o, i64 i)
-//	i64 @__kml_error_extra_get(ptr o, ptr key, ptr found)
+// its layout: the system fields set on it, then the keys of its `extra`
+// bag. They are boxsrc/errkeys.c.
 func (e *Emitter) emitErrorOwnKeysHooks() {
 	e.ensureDynObj()
-	e.ensureStrcmp()
-	sir := errorObjType.StructIR()
-	restore := e.beginThunkEmit()
-	// present(name) is an i1 register: whether field name is set on %o.
-	present := func(name string) (string, Type, int) {
-		idx, ty, _ := errorObjType.FieldIndex(name)
-		gep, v, p := e.freshReg(), e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%o, i32 0, i32 %d", gep, sir, idx))
-		if ty.Float {
-			e.emitInstr(fmt.Sprintf("%s = load double, ptr %s, align 8", v, gep))
-			e.emitInstr(fmt.Sprintf("%s = fcmp une double %s, 0.0", p, v))
-		} else {
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", v, gep))
-			e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", p, v))
-		}
-		// errcode/errstr are node:sqlite's (an error without errno); a
-		// system error's copies of them are internal.
-		if name == "errcode" || name == "errstr" {
-			eidx, _, _ := errorObjType.FieldIndex("errno")
-			eg, ev, noErrno, both := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%o, i32 0, i32 %d", eg, sir, eidx))
-			e.emitInstr(fmt.Sprintf("%s = load double, ptr %s, align 8", ev, eg))
-			e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, 0.0", noErrno, ev))
-			e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", both, p, noErrno))
-			p = both
-		}
-		return p, ty, idx
-	}
-	extraBag := func() string {
-		idx, _, _ := errorObjType.FieldIndex("extra")
-		gep, bag := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%o, i32 0, i32 %d", gep, sir, idx))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bag, gep))
-		return bag
-	}
-
-	// nextra: the count of present fields plus the bag's keys.
-	n := "0"
-	for _, name := range errorOwnKeyOrder {
-		p, _, _ := present(name)
-		z, s := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", z, p))
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", s, n, z))
-		n = s
-	}
-	bag := extraBag()
-	hasBag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasBag, bag))
-	bagL, doneL := e.freshLabel("errx.bag"), e.freshLabel("errx.done")
-	entryL := "entry" // no label precedes it: present() branches nowhere
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasBag, bagL, doneL))
-	e.emitLabel(bagL)
-	bn, total := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_count(ptr %s)", bn, bag))
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", total, n, bn))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-	e.emitLabel(doneL)
-	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %s, %%%s ]", res, n, entryL, total, bagL))
-	e.emitTerminator(fmt.Sprintf("ret i64 %s", res))
-	body := e.allocas.String() + e.body.String()
-	restore()
-	e.emitGlobal(fmt.Sprintf("define i64 @__kml_error_nextra(ptr %%o) {\nentry:\n%s}", body))
-
-	// extra_key: the i-th present field, else the bag's (i - present)-th key.
-	restore = e.beginThunkEmit()
-	iSlot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", iSlot))
-	e.emitInstr(fmt.Sprintf("store i64 %%i, ptr %s, align 8", iSlot))
-	for _, name := range errorOwnKeyOrder {
-		p, _, _ := present(name)
-		cur, isZero, hit := e.freshReg(), e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, iSlot))
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isZero, cur))
-		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", hit, p, isZero))
-		retL, nextL := e.freshLabel("errk.ret"), e.freshLabel("errk.next")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hit, retL, nextL))
-		e.emitLabel(retL)
-		e.emitTerminator(fmt.Sprintf("ret ptr %s", e.internString(name)))
-		e.emitLabel(nextL)
-		dec, nv := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", dec, p))
-		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", nv, cur, dec))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nv, iSlot))
-	}
-	bag = extraBag()
-	noBag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", noBag, bag))
-	nullL, keyL := e.freshLabel("errk.null"), e.freshLabel("errk.bag")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", noBag, nullL, keyL))
-	e.emitLabel(nullL)
-	e.emitTerminator("ret ptr null")
-	e.emitLabel(keyL)
-	bi, k := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", bi, iSlot))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_key_at(ptr %s, i64 %s)", k, bag, bi))
-	e.emitTerminator(fmt.Sprintf("ret ptr %s", k))
-	body = e.allocas.String() + e.body.String()
-	restore()
-	e.emitGlobal(fmt.Sprintf("define ptr @__kml_error_extra_key(ptr %%o, i64 %%i) {\nentry:\n%s}", body))
-
-	// extra_get: a present field's boxed value, else the bag's.
-	restore = e.beginThunkEmit()
-	for _, name := range errorOwnKeyOrder {
-		c, eq := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %%key, ptr %s)", c, e.internString(name)))
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", eq, c))
-		isL, nextL := e.freshLabel("errg.is"), e.freshLabel("errg.next")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", eq, isL, nextL))
-		e.emitLabel(isL)
-		p, ty, idx := present(name)
-		gotL := e.freshLabel("errg.got")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", p, gotL, nextL))
-		e.emitLabel(gotL)
-		gep, v := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%o, i32 0, i32 %d", gep, sir, idx))
-		loadTy := ty
-		loadTy.Nullable, loadTy.IsUndefined = false, false
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", v, loadTy.IR, gep))
-		boxed, err := e.emitBoxValue(Value{Ref: v, Ty: loadTy})
-		if err != nil {
-			panic(err)
-		}
-		e.emitInstr("store i32 1, ptr %found, align 4")
-		e.emitTerminator(fmt.Sprintf("ret i64 %s", boxed.Ref))
-		e.emitLabel(nextL)
-	}
-	bag = extraBag()
-	noBag = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", noBag, bag))
-	missL, bagGetL := e.freshLabel("errg.miss"), e.freshLabel("errg.bag")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", noBag, missL, bagGetL))
-	e.emitLabel(missL)
-	e.emitInstr("store i32 0, ptr %found, align 4")
-	e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
-	e.emitLabel(bagGetL)
-	bv := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get(ptr %s, ptr %%key)", bv, bag))
-	e.emitInstr("store i32 1, ptr %found, align 4")
-	e.emitTerminator(fmt.Sprintf("ret i64 %s", bv))
-	body = e.allocas.String() + e.body.String()
-	restore()
-	e.emitGlobal(fmt.Sprintf("define i64 @__kml_error_extra_get(ptr %%o, ptr %%key, ptr %%found) {\nentry:\n%s}", body))
+	e.ensureStrcmp() // other generated code leans on this decl arriving here
+	e.declareFn("__kml_error_nextra", "declare i64 @__kml_error_nextra(ptr)")
+	e.declareFn("__kml_error_extra_key", "declare ptr @__kml_error_extra_key(ptr, i64)")
+	e.declareFn("__kml_error_extra_get", "declare i64 @__kml_error_extra_get(ptr, ptr, ptr)")
 }

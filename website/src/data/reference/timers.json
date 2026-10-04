@@ -7,28 +7,33 @@
   "coverage": {
     "loose": "5/5",
     "loosePct": 100,
-    "strict": "2/5",
-    "strictPct": 40
+    "strict": "3/5",
+    "strictPct": 60
   },
-  "lede": "WHATWG/browser-standard timer functions as bare globals, matching real JS rather than a namespace. The one recurring divergence is that a timer callback must be a zero-argument, void-returning closure value. Under the hood there's no phased event loop: setTimeout, setInterval, and setImmediate share a single flat fire-time-ordered queue that drains after the synchronous script, while queueMicrotask has its own FIFO drained before that queue.",
+  "lede": "WHATWG/browser-standard timer functions as bare globals, matching real JS rather than a namespace. Under the hood there's no phased event loop: setTimeout, setInterval, and setImmediate share a single flat fire-time-ordered queue that drains after the synchronous script, while queueMicrotask has its own FIFO drained before that queue.",
   "entries": [
     {
       "id": "timers.setTimeout",
       "name": "setTimeout(fn, ms) / clearTimeout(id)",
       "statusRow": "setTimeout(fn, ms) / clearTimeout(id)",
-      "signature": "setTimeout(fn: () => void, ms?: number): NodeJS.Timeout; clearTimeout(timeout: NodeJS.Timeout | string | number | undefined): void",
+      "signature": "setTimeout<TArgs extends any[]>(fn: (...args: TArgs) => void, ms?: number, ...args: TArgs): NodeJS.Timeout; clearTimeout(timeout: NodeJS.Timeout | string | number | undefined): void",
       "badge": "caveats",
-      "description": "Schedules a callback to fire once after ms milliseconds and returns an id; clearTimeout cancels it before it fires. These are bare global functions, matching real JS (not a namespace). Multiple timeouts fire in delay order, not registration order.",
+      "description": "Schedules a callback to fire once after ms milliseconds passing it any arguments after ms, and returns an id; clearTimeout cancels it before it fires. These are bare global functions, matching real JS (not a namespace). Multiple timeouts fire in delay order, not registration order.",
       "params": [
         {
           "name": "fn",
-          "type": "() => void",
-          "desc": "Zero-argument, void-returning callback."
+          "type": "(...args: TArgs) => void",
+          "desc": "Callback; any function value, its result ignored."
         },
         {
           "name": "ms",
           "type": "number",
           "desc": "Delay in milliseconds."
+        },
+        {
+          "name": "args",
+          "type": "TArgs",
+          "desc": "Arguments for fn, evaluated when the timer is scheduled."
         }
       ],
       "returns": {
@@ -38,8 +43,7 @@
       "exampleKey": "timers/timers",
       "snippet": "setTimeout(() => { console.log(\"timeout fired\") }, 10)\nconst cancelledId = setTimeout(() => {}, 8)\nclearTimeout(cancelledId)",
       "differences": [
-        "Callback is restricted to a zero-argument, `void`-returning function — an arrow/function-expression closure, or a bare reference to a top-level named function.",
-        "The handle is the timer's numeric id, not Node's `Timeout` object: `typeof` reads `\"number\"`, and `ref`/`unref`/`hasRef`/`refresh`/`close` are compile errors."
+        "The handle is the timer's numeric id, not Node's `Timeout` object: `typeof` reads `\"number\"`; `refresh` is a compile error, and `ref`/`unref`/`hasRef`/`close` work only on a typed handle, not through `any`."
       ],
       "seeAlso": [
         "timers.setInterval",
@@ -53,19 +57,24 @@
       "id": "timers.setInterval",
       "name": "setInterval(fn, ms) / clearInterval(id)",
       "statusRow": "setInterval(fn, ms) / clearInterval(id)",
-      "signature": "setInterval(fn: () => void, ms: number): number; clearInterval(id: number): void",
+      "signature": "setInterval<TArgs extends any[]>(fn: (...args: TArgs) => void, ms?: number, ...args: TArgs): NodeJS.Timeout; clearInterval(id: NodeJS.Timeout | string | number | undefined): void",
       "badge": "exact",
       "description": "Schedules a callback to repeat every ms milliseconds until cleared. Closures capture by reference, so the idiomatic self-cancelling pattern — a callback that reads the id its own declaration produces — works correctly. Same callback scope as setTimeout.",
       "params": [
         {
           "name": "fn",
-          "type": "() => void",
-          "desc": "Zero-argument, void-returning callback."
+          "type": "(...args: TArgs) => void",
+          "desc": "Callback; any function value, its result ignored."
         },
         {
           "name": "ms",
           "type": "number",
           "desc": "Interval in milliseconds."
+        },
+        {
+          "name": "args",
+          "type": "TArgs",
+          "desc": "Arguments for fn on every tick, evaluated once at the schedule."
         }
       ],
       "returns": {

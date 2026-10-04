@@ -49,8 +49,10 @@ dns.resolve4("localhost", (err, addresses) => {
 `)
 }
 
+// localhost's first address is the host's resolver order (::1 on macOS,
+// 127.0.0.1 on most Linux hosts): Node is the oracle.
 func TestE2EDnsPromisesLookup(t *testing.T) {
-	assertOutputImports(t, `
+	assertSameAsNodeImports(t, `
 import dns from 'dns'
 async function main() {
   const r = await dns.promises.lookup("localhost")
@@ -58,7 +60,7 @@ async function main() {
   console.log("family:", r.family)
 }
 main()
-`, "addr: 127.0.0.1\nfamily: 4")
+`)
 }
 
 func TestE2EDnsPromisesLookupRejects(t *testing.T) {

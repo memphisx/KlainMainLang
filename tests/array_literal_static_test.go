@@ -2,6 +2,7 @@ package tests
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -86,7 +87,7 @@ console.log(xs.length, tbl.length)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(ir, "@.arrlit0 = private unnamed_addr constant [16 x double]") {
+	if !regexp.MustCompile(`@\.arrlit\.[0-9a-f]{16} = private unnamed_addr constant \[16 x double\]`).MatchString(ir) {
 		t.Errorf("flat literal was not lowered to a static image:\n%s", ir)
 	}
 	if !strings.Contains(ir, "call void @__kml_arr_lit_rows(") || !strings.Contains(ir, "constant [3 x ptr]") || !strings.Contains(ir, "constant [2 x i64] [i64 2, i64 1]") {

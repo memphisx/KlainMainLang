@@ -177,18 +177,17 @@
             "feature": "Dynamic `import(...)`",
             "status": "implemented",
             "caveats": [
-              "Opt-in via `-dynamic-import=lazy` ([ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md)); the default `-dynamic-import=eager` (TDD-00055's compile-time-merge backend) is not yet built and is a clean codegen error pointing at the flag",
               "String-literal specifier only — a runtime-computed `import(expr)` is a clean compile error (all imports resolve at compile time)",
-              "Result object exposes the target's **annotated scalar/string exports** only (via dlsym'd accessors); `function`/`class`/array/object exports are omitted in V1, and an un-annotated export has no field",
-              "Incompatible with `--static` (a static binary can't `dlopen`) — a clean mutual-exclusion rejection; the lazy build emits a sibling `<binary>.d/` island directory that must ship with the binary",
-              "A nested dynamic `import()` inside an island compiles eagerly (islands don't recursively partition in V1)",
-              "An island's sockets, pipes and children are invisible to the importer's `select()`: while such an island's top-level `await` is pending, the importer re-polls it every 10 ms instead of waking on the island's fd ([TDD-00225](../tdd/TDD-00225.md)); the island's timers are folded exactly"
+              "The result object exposes the target's **annotated scalar/string exports** only; `function`/`class`/array/object exports are omitted, and an un-annotated export has no field (module namespace objects are missing for static `import * as ns` too)",
+              "`import('node:…')` of a builtin module is a clean compile error",
+              "`-dynamic-import=lazy` and `-dynamic-import=isolated` refuse `--static` (a static binary can't `dlopen`), and `lazy` is not available on Windows",
+              "Under `-dynamic-import=isolated`, an island's sockets, pipes and children are invisible to the importer's `select()`: while such an island's top-level `await` is pending, the importer re-polls it every 10 ms instead of waking on the island's fd ([TDD-00225](../tdd/TDD-00225.md)); the island's timers are folded exactly"
             ],
             "notes": [
-              "Under `-dynamic-import=lazy` each target is compiled to its own shared-library island (`.so`/`.dylib`) beside the binary and `dlopen`'d on first `import()`, running its top-level exactly once — **real laziness**: the target's code runs only when the call site executes, not at startup. Verified on darwin/arm64 and Linux (glibc/arm64, Docker)",
-              "The executable self-locates via `_NSGetExecutablePath`/`/proc/self/exe`, so the binary + its `.d/` directory relocate together; island export symbols are hashed from the target's absolute path, computed identically both sides",
-              "An island with a top-level `await` evaluates as a coroutine driven by the importer's event loop: `import()` is pending until the island's module promise settles, the importer's own microtasks and timers interleave with the island's awaits, a top-level throw rejects `import()` with the island's Error ([ADR-01056](../adr/ADR-01056.md)/[TDD-00225](../tdd/TDD-00225.md))",
-              "See [ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md); [TDD-00055](../tdd/TDD-00055.md) is the alternative eager backend"
+              "Default `-dynamic-import=bundled`: the target is compiled into the binary and runs on first `import()`, as a task on the program's one event loop, on the microtask Node evaluates it on; it shares every module instance (builtin or user) with the program, a top-level throw rejects every `import()` of it, and an unsettled top-level `await` ends the process with code 13. Works with `--static`",
+              "`-dynamic-import=lazy`: the same semantics, with each target's own code in a shared library in `<binary>.d/`, loaded on first `import()` and bound to the executable's library, runtime and event loop. Verified on darwin/arm64 and Linux x86-64, both memory modes",
+              "`-dynamic-import=isolated`: each target is its own program in a shared-library island, with its own instance of every module it imports — a deliberate divergence from Node, for keeping a target's import-time state apart from the program's",
+              "See [ADR-01330](../adr/ADR-01330.md)/[TDD-00238](../tdd/TDD-00238.md) (bundled, lazy) and [ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md) (isolated)"
             ]
           },
           {

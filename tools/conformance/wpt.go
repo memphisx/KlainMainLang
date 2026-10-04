@@ -310,6 +310,16 @@ func runWPTSuite(workDir string, timeout time.Duration, workers int, compat stri
 	if err != nil {
 		fatal("walking WPT corpus %s (run tools/conformance/fetch.sh first): %v", wptCorpus, err)
 	}
+	if only := os.Getenv("WPT_ONLY"); only != "" {
+		// Debugging: just the files whose path contains WPT_ONLY.
+		kept := files[:0]
+		for _, f := range files {
+			if strings.Contains(f, only) {
+				kept = append(kept, f)
+			}
+		}
+		files = kept
+	}
 	if len(files) == 0 {
 		fatal("no WPT .any.js/.window.js/.worker.js files under %s (run tools/conformance/fetch.sh first)", wptCorpus)
 	}
@@ -397,6 +407,12 @@ func runOneWPT(path, workDir string, workerID int, timeout time.Duration) (res w
 	}
 	res.File = rel
 	res.Area = strings.SplitN(rel, "/", 2)[0]
+	if os.Getenv("WPT_TRACE") != "" {
+		// A fatal error (a Go stack overflow) cannot be recovered below: the
+		// last file a worker started names the culprit.
+		fmt.Fprintf(os.Stderr, "wpt start [%d] %s\n", workerID, rel)
+		defer func() { fmt.Fprintf(os.Stderr, "wpt done [%d] %s %s %.80s\n", workerID, rel, res.Status, res.Reason) }()
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			res.Status = "FAIL"

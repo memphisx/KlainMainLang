@@ -5,12 +5,12 @@
   "statusPage": "WEB-CRYPTO.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "13/14",
-    "loosePct": 93,
-    "strict": "2/14",
-    "strictPct": 14
+    "loose": "16/18",
+    "loosePct": 89,
+    "strict": "3/18",
+    "strictPct": 17
   },
-  "lede": "Web Crypto here is compile-time dispatched: the algorithm argument must be a string literal or an object literal with a literal name: — a variable holding the name is a compile error, and bare crypto.subtle as a value is unsupported. Operational failures throw synchronously at the call site rather than rejecting the returned promise, though await/.then/.catch/.finally all work on the settled result. crypto.subtle.* delegates to a native backend picked with -crypto (OpenSSL libcrypto by default, Apple CommonCrypto on macOS); getRandomValues and randomUUID need only a CSPRNG and no external library.",
+  "lede": "crypto.subtle is Node's own Web Crypto implementation (lib/internal/crypto/webcrypto.js) ported to TypeScript and written over the node:crypto module: the algorithm is normalized at run time, every failure rejects the returned promise with Node's error, and crypto.subtle is an ordinary value. node:crypto's natives come from the backend picked with -crypto (OpenSSL libcrypto by default; Apple CommonCrypto on macOS covers the symmetric algorithms only). getRandomValues and randomUUID need only a CSPRNG and no external library.",
   "entries": [
     {
       "id": "crypto.getRandomValues",
@@ -67,8 +67,8 @@
       "name": "crypto.subtle.digest(algo, data)",
       "statusRow": "crypto.subtle.digest(algo, data)",
       "signature": "digest(algo: string | { name: string }, data: TypedArray | ArrayBuffer): Promise<ArrayBuffer>",
-      "badge": "caveats",
-      "description": "Hashes a TypedArray or ArrayBuffer with SHA-1, SHA-256, SHA-384, or SHA-512, returning a Promise<ArrayBuffer>. Known-answer-tested against the NIST vectors on both backends.",
+      "badge": "supported",
+      "description": "Hashes any BufferSource with SHA-1, SHA-256, SHA-384 or SHA-512, returning a Promise<ArrayBuffer>; an unknown algorithm rejects with NotSupportedError.",
       "params": [
         {
           "name": "algo",
@@ -87,11 +87,6 @@
       },
       "exampleKey": "crypto/crypto",
       "snippet": "const sha256 = new Uint8Array(await crypto.subtle.digest(\"SHA-256\", data))",
-      "differences": [
-        "The algorithm argument must be a string literal or an object literal with a literal `name:` (a variable holding the name is a compile error — compile-time dispatch)",
-        "Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise",
-        "Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
-      ],
       "seeAlso": [
         "crypto.subtle.sign"
       ],
@@ -105,7 +100,7 @@
       "statusRow": "crypto.subtle.encrypt / .decrypt",
       "signature": "encrypt(algo, key: CryptoKey, data): Promise<ArrayBuffer>; decrypt(algo, key: CryptoKey, data): Promise<ArrayBuffer>",
       "badge": "caveats",
-      "description": "AES-GCM (iv, optional additionalData, optional tagLength default 128; auth failure → OperationError), AES-CBC (iv, PKCS#7), and RSA-OAEP (public encrypts / private decrypts, optional label), each returning a Promise<ArrayBuffer>.",
+      "description": "AES-CTR (counter, length), AES-CBC, AES-GCM (iv, additionalData, tagLength) and RSA-OAEP (label), each returning a Promise<ArrayBuffer>; a failed decryption rejects with OperationError.",
       "params": [
         {
           "name": "algo",
@@ -130,10 +125,7 @@
       "exampleKey": "crypto/crypto",
       "snippet": "const ct = await crypto.subtle.encrypt({ name: \"AES-GCM\", iv: iv }, aesKey, secret)\nconst pt = await crypto.subtle.decrypt({ name: \"AES-GCM\", iv: iv }, aesKey, ct)",
       "differences": [
-        "On `-crypto=commoncrypto` only: a non-empty RSA-OAEP `label` throws `NotSupportedError` (SecKey has no label parameter)",
-        "The algorithm argument must be a string literal or an object literal with a literal `name:` (a variable holding the name is a compile error — compile-time dispatch)",
-        "Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise",
-        "Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
+        "On -crypto=commoncrypto the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over node:crypto's KeyObject, which that backend does not provide."
       ],
       "seeAlso": [
         "crypto.subtle.generateKey",
@@ -149,7 +141,7 @@
       "statusRow": "crypto.subtle.sign / .verify",
       "signature": "sign(algo, key: CryptoKey, data): Promise<ArrayBuffer>; verify(algo, key: CryptoKey, sig, data): Promise<boolean>",
       "badge": "caveats",
-      "description": "HMAC (constant-time verify), RSA-PSS (runtime saltLength), and ECDSA over P-256/P-384/P-521 (per-call literal hash, raw r‖s signatures). sign returns Promise<ArrayBuffer>, verify returns Promise<boolean>.",
+      "description": "HMAC, RSASSA-PKCS1-v1_5, RSA-PSS (saltLength), ECDSA over P-256/P-384/P-521 (IEEE P1363 r‖s signatures) and Ed25519. sign returns Promise<ArrayBuffer>, verify returns Promise<boolean>.",
       "params": [
         {
           "name": "algo",
@@ -174,10 +166,7 @@
       "exampleKey": "crypto/crypto",
       "snippet": "const sig = new Uint8Array(await crypto.subtle.sign(\"HMAC\", hmacKey, msg))\nconsole.log(await crypto.subtle.verify(\"HMAC\", hmacKey, sig, msg)) // true",
       "differences": [
-        "On `-crypto=commoncrypto` only: RSA-PSS `saltLength` must equal the hash length or `NotSupportedError` is thrown (SecKey fixes salt = digest size)",
-        "The algorithm argument must be a string literal or an object literal with a literal `name:` (a variable holding the name is a compile error — compile-time dispatch)",
-        "Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise",
-        "Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
+        "On -crypto=commoncrypto the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over node:crypto's KeyObject, which that backend does not provide."
       ],
       "seeAlso": [
         "crypto.subtle.digest",
@@ -193,7 +182,7 @@
       "statusRow": "crypto.subtle.generateKey",
       "signature": "generateKey(algo, extractable: boolean, usages: string[]): Promise<CryptoKey | CryptoKeyPair>",
       "badge": "caveats",
-      "description": "Generates AES-GCM/AES-CBC (length:), HMAC (hash:, spec-default length), RSA-OAEP/RSA-PSS (modulusLength, hash) and ECDSA (namedCurve) keys, returning a Promise<CryptoKey> or a Promise<CryptoKeyPair> (.publicKey/.privateKey). Usages are enforced and spec-split across a key pair.",
+      "description": "AES-CTR/CBC/GCM/KW, HMAC, RSASSA-PKCS1-v1_5/RSA-PSS/RSA-OAEP with any publicExponent, ECDSA/ECDH, Ed25519 and X25519, returning a Promise<CryptoKey> or Promise<CryptoKeyPair>; usages are checked and split across a pair as Node splits them.",
       "params": [
         {
           "name": "algo",
@@ -218,10 +207,7 @@
       "exampleKey": "crypto/crypto",
       "snippet": "const aesKey = await crypto.subtle.generateKey(\n    { name: \"AES-GCM\", length: 256 }, false, [\"encrypt\", \"decrypt\"])",
       "differences": [
-        "`publicExponent` restricted to 65537 (the literal `new Uint8Array([1, 0, 1])`, or omit it)",
-        "The algorithm argument must be a string literal or an object literal with a literal `name:` (a variable holding the name is a compile error — compile-time dispatch)",
-        "Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise",
-        "Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
+        "On -crypto=commoncrypto the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over node:crypto's KeyObject, which that backend does not provide."
       ],
       "seeAlso": [
         "crypto.subtle.importKey",
@@ -237,7 +223,7 @@
       "statusRow": "crypto.subtle.importKey / .exportKey",
       "signature": "importKey(format, keyData, algo, extractable, usages): Promise<CryptoKey>; exportKey(format, key): Promise<ArrayBuffer | Map<string,string>>",
       "badge": "caveats",
-      "description": "raw (AES/HMAC bytes; EC public uncompressed points both ways), pkcs8 (private), spki (public), and jwk (oct/RSA/EC; object literal or Map in, Map out). Kind/format mismatches and non-extractable export throw InvalidAccessError.",
+      "description": "raw (secret keys; EC points, compressed or not; Ed25519/X25519), pkcs8, spki and jwk for every algorithm, with Node's JWK checks and member order. CryptoKey's type, extractable, algorithm and usages are all readable.",
       "params": [
         {
           "name": "format",
@@ -257,17 +243,12 @@
       ],
       "returns": {
         "type": "Promise<CryptoKey | ArrayBuffer | Map<string,string>>",
-        "desc": "A CryptoKey, or exported bytes / a JWK Map."
+        "desc": "A CryptoKey, or exported bytes / a JWK object."
       },
       "exampleKey": "crypto/crypto",
       "snippet": "const hmacKey = await crypto.subtle.importKey(\"raw\", rawKey,\n    { name: \"HMAC\", hash: \"SHA-256\" }, true, [\"sign\", \"verify\"])\nconst jwk = await crypto.subtle.exportKey(\"jwk\", hmacKey)",
       "differences": [
-        "`jwk` is surfaced as a `Map<string,string>` (this compiler has no dynamic object model), key-material members only (`kty`/`k`/`crv`/`n`/`e`/`d`/…) — no `key_ops`/`ext`/`alg` members; import never validates `kty`",
-        "`CryptoKey.algorithm`/`.usages` property reads not implemented (`.type`/`.extractable` work)",
-        "`raw` export of a non-EC asymmetric key isn't rejected (yields the stored DER)",
-        "The algorithm argument must be a string literal or an object literal with a literal `name:` (a variable holding the name is a compile error — compile-time dispatch)",
-        "Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise",
-        "Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
+        "On -crypto=commoncrypto the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over node:crypto's KeyObject, which that backend does not provide."
       ],
       "seeAlso": [
         "crypto.subtle.generateKey",
@@ -283,7 +264,7 @@
       "statusRow": "crypto.subtle.deriveKey / .deriveBits",
       "signature": "deriveKey(algo, baseKey, derivedAlgo, extractable, usages): Promise<CryptoKey>; deriveBits(algo, baseKey, length): Promise<ArrayBuffer>",
       "badge": "caveats",
-      "description": "PBKDF2 (salt, iterations, literal hash) and HKDF (salt, optional info, literal hash). deriveBits returns a Promise<ArrayBuffer>; deriveKey produces an AES-GCM/AES-CBC/HMAC Promise<CryptoKey>. Known-answer-tested against RFC 6070/5869 on both backends.",
+      "description": "PBKDF2 and HKDF (non-extractable base keys, as Node requires), ECDH and X25519. deriveBits returns a Promise<ArrayBuffer>; deriveKey makes any key the target algorithm can make.",
       "params": [
         {
           "name": "algo",
@@ -303,10 +284,7 @@
       "exampleKey": "crypto/crypto",
       "snippet": "const aes = await crypto.subtle.deriveKey(\n    { name: \"PBKDF2\", salt: salt, iterations: 100000, hash: \"SHA-256\" },\n    base, { name: \"AES-GCM\", length: 256 }, false, [\"encrypt\", \"decrypt\"])",
       "differences": [
-        "The spec's extractable=false requirement on PBKDF2/HKDF base keys is not enforced",
-        "The algorithm argument must be a string literal or an object literal with a literal `name:` (a variable holding the name is a compile error — compile-time dispatch)",
-        "Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise",
-        "Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
+        "On -crypto=commoncrypto the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over node:crypto's KeyObject, which that backend does not provide."
       ],
       "seeAlso": [
         "crypto.subtle.importKey",
@@ -314,6 +292,29 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/deriveKey"
+      }
+    },
+    {
+      "id": "crypto.subtle.wrapKey",
+      "name": "crypto.subtle.wrapKey / unwrapKey",
+      "statusRow": "`crypto.subtle.wrapKey` / `.unwrapKey`",
+      "signature": "wrapKey(format, key, wrappingKey, wrapAlgorithm): Promise<ArrayBuffer>; unwrapKey(format, wrapped, unwrappingKey, unwrapAlgorithm, keyAlgorithm, extractable, usages): Promise<CryptoKey>",
+      "badge": "caveats",
+      "description": "Exports a key in any format and encrypts it with AES-KW, AES-GCM/CBC/CTR or RSA-OAEP, and the reverse.",
+      "returns": {
+        "type": "Promise<ArrayBuffer> | Promise<CryptoKey>",
+        "desc": "The wrapped key, or the unwrapped CryptoKey."
+      },
+      "differences": [
+        "On -crypto=commoncrypto the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over node:crypto's KeyObject, which that backend does not provide."
+      ],
+      "snippet": "const wrapped = await crypto.subtle.wrapKey('raw', aesKey, kek, 'AES-KW')\nconst back = await crypto.subtle.unwrapKey('raw', wrapped, kek, 'AES-KW', 'AES-GCM', true, ['encrypt'])",
+      "seeAlso": [
+        "crypto.subtle.importKey",
+        "crypto.subtle.encrypt"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/wrapKey"
       }
     },
     {
@@ -410,23 +411,69 @@
       "statusRow": "Node `crypto` module: `generateKeyPair`/`generateKeyPairSync`, `createSign`/`createVerify`, `sign`/`verify`",
       "signature": "generateKeyPair(type, options, callback); generateKeyPairSync(type, options): { publicKey, privateKey }; sign(algorithm, data, key); verify(algorithm, data, key, signature)",
       "badge": "caveats",
-      "description": "rsa, ec, ed25519 and x25519 key pairs as PEM strings, and signatures over PEM keys: Sign/Verify streams and the one-shot sign/verify (null algorithm for Ed25519). The callback form of generateKeyPair runs on the thread pool.",
+      "description": "Key pairs of every type but dh — rsa, rsa-pss, dsa, ec, ed25519, ed448, x25519, x448 — as KeyObjects, or in any encoding (pem/der/jwk with pkcs1/spki/pkcs8/sec1 and an optional cipher). Signatures over a KeyObject, PEM or { key, passphrase, padding, saltLength, dsaEncoding }: Sign/Verify streams and the one-shot sign/verify (null algorithm for Ed25519). The callback form of generateKeyPair runs on the thread pool.",
       "returns": {
-        "type": "{ publicKey: string, privateKey: string } | Buffer | boolean",
-        "desc": "A PEM key pair, a signature, or the verification."
+        "type": "{ publicKey, privateKey } | Buffer | boolean",
+        "desc": "A key pair (KeyObjects or encoded keys), a signature, or the verification."
       },
       "differences": [
-        "Keys are PEM strings only: generateKeyPair needs publicKeyEncoding { type: 'spki', format: 'pem' } and privateKeyEncoding { type: 'pkcs8', format: 'pem' }. There are no KeyObject results, no pkcs1/sec1/der formats, and no cipher/passphrase.",
-        "An encrypted PEM key ({ key, passphrase }) is not decrypted.",
-        "On -crypto=commoncrypto: RSA keys of 1024 bits or more with exponent 65537, and EC keys on P-256/P-384/P-521 only."
+        "dh key pairs are not generated.",
+        "On -crypto=commoncrypto: RSA keys of 1024 bits or more with exponent 65537, EC keys on P-256/P-384/P-521, ed25519 and x25519 only; encodings other than SPKI/PKCS#8 PEM and the padding/saltLength/dsaEncoding sign options fail."
       ],
-      "snippet": "const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519', {\n  publicKeyEncoding: { type: 'spki', format: 'pem' },\n  privateKeyEncoding: { type: 'pkcs8', format: 'pem' },\n})\nconst sig = crypto.sign(null, Buffer.from('msg'), privateKey)",
+      "snippet": "const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519')\nconst sig = crypto.sign(null, Buffer.from('msg'), privateKey)\ncrypto.verify(null, Buffer.from('msg'), publicKey, sig)  // true",
       "seeAlso": [
         "crypto.subtle.generateKey",
         "crypto.subtle.sign"
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/crypto.html#cryptogeneratekeypairtype-options-callback"
+      }
+    },
+    {
+      "id": "crypto.keyobject",
+      "name": "KeyObject / createPrivateKey / createPublicKey / createSecretKey",
+      "statusRow": "Node `crypto` module: `KeyObject`, `createPrivateKey`/`createPublicKey`/`createSecretKey`",
+      "signature": "createPrivateKey(key); createPublicKey(key); createSecretKey(key[, encoding]); keyObject.export(options); keyObject.equals(other)",
+      "badge": "caveats",
+      "description": "Keys from PEM, DER (pkcs1/spki/pkcs8/sec1, encrypted PKCS#8 with a passphrase) or JWK (RSA, EC, OKP), and export back to each. type, asymmetricKeyType, asymmetricKeyDetails, symmetricKeySize and equals answer as in Node, with Node's error codes, OpenSSL's ERR_OSSL_* ones included.",
+      "returns": {
+        "type": "KeyObject",
+        "desc": "A SecretKeyObject, PublicKeyObject or PrivateKeyObject."
+      },
+      "differences": [
+        "A secp256k1 JWK cannot be imported (P-256/P-384/P-521 can; export covers all four).",
+        "On -crypto=commoncrypto, creating or exporting an asymmetric key fails."
+      ],
+      "snippet": "const key = crypto.createPrivateKey(pem)\nconst jwk = key.export({ format: 'jwk' })\ncrypto.createPublicKey(key).asymmetricKeyType  // 'ec'",
+      "seeAlso": [
+        "crypto.node",
+        "crypto.subtle.importKey"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/crypto.html#class-keyobject"
+      }
+    },
+    {
+      "id": "crypto.ecdh",
+      "name": "createECDH / diffieHellman / publicEncrypt / privateDecrypt / getCurves",
+      "statusRow": "Node `crypto` module: `createECDH`/`ECDH`, `diffieHellman`, `publicEncrypt`/`privateDecrypt`/`privateEncrypt`/`publicDecrypt`, `getCurves`",
+      "signature": "createECDH(curve): ECDH; ECDH.convertKey(key, curve[, inEnc, outEnc, format]); diffieHellman({ privateKey, publicKey }): Buffer; publicEncrypt(key, buffer): Buffer; privateDecrypt(key, buffer): Buffer",
+      "badge": "caveats",
+      "description": "ECDH key agreement on every built-in curve, with compressed, uncompressed or hybrid points; diffieHellman over EC, X25519 and X448 KeyObjects; RSA encryption with OAEP (oaepHash, oaepLabel), PKCS#1 or no padding, and the private-encrypt/public-decrypt pair. getCurves lists the curves.",
+      "returns": {
+        "type": "ECDH | Buffer | string[]",
+        "desc": "The ECDH object, a shared secret or ciphertext, or the curve names."
+      },
+      "differences": [
+        "On -crypto=commoncrypto each of these fails."
+      ],
+      "snippet": "const alice = crypto.createECDH('prime256v1'), bob = crypto.createECDH('prime256v1')\nconst a = alice.generateKeys(), b = bob.generateKeys()\nalice.computeSecret(b).equals(bob.computeSecret(a))  // true",
+      "seeAlso": [
+        "crypto.keyobject",
+        "crypto.subtle.deriveKey"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/crypto.html#class-ecdh"
       }
     }
   ]

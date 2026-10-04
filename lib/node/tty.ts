@@ -7,22 +7,7 @@
 import { Socket } from 'net';
 import { getColorDepth } from './internal_tty';
 import { cursorTo as rlCursorTo, moveCursor as rlMoveCursor, clearLine as rlClearLine, clearScreenDown as rlClearScreenDown } from './internal_readline_callbacks';
-
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeError, NodeRangeError } from './internal_errors';
 
 function errnoException(errno: number, syscall: string): Error {
     const code = __kml_native.errnoName(errno);

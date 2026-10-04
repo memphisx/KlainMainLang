@@ -26,6 +26,7 @@ func (e *Emitter) ensureDynJSONC() {
 		return
 	}
 	e.usedDynJSONC = true
+	e.ensureArrayGuard()    // an any-held array's writes check its integrity level
 	e.ensureShapeRuntime()  // a static object renders through its layout row (TDD-00233)
 	e.ensureDtoa()          // dynjson.c calls __kml_dtoa for float rendering
 	e.ensureInspectReduce() // and the util.inspect layout/quote helpers (ADR-01067)
@@ -38,6 +39,7 @@ func (e *Emitter) ensureDynJSONC() {
 	e.ensureFnMeta()           // dynjson.c renders tag-12 functions through fnmeta.c
 	e.ensureBoxedBigIntHooks() // and boxed bigint cells through the finalize-time hook
 	e.emitGlobal(`declare ptr @__kml_dynjson_stringify_at(i64, i64, ptr, i64, ptr)`)
+	e.emitGlobal(`declare ptr @__kml_dynjson_circ_msg()`)
 	e.emitGlobal(`declare ptr @__kml_dynarr_join(ptr)`)
 	e.emitGlobal(`declare ptr @__kml_array_join(ptr)`)             // TDD-00212; takes the box (ADR-01059)
 	e.emitGlobal(`declare ptr @__kml_array_inspect_at(ptr, i64)`)  // TDD-00212 Stage 2; takes the box + nesting depth (ADR-01067)
@@ -46,6 +48,10 @@ func (e *Emitter) ensureDynJSONC() {
 	e.emitGlobal(`declare ptr @__kml_buffer_inspect(ptr, i64)`)    // a Buffer's `<Buffer 68 69>` form
 	// ADR-01059: element access through an `any` holding a boxed static array.
 	e.emitGlobal(`declare i64 @__kml_anyarr_get_by_key(ptr, ptr)`)
+	e.emitGlobal(`declare i64 @__kml_str_get_by_key(ptr, ptr)`)
+	e.emitGlobal(`declare void @__kml_template_register(ptr, ptr)`)
+	e.emitGlobal(`declare ptr @__kml_template_raw(ptr)`)
+	e.emitGlobal(`declare i64 @__kml_anyarr_ctor(ptr)`)
 	e.emitGlobal(`declare ptr @__kml_anyarr_words(ptr)`)
 	e.emitGlobal(`declare ptr @__kml_anyarr_flat(ptr, i64, i64)`)
 	e.emitGlobal(`declare ptr @__kml_received(i64)`)

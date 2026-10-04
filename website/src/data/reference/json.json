@@ -5,8 +5,8 @@
   "statusPage": "JSON.md",
   "coverage": {
     "loose": "15/15",
-    "strict": "10/15",
-    "strictPct": 67
+    "strict": "11/15",
+    "strictPct": 73
   },
   "coversRows": "all",
   "lede": "Typed and dynamic JSON. JSON.stringify covers numbers, strings, booleans, arrays (mixed ones included), objects, pretty-printing, a class toJSON() override, and whole dynamic trees; JSON.parse projects the parse tree onto a declared target type when one is annotated, and otherwise keeps the tree fully dynamic — objects as runtime property bags, arrays as dynamic arrays — so untyped `const data = JSON.parse(s)` works like JS. A few literal-only argument restrictions remain on the pretty-printer.",
@@ -162,19 +162,16 @@
       "id": "json.stringify.pretty",
       "name": "JSON.stringify(value, null, space) — pretty-printing",
       "statusRow": "JSON.stringify(value, null, space) (pretty-printing)",
-      "signature": "JSON.stringify(value, null, space: number | string): string",
-      "badge": "caveats",
-      "description": "Pretty-prints with an indent unit and a space after each colon. A numeric space indents with N spaces; a string space is used literally as the indent unit. Empty containers stay inline even when pretty-printing.",
+      "signature": "JSON.stringify(value, replacer?, space?: number | string): string",
+      "badge": "exact",
+      "description": "Pretty-prints with an indent unit and a space after each colon. A numeric space indents with N spaces (capped at 10); a string space is used literally as the indent unit (its first 10 characters). The space and a replacer — a function called with each key and value, or a property list — may be values known only at run time. Empty containers stay inline even when pretty-printing.",
       "returns": {
         "type": "string",
         "desc": "Indented JSON text."
       },
       "exampleKey": "json/json_methods",
       "snippet": "console.log(JSON.stringify(user, null, 2))\n// {\n//   \"name\": \"bob\",\n//   \"active\": true,\n//   ...\n// }",
-      "differences": [
-        "`space` must be a literal number (N spaces, capped at 10) or literal string — a runtime `space` value is a clean compile error",
-        "The `replacer` (2nd) argument is supported only as `null`/undefined — a function/array replacer is a clean compile error, not silently ignored"
-      ],
+      "differences": [],
       "seeAlso": [
         "json.stringify.object",
         "json.stringify.tojson"

@@ -5,7 +5,7 @@
   "statusPage": "MODULES.md",
   "coversRows": "all",
   "coverage": { "loose": "18/18", "loosePct": 100, "strict": "9/18", "strictPct": 50 },
-  "lede": "ES module syntax — named/default/namespace imports, re-exports, aliasing, and static CommonJS require — resolved by a whole-program model rather than separate compilation units. The big divergence is architectural: the resolver merges the entry file plus every transitive import into one program before codegen, so there is no runtime module object, no live bindings, and no separate-compilation boundary. Namespace imports and import.meta.url are compile-time-only constructs, and an import cycle is restricted to declarations. Dynamic import() breaks the whole-program mold opt-in: under -dynamic-import=lazy each literal-specifier target compiles to a dlopen'd shared-library island loaded on first use — real laziness.",
+  "lede": "ES module syntax — named/default/namespace imports, re-exports, aliasing, and static CommonJS require — resolved by a whole-program model rather than separate compilation units. The big divergence is architectural: the resolver merges the entry file plus every transitive import into one program before codegen, so there is no runtime module object, no live bindings, and no separate-compilation boundary. Namespace imports and import.meta.url are compile-time-only constructs, and an import cycle is restricted to declarations. Dynamic import() runs its literal-specifier target on first use, sharing the program's modules as in Node; -dynamic-import=lazy moves each target's code into a shared library loaded on first use.",
   "entries": [
     {
       "id": "modules.exportDeclarations",
@@ -210,13 +210,14 @@
       "statusRow": "Dynamic import(...)",
       "signature": "const m = await import('./mod')",
       "badge": "caveats",
-      "description": "Opt-in via -dynamic-import=lazy: each literal-specifier target is compiled to its own shared-library island (.so/.dylib) beside the binary in a <binary>.d/ directory, dlopen'd on first import() and run exactly once — real laziness, so the target's top-level runs only when the call site executes, not at startup. The result object exposes the target's annotated scalar/string exports, read back through dlsym'd accessors. The executable self-locates (_NSGetExecutablePath / /proc/self/exe) so it and its .d/ directory relocate together.",
+      "description": "By default the target is compiled into the binary and its top-level runs on first import(), as a task on the program's one event loop: it shares every module instance with the program, a top-level throw rejects the import(), and an unsettled top-level await exits with code 13, as in Node. -dynamic-import=lazy keeps those semantics with each target's code in a shared library beside the binary, loaded on first use. -dynamic-import=isolated makes each target its own program with its own module instances, so its import-time state stays apart from the program's.",
       "snippet": "const m = await import('./mod')\nconsole.log(m.greeting, m.answer)",
       "differences": [
-        "Opt-in via -dynamic-import=lazy; the default -dynamic-import=eager (compile-time-merge) backend is not yet built and is a clean codegen error pointing at the flag",
         "String-literal specifier only — a runtime-computed import(expr) is a clean compile error",
-        "The result object exposes annotated scalar/string exports only; function/class/array/object exports are omitted in V1",
-        "Incompatible with --static (a static binary can't dlopen); ship the sibling <binary>.d/ island directory with the binary"
+        "The result object exposes annotated scalar/string exports only; function/class/array/object exports are omitted",
+        "import('node:…') of a builtin module is a clean compile error",
+        "lazy and isolated need the sibling <binary>.d/ directory and refuse --static; lazy is not available on Windows",
+        "isolated is a deliberate divergence: the target gets its own instance of every module it imports"
       ],
       "seeAlso": ["modules.require", "modules.namedImport", "modules.importMetaUrl"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/import" }

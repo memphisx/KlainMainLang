@@ -32,10 +32,14 @@ func parseAndCompile(src string) (string, error) {
 
 // parseStrict parses src and type-checks it as the strict lane does: a
 // program TypeScript rejects is a compile error here too (TDD-00230 P2.7).
+var declaresTopLevelMain = regexp.MustCompile(`(?m)^(?:export\s+)?(?:async\s+)?(?:function\*?|const|let|var|class)\s+main\b`)
+
 func parseStrict(src string) (*ast.Program, error) {
 	// A program naming a global a global module implements (TDD-00232) is
 	// resolved, as the CLI resolves every program: the module joins it.
-	if namesGlobalModule(src) {
+	// So is one declaring a top-level `main`: the resolver renames the
+	// program's names, as the CLI's does, so it never meets the C entry point.
+	if namesGlobalModule(src) || declaresTopLevelMain.MatchString(src) {
 		d, err := os.MkdirTemp("", "kmlglobal")
 		if err != nil {
 			return nil, err
@@ -82,8 +86,22 @@ func namesGlobalModule(src string) bool {
 	if processRE.MatchString(src) {
 		return true
 	}
+	for name := range lib.NativeGlobalUses {
+		if regexp.MustCompile(`\b` + name + `\b`).MatchString(src) {
+			return true
+		}
+	}
 	for name := range lib.GlobalModuleNames() {
 		if regexp.MustCompile(`\b` + name + `\b`).MatchString(src) {
+			return true
+		}
+	}
+	for _, uses := range lib.LoweredFuncUses() {
+		all := true
+		for _, u := range uses {
+			all = all && regexp.MustCompile(`\b`+u+`\b`).MatchString(src)
+		}
+		if all {
 			return true
 		}
 	}
@@ -128,17 +146,17 @@ func applyTestModeEnv(em *llvm.Emitter) {
 	}
 }
 
-// sidecarArg returns what to hand clang for one embedded C runtime file: the
+// sidecarObj returns what to hand clang for one embedded C runtime file: the
 // path of an object compiled once and shared by every test that needs it
 // (llvm.CSource.CachedObject, keyed by source + flags, under the temp root so
 // it follows KML_SCRATCH), instead of a fresh copy of the source recompiled for
 // each of the few thousand programs this suite builds. The code-generation
 // flags already on the caller's clang line (-O level, -fsanitize, -D, …) are
 // carried into that compile, so an ASan build gets an instrumented sidecar of
-// its own. cflags are the member's own flags; the caller still appends them to
-// the link line. If the object cannot be built, the source is written into dir
-// as before and clang reports the error through the normal path.
-func sidecarArg(t *testing.T, dir string, clangArgs []string, name, content string, cflags ...string) string {
+// its own. The caller still appends cs's own flags to the link line. If the
+// object cannot be built, the source is written into dir and clang reports
+// the error through the normal path.
+func sidecarObj(t *testing.T, dir string, clangArgs []string, cs llvm.CSource) string {
 	t.Helper()
 	var compileFlags []string
 	for _, a := range clangArgs {
@@ -149,13 +167,12 @@ func sidecarArg(t *testing.T, dir string, clangArgs []string, name, content stri
 			}
 		}
 	}
-	cs := llvm.CSource{Name: strings.TrimSuffix(name, ".c"), Content: content, CFlags: cflags}
 	if obj, err := cs.CachedObject(filepath.Join(os.TempDir(), "klainmain-cobj"), compileFlags); err == nil {
 		return obj
 	}
-	p := filepath.Join(dir, name)
-	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
-		t.Fatalf("write %s: %v", name, err)
+	p := filepath.Join(dir, cs.Name+"."+cs.SrcExt())
+	if err := os.WriteFile(p, []byte(cs.Content), 0644); err != nil {
+		t.Fatalf("write %s: %v", p, err)
 	}
 	return p
 }
@@ -192,39 +209,13 @@ func buildBinary(t *testing.T, src string) string {
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	clangArgs = appendFFIDl(t, em, dir, clangArgs)
-	clangArgs = appendFFIRegistry(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
-	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
-	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
-	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
-	clangArgs = appendH2NodeBackend(t, em, dir, clangArgs)
-	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
-	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	clangArgs = appendShape(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
-	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
-	clangArgs = appendCasemap(t, em, dir, clangArgs)
-	clangArgs = appendStringC(t, em, dir, clangArgs)
-	clangArgs = appendNumberC(t, em, dir, clangArgs)
-	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
-	clangArgs = appendURLPattern(t, em, dir, clangArgs)
-	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
-	clangArgs = appendPathWin32(t, em, dir, clangArgs)
-	clangArgs = appendThreadPool(t, em, dir, clangArgs)
-	clangArgs = appendProcMem(t, em, dir, clangArgs)
-	clangArgs = appendOSInfo(t, em, dir, clangArgs)
-	clangArgs = appendTty(t, em, dir, clangArgs)
-	clangArgs = appendTui(t, em, dir, clangArgs)
-	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
+		skipIfBackendMissing(t, em, err, out)
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
 	return binFile
@@ -258,332 +249,38 @@ func dependencyMissing(out []byte) bool {
 // skipIfBackendMissing skips when an optional bigint/crypto backend is in use
 // and the link failed on a missing dependency; it returns otherwise, and the
 // caller fails the test.
-func skipIfBackendMissing(t *testing.T, em *llvm.Emitter, bigintUsed, cryptoUsed bool, err error, out []byte) {
+func skipIfBackendMissing(t *testing.T, em *llvm.Emitter, err error, out []byte) {
 	t.Helper()
 	if !dependencyMissing(out) {
 		return
 	}
-	if bigintUsed {
+	if em.UsesBigInt() {
 		t.Skipf("bigint backend %q is not installed: clang: %v\n%s", em.BigIntBackend(), err, out)
 	}
-	if cryptoUsed {
+	if em.UsesCrypto() {
 		t.Skipf("crypto backend %q is not installed: clang: %v\n%s", em.CryptoBackend(), err, out)
 	}
 }
 
-// appendBigIntBackend compiles+links the selected bigint backend C file into the
-// clang invocation when the program used bigint, mirroring main.go so the test
-// build and the real build can't drift (the same rationale ADR-00020 applies to
-// the gc path). Returns whether bigint was used, so a caller can Skip (not Fail)
-// when the backend library isn't installed on the machine.
-func appendBigIntBackend(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) ([]string, bool) {
+// appendRuntime links every runtime C file the program uses: the list the
+// CLI links (EmbeddedCSources), so the test build cannot drift from it. The
+// webview binding is left to appendWebview, which skips when it is absent.
+func appendRuntime(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
 	t.Helper()
-	if !em.UsesBigInt() {
-		return clangArgs, false
+	srcs, err := em.EmbeddedCSources()
+	if err != nil {
+		t.Fatalf("runtime sources: %v", err)
 	}
-	backend := em.BigIntBackend()
-	src, _ := llvm.BigIntBackendSource(backend)
-	cflags, libs := llvm.LocateBigInt(backend)
-	biFile := sidecarArg(t, dir, clangArgs, "bigint.c", src, cflags...)
-	clangArgs = append(clangArgs, biFile)
-	clangArgs = append(clangArgs, cflags...)
-	clangArgs = append(clangArgs, libs...)
-	return clangArgs, true
-}
-
-// appendCryptoBackend compiles+links the selected crypto backend C file into
-// the clang invocation when the program used crypto.subtle, mirroring main.go
-// so the test build and the real build can't drift (TDD-00104; same rationale
-// as appendBigIntBackend). Returns whether crypto was used, so a caller can
-// Skip (not Fail) when the backend library isn't installed on the machine.
-// appendTLSBackend mirrors main.go's UsesTLS() block: compile tlssrc/tls.c and
-// link libssl when the program uses `tls` (TDD-00109), so the test build path
-// doesn't drift from the CLI's.
-func appendTLSBackend(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesTLS() && !em.UsesTLSHandles() {
-		return clangArgs
+	if em.UsesFFIDl() {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
 	}
-	cflags, libs := llvm.LocateTLS()
-	if em.UsesTLS() {
-		tlsFile := sidecarArg(t, dir, clangArgs, "tls.c", llvm.TLSClientSource(), cflags...)
-		clangArgs = append(clangArgs, tlsFile)
-	}
-	if em.UsesTLSHandles() {
-		hFile := sidecarArg(t, dir, clangArgs, "tlshandle.c", llvm.TLSHandleSource(), cflags...)
-		clangArgs = append(clangArgs, hFile)
-	}
-	clangArgs = append(clangArgs, cflags...)
-	clangArgs = append(clangArgs, libs...)
-	return clangArgs
-}
-
-// appendHTTP2Backend mirrors main.go's UsesHTTP2() block: compile
-// http2src/http2.c and link -lnghttp2 when the program uses the h2 server
-// (TDD-00111), so the test build path doesn't drift from the CLI's.
-func appendHTTP2Backend(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesHTTP2() {
-		return clangArgs
-	}
-	cflags, libs := llvm.LocateHTTP2()
-	h2File := sidecarArg(t, dir, clangArgs, "http2.c", llvm.HTTP2ServerSource(), cflags...)
-	clangArgs = append(clangArgs, h2File)
-	clangArgs = append(clangArgs, cflags...)
-	clangArgs = append(clangArgs, libs...)
-	return clangArgs
-}
-
-// appendH2NodeBackend mirrors main.go's UsesH2Node() block: the http2
-// module's nghttp2 session natives (http2src/h2node.c).
-func appendH2NodeBackend(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesH2Node() {
-		return clangArgs
-	}
-	cflags, libs := llvm.LocateHTTP2()
-	f := sidecarArg(t, dir, clangArgs, "h2node.c", llvm.H2NodeSource(), cflags...)
-	clangArgs = append(clangArgs, f)
-	clangArgs = append(clangArgs, cflags...)
-	clangArgs = append(clangArgs, libs...)
-	return clangArgs
-}
-
-func appendCryptoBackend(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) ([]string, bool) {
-	t.Helper()
-	if !em.UsesCrypto() {
-		return clangArgs, false
-	}
-	backend := em.CryptoBackend()
-	src, _ := llvm.CryptoBackendSource(backend)
-	cflags, libs := llvm.LocateCrypto(backend)
-	crFile := sidecarArg(t, dir, clangArgs, "crypto.c", src, cflags...)
-	clangArgs = append(clangArgs, crFile)
-	clangArgs = append(clangArgs, cflags...)
-	clangArgs = append(clangArgs, libs...)
-	return clangArgs, true
-}
-
-// appendJSONParseTree compiles the JSON parse-tree C file (__kml_json_* ABI,
-// libc only) into the clang invocation when the program used JSON.parse/
-// Response.json(), mirroring main.go so the test build and the real build can't
-// drift (TDD-00077 Track P; same rationale as appendBigIntBackend).
-func appendJSONParseTree(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesJSONParse() {
-		return clangArgs
-	}
-	jsonFile := sidecarArg(t, dir, clangArgs, "jsontree.c", llvm.JSONParseTreeSource())
-	return append(clangArgs, jsonFile)
-}
-
-// appendDynJSON compiles the dynamic-value stringify/join C file
-// (__kml_dynjson_* ABI, libc + dtoa) into the clang invocation when the
-// program stringified a dynamic value, mirroring main.go so the test build
-// and the real build can't drift (TDD-00155 Stage 2).
-// appendShape compiles the layout-lookup C file (TDD-00230 phase 5) when the
-// program reads a static object's shape at run time, mirroring
-// EmbeddedCSources.
-func appendShape(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesShapes() {
-		return clangArgs
-	}
-	f := sidecarArg(t, dir, clangArgs, "shape.c", llvm.ShapeSource())
-	return append(clangArgs, f)
-}
-
-// appendInspectReduce compiles the util.inspect line-layout C file (ADR-01067)
-// into the clang invocation when the program inspected a structured value,
-// mirroring EmbeddedCSources so the test build path can't drift from the CLI's.
-func appendInspectReduce(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesInspectReduce() {
-		return clangArgs
-	}
-	f := sidecarArg(t, dir, clangArgs, "inspect.c", llvm.InspectReduceSource())
-	return append(clangArgs, f)
-}
-
-// appendCasemap compiles the Unicode case-mapping C file (toUpperCase/
-// toLowerCase) into the clang invocation when the program used either method,
-// mirroring EmbeddedCSources.
-func appendCasemap(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesCasemap() {
-		return clangArgs
-	}
-	f := sidecarArg(t, dir, clangArgs, "casemap.c", llvm.CasemapSource())
-	return append(clangArgs, f)
-}
-
-// appendStringC compiles the string runtime (lowered String.prototype
-// methods) when the program used one, mirroring EmbeddedCSources.
-func appendStringC(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesStringC() {
-		return clangArgs
-	}
-	f := sidecarArg(t, dir, clangArgs, "string.c", llvm.StringSource())
-	return append(append(clangArgs, f), llvm.LibmLibs()...)
-}
-
-// appendNumberC compiles the number runtime (lowered Number.prototype
-// methods) when the program used one, mirroring EmbeddedCSources.
-func appendNumberC(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesNumberC() {
-		return clangArgs
-	}
-	f := sidecarArg(t, dir, clangArgs, "number.c", llvm.NumberSource())
-	return append(append(clangArgs, f), llvm.LibmLibs()...)
-}
-
-// appendFnMeta mirrors main.go's UsesFnMeta() block: compile
-// fnmetasrc/fnmeta.c (function-value name/length/inspect, TDD-00229).
-func appendFnMeta(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesFnMeta() {
-		return clangArgs
-	}
-	f := sidecarArg(t, dir, clangArgs, "fnmeta.c", llvm.FnMetaSource())
-	return append(clangArgs, f)
-}
-
-func appendDynJSON(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesDynJSON() {
-		return clangArgs
-	}
-	djFile := sidecarArg(t, dir, clangArgs, "dynjson.c", llvm.DynJSONSource())
-	return append(clangArgs, djFile)
-}
-
-// appendBufferCodecs compiles the Buffer codec C file (__kml_buf_* ABI, libc
-// only) into the clang invocation when the program used a Buffer string
-// codec, mirroring main.go so the test build and the real build can't drift
-// (TDD-00103; same rationale as appendJSONParseTree).
-func appendBufferCodecs(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesBufferCodecs() {
-		return clangArgs
-	}
-	bcFile := sidecarArg(t, dir, clangArgs, "bufcodecs.c", llvm.BufferCodecsSource())
-	return append(clangArgs, bcFile)
-}
-
-// appendURLPattern compiles the URLPattern runtime C file (__kml_urlpattern_*
-// ABI; pcre2 + curl, both already added via LinkLibs when used) into the clang
-// invocation when the program constructed a URLPattern, mirroring main.go so
-// the test build and the real build can't drift (TDD-00100).
-func appendURLPattern(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesURLPattern() {
-		return clangArgs
-	}
-	upFile := sidecarArg(t, dir, clangArgs, "urlpattern.c", llvm.URLPatternSource())
-	return append(clangArgs, upFile)
-}
-
-func appendURLSearchParams(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesURLSearchParams() {
-		return clangArgs
-	}
-	f := sidecarArg(t, dir, clangArgs, "urlsearchparams.c", llvm.URLSearchParamsSource())
-	return append(clangArgs, f)
-}
-
-// appendPathWin32 compiles the path.win32 sidecar (__kml_path_win32_* ABI,
-// libc only) into the clang invocation when the program used a win32-
-// flavoured path call — every bare `path.X` on Windows, or an explicit
-// `path.win32.X` anywhere — mirroring main.go so the test build and the real
-// build can't drift (TDD-00178).
-func appendPathWin32(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesPathWin32() {
-		return clangArgs
-	}
-	pwFile := sidecarArg(t, dir, clangArgs, "pathwin32.c", llvm.PathWin32Source())
-	return append(clangArgs, pwFile)
-}
-
-// appendDtoa compiles the JS-faithful float formatter C file (__kml_dtoa, libc
-// only) into the clang invocation when the program printed a float, mirroring
-// main.go so the test build and the real build can't drift (TDD-00080).
-func appendDtoa(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesFloatFmt() {
-		return clangArgs
-	}
-	dtoaFile := sidecarArg(t, dir, clangArgs, "dtoa.c", llvm.DtoaSource())
-	return append(clangArgs, dtoaFile)
-}
-
-// appendFFIDl adds node:ffi's libdl link flags and, on Windows (no libdl),
-// the LoadLibrary-backed dlopen/dlsym shim — mirroring embedded_c.go so the
-// test build and the real build can't drift.
-// appendFFIRegistry mirrors main.go's UsesFFIRegistry() members: node:ffi's
-// runtime registry (C) and its order container (C++ over the real
-// std::unordered_map on POSIX, the MSVC port on Windows) — TDD-00229.
-func appendFFIRegistry(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesFFIRegistry() {
-		return clangArgs
-	}
-	for _, cs := range em.FFIRegistrySources() {
-		var compileFlags []string
-		for _, a := range clangArgs {
-			if strings.HasPrefix(a, "-O") || strings.HasPrefix(a, "-g") {
-				compileFlags = append(compileFlags, a)
-			}
+	for _, cs := range srcs {
+		if strings.HasPrefix(cs.Name, "webview") {
+			continue
 		}
-		obj, err := cs.CachedObject(filepath.Join(os.TempDir(), "klainmain-cobj"), compileFlags)
-		if err != nil {
-			p := filepath.Join(dir, cs.Name+"."+cs.SrcExt())
-			if werr := os.WriteFile(p, []byte(cs.Content), 0644); werr != nil {
-				t.Fatalf("write %s: %v", p, werr)
-			}
-			obj = p
-		}
-		clangArgs = append(clangArgs, obj)
+		clangArgs = append(clangArgs, sidecarObj(t, dir, clangArgs, cs))
+		clangArgs = append(clangArgs, cs.CFlags...)
 		clangArgs = append(clangArgs, cs.Libs...)
-	}
-	return clangArgs
-}
-
-func appendFFIDl(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesFFIDl() {
-		return clangArgs
-	}
-	clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
-	if runtime.GOOS == "windows" {
-		shim := sidecarArg(t, dir, clangArgs, "ffiwindl.c", llvm.FFIWinDlShimSource())
-		clangArgs = append(clangArgs, shim)
-	}
-	return clangArgs
-}
-
-// appendSpawnSync compiles the blocking child_process *Sync C file
-// (__kml_cp_spawn_sync, libc only) into the clang invocation when used,
-// mirroring main.go so the test build and the real build can't drift.
-func appendSpawnSync(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if em.UsesSpawnSync() {
-		ssFile := sidecarArg(t, dir, clangArgs, "spawnsync.c", llvm.SpawnSyncSource())
-		clangArgs = append(clangArgs, ssFile)
-	}
-	// The self-spawn fork-chain guard C helper (ADR-00972), shared by the sync
-	// and async spawn paths.
-	if em.UsesReexecGuard() {
-		rgFile := sidecarArg(t, dir, clangArgs, "reexecguard.c", llvm.ReexecGuardSource())
-		clangArgs = append(clangArgs, rgFile)
-	}
-	// The fork IPC framing C (TDD-00141) rides the same helper.
-	if em.UsesIPC() {
-		ipcFile := sidecarArg(t, dir, clangArgs, "ipc.c", llvm.IPCSource())
-		clangArgs = append(clangArgs, ipcFile)
 	}
 	return clangArgs
 }
@@ -618,91 +315,6 @@ func appendWebview(t *testing.T, em *llvm.Emitter, dir string, clangArgs []strin
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
 	return clangArgs, true, nil
-}
-
-// appendTty compiles+links the klain:tty / terminal-control C shim (TDD-00031)
-// when the program used any terminal primitive, mirroring EmbeddedCSources so
-// the test build path can't drift from the CLI's. No extra libs (termios/ioctl
-// are in libc on both platforms).
-// appendSync links the klain:sync goroutine runtime (TDD-00143) into the test
-// build, mirroring main.go's EmbeddedCSources entry: -pthread and the
-// deprecated-ucontext warning silence on macOS.
-func appendSync(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesSync() {
-		return clangArgs
-	}
-	syncFile := sidecarArg(t, dir, clangArgs, "klainsync.c", llvm.SyncSource(), "-pthread", "-Wno-deprecated-declarations")
-	return append(clangArgs, "-pthread", "-Wno-deprecated-declarations", syncFile)
-}
-
-// appendThreadPool links the async-I/O thread-pool runtime (TDD-00185) into the
-// test build, mirroring main.go's EmbeddedCSources entry — the flags come from
-// em.ThreadPoolCFlags() (the shared source of truth) so this can't drift.
-func appendThreadPool(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesThreadPool() {
-		return clangArgs
-	}
-	poolFile := sidecarArg(t, dir, clangArgs, "klainpool.c", llvm.ThreadPoolSource(), em.ThreadPoolCFlags()...)
-	clangArgs = append(clangArgs, em.ThreadPoolCFlags()...)
-	return append(clangArgs, poolFile)
-}
-
-func appendProcMem(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesHeapStats() {
-		return clangArgs
-	}
-	pmFile := sidecarArg(t, dir, clangArgs, "procmem.c", llvm.ProcMemSource())
-	// This harness always builds in the default (non-gc) allocator mode, so the
-	// Darwin/glibc allocator-stats branch is what compiles here; the -mm=gc
-	// (KLAIN_GC) branch is exercised through the CLI / make examples path.
-	return append(clangArgs, pmFile)
-}
-
-// appendOSInfo compiles the host-information C file (os.type/release/…/
-// networkInterfaces, process.env enumeration) into the clang invocation,
-// mirroring EmbeddedCSources.
-func appendOSInfo(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesOSInfo() {
-		return clangArgs
-	}
-	f := sidecarArg(t, dir, clangArgs, "osinfo.c", llvm.OSInfoSource())
-	clangArgs = append(clangArgs, f)
-	return append(clangArgs, em.OSInfoLibs()...)
-}
-
-func appendTty(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	if !em.UsesTtyShim() {
-		return clangArgs
-	}
-	ttyFile := sidecarArg(t, dir, clangArgs, "tty.c", llvm.TTYShimSource())
-	return append(clangArgs, ttyFile)
-}
-
-// appendTui mirrors main.go's EmbeddedCSources loop for the klain:tui painter +
-// vendored Yoga link inputs (TDD-00150): each member's Content is written and
-// its CFlags/Libs appended, so the test build path links Yoga's prebuilt
-// objects exactly as the CLI does.
-func appendTui(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
-	t.Helper()
-	srcs, err := em.TuiCSources()
-	if err != nil {
-		t.Fatalf("tui sources: %v", err)
-	}
-	for _, cs := range srcs {
-		p := filepath.Join(dir, cs.Name+"."+cs.SrcExt())
-		if err := os.WriteFile(p, []byte(cs.Content), 0644); err != nil {
-			t.Fatalf("write %s: %v", cs.Name, err)
-		}
-		clangArgs = append(clangArgs, p)
-		clangArgs = append(clangArgs, cs.CFlags...)
-		clangArgs = append(clangArgs, cs.Libs...)
-	}
-	return clangArgs
 }
 
 func buildBinaryGC(t *testing.T, src string) string {
@@ -742,34 +354,10 @@ func buildBinaryGC(t *testing.T, src string) string {
 	clangArgs := []string{"-O2", llFile, shimFile, "-o", binFile}
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
-	clangArgs = appendFFIDl(t, em, dir, clangArgs)
-	clangArgs = appendFFIRegistry(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
-	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	clangArgs = appendShape(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
-	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
-	clangArgs = appendCasemap(t, em, dir, clangArgs)
-	clangArgs = appendStringC(t, em, dir, clangArgs)
-	clangArgs = appendNumberC(t, em, dir, clangArgs)
-	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
-	clangArgs = appendURLPattern(t, em, dir, clangArgs)
-	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
-	clangArgs = appendPathWin32(t, em, dir, clangArgs)
-	clangArgs = appendThreadPool(t, em, dir, clangArgs)
-	clangArgs = appendProcMem(t, em, dir, clangArgs)
-	clangArgs = appendOSInfo(t, em, dir, clangArgs)
-	clangArgs = appendTty(t, em, dir, clangArgs)
-	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
-	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
-	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
-	clangArgs = appendH2NodeBackend(t, em, dir, clangArgs)
-	clangArgs, _ = appendBigIntBackend(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
@@ -845,44 +433,18 @@ func buildBinaryFromFileCrypto(t *testing.T, srcFile, cryptoBackend string) stri
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	clangArgs = appendFFIDl(t, em, dir, clangArgs)
-	clangArgs = appendFFIRegistry(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
-	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
-	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
-	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
-	clangArgs = appendH2NodeBackend(t, em, dir, clangArgs)
-	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
-	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	clangArgs = appendShape(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
-	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
-	clangArgs = appendCasemap(t, em, dir, clangArgs)
-	clangArgs = appendStringC(t, em, dir, clangArgs)
-	clangArgs = appendNumberC(t, em, dir, clangArgs)
-	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
-	clangArgs = appendURLPattern(t, em, dir, clangArgs)
-	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
-	clangArgs = appendPathWin32(t, em, dir, clangArgs)
-	clangArgs = appendThreadPool(t, em, dir, clangArgs)
-	clangArgs = appendProcMem(t, em, dir, clangArgs)
-	clangArgs = appendOSInfo(t, em, dir, clangArgs)
-	clangArgs = appendTty(t, em, dir, clangArgs)
-	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs, webviewUsed, wverr := appendWebview(t, em, dir, clangArgs)
 	if wverr != nil {
 		t.Skipf("webview: %v", wverr)
 	}
 	clangArgs = appendEmbedBlobs(t, em, dir, clangArgs)
-	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
+		skipIfBackendMissing(t, em, err, out)
 		if webviewUsed && dependencyMissing(out) {
 			t.Skipf("webview dev packages are not installed: clang: %v\n%s", err, out)
 		}
@@ -899,10 +461,6 @@ func appendEmbedBlobs(t *testing.T, em *llvm.Emitter, dir string, clangArgs []st
 	if !em.UsesEmbeddedAssets() {
 		return clangArgs
 	}
-	// The embedded static-server C runtime (main.go links this via EmbeddedCSources;
-	// the test build path appends sources individually, so add it here).
-	eaFile := sidecarArg(t, dir, clangArgs, "embedassets.c", llvm.EmbedAssetsSource(), "-pthread")
-	clangArgs = append(clangArgs, eaFile, "-pthread")
 	blobs, err := em.EmbeddedBlobs()
 	if err != nil {
 		t.Fatalf("embedded blobs: %v", err)
@@ -977,36 +535,10 @@ func buildGCProgram(t *testing.T, dir, entry string) string {
 	}
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
-	clangArgs = appendFFIDl(t, em, dir, clangArgs)
-	clangArgs = appendFFIRegistry(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs, _ = appendBigIntBackend(t, em, dir, clangArgs)
-	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
-	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
-	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
-	clangArgs = appendH2NodeBackend(t, em, dir, clangArgs)
-	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
-	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	clangArgs = appendShape(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
-	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
-	clangArgs = appendCasemap(t, em, dir, clangArgs)
-	clangArgs = appendStringC(t, em, dir, clangArgs)
-	clangArgs = appendNumberC(t, em, dir, clangArgs)
-	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
-	clangArgs = appendURLPattern(t, em, dir, clangArgs)
-	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
-	clangArgs = appendPathWin32(t, em, dir, clangArgs)
-	clangArgs = appendThreadPool(t, em, dir, clangArgs)
-	clangArgs = appendProcMem(t, em, dir, clangArgs)
-	clangArgs = appendOSInfo(t, em, dir, clangArgs)
-	clangArgs = appendTty(t, em, dir, clangArgs)
-	clangArgs = appendTui(t, em, dir, clangArgs)
-	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
@@ -1177,36 +709,10 @@ func buildBinaryASan(t *testing.T, src string) string {
 		"-fsanitize=address", "-fsanitize=undefined",
 		llFile, asanOptFile, "-o", binFile,
 	}
-	clangArgs = appendFFIDl(t, em, dir, clangArgs)
-	clangArgs = appendFFIRegistry(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs, _ = appendBigIntBackend(t, em, dir, clangArgs)
-	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
-	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
-	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
-	clangArgs = appendH2NodeBackend(t, em, dir, clangArgs)
-	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
-	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	clangArgs = appendShape(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
-	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
-	clangArgs = appendCasemap(t, em, dir, clangArgs)
-	clangArgs = appendStringC(t, em, dir, clangArgs)
-	clangArgs = appendNumberC(t, em, dir, clangArgs)
-	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
-	clangArgs = appendURLPattern(t, em, dir, clangArgs)
-	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
-	clangArgs = appendPathWin32(t, em, dir, clangArgs)
-	clangArgs = appendThreadPool(t, em, dir, clangArgs)
-	clangArgs = appendProcMem(t, em, dir, clangArgs)
-	clangArgs = appendOSInfo(t, em, dir, clangArgs)
-	clangArgs = appendTty(t, em, dir, clangArgs)
-	clangArgs = appendTui(t, em, dir, clangArgs)
-	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
@@ -1285,39 +791,13 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	clangArgs = appendFFIDl(t, em, dir, clangArgs)
-	clangArgs = appendFFIRegistry(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
-	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
-	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
-	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
-	clangArgs = appendH2NodeBackend(t, em, dir, clangArgs)
-	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
-	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	clangArgs = appendShape(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
-	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
-	clangArgs = appendCasemap(t, em, dir, clangArgs)
-	clangArgs = appendStringC(t, em, dir, clangArgs)
-	clangArgs = appendNumberC(t, em, dir, clangArgs)
-	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
-	clangArgs = appendURLPattern(t, em, dir, clangArgs)
-	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
-	clangArgs = appendPathWin32(t, em, dir, clangArgs)
-	clangArgs = appendThreadPool(t, em, dir, clangArgs)
-	clangArgs = appendProcMem(t, em, dir, clangArgs)
-	clangArgs = appendOSInfo(t, em, dir, clangArgs)
-	clangArgs = appendTty(t, em, dir, clangArgs)
-	clangArgs = appendTui(t, em, dir, clangArgs)
-	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
+		skipIfBackendMissing(t, em, err, out)
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
 	return binFile
@@ -1340,11 +820,13 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	}
 	dir := writeMultiFile(t, files)
 
-	prog, err := resolver.ResolveProgramWithOptions(filepath.Join(dir, entryName), options.Options{Compat: "js"})
+	opts := options.Options{Compat: "js"}
+	prog, err := resolver.ResolveProgramWithOptions(filepath.Join(dir, entryName), opts)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	em := llvm.NewEmitter()
+	em.SetOptions(opts)
 	ir, err := em.EmitProgram(prog)
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
@@ -1359,39 +841,13 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	clangArgs = appendFFIDl(t, em, dir, clangArgs)
-	clangArgs = appendFFIRegistry(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
-	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
-	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
-	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
-	clangArgs = appendH2NodeBackend(t, em, dir, clangArgs)
-	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
-	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	clangArgs = appendShape(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
-	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
-	clangArgs = appendCasemap(t, em, dir, clangArgs)
-	clangArgs = appendStringC(t, em, dir, clangArgs)
-	clangArgs = appendNumberC(t, em, dir, clangArgs)
-	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
-	clangArgs = appendURLPattern(t, em, dir, clangArgs)
-	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
-	clangArgs = appendPathWin32(t, em, dir, clangArgs)
-	clangArgs = appendThreadPool(t, em, dir, clangArgs)
-	clangArgs = appendProcMem(t, em, dir, clangArgs)
-	clangArgs = appendOSInfo(t, em, dir, clangArgs)
-	clangArgs = appendTty(t, em, dir, clangArgs)
-	clangArgs = appendTui(t, em, dir, clangArgs)
-	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
+		skipIfBackendMissing(t, em, err, out)
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
 	return binFile
@@ -1463,39 +919,13 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	clangArgs = appendFFIDl(t, em, dir, clangArgs)
-	clangArgs = appendFFIRegistry(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
-	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
-	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
-	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
-	clangArgs = appendH2NodeBackend(t, em, dir, clangArgs)
-	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
-	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	clangArgs = appendShape(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
-	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
-	clangArgs = appendCasemap(t, em, dir, clangArgs)
-	clangArgs = appendStringC(t, em, dir, clangArgs)
-	clangArgs = appendNumberC(t, em, dir, clangArgs)
-	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
-	clangArgs = appendURLPattern(t, em, dir, clangArgs)
-	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
-	clangArgs = appendPathWin32(t, em, dir, clangArgs)
-	clangArgs = appendThreadPool(t, em, dir, clangArgs)
-	clangArgs = appendProcMem(t, em, dir, clangArgs)
-	clangArgs = appendOSInfo(t, em, dir, clangArgs)
-	clangArgs = appendTty(t, em, dir, clangArgs)
-	clangArgs = appendTui(t, em, dir, clangArgs)
-	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
+		skipIfBackendMissing(t, em, err, out)
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
 	return binFile
@@ -1530,39 +960,13 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	clangArgs = appendFFIDl(t, em, dir, clangArgs)
-	clangArgs = appendFFIRegistry(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
-	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
-	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
-	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
-	clangArgs = appendH2NodeBackend(t, em, dir, clangArgs)
-	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
-	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	clangArgs = appendShape(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
-	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
-	clangArgs = appendCasemap(t, em, dir, clangArgs)
-	clangArgs = appendStringC(t, em, dir, clangArgs)
-	clangArgs = appendNumberC(t, em, dir, clangArgs)
-	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
-	clangArgs = appendURLPattern(t, em, dir, clangArgs)
-	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
-	clangArgs = appendPathWin32(t, em, dir, clangArgs)
-	clangArgs = appendThreadPool(t, em, dir, clangArgs)
-	clangArgs = appendProcMem(t, em, dir, clangArgs)
-	clangArgs = appendOSInfo(t, em, dir, clangArgs)
-	clangArgs = appendTty(t, em, dir, clangArgs)
-	clangArgs = appendTui(t, em, dir, clangArgs)
-	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
+		skipIfBackendMissing(t, em, err, out)
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
 	return binFile
@@ -1593,19 +997,10 @@ func assertOutputWithDecoratorMetadata(t *testing.T, src, want string) {
 		t.Fatalf("write IR: %v", err)
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
-	clangArgs = appendFFIDl(t, em, dir, clangArgs)
-	clangArgs = appendFFIRegistry(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	clangArgs = appendShape(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
-	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
-	clangArgs = appendCasemap(t, em, dir, clangArgs)
-	clangArgs = appendStringC(t, em, dir, clangArgs)
-	clangArgs = appendNumberC(t, em, dir, clangArgs)
 	if out, err := llvm.ClangCommand(clangArgs...).CombinedOutput(); err != nil {
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
@@ -1640,19 +1035,10 @@ func assertOutputStandardDecorators(t *testing.T, src, want string) {
 		t.Fatalf("write IR: %v", err)
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
-	clangArgs = appendFFIDl(t, em, dir, clangArgs)
-	clangArgs = appendFFIRegistry(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	clangArgs = appendShape(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
-	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
-	clangArgs = appendCasemap(t, em, dir, clangArgs)
-	clangArgs = appendStringC(t, em, dir, clangArgs)
-	clangArgs = appendNumberC(t, em, dir, clangArgs)
 	if out, err := llvm.ClangCommand(clangArgs...).CombinedOutput(); err != nil {
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
@@ -1720,39 +1106,13 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
-	clangArgs = appendFFIDl(t, em, dir, clangArgs)
-	clangArgs = appendFFIRegistry(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
-	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
-	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
-	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
-	clangArgs = appendH2NodeBackend(t, em, dir, clangArgs)
-	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
-	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	clangArgs = appendShape(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
-	clangArgs = appendInspectReduce(t, em, dir, clangArgs)
-	clangArgs = appendCasemap(t, em, dir, clangArgs)
-	clangArgs = appendStringC(t, em, dir, clangArgs)
-	clangArgs = appendNumberC(t, em, dir, clangArgs)
-	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
-	clangArgs = appendURLPattern(t, em, dir, clangArgs)
-	clangArgs = appendURLSearchParams(t, em, dir, clangArgs)
-	clangArgs = appendPathWin32(t, em, dir, clangArgs)
-	clangArgs = appendThreadPool(t, em, dir, clangArgs)
-	clangArgs = appendProcMem(t, em, dir, clangArgs)
-	clangArgs = appendOSInfo(t, em, dir, clangArgs)
-	clangArgs = appendTty(t, em, dir, clangArgs)
-	clangArgs = appendTui(t, em, dir, clangArgs)
-	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
-		skipIfBackendMissing(t, em, bigintUsed, cryptoUsed, err, out)
+		skipIfBackendMissing(t, em, err, out)
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
 	return binFile

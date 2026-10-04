@@ -14,6 +14,8 @@ package llvm
 
 import (
 	"fmt"
+
+	"KlainMainLang/ast"
 )
 
 const combStateIR = "{ ptr, ptr, i64, i64 }"
@@ -86,8 +88,14 @@ func (e *Emitter) emitAsyncCombinator(kind, ptrReg, lenReg string, innerTy Type)
 func (e *Emitter) combinatorOutElem(kind string, innerTy Type) Type {
 	switch kind {
 	case "all":
+		if isVoidTy(innerTy) {
+			return TypeAny // each Promise<void> fulfils with undefined
+		}
 		return innerTy
 	case "allSettled":
+		if isVoidTy(innerTy) {
+			return SettlementType(TypeAny)
+		}
 		return SettlementType(innerTy)
 	case "any":
 		return TypePtr
@@ -99,9 +107,9 @@ func (e *Emitter) combinatorOutElem(kind string, innerTy Type) Type {
 func (e *Emitter) combinatorResultType(kind string, innerTy Type) Type {
 	switch kind {
 	case "all":
-		return ArrayOf(innerTy)
+		return ArrayOf(e.combinatorOutElem(kind, innerTy))
 	case "allSettled":
-		return ArrayOf(SettlementType(innerTy))
+		return ArrayOf(e.combinatorOutElem(kind, innerTy))
 	}
 	return innerTy
 }
@@ -120,8 +128,7 @@ func (e *Emitter) combinatorFinish(kind, q, out, n string, innerTy Type) {
 		agg := e.buildAggregateErrorObj(e.internString("All promises were rejected"), e.internString("AggregateError"), out, n)
 		bits := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", bits, agg))
-		e.storeRejectReasonI64Tag(q, fmt.Sprintf("%d", kmlTagError), bits)
-		e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 2)", q))
+		e.emitRejectPromise(q, fmt.Sprintf("%d", kmlTagError), false, bits)
 	}
 }
 
@@ -181,14 +188,7 @@ func (e *Emitter) emitCombinatorRunner(kind string, innerTy Type) string {
 	}
 	// rejectWith copies the member's reason into q and rejects it.
 	rejectWith := func() {
-		for _, f := range []int{2, 3} {
-			sp, sv, dp := e.freshReg(), e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", sp, promiseStructIR, m, f))
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", sv, sp))
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dp, promiseStructIR, q, f))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sv, dp))
-		}
-		e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 2)", q))
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_from(ptr %s, ptr %s)", q, m))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", retL))
 	}
 	resolveWith := func() {
@@ -201,20 +201,35 @@ func (e *Emitter) emitCombinatorRunner(kind string, innerTy Type) string {
 	switch kind {
 	case "all":
 		e.emitLabel(fulL)
-		e.storeArrayElementValue(out, idx, e.loadPromiseValue(m, innerTy), innerTy)
+		if isVoidTy(innerTy) {
+			e.storeArrayElementValue(out, idx, Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, TypeAny)
+		} else {
+			e.storeArrayElementValue(out, idx, e.loadPromiseValue(m, innerTy), innerTy)
+		}
 		countDown()
 		e.emitLabel(rejL)
 		rejectWith()
 	case "allSettled":
-		settleTy := SettlementType(innerTy)
+		valTy := innerTy
+		if isVoidTy(innerTy) {
+			valTy = TypeAny // a Promise<void> fulfils with undefined
+		}
+		settleTy := SettlementType(valTy)
 		e.emitLabel(fulL)
-		val := e.loadPromiseValue(m, innerTy)
+		val := Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}
+		if !isVoidTy(innerTy) {
+			val = e.loadPromiseValue(m, innerTy)
+		}
 		ok := e.buildSettlement(settleTy, e.internString("fulfilled"), val.Ref, "null")
 		e.storeArrayElement(out, idx, ok, settleTy)
 		countDown()
 		e.emitLabel(rejL)
 		reason := e.emitCaughtToAny(e.loadRejectReasonCaught(m))
-		bad := e.buildSettlement(settleTy, e.internString("rejected"), innerTy.zeroLiteral(), reason.Ref)
+		absent := valTy.zeroLiteral()
+		if valTy.IsDynamic {
+			absent = fmt.Sprint(nbUndefined)
+		}
+		bad := e.buildSettlement(settleTy, e.internString("rejected"), absent, reason.Ref)
 		e.storeArrayElement(out, idx, bad, settleTy)
 		countDown()
 	case "race":
@@ -240,3 +255,29 @@ func (e *Emitter) emitCombinatorRunner(kind string, innerTy Type) string {
 	e.functions.WriteString(fmt.Sprintf("\ndefine internal void %s(ptr %%env) {\nentry:\n%s}\n", name, body))
 	return name
 }
+
+// The Promise statics, reached through their `@intrinsic` declarations.
+func init() {
+	for name, emit := range map[string]func(e *Emitter, args []ast.Expression, pos ast.Pos) (Value, error){
+		"all":        (*Emitter).emitPromiseAll,
+		"race":       (*Emitter).emitPromiseRace,
+		"allSettled": (*Emitter).emitPromiseAllSettled,
+		"any":        (*Emitter).emitPromiseAny,
+		"reject":     (*Emitter).emitPromiseReject,
+		"resolve": func(e *Emitter, args []ast.Expression, pos ast.Pos) (Value, error) {
+			return e.emitPromiseResolve(args, pos, Type{})
+		},
+	} {
+		name, emit := name, emit
+		intrinsics["Promise."+name] = intrinsic{
+			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) { return emit(e, ex.Args, ex.GetPos()) },
+			ty: func(e *Emitter, ex *ast.CallExpression) Type {
+				t, _ := e.promiseStaticType(name, ex)
+				return t
+			},
+		}
+	}
+}
+
+// isVoidTy reports a void (or never) value type: a Promise<void>'s.
+func isVoidTy(t Type) bool { return t.IR == "void" || t.IR == "" }

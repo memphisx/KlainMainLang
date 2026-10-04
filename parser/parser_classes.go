@@ -91,6 +91,12 @@ func constMemberName(expr ast.Expression) (string, bool) {
 // `@@iterator`, dispatched by `for...of`/`for await...of` alongside the
 // structural `next(): T | null` shape.
 func wellKnownSymbolMemberName(expr ast.Expression) (string, bool) {
+	// util.inspect's custom-inspection hook, `[inspect.custom]` (also
+	// reached as `util.inspect.custom` or its registry symbol): the method
+	// console.log and util.inspect call for the object's rendering.
+	if isInspectCustomKey(expr) {
+		return "@@inspectCustom", true
+	}
 	me, ok := expr.(*ast.MemberExpression)
 	if !ok {
 		return "", false
@@ -104,6 +110,10 @@ func wellKnownSymbolMemberName(expr ast.Expression) (string, bool) {
 	}
 	if me.Property == "iterator" {
 		return "@@iterator", true
+	}
+	// [Symbol.toStringTag]: Object.prototype.toString's `[object Tag]`.
+	if me.Property == "toStringTag" {
+		return "@@toStringTag", true
 	}
 	// [Symbol.toPrimitive](hint) — the ToPrimitive ladder (TDD-00201) checks this
 	// reserved method field before valueOf/toString. Same static string-alias
@@ -730,4 +740,30 @@ func simpleTypeName(ta *ast.TypeAnnotation) bool {
 	return ta.Name != "" && ta.ElemType == nil && ta.KeyType == nil && len(ta.TypeArgs) == 0 &&
 		ta.UnionMembers == nil && ta.IntersectionMembers == nil && !ta.IsFuncType && !ta.Nullable &&
 		ta.Name != "any" && ta.Name != "unknown" && ta.Name != "object"
+}
+
+// isInspectCustomKey reports `inspect.custom`, `util.inspect.custom` or
+// `Symbol.for('nodejs.util.inspect.custom')`.
+func isInspectCustomKey(expr ast.Expression) bool {
+	if call, ok := expr.(*ast.CallExpression); ok && len(call.Args) == 1 {
+		callee, ok := call.Callee.(*ast.MemberExpression)
+		if !ok || callee.Property != "for" {
+			return false
+		}
+		sym, ok := callee.Object.(*ast.Identifier)
+		lit, isLit := call.Args[0].(*ast.StringLiteral)
+		return ok && sym.Name == "Symbol" && isLit && lit.Value == "nodejs.util.inspect.custom"
+	}
+	me, ok := expr.(*ast.MemberExpression)
+	if !ok || me.Property != "custom" {
+		return false
+	}
+	switch o := me.Object.(type) {
+	case *ast.Identifier:
+		return o.Name == "inspect"
+	case *ast.MemberExpression:
+		id, ok := o.Object.(*ast.Identifier)
+		return ok && o.Property == "inspect" && id.Name == "util"
+	}
+	return false
 }

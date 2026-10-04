@@ -1,268 +1,186 @@
-// emit_headers.go — `new Headers()`/`new Headers(init)` (TDD-00040).
-// Headers IS a Map<string,string> under the hood (HeadersType, types.go) —
-// get/set/has/delete/forEach/entries/keys/values all come for free from the
-// existing Map<string,string> runtime (emit_collections.go) with zero new
-// runtime code. Only two things are genuinely Headers-specific: normalizing
-// every key to lowercase (matching the real spec's case-insensitive header
-// names) and append(), the one method with no Map equivalent.
+// emit_headers.go — the native side of Headers (TDD-00237 Stage 3).
+// Headers is a class of the global module lib/node/kml_headers.ts. Request,
+// Response and fetch are native: they hold a Headers and use it through its
+// own members, called here from synthesized source:
+//
+//	new Headers(init)    a Request's, Response's or fetch's init.headers
+//	h.has / h.set        the implied Content-Type and a redirect's Location
+//	h.#pairs()           the list fetch sends, [name, value, …]
+//	h.#fillRaw(raw)      a fetched response's headers, from libcurl's text
+//	h.#seal(guard)       the guard, once the native side has filled the list
 package llvm
 
 import (
 	"fmt"
 
 	"KlainMainLang/ast"
-	"KlainMainLang/parser"
+	"KlainMainLang/sema"
 )
 
-// emitNewHeadersExpression implements `new Headers()` (empty) and
-// `new Headers(init)` (init: Map<string,string> — copies every entry,
-// lowercasing each key so a caller who happens to pass already-mixed-case
-// keys still ends up with normalized storage).
-func (e *Emitter) emitNewHeadersExpression(ex *ast.NewHeadersExpression) (Value, error) {
-	if ex.Init == nil {
-		e.ensureMapStrHelpers()
-		mapPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", mapPtr))
-		return Value{Ref: mapPtr, Ty: HeadersType()}, nil
+// headersClass is the program's Headers class. The resolver brings the
+// module into any program naming Request, Response or fetch
+// (lib.NativeGlobalUses).
+func (e *Emitter) headersClass(pos ast.Pos) (Type, error) {
+	cls, ok := e.globalClass("Headers")
+	if !ok {
+		return Type{}, fmt.Errorf("%d:%d: internal: the Headers class is not linked", pos.Line, pos.Col)
 	}
-	initVal, err := e.emitExpr(ex.Init)
+	return cls, nil
+}
+
+// bindValue names an already evaluated v for synthesized source: a fresh
+// internal binding whose slot holds it.
+func (e *Emitter) bindValue(v Value, pos ast.Pos) ast.Expression {
+	name := "__kml_bound_" + e.freshReg()[1:]
+	if v.Ty.IsArray {
+		e.define(name, Symbol{Ptr: e.newArrayHeaderSlotFromAggregate(v), Ty: v.Ty})
+		return ast.NewIdentifier(name, pos)
+	}
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, v.Ty.IR))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", v.Ty.IR, v.Ref, slot))
+	e.define(name, Symbol{Ptr: slot, Ty: v.Ty})
+	return ast.NewIdentifier(name, pos)
+}
+
+// emitSynthExpr emits source the compiler wrote itself, prepared as sema
+// prepares a program.
+func (e *Emitter) emitSynthExpr(x ast.Expression) (Value, error) {
+	wrap := &ast.Program{Body: []ast.Statement{ast.NewExpressionStatement(x, x.GetPos())}}
+	if err := sema.Prepare(wrap); err != nil {
+		return Value{}, err
+	}
+	return e.emitExpr(wrap.Body[0].(*ast.ExpressionStatement).Expr)
+}
+
+// emitNewHeaders is `new Headers(init)`, or `new Headers()` for a nil init.
+func (e *Emitter) emitNewHeaders(init *Value, pos ast.Pos) (Value, error) {
+	cls, err := e.headersClass(pos)
 	if err != nil {
 		return Value{}, err
 	}
-	return e.headersFromInit(initVal, ex.GetPos())
-}
-
-// headersFromInit is a fresh Headers from a HeadersInit, as the Fetch
-// standard's `fill` takes one: a Headers or Map<string, string> (copied), a
-// plain record of string fields (`{ "Content-Type": "text/plain" }`), or a
-// sequence of [name, value] pairs (appended in order). Names are lowercased.
-// Shared by `new Headers(init)` and the `headers` of fetch's, Request's and
-// Response's init.
-func (e *Emitter) headersFromInit(v Value, pos ast.Pos) (Value, error) {
-	strMap := MapType(TypePtr, TypePtr)
-	switch {
-	case isHeaderMapType(v.Ty):
-		return e.emitHeadersFromMapValue(v)
-	case plainRecordType(v.Ty):
-		for _, f := range v.Ty.UserFields() {
-			if !isStringTy(f.Ty) || f.Ty.IsArray || f.Ty.IsObject {
-				return Value{}, fmt.Errorf("%d:%d: a headers record's values must be strings (field '%s')", pos.Line, pos.Col, f.Name)
-			}
-		}
-		d := e.emitObjectToDict(v, strMap)
-		return e.emitHeadersFromMapValue(Value{Ref: d.Ref, Ty: strMap})
-	case v.Ty.IsArray:
-		// Pairs: each appended, as a Headers' own append does.
-		arr := "__kml_hinit_" + e.freshReg()[1:]
-		hdr := arr + "_h"
-		prog, err := parser.Parse(fmt.Sprintf("for (const p of %[1]s) %[2]s.append(p[0], p[1]);", arr, hdr))
-		if err != nil || len(prog.Body) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: internal: headers pairs", pos.Line, pos.Col)
-		}
-		e.ensureMapStrHelpers()
-		m := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", m))
-		hslot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", hslot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", m, hslot))
-		e.define(hdr, Symbol{Ptr: hslot, Ty: HeadersType()})
-		// Bound as a named array (its header in a slot).
-		e.define(arr, Symbol{Ptr: e.newArrayHeaderSlotFromAggregate(v), Ty: v.Ty})
-		if err := e.emitStmt(prog.Body[0]); err != nil {
-			return Value{}, err
-		}
-		return Value{Ref: m, Ty: HeadersType()}, nil
+	var args []ast.Expression
+	if init != nil {
+		args = append(args, e.bindValue(*init, pos))
 	}
-	return Value{}, fmt.Errorf("%d:%d: headers must be a Headers, a Map<string, string>, a record of strings or [name, value] pairs", pos.Line, pos.Col)
+	return e.emitSynthExpr(ast.NewNewExpression(cls.ClassName, args, pos))
 }
 
-// isHeaderMapType reports whether ty is a Map<string,string> — the one
-// shape both `new Headers(init)` and `new Request(url, init)`'s init.headers
-// field accept, whether or not IsHeaders happens to also be set.
-func isHeaderMapType(ty Type) bool {
-	return ty.IsMap && ty.MapKey != nil && ty.MapVal != nil &&
-		isStringTy(*ty.MapKey) && isStringTy(*ty.MapVal)
+// headersMember is `h.method` for synthesized source.
+func (e *Emitter) headersMember(h Value, method string, pos ast.Pos) ast.Expression {
+	return ast.NewMemberExpression(e.bindValue(h, pos), method, pos)
 }
 
-// emitHeadersFromMapValue builds a fresh Headers object by copying every
-// entry out of an already-evaluated Map<string,string>-shaped Value (which
-// may itself already be a Headers, or a plain Map<string,string> — both
-// share the identical underlying representation), lowercasing each key
-// during the copy. Shared by emitNewHeadersExpression's init-argument path
-// and emitNewRequestExpression's own init.headers extraction
-// (emit_fetch_request.go).
-func (e *Emitter) emitHeadersFromMapValue(mapVal Value) (Value, error) {
-	e.ensureMapStrHelpers()
-	e.ensureStringToLower()
-	mapPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", mapPtr))
+// emitHeadersMethod is `h.method(args…)`.
+func (e *Emitter) emitHeadersMethod(h Value, method string, pos ast.Pos, args ...ast.Expression) (Value, error) {
+	return e.emitSynthExpr(ast.NewCallExpression(e.headersMember(h, method, pos), args, pos))
+}
 
-	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapVal.Ref, "str", Type{IR: "ptr"})
+// emitHeadersSeal sets h's guard.
+func (e *Emitter) emitHeadersSeal(h Value, guard string, pos ast.Pos) error {
+	_, err := e.emitHeadersMethod(h, "#seal", pos, ast.NewStringLiteral(guard, pos))
+	return err
+}
 
-	idxAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
-
-	condL := e.freshLabel("headers.copy.cond")
-	bodyL := e.freshLabel("headers.copy.body")
-	doneL := e.freshLabel("headers.copy.done")
-
-	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
-	e.emitLabel(condL)
-	idxVal := e.freshReg()
-	isDone := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", isDone, idxVal, keysLen))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isDone, doneL, bodyL))
-
-	e.emitLabel(bodyL)
-	keyGep, keyVal := e.freshReg(), e.freshReg()
-	valGep, valVal := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", keyGep, keysPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", keyVal, keyGep))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", valGep, valsPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", valVal, valGep))
-
-	lowered := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_tolower(ptr %s)", lowered, keyVal))
-	valAsI64 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", valAsI64, valVal))
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapPtr, lowered, valAsI64))
-
-	idxNext := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
-
+// emitSetHeaderIfAbsent sets header name to the string value unless h has
+// it, or value is null.
+func (e *Emitter) emitSetHeaderIfAbsent(h Value, name, value string, pos ast.Pos) error {
+	setL, doneL := e.freshLabel("hdr.set"), e.freshLabel("hdr.done")
+	checkL := e.freshLabel("hdr.check")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(value), doneL, checkL))
+	e.emitLabel(checkL)
+	has, err := e.emitHeadersMethod(h, "has", pos, ast.NewStringLiteral(name, pos))
+	if err != nil {
+		return err
+	}
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.coerce(has, TypeBool).Ref, doneL, setL))
+	e.emitLabel(setL)
+	v := e.bindValue(Value{Ref: value, Ty: TypePtr}, pos)
+	if _, err := e.emitHeadersMethod(h, "set", pos, ast.NewStringLiteral(name, pos), v); err != nil {
+		return err
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
-	return Value{Ref: mapPtr, Ty: HeadersType()}, nil
+	return nil
 }
 
-// emitLoweredHeaderName evaluates nameExpr and lowercases it via the same
-// __kml_tolower primitive String.prototype.toLowerCase() uses — shared by
-// every Headers method below that takes a header-name argument.
-func (e *Emitter) emitLoweredHeaderName(nameExpr ast.Expression) (string, error) {
-	nameVal, err := e.emitExpr(nameExpr)
+// emitHeadersSlist is the curl_slist of h's list, as fetch sends it.
+func (e *Emitter) emitHeadersSlist(h Value, pos ast.Pos) (string, error) {
+	pairs := ast.NewCallExpression(e.headersMember(h, "#pairs", pos), nil, pos)
+	data, n, _, err := e.resolveArrayForHOF(pairs, pos)
 	if err != nil {
 		return "", err
 	}
-	nameVal = e.coerce(nameVal, TypePtr)
-	e.ensureStringToLower()
-	lowered := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_tolower(ptr %s)", lowered, nameVal.Ref))
-	return lowered, nil
+	count := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sdiv i64 %s, 2", count, n))
+	return e.buildCurlSlist(count, func(i string) (string, string) {
+		ni, vi := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 2", ni, i))
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", vi, ni))
+		return e.loadPtrAt(data, ni), e.loadPtrAt(data, vi)
+	})
 }
 
-// emitHeadersCall dispatches Headers' case-insensitive get/set/has/delete
-// (thin lowercased-key wrappers around the exact same __kml_map_str_*
-// primitives emitMapCall already calls for a plain Map<string,string>) plus
-// append (the one method with no Map equivalent). forEach/entries/keys/
-// values are deliberately not handled here — they fall through to the
-// generic Map dispatch in emit_call.go unchanged, since Headers IS a
-// Map<string,string> and none of those four need case-insensitive key
-// handling (they read back whatever was actually stored, already
-// lowercased by get/set/has/delete/append/the constructor above).
-func (e *Emitter) emitHeadersCall(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	ty, mapPtr, err := e.resolveMapOrSetForCall(objExpr, pos)
+// loadPtrAt is the ptr element i of the array data.
+func (e *Emitter) loadPtrAt(data, i string) string {
+	gep, v := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", gep, data, i))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", v, gep))
+	return v
+}
+
+// emitHeadersFromInit is the Headers of a Request's, Response's or fetch's
+// init: `new Headers(init.headers)` when init has the member (an absent
+// optional one is undefined, an empty list), else an empty Headers.
+func (e *Emitter) emitHeadersFromInit(initVal Value, pos ast.Pos) (Value, error) {
+	if idx, fieldTy, ok := initVal.Ty.FieldIndex("headers"); ok {
+		hv := e.loadFieldValue(initVal, idx, fieldTy)
+		return e.emitNewHeaders(&hv, pos)
+	}
+	return e.emitNewHeaders(nil, pos)
+}
+
+// emitResponseHeaders is a Response's headers: its own, or, for a fetched
+// response read the first time, a Headers filled from the raw header text
+// libcurl captured and stored as its own.
+func (e *Emitter) emitResponseHeaders(resp Value, pos ast.Pos) (Value, error) {
+	cls, err := e.headersClass(pos)
 	if err != nil {
 		return Value{}, err
 	}
-
-	switch method {
-	case "get":
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: headers.get() requires 1 argument", pos.Line, pos.Col)
-		}
-		lowered, err := e.emitLoweredHeaderName(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		raw := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", raw, mapPtr, lowered))
-		return e.mapValFromI64(raw, TypePtr), nil
-
-	case "has":
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: headers.has() requires 1 argument", pos.Line, pos.Col)
-		}
-		lowered, err := e.emitLoweredHeaderName(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		res := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", res, mapPtr, lowered))
-		return Value{Ref: res, Ty: TypeBool}, nil
-
-	case "delete":
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: headers.delete() requires 1 argument", pos.Line, pos.Col)
-		}
-		lowered, err := e.emitLoweredHeaderName(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		res := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_delete(ptr %s, ptr %s)", res, mapPtr, lowered))
-		return Value{Ref: res, Ty: TypeBool}, nil
-
-	case "set":
-		if len(args) != 2 {
-			return Value{}, fmt.Errorf("%d:%d: headers.set() requires 2 arguments", pos.Line, pos.Col)
-		}
-		lowered, err := e.emitLoweredHeaderName(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		valVal, err := e.emitExpr(args[1])
-		if err != nil {
-			return Value{}, err
-		}
-		valVal = e.coerce(valVal, TypePtr)
-		valAsI64 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", valAsI64, valVal.Ref))
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapPtr, lowered, valAsI64))
-		return Value{Ref: mapPtr, Ty: ty}, nil
-
-	case "append":
-		if len(args) != 2 {
-			return Value{}, fmt.Errorf("%d:%d: headers.append() requires 2 arguments", pos.Line, pos.Col)
-		}
-		lowered, err := e.emitLoweredHeaderName(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		valVal, err := e.emitExpr(args[1])
-		if err != nil {
-			return Value{}, err
-		}
-		valVal = e.coerce(valVal, TypePtr)
-
-		hasRes := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", hasRes, mapPtr, lowered))
-		combined, err := e.emitStrBranch(hasRes,
-			func() (string, error) {
-				existingRaw := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", existingRaw, mapPtr, lowered))
-				existing := e.mapValFromI64(existingRaw, TypePtr)
-				sep := e.internString(", ")
-				joined, err := e.emitStringConcat(existing, Value{Ref: sep, Ty: TypePtr})
-				if err != nil {
-					return "", err
-				}
-				final, err := e.emitStringConcat(joined, valVal)
-				if err != nil {
-					return "", err
-				}
-				return final.Ref, nil
-			},
-			func() (string, error) { return valVal.Ref, nil })
-		if err != nil {
-			return Value{}, err
-		}
-		combinedAsI64 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", combinedAsI64, combined))
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapPtr, lowered, combinedAsI64))
-		return Value{Ty: TypeVoid}, nil
+	pendIdx, pendTy, okP := resp.Ty.FieldIndex("__kml_pending")
+	hIdx, hTy, okH := resp.Ty.FieldIndex("__kml_headers")
+	if !okP || !okH {
+		return Value{}, fmt.Errorf("%d:%d: internal: not a Response", pos.Line, pos.Col)
 	}
-	return Value{}, fmt.Errorf("%d:%d: unknown Headers method '%s'", pos.Line, pos.Col, method)
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	own := e.loadFieldValue(resp, hIdx, hTy)
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", own.Ref, slot))
+	fillL, doneL := e.freshLabel("resp.hdr.fill"), e.freshLabel("resp.hdr.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(own.Ref), fillL, doneL))
+	e.emitLabel(fillL)
+	h, err := e.emitNewHeaders(nil, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	pend := e.loadFieldValue(resp, pendIdx, pendTy)
+	e.ensureFetchHeadersRaw()
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_headers_raw(ptr %s)", raw, pend.Ref))
+	if _, err := e.emitHeadersMethod(h, "#fillRaw", pos, e.bindValue(Value{Ref: raw, Ty: TypePtr}, pos)); err != nil {
+		return Value{}, err
+	}
+	if err := e.emitHeadersSeal(h, "immutable", pos); err != nil {
+		return Value{}, err
+	}
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, resp.Ty.StructIR(), resp.Ref, hIdx))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", h.Ref, gep))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", h.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+	return Value{Ref: out, Ty: cls}, nil
 }

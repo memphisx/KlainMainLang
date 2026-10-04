@@ -17,36 +17,7 @@
 #include <openssl/kdf.h>
 #include <openssl/x509.h>
 #include <openssl/rsa.h>
-
-static const EVP_MD *kml_md(long long hashId) {
-    switch (hashId) {
-    case 1: return EVP_sha1();
-    case 2: return EVP_sha256();
-    case 3: return EVP_sha384();
-    case 4: return EVP_sha512();
-    case 5: return EVP_md5(); /* crypto.createHash('md5') — TDD-00159 */
-    }
-    return NULL;
-}
-
-long long __kml_crypto_digest(long long hashId, const unsigned char *data,
-                              long long len, unsigned char *out,
-                              long long *outLen) {
-    const EVP_MD *md = kml_md(hashId);
-    unsigned int n = 0;
-    if (!md) return -3;
-    if (!EVP_Digest(data, (size_t)len, out, &n, md, NULL)) return -1;
-    *outLen = (long long)n;
-    return 0;
-}
-
-long long __kml_crypto_memeq(const unsigned char *a, const unsigned char *b,
-                             long long len) {
-    unsigned char diff = 0;
-    long long i;
-    for (i = 0; i < len; i++) diff |= (unsigned char)(a[i] ^ b[i]);
-    return diff == 0 ? 1 : 0;
-}
+#include <openssl/dsa.h>
 
 /* base64url (RFC 4648 §5, no padding) — the JWK `k`/component codec. Kept
  * in the backend file (duplicated across backends) so each stays a single
@@ -112,240 +83,11 @@ long long __kml_crypto_b64url_decode(const char *in, long long len,
     return 0;
 }
 
-static const char *kml_md_name(long long hashId) {
-    switch (hashId) {
-    case 1: return "SHA1";
-    case 2: return "SHA256";
-    case 3: return "SHA384";
-    case 4: return "SHA512";
-    case 5: return "MD5"; /* crypto.createHmac('md5') — TDD-00159 */
-    }
-    return NULL;
-}
-
-/* Streaming digest — crypto.createHash's Hash object (ADR-00637): a real
- * EVP_MD_CTX so update()/digest() hash incrementally rather than buffering. */
-void *__kml_crypto_hash_new(long long hashId) {
-    const EVP_MD *md = kml_md(hashId);
-    EVP_MD_CTX *ctx;
-    if (!md) return NULL;
-    ctx = EVP_MD_CTX_new();
-    if (!ctx) return NULL;
-    if (!EVP_DigestInit_ex(ctx, md, NULL)) { EVP_MD_CTX_free(ctx); return NULL; }
-    return ctx;
-}
-
-long long __kml_crypto_hash_update(void *ctx, const unsigned char *data,
-                                   long long len) {
-    if (!ctx) return -1;
-    return EVP_DigestUpdate((EVP_MD_CTX *)ctx, data, (size_t)len) ? 0 : -1;
-}
-
-long long __kml_crypto_hash_final(void *ctx, unsigned char *out,
-                                  long long *outLen) {
-    unsigned int n = 0;
-    int ok;
-    if (!ctx) return -1;
-    ok = EVP_DigestFinal_ex((EVP_MD_CTX *)ctx, out, &n);
-    EVP_MD_CTX_free((EVP_MD_CTX *)ctx);
-    if (!ok) return -1;
-    *outLen = (long long)n;
-    return 0;
-}
-
 /* Streaming HMAC — crypto.createHmac's Hmac object (ADR-00637). Wrap the
  * EVP_MAC and its ctx so both free together at final(). */
 struct kml_hmac_stream { EVP_MAC *mac; EVP_MAC_CTX *ctx; };
 
-void *__kml_crypto_hmac_new(long long hashId, const unsigned char *key,
-                            long long keyLen) {
-    const char *mdName = kml_md_name(hashId);
-    struct kml_hmac_stream *w;
-    OSSL_PARAM params[2];
-    if (!mdName) return NULL;
-    w = (struct kml_hmac_stream *)malloc(sizeof(*w));
-    if (!w) return NULL;
-    w->mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
-    if (!w->mac) { free(w); return NULL; }
-    w->ctx = EVP_MAC_CTX_new(w->mac);
-    if (!w->ctx) { EVP_MAC_free(w->mac); free(w); return NULL; }
-    params[0] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST,
-                                                 (char *)mdName, 0);
-    params[1] = OSSL_PARAM_construct_end();
-    if (!EVP_MAC_init(w->ctx, key, (size_t)keyLen, params)) {
-        EVP_MAC_CTX_free(w->ctx);
-        EVP_MAC_free(w->mac);
-        free(w);
-        return NULL;
-    }
-    return w;
-}
-
-long long __kml_crypto_hmac_update(void *h, const unsigned char *data,
-                                   long long len) {
-    struct kml_hmac_stream *w = (struct kml_hmac_stream *)h;
-    if (!w) return -1;
-    return EVP_MAC_update(w->ctx, data, (size_t)len) ? 0 : -1;
-}
-
-long long __kml_crypto_hmac_final(void *h, unsigned char *out,
-                                  long long *outLen) {
-    struct kml_hmac_stream *w = (struct kml_hmac_stream *)h;
-    size_t n = 0;
-    int ok;
-    if (!w) return -1;
-    ok = EVP_MAC_final(w->ctx, out, &n, 64);
-    EVP_MAC_CTX_free(w->ctx);
-    EVP_MAC_free(w->mac);
-    free(w);
-    if (!ok) return -1;
-    *outLen = (long long)n;
-    return 0;
-}
-
-long long __kml_crypto_hmac_sign(long long hashId, const unsigned char *key,
-                                 long long keyLen, const unsigned char *data,
-                                 long long len, unsigned char *out,
-                                 long long *outLen) {
-    const char *mdName = kml_md_name(hashId);
-    EVP_MAC *mac;
-    EVP_MAC_CTX *ctx;
-    OSSL_PARAM params[2];
-    size_t n = 0;
-    long long rc = -1;
-    if (!mdName) return -3;
-    mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
-    if (!mac) return -1;
-    ctx = EVP_MAC_CTX_new(mac);
-    if (!ctx) { EVP_MAC_free(mac); return -1; }
-    params[0] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST,
-                                                 (char *)mdName, 0);
-    params[1] = OSSL_PARAM_construct_end();
-    if (EVP_MAC_init(ctx, key, (size_t)keyLen, params) &&
-        EVP_MAC_update(ctx, data, (size_t)len) &&
-        EVP_MAC_final(ctx, out, &n, 64)) {
-        *outLen = (long long)n;
-        rc = 0;
-    }
-    EVP_MAC_CTX_free(ctx);
-    EVP_MAC_free(mac);
-    return rc;
-}
-
-static const EVP_CIPHER *kml_aes(long long keyLen, int gcm) {
-    switch (keyLen) {
-    case 16: return gcm ? EVP_aes_128_gcm() : EVP_aes_128_cbc();
-    case 24: return gcm ? EVP_aes_192_gcm() : EVP_aes_192_cbc();
-    case 32: return gcm ? EVP_aes_256_gcm() : EVP_aes_256_cbc();
-    }
-    return NULL;
-}
-
-long long __kml_crypto_aes_gcm(long long encrypt, const unsigned char *key,
-                               long long keyLen, const unsigned char *iv,
-                               long long ivLen, const unsigned char *aad,
-                               long long aadLen, long long tagBits,
-                               const unsigned char *in, long long inLen,
-                               unsigned char **out, long long *outLen) {
-    const EVP_CIPHER *ciph = kml_aes(keyLen, 1);
-    EVP_CIPHER_CTX *ctx;
-    unsigned char *buf;
-    int outl = 0, finl = 0;
-    long long tagBytes = tagBits / 8;
-    long long rc = -1;
-    if (!ciph) return -2;
-    if (tagBytes < 4 || tagBytes > 16) return -1;
-    if (!encrypt && inLen < tagBytes) return -1;
-    ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return -1;
-    if (encrypt) {
-        buf = (unsigned char *)malloc((size_t)(inLen + tagBytes) + 1);
-        if (buf &&
-            EVP_EncryptInit_ex(ctx, ciph, NULL, NULL, NULL) &&
-            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)ivLen, NULL) &&
-            EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv) &&
-            (aadLen == 0 ||
-             EVP_EncryptUpdate(ctx, NULL, &outl, aad, (int)aadLen)) &&
-            EVP_EncryptUpdate(ctx, buf, &outl, in, (int)inLen) &&
-            EVP_EncryptFinal_ex(ctx, buf + outl, &finl) &&
-            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, (int)tagBytes,
-                                buf + inLen)) {
-            *out = buf;
-            *outLen = inLen + tagBytes;
-            rc = 0;
-        } else {
-            free(buf);
-        }
-    } else {
-        long long ctLen = inLen - tagBytes;
-        buf = (unsigned char *)malloc((size_t)ctLen + 1);
-        if (buf &&
-            EVP_DecryptInit_ex(ctx, ciph, NULL, NULL, NULL) &&
-            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)ivLen, NULL) &&
-            EVP_DecryptInit_ex(ctx, NULL, NULL, key, iv) &&
-            (aadLen == 0 ||
-             EVP_DecryptUpdate(ctx, NULL, &outl, aad, (int)aadLen)) &&
-            EVP_DecryptUpdate(ctx, buf, &outl, in, (int)ctLen) &&
-            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, (int)tagBytes,
-                                (void *)(in + ctLen)) &&
-            EVP_DecryptFinal_ex(ctx, buf + outl, &finl)) {
-            *out = buf;
-            *outLen = ctLen;
-            rc = 0;
-        } else {
-            free(buf);
-        }
-    }
-    EVP_CIPHER_CTX_free(ctx);
-    return rc;
-}
-
 /* ── key derivation: PBKDF2 / HKDF ────────────────────────────────────────── */
-
-long long __kml_crypto_pbkdf2(long long hashId, const unsigned char *pw,
-                              long long pwLen, const unsigned char *salt,
-                              long long saltLen, long long iterations,
-                              unsigned char *out, long long outLen) {
-    const EVP_MD *md = kml_md(hashId);
-    if (!md) return -3;
-    if (iterations <= 0 || outLen <= 0) return -1;
-    if (!PKCS5_PBKDF2_HMAC((const char *)pw, (int)pwLen, salt, (int)saltLen,
-                           (int)iterations, md, (int)outLen, out))
-        return -1;
-    return 0;
-}
-
-long long __kml_crypto_hkdf(long long hashId, const unsigned char *ikm,
-                            long long ikmLen, const unsigned char *salt,
-                            long long saltLen, const unsigned char *info,
-                            long long infoLen, unsigned char *out,
-                            long long outLen) {
-    const char *mdName = kml_md_name(hashId);
-    EVP_KDF *kdf;
-    EVP_KDF_CTX *ctx;
-    OSSL_PARAM params[5];
-    int i = 0;
-    long long rc = -1;
-    if (!mdName) return -3;
-    if (outLen <= 0) return -1;
-    kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
-    if (!kdf) return -1;
-    ctx = EVP_KDF_CTX_new(kdf);
-    if (!ctx) { EVP_KDF_free(kdf); return -1; }
-    params[i++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST,
-                                                   (char *)mdName, 0);
-    params[i++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY,
-                                                    (void *)ikm, (size_t)ikmLen);
-    params[i++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT,
-                                                    (void *)salt, (size_t)saltLen);
-    params[i++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO,
-                                                    (void *)info, (size_t)infoLen);
-    params[i] = OSSL_PARAM_construct_end();
-    if (EVP_KDF_derive(ctx, out, (size_t)outLen, params) > 0) rc = 0;
-    EVP_KDF_CTX_free(ctx);
-    EVP_KDF_free(kdf);
-    return rc;
-}
 
 /* ── asymmetric: RSA-OAEP / RSA-PSS / ECDSA + key formats (TDD-00104) ─────── */
 
@@ -410,280 +152,6 @@ static EVP_PKEY *kml_pkey_from_der(const unsigned char *der, long long derLen,
     return d2i_PUBKEY(NULL, &p, (long)derLen);
 }
 
-long long __kml_crypto_gen_rsa(long long modulusBits, unsigned char **pkcs8,
-                               long long *pkcs8Len, unsigned char **spki,
-                               long long *spkiLen) {
-    EVP_PKEY *pkey = EVP_PKEY_Q_keygen(NULL, NULL, "RSA", (size_t)modulusBits);
-    long long rc;
-    if (!pkey) return -1;
-    rc = kml_pkey_to_der(pkey, pkcs8, pkcs8Len, spki, spkiLen);
-    EVP_PKEY_free(pkey);
-    return rc;
-}
-
-long long __kml_crypto_gen_ec(long long curveId, unsigned char **pkcs8,
-                              long long *pkcs8Len, unsigned char **spki,
-                              long long *spkiLen) {
-    const char *curve = kml_curve_name(curveId);
-    EVP_PKEY *pkey;
-    long long rc;
-    if (!curve) return -3;
-    pkey = EVP_PKEY_Q_keygen(NULL, NULL, "EC", curve);
-    if (!pkey) return -1;
-    rc = kml_pkey_to_der(pkey, pkcs8, pkcs8Len, spki, spkiLen);
-    EVP_PKEY_free(pkey);
-    return rc;
-}
-
-long long __kml_crypto_rsa_oaep(long long encrypt, long long hashId,
-                                const unsigned char *keyDer, long long keyDerLen,
-                                long long isPriv, const unsigned char *label,
-                                long long labelLen, const unsigned char *in,
-                                long long inLen, unsigned char **out,
-                                long long *outLen) {
-    const EVP_MD *md = kml_md(hashId);
-    EVP_PKEY *pkey;
-    EVP_PKEY_CTX *ctx;
-    size_t olen = 0;
-    unsigned char *buf = NULL;
-    long long rc = -1;
-    if (!md) return -3;
-    pkey = kml_pkey_from_der(keyDer, keyDerLen, isPriv);
-    if (!pkey) return -2;
-    ctx = EVP_PKEY_CTX_new(pkey, NULL);
-    if (ctx &&
-        (encrypt ? EVP_PKEY_encrypt_init(ctx) : EVP_PKEY_decrypt_init(ctx)) > 0 &&
-        EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING) > 0 &&
-        EVP_PKEY_CTX_set_rsa_oaep_md(ctx, md) > 0 &&
-        EVP_PKEY_CTX_set_rsa_mgf1_md(ctx, md) > 0) {
-        int labelOK = 1;
-        if (labelLen > 0) {
-            /* set0 takes ownership of an OPENSSL_malloc'd copy */
-            unsigned char *lc = (unsigned char *)OPENSSL_malloc((size_t)labelLen);
-            if (lc) memcpy(lc, label, (size_t)labelLen);
-            labelOK = lc &&
-                EVP_PKEY_CTX_set0_rsa_oaep_label(ctx, lc, (int)labelLen) > 0;
-        }
-        if (labelOK &&
-            (encrypt ? EVP_PKEY_encrypt(ctx, NULL, &olen, in, (size_t)inLen)
-                     : EVP_PKEY_decrypt(ctx, NULL, &olen, in, (size_t)inLen)) > 0) {
-            buf = (unsigned char *)malloc(olen + 1);
-            if (buf &&
-                (encrypt ? EVP_PKEY_encrypt(ctx, buf, &olen, in, (size_t)inLen)
-                         : EVP_PKEY_decrypt(ctx, buf, &olen, in, (size_t)inLen)) > 0) {
-                *out = buf;
-                *outLen = (long long)olen;
-                rc = 0;
-            } else {
-                free(buf);
-            }
-        }
-    }
-    EVP_PKEY_CTX_free(ctx);
-    EVP_PKEY_free(pkey);
-    return rc;
-}
-
-long long __kml_crypto_rsa_pss_sign(long long hashId, long long saltLen,
-                                    const unsigned char *pkcs8, long long pkcs8Len,
-                                    const unsigned char *data, long long len,
-                                    unsigned char **sig, long long *sigLen) {
-    const EVP_MD *md = kml_md(hashId);
-    EVP_PKEY *pkey;
-    EVP_MD_CTX *mctx;
-    EVP_PKEY_CTX *pctx = NULL;
-    size_t slen = 0;
-    unsigned char *buf = NULL;
-    long long rc = -1;
-    if (!md) return -3;
-    pkey = kml_pkey_from_der(pkcs8, pkcs8Len, 1);
-    if (!pkey) return -2;
-    mctx = EVP_MD_CTX_new();
-    if (mctx &&
-        EVP_DigestSignInit(mctx, &pctx, md, NULL, pkey) > 0 &&
-        EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) > 0 &&
-        EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, (int)saltLen) > 0 &&
-        EVP_DigestSign(mctx, NULL, &slen, data, (size_t)len) > 0) {
-        buf = (unsigned char *)malloc(slen + 1);
-        if (buf && EVP_DigestSign(mctx, buf, &slen, data, (size_t)len) > 0) {
-            *sig = buf;
-            *sigLen = (long long)slen;
-            rc = 0;
-        } else {
-            free(buf);
-        }
-    }
-    EVP_MD_CTX_free(mctx);
-    EVP_PKEY_free(pkey);
-    return rc;
-}
-
-long long __kml_crypto_rsa_pss_verify(long long hashId, long long saltLen,
-                                      const unsigned char *spki, long long spkiLen,
-                                      const unsigned char *data, long long len,
-                                      const unsigned char *sig, long long sigLen) {
-    const EVP_MD *md = kml_md(hashId);
-    EVP_PKEY *pkey;
-    EVP_MD_CTX *mctx;
-    EVP_PKEY_CTX *pctx = NULL;
-    long long rc = -1;
-    if (!md) return -3;
-    pkey = kml_pkey_from_der(spki, spkiLen, 0);
-    if (!pkey) return -2;
-    mctx = EVP_MD_CTX_new();
-    if (mctx &&
-        EVP_DigestVerifyInit(mctx, &pctx, md, NULL, pkey) > 0 &&
-        EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) > 0 &&
-        EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, (int)saltLen) > 0) {
-        rc = EVP_DigestVerify(mctx, sig, (size_t)sigLen, data, (size_t)len) == 1
-                 ? 1 : 0;
-    }
-    EVP_MD_CTX_free(mctx);
-    EVP_PKEY_free(pkey);
-    return rc;
-}
-
-/* Web Crypto ECDSA signatures are raw r||s (2 × curve bytes); OpenSSL
- * produces/consumes DER — convert both ways here. */
-long long __kml_crypto_ecdsa_sign(long long curveId, long long hashId,
-                                  const unsigned char *pkcs8, long long pkcs8Len,
-                                  const unsigned char *data, long long len,
-                                  unsigned char **sig, long long *sigLen) {
-    const EVP_MD *md = kml_md(hashId);
-    long long cb = kml_curve_bytes(curveId);
-    EVP_PKEY *pkey;
-    EVP_MD_CTX *mctx;
-    unsigned char der[256];
-    size_t derLen = sizeof(der);
-    long long rc = -1;
-    if (!md || cb == 0) return -3;
-    pkey = kml_pkey_from_der(pkcs8, pkcs8Len, 1);
-    if (!pkey) return -2;
-    mctx = EVP_MD_CTX_new();
-    if (mctx && EVP_DigestSignInit(mctx, NULL, md, NULL, pkey) > 0 &&
-        EVP_DigestSign(mctx, der, &derLen, data, (size_t)len) > 0) {
-        const unsigned char *p = der;
-        ECDSA_SIG *es = d2i_ECDSA_SIG(NULL, &p, (long)derLen);
-        if (es) {
-            unsigned char *raw = (unsigned char *)malloc((size_t)(2 * cb) + 1);
-            if (raw &&
-                BN_bn2binpad(ECDSA_SIG_get0_r(es), raw, (int)cb) == (int)cb &&
-                BN_bn2binpad(ECDSA_SIG_get0_s(es), raw + cb, (int)cb) == (int)cb) {
-                *sig = raw;
-                *sigLen = 2 * cb;
-                rc = 0;
-            } else {
-                free(raw);
-            }
-            ECDSA_SIG_free(es);
-        }
-    }
-    EVP_MD_CTX_free(mctx);
-    EVP_PKEY_free(pkey);
-    return rc;
-}
-
-long long __kml_crypto_ecdsa_verify(long long curveId, long long hashId,
-                                    const unsigned char *spki, long long spkiLen,
-                                    const unsigned char *data, long long len,
-                                    const unsigned char *sig, long long sigLen) {
-    const EVP_MD *md = kml_md(hashId);
-    long long cb = kml_curve_bytes(curveId);
-    EVP_PKEY *pkey;
-    EVP_MD_CTX *mctx;
-    ECDSA_SIG *es;
-    BIGNUM *r, *s;
-    unsigned char *der = NULL;
-    int derLen;
-    long long rc = -1;
-    if (!md || cb == 0) return -3;
-    if (sigLen != 2 * cb) return 0;
-    pkey = kml_pkey_from_der(spki, spkiLen, 0);
-    if (!pkey) return -2;
-    es = ECDSA_SIG_new();
-    r = BN_bin2bn(sig, (int)cb, NULL);
-    s = BN_bin2bn(sig + cb, (int)cb, NULL);
-    if (es && r && s && ECDSA_SIG_set0(es, r, s)) {
-        derLen = i2d_ECDSA_SIG(es, &der);
-        if (derLen > 0) {
-            mctx = EVP_MD_CTX_new();
-            if (mctx && EVP_DigestVerifyInit(mctx, NULL, md, NULL, pkey) > 0) {
-                rc = EVP_DigestVerify(mctx, der, (size_t)derLen, data,
-                                      (size_t)len) == 1 ? 1 : 0;
-            }
-            EVP_MD_CTX_free(mctx);
-            OPENSSL_free(der);
-        }
-        ECDSA_SIG_free(es); /* owns r/s after set0 */
-    } else {
-        if (!es || !r || !s) { BN_free(r); BN_free(s); }
-        ECDSA_SIG_free(es);
-    }
-    EVP_PKEY_free(pkey);
-    return rc;
-}
-
-/* Build an EC public EVP_PKEY from an uncompressed point (04||X||Y). */
-static EVP_PKEY *kml_ec_pub_from_point(long long curveId,
-                                       const unsigned char *pt, long long ptLen) {
-    const char *curve = kml_curve_name(curveId);
-    EVP_PKEY_CTX *ctx;
-    EVP_PKEY *pkey = NULL;
-    OSSL_PARAM_BLD *bld;
-    OSSL_PARAM *params;
-    if (!curve) return NULL;
-    bld = OSSL_PARAM_BLD_new();
-    if (!bld) return NULL;
-    OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME, curve, 0);
-    OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY, pt,
-                                     (size_t)ptLen);
-    params = OSSL_PARAM_BLD_to_param(bld);
-    ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
-    if (ctx && params && EVP_PKEY_fromdata_init(ctx) > 0)
-        EVP_PKEY_fromdata(ctx, &pkey, EVP_PKEY_PUBLIC_KEY, params);
-    EVP_PKEY_CTX_free(ctx);
-    OSSL_PARAM_free(params);
-    OSSL_PARAM_BLD_free(bld);
-    return pkey;
-}
-
-long long __kml_crypto_ec_raw_to_spki(long long curveId,
-                                      const unsigned char *raw, long long rawLen,
-                                      unsigned char **spki, long long *spkiLen) {
-    EVP_PKEY *pkey = kml_ec_pub_from_point(curveId, raw, rawLen);
-    long long rc;
-    if (!pkey) return -2;
-    rc = kml_pkey_to_der(pkey, NULL, NULL, spki, spkiLen);
-    EVP_PKEY_free(pkey);
-    return rc;
-}
-
-long long __kml_crypto_ec_spki_to_raw(long long curveId,
-                                      const unsigned char *spki, long long spkiLen,
-                                      unsigned char **raw, long long *rawLen) {
-    EVP_PKEY *pkey = kml_pkey_from_der(spki, spkiLen, 0);
-    size_t n = 0;
-    long long rc = -2;
-    (void)curveId;
-    if (!pkey) return -2;
-    if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, NULL, 0,
-                                        &n) &&
-        n > 0) {
-        unsigned char *buf = (unsigned char *)malloc(n + 1);
-        if (buf && EVP_PKEY_get_octet_string_param(
-                       pkey, OSSL_PKEY_PARAM_PUB_KEY, buf, n, &n)) {
-            *raw = buf;
-            *rawLen = (long long)n;
-            rc = 0;
-        } else {
-            free(buf);
-            rc = -1;
-        }
-    }
-    EVP_PKEY_free(pkey);
-    return rc;
-}
-
 /* ── JWK component bridge: DER ↔ base64url component strings ──────────────
  * The emitter surfaces JWKs as Map<string,string>; the shim converts between
  * the key DER and malloc'd base64url component strings (NULL when absent). */
@@ -714,27 +182,6 @@ static char *kml_pkey_bn_b64u(EVP_PKEY *pkey, const char *param) {
     out = kml_bn_b64u(bn);
     BN_free(bn);
     return out;
-}
-
-long long __kml_crypto_jwk_export_rsa(long long isPriv,
-                                      const unsigned char *der, long long derLen,
-                                      char **n, char **e, char **d, char **p,
-                                      char **q, char **dp, char **dq, char **qi) {
-    EVP_PKEY *pkey = kml_pkey_from_der(der, derLen, isPriv);
-    if (!pkey) return -2;
-    *n = kml_pkey_bn_b64u(pkey, OSSL_PKEY_PARAM_RSA_N);
-    *e = kml_pkey_bn_b64u(pkey, OSSL_PKEY_PARAM_RSA_E);
-    *d = *p = *q = *dp = *dq = *qi = NULL;
-    if (isPriv) {
-        *d = kml_pkey_bn_b64u(pkey, OSSL_PKEY_PARAM_RSA_D);
-        *p = kml_pkey_bn_b64u(pkey, OSSL_PKEY_PARAM_RSA_FACTOR1);
-        *q = kml_pkey_bn_b64u(pkey, OSSL_PKEY_PARAM_RSA_FACTOR2);
-        *dp = kml_pkey_bn_b64u(pkey, OSSL_PKEY_PARAM_RSA_EXPONENT1);
-        *dq = kml_pkey_bn_b64u(pkey, OSSL_PKEY_PARAM_RSA_EXPONENT2);
-        *qi = kml_pkey_bn_b64u(pkey, OSSL_PKEY_PARAM_RSA_COEFFICIENT1);
-    }
-    EVP_PKEY_free(pkey);
-    return (*n && *e) ? 0 : -1;
 }
 
 static BIGNUM *kml_b64u_bn(const char *s) {
@@ -798,51 +245,6 @@ long long __kml_crypto_jwk_import_rsa(const char *n, const char *e,
     return rc;
 }
 
-long long __kml_crypto_jwk_export_ec(long long curveId, long long isPriv,
-                                     const unsigned char *der, long long derLen,
-                                     char **x, char **y, char **d) {
-    EVP_PKEY *pkey = kml_pkey_from_der(der, derLen, isPriv);
-    long long cb = kml_curve_bytes(curveId);
-    unsigned char *pt = NULL;
-    size_t ptLen = 0;
-    long long rc = -1;
-    *x = *y = *d = NULL;
-    if (!pkey) return -2;
-    if (cb == 0) { EVP_PKEY_free(pkey); return -3; }
-    if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, NULL, 0,
-                                        &ptLen) && ptLen == (size_t)(1 + 2 * cb)) {
-        pt = (unsigned char *)malloc(ptLen);
-        if (pt && EVP_PKEY_get_octet_string_param(
-                      pkey, OSSL_PKEY_PARAM_PUB_KEY, pt, ptLen, &ptLen) &&
-            pt[0] == 4) {
-            long long xl, yl;
-            if (__kml_crypto_b64url_encode(pt + 1, cb, x, &xl) == 0 &&
-                __kml_crypto_b64url_encode(pt + 1 + cb, cb, y, &yl) == 0)
-                rc = 0;
-        }
-        free(pt);
-    }
-    if (rc == 0 && isPriv) {
-        BIGNUM *bn = NULL;
-        if (EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY, &bn) && bn) {
-            unsigned char *tmp = (unsigned char *)malloc((size_t)cb);
-            long long dl;
-            if (tmp && BN_bn2binpad(bn, tmp, (int)cb) == (int)cb &&
-                __kml_crypto_b64url_encode(tmp, cb, d, &dl) == 0) {
-                /* ok */
-            } else {
-                rc = -1;
-            }
-            free(tmp);
-            BN_free(bn);
-        } else {
-            rc = -1;
-        }
-    }
-    EVP_PKEY_free(pkey);
-    return rc;
-}
-
 long long __kml_crypto_jwk_import_ec(long long curveId, const char *x,
                                      const char *y, const char *d,
                                      unsigned char **der, long long *derLen,
@@ -896,38 +298,6 @@ done:
     OSSL_PARAM_BLD_free(bld);
     BN_free(priv);
     free(xb); free(yb); free(db); free(pt);
-    return rc;
-}
-
-long long __kml_crypto_aes_cbc(long long encrypt, const unsigned char *key,
-                               long long keyLen, const unsigned char *iv,
-                               const unsigned char *in, long long inLen,
-                               unsigned char **out, long long *outLen) {
-    const EVP_CIPHER *ciph = kml_aes(keyLen, 0);
-    EVP_CIPHER_CTX *ctx;
-    unsigned char *buf;
-    int outl = 0, finl = 0;
-    long long rc = -1;
-    if (!ciph) return -2;
-    ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return -1;
-    buf = (unsigned char *)malloc((size_t)inLen + 16 + 1);
-    if (buf) {
-        if (encrypt
-                ? (EVP_EncryptInit_ex(ctx, ciph, NULL, key, iv) &&
-                   EVP_EncryptUpdate(ctx, buf, &outl, in, (int)inLen) &&
-                   EVP_EncryptFinal_ex(ctx, buf + outl, &finl))
-                : (EVP_DecryptInit_ex(ctx, ciph, NULL, key, iv) &&
-                   EVP_DecryptUpdate(ctx, buf, &outl, in, (int)inLen) &&
-                   EVP_DecryptFinal_ex(ctx, buf + outl, &finl))) {
-            *out = buf;
-            *outLen = (long long)outl + finl;
-            rc = 0;
-        } else {
-            free(buf);
-        }
-    }
-    EVP_CIPHER_CTX_free(ctx);
     return rc;
 }
 
@@ -1135,11 +505,33 @@ static void knc_names_add(knc_names *n, const char *name) {
     n->buf[n->len] = 0;
 }
 
-static void knc_md_name(const OBJ_NAME *o, void *arg) {
-    knc_names_add((knc_names *)arg, o->name);
+/* Node's array_push_back (crypto_util.cc): a name is listed when the
+ * algorithm it names can be fetched from a provider (an alias is fetched by
+ * its real name). */
+static void knc_md_push(const EVP_MD *m, const char *from, const char *to, void *arg) {
+    (void)m; (void)to;
+    if (!from) return;
+    const EVP_MD *real = EVP_get_digestbyname(from);
+    const char *name = real ? EVP_MD_get0_name(real) : NULL;
+    EVP_MD *fetched = name ? EVP_MD_fetch(NULL, name, NULL) : NULL;
+    if (!fetched) { ERR_clear_error(); return; }
+    EVP_MD_free(fetched);
+    knc_names_add((knc_names *)arg, from);
 }
 
-/* which: 0 digests, 1 ciphers, 2 the linked OpenSSL's version number. */
+static void knc_cipher_push(const EVP_CIPHER *c, const char *from, const char *to, void *arg) {
+    (void)c; (void)to;
+    if (!from) return;
+    const EVP_CIPHER *real = EVP_get_cipherbyname(from);
+    const char *name = real ? EVP_CIPHER_get0_name(real) : NULL;
+    EVP_CIPHER *fetched = name ? EVP_CIPHER_fetch(NULL, name, NULL) : NULL;
+    if (!fetched) { ERR_clear_error(); return; }
+    EVP_CIPHER_free(fetched);
+    knc_names_add((knc_names *)arg, from);
+}
+
+/* which: 0 digests, 1 ciphers, 2 the linked OpenSSL's version number, 3
+ * the built-in EC curves' short names. */
 char *__kml_native_crypto_names(double which) {
     if (which == 2) {
         char v[32];
@@ -1147,7 +539,21 @@ char *__kml_native_crypto_names(double which) {
         return kml_ncrypto_str(v);
     }
     knc_names n = {0};
-    OBJ_NAME_do_all_sorted(which == 0 ? OBJ_NAME_TYPE_MD_METH : OBJ_NAME_TYPE_CIPHER_METH, knc_md_name, &n);
+    if (which == 3) {
+        size_t count = EC_get_builtin_curves(NULL, 0);
+        EC_builtin_curve *curves = (EC_builtin_curve *)malloc(sizeof(EC_builtin_curve) * (count ? count : 1));
+        EC_get_builtin_curves(curves, count);
+        for (size_t i = 0; i < count; i++) {
+            const char *sn = OBJ_nid2sn(curves[i].nid);
+            if (sn) knc_names_add(&n, sn);
+        }
+        free(curves);
+        char *out = kml_ncrypto_str(n.buf ? n.buf : "");
+        free(n.buf);
+        return out;
+    }
+    if (which == 0) EVP_MD_do_all_sorted(knc_md_push, &n);
+    else EVP_CIPHER_do_all_sorted(knc_cipher_push, &n);
     char *out = kml_ncrypto_str(n.buf ? n.buf : "");
     free(n.buf);
     return out;
@@ -1376,8 +782,46 @@ static EVP_PKEY *knc_keygen(double type, double bits, double exponent, const cha
         int nid = OBJ_txt2nid(curve ? curve : "");
         if (nid == NID_undef) nid = EC_curve_nist2nid(curve ? curve : "");
         if (nid == NID_undef || EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, nid) <= 0) goto done;
-    } else if (t == 2 || t == 3) {
-        ctx = EVP_PKEY_CTX_new_from_name(NULL, t == 2 ? "ED25519" : "X25519", NULL);
+    } else if (t == 2 || t == 3 || t == 6 || t == 7) {
+        ctx = EVP_PKEY_CTX_new_from_name(NULL, t == 2 ? "ED25519" : t == 3 ? "X25519" : t == 6 ? "ED448" : "X448", NULL);
+        if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0) goto done;
+    } else if (t == 4) {
+        /* RSA-PSS: curve carries "hash\tmgf1Hash\tsaltLength" (each may be
+         * empty), the key's restrictions. */
+        ctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA-PSS", NULL);
+        if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0) goto done;
+        if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, (int)bits) <= 0) goto done;
+        if (exponent > 0) {
+            BIGNUM *e = BN_new();
+            BN_set_word(e, (unsigned long)exponent);
+            EVP_PKEY_CTX_set1_rsa_keygen_pubexp(ctx, e);
+            BN_free(e);
+        }
+        char spec[200], *hash = spec, *mgf1 = NULL, *salt = NULL;
+        snprintf(spec, sizeof spec, "%s", curve ? curve : "");
+        if ((mgf1 = strchr(hash, '\t'))) { *mgf1++ = 0; if ((salt = strchr(mgf1, '\t'))) *salt++ = 0; }
+        if (*hash) {
+            const EVP_MD *md = EVP_get_digestbyname(hash);
+            if (!md || EVP_PKEY_CTX_set_rsa_pss_keygen_md(ctx, md) <= 0) goto done;
+        }
+        if (mgf1 && *mgf1) {
+            const EVP_MD *md = EVP_get_digestbyname(mgf1);
+            if (!md || EVP_PKEY_CTX_set_rsa_pss_keygen_mgf1_md(ctx, md) <= 0) goto done;
+        }
+        if (salt && *salt && EVP_PKEY_CTX_set_rsa_pss_keygen_saltlen(ctx, atoi(salt)) <= 0) goto done;
+    } else if (t == 5) {
+        /* DSA: bits for p, exponent carries the divisor (q) length. */
+        EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_from_name(NULL, "DSA", NULL);
+        EVP_PKEY *params = NULL;
+        if (!pctx || EVP_PKEY_paramgen_init(pctx) <= 0 || EVP_PKEY_CTX_set_dsa_paramgen_bits(pctx, (int)bits) <= 0 ||
+            (exponent > 0 && EVP_PKEY_CTX_set_dsa_paramgen_q_bits(pctx, (int)exponent) <= 0) ||
+            EVP_PKEY_paramgen(pctx, &params) <= 0) {
+            EVP_PKEY_CTX_free(pctx);
+            goto done;
+        }
+        EVP_PKEY_CTX_free(pctx);
+        ctx = EVP_PKEY_CTX_new_from_pkey(NULL, params, NULL);
+        EVP_PKEY_free(params);
         if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0) goto done;
     } else {
         goto done;
@@ -1485,20 +929,72 @@ static EVP_PKEY *knc_read_key(const char *pem, int priv, const char *pass, long 
 /* sign: the signature's length in out, or -1 (a bad key), -2 (out too
  * small; the needed size is then the negated result - 2). digest "" for a
  * one-shot key type (Ed25519). */
+/* The byte length of each of r and s in a key's IEEE P1363 signature (EC:
+ * the field size; DSA: q's), 0 for a key that signs another way. */
+static int knc_p1363_half(EVP_PKEY *k) {
+    int base = EVP_PKEY_get_base_id(k);
+    if (base == EVP_PKEY_EC) return (EVP_PKEY_get_bits(k) + 7) / 8;
+    if (base == EVP_PKEY_DSA) {
+        BIGNUM *q = NULL;
+        int n = 0;
+        if (EVP_PKEY_get_bn_param(k, OSSL_PKEY_PARAM_FFC_Q, &q) && q) n = (BN_num_bits(q) + 7) / 8;
+        BN_free(q);
+        return n;
+    }
+    return 0;
+}
+
+/* Node's sign options on the signing context: padding (< 0 the key's
+ * default), saltLength (KNC_NO_SALT none) for RSA-PSS. */
+#define KNC_NO_SALT 1e9
+static int knc_sig_opts(EVP_PKEY_CTX *pctx, EVP_PKEY *k, double padding, double saltLength) {
+    int base = EVP_PKEY_get_base_id(k);
+    if (base != EVP_PKEY_RSA && base != EVP_PKEY_RSA_PSS) return 1;
+    if (padding >= 0 && EVP_PKEY_CTX_set_rsa_padding(pctx, (int)padding) <= 0) return 0;
+    if (saltLength != KNC_NO_SALT && (padding == RSA_PKCS1_PSS_PADDING || base == EVP_PKEY_RSA_PSS) &&
+        EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, (int)saltLength) <= 0)
+        return 0;
+    return 1;
+}
+
+/* sign: the signature's length in out, -2 - n when out is too small, -1 on
+ * failure. dsaEncoding 1: IEEE P1363 (r || s) for EC and DSA keys. */
 double __kml_native_crypto_sign(const char *digest, const char *pem, void *pass, long long passLen, double hasPass,
+                                double padding, double saltLength, double dsaEncoding,
                                 void *data, long long len, void *out, long long outLen) {
     EVP_PKEY *k = knc_read_key(pem, 1, (const char *)pass, hasPass != 0 ? passLen : -1);
     if (!k) return -1;
     const EVP_MD *md = digest && *digest ? EVP_get_digestbyname(digest) : NULL;
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    EVP_PKEY_CTX *pctx = NULL;
     size_t n = 0;
     double r = -1;
-    if (ctx && EVP_DigestSignInit(ctx, NULL, md, NULL, k) > 0 && EVP_DigestSign(ctx, NULL, &n, data, (size_t)len) > 0) {
-        if ((long long)n > outLen) {
-            r = -2 - (double)n;
-        } else if (EVP_DigestSign(ctx, out, &n, data, (size_t)len) > 0) {
-            r = (double)n;
+    int half = dsaEncoding == 1 ? knc_p1363_half(k) : 0;
+    if (ctx && EVP_DigestSignInit(ctx, &pctx, md, NULL, k) > 0 && knc_sig_opts(pctx, k, padding, saltLength) &&
+        EVP_DigestSign(ctx, NULL, &n, data, (size_t)len) > 0) {
+        unsigned char *sig = (unsigned char *)malloc(n);
+        if (sig && EVP_DigestSign(ctx, sig, &n, data, (size_t)len) > 0) {
+            if (half > 0) {
+                const unsigned char *p = sig;
+                ECDSA_SIG *es = d2i_ECDSA_SIG(NULL, &p, (long)n);
+                n = (size_t)(2 * half);
+                if (!es) {
+                    r = -1;
+                } else if ((long long)n > outLen) {
+                    r = -2 - (double)n;
+                } else if (BN_bn2binpad(ECDSA_SIG_get0_r(es), out, half) == half &&
+                           BN_bn2binpad(ECDSA_SIG_get0_s(es), (unsigned char *)out + half, half) == half) {
+                    r = (double)n;
+                }
+                ECDSA_SIG_free(es);
+            } else if ((long long)n > outLen) {
+                r = -2 - (double)n;
+            } else {
+                memcpy(out, sig, n);
+                r = (double)n;
+            }
         }
+        free(sig);
     }
     EVP_MD_CTX_free(ctx);
     EVP_PKEY_free(k);
@@ -1507,14 +1003,42 @@ double __kml_native_crypto_sign(const char *digest, const char *pem, void *pass,
 
 /* verify: 1 valid, 0 invalid, -1 a bad key. */
 double __kml_native_crypto_verify(const char *digest, const char *pem, void *pass, long long passLen, double hasPass,
+                                  double padding, double saltLength, double dsaEncoding,
                                   void *data, long long len, void *sig, long long sigLen) {
     EVP_PKEY *k = knc_read_key(pem, 0, (const char *)pass, hasPass != 0 ? passLen : -1);
     if (!k) return -1;
     const EVP_MD *md = digest && *digest ? EVP_get_digestbyname(digest) : NULL;
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    EVP_PKEY_CTX *pctx = NULL;
     double r = 0;
-    if (ctx && EVP_DigestVerifyInit(ctx, NULL, md, NULL, k) > 0)
+    unsigned char *der = NULL;
+    int half = dsaEncoding == 1 ? knc_p1363_half(k) : 0;
+    if (half > 0) {
+        /* r || s back to the DER libcrypto verifies; a wrong length is a
+         * bad signature. */
+        ECDSA_SIG *es = ECDSA_SIG_new();
+        BIGNUM *br = NULL, *bs = NULL;
+        int dl = 0;
+        if (es && sigLen == 2 * half && (br = BN_bin2bn(sig, half, NULL)) &&
+            (bs = BN_bin2bn((unsigned char *)sig + half, half, NULL)) && ECDSA_SIG_set0(es, br, bs)) {
+            br = bs = NULL;
+            dl = i2d_ECDSA_SIG(es, &der);
+        }
+        BN_free(br);
+        BN_free(bs);
+        ECDSA_SIG_free(es);
+        if (dl <= 0) {
+            EVP_MD_CTX_free(ctx);
+            EVP_PKEY_free(k);
+            ERR_clear_error();
+            return 0;
+        }
+        sig = der;
+        sigLen = dl;
+    }
+    if (ctx && EVP_DigestVerifyInit(ctx, &pctx, md, NULL, k) > 0 && knc_sig_opts(pctx, k, padding, saltLength))
         r = EVP_DigestVerify(ctx, sig, (size_t)sigLen, data, (size_t)len) == 1 ? 1 : 0;
+    OPENSSL_free(der);
     EVP_MD_CTX_free(ctx);
     EVP_PKEY_free(k);
     ERR_clear_error();
@@ -1537,4 +1061,517 @@ char *__kml_native_crypto_last_error(void) {
     if (e) ERR_error_string_n(e, buf, sizeof buf);
     ERR_clear_error();
     return kml_ncrypto_str(buf);
+}
+
+/* ── KeyObject (lib/internal/crypto/keys.js) ───────────────────────────────
+ * A KeyObject's asymmetric key travels as canonical PEM: PKCS#8 for a
+ * private key, SPKI for a public one. These parse any input form into it,
+ * export it in Node's encodings, describe it, and convert JWKs. */
+#include <openssl/decoder.h>
+#include <openssl/encoder.h>
+
+/* The PEM (PKCS#8 or SPKI) of pkey, malloc'd; NULL when it has no such
+ * half (a public key has no PKCS#8). */
+static char *knc_pkey_pem(EVP_PKEY *pkey, int priv) {
+    OSSL_ENCODER_CTX *ec = OSSL_ENCODER_CTX_new_for_pkey(pkey, priv ? EVP_PKEY_KEYPAIR : EVP_PKEY_PUBLIC_KEY,
+                                                         "PEM", priv ? "PrivateKeyInfo" : "SubjectPublicKeyInfo", NULL);
+    unsigned char *data = NULL;
+    size_t len = 0;
+    char *out = NULL;
+    if (ec && OSSL_ENCODER_CTX_get_num_encoders(ec) > 0 && OSSL_ENCODER_to_data(ec, &data, &len)) {
+        out = (char *)malloc(len + 1);
+        memcpy(out, data, len);
+        out[len] = 0;
+    }
+    OPENSSL_free(data);
+    OSSL_ENCODER_CTX_free(ec);
+    return out;
+}
+
+/* Decodes a key: format 0 PEM, 1 DER; type 0 any, 1 pkcs1, 2 spki, 3 pkcs8,
+ * 4 sec1. passLen < 0: no passphrase. */
+static EVP_PKEY *knc_decode_key(const unsigned char *data, long long len, int format, int type,
+                                const unsigned char *pass, long long passLen) {
+    EVP_PKEY *pkey = NULL;
+    const char *structure = NULL, *keytype = NULL;
+    switch (type) {
+    case 1: structure = "type-specific"; keytype = "RSA"; break;
+    case 2: structure = "SubjectPublicKeyInfo"; break;
+    case 4: structure = "type-specific"; keytype = "EC"; break;
+    }
+    ERR_clear_error();
+    OSSL_DECODER_CTX *dc = OSSL_DECODER_CTX_new_for_pkey(&pkey, format == 1 ? "DER" : "PEM", structure, keytype, 0, NULL, NULL);
+    if (!dc) return NULL;
+    /* An encrypted key's passphrase as Node's PasswordCallback supplies it:
+     * none cancels the read rather than prompting. */
+    char *pw = NULL;
+    if (passLen >= 0) {
+        pw = (char *)malloc((size_t)passLen + 1);
+        memcpy(pw, pass, (size_t)passLen);
+        pw[passLen] = 0;
+    }
+    OSSL_DECODER_CTX_set_pem_password_cb(dc, knc_pass_cb, pw);
+    const unsigned char *p = data;
+    size_t n = (size_t)len;
+    if (!OSSL_DECODER_from_data(dc, &p, &n)) {
+        EVP_PKEY_free(pkey);
+        pkey = NULL;
+    }
+    OSSL_DECODER_CTX_free(dc);
+    free(pw);
+    return pkey;
+}
+
+static EVP_PKEY *knc_pem_key(const char *pem) {
+    return knc_decode_key((const unsigned char *)pem, (long long)strlen(pem), 0, 0, NULL, -1);
+}
+
+/* createPrivateKey / createPublicKey: the key's canonical PEM, or "" when
+ * the input is no such key ("!pass" when an encrypted key had no
+ * passphrase). A public key may come from a private one. */
+char *__kml_native_crypto_key_parse(void *data, long long len, double format, double type, double wantPriv,
+                                    void *pass, long long passLen, double hasPass) {
+    EVP_PKEY *pkey = knc_decode_key((const unsigned char *)data, len, (int)format, (int)type,
+                                    (const unsigned char *)pass, hasPass != 0 ? passLen : -1);
+    char *pem = pkey ? knc_pkey_pem(pkey, wantPriv != 0) : NULL;
+    EVP_PKEY_free(pkey);
+    char *out = kml_ncrypto_str(pem ? pem : "");
+    free(pem);
+    return out;
+}
+
+/* keyObject.export({ format, type, cipher, passphrase }) into out: the
+ * length, -2 - n when out is too small, -1 when the key cannot be encoded
+ * so. format 0 PEM, 1 DER; type as knc_decode_key. */
+double __kml_native_crypto_key_export(const char *pem, double priv, double format, double type, const char *cipher,
+                                      void *pass, long long passLen, double hasPass, void *out, long long outLen) {
+    ERR_clear_error();
+    EVP_PKEY *pkey = knc_pem_key(pem);
+    if (!pkey) return -1;
+    const char *structure = "SubjectPublicKeyInfo";
+    switch ((int)type) {
+    case 1: case 4: structure = "type-specific"; break;
+    case 3: structure = "PrivateKeyInfo"; break;
+    }
+    if (((int)type == 1 && !EVP_PKEY_is_a(pkey, "RSA")) || ((int)type == 4 && !EVP_PKEY_is_a(pkey, "EC"))) {
+        EVP_PKEY_free(pkey);
+        return -1;
+    }
+    OSSL_ENCODER_CTX *ec = OSSL_ENCODER_CTX_new_for_pkey(pkey, priv != 0 ? EVP_PKEY_KEYPAIR : EVP_PKEY_PUBLIC_KEY,
+                                                         (int)format == 1 ? "DER" : "PEM", structure, NULL);
+    double r = -1;
+    unsigned char *buf = NULL;
+    size_t n = 0;
+    if (ec && OSSL_ENCODER_CTX_get_num_encoders(ec) > 0) {
+        int ok = 1;
+        if (cipher && *cipher) {
+            ok = OSSL_ENCODER_CTX_set_cipher(ec, cipher, NULL) &&
+                 OSSL_ENCODER_CTX_set_passphrase(ec, (const unsigned char *)pass, hasPass != 0 ? (size_t)passLen : 0);
+        }
+        if (ok && OSSL_ENCODER_to_data(ec, &buf, &n)) {
+            if ((long long)n > outLen) {
+                r = -2 - (double)n;
+            } else {
+                memcpy(out, buf, n);
+                r = (double)n;
+            }
+        }
+    }
+    OPENSSL_free(buf);
+    OSSL_ENCODER_CTX_free(ec);
+    EVP_PKEY_free(pkey);
+    return r;
+}
+
+/* The key's Node type name ("" for one Node has no name for). */
+static const char *knc_key_type(EVP_PKEY *pkey) {
+    switch (EVP_PKEY_get_base_id(pkey)) {
+    case EVP_PKEY_RSA: return "rsa";
+    case EVP_PKEY_RSA_PSS: return "rsa-pss";
+    case EVP_PKEY_DSA: return "dsa";
+    case EVP_PKEY_DH: case EVP_PKEY_DHX: return "dh";
+    case EVP_PKEY_EC: return "ec";
+    case EVP_PKEY_ED25519: return "ed25519";
+    case EVP_PKEY_ED448: return "ed448";
+    case EVP_PKEY_X25519: return "x25519";
+    case EVP_PKEY_X448: return "x448";
+    }
+    return "";
+}
+
+/* A digest name as Node shows it (OpenSSL's long name: "sha256"). */
+static void knc_md_longname(const char *name, char *out, size_t cap) {
+    const EVP_MD *md = name && *name ? EVP_get_digestbyname(name) : NULL;
+    const char *ln = md ? OBJ_nid2ln(EVP_MD_get_type(md)) : name;
+    snprintf(out, cap, "%s", ln ? ln : "");
+}
+
+/* asymmetricKeyType and asymmetricKeyDetails, tab-separated: type,
+ * modulusLength, publicExponent (decimal), namedCurve, hashAlgorithm,
+ * mgf1HashAlgorithm, saltLength, divisorLength — empty where absent. "" for
+ * a key that does not parse. */
+char *__kml_native_crypto_key_info(const char *pem) {
+    EVP_PKEY *pkey = knc_pem_key(pem);
+    if (!pkey) return kml_ncrypto_str("");
+    char bits[24] = "", exp[1100] = "", curve[80] = "", hash[64] = "", mgf1[64] = "", salt[24] = "", div[24] = "";
+    const char *type = knc_key_type(pkey);
+    int base = EVP_PKEY_get_base_id(pkey);
+    if (base == EVP_PKEY_RSA || base == EVP_PKEY_RSA_PSS || base == EVP_PKEY_DSA) {
+        snprintf(bits, sizeof bits, "%d", EVP_PKEY_get_bits(pkey));
+    }
+    if (base == EVP_PKEY_RSA || base == EVP_PKEY_RSA_PSS) {
+        BIGNUM *e = NULL;
+        if (EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_E, &e) && e) {
+            char *d = BN_bn2dec(e);
+            snprintf(exp, sizeof exp, "%s", d ? d : "");
+            OPENSSL_free(d);
+            BN_free(e);
+        }
+    }
+    if (base == EVP_PKEY_RSA_PSS) {
+        char name[64] = "";
+        if (EVP_PKEY_get_utf8_string_param(pkey, OSSL_PKEY_PARAM_RSA_DIGEST, name, sizeof name, NULL)) {
+            knc_md_longname(name, hash, sizeof hash);
+            name[0] = 0;
+            if (EVP_PKEY_get_utf8_string_param(pkey, OSSL_PKEY_PARAM_RSA_MGF1_DIGEST, name, sizeof name, NULL))
+                knc_md_longname(name, mgf1, sizeof mgf1);
+            else
+                snprintf(mgf1, sizeof mgf1, "%s", hash);
+            int sl = 0;
+            if (EVP_PKEY_get_int_param(pkey, OSSL_PKEY_PARAM_RSA_PSS_SALTLEN, &sl)) snprintf(salt, sizeof salt, "%d", sl);
+        }
+    }
+    if (base == EVP_PKEY_EC) {
+        EVP_PKEY_get_utf8_string_param(pkey, OSSL_PKEY_PARAM_GROUP_NAME, curve, sizeof curve, NULL);
+    }
+    if (base == EVP_PKEY_DSA) {
+        BIGNUM *q = NULL;
+        if (EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_FFC_Q, &q) && q) {
+            snprintf(div, sizeof div, "%d", BN_num_bits(q));
+            BN_free(q);
+        }
+    }
+    EVP_PKEY_free(pkey);
+    size_t cap = strlen(type) + strlen(bits) + strlen(exp) + strlen(curve) + strlen(hash) + strlen(mgf1) + strlen(salt) + strlen(div) + 16;
+    char *buf = (char *)malloc(cap);
+    snprintf(buf, cap, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s", type, bits, exp, curve, hash, mgf1, salt, div);
+    char *out = kml_ncrypto_str(buf);
+    free(buf);
+    return out;
+}
+
+static void knc_append(char **buf, size_t *len, const char *key, const char *val) {
+    if (!val) return;
+    size_t add = strlen(key) + strlen(val) + 2;
+    *buf = (char *)realloc(*buf, *len + add + 1);
+    *len += (size_t)snprintf(*buf + *len, add + 1, "%s%s=%s", *len ? "\t" : "", key, val);
+}
+
+static char *knc_b64u(const unsigned char *p, long long n) {
+    char *out = NULL;
+    long long ol;
+    if (__kml_crypto_b64url_encode(p, n, &out, &ol) != 0) return NULL;
+    return out;
+}
+
+/* keyObject.export({ format: 'jwk' }): the members in Node's order,
+ * tab-separated name=value; "!type" for a key type JWK has no form for,
+ * "!curve" for an EC curve it has no name for. */
+char *__kml_native_crypto_key_jwk(const char *pem, double priv) {
+    EVP_PKEY *pkey = knc_pem_key(pem);
+    char *buf = NULL;
+    size_t len = 0;
+    const char *err = "!type";
+    if (!pkey) return kml_ncrypto_str("!type");
+    int base = EVP_PKEY_get_base_id(pkey);
+    if (base == EVP_PKEY_RSA) {
+        static const char *names[8] = {"n", "e", "d", "p", "q", "dp", "dq", "qi"};
+        static const char *params[8] = {OSSL_PKEY_PARAM_RSA_N, OSSL_PKEY_PARAM_RSA_E, OSSL_PKEY_PARAM_RSA_D,
+                                        OSSL_PKEY_PARAM_RSA_FACTOR1, OSSL_PKEY_PARAM_RSA_FACTOR2,
+                                        OSSL_PKEY_PARAM_RSA_EXPONENT1, OSSL_PKEY_PARAM_RSA_EXPONENT2,
+                                        OSSL_PKEY_PARAM_RSA_COEFFICIENT1};
+        knc_append(&buf, &len, "kty", "RSA");
+        for (int i = 0; i < (priv != 0 ? 8 : 2); i++) {
+            char *v = kml_pkey_bn_b64u(pkey, params[i]);
+            knc_append(&buf, &len, names[i], v);
+            free(v);
+        }
+        err = NULL;
+    } else if (base == EVP_PKEY_EC) {
+        char group[80] = "";
+        const char *crv = NULL;
+        EVP_PKEY_get_utf8_string_param(pkey, OSSL_PKEY_PARAM_GROUP_NAME, group, sizeof group, NULL);
+        if (!strcmp(group, "prime256v1")) crv = "P-256";
+        else if (!strcmp(group, "secp384r1")) crv = "P-384";
+        else if (!strcmp(group, "secp521r1")) crv = "P-521";
+        else if (!strcmp(group, "secp256k1")) crv = "secp256k1";
+        err = "!curve";
+        if (crv) {
+            long long cb = (EVP_PKEY_get_bits(pkey) + 7) / 8;
+            unsigned char pt[200];
+            size_t ptLen = 0;
+            if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, pt, sizeof pt, &ptLen) &&
+                ptLen == (size_t)(1 + 2 * cb) && pt[0] == 4) {
+                char *x = knc_b64u(pt + 1, cb), *y = knc_b64u(pt + 1 + cb, cb);
+                knc_append(&buf, &len, "kty", "EC");
+                knc_append(&buf, &len, "x", x);
+                knc_append(&buf, &len, "y", y);
+                knc_append(&buf, &len, "crv", crv);
+                free(x);
+                free(y);
+                err = NULL;
+                if (priv != 0) {
+                    BIGNUM *bn = NULL;
+                    err = "!type";
+                    if (EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY, &bn) && bn) {
+                        unsigned char tmp[80];
+                        if (BN_bn2binpad(bn, tmp, (int)cb) == (int)cb) {
+                            char *d = knc_b64u(tmp, cb);
+                            knc_append(&buf, &len, "d", d);
+                            free(d);
+                            err = NULL;
+                        }
+                        BN_free(bn);
+                    }
+                }
+            }
+        }
+    } else if (base == EVP_PKEY_ED25519 || base == EVP_PKEY_ED448 || base == EVP_PKEY_X25519 || base == EVP_PKEY_X448) {
+        const char *crv = base == EVP_PKEY_ED25519 ? "Ed25519" : base == EVP_PKEY_ED448 ? "Ed448"
+                        : base == EVP_PKEY_X25519 ? "X25519" : "X448";
+        unsigned char raw[64];
+        size_t n = sizeof raw;
+        knc_append(&buf, &len, "crv", crv);
+        if (priv != 0 && EVP_PKEY_get_raw_private_key(pkey, raw, &n)) {
+            char *d = knc_b64u(raw, (long long)n);
+            knc_append(&buf, &len, "d", d);
+            free(d);
+        }
+        n = sizeof raw;
+        if (EVP_PKEY_get_raw_public_key(pkey, raw, &n)) {
+            char *x = knc_b64u(raw, (long long)n);
+            knc_append(&buf, &len, "x", x);
+            free(x);
+        }
+        knc_append(&buf, &len, "kty", "OKP");
+        err = NULL;
+    }
+    EVP_PKEY_free(pkey);
+    char *out = kml_ncrypto_str(err ? err : buf ? buf : "");
+    free(buf);
+    return out;
+}
+
+/* createPrivateKey/createPublicKey({ key: jwk, format: 'jwk' }): the key's
+ * canonical PEM, or "" when the members describe no such key. kty 0 RSA,
+ * 1 EC, 2 OKP; for EC, crv names the curve; for OKP, Ed25519/Ed448/X25519/
+ * X448. A private key needs d. */
+char *__kml_native_crypto_key_from_jwk(double kty, const char *crv, const char *n, const char *e, const char *d,
+                                       const char *p, const char *q, const char *dp, const char *dq, const char *qi,
+                                       const char *x, const char *y, double wantPriv) {
+#define KNC_OPT(s) ((s) && *(s) ? (s) : NULL)
+    unsigned char *der = NULL;
+    long long derLen = 0, kind = 0;
+    EVP_PKEY *pkey = NULL;
+    int priv = wantPriv != 0;
+    if (priv && !KNC_OPT(d)) return kml_ncrypto_str("");
+    if ((int)kty == 0) {
+        if (__kml_crypto_jwk_import_rsa(KNC_OPT(n), KNC_OPT(e), priv ? KNC_OPT(d) : NULL, KNC_OPT(p), KNC_OPT(q),
+                                        KNC_OPT(dp), KNC_OPT(dq), KNC_OPT(qi), &der, &derLen, &kind) == 0)
+            pkey = kml_pkey_from_der(der, derLen, priv);
+    } else if ((int)kty == 1) {
+        long long id = !strcmp(crv, "P-256") ? 1 : !strcmp(crv, "P-384") ? 2 : !strcmp(crv, "P-521") ? 3 : 0;
+        if (id && __kml_crypto_jwk_import_ec(id, KNC_OPT(x), KNC_OPT(y), priv ? KNC_OPT(d) : NULL, &der, &derLen, &kind) == 0)
+            pkey = kml_pkey_from_der(der, derLen, priv);
+    } else if ((int)kty == 2) {
+        int nid = !strcmp(crv, "Ed25519") ? EVP_PKEY_ED25519 : !strcmp(crv, "Ed448") ? EVP_PKEY_ED448
+                : !strcmp(crv, "X25519") ? EVP_PKEY_X25519 : !strcmp(crv, "X448") ? EVP_PKEY_X448 : 0;
+        unsigned char *raw = NULL;
+        long long rawLen = 0;
+        const char *src = priv ? d : x;
+        if (nid && KNC_OPT(src) && __kml_crypto_b64url_decode(src, (long long)strlen(src), &raw, &rawLen) == 0) {
+            pkey = priv ? EVP_PKEY_new_raw_private_key(nid, NULL, raw, (size_t)rawLen)
+                        : EVP_PKEY_new_raw_public_key(nid, NULL, raw, (size_t)rawLen);
+            free(raw);
+        }
+    }
+#undef KNC_OPT
+    free(der);
+    char *pem = pkey ? knc_pkey_pem(pkey, priv) : NULL;
+    EVP_PKEY_free(pkey);
+    char *out = kml_ncrypto_str(pem ? pem : "");
+    free(pem);
+    ERR_clear_error();
+    return out;
+}
+
+/* publicEncrypt (op 0), privateDecrypt (1), privateEncrypt (2) and
+ * publicDecrypt (3) — Node's RSA cipher jobs (crypto_cipher.cc): the result's
+ * length in out, -2 - n when out is too small, -1 on failure, -3 for an
+ * unknown OAEP digest. padding is the RSA_* padding; oaepHash and label
+ * apply to OAEP. */
+double __kml_native_crypto_pkey_crypt(double op, const char *pem, void *pass, long long passLen, double hasPass,
+                                      double padding, const char *oaepHash, void *label, long long labelLen,
+                                      void *data, long long len, void *out, long long outLen) {
+    int o = (int)op;
+    ERR_clear_error();
+    EVP_PKEY *k = knc_read_key(pem, o == 1 || o == 2, (const char *)pass, hasPass != 0 ? passLen : -1);
+    if (!k) return -1;
+    double r = -1;
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(k, NULL);
+    int ok = ctx != NULL;
+    if (ok) {
+        switch (o) {
+        case 0: ok = EVP_PKEY_encrypt_init(ctx) > 0; break;
+        case 1: ok = EVP_PKEY_decrypt_init(ctx) > 0; break;
+        case 2: ok = EVP_PKEY_sign_init(ctx) > 0; break;
+        default: ok = EVP_PKEY_verify_recover_init(ctx) > 0; break;
+        }
+    }
+    if (ok) ok = EVP_PKEY_CTX_set_rsa_padding(ctx, (int)padding) > 0;
+    if (ok && (int)padding == RSA_PKCS1_OAEP_PADDING) {
+        const EVP_MD *md = EVP_get_digestbyname(oaepHash && *oaepHash ? oaepHash : "sha1");
+        if (!md) {
+            EVP_PKEY_CTX_free(ctx);
+            EVP_PKEY_free(k);
+            return -3;
+        }
+        ok = EVP_PKEY_CTX_set_rsa_oaep_md(ctx, md) > 0;
+        if (ok && labelLen > 0) {
+            unsigned char *l = (unsigned char *)OPENSSL_malloc((size_t)labelLen);
+            memcpy(l, label, (size_t)labelLen);
+            ok = EVP_PKEY_CTX_set0_rsa_oaep_label(ctx, l, (int)labelLen) > 0;
+            if (!ok) OPENSSL_free(l);
+        }
+    }
+    size_t n = 0;
+    if (ok) {
+        const unsigned char *in = (const unsigned char *)data;
+        switch (o) {
+        case 0: ok = EVP_PKEY_encrypt(ctx, NULL, &n, in, (size_t)len) > 0; break;
+        case 1: ok = EVP_PKEY_decrypt(ctx, NULL, &n, in, (size_t)len) > 0; break;
+        case 2: ok = EVP_PKEY_sign(ctx, NULL, &n, in, (size_t)len) > 0; break;
+        default: ok = EVP_PKEY_verify_recover(ctx, NULL, &n, in, (size_t)len) > 0; break;
+        }
+    }
+    if (ok) {
+        unsigned char *buf = (unsigned char *)malloc(n ? n : 1);
+        const unsigned char *in = (const unsigned char *)data;
+        switch (o) {
+        case 0: ok = EVP_PKEY_encrypt(ctx, buf, &n, in, (size_t)len) > 0; break;
+        case 1: ok = EVP_PKEY_decrypt(ctx, buf, &n, in, (size_t)len) > 0; break;
+        case 2: ok = EVP_PKEY_sign(ctx, buf, &n, in, (size_t)len) > 0; break;
+        default: ok = EVP_PKEY_verify_recover(ctx, buf, &n, in, (size_t)len) > 0; break;
+        }
+        if (ok) {
+            if ((long long)n > outLen) {
+                r = -2 - (double)n;
+            } else {
+                memcpy(out, buf, n);
+                r = (double)n;
+            }
+        }
+        free(buf);
+    }
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(k);
+    return r;
+}
+
+/* ECDH (lib/internal/crypto/diffiehellman.js's ECDH over node's ECDH
+ * binding), stateless: op 0 a new private key; 1 the public point of priv
+ * in format (2 compressed, 4 uncompressed, 6 hybrid); 2 the shared secret of
+ * priv and the peer point pub; 3 pub re-encoded in format; 4 priv checked
+ * (0 valid). The result's length in out, -1 on failure, -6 an invalid
+ * point, -7 an invalid private key, -8 an unknown curve. */
+double __kml_native_crypto_ecdh(double op, const char *curve, void *priv, long long privLen, void *pub, long long pubLen,
+                                double format, void *out, long long outLen) {
+    int nid = OBJ_sn2nid(curve ? curve : "");
+    if (nid == NID_undef) nid = EC_curve_nist2nid(curve ? curve : "");
+    EC_GROUP *group = nid != NID_undef ? EC_GROUP_new_by_curve_name(nid) : NULL;
+    if (!group) return -8;
+    double r = -1;
+    BN_CTX *bc = BN_CTX_new();
+    BIGNUM *k = NULL;
+    EC_POINT *pt = NULL;
+    const BIGNUM *order = EC_GROUP_get0_order(group);
+    int fieldBytes = (EC_GROUP_get_degree(group) + 7) / 8;
+    int o = (int)op;
+    if (o == 0) {
+        k = BN_new();
+        do {
+            if (!BN_rand_range(k, order)) goto done;
+        } while (BN_is_zero(k));
+    } else if (o == 1 || o == 2 || o == 4) {
+        k = BN_bin2bn((const unsigned char *)priv, (int)privLen, NULL);
+        if (!k || BN_is_zero(k) || BN_cmp(k, order) >= 0) { r = -7; goto done; }
+        if (o == 4) { r = 0; goto done; }
+    }
+    if (o == 0) {
+        if (fieldBytes > outLen) goto done;
+        int nb = BN_num_bytes(order);
+        if (BN_bn2binpad(k, out, nb) != nb) goto done;
+        r = nb;
+        goto done;
+    }
+    pt = EC_POINT_new(group);
+    if (!pt) goto done;
+    if (o == 1) {
+        if (!EC_POINT_mul(group, pt, k, NULL, NULL, bc)) goto done;
+    } else {
+        if (!EC_POINT_oct2point(group, pt, (const unsigned char *)pub, (size_t)pubLen, bc) ||
+            EC_POINT_is_on_curve(group, pt, bc) != 1) {
+            r = -6;
+            goto done;
+        }
+    }
+    if (o == 2) {
+        EC_POINT *s = EC_POINT_new(group);
+        BIGNUM *x = BN_new();
+        if (s && x && EC_POINT_mul(group, s, NULL, pt, k, bc) && !EC_POINT_is_at_infinity(group, s) &&
+            EC_POINT_get_affine_coordinates(group, s, x, NULL, bc) && fieldBytes <= outLen &&
+            BN_bn2binpad(x, out, fieldBytes) == fieldBytes)
+            r = fieldBytes;
+        EC_POINT_free(s);
+        BN_free(x);
+        goto done;
+    }
+    {
+        point_conversion_form_t form = (int)format == 2 ? POINT_CONVERSION_COMPRESSED
+                                     : (int)format == 6 ? POINT_CONVERSION_HYBRID : POINT_CONVERSION_UNCOMPRESSED;
+        size_t n = EC_POINT_point2oct(group, pt, form, NULL, 0, bc);
+        if (n > 0 && (long long)n <= outLen && EC_POINT_point2oct(group, pt, form, out, n, bc) == n) r = (double)n;
+    }
+done:
+    EC_POINT_free(pt);
+    BN_clear_free(k);
+    BN_CTX_free(bc);
+    EC_GROUP_free(group);
+    ERR_clear_error();
+    return r;
+}
+
+/* crypto.diffieHellman({ privateKey, publicKey }): the shared secret of two
+ * PEM keys in out; -2 - n when out is too small, -1 on failure (the error
+ * queue says why). */
+double __kml_native_crypto_derive_secret(const char *privPem, const char *pubPem, void *out, long long outLen) {
+    ERR_clear_error();
+    EVP_PKEY *priv = knc_pem_key(privPem);
+    if (!priv) return -1;
+    EVP_PKEY *pub = knc_pem_key(pubPem);
+    double r = -1;
+    EVP_PKEY_CTX *ctx = pub ? EVP_PKEY_CTX_new(priv, NULL) : NULL;
+    size_t n = 0;
+    if (ctx && EVP_PKEY_derive_init(ctx) > 0 && EVP_PKEY_derive_set_peer(ctx, pub) > 0 &&
+        EVP_PKEY_derive(ctx, NULL, &n) > 0) {
+        if ((long long)n > outLen) {
+            r = -2 - (double)n;
+        } else if (EVP_PKEY_derive(ctx, out, &n) > 0) {
+            r = (double)n;
+        }
+    }
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(pub);
+    EVP_PKEY_free(priv);
+    return r;
 }

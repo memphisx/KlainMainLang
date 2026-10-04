@@ -5,6 +5,17 @@
 // MessageEvent, CloseEvent and ErrorEvent, as undici's (Stage 2). A program that
 // names one without declaring it imports this module.
 
+import { inspect } from './internal_util_inspect';
+
+// customInspect is util.inspect's rendering of an event-target object, as
+// lib/internal/abort_controller.js has it: `Name { …obj }`, or the name
+// alone past the depth limit.
+function customInspect(name: string, obj: any, depth: number, options: any): string {
+    if (depth < 0) return name;
+    const opts = Object.assign({}, options, { depth: options.depth === null ? null : options.depth - 1 });
+    return `${name} ${inspect(obj, opts)}`;
+}
+
 export interface EventInit {
     bubbles?: boolean;
     cancelable?: boolean;
@@ -45,6 +56,15 @@ export class Event {
         this.#cancelable = options?.cancelable === true;
         this.#composed = options?.composed === true;
         this.#timeStamp = __kml_native.perfNow();
+    }
+
+    [inspect.custom](depth: number, options: any): string {
+        return customInspect(this.constructor.name, {
+            type: this.#type,
+            defaultPrevented: this.#cancelable && this.#defaultPrevented,
+            cancelable: this.#cancelable,
+            timeStamp: this.#timeStamp,
+        }, depth, options);
     }
 
     get type(): string { return this.#type; }
@@ -147,6 +167,10 @@ interface Registration {
 export class EventTarget {
     #listeners = new Map<string, Registration[]>();
 
+    [inspect.custom](depth: number, options: any): string {
+        return customInspect(this.constructor.name, {}, depth, options);
+    }
+
     // Listeners and options are `any` here: the checker types the calls
     // from the declaration (lib/node.d.ts), and a function-or-object union is
     // not a representation code generation has.
@@ -246,6 +270,10 @@ export class AbortSignal extends EventTarget {
     #onabort: ((this: AbortSignal, ev: Event) => any) | null = null;
     #onabortRegistered = false;
 
+    [inspect.custom](depth: number, options: any): string {
+        return customInspect(this.constructor.name, { aborted: this.#aborted }, depth, options);
+    }
+
     static #creating = false;
 
     constructor() {
@@ -323,6 +351,9 @@ export class AbortSignal extends EventTarget {
 export class AbortController {
     #signal: AbortSignal = AbortSignal._new();
     get signal(): AbortSignal { return this.#signal; }
+    [inspect.custom](depth: number, options: any): string {
+        return customInspect(this.constructor.name, { signal: this.#signal }, depth, options);
+    }
     abort(reason?: any): void {
         AbortSignal._abort(this.#signal, reason === undefined ? new DOMException("This operation was aborted", "AbortError") : reason);
     }

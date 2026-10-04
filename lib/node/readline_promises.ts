@@ -6,22 +6,7 @@
 
 import { Interface as _Interface, AbortError, validateAbortSignal } from './internal_readline_interface';
 import { kClearLine, kClearScreenDown, kClearToLineBeginning, kClearToLineEnd, kEscape } from './internal_readline_utils';
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeTypeError, NodeRangeError } from './internal_errors';
 
 function validateInteger(value: any, name: string, min: number = Number.MIN_SAFE_INTEGER, max: number = Number.MAX_SAFE_INTEGER): void {
     if (typeof value !== 'number') {

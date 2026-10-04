@@ -138,7 +138,11 @@ func (c typeConverter) convNode(n TypeNode) (*TypeAnnotation, error) {
 		ta.FuncThis = true
 		return ta, nil
 	case *ConstructorType:
-		return c.convFunction(n.TypeParameters, n.Parameters, n.Type)
+		ta, err := c.convFunction(n.TypeParameters, n.Parameters, n.Type)
+		if ta != nil {
+			ta.IsCtorType = true
+		}
+		return ta, err
 	case *TypeLiteral:
 		return c.convTypeLiteral(n)
 	case *MappedType:

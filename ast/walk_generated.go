@@ -287,10 +287,6 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 		if present(n.Init) && !visit(n.Init) {
 			return false
 		}
-	case *NewWeakRefExpression:
-		if present(n.Init) && !visit(n.Init) {
-			return false
-		}
 	case *NewReadableStreamExpression:
 		if present(n.Source) && !visit(n.Source) {
 			return false
@@ -361,47 +357,11 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 				return false
 			}
 		}
-	case *NewURLExpression:
-		if present(n.URL) && !visit(n.URL) {
-			return false
-		}
-		if present(n.Base) && !visit(n.Base) {
-			return false
-		}
-	case *NewURLPatternExpression:
-		if present(n.Init) && !visit(n.Init) {
-			return false
-		}
-	case *NewURLSearchParamsExpression:
-		if present(n.Init) && !visit(n.Init) {
-			return false
-		}
-	case *NewHeadersExpression:
-		if present(n.Init) && !visit(n.Init) {
-			return false
-		}
 	case *NewRequestExpression:
 		if present(n.URL) && !visit(n.URL) {
 			return false
 		}
 		if present(n.Init) && !visit(n.Init) {
-			return false
-		}
-	case *NewDataViewExpression:
-		if present(n.Buffer) && !visit(n.Buffer) {
-			return false
-		}
-		if present(n.ByteOffset) && !visit(n.ByteOffset) {
-			return false
-		}
-		if present(n.ByteLength) && !visit(n.ByteLength) {
-			return false
-		}
-	case *NewBlobExpression:
-		if present(n.Parts) && !visit(n.Parts) {
-			return false
-		}
-		if present(n.Options) && !visit(n.Options) {
 			return false
 		}
 	case *NewArrayBufferExpression:
@@ -425,10 +385,6 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 		if present(n.Length) && !visit(n.Length) {
 			return false
 		}
-	case *NewTextDecoderExpression:
-		if present(n.Label) && !visit(n.Label) {
-			return false
-		}
 	case *NewRegExpExpression:
 		if present(n.Pattern) && !visit(n.Pattern) {
 			return false
@@ -437,6 +393,9 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 			return false
 		}
 	case *NewExpression:
+		if present(n.Callee) && !visit(n.Callee) {
+			return false
+		}
 		for i := range n.Args {
 			if present(n.Args[i]) && !visit(n.Args[i]) {
 				return false
@@ -515,10 +474,6 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 		}
 	case *ImportCallExpression:
 		if present(n.Specifier) && !visit(n.Specifier) {
-			return false
-		}
-	case *NewHTTPAgentExpression:
-		if present(n.Options) && !visit(n.Options) {
 			return false
 		}
 	case *NewWebviewExpression:
@@ -996,10 +951,6 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 		if present(n.Init) {
 			n.Init = rewrite(n.Init).(Expression)
 		}
-	case *NewWeakRefExpression:
-		if present(n.Init) {
-			n.Init = rewrite(n.Init).(Expression)
-		}
 	case *NewReadableStreamExpression:
 		if present(n.Source) {
 			n.Source = rewrite(n.Source).(Expression)
@@ -1068,48 +1019,12 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 				n.Args[i] = rewrite(n.Args[i]).(Expression)
 			}
 		}
-	case *NewURLExpression:
-		if present(n.URL) {
-			n.URL = rewrite(n.URL).(Expression)
-		}
-		if present(n.Base) {
-			n.Base = rewrite(n.Base).(Expression)
-		}
-	case *NewURLPatternExpression:
-		if present(n.Init) {
-			n.Init = rewrite(n.Init).(Expression)
-		}
-	case *NewURLSearchParamsExpression:
-		if present(n.Init) {
-			n.Init = rewrite(n.Init).(Expression)
-		}
-	case *NewHeadersExpression:
-		if present(n.Init) {
-			n.Init = rewrite(n.Init).(Expression)
-		}
 	case *NewRequestExpression:
 		if present(n.URL) {
 			n.URL = rewrite(n.URL).(Expression)
 		}
 		if present(n.Init) {
 			n.Init = rewrite(n.Init).(Expression)
-		}
-	case *NewDataViewExpression:
-		if present(n.Buffer) {
-			n.Buffer = rewrite(n.Buffer).(Expression)
-		}
-		if present(n.ByteOffset) {
-			n.ByteOffset = rewrite(n.ByteOffset).(Expression)
-		}
-		if present(n.ByteLength) {
-			n.ByteLength = rewrite(n.ByteLength).(Expression)
-		}
-	case *NewBlobExpression:
-		if present(n.Parts) {
-			n.Parts = rewrite(n.Parts).(Expression)
-		}
-		if present(n.Options) {
-			n.Options = rewrite(n.Options).(Expression)
 		}
 	case *NewArrayBufferExpression:
 		if present(n.ByteLength) {
@@ -1132,10 +1047,6 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 		if present(n.Length) {
 			n.Length = rewrite(n.Length).(Expression)
 		}
-	case *NewTextDecoderExpression:
-		if present(n.Label) {
-			n.Label = rewrite(n.Label).(Expression)
-		}
 	case *NewRegExpExpression:
 		if present(n.Pattern) {
 			n.Pattern = rewrite(n.Pattern).(Expression)
@@ -1144,6 +1055,9 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 			n.Flags = rewrite(n.Flags).(Expression)
 		}
 	case *NewExpression:
+		if present(n.Callee) {
+			n.Callee = rewrite(n.Callee).(Expression)
+		}
 		for i := range n.Args {
 			if present(n.Args[i]) {
 				n.Args[i] = rewrite(n.Args[i]).(Expression)
@@ -1215,10 +1129,6 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 	case *ImportCallExpression:
 		if present(n.Specifier) {
 			n.Specifier = rewrite(n.Specifier).(Expression)
-		}
-	case *NewHTTPAgentExpression:
-		if present(n.Options) {
-			n.Options = rewrite(n.Options).(Expression)
 		}
 	case *NewWebviewExpression:
 		if present(n.Options) {
@@ -1699,4 +1609,4 @@ func visitWorkerModule(x *WorkerModule, visit func(Node) bool) bool {
 }
 
 // nodeKinds is every node type the walker knows, for tests.
-var nodeKinds = []string{"Program", "BlockStatement", "VarDeclaration", "VarDeclarationList", "FunctionDeclaration", "ReturnStatement", "ForStatement", "ForOfStatement", "WhileStatement", "DoWhileStatement", "ForInStatement", "IfStatement", "SwitchStatement", "BreakStatement", "ContinueStatement", "LabeledStatement", "ArrayDestructuring", "ObjectDestructuring", "ExpressionStatement", "NumberLiteral", "StringLiteral", "BooleanLiteral", "NullLiteral", "AwaitExpression", "YieldExpression", "Identifier", "ThisExpression", "BinaryExpression", "ConditionalExpression", "SequenceExpression", "NonNullExpression", "AsExpression", "SpreadElement", "UnaryExpression", "UpdateExpression", "AssignmentExpression", "CallExpression", "MemberExpression", "ArrayLiteral", "IndexExpression", "NewArrayExpression", "ObjectLiteral", "ArrowFunction", "FunctionExpression", "ClassExpression", "TemplateLiteral", "TaggedTemplateExpression", "NewMapExpression", "NewSetExpression", "NewWeakMapExpression", "NewWeakSetExpression", "NewWeakRefExpression", "NewReadableStreamExpression", "NewWritableStreamExpression", "NewTransformStreamExpression", "NewCompressionStreamExpression", "EnumDeclaration", "ThrowStatement", "TryStatement", "NewErrorExpression", "NewDateExpression", "NewURLExpression", "NewURLPatternExpression", "NewURLSearchParamsExpression", "NewHeadersExpression", "NewRequestExpression", "NewXMLHttpRequestExpression", "NewDataViewExpression", "NewBlobExpression", "NewArrayBufferExpression", "NewChannelExpression", "NewTypedArrayExpression", "NewTextEncoderExpression", "NewTextDecoderExpression", "NewRegExpExpression", "NewExpression", "InterfaceDeclaration", "ClassDeclaration", "SuperExpression", "TypeAliasDeclaration", "AmbientModuleDeclaration", "ExportDeclaration", "ImportDeclaration", "ExportFromDeclaration", "ImportMetaUrl", "ImportCallExpression", "NewHTTPAgentExpression", "NewWebviewExpression", "KeywordType", "TypeReference", "ArrayType", "TupleType", "NamedTupleMember", "OptionalType", "RestType", "UnionType", "IntersectionType", "ParenthesizedType", "TypeParameter", "SignatureParameter", "FunctionType", "ConstructorType", "TypeLiteral", "PropertySignature", "MethodSignature", "CallSignature", "ConstructSignature", "IndexSignature", "MappedType", "ConditionalType", "InferType", "TypeOperator", "IndexedAccessType", "ImportType", "TypeQuery", "LiteralType", "TemplateLiteralType", "TemplateLiteralTypeSpan", "TypePredicate"}
+var nodeKinds = []string{"Program", "BlockStatement", "VarDeclaration", "VarDeclarationList", "FunctionDeclaration", "ReturnStatement", "ForStatement", "ForOfStatement", "WhileStatement", "DoWhileStatement", "ForInStatement", "IfStatement", "SwitchStatement", "BreakStatement", "ContinueStatement", "LabeledStatement", "ArrayDestructuring", "ObjectDestructuring", "ExpressionStatement", "NumberLiteral", "StringLiteral", "BooleanLiteral", "NullLiteral", "AwaitExpression", "YieldExpression", "Identifier", "ThisExpression", "BinaryExpression", "ConditionalExpression", "SequenceExpression", "NonNullExpression", "AsExpression", "SpreadElement", "UnaryExpression", "UpdateExpression", "AssignmentExpression", "CallExpression", "MemberExpression", "ArrayLiteral", "IndexExpression", "NewArrayExpression", "ObjectLiteral", "ArrowFunction", "FunctionExpression", "ClassExpression", "TemplateLiteral", "TaggedTemplateExpression", "NewMapExpression", "NewSetExpression", "NewWeakMapExpression", "NewWeakSetExpression", "NewReadableStreamExpression", "NewWritableStreamExpression", "NewTransformStreamExpression", "NewCompressionStreamExpression", "EnumDeclaration", "ThrowStatement", "TryStatement", "NewErrorExpression", "NewDateExpression", "NewRequestExpression", "NewXMLHttpRequestExpression", "NewArrayBufferExpression", "NewChannelExpression", "NewTypedArrayExpression", "NewRegExpExpression", "NewExpression", "InterfaceDeclaration", "ClassDeclaration", "SuperExpression", "TypeAliasDeclaration", "AmbientModuleDeclaration", "ExportDeclaration", "ImportDeclaration", "ExportFromDeclaration", "ImportMetaUrl", "ImportCallExpression", "NewWebviewExpression", "KeywordType", "TypeReference", "ArrayType", "TupleType", "NamedTupleMember", "OptionalType", "RestType", "UnionType", "IntersectionType", "ParenthesizedType", "TypeParameter", "SignatureParameter", "FunctionType", "ConstructorType", "TypeLiteral", "PropertySignature", "MethodSignature", "CallSignature", "ConstructSignature", "IndexSignature", "MappedType", "ConditionalType", "InferType", "TypeOperator", "IndexedAccessType", "ImportType", "TypeQuery", "LiteralType", "TemplateLiteralType", "TemplateLiteralTypeSpan", "TypePredicate"}

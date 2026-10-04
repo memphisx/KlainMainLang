@@ -15,7 +15,7 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
   res.end("ok");
 });
 
-server.on('clientError', (err: Error, socket) => {
+server.on('clientError', (err: NodeJS.ErrnoException, socket) => {
   // err.code is 'ECONNRESET' for a truncated request, 'HPE_HEADER_OVERFLOW' for
   // an oversized header block — a small honest subset of Node's HPE_* set.
   console.log("clientError:", err.code);

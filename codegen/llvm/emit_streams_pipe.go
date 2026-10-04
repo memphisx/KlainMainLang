@@ -13,8 +13,6 @@ import (
 // into raw queue words + a done flag, so the runtime pipe/tee machinery can
 // move chunks without knowing their type.
 func (e *Emitter) emitStreamDecodeThunk(chunkTy Type) string {
-	e.streamSiteCtr++
-	fn := fmt.Sprintf("@__kml_rs_decode_%d", e.streamSiteCtr)
 	resultTy := streamReadResultType(chunkTy)
 
 	restore := e.beginThunkEmit()
@@ -39,7 +37,7 @@ func (e *Emitter) emitStreamDecodeThunk(chunkTy Type) string {
 	body := e.allocas.String() + e.body.String()
 	restore()
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine { i64, i64, i64 } %s(ptr %%rec) {\nentry:\n%s}\n", fn, body))
+	fn := e.defineContentNamed("@__kml_rs_decode.", "{ i64, i64, i64 }", "ptr %rec", body)
 	return fn
 }
 
@@ -93,13 +91,14 @@ func (e *Emitter) resolvePipeOptions(opt ast.Expression, pos ast.Pos) (flagsRef,
 			if !e.isAbortSignalType(sv.Ty) {
 				return "", "", "", fmt.Errorf("%d:%d: pipe option 'signal' must be an AbortSignal", pos.Line, pos.Col)
 			}
-			// The class's private #aborted flag and #reason (emit_signal.go).
-			aIdx, _, _ := sv.Ty.FieldIndex("#aborted")
-			rIdx, _, _ := sv.Ty.FieldIndex("#reason")
+			// The class's private #aborted flag and #reason (emit_signal.go),
+			// by the class's own layout.
+			aIdx, _, sigTy, _ := e.classField(sv.Ty, "#aborted")
+			rIdx, _, _, _ := e.classField(sv.Ty, "#reason")
 			ag := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", ag, sv.Ty.StructIR(), sv.Ref, aIdx))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", ag, sigTy.StructIR(), sv.Ref, aIdx))
 			rg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", rg, sv.Ty.StructIR(), sv.Ref, rIdx))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", rg, sigTy.StructIR(), sv.Ref, rIdx))
 			sigARef, sigRRef = ag, rg
 		default:
 			return "", "", "", fmt.Errorf("%d:%d: unknown pipe option '%s'", pos.Line, pos.Col, p.Key)

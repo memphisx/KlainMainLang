@@ -304,6 +304,13 @@
             ]
           },
           {
+            "feature": "`void` operator",
+            "status": "implemented",
+            "notes": [
+              "Evaluates its operand for its effects and yields `undefined`; a function may also name a parameter or variable `undefined`, which plain JS and tsc accept ([ADR-01334](../adr/ADR-01334.md))"
+            ]
+          },
+          {
             "feature": "`in` operator (`key in obj`)",
             "status": "implemented",
             "notes": [
@@ -368,13 +375,13 @@
             "status": "implemented",
             "caveats": [
               "A default (`{ x = 1 }`) on a `T \\| null \\| undefined` reference field (a string, array or object) also fires on `null`: one null pointer holds both ([ADR-01307](../adr/ADR-01307.md))",
-              "In the *assignment* form (`({ x, y } = expr)`), a `= default` on a nested position stays rejected — matching the declaration form ([ADR-00597](../adr/ADR-00597.md))",
+              "In the *assignment* form over a statically-typed source (`({ x, y } = obj)`), a `= default` on a nested position stays rejected — matching the declaration form ([ADR-00597](../adr/ADR-00597.md))",
               "`{ ...rest }` over an `any`/union/generic source (Stage 3c) and in the *assignment* form (`({ a, ...rest } = e)`) stay clean rejections",
-              "A computed key (`{ [k]: v }`) is supported only for a **constant** string/number literal key (`{ [\"a\"]: v }`, `{ [0]: v }` — resolves to that field); a runtime-valued key on a fixed object is a clean rejection ([ADR-00609](../adr/ADR-00609.md))"
+              "In a declaration, a computed key (`{ [k]: v }`) is supported only for a **constant** string/number literal key (`{ [\"a\"]: v }`, `{ [0]: v }` — resolves to that field); a runtime-valued key on a fixed object is a clean rejection ([ADR-00609](../adr/ADR-00609.md))"
             ],
             "notes": [
               "Renaming is supported (`{ x: y }`)",
-              "*Assignment* to already-declared targets (`({ x, y } = expr)`, parens required at statement level, matching real JS) — see [ADR-00160](../adr/ADR-00160.md)",
+              "*Assignment* to already-declared targets (`({ x, y } = expr)`, parens required at statement level, matching real JS) — see [ADR-00160](../adr/ADR-00160.md); its value is the right-hand side, and a dynamic source or a runtime computed key reads each property once through the boxed value, with defaults and nested patterns ([ADR-01379](../adr/ADR-01379.md))",
               "Nested patterns (`{ inner: { v }, tag }`, `{ coords: [x, y] }`) work in a declaration, for-of loop variable, and destructured parameter — see [ADR-00193](../adr/ADR-00193.md)/[TDD-00065](../tdd/TDD-00065.md) Stage 2",
               "String- or numeric-literal keys (`{ \"k\": v }`, `{ 0: v }`) reuse the object-literal key grammar — a non-identifier key has no shorthand, so it must bind through an explicit `: name` ([ADR-00203](../adr/ADR-00203.md)/[TDD-00065](../tdd/TDD-00065.md) Stage 3a)",
               "A rest element (`{ a, ...rest }`) works in the declaration, for-of, and destructured-parameter forms ([ADR-00204](../adr/ADR-00204.md)/[TDD-00065](../tdd/TDD-00065.md) Stage 3b): `rest` binds a fresh residual object of every visible source field not named earlier — a plain object (a class instance's rest strips hidden metadata, matching JS's own-enumerable copy), shallow-copied (a pointer-valued field is shared), usable like any object; requires a statically-known source shape",
@@ -397,14 +404,12 @@
           {
             "feature": "Tagged template literals (`` tag`Hello ${x}` ``)",
             "status": "implemented",
-            "caveats": [
-              "A **user** tag's `strings` argument has no `.raw` property (this compiler's arrays carry no extra properties) — the built-in `String.raw` tag itself is implemented and interleaves the raw, un-escaped quasis ([ADR-00562](../adr/ADR-00562.md))",
-              "The strict lane does not check a tag call's arguments against the tag's parameters: a `strings: string[]` parameter, which tsc rejects (TS2740), compiles"
-            ],
+            "caveats": [],
             "notes": [
               "Desugars to a plain call (`tag([\"a\",\"b\"], x)`) — interpolated values reach the tag function as real typed values, not implicitly stringified the way a plain template literal's own interpolation is",
               "Any callable — a named function, a class method, or an arrow function/closure (including with a `...rest` parameter) — works as a tag. See [TDD-00059](../tdd/TDD-00059.md)/[ADR-00151](../adr/ADR-00151.md)/[ADR-00152](../adr/ADR-00152.md)",
-              "The `strings` parameter is typed `TemplateStringsArray`, as in TypeScript; a generic tag takes explicit type arguments (`` tag<T>`…` ``). A template's CR LF and lone CR line breaks are LF in its value ([ADR-01156](../adr/ADR-01156.md))"
+              "The `strings` parameter is typed `TemplateStringsArray`, as in TypeScript; a generic tag takes explicit type arguments (`` tag<T>`…` ``). A template's CR LF and lone CR line breaks are LF in its value ([ADR-01156](../adr/ADR-01156.md))",
+              "`strings.raw` holds the raw text, each call site's template object is made once (the same object on every call), and the strict lane checks a tag call's arguments against the tag's parameters ([ADR-01344](../adr/ADR-01344.md))"
             ]
           },
           {
@@ -505,12 +510,12 @@
             "caveats": [
               "`thisArg` is the receiver only of a function with a `this: T` parameter, declared or from its contextual type ([ADR-01158](../adr/ADR-01158.md)); for any other function it is evaluated then ignored, so borrowing a class method against another receiver (`obj.m.call(other)`) is unsupported",
               "call/apply/bind on a Node module's function (`net.connect.apply(…)`) isn't supported — it isn't a function value; the ECMAScript builtins (`parseInt`, `Math.max`, `encodeURIComponent`, …) are ([ADR-01307](../adr/ADR-01307.md))",
-              "`.apply` takes either a literal array (`f.apply(null, [a, b])`) or a runtime array spread into a **rest** parameter (`f.apply(null, arr)` where `f` is `(...xs) => …`); a runtime array into a fixed-arity function is the usual spread-into-fixed-arity rejection",
-              "`.bind` is V1-scoped to functions whose parameters are plain scalar/string/pointer/`any` types with no rest slot — an array/nullable-scalar/rest parameter (`Math.max.bind(null, 1)`) is a clean compile error"
+              "`.apply` takes either a literal array (`f.apply(null, [a, b])`) or a runtime array spread into a **rest** parameter (`f.apply(null, arr)` where `f` is `(...xs) => …`); a runtime array into a fixed-arity function is the usual spread-into-fixed-arity rejection"
             ],
             "notes": [
               "On a function held in an `any`, `f.apply(thisArg, arr)`, `f.call(thisArg, …)` and `f(...args, x)` pass the argument list through the dynamic call ABI, any array ([ADR-01172](../adr/ADR-01172.md))",
-              "`f.call(thisArg, a, b)` / `f.apply(thisArg, [a, b])` lower to a direct `f(a, b)`; `f.apply(thisArg, arr)` spreads into the rest slot; `f.bind(thisArg, …bound)` builds a new partially-applied closure (a trampoline capturing `f` + bound args). All type-checked against `f`'s parameters exactly as a normal call ([TDD-00137](../tdd/TDD-00137.md))"
+              "`f.call(thisArg, a, b)` / `f.apply(thisArg, [a, b])` lower to a direct `f(a, b)`; `f.apply(thisArg, arr)` spreads into the rest slot; `f.bind(thisArg, …bound)` builds a new partially-applied closure (a trampoline capturing `f` + bound args). All type-checked against `f`'s parameters exactly as a normal call ([TDD-00137](../tdd/TDD-00137.md))",
+              "`.bind` on a function with a rest, array or optional parameter (`Math.max.bind(null, 0)`) binds through the function's dynamic record: the result is called through the dynamic call ABI ([ADR-01334](../adr/ADR-01334.md))"
             ]
           },
           {
@@ -568,7 +573,6 @@
               "Registers a resume reaction on the promise and parks; on `fetch()`'s `Promise<Response>` it really waits ([ADR-00050](../adr/ADR-00050.md)); an explicitly `: Promise<T>`-annotated variable, a plain function returning `new Promise`, and an `async` fn returning a promise all `await` correctly ([ADR-00265](../adr/ADR-00265.md))"
             ],
             "caveats": [
-              "In a **Worker module** or a **dynamically imported module** (`import()` target), a top-level `await` of a still-*pending* promise resumes out of order: the continuation runs before reactions registered on that promise ahead of it (`p.then(r1); await p` runs the code after the `await` before `r1`; Node runs `r1` first). The entry program, every async function, and a top-level await of a settled promise or a plain value anywhere have Node's order ([TDD-00224](../tdd/TDD-00224.md) Stage 2)"
             ]
           },
           {
@@ -580,8 +584,7 @@
               "Over task promises each combinator is the spec's: it returns a pending promise at once and settles it from its members' reactions — `.all` on every fulfilment (the first rejection rejects it), `.allSettled` on every settlement, `.race` on the first settlement, `.any` on the first fulfilment (all rejected: an `AggregateError`) — so `.then`/`.catch`/`.finally` chain on it and nothing blocks at the call ([ADR-01193](../adr/ADR-01193.md))"
             ],
             "caveats": [
-              "An inline list mixing promises and values (`[p, 4]`) is a heterogeneous array literal, rejected in the strict lane — an `any[]` list works",
-              "`JSON.stringify` of an **error-subclass instance** reason yields `{}` where Node serializes its own enumerable fields — needs per-field enumerability ([TDD-00222](../tdd/TDD-00222.md)). Everything else about a reason is faithful — `typeof`, `.message`/`.name`/`String(reason)` (subclasses included), and precise `instanceof` ([ADR-01003](../adr/ADR-01003.md)/[TDD-00169](../tdd/TDD-00169.md))."
+              "An inline list mixing promises and values (`[p, 4]`) is a heterogeneous array literal, rejected in the strict lane — an `any[]` list works"
             ]
           },
           {
@@ -739,14 +742,13 @@
             "feature": "Built-in `Error` subtypes (`new TypeError(msg)`, `RangeError`, `SyntaxError`, `EvalError`, `URIError`, `ReferenceError`, `DOMException`) and `instanceof` against them",
             "status": "implemented",
             "caveats": [
-              "`class X extends Error` (or a built-in kind, `extends TypeError`, [ADR-01169](../adr/ADR-01169.md)) works one level deep ([ADR-00630](../adr/ADR-00630.md)): construction, `super(msg)`, `.message`/`.name` (default the base's name unless assigned), `instanceof` the base, extra fields/methods, throw/catch with `instanceof` discrimination against sibling subclasses, `Error.prototype.toString`; extending an Error *subclass* is a clean rejection, and `.stack`/`Error.captureStackTrace` don't exist",
-              "`DOMException` carries no legacy numeric `.code`",
-              "`console.log` of a subclass's instance prints `Error: message`, not Node's `X [Error]: message` with its own properties"
+              "`.stack` and `Error.captureStackTrace` don't exist: util.inspect shows an error as Node does without the stack's frames (`Name: message`, `X [Error]` for a class not named by its `name`, then its own properties)"
             ],
             "notes": [
               "[TDD-00013](../tdd/TDD-00013.md) Option A — a small fixed kind enum (a hidden runtime tag on the same shared `Error` object shape, not a real class hierarchy), plus a real `.name` field",
               "`instanceof Error` matches any kind; `instanceof TypeError` etc. matches only that one. See [ADR-00082](../adr/ADR-00082.md)",
-              "`new DOMException(message?, name?)` takes its `.name` from the 2nd argument (default `\"Error\"`), unlike the fixed-name kinds; per the modern WebIDL spec it is `instanceof Error` too, and fetch cancellation throws one (`AbortError`/`TimeoutError`) — [ADR-00240](../adr/ADR-00240.md)"
+              "`new DOMException(message?, name?)` takes its `.name` from the 2nd argument (default `\"Error\"`), unlike the fixed-name kinds; per the modern WebIDL spec it is `instanceof Error` too, and fetch cancellation throws one (`AbortError`/`TimeoutError`) — [ADR-00240](../adr/ADR-00240.md)",
+              "`class X extends Error` (or a built-in kind, `extends TypeError`, [ADR-01169](../adr/ADR-01169.md)) at any depth ([ADR-01319](../adr/ADR-01319.md)): construction through the chain, `super(msg)`, `.message`/`.name`, `instanceof` at every level (also on a caught value), fields of its own — including ones named like a system error's (`code`, `errno`) — and its own enumerable keys, an assigned `name` included, in Node's order"
             ]
           },
           {
@@ -773,14 +775,16 @@
             "caveats": [
               "Instance-field initializers (`x = expr`) work, and a class with fields needs **no** explicit constructor — a bare declared field (`x: number`) reads as its calloc'd deterministic-zero value (0/false/null, the [ADR-00157](../adr/ADR-00157.md) convention), any initializers that exist run in a synthesized constructor ([ADR-00374](../adr/ADR-00374.md)); the one remaining rejection is a **derived** class adding fields when its base has a rest-parameter constructor (write an explicit `super(...)`). static field initializers (`static x = 5`) work — lowered to assignments run in declaration order in the class's static-init, ahead of any `static {}` block, with an unannotated one typed by inference ([ADR-00375](../adr/ADR-00375.md)). An instance-field initializer lowered into the constructor can currently see the constructor's own parameters (which real JS's separate initializer scope forbids), and an unannotated initializer of an expression shape the compiler doesn't recognize falls back to `i64` ([TDD-00063](../tdd/TDD-00063.md)/[ADR-00180](../adr/ADR-00180.md))",
               "A computed class member name must be a literal or one of the well-known symbols `iterator`, `asyncIterator`, `toPrimitive`, `dispose` and `asyncDispose` (desugared to their protocol methods, [TDD-00089](../tdd/TDD-00089.md), [ADR-00278](../adr/ADR-00278.md)); any other (an identifier, a call, `Symbol.toStringTag`) is a clean rejection",
-              "A class expression used as a runtime value (argument, return, nested binding) or a named self-reference (`class D {...}` whose body references `D`) is a clean rejection; `extends <expression>` is out of scope",
+              "A class that reads a local of its enclosing function from a nested `function` is a clean rejection; an inherited static method called on a subclass reads `this` as the class declaring it; a class expression that reads none is hoisted to one top-level class, so evaluating it twice yields the same class (identity and statics shared, where Node creates a new class per evaluation); `extends <expression>` is out of scope",
               "Class early-error gaps (deferred, no valid program miscompiles): a field initializer containing `arguments` or a `super()` call, a `super()` call in a method parameter default, field-definition ASI on the same line (`field = 1 method(){}`), and the `#constructor` private-name ban all compile instead of raising the spec's `SyntaxError`",
               "A bare field (`x;`) defaults to `number` (the unannotated-parameter convention; JSDoc `@type` overrides) — TS infers implicit `any`, so a non-numeric use is a shifted typed error ([ADR-00474](../adr/ADR-00474.md))"
             ],
             "notes": [
               "[TDD-00009](../tdd/TDD-00009.md) Stage 1 — instances reuse the same heap-object/GEP machinery interfaces already use; methods compile to plain static calls (`this` as an implicit first arg), no closure indirection. See [ADR-00063](../adr/ADR-00063.md)",
               "The **`readonly` field modifier** is enforced as a compile-time immutability check: a write is allowed only in the declaring class's constructor (and field initializers), and rejected in a method, from outside (`obj.x = v`), in a nested closure, or in a subclass constructor writing an inherited readonly field — TS's rule ([TDD-00154](../tdd/TDD-00154.md)/[ADR-00604](../adr/ADR-00604.md)). Deep immutability (`readonly xs: number[]` then `xs.push(...)`) stays unenforced, matching TS's own shallow check",
-              "Qualified constructors, bases and types resolve through a namespace import (`new m.C()`, `class D extends m.C`, `x: m.T[]`, [ADR-01162](../adr/ADR-01162.md)); any other qualifier dispatches on the final name, like the bare form ([ADR-00408](../adr/ADR-00408.md))"
+              "Qualified constructors, bases and types resolve through a namespace import (`new m.C()`, `class D extends m.C`, `x: m.T[]`, [ADR-01162](../adr/ADR-01162.md)); any other qualifier dispatches on the final name, like the bare form ([ADR-00408](../adr/ADR-00408.md))",
+              "A class declared in a function may read and write the function's locals: each evaluation is a class of its own, each instance holding that evaluation's bindings ([ADR-01334](../adr/ADR-01334.md)); returned or passed as a value, and as a class expression, each evaluation is a distinct constructor, and `instanceof` tells evaluations apart ([ADR-01336](../adr/ADR-01336.md))",
+              "Classes and builtin constructors are values: a `typeof C` binding, a parameter, an array element or `any` holds one, and `new` takes any constructor expression (`new k()`, `new this.K()`, `new reg.B()`, `new ctors[0]()`, `new (f())()`), constructing through a run-time dispatch; statics read and write through the value ([ADR-01318](../adr/ADR-01318.md))"
             ]
           },
           {
@@ -798,7 +802,7 @@
               "A value of another kind written through an interface-typed reference or `any` into an object's field (`o.x = \"s\"` for a `number` field) shadows the field: the object's own statically typed binding still reads the old value ([ADR-01215](../adr/ADR-01215.md))"
             ],
             "notes": [
-              "[TDD-00009](../tdd/TDD-00009.md) Stage 4 — `static` members are inherited through `extends` like real JS/TS (a non-redeclared static field shares its base's storage, not a per-subclass copy)",
+              "[TDD-00009](../tdd/TDD-00009.md) Stage 4 — `static` members are inherited through `extends` like real JS/TS (an inherited static field reads its base's until the subclass assigns its own, as JavaScript's constructor prototype chain does ([ADR-01318](../adr/ADR-01318.md)))",
               "`private`/`protected` are compile-time-only (zero runtime check, matching real TypeScript's own erasure), checked by the type checker with tsc's codes (`TS2341`, `TS2445`, `TS2446`, `TS2673`/`TS2674` for a constructor), including `super.privateMethod()`; an element access by name (`o[\"p\"]`) is TypeScript's way around a modifier and compiles ([ADR-01157](../adr/ADR-01157.md))",
               "An optional method (`m?(): T;`) is `undefined` on a class that does not implement it: `this.m != null`, `if (this.m)`, `typeof this.m` and `this.m?.(…)` read its presence ([ADR-01168](../adr/ADR-01168.md))",
               "`abstract` reuses Stage 3's override-detection machinery almost entirely for free; `implements` is a compile-time structural self-check ([ADR-00084](../adr/ADR-00084.md)); an object behind an interface-typed reference, of any layout, is read, written and called as itself through a checked view ([TDD-00233](../tdd/TDD-00233.md))"

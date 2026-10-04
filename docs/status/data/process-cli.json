@@ -151,9 +151,6 @@
               "Off a TTY the stream is not a `tty.WriteStream` and has no `columns`/`rows`: a real `undefined`, as in Node; `?? 80` is the idiomatic fallback. Typed `number`, as `@types/node` has it",
               "On a terminal, read at creation and refreshed on `SIGWINCH`, which emits `'resize'` when the size changed, as Node's `tty.WriteStream` does",
               "Available on both `process.stdout` and `process.stderr`"
-            ],
-            "caveats": [
-              "Stored into a declared `number` binding off a TTY (`const c: number = process.stdout.columns`), the value reads `NaN`, not `undefined`"
             ]
           },
           {
@@ -252,7 +249,7 @@
             "feature": "`process.nextTick(fn)`",
             "status": "implemented",
             "caveats": [
-              "Shares the one microtask FIFO with Promise reactions rather than draining strictly before them (Node keeps a separate nextTick queue ahead of promises); zero-argument `() => void` callback only"
+              "Shares the one microtask FIFO with Promise reactions rather than draining strictly before them (Node keeps a separate nextTick queue ahead of promises)"
             ],
             "notes": [
               "Enqueued on the existing microtask queue ([ADR-00332](../adr/ADR-00332.md))"

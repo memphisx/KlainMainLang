@@ -1,6 +1,10 @@
 package ast
 
-import "strings"
+import (
+	"fmt"
+	"hash/fnv"
+	"strings"
+)
 
 // Pos tracks source location.
 type Pos struct{ Line, Col int }
@@ -83,10 +87,12 @@ type Program struct {
 	// (renamed) top-level names the builtin modules written in TypeScript
 	// declare. A program reaches them only through an import.
 	LibDeclNames map[string]bool
-	// LibStatements are the merged program's top-level statements that come
-	// from the builtin modules written in TypeScript: they compile in the
-	// strict lane whatever lane the program's own code uses.
-	LibStatements map[Statement]bool
+	// LibStatements maps each of the merged program's top-level statements
+	// that come from the builtin modules written in TypeScript to its
+	// module's key (the fragment its names are mangled with). They compile
+	// in the strict lane whatever lane the program's own code uses, and a
+	// module's statements run from its init function.
+	LibStatements map[Statement]string
 	// CallableClasses are the (renamed) classes of the builtin modules
 	// written in TypeScript that Node implements as plain functions
 	// constructing when called without `new` (`http.Server(…)`), marked
@@ -133,6 +139,15 @@ type Program struct {
 	// gate the `--static` + `-dynamic-import=lazy` mutual-exclusion check
 	// (TDD-00056) without re-walking.
 	UsesDynamicImport bool
+	// DynStatements maps each top-level statement of a file that only
+	// dynamic import() edges reach (bundled and lazy backends) to its file's
+	// path: it runs from its import() target's init, on first import(), not
+	// in main (TDD-00238 Stage 5).
+	DynStatements map[Statement]string
+	// DynModules maps each dynamic import() target (bundled and lazy) to the
+	// files its first import() evaluates, dependencies first: the target and
+	// what it reaches that the program's static imports do not.
+	DynModules map[string][]string
 	// IslandRoots is filled by the resolver on the merged program under the
 	// lazy dynamic-import backend (TDD-00056): the resolved absolute path of
 	// each distinct dynamic-import target that is compiled to its own
@@ -201,6 +216,99 @@ func NamespaceMangle(ns, member string) string {
 	return strings.ReplaceAll(ns, ".", "__kmlns_") + "__kmlns_" + member
 }
 
+// moduleSuffix starts the per-file suffix the resolver gives every top-level
+// name (TDD-00041), making it file-private in the merged program.
+const moduleSuffix = "__kml_mod"
+
+// ModuleMangle is name's file-private form. A program's own file is told
+// apart by its index in this program's import walk (`name__kml_mod3`); a
+// builtin library file by its library key (`name__kml_modLnode_stream`), the
+// same in every program that imports it (TDD-00238 Stage 1). The key is
+// length-prefixed (`L11node_stream`), so text codegen appends after the
+// suffix (`_static_parse`) stays apart from it.
+func ModuleMangle(name string, fileIdx int, libKey string) string {
+	if libKey != "" {
+		return fmt.Sprintf("%s%sL%d%s", name, moduleSuffix, len(libKey), libKey)
+	}
+	return fmt.Sprintf("%s%s%d", name, moduleSuffix, fileIdx)
+}
+
+// DynModuleKey is the mangling key of a file only dynamic import() reaches
+// under the lazy backend: `isl_` and the FNV-1a hash of its absolute path,
+// the hash its target's shared library and init are named with.
+func DynModuleKey(absPath string) string {
+	h := fnv.New64a()
+	h.Write([]byte(absPath))
+	return fmt.Sprintf("isl_%016x", h.Sum64())
+}
+
+// Unmangle is a top-level name as the source wrote it: ModuleMangle's
+// suffix removed.
+func Unmangle(name string) string {
+	// The first suffix: a generic instantiation's name carries its class
+	// type arguments' own (`Q__kml_mod0__clsBox__kml_mod0` is Q).
+	if i := strings.Index(name, moduleSuffix); i > 0 {
+		return name[:i]
+	}
+	return name
+}
+
+// TrimModuleSuffix is name without a ModuleMangle suffix that ends it, and
+// name itself when none does (`P__kml_mod0_x` is not a declaration's name).
+func TrimModuleSuffix(name string) string {
+	i := strings.LastIndex(name, moduleSuffix)
+	if i <= 0 {
+		return name
+	}
+	if rest := name[i:]; UnmangleText(rest) == "" {
+		return name[:i]
+	}
+	return name
+}
+
+// IsLibraryName reports whether name is mangled from builtin-library files
+// only: it carries a library suffix and no program file's.
+func IsLibraryName(name string) bool {
+	if !strings.Contains(name, moduleSuffix+"L") {
+		return false
+	}
+	for rest := name; ; {
+		i := strings.Index(rest, moduleSuffix)
+		if i < 0 {
+			return true
+		}
+		rest = rest[i+len(moduleSuffix):]
+		if rest != "" && rest[0] >= '0' && rest[0] <= '9' {
+			return false
+		}
+	}
+}
+
+// UnmangleText removes every ModuleMangle suffix from s, a message that
+// may quote mangled names.
+func UnmangleText(s string) string {
+	for {
+		i := strings.Index(s, moduleSuffix)
+		if i < 0 {
+			return s
+		}
+		j := i + len(moduleSuffix)
+		lib := j < len(s) && s[j] == 'L'
+		if lib {
+			j++
+		}
+		n := 0
+		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			n = n*10 + int(s[j]-'0')
+			j++
+		}
+		if lib {
+			j = min(j+n, len(s)) // the key itself
+		}
+		s = s[:i] + s[j:]
+	}
+}
+
 // Assertion is an erased type assertion on an expression.
 type Assertion struct {
 	Const     bool            // `as const`
@@ -244,7 +352,10 @@ type VarDeclaration struct {
 	// value-type array layout — elements stored inline (copies), not as
 	// shared pointers. An explicit aliasing-semantics opt-in.
 	ValueArr bool
-	pos      Pos
+	// NamePos is the declared name's position (zero when not recorded),
+	// where TypeScript reports an initializer that does not fit.
+	NamePos Pos
+	pos     Pos
 }
 
 func (*VarDeclaration) nodeMarker()   {}
@@ -743,7 +854,10 @@ func NewBooleanLiteral(v bool, pos Pos) *BooleanLiteral { return &BooleanLiteral
 // NullLiteral represents `null` (IsUndefined=false) or `undefined` (IsUndefined=true).
 type NullLiteral struct {
 	IsUndefined bool
-	pos         Pos
+	// Void marks the undefined a `void` operator yields: the value itself,
+	// never a binding the program named undefined.
+	Void bool
+	pos  Pos
 }
 
 func (*NullLiteral) nodeMarker()   {}
@@ -962,6 +1076,9 @@ func NewAssignmentExpression(op string, left, right Expression, pos Pos) *Assign
 type CallExpression struct {
 	Callee Expression
 	Args   []Expression
+	// Intrinsic names the builtin a call the compiler synthesized means
+	// (`Array.from`), which no declaration reaches (TDD-00230 P3.2).
+	Intrinsic string
 	// Source is the call's source text, its type syntax blanked (as Node's
 	// type stripping shows it): assert.ok quotes it.
 	Source string
@@ -1310,21 +1427,6 @@ func NewNewWeakSetExpression(elem *TypeAnnotation, pos Pos) *NewWeakSetExpressio
 	return &NewWeakSetExpression{ElemType: elem, pos: pos}
 }
 
-// NewWeakRefExpression — new WeakRef(obj) (TDD-00112). Init is the referent.
-type NewWeakRefExpression struct {
-	ElemType *TypeAnnotation
-	Init     Expression
-	pos      Pos
-}
-
-func (*NewWeakRefExpression) nodeMarker()   {}
-func (*NewWeakRefExpression) exprMarker()   {}
-func (n *NewWeakRefExpression) GetPos() Pos { return n.pos }
-
-func NewNewWeakRefExpression(elem *TypeAnnotation, init Expression, pos Pos) *NewWeakRefExpression {
-	return &NewWeakRefExpression{ElemType: elem, Init: init, pos: pos}
-}
-
 // NewReadableStreamExpression — `new ReadableStream<T>(underlyingSource?,
 // strategy?)` (TDD-00097 Stage 1). The underlying source must be an object
 // literal (its start/pull/cancel members are destructured at compile time);
@@ -1514,77 +1616,6 @@ func NewNewDateExpressionMulti(args []Expression, pos Pos) *NewDateExpression {
 	return &NewDateExpression{Args: args, pos: pos}
 }
 
-// NewURLExpression is `new URL(url)` or `new URL(url, base)` — a required URL
-// argument plus an optional base against which a relative URL is resolved
-// (ADR-00579). Base is nil for the single-argument form.
-type NewURLExpression struct {
-	URL  Expression
-	Base Expression // optional base-URL argument; nil for the one-arg form
-	pos  Pos
-}
-
-func (*NewURLExpression) nodeMarker()   {}
-func (*NewURLExpression) exprMarker()   {}
-func (n *NewURLExpression) GetPos() Pos { return n.pos }
-
-func NewNewURLExpression(url Expression, pos Pos) *NewURLExpression {
-	return &NewURLExpression{URL: url, pos: pos}
-}
-
-func NewNewURLExpressionWithBase(url, base Expression, pos Pos) *NewURLExpression {
-	return &NewURLExpression{URL: url, Base: base, pos: pos}
-}
-
-// NewURLPatternExpression is `new URLPattern()` / `new URLPattern(init)` —
-// init, when present, must be an object literal with any subset of the six
-// supported component patterns (protocol/hostname/port/pathname/search/hash);
-// codegen enforces that shape (TDD-00100). The constructor-string form and a
-// baseURL second argument are out of scope.
-type NewURLPatternExpression struct {
-	Init Expression
-	pos  Pos
-}
-
-func (*NewURLPatternExpression) nodeMarker()   {}
-func (*NewURLPatternExpression) exprMarker()   {}
-func (n *NewURLPatternExpression) GetPos() Pos { return n.pos }
-
-func NewNewURLPatternExpression(init Expression, pos Pos) *NewURLPatternExpression {
-	return &NewURLPatternExpression{Init: init, pos: pos}
-}
-
-// NewURLSearchParamsExpression is `new URLSearchParams()` (empty) or
-// `new URLSearchParams(init)` (parses a query string, with or without a
-// leading '?').
-type NewURLSearchParamsExpression struct {
-	Init Expression // nil for the no-argument form
-	pos  Pos
-}
-
-func (*NewURLSearchParamsExpression) nodeMarker()   {}
-func (*NewURLSearchParamsExpression) exprMarker()   {}
-func (n *NewURLSearchParamsExpression) GetPos() Pos { return n.pos }
-
-func NewNewURLSearchParamsExpression(init Expression, pos Pos) *NewURLSearchParamsExpression {
-	return &NewURLSearchParamsExpression{Init: init, pos: pos}
-}
-
-// NewHeadersExpression is `new Headers()` (empty) or `new Headers(init)`
-// (init: Map<string,string>, TDD-00040) — see codegen/llvm's IsHeaders doc
-// comment for why this is just a flagged Map<string,string> under the hood.
-type NewHeadersExpression struct {
-	Init Expression // nil for the no-argument form
-	pos  Pos
-}
-
-func (*NewHeadersExpression) nodeMarker()   {}
-func (*NewHeadersExpression) exprMarker()   {}
-func (n *NewHeadersExpression) GetPos() Pos { return n.pos }
-
-func NewNewHeadersExpression(init Expression, pos Pos) *NewHeadersExpression {
-	return &NewHeadersExpression{Init: init, pos: pos}
-}
-
 // NewRequestExpression is `new Request(url)` or `new Request(url, init)`
 // (TDD-00040) — init is any value with some subset of method: string /
 // headers: Map<string,string> | Headers / body: string fields, the same
@@ -1623,40 +1654,6 @@ func NewNewXMLHttpRequestExpression(pos Pos) *NewXMLHttpRequestExpression {
 // zero-initialized raw byte buffer. Unlike Array/Map/Set/TypedArray below,
 // this is a general expression (not restricted to a variable-declaration
 // initializer), matching Date/URL/URLSearchParams.
-// NewDataViewExpression is `new DataView(buffer, byteOffset?, byteLength?)`
-// — an arbitrary-endian read/write view over an ArrayBuffer sub-range.
-type NewDataViewExpression struct {
-	Buffer     Expression
-	ByteOffset Expression // nil when omitted (0)
-	ByteLength Expression // nil when omitted (buffer length - offset)
-	pos        Pos
-}
-
-func (*NewDataViewExpression) nodeMarker()   {}
-func (*NewDataViewExpression) exprMarker()   {}
-func (n *NewDataViewExpression) GetPos() Pos { return n.pos }
-
-func NewNewDataViewExpression(buffer, byteOffset, byteLength Expression, pos Pos) *NewDataViewExpression {
-	return &NewDataViewExpression{Buffer: buffer, ByteOffset: byteOffset, ByteLength: byteLength, pos: pos}
-}
-
-// NewBlobExpression is `new Blob(parts?, options?)` (TDD-00102) — an
-// immutable binary value with a MIME type. Parts is usually an inline
-// ArrayLiteral of strings/TypedArrays/ArrayBuffers/Blobs; Options an object
-// literal carrying { type }. Both nil-able. A general expression.
-type NewBlobExpression struct {
-	Parts   Expression
-	Options Expression
-	pos     Pos
-}
-
-func (*NewBlobExpression) nodeMarker()   {}
-func (*NewBlobExpression) exprMarker()   {}
-func (n *NewBlobExpression) GetPos() Pos { return n.pos }
-
-func NewNewBlobExpression(parts, options Expression, pos Pos) *NewBlobExpression {
-	return &NewBlobExpression{Parts: parts, Options: options, pos: pos}
-}
 
 type NewArrayBufferExpression struct {
 	ByteLength Expression
@@ -1724,37 +1721,6 @@ func NewNewTypedArrayExpression(elemKind string, arg Expression, pos Pos) *NewTy
 	return &NewTypedArrayExpression{ElemKind: elemKind, Arg: arg, pos: pos}
 }
 
-// NewTextEncoderExpression is `new TextEncoder()` — no arguments. See
-// docs/status/ENCODING-TEXT.md.
-type NewTextEncoderExpression struct {
-	pos Pos
-}
-
-func (*NewTextEncoderExpression) nodeMarker()   {}
-func (*NewTextEncoderExpression) exprMarker()   {}
-func (n *NewTextEncoderExpression) GetPos() Pos { return n.pos }
-
-func NewNewTextEncoderExpression(pos Pos) *NewTextEncoderExpression {
-	return &NewTextEncoderExpression{pos: pos}
-}
-
-// NewTextDecoderExpression is `new TextDecoder()` (default, UTF-8) or
-// `new TextDecoder(label)` — Label is evaluated for side effects but
-// otherwise ignored (V1 scope: UTF-8 only, no encoding validation). See
-// docs/status/ENCODING-TEXT.md.
-type NewTextDecoderExpression struct {
-	Label Expression // nil for the no-argument form
-	pos   Pos
-}
-
-func (*NewTextDecoderExpression) nodeMarker()   {}
-func (*NewTextDecoderExpression) exprMarker()   {}
-func (n *NewTextDecoderExpression) GetPos() Pos { return n.pos }
-
-func NewNewTextDecoderExpression(label Expression, pos Pos) *NewTextDecoderExpression {
-	return &NewTextDecoderExpression{Label: label, pos: pos}
-}
-
 // NewRegExpExpression is `new RegExp(pattern, flags?)` — Flags is nil for
 // the 1-arg form. A `/pattern/flags` regex literal desugars to this same
 // node at parse time (parsePrimary's `case lexer.REGEX`), with both Pattern
@@ -1792,8 +1758,11 @@ type NewExpression struct {
 	// so this doesn't hit the `a<b>(c)` grammar ambiguity that keeps explicit
 	// call-site type arguments out of V1 for plain function calls.
 	TypeArgs []*TypeAnnotation
-	Args     []Expression
-	pos      Pos
+	// Callee is the constructor when it is not a name (`new this.K()`,
+	// `new ctors[0]()`); ClassName is then empty.
+	Callee Expression
+	Args   []Expression
+	pos    Pos
 }
 
 func (*NewExpression) nodeMarker()   {}
@@ -2117,6 +2086,9 @@ type ImportCallExpression struct {
 type ImportCallExport struct {
 	Name      string
 	TypeAnnot *TypeAnnotation
+	// Mangled is the export's merged-program name (bundled and lazy
+	// backends), "" when the target is not merged (isolated).
+	Mangled string
 }
 
 func (*ImportCallExpression) nodeMarker()   {}
@@ -2188,6 +2160,10 @@ type TypeAnnotation struct {
 	KeyType    *TypeAnnotation   // non-nil only for Map<K,V> — the key type K
 	TypeArgs   []*TypeAnnotation // N type arguments for a user-defined generic interface usage, e.g. Box<number, string> (TDD-00037); built-ins keep using ElemType/KeyType above, unrelated to this field
 	IsFuncType bool
+	// IsCtorType marks a constructor type (`new (…) => T`): its values are
+	// constructors, the function-type fields describing their construct
+	// signature.
+	IsCtorType bool
 	FuncParams []TypeAnnotation // param types for function type annotations
 	// FuncParamOptional[i] is true when parameter i of a function type carried a
 	// `?` marker (`(x?: T) => R`) — omittable at the call site, distinct from an
@@ -2300,22 +2276,6 @@ type TypeAnnotation struct {
 // for an annotation code generation synthesised.
 func (ta *TypeAnnotation) TypeNode() TypeNode { return ta.node }
 
-// NewHTTPAgentExpression is `new http.Agent(options?)` / `new Agent(options?)`
-// (ADR-00432): an inert connection-pool config token — this compiler's client
-// opens one connection per request, so the options carry no behavior.
-type NewHTTPAgentExpression struct {
-	Options Expression // nil, or the options object literal
-	pos     Pos
-}
-
-func (*NewHTTPAgentExpression) nodeMarker()   {}
-func (*NewHTTPAgentExpression) exprMarker()   {}
-func (n *NewHTTPAgentExpression) GetPos() Pos { return n.pos }
-
-func NewNewHTTPAgentExpression(options Expression, pos Pos) *NewHTTPAgentExpression {
-	return &NewHTTPAgentExpression{Options: options, pos: pos}
-}
-
 // NewWebviewExpression is `new Webview(options?)` (TDD-00142): the system
 // webview window handle. Options is the `{ title, width, height, debug }`
 // object literal (all fields optional).
@@ -2330,4 +2290,32 @@ func (n *NewWebviewExpression) GetPos() Pos { return n.pos }
 
 func NewNewWebviewExpression(options Expression, pos Pos) *NewWebviewExpression {
 	return &NewWebviewExpression{Options: options, pos: pos}
+}
+
+// ArrayPatternNames is every name an array pattern binds, through nested
+// patterns and a rest element.
+func ArrayPatternNames(elems []ArrayPatternElem) []string {
+	var out []string
+	for _, el := range elems {
+		if el.Name != "" {
+			out = append(out, el.Name)
+		}
+		out = append(out, ArrayPatternNames(el.SubArray)...)
+		out = append(out, ObjectPatternNames(el.SubObject)...)
+	}
+	return out
+}
+
+// ObjectPatternNames is every name an object pattern binds, through nested
+// patterns and a rest element.
+func ObjectPatternNames(props []DestructProp) []string {
+	var out []string
+	for _, p := range props {
+		if len(p.SubArray) == 0 && len(p.SubObject) == 0 && p.Local != "" {
+			out = append(out, p.Local)
+		}
+		out = append(out, ArrayPatternNames(p.SubArray)...)
+		out = append(out, ObjectPatternNames(p.SubObject)...)
+	}
+	return out
 }

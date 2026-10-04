@@ -16,4 +16,4 @@ console.log('a=b c=d'.replaceAll(pair, (m, k, v) => `${v}=${k}`)) // b=a d=c
 console.log('x5'.replace(/(\d)/, (m, digit, offset) => `${digit}@${offset}`)) // x5@1
 
 // A non-string return value is stringified.
-console.log('a1b'.replace(/1/, () => 9)) // a9b
+console.log('a1b'.replace(/1/, (): any => 9)) // a9b

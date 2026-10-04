@@ -603,10 +603,9 @@ func TestE2EFetchInitWrongFieldTypesRejected(t *testing.T) {
 
 // --- Headers / Request (TDD-00040) ---
 //
-// Headers IS a Map<string,string> under the hood (see IsHeaders's doc
-// comment in codegen/llvm/types.go), so these focus on the two genuinely
-// new behaviors — case-insensitive keys and append() — plus Request's own
-// construction/defaults and its wiring into fetch().
+// Case-insensitive names and append(), plus Request's own
+// construction/defaults and its wiring into fetch(). Headers' own semantics
+// are in headers_test.go.
 
 func TestE2EHeadersGetSetHasDeleteCaseInsensitive(t *testing.T) {
 	src := `
@@ -914,8 +913,10 @@ async function main2(): Promise<void> {
     const results = await Promise.allSettled(ps)
     for (const res of results) {
         console.log(res.status)
-        const arr = new Uint8Array(await res.value.arrayBuffer())
-        console.log(arr.length)
+        if (res.status === "fulfilled") {
+            const arr = new Uint8Array(await res.value.arrayBuffer())
+            console.log(arr.length)
+        }
     }
 }
 main2()
@@ -1196,14 +1197,14 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
 `, "got pong 200")
 }
 
-// Response.headers (ADR-00490): raw header capture parsed lazily into a
-// Map<string,string> with lowercased keys per fetch Headers semantics.
+// Response.headers (ADR-00490, ADR-01321): the Headers filled from the raw
+// header text on its first read.
 func TestE2EFetchResponseHeaders(t *testing.T) {
 	srv := newFetchTestServer(t)
 	src := fmt.Sprintf(`
 async function main2(): Promise<void> {
     const r: Response = await fetch("%s/flat")
-    const h: Map<string, string> = r.headers
+    const h: Headers = r.headers
     console.log(h.get("content-type"))
     console.log(h.has("x-nonexistent"))
 }
@@ -1262,4 +1263,26 @@ async function main2(): Promise<void> {
 main2()
 `, srv.URL)
 	assertOutput(t, src, `{"title":"hello","count":42,"active":true}`)
+}
+
+// An init held in `any` is read member by member at run time, as undici
+// reads a RequestInit dictionary; undefined or null is no init.
+func TestE2EFetchDynamicInit(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const init: any = { method: "POST", body: "x", headers: { "X-Custom-Header": "1" } }
+    console.log((await (await fetch("%[1]s/echo", init)).text()).trim())
+    const none: any = undefined
+    console.log((await (await fetch("%[1]s/echo", none)).text()).trim())
+    const pairs: any = { method: "PUT", body: "y", headers: [["Authorization", "t"]] }
+    console.log(await (await new Request("%[1]s/echo", pairs).text()))
+    console.log((await (await fetch(new Request("%[1]s/echo", pairs))).text()).trim())
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, `{"method":"POST","body":"x","x_custom":"1","authorization":""}
+{"method":"GET","body":"","x_custom":"","authorization":""}
+y
+{"method":"PUT","body":"y","x_custom":"","authorization":"t"}`)
 }

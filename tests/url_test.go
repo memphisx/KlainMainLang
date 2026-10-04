@@ -1,9 +1,6 @@
 package tests
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 // --- URL / URLSearchParams (see docs/adr/ADR-00076.md) ---
 
@@ -229,17 +226,16 @@ console.log(u.href);
 `, "threw\nhttps://example.com/")
 }
 
-func TestE2EURLComponentCompoundAssignmentRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// TDD-00237: a compound assignment to a URL component reads the getter and
+// writes the setter, as in JavaScript.
+func TestE2EURLComponentCompoundAssignment(t *testing.T) {
+	assertSameAsNode(t, `
 const url = new URL('http://example.com/path');
 url.hash += 'x';
+url.pathname += '/more';
+url.search += 'q=1';
+console.log(url.href);
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for compound assignment to a URL component")
-	}
-	if !strings.Contains(err.Error(), "compound assignment to a URL component") {
-		t.Errorf("unexpected error message: %v", err)
-	}
 }
 
 // --- TDD-00203: WHATWG URL / URLSearchParams conformance overhaul ---
@@ -269,8 +265,8 @@ console.log(p.toString())
 func TestE2EURLSearchParamsIteration(t *testing.T) {
 	assertOutput(t, `
 const p = new URLSearchParams("a=1&b=2&a=3")
-console.log(p.keys().join(","))
-console.log(p.values().join(","))
+console.log([...p.keys()].join(","))
+console.log(Array.from(p.values()).join(","))
 let out = ""
 p.forEach((v: string, k: string): void => { out = out + k + "=" + v + ";" })
 console.log(out)

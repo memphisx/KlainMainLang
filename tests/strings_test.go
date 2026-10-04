@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -230,7 +231,7 @@ console.log(result)
 
 func TestE2ETaggedTemplateBasic(t *testing.T) {
 	assertOutput(t, `
-function tag(strings: string[], ...values: number[]): string {
+function tag(strings: TemplateStringsArray, ...values: number[]): string {
     let result = strings[0];
     for (let i = 0; i < values.length; i++) {
         result += values[i];
@@ -244,7 +245,7 @@ console.log(tag`+"`"+`a${1}b${2}c`+"`"+`)
 
 func TestE2ETaggedTemplateNoSubstitution(t *testing.T) {
 	assertOutput(t, `
-function tag(strings: string[]): string {
+function tag(strings: TemplateStringsArray): string {
     return strings[0];
 }
 console.log(tag`+"`"+`hello world`+"`"+`)
@@ -270,7 +271,7 @@ func TestE2ETaggedTemplateValuesAreRealTypedValues(t *testing.T) {
 	// not stringified) — unlike a plain, un-tagged template literal's own
 	// interpolation.
 	assertOutput(t, `
-function sumTag(strings: string[], ...values: number[]): number {
+function sumTag(strings: TemplateStringsArray, ...values: number[]): number {
     let s = 0;
     for (const v of values) { s += v; }
     return s;
@@ -286,14 +287,14 @@ func TestE2ETaggedTemplateArrowFunctionTag(t *testing.T) {
 	// closing the ADR-00105 gap this file originally just documented
 	// around).
 	assertOutput(t, `
-const tag = (strings: string[], a: number, b: number): number => a + b + strings.length;
+const tag = (strings: TemplateStringsArray, a: number, b: number): number => a + b + strings.length;
 console.log(tag`+"`"+`x${1}y${2}z`+"`"+`)
 `, "6")
 }
 
 func TestE2ETaggedTemplateArrowFunctionTagWithRest(t *testing.T) {
 	assertOutput(t, `
-const tag = (strings: string[], ...values: number[]): number => {
+const tag = (strings: TemplateStringsArray, ...values: number[]): number => {
     let s = 0;
     for (const v of values) { s += v; }
     return s;
@@ -304,7 +305,7 @@ console.log(tag`+"`"+`x${10}y${20}z${12}`+"`"+`)
 
 func TestE2ETaggedTemplateClosureCapture(t *testing.T) {
 	assertOutput(t, `
-function tag(strings: string[], ...values: number[]): number {
+function tag(strings: TemplateStringsArray, ...values: number[]): number {
     let s = 0;
     for (const v of values) { s += v; }
     return s;
@@ -320,7 +321,7 @@ console.log(closure())
 
 func TestE2ETaggedTemplateUnannotatedConst(t *testing.T) {
 	assertOutput(t, `
-function tag(strings: string[], ...values: number[]): string {
+function tag(strings: TemplateStringsArray, ...values: number[]): string {
     return strings[0] + values[0];
 }
 const r = tag`+"`"+`v=${99}`+"`"+`;
@@ -335,7 +336,7 @@ func TestE2ETaggedTemplateClassMethodTag(t *testing.T) {
 	// literal argument is combined with further trailing arguments.
 	assertOutput(t, `
 class Fmt {
-    build(strings: string[]): string {
+    build(strings: TemplateStringsArray): string {
         return strings[0];
     }
 }
@@ -344,12 +345,12 @@ console.log(f.build`+"`"+`hi`+"`"+`)
 `, "hi")
 }
 
-func TestE2ETaggedTemplateRawPropertyRejected(t *testing.T) {
-	// Deliberate V1 scope cut (TDD-00059): no `.raw` property on the
-	// strings array.
-	_, err := parseAndCompile("function tag(strings: string[]): string { return strings.raw[0]; } console.log(tag`hi`)")
-	if err == nil {
-		t.Fatal("expected a compile error for 'strings.raw' on a tagged template's strings array, got none")
+// A tag typed with a mutable string[] is a TS2345, as tsc reports: a
+// template object is a TemplateStringsArray (readonly).
+func TestE2ETaggedTemplateMutableStringsParamRejected(t *testing.T) {
+	_, err := parseAndCompile("function tag(strings: string[]): string { return strings[0]; } console.log(tag`hi`)")
+	if err == nil || !strings.Contains(err.Error(), "TemplateStringsArray") {
+		t.Fatalf("expected the TS2345 on a string[] tag parameter, got %v", err)
 	}
 }
 
@@ -696,4 +697,38 @@ console.log(count`+"`"+`x${1}y${2}z`+"`"+`)
 // Node.
 func TestE2ETemplateLiteralLineTerminators(t *testing.T) {
 	assertOutput(t, "const s = `x\r\ny\rz`\nconsole.log(JSON.stringify(s), s.length)\n", "\"x\\ny\\nz\" 5")
+}
+
+// String.raw called as a function takes any array-like `raw`; a tag reads
+// `strings.raw`, and each site's template object is made once (ADR-01344).
+func TestE2EStringRawCallAndTemplateRaw(t *testing.T) {
+	assertSameAsNode(t, `
+console.log(String.raw({ raw: ["a", "b", "c"] }, 1, "x"));
+const t = { raw: ["p", "q"] };
+console.log(String.raw(t, 42, 99), JSON.stringify(String.raw({ raw: [] })));
+console.log(String.raw({ raw: { length: 3, 0: "a", 1: "b", 2: "c" } } as any, 1.5, [1, 2], { x: 1 }));
+console.log(String.raw({ raw: "abc" } as any, 0, 1));
+try { String.raw(null as any); } catch (e: any) { console.log(e instanceof TypeError); }
+function tag(strings: TemplateStringsArray, ...v: number[]): string { return strings.raw.join("|") + ":" + strings.join("|") + ":" + v.join(","); }
+console.log(tag`+"`a\\n${1}b${2}`"+`);
+function viaRaw(s: TemplateStringsArray, ...v: any[]): string { return String.raw(s, ...v); }
+console.log(viaRaw`+"`x\\t${3}y\\u0041`"+`);
+function id(s: TemplateStringsArray): TemplateStringsArray { return s; }
+const xs: TemplateStringsArray[] = [];
+for (let i = 0; i < 2; i++) xs.push(id`+"`a${i}b`"+`);
+console.log(xs[0] === xs[1], id`+"`a`"+` === id`+"`a`"+`);
+`)
+}
+
+// An index into a string held in any, and identity of arrays read out of
+// an array (ADR-01344).
+func TestE2EAnyStringIndexAndArrayElementIdentity(t *testing.T) {
+	assertSameAsNode(t, `
+const s: any = "abc";
+let i = 1;
+console.log(s[0], s[2], s[5], s[i]);
+const arr: string[][] = [];
+const q = ["z"]; arr.push(q); arr.push(q);
+console.log(arr[0] === arr[1], arr[0] === q, arr[0] !== arr[1], arr[3] === undefined);
+`)
 }

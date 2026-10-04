@@ -218,9 +218,21 @@ klainmain [flags] <file.ts>
                 es-ascii / pcre. See docs/tdd/TDD-00067.md.
 
   -dynamic-import <m>
-                import() lowering: eager (default — the target module is
-                resolved and linked at compile time, the returned promise
-                resolves to it) or lazy.
+                import() lowering. bundled (default): the target is
+                compiled into the binary, runs on first import() and
+                shares every module instance with the program, as in
+                Node. lazy: the same, with each target's code in a shared
+                library in <binary>.d/, loaded on first use. isolated: each
+                target is its own program in <binary>.d/, with its own
+                instance of every module it imports, so nothing it imports
+                shares state with the importer. lazy and isolated need the
+                <binary>.d/ directory beside the binary and refuse
+                --static.
+
+  -lib-objects  Compile each builtin library module once into the object
+                cache and link the cached objects (default true). With
+                -lib-objects=false the library is compiled with every
+                program.
 
   -diagnostics <f>
                 How errors in the program are reported: text (default —

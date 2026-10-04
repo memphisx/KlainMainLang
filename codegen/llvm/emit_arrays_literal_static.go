@@ -160,11 +160,18 @@ func (e *Emitter) constArrayImage(elems []ast.Expression, elemTy Type) (string, 
 }
 
 // newConstGlobal emits a private constant global of the given LLVM type and
-// initializer, returning its name.
+// initializer, returning its name. Named by its content, as internString
+// names a string, so the same constant is spelled the same in every unit;
+// one already emitted is reused.
 func (e *Emitter) newConstGlobal(llTy, init string) string {
-	name := fmt.Sprintf("@.arrlit%d", e.arrLitIdx)
-	e.arrLitIdx++
-	e.emitGlobal(fmt.Sprintf("%s = private unnamed_addr constant %s %s, align 8", name, llTy, init))
+	name := contentSymbol("@.arrlit.", llTy+" "+init)
+	if e.contentDefined == nil {
+		e.contentDefined = map[string]bool{}
+	}
+	if !e.contentDefined[name] {
+		e.contentDefined[name] = true
+		e.emitGlobal(fmt.Sprintf("%s = private unnamed_addr constant %s %s, align 8", name, llTy, init))
+	}
 	return name
 }
 

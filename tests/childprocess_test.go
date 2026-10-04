@@ -320,6 +320,8 @@ child.on('close', () => { console.log("closed") })
 func TestE2EChildProcessUnref(t *testing.T) {
 	// child.unref() drops the child from the loop's keepalive, so the parent
 	// exits without waiting for it — the 'close' listener never fires (ADR-00767).
+	// Piped stdout/stderr hold the loop until the child ends them, as in Node,
+	// whose loop then ends before the unref'd exit is reported.
 	assertOutputImports(t, `
 import { spawn } from 'child_process'
 const child = spawn("sleep", ["3"], {})
@@ -327,6 +329,15 @@ child.unref()
 child.on('close', () => { console.log("SHOULD_NOT_PRINT") })
 console.log("parent")
 `, "parent")
+	assertSameAsNodeImports(t, `
+import { spawn } from 'child_process'
+const t0 = Date.now()
+const child = spawn("sleep", ["1"], { stdio: "ignore" })
+child.unref()
+child.on('close', () => { console.log("SHOULD_NOT_PRINT") })
+process.on('exit', () => { console.log("exited early", Date.now() - t0 < 900) })
+console.log("parent")
+`)
 }
 
 func TestE2EChildProcessRefAfterUnref(t *testing.T) {

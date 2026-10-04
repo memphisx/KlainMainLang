@@ -14,9 +14,9 @@ package llvm
 //     undefined+1 → NaN); a numeric string coerces via ToNumber in
 //     arithmetic ("5"*2===10, ""*1===0, junk → NaN).
 //   - relational on two strings: lexicographic; mixed: numeric.
-//   - a heap reference reaching __kml_any_tonum directly → NaN; an object
-//     operand is first run through @__kml_toprimitive at the operator site
-//     (TDD-00201 Stage 4), so `{valueOf(){return 5}}*2` is 10, not NaN.
+//   - a heap reference is run through ToPrimitive (number hint) inside
+//     __kml_any_tonum, so `{valueOf(){return 5}}*2` is 10, not NaN, at
+//     every ToNumber site, not only the operators.
 //   - ToBoolean: false/null/undefined/±0/NaN/"" are false, all else true.
 
 import (
@@ -35,6 +35,8 @@ func (e *Emitter) ensureAnyOps() {
 	e.ensureStrHeaderRuntime()
 	e.ensureToNumber()
 	e.ensureNullDerefThrow()
+	e.ensureAnyToPrimitive()
+	e.emitGlobal("declare double @__kml_obj_tonum(i64)") // boxsrc/toprim.c
 	symMsg := e.internString("Cannot convert a Symbol value to a number")
 	e.emitGlobal(`
 ; JS ToNumber over a NaN-boxed word. Numbers decode; true/false -> 1/0;
@@ -43,8 +45,8 @@ func (e *Emitter) ensureAnyOps() {
 ; junk -> NaN — strtod alone took "inf" and rejected "  Infinity  ",
 ; ADR-01057); a boxed Symbol (an object whose hidden field 0 carries
 ; symbolTypeIDFlag, ADR-01059) throws the spec's TypeError; any other bare
-; heap reference -> NaN (an object operand is ToPrimitive'd at the operator
-; site before reaching here, TDD-00201 Stage 4).
+; heap reference goes through ToPrimitive with the number hint first
+; (@__kml_obj_tonum, boxsrc/toprim.c), as the spec's ToNumber does.
 define double @__kml_any_tonum(i64 %v) {
 entry:
   %isnum = icmp uge i64 %v, 562949953421312
@@ -76,14 +78,17 @@ str:
   ret double %pv
 notstr:
   %isobj = icmp eq i64 %kind, 1
-  br i1 %isobj, label %obj, label %retnan
+  br i1 %isobj, label %obj, label %objnum
 obj:
   %opay = and i64 %v, -8
   %optr = inttoptr i64 %opay to ptr
   %f0 = load i64, ptr %optr, align 8
   %symbit = and i64 %f0, ` + fmt.Sprintf("%d", symbolTypeIDFlag) + `
   %issym = icmp ne i64 %symbit, 0
-  br i1 %issym, label %symthrow, label %retnan
+  br i1 %issym, label %symthrow, label %objnum
+objnum:
+  %on = call double @__kml_obj_tonum(i64 %v)
+  ret double %on
 symthrow:
   call void @__kml_throw_nullderef(ptr ` + symMsg + `)
   unreachable
@@ -129,6 +134,18 @@ func (e *Emitter) emitAnyToNum(v Value) string {
 	return r
 }
 
+// emitAnyToF64Slot converts a boxed value to the double a number slot holds:
+// ToNumber, except that undefined stays undefined, as the slot's sentinel
+// (TDD-00241). Arithmetic on the box uses emitAnyToNum.
+func (e *Emitter) emitAnyToF64Slot(v Value) string {
+	num := e.emitAnyToNum(v)
+	isU := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, v.Ref, nbUndefined))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double bitcast (i64 %d to double), double %s", r, isU, undefF64, num))
+	return r
+}
+
 // emitAnyTruthy coerces a boxed value to i1 via JS ToBoolean.
 func (e *Emitter) emitAnyTruthy(v Value) Value {
 	e.ensureAnyOps()
@@ -162,6 +179,23 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 	}
 	lb = Value{Ref: e.emitAnyToPrimitiveHint(lb.Ref, hint), Ty: TypeAny}
 	rb = Value{Ref: e.emitAnyToPrimitiveHint(rb.Ref, hint), Ty: TypeAny}
+	// An `any` against a bigint: a bigint operator when the `any` holds a
+	// bigint too, a TypeError for any other non-string primitive.
+	_, bigArith := bigIntBinFn[op]
+	bigArith = bigArith && (left.Ty.IsBigInt || right.Ty.IsBigInt)
+	bigOp := func() (string, error) {
+		bl, br := e.emitUnboxBoxToType(lb.Ref, BigIntType()), e.emitUnboxBoxToType(rb.Ref, BigIntType())
+		bl.Ty.Nullable, br.Ty.Nullable = true, true
+		v, err := e.emitBigIntBinary(op, bl, br, pos)
+		if err != nil {
+			return "", err
+		}
+		return e.emitBoxBigInt(v).Ref, nil
+	}
+	if bigArith && op != "+" {
+		r, err := bigOp()
+		return Value{Ref: r, Ty: TypeAny}, err
+	}
 
 	if op == "+" {
 		// Runtime string check: pointer range with string kind bits on either
@@ -210,10 +244,17 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(numL)
-		ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
-		sum := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = fadd double %s, %s", sum, ld, rd))
-		enc := e.emitNbEncodeDouble(sum)
+		var enc string
+		if bigArith {
+			if enc, err = bigOp(); err != nil {
+				return Value{}, err
+			}
+		} else {
+			ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
+			sum := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = fadd double %s, %s", sum, ld, rd))
+			enc = e.emitNbEncodeDouble(sum)
+		}
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", enc, resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 

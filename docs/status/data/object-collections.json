@@ -70,7 +70,10 @@
           },
           {
             "feature": "`Object.groupBy(arr, fn)`",
-            "status": "implemented"
+            "status": "implemented",
+            "notes": [
+              "A null-prototype object of arrays, as in Node ([ADR-01331](../adr/ADR-01331.md))"
+            ]
           },
           {
             "feature": "`Object.assign(target, ...src)`",
@@ -101,12 +104,13 @@
             "feature": "`Object.defineProperty` / `getOwnPropertyDescriptor` / `getOwnPropertyNames` / accessors (dynamic objects)",
             "status": "implemented",
             "caveats": [
-              "Dynamic (`any`-typed / js-mode-literal) objects only — statically-typed structs have no descriptor table",
+              "`Object.defineProperty` and `defineProperties` take dynamic (`any`-typed / js-mode-literal) objects only — a statically typed struct has no descriptor table",
               "`Object.defineProperties` defines string keys only, not symbol keys"
             ],
             "notes": [
               "Real property descriptors ([TDD-00155](../tdd/TDD-00155.md) Stage 5, [ADR-00629](../adr/ADR-00629.md)): spec create-defaults (absent attributes are false), non-configurable redefinition rules, data and accessor descriptor forms. Object-literal `get`/`set` compile to dynamic-ABI functions invoked with the original receiver (inherited getters through the prototype chain included); `Object.keys`/`for...in`/`JSON.stringify` honor enumerability (stringify and spread invoke getters); rejected writes/deletes throw module-strict JS TypeErrors",
-              "`Object.defineProperties`; a function's own properties take descriptors too ([ADR-01237](../adr/ADR-01237.md), [ADR-01232](../adr/ADR-01232.md))"
+              "`Object.defineProperties`; a function's own properties take descriptors too ([ADR-01237](../adr/ADR-01237.md), [ADR-01232](../adr/ADR-01232.md))",
+              "`getOwnPropertyDescriptor` and `getOwnPropertyNames` of a statically typed object read its layout ([ADR-01331](../adr/ADR-01331.md))"
             ]
           },
           {
@@ -124,7 +128,7 @@
             "feature": "`Reflect.get/set/has/deleteProperty/ownKeys/getPrototypeOf/setPrototypeOf/isExtensible/preventExtensions/defineProperty` + `defineMetadata`/`getMetadata`/`hasMetadata`",
             "status": "implemented",
             "caveats": [
-              "`Reflect.construct` is missing",
+              "`Reflect.construct` with a `newTarget` other than the target throws a TypeError rather than constructing with that prototype",
               "The metadata API (`defineMetadata`/`getMetadata`/`getOwnMetadata`/`hasMetadata`/`hasOwnMetadata`, TDD-00161 Stage 3) stores on a dynamic-object target and does not walk the prototype chain (so `get` == `getOwn`); `Reflect.metadata` as a decorator factory is rejected",
               "Boolean-returning forms (`set`/`deleteProperty`/`setPrototypeOf`) return the success flag rather than throwing, per spec",
               "Every form requires a dynamic (`any`-typed, or `-compat=js`) target: a statically-typed object operand is a clean compile-time rejection (strict mode does not widen a typed struct to a bag, [ADR-00630](../adr/ADR-00630.md)), including `get`/`has`"
@@ -135,6 +139,7 @@
             "status": "implemented",
             "notes": [
               "Real runtime enforcement, not a no-op: tracks `obj`'s heap pointer in a global frozen-object set, checked at every field-write site, so a blocked write throws a catchable Error even through a different alias/function parameter ([ADR-00055](../adr/ADR-00055.md))",
+              "An array, or a typed array without elements, freezes too: its level is keyed by its shared header and every mutation checks it, throwing V8's TypeErrors ([ADR-01331](../adr/ADR-01331.md))",
               "A **dynamic** object freezes via its descriptor attributes instead ([ADR-00629](../adr/ADR-00629.md)): writes/adds/deletes throw, `Object.isFrozen`/`isSealed`/`isExtensible` answer truthfully; `Object.seal` and `Object.preventExtensions` enforce their own tiers the same way"
             ]
           },
@@ -218,7 +223,7 @@
             "feature": "`Map.entries()`",
             "status": "implemented",
             "notes": [
-              "`keys()`, `values()` and `entries()` of a `Map` or `Set` return live iterators (`next()`, `toArray()`, `for...of`, spread, `Array.from`): an entry added before the iterator reaches it is visited, a deleted one is not, and `console.log` shows the entries still to come (`[Map Iterator] { 'a' }`) ([ADR-01313](../adr/ADR-01313.md))"
+              "`keys()`, `values()` and `entries()` of a `Map` or `Set` return live iterators (`next()`, the iterator helpers ([ADR-01373](../adr/ADR-01373.md)), `for...of`, spread, `Array.from`): an entry added before the iterator reaches it is visited, a deleted one is not, and `console.log` shows the entries still to come (`[Map Iterator] { 'a' }`) ([ADR-01313](../adr/ADR-01313.md))"
             ]
           },
           {
@@ -279,11 +284,12 @@
             "status": "implemented",
             "caveats": [
               "Object-identity keys only (a primitive key is a clean compile error); non-iterable (no `size`/iteration — matches spec)",
-              "Under `-mm=manual` (default) a weak reference is strong: nothing is ever collected, so `.deref()` never nulls and keys persist (\"leak by design\"). Real weak semantics require `-mm=gc` ([TDD-00112](../tdd/TDD-00112.md)/[ADR-00349](../adr/ADR-00349.md))"
+              "Under `-mm=manual` (default) a weak reference is strong: nothing is ever collected, so `.deref()` never becomes `undefined` and keys persist (\"leak by design\"). Real weak semantics require `-mm=gc` ([TDD-00112](../tdd/TDD-00112.md)/[ADR-00349](../adr/ADR-00349.md))"
             ],
             "notes": [
               "`-mm=gc`: genuinely weak via Boehm disappearing links (the referent word is `GC_malloc_atomic`/unscanned so it isn't traced); a collected referent's `.deref()`/`WeakMap.has` observably drops. `gc()` (Node `--expose-gc` idiom) forces a full collection under gc, a no-op under manual",
-              "A `new WeakMap()` initial-entries argument is out of V1 scope"
+              "A `new WeakMap()` initial-entries argument is out of V1 scope",
+              "`WeakRef` is a TypeScript class (`lib/node/kml_weakref.ts`): any object, function or unregistered symbol as target (`WeakRef: invalid target` otherwise), `.deref()` `undefined` once collected, its target kept alive to the end of the job that made or derefed it (the spec's kept objects), and V8's inspect output ([ADR-01366](../adr/ADR-01366.md))"
             ]
           }
         ]

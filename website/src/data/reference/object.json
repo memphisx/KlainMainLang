@@ -135,9 +135,9 @@
       "id": "object.groupby",
       "name": "Object.groupBy(arr, fn)",
       "statusRow": "Object.groupBy(arr, fn)",
-      "signature": "Object.groupBy(arr, fn): { [key: string]: T[] }",
+      "signature": "Object.groupBy(items, fn): Partial<Record<K, T[]>>",
       "badge": "exact",
-      "description": "Groups an array's elements by the string key each returns from fn, producing a dynamic object mapping each key to the array of its members. Access groups by key and enumerate them via Object.keys.",
+      "description": "Groups an array's elements by the key fn returns for each, producing a null-prototype object that maps each key, in first-seen order, to the array of its members. A non-string key is converted to a string. Access groups by key and enumerate them via Object.keys.",
       "exampleKey": "objects/group_by",
       "snippet": "const byLetter = Object.groupBy(words, (w) => w.substring(0, 1))\nconst aWords = byLetter['a']\nconsole.log(aWords.length)        // 3",
       "seeAlso": [
@@ -174,7 +174,7 @@
       "statusRow": "Object.defineProperty / getOwnPropertyDescriptor / getOwnPropertyNames / accessors (dynamic objects)",
       "signature": "Object.defineProperty(o, \"k\", { value: 1, enumerable: false });\nconst d = Object.getOwnPropertyDescriptor(o, \"k\");\nconst t = { get x() { return this._x; }, set x(v) { this._x = v; } };",
       "badge": "implemented",
-      "description": "Real property descriptors on dynamic (any-typed, or js-mode untyped-literal) objects: defineProperty with the spec's create defaults and non-configurable redefinition rules, getOwnPropertyDescriptor in both data and accessor forms, getOwnPropertyNames including non-enumerables, and object-literal get/set accessors invoked with the original receiver — inherited getters through the prototype chain included. Object.keys, for...in, and JSON.stringify honor enumerability (stringify and spread invoke getters), and rejected writes or deletes throw the module-strict JS TypeErrors. Object.freeze/seal/preventExtensions enforce through the same attributes, with truthful isFrozen/isSealed/isExtensible. Object.defineProperties defines each key of its second argument the same way, and functions carry descriptors too. Statically-typed structs have no descriptor table.",
+      "description": "Real property descriptors on dynamic (any-typed, or js-mode untyped-literal) objects: defineProperty with the spec's create defaults and non-configurable redefinition rules, getOwnPropertyDescriptor in both data and accessor forms, getOwnPropertyNames including non-enumerables, and object-literal get/set accessors invoked with the original receiver — inherited getters through the prototype chain included. Object.keys, for...in, and JSON.stringify honor enumerability (stringify and spread invoke getters), and rejected writes or deletes throw the module-strict JS TypeErrors. Object.freeze/seal/preventExtensions enforce through the same attributes, with truthful isFrozen/isSealed/isExtensible. Object.defineProperties defines each key of its second argument the same way, and functions carry descriptors too. getOwnPropertyDescriptor and getOwnPropertyNames also read a statically-typed object's own fields; defineProperty needs a dynamic object, since a struct has no descriptor table.",
       "seeAlso": [
         "object.create",
         "object.freeze"
@@ -219,7 +219,7 @@
       "statusRow": "Object.freeze(obj)",
       "signature": "Object.freeze(obj): obj",
       "badge": "exact",
-      "description": "Real runtime enforcement, not a no-op: tracks obj's heap pointer in a global frozen-object set, checked at every field-write site, so a blocked write throws a catchable Error even through a different alias or function parameter. Adding/deleting fields is already structurally impossible, so value-write is the only thing freeze needs to enforce.",
+      "description": "Real runtime enforcement, not a no-op: tracks obj's heap pointer in a global frozen-object set, checked at every field-write site, so a blocked write throws a catchable Error even through a different alias or function parameter. Adding/deleting fields is already structurally impossible, so value-write is the only thing freeze needs to enforce. Arrays freeze too, every mutation checking the array's level.",
       "exampleKey": "objects/object_static",
       "snippet": "Object.freeze(conf)\ntry {\n  conf.port = 9090\n} catch (e) {\n  console.log('blocked: cannot write to a frozen object')\n}",
       "seeAlso": [
@@ -410,7 +410,7 @@
       "statusRow": "Map.entries()",
       "signature": "m.entries(): MapIterator<[K, V]>",
       "badge": "exact",
-      "description": "Returns a live Map Iterator of [K, V] tuples: next(), toArray(), for...of, spread and Array.from. An entry added before the iterator reaches it is visited, a deleted one is not; keys() and values() work the same way.",
+      "description": "Returns a live Map Iterator of [K, V] tuples: next(), the iterator helpers (map, filter, take, drop, flatMap, reduce, toArray, forEach, some, every, find), for...of, spread and Array.from. An entry added before the iterator reaches it is visited, a deleted one is not; keys() and values() work the same way.",
       "returns": {
         "type": "MapIterator<[K, V]>",
         "desc": "A live iterator over the entries."
@@ -574,10 +574,10 @@
       "statusRow": "WeakMap / WeakSet / WeakRef",
       "signature": "new WeakMap(); new WeakSet(); new WeakRef(obj)",
       "badge": "caveats",
-      "description": "Object-identity-keyed weak collections and references. Under -mm=gc these are genuinely weak via Boehm disappearing links (a collected referent's .deref() / WeakMap.has observably drops); gc() forces a full collection under gc, a no-op under manual.",
+      "description": "Object-identity-keyed weak collections and references. Under -mm=gc these are genuinely weak via Boehm disappearing links (a collected referent's .deref() / WeakMap.has observably drops); a WeakRef keeps its target to the end of the job that made or derefed it, as the spec does. gc() forces a full collection under gc, a no-op under manual.",
       "differences": [
         "Object-identity keys only (a primitive key is a clean compile error); non-iterable (no `size`/iteration — matches spec)",
-        "Under `-mm=manual` (default) a weak reference is strong: nothing is ever collected, so `.deref()` never nulls and keys persist (\"leak by design\"). Real weak semantics require `-mm=gc`",
+        "Under `-mm=manual` (default) a weak reference is strong: nothing is ever collected, so `.deref()` never becomes `undefined` and keys persist (\"leak by design\"). Real weak semantics require `-mm=gc`",
         "A `new WeakMap()` initial-entries argument is out of V1 scope"
       ],
       "seeAlso": [

@@ -1,13 +1,22 @@
 package llvm
 
 import (
+	_ "embed"
 	"fmt"
 
 	"KlainMainLang/ast"
 	"reflect"
-	"sort"
 	"strings"
 )
+
+//go:embed boxsrc/hostbox.c
+var hostBoxSource string
+
+// HostBoxSource is the host-box dispatchers' C source (boxsrc/hostbox.c).
+func HostBoxSource() string { return hostBoxSource }
+
+// UsesHostBoxC reports whether the program links the host-box dispatchers.
+func (e *Emitter) UsesHostBoxC() bool { return e.usedHostBox }
 
 // emit_hostbox.go — a host handle (a Map, a Blob, Headers, an ArrayBuffer, a
 // Worker, …: a bare pointer to runtime state with no header word of its own)
@@ -31,7 +40,7 @@ func hostCellObject(t Type) bool {
 		// A Date is its i64 timestamp; the cell carries the time value.
 		return t.IR == "i64" && !t.IsDynamic && !t.Nullable && !t.IsUndefined
 	}
-	return (t.IsRegExp || t.IsURL) && t.IsObject && t.IR == "ptr" && !t.IsDynamic && !t.IsArray && !t.IsNull && !t.IsUndefined
+	return t.IsRegExp && t.IsObject && t.IR == "ptr" && !t.IsDynamic && !t.IsArray && !t.IsNull && !t.IsUndefined
 }
 
 // hostHandleIR is the IR type of the word a host cell of t carries: a
@@ -73,11 +82,9 @@ func isHostHandle(t Type) bool {
 		!t.IsBigInt && !t.IsCaught && !t.IsNull && !t.IsUndefined && !t.IsDynamicObject && hasHandleFlag(t)
 }
 
-// hostClassPriority names the host classes whose flags overlap (Headers is a
-// Map, SharedArrayBuffer an ArrayBuffer): the first set flag wins.
+// hostClassPriority names the host classes whose flags overlap (a
+// SharedArrayBuffer is an ArrayBuffer): the first set flag wins.
 var hostClassPriority = []struct{ flag, class string }{
-	{"IsHeaders", "Headers"},
-	{"IsURLSearchParams", "URLSearchParams"},
 	{"IsSharedArrayBuffer", "SharedArrayBuffer"},
 	{"IsArrayBuffer", "ArrayBuffer"},
 	{"IsMap", "Map"},
@@ -87,6 +94,9 @@ var hostClassPriority = []struct{ flag, class string }{
 
 // hostClassName is the JS class a host type's values are instances of.
 func hostClassName(t Type) string {
+	if t.IsCollIter && t.IterSrc != nil {
+		return collIterName(t) // `[object Array Iterator]`
+	}
 	if t.Weak && t.IsMap {
 		return "WeakMap"
 	}
@@ -120,6 +130,11 @@ func hostKey(t Type) string {
 	if t.MapVal != nil {
 		k += "|" + layoutFieldKey(*t.MapVal)
 	}
+	if t.IsCollIter && t.IterSrc != nil {
+		// An iterator's steps read its source by kind: a Map's keys and its
+		// values are different layouts, as are two Maps' of other types.
+		k += fmt.Sprintf("|it%d|", t.IterKind) + hostKey(*t.IterSrc)
+	}
 	return k
 }
 
@@ -133,7 +148,7 @@ func (e *Emitter) hostID(t Type) int64 {
 	}
 	base := t
 	base.Nullable, base.IsUndefined = false, false
-	id := e.allocTypeID() | hostTypeIDFlag
+	id := e.stableTypeID("H"+key) | hostTypeIDFlag
 	e.hostLayouts = append(e.hostLayouts, hostLayout{id: id, class: hostClassName(t), ty: base})
 	return id
 }
@@ -249,19 +264,14 @@ var hostClassTypes = map[string]Type{
 	"Set":     SetType(TypePtr),
 	"WeakMap": WeakMapType(TypePtr, TypePtr),
 	"WeakSet": WeakSetType(TypePtr),
-	"WeakRef": WeakRefType(TypePtr),
 }
 
 // emitDynHostInstanceOf is `box instanceof name` for a host class: the box's
 // header names one of that class's host types.
 func (e *Emitter) emitDynHostInstanceOf(v Value, name string) Value {
 	e.ensureHostBoxHooks()
-	if e.hostInstanceofUsed == nil {
-		e.hostInstanceofUsed = map[string]bool{}
-	}
-	e.hostInstanceofUsed[name] = true
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_host_is_%s(i64 %s)", r, name, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_host_is(i64 %s, ptr %s)", r, v.Ref, e.internString(name)))
 	return Value{Ref: r, Ty: TypeBool}
 }
 
@@ -271,8 +281,12 @@ func (e *Emitter) ensureHostBoxHooks() {
 		return
 	}
 	e.usedHostBox = true
-	// No declares: __kml_host_inspect and __kml_host_is_* are defined at
-	// finalize.
+	// The dispatchers over a host box's registered row (boxsrc/hostbox.c).
+	e.emitGlobal(`declare ptr @__kml_host_inspect(ptr, i64)
+declare ptr @__kml_host_tag(ptr)
+declare zeroext i1 @__kml_host_is(i64, ptr)
+declare i64 @__kml_host_iter(i64)
+declare ptr @__kml_host_class_name(i64)`)
 }
 
 // emitHostInspectCall renders a probed host cell as console.log does.
@@ -309,99 +323,68 @@ func (e *Emitter) emitHostInspectRoutines() {
 	}
 }
 
-// emitHostBoxFinalize defines __kml_host_inspect (dispatching on the header
-// id and depth to the routines above) and one __kml_host_is_<Class> per
-// class an `instanceof` tests. Called last among the host steps.
+// emitHostBoxFinalize generates the routines the host rows name (boxsrc/
+// hostbox.c dispatches to them) and registers one row per host layout.
+// Called last among the host steps.
 func (e *Emitter) emitHostBoxFinalize() {
 	if !e.usedHostBox {
 		return
 	}
+	e.ensureUnitReg()
+	e.ensureStrcmp() // other generated code leans on this decl arriving here
 	for n := -1; n != len(e.hostLayouts); {
 		n = len(e.hostLayouts)
 		e.emitHostIterRoutines()
 		e.emitHostInspectRoutines()
 	}
-	e.emitHostIterDispatch()
-	e.emitHostToJSONDispatch()
 	// The routines cap nesting at the compile-time depth; util.inspect's
-	// `depth` option moves the cap at run time, so the dispatch shifts the
+	// `depth` option moves the cap at run time, so the dispatcher shifts the
 	// depth by the difference (clamped to the routines generated).
 	e.ensureInspectReduce()
 	e.declareInspectOptDepth()
 	maxD := e.effectiveInspectDepth() + 1
-	var b strings.Builder
-	b.WriteString("\ndefine ptr @__kml_host_inspect(ptr %cell, i64 %depth0) {\nentry:\n")
-	fmt.Fprintf(&b, "  %%opt = load i64, ptr @__kml_inspect_opt_depth, align 8\n")
-	fmt.Fprintf(&b, "  %%shift = sub i64 %d, %%opt\n  %%d1 = add i64 %%depth0, %%shift\n", e.effectiveInspectDepth())
-	fmt.Fprintf(&b, "  %%lo = icmp slt i64 %%d1, 0\n  %%d2 = select i1 %%lo, i64 0, i64 %%d1\n")
-	fmt.Fprintf(&b, "  %%hi = icmp sgt i64 %%d2, %d\n  %%depth = select i1 %%hi, i64 %d, i64 %%d2\n", maxD, maxD)
-	e.emitGlobal("@__kml_inspect_indent_shift = external global i64")
-	b.WriteString("  %oldshift = load i64, ptr @__kml_inspect_indent_shift, align 8\n")
-	b.WriteString("  %newshift = sub i64 %depth, %depth0\n")
-	b.WriteString("  store i64 %newshift, ptr @__kml_inspect_indent_shift, align 8\n")
-	b.WriteString("  %hdr = load i64, ptr %cell, align 8\n")
-	n := 0
 	for _, h := range e.hostLayouts {
-		for d := 0; d <= e.effectiveInspectDepth()+1; d++ {
-			fn := fmt.Sprintf("@__kml_host_inspect_%d_%d", h.id&kmlHdrIDMask, d)
-			fmt.Fprintf(&b, "  %%m%d = icmp eq i64 %%hdr, %d\n  %%dm%d = icmp eq i64 %%depth, %d\n  %%c%d = and i1 %%m%d, %%dm%d\n  br i1 %%c%d, label %%hit%d, label %%next%d\nhit%d:\n  %%r%d = call ptr %s(ptr %%cell)\n  store i64 %%oldshift, ptr @__kml_inspect_indent_shift, align 8\n  ret ptr %%r%d\nnext%d:\n",
-				n, h.id, n, d, n, n, n, n, n, n, n, n, fn, n, n)
-			n++
+		e.registerHostRow(h, maxD)
+	}
+}
+
+// hostRowTy is a registered host layout row (see emitHostBoxFinalize).
+const hostRowTy = "{ i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr }"
+
+// registerHostRow adds h's row: its inspect routine per depth, its own
+// toString, its `[object X]` tag, its class name, its iterator and toJSON.
+func (e *Emitter) registerHostRow(h hostLayout, maxD int) {
+	id := h.id & kmlHdrIDMask
+	// The table opens with the depth the routines were generated at and the
+	// deepest one, then holds one routine per depth.
+	fns := []string{
+		fmt.Sprintf("ptr inttoptr (i64 %d to ptr)", e.effectiveInspectDepth()),
+		fmt.Sprintf("ptr inttoptr (i64 %d to ptr)", maxD),
+	}
+	for d := 0; d <= maxD; d++ {
+		fns = append(fns, fmt.Sprintf("ptr @__kml_host_inspect_%d_%d", id, d))
+	}
+	tab := fmt.Sprintf("@__kml_host_inspect_tab_%d", id)
+	e.emitGlobal(fmt.Sprintf("%s = private constant [%d x ptr] [%s]", tab, len(fns), strings.Join(fns, ", ")))
+	field := func(fn string) string {
+		if fn == "" {
+			return "ptr null"
 		}
+		return "ptr " + fn
 	}
-	fmt.Fprintf(&b, "  store i64 %%oldshift, ptr @__kml_inspect_indent_shift, align 8\n  ret ptr %s\n}\n", e.internString("[Object]"))
-	// String(box): a class with a toString of its own (a RegExp's `/a/g`)
-	// renders through the typed conversion; any other is `[object Map]`.
-	var own []string
-	for _, h := range e.hostLayouts {
-		if hostOwnToString[h.class] {
-			own = append(own, e.emitHostToStringRoutine(h))
-		} else {
-			own = append(own, "")
-		}
+	tostr := ""
+	if hostOwnToString[h.class] {
+		tostr = e.emitHostToStringRoutine(h)
 	}
-	b.WriteString("\ndefine ptr @__kml_host_tag(ptr %cell) {\nentry:\n  %hdr = load i64, ptr %cell, align 8\n")
-	for i, h := range e.hostLayouts {
-		if own[i] == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "  %%o%d = icmp eq i64 %%hdr, %d\n  br i1 %%o%d, label %%own%d, label %%notown%d\nown%d:\n  %%os%d = call ptr %s(ptr %%cell)\n  ret ptr %%os%d\nnotown%d:\n", i, h.id, i, i, i, i, i, own[i], i, i)
-	}
-	b.WriteString("  %ct = call ptr @__kml_host_class_tag(ptr %cell)\n  ret ptr %ct\n}\n")
-	// Object.prototype.toString's `[object Map]`, whatever the class's own
-	// toString.
-	b.WriteString("\ndefine ptr @__kml_host_class_tag(ptr %cell) {\nentry:\n  %hdr = load i64, ptr %cell, align 8\n")
-	prev := e.internString("[object Object]")
-	for i, h := range e.hostLayouts {
-		fmt.Fprintf(&b, "  %%t%d = icmp eq i64 %%hdr, %d\n  %%s%d = select i1 %%t%d, ptr %s, ptr %s\n", i, h.id, i, i, e.internString("[object "+h.class+"]"), prev)
-		prev = fmt.Sprintf("%%s%d", i)
-	}
-	fmt.Fprintf(&b, "  ret ptr %s\n}\n", prev)
-	e.functions.WriteString(b.String())
-	var names []string
-	for n := range e.hostInstanceofUsed {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		var ids []int64
-		for _, h := range e.hostLayouts {
-			if h.class == name {
-				ids = append(ids, h.id)
-			}
-		}
-		var f strings.Builder
-		fmt.Fprintf(&f, "\ndefine i1 @__kml_host_is_%s(i64 %%v) {\nentry:\n", name)
-		f.WriteString("  %kind = and i64 %v, 7\n  %isobj = icmp eq i64 %kind, 1\n  %lo = icmp uge i64 %v, 65536\n  %hi = icmp ult i64 %v, 562949953421312\n  %ptr = and i1 %lo, %hi\n  %ok = and i1 %isobj, %ptr\n  br i1 %ok, label %load, label %no\nload:\n")
-		f.WriteString("  %pb = and i64 %v, -8\n  %p = inttoptr i64 %pb to ptr\n  %hdr = load i64, ptr %p, align 8\n")
-		prev := "false"
-		for i, id := range ids {
-			fmt.Fprintf(&f, "  %%e%d = icmp eq i64 %%hdr, %d\n  %%o%d = or i1 %s, %%e%d\n", i, id, i, prev, i)
-			prev = fmt.Sprintf("%%o%d", i)
-		}
-		fmt.Fprintf(&f, "  ret i1 %s\nno:\n  ret i1 false\n}\n", prev)
-		e.functions.WriteString(f.String())
-	}
+	e.addUnitRow(unitKindHost, hostRowTy, h.id, strings.Join([]string{
+		"ptr " + tab,
+		field(tostr),
+		"ptr " + e.internString("[object "+h.class+"]"),
+		"ptr " + e.internString(h.class),
+		field(e.hostIterFns[h.id]),
+		field(e.hostToJSONFn(h)),
+		field(e.hostToPrimFn(h)),
+	}, ", "))
 }
 
 // emitHostToStringTag is a host box's Object.prototype.toString form,
@@ -436,7 +419,7 @@ func (e *Emitter) emitHostToStringRoutine(h hostLayout) string {
 
 // hostIterable are the host classes a for-of or spread walks (their default
 // iterator), boxed or not.
-var hostIterable = map[string]bool{"Map": true, "Set": true, "Headers": true, "URLSearchParams": true}
+var hostIterable = map[string]bool{"Map": true, "Set": true}
 
 // emitHostIterValue is the value a for-of or spread over an `any` walks: an
 // iterable host box's entries as a boxed array (`[...box]`), anything else
@@ -479,55 +462,23 @@ func (e *Emitter) emitHostIterRoutines() {
 	}
 }
 
-// emitHostIterDispatch defines __kml_host_iter: an iterable host box's
-// routine by header id, else the value itself.
-func (e *Emitter) emitHostIterDispatch() {
-	if !e.hostIterUsed {
-		return
+// hostToJSONFn generates h's toJSON routine (a Date's toISOString), or ""
+// for a host class without one.
+func (e *Emitter) hostToJSONFn(h hostLayout) string {
+	if h.class != "Date" {
+		return ""
 	}
-	var b strings.Builder
-	b.WriteString("\ndefine i64 @__kml_host_iter(i64 %v) {\nentry:\n")
-	b.WriteString("  %kind = and i64 %v, 7\n  %isobj = icmp eq i64 %kind, 1\n  %lo = icmp uge i64 %v, 65536\n  %hi = icmp ult i64 %v, 562949953421312\n  %ptr = and i1 %lo, %hi\n  %ok = and i1 %isobj, %ptr\n  br i1 %ok, label %load, label %no\nload:\n")
-	b.WriteString("  %pb = and i64 %v, -8\n  %cell = inttoptr i64 %pb to ptr\n  %hdr = load i64, ptr %cell, align 8\n")
-	i := 0
-	for _, h := range e.hostLayouts {
-		fn, ok := e.hostIterFns[h.id]
-		if !ok {
-			continue
-		}
-		fmt.Fprintf(&b, "  %%m%d = icmp eq i64 %%hdr, %d\n  br i1 %%m%d, label %%hit%d, label %%next%d\nhit%d:\n  %%r%d = call i64 %s(ptr %%cell)\n  ret i64 %%r%d\nnext%d:\n", i, h.id, i, i, i, i, i, fn, i, i)
-		i++
+	restore := e.beginDetachedFunc()
+	handle := e.emitHostCellLoad("%cell", h.ty)
+	s, err := e.emitDateToISOString(Value{Ref: handle, Ty: h.ty})
+	ret := "null"
+	if err == nil {
+		ret = s.Ref
 	}
-	b.WriteString("  ret i64 %v\nno:\n  ret i64 %v\n}\n")
-	e.functions.WriteString(b.String())
-}
-
-// emitHostToJSONDispatch defines __kml_host_tojson: the string a host box's
-// toJSON returns (a Date's toISOString), or null for a host class without
-// one.
-func (e *Emitter) emitHostToJSONDispatch() {
-	var b strings.Builder
-	var fns strings.Builder
-	b.WriteString("\ndefine ptr @__kml_host_tojson(ptr %cell) {\nentry:\n  %hdr = load i64, ptr %cell, align 8\n")
-	for i, h := range e.hostLayouts {
-		if h.class != "Date" {
-			continue
-		}
-		restore := e.beginDetachedFunc()
-		handle := e.emitHostCellLoad("%cell", h.ty)
-		s, err := e.emitDateToISOString(Value{Ref: handle, Ty: h.ty})
-		ret := "null"
-		if err == nil {
-			ret = s.Ref
-		}
-		e.emitTerminator(fmt.Sprintf("ret ptr %s", ret))
-		body := e.allocas.String() + e.body.String()
-		restore()
-		fn := fmt.Sprintf("@__kml_host_tojson_%d", h.id&kmlHdrIDMask)
-		fmt.Fprintf(&fns, "\ndefine internal ptr %s(ptr %%cell) {\nentry:\n%s}\n", fn, body)
-		fmt.Fprintf(&b, "  %%m%d = icmp eq i64 %%hdr, %d\n  br i1 %%m%d, label %%hit%d, label %%next%d\nhit%d:\n  %%r%d = call ptr %s(ptr %%cell)\n  ret ptr %%r%d\nnext%d:\n", i, h.id, i, i, i, i, i, fn, i, i)
-	}
-	b.WriteString("  ret ptr null\n}\n")
-	e.functions.WriteString(fns.String())
-	e.functions.WriteString(b.String())
+	e.emitTerminator(fmt.Sprintf("ret ptr %s", ret))
+	body := e.allocas.String() + e.body.String()
+	restore()
+	fn := fmt.Sprintf("@__kml_host_tojson_%d", h.id&kmlHdrIDMask)
+	e.functions.WriteString(fmt.Sprintf("\ndefine internal ptr %s(ptr %%cell) {\nentry:\n%s}\n", fn, body))
+	return fn
 }

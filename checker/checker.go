@@ -106,6 +106,12 @@ type Checker struct {
 	declSyms map[ast.Node]*binder.Symbol
 	// env names the type arguments of the generic declaration being typed.
 	env []map[string]*Type
+	// substs bind function type parameters while a deferred type is
+	// evaluated (typeops.go).
+	substs []map[*Type]*Type
+	// inferPlaceholders are the `infer` placeholders of the extends clauses
+	// being typed: type parameters that do not make a type deferred.
+	inferPlaceholders map[*Type]bool
 	// aliases memoises each alias per argument list; aliasing guards
 	// recursion.
 	aliases  map[string]*Type
@@ -120,6 +126,12 @@ type Checker struct {
 	// contextualizing marks the functions whose contextual type is being
 	// computed (contextualReturn).
 	contextualizing map[ast.Node]bool
+	// keepLiterals makes inferArgs keep an inferred literal type (what a
+	// call's contextual return type can make tsc do).
+	keepLiterals bool
+	// inferring holds the calls whose type arguments are being inferred for
+	// an argument's contextual type (contextualType).
+	inferring map[ast.Node]bool
 	// nesting counts the instantiations of each generic declaration in
 	// progress (maxNesting).
 	nesting map[*binder.Symbol]int
@@ -159,7 +171,7 @@ func NewWith(b *binder.Binding, opts options.Options) *Checker {
 	c := &Checker{b: b, opts: opts, in: interner{byKey: map[string]*Type{}},
 		nodeTypes: map[ast.Node]*Type{}, symTypes: map[*binder.Symbol]*Type{}, resolving: map[*binder.Symbol]bool{},
 		assigning: map[ast.Expression]bool{}, storage: map[ast.Expression]*Type{}, evolving: map[*binder.Symbol]bool{}, tupleCtx: map[*ast.ArrayLiteral]bool{}, initializing: map[*binder.Symbol]bool{}, building: map[*Type]bool{}, failedNominal: map[*Type]bool{}, exhaustive: map[*ast.SwitchStatement]bool{}, memberDecls: map[*ast.MemberExpression]*Property{}, cannotFound: map[cannotFindKey]bool{}, implicitThis: map[*ast.ThisExpression]bool{}, modules: map[string]*Type{},
-		aliases: map[string]*Type{}, aliasing: map[string]bool{}, enums: map[*binder.Symbol][]*Type{}, classing: map[*binder.Symbol]bool{}, ctorChain: map[*binder.Symbol]bool{}, nesting: map[*binder.Symbol]int{}, contextualizing: map[ast.Node]bool{}, flowCache: map[flowKey]*Type{}, provisional: map[ast.Expression]provisional{}}
+		aliases: map[string]*Type{}, aliasing: map[string]bool{}, enums: map[*binder.Symbol][]*Type{}, classing: map[*binder.Symbol]bool{}, ctorChain: map[*binder.Symbol]bool{}, nesting: map[*binder.Symbol]int{}, contextualizing: map[ast.Node]bool{}, inferring: map[ast.Node]bool{}, flowCache: map[flowKey]*Type{}, provisional: map[ast.Expression]provisional{}}
 	c.anyT = c.in.intrinsic(Any)
 	c.unknownT = c.in.intrinsic(Unknown)
 	c.objectT = c.in.intrinsic(NonPrimitive)
@@ -304,6 +316,9 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 		}
 		return c.falseT
 	case *ast.NullLiteral:
+		if sym := c.b.UndefinedRef(e); sym != nil {
+			return c.typeOfSymbol(sym)
+		}
 		if e.IsUndefined {
 			return c.undefinedT
 		}
@@ -317,11 +332,8 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 			case "NaN", "Infinity":
 				return c.numT
 			}
-			if spec, ok := c.b.Program.BuiltinMarkers[e.Name]; ok {
-				return c.moduleType(spec) // a builtin module, as its import binds it
-			}
-			if s := c.builtinImport(e.Name); s != nil && s.Flags&binder.Value != 0 {
-				return c.typeOfSymbol(s)
+			if t := c.builtinValueType(e.Name); t != nil {
+				return t
 			}
 			c.unresolvedValue(e.Name, e, e.GetPos(), c.b.LookupScope(e))
 			return c.unanswered // a global the checker has no declarations for yet
@@ -463,9 +475,17 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 		return c.in.object(props)
 	case *ast.MemberExpression:
 		if m := c.namespaceMember(e); m != nil {
-			if id, ok := e.Object.(*ast.Identifier); ok && id.Name == "globalThis" && len(m.Declarations) > 0 {
-				// A builtin reached through globalThis keeps its declaration.
-				c.memberDecls[e] = &Property{Name: e.Property, Decl: m.Declarations[len(m.Declarations)-1].Node}
+			if n := len(m.Declarations); n > 0 && c.builtinNamespace(e.Object) {
+				// A namespace's member (or a builtin reached through
+				// globalThis) keeps its declaration; an overloaded
+				// function, each overload's.
+				p := &Property{Name: e.Property, Decl: m.Declarations[n-1].Node}
+				if n > 1 {
+					for _, d := range m.Declarations {
+						p.Decls = append(p.Decls, d.Node)
+					}
+				}
+				c.memberDecls[e] = p
 			}
 			return c.typeOfSymbol(m) // a namespace's member
 		}
@@ -505,6 +525,10 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 					return c.unanswered
 				}
 				p := m.Prop(e.Property)
+				if p == nil && m.StringIndex == nil {
+					// Object.prototype's (`o.hasOwnProperty`, `o.toString`).
+					p = c.objectMember(e.Property)
+				}
 				if p == nil {
 					if m.StringIndex != nil {
 						// Through a string index signature (`env.PATH`).
@@ -581,20 +605,46 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 			}
 			if len(callee.TypeParams) > 0 {
 				if len(e.TypeArgs) == 0 && literalSensitive(e.Args) && c.mayHaveContext(e) {
-					// tsc also infers from the call's contextual return type,
-					// which can keep a literal argument's type (`const b:
-					// Box<'a' | 'b'> = box('a')`); that is not modelled.
-					return c.unanswered
+					// tsc also infers from the call's contextual return type.
+					// For a callback argument that types its parameters,
+					// which is not modelled. Otherwise all it can change is
+					// whether a literal argument keeps its type (`const b:
+					// Box<'a' | 'b'> = box('a')`): the widened instantiation,
+					// else the literal one, whichever the context takes; if
+					// neither, the widened one, and the mismatch is reported.
+					if hasFunctionArg(e.Args) {
+						return c.unanswered
+					}
+					r := c.instantiate(callee.Result, c.inferArgs(e.Args, e.TypeArgs, callee, true))
+					ct := c.contextualType(e)
+					if ct == nil || c.Unanswered(ct) || c.Unanswered(r) || c.assignable(r, ct) {
+						return r
+					}
+					c.keepLiterals = true
+					rl := c.instantiate(callee.Result, c.inferArgs(e.Args, e.TypeArgs, callee, true))
+					c.keepLiterals = false
+					if !c.Unanswered(rl) && c.assignable(rl, ct) {
+						return rl
+					}
+					return r
 				}
 				return c.instantiate(callee.Result, c.inferArgs(e.Args, e.TypeArgs, callee, true))
 			}
 			return callee.Result
 		}
 		return c.unanswered
-	case *ast.NewDateExpression, *ast.NewMapExpression, *ast.NewSetExpression, *ast.NewWeakMapExpression, *ast.NewWeakSetExpression:
-		// The parser's own `new Date(…)`, `new Map<K, V>(…)`, …: as a `new`
-		// through the global's construct signatures.
-		name, args, targs, _ := builtinNewParts(e)
+	case *ast.NewDateExpression, *ast.NewMapExpression, *ast.NewSetExpression, *ast.NewWeakMapExpression, *ast.NewWeakSetExpression,
+		*ast.NewXMLHttpRequestExpression,
+		*ast.NewTypedArrayExpression, *ast.NewRequestExpression,
+		*ast.NewReadableStreamExpression, *ast.NewWritableStreamExpression, *ast.NewTransformStreamExpression,
+		*ast.NewErrorExpression, *ast.NewCompressionStreamExpression, *ast.NewArrayExpression,
+		*ast.NewArrayBufferExpression:
+		// The front end's own `new Date(…)`, `new Map<K, V>(…)`, …: as a
+		// `new` through the global's construct signatures.
+		name, args, targs, ok := builtinNewParts(e)
+		if !ok {
+			return c.unanswered
+		}
 		return c.newBuiltinType(name, args, targs, e.GetPos())
 	case *ast.NewRegExpExpression:
 		// `/re/flags` and `new RegExp(…)`: the RegExp interface.
@@ -612,18 +662,31 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 		for _, a := range e.Args {
 			c.TypeOf(a)
 		}
-		sym := c.b.NewTarget(e)
-		if sym == nil {
-			sym = c.builtinImport(e.ClassName)
+		var sym *binder.Symbol
+		if e.Callee == nil {
+			sym = c.b.NewTarget(e)
+			if sym == nil {
+				sym = c.builtinImport(e.ClassName)
+			}
 		}
-		if sym != nil && sym.Flags&binder.Class == 0 && sym.Flags&binder.Variable != 0 {
+		if e.Callee != nil || sym != nil && sym.Flags&binder.Class == 0 && sym.Flags&binder.Variable != 0 {
 			// `new X(…)` through a value whose type has construct signatures
-			// (`declare var Map: MapConstructor`).
-			ctor := c.signaturesOf(c.typeOfSymbol(sym), true)
+			// (`declare var Map: MapConstructor`, `new ctors[0]()`).
+			var calleeT *Type
+			var callee ast.Expression
+			if e.Callee != nil {
+				calleeT, callee = c.TypeOf(e.Callee), e.Callee
+			} else {
+				calleeT, callee = c.typeOfSymbol(sym), ast.NewIdentifier(e.ClassName, e.GetPos())
+			}
+			if calleeT.Flags&Any != 0 {
+				return c.anyT
+			}
+			ctor := c.signaturesOf(calleeT, true)
 			if c.Unanswered(ctor) || ctor.Flags&Object == 0 || ctor.Kind != Function {
 				return c.unanswered
 			}
-			fake := ast.NewCallExpression(ast.NewIdentifier(e.ClassName, e.GetPos()), e.Args, e.GetPos())
+			fake := ast.NewCallExpression(callee, e.Args, e.GetPos())
 			fake.TypeArgs = e.TypeArgs
 			switch {
 			case len(ctor.Overloads) > 0:
@@ -660,7 +723,7 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 		}
 		return c.functionType(e, e.Params, e.RetType, e.Block, e.Body)
 	case *ast.FunctionExpression:
-		if e.IsAsync || e.IsGenerator {
+		if e.IsAsync {
 			return c.unanswered
 		}
 		return c.functionType(e, e.Params, e.RetType, e.Body, nil)
@@ -993,6 +1056,20 @@ func (c *Checker) tupleContext(e *ast.ArrayLiteral, n int) *Type {
 	if ct == nil || c.Unanswered(ct) {
 		return nil
 	}
+	if ct.Flags&TypeParam != 0 && ct.Constraint != nil {
+		// A type parameter constrained by a tuple type (`T extends
+		// readonly unknown[] | []`) infers a tuple, as TypeScript does.
+		for _, m := range members(ct.Constraint) {
+			if m.Flags&Object != 0 && m.Kind == Tuple {
+				es := make([]*Type, n)
+				for i := range es {
+					es[i] = c.unknownT
+				}
+				return c.in.tuple(es)
+			}
+		}
+		return nil
+	}
 	var tuple *Type
 	for _, m := range members(ct) {
 		switch {
@@ -1030,6 +1107,8 @@ func (c *Checker) apparentType(t *Type) *Type {
 		name = "Boolean"
 	case t.Flags&ESSymbol != 0:
 		name = "Symbol"
+	case t.Flags&BigIntLike != 0:
+		name = "BigInt"
 	case t.Flags&Object != 0 && t.Kind == Array:
 		name, args = "Array", []*Type{t.Elem}
 	case t.Flags&Object != 0 && t.Kind == Tuple && len(t.Elems) > 0:
@@ -1075,6 +1154,20 @@ func (c *Checker) signaturesOf(t *Type, construct bool) *Type {
 	return c.in.overloaded(sigs)
 }
 
+// builtinNamespace reports whether x names a builtin global namespace
+// (`Reflect`, or globalThis itself), not a program's own.
+func (c *Checker) builtinNamespace(x ast.Expression) bool {
+	id, ok := x.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+	if id.Name == "globalThis" {
+		return true
+	}
+	sym, _ := c.b.Resolve(id)
+	return sym != nil && c.b.Globals != nil && sym.Scope == c.b.Globals
+}
+
 // MemberDecl is the declaration a property access resolves to (a method
 // signature of a builtin declaration, …), or nil when the checker does not
 // know one.
@@ -1099,6 +1192,26 @@ func (c *Checker) MemberOverloadDecls(e *ast.MemberExpression) []ast.Node {
 // OverloadResult is the result type every overload of fn that a call may
 // resolve to agrees on, taking an argument the checker cannot type as
 // fitting any parameter; nil when they differ or none fits.
+// AnyArgOverloadCall reports whether e calls an overloaded function with an
+// argument typed any or unknown where the overloads that fit disagree on the
+// result: the overload tsc picks is then the first that fits, not one the
+// run-time value is known to take.
+func (c *Checker) AnyArgOverloadCall(e *ast.CallExpression) bool {
+	fn := c.TypeOf(e.Callee)
+	if c.Unanswered(fn) || fn.Kind != Function || len(fn.Overloads) == 0 {
+		return false
+	}
+	for _, a := range e.Args {
+		if _, spread := a.(*ast.SpreadElement); spread {
+			continue
+		}
+		if t := c.TypeOf(a); !c.Unanswered(t) && t.Flags&(Any|Unknown) != 0 {
+			return c.OverloadResult(e, fn) == nil
+		}
+	}
+	return false
+}
+
 func (c *Checker) OverloadResult(e *ast.CallExpression, fn *Type) *Type {
 	var result *Type
 	for _, sig := range fn.Overloads {
@@ -1256,6 +1369,18 @@ type cannotFindKey struct {
 // (`import { EventEmitter } from 'events'`, whose statement the merged
 // program drops) to its export's declaration in that module's `declare
 // module` block; nil when the module or the export is not declared.
+// builtinValueType is the type of a value a builtin module's import binds
+// under name: the module itself, or one of its members. Nil for neither.
+func (c *Checker) builtinValueType(name string) *Type {
+	if spec, ok := c.b.Program.BuiltinMarkers[name]; ok {
+		return c.moduleType(spec)
+	}
+	if s := c.builtinImport(name); s != nil && s.Flags&binder.Value != 0 {
+		return c.typeOfSymbol(s)
+	}
+	return nil
+}
+
 func (c *Checker) builtinImport(name string) *binder.Symbol {
 	ref, ok := c.b.Program.BuiltinImportRefs[sourceName(name)]
 	if !ok {
@@ -1670,8 +1795,75 @@ func builtinNewParts(e ast.Node) (string, []ast.Expression, []*ast.TypeAnnotatio
 			targs = []*ast.TypeAnnotation{e.ElemType}
 		}
 		return "WeakSet", nil, targs, true
+	case *ast.NewXMLHttpRequestExpression:
+		return "XMLHttpRequest", nil, nil, true
+	case *ast.NewTypedArrayExpression:
+		for name, kind := range typedArrayKinds {
+			if kind == e.ElemKind {
+				return name, present(e.Arg, e.ByteOffset, e.Length), nil, true
+			}
+		}
+	case *ast.NewRequestExpression:
+		return "Request", present(e.URL, e.Init), nil, true
+	case *ast.NewReadableStreamExpression:
+		return "ReadableStream", present(e.Source, e.Strategy), annots(e.ChunkType), true
+	case *ast.NewWritableStreamExpression:
+		return "WritableStream", present(e.Sink, e.Strategy), annots(e.ChunkType), true
+	case *ast.NewTransformStreamExpression:
+		var targs []*ast.TypeAnnotation
+		if e.InType != nil && e.OutType != nil {
+			targs = []*ast.TypeAnnotation{e.InType, e.OutType}
+		}
+		return "TransformStream", present(e.Transformer, e.WritableStrategy, e.ReadableStrategy), targs, true
+	case *ast.NewErrorExpression:
+		if e.Kind == "AggregateError" {
+			return e.Kind, present(e.Errors, e.Message), nil, true
+		}
+		return e.Kind, present(e.Message, e.Name), nil, true
+	case *ast.NewCompressionStreamExpression:
+		if e.Decompress {
+			return "DecompressionStream", present(e.Format), nil, true
+		}
+		return "CompressionStream", present(e.Format), nil, true
+	case *ast.NewArrayExpression:
+		return "Array", present(e.Size), annots(e.ElemType), true
+	case *ast.NewArrayBufferExpression:
+		if e.Shared {
+			return "SharedArrayBuffer", present(e.ByteLength), nil, true
+		}
+		return "ArrayBuffer", present(e.ByteLength), nil, true
 	}
 	return "", nil, nil, false
+}
+
+// typedArrayKinds maps each TypedArray global to the element kind its
+// `new` node carries.
+var typedArrayKinds = map[string]string{
+	"Int8Array": "int8", "Uint8Array": "uint8", "Uint8ClampedArray": "uint8clamped",
+	"Int16Array": "int16", "Uint16Array": "uint16", "Int32Array": "int32",
+	"Uint32Array": "uint32", "Float32Array": "float32", "Float64Array": "float64",
+	"BigInt64Array": "bigint64", "BigUint64Array": "biguint64",
+}
+
+// present is the leading arguments that are there: a `new` node keeps an
+// omitted one as nil, and only trailing ones may be omitted.
+func present(args ...ast.Expression) []ast.Expression {
+	var out []ast.Expression
+	for _, a := range args {
+		if a == nil {
+			break
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// annots is a `new` node's lone explicit type argument, if it has one.
+func annots(t *ast.TypeAnnotation) []*ast.TypeAnnotation {
+	if t == nil {
+		return nil
+	}
+	return []*ast.TypeAnnotation{t}
 }
 
 func (c *Checker) newBuiltinType(name string, args []ast.Expression, typeArgs []*ast.TypeAnnotation, pos ast.Pos) *Type {

@@ -49,7 +49,7 @@ func mapRuntime(keyTy Type) (suffix, keyIR string) {
 // reference type (array or object/class instance) that must be routed to the
 // any-keyed runtime as a boxed pointer rather than stored raw in an i64 slot.
 func isReferenceKeyTy(t Type) bool {
-	return t.IsArray || t.IsObject
+	return t.IsArray || t.IsObject || t.IsFunc && !t.IsDynamic
 }
 
 // ensureMapFamily declares the __kml_map_<suffix>_* runtime once.
@@ -613,7 +613,7 @@ func (e *Emitter) emitMapMethod(ty Type, mapPtr string, method string, args []as
 		// miss is `undefined`, not `null` (ADR-00833). URLSearchParams.get is
 		// spec'd to return `null` (not undefined), and URLPattern's bespoke
 		// group-Map deliberately uses `null` — both are excluded.
-		if !ty.IsURLSearchParams && !ty.IsURLPattern && mapGetUndefinedablePtr(valTy) {
+		if mapGetUndefinedablePtr(valTy) {
 			v.Ty.Nullable = true
 			v.Ty.IsUndefined = true
 		}

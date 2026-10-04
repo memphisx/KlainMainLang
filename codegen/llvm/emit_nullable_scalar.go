@@ -719,7 +719,10 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 		// no constant; the pointer compare decides.
 		return Value{}, false, nil
 	}
-	if strict && litUndef != valUndef {
+	// A double slot may hold undefined as its sentinel (TDD-00241):
+	// emitF64UndefinedEq tests the bits.
+	f64Slot := vt.IR == "double" && !vt.IsDynamic && !isNullableScalar(vt)
+	if strict && litUndef != valUndef && !(f64Slot && litUndef) {
 		switch ex.Op {
 		case "===":
 			return Value{Ref: "false", Ty: TypeBool}, true, nil

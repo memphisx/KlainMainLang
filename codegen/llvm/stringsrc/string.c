@@ -210,6 +210,8 @@ bool __kml_String_codePointAt(const char *s, double pos, double *out) {
     return true;
 }
 
+extern void __kml_dtoa(char *buf, double v);
+
 // js_number writes v the way JavaScript's Number::toString does (shortest
 // round-trip digits, `Infinity`, `e+21`), for an error message.
 static void js_number(double v, char *buf, size_t size) {
@@ -221,22 +223,8 @@ static void js_number(double v, char *buf, size_t size) {
         snprintf(buf, size, v < 0 ? "-Infinity" : "Infinity");
         return;
     }
-    if (v == trunc(v) && fabs(v) < 1e21) {
-        snprintf(buf, size, "%.0f", v == 0 ? 0.0 : v);
-        return;
-    }
-    for (int p = 1; p <= 17; p++) {
-        snprintf(buf, size, "%.*g", p, v);
-        if (strtod(buf, NULL) == v) break;
-    }
-    // C's exponent is `e-07`/`e+21`; JavaScript's `e-7`/`e+21`.
-    char *e = strchr(buf, 'e');
-    if (e) {
-        char sign = e[1], *d = e + 2;
-        while (*d == '0' && d[1]) d++;
-        memmove(e + 2, d, strlen(d) + 1);
-        e[1] = sign;
-    }
+    (void)size; // buf holds at least 32 bytes
+    __kml_dtoa(buf, v);
 }
 
 // String.prototype.repeat(count): a negative or infinite count is a

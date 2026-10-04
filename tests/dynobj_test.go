@@ -174,7 +174,7 @@ try { JSON.parse("{bad") } catch (e) { console.log("caught:", (e as Error).name)
 let cyc: any = { a: 1 }
 cyc.self = cyc
 try { JSON.stringify(cyc) } catch (e) { console.log("caught:", (e as Error).message) }
-`, "caught: SyntaxError\ncaught: Converting circular structure to JSON")
+`, "caught: SyntaxError\ncaught: Converting circular structure to JSON\n    --> starting at object with constructor 'Object'\n    --- property 'self' closes the circle")
 }
 
 func TestE2EDynArrToStringJoin(t *testing.T) {

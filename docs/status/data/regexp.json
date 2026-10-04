@@ -101,11 +101,8 @@
           {
             "feature": "`str.matchAll(regexp)`",
             "status": "implemented",
-            "caveats": [
-              "Returns an eager `string[][]`, not a lazy iterator"
-            ],
             "notes": [
-              "One `.exec()`-shaped match array per match; throws `TypeError` without `g`. See [ADR-00117](../adr/ADR-00117.md)"
+              "A `RegExp String Iterator` over exec-shaped steps (`index`, `input`, `groups`) of a clone of the RegExp, starting at its `lastIndex`; throws `TypeError` without `g` ([ADR-00117](../adr/ADR-00117.md), [ADR-01339](../adr/ADR-01339.md))"
             ]
           },
           {

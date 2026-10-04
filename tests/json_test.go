@@ -283,40 +283,10 @@ console.log(nums[0][1])
 	}
 }
 
-func TestE2EJSONStringifyReplacerRejected(t *testing.T) {
-	// A non-null replacer (2nd arg) is a clean compile error in V1, not silently
-	// ignored.
-	_, err := parseAndCompile(`
-const f = (k: string, v: number): number => v
-console.log(JSON.stringify({ a: 1 }, f))
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a non-null JSON.stringify replacer")
-	}
-	if !strings.Contains(err.Error(), "replacer argument is not supported") {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
-func TestE2EJSONStringifyRuntimeSpaceRejected(t *testing.T) {
-	// A runtime (non-literal) space is rejected — pretty-print units are resolved
-	// at compile time in V1.
-	_, err := parseAndCompile(`
-const n: number = 2
-console.log(JSON.stringify({ a: 1 }, null, n))
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a runtime JSON.stringify space argument")
-	}
-	if !strings.Contains(err.Error(), "space argument must be a literal") {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
 func TestE2EJSONStringifyMapDict(t *testing.T) {
 	// ADR-00482: map-backed dicts (index-signature objects, computed-key
-	// literals, string-keyed Maps) serialize by key iteration, with
-	// escaping; a number-keyed Map stays a clean rejection.
+	// literals) serialize by key iteration, with escaping; a Map has no
+	// enumerable own properties, so it is `{}` as in Node, whatever its keys.
 	assertOutput(t, `
 interface Dict { [k: string]: number; }
 const d: Dict = {};
@@ -326,7 +296,9 @@ console.log(JSON.stringify(d));
 const m = new Map<string, string>();
 m.set("x", "he\"y");
 console.log(JSON.stringify(m));
-`, "{\"a\":1,\"b\":2.5}\n{\"x\":\"he\\\"y\"}")
+const n = new Map<number, number>([[1, 2]]);
+console.log(JSON.stringify({ n, s: new Set([1]) }));
+`, "{\"a\":1,\"b\":2.5}\n{}\n{\"n\":{},\"s\":{}}")
 }
 
 func TestE2EJSONStringifyChurnASan(t *testing.T) {

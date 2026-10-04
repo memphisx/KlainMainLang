@@ -3,8 +3,8 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"KlainMainLang/checker"
+	"KlainMainLang/sema"
 	"fmt"
-	"strings"
 )
 
 // collectTopLevelNames records every name the program itself binds at top
@@ -33,6 +33,16 @@ func (e *Emitter) collectTopLevelNames(prog *ast.Program) {
 		case *ast.ClassDeclaration:
 			e.topLevelNames[s.Name] = true
 			e.topLevelCallables[s.Name] = true
+		case *ast.ArrayDestructuring:
+			// A pattern's names are module-level too (`var [x, y] = a`),
+			// typed only when the statement runs.
+			for _, n := range ast.ArrayPatternNames(s.Elems) {
+				e.topLevelNames[n] = true
+			}
+		case *ast.ObjectDestructuring:
+			for _, n := range ast.ObjectPatternNames(s.Props) {
+				e.topLevelNames[n] = true
+			}
 		}
 	}
 }
@@ -61,10 +71,7 @@ func (e *Emitter) initRefsCallable(init ast.Expression) bool {
 // unmangleTopLevelName strips the resolver's per-file `__kml_mod<N>` suffix
 // from a top-level binding's name.
 func unmangleTopLevelName(name string) string {
-	if i := strings.LastIndex(name, "__kml_mod"); i > 0 {
-		return name[:i]
-	}
-	return name
+	return ast.Unmangle(name)
 }
 
 // registerModuleGlobals promotes each top-level `const`/`let`/`var` of a simple
@@ -89,6 +96,9 @@ func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
 		if !ok {
 			return
 		}
+		if ty.IR == "void" {
+			ty = TypeUndefined // a void call's result (`const r = m.clear()`)
+		}
 		// A promoted generic class instance (`const b = new Box<number>()`) needs
 		// its monomorphized ClassInfo (methods, dispatch) registered now, before
 		// Pass 2 emits the function bodies that will call `b.get()` — otherwise
@@ -99,7 +109,7 @@ func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
 		// needs no registration, but the method side does.
 		if ne, isNew := v.Init.(*ast.NewExpression); isNew {
 			if genDecl, gen := e.genericClasses[ne.ClassName]; gen {
-				if targs, ok := classTypeArgs(genDecl, ne.TypeArgs); ok {
+				if targs, ok := e.newTypeArgs(genDecl, ne); ok {
 					subs := e.buildTypeArgSubs(genDecl.TypeParams, targs)
 					_, _ = e.instantiateGenericClass(genDecl, subs)
 				}
@@ -205,6 +215,17 @@ func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
 			e.forcedGlobalTypes[v] = e.checkerClassType(v.Init, ty)
 			promote(v)
 		}
+	}
+	// A library module's statements run in its init function, and a
+	// dynamic-only file's in its import() target's, so every one of their
+	// bindings is a global, typed as its initializer is.
+	for _, v := range withFunctions {
+		if _, done := e.moduleGlobals[v.Name]; done || (e.libStmts[stmtOf[v]] == "" && e.dynStmts[stmtOf[v]] == "") || v.Init == nil {
+			continue
+		}
+		e.inLib = e.libStmts[stmtOf[v]]
+		e.forcedGlobalTypes[v] = e.inferExprType(v.Init)
+		promote(v)
 	}
 }
 
@@ -335,7 +356,7 @@ func (e *Emitter) decideGlobalType(v *ast.VarDeclaration) (Type, bool) {
 	if v.TypeAnnot != nil && e.resolveType(v.TypeAnnot).IsDynamic {
 		switch v.Init.(type) {
 		case *ast.NewMapExpression, *ast.NewSetExpression, *ast.NewWeakMapExpression,
-			*ast.NewWeakSetExpression, *ast.NewWeakRefExpression:
+			*ast.NewWeakSetExpression:
 			// Boxed into its annotation (emitVarDeclBody).
 			return TypeAny, true
 		}
@@ -346,7 +367,13 @@ func (e *Emitter) decideGlobalType(v *ast.VarDeclaration) (Type, bool) {
 		// skipped for the same reason the Set case below is: replicating that
 		// inference here risks an IR-type mismatch with emitMapVarDecl's store,
 		// and it must run in source order anyway so the entries source is in
-		// scope. A `new Map<K,V>()`/`new Map()` is unambiguous.
+		// scope. A `new Map<K,V>()`/`new Map()` is unambiguous, and so is one
+		// under a `Map<K, V>` annotation, whose K/V emitMapVarDecl takes.
+		if init.KeyType == nil && init.ValType == nil && v.TypeAnnot != nil {
+			if annTy := e.resolveType(v.TypeAnnot); annTy.IsMap && annTy.MapKey != nil && annTy.MapVal != nil {
+				return MapType(*annTy.MapKey, forceAnyMapVal(*annTy.MapKey, *annTy.MapVal)), true
+			}
+		}
 		if init.Init != nil {
 			return Type{}, false
 		}
@@ -427,16 +454,6 @@ func (e *Emitter) decideGlobalType(v *ast.VarDeclaration) (Type, bool) {
 			elemTy = e.resolveType(init.ElemType)
 		}
 		return WeakSetType(elemTy), true
-	case *ast.NewWeakRefExpression:
-		// The referent init runs in source order in main(); the global is a
-		// single ptr slot, so its IR can't disagree with storePtrHandleVarDecl.
-		referentTy := TypePtr
-		if init.ElemType != nil {
-			referentTy = e.resolveType(init.ElemType)
-		} else if init.Init != nil {
-			referentTy = e.inferExprType(init.Init)
-		}
-		return WeakRefType(referentTy), true
 	case *ast.NewTypedArrayExpression:
 		// A TypedArray is a 2-slot `{ptr,i64}` IsArray value — promoted via the
 		// same two-global (data + length) path as a plain array; emitArrayVarDecl
@@ -448,22 +465,6 @@ func (e *Emitter) decideGlobalType(v *ast.VarDeclaration) (Type, bool) {
 		// pre-declared global's shape disagrees with the store (ADR-01059).
 		if v.TypeAnnot == nil {
 			return TypedArrayType(init.ElemKind), true
-		}
-	}
-	// An http server handle — `const server = http.createServer(cb)` or the
-	// chained `…createServer(cb).listen(0, readyCb)` binding — is a single
-	// ptr slot with a constant type, so it promotes like the builtin `new`
-	// handles below. Promoting it is what lets a top-level `function
-	// doRequest() { … server.address().port … }` (the corpus's helper-fn
-	// idiom, ADR-00423/00425 residue) see the binding.
-	if call, ok := v.Init.(*ast.CallExpression); ok {
-		if _, _, isChain := chainedCreateServerListen(call); isChain {
-			return HTTPServerType(), true
-		}
-		if mem, ok := call.Callee.(*ast.MemberExpression); ok {
-			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "http__kml_builtin" && mem.Property == "createServer" {
-				return HTTPServerType(), true
-			}
 		}
 	}
 	if v.TypeAnnot != nil {
@@ -551,7 +552,10 @@ func (e *Emitter) decideGlobalType(v *ast.VarDeclaration) (Type, bool) {
 			}
 		}
 		if l, ok := e.loweredCall(init); ok {
-			return l.resultType(), true
+			if t := l.resultType(); t.IR != "" {
+				return t, true
+			}
+			return e.inferExprType(init), true // the per-kind inference's answer
 		}
 		if e.isBuiltinSymbolCall(init) {
 			if ty := e.inferExprType(init); ty.IsSymbol {
@@ -567,13 +571,31 @@ func (e *Emitter) decideGlobalType(v *ast.VarDeclaration) (Type, bool) {
 			return ty, true
 		}
 		return Type{}, false
-	case *ast.BinaryExpression, *ast.UnaryExpression, *ast.MemberExpression, *ast.ConditionalExpression:
+	case *ast.MemberExpression, *ast.IndexExpression:
+		// A property of an `any` module global (`const s = c.subtle`): an
+		// `any`, as the declaration stores it.
+		if e.dynamicGlobalPath(init) {
+			return TypeAny, true
+		}
+		if ty := e.inferExprType(init); isSimpleGlobalType(ty) {
+			return ty, true
+		}
+		return Type{}, false
+	case *ast.BinaryExpression, *ast.UnaryExpression, *ast.ConditionalExpression:
 		// A constant scalar/string expression (gated by promotableInitInPrePass →
 		// constFoldableScalarInit). Its type comes from the same inferExprType call
 		// emitVarDecl's Binary/Unary/Member cases use, so the pre-declared global's
 		// IR can't disagree with the store. Only a simple scalar/string slot is
 		// promoted; anything else stays a local.
 		if ty := e.inferExprType(init); isSimpleGlobalType(ty) {
+			return ty, true
+		}
+		return Type{}, false
+	case *ast.ArrowFunction, *ast.FunctionExpression:
+		// A function value whose free names are all module-level (gated by
+		// promotableInitInPrePass): one closure-header slot, its type the
+		// function's own.
+		if ty := e.inferExprType(init); ty.IsFunc && !ty.IsDynamic {
 			return ty, true
 		}
 		return Type{}, false
@@ -702,7 +724,15 @@ func (e *Emitter) promotableInitInPrePass(expr ast.Expression) bool {
 			}
 		}
 		return true
-	case *ast.BinaryExpression, *ast.UnaryExpression, *ast.MemberExpression, *ast.ConditionalExpression:
+	case *ast.MemberExpression, *ast.IndexExpression:
+		if e.dynamicGlobalPath(ex) {
+			return true
+		}
+		if mem, ok := ex.(*ast.MemberExpression); ok {
+			return e.constFoldableScalarInit(mem)
+		}
+		return false
+	case *ast.BinaryExpression, *ast.UnaryExpression, *ast.ConditionalExpression:
 		// A constant scalar expression (`4 * Math.PI * Math.PI`, `-Number.EPSILON`,
 		// `A + B` over earlier module globals) — every leaf is a literal, a known
 		// numeric builtin constant, or an already-registered module global, so its
@@ -711,6 +741,44 @@ func (e *Emitter) promotableInitInPrePass(expr ast.Expression) bool {
 		return e.constFoldableScalarInit(ex)
 	}
 	return false
+}
+
+// elementBindingType is the type of a binding initialized by an element
+// read: a typed array's element is a number, so the binding holds one, not
+// the element's storage width (`let n = bytes[i]; n = n * 256 + …`).
+func elementBindingType(ty Type) Type {
+	if (ty.IsInteger() && ty.IR != "i64" || ty.IR == "float") && !ty.IsBigInt && ty.IR != "i1" && !ty.IsDynamic {
+		wide := TypeF64
+		wide.Nullable, wide.IsUndefined = ty.Nullable, ty.IsUndefined
+		return wide
+	}
+	return ty
+}
+
+// dynamicGlobalPath reports whether x reads a property path (`c.a.b`,
+// `c["k"]` with a constant key) off an `any` module global: its value is an
+// `any` in the pre-pass and at the declaration alike.
+func (e *Emitter) dynamicGlobalPath(x ast.Expression) bool {
+	for {
+		switch n := x.(type) {
+		case *ast.MemberExpression:
+			if n.Optional {
+				return false
+			}
+			x = n.Object
+			continue
+		case *ast.IndexExpression:
+			if n.Optional || !e.constFoldableScalarInit(n.Index) {
+				return false
+			}
+			x = n.Object
+			continue
+		case *ast.Identifier:
+			g, ok := e.moduleGlobals[n.Name]
+			return ok && isUnconstrainedDynamic(g.Ty)
+		}
+		return false
+	}
 }
 
 // constFoldableScalarInit reports whether an initializer is a compile-time
@@ -725,7 +793,7 @@ func (e *Emitter) promotableInitInPrePass(expr ast.Expression) bool {
 func (e *Emitter) constFoldableScalarInit(expr ast.Expression) bool {
 	switch ex := expr.(type) {
 	case *ast.NumberLiteral:
-		return !ex.IsBigInt
+		return true // a number, or a bigint (one handle slot)
 	case *ast.StringLiteral, *ast.BooleanLiteral, *ast.TemplateLiteral:
 		return true
 	case *ast.Identifier:
@@ -824,7 +892,7 @@ func (e *Emitter) promotableNewExpr(init ast.Expression) (Type, bool) {
 		// lookup (no IR emission / no e.classes registration as a side effect),
 		// safe in this pre-pass. Only a full type-argument list is resolvable.
 		if generic {
-			if _, ok := classTypeArgs(genDecl, ne.TypeArgs); !ok {
+			if _, ok := e.newTypeArgs(genDecl, ne); !ok {
 				return Type{}, false
 			}
 		}
@@ -858,13 +926,10 @@ func (e *Emitter) promotableNewExpr(init ast.Expression) (Type, bool) {
 // the module global; `storePtrHandleVarDecl` makes those promotion-aware.)
 func isHandleNewExpr(init ast.Expression) bool {
 	switch init.(type) {
-	case *ast.NewBlobExpression, *ast.NewDateExpression,
-		*ast.NewErrorExpression, *ast.NewURLExpression,
-		*ast.NewURLSearchParamsExpression, *ast.NewRegExpExpression,
-		*ast.NewHeadersExpression, *ast.NewArrayBufferExpression,
-		*ast.NewTextEncoderExpression, *ast.NewTextDecoderExpression,
-		*ast.NewDataViewExpression, *ast.NewRequestExpression,
-		*ast.NewURLPatternExpression,
+	case *ast.NewDateExpression,
+		*ast.NewErrorExpression, *ast.NewRegExpExpression,
+		*ast.NewArrayBufferExpression,
+		*ast.NewRequestExpression,
 		*ast.NewReadableStreamExpression, *ast.NewWritableStreamExpression,
 		*ast.NewTransformStreamExpression, *ast.NewCompressionStreamExpression:
 		return true
@@ -1102,61 +1167,7 @@ func (e *Emitter) storePtrHandleVarDecl(v *ast.VarDeclaration, val Value) {
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
 }
 
-// isDirectCreateServerInit reports whether a declaration's initializer is
-// directly an `http.createServer(...)` call (or the chained `.listen(...)` form)
-// — i.e. this binding *is* the server handle, so a suffix handed up by the
-// createServer emit (TDD-00191 Stage 3) belongs to this name and isn't leaking
-// from a createServer buried in a nested function body.
-func isDirectCreateServerInit(init ast.Expression) bool {
-	call, ok := init.(*ast.CallExpression)
-	if !ok {
-		return false
-	}
-	if _, _, isChain := chainedCreateServerListen(call); isChain {
-		return true
-	}
-	if mem, ok := call.Callee.(*ast.MemberExpression); ok {
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "http__kml_builtin" && mem.Property == "createServer" {
-			return true
-		}
-	}
-	return false
-}
-
-// isDirectNewWebSocketServer mirrors isDirectCreateServerInit for
-// `new WebSocketServer({ server })`.
-func isDirectNewWebSocketServer(init ast.Expression) bool {
-	ne, ok := init.(*ast.NewExpression)
-	return ok && ne.ClassName == "WebSocketServer"
-}
-
 func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
-	// TDD-00191 Stage 3: record the dispatcher suffix of a server / WebSocketServer
-	// binding so a later `x.on('upgrade', …)` / `wss.on('connection', …)` routes
-	// to the right per-server ws/upgrade global. The createServer / new
-	// WebSocketServer emit sets the pending* scratch fields; capture them here for
-	// this binding's name once the initializer has been emitted. Save/restore
-	// across the (possibly recursive) body so a nested declaration can't corrupt
-	// an outer one's state.
-	savedPSC, savedPSS := e.pendingServerCreated, e.pendingServerSfx
-	savedPWC, savedPWS := e.pendingWSCreated, e.pendingWSSfx
-	e.pendingServerCreated, e.pendingWSCreated = false, false
-	defer func() {
-		if e.pendingServerCreated && isDirectCreateServerInit(v.Init) {
-			if e.httpServerVarSfx == nil {
-				e.httpServerVarSfx = map[string]string{}
-			}
-			e.httpServerVarSfx[v.Name] = e.pendingServerSfx
-		}
-		if e.pendingWSCreated && isDirectNewWebSocketServer(v.Init) {
-			if e.httpWSVarSfx == nil {
-				e.httpWSVarSfx = map[string]string{}
-			}
-			e.httpWSVarSfx[v.Name] = e.pendingWSSfx
-		}
-		e.pendingServerCreated, e.pendingServerSfx = savedPSC, savedPSS
-		e.pendingWSCreated, e.pendingWSSfx = savedPWC, savedPWS
-	}()
 	return e.emitVarDeclBody(v)
 }
 
@@ -1201,27 +1212,6 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			}
 			e.storePtrHandleVarDecl(v, val)
 			return nil
-		}
-		if init, ok := v.Init.(*ast.NewWeakRefExpression); ok {
-			val, err := e.emitNewWeakRefValue(init)
-			if err != nil {
-				return err
-			}
-			e.storePtrHandleVarDecl(v, val)
-			return nil
-		}
-	}
-	// Chained `const server = http.createServer(cb).listen(0, readyCb)`: the
-	// ready callback (and the event loop) run *inside* listen, and the corpus
-	// idiom reads `server.address()` in that callback — so the handle must be
-	// stored into the binding before listen is emitted, not after the whole
-	// initializer finishes.
-	if call, ok := v.Init.(*ast.CallExpression); ok {
-		if createArgs, listenArgs, isChain := chainedCreateServerListen(call); isChain {
-			_, err := e.emitChainedCreateServerListen(createArgs, listenArgs, func(handle Value) {
-				e.storePtrHandleVarDecl(v, handle)
-			}, v.GetPos())
-			return err
 		}
 	}
 	if init, ok := v.Init.(*ast.NewCompressionStreamExpression); ok {
@@ -1289,8 +1279,9 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 		return fmt.Errorf("%d:%d: an object literal with a getter/setter can't be assigned to a differently-shaped object type (its accessors are not plain fields) — use it directly, or give the target the same shape", v.GetPos().Line, v.GetPos().Col)
 	}
 
-	// Infer type from init when no annotation.
-	if !ty.IsArray && !ty.IsObject && v.TypeAnnot == nil {
+	// Infer type from init when no annotation — not for a widened binding,
+	// whose any-box the initializer's own type would undo.
+	if !ty.IsArray && !ty.IsObject && v.TypeAnnot == nil && !e.widenedBindings[v.Name] {
 		// A chain that continues past a `?.` (`a?.b.c`) is `T | undefined` as a
 		// whole (emitOptionalChain): the per-shape cases below look only at the
 		// outermost link and would size the slot for a bare T.
@@ -1326,6 +1317,8 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 				ty = funcValueType(sig)
 			} else if _, isClass := e.classes[init.Name]; isClass {
 				ty = TypeAny // `const K = C`: the constructor reference
+			} else if isErrorKindName(init.Name) || sema.IsBuiltinConstructor(init.Name) || init.Name == "Promise" {
+				ty = TypeAny // `const M = Map`: a builtin constructor reference
 			} else if lty := e.inferExprType(init); lty.IsFunc || init.Name == "process" && e.processIsValue(init) {
 				// A capturing nested function declaration referenced before its
 				// declaration statement (TDD-00129 Stage 2 letrec) — the closure
@@ -1336,17 +1329,19 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 					ty = TypeAny
 				}
 			} else {
-				switch init.Name {
-				case "NaN", "Infinity":
-					ty = TypeF64
-				}
+				// Any other global read as a value (NaN, a namespace object):
+				// what emitIdent produces for it.
+				ty = e.inferExprType(init)
 			}
 		case *ast.IndexExpression:
-			ty = e.inferExprType(init)
+			ty = elementBindingType(e.inferExprType(init))
 		case *ast.ThisExpression:
 			// `const self = this`: the receiver's own type.
 			ty = e.inferExprType(init)
 		case *ast.BinaryExpression:
+			ty = e.inferExprType(init)
+		case *ast.AssignmentExpression:
+			// `var x = y = v`, `var r = ({ a } = o)`: the assignment's value.
 			ty = e.inferExprType(init)
 		case *ast.UnaryExpression:
 			// `!x` is bool, unary `-`/`+` preserve the operand's numeric type —
@@ -1399,12 +1394,8 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			ty = errorObjType
 		case *ast.NewDateExpression:
 			ty = TypeDate
-		case *ast.NewURLExpression:
-			ty = URLType()
-		case *ast.NewURLSearchParamsExpression:
-			ty = URLSearchParamsType()
-		case *ast.NewURLPatternExpression:
-			ty = URLPatternType()
+		case *ast.ImportCallExpression:
+			ty = e.inferExprType(init)
 		case *ast.NewArrayBufferExpression:
 			ty = ArrayBufferType()
 			if init.Shared {
@@ -1416,27 +1407,12 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			} else {
 				ty = ChannelType(TypeI64)
 			}
-		case *ast.NewDataViewExpression:
-			ty = DataViewType()
-		case *ast.NewBlobExpression:
-			ty = BlobType()
-			if gen := e.blobShadowedByClass(init); gen != nil {
-				ty = e.inferExprType(gen)
-			}
 		case *ast.NewTypedArrayExpression:
 			ty = TypedArrayType(init.ElemKind)
-		case *ast.NewTextEncoderExpression:
-			ty = TextEncoderType()
-		case *ast.NewTextDecoderExpression:
-			ty = TextDecoderType()
 		case *ast.NewRegExpExpression:
 			ty = RegExpType()
-		case *ast.NewHTTPAgentExpression:
-			ty = HTTPAgentType()
 		case *ast.NewWebviewExpression:
 			ty = WebviewType()
-		case *ast.NewHeadersExpression:
-			ty = HeadersType()
 		case *ast.NewRequestExpression:
 			ty = FetchRequestType()
 		case *ast.NewXMLHttpRequestExpression:
@@ -1641,7 +1617,7 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 				// comment) — the real, memoized instantiation still happens
 				// exactly once, from emitExpr(v.Init) below via
 				// emitNewExpression.
-				targs, _ := classTypeArgs(genDecl, init.TypeArgs)
+				targs, _ := e.newTypeArgs(genDecl, init)
 				subs := e.buildTypeArgSubs(genDecl.TypeParams, targs)
 				if instTy, err := e.genericClassInstanceType(genDecl, subs); err == nil {
 					ty = instTy
@@ -1650,11 +1626,13 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 				// A vanilla-JS prototype-constructor instance is a dynamic
 				// object (TDD-00155 Stage 4).
 				ty = TypeAny
+			} else if instTy, ok := e.dynNewInstanceType(init); ok {
+				ty = instTy // `new K(…)` through a class held in a value
 			}
 		}
 	}
-	if _, ok := v.Init.(*ast.NewArrayExpression); ok && !ty.IsArray && !ty.IsDynamic {
-		return fmt.Errorf("%d:%d: new Array() requires a type annotation or a type parameter, e.g. new Array<number>(n)", v.GetPos().Line, v.GetPos().Col)
+	if na, ok := v.Init.(*ast.NewArrayExpression); ok && !ty.IsArray && !ty.IsDynamic {
+		ty = ArrayOf(newArrayElemType(e, na)) // an any[] without a type argument
 	}
 
 	if containsDynamicElement(ty) {

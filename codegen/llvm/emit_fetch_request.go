@@ -16,13 +16,12 @@ import (
 // defaults to "GET", headers to an empty Headers, body to null — the same
 // defaults real fetch(url) has today when no init is given.
 func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value, error) {
-	urlVal, err := e.emitExpr(ex.URL)
+	urlVal, err := e.emitExpr(stringifiedInput(ex.URL))
 	if err != nil {
 		return Value{}, err
 	}
 	urlVal = e.coerce(urlVal, TypePtr)
 
-	e.ensureMapStrHelpers()
 	e.ensureMalloc()
 	e.ensureMemcpy()
 	e.ensureStrHeaderRuntime()
@@ -32,10 +31,13 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", sl))
 	}
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lSlot))
-	emptyHeaders := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", emptyHeaders))
+	emptyHeaders, err := e.emitNewHeaders(nil, ex.GetPos())
+	if err != nil {
+		return Value{}, err
+	}
+	headersTy := emptyHeaders.Ty
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("GET"), mSlot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", emptyHeaders, hSlot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", emptyHeaders.Ref, hSlot))
 	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", bSlot))
 	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", cSlot))
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", lSlot))
@@ -45,11 +47,45 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 		if err != nil {
 			return Value{}, err
 		}
-		if !initVal.Ty.IsObject {
+		dyn := isUnconstrainedDynamic(initVal.Ty)
+		if !initVal.Ty.IsObject && !dyn {
 			return Value{}, fmt.Errorf("%d:%d: Request's second argument must be an object with an optional method/headers/body field", ex.GetPos().Line, ex.GetPos().Col)
 		}
 		doneInitL := e.freshLabel("req.initdone")
-		if initVal.Ty.Nullable {
+		if dyn {
+			// An init held in `any`: undefined or null is none; otherwise
+			// each member is read at run time.
+			pos := ex.GetPos()
+			dynGet := func(name string) Value {
+				v, _ := e.emitDynAnyMemberGetNamed(initVal, e.internString(name), name, pos)
+				return v
+			}
+			undef, null, absent := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", undef, initVal.Ref, nbUndefined))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", null, initVal.Ref, nbNull))
+			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", absent, undef, null))
+			haveL := e.freshLabel("req.dyninit")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", absent, doneInitL, haveL))
+			e.emitLabel(haveL)
+			mv := dynGet("method")
+			ms, _ := e.emitAnyIntoString(mv, TypePtr)
+			isUndef, sel := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isUndef, mv.Ref, nbUndefined))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, isUndef, e.internString("GET"), ms.Ref))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sel, mSlot))
+			hv := dynGet("headers")
+			h, err := e.emitNewHeaders(&hv, pos)
+			if err != nil {
+				return Value{}, err
+			}
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", h.Ref, hSlot))
+			d, l, c := e.emitFetchBodyFromBox(dynGet("body"))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", d, bSlot))
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", l, lSlot))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", c, cSlot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneInitL))
+			e.emitLabel(doneInitL)
+		} else if initVal.Ty.Nullable {
 			haveL := e.freshLabel("req.init")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(initVal.Ref), doneInitL, haveL))
 			e.emitLabel(haveL)
@@ -57,7 +93,7 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 			nn.Nullable, nn.IsUndefined = false, false
 			initVal = Value{Ref: initVal.Ref, Ty: nn}
 		}
-		if idx, fieldTy, ok := initVal.Ty.FieldIndex("method"); ok {
+		if idx, fieldTy, ok := initVal.Ty.FieldIndex("method"); ok && !dyn {
 			mv := e.loadFieldValue(initVal, idx, fieldTy)
 			switch {
 			case isStringTy(mv.Ty) && !mv.Ty.IsObject && !mv.Ty.IsArray:
@@ -72,23 +108,14 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, isNull, e.internString("GET"), mv.Ref))
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sel, mSlot))
 		}
-		if idx, fieldTy, ok := initVal.Ty.FieldIndex("headers"); ok {
-			hv := e.loadFieldValue(initVal, idx, fieldTy)
-			var mapVal Value
-			if isHeaderMapType(hv.Ty) || (plainRecordType(hv.Ty) && !hv.Ty.Nullable) || (hv.Ty.IsArray && !hv.Ty.Nullable) {
-				if mapVal, err = e.headersFromInit(hv, ex.GetPos()); err != nil {
-					return Value{}, err
-				}
-			} else {
-				box, berr := e.emitBoxValue(hv)
-				if berr != nil {
-					return Value{}, fmt.Errorf("%d:%d: Request's init.headers: %v", ex.GetPos().Line, ex.GetPos().Col, berr)
-				}
-				mapVal = e.emitHeadersFromBox(box)
+		if _, _, ok := initVal.Ty.FieldIndex("headers"); ok && !dyn {
+			hv, err := e.emitHeadersFromInit(initVal, ex.GetPos())
+			if err != nil {
+				return Value{}, err
 			}
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", mapVal.Ref, hSlot))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hv.Ref, hSlot))
 		}
-		if idx, fieldTy, ok := initVal.Ty.FieldIndex("body"); ok {
+		if idx, fieldTy, ok := initVal.Ty.FieldIndex("body"); ok && !dyn {
 			bv := e.loadFieldValue(initVal, idx, fieldTy)
 			box, berr := e.emitBoxValue(bv)
 			if berr != nil {
@@ -99,8 +126,10 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", l, lSlot))
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", c, cSlot))
 		}
-		e.emitTerminator(fmt.Sprintf("br label %%%s", doneInitL))
-		e.emitLabel(doneInitL)
+		if !dyn {
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneInitL))
+			e.emitLabel(doneInitL)
+		}
 	}
 	methodRaw, headersRef, bodyData, bodyLen, ctRef := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", methodRaw, mSlot))
@@ -108,7 +137,7 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bodyData, bSlot))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", bodyLen, lSlot))
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ctRef, cSlot))
-	headersVal := Value{Ref: headersRef, Ty: HeadersType()}
+	headersVal := Value{Ref: headersRef, Ty: headersTy}
 
 	// Fetch normalizes the standard methods' case ("post" is "POST").
 	e.ensureStrcasecmp()
@@ -159,7 +188,9 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cp, bodySlot))
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bodyLen, lenSlot))
 		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", flagSlot))
-		e.emitSetHeaderIfAbsent(headersVal.Ref, "content-type", ctRef)
+		if err := e.emitSetHeaderIfAbsent(headersVal, "content-type", ctRef, ex.GetPos()); err != nil {
+			return Value{}, err
+		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", noBodyL))
 	}
 	e.emitLabel(noBodyL)
@@ -182,10 +213,30 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 	}
 	storeField("url", urlVal)
 	storeField("method", methodVal)
-	storeField("headers", headersVal)
+	storeField("__kml_headers", headersVal)
 	storeField("body", bodyVal)
 	storeField("bodyLength", Value{Ref: lenRef, Ty: TypeI64})
 	storeField("__kml_bodyflags", Value{Ref: flags, Ty: TypeI64})
 
 	return Value{Ref: objReg, Ty: ty}, nil
+}
+
+// stringifiedInput is a fetch input as the Fetch standard reads one that is
+// not a Request: `String(input)` (a URL by its href).
+func stringifiedInput(x ast.Expression) ast.Expression {
+	if _, isStr := x.(*ast.StringLiteral); isStr {
+		return x
+	}
+	return stringCall(x, x.GetPos())
+}
+
+// emitRequestHeaders is a Request's Headers.
+func (e *Emitter) emitRequestHeaders(req Value, pos ast.Pos) (Value, error) {
+	cls, err := e.headersClass(pos)
+	if err != nil {
+		return Value{}, err
+	}
+	idx, fieldTy, _ := req.Ty.FieldIndex("__kml_headers")
+	h := e.loadFieldValue(req, idx, fieldTy)
+	return Value{Ref: h.Ref, Ty: cls}, nil
 }

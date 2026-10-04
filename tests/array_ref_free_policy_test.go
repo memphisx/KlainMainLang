@@ -153,21 +153,7 @@ func buildArrayRefASanAuto(t *testing.T, src string, optMem bool) string {
 	}
 	args := []string{"-O1", "-g", "-fno-omit-frame-pointer",
 		"-fsanitize=address", "-fsanitize=undefined", llFile, "-o", binFile}
-	if em.UsesJSONParse() {
-		f := filepath.Join(dir, "jsontree.c")
-		if err := os.WriteFile(f, []byte(llvm.JSONParseTreeSource()), 0644); err != nil {
-			t.Fatal(err)
-		}
-		args = append(args, f)
-	}
-	if em.UsesFloatFmt() {
-		f := filepath.Join(dir, "dtoa.c")
-		if err := os.WriteFile(f, []byte(llvm.DtoaSource()), 0644); err != nil {
-			t.Fatal(err)
-		}
-		args = append(args, f)
-	}
-	args = appendFnMeta(t, em, dir, args)
+	args = appendRuntime(t, em, dir, args)
 	if out, err := llvm.ClangCommand(args...).CombinedOutput(); err != nil {
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}

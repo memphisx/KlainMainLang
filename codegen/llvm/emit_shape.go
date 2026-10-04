@@ -21,7 +21,25 @@ import (
 var shapeSource string
 
 // ShapeSource returns the C runtime that looks a layout up by header.
-func ShapeSource() string { return shapeSource }
+func ShapeSource() string { return layoutHeader() + shapeSource }
+
+// ShapeCFlags selects the optional parts of shape.c the program uses.
+func (e *Emitter) ShapeCFlags() []string {
+	var f []string
+	if e.usedShapeSpread {
+		f = append(f, "-DKML_SHAPE_SPREAD")
+	}
+	if e.usedDynJSONC {
+		f = append(f, "-DKML_OBJ_HOOKS") // the __kml_obj_* hooks (emitObjHooksFinalize)
+	}
+	if e.usedShapeKeysArray {
+		f = append(f, "-DKML_SHAPE_KEYS_ARRAY")
+	}
+	if e.usedShapeDesc {
+		f = append(f, "-DKML_SHAPE_DESC")
+	}
+	return f
+}
 
 // UsesShapes reports whether the program reads a static object's shape at
 // run time (the layout table and shape.c are then linked in).
@@ -35,6 +53,7 @@ func (e *Emitter) ensureShapeRuntime() {
 	}
 	e.usedShapeRuntime = true
 	e.ensureNanBox()
+	e.ensureUnitReg() // shape.c finds rows in the registered tables
 	e.emitGlobal("declare i64 @__kml_shape_get(ptr, ptr, ptr)")
 	e.emitGlobal("declare i32 @__kml_shape_set(ptr, ptr, i64)")
 	e.emitGlobal("declare ptr @__kml_shape_class_name(ptr)")
@@ -83,6 +102,7 @@ func (e *Emitter) emitShapeFinalize() {
 	}
 	done := map[int64]bool{}
 	var rows []string
+	hosts := 0
 	for {
 		var pending []shapeLayout
 		for _, l := range e.layouts {
@@ -106,7 +126,7 @@ func (e *Emitter) emitShapeFinalize() {
 			}
 			pending = append(pending, shapeLayout{id: id, ty: info.Ty, class: &info})
 		}
-		if len(pending) == 0 {
+		if len(pending) == 0 && hosts == len(e.hostLayouts) {
 			break
 		}
 		for _, l := range pending {
@@ -114,32 +134,23 @@ func (e *Emitter) emitShapeFinalize() {
 			done[id] = true
 			rows = append(rows, e.emitShapeRow(id, l))
 		}
+		// A host box (emit_hostbox.go) has no own fields; its members are
+		// its class's declaration's (emit_host_shape.go). Generating one can
+		// box another host value or an object (an iterator's next() result),
+		// and an object row can box a host value, so both kinds run until
+		// neither adds a layout.
+		for ; hosts < len(e.hostLayouts); hosts++ {
+			rows = append(rows, e.emitHostShapeRow(e.hostLayouts[hosts]))
+		}
 	}
-	// A host box (emit_hostbox.go) has no own fields; its members are its
-	// class's declaration's (emit_host_shape.go). Generating one can box
-	// another host value, so this runs until no new host layout appears.
-	for i := 0; i < len(e.hostLayouts); i++ {
-		rows = append(rows, e.emitHostShapeRow(e.hostLayouts[i]))
+	for _, r := range rows {
+		lit := r[strings.IndexByte(r, '|')+1:]
+		e.addUnitRowLit(unitKindShape, shapeRowTy, strings.TrimPrefix(lit, shapeRowTy+" "))
 	}
-	sort.Slice(rows, func(i, j int) bool { return rowID(rows[i]) < rowID(rows[j]) })
-	body := make([]string, len(rows))
-	for i, r := range rows {
-		body[i] = r[strings.IndexByte(r, '|')+1:]
-	}
-	init := "zeroinitializer"
-	if len(body) > 0 {
-		init = "[" + strings.Join(body, ", ") + "]"
-	}
-	e.emitGlobal(fmt.Sprintf("@__kml_shapes = constant [%d x { i64, ptr, ptr, ptr, i64, ptr }] %s", len(body), init))
-	e.emitGlobal(fmt.Sprintf("@__kml_nshapes = constant i64 %d", len(body)))
 }
 
-// rowID reads the sort key emitShapeRow prefixes its row with.
-func rowID(row string) int64 {
-	var id int64
-	fmt.Sscanf(row[:strings.IndexByte(row, '|')], "%d", &id)
-	return id
-}
+// shapeRowTy is a KmlShape row (shapesrc/shape.c).
+const shapeRowTy = "{ i64, ptr, ptr, ptr, i64, ptr }"
 
 // shapeKeys are a layout's own enumerable keys, in declaration order.
 func shapeKeys(t Type) []Field {
@@ -165,13 +176,7 @@ func (e *Emitter) emitShapeRow(id int64, l shapeLayout) string {
 	// An Error subclass's instance begins with the error's own fields, which
 	// are not its enumerable properties (a boxed error reads them itself).
 	if l.class != nil && l.class.IsErrorSubclass {
-		var own []Field
-		for _, f := range keys {
-			if _, _, isErrField := errorObjType.FieldIndex(f.Name); !isErrField {
-				own = append(own, f)
-			}
-		}
-		keys = own
+		keys = errorOwnLayoutKeys(l.ty)
 	}
 	getName := fmt.Sprintf("@__kml_shape_get_%d", id)
 	setName := fmt.Sprintf("@__kml_shape_set_%d", id)
@@ -496,7 +501,10 @@ func (e *Emitter) emitShapeMethodAdapter(fn string, class *ClassInfo, t Type, m 
 		if sig.HasRest {
 			callArgs = append(callArgs, args[len(args)-1])
 		}
-		v, err := e.emitClassCall(t, self, m, callArgs, pos, false)
+		// The record is this class's own method: called directly, as an
+		// extracted method runs whatever its receiver (undefined, when the
+		// function is called on its own).
+		v, err := e.emitClassCall(t, self, m, callArgs, pos, true)
 		if err != nil {
 			e.emitThrowTypeError("the method '" + m + "' can't be called through a dynamic value")
 			return
@@ -632,7 +640,11 @@ func (e *Emitter) emitGeneratorMembers(genTy Type) {
 	if genTy.GeneratorIsAsync {
 		iter = "@@asyncIterator"
 	}
-	for _, m := range []string{"next", "return", "throw", iter} {
+	members := []string{"next", "return", "throw", iter}
+	if !genTy.GeneratorIsAsync {
+		members = append(members, e.linkedIteratorHelpers()...)
+	}
+	for _, m := range members {
 		miss := e.emitKeyIs("%key", m)
 		rec := e.generatorMethodRecord(genTy, m)
 		e.emitInstr(fmt.Sprintf("store i32 %d, ptr %%found, align 4", shapeMember))
@@ -658,6 +670,9 @@ func (e *Emitter) generatorMethodRecord(genTy Type, m string) string {
 	arity := 1
 	if strings.HasPrefix(m, "@@") {
 		arity = 0
+	}
+	if n, ok := iteratorHelperArity[m]; ok {
+		arity = n
 	}
 	e.registerFnMeta(fn, m, arity, fnKindPlain)
 	e.emitGlobal(fmt.Sprintf("%s = internal constant { ptr, ptr, i64 } { ptr %s, ptr null, i64 %d }", rec, fn, arity))
@@ -718,6 +733,10 @@ func (e *Emitter) generatorMethodRecord(genTy Type, m string) string {
 			res, err = e.emitGeneratorThrowByValue(gen, genTy, errPtr, pos)
 		}
 	default:
+		if _, helper := iteratorHelperArity[m]; helper {
+			res, err = e.emitIteratorHelperCall(m)
+			break
+		}
 		e.emitTerminator("ret i64 %this")
 	}
 	if !e.blockDone {
@@ -757,7 +776,7 @@ func (e *Emitter) anyToLayoutFn(t Type) string {
 	if fn, ok := e.anyToLayoutFns[id]; ok {
 		return fn
 	}
-	fn := fmt.Sprintf("@__kml_any_to_layout_%d", id&kmlHdrIDMask)
+	fn := fmt.Sprintf("@__kml_any_to_layout.%d", id&kmlHdrIDMask)
 	e.anyToLayoutFns[id] = fn
 	restore := e.beginDetachedFunc()
 	v := Value{Ref: "%v", Ty: TypeAny}
@@ -834,7 +853,7 @@ func iterResultType() Type {
 
 // emitArrayIterMembers is the layout-table getter body for an array iterator.
 func (e *Emitter) emitArrayIterMembers() {
-	for _, m := range []string{"next", "@@iterator"} {
+	for _, m := range append([]string{"next", "@@iterator"}, e.linkedIteratorHelpers()...) {
 		miss := e.emitKeyIs("%key", m)
 		rec := e.arrayIterMethodRecord(m)
 		e.emitInstr(fmt.Sprintf("store i32 %d, ptr %%found, align 4", shapeMember))
@@ -850,8 +869,9 @@ func (e *Emitter) arrayValuesRecord() string {
 }
 
 // arrayIterMethodRecord builds the dynamic-function records of the array
-// iterator protocol: "values" (on the array: a fresh iterator), and "next" /
-// "@@iterator" (on the iterator).
+// iterator protocol: "values" (on the array: a fresh iterator), "next" /
+// "@@iterator" (on the iterator), and "hostValues" (an iterable host box's
+// [Symbol.iterator]: an iterator over its spread entries).
 func (e *Emitter) arrayIterMethodRecord(m string) string {
 	key := "ArrayIterator." + m
 	if e.shapeMethodRecs == nil {
@@ -864,19 +884,31 @@ func (e *Emitter) arrayIterMethodRecord(m string) string {
 	rec := fn + "_rec"
 	e.shapeMethodRecs[key] = rec
 	name := m
-	if m == "@@iterator" {
+	if m == "@@iterator" || m == "hostValues" {
 		name = "[Symbol.iterator]"
 	}
-	e.registerFnMeta(fn, name, 0, fnKindPlain)
-	e.emitGlobal(fmt.Sprintf("%s = internal constant { ptr, ptr, i64 } { ptr %s, ptr null, i64 0 }", rec, fn))
+	arity := iteratorHelperArity[m]
+	e.registerFnMeta(fn, name, arity, fnKindPlain)
+	e.emitGlobal(fmt.Sprintf("%s = internal constant { ptr, ptr, i64 } { ptr %s, ptr null, i64 %d }", rec, fn, arity))
 	restore := e.beginDetachedFunc()
 	itTy := arrayIterType()
+	if _, helper := iteratorHelperArity[m]; helper {
+		if res, err := e.emitIteratorHelperCall(m); err != nil {
+			e.emitThrowTypeError("the iterator method '" + m + "' can't be called through a dynamic value")
+		} else {
+			e.emitTerminator(fmt.Sprintf("ret i64 %s", res.Ref))
+		}
+	}
 	switch m {
-	case "values":
+	case "values", "hostValues":
+		src := "%this"
+		if m == "hostValues" {
+			src = e.emitHostIterValue("%this")
+		}
 		obj := e.emitObjAlloc(itTy)
 		a := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", a, itTy.StructIR(), obj))
-		e.emitInstr(fmt.Sprintf("store i64 %%this, ptr %s, align 8", a))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", src, a))
 		bv, _ := e.emitBoxValue(Value{Ref: obj, Ty: itTy})
 		e.emitTerminator(fmt.Sprintf("ret i64 %s", bv.Ref))
 	case "@@iterator":
@@ -942,31 +974,20 @@ func (e *Emitter) ensureShapeSpread() {
 	e.usedShapeSpread = true
 	e.ensureShapeRuntime()
 	e.ensureDynObj()
-	e.emitGlobal(`
-define void @__kml_shape_spread(ptr %bag, ptr %obj) {
-entry:
-  %found = alloca i32, align 4
-  %n = call i64 @__kml_shape_nkeys(ptr %obj)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %entry ], [ %inext, %next ]
-  %more = icmp slt i64 %i, %n
-  br i1 %more, label %body, label %done
-body:
-  %key = call ptr @__kml_shape_key(ptr %obj, i64 %i)
-  %v = call i64 @__kml_shape_get(ptr %obj, ptr %key, ptr %found)
-  %f = load i32, ptr %found, align 4
-  %own = icmp eq i32 %f, 1
-  br i1 %own, label %set, label %next
-set:
-  call void @__kml_dynobj_set(ptr %bag, ptr %key, i64 %v)
-  br label %next
-next:
-  %inext = add i64 %i, 1
-  br label %loop
-done:
-  ret void
-}`)
+	e.emitGlobal("declare void @__kml_shape_spread(ptr, ptr)")
+}
+
+// ensureShapeDesc declares @__kml_shape_own_desc(obj, key): a boxed static
+// object's own-property descriptor, or undefined.
+func (e *Emitter) ensureShapeDesc() {
+	if e.usedShapeDesc {
+		return
+	}
+	e.usedShapeDesc = true
+	e.ensureShapeRuntime()
+	e.ensureDynObj()
+	e.ensureFrozenSet()
+	e.emitGlobal("declare i64 @__kml_shape_own_desc(ptr, ptr)")
 }
 
 // emitBoxFits is an i1: whether the boxed word holds a value of the scalar
@@ -999,4 +1020,116 @@ func (e *Emitter) emitBoxFits(word string, t Type) (string, bool) {
 		acc = o
 	}
 	return acc, true
+}
+
+// errorOwnLayoutKeys are an Error subclass layout's own enumerable keys: the
+// error's fields are the layout's prefix, not its properties; a subclass
+// field of the same name as one of them (`code`) is its own.
+func errorOwnLayoutKeys(t Type) []Field {
+	prefix := map[string]bool{}
+	for i, f := range t.Fields {
+		if i > 0 && i < len(errorObjType.Fields) {
+			prefix[f.Name] = true
+		}
+	}
+	var own []Field
+	for _, f := range shapeKeys(t) {
+		if !prefix[f.Name] {
+			own = append(own, f)
+		}
+	}
+	return own
+}
+
+// iteratorHelperArity is Iterator.prototype's helper methods (ES2025), each
+// with its `length`. Each is the TypeScript function its IteratorObject
+// declaration lowers to (lib/node/kml_iterator.ts).
+var iteratorHelperArity = map[string]int{
+	"map": 1, "filter": 1, "take": 1, "drop": 1, "flatMap": 1, "reduce": 1,
+	"toArray": 0, "forEach": 1, "some": 1, "every": 1, "find": 1,
+}
+
+// linkedIteratorHelpers is the helper methods whose functions the program
+// links (a program that names none links none), sorted.
+func (e *Emitter) linkedIteratorHelpers() []string {
+	var out []string
+	for m := range iteratorHelperArity {
+		if _, ok := e.globalLinks["__kml_Iterator_"+m]; ok {
+			out = append(out, m)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// emitIteratorHelperCall is the body of a dynamic-function record for helper
+// method m on an iterator held in `any` (a generator, an array iterator):
+// the linked TypeScript function called with %this and the record's
+// arguments, absent ones undefined. reduce passes its initial value only
+// when one was given, which its function tells apart. The result is boxed.
+func (e *Emitter) emitIteratorHelperCall(m string) (Value, error) {
+	fn := e.globalLinks["__kml_Iterator_"+m]
+	bind := func(name, word string) ast.Expression {
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", word, slot))
+		e.define(name, Symbol{Ptr: slot, Ty: TypeAny})
+		return ast.NewIdentifier(name, ast.Pos{})
+	}
+	argWord := func(i int) string {
+		have := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, %d", have, i))
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%argv, i64 %d", gep, i))
+		safe := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %%argv", safe, have, gep))
+		w := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, safe))
+		word := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, w, nbUndefined))
+		return word
+	}
+	self := bind("__kml_ih_this", "%this")
+	args := []ast.Expression{self}
+	if iteratorHelperArity[m] > 0 {
+		args = append(args, bind("__kml_ih_arg0", argWord(0)))
+	}
+	call := func(args []ast.Expression) (Value, error) {
+		v, err := e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(fn, ast.Pos{}), args, ast.Pos{}))
+		if err != nil {
+			return Value{}, err
+		}
+		if v.Ty.IR == "void" {
+			return Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeAny}, nil
+		}
+		return e.emitBoxValue(v)
+	}
+	if m != "reduce" {
+		return call(args)
+	}
+	// reduce(fn) and reduce(fn, initial) differ even for an undefined
+	// initial value.
+	init := bind("__kml_ih_arg1", argWord(1))
+	out := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", out))
+	two := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, 1", two))
+	withL, withoutL, joinL := e.freshLabel("ih.init"), e.freshLabel("ih.noinit"), e.freshLabel("ih.join")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", two, withL, withoutL))
+	for _, br := range []struct {
+		label string
+		args  []ast.Expression
+	}{{withL, append(append([]ast.Expression{}, args...), init)}, {withoutL, args}} {
+		e.emitLabel(br.label)
+		v, err := call(br.args)
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v.Ref, out))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	}
+	e.emitLabel(joinL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, out))
+	return Value{Ref: r, Ty: TypeAny}, nil
 }

@@ -116,7 +116,7 @@ func TestE2EFinRegPrimitiveTargetRejected(t *testing.T) {
 	mustCompileError(t, `
 const reg = new FinalizationRegistry((held: string) => {})
 reg.register("prim", "h")
-`, "not assignable to parameter of type 'object'")
+`, "not assignable to parameter of type 'object | symbol'")
 }
 
 // buildBinaryFinalizersReport mirrors buildBinary with -finalizers=report set
@@ -153,8 +153,7 @@ func buildBinaryFinalizersReport(t *testing.T, src string) string {
 	// The float formatter C file, linked exactly as buildBinary and the CLI do —
 	// a timer + microtask program ends in the full event loop, which formats
 	// numbers.
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
@@ -213,18 +212,26 @@ function orphan(i: number): WeakRef<Box> {
 }
 const refs: WeakRef<Box>[] = []
 for (let i = 0; i < 8; i++) { refs.push(orphan(i)) }
-gc()
-gc()
-console.log("deref null:", refs[0].deref() === null)
-console.log("end")
+// A WeakRef keeps its target to the end of the job that made it (ADR-01366).
+setTimeout(() => {
+  gc()
+  gc()
+  console.log("deref undefined:", refs[0].deref() === undefined)
+  console.log("end")
+}, 0)
 `
-	binFile := buildBinaryGC(t, src)
+	dir := tempDir(t)
+	srcFile := filepath.Join(dir, "prog.ts")
+	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	binFile := buildGCProgram(t, dir, srcFile)
 	out, err := exec.Command(binFile).Output()
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	got := strings.TrimRight(string(out), "\n")
-	want := "deref null: true\nend\ncollected: orphan-box"
+	want := "deref undefined: true\nend\ncollected: orphan-box"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -265,8 +272,7 @@ func buildBinaryFinRegAuto(t *testing.T, src string) string {
 	// The float formatter C file, linked exactly as buildBinary and the CLI do —
 	// a timer + microtask program ends in the full event loop, which formats
 	// numbers.
-	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
@@ -341,4 +347,17 @@ function f(): void {
 }
 f()
 `, "may escape its block")
+}
+
+// A symbol that is not registered can be a target or a token; a registered
+// one (`Symbol.for`) is Node's TypeError.
+func TestE2EFinRegSymbolTokens(t *testing.T) {
+	assertSameAsNode(t, `
+const r = new FinalizationRegistry<number>(() => {});
+const s = Symbol("t");
+r.register({}, 1, s);
+console.log(r.unregister(s));
+try { r.unregister(Symbol.for("y")) } catch (e: any) { console.log(e.name, e.message) }
+try { r.register(Symbol.for("x"), 1) } catch (e: any) { console.log(e.name, e.message) }
+`)
 }

@@ -24,11 +24,32 @@
 package llvm
 
 import (
+	_ "embed"
 	"fmt"
 	"strings"
 
 	"KlainMainLang/ast"
 )
+
+// The trampoline and the inline-loop helper live in promisesrc/module.c
+// (TDD-00240).
+//
+//go:embed promisesrc/module.c
+var moduleTaskSource string
+
+// ModuleTaskSource is module.c, behind kml_layout.h.
+func ModuleTaskSource() string { return layoutHeader() + moduleTaskSource }
+
+// UsesModuleTask reports whether the program links module.c.
+func (e *Emitter) UsesModuleTask() bool { return e.usedModuleTaskRuntime }
+
+// ModuleTaskCFlags: module.c restores the GC stack bottom after a swap.
+func (e *Emitter) ModuleTaskCFlags() []string {
+	if e.isGCMode() {
+		return []string{"-DKLAIN_GC=1"}
+	}
+	return nil
+}
 
 // tlaUnsettledMsg is what Node prints (first line) for a module whose top-level
 // await can never settle.
@@ -70,64 +91,12 @@ func (e *Emitter) ensureModuleTaskRuntime() {
 	}
 	e.usedModuleTaskRuntime = true
 	e.ensureTaskRuntime()
-	e.emitGlobal("@__kml_module_task = internal thread_local global ptr null, align 8")
-	e.emitGlobal("@__kml_module_wants_loop = internal thread_local global i1 false, align 1")
-	// The module promise of a worker module task, for the worker thread's
-	// unsettled check (the entry program keeps its promise in a main() register).
-	e.emitGlobal("@__kml_module_promise = internal thread_local global ptr null, align 8")
-
-	// No catch-all (unlike @__kml_task_trampoline): the task's jmpbuf stack is
-	// empty at entry, so an uncaught throw takes the process-level uncaught path.
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_module_trampoline() {
-entry:
-  %%t = load ptr, ptr @__kml_task_launching, align 8
-  store ptr %%t, ptr @__kml_module_task, align 8
-  %%fn_p = getelementptr %s, ptr %%t, i32 0, i32 %d
-  %%fn = load ptr, ptr %%fn_p, align 8
-  %%args_p = getelementptr %s, ptr %%t, i32 0, i32 %d
-  %%args = load ptr, ptr %%args_p, align 8
-  call void %%fn(ptr %%args)
-  call void @__kml_task_finish(ptr %%t)
-  ret void
-}`, taskStructIR, taskFn, taskStructIR, taskArgs))
-
-	// @__kml_module_run_loop(): a call that runs the event loop inline (the
-	// blocking http.listen). The loop may only run on the main stack — on a
-	// coroutine's stack it would switch contexts out from under itself — so the
-	// module task asks main() to run it and parks; main() resumes the task when
-	// that run of the loop returns. Anywhere else it is the plain inline run.
-	gcRestore := ""
-	if e.isGCMode() {
-		gcRestore = "\n  call void @__kml_task_gc_restore()"
-	}
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_module_run_loop() {
-entry:
-  %%ct = load ptr, ptr @__kml_current_task, align 8
-  %%mt = load ptr, ptr @__kml_module_task, align 8
-  %%has = icmp ne ptr %%ct, null
-  %%same = icmp eq ptr %%ct, %%mt
-  %%onmod = and i1 %%has, %%same
-  br i1 %%onmod, label %%park, label %%inline
-inline:
-  call void @__kml_event_loop_run()
-  ret void
-park:
-  store i1 true, ptr @__kml_module_wants_loop, align 1
-  %%st_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
-  store i64 3, ptr %%st_p, align 8
-  %%sjt_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
-  %%curtop = load i32, ptr @__kml_jmp_top, align 4
-  %%curtop64 = zext i32 %%curtop to i64
-  store i64 %%curtop64, ptr %%sjt_p, align 8
-  %%rc_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
-  %%rc = load ptr, ptr %%rc_p, align 8
-  %%ctx_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
-  %%ctx = load ptr, ptr %%ctx_p, align 8
-  %%sw = call i32 @swapcontext(ptr %%ctx, ptr %%rc)%s
-  ret void
-}`, taskStructIR, taskState, taskStructIR, taskSavedJmpTop, taskStructIR, taskResumerCtx, taskStructIR, taskCtx, gcRestore))
+	// Defined in module.c; the entry program and worker loops read them.
+	e.emitGlobal(`@__kml_module_task = external thread_local global ptr, align 8
+@__kml_module_wants_loop = external thread_local global i1, align 1
+@__kml_module_promise = external thread_local global ptr, align 8
+declare void @__kml_module_trampoline()
+declare void @__kml_module_run_loop()`)
 }
 
 // moduleBodySplit holds main()'s builders while the module body is emitted into

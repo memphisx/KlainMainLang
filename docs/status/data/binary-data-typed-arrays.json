@@ -37,10 +37,8 @@
           {
             "feature": "`Uint8Array` / `Int8Array` / `Uint16Array` / `Int16Array` / `Uint32Array` / `Int32Array` / `Float32Array` / `Float64Array`",
             "status": "implemented",
-            "caveats": [
-              "No `.buffer` property (would require every TypedArray, including the \"own buffer\" form, to carry a back-reference to a real `ArrayBuffer` object — a shape change from the plain `{ptr,i64}` array representation)"
-            ],
             "notes": [
+              "`.buffer` and `.byteOffset`: a view answers the buffer it was made over and its offset there, a `subarray` shares its parent's buffer, and an array with its own storage answers an ArrayBuffer made on first read and kept (`ta.buffer === ta.buffer`) — statically and through `any` ([ADR-01351](../adr/ADR-01351.md), [TDD-00243](../tdd/TDD-00243.md))",
               "Construction forms: from a size (`new Uint8Array(10)`, own new buffer), an existing `ArrayBuffer` (`new Uint8Array(buf)`, a **view** sharing the same memory — writes through one view are visible through any other view over the same buffer, including a differently-typed one reinterpreting the same bytes), the sub-range view form `new Uint8Array(buf, byteOffset, length?)` (RangeError for a negative/misaligned/out-of-bounds offset or over-long length — [ADR-00312](../adr/ADR-00312.md)), or a `number[]`/array literal/another TypedArray (`new Uint8Array([1,2,3])`, copy-construct). Construction is a general expression, usable anywhere an array value is — function argument, return value, object field, method-chain head — not only a variable declaration's initializer ([ADR-00512](../adr/ADR-00512.md))",
               "Indexing, `.length`, `.fill`/`.slice`/`.reverse`/`.at`/`.indexOf`/`.includes`/`.map`/`.filter`/`.reduce`/`.forEach`/`.some`/`.every`, for-of, and `.keys()`/`.values()`/`.entries()` all come from the same machinery a plain `number[]` uses; `.set(source, offset?)` (the offset is `ToIntegerOrInfinity`'d — a string/object/NaN converts, a negative or infinite offset is a `RangeError`, a Symbol a `TypeError`; [ADR-01057](../adr/ADR-01057.md); the source may be any array-like — an `any` holding an array/TypedArray, a string, `{ length, 0, 1 }`, a dynamic array — with `null`/`undefined` a `TypeError`, [ADR-01059](../adr/ADR-01059.md)), `.subarray(start?, end?)` (a view, not a copy — unlike `.slice()`), and `.byteLength` are TypedArray-specific additions",
               "Non-clamped writes wrap (mod 2^width, e.g. `new Uint8Array([300])[0] === 44`), matching real JS",
@@ -52,7 +50,6 @@
             "feature": "`BigInt64Array` / `BigUint64Array`",
             "status": "implemented",
             "caveats": [
-              "The missing `.buffer` property above applies here too",
               "Only an explicit method allow-list is supported — indexing r/w, `.length`/`.byteLength`, `.at`, `.set`, `.subarray`, `.slice`, `.fill`, `.reverse`, for-of, `Atomics.*`; everything else (`.map`/`.filter`/`.reduce`/`.indexOf`/`.sort`/`.join`/iterator objects/…) is a compile-time rejection, never a raw-scalar leak",
               "`Atomics.wait`/`notify` stay `Int32Array`-only"
             ],
@@ -66,9 +63,6 @@
           {
             "feature": "`Uint8ClampedArray`",
             "status": "implemented",
-            "caveats": [
-              "The missing `.buffer` property above applies here too"
-            ],
             "notes": [
               "Real spec ToUint8Clamp stores — clamp to [0,255], floats round half to even (`254.5 → 254`, `255.5 → 255`), NaN → 0 — on every write path: element assignment (compound included), construction, `.set`, `.fill`, and `.map`'s result store; verified against Node ([TDD-00101](../tdd/TDD-00101.md)/[ADR-00313](../adr/ADR-00313.md))",
               "Reads are plain u8, so the entire read-side method surface works unchanged"
@@ -78,32 +72,26 @@
             "feature": "`DataView`",
             "status": "implemented",
             "notes": [
-              "`new DataView(buffer, byteOffset?, byteLength?)`, full `get/set` × `Int8..Uint32/Float16/Float32/Float64` **and `BigInt64`/`BigUint64`** (real bigint values, unsigned > 2^63 correct — [ADR-00312](../adr/ADR-00312.md)) with the spec's per-call `littleEndian` flag (default big-endian, via `llvm.bswap`), `.byteLength`/`.byteOffset`/`.buffer` (aliasing-identical ArrayBuffer), RangeError on out-of-bounds access *and* construction ([ADR-00294](../adr/ADR-00294.md)/[ADR-00553](../adr/ADR-00553.md))"
+              "`new DataView(buffer, byteOffset?, byteLength?)`, full `get/set` × `Int8..Uint32/Float16/Float32/Float64` **and `BigInt64`/`BigUint64`** (real bigint values, unsigned > 2^63 correct — [ADR-00312](../adr/ADR-00312.md)) with the spec's per-call `littleEndian` flag (default big-endian), `.byteLength`/`.byteOffset`/`.buffer` (aliasing-identical ArrayBuffer), V8's RangeErrors on out-of-bounds access *and* construction, and V8's inspect output ([ADR-00294](../adr/ADR-00294.md)/[ADR-00553](../adr/ADR-00553.md))",
+              "A TypeScript class over a `Uint8Array` of its range: `ArrayBuffer.isView` and `instanceof` answer it statically and through `any`, and it is a `Blob` part and a `TextDecoder` input as any BufferSource is ([ADR-01352](../adr/ADR-01352.md))"
             ]
           },
           {
             "feature": "`Blob`",
             "status": "implemented",
-            "caveats": [
-              "`.stream()` delivers the whole blob as one `Uint8Array` chunk, not incrementally ([ADR-00341](../adr/ADR-00341.md))",
-              "The parts argument is an inline array literal or a `string[]` variable ([ADR-00489](../adr/ADR-00489.md)); no `endings` option; the `type` string is stored as-is (no spec lowercasing)",
-              "`.text()` truncates at an embedded null byte (the standard string-boundary caveat)",
-              "A Blob built from several parts is one buffer: its readers settle as a one-part Blob's do, where Node's reader takes two more microtask hops per extra part"
-            ],
             "notes": [
-              "`new Blob(parts?, { type }?)` over mixed string/TypedArray/ArrayBuffer/Blob parts — a general expression; `.size`/`.type`, `.slice(start?, end?, contentType?)` (copy; type never inherited, per spec), `.text()`/`.arrayBuffer()`/`.bytes()` returning promises of copies, settled as Node's reader settles them ([ADR-01198](../adr/ADR-01198.md)), and `.stream()` → `ReadableStream<Uint8Array>` ([TDD-00102](../tdd/TDD-00102.md)/[ADR-00314](../adr/ADR-00314.md))",
-              "A user-declared `class Blob` shadows the builtin"
+              "`new Blob(parts?, { type, endings }?)` over any iterable of strings, buffers, views and Blobs (a Blob part keeps its own parts); the type lowercased, or empty when it has a character outside U+0020–U+007E; `endings: 'native'`; Node's errors; `.size`/`.type`, `.slice(start?, end?, contentType?)`, `.text()`/`.arrayBuffer()`/`.bytes()` settling as Node's reader settles them (two microtasks per part), `.stream()` one chunk per part, and Node's inspect output",
+              "A TypeScript class (`lib/node/kml_blob.ts`, [ADR-01362](../adr/ADR-01362.md)); a user-declared `class Blob` shadows it, as in Node ([TDD-00102](../tdd/TDD-00102.md))"
             ]
           },
           {
             "feature": "`SharedArrayBuffer`",
             "status": "implemented",
             "caveats": [
-              "`grow(n)` requires the `{maxByteLength}` construction option (compile-time rejection otherwise, vs the spec's runtime TypeError); the maximum is reserved upfront ([ADR-00494](../adr/ADR-00494.md))",
-              "Crosses a worker boundary whole or as an object field; a TypedArray **view** doesn't cross — send the buffer, re-view on the other side",
-              "An in-thread closure can capture a view ([TDD-00213](../tdd/TDD-00213.md) Stage 3), but a view doesn't cross a worker boundary (previous caveat), so a cross-thread handler still re-views the shared buffer inside the handler"
+              "`grow(n)` requires the `{maxByteLength}` construction option (compile-time rejection otherwise, vs the spec's runtime TypeError); the maximum is reserved upfront ([ADR-00494](../adr/ADR-00494.md))"
             ],
             "notes": [
+              "A view over it crosses a worker boundary (`workerData`, `postMessage`, either direction) as a view over the same memory at its offset, and its `.buffer` is a `SharedArrayBuffer` statically and through `any` ([ADR-01357](../adr/ADR-01357.md))",
               "`new SharedArrayBuffer(n)` — identical representation to `ArrayBuffer` (all view constructions, `.byteLength`, `.slice()` — which returns a new `SharedArrayBuffer`, per spec ([ADR-00312](../adr/ADR-00312.md)) — and `DataView` work unchanged), but `postMessage`/`workerData`/`structuredClone` **share it by reference** instead of deep-copying, the spec's semantics ([TDD-00099](../tdd/TDD-00099.md), [ADR-00308](../adr/ADR-00308.md))",
               "Under `-mm=gc`, allocated uncollectable (cross-thread references are invisible to a per-thread Boehm scan)"
             ]
@@ -126,11 +114,10 @@
             "feature": "Node `Buffer` (`Buffer.from`/`.alloc`/`.toString(encoding)`/`.write`/etc.)",
             "status": "implemented",
             "caveats": [
-              "`Buffer.from(arrayBuffer)` **copies** (Node views)",
-              "String-valued `.indexOf`/`.includes`/`.lastIndexOf` search the needle's UTF-8 bytes ([ADR-00558](../adr/ADR-00558.md)), and `.fill(string, offset?, end?)` repeats the needle's bytes ([ADR-00559](../adr/ADR-00559.md)) — all single-argument-plus-range forms (no `byteOffset`/`encoding`); no 4-arg `.write(string, offset, length, encoding)` form; no `.swap16/32/64`, `.toJSON`, `Buffer.of`, `Buffer.isAscii`/`Buffer.isUtf8`, arbitrary-width `readIntLE(offset, byteLength)`, `poolSize`",
-              "`.toString()` (utf8/latin1) truncates at an embedded null byte"
+              "String-valued `.indexOf`/`.includes`/`.lastIndexOf` search the needle's UTF-8 bytes ([ADR-00558](../adr/ADR-00558.md)), and `.fill(string, offset?, end?)` repeats the needle's bytes ([ADR-00559](../adr/ADR-00559.md)) — all single-argument-plus-range forms (no `byteOffset`/`encoding`); no 4-arg `.write(string, offset, length, encoding)` form; no `.swap16/32/64`, `.toJSON`, `Buffer.of`, `Buffer.isAscii`/`Buffer.isUtf8`, arbitrary-width `readIntLE(offset, byteLength)`, `poolSize`"
             ],
             "notes": [
+              "`Buffer.from(arrayBuffer[, byteOffset, length])` is a view of the buffer's bytes, as Node's ([ADR-01365](../adr/ADR-01365.md))",
               "A Buffer IS a `Uint8Array` — indexing, `.length`, `.slice`/`.subarray`, numeric `.fill`/`.indexOf`/`.includes`, HOFs, for-of, `.set`, `.byteLength`, and `fs.writeFileSync(buffer)` all shared with the TypedArray machinery; `Buffer.from(...)`/`.alloc(...)` are **general expressions** (call syntax, no vardecl restriction) ([TDD-00103](../tdd/TDD-00103.md)/[ADR-00315](../adr/ADR-00315.md), superseding [ADR-00094](../adr/ADR-00094.md)'s \"no Buffer class\" half — fetch/fs still return WHATWG types)",
               "Codecs both directions: utf8, hex, base64, base64url (unpadded, per Node), latin1/binary/ascii — via an embedded libc-only C runtime, compiled in only when used",
               "An encoding named at run time dispatches in C, case-insensitively; an unknown one throws `ERR_UNKNOWN_ENCODING`. `Buffer.byteLength` follows Node's per-encoding formula ([ADR-01169](../adr/ADR-01169.md))",

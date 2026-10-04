@@ -31,10 +31,9 @@
             "feature": "`TextEncoder`",
             "status": "implemented",
             "notes": [
-              "`new TextEncoder().encode(str): Uint8Array` — UTF-8 only, which matches the spec (`TextEncoder` is UTF-8-only by spec, not a narrowing)",
-              "`.encodeInto(src, dest)` writes into a `Uint8Array` and returns `{ read, written }`; `.encoding` is `\"utf-8\"` ([ADR-00994](../adr/ADR-00994.md))",
-              "Strings are already raw UTF-8 byte sequences, so `encode`/`decode` are direct byte copies with no real transcoding",
-              "See [ADR-00112](../adr/ADR-00112.md)"
+              "`encode(str)` returns a `Uint8Array`; `encodeInto(src, dest)` writes whole code points and returns `{ read, written }`; `encoding` is `\"utf-8\"`; `util.inspect` prints Node's `{ encoding: 'utf-8' }`",
+              "Node's `lib/internal/encoding.js` in TypeScript (`lib/node/kml_encoding.ts`)",
+              "See [ADR-00112](../adr/ADR-00112.md), [ADR-01348](../adr/ADR-01348.md)"
             ],
             "caveats": []
           },
@@ -42,12 +41,13 @@
             "feature": "`TextDecoder`",
             "status": "implemented",
             "caveats": [
-              "UTF-8 only (V1 scope) — non-UTF-8 support (Latin-1/windows-1252, UTF-16, Greek, the rest of the WHATWG label list) is a staged, low-priority follow-on in [TDD-00034](../tdd/TDD-00034.md), not started; a recognized non-UTF-8 label (`latin1`/`utf-16`/…) therefore throws a `RangeError` at construction rather than decoding ([ADR-00567](../adr/ADR-00567.md))"
+              "The CJK encodings (GBK, GB18030, Big5, EUC-JP, EUC-KR, ISO-2022-JP, Shift_JIS), which Node decodes through ICU, throw `ERR_ENCODING_NOT_SUPPORTED`"
             ],
             "notes": [
-              "`new TextDecoder(label?).decode(bytes): string` — accepts a `Uint8Array` or `ArrayBuffer`",
-              "The `label` argument is WHATWG-normalized (trim + ASCII-lowercase) and validated against the six UTF-8 aliases; a UTF-8 alias (`utf-8`/`utf8`/`unicode-1-1-utf-8`/…) is accepted and anything else throws a catchable `RangeError`, matching real `TextDecoder` for an unrecognized label ([ADR-00567](../adr/ADR-00567.md))",
-              "See [ADR-00112](../adr/ADR-00112.md)"
+              "`decode(input?, { stream })` over any ArrayBuffer, SharedArrayBuffer or ArrayBufferView (one held in `any` too) in UTF-8, UTF-16LE/BE, x-user-defined and every single-byte encoding of the WHATWG list (the ISO-8859 and windows code pages, KOI8, IBM866, macintosh; tables generated from Node's): invalid or unmapped bytes are U+FFFD, or `ERR_ENCODING_INVALID_ENCODED_DATA` with `fatal`; a leading byte order mark is dropped unless `ignoreBOM`; `stream` keeps an incomplete sequence for the next call",
+              "Labels are WHATWG-normalized; an unknown one is `ERR_ENCODING_NOT_SUPPORTED`; `encoding`/`fatal`/`ignoreBOM` read back, and `util.inspect` prints Node's form",
+              "Node's `lib/internal/encoding.js` in TypeScript (`lib/node/kml_encoding.ts`)",
+              "See [ADR-00112](../adr/ADR-00112.md), [ADR-01348](../adr/ADR-01348.md)"
             ]
           }
         ]

@@ -36,7 +36,7 @@ func TestE2ETypeErrorAcrossFiles(t *testing.T) {
 		t.Fatal("expected TS2741 for the missing property")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "main.ts") || !strings.Contains(msg, "2:1: property 'y' is missing in type '{ x: number; }' but required in type 'Point'") {
+	if !strings.Contains(msg, "main.ts") || !strings.Contains(msg, "2:7: property 'y' is missing in type '{ x: number; }' but required in type 'Point'") {
 		t.Errorf("unexpected error: %s", msg)
 	}
 }

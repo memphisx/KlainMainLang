@@ -24,9 +24,9 @@ async function main(): Promise<void> {
 
   // Three concurrent pooled reads, gathered with Promise.all.
   const parts: string[] = await Promise.all([
-    fs.promises.readFile(a),
-    fs.promises.readFile(b),
-    fs.promises.readFile(c),
+    fs.promises.readFile(a, "utf8"),
+    fs.promises.readFile(b, "utf8"),
+    fs.promises.readFile(c, "utf8"),
   ]);
   clearInterval(timer);
 

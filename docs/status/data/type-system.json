@@ -81,7 +81,8 @@
             "feature": "`any`",
             "status": "implemented",
             "caveats": [
-              "`Object.assign` through `any` and `Object.defineProperties` copy and define string keys only, not symbol keys"
+              "`Object.assign` through `any` and `Object.defineProperties` copy and define string keys only, not symbol keys",
+              "A non-array held in `any` (a string, a number, an object) passed where an array is declared throws a TypeError; Node passes the value as it is ([ADR-01361](../adr/ADR-01361.md))"
             ],
             "notes": [
               "Under `-compat=js`, object operands to `+`/`==` coerce via runtime `ToPrimitive` and loose-`==` is the full JS Abstract Equality ([TDD-00201](../tdd/TDD-00201.md))",
@@ -170,7 +171,7 @@
             "notes": [
               "A literal's fields are coerced against the declared type wherever one is known (variable annotation, function parameter/return/default value, array element type, nested field) — not just the literal's own self-inferred type ([ADR-00077](../adr/ADR-00077.md)/[TDD-00007](../tdd/TDD-00007.md))",
               "Method signatures `name(params): R` (and `name?(…)`) in an inline `{}` type desugar to function-typed properties; a lone call signature `{ (n: number): string }` desugars to the function type itself; `field?: T` is accepted-but-required, matching interfaces ([ADR-00448](../adr/ADR-00448.md))",
-              "Constructor types `new (params) => R` parse as the equivalent function type (accept-and-erase, [ADR-00452](../adr/ADR-00452.md))",
+              "Constructor types `new (params) => R` hold constructors: a class or builtin passed for one constructs through it, and a generic infers `T` from `new () => T` ([ADR-01318](../adr/ADR-01318.md))",
               "Self- and mutually-referential interfaces and object-shape `type` aliases work (tree/linked-list shapes: `interface N { children: N[]; next: N \\| null }`) — a self-ref field's placeholder snapshot is re-resolved on demand at each drilling access, so `root.children[0].children[0].val` and full list traversal drill correctly ([ADR-00949](../adr/ADR-00949.md))",
               "`interface C extends A, B` merges simple base names' fields/method signatures (own declarations win); same-name `interface` + `interface` pairs merge too (members union, first wins on a collision — [ADR-00452](../adr/ADR-00452.md), [ADR-00479](../adr/ADR-00479.md))"
             ],
@@ -309,8 +310,7 @@
             "feature": "Index signatures (`{ [k: string]: T }`)",
             "status": "implemented",
             "caveats": [
-              "The class-body form (`class C { [n: number]: T }`) parses and is **dropped** — indexing a class instance keeps its use-site rejection ([ADR-00476](../adr/ADR-00476.md))",
-              "`JSON.stringify` of an index-signature dict is compact output only — the `space` argument isn't threaded through this path ([ADR-00482](../adr/ADR-00482.md))"
+              "The class-body form (`class C { [n: number]: T }`) parses and is **dropped** — indexing a class instance keeps its use-site rejection ([ADR-00476](../adr/ADR-00476.md))"
             ],
             "notes": [
               "String or number key, map-backed — `d[key]` read/write, an object-literal initializer, and `Object.keys/values/entries` + `for…of` all work; number keys stringify (JS object keys are strings), sharing the map backing; named properties beside the signature have their declared types; a missing key reads `undefined` ([ADR-01171](../adr/ADR-01171.md), [TDD-00130](../tdd/TDD-00130.md)/[ADR-00390](../adr/ADR-00390.md)/[ADR-00461](../adr/ADR-00461.md))",
@@ -321,11 +321,8 @@
             "feature": "`typeof` type queries (`type T = typeof x`)",
             "status": "implemented",
             "notes": [
-              "Resolves the referenced value's type (a variable's object/scalar/array type, or a function's type), walking a `typeof a.b` member path — usable as a `type` alias, an inline annotation, or a parameter/return type ([ADR-00389](../adr/ADR-00389.md))"
-            ],
-            "caveats": [
-              "A function-local binding shadowing a top-level one of the same name isn't distinguished (the top-level wins)",
-              "An unresolvable query degrades to the `number` default rather than erroring"
+              "Resolves the referenced value's type (a variable's object/scalar/array type, or a function's type), walking a `typeof a.b` member path — usable as a `type` alias, an inline annotation, or a parameter/return type ([ADR-00389](../adr/ADR-00389.md))",
+              "The checker types a query in its own scope (a `const` gives its literal type, as tsc does); `typeof C` of a class is the class itself as a value ([ADR-01318](../adr/ADR-01318.md))"
             ]
           },
           {

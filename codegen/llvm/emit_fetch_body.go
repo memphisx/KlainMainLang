@@ -88,24 +88,27 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 	// A host object: Blob, ArrayBuffer, URLSearchParams.
 	objL, strDefL := e.emitTagCheck(tag, kmlTagObject, "fbody.obj")
 	e.emitLabel(objL)
-	isBlob := e.emitDynHostInstanceOf(box, "Blob")
-	blobL, nb := e.freshLabel("fbody.blob"), e.freshLabel("fbody.nb")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBlob.Ref, blobL, nb))
-	e.emitLabel(blobL)
-	{
-		b := e.emitUnboxHost(box, BlobType())
-		size, bd := e.emitBlobSizeData(b.Ref)
-		tslot, tv := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", tslot, blobStructIR, b.Ref))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", tv, tslot))
-		// An empty type is no Content-Type.
-		tl, empty, c := e.freshReg(), e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", tl, tv))
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", empty, tl))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", c, empty, tv))
-		set(bd, size, c)
+	// A Blob (the global module's class, linked into any program naming
+	// fetch): its bytes, its type the Content-Type.
+	if blobCls, ok := e.globalClass("Blob"); ok {
+		isBlob, err := e.emitAnyInstanceOfClass(box, blobCls.ClassName)
+		if err == nil {
+			blobL, nb := e.freshLabel("fbody.blob"), e.freshLabel("fbody.nb")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBlob.Ref, blobL, nb))
+			e.emitLabel(blobL)
+			bd, size, tv, err := e.emitBlobBytes(e.coerce(box, blobCls), ast.Pos{})
+			if err != nil {
+				bd, size, tv = "null", "0", "null"
+			}
+			// An empty type is no Content-Type.
+			tl, empty, c := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", tl, tv))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", empty, tl))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", c, empty, tv))
+			set(bd, size, c)
+			e.emitLabel(nb)
+		}
 	}
-	e.emitLabel(nb)
 	isAB := e.emitDynHostInstanceOf(box, "ArrayBuffer")
 	abL, nab := e.freshLabel("fbody.ab"), e.freshLabel("fbody.nab")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAB.Ref, abL, nab))
@@ -120,19 +123,27 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 		set(d, l, "null")
 	}
 	e.emitLabel(nab)
-	isUSP := e.emitDynHostInstanceOf(box, "URLSearchParams")
-	uspL := e.freshLabel("fbody.usp")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isUSP.Ref, uspL, strDefL))
-	e.emitLabel(uspL)
-	{
-		e.ensureURLSearchParams()
-		u := e.emitUnboxHost(box, URLSearchParamsType())
-		s := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_usp_to_string(ptr %s)", s, u.Ref))
+	// A URLSearchParams (the global module's class): its serialization,
+	// form-urlencoded.
+	if usp, ok := e.globalClass("URLSearchParams"); ok {
+		isUSP, err := e.emitAnyInstanceOfClass(box, usp.ClassName)
+		if err != nil {
+			panic(err)
+		}
+		uspL, nusp := e.freshLabel("fbody.usp"), e.freshLabel("fbody.nusp")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isUSP.Ref, uspL, nusp))
+		e.emitLabel(uspL)
+		obj := e.coerce(box, usp)
+		sv, err := e.emitClassCall(usp, obj, "toString", nil, ast.Pos{}, false)
+		if err != nil {
+			panic(err)
+		}
 		l := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", l, s))
-		set(s, l, e.internString("application/x-www-form-urlencoded;charset=UTF-8"))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", l, sv.Ref))
+		set(sv.Ref, l, e.internString("application/x-www-form-urlencoded;charset=UTF-8"))
+		e.emitLabel(nusp)
 	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", strDefL))
 
 	// Anything else: its String().
 	e.emitLabel(strDefL)
@@ -179,155 +190,4 @@ w4:
 w8:
   ret i64 8
 }`)
-}
-
-// emitHeadersFromBox is a header map (lowercased names) from a boxed
-// HeadersInit, as `new Headers(init)` reads it: null/undefined is empty; a
-// Headers is copied; an array is [name, value] pairs, appended; any other
-// object is a record of its own string-keyed entries. A primitive is
-// Node's TypeError.
-func (e *Emitter) emitHeadersFromBox(box Value) Value {
-	e.ensureMapStrHelpers()
-	e.ensureStringToLower()
-	strMap := MapType(TypePtr, TypePtr)
-	m := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", m))
-	outSlot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", outSlot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", m, outSlot))
-	doneL := e.freshLabel("hinit.done")
-	tag, _ := e.emitUnboxTagPayload(box)
-
-	// append name/value into m: joined with ", " when the name is set.
-	appendHdr := func(name, value string) {
-		low := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_tolower(ptr %s)", low, name))
-		has := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", has, m, low))
-		joinL, setL, nextL := e.freshLabel("hinit.join"), e.freshLabel("hinit.set"), e.freshLabel("hinit.next")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, joinL, setL))
-		e.emitLabel(joinL)
-		old := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", old, m, low))
-		op := e.emitIntToPtr(old)
-		j1, _ := e.emitStringConcat(Value{Ref: op, Ty: TypePtr}, Value{Ref: e.internString(", "), Ty: TypePtr})
-		j2, _ := e.emitStringConcat(j1, Value{Ref: value, Ty: TypePtr})
-		ji := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", ji, j2.Ref))
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", m, low, ji))
-		e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
-		e.emitLabel(setL)
-		vi := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", vi, value))
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", m, low, vi))
-		e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
-		e.emitLabel(nextL)
-	}
-	// loop i over [0, n): body(i).
-	loop := func(n string, body func(i string)) {
-		idx := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idx))
-		condL, bodyL, endL := e.freshLabel("hinit.cond"), e.freshLabel("hinit.body"), e.freshLabel("hinit.end")
-		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
-		e.emitLabel(condL)
-		i, c := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, idx))
-		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", c, i, n))
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", c, bodyL, endL))
-		e.emitLabel(bodyL)
-		body(i)
-		nx := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nx, i))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nx, idx))
-		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
-		e.emitLabel(endL)
-	}
-	str := func(v Value) string {
-		s, ok := e.emitAnyIntoString(v, TypePtr)
-		if !ok {
-			s = e.coerce(v, TypePtr)
-		}
-		return s.Ref
-	}
-
-	// null / undefined: no headers.
-	isN, isU, none := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isN, tag, kmlTagNull))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isU, tag, kmlTagUndefined))
-	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", none, isN, isU))
-	next1 := e.freshLabel("hinit.n1")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", none, doneL, next1))
-	e.emitLabel(next1)
-
-	// A Headers: a copy.
-	isH := e.emitDynHostInstanceOf(box, "Headers")
-	hL, next2 := e.freshLabel("hinit.headers"), e.freshLabel("hinit.n2")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isH.Ref, hL, next2))
-	e.emitLabel(hL)
-	{
-		h := e.emitUnboxHost(box, HeadersType())
-		c, err := e.emitHeadersFromMapValue(Value{Ref: h.Ref, Ty: strMap})
-		if err == nil {
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", c.Ref, outSlot))
-		}
-		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-	}
-	e.emitLabel(next2)
-
-	// An array: [name, value] pairs.
-	isA1, isA2, isArr := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isA1, tag, kmlTagArray))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isA2, tag, kmlTagDynArray))
-	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", isArr, isA1, isA2))
-	arrL, next3 := e.freshLabel("hinit.arr"), e.freshLabel("hinit.n3")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isArr, arrL, next3))
-	e.emitLabel(arrL)
-	{
-		lv, _ := e.emitDynAnyMemberGetNamed(box, e.internString("length"), "length", ast0)
-		n := e.coerce(lv, TypeI64)
-		e.ensureSprintf()
-		loop(n.Ref, func(i string) {
-			key := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_alloc(i64 24)", key))
-			e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s)", key, e.internString("%lld"), i))
-			e.emitInstr(fmt.Sprintf("call void @__kml_str_finalize(ptr %s)", key))
-			pair, _ := e.emitDynAnyMemberGet(box, key, ast0)
-			k, _ := e.emitDynAnyMemberGet(pair, e.internString("0"), ast0)
-			v, _ := e.emitDynAnyMemberGet(pair, e.internString("1"), ast0)
-			appendHdr(str(k), str(v))
-		})
-		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-	}
-	e.emitLabel(next3)
-
-	// Any other object: a record of its own entries.
-	isO1, isO2, isObj := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isO1, tag, kmlTagObject))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isO2, tag, kmlTagDynObject))
-	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", isObj, isO1, isO2))
-	objL, badL := e.freshLabel("hinit.obj"), e.freshLabel("hinit.bad")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, objL, badL))
-	e.emitLabel(objL)
-	{
-		keys, _ := e.emitDynAnyKeys(box, ast0)
-		kd, kn := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", kd, keys.Ref))
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", kn, keys.Ref))
-		loop(kn, func(i string) {
-			kg, k := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", kg, kd, i))
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", k, kg))
-			v, _ := e.emitDynAnyMemberGet(box, k, ast0)
-			appendHdr(k, str(v))
-		})
-		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-	}
-	e.emitLabel(badL)
-	e.emitThrowTypeError("Failed to construct 'Headers': The provided value is not of type '(record<ByteString, ByteString> or sequence<sequence<ByteString>>)'.")
-
-	e.emitLabel(doneL)
-	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, outSlot))
-	return Value{Ref: out, Ty: HeadersType()}
 }

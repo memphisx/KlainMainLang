@@ -49,4 +49,8 @@ void kml_umap_each(kml_umap* u, void (*cb)(void* ctx, const char* key, size_t le
 
 void kml_umap_clear(kml_umap* u) { u->m.clear(); }
 
+void kml_umap_free(kml_umap* u) { delete u; }
+
+void kml_umap_reserve(kml_umap* u, size_t n) { u->m.reserve(n); }
+
 }  // extern "C"

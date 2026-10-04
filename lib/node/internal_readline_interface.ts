@@ -9,30 +9,7 @@ import { StringDecoder } from 'string_decoder';
 import { inspect } from './internal_util_inspect';
 import { clearScreenDown, cursorTo, moveCursor } from './internal_readline_callbacks';
 import { charLengthAt, charLengthLeft, commonPrefix, emitKeys, getStringWidth, kEscape, reverseString, stripVTControlCharacters } from './internal_readline_utils';
-
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
 export class AbortError extends Error {
     code: string = 'ABORT_ERR';

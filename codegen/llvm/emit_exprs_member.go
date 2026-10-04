@@ -36,6 +36,13 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 			out := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", out, ty.IR, slot))
 			if ty.IR != "ptr" {
+				if ex.Property == "index" && (v.Ty.ExecMaybePlain || e.inferExprType(ex.Object).ExecMaybePlain) {
+					// A global match's plain array has no index (-1).
+					nonneg, both := e.freshReg(), e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", nonneg, out))
+					e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", both, present, nonneg))
+					present = both
+				}
 				return e.wrapUndefinedable(Value{Ref: out, Ty: ty}, present), nil
 			}
 			res := ty
@@ -215,6 +222,9 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 		}
 		propVal = v
 	} else {
+		if objVal.Ty.IsClass {
+			objVal.Ty = e.canonicalizeClassTy(objVal.Ty)
+		}
 		idx, fieldTy, _ := objVal.Ty.FieldIndex(ex.Property)
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
@@ -653,12 +663,6 @@ func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 	if r, ok := e.processEnvIndexRewrite(ex); ok {
 		return e.emitExpr(r)
 	}
-	// Group map access: grouped["key"] → sub-array.
-	if id, ok := ex.Object.(*ast.Identifier); ok {
-		if sym, found := e.lookup(id.Name); found && sym.Ty.IsGroupMap {
-			return e.emitGroupMapIndex(sym, ex.Index, ex.GetPos())
-		}
-	}
 	// String-keyed Map bracket access: map[key] reads like Node's plain-object
 	// header records (`headers[':path']`, `req.headers['host']`) — sugar for
 	// .get(key), yielding the value string or null when absent (TDD-00139
@@ -894,7 +898,20 @@ func (e *Emitter) unwrapGlobalThis(expr ast.Expression) ast.Expression {
 		}
 	}
 	if id, ok := newObj.(*ast.Identifier); ok && id.Name == "globalThis" && !e.isShadowedByLocal("globalThis") {
-		return ast.NewIdentifier(mem.Property, mem.GetPos())
+		// A declared global (a builtin, `declare global { var x }`) is the
+		// global itself; any other property is the global object's own.
+		if e.globalDeclares(mem.Property) {
+			return ast.NewIdentifier(mem.Property, mem.GetPos())
+		}
+		if _, ok := e.libExports["internal_namespaces:_kmlGlobalThis"]; !ok {
+			return ast.NewIdentifier(mem.Property, mem.GetPos())
+		}
+	}
+	// `n.EPSILON` after `const n = Number`: the builtin's own member.
+	if id, ok := newObj.(*ast.Identifier); ok {
+		if target, ok := e.identBuiltinAlias(id); ok {
+			newObj = target
+		}
 	}
 	if newObj == mem.Object {
 		return expr
@@ -904,12 +921,63 @@ func (e *Emitter) unwrapGlobalThis(expr ast.Expression) ast.Expression {
 	return m
 }
 
+// identBuiltinAlias is the builtin global an identifier names through
+// constants bound to it (`const n = Number`): the bound identifier that
+// names it, so the checker answers for it as for the global itself.
+func (e *Emitter) identBuiltinAlias(id *ast.Identifier) (*ast.Identifier, bool) {
+	c := e.front()
+	if c == nil || e.isBuiltinGlobal(c, id) {
+		return nil, false
+	}
+	sym, _ := c.Binding().Resolve(id)
+	for i := 0; sym != nil && i < 8; i++ {
+		if len(sym.Declarations) != 1 {
+			return nil, false
+		}
+		vd, ok := sym.Declarations[0].Node.(*ast.VarDeclaration)
+		if !ok || vd.Kind != "const" || vd.TypeAnnot != nil {
+			return nil, false
+		}
+		init, ok := vd.Init.(*ast.Identifier)
+		if !ok {
+			return nil, false
+		}
+		if e.isBuiltinGlobal(c, init) {
+			return init, true
+		}
+		sym, _ = c.Binding().Resolve(init)
+	}
+	return nil, false
+}
+
 func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
+	// DOMException's legacy code constants, on the constructor or an instance.
+	if n, ok := domExceptionConstants[ex.Property]; ok && !ex.Optional && e.isDOMExceptionConstantOwner(ex.Object) {
+		if _, isID := ex.Object.(*ast.Identifier); !isID {
+			if _, err := e.emitExpr(ex.Object); err != nil {
+				return Value{}, err
+			}
+		}
+		return Value{Ref: fmt.Sprintf("%d.0", n), Ty: TypeF64}, nil
+	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && !ex.Optional {
 		if target, ok := e.identClassAlias(id); ok {
 			// `K.x` after `const K = C` reads C's static x.
 			ex = ast.NewMemberExpression(ast.NewIdentifier(target, id.GetPos()), ex.Property, ex.GetPos())
 		}
+	}
+	if e.hostMethodValue(ex) {
+		// `m.get` read as a value: the method the boxed object's shape
+		// answers, a function.
+		obj, err := e.emitExpr(ex.Object)
+		if err != nil {
+			return Value{}, err
+		}
+		box, err := e.emitBoxValue(obj)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyMemberGetNamed(box, e.internString(ex.Property), ex.Property, ex.GetPos())
 	}
 	v, err := e.emitMemberRaw(ex)
 	if err != nil || !v.Ty.IsDynamic || len(v.Ty.UnionMembers) == 0 {
@@ -920,6 +988,29 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 		return e.coerce(v, nt), nil
 	}
 	return v, nil
+}
+
+// hostMethodValue reports whether ex reads a builtin method of a host object
+// as a value (`typeof m.get`, `const f = re.test`): a method a builtin
+// declaration file declares, on a receiver codegen holds as a host handle
+// (or a promise), which has no field of that name.
+func (e *Emitter) hostMethodValue(ex *ast.MemberExpression) bool {
+	if ex.Optional {
+		return false
+	}
+	c := e.front()
+	if c == nil {
+		return false
+	}
+	ms, ok := c.MemberDecl(ex).(*ast.MethodSignature)
+	if !ok || !e.isLibMember(ms) {
+		return false
+	}
+	ot := e.inferExprType(ex.Object)
+	if ot.Nullable || ot.IsUndefined {
+		return false
+	}
+	return isHostHandle(ot) || ot.IsPromise && !ot.IsDynamic
 }
 
 // processStdioGetter is the stdio module's getter (TDD-00235) that
@@ -1114,6 +1205,12 @@ func (e *Emitter) emitMemberRaw(ex *ast.MemberExpression) (Value, error) {
 // emitMemberUnguarded is emitMember without the absent-base TypeError — the
 // access `?.` falls back to for a base it has already established the shape of.
 func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
+	if call, ok := e.tsSubtleRef(ex); ok {
+		return e.emitExpr(call)
+	}
+	if e.isTemplateRaw(ex) {
+		return e.emitTemplateRaw(ex)
+	}
 	if v, ok, err := e.emitExecArrayMember(ex); ok || err != nil {
 		return v, err
 	}
@@ -1150,67 +1247,23 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			return e.countToNumber(Value{Ref: r, Ty: TypeI64}), nil
 		}
 	}
-	// DataView properties (byteLength/byteOffset/buffer) — dedicated reads
-	// over the hidden header struct, same pattern ArrayBuffer's .byteLength
-	// uses below.
-	if ex.Property == "stdout" || ex.Property == "stderr" || ex.Property == "stdin" || ex.Property == "pid" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsChildProcess {
-			objVal, err := e.emitExpr(ex.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			return e.emitChildProcessMember(objVal, ex.Property, ex.GetPos())
+	if ex.Property == "byteOffset" || ex.Property == "buffer" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsTypedArray {
+			return e.emitTypedArrayViewProp(ex.Object, ex.Property, ex.GetPos())
 		}
 	}
-	// TextEncoder/TextDecoder `.encoding` — always "utf-8" (the only encoding
-	// this compiler's byte-string model supports; a non-UTF-8 TextDecoder label
-	// is rejected at construction, ADR-00567). The receiver is stateless, so the
-	// value is a constant; evaluate the object for its side effects only.
-	if ex.Property == "encoding" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsTextEncoder || objTy.IsTextDecoder {
+	// A typed array's constructor: the builtin, as a constructor reference
+	// (a Buffer's is Buffer).
+	if ex.Property == "constructor" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsTypedArray && !objTy.IsDynamic {
 			if _, err := e.emitExpr(ex.Object); err != nil {
 				return Value{}, err
 			}
-			return Value{Ref: e.internString("utf-8"), Ty: TypePtr}, nil
-		}
-	}
-	if ex.Property == "byteLength" || ex.Property == "byteOffset" || ex.Property == "buffer" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsDataView {
-			objVal, err := e.emitExpr(ex.Object)
-			if err != nil {
-				return Value{}, err
+			name := typedArrayConstructorName(objTy)
+			if objTy.IsBuffer {
+				name = "Buffer"
 			}
-			return e.emitDataViewProp(objVal, ex.Property, ex.GetPos())
-		}
-	}
-	// Blob properties (size/type, TDD-00102) — same dedicated-read pattern.
-	if ex.Property == "size" || ex.Property == "type" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsBlob {
-			objVal, err := e.emitExpr(ex.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			return e.emitBlobProp(objVal, ex.Property, ex.GetPos())
-		}
-	}
-	// CryptoKeyPair properties (publicKey/privateKey, TDD-00104).
-	if ex.Property == "publicKey" || ex.Property == "privateKey" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsCryptoKeyPair {
-			objVal, err := e.emitExpr(ex.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			return e.emitCryptoKeyPairProp(objVal, ex.Property)
-		}
-	}
-	// CryptoKey properties (type/extractable, TDD-00104) — same pattern.
-	if ex.Property == "type" || ex.Property == "extractable" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsCryptoKey {
-			objVal, err := e.emitExpr(ex.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			return e.emitCryptoKeyProp(objVal, ex.Property)
+			return Value{Ref: e.emitNbTagPtr(e.internString(name), kmlTagFuncRef), Ty: TypeAny}, nil
 		}
 	}
 	// TS namespace member in value position (`X.member`, TDD-00095):
@@ -1271,6 +1324,8 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: "2.302585092994046e+00", Ty: TypeF64}, nil
 		case "SQRT2":
 			return Value{Ref: "1.4142135623730951e+00", Ty: TypeF64}, nil
+		case "SQRT1_2":
+			return Value{Ref: "0x3FE6A09E667F3BCD", Ty: TypeF64}, nil // 0.7071067811865476
 		case "LOG2E":
 			return Value{Ref: "1.4426950408889634e+00", Ty: TypeF64}, nil
 		case "LOG10E":
@@ -1399,31 +1454,18 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			}
 		}
 	}
-	// Response.headers (ADR-00490): lazily parse the raw header text the
-	// fetch runtime captured (CURLOPT_HEADERFUNCTION side buffer) into a
-	// Map<string,string> with lowercased keys. Combinator-built Responses
-	// have a null __kml_pending and yield an empty map.
+	// A Response's or Request's headers: its Headers (a fetched response's
+	// filled on first read).
 	if ex.Property == "headers" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsResponse {
+		if objTy := e.inferExprType(ex.Object); objTy.IsResponse || objTy.IsFetchRequest {
 			objVal, err := e.emitExpr(ex.Object)
 			if err != nil {
 				return Value{}, err
 			}
-			pendIdx, pendTy, ok := objVal.Ty.FieldIndex("__kml_pending")
-			hIdx, hTy, okH := objVal.Ty.FieldIndex("__kml_headers")
-			if ok && okH {
-				// A constructed Response keeps its own Headers.
-				own := e.loadFieldValue(objVal, hIdx, hTy)
-				pend := e.loadFieldValue(objVal, pendIdx, pendTy)
-				e.ensureFetchHeadersMap()
-				m := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_headers_map(ptr %s)", m, pend.Ref))
-				hasOwn := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasOwn, own.Ref))
-				r := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, hasOwn, own.Ref, m))
-				return Value{Ref: r, Ty: HeadersType()}, nil
+			if objTy.IsResponse {
+				return e.emitResponseHeaders(objVal, ex.GetPos())
 			}
+			return e.emitRequestHeaders(objVal, ex.GetPos())
 		}
 	}
 	// ReadableStream/reader/controller properties (TDD-00097 Stage 1) —
@@ -1443,11 +1485,6 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 		}
 	}
 	if ex.Property == "size" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsURLSearchParams {
-			// The ordered pair-list's count (TDD-00203) — a number, not the Map
-			// header read below.
-			return e.emitURLSearchParamsSize(ex.Object)
-		}
 		if id, ok := ex.Object.(*ast.Identifier); ok {
 			if sym, found := e.lookup(id.Name); found && (sym.Ty.IsMap || sym.Ty.IsSet) {
 				mapPtr := e.freshReg()
@@ -1696,6 +1733,15 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	if objVal.Ty.IsError && ex.Property == "errors" {
 		return e.emitErrorErrorsAccess(objVal.Ref), nil
 	}
+	// A DOMException's code is the legacy number its name has.
+	if objVal.Ty.IsError && !objVal.Ty.IsClass && ex.Property == "code" && e.isDOMExceptionExpr(ex.Object) {
+		e.ensureDOMExceptionCode()
+		ngep, nm, num := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", ngep, errorObjType.StructIR(), objVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", nm, ngep))
+		e.emitInstr(fmt.Sprintf("%s = call double @__kml_domexc_code(ptr %s)", num, nm))
+		return Value{Ref: num, Ty: TypeF64}, nil
+	}
 	// TDD-00030: a class accessor (getter/setter) is checked before the
 	// plain-field FieldIndex path below — an accessor-only property name
 	// is never a real Field, so FieldIndex would otherwise report "no
@@ -1709,10 +1755,32 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			return e.emitClassCall(objVal.Ty, objVal, accessorMethodName("get", ex.Property), nil, ex.GetPos(), false)
 		}
 	}
-	// A class or interface type captured before its fields were registered
-	// (a type alias's function type naming it): its live shape.
-	if len(objVal.Ty.UserFields()) == 0 {
+	// A class or interface type captured before its layout was final (a
+	// type alias's function type naming it; a class snapshot taken before
+	// its vtable field was decided): its live shape.
+	if objVal.Ty.IsClass || len(objVal.Ty.UserFields()) == 0 {
 		objVal.Ty = e.canonicalizeClassTy(objVal.Ty)
+	}
+	if ex.Property == "constructor" && objVal.Ty.IsClass {
+		if _, _, own := objVal.Ty.FieldIndex("constructor"); !own {
+			return e.emitConstructorOf(objVal), nil
+		}
+	}
+	// A system-error slot read through Error's own type (`e.code` on a
+	// NodeJS.ErrnoException) when a subclass declares that field itself:
+	// the instance's layout answers first, as through `any`.
+	if objVal.Ty.IsError && !objVal.Ty.IsClass && e.errorShadowedSlots[ex.Property] {
+		if _, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property); ok {
+			box, err := e.emitBoxValue(objVal)
+			if err != nil {
+				return Value{}, err
+			}
+			v, err := e.emitDynAnyMemberGetNamed(box, e.internString(ex.Property), ex.Property, ex.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			return e.coerce(v, fieldTy), nil
+		}
 	}
 	idx, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property)
 	if !ok {
@@ -1793,9 +1861,24 @@ func (e *Emitter) emitUnionSoleObjectMemberRead(u Value, prop string, pos ast.Po
 		return Value{}, false, nil
 	}
 	obj = e.canonicalizeClassTy(obj)
-	idx, fty, ok := obj.FieldIndex(prop)
-	if !ok {
-		return Value{}, false, nil
+	// A field, or a class's getter (`url.protocol`): the member read off the
+	// object the union holds.
+	read := func(p string) (Value, error) {
+		if obj.IsClass {
+			if getter, _, ok := e.classAccessorSigs(obj.ClassName, prop); ok && getter != nil {
+				return e.emitClassCall(obj, Value{Ref: p, Ty: obj}, accessorMethodName("get", prop), nil, pos, false)
+			}
+		}
+		idx, fty, _ := obj.FieldIndex(prop)
+		g := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, obj.StructIR(), p, idx))
+		return e.loadScalarOrNullableField(g, fty), nil
+	}
+	if _, _, ok := obj.FieldIndex(prop); !ok {
+		getter, _, isAcc := e.classAccessorSigs(obj.ClassName, prop)
+		if !obj.IsClass || !isAcc || getter == nil {
+			return Value{}, false, nil
+		}
 	}
 	tag, payload := e.emitUnboxTagPayload(Value{Ref: u.Ref, Ty: TypeAny})
 	res := e.freshReg()
@@ -1807,9 +1890,10 @@ func (e *Emitter) emitUnionSoleObjectMemberRead(u Value, prop string, pos ast.Po
 	e.emitLabel(objL)
 	p := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, payload))
-	g := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, obj.StructIR(), p, idx))
-	fv := e.loadScalarOrNullableField(g, fty)
+	fv, err := read(p)
+	if err != nil {
+		return Value{}, true, err
+	}
 	boxed, err := e.emitBoxValue(fv)
 	if err != nil {
 		return Value{}, true, err
@@ -1885,6 +1969,12 @@ func (e *Emitter) checkerPrimitive(expr ast.Expression) (Type, bool) {
 	if c.Unanswered(t) || t.Flags&(checker.Union|checker.Any|checker.Unknown) != 0 {
 		return Type{}, false
 	}
+	if call, ok := expr.(*ast.CallExpression); ok && c.AnyArgOverloadCall(call) {
+		// An overload picked for an `any` argument is the first that fits
+		// any value, not the one the run-time value takes: the result is
+		// whatever the implementation returned.
+		return Type{}, false
+	}
 	switch {
 	case t.Flags&(checker.String|checker.StringLiteral) != 0:
 		// Not converted: a declared string reached through `any` may be
@@ -1904,4 +1994,63 @@ func (e *Emitter) checkerPrimitive(expr ast.Expression) (Type, bool) {
 		}
 	}
 	return Type{}, false
+}
+
+// globalDeclares reports whether a global declaration (the builtin library's,
+// or the program's `declare global`) names name.
+func (e *Emitter) globalDeclares(name string) bool {
+	c := e.front()
+	if c == nil {
+		return true
+	}
+	b := c.Binding()
+	return b.Globals != nil && b.Globals.Symbols.Get(name) != nil
+}
+
+// isDOMExceptionExpr reports whether the checker types x as a DOMException.
+func (e *Emitter) isDOMExceptionExpr(x ast.Expression) bool {
+	c := e.front()
+	if c == nil {
+		return false
+	}
+	t := c.TypeOf(x)
+	return t != nil && !c.Unanswered(t) && t.Symbol != nil && t.Symbol.Name == "DOMException"
+}
+
+// domExceptionConstants are DOMException's legacy code constants (WebIDL).
+var domExceptionConstants = map[string]int{
+	"INDEX_SIZE_ERR":              1,
+	"DOMSTRING_SIZE_ERR":          2,
+	"HIERARCHY_REQUEST_ERR":       3,
+	"WRONG_DOCUMENT_ERR":          4,
+	"INVALID_CHARACTER_ERR":       5,
+	"NO_DATA_ALLOWED_ERR":         6,
+	"NO_MODIFICATION_ALLOWED_ERR": 7,
+	"NOT_FOUND_ERR":               8,
+	"NOT_SUPPORTED_ERR":           9,
+	"INUSE_ATTRIBUTE_ERR":         10,
+	"INVALID_STATE_ERR":           11,
+	"SYNTAX_ERR":                  12,
+	"INVALID_MODIFICATION_ERR":    13,
+	"NAMESPACE_ERR":               14,
+	"INVALID_ACCESS_ERR":          15,
+	"VALIDATION_ERR":              16,
+	"TYPE_MISMATCH_ERR":           17,
+	"SECURITY_ERR":                18,
+	"NETWORK_ERR":                 19,
+	"ABORT_ERR":                   20,
+	"URL_MISMATCH_ERR":            21,
+	"QUOTA_EXCEEDED_ERR":          22,
+	"TIMEOUT_ERR":                 23,
+	"INVALID_NODE_TYPE_ERR":       24,
+	"DATA_CLONE_ERR":              25,
+}
+
+// isDOMExceptionConstantOwner reports whether x is the DOMException
+// constructor or an instance of it.
+func (e *Emitter) isDOMExceptionConstantOwner(x ast.Expression) bool {
+	if id, ok := x.(*ast.Identifier); ok && id.Name == "DOMException" && !e.isShadowedByLocal(id.Name) {
+		return true
+	}
+	return e.isDOMExceptionExpr(x)
 }

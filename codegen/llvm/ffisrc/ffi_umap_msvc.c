@@ -132,6 +132,15 @@ static size_t kml_umap_desired_grow(kml_umap* u, size_t for_size) {
   return req;
 }
 
+// reserve(n): rehash(ceil(n / max_load_factor)), which grows the bucket
+// vector (never below what the size needs) and never shrinks it.
+void kml_umap_reserve(kml_umap* u, size_t n) {
+  size_t buckets = (size_t)ceilf((float)n / 1.0f);
+  if (buckets < u->size) buckets = u->size;
+  if (buckets <= u->nbuckets) return;
+  kml_umap_forced_rehash(u, buckets);
+}
+
 int kml_umap_emplace(kml_umap* u, const char* key, size_t len, void* val) {
   uint64_t hash = kml_umap_fnv1a(key, len);
   kml_umap_node* dup;
@@ -193,4 +202,10 @@ void kml_umap_clear(kml_umap* u) {
   u->head.prev = u->head.next = &u->head;
   u->size = 0;
   kml_umap_reset_vec(u, KML_UMAP_MIN_BUCKETS);
+}
+
+void kml_umap_free(kml_umap* u) {
+  kml_umap_clear(u);
+  free(u->vec);
+  free(u);
 }

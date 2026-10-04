@@ -116,3 +116,19 @@ console.log(`+"`v=${new Foo()}`"+`)
 console.log(new Foo())
 `, "v=[object Object]\nFoo { x: 1 }")
 }
+
+func TestE2EInspectToStringTagPrefix(t *testing.T) {
+	// util.inspect shows `Name [Tag]` when a Symbol.toStringTag getter answers
+	// a tag other than the class name, statically and through any, and
+	// `[Name]` / `[Name [Tag]]` past the depth cap.
+	assertSameAsNode(t, `
+class A { x = 1; get [Symbol.toStringTag]() { return "Aye"; } }
+class S { get [Symbol.toStringTag]() { return "S"; } }
+class P { x = 1; }
+const a: any = new A();
+console.log(new A(), new S(), a, [a]);
+console.log({ q: { r: { s: new A(), t: new P(), u: a } } });
+console.log(Object.prototype.toString.call(new URL("http://x/")), Object.prototype.toString.call(new URLSearchParams()));
+console.log(Object.prototype.toString.call(new Headers().entries()), Object.prototype.toString.call(new URLSearchParams().entries()));
+`)
+}

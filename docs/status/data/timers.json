@@ -27,8 +27,7 @@
             "feature": "`setTimeout(fn, ms)` / `clearTimeout(id)`",
             "status": "implemented",
             "caveats": [
-              "Callback is restricted to a zero-argument, `void`-returning function — an arrow/function-expression closure, or a bare reference to a top-level named function ([ADR-00200](../adr/ADR-00200.md))",
-              "The handle is the timer's numeric id, not Node's `Timeout` object: `typeof` reads `\"number\"`; `refresh` is a compile error, and `ref`/`unref`/`hasRef`/`close` work only on a typed handle, not through `any`"
+              "The handle is the timer's numeric id, not Node's `Timeout` object: `typeof` reads `\"number\"`, and `ref`/`unref`/`hasRef`/`refresh`/`close` work only on a typed handle, not through `any`"
             ],
             "notes": [
               "Bare global functions, matching real JS (not a namespace)",
@@ -43,9 +42,6 @@
               "Same scope as `setTimeout`",
               "An active interval that's never cleared keeps the process running indefinitely, matching real Node",
               "See [ADR-00031](../adr/ADR-00031.md)"
-            ],
-            "caveats": [
-              "Callback must be a zero-argument `() => void`; the extra-args form is a compile error — `setInterval(cb, 10, 42)` is rejected, where Node forwards `42` to `cb` (shares `setTimeout`'s restriction)."
             ]
           },
           {

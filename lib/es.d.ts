@@ -8,46 +8,150 @@
 
 interface Object {
     constructor: Function;
+    /** @intrinsic Object.prototype.toString */
     toString(): string;
     toLocaleString(): string;
     valueOf(): Object;
-    hasOwnProperty(v: string): boolean;
+    /** @intrinsic Object.prototype.hasOwnProperty */
+    hasOwnProperty(v: PropertyKey): boolean;
     isPrototypeOf(v: Object): boolean;
     propertyIsEnumerable(v: string): boolean;
 }
 
+type PropertyKey = string | number | symbol;
+
+interface PropertyDescriptor {
+    configurable?: boolean;
+    enumerable?: boolean;
+    value?: any;
+    writable?: boolean;
+    get?(): any;
+    set?(v: any): void;
+}
+
+interface PropertyDescriptorMap {
+    [key: PropertyKey]: PropertyDescriptor;
+}
+
 interface ObjectConstructor {
     readonly prototype: Object;
+    /** @intrinsic Object.keys */
     keys(o: {}): string[];
+    /** @intrinsic Object.values */
     values(o: {}): any[];
+    /** @intrinsic Object.entries */
     entries(o: {}): [string, any][];
+    /** @intrinsic Object.assign */
     assign(target: any, ...sources: any[]): any;
+    /** @intrinsic Object.freeze */
     freeze<T>(o: T): T;
+    /** @intrinsic Object.isFrozen */
     isFrozen(o: any): boolean;
+    /** @intrinsic Object.seal */
     seal<T>(o: T): T;
+    /** @intrinsic Object.isSealed */
     isSealed(o: any): boolean;
+    /** @intrinsic Object.preventExtensions */
+    preventExtensions<T>(o: T): T;
+    /** @intrinsic Object.isExtensible */
+    isExtensible(o: any): boolean;
+    /** @intrinsic Object.getPrototypeOf */
     getPrototypeOf(o: any): any;
+    /** @intrinsic Object.setPrototypeOf */
     setPrototypeOf(o: any, proto: object | null): any;
+    /** @intrinsic Object.create */
     create(o: object | null, properties?: any): any;
+    /** @intrinsic Object.getOwnPropertyNames */
     getOwnPropertyNames(o: any): string[];
+    /** @intrinsic Object.getOwnPropertyDescriptor */
+    getOwnPropertyDescriptor(o: any, p: PropertyKey): PropertyDescriptor | undefined;
+    /** @intrinsic Object.defineProperty */
+    defineProperty<T>(o: T, p: PropertyKey, attributes: PropertyDescriptor): T;
+    /** @intrinsic Object.defineProperties */
+    defineProperties<T>(o: T, properties: PropertyDescriptorMap): T;
+    /** @intrinsic Object.hasOwn */
+    hasOwn(o: object, v: PropertyKey): boolean;
     /** @lower __kml_Object_is */
     is(value1: any, value2: any): boolean;
+    /** @intrinsic Object.fromEntries */
     fromEntries(entries: Iterable<readonly any[]>): any;
+    /** @intrinsic Object.groupBy */
+    groupBy<K extends PropertyKey, T>(items: Iterable<T>, keySelector: (item: T, index: number) => K): Partial<Record<K, T[]>>;
 }
 
 declare var Object: ObjectConstructor;
 
+declare namespace Reflect {
+    /** @intrinsic Reflect.apply */
+    function apply<T, A extends readonly any[], R>(target: (this: T, ...args: A) => R, thisArgument: T, argumentsList: Readonly<A>): R;
+    /** @intrinsic Reflect.apply */
+    function apply(target: Function, thisArgument: any, argumentsList: ArrayLike<any>): any;
+    /** @intrinsic Reflect.construct */
+    function construct<A extends readonly any[], R>(target: new (...args: A) => R, argumentsList: Readonly<A>, newTarget?: new (...args: any) => any): R;
+    /** @intrinsic Reflect.construct */
+    function construct(target: Function, argumentsList: ArrayLike<any>, newTarget?: Function): any;
+    /** @intrinsic Reflect.defineProperty */
+    function defineProperty(target: object, propertyKey: PropertyKey, attributes: PropertyDescriptor): boolean;
+    /** @intrinsic Reflect.deleteProperty */
+    function deleteProperty(target: object, propertyKey: PropertyKey): boolean;
+    /** @intrinsic Reflect.get */
+    function get<T extends object, P extends PropertyKey>(target: T, propertyKey: P, receiver?: unknown): P extends keyof T ? T[P] : any;
+    /** @intrinsic Reflect.getOwnPropertyDescriptor */
+    function getOwnPropertyDescriptor(target: object, propertyKey: PropertyKey): PropertyDescriptor | undefined;
+    /** @intrinsic Reflect.getPrototypeOf */
+    function getPrototypeOf(target: object): object | null;
+    /** @intrinsic Reflect.has */
+    function has(target: object, propertyKey: PropertyKey): boolean;
+    /** @intrinsic Reflect.isExtensible */
+    function isExtensible(target: object): boolean;
+    /** @intrinsic Reflect.ownKeys */
+    function ownKeys(target: object): (string | symbol)[];
+    /** @intrinsic Reflect.preventExtensions */
+    function preventExtensions(target: object): boolean;
+    /** @intrinsic Reflect.set */
+    function set<T extends object, P extends PropertyKey>(target: T, propertyKey: P, value: P extends keyof T ? T[P] : any, receiver?: any): boolean;
+    /** @intrinsic Reflect.set */
+    function set(target: object, propertyKey: PropertyKey, value: any, receiver?: any): boolean;
+    /** @intrinsic Reflect.setPrototypeOf */
+    function setPrototypeOf(target: object, proto: object | null): boolean;
+    // The reflect-metadata polyfill's API, built in for decorator metadata.
+    /** @intrinsic Reflect.defineMetadata */
+    function defineMetadata(metadataKey: any, metadataValue: any, target: any, propertyKey?: string | symbol): void;
+    /** @intrinsic Reflect.getMetadata */
+    function getMetadata(metadataKey: any, target: any, propertyKey?: string | symbol): any;
+    /** @intrinsic Reflect.getOwnMetadata */
+    function getOwnMetadata(metadataKey: any, target: any, propertyKey?: string | symbol): any;
+    /** @intrinsic Reflect.hasMetadata */
+    function hasMetadata(metadataKey: any, target: any, propertyKey?: string | symbol): boolean;
+    /** @intrinsic Reflect.hasOwnMetadata */
+    function hasOwnMetadata(metadataKey: any, target: any, propertyKey?: string | symbol): boolean;
+    /** @intrinsic Reflect.metadata */
+    function metadata(metadataKey: any, metadataValue: any): any;
+}
+
 interface Function {
     readonly name: string;
     readonly length: number;
+    /** @intrinsic Function.prototype.apply */
     apply(this: Function, thisArg: any, argArray?: any): any;
+    /** @intrinsic Function.prototype.call */
     call(this: Function, thisArg: any, ...argArray: any[]): any;
+    /** @intrinsic Function.prototype.bind */
     bind(this: Function, thisArg: any, ...argArray: any[]): any;
     toString(): string;
 }
 
+interface FunctionConstructor {
+    new (...args: string[]): Function;
+    (...args: string[]): Function;
+    readonly prototype: Function;
+}
+
+declare var Function: FunctionConstructor;
+
 interface String {
     readonly length: number;
+    /** @intrinsic Object.prototype.toString */
     toString(): string;
     /** @lower __kml_String_charAt @link string */
     charAt(pos: number): string;
@@ -86,6 +190,10 @@ interface String {
     replaceAll(searchValue: string | RegExp, replacer: (substring: string, ...args: any[]) => string): string;
     /** @intrinsic String.prototype.search */
     search(regexp: string | RegExp): number;
+    /** @intrinsic String.prototype.match */
+    match(regexp: string | RegExp): RegExpMatchArray | null;
+    /** @intrinsic String.prototype.matchAll */
+    matchAll(regexp: RegExp): RegExpStringIterator<RegExpExecArray>;
     /** @lower __kml_String_slice @link string */
     slice(start?: number, end?: number): string;
     /** @lower __kml_String_split @link string */
@@ -117,18 +225,21 @@ interface String {
 
 interface StringConstructor {
     new (value?: any): String;
+    /** @intrinsic String */
     (value?: any): string;
     readonly prototype: String;
     /** @intrinsic String.fromCharCode */
     fromCharCode(...codes: number[]): string;
     /** @intrinsic String.fromCodePoint */
     fromCodePoint(...codePoints: number[]): string;
+    /** @lower __kml_String_raw */
     raw(template: { raw: readonly string[] }, ...substitutions: any[]): string;
 }
 
 declare var String: StringConstructor;
 
 interface Symbol {
+    /** @intrinsic Object.prototype.toString */
     toString(): string;
     valueOf(): symbol;
     readonly description: string | undefined;
@@ -136,8 +247,11 @@ interface Symbol {
 
 interface SymbolConstructor {
     readonly prototype: Symbol;
+    /** @intrinsic Symbol */
     (description?: string | number): symbol;
+    /** @intrinsic Symbol.for */
     for(key: string): symbol;
+    /** @intrinsic Symbol.keyFor */
     keyFor(sym: symbol): string | undefined;
     readonly iterator: unique symbol;
     readonly asyncIterator: unique symbol;
@@ -151,6 +265,7 @@ interface Boolean {
 
 interface BooleanConstructor {
     new (value?: any): Boolean;
+    /** @intrinsic Boolean */
     <T>(value?: T): boolean;
     readonly prototype: Boolean;
 }
@@ -171,6 +286,7 @@ interface Number {
 
 interface NumberConstructor {
     new (value?: any): Number;
+    /** @intrinsic Number */
     (value?: any): number;
     readonly prototype: Number;
     readonly MAX_VALUE: number;
@@ -286,8 +402,11 @@ interface Math {
 declare var Math: Math;
 
 interface JSON {
+    /** @intrinsic JSON.parse */
     parse(text: string, reviver?: (this: any, key: string, value: any) => any): any;
+    /** @intrinsic JSON.stringify */
     stringify(value: any, replacer?: (this: any, key: string, value: any) => any, space?: string | number): string;
+    /** @intrinsic JSON.stringify */
     stringify(value: any, replacer?: (number | string)[] | null, space?: string | number): string;
 }
 
@@ -307,6 +426,7 @@ interface ReadonlyArray<T> {
     values(): ArrayIterator<T>;
     readonly length: number;
     readonly [n: number]: T;
+    /** @intrinsic Array.prototype.join */
     toString(): string;
     /** @intrinsic Array.prototype.join */
     join(separator?: string): string;
@@ -352,6 +472,7 @@ interface Array<T> {
     keys(): ArrayIterator<number>;
     /** @intrinsic Array.prototype.values */
     values(): ArrayIterator<T>;
+    /** @intrinsic Array.prototype.join */
     toString(): string;
     /** @intrinsic Array.prototype.pop */
     pop(): T | undefined;
@@ -443,11 +564,17 @@ interface ArrayConstructor {
     <T>(arrayLength: number): T[];
     <T>(...items: T[]): T[];
     readonly prototype: any[];
+    /** @intrinsic Array.isArray */
     isArray(arg: any): arg is any[];
+    /** @intrinsic Array.of */
     of<T>(...items: T[]): T[];
+    /** @intrinsic Array.from */
     from<T>(arrayLike: ArrayLike<T>): T[];
+    /** @intrinsic Array.from */
     from<T, U>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => U, thisArg?: any): U[];
+    /** @intrinsic Array.from */
     from<T>(iterable: Iterable<T> | ArrayLike<T>): T[];
+    /** @intrinsic Array.from */
     from<T, U>(iterable: Iterable<T> | ArrayLike<T>, mapfn: (v: T, k: number) => U, thisArg?: any): U[];
 }
 
@@ -531,10 +658,13 @@ interface Date {
     toString(): string;
     /** @intrinsic Date.prototype.toDateString */
     toDateString(): string;
+    /** @intrinsic Date.prototype.toTimeString */
     toTimeString(): string;
+    /** @intrinsic Date.prototype.toLocaleString */
     toLocaleString(locales?: string | string[], options?: any): string;
     /** @intrinsic Date.prototype.toLocaleDateString */
     toLocaleDateString(locales?: string | string[], options?: any): string;
+    /** @intrinsic Date.prototype.toLocaleTimeString */
     toLocaleTimeString(locales?: string | string[], options?: any): string;
     /** @intrinsic Date.prototype.valueOf */
     valueOf(): number;
@@ -594,6 +724,7 @@ interface Date {
     toUTCString(): string;
     /** @intrinsic Date.prototype.toISOString */
     toISOString(): string;
+    /** @intrinsic Date.prototype.toJSON */
     toJSON(key?: any): string;
     /** @intrinsic Date.prototype.setUTCMilliseconds */
     setUTCMilliseconds(ms: number): number;
@@ -616,8 +747,11 @@ interface DateConstructor {
     new (year: number, monthIndex: number, date?: number, hours?: number, minutes?: number, seconds?: number, ms?: number): Date;
     (): string;
     readonly prototype: Date;
+    /** @intrinsic Date.parse */
     parse(s: string): number;
+    /** @intrinsic Date.UTC */
     UTC(year: number, monthIndex?: number, date?: number, hours?: number, minutes?: number, seconds?: number, ms?: number): number;
+    /** @intrinsic Date.now */
     now(): number;
 }
 
@@ -677,10 +811,46 @@ interface IterableIterator<T> extends Iterator<T> {}
 
 interface IteratorObject<T, TReturn = unknown, TNext = unknown> extends Iterator<T, TReturn, TNext> {
     [Symbol.iterator](): IteratorObject<T, TReturn, TNext>;
+    /** @lower __kml_Iterator_map */
+    map<U>(callbackfn: (value: T, index: number) => U): IteratorObject<U, undefined, unknown>;
+    /** @lower __kml_Iterator_filter */
+    filter<S extends T>(predicate: (value: T, index: number) => value is S): IteratorObject<S, undefined, unknown>;
+    /** @lower __kml_Iterator_filter */
+    filter(predicate: (value: T, index: number) => unknown): IteratorObject<T, undefined, unknown>;
+    /** @lower __kml_Iterator_take */
+    take(limit: number): IteratorObject<T, undefined, unknown>;
+    /** @lower __kml_Iterator_drop */
+    drop(count: number): IteratorObject<T, undefined, unknown>;
+    /** @lower __kml_Iterator_flatMap */
+    flatMap<U>(callback: (value: T, index: number) => Iterator<U, unknown, undefined> | Iterable<U, unknown, undefined>): IteratorObject<U, undefined, unknown>;
+    /** @lower __kml_Iterator_reduce */
+    reduce(callbackfn: (previousValue: T, currentValue: T, currentIndex: number) => T): T;
+    /** @lower __kml_Iterator_reduce */
+    reduce(callbackfn: (previousValue: T, currentValue: T, currentIndex: number) => T, initialValue: T): T;
+    /** @lower __kml_Iterator_reduce */
+    reduce<U>(callbackfn: (previousValue: U, currentValue: T, currentIndex: number) => U, initialValue: U): U;
+    /** @lower __kml_Iterator_toArray */
     toArray(): T[];
+    /** @lower __kml_Iterator_forEach */
+    forEach(callbackfn: (value: T, index: number) => void): void;
+    /** @lower __kml_Iterator_some */
+    some(predicate: (value: T, index: number) => unknown): boolean;
+    /** @lower __kml_Iterator_every */
+    every(predicate: (value: T, index: number) => unknown): boolean;
+    /** @lower __kml_Iterator_find */
+    find<S extends T>(predicate: (value: T, index: number) => value is S): S | undefined;
+    /** @lower __kml_Iterator_find */
+    find(predicate: (value: T, index: number) => unknown): T | undefined;
 }
 
 type BuiltinIteratorReturn = any;
+
+interface Generator<T = unknown, TReturn = any, TNext = any> extends IteratorObject<T, TReturn, TNext> {
+    next(...[value]: [] | [TNext]): IteratorResult<T, TReturn>;
+    return(value: TReturn): IteratorResult<T, TReturn>;
+    throw(e: any): IteratorResult<T, TReturn>;
+    [Symbol.iterator](): Generator<T, TReturn, TNext>;
+}
 
 interface ArrayIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
     [Symbol.iterator](): ArrayIterator<T>;
@@ -688,6 +858,10 @@ interface ArrayIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unkn
 
 interface MapIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
     [Symbol.iterator](): MapIterator<T>;
+}
+
+interface RegExpStringIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
+    [Symbol.iterator](): RegExpStringIterator<T>;
 }
 
 interface SetIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
@@ -702,22 +876,74 @@ interface PromiseLike<T> {
 }
 
 interface Promise<T> {
+    /** @intrinsic Promise.prototype.then */
     then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): Promise<TResult1 | TResult2>;
+    /** @intrinsic Promise.prototype.catch */
     catch<TResult = never>(onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | undefined | null): Promise<T | TResult>;
+    /** @intrinsic Promise.prototype.finally */
     finally(onfinally?: (() => void) | undefined | null): Promise<T>;
 }
 
 interface PromiseConstructor {
     readonly prototype: Promise<any>;
     new <T>(executor: (resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: any) => void) => void): Promise<T>;
+    /** @intrinsic Promise.all */
+    all<T extends readonly unknown[] | []>(values: T): Promise<{ -readonly [P in keyof T]: Awaited<T[P]>; }>;
+    /** @intrinsic Promise.all */
+    all<T>(values: Iterable<T | PromiseLike<T>>): Promise<Awaited<T>[]>;
+    /** @intrinsic Promise.allSettled */
+    allSettled<T extends readonly unknown[] | []>(values: T): Promise<{ -readonly [P in keyof T]: PromiseSettledResult<Awaited<T[P]>>; }>;
+    /** @intrinsic Promise.allSettled */
+    allSettled<T>(values: Iterable<T | PromiseLike<T>>): Promise<PromiseSettledResult<Awaited<T>>[]>;
+    /** @intrinsic Promise.any */
+    any<T extends readonly unknown[] | []>(values: T): Promise<Awaited<T[number]>>;
+    /** @intrinsic Promise.any */
+    any<T>(values: Iterable<T | PromiseLike<T>>): Promise<Awaited<T>>;
+    /** @intrinsic Promise.race */
+    race<T extends readonly unknown[] | []>(values: T): Promise<Awaited<T[number]>>;
+    /** @intrinsic Promise.race */
+    race<T>(values: Iterable<T | PromiseLike<T>>): Promise<Awaited<T>>;
+    /** @intrinsic Promise.reject */
     reject<T = never>(reason?: any): Promise<T>;
+    /** @intrinsic Promise.resolve */
     resolve(): Promise<void>;
+    /** @intrinsic Promise.resolve */
     resolve<T>(value: T): Promise<Awaited<T>>;
+    /** @intrinsic Promise.resolve */
+    resolve<T>(value: T | PromiseLike<T>): Promise<Awaited<T>>;
 }
+
+interface PromiseFulfilledResult<T> {
+    status: "fulfilled";
+    value: T;
+}
+interface PromiseRejectedResult {
+    status: "rejected";
+    reason: any;
+}
+type PromiseSettledResult<T> = PromiseFulfilledResult<T> | PromiseRejectedResult;
 
 declare var Promise: PromiseConstructor;
 
-type Awaited<T> = T;
+type Awaited<T> = T extends null | undefined ? T :
+    T extends object & { then(onfulfilled: infer F, ...args: infer _): any; } ?
+        F extends ((value: infer V, ...args: infer _) => any) ? Awaited<V> : never :
+    T;
+
+// The utility types (lib.es5.d.ts).
+type Partial<T> = { [P in keyof T]?: T[P]; };
+type Required<T> = { [P in keyof T]-?: T[P]; };
+type Readonly<T> = { readonly [P in keyof T]: T[P]; };
+type Pick<T, K extends keyof T> = { [P in K]: T[P]; };
+type Record<K extends keyof any, T> = { [P in K]: T; };
+type Exclude<T, U> = T extends U ? never : T;
+type Extract<T, U> = T extends U ? T : never;
+type Omit<T, K extends keyof any> = Pick<T, Exclude<keyof T, K>>;
+type NonNullable<T> = T & {};
+type Parameters<T extends (...args: any) => any> = T extends (...args: infer P) => any ? P : never;
+type ConstructorParameters<T extends abstract new (...args: any) => any> = T extends abstract new (...args: infer P) => any ? P : never;
+type ReturnType<T extends (...args: any) => any> = T extends (...args: any) => infer R ? R : any;
+type InstanceType<T extends abstract new (...args: any) => any> = T extends abstract new (...args: any) => infer R ? R : any;
 
 interface Map<K, V> {
     /** @intrinsic Map.prototype.clear */
@@ -825,9 +1051,19 @@ interface WeakRefConstructor {
 }
 declare var WeakRef: WeakRefConstructor;
 
+// lib.es2023.collection.d.ts: symbols that are not registered can be held
+// weakly.
+interface WeakKeyTypes {
+    object: object;
+    symbol: symbol;
+}
+type WeakKey = WeakKeyTypes[keyof WeakKeyTypes];
+
 interface FinalizationRegistry<T> {
-    register(target: object, heldValue: T, unregisterToken?: object): void;
-    unregister(unregisterToken: object): boolean;
+    /** @intrinsic FinalizationRegistry.prototype.register */
+    register(target: WeakKey, heldValue: T, unregisterToken?: WeakKey): void;
+    /** @intrinsic FinalizationRegistry.prototype.unregister */
+    unregister(unregisterToken: WeakKey): boolean;
 }
 interface FinalizationRegistryConstructor {
     readonly prototype: FinalizationRegistry<any>;
@@ -892,6 +1128,7 @@ type ArrayBufferLike = ArrayBuffer | SharedArrayBuffer;
 interface ArrayBufferConstructor {
     readonly prototype: ArrayBuffer;
     new (byteLength: number): ArrayBuffer;
+    /** @intrinsic ArrayBuffer.isView */
     isView(arg: any): arg is ArrayBufferView;
 }
 interface ArrayBufferConstructor {
@@ -901,6 +1138,74 @@ interface ArrayBufferConstructor {
     new (byteLength: number, options?: { maxByteLength?: number; }): ArrayBuffer;
 }
 declare var ArrayBuffer: ArrayBufferConstructor;
+
+interface Atomics {
+    /** @intrinsic Atomics.add */
+    add(typedArray: Int8Array<ArrayBufferLike> | Uint8Array<ArrayBufferLike> | Int16Array<ArrayBufferLike> | Uint16Array<ArrayBufferLike> | Int32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>, index: number, value: number): number;
+    /** @intrinsic Atomics.add */
+    add(typedArray: BigInt64Array<ArrayBufferLike> | BigUint64Array<ArrayBufferLike>, index: number, value: bigint): bigint;
+    /** @intrinsic Atomics.and */
+    and(typedArray: Int8Array<ArrayBufferLike> | Uint8Array<ArrayBufferLike> | Int16Array<ArrayBufferLike> | Uint16Array<ArrayBufferLike> | Int32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>, index: number, value: number): number;
+    /** @intrinsic Atomics.and */
+    and(typedArray: BigInt64Array<ArrayBufferLike> | BigUint64Array<ArrayBufferLike>, index: number, value: bigint): bigint;
+    /** @intrinsic Atomics.exchange */
+    exchange(typedArray: Int8Array<ArrayBufferLike> | Uint8Array<ArrayBufferLike> | Int16Array<ArrayBufferLike> | Uint16Array<ArrayBufferLike> | Int32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>, index: number, value: number): number;
+    /** @intrinsic Atomics.exchange */
+    exchange(typedArray: BigInt64Array<ArrayBufferLike> | BigUint64Array<ArrayBufferLike>, index: number, value: bigint): bigint;
+    /** @intrinsic Atomics.or */
+    or(typedArray: Int8Array<ArrayBufferLike> | Uint8Array<ArrayBufferLike> | Int16Array<ArrayBufferLike> | Uint16Array<ArrayBufferLike> | Int32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>, index: number, value: number): number;
+    /** @intrinsic Atomics.or */
+    or(typedArray: BigInt64Array<ArrayBufferLike> | BigUint64Array<ArrayBufferLike>, index: number, value: bigint): bigint;
+    /** @intrinsic Atomics.sub */
+    sub(typedArray: Int8Array<ArrayBufferLike> | Uint8Array<ArrayBufferLike> | Int16Array<ArrayBufferLike> | Uint16Array<ArrayBufferLike> | Int32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>, index: number, value: number): number;
+    /** @intrinsic Atomics.sub */
+    sub(typedArray: BigInt64Array<ArrayBufferLike> | BigUint64Array<ArrayBufferLike>, index: number, value: bigint): bigint;
+    /** @intrinsic Atomics.xor */
+    xor(typedArray: Int8Array<ArrayBufferLike> | Uint8Array<ArrayBufferLike> | Int16Array<ArrayBufferLike> | Uint16Array<ArrayBufferLike> | Int32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>, index: number, value: number): number;
+    /** @intrinsic Atomics.xor */
+    xor(typedArray: BigInt64Array<ArrayBufferLike> | BigUint64Array<ArrayBufferLike>, index: number, value: bigint): bigint;
+    /** @intrinsic Atomics.compareExchange */
+    compareExchange(typedArray: Int8Array<ArrayBufferLike> | Uint8Array<ArrayBufferLike> | Int16Array<ArrayBufferLike> | Uint16Array<ArrayBufferLike> | Int32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>, index: number, expectedValue: number, replacementValue: number): number;
+    /** @intrinsic Atomics.compareExchange */
+    compareExchange(typedArray: BigInt64Array<ArrayBufferLike> | BigUint64Array<ArrayBufferLike>, index: number, expectedValue: bigint, replacementValue: bigint): bigint;
+    /** @intrinsic Atomics.load */
+    load(typedArray: Int8Array<ArrayBufferLike> | Uint8Array<ArrayBufferLike> | Int16Array<ArrayBufferLike> | Uint16Array<ArrayBufferLike> | Int32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>, index: number): number;
+    /** @intrinsic Atomics.load */
+    load(typedArray: BigInt64Array<ArrayBufferLike> | BigUint64Array<ArrayBufferLike>, index: number): bigint;
+    /** @intrinsic Atomics.store */
+    store(typedArray: Int8Array<ArrayBufferLike> | Uint8Array<ArrayBufferLike> | Int16Array<ArrayBufferLike> | Uint16Array<ArrayBufferLike> | Int32Array<ArrayBufferLike> | Uint32Array<ArrayBufferLike>, index: number, value: number): number;
+    /** @intrinsic Atomics.store */
+    store(typedArray: BigInt64Array<ArrayBufferLike> | BigUint64Array<ArrayBufferLike>, index: number, value: bigint): bigint;
+    /** @intrinsic Atomics.isLockFree */
+    isLockFree(size: number): boolean;
+    /** @intrinsic Atomics.wait */
+    wait(typedArray: Int32Array<ArrayBufferLike>, index: number, value: number, timeout?: number): "ok" | "not-equal" | "timed-out";
+    /** @intrinsic Atomics.wait */
+    wait(typedArray: BigInt64Array<ArrayBufferLike>, index: number, value: bigint, timeout?: number): "ok" | "not-equal" | "timed-out";
+    /** @intrinsic Atomics.notify */
+    notify(typedArray: Int32Array<ArrayBufferLike> | BigInt64Array<ArrayBufferLike>, index: number, count?: number): number;
+}
+
+declare var Atomics: Atomics;
+
+interface BigInt {
+    /** @intrinsic BigInt.prototype.toString */
+    toString(radix?: number): string;
+    toLocaleString(locales?: string | string[], options?: any): string;
+    valueOf(): bigint;
+}
+
+interface BigIntConstructor {
+    /** @intrinsic BigInt */
+    (value: bigint | boolean | number | string): bigint;
+    readonly prototype: BigInt;
+    /** @intrinsic BigInt.asIntN */
+    asIntN(bits: number, int: bigint): bigint;
+    /** @intrinsic BigInt.asUintN */
+    asUintN(bits: number, int: bigint): bigint;
+}
+
+declare var BigInt: BigIntConstructor;
 interface ArrayBufferView<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
@@ -953,6 +1258,7 @@ interface Int8Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
     /** @intrinsic Array.prototype.reverse */
     reverse(): this;
+    /** @intrinsic TypedArray.prototype.set */
     set(array: ArrayLike<number>, offset?: number): void;
     /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Int8Array<ArrayBuffer>;
@@ -960,6 +1266,7 @@ interface Int8Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
     /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
+    /** @intrinsic TypedArray.prototype.subarray */
     subarray(begin?: number, end?: number): Int8Array<TArrayBuffer>;
     toLocaleString(): string;
     toString(): string;
@@ -974,8 +1281,11 @@ interface Int8ArrayConstructor {
     new (buffer: ArrayBuffer, byteOffset?: number, length?: number): Int8Array<ArrayBuffer>;
     new (array: ArrayLike<number> | ArrayBuffer): Int8Array<ArrayBuffer>;
     readonly BYTES_PER_ELEMENT: number;
+    /** @lower __kml_Int8Array_of */
     of(...items: number[]): Int8Array<ArrayBuffer>;
+    /** @lower __kml_Int8Array_from */
     from(arrayLike: ArrayLike<number>): Int8Array<ArrayBuffer>;
+    /** @lower __kml_Int8Array_from */
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Int8Array<ArrayBuffer>;
 }
 declare var Int8Array: Int8ArrayConstructor;
@@ -1021,6 +1331,7 @@ interface Uint8Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
     /** @intrinsic Array.prototype.reverse */
     reverse(): this;
+    /** @intrinsic TypedArray.prototype.set */
     set(array: ArrayLike<number>, offset?: number): void;
     /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Uint8Array<ArrayBuffer>;
@@ -1028,6 +1339,7 @@ interface Uint8Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
     /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
+    /** @intrinsic TypedArray.prototype.subarray */
     subarray(begin?: number, end?: number): Uint8Array<TArrayBuffer>;
     toLocaleString(): string;
     toString(): string;
@@ -1042,8 +1354,11 @@ interface Uint8ArrayConstructor {
     new (buffer: ArrayBuffer, byteOffset?: number, length?: number): Uint8Array<ArrayBuffer>;
     new (array: ArrayLike<number> | ArrayBuffer): Uint8Array<ArrayBuffer>;
     readonly BYTES_PER_ELEMENT: number;
+    /** @lower __kml_Uint8Array_of */
     of(...items: number[]): Uint8Array<ArrayBuffer>;
+    /** @lower __kml_Uint8Array_from */
     from(arrayLike: ArrayLike<number>): Uint8Array<ArrayBuffer>;
+    /** @lower __kml_Uint8Array_from */
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Uint8Array<ArrayBuffer>;
 }
 declare var Uint8Array: Uint8ArrayConstructor;
@@ -1089,6 +1404,7 @@ interface Uint8ClampedArray<TArrayBuffer extends ArrayBufferLike = ArrayBufferLi
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
     /** @intrinsic Array.prototype.reverse */
     reverse(): this;
+    /** @intrinsic TypedArray.prototype.set */
     set(array: ArrayLike<number>, offset?: number): void;
     /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Uint8ClampedArray<ArrayBuffer>;
@@ -1096,6 +1412,7 @@ interface Uint8ClampedArray<TArrayBuffer extends ArrayBufferLike = ArrayBufferLi
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
     /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
+    /** @intrinsic TypedArray.prototype.subarray */
     subarray(begin?: number, end?: number): Uint8ClampedArray<TArrayBuffer>;
     toLocaleString(): string;
     toString(): string;
@@ -1110,8 +1427,11 @@ interface Uint8ClampedArrayConstructor {
     new (buffer: ArrayBuffer, byteOffset?: number, length?: number): Uint8ClampedArray<ArrayBuffer>;
     new (array: ArrayLike<number> | ArrayBuffer): Uint8ClampedArray<ArrayBuffer>;
     readonly BYTES_PER_ELEMENT: number;
+    /** @lower __kml_Uint8ClampedArray_of */
     of(...items: number[]): Uint8ClampedArray<ArrayBuffer>;
+    /** @lower __kml_Uint8ClampedArray_from */
     from(arrayLike: ArrayLike<number>): Uint8ClampedArray<ArrayBuffer>;
+    /** @lower __kml_Uint8ClampedArray_from */
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Uint8ClampedArray<ArrayBuffer>;
 }
 declare var Uint8ClampedArray: Uint8ClampedArrayConstructor;
@@ -1157,6 +1477,7 @@ interface Int16Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
     /** @intrinsic Array.prototype.reverse */
     reverse(): this;
+    /** @intrinsic TypedArray.prototype.set */
     set(array: ArrayLike<number>, offset?: number): void;
     /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Int16Array<ArrayBuffer>;
@@ -1164,6 +1485,7 @@ interface Int16Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
     /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
+    /** @intrinsic TypedArray.prototype.subarray */
     subarray(begin?: number, end?: number): Int16Array<TArrayBuffer>;
     toLocaleString(): string;
     toString(): string;
@@ -1178,8 +1500,11 @@ interface Int16ArrayConstructor {
     new (buffer: ArrayBuffer, byteOffset?: number, length?: number): Int16Array<ArrayBuffer>;
     new (array: ArrayLike<number> | ArrayBuffer): Int16Array<ArrayBuffer>;
     readonly BYTES_PER_ELEMENT: number;
+    /** @lower __kml_Int16Array_of */
     of(...items: number[]): Int16Array<ArrayBuffer>;
+    /** @lower __kml_Int16Array_from */
     from(arrayLike: ArrayLike<number>): Int16Array<ArrayBuffer>;
+    /** @lower __kml_Int16Array_from */
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Int16Array<ArrayBuffer>;
 }
 declare var Int16Array: Int16ArrayConstructor;
@@ -1225,6 +1550,7 @@ interface Uint16Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
     /** @intrinsic Array.prototype.reverse */
     reverse(): this;
+    /** @intrinsic TypedArray.prototype.set */
     set(array: ArrayLike<number>, offset?: number): void;
     /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Uint16Array<ArrayBuffer>;
@@ -1232,6 +1558,7 @@ interface Uint16Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
     /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
+    /** @intrinsic TypedArray.prototype.subarray */
     subarray(begin?: number, end?: number): Uint16Array<TArrayBuffer>;
     toLocaleString(): string;
     toString(): string;
@@ -1246,8 +1573,11 @@ interface Uint16ArrayConstructor {
     new (buffer: ArrayBuffer, byteOffset?: number, length?: number): Uint16Array<ArrayBuffer>;
     new (array: ArrayLike<number> | ArrayBuffer): Uint16Array<ArrayBuffer>;
     readonly BYTES_PER_ELEMENT: number;
+    /** @lower __kml_Uint16Array_of */
     of(...items: number[]): Uint16Array<ArrayBuffer>;
+    /** @lower __kml_Uint16Array_from */
     from(arrayLike: ArrayLike<number>): Uint16Array<ArrayBuffer>;
+    /** @lower __kml_Uint16Array_from */
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Uint16Array<ArrayBuffer>;
 }
 declare var Uint16Array: Uint16ArrayConstructor;
@@ -1293,6 +1623,7 @@ interface Int32Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
     /** @intrinsic Array.prototype.reverse */
     reverse(): this;
+    /** @intrinsic TypedArray.prototype.set */
     set(array: ArrayLike<number>, offset?: number): void;
     /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Int32Array<ArrayBuffer>;
@@ -1300,6 +1631,7 @@ interface Int32Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
     /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
+    /** @intrinsic TypedArray.prototype.subarray */
     subarray(begin?: number, end?: number): Int32Array<TArrayBuffer>;
     toLocaleString(): string;
     toString(): string;
@@ -1314,8 +1646,11 @@ interface Int32ArrayConstructor {
     new (buffer: ArrayBuffer, byteOffset?: number, length?: number): Int32Array<ArrayBuffer>;
     new (array: ArrayLike<number> | ArrayBuffer): Int32Array<ArrayBuffer>;
     readonly BYTES_PER_ELEMENT: number;
+    /** @lower __kml_Int32Array_of */
     of(...items: number[]): Int32Array<ArrayBuffer>;
+    /** @lower __kml_Int32Array_from */
     from(arrayLike: ArrayLike<number>): Int32Array<ArrayBuffer>;
+    /** @lower __kml_Int32Array_from */
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Int32Array<ArrayBuffer>;
 }
 declare var Int32Array: Int32ArrayConstructor;
@@ -1361,6 +1696,7 @@ interface Uint32Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
     /** @intrinsic Array.prototype.reverse */
     reverse(): this;
+    /** @intrinsic TypedArray.prototype.set */
     set(array: ArrayLike<number>, offset?: number): void;
     /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Uint32Array<ArrayBuffer>;
@@ -1368,6 +1704,7 @@ interface Uint32Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
     /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
+    /** @intrinsic TypedArray.prototype.subarray */
     subarray(begin?: number, end?: number): Uint32Array<TArrayBuffer>;
     toLocaleString(): string;
     toString(): string;
@@ -1382,8 +1719,11 @@ interface Uint32ArrayConstructor {
     new (buffer: ArrayBuffer, byteOffset?: number, length?: number): Uint32Array<ArrayBuffer>;
     new (array: ArrayLike<number> | ArrayBuffer): Uint32Array<ArrayBuffer>;
     readonly BYTES_PER_ELEMENT: number;
+    /** @lower __kml_Uint32Array_of */
     of(...items: number[]): Uint32Array<ArrayBuffer>;
+    /** @lower __kml_Uint32Array_from */
     from(arrayLike: ArrayLike<number>): Uint32Array<ArrayBuffer>;
+    /** @lower __kml_Uint32Array_from */
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Uint32Array<ArrayBuffer>;
 }
 declare var Uint32Array: Uint32ArrayConstructor;
@@ -1429,6 +1769,7 @@ interface Float32Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
     /** @intrinsic Array.prototype.reverse */
     reverse(): this;
+    /** @intrinsic TypedArray.prototype.set */
     set(array: ArrayLike<number>, offset?: number): void;
     /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Float32Array<ArrayBuffer>;
@@ -1436,6 +1777,7 @@ interface Float32Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
     /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
+    /** @intrinsic TypedArray.prototype.subarray */
     subarray(begin?: number, end?: number): Float32Array<TArrayBuffer>;
     toLocaleString(): string;
     toString(): string;
@@ -1450,8 +1792,11 @@ interface Float32ArrayConstructor {
     new (buffer: ArrayBuffer, byteOffset?: number, length?: number): Float32Array<ArrayBuffer>;
     new (array: ArrayLike<number> | ArrayBuffer): Float32Array<ArrayBuffer>;
     readonly BYTES_PER_ELEMENT: number;
+    /** @lower __kml_Float32Array_of */
     of(...items: number[]): Float32Array<ArrayBuffer>;
+    /** @lower __kml_Float32Array_from */
     from(arrayLike: ArrayLike<number>): Float32Array<ArrayBuffer>;
+    /** @lower __kml_Float32Array_from */
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Float32Array<ArrayBuffer>;
 }
 declare var Float32Array: Float32ArrayConstructor;
@@ -1497,6 +1842,7 @@ interface Float64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: number, currentIndex: number, array: this) => U, initialValue: U): U;
     /** @intrinsic Array.prototype.reverse */
     reverse(): this;
+    /** @intrinsic TypedArray.prototype.set */
     set(array: ArrayLike<number>, offset?: number): void;
     /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): Float64Array<ArrayBuffer>;
@@ -1504,6 +1850,7 @@ interface Float64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     some(predicate: (value: number, index: number, array: this) => unknown, thisArg?: any): boolean;
     /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: number, b: number) => number): this;
+    /** @intrinsic TypedArray.prototype.subarray */
     subarray(begin?: number, end?: number): Float64Array<TArrayBuffer>;
     toLocaleString(): string;
     toString(): string;
@@ -1518,8 +1865,11 @@ interface Float64ArrayConstructor {
     new (buffer: ArrayBuffer, byteOffset?: number, length?: number): Float64Array<ArrayBuffer>;
     new (array: ArrayLike<number> | ArrayBuffer): Float64Array<ArrayBuffer>;
     readonly BYTES_PER_ELEMENT: number;
+    /** @lower __kml_Float64Array_of */
     of(...items: number[]): Float64Array<ArrayBuffer>;
+    /** @lower __kml_Float64Array_from */
     from(arrayLike: ArrayLike<number>): Float64Array<ArrayBuffer>;
+    /** @lower __kml_Float64Array_from */
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Float64Array<ArrayBuffer>;
 }
 declare var Float64Array: Float64ArrayConstructor;
@@ -1567,6 +1917,7 @@ interface BigInt64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> 
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: bigint, currentIndex: number, array: BigInt64Array<TArrayBuffer>) => U, initialValue: U): U;
     /** @intrinsic Array.prototype.reverse */
     reverse(): this;
+    /** @intrinsic TypedArray.prototype.set */
     set(array: ArrayLike<bigint>, offset?: number): void;
     /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): BigInt64Array<ArrayBuffer>;
@@ -1574,6 +1925,7 @@ interface BigInt64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> 
     some(predicate: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => boolean, thisArg?: any): boolean;
     /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: bigint, b: bigint) => number | bigint): this;
+    /** @intrinsic TypedArray.prototype.subarray */
     subarray(begin?: number, end?: number): BigInt64Array<TArrayBuffer>;
     toLocaleString(locales?: string | string[], options?: Intl.NumberFormatOptions): string;
     toString(): string;
@@ -1643,6 +1995,7 @@ interface BigUint64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike>
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: bigint, currentIndex: number, array: BigUint64Array<TArrayBuffer>) => U, initialValue: U): U;
     /** @intrinsic Array.prototype.reverse */
     reverse(): this;
+    /** @intrinsic TypedArray.prototype.set */
     set(array: ArrayLike<bigint>, offset?: number): void;
     /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): BigUint64Array<ArrayBuffer>;
@@ -1650,6 +2003,7 @@ interface BigUint64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike>
     some(predicate: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => boolean, thisArg?: any): boolean;
     /** @intrinsic Array.prototype.sort */
     sort(compareFn?: (a: bigint, b: bigint) => number | bigint): this;
+    /** @intrinsic TypedArray.prototype.subarray */
     subarray(begin?: number, end?: number): BigUint64Array<TArrayBuffer>;
     toLocaleString(locales?: string | string[], options?: Intl.NumberFormatOptions): string;
     toString(): string;
@@ -1715,7 +2069,9 @@ interface Int8Array<TArrayBuffer extends ArrayBufferLike> {
 }
 interface Int8ArrayConstructor {
     new (elements: Iterable<number>): Int8Array<ArrayBuffer>;
+    /** @lower __kml_Int8Array_from */
     from(elements: Iterable<number>): Int8Array<ArrayBuffer>;
+    /** @lower __kml_Int8Array_from */
     from<T>(elements: Iterable<T>, mapfn?: (v: T, k: number) => number, thisArg?: any): Int8Array<ArrayBuffer>;
 }
 interface Uint8Array<TArrayBuffer extends ArrayBufferLike> {
@@ -1729,7 +2085,9 @@ interface Uint8Array<TArrayBuffer extends ArrayBufferLike> {
 }
 interface Uint8ArrayConstructor {
     new (elements: Iterable<number>): Uint8Array<ArrayBuffer>;
+    /** @lower __kml_Uint8Array_from */
     from(elements: Iterable<number>): Uint8Array<ArrayBuffer>;
+    /** @lower __kml_Uint8Array_from */
     from<T>(elements: Iterable<T>, mapfn?: (v: T, k: number) => number, thisArg?: any): Uint8Array<ArrayBuffer>;
 }
 interface Uint8ClampedArray<TArrayBuffer extends ArrayBufferLike> {
@@ -1743,7 +2101,9 @@ interface Uint8ClampedArray<TArrayBuffer extends ArrayBufferLike> {
 }
 interface Uint8ClampedArrayConstructor {
     new (elements: Iterable<number>): Uint8ClampedArray<ArrayBuffer>;
+    /** @lower __kml_Uint8ClampedArray_from */
     from(elements: Iterable<number>): Uint8ClampedArray<ArrayBuffer>;
+    /** @lower __kml_Uint8ClampedArray_from */
     from<T>(elements: Iterable<T>, mapfn?: (v: T, k: number) => number, thisArg?: any): Uint8ClampedArray<ArrayBuffer>;
 }
 interface Int16Array<TArrayBuffer extends ArrayBufferLike> {
@@ -1757,7 +2117,9 @@ interface Int16Array<TArrayBuffer extends ArrayBufferLike> {
 }
 interface Int16ArrayConstructor {
     new (elements: Iterable<number>): Int16Array<ArrayBuffer>;
+    /** @lower __kml_Int16Array_from */
     from(elements: Iterable<number>): Int16Array<ArrayBuffer>;
+    /** @lower __kml_Int16Array_from */
     from<T>(elements: Iterable<T>, mapfn?: (v: T, k: number) => number, thisArg?: any): Int16Array<ArrayBuffer>;
 }
 interface Uint16Array<TArrayBuffer extends ArrayBufferLike> {
@@ -1771,7 +2133,9 @@ interface Uint16Array<TArrayBuffer extends ArrayBufferLike> {
 }
 interface Uint16ArrayConstructor {
     new (elements: Iterable<number>): Uint16Array<ArrayBuffer>;
+    /** @lower __kml_Uint16Array_from */
     from(elements: Iterable<number>): Uint16Array<ArrayBuffer>;
+    /** @lower __kml_Uint16Array_from */
     from<T>(elements: Iterable<T>, mapfn?: (v: T, k: number) => number, thisArg?: any): Uint16Array<ArrayBuffer>;
 }
 interface Int32Array<TArrayBuffer extends ArrayBufferLike> {
@@ -1785,7 +2149,9 @@ interface Int32Array<TArrayBuffer extends ArrayBufferLike> {
 }
 interface Int32ArrayConstructor {
     new (elements: Iterable<number>): Int32Array<ArrayBuffer>;
+    /** @lower __kml_Int32Array_from */
     from(elements: Iterable<number>): Int32Array<ArrayBuffer>;
+    /** @lower __kml_Int32Array_from */
     from<T>(elements: Iterable<T>, mapfn?: (v: T, k: number) => number, thisArg?: any): Int32Array<ArrayBuffer>;
 }
 interface Uint32Array<TArrayBuffer extends ArrayBufferLike> {
@@ -1799,7 +2165,9 @@ interface Uint32Array<TArrayBuffer extends ArrayBufferLike> {
 }
 interface Uint32ArrayConstructor {
     new (elements: Iterable<number>): Uint32Array<ArrayBuffer>;
+    /** @lower __kml_Uint32Array_from */
     from(elements: Iterable<number>): Uint32Array<ArrayBuffer>;
+    /** @lower __kml_Uint32Array_from */
     from<T>(elements: Iterable<T>, mapfn?: (v: T, k: number) => number, thisArg?: any): Uint32Array<ArrayBuffer>;
 }
 interface Float32Array<TArrayBuffer extends ArrayBufferLike> {
@@ -1813,7 +2181,9 @@ interface Float32Array<TArrayBuffer extends ArrayBufferLike> {
 }
 interface Float32ArrayConstructor {
     new (elements: Iterable<number>): Float32Array<ArrayBuffer>;
+    /** @lower __kml_Float32Array_from */
     from(elements: Iterable<number>): Float32Array<ArrayBuffer>;
+    /** @lower __kml_Float32Array_from */
     from<T>(elements: Iterable<T>, mapfn?: (v: T, k: number) => number, thisArg?: any): Float32Array<ArrayBuffer>;
 }
 interface Float64Array<TArrayBuffer extends ArrayBufferLike> {
@@ -1827,7 +2197,9 @@ interface Float64Array<TArrayBuffer extends ArrayBufferLike> {
 }
 interface Float64ArrayConstructor {
     new (elements: Iterable<number>): Float64Array<ArrayBuffer>;
+    /** @lower __kml_Float64Array_from */
     from(elements: Iterable<number>): Float64Array<ArrayBuffer>;
+    /** @lower __kml_Float64Array_from */
     from<T>(elements: Iterable<T>, mapfn?: (v: T, k: number) => number, thisArg?: any): Float64Array<ArrayBuffer>;
 }
 interface Int8Array<TArrayBuffer extends ArrayBufferLike> {
@@ -2350,4 +2722,9 @@ interface DataView<TArrayBuffer extends ArrayBufferLike> {
     getBigUint64(byteOffset: number, littleEndian?: boolean): bigint;
     setBigInt64(byteOffset: number, value: bigint, littleEndian?: boolean): void;
     setBigUint64(byteOffset: number, value: bigint, littleEndian?: boolean): void;
+}
+// lib.esnext.float16.d.ts's DataView members.
+interface DataView<TArrayBuffer extends ArrayBufferLike> {
+    getFloat16(byteOffset: number, littleEndian?: boolean): number;
+    setFloat16(byteOffset: number, value: number, littleEndian?: boolean): void;
 }

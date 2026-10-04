@@ -55,13 +55,13 @@ func (e *Emitter) ensureCurrentTaskGlobal() {
 		return
 	}
 	e.usedCurrentTaskGlobal = true
-	e.emitGlobal("@__kml_current_task = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_current_task = thread_local global ptr null, align 8")
 	// The top-level (no-task) AsyncLocalStorage context-frame head (TDD-00168).
 	// Declared alongside @__kml_current_task so __kml_spawn_task can inherit it
 	// for a task spawned from top-level code, and the ALS accessors can fall
 	// back to it, whether or not the program actually uses AsyncLocalStorage
 	// (it just stays null when unused). See runtime_asynchooks.go.
-	e.emitGlobal("@__kml_root_async_ctx = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_root_async_ctx = thread_local global ptr null, align 8")
 }
 
 // ensureConnPokeGlobal declares @__kml_conn_poke once: set whenever a task
@@ -77,7 +77,7 @@ func (e *Emitter) ensureConnPokeGlobal() {
 		return
 	}
 	e.usedConnPokeGlobal = true
-	e.emitGlobal("@__kml_conn_poke = internal thread_local global i8 0, align 1")
+	e.emitGlobal("@__kml_conn_poke = thread_local global i8 0, align 1")
 }
 
 // awaitsDirectly reports whether n contains an `await` or a `for await…of`

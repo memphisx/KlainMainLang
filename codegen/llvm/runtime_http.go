@@ -556,11 +556,11 @@ func (e *Emitter) ensureFiberRuntime() {
 	e.emitGlobal("declare void @makecontext(ptr noundef, ptr noundef, i32 noundef, ...)")
 	e.emitGlobal("declare i32 @swapcontext(ptr noundef, ptr noundef)")
 	ctxSize, _, _, _ := e.ucontextLayout()
-	e.emitGlobal(fmt.Sprintf("@__kml_main_ctx = internal thread_local global [%d x i8] zeroinitializer, align 16", ctxSize))
-	e.emitGlobal("@__kml_conn_data = internal thread_local global ptr null, align 8")
+	e.emitGlobal(fmt.Sprintf("@__kml_main_ctx = thread_local global [%d x i8] zeroinitializer, align 16", ctxSize))
+	e.emitGlobal("@__kml_conn_data = thread_local global ptr null, align 8")
 	e.emitGlobal("@__kml_conn_len = internal thread_local global i64 0, align 8")
 	e.emitGlobal("@__kml_conn_cap = internal thread_local global i64 0, align 8")
-	e.emitGlobal("@__kml_current_conn_idx = internal thread_local global i64 -1, align 8")
+	e.emitGlobal("@__kml_current_conn_idx = thread_local global i64 -1, align 8")
 	e.emitGlobal("@__kml_conn_active = internal thread_local global i64 0, align 8")
 	// ADR-00986: set whenever a connection fiber was just resumed/run (append or
 	// resume-scan). A fiber that ran may have written a response an in-process
@@ -2458,9 +2458,6 @@ afterselect:
   br i1 %selfailed, label %outerloop, label %afterselectok
 
 afterselectok:
-  ; A terminated worker's thread ends here (runtime_worker.go); a no-op
-  ; stub without workers.
-  call void @__kml_worker_dispatch()
   ; child_process: drain spawned children's stdout/stderr and finalize exits.
   call void @__kml_cp_dispatch()
   ; TDD-00225: poll pending dynamic-import islands (one turn of each island's
@@ -2473,6 +2470,13 @@ afterselectok:
   ; async-I/O thread pool: drain arrived completions and settle their Promises
   ; on this (the loop) thread (TDD-00185).
   %plran0 = call zeroext i1 @__kml_pool_dispatch()
+  ; A terminated worker's thread ends here (runtime_worker.go); a no-op
+  ; stub without workers. The check follows the drain: terminate() sets
+  ; the flag before it posts the wakeup, so a wakeup the drain consumed
+  ; always has its flag visible here. Checked before the drain, a
+  ; terminate landing in between lost its wakeup and the worker slept in
+  ; select() for good.
+  call void @__kml_worker_dispatch()
   %tcpran = call zeroext i1 @__kml_tcp_dispatch()
   %plran = or i1 %plran0, %tcpran
   ; A completion's callback may have settled what a parked connection fiber

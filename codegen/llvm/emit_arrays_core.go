@@ -1106,6 +1106,27 @@ func (e *Emitter) emitNewArraySizedAggregate(na *ast.NewArrayExpression, elemTy 
 	e.ensureCalloc()
 	dataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 %d)", dataReg, sizeVal.Ref, elemTy.Align()))
+	if isUnconstrainedDynamic(elemTy) {
+		// An any[]'s unwritten slots read undefined.
+		idx := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idx))
+		condL, bodyL, doneL := e.freshLabel("newarr.cond"), e.freshLabel("newarr.body"), e.freshLabel("newarr.done")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(condL)
+		i, more := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, idx))
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, i, sizeVal.Ref))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, doneL))
+		e.emitLabel(bodyL)
+		slot, next := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", slot, dataReg, i))
+		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, slot))
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idx))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(doneL)
+	}
 	r0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
 	r1 := e.freshReg()
@@ -1234,12 +1255,12 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 				slot := e.freshReg()
 				e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, slot))
-				e.define(elem.Name, Symbol{Ptr: slot, Ty: defVal.Ty})
+				e.definePatternLocal(elem.Name, Symbol{Ptr: slot, Ty: defVal.Ty})
 			} else {
 				slot := e.freshReg()
 				e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, defVal.Ty.IR, defVal.Ty.Align()))
 				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", defVal.Ty.IR, defVal.Ref, slot, defVal.Ty.Align()))
-				e.define(elem.Name, Symbol{Ptr: slot, Ty: defVal.Ty})
+				e.definePatternLocal(elem.Name, Symbol{Ptr: slot, Ty: defVal.Ty})
 			}
 			continue
 		}
@@ -1286,7 +1307,7 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
 			e.emitLabel(afterL)
-			e.define(elem.Name, Symbol{Ptr: slot, Ty: elemTy})
+			e.definePatternLocal(elem.Name, Symbol{Ptr: slot, Ty: elemTy})
 			continue
 		}
 
@@ -1354,7 +1375,7 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 		if mayBeAbsent {
 			bindTy = undefinedableElem(elemTy)
 		}
-		e.define(elem.Name, Symbol{Ptr: localPtr, Ty: bindTy})
+		e.definePatternLocal(elem.Name, Symbol{Ptr: localPtr, Ty: bindTy})
 	}
 	return nil
 }
@@ -1565,15 +1586,15 @@ func (e *Emitter) collectionSpreadSource(arg ast.Expression) ast.Expression {
 	// completion, as Array.from does.
 	if t.IsGenerator && !t.GeneratorIsAsync || t.IsCollIter {
 		pos := arg.GetPos()
-		return ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Array", pos), "from", pos), []ast.Expression{arg}, pos)
+		return arrayFromCall(pos, []ast.Expression{arg})
 	}
 	if mapIterable(t) {
 		pos := arg.GetPos()
-		return ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Array", pos), "from", pos), []ast.Expression{arg}, pos)
+		return arrayFromCall(pos, []ast.Expression{arg})
 	}
 	method := ""
 	switch {
-	case t.IsHeaders || t.IsURLSearchParams || t.IsMap && !t.IsSet:
+	case t.IsMap && !t.IsSet:
 		method = "entries"
 	case t.IsSet:
 		method = "values"
@@ -1898,7 +1919,7 @@ func (e *Emitter) iterableArraySource(expr ast.Expression) ast.Expression {
 	t := e.inferExprType(expr)
 	if mapIterable(t) || t.IsCollIter || t.IsGenerator && !t.GeneratorIsAsync {
 		pos := expr.GetPos()
-		return ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Array", pos), "from", pos), []ast.Expression{expr}, pos)
+		return arrayFromCall(pos, []ast.Expression{expr})
 	}
 	return expr
 }

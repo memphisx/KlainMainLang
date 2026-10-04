@@ -817,6 +817,7 @@ func (p *Parser) parseParenOrFunctionType() (ast.TypeNode, error) {
 			prm.Type = pt
 		} else {
 			prm.Type = &ast.KeywordType{Keyword: "any", Range: p.loc(pstart)}
+			prm.Untyped = true
 		}
 		prm.Range = p.loc(pstart)
 		if prm.Name == "this" && len(params) == 0 && thisType == nil {
@@ -863,6 +864,12 @@ func (p *Parser) parseObjectType() (ast.TypeNode, error) {
 		p.peekNth(roOff+1).Type == lexer.IDENT &&
 		p.peekNth(roOff+2).Type == lexer.IDENT && p.peekNth(roOff+2).Literal == "in" {
 		m := &ast.MappedType{Readonly: roOff > 0 && !p.check(lexer.MINUS)}
+		if roOff > 0 {
+			m.ReadonlyMod = 1
+			if p.check(lexer.MINUS) {
+				m.ReadonlyMod = -1
+			}
+		}
 		for i := 0; i < roOff; i++ {
 			p.advance() // `+`/`-`, 'readonly'
 		}
@@ -882,11 +889,15 @@ func (p *Parser) parseObjectType() (ast.TypeNode, error) {
 		case p.check(lexer.MINUS) && p.peekNth(1).Type == lexer.QUESTION:
 			p.advance()
 			p.advance()
+			m.OptionalMod = -1
 		case p.check(lexer.PLUS) && p.peekNth(1).Type == lexer.QUESTION:
 			p.advance()
 			m.Optional = p.match(lexer.QUESTION)
 		default:
 			m.Optional = p.match(lexer.QUESTION)
+		}
+		if m.Optional {
+			m.OptionalMod = 1
 		}
 		if _, err := p.expect(lexer.COLON); err != nil {
 			return nil, err
@@ -1015,6 +1026,14 @@ func (p *Parser) parseTypeMembers() ([]ast.TypeMember, error) {
 					ms.Link = append(ms.Link, a.Value)
 				case "intrinsic":
 					ms.Intrinsic = a.Value
+				}
+			}
+		}
+		if cs, ok := m.(*ast.CallSignature); ok && doc != nil {
+			// A builtin constructor called as a function (`String(x)`).
+			for _, a := range doc.Annotations {
+				if a.Tag == "intrinsic" {
+					cs.Intrinsic = a.Value
 				}
 			}
 		}

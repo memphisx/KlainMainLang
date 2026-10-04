@@ -2,7 +2,9 @@ package checker
 
 import (
 	"KlainMainLang/lib"
+	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -94,6 +96,7 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 		return
 	case *ast.ClassDeclaration:
 		c.checkClassFields(n)
+		c.checkOverrides(n)
 		if n.BaseClass != "" && !n.BaseQualified {
 			if sym := c.symbolOf(n); sym != nil && lookupName(n.BaseClass, sym.Scope) == nil {
 				c.cannotFind(n.BaseClass, n.GetPos())
@@ -112,7 +115,7 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 	case *ast.NewExpression:
 		// A bare `new X(…)` the binder did not resolve: a builtin sema did
 		// not map (a module-only one never imported) or an undeclared name.
-		if !n.Qualified && c.b.NewTarget(n) == nil && !strings.Contains(n.ClassName, ".") {
+		if n.Callee == nil && !n.Qualified && c.b.NewTarget(n) == nil && !strings.Contains(n.ClassName, ".") {
 			c.unresolvedValue(n.ClassName, n, n.GetPos(), c.b.LookupScope(n))
 		}
 		if sym := c.b.NewTarget(n); sym != nil && sym.Flags&binder.Class != 0 {
@@ -121,6 +124,16 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 		if len(n.TypeArgs) > 0 {
 			if ctor := c.newCtor(n); ctor != nil {
 				c.typeArgConstraintError(n.TypeArgs, len(n.Args), ctor)
+			}
+		}
+		// `new X(…)` through a value's construct signatures (`declare var
+		// DataView: DataViewConstructor`) is checked as the call it is.
+		if n.Callee == nil && !n.Qualified && len(n.TypeArgs) == 0 {
+			if sym := c.b.NewTarget(n); sym != nil && sym.Flags&binder.Class == 0 && sym.Flags&binder.Variable != 0 {
+				if ctor := c.newCtor(n); ctor != nil && !c.hasSpread(n.Args) {
+					fake := ast.NewCallExpression(ast.NewIdentifier(n.ClassName, n.GetPos()), n.Args, n.GetPos())
+					c.checkSignatureCall(fake, ctor)
+				}
 			}
 		}
 	case *ast.NewDateExpression, *ast.NewMapExpression, *ast.NewSetExpression, *ast.NewWeakMapExpression, *ast.NewWeakSetExpression:
@@ -132,7 +145,11 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 	case *ast.VarDeclaration:
 		if n.TypeAnnot != nil && n.Init != nil {
 			if sym := c.symbolOf(n); sym != nil {
-				c.checkAssign(n.Init, c.typeOfSymbol(sym), diag.NotAssignable, n.GetPos())
+				pos := n.NamePos
+				if pos.Line == 0 {
+					pos = n.GetPos()
+				}
+				c.checkAssign(n.Init, c.typeOfSymbol(sym), diag.NotAssignable, pos)
 			}
 		}
 	case *ast.AssignmentExpression:
@@ -179,6 +196,8 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 			return // tsc resolves nothing further of `super<T>(…)`
 		}
 		c.checkCall(n)
+	case *ast.TaggedTemplateExpression:
+		c.checkTaggedTemplate(n)
 	case *ast.BinaryExpression:
 		c.checkOperator(n)
 	case *ast.Identifier:
@@ -263,6 +282,39 @@ func (c *Checker) checkParams(params []ast.Param, fn ast.Node) {
 	}
 }
 
+// checkOverrides reports a member of a derived class that is not assignable
+// to the base class's member of the same name (TS2416); methods compare
+// bivariantly, as relate does. Private members, accessors and generic
+// classes are left alone.
+func (c *Checker) checkOverrides(cd *ast.ClassDeclaration) {
+	if cd.BaseClass == "" || len(cd.TypeParams) > 0 {
+		return
+	}
+	sym := c.symbolOf(cd)
+	if sym == nil {
+		return
+	}
+	inst, base := c.instanceType(sym), c.baseInstance(cd, sym)
+	if inst == nil || base == nil || c.Unanswered(inst) || c.Unanswered(base) {
+		return
+	}
+	for _, p := range inst.Props {
+		if p.Owner != sym || p.Visibility == "private" || p.Accessor || p.Decl == nil {
+			continue
+		}
+		bp := base.Prop(p.Name)
+		if bp == nil || bp.Visibility == "private" || bp.Accessor {
+			continue
+		}
+		if c.Unanswered(p.Type) || c.Unanswered(bp.Type) || hasTypeParam(p.Type) || hasTypeParam(bp.Type) {
+			continue
+		}
+		if !c.assignable(p.Type, bp.Type) {
+			c.report(diag.OverrideNotAssignable, p.Decl.GetPos(), p.Name, sourceName(cd.Name), base)
+		}
+	}
+}
+
 // checkClassFields checks each annotated field's initializer.
 func (c *Checker) checkClassFields(cd *ast.ClassDeclaration) {
 	if len(cd.TypeParams) > 0 {
@@ -312,7 +364,7 @@ func (c *Checker) checkAssign(value ast.Expression, target *Type, m *diag.Messag
 		if !someMember(target, Literal) {
 			src = widen(c, src) // tsc names `"x"` as string against number
 		}
-		c.report(m, pos, src, target)
+		c.report(m, pos, src, c.displayTarget(src, target))
 	case maybe:
 		if c.weakMismatch(src, target) {
 			// A weak type (every property optional) takes no primitive or
@@ -470,6 +522,34 @@ func nominalOpen(t *Type) bool {
 	return false
 }
 
+// libLacks reports a member read on a builtin interface's type that neither
+// the builtin declarations nor TypeScript's own declarations of it and its
+// bases have (lib/tsmembers.txt): the declarations list only what this
+// compiler implements, so a member they lack is TS2339 only when
+// TypeScript's library lacks it too.
+func (c *Checker) libLacks(t *Type, name string) bool {
+	if t.Symbol == nil || t.Prop(name) != nil || t.StringIndex != nil || t.NumberIndex != nil {
+		return false
+	}
+	if t.Kind != Interface && t.Kind != Instance {
+		return false
+	}
+	if !c.inLibrary(t.Symbol.Scope) {
+		return false // (a program's augmentation of it declares its own members, found above)
+	}
+	known, has := lib.TSInterfaceHas(sourceName(t.Symbol.Name), name)
+	if !known || has {
+		return false
+	}
+	if len(t.Calls) > 0 || len(t.Constructs) > 0 {
+		// A callable value also has Function's members.
+		if _, fn := lib.TSInterfaceHas("Function", name); fn {
+			return false
+		}
+	}
+	return true
+}
+
 // objectProto are the members every object has from Object.prototype.
 var objectProto = map[string]bool{
 	"toString": true, "toLocaleString": true, "valueOf": true, "hasOwnProperty": true,
@@ -493,7 +573,14 @@ func (c *Checker) checkProperty(e *ast.MemberExpression) {
 		return // a merged declaration (an enum and a namespace, …)
 	}
 	obj := c.TypeOf(e.Object)
-	if c.Unanswered(obj) || obj.Flags&Object == 0 || obj.Flags&Union != 0 || nominalOpen(obj) {
+	if c.Unanswered(obj) || obj.Flags&Object == 0 || obj.Flags&Union != 0 {
+		return
+	}
+	if c.libLacks(obj, e.Property) {
+		c.report(diag.PropertyNotExist, e.GetPos(), e.Property, obj)
+		return
+	}
+	if nominalOpen(obj) {
 		return
 	}
 	switch obj.Kind {
@@ -693,6 +780,13 @@ func (c *Checker) checkCall(e *ast.CallExpression) {
 	if c.Unanswered(fn) || fn.Flags&Object == 0 || fn.Kind != Function {
 		return
 	}
+	c.checkSignatureCall(e, fn)
+}
+
+// checkSignatureCall checks a call's arguments against fn, a function or
+// construct signature (or an overload list): type-argument arity and
+// constraints, the argument count, and each argument's type.
+func (c *Checker) checkSignatureCall(e *ast.CallExpression, fn *Type) {
 	if c.typeArgArityError(e, fn) || c.typeArgConstraintError(e.TypeArgs, len(e.Args), fn) {
 		return
 	}
@@ -738,11 +832,77 @@ func (c *Checker) checkCall(e *ast.CallExpression) {
 		return
 	}
 	if generic {
-		return // the arguments are checked against the inferred instantiation, not modelled here
+		// The arguments are checked against the inferred instantiation only
+		// where an argument alone answers a constrained type parameter
+		// (`f<T extends C>(x: T)`): the inferred type must satisfy C (tsc's
+		// TS2345 against the constraint). The rest is not modelled.
+		if len(e.TypeArgs) == 0 {
+			c.checkInferredConstraints(e, fn)
+		}
+		// A parameter whose type names no type parameter is checked as in
+		// a plain call (`byteOffset?: number` of `new DataView<T>(…)`).
+		for i, a := range e.Args {
+			if p := paramAt(fn, i); p != nil && !hasTypeParam(p) {
+				c.checkAssign(a, p, diag.ArgNotAssignable, startOf(a))
+			}
+		}
+		return
 	}
 	for i, a := range e.Args {
 		if p := paramAt(fn, i); p != nil {
-			c.checkAssign(a, p, diag.ArgNotAssignable, a.GetPos())
+			c.checkAssign(a, p, diag.ArgNotAssignable, startOf(a))
+		}
+	}
+}
+
+// checkTaggedTemplate checks a tagged template as the call it is: the
+// template object (a TemplateStringsArray) and each substitution against
+// the tag's parameters, for a tag the checker models whole (one non-generic
+// signature).
+func (c *Checker) checkTaggedTemplate(e *ast.TaggedTemplateExpression) {
+	fn := c.signaturesOf(c.TypeOf(e.Tag), false)
+	if c.Unanswered(fn) || fn.Flags&Object == 0 || fn.Kind != Function || len(fn.Overloads) > 0 ||
+		len(fn.TypeParams) > 0 || len(e.TypeArgs) > 0 {
+		return
+	}
+	if p := paramAt(fn, 0); p != nil && !c.Unanswered(p) && c.b.Globals != nil {
+		if sym := c.b.Globals.Symbols.Get("TemplateStringsArray"); sym != nil && sym.Flags&binder.Interface != 0 {
+			if tsa := c.interfaceOf(sym, nil); !c.Unanswered(tsa) && !c.assignable(tsa, p) {
+				c.report(diag.ArgNotAssignable, e.GetPos(), tsa, p)
+			}
+		}
+	}
+	for i, x := range e.Exprs {
+		if p := paramAt(fn, i+1); p != nil {
+			c.checkAssign(x, p, diag.ArgNotAssignable, x.GetPos())
+		}
+	}
+}
+
+// checkInferredConstraints reports an argument whose parameter is a bare
+// constrained type parameter and whose inferred type does not satisfy the
+// constraint (TS2345, with the instantiated constraint as the parameter).
+func (c *Checker) checkInferredConstraints(e *ast.CallExpression, fn *Type) {
+	m := c.inferArgs(e.Args, nil, fn, true)
+	for i, a := range e.Args {
+		if _, spread := a.(*ast.SpreadElement); spread {
+			return
+		}
+		p := paramAt(fn, i)
+		if p == nil || p.Flags&TypeParam == 0 || p.Constraint == nil {
+			continue
+		}
+		at, con := m[p], c.instantiate(p.Constraint, m)
+		if at == nil || c.Unanswered(at) || c.Unanswered(con) || hasTypeParam(con) || hasTypeParam(at) {
+			continue
+		}
+		if at.Flags&(Any|Unknown|Never) != 0 {
+			continue
+		}
+		if !c.assignable(at, con) {
+			// tsc falls back to the constraint and checks the argument
+			// against it: an object literal is elaborated (TS2353/TS2741).
+			c.checkAssign(a, con, diag.ArgNotAssignable, startOf(a))
 		}
 	}
 }
@@ -1141,34 +1301,152 @@ func (c *Checker) checkTypeNames(n ast.Node) {
 	if c.opts.CompatJS() {
 		return
 	}
-	ast.Inspect(n, func(x ast.Node) bool {
-		if t, ok := x.(*ast.ThisExpression); ok && !c.ImplicitThis && !c.implicitThis[t] && c.thisImplicitlyAny(t) {
-			c.implicitThis[t] = true
-			c.report(diag.ThisImplicitlyAny, t.GetPos())
+	scope := c.b.Module
+	if st, ok := n.(ast.Statement); ok {
+		if s := c.b.StatementScope(st); s != nil {
+			scope = s
 		}
-		if call, ok := x.(*ast.CallExpression); ok {
-			if _, super := call.Callee.(*ast.SuperExpression); super && len(call.TypeArgs) > 0 {
-				return true // `super<T>(…)` is TS2754; its type arguments resolve nothing
-			}
+	}
+	c.checkTypeNamesIn(n, scope)
+}
+
+// checkTypeNamesIn is checkTypeNames over x, whose innermost enclosing scope
+// is scope.
+func (c *Checker) checkTypeNamesIn(x ast.Node, scope *binder.Scope) {
+	if x == nil || (reflect.ValueOf(x).Kind() == reflect.Ptr && reflect.ValueOf(x).IsNil()) {
+		return
+	}
+	if s := c.b.OpenedScope(x); s != nil {
+		scope = s
+	}
+	if t, ok := x.(*ast.ThisExpression); ok && !c.ImplicitThis && !c.implicitThis[t] && c.thisImplicitlyAny(t) {
+		c.implicitThis[t] = true
+		c.report(diag.ThisImplicitlyAny, t.GetPos())
+	}
+	if call, ok := x.(*ast.CallExpression); ok {
+		if _, super := call.Callee.(*ast.SuperExpression); super && len(call.TypeArgs) > 0 {
+			// `super<T>(…)` is TS2754; its type arguments resolve nothing
+			ast.ForEachChild(x, func(ch ast.Node) bool { c.checkTypeNamesIn(ch, scope); return true })
+			return
 		}
-		forEachAnnotation(reflect.ValueOf(x), func(ta *ast.TypeAnnotation) {
-			if ta.Source == "jsdoc" || ta.TypeNode() == nil {
-				return
-			}
-			scope := c.b.LookupScope(x)
-			if scope == nil {
-				scope = c.b.Module
-			}
-			ast.Inspect(ta.TypeNode(), func(tn ast.Node) bool {
-				if r, ok := tn.(*ast.TypeReference); ok && len(r.Qualifier) == 0 {
+	}
+	forEachAnnotation(reflect.ValueOf(x), func(ta *ast.TypeAnnotation) {
+		if ta.Source == "jsdoc" || ta.TypeNode() == nil {
+			return
+		}
+		tscope := scope
+		if s := c.b.LookupScope(x); s != nil {
+			tscope = s
+		}
+		ast.Inspect(ta.TypeNode(), func(tn ast.Node) bool {
+			if r, ok := tn.(*ast.TypeReference); ok && len(r.Qualifier) == 0 {
+				if !c.valueAsType(r, tscope) && !c.typeOutOfScope(r, tscope) {
 					c.cannotFindType(r.Name, r.Range.Pos)
-					c.checkRefTypeArgs(r, scope)
 				}
-				return true
-			})
+				c.checkRefTypeArgs(r, tscope)
+			}
+			switch sig := tn.(type) {
+			case *ast.FunctionType:
+				c.checkSignatureParams(sig.Parameters, tscope)
+			case *ast.MethodSignature:
+				c.checkSignatureParams(sig.Parameters, tscope)
+			case *ast.CallSignature:
+				c.checkSignatureParams(sig.Parameters, tscope)
+			}
+			return true
 		})
-		return true
 	})
+	ast.ForEachChild(x, func(ch ast.Node) bool { c.checkTypeNamesIn(ch, scope); return true })
+}
+
+// typeOutOfScope reports a type reference that only names types the program
+// declares in scopes not enclosing it (a namespace's `Kind` used outside it,
+// a block's type used after the block) as TS2304, and says whether it did.
+func (c *Checker) typeOutOfScope(r *ast.TypeReference, scope *binder.Scope) bool {
+	if resolveTypeName(r.Name, scope) != nil || lookupName(r.Name, scope) != nil {
+		return false
+	}
+	src := sourceName(r.Name)
+	found := false
+	for _, sym := range c.b.Symbols() {
+		if sym.Name != r.Name && sourceName(sym.Name) != src {
+			continue
+		}
+		if sym.Scope == nil || c.inLibrary(sym.Scope) || sym.Scope == c.b.Module || sym.Scope == c.b.Globals || sym.Flags&binder.TypeParameter != 0 {
+			return false
+		}
+		if sym.Flags&binder.Type == 0 {
+			continue
+		}
+		for s := scope; s != nil; s = s.Parent {
+			if s == sym.Scope {
+				return false
+			}
+		}
+		found = true
+	}
+	if !found {
+		return false
+	}
+	c.cannotFind(r.Name, r.Range.Pos)
+	return true
+}
+
+// valueAsType reports a type reference that names a value of the program's
+// with no type meaning (`const C = class {}` used as `C`) as TS2749, and
+// says whether it did.
+func (c *Checker) valueAsType(r *ast.TypeReference, scope *binder.Scope) bool {
+	if resolveTypeName(r.Name, scope) != nil {
+		return false
+	}
+	sym := lookupName(r.Name, scope)
+	if sym == nil || sym.Flags&binder.Type != 0 || sym.Flags&(binder.Variable|binder.Function) == 0 {
+		return false
+	}
+	if sym.Scope == nil || c.inLibrary(sym.Scope) {
+		return false
+	}
+	src := sourceName(r.Name)
+	c.report(diag.ValueUsedAsType, r.Range.Pos, src, src)
+	return true
+}
+
+// typeKeywords are the type keywords a parameter name can spell
+// (tsc's isTypeNodeKind for a keyword).
+var typeKeywords = map[string]bool{
+	"any": true, "unknown": true, "number": true, "bigint": true, "object": true, "boolean": true,
+	"string": true, "symbol": true, "void": true, "undefined": true, "never": true, "null": true,
+}
+
+// checkSignatureParams reports a signature's parameter written without a
+// type, as tsc's reportImplicitAny does under noImplicitAny: TS7051 when its
+// name is a type (`(string) => void`), else TS7006 (TS7019 for a rest).
+func (c *Checker) checkSignatureParams(params []*ast.SignatureParameter, scope *binder.Scope) {
+	for i, p := range params {
+		if p == nil || (p.Type != nil && !p.Untyped) || p.Name == "" || p.Name == "this" || p.Name == "__pattern" {
+			continue
+		}
+		pos := p.Range.Pos
+		isType := typeKeywords[p.Name]
+		if !isType {
+			if sym := lookupName(p.Name, scope); sym != nil && sym.Flags&binder.Type != 0 {
+				isType = true
+			}
+		}
+		if isType {
+			typeName := p.Name
+			if p.Rest {
+				typeName += "[]"
+			}
+			c.report(diag.ParamNameNoType, pos, fmt.Sprintf("arg%d", i), typeName)
+			continue
+		}
+		if p.Rest {
+			c.report(diag.RestParamImplicitAny, pos, p.Name)
+		} else {
+			c.report(diag.ParamImplicitAny, pos, p.Name)
+		}
+	}
 }
 
 var typeAnnotationPtr = reflect.TypeOf((*ast.TypeAnnotation)(nil))
@@ -1240,8 +1518,15 @@ func (c *Checker) cannotFindType(name string, pos ast.Pos) {
 	}
 	suggest := c.suggestionCount < 10 // tsc's maximumSuggestionCount
 	c.suggestionCount++
-	if suggest && c.nearKnownName(src) {
-		return // tsc's TS2552, not reported
+	if suggest {
+		if near := c.nearKnownName(src); near != "" {
+			key := cannotFindKey{src, pos}
+			if !c.cannotFound[key] {
+				c.cannotFound[key] = true
+				c.report(diag.CannotFindNameDidYouMean, pos, src, near)
+			}
+			return
+		}
 	}
 	c.cannotFind(name, pos)
 }
@@ -1251,21 +1536,22 @@ func (c *Checker) cannotFindType(name string, pos ast.Pos) {
 // this compiler's own surfaces', and `intrinsic` (tsc's `Uppercase` body).
 var compilerTypeNames = map[string]bool{
 	"ClusterAddress": true, "ClusterWorker": true, "HttpRequest": true,
-	"URLPattern": true, "intrinsic": true,
+	"intrinsic": true,
 }
 
 // nearKnownName reports whether name is within tsc's spelling-suggestion
 // distance of a known name (getSpellingSuggestion): tsc then reports TS2552.
-func (c *Checker) nearKnownName(name string) bool {
+func (c *Checker) nearKnownName(name string) string {
 	var cands []string
 	for n := range c.knownTypeNames {
 		cands = append(cands, n)
 	}
-	if spellingSuggestion(name, cands) != "" {
-		return true
+	sort.Strings(cands)
+	if s := spellingSuggestion(name, cands); s != "" {
+		return s
 	}
 	names, _ := lib.GlobalNames()
-	return spellingSuggestion(name, names) != ""
+	return spellingSuggestion(name, names)
 }
 
 // skipOuter is e without its non-null assertions (skipOuterExpressions;
@@ -1293,4 +1579,28 @@ func memberTarget(target *Type, key string) *Type {
 		return target.NumberIndex
 	}
 	return target.StringIndex
+}
+
+// hasSpread reports a spread among args.
+func (c *Checker) hasSpread(args []ast.Expression) bool {
+	for _, a := range args {
+		if _, ok := a.(*ast.SpreadElement); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// displayTarget is the target type tsc names when src is not assignable to
+// it: a union that is one type plus null or undefined is named as that type
+// when src is neither (`number` for an optional `x?: number`); any other
+// target as it is.
+func (c *Checker) displayTarget(src, target *Type) *Type {
+	if target.Flags&Union == 0 || someMember(src, Null|Undefined) {
+		return target
+	}
+	if nn := c.nonNullable(target); nn != nil && nn.Flags&Union == 0 && nn != target {
+		return nn
+	}
+	return target
 }

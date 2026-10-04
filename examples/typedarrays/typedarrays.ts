@@ -126,3 +126,17 @@ const packet: { id: number, body: Uint8Array } = { id: 1, body: new Uint8Array([
 console.log(packet.body.length)                          // 2 (object field)
 
 console.log(new Int32Array([1, 2, 3]).map((x) => x * 2).join(",")) // 2,4,6
+
+// ── buffer and byteOffset ───────────────────────────────────────────────────
+// Every typed array knows the ArrayBuffer behind it and where it starts there:
+// a view over a buffer, a subarray of it, and an array with its own storage
+// (whose buffer is made on first use and kept).
+const backing = new ArrayBuffer(16)
+const window8 = new Uint8Array(backing, 4, 8)
+console.log(window8.byteOffset, window8.buffer === backing)       // 4 true
+console.log(window8.subarray(2).byteOffset)                       // 6
+const words = new Uint16Array([0x0102, 0x0304])
+console.log(new Uint8Array(words.buffer).join(","))               // 2,1,4,3
+const msg = Buffer.from("hi!")
+const reader = new DataView(msg.buffer, msg.byteOffset, msg.byteLength)
+console.log(reader.getUint8(2))                                   // 33

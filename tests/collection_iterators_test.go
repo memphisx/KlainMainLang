@@ -205,7 +205,7 @@ const b = h(); console.log(b.next(), b.next(), b.next());
 function* s(): Generator<string> { yield "x"; }
 const c = s(); console.log(c.next(), c.next());
 const d = g(); console.log(d.next(), d.return(5), d.next());
-const e2 = g(); console.log(e2.return(), e2.next());
+const e2 = g(); console.log(e2.return(undefined), e2.next());
 let total = 0; for (const v of g()) total += v; console.log(total);
 const f = g(); let r = f.next(); while (!r.done) { console.log("v", r.value); r = f.next(); }
 function* arr(): Generator<number[]> { yield [1, 2]; }

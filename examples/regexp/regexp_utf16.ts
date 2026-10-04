@@ -37,4 +37,4 @@ console.log("é1".replace(/1/, (match: string, offset: number) => "@" + offset.t
 
 // An empty-capable global pattern now terminates in every mode (previously an
 // infinite loop): one empty match per code point plus the end position.
-console.log("aéb".match(/x*/g).length) // 4
+console.log("aéb".match(/x*/g)!.length) // 4

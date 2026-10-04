@@ -81,7 +81,6 @@ var virtualBuiltinMarkers = map[string]string{
 	// machinery (member validation, `node:` aliasing, not-a-file); they are never
 	// bound (globalReexportModules is handled before the generic marker path in
 	// resolver.go), so they must not collide with a real dispatch marker.
-	"url":    "url__reexport_kml_builtin",
 	"buffer": "buffer__reexport_kml_builtin",
 }
 
@@ -107,7 +106,6 @@ func firstKey(set map[string]bool) string {
 // NOT listed — they have no same-named global and are separate future surface,
 // so they keep the standard "no exported member" rejection.
 var globalReexportModules = map[string]map[string]bool{
-	"url":    {"URL": true, "URLSearchParams": true},
 	"buffer": {"Buffer": true, "Blob": true, "atob": true, "btoa": true},
 }
 
@@ -117,9 +115,7 @@ var globalReexportModules = map[string]map[string]bool{
 // rather than erased to a global. Their presence also makes a namespace/default
 // import of the module bind the marker (so `import * as url from 'url'; url.parse(…)`
 // works). A named import of one records an ordinary builtin-member reference.
-var moduleFunctionMembers = map[string]map[string]bool{
-	"url": {"fileURLToPath": true, "pathToFileURL": true, "urlToHttpOptions": true, "domainToASCII": true, "domainToUnicode": true},
-}
+var moduleFunctionMembers = map[string]map[string]bool{}
 
 // parseTimeReexports are the global-reexport members recognized by the **parser**
 // as a literal `new <Name>(...)` construct (`parser/parser_literals.go`), before
@@ -129,9 +125,7 @@ var moduleFunctionMembers = map[string]map[string]bool{
 // built-in construct — so an alias stays a clean Stage 3 rejection. Every other
 // reexport member is resolved in codegen by its bare name (`setTimeout(...)`,
 // `performance.now()`, `atob(...)`), so aliasing it is just a rename (Stage 2).
-var parseTimeReexports = map[string]bool{
-	"URL": true, "URLSearchParams": true, "Blob": true,
-}
+var parseTimeReexports = map[string]bool{}
 
 // virtualModuleMembers is Stage 2's addition: the real "exported member"
 // list per virtual specifier, used to validate a named import

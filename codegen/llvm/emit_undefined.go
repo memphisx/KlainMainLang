@@ -94,6 +94,11 @@ func (e *Emitter) emitFieldPresentAt(gepReg string, field Field) (present string
 		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", present, p, e.triPayloadIsMarker(payload.Ref, field.Ty)))
 	case isNullableScalar(field.Ty):
 		present, _ = e.nullableScalarAggParts(val)
+	case isF64Slot(field.Ty):
+		// An optional field held as a plain double: absent is the
+		// undefined sentinel (TDD-00241).
+		present = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", present, e.emitF64IsUndefined(val.Ref)))
 	case field.Ty.IsArray:
 		dataPtr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, val.Ref))
@@ -298,12 +303,26 @@ func (e *Emitter) emitNullableScalarValueEq(op string, left, right Value) (Value
 // demotes to its payload, a nullable pointer just drops the static flags. No
 // runtime check, exactly as in TS.
 func (e *Emitter) emitNonNull(ex *ast.NonNullExpression) (Value, error) {
-	v, err := e.emitExpr(ex.Arg)
-	if err != nil {
-		return Value{}, err
+	var v Value
+	if sym, ok := e.nullableScalarLValue(ex.Arg); ok && !sym.NarrowedNonNull && nullableScalarEqComparable(sym.Ty) {
+		// A local reads as its payload; the assertion needs its presence.
+		v = e.loadNullableScalarAgg(sym.Ptr, sym.Ty)
+	} else {
+		var err error
+		if v, err = e.emitExpr(ex.Arg); err != nil {
+			return Value{}, err
+		}
 	}
 	if isNullableScalar(v.Ty) {
-		return e.nullableScalarPayloadOf(v), nil
+		payload := e.nullableScalarPayloadOf(v)
+		if payload.Ty.IR == "double" && v.Ty.IsUndefined {
+			// An absent value stays undefined: the slot's sentinel (TDD-00241).
+			present, _ := e.nullableScalarAggParts(v)
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, double %s, double bitcast (i64 %d to double)", r, present, payload.Ref, undefF64))
+			payload.Ref = r
+		}
+		return payload, nil
 	}
 	v.Ty.Nullable = false
 	v.Ty.IsUndefined = false
@@ -334,16 +353,24 @@ func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
 		}
 		return e.coerce(v, t), nil
 	}
-	v, err := e.emitExpr(ex.Expr)
+	toAny := ex.TypeAnnot != nil && isUnconstrainedDynamic(e.resolveType(ex.TypeAnnot))
+	var v Value
+	var err error
+	if toAny {
+		v, err = e.emitExprWithObjectHint(ex.Expr, TypeAny)
+	} else {
+		v, err = e.emitExpr(ex.Expr)
+	}
 	if err != nil {
 		return Value{}, err
 	}
-	if ex.TypeAnnot != nil && v.Ty.IsFunc && !v.Ty.IsDynamic {
-		// A function asserted to `any` is the boxed function object, whose
-		// own properties the dynamic paths read and write (TDD-00229).
-		if t := e.resolveType(ex.TypeAnnot); isUnconstrainedDynamic(t) {
-			return e.emitBoxValue(v)
-		}
+	if toAny && !v.Ty.IsDynamic && v.Ty.IR != "void" {
+		// A value asserted to `any`/`unknown` is that value held in one, as
+		// `const x: any = <expr>` holds it: it keeps its own kind at run time
+		// (`1 as any` is a number wherever it goes), an object literal is a
+		// dynamic bag, and a function is its boxed function object, whose own
+		// properties the dynamic paths read and write (TDD-00229).
+		return e.emitBoxValueWidened(v, ex.Expr)
 	}
 	if ex.TypeAnnot == nil || !v.Ty.IsDynamic {
 		return v, nil
@@ -589,17 +616,6 @@ func (e *Emitter) isAbsentPtr(ref string, t Type) string {
 	}
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", r, isNull, e.isNullRef(ref)))
-	return r
-}
-
-// absentWordRef is the keyword an absent pointer of type t renders as:
-// for a three-state one, "null" for nullRef and "undefined" otherwise.
-func (e *Emitter) absentWordRef(ref string, t Type) string {
-	if !t.NullAndUndef {
-		return e.internString(absentLiteral(t))
-	}
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, e.isNullRef(ref), e.internString("null"), e.internString("undefined")))
 	return r
 }
 

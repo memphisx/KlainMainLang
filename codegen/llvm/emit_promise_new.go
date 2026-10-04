@@ -7,11 +7,24 @@ package llvm
 
 import (
 	"KlainMainLang/ast"
+	_ "embed"
 	"fmt"
 	"strings"
 )
 
-// ensurePromiseSettle emits @__kml_promise_settle(ptr %p, i64 %state): settle a
+// The settle, reject and adoption routines live in promisesrc/settle.c
+// (TDD-00240).
+//
+//go:embed promisesrc/settle.c
+var promiseSettleSource string
+
+// PromiseSettleSource is settle.c, behind kml_layout.h.
+func PromiseSettleSource() string { return layoutHeader() + promiseSettleSource }
+
+// UsesPromiseSettle reports whether the program links settle.c.
+func (e *Emitter) UsesPromiseSettle() bool { return e.usedPromiseSettle }
+
+// ensurePromiseSettle declares @__kml_promise_settle(ptr %p, i64 %state): settle a
 // bare promise (state 1 fulfilled / 2 rejected — the value is already in v0/v1),
 // waking a parked awaiter and enqueuing its reactions. The first settle wins; a
 // later resolve/reject is a no-op. Factored from __kml_task_finish's body, which
@@ -23,35 +36,24 @@ func (e *Emitter) ensurePromiseSettle() {
 	e.usedPromiseSettle = true
 	e.ensurePromiseRuntime()
 	e.ensureMicrotasks() // @__kml_promise_drain_reactions
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_promise_settle(ptr %%p, i64 %%state) {
-entry:
-  %%res_p = getelementptr %s, ptr %%p, i32 0, i32 0
-  %%cur = load i64, ptr %%res_p, align 8
-  %%settled = icmp ne i64 %%cur, 0
-  br i1 %%settled, label %%ret, label %%do
-do:
-  store i64 %%state, ptr %%res_p, align 8
-  %%isrej = icmp eq i64 %%state, 2
-  br i1 %%isrej, label %%noterej, label %%waiter
-noterej:
-  call void @__kml_promise_note_rejected(ptr %%p)
-  br label %%waiter
-waiter:
-  %%w_p = getelementptr %s, ptr %%p, i32 0, i32 1
-  %%w = load ptr, ptr %%w_p, align 8
-  %%haswaiter = icmp ne ptr %%w, null
-  br i1 %%haswaiter, label %%wake, label %%drain
-wake:
-  %%pp_p = getelementptr %s, ptr %%w, i32 0, i32 %d
-  store ptr null, ptr %%pp_p, align 8
-  br label %%drain
-drain:
-  call void @__kml_promise_drain_reactions(ptr %%p)
-  ret void
-ret:
-  ret void
-}`, promiseStructIR, promiseStructIR, taskStructIR, taskPendingProm))
+	e.ensureNanBox()     // @__kml_promise_reject_box
+	e.emitGlobal(`declare void @__kml_promise_settle(ptr, i64)
+declare void @__kml_promise_reject_with(ptr, i64, i64)
+declare void @__kml_promise_reject_err(ptr, i64)
+declare void @__kml_promise_reject_from(ptr, ptr)
+declare void @__kml_promise_reject_box(ptr, i64)`)
+}
+
+// emitRejectPromise rejects promise q with the caught value (tag, an i8 or
+// i64 register or literal; pay, i64): the one rejection writer.
+func (e *Emitter) emitRejectPromise(q, tag string, tagIsI8 bool, pay string) {
+	e.ensurePromiseSettle()
+	if tagIsI8 {
+		w := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i64", w, tag))
+		tag = w
+	}
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_with(ptr %s, i64 %s, i64 %s)", q, tag, pay))
 }
 
 // emitNewPromise implements `new Promise<T>((resolve, reject) => …)`. It allocates
@@ -75,11 +77,8 @@ func (e *Emitter) emitNewPromise(ex *ast.NewExpression) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", p))
 
 	// Per-site resolve/reject settle functions + their closure headers over p.
-	e.newPromiseCtr++
-	resolveFn := fmt.Sprintf("@__kml_promise_resolve_%d", e.newPromiseCtr)
-	rejectFn := fmt.Sprintf("@__kml_promise_reject_%d", e.newPromiseCtr)
-	e.emitResolveThunk(resolveFn, valTy)
-	e.emitRejectThunk(rejectFn)
+	resolveFn := e.emitResolveThunk(valTy)
+	rejectFn := e.emitRejectThunk()
 
 	resolveClo := e.buildBuiltinClosure(resolveFn, p)
 	rejectClo := e.buildBuiltinClosure(rejectFn, p)
@@ -150,33 +149,7 @@ func (e *Emitter) ensurePromiseAdoptRunner() {
 	}
 	e.usedPromiseAdoptRunner = true
 	e.ensurePromiseSettle()
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_promise_adopt_runner(ptr %%env) {
-entry:
-  %%src_p = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0
-  %%src = load ptr, ptr %%src_p, align 8
-  %%tgt_p = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1
-  %%tgt = load ptr, ptr %%tgt_p, align 8
-  %%ts_p = getelementptr %s, ptr %%tgt, i32 0, i32 0
-  %%ts = load i64, ptr %%ts_p, align 8
-  %%already = icmp ne i64 %%ts, 0
-  br i1 %%already, label %%ret, label %%do
-do:
-  %%as_p = getelementptr %s, ptr %%src, i32 0, i32 0
-  %%as = load i64, ptr %%as_p, align 8
-  %%av0_p = getelementptr %s, ptr %%src, i32 0, i32 2
-  %%av0 = load i64, ptr %%av0_p, align 8
-  %%av1_p = getelementptr %s, ptr %%src, i32 0, i32 3
-  %%av1 = load i64, ptr %%av1_p, align 8
-  %%tv0_p = getelementptr %s, ptr %%tgt, i32 0, i32 2
-  store i64 %%av0, ptr %%tv0_p, align 8
-  %%tv1_p = getelementptr %s, ptr %%tgt, i32 0, i32 3
-  store i64 %%av1, ptr %%tv1_p, align 8
-  call void @__kml_promise_settle(ptr %%tgt, i64 %%as)
-  ret void
-ret:
-  ret void
-}`, promiseStructIR, promiseStructIR, promiseStructIR, promiseStructIR, promiseStructIR, promiseStructIR))
+	e.emitGlobal("declare void @__kml_promise_adopt_runner(ptr)")
 }
 
 // emitPromiseAdopt implements `resolve(srcPromise)` thenable adoption (TDD-00091):
@@ -285,10 +258,11 @@ func (e *Emitter) emitClosureCallValues(closurePtr string, ty Type, argVals []Va
 	e.emitInstr(fmt.Sprintf("call void (%s) %s(%s)", strings.Join(tyParts, ", "), fpVal, strings.Join(argParts, ", ")))
 }
 
-// emitResolveThunk emits `void @fn(ptr %p, <T> %v)`: store v into the promise's
-// value slot(s) and settle it fulfilled. The promise arrives as the closure env
-// (first arg), the resolved value as the second.
-func (e *Emitter) emitResolveThunk(fn string, valTy Type) {
+// emitResolveThunk emits `void (ptr %p, <T> %v)` and returns its symbol:
+// store v into the promise's value slot(s) and settle it fulfilled. The
+// promise arrives as the closure env (first arg), the resolved value as the
+// second.
+func (e *Emitter) emitResolveThunk(valTy Type) string {
 	// A `Promise<void>` resolves with no value — `resolve()` takes no argument, so
 	// the thunk has no `%v` parameter (a `void %v` param is invalid IR).
 	isVoid := valTy.IR == "void" || valTy.IR == ""
@@ -337,15 +311,13 @@ func (e *Emitter) emitResolveThunk(fn string, valTy Type) {
 			params = fmt.Sprintf("ptr %%p, %s %%v", StructFieldIR(valTy))
 		}
 	}
-	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(%s) {\nentry:\n", fn, params))
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	return e.defineContentNamed("@__kml_promise_resolve.", "void", params, e.allocas.String()+e.body.String())
 }
 
-// emitRejectThunk emits `void @fn(ptr %p, ptr %err)`: store the error pointer bits
-// into the promise's value slot and settle it rejected.
-func (e *Emitter) emitRejectThunk(fn string) {
+// emitRejectThunk emits `void (ptr %p, ptr %err)` and returns its symbol:
+// store the error pointer bits into the promise's value slot and settle it
+// rejected.
+func (e *Emitter) emitRejectThunk() string {
 	restore := e.beginThunkEmit()
 	defer restore()
 	e.emitThunkAlreadySettledGuard()
@@ -355,13 +327,9 @@ func (e *Emitter) emitRejectThunk(fn string) {
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %%err, 0", tag))
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %%err, 1", pay))
-	e.storeRejectReason("%p", tag, pay)
-	e.emitInstr("call void @__kml_promise_settle(ptr %p, i64 2)")
+	e.emitRejectPromise("%p", tag, true, pay)
 	e.emitInstr("ret void")
-	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%p, { i8, i64 } %%err) {\nentry:\n", fn))
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	return e.defineContentNamed("@__kml_promise_reject.", "void", "ptr %p, { i8, i64 } %err", e.allocas.String()+e.body.String())
 }
 
 // emitThunkAlreadySettledGuard emits an early `ret void` when %p is already

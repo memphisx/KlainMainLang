@@ -13,7 +13,7 @@ const fns = "function id<T>(x: T): T { return x }\n" +
 
 func TestGenerics(t *testing.T) {
 	for _, tc := range []struct{ src, want string }{
-		{fns + "id", "<T>(p0: T) => T"},
+		{fns + "id", "<T>(x: T) => T"},
 		{fns + "id(1)", "1"},
 		{"function ap<T>(v: T, f: (x: T) => T): T { return f(v) }\nap(2, (x) => x * 3)", "number"},
 		{fns + "id('a')", `"a"`},
@@ -26,7 +26,7 @@ func TestGenerics(t *testing.T) {
 		{fns + "apply(2, (n) => { const r = n + 1; return r })", "number"},
 		{fns + "orElse(u, 5)", "number"},
 		{fns + "len('abc')", `"abc"`},
-		{fns + "const k = (n: number) => n\nid(k)", "(p0: number) => number"},
+		{fns + "const k = (n: number) => n\nid(k)", "(n: number) => number"},
 		{fns + "declare const q: any\nid(q)", "any"},
 		{"function g<T>(x: T): T { return x }\ng(undefinedName)", "?"},
 	} {
@@ -98,7 +98,7 @@ func TestOverloads(t *testing.T) {
 		{overloads + "gen('s')", "string"},
 		{overloads + "new K().m(2)", "number"},
 		{overloads + "new K().m('q')", "string"},
-		{overloads + "conv", "{ (p0: string): number; (p0: number): string }"},
+		{overloads + "conv", "{ (x: string): number; (x: number): string }"},
 		{overloads + "declare const u: string | number\nconv(u)", "?"},
 		{overloads + "conv(unknownName)", "?"},
 	} {
@@ -189,7 +189,7 @@ func TestExpandingGeneric(t *testing.T) {
 	for _, tc := range []struct{ src, want string }{
 		{"interface I<T> { x: I<T[]>; v: T }\ndeclare const i: I<number>\ni.v", "number"},
 		{"class C<T> { x!: C<T[]>; v!: T }\ndeclare const c: C<number>\nc.v", "number"},
-		{"type A<T> = { x: A<T[]>; v: T }\ndeclare const a: A<number>\na.v", "?"},
+		{"type A<T> = { x: A<T[]>; v: T }\ndeclare const a: A<number>\na.v", "number"},
 	} {
 		if got := typeOfLast(t, tc.src); got != tc.want {
 			t.Errorf("%q: got %s, want %s", tc.src, got, tc.want)

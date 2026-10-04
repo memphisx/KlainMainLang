@@ -1,7 +1,6 @@
 // Web Crypto — crypto.getRandomValues / crypto.randomUUID (in-house CSPRNG:
 // arc4random_buf on macOS/BSD, getrandom() on Linux) and crypto.subtle
-// (delegated to the -crypto backend library: OpenSSL by default,
-// -crypto=commoncrypto on macOS).
+// (Node's own Web Crypto implementation, written over node:crypto).
 
 // ── crypto.getRandomValues(view) ────────────────────────────────────────────
 // Fills a TypedArray's (or ArrayBuffer's) bytes in place, per the real API.
@@ -15,11 +14,12 @@ for (let i = 0; i < bytes.length; i++) {
 }
 console.log(anyNonZero)     // true (16 zero bytes from a CSPRNG: p ≈ 2^-128)
 
-// The pre-TypedArray form still works: a plain number[] "buffer" gets one
-// random byte value (0-255) per element.
-let buf: number[] = new Array<number>(16)
-crypto.getRandomValues(buf)
-console.log(buf.length)   // 16
+// Only an integer TypedArray is filled; anything else is a TypeMismatchError.
+try {
+  crypto.getRandomValues(new Float64Array(2) as any)
+} catch (e: any) {
+  console.log(e.name)     // TypeMismatchError
+}
 
 // ── crypto.randomUUID() ─────────────────────────────────────────────────────
 // A standard RFC 4122 version-4 UUID string:
@@ -55,7 +55,7 @@ async function digests(): Promise<void> {
 // ── HMAC sign/verify + AES-GCM encrypt/decrypt (CryptoKey) ─────────────────
 async function symmetric(): Promise<void> {
     // Keys are imported ("raw" bytes or "jwk") or generated; usages are
-    // enforced (using a key outside them throws InvalidAccessError).
+    // enforced (using a key outside them rejects with InvalidAccessError).
     const rawKey = new TextEncoder().encode("Jefe")
     const hmacKey = await crypto.subtle.importKey("raw", rawKey,
         { name: "HMAC", hash: "SHA-256" }, true, ["sign", "verify"])
@@ -66,12 +66,12 @@ async function symmetric(): Promise<void> {
     console.log(await crypto.subtle.verify("HMAC", hmacKey, sig, msg)) // true
 
     // JWK export/import: symmetric keys use { kty: "oct", k: base64url },
-    // surfaced as a Map<string,string>.
+    // returned as a plain JsonWebKey object.
     const jwk = await crypto.subtle.exportKey("jwk", hmacKey)
-    console.log(jwk.get("kty"), jwk.get("k")) // oct SmVmZQ
+    console.log(jwk.kty, jwk.k) // oct SmVmZQ
 
-    // AES-GCM: authenticated encryption; decrypt of tampered data throws
-    // OperationError.
+    // AES-GCM: authenticated encryption; decrypting tampered data rejects
+    // with OperationError.
     const aesKey = await crypto.subtle.generateKey(
         { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"])
     const iv = new Uint8Array(12)
@@ -93,16 +93,41 @@ async function asymmetric(): Promise<void> {
     console.log(sig.byteLength) // 64
     console.log(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, ecPair.publicKey, sig, msg)) // true
 
-    // Keys travel as raw points, PKCS#8/SPKI DER, or JWK Maps.
+    // Keys travel as raw points, PKCS#8/SPKI DER, or JWK objects.
     const jwk = await crypto.subtle.exportKey("jwk", ecPair.publicKey)
-    console.log(jwk.get("kty"), jwk.get("crv")) // EC P-256
+    console.log(jwk.kty, jwk.crv) // EC P-256
 
     // RSA-OAEP: encrypt with the public key, decrypt with the private one.
     const rsaPair = await crypto.subtle.generateKey(
-        { name: "RSA-OAEP", modulusLength: 2048, hash: "SHA-256" }, false, ["encrypt", "decrypt"])
+        { name: "RSA-OAEP", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, false, ["encrypt", "decrypt"])
     const ct = await crypto.subtle.encrypt({ name: "RSA-OAEP" }, rsaPair.publicKey, msg)
     const pt = await crypto.subtle.decrypt({ name: "RSA-OAEP" }, rsaPair.privateKey, ct)
     console.log(new TextDecoder().decode(pt)) // signed in Thessaloniki
+}
+
+// ── Ed25519, X25519 and AES-KW ──────────────────────────────────────────────
+async function modern(): Promise<void> {
+    // Ed25519 signatures are 64 bytes; the raw public key is 32.
+    const ed = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']) as CryptoKeyPair;
+    const msg = new TextEncoder().encode('Thessaloniki')
+    const sig = await crypto.subtle.sign('Ed25519', ed.privateKey, msg);
+    console.log(sig.byteLength, await crypto.subtle.verify('Ed25519', ed.publicKey, sig, msg)); // 64 true
+    console.log((await crypto.subtle.exportKey('raw', ed.publicKey)).byteLength);             // 32
+
+    // X25519 key agreement: both sides derive the same 32 bytes.
+    const a = await crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']) as CryptoKeyPair;
+    const b = await crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']) as CryptoKeyPair;
+    const ab = new Uint8Array(await crypto.subtle.deriveBits({ name: 'X25519', public: b.publicKey }, a.privateKey, 256));
+    const ba = new Uint8Array(await crypto.subtle.deriveBits({ name: 'X25519', public: a.publicKey }, b.privateKey, 256));
+    console.log(toHex(ab) === toHex(ba));                                                     // true
+
+    // AES-KW (RFC 3394) wraps another key for storage or transport.
+    const kek = await crypto.subtle.generateKey({ name: 'AES-KW', length: 256 }, false, ['wrapKey', 'unwrapKey']);
+    const dataKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 128 }, true, ['encrypt']);
+    const wrapped = await crypto.subtle.wrapKey('raw', dataKey, kek, 'AES-KW');
+    console.log(wrapped.byteLength);                                                          // 24
+    const back = await crypto.subtle.unwrapKey('raw', wrapped, kek, 'AES-KW', 'AES-GCM', true, ['encrypt']);
+    console.log(back.algorithm);                                                              // { name: 'AES-GCM', length: 128 }
 }
 
 // ── deriveKey / deriveBits (PBKDF2, HKDF) ───────────────────────────────────
@@ -128,6 +153,7 @@ async function main(): Promise<void> {
     await digests()
     await symmetric()
     await asymmetric()
+    await modern()
     await derive()
 }
 main()

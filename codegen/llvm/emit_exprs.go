@@ -8,6 +8,8 @@ package llvm
 
 import (
 	"KlainMainLang/ast"
+	"KlainMainLang/resolver"
+	"KlainMainLang/sema"
 	"fmt"
 	"math"
 	"strconv"
@@ -44,6 +46,9 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		}
 		return Value{Ref: v, Ty: TypeBool}, nil
 	case *ast.Identifier:
+		if !e.classRecordSites[ex] {
+			e.emitClassReeval(ex) // a record site re-runs once its record is made
+		}
 		return e.emitIdent(ex)
 	case *ast.BinaryExpression:
 		if ex.Op == "??" {
@@ -74,10 +79,7 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		}
 		return v, err
 	case *ast.TaggedTemplateExpression:
-		if e.isStringRawTag(ex.Tag) {
-			return e.emitStringRaw(ex)
-		}
-		return e.emitCall(desugarTaggedTemplate(ex))
+		return e.emitCall(e.desugarTaggedTemplate(ex))
 	case *ast.IndexExpression:
 		return e.emitIndex(ex)
 	case *ast.MemberExpression:
@@ -98,10 +100,9 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		// gets that for free.
 		return e.emitArrayLiteralAggregate(ex, nil)
 	case *ast.NewArrayExpression:
-		if ex.ElemType == nil {
-			return Value{}, fmt.Errorf("%d:%d: new Array(n) needs an explicit element type here (e.g. new Array<number>(n)) — no declared target type is available in this position", ex.GetPos().Line, ex.GetPos().Col)
-		}
-		return e.emitNewArraySizedAggregate(ex, e.resolveType(ex.ElemType))
+		// `new Array(n)` without a type argument is an any[], as TypeScript
+		// types it.
+		return e.emitNewArraySizedAggregate(ex, newArrayElemType(e, ex))
 	case *ast.NewMapExpression:
 		// A redeclared top-level `var m = new Map()` passes the promoted
 		// binding's K/V down (emitVarRedeclaration, ADR-01061).
@@ -120,8 +121,6 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		return e.emitNewWeakMapValue(ex)
 	case *ast.NewWeakSetExpression:
 		return e.emitNewWeakSetValue(ex)
-	case *ast.NewWeakRefExpression:
-		return e.emitNewWeakRefValue(ex)
 	case *ast.NewReadableStreamExpression:
 		return e.emitNewReadableStream(ex)
 	case *ast.NewWritableStreamExpression:
@@ -189,12 +188,6 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		return e.emitThisExpression(ex.GetPos())
 	case *ast.NewExpression:
 		return e.emitNewExpression(ex)
-	case *ast.NewURLExpression:
-		return e.emitNewURLExpression(ex)
-	case *ast.NewURLSearchParamsExpression:
-		return e.emitNewURLSearchParamsExpression(ex)
-	case *ast.NewURLPatternExpression:
-		return e.emitNewURLPatternExpression(ex)
 	case *ast.NewArrayBufferExpression:
 		return e.emitNewArrayBufferExpression(ex)
 	case *ast.NewChannelExpression:
@@ -203,34 +196,19 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		return e.emitNewTypedArrayAggregate(ex)
 	case *ast.ImportCallExpression:
 		return e.emitImportCall(ex)
-	case *ast.NewTextEncoderExpression:
-		return Value{Ref: "null", Ty: TextEncoderType()}, nil
-	case *ast.NewTextDecoderExpression:
-		return e.emitNewTextDecoderExpression(ex)
 	case *ast.NewRegExpExpression:
 		return e.emitNewRegExpExpression(ex)
-	case *ast.NewHTTPAgentExpression:
-		return e.emitNewHTTPAgent(ex)
 	case *ast.NewWebviewExpression:
 		return e.emitNewWebview(ex)
-	case *ast.NewHeadersExpression:
-		return e.emitNewHeadersExpression(ex)
-	case *ast.NewDataViewExpression:
-		return e.emitNewDataViewExpression(ex)
-	case *ast.NewBlobExpression:
-		return e.emitNewBlobExpression(ex)
 	case *ast.NewRequestExpression:
 		return e.emitNewRequestExpression(ex)
 	case *ast.NewXMLHttpRequestExpression:
 		return e.emitNewXMLHttpRequestExpression(ex)
 	case *ast.ClassExpression:
-		// A top-level `const X = class {...}` binding was already rewritten to
-		// a nominal class declaration before emission (TDD-00063 Stage 4,
-		// rewriteTopLevelClassExpressions). Reaching here means the class
-		// expression was used as a value — an argument, a return, a nested or
-		// non-top-level binding — which this compiler's nominal (non-first-
-		// class) class model can't produce a runtime value for.
-		return Value{}, fmt.Errorf("%d:%d: a class expression is only supported as a top-level `const/let/var X = class {...}` binding (V1) — using it as a value (an argument, a return value, or a nested/non-top-level binding) is not yet supported", ex.GetPos().Line, ex.GetPos().Col)
+		// Every class expression that captures no enclosing local was hoisted
+		// to a top-level class before emission (emit_classexpr.go); this one
+		// reads a local of the function it is written in.
+		return Value{}, fmt.Errorf("%d:%d: a class expression that uses '%s', a local of its enclosing function, is not supported", ex.GetPos().Line, ex.GetPos().Col, e.classExprCaptures[ex])
 	}
 	return Value{}, fmt.Errorf("unknown expression type %T", expr)
 }
@@ -327,6 +305,9 @@ func llvmDoubleLit(f float64) string {
 }
 
 func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
+	if call, ok := e.tsSubtleAlias(id); ok {
+		return e.emitExpr(call)
+	}
 	sym, ok := e.lookup(id.Name)
 	if !ok {
 		// A bare reference to a sibling namespace member from inside a
@@ -376,6 +357,20 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// constructor reference (emit_classref.go).
 		if _, isClass := e.classes[id.Name]; isClass {
 			e.shadowReference(id, false)
+			if e.classRecordSites[id] {
+				// A class expression's evaluation makes its record, then
+				// initializes its statics.
+				if err := e.emitClassRecord(id.Name); err != nil {
+					return Value{}, err
+				}
+				e.emitClassReeval(id)
+			}
+			if rec, ok := e.lookup(id.Name + classRecSuffix); ok {
+				// This evaluation's class (TDD-00242).
+				r := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, rec.Ptr))
+				return Value{Ref: e.emitNbTagPtr(r, kmlTagFuncRef), Ty: TypeAny}, nil
+			}
 			return e.emitClassRef(id.Name), nil
 		}
 		// A built-in error constructor in value position (`assert.throws(
@@ -385,6 +380,7 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// dedicated paths.
 		if isErrorKindName(id.Name) {
 			e.shadowReference(id, false)
+			e.noteHostRef(id.Name)
 			return Value{Ref: e.emitNbTagPtr(e.internString(id.Name), kmlTagFuncRef), Ty: TypeAny}, nil
 		}
 		// A builtin-module marker reaching the generic identifier path means
@@ -404,6 +400,21 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 				return e.emitExpr(id) // re-enter: the binding now exists
 			}
 		}
+		// A builtin constructor in value position (`const M = Map`, `mk(Set)`):
+		// a constructor reference carrying its name, as the Error kinds'.
+		if sema.IsBuiltinConstructor(id.Name) || id.Name == "Promise" || (id.Name == "Object" || id.Name == "Function") && e.isGlobalName(id) {
+			e.shadowReference(id, false)
+			e.noteHostRef(id.Name)
+			return Value{Ref: e.emitNbTagPtr(e.internString(id.Name), kmlTagFuncRef), Ty: TypeAny}, nil
+		}
+		// `Math`, `JSON`, `console`, `Reflect`, `Atomics` as a value: the
+		// object lib/node/internal_namespaces.ts makes.
+		if key, ok := namespaceValueExport(id.Name); ok && (e.isGlobalName(id) || id.Name == "globalThis" && !e.isShadowedByLocal(id.Name)) {
+			if m, ok := e.libExports[key]; ok {
+				e.shadowReference(id, false)
+				return e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(m, id.GetPos()), nil, id.GetPos()))
+			}
+		}
 		// `process` as a value: its emitter object (lib/node/internal_process.ts).
 		if id.Name == "process" {
 			if obj, ok := e.processEmitterValue(id.GetPos()); ok {
@@ -420,7 +431,7 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// value reads as a real string/number/boolean (or a smaller union).
 		box := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", box, sym.Ptr))
-		return e.emitUnboxBoxToType(box, e.canonicalizeClassTy(*sym.NarrowedTo)), nil
+		return e.emitUnboxBoxToType(box, e.flowNarrowedTy(id, sym)), nil
 	}
 	if sym.Ty.IsArray {
 		// A named array variable is stored as two separate allocas
@@ -489,4 +500,43 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		return e.coerce(Value{Ref: reg, Ty: sym.Ty}, t), nil
 	}
 	return Value{Ref: reg, Ty: sym.Ty}, nil
+}
+
+// newArrayElemType is `new Array<T>(n)`'s element type: T, or any.
+func newArrayElemType(e *Emitter, na *ast.NewArrayExpression) Type {
+	if na.ElemType == nil {
+		return TypeAny
+	}
+	return e.resolveType(na.ElemType)
+}
+
+// flowNarrowedTy is the type a flow-narrowed union local reads as: its
+// narrowed type, or, when that is still a union, the one member the checker
+// narrows the reference to (a type predicate's `Buffer.isBuffer(x)`, which
+// no statement-level guard models).
+func (e *Emitter) flowNarrowedTy(id *ast.Identifier, sym Symbol) Type {
+	t := e.canonicalizeClassTy(*sym.NarrowedTo)
+	if t.IsDynamic && len(t.UnionMembers) > 0 {
+		if nt, ok := e.checkerNarrowedUnion(id, t); ok {
+			return e.canonicalizeClassTy(nt)
+		}
+	}
+	return t
+}
+
+// isGlobalName reports whether id names the builtin global of its name, not
+// a binding of the program's.
+func (e *Emitter) isGlobalName(id *ast.Identifier) bool {
+	c := e.front()
+	return c != nil && e.isBuiltinGlobal(c, id)
+}
+
+// namespaceValueExport is the library export that makes the global object
+// named name when it is read as a value (`Math`, `crypto`, `globalThis`).
+func namespaceValueExport(name string) (string, bool) {
+	if name == "crypto" {
+		return "internal_crypto_global:_kmlCrypto", true
+	}
+	maker, ok := resolver.NamespaceValueNames[name]
+	return "internal_namespaces:" + maker, ok
 }

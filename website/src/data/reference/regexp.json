@@ -4,8 +4,8 @@
   "kind": "language",
   "statusPage": "REGEXP.md",
   "coversRows": "all",
-  "coverage": { "loose": "14/15", "loosePct": 93, "strict": "9/15", "strictPct": 60 },
-  "lede": "PCRE2 under the hood, but aligned to the ECMAScript dialect by default so the everyday edge cases (`$` at the true end, an unset backreference matching empty, `\\uXXXX` escapes) behave as real JS does. The recurring divergences are structural: strings are byte-indexed, so match offsets are byte positions unless you opt into `-regex=es-utf16`; `exec` results carry `index`, `input` and `groups`, but `matchAll`'s do not, and `matchAll` is eager, not a lazy iterator. The whole-program `-regex=<mode>` flag trades fidelity for speed across five modes, and the `u`/`d` flags are out of scope for V1 (`y`/sticky is implemented).",
+  "coverage": { "loose": "14/15", "loosePct": 93, "strict": "10/15", "strictPct": 67 },
+  "lede": "PCRE2 under the hood, but aligned to the ECMAScript dialect by default so the everyday edge cases (`$` at the true end, an unset backreference matching empty, `\\uXXXX` escapes) behave as real JS does. The recurring divergences are structural: strings are byte-indexed, so match offsets are byte positions unless you opt into `-regex=es-utf16`; `exec` results carry `index`, `input` and `groups`, and so does each step of `matchAll`'s iterator. The whole-program `-regex=<mode>` flag trades fidelity for speed across five modes, and the `u`/`d` flags are out of scope for V1 (`y`/sticky is implemented).",
   "entries": [
     {
       "id": "regexp.construction",
@@ -128,16 +128,13 @@
       "id": "regexp.matchAll",
       "name": "str.matchAll(regexp)",
       "statusRow": "str.matchAll(regexp)",
-      "signature": "str.matchAll(regexp: RegExp): string[][]",
-      "badge": "caveats",
-      "description": "One .exec()-shaped match array per match; throws TypeError without the g flag.",
+      "signature": "str.matchAll(regexp: RegExp): RegExpStringIterator<RegExpExecArray>",
+      "badge": "exact",
+      "description": "A RegExp String Iterator over every match, each step an exec result with index, input and groups. It runs on a clone of the RegExp, starting at its lastIndex, so the original's lastIndex is untouched. Throws a TypeError without the g flag.",
       "params": [{ "name": "regexp", "type": "RegExp", "desc": "A g-flagged pattern." }],
-      "returns": { "type": "string[][]", "desc": "One match array per match." },
+      "returns": { "type": "RegExpStringIterator<RegExpExecArray>", "desc": "An iterator of exec results." },
       "exampleKey": "regexp/regexp",
-      "snippet": "for (const each of \"a-1 b-22 c-333\".matchAll(/(\\w)-(\\d+)/g)) {\n  console.log(each[0])\n}",
-      "differences": [
-        "Returns an eager `string[][]`, not a lazy iterator"
-      ],
+      "snippet": "for (const each of \"a-1 b-22 c-333\".matchAll(/(\\w)-(\\d+)/g)) {\n  console.log(each[0], each.index)\n}",
       "seeAlso": ["regexp.match", "regexp.exec"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/matchAll" }
     },

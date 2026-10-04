@@ -58,6 +58,8 @@ func (c *Checker) instantiate(t *Type, m map[*Type]*Type) *Type {
 		return t
 	}
 	switch {
+	case t.Flags&Deferred != 0:
+		return c.instantiateDeferred(t, m)
 	case t.Flags&TypeParam != 0:
 		if r, ok := m[t]; ok {
 			return r
@@ -108,7 +110,7 @@ func (c *Checker) instantiate(t *Type, m map[*Type]*Type) *Type {
 				tps = append(tps, tp)
 			}
 		}
-		fn := c.in.function(ps, t.optionals, t.restParam, c.instantiate(t.Result, m), pred, tps)
+		fn := c.in.withParamNames(c.in.function(ps, t.optionals, t.restParam, c.instantiate(t.Result, m), pred, tps), t.ParamNames)
 		if t.ThisType != nil {
 			fn = c.in.withThis(fn, c.instantiate(t.ThisType, m))
 		}
@@ -150,7 +152,19 @@ func (c *Checker) instantiate(t *Type, m map[*Type]*Type) *Type {
 		if t.NumberIndex != nil {
 			num = c.instantiate(t.NumberIndex, m)
 		}
-		return c.in.indexed(props, str, num)
+		r := c.in.indexed(props, str, num)
+		if len(t.Calls) > 0 || len(t.Constructs) > 0 {
+			calls := make([]*Type, len(t.Calls))
+			for i, s := range t.Calls {
+				calls[i] = c.instantiate(s, m)
+			}
+			ctors := make([]*Type, len(t.Constructs))
+			for i, s := range t.Constructs {
+				ctors[i] = c.instantiate(s, m)
+			}
+			r = c.in.withSignatures(r, calls, ctors)
+		}
+		return r
 	}
 	return t
 }
@@ -280,7 +294,7 @@ func (c *Checker) inferArgs(callArgs []ast.Expression, typeArgs []*ast.TypeAnnot
 			continue
 		}
 		t := c.in.union(cs...)
-		if !c.keepsLiterals(tp, fn) {
+		if !c.keepsLiterals(tp, fn) && !c.keepLiterals {
 			t = widen(c, t)
 		}
 		m[tp] = t
@@ -350,6 +364,15 @@ func (c *Checker) unify(p, a *Type, fn *Type, cands map[*Type][]*Type) {
 		} else if a.Kind == Function && len(a.Overloads) > 0 {
 			a = a.Overloads[len(a.Overloads)-1]
 		}
+		if a.Kind == Function && len(a.TypeParams) > 0 && len(p.TypeParams) == 0 {
+			// A generic source signature: its own parameters are unknown
+			// (TypeScript's getErasedSignature for inference).
+			m := map[*Type]*Type{}
+			for _, tp := range a.TypeParams {
+				m[tp] = c.unknownT
+			}
+			a = c.instantiate(a, m)
+		}
 	}
 	switch {
 	case (p.Kind == Interface || p.Kind == Instance) && p.Kind == a.Kind && p.Symbol == a.Symbol && len(p.TypeArgs) == len(a.TypeArgs):
@@ -382,6 +405,11 @@ func (c *Checker) unify(p, a *Type, fn *Type, cands map[*Type][]*Type) {
 			if ap := a.Prop(pp.Name); ap != nil {
 				c.unify(pp.Type, ap.Type, fn, cands)
 			}
+		}
+		// A constructor type (`new () => T`) infers from the source's
+		// construct signature, the last of an overload list.
+		if len(p.Constructs) == 1 && len(a.Constructs) > 0 {
+			c.unify(p.Constructs[0], a.Constructs[len(a.Constructs)-1], fn, cands)
 		}
 	case p.Kind == Interface && c.unifyDepth < 3:
 		// Another declaration (`ReadonlyArray<T>` from an `Array<string>`):
@@ -437,6 +465,11 @@ func occurs(tp, t *Type) bool {
 					return true
 				}
 			}
+			for _, s := range append(append([]*Type{}, t.Calls...), t.Constructs...) {
+				if occurs(tp, s) {
+					return true
+				}
+			}
 		case Interface, Instance:
 			for _, a := range t.TypeArgs {
 				if occurs(tp, a) {
@@ -450,7 +483,7 @@ func occurs(tp, t *Type) bool {
 
 func hasTypeParam(t *Type) bool {
 	switch {
-	case t.Flags&TypeParam != 0:
+	case t.Flags&(TypeParam|Deferred) != 0:
 		return true
 	case t.Flags&Union != 0:
 		for _, m := range t.Types {
@@ -478,6 +511,11 @@ func hasTypeParam(t *Type) bool {
 		case Anonymous:
 			for _, p := range t.Props {
 				if hasTypeParam(p.Type) {
+					return true
+				}
+			}
+			for _, s := range append(append([]*Type{}, t.Calls...), t.Constructs...) {
+				if hasTypeParam(s) {
 					return true
 				}
 			}
@@ -614,8 +652,13 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 			if pt == nil {
 				return nil
 			}
-			if len(callee.TypeParams) > 0 {
+			if len(callee.TypeParams) > 0 && !c.inferring[p] {
+				// While this call's own type arguments are inferred, an
+				// argument's context is the uninstantiated parameter: typing
+				// the argument must not start the same inference again.
+				c.inferring[p] = true
 				m := c.contextualInference(c.inferArgs(p.Args, p.TypeArgs, callee, false), callee)
+				delete(c.inferring, p)
 				if rt := c.returnTypeContext(p, callee, j, m); rt != nil {
 					return rt
 				}
@@ -637,8 +680,10 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 				return nil
 			}
 			pt := paramAt(ctor, j)
-			if pt != nil && len(ctor.TypeParams) > 0 {
+			if pt != nil && len(ctor.TypeParams) > 0 && !c.inferring[p] {
+				c.inferring[p] = true
 				pt = c.instantiate(pt, c.contextualInference(c.inferArgs(p.Args, p.TypeArgs, ctor, false), ctor))
+				delete(c.inferring, p)
 			}
 			return pt
 		}
@@ -652,6 +697,18 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 		if ast.Node(p.Init) == e && p.TypeAnnot != nil && p.TypeAnnot.TypeNode() != nil {
 			if t := c.typeFromNode(p.TypeAnnot.TypeNode(), c.b.Module); !c.Unanswered(t) {
 				return t
+			}
+		}
+	case *ast.AssignmentExpression:
+		// `x = e`: e in the context of x's declared type (tsc's assignment
+		// context), so `pt = [a, b]` is a tuple where pt is declared one.
+		if ast.Node(p.Right) == e && (p.Op == "=" || p.Op == "??=" || p.Op == "||=" || p.Op == "&&=") {
+			if id, ok := p.Left.(*ast.Identifier); ok {
+				if sym, _ := c.b.Resolve(id); sym != nil {
+					if t := c.typeOfSymbol(sym); t != nil && !c.Unanswered(t) {
+						return t
+					}
+				}
 			}
 		}
 	}
@@ -880,6 +937,28 @@ func literalSensitive(args []ast.Expression) bool {
 			*ast.ObjectLiteral, *ast.ArrayLiteral, *ast.ArrowFunction, *ast.FunctionExpression:
 			// A callback's result is inferred in the call's context too.
 			return true
+		}
+	}
+	return false
+}
+
+// hasFunctionArg reports whether an argument is, or holds, a function
+// expression.
+func hasFunctionArg(args []ast.Expression) bool {
+	for _, a := range args {
+		switch x := a.(type) {
+		case *ast.ArrowFunction, *ast.FunctionExpression:
+			return true
+		case *ast.ArrayLiteral:
+			if hasFunctionArg(x.Elements) {
+				return true
+			}
+		case *ast.ObjectLiteral:
+			for _, p := range x.Properties {
+				if p.Value != nil && hasFunctionArg([]ast.Expression{p.Value}) {
+					return true
+				}
+			}
 		}
 	}
 	return false

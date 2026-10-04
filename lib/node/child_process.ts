@@ -15,32 +15,9 @@ import type { Socket as DgramSocket } from 'dgram';
 import type { Readable, Writable } from 'stream';
 import { resolve as resolvePath } from 'path';
 import { Channel } from './internal_child_process_channel';
+import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
 // ---- errors (lib/internal/errors.js) ----
-
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
 
 // ErrnoException: `${syscall} ${code}`, with errno, code, syscall.
 function errnoException(errnoIn: number, syscall: string): Error {

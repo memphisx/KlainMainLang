@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "suites": {
+    "node": {
+      "lanes": {
+        "js": {
+          "pass": 142,
+          "fail": 2444,
+          "skip": 1371,
+          "runnable": 2586,
+          "total": 3957
+        },
+        "strict": {
+          "pass": 118,
+          "fail": 2468,
+          "skip": 1371,
+          "runnable": 2586,
+          "total": 3957
+        }
+      }
+    },
+    "test262": {
+      "lanes": {
+        "js": {
+          "overall": {
+            "pass": 9842,
+            "total": 53578
+          },
+          "inScope": {
+            "pass": 9576,
+            "total": 42942
+          },
+          "pending": {
+            "pass": 562,
+            "total": 2860
+          },
+          "byPhase": {
+            "clang": 70,
+            "compile": 38769,
+            "neg-accepted": 666,
+            "other": 111,
+            "run-timeout": 9,
+            "runtime": 4005,
+            "strict-reject": 106
+          }
+        },
+        "strict": {
+          "overall": {
+            "pass": 8201,
+            "total": 53578
+          },
+          "inScope": {
+            "pass": 7986,
+            "total": 42942
+          },
+          "pending": {
+            "pass": 477,
+            "total": 2860
+          },
+          "byPhase": {
+            "clang": 38,
+            "compile": 29964,
+            "neg-accepted": 658,
+            "other": 61,
+            "run-timeout": 2,
+            "runtime": 2276,
+            "strict-reject": 12378
+          }
+        }
+      }
+    },
+    "ts": {
+      "lanes": {
+        "js": {
+          "agree": 6723,
+          "classified": 11247,
+          "falseAccept": 1815,
+          "falseReject": 2709,
+          "skipped": 827
+        },
+        "strict": {
+          "agree": 6929,
+          "classified": 11247,
+          "falseAccept": 1469,
+          "falseReject": 2849,
+          "skipped": 827
+        }
+      }
+    },
+    "wpt": {
+      "lanes": {
+        "js": {
+          "pass": 28,
+          "fail": 1938,
+          "skip": 2241,
+          "runnable": 1966,
+          "total": 4207,
+          "documents": 7077,
+          "html": 66781,
+          "subtestPass": 183,
+          "subtestTotal": 703
+        },
+        "strict": {
+          "pass": 23,
+          "fail": 1943,
+          "skip": 2241,
+          "runnable": 1966,
+          "total": 4207,
+          "documents": 7077,
+          "html": 66781,
+          "subtestPass": 156,
+          "subtestTotal": 673
+        }
+      }
+    }
+  }
+}

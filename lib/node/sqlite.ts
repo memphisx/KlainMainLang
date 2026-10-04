@@ -9,29 +9,7 @@
 //
 // kml:scheme-only — Node exposes this module only as `node:sqlite`.
 
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
 const SQLITE_OK = 0;
 const SQLITE_ROW = 100;

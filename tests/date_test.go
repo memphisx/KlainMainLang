@@ -7,10 +7,10 @@ import (
 // --- Date (UTC only, not local time — see docs/adr/ADR-00014.md) ---
 
 // A non-numeric argument to a Date calendar constructor or setter (e.g. a
-// Symbol) is a clean compile-time type error, not invalid IR at the component
-// arithmetic (the A1 invalid-IR cluster; same fix as ADR-00882/00883).
+// Symbol) is tsc's TS2345, not invalid IR at the component arithmetic (the A1
+// invalid-IR cluster; ADR-00882/00883, ADR-01355).
 func TestE2EDateNonNumericArgRejected(t *testing.T) {
-	mustCompileError(t, `const d = new Date(2020, Symbol("x"))`, "Date component")
+	mustCompileError(t, `const d = new Date(2020, Symbol("x"))`, "argument of type 'symbol' is not assignable to parameter of type 'number'")
 	mustCompileError(t, `const d = new Date(0); d.setFullYear(Symbol("x"))`, "argument of type 'symbol' is not assignable")
 }
 
@@ -459,4 +459,42 @@ func TestE2EDateTwoDigitYear(t *testing.T) {
 	assertOutput(t, `
 console.log(new Date(99, 0, 1).getFullYear(), new Date(5, 0).getFullYear(), new Date(100, 0).getFullYear(), new Date(-1, 0).getFullYear(), new Date(2024, 1).getFullYear())
 `, "1999 1905 100 -1 2024")
+}
+
+// A fraction's digits are its milliseconds: ".5" is 500 ms, not 5.
+func TestE2EDateParseFractionDigits(t *testing.T) {
+	assertSameAsNode(t, `for (const s of ["2024-03-01T10:20:30.5Z", "2024-03-01T10:20:30.05Z", "2024-03-01T10:20:30.123456Z", "2024-03-01T10:20:30.007+02:00", "2024-03-01T10:20:30Z"]) {
+  console.log(new Date(s).getTime(), new Date(s).getUTCMilliseconds());
+}`)
+}
+
+// A Date in a `var` hoisted out of a loop is a `Date | undefined` slot: its
+// methods read the time value, its setters write it back, and it is still
+// the Date after the loop.
+func TestE2EDateInLoopVar(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+for (var i = 0; i < 2; i++) {
+  var d = new Date(0);
+  console.log(d.getTime(), d.setTime(5 + i), d.getTime(), d.valueOf(), d.toISOString());
+  console.log(d.setTime(Infinity), d.getTime(), String(d.getUTCFullYear()));
+}
+console.log(d.getTime());
+for (var j = 0; j < 1; j++) { var f = new Date(0); f.setUTCFullYear(2001); }
+console.log(f.getUTCFullYear());
+`)
+}
+
+// setTime is TimeClip(ToNumber(t)); an Invalid Date's getters are NaN, its
+// setFullYear starts from +0 and every other setter leaves it invalid.
+func TestE2EDateInvalidGettersSetters(t *testing.T) {
+	assertSameAsNode(t, `
+const e = new Date(0);
+console.log(e.setTime(1.9), e.setTime(-1.9), e.setTime(8.64e15), e.setTime(8.64e15 + 1), e.getTime(), e.setTime(NaN));
+const g = new Date(NaN);
+console.log(g.getMonth(), g.getUTCHours(), g.setMonth(3), g.getTime(), g.setDate(2), g.setUTCFullYear(2020), g.getUTCFullYear(), g.getUTCMonth());
+const h = new Date(NaN);
+console.log(h.setUTCFullYear(1999), h.getUTCFullYear(), h.getUTCMonth(), h.getUTCDate(), h.getUTCHours());
+const k = new Date(Date.UTC(2020, 0, 31));
+console.log(k.setUTCMonth(1), k.getUTCDate(), k.getUTCMonth(), k.setUTCHours(25), k.getUTCDay(), typeof k.getUTCDay());
+`)
 }

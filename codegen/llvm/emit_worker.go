@@ -52,11 +52,7 @@ func (e *Emitter) emitWorkerModules(prog *ast.Program) error {
 		e.inModuleTask = moduleTask
 
 		var emitErr error
-		for _, stmt := range append(append([]ast.Statement{}, wm.Deps...), wm.Body...) {
-			if emitErr = e.emitStmt(stmt); emitErr != nil {
-				break
-			}
-		}
+		emitErr = e.emitLibInitCalls(append(append([]ast.Statement{}, wm.Deps...), wm.Body...), e.emitStmt)
 		if emitErr == nil {
 			e.emitTerminator("ret void")
 			if moduleTask {
@@ -151,15 +147,4 @@ unsettled:
 done:
 %s  ret i64 %s
 }`, promiseStructIR, len(tlaUnsettledMsg), pre, code))
-}
-
-func stringLiteralArg(args []ast.Expression, idx int, what string, pos ast.Pos) (string, error) {
-	if idx >= len(args) {
-		return "", fmt.Errorf("%d:%d: %s requires a string-literal event name", pos.Line, pos.Col, what)
-	}
-	lit, ok := args[idx].(*ast.StringLiteral)
-	if !ok {
-		return "", fmt.Errorf("%d:%d: %s requires a string-literal event name", pos.Line, pos.Col, what)
-	}
-	return lit.Value, nil
 }

@@ -86,3 +86,30 @@ func TestGlobalNamesUpToDate(t *testing.T) {
 		t.Error("lib/tsglobals.txt is stale: go run ./tools/libconform -globals lib/tsglobals.txt")
 	}
 }
+
+// TestMemberListUpToDate: lib/tsmembers.txt is what tools/libconform
+// -members generates from the pinned TypeScript library and the builtin
+// declarations. Skipped when the library has not been fetched.
+func TestMemberListUpToDate(t *testing.T) {
+	tsLib := filepath.Join("..", "..", ".ts-tests", "src", "lib")
+	if _, err := os.Stat(tsLib); err != nil {
+		t.Skip("TypeScript library not fetched (tools/conformance/fetch.sh)")
+	}
+	lines, err := conform.MemberLines(tsLib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join("..", "tsmembers.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var have []string
+	for _, l := range splitLines(string(data)) {
+		if l != "" && l[0] != '#' {
+			have = append(have, l)
+		}
+	}
+	if strings.Join(have, "\n") != strings.Join(lines, "\n") {
+		t.Error("lib/tsmembers.txt is stale: go run ./tools/libconform -members lib/tsmembers.txt")
+	}
+}

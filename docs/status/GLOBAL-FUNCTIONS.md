@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index. JavaScript language-level globals unrelated to any browser API.
 
-**Coverage**: 20/21 (~95%) · **Strict Coverage**: 14/21 (~67%).
+**Coverage**: 20/21 (~95%) · **Strict Coverage**: 17/21 (~81%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -17,10 +17,10 @@ Format: [Status page format](README.md#status-page-format).
 | `Boolean(x)` | ✅ | | • Shared truthiness (`NaN`, `""`, 0 falsy — [ADR-00116](../adr/ADR-00116.md)) |
 | `parseInt(s, radix?)` | ✅ | | • A no-digits input returns a real `NaN` (endptr-checked, double result — [ADR-00287](../adr/ADR-00287.md))<br>• With `radix` omitted, auto-detects base 16 for a `"0x"`/`"0X"` prefix (`"0xFF"` → `255`) and base 10 otherwise — no octal auto-detect (`"077"` → `77`), and `"0x"` with no trailing hex digit is `NaN`, matching real JS ([ADR-00530](../adr/ADR-00530.md)) |
 | `parseFloat(s)` | ✅ | | • A `"0x"` hex prefix reads only its leading `0` → `0` (real parseFloat, unlike `Number("0x10")` → `16`) via `__kml_strtod_parsefloat` ([ADR-00545](../adr/ADR-00545.md))<br>• A no-conversion input returns a real `NaN`; the only accepted infinity spelling is the exact word `"Infinity"` (`"inf"`/case variants → `NaN`) ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md)) |
-| `NaN` (global constant) | ✅ | • `let NaN = 99;` is a reserved-name collision under the default `-compat=strict`; `-compat=js` allows the shadow real JS permits | • `NaN != x`/`!== x` comparisons are correct — compiled as unordered `fcmp une`, so `NaN !== NaN` is `true` as in JS — see [ADR-00188](../adr/ADR-00188.md) |
-| `Infinity` (global constant) | ✅ | • Same shadowing caveat as `NaN` above — needs `-compat=js`, not unconditional | • See [ADR-00166](../adr/ADR-00166.md). |
+| `NaN` (global constant) | ✅ | | • `NaN != x`/`!== x` comparisons are correct — compiled as unordered `fcmp une`, so `NaN !== NaN` is `true` as in JS — see [ADR-00188](../adr/ADR-00188.md) |
+| `Infinity` (global constant) | ✅ | | • See [ADR-00166](../adr/ADR-00166.md). |
 | `undefined` (global constant) | ✅ | | • As a literal value |
-| `globalThis` | ✅ | • Only member access resolves, and only to *known* globals — an unknown `globalThis.foo` is a compile error (there is no dynamic global record); a bare `globalThis` used as a standalone object value, computed access (`globalThis["x"]`), and assigning a new global (`globalThis.x = …`) are unsupported | • `globalThis.X` (and nested/call forms like `globalThis.JSON.stringify(...)`, `globalThis.setTimeout(...)`) desugars to the bare ambient global X ([ADR-00508](../adr/ADR-00508.md)) |
+| `globalThis` | ✅ | | • `globalThis.X` (and nested/call forms like `globalThis.JSON.stringify(...)`, `globalThis.setTimeout(...)`) desugars to the bare ambient global X ([ADR-00508](../adr/ADR-00508.md))<br>• `globalThis` as a value is the global object: the builtins as its properties, and whatever the program sets on it (`globalThis.x = …`, computed keys); a module's top-level bindings are not on it, as in an ES module ([ADR-01333](../adr/ADR-01333.md)) |
 | `encodeURI(s)` | ✅ | | • Leaves the unreserved *and* reserved (`;/?:@&=+$,#`) character sets unescaped. See [ADR-00024](../adr/ADR-00024.md). |
 | `decodeURI(s)` | ✅ | | • A malformed escape (a lone/truncated `%`, or one not followed by two hex digits) throws a real `URIError` as in JS ([ADR-00556](../adr/ADR-00556.md))<br>• Does **not** decode a `%XX` escape representing a reserved character (leaves it as literal `%XX` text) — the one real behavioral difference from `decodeURIComponent`. See [ADR-00024](../adr/ADR-00024.md). |
 | `encodeURIComponent(s)` | ✅ | | • Leaves only the unreserved set (letters, digits, `-_.!~*'()`) unescaped. See [ADR-00024](../adr/ADR-00024.md). |

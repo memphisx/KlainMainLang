@@ -54,6 +54,7 @@ var (
 	StrictDeleteName      = syntax(1102, "'delete' cannot be called on an identifier in strict mode")
 	UndefinedLabel        = syntax(1116, "a '%s' statement can only jump to a label of an enclosing statement ('%s' is not one)")
 	YieldOutsideGenerator = syntax(1163, "a 'yield' expression is only allowed in a generator body")
+	AwaitOutsideAsync     = syntax(1308, "'await' expressions are only allowed within async functions and at the top levels of modules")
 	InvalidAssignTarget   = syntax(2364, "the left-hand side of an assignment expression must be a variable or a property access")
 	InvalidUpdateTarget   = syntax(2357, "the operand of an increment or decrement operator must be a variable or a property access")
 	ExpectedAsNamespace   = syntax(1005, "expected 'as' after '*' in namespace import, got %s")
@@ -165,6 +166,11 @@ var (
 	SuperTypeArgs         = &Message{Code: 2754, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'super' may not use type arguments"}
 	TypeArgCount          = &Message{Code: 2558, Kind: TypeScriptError, Phase: PhaseCheck, Text: "expected %s type arguments, but got %d"}
 	NoOverloadMatches     = &Message{Code: 2769, Kind: TypeScriptError, Phase: PhaseCheck, Text: "no overload matches this call"}
+	ParamNameNoType       = &Message{Code: 7051, Kind: TypeScriptError, Phase: PhaseCheck, Text: "parameter has a name but no type; did you mean '%s: %s'?"}
+	ParamImplicitAny      = &Message{Code: 7006, Kind: TypeScriptError, Phase: PhaseCheck, Text: "parameter '%s' implicitly has an 'any' type"}
+	RestParamImplicitAny  = &Message{Code: 7019, Kind: TypeScriptError, Phase: PhaseCheck, Text: "rest parameter '%s' implicitly has an 'any[]' type"}
+	OverrideNotAssignable = &Message{Code: 2416, Kind: TypeScriptError, Phase: PhaseCheck, Text: "property '%s' in type '%s' is not assignable to the same property in base type '%s'"}
+	ValueUsedAsType       = &Message{Code: 2749, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'%s' refers to a value, but is being used as a type here; did you mean 'typeof %s'?"}
 	CannotFindName        = &Message{Code: 2304, Kind: TypeScriptError, Phase: PhaseCheck, Text: "cannot find name '%s'"}
 	ThisImplicitlyAny     = &Message{Code: 2683, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'this' implicitly has type 'any' because it does not have a type annotation"}
 	// The forms of TS2304 tsc gives when it knows more about the name.

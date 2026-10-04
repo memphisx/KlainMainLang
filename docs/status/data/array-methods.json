@@ -241,7 +241,7 @@
             "feature": "`.keys()` / `.values()` / `.entries()`",
             "status": "implemented",
             "notes": [
-              "Return an Array Iterator over the array itself — `next()`, `toArray()`, `for...of`, spread and `Array.from` — which sees a later `push` as Node's does; `.entries()` yields `[index, value]` tuples ([ADR-01313](../adr/ADR-01313.md))"
+              "Return an Array Iterator over the array itself — `next()`, the iterator helpers ([ADR-01373](../adr/ADR-01373.md)), `for...of`, spread and `Array.from` — which sees a later `push` as Node's does; `.entries()` yields `[index, value]` tuples ([ADR-01313](../adr/ADR-01313.md))"
             ]
           },
           {
@@ -274,14 +274,6 @@
           }
         ]
       }
-    },
-    {
-      "kind": "block",
-      "text": "## Known limitations"
-    },
-    {
-      "kind": "block",
-      "text": "- `Object.groupBy` also rejects a nested-array element (`number[][]`) — its buckets store each element as a raw `i64` ([ADR-00152](../adr/ADR-00152.md))."
     }
   ]
 }

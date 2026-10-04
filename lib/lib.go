@@ -278,16 +278,44 @@ var exportedClassDecl = regexp.MustCompile(`(?m)^export (?:declare )?(?:abstract
 // global of its own (`performance`): `export const X = …; // kml:global`.
 var exportedGlobalConst = regexp.MustCompile(`(?m)^export const ([A-Za-z_$][A-Za-z0-9_$]*)\b.*// kml:global$`)
 
+// exportedLoweredFunc is a global module's exported function that a
+// builtin's `@lower` names (TDD-00230 P3.2): `export function
+// __kml_String_raw(…) … // kml:lower String.raw`. A program naming every
+// identifier of the dotted path brings the module in.
+var exportedLoweredFunc = regexp.MustCompile(`(?m)^export function ([A-Za-z_$][A-Za-z0-9_$]*)\b.*// kml:lower ([A-Za-z0-9_$.]+)$`)
+
 var (
 	globalModulesOnce sync.Once
 	globalModules     map[string]string
+	loweredUses       map[string][]string
 )
+
+// LoweredFuncUses maps each lowered TypeScript function a global module
+// exports to the identifiers a program must name to need it.
+func LoweredFuncUses() map[string][]string {
+	GlobalModuleNames()
+	return loweredUses
+}
 
 // GlobalModuleNames maps each global a global module implements (one of its
 // exported classes, or a constant marked global) to the module's pseudo-path.
+// NativeGlobalUses names the global-module classes native codegen
+// constructs itself, by an identifier whose use can need them, so a program
+// naming the identifier brings them in: Request, Response and fetch hold
+// their headers in a Headers, a Response body and a fetch body are read
+// through a Blob, and Response.redirect parses its URL with the URL class.
+var NativeGlobalUses = map[string][]string{
+	"Request":  {"Headers"},
+	"Response": {"Headers", "Blob"},
+	"fetch":    {"Headers", "Blob"},
+	"redirect": {"URL"},
+	"subtle":   {"SubtleCrypto"},
+}
+
 func GlobalModuleNames() map[string]string {
 	globalModulesOnce.Do(func() {
 		globalModules = map[string]string{}
+		loweredUses = map[string][]string{}
 		entries, _ := nodeModuleFiles.ReadDir("node")
 		for _, en := range entries {
 			if !strings.HasSuffix(en.Name(), ".ts") {
@@ -303,7 +331,72 @@ func GlobalModuleNames() map[string]string {
 			for _, m := range exportedGlobalConst.FindAllStringSubmatch(string(src), -1) {
 				globalModules[m[1]] = ModuleRoot + en.Name()
 			}
+			for _, m := range exportedLoweredFunc.FindAllStringSubmatch(string(src), -1) {
+				globalModules[m[1]] = ModuleRoot + en.Name()
+				loweredUses[m[1]] = strings.Split(m[2], ".")
+			}
 		}
 	})
 	return globalModules
+}
+
+//go:embed tsmembers.txt
+var tsMembersSrc string
+
+var (
+	tsMembersOnce sync.Once
+	tsMembers     map[string]tsIface
+)
+
+type tsIface struct {
+	bases   []string
+	members map[string]bool
+}
+
+// TSInterfaceHas reports whether TypeScript's library declares interface
+// name (known), and whether it or an interface it extends has member
+// (lib/tsmembers.txt, from tools/libconform -members).
+func TSInterfaceHas(name, member string) (known, has bool) {
+	tsMembersOnce.Do(func() {
+		tsMembers = map[string]tsIface{}
+		for _, line := range strings.Split(tsMembersSrc, "\n") {
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			f := strings.SplitN(line, "\t", 3)
+			if len(f) != 3 {
+				continue
+			}
+			it := tsIface{members: map[string]bool{}}
+			if f[1] != "" {
+				it.bases = strings.Split(f[1], ",")
+			}
+			for _, m := range strings.Fields(f[2]) {
+				it.members[m] = true
+			}
+			tsMembers[f[0]] = it
+		}
+	})
+	if _, ok := tsMembers[name]; !ok {
+		return false, false
+	}
+	seen := map[string]bool{}
+	var walk func(string) bool
+	walk = func(n string) bool {
+		it, ok := tsMembers[n]
+		if !ok || seen[n] {
+			return false
+		}
+		seen[n] = true
+		if it.members[member] {
+			return true
+		}
+		for _, b := range it.bases {
+			if walk(b) {
+				return true
+			}
+		}
+		return false
+	}
+	return true, walk(name)
 }

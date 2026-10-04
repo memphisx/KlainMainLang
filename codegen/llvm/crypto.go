@@ -7,9 +7,9 @@ import (
 )
 
 // crypto.go — the selectable crypto backend plumbing (TDD-00104). Each backend
-// is a C file implementing the identical __kml_crypto_* subtle-crypto ABI
-// (see runtime_crypto_subtle.go); the emitter is backend-agnostic and only
-// what gets compiled+linked differs. main.go writes the selected source next
+// is a C file implementing node:crypto's natives (lib/native.d.ts's
+// `cryptoXxx`, which crypto.subtle is written over too); the emitter is
+// backend-agnostic and only what gets compiled+linked differs. main.go writes the selected source next
 // to the .ll and compiles it alongside — the same shape as -bigint
 // (bigint.go) and -mm=gc (gcsrc/gcshim.c).
 
@@ -22,8 +22,8 @@ var cryptoCommonCryptoSource string
 // CryptoBackends are the accepted -crypto values, default (openssl) first.
 var CryptoBackends = []string{"openssl", "commoncrypto"}
 
-// CryptoBackendSource returns the C source implementing the __kml_crypto_*
-// subtle-crypto ABI for a backend, and whether the name is known.
+// CryptoBackendSource returns the C source implementing node:crypto's
+// natives for a backend, and whether the name is known.
 func CryptoBackendSource(backend string) (string, bool) {
 	switch backend {
 	case "", "openssl":

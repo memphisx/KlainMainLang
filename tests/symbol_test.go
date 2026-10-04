@@ -25,7 +25,7 @@ console.log(typeof a)
 console.log(a.description)
 const b = Symbol()
 console.log(b.description)
-`, "symbol\nhello\n")
+`, "symbol\nhello\nundefined")
 }
 
 func TestE2ESymbolToStringAndFormatting(t *testing.T) {
@@ -49,13 +49,13 @@ console.log(a < b)
 	}
 }
 
-func TestE2ESymbolDescriptionMustBeString(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2ESymbolDescriptionToString(t *testing.T) {
+	// A description is ToString'd (TypeScript types it string | number);
+	// undefined leaves none.
+	assertOutput(t, `
 const a = Symbol(5)
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a non-string Symbol() description, got none")
-	}
+console.log(a.description, a.toString(), Symbol(undefined).description)
+`, "5 Symbol(5) undefined")
 }
 
 func TestE2ESymbolTooManyArgs(t *testing.T) {

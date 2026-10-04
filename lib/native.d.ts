@@ -30,6 +30,12 @@ interface KmlNative {
     // the address the last tcpAddress read.
     /** @lower __kml_native_last_string @link pool */
     lastString(): string;
+    // keys ('\n'-joined) in the iteration order of a C++
+    // std::unordered_map<std::string, …> that reserved their count and took
+    // them in order: the order Node gives an object built from one
+    // (URLPattern's groups, from ada).
+    /** @lower __kml_native_umap_order @link umap */
+    umapOrder(keys: string): string;
     /** @lower __kml_native_dns_lookup @link pool */
     dnsLookup(host: string, family: number, callback: (status: number, family: number) => void): void;
     // dns (klaindns.c): each completes with (status, 0) and leaves its
@@ -508,6 +514,13 @@ interface KmlNative {
     protoKey(value: any): string;
     // A TypedArray's bytes, copied into out (as many as fit): the count
     // copied, 0 for any other value.
+    // A weak link to an object (or an unregistered symbol) held in `any`
+    // (weak.c): its handle, and the target back, or undefined once it is
+    // collected.
+    /** @lower __kml_weak_link_any @link weak */
+    weakLink(target: any): number;
+    /** @lower __kml_weak_deref_any @link weak */
+    weakDeref(handle: number): any;
     /** @lower __kml_typed_copy_bytes @link inspect */
     typedBytes(value: any, out: Uint8Array): number;
     // in's bytes copied into a TypedArray held in `any` (as many as fit).
@@ -563,9 +576,32 @@ interface KmlNative {
     /** @lower __kml_native_crypto_keygen_take @link crypto */
     cryptoKeygenTake(result: number): string;
     /** @lower __kml_native_crypto_sign @link crypto */
-    cryptoSign(digest: string, pem: string, passphrase: Uint8Array, hasPassphrase: number, data: Uint8Array, out: Uint8Array): number;
+    cryptoSign(digest: string, pem: string, passphrase: Uint8Array, hasPassphrase: number, padding: number, saltLength: number, dsaEncoding: number, data: Uint8Array, out: Uint8Array): number;
     /** @lower __kml_native_crypto_verify @link crypto */
-    cryptoVerify(digest: string, pem: string, passphrase: Uint8Array, hasPassphrase: number, data: Uint8Array, signature: Uint8Array): number;
+    cryptoVerify(digest: string, pem: string, passphrase: Uint8Array, hasPassphrase: number, padding: number, saltLength: number, dsaEncoding: number, data: Uint8Array, signature: Uint8Array): number;
+    // KeyObject: a key's canonical PEM (PKCS#8 private, SPKI public) from
+    // PEM/DER input (format 0 PEM, 1 DER; type 0 any, 1 pkcs1, 2 spki,
+    // 3 pkcs8, 4 sec1), its export, its details and its JWK form.
+    /** @lower __kml_native_crypto_key_parse @link crypto */
+    cryptoKeyParse(data: Uint8Array, format: number, type: number, wantPrivate: number, passphrase: Uint8Array, hasPassphrase: number): string;
+    /** @lower __kml_native_crypto_key_export @link crypto */
+    cryptoKeyExport(pem: string, isPrivate: number, format: number, type: number, cipher: string, passphrase: Uint8Array, hasPassphrase: number, out: Uint8Array): number;
+    /** @lower __kml_native_crypto_key_info @link crypto */
+    cryptoKeyInfo(pem: string): string;
+    /** @lower __kml_native_crypto_key_jwk @link crypto */
+    cryptoKeyJwk(pem: string, isPrivate: number): string;
+    /** @lower __kml_native_crypto_key_from_jwk @link crypto */
+    cryptoKeyFromJwk(kty: number, crv: string, n: string, e: string, d: string, p: string, q: string, dp: string, dq: string, qi: string, x: string, y: string, wantPrivate: number): string;
+    // publicEncrypt (op 0), privateDecrypt (1), privateEncrypt (2),
+    // publicDecrypt (3) over a PEM key.
+    /** @lower __kml_native_crypto_pkey_crypt @link crypto */
+    cryptoPkeyCrypt(op: number, pem: string, passphrase: Uint8Array, hasPassphrase: number, padding: number, oaepHash: string, label: Uint8Array, data: Uint8Array, out: Uint8Array): number;
+    // ECDH, stateless (op 0 generate, 1 public of private, 2 secret, 3
+    // convert a point, 4 check a private key), and diffieHellman's secret.
+    /** @lower __kml_native_crypto_ecdh @link crypto */
+    cryptoEcdh(op: number, curve: string, privateKey: Uint8Array, publicKey: Uint8Array, format: number, out: Uint8Array): number;
+    /** @lower __kml_native_crypto_derive_secret @link crypto */
+    cryptoDeriveSecret(privatePem: string, publicPem: string, out: Uint8Array): number;
     /** @lower __kml_native_crypto_timing_equal @link crypto */
     cryptoTimingEqual(a: Uint8Array, b: Uint8Array): number;
     /** @lower __kml_native_crypto_last_error @link crypto */

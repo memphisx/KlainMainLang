@@ -266,7 +266,7 @@ func isUnionObjectMember(m Type) bool {
 		return true
 	}
 	return m.IsObject && !m.IsArray && !m.IsMap && !m.IsSet && !m.IsTuple &&
-		!m.IsDynamicObject && !m.IsGroupMap
+		!m.IsDynamicObject
 }
 
 // unionAllowsAssignmentFrom reports whether a value of type valTy may be
@@ -289,6 +289,12 @@ func unionAllowsAssignmentFrom(unionTy Type, valTy Type) bool {
 		// A possibly-absent T (`T | undefined`, narrowed where the checker
 		// proved it present): T is what must be a member.
 		valTy.Nullable, valTy.IsNull, valTy.IsUndefined = false, false, false
+	}
+	// A dynamic member (`ArrayBufferView`, `any`) holds any value.
+	for _, m := range unionTy.UnionMembers {
+		if m.IsDynamic && m.UnionMembers == nil {
+			return true
+		}
 	}
 	// A value that's already boxed dynamic (e.g. assigning one union-typed
 	// variable to another, or a bare any/unknown expression) can't be
@@ -863,6 +869,9 @@ func (e *Emitter) boxAnyArray(v Value) string {
 	e.ensureMalloc()
 	e.ensureCalloc()
 	kind, typed := anyArrayBoxBytes(v.Ty)
+	if typed != anyArrayPlain {
+		e.ensureBoxedViews()
+	}
 	innerKind, innerTyped := -1, anyArrayPlain
 	if v.Ty.ElemType != nil && v.Ty.ElemType.IsArray {
 		kind = 13 // KJ_ARRAY: elements are header pointers
@@ -927,10 +936,6 @@ func (e *Emitter) anyArrayElemRoutines(elem Type) (boxer, unboxer string, ok boo
 	if fns, ok := e.anyArrElemFns[key]; ok {
 		return fns[0], fns[1], true
 	}
-	n := len(e.anyArrElemFns)
-	boxer = fmt.Sprintf("@__kml_arrelem_box_%d", n)
-	unboxer = fmt.Sprintf("@__kml_arrelem_unbox_%d", n)
-	e.anyArrElemFns[key] = [2]string{boxer, unboxer}
 	elemIR := StructFieldIR(elem)
 
 	restore := e.beginDetachedFunc()
@@ -944,7 +949,7 @@ func (e *Emitter) anyArrayElemRoutines(elem Type) (boxer, unboxer string, ok boo
 	e.emitTerminator(fmt.Sprintf("ret i64 %s", boxed.Ref))
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine internal i64 %s(ptr %%data, i64 %%i) {\nentry:\n%s}\n", boxer, body))
+	boxer = e.defineContentNamed("@__kml_arrelem_box.", "i64", "ptr %data, i64 %i", body)
 
 	restore = e.beginDetachedFunc()
 	gep = e.freshReg()
@@ -954,7 +959,8 @@ func (e *Emitter) anyArrayElemRoutines(elem Type) (boxer, unboxer string, ok boo
 	e.emitTerminator("ret void")
 	body = e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine internal void %s(ptr %%data, i64 %%i, i64 %%w) {\nentry:\n%s}\n", unboxer, body))
+	unboxer = e.defineContentNamed("@__kml_arrelem_unbox.", "void", "ptr %data, i64 %i, i64 %w", body)
+	e.anyArrElemFns[key] = [2]string{boxer, unboxer}
 	return boxer, unboxer, true
 }
 
@@ -969,7 +975,12 @@ func (e *Emitter) emitNbEncodeDouble(dReg string) string {
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 9221120237041090560, i64 %s", canon, isnan, bits))
 	enc := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", enc, canon, nbDoubleOffset))
-	return enc
+	// The slot's undefined (TDD-00241) boxes as undefined.
+	isU := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, bits, undefF64))
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", out, isU, nbUndefined, enc))
+	return out
 }
 
 // emitNbTagPtr tags a pointer register with its NaN-box kind bits.
@@ -1251,8 +1262,11 @@ func (e *Emitter) emitDynamicRenderAt(v Value, inspect bool, depth int) (Value, 
 	store(bigStr.Ref)
 	e.emitLabel(notBigL)
 	// A boxed host handle (emit_hostbox.go): Node's inspect form under
-	// console.log, `[object Map]` as a string.
-	if e.usedHostBox {
+	// console.log, `[object Map]` as a string. Probed whether or not a host
+	// box was made yet: one made later reaches here too, and the builtin
+	// library's code cannot know (TDD-00238).
+	{
+		e.ensureHostBoxHooks()
 		hostCell, isHost := e.emitHostProbe(payload)
 		hostL, notHostL := e.freshLabel("dynstr.obj.host"), e.freshLabel("dynstr.obj.nothost")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isHost, hostL, notHostL))
@@ -1269,11 +1283,21 @@ func (e *Emitter) emitDynamicRenderAt(v Value, inspect bool, depth int) (Value, 
 	plainL := e.freshLabel("dynstr.obj.plain")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", errIsErr, errL, plainL))
 	e.emitLabel(errL)
-	errStr, err := e.emitErrorToString(Value{Ref: errObjPtr, Ty: TypePtr})
-	if err != nil {
-		return Value{}, err
+	if inspect {
+		// util.inspect's form: the header with Node's `Ctor [Name]`, then
+		// its own properties (dynjson.c inspect_error).
+		e.ensureDynJSONC()
+		e.declareFn("__kml_obj_inspect_at", "declare ptr @__kml_obj_inspect_at(ptr, i64)")
+		es := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_obj_inspect_at(ptr %s, i64 %d)", es, errObjPtr, depth))
+		store(es)
+	} else {
+		errStr, err := e.emitErrorToString(Value{Ref: errObjPtr, Ty: TypePtr})
+		if err != nil {
+			return Value{}, err
+		}
+		store(errStr.Ref)
 	}
-	store(errStr.Ref)
 	e.emitLabel(plainL)
 	// A boxed Symbol (hidden field-0 flag, ADR-01059) renders as
 	// `Symbol(desc)` — console.log's and String(sym)'s form — instead of the
@@ -1300,7 +1324,13 @@ func (e *Emitter) emitDynamicRenderAt(v Value, inspect bool, depth int) (Value, 
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_obj_inspect_at(ptr %s, i64 %d)", os, op, depth))
 		store(os)
 	} else {
-		store(e.internString("[object Object]"))
+		// Object.prototype.toString: "[object Tag]" for a class with a
+		// Symbol.toStringTag, else "[object Object]".
+		e.ensureDynJSONC()
+		e.declareFn("__kml_object_tostring", "declare ptr @__kml_object_tostring(i64)")
+		os := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_object_tostring(i64 %s)", os, v.Ref))
+		store(os)
 	}
 	e.emitLabel(nextL)
 
@@ -1444,13 +1474,20 @@ func (e *Emitter) emitArrayBufferIsView(arg ast.Expression) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", r, plain))
 		out := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", out, r, isArr))
-		// A boxed DataView is a view too.
-		isDV := e.emitDynHostInstanceOf(v, "DataView")
+		// A boxed DataView (the global module's class) is a view too.
+		cls, ok := e.globalClass("DataView")
+		if !ok {
+			return Value{Ref: out, Ty: TypeBool}, nil
+		}
+		isDV, err := e.emitAnyInstanceOfClass(v, cls.ClassName)
+		if err != nil {
+			return Value{}, err
+		}
 		either := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, out, isDV.Ref))
 		return Value{Ref: either, Ty: TypeBool}, nil
 	}
-	return Value{Ref: fmt.Sprint(v.Ty.IsTypedArray || v.Ty.IsDataView), Ty: TypeBool}, nil
+	return Value{Ref: fmt.Sprint(v.Ty.IsTypedArray || e.isGlobalClassInstance(v.Ty, "DataView")), Ty: TypeBool}, nil
 }
 
 // emitBoxIsArrayTag is whether an `any` holds a static array's box.

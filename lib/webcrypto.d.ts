@@ -104,7 +104,9 @@ interface RsaPssParams extends Algorithm {
 }
 interface Crypto {
     readonly subtle: SubtleCrypto;
+    /** @intrinsic crypto.getRandomValues */
     getRandomValues<T extends Exclude<BufferSource, ArrayBuffer>>(array: T): T;
+    /** @intrinsic crypto.randomUUID */
     randomUUID(): `${string}-${string}-${string}-${string}-${string}`;
 }
 declare var Crypto: {

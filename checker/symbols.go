@@ -71,7 +71,7 @@ func (c *Checker) computeSymbolType(sym *binder.Symbol) *Type {
 		return c.widenFrom(n.Init, t)
 	case *ast.FunctionDeclaration:
 		if sym.Flags&binder.Function != 0 && d.Flags&binder.Function != 0 {
-			if n.IsAsync || n.IsGenerator {
+			if n.IsAsync {
 				return c.unanswered
 			}
 			if sigs := ambientOverloads(sym); len(sigs) > 1 {
@@ -249,6 +249,8 @@ func (c *Checker) signatureType(fn ast.Node, params []ast.Param, ret *ast.TypeAn
 		return c.unanswered
 	case body == nil && exprBody == nil:
 		r = c.voidT // a signature without a body (a constructor's, typed for `new`)
+	case isGeneratorFn(fn):
+		r = c.generatorReturn(body)
 	default:
 		r = c.returnType(body, exprBody)
 		if _, decl := fn.(*ast.FunctionDeclaration); !decl && fn != nil {
@@ -261,7 +263,11 @@ func (c *Checker) signatureType(fn ast.Node, params []ast.Param, ret *ast.TypeAn
 	if pred == nil && ret == nil && fn != nil {
 		pred = c.inferredPredicate(fn, params, ps, r, body, exprBody)
 	}
-	return c.in.withThis(c.in.function(ps, opts, rest, r, pred, tps), c.thisParamType(fn, scope))
+	names := make([]string, len(params))
+	for i, p := range params {
+		names[i] = p.Name
+	}
+	return c.in.withThis(c.in.withParamNames(c.in.function(ps, opts, rest, r, pred, tps), names), c.thisParamType(fn, scope))
 }
 
 // thisParamType is the type of fn's `this: T` parameter, nil when it has
@@ -705,9 +711,9 @@ func (c *Checker) instanceOf(sym *binder.Symbol, args []*Type) *Type {
 			continue
 		}
 		mt := c.unanswered
-		if len(m.Overloads) > 0 && !m.IsAsync && !m.IsGenerator {
+		if len(m.Overloads) > 0 && !m.IsAsync {
 			mt = c.overloadsType(strconv.Itoa(sym.ID)+"."+m.Name+"<"+ids(args), sym.Scope, m.Overloads)
-		} else if !m.IsAsync && !m.IsGenerator && (!generic || m.ReturnType != nil) {
+		} else if !m.IsAsync && (!generic || m.ReturnType != nil) {
 			mt = c.signatureType(m, m.Params, m.ReturnType, m.Body, nil, sym.Scope)
 		}
 		if m.IsOptional && !c.Unanswered(mt) {
@@ -1041,7 +1047,11 @@ func (c *Checker) signatureOfNodes(key string, tps []*ast.TypeParameter, params 
 	if c.Unanswered(r) {
 		return r
 	}
-	return c.in.function(ps, opts, rest, r, pred, tpTypes)
+	pnames := make([]string, len(params))
+	for i, p := range params {
+		pnames[i] = p.Name
+	}
+	return c.in.withParamNames(c.in.function(ps, opts, rest, r, pred, tpTypes), pnames)
 }
 
 // lookupName resolves name as any symbol, type or value, from scope out.
@@ -1081,6 +1091,8 @@ func (c *Checker) TypeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 
 func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 	switch n := n.(type) {
+	case *ast.TypeQuery:
+		return c.typeQueryType(n, scope)
 	case *ast.KeywordType:
 		switch n.Keyword {
 		case "any":
@@ -1129,6 +1141,16 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 	case *ast.TemplateLiteralType:
 		return c.templateLiteralType(n, scope)
 	case *ast.TypeOperator:
+		if n.Operator == "keyof" {
+			t := c.typeFromNode(n.Type, scope)
+			switch {
+			case c.Unanswered(t):
+				return t
+			case c.generic(t):
+				return c.deferredType(n, scope)
+			}
+			return c.keyofType(t)
+		}
 		if n.Operator == "unique" {
 			return c.symT // `unique symbol`: a symbol, its identity not modelled
 		}
@@ -1151,6 +1173,25 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 		return c.unanswered
 	case *ast.ParenthesizedType:
 		return c.typeFromNode(n.Type, scope)
+	case *ast.IndexedAccessType:
+		o := c.typeFromNode(n.ObjectType, scope)
+		k := c.typeFromNode(n.IndexType, scope)
+		switch {
+		case c.Unanswered(o) || c.Unanswered(k):
+			return c.unanswered
+		case c.generic(o) || c.generic(k):
+			return c.deferredType(n, scope)
+		}
+		return c.indexedAccess(o, k)
+	case *ast.MappedType:
+		return c.mappedType(n, scope)
+	case *ast.ConditionalType:
+		return c.conditionalType(n, scope)
+	case *ast.InferType:
+		if t := c.lookupEnv(n.Name); t != nil {
+			return t
+		}
+		return c.unanswered
 	case *ast.ArrayType:
 		e := c.typeFromNode(n.ElementType, scope)
 		if c.Unanswered(e) {
@@ -1175,11 +1216,44 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 		var props []*Property
 		partial := false
 		seen := map[string]int{}
+		var parts []*Type
+		emptyObj, object := false, false
 		for _, m := range n.Types {
 			t := c.typeFromNode(m, scope)
 			if c.Unanswered(t) {
 				return t
 			}
+			switch {
+			case t.Flags&NonPrimitive != 0:
+				object = true // `object & {…}`: the object member decides
+				continue
+			case t.Flags == Object && t.Kind == Anonymous && len(t.Props) == 0 && len(t.Calls) == 0 && len(t.Constructs) == 0 &&
+				t.StringIndex == nil && t.NumberIndex == nil && !t.partial:
+				emptyObj = true // `T & {}`: T without null and undefined
+				continue
+			}
+			parts = append(parts, t)
+		}
+		if len(parts) == 1 && (emptyObj || object) {
+			t := parts[0]
+			if c.generic(t) {
+				return c.deferredType(n, scope)
+			}
+			if emptyObj {
+				return c.filter(t, func(m *Type) bool { return m.Flags&Nullish == 0 })
+			}
+			if t.Flags&Object != 0 {
+				return t
+			}
+			return c.unanswered
+		}
+		if len(parts) == 0 {
+			if object {
+				return c.objectT
+			}
+			return c.in.object(nil)
+		}
+		for _, t := range parts {
 			if t.Flags != Object || (t.Kind != Anonymous && t.Kind != Interface) || len(t.Calls) > 0 || len(t.Constructs) > 0 || len(t.TypeArgs) > 0 || c.building[t] ||
 				t.StringIndex != nil || t.NumberIndex != nil {
 				return c.unanswered
@@ -1222,6 +1296,17 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 			es = append(es, t)
 		}
 		return c.in.tuple(es)
+	case *ast.ConstructorType:
+		// `new (…) => R`: an object type whose one member is that construct
+		// signature, as tsc models it.
+		if len(n.TypeParameters) > 0 {
+			break
+		}
+		sig := c.typeFromNode(&ast.FunctionType{Parameters: n.Parameters, Type: n.Type, Range: n.Range}, scope)
+		if c.Unanswered(sig) || sig.Kind != Function {
+			return c.unanswered
+		}
+		return c.in.withSignatures(c.in.object(nil), nil, []*Type{sig})
 	case *ast.FunctionType:
 		if len(n.TypeParameters) > 0 {
 			break
@@ -1264,7 +1349,11 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 		if c.Unanswered(r) {
 			return r
 		}
-		fn := c.in.function(ps, opts, rest, r, nil, nil)
+		names := make([]string, len(n.Parameters))
+		for i, p := range n.Parameters {
+			names[i] = p.Name
+		}
+		fn := c.in.withParamNames(c.in.function(ps, opts, rest, r, nil, nil), names)
 		if n.This != nil {
 			tt := c.typeFromNode(n.This, scope)
 			if c.Unanswered(tt) {
@@ -1279,6 +1368,7 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 		var props []*Property
 		var strIdx, numIdx *Type
 		var calls, constructs []*Type
+		partial := false
 		for _, m := range n.Members {
 			if ix, ok := m.(*ast.IndexSignature); ok {
 				kind, vt := c.indexSignature(ix, scope)
@@ -1302,11 +1392,10 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 				if sm.Computed {
 					return c.unanswered
 				}
+				// A member the checker does not model types as unanswered,
+				// as an interface's does; the rest of the type stays known.
 				mt := c.signatureOfNodes(fmt.Sprintf("lit%p", sm), sm.TypeParameters, sm.Parameters, sm.Type, scope)
-				if c.Unanswered(mt) {
-					return mt
-				}
-				if sm.Optional {
+				if sm.Optional && !c.Unanswered(mt) {
 					mt = c.in.union(mt, c.missingT)
 				}
 				props = append(props, &Property{Name: sm.Name, Type: mt, Optional: sm.Optional, Decl: sm, Decls: []ast.Node{sm}})
@@ -1314,14 +1403,16 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 			case *ast.CallSignature:
 				st := c.signatureOfNodes(fmt.Sprintf("lit%p", sm), sm.TypeParameters, sm.Parameters, sm.Type, scope)
 				if c.Unanswered(st) {
-					return st
+					partial = true // a signature the checker does not model
+					continue
 				}
 				calls = append(calls, st)
 				continue
 			case *ast.ConstructSignature:
 				st := c.signatureOfNodes(fmt.Sprintf("lit%p", sm), sm.TypeParameters, sm.Parameters, sm.Type, scope)
 				if c.Unanswered(st) {
-					return st
+					partial = true
+					continue
 				}
 				constructs = append(constructs, st)
 				continue
@@ -1334,10 +1425,7 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 			if p.Type != nil {
 				t = c.typeFromNode(p.Type, scope)
 			}
-			if c.Unanswered(t) {
-				return t
-			}
-			if p.Optional {
+			if p.Optional && !c.Unanswered(t) {
 				t = c.in.union(t, c.missingT)
 			}
 			if p.Accessor != "" {
@@ -1365,7 +1453,7 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 			}
 			props = append(props, &Property{Name: p.Name, Type: t, Optional: p.Optional, Readonly: p.Readonly})
 		}
-		return c.in.withSignatures(c.in.indexed(props, strIdx, numIdx), calls, constructs)
+		return c.in.withSignatures(c.in.indexedOn(c.in.objectOf(props, partial, false), strIdx, numIdx), calls, constructs)
 	case *ast.TypeReference:
 		if len(n.Qualifier) > 0 {
 			// `NS.T` / `NS.T<A>`: T among the namespace's own declarations.
@@ -1395,7 +1483,11 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 		}
 		if len(n.TypeArgs) == 0 {
 			if sym := resolveTypeName(n.Name, scope); sym != nil && sym.Flags&binder.TypeParameter != 0 {
-				return c.typeParamType(sym)
+				tp := c.typeParamType(sym)
+				if r := c.lookupSubst(tp); r != nil {
+					return r
+				}
+				return tp
 			}
 		}
 		if w, ok := nativeWidths[n.Name]; ok && len(n.TypeArgs) == 0 {
@@ -1678,7 +1770,7 @@ func (c *Checker) classObject(sym *binder.Symbol, decl *ast.ClassDeclaration) *T
 		}
 		if m.AccessorKind != "" {
 			at := c.unanswered
-			if !m.IsAsync && !m.IsGenerator {
+			if !m.IsAsync {
 				if sig := c.signatureType(m, m.Params, m.ReturnType, m.Body, nil, sym.Scope); !c.Unanswered(sig) {
 					switch {
 					case m.AccessorKind == "get":
@@ -1702,9 +1794,9 @@ func (c *Checker) classObject(sym *binder.Symbol, decl *ast.ClassDeclaration) *T
 			continue
 		}
 		mt := c.unanswered
-		if len(m.Overloads) > 0 && !m.IsAsync && !m.IsGenerator {
+		if len(m.Overloads) > 0 && !m.IsAsync {
 			mt = c.overloadsType(strconv.Itoa(sym.ID)+".static."+m.Name, sym.Scope, m.Overloads)
-		} else if !m.IsAsync && !m.IsGenerator {
+		} else if !m.IsAsync {
 			mt = c.signatureType(m, m.Params, m.ReturnType, m.Body, nil, sym.Scope)
 		}
 		add(&Property{Name: m.Name, Type: mt, Visibility: m.Visibility, Owner: sym, Decl: m})
@@ -1733,11 +1825,7 @@ func (c *Checker) classObject(sym *binder.Symbol, decl *ast.ClassDeclaration) *T
 			add(&Property{Name: "prototype", Type: inst, Readonly: true})
 		}
 	}
-	t := c.in.objectOf(props, partial, false)
-	if ctor := c.constructorType(sym); ctor != nil {
-		t = c.in.withSignatures(t, nil, []*Type{ctor})
-	}
-	return t
+	return c.in.classValue(c.in.objectOf(props, partial, false), c.constructorType(sym), sym)
 }
 
 // baseInstance is the instance type of decl's base class, with the
@@ -2109,4 +2197,125 @@ func (c *Checker) templateLiteralType(n *ast.TemplateLiteralType, scope *binder.
 		lits = append(lits, c.in.literal(StringLiteral, s))
 	}
 	return c.in.union(lits...)
+}
+
+// typeQueryType is `typeof a.b.c` in a type position: the type of the value
+// a names, then of each property along the path.
+func (c *Checker) typeQueryType(n *ast.TypeQuery, scope *binder.Scope) *Type {
+	if s := c.b.LookupScope(n); s != nil {
+		scope = s // the scope the annotation is written in
+	}
+	var sym *binder.Symbol
+	for s := scope; s != nil && sym == nil; s = s.Parent {
+		if v := s.Symbols.Get(n.Name); v != nil && v.Flags&binder.Value != 0 {
+			sym = v
+		}
+	}
+	var t *Type
+	if sym != nil {
+		t = c.typeOfSymbol(sym)
+	} else if t = c.builtinValueType(n.Name); t == nil {
+		c.unresolvedValue(n.Name, n, n.GetPos(), scope) // TS2304
+		return c.unanswered
+	}
+	for _, seg := range n.Path {
+		if c.Unanswered(t) || t.Flags&Any != 0 {
+			return t
+		}
+		var next *Type
+		for _, p := range c.apparentType(t).Props {
+			if p.Name == seg {
+				next = p.Type
+				break
+			}
+		}
+		if next == nil {
+			return c.unanswered
+		}
+		t = next
+	}
+	return t
+}
+
+// generatorReturn is the type an unannotated generator function returns, as
+// tsc infers it: Generator<Y, R, unknown>, Y the union of what its
+// `yield`s produce (a bare `yield` undefined, a `yield*` its iterable's
+// element type) and R what its body returns. Unanswered when a yielded
+// value is, or when there is no Generator declaration.
+func (c *Checker) generatorReturn(body *ast.BlockStatement) *Type {
+	if body == nil || c.b.Globals == nil {
+		return c.unanswered
+	}
+	sym := c.b.Globals.Symbols.Get("Generator")
+	if sym == nil || sym.Flags&binder.Interface == 0 {
+		return c.unanswered
+	}
+	var ys []*Type
+	unknown := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration, *ast.ClassExpression:
+			return false // a nested function's yields are its own
+		case *ast.YieldExpression:
+			var t *Type
+			switch {
+			case n.Argument == nil:
+				t = c.undefinedT
+			case n.Delegate:
+				t = c.iteratedType(c.TypeOf(n.Argument))
+			default:
+				t = c.TypeOf(n.Argument) // tsc keeps a yield's literal type
+			}
+			if c.Unanswered(t) {
+				unknown = true
+			} else {
+				ys = append(ys, t)
+			}
+		}
+		return true
+	})
+	if unknown {
+		return c.unanswered
+	}
+	y := c.neverT
+	if len(ys) > 0 {
+		y = c.in.union(ys...)
+	}
+	r := c.returnType(body, nil)
+	if c.Unanswered(r) {
+		return r
+	}
+	return c.interfaceOf(sym, []*Type{y, r, c.unknownT})
+}
+
+// iteratedType is the element type `yield*` and spread take from t: an
+// array's element, a string's characters, a builtin iterator's or
+// generator's first type argument; unanswered for anything else.
+func (c *Checker) iteratedType(t *Type) *Type {
+	switch {
+	case c.Unanswered(t):
+		return t
+	case isStringLike(t):
+		return c.strT
+	case t.Flags&Object != 0 && t.Kind == Array:
+		return t.Elem
+	case t.Flags&Object != 0 && t.Kind == Interface && t.Symbol != nil && len(t.TypeArgs) > 0 && c.inLibrary(t.Symbol.Scope):
+		switch t.Symbol.Name {
+		case "Generator", "IteratorObject", "ArrayIterator", "MapIterator", "SetIterator", "IterableIterator":
+			return t.TypeArgs[0]
+		}
+	}
+	return c.unanswered
+}
+
+// isGeneratorFn reports whether fn is a (non-async) generator function,
+// declaration, method or expression.
+func isGeneratorFn(fn ast.Node) bool {
+	switch f := fn.(type) {
+	case *ast.FunctionDeclaration:
+		return f.IsGenerator && !f.IsAsync
+	case *ast.FunctionExpression:
+		return f.IsGenerator && !f.IsAsync
+	}
+	return false
 }

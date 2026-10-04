@@ -110,7 +110,7 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 		}
 		switch {
 		case target.Float:
-			d := e.emitAnyToNum(v)
+			d := e.emitAnyToF64Slot(v)
 			return e.coerce(Value{Ref: d, Ty: TypeF64}, target)
 		case target.IR == "i1":
 			return e.emitAnyTruthy(v)
@@ -182,6 +182,18 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 			// that layout, else a copy of the layout read field by field
 			// (emit_shape.go) — a dynamic object from a spread included.
 			return Value{Ref: e.emitAnyToLayout(v, target), Ty: target}
+		case target.IsClass && target.IR == "ptr" && !target.IsArray:
+			// A class-instance slot holds an instance: a box with no pointer
+			// (a number, a boolean, a string, null, undefined) reads as null —
+			// which `instanceof` and a member read then see — rather than its
+			// payload's bits. Every heap kind (an object, a stream) keeps its
+			// pointer.
+			tag, payload := e.emitUnboxTagPayload(v)
+			isObj, p, r := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp uge i8 %s, %d", isObj, tag, kmlTagObject))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", p, isObj, payload))
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, p))
+			return Value{Ref: r, Ty: target}
 		case target.IR == "ptr" && !target.IsArray:
 			// A dynamic value flowing into a string- (or other single-pointer-)
 			// typed target reinterprets its boxed payload as that pointer:
@@ -336,6 +348,23 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 			return e.coerce(res, target)
 		}
 	}
+	// A string, array, function or other object where a number (a double)
+	// is expected:
+	// JavaScript's ToNumber (through ToPrimitive for an object), never the
+	// pointer reinterpreted. A boolean target takes ToBoolean.
+	// Under -compat=js only: the strict lane rejects such a value as tsc
+	// does, at its own checks.
+	if e.compatJS() && !v.Ty.IsDynamic && !target.IsDynamic && !v.Ty.IsSymbol && !v.Ty.IsBigInt && !isNullableScalar(v.Ty) &&
+		(isStringTy(v.Ty) || v.Ty.IsArray || v.Ty.IsObject || v.Ty.IsFunc) {
+		switch {
+		case target.IR == "i1" && !isNullableScalar(target):
+			return e.toBool(v)
+		case target.Float && !isNullableScalar(target):
+			if n, err := e.emitUnaryPlus(v, ast.Pos{}); err == nil && n.Ty.IR == "double" {
+				return e.coerce(n, target)
+			}
+		}
+	}
 	// ToNumber(Symbol) is a TypeError in real JS ("Cannot convert a Symbol
 	// value to a number"). A Symbol-typed value flowing into a concrete numeric
 	// scalar (double / machine integer) therefore throws unconditionally rather
@@ -344,8 +373,14 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 	// (`ptr` where an `i64`/`double` is required). Guarded to genuine numeric
 	// machine targets so equality/dynamic/boxing paths (which route elsewhere)
 	// are untouched.
+	if v.Ty.IsSymbol && target.IR == "i1" && !isNullableScalar(target) {
+		return Value{Ref: "true", Ty: target} // ToBoolean(Symbol) is true
+	}
 	if v.Ty.IsSymbol && !target.IsDynamic && (target.Float || (target.IsInteger() && target.IR != "" && target.IR != "ptr")) {
 		e.emitThrowTypeError("Cannot convert a Symbol value to a number")
+		// The caller goes on emitting: into an unreachable block, so nothing
+		// after the throw is dropped while a later block still uses it.
+		e.emitLabel(e.freshLabel("dead"))
 		return Value{Ref: zeroRef(target), Ty: target}
 	}
 
@@ -539,6 +574,9 @@ func (e *Emitter) coerceChecked(v Value, target Type, pos ast.Pos, what string) 
 	// typed-subset diagnostic these call sites want — rather than falling into
 	// coerce's runtime ToNumber(Symbol) TypeError throw (which is reserved for
 	// sites that have no compile-time reject path, like the ArrayBuffer ctor).
+	if v.Ty.IsSymbol && target.IR == "i1" && !isNullableScalar(target) {
+		return Value{Ref: "true", Ty: target}, nil // ToBoolean(Symbol) is true
+	}
 	if v.Ty.IsSymbol && !target.IsDynamic && (target.Float || (target.IsInteger() && target.IR != "" && target.IR != "ptr")) {
 		return Value{}, fmt.Errorf("%d:%d: type mismatch in %s — a Symbol cannot be converted to a number (this compiler is a typed subset)", pos.Line, pos.Col, what)
 	}

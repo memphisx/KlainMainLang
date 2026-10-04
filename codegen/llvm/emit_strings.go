@@ -28,8 +28,7 @@ func (e *Emitter) coerceNumArgRef(v Value, target Type, pos ast.Pos, what string
 
 // isStringTy returns true for a plain string (ptr, not object/array/closure).
 func isStringTy(ty Type) bool {
-	return ty.IR == "ptr" && !ty.IsObject && !ty.IsArray && !ty.IsFlatArray && !ty.IsFunc && !ty.IsBigInt &&
-		!ty.IsURLSearchParams // a URLSearchParams is a pair-list handle, not a string (TDD-00203)
+	return ty.IR == "ptr" && !ty.IsObject && !ty.IsArray && !ty.IsFlatArray && !ty.IsFunc && !ty.IsBigInt
 }
 
 // stringFlags are the Type flags a string itself can carry; every other
@@ -68,7 +67,7 @@ func hasHandleFlag(t Type) bool {
 // type system carries a flag for, so only a genuine string survives.
 func isForOfStringTy(ty Type) bool {
 	return isStringTy(ty) && !ty.IsMap && !ty.IsSet && !ty.IsRegExp && !ty.IsPromise &&
-		!ty.IsDate && !ty.IsURL && !ty.IsURLPattern && !ty.IsSymbol && !ty.IsBlob &&
+		!ty.IsDate && !ty.IsSymbol &&
 		!ty.IsTypedArray && !ty.IsArrayBuffer && !ty.IsReadableStream && !ty.IsStreamReader &&
 		!ty.IsGenerator && !ty.IsDynamic && !ty.Nullable
 }
@@ -218,6 +217,42 @@ func (e *Emitter) emitStringConcat(left, right Value) (Value, error) {
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
 
+// emitStrEq is the i1 of a == b over two non-null string values: equal
+// header lengths, then equal bytes. Inline, so a compare against a constant
+// folds to a length test and a few loads; the memcmp length is the constant
+// operand's when there is one.
+func (e *Emitter) emitStrEq(a, b string) string {
+	e.ensureMemcmp()
+	lenOf := func(p string) string {
+		hp, n := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", hp, p))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", n, hp))
+		return n
+	}
+	la, lb := lenOf(a), lenOf(b)
+	n := la
+	if !strings.HasPrefix(b, "%") {
+		n = lb
+	}
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
+	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", slot))
+	leq := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", leq, la, lb))
+	bytes, done := e.freshLabel("streq.bytes"), e.freshLabel("streq.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", leq, bytes, done))
+	e.emitLabel(bytes)
+	mc, z := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @memcmp(ptr %s, ptr %s, i64 %s)", mc, a, b, n))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", z, mc))
+	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", z, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", done))
+	e.emitLabel(done)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", r, slot))
+	return r
+}
+
 // emitStringBinary handles binary operations on two string (ptr) operands.
 func (e *Emitter) emitStringBinary(op string, left, right Value, pos ast.Pos) (Value, error) {
 	switch op {
@@ -243,18 +278,25 @@ func (e *Emitter) emitStringBinary(op string, left, right Value, pos ast.Pos) (V
 		rSafe := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", lSafe, lNull, empty, left.Ref))
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", rSafe, rNull, empty, right.Ref))
-		cmp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp(ptr %s, ptr %s)", cmp, lSafe, rSafe))
+		// Equality compares inline; an ordering goes through __kml_str_cmp.
+		var raw string
+		if op == "==" || op == "===" || op == "!=" || op == "!==" {
+			raw = e.emitStrEq(lSafe, rSafe)
+			if op == "!=" || op == "!==" {
+				ne := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", ne, raw))
+				raw = ne
+			}
+		} else {
+			cmp := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp(ptr %s, ptr %s)", cmp, lSafe, rSafe))
+			raw = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp %s i32 %s, 0", raw, map[string]string{"<": "slt", ">": "sgt", "<=": "sle", ">=": "sge"}[op], cmp))
+		}
 		anyNull := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", anyNull, lNull, rNull))
 		bothNull := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", bothNull, lNull, rNull))
-		iop := map[string]string{
-			"==": "eq", "===": "eq", "!=": "ne", "!==": "ne",
-			"<": "slt", ">": "sgt", "<=": "sle", ">=": "sge",
-		}[op]
-		raw := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp %s i32 %s, 0", raw, iop, cmp))
 		result := e.freshReg()
 		switch op {
 		case "==", "===":
@@ -739,4 +781,40 @@ func (e *Emitter) emitNumberToLocaleString(mem *ast.MemberExpression, args []ast
 	e.emitInstr(fmt.Sprintf("call void @__kml_num_tolocalestring(ptr %s, double %s)", buf, dblReg))
 	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
+}
+
+// emitStrBranch runs `condReg` (an i1) as a branch, evaluating exactly one
+// of thenFn/elseFn to produce a ptr result — the same alloca+store-in-each-
+// branch+load-after-merge pattern emitConsoleCountMapEnsure/emitConditional
+// already use to merge a branch-computed value back into straight-line
+// code, specialized here to a plain ptr since every URL part is a string.
+func (e *Emitter) emitStrBranch(condReg string, thenFn, elseFn func() (string, error)) (string, error) {
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
+
+	thenL := e.freshLabel("strb.then")
+	elseL := e.freshLabel("strb.else")
+	mergeL := e.freshLabel("strb.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", condReg, thenL, elseL))
+
+	e.emitLabel(thenL)
+	tv, err := thenFn()
+	if err != nil {
+		return "", err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", tv, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(elseL)
+	ev, err := elseFn()
+	if err != nil {
+		return "", err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ev, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
+	return result, nil
 }

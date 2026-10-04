@@ -211,8 +211,9 @@ func (e *Emitter) emitCaughtInstanceOfError(v Value, kindName string, kindID int
 
 // emitCaughtInstanceOfClassTag implements `e instanceof UserErrorClass` for a
 // `class X extends Error` (TDD-00202): true only for a caught Error (tag 13)
-// whose kind slot (field 0) holds the class's TagID — the same runtime identity
-// the static error-subclass instanceof compares (emit_classes.go).
+// whose kind slot (field 0) holds the TagID of the class or of a subclass
+// of it — the same class walk the static error-subclass instanceof uses
+// (emitClassIs).
 func (e *Emitter) emitCaughtInstanceOfClassTag(v Value, tagID int64) Value {
 	tag, pay := e.caughtParts(v)
 	isErr := e.freshReg()
@@ -230,8 +231,7 @@ func (e *Emitter) emitCaughtInstanceOfClassTag(v Value, tagID int64) Value {
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kgep, errorObjType.StructIR(), errObj))
 	kval := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", kval, kgep))
-	km := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", km, kval, errorTypeIDStored(tagID)))
+	km := e.emitClassIs(kval, errorTypeIDStored(tagID))
 	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", km, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	e.emitLabel(mergeL)

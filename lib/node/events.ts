@@ -5,22 +5,7 @@
 // Its default export is EventEmitter itself, as in Node.
 
 import { inspect } from './internal_util_inspect';
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeTypeError, NodeRangeError } from './internal_errors';
 
 class AbortError extends Error {
     code: string = 'ABORT_ERR';
@@ -462,6 +447,12 @@ export class EventEmitter<T = any> {
 
     static getMaxListeners(emitter: any): number {
         return getMaxListeners(emitter);
+    }
+
+    // `require('events').EventEmitter`: the module is the class, and the
+    // class names itself (lib/events.js's EventEmitter.EventEmitter).
+    static get EventEmitter(): typeof EventEmitter {
+        return EventEmitter;
     }
 
     static setMaxListeners(n?: number, ...eventTargets: any[]): void {

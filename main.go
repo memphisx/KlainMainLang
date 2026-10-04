@@ -1,6 +1,7 @@
 package main
 
 import (
+	"KlainMainLang/ast"
 	"KlainMainLang/codegen/llvm"
 	"KlainMainLang/diag"
 	"KlainMainLang/internal/scratch"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -20,7 +22,7 @@ func main() {
 	output := flag.String("o", "", "output binary `name` (default: the input name without its extension)")
 	static := flag.Bool("static", false, "statically link the output binary — for minimal/scratch Docker images. Linux only: run klainmain itself on Linux to use this (macOS's linker has no static-libc support at all, by design)")
 	mm := flag.String("mm", "manual", "memory management `mode`: manual (default, Memory.free(x) only), gc (Boehm GC — allocations are collected automatically; needs bdw-gc/libgc installed), or auto (the compiler inserts free calls where it can prove them safe — /** @free */ and /** @owned */ annotations plus automatic freeing of provably-local values; Memory.free is a compile error)")
-	dynImport := flag.String("dynamic-import", "eager", "dynamic `import()` `mode`: eager (default — a literal-specifier import resolved at compile time, target runs eagerly, wrapped in a resolved Promise) or lazy (each dynamic-import target compiled to a shared-library island loaded on first use — real laziness; incompatible with --static, produces multiple artifacts)")
+	dynImport := flag.String("dynamic-import", "bundled", "dynamic `import()` `mode`: bundled (default — the target is compiled into the binary and its top-level runs on first import(), one module instance shared with the program, as in Node), lazy (the same, with the target's code in a shared library beside the binary, loaded on first use; incompatible with --static) or isolated (the target is its own program in a shared library, with its own instances of every module it imports: nothing it imports shares state with the importer; incompatible with --static)")
 	diagFormat := flag.String("diagnostics", "text", "how errors in the program are reported (the `format`): text (default — one file: line:col: message line each; parsing continues past an error, so every syntax error is reported) or json (an array on stdout, one object per error with code, severity, file, line, col, start, end, message, kind, phase; a code below 90000 is TypeScript's)")
 	compat := flag.String("compat", "strict", "compatibility `mode`: strict (default — the compiler's opinionated, safer-than-JS semantics; e.g. a declaration colliding with an ambient built-in name like Math/fetch is a compile error) or js (best-effort JS-faithful — e.g. real-JS/browser global shadowing)")
 	regex := flag.String("regex", "", "RegExp `dialect`: es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus a source-normalization pass — exact dot line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
@@ -64,6 +66,9 @@ func main() {
 			fmt.Fprintln(out)
 		})
 	}
+	noCache := flag.Bool("no-cache", false, "compile the embedded C runtime files with the program instead of reusing their cached objects")
+	libObjects := flag.Bool("lib-objects", true, "compile each builtin library module once into the object cache and link it; false compiles the library with every program")
+	cacheDir := flag.String("cache-dir", "", "where compiled runtime objects are cached (default: the user cache directory's klainmain/cobj)")
 	showVersion := flag.Bool("version", false, "print the compiler's version (stamped from the release tag by the release pipeline; a git describe for a `make build`; 0.0.0-dev for a plain `go build`) and exit")
 	flag.Parse()
 
@@ -201,10 +206,10 @@ func main() {
 	}
 
 	switch *dynImport {
-	case "eager", "lazy":
+	case "bundled", "lazy", "isolated":
 		// ok
 	default:
-		fatal("unrecognized -dynamic-import value %q — must be one of: eager (default), lazy", *dynImport)
+		fatal("unrecognized -dynamic-import value %q — must be one of: bundled (default), lazy, isolated", *dynImport)
 	}
 
 	switch *diagFormat {
@@ -239,12 +244,12 @@ func main() {
 		reportDiagnostics("parse error", err, *diagFormat)
 	}
 
-	// TDD-00056: the lazy backend loads shared-library islands via dlopen at
+	// The lazy and isolated backends load shared libraries via dlopen at
 	// runtime, which a statically-linked binary generally cannot do. Reject the
 	// combination cleanly (only when dynamic import is actually used), the same
 	// mutual-exclusion posture as -mm / -crypto above.
-	if *dynImport == "lazy" && *static && prog.UsesDynamicImport {
-		fatal("--static cannot be combined with -dynamic-import=lazy when the program uses dynamic import(): a statically-linked binary cannot dlopen() its shared-library islands at runtime. Use -dynamic-import=eager for a single self-contained --static binary, or drop --static to ship the islands alongside the executable")
+	if *dynImport != "bundled" && *static && prog.UsesDynamicImport {
+		fatal("--static cannot be combined with -dynamic-import=%s when the program uses dynamic import(): a statically-linked binary cannot dlopen() shared libraries at runtime. Use -dynamic-import=bundled (the default) for a single self-contained --static binary, or drop --static to ship the libraries alongside the executable", *dynImport)
 	}
 
 	em := llvm.NewEmitter()
@@ -335,7 +340,70 @@ func main() {
 	if cerr != nil {
 		fatal("%v", cerr)
 	}
+	// The runtime files are the same for every program: compiled once into the
+	// object cache and reused (TDD-00238 Stage 0). A cross-target build, -no-cache,
+	// or a member the cache refuses compiles its source with the program.
+	objCache := ""
+	if !*noCache && opts.Target.Triple == "" {
+		objCache = *cacheDir
+		if objCache == "" {
+			if d, err := os.UserCacheDir(); err == nil {
+				objCache = filepath.Join(d, "klainmain", "cobj")
+			}
+		}
+	}
+	// Each builtin library module compiles to the same IR in every program:
+	// its unit is compiled once into the object cache (TDD-00238 Stage 4).
+	// A module object holds the whole module: the link drops what the
+	// program does not reach.
+	libFlags, strip := []string{"-O2"}, "-Wl,-dead_strip"
+	if runtime.GOOS != "darwin" {
+		libFlags, strip = append(libFlags, "-ffunction-sections", "-fdata-sections"), "-Wl,--gc-sections"
+	}
+	// -dynamic-import=lazy (TDD-00238 Stage 5): each import() target's own
+	// code is a shared library beside the binary, binding to the
+	// executable's library, runtime and event loop.
+	var lazyIslands map[string][]string
+	if *dynImport == "lazy" && len(prog.DynModules) > 0 {
+		if runtime.GOOS == "windows" {
+			fatal("-dynamic-import=lazy is not supported on Windows yet; use -dynamic-import=bundled (the default)")
+		}
+		unitCache := objCache
+		if unitCache == "" {
+			d, terr := os.MkdirTemp("", "klainunits-")
+			if terr != nil {
+				fatal("cannot create a unit directory: %v", terr)
+			}
+			defer os.RemoveAll(d)
+			unitCache = d
+		}
+		host, isl, err := llvm.IslandObjects(llFile, unitCache, libFlags, append(append([]string{}, libFlags...), "-fPIC"), islandPlacement(prog))
+		if err != nil {
+			fatal("%v", err)
+		}
+		clangArgs = append(clangArgs, host...)
+		// The libraries bind to the executable's symbols: all of them stay.
+		clangArgs = append(clangArgs, llvm.ExportDynamicFlags()...)
+		lazyIslands = isl
+	} else if *libObjects && objCache != "" {
+		objs, _, err := llvm.LibObjects(llFile, objCache, libFlags)
+		if err != nil {
+			fatal("%v", err)
+		}
+		clangArgs = append(clangArgs, objs...)
+		if !em.UsesFFIDl() { // dlopen(null) looks the executable's own symbols up
+			clangArgs = append(clangArgs, strip)
+		}
+	}
 	for _, cs := range cSources {
+		if objCache != "" {
+			if obj, err := cs.CachedObject(objCache, []string{"-O2"}); err == nil {
+				clangArgs = append(clangArgs, obj)
+				clangArgs = append(clangArgs, cs.CFlags...)
+				clangArgs = append(clangArgs, cs.Libs...)
+				continue
+			}
+		}
 		cPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + "." + cs.Name + "." + cs.SrcExt()
 		if err := os.WriteFile(cPath, []byte(cs.Content), 0644); err != nil {
 			fatal("cannot write %s source: %v", cs.Name, err)
@@ -403,38 +471,30 @@ func main() {
 
 	fmt.Fprintf(os.Stderr, "compiled: %s\n", outBin)
 
-	// --run: execute the freshly-built binary, forwarding the arguments given
-	// after the filename (an optional leading `--` is dropped), propagate its
-	// exit code, and clean up the temp build directory. Done here — before the
-	// lazy-island / packaging / d.ts steps below, which --run does not use.
-	if *runNow {
-		progArgs := flag.Args()[1:]
-		if len(progArgs) > 0 && progArgs[0] == "--" {
-			progArgs = progArgs[1:]
+	// The lazy backend's shared libraries, one per import() target, in a
+	// `<binary>.d/` directory beside the binary (TDD-00238 Stage 5).
+	if len(lazyIslands) > 0 {
+		islandDir := outBin + ".d"
+		if err := os.MkdirAll(islandDir, 0755); err != nil {
+			fatal("cannot create island directory %s: %v", islandDir, err)
 		}
-		runCmd := exec.Command(outBin, progArgs...)
-		runCmd.Stdin = os.Stdin
-		runCmd.Stdout = os.Stdout
-		runCmd.Stderr = os.Stderr
-		runErr := runCmd.Run()
-		if runTmpDir != "" {
-			os.RemoveAll(runTmpDir)
-		}
-		if runErr != nil {
-			if ee, ok := runErr.(*exec.ExitError); ok {
-				os.Exit(ee.ExitCode())
+		for _, h := range sortedIslandHashes(lazyIslands) {
+			soPath := filepath.Join(islandDir, h+llvm.SharedLibExt())
+			args := append([]string{"-shared", "-fPIC"}, lazyIslands[h]...)
+			args = append(args, llvm.IslandLinkFlags()...)
+			args = append(args, "-o", soPath)
+			if err := em.Toolchain().RunLink(args...); err != nil {
+				fatal("dynamic import library %s: clang: %v", h, err)
 			}
-			fatal("run: %v", runErr)
 		}
-		return
 	}
 
-	// TDD-00056 lazy backend: compile each dynamic-import target into its own
-	// shared-library island beside the binary, in a `<binary>.d/` directory, so
-	// the executable dlopen()s it (self-locating) on first `import()`. Each
-	// island is an independent whole-program compile rooted at its target
-	// (nested dynamic imports inside an island stay eager in V1).
-	if *dynImport == "lazy" && len(prog.IslandRoots) > 0 {
+	// TDD-00056 isolated backend: compile each dynamic-import target into its
+	// own shared-library island beside the binary, in a `<binary>.d/`
+	// directory, so the executable dlopen()s it (self-locating) on first
+	// `import()`. Each island is an independent whole-program compile rooted
+	// at its target, with its own instance of every module it imports.
+	if *dynImport == "isolated" && len(prog.IslandRoots) > 0 {
 		islandDir := outBin + ".d"
 		if err := os.MkdirAll(islandDir, 0755); err != nil {
 			fatal("cannot create island directory %s: %v", islandDir, err)
@@ -449,7 +509,7 @@ func main() {
 		for _, root := range prog.IslandRoots {
 			hash := llvm.IslandHash(root)
 			iopts := opts
-			iopts.DynamicImport = "" // an island's own import() is eager, as before
+			iopts.DynamicImport = "" // an island's own import() is bundled into it
 			iprog, err := resolver.ResolveProgramWithOptions(root, iopts)
 			if err != nil {
 				fatal("island %s: parse error: %v", root, err)
@@ -497,6 +557,33 @@ func main() {
 			}
 			fmt.Fprintf(os.Stderr, "  island: %s\n", soPath)
 		}
+	}
+
+	// --run: execute the freshly-built binary, forwarding the arguments given
+	// after the filename (an optional leading `--` is dropped), propagate its
+	// exit code, and clean up the temp build directory. Done here — after the
+	// dynamic-import libraries, before the packaging / d.ts steps below,
+	// which --run does not use.
+	if *runNow {
+		progArgs := flag.Args()[1:]
+		if len(progArgs) > 0 && progArgs[0] == "--" {
+			progArgs = progArgs[1:]
+		}
+		runCmd := exec.Command(outBin, progArgs...)
+		runCmd.Stdin = os.Stdin
+		runCmd.Stdout = os.Stdout
+		runCmd.Stderr = os.Stderr
+		runErr := runCmd.Run()
+		if runTmpDir != "" {
+			os.RemoveAll(runTmpDir)
+		}
+		if runErr != nil {
+			if ee, ok := runErr.(*exec.ExitError); ok {
+				os.Exit(ee.ExitCode())
+			}
+			fatal("run: %v", runErr)
+		}
+		return
 	}
 
 	// --emit-window-dts (TDD-00142 Stage 6): write the page-side Window typing
@@ -679,4 +766,35 @@ func wrapText(s string, width int) []string {
 		lines = append(lines, cur.String())
 	}
 	return lines
+}
+
+// islandPlacement maps a lazy island unit's key to the hash of the import()
+// target whose shared library holds it: a target's init goes into its own,
+// a file only one target reaches into that target's, and a file several
+// reach into the executable ("").
+func islandPlacement(prog *ast.Program) func(string) string {
+	place := map[string]string{}
+	reached := map[string][]string{}
+	for target, files := range prog.DynModules {
+		h := llvm.IslandHash(target)
+		place[llvm.IslandTargetKey(h)] = h
+		for _, f := range files {
+			reached[f] = append(reached[f], h)
+		}
+	}
+	for f, hs := range reached {
+		if len(hs) == 1 {
+			place[ast.DynModuleKey(f)] = hs[0]
+		}
+	}
+	return func(key string) string { return place[key] }
+}
+
+func sortedIslandHashes(m map[string][]string) []string {
+	hs := make([]string, 0, len(m))
+	for h := range m {
+		hs = append(hs, h)
+	}
+	sort.Strings(hs)
+	return hs
 }

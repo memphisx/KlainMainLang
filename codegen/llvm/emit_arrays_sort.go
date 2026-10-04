@@ -150,6 +150,7 @@ func (e *Emitter) emitArraySort(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
+	e.emitArrayGuardFor(mem.Object, arrOpReorder, nil)
 
 	if err := e.emitQsortCall(ptrReg, lenReg, elemTy, args, pos); err != nil {
 		return Value{}, err

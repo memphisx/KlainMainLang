@@ -58,7 +58,7 @@ func TestE2EUtilityPickDropsField(t *testing.T) {
 	mustCompileError(t, `
 interface User { name: string; age: number }
 const a: Pick<User, "name"> = { name: "Z", age: 5 }
-`, "no field 'age'")
+`, "'age' does not exist in type '{ name: string; }'")
 }
 
 // Omit<T, K> drops the named fields.
@@ -90,4 +90,36 @@ type Dir = "north" | "south"
 const d: Dir = "north"
 console.log(d)
 `, "north")
+}
+
+// A named property of a Record<string, V> or an index-signature object
+// reads the value, undefined when absent; the checker types the utility
+// types through their lib.es5 declarations.
+func TestE2ERecordDotReadAbsent(t *testing.T) {
+	assertSameAsNode(t, `
+function f(h: Record<string, string>) { const l = h.link; console.log(l ?? "none") }
+f({ link: "x" })
+f({})
+function g(h: { [k: string]: string }) { const l = h.link; console.log(l ?? "none") }
+g({ link: "y" })
+g({})
+type P = Partial<{ a: number; b: string }>
+const p: P = { a: 1 }
+console.log(p.a, p.b)
+`)
+}
+
+// Object.prototype's toString and hasOwnProperty, through the Object
+// declaration, on objects, class instances and every primitive.
+func TestE2EObjectProtoToStringHasOwn(t *testing.T) {
+	assertSameAsNode(t, `
+const o = { a: 1 }
+console.log(o.hasOwnProperty("a"), o.hasOwnProperty("b"), o.toString())
+class C { x = 1 }
+const c = new C()
+console.log(c.hasOwnProperty("x"), c.toString())
+console.log(Symbol("s").toString(), (10n).toString(), (255n).toString(16), new Error("m").toString(), /a+/g.toString())
+console.log(true.toString(), (1.5).toString(), "s".toString(), [1, 2].toString())
+const e = new TypeError("t"); console.log(e.toString())
+`)
 }

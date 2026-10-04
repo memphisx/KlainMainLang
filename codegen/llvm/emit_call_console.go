@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"KlainMainLang/ast"
+	"KlainMainLang/resolver"
 	"fmt"
 	"strconv"
 	"strings"
@@ -238,16 +239,10 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		e.emitLabel(doneL)
 		return nil
 	}
-	// A caught value (TypeCaught ≈ `unknown`, TDD-00202): an Error renders
-	// "Name: message", anything else via its string form — routed through the
-	// shared caught-to-string helper.
+	// A caught value (TypeCaught ≈ `unknown`, TDD-00202) prints as the value
+	// it holds: an Error with its own properties, anything else inspected.
 	if val.Ty.IsCaught {
-		strVal, err := e.emitCaughtToString(val)
-		if err != nil {
-			return err
-		}
-		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
-		return nil
+		return e.emitConsolePrintValueToken(e.emitCaughtToAny(val), fd, term)
 	}
 	// A nullable-scalar aggregate value (a T|null return/field) prints
 	// null-aware, same as a boxed local (TDD-00064 Stage 3).
@@ -346,7 +341,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		return nil
 	}
 	// A WeakMap / WeakSet hides its entries, a WeakRef its target.
-	if val.Ty.Weak && (val.Ty.IsMap || val.Ty.IsSet) || val.Ty.IsWeakRef || val.Ty.IsCollIter {
+	if val.Ty.Weak && (val.Ty.IsMap || val.Ty.IsSet) || val.Ty.IsCollIter {
 		strVal, err := e.emitInspectField(val, 0)
 		if err != nil {
 			return err
@@ -419,14 +414,6 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 			return nil
 		}
 		strVal, err := e.emitInspectArray(val, 0)
-		if err != nil {
-			return err
-		}
-		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
-		return nil
-	}
-	if val.Ty.IsURL && !val.Ty.Nullable && !val.Ty.IsDynamic {
-		strVal, err := e.emitInspectURL(val, 0)
 		if err != nil {
 			return err
 		}
@@ -742,6 +729,20 @@ func (e *Emitter) emitConsoleGroupEnd(args []ast.Expression, pos ast.Pos) (Value
 func (e *Emitter) emitConsoleDir(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) < 1 || len(args) > 2 {
 		return Value{}, fmt.Errorf("%d:%d: console.dir takes 1 or 2 arguments (obj, options?)", pos.Line, pos.Col)
+	}
+	// Options known only at run time: Node's own form, the line
+	// util.inspect(obj, { customInspect: false, ...options }) renders.
+	if resolver.DirOptionsAtRunTime(args) {
+		m, ok := e.libExports["internal_util_inspect:inspect"]
+		if !ok {
+			return Value{}, fmt.Errorf("%d:%d: internal error: console.dir's run-time inspect is not linked", pos.Line, pos.Col)
+		}
+		opts := ast.NewObjectLiteral([]ast.ObjectProperty{
+			{Key: "customInspect", Value: &ast.BooleanLiteral{Value: false}},
+			{Value: ast.NewSpreadElement(args[1], pos)},
+		}, pos)
+		line := ast.NewCallExpression(ast.NewIdentifier(m, pos), []ast.Expression{args[0], opts}, pos)
+		return e.emitConsolePrint([]ast.Expression{line}, 1, "")
 	}
 	// Node's console.dir defaults to depth 2 (util.inspect's default), unlike a
 	// bare console.log; honor that here, overridable via { depth }.

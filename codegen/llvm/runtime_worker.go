@@ -6,6 +6,7 @@
 package llvm
 
 import (
+	_ "embed"
 	"fmt"
 )
 
@@ -71,15 +72,6 @@ func (e *Emitter) ensureGCStackBottomCurrent() {
 	e.emitGlobal("declare void @__kml_gc_sb_cur()")
 }
 
-// sigBlockFlag returns SIG_BLOCK's numeric value — glibc defines it as 0,
-// Darwin as 1. Same per-OS-constant pattern as httpNonblockFlag.
-func (e *Emitter) sigBlockFlag() int {
-	if e.opts.Target.OS() == "darwin" {
-		return 1
-	}
-	return 0
-}
-
 // ensureGCUncollectable declares GC_malloc_uncollectable exactly once —
 // zeroed, never collected, but still scanned. Used for any allocation whose
 // only live reference can be invisible to Boehm (pipe-buffered envelopes,
@@ -92,6 +84,23 @@ func (e *Emitter) ensureGCUncollectable() {
 	e.emitGlobal("declare ptr @GC_malloc_uncollectable(i64 noundef)")
 }
 
+//go:embed workersrc/worker.c
+var workerSource string
+
+// WorkerSource is the Worker thread runtime's C source, behind kml_layout.h.
+func WorkerSource() string { return layoutHeader() + workerSource }
+
+// WorkerCFlags is worker.c's mode define: under -mm=gc the thread registers
+// with the collector.
+func (e *Emitter) WorkerCFlags() []string {
+	if e.isGCMode() {
+		return []string{"-DKLAIN_GC=1"}
+	}
+	return nil
+}
+
+// ensureWorkerRuntime declares the Worker thread runtime (workersrc/worker.c)
+// once and emits the generated @__kml_worker_uncaught.
 func (e *Emitter) ensureWorkerRuntime() {
 	if e.usedWorkerRuntime {
 		return
@@ -99,136 +108,20 @@ func (e *Emitter) ensureWorkerRuntime() {
 	e.usedWorkerRuntime = true
 	e.ensureExit()
 	e.ensureWorkerFdSetbit()
-	e.emitGlobal("declare i32 @pthread_sigmask(i32 noundef, ptr noundef, ptr noundef)")
-	e.emitGlobal("declare i32 @sigfillset(ptr noundef)")
-	e.emitGlobal("declare void @pthread_exit(ptr noundef)")
-	// klainpool.c's worker natives.
-	e.emitGlobal("declare void @__kml_worker_register(ptr, ptr, ptr)")
-	e.emitGlobal("declare ptr @__kml_worker_enter(ptr)")
-	e.emitGlobal("declare void @__kml_worker_leave(i64)")
-	e.emitGlobal("declare zeroext i1 @__kml_worker_is_thread()")
-	e.emitGlobal("declare zeroext i1 @__kml_worker_terminating()")
-
-	// A worker thread's GC registration: with Boehm before its first
-	// allocation, its thread-local block a root, and its own stack bottom in
-	// the TLS orig slot so fiber-swap restores never point at another
-	// thread's stack.
-	gcRegister, gcUnregister := "", ""
-	if e.isGCMode() {
-		e.emitGlobal("declare i32 @GC_get_stack_base(ptr noundef)")
-		e.emitGlobal("declare i32 @GC_register_my_thread(ptr noundef)")
-		e.emitGlobal("declare i32 @GC_unregister_my_thread()")
-		e.emitGlobal("declare void @__kml_gc_tls_register()")
-		e.emitGlobal("declare void @__kml_gc_tls_unregister()")
-		gcRegister = `
-  %gcsb = alloca [2 x ptr], align 8
-  call i32 @GC_get_stack_base(ptr %gcsb)
-  call i32 @GC_register_my_thread(ptr %gcsb)
-  call void @__kml_gc_tls_register()
-  %gcmem_p = getelementptr [2 x ptr], ptr %gcsb, i32 0, i32 0
-  %gcmem = load ptr, ptr %gcmem_p, align 8
-  store ptr %gcmem, ptr @__kml_gc_orig_stackbottom, align 8`
-		gcUnregister = `
-  call void @__kml_gc_tls_unregister()
-  call i32 @GC_unregister_my_thread()`
-	}
-
-	// @__kml_worker_thread(ctx): the thread a Worker runs. Signals are the
-	// main thread's; the worker's modules evaluate (its entry), then its loop
-	// runs until nothing holds it open, and the parent hears the exit code.
-	e.emitGlobal(fmt.Sprintf(`define ptr @__kml_worker_thread(ptr %%ctx) {
-entry:%s
-  %%sigset = alloca [128 x i8], align 8
-  call i32 @sigfillset(ptr %%sigset)
-  call i32 @pthread_sigmask(i32 %d, ptr %%sigset, ptr null)
-  %%entryfn = call ptr @__kml_worker_enter(ptr %%ctx)
-  call void %%entryfn()
-  %%code = call i64 @__kml_worker_run_loop()
-  call void @__kml_worker_leave(i64 %%code)%s
-  ret ptr null
-}`, gcRegister, e.sigBlockFlag(), gcUnregister))
-
-	// @__kml_worker_end_thread: the end of a worker thread from anywhere on
-	// its own stack (process.exit, an uncaught error, terminate()).
-	e.emitGlobal(fmt.Sprintf(`define void @__kml_worker_end_thread() {
-entry:%s
-  call void @pthread_exit(ptr null)
-  unreachable
-}`, gcUnregister))
-
-	// @__kml_thread_exit(code): process.exit's end on a worker — the thread
-	// ends with the code; elsewhere the process does. On a coroutine stack (a
-	// worker module task's top level, or any task) the thread may not end
-	// from there: winpthreads' pthread_exit longjmps to the thread's start
-	// frame, and a longjmp off a fiber stack fast-fails the process. It
-	// parks for good and whoever resumed the task — always on the thread's
-	// own stack — ends the thread (@__kml_worker_abort_check).
 	e.ensureTaskRuntime()
-	e.emitGlobal("@__kml_worker_abort = internal thread_local global i1 false, align 1")
-	e.emitGlobal(fmt.Sprintf(`define void @__kml_thread_exit(i32 %%code) {
-entry:
-  %%w = call zeroext i1 @__kml_worker_is_thread()
-  br i1 %%w, label %%worker, label %%proc
-proc:
-  call void @exit(i32 %%code)
-  unreachable
-worker:
-  %%c64 = sext i32 %%code to i64
-  call void @__kml_worker_leave(i64 %%c64)
-  %%ct = load ptr, ptr @__kml_current_task, align 8
-  %%ontask = icmp ne ptr %%ct, null
-  br i1 %%ontask, label %%parkforever, label %%endthread
-endthread:
-  call void @__kml_worker_end_thread()
-  unreachable
-parkforever:
-  store i1 true, ptr @__kml_worker_abort, align 1
-  %%rc_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
-  %%rc = load ptr, ptr %%rc_p, align 8
-  %%ctx_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
-  %%ctx = load ptr, ptr %%ctx_p, align 8
-  %%sw = call i32 @swapcontext(ptr %%ctx, ptr %%rc)
-  unreachable
-}`, taskStructIR, taskResumerCtx, taskStructIR, taskCtx))
-
-	// @__kml_worker_abort_check runs after every task swap returns (spawn,
-	// the scheduler, @__kml_task_resume) and ends the thread once control is
-	// back on the thread's own stack.
-	e.emitGlobal(`define void @__kml_worker_abort_check() {
-entry:
-  %abort = load i1, ptr @__kml_worker_abort, align 1
-  br i1 %abort, label %chk, label %done
-chk:
-  %ct = load ptr, ptr @__kml_current_task, align 8
-  %onstack = icmp eq ptr %ct, null
-  br i1 %onstack, label %endthread, label %done
-endthread:
-  call void @__kml_worker_end_thread()
-  unreachable
-done:
-  ret void
-}`)
-
-	// The loop's worker hook: a terminated worker ends at its next turn,
-	// with exit code 1 (klainpool.c's leave records it).
-	e.emitGlobal(`define void @__kml_worker_dispatch() {
-entry:
-  %t = call zeroext i1 @__kml_worker_terminating()
-  br i1 %t, label %stop, label %done
-stop:
-  call void @__kml_thread_exit(i32 1)
-  ret void
-done:
-  ret void
-}
-define i1 @__kml_worker_keepalive() {
-entry:
-  ret i1 0
-}
-define i1 @__kml_worker_fdset_add(ptr %fdset, ptr %maxfd) {
-entry:
-  ret i1 0
-}`)
+	// klainpool.c's worker natives, and worker.c's own entry points.
+	e.emitGlobal(`declare void @__kml_worker_register(ptr, ptr, ptr)
+declare ptr @__kml_worker_enter(ptr)
+declare void @__kml_worker_leave(i64)
+declare zeroext i1 @__kml_worker_is_thread()
+declare zeroext i1 @__kml_worker_terminating()
+declare ptr @__kml_worker_thread(ptr)
+declare void @__kml_worker_end_thread()
+declare void @__kml_thread_exit(i32)
+declare void @__kml_worker_abort_check()
+declare void @__kml_worker_dispatch()
+declare i1 @__kml_worker_keepalive()
+declare i1 @__kml_worker_fdset_add(ptr, ptr)`)
 
 	// @__kml_worker_uncaught(tag, payload): an uncaught error on a worker
 	// thread goes to the parent's 'error' listener (through the hook

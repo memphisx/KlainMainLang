@@ -1,8 +1,15 @@
 package tests
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"KlainMainLang/codegen/llvm"
+	"KlainMainLang/options"
+	"KlainMainLang/resolver"
 )
 
 // --- Ambient declarations (`declare`), ADR-00388 ---
@@ -52,8 +59,10 @@ console.log(c2.port)
 }
 
 func TestE2ETypeofScalarInline(t *testing.T) {
+	// `let`: a `const base = 42` would make `typeof base` the literal 42
+	// (TS2322 on 100), as in tsc.
 	assertOutput(t, `
-const base = 42;
+let base = 42;
 let copy: typeof base = 100;
 console.log(copy)
 `, "100")
@@ -645,4 +654,445 @@ function pick(b: boolean): string | undefined | void { if (b) return "x" }
 const a = pick(true), c = pick(false)
 console.log(a, c, c === undefined)
 `, "x undefined true")
+}
+
+// ADR-01318: a `typeof` query names the value in its own scope — a local
+// shadowing a top-level binding — and an unknown name is TS2304.
+func TestE2ETypeofLocalShadowAndUnknownName(t *testing.T) {
+	assertSameAsNode(t, `
+const v = { a: 1 };
+function f() { let v = "s"; let w: typeof v = "t"; return w; }
+console.log(f(), v.a);
+`)
+	_, err := parseAndCompile(`let z: typeof nope = 1;`)
+	if err == nil || !strings.Contains(err.Error(), "cannot find name 'nope'") {
+		t.Errorf("want TS2304 for typeof of an unknown name, got %v", err)
+	}
+}
+
+// A generic call whose argument alone answers a constrained type parameter
+// is checked against the constraint, as tsc does (TS2345, TS2353 for an
+// object literal); a call that satisfies it compiles (BACKLOG 40).
+func TestGenericArgumentCheckedAgainstConstraint(t *testing.T) {
+	for _, src := range []string{
+		"const xs: number[] = [1, 2]; crypto.getRandomValues(xs);",
+		"function g<T extends { id: number }>(x: T): number { return x.id; } g({ name: 'z' });",
+		"function f<T extends string>(x: T): T { return x; } f(1 as number);",
+	} {
+		if _, err := parseAndCompile(src); err == nil {
+			t.Errorf("expected a type error for %q", src)
+		}
+	}
+	if _, err := parseAndCompile("function f<T extends string>(x: T): T { return x; } function g<T extends { id: number }>(x: T): number { return x.id; } console.log(f('a'), g({ id: 1, name: 'z' }), crypto.getRandomValues(new Uint8Array(2)).length);"); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// A function type's parameter with a name but no type is TS7051 (a type
+// name) or TS7006, and an override not assignable to the base member is
+// TS2416, as tsc reports them; valid overrides compile (BACKLOG 49).
+func TestSignatureParamTypesAndOverrides(t *testing.T) {
+	for src, want := range map[string]string{
+		"type F = (string) => void; const f: F = (x: string) => {};":                                              "did you mean 'arg0: string'",
+		"type G = (x) => void; const g: G = () => {};":                                                            "implicitly has an 'any' type",
+		"class A { m(x: number): number { return x; } } class B extends A { m(x: string): number { return 1; } }": "not assignable to the same property in base type",
+	} {
+		_, err := parseAndCompile(src)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want %q, got %v", src, want, err)
+		}
+	}
+	if _, err := parseAndCompile("class Animal { speak(): string { return 'x'; } clone(): Animal { return new Animal(); } } class Dog extends Animal { speak(): string { return 'w'; } clone(): Dog { return new Dog(); } } console.log(new Dog().speak());"); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// A value with no type meaning used as a type is TS2749 (BACKLOG 34).
+func TestValueUsedAsTypeIsTS2749(t *testing.T) {
+	_, err := parseAndCompile("const C = class { x = 1; }; const c: C = new C(); console.log(c);")
+	if err == nil || !strings.Contains(err.Error(), "refers to a value, but is being used as a type") {
+		t.Fatalf("want TS2749, got %v", err)
+	}
+	if _, err := parseAndCompile("class D { x = 1; } enum E { A } const d: D = new D(); const e: E = E.A; console.log(d, e);"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// A misspelled type name near a known one is TS2552 with tsc's suggestion
+// (BACKLOG 33).
+func TestNearMissTypeNameIsTS2552(t *testing.T) {
+	_, err := parseAndCompile("interface Point { x: number } const p: Pont = { x: 1 }; console.log(p);")
+	if err == nil || !strings.Contains(err.Error(), "did you mean 'Point'") {
+		t.Fatalf("want TS2552, got %v", err)
+	}
+}
+
+// InstanceType<typeof C> of a class expression's binding is its instances'
+// type (ADR-01350).
+func TestE2EInstanceTypeOfClassExpression(t *testing.T) {
+	assertSameAsNode(t, `
+const Money = class Currency {
+  cents: number;
+  constructor(cents: number) { this.cents = cents; }
+};
+function dollars(m: InstanceType<typeof Money>): number { return m.cents / 100; }
+class Plain { v = 3; }
+function v(p: InstanceType<typeof Plain>): number { return p.v; }
+console.log(dollars(new Money(500)), v(new Plain()));
+`)
+}
+
+// `new` of an indexed or member callee (BACKLOG 41).
+func TestE2ENewIndexedCallee(t *testing.T) {
+	assertSameAsNode(t, `
+class A { v = 1; }
+class B { v = 2; }
+const classes = [A, B];
+const ns = { K: A };
+console.log(new classes[1]().v, new ns.K().v, new (classes[0])().v);
+`)
+}
+
+// A top-level stream reader is visible in a named function (BACKLOG 42).
+func TestE2ETopLevelReaderInFunction(t *testing.T) {
+	assertSameAsNode(t, `
+const rs = new ReadableStream<string>({ start(c) { c.enqueue('a'); c.enqueue('b'); c.close(); } });
+const r = rs.getReader();
+async function drain(): Promise<void> {
+  for (;;) { const { done, value } = await r.read(); if (done) break; console.log(value); }
+}
+drain();
+`)
+}
+
+// A type name is resolved in its scope: a block's or function's type used
+// outside it, and a namespace's type used unqualified outside it, are
+// TS2304 (BACKLOG 32, 37).
+func TestOutOfScopeTypeNameIsTS2304(t *testing.T) {
+	for _, src := range []string{
+		"function f() { type Local = { a: number }; const l: Local = { a: 1 }; return l.a; } const z: Local = { a: 2 }; console.log(f(), z);",
+		"{ interface Inner { b: string } const i: Inner = { b: 'x' }; console.log(i.b); } const w: Inner = { b: 'y' }; console.log(w);",
+		"namespace N { export type Kind = 'a' | 'b'; } const k: Kind = 'a'; console.log(k);",
+	} {
+		_, err := parseAndCompile(src)
+		if err == nil || !strings.Contains(err.Error(), "cannot find name") {
+			t.Errorf("%q: want TS2304, got %v", src, err)
+		}
+	}
+	if _, err := parseAndCompile("namespace N { export type Kind = 'a' | 'b'; export function f(k: Kind): Kind { return k; } export namespace In { export type Deep = number; export const d: Deep = 1; } } const q: N.Kind = N.f('b'); const z: N.In.Deep = N.In.d; console.log(q, z);"); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// A member a builtin module or class does not declare is TS2339
+// (BACKLOG 47).
+func TestUnknownBuiltinMemberIsTS2339(t *testing.T) {
+	for src, want := range map[string]string{
+		"import * as fs from 'fs'; fs.nopeSync();":                                       `does not exist on type 'typeof import("fs")'`,
+		"import { EventEmitter } from 'events'; const e = new EventEmitter(); e.nope();": "property 'nope' does not exist",
+	} {
+		_, err := parseAndCompileImports(t, src)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want %q, got %v", src, want, err)
+		}
+	}
+}
+
+// `new X(…)` through a value's construct signatures checks its arguments,
+// and an optional parameter's target is named without its undefined, at the
+// argument's start, as tsc reports them (ADR-01355).
+func TestConstructSignatureArgumentsChecked(t *testing.T) {
+	for src, want := range map[string]string{
+		`const dv = new DataView(new ArrayBuffer(8), Symbol("x")); console.log(dv);`: `1:45: argument of type 'symbol' is not assignable to parameter of type 'number'`,
+		`function f(x?: number) { return x; } f(Symbol("x"));`:                       `1:40: argument of type 'symbol' is not assignable to parameter of type 'number'`,
+		`function k(x?: string | number) { return x; } k(Symbol("d"));`:              `parameter of type 'string | number | undefined'`,
+	} {
+		_, err := parseAndCompile(src)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want %q, got %v", src, want, err)
+		}
+	}
+}
+
+// A statement after an unconditional throw compiles to valid IR, and the
+// JS lane throws Node's TypeError (ADR-01356).
+func TestE2EStatementAfterCompileTimeThrow(t *testing.T) {
+	bin := buildBinaryCompatJS(t, `const dv = new DataView(new ArrayBuffer(8), Symbol("x"));
+console.log(dv);
+`)
+	out, _ := exec.Command(bin).CombinedOutput()
+	if !strings.Contains(string(out), "Cannot convert a Symbol value to a number") {
+		t.Fatalf("want the TypeError, got %q", out)
+	}
+}
+
+// A class value is related through its construct signature: `typeof B` does
+// not fit `typeof A` or a constructor type whose parameters it rejects; the
+// types print as tsc prints them, at the declared name (ADR-01358).
+func TestConstructSignatureAssignability(t *testing.T) {
+	for src, want := range map[string]string{
+		"class A { constructor(n?: string) {} } class B extends A { constructor(x: number) { super(); } }\nlet K: typeof A = B;":                "2:5: type 'typeof B' is not assignable to type 'typeof A'",
+		"class A { constructor(n?: string) {} } class B extends A { constructor(x: number) { super(); } }\nconst f: new (n?: string) => A = B;": "2:7: type 'typeof B' is not assignable to type 'new (n?: string | undefined) => A'",
+	} {
+		_, err := parseAndCompile(src)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want %q, got %v", src, want, err)
+		}
+	}
+	if _, err := parseAndCompile("class A { constructor(n?: string) {} } class C extends A { constructor(s: string) { super(s); } }\nlet ok: typeof A = C; const g: new (n: string) => A = C; console.log(ok, g);"); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	// A constructor type infers its instance type from a class value or a
+	// builtin constructor.
+	assertSameAsNode(t, `
+class Shape { name = "shape"; }
+function make<T>(ctor: new () => T): T { return new ctor(); }
+console.log(make(Shape).name, make(Map).size);
+`)
+}
+
+// A typed promise viewed under another type (`Promise<unknown>`, `any`) is
+// the same object: it settles in the same microtask as the source
+// (ADR-01363).
+func TestE2EPromiseViewSettlesWithSource(t *testing.T) {
+	assertSameAsNode(t, `
+async function hops(p: Promise<unknown>): Promise<number> { let n = 0, done = false; p.then(() => { done = true; }); while (!done) { await null; n++; if (n > 50) break; } return n; }
+async function main(): Promise<void> {
+  console.log(await hops(Promise.resolve(1)));
+  console.log(await hops(Promise.resolve(1).then((v) => v)));
+  console.log(await hops(Promise.resolve(1).then((v) => v).then((v) => v)));
+  const a: any = Promise.resolve(2).then((v) => v);
+  console.log(await hops(a));
+  const r = Promise.reject(new Error('x')).then(() => 1);
+  const rv: Promise<unknown> = r;
+  rv.catch((e) => console.log('caught', (e as Error).message));
+}
+main();
+`)
+}
+
+// JSON.stringify escapes an embedded NUL as \u0000 (ADR-01364).
+func TestE2EJSONStringifyEmbeddedNul(t *testing.T) {
+	assertSameAsNode(t, `
+const s = "a\u0000b";
+const o: any = { s, n: [s] };
+console.log(s.length, JSON.stringify(s), JSON.stringify({ s }), JSON.stringify(o));
+`)
+}
+
+// An assigned Error `cause` is an own enumerable property, the constructor's
+// option is not, and defineProperty's `enumerable` (default false for a new
+// property, kept for an existing one) decides it (ADR-01369).
+func TestE2EErrorCauseEnumerability(t *testing.T) {
+	assertSameAsNode(t, `
+const e = new Error('x');
+(e as any).cause = 5;
+console.log(Object.keys(e), JSON.stringify(e));
+Object.defineProperty(e, 'cause', { enumerable: false, value: 9 });
+console.log(Object.keys(e), (e as any).cause, JSON.stringify(e));
+const f = new Error('y', { cause: 1 });
+Object.defineProperty(f, 'cause', { value: 3 });
+console.log(Object.keys(f), (f as any).cause);
+Object.defineProperty(f, 'cause', { value: 4, enumerable: true });
+console.log(Object.keys(f), (f as any).cause);
+const g = new Error('z');
+Object.defineProperty(g, 'cause', { value: 7 });
+console.log(Object.keys(g), (g as any).cause);
+(g as any).extraKey = 1;
+Object.defineProperty(g, 'hidden', { value: 2 });
+console.log(Object.keys(g), (g as any).hidden);
+`)
+}
+
+// Under -compat=js a Date variable compound-assigned with arithmetic takes
+// the result (`d += 1` a string, `d -= 5` a number), as in JS (ADR-01370).
+func TestE2ECompatJSDateCompoundAssignWidens(t *testing.T) {
+	assertOutputCompatJS(t, `
+let d = new Date(0);
+d += 1;
+console.log(typeof d, String(d).endsWith("1"));
+let e = new Date(0);
+e -= 5;
+console.log(typeof e, e);
+let f = new Date(0);
+f = new Date(5);
+console.log(typeof f, f.getTime());
+`, "string true\nnumber -5\nobject 5")
+}
+
+// Under -compat=js a function declared in a block also binds a var of its
+// name in the enclosing function (Annex B.3.3), undefined until the block
+// runs (ADR-01371).
+func TestE2ECompatJSAnnexBBlockFunctions(t *testing.T) {
+	// The rewrite is the resolver's: built through the CLI.
+	cli := buildCLI(t)
+	dir := tempDir(t)
+	srcFile, binFile := filepath.Join(dir, "prog.ts"), filepath.Join(dir, "prog")
+	if err := os.WriteFile(srcFile, []byte(`
+console.log(typeof f);
+{ function f() { return 1; } }
+console.log(typeof f, f());
+if (true) { function g() { return 2; } }
+console.log(g());
+function outer() {
+  console.log(typeof h);
+  for (let i = 0; i < 1; i++) { function h() { return 3; } }
+  return h();
+}
+console.log(outer());
+switch (1) { case 1: function s() { return 's'; } }
+console.log(s());
+function w() { let x = null; x = function () { return 4; }; return x(); }
+console.log(w());
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(cli, "-compat=js", "-o", binFile, srcFile).CombinedOutput(); err != nil {
+		t.Fatalf("compile: %v\n%s", err, out)
+	}
+	out, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	compareLines(t, strings.TrimRight(string(out), "\n"), "undefined\nfunction 1\n2\nundefined\n3\ns\n4")
+}
+
+// Under -compat=js a class method's number parameter takes ToNumber of a
+// string, array or object argument, as JavaScript converts it (ADR-01372).
+func TestE2ECompatJSClassCallToNumber(t *testing.T) {
+	assertOutputCompatJS(t, `
+var sample = new DataView(new ArrayBuffer(8), 0);
+sample.setUint8(1, 7);
+console.log(sample.getUint8("1"), sample.getUint8([1]), sample.getUint8(["1"]), sample.getUint8([]), sample.getUint8(null), sample.getUint8(true));
+`, "7 7 7 0 0 7")
+}
+
+// A class method's boolean parameter takes ToBoolean of whatever is passed
+// (a string, an object), and a number parameter ToNumber through the
+// object's own valueOf/toString.
+func TestE2ECompatJSClassCallToBoolean(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var buffer = new ArrayBuffer(4);
+var sample = new DataView(buffer, 0);
+sample.setInt8(0, 39);
+sample.setInt8(1, 42);
+console.log(sample.getInt16(0, "s"), sample.getInt16(0, ""), sample.getInt16(0, {}), sample.getInt16(0, 0), sample.getInt16(0, null));
+var one = { valueOf: function () { return 1; } };
+var two = { toString: function () { return "1"; } };
+console.log(sample.getInt8(one), sample.getInt8(two), sample.getInt8([1]));
+`)
+}
+
+// ToNumber of an object held in any runs ToPrimitive at every site, not
+// only at an operator: Number(), a Math function's argument.
+func TestE2EAnyToNumberToPrimitive(t *testing.T) {
+	assertSameAsNode(t, `
+const o: any = { valueOf() { return 4; } };
+const s: any = { toString() { return "5"; } };
+const arr: any = [6];
+const plain: any = {};
+console.log(o * 1, Number(o), Math.max(o, s), Math.abs(arr), Math.abs(plain));
+`)
+}
+
+// An Array, Map or Set iterator held in any: next()'s result reads its
+// value and done, and an absent optional method reads undefined.
+func TestE2EAnyCollectionIteratorResult(t *testing.T) {
+	assertSameAsNode(t, `
+const it: any = [1, 2].values();
+const r = it.next();
+console.log(r.done, r.value, typeof it.return, typeof it.throw);
+const m: any = new Map([[1, "a"]]).keys();
+const q = m.next();
+console.log(q.done, q.value, m.next().done);
+const st: any = new Set(["x"]).values();
+console.log(st.next().value);
+const prices = new Map([["tea", 3], ["cake", 5]]);
+const vs: any = prices.values();
+const ks: any = prices.keys();
+console.log(vs.next().value, ks.next().value, vs, ks);
+`)
+}
+
+// An unannotated method may call a sibling declared after it: its result is
+// that sibling's, through a chain of such calls, for instance, private and
+// static methods alike.
+func TestE2EMethodCallsLaterSibling(t *testing.T) {
+	assertSameAsNode(t, `
+class B {
+  a() { return this.b(); }
+  b() { return this.c() + "!"; }
+  c() { return "x"; }
+  n() { return this.#p() * 2; }
+  #p() { return 21; }
+  static s() { return B.t(); }
+  static t() { return [1, 2]; }
+}
+const b = new B();
+console.log(b.a(), b.n(), B.s());
+const E = class { method() { return this.#m(); } #m() { return "test262"; } };
+console.log(new E().method());
+`)
+}
+
+// A destructuring assignment's value is its right-hand side; it reads a
+// dynamic source and computed keys; a null-initialized binding it assigns
+// takes the value; a declaration initialized by an assignment takes its
+// value.
+func TestE2EDestructuringAssignmentValue(t *testing.T) {
+	src := `
+var x = null; var result; var vals = { x: 2 };
+result = { x, } = vals;
+console.log(x, result === vals);
+var a, b, c, d, k = "kk";
+var o = { a: 1, b: { c: 3 }, kk: "K" };
+({ a, b: { c }, d = 9, [k]: b } = o);
+console.log(a, c, d, b);
+var r2 = ({ a } = { a: 5 });
+console.log(a, r2.a);
+var y; var z = y = "s"; console.log(z, y);
+var p = null; [p] = [7]; console.log(p);
+`
+	assertSameAsNode(t, src)
+	assertSameAsNodeCompatJS(t, src)
+}
+
+// indexOf / lastIndexOf / includes compare by strict equality: a search
+// value of another kind than the elements matches none, never converted.
+func TestE2EArraySearchOtherKind(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var o = {};
+console.log([0, 1].indexOf(o), [0, o].indexOf(o), [1, 2].indexOf("1"), [1, 0].indexOf(true));
+console.log([1, 2].lastIndexOf("2"), [1, 2].includes("1"), ["a", "1"].indexOf(1), [true].indexOf(1));
+console.log([1.5, 2].indexOf(2), [1, 2].includes(2));
+`)
+}
+
+// Where the type check leaves a call unchecked, an argument no conversion
+// reaches is a type error at the strict emitter, never invalid IR: a
+// method's parameter, resize's length and a concat element. The program is
+// resolved without the check (as the js lane resolves) to reach the emitter.
+func TestE2EStrictEmitterRejectsUnconvertibleArgs(t *testing.T) {
+	cases := []string{
+		`var dv = new DataView(new ArrayBuffer(4), 0); console.log(dv.getInt8(""));`,
+		`var dv = new DataView(new ArrayBuffer(4), 0); console.log(dv.getInt16(0, {}));`,
+		`var ab = new ArrayBuffer(0, { maxByteLength: 4 }); ab.resize({ valueOf: function () { return {}; } });`,
+		`var fn = function () {}; console.log([].concat(fn).length);`,
+	}
+	for _, src := range cases {
+		d := t.TempDir()
+		f := filepath.Join(d, "main.js")
+		if err := os.WriteFile(f, []byte(src), 0644); err != nil {
+			t.Fatal(err)
+		}
+		prog, err := resolver.ResolveProgramWithOptions(f, options.Options{Compat: "js"})
+		if err != nil {
+			t.Fatalf("resolve %q: %v", src, err)
+		}
+		em := llvm.NewEmitter()
+		em.SetCompatMode("strict")
+		if _, err := em.EmitProgram(prog); err == nil || !strings.Contains(err.Error(), "type mismatch") {
+			t.Errorf("%q: want a type-mismatch error, got %v", src, err)
+		}
+	}
 }

@@ -117,7 +117,10 @@ type SignatureParameter struct {
 	Optional bool
 	Rest     bool
 	Type     TypeNode
-	Range    Loc
+	// Untyped marks a parameter written without a type (`(x) => void`), whose
+	// Type the parser fills in as `any`.
+	Untyped bool
+	Range   Loc
 }
 
 // FunctionType is `<T>(a: A, b?: B, ...c: C[]) => R`.
@@ -193,6 +196,9 @@ type CallSignature struct {
 	Parameters     []*SignatureParameter
 	Type           TypeNode
 	Range          Loc
+	// Intrinsic is a builtin declaration's `/** @intrinsic name */`: a call
+	// of a value of this type is emitted inline (TDD-00230 P3.2).
+	Intrinsic string
 }
 
 // ConstructSignature is `new (params): R`. Type is nil when the return type is
@@ -221,6 +227,10 @@ type MappedType struct {
 	Optional   bool
 	Type       TypeNode
 	Range      Loc
+	// ReadonlyMod and OptionalMod are the modifiers' signs: 1 for
+	// `readonly`/`+readonly` and `?`/`+?`, -1 for `-readonly` and `-?`, 0
+	// when absent (a homomorphic mapping keeps the source's).
+	ReadonlyMod, OptionalMod int
 }
 
 // ConditionalType is `C extends E ? T : F`.

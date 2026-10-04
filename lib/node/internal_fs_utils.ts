@@ -3,6 +3,8 @@
 // share, and the binding their operations call — one libuv fs request per
 // call (klainfs.c), synchronous or on the thread pool.
 
+import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
+
 export type PathLike = string | Buffer | URL;
 export type PathOrFileDescriptor = PathLike | number;
 export type TimeLike = string | number | Date;
@@ -49,30 +51,8 @@ export interface StatFsOptions {
     bigint?: boolean | undefined;
 }
 
-// A Node error with its `code` (ERR_*).
-export class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-export class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-export class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+// Node's coded errors, for this module's importers.
+export { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
 // Node's AbortError (internal/errors.js).
 export class AbortError extends Error {

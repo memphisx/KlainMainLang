@@ -63,6 +63,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"KlainMainLang/ast"
 	"KlainMainLang/parser"
@@ -125,19 +126,14 @@ func ResolveProgram(entryPath string) (*ast.Program, error) {
 }
 
 // ResolveProgramWithOptions is ResolveProgram under the compile modes opts
-// (TDD-00230 P2.6). The `-compat=js` lane governs three things here:
-//   - whether a program may declare its own binding named the same as a
-//     Tier 1 ambient global (`Math`/`process`/`fetch`/… — see
-//     resolver/reserved_names.go, TDD-00050); Tier 2 names (`Map`/`Date`/
-//     `RegExp`/… — parser-level `new`-form built-ins) are rejected either
-//     way, see reserved_names.go's own doc comment for why;
+// (TDD-00230 P2.6). The `-compat=js` lane governs two things here:
 //   - whether the TS-only definite-assignment early error is suppressed
 //     (plain JS has no such concept — TDD-00022 sub-problem 5);
 //   - whether the program is type-checked (the strict lane is TypeScript's).
 //
 // `-dynamic-import=lazy` makes each dynamic import target an island.
 func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Program, error) {
-	allowGlobalShadowing, lazyDynamicImport := opts.CompatJS(), opts.DynamicImport == "lazy"
+	compatJS, isolatedDynamicImport := opts.CompatJS(), opts.DynamicImport == "isolated"
 	entryAbs, err := filepath.Abs(entryPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolving entry path: %w", err)
@@ -153,6 +149,9 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 
 	files := map[string]*fileInfo{}
 	var order []string // dependency-first visitation order of non-entry files
+	// dynEdges: each file's dynamic import() targets under the bundled and
+	// lazy backends (merged, but not static dependencies).
+	dynEdges := map[string][]string{}
 	nextIndex := 0
 
 	// TDD-00052: cycle detection, so a file that genuinely participates in
@@ -223,6 +222,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		selfWorker := rewriteSelfWorker(prog, path)
 		if !strings.HasPrefix(path, lib.ModuleRoot) {
 			rewriteFileGlobals(prog, path)
+			rewriteStaticEval(prog)
 		}
 		prog.WorkerPaths = workerPaths(prog)
 		prog.DynamicImportNodes = dynamicImports(prog)
@@ -232,6 +232,22 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		// declared here, brings the module in; the name links to its class
 		// after checking (sema).
 		idents := codeIdents(src)
+		for native, uses := range lib.NativeGlobalUses {
+			if idents[native] && !declaresTopLevel(prog, native) {
+				for _, u := range uses {
+					idents[u] = true
+				}
+			}
+		}
+		for name, uses := range lib.LoweredFuncUses() {
+			all := true
+			for _, u := range uses {
+				all = all && idents[u]
+			}
+			if all {
+				idents[name] = true
+			}
+		}
 		for _, name := range sortedGlobalNames() {
 			gpath := lib.GlobalModuleNames()[name]
 			if gpath == path || !idents[name] || declaresTopLevel(prog, name) {
@@ -248,6 +264,41 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		if sc := lib.ModuleRoot + "internal_structured_clone.ts"; path != sc && idents["structuredClone"] && !declaresTopLevel(prog, "structuredClone") {
 			importTargets[sc] = true
 			if err := visit(sc, false); err != nil {
+				return err
+			}
+		}
+
+		// JSON.stringify with a replacer, a run-time space, or by value, and
+		// JSON.parse with a reviver or by value, are a TypeScript module's.
+		if jp := lib.ModuleRoot + "internal_json.ts"; path != jp && idents["JSON"] && (idents["stringify"] || idents["parse"]) && jsonAtRunTime(prog) {
+			importTargets[jp] = true
+			if err := visit(jp, false); err != nil {
+				return err
+			}
+		}
+
+		// Math, JSON, console, Reflect or Atomics read as a value are a
+		// TypeScript module's objects.
+		// The Web Crypto global as a value, or a method of it taken by value.
+		if cp := lib.ModuleRoot + "internal_crypto_global.ts"; path != cp && !strings.HasPrefix(path, lib.ModuleRoot) && idents["crypto"] && cryptoValueUse(src) {
+			importTargets[cp] = true
+			if err := visit(cp, false); err != nil {
+				return err
+			}
+		}
+
+		if np := lib.ModuleRoot + "internal_namespaces.ts"; path != np && !strings.HasPrefix(path, lib.ModuleRoot) && (namespaceValueUse(src, idents) || idents["globalThis"] && globalObjectUse(src)) {
+			importTargets[np] = true
+			if err := visit(np, false); err != nil {
+				return err
+			}
+		}
+
+		// console.dir with options known only at run time inspects through
+		// util's inspect.
+		if ip := lib.ModuleRoot + "internal_util_inspect.ts"; path != ip && idents["dir"] && consoleDirAtRunTime(prog) {
+			importTargets[ip] = true
+			if err := visit(ip, false); err != nil {
 				return err
 			}
 		}
@@ -374,11 +425,9 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 		}
 
-		// TDD-00055/TDD-00056: visit each dynamic `import('...')` literal target
-		// as a dependency, exactly like a static import or a worker path. Under
-		// the lazy backend (TDD-00056) these become shared-library islands
-		// rather than merged files; that partitioning happens later — here they
-		// are only discovered, parsed, and validated as real, resolvable files.
+		// Each dynamic `import('...')` literal target: merged over a dynamic
+		// edge (bundled, lazy), or only discovered and validated (isolated,
+		// where it becomes its own program).
 		for _, node := range prog.DynamicImportNodes {
 			lit, ok := node.Specifier.(*ast.StringLiteral)
 			if !ok {
@@ -392,25 +441,26 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			if err != nil {
 				return fmt.Errorf("%s: resolving dynamic import('%s'): %w", path, dp, err)
 			}
-			node.ResolvedPath = resolved // annotate for codegen (island hash + dlopen path)
+			node.ResolvedPath = resolved // annotate for codegen (module key + dlopen path)
 			dynamicImportTargets[resolved] = true
-			if lazyDynamicImport {
-				// TDD-00056 lazy backend: the target is NOT merged — it becomes
-				// its own shared-library island, compiled separately and loaded
-				// on first use, so its top-level runs only when reached. Record
-				// it as an island root and extract its annotated value exports
-				// so the loading call site can shape the typed result object;
-				// don't visit()-merge it here.
-				exps, err := parseIslandExports(resolved)
-				if err != nil {
-					return fmt.Errorf("%s: reading dynamic import('%s') exports: %w", path, dp, err)
-				}
-				node.Exports = exps
+			// The target's annotated value exports shape the typed result
+			// object at the loading call site.
+			exps, err := parseIslandExports(resolved)
+			if err != nil {
+				return fmt.Errorf("%s: reading dynamic import('%s') exports: %w", path, dp, err)
+			}
+			node.Exports = exps
+			if isolatedDynamicImport {
+				// TDD-00056 isolated backend: the target is NOT merged — it
+				// becomes its own program in a shared-library island, compiled
+				// separately and loaded on first use, with its own instance of
+				// every module it imports.
 				continue
 			}
-			// Eager backend (TDD-00055): merge the target like a static import
-			// (its top-level runs unconditionally at startup).
-			userEdges[path] = append(userEdges[path], resolved)
+			// Bundled and lazy (TDD-00238 Stage 5): the target is merged like
+			// a static import, but over a dynamic edge — a file only such
+			// edges reach runs its top-level on first import(), not at startup.
+			dynEdges[path] = append(dynEdges[path], resolved)
 			if err := visit(resolved, false); err != nil {
 				return err
 			}
@@ -457,6 +507,39 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 	allPaths := make([]string, 0, len(order)+1)
 	allPaths = append(allPaths, order...)
 	allPaths = append(allPaths, entryAbs)
+
+	// The files only dynamic import() edges reach (bundled and lazy). Under
+	// lazy each is mangled with its own key, so its definitions split into
+	// the shared library loaded on first import() (TDD-00238 Stage 5).
+	dynOnly := map[string]bool{}
+	if len(dynEdges) > 0 {
+		static := map[string]bool{entryAbs: true}
+		var reach func(string)
+		reach = func(p string) {
+			for _, d := range userEdges[p] {
+				if !static[d] {
+					static[d] = true
+					reach(d)
+				}
+			}
+		}
+		reach(entryAbs)
+		for w := range workerTargets {
+			static[w] = true
+			reach(w)
+		}
+		for _, p := range order {
+			if !static[p] && !strings.HasPrefix(p, lib.ModuleRoot) {
+				dynOnly[p] = true
+			}
+		}
+	}
+	fileKey := func(path string) string {
+		if dynOnly[path] && opts.DynamicImport == "lazy" {
+			return ast.DynModuleKey(path)
+		}
+		return libKey(path)
+	}
 
 	// TDD-00051: fold every file's re-exports into its own `exported` set
 	// before anything downstream consults that set. Must run in dependency
@@ -568,9 +651,12 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		// (the temporal dead zone; definite assignment, a TypeScript rule that
 		// plain JavaScript under -compat=js does not have), from the binder —
 		// run pre-mangle so messages carry the original binding names.
-		bound := binder.BindWith(info.prog, binder.Options{AnnexB: allowGlobalShadowing})
+		if compatJS {
+			annexBFunctions(info.prog) // block functions' var bindings (B.3.3)
+		}
+		bound := binder.BindWith(info.prog, binder.Options{AnnexB: compatJS})
 		offsets := diag.Offsets(info.src)
-		ds := append(bound.Diagnostics(offsets), bound.FlowDiagnostics(offsets, !allowGlobalShadowing)...)
+		ds := append(bound.Diagnostics(offsets), bound.FlowDiagnostics(offsets, !compatJS)...)
 		if len(ds) > 0 {
 			sort.SliceStable(ds, func(i, j int) bool {
 				a, b := ds[i].Pos, ds[j].Pos
@@ -578,7 +664,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			})
 			return nil, diag.InFile(diag.Errors(ds), path)
 		}
-		mangled, err := mangleFileDecls(path, info.prog, info.index, allowGlobalShadowing || strings.HasPrefix(path, lib.ModuleRoot))
+		mangled, err := mangleFileDecls(path, fileKey(path), info.prog, info.index)
 		if err != nil {
 			return nil, err
 		}
@@ -616,6 +702,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			lookup[orig] = m
 		}
 		ns := map[string]map[string]string{}
+		nsSource := map[string]string{} // a namespace alias's module specifier
 		builtinMembers := map[string]builtinMemberRef{}
 		// TDD-00165 Stage 3: aliases of a parse-time built-in constructor
 		// (`import { URL as U } from 'url'`) — the rename pass rebuilds `new U(...)`
@@ -867,17 +954,18 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 					members[name], _ = target.publicMangled(name)
 				}
 				ns[imp.Namespace] = members
+				nsSource[imp.Namespace] = imp.Source
 			}
 		}
 		var reservedErr error
 		renameFile(info.prog, lookupTable{
 			resolved: resolvedModules,
-			names:    lookup, ns: ns, builtinMembers: builtinMembers,
-			typeOnly:             typeOnlyLocals(info.prog),
-			nodeTypes:            info.prog.NodeTypeImports,
-			parseTimeAliases:     parseTimeAliases,
-			allowGlobalShadowing: allowGlobalShadowing, reservedErr: &reservedErr,
-			filePath: path, workerLits: stringSet(info.prog.WorkerPaths),
+			names:    lookup, ns: ns, nsSource: nsSource, builtinMembers: builtinMembers,
+			typeOnly:         typeOnlyLocals(info.prog),
+			nodeTypes:        info.prog.NodeTypeImports,
+			parseTimeAliases: parseTimeAliases,
+			reservedErr:      &reservedErr,
+			filePath:         path, workerLits: stringSet(info.prog.WorkerPaths),
 		})
 		if reservedErr != nil {
 			return nil, reservedErr
@@ -894,17 +982,17 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			rewriteSelfWorker(cp, path)
 			cp.WorkerPaths = workerPaths(cp)
 			eraseBuiltinTypeImports(cp)
-			if _, err := mangleFileDecls(path, cp, info.index, allowGlobalShadowing || strings.HasPrefix(path, lib.ModuleRoot)); err != nil {
+			if _, err := mangleFileDecls(path, fileKey(path), cp, info.index); err != nil {
 				return nil, err
 			}
 			renameFile(cp, lookupTable{
 				resolved: resolvedModules,
-				names:    lookup, ns: ns, builtinMembers: builtinMembers,
-				typeOnly:             typeOnlyLocals(cp),
-				nodeTypes:            info.prog.NodeTypeImports,
-				parseTimeAliases:     parseTimeAliases,
-				allowGlobalShadowing: allowGlobalShadowing, reservedErr: &reservedErr,
-				filePath: path, workerLits: stringSet(cp.WorkerPaths),
+				names:    lookup, ns: ns, nsSource: nsSource, builtinMembers: builtinMembers,
+				typeOnly:         typeOnlyLocals(cp),
+				nodeTypes:        info.prog.NodeTypeImports,
+				parseTimeAliases: parseTimeAliases,
+				reservedErr:      &reservedErr,
+				filePath:         path, workerLits: stringSet(cp.WorkerPaths),
 			})
 			if reservedErr != nil {
 				return nil, reservedErr
@@ -942,11 +1030,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 					// (ADR-00450), and the binder keeps each namespace's own
 					// scope: two namespaces declaring one type name meet here.
 					if prev.path == path && isTypeMemberKind(prev.kind) && isTypeMemberKind(ref.Kind) {
-						name := ref.Name
-						if i := strings.LastIndex(name, "__kml_mod"); i > 0 {
-							name = name[:i]
-						}
-						return nil, diag.InFile(diag.New(diag.NamespaceTypeMemberClash, diag.Span{}, name), path)
+						return nil, diag.InFile(diag.New(diag.NamespaceTypeMemberClash, diag.Span{}, ast.Unmangle(ref.Name)), path)
 					}
 					return nil, fmt.Errorf("internal error: mangled name '%s' collided between %s and %s", ref.Name, prev.path, path)
 				}
@@ -995,7 +1079,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		}
 		merged.EntryExportMangled = m
 	}
-	if lazyDynamicImport {
+	if isolatedDynamicImport {
 		roots := make([]string, 0, len(dynamicImportTargets))
 		for p := range dynamicImportTargets {
 			roots = append(roots, p)
@@ -1121,12 +1205,63 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			break
 		}
 	}
+	// Each merged target's exports, by their program names.
+	for _, f := range files {
+		for _, node := range f.prog.DynamicImportNodes {
+			tf, ok := files[node.ResolvedPath]
+			if !ok || isolatedDynamicImport {
+				continue
+			}
+			for i := range node.Exports {
+				if m, ok := tf.publicMangled(node.Exports[i].Name); ok {
+					node.Exports[i].Mangled = m
+				} else {
+					node.Exports[i].Mangled = node.Exports[i].Name
+				}
+			}
+		}
+	}
+	// Files only dynamic import() edges reach run their top-level on first
+	// import(), from the target's init (TDD-00238 Stage 5), not at startup.
+	if len(dynOnly) > 0 {
+		for st, path := range stmtFile {
+			if dynOnly[path] {
+				if merged.DynStatements == nil {
+					merged.DynStatements = map[ast.Statement]string{}
+				}
+				merged.DynStatements[st] = path
+			}
+		}
+		// Each target's dynamic-only files, dependencies first.
+		merged.DynModules = map[string][]string{}
+		for target := range dynamicImportTargets {
+			in := map[string]bool{}
+			var walk func(string)
+			walk = func(p string) {
+				if in[p] || !dynOnly[p] {
+					return
+				}
+				in[p] = true
+				for _, d := range userEdges[p] {
+					walk(d)
+				}
+			}
+			walk(target)
+			var files []string
+			for _, p := range order {
+				if in[p] {
+					files = append(files, p)
+				}
+			}
+			merged.DynModules[target] = files
+		}
+	}
 	for st, path := range stmtFile {
 		if strings.HasPrefix(path, lib.ModuleRoot) {
 			if merged.LibStatements == nil {
-				merged.LibStatements = map[ast.Statement]bool{}
+				merged.LibStatements = map[ast.Statement]string{}
 			}
-			merged.LibStatements[st] = true
+			merged.LibStatements[st] = libKey(path)
 		}
 	}
 	// Every class of an included global module links (a program naming
@@ -1167,7 +1302,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 	// The strict lane is TypeScript's: a program tsc rejects for a type
 	// error is rejected here, with tsc's code (TDD-00230 P2.7). The js lane
 	// compiles it as JavaScript.
-	if !allowGlobalShadowing {
+	if !compatJS {
 		entry := files[entryAbs].prog
 		script := len(files) == 1 && !IsModule(entry)
 		if err := TypeCheck(merged, func(st ast.Statement) string { return stmtFile[st] }, opts, script); err != nil {
@@ -1371,11 +1506,21 @@ func declRefsOf(stmt ast.Statement) []declRef {
 	return nil
 }
 
-// mangleName builds fileIdx's file-private internal name for a top-level
-// declaration originally named name — unique per file (TDD-00041), and
-// valid as an LLVM/C identifier fragment (alphanumeric + underscore only).
-func mangleName(name string, fileIdx int) string {
-	return fmt.Sprintf("%s__kml_mod%d", name, fileIdx)
+// libKey names a builtin library file the same in every program (its path
+// under lib.ModuleRoot, as an identifier fragment); "" for a program's own.
+func libKey(path string) string {
+	rest, ok := strings.CutPrefix(path, lib.ModuleRoot)
+	if !ok {
+		return ""
+	}
+	rest = strings.TrimSuffix(rest, filepath.Ext(rest))
+	b := []byte("node_" + rest)
+	for i, c := range b {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			b[i] = '_'
+		}
+	}
+	return string(b)
 }
 
 // mangleFileDecls assigns every top-level declaration in prog a file-private
@@ -1396,7 +1541,7 @@ func mangleName(name string, fileIdx int) string {
 // `export default` in the same file — checked explicitly since the two
 // underlying declarations may have different own names ("foo" vs "bar")
 // and so wouldn't be caught by the loop's own duplicate check above.
-func mangleFileDecls(path string, prog *ast.Program, fileIdx int, allowGlobalShadowing bool) (map[string]string, error) {
+func mangleFileDecls(path, key string, prog *ast.Program, fileIdx int) (map[string]string, error) {
 	mangled := map[string]string{}
 	seenKind := map[string]string{} // name -> kind of the first declaration of it
 	sawDefault := false
@@ -1414,9 +1559,6 @@ func mangleFileDecls(path string, prog *ast.Program, fileIdx int, allowGlobalSha
 				mangled[ref.Name] = ref.Name
 				continue
 			}
-			if err := checkReservedBinding(ref.Name, stmt.GetPos().Line, stmt.GetPos().Col, allowGlobalShadowing); err != nil {
-				return nil, err
-			}
 			if _, dup := seenKind[ref.Name]; dup {
 				// The binder has already rejected every redeclaration, so a
 				// repeated name here is a merge it allows: a repeated `var` or
@@ -1431,7 +1573,7 @@ func mangleFileDecls(path string, prog *ast.Program, fileIdx int, allowGlobalSha
 				lastNewName = mangled[ref.Name]
 				continue
 			}
-			newName := mangleName(ref.Name, fileIdx)
+			newName := ast.ModuleMangle(ref.Name, fileIdx, key)
 			mangled[ref.Name] = newName
 			seenKind[ref.Name] = ref.Kind
 			ref.Set(newName)
@@ -1871,6 +2013,71 @@ func rewriteFileGlobals(prog *ast.Program, path string) {
 	ast.RewriteChildren(prog, rewrite)
 }
 
+// rewriteStaticEval replaces `eval("<expression>")`, its argument a
+// constant string holding one expression, with that expression (TDD-00046's
+// static subset), so the binder and checker see it as the program's own
+// code. A file declaring its own `eval` keeps its calls; any other eval is
+// left to code generation, which rejects it cleanly.
+func rewriteStaticEval(prog *ast.Program) {
+	declared := false
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch d := n.(type) {
+		case *ast.VarDeclaration:
+			declared = declared || d.Name == "eval"
+		case *ast.FunctionDeclaration:
+			declared = declared || d.Name == "eval"
+			for _, p := range d.Params {
+				declared = declared || p.Name == "eval"
+			}
+		case *ast.ArrowFunction:
+			for _, p := range d.Params {
+				declared = declared || p.Name == "eval"
+			}
+		case *ast.FunctionExpression:
+			for _, p := range d.Params {
+				declared = declared || p.Name == "eval"
+			}
+		}
+		return !declared
+	})
+	if declared {
+		return
+	}
+	var rewrite func(ast.Node) ast.Node
+	rewrite = func(n ast.Node) ast.Node {
+		ast.RewriteChildren(n, rewrite)
+		call, ok := n.(*ast.CallExpression)
+		if !ok || len(call.Args) != 1 || call.Optional {
+			return n
+		}
+		if id, ok := call.Callee.(*ast.Identifier); !ok || id.Name != "eval" {
+			return n
+		}
+		var src string
+		switch a := call.Args[0].(type) {
+		case *ast.StringLiteral:
+			src = a.Value
+		case *ast.TemplateLiteral:
+			if len(a.Exprs) != 0 || len(a.Quasis) != 1 {
+				return n
+			}
+			src = a.Quasis[0]
+		default:
+			return n
+		}
+		ev, err := parser.ParseEval(src)
+		if err != nil || len(ev.Body) != 1 {
+			return n
+		}
+		es, ok := ev.Body[0].(*ast.ExpressionStatement)
+		if !ok {
+			return n
+		}
+		return rewrite(es.Expr)
+	}
+	ast.RewriteChildren(prog, rewrite)
+}
+
 // onlySelfWorker reports whether every worker the file starts is itself.
 func onlySelfWorker(prog *ast.Program, path string) bool {
 	for _, wp := range prog.WorkerPaths {
@@ -2095,4 +2302,210 @@ func markAssertCallSites(prog *ast.Program) {
 		}
 		return true
 	})
+}
+
+// jsonAtRunTime reports whether prog calls JSON.stringify with a replacer
+// that is not null or a space that is not a literal, JSON.parse with a
+// reviver, or takes either by value: what lib/node/internal_json.ts runs.
+func jsonAtRunTime(prog *ast.Program) bool {
+	direct := map[ast.Node]bool{}
+	found := false
+	ast.Inspect(prog, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch x := n.(type) {
+		case *ast.CallExpression:
+			if IsJSONStringify(x.Callee) {
+				direct[x.Callee] = true
+				found = StringifyArgsAtRunTime(x.Args)
+			} else if isJSONMember(x.Callee, "parse") {
+				direct[x.Callee] = true
+				found = ParseArgsAtRunTime(x.Args)
+			}
+		case *ast.MemberExpression:
+			if (IsJSONStringify(x) || isJSONMember(x, "parse")) && !direct[x] {
+				found = true
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// ParseArgsAtRunTime reports whether JSON.parse(args...) revives: a second
+// argument other than null or undefined.
+func ParseArgsAtRunTime(args []ast.Expression) bool {
+	for _, a := range args {
+		if _, ok := a.(*ast.SpreadElement); ok {
+			return true
+		}
+	}
+	if len(args) >= 2 {
+		if _, ok := args[1].(*ast.NullLiteral); !ok {
+			return true
+		}
+	}
+	return false
+}
+
+func isJSONMember(x ast.Expression, prop string) bool {
+	m, ok := x.(*ast.MemberExpression)
+	if !ok || m.Property != prop || m.Optional {
+		return false
+	}
+	id, ok := m.Object.(*ast.Identifier)
+	return ok && id.Name == "JSON"
+}
+
+// IsJSONStringify reports whether x is `JSON.stringify`.
+func IsJSONStringify(x ast.Expression) bool {
+	return isJSONMember(x, "stringify")
+}
+
+// StringifyArgsAtRunTime reports whether JSON.stringify(args...) needs the
+// run-time serializer: a replacer other than null or undefined, or a space
+// other than a number or string literal.
+func StringifyArgsAtRunTime(args []ast.Expression) bool {
+	for _, a := range args {
+		if _, ok := a.(*ast.SpreadElement); ok {
+			return true
+		}
+	}
+	if len(args) >= 2 {
+		if _, ok := args[1].(*ast.NullLiteral); !ok {
+			return true
+		}
+	}
+	if len(args) >= 3 {
+		switch args[2].(type) {
+		case *ast.NumberLiteral, *ast.StringLiteral, *ast.NullLiteral:
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// NamespaceValueNames are the builtin namespace objects
+// lib/node/internal_namespaces.ts makes when one is read as a value, each
+// with its maker.
+var NamespaceValueNames = map[string]string{
+	"Math": "_kmlMath", "JSON": "_kmlJSON", "console": "_kmlConsole",
+	"Reflect": "_kmlReflect", "Atomics": "_kmlAtomics", "globalThis": "_kmlGlobalThis",
+}
+
+var namespaceWordRE = regexp.MustCompile(`(^|[^.\w$])(Math|JSON|console|Reflect|Atomics)\b(\s*\??\.)?`)
+
+// namespaceValueUse reports whether src may read a namespace object as a
+// value: its name not followed by a member access.
+func namespaceValueUse(src []byte, idents map[string]bool) bool {
+	any := false
+	for name := range NamespaceValueNames {
+		any = any || idents[name]
+	}
+	if !any {
+		return false
+	}
+	for _, m := range namespaceWordRE.FindAllSubmatch(src, -1) {
+		if len(m[3]) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// consoleDirAtRunTime reports whether prog calls console.dir with options
+// only known at run time (DirOptionsAtRunTime).
+func consoleDirAtRunTime(prog *ast.Program) bool {
+	isDir := func(x ast.Expression) bool {
+		m, ok := x.(*ast.MemberExpression)
+		if !ok || m.Property != "dir" {
+			return false
+		}
+		id, ok := m.Object.(*ast.Identifier)
+		return ok && id.Name == "console"
+	}
+	direct := map[ast.Node]bool{}
+	found := false
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CallExpression:
+			if isDir(x.Callee) {
+				direct[x.Callee] = true
+				found = found || DirOptionsAtRunTime(x.Args)
+			}
+		case *ast.MemberExpression:
+			found = found || isDir(x) && !direct[x] // console.dir by value
+		}
+		return !found
+	})
+	return found
+}
+
+// DirOptionsAtRunTime reports whether console.dir(args...)'s options are not
+// an object literal of literal values the compiler reads itself.
+func DirOptionsAtRunTime(args []ast.Expression) bool {
+	if len(args) < 2 {
+		return false
+	}
+	ol, ok := args[1].(*ast.ObjectLiteral)
+	if !ok {
+		return true
+	}
+	for _, p := range ol.Properties {
+		switch p.Value.(type) {
+		case *ast.NumberLiteral, *ast.NullLiteral, *ast.BooleanLiteral, *ast.StringLiteral:
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+var globalThisRE = regexp.MustCompile(`(^|[^.\w$])globalThis\b(\s*\??\.\s*([A-Za-z_$][\w$]*))?`)
+
+// globalObjectUse reports whether src may use the global object itself:
+// `globalThis` as a value, or a property of it that no global declares.
+func globalObjectUse(src []byte) bool {
+	declared := tsGlobalValues()
+	for _, m := range globalThisRE.FindAllSubmatch(src, -1) {
+		if len(m[2]) == 0 || !declared[string(m[3])] {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	tsGlobalValueSet  map[string]bool
+	tsGlobalValueOnce sync.Once
+)
+
+func tsGlobalValues() map[string]bool {
+	tsGlobalValueOnce.Do(func() {
+		tsGlobalValueSet = map[string]bool{}
+		names, values := lib.GlobalNames()
+		for i, n := range names {
+			if values[i] {
+				tsGlobalValueSet[n] = true
+			}
+		}
+	})
+	return tsGlobalValueSet
+}
+
+var cryptoWordRE = regexp.MustCompile(`(^|[^.\w$])crypto\b(\s*\??\.\s*(getRandomValues|randomUUID)\b(\s*\()?)?(\s*\??\.)?`)
+
+// cryptoValueUse reports whether src may read the Web Crypto global as a
+// value (`const c = crypto`), or take one of its methods by value.
+func cryptoValueUse(src []byte) bool {
+	for _, m := range cryptoWordRE.FindAllSubmatch(src, -1) {
+		bare := len(m[2]) == 0 && len(m[5]) == 0
+		byValue := len(m[2]) > 0 && len(m[4]) == 0
+		if bare || byValue {
+			return true
+		}
+	}
+	return false
 }

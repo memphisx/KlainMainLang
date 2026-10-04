@@ -24,6 +24,9 @@ import (
 // the field-0 probe can never mistake a pointer slot for an Error.
 const errorTypeIDFlag = 1 << 48
 
+// errorNameOwnField is errorObjType's flag that its `name` is its own.
+const errorNameOwnField = "__kml_name_own"
+
 // errorTypeIDStored returns the field-0 value stored for an Error whose logical
 // kind/TagID is id: the marker bit OR'd onto id. Every write of an Error's
 // field 0 uses this, and every compare against an Error's field 0 flags its
@@ -168,6 +171,10 @@ var errorObjType = func() Type {
 		// ADR-01080); null for every other error. A caught value's unknown
 		// property read consults it (emitDynAnyMemberGetNamed's error arm).
 		{Name: "extra", Ty: TypePtr},
+		// errorNameOwnField: 1 once `name` is assigned on the error itself
+		// (`this.name = "X"`), making it an own enumerable property, as in
+		// JavaScript; the constructor's default name is not.
+		{Name: errorNameOwnField, Ty: TypeI64},
 	})
 	ty.IsError = true
 	return ty
@@ -386,6 +393,20 @@ func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 	// DOMException's `.name` is the second constructor argument (default
 	// "Error"), unlike the fixed-name kinds whose name is the kind itself.
 	namePtr := e.internString(ne.Kind)
+	if ne.Kind == "DOMException" && ne.Name != nil && ne.Cause == nil {
+		if nt := e.inferExprType(ne.Name); nt.IsObject || nt.IsDynamicObject || isUnconstrainedDynamic(nt) {
+			// An options object held in a value: its name and cause.
+			opts := ne.Name
+			if _, ok := opts.(*ast.Identifier); ok {
+				name := ast.NewMemberExpression(opts, "name", ne.GetPos())
+				name.Optional = true
+				cn := *ne
+				cn.Name = ast.NewBinaryExpression("??", name, ast.NewStringLiteral("Error", ne.GetPos()), ne.GetPos())
+				cn.Cause = ast.NewMemberExpression(opts, "cause", ne.GetPos())
+				ne = &cn
+			}
+		}
+	}
 	if ne.Kind == "DOMException" {
 		namePtr = e.internString("Error")
 		if ne.Name != nil {

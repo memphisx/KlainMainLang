@@ -275,6 +275,9 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 	pos := posOf(tok)
 
 	nameTok := p.peek()
+	if p.newTargetIsExpression() {
+		return p.parseNewOfExpression(pos)
+	}
 	if nameTok.Type != lexer.IDENT {
 		return nil, p.errAt(nameTok, diag.ExpectedConstructor)
 	}
@@ -303,6 +306,61 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 // builtin or user class alike; sema decides which.
 func (p *Parser) parseNewGenericBody(pos ast.Pos) (*ast.NewExpression, error) {
 	nameTok := p.advance() // consume class name
+	return p.parseNewTail(nameTok.Literal, pos)
+}
+
+// newTargetIsExpression reports a `new` whose constructor is not a name or a
+// dotted name: `new this.K()`, `new ctors[0]()`, `new (f())()`.
+func (p *Parser) newTargetIsExpression() bool {
+	if p.peek().Type != lexer.IDENT {
+		return p.peek().Type == lexer.THIS || p.peek().Type == lexer.LPAREN
+	}
+	i := 1
+	for p.peekNth(i).Type == lexer.DOT && p.peekNth(i+1).Type == lexer.IDENT {
+		i += 2
+	}
+	return p.peekNth(i).Type == lexer.LBRACKET
+}
+
+// parseNewOfExpression parses `new <member expression>(args)`: the
+// constructor is the value of a member chain without calls.
+func (p *Parser) parseNewOfExpression(pos ast.Pos) (ast.Expression, error) {
+	callee, err := p.parsePrimary()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		if p.match(lexer.DOT) {
+			propTok, err := p.expectPropertyName()
+			if err != nil {
+				return nil, err
+			}
+			callee = ast.NewMemberExpression(callee, propTok.Literal, posOf(propTok))
+			continue
+		}
+		if p.check(lexer.LBRACKET) {
+			lbrak := p.advance()
+			index, err := p.parseExpression()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.RBRACKET); err != nil {
+				return nil, err
+			}
+			callee = ast.NewIndexExpression(callee, index, posOf(lbrak))
+			continue
+		}
+		break
+	}
+	ne, err := p.parseNewTail("", pos)
+	if ne != nil {
+		ne.Callee = callee
+	}
+	return ne, err
+}
+
+// parseNewTail parses a `new`'s optional type arguments and argument list.
+func (p *Parser) parseNewTail(name string, pos ast.Pos) (*ast.NewExpression, error) {
 	// Optional explicit `<T>` or `<K, V>` type argument list (TDD-00010 V1 /
 	// TDD-00037 generic classes). Unlike a bare generic function call, `new`
 	// unambiguously starts a constructor call, so this doesn't hit the
@@ -322,7 +380,7 @@ func (p *Parser) parseNewGenericBody(pos ast.Pos) (*ast.NewExpression, error) {
 				break
 			}
 		}
-		if err := p.expectGT(nameTok.Literal + "<T>"); err != nil {
+		if err := p.expectGT(name + "<T>"); err != nil {
 			return nil, err
 		}
 	}
@@ -330,9 +388,19 @@ func (p *Parser) parseNewGenericBody(pos ast.Pos) (*ast.NewExpression, error) {
 	var args []ast.Expression
 	if p.match(lexer.LPAREN) {
 		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
-			arg, err := p.parseAssignment()
-			if err != nil {
-				return nil, err
+			var arg ast.Expression
+			if p.check(lexer.ELLIPSIS) {
+				spreadTok := p.advance() // `new X(...args)`
+				inner, err := p.parseAssignment()
+				if err != nil {
+					return nil, err
+				}
+				arg = ast.NewSpreadElement(inner, posOf(spreadTok))
+			} else {
+				var err error
+				if arg, err = p.parseAssignment(); err != nil {
+					return nil, err
+				}
 			}
 			args = append(args, arg)
 			if !p.match(lexer.COMMA) {
@@ -343,7 +411,7 @@ func (p *Parser) parseNewGenericBody(pos ast.Pos) (*ast.NewExpression, error) {
 			return nil, err
 		}
 	}
-	ne := ast.NewNewExpression(nameTok.Literal, args, pos)
+	ne := ast.NewNewExpression(name, args, pos)
 	ne.TypeArgs = typeArgs
 	return ne, nil
 }

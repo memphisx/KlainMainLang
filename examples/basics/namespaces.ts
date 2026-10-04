@@ -15,6 +15,13 @@ console.log(distance(504)); // Thessaloniki -> Athens
 console.log(distance.miles(504));
 console.log(distance.unit);
 
+// The merged name is one binding: a value passed through `distance.miles`
+// keeps its type for every later use.
+const legs = new DataView(new ArrayBuffer(2));
+legs.setUint8(0, 150);
+legs.setUint8(1, 87);
+console.log(distance.miles(legs.getUint8(0)), distance(legs.getUint8(0) + legs.getUint8(1)));
+
 namespace parse {
   export function strictNumber(s: string): number {
     const n = Number(s);

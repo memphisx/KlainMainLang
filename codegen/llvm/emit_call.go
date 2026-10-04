@@ -19,64 +19,85 @@ import (
 // else to live.
 
 // desugarTaggedTemplate builds the plain call “ tag`a${x}b` “ is
-// equivalent to — `tag(["a","b"], x)` — as a synthetic *ast.CallExpression:
-// a real array literal of the cooked quasis as the first argument, then
-// every interpolated expression untouched (no implicit stringification —
-// unlike a plain, un-tagged template literal's own interpolation) as the
-// remaining arguments. See TDD-00059: this is the only new logic tagged
-// templates need — every existing call-dispatch/coercion/rest-param-
-// packing path handles the result exactly like a hand-written call.
-// isStringRawTag reports whether a tagged-template tag is the built-in
-// `String.raw` (and not a user binding shadowing `String`).
-func (e *Emitter) isStringRawTag(tag ast.Expression) bool {
-	mem, ok := tag.(*ast.MemberExpression)
-	if !ok || mem.Property != "raw" {
-		return false
+// equivalent to — `tag(strings, x)` — as a synthetic *ast.CallExpression:
+// the site's template object (the cooked quasis, their raw text as `raw`)
+// as the first argument, then every interpolated expression untouched (no
+// implicit stringification) as the remaining arguments (TDD-00059). The
+// built-in `String.raw` tag is such a call too.
+func (e *Emitter) desugarTaggedTemplate(tt *ast.TaggedTemplateExpression) *ast.CallExpression {
+	if call, ok := e.tmplCalls[tt]; ok {
+		return call
 	}
-	id, ok := mem.Object.(*ast.Identifier)
-	return ok && id.Name == "String" && !e.isShadowedByLocal("String")
-}
-
-// emitStringRaw implements the `String.raw` tag: it interleaves the RAW
-// (undecoded) quasi text with the string-coerced interpolations, so escape
-// sequences appear verbatim (`String.raw`\n“ is the two characters `\` and
-// `n`). ADR-00562.
-func (e *Emitter) emitStringRaw(tt *ast.TaggedTemplateExpression) (Value, error) {
+	lit := func(qs []string) *ast.ArrayLiteral {
+		xs := make([]ast.Expression, len(qs))
+		for i, q := range qs {
+			xs[i] = ast.NewStringLiteral(q, tt.GetPos())
+		}
+		return ast.NewArrayLiteral(xs, tt.GetPos())
+	}
 	raw := tt.RawQuasis
 	if len(raw) != len(tt.Quasis) {
-		// Defensive: fall back to cooked if raw wasn't threaded (never expected).
 		raw = tt.Quasis
 	}
-	acc := Value{Ref: e.internString(raw[0]), Ty: TypePtr}
-	for i, expr := range tt.Exprs {
-		val, err := e.emitExpr(expr)
-		if err != nil {
-			return Value{}, err
-		}
-		strVal, err := e.emitValueToString(val)
-		if err != nil {
-			return Value{}, fmt.Errorf("%d:%d: %w", tt.GetPos().Line, tt.GetPos().Col, err)
-		}
-		if acc, err = e.emitStringConcat(acc, strVal); err != nil {
-			return Value{}, err
-		}
-		tail := Value{Ref: e.internString(raw[i+1]), Ty: TypePtr}
-		if acc, err = e.emitStringConcat(acc, tail); err != nil {
-			return Value{}, err
-		}
-	}
-	return acc, nil
-}
-
-func desugarTaggedTemplate(tt *ast.TaggedTemplateExpression) *ast.CallExpression {
-	quasiExprs := make([]ast.Expression, len(tt.Quasis))
-	for i, q := range tt.Quasis {
-		quasiExprs[i] = ast.NewStringLiteral(q, tt.GetPos())
-	}
-	args := append([]ast.Expression{ast.NewArrayLiteral(quasiExprs, tt.GetPos())}, tt.Exprs...)
+	// The template object: the cooked strings, carrying the raw ones.
+	tmpl := ast.NewCallExpression(nil, []ast.Expression{lit(tt.Quasis), lit(raw)}, tt.GetPos())
+	tmpl.Intrinsic = templateObjectIntrinsic
+	args := append([]ast.Expression{tmpl}, tt.Exprs...)
 	call := ast.NewCallExpression(tt.Tag, args, tt.GetPos())
 	call.TypeArgs = tt.TypeArgs // `` tag<T>`…` ``
+	if e.tmplCalls == nil {
+		e.tmplCalls = map[*ast.TaggedTemplateExpression]*ast.CallExpression{}
+	}
+	e.tmplCalls[tt] = call
 	return call
+}
+
+// templateObjectIntrinsic is a tagged template's first argument: its
+// template object, made once per site (GetTemplateObject caches it in the
+// realm's template map), the cooked strings with the raw strings registered
+// as their `raw` (__kml_template_raw).
+const templateObjectIntrinsic = "%TemplateObject%"
+
+func init() {
+	intrinsics[templateObjectIntrinsic] = intrinsic{
+		emit: (*Emitter).emitTemplateObject,
+		ty:   func(*Emitter, *ast.CallExpression) Type { return ArrayOf(TypePtr) },
+	}
+}
+
+func (e *Emitter) emitTemplateObject(ex *ast.CallExpression) (Value, error) {
+	if e.tmplSites == nil {
+		e.tmplSites = map[*ast.CallExpression]string{}
+	}
+	g, ok := e.tmplSites[ex]
+	if !ok {
+		g = fmt.Sprintf("@__kml_tmpl.%d", len(e.tmplSites))
+		e.tmplSites[ex] = g
+		e.emitGlobal(fmt.Sprintf("%s = internal %sglobal ptr null, align 8", g, e.isolateTLS()))
+	}
+	e.ensureDynJSONC() // __kml_template_register
+	cached := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cached, g))
+	isNew := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNew, cached))
+	makeL, doneL := e.freshLabel("tmpl.make"), e.freshLabel("tmpl.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNew, makeL, doneL))
+	e.emitLabel(makeL)
+	var hdrs [2]string
+	for i, a := range ex.Args {
+		v, err := e.emitExprWithObjectHint(a, ArrayOf(TypePtr))
+		if err != nil {
+			return Value{}, err
+		}
+		hdrs[i] = e.arrayReturnHeader(v)
+	}
+	e.emitInstr(fmt.Sprintf("call void @__kml_template_register(ptr %s, ptr %s)", hdrs[0], hdrs[1]))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdrs[0], g))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	h := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, g))
+	return e.arrayValueFromHeaderReg(h, ArrayOf(TypePtr)), nil
 }
 
 // emitOptionalCall implements `a?.m(...)` (ADR-00682): the receiver is
@@ -96,6 +117,15 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 	// presence bit, and run the method on the unwrapped value.
 	if isNullableScalar(objVal.Ty) {
 		return e.emitOptionalCallNullableScalar(ex, mem, objVal)
+	}
+	// A double slot short-circuits on its undefined (TDD-00241).
+	if isF64Slot(objVal.Ty) {
+		b := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", b, objVal.Ref))
+		present := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", present, b, undefF64))
+		aggTy := undefinedableElem(objVal.Ty)
+		return e.emitOptionalCallNullableScalar(ex, mem, Value{Ref: e.makeNullableScalarAgg(aggTy, present, objVal.Ref), Ty: aggTy})
 	}
 	// An `any` receiver short-circuits where it holds null or undefined.
 	if isUnconstrainedDynamic(objVal.Ty) {
@@ -628,25 +658,6 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		return e.emitDynAnyMethodCallPlain(fn, mem.Property, ex.Args, ex.GetPos())
 	}
-	// Node's chained `http.createServer((req, res) => …).listen(port[, cb])`
-	// (TDD-00131) — the callee is `<createServer call>.listen`. Routed through
-	// the bound-handle machinery; listen() returns the server handle.
-	if createArgs, listenArgs, ok := chainedCreateServerListen(ex); ok {
-		return e.emitChainedCreateServerListen(createArgs, listenArgs, nil, ex.GetPos())
-	}
-	// A `res.writeHead/setHeader/write/end(...)` call on Node's http.createServer
-	// `res` object (TDD-00131).
-	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-		if e.inferExprType(mem.Object).IsServerResponse {
-			return e.emitServerResponseMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
-		}
-	}
-	// http.get/request response (TDD-00138): res.on('data'|'end'), setEncoding, …
-	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-		if e.inferExprType(mem.Object).IsIncomingMessage {
-			return e.emitIncomingMessageCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
-		}
-	}
 	// Static method call: ClassName.staticMethod(args) (TDD-00009 Stage
 	// 4). Checked before every mem.Property-name-based/inferExprType-based
 	// dispatch below, for the same reason super's own checks above are: a
@@ -685,12 +696,6 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if id, ok := mem.Object.(*ast.Identifier); ok && e.compatJS() && e.jsProtoCtor[id.Name] && mem.Property == "call" {
 			return e.emitProtoCtorChainCall(id.Name, ex.Args, ex.GetPos())
 		}
-		// Symbol.for / Symbol.keyFor (ADR-00488) — before class dispatch, a
-		// user binding named Symbol still wins via the shadow check.
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Symbol" && !e.isShadowedByLocal("Symbol") &&
-			(mem.Property == "for" || mem.Property == "keyFor") {
-			return e.emitSymbolStatic(mem.Property, ex.Args, ex.GetPos())
-		}
 		// A namespace-qualified static call (`X.C.method()` — ADR-00480).
 		if bare := e.stripNSTypeQualifier(mem.Object); bare != nil {
 			if bid, ok := bare.(*ast.Identifier); ok {
@@ -713,143 +718,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	}
 	// Special-case: console.log(...) and array.push(...)
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-		// URLSearchParams: the ordered pair-list backs the whole method surface
-		// (TDD-00203). Checked first so a shared name (sort/keys/values/entries/
-		// forEach) routes to the __kml_usp_* ABI rather than the array/Map paths
-		// below, which would reject the non-array/non-Map receiver.
-		if objTy := e.inferExprType(mem.Object); objTy.IsURL && !objTy.IsDynamic && (mem.Property == "toString" || mem.Property == "toJSON") && len(ex.Args) == 0 {
-			// URL.prototype.toString/toJSON: the href.
-			return e.emitMember(ast.NewMemberExpression(mem.Object, "href", mem.GetPos()))
-		}
-		if objTy := e.inferExprType(mem.Object); objTy.IsURLSearchParams {
-			if v, handled, err := e.emitURLSearchParamsCall(mem.Object, mem.Property, ex.Args, ex.GetPos()); handled {
-				return v, err
-			}
-			return Value{}, fmt.Errorf("%d:%d: URLSearchParams has no method '%s'", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "URL" && !e.isShadowedByLocal(id.Name) &&
-			(mem.Property == "canParse" || mem.Property == "parse") {
-			// WHATWG statics URL.canParse / URL.parse (TDD-00203) — distinct from
-			// the legacy `url.parse()` module function (a lowercase `url` import).
-			return e.emitURLStaticCall(mem.Property, ex.Args, ex.GetPos())
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "BigInt" && !e.isShadowedByLocal(id.Name) &&
-			(mem.Property == "asIntN" || mem.Property == "asUintN") {
-			return e.emitBigIntAsN(mem.Property, ex.Args, ex.GetPos())
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Buffer" && !e.isShadowedByLocal(id.Name) {
-			return e.emitBufferStaticCall(mem.Property, ex.Args, ex.GetPos())
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "ArrayBuffer" && mem.Property == "isView" && len(ex.Args) == 1 && !e.isShadowedByLocal(id.Name) {
-			return e.emitArrayBufferIsView(ex.Args[0])
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Atomics" && !e.isShadowedByLocal(id.Name) {
-			return e.emitAtomicsCall(mem.Property, ex.Args, ex.GetPos())
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "JSON" && !e.isShadowedByLocal(id.Name) {
-			switch mem.Property {
-			case "stringify":
-				return e.emitJSONStringify(ex.Args, ex.GetPos())
-			case "parse":
-				// Context-free JSON.parse is JS-faithful untyped parse: the
-				// result is a dynamic (`any`) tree — tag-10 objects / tag-11
-				// arrays / boxed scalars (TDD-00155 Stage 2). A typed target
-				// (declared annotation) routes through emitDeclJSONProjection
-				// with the real target type instead of reaching here; an
-				// `as T` written on the call supplies the target the same way.
-				if ty, ok := e.callAssertedTargetTy(ex); ok {
-					return e.emitJSONParse(ex.Args, ty, ex.GetPos())
-				}
-				return e.emitJSONParse(ex.Args, TypeAny, ex.GetPos())
-			}
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Date" && mem.Property == "now" {
-			return e.emitDateNow()
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Date" && mem.Property == "parse" {
-			return e.emitDateParse(ex.Args, ex.GetPos())
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Date" && mem.Property == "UTC" && !e.isShadowedByLocal("Date") {
-			// Date.UTC: the same fields as new Date(y, m, …), read as UTC, as
-			// a time value number.
-			v, err := e.emitDateFields(ex.Args)
-			if err != nil {
-				return Value{}, err
-			}
-			return Value{Ref: v.Ref, Ty: TypeI64}, nil
-		}
-		if mem.Property == "toString" && e.inferExprType(mem.Object).IsSymbol {
-			objVal, err := e.emitExpr(mem.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			return e.emitSymbolToString(objVal)
-		}
-		if mem.Property == "toString" && e.inferExprType(mem.Object).IsBigInt {
-			return e.emitBigIntToStringMethod(mem.Object, ex.Args, ex.GetPos())
-		}
-		if mem.Property == "toString" && e.inferExprType(mem.Object).IsError {
-			objVal, err := e.emitExpr(mem.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			return e.emitErrorToString(objVal)
-		}
-		if objTy := e.inferExprType(mem.Object); objTy.IsReadableStream || objTy.IsStreamReader || objTy.IsRSController {
-			return e.emitStreamMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
-		}
-		if objTy := e.inferExprType(mem.Object); objTy.IsWritableStream || objTy.IsStreamWriter || objTy.IsWSController {
-			return e.emitWStreamMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
-		}
-		if (mem.Property == "then" || mem.Property == "catch" || mem.Property == "finally") && e.inferExprType(mem.Object).IsPromise {
-			return e.emitPromiseThen(mem.Object, mem.Property, ex.Args, ex.GetPos())
-		}
-		if isResponseMethodName(mem.Property) && hasBodyMixin(e.inferExprType(mem.Object)) {
-			objVal, err := e.emitExpr(mem.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			if ty, ok := e.callAssertedTargetTy(ex); ok && mem.Property == "json" {
-				// `res.json() as T` supplies the parse target (a carve-out in
-				// the same spirit as `JSON.parse(s) as T`); the result is still
-				// a Promise<T> you await (TDD-00186 Part B).
-				return e.emitResponseCall(objVal, mem.Property, ex.GetPos(), ty)
-			}
-			return e.emitResponseCall(objVal, mem.Property, ex.GetPos())
-		}
-		if mem.Property == "encode" && e.inferExprType(mem.Object).IsTextEncoder {
-			return e.emitTextEncoderEncode(mem.Object, ex.Args, ex.GetPos())
-		}
-		if mem.Property == "encodeInto" && e.inferExprType(mem.Object).IsTextEncoder {
-			return e.emitTextEncoderEncodeInto(mem.Object, ex.Args, ex.GetPos())
-		}
-		if mem.Property == "decode" && e.inferExprType(mem.Object).IsTextDecoder {
-			return e.emitTextDecoderDecode(mem.Object, ex.Args, ex.GetPos())
-		}
-		if mem.Property == "test" && e.inferExprType(mem.Object).IsURLPattern {
-			return e.emitURLPatternTest(mem, ex.Args, ex.GetPos())
-		}
-		if mem.Property == "exec" && e.inferExprType(mem.Object).IsURLPattern {
-			return e.emitURLPatternExec(mem, ex.Args, ex.GetPos())
-		}
 
-		if mem.Property == "toString" && len(ex.Args) == 0 && e.inferExprType(mem.Object).IsRegExp {
-			rv, err := e.emitExpr(mem.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			return e.emitValueToString(rv)
-		}
-
-		if objTy := e.inferExprType(mem.Object); objTy.IsChildProcess || objTy.IsCPStream || objTy.IsCPStdin {
-			return e.emitChildProcessMethodCall(mem.Object, objTy, mem.Property, ex.Args, ex.GetPos())
-		}
-		if e.inferExprType(mem.Object).IsClientRequest {
-			return e.emitClientRequestMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
-		}
-		if e.inferExprType(mem.Object).IsHTTPAgent {
-			return e.emitHTTPAgentMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
-		}
 		if e.inferExprType(mem.Object).IsWebview {
 			return e.emitWebviewMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
@@ -871,12 +740,6 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if e.inferExprType(mem.Object).IsChannel {
 			return e.emitChannelMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
-		if e.inferExprType(mem.Object).IsHTTPServer {
-			return e.emitHTTPServerMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
-		}
-		if e.inferExprType(mem.Object).IsFinalizationRegistry {
-			return e.emitFinalizationRegistryMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
-		}
 		// `/** @value */` flat array (TDD-00134 Stage 2): push is the one
 		// supported method; everything else needs the pointer-slot layout.
 		if objTy := e.inferExprType(mem.Object); objTy.IsFlatArray {
@@ -884,9 +747,6 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitFlatArrayPush(objTy, mem, ex.Args, ex.GetPos())
 			}
 			return Value{}, fmt.Errorf("%d:%d: a @value array supports index read/write, .length, for...of, and .push — '%s' needs a regular (pointer-element) array", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
-		}
-		if e.inferExprType(mem.Object).IsNetSocket {
-			return e.emitNetSocketMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
 		if mem.Property == "stream" && e.inferExprType(mem.Object).IsRequest {
 			objVal, err := e.emitExpr(mem.Object)
@@ -934,7 +794,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			if _, ok := e.classes[objTy.ClassName]; !ok {
 				if ne, isNew := mem.Object.(*ast.NewExpression); isNew {
 					if genDecl, generic := e.genericClasses[ne.ClassName]; generic {
-						if targs, ok := classTypeArgs(genDecl, ne.TypeArgs); ok {
+						if targs, ok := e.newTypeArgs(genDecl, ne); ok {
 							if _, err := e.instantiateGenericClass(genDecl, e.buildTypeArgSubs(genDecl.TypeParams, targs)); err != nil {
 								return Value{}, err
 							}
@@ -961,213 +821,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				}
 			}
 		}
-		if mem.Property == "hasOwnProperty" && e.inferExprType(mem.Object).IsObject {
-			if len(ex.Args) != 1 {
-				return Value{}, fmt.Errorf("%d:%d: hasOwnProperty takes 1 argument", ex.GetPos().Line, ex.GetPos().Col)
-			}
-			return e.emitHasOwnProperty(mem.Object, ex.Args[0], "hasOwnProperty", true, ex.GetPos())
-		}
-		if mem.Property == "toString" && len(ex.Args) == 0 && isNumberTy(e.inferExprType(mem.Object)) {
-			// A boolean (or a number the declarations' lowering does not
-			// take): String(x).
-			v, err := e.emitExpr(mem.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			return e.emitValueToString(v)
-		}
-		// str.toString() is the identity — Node code calls it habitually on
-		// values that are Buffers there but strings here (spawnSync results,
-		// stream chunks), so this keeps that idiom compiling.
-		if mem.Property == "toString" && len(ex.Args) == 0 && isPlainStringType(e.inferExprType(mem.Object).staticIndexType()) {
-			return e.emitExpr(mem.Object)
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Array" && !e.isShadowedByLocal(id.Name) {
-			switch mem.Property {
-			case "isArray":
-				if len(ex.Args) != 1 {
-					return Value{}, fmt.Errorf("%d:%d: Array.isArray takes exactly 1 argument", ex.GetPos().Line, ex.GetPos().Col)
-				}
-				// A dynamic (`any`) argument's array-ness is only known at
-				// runtime — a NaN-box can carry an array now and a plain object
-				// the next line. Consult the box tag (a static-array box is
-				// kmlTagArray, a D1 dynamic array kmlTagDynArray) rather than the
-				// compile-time IsArray, which is always false for `any` and made
-				// `Array.isArray(x)` wrongly return false for a genuine boxed
-				// array (ADR-00934).
-				argTy := e.inferExprType(ex.Args[0])
-				if argTy.IsDynamic {
-					v, err := e.emitExpr(ex.Args[0])
-					if err != nil {
-						return Value{}, err
-					}
-					v, err = e.emitBoxValue(v)
-					if err != nil {
-						return Value{}, err
-					}
-					tag, payload := e.emitUnboxTagPayload(v)
-					isArr := e.freshReg()
-					isDyn := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isArr, tag, kmlTagArray))
-					e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isDyn, tag, kmlTagDynArray))
-					// A boxed TypedArray is kmlTagArray too, but `Array.isArray(new
-					// Int32Array(1))` is false — read the box's typed byte (ADR-01059).
-					// Only dereferenced when the tag says the payload is a box.
-					resPtr := e.freshReg()
-					e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resPtr))
-					e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", isDyn, resPtr))
-					typedL := e.freshLabel("isarray.typed")
-					mergeL := e.freshLabel("isarray.merge")
-					e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isArr, typedL, mergeL))
-					e.emitLabel(typedL)
-					box := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", box, payload))
-					typedGep := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", typedGep, anyArrayBoxTy, box))
-					typedB := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", typedB, typedGep))
-					plain := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", plain, typedB, anyArrayPlain))
-					e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", plain, resPtr))
-					e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-					e.emitLabel(mergeL)
-					res := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", res, resPtr))
-					return Value{Ref: res, Ty: TypeBool}, nil
-				}
-				if argTy.IsTypedArray || argTy.IsBuffer {
-					// A TypedArray/Buffer is IsArray storage-wise but not a JS Array.
-					return Value{Ref: "false", Ty: TypeBool}, nil
-				}
-				if argTy.IsArray {
-					// A `T[] | undefined` value (a nested-array element absence,
-					// TDD-00221): a miss is `undefined`, and `Array.isArray(undefined)`
-					// is false — decide at runtime on the null data-ptr.
-					if argTy.Nullable {
-						v, err := e.emitExpr(ex.Args[0])
-						if err != nil {
-							return Value{}, err
-						}
-						dataPtr := e.freshReg()
-						e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, v.Ref))
-						isArr := e.freshReg()
-						e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isArr, dataPtr))
-						return Value{Ref: isArr, Ty: TypeBool}, nil
-					}
-					return Value{Ref: "true", Ty: TypeBool}, nil
-				}
-				return Value{Ref: "false", Ty: TypeBool}, nil
-			case "of":
-				return e.emitArrayOf(ex.Args, ex.GetPos())
-			case "from":
-				return e.emitArrayFrom(ex.Args, ex.GetPos())
-			}
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "ReadableStream" && mem.Property == "from" {
-			if _, found := e.lookup(id.Name); !found {
-				return e.emitReadableStreamFrom(ex.Args, ex.GetPos())
-			}
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Response" && (mem.Property == "json" || mem.Property == "redirect" || mem.Property == "error") {
-			if _, user := e.classes[id.Name]; !user {
-				if _, found := e.lookup(id.Name); !found {
-					return e.emitResponseStatic(mem.Property, ex.Args, ex.GetPos())
-				}
-			}
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Promise" {
-			switch mem.Property {
-			case "all":
-				return e.emitPromiseAll(ex.Args, ex.GetPos())
-			case "race":
-				return e.emitPromiseRace(ex.Args, ex.GetPos())
-			case "allSettled":
-				return e.emitPromiseAllSettled(ex.Args, ex.GetPos())
-			case "any":
-				return e.emitPromiseAny(ex.Args, ex.GetPos())
-			case "resolve":
-				return e.emitPromiseResolve(ex.Args, ex.GetPos(), Type{})
-			case "reject":
-				return e.emitPromiseReject(ex.Args, ex.GetPos())
-			}
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Reflect" && !e.isShadowedByLocal(id.Name) {
-			return e.emitReflectCall(mem.Property, ex.Args, ex.GetPos())
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Object" && !e.isShadowedByLocal(id.Name) {
-			switch mem.Property {
-			case "groupBy":
-				return e.emitObjectGroupBy(ex.Args, ex.GetPos())
-			case "keys":
-				return e.emitObjectKeys(ex.Args, ex.GetPos())
-			case "values":
-				return e.emitObjectValues(ex.Args, ex.GetPos())
-			case "entries":
-				return e.emitObjectEntries(ex.Args, ex.GetPos())
-			case "fromEntries":
-				return e.emitObjectFromEntries(ex.Args, ex.GetPos())
-			case "assign":
-				return e.emitObjectAssign(ex.Args, ex.GetPos())
-			case "freeze":
-				return e.emitObjectFreeze(ex.Args, ex.GetPos())
-			case "seal":
-				return e.emitObjectSeal(ex.Args, ex.GetPos())
-			case "hasOwn":
-				if len(ex.Args) != 2 {
-					return Value{}, fmt.Errorf("%d:%d: Object.hasOwn takes 2 arguments", ex.GetPos().Line, ex.GetPos().Col)
-				}
-				return e.emitHasOwnProperty(ex.Args[0], ex.Args[1], "Object.hasOwn", true, ex.GetPos())
-			case "create":
-				return e.emitObjectCreate(ex.Args, ex.GetPos())
-			case "getPrototypeOf":
-				return e.emitObjectGetPrototypeOf(ex.Args, ex.GetPos())
-			case "setPrototypeOf":
-				return e.emitObjectSetPrototypeOf(ex.Args, ex.GetPos())
-			case "defineProperty":
-				return e.emitObjectDefineProperty(ex.Args, ex.GetPos())
-			case "defineProperties":
-				return e.emitObjectDefineProperties(ex.Args, ex.GetPos())
-			case "getOwnPropertyDescriptor":
-				return e.emitObjectGetOwnPropertyDescriptor(ex.Args, ex.GetPos())
-			case "getOwnPropertyNames":
-				return e.emitObjectGetOwnPropertyNames(ex.Args, ex.GetPos())
-			case "preventExtensions", "isExtensible", "isSealed", "isFrozen":
-				// Dynamic-object forms (TDD-00155 Stage 5); the static-object
-				// freeze/seal paths keep their own handlers below.
-				if len(ex.Args) == 1 && isUnconstrainedDynamic(e.inferExprType(ex.Args[0])) {
-					v, err := e.emitExprWithObjectHint(ex.Args[0], TypeAny)
-					if err != nil {
-						return Value{}, err
-					}
-					switch mem.Property {
-					case "preventExtensions":
-						return e.emitDynPrevent(v, 0)
-					case "isExtensible":
-						return e.emitDynFlagsTest(v, 0)
-					case "isSealed":
-						return e.emitDynFlagsTest(v, 1)
-					case "isFrozen":
-						return e.emitDynFlagsTest(v, 2)
-					}
-				}
-				// A static object's integrity level (TDD-00229).
-				if len(ex.Args) == 1 && e.inferExprType(ex.Args[0]).IsObject {
-					v, err := e.emitExpr(ex.Args[0])
-					if err != nil {
-						return Value{}, err
-					}
-					if mem.Property == "preventExtensions" {
-						e.emitStaticIntegrity(v.Ref, staticIntegrityNonExtensible)
-						return v, nil
-					}
-					return e.emitStaticIntegrityTest(v, mem.Property), nil
-				}
-			}
-		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
 			switch mem.Property {
-			case "nextTick":
-				return e.emitProcessNextTick(ex.Args, ex.GetPos())
 			case "getuid", "geteuid", "getgid", "getegid":
 				// Node has no process.getuid/getgid family on Windows (they are
 				// undefined there, so the bare call is a TypeError in Node);
@@ -1176,34 +831,6 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				// (emitOptionalCalleeCall). Elsewhere they are
 				// internal_process_methods.ts's (processMemberRewrite).
 				return Value{}, fmt.Errorf("%d:%d: process.%s is not available on Windows (Node defines it only on POSIX) — use the optional call `process.%s?.()`, which is `undefined` on Windows", ex.GetPos().Line, ex.GetPos().Col, mem.Property, mem.Property)
-			}
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "url__reexport_kml_builtin" {
-			// TDD-00165 Stage 4: the legacy `url` module functions. The primary
-			// exports (URL/URLSearchParams) are reexports of the globals handled in
-			// the resolver; only the module-only functions reach codegen here.
-			switch mem.Property {
-			case "fileURLToPath":
-				return e.emitFileURLToPath(ex.Args, ex.GetPos())
-			case "pathToFileURL":
-				return e.emitPathToFileURL(ex.Args, ex.GetPos())
-			case "urlToHttpOptions":
-				return e.emitUrlToHttpOptions(ex.Args, ex.GetPos())
-			case "domainToASCII":
-				return e.emitUrlDomainConvert(ex.Args, ex.GetPos(), curluPunycode)
-			case "domainToUnicode":
-				return e.emitUrlDomainConvert(ex.Args, ex.GetPos(), curluPuny2IDN)
-			}
-		}
-		if e.isCryptoSubtle(mem.Object) {
-			return e.emitCryptoSubtleCall(mem.Property, ex.Args, ex.GetPos())
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "crypto" && !e.isShadowedByLocal(id.Name) {
-			switch mem.Property {
-			case "getRandomValues":
-				return e.emitCryptoGetRandomValues(ex.Args, ex.GetPos())
-			case "randomUUID":
-				return e.emitCryptoRandomUUID(ex.Args, ex.GetPos())
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Memory__kml_builtin" && mem.Property == "free" {
@@ -1215,13 +842,6 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				// Bespoke server functions moved to klain:http (ADR-00635) — Node
 				// has these as Server methods, not `http.*` functions.
 				return Value{}, fmt.Errorf("%d:%d: http.%s is not a Node API — use `http.createServer(handler).listen(port)` for the faithful server, or import the bespoke handler-returns-response model from klain:http: `import http from 'klain:http'`", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
-			case "get", "request":
-				return e.emitHTTPClientGet(ex.Args, ex.GetPos(), mem.Property == "request")
-			case "createServer":
-				// The chained createServer(cb).listen(...) expression is
-				// intercepted earlier; reaching here means the variable-bound
-				// handle form (TDD-00131 follow-on).
-				return e.emitHTTPCreateServer(ex.Args, ex.GetPos())
 			}
 		}
 		// klain:http — the bespoke handler-returns-response server model
@@ -1238,51 +858,6 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitHTTPCloseAllConnections(ex.Args, ex.GetPos())
 			}
 			return Value{}, fmt.Errorf("%d:%d: klain:http has no method '%s' (supported: listen, close, closeAllConnections) — the Node client/server surface (createServer/get/request) is under 'http'", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "https__kml_builtin" {
-			switch mem.Property {
-			case "get", "request":
-				// TLS is the libcurl client's native ground — same emitter as
-				// http.get/request; the options-object form composes https URLs.
-				return e.emitHTTPClientGetScheme(ex.Args, ex.GetPos(), "https", mem.Property == "request")
-			case "createServer":
-				// HTTPS/1.1 server (TDD-00111): a TLS-wrapped accept path serving
-				// the same (req,res) core as http.createServer over the SSL shims.
-				return e.emitHTTPSCreateServer(ex.Args, ex.GetPos())
-			}
-			return Value{}, fmt.Errorf("%d:%d: https has no method '%s' (supported: get, request)", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "console" && !e.isShadowedByLocal(id.Name) {
-			switch mem.Property {
-			case "log", "info", "debug":
-				return e.emitConsolePrint(ex.Args, 1, "")
-			case "error":
-				return e.emitConsolePrint(ex.Args, 2, "")
-			case "warn":
-				// Real console.warn prints the arguments to stderr with no
-				// prefix of any kind — identical to console.error.
-				return e.emitConsolePrint(ex.Args, 2, "")
-			case "trace":
-				return e.emitConsolePrint(ex.Args, 2, "Trace: ")
-			case "assert":
-				return e.emitConsoleAssert(ex.Args, ex.GetPos())
-			case "dir":
-				return e.emitConsoleDir(ex.Args, ex.GetPos())
-			case "time":
-				return e.emitConsoleTime(ex.Args, ex.GetPos())
-			case "timeEnd":
-				return e.emitConsoleTimeEnd(ex.Args, ex.GetPos())
-			case "count":
-				return e.emitConsoleCount(ex.Args, ex.GetPos())
-			case "countReset":
-				return e.emitConsoleCountReset(ex.Args, ex.GetPos())
-			case "group", "groupCollapsed":
-				return e.emitConsoleGroup(ex.Args, ex.GetPos())
-			case "groupEnd":
-				return e.emitConsoleGroupEnd(ex.Args, ex.GetPos())
-			case "table":
-				return e.emitConsoleTable(ex.Args, ex.GetPos())
-			}
 		}
 		// TDD-00101: a BigInt64Array/BigUint64Array supports only an explicit
 		// allow-list of array methods — the generic HOF/search/sort/mutator
@@ -1301,21 +876,6 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			}
 			return e.emitDynAnyMethodCall(objVal, mem.Property, ex.Args, ex.GetPos())
 		}
-		// Name-dispatched fallbacks of the Array intrinsics (TDD-00230 P3.2),
-		// for a receiver no Array declaration reaches (a Buffer's own
-		// declarations, an undeclared method).
-		switch mem.Property {
-		case "push":
-			return e.emitPush(mem, ex.Args, ex.GetPos())
-		case "pop":
-			return e.emitPop(mem, ex.Args, ex.GetPos())
-		case "shift":
-			return e.emitShift(mem, ex.Args, ex.GetPos())
-		case "unshift":
-			return e.emitUnshift(mem, ex.Args, ex.GetPos())
-		case "splice":
-			return e.emitSplice(mem, ex.Args, ex.GetPos())
-		}
 		// SharedArrayBuffer.grow / ArrayBuffer.resize (ADR-00494) — only on
 		// buffers constructed with {maxByteLength}.
 		if mem.Property == "grow" || mem.Property == "resize" {
@@ -1328,15 +888,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			}
 		}
 		if mem.Property == "slice" {
-			objTy := e.inferExprType(mem.Object)
-			if objTy.IsBlob {
-				return e.emitBlobCall(mem, "slice", ex.Args, ex.GetPos())
-			}
-			if objTy.IsArrayBuffer {
+			if objTy := e.inferExprType(mem.Object); objTy.IsArrayBuffer {
 				return e.emitArrayBufferSlice(mem, ex.Args, ex.GetPos())
-			}
-			if objTy.IsArray {
-				return e.emitArraySlice(mem, ex.Args, ex.GetPos())
 			}
 		}
 		// Buffer.indexOf/includes/lastIndexOf with a STRING argument searches the
@@ -1347,174 +900,15 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitBufferStringSearch(mem, mem.Property, ex.Args, ex.GetPos())
 			}
 		}
-		if e.inferExprType(mem.Object).IsArray {
-			switch mem.Property {
-			case "indexOf":
-				return e.emitArrayIndexOf(mem, ex.Args, ex.GetPos())
-			case "lastIndexOf":
-				return e.emitArrayLastIndexOf(mem, ex.Args, ex.GetPos())
-			case "includes":
-				return e.emitArrayIncludes(mem, ex.Args, ex.GetPos())
-			case "at":
-				return e.emitArrayAt(mem, ex.Args, ex.GetPos())
-			}
-		}
-		if mem.Property == "concat" {
-			objTy := e.inferExprType(mem.Object)
-			if objTy.IsArray {
-				return e.emitArrayConcat(mem, ex.Args, ex.GetPos())
-			}
-			if isForOfStringTy(objTy) {
-				return e.emitStringConcatMethod(mem, ex.Args, ex.GetPos())
-			}
-		}
-		switch mem.Property {
-		case "reverse":
-			return e.emitArrayReverse(mem, ex.Args, ex.GetPos())
-		case "toReversed":
-			return e.emitArrayToReversed(mem, ex.Args, ex.GetPos())
-		case "toSorted":
-			return e.emitArrayToSorted(mem, ex.Args, ex.GetPos())
-		case "toSpliced":
-			return e.emitArrayToSpliced(mem, ex.Args, ex.GetPos())
-		case "with":
-			return e.emitArrayWith(mem, ex.Args, ex.GetPos())
-		case "copyWithin":
-			return e.emitArrayCopyWithin(mem, ex.Args, ex.GetPos())
-		case "findIndex":
-			return e.emitArrayFindIndex(mem, ex.Args, ex.GetPos())
-		case "findLast":
-			return e.emitArrayFindLast(mem, ex.Args, ex.GetPos())
-		case "findLastIndex":
-			return e.emitArrayFindLastIndex(mem, ex.Args, ex.GetPos())
-		}
 		if mem.Property == "fill" {
 			// Buffer.fill(string, ...) repeats the needle's bytes (ADR-00559);
 			// number fills stay on the shared array path.
 			if objTy := e.inferExprType(mem.Object); objTy.IsBuffer && len(ex.Args) >= 1 && isStringTy(e.inferExprType(ex.Args[0])) {
 				return e.emitBufferStringFill(mem, ex.Args, ex.GetPos())
 			}
-			return e.emitArrayFill(mem, ex.Args, ex.GetPos())
 		}
 		if mem.Property == "toLocaleString" && isNumberTy(e.inferExprType(mem.Object)) {
 			return e.emitNumberToLocaleString(mem, ex.Args, ex.GetPos())
-		}
-		switch mem.Property {
-		case "search":
-			return e.emitStringSearch(mem, ex.Args, ex.GetPos())
-		case "localeCompare":
-			return e.emitStringLocaleCompare(mem, ex.Args, ex.GetPos())
-		case "replace":
-			return e.emitStringReplace(mem, ex.Args, ex.GetPos())
-		case "replaceAll":
-			return e.emitStringReplaceAll(mem, ex.Args, ex.GetPos())
-		case "split":
-			return e.emitStringSplit(mem, ex.Args, ex.GetPos())
-		case "map":
-			return e.emitArrayMap(mem, ex.Args, ex.GetPos())
-		case "filter":
-			return e.emitArrayFilter(mem, ex.Args, ex.GetPos())
-		case "reduce":
-			return e.emitArrayReduce(mem, ex.Args, ex.GetPos(), false)
-		case "reduceRight":
-			return e.emitArrayReduce(mem, ex.Args, ex.GetPos(), true)
-		case "find":
-			return e.emitArrayFind(mem, ex.Args, ex.GetPos())
-		case "some":
-			return e.emitArraySome(mem, ex.Args, ex.GetPos())
-		case "every":
-			return e.emitArrayEvery(mem, ex.Args, ex.GetPos())
-		case "join":
-			return e.emitArrayJoin(mem, ex.Args, ex.GetPos())
-		case "sort":
-			return e.emitArraySort(mem, ex.Args, ex.GetPos())
-		case "flat":
-			return e.emitArrayFlat(mem, ex.Args, ex.GetPos())
-		case "flatMap":
-			return e.emitArrayFlatMap(mem, ex.Args, ex.GetPos())
-		}
-		if mem.Property == "match" {
-			return e.emitStringMatch(mem, ex.Args, ex.GetPos())
-		}
-		if mem.Property == "matchAll" {
-			return e.emitStringMatchAll(mem, ex.Args, ex.GetPos())
-		}
-		// Buffer instance methods (TDD-00103) — checked before the generic
-		// string/array chains can claim .toString/.write/.copy/.equals/
-		// .compare; everything not named here (indexing, .fill, .indexOf,
-		// .slice, HOFs, …) deliberately falls through to the shared
-		// TypedArray/array machinery.
-		if isBufferMethodName(mem.Property) && e.inferExprType(mem.Object).IsBuffer {
-			return e.emitBufferInstanceCall(mem, mem.Property, ex.Args, ex.GetPos())
-		}
-		// Blob-only methods (TDD-00102) — checked before Response's own
-		// .arrayBuffer()/.text() dispatch below can claim the same names.
-		if e.inferExprType(mem.Object).IsBlob {
-			switch mem.Property {
-			case "arrayBuffer", "bytes", "text", "stream":
-				return e.emitBlobCall(mem, mem.Property, ex.Args, ex.GetPos())
-			}
-		}
-		// DataView accessors (getInt16/setFloat64/..., emit_dataview.go).
-		if op, kind, ok := dataViewMethodKind(mem.Property); ok {
-			if e.inferExprType(mem.Object).IsDataView {
-				if op == "get" {
-					return e.emitDataViewGet(mem, kind, ex.Args, ex.GetPos())
-				}
-				return e.emitDataViewSet(mem, kind, ex.Args, ex.GetPos())
-			}
-		}
-		// TypedArray-only methods. TypedArray IS a plain array (IsArray/
-		// ElemType — see IsTypedArray's doc comment), so indexing/.length/
-		// .fill/.slice/.reverse/.at/.indexOf/.includes/.map/.filter/
-		// .reduce/.forEach/.some/.every/for-of/.keys()/.values()/.entries()
-		// all already dispatch correctly via the unguarded array-property
-		// checks above and the generic array-HOF checks below with zero
-		// changes; only these two names (no `number[]` equivalent to
-		// collide with) need TypedArray-specific behavior.
-		if objTy := e.inferExprType(mem.Object); objTy.IsTypedArray {
-			switch mem.Property {
-			case "set":
-				return e.emitTypedArraySet(mem, ex.Args, ex.GetPos())
-			case "subarray":
-				return e.emitTypedArraySubarray(mem, ex.Args, ex.GetPos())
-			}
-		}
-		// XMLHttpRequest-only methods (TDD-00040).
-		if e.inferExprType(mem.Object).IsXHR {
-			switch mem.Property {
-			case "open":
-				return e.emitXHROpen(mem.Object, ex.Args, ex.GetPos())
-			case "setRequestHeader":
-				return e.emitXHRSetRequestHeader(mem.Object, ex.Args, ex.GetPos())
-			case "send":
-				return e.emitXHRSend(mem.Object, ex.Args, ex.GetPos())
-			case "abort":
-				return e.emitXHRAbort(mem.Object, ex.Args, ex.GetPos())
-			case "getResponseHeader":
-				return e.emitXHRGetResponseHeader(mem.Object, ex.Args, ex.GetPos())
-			case "getAllResponseHeaders":
-				return e.emitXHRGetAllResponseHeaders(mem.Object, ex.Args, ex.GetPos())
-			}
-		}
-		// Headers-only methods (TDD-00040), checked before the generic Map
-		// dispatch right below — same "narrower flag first" ordering
-		// IsURLSearchParams already establishes just above (Headers IS a
-		// Map<string,string> too: get/set/has/delete are case-insensitive,
-		// append has no Map equivalent, and forEach/entries/keys/values are
-		// the backing Map's).
-		if objTy := e.inferExprType(mem.Object); objTy.IsHeaders {
-			switch mem.Property {
-			case "get", "set", "has", "delete", "append":
-				return e.emitHeadersCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
-			case "forEach", "entries", "keys", "values":
-				// The rest of the surface is the backing Map<string, string>'s.
-				ty, ptr, err := e.resolveMapOrSetForCall(mem.Object, ex.GetPos())
-				if err != nil {
-					return Value{}, err
-				}
-				return e.emitMapCall(ty, ptr, mem.Property, ex.Args, ex.GetPos())
-			}
 		}
 		// Map<K,V> and Set<T> method dispatch. Checked before the generic
 		// "forEach" name below, since both Array and Map/Set have a
@@ -1525,16 +919,6 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		// catches a Map/Set-typed field access, array index, or call result
 		// (e.g. `c.scores.get(...)` where `scores: Map<K,V>`), which
 		// resolveMapOrSetForCall then evaluates for real.
-		// Weak collections (TDD-00112) — checked before the plain Map/Set
-		// dispatch below, since WeakMap/WeakSet also carry IsMap/IsSet. WeakRef
-		// carries neither, so it gets its own check.
-		if objTy := e.inferExprType(mem.Object); objTy.IsWeakRef {
-			ptr, err := e.resolveWeakRefForCall(mem.Object, ex.GetPos())
-			if err != nil {
-				return Value{}, err
-			}
-			return e.emitWeakRefCall(objTy, ptr, mem.Property, ex.Args, ex.GetPos())
-		}
 		// A Map or Set the checker has no declaration for: a klain: module's
 		// compiler-typed value (klain:http's HttpRequest.query), until those
 		// modules are declared (TDD-00230 ports them last).
@@ -1561,35 +945,6 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		// pattern here rather than assuming that stays true).
 		if gt := e.inferExprType(mem.Object); gt.IsGenerator && (mem.Property == "next" || mem.Property == "throw" || mem.Property == "return") {
 			return e.emitGeneratorUserCall(mem, gt, ex.Args, ex.GetPos())
-		}
-		if mem.Property == "forEach" {
-			return e.emitArrayForEach(mem, ex.Args, ex.GetPos())
-		}
-		// arr.keys()/.values()/.entries() — same names Map/Set already use
-		// above (handled there for Map/Set receivers), so guard on IsArray
-		// the same way "slice"/"indexOf"/"at" already disambiguate against
-		// their string-method namesakes.
-		if mem.Property == "keys" && e.inferExprType(mem.Object).IsArray {
-			return e.emitArrayKeys(mem, ex.Args, ex.GetPos())
-		}
-		if mem.Property == "values" && e.inferExprType(mem.Object).IsArray {
-			return e.emitArrayValues(mem, ex.Args, ex.GetPos())
-		}
-		if mem.Property == "entries" && e.inferExprType(mem.Object).IsArray {
-			return e.emitArrayEntries(mem, ex.Args, ex.GetPos())
-		}
-		// Function.prototype.call / .apply on a first-class function value
-		// (TDD-00137 Stage A): fn.call(thisArg, a, b) and fn.apply(thisArg,
-		// [a, b]) lower to a direct fn(a, b). Checked before the generic
-		// field-call below so `fn.call`/`fn.apply` aren't misread as calling a
-		// field literally named "call"/"apply".
-		if (mem.Property == "call" || mem.Property == "apply") && e.inferExprType(mem.Object).IsFunc {
-			return e.emitFunctionCallApply(mem.Object, mem.Property, ex.Args, ex.GetPos())
-		}
-		// Function.prototype.bind (TDD-00137 Stage C): fn.bind(thisArg, …bound)
-		// returns a new partially-applied function value.
-		if mem.Property == "bind" && e.inferExprType(mem.Object).IsFunc {
-			return e.emitFunctionBind(mem.Object, ex.Args, ex.GetPos())
 		}
 		// Calling a function-typed object field: obj.callback(...), none of
 		// the hardcoded built-in method names above matched, so treat mem as
@@ -1634,37 +989,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 
 	// Global built-in functions.
 	if id, ok := ex.Callee.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
-		switch id.Name {
-		case "String":
-			return e.emitGlobalStringConv(ex.Args, ex.GetPos())
-		case "Number":
-			return e.emitGlobalNumberConv(ex.Args, ex.GetPos())
-		case "Boolean":
-			return e.emitGlobalBooleanConv(ex.Args, ex.GetPos())
-		case "fetch":
-			return e.emitFetch(ex.Args, ex.GetPos())
-		case "queueMicrotask":
-			return e.emitQueueMicrotask(ex.Args, ex.GetPos())
-		case "setTimeout":
-			return e.emitSetTimeout(ex.Args, ex.GetPos())
-		case "setInterval":
-			return e.emitSetInterval(ex.Args, ex.GetPos())
-		case "setImmediate":
-			return e.emitSetImmediate(ex.Args, ex.GetPos())
-		case "clearTimeout":
-			return e.emitClearTimer(ex.Args, "clearTimeout", ex.GetPos())
-		case "clearInterval":
-			return e.emitClearTimer(ex.Args, "clearInterval", ex.GetPos())
-		case "clearImmediate":
-			return e.emitClearTimer(ex.Args, "clearImmediate", ex.GetPos())
-		case "gc":
+		if id.Name == "gc" {
 			return e.emitGlobalGC(ex.Args, ex.GetPos())
-		case "structuredClone":
-			return e.emitStructuredClone(ex.Args, ex.GetPos())
-		case "Symbol":
-			return e.emitSymbolConstructor(ex.Args, ex.GetPos())
-		case "BigInt":
-			return e.emitBigIntConstructor(ex.Args, ex.GetPos())
 		}
 	}
 
@@ -1678,7 +1004,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	}
 
 	// Immediately-invoked function expression: (function(x: number) { return x+1; })(5)
-	if fe, ok := ex.Callee.(*ast.FunctionExpression); ok {
+	// A generator expression's value is a boxed constructor: its call is
+	// the dynamic call below, as for `const g = function* () {}; g()`.
+	if fe, ok := ex.Callee.(*ast.FunctionExpression); ok && !fe.IsGenerator {
 		closureVal, err := e.emitFunctionExpression(fe, nil)
 		if err != nil {
 			return Value{}, err
@@ -1836,35 +1164,6 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	// "only simple function calls" fallback, and (for the conformance leverage
 	// map) it splits that catch-all bucket by the receiver's type instead of
 	// lumping every unrecognized method call together.
-	// A timer handle's methods (NodeJS.Timeout / Immediate): unref, ref,
-	// hasRef, close.
-	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && e.isTimerHandle(mem.Object) {
-		switch mem.Property {
-		case "unref", "ref", "hasRef", "close":
-			h, err := e.emitExpr(mem.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			id := e.coerce(h, TypeI64)
-			e.ensureTimerRuntime()
-			switch mem.Property {
-			case "unref", "ref":
-				on := "true"
-				if mem.Property == "unref" {
-					on = "false"
-				}
-				e.emitInstr(fmt.Sprintf("call void @__kml_timer_set_ref(i64 %s, i1 %s)", id.Ref, on))
-				return h, nil
-			case "hasRef":
-				r := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_timer_has_ref(i64 %s)", r, id.Ref))
-				return Value{Ref: r, Ty: TypeBool}, nil
-			default:
-				e.emitInstr(fmt.Sprintf("call void @__kml_timer_clear(i64 %s)", id.Ref))
-				return h, nil
-			}
-		}
-	}
 	// A function's own function-valued property the checker did not see
 	// declared (`f.p(…)`), when nothing else claimed the call.
 	if r, ok := e.funcOwnPropCall(ex); ok {
@@ -1927,8 +1226,6 @@ func describeReceiverType(ty Type) string {
 		return "a TypedArray"
 	case ty.IsArrayBuffer:
 		return "an ArrayBuffer"
-	case ty.IsDataView:
-		return "a DataView"
 	case ty.IsArray:
 		return "an array"
 	case ty.IsMap:
@@ -1943,10 +1240,6 @@ func describeReceiverType(ty Type) string {
 		return "a RegExp"
 	case ty.IsBigInt:
 		return "a bigint"
-	case ty.IsNetSocket:
-		return "a net socket"
-	case ty.IsChildProcess:
-		return "a ChildProcess"
 	case ty.IsResponse:
 		return "a Response"
 	case ty.IsRequest:
@@ -2025,6 +1318,24 @@ func anySpread(restArgs []ast.Expression) bool {
 // technique, but keyed off a call's arg list (resolveArrayForHOF spreads, so an
 // array-returning expression works, not only a bare array variable).
 func (e *Emitter) emitRestArgBuffer(restArgs []ast.Expression, elemTy Type) (dataReg, lenReg string, err error) {
+	for _, arg := range restArgs {
+		if sp, ok := arg.(*ast.SpreadElement); ok && !sameRestElem(e.inferExprType(sp.Arg), elemTy) {
+			// A spread of other elements (numbers into an any[] rest): the
+			// arguments as an array literal of the rest's element type,
+			// which converts each element.
+			v, err := e.emitExprWithObjectHint(ast.NewArrayLiteral(restArgs, arg.GetPos()), ArrayOf(elemTy))
+			if err != nil {
+				return "", "", err
+			}
+			if !v.Ty.IsArray || v.Ty.ElemType == nil || v.Ty.ElemType.IR != elemTy.IR {
+				return "", "", fmt.Errorf("%d:%d: spread array's element type does not match the rest parameter's element type", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col)
+			}
+			data, n := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", data, v.Ref))
+			e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", n, v.Ref))
+			return data, n, nil
+		}
+	}
 	type restItem struct {
 		spread bool
 		ptr    string // spread: source data pointer
@@ -2357,7 +1668,9 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 				paramScalar = &pv
 			}
 			popScratch()
-		} else if i < len(sig.Optional) && sig.Optional[i] {
+		} else if i < len(sig.Optional) && sig.Optional[i] || paramTy.IsDynamic && !paramTy.IsArray {
+			// A required `any` parameter left out (plain JS; tsc rejects the
+			// call) is undefined, as an omitted optional one is.
 			// ADR-00164: an omitted `param?: T` argument gets T's zero
 			// value, the same undefined stand-in ADR-00157/ADR-00158 use.
 			// Array-typed params decompose into two LLVM params (ptr, i64
@@ -2428,16 +1741,13 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 		if restTy.ElemType != nil {
 			elemTy = *restTy.ElemType
 		}
-		if spread, ok := singleSpread(restArgs); ok {
+		if spread, ok := singleSpread(restArgs); ok && sameRestElem(e.inferExprType(spread.Arg), elemTy) {
 			// f(fixed..., ...arr): forward the array's own (ptr, len) buffer
 			// straight into the rest slot — the rest-param ABI is (ptr, i64),
 			// exactly what an array argument already lowers to (TDD-00106).
-			ptrReg, lenReg, srcElemTy, err := e.resolveArrayForHOF(spread.Arg, spread.Arg.GetPos())
+			ptrReg, lenReg, _, err := e.resolveArrayForHOF(spread.Arg, spread.Arg.GetPos())
 			if err != nil {
 				return Value{}, err
-			}
-			if srcElemTy.IR != elemTy.IR || srcElemTy.IsArray != elemTy.IsArray || srcElemTy.IsObject != elemTy.IsObject {
-				return Value{}, fmt.Errorf("%d:%d: spread array's element type does not match the rest parameter's element type", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col)
 			}
 			restHdr := e.newArrayHeader(ptrReg, lenReg)
 			argParts = append(argParts, "ptr "+restHdr, "i64 "+lenReg)
@@ -2538,8 +1848,8 @@ func (e *Emitter) namespaceByChain(obj ast.Expression) (map[string]bool, string)
 	}
 	if i := strings.Index(chain, "."); i > 0 {
 		root := chain[:i]
-		if j := strings.LastIndex(root, "__kml_mod"); j > 0 {
-			c2 := root[:j] + chain[i:]
+		if base := ast.Unmangle(root); base != root {
+			c2 := base + chain[i:]
 			if m, ok := e.namespaces[c2]; ok {
 				return m, c2
 			}
@@ -2644,8 +1954,7 @@ func (e *Emitter) namespaceMembers(name string) (map[string]bool, string) {
 			return m, t
 		}
 	}
-	if i := strings.LastIndex(name, "__kml_mod"); i > 0 {
-		base := name[:i]
+	if base := ast.Unmangle(name); base != name {
 		if m, ok := e.namespaces[base]; ok {
 			return m, base
 		}
@@ -2759,24 +2068,6 @@ func (e *Emitter) receiverlessThisCall(ex *ast.CallExpression) *ast.CallExpressi
 	return c
 }
 
-// isTimerHandle reports whether the checker types expr as a timer handle
-// (NodeJS.Timeout, NodeJS.Immediate), which is the timer's id here.
-func (e *Emitter) isTimerHandle(expr ast.Expression) bool {
-	c := e.front()
-	if c == nil {
-		return false
-	}
-	t := c.TypeOf(expr)
-	if c.Unanswered(t) || t.Flags&checker.Object == 0 || t.Symbol == nil {
-		return false
-	}
-	switch t.Symbol.Name {
-	case "Timeout", "Immediate":
-		return true
-	}
-	return false
-}
-
 // emitArgOrDefault passes a defaulted scalar or `any` parameter an argument
 // that may be undefined at run time (an `any`, a `T | undefined`): the
 // argument, or — when it is undefined, as JavaScript substitutes — the
@@ -2886,10 +2177,11 @@ func (e *Emitter) funcOwnPropCall(ex *ast.CallExpression) (*ast.CallExpression, 
 	if !ty.IsFunc || ty.IsDynamic {
 		return nil, false
 	}
-	// A namespace merged into the function declares its own members.
+	// A namespace merged into the function declares its own members, and a
+	// builtin constructor's interface its statics (`String.fromCharCode`).
 	if c := e.front(); c != nil && !c.ExpandoMember(mem) {
 		switch c.MemberDecl(mem).(type) {
-		case *ast.FunctionDeclaration, *ast.VarDeclaration:
+		case *ast.FunctionDeclaration, *ast.VarDeclaration, *ast.MethodSignature, *ast.PropertySignature:
 			return nil, false
 		}
 	}
@@ -2974,12 +2266,16 @@ func (e *Emitter) objectProtoCall(ex *ast.CallExpression) (func() (Value, error)
 	switch m.Property {
 	case "hasOwnProperty":
 		return func() (Value, error) {
-			return e.emitCall(ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Object", pos), "hasOwn", pos), []ast.Expression{recv, arg(1)}, pos))
+			return e.emitObjectStatic("hasOwn", ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Object", pos), "hasOwn", pos), []ast.Expression{recv, arg(1)}, pos))
 		}, true
 	case "propertyIsEnumerable":
 		return func() (Value, error) {
-			keys := ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Object", pos), "keys", pos), []ast.Expression{recv}, pos)
-			key := ast.NewCallExpression(ast.NewIdentifier("String", pos), []ast.Expression{arg(1)}, pos)
+			kv, err := e.emitObjectStatic("keys", ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Object", pos), "keys", pos), []ast.Expression{recv}, pos))
+			if err != nil {
+				return Value{}, err
+			}
+			keys := e.bindValue(kv, pos)
+			key := stringCall(arg(1), pos)
 			return e.emitCall(ast.NewCallExpression(ast.NewMemberExpression(keys, "includes", pos), []ast.Expression{key}, pos))
 		}, true
 	case "toString":
@@ -3054,4 +2350,35 @@ func (e *Emitter) emitFuncFieldCall(ex *ast.CallExpression, mem *ast.MemberExpre
 		return Value{}, err
 	}
 	return e.emitClosureCallByPtr(memVal.Ref, memVal.Ty, ex.Args, ex.GetPos())
+}
+
+// isTemplateRaw reports whether a member read is `strings.raw` on a
+// template object (the checker types the base `TemplateStringsArray`).
+func (e *Emitter) isTemplateRaw(ex *ast.MemberExpression) bool {
+	if ex.Property != "raw" || ex.Optional {
+		return false
+	}
+	c := e.front()
+	if c == nil {
+		return false
+	}
+	t := c.TypeOf(ex.Object)
+	return t != nil && t.Symbol != nil && t.Symbol.Name == "TemplateStringsArray" && e.inferExprType(ex.Object).IsArray
+}
+
+// emitTemplateRaw reads a template object's raw strings (registered by
+// emitTemplateObject); an array the runtime never registered reads as its
+// own strings.
+func (e *Emitter) emitTemplateRaw(ex *ast.MemberExpression) (Value, error) {
+	v, err := e.emitExpr(ex.Object)
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureDynJSONC()
+	cooked := e.arrayReturnHeader(v)
+	raw, has, h := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_template_raw(ptr %s)", raw, cooked))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", has, raw))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", h, has, raw, cooked))
+	return e.arrayValueFromHeaderReg(h, ArrayOf(TypePtr)), nil
 }

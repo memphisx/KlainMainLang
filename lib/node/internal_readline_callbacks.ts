@@ -1,13 +1,7 @@
 // Node's lib/internal/readline/callbacks.js: the cursor and clearing
 // escapes `readline` and `tty.WriteStream` write to a stream.
 
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeTypeError } from './internal_errors';
 
 const kEscape = '\x1b';
 export const kClearToLineBeginning = kEscape + '[1K';

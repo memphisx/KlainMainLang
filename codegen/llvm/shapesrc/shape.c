@@ -1,7 +1,7 @@
 // shape.c — the run-time shape of a static object (TDD-00230 phase 5).
 // Every object layout starts with a header word (objheader.go); its low 32
-// bits index the program's layout table, which code generation emits as
-// __kml_shapes (sorted by id) with a generated get/set routine per layout.
+// bits key the layout table each compiled unit registers (unitreg.c), a
+// row per layout with its generated get/set routines.
 // This file finds a layout from an object's header and dispatches to it.
 //
 // LAYOUT CONTRACTS (must stay in sync with objheader.go / emit_shape.go):
@@ -29,14 +29,13 @@ typedef struct KmlShape {
     const char *const *keys;
 } KmlShape;
 
-extern const KmlShape __kml_shapes[];
-extern const i64 __kml_nshapes;
+// The registered tables (unitreg.c); kind 3 holds KmlShape rows.
+extern const void *__kml_unit_find(i64 kind, i64 id);
+#define KML_UNIT_SHAPE 3
 
 #define KML_HDR_MAGIC      (0x4B4DLL << 32)
 #define KML_HDR_MAGIC_MASK (0x7FFFLL << 32)
 #define KML_HDR_ERROR      (1LL << 48)
-#define KML_ERROR_SUBCLASS_BASE 1000
-#define KML_NB_UNDEFINED   10
 
 const KmlShape *__kml_shape_of(void *obj) {
     if (!obj) return NULL;
@@ -47,16 +46,7 @@ const KmlShape *__kml_shape_of(void *obj) {
     if (!valid && (hdr & KML_HDR_ERROR) && (hdr & 0xFFFFFFFFLL) >= KML_ERROR_SUBCLASS_BASE)
         valid = 1;
     if (!valid) return NULL;
-    i64 id = hdr & 0xFFFFFFFFLL;
-    i64 lo = 0, hi = __kml_nshapes - 1;
-    while (lo <= hi) {
-        i64 mid = (lo + hi) / 2;
-        i64 mid_id = __kml_shapes[mid].id;
-        if (mid_id == id) return &__kml_shapes[mid];
-        if (mid_id < id) lo = mid + 1;
-        else hi = mid - 1;
-    }
-    return NULL;
+    return (const KmlShape *)__kml_unit_find(KML_UNIT_SHAPE, hdr & 0xFFFFFFFFLL);
 }
 
 // ---- own properties added at run time ----
@@ -239,3 +229,129 @@ const char *__kml_shape_key(void *obj, i64 i) {
     }
     return NULL;
 }
+
+#ifdef KML_SHAPE_SPREAD
+// { ...o } of a boxed static object: its own enumerable fields into a
+// dynamic object.
+extern void __kml_dynobj_set(void *bag, const char *key, i64 value);
+
+void __kml_shape_spread(void *bag, void *obj) {
+    i64 n = __kml_shape_nkeys(obj);
+    for (i64 i = 0; i < n; i++) {
+        const char *key = __kml_shape_key(obj, i);
+        int found = 0;
+        i64 v = __kml_shape_get(obj, key, &found);
+        if (found == 1) __kml_dynobj_set(bag, key, v);
+    }
+}
+#endif
+
+#ifdef KML_OBJ_HOOKS
+// The hooks dynjson.c reads a static object's layout row through. An
+// Error's own enumerable fields beyond its layout (its system fields and
+// extra bag) follow the layout's keys.
+extern i64 __kml_error_nextra(void *o);
+extern const char *__kml_error_extra_key(void *o, i64 i);
+extern i64 __kml_error_extra_get(void *o, const char *key, int *found);
+
+static int obj_is_error(void *o) { return (*(i64 *)o & KML_HDR_ERROR) != 0; }
+
+// An Error's own name, once assigned on it: its index among the layout's
+// keys (the name-own slot holds it plus one), clamped to their count; -1
+// when it is not its own.
+static i64 error_name_pos(void *o, i64 base) {
+    if (!obj_is_error(o)) return -1;
+    i64 p = *(i64 *)((char *)o + KML_ERR_NAME_OWN) - 1;
+    return p > base ? base : p;
+}
+
+i64 __kml_obj_nkeys(void *o) {
+    i64 n = __kml_shape_nkeys(o);
+    if (!obj_is_error(o)) return n;
+    i64 base = n < 0 ? 0 : n;
+    i64 x = __kml_error_nextra(o) + (error_name_pos(o, base) >= 0);
+    return x == 0 ? n : base + x;
+}
+
+// A string value is a pointer past its 8-byte length header.
+static const struct { i64 len; char s[8]; } name_str = { 4, "name" };
+
+const char *__kml_obj_key(void *o, i64 i0) {
+    i64 n = __kml_shape_nkeys(o);
+    i64 base = n < 0 ? 0 : n;
+    i64 np = error_name_pos(o, base);
+    int hasname = np >= 0;
+    if (hasname && i0 == np) return name_str.s;
+    i64 i = i0 - (hasname && i0 > np);
+    if (i < base) return __kml_shape_key(o, i);
+    if (!obj_is_error(o)) return NULL;
+    return __kml_error_extra_key(o, i - base);
+}
+
+i64 __kml_obj_get(void *o, const char *k) {
+    int f = 0;
+    i64 v = __kml_shape_get(o, k, &f);
+    if (f > 0 || !obj_is_error(o)) return v;
+    i64 ev = __kml_error_extra_get(o, k, &f);
+    return f > 0 ? ev : v;
+}
+
+int __kml_obj_has(void *o, const char *k) {
+    int f = 0;
+    __kml_shape_get(o, k, &f);
+    if (f > 0) return 1;
+    if (!obj_is_error(o)) return 0;
+    __kml_error_extra_get(o, k, &f);
+    return f > 0;
+}
+
+const char *__kml_obj_name(void *o) { return __kml_shape_class_name(o); }
+#endif
+
+#ifdef KML_SHAPE_KEYS_ARRAY
+// A string[] of a static object's own keys: its layout row's, and an
+// Error's own fields beyond it. Written to out as { ptr data, i64 len }
+// (the IR wrapper keeps the aggregate-returning signature).
+void __kml_shape_keys_array_c(void *o, void **out) {
+    i64 n0 = __kml_obj_nkeys(o), n = n0 < 0 ? 0 : n0;
+    const char **data = malloc((size_t)n * 8 + 8);
+    i64 w = 0;
+    for (i64 i = 0; i < n; i++) {
+        const char *k = __kml_obj_key(o, i);
+        if (__kml_obj_has(o, k)) data[w++] = k;
+    }
+    out[0] = data;
+    out[1] = (void *)(size_t)w;
+}
+#endif
+
+#ifdef KML_SHAPE_DESC
+// Object.getOwnPropertyDescriptor(o, key) of a boxed static object: a data
+// descriptor for an own field, undefined otherwise. Object.freeze and
+// Object.seal record a static object's integrity level in the frozen set
+// (1 frozen, 2 sealed, 3 non-extensible).
+extern void *__kml_dynobj_new(void);
+extern void __kml_dynobj_set(void *bag, const char *key, i64 value);
+extern void *__kml_frozen_set_get(void);
+extern i64 __kml_map_num_get(void *map, i64 key);
+
+// A string value is a pointer past its 8-byte length header.
+#define DESC_KEY(n, s) static const struct { i64 len; char s_[sizeof(s)]; } n = { sizeof(s) - 1, s }
+DESC_KEY(desc_value, "value");
+DESC_KEY(desc_writable, "writable");
+DESC_KEY(desc_enumerable, "enumerable");
+DESC_KEY(desc_configurable, "configurable");
+
+i64 __kml_shape_own_desc(void *obj, const char *key) {
+    int found = 0;
+    i64 v = __kml_shape_get(obj, key, &found);
+    if (found != 1) return KML_NB_UNDEFINED;
+    i64 level = __kml_map_num_get(__kml_frozen_set_get(), (i64)obj);
+    void *d = __kml_dynobj_new();
+    __kml_dynobj_set(d, desc_value.s_, v);
+    __kml_dynobj_set(d, desc_writable.s_, level == 1 ? KML_NB_FALSE : KML_NB_TRUE);
+    __kml_dynobj_set(d, desc_enumerable.s_, KML_NB_TRUE);
+    __kml_dynobj_set(d, desc_configurable.s_, level == 1 || level == 2 ? KML_NB_FALSE : KML_NB_TRUE);
+    return (i64)d | 5; // a dynamic object's box
+}
+#endif

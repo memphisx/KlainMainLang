@@ -205,7 +205,12 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 	// non-undefined pattern (e.g. a number) is ToString'd — faithful to JS, and
 	// avoids leaving a non-`ptr` word where the compiler expects the pattern
 	// string (the RegExp A1 invalid-IR files).
-	if patternVal.Ty.IsUndefined || patternVal.Ty.IR == "void" {
+	var srcFlags string // a RegExp pattern's own flags, the default
+	if patternVal.Ty.IsRegExp && !patternVal.Ty.IsDynamic {
+		// `new RegExp(re[, flags])`: re's source, and its flags unless given.
+		srcFlags = e.emitRegexLoadField(patternVal, "flags", "ptr", 8)
+		patternVal = Value{Ref: e.emitRegexLoadField(patternVal, "source", "ptr", 8), Ty: TypePtr}
+	} else if patternVal.Ty.IsUndefined || patternVal.Ty.IR == "void" {
 		patternVal = Value{Ref: e.internString(""), Ty: TypePtr}
 	} else if !isStringTy(patternVal.Ty) {
 		patternVal, err = e.emitValueToString(patternVal)
@@ -244,6 +249,8 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", flagsSafe, flagsNull, e.internString(""), flagsVal.Ref))
 			flagsVal = Value{Ref: flagsSafe, Ty: TypePtr}
 		}
+	} else if srcFlags != "" {
+		flagsVal = Value{Ref: srcFlags, Ty: TypePtr}
 	} else {
 		flagsVal = Value{Ref: e.internString(""), Ty: TypePtr}
 	}
@@ -320,12 +327,18 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 	// dialect before compiling, using the runtime-parsed dotAll flag. The
 	// original pattern is kept for `.source`; only the compiled form changes.
 	compilePatternRef := patternVal.Ref
+	if e.resolveRegexMode() != "pcre" {
+		e.ensureRegexESClasses()
+		norm := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_regex_es_classes(ptr %s)", norm, compilePatternRef))
+		compilePatternRef = norm
+	}
 	if modeOpts.normalize {
 		e.ensureRegexESNormalize()
 		dotAllForNorm := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", dotAllForNorm, dotAllSlot))
 		normPat := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_regex_es_normalize(ptr %s, i1 %s)", normPat, patternVal.Ref, dotAllForNorm))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_regex_es_normalize(ptr %s, i1 %s)", normPat, compilePatternRef, dotAllForNorm))
 		compilePatternRef = normPat
 	}
 
@@ -575,21 +588,56 @@ func execArrayMemberType(prop string) (Type, int, bool) {
 	return Type{}, 0, false
 }
 
+// execMemberRead reads prop off an exec-shaped header as its value: for a
+// match result that may be a global match's plain array, index -1 and a
+// null input are undefined.
+func (e *Emitter) execMemberRead(header string, prop string, maybePlain bool) Value {
+	ty, off, _ := execArrayMemberType(prop)
+	gep, r := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", gep, header, off))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", r, ty.IR, gep))
+	v := Value{Ref: r, Ty: ty}
+	if !maybePlain {
+		return v
+	}
+	switch prop {
+	case "index":
+		present := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", present, r))
+		return e.wrapUndefinedable(v, present)
+	case "input":
+		v.Ty.Nullable, v.Ty.IsUndefined = true, true
+	}
+	return v
+}
+
+// execMemberValueType is the type execMemberRead gives prop.
+func execMemberValueType(prop string, maybePlain bool) Type {
+	ty, _, _ := execArrayMemberType(prop)
+	if maybePlain {
+		switch prop {
+		case "index":
+			return undefinedableElem(ty)
+		case "input":
+			ty.Nullable, ty.IsUndefined = true, true
+		}
+	}
+	return ty
+}
+
 // emitExecArrayMember reads an exec() result's index, input or groups off
 // its header.
 func (e *Emitter) emitExecArrayMember(ex *ast.MemberExpression) (Value, bool, error) {
-	ty, off, ok := execArrayMemberType(ex.Property)
-	if !ok || !e.inferExprType(ex.Object).ExecArray {
+	_, _, ok := execArrayMemberType(ex.Property)
+	ot := e.inferExprType(ex.Object)
+	if !ok || !ot.ExecArray {
 		return Value{}, false, nil
 	}
 	v, err := e.emitExpr(ex.Object)
 	if err != nil || v.ArrayHeader == "" {
 		return Value{}, false, err
 	}
-	gep, r := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", gep, v.ArrayHeader, off))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", r, ty.IR, gep))
-	return Value{Ref: r, Ty: ty}, true, nil
+	return e.execMemberRead(v.ArrayHeader, ex.Property, ot.ExecMaybePlain || v.Ty.ExecMaybePlain), true, nil
 }
 
 // emitRegexStoreLastIndex GEPs/stores a new value into an already-evaluated
@@ -1022,7 +1070,7 @@ func (e *Emitter) emitRegExpArg(arg ast.Expression, flags string) (Value, error)
 	}
 	pattern := arg
 	if !isStringTy(ty) {
-		pattern = ast.NewCallExpression(ast.NewIdentifier("String", arg.GetPos()), []ast.Expression{arg}, arg.GetPos())
+		pattern = stringCall(arg, arg.GetPos())
 	}
 	re := &ast.NewRegExpExpression{Pattern: pattern}
 	if flags != "" {
@@ -1055,28 +1103,23 @@ func (e *Emitter) emitStringMatch(mem *ast.MemberExpression, args []ast.Expressi
 
 	globalReg := e.emitRegexLoadField(regexVal, "global", "i1", 1)
 
-	resultPtrSlot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resultPtrSlot))
-	resultLenSlot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", resultLenSlot))
-
+	// Either way the result is an exec-shaped header (null for no match): a
+	// non-global match's carries index, input and groups; a global one's
+	// is the plain array of full matches, index -1 marking it.
+	hdrSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", hdrSlot))
 	globalL := e.freshLabel("regex.match.global")
 	singleL := e.freshLabel("regex.match.single")
 	mergeL := e.freshLabel("regex.match.merge")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", globalReg, globalL, singleL))
 
-	// --- non-global: identical to regexp.exec(str) ---
+	// --- non-global: regexp.exec(str) ---
 	e.emitLabel(singleL)
-	single, _, _ := e.emitRegexSingleMatchCore(regexVal, strVal)
-	singlePtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", singlePtr, single.Ref))
-	singleLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", singleLen, single.Ref))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", singlePtr, resultPtrSlot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", singleLen, resultLenSlot))
+	single := e.emitExecResult(regexVal, strVal)
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", single.ArrayHeader, hdrSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
-	// --- global: collect every match's full-text string, null if none ---
+	// --- global: every match's full text, null if none ---
 	e.emitLabel(globalL)
 	data, count := e.emitRegexCollectGlobalMatches(regexVal, strVal, func(destSlot string, m Value) {
 		mPtr := e.freshReg()
@@ -1087,49 +1130,32 @@ func (e *Emitter) emitStringMatch(mem *ast.MemberExpression, args []ast.Expressi
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", elem0, elem0Gep))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", elem0, destSlot))
 	})
-	zeroCountReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", zeroCountReg, count))
-	zeroL := e.freshLabel("regex.match.zero")
-	nonzeroL := e.freshLabel("regex.match.nonzero")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", zeroCountReg, zeroL, nonzeroL))
-
-	e.emitLabel(zeroL)
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", resultPtrSlot))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", resultLenSlot))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-
-	e.emitLabel(nonzeroL)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", data, resultPtrSlot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", count, resultLenSlot))
+	e.ensureCalloc()
+	ghdr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 40)", ghdr))
+	for i, f := range []string{"ptr " + data, "i64 " + count, "i64 -1"} {
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", gep, ghdr, i*8))
+		e.emitInstr(fmt.Sprintf("store %s, ptr %s, align 8", f, gep))
+	}
+	none, gsel := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", none, count))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", gsel, none, ghdr))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", gsel, hdrSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
-	finalPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", finalPtr, resultPtrSlot))
-	finalLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalLen, resultLenSlot))
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, finalPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, finalLen))
-
-	return Value{Ref: r1, Ty: regExpExecResultType()}, nil
+	hdr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, hdrSlot))
+	ty := execArrayType()
+	ty.ExecMaybePlain = true
+	return e.loadArrayHeaderOrAbsent(hdr, ty), nil
 }
 
-// emitStringMatchAll implements `str.matchAll(regexp): string[][]`
-// (TDD-00035 Stage 3) — scoped down to an eager array of match arrays
-// rather than a real lazy iterator (`%RegExpStringIteratorPrototype%`): no
-// lazy-iteration infrastructure exists anywhere in this compiler today,
-// every `for...of` is already over an eager array/Map/Set/class-defined
-// iterator, so building one here would be new infrastructure disproportionate
-// to this feature. Each inner `string[]` is exactly one `.exec()`-shaped
-// match array (full match + capture groups), stored boxed into the outer
-// array via the existing nested-array machinery (storeArrayElem,
-// TDD-00029) — no new boxing logic needed here at all.
-//
-// Requires the `global` flag, throwing a catchable TypeError otherwise —
-// matches real JS's own hard requirement (`matchAll` throws synchronously
-// for a non-global RegExp, since its whole point is iterating every match).
+// emitStringMatchAll implements `str.matchAll(regexp)`: a RegExp String
+// Iterator over exec results of a clone of the RegExp (ADR-01339). Requires
+// the `global` flag, throwing a catchable TypeError otherwise, as JavaScript
+// does.
 func (e *Emitter) emitStringMatchAll(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: matchAll takes exactly 1 argument", pos.Line, pos.Col)
@@ -1159,17 +1185,72 @@ func (e *Emitter) emitStringMatchAll(mem *ast.MemberExpression, args []ast.Expre
 	e.emitTerminator("unreachable")
 
 	e.emitLabel(okL)
-	innerTy := ArrayOf(TypePtr)
-	data, count := e.emitRegexCollectGlobalMatches(regexVal, strVal, func(destSlot string, m Value) {
-		e.storeArrayElem(destSlot, innerTy, m)
-	})
+	// The spec's matchAll runs exec on a clone of the RegExp (its source and
+	// flags, starting at its lastIndex), each step an exec result. The
+	// string is immutable and the clone private, so the steps are taken
+	// here, in order, and the iterator walks them.
+	e.pushScope()
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", regexVal.Ref, slot))
+	e.define("__kml_matchall_re", Symbol{Ptr: slot, Ty: regexVal.Ty})
+	clone, err := e.emitNewRegExpExpression(&ast.NewRegExpExpression{Pattern: ast.NewIdentifier("__kml_matchall_re", pos)})
+	e.popScope()
+	if err != nil {
+		return Value{}, err
+	}
+	lastIdx := e.emitRegexLoadField(regexVal, "lastIndex", "i64", 8)
+	idx, _, _ := clone.Ty.FieldIndex("lastIndex")
+	lgep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", lgep, clone.Ty.StructIR(), clone.Ref, idx))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lastIdx, lgep))
 
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, data))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, count))
+	// At most as many steps as global matches from the start.
+	count := e.emitRegexCountGlobalMatches(clone, strVal)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lastIdx, lgep))
+	e.ensureMalloc()
+	bytes, data := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, count))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", data, bytes))
+	nSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", nSlot))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", nSlot))
+	loopL, stepL, doneL := e.freshLabel("matchall.loop"), e.freshLabel("matchall.step"), e.freshLabel("matchall.done")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
+	e.emitLabel(loopL)
+	n := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", n, nSlot))
+	full := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, %s", full, n, count))
+	execL := e.freshLabel("matchall.exec")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", full, doneL, execL))
+	e.emitLabel(execL)
+	step, start, end := e.emitExecStep(clone, strVal)
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, step.ArrayHeader))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, stepL))
+	e.emitLabel(stepL)
+	e.emitRegexAdvancePastEmpty(clone, strVal, start, end)
+	dest := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", dest, data, n))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", step.ArrayHeader, dest))
+	n1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", n1, n))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", n1, nSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
+	e.emitLabel(doneL)
+	got := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", got, nSlot))
+	header := e.newArrayHeader(data, got)
+	steps := e.arrayValueFromHeaderReg(header, ArrayOf(execArrayType()))
+	return e.emitArrayIterOpenValue(steps, mapIterValues, true), nil
+}
 
-	return Value{Ref: r1, Ty: ArrayOf(innerTy)}, nil
+// emitExecStep is one exec() of objVal against strVal, as emitExecResult,
+// with the match's raw byte offsets.
+func (e *Emitter) emitExecStep(objVal, strVal Value) (Value, string, string) {
+	result, start, end, groups := e.emitRegexMatch(objVal, strVal, true)
+	return e.execResultFrom(result, start, groups, strVal), start, end
 }
 
 // emitExecResult runs one exec() of objVal against strVal: the match array,
@@ -1177,6 +1258,11 @@ func (e *Emitter) emitStringMatchAll(mem *ast.MemberExpression, args []ast.Expre
 // (execArrayType); no match is the null header.
 func (e *Emitter) emitExecResult(objVal, strVal Value) Value {
 	result, start, _, groups := e.emitRegexMatch(objVal, strVal, true)
+	return e.execResultFrom(result, start, groups, strVal)
+}
+
+// execResultFrom builds an exec result from a match.
+func (e *Emitter) execResultFrom(result Value, start, groups string, strVal Value) Value {
 	// The result array's header carries index, input and groups after its
 	// {data, len} (execArrayHeaderTy); no match is the null header.
 	e.ensureMalloc()

@@ -69,7 +69,6 @@ func (e *Emitter) emitResponseCore(bodyArg, initArg ast.Expression, shape respon
 		initArg = nil
 	}
 	e.ensureMalloc()
-	e.ensureMapStrHelpers()
 	e.ensureStrHeaderRuntime()
 	e.ensureMemcpy()
 
@@ -142,22 +141,29 @@ func (e *Emitter) emitResponseCore(bodyArg, initArg ast.Expression, shape respon
 	}
 
 	// Headers: init's, or a fresh one.
-	var headers Value
+	var init *Value
 	if headersExpr != nil {
-		hv, err := e.emitExpr(ast.NewNewHeadersExpression(headersExpr, pos))
+		hv, err := e.emitExpr(headersExpr)
 		if err != nil {
 			return Value{}, err
 		}
-		headers = hv
-	} else {
-		m := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", m))
-		headers = Value{Ref: m, Ty: HeadersType()}
+		init = &hv
+	}
+	headers, err := e.emitNewHeaders(init, pos)
+	if err != nil {
+		return Value{}, err
 	}
 	if shape.location != "" {
-		lv := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", lv, shape.location))
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", headers.Ref, e.internString("location"), lv))
+		loc := e.bindValue(Value{Ref: shape.location, Ty: TypePtr}, pos)
+		if _, err := e.emitHeadersMethod(headers, "set", pos, ast.NewStringLiteral("location", pos), loc); err != nil {
+			return Value{}, err
+		}
+	}
+	// Response.redirect's and Response.error's headers are immutable.
+	if shape.location != "" || shape.typeName == "error" {
+		if err := e.emitHeadersSeal(headers, "immutable", pos); err != nil {
+			return Value{}, err
+		}
 	}
 	return e.emitResponseBodyAndFinish(bodyArg, status, statusText, headers, shape, pos)
 }
@@ -208,7 +214,7 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 			if err := e.ensureResponseStreamCollect(); err != nil {
 				return Value{}, fmt.Errorf("%d:%d: %v", pos.Line, pos.Col, err)
 			}
-		case bt.IsURLSearchParams:
+		case e.isGlobalClassInstance(bt, "URLSearchParams"):
 			sv, err := e.emitExpr(ast.NewCallExpression(ast.NewMemberExpression(bodyArg, "toString", pos), nil, pos))
 			if err != nil {
 				return Value{}, err
@@ -219,7 +225,8 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 			lenRef = l
 			contentType = "application/x-www-form-urlencoded;charset=UTF-8"
 		default:
-			if isStringTy(bt) && !bt.IsBlob && !bt.IsTypedArray && !bt.IsArrayBuffer {
+			isBlob := e.isGlobalClassInstance(bt, "Blob")
+			if isStringTy(bt) && !bt.IsTypedArray && !bt.IsArrayBuffer && !bt.IsClass {
 				contentType = "text/plain;charset=UTF-8"
 				if shape.contentType != "" {
 					contentType = shape.contentType
@@ -227,20 +234,21 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 			}
 			// A Blob is read as it is (its type is the content type); any
 			// other body through one.
-			blobExpr := bodyArg
-			if !bt.IsBlob {
-				blobExpr = ast.NewNewBlobExpression(ast.NewArrayLiteral([]ast.Expression{bodyArg}, pos), nil, pos)
+			var bv Value
+			var err error
+			if isBlob {
+				bv, err = e.emitExpr(bodyArg)
+			} else {
+				bv, err = e.emitNewBlobOf(bodyArg, pos)
 			}
-			bv, err := e.emitExpr(blobExpr)
 			if err != nil {
 				return Value{}, err
 			}
-			size, data := e.emitBlobSizeData(bv.Ref)
-			if bt.IsBlob {
-				tslot := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", tslot, blobStructIR, bv.Ref))
-				tv := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", tv, tslot))
+			data, size, tv, err := e.emitBlobBytes(bv, pos)
+			if err != nil {
+				return Value{}, err
+			}
+			if isBlob {
 				blobType = tv
 			}
 			buf := e.freshReg()
@@ -279,31 +287,20 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 		e.emitLabel(nbOkL)
 	}
 
-	// The implied Content-Type, unless init's headers set one.
+	// The implied Content-Type, unless init's headers set one: a Blob's
+	// own type, when it has one.
 	if contentType != "" || blobType != "" {
-		key := e.internString("content-type")
-		has := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", has, headers.Ref, key))
-		setL, doneL := e.freshLabel("resp.ct.set"), e.freshLabel("resp.ct.done")
 		ctRef := e.internString(contentType)
 		if blobType != "" {
-			// A Blob's own type, when it has one.
-			l := e.freshReg()
+			l, empty := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", l, blobType))
-			empty := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", empty, l))
-			skip := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", skip, has, empty))
-			has = skip
-			ctRef = blobType
+			ctRef = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", ctRef, empty, blobType))
 		}
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, doneL, setL))
-		e.emitLabel(setL)
-		cv := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", cv, ctRef))
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", headers.Ref, key, cv))
-		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-		e.emitLabel(doneL)
+		if err := e.emitSetHeaderIfAbsent(headers, "content-type", ctRef, pos); err != nil {
+			return Value{}, err
+		}
 	}
 
 	respTy := ResponseType()
@@ -349,14 +346,21 @@ func (e *Emitter) emitResponseStatic(method string, args []ast.Expression, pos a
 		if len(args) == 0 || len(args) > 2 {
 			return Value{}, fmt.Errorf("%d:%d: Response.json takes (data, init?)", pos.Line, pos.Col)
 		}
-		body := ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("JSON", pos), "stringify", pos), []ast.Expression{args[0]}, pos)
-		return e.emitResponseCore(body, arg(1), responseShape{contentType: "application/json"}, pos)
+		text, err := e.emitJSONStringify(args[:1], pos)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitResponseCore(e.bindValue(text, pos), arg(1), responseShape{contentType: "application/json"}, pos)
 	case "redirect":
 		if len(args) == 0 || len(args) > 2 {
 			return Value{}, fmt.Errorf("%d:%d: Response.redirect takes (url, status?)", pos.Line, pos.Col)
 		}
 		// The Location is the parsed URL, serialized.
-		hrefExpr := ast.Expression(ast.NewMemberExpression(ast.NewNewExpression("URL", []ast.Expression{args[0]}, pos), "href", pos))
+		urlClass, linked := e.globalClass("URL")
+		if !linked {
+			return Value{}, fmt.Errorf("%d:%d: Response.redirect: the URL class is not linked", pos.Line, pos.Col)
+		}
+		hrefExpr := ast.Expression(ast.NewMemberExpression(ast.NewNewExpression(urlClass.ClassName, []ast.Expression{args[0]}, pos), "href", pos))
 		wrap := &ast.Program{Body: []ast.Statement{ast.NewExpressionStatement(hrefExpr, pos)}}
 		if err := sema.Prepare(wrap); err != nil {
 			return Value{}, err
@@ -448,13 +452,12 @@ entry:
   %%ok = icmp eq i64 %%st, 1
   br i1 %%ok, label %%fill, label %%rej
 fill:
-  ; The Blob: { i64 size, ptr data, ptr type }.
-  %%ab_p = getelementptr %[1]s, ptr %%p, i32 0, i32 2
-  %%ab_bits = load i64, ptr %%ab_p, align 8
-  %%ab = inttoptr i64 %%ab_bits to ptr
-  %%len = load i64, ptr %%ab, align 8
-  %%data_p = getelementptr { i64, ptr }, ptr %%ab, i32 0, i32 1
-  %%data = load ptr, ptr %%data_p, align 8
+  ; The bytes: a Uint8Array, its data in v0 and its length in v1.
+  %%d_p = getelementptr %[1]s, ptr %%p, i32 0, i32 2
+  %%d_bits = load i64, ptr %%d_p, align 8
+  %%data = inttoptr i64 %%d_bits to ptr
+  %%n_p = getelementptr %[1]s, ptr %%p, i32 0, i32 3
+  %%len = load i64, ptr %%n_p, align 8
   %%n1 = add i64 %%len, 1
   %%buf = call ptr @malloc(i64 %%n1)
   %%ign = call ptr @memcpy(ptr %%buf, ptr %%data, i64 %%len)
@@ -471,15 +474,7 @@ fill:
   call void @__kml_fbp_invoke(ptr %%clo)
   ret void
 rej:
-  %%v0_p = getelementptr %[1]s, ptr %%p, i32 0, i32 2
-  %%v0 = load i64, ptr %%v0_p, align 8
-  %%v1_p = getelementptr %[1]s, ptr %%p, i32 0, i32 3
-  %%v1 = load i64, ptr %%v1_p, align 8
-  %%q0_p = getelementptr %[1]s, ptr %%q, i32 0, i32 2
-  store i64 %%v0, ptr %%q0_p, align 8
-  %%q1_p = getelementptr %[1]s, ptr %%q, i32 0, i32 3
-  store i64 %%v1, ptr %%q1_p, align 8
-  call void @__kml_promise_settle(ptr %%q, i64 2)
+  call void @__kml_promise_reject_from(ptr %%q, ptr %%p)
   ret void
 }`, promiseStructIR, respTy.StructIR(), field("body"), field("bodyLength"), field("__kml_bodyflags"), ^int64(responseStreamBody)))
 
@@ -494,7 +489,7 @@ rej:
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sv.Ref, slot))
 	e.define(src, Symbol{Ptr: slot, Ty: ReadableStreamType(TypedArrayType("uint8"))})
-	prog, err := parser.Parse(`(async (s: ReadableStream<Uint8Array>): Promise<Blob> => {
+	prog, err := parser.Parse(`(async (s: ReadableStream<Uint8Array>): Promise<Uint8Array> => {
   const rd = s.getReader();
   const parts: Uint8Array[] = [];
   let n = 0;
@@ -510,7 +505,7 @@ rej:
     out.set(p, o);
     o += p.length;
   }
-  return new Blob([out]);
+  return out;
 })(` + src + `);`)
 	if err == nil && len(prog.Body) == 1 {
 		err = sema.Prepare(prog)
@@ -518,6 +513,16 @@ rej:
 	if err != nil {
 		return fmt.Errorf("reading a Response's stream body: %v", err)
 	}
+	// Synthesized code has no checker declarations: `out.set` names its
+	// intrinsic itself.
+	ast.Inspect(prog, func(n ast.Node) bool {
+		if ce, ok := n.(*ast.CallExpression); ok {
+			if mem, ok := ce.Callee.(*ast.MemberExpression); ok && mem.Property == "set" {
+				ce.Intrinsic = "TypedArray.prototype.set"
+			}
+		}
+		return true
+	})
 	pv, err := e.emitExpr(prog.Body[0].(*ast.ExpressionStatement).Expr)
 	if err != nil {
 		return fmt.Errorf("reading a Response's stream body: %v", err)

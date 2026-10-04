@@ -12,30 +12,6 @@ import type { DuplexOptions } from 'stream';
 
 // ---- errors (lib/internal/errors.js) ----
 
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
 // A system error from a native errno: `${syscall} ${code}` (ErrnoException),
 // with `${address}:${port}` after it (ExceptionWithHostPort).
 function errnoException(errno: number, syscall: string, address?: string, port?: number): Error {
@@ -78,6 +54,7 @@ function dnsException(status: number, hostname: string): Error {
 // lib/internal/net.js
 export { isIP, isIPv4, isIPv6 } from './internal_net';
 import { isIP, isIPv4, isIPv6 } from './internal_net';
+import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
 export interface AddressInfo {
     address: string;
@@ -294,6 +271,9 @@ export class Socket extends Duplex {
         return this.getsockname() ?? {};
     }
 
+    // The IPC channel's end-of-stream hook (internal_child_process_channel).
+    _kmlOnEof: (() => void) | null = null;
+
     // Node's stream_base_commons onStreamRead, as the native handle calls it.
     private onRead(status: number, nread: number): void {
         this.refreshTimer();
@@ -310,6 +290,13 @@ export class Socket extends Duplex {
         if (status !== 0) {
             this.destroy(errnoException(status, 'read'));
             return;
+        }
+        // An IPC channel learns of the end here, as Node's channel's own
+        // onread does, before any later event of the loop's iteration.
+        if (this._kmlOnEof !== null) {
+            const f = this._kmlOnEof;
+            this._kmlOnEof = null;
+            f();
         }
         // The end of the stream: push null before 'close' is possible, so
         // the order of events is 'end' -> 'close'.

@@ -122,8 +122,8 @@ func (e *Emitter) unionHasUnknownMember(ta *ast.TypeAnnotation) bool {
 // `IteratorYieldResult<T>`), instantiable the way a program's own generic is.
 // A program's own declaration of the name wins.
 func (e *Emitter) registerAmbientGeneric(name string) {
-	if name == "" || e.userTypeName(name) {
-		return
+	if name == "" || e.userTypeName(name) || utilityTypeNames[name] {
+		return // a utility type codegen evaluates itself (resolveUtilityType)
 	}
 	if _, ok := e.genericTypeAliases[name]; ok {
 		return

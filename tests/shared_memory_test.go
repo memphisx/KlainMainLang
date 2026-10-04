@@ -103,12 +103,12 @@ console.log(Atomics.isLockFree(n));
 `, "true\ntrue\nfalse\ntrue\ntrue\nfalse")
 }
 
-// ADR-00920: a non-numeric isLockFree size (a string) is a TS type error and
-// must reject cleanly, not emit `icmp eq i64 <string-ptr>, 1` (invalid IR).
+// ADR-00920: a non-numeric isLockFree size (a string) is a TS type error
+// (the checker's, from the declaration) and must reject cleanly, not emit `icmp eq i64 <string-ptr>, 1` (invalid IR).
 func TestE2EAtomicsIsLockFreeStringRejected(t *testing.T) {
 	mustCompileError(t, `
 Atomics.isLockFree("bad");
-`, "Atomics.isLockFree size")
+`, "argument of type 'string' is not assignable to parameter of type 'number'")
 }
 
 func TestE2EAtomicsWaitNotifyAcrossWorker(t *testing.T) {

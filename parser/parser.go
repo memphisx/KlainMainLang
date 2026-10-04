@@ -287,6 +287,18 @@ func (p *Parser) expect(typ lexer.TokenType) (lexer.Token, error) {
 	return p.advance(), nil
 }
 
+// expectBindingName consumes a binding identifier. `undefined` is not a
+// reserved word: a function may declare a binding of that name (tsc
+// reports it, TS2397; plain JS accepts it).
+func (p *Parser) expectBindingName() (lexer.Token, error) {
+	if t := p.peek(); t.Type == lexer.UNDEFINED {
+		t = p.advance()
+		t.Type, t.Literal = lexer.IDENT, "undefined"
+		return t, nil
+	}
+	return p.expect(lexer.IDENT)
+}
+
 // expectGT consumes the `>` closing a type-argument or type-parameter list.
 // The scanner never merges `>`s (only an operator position glues them), so
 // `Array<Promise<T>>` closes with two plain GT tokens.
@@ -545,6 +557,9 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 	if err := yieldOutsideGenerator(prog, false); err != nil {
 		return nil, err
 	}
+	if err := awaitOutsideAsync(prog, true); err != nil {
+		return nil, err
+	}
 	if !p.evalCode {
 		// Direct eval code sees the enclosing class's private names.
 		if err := privateNameErrors(prog, nil); err != nil {
@@ -612,6 +627,61 @@ func yieldOutsideGenerator(n ast.Node, inGenerator bool) error {
 		return err == nil
 	})
 	return err
+}
+
+// awaitOutsideAsync is the early error for an `await` expression outside
+// an async body (tsc's TS1308, V8's "Unexpected reserved word"): a module's
+// top level allows it, every function sets the context by being async or
+// not, and a class field initializer or static block never allows it.
+func awaitOutsideAsync(n ast.Node, inAsync bool) error {
+	walk := func(n ast.Node, inAsync bool, skip map[ast.Node]bool) error {
+		var err error
+		ast.ForEachChild(n, func(ch ast.Node) bool {
+			if err == nil && !skip[ch] {
+				err = awaitOutsideAsync(ch, inAsync)
+			}
+			return err == nil
+		})
+		return err
+	}
+	switch x := n.(type) {
+	case *ast.AwaitExpression:
+		if !inAsync {
+			return errAtPos(x.GetPos(), diag.AwaitOutsideAsync)
+		}
+	case *ast.FunctionDeclaration:
+		// A method's decorators run where the class is defined, not in it.
+		outer := map[ast.Node]bool{}
+		for _, d := range x.Decorators {
+			if err := awaitOutsideAsync(d, inAsync); err != nil {
+				return err
+			}
+			outer[d] = true
+		}
+		return walk(n, x.IsAsync, outer)
+	case *ast.FunctionExpression:
+		inAsync = x.IsAsync
+	case *ast.ArrowFunction:
+		inAsync = x.IsAsync
+	case *ast.ClassDeclaration:
+		inner := map[ast.Node]bool{}
+		for _, f := range x.Fields {
+			if f.Initializer != nil {
+				if err := awaitOutsideAsync(f.Initializer, false); err != nil {
+					return err
+				}
+				inner[f.Initializer] = true
+			}
+		}
+		for _, b := range x.StaticBlocks {
+			if err := awaitOutsideAsync(b, false); err != nil {
+				return err
+			}
+			inner[b] = true
+		}
+		return walk(n, inAsync, inner)
+	}
+	return walk(n, inAsync, nil)
 }
 
 // privateNameErrors is the early errors of private names: a `#name` access
@@ -695,6 +765,19 @@ func strictErrors(n ast.Node) error {
 		if _, ok := x.Arg.(*ast.CallExpression); ok {
 			return errAtPos(x.GetPos(), diag.InvalidAssignTarget)
 		}
+	case *ast.FunctionDeclaration:
+		if err := strictParamNames(x.Params, x.GetPos()); err != nil {
+			return err
+		}
+	case *ast.FunctionExpression:
+		// An object literal's method and accessors too (`set x(eval) {}`).
+		if err := strictParamNames(x.Params, x.GetPos()); err != nil {
+			return err
+		}
+	case *ast.ArrowFunction:
+		if err := strictParamNames(x.Params, x.GetPos()); err != nil {
+			return err
+		}
 	}
 	var err error
 	ast.ForEachChild(n, func(ch ast.Node) bool {
@@ -704,6 +787,17 @@ func strictErrors(n ast.Node) error {
 		return err == nil
 	})
 	return err
+}
+
+// strictParamNames is strict code's early error for a parameter named
+// `eval` or `arguments`.
+func strictParamNames(params []ast.Param, pos ast.Pos) error {
+	for _, prm := range params {
+		if prm.Name == "eval" || prm.Name == "arguments" {
+			return errAtPos(pos, diag.StrictParameterName, prm.Name)
+		}
+	}
+	return nil
 }
 
 // labelErrors is the early error of a `break` or `continue` naming a label

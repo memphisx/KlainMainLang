@@ -515,26 +515,4 @@ func (c *purityChecker) violation(pos ast.Pos, sc *pureScope, what string) error
 // pureDisplayName strips the resolver's per-file mangling suffix
 // (`name__kml_mod<N>`) so diagnostics show the source-level name. Applied to the
 // whole message so an interpolated mangled identifier reads cleanly too.
-func pureDisplayName(s string) string {
-	for {
-		i := indexOf(s, "__kml_mod")
-		if i < 0 {
-			return s
-		}
-		// drop "__kml_mod" plus the trailing digits
-		j := i + len("__kml_mod")
-		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
-			j++
-		}
-		s = s[:i] + s[j:]
-	}
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
-}
+func pureDisplayName(s string) string { return ast.UnmangleText(s) }

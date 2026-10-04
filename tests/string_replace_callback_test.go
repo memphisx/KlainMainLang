@@ -84,7 +84,12 @@ console.log("x5".replace(/(\d)/, (m: string, d: string, off: number) => d + "@" 
 // A replacer that returns a non-string has its result ToString'd (ADR-00922) —
 // previously a number result was reinterpreted as a pointer (invalid IR).
 func TestE2EReplaceCallbackNumericReturn(t *testing.T) {
-	assertOutput(t, `
+	// tsc rejects a replacer returning a number (TS2769); JavaScript
+	// stringifies its result.
+	mustCompileError(t, `
+console.log("a1b".replace(/1/, () => 9))
+`, "no overload matches this call")
+	assertOutputCompatJS(t, `
 console.log("a1b".replace(/1/, () => 9))
 `, "a9b")
 }

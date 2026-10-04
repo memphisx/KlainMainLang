@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -78,11 +80,12 @@ console.log(sink);
 
 // TestE2EGCModeWeakCollected proves the -mm=gc weak path is genuinely weak
 // (TDD-00112): a WeakRef/WeakMap referent that becomes unreachable is dropped
-// after a forced collection, while a still-reachable one survives. The referent
-// is created in a separate function so its pointer leaves the caller's stack
-// frame (conservative scanning would otherwise keep it), and gc() forces a full
-// Boehm collection. Object literals (not class instances) are used as referents
-// deliberately — see the class-allocation gc crash noted on the status page.
+// after a forced collection, while a still-reachable one survives. A WeakRef
+// keeps its target until the end of the job that made it (the spec's kept
+// objects, ADR-01366), so its orphan is made in one task and checked in a
+// later one. Referents are made in separate functions so their pointers leave
+// the frames still live (conservative scanning would otherwise keep them),
+// and gc() forces a full Boehm collection.
 func TestE2EGCModeWeakCollected(t *testing.T) {
 	const src = `
 interface Box { v: number }
@@ -98,23 +101,35 @@ function orphanEntry(): void {
 const kept: Box = { v: 7 };
 const keptRef = new WeakRef(kept);
 wm.set(kept, "stays");
-const orphanRef = makeOrphanRef();
 orphanEntry();
-gc();
-gc();
-console.log(keptRef.deref() === null);
-console.log(orphanRef.deref() === null);
-console.log(wm.has(kept));
-console.log(wm.get(kept));
+setTimeout(() => {
+  const orphanRef = makeOrphanRef();
+  console.log(orphanRef.deref() !== undefined);
+  setTimeout(() => {
+    gc();
+    gc();
+    console.log(keptRef.deref() === undefined);
+    console.log(orphanRef.deref() === undefined);
+    console.log(wm.has(kept));
+    console.log(wm.get(kept));
+  }, 0);
+}, 0);
 `
-	binFile := buildBinaryGC(t, src)
+	// WeakRef is a global module's class: resolved, so the module links.
+	dir := tempDir(t)
+	srcFile := filepath.Join(dir, "prog.ts")
+	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	binFile := buildGCProgram(t, dir, srcFile)
 	out, err := exec.Command(binFile).Output()
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	got := strings.TrimRight(string(out), "\n")
-	// kept survives (false), orphan collected (true), map key kept (true, "stays").
-	want := "false\ntrue\ntrue\nstays"
+	// The orphan is alive in its own job (true); then kept survives (false),
+	// the orphan is collected (true), the map key is kept (true, "stays").
+	want := "true\nfalse\ntrue\ntrue\nstays"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}

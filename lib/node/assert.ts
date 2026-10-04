@@ -7,18 +7,11 @@
 
 import { AssertionError, inspect } from './internal_assert_assertion_error';
 import { isDeepEqual, isDeepStrictEqual, isPartialStrictEqual } from './internal_util_comparisons';
+import { NodeTypeError } from './internal_errors';
 
 export { AssertionError } from './internal_assert_assertion_error';
 
 // A TypeError carrying Node's error code.
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
 // The TypeError message Node's ERR_INVALID_ARG_TYPE formats for a value.
 function receivedDescription(value: any): string {
     if (value === null || value === undefined) {

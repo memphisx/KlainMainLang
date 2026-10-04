@@ -61,7 +61,7 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 		MethodSigs:              make(map[string]FuncSig),
 		MethodImplementor:       make(map[string]string),
 		MethodDispatchSlot:      make(map[string]*MethodSlot),
-		TagID:                   e.allocTypeID(),
+		TagID:                   e.classTypeID(className),
 		RootClass:               className,
 		FieldOrigin:             make(map[string]string),
 		StaticFieldTypes:        make(map[string]Type),
@@ -85,9 +85,7 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 			continue
 		}
 		key := accessorMethodName(p.AccessorKind, p.Key)
-		if _, dup := info.MethodSigs[key]; dup {
-			continue // duplicate reported at emit
-		}
+		_, dup := info.MethodSigs[key]
 		fd := &ast.FunctionDeclaration{Name: p.Key, Params: fe.Params, ReturnType: fe.RetType, Body: fe.Body}
 		e.pushScope()
 		e.define("this", Symbol{Ty: ty})
@@ -96,10 +94,14 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 		if p.AccessorKind == "set" {
 			sig.RetType = TypeVoid
 		}
+		// A later accessor of the same kind and name replaces the earlier,
+		// as a later property definition does.
 		info.MethodSigs[key] = sig
 		info.MethodImplementor[key] = className
 		info.Methods[key] = fd
-		info.MethodOrder = append(info.MethodOrder, key)
+		if !dup {
+			info.MethodOrder = append(info.MethodOrder, key)
+		}
 	}
 
 	e.classes[className] = info
@@ -123,9 +125,16 @@ func (e *Emitter) emitObjectLiteralWithAccessors(lit *ast.ObjectLiteral) (Value,
 	}
 	if !e.objLitEmitted[className] {
 		e.objLitEmitted[className] = true
+		// The last accessor of each kind and name is the one defined.
+		last := map[string]int{}
+		for i, p := range lit.Properties {
+			if p.AccessorKind != "" {
+				last[accessorMethodName(p.AccessorKind, p.Key)] = i
+			}
+		}
 		// Reject the property forms this path doesn't handle, rather than
 		// silently dropping them.
-		for _, p := range lit.Properties {
+		for i, p := range lit.Properties {
 			if p.AccessorKind == "" {
 				if p.Key == "" {
 					return Value{}, fmt.Errorf("%d:%d: an object literal that mixes a spread with a getter/setter is not yet supported", pos.Line, pos.Col)
@@ -146,6 +155,9 @@ func (e *Emitter) emitObjectLiteralWithAccessors(lit *ast.ObjectLiteral) (Value,
 			sig := info.MethodSigs[key]
 			if p.AccessorKind == "get" && sig.RetType.IR == "void" {
 				return Value{}, fmt.Errorf("%d:%d: a getter ('get %s') must return a value", pos.Line, pos.Col, p.Key)
+			}
+			if last[key] != i {
+				continue // replaced by a later one
 			}
 			llvmName := llvmSafeSymbol(className + "_" + key)
 			if err := e.emitClassMember(llvmName, ty, fe.Params, sig, fe.Body, sig.RetType, pos, false, false); err != nil {

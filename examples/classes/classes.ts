@@ -605,14 +605,15 @@ acc.add(20);
 console.log(acc.average()); // 15
 
 // A named class expression binds under the LHS name (the internal name is
-// dropped in V1); either way the class is usable as a type annotation.
+// dropped in V1). The binding is a value, so its instances' type is
+// `InstanceType<typeof Money>`.
 const Money = class Currency {
   cents: number;
   constructor(cents: number) {
     this.cents = cents;
   }
 };
-function dollars(m: Money): number {
+function dollars(m: InstanceType<typeof Money>): number {
   return m.cents / 100;
 }
 console.log(dollars(new Money(500))); // 5

@@ -22,6 +22,7 @@ func (e *Emitter) ensureBigInt() {
 	e.declaredBigInt = true
 	for _, d := range []string{
 		"declare ptr @__kml_bigint_from_str(ptr, i64, i32)",
+		"declare ptr @__kml_bigint_parse(ptr)",
 		"declare ptr @__kml_bigint_from_i64(i64)",
 		"declare i64 @__kml_bigint_to_i64(ptr)",
 		"declare ptr @__kml_bigint_from_u64(i64)",
@@ -453,11 +454,26 @@ func (e *Emitter) emitBigIntConstructor(args []ast.Expression, pos ast.Pos) (Val
 	case arg.Ty.IsBigInt:
 		return arg, nil
 	case isStringTy(arg.Ty):
+		// StringToBigInt: a string that is no integer is a SyntaxError.
 		reg := e.freshReg()
-		lenReg := e.freshReg()
-		e.ensureStrlen()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", lenReg, arg.Ref))
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_str(ptr %s, i64 %s, i32 10)", reg, arg.Ref, lenReg))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_parse(ptr %s)", reg, arg.Ref))
+		bad := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", bad, reg))
+		badL, okL := e.freshLabel("bigint.str.bad"), e.freshLabel("bigint.str.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
+		e.emitLabel(badL)
+		msg, err := e.emitStringConcat(Value{Ref: e.internString("Cannot convert "), Ty: TypePtr}, arg)
+		if err != nil {
+			return Value{}, err
+		}
+		if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(" to a BigInt"), Ty: TypePtr}); err != nil {
+			return Value{}, err
+		}
+		e.ensureExceptionHelpers()
+		errObj := e.buildErrorObj(errorKindIDs["SyntaxError"], msg.Ref, e.internString("SyntaxError"))
+		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+		e.emitTerminator("unreachable")
+		e.emitLabel(okL)
 		return Value{Ref: reg, Ty: BigIntType()}, nil
 	case arg.Ty.IR == "i64" || arg.Ty.IR == "i32" || arg.Ty.IR == "i16" || arg.Ty.IR == "i8" || arg.Ty.IR == "i1":
 		wide := e.coerce(arg, TypeI64)

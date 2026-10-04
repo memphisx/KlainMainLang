@@ -396,8 +396,8 @@ func (p *Parser) parseExponentiation() (ast.Expression, error) {
 		return nil, err
 	}
 	if p.peek().Type == lexer.POW {
-		if u, ok := left.(*ast.UnaryExpression); ok && u.Prefix && startTok.Type != lexer.LPAREN {
-			return nil, p.errAt(startTok, diag.ExponentUnaryAmbiguous, u.Op, u.Op, u.Op)
+		if op := unaryOperatorStart(startTok, left); op != "" {
+			return nil, p.errAt(startTok, diag.ExponentUnaryAmbiguous, op, op, op)
 		}
 		op := p.advance()
 		right, err := p.parseExponentiation()
@@ -407,6 +407,27 @@ func (p *Parser) parseExponentiation() (ast.Expression, error) {
 		left = ast.NewBinaryExpression("**", left, right, posOf(op))
 	}
 	return left, nil
+}
+
+// unaryOperatorStart is the operator of an unparenthesized unary expression
+// that starts at tok and parsed to left (`-x`, `void x`, `typeof x`,
+// `delete x`, `await x`), or "": the left operand `**` may not take. Each
+// parses to its own node (`void x` to an undefined literal), so the start
+// token tells them apart; `await` naming a variable is an identifier.
+func unaryOperatorStart(tok lexer.Token, left ast.Expression) string {
+	switch tok.Type {
+	case lexer.MINUS, lexer.PLUS, lexer.NOT, lexer.BITNOT, lexer.TYPEOF, lexer.VOID:
+		return tok.Literal
+	case lexer.AWAIT:
+		if _, ident := left.(*ast.Identifier); !ident {
+			return tok.Literal
+		}
+	case lexer.IDENT:
+		if tok.Literal == "delete" {
+			return tok.Literal
+		}
+	}
+	return ""
 }
 
 func (p *Parser) parseUnary() (ast.Expression, error) {
@@ -469,6 +490,20 @@ func (p *Parser) parseUnary() (ast.Expression, error) {
 			return nil, err
 		}
 		return ast.NewUnaryExpression("typeof", true, arg, posOf(op)), nil
+	case lexer.VOID:
+		// `void e` evaluates e for its effects and yields undefined.
+		op := p.advance()
+		arg, err := p.parseUnary()
+		if err != nil {
+			return nil, err
+		}
+		u := ast.NewNullLiteral(true, posOf(op))
+		u.Void = true
+		switch arg.(type) {
+		case *ast.NumberLiteral, *ast.StringLiteral, *ast.BooleanLiteral, *ast.NullLiteral:
+			return u, nil
+		}
+		return ast.NewSequenceExpression([]ast.Expression{arg, u}, posOf(op)), nil
 	case lexer.INC, lexer.DEC:
 		op := p.advance()
 		arg, err := p.parseUnary()

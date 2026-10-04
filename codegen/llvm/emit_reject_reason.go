@@ -61,9 +61,6 @@ func (e *Emitter) emitRejectAdapter(userClo Value) Value {
 	}
 	retIR := thenCallRetIR(retTy)
 
-	e.closureCtr++
-	fn := fmt.Sprintf("@__kml_reject_adapt_%d", e.closureCtr)
-
 	restore := e.beginThunkEmit()
 	// Load the user handler's fn/env.
 	fp := e.freshReg()
@@ -92,7 +89,7 @@ func (e *Emitter) emitRejectAdapter(userClo Value) Value {
 	}
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(ptr %%uclo, { i8, i64 } %%reason) {\nentry:\n%s}\n", retIR, fn, body))
+	fn := e.defineContentNamed("@__kml_reject_adapt.", retIR, "ptr %uclo, { i8, i64 } %reason", body)
 
 	// Trampoline closure { adaptFn, userClo } — the runner calls adaptFn(userClo,
 	// reason). The param type it advertises is TypeCaught (what the runner passes).
@@ -136,22 +133,10 @@ func (e *Emitter) emitValueToCaughtParts(val Value) (tag, pay string, err error)
 	return t2, p, nil
 }
 
-// storeRejectReason writes a caught value's (tag, payload) into a task promise's
-// rejection slots: payload → v0 (slot 2), tag (widened to i64) → v1 (slot 3).
-// It does NOT set the state or wake awaiters — the caller settles.
-func (e *Emitter) storeRejectReason(prom, tag, pay string) {
-	v0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0, promiseStructIR, prom))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", pay, v0))
-	tagWide := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i64", tagWide, tag))
-	v1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", v1, promiseStructIR, prom))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", tagWide, v1))
-}
-
-// storeRejectReasonI64Tag is storeRejectReason when the tag is already an i64
-// register (e.g. straight from __kml_get_thrown_tag zext'd, or a literal).
+// storeRejectReasonI64Tag writes a caught value's payload and i64 tag into
+// a promise's rejection slots without settling it: an async function's own
+// promise, marked rejected before any reaction exists. Everything else
+// rejects through emitRejectPromise.
 func (e *Emitter) storeRejectReasonI64Tag(prom, tagI64, pay string) {
 	v0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0, promiseStructIR, prom))
@@ -162,7 +147,7 @@ func (e *Emitter) storeRejectReasonI64Tag(prom, tagI64, pay string) {
 }
 
 // loadRejectReasonCaught reconstructs a TypeCaught value from a rejected promise's
-// v0 (payload) + v1 (tag) slots — the mirror of storeRejectReason, used by
+// v0 (payload) + v1 (tag) slots — the mirror of emitRejectPromise, used by
 // anything that reads a rejection reason as a first-class value (allSettled, etc.).
 func (e *Emitter) loadRejectReasonCaught(prom string) Value {
 	v0p := e.freshReg()

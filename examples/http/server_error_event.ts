@@ -18,7 +18,7 @@ const second = http.createServer((req: http.IncomingMessage, res: http.ServerRes
   res.end("second");
 });
 
-second.on('error', (err: Error) => {
+second.on('error', (err: NodeJS.ErrnoException) => {
   console.log("server error:", err.code);
   console.log("message:", err.message);
   process.exit(0);

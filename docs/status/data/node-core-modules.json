@@ -63,8 +63,8 @@
             "status": "implemented",
             "caveats": [
               "`promisify(f) === f` is false for an already-promisified `f`: a function unboxed from `any` is a new thunk",
-              "`.inspect` renders through the compiler's inspector: `depth`, `compact` (a number or `false`; `true` is treated as 3), `sorted` (not a comparator), `breakLength` and `maxArrayLength` apply; `colors`, `showHidden`, `getters`, `maxStringLength`, `numericSeparator` and `[inspect.custom]` methods do not, so `%o` shows no hidden properties",
-              "No `inherits`, `parseArgs`, `MIMEType`, `getCallSites`, `transferableAbortSignal`, `parseEnv` or `TextEncoder`/`TextDecoder` through `util` (they are globals); `debuglog`'s logger is typed `any`"
+              "`.inspect` renders through the compiler's inspector: `depth`, `compact` (a number or `false`; `true` is treated as 3), `sorted` (not a comparator), `breakLength`, `maxArrayLength` and `[inspect.custom]` methods apply; `colors`, `showHidden`, `getters`, `maxStringLength` and `numericSeparator` do not, so `%o` shows no hidden properties; a custom method's `depth` argument is `Infinity`, not `null`, when the depth is unlimited",
+              "No `inherits`, `MIMEType`, `getCallSites`, `transferableAbortSignal`, `parseEnv`; `debuglog`'s logger is typed `any`"
             ],
             "notes": [
               "Node's lib/util.js in TypeScript (`lib/node/util.ts`, [ADR-01289](../adr/ADR-01289.md)): `format`/`formatWithOptions` (Node's own specifier walk: a runtime format string, `%s` calling a program's own `toString`), `inspect` with `inspect.custom`/`colors`/`styles`/`defaultOptions`, `isDeepStrictEqual`, `callbackify`, `deprecate`, `debuglog`/`debug` (`NODE_DEBUG`), `stripVTControlCharacters`, `toUSVString`, `getSystemErrorName`/`Message`/`Map`, `styleText` (plain unless the stream shows colours), `types`, `aborted`, and the deprecated `isArray`",

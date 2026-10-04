@@ -32,29 +32,6 @@
         return 0;                                                              \
     } while (0)
 
-long long __kml_crypto_digest(long long hashId, const unsigned char *data,
-                              long long len, unsigned char *out,
-                              long long *outLen) {
-    switch (hashId) {
-    case 1:
-        KML_CC_DIGEST(CC_SHA1_CTX, CC_SHA1_Init, CC_SHA1_Update, CC_SHA1_Final,
-                      CC_SHA1_DIGEST_LENGTH);
-    case 2:
-        KML_CC_DIGEST(CC_SHA256_CTX, CC_SHA256_Init, CC_SHA256_Update,
-                      CC_SHA256_Final, CC_SHA256_DIGEST_LENGTH);
-    case 3:
-        KML_CC_DIGEST(CC_SHA512_CTX, CC_SHA384_Init, CC_SHA384_Update,
-                      CC_SHA384_Final, CC_SHA384_DIGEST_LENGTH);
-    case 4:
-        KML_CC_DIGEST(CC_SHA512_CTX, CC_SHA512_Init, CC_SHA512_Update,
-                      CC_SHA512_Final, CC_SHA512_DIGEST_LENGTH);
-    case 5: /* crypto.createHash('md5') — TDD-00159 */
-        KML_CC_DIGEST(CC_MD5_CTX, CC_MD5_Init, CC_MD5_Update,
-                      CC_MD5_Final, CC_MD5_DIGEST_LENGTH);
-    }
-    return -3;
-}
-
 /* Streaming digest — crypto.createHash's Hash object (ADR-00637): a tagged
  * union of the CC context types, so update()/digest() hash incrementally. */
 struct kml_cc_hash {
@@ -67,216 +44,17 @@ struct kml_cc_hash {
     } u;
 };
 
-void *__kml_crypto_hash_new(long long hashId) {
-    struct kml_cc_hash *h;
-    if (hashId < 1 || hashId > 5) return NULL;
-    h = (struct kml_cc_hash *)malloc(sizeof(*h));
-    if (!h) return NULL;
-    h->algo = hashId;
-    switch (hashId) {
-    case 1: CC_SHA1_Init(&h->u.s1); break;
-    case 2: CC_SHA256_Init(&h->u.s256); break;
-    case 3: CC_SHA384_Init(&h->u.s512); break;
-    case 4: CC_SHA512_Init(&h->u.s512); break;
-    case 5: CC_MD5_Init(&h->u.md5); break;
-    }
-    return h;
-}
-
-long long __kml_crypto_hash_update(void *ctx, const unsigned char *data,
-                                   long long len) {
-    struct kml_cc_hash *h = (struct kml_cc_hash *)ctx;
-    long long off = 0;
-    if (!h) return -1;
-    while (off < len) {
-        long long chunk = len - off;
-        if (chunk > 0x40000000LL) chunk = 0x40000000LL;
-        switch (h->algo) {
-        case 1: CC_SHA1_Update(&h->u.s1, data + off, (CC_LONG)chunk); break;
-        case 2: CC_SHA256_Update(&h->u.s256, data + off, (CC_LONG)chunk); break;
-        case 3: CC_SHA384_Update(&h->u.s512, data + off, (CC_LONG)chunk); break;
-        case 4: CC_SHA512_Update(&h->u.s512, data + off, (CC_LONG)chunk); break;
-        case 5: CC_MD5_Update(&h->u.md5, data + off, (CC_LONG)chunk); break;
-        }
-        off += chunk;
-    }
-    return 0;
-}
-
-long long __kml_crypto_hash_final(void *ctx, unsigned char *out,
-                                  long long *outLen) {
-    struct kml_cc_hash *h = (struct kml_cc_hash *)ctx;
-    if (!h) return -1;
-    switch (h->algo) {
-    case 1: CC_SHA1_Final(out, &h->u.s1); *outLen = CC_SHA1_DIGEST_LENGTH; break;
-    case 2: CC_SHA256_Final(out, &h->u.s256); *outLen = CC_SHA256_DIGEST_LENGTH; break;
-    case 3: CC_SHA384_Final(out, &h->u.s512); *outLen = CC_SHA384_DIGEST_LENGTH; break;
-    case 4: CC_SHA512_Final(out, &h->u.s512); *outLen = CC_SHA512_DIGEST_LENGTH; break;
-    case 5: CC_MD5_Final(out, &h->u.md5); *outLen = CC_MD5_DIGEST_LENGTH; break;
-    }
-    free(h);
-    return 0;
-}
-
 /* Streaming HMAC — crypto.createHmac's Hmac object (ADR-00637). */
 struct kml_cc_hmac_stream {
     CCHmacContext ctx;
     long long dlen;
 };
 
-void *__kml_crypto_hmac_new(long long hashId, const unsigned char *key,
-                            long long keyLen) {
-    CCHmacAlgorithm alg;
-    long long dlen;
-    struct kml_cc_hmac_stream *h;
-    switch (hashId) {
-    case 1: alg = kCCHmacAlgSHA1; dlen = CC_SHA1_DIGEST_LENGTH; break;
-    case 2: alg = kCCHmacAlgSHA256; dlen = CC_SHA256_DIGEST_LENGTH; break;
-    case 3: alg = kCCHmacAlgSHA384; dlen = CC_SHA384_DIGEST_LENGTH; break;
-    case 4: alg = kCCHmacAlgSHA512; dlen = CC_SHA512_DIGEST_LENGTH; break;
-    case 5: alg = kCCHmacAlgMD5; dlen = CC_MD5_DIGEST_LENGTH; break;
-    default: return NULL;
-    }
-    h = (struct kml_cc_hmac_stream *)malloc(sizeof(*h));
-    if (!h) return NULL;
-    CCHmacInit(&h->ctx, alg, key, (size_t)keyLen);
-    h->dlen = dlen;
-    return h;
-}
-
-long long __kml_crypto_hmac_update(void *ctx, const unsigned char *data,
-                                   long long len) {
-    struct kml_cc_hmac_stream *h = (struct kml_cc_hmac_stream *)ctx;
-    if (!h) return -1;
-    CCHmacUpdate(&h->ctx, data, (size_t)len);
-    return 0;
-}
-
-long long __kml_crypto_hmac_final(void *ctx, unsigned char *out,
-                                  long long *outLen) {
-    struct kml_cc_hmac_stream *h = (struct kml_cc_hmac_stream *)ctx;
-    if (!h) return -1;
-    CCHmacFinal(&h->ctx, out);
-    *outLen = h->dlen;
-    free(h);
-    return 0;
-}
-
-long long __kml_crypto_memeq(const unsigned char *a, const unsigned char *b,
-                             long long len) {
-    unsigned char diff = 0;
-    long long i;
-    for (i = 0; i < len; i++) diff |= (unsigned char)(a[i] ^ b[i]);
-    return diff == 0 ? 1 : 0;
-}
-
 /* base64url (RFC 4648 §5, no padding) — the JWK `k`/component codec. Kept
  * in the backend file (duplicated across backends) so each stays a single
  * self-contained TU. */
 static const char kml_b64u[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-long long __kml_crypto_b64url_encode(const unsigned char *in, long long len,
-                                     char **out, long long *outLen) {
-    long long olen = (len + 2) / 3 * 4, i, o = 0;
-    char *buf = (char *)malloc((size_t)olen + 1);
-    if (!buf) return -1;
-    for (i = 0; i + 2 < len; i += 3) {
-        unsigned v = (unsigned)in[i] << 16 | (unsigned)in[i + 1] << 8 | in[i + 2];
-        buf[o++] = kml_b64u[v >> 18];
-        buf[o++] = kml_b64u[(v >> 12) & 63];
-        buf[o++] = kml_b64u[(v >> 6) & 63];
-        buf[o++] = kml_b64u[v & 63];
-    }
-    if (i < len) {
-        unsigned v = (unsigned)in[i] << 16;
-        if (i + 1 < len) v |= (unsigned)in[i + 1] << 8;
-        buf[o++] = kml_b64u[v >> 18];
-        buf[o++] = kml_b64u[(v >> 12) & 63];
-        if (i + 1 < len) buf[o++] = kml_b64u[(v >> 6) & 63];
-    }
-    buf[o] = 0;
-    *out = buf;
-    *outLen = o;
-    return 0;
-}
-
-static int kml_b64u_val(char c) {
-    if (c >= 'A' && c <= 'Z') return c - 'A';
-    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-    if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '-') return 62;
-    if (c == '_') return 63;
-    return -1;
-}
-
-long long __kml_crypto_b64url_decode(const char *in, long long len,
-                                     unsigned char **out, long long *outLen) {
-    unsigned char *buf;
-    long long i, o = 0;
-    unsigned acc = 0;
-    int bits = 0;
-    if (len % 4 == 1) return -2;
-    buf = (unsigned char *)malloc((size_t)(len / 4 * 3 + 3) + 1);
-    if (!buf) return -1;
-    for (i = 0; i < len; i++) {
-        int v = kml_b64u_val(in[i]);
-        if (v < 0) { free(buf); return -2; }
-        acc = acc << 6 | (unsigned)v;
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            buf[o++] = (unsigned char)(acc >> bits);
-        }
-    }
-    *out = buf;
-    *outLen = o;
-    return 0;
-}
-
-long long __kml_crypto_hmac_sign(long long hashId, const unsigned char *key,
-                                 long long keyLen, const unsigned char *data,
-                                 long long len, unsigned char *out,
-                                 long long *outLen) {
-    switch (hashId) {
-    case 1:
-        CCHmac(kCCHmacAlgSHA1, key, (size_t)keyLen, data, (size_t)len, out);
-        *outLen = CC_SHA1_DIGEST_LENGTH;
-        return 0;
-    case 2:
-        CCHmac(kCCHmacAlgSHA256, key, (size_t)keyLen, data, (size_t)len, out);
-        *outLen = CC_SHA256_DIGEST_LENGTH;
-        return 0;
-    case 3:
-        CCHmac(kCCHmacAlgSHA384, key, (size_t)keyLen, data, (size_t)len, out);
-        *outLen = CC_SHA384_DIGEST_LENGTH;
-        return 0;
-    case 4:
-        CCHmac(kCCHmacAlgSHA512, key, (size_t)keyLen, data, (size_t)len, out);
-        *outLen = CC_SHA512_DIGEST_LENGTH;
-        return 0;
-    }
-    return -3;
-}
-
-long long __kml_crypto_aes_cbc(long long encrypt, const unsigned char *key,
-                               long long keyLen, const unsigned char *iv,
-                               const unsigned char *in, long long inLen,
-                               unsigned char **out, long long *outLen) {
-    unsigned char *buf;
-    size_t moved = 0;
-    CCCryptorStatus st;
-    if (keyLen != 16 && keyLen != 24 && keyLen != 32) return -2;
-    buf = (unsigned char *)malloc((size_t)inLen + 16 + 1);
-    if (!buf) return -1;
-    st = CCCrypt(encrypt ? kCCEncrypt : kCCDecrypt, kCCAlgorithmAES,
-                 kCCOptionPKCS7Padding, key, (size_t)keyLen, iv, in,
-                 (size_t)inLen, buf, (size_t)inLen + 16, &moved);
-    if (st != kCCSuccess) { free(buf); return -1; }
-    *out = buf;
-    *outLen = (long long)moved;
-    return 0;
-}
 
 /* ── key derivation: PBKDF2 (CCKeyDerivationPBKDF) / HKDF (RFC 5869 over
  * CCHmac — CommonCrypto's public API has no HKDF) ─────────────────────────── */
@@ -285,73 +63,6 @@ long long __kml_crypto_aes_cbc(long long encrypt, const unsigned char *key,
 
 /* MD5 is part of Node's surface; its CC entry points are marked deprecated. */
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-
-static int kml_cc_hmac_alg(long long hashId, CCHmacAlgorithm *alg,
-                           long long *hlen) {
-    switch (hashId) {
-    case 1: *alg = kCCHmacAlgSHA1; *hlen = CC_SHA1_DIGEST_LENGTH; return 1;
-    case 2: *alg = kCCHmacAlgSHA256; *hlen = CC_SHA256_DIGEST_LENGTH; return 1;
-    case 3: *alg = kCCHmacAlgSHA384; *hlen = CC_SHA384_DIGEST_LENGTH; return 1;
-    case 4: *alg = kCCHmacAlgSHA512; *hlen = CC_SHA512_DIGEST_LENGTH; return 1;
-    }
-    return 0;
-}
-
-long long __kml_crypto_pbkdf2(long long hashId, const unsigned char *pw,
-                              long long pwLen, const unsigned char *salt,
-                              long long saltLen, long long iterations,
-                              unsigned char *out, long long outLen) {
-    CCPseudoRandomAlgorithm prf;
-    switch (hashId) {
-    case 1: prf = kCCPRFHmacAlgSHA1; break;
-    case 2: prf = kCCPRFHmacAlgSHA256; break;
-    case 3: prf = kCCPRFHmacAlgSHA384; break;
-    case 4: prf = kCCPRFHmacAlgSHA512; break;
-    default: return -3;
-    }
-    if (iterations <= 0 || outLen <= 0) return -1;
-    if (CCKeyDerivationPBKDF(kCCPBKDF2, (const char *)pw, (size_t)pwLen, salt,
-                             (size_t)saltLen, prf, (unsigned)iterations, out,
-                             (size_t)outLen) != kCCSuccess)
-        return -1;
-    return 0;
-}
-
-long long __kml_crypto_hkdf(long long hashId, const unsigned char *ikm,
-                            long long ikmLen, const unsigned char *salt,
-                            long long saltLen, const unsigned char *info,
-                            long long infoLen, unsigned char *out,
-                            long long outLen) {
-    CCHmacAlgorithm alg;
-    long long hlen;
-    unsigned char prk[64], t[64];
-    unsigned char zeros[64] = {0};
-    long long tLen = 0, done = 0;
-    unsigned char counter = 1;
-    if (!kml_cc_hmac_alg(hashId, &alg, &hlen)) return -3;
-    if (outLen <= 0 || outLen > 255 * hlen) return -1;
-    /* extract: PRK = HMAC(salt or zeros, IKM) */
-    if (saltLen > 0)
-        CCHmac(alg, salt, (size_t)saltLen, ikm, (size_t)ikmLen, prk);
-    else
-        CCHmac(alg, zeros, (size_t)hlen, ikm, (size_t)ikmLen, prk);
-    /* expand: T(i) = HMAC(PRK, T(i-1) || info || i) */
-    while (done < outLen) {
-        CCHmacContext ctx;
-        long long n;
-        CCHmacInit(&ctx, alg, prk, (size_t)hlen);
-        if (tLen > 0) CCHmacUpdate(&ctx, t, (size_t)tLen);
-        if (infoLen > 0) CCHmacUpdate(&ctx, info, (size_t)infoLen);
-        CCHmacUpdate(&ctx, &counter, 1);
-        CCHmacFinal(&ctx, t);
-        tLen = hlen;
-        n = outLen - done < hlen ? outLen - done : hlen;
-        memcpy(out + done, t, (size_t)n);
-        done += n;
-        counter++;
-    }
-    return 0;
-}
 
 /* ── asymmetric: SecKey (Security.framework) + a mini-DER layer ─────────────
  * SecKey's external representations are PKCS#1 (RSA) and X9.63 (EC: raw
@@ -409,25 +120,6 @@ static size_t kml_der_hdr_size(size_t len) {
     if (len < 256) return 3;
     if (len < 65536) return 4;
     return 5;
-}
-
-/* DER INTEGER from unsigned big-endian bytes (strips leading zeros, adds a
- * 00 pad when the high bit is set). */
-static int kml_der_uint(kml_der *d, const unsigned char *v, size_t n) {
-    while (n > 1 && v[0] == 0) { v++; n--; }
-    if (v[0] & 0x80) {
-        unsigned char z = 0;
-        if (!kml_der_hdr(d, 0x02, n + 1) || !kml_der_put(d, &z, 1)) return 0;
-    } else {
-        if (!kml_der_hdr(d, 0x02, n)) return 0;
-    }
-    return kml_der_put(d, v, n);
-}
-
-static size_t kml_der_uint_size(const unsigned char *v, size_t n) {
-    while (n > 1 && v[0] == 0) { v++; n--; }
-    if (v[0] & 0x80) n++;
-    return kml_der_hdr_size(n) + n;
 }
 
 /* -- DER reader -- */
@@ -523,31 +215,6 @@ static ll kml_rsa_wrap(const unsigned char *pkcs1, size_t p1len, int isPriv,
     return 0;
 }
 
-/* PKCS#8/SPKI → the inner PKCS#1 body (pointers into the input). */
-static ll kml_rsa_unwrap(const unsigned char *der, ll derLen, int isPriv,
-                         const unsigned char **body, size_t *bodyLen) {
-    const unsigned char *p = der, *end = der + derLen, *c;
-    unsigned char tag;
-    size_t clen;
-    if (!kml_der_read(&p, end, &tag, &c, &clen) || tag != 0x30) return -2;
-    p = c;
-    end = c + clen;
-    if (isPriv) {
-        if (!kml_der_read(&p, end, &tag, &c, &clen) || tag != 0x02) return -2;
-        if (!kml_der_read(&p, end, &tag, &c, &clen) || tag != 0x30) return -2;
-        if (!kml_der_read(&p, end, &tag, &c, &clen) || tag != 0x04) return -2;
-        *body = c;
-        *bodyLen = clen;
-    } else {
-        if (!kml_der_read(&p, end, &tag, &c, &clen) || tag != 0x30) return -2;
-        if (!kml_der_read(&p, end, &tag, &c, &clen) || tag != 0x03 || clen < 2)
-            return -2;
-        *body = c + 1; /* skip unused-bits byte */
-        *bodyLen = clen - 1;
-    }
-    return 0;
-}
-
 /* EC: X9.63 (04||X||Y[||K]) → PKCS#8/SPKI. */
 static ll kml_ec_wrap(ll curveId, const unsigned char *x963, size_t xlen,
                       int isPriv, unsigned char **out, ll *outLen) {
@@ -597,69 +264,6 @@ static ll kml_ec_wrap(ll curveId, const unsigned char *x963, size_t xlen,
     return 0;
 }
 
-/* PKCS#8/SPKI → X9.63 (malloc'd: point, or point||K for private). */
-static ll kml_ec_unwrap(ll curveId, const unsigned char *der, ll derLen,
-                        int isPriv, unsigned char **x963, size_t *xlen) {
-    const unsigned char *p = der, *end = der + derLen, *c;
-    unsigned char tag;
-    size_t clen;
-    ll cb = kml_curve_bytes(curveId);
-    size_t ptLen = (size_t)(1 + 2 * cb);
-    if (cb == 0) return -3;
-    if (!kml_der_read(&p, end, &tag, &c, &clen) || tag != 0x30) return -2;
-    p = c;
-    end = c + clen;
-    if (isPriv) {
-        const unsigned char *k = NULL, *pt = NULL;
-        size_t kn = 0;
-        if (!kml_der_read(&p, end, &tag, &c, &clen) || tag != 0x02) return -2;
-        if (!kml_der_read(&p, end, &tag, &c, &clen) || tag != 0x30) return -2;
-        if (!kml_der_read(&p, end, &tag, &c, &clen) || tag != 0x04) return -2;
-        /* inside: ECPrivateKey */
-        {
-            const unsigned char *ip = c, *iend = c + clen, *ic;
-            size_t iclen;
-            if (!kml_der_read(&ip, iend, &tag, &ic, &iclen) || tag != 0x30)
-                return -2;
-            ip = ic;
-            iend = ic + iclen;
-            if (!kml_der_read(&ip, iend, &tag, &ic, &iclen) || tag != 0x02)
-                return -2;
-            if (!kml_der_read(&ip, iend, &tag, &ic, &iclen) || tag != 0x04)
-                return -2;
-            k = ic;
-            kn = iclen;
-            while (ip < iend) {
-                if (!kml_der_read(&ip, iend, &tag, &ic, &iclen)) return -2;
-                if (tag == 0xa1) {
-                    const unsigned char *bp = ic, *bend = ic + iclen, *bc;
-                    size_t bclen;
-                    if (kml_der_read(&bp, bend, &tag, &bc, &bclen) &&
-                        tag == 0x03 && bclen == ptLen + 1)
-                        pt = bc + 1;
-                }
-            }
-            if (!pt || kn > (size_t)cb) return -2;
-        }
-        *x963 = (unsigned char *)malloc(ptLen + (size_t)cb);
-        if (!*x963) return -1;
-        memcpy(*x963, pt, ptLen);
-        memset(*x963 + ptLen, 0, (size_t)cb - kn); /* left-pad the scalar */
-        memcpy(*x963 + ptLen + ((size_t)cb - kn), k, kn);
-        *xlen = ptLen + (size_t)cb;
-    } else {
-        if (!kml_der_read(&p, end, &tag, &c, &clen) || tag != 0x30) return -2;
-        if (!kml_der_read(&p, end, &tag, &c, &clen) || tag != 0x03 ||
-            clen != ptLen + 1)
-            return -2;
-        *x963 = (unsigned char *)malloc(ptLen);
-        if (!*x963) return -1;
-        memcpy(*x963, c + 1, ptLen);
-        *xlen = ptLen;
-    }
-    return 0;
-}
-
 /* -- SecKey helpers -- */
 
 static SecKeyRef kml_seckey_import(const unsigned char *raw, size_t rawLen,
@@ -680,39 +284,6 @@ static SecKeyRef kml_seckey_import(const unsigned char *raw, size_t rawLen,
     if (data) CFRelease(data);
     if (attrs) CFRelease(attrs);
     return key;
-}
-
-/* Import from the CryptoKey header's PKCS#8/SPKI DER. */
-static SecKeyRef kml_seckey_from_der(const unsigned char *der, ll derLen,
-                                     int isRSA, int isPriv, ll curveId) {
-    SecKeyRef key = NULL;
-    if (isRSA) {
-        const unsigned char *body;
-        size_t bodyLen;
-        if (kml_rsa_unwrap(der, derLen, isPriv, &body, &bodyLen) != 0)
-            return NULL;
-        key = kml_seckey_import(body, bodyLen, 1, isPriv);
-    } else {
-        unsigned char *x963;
-        size_t xlen;
-        if (kml_ec_unwrap(curveId, der, derLen, isPriv, &x963, &xlen) != 0)
-            return NULL;
-        key = kml_seckey_import(x963, xlen, 0, isPriv);
-        free(x963);
-    }
-    return key;
-}
-
-static ll kml_cfdata_out(CFDataRef d, unsigned char **out, ll *outLen) {
-    size_t n;
-    if (!d) return -1;
-    n = (size_t)CFDataGetLength(d);
-    *out = (unsigned char *)malloc(n + 1);
-    if (!*out) { CFRelease(d); return -1; }
-    memcpy(*out, CFDataGetBytePtr(d), n);
-    *outLen = (ll)n;
-    CFRelease(d);
-    return 0;
 }
 
 long long __kml_crypto_gen_rsa(long long modulusBits, unsigned char **pkcs8,
@@ -793,378 +364,7 @@ long long __kml_crypto_gen_ec(long long curveId, unsigned char **pkcs8,
     return rc;
 }
 
-static SecKeyAlgorithm kml_oaep_alg(ll hashId) {
-    switch (hashId) {
-    case 1: return kSecKeyAlgorithmRSAEncryptionOAEPSHA1;
-    case 2: return kSecKeyAlgorithmRSAEncryptionOAEPSHA256;
-    case 3: return kSecKeyAlgorithmRSAEncryptionOAEPSHA384;
-    case 4: return kSecKeyAlgorithmRSAEncryptionOAEPSHA512;
-    }
-    return NULL;
-}
-
-long long __kml_crypto_rsa_oaep(long long encrypt, long long hashId,
-                                const unsigned char *keyDer, long long keyDerLen,
-                                long long isPriv, const unsigned char *label,
-                                long long labelLen, const unsigned char *in,
-                                long long inLen, unsigned char **out,
-                                long long *outLen) {
-    SecKeyAlgorithm alg = kml_oaep_alg(hashId);
-    SecKeyRef key;
-    CFDataRef inData, outData = NULL;
-    (void)label;
-    if (!alg) return -3;
-    /* SecKey has no OAEP-label parameter — a caveat of this backend. */
-    if (labelLen > 0) return -3;
-    key = kml_seckey_from_der(keyDer, keyDerLen, 1, (int)isPriv, 0);
-    if (!key) return -2;
-    inData = CFDataCreate(NULL, in, (CFIndex)inLen);
-    if (inData) {
-        outData = encrypt ? SecKeyCreateEncryptedData(key, alg, inData, NULL)
-                          : SecKeyCreateDecryptedData(key, alg, inData, NULL);
-        CFRelease(inData);
-    }
-    CFRelease(key);
-    return kml_cfdata_out(outData, out, outLen);
-}
-
-static SecKeyAlgorithm kml_pss_alg(ll hashId) {
-    switch (hashId) {
-    case 1: return kSecKeyAlgorithmRSASignatureMessagePSSSHA1;
-    case 2: return kSecKeyAlgorithmRSASignatureMessagePSSSHA256;
-    case 3: return kSecKeyAlgorithmRSASignatureMessagePSSSHA384;
-    case 4: return kSecKeyAlgorithmRSASignatureMessagePSSSHA512;
-    }
-    return NULL;
-}
-
-static ll kml_hash_len(ll hashId) {
-    switch (hashId) {
-    case 1: return 20;
-    case 2: return 32;
-    case 3: return 48;
-    case 4: return 64;
-    }
-    return 0;
-}
-
-long long __kml_crypto_rsa_pss_sign(long long hashId, long long saltLen,
-                                    const unsigned char *pkcs8, long long pkcs8Len,
-                                    const unsigned char *data, long long len,
-                                    unsigned char **sig, long long *sigLen) {
-    SecKeyAlgorithm alg = kml_pss_alg(hashId);
-    SecKeyRef key;
-    CFDataRef inData, sigData = NULL;
-    if (!alg) return -3;
-    /* SecKey's PSS fixes saltLen == hash length — a caveat of this backend. */
-    if (saltLen != kml_hash_len(hashId)) return -3;
-    key = kml_seckey_from_der(pkcs8, pkcs8Len, 1, 1, 0);
-    if (!key) return -2;
-    inData = CFDataCreate(NULL, data, (CFIndex)len);
-    if (inData) {
-        sigData = SecKeyCreateSignature(key, alg, inData, NULL);
-        CFRelease(inData);
-    }
-    CFRelease(key);
-    return kml_cfdata_out(sigData, sig, sigLen);
-}
-
-long long __kml_crypto_rsa_pss_verify(long long hashId, long long saltLen,
-                                      const unsigned char *spki, long long spkiLen,
-                                      const unsigned char *data, long long len,
-                                      const unsigned char *sig, long long sigLen) {
-    SecKeyAlgorithm alg = kml_pss_alg(hashId);
-    SecKeyRef key;
-    CFDataRef inData, sigData;
-    Boolean ok = 0;
-    if (!alg) return -3;
-    if (saltLen != kml_hash_len(hashId)) return -3;
-    key = kml_seckey_from_der(spki, spkiLen, 1, 0, 0);
-    if (!key) return -2;
-    inData = CFDataCreate(NULL, data, (CFIndex)len);
-    sigData = CFDataCreate(NULL, sig, (CFIndex)sigLen);
-    if (inData && sigData)
-        ok = SecKeyVerifySignature(key, alg, inData, sigData, NULL);
-    if (inData) CFRelease(inData);
-    if (sigData) CFRelease(sigData);
-    CFRelease(key);
-    return ok ? 1 : 0;
-}
-
-static SecKeyAlgorithm kml_ecdsa_alg(ll hashId) {
-    switch (hashId) {
-    case 1: return kSecKeyAlgorithmECDSASignatureMessageX962SHA1;
-    case 2: return kSecKeyAlgorithmECDSASignatureMessageX962SHA256;
-    case 3: return kSecKeyAlgorithmECDSASignatureMessageX962SHA384;
-    case 4: return kSecKeyAlgorithmECDSASignatureMessageX962SHA512;
-    }
-    return NULL;
-}
-
-/* DER ECDSA-Sig-Value (SEQ{INT r, INT s}) → raw r||s at curve width. */
-static ll kml_ecdsa_der_to_raw(const unsigned char *der, size_t derLen, ll cb,
-                               unsigned char *raw) {
-    const unsigned char *p = der, *end = der + derLen, *c, *r, *s;
-    unsigned char tag;
-    size_t clen, rl, sl;
-    if (!kml_der_read(&p, end, &tag, &c, &clen) || tag != 0x30) return -1;
-    p = c;
-    end = c + clen;
-    if (!kml_der_read_uint(&p, end, &r, &rl) || rl > (size_t)cb) return -1;
-    if (!kml_der_read_uint(&p, end, &s, &sl) || sl > (size_t)cb) return -1;
-    memset(raw, 0, (size_t)(2 * cb));
-    memcpy(raw + cb - rl, r, rl);
-    memcpy(raw + 2 * cb - sl, s, sl);
-    return 0;
-}
-
-/* raw r||s → DER ECDSA-Sig-Value. */
-static ll kml_ecdsa_raw_to_der(const unsigned char *raw, ll cb,
-                               unsigned char **der, size_t *derLen) {
-    kml_der d = {0};
-    size_t body = kml_der_uint_size(raw, (size_t)cb) +
-                  kml_der_uint_size(raw + cb, (size_t)cb);
-    if (!kml_der_hdr(&d, 0x30, body) || !kml_der_uint(&d, raw, (size_t)cb) ||
-        !kml_der_uint(&d, raw + cb, (size_t)cb)) {
-        free(d.buf);
-        return -1;
-    }
-    *der = d.buf;
-    *derLen = d.len;
-    return 0;
-}
-
-long long __kml_crypto_ecdsa_sign(long long curveId, long long hashId,
-                                  const unsigned char *pkcs8, long long pkcs8Len,
-                                  const unsigned char *data, long long len,
-                                  unsigned char **sig, long long *sigLen) {
-    SecKeyAlgorithm alg = kml_ecdsa_alg(hashId);
-    ll cb = kml_curve_bytes(curveId);
-    SecKeyRef key;
-    CFDataRef inData, sigData = NULL;
-    ll rc = -1;
-    if (!alg || cb == 0) return -3;
-    key = kml_seckey_from_der(pkcs8, pkcs8Len, 0, 1, curveId);
-    if (!key) return -2;
-    inData = CFDataCreate(NULL, data, (CFIndex)len);
-    if (inData) {
-        sigData = SecKeyCreateSignature(key, alg, inData, NULL);
-        CFRelease(inData);
-    }
-    CFRelease(key);
-    if (sigData) {
-        unsigned char *raw = (unsigned char *)malloc((size_t)(2 * cb) + 1);
-        if (raw && kml_ecdsa_der_to_raw(CFDataGetBytePtr(sigData),
-                                        (size_t)CFDataGetLength(sigData), cb,
-                                        raw) == 0) {
-            *sig = raw;
-            *sigLen = 2 * cb;
-            rc = 0;
-        } else {
-            free(raw);
-        }
-        CFRelease(sigData);
-    }
-    return rc;
-}
-
-long long __kml_crypto_ecdsa_verify(long long curveId, long long hashId,
-                                    const unsigned char *spki, long long spkiLen,
-                                    const unsigned char *data, long long len,
-                                    const unsigned char *sig, long long sigLen) {
-    SecKeyAlgorithm alg = kml_ecdsa_alg(hashId);
-    ll cb = kml_curve_bytes(curveId);
-    SecKeyRef key;
-    unsigned char *der = NULL;
-    size_t derLen = 0;
-    CFDataRef inData, sigData = NULL;
-    Boolean ok = 0;
-    if (!alg || cb == 0) return -3;
-    if (sigLen != 2 * cb) return 0;
-    key = kml_seckey_from_der(spki, spkiLen, 0, 0, curveId);
-    if (!key) return -2;
-    if (kml_ecdsa_raw_to_der(sig, cb, &der, &derLen) != 0) {
-        CFRelease(key);
-        return -1;
-    }
-    inData = CFDataCreate(NULL, data, (CFIndex)len);
-    sigData = CFDataCreate(NULL, der, (CFIndex)derLen);
-    if (inData && sigData)
-        ok = SecKeyVerifySignature(key, alg, inData, sigData, NULL);
-    if (inData) CFRelease(inData);
-    if (sigData) CFRelease(sigData);
-    free(der);
-    CFRelease(key);
-    return ok ? 1 : 0;
-}
-
-long long __kml_crypto_ec_raw_to_spki(long long curveId,
-                                      const unsigned char *raw, long long rawLen,
-                                      unsigned char **spki, long long *spkiLen) {
-    return kml_ec_wrap(curveId, raw, (size_t)rawLen, 0, spki, spkiLen);
-}
-
-long long __kml_crypto_ec_spki_to_raw(long long curveId,
-                                      const unsigned char *spki, long long spkiLen,
-                                      unsigned char **raw, long long *rawLen) {
-    unsigned char *pt;
-    size_t ptLen;
-    ll rc = kml_ec_unwrap(curveId, spki, spkiLen, 0, &pt, &ptLen);
-    if (rc != 0) return rc;
-    *raw = pt;
-    *rawLen = (ll)ptLen;
-    return 0;
-}
-
 /* ── JWK component bridge (PKCS#1 / X9.63 parsing via the mini-DER) ──────── */
-
-static char *kml_uint_b64u(const unsigned char *v, size_t n) {
-    char *out = NULL;
-    ll outLen;
-    if (__kml_crypto_b64url_encode(v, (ll)n, &out, &outLen) != 0) return NULL;
-    return out;
-}
-
-long long __kml_crypto_jwk_export_rsa(long long isPriv,
-                                      const unsigned char *der, long long derLen,
-                                      char **n, char **e, char **d, char **p,
-                                      char **q, char **dp, char **dq, char **qi) {
-    const unsigned char *body, *ip, *iend, *c;
-    size_t bodyLen, clen;
-    unsigned char tag;
-    const unsigned char *vals[9];
-    size_t lens[9];
-    int i, count = 0;
-    if (kml_rsa_unwrap(der, derLen, (int)isPriv, &body, &bodyLen) != 0)
-        return -2;
-    ip = body;
-    iend = body + bodyLen;
-    if (!kml_der_read(&ip, iend, &tag, &c, &clen) || tag != 0x30) return -2;
-    ip = c;
-    iend = c + clen;
-    while (count < 9 && kml_der_read_uint(&ip, iend, &vals[count], &lens[count]))
-        count++;
-    *n = *e = *d = *p = *q = *dp = *dq = *qi = NULL;
-    if (isPriv) {
-        /* PKCS#1 RSAPrivateKey: ver, n, e, d, p, q, dp, dq, qi */
-        if (count < 9) return -2;
-        *n = kml_uint_b64u(vals[1], lens[1]);
-        *e = kml_uint_b64u(vals[2], lens[2]);
-        *d = kml_uint_b64u(vals[3], lens[3]);
-        *p = kml_uint_b64u(vals[4], lens[4]);
-        *q = kml_uint_b64u(vals[5], lens[5]);
-        *dp = kml_uint_b64u(vals[6], lens[6]);
-        *dq = kml_uint_b64u(vals[7], lens[7]);
-        *qi = kml_uint_b64u(vals[8], lens[8]);
-    } else {
-        /* PKCS#1 RSAPublicKey: n, e */
-        if (count < 2) return -2;
-        *n = kml_uint_b64u(vals[0], lens[0]);
-        *e = kml_uint_b64u(vals[1], lens[1]);
-    }
-    for (i = 0; i < (isPriv ? 8 : 2); i++) {
-        /* all requested components must have encoded */
-    }
-    return (*n && *e) ? 0 : -1;
-}
-
-static unsigned char *kml_b64u_bytes(const char *s, size_t *n) {
-    unsigned char *b;
-    ll bl;
-    if (!s) return NULL;
-    if (__kml_crypto_b64url_decode(s, (ll)strlen(s), &b, &bl) != 0) return NULL;
-    *n = (size_t)bl;
-    return b;
-}
-
-long long __kml_crypto_jwk_import_rsa(const char *n, const char *e,
-                                      const char *d, const char *p,
-                                      const char *q, const char *dp,
-                                      const char *dq, const char *qi,
-                                      unsigned char **der, long long *derLen,
-                                      long long *kindOut) {
-    int isPriv = d != NULL;
-    const char *strs[8];
-    unsigned char *bytes[8] = {0};
-    size_t lens[8] = {0};
-    int count = isPriv ? 8 : 2, i, ok = 1;
-    kml_der body = {0};
-    ll rc = -2;
-    strs[0] = n; strs[1] = e; strs[2] = d; strs[3] = p;
-    strs[4] = q; strs[5] = dp; strs[6] = dq; strs[7] = qi;
-    if (!n || !e) return -2;
-    if (isPriv && (!p || !q || !dp || !dq || !qi)) return -2;
-    for (i = 0; i < count; i++) {
-        bytes[i] = kml_b64u_bytes(strs[i], &lens[i]);
-        if (!bytes[i]) ok = 0;
-    }
-    if (ok) {
-        size_t seqLen = 0;
-        static const unsigned char zero = 0;
-        if (isPriv) seqLen += 3; /* INT 0 */
-        for (i = 0; i < count; i++) seqLen += kml_der_uint_size(bytes[i], lens[i]);
-        ok = kml_der_hdr(&body, 0x30, seqLen);
-        if (ok && isPriv) {
-            ok = kml_der_hdr(&body, 0x02, 1) && kml_der_put(&body, &zero, 1);
-        }
-        for (i = 0; ok && i < count; i++)
-            ok = kml_der_uint(&body, bytes[i], lens[i]);
-        if (ok)
-            rc = kml_rsa_wrap(body.buf, body.len, isPriv, der, derLen);
-        if (rc == 0) *kindOut = isPriv ? 2 : 1;
-    }
-    free(body.buf);
-    for (i = 0; i < count; i++) free(bytes[i]);
-    return rc;
-}
-
-long long __kml_crypto_jwk_export_ec(long long curveId, long long isPriv,
-                                     const unsigned char *der, long long derLen,
-                                     char **x, char **y, char **d) {
-    unsigned char *x963;
-    size_t xlen;
-    ll cb = kml_curve_bytes(curveId);
-    ll rc;
-    *x = *y = *d = NULL;
-    if (cb == 0) return -3;
-    rc = kml_ec_unwrap(curveId, der, derLen, (int)isPriv, &x963, &xlen);
-    if (rc != 0) return rc;
-    *x = kml_uint_b64u(x963 + 1, (size_t)cb);
-    *y = kml_uint_b64u(x963 + 1 + cb, (size_t)cb);
-    if (isPriv) *d = kml_uint_b64u(x963 + 1 + 2 * cb, (size_t)cb);
-    free(x963);
-    return (*x && *y && (!isPriv || *d)) ? 0 : -1;
-}
-
-long long __kml_crypto_jwk_import_ec(long long curveId, const char *x,
-                                     const char *y, const char *d,
-                                     unsigned char **der, long long *derLen,
-                                     long long *kindOut) {
-    ll cb = kml_curve_bytes(curveId);
-    unsigned char *xb = NULL, *yb = NULL, *db = NULL, *x963 = NULL;
-    size_t xl = 0, yl = 0, dl = 0;
-    ll rc = -2;
-    if (cb == 0) return -3;
-    if (!x || !y) return -2;
-    xb = kml_b64u_bytes(x, &xl);
-    yb = kml_b64u_bytes(y, &yl);
-    if (d) db = kml_b64u_bytes(d, &dl);
-    if (xb && yb && xl == (size_t)cb && yl == (size_t)cb &&
-        (!d || (db && dl == (size_t)cb))) {
-        size_t total = (size_t)(1 + 2 * cb) + (d ? (size_t)cb : 0);
-        x963 = (unsigned char *)malloc(total);
-        if (x963) {
-            x963[0] = 4;
-            memcpy(x963 + 1, xb, (size_t)cb);
-            memcpy(x963 + 1 + cb, yb, (size_t)cb);
-            if (d) memcpy(x963 + 1 + 2 * cb, db, (size_t)cb);
-            rc = kml_ec_wrap(curveId, x963, total, d != NULL, der, derLen);
-            if (rc == 0) *kindOut = d ? 2 : 1;
-        }
-    }
-    free(xb); free(yb); free(db); free(x963);
-    return rc;
-}
 
 /* ── AES-GCM = public-API AES-CTR + an in-shim GHASH ────────────────────────
  * CommonCrypto's own GCM entry points are private SPI (TDD-00104), so GCM is
@@ -1194,131 +394,11 @@ static void kml_ghash_mul(unsigned char x[16], const unsigned char h[16]) {
     memcpy(x, z, 16);
 }
 
-static void kml_ghash(const unsigned char h[16], const unsigned char *aad,
-                      long long aadLen, const unsigned char *ct,
-                      long long ctLen, unsigned char out[16]) {
-    unsigned char y[16] = {0}, block[16];
-    long long i;
-    for (i = 0; i < aadLen; i += 16) {
-        long long n = aadLen - i < 16 ? aadLen - i : 16;
-        int j;
-        memset(block, 0, 16);
-        memcpy(block, aad + i, (size_t)n);
-        for (j = 0; j < 16; j++) y[j] ^= block[j];
-        kml_ghash_mul(y, h);
-    }
-    for (i = 0; i < ctLen; i += 16) {
-        long long n = ctLen - i < 16 ? ctLen - i : 16;
-        int j;
-        memset(block, 0, 16);
-        memcpy(block, ct + i, (size_t)n);
-        for (j = 0; j < 16; j++) y[j] ^= block[j];
-        kml_ghash_mul(y, h);
-    }
-    {
-        unsigned long long ab = (unsigned long long)aadLen * 8;
-        unsigned long long cb = (unsigned long long)ctLen * 8;
-        int j;
-        for (j = 0; j < 8; j++) block[j] = (unsigned char)(ab >> (56 - 8 * j));
-        for (j = 0; j < 8; j++) block[8 + j] = (unsigned char)(cb >> (56 - 8 * j));
-        for (j = 0; j < 16; j++) y[j] ^= block[j];
-        kml_ghash_mul(y, h);
-    }
-    memcpy(out, y, 16);
-}
-
-static long long kml_aes_ecb_block(const unsigned char *key, long long keyLen,
-                                   const unsigned char in[16],
-                                   unsigned char out[16]) {
-    size_t moved = 0;
-    CCCryptorStatus st = CCCrypt(kCCEncrypt, kCCAlgorithmAES,
-                                 kCCOptionECBMode, key, (size_t)keyLen, NULL,
-                                 in, 16, out, 16, &moved);
-    return (st == kCCSuccess && moved == 16) ? 0 : -1;
-}
-
 static void kml_inc32(unsigned char ctr[16]) {
     int j;
     for (j = 15; j >= 12; j--) {
         if (++ctr[j] != 0) break;
     }
-}
-
-long long __kml_crypto_aes_gcm(long long encrypt, const unsigned char *key,
-                               long long keyLen, const unsigned char *iv,
-                               long long ivLen, const unsigned char *aad,
-                               long long aadLen, long long tagBits,
-                               const unsigned char *in, long long inLen,
-                               unsigned char **out, long long *outLen) {
-    unsigned char h[16] = {0}, zero[16] = {0}, j0[16], ctr[16], ektj0[16];
-    unsigned char tag[16];
-    unsigned char *buf = NULL;
-    long long tagBytes = tagBits / 8;
-    long long ctLen, rc = -1;
-    const unsigned char *ct;
-    CCCryptorRef cryptor = NULL;
-    size_t moved = 0;
-    int j;
-
-    if (keyLen != 16 && keyLen != 24 && keyLen != 32) return -2;
-    if (tagBytes < 4 || tagBytes > 16) return -1;
-    if (!encrypt && inLen < tagBytes) return -1;
-    if (kml_aes_ecb_block(key, keyLen, zero, h) != 0) return -1;
-
-    if (ivLen == 12) {
-        memcpy(j0, iv, 12);
-        j0[12] = j0[13] = j0[14] = 0;
-        j0[15] = 1;
-    } else {
-        kml_ghash(h, NULL, 0, iv, ivLen, j0);
-    }
-
-    ctLen = encrypt ? inLen : inLen - tagBytes;
-    buf = (unsigned char *)malloc((size_t)(encrypt ? inLen + tagBytes : ctLen) + 1);
-    if (!buf) return -1;
-
-    memcpy(ctr, j0, 16);
-    kml_inc32(ctr);
-    if (CCCryptorCreateWithMode(kCCEncrypt, kCCModeCTR, kCCAlgorithmAES,
-                                ccNoPadding, ctr, key, (size_t)keyLen, NULL, 0,
-                                0, kCCModeOptionCTR_BE,
-                                &cryptor) != kCCSuccess) {
-        free(buf);
-        return -1;
-    }
-    if (CCCryptorUpdate(cryptor, in, (size_t)ctLen, buf, (size_t)ctLen + 1,
-                        &moved) != kCCSuccess ||
-        (long long)moved != ctLen) {
-        CCCryptorRelease(cryptor);
-        free(buf);
-        return -1;
-    }
-    CCCryptorRelease(cryptor);
-
-    ct = encrypt ? buf : in;
-    kml_ghash(h, aad, aadLen, ct, ctLen, tag);
-    if (kml_aes_ecb_block(key, keyLen, j0, ektj0) != 0) {
-        free(buf);
-        return -1;
-    }
-    for (j = 0; j < 16; j++) tag[j] ^= ektj0[j];
-
-    if (encrypt) {
-        memcpy(buf + ctLen, tag, (size_t)tagBytes);
-        *out = buf;
-        *outLen = ctLen + tagBytes;
-        rc = 0;
-    } else {
-        if (__kml_crypto_memeq(tag, in + ctLen, tagBytes) == 1) {
-            *out = buf;
-            *outLen = ctLen;
-            rc = 0;
-        } else {
-            free(buf);
-            rc = -1;
-        }
-    }
-    return rc;
 }
 
 /* ---- node:crypto natives (lib/node/crypto.ts) ---------------------------------
@@ -1608,6 +688,7 @@ static const char *kncc_cipher_list =
  * version number, and there is no OpenSSL here. */
 char *__kml_native_crypto_names(double which) {
     if (which == 2) return kncc_str("0");
+    if (which == 3) return kncc_str("prime256v1,secp384r1,secp521r1"); /* SecKey's curves */
     return kncc_str(which == 0 ? kncc_hash_list : kncc_cipher_list);
 }
 
@@ -3035,8 +2116,14 @@ static CFDataRef kncc_sig_input(const kncc_key *k, const char *digest, void *dat
 }
 
 double __kml_native_crypto_sign(const char *digest, const char *pem, void *pass, long long passLen, double hasPass,
+                                double padding, double saltLength, double dsaEncoding,
                                 void *data, long long len, void *out, long long outLen) {
     kncc_key k;
+    /* SecKey has no padding, salt length or P1363 choice to make. */
+    if (padding >= 0 || saltLength != 1e9 || dsaEncoding != 0) {
+        kncc_set_err(KNCC_E_KEYTYPE);
+        return -1;
+    }
     if (!kncc_parse_key(pem, 1, (const unsigned char *)pass, hasPass != 0 ? passLen : -1, &k)) {
         if (!kncc_err[0]) kncc_set_err(KNCC_E_DECODER);
         return -1;
@@ -3074,8 +2161,13 @@ double __kml_native_crypto_sign(const char *digest, const char *pem, void *pass,
 }
 
 double __kml_native_crypto_verify(const char *digest, const char *pem, void *pass, long long passLen, double hasPass,
+                                  double padding, double saltLength, double dsaEncoding,
                                   void *data, long long len, void *sig, long long sigLen) {
     kncc_key k;
+    if (padding >= 0 || saltLength != 1e9 || dsaEncoding != 0) {
+        kncc_set_err(KNCC_E_KEYTYPE);
+        return -1;
+    }
     if (!kncc_parse_key(pem, 0, (const unsigned char *)pass, hasPass != 0 ? passLen : -1, &k)) {
         if (!kncc_err[0]) kncc_set_err(KNCC_E_DECODER);
         return -1;
@@ -3113,4 +2205,61 @@ char *__kml_native_crypto_last_error(void) {
     char *out = kncc_str(kncc_err);
     kncc_err[0] = 0;
     return out;
+}
+
+/* KeyObject's PEM/DER/JWK conversions need OpenSSL's encoders and
+ * decoders: on this backend every one fails, which createPrivateKey,
+ * createPublicKey and export report as an unsupported key. */
+char *__kml_native_crypto_key_parse(void *data, long long len, double format, double type, double wantPriv,
+                                    void *pass, long long passLen, double hasPass) {
+    (void)data; (void)len; (void)format; (void)type; (void)wantPriv; (void)pass; (void)passLen; (void)hasPass;
+    return kncc_str("");
+}
+
+double __kml_native_crypto_key_export(const char *pem, double priv, double format, double type, const char *cipher,
+                                      void *pass, long long passLen, double hasPass, void *out, long long outLen) {
+    (void)pem; (void)priv; (void)format; (void)type; (void)cipher; (void)pass; (void)passLen; (void)hasPass; (void)out; (void)outLen;
+    return -1;
+}
+
+char *__kml_native_crypto_key_info(const char *pem) {
+    (void)pem;
+    return kncc_str("");
+}
+
+char *__kml_native_crypto_key_jwk(const char *pem, double priv) {
+    (void)pem; (void)priv;
+    return kncc_str("!type");
+}
+
+char *__kml_native_crypto_key_from_jwk(double kty, const char *crv, const char *n, const char *e, const char *d,
+                                       const char *p, const char *q, const char *dp, const char *dq, const char *qi,
+                                       const char *x, const char *y, double wantPriv) {
+    (void)kty; (void)crv; (void)n; (void)e; (void)d; (void)p; (void)q; (void)dp; (void)dq; (void)qi; (void)x; (void)y; (void)wantPriv;
+    return kncc_str("");
+}
+
+/* publicEncrypt/privateDecrypt/privateEncrypt/publicDecrypt need padding
+ * and OAEP choices SecKey does not expose: each fails here. */
+double __kml_native_crypto_pkey_crypt(double op, const char *pem, void *pass, long long passLen, double hasPass,
+                                      double padding, const char *oaepHash, void *label, long long labelLen,
+                                      void *data, long long len, void *out, long long outLen) {
+    (void)op; (void)pem; (void)pass; (void)passLen; (void)hasPass; (void)padding; (void)oaepHash;
+    (void)label; (void)labelLen; (void)data; (void)len; (void)out; (void)outLen;
+    kncc_set_err(KNCC_E_KEYTYPE);
+    return -1;
+}
+
+/* ECDH and diffieHellman need EC point arithmetic and key derivation this
+ * backend does not wire: each fails here. */
+double __kml_native_crypto_ecdh(double op, const char *curve, void *priv, long long privLen, void *pub, long long pubLen,
+                                double format, void *out, long long outLen) {
+    (void)op; (void)curve; (void)priv; (void)privLen; (void)pub; (void)pubLen; (void)format; (void)out; (void)outLen;
+    return -8;
+}
+
+double __kml_native_crypto_derive_secret(const char *privPem, const char *pubPem, void *out, long long outLen) {
+    (void)privPem; (void)pubPem; (void)out; (void)outLen;
+    kncc_set_err(KNCC_E_KEYTYPE);
+    return -1;
 }

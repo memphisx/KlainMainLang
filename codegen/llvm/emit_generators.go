@@ -136,13 +136,17 @@ func (e *Emitter) buildGeneratorSig(fd *ast.FunctionDeclaration) (*GeneratorInfo
 		elemTy = inferred
 	}
 	e.generatorBodyCtr++
+	body := fmt.Sprintf("@__generator_body_%s_%d", fd.Name, e.generatorBodyCtr)
+	if e.inLib != "" {
+		body = e.literalSymbol("@__generator_body", fd.GetPos())
+	}
 	return &GeneratorInfo{
 		ParamTypes:   paramTypes,
 		ParamNames:   paramNames,
 		ElemTy:       elemTy,
 		IsAsync:      fd.IsAsync,
 		GenTy:        GeneratorType(elemTy, paramTypes, nil, fd.IsAsync),
-		BodyFuncName: fmt.Sprintf("@__generator_body_%s_%d", fd.Name, e.generatorBodyCtr),
+		BodyFuncName: body,
 	}, nil
 }
 
@@ -159,6 +163,9 @@ func (e *Emitter) buildGeneratorMethodInfo(fd *ast.FunctionDeclaration, classNam
 	base.ThisTy = &classTy
 	base.GenTy = GeneratorType(base.ElemTy, base.ParamTypes, &classTy, base.IsAsync)
 	base.BodyFuncName = fmt.Sprintf("@__generator_method_%s_%s_%d", llvmSafeSymbol(className), llvmSafeSymbol(fd.Name), e.generatorBodyCtr)
+	if e.inLib != "" {
+		base.BodyFuncName = e.literalSymbol("@__generator_method", fd.GetPos())
+	}
 	return base, nil
 }
 
@@ -442,13 +449,13 @@ func (e *Emitter) emitGeneratorConstructValues(info *GeneratorInfo, thisRef stri
 	e.storeGeneratorField(genObj, genTy, GeneratorSentField, "i64", fmt.Sprint(nbUndefined))
 	e.storeGeneratorField(genObj, genTy, GeneratorResumeModeField, "i64", "0")
 	e.storeGeneratorField(genObj, genTy, GeneratorThrownField, "ptr", "null")
-	// This generator's own isolated jmpbuf stack (16 frames * 512 bytes, matching
-	// a coroutine task's), so its body's try-frames never interleave on the shared
+	// This generator's own isolated jmpbuf stack (jmpstack.c, as a coroutine
+	// task's), so its body's try-frames never interleave on the shared
 	// global stack with the caller's own trys while the two fibers alternate
 	// (TDD-00086). __jmpTop tracks its top across suspension; __genError carries an
 	// uncaught body throw back to the caller.
 	jmpStk := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", jmpStk, 16*512))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_jmp_stack_new()", jmpStk))
 	e.storeGeneratorField(genObj, genTy, GeneratorJmpStkField, "ptr", jmpStk)
 	e.storeGeneratorField(genObj, genTy, GeneratorJmpTopField, "i64", "0")
 	e.storeGeneratorField(genObj, genTy, GeneratorGenErrorField, "ptr", "null")
@@ -1675,11 +1682,9 @@ func (e *Emitter) emitAsyncGenRejectPromise(q, errPtr string) {
 	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", errBits, errPtr))
 	// errPtr is an errorObj — carry it as a caught Error (tag kmlTagError) so a
 	// .then/.catch reject handler reads its message/name/instanceof (TDD-00207).
-	e.storeRejectReasonI64Tag(q, fmt.Sprintf("%d", kmlTagError), errBits)
-	// Reject through __kml_promise_settle so a parked awaiter (deferred .next())
-	// is woken; a no-op drain in the synchronous no-waiter case.
-	e.ensurePromiseSettle()
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 2)", q))
+	// Settling wakes a parked awaiter (a deferred .next()); a no-op drain
+	// in the synchronous no-waiter case.
+	e.emitRejectPromise(q, fmt.Sprintf("%d", kmlTagError), false, errBits)
 }
 
 // emitAsyncGenSwapAndSettle runs a suspended async generator one resume step
@@ -2021,8 +2026,9 @@ func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 	if name, ok := e.asyncGenStepFns[key]; ok {
 		return name
 	}
-	e.asyncGenStepCtr++
-	name := fmt.Sprintf("@__kml_agen_step_%d", e.asyncGenStepCtr)
+	// Named by its key (the generator's layout, which decides the body): it
+	// re-enqueues itself, so its body names it.
+	name := contentSymbol("@__kml_agen_step.", key)
 	e.asyncGenStepFns[key] = name
 	elemTy := *genTy.GeneratorElemType
 	resultTy := genNextResultType(elemTy)
@@ -2132,7 +2138,7 @@ func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 	e.emitLabel(retL)
 	e.emitInstr("ret void")
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%env) {\nentry:\n", name))
+	e.functions.WriteString(fmt.Sprintf("\ndefine linkonce_odr hidden void %s(ptr %%env) {\nentry:\n", name))
 	e.functions.WriteString(e.allocas.String())
 	e.functions.WriteString(e.body.String())
 	e.functions.WriteString("}\n")
@@ -3337,8 +3343,9 @@ func (e *Emitter) emitGeneratorUserCall(mem *ast.MemberExpression, genTy Type, a
 	case "throw":
 		res, err = e.emitGeneratorThrow(recv, genTy, args, pos)
 	default:
-		if len(args) > 0 {
-			// `.return(v)` completes with v.
+		if len(args) > 0 && !isUndefinedLiteral(e, args[0]) {
+			// `.return(v)` completes with v; `.return(undefined)` is
+			// `.return()`.
 			e.storeGeneratorField(genVal.Ref, genTy, GeneratorHasRetField, "i1", "1")
 		}
 		res, err = e.emitGeneratorReturnMethod(recv, genTy, args, pos)

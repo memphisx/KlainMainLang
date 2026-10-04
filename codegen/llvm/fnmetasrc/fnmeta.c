@@ -2,7 +2,7 @@
  *
  * A function value is a closure header {fnptr, env} (static ABI) or a boxed
  * dynamic record {fnptr, env, arity} (tag 12, dyn ABI). Its name, length and
- * kind live in a table the compiler emits once per program, keyed by the
+ * kind live in rows each compiled unit registers (unitreg.c), keyed by the
  * code pointer (fnmeta.go). An unregistered code pointer is an anonymous
  * plain function — every runtime-internal callable (a promise resolver, a
  * stream callback) lands there, which is how Node renders those too. */
@@ -13,14 +13,14 @@
 #include <string.h>
 
 typedef struct {
-    void *fn;
+    void *fn; /* the row's key, as unitreg.c's i64 */
     const char *name;
     long long length;
     long long kind;
 } KmlFnMeta;
 
-extern const KmlFnMeta __kml_fnmeta_tab[];
-extern const long long __kml_fnmeta_count;
+extern const void *__kml_unit_find(long long kind, long long id);
+#define KML_UNIT_FNMETA 4
 
 enum {
     FN_PLAIN = 0,
@@ -39,17 +39,52 @@ enum {
  * { fnptr, env, arity | FN_EXT, char *name, void *props }. */
 #define FN_EXT (1LL << 62)
 
-/* Renders an own-property bag at `depth` ("" when empty) — defined by the
- * compiler at finalize (the real inspector when dynjson.c is linked). */
-extern char *__kml_fn_props_inspect(void *props, long long depth);
+/* Dynamic-object runtime (dynobjsrc/dynobj.c), always linked with this file. */
+extern long long __kml_dynobj_find(void *o, const char *key);
+extern void __kml_dynobj_set(void *o, const char *key, long long v);
+extern long long __kml_dynobj_rawtag_at(void *o, long long i);
+extern long long __kml_dynobj_rawpay_at(void *o, long long i);
+extern void __kml_dynobj_patch(void *o, long long i, long long tag, long long pay, long long attrs);
+
+/* Renders an own-property bag at `depth` ("" when empty). A program without
+ * dynjson.c (KML_FN_DYNJSON unset) has no function that can carry properties. */
+#ifdef KML_FN_DYNJSON
+extern char *__kml_dynobj_inspect_at(char *o, long long depth);
+#endif
+static struct { long long len; char z[8]; } fn_empty_str;
+static char *__kml_fn_props_inspect(void *props, long long depth) {
+#ifdef KML_FN_DYNJSON
+    if (*(long long *)((char *)props + 24) != 0) return __kml_dynobj_inspect_at((char *)props, depth);
+#else
+    (void)props; (void)depth;
+#endif
+    return fn_empty_str.z;
+}
+
+char *__kml_fn_name_dyn(void **rec);
+long long __kml_fn_length_dyn(void **rec);
+
+/* A function's new property bag starts with its own `length` and `name`, as
+ * Node's function has them: not writable, not enumerable, but configurable.
+ * Passed to __kml_fn_props_dyn_make by the compiler. KML_NB_DOUBLE_OFFSET and
+ * KML_DYN_ATTR_CONFIGURABLE come from fnmeta.go. */
+void __kml_fn_bag_seed(void *bag, void **rec) {
+    double len = (double)__kml_fn_length_dyn(rec);
+    long long lenbits;
+    memcpy(&lenbits, &len, 8);
+    __kml_dynobj_set(bag, "length", lenbits + KML_NB_DOUBLE_OFFSET);
+    long long li = __kml_dynobj_find(bag, "length");
+    __kml_dynobj_patch(bag, li, __kml_dynobj_rawtag_at(bag, li), __kml_dynobj_rawpay_at(bag, li), KML_DYN_ATTR_CONFIGURABLE);
+    __kml_dynobj_set(bag, "name", (long long)(uintptr_t)__kml_fn_name_dyn(rec));
+    long long ni = __kml_dynobj_find(bag, "name");
+    __kml_dynobj_patch(bag, ni, __kml_dynobj_rawtag_at(bag, ni), __kml_dynobj_rawpay_at(bag, ni), KML_DYN_ATTR_CONFIGURABLE);
+}
 
 /* Nested bind/adapter chains are short; the bound bounds a malformed cycle. */
 #define FN_MAX_DEPTH 64
 
 static const KmlFnMeta *fn_find(void *fn) {
-    for (long long i = 0; i < __kml_fnmeta_count; i++)
-        if (__kml_fnmeta_tab[i].fn == fn) return &__kml_fnmeta_tab[i];
-    return NULL;
+    return fn ? (const KmlFnMeta *)__kml_unit_find(KML_UNIT_FNMETA, (long long)(intptr_t)fn) : NULL;
 }
 
 /* Resolved view of one function value. */

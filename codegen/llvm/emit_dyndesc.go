@@ -36,6 +36,12 @@ func (e *Emitter) emitDynOwnBag(arg ast.Expression, what string, fn bool, pos as
 	if err != nil {
 		return "", Value{}, err
 	}
+	return e.emitDynOwnBagOf(v, what, fn, pos)
+}
+
+// emitDynOwnBagOf is emitDynOwnBag of an already-emitted value.
+func (e *Emitter) emitDynOwnBagOf(v Value, what string, fn bool, pos ast.Pos) (string, Value, error) {
+	var err error
 	if fn && !v.Ty.IsDynamic && v.Ty.IsFunc {
 		if v, err = e.emitBoxValue(v); err != nil {
 			return "", Value{}, err
@@ -114,9 +120,14 @@ func (e *Emitter) emitObjectDefineProperty(args []ast.Expression, pos ast.Pos) (
 	}
 	e.ensureDynObj()
 	e.ensureAnyOps()
-	bag, obj, err := e.emitDynOwnBag(args[0], "Object.defineProperty", true, pos)
+	target, err := e.emitExprWithObjectHint(args[0], TypeAny)
 	if err != nil {
 		return Value{}, err
+	}
+	if !target.Ty.IsDynamic && (target.Ty.IsError || target.Ty.IsFunc) {
+		if target, err = e.emitBoxValue(target); err != nil {
+			return Value{}, err
+		}
 	}
 	keyRef, err := e.dynAnyKeyRef(args[1], pos)
 	if err != nil {
@@ -126,7 +137,53 @@ func (e *Emitter) emitObjectDefineProperty(args []ast.Expression, pos ast.Pos) (
 	if err != nil {
 		return Value{}, err
 	}
+	// An Error's properties are its fields and its extra bag: the
+	// descriptor's value is stored as an assignment stores it.
+	errL, bagL, doneL := e.freshLabel("defprop.err"), e.freshLabel("defprop.bag"), e.freshLabel("defprop.done")
+	if target.Ty.IsDynamic {
+		tag, payload := e.emitUnboxTagPayload(target)
+		objL := e.freshLabel("defprop.obj")
+		isObj := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, objL, bagL))
+		e.emitLabel(objL)
+		errPtr, isErr := e.emitBoxedErrorProbe(payload) // a boxed Error (field-0 flag)
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isErr, errL, bagL))
+		e.emitLabel(errL)
+		// Whether the key was its own enumerable property before the store:
+		// the descriptor's omitted `enumerable` keeps that.
+		e.emitErrorOwnKeysHooks()
+		e.declareFn("__kml_error_key_enumerable", "declare i64 @__kml_error_key_enumerable(ptr, ptr)")
+		e.declareFn("__kml_error_define_enum", "declare void @__kml_error_define_enum(ptr, ptr, i64, ptr)")
+		was := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_error_key_enumerable(ptr %s, ptr %s)", was, errPtr, keyRef))
+		v := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get(ptr %s, ptr %s)", v, descBag, e.internString("value")))
+		set := func() (Value, error) {
+			return e.emitDynAnyMemberSet(target, keyRef, Value{Ref: v, Ty: TypeAny}, pos)
+		}
+		if lit, ok := args[1].(*ast.StringLiteral); ok {
+			// A named key reaches the error's own field (`cause`, `code`).
+			set = func() (Value, error) {
+				return e.emitDynAnyMemberSetNamed(target, keyRef, lit.Value, Value{Ref: v, Ty: TypeAny}, pos)
+			}
+		}
+		if _, err := set(); err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("call void @__kml_error_define_enum(ptr %s, ptr %s, i64 %s, ptr %s)", errPtr, keyRef, was, descBag))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(bagL)
+	}
+	bag, obj, err := e.emitDynOwnBagOf(target, "Object.defineProperty", true, pos)
+	if err != nil {
+		return Value{}, err
+	}
 	e.emitDefinePropertyOn(bag, keyRef, descBag)
+	if target.Ty.IsDynamic {
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+	}
 	return obj, nil
 }
 
@@ -343,9 +400,15 @@ func (e *Emitter) emitObjectGetOwnPropertyDescriptor(args []ast.Expression, pos 
 		return Value{}, fmt.Errorf("%d:%d: Object.getOwnPropertyDescriptor takes 2 arguments", pos.Line, pos.Col)
 	}
 	e.ensureDynObj()
-	bag, _, err := e.emitDynOwnBag(args[0], "Object.getOwnPropertyDescriptor", true, pos)
+	v, err := e.emitExprWithObjectHint(args[0], TypeAny)
 	if err != nil {
 		return Value{}, err
+	}
+	if !v.Ty.IsDynamic && (v.Ty.IsObject || v.Ty.IsClass) && !v.Ty.IsDynamicObject {
+		// A static object or class instance: its layout answers.
+		if v, err = e.emitBoxValue(v); err != nil {
+			return Value{}, err
+		}
 	}
 	keyRef, err := e.dynAnyKeyRef(args[1], pos)
 	if err != nil {
@@ -354,12 +417,28 @@ func (e *Emitter) emitObjectGetOwnPropertyDescriptor(args []ast.Expression, pos 
 	resPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", resPtr))
 	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, resPtr))
+	doneL := e.freshLabel("gopd.done")
+	if v.Ty.IsDynamic {
+		// A boxed static object reads its own field through its layout.
+		e.ensureShapeDesc()
+		tag, payload := e.emitUnboxTagPayload(v)
+		staticL, dynL := e.emitTagCheck(tag, kmlTagObject, "gopd.static")
+		e.emitLabel(staticL)
+		sd := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_shape_own_desc(ptr %s, ptr %s)", sd, e.emitIntToPtr(payload), keyRef))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sd, resPtr))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(dynL)
+	}
+	bag, _, err := e.emitDynOwnBagOf(v, "Object.getOwnPropertyDescriptor", true, pos)
+	if err != nil {
+		return Value{}, err
+	}
 	idx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_find(ptr %s, ptr %s)", idx, bag, keyRef))
 	found := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", found, idx))
 	buildL := e.freshLabel("gopd.build")
-	doneL := e.freshLabel("gopd.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", found, buildL, doneL))
 
 	e.emitLabel(buildL)
@@ -436,13 +515,42 @@ func (e *Emitter) emitObjectGetOwnPropertyNames(args []ast.Expression, pos ast.P
 		return Value{}, fmt.Errorf("%d:%d: Object.getOwnPropertyNames takes 1 argument", pos.Line, pos.Col)
 	}
 	e.ensureDynObj()
-	bag, _, err := e.emitDynOwnBag(args[0], "Object.getOwnPropertyNames", true, pos)
+	v, err := e.emitExprWithObjectHint(args[0], TypeAny)
+	if err != nil {
+		return Value{}, err
+	}
+	if !v.Ty.IsDynamic && (v.Ty.IsObject || v.Ty.IsClass) && !v.Ty.IsDynamicObject {
+		if v, err = e.emitBoxValue(v); err != nil {
+			return Value{}, err
+		}
+	}
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca { ptr, i64 }, align 8", resPtr))
+	doneL := e.freshLabel("gopn.done")
+	if v.Ty.IsDynamic {
+		// A boxed static object: its layout's keys, all enumerable.
+		e.ensureShapeKeysArray()
+		tag, payload := e.emitUnboxTagPayload(v)
+		staticL, dynL := e.emitTagCheck(tag, kmlTagObject, "gopn.static")
+		e.emitLabel(staticL)
+		sk := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_shape_keys_array(ptr %s)", sk, e.emitIntToPtr(payload)))
+		e.emitInstr(fmt.Sprintf("store { ptr, i64 } %s, ptr %s, align 8", sk, resPtr))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(dynL)
+	}
+	bag, _, err := e.emitDynOwnBagOf(v, "Object.getOwnPropertyNames", true, pos)
 	if err != nil {
 		return Value{}, err
 	}
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_dynobj_keys(ptr %s)", r, bag))
-	return Value{Ref: r, Ty: ArrayOf(TypePtr)}, nil
+	e.emitInstr(fmt.Sprintf("store { ptr, i64 } %s, ptr %s, align 8", r, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load { ptr, i64 }, ptr %s, align 8", out, resPtr))
+	return Value{Ref: out, Ty: ArrayOf(TypePtr)}, nil
 }
 
 // emitDynPrevent backs freeze/seal/preventExtensions on a dynamic object;

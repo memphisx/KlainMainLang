@@ -7,8 +7,9 @@ type Config = typeof config;
 const staging: Config = { host: "staging", port: 9090 };
 console.log(staging.port); // 9090
 
-// Inline, on a scalar — the new binding takes the value's type.
-const defaultRetries = 3;
+// Inline, on a scalar — the new binding takes the value's type (`number`
+// for a `let`; a `const` would give the literal type `3`).
+let defaultRetries = 3;
 let retries: typeof defaultRetries = 5;
 console.log(retries); // 5
 

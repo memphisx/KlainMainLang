@@ -11,24 +11,43 @@ import (
 	"fmt"
 )
 
-// emitSymbolConstructor implements the bare (no `new`) Symbol()/Symbol("desc")
-// call. At most one argument, which must be a plain string — no implicit
-// stringification of a non-string description, matching this compiler's
-// general "clean compile error, not silent coercion" style.
+// emitSymbolConstructor implements the bare (no `new`) Symbol()/Symbol(desc)
+// call. A description other than undefined is ToString'd (`Symbol(42)` is
+// described "42"); an absent or undefined one leaves the description
+// undefined (a null pointer), which toString renders as `Symbol()`.
 func (e *Emitter) emitSymbolConstructor(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) > 1 {
 		return Value{}, fmt.Errorf("%d:%d: Symbol() takes at most 1 argument (an optional description)", pos.Line, pos.Col)
 	}
-	descPtr := e.internString("")
+	descPtr := "null"
 	if len(args) == 1 {
-		val, err := e.emitExpr(args[0])
-		if err != nil {
-			return Value{}, err
+		if nl, ok := args[0].(*ast.NullLiteral); !ok || !nl.IsUndefined {
+			val, err := e.emitExpr(args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			switch {
+			case val.Ty.IsDynamic:
+				// undefined stays no description; anything else is ToString'd.
+				undef := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", undef, e.coerce(val, TypeAny).Ref, nbUndefined))
+				str, err := e.emitDynamicToString(e.coerce(val, TypeAny))
+				if err != nil {
+					return Value{}, err
+				}
+				r := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", r, undef, str.Ref))
+				descPtr = r
+			case val.Ty.IR == "ptr" && !val.Ty.IsObject && !val.Ty.IsArray && !val.Ty.IsFunc && !val.Ty.IsSymbol:
+				descPtr = val.Ref // a string (null when `string | undefined` is undefined)
+			default:
+				str, err := e.emitValueToString(val)
+				if err != nil {
+					return Value{}, err
+				}
+				descPtr = str.Ref
+			}
 		}
-		if val.Ty.IR != "ptr" || val.Ty.IsObject || val.Ty.IsArray || val.Ty.IsFunc || val.Ty.IsSymbol {
-			return Value{}, fmt.Errorf("%d:%d: Symbol()'s description must be a string", pos.Line, pos.Col)
-		}
-		descPtr = val.Ref
 	}
 
 	ty := SymbolType()
@@ -80,7 +99,10 @@ func (e *Emitter) emitSymbolToString(val Value) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", descReg, fieldTy.IR, gepReg, fieldTy.Align()))
 
 	prefix := Value{Ref: e.internString("Symbol("), Ty: TypePtr}
-	descVal := Value{Ref: descReg, Ty: TypePtr}
+	none, shown := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", none, descReg))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", shown, none, e.internString(""), descReg))
+	descVal := Value{Ref: shown, Ty: TypePtr}
 	suffix := Value{Ref: e.internString(")"), Ty: TypePtr}
 	acc, err := e.emitStringConcat(prefix, descVal)
 	if err != nil {

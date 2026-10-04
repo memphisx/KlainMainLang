@@ -66,8 +66,10 @@ console.log(String.raw`C:\path\to\file`);  // C:\path\to\file
 const port = 8080;
 console.log(String.raw`http://localhost:${port}\api`);  // http://localhost:8080\api
 
-// --- Scope note (see docs/tdd/TDD-00059.md): a user-defined tag function
-// can't read the `strings` array's `.raw` property yet — this compiler's
-// arrays are fixed-shape with no room for an extra property; only the
-// built-in `String.raw` tag exposes raw text (via a dedicated codegen path,
-// ADR-00562).
+// --- A tag reads the raw text too, as `strings.raw`; String.raw is also an
+// ordinary function over any { raw } object.
+function rawTag(strings: TemplateStringsArray, ...values: number[]): string {
+  return strings.raw.join("|") + " / " + values.join(",");
+}
+console.log(rawTag`line\n${1}tab\t${2}`);          // line\n|tab\t| / 1,2
+console.log(String.raw({ raw: ["x", "y", "z"] }, 1, 2)); // x1y2z

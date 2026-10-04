@@ -378,3 +378,54 @@ char *__kml_inspect_hex(const unsigned char *p, long long n) {
     sb_put(&b, ">", 1);
     return sb_finish(&b);
 }
+
+// __kml_inspect_tagged returns `name [tag] rest` when the instance's
+// Symbol.toStringTag (tag, null when absent) is a non-empty string its
+// constructor's name does not contain, else `name rest` — util.inspect's
+// prefix.
+// A null rest gives the past-depth placeholder, `[name [tag]]` / `[name]`.
+char *__kml_inspect_tagged(const char *name, const char *tag, const char *rest) {
+    int placeholder = rest == NULL;
+    if (placeholder) rest = "";
+    size_t nl = strlen(name), rl = strlen(rest);
+    int show = tag && *tag && !strstr(name, tag);
+    size_t tl = show ? strlen(tag) : 0;
+    char *out = str_alloc((long long)(nl + rl + (show ? tl + 3 : 0) + 1 + placeholder));
+    char *p = out;
+    if (placeholder) *p++ = '[';
+    memcpy(p, name, nl); p += nl;
+    if (show) {
+        *p++ = ' ';
+        *p++ = '[';
+        memcpy(p, tag, tl); p += tl;
+        *p++ = ']';
+    }
+    if (placeholder) *p++ = ']';
+    else *p++ = ' ';
+    memcpy(p, rest, rl); p += rl;
+    *p = 0;
+    return out;
+}
+
+/* __kml_inspect_reindent indents every line after the first of a custom
+   `[inspect.custom]` string by the enclosing indentation, as util.inspect's
+   formatValue does (`ret.replaceAll('\n', '\n' + ' '.repeat(indentationLvl))`):
+   depth is the nesting level, two spaces each. */
+char *__kml_inspect_reindent(char *s, long long depth) {
+    long long indent = 2 * (depth - __kml_inspect_indent_shift);
+    if (!s || indent <= 0) return s;
+    long long n = *(const long long *)(s - 8), lines = 0;
+    for (long long i = 0; i < n; i++)
+        if (s[i] == '\n') lines++;
+    if (!lines) return s;
+    char *out = str_alloc(n + lines * indent);
+    char *o = out;
+    for (long long i = 0; i < n; i++) {
+        *o++ = s[i];
+        if (s[i] == '\n') {
+            memset(o, ' ', (size_t)indent);
+            o += indent;
+        }
+    }
+    return out;
+}

@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"KlainMainLang/ast"
@@ -120,6 +121,7 @@ func (e *Emitter) ensureFnMeta() {
 	}
 	e.usedFnMeta = true
 	e.ensureStrHeaderRuntime() // fnmeta.c builds its results with __kml_str_from_cstr
+	e.ensureDynObj()           // and a function's property bag with dynobj.c
 	e.emitGlobal("declare ptr @__kml_fn_inspect_hdr(ptr)")
 	e.emitGlobal("declare ptr @__kml_fn_inspect_dyn(ptr, i64)")
 	e.emitGlobal("declare ptr @__kml_fn_name_hdr(ptr)")
@@ -145,78 +147,46 @@ func (e *Emitter) emitFnPropsBag(rec string) string {
 	return bag
 }
 
-// ensureFnBagSeed defines @__kml_fn_bag_seed(bag, rec): a function's new
-// property bag starts with its own `length` and `name`, as Node's function
-// has them — neither writable nor enumerable, but configurable.
+// ensureFnBagSeed declares @__kml_fn_bag_seed(bag, rec) (fnmeta.c): a
+// function's new property bag starts with its own `length` and `name`.
 func (e *Emitter) ensureFnBagSeed() {
 	if e.fnDecls["__kml_fn_bag_seed"] {
 		return
 	}
 	e.fnDecls["__kml_fn_bag_seed"] = true
-	e.functions.WriteString(fmt.Sprintf(`
-define void @__kml_fn_bag_seed(ptr %%bag, ptr %%rec) {
-entry:
-  %%len = call i64 @__kml_fn_length_dyn(ptr %%rec)
-  %%lend = sitofp i64 %%len to double
-  %%lenb = bitcast double %%lend to i64
-  %%lenbox = add i64 %%lenb, %d
-  call void @__kml_dynobj_set(ptr %%bag, ptr %s, i64 %%lenbox)
-  %%li = call i64 @__kml_dynobj_find(ptr %%bag, ptr %s)
-  %%lt = call i64 @__kml_dynobj_rawtag_at(ptr %%bag, i64 %%li)
-  %%lp = call i64 @__kml_dynobj_rawpay_at(ptr %%bag, i64 %%li)
-  call void @__kml_dynobj_patch(ptr %%bag, i64 %%li, i64 %%lt, i64 %%lp, i64 %d)
-  %%nm = call ptr @__kml_fn_name_dyn(ptr %%rec)
-  %%nmbox = ptrtoint ptr %%nm to i64
-  call void @__kml_dynobj_set(ptr %%bag, ptr %s, i64 %%nmbox)
-  %%ni = call i64 @__kml_dynobj_find(ptr %%bag, ptr %s)
-  %%nt = call i64 @__kml_dynobj_rawtag_at(ptr %%bag, i64 %%ni)
-  %%np = call i64 @__kml_dynobj_rawpay_at(ptr %%bag, i64 %%ni)
-  call void @__kml_dynobj_patch(ptr %%bag, i64 %%ni, i64 %%nt, i64 %%np, i64 %d)
-  ret void
+	e.emitGlobal("declare void @__kml_fn_bag_seed(ptr, ptr)")
 }
-`, nbDoubleOffset, e.internString("length"), e.internString("length"), dynAttrConfigurable, e.internString("name"), e.internString("name"), dynAttrConfigurable))
+
+// FnMetaCFlags passes the NaN-box double offset and the configurable
+// attribute bit fnmeta.c's bag seed uses, and selects the object inspector
+// when dynjson.c is linked.
+func (e *Emitter) FnMetaCFlags() []string {
+	f := []string{
+		"-DKML_NB_DOUBLE_OFFSET=" + strconv.FormatInt(nbDoubleOffset, 10) + "LL",
+		"-DKML_DYN_ATTR_CONFIGURABLE=" + strconv.Itoa(dynAttrConfigurable),
+	}
+	if e.UsesDynJSON() {
+		f = append(f, "-DKML_FN_DYNJSON")
+	}
+	return f
 }
 
 // UsesFnMeta reports whether fnmeta.c must be linked.
 func (e *Emitter) UsesFnMeta() bool { return e.usedFnMeta }
 
-// emitFnMetaFinalize emits the code-pointer → metadata table fnmeta.c scans.
+// emitFnMetaFinalize registers the code-pointer → metadata rows fnmeta.c
+// looks up.
 // Only a program that reached ensureFnMeta pays for it.
 func (e *Emitter) emitFnMetaFinalize() {
 	if !e.usedFnMeta {
 		return
 	}
-	var rows []string
+	// Registered rows keyed by the code pointer (unitreg.go); fnmeta.c
+	// finds a function's row there. The registry links even with no rows.
+	e.ensureUnitReg()
 	for _, m := range e.fnMetas {
-		rows = append(rows, fmt.Sprintf("{ ptr, ptr, i64, i64 } { ptr %s, ptr %s, i64 %d, i64 %d }",
+		e.addUnitRowLit(unitKindFnMeta, "{ i64, ptr, i64, i64 }", fmt.Sprintf("{ i64 ptrtoint (ptr %s to i64), ptr %s, i64 %d, i64 %d }",
 			m.sym, e.internString(m.name), m.length, m.kind))
-	}
-	e.emitGlobal(fmt.Sprintf("@__kml_fnmeta_tab = constant [%d x { ptr, ptr, i64, i64 }] [%s]",
-		len(rows), strings.Join(rows, ", ")))
-	e.emitGlobal(fmt.Sprintf("@__kml_fnmeta_count = constant i64 %d", len(rows)))
-	// A function object's own-property bag renders through dynjson.c's
-	// object inspector — linked only when the program uses it; otherwise no
-	// function can carry properties and the hook renders nothing.
-	if e.UsesDynJSON() {
-		e.emitGlobal(`
-define ptr @__kml_fn_props_inspect(ptr %props, i64 %depth) {
-entry:
-  %n = getelementptr i8, ptr %props, i64 24
-  %cnt = load i64, ptr %n, align 8
-  %empty = icmp eq i64 %cnt, 0
-  br i1 %empty, label %none, label %some
-some:
-  %s = call ptr @__kml_dynobj_inspect_at(ptr %props, i64 %depth)
-  ret ptr %s
-none:
-  ret ptr ` + e.internString("") + `
-}`)
-	} else {
-		e.emitGlobal(`
-define ptr @__kml_fn_props_inspect(ptr %props, i64 %depth) {
-entry:
-  ret ptr ` + e.internString("") + `
-}`)
 	}
 }
 

@@ -214,6 +214,21 @@ func (e *Emitter) jsCollectFuncParamTypes(prog *ast.Program) error {
 			}
 			addSlot(name, i, t, a.GetPos())
 		}
+		// A call that leaves a parameter out passes undefined there, which no
+		// concrete type holds: the parameter is polymorphic.
+		if fd := fnDecls[name]; fd != nil && !hasSpreadArg(args) {
+			for i := len(args); i < len(fd.Params); i++ {
+				if p := fd.Params[i]; p.Rest || p.Default != nil || p.Optional {
+					continue
+				}
+				slots := e.jsFuncParamTy[name]
+				for len(slots) <= i {
+					slots = append(slots, jsParamSlot{})
+				}
+				slots[i].conflict = true
+				e.jsFuncParamTy[name] = slots
+			}
+		}
 		return nil
 	}
 	if err := e.jsWalkProgram(prog, nil, recordCall); err != nil {
@@ -649,4 +664,13 @@ func (e *Emitter) jsInferConstructorFields(cd *ast.ClassDeclaration, seen map[st
 		return nil, err
 	}
 	return fields, nil
+}
+
+func hasSpreadArg(args []ast.Expression) bool {
+	for _, a := range args {
+		if _, ok := a.(*ast.SpreadElement); ok {
+			return true
+		}
+	}
+	return false
 }

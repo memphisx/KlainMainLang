@@ -23,12 +23,12 @@ Format: [Status page format](README.md#status-page-format). ✅ = the built-in w
 | `WeakMap` / `WeakSet` / `WeakRef` (real weak semantics under `-mm=gc`) | ✅ | | • → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
 | `JSON` (`stringify`/`parse`, dynamic + typed trees, `toJSON`) | ✅ | | • → [JSON](JSON.md) |
 | `RegExp` (literal + ctor, `exec`/`test`/`match`/`matchAll`/`replace`/`replaceAll`/`split`/`search`) — PCRE2-backed | ✅ | | • → [RegExp](REGEXP.md) |
-| `Error` + subtypes (`TypeError`/`RangeError`/`SyntaxError`/`EvalError`/`URIError`/`ReferenceError`/`AggregateError`/`DOMException`), `class X extends Error` (1 level) | ✅ | • The error-options second argument must be a `{ cause: <expr> }` object **literal** — a variable/computed options bag is a clean rejection ([ADR-01007](../adr/ADR-01007.md)); `AggregateError` takes no options (its `.cause` reads `undefined`)<br>• `.stack` is typed a number, not a string (`typeof err.stack` is `'number'`, Node: `'string'`) | • → [Language constructs](LANGUAGE-CONSTRUCTS.md)<br>• `.toString()` / `String(err)` / `` `${err}` `` render `name: message` as in Node. See [ADR-00846](../adr/ADR-00846.md) |
+| `Error` + subtypes (`TypeError`/`RangeError`/`SyntaxError`/`EvalError`/`URIError`/`ReferenceError`/`AggregateError`/`DOMException`), `class X extends Error` | ✅ | • The error-options second argument must be a `{ cause: <expr> }` object **literal** — a variable/computed options bag is a clean rejection ([ADR-01007](../adr/ADR-01007.md)); `AggregateError` takes no options (its `.cause` reads `undefined`)<br>• `.stack` is typed a number, not a string (`typeof err.stack` is `'number'`, Node: `'string'`) | • → [Language constructs](LANGUAGE-CONSTRUCTS.md)<br>• `.toString()` / `String(err)` / `` `${err}` `` render `name: message` as in Node. See [ADR-00846](../adr/ADR-00846.md) |
 | `Symbol` (`Symbol()`/`for`/`keyFor`, `.description`, `typeof`) — opaque unique values | ✅ | | • → [Type system](TYPE-SYSTEM.md)<br>• A Symbol keeps its identity inside an `any` (hidden type-id word): `typeof` → `"symbol"` and narrows, `===`, `.description`, `Symbol(desc)` rendering, and ToNumber (`Number(x)`, a `TypedArray.set` offset, `+x`/`x * 1` under `-compat=js`) throws the spec's `TypeError` ([ADR-01059](../adr/ADR-01059.md)) |
-| `Promise` (`all`/`race`/`allSettled`/`any`/`resolve`/`reject`, executor, `then`/`catch`/`finally`) | ✅ | • `JSON.stringify` of an **error-subclass instance** reason yields `{}` where Node serializes its own enumerable fields (an assigned `this.name`, extra declared fields) — needs per-field enumerability ([TDD-00222](../tdd/TDD-00222.md)). Everything else about a subclass reason is faithful — `.message`/`.name`, `String` (`Name: message`), precise `instanceof`; primitive and built-in-Error reasons fully so ([ADR-01003](../adr/ADR-01003.md)) | • → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
+| `Promise` (`all`/`race`/`allSettled`/`any`/`resolve`/`reject`, executor, `then`/`catch`/`finally`) | ✅ | | • → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | async functions / `await` / async generators / `for await…of` | ✅ | | • → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | Generators (`function*`, `yield`/`yield*`, `.next(value)`) | ✅ | | • → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
-| `globalThis` | ✅ | • `globalThis` exists only inside `typeof globalThis` — used as a value (property access, assignment, identity), it fails compilation with `undefined variable 'globalThis'`. | • → [Global functions](GLOBAL-FUNCTIONS.md) |
+| `globalThis` | ✅ | | • → [Global functions](GLOBAL-FUNCTIONS.md) |
 | Global functions (`isNaN`/`isFinite`/`parseInt`/`parseFloat`/`encodeURI(Component)`/`decodeURI(Component)`/`atob`/`btoa`) | ✅ | | • → [Global functions](GLOBAL-FUNCTIONS.md) |
 | `structuredClone` | ✅ | | • → [Global functions](GLOBAL-FUNCTIONS.md) |
 | `queueMicrotask` | ✅ | | • → [Timers](TIMERS.md) |
@@ -55,19 +55,19 @@ Each compiles and runs for its core case but carries a limitation, mostly driven
 | `Reflect` | ✅ | • missing `construct`; the object methods require a dynamic target → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
 | `Proxy` | ✅ | • only `get`/`set`/`has`/`deleteProperty` traps; dynamic target only → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
 | `Number` | ✅ | • `toString(radix)` non-power-of-two fractional trailing-digit divergence; `toPrecision` fixed/exp threshold differs → [Number & Math](NUMBER-MATH.md) |
-| `Function` `.call`/`.apply`/`.bind` | ✅ | • `thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); `.bind` not over an array/nullable/rest parameter; not on a Node module's functions → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
+| `Function` `.call`/`.apply`/`.bind` | ✅ | • `thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); not on a Node module's functions → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | `Symbol` | ✅ | • Of the well-known symbols the runtime honors `Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive`; `toStringTag`, `hasInstance`, `species` and the rest are values only → [Type system](TYPE-SYSTEM.md) |
 | `RegExp` | ✅ | • `u`/`d` flags **missing** (accepted, not implemented) → [RegExp](REGEXP.md) |
-| `JSON` | ✅ | • a strict-lane literal mixing two object types is rejected; function/array `replacer` rejected; `space` must be literal → [JSON](JSON.md) |
+| `JSON` | ✅ | • a strict-lane literal mixing two object types is rejected → [JSON](JSON.md) |
 | TypedArrays / `ArrayBuffer` | ✅ | • no `.buffer` back-ref; `resize`/`grow` need `{maxByteLength}`; views don't length-track resize → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md) |
 | `TextDecoder` | ✅ | • UTF-8 only; non-UTF-8 labels throw `RangeError` at construction → [Encoding & text](ENCODING-TEXT.md) |
-| `URLSearchParams` / `URLPattern` | ✅ | • `URLSearchParams` keeps one value per key; `URLPattern` is object-init only with a reduced grammar and a merged-`Map` `.exec()` result → [URL](URL.md) |
+| `URLSearchParams` / `URLPattern` | ✅ | • `URLPattern`'s regexp groups follow PCRE2 where ECMAScript differs → [URL](URL.md) |
 | `EventTarget` / `Event` / `AbortSignal` | ✅ | • `AbortSignal` isn't wired into `setTimeout` → [Events & cancellation](EVENTS-CANCELLATION.md) |
-| `crypto.subtle` | ✅ | • literal-only algorithm dispatch; ops throw synchronously rather than rejecting; jwk as `Map<string,string>`; `CryptoKey.algorithm`/`.usages` unimplemented → [Web Crypto](WEB-CRYPTO.md) |
+| `crypto.subtle` | ✅ | • literal-only algorithm dispatch; ops throw synchronously rather than rejecting; `CryptoKey.algorithm`/`.usages` unimplemented → [Web Crypto](WEB-CRYPTO.md) |
 | `Date` | ✅ | • Setters need a named-variable receiver; no locale/`Intl` formatting; `toString`'s zone name covers the common zones only → [Performance timing](PERFORMANCE-TIMING.md) |
 | `performance` | ✅ | • `eventLoopUtilization`/`nodeTiming` missing → [Performance timing](PERFORMANCE-TIMING.md) |
 | `eval` | ✅ | • general/dynamic eval **missing**; only a compile-time-constant `eval("<expression>")` static subset works → [Global functions](GLOBAL-FUNCTIONS.md) |
-| `globalThis` | ✅ | • member access to known globals only; no bare-value use, computed access, or new-global assignment → [Global functions](GLOBAL-FUNCTIONS.md)<br>• `globalThis` exists only inside `typeof globalThis` — used as a value (property access, assignment, identity), it fails compilation with `undefined variable 'globalThis'`. |
+| `globalThis` | ✅ | |
 
 ## Not started (in scope)
 
@@ -77,8 +77,8 @@ Standard built-ins that fit the model and would add value, not yet built.
 |---|---|---|
 | `String.prototype.normalize()` | ❌ | • Deliberately deferred (needs NFC/NFD/NFKC/NFKD tables) → [String methods](STRING-METHODS.md) |
 | `RegExp` `u`/`v`/`d` flag semantics | ❌ | • Accepted but not implemented → [RegExp](REGEXP.md) |
-| `Iterator` / `AsyncIterator` helpers (`Iterator.prototype.map`/`filter`/`take`/`drop`/…) | ❌ | • Array, Map and Set iterators have `toArray()`; the lazy helpers (`map`, `filter`, `take`, `drop`, `flatMap`, `reduce`, `forEach`, `some`, `every`, `find`) and `Iterator.from` are missing |
-| `Reflect.construct` | ❌ | • Explicitly missing → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
+| `Iterator` / `AsyncIterator` helpers (`Iterator.prototype.map`/`filter`/`take`/`drop`/…) | ✅ | • `map`, `filter`, `take`, `drop`, `flatMap` (lazy, closing the source on `return()`), `reduce`, `toArray`, `forEach`, `some`, `every` and `find` on generators and the Array, Map and Set iterators, also through `any`, written in TypeScript ([ADR-01373](../adr/ADR-01373.md)); Node has no `AsyncIterator` helpers |
+| `Reflect.construct` | ✅ | • Through the run-time constructor dispatch ([ADR-01333](../adr/ADR-01333.md)) |
 | Dynamic `eval` (arbitrary strings) | ❌ | • The opt-in embedded JS engine is not started (only the static-subset eval works) → [Global functions](GLOBAL-FUNCTIONS.md) |
 
 ## Out of scope (by the whole-program AOT / no-runtime / fixed-shape model)

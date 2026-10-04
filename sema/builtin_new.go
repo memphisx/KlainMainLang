@@ -19,11 +19,9 @@ var builtinConstructors = map[string]builder{
 	"Set":                 buildSet,
 	"WeakMap":             buildWeakMap,
 	"WeakSet":             buildWeakSet,
-	"WeakRef":             buildWeakRef,
 	"ReadableStream":      buildReadableStream,
 	"WritableStream":      buildWritableStream,
 	"TransformStream":     buildTransformStream,
-	"Agent":               optionsOnly(func(o ast.Expression, p ast.Pos) ast.Expression { return ast.NewNewHTTPAgentExpression(o, p) }),
 	"Webview":             optionsOnly(func(o ast.Expression, p ast.Pos) ast.Expression { return ast.NewNewWebviewExpression(o, p) }),
 	"CompressionStream":   compressionStream(false),
 	"DecompressionStream": compressionStream(true),
@@ -37,20 +35,12 @@ var builtinConstructors = map[string]builder{
 	"DOMException":        buildDOMException,
 	"AggregateError":      buildAggregateError,
 	"Date":                buildDate,
-	"URL":                 buildURL,
-	"URLSearchParams":     optionsOnly(func(o ast.Expression, p ast.Pos) ast.Expression { return ast.NewNewURLSearchParamsExpression(o, p) }),
-	"URLPattern":          buildURLPattern,
-	"Headers":             optionsOnly(func(o ast.Expression, p ast.Pos) ast.Expression { return ast.NewNewHeadersExpression(o, p) }),
 	"Request":             buildRequest,
 	"XMLHttpRequest":      noArgs("XMLHttpRequest", func(p ast.Pos) ast.Expression { return ast.NewNewXMLHttpRequestExpression(p) }),
 	"ArrayBuffer":         arrayBuffer(false),
 	"SharedArrayBuffer":   arrayBuffer(true),
 	"Channel":             buildChannel,
-	"DataView":            buildDataView,
-	"TextEncoder":         noArgs("TextEncoder", func(p ast.Pos) ast.Expression { return ast.NewNewTextEncoderExpression(p) }),
-	"TextDecoder":         optionsOnly(func(o ast.Expression, p ast.Pos) ast.Expression { return ast.NewNewTextDecoderExpression(o, p) }),
 	"RegExp":              buildRegExp,
-	"Blob":                buildBlob,
 }
 
 func init() {
@@ -166,13 +156,6 @@ func buildWeakSet(e *ast.NewExpression) (ast.Expression, error) {
 	return ast.NewNewWeakSetExpression(typeArg(e, 0), e.GetPos()), nil
 }
 
-func buildWeakRef(e *ast.NewExpression) (ast.Expression, error) {
-	if err := arity(e, "WeakRef(target)", 1, 1); err != nil {
-		return nil, err
-	}
-	return ast.NewNewWeakRefExpression(typeArg(e, 0), e.Args[0], e.GetPos()), nil
-}
-
 func buildReadableStream(e *ast.NewExpression) (ast.Expression, error) {
 	if err := arity(e, "ReadableStream(source?, strategy?)", 0, 2); err != nil {
 		return nil, err
@@ -232,6 +215,20 @@ func buildDOMException(e *ast.NewExpression) (ast.Expression, error) {
 	}
 	ne := ast.NewNewErrorExpression("DOMException", arg(e, 0), e.GetPos())
 	ne.Name = arg(e, 1)
+	// `new DOMException(message, { name, cause })`: the options form.
+	if lit, ok := ne.Name.(*ast.ObjectLiteral); ok {
+		ne.Name = nil
+		for _, p := range lit.Properties {
+			switch {
+			case p.KeyExpr != nil || p.Key == "":
+				return nil, errAt(e.GetPos(), "new DOMException options must be a plain { name, cause } object")
+			case p.Key == "name":
+				ne.Name = p.Value
+			case p.Key == "cause":
+				ne.Cause = p.Value
+			}
+		}
+	}
 	return ne, nil
 }
 
@@ -256,16 +253,6 @@ func buildDate(e *ast.NewExpression) (ast.Expression, error) {
 	return ast.NewNewDateExpressionMulti(e.Args, e.GetPos()), nil
 }
 
-func buildURL(e *ast.NewExpression) (ast.Expression, error) {
-	if err := arity(e, "URL(url, base?)", 1, 2); err != nil {
-		return nil, err
-	}
-	if base := arg(e, 1); base != nil {
-		return ast.NewNewURLExpressionWithBase(e.Args[0], base, e.GetPos()), nil
-	}
-	return ast.NewNewURLExpression(e.Args[0], e.GetPos()), nil
-}
-
 // objectProp returns the value of property key in an object-literal argument.
 func objectProp(ex ast.Expression, key string) ast.Expression {
 	obj, ok := ex.(*ast.ObjectLiteral)
@@ -279,13 +266,6 @@ func objectProp(ex ast.Expression, key string) ast.Expression {
 		}
 	}
 	return v
-}
-
-func buildURLPattern(e *ast.NewExpression) (ast.Expression, error) {
-	if len(e.Args) > 1 {
-		return nil, errAt(e.GetPos(), "new URLPattern does not take a baseURL second argument (single object-init form only)")
-	}
-	return ast.NewNewURLPatternExpression(arg(e, 0), e.GetPos()), nil
 }
 
 func buildRequest(e *ast.NewExpression) (ast.Expression, error) {
@@ -321,13 +301,6 @@ func buildChannel(e *ast.NewExpression) (ast.Expression, error) {
 	return ast.NewNewChannelExpression(typeArg(e, 0), arg(e, 0), e.GetPos()), nil
 }
 
-func buildDataView(e *ast.NewExpression) (ast.Expression, error) {
-	if err := arity(e, "DataView(buffer, byteOffset?, byteLength?)", 1, 3); err != nil {
-		return nil, err
-	}
-	return ast.NewNewDataViewExpression(e.Args[0], arg(e, 1), arg(e, 2), e.GetPos()), nil
-}
-
 func buildRegExp(e *ast.NewExpression) (ast.Expression, error) {
 	if err := arity(e, "RegExp(pattern?, flags?)", 0, 2); err != nil {
 		return nil, err
@@ -338,13 +311,6 @@ func buildRegExp(e *ast.NewExpression) (ast.Expression, error) {
 		pattern = ast.NewStringLiteral("(?:)", e.GetPos())
 	}
 	return ast.NewNewRegExpExpression(pattern, arg(e, 1), e.GetPos()), nil
-}
-
-func buildBlob(e *ast.NewExpression) (ast.Expression, error) {
-	if err := arity(e, "Blob(parts?, options?)", 0, 2); err != nil {
-		return nil, err
-	}
-	return ast.NewNewBlobExpression(arg(e, 0), arg(e, 1), e.GetPos()), nil
 }
 
 func typedArray(kind string) builder {

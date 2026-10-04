@@ -33,7 +33,9 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 		if err != nil {
 			return Value{}, err
 		}
-		v = e.coerce(v, elemTy)
+		if v, err = e.coerceChecked(v, elemTy, arg.GetPos(), "concat argument"); err != nil {
+			return Value{}, err
+		}
 		parts = append(parts, concatPart{scalar: &v})
 	}
 	e.ensureMalloc()
@@ -99,6 +101,7 @@ func (e *Emitter) emitArrayReverse(mem *ast.MemberExpression, args []ast.Express
 	if err != nil {
 		return Value{}, err
 	}
+	e.emitArrayGuardFor(mem.Object, arrOpReorder, nil)
 	e.emitReverseInPlace(ptrReg, lenReg, elemTy)
 	r0 := e.freshReg()
 	r1 := e.freshReg()
@@ -181,6 +184,7 @@ func (e *Emitter) emitArrayFill(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
+	e.emitArrayGuardFor(mem.Object, arrOpReorder, nil)
 	fillVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err

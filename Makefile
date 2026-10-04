@@ -3,11 +3,11 @@ GO           := go
 CLANG        := clang
 # The tests/ E2E suite (each case spawns clang + a compiled binary) runs well
 # past Go's default 600s `go test` timeout on a slower box — override it here so
-# a full run doesn't die mid-suite with a timeout panic. Matches test-par's 20m.
-TEST_TIMEOUT ?= 20m
+# a full run doesn't die mid-suite with a timeout panic. test-par uses it as
+# each shard's timeout too.
+TEST_TIMEOUT ?= 45m
 # *_worker.ts files are worker modules loaded via new Worker(...) — they are
 # compiled into their spawning example's binary, not standalone entries.
-EXAMPLES     := $(shell find examples -name '*.ts' ! -name '*_worker.ts' ! -path 'examples/tls/*' ! -path 'examples/webview/*' ! -name 'standard_decorators.ts' | sort)
 # Showcase apps — real applications (the landing-page gallery), not console.log
 # fixtures. Built as distributable single binaries via `make apps` (`--static`),
 # with a self-containment assertion on Windows. Listed by entry source; loadtest
@@ -27,7 +27,7 @@ OPTMEM ?=
 MODEFLAGS := $(if $(MM),-mm=$(MM)) $(if $(OPTMEM),-optimize-memory)
 MODEFLAGS_NOMM := $(if $(OPTMEM),-optimize-memory)
 
-.PHONY: all build dist install test test-par examples apps compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts conformance-wpt shadow-report mode-lanes status status-check status-roundtrip reference-check reference-sync conformance-check conformance-sync coverage-check coverage-sync help
+.PHONY: all build dist install test test-unit test-par test-shard examples drift apps compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts conformance-wpt shadow-report mode-lanes status status-check status-roundtrip reference-check reference-sync conformance-check conformance-sync coverage-check coverage-sync help
 
 ## all: build the compiler
 all: build
@@ -56,43 +56,29 @@ dist:
 install:
 	$(GO) install .
 
-## test: run Go unit tests
+## test: run every package's tests, tests/ included — the command CI runs
 test:
 	$(GO) test -timeout $(TEST_TIMEOUT) ./...
 
-## test-par: run the tests/ suite sharded across SHARDS parallel processes
-## (~1.5-2x faster than serial — the suite is subprocess/IO-bound, not CPU-bound,
-## so 4 shards is the sweet spot; more just thrashes memory/IO). Compiles the test
-## binary once, then runs disjoint name-shards of it concurrently. Any failure is
-## re-run *serially*, so a parallel-unsafe test (signal-disposition timing, a
+## test-unit: every package's tests except the tests/ suite
+test-unit:
+	$(GO) test -timeout $(TEST_TIMEOUT) $$($(GO) list ./... | grep -v '/tests$$')
+
+## test-par: run the tests/ suite sharded across SHARDS parallel processes.
+## tools/testshard compiles the test binary once, deals the tests round-robin
+## into SHARDS shards and runs them concurrently; any failure is re-run
+## *serially*, so a parallel-unsafe test (signal-disposition timing, a
 ## fixed-port server) that only flakes under concurrency doesn't fail the run —
-## only a test that also fails alone does. Serial `make test` stays the source of
-## truth; this is a fast local pre-check.
+## only a test that also fails alone does. The unit packages run first
+## (test-unit), so test-par covers everything `make test` does.
 SHARDS ?= 4
-test-par: build
-	@tb=$$(mktemp -d)/kml_tests.test; sd=$$(mktemp -d); \
-	$(GO) test ./tests/ -c -o "$$tb"; \
-	$(GO) test ./tests/ -list '.*' 2>/dev/null | grep '^Test' | \
-	  awk -v d="$$sd" -v n=$(SHARDS) '{print > (d "/s_" (NR % n) ".txt")}'; \
-	for i in $$(seq 0 $$(($(SHARDS)-1))); do \
-	  rx=$$(paste -sd'|' "$$sd/s_$$i.txt"); \
-	  ( "$$tb" -test.run "^($$rx)$$" -test.timeout 20m >"$$sd/o_$$i.txt" 2>&1; echo $$? >"$$sd/c_$$i.txt" ) & \
-	done; wait; \
-	anyfail=0; fails=""; \
-	for i in $$(seq 0 $$(($(SHARDS)-1))); do \
-	  if [ "$$(cat $$sd/c_$$i.txt)" != "0" ]; then \
-	    anyfail=1; \
-	    n=$$(grep '^--- FAIL' "$$sd/o_$$i.txt" | sed 's/^--- FAIL: //; s/ (.*$$//'); \
-	    if [ -z "$$n" ]; then echo "shard $$i failed with no test-level FAIL (panic/timeout) — full output:"; cat "$$sd/o_$$i.txt"; exit 1; fi; \
-	    fails="$$fails $$n"; \
-	  fi; \
-	done; \
-	if [ "$$anyfail" = "0" ]; then echo "ok  tests (parallel, $(SHARDS) shards)"; \
-	else \
-	  echo "parallel run had failures; re-running serially to rule out concurrency flakes:$$fails"; \
-	  rx=$$(echo $$fails | tr ' ' '|'); \
-	  "$$tb" -test.run "^($$rx)$$" -test.v; \
-	fi
+test-par: build test-unit
+	$(GO) run ./tools/testshard -shards $(SHARDS) -timeout $(TEST_TIMEOUT)
+
+## test-shard: run one shard (SHARD, 0-based) of the tests/ suite dealt into
+## SHARDS — one CI matrix job; the same split test-par runs all of at once
+test-shard: build
+	$(GO) run ./tools/testshard -shard $(SHARD) -shards $(SHARDS) -timeout $(TEST_TIMEOUT)
 
 ## examples: compile every example .ts file and run it
 ## examples/fetch/*.ts and examples/async/promise_all.ts talk to a local
@@ -102,7 +88,8 @@ test-par: build
 # Each example runs under a time limit, so one that hangs fails instead of
 # stalling the whole run (macOS has no `timeout`; SIGALRM ends the program).
 EXAMPLE_TIMEOUT := 300
-RUN_LIMITED = perl -e 'alarm shift; exec @ARGV or exit 127' $(EXAMPLE_TIMEOUT)
+# Concurrent example compiles (tools/runexamples); the runs stay serial.
+EXAMPLES_JOBS ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 
 examples: build
 	@./$(BINARY) -o $(HTTPBIN_LITE) tools/httpbin-lite/httpbin.ts >/dev/null 2>&1
@@ -113,41 +100,14 @@ examples: build
 		curl -s -o /dev/null http://127.0.0.1:$(HTTPBIN_LITE_PORT)/get && break; \
 		sleep 0.1; \
 	done; \
-	ok=0; fail=0; \
-	for f in $(EXAMPLES); do \
-		out=$$(dirname $$f)/$$(basename $$f .ts); \
-		flags="$(MODEFLAGS)"; \
-		case $$f in examples/memory/memory_free.ts|examples/finalization/finalization_registry.ts) flags="$(MODEFLAGS_NOMM)";; esac; \
-		printf '%-50s' "  $$f"; \
-		if ./$(BINARY) $$flags $$f 2>/dev/null && $(RUN_LIMITED) $$out </dev/null 2>/dev/null >/dev/null; then \
-			echo "OK"; ok=$$((ok+1)); \
-		else \
-			echo "FAIL"; fail=$$((fail+1)); \
-		fi; \
-	done; \
-	for f in examples/jsmode/*.js; do \
-		[ -e "$$f" ] || continue; \
-		out=$$(dirname $$f)/$$(basename $$f .js); \
-		printf '%-50s' "  $$f (-compat=js)"; \
-		if ./$(BINARY) $(MODEFLAGS) -compat=js $$f 2>/dev/null && $(RUN_LIMITED) $$out </dev/null 2>/dev/null >/dev/null; then \
-			echo "OK"; ok=$$((ok+1)); \
-		else \
-			echo "FAIL"; fail=$$((fail+1)); \
-		fi; \
-	done; \
-	for f in examples/decorators/standard_decorators.ts; do \
-		[ -e "$$f" ] || continue; \
-		out=$$(dirname $$f)/$$(basename $$f .ts); \
-		printf '%-50s' "  $$f (-decorators=standard)"; \
-		if ./$(BINARY) $(MODEFLAGS) -decorators=standard $$f 2>/dev/null && $(RUN_LIMITED) $$out </dev/null 2>/dev/null >/dev/null; then \
-			echo "OK"; ok=$$((ok+1)); \
-		else \
-			echo "FAIL"; fail=$$((fail+1)); \
-		fi; \
-	done; \
-	echo ""; \
-	echo "Results: $$ok passed, $$fail failed"; \
-	test $$fail -eq 0
+	$(GO) run ./tools/runexamples -bin ./$(BINARY) -j $(EXAMPLES_JOBS) -timeout $(EXAMPLE_TIMEOUT)s -modeflags "$(MODEFLAGS)" -modeflags-nomm "$(MODEFLAGS_NOMM)"
+
+## drift: the builtin library compiles the same in every example and every
+## compile is deterministic (TDD-00238 Stage 4; tools/libdrift)
+drift: build
+	@ex=$$($(GO) run ./tools/runexamples -list); \
+	$(GO) run ./tools/libdrift -bin ./$(BINARY) -fail -top 20 $$ex && \
+	$(GO) run ./tools/libdrift -bin ./$(BINARY) -repeat 2 $$ex
 
 ## apps: build every showcase app (APPS) as a distributable single binary
 ## (--static) and, on Windows, assert it imports no non-system DLL. These are

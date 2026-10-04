@@ -37,10 +37,10 @@ console.log((await mixed.bytes())[0]);
 `, "8\n8\n8 72 63 33\n72")
 }
 
-// Blob.stream() (ADR-00341): a ReadableStream<Uint8Array> over the blob's
-// bytes — one owned-copy chunk, then closed; an empty blob yields no chunk.
+// Blob.stream() (ADR-00341, ADR-01362): a ReadableStream<Uint8Array> over
+// the blob's bytes — one chunk per part, as Node's reader yields them.
 func TestE2EBlobStreamForAwait(t *testing.T) {
-	assertOutput(t, `
+	assertSameAsNode(t, `
 async function run(): Promise<void> {
   const b = new Blob(["Hello, ", "streamed ", "world"]);
   let bytes = 0;
@@ -52,7 +52,7 @@ async function run(): Promise<void> {
   console.log(chunks + " " + bytes);
 }
 run();
-`, "1 21")
+`)
 }
 
 func TestE2EBlobStreamReader(t *testing.T) {
@@ -112,5 +112,22 @@ none.text().then((s) => log.push("none.text " + s.length))
 none.arrayBuffer().then(() => log.push("none.ab"))
 Promise.resolve().then(() => log.push("t1")).then(() => log.push("t2")).then(() => log.push("t3"))
 setTimeout(() => console.log(log.join(" | ")), 10)
+`)
+}
+
+// Blob is the global module's class (ADR-01362): Node's type normalization,
+// `endings`, part flattening, inspect, and its readers' microtask timing.
+func TestE2EBlobGlobalClassParity(t *testing.T) {
+	assertSameAsNode(t, `
+try { new Blob([], { endings: 'x' as any }); } catch (e) { console.log((e as Error).name, (e as any).code, (e as Error).message); }
+new Blob(['a\r\nb\rc\n'], { endings: 'native' }).text().then((t) => console.log(JSON.stringify(t)));
+console.log(new Blob(['X'], { type: 'Text/HTML' }).type, new Blob([], { type: 'é' }).type === '');
+const big = new Blob(['ab', new Blob(['cd', 'ef'])]);
+console.log(big, String(big), big.size, [big]);
+const s = big.slice(-3, -1, 'X/Y');
+s.text().then((t) => console.log('slice', JSON.stringify(t), s.type, s.size));
+big.arrayBuffer().then((a) => console.log('ab', a.byteLength));
+big.bytes().then((u) => console.log('bytes', u.length));
+new Blob(['a\0b', new Uint8Array([0, 99])]).text().then((t) => console.log(t.length, JSON.stringify(t)));
 `)
 }

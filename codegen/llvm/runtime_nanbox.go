@@ -29,6 +29,11 @@ const (
 	nbFalse        = 6
 	nbTrue         = 7
 	nbDoubleOffset = int64(1) << 49
+	// undefF64 is undefined held in a double slot (TDD-00241): a signaling
+	// NaN (quiet bit clear) with the sign bit set, 0xFFF4000000000001.
+	// Copies keep it; arithmetic, negation and fabs change its bits, so
+	// they read NaN. Mirrored as KML_UNDEF_F64 in dtoasrc/dtoa.c.
+	undefF64 = int64(-3377699720527871)
 )
 
 func (e *Emitter) ensureNanBox() {
@@ -38,7 +43,7 @@ func (e *Emitter) ensureNanBox() {
 	e.usedNanBox = true
 	e.emitGlobal(`
 ; pack a logical (tag, payload) pair into a NaN-boxed word.
-define i64 @__kml_nb_pack(i8 %tag, i64 %pay) {
+define weak_odr i64 @__kml_nb_pack(i8 %tag, i64 %pay) {
 entry:
   switch i8 %tag, label %imm [
     i8 0, label %int
@@ -98,7 +103,7 @@ imm:
 }
 
 ; decode a word's logical tag (numbers always answer kmlTagFloat=1).
-define i8 @__kml_nb_tag(i64 %v) {
+define weak_odr i8 @__kml_nb_tag(i64 %v) {
 entry:
   %isnum = icmp uge i64 %v, 562949953421312
   br i1 %isnum, label %num, label %notnum
@@ -151,7 +156,7 @@ tdynfn:
 }
 
 ; decode a word's logical payload (double bits / masked pointer / 0|1).
-define i64 @__kml_nb_pay(i64 %v) {
+define weak_odr i64 @__kml_nb_pay(i64 %v) {
 entry:
   %isnum = icmp uge i64 %v, 562949953421312
   br i1 %isnum, label %num, label %notnum

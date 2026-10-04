@@ -215,7 +215,7 @@
             "feature": "`Function.prototype.call`/`apply`/`bind`",
             "status": "implemented",
             "caveats": [
-              "`thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); first-class function values only, not builtins → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
+              "`thisArg` binds only a `this: T` parameter (no method-borrowing of a class method) → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
             ]
           },
           {

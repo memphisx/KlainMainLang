@@ -17,7 +17,7 @@ console.log(new Event(5).n)
 
 func TestE2EBuiltinConstructorForms(t *testing.T) {
 	assertOutput(t, `
-const r = new RegExp()
+const r = new RegExp("")
 console.log(r.source, r.test("abc"))
 const d = new Date
 console.log(typeof d.getTime())

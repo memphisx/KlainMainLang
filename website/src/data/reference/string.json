@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "32/33",
     "loosePct": 97,
-    "strict": "21/33",
-    "strictPct": 64
+    "strict": "22/33",
+    "strictPct": 67
   },
   "lede": "The String surface is nearly complete. Comparison and substring search are binary-safe (length-headed, NUL-tolerant); the open edges are real Unicode — normalization, surrogate-pair code points, and locale collation — which this compiler has no tables for and does not fake.",
   "entries": [
@@ -569,16 +569,13 @@
     {
       "id": "string.match",
       "name": ".match() / .matchAll()",
-      "signature": "match(re: RegExp): string[] | null; matchAll(re: RegExp): string[][]",
-      "badge": "caveats",
-      "description": "PCRE2-backed regex matching. .match() is real-JS-shaped. See RegExp for the full pattern-language caveats.",
+      "signature": "match(re: string | RegExp): RegExpMatchArray | null; matchAll(re: RegExp): RegExpStringIterator<RegExpExecArray>",
+      "badge": "exact",
+      "description": "PCRE2-backed regex matching. .match() is real-JS-shaped, and .matchAll() is a RegExp String Iterator of exec results. See RegExp for the pattern-language caveats.",
       "returns": {
-        "type": "string[] | string[][]",
-        "desc": "The match(es)."
+        "type": "RegExpMatchArray | null | RegExpStringIterator<RegExpExecArray>",
+        "desc": "The match, or an iterator of matches."
       },
-      "differences": [
-        "`.matchAll()` returns an eager `string[][]` rather than a lazy iterator."
-      ],
       "seeAlso": [
         "string.replace",
         "string.search"
@@ -692,10 +689,10 @@
     },
     {
       "id": "string.raw",
-      "name": "String.raw tag",
-      "signature": "String.raw`template`",
+      "name": "String.raw (tag and function)",
+      "signature": "String.raw`template` / String.raw({ raw }, ...substitutions)",
       "badge": "supported",
-      "description": "The String.raw tag interleaves the raw (undecoded) quasi text with the string-coerced interpolations — escape sequences appear verbatim (String.raw`a\\nb` is a\\nb), byte-for-byte the same as Node.",
+      "description": "Interleaves the raw (undecoded) quasi text with the string-coerced interpolations — escape sequences appear verbatim (String.raw`a\\nb` is a\\nb), byte-for-byte the same as Node. Called as a function it takes any object whose raw is array-like, which is how a tag forwards its strings (String.raw(strings, ...values)).",
       "snippet": "console.log(String.raw`C:\\path\\to\\file`)  // C:\\path\\to\\file",
       "seeAlso": [
         "string.replace"

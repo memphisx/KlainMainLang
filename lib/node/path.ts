@@ -4,6 +4,8 @@
 // kml:default-namespace — `import path from 'path'` reads this module's
 // exports, as Node's module.exports carries them.
 
+import { NodeTypeError } from './internal_errors';
+
 export interface ParsedPath {
     root: string;
     dir: string;
@@ -18,14 +20,6 @@ export interface FormatInputPathObject {
     base?: string | undefined;
     ext?: string | undefined;
     name?: string | undefined;
-}
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
 }
 
 // The " Received …" tail of Node's ERR_INVALID_ARG_TYPE messages.
@@ -1046,7 +1040,6 @@ function win32_extname(path: string): string {
   return path.slice(startDot, end);
 }
 
-
 /**
  * @param {string} path
  * @returns {{
@@ -1208,8 +1201,6 @@ function win32_parse(path: string): ParsedPath {
 
   return ret;
 }
-
-
 
 // process.cwd() in POSIX form: on Windows its separators are forward
 // slashes and its drive indicator is dropped.
@@ -1583,7 +1574,6 @@ function posix_extname(path: string): string {
   }
   return path.slice(startDot, end);
 }
-
 
 /**
  * @param {string} path

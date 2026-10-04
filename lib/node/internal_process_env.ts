@@ -5,23 +5,9 @@
 // internal_process_methods.ts, since the builtin modules themselves read
 // process.env.
 
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
 // lib/internal/errors.js determineSpecificType.
+import { NodeTypeError, NodeRangeError } from './internal_errors';
+
 function received(value: any): string {
     if (value === null || value === undefined) return 'Received ' + String(value);
     if (typeof value === 'function') return 'Received function ' + (value as Function).name;

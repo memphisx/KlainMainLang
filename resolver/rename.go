@@ -87,12 +87,12 @@ type builtinMemberRef struct {
 // local alias -> {exported member's original name -> its mangled name},
 // one entry per `import * as ns from '...'`), builtinMembers (TDD-00049
 // Stage 2: local alias -> which virtual module member it names), and
-// allowGlobalShadowing/reservedErr (TDD-00050: `-compat=strict|permissive`
-// — see checkBinding's own doc comment). All are built once by the caller
+// reservedErr (the first rejected reference). All are built once by the caller
 // (resolver.go) and passed down unchanged through the whole walk.
 type lookupTable struct {
 	names          map[string]string
 	ns             map[string]map[string]string
+	nsSource       map[string]string // a namespace alias's module specifier
 	builtinMembers map[string]builtinMemberRef
 	// parseTimeAliases maps an aliased import local name to the canonical
 	// builtin constructor it stands for (`U` → `URL` for
@@ -104,11 +104,10 @@ type lookupTable struct {
 	typeOnly map[string]bool
 	// nodeTypes is every local bound to a Node export implemented only as
 	// a type (Program.NodeTypeImports): a value use is an error.
-	nodeTypes            map[string]string
-	allowGlobalShadowing bool
-	reservedErr          *error                        // first-write-wins: set by the first reserved-name violation found anywhere in the walk, checked by the caller once renameFile returns
-	filePath             string                        // this file's own absolute path (TDD-00055 Stage 1) — backs import.meta.url's rewrite, see rewriteExpr's *ast.ImportMetaUrl case
-	resolved             map[*ast.StringLiteral]string // module-specifier literals resolved to canonical files, shared by every file
+	nodeTypes   map[string]string
+	reservedErr *error                        // first-write-wins: set by the first rejected reference found anywhere in the walk, checked by the caller once renameFile returns
+	filePath    string                        // this file's own absolute path (TDD-00055 Stage 1) — backs import.meta.url's rewrite, see rewriteExpr's *ast.ImportMetaUrl case
+	resolved    map[*ast.StringLiteral]string // module-specifier literals resolved to canonical files, shared by every file
 	// thisParams are the file's `this: T` parameter annotations
 	// (Program.ThisParams), rewritten with their functions' parameters.
 	thisParams map[ast.Node]*ast.TypeAnnotation
@@ -122,22 +121,6 @@ func stringSet(xs []string) map[string]bool {
 		m[x] = true
 	}
 	return m
-}
-
-// checkBinding is TDD-00050's hook, called at every point a local binding
-// is introduced (every scope.bind(...) call site below). It never halts
-// the walk — none of rename.go's functions return an error today, and this
-// intentionally doesn't change that (see the TDD's Design section for why
-// a first-write-wins pointer was chosen over restructuring every function
-// here to propagate one) — it only ever records the *first* violation
-// found, which resolver.go checks once the whole walk completes.
-func (lu lookupTable) checkBinding(name string, pos ast.Pos) {
-	if lu.reservedErr == nil || *lu.reservedErr != nil {
-		return // no error slot given (shouldn't happen from resolver.go), or already recorded one
-	}
-	if err := checkReservedBinding(name, pos.Line, pos.Col, lu.allowGlobalShadowing); err != nil {
-		*lu.reservedErr = err
-	}
 }
 
 // renameFile rewrites every top-level statement in prog using lu — see
@@ -219,7 +202,7 @@ func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) 
 			rewriteType(c, sc, lu)
 		}
 	}
-	bindParams(f.Params, sc, lu, f.GetPos())
+	bindParams(f.Params, sc, lu)
 	rewritePatternDefaults(f.Params, sc, lu)
 	if ta := lu.thisParams[f]; ta != nil {
 		rewriteType(ta, sc, lu)
@@ -252,26 +235,20 @@ func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) 
 
 // bindParams adds every name a parameter list binds — a plain name, or the
 // individual names of a destructured array/object parameter pattern — into
-// the current (already-pushed) scope frame. pos is the enclosing
-// function/arrow's own position — ast.Param carries no position of its
-// own, so a reserved-name violation on a parameter is reported at the
-// function's position rather than the individual parameter's (TDD-00050).
-func bindParams(params []ast.Param, sc *scope, lu lookupTable, pos ast.Pos) {
+// the current (already-pushed) scope frame.
+func bindParams(params []ast.Param, sc *scope, lu lookupTable) {
 	for _, p := range params {
 		switch {
 		case p.ArrayPattern != nil:
 			for _, elem := range p.ArrayPattern {
 				sc.bind(elem.Name)
-				lu.checkBinding(elem.Name, pos)
 			}
 		case p.ObjectPattern != nil:
 			for _, dp := range p.ObjectPattern {
 				sc.bind(dp.Local)
-				lu.checkBinding(dp.Local, pos)
 			}
 		default:
 			sc.bind(p.Name)
-			lu.checkBinding(p.Name, pos)
 		}
 	}
 }
@@ -325,7 +302,7 @@ func rewriteInterfaceDecl(i *ast.InterfaceDeclaration, lu lookupTable) {
 	rewriteType(i.CallSig, sc, lu)
 	for mi := range i.Methods {
 		sc.push()
-		bindParams(i.Methods[mi].Params, sc, lu, i.GetPos())
+		bindParams(i.Methods[mi].Params, sc, lu)
 		for pi := range i.Methods[mi].Params {
 			if i.Methods[mi].Params[pi].Type != nil {
 				rewriteType(i.Methods[mi].Params[pi].Type, sc, lu)
@@ -342,7 +319,13 @@ func rewriteInterfaceDecl(i *ast.InterfaceDeclaration, lu lookupTable) {
 }
 
 func rewriteClassDecl(c *ast.ClassDeclaration, lu lookupTable) {
-	sc := newScope()
+	rewriteClassDeclIn(c, newScope(), lu)
+}
+
+// rewriteClassDeclIn walks a class inside sc, the scope it is declared in:
+// a class declared in a block sees that block's locals, which shadow the
+// file's mangled top-level names.
+func rewriteClassDeclIn(c *ast.ClassDeclaration, sc *scope, lu lookupTable) {
 	sc.push()
 	for _, tp := range c.TypeParams {
 		sc.bind(tp)
@@ -421,8 +404,11 @@ func rewriteBlock(b *ast.BlockStatement, sc *scope, lu lookupTable) {
 	// binding rather than being mis-renamed to a top-level mangled name — matching
 	// the emitter's own pre-scan of nested functions (TDD-00094).
 	for _, st := range b.Body {
-		if fd, ok := st.(*ast.FunctionDeclaration); ok {
-			sc.bind(fd.Name)
+		switch d := st.(type) {
+		case *ast.FunctionDeclaration:
+			sc.bind(d.Name)
+		case *ast.ClassDeclaration:
+			sc.bind(d.Name)
 		}
 	}
 	for _, st := range b.Body {
@@ -431,11 +417,19 @@ func rewriteBlock(b *ast.BlockStatement, sc *scope, lu lookupTable) {
 	sc.pop()
 }
 
+// RenameInBlock renames every reference to old in b that is not shadowed by
+// a nearer binding: a class declared in b that was hoisted out of it.
+func RenameInBlock(b *ast.BlockStatement, old, new string) {
+	var reserved error
+	rewriteBlock(b, newScope(), lookupTable{names: map[string]string{old: new}, reservedErr: &reserved})
+}
+
 // rewriteStmt handles every statement kind that can appear nested inside a
 // block. A nested *function declaration* is walked here (its name is already
 // hoisted into the block frame by rewriteBlock, so a reference to it stays local
-// — TDD-00094; its body's own top-level references still get renamed). The other
-// declaration kinds (Class/Interface/Enum/TypeAlias/Import/Export) only appear at
+// — TDD-00094; its body's own top-level references still get renamed), and so
+// is a nested class declaration, inside the block's scope. The other
+// declaration kinds (Interface/Enum/TypeAlias/Import/Export) only appear at
 // Program top level and are handled solely by rewriteTopLevelStmt.
 // renameTopLevelVarRedeclaration handles a `var` nested in a block at file
 // top level (a `for (var i …)` init, an `if` body …) whose name is one of the
@@ -461,6 +455,9 @@ func renameTopLevelVarRedeclaration(v *ast.VarDeclaration, sc *scope, lu lookupT
 
 func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 	switch s := stmt.(type) {
+	case *ast.ClassDeclaration:
+		sc.bind(s.Name)
+		rewriteClassDeclIn(s, sc, lu)
 	case *ast.FunctionDeclaration:
 		// The name is already bound by rewriteBlock's hoist pass; walk the
 		// params/return type/body so a top-level reference inside gets mangled.
@@ -476,7 +473,6 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 		}
 		if !renameTopLevelVarRedeclaration(s, sc, lu) {
 			sc.bind(s.Name)
-			lu.checkBinding(s.Name, s.GetPos())
 		}
 	case *ast.VarDeclarationList:
 		for _, d := range s.Decls {
@@ -488,7 +484,6 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 			}
 			if !renameTopLevelVarRedeclaration(d, sc, lu) {
 				sc.bind(d.Name)
-				lu.checkBinding(d.Name, d.GetPos())
 			}
 		}
 	case *ast.ArrayDestructuring:
@@ -505,7 +500,6 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 				s.Elems[i].Default = rewriteExpr(s.Elems[i].Default, sc, lu)
 			}
 			sc.bind(s.Elems[i].Name)
-			lu.checkBinding(s.Elems[i].Name, s.GetPos())
 		}
 	case *ast.ObjectDestructuring:
 		if s.Init != nil {
@@ -516,7 +510,6 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 				s.Props[i].Default = rewriteExpr(s.Props[i].Default, sc, lu)
 			}
 			sc.bind(s.Props[i].Local)
-			lu.checkBinding(s.Props[i].Local, s.GetPos())
 		}
 	case *ast.ExpressionStatement:
 		s.Expr = rewriteExpr(s.Expr, sc, lu)
@@ -549,14 +542,12 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 		s.Iterable = rewriteExpr(s.Iterable, sc, lu)
 		sc.push()
 		sc.bind(s.VarName)
-		lu.checkBinding(s.VarName, s.GetPos())
 		rewriteBlock(s.Body, sc, lu)
 		sc.pop()
 	case *ast.ForInStatement:
 		s.Object = rewriteExpr(s.Object, sc, lu)
 		sc.push()
 		sc.bind(s.VarName)
-		lu.checkBinding(s.VarName, s.GetPos())
 		rewriteBlock(s.Body, sc, lu)
 		sc.pop()
 	case *ast.WhileStatement:
@@ -587,11 +578,9 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 			sc.push()
 			if s.Catch.Param != "" {
 				sc.bind(s.Catch.Param)
-				lu.checkBinding(s.Catch.Param, s.GetPos())
 			}
 			for i, dp := range s.Catch.ObjectPattern {
 				sc.bind(dp.Local)
-				lu.checkBinding(dp.Local, s.Catch.Pos)
 				if dp.Default != nil {
 					s.Catch.ObjectPattern[i].Default = rewriteExpr(dp.Default, sc, lu)
 				}
@@ -733,6 +722,11 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				if mangled, ok := members[e.Property]; ok {
 					return ast.NewIdentifier(mangled, e.GetPos())
 				}
+				// A member the module does not export (TS2339).
+				if src, ok := lu.nsSource[id.Name]; ok && lu.reservedErr != nil && *lu.reservedErr == nil {
+					p := e.GetPos()
+					*lu.reservedErr = diag.New(diag.PropertyNotExist, diag.Span{Pos: diag.Pos{Line: p.Line, Col: p.Col}}, e.Property, fmt.Sprintf("typeof import(%q)", src))
+				}
 			}
 		}
 		return e
@@ -755,7 +749,7 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 	case *ast.ArrowFunction:
 		sc.push()
 		sc.funcDepth++
-		bindParams(e.Params, sc, lu, e.GetPos())
+		bindParams(e.Params, sc, lu)
 		rewritePatternDefaults(e.Params, sc, lu)
 		for i := range e.Params {
 			if e.Params[i].Type != nil {
@@ -790,7 +784,7 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		// here shields those references, letting codegen's self-capture
 		// (CapturedVar{IsSelf}) reclaim them (see emit_func.go).
 		sc.bind(e.Name)
-		bindParams(e.Params, sc, lu, e.GetPos())
+		bindParams(e.Params, sc, lu)
 		rewritePatternDefaults(e.Params, sc, lu)
 		if ta := lu.thisParams[e]; ta != nil {
 			rewriteType(ta, sc, lu)
@@ -821,9 +815,21 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 	case *ast.NewExpression:
 		constructed := e.ClassName
 		// `new ns.C()` through a namespace import: that module's C.
-		if m, ok := lu.ns[e.Qualifier][e.ClassName]; ok && e.Qualifier != "" && !sc.bound(e.Qualifier) {
+		if e.Callee != nil {
+			// `new <expression>()`: its names rename below.
+		} else if e.Qualified && e.Qualifier == "globalThis" && !sc.bound("globalThis") {
+			// `new globalThis.Map()`: the global, never a module's own Map.
+		} else if m, ok := lu.ns[e.Qualifier][e.ClassName]; ok && e.Qualifier != "" && !sc.bound(e.Qualifier) {
 			e.ClassName = m
+		} else if _, value := lu.names[e.Qualifier]; e.Qualified && e.Qualifier != "" && (value || sc.bound(e.Qualifier)) {
+			// `new obj.K()` with obj a value: obj is the binding. K is a
+			// property name, which codegen resolves through the value.
+			if m, ok := lu.names[e.Qualifier]; ok && !sc.bound(e.Qualifier) {
+				e.Qualifier = m
+			}
 		} else if !sc.bound(e.ClassName) {
+			// A bare class, or a namespace's (`new G.P()`: a namespace's
+			// class is a bare top-level declaration, ADR-00408).
 			if canon, ok := lu.parseTimeAliases[e.ClassName]; ok {
 				// TDD-00165 Stage 3: an aliased import of a builtin constructor
 				// (`import { URL as U } from 'url'`) constructs the builtin; sema
@@ -836,6 +842,9 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		}
 		for _, ta := range e.TypeArgs {
 			rewriteType(ta, sc, lu)
+		}
+		if e.Callee != nil {
+			e.Callee = rewriteExpr(e.Callee, sc, lu)
 		}
 		for i := range e.Args {
 			e.Args[i] = rewriteExpr(e.Args[i], sc, lu)
@@ -857,7 +866,7 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		return ast.NewStringLiteral(fileURLFromPath(lu.filePath, runtime.GOOS == "windows"), e.GetPos())
 	}
 	// Every other expression kind (literals, ThisExpression, SuperExpression,
-	// NewXMLHttpRequestExpression/NewTextEncoderExpression — both zero-arg)
+	// NewXMLHttpRequestExpression — zero-arg)
 	// carries no identifier or type reference to rewrite.
 	return expr
 }
@@ -870,6 +879,11 @@ func rewriteType(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
 	if ta.IsTypeof && len(ta.TypeofPath) > 0 && !sc.bound(ta.TypeofName) {
 		if m, ok := lu.ns[ta.TypeofName][ta.TypeofPath[0]]; ok {
 			ta.TypeofName, ta.TypeofPath = m, ta.TypeofPath[1:]
+		}
+	}
+	if ta.IsTypeof && !sc.bound(ta.TypeofName) {
+		if m, ok := lu.names[ta.TypeofName]; ok {
+			ta.TypeofName = m
 		}
 	}
 	rewriteTypeName(ta, sc, lu)
@@ -983,6 +997,13 @@ func rewriteTypeNode(n ast.TypeNode, sc *scope, lu lookupTable) {
 				}
 			}
 		case *ast.TypeQuery:
+			if !sc.bound(t.Name) && len(t.Path) > 0 {
+				// `typeof ns.x` through a namespace import: that module's x.
+				if m, ok := lu.ns[t.Name][t.Path[0]]; ok {
+					t.Name, t.Path = m, t.Path[1:]
+					break
+				}
+			}
 			if !sc.bound(t.Name) {
 				if m, ok := lu.names[t.Name]; ok {
 					t.Name = m
@@ -1044,4 +1065,12 @@ func (lu lookupTable) resolveWorkerPath(lit *ast.StringLiteral) {
 		return
 	}
 	lu.resolved[lit] = abs
+}
+
+// RenameInClass renames the free references to name old inside class c —
+// values, `new` targets and types — to new: a class expression's own name
+// once the class is hoisted under another.
+func RenameInClass(c *ast.ClassDeclaration, old, new string) {
+	var reserved error
+	rewriteClassDecl(c, lookupTable{names: map[string]string{old: new}, reservedErr: &reserved})
 }

@@ -36,3 +36,22 @@ try {
 } catch (e) {
     console.log((e as Error).name);
 }
+
+// TextDecoder speaks UTF-16 and windows-1252 (the `latin1` label) too.
+console.log(new TextDecoder("utf-16le").decode(new Uint8Array([0x54, 0x00, 0x68, 0x00, 0xAC, 0x20])));  // Th€
+const latin = new TextDecoder("latin1");
+console.log(latin.encoding, latin.decode(new Uint8Array([0x63, 0x61, 0x66, 0xE9])));                     // windows-1252 café
+
+// A multi-byte character split across chunks: { stream: true } holds the
+// partial sequence until the next call.
+const streaming = new TextDecoder();
+const euro = new TextEncoder().encode("€");                                                                  // 3 bytes
+console.log(JSON.stringify(streaming.decode(euro.subarray(0, 2), { stream: true })));                         // ""
+console.log(streaming.decode(euro.subarray(2)));                                                              // €
+
+// fatal: invalid bytes throw instead of becoming U+FFFD.
+try {
+    new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array([0xFF]));
+} catch (e: any) {
+    console.log(e.code);                                                                                       // ERR_ENCODING_INVALID_ENCODED_DATA
+}

@@ -75,9 +75,6 @@
           {
             "feature": "`NaN` (global constant)",
             "status": "implemented",
-            "caveats": [
-              "`let NaN = 99;` is a reserved-name collision under the default `-compat=strict`; `-compat=js` allows the shadow real JS permits"
-            ],
             "notes": [
               "`NaN != x`/`!== x` comparisons are correct — compiled as unordered `fcmp une`, so `NaN !== NaN` is `true` as in JS — see [ADR-00188](../adr/ADR-00188.md)"
             ]
@@ -85,9 +82,7 @@
           {
             "feature": "`Infinity` (global constant)",
             "status": "implemented",
-            "caveats": [
-              "Same shadowing caveat as `NaN` above — needs `-compat=js`, not unconditional"
-            ],
+            "caveats": [],
             "notes": [
               "See [ADR-00166](../adr/ADR-00166.md)."
             ]
@@ -103,10 +98,8 @@
             "feature": "`globalThis`",
             "status": "implemented",
             "notes": [
-              "`globalThis.X` (and nested/call forms like `globalThis.JSON.stringify(...)`, `globalThis.setTimeout(...)`) desugars to the bare ambient global X ([ADR-00508](../adr/ADR-00508.md))"
-            ],
-            "caveats": [
-              "Only member access resolves, and only to *known* globals — an unknown `globalThis.foo` is a compile error (there is no dynamic global record); a bare `globalThis` used as a standalone object value, computed access (`globalThis[\"x\"]`), and assigning a new global (`globalThis.x = …`) are unsupported"
+              "`globalThis.X` (and nested/call forms like `globalThis.JSON.stringify(...)`, `globalThis.setTimeout(...)`) desugars to the bare ambient global X ([ADR-00508](../adr/ADR-00508.md))",
+              "`globalThis` as a value is the global object: the builtins as its properties, and whatever the program sets on it (`globalThis.x = …`, computed keys); a module's top-level bindings are not on it, as in an ES module ([ADR-01333](../adr/ADR-01333.md))"
             ]
           },
           {

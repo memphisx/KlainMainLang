@@ -83,10 +83,6 @@ type Type struct {
 	// when the argument settles — instead of coercing a promise to the value
 	// type (TDD-00091). The target promise is the closure's env.
 	IsPromiseResolver bool
-	// IsGroupMap marks the result of Object.groupBy: a heap ptr to a dynamic
-	// string-keyed map of typed sub-arrays. ElemType is the element type of
-	// each bucket. Bracket-notation access returns ArrayOf(*ElemType).
-	IsGroupMap bool
 	// IsMap / IsSet mark Map<K,V> and Set<T> heap objects.
 	// MapKey holds the key type; MapVal holds the value type (nil for Set).
 	IsMap  bool
@@ -95,10 +91,7 @@ type Type struct {
 	MapVal *Type
 	// Weak marks a WeakMap<K,V>/WeakSet<T> (IsMap/IsSet also set): keyed on
 	// object-pointer identity, not iterable, mode-dependent backing (TDD-00112).
-	// IsWeakRef marks a WeakRef<T> (a one-word referent box); MapKey holds the
-	// referent type.
-	Weak      bool
-	IsWeakRef bool
+	Weak bool
 	// IsDynamicObject marks an object literal that had at least one computed
 	// property key (`{ [expr]: value }`). Storage-wise it IS a real
 	// Map<string,V> (IsMap is also set, MapKey is TypePtr) — IsDynamicObject
@@ -259,8 +252,6 @@ type Type struct {
 	// exactly as it reads a bespoke handler's returned object.
 	IsServerResponse bool
 
-	// IsIncomingMessage marks Node's http client response object (TDD-00138).
-	IsIncomingMessage bool
 	// DynPropTy, on a dynamic (`any`) object, is the declared type of every
 	// property it holds — an index-signature view (`{ [k: string]: bigint }`,
 	// node:ffi's `lib.symbols`, TDD-00229): a member/bracket read unboxes to
@@ -274,18 +265,6 @@ type Type struct {
 	// prototype (node:ffi's `getFunctions(defs)` / `dlopen().functions`,
 	// TDD-00229): rendered with util.inspect's `[Object: null prototype]`.
 	IsNullProtoObject bool
-	// IsURL marks `new URL(...)`'s result: an ordinary heap object (href,
-	// protocol, host, hostname, port, pathname, search, hash, origin,
-	// searchParams — all plain field reads via the existing object
-	// machinery, no dispatched methods of its own) built by parsing through
-	// libcurl's URL API. See emit_url.go.
-	IsURL bool
-	// IsURLPattern marks `new URLPattern(...)`'s result (TDD-00100): a heap
-	// object whose six visible fields are the (defaulted) component pattern
-	// strings, plus a hidden __kml_handle ptr to the C-side compiled state
-	// (urlpatternsrc/urlpattern.c) that .test/.exec dispatch on. Same
-	// flagged-ObjectType shape as URL/Response.
-	IsURLPattern bool
 	// IsSymbol marks Symbol(...)'s result (TDD-00044 V1): an ordinary
 	// 1-field heap object ({description: string}, description read via the
 	// existing object field-access machinery, no dynamic property keys or
@@ -304,16 +283,6 @@ type Type struct {
 	// stringification, JSON) branch on it instead of the generic ptr path. See
 	// emit_bigint.go.
 	IsBigInt bool
-	// IsURLSearchParams marks `new URLSearchParams(...)` and `URL`'s own
-	// `.searchParams` field. Storage is a bare pointer to the ordered
-	// name/value pair-list handle (urlsearchparamssrc/urlsearchparams.c), the
-	// WHATWG "list of tuples" model — NOT a Map (a Map keeps one value per key
-	// and no cross-key order for duplicates, so it could not represent
-	// `?a=1&b=2&a=3`). The full surface — get/set/has/delete/append/getAll/sort/
-	// size/keys/values/entries/forEach/toString, plus for-of/spread iteration
-	// and console.log — is re-owned against the `__kml_usp_*` ABI; this flag is
-	// how those dispatch sites recognize the type (TDD-00203). See emit_usp.go.
-	IsURLSearchParams bool
 	// IsGenerator marks a `function* name(): T {}`'s instance value (the
 	// result of calling the generator function, TDD-00061/ADR-00172) — a
 	// ptr to a heap struct carrying its own fiber (ucontext_t + stack),
@@ -338,10 +307,17 @@ type Type struct {
 	// index, input and groups after its {data, len} (40 bytes: data, len,
 	// index i64, input ptr, groups ptr).
 	ExecArray bool
+	// ExecMaybePlain marks a str.match() result whose RegExp may be global:
+	// a global match's header stores index -1 and a null input, read as
+	// undefined (and not listed by console.log), as Node's plain array.
+	ExecMaybePlain bool
 
 	IsCollIter bool
 	IterKind   mapIterKind
 	IterSrc    *Type
+	// IterRegExp marks matchAll's RegExp String Iterator: an Array
+	// Iterator over its exec steps in every other respect.
+	IterRegExp bool
 
 	// IsArrayBuffer marks `new ArrayBuffer(byteLength)`: a fixed-length,
 	// zero-initialized raw byte buffer. Deliberately not IsObject — the
@@ -365,18 +341,6 @@ type Type struct {
 	// `.growable`/`.maxByteLength`/`.grow()` may read word 2. Buffers from
 	// every other producer keep the 16-byte header and must never read it.
 	BufferGrowable bool
-	// IsDataView marks `new DataView(buffer, byteOffset?, byteLength?)`: an
-	// arbitrary-endian read/write view over an ArrayBuffer sub-range. Same
-	// hidden-heap-struct convention as IsArrayBuffer — a ptr to
-	// {ptr data(base+offset), i64 byteLength, i64 byteOffset, ptr bufHdr},
-	// with dedicated property/method dispatch. See emit_dataview.go.
-	IsDataView bool
-	// IsBlob marks `new Blob(parts?, {type}?)` (TDD-00102): an immutable
-	// binary value with a MIME type. Same hidden-heap-struct convention as
-	// IsArrayBuffer — a ptr to { i64 size, ptr data, ptr type }, with
-	// dedicated .size/.type property reads and .slice()/.arrayBuffer()/
-	// .bytes()/.text() method dispatch. See emit_blob.go.
-	IsBlob bool
 	// IsTypedArray marks a TypedArray (Int8Array/Uint8Array/Int16Array/
 	// Uint16Array/Int32Array/Uint32Array/Float32Array/Float64Array — no
 	// Uint8ClampedArray/BigInt64Array/BigUint64Array, see the TDD's
@@ -391,17 +355,6 @@ type Type struct {
 	// `number[]` does not get. See emit_arraybuffer.go and
 	// docs/tdd/TDD-00018.md.
 	IsTypedArray bool
-	// IsCryptoKey marks a Web Crypto CryptoKey (TDD-00104): a ptr to a
-	// hidden { i64 algId, i64 hashId, i64 usages, i64 extractable,
-	// i64 kind, ptr keyData, i64 keyLen } heap struct — same hidden-layout
-	// convention as IsArrayBuffer/IsBlob, with dedicated .type/
-	// .extractable property reads. keyData is raw bytes for symmetric
-	// keys, DER (PKCS#8/SPKI) for asymmetric. See emit_call_crypto.go.
-	IsCryptoKey bool
-	// IsCryptoKeyPair marks generateKey's RSA/EC result (TDD-00104): a ptr
-	// to { ptr publicKey, ptr privateKey }, with dedicated .publicKey/
-	// .privateKey property reads yielding IsCryptoKey values.
-	IsCryptoKeyPair bool
 	// IsBuffer marks a Node Buffer (TDD-00103): storage-wise it IS a
 	// Uint8Array (IsTypedArray/IsArray/ElemType u8), so the whole array/
 	// TypedArray surface comes free; the flag only additionally enables
@@ -422,23 +375,9 @@ type Type struct {
 	// the spec's ToUint8Clamp — clamp to [0,255], floats round-half-to-even,
 	// NaN → 0 — instead of e.coerce's mod-2^width trunc.
 	Clamped bool
-	// IsTextEncoder marks `new TextEncoder()`'s result: a stateless marker
-	// value (Ref is always the constant "null" — nothing is ever allocated
-	// or read through it) whose only purpose is letting `.encode(str)`
-	// dispatch at emitCall. See emit_call_encoding.go and
-	// docs/status/ENCODING-TEXT.md.
-	IsTextEncoder bool
-	// IsTextDecoder marks `new TextDecoder(label?)`'s result — same
-	// stateless-marker shape as IsTextEncoder (label is evaluated for side
-	// effects at construction but never stored: V1 scope is UTF-8 only, see
-	// NewTextDecoderExpression's doc comment). Enables `.decode(bytes)`
-	// dispatch at emitCall. See emit_call_encoding.go and
-	// docs/status/ENCODING-TEXT.md.
-	IsTextDecoder bool
 	// IsRegExp marks `new RegExp(pattern, flags?)`'s result (and a
 	// `/pattern/flags` literal, which desugars to the same construction at
-	// parse time) — a real heap object, not a stateless marker like
-	// IsTextEncoder/IsTextDecoder: avoiding pattern recompilation on every
+	// parse time) — a real heap object: avoiding pattern recompilation on every
 	// method call and the `.lastIndex` mutable state the `g`-flag iteration
 	// idiom needs both require real per-instance storage. A hidden field at
 	// index 0 (named RegexHandleField, skipped by VisibleFields() — same
@@ -446,22 +385,6 @@ type Type struct {
 	// pcre2_code* handle, never exposed via Object.keys/JSON. See
 	// RegExpType and docs/tdd/TDD-00035.md.
 	IsRegExp bool
-	// child_process handles: IsChildProcess marks a spawn()/exec()/execFile()
-	// ChildProcess value (a ptr to runtime_childprocess.go's cpStructIR);
-	// IsCPStream marks child.stdout/child.stderr (CPWhich 0/1 picks the
-	// listener slots); IsCPStdin marks child.stdin (.write/.end).
-	IsChildProcess bool
-	IsCPStream     bool
-	IsCPStdin      bool
-	CPWhich        int
-	// IsHTTPServer marks a variable-bound http.createServer() handle
-	// (.listen/.close/.closeAllConnections/.address).
-	IsHTTPServer bool
-	// IsClientRequest marks the http.get/request return handle (ADR-00430):
-	// a { ptr url, ptr cb, i64 state } struct for .end()/.abort()/.on().
-	IsClientRequest bool
-	// IsHTTPAgent marks the inert `new http.Agent(...)` token (ADR-00432).
-	IsHTTPAgent bool
 	// IsEmbeddedAssets marks an `embedDir(...)` handle (TDD-00142 Stage 7).
 	IsEmbeddedAssets bool
 	// IsWebview marks a `new Webview(...)` handle (TDD-00142): a calloc'd
@@ -492,8 +415,7 @@ type Type struct {
 	// planTupleByValReturns — never on a variable's or field's type — and
 	// cleared on the Value a call site hands downstream (the aggregate is
 	// spilled back to a pointer there unless destructured directly).
-	TupleByVal  bool
-	IsNetSocket bool
+	TupleByVal bool
 	// IsChannel marks a klain:sync `new Channel<T>(cap)` handle (TDD-00143):
 	// a ptr to the C runtime's hchan. The element type T lives in ElemType
 	// (like MessagePort/Set<T>); channel elements are a fixed 8-byte slot, so
@@ -506,15 +428,6 @@ type Type struct {
 	// parameter at compile time, instead of silently bit-reinterpreting it
 	// as an i64 (see docs/adr/ADR-00042.md).
 	Inferred bool
-	// IsHeaders marks `new Headers(...)`'s result (TDD-00040): storage-wise
-	// it IS a real Map<string,string> (IsMap also set, MapKey/MapVal both
-	// TypePtr) — exactly IsURLSearchParams's own precedent. get/set/has/
-	// delete/forEach/entries/keys/values all come for free from the existing
-	// Map machinery; IsHeaders only additionally enables case-insensitive
-	// (lowercased-key) get/set/has/delete and the one genuinely new method,
-	// append(), all dispatched in emit_call.go ahead of the generic IsMap
-	// branch. See emit_headers.go.
-	IsHeaders bool
 	// IsFetchRequest marks `new Request(...)`'s result (TDD-00040): an
 	// ordinary heap object (url/method/headers/body, all plain field reads)
 	// like Response/URL. Named to avoid colliding with the pre-existing,
@@ -671,12 +584,6 @@ func WeakSetType(elem Type) Type {
 	return Type{IR: "ptr", IsSet: true, Weak: true, MapKey: &elem}
 }
 
-// WeakRefType returns a WeakRef<referent> type (TDD-00112) — a one-word box
-// whose referent may be collected under -mm=gc (MapKey holds the referent type).
-func WeakRefType(referent Type) Type {
-	return Type{IR: "ptr", IsWeakRef: true, MapKey: &referent}
-}
-
 // PromiseOf returns a Promise<T> type (the coroutine handle ptr).
 // Pass TypeVoid for Promise<void>.
 func PromiseOf(inner Type) Type {
@@ -762,112 +669,6 @@ func ResponseType() Type {
 	return ty
 }
 
-// URLSearchParamsType returns the type behind `new URLSearchParams(...)`
-// and `URL`'s own `.searchParams` field — see IsURLSearchParams's doc
-// comment for why this is just a flagged Map<string,string>.
-func URLSearchParamsType() Type {
-	// A bare pointer to the ordered pair-list handle (urlsearchparamssrc/
-	// urlsearchparams.c), NOT a Map — the Map backing (single value per key, no
-	// cross-key order for duplicates) could not represent the WHATWG model
-	// (TDD-00203). Method dispatch, iteration (for-of/spread), console.log and
-	// toString are re-owned explicitly against the `__kml_usp_*` ABI; the
-	// IsURLSearchParams flag is how those sites recognize the type.
-	ty := TypePtr
-	ty.IsURLSearchParams = true
-	return ty
-}
-
-// URLType returns `new URL(...)`'s result type: a plain heap object whose
-// fields are all built once at construction time by emit_url.go (via
-// libcurl's URL-parsing API), plus IsURL so nothing else needs to special-
-// case it — field reads go through the ordinary object machinery exactly
-// like Response's status/ok/body already do.
-func URLType() Type {
-	ty := hostObjectType([]Field{
-		{Name: "href", Ty: TypePtr},
-		{Name: "protocol", Ty: TypePtr},
-		{Name: "host", Ty: TypePtr},
-		{Name: "hostname", Ty: TypePtr},
-		{Name: "port", Ty: TypePtr},
-		{Name: "pathname", Ty: TypePtr},
-		{Name: "search", Ty: TypePtr},
-		{Name: "hash", Ty: TypePtr},
-		{Name: "origin", Ty: TypePtr},
-		{Name: "username", Ty: TypePtr},
-		{Name: "password", Ty: TypePtr},
-		{Name: "searchParams", Ty: URLSearchParamsType()},
-	})
-	ty.IsURL = true
-	return ty
-}
-
-// HttpOptionsType returns the object `url.urlToHttpOptions()` produces
-// (TDD-00165 Stage 4) — the option-bag shape `http.request` accepts, remapped
-// from a WHATWG URL. `path` is `pathname`+`search`; `auth` is `user[:pass]`.
-func HttpOptionsType() Type {
-	return ObjectType([]Field{
-		{Name: "protocol", Ty: TypePtr},
-		{Name: "hostname", Ty: TypePtr},
-		{Name: "hash", Ty: TypePtr},
-		{Name: "search", Ty: TypePtr},
-		{Name: "pathname", Ty: TypePtr},
-		{Name: "path", Ty: TypePtr},
-		{Name: "href", Ty: TypePtr},
-		{Name: "port", Ty: TypePtr},
-		{Name: "auth", Ty: TypePtr},
-	})
-}
-
-// SQLiteColumnMetaType is one entry of stmt.columns() (ADR-00540): the
-// column/table/database origin plus declared type and result name. Absent
-// origins (an expression column) read back as null, matching node:sqlite.
-func SQLiteColumnMetaType() Type {
-	return ObjectType([]Field{
-		{Name: "column", Ty: nullablePtr()},
-		{Name: "database", Ty: nullablePtr()},
-		{Name: "table", Ty: nullablePtr()},
-		{Name: "type", Ty: nullablePtr()},
-		{Name: "name", Ty: TypePtr},
-	})
-}
-
-func nullablePtr() Type {
-	t := TypePtr
-	t.Nullable = true
-	return t
-}
-
-// SQLiteRunResultType is the `{ changes, lastInsertRowid }` object stmt.run()
-// returns (ADR-00540). Both are `number` (TDD-00123 f64); real Node returns
-// bigint-or-number, narrowed to number for V1 with the >2^53 caveat documented.
-func SQLiteRunResultType() Type {
-	return ObjectType([]Field{
-		{Name: "changes", Ty: TypeF64},
-		{Name: "lastInsertRowid", Ty: TypeF64},
-	})
-}
-
-// URLPatternType returns `new URLPattern(...)`'s result type (TDD-00100): the
-// six component pattern strings as readable fields (matching the spec's
-// readonly component accessors — an omitted init component reads back as its
-// "*" default), plus the hidden __kml_handle carrying the compiled per-
-// component PCRE2 state, same hidden-field trick as Response.__kml_pending.
-func URLPatternType() Type {
-	ty := hostObjectType([]Field{
-		{Name: "protocol", Ty: TypePtr},
-		{Name: "hostname", Ty: TypePtr},
-		{Name: "port", Ty: TypePtr},
-		{Name: "pathname", Ty: TypePtr},
-		{Name: "search", Ty: TypePtr},
-		{Name: "hash", Ty: TypePtr},
-		{Name: "username", Ty: TypePtr},
-		{Name: "password", Ty: TypePtr},
-		{Name: "__kml_handle", Ty: TypePtr},
-	})
-	ty.IsURLPattern = true
-	return ty
-}
-
 // SymbolType returns Symbol(...)'s result type (TDD-00044 V1) — a plain
 // 1-field heap object, same "flag a generic ObjectType" shape URLType uses
 // above. Uniqueness and === come from the struct's own pointer identity, not
@@ -879,7 +680,10 @@ func SymbolType() Type {
 	// `=== "symbol"` narrowing tell it apart from a plain object at runtime —
 	// the same field-0 probe Errors use, on a different bit. Every allocation
 	// site (Symbol(), Symbol.for) stores it.
-	ty := ObjectType([]Field{{Name: "description", Ty: TypePtr}})
+	// description is undefined for `Symbol()` (a null pointer).
+	desc := TypePtr
+	desc.Nullable, desc.IsUndefined = true, true
+	ty := ObjectType([]Field{{Name: "description", Ty: desc}})
 	ty.IsSymbol = true
 	return ty
 }
@@ -892,14 +696,6 @@ func BigIntType() Type {
 	return Type{IR: "ptr", IsBigInt: true}
 }
 
-// HeadersType returns `new Headers(...)`'s result type (TDD-00040) — see
-// IsHeaders's doc comment for why this is just a flagged Map<string,string>.
-func HeadersType() Type {
-	ty := MapType(TypePtr, TypePtr)
-	ty.IsHeaders = true
-	return ty
-}
-
 // FetchRequestType returns `new Request(...)`'s result type (TDD-00040): a
 // plain heap object like Response/URL — url/method/headers/body are all
 // plain field reads via the existing object machinery, no dispatched
@@ -910,7 +706,7 @@ func FetchRequestType() Type {
 	ty := hostObjectType([]Field{
 		{Name: "url", Ty: TypePtr},
 		{Name: "method", Ty: TypePtr},
-		{Name: "headers", Ty: HeadersType()},
+		{Name: "__kml_headers", Ty: TypePtr}, // its Headers
 		// The body's bytes (null without a body) and the Body members'
 		// state, as Response has them (emitResponseCall and
 		// emitResponseBodyStream serve both).
@@ -1057,17 +853,6 @@ func ArrayBufferType() Type {
 	return Type{IR: "ptr", IsArrayBuffer: true}
 }
 
-// CryptoKeyType returns a Web Crypto CryptoKey's type (TDD-00104).
-func CryptoKeyType() Type {
-	return Type{IR: "ptr", IsCryptoKey: true}
-}
-
-// CryptoKeyPairType returns generateKey's {publicKey, privateKey} result
-// type for asymmetric algorithms (TDD-00104).
-func CryptoKeyPairType() Type {
-	return Type{IR: "ptr", IsCryptoKeyPair: true}
-}
-
 // ChannelType returns `new Channel<T>(cap)`'s result type (TDD-00143); the
 // element type T lives in ElemType.
 func ChannelType(elem Type) Type {
@@ -1079,24 +864,6 @@ func ChannelType(elem Type) Type {
 // the ArrayBuffer representation plus the shared-across-workers flag.
 func SharedArrayBufferType() Type {
 	return Type{IR: "ptr", IsArrayBuffer: true, IsSharedArrayBuffer: true}
-}
-
-// DataViewType returns `new DataView(...)`'s result type — see IsDataView's
-// doc comment for the hidden-struct representation.
-func DataViewType() Type {
-	return Type{IR: "ptr", IsDataView: true}
-}
-
-// TextEncoderType returns `new TextEncoder()`'s result type — see
-// IsTextEncoder's doc comment for why this holds no real storage.
-func TextEncoderType() Type {
-	return Type{IR: "ptr", IsTextEncoder: true}
-}
-
-// TextDecoderType returns `new TextDecoder(...)`'s result type — see
-// IsTextDecoder's doc comment for why this holds no real storage.
-func TextDecoderType() Type {
-	return Type{IR: "ptr", IsTextDecoder: true}
 }
 
 // RegexHandleField is the name of the hidden ptr field every RegExp
@@ -1131,63 +898,6 @@ func RegExpType() Type {
 	return ty
 }
 
-// ChildProcessType is a spawn()/exec()/execFile() ChildProcess handle: a bare
-// pointer to runtime_childprocess.go's cpStructIR, flag-tagged for method and
-// property dispatch (.stdout/.stderr/.stdin/.on/.pid/.kill).
-func ChildProcessType() Type {
-	ty := hostObjectType([]Field{{Name: "__cp", Ty: TypePtr}})
-	ty.IsChildProcess = true
-	return ty
-}
-
-// CPStreamType is child.stdout (which 0) / child.stderr (which 1): the same
-// underlying cp pointer, tagged so .on('data'|'end', cb) stores into the
-// correct listener slots.
-func CPStreamType(which int) Type {
-	ty := ChildProcessType()
-	ty.IsChildProcess = false
-	ty.IsCPStream = true
-	ty.CPWhich = which
-	return ty
-}
-
-// CPStdinType is child.stdin: the cp pointer, tagged for .write()/.end().
-func CPStdinType() Type {
-	ty := ChildProcessType()
-	ty.IsChildProcess = false
-	ty.IsCPStdin = true
-	return ty
-}
-
-// HTTPServerType is an http.createServer() handle bound to a variable (the
-// standard Node idiom, as opposed to the chained
-// `http.createServer(cb).listen(port)` expression): a pointer to a single i64
-// slot holding the listen fd (-1 before .listen()), flag-tagged for
-// .listen/.close/.closeAllConnections/.address.
-func HTTPServerType() Type {
-	ty := hostObjectType([]Field{{Name: "__httpsrv", Ty: TypePtr}})
-	ty.IsHTTPServer = true
-	return ty
-}
-
-// ClientRequestType is the http.get/request return handle (ADR-00430): a
-// pointer to { ptr url, ptr userCb, i64 state } (state 0 pending · 1 fired ·
-// 2 aborted). `request` fires on .end(); `get` is returned already fired.
-func ClientRequestType() Type {
-	ty := hostObjectType([]Field{{Name: "__clientreq", Ty: TypePtr}})
-	ty.IsClientRequest = true
-	return ty
-}
-
-// HTTPAgentType is the inert `new http.Agent(...)` token (ADR-00432): a
-// single heap byte — the client opens one connection per request, so an
-// Agent carries configuration with no behavior; .destroy() is a no-op.
-func HTTPAgentType() Type {
-	ty := hostObjectType([]Field{{Name: "__httpagent", Ty: TypePtr}})
-	ty.IsHTTPAgent = true
-	return ty
-}
-
 // EmbeddedAssetsType is an `embedDir(...)` handle (TDD-00142 Stage 7): a ptr to
 // the packed blob linked into the binary, dispatching `.get(path)`.
 func EmbeddedAssetsType() Type {
@@ -1205,25 +915,12 @@ func WebviewType() Type {
 	return ty
 }
 
-// NetSocketType is a TCP connection socket: a bare pointer to runtime_net.go's
-// netSocketIR, flag-tagged for .on('data'|'end')/.write/.end.
-func NetSocketType() Type {
-	ty := hostObjectType([]Field{{Name: "__netsock", Ty: TypePtr}})
-	ty.IsNetSocket = true
-	return ty
-}
-
 // BufferType returns a Node Buffer's type (TDD-00103): a Uint8Array
 // (TypedArrayType("uint8")) with IsBuffer set — see the flag's doc comment.
 func BufferType() Type {
 	ty := TypedArrayType("uint8")
 	ty.IsBuffer = true
 	return ty
-}
-
-// BlobType returns `new Blob(...)`'s result type — see IsBlob's doc comment.
-func BlobType() Type {
-	return Type{IR: "ptr", IsBlob: true}
 }
 
 // typedArrayElemKindToType maps the element-kind strings the parser already
@@ -1299,7 +996,8 @@ func SettlementType(valueTy Type) Type {
 const ClassTagField = "__kml_tag"
 
 // ClassVTableField is the name of the hidden vtable-pointer field a class
-// carries at index 1 (right after the tag) when HasVTable is set
+// carries when HasVTable is set: at index 1, right after the tag, or after
+// the error fields in an Error subclass (VTableIndex)
 // (TDD-00009 Stage 3) — a plain ptr to that concrete class's own
 // @ClassName_vtable global. Reserved the same way ClassTagField is: a
 // user-declared field with this name is a compile-time error.
@@ -1311,7 +1009,8 @@ const ClassVTableField = "__kml_vtable"
 // method-call dispatch can find the class's registered method table.
 //
 // Field order is: hidden tag (always, index 0) → hidden vtable pointer
-// (only when hasVTable, index 1) → inherited fields (already-flattened, base-first, empty for a
+// (only when hasVTable; index 1, or after the error fields an Error
+// subclass inherits) → inherited fields (already-flattened, base-first, empty for a
 // root class — TDD-00009 Stage 3) → this class's own newly-declared fields.
 // FieldIndex/StructIR/StructSize all derive from Fields' order generically,
 // so every named field access shifts for free with no changes needed at any
@@ -1324,16 +1023,43 @@ const ClassVTableField = "__kml_vtable"
 func ClassType(name string, inherited []Field, own []Field, hasVTable bool) Type {
 	tagged := make([]Field, 0, 4+len(inherited)+len(own))
 	tagged = append(tagged, Field{Name: ClassTagField, Ty: TypeI64})
+	// An Error subclass keeps the error object's fields where every error
+	// reader finds them: its vtable pointer comes after them.
+	keep := errorFieldsPrefix(inherited)
+	tagged = append(tagged, inherited[:keep]...)
 	if hasVTable {
 		tagged = append(tagged, Field{Name: ClassVTableField, Ty: TypePtr})
 	}
-	tagged = append(tagged, inherited...)
+	tagged = append(tagged, inherited[keep:]...)
 	tagged = append(tagged, own...)
 	ty := ObjectType(tagged)
 	ty.IsClass = true
 	ty.ClassName = name
 	ty.HasVTable = hasVTable
 	return ty
+}
+
+// errorFieldsPrefix is how many leading fields of inherited are the error
+// object's own (an Error subclass's), 0 for any other class. A system slot
+// a subclass's own field displaced is renamed `__kml_err_<name>`
+// (registerClasses) and still counts.
+func errorFieldsPrefix(inherited []Field) int {
+	errFields := errorObjType.Fields[1:]
+	if len(inherited) < len(errFields) {
+		return 0
+	}
+	for i, f := range errFields {
+		if n := inherited[i].Name; n != f.Name && n != "__kml_err_"+f.Name {
+			return 0
+		}
+	}
+	return len(errFields)
+}
+
+// VTableIndex is the index of a class instance's vtable-pointer field.
+func (t Type) VTableIndex() int {
+	i, _, _ := t.FieldIndex(ClassVTableField)
+	return i
 }
 
 // VisibleFields returns the fields a user should ever see: identical to
@@ -1350,12 +1076,14 @@ func ClassType(name string, inherited []Field, own []Field, hasVTable bool) Type
 func (t Type) VisibleFields() []Field {
 	fields := t.UserFields()
 	switch {
-	case t.IsClass && len(fields) > 0:
-		skip := 0
-		if t.HasVTable {
-			skip++
+	case t.IsClass && t.HasVTable:
+		var kept []Field
+		for _, f := range fields {
+			if f.Name != ClassVTableField {
+				kept = append(kept, f)
+			}
 		}
-		fields = fields[skip:]
+		fields = kept
 	case t.IsRegExp && len(fields) > 0:
 		fields = fields[1:]
 	case t.IsXHR && len(fields) > 3:
@@ -1479,20 +1207,6 @@ func FinalizationRegistryType(held Type) Type {
 	return ty
 }
 
-// IncomingMessageType is Node's `http.get`/`http.request` response object
-// (TDD-00138) handed to the callback: `res.statusCode`, `res.on('data'|'end')`,
-// with the buffered body + listener slots hidden behind the event surface.
-func IncomingMessageType() Type {
-	ty := hostObjectType([]Field{
-		{Name: "statusCode", Ty: TypeF64},
-		{Name: incomingBodyField, Ty: TypePtr},
-		{Name: incomingDataListenerField, Ty: TypePtr},
-		{Name: incomingEndListenerField, Ty: TypePtr},
-	})
-	ty.IsIncomingMessage = true
-	return ty
-}
-
 const (
 	incomingBodyField         = "__kml_im_body"
 	incomingDataListenerField = "__kml_im_data"
@@ -1519,17 +1233,6 @@ func RequestType() Type {
 	})
 	ty.IsRequest = true
 	return ty
-}
-
-// EncodeIntoResultType returns TextEncoder.encodeInto's result shape,
-// { read, written }: the number of source code units read and the number of
-// bytes written into the destination. A plain heap object read through the
-// ordinary field-access path, like PathParsedType.
-func EncodeIntoResultType() Type {
-	return ObjectType([]Field{
-		{Name: "read", Ty: TypeI64},
-		{Name: "written", Ty: TypeI64},
-	})
 }
 
 // FuncType returns a closure/function type. All closures are represented as ptr
@@ -1887,27 +1590,12 @@ func ResolveTypeName(name string) Type {
 		return ResponseType()
 	case "HttpRequest", "IncomingMessage":
 		return RequestType()
-	case "__kml_client_response":
-		// Internal-only name synthesized by contextTypeArrowParams for the
-		// http client's response callback — Node calls both the server request
-		// and the client response `IncomingMessage`, but this compiler models
-		// them as distinct types and the public annotation name is taken by
-		// the server side above. Never written by user code.
-		return IncomingMessageType()
 	case "ServerResponse":
 		return ServerResponseType()
 	case "Request":
 		return FetchRequestType()
-	case "Headers":
-		return HeadersType()
 	case "XMLHttpRequest":
 		return XMLHttpRequestType()
-	case "URL":
-		return URLType()
-	case "URLSearchParams":
-		return URLSearchParamsType()
-	case "URLPattern":
-		return URLPatternType()
 	case "RegExp":
 		return RegExpType()
 	case "RegExpExecArray":
@@ -1963,22 +1651,13 @@ func ResolveTypeName(name string) Type {
 		return TypeF32
 	case "float64":
 		return TypeF64
-	// The objects of the code-generated Node modules, by @types/node's names
-	// (`child_process.ChildProcess`).
-	case "ChildProcess":
-		return ChildProcessType()
-	case "DataView":
-		return DataViewType()
-	case "TextEncoder":
-		return TextEncoderType()
-	case "TextDecoder":
-		return TextDecoderType()
-	case "Blob":
-		return BlobType()
-	case "CryptoKey":
-		return CryptoKeyType()
-	case "CryptoKeyPair":
-		return CryptoKeyPairType()
+	case "ArrayBufferLike":
+		// An ArrayBuffer or a SharedArrayBuffer: one representation.
+		return ArrayBufferType()
+	case "ArrayBufferView", "BufferSource", "AllowSharedBufferSource":
+		// A typed array or a DataView (or, for the last two, a buffer):
+		// held boxed, each value as its own class.
+		return TypeAny
 	}
 	return TypeI64 // default
 }

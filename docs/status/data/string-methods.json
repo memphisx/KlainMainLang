@@ -204,11 +204,8 @@
           {
             "feature": "`.match()` / `.matchAll()`",
             "status": "implemented",
-            "caveats": [
-              "`.matchAll()` returns an eager `string[][]` rather than a lazy iterator ([REGEXP.md](REGEXP.md))"
-            ],
             "notes": [
-              "PCRE2-backed; `.match()` is real JS-shaped ([REGEXP.md](REGEXP.md))"
+              "PCRE2-backed; `.match()` is real JS-shaped and `.matchAll()` a `RegExp String Iterator` of exec results ([REGEXP.md](REGEXP.md))"
             ]
           },
           {
@@ -256,10 +253,10 @@
             ]
           },
           {
-            "feature": "`String.raw` tag",
+            "feature": "`String.raw` (tag and function)",
             "status": "implemented",
             "notes": [
-              "Interleaves the raw (undecoded) quasi text with the string-coerced interpolations — escape sequences appear verbatim (`` String.raw`a\\nb` `` is `a\\nb`), byte-for-byte the same as Node. The raw quasis are threaded from the lexer through the `TaggedTemplateExpression` ([ADR-00562](../adr/ADR-00562.md))"
+              "Interleaves the raw (undecoded) quasi text with the string-coerced interpolations — escape sequences appear verbatim (`` String.raw`a\\nb` `` is `a\\nb`), byte-for-byte the same as Node. Called as a function it takes any `{ raw }` whose `raw` is array-like ([ADR-00562](../adr/ADR-00562.md), [ADR-01344](../adr/ADR-01344.md))"
             ]
           }
         ]

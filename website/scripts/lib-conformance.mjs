@@ -18,7 +18,7 @@ export const OUT = join(here, '..', 'src', 'data', 'conformance-platforms.json')
 
 // Primary dev platform first; any other platform with a summary follows in a
 // stable (alphabetical) order so the output is deterministic across machines.
-const PLATFORM_PRIORITY = ['macos-arm64', 'linux-x64', 'linux-arm64', 'windows-x64']
+export const PLATFORM_PRIORITY = ['macos-arm64', 'linux-x64', 'linux-arm64', 'windows-x64']
 
 // Read every docs/testing/<platform>/conformance-summary.json into the shape the
 // website consumes: { schemaVersion, platforms: [{ platform, suites }, …] }.

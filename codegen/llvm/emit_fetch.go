@@ -20,21 +20,10 @@ import (
 	"KlainMainLang/ast"
 )
 
-// isResponseMethodName reports whether name is one of Response's dispatched
-// methods. status/ok/body are plain object fields (already handled by the
-// generic object field-read path) and need no entry here.
 // hasBodyMixin reports a type with Fetch's Body members (body, bodyUsed,
 // text(), json(), arrayBuffer()): a Response or a Request.
 func hasBodyMixin(t Type) bool {
 	return t.IsResponse || t.IsFetchRequest
-}
-
-func isResponseMethodName(name string) bool {
-	switch name {
-	case "text", "json", "arrayBuffer":
-		return true
-	}
-	return false
 }
 
 // emitFetch implements fetch(url), fetch(url, init), and fetch(request)
@@ -74,15 +63,16 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 			}
 			urlIdx, urlFieldTy, _ := reqTy.FieldIndex("url")
 			methodIdx, methodFieldTy, _ := reqTy.FieldIndex("method")
-			headersIdx, headersFieldTy, _ := reqTy.FieldIndex("headers")
 			bodyIdx, bodyFieldTy, _ := reqTy.FieldIndex("body")
 
 			urlVal := e.loadFieldValue(reqVal, urlIdx, urlFieldTy)
 			methodVal := e.loadFieldValue(reqVal, methodIdx, methodFieldTy)
-			headersVal := e.loadFieldValue(reqVal, headersIdx, headersFieldTy)
 			bodyVal := e.loadFieldValue(reqVal, bodyIdx, bodyFieldTy)
-
-			headersRef, err := e.buildFetchHeaderList(headersVal.Ref)
+			headersVal, err := e.emitRequestHeaders(reqVal, pos)
+			if err != nil {
+				return Value{}, err
+			}
+			headersRef, err := e.emitHeadersSlist(headersVal, pos)
 			if err != nil {
 				return Value{}, err
 			}
@@ -90,7 +80,7 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		}
 	}
 
-	urlVal, err := e.emitExpr(args[0])
+	urlVal, err := e.emitExpr(stringifiedInput(args[0]))
 	if err != nil {
 		return Value{}, err
 	}
@@ -103,14 +93,21 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		if !initVal.Ty.IsObject {
+		// An init held in `any` is read member by member at run time;
+		// undefined or null is no init (WebIDL's empty dictionary).
+		dyn := isUnconstrainedDynamic(initVal.Ty)
+		if !initVal.Ty.IsObject && !dyn {
 			return Value{}, fmt.Errorf("%d:%d: fetch's second argument must be an object with an optional method/headers/body field", pos.Line, pos.Col)
+		}
+		dynGet := func(name string) Value {
+			v, _ := e.emitDynAnyMemberGetNamed(initVal, e.internString(name), name, pos)
+			return v
 		}
 		// An optional init (`init?: RequestInit`) may be absent: its parts
 		// are read only when it is there, and default to none.
 		var slots [5]string
 		var skipL, doneInitL string
-		if initVal.Ty.Nullable {
+		if initVal.Ty.Nullable || dyn {
 			for i := range slots {
 				slots[i] = e.freshReg()
 				ir := "ptr"
@@ -125,13 +122,42 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 			e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", slots[4]))
 			haveL := e.freshLabel("fetch.init")
 			skipL, doneInitL = e.freshLabel("fetch.noinit"), e.freshLabel("fetch.initdone")
-			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(initVal.Ref), skipL, haveL))
+			var absent string
+			if !dyn {
+				absent = e.ptrIsNull(initVal.Ref)
+			} else {
+				undef, null := e.freshReg(), e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", undef, initVal.Ref, nbUndefined))
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", null, initVal.Ref, nbNull))
+				absent = e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", absent, undef, null))
+			}
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", absent, skipL, haveL))
 			e.emitLabel(haveL)
-			nn := initVal.Ty
-			nn.Nullable, nn.IsUndefined = false, false
-			initVal = Value{Ref: initVal.Ref, Ty: nn}
+			if !dyn {
+				nn := initVal.Ty
+				nn.Nullable, nn.IsUndefined = false, false
+				initVal = Value{Ref: initVal.Ref, Ty: nn}
+			}
 		}
-		if idx, fieldTy, ok := initVal.Ty.FieldIndex("signal"); ok {
+		if dyn {
+			// signal: an AbortSignal, or none when undefined/null.
+			if cls, hasSignals := e.abortSignalClass(); hasSignals {
+				sv := dynGet("signal")
+				sig := e.coerce(sv, cls)
+				nullish := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp ule i64 %s, %d", nullish, sv.Ref, nbUndefined))
+				sel := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", sel, nullish, sig.Ref))
+				signalRef = sel
+			}
+			mv := dynGet("method")
+			ms, _ := e.emitAnyIntoString(mv, TypePtr)
+			isUndef, sel := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isUndef, mv.Ref, nbUndefined))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", sel, isUndef, ms.Ref))
+			methodRef = sel
+		} else if idx, fieldTy, ok := initVal.Ty.FieldIndex("signal"); ok {
 			_, hasSignals := e.abortSignalClass()
 			switch {
 			case e.isAbortSignalType(fieldTy):
@@ -143,7 +169,7 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 				return Value{}, fmt.Errorf("%d:%d: fetch's init.signal must be an AbortSignal", pos.Line, pos.Col)
 			}
 		}
-		if idx, fieldTy, ok := initVal.Ty.FieldIndex("method"); ok {
+		if idx, fieldTy, ok := initVal.Ty.FieldIndex("method"); ok && !dyn {
 			mv := e.loadFieldValue(initVal, idx, fieldTy)
 			switch {
 			case isStringTy(mv.Ty) && !mv.Ty.IsObject && !mv.Ty.IsArray:
@@ -158,7 +184,9 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		// The body, as undici's extractBody reads it, and the Content-Type
 		// it implies.
 		ctRef := "null"
-		if idx, fieldTy, ok := initVal.Ty.FieldIndex("body"); ok {
+		if dyn {
+			bodyRef, bodyLen, ctRef = e.emitFetchBodyFromBox(dynGet("body"))
+		} else if idx, fieldTy, ok := initVal.Ty.FieldIndex("body"); ok {
 			bv := e.loadFieldValue(initVal, idx, fieldTy)
 			box, err := e.emitBoxValue(bv)
 			if err != nil {
@@ -168,41 +196,31 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		}
 		// The headers: init's, plus the implied Content-Type unless they
 		// set one.
-		var mapRef string
-		if idx, fieldTy, ok := initVal.Ty.FieldIndex("headers"); ok {
-			hv := e.loadFieldValue(initVal, idx, fieldTy)
-			var mapVal Value
-			if isHeaderMapType(hv.Ty) || (plainRecordType(hv.Ty) && !hv.Ty.Nullable) || (hv.Ty.IsArray && !hv.Ty.Nullable) {
-				if mapVal, err = e.headersFromInit(hv, pos); err != nil {
-					return Value{}, err
-				}
-			} else {
-				// A HeadersInit union, `any`, or an optional member: read
-				// by its run-time kind.
-				box, berr := e.emitBoxValue(hv)
-				if berr != nil {
-					return Value{}, fmt.Errorf("%d:%d: fetch's init.headers: %v", pos.Line, pos.Col, berr)
-				}
-				mapVal = e.emitHeadersFromBox(box)
-			}
-			mapRef = mapVal.Ref
+		var headers Value
+		if dyn {
+			hv := dynGet("headers")
+			headers, err = e.emitNewHeaders(&hv, pos)
 		} else {
-			e.ensureMapStrHelpers()
-			mapRef = e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", mapRef))
+			headers, err = e.emitHeadersFromInit(initVal, pos)
 		}
-		if ctRef != "null" {
-			e.emitSetHeaderIfAbsent(mapRef, "content-type", ctRef)
-		}
-		headersRef, err = e.buildFetchHeaderList(mapRef)
 		if err != nil {
+			return Value{}, err
+		}
+		if err := e.emitSetHeaderIfAbsent(headers, "content-type", ctRef, pos); err != nil {
+			return Value{}, err
+		}
+		if headersRef, err = e.emitHeadersSlist(headers, pos); err != nil {
 			return Value{}, err
 		}
 		if bodyRef != "null" {
 			// A body with no Content-Type is sent without one, as Node sends
 			// it: `Content-Type:` removes curl's form-urlencoded default.
-			has, hasBody, need := e.freshReg(), e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", has, mapRef, e.internString("content-type")))
+			hasV, err := e.emitHeadersMethod(headers, "has", pos, ast.NewStringLiteral("content-type", pos))
+			if err != nil {
+				return Value{}, err
+			}
+			has := e.coerce(hasV, TypeBool).Ref
+			hasBody, need := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasBody, bodyRef))
 			noCT := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", noCT, has))
@@ -246,24 +264,6 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 	}
 
 	return e.emitFetchAsyncCallN(urlVal.Ref, methodRef, headersRef, bodyRef, bodyLen, signalRef)
-}
-
-// emitSetHeaderIfAbsent sets header name (lowercase) to the string value
-// in the header map m unless m has it, or value is null.
-func (e *Emitter) emitSetHeaderIfAbsent(m, name, value string) {
-	key := e.internString(name)
-	has, isNull, skip := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", has, m, key))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, value))
-	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", skip, has, isNull))
-	setL, doneL := e.freshLabel("hdr.set"), e.freshLabel("hdr.done")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", skip, doneL, setL))
-	e.emitLabel(setL)
-	vi := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", vi, value))
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", m, key, vi))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-	e.emitLabel(doneL)
 }
 
 // emitFetchAsyncCallN is emitFetchAsyncCall with the body's byte length (-1:
@@ -362,21 +362,22 @@ func (e *Emitter) loadFieldValue(objVal Value, idx int, fieldTy Type) Value {
 	return Value{Ref: r, Ty: fieldTy}
 }
 
-// buildFetchHeaderList builds a struct curl_slist* (ADR-00074/TDD-00017)
-// from a Map<string,string> value, one curl_slist_append call per entry —
-// walks the same {ptr, i64} key/value arrays map.entries()/map.forEach()
-// already use (emit_collections.go's mapKeysAndVals), building each
-// "key: value" line with the existing emitStringConcat helper
-// (emit_strings.go). A runtime-empty map naturally produces a null list
-// (the loop just runs zero iterations) — no separate empty-map case needed.
+// buildFetchHeaderList is the curl_slist (ADR-00074/TDD-00017) of a
+// Map<string,string>'s entries (XMLHttpRequest's and http's header maps).
 func (e *Emitter) buildFetchHeaderList(mapPtr string) (string, error) {
-	e.ensureCurlSlist()
 	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, "str", Type{IR: "ptr"})
+	return e.buildCurlSlist(keysLen, func(i string) (string, string) {
+		return e.loadPtrAt(keysPtr, i), e.loadPtrAt(valsPtr, i)
+	})
+}
 
+// buildCurlSlist is a curl_slist of n "name: value" lines, entry(i) giving
+// line i's name and value. No lines is a null list.
+func (e *Emitter) buildCurlSlist(n string, entry func(i string) (name, value string)) (string, error) {
+	e.ensureCurlSlist()
 	listAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", listAlloca))
 	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", listAlloca))
-
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
@@ -384,38 +385,27 @@ func (e *Emitter) buildFetchHeaderList(mapPtr string) (string, error) {
 	condL := e.freshLabel("fetchheaders.cond")
 	bodyL := e.freshLabel("fetchheaders.body")
 	doneL := e.freshLabel("fetchheaders.done")
-
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
-	idxVal := e.freshReg()
-	isDone := e.freshReg()
+	idxVal, isDone := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", isDone, idxVal, keysLen))
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, %s", isDone, idxVal, n))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isDone, doneL, bodyL))
 
 	e.emitLabel(bodyL)
-	keyGep, keyVal := e.freshReg(), e.freshReg()
-	valGep, valVal := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", keyGep, keysPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", keyVal, keyGep))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", valGep, valsPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", valVal, valGep))
-
-	sep := e.internString(": ")
-	line1, err := e.emitStringConcat(Value{Ref: keyVal, Ty: TypePtr}, Value{Ref: sep, Ty: TypePtr})
+	name, value := entry(idxVal)
+	line1, err := e.emitStringConcat(Value{Ref: name, Ty: TypePtr}, Value{Ref: e.internString(": "), Ty: TypePtr})
 	if err != nil {
 		return "", err
 	}
-	line2, err := e.emitStringConcat(line1, Value{Ref: valVal, Ty: TypePtr})
+	line2, err := e.emitStringConcat(line1, Value{Ref: value, Ty: TypePtr})
 	if err != nil {
 		return "", err
 	}
-
 	curList, newList := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curList, listAlloca))
 	e.emitInstr(fmt.Sprintf("%s = call ptr @curl_slist_append(ptr %s, ptr %s)", newList, curList, line2.Ref))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newList, listAlloca))
-
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
@@ -668,14 +658,7 @@ func (e *Emitter) emitRejectWithThrown(q string) {
 
 // emitRejectCaught rejects task promise q with the caught value (tag, pay).
 func (e *Emitter) emitRejectCaught(q, tag, pay string) {
-	tag64 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i64", tag64, tag))
-	v0, v1 := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0, promiseStructIR, q))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", pay, v0))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", v1, promiseStructIR, q))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", tag64, v1))
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 2)", q))
+	e.emitRejectPromise(q, tag, true, pay)
 }
 
 // emitResponseBodyUsed is response.bodyUsed: a body method has run, or the
@@ -865,4 +848,32 @@ func (e *Emitter) emitResponseJSON(objExpr ast.Expression, targetTy Type, pos as
 		return Value{}, err
 	}
 	return e.emitJSONParseValue(bodyVal, targetTy, pos)
+}
+
+// The Body mixin's readers on a Response or a fetch Request, reached
+// through their `@intrinsic` declarations.
+func init() {
+	for _, name := range []string{"text", "json", "arrayBuffer"} {
+		name := name
+		intrinsics["Body.prototype."+name] = intrinsic{
+			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+				mem := ex.Callee.(*ast.MemberExpression)
+				objVal, err := e.emitExpr(mem.Object)
+				if err != nil {
+					return Value{}, err
+				}
+				if ty, ok := e.callAssertedTargetTy(ex); ok && name == "json" {
+					// `res.json() as T` supplies the parse target, as
+					// `JSON.parse(s) as T` does; the result is still a
+					// Promise<T> (TDD-00186 Part B).
+					return e.emitResponseCall(objVal, name, ex.GetPos(), ty)
+				}
+				return e.emitResponseCall(objVal, name, ex.GetPos())
+			},
+			ty: func(e *Emitter, ex *ast.CallExpression) Type {
+				t, _ := e.inferMethodNameType(ex, ex.Callee.(*ast.MemberExpression))
+				return t
+			},
+		}
+	}
 }

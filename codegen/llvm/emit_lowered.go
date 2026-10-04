@@ -51,7 +51,12 @@ type lowering struct {
 	// recv is the receiver's representation for a method of a primitive's
 	// apparent type (`s.trim()`), passed as the first argument; nil for a
 	// method of a global object (`Math.sin(x)`).
-	recv   *Type
+	recv *Type
+	// libFn is the TypeScript builtin library's function a `@lower` target
+	// names (a global module's export, by its linked name): the call is an
+	// ordinary call of it, the receiver (if any) its first argument.
+	libFn  string
+	call   *ast.CallExpression
 	params []loweredParam
 	result Type
 	// resultOptional marks a `T | undefined` result: the entry point
@@ -65,10 +70,49 @@ func (l *lowering) resultType() Type {
 	if l.intrinsic != "" {
 		return intrinsics[l.intrinsic].ty(l.e, l.ex)
 	}
+	if l.libFn != "" {
+		return l.e.inferExprType(l.libCall())
+	}
 	if l.resultOptional {
 		return undefinedableElem(l.result)
 	}
 	return l.result
+}
+
+// sharedLibLowering is the linked TypeScript function every declaration of
+// a method (its overloads, or its one declaration) names as its `@lower`.
+func (e *Emitter) sharedLibLowering(decl ast.Node, overloads []ast.Node) (string, bool) {
+	decls := overloads
+	if len(decls) == 0 {
+		if decl == nil {
+			return "", false
+		}
+		decls = []ast.Node{decl}
+	}
+	target := ""
+	for _, d := range decls {
+		ms, ok := d.(*ast.MethodSignature)
+		if !ok || ms.Lower == "" || target != "" && ms.Lower != target {
+			return "", false
+		}
+		target = ms.Lower
+	}
+	m, ok := e.globalLinks[target]
+	return m, ok
+}
+
+// libCall is a library-lowered call as the call of its function (built
+// once, so inference and emission see one node).
+func (l *lowering) libCall() *ast.CallExpression {
+	if l.call == nil {
+		ex := l.ex
+		args := ex.Args
+		if l.recv != nil {
+			args = append([]ast.Expression{ex.Callee.(*ast.MemberExpression).Object}, args...)
+		}
+		l.call = ast.NewCallExpression(ast.NewIdentifier(l.libFn, ex.GetPos()), args, ex.GetPos())
+	}
+	return l.call
 }
 
 // loweredParam is one declared parameter: its representation, and whether
@@ -96,8 +140,80 @@ type loweredParam struct {
 // decider both emission and inferExprType consult. It is not memoised: it
 // reads codegen's scope (shadowing, the receiver's representation), which
 // inferExprType may consult before a callback's parameters are bound.
+// callSignatureIntrinsic is the intrinsic every call signature of an
+// interface type names, or "" when one names none or they differ.
+func callSignatureIntrinsic(t *checker.Type) string {
+	if t == nil || t.Symbol == nil {
+		return ""
+	}
+	key := ""
+	for _, d := range t.Symbol.Declarations {
+		decl, ok := d.Node.(*ast.InterfaceDeclaration)
+		if !ok {
+			continue
+		}
+		for _, m := range decl.Members {
+			cs, ok := m.(*ast.CallSignature)
+			if !ok {
+				continue
+			}
+			if cs.Intrinsic == "" || key != "" && cs.Intrinsic != key {
+				return ""
+			}
+			key = cs.Intrinsic
+		}
+	}
+	if _, known := intrinsics[key]; !known {
+		return ""
+	}
+	return key
+}
+
 func (e *Emitter) loweredCall(ex *ast.CallExpression) (*lowering, bool) {
-	if ex.Optional || len(ex.TypeArgs) > 0 {
+	if l, ok := e.loweredCallDecl(ex); ok {
+		return l, true
+	}
+	// A call shape its declaration's lowering does not take (an argument
+	// no overload accepts under -compat=js, a spread of an `any`, a method
+	// declared without a key): the method of the owner codegen's
+	// representation of the receiver names, whose emitter takes every form.
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && !ex.Optional && !mem.Optional {
+		if c := e.front(); c != nil && e.isLibMember(c.MemberDecl(mem)) {
+			if key, ok := e.reprIntrinsic(mem); ok {
+				return &lowering{intrinsic: key, e: e, ex: ex}, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// isLibMember reports whether d is a member a builtin declaration file
+// declares (an interface's method), not the program's own.
+func (e *Emitter) isLibMember(d ast.Node) bool {
+	if d == nil {
+		return false
+	}
+	if e.libMembers == nil {
+		e.libMembers = map[ast.Node]bool{}
+		if progs, err := lib.Programs(); err == nil {
+			for _, p := range progs {
+				ast.Inspect(p, func(n ast.Node) bool {
+					if ms, ok := n.(*ast.MethodSignature); ok {
+						e.libMembers[ms] = true
+					}
+					return true
+				})
+			}
+		}
+	}
+	return e.libMembers[d]
+}
+
+func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
+	if _, known := intrinsics[ex.Intrinsic]; known {
+		return &lowering{intrinsic: ex.Intrinsic, e: e, ex: ex}, true // synthesized
+	}
+	if ex.Optional {
 		return nil, false
 	}
 	c := e.front()
@@ -115,6 +231,11 @@ func (e *Emitter) loweredCall(ex *ast.CallExpression) (*lowering, bool) {
 				}
 			}
 		}
+		// A builtin constructor called as a function (`String(x)`): its
+		// interface's call signatures, when they all name one intrinsic.
+		if key := callSignatureIntrinsic(c.TypeOf(id)); key != "" {
+			return &lowering{intrinsic: key, e: e, ex: ex}, true
+		}
 		return nil, false
 	}
 	mem, ok := ex.Callee.(*ast.MemberExpression)
@@ -122,7 +243,17 @@ func (e *Emitter) loweredCall(ex *ast.CallExpression) (*lowering, bool) {
 		return nil, false
 	}
 	if key, ok := e.methodIntrinsic(c, mem); ok {
+		// An intrinsic's emitter reads its types off the arguments; explicit
+		// type arguments (`Object.freeze<T>(o)`) change nothing.
 		return &lowering{intrinsic: key, e: e, ex: ex}, true
+	}
+	if c.MemberDecl(mem) == nil && c.MemberOverloadDecls(mem) == nil {
+		if key, ok := e.reprIntrinsic(mem); ok {
+			return &lowering{intrinsic: key, e: e, ex: ex}, true
+		}
+	}
+	if len(ex.TypeArgs) > 0 {
+		return nil, false
 	}
 	var recv *Type
 	var decl ast.Node
@@ -142,8 +273,22 @@ func (e *Emitter) loweredCall(ex *ast.CallExpression) (*lowering, bool) {
 			// type's member.
 			fn, decl, overloads = c.PrimitiveMember(r.IR == "ptr", mem.Property)
 		}
+	} else if d, ov := c.MemberDecl(mem), c.MemberOverloadDecls(mem); e.isLibMember(d) || len(ov) > 0 && e.isLibMember(ov[0]) {
+		// A builtin interface's method on an object (an iterator's
+		// `every`) lowered to a TypeScript library function: the receiver
+		// is its first argument.
+		if m, ok := e.sharedLibLowering(d, ov); ok {
+			r := TypeAny
+			return &lowering{libFn: m, recv: &r, e: e, ex: ex}, true
+		}
+		return nil, false
 	} else {
 		return nil, false
+	}
+	if m, ok := e.sharedLibLowering(decl, overloads); ok {
+		// Every overload lowers to one TypeScript function: which the call
+		// resolves to does not matter.
+		return &lowering{libFn: m, recv: recv, e: e, ex: ex}, true
 	}
 	if fn == nil || c.Unanswered(fn) || fn.Flags&checker.Object == 0 || fn.Kind != checker.Function {
 		return nil, false
@@ -163,6 +308,11 @@ func (e *Emitter) loweredCall(ex *ast.CallExpression) (*lowering, bool) {
 			return &lowering{intrinsic: ms.Intrinsic, e: e, ex: ex}, true
 		}
 		return nil, false // the named path, which rejects what the intrinsic cannot take
+	}
+	if ok && ms.Lower != "" {
+		if m, linked := e.globalLinks[ms.Lower]; linked {
+			return &lowering{libFn: m, recv: recv, e: e, ex: ex}, true
+		}
 	}
 	if !ok || ms.Lower == "" || len(ms.TypeParameters) > 0 {
 		return nil, false
@@ -200,8 +350,20 @@ func (e *Emitter) loweredCall(ex *ast.CallExpression) (*lowering, bool) {
 		}
 		l.params = append(l.params, loweredParam{ty: r, optional: p.Optional})
 	}
-	for _, a := range ex.Args {
-		if _, ok := a.(*ast.SpreadElement); ok {
+	for i, a := range ex.Args {
+		sp, ok := a.(*ast.SpreadElement)
+		if !ok {
+			continue
+		}
+		// A spread into the rest parameter (`s.concat(...parts)`) of an
+		// array whose elements already have the rest's representation.
+		n := len(l.params)
+		if n == 0 || !l.params[n-1].rest || i < n-1 {
+			return nil, false
+		}
+		at := e.inferExprType(sp.Arg)
+		if !at.IsArray || at.ElemType == nil || at.ElemType.IR != l.params[n-1].ty.ElemType.IR ||
+			at.ElemType.IsDynamic || at.ElemType.Nullable || isUnconstrainedDynamic(at) {
 			return nil, false
 		}
 	}
@@ -220,8 +382,28 @@ func (e *Emitter) loweredCall(ex *ast.CallExpression) (*lowering, bool) {
 // whatever declares it. A receiver the checker cannot type (or types `any`)
 // has no declaration: it takes the named paths.
 func (e *Emitter) methodIntrinsic(c *checker.Checker, mem *ast.MemberExpression) (string, bool) {
-	if c.MemberOverloadDecls(mem) != nil {
-		return "", false // an overloaded method: the overload the call resolves to decides
+	if ovs := c.MemberOverloadDecls(mem); ovs != nil {
+		// An overloaded method whose overloads all name one intrinsic
+		// (`JSON.stringify`): its emitter takes every form. Otherwise the
+		// overload the call resolves to decides.
+		key := ""
+		for _, d := range ovs {
+			k := ""
+			switch d := d.(type) {
+			case *ast.MethodSignature:
+				k = d.Intrinsic
+			case *ast.FunctionDeclaration:
+				k = d.Intrinsic // a namespace's function (`Reflect.apply`)
+			}
+			if k == "" || key != "" && k != key {
+				return "", false
+			}
+			key = k
+		}
+		if !e.intrinsicApplies(key, mem) {
+			return "", false
+		}
+		return key, true
 	}
 	decl := c.MemberDecl(mem)
 	key := ""
@@ -246,20 +428,84 @@ func (e *Emitter) intrinsicApplies(key string, mem *ast.MemberExpression) bool {
 		return false
 	}
 	if owner, _, ok := strings.Cut(key, ".prototype."); ok && collectionIntrinsics[owner] != nil {
-		// Codegen must hold the receiver as that collection (a dictionary,
-		// Headers or URLSearchParams keeps its own path).
+		// Codegen must hold the receiver as that collection (a dictionary
+		// keeps its own path).
 		ot := e.inferExprType(mem.Object)
 		weak := owner == "WeakMap" || owner == "WeakSet"
-		return (ot.IsMap || ot.IsSet) && ot.Weak == weak && !ot.IsDynamicObject && !ot.IsHeaders &&
-			!ot.IsURLSearchParams && !isUnconstrainedDynamic(ot)
+		return (ot.IsMap || ot.IsSet) && ot.Weak == weak && !ot.IsDynamicObject &&
+			!isUnconstrainedDynamic(ot)
 	}
 	if strings.HasPrefix(key, "RegExp.prototype.") {
 		ot := e.inferExprType(mem.Object)
 		return ot.IsRegExp && !ot.IsDynamic
 	}
+	if strings.HasPrefix(key, "Function.prototype.") {
+		// A -compat=js prototype constructor's Base.call(this, …) runs it on
+		// the receiver object (emitCall's jsProtoCtor path).
+		if id, ok := mem.Object.(*ast.Identifier); ok && e.compatJS() && e.jsProtoCtor[id.Name] {
+			return false
+		}
+		ot := e.inferExprType(mem.Object)
+		return ot.IsFunc && !ot.IsDynamic
+	}
+	if strings.HasPrefix(key, "Promise.prototype.") {
+		ot := e.inferExprType(mem.Object)
+		return ot.IsPromise && !ot.IsDynamic
+	}
 	if strings.HasPrefix(key, "Date.prototype.") {
 		ot := e.inferExprType(mem.Object)
 		return ot.IsDate && !ot.IsDynamic
+	}
+	if strings.HasPrefix(key, "TypedArray.prototype.") {
+		ot := e.inferExprType(mem.Object)
+		return ot.IsTypedArray && !isUnconstrainedDynamic(ot)
+	}
+	if owner, _, ok := strings.Cut(key, ".prototype."); ok {
+		if held := ownerReprs[owner]; held != nil {
+			ot := e.inferExprType(mem.Object)
+			return held(ot) && !isUnconstrainedDynamic(ot)
+		}
+	}
+	switch key {
+	case "Object.prototype.toString":
+		ot := e.inferExprType(mem.Object)
+		if isNumberTy(ot) && ot.IR != "i1" {
+			// A number reaches Object's toString only through a declaration
+			// that names it, or as a union with a boolean (whose members
+			// TypeScript requires to take no argument); an undeclared one
+			// takes Number.prototype.toString(radix)'s lowering.
+			c := e.front()
+			if c == nil || isUnconstrainedDynamic(ot) {
+				return false
+			}
+			t := c.TypeOf(mem.Object)
+			return c.MemberDecl(mem) != nil || !c.Unanswered(t) && t.Flags&checker.Union != 0
+		}
+		return objectProtoToStringApplies(ot)
+	case "Object.prototype.hasOwnProperty":
+		ot := e.inferExprType(mem.Object)
+		return ot.IsObject && !isUnconstrainedDynamic(ot)
+	case "BigInt.prototype.toString":
+		return e.inferExprType(mem.Object).IsBigInt
+	}
+	if owner, _, ok := strings.Cut(key, ".prototype."); ok && strings.Contains(owner, "Stream") {
+		ot := e.inferExprType(mem.Object)
+		if strings.HasPrefix(owner, "Writable") {
+			return ot.IsWritableStream || ot.IsStreamWriter || ot.IsWSController
+		}
+		return ot.IsReadableStream || ot.IsStreamReader || ot.IsRSController
+	}
+	if strings.HasPrefix(key, "Body.prototype.") {
+		ot := e.inferExprType(mem.Object)
+		return hasBodyMixin(ot) && !isUnconstrainedDynamic(ot)
+	}
+	if strings.HasPrefix(key, "XMLHttpRequest.prototype.") {
+		ot := e.inferExprType(mem.Object)
+		return ot.IsXHR && !isUnconstrainedDynamic(ot)
+	}
+	if strings.HasPrefix(key, "Buffer.prototype.") {
+		ot := e.inferExprType(mem.Object)
+		return ot.IsBuffer && !isUnconstrainedDynamic(ot)
 	}
 	if strings.HasPrefix(key, "Array.prototype.") {
 		ot := e.inferExprType(mem.Object)
@@ -291,6 +537,10 @@ func (e *Emitter) isBuiltinGlobalObject(c *checker.Checker, x ast.Expression) bo
 		}
 		if !e.isBuiltinGlobal(c, x) {
 			return false
+		}
+		// A builtin namespace (`Reflect`) has no value type of its own.
+		if sym, _ := c.Binding().Resolve(x); sym != nil && sym.Flags&binder.NamespaceModule != 0 {
+			return true
 		}
 	case *ast.MemberExpression:
 		id, ok := x.Object.(*ast.Identifier)
@@ -343,6 +593,9 @@ func (e *Emitter) loweredReceiver(c *checker.Checker, obj ast.Expression) (ty Ty
 
 // isUndefinedLiteral reports whether a is the global `undefined`.
 func isUndefinedLiteral(e *Emitter, a ast.Expression) bool {
+	if nl, ok := a.(*ast.NullLiteral); ok {
+		return nl.IsUndefined && !nl.Void // `undefined` as parsed; `void x` evaluates x
+	}
 	id, ok := a.(*ast.Identifier)
 	return ok && id.Name == "undefined" && !e.isShadowedByLocal("undefined")
 }
@@ -417,6 +670,9 @@ func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error
 		return intrinsics[l.intrinsic].emit(e, ex)
 	}
 	mem := ex.Callee.(*ast.MemberExpression)
+	if l.libFn != "" {
+		return e.emitExpr(l.libCall())
+	}
 	var args []string
 	if l.recv != nil {
 		v, err := e.emitExpr(mem.Object)
@@ -431,7 +687,16 @@ func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error
 		restAt = n - 1
 	}
 	var rest []string
+	restSpread := false
 	for i, a := range ex.Args {
+		if _, ok := a.(*ast.SpreadElement); ok && restAt >= 0 && i >= restAt {
+			restSpread = true
+		}
+	}
+	for i, a := range ex.Args {
+		if restSpread && i >= restAt {
+			continue // the rest arguments, spreads among them, as one array below
+		}
 		if restAt >= 0 && i >= restAt {
 			v, err := e.emitExpr(a)
 			if err != nil {
@@ -515,7 +780,16 @@ func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error
 			return Value{}, fmt.Errorf("%d:%d: missing argument %d", ex.GetPos().Line, ex.GetPos().Col, i+1)
 		}
 	}
-	if restAt >= 0 {
+	if restSpread {
+		// The remaining arguments as an array literal: its spreads copy their
+		// arrays' elements in order.
+		lit := ast.NewArrayLiteral(ex.Args[restAt:], ex.GetPos())
+		v, err := e.emitExprWithObjectHint(lit, l.params[restAt].ty)
+		if err != nil {
+			return Value{}, err
+		}
+		args = append(args, "ptr noundef "+e.arrayReturnHeader(v))
+	} else if restAt >= 0 {
 		args = append(args, "ptr noundef "+e.restArray(rest))
 	}
 	var slot string
@@ -546,13 +820,11 @@ func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error
 	return Value{Ref: r, Ty: l.result}, nil
 }
 
-// emitLoweredInvoker emits `void @__kml_lower_inv_N(ptr %clo, params…)`: the
-// runtime's typed caller of a callback passed to a lowered entry point, which
-// converts each value the runtime passes to the closure's own parameter
-// representation.
+// emitLoweredInvoker emits `void (ptr %clo, params…)` and returns its
+// symbol: the runtime's typed caller of a callback passed to a lowered entry
+// point, which converts each value the runtime passes to the closure's own
+// parameter representation. Named by its content (defineContentNamed).
 func (e *Emitter) emitLoweredInvoker(fnTy Type, params []Type) (string, error) {
-	e.lowerInvCtr++
-	fn := fmt.Sprintf("@__kml_lower_inv_%d", e.lowerInvCtr)
 	restore := e.beginThunkEmit()
 	var sig []string
 	var args []Value
@@ -569,8 +841,7 @@ func (e *Emitter) emitLoweredInvoker(fnTy Type, params []Type) (string, error) {
 	e.emitInstr("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(%s) {\nentry:\n%s}\n", fn, strings.Join(append([]string{"ptr %clo"}, sig...), ", "), body))
-	return fn, nil
+	return e.defineContentNamed("@__kml_lower_inv.", "void", strings.Join(append([]string{"ptr %clo"}, sig...), ", "), body), nil
 }
 
 // optionalPresence is whether an argument to an optional parameter is
@@ -731,6 +1002,8 @@ var runtimeUnits = map[string]func(*Emitter){
 	"ffi":     (*Emitter).ensureFFINatives,
 	"crypto":  (*Emitter).ensureCryptoNatives,
 	"http2":   (*Emitter).ensureH2Natives,
+	"umap":    (*Emitter).ensureUmapOrder,
+	"weak":    (*Emitter).ensureWeakNatives,
 }
 
 // runtimeSymbols are the `@lower` targets the IR runtime defines, rather
@@ -1011,18 +1284,75 @@ func (e *Emitter) genericMethodResult(ex *ast.CallExpression, objTy Type, method
 // interface/alias (RefName).
 func objectMemberNamed(m Type, name string) bool {
 	if m.IsClass {
-		cn := m.ClassName
-		if i := strings.Index(cn, "__kml_mod"); i >= 0 {
-			cn = cn[:i]
-		}
-		return cn == name
+		return ast.Unmangle(m.ClassName) == name
 	}
 	if m.RefName != "" {
-		rn := m.RefName
-		if i := strings.Index(rn, "__kml_mod"); i >= 0 {
-			rn = rn[:i]
-		}
-		return rn == name
+		return ast.Unmangle(m.RefName) == name
 	}
 	return hostClassName(m) == name
+}
+
+// ownerReprs are the host-object owners whose intrinsics take a receiver
+// codegen holds as the representation the predicate accepts.
+var ownerReprs = map[string]func(Type) bool{
+	"FinalizationRegistry": func(t Type) bool { return t.IsFinalizationRegistry },
+}
+
+// reprOwners are the declaration owners whose methods a receiver held as ty
+// has, most specific first.
+func reprOwners(ty Type) []string {
+	for owner, held := range ownerReprs {
+		if held(ty) {
+			return []string{owner}
+		}
+	}
+	switch {
+	case isUnconstrainedDynamic(ty):
+		return nil
+	case ty.IsReadableStream:
+		return []string{"ReadableStream"}
+	case ty.IsStreamReader:
+		return []string{"ReadableStreamDefaultReader", "ReadableStreamGenericReader"}
+	case ty.IsRSController:
+		return []string{"ReadableStreamDefaultController"}
+	case ty.IsWritableStream:
+		return []string{"WritableStream"}
+	case ty.IsStreamWriter:
+		return []string{"WritableStreamDefaultWriter"}
+	case ty.IsWSController:
+		return []string{"WritableStreamDefaultController"}
+	case ty.IsBuffer:
+		return []string{"Buffer", "TypedArray", "Array", "Object"}
+	case ty.IsTypedArray:
+		return []string{"TypedArray", "Array", "Object"}
+	case ty.IsXHR:
+		return []string{"XMLHttpRequest"}
+	case hasBodyMixin(ty):
+		return []string{"Body"}
+	case ty.IsBigInt:
+		return []string{"BigInt"}
+	case ty.IsPromise:
+		return []string{"Promise"}
+	case ty.IsFunc && !ty.IsDynamic:
+		return []string{"Function", "Object"}
+	case ty.IsArray:
+		return []string{"Array", "Object"}
+	case isForOfStringTy(ty):
+		return []string{"String", "Object"}
+	}
+	return []string{"Object"}
+}
+
+// reprIntrinsic is the intrinsic a method call takes when the checker has
+// no declaration for it (a callback parameter it could not type from an
+// overloaded generic context, synthesized code): the method of the owner
+// codegen's own representation of the receiver names.
+func (e *Emitter) reprIntrinsic(mem *ast.MemberExpression) (string, bool) {
+	for _, owner := range reprOwners(e.inferExprType(mem.Object)) {
+		key := owner + ".prototype." + mem.Property
+		if e.intrinsicApplies(key, mem) {
+			return key, true
+		}
+	}
+	return "", false
 }

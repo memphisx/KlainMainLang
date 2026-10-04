@@ -18,32 +18,9 @@ import * as tls from 'tls';
 import * as fs from 'fs';
 import { _kmlHttpServerCore } from './internal_http';
 import { invalidArgType, validateFunction, validateBoolean, validateNumber, validateString } from './internal_dns_utils';
+import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
 // ---- errors (lib/internal/errors.js) ----
-
-class NodeError extends Error {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
 
 // An nghttp2 library error: nghttp2_strerror's text, code ERR_HTTP2_ERROR.
 class NghttpError extends Error {

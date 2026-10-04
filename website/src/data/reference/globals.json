@@ -7,10 +7,10 @@
   "coverage": {
     "loose": "20/21",
     "loosePct": 95,
-    "strict": "14/21",
-    "strictPct": 67
+    "strict": "17/21",
+    "strictPct": 76
   },
-  "lede": "JavaScript's language-level globals — numeric parsing, type coercion, URI/base64 codecs, and deep cloning — compiled to plain C-stdlib calls with no runtime engine. globalThis.X works as an alias for the bare ambient global X (member access to known globals only — there's no dynamic global object). Dynamic eval is out of scope — it needs the (unstarted) embedded engine, though a compile-time-constant eval(\"<expression>\") does route through this compiler's own parser. Malformed input is rejected where JS rejects it — decodeURI/decodeURIComponent throw URIError and atob enforces forgiving-base64 with QuotaExceededError.",
+  "lede": "JavaScript's language-level globals — numeric parsing, type coercion, URI/base64 codecs, and deep cloning — compiled to plain C-stdlib calls with no runtime engine. globalThis.X reads the global X, and globalThis as a value is the global object, holding the builtins and whatever the program sets on it. Dynamic eval is out of scope — it needs the (unstarted) embedded engine, though a compile-time-constant eval(\"<expression>\") does route through this compiler's own parser. Malformed input is rejected where JS rejects it — decodeURI/decodeURIComponent throw URIError and atob enforces forgiving-base64 with QuotaExceededError.",
   "entries": [
     {
       "id": "globals.isNaN",
@@ -183,7 +183,7 @@
       "name": "NaN (global constant)",
       "statusRow": "NaN (global constant)",
       "signature": "const NaN: number",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "The bare NaN global (same value as Number.NaN), usable without the Number. prefix. NaN != x and !== x comparisons are correct — compiled as unordered fcmp une, so NaN !== NaN is true as in JS.",
       "returns": {
         "type": "number",
@@ -191,9 +191,7 @@
       },
       "exampleKey": "globals/globals",
       "snippet": "const nan: float64 = NaN\nconsole.log(nan !== nan)           // true  (the defining property of NaN)",
-      "differences": [
-        "`let NaN = 99;` is a reserved-name collision under the default `-compat=strict`; `-compat=js` allows the shadow real JS permits."
-      ],
+      "differences": [],
       "seeAlso": [
         "globals.Infinity",
         "globals.isNaN"
@@ -207,7 +205,7 @@
       "name": "Infinity (global constant)",
       "statusRow": "Infinity (global constant)",
       "signature": "const Infinity: number",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "The bare Infinity global (same value as Number.POSITIVE_INFINITY), usable without the Number. prefix; -Infinity is the negative pole.",
       "returns": {
         "type": "number",
@@ -215,9 +213,6 @@
       },
       "exampleKey": "globals/globals",
       "snippet": "console.log(-Infinity < 0)         // true\nconsole.log(Infinity > 1000000)    // true",
-      "differences": [
-        "Same shadowing caveat as `NaN` above — needs `-compat=js`, not unconditional."
-      ],
       "seeAlso": [
         "globals.NaN",
         "globals.isFinite"
@@ -248,14 +243,10 @@
       "id": "globals.globalThis",
       "name": "globalThis",
       "statusRow": "globalThis",
-      "signature": "globalThis.<knownGlobal>",
-      "badge": "caveats",
-      "description": "globalThis.X desugars to the bare ambient global X, so the standard portable alias works for member access — including nested and call forms like globalThis.JSON.stringify(...), globalThis.Math.max(...), and globalThis.setTimeout(...). There is no dynamic global object: only known globals resolve (an unknown globalThis.foo is a compile error), and a bare globalThis as a value, computed access (globalThis[\"x\"]), and assigning a new global are unsupported.",
-      "caveats": [
-        "Only member access to known globals resolves — no dynamic global record",
-        "Bare globalThis as a value, globalThis[\"x\"], and globalThis.x = … are unsupported"
-      ],
-      "snippet": "console.log(globalThis.JSON.stringify({ a: 1 }))",
+      "signature": "globalThis",
+      "badge": "exact",
+      "description": "The global object. globalThis.X for a declared global (a builtin, or a declare global var) is that global, including nested and call forms like globalThis.JSON.stringify(...) and globalThis.setTimeout(...). As a value it is one object holding the builtins as its properties and whatever the program sets on it — globalThis.x = …, computed keys, passing it around. A module's top-level bindings are not on it, as in an ES module.",
+      "snippet": "(globalThis as any).appVersion = '1.2.3'\nconst g: any = globalThis\nconsole.log(g.appVersion, typeof globalThis) // 1.2.3 object",
       "seeAlso": [
         "globals.undefined"
       ],

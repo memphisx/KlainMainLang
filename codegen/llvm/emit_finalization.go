@@ -155,6 +155,35 @@ func (e *Emitter) finregObjectArg(expr ast.Expression, what string, pos ast.Pos)
 	if v.Ty.IR != "ptr" || isStringTy(v.Ty) {
 		return "", fmt.Errorf("%d:%d: FinalizationRegistry's %s must be an object (not a primitive)", pos.Line, pos.Col, what)
 	}
+	if v.Ty.IsSymbol {
+		// A registered symbol (`Symbol.for`) cannot be held weakly: Node's
+		// TypeError.
+		e.ensureSymbolRegistry()
+		key, isReg := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_symbol_keyfor(ptr %s)", key, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isReg, key))
+		bad, ok := e.freshLabel("finreg.badkey"), e.freshLabel("finreg.key")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isReg, bad, ok))
+		e.emitLabel(bad)
+		if what == "unregisterToken" {
+			shown, err := e.emitSymbolToString(v)
+			if err != nil {
+				return "", err
+			}
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", shown.Ref, slot))
+			e.define("__kml_finreg_sym", Symbol{Ptr: slot, Ty: TypePtr})
+			msg, err := e.emitExpr(ast.NewBinaryExpression("+", ast.NewBinaryExpression("+", ast.NewStringLiteral("Invalid unregisterToken ('", pos), ast.NewIdentifier("__kml_finreg_sym", pos), pos), ast.NewStringLiteral("')", pos), pos))
+			if err != nil {
+				return "", err
+			}
+			e.emitThrowTypeErrorValue(msg.Ref)
+		} else {
+			e.emitThrowTypeError("FinalizationRegistry.prototype.register: invalid target")
+		}
+		e.emitLabel(ok)
+	}
 	return v.Ref, nil
 }
 

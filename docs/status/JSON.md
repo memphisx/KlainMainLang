@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 15/15 (100%) · **Strict Coverage**: 10/15 (~67%).
+**Coverage**: 15/15 (100%) · **Strict Coverage**: 11/15 (~73%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -17,7 +17,7 @@ Format: [Status page format](README.md#status-page-format).
 | `JSON.stringify(object)` | ✅ | | |
 | `JSON.stringify(boolean[])` | ✅ | | |
 | `JSON.stringify(object[])` | ✅ | | |
-| `JSON.stringify(value, null, space)` (pretty-printing) | ✅ | • `space` must be a literal number (N spaces, capped at 10) or literal string — a runtime `space` value is a clean compile error ([ADR-00222](../adr/ADR-00222.md))<br>• The `replacer` (2nd) argument is supported only as `null`/undefined — a function/array replacer is a clean compile error, not silently ignored | • A `jsonIndent{unit,depth}` threaded through the serializer; empty containers stay inline (`{}`/`[]`), an array's empty-vs-non-empty close is a runtime `select` on its length ([TDD-00077](../tdd/TDD-00077.md) Track S) |
+| `JSON.stringify(value, null, space)` (pretty-printing) | ✅ | | • A replacer function or property list, a `space` known only at run time, and `JSON.parse`'s reviver run ECMA-262's SerializeJSONProperty / InternalizeJSONProperty over the run-time value ([ADR-01333](../adr/ADR-01333.md))<br>• A `jsonIndent{unit,depth}` threaded through the serializer; empty containers stay inline (`{}`/`[]`), an array's empty-vs-non-empty close is a runtime `select` on its length ([TDD-00077](../tdd/TDD-00077.md) Track S) |
 | `JSON.stringify` honors a class `toJSON()` | ✅ | | • A class with a `toJSON()` method serializes its result instead of its own fields, matching JS — same override dispatch as `toString()`. A `toJSON()` returning its own type is bounded against compile-time infinite recursion (cf. [ADR-00221](../adr/ADR-00221.md)). `Date` keeps its own `toISOString`-based path rather than being unified ([ADR-00222](../adr/ADR-00222.md)) |
 | `JSON.stringify(mixedTypeArray)` | ✅ | • Strict lane: a literal mixing two object types, or an untyped `[]` grown with values of different types, is rejected (annotate it, or `-compat=js`) | • An unannotated mixed literal is an array of the union of its element types (`[new P(), 2, null]` is `(P | number | null)[]`), and each element serializes by its run-time kind, class instances and plain objects through their layout rows ([ADR-01213](../adr/ADR-01213.md), [ADR-01214](../adr/ADR-01214.md)); under `-compat=js` a mixed literal is `any[]` ([ADR-00887](../adr/ADR-00887.md))<br>• A static object or array inside an `any[]` serializes as itself, nested values included |
 | `JSON.parse(s)` → number | ✅ | | • Integer via `atoll`, float (incl. a `/** @type {float64} */`/`float32` variable) via `strtod` on the node's raw lexeme, through the type-directed projection ([ADR-00224](../adr/ADR-00224.md)) |

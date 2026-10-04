@@ -451,6 +451,7 @@ func (p *Parser) parseNamespaceBody(nsTok lexer.Token, ns string, ambient bool) 
 			// throwing-stub treatment a top-level `declare function` does
 			// (ADR-00471/ADR-00474).
 			if ambient {
+				doc := p.takeDoc()
 				p.advance() // 'function'
 				nameTok, err := p.expect(lexer.IDENT)
 				if err != nil {
@@ -467,6 +468,13 @@ func (p *Parser) parseNamespaceBody(nsTok lexer.Token, ns string, ambient bool) 
 					fd.Body = ast.NewBlockStatement([]ast.Statement{throwStmt}, posOf(nsTok))
 					fd.IsAbstract = false
 					fd.Ambient = true
+				}
+				if doc != nil {
+					for _, a := range doc.Annotations {
+						if a.Tag == "intrinsic" {
+							fd.Intrinsic = a.Value // a builtin namespace's function (`Reflect.get`)
+						}
+					}
 				}
 				p.namespaces[ns][fd.Name] = exported
 				fd.Name = ast.NamespaceMangle(ns, fd.Name)
@@ -716,7 +724,7 @@ func (p *Parser) parseVarDecl(consumeSemi bool) (ast.Statement, error) {
 // a comma. doc is only ever non-nil for the first declarator: a JSDoc
 // comment precedes the statement as a whole, not each individual name.
 func (p *Parser) parseOneVarDeclarator(kind string, pos ast.Pos, doc *jsdoc.Comment) (*ast.VarDeclaration, error) {
-	nameTok, err := p.expect(lexer.IDENT)
+	nameTok, err := p.expectBindingName()
 	if err != nil {
 		return nil, err
 	}
@@ -775,6 +783,7 @@ func (p *Parser) parseOneVarDeclarator(kind string, pos ast.Pos, doc *jsdoc.Comm
 
 	vd := ast.NewVarDeclaration(kind, nameTok.Literal, ta, init, pos)
 	vd.Ambient = p.declarations && init == nil
+	vd.NamePos = posOf(nameTok)
 	return vd, nil
 }
 
@@ -1313,7 +1322,7 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 			continue
 		}
 
-		nameTok, err := p.expect(lexer.IDENT)
+		nameTok, err := p.expectBindingName()
 		if err != nil {
 			return nil, err
 		}

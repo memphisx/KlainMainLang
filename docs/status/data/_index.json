@@ -61,7 +61,7 @@
         {
           "category": "Functions & closures",
           "pageFile": "LANGUAGE-CONSTRUCTS.md",
-          "caveats": "• The `arguments` object reflects the values actually passed — declared parameters plus any overflow (a function reading `arguments` gains an implicit boxed rest, [ADR-00928](../adr/ADR-00928.md)/[TDD-00210](../tdd/TDD-00210.md)); elements are `any` (heterogeneous → NaN-boxed, so `arguments[i]` needs an `as T` cast under strict / operates directly under `-compat=js`), and `.length`/indexing/`for…of`/callback replacers ([ADR-00387](../adr/ADR-00387.md)) all work; a rest/destructured parameter combined with `arguments` and arrow functions stay clean rejections (use the `...rest` directly; arrows have no own `arguments`); class method bodies get boxed declared parameters, non-variadic ([ADR-00464](../adr/ADR-00464.md)) (a leading `this` parameter is parsed and erased — [ADR-00373](../adr/ADR-00373.md))<br>• Function overload signatures are parsed and **erased** — call sites type-check against the implementation's parameter list only ([ADR-00446](../adr/ADR-00446.md))<br>• Nested function declarations capture enclosing locals (by reference, [TDD-00129](../tdd/TDD-00129.md) — array captures share the enclosing header cell, [TDD-00213](../tdd/TDD-00213.md) Stage 3; loop variables get per-iteration `let` cells), hoist letrec-style (usable before the declaration statement), and escape by name — capturing generators included — with an inferred closure type ([ADR-01013](../adr/ADR-01013.md)/[ADR-01014](../adr/ADR-01014.md)); two mutually-recursive capturing siblings stay a clean compile error ([ADR-01016](../adr/ADR-01016.md))<br>• Tagged template literals have no `.raw` property on the `strings` array (real `String.raw` stays separately out of scope, see [ADR-00028](../adr/ADR-00028.md)) — see [TDD-00059](../tdd/TDD-00059.md)/[ADR-00152](../adr/ADR-00152.md)<br>• A top-level named function can't reference a sibling top-level binding whose value is a connection handle (`Worker`/`WebSocket`/`EventSource`/channels/`XMLHttpRequest`), a `Promise`, or an inferred-type-argument/nested generic instance (scalars/strings/arrays/`TypedArray`s/objects/`Map`/`Set`/class instances incl. `new Box<number>()`, the value/event handles — `Blob`/`Date`/`URL`/`RegExp`/`Headers`/`Request`/`AbortController`/`Event`/… — and streams + `EventEmitter` — plus `http.createServer` handles ([ADR-00426](../adr/ADR-00426.md)) — are promoted to module globals and work — [ADR-00342](../adr/ADR-00342.md)); a default parameter can't reference an earlier parameter ([ADR-00166](../adr/ADR-00166.md))<br>• A named function expression whose name shadows a top-level function of the same name is a clean compile error — rename one ([TDD-00060](../tdd/TDD-00060.md)/[ADR-00178](../adr/ADR-00178.md))<br>• A free `function*` generator may be top-level **or nested** (a nested one captures enclosing state by reference, including arrays — [TDD-00213](../tdd/TDD-00213.md) Stage 3); a generator *expression* bound by a top-level `const G = function* ...` has its element type inferred from yields; in any other position it is a value held as `any` ([TDD-00096](../tdd/TDD-00096.md)/[ADR-00293](../adr/ADR-00293.md))"
+          "caveats": "• The `arguments` object reflects the values actually passed — declared parameters plus any overflow (a function reading `arguments` gains an implicit boxed rest, [ADR-00928](../adr/ADR-00928.md)/[TDD-00210](../tdd/TDD-00210.md)); elements are `any` (heterogeneous → NaN-boxed, so `arguments[i]` needs an `as T` cast under strict / operates directly under `-compat=js`), and `.length`/indexing/`for…of`/callback replacers ([ADR-00387](../adr/ADR-00387.md)) all work; a rest/destructured parameter combined with `arguments` and arrow functions stay clean rejections (use the `...rest` directly; arrows have no own `arguments`); class method bodies get boxed declared parameters, non-variadic ([ADR-00464](../adr/ADR-00464.md)) (a leading `this` parameter is parsed and erased — [ADR-00373](../adr/ADR-00373.md))<br>• Function overload signatures are parsed and **erased** — call sites type-check against the implementation's parameter list only ([ADR-00446](../adr/ADR-00446.md))<br>• Nested function declarations capture enclosing locals (by reference, [TDD-00129](../tdd/TDD-00129.md) — array captures share the enclosing header cell, [TDD-00213](../tdd/TDD-00213.md) Stage 3; loop variables get per-iteration `let` cells), hoist letrec-style (usable before the declaration statement), and escape by name — capturing generators included — with an inferred closure type ([ADR-01013](../adr/ADR-01013.md)/[ADR-01014](../adr/ADR-01014.md)); two mutually-recursive capturing siblings stay a clean compile error ([ADR-01016](../adr/ADR-01016.md))<br>• A top-level named function can't reference a sibling top-level binding whose value is a connection handle (`Worker`/`WebSocket`/`EventSource`/channels/`XMLHttpRequest`), a `Promise`, or an inferred-type-argument/nested generic instance (scalars/strings/arrays/`TypedArray`s/objects/`Map`/`Set`/class instances incl. `new Box<number>()`, the value/event handles — `Blob`/`Date`/`URL`/`RegExp`/`Headers`/`Request`/`AbortController`/`Event`/… — and streams + `EventEmitter` — plus `http.createServer` handles ([ADR-00426](../adr/ADR-00426.md)) — are promoted to module globals and work — [ADR-00342](../adr/ADR-00342.md)); a default parameter can't reference an earlier parameter ([ADR-00166](../adr/ADR-00166.md))<br>• A named function expression whose name shadows a top-level function of the same name is a clean compile error — rename one ([TDD-00060](../tdd/TDD-00060.md)/[ADR-00178](../adr/ADR-00178.md))<br>• A free `function*` generator may be top-level **or nested** (a nested one captures enclosing state by reference, including arrays — [TDD-00213](../tdd/TDD-00213.md) Stage 3); a generator *expression* bound by a top-level `const G = function* ...` has its element type inferred from yields; in any other position it is a value held as `any` ([TDD-00096](../tdd/TDD-00096.md)/[ADR-00293](../adr/ADR-00293.md))"
         },
         {
           "category": "Type primitives",
@@ -100,7 +100,7 @@
         {
           "category": "JSON",
           "pageFile": "JSON.md",
-          "caveats": "• A runtime `space` argument and a non-null `replacer` on `JSON.stringify` are clean rejections ([ADR-00222](../adr/ADR-00222.md)) — a literal `space` pretty-prints both statically-typed and dynamic values ([ADR-00639](../adr/ADR-00639.md))<br>• A statically-typed value boxed into `any` (e.g. a class instance) can't be stringified through the dynamic walker (no runtime shape) — the typed `JSON.stringify` paths cover it directly"
+          "caveats": ""
         },
         {
           "category": "console",
@@ -110,7 +110,7 @@
         {
           "category": "Global functions & constants",
           "pageFile": "GLOBAL-FUNCTIONS.md",
-          "caveats": "• `eval` is an opt-in embedded-engine path ([TDD-00046](../tdd/TDD-00046.md)), not started<br>• `NaN`/`Infinity` shadowing needs `-compat=js`, not unconditional"
+          "caveats": "• `eval` is an opt-in embedded-engine path ([TDD-00046](../tdd/TDD-00046.md)), not started"
         },
         {
           "category": "Type system features",
@@ -210,7 +210,7 @@
         {
           "category": "Events & Cancellation",
           "pageFile": "EVENTS-CANCELLATION.md",
-          "caveats": "• `AbortSignal` isn't wired into `setTimeout`; `DOMException` carries no numeric `.code`"
+          "caveats": "• `AbortSignal` isn't wired into `setTimeout`"
         },
         {
           "category": "Workers / Concurrency",
@@ -417,7 +417,7 @@
     },
     {
       "kind": "block",
-      "text": "| Feature | Notes |\n|---|---|\n| Decorator class *replacement* + static-field decorators | The two remaining decorator pieces ([TDD-00161](../tdd/TDD-00161.md)): a class decorator that returns a replacement class is refused at runtime — a documented divergence under the static model, whose home is a future `-compat=js`/first-class-constructor world — and static-field decorators are not run |\n| Dynamic `import()` — runtime-variable specifier | A genuinely *runtime-computed* specifier (`import(expr)`) is out of scope — whole-program AOT can't resolve it; a bounded template-literal form is a possible follow-on ([TDD-00056](../tdd/TDD-00056.md)). Literal-specifier `import()` needs the opt-in `-dynamic-import=lazy` flag |\n| Dynamic property add/delete on *statically-typed* objects | A statically-*annotated* struct stays fixed-shape by design (the two-tier decision, [TDD-00155](../tdd/TDD-00155.md)) — runtime add/delete, prototype chains, and `Proxy` traps require an `any`-typed value or, under `-compat=js`, an untyped literal. See [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md) |"
+      "text": "| Feature | Notes |\n|---|---|\n| Decorator class *replacement* + static-field decorators | The two remaining decorator pieces ([TDD-00161](../tdd/TDD-00161.md)): a class decorator that returns a replacement class is refused at runtime — a documented divergence under the static model, whose home is a future `-compat=js`/first-class-constructor world — and static-field decorators are not run |\n| Dynamic `import()` — runtime-variable specifier | A genuinely *runtime-computed* specifier (`import(expr)`) is out of scope — whole-program AOT can't resolve it; a bounded template-literal form is a possible follow-on ([TDD-00056](../tdd/TDD-00056.md)). |\n| Dynamic property add/delete on *statically-typed* objects | A statically-*annotated* struct stays fixed-shape by design (the two-tier decision, [TDD-00155](../tdd/TDD-00155.md)) — runtime add/delete, prototype chains, and `Proxy` traps require an `any`-typed value or, under `-compat=js`, an untyped literal. See [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md) |"
     },
     {
       "kind": "block",
@@ -474,6 +474,22 @@
     {
       "kind": "tddBacklog",
       "editorial": {
+        "242": {
+          "title": "Class objects carrying their evaluation's bindings",
+          "notes": "A class declared in a function that reads its locals works through its instances (ADR-01334), but not as a value (`return D`), from a static member, or as a class expression (the mixin pattern): Node gives every evaluation its own constructor and statics. Each evaluation allocates a record holding the class's static reference, its captured bindings and its statics; the record is the class value, instances point at it, and the existing per-class dispatchers unwrap it to the static reference"
+        },
+        "241": {
+          "title": "`undefined` in a `number` slot",
+          "notes": "A required `number` that receives `undefined` (a short dynamic call, an unboxing from `any`, `x!` over an absent value) reads `NaN` or `0` where Node keeps `undefined`. A signaling-NaN sentinel with its sign bit set survives copies, calls and stores but is quieted by arithmetic, `-x` and `Math.abs` (measured on Apple Silicon and x86-64); only the observation points (boxing, number-to-string, `typeof`, `=== undefined`, JSON) and the emitter's own identity operations test for it"
+        },
+        "239": {
+          "title": "`klain:test`, testing the compiled application",
+          "notes": "Tests the native binary as a user meets it, where `node:test` cannot: terminal apps under a pseudo-terminal with screen snapshots (Playwright for terminals), HTTP services driven through `fetch`, webview pages through the platform's automation protocol, plus what only the compiler knows (per-test leak checks, LLVM coverage, compile-time test discovery). After TDD-00230 and the open bugs and caveats: the compiler has to be stable before it tells developers how to test their applications"
+        },
+        "238": {
+          "title": "The builtin library compiled once and linked",
+          "notes": "Every program that names `fs`, `net`, `fetch` or `URL` compiles the TypeScript builtin library with it: clang `-O2` sees every library function, used or not, and each P3 port adds more. The design keeps user code whole-program and compiles each `lib/` module once per compiler version, target and option set into a cached object: stable library symbol names and type ids, program-wide dispatchers (class references, shapes, inspect and toStringTag hooks, function metadata) turned into tables each unit registers into, module top-level code as a run-once init function, and islands sharing the main binary's library instead of a copy of it. Staged: the CLI's own C object cache, stable names, stable ids, registration, library objects, shared islands"
+        },
         "226": {
           "title": "Array holes — a lazy hole bitmap beside the scalar buffer",
           "notes": "`a[a.length + 2] = v` throws here; Node extends `length` with *holes*, a third element state that `in`/`forEach`/`Object.keys` skip, `for…of`/spread see as `undefined`, `inspect` shows as `<n empty items>` and `JSON` as `null`. The chosen design (Option A) adds one hidden `holes` word to the heap array header — null for every packed array, a bitmap after the first gap write, `delete a[i]`, `a.length = n` growth, `new Array(n)` or a literal elision — so the `{ptr,i64}` aggregate, the named-binding shape and the call ABI are untouched and a packed array pays one null test. Boxed-element and sentinel alternatives are rejected there. Staged: header field + fast paths, producers + readers, mutator bitmap maintenance, `delete`/`length`/`in` on arrays"
@@ -624,7 +640,7 @@
         },
         "55": {
           "title": "Dynamic `import(...)` and `import.meta`",
-          "notes": "`import.meta.url` exists; dynamic `import()` works opt-in via `-dynamic-import=lazy` (real laziness via `.so` islands) — see the Modules row"
+          "notes": "`import.meta.url` exists; dynamic `import()` runs its target on first use and shares the program's modules, as in Node (`-dynamic-import=lazy` puts the target in a shared library; `isolated` gives it its own modules) — see the Modules row"
         },
         "56": {
           "title": "Dynamic `import(...)` V2 — runtime-loaded shared libraries",
@@ -809,6 +825,14 @@
         "235": {
           "title": "process stdio, tty and readline as TypeScript modules",
           "notes": "Stage 1 shipped ([ADR-01239](../adr/ADR-01239.md)): `process.stdin`/`stdout`/`stderr` as Node's tty/net streams over fd stream handles, `tty` ported. Left: `readline` (and `readline/promises`) over any Readable, a file stdin as `fs.ReadStream`, deleting the code-generated readline (`klain:tty`'s deletion is post-restructure cleanup, BACKLOG 117)"
+        },
+        "237": {
+          "title": "`URL`, `URLSearchParams` and `Headers` as Node's, in TypeScript",
+          "notes": "TDD-00230 P3.2's host objects: the three move from codegen handles (`IsURL`/`IsURLSearchParams`/`IsHeaders`) to global modules. `URL` gets the URL Standard's parser in TypeScript in place of libcurl's `CURLU` (Node uses ada, written to the standard), with IDNA staying native; `Headers` follows undici (sorted iteration, `getSetCookie`, guards; BACKLOG 85). Staged: `URLSearchParams`, then `URL`, then `Headers` with a pair-array interop to the still-native fetch"
+        },
+        "240": {
+          "title": "The runtime written in C, not in IR text",
+          "notes": "~15k lines of `runtime_*.go` IR text → C behind a layout header generated from the Go types; one runtime object per option set (unblocks [TDD-00238](../tdd/TDD-00238.md) Stage 4), the event-loop users ported onto [TDD-00230](../tdd/TDD-00230.md) Phase 4's loop interface"
         }
       }
     },

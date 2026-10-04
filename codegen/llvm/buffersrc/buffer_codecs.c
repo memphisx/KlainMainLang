@@ -159,6 +159,7 @@ char *__kml_buf_b64_enc(const unsigned char *src, int64_t n, int urlsafe) {
 		else if (!urlsafe) out[o++] = '=';
 	}
 	out[o] = 0;
+	*(int64_t *)(out - 8) = o; /* base64url leaves the padding out */
 	return out;
 }
 

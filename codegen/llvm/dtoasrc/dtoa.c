@@ -14,7 +14,58 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* sci is "D[.DDD]e±X" (%e's form): moves its last digit one unit up or down,
+ * carrying across digits and into the exponent. */
+static void kml_nudge(char *sci, size_t n, int up) {
+	char d[24];
+	int nd = 0;
+	char *s = sci;
+	for (; *s && *s != 'e'; s++)
+		if (*s != '.') d[nd++] = *s;
+	int exp = atoi(s + 1);
+	int i = nd - 1;
+	if (up) {
+		while (i >= 0 && d[i] == '9') d[i--] = '0';
+		if (i < 0) { memmove(d + 1, d, (size_t)nd); d[0] = '1'; exp++; }
+		else d[i]++;
+	} else {
+		while (i >= 0 && d[i] == '0') d[i--] = '9';
+		if (i >= 0) d[i]--;
+		if (d[0] == '0' && nd > 1) { memmove(d, d + 1, (size_t)nd - 1); d[nd - 1] = '9'; exp--; }
+	}
+	char *o = sci;
+	*o++ = d[0];
+	if (nd > 1) { *o++ = '.'; memcpy(o, d + 1, (size_t)nd - 1); o += nd - 1; }
+	snprintf(o, n - (size_t)(o - sci), "e%+d", exp);
+}
+
+/* Writes |v| (finite, nonzero) in %e form with the fewest significant digits
+ * that round-trip, and returns their count. At each count the correctly
+ * rounded string comes first; when it misses, the string one unit in its last
+ * place toward v is tried. Across a rounding tie the closest string can fall
+ * outside v's interval, which is narrower below a power of two: 2^-24 is
+ * 5.960464477539063e-8, not …062. Any string of that length that round-trips
+ * is the spec's (Number::toString). */
+int __kml_dtoa_digits(double v, char *sci, size_t n) {
+	if (v < 0) v = -v;
+	for (int prec = 1; prec < 17; prec++) {
+		snprintf(sci, n, "%.*e", prec - 1, v);
+		double back = strtod(sci, NULL);
+		if (back == v) return prec;
+		kml_nudge(sci, n, back < v);
+		if (strtod(sci, NULL) == v) return prec;
+	}
+	snprintf(sci, n, "%.16e", v);
+	return 17;
+}
+
+/* undefined held in a double slot (TDD-00241); mirrors undefF64. */
+#define KML_UNDEF_F64 0xFFF4000000000001ULL
+
 void __kml_dtoa(char *buf, double v) {
+	unsigned long long bits;
+	memcpy(&bits, &v, sizeof bits);
+	if (bits == KML_UNDEF_F64) { strcpy(buf, "undefined"); return; }
 	if (isnan(v)) { strcpy(buf, "NaN"); return; }
 	if (isinf(v)) { strcpy(buf, v < 0 ? "-Infinity" : "Infinity"); return; }
 	if (v == 0.0) { strcpy(buf, "0"); return; } /* +0 and -0 both → "0" */
@@ -25,12 +76,7 @@ void __kml_dtoa(char *buf, double v) {
 	/* Shortest significant-digit count (1..17) that round-trips. %e (not %g)
 	 * exposes the digit string and decimal exponent uniformly across magnitudes. */
 	char sci[40];
-	int prec = 1;
-	for (; prec < 17; prec++) {
-		snprintf(sci, sizeof(sci), "%.*e", prec - 1, v);
-		if (strtod(sci, NULL) == v) break;
-	}
-	if (prec == 17) snprintf(sci, sizeof(sci), "%.*e", prec - 1, v);
+	__kml_dtoa_digits(v, sci, sizeof(sci));
 
 	/* Parse "D.DDDe±XX" (or "De±XX" when prec==1) into digits + exponent. */
 	char digits[24];
@@ -134,12 +180,7 @@ void __kml_dtoa_exp(char *buf, double v) {
 	if (v < 0) { *p++ = '-'; v = -v; }
 
 	char sci[40];
-	int prec = 1;
-	for (; prec < 17; prec++) {
-		snprintf(sci, sizeof(sci), "%.*e", prec - 1, v);
-		if (strtod(sci, NULL) == v) break;
-	}
-	if (prec == 17) snprintf(sci, sizeof(sci), "%.*e", prec - 1, v);
+	__kml_dtoa_digits(v, sci, sizeof(sci));
 
 	char digits[24];
 	int nd = 0;

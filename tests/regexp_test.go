@@ -269,10 +269,10 @@ func TestE2ERegExpExecMatchWithCaptureGroups(t *testing.T) {
 const r = /(\d+)-(\d+)/
 const m = r.exec("range: 12-34 end")!
 console.log(m !== null)
-console.log(m.length)
-console.log(m[0])
-console.log(m[1])
-console.log(m[2])
+console.log(m!.length)
+console.log(m![0])
+console.log(m![1])
+console.log(m![2])
 `, "true\n3\n12-34\n12\n34")
 }
 
@@ -415,10 +415,10 @@ func TestE2EStringMatchNonGlobalIsExecShaped(t *testing.T) {
 const r = /(\d+)-(\d+)/
 const m = "range: 12-34 end".match(r)
 console.log(m !== null)
-console.log(m.length)
-console.log(m[0])
-console.log(m[1])
-console.log(m[2])
+console.log(m!.length)
+console.log(m![0])
+console.log(m![1])
+console.log(m![2])
 `, "true\n3\n12-34\n12\n34")
 }
 
@@ -433,7 +433,7 @@ console.log(m === null)
 func TestE2EStringMatchGlobalCollectsFullMatchesOnly(t *testing.T) {
 	assertOutput(t, `
 const g = /\d+/g
-const all = "a1 b22 c333".match(g)
+const all = "a1 b22 c333".match(g)!
 console.log(all.length)
 console.log(all[0])
 console.log(all[1])
@@ -456,8 +456,8 @@ console.log(g.lastIndex)
 func TestE2EStringMatchAllReturnsMatchArrayPerMatch(t *testing.T) {
 	assertOutput(t, `
 const r = /(\w)-(\d+)/g
+console.log([..."a-1 b-22 c-333".matchAll(r)].length)
 const all = "a-1 b-22 c-333".matchAll(r)
-console.log(all.length)
 for (const m of all) {
   console.log(m[0])
   console.log(m[1])
@@ -466,12 +466,11 @@ for (const m of all) {
 `, "3\na-1\na\n1\nb-22\nb\n22\nc-333\nc\n333")
 }
 
-func TestE2EStringMatchAllZeroMatchesIsEmptyArray(t *testing.T) {
+func TestE2EStringMatchAllZeroMatchesIsAnEmptyIterator(t *testing.T) {
 	assertOutput(t, `
 const r = /\d+/g
-const none = "no digits".matchAll(r)
-console.log(none.length)
-`, "0")
+console.log([..."no digits".matchAll(r)].length, "no digits".matchAll(r).next().done)
+`, "0 true")
 }
 
 func TestE2EStringMatchAllNonGlobalThrowsTypeError(t *testing.T) {
@@ -491,9 +490,14 @@ try {
 func TestE2EStringMatchCoercesNonRegExpArgument(t *testing.T) {
 	assertOutput(t, `
 const s = "a.b.c"
-console.log(s.match(".")![0], s.match("x"), [...s.matchAll(".")].map((m) => m[0]).join(""))
+console.log(s.match(".")![0], s.match("x"))
 console.log("a5b".match(String(5))![0])
-`, "a null a.b.c\n5")
+`, "a null\n5")
+	// TypeScript declares matchAll(regexp: RegExp); JavaScript coerces a string.
+	assertOutputCompatJS(t, `
+var s = "a.b.c"
+console.log([...s.matchAll(".")].map(function (m) { return m[0]; }).join(""))
+`, "a.b.c")
 }
 
 // --- Stage 4: str.replace(regexp, replacement), str.replaceAll(regexp, replacement) ---
@@ -748,14 +752,14 @@ func TestE2ERegExpDialectModeMatrix(t *testing.T) {
 // the multibyte case both terminates and counts by code point.
 func TestE2ERegExpEmptyGlobalMatchTerminates(t *testing.T) {
 	cases := []struct{ name, src, want string }{
-		{"match-star", `console.log("abc".match(/x*/g).length)`, "4"},
+		{"match-star", `console.log("abc".match(/x*/g)!.length)`, "4"},
 		{"replaceAll-star", `console.log("abc".replaceAll(/x*/g, "-"))`, "-a-b-c-"},
-		{"matchAll-nonempty", `console.log("aXbXc".matchAll(/X/g).length)`, "2"},
-		{"lookahead-empty", `console.log("a".match(/(?=a)/g).length)`, "1"},
+		{"matchAll-nonempty", `console.log([..."aXbXc".matchAll(/X/g)].length)`, "2"},
+		{"lookahead-empty", `console.log("a".match(/(?=a)/g)!.length)`, "1"},
 		// Multibyte subject: the empty-match advance steps a whole UTF-8 code
 		// point, so iteration terminates and produces one empty match per code
 		// point (3 chars + the end position = 4), never landing mid-code-point.
-		{"multibyte-star", `console.log("aéb".match(/x*/g).length)`, "4"},
+		{"multibyte-star", `console.log("aéb".match(/x*/g)!.length)`, "4"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -835,8 +839,8 @@ func TestE2ERegExpUTF16IndexMode(t *testing.T) {
 		// rather than re-finding the same end-of-string empty match forever. The
 		// advance steps a whole code point, so an astral char (PCRE2_UTF sees it
 		// as one code point) yields one empty match, not two.
-		{"empty-at-end/es-utf16", "es-utf16", `console.log("aéb".match(/x*/g).length)`, "4"},
-		{"empty-astral/es-utf16", "es-utf16", `console.log("😀x".match(/y*/g).length)`, "3"},
+		{"empty-at-end/es-utf16", "es-utf16", `console.log("aéb".match(/x*/g)!.length)`, "4"},
+		{"empty-astral/es-utf16", "es-utf16", `console.log("😀x".match(/y*/g)!.length)`, "3"},
 		// replace callback offset argument: byte vs UTF-16 units. replace keeps
 		// the unmatched "é" prefix and substitutes the matched "1" with the
 		// callback result "#<offset>".

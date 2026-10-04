@@ -78,6 +78,10 @@ static void round_to(decimal *x, int k) {
     }
 }
 
+// The shortest round-tripping digits of |v| in %e form, and their count
+// (dtoasrc/dtoa.c).
+extern int __kml_dtoa_digits(double v, char *sci, size_t n);
+
 // shortest writes Number::toString(v) for radix 10: the shortest digits that
 // round-trip, laid out per the spec (fixed below 1e21, exponent otherwise).
 static void shortest(double v, char *out, size_t size) {
@@ -85,12 +89,7 @@ static void shortest(double v, char *out, size_t size) {
     if (isinf(v)) { snprintf(out, size, v < 0 ? "-Infinity" : "Infinity"); return; }
     if (v == 0) { snprintf(out, size, "0"); return; }
     char sci[40];
-    int prec = 1;
-    for (; prec < 17; prec++) {
-        snprintf(sci, sizeof sci, "%.*e", prec - 1, fabs(v));
-        if (strtod(sci, NULL) == fabs(v)) break;
-    }
-    if (prec == 17) snprintf(sci, sizeof sci, "%.16e", fabs(v));
+    __kml_dtoa_digits(v, sci, sizeof sci);
     char d[24];
     int n = 0;
     char *p = sci;
@@ -182,13 +181,12 @@ char *__kml_Number_toExponential(double x, bool has, double digits) {
     } else if (!has) {
         // As many digits as the shortest round-trip needs.
         char sci[40];
-        int prec = 1;
-        for (; prec < 17; prec++) {
-            snprintf(sci, sizeof sci, "%.*e", prec - 1, fabs(x));
-            if (strtod(sci, NULL) == fabs(x)) break;
-        }
-        exact_decimal(x, &dec);
-        round_to(&dec, prec);
+        __kml_dtoa_digits(x, sci, sizeof sci);
+        // The digits are the round-tripping string's ("D.DDDe±X").
+        dec.n = 0;
+        for (const char *s = sci; *s && *s != 'e'; s++)
+            if (*s != '.') dec.d[dec.n++] = *s;
+        dec.exp = atoi(strchr(sci, 'e') + 1);
         while (dec.n > 1 && dec.d[dec.n - 1] == '0') dec.n--;
     } else {
         exact_decimal(x, &dec);

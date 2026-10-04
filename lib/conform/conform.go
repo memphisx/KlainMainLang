@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"KlainMainLang/ast"
 	"KlainMainLang/lib"
@@ -68,11 +69,12 @@ type member struct {
 // global value and type names.
 type decls struct {
 	ifaces  map[string]map[string]*member
+	bases   map[string]map[string]bool // each interface's `extends` names
 	globals map[string]bool
 }
 
 func newDecls() *decls {
-	return &decls{ifaces: map[string]map[string]*member{}, globals: map[string]bool{}}
+	return &decls{ifaces: map[string]map[string]*member{}, bases: map[string]map[string]bool{}, globals: map[string]bool{}}
 }
 
 func (d *decls) add(prog *ast.Program) {
@@ -96,6 +98,14 @@ func (d *decls) add(prog *ast.Program) {
 			}
 			for _, m := range n.Members {
 				d.addMember(ms, m)
+			}
+			for _, h := range n.Heritage {
+				if r, ok := h.(*ast.TypeReference); ok && len(r.Qualifier) == 0 {
+					if d.bases[n.Name] == nil {
+						d.bases[n.Name] = map[string]bool{}
+					}
+					d.bases[n.Name][r.Name] = true
+				}
 			}
 		case *ast.VarDeclaration:
 			d.globals[n.Name] = true
@@ -142,24 +152,99 @@ func (d *decls) addMember(ms map[string]*member, m ast.TypeMember) {
 	}
 }
 
-// Diff compares the builtin declarations with the TypeScript library in
-// tsLib (its src/lib directory). Problems allowed lists are left out.
-func Diff(tsLib string, allowed map[string]bool) (problems, review []string, err error) {
+// parseTSLib reads every declaration file of TypeScript's library.
+func parseTSLib(tsLib string) (*decls, error) {
 	ts := newDecls()
 	files, _ := filepath.Glob(filepath.Join(tsLib, "*.d.ts"))
 	if len(files) == 0 {
-		return nil, nil, fmt.Errorf("no TypeScript library at %s (run tools/conformance/fetch.sh)", tsLib)
+		return nil, fmt.Errorf("no TypeScript library at %s (run tools/conformance/fetch.sh)", tsLib)
 	}
 	for _, f := range files {
 		src, err := os.ReadFile(f)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		p, err := parser.ParseDeclarations(string(src))
 		if err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", f, err)
+			return nil, fmt.Errorf("%s: %w", f, err)
 		}
 		ts.add(p)
+		// A module-shaped file (es2025.iterator.d.ts) declares its globals
+		// in a `declare global` block, which the parse above leaves out.
+		for _, body := range globalBlocks(string(src)) {
+			gp, err := parser.ParseDeclarations(body)
+			if err != nil {
+				return nil, fmt.Errorf("%s (declare global): %w", f, err)
+			}
+			ts.add(gp)
+		}
+	}
+	return ts, nil
+}
+
+// MemberLines lists, for each interface TypeScript's library declares that
+// the builtin declarations declare too, and each interface those extend,
+// every member name across all of TypeScript's declarations of it and its
+// `extends` names: "Name<TAB>base,base<TAB>member member". The checker
+// reports TS2339 for a member none of them has (lib.TSInterfaceHas).
+func MemberLines(tsLib string) ([]string, error) {
+	ts, err := parseTSLib(tsLib)
+	if err != nil {
+		return nil, err
+	}
+	progs, err := lib.Programs()
+	if err != nil {
+		return nil, fmt.Errorf("builtin declarations: %w", err)
+	}
+	ours := newDecls()
+	for _, p := range progs {
+		ours.add(p)
+	}
+	want := map[string]bool{}
+	var visit func(string)
+	visit = func(n string) {
+		if want[n] || ts.ifaces[n] == nil {
+			return
+		}
+		want[n] = true
+		for b := range ts.bases[n] {
+			visit(b)
+		}
+	}
+	for n := range ours.ifaces {
+		visit(n)
+	}
+	var names []string
+	for n := range want {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var out []string
+	for _, n := range names {
+		var bs, ms []string
+		for b := range ts.bases[n] {
+			if ts.ifaces[b] != nil {
+				bs = append(bs, b)
+			}
+		}
+		for m := range ts.ifaces[n] {
+			if m != "()" && m != "new()" && !strings.ContainsAny(m, " \t[]") {
+				ms = append(ms, m)
+			}
+		}
+		sort.Strings(bs)
+		sort.Strings(ms)
+		out = append(out, n+"\t"+strings.Join(bs, ",")+"\t"+strings.Join(ms, " "))
+	}
+	return out, nil
+}
+
+// Diff compares the builtin declarations with the TypeScript library in
+// tsLib (its src/lib directory). Problems allowed lists are left out.
+func Diff(tsLib string, allowed map[string]bool) (problems, review []string, err error) {
+	ts, err := parseTSLib(tsLib)
+	if err != nil {
+		return nil, nil, err
 	}
 	ours := newDecls()
 	progs, err := lib.Programs()

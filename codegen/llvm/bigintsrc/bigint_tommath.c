@@ -12,6 +12,7 @@
  */
 #include <tommath.h>
 #include <stdlib.h>
+#include <string.h>
 #include <stdio.h>
 #include <math.h>
 
@@ -228,4 +229,45 @@ int __kml_bigint_cmp_double(void *a, double d) {
 	}
 	mp_clear_multi(&bd, &tmp, NULL);
 	return cmp; /* MP_LT=-1, MP_EQ=0, MP_GT=1 */
+}
+
+/* StringToBigInt (ECMA-262 §7.1.14), for BigInt(string): surrounding white
+ * space trimmed, an empty string 0n, a 0x/0o/0b prefix with no sign, or a
+ * signed decimal integer; NULL when the string is none of these (the
+ * caller throws SyntaxError). */
+static int kml_bi_space(unsigned char c) {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+}
+
+void *__kml_bigint_parse(const char *s) {
+	size_t n = strlen(s);
+	size_t a = 0, b = n;
+	while (a < b && kml_bi_space((unsigned char)s[a])) a++;
+	while (b > a && kml_bi_space((unsigned char)s[b - 1])) b--;
+	if (a == b) return __kml_bigint_from_str("0", 1, 10);
+	int radix = 10;
+	size_t start = a;
+	int neg = 0;
+	if (b - a > 2 && s[a] == '0' && (s[a + 1] == 'x' || s[a + 1] == 'X' || s[a + 1] == 'o' || s[a + 1] == 'O' || s[a + 1] == 'b' || s[a + 1] == 'B')) {
+		char p = s[a + 1];
+		radix = (p == 'x' || p == 'X') ? 16 : (p == 'o' || p == 'O') ? 8 : 2;
+		start = a + 2;
+	} else if (s[a] == '+' || s[a] == '-') {
+		neg = s[a] == '-';
+		start = a + 1;
+		if (start == b) return NULL;
+	}
+	char *buf = (char *)malloc(b - start + 2);
+	size_t k = 0;
+	if (neg) buf[k++] = '-';
+	for (size_t i = start; i < b; i++) {
+		unsigned char c = (unsigned char)s[i];
+		int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 99;
+		if (d >= radix) { free(buf); return NULL; }
+		buf[k++] = (char)c;
+	}
+	buf[k] = 0;
+	void *r = __kml_bigint_from_str(buf, (long long)k, radix);
+	free(buf);
+	return r;
 }

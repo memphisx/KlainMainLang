@@ -94,16 +94,6 @@ func extractYoga(dir string) (includeRoot string, cpps []string, err error) {
 	return includeRoot, cpps, nil
 }
 
-// TuiCSources returns the klain:tui painter + Yoga link inputs when the program
-// used klain:tui, and nil otherwise — the exported entry point the test build
-// path uses to mirror EmbeddedCSources without re-deriving the extraction.
-func (e *Emitter) TuiCSources() ([]CSource, error) {
-	if !e.usedTui {
-		return nil, nil
-	}
-	return yogaCSources(e.Toolchain())
-}
-
 // yogaCSources materializes and pre-compiles the vendored Yoga engine, returning
 // a single CSource whose Libs are the resulting object-file paths plus the C++
 // runtime — i.e. Yoga joins the final link as prebuilt objects, not as source on

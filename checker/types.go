@@ -5,6 +5,7 @@ package checker
 
 import (
 	"KlainMainLang/ast"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,6 +46,9 @@ const (
 	NonPrimitive
 	// ESSymbol is `symbol`.
 	ESSymbol
+	// Deferred is a type operator over a type parameter (`keyof T`, a
+	// mapped or conditional type), evaluated once instantiated.
+	Deferred
 
 	Literal     = StringLiteral | NumberLiteral | BooleanLiteral | BigIntLiteral
 	StringLike  = String | StringLiteral
@@ -79,19 +83,23 @@ type Type struct {
 	// Types are a union's members, ordered by ID.
 	Types []*Type
 	// The object payload.
-	Kind       ObjectKind
-	Elem       *Type          // Array
-	Elems      []*Type        // Tuple
-	Props      []*Property    // Anonymous, Instance, Interface
-	Params     []*Type        // Function
-	Result     *Type          // Function
-	Symbol     *binder.Symbol // Instance, Interface: the declaring symbol
-	Base       *Type          // Instance: the base class's instance type
-	TypeArgs   []*Type        // Instance, Interface: a generic declaration's arguments
-	Predicate  *Predicate     // Function: a `p is T` result
-	TypeParams []*Type        // Function: a generic signature's type parameters
-	Overloads  []*Type        // Function: an overloaded function's signatures, in order
-	ThisType   *Type          // Function: a `this: T` parameter's T, or nil
+	Kind    ObjectKind
+	Elem    *Type          // Array
+	Elems   []*Type        // Tuple
+	Props   []*Property    // Anonymous, Instance, Interface
+	Params  []*Type        // Function
+	Result  *Type          // Function
+	Symbol  *binder.Symbol // Instance, Interface: the declaring symbol
+	ClassOf *binder.Symbol // Anonymous: a class value's class (`typeof C`)
+	// ParamNames are a Function's declared parameter names, for display only:
+	// relations ignore them.
+	ParamNames []string
+	Base       *Type      // Instance: the base class's instance type
+	TypeArgs   []*Type    // Instance, Interface: a generic declaration's arguments
+	Predicate  *Predicate // Function: a `p is T` result
+	TypeParams []*Type    // Function: a generic signature's type parameters
+	Overloads  []*Type    // Function: an overloaded function's signatures, in order
+	ThisType   *Type      // Function: a `this: T` parameter's T, or nil
 	// StringIndex and NumberIndex are an object type's index signatures'
 	// value types (`[k: string]: T`, `[i: number]: T`), or nil.
 	StringIndex, NumberIndex *Type
@@ -117,6 +125,12 @@ type Type struct {
 	// intersection marks an object type built from an intersection
 	// (`A & B`): tsc reports a property missing from it as TS2322.
 	intersection bool
+	// A Deferred type's node, scope and the bindings in scope there: the
+	// environment's names and the function type parameters' substitution.
+	deferNode  ast.TypeNode
+	deferScope *binder.Scope
+	deferEnv   map[string]*Type
+	deferSubst map[*Type]*Type
 }
 
 // Predicate is a function's type predicate: a true result means its
@@ -158,19 +172,7 @@ func (t *Type) IsMissing() bool { return t.Flags&Undefined != 0 && t.Value == "m
 // per-file suffix (`P__kml_mod0`) removed, and a namespace member's
 // mangling (`ns__kmlns_P`) read back as `ns.P`.
 func sourceName(name string) string {
-	if i := strings.LastIndex(name, "__kml_mod"); i > 0 && allDigits(name[i+len("__kml_mod"):]) {
-		name = name[:i]
-	}
-	return strings.ReplaceAll(name, "__kmlns_", ".")
-}
-
-func allDigits(s string) bool {
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return s != ""
+	return strings.ReplaceAll(ast.TrimModuleSuffix(name), "__kmlns_", ".")
 }
 
 // Prop returns the property named name, or nil.
@@ -185,6 +187,14 @@ func (t *Type) Prop(name string) *Property {
 
 // String renders a type the way TypeScript prints it.
 func (t *Type) String() string {
+	if t.ClassOf != nil {
+		return "typeof " + sourceName(t.ClassOf.Name)
+	}
+	// A constructor type: an object whose one member is a construct
+	// signature.
+	if t.Kind == Anonymous && len(t.Props) == 0 && len(t.Calls) == 0 && len(t.Constructs) == 1 && t.StringIndex == nil && t.NumberIndex == nil {
+		return "new " + t.Constructs[0].String()
+	}
 	switch {
 	case t.Flags&Any != 0:
 		return "any"
@@ -225,6 +235,8 @@ func (t *Type) String() string {
 		return "uint" + strconv.Itoa(t.Bits)
 	case t.Flags&Float32 != 0:
 		return "float32"
+	case t.Flags&Deferred != 0:
+		return "unknown"
 	case t.Flags&TypeParam != 0:
 		if t.Symbol == nil {
 			return t.Value // a class's or interface's type parameter
@@ -291,7 +303,17 @@ func (t *Type) String() string {
 		}
 		parts := make([]string, len(t.Params))
 		for i, p := range t.Params {
-			parts[i] = "p" + strconv.Itoa(i) + ": " + p.String()
+			name := "p" + strconv.Itoa(i)
+			if i < len(t.ParamNames) && t.ParamNames[i] != "" {
+				name = t.ParamNames[i]
+			}
+			switch {
+			case t.restParam && i == len(t.Params)-1:
+				name = "..." + name
+			case i < len(t.optionals) && t.optionals[i]:
+				name += "?"
+			}
+			parts[i] = name + ": " + p.String()
 		}
 		if t.ThisType != nil {
 			parts = append([]string{"this: " + t.ThisType.String()}, parts...)
@@ -306,6 +328,9 @@ func (t *Type) String() string {
 		}
 		if p := t.Predicate; p != nil {
 			s := "p" + strconv.Itoa(p.Index)
+			if p.Index >= 0 && p.Index < len(t.ParamNames) && t.ParamNames[p.Index] != "" {
+				s = t.ParamNames[p.Index]
+			}
 			if p.Index == -1 {
 				s = "this"
 			}
@@ -412,6 +437,19 @@ func (in *interner) function(params []*Type, optionals []bool, rest bool, result
 	})
 }
 
+// withParamNames is signature fn with its parameters' declared names, for
+// display.
+func (in *interner) withParamNames(fn *Type, names []string) *Type {
+	if fn.Flags&Object == 0 || fn.Kind != Function || len(names) == 0 {
+		return fn
+	}
+	return in.intern("n"+strconv.Itoa(fn.ID)+":"+strings.Join(names, ","), func() *Type {
+		c := *fn
+		c.ParamNames = names
+		return &c
+	})
+}
+
 // withThis is signature fn with a `this: t` parameter.
 func (in *interner) withThis(fn, t *Type) *Type {
 	if t == nil || fn.Flags&Object == 0 || fn.Kind != Function {
@@ -427,7 +465,11 @@ func (in *interner) withThis(fn, t *Type) *Type {
 // indexed interns an anonymous object type with properties props and the
 // index signatures str and num (either may be nil).
 func (in *interner) indexed(props []*Property, str, num *Type) *Type {
-	o := in.object(props)
+	return in.indexedOn(in.object(props), str, num)
+}
+
+// indexedOn is the object type o with string and number index signatures.
+func (in *interner) indexedOn(o *Type, str, num *Type) *Type {
 	if str == nil && num == nil {
 		return o
 	}
@@ -461,6 +503,23 @@ func (in *interner) withSignatures(o *Type, calls, constructs []*Type) *Type {
 	return in.intern(key, func() *Type {
 		c := *o
 		c.Calls, c.Constructs = calls, constructs
+		return &c
+	})
+}
+
+// classValue is the type of class sym's value: its statics o with its
+// construct signature ctor (nil for none modelled), named `typeof C`.
+func (in *interner) classValue(o, ctor *Type, sym *binder.Symbol) *Type {
+	key := "v" + strconv.Itoa(o.ID) + "|" + sym.Name + fmt.Sprintf("|%p", sym)
+	if ctor != nil {
+		key += "k" + strconv.Itoa(ctor.ID)
+	}
+	return in.intern(key, func() *Type {
+		c := *o
+		if ctor != nil {
+			c.Constructs = []*Type{ctor}
+		}
+		c.ClassOf = sym
 		return &c
 	})
 }

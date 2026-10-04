@@ -3,21 +3,37 @@
 // against TypeScript's library.
 
 interface Console {
+    /** @intrinsic console.assert */
     assert(condition?: boolean, ...data: any[]): void;
+    /** @intrinsic console.count */
     count(label?: string): void;
+    /** @intrinsic console.countReset */
     countReset(label?: string): void;
+    /** @intrinsic console.debug */
     debug(...data: any[]): void;
+    /** @intrinsic console.dir */
     dir(item?: any, options?: any): void;
+    /** @intrinsic console.error */
     error(...data: any[]): void;
+    /** @intrinsic console.group */
     group(...data: any[]): void;
+    /** @intrinsic console.groupCollapsed */
     groupCollapsed(...data: any[]): void;
+    /** @intrinsic console.groupEnd */
     groupEnd(): void;
+    /** @intrinsic console.info */
     info(...data: any[]): void;
+    /** @intrinsic console.log */
     log(...data: any[]): void;
+    /** @intrinsic console.table */
     table(tabularData?: any, properties?: string[]): void;
+    /** @intrinsic console.time */
     time(label?: string): void;
+    /** @intrinsic console.timeEnd */
     timeEnd(label?: string): void;
+    /** @intrinsic console.trace */
     trace(...data: any[]): void;
+    /** @intrinsic console.warn */
     warn(...data: any[]): void;
 }
 
@@ -32,33 +48,54 @@ interface BufferConstructor {
     new (size: number): Buffer<ArrayBuffer>;
     new (array: ArrayLike<number>): Buffer<ArrayBuffer>;
     new <TArrayBuffer extends ArrayBufferLike = ArrayBuffer>(arrayBuffer: TArrayBuffer): Buffer<TArrayBuffer>;
+    /** @intrinsic Buffer.from */
     from(array: ArrayLike<number>): Buffer<ArrayBuffer>;
+    /** @intrinsic Buffer.from */
     from<TArrayBuffer extends ArrayBufferLike>(arrayBuffer: TArrayBuffer, byteOffset?: number, length?: number): Buffer<TArrayBuffer>;
+    /** @intrinsic Buffer.from */
     from(string: string, encoding?: BufferEncoding): Buffer<ArrayBuffer>;
+    /** @intrinsic Buffer.from */
     from(arrayOrString: ArrayLike<number> | string): Buffer<ArrayBuffer>;
+    /** @intrinsic Buffer.of */
     of(...items: number[]): Buffer<ArrayBuffer>;
+    /** @intrinsic Buffer.concat */
     concat(list: readonly Uint8Array[], totalLength?: number): Buffer<ArrayBuffer>;
+    /** @intrinsic Buffer.alloc */
     alloc(size: number, fill?: string | Uint8Array | number, encoding?: BufferEncoding): Buffer<ArrayBuffer>;
+    /** @intrinsic Buffer.allocUnsafe */
     allocUnsafe(size: number): Buffer<ArrayBuffer>;
+    /** @intrinsic Buffer.allocUnsafeSlow */
     allocUnsafeSlow(size: number): Buffer<ArrayBuffer>;
+    /** @intrinsic Buffer.isBuffer */
     isBuffer(obj: any): obj is Buffer;
+    /** @intrinsic Buffer.isEncoding */
     isEncoding(encoding: string): encoding is BufferEncoding;
+    /** @intrinsic Buffer.byteLength */
     byteLength(string: string | NodeJS.ArrayBufferView | ArrayBufferLike, encoding?: BufferEncoding): number;
+    /** @intrinsic Buffer.compare */
     compare(buf1: Uint8Array, buf2: Uint8Array): -1 | 0 | 1;
     poolSize: number;
 }
 interface Buffer<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> extends Uint8Array<TArrayBuffer> {
+    /** @intrinsic TypedArray.prototype.subarray */
     slice(start?: number, end?: number): Buffer<ArrayBuffer>;
+    /** @intrinsic TypedArray.prototype.subarray */
     subarray(start?: number, end?: number): Buffer<TArrayBuffer>;
+    /** @intrinsic Buffer.prototype.write */
     write(string: string, encoding?: BufferEncoding): number;
+    /** @intrinsic Buffer.prototype.write */
     write(string: string, offset: number, encoding?: BufferEncoding): number;
+    /** @intrinsic Buffer.prototype.write */
     write(string: string, offset: number, length: number, encoding?: BufferEncoding): number;
+    /** @intrinsic Buffer.prototype.toString */
     toString(encoding?: BufferEncoding, start?: number, end?: number): string;
     toJSON(): {
         type: "Buffer";
         data: number[];
     };
+    /** @intrinsic Buffer.prototype.equals */
     equals(otherBuffer: Uint8Array): boolean;
+    /** @intrinsic Buffer.prototype.compare */
     compare(
         target: Uint8Array,
         targetStart?: number,
@@ -66,81 +103,153 @@ interface Buffer<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> extends
         sourceStart?: number,
         sourceEnd?: number,
         ): -1 | 0 | 1;
+    /** @intrinsic Buffer.prototype.copy */
     copy(target: Uint8Array, targetStart?: number, sourceStart?: number, sourceEnd?: number): number;
+    /** @intrinsic Buffer.prototype.writeBigInt64BE */
     writeBigInt64BE(value: bigint, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeBigInt64LE */
     writeBigInt64LE(value: bigint, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeBigUInt64BE */
     writeBigUInt64BE(value: bigint, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeBigUint64BE */
     writeBigUint64BE(value: bigint, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeBigUInt64LE */
     writeBigUInt64LE(value: bigint, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeBigUint64LE */
     writeBigUint64LE(value: bigint, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeUIntLE */
     writeUIntLE(value: number, offset: number, byteLength: number): number;
+    /** @intrinsic Buffer.prototype.writeUintLE */
     writeUintLE(value: number, offset: number, byteLength: number): number;
+    /** @intrinsic Buffer.prototype.writeUIntBE */
     writeUIntBE(value: number, offset: number, byteLength: number): number;
+    /** @intrinsic Buffer.prototype.writeUintBE */
     writeUintBE(value: number, offset: number, byteLength: number): number;
+    /** @intrinsic Buffer.prototype.writeIntLE */
     writeIntLE(value: number, offset: number, byteLength: number): number;
+    /** @intrinsic Buffer.prototype.writeIntBE */
     writeIntBE(value: number, offset: number, byteLength: number): number;
+    /** @intrinsic Buffer.prototype.readBigUInt64BE */
     readBigUInt64BE(offset?: number): bigint;
+    /** @intrinsic Buffer.prototype.readBigUint64BE */
     readBigUint64BE(offset?: number): bigint;
+    /** @intrinsic Buffer.prototype.readBigUInt64LE */
     readBigUInt64LE(offset?: number): bigint;
+    /** @intrinsic Buffer.prototype.readBigUint64LE */
     readBigUint64LE(offset?: number): bigint;
+    /** @intrinsic Buffer.prototype.readBigInt64BE */
     readBigInt64BE(offset?: number): bigint;
+    /** @intrinsic Buffer.prototype.readBigInt64LE */
     readBigInt64LE(offset?: number): bigint;
+    /** @intrinsic Buffer.prototype.readUIntLE */
     readUIntLE(offset: number, byteLength: number): number;
+    /** @intrinsic Buffer.prototype.readUintLE */
     readUintLE(offset: number, byteLength: number): number;
+    /** @intrinsic Buffer.prototype.readUIntBE */
     readUIntBE(offset: number, byteLength: number): number;
+    /** @intrinsic Buffer.prototype.readUintBE */
     readUintBE(offset: number, byteLength: number): number;
+    /** @intrinsic Buffer.prototype.readIntLE */
     readIntLE(offset: number, byteLength: number): number;
+    /** @intrinsic Buffer.prototype.readIntBE */
     readIntBE(offset: number, byteLength: number): number;
+    /** @intrinsic Buffer.prototype.readUInt8 */
     readUInt8(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readUint8 */
     readUint8(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readUInt16LE */
     readUInt16LE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readUint16LE */
     readUint16LE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readUInt16BE */
     readUInt16BE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readUint16BE */
     readUint16BE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readUInt32LE */
     readUInt32LE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readUint32LE */
     readUint32LE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readUInt32BE */
     readUInt32BE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readUint32BE */
     readUint32BE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readInt8 */
     readInt8(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readInt16LE */
     readInt16LE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readInt16BE */
     readInt16BE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readInt32LE */
     readInt32LE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readInt32BE */
     readInt32BE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readFloatLE */
     readFloatLE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readFloatBE */
     readFloatBE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readDoubleLE */
     readDoubleLE(offset?: number): number;
+    /** @intrinsic Buffer.prototype.readDoubleBE */
     readDoubleBE(offset?: number): number;
     reverse(): this;
     swap16(): this;
     swap32(): this;
     swap64(): this;
+    /** @intrinsic Buffer.prototype.writeUInt8 */
     writeUInt8(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeUint8 */
     writeUint8(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeUInt16LE */
     writeUInt16LE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeUint16LE */
     writeUint16LE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeUInt16BE */
     writeUInt16BE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeUint16BE */
     writeUint16BE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeUInt32LE */
     writeUInt32LE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeUint32LE */
     writeUint32LE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeUInt32BE */
     writeUInt32BE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeUint32BE */
     writeUint32BE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeInt8 */
     writeInt8(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeInt16LE */
     writeInt16LE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeInt16BE */
     writeInt16BE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeInt32LE */
     writeInt32LE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeInt32BE */
     writeInt32BE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeFloatLE */
     writeFloatLE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeFloatBE */
     writeFloatBE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeDoubleLE */
     writeDoubleLE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.writeDoubleBE */
     writeDoubleBE(value: number, offset?: number): number;
+    /** @intrinsic Buffer.prototype.fill */
     fill(value: string | Uint8Array | number, offset?: number, end?: number, encoding?: BufferEncoding): this;
+    /** @intrinsic Buffer.prototype.fill */
     fill(value: string | Uint8Array | number, offset: number, encoding: BufferEncoding): this;
+    /** @intrinsic Buffer.prototype.fill */
     fill(value: string | Uint8Array | number, encoding: BufferEncoding): this;
+    /** @intrinsic Buffer.prototype.indexOf */
     indexOf(value: string | number | Uint8Array, byteOffset?: number, encoding?: BufferEncoding): number;
+    /** @intrinsic Buffer.prototype.indexOf */
     indexOf(value: string | number | Uint8Array, encoding: BufferEncoding): number;
+    /** @intrinsic Buffer.prototype.lastIndexOf */
     lastIndexOf(value: string | number | Uint8Array, byteOffset?: number, encoding?: BufferEncoding): number;
+    /** @intrinsic Buffer.prototype.lastIndexOf */
     lastIndexOf(value: string | number | Uint8Array, encoding: BufferEncoding): number;
+    /** @intrinsic Buffer.prototype.includes */
     includes(value: string | number | Buffer, byteOffset?: number, encoding?: BufferEncoding): boolean;
+    /** @intrinsic Buffer.prototype.includes */
     includes(value: string | number | Buffer, encoding: BufferEncoding): boolean;
 }
 declare var Buffer: BufferConstructor;
@@ -168,6 +277,55 @@ declare var URL: {
     createObjectURL(blob: Blob): string;
     parse(url: string | URL, base?: string | URL): URL | null;
     revokeObjectURL(url: string): void;
+};
+// The web URLPattern (@types/node's url.d.ts global).
+type URLPatternInput = string | URLPatternInit;
+interface URLPatternComponentResult {
+    input: string;
+    groups: Record<string, string | undefined>;
+}
+interface URLPatternInit {
+    protocol?: string;
+    username?: string;
+    password?: string;
+    hostname?: string;
+    port?: string;
+    pathname?: string;
+    search?: string;
+    hash?: string;
+    baseURL?: string;
+}
+interface URLPatternOptions {
+    ignoreCase?: boolean;
+}
+interface URLPatternResult {
+    inputs: URLPatternInput[];
+    protocol: URLPatternComponentResult;
+    username: URLPatternComponentResult;
+    password: URLPatternComponentResult;
+    hostname: URLPatternComponentResult;
+    port: URLPatternComponentResult;
+    pathname: URLPatternComponentResult;
+    search: URLPatternComponentResult;
+    hash: URLPatternComponentResult;
+}
+interface URLPattern {
+    readonly hasRegExpGroups: boolean;
+    readonly hash: string;
+    readonly hostname: string;
+    readonly password: string;
+    readonly pathname: string;
+    readonly port: string;
+    readonly protocol: string;
+    readonly search: string;
+    readonly username: string;
+    exec(input?: URLPatternInput, baseURL?: string | URL): URLPatternResult | null;
+    test(input?: URLPatternInput, baseURL?: string | URL): boolean;
+}
+declare var URLPattern: {
+    prototype: URLPattern;
+    new (input: URLPatternInput, baseURL: string | URL, options?: URLPatternOptions): URLPattern;
+    new (input?: URLPatternInput, options?: URLPatternOptions): URLPattern;
 };
 interface URLSearchParams {
     readonly size: number;
@@ -337,6 +495,7 @@ declare namespace NodeJS {
         uptime(): number;
         memoryUsage(): MemoryUsage;
         kill(pid: number, signal?: string | number): true;
+        /** @intrinsic process.nextTick */
         nextTick(callback: Function, ...args: any[]): void;
     }
     type TypedArray<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> =
@@ -358,25 +517,60 @@ declare namespace NodeJS {
         path?: string | undefined;
         syscall?: string | undefined;
     }
-    // A timer handle. Its members (ref, unref, hasRef, refresh, close) are
-    // not implemented: the handle is the timer's id.
-    interface Timeout {}
-    interface Immediate {}
+    // A timer handle (@types/node's timers.d.ts), whose value is the
+    // timer's id.
+    interface Timeout {
+        /** @intrinsic Timeout.prototype.ref */
+        ref(): this;
+        /** @intrinsic Timeout.prototype.unref */
+        unref(): this;
+        /** @intrinsic Timeout.prototype.hasRef */
+        hasRef(): boolean;
+        /** @intrinsic Timeout.prototype.refresh */
+        refresh(): this;
+        /** @intrinsic Timeout.prototype.close */
+        close(): this;
+    }
+    interface Immediate {
+        /** @intrinsic Immediate.prototype.ref */
+        ref(): this;
+        /** @intrinsic Immediate.prototype.unref */
+        unref(): this;
+        /** @intrinsic Immediate.prototype.hasRef */
+        hasRef(): boolean;
+    }
 }
 
 declare var process: NodeJS.Process;
 
 // Node's timers (@types/node's timers.d.ts globals).
+/** @intrinsic setTimeout */
 declare function setTimeout<TArgs extends any[]>(callback: (...args: TArgs) => void, delay?: number, ...args: TArgs): NodeJS.Timeout;
+/** @intrinsic setTimeout */
 declare function setTimeout(callback: (_: void) => void, delay?: number): NodeJS.Timeout;
+/** @intrinsic setInterval */
 declare function setInterval<TArgs extends any[]>(callback: (...args: TArgs) => void, delay?: number, ...args: TArgs): NodeJS.Timeout;
+/** @intrinsic setInterval */
 declare function setInterval(callback: (_: void) => void, delay?: number): NodeJS.Timeout;
+/** @intrinsic setImmediate */
 declare function setImmediate<TArgs extends any[]>(callback: (...args: TArgs) => void, ...args: TArgs): NodeJS.Immediate;
+/** @intrinsic setImmediate */
 declare function setImmediate(callback: (_: void) => void): NodeJS.Immediate;
+/** @intrinsic clearTimeout */
 declare function clearTimeout(timeout: NodeJS.Timeout | string | number | undefined): void;
+/** @intrinsic clearInterval */
 declare function clearInterval(timeout: NodeJS.Timeout | string | number | undefined): void;
+/** @intrinsic clearImmediate */
 declare function clearImmediate(immediate: NodeJS.Immediate | undefined): void;
+/** @intrinsic queueMicrotask */
 declare function queueMicrotask(callback: () => void): void;
+
+interface StructuredSerializeOptions {
+    transfer?: any[];
+}
+
+/** @intrinsic structuredClone */
+declare function structuredClone<T = any>(value: T, options?: StructuredSerializeOptions): T;
 
 // Node's `url` module, its code-generated part (@types/node's url.d.ts);
 // the legacy API is lib/node/internal_url.ts.
@@ -410,6 +604,9 @@ declare module "url" {
 // web-globals/fetch.d.ts) in TypeScript's own library shapes (lib.dom.d.ts):
 // fetch, Request, Response and Headers.
 type RequestInfo = Request | string;
+// FormData has no implementation: the type is declared for BodyInit and
+// Body.formData(), and no constructor is.
+interface FormData {}
 type BodyInit =
     | ArrayBuffer
     | AsyncIterable<Uint8Array>
@@ -432,11 +629,14 @@ type ResponseType = "basic" | "cors" | "default" | "error" | "opaque" | "opaquer
 interface Body {
     readonly body: ReadableStream<Uint8Array> | null;
     readonly bodyUsed: boolean;
+    /** @intrinsic Body.prototype.arrayBuffer */
     arrayBuffer(): Promise<ArrayBuffer>;
     blob(): Promise<Blob>;
     bytes(): Promise<Uint8Array<ArrayBuffer>>;
     formData(): Promise<FormData>;
+    /** @intrinsic Body.prototype.json */
     json(): Promise<any>;
+    /** @intrinsic Body.prototype.text */
     text(): Promise<string>;
 }
 interface Headers {
@@ -507,10 +707,14 @@ interface Response extends Body {
 declare var Response: {
     prototype: Response;
     new (body?: BodyInit | null, init?: ResponseInit): Response;
+    /** @intrinsic Response.error */
     error(): Response;
+    /** @intrinsic Response.json */
     json(data: any, init?: ResponseInit): Response;
+    /** @intrinsic Response.redirect */
     redirect(url: string | URL, status?: number): Response;
 };
+/** @intrinsic fetch */
 declare function fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
 /** @intrinsic btoa */
 declare function btoa(data: string): string;
@@ -635,26 +839,36 @@ interface ReadableStreamAsyncIterator<T> extends AsyncIterableIterator<T> {
 }
 interface ReadableStream<R = any> {
     readonly locked: boolean;
+    /** @intrinsic ReadableStream.prototype.cancel */
     cancel(reason?: any): Promise<void>;
+    /** @intrinsic ReadableStream.prototype.getReader */
     getReader(): ReadableStreamDefaultReader<R>;
+    /** @intrinsic ReadableStream.prototype.pipeThrough */
     pipeThrough<T>(transform: ReadableWritablePair<T, R>, options?: StreamPipeOptions): ReadableStream<T>;
+    /** @intrinsic ReadableStream.prototype.pipeTo */
     pipeTo(destination: WritableStream<R>, options?: StreamPipeOptions): Promise<void>;
+    /** @intrinsic ReadableStream.prototype.tee */
     tee(): [ReadableStream<R>, ReadableStream<R>];
+    /** @intrinsic ReadableStream.prototype.values */
     values(options?: ReadableStreamIteratorOptions): ReadableStreamAsyncIterator<R>;
     [Symbol.asyncIterator](options?: ReadableStreamIteratorOptions): ReadableStreamAsyncIterator<R>;
 }
 declare var ReadableStream: {
     prototype: ReadableStream;
+    /** @intrinsic ReadableStream.from */
     from<T>(iterable: Iterable<T> | AsyncIterable<T>): ReadableStream<T>;
     new <R = any>(underlyingSource: UnderlyingDefaultSource<R>, strategy?: QueuingStrategy<R>): ReadableStream<R>;
     new <R = any>(underlyingSource?: UnderlyingSource<R>, strategy?: QueuingStrategy<R>): ReadableStream<R>;
 };
 interface ReadableStreamGenericReader {
     readonly closed: Promise<void>;
+    /** @intrinsic ReadableStreamGenericReader.prototype.cancel */
     cancel(reason?: any): Promise<void>;
 }
 interface ReadableStreamDefaultReader<R = any> extends ReadableStreamGenericReader {
+    /** @intrinsic ReadableStreamDefaultReader.prototype.read */
     read(): Promise<ReadableStreamReadResult<R>>;
+    /** @intrinsic ReadableStreamDefaultReader.prototype.releaseLock */
     releaseLock(): void;
 }
 declare var ReadableStreamDefaultReader: {
@@ -663,8 +877,11 @@ declare var ReadableStreamDefaultReader: {
 };
 interface ReadableStreamDefaultController<R = any> {
     readonly desiredSize: number | null;
+    /** @intrinsic ReadableStreamDefaultController.prototype.close */
     close(): void;
+    /** @intrinsic ReadableStreamDefaultController.prototype.enqueue */
     enqueue(chunk: R): void;
+    /** @intrinsic ReadableStreamDefaultController.prototype.error */
     error(e?: any): void;
 }
 declare var ReadableStreamDefaultController: {
@@ -673,8 +890,11 @@ declare var ReadableStreamDefaultController: {
 };
 interface WritableStream<W = any> {
     readonly locked: boolean;
+    /** @intrinsic WritableStream.prototype.abort */
     abort(reason?: any): Promise<void>;
+    /** @intrinsic WritableStream.prototype.close */
     close(): Promise<void>;
+    /** @intrinsic WritableStream.prototype.getWriter */
     getWriter(): WritableStreamDefaultWriter<W>;
 }
 declare var WritableStream: {
@@ -685,9 +905,13 @@ interface WritableStreamDefaultWriter<W = any> {
     readonly closed: Promise<void>;
     readonly desiredSize: number | null;
     readonly ready: Promise<void>;
+    /** @intrinsic WritableStreamDefaultWriter.prototype.abort */
     abort(reason?: any): Promise<void>;
+    /** @intrinsic WritableStreamDefaultWriter.prototype.close */
     close(): Promise<void>;
+    /** @intrinsic WritableStreamDefaultWriter.prototype.releaseLock */
     releaseLock(): void;
+    /** @intrinsic WritableStreamDefaultWriter.prototype.write */
     write(chunk?: W): Promise<void>;
 }
 declare var WritableStreamDefaultWriter: {
@@ -696,6 +920,7 @@ declare var WritableStreamDefaultWriter: {
 };
 interface WritableStreamDefaultController {
     readonly signal: AbortSignal;
+    /** @intrinsic WritableStreamDefaultController.prototype.error */
     error(e?: any): void;
 }
 declare var WritableStreamDefaultController: {
@@ -712,8 +937,11 @@ declare var TransformStream: {
 };
 interface TransformStreamDefaultController<O = any> {
     readonly desiredSize: number | null;
+    /** @intrinsic ReadableStreamDefaultController.prototype.enqueue */
     enqueue(chunk?: O): void;
+    /** @intrinsic ReadableStreamDefaultController.prototype.error */
     error(reason?: any): void;
+    /** @intrinsic ReadableStreamDefaultController.prototype.terminate */
     terminate(): void;
 }
 declare var TransformStreamDefaultController: {
@@ -740,6 +968,39 @@ interface DecompressionStream extends GenericTransformStream {
 declare var DecompressionStream: {
     prototype: DecompressionStream;
     new (format: CompressionFormat): DecompressionStream;
+};
+
+// XMLHttpRequest (TypeScript's lib.dom.d.ts): the members this compiler
+// implements. The handlers take no event argument, and `response` is the
+// body text.
+interface XMLHttpRequestEventTarget {
+    onload: () => void;
+    onerror: () => void;
+}
+interface XMLHttpRequest extends XMLHttpRequestEventTarget {
+    readonly readyState: number;
+    readonly status: number;
+    readonly responseText: string;
+    readonly response: string;
+    onreadystatechange: () => void;
+    /** @intrinsic XMLHttpRequest.prototype.open */
+    open(method: string, url: string | URL): void;
+    /** @intrinsic XMLHttpRequest.prototype.open */
+    open(method: string, url: string | URL, async: boolean, username?: string | null, password?: string | null): void;
+    /** @intrinsic XMLHttpRequest.prototype.setRequestHeader */
+    setRequestHeader(name: string, value: string): void;
+    /** @intrinsic XMLHttpRequest.prototype.send */
+    send(body?: string | null): void;
+    /** @intrinsic XMLHttpRequest.prototype.abort */
+    abort(): void;
+    /** @intrinsic XMLHttpRequest.prototype.getResponseHeader */
+    getResponseHeader(name: string): string | null;
+    /** @intrinsic XMLHttpRequest.prototype.getAllResponseHeaders */
+    getAllResponseHeaders(): string;
+}
+declare var XMLHttpRequest: {
+    prototype: XMLHttpRequest;
+    new (): XMLHttpRequest;
 };
 
 // Blob (TypeScript's lib.dom.d.ts). The `endings` option is not
@@ -1114,3 +1375,65 @@ declare var EventSource: {
 
 // Node's `util` module: the code-generated part (@types/node's util.d.ts
 // `format` and `inspect`); `promisify` is lib/node/internal_util.ts.
+
+interface DOMException extends Error {
+    readonly code: number;
+    readonly message: string;
+    readonly name: string;
+    readonly INDEX_SIZE_ERR: 1;
+    readonly DOMSTRING_SIZE_ERR: 2;
+    readonly HIERARCHY_REQUEST_ERR: 3;
+    readonly WRONG_DOCUMENT_ERR: 4;
+    readonly INVALID_CHARACTER_ERR: 5;
+    readonly NO_DATA_ALLOWED_ERR: 6;
+    readonly NO_MODIFICATION_ALLOWED_ERR: 7;
+    readonly NOT_FOUND_ERR: 8;
+    readonly NOT_SUPPORTED_ERR: 9;
+    readonly INUSE_ATTRIBUTE_ERR: 10;
+    readonly INVALID_STATE_ERR: 11;
+    readonly SYNTAX_ERR: 12;
+    readonly INVALID_MODIFICATION_ERR: 13;
+    readonly NAMESPACE_ERR: 14;
+    readonly INVALID_ACCESS_ERR: 15;
+    readonly VALIDATION_ERR: 16;
+    readonly TYPE_MISMATCH_ERR: 17;
+    readonly SECURITY_ERR: 18;
+    readonly NETWORK_ERR: 19;
+    readonly ABORT_ERR: 20;
+    readonly URL_MISMATCH_ERR: 21;
+    readonly QUOTA_EXCEEDED_ERR: 22;
+    readonly TIMEOUT_ERR: 23;
+    readonly INVALID_NODE_TYPE_ERR: 24;
+    readonly DATA_CLONE_ERR: 25;
+}
+
+declare var DOMException: {
+    prototype: DOMException;
+    new (message?: string, name?: string): DOMException;
+    new (message?: string, options?: { name?: string; cause?: unknown }): DOMException;
+    readonly INDEX_SIZE_ERR: 1;
+    readonly DOMSTRING_SIZE_ERR: 2;
+    readonly HIERARCHY_REQUEST_ERR: 3;
+    readonly WRONG_DOCUMENT_ERR: 4;
+    readonly INVALID_CHARACTER_ERR: 5;
+    readonly NO_DATA_ALLOWED_ERR: 6;
+    readonly NO_MODIFICATION_ALLOWED_ERR: 7;
+    readonly NOT_FOUND_ERR: 8;
+    readonly NOT_SUPPORTED_ERR: 9;
+    readonly INUSE_ATTRIBUTE_ERR: 10;
+    readonly INVALID_STATE_ERR: 11;
+    readonly SYNTAX_ERR: 12;
+    readonly INVALID_MODIFICATION_ERR: 13;
+    readonly NAMESPACE_ERR: 14;
+    readonly INVALID_ACCESS_ERR: 15;
+    readonly VALIDATION_ERR: 16;
+    readonly TYPE_MISMATCH_ERR: 17;
+    readonly SECURITY_ERR: 18;
+    readonly NETWORK_ERR: 19;
+    readonly ABORT_ERR: 20;
+    readonly URL_MISMATCH_ERR: 21;
+    readonly QUOTA_EXCEEDED_ERR: 22;
+    readonly TIMEOUT_ERR: 23;
+    readonly INVALID_NODE_TYPE_ERR: 24;
+    readonly DATA_CLONE_ERR: 25;
+};

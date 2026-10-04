@@ -3,6 +3,8 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // isConstLiteralExpr reports whether expr is a compile-time primitive literal
@@ -144,6 +146,11 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 			return e.emitAnyBinary("+", left, right, ex.GetPos())
 		}
 	}
+	if ex.Op == "==" || ex.Op == "===" || ex.Op == "!=" || ex.Op == "!==" {
+		if v, ok := e.emitF64UndefinedEq(ex, left, right); ok {
+			return v, nil
+		}
+	}
 	// A `T | undefined` local reads as its payload (emitIdent), which would
 	// make an absent one equal the payload's zero (`copy === false` for an
 	// omitted `copy?: boolean`): equality reloads its aggregate.
@@ -166,6 +173,16 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		return e.emitNullableScalarValueEq(ex.Op, left, right)
 	}
 
+	// An equality between a reference and a number held in different
+	// representations (a number parameter against a function): compared as
+	// values, boxed, never as one register read as the other's type.
+	if (ex.Op == "==" || ex.Op == "===" || ex.Op == "!=" || ex.Op == "!==") && reprMismatch(left.Ty, right.Ty) {
+		negate := ex.Op == "!=" || ex.Op == "!=="
+		if ex.Op == "==" || ex.Op == "!=" {
+			return e.emitAnyLooseEquals(left, right, negate)
+		}
+		return e.emitAnyEquals(left, right, negate)
+	}
 	strConcatToStr := ex.Op == "+" && (isStringTy(left.Ty) || isStringTy(right.Ty))
 	// A function operand of `+` converts as an object: boxed, it takes the
 	// dynamic branch below (ToPrimitive with the default hint).
@@ -182,6 +199,30 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 				}
 			}
 			if side.Ty.IsFunc && !side.Ty.Nullable {
+				b, err := e.emitBoxValue(*side)
+				if err != nil {
+					return Value{}, err
+				}
+				*side = b
+				continue
+			}
+			// Any other reference (a Promise, a host handle): its ToString
+			// through the box ("[object Promise]").
+			if (side.Ty.IsPromise || isHostHandle(side.Ty)) && !side.Ty.IsDynamic {
+				b, err := e.emitBoxValue(*side)
+				if err != nil {
+					return Value{}, err
+				}
+				*side = b
+			}
+		}
+	}
+	// A function operand of an arithmetic or relational operator converts as
+	// an object too (ToPrimitive, then ToNumber): boxed, it takes the dynamic
+	// branch below.
+	if !strConcatToStr && arithOrRelationalOp(ex.Op) {
+		for _, side := range []*Value{&left, &right} {
+			if side.Ty.IsFunc && !side.Ty.Nullable && !side.Ty.IsDynamic {
 				b, err := e.emitBoxValue(*side)
 				if err != nil {
 					return Value{}, err
@@ -407,8 +448,10 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// aggregate), so `map.get(miss) === undefined` must test the data pointer
 	// for null exactly as `=== null` does, rather than falling through to the
 	// aggregate-hostile generic path.
-	leftArrNullish := right.Ty.IsNull || right.Ty.IsUndefined || right.Ty.IR == "void"
-	rightArrNullish := left.Ty.IsNull || left.Ty.IsUndefined || left.Ty.IR == "void"
+	// An array that may be undefined (an element read, `T[] | undefined`) is
+	// still an array operand: two of them compare by identity below.
+	leftArrNullish := !right.Ty.IsArray && (right.Ty.IsNull || right.Ty.IsUndefined || right.Ty.IR == "void")
+	rightArrNullish := !left.Ty.IsArray && (left.Ty.IsNull || left.Ty.IsUndefined || left.Ty.IR == "void")
 	if (left.Ty.IsArray && leftArrNullish) || (rightArrNullish && right.Ty.IsArray) {
 		arrVal := left
 		if !left.Ty.IsArray {
@@ -775,7 +818,7 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		} else {
 			e.emitInstr(fmt.Sprintf("%s = add %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		}
-		return Value{Ref: reg, Ty: ty}, nil
+		return e.quietIdentity(ex, Value{Ref: reg, Ty: ty}), nil
 	case "-":
 		// Date - Date is a real, meaningful operation (real JS does this
 		// too, via numeric ToPrimitive) — the difference in milliseconds,
@@ -792,14 +835,14 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		} else {
 			e.emitInstr(fmt.Sprintf("%s = sub %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		}
-		return Value{Ref: reg, Ty: ty}, nil
+		return e.quietIdentity(ex, Value{Ref: reg, Ty: ty}), nil
 	case "*":
 		if ty.Float {
 			e.emitInstr(fmt.Sprintf("%s = fmul %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		} else {
 			e.emitInstr(fmt.Sprintf("%s = mul %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		}
-		return Value{Ref: reg, Ty: ty}, nil
+		return e.quietIdentity(ex, Value{Ref: reg, Ty: ty}), nil
 	case "/":
 		if ty.Float {
 			e.emitInstr(fmt.Sprintf("%s = fdiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
@@ -811,7 +854,7 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 				e.emitInstr(fmt.Sprintf("%s = udiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 			}
 		}
-		return Value{Ref: reg, Ty: ty}, nil
+		return e.quietIdentity(ex, Value{Ref: reg, Ty: ty}), nil
 	case "%":
 		if ty.Float {
 			// frem lowers to a libcall to fmod — needs libm on Linux.
@@ -825,7 +868,7 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 				e.emitInstr(fmt.Sprintf("%s = urem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 			}
 		}
-		return Value{Ref: reg, Ty: ty}, nil
+		return e.quietIdentity(ex, Value{Ref: reg, Ty: ty}), nil
 	case "**":
 		// Exponentiation. Float operands (either side) use libm's pow() and
 		// yield a float, matching Math.pow. Integer operands use an exact
@@ -1032,9 +1075,8 @@ func typeofString(ty Type) string {
 		return "symbol"
 	case ty.IsNull, ty.IsObject, ty.IsArray, ty.IsTuple, ty.IsPromise, ty.IsMap,
 		ty.IsSet, ty.IsGenerator, ty.IsCollIter, ty.IsDate, ty.IsResponse, ty.IsClass,
-		ty.IsError, ty.IsRequest, ty.IsFetchRequest, ty.IsURL,
-		ty.IsURLSearchParams, ty.IsHeaders, ty.IsRegExp,
-		ty.IsArrayBuffer, ty.IsDataView, ty.IsTypedArray, ty.IsDynamicObject:
+		ty.IsError, ty.IsRequest, ty.IsFetchRequest, ty.IsRegExp,
+		ty.IsArrayBuffer, ty.IsTypedArray, ty.IsDynamicObject:
 		return "object"
 	case ty.IR == "i1":
 		return "boolean"
@@ -1120,7 +1162,7 @@ var typeofBuiltinConstructors = map[string]bool{
 	"Float32Array": true, "Float64Array": true, "BigInt64Array": true, "BigUint64Array": true,
 	"Number": true, "String": true, "Boolean": true, "Symbol": true, "BigInt": true, "Buffer": true, "Blob": true,
 	"Object": true, "Array": true, "URL": true, "URLSearchParams": true,
-	"Headers": true, "Request": true, "Response": true,
+	"Request": true, "Response": true,
 	"TextEncoder": true, "TextDecoder": true, "XMLHttpRequest": true,
 }
 
@@ -1172,7 +1214,7 @@ func (e *Emitter) typeofStaticAnswer(arg ast.Expression) string {
 			return "function"
 		}
 		switch a.Name {
-		case "Math", "JSON", "console", "globalThis", "process":
+		case "Math", "JSON", "console", "globalThis", "process", "Reflect", "Atomics", "crypto":
 			return "object"
 		case "NaN", "Infinity":
 			return "" // numeric globals — infer normally
@@ -1419,6 +1461,9 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 			}
 		}
 		if s := e.typeofStaticAnswer(ex.Arg); s != "" {
+			if err := e.emitTypeofOperandEffects(ex.Arg); err != nil {
+				return Value{}, err
+			}
 			return Value{Ref: e.internString(s), Ty: TypePtr}, nil
 		}
 		ty := e.inferExprType(ex.Arg)
@@ -1434,7 +1479,35 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
+			if !val.Ty.IsDynamic {
+				// Inferred dynamic but emitted static (`Math.E` under
+				// -compat=js): the value's own box answers.
+				if val, err = e.emitBoxValue(val); err != nil {
+					return Value{}, err
+				}
+			}
 			return e.emitDynamicTypeof(val)
+		}
+		// A double slot may hold undefined as its sentinel (TDD-00241).
+		if ty.IR == "double" && !ty.Nullable && !ty.IsUndefined {
+			if _, lit := ex.Arg.(*ast.NumberLiteral); !lit {
+				v, err := e.emitExpr(ex.Arg)
+				if err != nil {
+					return Value{}, err
+				}
+				if v.Ty.IR != "double" {
+					// Inferred a number, emitted otherwise (a box): its own
+					// type answers.
+					return e.typeofValue(v)
+				}
+				b := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", b, v.Ref))
+				isU := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, b, undefF64))
+				r := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isU, e.internString("undefined"), e.internString("number")))
+				return Value{Ref: r, Ty: TypePtr}, nil
+			}
 		}
 		// A `T | undefined` value (TDD-00187/TDD-00221) needs a *runtime* answer:
 		// `typeofString` would statically report "undefined" for every one, even a
@@ -1451,6 +1524,25 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 			if res, ok, err := e.emitUndefinedableTypeof(ex.Arg, ty); ok || err != nil {
 				return res, err
 			}
+		}
+		// A string slot can hold null where a declaration says string but
+		// the value is null (`new Date(NaN).toJSON()`): "object".
+		if typeofString(ty) == "string" && ty.IR == "ptr" && !ty.IsDynamic {
+			if _, lit := ex.Arg.(*ast.StringLiteral); !lit {
+				v, err := e.emitExpr(ex.Arg)
+				if err != nil {
+					return Value{}, err
+				}
+				if !isStringTy(v.Ty) || v.Ty.IsDynamic {
+					return e.typeofValue(v)
+				}
+				r := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, e.ptrIsNull(v.Ref), e.internString("object"), e.internString("string")))
+				return Value{Ref: r, Ty: TypePtr}, nil
+			}
+		}
+		if err := e.emitTypeofOperandEffects(ex.Arg); err != nil {
+			return Value{}, err
 		}
 		ptr := e.internString(typeofString(ty))
 		return Value{Ref: ptr, Ty: TypePtr}, nil
@@ -1555,9 +1647,11 @@ func (e *Emitter) emitUnaryPlus(arg Value, pos ast.Pos) (Value, error) {
 	switch {
 	case t.IsBigInt:
 		e.emitThrowTypeError("Cannot convert a BigInt value to a number")
+		e.emitLabel(e.freshLabel("dead")) // the caller goes on emitting
 		return nan, nil
 	case t.IsSymbol:
 		e.emitThrowTypeError("Cannot convert a Symbol value to a number")
+		e.emitLabel(e.freshLabel("dead")) // the caller goes on emitting
 		return nan, nil
 	case isNullableScalar(t):
 		present, payload := e.nullableScalarAggParts(arg)
@@ -1582,6 +1676,9 @@ func (e *Emitter) emitUnaryPlus(arg Value, pos ast.Pos) (Value, error) {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = uitofp i1 %s to double", r, arg.Ref))
 		return Value{Ref: r, Ty: TypeF64}, nil
+	case t.IR == "double":
+		// The slot's undefined (TDD-00241) is NaN.
+		return Value{Ref: e.emitQuietF64(arg.Ref), Ty: t}, nil
 	case t.Float || (t.IsInteger() && !t.IsDynamic):
 		return arg, nil
 	case t.IsDynamic || (t.IsFunc && !t.Nullable):
@@ -2805,6 +2902,14 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 	if left.Ty.NullAndUndef {
 		left = e.fromThreeState(left) // either absence takes the right operand
 	}
+	if isF64Slot(left.Ty) {
+		// The slot's undefined (TDD-00241) takes the right operand.
+		b := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", b, left.Ref))
+		present := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", present, b, undefF64))
+		return e.emitNullCoalesceScalar(present, left, ex.Right)
+	}
 	if left.Ty.IR != "ptr" {
 		return left, nil
 	}
@@ -3083,4 +3188,147 @@ func isNumericScalar(t Type) bool {
 		return true
 	}
 	return false
+}
+
+// emitTypeofOperandEffects evaluates, for its effects only, a typeof operand
+// whose answer is static: `typeof f()` still calls f.
+func (e *Emitter) emitTypeofOperandEffects(arg ast.Expression) error {
+	switch a := arg.(type) {
+	case *ast.Identifier, *ast.StringLiteral, *ast.NumberLiteral, *ast.BooleanLiteral, *ast.NullLiteral,
+		*ast.ThisExpression, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassExpression:
+		return nil
+	case *ast.MemberExpression:
+		return e.emitTypeofOperandEffects(a.Object)
+	case *ast.NonNullExpression:
+		return e.emitTypeofOperandEffects(a.Arg)
+	}
+	_, err := e.emitExpr(arg)
+	return err
+}
+
+// emitF64UndefinedEq is an equality over a double slot that may hold the
+// slot's undefined (TDD-00241): against an `undefined` or `null` literal it
+// tests for the sentinel (`=== null` never holds), and between two doubles
+// two sentinels are equal, which fcmp alone says they are not.
+func (e *Emitter) emitF64UndefinedEq(ex *ast.BinaryExpression, left, right Value) (Value, bool) {
+	isF64 := func(v Value) bool { return isF64Slot(v.Ty) }
+	negate := ex.Op == "!=" || ex.Op == "!=="
+	strict := ex.Op == "===" || ex.Op == "!=="
+	finish := func(r string) (Value, bool) {
+		if negate {
+			n := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", n, r))
+			r = n
+		}
+		return Value{Ref: r, Ty: TypeBool}, true
+	}
+	isSent := func(v Value) string {
+		b := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", b, v.Ref))
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", r, b, undefF64))
+		return r
+	}
+	nullLit := func(x ast.Expression) (*ast.NullLiteral, bool) {
+		nl, ok := x.(*ast.NullLiteral)
+		return nl, ok
+	}
+	for _, side := range [][2]any{{ex.Left, right}, {ex.Right, left}} {
+		nl, ok := nullLit(side[0].(ast.Expression))
+		other := side[1].(Value)
+		if !ok || !isF64(other) {
+			continue
+		}
+		if strict && !nl.IsUndefined {
+			return finish("false")
+		}
+		return finish(isSent(other))
+	}
+	if isF64(left) && isF64(right) {
+		eq := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, %s", eq, left.Ref, right.Ref))
+		both := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", both, isSent(left), isSent(right)))
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", r, eq, both))
+		return finish(r)
+	}
+	return Value{}, false
+}
+
+// quietIdentity turns the slot's undefined (TDD-00241) into NaN in a float
+// result LLVM may have folded to an operand: hardware arithmetic quiets the
+// signaling sentinel, but `x * 1`, `x / 1`, `x - 0` and `x + -0` fold to x
+// itself. Only those identity forms (a literal 0 or 1 operand) pay for the
+// test.
+func (e *Emitter) quietIdentity(ex *ast.BinaryExpression, v Value) Value {
+	if v.Ty.IR != "double" || !(isIdentityLiteral(ex.Left) || isIdentityLiteral(ex.Right)) {
+		return v
+	}
+	return Value{Ref: e.emitQuietF64(v.Ref), Ty: v.Ty}
+}
+
+func isIdentityLiteral(x ast.Expression) bool {
+	if u, ok := x.(*ast.UnaryExpression); ok && u.Op == "-" {
+		x = u.Arg
+	}
+	n, ok := x.(*ast.NumberLiteral)
+	if !ok {
+		return false
+	}
+	f, err := strconv.ParseFloat(strings.ReplaceAll(n.Value, "_", ""), 64)
+	return err == nil && (f == 0 || f == 1)
+}
+
+// emitF64IsUndefined tests a double for the slot's undefined (TDD-00241).
+func (e *Emitter) emitF64IsUndefined(d string) string {
+	b := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", b, d))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", r, b, undefF64))
+	return r
+}
+
+// emitQuietF64 is d with the slot's undefined read as NaN (ToNumber).
+func (e *Emitter) emitQuietF64(d string) string {
+	b := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", b, d))
+	isU := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, b, undefF64))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0x7FF8000000000000, double %s", r, isU, d))
+	return r
+}
+
+// arithOrRelationalOp reports a binary operator whose operands take
+// ToNumber (or ToPrimitive then ToNumber): the arithmetic, bitwise, shift
+// and relational ones.
+func arithOrRelationalOp(op string) bool {
+	switch op {
+	case "+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", ">>>", "<", ">", "<=", ">=":
+		return true
+	}
+	return false
+}
+
+// typeofValue is typeof of an already-emitted value, by its own type: a box
+// reads its tag, anything else is answered statically.
+func (e *Emitter) typeofValue(v Value) (Value, error) {
+	if v.Ty.IsDynamic {
+		return e.emitDynamicTypeof(v)
+	}
+	return Value{Ref: e.internString(typeofString(v.Ty)), Ty: TypePtr}, nil
+}
+
+// reprMismatch reports two non-boxed operands of which exactly one is a
+// reference (a pointer) and the other a number or boolean register: an
+// equality between them cannot compare the registers.
+func reprMismatch(a, b Type) bool {
+	plain := func(t Type) bool {
+		return !t.IsDynamic && !isNullableScalar(t) && !t.IsNull && !t.IsUndefined && !t.NullAndUndef && !t.IsBigInt && t.IR != "" && t.IR != "void"
+	}
+	if !plain(a) || !plain(b) {
+		return false
+	}
+	return (a.IR == "ptr") != (b.IR == "ptr")
 }

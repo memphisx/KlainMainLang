@@ -40,11 +40,8 @@
           {
             "feature": "`AbortController` / `AbortSignal`",
             "status": "implemented",
-            "caveats": [
-              "DOMException carries no legacy numeric `.code`",
-              "`JSON.stringify` of an error-subclass `abort(reason)` yields `{}` — Node serializes the instance's own enumerable fields (an assigned `this.name`, extra declared fields); needs per-field enumerability, same residue as `allSettled` ([TDD-00222](../tdd/TDD-00222.md))"
-            ],
             "notes": [
+              "`DOMException` has its legacy `code` and code constants ([ADR-01333](../adr/ADR-01333.md))",
               "Node's `lib/internal/abort_controller.js` in TypeScript, subclasses of `EventTarget` ([ADR-01203](../adr/ADR-01203.md)): `aborted`, `reason`, `throwIfAborted()`, a trusted `abort` event, `onabort` holding its listener slot from its first assignment, `AbortSignal.abort()`/`timeout()` (an unref'd timer)/`any()`; `new AbortSignal()` is Node's `TypeError: Illegal constructor`",
               "`signal.reason` is `any` ([ADR-01004](../adr/ADR-01004.md)): a never-aborted signal reads `undefined`, `abort(reason)` preserves any value's type (`typeof`, `===`), and the default/timeout DOMExceptions keep their full Error shape (`.name`/`.message`/`String`/`instanceof`) through the box via the field-0 type-id ([TDD-00222](../tdd/TDD-00222.md))",
               "`fetch(url, { signal })` cancellation works — pre-flight, mid-flight, and via **`AbortSignal.timeout(ms)`**, on both the top-level `await` path and the fiber path (a fetch awaited inside an `http.listen` handler): the await loop checks the signal every spin, and the event loop folds the timeout deadline into its `select()` wait so an idle loop wakes at the deadline — then tears the transfer down and rejects with **`signal.reason`** itself, Node parity ([ADR-01004](../adr/ADR-01004.md)): the default is a `DOMException` (`instanceof DOMException` and, since it inherits `Error`, `instanceof Error` both hold), named `AbortError` for a manual abort and `TimeoutError` for a timeout, and a custom `abort(reason)` value is rethrown as-is ([ADR-00237](../adr/ADR-00237.md)–[ADR-00240](../adr/ADR-00240.md))",

@@ -1808,6 +1808,29 @@ function notAGenerator(): void {
 	}
 }
 
+// An await outside an async body is an early error (TS1308; V8's
+// "Unexpected reserved word"): a plain function, an async function's class
+// field initializer, and a static block.
+func TestE2EAwaitOutsideAsyncRejected(t *testing.T) {
+	for _, src := range []string{
+		"export {}\nfunction f() { return await 1 }\n",
+		"export {}\nconst f = async () => class { x = await 1 }\n",
+		"export {}\nasync function g() { class C { static { await 1 } } }\n",
+	} {
+		_, err := parseAndCompile(src)
+		if err == nil || !strings.Contains(err.Error(), "'await' expressions are only allowed within async functions") {
+			t.Errorf("%q: expected tsc's TS1308, got: %v", src, err)
+		}
+	}
+	assertOutput(t, `
+async function g() { const a = async () => await 1; return await a() }
+g().then((v) => console.log(v))
+class K { m = async () => await 3 }
+new K().m().then((v) => console.log(v))
+console.log(await Promise.resolve(2))
+`, "2\n3\n1")
+}
+
 // yield* delegates to another generator (TDD-00086); yield* over a general
 // iterable such as an array still needs Symbol.iterator and is a clean rejection.
 func TestE2EYieldStarOverArrayRejected(t *testing.T) {

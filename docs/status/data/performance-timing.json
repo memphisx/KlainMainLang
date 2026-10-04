@@ -44,12 +44,11 @@
             "feature": "`Date`",
             "status": "implemented",
             "notes": [
-              "Local time is not implemented: every local getter, the component constructor and `toString` work in UTC",
-              "`new Date()` / `new Date(ms)` / `new Date(isoString)` (the string form parses via the same logic as `Date.parse`, including its `-1`-on-unparseable sentinel — see [ADR-00038](../adr/ADR-00038.md)) / `new Date(year, month, day?, hours?, minutes?, seconds?, ms?)` (month 0-indexed, matching `getMonth()`; omitted trailing fields default like real JS — day to 1, everything after that to 0; see [ADR-00039](../adr/ADR-00039.md))",
+              "`new Date()` / `new Date(ms)` / `new Date(isoString)` (the string form parses via the same logic as `Date.parse` — see [ADR-00038](../adr/ADR-00038.md)) / `new Date(year, month, day?, hours?, minutes?, seconds?, ms?)` (month 0-indexed, matching `getMonth()`; omitted trailing fields default like real JS — day to 1, everything after that to 0; see [ADR-00039](../adr/ADR-00039.md))",
               "`getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds` (+ the `set*` setters), `getTime`/`valueOf`, `toISOString`",
-              "The `getUTC*`/`setUTC*` accessors alias the field getters/setters — since the stored timestamp is UTC, these are fully faithful to Node's UTC methods (unlike the local `get*`/`set*`, which carry the UTC deviation above) ([ADR-00844](../adr/ADR-00844.md))",
+              "The `getUTC*`/`setUTC*` accessors alias the field getters/setters — since the stored timestamp is UTC, these are Node's UTC methods ([ADR-00844](../adr/ADR-00844.md))",
               "See [ADR-00014](../adr/ADR-00014.md)",
-              "Local time follows the host's time zone, as Node's does: the local getters, the component constructor, the local setters, `toString` (`GMT+0300 (Eastern European Summer Time)`), `toDateString` and `getTimezoneOffset`; `Date.UTC` and the `getUTC*`/`setUTC*` accessors are UTC. An unparseable string or a `NaN` time value is an Invalid Date: `getTime()` is `NaN`, `toString()` is `Invalid Date`, `toISOString()` throws a `RangeError` and JSON gives `null` ([ADR-01315](../adr/ADR-01315.md))"
+              "Local time follows the host's time zone, as Node's does: the local getters, the component constructor, the local setters, `toString` (`GMT+0300 (Eastern European Summer Time)`), `toDateString` and `getTimezoneOffset`; `Date.UTC` and the `getUTC*`/`setUTC*` accessors are UTC. An unparseable string or a `NaN` time value is an Invalid Date: `getTime()` is `NaN`, `toString()` is `Invalid Date`, `toISOString()` throws a `RangeError` and JSON gives `null` ([ADR-01315](../adr/ADR-01315.md)); its getters are `NaN`, `setFullYear` starts from +0 and the other setters leave it invalid; `setTime` is TimeClip(ToNumber(t)) ([ADR-01383](../adr/ADR-01383.md))"
             ],
             "caveats": [
               "`toString`'s zone name comes from a built-in table of the common zones' abbreviations; a zone outside it prints the C library's abbreviation (`GMT-0300 (-03)` where Node says `(Brasilia Standard Time)`)"
@@ -111,6 +110,23 @@
             ],
             "notes": [
               "See [ADR-00019](../adr/ADR-00019.md)"
+            ]
+          },
+          {
+            "feature": "`Date.prototype.toTimeString()` / `toJSON()`",
+            "status": "implemented",
+            "notes": [
+              "`toTimeString` is `toString`'s time and zone (`\"13:04:09 GMT+0000 (Coordinated Universal Time)\"`); `toJSON` is `toISOString`, `null` for Invalid Date ([ADR-01333](../adr/ADR-01333.md))"
+            ]
+          },
+          {
+            "feature": "`Date.prototype.toLocaleTimeString()` / `toLocaleString()`",
+            "status": "implemented",
+            "caveats": [
+              "One fixed en-US shape (`\"1:04:09 PM\"`, `\"1/5/2020, 1:04:09 PM\"`) in local time; no locale argument or full `Intl`-style locale support"
+            ],
+            "notes": [
+              "[ADR-01333](../adr/ADR-01333.md)"
             ]
           },
           {

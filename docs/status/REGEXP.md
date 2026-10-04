@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 14/15 (~93%) · **Strict Coverage**: 9/15 (60%).
+**Coverage**: 14/15 (~93%) · **Strict Coverage**: 10/15 (~67%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -22,7 +22,7 @@ Matching follows the **ECMAScript dialect by default** ([TDD-00067](../tdd/TDD-0
 | `.test(str)` | ✅ | | • A `g`-flagged RegExp reads/advances `.lastIndex` exactly as `.exec()` does, so `while (re.test(s))` steps through every match; a non-global RegExp always matches from offset 0 and never touches `.lastIndex` — see [ADR-00115](../adr/ADR-00115.md)/[ADR-00526](../adr/ADR-00526.md) |
 | `.exec(str)` | ✅ | | • Returns `string[] \| null` — real, working `m !== null`/`if (m)` checks against the result. See [ADR-00116](../adr/ADR-00116.md)<br>• All matching methods route through the one compiled PCRE2 handle, so the `-regex` dialect mode and its Known-limitations dialect caveats apply uniformly here and to `.match`/`.matchAll`/`.replace`/`.replaceAll`/`.split`/`.search`<br>• The result carries `index`, `input` and `groups` (a null-prototype dictionary of the named groups, `undefined` without any), as in Node ([ADR-01316](../adr/ADR-01316.md)) |
 | `str.match(regexp)` | ✅ | • With a regex held in a variable (not a literal), the result has no `index`/`input`/`groups`; a non-global literal's result carries them, as `.exec()`'s does | • Without `g`: identical to `regexp.exec(str)`. With `g`: full-match-only strings, `null` (not `[]`) on zero matches — matches real JS exactly. See [ADR-00117](../adr/ADR-00117.md) |
-| `str.matchAll(regexp)` | ✅ | • Returns an eager `string[][]`, not a lazy iterator | • One `.exec()`-shaped match array per match; throws `TypeError` without `g`. See [ADR-00117](../adr/ADR-00117.md) |
+| `str.matchAll(regexp)` | ✅ | | • A `RegExp String Iterator` over exec-shaped steps (`index`, `input`, `groups`) of a clone of the RegExp, starting at its `lastIndex`; throws `TypeError` without `g` ([ADR-00117](../adr/ADR-00117.md), [ADR-01339](../adr/ADR-01339.md)) |
 | `str.replace(regexp, replacement)` (string or callback) | ✅ | • Replacement template supports `$1`-`$9`/`$&`/`$$` only (`` $` ``/`$'` — pre-/post-match text — are out of scope)<br>• The callback form is invoked with a fixed `(match, offset, string)` — real JS's variadic `...capturedGroups` in the middle isn't supported (a callback's arity is fixed at compile time but a pattern's capture count is only known at runtime; a callback declaring more than 3 parameters is a compile-time error) | • Replaces the first match without `g`, every match with `g`; the callback runs exactly once per match. See [ADR-00118](../adr/ADR-00118.md) |
 | `str.replaceAll(regexp, replacement)` (string or callback) | ✅ | • Same replacement narrowing as `.replace()` (`$1`-`$9`/`$&`/`$$` only; fixed `(match, offset, string)` callback) | • Same replacement rules as `.replace()`; requires the `g` flag, throwing `TypeError` otherwise. See [ADR-00118](../adr/ADR-00118.md) |
 | `str.split(regexp)` | ✅ | | • The separator's capture groups are spliced in after each piece, an unmatched one as `undefined` ([ADR-01307](../adr/ADR-01307.md))<br>• Finds every match regardless of `g` (its own local search loop, like real JS); an empty match splits as `@@split` does ([ADR-01277](../adr/ADR-01277.md)) |

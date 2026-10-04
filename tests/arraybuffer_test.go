@@ -40,10 +40,9 @@ console.log(dv.getInt8(0));
 // A non-numeric DataView byteOffset/value (e.g. a Symbol, as several Test262
 // `return-abrupt-from-tonumber-*` files pass) is a clean compile-time type
 // error — the typed-subset equivalent of the runtime TypeError real JS throws,
-// and what tsc itself reports (the checker's TS2345 for the methods; the
-// constructor's generic buffer constraint leaves it to code generation) — not
-// invalid IR emitted at the arithmetic/store site (the DataView A1 invalid-IR
-// cluster).
+// and what tsc itself reports (TS2345, for the methods and the constructor's
+// non-generic parameters alike) — not invalid IR emitted at the
+// arithmetic/store site (the DataView A1 invalid-IR cluster).
 func TestE2EDataViewNonNumericRejected(t *testing.T) {
 	mustCompileError(t, `
 const dv = new DataView(new ArrayBuffer(8));
@@ -55,7 +54,7 @@ dv.setInt16(0, Symbol("x"));
 `, "not assignable to parameter of type 'number'")
 	mustCompileError(t, `
 const dv = new DataView(new ArrayBuffer(8), Symbol("x"));
-`, "DataView byteOffset")
+`, "not assignable to parameter of type 'number'")
 }
 
 // DataView Float16 accessors (ADR-00553): half-precision reads/writes with the
@@ -191,4 +190,16 @@ try { ab.resize(20) } catch (e) { console.log("caught:", (e as Error).message.in
 const sab = new SharedArrayBuffer(8, {maxByteLength: 16})
 try { sab.grow(4) } catch (e) { console.log("shrink-blocked:", (e as Error).message.indexOf("RangeError") === 0) }
 `, "8\n12\n4\n10\ncaught: true\nshrink-blocked: true")
+}
+
+// A void builtin call's result held in a top-level binding is undefined.
+func TestE2EVoidBuiltinResultGlobal(t *testing.T) {
+	assertOutput(t, `
+const m = new Map<string, number>();
+const q = m.clear();
+console.log(q);
+const ta = new Uint8Array(4);
+const s = ta.set([1, 2], 1);
+console.log(s, ta.subarray(1, 3).join(","));
+`, "undefined\nundefined 1,2")
 }

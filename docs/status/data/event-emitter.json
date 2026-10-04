@@ -28,7 +28,7 @@
             "status": "implemented",
             "caveats": [
               "An override's declared signature isn't checked for compatibility against the method it replaces (tsc's TS2416)",
-              "The checker types every event as taking `...args: any[]`: @types/node types a typed map's listeners through conditional types (`Key`/`Args`/`Listener`), which it does not model yet, so a typed map's event names and argument types are not checked"
+              "The checker types every event as taking `...args: any[]`: `lib/node/events.ts` declares its methods that way, not through @types/node's conditional types (`Key`/`Args`/`Listener`), so a typed map's event names and argument types are not checked"
             ],
             "notes": [
               "Node's `lib/events.js`, ported to TypeScript ([TDD-00230](../tdd/TDD-00230.md) P3.1): an ordinary class, imported from `events` (named, default or namespace), not a global. With no type argument every event takes any arguments (@types/node's default event map); a type argument is an event map of argument tuples (`EventEmitter<{ data: [chunk: string]; end: [] }>`)",

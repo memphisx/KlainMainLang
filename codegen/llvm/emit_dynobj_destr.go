@@ -86,7 +86,7 @@ func (e *Emitter) bindDynPatternValue(val Value, local string, def ast.Expressio
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", val.Ref, slot))
-	e.define(local, Symbol{Ptr: slot, Ty: TypeAny})
+	e.definePatternLocal(local, Symbol{Ptr: slot, Ty: TypeAny})
 	return nil
 }
 

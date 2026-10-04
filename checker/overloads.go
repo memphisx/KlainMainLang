@@ -275,6 +275,23 @@ func (c *Checker) argTypeFor(a ast.Expression, p *Type) *Type {
 	if !ok || p == nil {
 		return c.TypeOf(a)
 	}
+	if p.Flags&TypeParam != 0 && p.Constraint != nil && len(lit.Elements) > 0 {
+		// A type parameter constrained by a tuple type (`T extends
+		// readonly unknown[] | []`, Promise.all's) infers a tuple.
+		for _, m := range members(p.Constraint) {
+			if m.Flags&Object != 0 && m.Kind == Tuple {
+				elems := make([]*Type, 0, len(lit.Elements))
+				for _, x := range lit.Elements {
+					t := c.TypeOf(x)
+					if _, spread := x.(*ast.SpreadElement); spread || c.Unanswered(t) {
+						return c.TypeOf(a)
+					}
+					elems = append(elems, widen(c, t))
+				}
+				return c.in.tuple(elems)
+			}
+		}
+	}
 	// A context that may be absent (`[K, V][] | null`): its array or tuple.
 	if p.Flags&Union != 0 {
 		var ctx *Type
@@ -306,6 +323,25 @@ func (c *Checker) argTypeFor(a ast.Expression, p *Type) *Type {
 			t := c.argTypeFor(x, elemCtx)
 			if c.Unanswered(t) {
 				return t
+			}
+			elems = append(elems, t)
+		}
+		return c.in.array(c.in.union(elems...))
+	}
+	if p.Flags&Object != 0 && (p.Kind == Array || readonlyArrayElem(p) != nil) && elemCtx != nil && len(lit.Elements) > 0 {
+		// An array of literals for a literal element type (`["sign"]` for
+		// `KeyUsage[]`): each element keeps its literal type.
+		elems := make([]*Type, 0, len(lit.Elements))
+		for _, x := range lit.Elements {
+			if _, spread := x.(*ast.SpreadElement); spread {
+				return c.TypeOf(a)
+			}
+			t := c.TypeOf(x)
+			if c.Unanswered(t) {
+				return t
+			}
+			if !c.literalOfContext(t, elemCtx) && !c.keepsLiteral(x, t) {
+				t = c.widenFrom(x, t)
 			}
 			elems = append(elems, t)
 		}

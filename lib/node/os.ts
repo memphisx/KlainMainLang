@@ -4,24 +4,9 @@
 
 import { Buffer } from 'buffer';
 import { inspect } from './internal_util_inspect';
+import { NodeTypeError, NodeRangeError } from './internal_errors';
 
 const isWindows = process.platform === 'win32';
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
-
-class NodeRangeError extends RangeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
 
 // Node's SystemError (internal/errors.js) for ERR_SYSTEM_ERROR: the context
 // of the failed libuv call is `info`. Node's errno and syscall are accessors

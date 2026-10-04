@@ -1310,7 +1310,7 @@ const arr: number[] = Array.from(x)
 // load/store that a 16-byte {ptr,i64} aggregate can't fit through) plus its
 // rejectNestedArrayElem guard removed.
 //
-// Three genuinely different, unrelated mechanisms remain out of scope, each
+// Two genuinely different, unrelated mechanisms remain out of scope, each
 // for its own reason (TestE2ENestedArrayHOFRejectedCleanly below):
 //   - indexOf/includes/join compare or stringify an element as a bare
 //     elemTy.IR-typed register directly (no callback at all) — a boxed
@@ -1318,10 +1318,6 @@ const arr: number[] = Array.from(x)
 //   - sort's comparator runs through a C-ABI qsort() trampoline
 //     (emit_arrays_sort.go) with one fixed trampoline per element kind
 //     (i64/f64/str) — a fourth, array-aware trampoline is a separate task.
-//   - Object.groupBy's buckets store every element uniformly as a raw i64
-//     (ptrtoint'd for a pointer-shaped element) — a different storage
-//     scheme than a plain array's backing buffer, with no room for a
-//     16-byte aggregate without its own redesign.
 // `new Array<T[]>(n)` (construction, not consumption) and capturing an
 // array *variable* into a closure's env (a different storage shape — one
 // heap-cell pointer per env slot, not a (ptr, i64) pair) are also untouched.
@@ -1486,7 +1482,6 @@ func TestE2ENestedArrayHOFRejectedCleanly(t *testing.T) {
 		`const m: number[][] = [[1,2]]; m.indexOf([1,2]);`,
 		`const m: number[][] = [[1,2]]; m.includes([1,2]);`,
 		`const m: number[][] = [[1,2]]; m.sort();`,
-		`const m: number[][] = [[1,2]]; Object.groupBy(m, (row) => "" + row.length);`,
 		`const m = new Array<number[]>(3);`,
 	}
 	for _, src := range cases {
@@ -2387,7 +2382,10 @@ o.list.length = 2
 console.log(o.list)
 try { a.length = -1 } catch (e: any) { console.log(e.name, e.message) }
 try { a.length = 1.5 } catch (e: any) { console.log(e.name, e.message) }
-`, "[ 1 ] [ 1 ] 1\n3 1\n[ 'z' ]\n3 undefined\n[ 1, 2 ]\nRangeError Invalid array length\nRangeError Invalid array length")
+const big: number[] = []
+big.length = 4294967295
+console.log(big.length)
+`, "[ 1 ] [ 1 ] 1\n3 1\n[ 'z' ]\n3 undefined\n[ 1, 2 ]\nRangeError Invalid array length\nRangeError Invalid array length\n4294967295")
 }
 
 // An un-annotated local initialized from a call takes the callee's declared

@@ -1,12 +1,6 @@
 // Node's lib/internal/util.js: promisify, which `util` exports.
 
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeTypeError } from './internal_errors';
 
 function received(v: any): string {
     if (v === null) return ' Received null';

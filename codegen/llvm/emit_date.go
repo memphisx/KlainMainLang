@@ -42,22 +42,6 @@ var dateDecomposeFieldIndex = map[string]int{
 	"getUTCMilliseconds": 7,
 }
 
-// isDateMethodName reports whether name is one of Date's instance methods —
-// used as a cheap pre-check (alongside the side-effect-free inferExprType
-// guard at the call site) before committing to evaluate the receiver
-// expression, so a same-named method on some other type is never mistakenly
-// double-evaluated or misrouted.
-func isDateMethodName(name string) bool {
-	if _, ok := dateDecomposeFieldIndex[name]; ok {
-		return true
-	}
-	switch name {
-	case "getTime", "valueOf", "toISOString", "toDateString", "toLocaleDateString", "toUTCString", "toGMTString", "toString", "getTimezoneOffset":
-		return true
-	}
-	return false
-}
-
 // dateSetterFieldIndex maps a setter method name to the position it
 // overrides in the same { year, month, day, weekday, hour, min, sec, millis }
 // shape dateDecomposeFieldIndex uses (weekday, index 3, is never a setter
@@ -126,7 +110,46 @@ func (e *Emitter) emitNewDate(n *ast.NewDateExpression) (Value, error) {
 		// A double time value: NaN or one past the range is Invalid Date.
 		return Value{Ref: e.emitTimeValueToDate(e.coerce(val, TypeF64).Ref), Ty: TypeDate}, nil
 	}
+	if isUnconstrainedDynamic(val.Ty) {
+		return e.emitNewDateFromAny(val)
+	}
 	return Value{Ref: e.coerce(val, TypeI64).Ref, Ty: TypeDate}, nil
+}
+
+// emitNewDateFromAny is `new Date(value)` with value known only at run time
+// (ECMA-262 §21.4.2.1): a Date gives its time value, a string is parsed,
+// anything else is ToNumber'd into one.
+func (e *Emitter) emitNewDateFromAny(val Value) (Value, error) {
+	e.ensureHostBoxHooks()
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	tag, payload := e.emitUnboxTagPayload(val)
+	strL, notStrL, dateL, numL, doneL := e.freshLabel("ndate.str"), e.freshLabel("ndate.nstr"), e.freshLabel("ndate.date"), e.freshLabel("ndate.num"), e.freshLabel("ndate.done")
+	isStr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isStr, tag, kmlTagString))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isStr, strL, notStrL))
+	e.emitLabel(strL)
+	parsed, err := e.emitDateParseValue(Value{Ref: e.emitIntToPtr(payload), Ty: TypePtr})
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitTimeValueToDate(parsed.Ref), slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(notStrL)
+	isDate := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call zeroext i1 @__kml_host_is(i64 %s, ptr %s)", isDate, val.Ref, e.internString("Date")))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isDate, dateL, numL))
+	e.emitLabel(dateL)
+	d := e.coerce(val, TypeDate)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", d.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(numL)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitTimeValueToDate(e.emitAnyToNum(val)), slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, slot))
+	return Value{Ref: r, Ty: TypeDate}, nil
 }
 
 // emitNewDateMulti implements the multi-argument calendar form
@@ -191,6 +214,14 @@ func (e *Emitter) emitDateNow() (Value, error) {
 // Value with Ty.IsDate — not restricted to a named variable, since Date
 // needs no Symbol/alloca resolution (it's just a plain i64), unlike Map/Set.
 func (e *Emitter) emitDateCall(dateVal Value, method string, pos ast.Pos) (Value, error) {
+	// A `Date | undefined` slot (a `var` hoisted out of a loop) holds its
+	// { present, time } pair; the receiver's absent case was already
+	// guarded, so the time value is its payload.
+	if isNullableScalar(dateVal.Ty) {
+		p := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue %s %s, 1", p, nullableScalarStorageIR(dateVal.Ty), dateVal.Ref))
+		dateVal = Value{Ref: p, Ty: dateVal.Ty.withoutNullable()}
+	}
 	switch method {
 	case "getTime", "valueOf":
 		// An Invalid Date's time value is NaN.
@@ -201,8 +232,37 @@ func (e *Emitter) emitDateCall(dateVal Value, method string, pos ast.Pos) (Value
 	case "toISOString":
 		e.emitDateThrowIfInvalid(dateVal.Ref)
 		return e.emitDateToISOString(dateVal)
+	case "toJSON":
+		// An Invalid Date's toJSON is null (its time value is not finite).
+		iso, err := e.emitDateOrInvalid(dateVal, e.emitDateToISOString)
+		if err != nil {
+			return Value{}, err
+		}
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", r, e.emitDateIsInvalid(dateVal.Ref), iso.Ref))
+		return Value{Ref: r, Ty: TypePtr}, nil
 	case "toDateString":
 		return e.emitDateOrInvalid(dateVal, e.emitDateToDateString)
+	case "toTimeString":
+		return e.emitDateOrInvalid(dateVal, e.emitDateToTimeString)
+	case "toLocaleTimeString":
+		return e.emitDateOrInvalid(dateVal, e.emitDateToLocaleTimeString)
+	case "toLocaleString":
+		return e.emitDateOrInvalid(dateVal, func(v Value) (Value, error) {
+			d, err := e.emitDateToLocaleDateString(v)
+			if err != nil {
+				return Value{}, err
+			}
+			t, err := e.emitDateToLocaleTimeString(v)
+			if err != nil {
+				return Value{}, err
+			}
+			ds, err := e.emitStringConcat(d, Value{Ref: e.internString(", "), Ty: TypePtr})
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitStringConcat(ds, t)
+		})
 	case "toString":
 		return e.emitDateOrInvalid(dateVal, e.emitDateToString)
 	case "toUTCString", "toGMTString":
@@ -217,13 +277,17 @@ func (e *Emitter) emitDateCall(dateVal Value, method string, pos ast.Pos) (Value
 		return Value{Ref: neg, Ty: TypeI64}, nil
 	}
 	if idx, ok := dateDecomposeFieldIndex[method]; ok {
+		invalid := e.emitDateIsInvalid(dateVal.Ref)
 		if !strings.HasPrefix(method, "getUTC") {
 			dateVal = e.emitDateLocal(dateVal)
 		}
 		decomposed := e.emitDateDecompose(dateVal)
-		result := e.freshReg()
+		result, f, r := e.freshReg(), e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %s, %d", result, decomposed, idx))
-		return Value{Ref: result, Ty: TypeI64}, nil
+		// An Invalid Date's every field is NaN.
+		e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", f, result))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0x7FF8000000000000, double %s", r, invalid, f))
+		return Value{Ref: r, Ty: TypeF64}, nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: unknown Date method '%s'", pos.Line, pos.Col, method)
 }
@@ -272,6 +336,34 @@ func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, a
 		return Value{}, fmt.Errorf("%d:%d: '%s' is not a Date", pos.Line, pos.Col, id.Name)
 	}
 
+	// A `Date | undefined` slot (a `var` hoisted out of a loop) holds its
+	// { present, time } pair: read and written through its payload.
+	nullable := isNullableScalar(sym.Ty)
+	store := func(t string) {
+		if nullable {
+			agg := e.makeNullableScalarAgg(sym.Ty, "true", t)
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", nullableScalarStorageIR(sym.Ty), agg, sym.Ptr))
+			return
+		}
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", t, sym.Ptr))
+	}
+
+	if method == "setTime" {
+		// TimeClip(ToNumber(time)): NaN, an infinity or a value past the
+		// range is Invalid Date; the result is the new time value.
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		n, err := e.coerceChecked(v, TypeF64, args[0].GetPos(), "Date setter argument")
+		if err != nil {
+			return Value{}, err
+		}
+		t := e.emitTimeValueToDate(n.Ref)
+		store(t)
+		return e.emitDateCall(Value{Ref: t, Ty: TypeDate}, "getTime", pos)
+	}
+
 	argVals := make([]string, len(args))
 	for i, a := range args {
 		v, err := e.emitExpr(a)
@@ -285,17 +377,26 @@ func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, a
 		argVals[i] = cv.Ref
 	}
 
-	if method == "setTime" {
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", argVals[0], sym.Ptr))
-		return Value{Ref: argVals[0], Ty: TypeI64}, nil
-	}
-
 	curReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curReg, sym.Ptr))
+	if nullable {
+		agg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", agg, nullableScalarStorageIR(sym.Ty), sym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue %s %s, 1", curReg, nullableScalarStorageIR(sym.Ty), agg))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curReg, sym.Ptr))
+	}
 	local := !strings.HasPrefix(method, "setUTC")
+	wasInvalid := e.emitDateIsInvalid(curReg)
 	cur := Value{Ref: curReg, Ty: TypeDate}
 	if local {
 		cur = e.emitDateLocal(cur)
+	}
+	fullYear := method == "setFullYear" || method == "setUTCFullYear"
+	if fullYear {
+		// setFullYear on an Invalid Date starts from +0 (not a local time).
+		z := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", z, wasInvalid, cur.Ref))
+		cur = Value{Ref: z, Ty: TypeDate}
 	}
 	decomposed := e.emitDateDecompose(cur)
 	extract := func(idx int) string {
@@ -335,8 +436,15 @@ func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, a
 		newMs = e.emitLocalToUTC(newMs)
 	}
 
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newMs, sym.Ptr))
-	return Value{Ref: newMs, Ty: TypeI64}, nil
+	if !fullYear {
+		// Any other setter leaves an Invalid Date invalid.
+		kept := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", kept, wasInvalid, dateInvalid, newMs))
+		newMs = kept
+	}
+	store(newMs)
+	// The result is the new time value: NaN for Invalid Date.
+	return e.emitDateCall(Value{Ref: newMs, Ty: TypeDate}, "getTime", pos)
 }
 
 // emitDateParse implements the static Date.parse(dateString), returning a
@@ -352,6 +460,10 @@ func (e *Emitter) emitDateParse(args []ast.Expression, pos ast.Pos) (Value, erro
 	}
 	strVal, err := e.emitExpr(args[0])
 	if err != nil {
+		return Value{}, err
+	}
+	// Date.parse takes ToString of its argument (a box, a number, an object).
+	if strVal, err = e.coerceStringArg(strVal); err != nil {
 		return Value{}, err
 	}
 	return e.emitDateParseValue(strVal)
@@ -518,6 +630,55 @@ func (e *Emitter) emitDateToString(dateVal Value) (Value, error) {
 	e.emitInstr(fmt.Sprintf(
 		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, ptr %s, i64 %s, ptr %s, i64 %s, i64 %s, i64 %s, i64 %s, ptr %s)",
 		buf, fmtPtr, wdayName, monthName, day, sign, absYear, hour, min, sec, suffix))
+	e.emitStringFinalizeLen(buf)
+	return Value{Ref: buf, Ty: TypePtr}, nil
+}
+
+// emitDateToTimeString is Date.prototype.toTimeString: "00:00:00 GMT+0000
+// (Coordinated Universal Time)", toString's time and zone.
+func (e *Emitter) emitDateToTimeString(dateVal Value) (Value, error) {
+	decomposed := e.emitDateDecompose(e.emitDateLocal(dateVal))
+	extract := func(idx int) string {
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %s, %d", r, decomposed, idx))
+		return r
+	}
+	hour, min, sec := extract(4), extract(5), extract(6)
+	e.ensureSprintf()
+	e.ensureDateLocal()
+	suffix := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca [80 x i8], align 1", suffix))
+	e.emitInstr(fmt.Sprintf("call void @__kml_tz_suffix(i64 %s, ptr %s)", dateVal.Ref, suffix))
+	buf := e.emitStringScratch(112)
+	e.emitInstr(fmt.Sprintf(
+		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s, i64 %s, i64 %s, ptr %s)",
+		buf, e.internString("%02lld:%02lld:%02lld%s"), hour, min, sec, suffix))
+	e.emitStringFinalizeLen(buf)
+	return Value{Ref: buf, Ty: TypePtr}, nil
+}
+
+// emitDateToLocaleTimeString formats en-US's "1:04:09 PM", the shape
+// toLocaleDateString's default locale gives the time.
+func (e *Emitter) emitDateToLocaleTimeString(dateVal Value) (Value, error) {
+	decomposed := e.emitDateDecompose(e.emitDateLocal(dateVal))
+	extract := func(idx int) string {
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %s, %d", r, decomposed, idx))
+		return r
+	}
+	hour, min, sec := extract(4), extract(5), extract(6)
+	pm, h12, zero, h := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 12", pm, hour))
+	e.emitInstr(fmt.Sprintf("%s = srem i64 %s, 12", h12, hour))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", zero, h12))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 12, i64 %s", h, zero, h12))
+	ampm := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", ampm, pm, e.internString("PM"), e.internString("AM")))
+	e.ensureSprintf()
+	buf := e.emitStringScratch(32)
+	e.emitInstr(fmt.Sprintf(
+		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s, i64 %s, i64 %s, ptr %s)",
+		buf, e.internString("%lld:%02lld:%02lld %s"), h, min, sec, ampm))
 	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }

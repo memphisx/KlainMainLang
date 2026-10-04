@@ -113,8 +113,8 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if e.UsesBufferCodecs() {
 		out = append(out, CSource{"bufcodecs", BufferCodecsSource(), nil, nil, ""})
 	}
-	if e.usesDynamicImport && e.opts.DynamicImport == "lazy" {
-		// The dlopen island loader (TDD-00056). Linux resolves dlopen from
+	if e.usesDynamicImport && (e.opts.DynamicImport == "isolated" || e.opts.DynamicImport == "lazy") {
+		// The dlopen loader (TDD-00056, TDD-00238 Stage 5). Linux resolves dlopen from
 		// libdl (-ldl); macOS ships it in libSystem, so no extra lib there.
 		var libs []string
 		if e.opts.Target.OS() != "darwin" {
@@ -132,15 +132,189 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"pathwin32", PathWin32Source(), nil, nil, ""})
 	}
 	if e.UsesDynJSON() {
-		out = append(out, CSource{"dynjson", DynJSONSource(), nil, nil, ""})
+		out = append(out, CSource{"dynjson", DynJSONSource(), e.dynJSONViewFlags(), nil, ""})
+	}
+	if e.usedJmpStack {
+		out = append(out, CSource{"jmpstack", JmpStackSource(), nil, nil, ""})
+	}
+	if e.UsesMicrotasks() {
+		out = append(out, CSource{"microtask", MicrotaskSource(), nil, nil, ""})
+	}
+	if e.usedPromiseRuntime {
+		out = append(out, CSource{"promise", PromiseSource(), nil, nil, ""})
+	}
+	if e.usedTaskRuntime {
+		out = append(out, CSource{"task", TaskSource(), e.TaskCFlags(), nil, ""})
+	}
+	if e.UsesCoreC() {
+		out = append(out, CSource{"core", CoreSource(), nil, LibmLibs(), ""})
+	}
+	if e.UsesJSONRuntime() {
+		out = append(out, CSource{"jsonrt", JSONRuntimeSource(), nil, nil, ""})
+	}
+	if e.UsesStrHeaderC() {
+		out = append(out, CSource{"strheader", StrHeaderSource(), nil, nil, ""})
+	}
+	if e.UsesStringsC() {
+		out = append(out, CSource{"strings", StringsCSource(), nil, nil, ""})
+	}
+	if e.UsesRegexpC() {
+		out = append(out, CSource{"regexp", RegexpCSource(), nil, nil, ""})
+	}
+	if e.UsesDynObj() {
+		out = append(out, CSource{"dynobj", DynObjSource(), nil, nil, ""})
+	}
+	if e.UsesDynArr() {
+		out = append(out, CSource{"dynarr", DynArrSource(), nil, nil, ""})
+	}
+	if e.UsesDynJSONNode() {
+		out = append(out, CSource{"dynjsonnode", DynJSONNodeSource(), nil, nil, ""})
+	}
+	if e.UsesDate() {
+		out = append(out, CSource{"date", DateSource(), nil, nil, ""})
+	}
+	if e.UsesEncoding() {
+		out = append(out, CSource{"encoding", EncodingSource(), nil, nil, ""})
+	}
+	if e.UsesPathNormalize() {
+		out = append(out, CSource{"path", PathSource(), nil, nil, ""})
+	}
+	if e.UsesWeakHelpers() {
+		out = append(out, CSource{"weak", e.WeakSource(), nil, nil, ""})
+	}
+	if e.UsesFinRegHelpers() {
+		out = append(out, CSource{"finalization", e.FinalizationSource(), nil, nil, ""})
+	}
+	if e.UsesAtomicsRuntime() {
+		out = append(out, CSource{"atomics", AtomicsSource(), nil, nil, ""})
+	}
+	if e.UsesProcessRuntime() {
+		out = append(out, CSource{"process", ProcessSource(), e.ProcessCFlags(), nil, ""})
+	}
+	if e.UsesAsyncHooks() {
+		out = append(out, CSource{"asynchooks", AsyncHooksSource(), e.AsyncHooksCFlags(), nil, ""})
+	}
+	if e.UsesViews() {
+		out = append(out, CSource{"views", e.ViewsSource(), e.dynJSONViewFlags(), nil, ""})
+	}
+	if e.UsesCryptoRand() {
+		out = append(out, CSource{"cryptorand", CryptoRandSource(), e.CryptoRandCFlags(), nil, ""})
+	}
+	if e.UsesErrno() {
+		out = append(out, CSource{"errno", ErrnoSource(), nil, nil, ""})
+	}
+	if e.UsesFsError() {
+		out = append(out, CSource{"fserror", FsErrorSource(), nil, nil, ""})
+	}
+	if e.UsesFsWatch() {
+		out = append(out, CSource{"fswatch", FsWatchSource(), nil, nil, ""})
+	}
+	if e.UsesStreams() {
+		out = append(out, CSource{"streams", StreamsSource(), nil, nil, ""})
+	}
+	if e.UsesZlibStream() {
+		out = append(out, CSource{"zlibstream", ZlibStreamSource(), nil, nil, ""})
+	}
+	if e.UsesChildProcRuntime() {
+		out = append(out, CSource{"childproc", ChildProcSource(), nil, nil, ""})
+	}
+	if e.UsesFetch() {
+		out = append(out, CSource{"fetch", FetchSource(), e.FetchCFlags(), nil, ""})
+	}
+	if e.UsesPromiseAdopt() {
+		out = append(out, CSource{"promise_adopt", PromiseAdoptSource(), nil, nil, ""})
+	}
+	if e.UsesFetchSlotToPromise() {
+		out = append(out, CSource{"fetchslot", FetchSlotSource(), nil, nil, ""})
+	}
+	if e.UsesExceptions() {
+		out = append(out, CSource{"exceptions", ExceptionsSource(), e.ExceptionsCFlags(), nil, ""})
+	}
+	if e.UsesWorkers() {
+		out = append(out, CSource{"worker", WorkerSource(), e.WorkerCFlags(), nil, ""})
+	}
+	if e.UsesCPIPC() {
+		out = append(out, CSource{"cpipc", CPIPCSource(), nil, nil, ""})
+	}
+	if e.UsesIPCChild() {
+		out = append(out, CSource{"ipcc", IPCChildSource(), nil, nil, ""})
+	}
+	if e.UsesNetSockIO() {
+		out = append(out, CSource{"netsock", NetSockSource(), nil, nil, ""})
+	}
+	if e.UsesNet() {
+		out = append(out, CSource{"net", NetSource(), nil, nil, ""})
+	}
+	if e.UsesTimers() {
+		out = append(out, CSource{"timers", TimersSource(), nil, nil, ""})
+	}
+	if e.UsesNative() {
+		out = append(out, CSource{"native", NativeSource(), e.NativeCFlags(), nil, ""})
+	}
+	if e.UsesDynWhen() {
+		out = append(out, CSource{"dynwhen", DynWhenSource(), nil, nil, ""})
+	}
+	if e.UsesDynImportWatch() {
+		out = append(out, CSource{"dynimportwatch", DynImportWatchSource(), nil, nil, ""})
+	}
+	if e.UsesPromiseSettle() {
+		out = append(out, CSource{"promise_settle", PromiseSettleSource(), nil, nil, ""})
+	}
+	if e.UsesPromiseDefer() {
+		out = append(out, CSource{"promise_defer", PromiseDeferSource(), nil, nil, ""})
+	}
+	if e.UsesPromiseFinally() {
+		out = append(out, CSource{"promise_finally", PromiseFinallySource(), nil, nil, ""})
+	}
+	if e.UsesAnyProm() {
+		out = append(out, CSource{"anyprom", AnyPromSource(), nil, nil, ""})
+	}
+	if e.UsesFetchDrive() {
+		out = append(out, CSource{"fetchdrive", FetchDriveSource(), nil, nil, ""})
+	}
+	if e.UsesFetchBodyProm() {
+		out = append(out, CSource{"fetchbodyprom", FetchBodyPromSource(), nil, nil, ""})
+	}
+	if e.UsesModuleTask() {
+		out = append(out, CSource{"module_task", ModuleTaskSource(), e.ModuleTaskCFlags(), nil, ""})
+	}
+	if e.UsesBigIntBoxC() {
+		out = append(out, CSource{"bigintbox", BigIntBoxSource(), nil, nil, ""})
+	}
+	if e.UsesBigIntRelC() {
+		out = append(out, CSource{"bigintrel", BigIntRelSource(), nil, nil, ""})
+	}
+	if e.UsesToPrimitiveC() {
+		out = append(out, CSource{"toprim", ToPrimitiveSource(), nil, nil, ""})
+	}
+	if e.UsesLooseEqC() {
+		out = append(out, CSource{"looseeq", LooseEqSource(), nil, nil, ""})
+	}
+	if e.UsesHostBoxC() {
+		out = append(out, CSource{"hostbox", HostBoxSource(), nil, nil, ""})
+	}
+	if e.UsesErrKeysC() {
+		out = append(out, CSource{"errkeys", ErrKeysSource(), nil, nil, ""})
+	}
+	if e.UsesArrayGuard() {
+		out = append(out, CSource{"arrayguard", ArrayGuardSource(), nil, nil, ""})
+	}
+	if e.UsesCollections() {
+		out = append(out, CSource{"collections", CollectionsSource(e.isGCMode()), nil, nil, ""})
+	}
+	if e.UsesCollectionsAny() {
+		out = append(out, CSource{"collections_any", CollectionsAnySource(), nil, nil, ""})
+	}
+	if e.UsesUnitReg() {
+		out = append(out, CSource{"unitreg", UnitRegSource(), nil, nil, ""})
 	}
 	if e.UsesShapes() {
-		out = append(out, CSource{"shape", ShapeSource(), nil, nil, ""})
+		out = append(out, CSource{"shape", ShapeSource(), e.ShapeCFlags(), nil, ""})
 	}
 	if e.UsesCasemap() {
 		// Unicode case mapping for toUpperCase/toLowerCase. Tables + code,
 		// libc only.
-		out = append(out, CSource{"casemap", CasemapSource(), nil, nil, ""})
+		out = append(out, CSource{"casemap", CasemapSource(), nil, LibmLibs(), ""})
 	}
 	if e.UsesStringC() {
 		out = append(out, CSource{"string", StringSource(), nil, LibmLibs(), ""})
@@ -149,7 +323,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"number", NumberSource(), nil, LibmLibs(), ""})
 	}
 	if e.UsesFnMeta() {
-		out = append(out, CSource{"fnmeta", FnMetaSource(), nil, nil, ""})
+		out = append(out, CSource{"fnmeta", FnMetaSource(), e.FnMetaCFlags(), nil, ""})
 	}
 	if e.UsesInspectReduce() {
 		out = append(out, CSource{"inspect", InspectReduceSource(), nil, nil, ""})
@@ -158,12 +332,6 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		// os.type/release/version/machine/uptime/loadavg/userInfo/
 		// availableParallelism/networkInterfaces + process.env enumeration.
 		out = append(out, CSource{"osinfo", OSInfoSource(), nil, e.OSInfoLibs(), ""})
-	}
-	if e.UsesURLPattern() {
-		out = append(out, CSource{"urlpattern", URLPatternSource(), nil, nil, ""})
-	}
-	if e.UsesURLSearchParams() {
-		out = append(out, CSource{"urlsearchparams", URLSearchParamsSource(), nil, nil, ""})
 	}
 	if e.UsesFloatFmt() {
 		out = append(out, CSource{"dtoa", DtoaSource(), nil, nil, ""})

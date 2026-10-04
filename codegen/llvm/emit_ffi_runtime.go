@@ -24,12 +24,22 @@ var ffiUmapMSVCSource string
 //go:embed ffisrc/ffi_native.c
 var ffiNativeSource string
 
-// FFIRegistrySources returns the C/C++ members behind the registry for the
-// current target: the registry itself plus the order container.
+//go:embed ffisrc/umap_order.c
+var umapOrderSource string
+
+// FFIRegistrySources returns the C/C++ members behind the registry and
+// umapOrder for the current target: the registry, the order helper, each
+// when used, and the order container.
 func (e *Emitter) FFIRegistrySources() []CSource {
-	out := []CSource{{"ffireg", ffiRegistrySource, nil, nil, ""}}
+	var out []CSource
+	if e.usedFFIRegistry {
+		out = append(out, CSource{"ffireg", ffiRegistrySource, nil, nil, ""})
+	}
 	if e.usedFFINatives {
 		out = append(out, CSource{"ffinative", ffiNativeSource, nil, nil, ""})
+	}
+	if e.usedUmapOrder {
+		out = append(out, CSource{"umaporder", umapOrderSource, nil, nil, ""})
 	}
 	if e.opts.Target.OS() == "windows" {
 		return append(out, CSource{"ffiumap", ffiUmapMSVCSource, nil, nil, ""})
@@ -102,5 +112,10 @@ func (e *Emitter) ensureNativeFFIView() {
 	e.functions.WriteString(fmt.Sprintf("\ndefine i64 @__kml_native_ffi_view(double %%addr, double %%len, i1 %%ab) {\nentry:\n%s}\n", body))
 }
 
-// UsesFFIRegistry reports whether the registry members must be linked.
-func (e *Emitter) UsesFFIRegistry() bool { return e.usedFFIRegistry }
+// UsesFFIRegistry reports whether the registry or the order container must
+// be linked.
+func (e *Emitter) UsesFFIRegistry() bool { return e.usedFFIRegistry || e.usedUmapOrder }
+
+// ensureUmapOrder links __kml_native_umap_order (umap_order.c) and its
+// container: the `@link umap` of lib/native.d.ts.
+func (e *Emitter) ensureUmapOrder() { e.usedUmapOrder = true }

@@ -385,18 +385,14 @@ func FuzzFetchInitOracle(f *testing.F) {
 			if rng.Intn(2) == 0 {
 				body = fuzzRandString(rng, 1+rng.Intn(20))
 				initFields = append(initFields, fmt.Sprintf("body: %q", body))
-				if !methodExplicit {
-					// Confirmed directly (this fuzz lane's own first run
-					// caught it): setting CURLOPT_POSTFIELDS implicitly
-					// switches libcurl into POST mode unless overridden by
-					// an explicit CURLOPT_CUSTOMREQUEST — real, well-known
-					// curl behavior, not a compiler bug. A body with no
-					// explicit method really does arrive as POST — but an
-					// *explicit* method: "GET" (methodExplicit=true) still
-					// wins over that default and really does arrive as GET
-					// (also confirmed directly — the fuzzer's own second
-					// found case, distinct from the first).
+				// A GET request cannot have a body: Node's fetch throws
+				// TypeError, so a body goes with a method that takes one.
+				if method == "GET" {
+					if methodExplicit {
+						initFields = initFields[1:]
+					}
 					method = "POST"
+					initFields = append([]string{`method: "POST"`}, initFields...)
 				}
 			}
 

@@ -196,6 +196,10 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 		if !adapterConvertible(concrete) {
 			supported = false
 		}
+	case promiseElemsNeedConvert(sr, tr):
+		// A Promise<T> where a Promise<any> is expected (an async callback
+		// returning an array): the value converted when it settles.
+		needed = true
 	case storageIR(sr) != storageIR(tr) || sr.IsArray != tr.IsArray:
 		supported = false
 	}
@@ -256,10 +260,6 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 			return c, true
 		}
 	}
-	e.closureAdaptCtr++
-	name := fmt.Sprintf("@__kml_fnadapt_%d", e.closureAdaptCtr)
-	// The adapter's env is the original header: it is that function (TDD-00229).
-	e.registerFnMeta(name, "", 0, fnFlagThroughEnv)
 
 	// Unpack the original closure header (our env).
 	callee := func() (string, string) {
@@ -271,9 +271,12 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
 		return fp, ep
 	}
-	if !e.emitAdapterFunc(name, src, tgt, callee) {
+	name, ok := e.emitAdapterFunc("", src, tgt, callee)
+	if !ok {
 		return Value{}, false
 	}
+	// The adapter's env is the original header: it is that function (TDD-00229).
+	e.registerFnMeta(name, "", 0, fnFlagThroughEnv)
 
 	e.ensureMalloc()
 	hdr := e.buildBuiltinClosure(name, orig.Ref)
@@ -282,10 +285,12 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 
 // emitAdapterFunc emits function name with the target type's caller ABI
 // (`ptr %env` first), converting each argument to the source type's callee
-// ABI and its result back. callee emits the callee and the first argument
-// it takes (a closure's code and env, or a method and its receiver);
-// false when a conversion is not one the adapter takes.
-func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp string, first string)) bool {
+// ABI and its result back; with name "" the function is named by its
+// content (defineContentNamed). callee emits the callee and the first
+// argument it takes (a closure's code and env, or a method and its
+// receiver). It returns the function's name, or false when a conversion is
+// not one the adapter takes.
+func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp string, first string)) (string, bool) {
 	sFixed, sRest := restOf(src)
 	tFixed, tRest := restOf(tgt)
 
@@ -404,6 +409,13 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 			} else {
 				e.emitInstr(fmt.Sprintf("ret %s %s", tr.LLVMRetType(), b.Ref))
 			}
+		case promiseElemsNeedConvert(sr, tr):
+			// A promise of another element type: the value converted when it
+			// settles.
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", r, sr.LLVMRetType(), fnTypePart, fp, strings.Join(argParts, ", ")))
+			v := e.emitConvertPromise(Value{Ref: r, Ty: sr}, tr)
+			e.emitInstr(fmt.Sprintf("ret %s %s", tr.LLVMRetType(), v.Ref))
 		case sr.IsDynamic == tr.IsDynamic:
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", r, sr.LLVMRetType(), fnTypePart, fp, strings.Join(argParts, ", ")))
@@ -440,12 +452,14 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 	body := e.allocas.String() + e.body.String()
 	restore()
 	if !buildOK {
-		return false
+		return "", false
 	}
-
+	if name == "" {
+		return e.defineContentNamed("@__kml_fnadapt.", tr.LLVMRetType(), strings.Join(sigParts, ", "), body), true
+	}
 	e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n%s}\n",
 		tr.LLVMRetType(), name, strings.Join(sigParts, ", "), body))
-	return true
+	return name, true
 }
 
 // spreadRestArg reads element k of a rest tail (header pointer hdr holding

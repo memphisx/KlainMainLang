@@ -1286,6 +1286,7 @@ static int tcp_active(kml_tcp *h) {
 static _Bool proc_keepalive(void);
 static _Bool proc_fdset_add(void *fdset, int *maxfd);
 static _Bool proc_dispatch(void);
+static _Bool proc_dispatch_unrefd(void);
 
 _Bool __kml_tcp_keepalive(void) {
     if (proc_keepalive()) return 1;
@@ -1330,7 +1331,10 @@ _Bool __kml_tcp_fdset_add(void *fdset, void *wfdset, int *maxfd) {
 
 // Run what became ready on every handle. Returns whether anything ran.
 _Bool __kml_tcp_dispatch(void) {
-    _Bool ran = proc_dispatch();
+    // An unref'd child's exit waits for a pass in which the loop is still
+    // running before its streams close; when they are what held the loop,
+    // the loop ends first and the exit goes unreported, as libuv's does.
+    _Bool ran = proc_dispatch_unrefd();
     for (int i = 0; i < tcp_n; i++) {
         kml_tcp *h = tcp_tab[i];
         if (h->closing) {
@@ -1471,6 +1475,10 @@ _Bool __kml_tcp_dispatch(void) {
             if (n < (int64_t)sizeof buf) break;
         }
     }
+    // A child's exit after its streams, as libuv's readiness order has it:
+    // a process's descriptors close before it is reaped, so the end of its
+    // pipes (an IPC channel's disconnect) comes before its 'exit'.
+    if (proc_dispatch()) ran = 1;
     return ran;
 }
 
@@ -1901,14 +1909,17 @@ void __kml_native_process_close(double id) {
 
 static _Bool proc_keepalive(void) {
     for (int i = 0; i < proc_n; i++)
-        if (proc_tab[i]->alive && proc_tab[i]->refd && proc_tab[i]->exit_inv) return 1;
+        if ((proc_tab[i]->alive || proc_tab[i]->pending == 2) && proc_tab[i]->refd && proc_tab[i]->exit_inv) return 1;
     return 0;
 }
 
 static _Bool proc_fdset_add(void *fdset, int *maxfd) {
-    int any = 0;
-    for (int i = 0; i < proc_n; i++)
+    int any = 0, held = 0;
+    for (int i = 0; i < proc_n; i++) {
         if (proc_tab[i]->alive) any = 1;
+        if (proc_tab[i]->pending == 2) held = 1;
+    }
+    if (held) return 1; // an exit held for its streams runs next pass
     if (!any) return 0;
 #ifndef _WIN32
     if (sigchld_pipe[0] >= 0) {
@@ -1924,17 +1935,12 @@ static _Bool proc_fdset_add(void *fdset, int *maxfd) {
     return kick;
 }
 
-static _Bool proc_dispatch(void) {
-#ifndef _WIN32
-    if (sigchld_pipe[0] >= 0) {
-        char buf[64];
-        while (read(sigchld_pipe[0], buf, sizeof buf) > 0) { /* drain */ }
-    }
-#endif
+// The exits of unref'd children reaped on an earlier pass (pending 1).
+static _Bool proc_dispatch_unrefd(void) {
     _Bool ran = 0;
     for (int i = 0; i < proc_n; i++) {
         kml_proch *p = proc_tab[i];
-        if (p->pending) {
+        if (p->pending == 1) {
             // Not while its own stdio is still active (reading before the end
             // of the stream, or closing): when nothing else holds the loop
             // open it ends first, and the exit goes unreported.
@@ -1951,6 +1957,28 @@ static _Bool proc_dispatch(void) {
             if (p->exit_inv) TCP_CALL(p->exit_inv, p->exit_clo, p->pending_code, p->pending_sig);
             continue;
         }
+    }
+    return ran;
+}
+
+static _Bool proc_dispatch(void) {
+#ifndef _WIN32
+    if (sigchld_pipe[0] >= 0) {
+        char buf[64];
+        while (read(sigchld_pipe[0], buf, sizeof buf) > 0) { /* drain */ }
+    }
+#endif
+    _Bool ran = 0;
+    for (int i = 0; i < proc_n; i++) {
+        kml_proch *p = proc_tab[i];
+        if (p->pending == 2) {
+            // Held one pass for its streams, which this pass has now read.
+            p->pending = 0;
+            ran = 1;
+            if (p->exit_inv) TCP_CALL(p->exit_inv, p->exit_clo, p->pending_code, p->pending_sig);
+            continue;
+        }
+        if (p->pending) continue; // proc_dispatch_unrefd's
         if (!p->alive) continue;
         int st = 0;
         int r = waitpid(p->pid, &st, WNOHANG);
@@ -1971,6 +1999,26 @@ static _Bool proc_dispatch(void) {
             p->pending_sig = sig;
             continue;
         }
+#ifndef _WIN32
+        // Reaped after this pass read its streams: what they still hold
+        // (an IPC channel's last message, its end) was written before the
+        // process ended, so it is read first, next pass.
+        int unread = 0;
+        for (int k = 0; k < KML_MAX_STDIO_H; k++) {
+            int h = p->stdio[k];
+            if (h < 0 || h >= tcp_n) continue;
+            kml_tcp *t = tcp_tab[h];
+            if (t->fd < 0 || t->closing || !t->reading || t->read_eof) continue;
+            struct pollfd pfd = { t->fd, POLLIN, 0 };
+            if (poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLIN | POLLHUP)) != 0) unread = 1;
+        }
+        if (unread) {
+            p->pending = 2;
+            p->pending_code = code;
+            p->pending_sig = sig;
+            continue;
+        }
+#endif
         ran = 1;
         if (p->exit_inv) TCP_CALL(p->exit_inv, p->exit_clo, code, sig);
     }

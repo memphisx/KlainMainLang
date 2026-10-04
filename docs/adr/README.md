@@ -353,7 +353,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00308](ADR-00308.md) | `SharedArrayBuffer` + `Atomics` — shared memory across worker threads | Implements [TDD-00099](../tdd/TDD-00099.md); extends [ADR-00305](ADR-00305.md) (Worker), [ADR-00078](ADR-00078.md) (ArrayBuffer) |
 | [00309](ADR-00309.md) | `BroadcastChannel` + `MessageChannel`/`MessagePort` | Implements [TDD-00099](../tdd/TDD-00099.md); extends [ADR-00305](ADR-00305.md), [ADR-00306](ADR-00306.md) (Worker channels) |
 | [00310](ADR-00310.md) | Free-variable scanner missed `new TypedArray/ArrayBuffer/DataView(...)` arguments | Extends [ADR-00104](ADR-00104.md) (closure captures); found during [ADR-00308](ADR-00308.md) |
-| [00311](ADR-00311.md) | URLPattern — route matching over compiled per-component regexes | Implements [TDD-00100](../tdd/TDD-00100.md) |
+| [00311](ADR-00311.md) | URLPattern — route matching over compiled per-component regexes | Implements [TDD-00100](../tdd/TDD-00100.md). Superseded by [ADR-01340](ADR-01340.md) |
 | [00312](ADR-00312.md) | Binary-data caveat batch — `Atomics.isLockFree`, `ArrayBuffer`/`SharedArrayBuffer.slice`, 3-argument TypedArray views, DataView BigInt accessors | Extends [ADR-00078](ADR-00078.md), [ADR-00294](ADR-00294.md), [ADR-00308](ADR-00308.md) |
 | [00313](ADR-00313.md) | `BigInt64Array`/`BigUint64Array` and `Uint8ClampedArray` — the TypedArray store/load conversion layer | Implements [TDD-00101](../tdd/TDD-00101.md); extends [ADR-00078](ADR-00078.md), [ADR-00308](ADR-00308.md) |
 | [00314](ADR-00314.md) | `Blob` — immutable binary data with a MIME type | Implements [TDD-00102](../tdd/TDD-00102.md) |
@@ -627,7 +627,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00582](ADR-00582.md) | process.hrtime diff-from-previous form | Extends [ADR-00332](ADR-00332.md) |
 | [00583](ADR-00583.md) | console.dir depth option | Extends [ADR-00029](ADR-00029.md), [ADR-00218](ADR-00218.md) |
 | [00584](ADR-00584.md) | BigInt.asIntN / asUintN | Extends [ADR-00216](ADR-00216.md), [TDD-00074](../tdd/TDD-00074.md) |
-| [00585](ADR-00585.md) | URLPattern username/password components | Extends [ADR-00311](ADR-00311.md), [TDD-00100](../tdd/TDD-00100.md) |
+| [00585](ADR-00585.md) | URLPattern username/password components | Extends [ADR-00311](ADR-00311.md), [TDD-00100](../tdd/TDD-00100.md). Superseded by [ADR-01340](ADR-01340.md) |
 | [00586](ADR-00586.md) | Number(bigint) conversion | Extends [ADR-00216](ADR-00216.md), follows [ADR-00584](ADR-00584.md) |
 | [00587](ADR-00587.md) | Event cancelable honored by preventDefault | Extends [ADR-00234](ADR-00234.md), [TDD-00081](../tdd/TDD-00081.md) |
 | [00588](ADR-00588.md) | net.connect IPC (Unix-domain socket) form | Extends [ADR-00328](ADR-00328.md), [ADR-00413](ADR-00413.md) |
@@ -1360,3 +1360,69 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [01315](ADR-01315.md) | Local-time Date, Date.parse, Invalid Date, and Map/Set/Date through their declarations | `Implements [TDD-00230](../tdd/TDD-00230.md)` (P3.2); `Extends [ADR-01307](ADR-01307.md)`; `Supersedes` the UTC-only rule of the Date ADRs ([ADR-00015](ADR-00015.md), [ADR-00016](ADR-00016.md), [ADR-00844](ADR-00844.md)) |
 | [01316](ADR-01316.md) | exec() results carry index, input and groups | `Implements [TDD-00230](../tdd/TDD-00230.md)` (P3.2, P3.3); `Extends [ADR-01307](ADR-01307.md)` |
 | [01317](ADR-01317.md) | A class's static side, TS2344, and tsc's flow shortcuts past calls and conditions | `Implements [TDD-00230](../tdd/TDD-00230.md)` (P3.2); `Extends [ADR-01315](ADR-01315.md)` |
+| [01318](ADR-01318.md) | Classes and builtin constructors are values; `new` takes any constructor expression | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.2), Extends [ADR-01317](ADR-01317.md) |
+| [01319](ADR-01319.md) | Error subclasses render, enumerate and nest as Node's | Extends [ADR-00630](ADR-00630.md), [ADR-01181](ADR-01181.md), [ADR-01318](ADR-01318.md) |
+| [01320](ADR-01320.md) | `URL` and `URLSearchParams` are TypeScript, on the URL Standard's parser | Implements [TDD-00237](../tdd/TDD-00237.md) (Stages 1 and 2), Extends [ADR-01203](ADR-01203.md), [ADR-01318](ADR-01318.md), [ADR-01319](ADR-01319.md), Supersedes [ADR-00572](ADR-00572.md) |
+| [01321](ADR-01321.md) | `Headers` is undici's, in TypeScript | Implements [TDD-00237](../tdd/TDD-00237.md) (Stage 3), Extends [ADR-01320](ADR-01320.md), [ADR-01190](ADR-01190.md), [ADR-00490](ADR-00490.md) |
+| [01322](ADR-01322.md) | CI runs each platform's parts in parallel, failing fast per platform | Extends [ADR-00732](ADR-00732.md), Amends [TDD-00179](../tdd/TDD-00179.md) |
+| [01323](ADR-01323.md) | The library's names and type ids are the same in every program | Implements [TDD-00238](../tdd/TDD-00238.md) (Stages 0–2), Amends [TDD-00041](../tdd/TDD-00041.md) |
+| [01324](ADR-01324.md) | Two front-end runaways on generic code | Fixes [TDD-00230](../tdd/TDD-00230.md) (P2), Extends [TDD-00010](../tdd/TDD-00010.md) |
+| [01325](ADR-01325.md) | Type-id dispatch goes through tables each unit registers | Implements [TDD-00238](../tdd/TDD-00238.md) (Stage 3), Amends [ADR-01323](ADR-01323.md) |
+| [01326](ADR-01326.md) | The builtin library compiles to the same code in every program | Implements [TDD-00238](../tdd/TDD-00238.md) (Stage 4, first part), Extends [ADR-01325](ADR-01325.md) |
+| [01327](ADR-01327.md) | The microtask, rejection and try-frame runtimes in C | Implements [TDD-00240](../tdd/TDD-00240.md) (first ports), Extends [ADR-01326](ADR-01326.md) |
+| [01328](ADR-01328.md) | The runtime outside HTTP in C | Implements [TDD-00240](../tdd/TDD-00240.md) (second batch), Extends [ADR-01327](ADR-01327.md) |
+| [01329](ADR-01329.md) | Builtin library modules compiled once and linked as objects | Implements [TDD-00238](../tdd/TDD-00238.md) (Stage 4), Extends [ADR-01326](ADR-01326.md) |
+| [01330](ADR-01330.md) | Dynamic import() shares the program's modules; three backends | Implements [TDD-00238](../tdd/TDD-00238.md) (Stage 5), Extends [ADR-01329](ADR-01329.md), [ADR-00515](ADR-00515.md) |
+| [01331](ADR-01331.md) | Builtin statics dispatch through their declarations | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.2), Extends [ADR-01315](ADR-01315.md), [ADR-01307](ADR-01307.md) |
+| [01332](ADR-01332.md) | Timer arguments, `await` placement, and four strict-lane regressions | Extends [ADR-00031](ADR-00031.md), [ADR-00332](ADR-00332.md), [ADR-01331](ADR-01331.md) |
+| [01333](ADR-01333.md) | Builtin values, local classes, JSON's replacer and reviver, and builtin names a program declares | Extends [ADR-01331](ADR-01331.md), [ADR-01332](ADR-01332.md), [ADR-01327](ADR-01327.md) |
+| [01334](ADR-01334.md) | Closure-converted local classes, `.bind` over any parameter list, and `void` | Extends [ADR-01333](ADR-01333.md), [TDD-00137](../tdd/TDD-00137.md) |
+| [01335](ADR-01335.md) | `undefined` in a `number` slot | Implements [TDD-00241](../tdd/TDD-00241.md) (in part), Extends [TDD-00187](../tdd/TDD-00187.md) |
+| [01336](ADR-01336.md) | A class per evaluation as a value | Implements [TDD-00242](../tdd/TDD-00242.md) (in part), Extends [ADR-01334](ADR-01334.md), [ADR-01318](ADR-01318.md) |
+| [01337](ADR-01337.md) | Host-object methods through declarations, and the checker's type operators | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3, P3.2), Extends [ADR-01331](ADR-01331.md), [ADR-01315](ADR-01315.md) |
+| [01338](ADR-01338.md) | Statics per evaluation | Implements [TDD-00242](../tdd/TDD-00242.md), Extends [ADR-01336](ADR-01336.md), [ADR-01334](ADR-01334.md), [ADR-01333](ADR-01333.md) |
+| [01339](ADR-01339.md) | Builtin fall-through removed for arrays, strings, promises and `http` | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.2), Extends [ADR-01337](ADR-01337.md), [ADR-01307](ADR-01307.md) |
+| [01340](ADR-01340.md) | `URLPattern` as the URL Pattern Standard, in TypeScript | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.2), Supersedes [ADR-00311](ADR-00311.md), [ADR-00585](ADR-00585.md), Extends [ADR-01320](ADR-01320.md) |
+| [01341](ADR-01341.md) | Compiler fixes found by porting URLPattern and Web Crypto | Extends [ADR-01339](ADR-01339.md), [ADR-01340](ADR-01340.md), [ADR-00265](ADR-00265.md), [ADR-01311](ADR-01311.md), [ADR-00619](ADR-00619.md) |
+| [01342](ADR-01342.md) | TS2339 for a builtin interface's missing member | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.7), Extends [ADR-01132](ADR-01132.md), [ADR-01139](ADR-01139.md) |
+| [01343](ADR-01343.md) | A JWK is a plain object | Extends [ADR-01342](ADR-01342.md), [ADR-01339](ADR-01339.md), Superseded by [ADR-01347](ADR-01347.md) |
+| [01344](ADR-01344.md) | A `@lower` target can be a TypeScript function; template objects carry `raw` | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.2), Extends [ADR-00562](ADR-00562.md), [ADR-01203](ADR-01203.md), [ADR-00152](ADR-00152.md) |
+| [01345](ADR-01345.md) | `KeyObject`, and every key encoding, over OpenSSL | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.2), Extends [ADR-01300](ADR-01300.md), [ADR-01344](ADR-01344.md) |
+| [01346](ADR-01346.md) | ECDH, `diffieHellman` and the RSA cipher functions; overloads called with `any` | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.2), Extends [ADR-01345](ADR-01345.md) |
+| [01347](ADR-01347.md) | `crypto.subtle` is Node's Web Crypto in TypeScript | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.2), Extends [ADR-01345](ADR-01345.md), [ADR-01346](ADR-01346.md), [ADR-01344](ADR-01344.md), Supersedes [ADR-01343](ADR-01343.md) |
+| [01348](ADR-01348.md) | `TextEncoder` and `TextDecoder` are TypeScript | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.4), [TDD-00034](../tdd/TDD-00034.md) (Stages 0–3, Stage 4 single-byte), Extends [ADR-01320](ADR-01320.md), [ADR-00112](ADR-00112.md), Supersedes [ADR-00567](ADR-00567.md) |
+| [01349](ADR-01349.md) | `util.parseArgs`; spread `push`/`unshift`; nullable array literals; custom inspect depth; inferred type arguments checked against constraints | Extends [ADR-01300](ADR-01300.md), [ADR-01341](ADR-01341.md) |
+| [01350](ADR-01350.md) | TS7051/TS7006, TS2416, TS2749, TS2552 and scoped TS2304 in the strict lane | Extends [ADR-01342](ADR-01342.md), [ADR-01349](ADR-01349.md) |
+| [01351](ADR-01351.md) | Typed arrays answer `buffer` and `byteOffset` through a view registry | Implements part of [TDD-00243](../tdd/TDD-00243.md); extends [TDD-00018](../tdd/TDD-00018.md) |
+| [01352](ADR-01352.md) | DataView is a TypeScript class | Implements part of [TDD-00243](../tdd/TDD-00243.md) and [TDD-00230](../tdd/TDD-00230.md) P3.4; builds on [ADR-01351](ADR-01351.md) |
+| [01353](ADR-01353.md) | Shortest number digits across a rounding tie | Fixes [TDD-00080](../tdd/TDD-00080.md)'s dtoa |
+| [01354](ADR-01354.md) | A custom inspect string is re-indented to its nesting level | Extends [ADR-01067](ADR-01067.md) |
+| [01355](ADR-01355.md) | Construct-signature arguments are checked, and named as tsc names them | Extends [ADR-01350](ADR-01350.md) |
+| [01356](ADR-01356.md) | A statement after a terminator opens an unreachable block | Refines the dead-code drop (`emitTerminator`/`emitLabel`) |
+| [01357](ADR-01357.md) | A shared view crosses a worker boundary as a view | Completes [TDD-00243](../tdd/TDD-00243.md); builds on [ADR-01351](ADR-01351.md) |
+| [01358](ADR-01358.md) | Class values relate through their construct signatures | Extends [ADR-01355](ADR-01355.md) |
+| [01359](ADR-01359.md) | ArrayBufferView, BufferSource and ArrayBufferLike resolve to their members | Extends [ADR-01352](ADR-01352.md) |
+| [01360](ADR-01360.md) | A typed array's `constructor` is its builtin | Extends [TDD-00018](../tdd/TDD-00018.md) |
+| [01361](ADR-01361.md) | A non-array in `any` throws where an array is declared | Refines [TDD-00212](../tdd/TDD-00212.md)'s any-array unboxing |
+| [01362](ADR-01362.md) | Blob is a TypeScript class | Implements part of [TDD-00230](../tdd/TDD-00230.md) P3.4; supersedes the representation of [TDD-00102](../tdd/TDD-00102.md) |
+| [01363](ADR-01363.md) | A promise viewed under another type settles with its source | Refines [TDD-00230](../tdd/TDD-00230.md) phase 5's promise views |
+| [01364](ADR-01364.md) | JSON.stringify escapes an embedded NUL | Fixes the JSON string quoting of [TDD-00077](../tdd/TDD-00077.md) |
+| [01365](ADR-01365.md) | Buffer.from(arrayBuffer) is a view | Builds on [ADR-01351](ADR-01351.md); refines [TDD-00103](../tdd/TDD-00103.md) |
+| [01366](ADR-01366.md) | WeakRef is a TypeScript class, with the spec's kept objects | Implements part of [TDD-00230](../tdd/TDD-00230.md) P3.4; refines [TDD-00112](../tdd/TDD-00112.md) |
+| [01367](ADR-01367.md) | A generic class's `new` infers its type arguments | Extends [TDD-00010](../tdd/TDD-00010.md) |
+| [01368](ADR-01368.md) | A generic class's instances show its own name | Extends [TDD-00010](../tdd/TDD-00010.md) |
+| [01369](ADR-01369.md) | An Error's own keys follow assignment and defineProperty's `enumerable` | Extends [ADR-01080](ADR-01080.md)'s extra bag |
+| [01370](ADR-01370.md) | A Date variable compound-assigned with arithmetic widens under -compat=js | Extends [TDD-00162](../tdd/TDD-00162.md)'s cross-type widening |
+| [01371](ADR-01371.md) | Annex B block functions under -compat=js; an evolving binding keeps its any-box | Extends [TDD-00022](../tdd/TDD-00022.md)'s `-compat=js` lane and [TDD-00162](../tdd/TDD-00162.md) |
+| [01372](ADR-01372.md) | A class method's number parameter takes ToNumber under -compat=js | Extends [TDD-00022](../tdd/TDD-00022.md)'s `-compat=js` lane; Superseded by [ADR-01377](ADR-01377.md) (the conversion moved into `coerce`) |
+| [01373](ADR-01373.md) | Iterator helpers in TypeScript, and generators typed as Generator | Implements [TDD-00230](../tdd/TDD-00230.md) P3.1/P3.2 for `IteratorObject`; Extends [ADR-01344](ADR-01344.md), [ADR-01313](ADR-01313.md) |
+| [01374](ADR-01374.md) | ToNumber runs ToPrimitive everywhere; a boolean parameter takes ToBoolean | Extends [ADR-01372](ADR-01372.md), [TDD-00201](../tdd/TDD-00201.md); the class-call branch Superseded by [ADR-01377](ADR-01377.md) |
+| [01375](ADR-01375.md) | A static eval is expanded before binding; two early errors | Extends [TDD-00046](../tdd/TDD-00046.md) (static eval subset), [TDD-00230](../tdd/TDD-00230.md) P2 |
+| [01376](ADR-01376.md) | A value is used in the representation it was emitted in | Extends [ADR-01373](ADR-01373.md), [TDD-00230](../tdd/TDD-00230.md) P3.3 |
+| [01377](ADR-01377.md) | coerce takes ToNumber and ToBoolean, never a reinterpretation | Supersedes the class-call branches of [ADR-01372](ADR-01372.md) and [ADR-01374](ADR-01374.md); Implements part of [TDD-00230](../tdd/TDD-00230.md) P3.3 (`convert`) |
+| [01378](ADR-01378.md) | Class members: a later sibling's result, static name clashes, repeated accessors | Extends [ADR-00906](ADR-00906.md) |
+| [01379](ADR-01379.md) | Destructuring assignment: its value, a dynamic source, computed keys | Extends [ADR-00160](ADR-00160.md), [ADR-00663](ADR-00663.md) |
+| [01380](ADR-01380.md) | Dynamic functions: captured parameters, nested pushes, generator expressions called at once | Extends [ADR-00619](ADR-00619.md), [TDD-00205](../tdd/TDD-00205.md) |
+| [01381](ADR-01381.md) | A renamed function keeps its namespace; unconvertible arguments are rejected, not emitted | Extends [ADR-01376](ADR-01376.md), [TDD-00095](../tdd/TDD-00095.md), [TDD-00230](../tdd/TDD-00230.md) P2.7 |
+| [01382](ADR-01382.md) | A child's exit is dispatched after its streams are read | Extends [ADR-00767](ADR-00767.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01383](ADR-01383.md) | A Date in a nullable slot, setTime's TimeClip, and an Invalid Date's getters and setters | Extends [ADR-01315](ADR-01315.md), [ADR-00488](ADR-00488.md) |

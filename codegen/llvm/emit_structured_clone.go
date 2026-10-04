@@ -60,17 +60,17 @@ func (e *Emitter) clonesAtRunTime(arg ast.Expression) bool {
 // generic IsObject/IsMap checks they also happen to set, purely so the error
 // names the type the user actually wrote rather than its storage
 // representation.
-func structuredCloneUnsupportedKind(ty Type) string {
+func (e *Emitter) structuredCloneUnsupportedKind(ty Type) string {
 	switch {
 	case ty.IsSymbol:
 		return "Symbol"
-	case ty.IsURL:
+	case e.isGlobalClassInstance(ty, "URL"):
 		// Node itself throws DataCloneError for a URL (not a serializable type),
 		// so refusing it here matches — as a compile-time rejection.
 		return "URL"
-	case ty.IsURLSearchParams:
+	case e.isGlobalClassInstance(ty, "URLSearchParams"):
 		return "URLSearchParams"
-	case ty.IsHeaders:
+	case e.isGlobalClassInstance(ty, "Headers"):
 		return "Headers"
 	// Map/Set are cloneable (ADR-00574) — validated in emitDeepCloneMap/Set,
 	// which reject only a nested-collection/array element type.
@@ -105,7 +105,7 @@ func structuredCloneUnsupportedKind(ty Type) string {
 // doc comment above for the exact scope: array and plain-object values
 // recurse; everything else with reference/identity semantics is rejected.
 func (e *Emitter) emitDeepClone(val Value, ty Type, pos ast.Pos) (Value, error) {
-	if kind := structuredCloneUnsupportedKind(ty); kind != "" {
+	if kind := e.structuredCloneUnsupportedKind(ty); kind != "" {
 		return Value{}, fmt.Errorf("%d:%d: structuredClone does not yet support %s values", pos.Line, pos.Col, kind)
 	}
 	switch {
@@ -291,18 +291,18 @@ func (e *Emitter) emitDeepCloneObject(val Value, ty Type, pos ast.Pos) (Value, e
 // strings, and plain objects. A nested array/Map/Set element is rejected —
 // the runtime clone loop loads each element at its scalar/pointer slot width,
 // which doesn't match an array's {ptr,i64} aggregate shape.
-func cloneableCollectionElem(ty Type) bool {
+func (e *Emitter) cloneableCollectionElem(ty Type) bool {
 	if ty.IsArray || ty.IsMap || ty.IsSet {
 		return false
 	}
-	return structuredCloneUnsupportedKind(ty) == ""
+	return e.structuredCloneUnsupportedKind(ty) == ""
 }
 
 // emitDeepCloneMap deep-copies a Map into a fresh one, cloning each value (and
 // object keys) — real structuredClone semantics for a Map (ADR-00574).
 func (e *Emitter) emitDeepCloneMap(val Value, ty Type, pos ast.Pos) (Value, error) {
 	keyTy, valTy := *ty.MapKey, *ty.MapVal
-	if !cloneableCollectionElem(keyTy) || !cloneableCollectionElem(valTy) {
+	if !e.cloneableCollectionElem(keyTy) || !e.cloneableCollectionElem(valTy) {
 		return Value{}, fmt.Errorf("%d:%d: structuredClone of a Map with an array/Map/Set key or value type is not supported", pos.Line, pos.Col)
 	}
 	suffix, keyIR := mapRuntime(keyTy)
@@ -359,7 +359,7 @@ func (e *Emitter) emitDeepCloneMap(val Value, ty Type, pos ast.Pos) (Value, erro
 // (ADR-00574).
 func (e *Emitter) emitDeepCloneSet(val Value, ty Type, pos ast.Pos) (Value, error) {
 	elemTy := *ty.MapKey
-	if !cloneableCollectionElem(elemTy) {
+	if !e.cloneableCollectionElem(elemTy) {
 		return Value{}, fmt.Errorf("%d:%d: structuredClone of a Set with an array/Map/Set element type is not supported", pos.Line, pos.Col)
 	}
 	setSuffix, _ := mapRuntime(elemTy)

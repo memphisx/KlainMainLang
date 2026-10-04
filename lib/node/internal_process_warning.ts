@@ -9,13 +9,7 @@
 // The `(Use \`node --trace-warnings ...\`)` hint Node prints once is left
 // out: a compiled program has no --trace-warnings flag to point to.
 
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeTypeError } from './internal_errors';
 
 function received(value: any): string {
     if (value === null || value === undefined) return ' Received ' + String(value);

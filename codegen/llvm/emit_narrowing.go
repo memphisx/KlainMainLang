@@ -364,6 +364,21 @@ func (e *Emitter) classHasMethod(cls, name string) bool {
 	return g
 }
 
+// classHasMethodInherited reports a method name of class cls or a base.
+func (e *Emitter) classHasMethodInherited(cls, name string) bool {
+	for i := 0; cls != "" && i < 64; i++ {
+		info, ok := e.classes[cls]
+		if !ok {
+			return false
+		}
+		if _, ok := info.MethodSigs[name]; ok {
+			return true
+		}
+		cls = info.BaseClass
+	}
+	return false
+}
+
 // discriminantNarrowing recognizes `x.tag === "lit"` over a discriminated-union
 // local (TDD-00116) and narrows to the member whose discriminant value is "lit"
 // (the complement — the other members — narrows the opposite branch).
@@ -708,6 +723,23 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 			e.emitLabel(staticL)
 		}
+		// Anything but an array, null or undefined (a string, a number, an
+		// object) has no array behind its payload: a TypeError, never a read
+		// through it.
+		{
+			isArr, isNil, isUndef := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isArr, tagReg, kmlTagArray))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNil, tagReg, kmlTagNull))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tagReg, kmlTagUndefined))
+			ok1, ok := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", ok1, isArr, isNil))
+			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", ok, ok1, isUndef))
+			badL, goodL := e.freshLabel("unbarr.notarray"), e.freshLabel("unbarr.isarray")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, goodL, badL))
+			e.emitLabel(badL)
+			e.emitInternalThrowKind("TypeError", e.internString("the value is not an array"))
+			e.emitLabel(goodL)
+		}
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, mergeL, loadL))
 		e.emitLabel(loadL)
 		// An `any[]` (each element a NaN-boxed word) read as a typed array:
@@ -854,14 +886,23 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 		return e.emitBoxedObjToDict(Value{Ref: boxRef, Ty: TypeAny}, target)
 	case target.IsTuple && !target.IsArray:
 		return e.emitUnboxTuple(tagReg, payload, target)
+	case target.IR == "ptr" && target.IsClass:
+		// An object slot holds an object: a box with no pointer (a number, a
+		// boolean, a string, null, undefined) reads as null rather than its
+		// payload's bits.
+		r, isObj, p := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp uge i8 %s, %d", isObj, tagReg, kmlTagObject))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", p, isObj, payload))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, p))
+		return Value{Ref: r, Ty: target}
 	case target.IR == "ptr":
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, payload))
 		return Value{Ref: r, Ty: target}
 	case target.IR == "double":
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", r, payload))
-		return Value{Ref: r, Ty: target}
+		// ToNumber, as the integer arm below: undefined is NaN, a string
+		// parses — a box of a number is its own double.
+		return Value{Ref: e.emitAnyToF64Slot(Value{Ref: boxRef, Ty: TypeAny}), Ty: target}
 	case target.IR == "i1":
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i1", r, payload))

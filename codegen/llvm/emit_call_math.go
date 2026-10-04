@@ -282,7 +282,9 @@ func (e *Emitter) emitMathMinMax(fn string, args []ast.Expression, pos ast.Pos) 
 			e.emitInstr(fmt.Sprintf("%s = call double @%s(double %s, double %s)", r, intrinsic, result.Ref, next.Ref))
 			result = Value{Ref: r, Ty: TypeF64}
 		}
-		return result, nil
+		// The intrinsics return a NaN operand unchanged on x86-64, so an
+		// undefined operand (TDD-00241) would come back as the sentinel.
+		return Value{Ref: e.emitQuietF64(result.Ref), Ty: TypeF64}, nil
 	}
 	result := e.coerce(vals[0], TypeI64)
 	for _, v := range vals[1:] {
@@ -377,6 +379,7 @@ func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast
 				intrinsic = "llvm.maximum.f64"
 			}
 			e.emitInstr(fmt.Sprintf("%s = call double @%s(double %s, double %s)", r, intrinsic, cur, nextRef))
+			r = e.emitQuietF64(r)
 		} else {
 			cmp := e.freshReg()
 			op := "icmp slt"

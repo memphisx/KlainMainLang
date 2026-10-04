@@ -546,6 +546,22 @@
       }
     },
     {
+      "id": "lang.void",
+      "name": "void operator",
+      "statusRow": "void operator",
+      "signature": "void expr",
+      "badge": "exact",
+      "description": "Evaluates its operand for its side effects and yields undefined. A function may name a parameter or variable undefined, which then reads that binding.",
+      "exampleKey": "basics/void_operator",
+      "snippet": "console.log(void 0)          // undefined\nconsole.log(void track())    // undefined, track() still runs",
+      "seeAlso": [
+        "lang.typeof"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/void"
+      }
+    },
+    {
       "id": "lang.in",
       "name": "in operator (key in obj)",
       "statusRow": "in operator (key in obj)",
@@ -637,12 +653,8 @@
       "name": "Tagged template literals",
       "statusRow": "Tagged template literals ( tagHello ${x} )",
       "signature": "tag`Hello ${x}`",
-      "badge": "caveats",
-      "description": "Desugars to a plain call (tag([\"a\",\"b\"], x)) — interpolated values reach the tag as real typed values, not implicitly stringified. Any callable works as a tag, including an arrow/closure with a ...rest parameter. The strings parameter is a TemplateStringsArray, and a generic tag takes explicit type arguments (tag<T>`…`).",
-      "differences": [
-        "A user tag's `strings` argument has no `.raw` property (arrays carry no extra properties); the built-in `String.raw` tag itself is implemented and interleaves the raw, un-escaped quasis.",
-        "A tag call's arguments are not checked against the tag's parameters, so a `strings: string[]` parameter (a type error in TypeScript) compiles."
-      ],
+      "badge": "supported",
+      "description": "Desugars to a plain call — interpolated values reach the tag as real typed values, not implicitly stringified. Any callable works as a tag, including an arrow/closure with a ...rest parameter. The strings parameter is a TemplateStringsArray with its raw text in strings.raw, each call site's template object is the same object on every call, and a generic tag takes explicit type arguments (tag<T>`…`).",
       "seeAlso": [
         "lang.template"
       ],
@@ -807,8 +819,7 @@
       "differences": [
         "`thisArg` is the receiver only of a function with a `this: T` parameter (declared, or from its contextual type); for any other function it is evaluated then ignored, so borrowing a class method against another receiver is unsupported.",
         "call/apply/bind on a Node module's function isn't supported (it isn't a function value); the ECMAScript builtins (`parseInt`, `Math.max`, `encodeURIComponent`, …) are function values.",
-        "`.apply` takes either a literal array or a runtime array spread into a **rest** parameter; a runtime array into a fixed-arity function is the usual spread-into-fixed-arity rejection.",
-        "`.bind` is V1-scoped to functions whose parameters are plain scalar/string/pointer/`any` types with no rest slot — an array/nullable-scalar/rest parameter is a clean compile error."
+        "`.apply` takes either a literal array or a runtime array spread into a **rest** parameter; a runtime array into a fixed-arity function is the usual spread-into-fixed-arity rejection."
       ],
       "seeAlso": [
         "lang.fnexpr",
@@ -1131,7 +1142,7 @@
       "badge": "caveats",
       "description": "A small fixed kind enum (a hidden runtime tag on the shared Error object shape, not a real class hierarchy), plus a real .name field. instanceof Error matches any kind; instanceof TypeError matches only that one. new DOMException(message?, name?) takes its .name from the 2nd argument. The ES2022 error-options bag works too: new Error(msg, { cause }) stores any value as err.cause (default undefined), preserved through throw/catch.",
       "differences": [
-        "`class X extends Error` works one level deep — construction, `super(msg)`, `.message`/`.name`, extra fields/methods, throw/catch with `instanceof` discrimination against sibling subclasses. Extending an Error *subclass* is a clean rejection, and `.stack`/`Error.captureStackTrace` don't exist.",
+        "`.stack`/`Error.captureStackTrace` don't exist: console.log shows an error as Node does minus the stack's frames. `class X extends Error` works at any depth — construction, `super(msg)`, `.message`/`.name`, fields of its own, `instanceof` at every level.",
         "`DOMException` carries no legacy numeric `.code`.",
         "The error-options second argument must be a `{ cause: <expr> }` object literal — a variable/computed options bag is a clean rejection; `AggregateError` takes no options (its `.cause` reads `undefined`)."
       ],

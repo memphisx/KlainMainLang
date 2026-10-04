@@ -8,14 +8,7 @@
 // module's exports, as Node's default export carries them.
 
 import { startTimeout, stopTimeout, startInterval, stopInterval, startImmediate, stopImmediate } from './internal_timers';
-
-class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
-}
+import { NodeTypeError } from './internal_errors';
 
 class AbortError extends Error {
     code: string = 'ABORT_ERR';

@@ -5,9 +5,9 @@
   "statusPage": "PERFORMANCE-TIMING.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "11/12",
-    "loosePct": 92,
-    "strict": "6/12",
+    "loose": "13/14",
+    "loosePct": 93,
+    "strict": "7/14",
     "strictPct": 50
   },
   "lede": "Wall-clock and monotonic timing grouped together, the way real JS/Node group them. Date follows the host's time zone as Node's does (local getters, the component constructor, toString), with Invalid Date for an unparseable string; the remaining divergence is the plain-number Date representation, so a setter needs a named variable and a zone outside the built-in name table prints its abbreviation in toString. performance and perf_hooks are Node's own user-timing code ported to TypeScript: marks and measures are entries on a timeline, observers receive them on a later turn of the loop, and histograms time the event loop.",
@@ -61,7 +61,7 @@
       "statusRow": "Date",
       "signature": "new Date(); new Date(ms); new Date(isoString); new Date(year, month, day?, hours?, minutes?, seconds?, ms?)",
       "badge": "caveats",
-      "description": "A thin wrapper over milliseconds-since-epoch. Constructs from no argument (now), a millisecond number, an ISO string, or year/month/day/... fields (month 0-indexed, omitted trailing fields defaulting like real JS). Provides the local getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds and their getUTC* forms, getTimezoneOffset, getTime/valueOf, toISOString and toString, in the host's time zone as Node's are. An unparseable string makes an Invalid Date (getTime() is NaN).",
+      "description": "A thin wrapper over milliseconds-since-epoch. Constructs from no argument (now), a millisecond number, an ISO string, or year/month/day/... fields (month 0-indexed, omitted trailing fields defaulting like real JS). Provides the local getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds and their getUTC* forms, getTimezoneOffset, getTime/valueOf, toISOString and toString, in the host's time zone as Node's are. The set* and setUTC* setters write the time value back. An unparseable string, NaN or a time past ±8.64e15 ms makes an Invalid Date, whose getters are all NaN.",
       "returns": {
         "type": "Date",
         "desc": "A Date value (a plain number under the hood)."
@@ -216,6 +216,52 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toLocaleDateString"
+      }
+    },
+    {
+      "id": "Date.toTimeString",
+      "name": "Date.prototype.toTimeString() / toJSON()",
+      "statusRow": "Date.prototype.toTimeString() / toJSON()",
+      "signature": "date.toTimeString(): string · date.toJSON(): string",
+      "badge": "exact",
+      "description": "toTimeString is toString's time and zone part, in local time; toJSON is toISOString, and null for an Invalid Date (what JSON.stringify writes for one).",
+      "returns": {
+        "type": "string",
+        "desc": "\"13:04:09 GMT+0000 (Coordinated Universal Time)\", or the ISO form."
+      },
+      "exampleKey": "date/date",
+      "snippet": "const d = new Date(Date.UTC(2020, 0, 5, 13, 4, 9))\nconsole.log(d.toJSON())            // 2020-01-05T13:04:09.000Z\nconsole.log(new Date(NaN).toJSON()) // null",
+      "differences": [],
+      "seeAlso": [
+        "Date.toDateString",
+        "Date.toLocaleTimeString"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toTimeString"
+      }
+    },
+    {
+      "id": "Date.toLocaleTimeString",
+      "name": "Date.prototype.toLocaleTimeString() / toLocaleString()",
+      "statusRow": "Date.prototype.toLocaleTimeString() / toLocaleString()",
+      "signature": "date.toLocaleTimeString(): string · date.toLocaleString(): string",
+      "badge": "caveats",
+      "description": "The default en-US shapes in local time: \"1:04:09 PM\", and the date with it, \"1/5/2020, 1:04:09 PM\".",
+      "returns": {
+        "type": "string",
+        "desc": "The local time, or date and time, in en-US form."
+      },
+      "exampleKey": "date/date",
+      "snippet": "const d = new Date(Date.UTC(2020, 0, 5, 13, 4, 9))\nconsole.log(d.toLocaleString()) // 1/5/2020, 1:04:09 PM (TZ=UTC)",
+      "differences": [
+        "One fixed en-US shape; no locale argument or full Intl-style locale support"
+      ],
+      "seeAlso": [
+        "Date.toLocaleDateString",
+        "Date.toTimeString"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toLocaleString"
       }
     },
     {

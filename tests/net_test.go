@@ -259,7 +259,7 @@ import net from 'net'
 const sock = net.connect(1, "127.0.0.1")   // port 1 refused on loopback
 console.log("returned")
 sock.on('connect', () => { console.log("UNEXPECTED connect") })
-sock.on('error', (err) => {
+sock.on('error', (err: NodeJS.ErrnoException) => {
   console.log("error", err.code, err.syscall, err.message, err.address + ":" + err.port)
 })
 `, "returned\nerror ECONNREFUSED connect connect ECONNREFUSED 127.0.0.1:1 127.0.0.1:1")
@@ -272,7 +272,7 @@ func TestE2ENetConnectDNSFailureEmitsError(t *testing.T) {
 import net from 'net'
 const sock = net.connect(80, "no-such-host.invalid.example")
 sock.on('connect', () => { console.log("UNEXPECTED connect") })
-sock.on('error', (err) => { console.log("error", err.code, err.syscall) })
+sock.on('error', (err: NodeJS.ErrnoException) => { console.log("error", err.code, err.syscall) })
 `, "error ENOTFOUND getaddrinfo")
 }
 

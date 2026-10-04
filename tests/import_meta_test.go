@@ -43,7 +43,7 @@ func buildAndRunFromDir(t *testing.T, dir, entryName string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	clangArgs = appendFnMeta(t, em, dir, clangArgs)
+	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	if out, err := llvm.ClangCommand(clangArgs...).CombinedOutput(); err != nil {
 		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
 	}
@@ -129,19 +129,5 @@ func TestE2EImportMetaOtherMemberRejected(t *testing.T) {
 	}, "main.ts")
 	if err == nil {
 		t.Fatal("expected a compile error for 'import.meta.resolve' (only '.url' is supported), got none")
-	}
-}
-
-func TestE2EDynamicImportCallNotYetSupportedRejected(t *testing.T) {
-	_, err := resolveMultiFile(t, map[string]string{
-		"main.ts": `
-async function main(): Promise<void> {
-    const mod = await import('./lib')
-    console.log(mod)
-}
-`,
-	}, "main.ts")
-	if err == nil {
-		t.Fatal("expected a compile error for dynamic import(), got none")
 	}
 }

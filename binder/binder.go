@@ -18,6 +18,9 @@ type Binding struct {
 	// the program declares.
 	refs    map[*ast.Identifier]*Symbol
 	globals map[*ast.Identifier]bool
+	// undefinedRefs maps an `undefined` literal to the binding of that name
+	// in scope (plain JS lets a function declare one).
+	undefinedRefs map[*ast.NullLiteral]*Symbol
 	// lookupScopes is the scope each unresolved reference was looked up
 	// from.
 	lookupScopes map[ast.Node]*Scope
@@ -42,6 +45,10 @@ type Binding struct {
 	// fnScopes maps each function-like node to the scope its parameters,
 	// type parameters and body share.
 	fnScopes map[ast.Node]*Scope
+	// opened maps a node to the scope it opens (its first, tag 0);
+	// stmtScopes a namespace member statement to its namespace's scope.
+	opened     map[ast.Node]*Scope
+	stmtScopes map[ast.Statement]*Scope
 	// refOrd and declOrd place references and declarations in visiting
 	// order; lastAssign is each symbol's last assignment in that order,
 	// extended to its enclosing statement's end (maxOrd: assigned in a
@@ -101,9 +108,21 @@ func (b *Binding) Resolve(id *ast.Identifier) (sym *Symbol, ok bool) {
 	return nil, b.globals[id]
 }
 
+// UndefinedRef returns the binding an `undefined` literal reads, or nil
+// when it is the value undefined.
+func (b *Binding) UndefinedRef(n *ast.NullLiteral) *Symbol { return b.undefinedRefs[n] }
+
 // LookupScope returns the scope an unresolved reference (an identifier, or a
 // `new X(…)`) was looked up from (the innermost around it), or nil.
 func (b *Binding) LookupScope(ref ast.Node) *Scope { return b.lookupScopes[ref] }
+
+// OpenedScope returns the scope node opens (a block, function or module's),
+// or nil.
+func (b *Binding) OpenedScope(node ast.Node) *Scope { return b.opened[node] }
+
+// StatementScope returns the namespace scope a top-level statement a
+// namespace member desugared to is bound in, or nil.
+func (b *Binding) StatementScope(st ast.Statement) *Scope { return b.stmtScopes[st] }
 
 // NewTarget returns the symbol a `new X(…)` constructs, or nil for a name the
 // program does not declare.
@@ -239,8 +258,11 @@ func BindWith(prog *ast.Program, opts Options) *Binding {
 		Binding: &Binding{
 			Program:             prog,
 			refs:                map[*ast.Identifier]*Symbol{},
+			undefinedRefs:       map[*ast.NullLiteral]*Symbol{},
 			globals:             map[*ast.Identifier]bool{},
 			lookupScopes:        map[ast.Node]*Scope{},
+			opened:              map[ast.Node]*Scope{},
+			stmtScopes:          map[ast.Statement]*Scope{},
 			newTargets:          map[*ast.NewExpression]*Symbol{},
 			refFlow:             map[*ast.Identifier]*FlowNode{},
 			written:             map[*ast.Identifier]bool{},
@@ -300,7 +322,7 @@ func BindWith(prog *ast.Program, opts Options) *Binding {
 		b.flow = &FlowNode{Flags: FlowStart, Scope: b.Module}
 		for _, st := range prog.Body {
 			if ns := b.memberOf[st]; ns != nil {
-				b.inNamespace(ns, func() { b.visit(st) })
+				b.inNamespace(ns, func() { b.stmtScopes[st] = b.cur; b.visit(st) })
 				continue
 			}
 			b.visit(st)
@@ -407,6 +429,14 @@ func (b *binder) inNamespace(ns *namespace, f func()) {
 		if n.instantiated {
 			flag = NamespaceModule
 		}
+		// A namespace merging with a function, class or enum whose name a
+		// file-private rename suffixed (namespace names stay global) merges
+		// with it, as under its own name.
+		if b.cur.Symbols.Get(short) == nil {
+			if p := renamedPartner(&b.cur.Symbols, short); p != nil {
+				short = p.Name
+			}
+		}
 		if sym := b.cur.Symbols.Get(short); sym == nil || sym.Flags&flag == 0 {
 			b.declare(b.cur, short, flag, NamespaceDecl, nil)
 		}
@@ -439,6 +469,9 @@ func (b *binder) enter(node any, tag int, kind ScopeKind) *Scope {
 		s = &Scope{Kind: kind, Parent: b.cur}
 		s.Node, _ = node.(ast.Node)
 		b.scopes[k] = s
+		if n, ok := node.(ast.Node); ok && tag == 0 && b.opened[n] == nil {
+			b.opened[n] = s
+		}
 	}
 	b.cur = s
 	return s
@@ -602,6 +635,13 @@ func (b *binder) visitNode(n ast.Node) {
 			}
 		}
 		return
+	case *ast.NullLiteral:
+		if n.IsUndefined && !n.Void && !b.declaring {
+			if sym := b.resolveName("undefined"); sym != nil {
+				b.undefinedRefs[n] = sym
+			}
+		}
+		return
 	case *ast.NewExpression:
 		if !b.declaring {
 			if sym := b.resolveName(n.ClassName); sym != nil {
@@ -617,6 +657,7 @@ func (b *binder) visitNode(n ast.Node) {
 		return
 	case *ast.VarDeclaration:
 		b.declareVariable(n.Kind, n.Name, n)
+		b.typeQueryScopes(n.TypeAnnot)
 		b.visit(n.Init)
 		b.storing = n
 		defer func() { b.storing = nil }()
@@ -820,6 +861,15 @@ func (b *binder) visitNode(n ast.Node) {
 			addAntecedent(b.returnTo, b.flow) // out of an inline function
 		}
 		b.unreachable()
+		return
+	case *ast.ExpressionStatement:
+		b.visit(n.Expr)
+		// A call of a function declared to return never ends the flow, as
+		// TypeScript binds a statement-level call (its declared type is
+		// explicit, so the declaration decides).
+		if call, ok := n.Expr.(*ast.CallExpression); ok && b.flowing() && b.returnsNever(call) {
+			b.unreachable()
+		}
 		return
 	case *ast.CallExpression:
 		if fn := iifeCallee(n.Callee); fn != nil {
@@ -1106,6 +1156,15 @@ func (b *binder) function(node ast.Node, params []ast.Param, body *ast.BlockStat
 		}
 	}
 	for _, p := range params {
+		b.typeQueryScopes(p.Type)
+	}
+	switch fn := node.(type) {
+	case *ast.FunctionDeclaration:
+		b.typeQueryScopes(fn.ReturnType)
+	case *ast.ArrowFunction:
+		b.typeQueryScopes(fn.RetType)
+	}
+	for _, p := range params {
 		b.declare(scope, p.Name, FunctionScopedVariable, VarLike, node)
 		for _, name := range arrayPatternNames(p.ArrayPattern) {
 			b.declare(scope, name, FunctionScopedVariable, VarLike, node)
@@ -1145,6 +1204,9 @@ func (b *binder) class(c *ast.ClassDeclaration) {
 		b.visit(d)
 	}
 
+	for _, f := range c.Fields {
+		b.typeQueryScopes(f.Type)
+	}
 	for _, f := range c.Fields {
 		for _, d := range f.Decorators {
 			b.visit(d)
@@ -1443,6 +1505,30 @@ func (b *binder) jumpTarget(label string, cont bool) *jumpTarget {
 }
 
 // unreachable marks the flow after a jump.
+// returnsNever reports whether call's callee names a function whose every
+// declaration states the return type never.
+func (b *binder) returnsNever(call *ast.CallExpression) bool {
+	id, ok := call.Callee.(*ast.Identifier)
+	if !ok || call.Optional {
+		return false
+	}
+	sym := b.refs[id]
+	if sym == nil || len(sym.Declarations) == 0 {
+		return false
+	}
+	for _, d := range sym.Declarations {
+		fd, ok := d.Node.(*ast.FunctionDeclaration)
+		if !ok || fd.ReturnType == nil {
+			return false
+		}
+		kw, ok := fd.ReturnType.TypeNode().(*ast.KeywordType)
+		if !ok || kw.Keyword != "never" {
+			return false
+		}
+	}
+	return true
+}
+
 func (b *binder) unreachable() {
 	if b.flowing() {
 		b.flow = unreachableFlow
@@ -1477,4 +1563,35 @@ func (b *binder) bindPattern(kind string, arr []ast.ArrayPatternElem, obj []ast.
 // condition's expression only, never part of the program.
 func nonNullTest(x ast.Expression) ast.Expression {
 	return ast.NewBinaryExpression("!=", x, ast.NewNullLiteral(false, x.GetPos()), x.GetPos())
+}
+
+// typeQueryScopes records the scope each `typeof x` in annotation ta names
+// its value from: the scope the annotation is written in.
+func (b *binder) typeQueryScopes(ta *ast.TypeAnnotation) {
+	if ta == nil || ta.TypeNode() == nil {
+		return
+	}
+	ast.Inspect(ta.TypeNode(), func(n ast.Node) bool {
+		if q, ok := n.(*ast.TypeQuery); ok {
+			b.lookupScopes[q] = b.cur
+		}
+		return true
+	})
+}
+
+// renamedPartner is the one function, class or enum in t whose name is name
+// with the per-file rename suffix, or nil when there is none or more than one.
+func renamedPartner(t *Table, name string) *Symbol {
+	var found *Symbol
+	n := 0
+	t.Each(func(sym *Symbol) {
+		if sym.Name != name && ast.Unmangle(sym.Name) == name && sym.Flags&(Function|Class|Enum) != 0 {
+			found = sym
+			n++
+		}
+	})
+	if n != 1 {
+		return nil
+	}
+	return found
 }

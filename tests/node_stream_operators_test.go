@@ -201,3 +201,26 @@ r.on('end', async () => {
 })
 `)
 }
+
+// A Duplex held as a Writable (Node's types allow it) writes through the
+// Writable it is typed as; a subclass's override of a library method is
+// still the one a library-typed call reaches.
+func TestE2EStreamDuplexAsWritableAndOverride(t *testing.T) {
+	assertSameAsNodeImports(t, `
+import { Writable, PassThrough, Readable } from 'stream';
+const p = new PassThrough();
+p.on('data', (c: any) => console.log('got', String(c)));
+const w: Writable = p;
+w.write('x');
+class Loud extends PassThrough {
+  push(chunk: any, encoding?: BufferEncoding): boolean {
+    if (chunk !== null) console.log('push', String(chunk));
+    return super.push(chunk, encoding);
+  }
+}
+const l = new Loud();
+const r: Readable = l;
+r.on('data', () => {});
+l.write('y');
+`)
+}

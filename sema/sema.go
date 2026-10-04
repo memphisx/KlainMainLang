@@ -35,6 +35,7 @@ func Prepare(prog *ast.Program) error {
 // user binding named X is in scope.
 type walker struct {
 	frames   []map[string]bool
+	aliases  []map[string]string           // per frame: `const M = Map` → M names Map
 	resolved map[*ast.StringLiteral]string // the resolver's module-specifier table
 	prog     *ast.Program
 	err      error
@@ -50,7 +51,6 @@ var moduleOnly = map[string][]string{
 	"Transform":    {"stream"},
 	"PassThrough":  {"stream"},
 	"Duplex":       {"stream"},
-	"Agent":        {"http", "https"},
 	"DatabaseSync": {"node:sqlite"},
 	"Channel":      {"klain:sync"},
 	"Webview":      {"klain:webview"},
@@ -77,8 +77,48 @@ func (w *walker) imported(name string) bool {
 	return false
 }
 
-func (w *walker) push(names map[string]bool) { w.frames = append(w.frames, names) }
-func (w *walker) pop()                       { w.frames = w.frames[:len(w.frames)-1] }
+func (w *walker) push(names map[string]bool) {
+	w.frames = append(w.frames, names)
+	w.aliases = append(w.aliases, nil)
+}
+
+func (w *walker) pop() {
+	w.frames = w.frames[:len(w.frames)-1]
+	w.aliases = w.aliases[:len(w.aliases)-1]
+}
+
+// builtinBehind is the builtin constructor name constructs through: the
+// name itself, or the builtin a constant in scope was bound to (`const M =
+// Map`).
+func (w *walker) builtinBehind(name string) (string, bool) {
+	for i := len(w.frames) - 1; i >= 0; i-- {
+		if b, ok := w.aliases[i][name]; ok {
+			return b, true
+		}
+		if w.frames[i][name] {
+			return "", false
+		}
+	}
+	_, ok := builtinConstructors[name]
+	return name, ok && w.imported(name)
+}
+
+// noteAlias records `const M = Map` with Map the builtin.
+func (w *walker) noteAlias(v *ast.VarDeclaration) {
+	id, ok := v.Init.(*ast.Identifier)
+	if !ok || v.Kind != "const" || v.Name == "" || v.TypeAnnot != nil {
+		return
+	}
+	b, ok := w.builtinBehind(id.Name)
+	if !ok {
+		return
+	}
+	top := len(w.aliases) - 1
+	if w.aliases[top] == nil {
+		w.aliases[top] = map[string]string{}
+	}
+	w.aliases[top][v.Name] = b
+}
 
 func (w *walker) declared(name string) bool {
 	for i := len(w.frames) - 1; i >= 0; i-- {
@@ -102,8 +142,15 @@ func (w *walker) rewrite(n ast.Node) ast.Node {
 		defer w.pop()
 	}
 	ast.RewriteChildren(n, w.rewrite)
+	if nl, ok := n.(*ast.NullLiteral); ok && nl.IsUndefined && !nl.Void && w.declared("undefined") {
+		// A binding named undefined is in scope (only plain JS accepts one).
+		return ast.NewIdentifier("undefined", nl.GetPos())
+	}
 	w.link(n)
-	if ne, ok := n.(*ast.NewExpression); ok {
+	if v, ok := n.(*ast.VarDeclaration); ok {
+		w.noteAlias(v)
+	}
+	if ne, ok := n.(*ast.NewExpression); ok && ne.Callee == nil {
 		// A worker's path literal names the module file the resolver
 		// resolved it to (relative to the file it is written in), the path
 		// its entry is registered by.
@@ -114,8 +161,24 @@ func (w *walker) rewrite(n ast.Node) ast.Node {
 				}
 			}
 		}
-		if build, ok := builtinConstructors[ne.ClassName]; ok && !w.declared(ne.ClassName) && w.imported(ne.ClassName) {
-			out, err := build(ne)
+		if _, ok := builtinConstructors[ne.ClassName]; ok && ne.Qualified && ne.Qualifier == "globalThis" && !w.declared("globalThis") {
+			// `new globalThis.Map()` is the builtin whatever the module
+			// declares as Map.
+			alias := *ne
+			alias.Qualified, alias.Qualifier = false, ""
+			out, err := builtinConstructors[ne.ClassName](&alias)
+			if err != nil {
+				if w.err == nil {
+					w.err = err
+				}
+				return n
+			}
+			return out
+		}
+		if name, ok := w.builtinBehind(ne.ClassName); ok && !ne.Qualified || ok && name == ne.ClassName {
+			alias := *ne
+			alias.ClassName = name
+			out, err := builtinConstructors[name](&alias)
 			if err != nil {
 				if w.err == nil {
 					w.err = err
@@ -246,4 +309,21 @@ func declaredNames(stmts []ast.Statement) map[string]bool {
 		})
 	}
 	return names
+}
+
+// BuiltinNew lowers `new X(args)` with X a builtin constructor's global name
+// to the node codegen emits it through; false when X names none.
+func BuiltinNew(ne *ast.NewExpression) (ast.Expression, bool, error) {
+	build, ok := builtinConstructors[ne.ClassName]
+	if !ok {
+		return nil, false, nil
+	}
+	out, err := build(ne)
+	return out, true, err
+}
+
+// IsBuiltinConstructor reports a global name `new` lowers as a builtin.
+func IsBuiltinConstructor(name string) bool {
+	_, ok := builtinConstructors[name]
+	return ok
 }

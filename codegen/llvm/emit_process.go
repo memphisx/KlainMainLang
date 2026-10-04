@@ -21,34 +21,18 @@ func (e *Emitter) isProcessEnvExpr(expr ast.Expression) bool {
 // emitProcessNextTick implements process.nextTick(fn): enqueue fn onto the
 // tick queue, which runs ahead of the promise jobs (drained after the current
 // synchronous run, before timers).
-// V1 accepts a zero-argument callback only (Node forwards extra args to fn).
+// The arguments after fn are passed to it, as Node does.
 func (e *Emitter) emitProcessNextTick(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: process.nextTick takes exactly 1 argument (a () => void callback)", pos.Line, pos.Col)
+	if len(args) < 1 {
+		return Value{}, fmt.Errorf("%d:%d: process.nextTick takes a callback", pos.Line, pos.Col)
 	}
-	cbPtr, err := e.timerCallbackPtr(args[0], "process.nextTick", pos)
+	cbPtr, err := e.timerCallbackPtr(args[0], "process.nextTick", pos, args[1:]...)
 	if err != nil {
 		return Value{}, err
 	}
 	e.ensureMicrotasks()
 	e.emitInstr(fmt.Sprintf("call void @__kml_nexttick_enqueue(ptr %s)", cbPtr))
 	return Value{Ty: TypeVoid}, nil
-}
-
-// emitGetenvCall calls C getenv() on the given key pointer. The result is
-// `string | undefined` (TDD-00187 Stage 3): a missing variable is the null
-// pointer with the static type flagged Nullable|IsUndefined, so it prints and
-// compares as `undefined` and strict mode gates bare-string use.
-func (e *Emitter) emitGetenvCall(keyPtr string) Value {
-	e.ensureGetenv()
-	e.ensureStrHeaderRuntime()
-	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @getenv(ptr %s)", raw, keyPtr))
-	// TDD-00120: getenv returns a foreign pointer into the environ block with no
-	// length header — copy it into a length-prefixed string (null stays null).
-	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", result, raw))
-	return Value{Ref: result, Ty: undefinedableElem(TypePtr)}
 }
 
 // memoryUsageType is NodeJS.MemoryUsage: byte counts, numbers.

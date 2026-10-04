@@ -264,15 +264,14 @@ func (e *Emitter) emitBufferStaticCall(method string, args []ast.Expression, pos
 		case argTy.IsArrayBuffer && len(args) == 2:
 			return e.emitBufferFromArrayBufferRange(args, pos)
 		case argTy.IsArrayBuffer:
-			// Node views the ArrayBuffer; this copies (disclosed caveat) —
-			// the out-of-scope .buffer machinery would be needed to alias.
+			// A view of the ArrayBuffer's bytes, as Node's (TDD-00243).
 			v, err := e.emitExpr(args[0])
 			if err != nil {
 				return Value{}, err
 			}
-			size, data := e.emitBlobSizeData(v.Ref)
-			c := e.emitBlobCopyData(size, data)
-			return e.bufferAggregate(c, size), nil
+			size, data := e.emitBufSizeData(v.Ref)
+			e.emitRegisterView(data, v, "0", argTy.IsSharedArrayBuffer)
+			return e.bufferAggregate(data, size), nil
 		case argTy.IsArray:
 			if argTy.BigIntElem {
 				return Value{}, fmt.Errorf("%d:%d: Buffer.from cannot copy-construct from a BigInt64Array/BigUint64Array", pos.Line, pos.Col)
@@ -293,7 +292,7 @@ func (e *Emitter) emitBufferStaticCall(method string, args []ast.Expression, pos
 			if err != nil {
 				return Value{}, err
 			}
-			if !isStringTy(v.Ty) || v.Ty.IsArrayBuffer || v.Ty.IsBlob || v.Ty.IsDataView {
+			if !isStringTy(v.Ty) || v.Ty.IsArrayBuffer {
 				return Value{}, fmt.Errorf("%d:%d: Buffer.from takes a string, array, TypedArray, ArrayBuffer, or Buffer", pos.Line, pos.Col)
 			}
 			enc, encRef, err := e.bufferEncoding(args, 1, pos)
@@ -697,7 +696,7 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 	if !k.write {
 		raw := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i%d, ptr %s, align 1", raw, bits, elemPtr))
-		val := e.emitDataViewMaybeSwap(raw, k.width, littleRef)
+		val := e.emitMaybeSwap(raw, k.width, littleRef)
 		switch {
 		case k.float:
 			if k.width == 4 {
@@ -771,7 +770,7 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 			e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i%d", narrow, iv.Ref, bits))
 		}
 	}
-	stored := e.emitDataViewMaybeSwap(narrow, k.width, littleRef)
+	stored := e.emitMaybeSwap(narrow, k.width, littleRef)
 	e.emitInstr(fmt.Sprintf("store i%d %s, ptr %s, align 1", bits, stored, elemPtr))
 	ret := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", ret, offRef, k.width))
@@ -1261,8 +1260,9 @@ func (e *Emitter) emitBufferFromDynamic(v Value, args []ast.Expression, pos ast.
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", either, abL, notABL))
 	e.emitLabel(abL)
 	h := e.emitUnboxHost(v, ArrayBufferType())
-	size, bytes := e.emitBlobSizeData(h.Ref)
-	put(e.emitBlobCopyData(size, bytes), size)
+	size, bytes := e.emitBufSizeData(h.Ref)
+	e.emitRegisterViewDyn(bytes, h, "0", isSAB.Ref)
+	put(bytes, size)
 	e.emitLabel(notABL)
 	// Anything array-like: each element to a byte.
 	e.ensureDynJSONC()
@@ -1303,7 +1303,7 @@ func (e *Emitter) emitBufferFromArrayBufferRange(args []ast.Expression, pos ast.
 	if err != nil {
 		return Value{}, err
 	}
-	size, data := e.emitBlobSizeData(v.Ref)
+	size, data := e.emitBufSizeData(v.Ref)
 	ov, err := e.emitExpr(args[1])
 	if err != nil {
 		return Value{}, err
@@ -1345,6 +1345,60 @@ func (e *Emitter) emitBufferFromArrayBufferRange(args []ast.Expression, pos ast.
 	}
 	src := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", src, data, off))
-	c := e.emitBlobCopyData(n, src)
-	return e.bufferAggregate(c, n), nil
+	// A view of that range, as Node's (TDD-00243).
+	e.emitRegisterView(src, v, off, v.Ty.IsSharedArrayBuffer)
+	return e.bufferAggregate(src, n), nil
+}
+
+// bufferIntrinsicNames are the Buffer methods emitBufferInstanceCall
+// implements, the keys of their `Buffer.prototype.*` intrinsics.
+func bufferIntrinsicNames() []string {
+	names := []string{"toString", "write", "copy", "equals", "compare"}
+	for _, op := range []string{"read", "write"} {
+		for _, w := range []string{"UInt8", "Uint8", "Int8", "UInt16", "Uint16", "Int16", "UInt32", "Uint32", "Int32", "Float", "Double", "BigInt64", "BigUInt64", "BigUint64"} {
+			for _, end := range []string{"", "LE", "BE"} {
+				if n := op + w + end; isBufferMethodName(n) {
+					names = append(names, n)
+				}
+			}
+		}
+	}
+	return names
+}
+
+// ensureBswap declares the llvm.bswap intrinsic of a width-byte integer.
+func (e *Emitter) ensureBswap(width int) {
+	switch width {
+	case 2:
+		if !e.usedBswap16 {
+			e.usedBswap16 = true
+			e.emitGlobal("declare i16 @llvm.bswap.i16(i16)")
+		}
+	case 4:
+		if !e.usedBswap32 {
+			e.usedBswap32 = true
+			e.emitGlobal("declare i32 @llvm.bswap.i32(i32)")
+		}
+	case 8:
+		if !e.usedBswap64 {
+			e.usedBswap64 = true
+			e.emitGlobal("declare i64 @llvm.bswap.i64(i64)")
+		}
+	}
+}
+
+// emitMaybeSwap emits the conditional byte swap of an iN register raw:
+// littleRef is a runtime i1 little-endian flag. The host is little-endian,
+// so the value is swapped exactly when littleRef is false.
+func (e *Emitter) emitMaybeSwap(raw string, width int, littleRef string) string {
+	if width == 1 {
+		return raw
+	}
+	e.ensureBswap(width)
+	bits := width * 8
+	swapped := e.freshReg()
+	sel := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i%d @llvm.bswap.i%d(i%d %s)", swapped, bits, bits, bits, raw))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i%d %s, i%d %s", sel, littleRef, bits, raw, bits, swapped))
+	return sel
 }

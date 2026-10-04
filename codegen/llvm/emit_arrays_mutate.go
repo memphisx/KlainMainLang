@@ -122,6 +122,9 @@ func (e *Emitter) emitPop(mem *ast.MemberExpression, args []ast.Expression, pos 
 	curLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
+	popIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", popIdx, curLen))
+	e.emitArrayGuard(ptrPtr, arrOpDelete, popIdx, "0")
 
 	// Guard: empty array — return `undefined` (TDD-00187) and leave length
 	// unchanged (0): a scalar element wraps in the { i1, T } presence
@@ -268,6 +271,9 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 	tmpLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", tmpLen, curLen, delCount))
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", newLen, tmpLen, numInserted))
+	spliceDelta := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", spliceDelta, newLen, curLen))
+	e.emitArrayGuard(ptrPtr, arrOpSplice, startN, spliceDelta)
 
 	checkL := e.freshLabel("splice.checkgrow")
 	growL := e.freshLabel("splice.grow")
@@ -465,6 +471,7 @@ func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, po
 	curLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
+	e.emitArrayGuard(ptrPtr, arrOpShift, "0", "0")
 
 	// Guard: empty array — return `undefined` (TDD-00187).
 	isEmpty := e.freshReg()
@@ -529,6 +536,9 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 	if err != nil {
 		return Value{}, err
 	}
+	if hasSpreadArg(args) {
+		return e.emitArrayInsertSpread(ptrPtr, lenPtr, elemTy, args, true, pos)
+	}
 
 	vals := make([]Value, 0, len(args))
 	for _, arg := range args {
@@ -571,6 +581,7 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 	if len(vals) == 0 {
 		return e.countToNumber(Value{Ref: curLen, Ty: TypeI64}), nil
 	}
+	e.emitArrayGuard(ptrPtr, arrOpAdd, curLen, "0")
 
 	newLen := e.freshReg()
 	newBytes := e.freshReg()
@@ -608,6 +619,9 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 	ptrPtr, lenPtr, elemTy, err := e.resolveArrayMutLoc(mem.Object, "push", pos)
 	if err != nil {
 		return Value{}, err
+	}
+	if hasSpreadArg(args) {
+		return e.emitArrayInsertSpread(ptrPtr, lenPtr, elemTy, args, false, pos)
 	}
 
 	// Real .push(...items) is variadic (including the zero-argument call,
@@ -655,6 +669,7 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 	if len(vals) == 0 {
 		return e.countToNumber(Value{Ref: curLen, Ty: TypeI64}), nil
 	}
+	e.emitArrayGuard(ptrPtr, arrOpAdd, curLen, "0")
 
 	newLen := e.freshReg()
 	newBytes := e.freshReg()
@@ -726,6 +741,7 @@ func (e *Emitter) emitArrayLengthAssign(mem *ast.MemberExpression, rhs ast.Expre
 	curPtr, curLen := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
+	e.emitArrayGuard(ptrPtr, arrOpLength, n, "0")
 	grow := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ugt i64 %s, %s", grow, n, curLen))
 	growL, doneL := e.freshLabel("arrlen.grow"), e.freshLabel("arrlen.done")
@@ -735,15 +751,34 @@ func (e *Emitter) emitArrayLengthAssign(mem *ast.MemberExpression, rhs ast.Expre
 	width := elemTy.Align()
 	bytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, n, width))
+	// An empty array takes fresh zeroed storage from calloc, which the
+	// kernel zeroes lazily: `a.length = 2 ** 32 - 1` must not touch every
+	// page. A non-empty one keeps its elements through realloc.
+	empty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", empty, curLen))
+	freshL, keepL, joinL := e.freshLabel("arrlen.fresh"), e.freshLabel("arrlen.keep"), e.freshLabel("arrlen.grown")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", empty, freshL, keepL))
+	e.emitLabel(freshL)
+	e.ensureCalloc()
+	e.ensureFree()
+	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", curPtr))
+	freshPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 %d)", freshPtr, n, width))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(keepL)
 	e.ensureRealloc()
-	newPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", newPtr, curPtr, bytes))
+	keptPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", keptPtr, curPtr, bytes))
 	tail := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", tail, newPtr, e.mulConst(curLen, width)))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", tail, keptPtr, e.mulConst(curLen, width)))
 	tailBytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", tailBytes, bytes, e.mulConst(curLen, width)))
 	e.ensureMemset()
 	e.emitInstr(fmt.Sprintf("call ptr @memset(ptr %s, i32 0, i64 %s)", tail, tailBytes))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(joinL)
+	newPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", newPtr, freshPtr, freshL, keptPtr, keepL))
 	if elemTy.IsDynamic && elemTy.IR == "i64" {
 		// Boxed elements: each new slot holds undefined.
 		idx := e.freshReg()
@@ -829,6 +864,7 @@ func (e *Emitter) emitArrayIndexAssignGrow(idxEx *ast.IndexExpression, rhs ast.E
 	// reallocated this array (e.g. `arr[i] = arr.push(0)`).
 	lenReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenPtr))
+	e.emitArrayGuard(ptrPtr, arrOpSet, idxVal.Ref, "0")
 
 	past := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ugt i64 %s, %s", past, idxVal.Ref, lenReg))
@@ -888,4 +924,48 @@ func undefinedAccessMessage(verb string) string {
 		return "Cannot set properties of undefined"
 	}
 	return "Cannot read properties of undefined (reading '" + verb + "')"
+}
+
+// emitArrayInsertSpread is `arr.push(...items)` / `arr.unshift(...items)`
+// with spread arguments: the arguments as one array of the element type
+// (each spread's elements in order), then that many slots added at the end
+// or the start at once. Returns the new length.
+func (e *Emitter) emitArrayInsertSpread(ptrPtr, lenPtr string, elemTy Type, args []ast.Expression, atStart bool, pos ast.Pos) (Value, error) {
+	items, err := e.emitExprWithObjectHint(ast.NewArrayLiteral(args, pos), ArrayOf(elemTy))
+	if err != nil {
+		return Value{}, err
+	}
+	hdr := e.arrayReturnHeader(items)
+	itemsAgg, src, n := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", itemsAgg, hdr))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", src, itemsAgg))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", n, itemsAgg))
+	curPtr, curLen := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
+	e.emitArrayGuard(ptrPtr, arrOpAdd, curLen, "0")
+	size := elemTy.Align()
+	newLen, newBytes, addBytes, curBytes := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newLen, curLen, n))
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", newBytes, newLen, size))
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", addBytes, n, size))
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", curBytes, curLen, size))
+	e.ensureRealloc()
+	e.ensureMemcpy()
+	newPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", newPtr, curPtr, newBytes))
+	if atStart {
+		e.ensureMemmove()
+		shifted := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", shifted, newPtr, addBytes))
+		e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", shifted, newPtr, curBytes))
+		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, src, addBytes))
+	} else {
+		dst := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dst, newPtr, curBytes))
+		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", dst, src, addBytes))
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
+	return e.countToNumber(Value{Ref: newLen, Ty: TypeI64}), nil
 }

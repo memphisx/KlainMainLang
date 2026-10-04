@@ -4,80 +4,48 @@ import (
 	"testing"
 )
 
-// --- URLPattern (TDD-00100 / ADR-00311) ---
+// --- URLPattern: the WHATWG URL Pattern Standard, as Node's global ---
+// Expected outputs are Node 24's.
 
-func TestE2EURLPatternTestAndComponents(t *testing.T) {
+func TestE2EURLPatternTestAndExecResult(t *testing.T) {
 	assertOutput(t, `
 const pattern = new URLPattern({ pathname: "/books/:id" })
-console.log(pattern.pathname)
-console.log(pattern.protocol)
-console.log(pattern.test("https://example.com/books/123"))
-console.log(pattern.test("https://example.com/authors/9"))
-console.log(pattern.test("not a url"))
-`, "/books/:id\n*\ntrue\nfalse\nfalse")
-}
-
-// ADR-00585: URLPattern matches username/password components.
-func TestE2EURLPatternUserPass(t *testing.T) {
-	assertOutput(t, `
-const p = new URLPattern({ username: "admin", pathname: "/books/:id" })
-console.log(p.username)
-console.log(p.test("http://admin@example.com/books/5"))
-console.log(p.test("http://guest@example.com/books/5"))
-const m = p.exec("http://admin@example.com/books/42")
-if (m !== null) { console.log(m.get("id")) }
-const p2 = new URLPattern({ password: "secret" })
-console.log(p2.test("http://u:secret@x.com/"))
-console.log(p2.test("http://u:wrong@x.com/"))
-`, "admin\ntrue\nfalse\n42\ntrue\nfalse")
-}
-
-func TestE2EURLPatternExecGroups(t *testing.T) {
-	assertOutput(t, `
-const pattern = new URLPattern({ pathname: "/books/:id" })
-const m = pattern.exec("https://example.com/books/123")
-if (m !== null) {
-  console.log(m.get("id"))
-}
+console.log(pattern.pathname, pattern.protocol, pattern.hasRegExpGroups)
+console.log(pattern.test("https://example.com/books/123"), pattern.test("https://example.com/authors/9"), pattern.test("not a url"))
+const m = pattern.exec("https://example.com/books/123")!
+console.log(m.pathname.groups.id, m.pathname.input, m.hostname.input, m.inputs.length, JSON.stringify(m.protocol))
 console.log(pattern.exec("https://example.com/nope") === null)
-`, "123\ntrue")
+`, "/books/:id * false\ntrue false false\n123 /books/123 example.com 1 {\"input\":\"https\",\"groups\":{\"0\":\"https\"}}\ntrue")
 }
 
-func TestE2EURLPatternMultiComponentAndOptionalGroup(t *testing.T) {
+func TestE2EURLPatternConstructorStringBaseAndOptions(t *testing.T) {
 	assertOutput(t, `
-const api = new URLPattern({ protocol: "https", hostname: "api.example.com", pathname: "/v1/:resource/:id?" })
-console.log(api.test("https://api.example.com/v1/users/42"))
-console.log(api.test("https://api.example.com/v1/users"))
-console.log(api.test("http://api.example.com/v1/users/42"))
-console.log(api.test("https://other.example.com/v1/users/42"))
-const g = api.exec("https://api.example.com/v1/users/42")
-if (g !== null) {
-  console.log(g.get("resource"))
-  console.log(g.get("id"))
-}
-const only = api.exec("https://api.example.com/v1/users")
-if (only !== null) {
-  console.log(only.get("resource"))
-  console.log(only.get("id") === undefined)
-}
-`, "true\ntrue\nfalse\nfalse\nusers\n42\nusers\ntrue")
+const api = new URLPattern("https://api.example.com/v1/:resource/:id(\\d+)?")
+console.log(api.protocol, api.hostname, api.pathname, api.hasRegExpGroups)
+const only = api.exec("https://api.example.com/v1/users")!
+console.log(only.pathname.groups.resource, only.pathname.groups.id === undefined)
+console.log(api.test("https://api.example.com/v1/users/x"))
+const rel = new URLPattern("/files/*", "https://cdn.example.com")
+console.log(rel.test("/files/a/b.png", "https://cdn.example.com"), rel.test({ pathname: "/files/z" }))
+console.log(new URLPattern({ pathname: "/A/:x" }, { ignoreCase: true }).test("https://e.com/a/1"))
+const p = new URLPattern({ username: "admin", password: "secret" })
+console.log(p.test("http://admin:secret@x.com/"), p.test("http://admin:no@x.com/"))
+`, "https api.example.com /v1/:resource/:id(\\d+)? true\nusers true\nfalse\ntrue false\ntrue\ntrue false")
 }
 
-func TestE2EURLPatternDefaultsAndEmptyComponent(t *testing.T) {
-	assertOutput(t, `
-console.log(new URLPattern().test("https://anything.example/x?q=1#f"))
-console.log(new URLPattern({ search: "" }).test("https://example.com/a?q=1"))
-console.log(new URLPattern({ search: "" }).test("https://example.com/a"))
-`, "true\nfalse\ntrue")
+// A result's groups are listed in the order Node's (ada's) std::unordered_map
+// enumerates them — the platform C++ library's order, so the oracle is the
+// local Node; an invalid pattern is a TypeError.
+func TestE2EURLPatternGroupOrderAndErrors(t *testing.T) {
+	assertSameAsNode(t, `
+for (const n of [3, 5, 6, 7, 9, 12]) {
+  const names = Array.from({ length: n }, (_, i) => "g" + String.fromCharCode(97 + i) + i);
+  const p = new URLPattern({ pathname: "/" + names.map(x => ":" + x).join("/") + "/*" });
+  const r = p.exec("https://x.com/" + names.map((_, i) => String(i)).join("/") + "/rest")!;
+  console.log(Object.keys(r.pathname.groups).join(","));
 }
-
-func TestE2EURLPatternInvalidPatternThrowsTypeError(t *testing.T) {
-	assertOutput(t, `
-try {
-  const bad = new URLPattern({ pathname: "/x/{group}" })
-  console.log(bad.test("https://e.com/x/y"))
-} catch (e) {
-  console.log(e instanceof TypeError)
-}
-`, "true")
+try { new URLPattern({ pathname: "/x/(" }) } catch (e) { console.log((e as Error).name) }
+try { new URLPattern("https://example.com:99999/") } catch (e) { console.log((e as Error).name) }
+console.log(new URLPattern({ search: "" }).test("https://example.com/a?q=1"), new URLPattern().test("https://anything.example/x?q=1#f"))
+`)
 }

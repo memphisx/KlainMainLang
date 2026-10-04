@@ -47,7 +47,8 @@ func (c *Checker) assignableTo(s, t *Type) ternary {
 
 func (c *Checker) relate(s, t *Type, rel relation, depth int) ternary {
 	switch {
-	case s == nil || t == nil || c.Unanswered(s) || c.Unanswered(t) || depth > 8:
+	case s == nil || t == nil || c.Unanswered(s) || c.Unanswered(t) || depth > 8,
+		s.Flags&Deferred != 0 || t.Flags&Deferred != 0:
 		return maybe
 	case s == t:
 		return yes
@@ -212,6 +213,12 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 			return out
 		case Function:
 			return no
+		case Interface, Instance:
+			// A ReadonlyArray (`readonly T[]`, a TemplateStringsArray) has
+			// no `push`: it is not a mutable array (TS4104, TS2740).
+			if len(s.Props) > 0 && s.Prop("push") == nil && s.Prop("length") != nil {
+				return no
+			}
 		}
 		return maybe // an object type may still carry every array member
 	case Tuple:
@@ -235,6 +242,15 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 		return maybe
 	case Function:
 		if s.Kind != Function {
+			// A class value against a constructor type (`new (n?: string)
+			// => A`, which the checker holds as a function type): its
+			// construct signature must fit. A mismatch is no either way,
+			// since a class value fits no call signature.
+			if (s.Kind == Anonymous || s.Kind == Interface) && len(s.Calls) == 0 && len(s.Constructs) == 1 {
+				if c.relate(s.Constructs[0], t, rel, depth+1) == no {
+					return no
+				}
+			}
 			return maybe // a callable object type: not modelled yet
 		}
 		// A type guard is assignable only to a signature it guards alike: a
@@ -248,8 +264,11 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 				return no
 			}
 		}
-		if len(s.Overloads) > 0 || len(t.Overloads) > 0 || len(s.TypeParams) > 0 || len(t.TypeParams) > 0 || s.restParam || t.restParam {
-			return maybe // rest parameters match any number of positions
+		if len(s.Overloads) > 0 || len(t.Overloads) > 0 || len(s.TypeParams) > 0 || len(t.TypeParams) > 0 {
+			return maybe
+		}
+		if s.restParam || t.restParam {
+			return c.relateRestSignatures(s, t, rel, depth)
 		}
 		for _, p := range s.Params {
 			if p.Flags&Void != 0 {
@@ -316,6 +335,13 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 		r := c.propsFit(s, t, rel, depth)
 		if r == no {
 			return no
+		}
+		// A target's construct signature (`typeof A`) needs a source
+		// construct signature that fits it.
+		if len(t.Constructs) == 1 && len(s.Constructs) == 1 && (s.Kind == Anonymous || s.Kind == Interface) {
+			if c.relate(s.Constructs[0], t.Constructs[0], rel, depth+1) == no {
+				return no
+			}
 		}
 		return all(r, c.indexesFit(s, t, rel, depth))
 	}
@@ -501,4 +527,77 @@ func (c *Checker) primitiveLacksLibraryMember(s, t *Type) bool {
 		return true
 	}
 	return false
+}
+
+// restElem is the element type a rest parameter of type t binds each
+// argument to (`...args: any` binds any).
+func (c *Checker) restElem(t *Type) *Type {
+	switch {
+	case t.Flags&(Any|Unknown) != 0:
+		return t
+	case t.Flags&Object != 0 && t.Kind == Array:
+		return t.Elem
+	}
+	return nil
+}
+
+// relateRestSignatures relates two signatures either of which ends in a
+// rest parameter: each position s reads takes t's parameter there (t's
+// rest element past its fixed ones), and the results relate.
+func (c *Checker) relateRestSignatures(s, t *Type, rel relation, depth int) ternary {
+	fixed := func(f *Type) int {
+		if f.restParam {
+			return len(f.Params) - 1
+		}
+		return len(f.Params)
+	}
+	var sRest, tRest *Type
+	if s.restParam {
+		if sRest = c.restElem(s.Params[len(s.Params)-1]); sRest == nil {
+			return maybe // a tuple-typed rest
+		}
+	}
+	if t.restParam {
+		if tRest = c.restElem(t.Params[len(t.Params)-1]); tRest == nil {
+			return maybe
+		}
+	}
+	at := func(f *Type, rest *Type, i int) *Type {
+		if i < fixed(f) {
+			return f.Params[i]
+		}
+		return rest
+	}
+	n := fixed(s)
+	if fixed(t) > n {
+		n = fixed(t)
+	}
+	out := yes
+	for i := 0; i < n; i++ {
+		sp, tp := at(s, sRest, i), at(t, tRest, i)
+		if sp == nil || tp == nil {
+			if sp != nil && !(i < len(s.optionals) && s.optionals[i]) && tp == nil {
+				return no // s requires a parameter t never passes
+			}
+			continue
+		}
+		if r := c.relate(tp, sp, rel, depth+1); r != yes {
+			if c.relate(sp, tp, rel, depth+1) == no && r == no {
+				return no
+			}
+			out = all(out, maybe)
+		}
+	}
+	if sRest != nil && tRest != nil {
+		if r := c.relate(tRest, sRest, rel, depth+1); r != yes {
+			if c.relate(sRest, tRest, rel, depth+1) == no && r == no {
+				return no
+			}
+			out = all(out, maybe)
+		}
+	}
+	if t.Result.Flags&Void != 0 {
+		return out
+	}
+	return all(out, c.relate(s.Result, t.Result, rel, depth+1))
 }

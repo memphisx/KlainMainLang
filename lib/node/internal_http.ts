@@ -974,9 +974,19 @@ export class OutgoingMessage extends Stream {
         return this;
     }
 
-    setHeaders(headers: Map<string, number | string | readonly string[]>): this {
+    // Node's setHeaders: a Headers' set-cookie values are set together.
+    setHeaders(headers: Headers | Map<string, number | string | readonly string[]>): this {
         if (this._header) {
             throw new HttpError('ERR_HTTP_HEADERS_SENT', 'Cannot set headers after they are sent to the client');
+        }
+        if (headers instanceof Headers) {
+            const cookies: string[] = [];
+            for (const [k, v] of headers) {
+                if (k === 'set-cookie') cookies.push(v);
+                else this.setHeader(k, v);
+            }
+            if (cookies.length > 0) this.setHeader('set-cookie', cookies);
+            return this;
         }
         for (const [k, v] of headers) this.setHeader(k, v);
         return this;

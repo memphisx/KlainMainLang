@@ -63,6 +63,10 @@ func (e *Emitter) emitAtomicsElemPtr(method string, args []ast.Expression, pos a
 		return "", Type{}, Type{}, err
 	}
 	idxNum = e.coerce(idxNum, TypeF64)
+	if e.blockDone {
+		// ToNumber threw (a Symbol index): what follows is unreachable.
+		e.emitLabel(e.freshLabel("dead"))
+	}
 	// ToIntegerOrInfinity: NaN → 0, else truncate.
 	e.ensureMathFuncs()
 	isNaN := e.freshReg()
@@ -102,7 +106,12 @@ func (e *Emitter) emitAtomicsNumber(expr ast.Expression) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	return e.coerce(n, TypeF64), nil
+	n = e.coerce(n, TypeF64)
+	if e.blockDone {
+		// ToNumber threw (a Symbol): what follows is unreachable.
+		e.emitLabel(e.freshLabel("dead"))
+	}
+	return n, nil
 }
 
 // emitAtomicsOperand converts an Atomics value operand into the raw stored
@@ -227,22 +236,29 @@ func (e *Emitter) emitAtomicsCall(method string, args []ast.Expression, pos ast.
 		return e.wrapAtomicsResult(Value{Ref: old, Ty: elemTy}, taTy), nil
 
 	case "wait":
-		elemPtr, elemTy, _, err := e.emitAtomicsElemPtr(method, args, pos)
+		elemPtr, elemTy, taTy, err := e.emitAtomicsElemPtr(method, args, pos)
 		if err != nil {
 			return Value{}, err
 		}
-		if elemTy.IR != "i32" || !elemTy.Signed {
-			return Value{}, fmt.Errorf("%d:%d: Atomics.wait requires an Int32Array", pos.Line, pos.Col)
+		wide := taTy.BigIntElem && elemTy.IR == "i64" && elemTy.Signed
+		if !wide && (elemTy.IR != "i32" || !elemTy.Signed) {
+			return Value{}, fmt.Errorf("%d:%d: Atomics.wait requires an Int32Array or a BigInt64Array", pos.Line, pos.Col)
 		}
 		if len(args) != 3 && len(args) != 4 {
-			return Value{}, fmt.Errorf("%d:%d: Atomics.wait takes (int32Array, index, expected, timeoutMs?)", pos.Line, pos.Col)
+			return Value{}, fmt.Errorf("%d:%d: Atomics.wait takes (typedArray, index, expected, timeoutMs?)", pos.Line, pos.Col)
 		}
-		// Spec order: index (above), then ToInt32(value), then ToNumber(timeout).
-		expVal, err := e.emitAtomicsNumber(args[2])
+		// Spec order: index (above), then ToInt32 / ToBigInt64(value), then
+		// ToNumber(timeout).
+		var expVal Value
+		if wide {
+			expVal, err = e.emitAtomicsOperand(args[2], elemTy, taTy, pos)
+		} else {
+			expVal, err = e.emitAtomicsNumber(args[2])
+			expVal = e.coerce(expVal, TypeI32)
+		}
 		if err != nil {
 			return Value{}, err
 		}
-		expVal = e.coerce(expVal, TypeI32)
 		tmoRef := "0x7FF8000000000000" // absent → NaN → wait forever
 		if len(args) == 4 {
 			tmoVal, err := e.emitAtomicsNumber(args[3])
@@ -253,7 +269,11 @@ func (e *Emitter) emitAtomicsCall(method string, args []ast.Expression, pos ast.
 		}
 		e.ensureAtomicsRuntime()
 		code := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_atomics_wait(ptr %s, i32 %s, double %s)", code, elemPtr, expVal.Ref, tmoRef))
+		if wide {
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_atomics_wait64(ptr %s, i64 %s, double %s)", code, elemPtr, expVal.Ref, tmoRef))
+		} else {
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_atomics_wait(ptr %s, i32 %s, double %s)", code, elemPtr, expVal.Ref, tmoRef))
+		}
 		// Map 0/1/2 to the spec's result strings.
 		isok := e.freshReg()
 		isne := e.freshReg()
@@ -266,22 +286,31 @@ func (e *Emitter) emitAtomicsCall(method string, args []ast.Expression, pos ast.
 		return Value{Ref: s2, Ty: TypePtr}, nil
 
 	case "notify":
-		elemPtr, elemTy, _, err := e.emitAtomicsElemPtr(method, args, pos)
+		elemPtr, elemTy, taTy, err := e.emitAtomicsElemPtr(method, args, pos)
 		if err != nil {
 			return Value{}, err
 		}
-		if elemTy.IR != "i32" || !elemTy.Signed {
-			return Value{}, fmt.Errorf("%d:%d: Atomics.notify requires an Int32Array", pos.Line, pos.Col)
+		if !(elemTy.IR == "i32" && elemTy.Signed) && !(taTy.BigIntElem && elemTy.IR == "i64" && elemTy.Signed) {
+			return Value{}, fmt.Errorf("%d:%d: Atomics.notify requires an Int32Array or a BigInt64Array", pos.Line, pos.Col)
 		}
 		countRef := "9223372036854775807"
-		if len(args) == 3 {
-			cVal, err := e.emitExpr(args[2])
+		if len(args) == 3 && !isUndefinedLiteral(e, args[2]) {
+			// ToIntegerOrInfinity(ToNumber(count)), at least 0: NaN and a
+			// negative count are 0, +Infinity every waiter.
+			cNum, err := e.emitAtomicsNumber(args[2])
 			if err != nil {
 				return Value{}, err
 			}
-			cVal = e.coerce(cVal, TypeI64)
-			countRef = cVal.Ref
-		} else if len(args) != 2 {
+			isNaN := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = fcmp uno double %s, %s", isNaN, cNum.Ref, cNum.Ref))
+			noNaN := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0.0, double %s", noNaN, isNaN, cNum.Ref))
+			neg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = fcmp olt double %s, 0.0", neg, noNaN))
+			nonNeg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0.0, double %s", nonNeg, neg, noNaN))
+			countRef = e.emitFloatToI64("double", nonNeg) // saturating: +Infinity is every waiter
+		} else if len(args) != 2 && len(args) != 3 {
 			return Value{}, fmt.Errorf("%d:%d: Atomics.notify takes (int32Array, index, count?)", pos.Line, pos.Col)
 		}
 		e.ensureAtomicsRuntime()
