@@ -5,12 +5,13 @@ import "testing"
 // --- Node `dns`: dns.lookup (ADR-00326) ---
 //
 // getaddrinfo-backed IPv4 resolution; the callback fires synchronously with
-// (err, address, family), like zlib's callback forms.
+// (err, address, family), like zlib's callback forms. The loopback is
+// 127.0.0.1: what `localhost` resolves to (and in which order) is the host's.
 
-func TestE2EDnsLookupLocalhost(t *testing.T) {
+func TestE2EDnsLookupLoopback(t *testing.T) {
 	assertOutputImports(t, `
 import dns from 'dns'
-dns.lookup("localhost", (err, address, family) => {
+dns.lookup("127.0.0.1", (err, address, family) => {
   console.log("err null:", err === null)
   console.log("addr:", address)
   console.log("family:", family)
@@ -38,24 +39,22 @@ dns.lookup("no.such.host.invalid.example", (err, address, family) => {
 
 // --- dns extras: resolve4 + promises.lookup (ADR-00329) ---
 
-// resolve4 is a DNS query (c-ares in Node), not the hosts file: `localhost`
-// is ENOTFOUND there.
+// resolve4 is a DNS query (c-ares in Node), not the hosts file or
+// getaddrinfo: a name no server has is ENOTFOUND.
 func TestE2EDnsResolve4(t *testing.T) {
 	assertSameAsNodeImports(t, `
 import dns from 'dns'
-dns.resolve4("localhost", (err, addresses) => {
+dns.resolve4("nonexistent.invalid", (err, addresses) => {
   console.log(err && err.code, err && err.syscall, addresses)
 })
 `)
 }
 
-// localhost's first address is the host's resolver order (::1 on macOS,
-// 127.0.0.1 on most Linux hosts): Node is the oracle.
 func TestE2EDnsPromisesLookup(t *testing.T) {
 	assertSameAsNodeImports(t, `
 import dns from 'dns'
 async function main() {
-  const r = await dns.promises.lookup("localhost")
+  const r = await dns.promises.lookup("127.0.0.1")
   console.log("addr:", r.address)
   console.log("family:", r.family)
 }

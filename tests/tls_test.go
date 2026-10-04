@@ -19,6 +19,11 @@ import (
 	"time"
 )
 
+// testCertDomain is the name the self-signed fixture is issued for: a
+// domain under .test, the TLD reserved for testing (RFC 2606). A client
+// that verifies it connects to 127.0.0.1 with this as its servername.
+const testCertDomain = "kml.test"
+
 // genSelfSignedPEM produces a self-signed cert + key as PEM strings, escaped for
 // embedding in a TS string literal (newlines → \n) — the { cert, key } a
 // tls.createServer program needs.
@@ -30,10 +35,10 @@ func genSelfSignedPEM(t *testing.T) (certLit, keyLit string) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "localhost"},
+		Subject:      pkix.Name{CommonName: testCertDomain},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
-		DNSNames:     []string{"localhost"},
+		DNSNames:     []string{testCertDomain},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {

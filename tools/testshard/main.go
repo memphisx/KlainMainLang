@@ -1,7 +1,8 @@
 // testshard runs the tests/ suite in shards: it compiles the test binary
 // once, deals the tests round-robin into -shards shards and runs one shard
-// (-shard i, a CI matrix job) or all of them concurrently (-shard -1,
-// `make test-par`). A test that fails is re-run alone, serially: one that
+// (-shard i, a CI matrix job, its tests dealt again over -j concurrent
+// processes so the job uses every core) or all of them concurrently
+// (-shard -1, `make test-par`). A test that fails is re-run alone, serially: one that
 // only failed under concurrency (a fixed port, signal timing) does not fail
 // the run, one that fails again does.
 package main
@@ -23,14 +24,15 @@ func main() {
 	shards := flag.Int("shards", 4, "how many shards the suite is dealt into")
 	timeout := flag.String("timeout", "50m", "each shard's go test timeout")
 	pkg := flag.String("pkg", "./tests/", "the package whose tests are sharded")
+	jobs := flag.Int("j", runtime.NumCPU(), "with -shard i: concurrent test processes the shard is run in")
 	flag.Parse()
 	if *shards < 1 || *shard >= *shards {
 		fatal("need 0 <= -shard < -shards, or -shard -1")
 	}
-	os.Exit(run(*pkg, *shard, *shards, *timeout))
+	os.Exit(run(*pkg, *shard, *shards, *jobs, *timeout))
 }
 
-func run(pkg string, shard, shards int, timeout string) int {
+func run(pkg string, shard, shards, jobs int, timeout string) int {
 	dir, err := os.MkdirTemp("", "kml-testshard")
 	if err != nil {
 		fatal(err.Error())
@@ -51,10 +53,22 @@ func run(pkg string, shard, shards int, timeout string) int {
 	for i, n := range names {
 		dealt[i%shards] = append(dealt[i%shards], n)
 	}
-	todo := []int{shard}
-	if shard < 0 {
-		todo = todo[:0]
-		for i := range dealt {
+	total := len(names)
+	if shard >= 0 {
+		// One shard: its tests, dealt over jobs processes.
+		total = len(dealt[shard])
+		if jobs < 1 {
+			jobs = 1
+		}
+		mine := dealt[shard]
+		dealt = make([][]string, jobs)
+		for i, n := range mine {
+			dealt[i%jobs] = append(dealt[i%jobs], n)
+		}
+	}
+	var todo []int
+	for i := range dealt {
+		if len(dealt[i]) > 0 {
 			todo = append(todo, i)
 		}
 	}
@@ -64,7 +78,7 @@ func run(pkg string, shard, shards int, timeout string) int {
 		failed []string
 		err    error
 	}
-	results := make([]result, shards)
+	results := make([]result, len(dealt))
 	var wg sync.WaitGroup
 	for _, i := range todo {
 		wg.Add(1)
@@ -85,14 +99,18 @@ func run(pkg string, shard, shards int, timeout string) int {
 		}
 		if len(r.failed) == 0 {
 			// A panic or a timeout: no test-level FAIL line to re-run.
-			fmt.Printf("shard %d failed with no test-level FAIL (panic/timeout) — full output:\n", i)
+			fmt.Printf("group %d failed with no test-level FAIL (panic/timeout) — full output:\n", i)
 			os.Stdout.Write(r.out)
 			return 1
 		}
 		failed = append(failed, r.failed...)
 	}
 	if len(failed) == 0 {
-		fmt.Printf("ok  tests (%d of %d shards, %d tests)\n", len(todo), shards, countIn(dealt, todo))
+		if shard >= 0 {
+			fmt.Printf("ok  tests (shard %d of %d, %d tests in %d processes)\n", shard, shards, total, len(todo))
+		} else {
+			fmt.Printf("ok  tests (%d of %d shards, %d tests)\n", len(todo), shards, total)
+		}
 		return 0
 	}
 	fmt.Printf("parallel run had failures; re-running serially to rule out concurrency flakes: %s\n", strings.Join(failed, " "))
@@ -132,14 +150,6 @@ func failedTests(out []byte) []string {
 
 func anchored(names []string) string {
 	return "^(" + strings.Join(names, "|") + ")$"
-}
-
-func countIn(dealt [][]string, todo []int) int {
-	n := 0
-	for _, i := range todo {
-		n += len(dealt[i])
-	}
-	return n
 }
 
 func command(name string, args ...string) *exec.Cmd {

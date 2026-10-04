@@ -79,7 +79,7 @@ server.on('listening', () => {
   const client = dgram.createSocket({ type: 'udp4' })
   client.send('hello', a.port, '127.0.0.1', (err, bytes) => {
     console.log('sent', err, bytes)
-    client.send(Buffer.from('xxabcxx'), 2, 3, a.port, 'localhost', () => {
+    client.send(Buffer.from('xxabcxx'), 2, 3, a.port, '127.0.0.1', () => {
       client.connect(a.port, '127.0.0.1', () => {
         console.log('connected', client.remoteAddress().port === a.port)
         client.send(['multi', '-part'])

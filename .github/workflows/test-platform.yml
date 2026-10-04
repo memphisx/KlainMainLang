@@ -1,9 +1,10 @@
 name: Test one platform
 
-# One platform's lane of release.yml: build the compiler once, then run the
-# tests/ suite and the examples as two sharded matrices on that binary. Each
-# matrix fails fast within itself; other platforms are not affected. The gate
-# job publishes the platform's pass marker once every part passed.
+# One platform's lane of release.yml: build the compiler and run the unit
+# packages once, then the tests/ suite in shards (each shard's tests spread
+# over the runner's cores) and the examples on that binary, failing fast.
+# Other platforms are not affected. The gate job publishes the platform's
+# pass marker once every part passed.
 
 on:
   workflow_call:
@@ -16,24 +17,32 @@ on:
       examples: { type: boolean, default: true }
 
 env:
-  # Keep in step with the matrices below.
-  SHARDS: 6
-  EXAMPLE_SHARDS: 4
+  # Keep in step with the shard matrix below.
+  SHARDS: 4
   BIN: klainmain${{ inputs.goos == 'windows' && '.exe' || '' }}
 
 jobs:
   build:
-    name: build
+    name: build + unit
     runs-on: ${{ inputs.os }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: false
+      - uses: ./.github/actions/toolchain
+        with: { goos: '${{ inputs.goos }}' }
       - run: go build -o ${{ env.BIN }} .
       - run: go vet ./...
+      # One real compile first: a broken platform layer fails here in seconds
+      # instead of as hundreds of link errors later.
+      - name: Smoke-compile and run one program
+        shell: bash
+        run: ./${{ env.BIN }} examples/basics/basics.ts && ./examples/basics/basics
+      - name: docs/status pages match their data/ JSON (reference lane only)
+        if: inputs.name == 'linux-x64'
+        run: make -o build status-check
+      - name: Unit packages (every package but tests/)
+        shell: bash
+        run: go test -timeout 25m $(go list ./... | grep -v '/tests$')
       - uses: actions/upload-artifact@v7
         with:
           name: klainmain-${{ inputs.name }}
@@ -46,50 +55,29 @@ jobs:
     runs-on: ${{ inputs.os }}
     # Windows (MSYS2 setup, Defender) gets more room. go test's own -timeout
     # catches a hang before the job ceiling does.
-    timeout-minutes: ${{ inputs.goos == 'windows' && 90 || 60 }}
+    timeout-minutes: ${{ inputs.goos == 'windows' && 90 || 45 }}
     strategy:
       fail-fast: true
       matrix:
-        part: [unit, shard-0, shard-1, shard-2, shard-3, shard-4, shard-5]
+        part: [shard-0, shard-1, shard-2, shard-3]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/toolchain
         with: { goos: '${{ inputs.goos }}' }
-      - uses: actions/download-artifact@v8
-        with: { name: 'klainmain-${{ inputs.name }}' }
-      - run: chmod +x ${{ env.BIN }}
-        shell: bash
-
-      # One real compile first: a broken platform layer fails here in seconds
-      # instead of as hundreds of link errors fifty minutes later.
-      - name: Smoke-compile and run one program
-        if: matrix.part == 'unit'
-        shell: bash
-        run: ./${{ env.BIN }} examples/basics/basics.ts && ./examples/basics/basics
-      - name: docs/status pages match their data/ JSON (reference lane only)
-        if: matrix.part == 'unit' && inputs.name == 'linux-x64'
-        run: make -o build status-check
-      - name: Unit packages (every package but tests/)
-        if: matrix.part == 'unit'
-        shell: bash
-        run: go test -timeout 50m $(go list ./... | grep -v '/tests$')
+      # One test process per core: no test calls t.Parallel, so a shard run
+      # as one process would use a single core of the runner.
       - name: Suite shard
-        if: startsWith(matrix.part, 'shard-')
         shell: bash
         run: |
           part='${{ matrix.part }}'
-          go run ./tools/testshard -shard "${part#shard-}" -shards "$SHARDS" -timeout 50m
+          go run ./tools/testshard -shard "${part#shard-}" -shards "$SHARDS" -timeout 40m
 
   examples:
-    name: ${{ matrix.part }}
+    name: examples + drift
     needs: build
     if: inputs.examples
     runs-on: ${{ inputs.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: true
-      matrix:
-        part: [examples-0, examples-1, examples-2, examples-3, drift]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/toolchain
@@ -98,13 +86,9 @@ jobs:
         with: { name: 'klainmain-${{ inputs.name }}' }
       - run: chmod +x ${{ env.BIN }}
       # -o build: use the downloaded compiler, don't rebuild it.
-      - name: Compile and run one shard of the examples
-        if: startsWith(matrix.part, 'examples-')
-        run: |
-          part='${{ matrix.part }}'
-          make -o build examples SHARD="${part#examples-}" SHARDS="$EXAMPLE_SHARDS"
+      - name: Compile and run every example
+        run: make -o build examples
       - name: The builtin library compiles the same everywhere, deterministically
-        if: matrix.part == 'drift'
         run: make -o build drift
 
   gate:

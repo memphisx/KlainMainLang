@@ -53,7 +53,7 @@ import dns from 'dns';
 import { gzipSync, gunzipSync, deflateSync, inflateSync } from 'zlib';
 const z = gzipSync("hello hello hello");
 console.log(gunzipSync(z).toString(), inflateSync(deflateSync("abc", { level: 9 })).toString());
-dns.lookup("localhost", (err, address, family) => { console.log(err, typeof address, family); });
+dns.lookup("127.0.0.1", (err, address, family) => { console.log(err, typeof address, family); });
 `)
 	for _, c := range []struct{ src, want string }{
 		{"import { gzipSync } from \"zlib\"\nconst n: number = gzipSync(\"x\")\n", "is not assignable to type 'number'"},

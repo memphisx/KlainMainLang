@@ -7,6 +7,9 @@
  * top. kml_layout.h is prepended by the compiler. */
 #include <stdio.h>
 #include <stdlib.h>
+#ifndef _WIN32
+#include <sys/mman.h>
+#endif
 
 #define JMP_SLOT 512   /* a jmp_buf on every target, 16-aligned (Win64) */
 #define JMP_CHUNK 64   /* slots per chunk */
@@ -20,14 +23,17 @@ _Thread_local void *__kml_cur_jmp_stk;
 _Thread_local int __kml_jmp_top;
 static _Thread_local kml_jmpstack own;
 
+/* A chunk lives outside the allocator: under -mm=gc, malloc is the
+ * collector's, and a thread's own chunks are named only from thread-local
+ * storage, which the collector does not scan, so it would free a chunk in
+ * use. aligned_alloc stayed outside it but was handed to the shim's free,
+ * which cannot release it. A mapping is page-aligned and is released. */
 static void *chunk_alloc(void) {
 #ifdef _WIN32
     return _aligned_malloc(JMP_CHUNK * JMP_SLOT, 16);
 #else
-    /* malloc is 16-aligned on every 64-bit POSIX target, and under -mm=gc
-     * it is the shim's: aligned_alloc would come from the system allocator,
-     * and the shim's free cannot release it. */
-    return malloc(JMP_CHUNK * JMP_SLOT);
+    void *p = mmap(NULL, JMP_CHUNK * JMP_SLOT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return p == MAP_FAILED ? NULL : p;
 #endif
 }
 
@@ -35,7 +41,7 @@ static void chunk_free(void *c) {
 #ifdef _WIN32
     _aligned_free(c);
 #else
-    free(c);
+    munmap(c, JMP_CHUNK * JMP_SLOT);
 #endif
 }
 

@@ -16,14 +16,14 @@ function done(line: string) {
   if (--pending === 0) { out.sort(); for (const l of out) console.log(l) }
 }
 function q(label: string, f: (cb: (...a: any[]) => void) => void) { pending++; f((...a: any[]) => done(label + " " + JSON.stringify(a))) }
-q("all", (cb) => dns.lookup("localhost", { all: true }, cb))
-q("v4", (cb) => dns.lookup("localhost", 4, cb))
+q("all", (cb) => dns.lookup("127.0.0.1", { all: true }, cb))
+q("v4", (cb) => dns.lookup("127.0.0.1", 4, cb))
 q("ip", (cb) => dns.lookup("127.0.0.1", cb))
 q("ip6", (cb) => dns.lookup("::1", { all: true }, cb))
 q("err", (cb) => dns.lookup("nonexistent.invalid", (e: any) => cb(e.code, e.errno, e.syscall, e.hostname, e.message)))
 q("svc", (cb) => dns.lookupService("127.0.0.1", 22, cb))
-q("plookup", (cb) => { dns.promises.lookup("localhost", { family: 4 }).then(cb) })
-q("pall", (cb) => { dns.promises.lookup("localhost", { all: true, order: "ipv6first" }).then(cb) })
+q("plookup", (cb) => { dns.promises.lookup("127.0.0.1", { family: 4 }).then(cb) })
+q("pall", (cb) => { dns.promises.lookup("::1", { all: true, order: "ipv6first" }).then(cb) })
 q("r4err", (cb) => dns.resolve4("nonexistent.invalid", (e: any) => cb(e.code, e.errno, e.syscall, e.hostname, e.message)))
 console.log(dns.getDefaultResultOrder(), dns.ADDRCONFIG, dns.ALL, dns.V4MAPPED, dns.NOTFOUND, dns.CANCELLED)
 console.log(dns.getServers().length > 0, new dns.Resolver({ timeout: 100, tries: 1 }).getServers().length > 0)
