@@ -100,7 +100,7 @@ examples: build
 		curl -s -o /dev/null http://127.0.0.1:$(HTTPBIN_LITE_PORT)/get && break; \
 		sleep 0.1; \
 	done; \
-	$(GO) run ./tools/runexamples -bin ./$(BINARY) -j $(EXAMPLES_JOBS) -timeout $(EXAMPLE_TIMEOUT)s -modeflags "$(MODEFLAGS)" -modeflags-nomm "$(MODEFLAGS_NOMM)"
+	$(GO) run ./tools/runexamples -bin ./$(BINARY) -j $(EXAMPLES_JOBS) -timeout $(EXAMPLE_TIMEOUT)s -modeflags "$(MODEFLAGS)" -modeflags-nomm "$(MODEFLAGS_NOMM)" $(if $(SHARD),-shard $(SHARD) -shards $(SHARDS))
 
 ## drift: the builtin library compiles the same in every example and every
 ## compile is deterministic (TDD-00238 Stage 4; tools/libdrift)

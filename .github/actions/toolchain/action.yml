@@ -1,0 +1,92 @@
+name: Toolchain
+description: Go, the Node oracles, clang and the optional libraries the suite links against, for one platform.
+
+inputs:
+  goos: { required: true, description: 'linux, darwin or windows' }
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+        cache: false # stdlib-only project, no go.sum to key the module cache on
+
+    # The FFI differential oracle (assertSameAsNodeFFI) needs `node:ffi`, which
+    # only exists in Node >= 26.1.0 behind --experimental-ffi — a *separate*
+    # oracle from the general one below. Install it first (POSIX lanes: node:ffi
+    # is exercised through dlopen there), capture its absolute path into
+    # KML_FFI_NODE, *then* install the general oracle so 24.19.0 wins PATH. On
+    # Windows KML_FFI_NODE stays unset and the FFI oracle self-skips.
+    - uses: actions/setup-node@v7
+      if: inputs.goos != 'windows'
+      with:
+        node-version: '26.10.0'
+    - name: Record the node:ffi oracle path
+      if: inputs.goos != 'windows'
+      shell: bash
+      run: echo "KML_FFI_NODE=$(command -v node)" >> "$GITHUB_ENV"
+
+    # The `assertSameAsNode*` oracle tests diff our stdout against the Node on
+    # PATH, so the oracle is one pinned version everywhere (Active LTS).
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '24.19.0'
+
+    - name: Linux — clang + curl, gc, tommath, pcre2, ssl, nghttp2, sqlite3, gtk3/webkit2gtk
+      if: inputs.goos == 'linux'
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev libsqlite3-dev libgtk-3-dev libwebkit2gtk-4.1-dev
+
+    - name: macOS — Homebrew pcre2, tommath, openssl@3, nghttp2, bdw-gc (keg-only openssl@3 exposed to clang)
+      if: inputs.goos == 'darwin'
+      shell: bash
+      run: |
+        brew install pcre2 libtommath openssl@3 nghttp2 bdw-gc
+        prefix="$(brew --prefix)"
+        ssl="$(brew --prefix openssl@3)"
+        echo "PKG_CONFIG_PATH=$ssl/lib/pkgconfig:$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+        echo "CPATH=$ssl/include:$prefix/include" >> "$GITHUB_ENV"
+        echo "LIBRARY_PATH=$ssl/lib:$prefix/lib" >> "$GITHUB_ENV"
+
+    - name: Windows — MSYS2 UCRT64 toolchain + optional libraries + WebView2 loader
+      if: inputs.goos == 'windows'
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: UCRT64
+        update: true
+        install: >-
+          make
+          mingw-w64-ucrt-x86_64-toolchain
+          mingw-w64-ucrt-x86_64-clang
+          mingw-w64-ucrt-x86_64-lld
+          mingw-w64-ucrt-x86_64-llvm
+          mingw-w64-ucrt-x86_64-curl
+          mingw-w64-ucrt-x86_64-sqlite3
+          mingw-w64-ucrt-x86_64-pcre2
+          mingw-w64-ucrt-x86_64-libtommath
+          mingw-w64-ucrt-x86_64-openssl
+          mingw-w64-ucrt-x86_64-nghttp2
+          mingw-w64-ucrt-x86_64-gc
+          mingw-w64-ucrt-x86_64-zlib
+          mingw-w64-ucrt-x86_64-webview2-loader
+
+    # Each test writes and runs a fresh .exe; Defender's real-time scan of
+    # each one roughly doubles the run.
+    - name: Windows — exclude the checkout and temp dirs from Defender
+      if: inputs.goos == 'windows'
+      shell: pwsh
+      run: |
+        Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+        Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
+        Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\Temp"
+        Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\klainmain"
+
+    - name: Windows — UCRT64 + MSYS2 coreutils on PATH, KLAIN_SYSROOT
+      if: inputs.goos == 'windows'
+      shell: pwsh
+      run: |
+        $root = (msys2 -c 'cygpath -w /').Trim()
+        "$root\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        "$root\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        "KLAIN_SYSROOT=$root\ucrt64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8

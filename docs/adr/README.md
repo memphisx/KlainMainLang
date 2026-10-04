@@ -1426,3 +1426,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [01381](ADR-01381.md) | A renamed function keeps its namespace; unconvertible arguments are rejected, not emitted | Extends [ADR-01376](ADR-01376.md), [TDD-00095](../tdd/TDD-00095.md), [TDD-00230](../tdd/TDD-00230.md) P2.7 |
 | [01382](ADR-01382.md) | A child's exit is dispatched after its streams are read | Extends [ADR-00767](ADR-00767.md), [TDD-00230](../tdd/TDD-00230.md) |
 | [01383](ADR-01383.md) | A Date in a nullable slot, setTime's TimeClip, and an Invalid Date's getters and setters | Extends [ADR-01315](ADR-01315.md), [ADR-00488](ADR-00488.md) |
+| [01384](ADR-01384.md) | CI lanes green again — library drift, nondeterministic IR, a -mm=gc leak, per-platform job layout | Extends [ADR-01326](ADR-01326.md), [ADR-01074](ADR-01074.md); refines [TDD-00179](../tdd/TDD-00179.md) |

@@ -1468,6 +1468,37 @@ func (e *Emitter) emitArrayBufferIsView(arg ast.Expression) (Value, error) {
 		return Value{}, err
 	}
 	if isSelfDescribingBox(v.Ty) {
+		// A call, named by the box type, to a helper in the program's unit:
+		// whether DataView is a class depends on the program, and library
+		// code must compile the same in every program (TDD-00238 Stage 4).
+		fn := contentSymbol("@__kml_isview.", v.Ty.IR)
+		if e.contentDefined == nil {
+			e.contentDefined = map[string]bool{}
+		}
+		if !e.contentDefined[fn] {
+			e.contentDefined[fn] = true
+			restore := e.beginDetachedFunc()
+			r, err := e.emitBoxIsView(Value{Ref: "%v", Ty: v.Ty})
+			if err != nil {
+				restore()
+				return Value{}, err
+			}
+			e.emitTerminator("ret i1 " + r)
+			body := e.allocas.String() + e.body.String()
+			restore()
+			e.writeHelper("hidden", "i1", fn, v.Ty.IR+" %v", body)
+		}
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 %s(%s %s)", r, fn, v.Ty.IR, v.Ref))
+		return Value{Ref: r, Ty: TypeBool}, nil
+	}
+	return Value{Ref: fmt.Sprint(v.Ty.IsTypedArray || e.isGlobalClassInstance(v.Ty, "DataView")), Ty: TypeBool}, nil
+}
+
+// emitBoxIsView is whether a self-describing box holds a typed array (not a
+// plain array) or a DataView.
+func (e *Emitter) emitBoxIsView(v Value) (string, error) {
+	{
 		plain := e.emitBoxIsTypedArray(v, anyArrayPlain)
 		isArr := e.emitBoxIsArrayTag(v)
 		r := e.freshReg()
@@ -1477,17 +1508,16 @@ func (e *Emitter) emitArrayBufferIsView(arg ast.Expression) (Value, error) {
 		// A boxed DataView (the global module's class) is a view too.
 		cls, ok := e.globalClass("DataView")
 		if !ok {
-			return Value{Ref: out, Ty: TypeBool}, nil
+			return out, nil
 		}
 		isDV, err := e.emitAnyInstanceOfClass(v, cls.ClassName)
 		if err != nil {
-			return Value{}, err
+			return "", err
 		}
 		either := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, out, isDV.Ref))
-		return Value{Ref: either, Ty: TypeBool}, nil
+		return either, nil
 	}
-	return Value{Ref: fmt.Sprint(v.Ty.IsTypedArray || e.isGlobalClassInstance(v.Ty, "DataView")), Ty: TypeBool}, nil
 }
 
 // emitBoxIsArrayTag is whether an `any` holds a static array's box.

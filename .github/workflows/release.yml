@@ -9,36 +9,31 @@ permissions:
 
 jobs:
   # One lane per platform, all in parallel, none stopping the others
-  # (TDD-00179). Each lane is test-platform.yml: the platform's parts (unit
-  # packages, examples, the tests/ suite in shards) run in parallel and fail
-  # fast within that platform only. The release job attaches a binary for each
-  # platform whose every part passed.
-  test:
-    name: ${{ matrix.platform.name }}
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { name: linux-x64, os: ubuntu-latest, goos: linux, goarch: amd64, parts: '["unit","examples","shard-0","shard-1","shard-2","shard-3","shard-4","shard-5"]' }
-          - { name: linux-arm64, os: ubuntu-24.04-arm, goos: linux, goarch: arm64, parts: '["unit","examples","shard-0","shard-1","shard-2","shard-3","shard-4","shard-5"]' }
-          - { name: macos-x64, os: macos-15-intel, goos: darwin, goarch: amd64, parts: '["unit","examples","shard-0","shard-1","shard-2","shard-3","shard-4","shard-5"]' }
-          - { name: macos-arm64, os: macos-15, goos: darwin, goarch: arm64, parts: '["unit","examples","shard-0","shard-1","shard-2","shard-3","shard-4","shard-5"]' }
-          # The example runner is a POSIX Makefile recipe: no examples part.
-          - { name: windows-x64, os: windows-latest, goos: windows, goarch: amd64, parts: '["unit","shard-0","shard-1","shard-2","shard-3","shard-4","shard-5"]' }
+  # (TDD-00179). Each lane is test-platform.yml: build the compiler once, then
+  # the sharded suite and the sharded examples on it. The release job
+  # attaches a binary for each platform whose gate passed.
+  linux-x64:
     uses: ./.github/workflows/test-platform.yml
-    with:
-      name: ${{ matrix.platform.name }}
-      os: ${{ matrix.platform.os }}
-      goos: ${{ matrix.platform.goos }}
-      goarch: ${{ matrix.platform.goarch }}
-      parts: ${{ matrix.platform.parts }}
+    with: { name: linux-x64, os: ubuntu-latest, goos: linux, goarch: amd64 }
+  linux-arm64:
+    uses: ./.github/workflows/test-platform.yml
+    with: { name: linux-arm64, os: ubuntu-24.04-arm, goos: linux, goarch: arm64 }
+  macos-x64:
+    uses: ./.github/workflows/test-platform.yml
+    with: { name: macos-x64, os: macos-15-intel, goos: darwin, goarch: amd64 }
+  macos-arm64:
+    uses: ./.github/workflows/test-platform.yml
+    with: { name: macos-arm64, os: macos-15, goos: darwin, goarch: arm64 }
+  windows-x64:
+    uses: ./.github/workflows/test-platform.yml
+    with: { name: windows-x64, os: windows-latest, goos: windows, goarch: amd64, examples: false }
 
   # Runs even when some lanes failed: cuts the release if at least one lane is
   # green, and attaches a binary for each green platform, cross-compiled here
   # (the compiler is pure Go) once the tag is known so the version can be
   # stamped into it.
   release:
-    needs: test
+    needs: [linux-x64, linux-arm64, macos-x64, macos-arm64, windows-x64]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -57,15 +52,10 @@ jobs:
         id: gates
         shell: bash
         run: |
-          # A platform passed when every one of its parts published a gate:
-          # its unit packages, its shards and (POSIX) its examples.
-          shards=6 # keep in step with the test job's SHARDS
+          # A platform passed when its lane's gate job published its marker.
           passed=""
           for p in linux-x64 linux-arm64 macos-x64 macos-arm64 windows-x64; do
-            parts="unit"; for i in $(seq 0 $((shards-1))); do parts="$parts shard-$i"; done
-            [ "$p" = windows-x64 ] || parts="$parts examples"
-            ok=1; for part in $parts; do [ -f "gates/$p--$part" ] || ok=0; done
-            if [ $ok = 1 ]; then echo "PASS  $p"; cp "gates/$p--unit" "gates/$p"; passed="$passed $p"
+            if [ -f "gates/$p" ]; then echo "PASS  $p"; passed="$passed $p"
             else echo "FAIL  $p (no binary will be attached for it)"; fi
           done
           echo "passed=${passed# }" >> "$GITHUB_OUTPUT"

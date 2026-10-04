@@ -27,9 +27,14 @@ func (e *Emitter) defineContentNamed(prefix, retIR, params, body string) string 
 	}
 	if !e.contentDefined[name] {
 		e.contentDefined[name] = true
-		e.functions.WriteString(fmt.Sprintf("\ndefine linkonce_odr hidden %s %s(%s) {\nentry:\n%s}\n", retIR, name, params, body))
+		e.writeHelper("linkonce_odr hidden", retIR, name, params, body)
 	}
 	return name
+}
+
+// writeHelper writes a generated helper's definition.
+func (e *Emitter) writeHelper(linkage, retIR, name, params, body string) {
+	e.functions.WriteString(fmt.Sprintf("\ndefine %s %s %s(%s) {\nentry:\n%s}\n", linkage, retIR, name, params, body))
 }
 
 // closureSymbol names the function of a closure literal at pos. In a

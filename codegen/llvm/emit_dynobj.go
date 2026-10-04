@@ -221,22 +221,34 @@ func (e *Emitter) emitDynAnyMemberGetNamed(objVal Value, keyRef, propName string
 // dynGetHelper is `i64 get(i64 value, ptr key)` for property propName ("" for
 // a run-time key), generated once.
 func (e *Emitter) dynGetHelper(propName string, pos ast.Pos) string {
+	if fn, ok := e.dynGetHelpers[propName]; ok {
+		return fn
+	}
 	if e.dynGetHelpers == nil {
 		e.dynGetHelpers = map[string]string{}
 	}
-	return e.contentNamedHelper(e.dynGetHelpers, propName, "@__kml_dynget.", "i64", "i64 %v, ptr %key", func() {
-		saved := e.dynGetInline
-		e.dynGetInline = true
-		v, err := e.emitDynAnyMemberGetInline(Value{Ref: "%v", Ty: TypeAny}, "%key", propName, pos)
-		e.dynGetInline = saved
-		if err != nil {
-			if !e.blockDone {
-				e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
-			}
-		} else if !e.blockDone {
-			e.emitTerminator(fmt.Sprintf("ret i64 %s", v.Ref))
+	// Named by the property, not the body: the dispatch covers the
+	// program's own classes, and library code calls it, so a content name
+	// would make the library's IR differ per program (TDD-00238 Stage 4).
+	// The program's unit owns it.
+	fn := contentSymbol("@__kml_dynget.", propName)
+	e.dynGetHelpers[propName] = fn
+	restore := e.beginDetachedFunc()
+	saved := e.dynGetInline
+	e.dynGetInline = true
+	v, err := e.emitDynAnyMemberGetInline(Value{Ref: "%v", Ty: TypeAny}, "%key", propName, pos)
+	e.dynGetInline = saved
+	if err != nil {
+		if !e.blockDone {
+			e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
 		}
-	})
+	} else if !e.blockDone {
+		e.emitTerminator(fmt.Sprintf("ret i64 %s", v.Ref))
+	}
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.writeHelper("hidden", "i64", fn, "i64 %v, ptr %key", body)
+	return fn
 }
 
 // emitDynAnyMemberGetInline is emitDynAnyMemberGetNamed's dispatch, emitted
@@ -544,24 +556,32 @@ func (e *Emitter) emitDynAnyMemberGetInline(objVal Value, keyRef, propName strin
 			// "DataError", an Error renamed), whatever its name says.
 			kind := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", kind, errPtr))
-			ctors := map[string]int64{}
+			// One check per kind id: two modules' `class X extends Error`
+			// share a name but not an id. Sorted, so the IR is the same on
+			// every compile.
+			type ctor struct {
+				name string
+				id   int64
+			}
+			var ctors []ctor
 			for _, k := range errorKinds {
-				ctors[k] = errorTypeIDStored(errorKindIDs[k])
+				ctors = append(ctors, ctor{k, errorTypeIDStored(errorKindIDs[k])})
 			}
 			for name, info := range e.classes {
 				if info.IsErrorSubclass && info.TagID != 0 {
-					ctors[demangleModuleName(name)] = errorTypeIDStored(info.TagID) // `class X extends Error`
+					ctors = append(ctors, ctor{demangleModuleName(name), errorTypeIDStored(info.TagID)}) // `class X extends Error`
 				}
 			}
-			names := make([]string, 0, len(ctors))
-			for n := range ctors {
-				names = append(names, n)
-			}
-			sort.Strings(names)
-			for _, k := range names {
+			sort.Slice(ctors, func(i, j int) bool {
+				if ctors[i].name != ctors[j].name {
+					return ctors[i].name < ctors[j].name
+				}
+				return ctors[i].id < ctors[j].id
+			})
+			for _, c := range ctors {
 				is, sel := e.freshReg(), e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", is, kind, ctors[k]))
-				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, is, e.internString(k), np))
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", is, kind, c.id))
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, is, e.internString(c.name), np))
 				np = sel
 			}
 			errBoxed = e.emitNbTagPtr(np, kmlTagFuncRef)

@@ -24,7 +24,10 @@ static void *chunk_alloc(void) {
 #ifdef _WIN32
     return _aligned_malloc(JMP_CHUNK * JMP_SLOT, 16);
 #else
-    return aligned_alloc(16, JMP_CHUNK * JMP_SLOT);
+    /* malloc is 16-aligned on every 64-bit POSIX target, and under -mm=gc
+     * it is the shim's: aligned_alloc would come from the system allocator,
+     * and the shim's free cannot release it. */
+    return malloc(JMP_CHUNK * JMP_SLOT);
 #endif
 }
 

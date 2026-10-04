@@ -35,9 +35,20 @@ func main() {
 	mode := flag.String("modeflags", "", "flags every example compiles with (-mm, -optimize-memory)")
 	modeNoMM := flag.String("modeflags-nomm", "", "the mode flags for an example that picks its own -mm")
 	listOnly := flag.Bool("list", false, "print the .ts examples, one per line, and exit")
+	shard := flag.Int("shard", -1, "run only this shard of the examples, 0-based; -1 runs them all")
+	shards := flag.Int("shards", 1, "how many shards the examples are dealt into")
 	flag.Parse()
 
 	list := examples(*mode, *modeNoMM)
+	if *shard >= 0 && !*listOnly {
+		var mine []*job
+		for i, j := range list {
+			if i%*shards == *shard {
+				mine = append(mine, j)
+			}
+		}
+		list = mine
+	}
 	if *listOnly {
 		for _, j := range list {
 			if j.label == "" {
