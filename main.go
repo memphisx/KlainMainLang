@@ -382,8 +382,10 @@ func main() {
 			fatal("%v", err)
 		}
 		clangArgs = append(clangArgs, host...)
-		// The libraries bind to the executable's symbols: all of them stay.
+		// The libraries bind to the executable's symbols: all of them stay,
+		// with the runtime's unreachable references.
 		clangArgs = append(clangArgs, llvm.ExportDynamicFlags()...)
+		clangArgs = append(clangArgs, llvm.UnreachableRefFlags()...)
 		lazyIslands = isl
 	} else if *libObjects && objCache != "" {
 		objs, _, err := llvm.LibObjects(llFile, objCache, libFlags)
@@ -399,13 +401,20 @@ func main() {
 		if objCache != "" {
 			if obj, err := cs.CachedObject(objCache, []string{"-O2"}); err == nil {
 				clangArgs = append(clangArgs, obj)
-				clangArgs = append(clangArgs, cs.CFlags...)
+				// the object is compiled: its -I/-D flags are not the link's
+				for _, f := range cs.CFlags {
+					if !strings.HasPrefix(f, "-I") && !strings.HasPrefix(f, "-D") {
+						clangArgs = append(clangArgs, f)
+					}
+				}
 				clangArgs = append(clangArgs, cs.Libs...)
 				continue
 			}
 		}
 		cPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + "." + cs.Name + "." + cs.SrcExt()
-		if err := os.WriteFile(cPath, []byte(cs.Content), 0644); err != nil {
+		// Every source shares this one clang invocation.
+		content, rest := cs.Standalone()
+		if err := os.WriteFile(cPath, []byte(content), 0644); err != nil {
 			fatal("cannot write %s source: %v", cs.Name, err)
 		}
 		// A Qt source (the Sailfish webview shim) needs moc run over it first,
@@ -417,7 +426,7 @@ func main() {
 			}
 		}
 		clangArgs = append(clangArgs, cPath)
-		clangArgs = append(clangArgs, cs.CFlags...)
+		clangArgs = append(clangArgs, rest...)
 		clangArgs = append(clangArgs, cs.Libs...)
 	}
 	// Embedded asset blobs (TDD-00142 Stage 7): each packed directory is written
@@ -526,7 +535,9 @@ func main() {
 				fatal("cannot write island IR: %v", err)
 			}
 			soPath := filepath.Join(islandDir, hash+soExt)
-			iArgs := []string{"-O2", "-shared", "-fPIC", illFile, "-o", soPath}
+			// The island's runtime is its own: hidden, so the link drops the
+			// functions it never reaches, with their references.
+			iArgs := append([]string{"-O2", "-shared", "-fPIC", illFile, "-o", soPath}, llvm.DeadStripFlags(false)...)
 			if iem.UsesWorkers() {
 				iArgs = append(iArgs, llvm.WorkerPthreadLinkFlags()...)
 			}

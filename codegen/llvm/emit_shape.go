@@ -23,23 +23,9 @@ var shapeSource string
 // ShapeSource returns the C runtime that looks a layout up by header.
 func ShapeSource() string { return layoutHeader() + shapeSource }
 
-// ShapeCFlags selects the optional parts of shape.c the program uses.
-func (e *Emitter) ShapeCFlags() []string {
-	var f []string
-	if e.usedShapeSpread {
-		f = append(f, "-DKML_SHAPE_SPREAD")
-	}
-	if e.usedDynJSONC {
-		f = append(f, "-DKML_OBJ_HOOKS") // the __kml_obj_* hooks (emitObjHooksFinalize)
-	}
-	if e.usedShapeKeysArray {
-		f = append(f, "-DKML_SHAPE_KEYS_ARRAY")
-	}
-	if e.usedShapeDesc {
-		f = append(f, "-DKML_SHAPE_DESC")
-	}
-	return f
-}
+// ShapeCFlags: shape.c is compiled the same way for every program; the
+// link drops the parts a program does not use (DeadStripFlags).
+func (e *Emitter) ShapeCFlags() []string { return DeadStripFlags(e.exportsRuntime()) }
 
 // UsesShapes reports whether the program reads a static object's shape at
 // run time (the layout table and shape.c are then linked in).
@@ -62,6 +48,28 @@ func (e *Emitter) ensureShapeRuntime() {
 	e.emitGlobal("declare void @__kml_shape_expando_set(ptr, ptr, i64)")
 	e.emitGlobal("declare i64 @__kml_shape_expando_count(ptr)")
 	e.emitGlobal("declare i32 @__kml_shape_expando_delete(ptr, ptr)")
+	e.emitGlobal("declare i32 @__kml_shape_expando_has(ptr, ptr)")
+}
+
+// jsMemberWritten reports whether the program assigns a property of this
+// name anywhere (`x.name = ...`): in -compat=js an instance may then own a
+// method of that name, which a call must prefer over its class's.
+func (e *Emitter) jsMemberWritten(name string) bool {
+	if e.jsMemberWrites == nil {
+		e.jsMemberWrites = map[string]bool{}
+		if e.prog != nil {
+			ast.Inspect(e.prog, func(n ast.Node) bool {
+				if as, ok := n.(*ast.AssignmentExpression); ok {
+					if m, ok := as.Left.(*ast.MemberExpression); ok {
+						e.jsMemberWrites[m.Property] = true
+					}
+				}
+				return true
+			})
+		}
+	}
+	// A private name (`#m`) is never an own property.
+	return !strings.HasPrefix(name, "#") && e.jsMemberWrites[name]
 }
 
 // shapeFound values: how __kml_shape_get found a key.
@@ -150,7 +158,7 @@ func (e *Emitter) emitShapeFinalize() {
 }
 
 // shapeRowTy is a KmlShape row (shapesrc/shape.c).
-const shapeRowTy = "{ i64, ptr, ptr, ptr, i64, ptr }"
+const shapeRowTy = "{ i64, ptr, ptr, ptr, i64, ptr, ptr }"
 
 // shapeKeys are a layout's own enumerable keys, in declaration order.
 func shapeKeys(t Type) []Field {
@@ -161,12 +169,14 @@ func shapeKeys(t Type) []Field {
 		}
 		out = append(out, f)
 	}
-	return out
+	// Then the symbol-keyed ones (TDD-00246): string enumerations skip them.
+	return append(out, symbolFields(t)...)
 }
 
 // emitShapeRow generates one layout's get/set routines and key list, and
 // returns its table row prefixed with "id|".
 func (e *Emitter) emitShapeRow(id int64, l shapeLayout) string {
+	defer e.stableHelperBody(id)()
 	keys := shapeKeys(l.ty)
 	// A promise wrapper or a generator has no own fields to show: its members
 	// are the protocol methods.
@@ -192,7 +202,20 @@ func (e *Emitter) emitShapeRow(id int64, l shapeLayout) string {
 	if l.class != nil {
 		name = "ptr " + e.internString(classSourceName(l.ty.ClassName))
 	}
-	return fmt.Sprintf("%d|{ i64, ptr, ptr, ptr, i64, ptr } { i64 %d, %s, ptr %s, ptr %s, i64 %d, ptr %s }", id, id, name, getName, setName, len(keys), keysName)
+	// Each symbol-keyed field's symbol, through the global holding it.
+	syms := "null"
+	symRefs := make([]string, len(keys))
+	for i, f := range keys {
+		symRefs[i] = "ptr null"
+		if g, ok := e.symbolFieldGlobal(f.Name); ok {
+			symRefs[i] = "ptr " + g
+			syms = fmt.Sprintf("@__kml_shape_syms_%d", id)
+		}
+	}
+	if syms != "null" {
+		e.emitGlobal(fmt.Sprintf("%s = constant [%d x ptr] [%s]", syms, len(keys), strings.Join(symRefs, ", ")))
+	}
+	return fmt.Sprintf("%d|%s { i64 %d, %s, ptr %s, ptr %s, i64 %d, ptr %s, ptr %s }", id, shapeRowTy, id, name, getName, setName, len(keys), keysName, syms)
 }
 
 // classSourceName is a class's name as the source wrote it: a generic
@@ -212,6 +235,16 @@ func (e *Emitter) emitKeyIs(keyReg, name string) (miss string) {
 	e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", c, keyReg, e.internString(name)))
 	eq := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", eq, c))
+	// A symbol-keyed field (TDD-00246) is also the property of its symbol's
+	// own run-time key, `obj[k]` through a dynamic value.
+	if g, ok := e.symbolFieldGlobal(name); ok {
+		e.declareFn("__kml_key_is_sym", "declare zeroext i1 @__kml_key_is_sym(ptr, ptr)")
+		sym, is, both := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", sym, g))
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_key_is_sym(ptr %s, ptr %s)", is, keyReg, sym))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", both, eq, is))
+		eq = both
+	}
 	hit := e.freshLabel("shape.hit")
 	miss = e.freshLabel("shape.miss")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", eq, hit, miss))
@@ -283,10 +316,51 @@ func (e *Emitter) emitShapeGetter(name string, t Type, keys []Field, class *Clas
 			e.emitLabel(miss)
 		}
 	}
-	e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
+	hostGet := ""
+	if class != nil && class.HostBase != nil && class.HostBase.IsPromise {
+		// A class extending Promise: Promise's methods, each a species
+		// construction of the class (TDD-00247), unless it declares its own.
+		for _, m := range []string{"then", "catch", "finally"} {
+			if e.classHasMethodInherited(t.ClassName, m) {
+				continue
+			}
+			miss := e.emitKeyIs("%key", m)
+			rec := e.promiseSubclassMethodRecord(class, t, m)
+			e.emitInstr(fmt.Sprintf("store i32 %d, ptr %%found, align 4", shapeMember))
+			e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbTagPtr(rec, kmlTagDynFunc)))
+			e.emitLabel(miss)
+		}
+		e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
+	} else if class != nil && class.HostBase != nil && class.HostBase.IsArray {
+		// A class extending Array: its array's elements and members, read
+		// on its body as on the array.
+		hdr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %%obj, i64 8", hdr))
+		boxed := e.emitBoxArrayPlain(e.arrayValueFromHeaderReg(hdr, *class.HostBase))
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 %s(i64 %s, ptr %%key)", r, e.dynGetHelper("", ast.Pos{}), boxed))
+		isUndef, found := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isUndef, r, nbUndefined))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i32 %d, i32 %d", found, isUndef, shapeAbsent, shapeMember))
+		e.emitInstr(fmt.Sprintf("store i32 %s, ptr %%found, align 4", found))
+		e.emitTerminator(fmt.Sprintf("ret i64 %s", r))
+	} else if class != nil && class.HostBase != nil {
+		// A class extending Map or Set: its host's members, read on its body
+		// (the instance stands in for a host cell, its body at +8).
+		hostGet = fmt.Sprintf("@__kml_shape_get_hsub_%d", class.TagID&kmlHdrIDMask)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %%obj, ptr %%key, ptr %%found)", r, hostGet))
+		e.emitTerminator(fmt.Sprintf("ret i64 %s", r))
+	} else {
+		e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
+	}
 	body := e.allocas.String() + e.body.String()
 	restore()
 	e.functions.WriteString(fmt.Sprintf("\ndefine internal i64 %s(ptr %%obj, ptr %%key, ptr %%found) {\nentry:\n%s}\n", name, body))
+	if hostGet != "" {
+		h := hostLayout{id: e.hostID(*class.HostBase), class: hostClassName(*class.HostBase), ty: *class.HostBase}
+		e.emitHostShapeGetter(hostGet, h, e.hostMembers(h.class))
+	}
 }
 
 // emitShapeSetter generates `i32 set(ptr obj, ptr key, i64 value)`.
@@ -404,8 +478,14 @@ func (e *Emitter) shapeMethodRecord(class *ClassInfo, t Type, m string) string {
 	if rec, ok := e.shapeMethodRecs[key]; ok {
 		return rec
 	}
+	defer e.stableHelperBody(class.TagID)()
 	sig := class.MethodSigs[m]
 	base := fmt.Sprintf("__kml_shape_m_%s_%s", llvmSafeSymbol(t.ClassName), llvmSafeSymbol(m))
+	// A library class's adapters are named by its stable id, so they are
+	// compiled in that id's own unit with its shape row (libOwner).
+	if id := class.TagID & kmlHdrIDMask; id >= kmlStableIDBase {
+		base = fmt.Sprintf("__kml_shape_m.%d.%s", id, llvmSafeSymbol(m))
+	}
 	fn := "@" + base
 	rec := "@" + base + "_rec"
 	e.shapeMethodRecs[key] = rec
@@ -664,6 +744,7 @@ func (e *Emitter) generatorMethodRecord(genTy Type, m string) string {
 	if rec, ok := e.shapeMethodRecs[key]; ok {
 		return rec
 	}
+	defer e.stableHelperBody(id)()
 	fn := fmt.Sprintf("@__kml_gen_dyn_%d_%s", id, llvmSafeSymbol(m))
 	rec := fn + "_rec"
 	e.shapeMethodRecs[key] = rec
@@ -776,6 +857,7 @@ func (e *Emitter) anyToLayoutFn(t Type) string {
 	if fn, ok := e.anyToLayoutFns[id]; ok {
 		return fn
 	}
+	defer e.stableHelperBody(id)()
 	fn := fmt.Sprintf("@__kml_any_to_layout.%d", id&kmlHdrIDMask)
 	e.anyToLayoutFns[id] = fn
 	restore := e.beginDetachedFunc()
@@ -884,7 +966,7 @@ func (e *Emitter) arrayIterMethodRecord(m string) string {
 	rec := fn + "_rec"
 	e.shapeMethodRecs[key] = rec
 	name := m
-	if m == "@@iterator" || m == "hostValues" {
+	if m == "@@iterator" || m == "hostValues" || m == "stringValues" {
 		name = "[Symbol.iterator]"
 	}
 	arity := iteratorHelperArity[m]
@@ -900,10 +982,19 @@ func (e *Emitter) arrayIterMethodRecord(m string) string {
 		}
 	}
 	switch m {
-	case "values", "hostValues":
+	case "values", "hostValues", "stringValues":
 		src := "%this"
-		if m == "hostValues" {
+		switch m {
+		case "hostValues":
 			src = e.emitHostIterValue("%this")
+		case "stringValues":
+			// A string's iterator walks its code points.
+			e.ensureNanBox()
+			pay := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %%this)", pay))
+			chars := e.emitStringToCharArray(Value{Ref: e.emitIntToPtr(pay), Ty: TypePtr})
+			bv, _ := e.emitBoxValue(chars)
+			src = bv.Ref
 		}
 		obj := e.emitObjAlloc(itTy)
 		a := e.freshReg()
@@ -1132,4 +1223,68 @@ func (e *Emitter) emitIteratorHelperCall(m string) (Value, error) {
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, out))
 	return Value{Ref: r, Ty: TypeAny}, nil
+}
+
+// promiseSubclassMethodRecord is the dynamic-function record for Promise's
+// `then`/`catch`/`finally` on an instance of a class extending Promise held
+// in `any`: the species call, its callbacks the boxed arguments.
+func (e *Emitter) promiseSubclassMethodRecord(class *ClassInfo, t Type, m string) string {
+	key := t.ClassName + ".@promise." + m
+	if e.shapeMethodRecs == nil {
+		e.shapeMethodRecs = map[string]string{}
+	}
+	if rec, ok := e.shapeMethodRecs[key]; ok {
+		return rec
+	}
+	base := fmt.Sprintf("__kml_shape_pm_%s_%s", llvmSafeSymbol(t.ClassName), m)
+	fn := "@" + base
+	rec := "@" + base + "_rec"
+	e.shapeMethodRecs[key] = rec
+	arity := 2
+	if m != "then" {
+		arity = 1
+	}
+	e.registerFnMeta(fn, m, arity, fnKindPlain)
+	e.emitGlobal(fmt.Sprintf("%s = internal constant { ptr, ptr, i64 } { ptr %s, ptr null, i64 %d }", rec, fn, arity))
+	restore := e.beginDetachedFunc()
+	pos := ast.Pos{}
+	e.ensureNanBox()
+	pay := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %%this)", pay))
+	self := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", self, pay))
+	var args []ast.Expression
+	for i := 0; i < arity; i++ {
+		have, slotp, loaded, word := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, %d", have, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%argv, i64 %d", slotp, i))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loaded, slotp))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, loaded, nbUndefined))
+		args = append(args, e.bindValue(Value{Ref: word, Ty: TypeAny}, pos))
+	}
+	// The body holds the class's own value type, or a boxed one when
+	// flagged (promiseFlagBoxedValue).
+	call := func(selfTy Type) {
+		v, err := e.emitHostBaseCall(Value{Ref: self, Ty: selfTy}, *class.HostBase, m, args, pos)
+		if err == nil && !e.blockDone {
+			if bx, err := e.emitBoxValue(v); err == nil {
+				e.emitTerminator(fmt.Sprintf("ret i64 %s", bx.Ref))
+			}
+		}
+	}
+	if own := e.promiseSubclassValueType(t); isUnconstrainedDynamic(own) {
+		call(t)
+	} else {
+		boxedL, ownL := e.freshLabel("pm.boxed"), e.freshLabel("pm.own")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitBoxedPromiseValueTest(self), boxedL, ownL))
+		e.emitLabel(boxedL)
+		call(promiseSubclassOf(t, PromiseOf(TypeAny)))
+		if !e.blockDone {
+			e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
+		}
+		e.emitLabel(ownL)
+		call(t)
+	}
+	e.shapeFinishAdapter(fn, restore)
+	return rec
 }

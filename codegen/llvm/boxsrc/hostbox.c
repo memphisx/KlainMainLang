@@ -31,8 +31,29 @@ extern i64 __kml_inspect_indent_shift;
 KSTR(k_object, "[Object]");
 KSTR(k_objobj, "[object Object]");
 
+#define KML_UNIT_CLASS_PARENT 7
+#define KML_ID_MASK 0xFFFFFFFFLL
+#define KML_HDR_MAGIC (0x4B4DLL << 32)
+#define KML_HDR_MAGIC_MASK (0x7FFFLL << 32)
+#define KML_HOST_FLAG (1LL << 49)
+#define KML_HOST_INLINE (1LL << 50)
+
+/* A host value's row. An instance of a class extending Map or Set
+ * (TDD-00247) carries its class tag: its row is the host layout its class
+ * chain reaches, whose body follows the tag word as a host's does. */
 static const HostRow *host_row(const void *cell) {
-    return (const HostRow *)__kml_unit_find(KML_UNIT_HOST, *(const i64 *)cell);
+    i64 h = *(const i64 *)cell;
+    const HostRow *row = (const HostRow *)__kml_unit_find(KML_UNIT_HOST, h);
+    if (row || (h & KML_HDR_MAGIC_MASK) != KML_HDR_MAGIC || (h & KML_HOST_FLAG)) return row;
+    i64 id = h & KML_ID_MASK;
+    for (int depth = 0; depth < 4096; depth++) {
+        const i64 *p = (const i64 *)__kml_unit_find(KML_UNIT_CLASS_PARENT, id);
+        if (!p) return 0;
+        id = p[1];
+        row = (const HostRow *)__kml_unit_find(KML_UNIT_HOST, KML_HDR_MAGIC | KML_HOST_FLAG | KML_HOST_INLINE | id);
+        if (row) return row;
+    }
+    return 0;
 }
 
 /* The cell of a boxed object word (kind 1, below the number range), or null. */

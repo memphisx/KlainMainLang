@@ -40,21 +40,10 @@ func (e *Emitter) UsesProcessRuntime() bool {
 	return false
 }
 
-// ProcessCFlags are process.c's mode defines: the string-wrapping routines
-// (they need the string runtime, which their ensure* functions pull in), the
-// memory numbers, the worker exit, and the NaN-box constants.
+// ProcessCFlags pass process.c the NaN-box constants; it is compiled the
+// same way for every program (DeadStripFlags).
 func (e *Emitter) ProcessCFlags() []string {
-	flags := []string{"-DKML_NB_UNDEFINED=" + strconv.Itoa(nbUndefined) + "LL", "-DKML_NB_DOUBLE_OFFSET=" + strconv.FormatInt(nbDoubleOffset, 10) + "LL"}
-	if e.usedProcessCwd || e.fnDecls["__kml_native_process_exec_path"] || e.fnDecls["__kml_native_env_get"] {
-		flags = append(flags, "-DKML_PROC_STR")
-	}
-	if e.fnDecls["__kml_native_process_memory"] {
-		flags = append(flags, "-DKML_PROC_MEM")
-	}
-	if e.hasWorkers {
-		flags = append(flags, "-DKML_PROC_WORKERS")
-	}
-	return flags
+	return append([]string{"-DKML_NB_UNDEFINED=" + strconv.Itoa(nbUndefined) + "LL", "-DKML_NB_DOUBLE_OFFSET=" + strconv.FormatInt(nbDoubleOffset, 10) + "LL"}, DeadStripFlags(e.exportsRuntime())...)
 }
 
 // nodePlatformName maps the Go compiler's own runtime.GOOS to the string
@@ -206,55 +195,30 @@ func (e *Emitter) ensureSigpipeIgnored() {
 	e.emitGlobal("declare void @__kml_ignore_sigpipe()")
 }
 
-// ensureSignalHandlerRuntime declares the machinery behind a process signal
-// listener (TDD-00019; the process emitter starts a watcher per signal). POSIX signal handlers
-// must be async-signal-safe: they can interrupt the program at literally any
-// instruction, including mid-malloc, mid-longjmp, or mid-swapcontext fiber
-// switch (see TDD-00006 on why coroutine/fiber suspension is already this
-// fragile around this compiler's setjmp/longjmp exception model). So
-// __kml_sig_handler, the only code that ever runs in real signal context,
-// does the absolute minimum: one `store volatile` to a flag, nothing else.
-// The watcher is only ever invoked later, from ordinary
-// control flow at the top of the event loop's own iteration (see
-// __kml_event_loop_run in runtime_http.go and __kml_timer_drain in
-// emit_timers.go) — by construction, never from signal context itself.
-//
-// The pending flags are `i8`, always accessed `volatile` — required so
-// -O2 can't cache a flag's value across the select() call or eliminate a
-// store as dead, the LLVM-IR equivalent of C's mandatory
-// `volatile sig_atomic_t` for this exact pattern.
-//
-// signal(), not sigaction(): sigaction() needs a hand-laid-out
-// struct sigaction, and that struct's byte layout differs between Darwin
-// and Linux (sa_mask size, presence of sa_restorer) — exactly the class of
-// bug already hit once with ucontext_t (ADR-00051). signal()'s C signature
-// is two scalars, no struct, identical on both platforms this compiler
-// targets. select()/poll() are documented (Linux signal(7), equivalently
-// on BSD/Darwin) to always return EINTR on a signal regardless of
-// SA_RESTART, so signal()'s restart semantics don't matter for this
-// design's correctness.
+// ensureSignalHandlerRuntime links process.c's signal watchers (TDD-00019;
+// the process emitter starts one per signal). On POSIX a watcher runs from
+// its uv_signal_t callback; on Windows a signal only marks itself pending
+// and runs from the top of the event loop's next pass, never from signal
+// context.
 func (e *Emitter) ensureSignalHandlerRuntime() {
-	if e.usedSignalHandler {
-		return
-	}
 	e.usedSignalHandler = true
-	e.emitGlobal("declare void @__kml_signal_dispatch()")
 }
 
 // ensureNativeSignal defines lib/native.d.ts's signalStart and signalStop:
-// Node's signal_wrap over the handler above. Starting installs the handler
-// (a watcher never holds the loop open, as Node unrefs its signal handles);
-// stopping restores the default disposition (SIGPIPE's is ignored, as this
-// runtime ignores it). A signal the host refuses (SIGKILL, SIGSTOP) is
-// -EINVAL. On Windows the signal() shim (win32proc.c) raises SIGINT, SIGHUP,
-// SIGBREAK and SIGWINCH; a watcher for another is accepted and never runs,
-// as libuv's is.
+// Node's signal_wrap. On POSIX a watcher is an unref'd uv_signal_t on the
+// event loop (loop.c), so a watcher never holds the loop open; stopping
+// restores the default disposition (SIGPIPE's is ignored, as this runtime
+// ignores it). A signal the host refuses (SIGKILL, SIGSTOP) is -EINVAL. On
+// Windows the handler above stays until TDD-00244 Stage 6: the signal() shim
+// (win32proc.c) raises SIGINT, SIGHUP, SIGBREAK and SIGWINCH; a watcher for
+// another is accepted and never runs, as libuv's is.
 func (e *Emitter) ensureNativeSignal() {
 	if e.fnDecls["__kml_native_signal_start"] {
 		return
 	}
 	e.fnDecls["__kml_native_signal_start"] = true
 	e.ensureSignalHandlerRuntime()
+	e.ensureHTTPRuntime() // loop.c holds the uv_signal_t handles
 	e.emitGlobal(`declare double @__kml_native_signal_start(double, ptr, ptr)
 declare void @__kml_native_signal_stop(double)`)
 }

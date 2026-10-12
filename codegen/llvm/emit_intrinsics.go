@@ -41,6 +41,7 @@ var arrayIntrinsics = map[string]func(e *Emitter, mem *ast.MemberExpression, arg
 	"unshift":       (*Emitter).emitUnshift,
 	"splice":        (*Emitter).emitSplice,
 	"join":          (*Emitter).emitArrayJoin,
+	"toString":      (*Emitter).emitArrayToString,
 	"sort":          (*Emitter).emitArraySort,
 	"flat":          (*Emitter).emitArrayFlat,
 	"reverse":       (*Emitter).emitArrayReverse,
@@ -96,7 +97,7 @@ var collectionIntrinsics = map[string][]string{
 // the type each call has.
 var reflectIntrinsics = map[string]Type{
 	"apply": TypeAny, "construct": TypeAny, "get": TypeAny, "getPrototypeOf": TypeAny,
-	"getOwnPropertyDescriptor": TypeAny, "ownKeys": ArrayOf(TypePtr),
+	"getOwnPropertyDescriptor": TypeAny, "ownKeys": ArrayOf(TypeAny),
 	"set": TypeBool, "has": TypeBool, "deleteProperty": TypeBool, "setPrototypeOf": TypeBool,
 	"isExtensible": TypeBool, "preventExtensions": TypeBool, "defineProperty": TypeBool,
 	"defineMetadata": TypeAny, "getMetadata": TypeAny, "getOwnMetadata": TypeAny,
@@ -107,7 +108,7 @@ var reflectIntrinsics = map[string]Type{
 var objectStaticIntrinsics = []string{
 	"keys", "values", "entries", "assign", "freeze", "isFrozen", "seal", "isSealed",
 	"preventExtensions", "isExtensible", "getPrototypeOf", "setPrototypeOf", "create",
-	"getOwnPropertyNames", "getOwnPropertyDescriptor", "defineProperty", "defineProperties",
+	"getOwnPropertyNames", "getOwnPropertySymbols", "getOwnPropertyDescriptor", "defineProperty", "defineProperties",
 	"hasOwn", "fromEntries", "groupBy",
 }
 
@@ -278,12 +279,17 @@ func init() {
 		intrinsics["Array.prototype."+name] = intrinsic{
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 				mem := ex.Callee.(*ast.MemberExpression)
+				if v, ok, err := e.emitArrayOverrideDispatch(mem, name, ex, emit); ok || err != nil {
+					return v, err
+				}
 				v, err := emit(e, mem, ex.Args, ex.GetPos())
 				if err == nil && returnsReceiver[name] && v.Ty.IsArray {
 					// The method returns its receiver: a typed array or a
 					// Buffer stays one (a boxed `fill()` result is a view).
 					if rt := e.inferExprType(mem.Object); rt.IsTypedArray || rt.IsBuffer {
 						v.Ty = rt
+					} else if v.ArrayHeader == "" && !e.blockDone {
+						v = e.receiverArrayIdentity(mem.Object, v)
 					}
 				}
 				return v, err
@@ -451,7 +457,7 @@ func init() {
 	}
 	intrinsics["Date.now"] = intrinsic{
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) { return e.emitDateNow() },
-		ty:   func(*Emitter, *ast.CallExpression) Type { return TypeDate },
+		ty:   func(*Emitter, *ast.CallExpression) Type { return TypeI64 },
 	}
 	intrinsics["Date.parse"] = intrinsic{
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) { return e.emitDateParse(ex.Args, ex.GetPos()) },
@@ -464,9 +470,11 @@ func init() {
 			if err != nil {
 				return Value{}, err
 			}
-			return Value{Ref: v.Ref, Ty: TypeI64}, nil
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call double @__kml_date_timeclip(double %s)", r, v.Ref))
+			return Value{Ref: r, Ty: TypeF64}, nil
 		},
-		ty: func(*Emitter, *ast.CallExpression) Type { return TypeI64 },
+		ty: func(*Emitter, *ast.CallExpression) Type { return TypeF64 }, // NaN for an invalid date
 	}
 	for name, emit := range map[string]func(e *Emitter, ex *ast.CallExpression) (Value, error){
 		"log":   func(e *Emitter, ex *ast.CallExpression) (Value, error) { return e.emitConsolePrint(ex.Args, 1, "") },
@@ -510,7 +518,6 @@ func init() {
 		// Every console method returns void.
 		intrinsics["console."+name] = intrinsic{emit: emit, ty: func(*Emitter, *ast.CallExpression) Type { return TypeVoid }}
 	}
-	timerID := func(*Emitter, *ast.CallExpression) Type { return TypeI64 }
 	void := func(*Emitter, *ast.CallExpression) Type { return TypeVoid }
 	intrinsics["fetch"] = intrinsic{
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) { return e.emitFetch(ex.Args, ex.GetPos()) },
@@ -521,31 +528,6 @@ func init() {
 			return e.emitQueueMicrotask(ex.Args, ex.GetPos())
 		},
 		ty: void,
-	}
-	intrinsics["setTimeout"] = intrinsic{
-		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) { return e.emitSetTimeout(ex.Args, ex.GetPos()) },
-		ty:   timerID,
-	}
-	intrinsics["setInterval"] = intrinsic{
-		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-			return e.emitSetInterval(ex.Args, ex.GetPos())
-		},
-		ty: timerID,
-	}
-	intrinsics["setImmediate"] = intrinsic{
-		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-			return e.emitSetImmediate(ex.Args, ex.GetPos())
-		},
-		ty: timerID,
-	}
-	for _, name := range []string{"clearTimeout", "clearInterval", "clearImmediate"} {
-		fn := name
-		intrinsics[fn] = intrinsic{
-			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-				return e.emitClearTimer(ex.Args, fn, ex.GetPos())
-			},
-			ty: void,
-		}
 	}
 	// The builtin constructors called as functions: conversions, and a new
 	// symbol or bigint.
@@ -726,6 +708,7 @@ func (e *Emitter) mathResultType(prop string, ex *ast.CallExpression) Type {
 var intrinsicSpecLength = map[string]int{
 	"Math.max": 2, "Math.min": 2, "Math.hypot": 2,
 	"String.fromCharCode": 1, "String.fromCodePoint": 1,
+	"Date.UTC": 7,
 }
 
 // builtinFn is a builtin function referenced by value (`arr.map(parseFloat)`,
@@ -910,6 +893,19 @@ func (e *Emitter) builtinRef(x ast.Expression) (*builtinFn, bool) {
 	// An intrinsic: every parameter an `any` (its emitter converts as the
 	// builtin does), a rest one an `any[]`.
 	b := &builtinFn{key: key, name: key[strings.LastIndex(key, ".")+1:]}
+	if key == "Date.UTC" {
+		// Its fields default only when absent (not when undefined): it
+		// takes what it is passed as a rest, and counts it.
+		b.params, b.rest = []Type{ArrayOf(TypeAny)}, true
+		b.call = func(e *Emitter, args []ast.Expression) (Value, error) {
+			rest := args[0]
+			if sp, ok := rest.(*ast.SpreadElement); ok {
+				rest = sp.Arg
+			}
+			return e.emitDateUTCFromRest(rest)
+		}
+		return b, true
+	}
 	for i := range fn.Params {
 		if fn.HasRestParam() && i == len(fn.Params)-1 {
 			b.params, b.rest = append(b.params, ArrayOf(TypeAny)), true
@@ -1153,4 +1149,9 @@ func init() {
 			ty: none,
 		}
 	}
+}
+
+// emitArrayToString is Array.prototype.toString: join(",").
+func (e *Emitter) emitArrayToString(mem *ast.MemberExpression, _ []ast.Expression, pos ast.Pos) (Value, error) {
+	return e.emitArrayJoin(mem, nil, pos)
 }

@@ -193,6 +193,14 @@ func (e *Emitter) emitRegexAdvancePastEmpty(objVal, strVal Value, startByteReg, 
 // of-bounds already use, matching real JS's own `new RegExp("(")` throwing
 // a real SyntaxError.
 func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, error) {
+	return e.emitNewRegExpInto(ex, "")
+}
+
+// emitNewRegExpInto builds a RegExp's body at body, or, when body is "", in
+// a fresh allocation whose header word precedes the body (TDD-00247): a
+// RegExp boxes as that header, and a class extending RegExp builds its
+// body in place after its own tag word.
+func (e *Emitter) emitNewRegExpInto(ex *ast.NewRegExpExpression, body string) (Value, error) {
 	e.ensureRegexCompile()
 	e.ensureMalloc()
 	e.ensureExceptionHelpers()
@@ -206,12 +214,49 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 	// avoids leaving a non-`ptr` word where the compiler expects the pattern
 	// string (the RegExp A1 invalid-IR files).
 	var srcFlags string // a RegExp pattern's own flags, the default
+	if info, ok := e.classes[patternVal.Ty.ClassName]; ok && patternVal.Ty.IsClass && info.HostBase != nil && info.HostBase.IsRegExp {
+		// An instance of a class extending RegExp: the RegExp at its body.
+		body := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, patternVal.Ref))
+		patternVal = Value{Ref: body, Ty: *info.HostBase}
+	}
 	if patternVal.Ty.IsRegExp && !patternVal.Ty.IsDynamic {
 		// `new RegExp(re[, flags])`: re's source, and its flags unless given.
 		srcFlags = e.emitRegexLoadField(patternVal, "flags", "ptr", 8)
 		patternVal = Value{Ref: e.emitRegexLoadField(patternVal, "source", "ptr", 8), Ty: TypePtr}
 	} else if patternVal.Ty.IsUndefined || patternVal.Ty.IR == "void" {
 		patternVal = Value{Ref: e.internString(""), Ty: TypePtr}
+	} else if isUnconstrainedDynamic(patternVal.Ty) {
+		// A boxed RegExp gives its source and flags; a boxed undefined is
+		// the empty pattern; anything else is ToString'd.
+		patSlot, flagSlot := e.freshReg(), e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", patSlot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", flagSlot))
+		isRe := e.emitDynHostInstanceOf(patternVal, "RegExp")
+		reL, otherL, doneL := e.freshLabel("regex.src.re"), e.freshLabel("regex.src.other"), e.freshLabel("regex.src.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isRe.Ref, reL, otherL))
+		e.emitLabel(reL)
+		re := e.emitUnboxHost(patternVal, RegExpType())
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.emitRegexLoadField(re, "source", "ptr", 8), patSlot))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.emitRegexLoadField(re, "flags", "ptr", 8), flagSlot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(otherL)
+		tag, _ := e.emitUnboxTagPayload(patternVal)
+		str, err := e.emitValueToString(patternVal)
+		if err != nil {
+			return Value{}, err
+		}
+		isU, sel := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isU, tag, kmlTagUndefined))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, isU, e.internString(""), e.coerce(str, TypePtr).Ref))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sel, patSlot))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(""), flagSlot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		pat, fl := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pat, patSlot))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fl, flagSlot))
+		patternVal, srcFlags = Value{Ref: pat, Ty: TypePtr}, fl
 	} else if !isStringTy(patternVal.Ty) {
 		patternVal, err = e.emitValueToString(patternVal)
 		if err != nil {
@@ -232,7 +277,7 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 		// (an i64 sentinel) never reaches the ptr flag validator as invalid IR;
 		// a non-string flags value is otherwise ToString'd.
 		switch {
-		case flagsVal.Ty.IsUndefined || flagsVal.Ty.IsNull || flagsVal.Ty.IR == "void":
+		case (flagsVal.Ty.IsUndefined || flagsVal.Ty.IsNull) && !isStringTy(flagsVal.Ty) || flagsVal.Ty.IR == "void":
 			flagsVal = Value{Ref: e.internString(""), Ty: TypePtr}
 		case !isStringTy(flagsVal.Ty):
 			flagsVal, err = e.emitValueToString(flagsVal)
@@ -385,8 +430,14 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", stickyReg, stickySlot))
 
 	ty := RegExpType()
-	dataReg := e.freshReg()
-	e.emitObjMallocInto(dataReg, ty)
+	dataReg := body
+	if dataReg == "" {
+		base := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", base, ty.StructSize()+8))
+		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", e.hostHeaderWord(ty), base))
+		dataReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", dataReg, base))
+	}
 	structIR := ty.StructIR()
 
 	storeField := func(name, ir, val string, align int) {
@@ -609,20 +660,6 @@ func (e *Emitter) execMemberRead(header string, prop string, maybePlain bool) Va
 		v.Ty.Nullable, v.Ty.IsUndefined = true, true
 	}
 	return v
-}
-
-// execMemberValueType is the type execMemberRead gives prop.
-func execMemberValueType(prop string, maybePlain bool) Type {
-	ty, _, _ := execArrayMemberType(prop)
-	if maybePlain {
-		switch prop {
-		case "index":
-			return undefinedableElem(ty)
-		case "input":
-			ty.Nullable, ty.IsUndefined = true, true
-		}
-	}
-	return ty
 }
 
 // emitExecArrayMember reads an exec() result's index, input or groups off
@@ -1091,6 +1128,10 @@ func (e *Emitter) emitStringMatch(mem *ast.MemberExpression, args []ast.Expressi
 		return Value{}, fmt.Errorf("%d:%d: match is only supported on strings", pos.Line, pos.Col)
 	}
 	strVal = e.coerce(strVal, TypePtr)
+	args, err = e.hostRegExpArgs(args)
+	if err != nil {
+		return Value{}, err
+	}
 	regexVal, err := e.emitRegExpArg(args[0], "")
 	if err != nil {
 		return Value{}, err
@@ -1130,9 +1171,7 @@ func (e *Emitter) emitStringMatch(mem *ast.MemberExpression, args []ast.Expressi
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", elem0, elem0Gep))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", elem0, destSlot))
 	})
-	e.ensureCalloc()
-	ghdr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 40)", ghdr))
+	ghdr := e.allocArrayHeaderSized(40, true)
 	for i, f := range []string{"ptr " + data, "i64 " + count, "i64 -1"} {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", gep, ghdr, i*8))
@@ -1168,6 +1207,10 @@ func (e *Emitter) emitStringMatchAll(mem *ast.MemberExpression, args []ast.Expre
 		return Value{}, fmt.Errorf("%d:%d: matchAll is only supported on strings", pos.Line, pos.Col)
 	}
 	strVal = e.coerce(strVal, TypePtr)
+	args, err = e.hostRegExpArgs(args)
+	if err != nil {
+		return Value{}, err
+	}
 	regexVal, err := e.emitRegExpArg(args[0], "g")
 	if err != nil {
 		return Value{}, err
@@ -1265,11 +1308,10 @@ func (e *Emitter) emitExecResult(objVal, strVal Value) Value {
 func (e *Emitter) execResultFrom(result Value, start, groups string, strVal Value) Value {
 	// The result array's header carries index, input and groups after its
 	// {data, len} (execArrayHeaderTy); no match is the null header.
-	e.ensureMalloc()
-	data, n, hdr := e.freshReg(), e.freshReg(), e.freshReg()
+	data, n := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", data, result.Ref))
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", n, result.Ref))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 40)", hdr))
+	hdr := e.allocArrayHeaderSized(40, false)
 	idx := e.regexByteToUTF16Signed(strVal.Ref, start)
 	for i, f := range []string{"ptr " + data, "i64 " + n, "i64 " + idx, "ptr " + strVal.Ref, "ptr " + groups} {
 		gep := e.freshReg()
@@ -1298,4 +1340,18 @@ func matchIsExec(arg ast.Expression) bool {
 	}
 	lit, ok := re.Flags.(*ast.StringLiteral)
 	return ok && !strings.Contains(lit.Value, "g")
+}
+
+// execMemberValueType is the type execMemberRead gives prop.
+func execMemberValueType(prop string, maybePlain bool) Type {
+	ty, _, _ := execArrayMemberType(prop)
+	if maybePlain {
+		switch prop {
+		case "index":
+			return undefinedableElem(ty)
+		case "input":
+			ty.Nullable, ty.IsUndefined = true, true
+		}
+	}
+	return ty
 }

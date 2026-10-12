@@ -40,6 +40,14 @@ func (e *Emitter) promiseArrayElemType(expr ast.Expression, name string, pos ast
 		if isUnconstrainedDynamic(elemTy) {
 			return TypeAny, nil
 		}
+		// A union with promise members (`[Promise.resolve("a"), 2]`): each
+		// member awaited, as TypeScript's Awaited<T> over the union.
+		if elemTy.IsDynamic && len(elemTy.UnionMembers) > 0 {
+			return awaitedUnion(elemTy), nil
+		}
+		if sig, ok := e.thenableClass(elemTy); ok {
+			return thenableValueType(sig), nil // adopted through its `then`
+		}
 		return elemTy, nil
 	}
 	innerTy := TypeVoid
@@ -69,6 +77,40 @@ func (e *Emitter) promiseArrayElemType(expr ast.Expression, name string, pos ast
 		}
 	}
 	return innerTy, nil
+}
+
+// awaitedUnion is a union's members each awaited (a promise member its
+// value), deduplicated: the one left, else their union.
+func awaitedUnion(u Type) Type {
+	var ms []Type
+	seen := map[string]bool{}
+	for _, m := range u.UnionMembers {
+		if m.IsPromise {
+			if m.PromiseType == nil || m.PromiseType.IR == "void" {
+				m = TypeUndefined
+			} else if m.PromiseType.IsNever {
+				continue // a rejected member yields no value
+			} else {
+				m = *m.PromiseType
+			}
+		}
+		if isUnconstrainedDynamic(m) {
+			return TypeAny
+		}
+		if !seen[reprKey(m)] {
+			seen[reprKey(m)] = true
+			ms = append(ms, m)
+		}
+	}
+	switch len(ms) {
+	case 0:
+		return TypeAny
+	case 1:
+		return ms[0]
+	}
+	out := u
+	out.UnionMembers = ms
+	return out
 }
 
 // promiseArrayIsTask reports whether the argument is an array of task promises
@@ -188,6 +230,10 @@ func (e *Emitter) emitPromiseResolve(args []ast.Expression, pos ast.Pos, hint Ty
 	}
 	if val.Ty.IsPromise {
 		return val, nil
+	}
+	// A thenable class instance is adopted through its `then`.
+	if sig, ok := e.thenableClass(val.Ty); ok {
+		return e.emitThenableToPromise(val, sig, pos)
 	}
 	// A dynamic value holding a promise resolves as that promise
 	// (PromiseResolve); anything else is a fulfilled Promise<any>.
@@ -369,7 +415,10 @@ func (e *Emitter) combinatorMembers(arr ast.Expression, ptrReg, lenReg string, i
 func (e *Emitter) wrapValueMembers(ptrReg, lenReg string, el Type) (string, Type) {
 	e.ensurePromiseRuntime()
 	e.ensureMalloc()
-	dyn := isUnconstrainedDynamic(el)
+	// A boxed member (`any`, or a union, which may hold a promise or a
+	// thenable) resolves at run time.
+	dyn := el.IsDynamic && !el.IsArray
+	sig, thenable := e.thenableClass(el)
 	bytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, lenReg))
 	out := e.freshReg()
@@ -388,6 +437,10 @@ func (e *Emitter) wrapValueMembers(ptrReg, lenReg string, el Type) (string, Type
 		var p string
 		if dyn {
 			p = e.emitAnyToPromiseAny(v).Ref
+		} else if thenable {
+			// A thenable class instance, adopted through its `then`.
+			pv, _ := e.emitThenableToPromise(v, sig, ast.Pos{})
+			p = pv.Ref
 		} else {
 			p = e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", p))
@@ -399,7 +452,13 @@ func (e *Emitter) wrapValueMembers(ptrReg, lenReg string, el Type) (string, Type
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, d))
 	})
 	if dyn {
-		return out, TypeAny
+		if isUnconstrainedDynamic(el) {
+			return out, TypeAny
+		}
+		return out, el
+	}
+	if thenable {
+		return out, thenableValueType(sig)
 	}
 	return out, el
 }

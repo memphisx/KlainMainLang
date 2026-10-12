@@ -250,13 +250,13 @@ func (e *Emitter) tryEmitStaticArrayLiteral(lit *ast.ArrayLiteral, elemTy Type) 
 	e.ensureArrLitRows()
 	dataReg = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, int64(n)*8))
-	e.emitInstr(fmt.Sprintf("call void @__kml_arr_lit_rows(ptr %s, ptr %s, ptr %s, i64 %d, i64 %d)", dataReg, flatG, lensG, int64(n), int64(rowTy.Align())))
+	e.emitInstr(fmt.Sprintf("call void @__kml_arr_lit_rows(ptr %s, ptr %s, ptr %s, i64 %d, i64 %d, i64 %d)", dataReg, flatG, lensG, int64(n), int64(rowTy.Align()), e.arrayHeaderWord()))
 	return dataReg, true
 }
 
 // ensureArrLitRows declares the row-table builder once:
-// __kml_arr_lit_rows(outer, flat, lens, n, elemSize) fills outer[i] with a
-// fresh box {data, len} whose data is a malloc'd copy of the next lens[i]
+// __kml_arr_lit_rows(outer, flat, lens, n, elemSize, word) fills outer[i]
+// with a fresh box {data, len} after its header word whose data is a malloc'd copy of the next lens[i]
 // elements of flat — exactly what the general path's boxArrayValue +
 // emitArrayLiteralData produce per row, in a loop.
 func (e *Emitter) ensureArrLitRows() {
@@ -267,7 +267,7 @@ func (e *Emitter) ensureArrLitRows() {
 	e.ensureMalloc()
 	e.ensureMemcpy()
 	e.emitGlobal(`
-define void @__kml_arr_lit_rows(ptr %outer, ptr %flat, ptr %lens, i64 %n, i64 %esz) {
+define void @__kml_arr_lit_rows(ptr %outer, ptr %flat, ptr %lens, i64 %n, i64 %esz, i64 %word) {
 entry:
   br label %cond
 cond:
@@ -282,7 +282,9 @@ body:
   %data = call ptr @malloc(i64 %bytes)
   %src = getelementptr i8, ptr %flat, i64 %off
   call void @memcpy(ptr %data, ptr %src, i64 %bytes)
-  %box = call ptr @malloc(i64 16)
+  %cell = call ptr @malloc(i64 24)
+  store i64 %word, ptr %cell, align 8
+  %box = getelementptr i8, ptr %cell, i64 8
   store ptr %data, ptr %box, align 8
   %boxlen = getelementptr i8, ptr %box, i64 8
   store i64 %len, ptr %boxlen, align 8

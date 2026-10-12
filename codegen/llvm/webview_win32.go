@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 )
 
 // webview_win32.go — the WebView2 backend's build inputs and the one
@@ -99,20 +98,3 @@ WEBVIEW_API void __kml_wv_set_html(webview_t w, const char *html) {
 }
 }
 `
-
-// webviewNavigateSym / webviewSetHTMLSym name the navigation entry points the
-// emitted IR calls: the upstream functions on WebKit hosts, the deferring
-// shims above on Windows.
-func webviewNavigateSym() string {
-	if runtime.GOOS == "windows" {
-		return "__kml_wv_navigate"
-	}
-	return "webview_navigate"
-}
-
-func webviewSetHTMLSym() string {
-	if runtime.GOOS == "windows" {
-		return "__kml_wv_set_html"
-	}
-	return "webview_set_html"
-}

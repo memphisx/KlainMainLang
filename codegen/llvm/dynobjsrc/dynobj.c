@@ -225,6 +225,8 @@ _Bool __kml_dynobj_ordinary(void *o) {
 
 /* has_chain = the "in" operator: own table, then the prototype chain. A
  * Proxy consults its "has" trap, else forwards to the target. */
+static void *objproto; /* Object.prototype's bag, below */
+
 _Bool __kml_dynobj_has_chain(void *o, const char *key) {
     if (((Bag *)o)->flags & F_PROXY) {
         void *target = PX_TARGET(o), *handler = PX_HANDLER(o);
@@ -233,8 +235,23 @@ _Bool __kml_dynobj_has_chain(void *o, const char *key) {
         i64 argv[2] = {BOX_DYNOBJ(target), (i64)key};
         return tobool(call_rec((void *)nb_pay(trap), BOX_DYNOBJ(handler), 2, argv));
     }
-    for (void *cur = o; cur; cur = ((Bag *)cur)->proto)
+    void *last = o;
+    for (void *cur = o; cur; cur = ((Bag *)cur)->proto) {
         if (__kml_dynobj_has(cur, key)) return 1;
+        last = cur;
+    }
+    /* A chain ending at an unmodeled Object.prototype link (not an explicit
+     * null prototype), or at Object.prototype's own bag, reaches
+     * Object.prototype's members. */
+    if (!(((Bag *)last)->flags & F_NULLPROTO) || (objproto && last == objproto)) {
+        static const char *const objproto[] = {
+            "constructor", "hasOwnProperty", "isPrototypeOf",
+            "propertyIsEnumerable", "toLocaleString", "toString", "valueOf",
+            "__proto__", "__defineGetter__", "__defineSetter__",
+            "__lookupGetter__", "__lookupSetter__"};
+        for (unsigned i = 0; i < sizeof objproto / sizeof *objproto; i++)
+            if (strcmp(key, objproto[i]) == 0) return 1;
+    }
     return 0;
 }
 
@@ -440,3 +457,14 @@ _Bool __kml_dynobj_flags_test(void *o, i64 mode) {
     }
     return 1;
 }
+
+/* Proxy parts for callers outside this file (shape.c's ownKeys trap): whether
+ * o is a Proxy, its target and handler; calling a trap record; whether a bag
+ * is extensible. */
+_Bool __kml_dynobj_proxy_parts(void *o, void **target, void **handler) {
+    if (!(((Bag *)o)->flags & F_PROXY)) return 0;
+    *target = PX_TARGET(o);
+    *handler = PX_HANDLER(o);
+    return 1;
+}
+i64 __kml_dynobj_call_trap(void *rec, i64 thisv, i64 argc, i64 *argv) { return call_rec(rec, thisv, argc, argv); }

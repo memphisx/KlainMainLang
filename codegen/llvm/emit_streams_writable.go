@@ -105,7 +105,7 @@ func (e *Emitter) emitStreamCloseWrap(userTy Type) string {
 // emitNewWritableStream implements `new WritableStream<T>(sink?, strategy?)`.
 func (e *Emitter) emitNewWritableStream(ex *ast.NewWritableStreamExpression) (Value, error) {
 	pos := ex.GetPos()
-	chunkTy := TypeI64
+	chunkTy := TypeAny // WritableStream<W = any>
 	if ex.ChunkType != nil {
 		chunkTy = e.resolveType(ex.ChunkType)
 	}

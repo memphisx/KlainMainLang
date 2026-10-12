@@ -14,8 +14,19 @@ PINNED_SHA="3655e7464de3d52643ecddd4b5f9f4f3e7f62398"
 REPO_URL="https://github.com/tc39/test262.git"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# A corpus directory that is not a git checkout (copied without its .git)
+# cannot be checked out over: git refuses to overwrite its untracked files.
+# It is fetched again, as a checkout at the wrong version is.
+not_a_checkout() {
+  if [ -e "$1" ] && [ ! -d "$1/.git" ]; then
+    echo "$1 is not a git checkout — removing and re-fetching."
+    rm -rf "$1"
+  fi
+}
 DEST="$SCRIPT_DIR/../../.test262"
 
+not_a_checkout "$DEST"
 test262_ready=""
 if [ -d "$DEST/.git" ]; then
   current="$(git -C "$DEST" rev-parse HEAD)"
@@ -57,6 +68,7 @@ NODE_DEST="$SCRIPT_DIR/../../.node-tests"
 # v2 = every behavioral suite dir, not just parallel (TDD-00204 Track 3).
 NODE_SLICE="suites-v2"
 NODE_MARKER="$NODE_DEST/.git/kml-corpus-version"
+not_a_checkout "$NODE_DEST"
 if [ -d "$NODE_DEST/.git" ]; then
   current_tag="$(cat "$NODE_MARKER" 2>/dev/null || echo none)"
   if [ "$current_tag" = "$NODE_TAG+$NODE_SLICE" ]; then
@@ -116,6 +128,7 @@ WPT_DEST="$SCRIPT_DIR/../../.wpt-tests"
 # source repo-wide, no directory allowlist.
 WPT_SLICE="full-headless-v3"
 WPT_MARKER="$WPT_DEST/.git/kml-corpus-version"
+not_a_checkout "$WPT_DEST"
 if [ -d "$WPT_DEST/.git" ]; then
   current="$(cat "$WPT_MARKER" 2>/dev/null || echo none)"
   if [ "$current" = "$WPT_SHA+$WPT_SLICE" ]; then
@@ -190,6 +203,7 @@ TS_DEST="$SCRIPT_DIR/../../.ts-tests"
 # Same version-marker readiness as the node corpus above (git describe can't see
 # the pinned tag after a shallow tag fetch).
 TS_MARKER="$TS_DEST/.git/kml-corpus-version"
+not_a_checkout "$TS_DEST"
 if [ -d "$TS_DEST/.git" ]; then
   current_tag="$(cat "$TS_MARKER" 2>/dev/null || echo none)"
   if [ "$current_tag" = "$TS_TAG" ]; then

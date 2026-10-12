@@ -67,6 +67,22 @@ func (e *Emitter) emitFieldPresent(objRef string, objTy Type, field Field) (pres
 	idx, _, _ := objTy.FieldIndex(field.Name)
 	gepReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objTy.StructIR(), objRef, idx))
+	if isSettlementType(objTy) && (field.Name == "value" || field.Name == "reason") {
+		// A Promise.allSettled record has `value` when fulfilled and
+		// `reason` when rejected (even an undefined one), never both.
+		_, val = e.emitFieldPresentAt(gepReg, field)
+		sIdx, _, _ := objTy.FieldIndex("status")
+		sGep, status := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", sGep, objTy.StructIR(), objRef, sIdx))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", status, sGep))
+		op := "eq"
+		if field.Name == "reason" {
+			op = "ne"
+		}
+		present = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp %s ptr %s, %s", present, op, status, e.internString("fulfilled")))
+		return present, val
+	}
 	return e.emitFieldPresentAt(gepReg, field)
 }
 
@@ -159,11 +175,28 @@ func optionalParamType(p ast.Param, pty Type) Type {
 		// only undefined.
 		return TypeUndefined
 	}
-	if !p.Optional || p.Default != nil ||
-		p.ArrayPattern != nil || p.ObjectPattern != nil {
+	if !(p.Optional || bodyDefaulted(p)) || p.ArrayPattern != nil || p.ObjectPattern != nil {
 		return pty
 	}
 	return optionalFieldType(pty)
+}
+
+// bodyDefaulted reports whether parameter p's default is filled by the
+// function itself (emitParamDefaultPrologue): a plain, non-rest parameter
+// with a default is passed as an optional one, `T | undefined`, and an
+// absent or undefined argument takes the default in the body, as
+// JavaScript evaluates it (TDD-00230 P3.3: one representation per type).
+func bodyDefaulted(p ast.Param) bool {
+	return p.Default != nil && !p.Rest && p.ArrayPattern == nil && p.ObjectPattern == nil
+}
+
+// callSiteDefault is the default a caller fills for p: only a destructured
+// parameter's, which the body does not take absent.
+func callSiteDefault(p ast.Param) ast.Expression {
+	if bodyDefaulted(p) {
+		return nil
+	}
+	return p.Default
 }
 
 // contextualParamOptionality reconciles a closure parameter's ABI with the
@@ -339,8 +372,9 @@ func (e *Emitter) emitNonNull(ex *ast.NonNullExpression) (Value, error) {
 func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
 	// An array literal asserted to an array type is built as that type
 	// (`[5, "s", null] as any[]`): the assertion is its contextual type.
+	// An empty one (`[] as string[]`) has no element to type it otherwise.
 	if lit, ok := ex.Expr.(*ast.ArrayLiteral); ok && ex.TypeAnnot != nil {
-		if target := e.resolveType(ex.TypeAnnot); target.IsArray && target.ElemType != nil && target.ElemType.IsDynamic {
+		if target := e.resolveType(ex.TypeAnnot); target.IsArray && target.ElemType != nil && (target.ElemType.IsDynamic || len(lit.Elements) == 0) {
 			return e.emitExprWithObjectHint(lit, target)
 		}
 	}
@@ -386,7 +420,7 @@ func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
 	// (emitAnyToNum → fptosi for integers, truthiness for bool, payload-pointer
 	// extraction for string/object). Array and nullable-scalar targets need the
 	// heap-header / presence-aware decode, which emitUnboxBoxToType provides.
-	if target.IsArray || isNullableScalar(target) {
+	if target.IsArray || isNullableScalar(target) || target.IsPromise {
 		return e.emitUnboxBoxToType(v.Ref, target), nil
 	}
 	// A union's object member asserted as another shape (`address() as
@@ -647,4 +681,159 @@ func (e *Emitter) renderThreeState(v Value, render func(Value) (Value, error)) (
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
 	return Value{Ref: r, Ty: pv.Ty}, nil
+}
+
+// emitParamDefaultPrologue gives each body-defaulted parameter (bodyDefaulted)
+// its value at the top of the body: the argument, or the default when it is
+// absent or undefined, evaluated with the earlier parameters in scope, as
+// JavaScript does. The parameter arrives as `T | undefined` (its slot type,
+// types[i]); the body sees a binding of T, declared over it in a scope the
+// body runs in. A parameter whose own type admits null keeps an explicit null.
+func (e *Emitter) emitParamDefaultPrologue(params []ast.Param, types []Type, body *ast.BlockStatement, pos ast.Pos) error {
+	scoped := false
+	bodyNames := bodyDeclaredNames(body)
+	for i, p := range params {
+		if !bodyDefaulted(p) || i >= len(types) {
+			continue
+		}
+		sym, ok := e.lookup(p.Name)
+		if !ok {
+			continue
+		}
+		if !scoped {
+			scoped = true
+			e.pushScope() // popped with the function's own scopes
+		}
+		// The argument under a name of its own: the declaration below binds
+		// p.Name before its initializer runs.
+		argName := "__kml_parg_" + p.Name
+		e.define(argName, sym)
+		arg := ast.NewIdentifier(argName, pos)
+		if e.inferExprType(p.Default).IR == "void" {
+			// A default with no value (`a = f()`, f returning void) runs for
+			// its effects; the parameter is then undefined.
+			run := ast.NewBlockStatement([]ast.Statement{ast.NewExpressionStatement(p.Default, pos)}, pos)
+			test := ast.NewBinaryExpression("===", arg, ast.NewNullLiteral(true, pos), pos)
+			if err := e.emitStmt(ast.NewIfStatement(test, run, nil, pos)); err != nil {
+				return err
+			}
+			if err := e.emitStmt(ast.NewVarDeclaration("let", p.Name, p.Type, arg, pos)); err != nil {
+				return err
+			}
+			continue
+		}
+		var init ast.Expression = ast.NewBinaryExpression("??", arg, p.Default, pos)
+		if types[i].NullAndUndef {
+			isUndef := ast.NewBinaryExpression("===", arg, ast.NewNullLiteral(true, pos), pos)
+			init = ast.NewConditionalExpression(isUndef, p.Default, arg, pos)
+		}
+		// The parameter itself and the later ones its default reads are in
+		// their dead zone while it runs. A name only the body declares is
+		// not in the parameters' scope: with nothing outer of that name,
+		// reading it throws (`(y = b) => { var b }`).
+		dead := laterParamRefs(params, i)
+		undeclared := e.bodyOnlyRefs(params[i].Default, bodyNames, params)
+		if len(dead) > 0 || len(undeclared) > 0 {
+			e.pushScope()
+			for _, n := range dead {
+				e.define(n, Symbol{TDZ: true, Ty: TypeAny})
+			}
+			for _, n := range undeclared {
+				e.define(n, Symbol{NotDefined: true, Ty: TypeAny})
+			}
+			v, err := e.emitExpr(init)
+			e.popScope()
+			if err != nil {
+				return err
+			}
+			init = e.bindValue(v, pos)
+		}
+		if err := e.emitStmt(ast.NewVarDeclaration("let", p.Name, p.Type, init, pos)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// bodyDeclaredNames are the names a function body declares (not inside a
+// nested function).
+func bodyDeclaredNames(body *ast.BlockStatement) map[string]bool {
+	names := map[string]bool{}
+	if body == nil {
+		return names
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.ArrowFunction, *ast.FunctionExpression, *ast.ClassExpression:
+			return false
+		case *ast.FunctionDeclaration:
+			names[x.Name] = true
+			return false
+		case *ast.ClassDeclaration:
+			names[x.Name] = true
+			return false
+		case *ast.VarDeclaration:
+			names[x.Name] = true
+		}
+		return true
+	})
+	return names
+}
+
+// bodyOnlyRefs are the names a default reads that only the function body
+// declares, with nothing of that name in scope outside it.
+func (e *Emitter) bodyOnlyRefs(def ast.Expression, bodyNames map[string]bool, params []ast.Param) []string {
+	if len(bodyNames) == 0 {
+		return nil
+	}
+	isParam := map[string]bool{}
+	for _, p := range params {
+		isParam[p.Name] = true
+	}
+	seen := map[string]bool{}
+	var out []string
+	ast.Inspect(def, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.ArrowFunction, *ast.FunctionExpression, *ast.ClassExpression:
+			return false
+		case *ast.Identifier:
+			if bodyNames[x.Name] && !isParam[x.Name] && !seen[x.Name] {
+				_, local := e.lookup(x.Name)
+				_, fn := e.funcs[x.Name]
+				_, cls := e.classes[x.Name]
+				if !local && !fn && !cls {
+					seen[x.Name] = true
+					out = append(out, x.Name)
+				}
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// laterParamRefs are the names among params[i:] that params[i]'s default
+// reads directly (not inside a function it creates, which runs later).
+func laterParamRefs(params []ast.Param, i int) []string {
+	later := map[string]bool{}
+	for _, p := range params[i:] {
+		if p.Name != "" {
+			later[p.Name] = true
+		}
+	}
+	seen := map[string]bool{}
+	var out []string
+	ast.Inspect(params[i].Default, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.ArrowFunction, *ast.FunctionExpression, *ast.ClassExpression:
+			return false
+		case *ast.Identifier:
+			if later[x.Name] && !seen[x.Name] {
+				seen[x.Name] = true
+				out = append(out, x.Name)
+			}
+		}
+		return true
+	})
+	return out
 }

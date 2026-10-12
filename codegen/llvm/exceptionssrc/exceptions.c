@@ -83,6 +83,18 @@ void *__kml_caught_unc_msg(int tag, i64 pay) {
     }
 }
 
+/* Set while the 'uncaughtException' listeners run. */
+static _Thread_local int in_uncaught;
+
+/* The 'uncaughtException' listeners, for a throw and for an unhandled
+ * rejection; true when one ran. */
+_Bool __kml_process_uncaught_guarded(u8 tag, i64 pay, _Bool rejection) {
+    in_uncaught = 1;
+    _Bool handled = __kml_process_uncaught(tag, pay, rejection) & 1;
+    in_uncaught = 0;
+    return handled;
+}
+
 /* The core: record the value, then unwind to the nearest try frame, or end
  * the program (or the worker thread) when there is none. */
 void __kml_throw_any(int tag, i64 pay) {
@@ -91,11 +103,17 @@ void __kml_throw_any(int tag, i64 pay) {
     thrown_pay = pay;
     __kml_thrown = t == KML_TAG_ERROR ? (void *)pay : NULL;
     if (__kml_jmp_top == 0) {
+        /* A listener of 'uncaughtException' threw: Node reports that error
+         * and exits 7 rather than calling the listeners again. */
+        if (in_uncaught) {
+            printf("Uncaught: %s\n", (char *)__kml_caught_unc_msg(t, pay));
+            KML_EXIT(7);
+        }
         /* The process 'uncaughtException' event: if a listener runs the
          * default print is skipped, but we still exit (the stack has
          * unwound to the top-level catch-all). Emits 'exit' on the way out,
          * like Node. */
-        if (__kml_process_uncaught(t, pay, 0) & 1) {
+        if (__kml_process_uncaught_guarded(t, pay, 0)) {
             __kml_run_exit_handlers(1);
             KML_EXIT(1);
         }

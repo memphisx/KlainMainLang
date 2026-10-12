@@ -1,16 +1,24 @@
-/* timers.c — setTimeout/setInterval and their drains (in C per TDD-00240).
- * One queue per isolate (thread): an array of 32-byte entries
- * {id, fireAtNs, intervalMs, closure}. intervalMs is 0 for a one-shot, the
- * cadence for setInterval, -1 for cancelled / done (never compacted). Bit
- * 62 of an id marks the entry unref'd: it still fires but does not keep the
- * loop alive. The queue globals are read by generated loop code. */
+/* timers.c — Node's timers binding (src/timers.cc), TDD-00245.
+ *
+ * The timers themselves are lib/node/kml_timers.ts (Node's lib/timers.js
+ * and lib/internal/timers.js): Timeout and Immediate objects, lists of
+ * timers sharing a duration, a priority queue of the lists. This file is
+ * what those call into: one timer armed for the earliest list, whose firing
+ * runs processTimers(now); a check handle that runs processImmediate after
+ * the poll while immediates are pending; an idle handle that keeps the poll
+ * from blocking while a referenced immediate is pending; and the loop's
+ * clock in milliseconds.
+ *
+ * On POSIX these are libuv handles on the thread's loop (loop.c). Windows
+ * keeps the same state for its select() pass (loop.c's __kml_timers_*
+ * hooks) until its loop moves to libuv (TDD-00244 Stage 6). */
 #include <stdlib.h>
+#include <stdint.h>
 
 #ifdef _WIN32
-/* the shim's nanosleep/clock_gettime take { i64 sec, i64 nsec } */
+/* the shim's clock_gettime takes { i64 sec, i64 nsec } */
 typedef struct { long long tv_sec, tv_nsec; } kml_ts;
 int clock_gettime(int clk, kml_ts *ts);
-int nanosleep(const kml_ts *req, kml_ts *rem);
 #define MONO_CLK 1
 #else
 #include <time.h>
@@ -23,20 +31,8 @@ typedef struct timespec kml_ts;
 #endif
 
 typedef long long i64;
-typedef struct { i64 id, fire, interval; void *closure; } kml_timer;
-typedef struct { void (*fn)(void *); void *env; } kml_closure;
-
-extern void __kml_signal_dispatch(void);
-
-_Thread_local kml_timer *__kml_timer_data;
-_Thread_local i64 __kml_timer_len;
-_Thread_local i64 __kml_timer_cap;
-_Thread_local i64 __kml_timer_next_id = 1;
-/* Each entry's delay, by index, for Timeout.refresh(); -1 once cleared. */
-static _Thread_local i64 *timer_delay;
-
-#define ID_MASK 4611686018427387903LL
-#define UNREF_BIT 4611686018427387904LL
+typedef void (*kml_inv2)(void *clo, double a, double b);
+void __kml_drain_microtasks(void);
 
 i64 __kml_monotonic_ns(void) {
     kml_ts ts;
@@ -44,140 +40,167 @@ i64 __kml_monotonic_ns(void) {
     return (i64)ts.tv_sec * 1000000000LL + (i64)ts.tv_nsec;
 }
 
-i64 __kml_timer_schedule(void *closure, i64 delayms, i64 intervalms) {
-    if (__kml_timer_len + 1 > __kml_timer_cap) {
-        i64 nc = __kml_timer_cap * 2 > 8 ? __kml_timer_cap * 2 : 8;
-        __kml_timer_data = (kml_timer *)realloc(__kml_timer_data, (size_t)nc * sizeof(kml_timer));
-        __kml_timer_cap = nc;
-        timer_delay = (i64 *)realloc(timer_delay, (size_t)nc * sizeof(i64));
-    }
-    timer_delay[__kml_timer_len] = delayms;
-    kml_timer *t = &__kml_timer_data[__kml_timer_len++];
-    t->id = __kml_timer_next_id++;
-    t->fire = __kml_monotonic_ns() + delayms * 1000000;
-    t->interval = intervalms;
-    t->closure = closure;
-    return t->id;
+/* processTimers and processImmediate, as (invoke, closure) pairs. */
+static _Thread_local void *pt_inv, *pt_clo, *pi_inv, *pi_clo;
+/* processTimers' answer (timersNext): the next expiry, positive when that
+ * list is referenced, negative when not, 0 for none. */
+static _Thread_local double next_expiry;
+/* immediateInfo[kCount]: the pending immediates. */
+static _Thread_local double imm_count;
+/* The armed timer's deadline on the monotonic clock, 0 when none. */
+static _Thread_local i64 due_ns;
+static _Thread_local int timer_refed, imm_refed;
+
+#ifndef _WIN32
+#include <uv.h>
+uv_loop_t *__kml_loop_uv(void);
+void *__kml_loop_raw_alloc(size_t n);
+
+static _Thread_local uv_timer_t *timer;
+static _Thread_local uv_check_t *check;
+static _Thread_local uv_idle_t *idle;
+/* The loop's clock when the binding was set up: Node's timer_base. */
+static _Thread_local uint64_t base;
+
+static double now_ms(void) {
+    uv_loop_t *l = __kml_loop_uv();
+    uv_update_time(l);
+    return (double)(uv_now(l) - base);
 }
 
-void __kml_timer_clear(i64 id) {
-    for (i64 i = 0; i < __kml_timer_len; i++)
-        if ((__kml_timer_data[i].id & ID_MASK) == id) {
-            __kml_timer_data[i].interval = -1;
-            timer_delay[i] = -1;
-            return;
-        }
+static void on_timer(uv_timer_t *h);
+
+static void arm(double ms) {
+    uint64_t d = ms < 1 ? 1 : (uint64_t)ms;
+    uv_timer_start(timer, on_timer, d, 0);
+    due_ns = __kml_monotonic_ns() + (i64)d * 1000000;
 }
 
-/* Timeout.unref()/ref()/hasRef(). The i1 arrives as a bare int. */
-void __kml_timer_set_ref(i64 id, int on) {
-    for (i64 i = 0; i < __kml_timer_len; i++) {
-        i64 eid = __kml_timer_data[i].id & ID_MASK;
-        if (eid == id) {
-            __kml_timer_data[i].id = (on & 1) ? eid : (eid | UNREF_BIT);
-            return;
-        }
-    }
-}
-
-_Bool __kml_timer_has_ref(i64 id) {
-    for (i64 i = 0; i < __kml_timer_len; i++)
-        if ((__kml_timer_data[i].id & ID_MASK) == id)
-            return (__kml_timer_data[i].id & UNREF_BIT) == 0;
-    return 1;
-}
-
-/* Timeout.refresh(): restart the countdown from now with the original
- * delay. A one-shot that already fired is re-armed, as in Node; a cleared
- * timer stays cleared. */
-void __kml_timer_refresh(i64 id) {
-    for (i64 i = 0; i < __kml_timer_len; i++)
-        if ((__kml_timer_data[i].id & ID_MASK) == id) {
-            if (timer_delay[i] < 0) return;
-            kml_timer *t = &__kml_timer_data[i];
-            if (t->interval == -1) t->interval = 0;
-            t->fire = __kml_monotonic_ns() + timer_delay[i] * 1000000;
-            return;
-        }
-}
-
-_Bool __kml_timer_any_ref(void) {
-    for (i64 i = 0; i < __kml_timer_len; i++)
-        if (__kml_timer_data[i].interval != -1 && (__kml_timer_data[i].id & UNREF_BIT) == 0)
-            return 1;
-    return 0;
-}
-
-/* The pending entry with the smallest fire time (-1 when none). */
-static i64 find_best(i64 *bestfire) {
-    i64 best = -1;
-    for (i64 i = 0; i < __kml_timer_len; i++) {
-        kml_timer *t = &__kml_timer_data[i];
-        if (t->interval == -1) continue;
-        if (best == -1 || t->fire < *bestfire) {
-            best = i;
-            *bestfire = t->fire;
-        }
-    }
-    return best;
-}
-
-/* Run entry idx's callback, then — it may have scheduled or cleared timers
- * and moved the queue — reload and reschedule a repeating one or retire a
- * one-shot. */
-static void fire(i64 idx) {
-    kml_closure *c = (kml_closure *)__kml_timer_data[idx].closure;
-    c->fn(c->env);
-    kml_timer *t = &__kml_timer_data[idx];
-    if (t->interval > 0)
-        t->fire = __kml_monotonic_ns() + t->interval * 1000000;
+static void set_timer_ref(int on) {
+    timer_refed = on;
+    if (on)
+        uv_ref((uv_handle_t *)timer);
     else
-        t->interval = -1;
+        uv_unref((uv_handle_t *)timer);
+}
+#else
+static double now_ms(void) { return (double)(__kml_monotonic_ns() / 1000000); }
+
+static void arm(double ms) {
+    i64 d = ms < 1 ? 1 : (i64)ms;
+    due_ns = __kml_monotonic_ns() + d * 1000000;
 }
 
-static int sleep_until(i64 fire_at, i64 now) {
-    i64 wait = fire_at - now;
-    kml_ts ts;
-    ts.tv_sec = wait / 1000000000LL;
-    ts.tv_nsec = wait % 1000000000LL;
-    return nanosleep(&ts, NULL);
-}
+static void set_timer_ref(int on) { timer_refed = on; }
+#endif
 
-/* One step: fire the earliest pending timer after sleeping until it is due;
- * 0 when none is pending (TDD-00087). A signal interrupting the sleep leaves
- * dispatch to the caller. */
-_Bool __kml_timer_fire_next(void) {
-    i64 tf = 0;
-    i64 best = find_best(&tf);
-    if (best == -1) return 0;
-    i64 now = __kml_monotonic_ns();
-    if (tf > now) sleep_until(tf, now);
-    if (tf <= __kml_monotonic_ns()) fire(best);
-    return 1;
-}
-
-/* Run to empty after the program's top-level code. A pending signal's
- * watcher runs first each pass (a signal interrupting the sleep is seen on
- * looping back); only unref'd timers left ends the loop. */
-void __kml_timer_drain(void) {
-    for (;;) {
-        __kml_signal_dispatch();
-        i64 tf = 0;
-        i64 best = find_best(&tf);
-        if (best == -1 || !__kml_timer_any_ref()) return;
-        i64 now = __kml_monotonic_ns();
-        if (tf > now && sleep_until(tf, now) != 0) continue;
-        if (tf <= __kml_monotonic_ns()) fire(best);
+/* Node's RunTimers: processTimers(now), then the timer re-armed for the
+ * next expiry it answers, referenced or not as that list is; the microtasks
+ * run last, as Node's callback scope closes, so a timer they schedule keeps
+ * its own arming and reference. */
+static void run_timers(void) {
+    due_ns = 0;
+    double now = now_ms();
+    next_expiry = 0;
+    ((kml_inv2)pt_inv)(pt_clo, now, 0);
+    double r = next_expiry;
+    if (r != 0) {
+        double left = (r < 0 ? -r : r) - now_ms();
+        arm(left > 0 ? left : 1);
+        set_timer_ref(r > 0);
+    } else {
+        set_timer_ref(0);
     }
+    __kml_drain_microtasks();
 }
 
-/* Non-blocking: fire every timer already due, earliest first (the webview
- * page-tick pump); never sleeps. */
-void __kml_timer_tick(void) {
-    for (;;) {
-        i64 tf = 0;
-        i64 best = find_best(&tf);
-        if (best == -1 || tf > __kml_monotonic_ns()) return;
-        fire(best);
-    }
+/* Node's CheckImmediate: processImmediate while any immediate is pending. */
+static void run_immediates(void) {
+    if (imm_count == 0)
+        return;
+    ((kml_inv2)pi_inv)(pi_clo, 0, 0);
+    __kml_drain_microtasks();
 }
+
+#ifndef _WIN32
+static void on_timer(uv_timer_t *h) {
+    (void)h;
+    run_timers();
+}
+
+static void on_check(uv_check_t *h) {
+    (void)h;
+    run_immediates();
+}
+
+static void on_idle(uv_idle_t *h) { (void)h; }
+#endif
+
+/* The natives lib/native.d.ts declares (`@link timers`). Numbers cross as
+ * doubles; each callback as an (invoke, closure) pair. */
+void __kml_native_timers_setup(void *ti, void *tc, void *ii, void *ic) {
+    pt_inv = ti;
+    pt_clo = tc;
+    pi_inv = ii;
+    pi_clo = ic;
+#ifndef _WIN32
+    if (timer)
+        return;
+    uv_loop_t *l = __kml_loop_uv();
+    uv_update_time(l);
+    base = uv_now(l);
+    timer = (uv_timer_t *)__kml_loop_raw_alloc(sizeof *timer);
+    uv_timer_init(l, timer);
+    uv_unref((uv_handle_t *)timer);
+    check = (uv_check_t *)__kml_loop_raw_alloc(sizeof *check);
+    uv_check_init(l, check);
+    uv_check_start(check, on_check);
+    uv_unref((uv_handle_t *)check);
+    idle = (uv_idle_t *)__kml_loop_raw_alloc(sizeof *idle);
+    uv_idle_init(l, idle);
+#endif
+}
+
+double __kml_native_timers_now(void) { return now_ms(); }
+
+void __kml_native_timers_schedule(double ms) { arm(ms); }
+
+void __kml_native_timers_toggle_ref(double on) { set_timer_ref(on != 0); }
+
+void __kml_native_timers_next(double next) { next_expiry = next; }
+
+void __kml_native_immediate_toggle_ref(double on) {
+    imm_refed = on != 0;
+#ifndef _WIN32
+    if (imm_refed)
+        uv_idle_start(idle, on_idle);
+    else
+        uv_idle_stop(idle);
+#endif
+}
+
+void __kml_native_immediate_count(double n) { imm_count = n; }
+
+/* The armed timer's deadline (0 when none): a dynamic-import island folds
+ * it into its wait. */
+i64 __kml_timer_next_deadline_ns(void) { return due_ns; }
+
+#ifdef _WIN32
+/* The Windows select() pass (loop.c): whether timers or immediates hold
+ * the loop, the deadline the wait folds in (now while a referenced
+ * immediate is pending), and the timers and check phases. */
+_Bool __kml_timers_keepalive(void) { return (due_ns != 0 && timer_refed) || imm_refed; }
+
+i64 __kml_timers_deadline_ns(void) {
+    if (imm_count > 0)
+        return __kml_monotonic_ns();
+    return due_ns;
+}
+
+void __kml_timers_run_due(void) {
+    if (due_ns != 0 && __kml_monotonic_ns() >= due_ns)
+        run_timers();
+}
+
+void __kml_timers_check(void) { run_immediates(); }
+#endif

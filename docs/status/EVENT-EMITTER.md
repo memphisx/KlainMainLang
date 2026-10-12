@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index. Node's classic `EventEmitter` base class (`require('events')`) — not the same thing as the WHATWG `EventTarget`/`Event`/`CustomEvent` trio tracked in [EVENTS-CANCELLATION.md](EVENTS-CANCELLATION.md). Real Node code uses `EventEmitter` pervasively: `stream.Readable`/`Writable` (see [STREAMS.md](STREAMS.md)'s Node section), `child_process`'s spawned handles, and `net.Server`/sockets all extend it.
 
-**Coverage**: 9/9 (100%) · **Strict Coverage**: 7/9 (~78%).
+**Coverage**: 9/9 (100%) · **Strict Coverage**: 8/9 (~89%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -15,7 +15,7 @@ Format: [Status page format](README.md#status-page-format).
 | `.emit(event, ...args)` | ✅ | | • Synchronously invokes every registered listener for `event`, in registration order; returns whether any listener ran; a `once` listener is removed before it runs<br>• `emit(event, a, b, …)` passes each argument; a typed map's event takes exactly its tuple's arguments ([ADR-00392](../adr/ADR-00392.md)) |
 | `.off(event, listener)` / `.removeListener(...)` / `.removeAllListeners(...)` | ✅ | | • `off`/`removeListener` removes the most recently added matching listener and keeps the others in order; `removeAllListeners()` (no arg) clears every event; `removeAllListeners(event)` clears just that one |
 | `.addListener(...)` / `.prependListener(...)` / `.prependOnceListener(...)` | ✅ | | • `prepend*` puts the listener before the existing ones ([ADR-01162](../adr/ADR-01162.md)) |
-| `.listenerCount(event)` / `.eventNames()` | ✅ | • `eventNames()` leaves out symbol event names (`Reflect.ownKeys` omits an object's symbol keys); `on`/`emit`/`listenerCount` with a symbol work | • `eventNames()` returns registration order; an event whose last listener is removed leaves the list, as in Node |
+| `.listenerCount(event)` / `.eventNames()` | ✅ | | • `eventNames()` returns registration order; an event whose last listener is removed leaves the list, as in Node |
 | `EventEmitter.prototype.emit('error', ...)` special-cases (throws if no `'error'` listener) | ✅ | | • An unlistened `'error'` throws its argument when it is an Error, and otherwise an Error reading `Unhandled error. (<value>)` with the value rendered by `util.inspect`, as Node does |
 | `events.once(emitter, name)` (static helper) | ✅ | | • Returns a Promise that resolves with the event's argument array the first time it fires (`const [x] = await once(ee, 'x')`); an `'error'` first rejects it, and an `AbortSignal` option cancels it |
 | `events.on(emitter, name)` (async iterator) | ✅ | | • An async iterator yielding each emission's argument array (`for await (const [x] of on(ee, 'data'))`), buffering events between iterations; leaving the loop (`break`, `return()`) removes its listeners, as in Node |

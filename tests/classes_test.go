@@ -568,6 +568,7 @@ class Shape {
 class Circle extends Shape {
   radius: number;
   constructor(radius: number) {
+    super();
     this.radius = radius;
   }
   area(): number { return 3 * this.radius * this.radius }
@@ -575,6 +576,7 @@ class Circle extends Shape {
 class Square extends Shape {
   side: number;
   constructor(side: number) {
+    super();
     this.side = side;
   }
   area(): number { return this.side * this.side }
@@ -751,7 +753,7 @@ class Derived extends Base {
 	if err == nil {
 		t.Fatal("expected a compile error for a derived constructor missing super(...)")
 	}
-	if !strings.Contains(err.Error(), "must call super(...)") {
+	if !strings.Contains(err.Error(), "must contain a 'super' call") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -770,17 +772,17 @@ class Derived extends Ghost {
 }
 
 func TestE2EClassExtendsBuiltinIsError(t *testing.T) {
-	// `extends Error` is a supported synthetic root since TDD-00155 Stage 6;
-	// other built-ins remain invalid extends targets.
-	_, err := parseAndCompile(`
-class Derived extends Date {
-}
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for extending a built-in")
-	}
-	if !strings.Contains(err.Error(), "extends unknown class") {
-		t.Errorf("unexpected error message: %v", err)
+	// `extends Error` (TDD-00155 Stage 6), `extends Map`/`Set`/`RegExp`/
+	// `Promise`/`Date`/`Array`/a typed array (TDD-00247) work; extending
+	// another host builtin is a clean rejection.
+	for _, base := range []string{"ArrayBuffer", "Response"} {
+		_, err := parseAndCompile("class Derived extends " + base + " {}\n")
+		if err == nil {
+			t.Fatalf("%s: expected a compile error for extending a built-in", base)
+		}
+		if !strings.Contains(err.Error(), "extending a builtin other than Error is not supported yet") {
+			t.Errorf("%s: unexpected error message: %v", base, err)
+		}
 	}
 }
 
@@ -1182,7 +1184,7 @@ abstract class Shape {
 }
 class Circle extends Shape {
   radius: number;
-  constructor(radius: number) { this.radius = radius }
+  constructor(radius: number) { super(); this.radius = radius }
   area(): number { return 3 * this.radius * this.radius }
 }
 const c = new Circle(2);
@@ -1212,7 +1214,7 @@ abstract class Shape {
 }
 class Circle extends Shape {
   radius: number;
-  constructor(radius: number) { this.radius = radius }
+  constructor(radius: number) { super(); this.radius = radius }
 }
 `)
 	if err == nil {
@@ -1253,7 +1255,7 @@ class Cat implements Greeter {
 	if err == nil {
 		t.Fatal("expected a compile error for a class missing an interface method")
 	}
-	if !strings.Contains(err.Error(), "does not satisfy interface") {
+	if !strings.Contains(err.Error(), "incorrectly implements interface 'Greeter'") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -1271,7 +1273,7 @@ class Cat implements Greeter {
 	if err == nil {
 		t.Fatal("expected a compile error for a class missing an interface field")
 	}
-	if !strings.Contains(err.Error(), "does not satisfy interface") {
+	if !strings.Contains(err.Error(), "incorrectly implements interface 'Greeter'") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -1934,7 +1936,7 @@ class Range {
   lo: number;
   hi: number;
   constructor(lo: number, hi: number) { this.lo = lo; this.hi = hi; }
-  *values(): number {
+  *values(): Generator<number> {
     for (let i = this.lo; i < this.hi; i = i + 1) { yield i; }
   }
 }
@@ -1948,7 +1950,7 @@ func TestE2EGeneratorMethodNext(t *testing.T) {
 class Counter {
   n: number;
   constructor(start: number) { this.n = start; }
-  *count(): number { yield this.n; yield this.n + 1; }
+  *count(): Generator<number> { yield this.n; yield this.n + 1; }
 }
 const g = new Counter(10).count();
 const a = g.next();
@@ -1967,7 +1969,7 @@ func TestE2EGeneratorMethodWithParam(t *testing.T) {
 class Stepper {
   base: number;
   constructor(base: number) { this.base = base; }
-  *upTo(limit: number): number {
+  *upTo(limit: number): Generator<number> {
     let i = this.base;
     while (i <= limit) { yield i; i = i + 1; }
   }
@@ -1986,7 +1988,7 @@ class Base {
 class Seq extends Base {
   n: number;
   constructor(l: string, n: number) { super(l); this.n = n; }
-  *nums(): number { let i = 0; while (i < this.n) { yield i; i = i + 1; } }
+  *nums(): Generator<number> { let i = 0; while (i < this.n) { yield i; i = i + 1; } }
 }
 const s = new Seq("x", 3);
 for (const v of s.nums()) { console.log(v); }
@@ -1999,7 +2001,7 @@ console.log(s.label);
 func TestE2EStaticGeneratorMethodRejected(t *testing.T) {
 	_, err := parseAndCompile(`
 class C {
-  static *g(): number { yield 1; }
+  static *g(): Generator<number> { yield 1; }
 }
 `)
 	if err == nil {
@@ -2016,7 +2018,7 @@ class C {
 func TestE2EAsyncGeneratorMethodCompiles(t *testing.T) {
 	assertOutput(t, `
 class C {
-  async *g(): number { yield 1; yield 2 }
+  async *g(): AsyncGenerator<number> { yield 1; yield 2 }
 }
 async function main2(): Promise<void> {
   for await (const x of new C().g()) { console.log(x) }
@@ -2080,12 +2082,14 @@ console.log(new C().value);
 `, "7")
 }
 
-// A non-constant computed member name (identifier / call / non-well-known
-// Symbol) is a clean, specific rejection in V1. `[Symbol.iterator]` /
-// `[Symbol.asyncIterator]` are the recognized well-known-symbol exceptions.
+// A computed member name bound to anything but a const symbol or a const
+// string/number literal (a `let`, a call) is a clean, specific rejection.
+// `[Symbol.iterator]` / `[Symbol.asyncIterator]` are the recognized
+// well-known-symbol exceptions; a const literal names the member by value
+// and a const symbol keys it (TDD-00246).
 func TestE2EComputedNonConstantNameRejected(t *testing.T) {
 	_, err := parseAndCompile(`
-const k = "dyn";
+let k = "dyn";
 class C {
   [k]() { return 1; }
 }
@@ -2144,7 +2148,7 @@ console.log(make(9).v);
 func TestE2EClassExpressionGeneratorMethod(t *testing.T) {
 	assertOutput(t, `
 const Seq = class {
-  *nums(): number { yield 1; yield 2; yield 3; }
+  *nums(): Generator<number> { yield 1; yield 2; yield 3; }
 };
 for (const n of new Seq().nums()) { console.log(n); }
 `, "1\n2\n3")
@@ -2859,5 +2863,599 @@ class Square { name = "square" }
 class Circle { name = "circle" }
 const reg = { Square: Circle };
 console.log(new reg.Square().name, new Square().name);
+`)
+}
+
+// TDD-00246: a class field keyed by a symbol the program declares is a field
+// of the class: read, written and compound-assigned through `obj[k]`,
+// inherited, hidden from Object.keys and JSON, shown by inspect as
+// `Symbol(desc)`, and found through `any` by the symbol's own key.
+func TestE2EClassSymbolKeyedFields(t *testing.T) {
+	const src = `
+const kRefed = Symbol('refed')
+const kCount = Symbol('count')
+class T {
+  _idleTimeout: number = 5;
+  [kRefed]: boolean | null = true;
+  [kCount]: number = 7
+  hasRef(): boolean | null { return this[kRefed] }
+}
+class U extends T { extra = 'u' }
+const t = new T()
+console.log(t.hasRef(), t[kCount])
+t[kRefed] = null
+t[kCount] += 1
+console.log(t.hasRef(), t[kCount], Object.keys(t), JSON.stringify(t))
+console.log(t)
+const u = new U()
+u[kCount] = 9
+console.log(u, u[kCount])
+const a: any = t
+console.log(a[kCount], kRefed in a, Object.keys(a))
+a[kCount] = 11
+console.log(t[kCount])
+`
+	assertOutput(t, src, `true 7
+null 8 [ '_idleTimeout' ] {"_idleTimeout":5}
+T { _idleTimeout: 5, Symbol(refed): null, Symbol(count): 8 }
+U {
+  _idleTimeout: 5,
+  extra: 'u',
+  Symbol(refed): true,
+  Symbol(count): 9
+} 9
+8 true [ '_idleTimeout' ]
+11`)
+	assertSameAsNode(t, src)
+}
+
+// A computed member name bound to a const string or number literal names
+// the member by its value; one bound to a const symbol keys a method.
+func TestE2EComputedConstKeyedMembers(t *testing.T) {
+	const src = `
+const k = "dyn"
+const n = 2
+const kDescribe = Symbol('describe')
+class Box {
+  v = 3;
+  [k](): number { return 1 }
+  [n]: string = 'two';
+  [kDescribe](prefix: string): string { return prefix + this.v }
+}
+class Big extends Box {
+  [kDescribe](prefix: string): string { return 'big ' + super[kDescribe](prefix) }
+}
+const b = new Box()
+console.log(b.dyn(), b[2], b[kDescribe]('v='), new Big()[kDescribe]('w='))
+console.log(b, Object.keys(b))
+const a: any = new Big()
+console.log(a[kDescribe]('any '), typeof a[kDescribe])
+`
+	assertOutput(t, src, "1 two v=3 big w=3\nBox { '2': 'two', v: 3 } [ '2', 'v' ]\nbig any 3 function")
+	assertSameAsNode(t, src)
+}
+
+func TestE2ELiteralClassMemberNames(t *testing.T) {
+	// String and numeric literal member names, numeric keys named by their
+	// value as JavaScript writes it, a const literal key, and a member
+	// called through a literal index (TDD-00246).
+	const src = `
+class T { "a-b" = 1; 0 = 3; 1() { return 5 } "m x"() { return 6 } static 2 = 4; 0x10 = 16 }
+const t = new T()
+console.log(t["a-b"], t[0], t[1](), t["m x"](), T[2], t[16], Object.keys(t))
+const o = { 0x10: 1, 1.50: 2, 1e3: 3 }
+console.log(Object.keys(o), o[16], o[1.5], o["1000"])
+console.log(t)
+const k = "a-b"
+function f(k: string) { return k.length }
+console.log(t[k], f("xyz"))
+`
+	assertOutput(t, src, "1 3 5 6 4 16 [ '0', '16', 'a-b' ]\n[ '16', '1000', '1.5' ] 1 2 3\nT { '0': 3, '16': 16, 'a-b': 1 }\n1 3")
+	assertSameAsNode(t, src)
+}
+
+func TestE2ESymbolReflection(t *testing.T) {
+	// Symbol-keyed properties in Object.getOwnPropertySymbols,
+	// Reflect.ownKeys, spread and Object.assign (TDD-00246, ADR-01421).
+	const src = `
+import { EventEmitter } from "events"
+const kA = Symbol('a')
+const kB = Symbol('b')
+class C { x = 1; [kA]: number = 2; [kB] = "b" }
+const c = new C()
+const syms = Object.getOwnPropertySymbols(c)
+console.log(syms.length, syms.map(s => s.toString()), syms[0] === kA)
+const copy: any = { ...c }
+console.log(copy, copy[kA], Object.keys(copy))
+console.log(Reflect.ownKeys(c))
+const o: any = Object.assign({}, c)
+console.log(o[kB])
+const k = Symbol('k')
+const d: any = { a: 1 }
+d[k] = 2
+d.b = 3
+console.log(Reflect.ownKeys(d), Object.getOwnPropertySymbols(d).length)
+for (const key of Reflect.ownKeys(d)) console.log(typeof key)
+const e = new EventEmitter()
+e.on("a", () => {})
+e.on(k, () => {})
+console.log(e.eventNames())
+`
+	assertOutput(t, src, "2 [ 'Symbol(a)', 'Symbol(b)' ] true\n{ x: 1, Symbol(a): 2, Symbol(b): 'b' } 2 [ 'x' ]\n[ 'x', Symbol(a), Symbol(b) ]\nb\n[ 'a', 'b', Symbol(k) ] 1\nstring\nstring\nsymbol\n[ 'a', Symbol(k) ]")
+	assertSameAsNode(t, src)
+}
+
+func TestE2ECompatJSMissingLiteralKey(t *testing.T) {
+	// A constant key naming no field reads the property through the boxed
+	// object: undefined, or the class's method (ADR-01420).
+	assertOutputCompatJS(t, `
+class T { a = 1; m() { return this.a + 1 } }
+const t = new T()
+console.log(t["nope"], typeof t["m"], t["a"])
+const o = { x: 1 }
+console.log(o["y"])
+`, "undefined function 1\nundefined")
+}
+
+// A class extends a builtin error through its declaration's layout
+// (`@lowerType error`): Error, its kinds and DOMException, each taking its
+// constructor's second argument (options.cause; DOMException's name).
+func TestE2EExtendsBuiltinErrorLayouts(t *testing.T) {
+	assertSameAsNode(t, `
+class AppError extends Error {
+  code: number;
+  constructor(m: string, code: number) { super(m); this.name = "AppError"; this.code = code; }
+}
+class Bad extends TypeError {}
+class Quota extends DOMException {}
+class Wrapped extends Error {}
+const a = new AppError("boom", 7);
+console.log(a instanceof Error, a instanceof AppError, a.message, a.code, a.name);
+const b = new Bad("t");
+console.log(b instanceof TypeError, b instanceof Error, b.message, b.name);
+const q = new Quota("full", "QuotaExceededError");
+console.log(q instanceof DOMException, q instanceof Error, q.name, q.message);
+const q2 = new Quota("plain");
+console.log(q2.name, q2.message);
+const w = new Wrapped("outer", { cause: "inner" });
+console.log(w.message, w.cause);
+`)
+}
+
+// Builtin generics resolve through their declarations' layouts, an annotated
+// module-level `new Set([…])` is readable from a function, and a program's own
+// class named like a builtin shadows it.
+func TestE2EBuiltinGenericLayouts(t *testing.T) {
+	assertSameAsNode(t, `
+const m: Map<string, number> = new Map([["a", 1]]);
+const s: Set<number> = new Set([1, 2, 2]);
+async function f(): Promise<number> { return 41; }
+const p: Promise<number> = f();
+const rs: ReadableStream<string> = new ReadableStream<string>({ start(c) { c.enqueue("x"); c.close(); } });
+async function main(): Promise<void> {
+  console.log(m.get("a"), s.size, s.has(2), (await p) + 1);
+  const r = rs.getReader();
+  const { value } = await r.read();
+  console.log(value);
+}
+main();
+`)
+	assertSameAsNode(t, `
+class Map { size = 7; get(k: string): string { return "mine:" + k; } }
+const m: Map = new Map();
+console.log(m.get("a"), m.size);
+`)
+}
+
+// Classes extending Map and Set (TDD-00247): the instance is the host
+// collection, through its own type, `any`, a Map parameter and console.log.
+func TestE2EClassExtendsMapAndSet(t *testing.T) {
+	assertSameAsNode(t, `
+class Counter extends Map<string, number> {
+  bump(k: string): number {
+    const n = (this.get(k) ?? 0) + 1;
+    this.set(k, n);
+    return n;
+  }
+  total(): number {
+    let t = 0;
+    for (const v of this.values()) t += v;
+    return t;
+  }
+}
+const c = new Counter([["a", 5]]);
+c.bump("a"); c.bump("b");
+console.log(c.get("a"), c.get("b"), c.size, c.total(), c.has("b"));
+console.log(c instanceof Counter, c instanceof Map);
+for (const [k, v] of c) console.log(k, v);
+function sizeOf(m: Map<string, number>): number { return m.size; }
+console.log(sizeOf(c));
+console.log(c);
+`)
+	assertSameAsNode(t, `
+class Tags extends Set<string> {
+  label: string;
+  constructor(label: string, items: string[]) { super(items); this.label = label; }
+  describe(): string { return this.label + ":" + [...this].join(","); }
+}
+const t = new Tags("t", ["x", "y"]);
+t.add("z");
+console.log(t.describe(), t.size, t.has("y"), t instanceof Set, t);
+class Logged extends Map<string, number> {
+  writes = 0;
+  set(k: string, v: number): this { this.writes++; return super.set(k, v); }
+}
+class Deeper extends Logged { peek(): number { return this.get("a") ?? -1; } }
+const d = new Deeper();
+d.set("a", 1).set("b", 2);
+console.log(d.writes, d.peek(), d.size, d instanceof Logged, d instanceof Map, d);
+const any1: any = d;
+console.log(any1 instanceof Map, any1 instanceof Deeper, any1.get("b"), any1.size);
+console.log(any1);
+`)
+	assertSameAsNode(t, `
+class Counter extends Map<string, number> { tag = "c"; }
+const c = new Counter([["a", 1]]);
+console.log({ c }, [c]);
+console.log(JSON.stringify(c), Object.keys(c), String(c), Object.prototype.toString.call(c));
+class Bag extends Set<number> {}
+const b = new Bag([3, 1]);
+console.log(Array.from(b), [...b].length, b.size, Math.max(...b));
+const m2 = new Map<string, Counter>([["k", c]]);
+console.log(m2);
+`)
+}
+
+// A class extending Map renders as Node does past util.inspect's depth,
+// `[C [Map]]`, statically and through `any`.
+func TestE2EClassExtendsMapInspectDepth(t *testing.T) {
+	assertSameAsNode(t, `
+class C extends Map<string, number> {}
+const c = new C([["a", 1]]);
+console.log({ a: { b: { c } } });
+console.log({ a: { b: { d: { c } } } });
+const x: any = { a: { b: { d: { c } } } };
+console.log(x);
+console.log(new C());
+`)
+}
+
+// TestE2ESuperPrivateNameIsEarlyError: `super.#x` is JavaScript's early
+// SyntaxError, in a class declaration and a class expression alike (ADR-01459).
+func TestE2ESuperPrivateNameIsEarlyError(t *testing.T) {
+	for _, src := range []string{
+		"class B {}\nclass C extends B { #x() {} m() { super.#x(); } }\n",
+		"class B {}\nconst C = class extends B { #x = 1; m() { return super.#x; } };\n",
+	} {
+		_, err := parseAndCompile(src)
+		if err == nil || !strings.Contains(err.Error(), "a private name cannot be read through 'super'") {
+			t.Errorf("%q: want the super private-name error, got %v", src, err)
+		}
+	}
+}
+
+func TestE2EClassExtendsRegExp(t *testing.T) {
+	// The instance is the RegExp (TDD-00247 stage 3): RegExp's methods and
+	// properties, string methods taking it, `instanceof`, inspect, ToString,
+	// and the same through `any`.
+	assertSameAsNode(t, `class R extends RegExp {
+  tag = "x";
+  constructor(p: string, f?: string) { super(p, f); }
+  hi(): string { return this.tag + this.source; }
+  test(s: string): boolean { return super.test(s.trim()); }
+}
+class Plain extends RegExp {}
+const r = new R("a+b", "g");
+console.log(r);
+console.log(new Plain("q"), [new Plain("z", "i")], { r });
+console.log(Object.prototype.toString.call(r), String(r), `+"`"+`${r}`+"`"+`);
+console.log(r.test(" aab "), r.lastIndex, r.hi(), r.global, r.flags);
+r.lastIndex = 0;
+console.log("xaabyab".replace(r, "-"), "aab-ab".split(new Plain("-")), "zab".match(new Plain("a(b)"))![1]);
+const a: any = r;
+console.log(a instanceof R, a instanceof RegExp, a.source, a === r);
+function take(x: RegExp) { return x instanceof R; }
+console.log(take(r), take(/x/));
+`)
+	assertSameAsNode(t, `class R extends RegExp {
+  n = 1;
+}
+const a: any = new R("b", "g");
+const p: any = /x(y)/;
+console.log(a.test("abc"), a.lastIndex, a.flags, "abcb".split(a), "abab".replace(a, "_"));
+console.log(p.exec("zxy")[1], p === p, String(a), typeof a, Object.prototype.toString.call(a));
+const m = new Map<any, number>([[a, 1], [p, 2]]);
+console.log(m.get(a), m.get(p), m.size);
+console.log([a, p]);
+const re2 = new RegExp(new R("q+", "i"));
+console.log(re2, re2.flags);
+`)
+	assertSameAsNode(t, `class R extends RegExp { n = 1; }
+const xs: any[] = [/a+/gi, new R("b", "m"), "c.d", undefined, 12];
+for (const x of xs) { const r = new RegExp(x); console.log(r, r.flags, r.source); }
+const y: any = /z/g;
+console.log(new RegExp(y, "i"));
+`)
+	// Stored where its host is expected (a binding, an argument, a return,
+	// a field, an array element) it is the host's body; narrowed back by
+	// instanceof it is the instance.
+	assertSameAsNode(t, `class R2 extends RegExp { k = 2; }
+class C extends Map<string, number> { tag = "t"; }
+function f() { const r: RegExp = new R2("x+"); console.log(r instanceof R2, r.source); }
+f();
+const g: RegExp = new R2("y");
+console.log(g.source, g instanceof R2);
+let h: RegExp = /z/;
+h = new R2("w");
+console.log(h.source, h instanceof R2);
+function take(x: RegExp): string { return x.source; }
+console.log(take(new R2("arg")));
+function give(): RegExp { return new R2("ret"); }
+console.log(give().source, give() instanceof R2);
+const holder: { re: RegExp; m: Map<string, number> } = { re: new R2("fld"), m: new C() };
+console.log(holder.re.source, holder.re instanceof R2, holder.m instanceof C);
+const arr: RegExp[] = [new R2("a1"), /a2/];
+console.log(arr[0].source, arr[0] instanceof R2, arr[1] instanceof R2);
+const mm: Map<string, number> = new C();
+mm.set("q", 1);
+console.log(mm.size, mm instanceof C);
+`)
+	assertSameAsNode(t, `class C extends Map<string, number> { tag = "t"; }
+class R2 extends RegExp { k = 2; }
+const m: Map<string, number> = new C();
+m.set("a", 1);
+if (m instanceof C) console.log(m.tag, m.size, m.get("a"));
+const r: RegExp = new R2("x+");
+if (r instanceof R2) { console.log(r.k, r.source); }
+function f(x: Map<string, number>): string { if (!(x instanceof C)) return "plain"; return x.tag; }
+console.log(f(m), f(new Map()));
+const t = m instanceof C ? m.tag : "no";
+console.log(t);
+`)
+}
+
+func TestE2EOverrideModifier(t *testing.T) {
+	assertSameAsNode(t, `
+class A { m(): number { return 1; } get x(): number { return 0; } }
+class B extends A {
+  override m(): number { return 2; }
+  public override get x(): number { return 3; }
+}
+class C { override = 1; }
+class D { override(): number { return 5; } }
+class S { static k(): number { return 1; } }
+class T extends S { static override k(): number { return 7; } }
+console.log(new B().m(), new B().x, new C().override, new D().override(), T.k());
+`)
+	// tsc's checks: a base must declare the member (TS4113), and a class
+	// without a base takes no `override` (TS4112).
+	for src, want := range map[string]string{
+		"class A { m(): void {} }\nclass B extends A { override n(): void {} }\n":   "not declared in the base class 'A'",
+		"class A {}\nclass B extends A { override x = 1; }\n":                       "not declared in the base class 'A'",
+		"class R extends RegExp { override zz(): void {} }\n":                       "not declared in the base class 'RegExp'",
+		"class C { override m(): void {} }\n":                                       "does not extend another class",
+		"class A { static s = 1; }\nclass B extends A { static override t = 1; }\n": "not declared in the base class 'A'",
+	} {
+		if _, err := parseAndCompile(src); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want an error containing %q, got %v", src, want, err)
+		}
+	}
+}
+
+func TestE2EClassExtendsPromise(t *testing.T) {
+	// The instance is the promise (TDD-00247 stage 3): await, instanceof,
+	// console.log, and Promise's methods and statics making instances of the
+	// class (species), through its constructor (a wrapping one included),
+	// statically and through any.
+	assertSameAsNode(t, `class P extends Promise<number> {
+  tag = "p";
+  label(): string { return "P:" + this.tag; }
+}
+class Q extends Promise<string> {}
+async function main() {
+  const p = new P((res) => res(1));
+  console.log(p instanceof Promise, p instanceof P, p.label());
+  console.log(await p);
+  const q = new Q((_, rej) => rej(new Error("no")));
+  try { await q; } catch (e) { console.log("caught", (e as Error).message); }
+  function take(x: Promise<number>): boolean { return x instanceof P; }
+  console.log(take(p), take(Promise.resolve(1)));
+  const viaFn: Promise<number> = p;
+  console.log(await viaFn);
+}
+main();
+`)
+	assertSameAsNode(t, `class P extends Promise<number> {
+  tag = "p";
+  label(): string { return "P:" + this.tag; }
+}
+let made = 0;
+class Q extends Promise<number> {
+  constructor(ex: (res: (v: number) => void, rej: (e: unknown) => void) => void) {
+    made++;
+    super((res, rej) => ex((v) => { console.log("resolving", v); res(v * 10); }, rej));
+  }
+}
+async function main() {
+  const p = new P((res) => res(1));
+  console.log(p instanceof Promise, p instanceof P, p.label(), p);
+  const t = p.then((v) => v + 1);
+  console.log(t instanceof P, t instanceof Promise);
+  console.log(await t, await p);
+  const q = new Q((res) => res(2));
+  const q2 = q.then((v) => v + 1);
+  console.log(made, q2 instanceof Q, await q2);
+  const c = new P((_, rej) => rej(new Error("no"))).catch((e: Error) => e.message.length);
+  console.log(c instanceof P, await c);
+  const all = await Promise.all([p, q, 3]);
+  console.log(all);
+  function take(x: Promise<number>): boolean { return x instanceof P; }
+  console.log(take(p), take(Promise.resolve(1)));
+  const r = P.resolve(5);
+  console.log(r instanceof P, await r);
+}
+main();
+`)
+	assertSameAsNode(t, `let made = 0;
+class L extends Promise<number> {
+  constructor(ex: (res: (v: number) => void, rej: (e: unknown) => void) => void) {
+    made++;
+    super(ex);
+  }
+}
+class O extends Promise<number> {
+  then<A = number, B = never>(f?: ((v: number) => A) | null, r?: ((e: any) => B) | null): Promise<A | B> {
+    console.log("own then");
+    return super.then(f, r);
+  }
+}
+async function main() {
+  const p = new L((res) => res(2));
+  const f = p.finally(() => console.log("fin"));
+  console.log(await f, made);
+  console.log(await L.all([p, 5]), made);
+  console.log(await L.race([p, new L(() => {})]), made);
+  console.log(await L.allSettled([p, L.reject("x")]), made);
+  console.log(await L.any([L.reject(new Error("a")), p]), made);
+  try { await L.any([L.reject(new Error("a"))]); } catch (e) { console.log((e as Error).constructor.name, made); }
+  const o = new O((res) => res(9));
+  console.log(await o);
+  const a: any = p;
+  const t = a.then((v: number) => v * 3);
+  console.log(t instanceof L, await t, made);
+  const fa = a.finally(() => {});
+  console.log(fa instanceof L, await fa);
+}
+main();
+`)
+	assertSameAsNode(t, `class P extends Promise<number> {}
+async function main() {
+const p = new P((res) => res(1));
+const f = p.finally(() => console.log("fin"));
+console.log(f instanceof P, await f);
+}
+main();
+`)
+	assertSameAsNode(t, `class P extends Promise<number> { tag = "p"; }
+class E extends Promise<string> {}
+const p = new P((res) => res(1));
+console.log(p);
+console.log(new P(() => {}));
+const r = new E((_, rej) => rej("bad"));
+r.catch(() => {});
+console.log(r, [p], { p });
+`)
+}
+
+// -compat=js: an instance takes properties and methods of its own, and a
+// call prefers its own method over its class's (BACKLOG 62).
+func TestJSInstanceOwnPropertiesAndMethods(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+class R {
+  constructor() { this._read = function () { return "own"; }; }
+  _read() { return "proto"; }
+}
+const r = new R();
+console.log(r._read());
+r._read = () => "reassigned";
+console.log(r._read());
+class Q { go() { return 1; } }
+const q = new Q();
+q.go = function () { return 2; };
+console.log(q.go(), new Q().go());
+q.extra = 5;
+q.fn = function () { return 3; };
+q.extra += 1;
+console.log(q.extra, q.fn(), Object.keys(q), new Q().extra);
+`)
+}
+
+// The strict lane: a method assigned on an instance (directly or through
+// any) is called, and for...in lists added properties (BACKLOG 91).
+func TestInstanceOwnMethodAndForInStrict(t *testing.T) {
+	assertSameAsNode(t, `
+class P { m(): string { return "proto"; } x = 1; }
+const p = new P();
+(p as any).m = () => "own";
+(p as any).extra = 5;
+console.log(p.m(), new P().m());
+const keys: string[] = [];
+for (const k in p) keys.push(k);
+console.log(keys, Object.keys(p));
+const q = new P();
+q.m = () => "assigned";
+console.log(q.m());
+`)
+}
+
+// `implements` is the checker's (TS2420); a generic interface implemented
+// with type arguments compiles, and a mismatch is rejected (BACKLOG 155).
+func TestClassImplementsIsCheckedNotEmitted(t *testing.T) {
+	assertSameAsNode(t, `
+interface G<T> { v: T }
+class D implements G<number> { v = 1; }
+interface I { a: number }
+class E implements I { a = 2; extra = "x"; }
+console.log(new D().v, new E().a)
+`)
+	if _, err := parseAndCompile("interface I { a: number }\nclass C implements I { a = 's' }\n"); err == nil || !strings.Contains(err.Error(), "incorrectly implements interface 'I'") {
+		t.Errorf("expected TS2420, got %v", err)
+	}
+}
+
+// A generic class construction infers its type arguments from its
+// arguments or, when none names a parameter, the contextual type (BACKLOG
+// 137).
+func TestGenericClassConstructionInference(t *testing.T) {
+	assertSameAsNode(t, `
+class Box<T> { v: T; constructor(v: T) { this.v = v; } get(): T { return this.v; } }
+const arr = new Box([1, 2]);
+const nested = new Box(new Box(true));
+function mk<U>(u: U) { return new Box(u); }
+console.log(arr.get().length, nested.get().get(), mk("z").get());
+class Stack<T> { items: T[] = []; push(x: T) { this.items.push(x); return this; } }
+const st: Stack<number> = new Stack();
+st.push(3);
+console.log(st.items);
+`)
+}
+
+// A method returning an array, called where an own method of its name may
+// exist: both results are arrays (the httpbin fixture caught invalid IR).
+func TestOwnMethodCheckArrayResult(t *testing.T) {
+	assertSameAsNode(t, `
+class L { items(): number[] { return [1, 2]; } name(): string { return "n"; } }
+const a = new L();
+const b = new L();
+(b as any).items = () => [9];
+console.log(a.items(), b.items(), a.items().length, a.name());
+`)
+}
+
+// A static setter receives a nullable argument as null, not its payload,
+// and a class declared in a block initializes its statics there: one that
+// throws is caught by the try around it.
+func TestE2EStaticSetterNullAndBlockStatics(t *testing.T) {
+	assertOutput(t, `class C { static set a(_ = null) { console.log("set", _) } }
+C.a = null
+class E extends Error {}
+function initThrows(): never { throw new E("x") }
+try { class D { static f = initThrows() } } catch (e) { console.log("caught", e instanceof E) }
+`, "set null\ncaught true")
+}
+
+// A method assigned on an instance of a library class is the one the
+// library's own code calls (`r._read = fn` on a Readable, `w._write`).
+func TestE2ELibraryInstanceOwnMethod(t *testing.T) {
+	assertSameAsNodeImports(t, `
+import { Readable, Writable } from 'stream'
+const r = new Readable()
+let i = 0
+r._read = function (n) { r.push(i++ < 3 ? Buffer.from('a') : null) }
+r.on('data', (d: Buffer) => console.log('data', d.length))
+r.on('end', () => console.log('end'))
+const w = new Writable()
+w._write = (chunk: any, enc: string, cb: () => void) => { console.log('write', String(chunk)); cb() }
+w.end('x')
 `)
 }

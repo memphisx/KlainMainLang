@@ -30,30 +30,47 @@ func (e *Emitter) UsesHostBoxC() bool { return e.usedHostBox }
 // hostTypeIDFlag marks a host box's header (objheader.go's bit table).
 const hostTypeIDFlag int64 = 1 << 49
 
+// hostInlineFlag marks a headered host's header (headeredHost): its body
+// follows the header, where a cell holds a handle.
+const hostInlineFlag int64 = 1 << 50
+
 const hostBoxTy = "{ i64, ptr }"
 
 // hostLayout is one host type boxed somewhere in the program.
 // hostCellObject reports a headerless host object that boxes into a host
 // cell like a handle does.
 func hostCellObject(t Type) bool {
-	if t.IsDate {
-		// A Date is its i64 timestamp; the cell carries the time value.
-		return t.IR == "i64" && !t.IsDynamic && !t.Nullable && !t.IsUndefined
-	}
 	return t.IsRegExp && t.IsObject && t.IR == "ptr" && !t.IsDynamic && !t.IsArray && !t.IsNull && !t.IsUndefined
 }
 
-// hostHandleIR is the IR type of the word a host cell of t carries: a
-// pointer, or a Date's i64 time value.
+// hostHandleIR is the IR type of the word a host cell of t carries.
 func hostHandleIR(t Type) string {
-	if t.IsDate {
-		return "i64"
-	}
 	return "ptr"
 }
 
-// emitHostCellLoad loads the handle out of the host cell at cell.
+// headeredHost reports a host value that carries its own header word, before
+// its body (TDD-00247): a Map, a Set, a RegExp or a Date. Its box is that header,
+// not a cell.
+func headeredHost(t Type) bool {
+	return (t.IsMap || t.IsSet) && !t.Weak || t.IsRegExp && t.IsObject && !t.IsClass || t.IsDate && t.IR == "ptr" && !t.IsClass && !t.IsDynamic
+}
+
+// hostBodyAt8 reports a host value an instance of a class extending its
+// host holds at +8, after its tag word (TDD-00247): a headered host, or a
+// task promise (whose header word precedes its body, though a promise
+// boxes through its wrapper rather than as its header).
+func hostBodyAt8(t Type) bool {
+	return headeredHost(t) || t.IsPromise && t.PromiseTask && !t.IsDynamic && !t.IsClass
+}
+
+// emitHostCellLoad loads the handle out of the host cell at cell; for a
+// headered host the handle is the body after the header.
 func (e *Emitter) emitHostCellLoad(cell string, t Type) string {
+	if headeredHost(t) {
+		body := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, cell))
+		return body
+	}
 	hp, handle := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", hp, hostBoxTy, cell))
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", handle, hostHandleIR(t), hp))
@@ -97,6 +114,9 @@ func hostClassName(t Type) string {
 	if t.IsCollIter && t.IterSrc != nil {
 		return collIterName(t) // `[object Array Iterator]`
 	}
+	if t.IsArray && !t.IsTypedArray && !t.IsBuffer {
+		return "Array" // the parent row of a class extending Array
+	}
 	if t.Weak && t.IsMap {
 		return "WeakMap"
 	}
@@ -130,12 +150,29 @@ func hostKey(t Type) string {
 	if t.MapVal != nil {
 		k += "|" + layoutFieldKey(*t.MapVal)
 	}
+	if t.IsArray && t.ElemType != nil {
+		// An array source's elements: a number[] iterator reads raw
+		// numbers, an any[] one boxes.
+		k += "|" + layoutFieldKey(*t.ElemType)
+	}
 	if t.IsCollIter && t.IterSrc != nil {
 		// An iterator's steps read its source by kind: a Map's keys and its
 		// values are different layouts, as are two Maps' of other types.
 		k += fmt.Sprintf("|it%d|", t.IterKind) + hostKey(*t.IterSrc)
 	}
 	return k
+}
+
+// hostHeaderWord is t's host header word without registering its layout
+// (registration generates the box's render and method entry points, needed
+// only once a value of the type is boxed). A Map or Set stores it at creation
+// (TDD-00247); hostID gives the same word.
+func (e *Emitter) hostHeaderWord(t Type) int64 {
+	id := e.stableTypeID("H"+hostKey(t)) | hostTypeIDFlag
+	if headeredHost(t) {
+		id |= hostInlineFlag
+	}
+	return id
 }
 
 // hostID returns t's host header word, registering the type on first use.
@@ -148,7 +185,7 @@ func (e *Emitter) hostID(t Type) int64 {
 	}
 	base := t
 	base.Nullable, base.IsUndefined = false, false
-	id := e.stableTypeID("H"+key) | hostTypeIDFlag
+	id := e.hostHeaderWord(t)
 	e.hostLayouts = append(e.hostLayouts, hostLayout{id: id, class: hostClassName(t), ty: base})
 	return id
 }
@@ -159,12 +196,20 @@ func (e *Emitter) emitBoxHost(v Value) Value {
 	e.ensureMalloc()
 	e.ensureHostBoxHooks()
 	id := e.hostID(v.Ty)
-	cell := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", cell))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", id, cell))
-	hp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", hp, hostBoxTy, cell))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", hostHandleIR(v.Ty), v.Ref, hp))
+	var cell string
+	if headeredHost(v.Ty) {
+		// Its header word is already before its body: the box is the
+		// object itself, so identity holds through `any`.
+		cell = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", cell, v.Ref))
+	} else {
+		cell = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", cell))
+		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", id, cell))
+		hp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", hp, hostBoxTy, cell))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", hostHandleIR(v.Ty), v.Ref, hp))
+	}
 	boxed := e.emitNbTagPtr(cell, kmlTagObject)
 	if !v.Ty.Nullable {
 		return Value{Ref: boxed, Ty: TypeAny}
@@ -236,6 +281,15 @@ func (e *Emitter) emitUnboxHost(v Value, target Type) Value {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, probeL, doneL))
 	e.emitLabel(probeL)
 	cell, isHost := e.emitHostProbe(payload)
+	if headeredHost(target) {
+		// An instance of a class extending the host has its body at +8 as
+		// the host has: the runtime's row lookup walks its class to the host.
+		e.ensureHostBoxHooks()
+		name := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_host_class_name(i64 %s)", name, v.Ref))
+		isHost = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isHost, name))
+	}
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isHost, loadL, doneL))
 	e.emitLabel(loadL)
 	h := e.emitHostCellLoad(cell, target)
@@ -249,10 +303,10 @@ func (e *Emitter) emitUnboxHost(v Value, target Type) Value {
 
 // hostClassNames are the classes `x instanceof C` can test a boxed host
 // value against.
-func isHostClassName(name string) bool {
+func (e *Emitter) isHostClassName(name string) bool {
 	t, ok := hostClassTypes[name]
 	if !ok {
-		t = ResolveTypeName(name)
+		t = e.resolveTypeName(name)
 	}
 	return isHostHandle(t) && hostClassName(t) == name
 }
@@ -309,15 +363,25 @@ func (e *Emitter) emitHostInspectRoutines() {
 		h := e.hostLayouts[e.hostRendered]
 		for d := 0; d <= e.effectiveInspectDepth()+1; d++ {
 			fn := fmt.Sprintf("@__kml_host_inspect_%d_%d", h.id&kmlHdrIDMask, d)
+			stable := e.stableHelperBody(h.id)
 			restore := e.beginDetachedFunc()
-			handle := e.emitHostCellLoad("%cell", h.ty)
-			s, err := e.emitInspectField(Value{Ref: handle, Ty: h.ty}, d)
+			var v Value
+			if h.ty.IsArray {
+				// An array's cell is its header word; the header follows.
+				hdr := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %%cell, i64 8", hdr))
+				v = e.arrayValueFromHeaderReg(hdr, h.ty)
+			} else {
+				v = Value{Ref: e.emitHostCellLoad("%cell", h.ty), Ty: h.ty}
+			}
+			s, err := e.emitInspectField(v, d)
 			if err != nil || s.Ref == "" {
 				s = Value{Ref: e.internString("[" + h.class + "]"), Ty: TypePtr}
 			}
 			e.emitTerminator(fmt.Sprintf("ret ptr %s", s.Ref))
 			body := e.allocas.String() + e.body.String()
 			restore()
+			stable()
 			e.functions.WriteString(fmt.Sprintf("\ndefine internal ptr %s(ptr %%cell) {\nentry:\n%s}\n", fn, body))
 		}
 	}
@@ -470,7 +534,7 @@ func (e *Emitter) hostToJSONFn(h hostLayout) string {
 	}
 	restore := e.beginDetachedFunc()
 	handle := e.emitHostCellLoad("%cell", h.ty)
-	s, err := e.emitDateToISOString(Value{Ref: handle, Ty: h.ty})
+	s, err := e.emitDateToISOString(Value{Ref: e.emitDateTimeValue(Value{Ref: handle, Ty: h.ty}), Ty: TypeI64})
 	ret := "null"
 	if err == nil {
 		ret = s.Ref

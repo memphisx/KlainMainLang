@@ -55,6 +55,7 @@ import (
 	"KlainMainLang/diag"
 	"KlainMainLang/lib"
 	"KlainMainLang/options"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -240,9 +241,13 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 		}
 		for name, uses := range lib.LoweredFuncUses() {
+			// A file declaring the name itself (lib/node/timers.ts's own
+			// setTimeout) means its own, not the lowered global.
+			// The rest of the uses are member names (`Uint8Array.from`): a
+			// binding of the same name (`const from = …`) is no shadow.
 			all := true
-			for _, u := range uses {
-				all = all && idents[u]
+			for i, u := range uses {
+				all = all && idents[u] && (i > 0 || !declaresTopLevel(prog, u))
 			}
 			if all {
 				idents[name] = true
@@ -299,6 +304,14 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		if ip := lib.ModuleRoot + "internal_util_inspect.ts"; path != ip && idents["dir"] && consoleDirAtRunTime(prog) {
 			importTargets[ip] = true
 			if err := visit(ip, false); err != nil {
+				return err
+			}
+		}
+
+		// console.countReset of an unknown label is a process warning.
+		if wp := lib.ModuleRoot + "internal_process_warning.ts"; path != wp && idents["countReset"] && !strings.HasPrefix(path, lib.ModuleRoot) {
+			importTargets[wp] = true
+			if err := visit(wp, false); err != nil {
 				return err
 			}
 		}
@@ -1136,7 +1149,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			// the worker runs its copy's executable statements.
 			_, body := splitWorkerBody(unwrap(files[path].workerCopy.Body))
 			merged.WorkerModules = append(merged.WorkerModules, ast.WorkerModule{Path: path, Body: body})
-			merged.Body = append(merged.Body, unwrap(files[path].prog.Body)...)
+			merged.Body = appendModule(merged, unwrap(files[path].prog.Body))
 			mergeNamespaces(files[path].prog)
 			continue
 		}
@@ -1149,7 +1162,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			// program also imports runs at import time too, as in Node.
 			decls, body := splitWorkerBody(unwrap(files[path].prog.Body))
 			if importTargets[path] {
-				merged.Body = append(merged.Body, unwrap(files[path].prog.Body)...)
+				merged.Body = appendModule(merged, unwrap(files[path].prog.Body))
 			} else {
 				merged.Body = append(merged.Body, decls...)
 			}
@@ -1157,10 +1170,10 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			mergeNamespaces(files[path].prog)
 			continue
 		}
-		merged.Body = append(merged.Body, unwrap(files[path].prog.Body)...)
+		merged.Body = appendModule(merged, unwrap(files[path].prog.Body))
 		mergeNamespaces(files[path].prog)
 	}
-	merged.Body = append(merged.Body, unwrap(files[entryAbs].prog.Body)...)
+	merged.Body = appendModule(merged, unwrap(files[entryAbs].prog.Body))
 	mergeNamespaces(files[entryAbs].prog)
 	if cp := files[entryAbs].workerCopy; cp != nil {
 		// The entry is also its own worker (`new Worker(__filename)`).
@@ -1318,6 +1331,11 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 func TypeCheck(prog *ast.Program, fileOf func(ast.Statement) string, opts options.Options, script bool) error {
 	if fileOf == nil {
 		fileOf = func(ast.Statement) string { return "" }
+	}
+	// Members keyed by a const (`[kRefed]`, TDD-00246) are named before the
+	// checker reads the class.
+	if err := ast.NameComputedMembers(prog); err != nil {
+		return err
 	}
 	libProgs, err := lib.Programs()
 	if err != nil {
@@ -1689,8 +1707,10 @@ func resolveImportPath(dir, source, klainModulesDir string) (string, error) {
 	}
 	// A builtin module's relative import of another (`./internal_http`):
 	// the library's own file.
-	if (strings.HasPrefix(source, "./") || strings.HasPrefix(source, "../")) && strings.HasPrefix(dir+"/", lib.ModuleRoot) {
-		p := path.Join(dir, source)
+	// filepath.Dir turns the library's pseudo-path into `\__kml_lib\node`
+	// on Windows: compare and join it slash-separated.
+	if libDir := filepath.ToSlash(dir); (strings.HasPrefix(source, "./") || strings.HasPrefix(source, "../")) && strings.HasPrefix(libDir+"/", lib.ModuleRoot) {
+		p := path.Join(libDir, source)
 		if !strings.HasSuffix(p, ".ts") {
 			p += ".ts"
 		}
@@ -2128,7 +2148,7 @@ func codeIdents(src []byte) map[string]bool {
 				i++
 			}
 		case c == '/' && i+1 < len(src) && src[i+1] == '*':
-			end := strings.Index(string(src[i+2:]), "*/")
+			end := bytes.Index(src[i+2:], []byte("*/"))
 			if end < 0 {
 				return out
 			}
@@ -2508,4 +2528,28 @@ func cryptoValueUse(src []byte) bool {
 		}
 	}
 	return false
+}
+
+// appendModule appends one module's top-level statements to the merged
+// body, recording each top-level `return` (outside any function) against
+// the module's last statement (ast.Program.TopLevelReturns).
+func appendModule(merged *ast.Program, stmts []ast.Statement) []ast.Statement {
+	if len(stmts) > 0 {
+		last := stmts[len(stmts)-1]
+		for _, st := range stmts {
+			ast.Inspect(st, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration, *ast.ClassExpression:
+					return false
+				case *ast.ReturnStatement:
+					if merged.TopLevelReturns == nil {
+						merged.TopLevelReturns = map[*ast.ReturnStatement]ast.Statement{}
+					}
+					merged.TopLevelReturns[x] = last
+				}
+				return true
+			})
+		}
+	}
+	return append(merged.Body, stmts...)
 }

@@ -24,6 +24,7 @@ func (c *Checker) Check() []*diag.Diagnostic {
 	if c.b.Module != nil && c.b.Module.Node != nil {
 		c.checkNode(c.b.Module.Node, nil)
 		c.checkTypeNames(c.b.Module.Node)
+		c.checkStrictCode(c.b.Module.Node)
 	}
 	return c.diags
 }
@@ -44,12 +45,14 @@ func (c *Checker) CheckFiles(fileOf func(ast.Statement) string) []*diag.Diagnost
 		c.file = fileOf(st)
 		c.checkNode(st, nil)
 		c.checkTypeNames(st)
+		c.checkStrictCode(st)
 	}
 	for _, wm := range prog.WorkerModules {
 		for _, st := range wm.Body {
 			c.file = fileOf(st)
 			c.checkNode(st, nil)
 			c.checkTypeNames(st)
+			c.checkStrictCode(st)
 		}
 	}
 	c.file = ""
@@ -68,22 +71,41 @@ func (c *Checker) report(m *diag.Message, pos ast.Pos, args ...any) {
 // checkNode checks n and its children; ret is the declared return type of
 // the function n is in (nil when it has none, or is not a function's body).
 func (c *Checker) checkNode(n ast.Node, ret *Type) {
+	if a, ok := n.(*ast.AssignmentExpression); ok && a.Op == "=" {
+		if id, ok := a.Left.(*ast.Identifier); ok {
+			c.implicitAnyReported[id] = true // a store, not a read
+		}
+	}
 	switch n := n.(type) {
+	case *ast.ObjectLiteral:
+		for _, p := range n.Properties {
+			if fe, ok := p.Value.(*ast.FunctionExpression); ok && p.AccessorKind == "get" {
+				c.checkGetterReturns(fe.Body, namePos(fe.NamePos, fe.GetPos()))
+			}
+		}
 	case *ast.FunctionDeclaration:
 		c.checkParams(n.Params, n)
 		ret = c.declaredReturn(n, n.ReturnType, n.IsAsync || n.IsGenerator)
 		if n.Body != nil {
 			c.checkNode(n.Body, ret)
 		}
+		// After the body: reachability types the body's calls, and they must
+		// be typed in their own context first (the memo keeps the answer).
+		if n.AccessorKind == "get" {
+			c.checkGetterReturns(n.Body, namePos(n.NamePos, n.GetPos()))
+		}
+		c.checkReturnPaths(n, n.ReturnType, n.Body, n.IsAsync, n.IsGenerator)
 		return
 	case *ast.FunctionExpression:
 		c.checkParams(n.Params, n)
 		if n.Body != nil {
 			c.checkNode(n.Body, c.declaredReturn(n, n.RetType, n.IsAsync || n.IsGenerator))
 		}
+		c.checkReturnPaths(n, n.RetType, n.Body, n.IsAsync, n.IsGenerator)
 		return
 	case *ast.ArrowFunction:
 		c.checkParams(n.Params, n)
+		defer c.checkReturnPaths(n, n.RetType, n.Block, n.IsAsync, false)
 		r := c.declaredReturn(n, n.RetType, n.IsAsync)
 		if n.Block != nil {
 			c.checkNode(n.Block, r)
@@ -96,7 +118,10 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 		return
 	case *ast.ClassDeclaration:
 		c.checkClassFields(n)
+		c.checkImplements(n)
 		c.checkOverrides(n)
+		c.checkOverrideModifiers(n)
+		c.checkDerivedSuper(n)
 		if n.BaseClass != "" && !n.BaseQualified {
 			if sym := c.symbolOf(n); sym != nil && lookupName(n.BaseClass, sym.Scope) == nil {
 				c.cannotFind(n.BaseClass, n.GetPos())
@@ -104,6 +129,10 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 		}
 	case *ast.InterfaceDeclaration:
 		c.checkIndexedProperties(n)
+	case *ast.YieldExpression:
+		if !c.opts.CompatJS() && c.yieldResultImplicitAny(n) {
+			c.report(diag.YieldImplicitAny, n.GetPos())
+		}
 	case *ast.TryStatement:
 		// `catch ({ message })`: the caught value is unknown under
 		// useUnknownInCatchVariables, which has no properties (TS2339).
@@ -126,14 +155,23 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 				c.typeArgConstraintError(n.TypeArgs, len(n.Args), ctor)
 			}
 		}
-		// `new X(…)` through a value's construct signatures (`declare var
-		// DataView: DataViewConstructor`) is checked as the call it is.
+		// `new X(…)` of a class, or through a value's construct signatures
+		// (`declare var DataView: DataViewConstructor`), is checked as the
+		// call it is.
 		if n.Callee == nil && !n.Qualified && len(n.TypeArgs) == 0 {
-			if sym := c.b.NewTarget(n); sym != nil && sym.Flags&binder.Class == 0 && sym.Flags&binder.Variable != 0 {
+			if sym := c.b.NewTarget(n); sym != nil && (sym.Flags&binder.Class != 0 || sym.Flags&binder.Variable != 0) {
 				if ctor := c.newCtor(n); ctor != nil && !c.hasSpread(n.Args) {
 					fake := ast.NewCallExpression(ast.NewIdentifier(n.ClassName, n.GetPos()), n.Args, n.GetPos())
 					c.checkSignatureCall(fake, ctor)
 				}
+			}
+		}
+	case *ast.NewTypedArrayExpression:
+		// Checked as the call it is, against the declared constructor's
+		// signatures (`Uint8ArrayConstructor`).
+		if name, args, _, _ := builtinNewParts(n); name != "" && !c.hasSpread(args) {
+			if ctor := c.builtinCtor(name); ctor != nil {
+				c.checkSignatureCall(ast.NewCallExpression(ast.NewIdentifier(name, n.GetPos()), args, n.GetPos()), ctor)
 			}
 		}
 	case *ast.NewDateExpression, *ast.NewMapExpression, *ast.NewSetExpression, *ast.NewWeakMapExpression, *ast.NewWeakSetExpression:
@@ -142,7 +180,18 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 				c.typeArgConstraintError(targs, len(args), ctor)
 			}
 		}
+	case *ast.ForInStatement:
+		if n.Kind == "var" {
+			c.checkVarRedeclared(n, n.VarName, n.GetPos())
+		}
 	case *ast.VarDeclaration:
+		if n.Kind == "var" && (n.TypeAnnot != nil || n.Init != nil) {
+			pos := n.NamePos
+			if pos.Line == 0 {
+				pos = n.GetPos()
+			}
+			c.checkVarRedeclared(n, n.Name, pos)
+		}
 		if n.TypeAnnot != nil && n.Init != nil {
 			if sym := c.symbolOf(n); sym != nil {
 				pos := n.NamePos
@@ -178,15 +227,26 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 		}
 	case *ast.IndexExpression:
 		if !n.Optional {
-			c.checkNonNull(n.Object)
+			c.checkReceiver(n.Object)
 		}
+		c.checkIndexKey(n)
 	case *ast.ReturnStatement:
+		// A module-level return is CommonJS; TypeScript rejects it (the js
+		// lane takes the CommonJS meaning).
+		if prog, ok := c.b.Module.Node.(*ast.Program); ok && !c.opts.CompatJS() {
+			if _, top := prog.TopLevelReturns[n]; top {
+				c.report(diag.ReturnOutsideFunction, n.GetPos())
+			}
+		}
 		if ret != nil && n.Value != nil {
 			c.checkAssign(n.Value, ret, diag.NotAssignable, n.GetPos())
 		}
 	case *ast.ForOfStatement:
 		// tsc's checkForOfStatement: the iterable is checkNonNullExpression'd.
 		c.checkNonNull(n.Iterable)
+		if n.Kind == "var" && n.ArrayPattern == nil && n.ObjectPattern == nil {
+			c.checkVarRedeclared(n, n.VarName, n.GetPos())
+		}
 	case *ast.MemberExpression:
 		c.checkProperty(n)
 		c.checkAccessibility(n)
@@ -204,6 +264,8 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 		// Every reference resolves, whether or not anything asks its type.
 		if sym, _ := c.b.Resolve(n); sym == nil {
 			c.unresolvedValue(n.Name, n, n.GetPos(), c.b.LookupScope(n))
+		} else if evolvingDecl(sym) && !c.implicitAnyReported[n] {
+			c.TypeOf(n) // a read in another function is TS7005
 		}
 	}
 	ast.ForEachChild(n, func(ch ast.Node) bool {
@@ -268,18 +330,238 @@ func (c *Checker) declaredReturn(fn ast.Node, ta *ast.TypeAnnotation, wrapped bo
 	return t
 }
 
+// checkReturnPaths is tsc's checkAllCodePathsInNonVoidFunctionReturnOrThrow
+// for a function with a return annotation and a block body: one that can
+// complete without a value must allow undefined. A generator's annotation
+// must be an iterator type (the yields are what it produces).
+func (c *Checker) checkReturnPaths(fn ast.Node, ta *ast.TypeAnnotation, body *ast.BlockStatement, async, generator bool) {
+	if c.opts.CompatJS() || ta == nil || ta.TypeNode() == nil || body == nil {
+		return
+	}
+	if _, pred := ta.TypeNode().(*ast.TypePredicate); pred {
+		return
+	}
+	// Resolve the annotation only when the answer is needed: a generator's
+	// named iterator type needs no resolving, and a body whose end is
+	// unreachable needs no return type. (Resolving every annotation also
+	// expands types the rest of the check never asks for.)
+	if generator && iteratorAnnotation(ta.TypeNode()) || !generator && !c.endReachable(body) {
+		return
+	}
+	scope := c.b.ScopeOf(fn)
+	if scope == nil {
+		scope = c.b.Module
+	}
+	t := c.typeFromNode(ta.TypeNode(), scope)
+	if c.Unanswered(t) {
+		return
+	}
+	pos := ta.TypeNode().GetPos()
+	if generator {
+		if !c.iteratorLike(t) {
+			gen := "Generator<any, any, unknown>"
+			if async {
+				gen = "AsyncGenerator<any, any, unknown>"
+			}
+			c.report(diag.NotAssignable, pos, gen, t)
+		}
+		return
+	}
+	if async {
+		t = c.awaited(t, 0)
+		if c.Unanswered(t) {
+			return
+		}
+	}
+	if t.Flags&(Any|Undefined) != 0 || c.maybeVoid(t) || !c.endReachable(body) {
+		return
+	}
+	switch {
+	case t.Flags&Never != 0:
+		c.report(diag.NeverReachableEnd, pos)
+	case !hasReturn(body):
+		c.report(diag.MustReturnValue, pos)
+	case !c.assignable(c.undefinedT, t):
+		c.report(diag.LacksEndingReturn, pos)
+	}
+}
+
+// checkGetterReturns is tsc's TS2378: a getter whose end is reachable and
+// that has no return statement at all.
+func (c *Checker) checkGetterReturns(body *ast.BlockStatement, pos ast.Pos) {
+	if c.opts.CompatJS() || body == nil || hasReturn(body) || !c.endReachable(body) {
+		return
+	}
+	c.report(diag.GetterMustReturn, pos)
+}
+
+// iteratorAnnotation reports n as a generator annotation tsc accepts by its
+// name alone: an iterator type of the standard library, any or unknown.
+func iteratorAnnotation(n ast.TypeNode) bool {
+	switch t := n.(type) {
+	case *ast.KeywordType:
+		return t.Keyword == "any" || t.Keyword == "unknown"
+	case *ast.TypeReference:
+		if len(t.Qualifier) > 0 {
+			return false
+		}
+		switch t.Name {
+		case "Generator", "AsyncGenerator", "Iterable", "IterableIterator", "Iterator",
+			"AsyncIterable", "AsyncIterableIterator", "AsyncIterator", "IteratorObject", "AsyncIteratorObject":
+			return true
+		}
+	}
+	return false
+}
+
+// maybeVoid reports t as void or a union with a void member (tsc's
+// maybeTypeOfKind(t, Void)).
+func (c *Checker) maybeVoid(t *Type) bool {
+	if t.Flags&Void != 0 {
+		return true
+	}
+	if t.Flags&Union != 0 {
+		for _, m := range t.Types {
+			if m.Flags&Void != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // checkParams checks each annotated parameter's default value.
 func (c *Checker) checkParams(params []ast.Param, fn ast.Node) {
 	scope := c.b.ScopeOf(fn)
 	if scope == nil {
 		scope = c.b.Module
 	}
-	for _, p := range params {
-		if p.Default == nil || p.Type == nil || p.Type.TypeNode() == nil {
+	for i, p := range params {
+		if p.Type == nil && p.Default == nil && p.ArrayPattern == nil && p.ObjectPattern == nil &&
+			p.Name != "this" && p.Pos.Line > 0 && !c.opts.CompatJS() && !c.contextuallyTyped(fn, i) && !c.setterOfGetter(fn) {
+			// noImplicitAny (TS7006, TS7019 for a rest).
+			if p.Rest {
+				c.report(diag.RestParamImplicitAny, p.Pos, p.Name)
+			} else {
+				c.report(diag.ParamImplicitAny, p.Pos, p.Name)
+			}
+		}
+		if p.Type == nil && p.Default == nil && (p.ArrayPattern != nil || p.ObjectPattern != nil) &&
+			p.Pos.Line > 0 && !c.opts.CompatJS() && !c.contextuallyTyped(fn, i) {
+			// noImplicitAny on a destructuring parameter: each binding
+			// element without a default (TS7031).
+			c.reportImplicitAnyLeaves(p.ArrayPattern, p.ObjectPattern, p.Pos)
+		}
+		if p.Default == nil {
+			continue
+		}
+		if p.Type == nil || p.Type.TypeNode() == nil {
+			// An unannotated default is checked as it is written, called or
+			// not (its names, its own expression errors).
+			c.checkExpr(p.Default)
 			continue
 		}
 		c.checkAssign(p.Default, c.typeFromNode(p.Type.TypeNode(), scope), diag.NotAssignable, p.Default.GetPos())
 	}
+}
+
+// reportImplicitAnyLeaves reports TS7031 for each binding element of an
+// unannotated destructuring parameter that has no default of its own.
+func (c *Checker) reportImplicitAnyLeaves(elems []ast.ArrayPatternElem, props []ast.DestructProp, pos ast.Pos) {
+	for _, e := range elems {
+		switch {
+		case e.SubArray != nil || e.SubObject != nil:
+			c.reportImplicitAnyLeaves(e.SubArray, e.SubObject, pos)
+		case e.Name != "" && e.Default == nil && !e.Rest:
+			c.report(diag.BindingImplicitAny, pos, e.Name)
+		}
+	}
+	for _, p := range props {
+		switch {
+		case p.SubArray != nil || p.SubObject != nil:
+			c.reportImplicitAnyLeaves(p.SubArray, p.SubObject, pos)
+		case p.Local != "" && p.Default == nil && !p.Rest:
+			c.report(diag.BindingImplicitAny, pos, p.Local)
+		}
+	}
+}
+
+// yieldResultImplicitAny reports tsc's TS7057: a `yield` whose value is
+// used, in a generator with neither a declared return type nor a contextual
+// one, implicitly results in any.
+func (c *Checker) yieldResultImplicitAny(y *ast.YieldExpression) bool {
+	if y.Delegate {
+		return false // `yield*` results in its delegate's return type
+	}
+	// A context types it (`const v: string = yield`, `f<string>(yield)`).
+	if ct := c.contextualType(y); ct != nil && !c.Unanswered(ct) && ct.Flags&Any == 0 {
+		return false
+	}
+	switch p := c.parentOf(y).(type) {
+	case *ast.ObjectLiteral, *ast.ClassDeclaration, *ast.ImportCallExpression,
+		*ast.ArrayDestructuring, *ast.ObjectDestructuring:
+		// A computed key, a decorator, an `import()` specifier, a binding
+		// pattern: positions tsc types by context this checker does not
+		// model yet.
+		return false
+	case *ast.VarDeclaration:
+		if p.TypeAnnot != nil {
+			return false // annotated, though its type may not be answered (`T`)
+		}
+	case *ast.ExpressionStatement:
+		return false
+	case *ast.SequenceExpression:
+		if len(p.Exprs) > 0 && p.Exprs[len(p.Exprs)-1] != ast.Expression(y) {
+			return false
+		}
+	case *ast.UnaryExpression:
+		if p.Op == "void" {
+			return false
+		}
+	case *ast.ForStatement:
+		for _, u := range p.Update {
+			if u == ast.Expression(y) {
+				return false // an update's value is never used
+			}
+		}
+	}
+	for n := c.parentOf(y); n != nil; n = c.parentOf(n) {
+		switch f := n.(type) {
+		case *ast.FunctionDeclaration:
+			return f.ReturnType == nil
+		case *ast.FunctionExpression:
+			if f.RetType != nil {
+				return false
+			}
+			ct := c.contextualType(f)
+			return ct == nil || c.Unanswered(ct)
+		case *ast.ArrowFunction:
+			return false
+		}
+	}
+	return false
+}
+
+// setterOfGetter reports whether fn is a set accessor whose class declares a
+// get accessor of the same name: its parameter has the getter's type.
+func (c *Checker) setterOfGetter(fn ast.Node) bool {
+	fd, ok := fn.(*ast.FunctionDeclaration)
+	if !ok || fd.AccessorKind != "set" {
+		return false
+	}
+	for n := c.parentOf(fn); n != nil; n = c.parentOf(n) {
+		cd, ok := n.(*ast.ClassDeclaration)
+		if !ok {
+			continue
+		}
+		for _, m := range cd.Methods {
+			if m.AccessorKind == "get" && m.Name == fd.Name && m.IsStatic == fd.IsStatic {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // checkOverrides reports a member of a derived class that is not assignable
@@ -315,6 +597,138 @@ func (c *Checker) checkOverrides(cd *ast.ClassDeclaration) {
 	}
 }
 
+// checkImplements reports a class whose instance type is not assignable to
+// an interface (or class, or object type alias) it implements (TS2420).
+func (c *Checker) checkImplements(cd *ast.ClassDeclaration) {
+	if len(cd.Implements) == 0 || len(cd.TypeParams) > 0 {
+		return
+	}
+	sym := c.symbolOf(cd)
+	if sym == nil {
+		return
+	}
+	inst := c.instanceType(sym)
+	if inst == nil || c.Unanswered(inst) {
+		return
+	}
+	for _, name := range cd.Implements {
+		if strings.ContainsAny(name, "<.") {
+			continue // a generic or qualified one: its arguments are not kept
+		}
+		isym := resolveTypeName(name, sym.Scope)
+		if isym == nil {
+			continue
+		}
+		var target *Type
+		switch {
+		case isym.Flags&binder.Interface != 0:
+			target = c.interfaceOf(isym, nil)
+		case isym.Flags&binder.Class != 0:
+			target = c.instanceOf(isym, nil)
+		case isym.Flags&binder.TypeAlias != 0:
+			target = c.aliasOf(isym, nil)
+		}
+		if target == nil || c.Unanswered(target) || hasTypeParam(target) {
+			continue
+		}
+		if !c.assignable(inst, target) {
+			c.report(diag.IncorrectlyImplements, cd.GetPos(), sourceName(cd.Name), sourceName(name))
+		}
+	}
+}
+
+// checkOverrideModifiers reports a member written `override` in a class
+// without a base (TS4112) or whose base does not declare it (TS4113): an
+// instance member against the base's instance type, a static one against
+// the base's constructor.
+func (c *Checker) checkOverrideModifiers(cd *ast.ClassDeclaration) {
+	type member struct {
+		name   string
+		pos    ast.Pos
+		static bool
+	}
+	var marked []member
+	for _, m := range cd.Methods {
+		if m.IsOverride {
+			marked = append(marked, member{m.Name, m.GetPos(), m.IsStatic})
+		}
+	}
+	for _, f := range cd.Fields {
+		if f.Override {
+			marked = append(marked, member{f.Name, f.Pos, f.Static})
+		}
+	}
+	if len(marked) == 0 {
+		return
+	}
+	if cd.BaseClass == "" {
+		for _, m := range marked {
+			c.report(diag.OverrideNoBase, m.pos, sourceName(cd.Name))
+		}
+		return
+	}
+	sym := c.symbolOf(cd)
+	if sym == nil {
+		return
+	}
+	base := c.baseInstance(cd, sym)
+	var statics *Type
+	if vsym := lookupName(cd.BaseClass, sym.Scope); vsym != nil {
+		statics = c.typeOfSymbol(vsym)
+	} else if vsym := c.builtinImport(cd.BaseClass); vsym != nil {
+		statics = c.typeOfSymbol(vsym)
+	}
+	for _, m := range marked {
+		side := base
+		if m.static {
+			side = statics
+		}
+		if side == nil || c.Unanswered(side) {
+			continue
+		}
+		if side.Prop(m.name) == nil {
+			c.report(diag.OverrideNotInBase, m.pos, sourceName(cd.BaseClass))
+		}
+	}
+}
+
+// checkDerivedSuper reports a derived class's constructor that never calls
+// super() (TS2377).
+func (c *Checker) checkDerivedSuper(cd *ast.ClassDeclaration) {
+	if cd.BaseClass == "" || cd.Constructor == nil || cd.Constructor.Body == nil {
+		return
+	}
+	found := false
+	ast.Inspect(cd.Constructor.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ClassDeclaration, *ast.ClassExpression:
+			return false
+		case *ast.CallExpression:
+			if _, ok := n.Callee.(*ast.SuperExpression); ok {
+				found = true
+			}
+		}
+		return !found
+	})
+	if !found {
+		c.report(diag.DerivedNoSuper, cd.Constructor.GetPos())
+	}
+}
+
+// ctorAssigned is the type cd's constructor assigns to this.name, or
+// unanswered when it assigns none.
+func (c *Checker) ctorAssigned(cd *ast.ClassDeclaration, name string) *Type {
+	if cd.Constructor == nil || cd.Constructor.Body == nil {
+		return c.unanswered
+	}
+	for _, p := range c.constructorFields(cd) {
+		if p.Name == name {
+			return p.Type
+		}
+	}
+	return c.unanswered
+}
+
 // checkClassFields checks each annotated field's initializer.
 func (c *Checker) checkClassFields(cd *ast.ClassDeclaration) {
 	if len(cd.TypeParams) > 0 {
@@ -325,6 +739,11 @@ func (c *Checker) checkClassFields(cd *ast.ClassDeclaration) {
 		return
 	}
 	for _, f := range cd.Fields {
+		if f.Initializer == nil && f.Type == nil && !f.Static && f.Pos.Line > 0 && !c.opts.CompatJS() &&
+			c.Unanswered(c.ctorAssigned(cd, f.Name)) {
+			// Neither typed nor assigned by the constructor (TS7008).
+			c.report(diag.MemberImplicitAny, f.Pos, sourceName(f.Name))
+		}
 		if f.Initializer == nil || f.Type == nil || f.Type.TypeNode() == nil {
 			continue
 		}
@@ -429,6 +848,17 @@ func (c *Checker) reportMissing(missing []string, src, target *Type, m *diag.Mes
 // a constant, TS2630 a function, TS2629 a class, TS2628 an enum); it
 // reports whether the target is one a value may be stored to.
 func (c *Checker) checkTarget(target ast.Expression) bool {
+	if m, ok := target.(*ast.MemberExpression); ok {
+		// A read-only property of an object type (a getter without a
+		// setter, a `Readonly<T>` member) takes no write (TS2540).
+		if ot := c.TypeOf(m.Object); !c.Unanswered(ot) && ot.Flags&Object != 0 && ot.Kind == Anonymous {
+			if p := ot.Prop(m.Property); p != nil && p.Readonly {
+				c.report(diag.ReadonlyProperty, m.GetPos(), m.Property)
+				return false
+			}
+		}
+		return true
+	}
 	id, ok := target.(*ast.Identifier)
 	if !ok {
 		return true
@@ -561,7 +991,14 @@ var objectProto = map[string]bool{
 // object literal type, interface or class instance it models whole.
 func (c *Checker) checkProperty(e *ast.MemberExpression) {
 	if !e.Optional {
-		c.checkNonNull(e.Object)
+		c.checkReceiver(e.Object)
+	}
+	// `never` (a value flow proves cannot exist) has no members.
+	// (A `x!` of a null is never too, but tsc reads its members unchecked.)
+	if _, nonNull := e.Object.(*ast.NonNullExpression); nonNull {
+	} else if obj := c.TypeOf(e.Object); !c.Unanswered(obj) && obj.Flags&Never != 0 && obj.Flags&Union == 0 {
+		c.report(diag.PropertyNotExist, e.GetPos(), e.Property, obj)
+		return
 	}
 	if objectProto[e.Property] || strings.HasPrefix(e.Property, "#") || strings.HasPrefix(e.Property, "__kml_") {
 		return // Object.prototype's, a private name's, or this compiler's own
@@ -597,6 +1034,45 @@ func (c *Checker) checkProperty(e *ast.MemberExpression) {
 	if obj.Prop(e.Property) == nil && obj.StringIndex == nil {
 		c.report(diag.PropertyNotExist, e.GetPos(), e.Property, obj)
 	}
+}
+
+// checkIndexKey reports an element access by a constant key (a string or
+// number literal, a const holding one, or a const `unique symbol`) that the
+// object's type has neither as a member nor through an index signature
+// (TS7053), for the types checkProperty models whole.
+func (c *Checker) checkIndexKey(e *ast.IndexExpression) {
+	key, literal := c.accessKey(e.Index)
+	if !literal || objectProto[key] || strings.HasPrefix(key, "__kml_") {
+		return
+	}
+	obj := c.TypeOf(e.Object)
+	if c.Unanswered(obj) || obj.Flags&Object == 0 || obj.Flags&Union != 0 || nominalOpen(obj) {
+		return
+	}
+	switch obj.Kind {
+	case Anonymous, Interface, Instance:
+	default:
+		return
+	}
+	if obj.Symbol != nil && c.inLibrary(obj.Symbol.Scope) {
+		return
+	}
+	if obj.Prop(key) != nil {
+		return
+	}
+	sym := strings.HasPrefix(key, ast.SymbolMemberPrefix)
+	if !sym && obj.StringIndex != nil {
+		return
+	}
+	kt := c.TypeOf(e.Index)
+	if !sym && obj.NumberIndex != nil && kt.Flags&(Number|NumberLiteral) != 0 {
+		return
+	}
+	shown := kt.String()
+	if sym {
+		shown = "unique symbol"
+	}
+	c.report(diag.IndexImplicitAny, e.GetPos(), shown, obj)
 }
 
 // classDecls counts sym's class declarations: more than one is two
@@ -776,11 +1252,48 @@ func (c *Checker) checkCall(e *ast.CallExpression) {
 			return
 		}
 	}
+	if sig := c.boundCallSignature(e); sig != nil {
+		c.checkSignatureCall(e, sig)
+		return
+	}
 	fn := c.signaturesOf(c.TypeOf(e.Callee), false)
 	if c.Unanswered(fn) || fn.Flags&Object == 0 || fn.Kind != Function {
 		return
 	}
 	c.checkSignatureCall(e, fn)
+}
+
+// boundCallSignature is what `f.call(thisArg, …)` / `f.apply(thisArg, args)`
+// is checked against where f has one non-generic signature: CallableFunction
+// instantiated by it (strictBindCallApply), `(thisArg: T, ...params) => R` /
+// `(thisArg: T, args: [params]) => R`. An apply over optional or rest
+// parameters (a tuple with optional elements) is not modelled.
+func (c *Checker) boundCallSignature(e *ast.CallExpression) *Type {
+	if c.boundCallResult(e) == nil {
+		return nil
+	}
+	m := e.Callee.(*ast.MemberExpression)
+	ft := c.TypeOf(m.Object)
+	this := ft.ThisType
+	if this == nil {
+		this = c.unknownT
+	}
+	if m.Property == "call" {
+		params := append([]*Type{this}, ft.Params...)
+		var optionals []bool
+		if len(ft.optionals) > 0 {
+			optionals = append([]bool{false}, ft.optionals...)
+		}
+		return c.in.function(params, optionals, ft.restParam, ft.Result, nil, nil)
+	}
+	if ft.restParam || ft.MinArgs() != len(ft.Params) {
+		return nil
+	}
+	if len(ft.Params) == 0 {
+		// `f.apply(thisArg)` or with an empty argument list.
+		return c.in.function([]*Type{this, c.in.tuple(nil)}, []bool{false, true}, false, ft.Result, nil, nil)
+	}
+	return c.in.function([]*Type{this, c.in.tuple(ft.Params)}, nil, false, ft.Result, nil, nil)
 }
 
 // checkSignatureCall checks a call's arguments against fn, a function or
@@ -809,19 +1322,15 @@ func (c *Checker) checkSignatureCall(e *ast.CallExpression, fn *Type) {
 			c.report(diag.ThisContext, e.Callee.GetPos(), c.voidT, fn.ThisType)
 		}
 	}
-	min, max := 0, len(fn.Params)
-	for i := range fn.Params {
-		switch {
-		case fn.restParam && i == len(fn.Params)-1:
-			max = -1
-		case i < len(fn.optionals) && fn.optionals[i]:
-		default:
-			min = i + 1
-		}
+	min, max := fn.MinArgs(), len(fn.Params)
+	if fn.restParam {
+		max = -1
 	}
 	if len(e.Args) < min {
 		if max < 0 {
 			c.report(diag.ArgCountAtLeast, e.Callee.GetPos(), min, len(e.Args))
+		} else if len(e.Args) == 0 && c.isPromiseResolve(e.Callee) {
+			c.report(diag.PromiseResolveArity, e.Callee.GetPos(), arity(min, max), len(e.Args))
 		} else {
 			c.report(diag.ArgCount, e.Callee.GetPos(), arity(min, max), len(e.Args))
 		}
@@ -840,10 +1349,18 @@ func (c *Checker) checkSignatureCall(e *ast.CallExpression, fn *Type) {
 			c.checkInferredConstraints(e, fn)
 		}
 		// A parameter whose type names no type parameter is checked as in
-		// a plain call (`byteOffset?: number` of `new DataView<T>(…)`).
+		// a plain call (`byteOffset?: number` of `new DataView<T>(…)`). A
+		// primitive passed for a function-typed one fails under every
+		// instantiation (`setTimeout(5)`).
 		for i, a := range e.Args {
-			if p := paramAt(fn, i); p != nil && !hasTypeParam(p) {
+			p := paramAt(fn, i)
+			if p == nil {
+				continue
+			}
+			if !hasTypeParam(p) {
 				c.checkAssign(a, p, diag.ArgNotAssignable, startOf(a))
+			} else if c.primitiveForFunction(a, p) {
+				c.report(diag.ArgNotAssignable, startOf(a), c.TypeOf(a), p)
 			}
 		}
 		return
@@ -1098,41 +1615,61 @@ func (c *Checker) checkOperator(e *ast.BinaryExpression) {
 		c.checkNonNull(e.Left)
 		c.checkNonNull(e.Right)
 		return
+	}
+	c.checkArithmetic(e.Op, e.Op, e.Left, e.Right, l, r)
+}
+
+// checkArithmetic checks the operands of the arithmetic, bitwise or `+`
+// operator op (written as shown, `+=` for a compound assignment) and
+// returns its result type, nil where an operand was reported or the result
+// is not decided here (any, unknown, a type parameter).
+func (c *Checker) checkArithmetic(op, shown string, left, right ast.Expression, l, r *Type) *Type {
+	switch op {
 	case "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", ">>>":
 		// Each operand must be a value first (checkNonNullType), then a
 		// number.
-		nl, nr := c.checkNonNull(e.Left), c.checkNonNull(e.Right)
+		nl, nr := c.checkNonNull(left), c.checkNonNull(right)
 		if nl == nil || nr == nil {
-			return
+			return nil
 		}
 	case "+":
 		if !c.Unanswered(l) && !c.Unanswered(r) && l.Flags&Any == 0 && r.Flags&Any == 0 && !isStringLike(l) && !isStringLike(r) {
-			if nl, nr := c.checkNonNull(e.Left), c.checkNonNull(e.Right); nl == nil || nr == nil {
-				return
+			if nl, nr := c.checkNonNull(left), c.checkNonNull(right); nl == nil || nr == nil {
+				return nil
 			}
 		}
+	default:
+		return nil
 	}
 	if c.Unanswered(l) || c.Unanswered(r) || !plainOperand(l) || !plainOperand(r) {
-		return
+		return nil
 	}
-	switch e.Op {
+	switch op {
 	case "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", ">>>":
-		if (e.Op == "&" || e.Op == "|" || e.Op == "^") && allMembers(l, BooleanLike) && allMembers(r, BooleanLike) {
-			return // TypeScript's TS2447 ("use && instead"), not reported here
+		if (op == "&" || op == "|" || op == "^") && allMembers(l, BooleanLike) && allMembers(r, BooleanLike) {
+			return nil // TypeScript's TS2447 ("use && instead"), not reported here
 		}
 		lok, rok := arithmetic(l), arithmetic(r)
 		if !lok {
-			c.report(diag.ArithmeticLeft, e.Left.GetPos())
+			c.report(diag.ArithmeticLeft, left.GetPos())
 		}
 		if !rok {
-			c.report(diag.ArithmeticRight, e.Right.GetPos())
+			c.report(diag.ArithmeticRight, right.GetPos())
 		}
 		if lok && rok && mixesBigInt(l, r) {
-			c.report(diag.OperatorNotApplied, e.Left.GetPos(), e.Op, widen(c, l), widen(c, r))
+			c.report(diag.OperatorNotApplied, left.GetPos(), shown, widen(c, l), widen(c, r))
+			return nil
 		}
+		if !lok || !rok {
+			return nil
+		}
+		if isBigIntLike(l) && isBigIntLike(r) {
+			return c.bigintT
+		}
+		return c.numT
 	case "+":
 		if isStringLike(l) || isStringLike(r) {
-			return
+			return c.strT
 		}
 		if !arithmetic(l) || !arithmetic(r) || mixesBigInt(l, r) {
 			// tsc names the operands as typed when a bigint is involved,
@@ -1141,9 +1678,15 @@ func (c *Checker) checkOperator(e *ast.BinaryExpression) {
 			if !isBigIntLike(l) && !isBigIntLike(r) {
 				l, r = widen(c, l), widen(c, r)
 			}
-			c.report(diag.OperatorNotApplied, e.Left.GetPos(), e.Op, l, r)
+			c.report(diag.OperatorNotApplied, left.GetPos(), shown, l, r)
+			return nil
 		}
+		if isBigIntLike(l) && isBigIntLike(r) {
+			return c.bigintT
+		}
+		return c.numT
 	}
+	return nil
 }
 
 // plainOperand reports whether t is an operand this check decides: not any
@@ -1280,14 +1823,22 @@ func nullableUnit(t *Type) bool {
 // (`x -= 1` as `x - 1`): each must be a value, and a number for arithmetic.
 func (c *Checker) checkCompound(op string, left, right ast.Expression) {
 	l, r := c.TypeOf(left), c.TypeOf(right)
-	switch op {
-	case "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", ">>>":
-		c.checkNonNull(left)
-		c.checkNonNull(right)
-	case "+":
-		if !c.Unanswered(l) && !c.Unanswered(r) && l.Flags&Any == 0 && r.Flags&Any == 0 && !isStringLike(l) && !isStringLike(r) {
-			c.checkNonNull(left)
-			c.checkNonNull(right)
+	res := c.checkArithmetic(op, op+"=", left, right, l, r)
+	if res == nil {
+		return
+	}
+	// tsc's checkAssignmentOperator: the result is stored to the left.
+	switch left.(type) {
+	case *ast.Identifier, *ast.MemberExpression:
+		target := c.writeType(left)
+		if c.Unanswered(target) || target.Flags&Any != 0 {
+			return
+		}
+		if _, id := left.(*ast.Identifier); id {
+			target = widen(c, target) // as `x = x + 1` assigns to x's base type
+		}
+		if c.assignableTo(res, target) == no {
+			c.report(diag.NotAssignable, left.GetPos(), res, c.displayTarget(res, target))
 		}
 	}
 }
@@ -1603,4 +2154,122 @@ func (c *Checker) displayTarget(src, target *Type) *Type {
 		return nn
 	}
 	return target
+}
+
+// checkVarRedeclared reports a `var` declaration node of name whose type is
+// not the one the variable's first declaration gave it (TS2403). A
+// declaration with neither a type nor an initializer takes the variable's.
+func (c *Checker) checkVarRedeclared(node ast.Node, name string, pos ast.Pos) {
+	sym := c.symbolOf(node)
+	if sym == nil || sym.Name != name || len(sym.Declarations) < 2 {
+		return
+	}
+	var self binder.Declaration
+	first := true
+	for i, d := range sym.Declarations {
+		if d.Node == node {
+			self, first = d, i == 0
+			break
+		}
+	}
+	if first || self.Node == nil {
+		return
+	}
+	want := c.typeOfSymbol(sym)
+	got := c.declType(sym, self)
+	// tsc's identity relation, approximated as assignability both ways: a
+	// structurally identical type (an intersection and its flattening, a
+	// mapped type and its expansion) is the same, however it is interned.
+	if c.Unanswered(want) || c.Unanswered(got) || want == got ||
+		c.assignableTo(got, want) != no && c.assignableTo(want, got) != no {
+		return
+	}
+	// Only where the checker's types are exact: primitives, literals and
+	// unions and arrays of them. An object type (a mapped `Required<T>`,
+	// an intersection) may be identical to tsc and not to this checker.
+	if !c.exactForIdentity(want) || !c.exactForIdentity(got) {
+		// … except an object type against a primitive one, which no
+		// identity makes the same.
+		ew, eg := c.exactForIdentity(want), c.exactForIdentity(got)
+		if !(ew && got.Flags&Object != 0 || eg && want.Flags&Object != 0) {
+			return
+		}
+	}
+	c.report(diag.VarRedeclaredType, pos, sourceName(name), want, got)
+}
+
+// exactForIdentity reports a type whose identity this checker decides as
+// tsc does: a primitive or literal, or a union, array or tuple of them.
+func (c *Checker) exactForIdentity(t *Type) bool {
+	switch {
+	case t == nil || c.Unanswered(t):
+		return false
+	case t.Flags&Union != 0:
+		for _, m := range t.Types {
+			if !c.exactForIdentity(m) {
+				return false
+			}
+		}
+		return true
+	case t.Flags&Object != 0 && t.Kind == Array:
+		return c.exactForIdentity(t.Elem)
+	case t.Flags&Object != 0 && t.Kind == Tuple:
+		for _, el := range t.Elems {
+			if !c.exactForIdentity(el) {
+				return false
+			}
+		}
+		return true
+	case t.Flags&(Object|TypeParam|Deferred|NonPrimitive) != 0:
+		return false
+	}
+	return true
+}
+
+// evolvingDecl reports whether sym is declared by one unannotated variable
+// declaration without a value (a binding that may evolve).
+func evolvingDecl(sym *binder.Symbol) bool {
+	if len(sym.Declarations) != 1 {
+		return false
+	}
+	v, ok := sym.Declarations[0].Node.(*ast.VarDeclaration)
+	if !ok || v.TypeAnnot != nil || v.Ambient {
+		return false
+	}
+	a, empty := v.Init.(*ast.ArrayLiteral)
+	return v.Init == nil || empty && len(a.Elements) == 0 // `[]`: an evolving array
+}
+
+// isPromiseResolve reports tsc's isPromiseResolveArityError callee: the
+// first parameter of an executor passed to the global `new Promise`.
+func (c *Checker) isPromiseResolve(callee ast.Expression) bool {
+	id, ok := callee.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+	sym, _ := c.b.Resolve(id)
+	if sym == nil || len(sym.Declarations) != 1 {
+		return false
+	}
+	fn := sym.Declarations[0].Node
+	var first string
+	switch f := fn.(type) {
+	case *ast.ArrowFunction:
+		if len(f.Params) > 0 {
+			first = f.Params[0].Name
+		}
+	case *ast.FunctionExpression:
+		if len(f.Params) > 0 {
+			first = f.Params[0].Name
+		}
+	}
+	if first != id.Name {
+		return false
+	}
+	n, ok := c.parentOf(fn).(*ast.NewExpression)
+	if !ok || len(n.Args) == 0 || ast.Node(n.Args[0]) != fn {
+		return false
+	}
+	target := c.b.NewTarget(n)
+	return target != nil && target.Name == "Promise" && c.inLibrary(target.Scope)
 }

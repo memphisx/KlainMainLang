@@ -8,6 +8,7 @@ import {
     validateNumber, validateBoolean, validateOneOf, validatePort, validateHints, emitInvalidHostnameWarning,
     getDefaultResultOrder, setDefaultResultOrder as setOrder, validDnsOrders, validFamilies, invalidArgType,
     invalidArgValue, missingArgs,
+    getDefaultResolver as sharedDefaultResolver, setDefaultResolver as setSharedDefaultResolver,
 } from './internal_dns_utils';
 import { resolveMap } from './internal_dns_callback_resolver';
 import type {
@@ -175,10 +176,17 @@ export class Resolver extends ResolverBase {
 }
 
 // The default resolver the module's own resolve functions use.
+// One channel is the default for both dns and dns/promises (Node's
+// bindDefaultResolver over internal/dns/utils' default): this module's
+// resolver object queries on that shared channel.
 let defaultResolver: Resolver | undefined;
 
 function getDefaultResolver(): Resolver {
-    if (defaultResolver === undefined) defaultResolver = new Resolver();
+    if (defaultResolver === undefined) {
+        defaultResolver = new Resolver();
+        if (sharedDefaultResolver() === undefined) setSharedDefaultResolver(defaultResolver);
+    }
+    defaultResolver._handle = sharedDefaultResolver()._handle;
     return defaultResolver;
 }
 
@@ -187,7 +195,7 @@ export function setServers(servers: readonly string[]): void;
 export function setServers(servers: any): void {
     const resolver = new Resolver();
     resolver.setServers(servers);
-    defaultResolver = resolver;
+    setSharedDefaultResolver(resolver);
 }
 export function resolve(hostname: string): Promise<string[]>;
 export function resolve(hostname: string, rrtype: 'A' | 'AAAA' | 'CNAME' | 'NS' | 'PTR'): Promise<string[]>;

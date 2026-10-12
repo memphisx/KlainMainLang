@@ -221,19 +221,28 @@ console.log("done");
 `, "true\nfalse\ndone")
 }
 
-func TestE2EBareClassFieldDefaultsToNumber(t *testing.T) {
-	// ADR-00474: a bare field follows the unannotated-parameter precedent.
-	assertOutput(t, `
+func TestE2EBareClassField(t *testing.T) {
+	// ADR-01427: a bare field has the type its constructor assigns, else an
+	// implicit any — TS7008 in the strict lane (tsc --strict), any in the js
+	// lane.
+	src := `
 class C {
     x;
     y;
     constructor() { this.x = 1; }
-    sum(): number { return this.x + this.y; }
+    sum() { return this.x + this.y; }
 }
 const c = new C();
 c.y = 41;
 console.log(c.sum());
-`, "42")
+c.y = "!";
+console.log(c.sum());
+`
+	_, err := parseAndCompile(src)
+	if err == nil || !strings.Contains(err.Error(), "4:5: member 'y' implicitly has an 'any' type") || strings.Contains(err.Error(), "member 'x'") {
+		t.Fatalf("want TS7008 on y only, got %v", err)
+	}
+	assertOutputCompatJS(t, src, "42\n1!")
 }
 
 func TestE2EEnumBracketAndReverseMapping(t *testing.T) {
@@ -1068,14 +1077,21 @@ console.log([1.5, 2].indexOf(2), [1, 2].includes(2));
 `)
 }
 
+// A defaulted parameter is passed as an optional one and filled by the
+// method (ADR-01480): an argument of another type reaches it converted as
+// JavaScript converts it.
+func TestE2EDataViewArgsConvertedJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `var dv = new DataView(new ArrayBuffer(4), 0); dv.setInt8(0, 7); dv.setInt16(2, 258);
+console.log(dv.getInt8(""), dv.getInt16(2, {}), dv.getInt16(2, true));
+`)
+}
+
 // Where the type check leaves a call unchecked, an argument no conversion
 // reaches is a type error at the strict emitter, never invalid IR: a
 // method's parameter, resize's length and a concat element. The program is
 // resolved without the check (as the js lane resolves) to reach the emitter.
 func TestE2EStrictEmitterRejectsUnconvertibleArgs(t *testing.T) {
 	cases := []string{
-		`var dv = new DataView(new ArrayBuffer(4), 0); console.log(dv.getInt8(""));`,
-		`var dv = new DataView(new ArrayBuffer(4), 0); console.log(dv.getInt16(0, {}));`,
 		`var ab = new ArrayBuffer(0, { maxByteLength: 4 }); ab.resize({ valueOf: function () { return {}; } });`,
 		`var fn = function () {}; console.log([].concat(fn).length);`,
 	}

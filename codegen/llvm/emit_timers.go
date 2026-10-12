@@ -1,13 +1,8 @@
-// emit_timers.go — setTimeout/clearTimeout/setInterval/clearInterval.
-// Bare global functions (like fetch/btoa/parseInt), not a namespace.
-//
-// Needs no general-purpose (I/O-multiplexing) event loop — just a
-// sleep-until-next-due queue, drained once by EmitProgram after the
-// program's own top-level code finishes (see ensureTimerRuntime below
-// for the full design). An active setInterval with
-// nothing ever calling clearInterval on it means that drain loop never
-// finishes, matching real Node's behavior: the process only exits once
-// every timer has fired-and-not-repeated or been cleared.
+// emit_timers.go — the timer binding's C source (timerssrc/timers.c, Node's
+// src/timers.cc) and the callback adaptation runtime callbacks share:
+// timerCallbackPtr turns a callback and its bound arguments into the
+// zero-argument void closure process.nextTick and the task runtime call.
+// setTimeout and the rest are lib/node/internal_timers.ts (TDD-00245).
 package llvm
 
 import (
@@ -17,10 +12,9 @@ import (
 	"KlainMainLang/ast"
 )
 
-// timerCallbackPtr evaluates and validates arg as a Memory.free-free zero-
-// argument, void-returning closure — the only callback shape this V1
-// supports, matching the fixed `call void (ptr) %fp(ptr %ep)` trampoline
-// shape __kml_timer_drain uses to call it back later.
+// timerCallbackPtr evaluates and validates arg as a zero-argument,
+// void-returning closure, binding extra as its arguments: the fixed
+// `call void (ptr) %fp(ptr %ep)` shape the runtime calls back later.
 func (e *Emitter) timerCallbackPtr(arg ast.Expression, fnName string, pos ast.Pos, extra ...ast.Expression) (string, error) {
 	val, err := e.emitExpr(arg)
 	if err != nil {
@@ -45,7 +39,7 @@ func (e *Emitter) timerCallbackPtr(arg ast.Expression, fnName string, pos ast.Po
 			if err != nil {
 				return "", err
 			}
-			if e.programUsesALS {
+			if e.programUsesALS || e.programIndependent() {
 				return e.wrapTimerClosureWithAsyncCtx(adapted.Ref), nil
 			}
 			return adapted.Ref, nil
@@ -115,119 +109,11 @@ func (e *Emitter) timerCallbackPtr(arg ast.Expression, fnName string, pos ast.Po
 	// callback so it carries the async context captured at *this* schedule point
 	// to its deferred fire (a setTimeout inside als.run(...) still sees the
 	// store). No-op when the program has no AsyncLocalStorage.
-	if e.programUsesALS {
+	if e.programUsesALS || e.programIndependent() {
 		return e.wrapTimerClosureWithAsyncCtx(val.Ref), nil
 	}
 	return val.Ref, nil
 }
-
-// timerDelayArg resolves the optional delayMs argument (0 if omitted).
-func (e *Emitter) timerDelayArg(args []ast.Expression, idx int) (string, error) {
-	if idx >= len(args) {
-		return "1", nil
-	}
-	val, err := e.emitExpr(args[idx])
-	if err != nil {
-		return "", err
-	}
-	val = e.coerce(val, TypeI64)
-	// Node's clamp (lib/internal/timers.js): a delay outside [1, 2^31-1] —
-	// including the omitted/0/negative/NaN cases — becomes 1 ms. This is what
-	// makes 20,000 sequential `setTimeout(f, 0)` take ≥ 20 s there; a flat 0
-	// here fired them all in a burst. setImmediate does not go through this.
-	tooSmall := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 1", tooSmall, val.Ref))
-	tooBig := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 2147483647", tooBig, val.Ref))
-	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", out, tooSmall, tooBig))
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 1, i64 %s", r, out, val.Ref))
-	return r, nil
-}
-
-func (e *Emitter) emitSetTimeout(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 {
-		return Value{}, fmt.Errorf("%d:%d: setTimeout takes a callback", pos.Line, pos.Col)
-	}
-	closurePtr, err := e.timerCallbackPtr(args[0], "setTimeout", pos, timerExtraArgs(args, 2)...)
-	if err != nil {
-		return Value{}, err
-	}
-	delayRef, err := e.timerDelayArg(args, 1)
-	if err != nil {
-		return Value{}, err
-	}
-	e.ensureTimerRuntime()
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_timer_schedule(ptr %s, i64 %s, i64 0)", r, closurePtr, delayRef))
-	return Value{Ref: r, Ty: TypeI64}, nil
-}
-
-func (e *Emitter) emitSetInterval(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 {
-		return Value{}, fmt.Errorf("%d:%d: setInterval takes a callback", pos.Line, pos.Col)
-	}
-	closurePtr, err := e.timerCallbackPtr(args[0], "setInterval", pos, timerExtraArgs(args, 2)...)
-	if err != nil {
-		return Value{}, err
-	}
-	delayRef, err := e.timerDelayArg(args, 1)
-	if err != nil {
-		return Value{}, err
-	}
-	e.ensureTimerRuntime()
-	r := e.freshReg()
-	// intervalMs == delayMs: the same cadence used for the first fire is
-	// reused for every subsequent one, matching real JS's setInterval.
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_timer_schedule(ptr %s, i64 %s, i64 %s)", r, closurePtr, delayRef, delayRef))
-	return Value{Ref: r, Ty: TypeI64}, nil
-}
-
-// emitSetImmediate implements setImmediate(callback): schedules callback to
-// fire via the same timer queue setTimeout/setInterval already use, with
-// delayMs hardcoded to 0 (no delay argument — real Node's setImmediate
-// doesn't take one either). Known scope narrowing, not a bug: real Node
-// guarantees a setImmediate callback fires before a same-tick
-// setTimeout(fn, 0) when both are scheduled from inside an I/O callback,
-// because its event loop has distinct phases (check vs. timers) — this
-// compiler's __kml_timer_drain is a single flat fire-time-ordered queue
-// with no phase concept, so setImmediate(fn) and setTimeout(fn, 0) are
-// genuinely indistinguishable here (both fire at "now"). Documented in
-// docs/status/TIMERS.md rather than silently assumed equivalent.
-func (e *Emitter) emitSetImmediate(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 {
-		return Value{}, fmt.Errorf("%d:%d: setImmediate takes a callback", pos.Line, pos.Col)
-	}
-	closurePtr, err := e.timerCallbackPtr(args[0], "setImmediate", pos, args[1:]...)
-	if err != nil {
-		return Value{}, err
-	}
-	e.ensureTimerRuntime()
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_timer_schedule(ptr %s, i64 0, i64 0)", r, closurePtr))
-	return Value{Ref: r, Ty: TypeI64}, nil
-}
-
-func (e *Emitter) emitClearTimer(args []ast.Expression, fnName string, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: %s takes exactly 1 argument (id)", pos.Line, pos.Col, fnName)
-	}
-	idVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	idVal = e.coerce(idVal, TypeI64)
-	e.ensureTimerRuntime()
-	e.emitInstr(fmt.Sprintf("call void @__kml_timer_clear(i64 %s)", idVal.Ref))
-	return Value{Ty: TypeVoid}, nil
-}
-
-// emitTimerFireNext: @__kml_timer_fire_next() -> i1 (fire the single
-// earliest-due pending timer, 0 when none; TDD-00087) is defined in
-// timerssrc/timers.c with the rest of the timer runtime and declared by
-// ensureTimerRuntime, so there is nothing left to emit.
-func (e *Emitter) emitTimerFireNext() {}
 
 //go:embed timerssrc/timers.c
 var timersSource string
@@ -249,26 +135,17 @@ func (e *Emitter) ensureTimerRuntime() {
 		return
 	}
 	e.usedTimers = true
-	// Generated code that co-occurs with timers leans on these decls.
-	e.ensureMalloc()
-	e.ensureRealloc()
-	e.ensureClockGettime()
-	e.emitGlobal("declare i32 @nanosleep(ptr noundef, ptr noundef)")
-	e.ensureSignalHandlerRuntime()
-	e.emitGlobal(`@__kml_timer_data = external thread_local global ptr, align 8
-@__kml_timer_len = external thread_local global i64, align 8
-@__kml_timer_cap = external thread_local global i64, align 8
-@__kml_timer_next_id = external thread_local global i64, align 8
-declare i64 @__kml_monotonic_ns()
-declare i64 @__kml_timer_schedule(ptr, i64, i64)
-declare void @__kml_timer_clear(i64)
-declare void @__kml_timer_set_ref(i64, i1)
-declare zeroext i1 @__kml_timer_has_ref(i64)
-declare void @__kml_timer_refresh(i64)
-declare zeroext i1 @__kml_timer_any_ref()
-declare zeroext i1 @__kml_timer_fire_next()
-declare void @__kml_timer_drain()
-declare void @__kml_timer_tick()`)
+	e.emitGlobal(`declare i64 @__kml_monotonic_ns()
+declare i64 @__kml_timer_next_deadline_ns()`)
+}
+
+// ensureTimerNatives links Node's timers binding (`@link timers`) and, on
+// POSIX, the loop its handles live on.
+func (e *Emitter) ensureTimerNatives() {
+	e.ensureTimerRuntime()
+	if e.opts.Target.OS() != "windows" {
+		e.ensureHTTPRuntime()
+	}
 }
 
 // emitDiscardReturnAdapter wraps a zero-argument closure that returns a value in
@@ -304,15 +181,6 @@ func (e *Emitter) emitNoArgAdapter(val Value) (Value, error) {
 	ty.FuncHasRest = false
 	ty.FuncRetType = &voidTy
 	return Value{Ref: clo, Ty: ty}, nil
-}
-
-// timerExtraArgs are the arguments a timer passes its callback: those
-// after the callback and the delay.
-func timerExtraArgs(args []ast.Expression, from int) []ast.Expression {
-	if len(args) <= from {
-		return nil
-	}
-	return args[from:]
 }
 
 // emitBoundArgsAdapter wraps a callback as a no-argument closure that calls
@@ -535,54 +403,4 @@ func (e *Emitter) emitThrowUnlessFunction(v Value, name string) {
 		e.emitTerminator("unreachable")
 	}
 	e.emitLabel(contL)
-}
-
-// The timer handle's methods (`NodeJS.Timeout`/`Immediate`, whose value is
-// the timer's id), reached through their `@intrinsic` declarations.
-func init() {
-	for _, owner := range []string{"Timeout", "Immediate"} {
-		for _, name := range []string{"ref", "unref", "hasRef", "refresh", "close"} {
-			if owner == "Immediate" && (name == "refresh" || name == "close") {
-				continue
-			}
-			name := name
-			intrinsics[owner+".prototype."+name] = intrinsic{
-				emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-					return e.emitTimerHandleCall(ex.Callee.(*ast.MemberExpression), name)
-				},
-				ty: func(e *Emitter, ex *ast.CallExpression) Type {
-					if name == "hasRef" {
-						return TypeBool
-					}
-					return e.inferExprType(ex.Callee.(*ast.MemberExpression).Object)
-				},
-			}
-		}
-	}
-}
-
-func (e *Emitter) emitTimerHandleCall(mem *ast.MemberExpression, name string) (Value, error) {
-	h, err := e.emitExpr(mem.Object)
-	if err != nil {
-		return Value{}, err
-	}
-	id := e.coerce(h, TypeI64)
-	e.ensureTimerRuntime()
-	switch name {
-	case "ref", "unref":
-		on := "true"
-		if name == "unref" {
-			on = "false"
-		}
-		e.emitInstr(fmt.Sprintf("call void @__kml_timer_set_ref(i64 %s, i1 %s)", id.Ref, on))
-	case "hasRef":
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_timer_has_ref(i64 %s)", r, id.Ref))
-		return Value{Ref: r, Ty: TypeBool}, nil
-	case "refresh":
-		e.emitInstr(fmt.Sprintf("call void @__kml_timer_refresh(i64 %s)", id.Ref))
-	default:
-		e.emitInstr(fmt.Sprintf("call void @__kml_timer_clear(i64 %s)", id.Ref))
-	}
-	return h, nil
 }

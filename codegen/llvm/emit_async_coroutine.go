@@ -40,9 +40,10 @@ import (
 )
 
 // programMayWait reports whether the program contains anything that can wait on
-// the event loop: an `await`, a `for await`, or a fetch call (whose promise
-// reactions run as coroutines), in the entry module or a worker module compiled
-// with it. It decides hasMaySuspend before any code is emitted, because runtime
+// the event loop: an `await`, a `for await`, an async callable returning a value
+// (a returned promise is awaited: async-return flattening), or a fetch call
+// (whose promise reactions run as coroutines), in the entry module or a worker
+// module compiled with it. It decides hasMaySuspend before any code is emitted, because runtime
 // functions emitted early (the fetch waits) include their coroutine-park path
 // only when it is set.
 func programMayWait(prog *ast.Program) bool {
@@ -57,6 +58,12 @@ func programMayWait(prog *ast.Program) bool {
 			if id, ok := n.Callee.(*ast.Identifier); ok && id.Name == "fetch" {
 				found = true
 			}
+		case *ast.FunctionDeclaration:
+			found = found || (n.IsAsync && n.Body != nil && returnsValue(n.Body))
+		case *ast.FunctionExpression:
+			found = found || (n.IsAsync && n.Body != nil && returnsValue(n.Body))
+		case *ast.ArrowFunction:
+			found = found || (n.IsAsync && (n.Body != nil || returnsValue(n.Block)))
 		}
 		return !found
 	}
@@ -66,6 +73,26 @@ func programMayWait(prog *ast.Program) bool {
 			ast.Inspect(st, visit)
 		}
 	}
+	return found
+}
+
+// returnsValue reports whether a function body has a `return <expr>` of its
+// own (not one inside a nested function or class).
+func returnsValue(body *ast.BlockStatement) bool {
+	if body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(body, func(c ast.Node) bool {
+		switch c := c.(type) {
+		case *ast.ReturnStatement:
+			found = found || c.Value != nil
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction,
+			*ast.ClassDeclaration, *ast.ClassExpression:
+			return false
+		}
+		return !found
+	})
 	return found
 }
 

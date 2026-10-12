@@ -29,6 +29,7 @@ void __kml_promise_settle(void *p, i64 state) {
 /* The one way anything rejects a promise: both reason slots (the payload and
  * its tag) and the settle. The others are its forms. */
 void __kml_promise_reject_with(void *p, i64 tag, i64 pay) {
+    if (F(p, KML_PROMISE_STATE, i64) != 0) return; /* the first settlement wins */
     P_V0(p) = pay;
     P_V1(p) = tag;
     __kml_promise_settle(p, 2);
@@ -59,3 +60,31 @@ void __kml_promise_adopt_runner(void *env) {
     P_V1(tgt) = P_V1(src);
     __kml_promise_settle(tgt, P_STATE(src));
 }
+
+#if defined(_WIN32)
+extern int _setjmp(void *, void *) __attribute__((returns_twice));
+#define KML_SETJMP(b) _setjmp((b), 0)
+#else
+extern int setjmp(void *) __attribute__((returns_twice));
+#define KML_SETJMP(b) setjmp(b)
+#endif
+
+extern void *__kml_push_jmpbuf(void);
+extern void __kml_pop_jmpbuf(void);
+extern i64 __kml_get_thrown_pay(void);
+extern unsigned char __kml_get_thrown_tag(void);
+
+/* The Promise constructor's call of its executor (clo, a { fn, env }
+ * closure) with p's resolving functions: a throw rejects p, unless it was
+ * already settled (its first settlement wins). */
+void __kml_promise_run_executor(void *clo, void *res, void *rej, void *p) {
+    void **c = clo;
+    void *jb = __kml_push_jmpbuf();
+    if (KML_SETJMP(jb) != 0) {
+        __kml_promise_reject_with(p, (i64)__kml_get_thrown_tag(), __kml_get_thrown_pay());
+        return;
+    }
+    ((void (*)(void *, void *, void *))c[0])(c[1], res, rej);
+    __kml_pop_jmpbuf();
+}
+

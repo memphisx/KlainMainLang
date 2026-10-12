@@ -14,15 +14,7 @@ func DateSource() string { return dateSource }
 // UsesDate reports whether the program links the Date runtime.
 func (e *Emitter) UsesDate() bool {
 	return e.usedDateNow || e.usedPerformanceNow || e.usedDateDecompose || e.usedDateNameTables ||
-		e.usedDaysFromCivil || e.usedDateCompose || e.usedDateParse
-}
-
-func (e *Emitter) ensureClockGettime() {
-	if e.usedClockGettime {
-		return
-	}
-	e.usedClockGettime = true
-	e.emitGlobal("declare i32 @clock_gettime(i32 noundef, ptr noundef)")
+		e.usedDaysFromCivil || e.usedDateCompose || e.usedDateFields || e.usedDateParse
 }
 
 // ensureDateNow declares __kml_date_now: ms since the Unix epoch.
@@ -91,6 +83,15 @@ func (e *Emitter) ensureDateNameTables() {
 
 // ensureDateCompose declares __kml_date_compose: the inverse of decompose
 // (month 1-indexed here), shared by Date.parse and the Date setters.
+func (e *Emitter) ensureDateFields() {
+	if e.usedDateFields {
+		return
+	}
+	e.usedDateFields = true
+	e.emitGlobal("declare double @__kml_date_fields(double, double, double, double, double, double, double)")
+	e.emitGlobal("declare double @__kml_date_timeclip(double)")
+}
+
 func (e *Emitter) ensureDateCompose() {
 	if e.usedDateCompose {
 		return

@@ -31,6 +31,10 @@ type Expression interface {
 
 type Program struct {
 	Body []Statement
+	// TopLevelReturns maps a `return` at a module's top level (outside any
+	// function, as CommonJS allows) to that module's last statement in Body:
+	// the return ends the module's evaluation there.
+	TopLevelReturns map[*ReturnStatement]Statement
 	// LibExports maps "<module file>:<name>" (`stream:_kmlFromWeb`) to the
 	// merged name of a top-level declaration of a builtin module written in
 	// TypeScript that the program includes, so code generation can call into
@@ -64,6 +68,9 @@ type Program struct {
 	// ThisParams records a function's `this: T` parameter annotation, which
 	// the parser drops from its parameters (it is no runtime argument).
 	ThisParams map[Node]*TypeAnnotation
+	// StaticThis maps a static member's `this`, which codegen rewrites to
+	// the class's name after binding, to that class.
+	StaticThis map[*Identifier]*ClassDeclaration
 	// EntryIsModule marks a program whose entry file is an ES module (it
 	// imports or exports), recorded before the resolver strips its imports:
 	// its top level's promise jobs run before its ticks.
@@ -388,6 +395,13 @@ func NewVarDeclarationList(decls []*VarDeclaration, pos Pos) *VarDeclarationList
 }
 
 type FunctionDeclaration struct {
+	// NamePos is the declared name's position (zero when not recorded),
+	// where TypeScript reports a diagnostic about the function itself.
+	NamePos Pos
+	// Key is a class method's computed key when it is an identifier
+	// (`[kInspect]() {}`, TDD-00246); Name is then a placeholder until code
+	// generation names the method by the const's resolved binding.
+	Key        *Identifier
 	Name       string
 	TypeParams []string // e.g. ["T"] for `function identity<T>(...)` — TDD-00010 V1, single param only
 	// TypeParamConstraints[i] is the `extends X` bound on TypeParams[i] (nil if
@@ -414,6 +428,10 @@ type FunctionDeclaration struct {
 	// Intrinsic is `/** @intrinsic name */` on a builtin `declare
 	// function`: the call is emitted inline (TDD-00230 P3.2).
 	Intrinsic string
+	// Lower is `/** @lower symbol */` on a builtin `declare function`: the
+	// call is an ordinary call of the global module function that symbol
+	// links to (TDD-00245).
+	Lower string
 	// CallSite is set by a `/** @callsite */` JSDoc annotation: a call of
 	// the function receives the call's source text (CallExpression.Source)
 	// as a hidden last argument (assert.ok's message quotes it).
@@ -432,6 +450,9 @@ type FunctionDeclaration struct {
 	IsStatic   bool
 	Visibility string // "private" / "protected" / "" (public, default)
 	IsAbstract bool
+	// IsOverride marks a method written with TS's `override` modifier: no
+	// run-time effect; the checker requires the base to declare it.
+	IsOverride bool
 	// IsOptional marks an optional method (`m?(): T;`): a signature with no
 	// body that a subclass may implement; on a class that does not, the
 	// member is undefined.
@@ -485,7 +506,9 @@ func (f *FunctionDeclaration) GetPos() Pos { return f.pos }
 func (f *FunctionDeclaration) SetPos(pos Pos) { f.pos = pos }
 
 type Param struct {
-	Name     string
+	Name string
+	// Pos is the parameter name's position, where one was parsed.
+	Pos      Pos
 	Type     *TypeAnnotation
 	Rest     bool       // true when declared with ...
 	Default  Expression // non-nil when declared with = expr
@@ -1273,6 +1296,7 @@ func NewArrowFunction(params []Param, retType *TypeAnnotation, body Expression, 
 // a named function expression is a V1 scope cut (TDD-00060).
 type FunctionExpression struct {
 	Name    string // "" for anonymous, rejected for named V1
+	NamePos Pos    // the name's position (zero when anonymous)
 	Params  []Param
 	RetType *TypeAnnotation // nil = infer
 	Body    *BlockStatement
@@ -1283,7 +1307,10 @@ type FunctionExpression struct {
 	// any other use is a clean codegen rejection.
 	IsGenerator bool
 	Pure        bool // `/** @pure */` on the binding (TDD-00128) — see FunctionDeclaration.Pure
-	pos         Pos
+	// Method marks an object literal's method, getter or setter, whose body
+	// may reference `super.x`.
+	Method bool
+	pos    Pos
 }
 
 func (*FunctionExpression) nodeMarker()   {}
@@ -1676,23 +1703,6 @@ func NewNewArrayBufferExpression(byteLength Expression, pos Pos) *NewArrayBuffer
 	return &NewArrayBufferExpression{ByteLength: byteLength, pos: pos}
 }
 
-// NewChannelExpression is `new Channel<T>(capacity)` — a klain:sync CSP channel
-// (TDD-00143). TypeArg is the element type T (nil → default i64); Capacity is
-// the buffer size (0/unbuffered when omitted).
-type NewChannelExpression struct {
-	TypeArg  *TypeAnnotation
-	Capacity Expression
-	pos      Pos
-}
-
-func (*NewChannelExpression) nodeMarker()   {}
-func (*NewChannelExpression) exprMarker()   {}
-func (n *NewChannelExpression) GetPos() Pos { return n.pos }
-
-func NewNewChannelExpression(typeArg *TypeAnnotation, capacity Expression, pos Pos) *NewChannelExpression {
-	return &NewChannelExpression{TypeArg: typeArg, Capacity: capacity, pos: pos}
-}
-
 // NewTypedArrayExpression is `new Int8Array(...)`/`new Uint8Array(...)`/.../
 // `new Float64Array(...)` — ElemKind identifies which of the 8 supported
 // constructor names matched (see docs/tdd/TDD-00018.md), and Arg is the
@@ -1752,6 +1762,9 @@ type NewExpression struct {
 	// Qualifier the namespace before it.
 	Qualified bool
 	Qualifier string
+	// QualifierPath is every segment before the class name (`new a.b.C()`:
+	// a, b); Qualifier is its last.
+	QualifierPath []string
 	// TypeArgs is non-nil only for `new ClassName<T>(args)` against a generic
 	// class (TDD-00010 V1) — nil for every non-generic `new`. Unlike a bare
 	// generic function call, `new` unambiguously starts a constructor call,
@@ -1775,7 +1788,11 @@ func NewNewExpression(className string, args []Expression, pos Pos) *NewExpressi
 
 // InterfaceDeclaration — `interface Name { field: type; ... }`
 type InterfaceDeclaration struct {
-	Name                 string
+	Name string
+	// LowerType is a builtin declaration's `/** @lowerType <layout> */`: the
+	// native layout its values have (TDD-00230 P3.2). Empty for a program's
+	// own interfaces.
+	LowerType            string
 	TypeParams           []string // e.g. ["T"] for `interface Box<T>` — TDD-00010 V1, single param only
 	TypeParamConstraints []*TypeAnnotation
 	Fields               []AnnotField
@@ -2104,6 +2121,13 @@ func NewImportCallExpression(specifier Expression, pos Pos) *ImportCallExpressio
 // AnnotField is one field in an object type annotation.
 type AnnotField struct {
 	Name string
+	// Pos is a class field's name, where one was parsed.
+	Pos Pos
+	// Key is a class field's computed key when it is an identifier
+	// (`[kRefed]: T`, TDD-00246): the const holding the symbol. Name is
+	// then a placeholder until codegen names the field by the const's
+	// resolved binding (symbolFieldName).
+	Key  *Identifier
 	Type *TypeAnnotation
 	// Optional marks a `name?: T` field (TDD-00187 Stage 2): the field's
 	// resolved type widens to `T | undefined`, and an object literal may omit
@@ -2123,6 +2147,8 @@ type AnnotField struct {
 	// constructor is rejected). Meaningful only for a ClassDeclaration's Fields;
 	// always false for interface/object-type reuse of this shared type.
 	Readonly bool
+	// Override marks a class field written with TS's `override` modifier.
+	Override bool
 	// Initializer is a class field's `= expr` default (TDD-00063 Stage 1) —
 	// nil when the field has none (a bare `x: T;`) and always nil for every
 	// non-class reuse of this shared type (interface/object-type fields,
@@ -2275,22 +2301,6 @@ type TypeAnnotation struct {
 // TypeNode returns the parsed type this annotation was converted from, or nil
 // for an annotation code generation synthesised.
 func (ta *TypeAnnotation) TypeNode() TypeNode { return ta.node }
-
-// NewWebviewExpression is `new Webview(options?)` (TDD-00142): the system
-// webview window handle. Options is the `{ title, width, height, debug }`
-// object literal (all fields optional).
-type NewWebviewExpression struct {
-	Options Expression // nil, or the options object literal
-	pos     Pos
-}
-
-func (*NewWebviewExpression) nodeMarker()   {}
-func (*NewWebviewExpression) exprMarker()   {}
-func (n *NewWebviewExpression) GetPos() Pos { return n.pos }
-
-func NewNewWebviewExpression(options Expression, pos Pos) *NewWebviewExpression {
-	return &NewWebviewExpression{Options: options, pos: pos}
-}
 
 // ArrayPatternNames is every name an array pattern binds, through nested
 // patterns and a rest element.

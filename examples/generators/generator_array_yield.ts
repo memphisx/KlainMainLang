@@ -3,7 +3,7 @@
 // round-trip through every generator slot as the inline {ptr,i64} aggregate.
 
 // yield array literals of varying length, consumed by for...of
-function* rows(): number[] {
+function* rows(): Generator<number[]> {
     yield [1, 2];
     yield [3, 4, 5];
     yield [];
@@ -13,7 +13,7 @@ for (const r of rows()) {
 }
 
 // yield an array held in a local, then read .value back manually
-function* pairs(): number[] {
+function* pairs(): Generator<number[]> {
     const a = [10, 20];
     yield a;
     yield [30];
@@ -26,11 +26,11 @@ console.log(r2.done, r2.value.join("-"));  // false 30
 console.log(it.next().done);               // true
 
 // yield* delegation forwards each inner array through the outer generator
-function* words(): string[] {
+function* words(): Generator<string[]> {
     yield ["a", "b"];
     yield ["c"];
 }
-function* deleg(): string[] {
+function* deleg(): Generator<string[]> {
     yield ["x"];
     yield* words();
     yield ["z"];
@@ -40,7 +40,7 @@ for (const w of deleg()) {
 }
 
 // async generator of arrays, drained with for await
-async function* agen(): number[] {
+async function* agen(): AsyncGenerator<number[]> {
     yield [1, 2];
     yield [3, 4, 5];
 }

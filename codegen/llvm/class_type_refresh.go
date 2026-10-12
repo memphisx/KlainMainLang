@@ -100,6 +100,7 @@ func (e *Emitter) refreshClassTypes() {
 		}
 		e.interfaces[k] = e.freshType(t, 0)
 	}
+	e.genericIfaceTypes = nil
 	for k, sym := range e.moduleGlobals {
 		sym.Ty = e.freshType(sym.Ty, 0)
 		e.moduleGlobals[k] = sym

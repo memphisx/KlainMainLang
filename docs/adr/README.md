@@ -84,7 +84,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00039](ADR-00039.md) | Implement the multi-argument new Date(year, month, ...) constructor | |
 | [00040](ADR-00040.md) | Support JSDoc @type overrides on interface fields | |
 | [00041](ADR-00041.md) | Infer return types for unannotated functions and arrow functions | Extends [ADR-00012](ADR-00012.md), [ADR-00037](ADR-00037.md); Extended by [ADR-00150](ADR-00150.md) |
-| [00042](ADR-00042.md) | Reject non-numeric arguments to unannotated parameters at call sites | Implements [TDD-00005](../tdd/TDD-00005.md) |
+| [00042](ADR-00042.md) | Reject non-numeric arguments to unannotated parameters at call sites | Implements [TDD-00005](../tdd/TDD-00005.md); superseded in the strict lane by [ADR-01428](ADR-01428.md) |
 | [00043](ADR-00043.md) | Fix forEach/HOF callbacks with console.log bodies or non-numeric elements | |
 | [00044](ADR-00044.md) | Fix array index out-of-bounds reads/writes with a runtime bounds check | |
 | [00045](ADR-00045.md) | Reject const reassignment with a Symbol.IsConst check in emitAssign | |
@@ -516,7 +516,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00471](ADR-00471.md) | ambient value declarations become real bindings | Extends the ambient-erasure ADR behind `parseAmbientDeclaration` |
 | [00472](ADR-00472.md) | conformance oracles measure under `-compat=js` shadowing | Extends [TDD-00121](../tdd/TDD-00121.md), [TDD-00075](../tdd/TDD-00075.md) |
 | [00473](ADR-00473.md) | explicit call-site type arguments (`id<string>(x)`) | Extends [TDD-00010](../tdd/TDD-00010.md)'s monomorphization; Extends [ADR-00452](ADR-00452.md)'s depth cap |
-| [00474](ADR-00474.md) | type predicates, bare class fields, ambient namespaces | Extends [ADR-00471](ADR-00471.md), [ADR-00450](ADR-00450.md); the field default follows [ADR-00042](ADR-00042.md)'s unannotated-parameter convention |
+| [00474](ADR-00474.md) | type predicates, bare class fields, ambient namespaces | Extends [ADR-00471](ADR-00471.md), [ADR-00450](ADR-00450.md); the field default follows [ADR-00042](ADR-00042.md)'s unannotated-parameter convention; the bare-field default is superseded by [ADR-01427](ADR-01427.md) |
 | [00475](ADR-00475.md) | uninitialized unions; generic-method rejection; any-return closure bug (deferred) | Extends [ADR-00454](ADR-00454.md), [ADR-00469](ADR-00469.md) |
 | [00476](ADR-00476.md) | class index-sig erasure; comma statements; ambient enums | Extends [ADR-00461](ADR-00461.md), [ADR-00471](ADR-00471.md) |
 | [00477](ADR-00477.md) | closure adapter trampolines (the any-boundary boxing fix) | Fixes the bug deferred in [ADR-00475](ADR-00475.md); Extends [ADR-00469](ADR-00469.md) |
@@ -1427,3 +1427,215 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [01382](ADR-01382.md) | A child's exit is dispatched after its streams are read | Extends [ADR-00767](ADR-00767.md), [TDD-00230](../tdd/TDD-00230.md) |
 | [01383](ADR-01383.md) | A Date in a nullable slot, setTime's TimeClip, and an Invalid Date's getters and setters | Extends [ADR-01315](ADR-01315.md), [ADR-00488](ADR-00488.md) |
 | [01384](ADR-01384.md) | CI lanes green again — library drift, nondeterministic IR, a -mm=gc leak, per-platform job layout | Extends [ADR-01326](ADR-01326.md), [ADR-01074](ADR-01074.md); refines [TDD-00179](../tdd/TDD-00179.md) |
+| [01385](ADR-01385.md) | The event loop in C, waiting through libuv | Implements [TDD-00244](../tdd/TDD-00244.md), [TDD-00240](../tdd/TDD-00240.md) |
+| [01386](ADR-01386.md) | libcurl driven through its socket API | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01385](ADR-01385.md) |
+| [01387](ADR-01387.md) | Waits outside a coroutine abort instead of driving a subset | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01386](ADR-01386.md) |
+| [01388](ADR-01388.md) | Every wait parks; one loop drives every program | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01387](ADR-01387.md) |
+| [01389](ADR-01389.md) | Signals and the pool wake on libuv handles | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01385](ADR-01385.md) |
+| [01390](ADR-01390.md) | fs.watch on uv_fs_event_t | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01389](ADR-01389.md) |
+| [01391](ADR-01391.md) | Child processes spawn through uv_spawn | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01389](ADR-01389.md) |
+| [01392](ADR-01392.md) | Stream handles on their own libuv watchers | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01391](ADR-01391.md) |
+| [01393](ADR-01393.md) | IPC child, Worker, fs.watch and signal hooks off the bridge | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01392](ADR-01392.md) |
+| [01394](ADR-01394.md) | JS timers on uv_timer_t | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01393](ADR-01393.md) |
+| [01395](ADR-01395.md) | The pool's completion port on its own uv_async_t | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01394](ADR-01394.md) |
+| [01396](ADR-01396.md) | TLS over the handle table on memory BIOs | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01395](ADR-01395.md) |
+| [01397](ADR-01397.md) | libcurl's sockets and timer on libuv handles | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01396](ADR-01396.md) |
+| [01398](ADR-01398.md) | ecdh.getPrivateKey() without leading zero bytes | Fixes the ECDH surface of `lib/node/crypto.ts` |
+| [01399](ADR-01399.md) | Dead connection-timeout IR deleted; write parks on any fd | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01397](ADR-01397.md) |
+| [01400](ADR-01400.md) | The HTTP server's fixed runtime in C | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01399](ADR-01399.md) |
+| [01401](ADR-01401.md) | The codegen TLS server path deleted | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01400](ADR-01400.md) |
+| [01402](ADR-01402.md) | Connection fibers and the HTTP accepts move to C | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01400](ADR-01400.md) |
+| [01403](ADR-01403.md) | Generic interface instantiations memoized; an object's own `map` | Extends [ADR-01217](ADR-01217.md) |
+| [01404](ADR-01404.md) | HTTP listeners and connection fibers on their own libuv watchers | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01402](ADR-01402.md) |
+| [01405](ADR-01405.md) | The loop inside the webview's main loop | Implements [TDD-00244](../tdd/TDD-00244.md); Supersedes [ADR-00439](ADR-00439.md) |
+| [01406](ADR-01406.md) | A connection fiber's await parks on its promise | Implements [TDD-00244](../tdd/TDD-00244.md); Supersedes [ADR-00986](ADR-00986.md) |
+| [01407](ADR-01407.md) | A hint-less `[Symbol.toPrimitive]()` ignores the hint | Extends [ADR-00912](ADR-00912.md) |
+| [01408](ADR-01408.md) | fetch above descriptor 1024 on macOS | Extends [ADR-01397](ADR-01397.md) |
+| [01409](ADR-01409.md) | The h2c server session yields instead of blocking | Implements [TDD-00244](../tdd/TDD-00244.md); Extends [ADR-01401](ADR-01401.md) |
+| [01410](ADR-01410.md) | Symbol keys inspect as symbols on class instances and Errors | Extends [ADR-00912](ADR-00912.md) |
+| [01411](ADR-01411.md) | Timers are Node's lib/timers.js, in TypeScript | Implements [TDD-00245](../tdd/TDD-00245.md); Supersedes [ADR-01394](ADR-01394.md); Extends [ADR-01405](ADR-01405.md) |
+| [01412](ADR-01412.md) | A primitive is never assignable to a generic function parameter | Extends [ADR-01217](ADR-01217.md) |
+| [01413](ADR-01413.md) | util.inspect honours customInspect: false | Extends [ADR-01410](ADR-01410.md) |
+| [01414](ADR-01414.md) | Class fields keyed by a declared symbol | Implements [TDD-00246](../tdd/TDD-00246.md); Extends [ADR-01411](ADR-01411.md), [ADR-01410](ADR-01410.md) |
+| [01415](ADR-01415.md) | Methods and const literals as computed member keys | Implements [TDD-00246](../tdd/TDD-00246.md); Extends [ADR-01414](ADR-01414.md) |
+| [01416](ADR-01416.md) | The Sailfish sysroot carries libuv and the runtime's C libraries | Extends [ADR-00817](ADR-00817.md), [ADR-01404](ADR-01404.md) |
+| [01417](ADR-01417.md) | A then/catch whose two paths settle to different types | |
+| [01418](ADR-01418.md) | fetch fails with Node's `TypeError: fetch failed` and its cause | |
+| [01419](ADR-01419.md) | Element access by a const symbol or literal key in the checker | Implements [TDD-00246](../tdd/TDD-00246.md); Extends [ADR-01414](ADR-01414.md) |
+| [01420](ADR-01420.md) | Literal class member names and numeric property keys | Extends [ADR-00608](ADR-00608.md), [ADR-01415](ADR-01415.md) |
+| [01421](ADR-01421.md) | Symbol-keyed properties in reflection and spread | Implements [TDD-00246](../tdd/TDD-00246.md); Extends [ADR-01414](ADR-01414.md) |
+| [01422](ADR-01422.md) | Regressions from symbol keys and literal member names | Extends [ADR-01419](ADR-01419.md), [ADR-01420](ADR-01420.md), [ADR-01421](ADR-01421.md) |
+| [01423](ADR-01423.md) | `@lowerType` — builtin layouts named by their declarations | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.2) |
+| [01424](ADR-01424.md) | Classes extending Map and Set | Implements [TDD-00247](../tdd/TDD-00247.md) (stages 1 and 2), Extends [ADR-01423](ADR-01423.md) |
+| [01425](ADR-01425.md) | The shadow report measures every decider | Implements [TDD-00230](../tdd/TDD-00230.md) (P0.2, P2.3, P3.3) |
+| [01426](ADR-01426.md) | Missing super(), unreachable reads, finally, Map entry objects | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.5, P2.7), Extends [ADR-01424](ADR-01424.md) |
+| [01427](ADR-01427.md) | The checker decides return types and bare fields | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.6), Extends [ADR-01425](ADR-01425.md), [ADR-01426](ADR-01426.md), Supersedes [ADR-00474](ADR-00474.md) (its bare-field default) |
+| [01428](ADR-01428.md) | Implicit-any parameters, async results, contextual positions | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3, P2.6, P2.7), Extends [ADR-01427](ADR-01427.md), Supersedes [ADR-00042](ADR-00042.md) (in the strict lane) |
+| [01429](ADR-01429.md) | Immediately invoked parameters, `any` promise handlers | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3), Extends [ADR-01428](ADR-01428.md) |
+| [01430](ADR-01430.md) | Parameter types in body pre-passes, class and object reprs | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2, P3.3), Extends [ADR-01429](ADR-01429.md) |
+| [01431](ADR-01431.md) | The checker types a name read before its declaration | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2), Extends [ADR-01430](ADR-01430.md) |
+| [01432](ADR-01432.md) | Captured uninitialized globals, element-read and `any` reprs | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2, P3.3), Extends [ADR-01431](ADR-01431.md) |
+| [01433](ADR-01433.md) | Shadow rows name their module; narrowed, typed-array reprs | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2, P3.3), Extends [ADR-01432](ADR-01432.md) |
+| [01434](ADR-01434.md) | Class-typed unbound names; `any` arithmetic and bigints | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2), Extends [ADR-01431](ADR-01431.md) |
+| [01435](ADR-01435.md) | Annotated array locals take the annotation's nullability | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2) |
+| [01436](ADR-01436.md) | Closure types before emission match the emitted closure | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2) |
+| [01437](ADR-01437.md) | Element and record reads bound to a local keep their absence | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2), Extends [ADR-01431](ADR-01431.md) |
+| [01438](ADR-01438.md) | Promise callback parameters; `void`-typed parameters | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2) |
+| [01439](ADR-01439.md) | Presence-narrowed reads; `\|\|` nullability; generic layouts of classes | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2), Extends [ADR-01431](ADR-01431.md) |
+| [01440](ADR-01440.md) | `ArrayBuffer.byteLength` is a number | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2) |
+| [01441](ADR-01441.md) | Contextual callback parameters of builtin layouts | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2) |
+| [01442](ADR-01442.md) | Narrowed nullable references and absent-reference strings | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2) |
+| [01443](ADR-01443.md) | Implicit-any arithmetic and method parameters under -compat=js | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2) |
+| [01444](ADR-01444.md) | Shadow oracle: union order, intersection pieces, interfaces | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2) |
+| [01445](ADR-01445.md) | An empty array literal takes its asserted type | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2) |
+| [01446](ADR-01446.md) | Untyped streams hold any; builtin constructors type their callbacks | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2) |
+| [01447](ADR-01447.md) | Shadow oracle: narrowed references, `arguments`, annotation unions | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2); extends [ADR-01442](ADR-01442.md), [ADR-01444](ADR-01444.md) |
+| [01448](ADR-01448.md) | Generator types, `yield` results, array spreads, TS7057 | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3, P2.6, P2.7) |
+| [01449](ADR-01449.md) | Number's safe-integer bounds are numbers | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2) |
+| [01450](ADR-01450.md) | Class expressions are class values | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.1, P2.3) |
+| [01451](ADR-01451.md) | `arguments` in a dynamic function | Extends [TDD-00210](../tdd/TDD-00210.md) |
+| [01452](ADR-01452.md) | `join` renders null and undefined as empty; Array `toString` | none |
+| [01453](ADR-01453.md) | Absent elements in a scalar array literal stay absent | none |
+| [01454](ADR-01454.md) | A generator's TReturn shares its value slot | Extends [ADR-00172](ADR-00172.md) |
+| [01455](ADR-01455.md) | A catch binding is the caught-value record in every pass | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2); extends [TDD-00202](../tdd/TDD-00202.md) |
+| [01456](ADR-01456.md) | Property descriptors are held as `any` | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2, P3.2) |
+| [01457](ADR-01457.md) | Buffer-encoding overloads of the path-returning fs calls | none |
+| [01458](ADR-01458.md) | Parameter dead zone and omitted arguments under -compat=js | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.1) |
+| [01459](ADR-01459.md) | BigInt(x) at run time; `super.#x` is an early error | none |
+| [01460](ADR-01460.md) | Narrowed nullable property reads | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.5); extends [ADR-01442](ADR-01442.md) |
+| [01461](ADR-01461.md) | A -compat=js object-literal binding is a module global | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.2); extends [TDD-00022](../tdd/TDD-00022.md) |
+| [01462](ADR-01462.md) | A -compat=js destructuring target holds any kind | Extends [TDD-00162](../tdd/TDD-00162.md) |
+| [01463](ADR-01463.md) | Classes extending RegExp | Implements [TDD-00247](../tdd/TDD-00247.md) (stage 3, RegExp), Extends [ADR-01424](ADR-01424.md) |
+| [01464](ADR-01464.md) | The `override` member modifier | |
+| [01465](ADR-01465.md) | Thenables adopted through their `then` | Extends [ADR-00271](ADR-00271.md) |
+| [01466](ADR-01466.md) | Classes extending Promise | Implements [TDD-00247](../tdd/TDD-00247.md) (stage 3, Promise), Extends [ADR-01463](ADR-01463.md), [ADR-01465](ADR-01465.md) |
+| [01467](ADR-01467.md) | Linear provisional types for mutually dependent locals; `Array()` as a call | Extends [ADR-01121](ADR-01121.md) |
+| [01468](ADR-01468.md) | Date as a heap object; classes extending Date | Implements [TDD-00247](../tdd/TDD-00247.md) (stage 4), Extends [ADR-01463](ADR-01463.md), [ADR-01466](ADR-01466.md) |
+| [01469](ADR-01469.md) | The array header word; classes extending Array and the typed arrays | Implements [TDD-00247](../tdd/TDD-00247.md) (stage 5), Extends [ADR-01468](ADR-01468.md) |
+| [01470](ADR-01470.md) | Var redeclaration types (TS2403); the `any` overload pass | Extends [ADR-01469](ADR-01469.md) |
+| [01471](ADR-01471.md) | The klain: modules as TypeScript over natives | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.1, P3.2), extends [ADR-01344](ADR-01344.md), [ADR-01170](ADR-01170.md) |
+| [01472](ADR-01472.md) | `new C(…)` checked against the class's constructor | Extends [ADR-01470](ADR-01470.md) |
+| [01473](ADR-01473.md) | A generic class instantiated where a type names it | Extends [ADR-01471](ADR-01471.md) |
+| [01474](ADR-01474.md) | `for…of` over a plain iterator object | Extends [ADR-01471](ADR-01471.md) |
+| [01475](ADR-01475.md) | A class's type parameters are types; null is no type parameter | Extends [ADR-01473](ADR-01473.md) |
+| [01476](ADR-01476.md) | One runtime object per C file, whatever the program uses | Extends [ADR-01471](ADR-01471.md); Implements [TDD-00238](../tdd/TDD-00238.md) |
+| [01477](ADR-01477.md) | Invalid IR the Node suite's clang timeouts hid | Extends [ADR-01476](ADR-01476.md) |
+| [01478](ADR-01478.md) | Library units the same in every program | Extends [ADR-01476](ADR-01476.md), Extends [ADR-01469](ADR-01469.md) |
+| [01479](ADR-01479.md) | Counts and indexes are numbers; a nullable generic annotation | Extends [ADR-01478](ADR-01478.md) |
+| [01480](ADR-01480.md) | A defaulted parameter is an optional one, filled by the body | Extends [ADR-01479](ADR-01479.md) |
+| [01481](ADR-01481.md) | Shadow agreement by node kind; dictionary reads | Extends [ADR-01480](ADR-01480.md) |
+| [01482](ADR-01482.md) | A string declaration keeps a read's undefined | Extends [ADR-01481](ADR-01481.md) |
+| [01483](ADR-01483.md) | Dictionary membership, member arrays and nested literals; `in` with a runtime key | Extends [ADR-01482](ADR-01482.md) |
+| [01484](ADR-01484.md) | A dictionary type is the object itself | Implements [TDD-00230](../tdd/TDD-00230.md); Supersedes the representation in [ADR-00485](ADR-00485.md) and [ADR-01225](ADR-01225.md)'s conversions |
+| [01485](ADR-01485.md) | Object.assign onto an array | Extends [ADR-01237](ADR-01237.md) |
+| [01486](ADR-01486.md) | A computed-key object literal is a dynamic object | Extends [ADR-01484](ADR-01484.md); Supersedes the representation in [ADR-00066](ADR-00066.md) |
+| [01487](ADR-01487.md) | Parameter-default edges, `{}`, a method's `this` type, TS2454 on `var` | Extends [ADR-01480](ADR-01480.md) |
+| [01488](ADR-01488.md) | An uninitialized typed local holds undefined | Extends [ADR-01482](ADR-01482.md) |
+| [01489](ADR-01489.md) | `arguments` counts the arguments a call passed | Extends [ADR-00387](ADR-00387.md), [TDD-00210](../tdd/TDD-00210.md) |
+| [01490](ADR-01490.md) | An instance's own properties and methods | Extends [ADR-00887](ADR-00887.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01491](ADR-01491.md) | `instanceof` a builtin on a union member or an `any` | Extends [ADR-01204](ADR-01204.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01492](ADR-01492.md) | A namespace's type named qualified is checked | Extends [TDD-00230](../tdd/TDD-00230.md) P2 |
+| [01493](ADR-01493.md) | `(a, b)` is the comma operator unless an arrow follows | Supersedes the lookahead in [ADR-00179](ADR-00179.md) |
+| [01494](ADR-01494.md) | `[Symbol.iterator]` on builtin iterables | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01495](ADR-01495.md) | `console.countReset` of an unknown label warns | Extends [ADR-00347](ADR-00347.md) |
+| [01496](ADR-01496.md) | Generator rest and array parameters, `arguments`, `yield*` over an iterable | Extends [TDD-00061](../tdd/TDD-00061.md), [TDD-00086](../tdd/TDD-00086.md), [TDD-00210](../tdd/TDD-00210.md) |
+| [01497](ADR-01497.md) | `x.constructor` of a builtin-made value | Extends [ADR-01204](ADR-01204.md) |
+| [01498](ADR-01498.md) | `implements` is checked by the checker (TS2420) | Supersedes the conformance check of [ADR-01475](ADR-01475.md) and [TDD-00009](../tdd/TDD-00009.md) Stage 4 |
+| [01499](ADR-01499.md) | A generic class construction's type arguments are the checker's | Extends [ADR-01207](ADR-01207.md), [TDD-00010](../tdd/TDD-00010.md) |
+| [01500](ADR-01500.md) | `reduce` on a builtin iterator has the lib's type | Extends [ADR-01494](ADR-01494.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01501](ADR-01501.md) | An array's element type is part of its host layout key | Extends [TDD-00247](../tdd/TDD-00247.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01502](ADR-01502.md) | Shadow oracle maps dictionary views, generator methods and `arguments` | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01503](ADR-01503.md) | A skippable `var` reads its value where every path stores one | Extends [ADR-01057](ADR-01057.md), [ADR-01488](ADR-01488.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01504](ADR-01504.md) | A JS parameter is not typed from a `null` or `undefined` argument | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01505](ADR-01505.md) | `arguments` has the lib's `IArguments` type | Extends [ADR-01489](ADR-01489.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01506](ADR-01506.md) | A JS call may omit any argument of a named function | Extends [ADR-00963](ADR-00963.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01507](ADR-01507.md) | JS function expressions take their call sites' parameter types | Extends [ADR-01504](ADR-01504.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01508](ADR-01508.md) | A defaulted parameter is present in its function's body | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01509](ADR-01509.md) | A nullable array reference flow proves present reads present | Extends [ADR-01442](ADR-01442.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01510](ADR-01510.md) | Short-circuit operators over a nullable scalar | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01511](ADR-01511.md) | A contextually typed arrow parameter takes any represented type | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01512](ADR-01512.md) | `f.call` / `f.apply` return f's result | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01513](ADR-01513.md) | A js-lane object-literal binding read before its declaration is `any` | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01514](ADR-01514.md) | A named-element array annotation keeps its nullability | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01515](ADR-01515.md) | Return inference reads a catch binding as the caught value | Extends [TDD-00229](../tdd/TDD-00229.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01516](ADR-01516.md) | Unary `-` and `~` run ToNumber on any operand, in both lanes | Extends [ADR-00898](ADR-00898.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01517](ADR-01517.md) | The js parameter pre-pass types a call's result by the checker | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01518](ADR-01518.md) | A function read inside its own return is itself | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01519](ADR-01519.md) | A narrowing another function may undo is not trusted | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01520](ADR-01520.md) | A module binding promotes by its declared type's representation | Extends [TDD-00093](../tdd/TDD-00093.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01521](ADR-01521.md) | A member of `never` is TS2339 | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01522](ADR-01522.md) | A generator's value is one function, under its own name | Extends [TDD-00096](../tdd/TDD-00096.md), [TDD-00129](../tdd/TDD-00129.md) |
+| [01523](ADR-01523.md) | A captured evolving binding is TypeScript's implicit any | Extends [TDD-00162](../tdd/TDD-00162.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01524](ADR-01524.md) | The shadow report compiles Test262 files with their harness | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01525](ADR-01525.md) | A literal key on a builtin global reads as its member | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01526](ADR-01526.md) | Date's calendar fields compose as ECMAScript's MakeDate | Extends [TDD-00240](../tdd/TDD-00240.md) |
+| [01527](ADR-01527.md) | A namespace merged into a function declares its members | Extends [TDD-00095](../tdd/TDD-00095.md), [TDD-00229](../tdd/TDD-00229.md) |
+| [01528](ADR-01528.md) | An immediately invoked function's parameters take its arguments' types | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01529](ADR-01529.md) | A returned empty array keeps its pushed element type | Extends [TDD-00205](../tdd/TDD-00205.md) |
+| [01530](ADR-01530.md) | An evolving binding starts its container undefined | Extends [TDD-00162](../tdd/TDD-00162.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01531](ADR-01531.md) | A return type inferred through its own function is TS7023 | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01532](ADR-01532.md) | A named async function expression's self binding is its value | Extends [TDD-00060](../tdd/TDD-00060.md), [TDD-00087](../tdd/TDD-00087.md) |
+| [01533](ADR-01533.md) | A boxed instance of an Array subclass is an Array | Extends [TDD-00247](../tdd/TDD-00247.md) |
+| [01534](ADR-01534.md) | An async function's dynamic result is resolved, not awaited | Extends [ADR-00265](ADR-00265.md), [TDD-00223](../tdd/TDD-00223.md) |
+| [01535](ADR-01535.md) | The checker types an evolving `[]` array | Extends [TDD-00230](../tdd/TDD-00230.md), [ADR-01530](ADR-01530.md) |
+| [01536](ADR-01536.md) | An async function adopts a returned promise when it settles | Extends [ADR-00265](ADR-00265.md), [ADR-01534](ADR-01534.md), [TDD-00223](../tdd/TDD-00223.md) |
+| [01537](ADR-01537.md) | A plain function's `this` is `any` | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01538](ADR-01538.md) | A function's pushes type an outer empty array | Extends [TDD-00205](../tdd/TDD-00205.md), [ADR-01529](ADR-01529.md) |
+| [01539](ADR-01539.md) | A reaction on a promise of void receives undefined | Extends [TDD-00087](../tdd/TDD-00087.md) |
+| [01540](ADR-01540.md) | An async function's signature returns a task promise | Extends [TDD-00084](../tdd/TDD-00084.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01541](ADR-01541.md) | A function expression's parameters take their context | Extends [ADR-01528](ADR-01528.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01542](ADR-01542.md) | A builtin `new` infers its type arguments from its context | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01543](ADR-01543.md) | `++`/`--` on an `any` holding a BigInt steps by 1n | Extends [ADR-01061](ADR-01061.md) |
+| [01544](ADR-01544.md) | An untyped `[]` pushed an `any` is `any[]`; polymorphic JS parameters are `any` | Extends [TDD-00230](../tdd/TDD-00230.md), [ADR-00887](ADR-00887.md) |
+| [01545](ADR-01545.md) | The checker types an object literal's accessors | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01546](ADR-01546.md) | Method values and a method's `arguments` | Extends [TDD-00230](../tdd/TDD-00230.md), [TDD-00210](../tdd/TDD-00210.md) |
+| [01547](ADR-01547.md) | Covariant builtin interfaces relate by type arguments; async expressions that never complete are `Promise<never>` | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01548](ADR-01548.md) | Settled expression kinds: the old inference deleted | Extends [TDD-00230](../tdd/TDD-00230.md) |
+| [01549](ADR-01549.md) | AggregateError's `errors` is `any[]`; SharedArrayBuffer's constructor | Extends [TDD-00083](../tdd/TDD-00083.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01550](ADR-01550.md) | Promise members of a union | Extends [TDD-00114](../tdd/TDD-00114.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01551](ADR-01551.md) | Nullish elements of an array literal; a `try` that never completes | Extends [ADR-00869](ADR-00869.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01552](ADR-01552.md) | Inference from index signatures; `this` from the checker alone | Extends [ADR-01548](ADR-01548.md), [ADR-01469](ADR-01469.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01553](ADR-01553.md) | Strict code's early errors in the strict lane and in strict regions | Extends [ADR-00197](ADR-00197.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01554](ADR-01554.md) | Uninferred type parameters, overload type parameters, empty array elements | Extends [ADR-01552](ADR-01552.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01555](ADR-01555.md) | `this` in static members, statics read during class typing, method names in strict code | Extends [ADR-01551](ADR-01551.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01556](ADR-01556.md) | Representation rules the checker-side mapping lacked; Array.of as a literal; generator values in objects | Extends [ADR-01554](ADR-01554.md), [ADR-01555](ADR-01555.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01557](ADR-01557.md) | Overloaded and callable sources in assignability; `Iterable` needs iteration; `__promisify__` typing | Extends [ADR-01554](ADR-01554.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01558](ADR-01558.md) | More representation rules for member reads, calls and identifiers; `this` parameters on method signatures; asserted call types | Extends [ADR-01556](ADR-01556.md), [ADR-01557](ADR-01557.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01559](ADR-01559.md) | A module-level `var` nested in a block is a module binding | Extends [ADR-01057](ADR-01057.md) |
+| [01560](ADR-01560.md) | A class-typed parameter given another object by a dynamic call | Extends [ADR-01558](ADR-01558.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01561](ADR-01561.md) | The checker types optional chains; a `T \| null` link keeps its null | Extends [ADR-01558](ADR-01558.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [01562](ADR-01562.md) | Identifiers, member reads and calls take their type from the checker | Extends [ADR-01558](ADR-01558.md), [ADR-01560](ADR-01560.md), [ADR-01561](ADR-01561.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01563](ADR-01563.md) | A declaration's `this` parameter is never one of its signature's parameters | Extends [ADR-01562](ADR-01562.md) |
+| [01564](ADR-01564.md) | `for await` over a Map iterates its entries | |
+| [01565](ADR-01565.md) | Only a generator function is held boxed in an object literal | Extends [ADR-01562](ADR-01562.md) |
+| [01566](ADR-01566.md) | `typeof x.p` reads an object's own property | |
+| [01567](ADR-01567.md) | A construction's contextual inference does not re-enter itself | Extends [ADR-01562](ADR-01562.md) |
+| [01568](ADR-01568.md) | A return annotation the body cannot meet is a type error | Extends [ADR-01565](ADR-01565.md), [ADR-00814](ADR-00814.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01569](ADR-01569.md) | A property of a boxed value takes the dynamic dispatch's type | Extends [ADR-01562](ADR-01562.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01570](ADR-01570.md) | A block's class initializes its statics where it is declared | Extends [ADR-00375](ADR-00375.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01571](ADR-01571.md) | Compile-time fixes for large and deeply nested programs | Extends [ADR-01562](ADR-01562.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01572](ADR-01572.md) | Getter return check, and diagnostics at the declared name | Extends [ADR-01568](ADR-01568.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01573](ADR-01573.md) | Bounded resolution of recursive conditional types | Extends [ADR-01571](ADR-01571.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01574](ADR-01574.md) | A program-wide bound on generic interface instantiation | Extends [ADR-01568](ADR-01568.md), [ADR-01573](ADR-01573.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01575](ADR-01575.md) | Return checks after the body; exhausted flow queries stay unanswered | Extends [ADR-01568](ADR-01568.md), [ADR-01574](ADR-01574.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01576](ADR-01576.md) | Bounded codegen expansion of self-nesting generic interfaces | Extends [ADR-01573](ADR-01573.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01577](ADR-01577.md) | Closure flow follows tsc's control-flow container | Extends [ADR-01572](ADR-01572.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01578](ADR-01578.md) | A call of a function whose result is boxed reads the box | Extends [ADR-01562](ADR-01562.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01579](ADR-01579.md) | Library literals and per-type helpers compile outside the program unit | Extends [ADR-01329](ADR-01329.md), [ADR-01478](ADR-01478.md), Implements [TDD-00248](../tdd/TDD-00248.md) |
+| [01580](ADR-01580.md) | Library code compiles the same whatever the program declares | Extends [ADR-01579](ADR-01579.md), [ADR-01326](ADR-01326.md) |
+| [01581](ADR-01581.md) | A shell that starts this executable is a self-spawn | Extends [ADR-00972](ADR-00972.md) |
+| [01582](ADR-01582.md) | The conformance runner caps each process's data segment | |
+| [01583](ADR-01583.md) | Stack overflow throws a RangeError | Implements [TDD-00249](../tdd/TDD-00249.md) |
+| [01584](ADR-01584.md) | A throwing uncaughtException listener exits 7 | |
+| [01585](ADR-01585.md) | Array search compares a null string slot by identity | |
+| [01586](ADR-01586.md) | An island never installs the stack guard | |
+| [01587](ADR-01587.md) | The dns resolver on c-ares, as cares_wrap drives it | Implements [TDD-00250](../tdd/TDD-00250.md) |
+| [01588](ADR-01588.md) | concat spreads an `any` holding an Array | |
+| [01589](ADR-01589.md) | An `any` converts into tuples and arrays of arrays | |
+| [01590](ADR-01590.md) | A module global read from a typed Record keeps its type | |
+| [01591](ADR-01591.md) | Buffer.concat takes a list with a spread element | |
+| [01592](ADR-01592.md) | `new a.b.C()` rooted at a value | |
+| [01593](ADR-01593.md) | Unannotated destructuring parameters | |
+| [01594](ADR-01594.md) | The node suite's common/dns harness | |
+| [01595](ADR-01595.md) | Windows library imports and the process unit's headers | |
+| [01596](ADR-01596.md) | A library call prefers the instance's own method | |

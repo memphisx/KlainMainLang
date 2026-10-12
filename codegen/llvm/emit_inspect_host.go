@@ -76,10 +76,3 @@ func (e *Emitter) emitInspectArrayBuffer(v Value, depth int) (Value, error) {
 	e.inspectPush(list, entry)
 	return e.inspectEnd(list, e.internString(name+" {"), e.internString("}"), depth, false, false), nil
 }
-
-// emitNullToEmpty is s, or "" for a null pointer.
-func (e *Emitter) emitNullToEmpty(s string) string {
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, e.ptrIsNull(s), e.internString(""), s))
-	return r
-}

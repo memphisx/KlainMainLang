@@ -63,26 +63,32 @@ console.log("false" == 0);
 }
 
 // A ternary mixing a non-pointer scalar branch (number) with a pointer/reference
-// branch (object) has a genuine union result (`number | object`) this typed-subset
-// compiler can't put in one result slot — previously it coerced the object branch
-// to the scalar's IR and emitted `store double %p, ptr %slot` (a clang-stage
-// failure). Reject cleanly instead. ADR-00975.
-func TestE2ETernaryScalarObjectMixRejectedStrict(t *testing.T) {
-	mustCompileError(t, `
+// branch (object) is the union `number | Addr`, held boxed (ADR-01480; it
+// was a compile error, ADR-00975, and before that invalid IR).
+func TestE2ETernaryScalarObjectMixBoxed(t *testing.T) {
+	assertSameAsNode(t, `
 type Addr = { port: number }
-function f(addr: Addr): void {
-  const p = addr ? addr.port : addr
+function f(addr: Addr, n: number): void {
+  const p = n > 0 ? addr.port : addr
   console.log(p)
 }
-f({ port: 8080 })
-`, "incompatible types")
+f({ port: 8080 }, 1)
+f({ port: 9090 }, 0)
+`)
 }
 
-// `~object` runs ToNumber(operand) in real JS (`~{}` is -1). strict rejects the
-// non-numeric operand cleanly (was invalid IR — a `trunc` of the object ptr as
-// an i64); -compat=js boxes and runs the real ToNumber. ADR-00898.
-func TestE2EBitNotObjectRejectedStrict(t *testing.T) {
-	mustCompileError(t, `console.log(~({}))`, "unary '~' requires a number")
+// `~object` runs ToNumber(operand) in real JS (`~{}` is -1), in both lanes:
+// tsc accepts a non-numeric operand of unary `~` and `-` (ADR-00898,
+// ADR-01516).
+func TestE2EBitNotObjectStrict(t *testing.T) {
+	assertSameAsNode(t, `
+const s = "3";
+const t = true;
+const o = { valueOf() { return 4; } };
+const b = ~0;
+let d = ~3; d = d * 1.5;
+console.log(~({}), -({}), -[1, 2], ~"12abc", -s, -t, -o, ~o, -[5], ~[5], -"", -false, typeof -s, ~5n, b, d, typeof b);
+`)
 }
 
 func TestE2EBitNotObjectCompatJS(t *testing.T) {
@@ -300,7 +306,7 @@ console.log(calls, Number.isNaN(r));
 // monomorphized against the element hint (string), so its untyped parameters are
 // strings, not the i64 default — previously an i64/string IR mismatch. ADR-00913.
 func TestE2ENamedCallbackReduceStringArray(t *testing.T) {
-	assertOutput(t, `
+	assertOutputCompatJS(t, `
 function cb(prev, cur) { return prev + cur; }
 console.log(["1", "2", "3"].reduce(cb));
 console.log([10, 20, 30].reduce(cb));

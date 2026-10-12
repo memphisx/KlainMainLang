@@ -349,6 +349,17 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 		return nil
 	}
+	// A class extending Map or Set: `Counter(2) [Map] { 'a' => 1, x: 1 }`.
+	if val.Ty.IsClass {
+		if info, ok := e.classes[val.Ty.ClassName]; ok && info.HostBase != nil {
+			strVal, err := e.emitInspectHostClass(val, info, 0)
+			if err != nil {
+				return err
+			}
+			e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+			return nil
+		}
+	}
 	// Map / Set inspect as `Map(1) { 'a' => 1 }` / `Set(2) { 1, 2 }`.
 	if val.Ty.IsMap {
 		strVal, err := e.emitInspectMap(val, 0)
@@ -467,7 +478,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 		return nil
 	}
-	if val.Ty.IsDate && val.Ty.IR == "i64" || val.Ty.IsRegExp && val.Ty.IsObject && !val.Ty.Nullable && !val.Ty.IsDynamic {
+	if val.Ty.IsDate && !val.Ty.IsDynamic || val.Ty.IsRegExp && val.Ty.IsObject && !val.Ty.Nullable && !val.Ty.IsDynamic {
 		// console.log(date) shows its util.inspect form, the ISO string.
 		strVal, err := e.emitInspectField(val, 0)
 		if err != nil {
@@ -789,18 +800,43 @@ func (e *Emitter) emitConsoleDir(args []ast.Expression, pos ast.Pos) (Value, err
 // args), defaulting to "default" when omitted — matching real Node's own
 // default label for time/timeEnd/count/countReset.
 func (e *Emitter) consoleLabelArg(args []ast.Expression, name string, pos ast.Pos) (string, error) {
+	s, _, err := e.consoleLabelArgKind(args, name, pos)
+	return s, err
+}
+
+// consoleLabelArgKind is consoleLabelArg and an i1: whether the label was
+// a string (or omitted), which a lookup by the label as given needs.
+func (e *Emitter) consoleLabelArgKind(args []ast.Expression, name string, pos ast.Pos) (string, string, error) {
 	if len(args) > 1 {
-		return "", fmt.Errorf("%d:%d: console.%s takes 0 or 1 arguments (label?)", pos.Line, pos.Col, name)
+		return "", "", fmt.Errorf("%d:%d: console.%s takes 0 or 1 arguments (label?)", pos.Line, pos.Col, name)
 	}
 	if len(args) == 0 {
-		return e.internString("default"), nil
+		return e.internString("default"), "1", nil
 	}
 	val, err := e.emitExpr(args[0])
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	val = e.coerce(val, TypePtr)
-	return val.Ref, nil
+	// Node: `label = 'default'` as the parameter's default, then
+	// `${label}` (console.count(1) counts "1", null counts "null").
+	if val.Ty.IsUndefined && !val.Ty.IsDynamic && !val.Ty.Nullable {
+		return e.internString("default"), "1", nil
+	}
+	isStr := "0"
+	switch {
+	case isStringTy(val.Ty) && !val.Ty.Nullable:
+		isStr = "1"
+	case val.Ty.IsDynamic:
+		tag, _ := e.emitUnboxTagPayload(val)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", r, tag, kmlTagString))
+		isStr = r
+	}
+	s, err := e.emitArgToString(val)
+	if err != nil {
+		return "", "", err
+	}
+	return s.Ref, isStr, nil
 }
 
 // emitConsoleTimeMapEnsure returns a register holding the lazily-created
@@ -959,12 +995,46 @@ func (e *Emitter) emitConsoleCount(args []ast.Expression, pos ast.Pos) (Value, e
 // emitConsoleCountReset implements console.countReset(label?): resets the
 // given label's counter back to 0 (does not remove the label).
 func (e *Emitter) emitConsoleCountReset(args []ast.Expression, pos ast.Pos) (Value, error) {
-	labelPtr, err := e.consoleLabelArg(args, "countReset", pos)
+	labelPtr, isStr, err := e.consoleLabelArgKind(args, "countReset", pos)
 	if err != nil {
 		return Value{}, err
 	}
 	mapReg := e.emitConsoleCountMapEnsure()
+	// An unknown label is a process warning (Node: "Count for '<label>'
+	// does not exist"), and nothing is reset. Node looks the label up as
+	// given, so a non-string one (counted under its string form) never
+	// matches.
+	found := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", found, mapReg, labelPtr))
+	has := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", has, found, isStr))
+	setL, warnL, doneL := e.freshLabel("countreset.set"), e.freshLabel("countreset.warn"), e.freshLabel("countreset.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, setL, warnL))
+	e.emitLabel(setL)
 	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 0)", mapReg, labelPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(warnL)
+	tmp := "__kml_countreset_" + e.freshReg()[1:]
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", labelPtr, slot))
+	e.define(tmp, Symbol{Ptr: slot, Ty: TypePtr})
+	msg := ast.NewBinaryExpression("+", ast.NewBinaryExpression("+", ast.NewStringLiteral("Count for '", pos), ast.NewIdentifier(tmp, pos), pos), ast.NewStringLiteral("' does not exist", pos), pos)
+	if m, ok := e.libExports["internal_process_warning:emitWarning"]; ok {
+		if _, err := e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(m, pos), []ast.Expression{msg}, pos)); err != nil {
+			return Value{}, err
+		}
+	} else {
+		// A program compiled without the library (no process emitter to
+		// listen): the default listener's line.
+		e.ensureDprintf()
+		e.ensureGetpid()
+		pid := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @getpid()", pid))
+		e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, i32 %s, ptr %s)", e.internString("(node:%d) Warning: Count for '%s' does not exist\n"), pid, labelPtr))
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
 	return Value{Ty: TypeVoid}, nil
 }
 

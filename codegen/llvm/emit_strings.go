@@ -375,6 +375,10 @@ func (e *Emitter) emitStringSearch(mem *ast.MemberExpression, args []ast.Express
 		return Value{}, fmt.Errorf("%d:%d: search is only supported on strings", pos.Line, pos.Col)
 	}
 	strVal = e.coerce(strVal, TypePtr)
+	args, err = e.hostRegExpArgs(args)
+	if err != nil {
+		return Value{}, err
+	}
 	regexVal, err := e.emitRegExpArg(args[0], "")
 	if err != nil {
 		return Value{}, err
@@ -425,26 +429,83 @@ func (e *Emitter) emitStringLocaleCompare(mem *ast.MemberExpression, args []ast.
 }
 
 func (e *Emitter) emitStringReplace(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	return e.emitStringReplaceMethod(mem, args, pos, false)
+}
+
+func (e *Emitter) emitStringReplaceAll(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	return e.emitStringReplaceMethod(mem, args, pos, true)
+}
+
+// emitStringReplaceMethod is `s.replace(search, rep)`, or `s.replaceAll`
+// when all.
+func (e *Emitter) emitStringReplaceMethod(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos, all bool) (Value, error) {
+	method := "replace"
+	if all {
+		method = "replaceAll"
+	}
 	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: replace takes exactly 2 arguments", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: %s takes exactly 2 arguments", pos.Line, pos.Col, method)
 	}
 	objVal, err := e.emitExpr(mem.Object)
 	if err != nil {
 		return Value{}, err
 	}
 	if isUnconstrainedDynamic(objVal.Ty) {
-		return e.emitDynAnyMethodCall(objVal, "replace", args, pos) // dispatched on its tag
+		return e.emitDynAnyMethodCall(objVal, method, args, pos) // dispatched on its tag
 	}
 	if !isStringTy(objVal.Ty) {
-		return Value{}, fmt.Errorf("%d:%d: replace is only supported on strings", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: %s is only supported on strings", pos.Line, pos.Col, method)
 	}
+	if args, err = e.hostRegExpArgs(args); err != nil {
+		return Value{}, err
+	}
+	if !e.inferExprType(args[0]).IsDynamic {
+		return e.emitStringReplaceArgs(objVal, args, pos, all)
+	}
+	// A `string | RegExp` (or `any`) search: which replace is decided by
+	// what the box holds.
+	searchVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	isRe := e.emitDynHostInstanceOf(searchVal, "RegExp")
+	reL, strL, doneL := e.freshLabel("replace.re"), e.freshLabel("replace.str"), e.freshLabel("replace.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isRe.Ref, reL, strL))
+	for _, isRegExp := range []bool{true, false} {
+		val := searchVal
+		if isRegExp {
+			e.emitLabel(reL)
+			val = e.emitUnboxHost(searchVal, RegExpType())
+		} else {
+			e.emitLabel(strL)
+		}
+		v, err := e.emitStringReplaceArgs(objVal, []ast.Expression{e.bindValue(val, args[0].GetPos()), args[1]}, pos, all)
+		if err != nil {
+			return Value{}, err
+		}
+		if !e.blockDone {
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.coerce(v, TypePtr).Ref, slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		}
+	}
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	return Value{Ref: r, Ty: TypePtr}, nil
+}
+
+// emitStringReplaceArgs is replace/replaceAll on the string objVal once the
+// search's kind is known statically.
+func (e *Emitter) emitStringReplaceArgs(objVal Value, args []ast.Expression, pos ast.Pos, all bool) (Value, error) {
 	if e.inferExprType(args[0]).IsRegExp {
-		return e.emitRegexReplace(objVal, args, pos, false)
+		return e.emitRegexReplace(objVal, args, pos, all)
 	}
 	// String-literal search with a function replacer: invoke it per match with
 	// (match, offset, string) — ADR-00697.
 	if e.inferExprType(args[1]).IsFunc {
-		return e.emitStringReplaceLiteralCallback(objVal, args[0], args[1], false, pos)
+		return e.emitStringReplaceLiteralCallback(objVal, args[0], args[1], all, pos)
 	}
 	searchVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -462,59 +523,18 @@ func (e *Emitter) emitStringReplace(mem *ast.MemberExpression, args []ast.Expres
 	if repVal, err = e.coerceStringArg(repVal); err != nil {
 		return Value{}, err
 	}
-	e.ensureStringReplace()
+	fn := "__kml_replace"
+	if all {
+		e.ensureStringReplaceAll()
+		fn = "__kml_replace_all"
+	} else {
+		e.ensureStringReplace()
+	}
 	sLen := e.emitStrLenHeader(objVal.Ref)
 	searchLen := e.emitStrLenHeader(searchVal.Ref)
 	repLen := e.emitStrLenHeader(repVal.Ref)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_replace(ptr %s, i64 %s, ptr %s, i64 %s, ptr %s, i64 %s)", result, objVal.Ref, sLen, searchVal.Ref, searchLen, repVal.Ref, repLen))
-	return Value{Ref: result, Ty: TypePtr}, nil
-}
-
-func (e *Emitter) emitStringReplaceAll(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: replaceAll takes exactly 2 arguments", pos.Line, pos.Col)
-	}
-	objVal, err := e.emitExpr(mem.Object)
-	if err != nil {
-		return Value{}, err
-	}
-	if isUnconstrainedDynamic(objVal.Ty) {
-		return e.emitDynAnyMethodCall(objVal, "replaceAll", args, pos) // dispatched on its tag
-	}
-	if !isStringTy(objVal.Ty) {
-		return Value{}, fmt.Errorf("%d:%d: replaceAll is only supported on strings", pos.Line, pos.Col)
-	}
-	if e.inferExprType(args[0]).IsRegExp {
-		return e.emitRegexReplace(objVal, args, pos, true)
-	}
-	// String-literal search with a function replacer: invoke it per match with
-	// (match, offset, string) — ADR-00697.
-	if e.inferExprType(args[1]).IsFunc {
-		return e.emitStringReplaceLiteralCallback(objVal, args[0], args[1], true, pos)
-	}
-	searchVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	repVal, err := e.emitExpr(args[1])
-	if err != nil {
-		return Value{}, err
-	}
-	// ToString an object search/replacement (TDD-00201); a RegExp arg was already
-	// dispatched to emitRegexReplace above.
-	if searchVal, err = e.coerceStringArg(searchVal); err != nil {
-		return Value{}, err
-	}
-	if repVal, err = e.coerceStringArg(repVal); err != nil {
-		return Value{}, err
-	}
-	e.ensureStringReplaceAll()
-	sLen := e.emitStrLenHeader(objVal.Ref)
-	searchLen := e.emitStrLenHeader(searchVal.Ref)
-	repLen := e.emitStrLenHeader(repVal.Ref)
-	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_replace_all(ptr %s, i64 %s, ptr %s, i64 %s, ptr %s, i64 %s)", result, objVal.Ref, sLen, searchVal.Ref, searchLen, repVal.Ref, repLen))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @%s(ptr %s, i64 %s, ptr %s, i64 %s, ptr %s, i64 %s)", result, fn, objVal.Ref, sLen, searchVal.Ref, searchLen, repVal.Ref, repLen))
 	return Value{Ref: result, Ty: TypePtr}, nil
 }
 
@@ -533,6 +553,9 @@ func (e *Emitter) emitStringSplit(mem *ast.MemberExpression, args []ast.Expressi
 		return Value{}, fmt.Errorf("%d:%d: split is only supported on strings", pos.Line, pos.Col)
 	}
 	var result Value
+	if args, err = e.hostRegExpArgs(args); err != nil {
+		return Value{}, err
+	}
 	if e.inferExprType(args[0]).IsRegExp {
 		objVal = e.coerce(objVal, TypePtr)
 		regexVal, err := e.emitExpr(args[0])

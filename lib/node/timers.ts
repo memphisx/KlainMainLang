@@ -4,34 +4,40 @@
 // kml:default-namespace — `import timers from 'timers'` reads this module's
 // exports, as Node's default export carries them.
 
-import { startTimeout, stopTimeout, startInterval, stopInterval, startImmediate, stopImmediate } from './internal_timers';
+import {
+    setTimeout as nodeSetTimeout,
+    setInterval as nodeSetInterval,
+    setImmediate as nodeSetImmediate,
+    clearTimeout as nodeClearTimeout,
+    clearInterval as nodeClearInterval,
+    clearImmediate as nodeClearImmediate,
+    Timeout,
+    Immediate,
+} from './internal_timers';
 import { setTimeout as promiseTimeout, setImmediate as promiseImmediate, setInterval as promiseInterval, scheduler } from './timers_promises';
 
-export function setTimeout(callback: (...args: any[]) => void, delay?: number, ...args: any[]): NodeJS.Timeout {
-    return startTimeout(() => { callback(...args); }, delay === undefined ? 0 : delay);
+export function setTimeout(callback: (...args: any[]) => void, delay?: any, ...args: any[]): Timeout {
+    return nodeSetTimeout(callback, delay, ...args);
 }
 
 export function clearTimeout(timeout: any): void {
-    if (timeout === undefined || timeout === null) return;
-    stopTimeout(timeout as NodeJS.Timeout);
+    nodeClearTimeout(timeout);
 }
 
-export function setInterval(callback: (...args: any[]) => void, delay?: number, ...args: any[]): NodeJS.Timeout {
-    return startInterval(() => { callback(...args); }, delay === undefined ? 0 : delay);
+export function setInterval(callback: (...args: any[]) => void, delay?: any, ...args: any[]): Timeout {
+    return nodeSetInterval(callback, delay, ...args);
 }
 
 export function clearInterval(timeout: any): void {
-    if (timeout === undefined || timeout === null) return;
-    stopInterval(timeout as NodeJS.Timeout);
+    nodeClearInterval(timeout);
 }
 
-export function setImmediate(callback: (...args: any[]) => void, ...args: any[]): NodeJS.Immediate {
-    return startImmediate(() => { callback(...args); });
+export function setImmediate(callback: (...args: any[]) => void, ...args: any[]): Immediate {
+    return nodeSetImmediate(callback, ...args);
 }
 
 export function clearImmediate(immediate: any): void {
-    if (immediate === undefined || immediate === null) return;
-    stopImmediate(immediate as NodeJS.Immediate);
+    nodeClearImmediate(immediate);
 }
 
 // `timers.promises` is `timers/promises`.

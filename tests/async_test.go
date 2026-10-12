@@ -462,6 +462,21 @@ main2()
 `, "yes\nerr no\n5")
 }
 
+// An async fn that only returns a pending promise (no await anywhere in the
+// program) suspends at the return: its caller runs on, at top level and in a
+// timer callback alike, as in Node.
+func TestE2EAsyncReturnPendingWithoutAwait(t *testing.T) {
+	assertOutput(t, `
+async function f(): Promise<number> {
+  return new Promise<number>((r) => setTimeout(() => r(7), 10))
+}
+console.log("a")
+f().then((v) => console.log("top " + v))
+setTimeout(() => { f().then((v) => console.log("cb " + v)); console.log("b") }, 1)
+console.log("c")
+`, "a\nc\nb\ntop 7\ncb 7")
+}
+
 // The canonical delay() helper: an async fn returning a deferred new Promise.
 func TestE2EAsyncDelayHelper(t *testing.T) {
 	assertOutput(t, `
@@ -830,4 +845,123 @@ ps.then((v) => { console.log(v, typeof v) })
 function take(p: Promise<any>): void { p.then((v) => console.log("param", v)) }
 take(Promise.resolve(99))
 `, "42 number\ntrue boolean\nhi string\nparam 99")
+}
+
+// A closure whose returns are all bare is void before it is emitted, and an
+// async arrow annotated `Promise<void>` is one promise, not two (ADR-01436).
+func TestE2EClosureTypeBeforeEmission(t *testing.T) {
+	assertSameAsNode(t, `
+let called = false;
+const once = (tag?: string | null) => {
+  if (called) return;
+  called = true;
+  console.log("once", tag ?? "none");
+};
+const f = function (n: number) { if (n > 0) return; console.log("neg", n); };
+console.log(once("a"), once(), f(1), f(-2));
+const tick = async (): Promise<void> => { await null; console.log("tick"); };
+async function main() { const r = await tick(); console.log(r); await tick(); }
+main();
+`)
+}
+
+func TestE2EAwaitThenableClass(t *testing.T) {
+	// A class instance with a then method is a thenable: await,
+	// Promise.resolve, the combinators, a then callback's result, an async
+	// return and resolve() adopt it through a job that calls its then.
+	assertSameAsNode(t, `class T {
+  v: number;
+  constructor(v: number) { this.v = v; }
+  then(res: (x: number) => void, _rej?: (e: unknown) => void): void { console.log("then called"); res(this.v * 2); }
+}
+class Bad {
+  then(_res: (x: string) => void): void { throw new Error("boom"); }
+}
+async function main() {
+  const x = await new T(21);
+  console.log(x + 1);
+  try { await new Bad(); } catch (e) { console.log("caught", (e as Error).message); }
+}
+main();
+console.log("after main");
+`)
+	assertSameAsNode(t, `class T {
+  v: number;
+  constructor(v: number) { this.v = v; }
+  then(res: (x: number) => void): void { console.log("then", this.v); res(this.v * 2); }
+}
+async function main() {
+  const a = await Promise.resolve(new T(1));
+  console.log("a", a);
+  const all = await Promise.all([new T(2), Promise.resolve(7)]);
+  console.log("all", all);
+  const r = await Promise.race([new T(3)]);
+  console.log("race", r);
+  const q = Promise.resolve(1).then(() => new T(6));
+  console.log("then-ret", await q);
+}
+main();
+`)
+	assertSameAsNode(t, `class T {
+  v: number;
+  constructor(v: number) { this.v = v; }
+  then(res: (x: number) => void): void { console.log("then", this.v); res(this.v * 2); }
+}
+async function ret(): Promise<number> { return new T(5); }
+async function inferred() { return new T(7); }
+async function main() {
+  console.log("ret", await ret());
+  console.log("inferred", await inferred());
+  const p = new Promise<number>((res) => res(new T(8)));
+  console.log("exec", await p);
+}
+main();
+`)
+	// An object or interface value with a then member is one too.
+	assertSameAsNode(t, `interface Thenish { then(res: (v: string) => void): void }
+const lit = { then(res: (v: string) => void): void { console.log("lit then"); res("hello"); } };
+async function main() {
+  const a = await lit;
+  console.log(a.toUpperCase());
+  const t: Thenish = { then(res) { res("iface"); } };
+  console.log(await t);
+  const p = new Promise<string>((res) => res(lit));
+  console.log(await p);
+  console.log(await Promise.resolve(lit));
+}
+main();
+`)
+}
+
+func TestE2EPromiseFaithfulnessFixes(t *testing.T) {
+	// A throw in the executor rejects; a late reject leaves a fulfilled
+	// promise alone; allSettled records have only their status's key; an
+	// any holding a thenable is adopted by await.
+	assertSameAsNode(t, `const p = new Promise<number>(() => { throw new Error("x"); });
+p.catch((e: Error) => console.log("caught", e.message));
+console.log("sync");
+`)
+	assertSameAsNode(t, `const p = new Promise<number>((res) => { res(1); throw new Error("late"); });
+p.then((v) => console.log("ok", v), (e: Error) => console.log("bad", e.message));
+const q = new Promise<string>((_r, rej) => { throw "str"; });
+q.catch((e) => console.log("q", e));
+`)
+	assertSameAsNode(t, `const p = new Promise<number>((res, rej) => { rej(new Error("first")); res(5); });
+p.then((v) => console.log("ok", v), (e: Error) => console.log("rej", e.message));
+const q = new Promise<number>((res) => { res(1); res(2); });
+q.then((v) => console.log("q", v));
+`)
+	assertSameAsNode(t, `async function main() {
+  const r = await Promise.allSettled([Promise.resolve(1), Promise.reject("x")]);
+  console.log(r);
+  console.log(Object.keys(r[0]), Object.keys(r[1]), "reason" in r[0], "value" in r[1]);
+  const v = await Promise.allSettled([Promise.resolve()]);
+  console.log(v, JSON.stringify(r[0]));
+}
+main();
+`)
+	assertSameAsNode(t, `const t: any = { then(r: (v: number) => void) { r(4); } };
+async function m() { console.log(await t); const z: any = 3; console.log(await z); }
+m();
+`)
 }

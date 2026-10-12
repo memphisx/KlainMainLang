@@ -38,7 +38,7 @@
       "exampleKey": "fetch/fetch_init",
       "snippet": "const r = await fetch('http://127.0.0.1:8765/get')\nconsole.log(r.status, r.ok)   // 200 true",
       "differences": [
-        "A network failure rejects with a TypeError whose message is libcurl's (\"Couldn't connect to server\"); Node's is \"fetch failed\", with the reason as its cause."
+        "A transport failure other than a refused connection, a failed lookup or a bad port (TLS, timeout, reset) has an Error with libcurl's message as its cause, where undici gives its own error and code."
       ],
       "seeAlso": [
         "fetch.response.status",

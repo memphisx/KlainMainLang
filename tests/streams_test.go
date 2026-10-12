@@ -1042,3 +1042,25 @@ zlib.brotliCompress('async', (err, res) => {
 });
 `, "true\ntrue\nERR__ERROR_FORMAT_PADDING_1 -14 Decompression failed\nZ_BUF_ERROR unexpected end of file\nZSTD_error_prefix_unknown 10 Unknown frame descriptor\nERR_BROTLI_INVALID_PARAM 99 is not a valid Brotli parameter\nERR_ZSTD_INVALID_PARAM 999 is not a valid zstd parameter\nnull null async")
 }
+
+// A stream without a type argument holds `any` chunks (`ReadableStream<R =
+// any>`): a string and a number read back as themselves (ADR-01446).
+func TestE2EStreamsUntypedChunksAreAny(t *testing.T) {
+	assertSameAsNode(t, `
+const s = new ReadableStream({
+  start(controller) { controller.enqueue("a"); controller.enqueue(2); controller.close(); },
+});
+const t = new TransformStream({
+  transform(chunk, controller) { controller.enqueue(typeof chunk + ":" + chunk); },
+});
+async function main() {
+  const r = s.getReader();
+  for (;;) { const { done, value } = await r.read(); if (done) break; console.log(typeof value, value); }
+  const w = t.writable.getWriter();
+  w.write("x"); w.write(3); w.close();
+  const tr = t.readable.getReader();
+  for (;;) { const { done, value } = await tr.read(); if (done) break; console.log(value); }
+}
+main();
+`)
+}

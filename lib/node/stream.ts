@@ -1874,7 +1874,8 @@ function writeOrBuffer(stream: Stream, s: WritableState, chunk: any, encoding: s
         s.writing = true;
         s.sync = true;
         s.expectWriteCb = true;
-        stream._write(chunk, encoding as BufferEncoding, (er?: Error | null) => { onwrite(stream, er); });
+        const onwriteCb = (er?: Error | null): void => { onwrite(stream, er); };
+        stream._write(chunk, encoding as BufferEncoding, onwriteCb);
         s.sync = false;
     }
     const ret = s.length < s.highWaterMark || s.length === 0;
@@ -1889,7 +1890,10 @@ function doWrite(stream: Stream, s: WritableState, len: number, chunk: any, enco
     s.sync = true;
     s.expectWriteCb = true;
     if (s.destroyed) onwrite(stream, new StreamError('ERR_STREAM_DESTROYED', 'Cannot call write after a stream was destroyed'));
-    else stream._write(chunk, encoding as BufferEncoding, (er?: Error | null) => { onwrite(stream, er); });
+    else {
+        const onwriteCb = (er?: Error | null): void => { onwrite(stream, er); };
+        stream._write(chunk, encoding as BufferEncoding, onwriteCb);
+    }
     s.sync = false;
 }
 
@@ -2093,7 +2097,8 @@ function prefinish(stream: Stream, s: WritableState): void {
         s.pendingcb++;
         stream._kmlNoFinal = false;
         try {
-            stream._final((err?: Error | null) => { onFinish(stream, s, err); });
+            const onFinal = (err?: Error | null): void => { onFinish(stream, s, err); };
+            stream._final(onFinal);
         } catch (err) {
             onFinish(stream, s, err as Error);
         }
@@ -2308,7 +2313,7 @@ export class Transform extends Duplex {
 
     private transformFinal(callback: Callback | undefined): void {
         if (!this.destroyed) {
-            this._flush((er?: Error | null, data?: any) => {
+            const onFlush = (er?: Error | null, data?: any): void => {
                 if (er) {
                     if (callback) callback(er);
                     else this.destroy(er);
@@ -2317,7 +2322,8 @@ export class Transform extends Duplex {
                 if (data !== undefined && data !== null) this.push(data);
                 this.push(null);
                 if (callback) callback();
-            });
+            };
+            this._flush(onFlush);
         } else {
             this.push(null);
             if (callback) callback();
@@ -2328,7 +2334,7 @@ export class Transform extends Duplex {
         const r = this._readableState!;
         const w = this._writableState!;
         const length = r.length;
-        this._transform(chunk, encoding, (err?: Error | null, val?: any) => {
+        const onTransform = (err?: Error | null, val?: any): void => {
             if (err) {
                 callback(err);
                 return;
@@ -2341,7 +2347,8 @@ export class Transform extends Duplex {
             } else {
                 this.pendingCallback = callback;
             }
-        });
+        };
+        this._transform(chunk, encoding, onTransform);
     }
 
     _read(size: number): void {

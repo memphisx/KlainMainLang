@@ -45,16 +45,17 @@ console.log(m.length, m.join(","))
 `, "2 hi yo\ntrue false\nx0,x1,x2\ntyped\n3 a,a,a")
 }
 
-// TDD-00205 Stage 2 (strict lane): a genuinely heterogeneous untyped `[]` (no
-// single element type) is cleanly rejected with an actionable message naming
-// the escape hatches — a tuple, an `any[]` annotation, or -compat=js — since
-// strict mode has no boxed-element array. Never invalid IR.
-func TestE2EEmptyArrayHeterogeneousRejected(t *testing.T) {
-	mustCompileError(t, `
+// A heterogeneous untyped `[]` is tsc's evolving `(string | number)[]` in
+// the strict lane too: a boxed-element array.
+func TestE2EEmptyArrayHeterogeneousStrict(t *testing.T) {
+	assertSameAsNode(t, `
 const a = []
 a.push(1)
 a.push("x")
-`, "heterogeneous array")
+console.log(a, typeof a[0], typeof a[1])
+function g() { const b = []; const y: any = 2; b.push(y); b.push("s"); return b; }
+console.log(g())
+`)
 }
 
 // TDD-00205 Stage 2 (-compat=js lane): the same heterogeneous untyped `[]`
@@ -2079,7 +2080,7 @@ for (const r of xs) { console.log(r.k); }
 // ADR-00686: a named function callback with an untyped 3rd (array) parameter
 // no longer emits invalid IR (the array was passed into an i64 slot).
 func TestE2EArrayForEachNamedUntypedArrayParam(t *testing.T) {
-	assertOutput(t, `
+	assertOutputCompatJS(t, `
 var seen = 0;
 function cb(val, idx, obj) { seen = seen + val; }
 [11, 9].forEach(cb);
@@ -2089,7 +2090,7 @@ console.log(seen);
 
 // ADR-00687: a void-returning predicate (no `return`) is falsy, not invalid IR.
 func TestE2EArrayFilterVoidPredicate(t *testing.T) {
-	assertOutput(t, `
+	assertOutputCompatJS(t, `
 function pred(x) { }
 console.log([1, 2, 3].filter(pred).length);
 console.log([1, 2].every(function (x) { }));
@@ -2406,4 +2407,142 @@ class B { readonly t: number; constructor(t: number) { this.t = t } }
 class D extends B { constructor() { const t = g(); super(t) } }
 console.log(new D().t)
 `, "2.5 1.25 1.25 true\n2.5")
+}
+
+// An empty array's element type is inferred from pushes that read the
+// function's parameters, typed by their annotations (a class field read
+// is a number like `n / 4`, not a heterogeneous mix).
+func TestE2EEmptyArrayElemFromParams(t *testing.T) {
+	assertSameAsNode(t, `
+class L { expiry = 1.5; }
+function f(a: L, n: number) { const out = []; out.push(a.expiry); out.push(n / 4); return out; }
+const g = (a: L, n: number) => { const out = []; out.push(a.expiry); out.push(n / 4); return out; };
+const h = function (a: L, n: number) { const out = []; out.push(a.expiry); out.push(n / 4); return out; };
+console.log(f(new L(), 3), g(new L(), 3), h(new L(), 3));
+`)
+}
+
+// An annotation's nullability decides an array local's, not the branches of
+// its initializer (ADR-01435).
+func TestE2EAnnotatedArrayFromNullableBranch(t *testing.T) {
+	assertSameAsNode(t, `
+class C {
+  props: string[] | undefined = undefined;
+  f(value: any): string {
+    const names: string[] = this.props !== undefined ? this.props : Object.keys(value);
+    const maybe: string[] | undefined = this.props !== undefined ? this.props : undefined;
+    return names.join(",") + " " + (maybe ? maybe.length : "none");
+  }
+}
+const c = new C();
+console.log(c.f({ ab: 1, c: 2 }));
+c.props = ["x"];
+console.log(c.f({}));
+`)
+}
+
+// An element or record read bound to a local keeps its possible absence
+// wherever the local is read, including passes that run before the
+// declaration is emitted (ADR-01437).
+func TestE2EElementReadLocalAbsence(t *testing.T) {
+	assertSameAsNode(t, `
+function dec(bytes: number[]): number[] {
+  const out: number[] = [];
+  let i = 0;
+  const n = bytes.length;
+  while (i < n) {
+    const b = bytes[i];
+    let cp = 0;
+    if (b < 0x80) { out.push(b); i++; continue; }
+    if (b >= 0xC2 && b <= 0xDF) cp = b & 0x1F;
+    const nb = i + 1 < n ? bytes[i + 1] : -1;
+    out.push(nb < 0x80 || nb > 0xBF ? -1 : (cp << 6) | (nb & 0x3F));
+    i += 2;
+  }
+  return out;
+}
+console.log(dec([104, 0xC3, 0xA9, 0xC3]));
+const aliases: Record<string, string> = { a: "x" };
+const colors: Record<string, number[]> = { x: [1, 2] };
+function codes(name: string): number[] | undefined {
+  const direct = colors[name];
+  if (direct !== undefined) return direct;
+  const alias = aliases[name];
+  return alias === undefined ? undefined : colors[alias];
+}
+console.log(codes("x"), codes("a"), codes("q"));
+`)
+}
+
+// An empty array literal asserted to an array type is that type, in an
+// object literal's field as in a binding (ADR-01445).
+func TestE2EEmptyArrayAssertion(t *testing.T) {
+	assertSameAsNode(t, `
+let st = { count: 0, items: [] as string[] };
+st.items.push('a'); st.items.push('bc');
+console.log(st.items, st.items.join('-'), st.items[1].length);
+class K { v = 1; }
+const o = { ks: [] as K[], m: [] as number[], z: [] as (string | number)[] };
+o.ks.push(new K()); o.m.push(2.5); o.z.push('q'); o.z.push(3);
+console.log(o.ks.length, o.ks[0].v, o.m, o.z);
+function mk() { return { tags: [] as string[] }; }
+const t = mk(); t.tags.push('t'); console.log(t.tags);
+`)
+}
+
+// A literal mixing a scalar or string with null and undefined keeps them
+// absent (`(number | null | undefined)[]`), and join/toString render an
+// absent element as "" (ADR-01452, ADR-01453).
+func TestE2EArrayNullishElementsJoin(t *testing.T) {
+	assertSameAsNode(t, `
+const a = [1, null, 3];
+const b = [undefined, 2.5];
+const c = [1, null, undefined];
+const d = [true, null];
+const e = [null, 'x', undefined];
+console.log(a, b, c, d, e);
+console.log(a.join(), b.join(), c.join('-'), d.join(), e.join(), String(c));
+console.log(a[1] === null, b[0] === undefined, c[2] === undefined, c[1] === null, a.length, c.indexOf(null));
+a.push(null); a.push(4); console.log(a, a.filter(x => x !== null));
+console.log(JSON.stringify(c), JSON.stringify(e));
+const t3 = [1, null, undefined, 2];
+console.log(t3.join('/'), String(t3), `+"`${[null, 'q', undefined]}`"+`, [true, null, undefined].join());
+console.log([1.5, 2].toString(), [true, false].toString(), [[1, 2], [3]].toString(), ['a', 'b'].toString());
+`)
+}
+
+// Join and toString on dynamic arrays (-compat=js): holes, null and
+// undefined render as "" (ADR-01452).
+func TestE2EDynamicArrayJoinAbsent(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var a = [];
+a.push(undefined); a.push(null); a.push(3); a.push('s');
+console.log(a.join('|'), String(a), a + '', a.toString());
+var o = { list: [1, null, undefined] };
+console.log(o.list.join(), [[1, null], [undefined, 2]].join(';'), [null] + '', [undefined].join() === '');
+var h = [, 1, , 2];
+console.log(h.join('-'), h.length);
+function g(p, q) { return [p, q].join(','); }
+console.log(g(1), g());
+`)
+}
+
+// A returned empty array takes the elements a loop pushes (for-of, for-in)
+// in its function's return type too (ADR-01529).
+func TestReturnedEmptyArrayPushedInLoop(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+function props(x) {
+  var array = [];
+  for (let p in x) array.push(p);
+  return array;
+}
+console.log(props([]), props(["a", "b"]), props({ q: 1 }));
+var a2 = [];
+a2.push("s");
+console.log(a2, typeof a2[0]);
+function f(xs) { var out = []; for (const x of xs) out.push(x + "!"); return out; }
+console.log(f(["a"]));
+function g() { const out = []; for (const s of ["p", "q"]) out.push(s); return out; }
+console.log(g());
+`)
 }

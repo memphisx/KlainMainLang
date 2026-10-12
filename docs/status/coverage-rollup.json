@@ -5,8 +5,8 @@
     {
       "section": "TypeScript Core Language",
       "total": {
-        "impl": 364,
-        "total": 369,
+        "impl": 369,
+        "total": 374,
         "pct": 99
       },
       "rows": [
@@ -68,7 +68,7 @@
             "total": 12,
             "pct": 25
           },
-          "caveats": "• The `arguments` object reflects the values actually passed — declared parameters plus any overflow (a function reading `arguments` gains an implicit boxed rest, [ADR-00928](../adr/ADR-00928.md)/[TDD-00210](../tdd/TDD-00210.md)); elements are `any` (heterogeneous → NaN-boxed, so `arguments[i]` needs an `as T` cast under strict / operates directly under `-compat=js`), and `.length`/indexing/`for…of`/callback replacers ([ADR-00387](../adr/ADR-00387.md)) all work; a rest/destructured parameter combined with `arguments` and arrow functions stay clean rejections (use the `...rest` directly; arrows have no own `arguments`); class method bodies get boxed declared parameters, non-variadic ([ADR-00464](../adr/ADR-00464.md)) (a leading `this` parameter is parsed and erased — [ADR-00373](../adr/ADR-00373.md))\u003cbr\u003e• Function overload signatures are parsed and **erased** — call sites type-check against the implementation's parameter list only ([ADR-00446](../adr/ADR-00446.md))\u003cbr\u003e• Nested function declarations capture enclosing locals (by reference, [TDD-00129](../tdd/TDD-00129.md) — array captures share the enclosing header cell, [TDD-00213](../tdd/TDD-00213.md) Stage 3; loop variables get per-iteration `let` cells), hoist letrec-style (usable before the declaration statement), and escape by name — capturing generators included — with an inferred closure type ([ADR-01013](../adr/ADR-01013.md)/[ADR-01014](../adr/ADR-01014.md)); two mutually-recursive capturing siblings stay a clean compile error ([ADR-01016](../adr/ADR-01016.md))\u003cbr\u003e• A top-level named function can't reference a sibling top-level binding whose value is a connection handle (`Worker`/`WebSocket`/`EventSource`/channels/`XMLHttpRequest`), a `Promise`, or an inferred-type-argument/nested generic instance (scalars/strings/arrays/`TypedArray`s/objects/`Map`/`Set`/class instances incl. `new Box\u003cnumber\u003e()`, the value/event handles — `Blob`/`Date`/`URL`/`RegExp`/`Headers`/`Request`/`AbortController`/`Event`/… — and streams + `EventEmitter` — plus `http.createServer` handles ([ADR-00426](../adr/ADR-00426.md)) — are promoted to module globals and work — [ADR-00342](../adr/ADR-00342.md)); a default parameter can't reference an earlier parameter ([ADR-00166](../adr/ADR-00166.md))\u003cbr\u003e• A named function expression whose name shadows a top-level function of the same name is a clean compile error — rename one ([TDD-00060](../tdd/TDD-00060.md)/[ADR-00178](../adr/ADR-00178.md))\u003cbr\u003e• A free `function*` generator may be top-level **or nested** (a nested one captures enclosing state by reference, including arrays — [TDD-00213](../tdd/TDD-00213.md) Stage 3); a generator *expression* bound by a top-level `const G = function* ...` has its element type inferred from yields; in any other position it is a value held as `any` ([TDD-00096](../tdd/TDD-00096.md)/[ADR-00293](../adr/ADR-00293.md))"
+          "caveats": "• The `arguments` object reflects the values actually passed — declared parameters plus any overflow (a function reading `arguments` gains an implicit boxed rest, [ADR-00928](../adr/ADR-00928.md)/[TDD-00210](../tdd/TDD-00210.md)); elements are `any` (heterogeneous → NaN-boxed, so `arguments[i]` needs an `as T` cast under strict / operates directly under `-compat=js`), and `.length`/indexing/`for…of`/callback replacers ([ADR-00387](../adr/ADR-00387.md)) all work; a rest/destructured parameter combined with `arguments` and arrow functions stay clean rejections (use the `...rest` directly; arrows have no own `arguments`); a class method's `arguments` counts the declared parameters a call passed and takes no overflow ([ADR-00464](../adr/ADR-00464.md), [ADR-01489](../adr/ADR-01489.md)) (a leading `this` parameter is parsed and erased — [ADR-00373](../adr/ADR-00373.md))\u003cbr\u003e• Function overload signatures are parsed and **erased** — call sites type-check against the implementation's parameter list only ([ADR-00446](../adr/ADR-00446.md))\u003cbr\u003e• Nested function declarations capture enclosing locals (by reference, [TDD-00129](../tdd/TDD-00129.md) — array captures share the enclosing header cell, [TDD-00213](../tdd/TDD-00213.md) Stage 3; loop variables get per-iteration `let` cells), hoist letrec-style (usable before the declaration statement), and escape by name — capturing generators included — with an inferred closure type ([ADR-01013](../adr/ADR-01013.md)/[ADR-01014](../adr/ADR-01014.md)); two mutually-recursive capturing siblings stay a clean compile error ([ADR-01016](../adr/ADR-01016.md))\u003cbr\u003e• A top-level named function can't reference a sibling top-level binding whose value is a connection handle (`Worker`/`WebSocket`/`EventSource`/channels/`XMLHttpRequest`), a `Promise`, or an inferred-type-argument/nested generic instance (scalars/strings/arrays/`TypedArray`s/objects/`Map`/`Set`/class instances incl. `new Box\u003cnumber\u003e()`, the value/event handles — `Blob`/`Date`/`URL`/`RegExp`/`Headers`/`Request`/`AbortController`/`Event`/… — and streams + `EventEmitter` — plus `http.createServer` handles ([ADR-00426](../adr/ADR-00426.md)) — are promoted to module globals and work — [ADR-00342](../adr/ADR-00342.md)); a default parameter can't reference an earlier parameter ([ADR-00166](../adr/ADR-00166.md))\u003cbr\u003e• A named function expression whose name shadows a top-level function of the same name is a clean compile error — rename one ([TDD-00060](../tdd/TDD-00060.md)/[ADR-00178](../adr/ADR-00178.md))\u003cbr\u003e• A free `function*` generator may be top-level **or nested** (a nested one captures enclosing state by reference, including arrays — [TDD-00213](../tdd/TDD-00213.md) Stage 3); a generator *expression* bound by a top-level `const G = function* ...` has its element type inferred from yields; in any other position it is a value held as `any` ([TDD-00096](../tdd/TDD-00096.md)/[ADR-00293](../adr/ADR-00293.md))"
         },
         {
           "category": "Type primitives",
@@ -94,9 +94,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 8,
+            "impl": 9,
             "total": 9,
-            "pct": 89
+            "pct": 100
           }
         },
         {
@@ -168,9 +168,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 19,
+            "impl": 23,
             "total": 32,
-            "pct": 59
+            "pct": 72
           },
           "caveats": "• `Object.create`/`getPrototypeOf`/`setPrototypeOf`/`__proto__` work on **dynamic (`any`-typed) objects only** — statically-typed structs have no prototype link ([TDD-00155](../tdd/TDD-00155.md) Stage 3)\u003cbr\u003e• `WeakMap`/`WeakSet`/`WeakRef` are strong-backed under `-mm=manual`; real weak semantics only under `-mm=gc` ([TDD-00112](../tdd/TDD-00112.md))\u003cbr\u003e• Object literal method shorthand (`{ foo() {...} }`) has no `this` binding (no nominal type to give it a shape, no dynamic call-site binding) — a clean compile-time rejection, not silently wrong. See [ADR-00169](../adr/ADR-00169.md)"
         },
@@ -237,16 +237,16 @@
           "category": "Classes / OOP",
           "pageFile": "LANGUAGE-CONSTRUCTS.md",
           "coverage": {
-            "impl": 19,
-            "total": 19,
+            "impl": 24,
+            "total": 24,
             "pct": 100
           },
           "strict": {
-            "impl": 8,
-            "total": 19,
-            "pct": 42
+            "impl": 11,
+            "total": 24,
+            "pct": 46
           },
-          "caveats": "• **Parameter properties** (`constructor(public x: number)`/`private`/`readonly`) declare + assign their field ([ADR-00447](../adr/ADR-00447.md); `readonly` is not enforced as immutability), and the **`readonly` *field* modifier** parses too — both recorded, not enforced as immutability ([ADR-00480](../adr/ADR-00480.md))\u003cbr\u003e• `class X extends Error` works one level deep ([ADR-00630](../adr/ADR-00630.md)); extending an Error *subclass* is a clean rejection, and `.stack` doesn't exist\u003cbr\u003e• Static field initializers (`static x = 5`) work ([ADR-00375](../adr/ADR-00375.md)); clean rejections: static/async generator methods, a dynamic computed member key (`[Symbol.asyncIterator]`/`[Symbol.iterator]` are accepted, desugared to the iteration methods — [TDD-00089](../tdd/TDD-00089.md)/[ADR-00278](../adr/ADR-00278.md)), and a class expression used as a runtime value\u003cbr\u003e• A field initializer can currently see constructor params (real JS's separate initializer scope forbids this — [ADR-00180](../adr/ADR-00180.md))\u003cbr\u003e• `#x` private names have no early-error check for `#m`/`static #m` name collision or the `#constructor`-is-banned rule ([ADR-00155](../adr/ADR-00155.md))"
+          "caveats": "• **Parameter properties** (`constructor(public x: number)`/`private`/`readonly`) declare + assign their field ([ADR-00447](../adr/ADR-00447.md); `readonly` is not enforced as immutability), and the **`readonly` *field* modifier** parses too — both recorded, not enforced as immutability ([ADR-00480](../adr/ADR-00480.md))\u003cbr\u003e• `class X extends Error` works one level deep ([ADR-00630](../adr/ADR-00630.md)); extending an Error *subclass* is a clean rejection, and `.stack` doesn't exist\u003cbr\u003e• Static field initializers (`static x = 5`) work ([ADR-00375](../adr/ADR-00375.md)); clean rejections: static/async generator methods, a member keyed by a value computed at run time (a `let`, a call, an interpolation); well-known symbols, a const symbol and a const string or number key are accepted ([TDD-00089](../tdd/TDD-00089.md), [ADR-01414](../adr/ADR-01414.md), [ADR-01415](../adr/ADR-01415.md)), and a class expression used as a runtime value\u003cbr\u003e• A field initializer can currently see constructor params (real JS's separate initializer scope forbids this — [ADR-00180](../adr/ADR-00180.md))\u003cbr\u003e• `#x` private names have no early-error check for `#m`/`static #m` name collision or the `#constructor`-is-banned rule ([ADR-00155](../adr/ADR-00155.md))"
         },
         {
           "category": "JSDoc tags",
@@ -316,9 +316,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 3,
+            "impl": 5,
             "total": 5,
-            "pct": 60
+            "pct": 100
           },
           "caveats": "• A timer callback must be a zero-argument `void` function (a closure or a bare top-level-function reference — [ADR-00200](../adr/ADR-00200.md))\u003cbr\u003e• `setImmediate` and a same-tick `setTimeout(fn, 0)` are indistinguishable — `__kml_timer_drain` is one flat fire-time-ordered queue with no check-vs-timers phases"
         },
@@ -365,7 +365,7 @@
             "total": 9,
             "pct": 44
           },
-          "caveats": "• TypedArray construction is restricted to a variable declaration's initializer (Node `Buffer`'s call-syntax statics are exempt); no `.buffer`\u003cbr\u003e• BigInt64Array/BigUint64Array support an explicit method allow-list — everything else is a compile-time rejection\u003cbr\u003e• Buffer encodings must be string literals\u003cbr\u003e• No `Atomics.waitAsync`, no `getFloat16`"
+          "caveats": "• A view over a resizable ArrayBuffer keeps the length it had when made (no length tracking)\u003cbr\u003e• BigInt64Array/BigUint64Array support an explicit method allow-list — everything else is a compile-time rejection\u003cbr\u003e• Buffer encodings must be string literals\u003cbr\u003e• No `Atomics.waitAsync`, no `getFloat16`"
         },
         {
           "category": "Web Crypto",
@@ -391,9 +391,9 @@
             "pct": 93
           },
           "strict": {
-            "impl": 7,
+            "impl": 9,
             "total": 14,
-            "pct": 50
+            "pct": 64
           },
           "caveats": "`Date` setters need a named-variable receiver"
         },
@@ -555,9 +555,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 7,
+            "impl": 8,
             "total": 9,
-            "pct": 78
+            "pct": 89
           },
           "caveats": "• Multi-argument events via a tuple payload (`emit(e, a, b)` — [ADR-00392](../adr/ADR-00392.md)); no open-ended untyped `...args` beyond a declared tuple\u003cbr\u003e• `instanceof EventEmitter` is a compile-time constant, not a runtime tag"
         },
@@ -633,7 +633,7 @@
             "total": 20,
             "pct": 0
           },
-          "caveats": "• One window per process (V1); a second `new Webview` is a clean rejection; multi-window deferred (engine run-loop/app-delegate rework)\u003cbr\u003e• Servers/fd-loops still need a Worker — timers/microtasks/async bind run on the GUI thread via a page-tick pump ([ADR-00439](../adr/ADR-00439.md))\u003cbr\u003e• Linux is compile-tier only, not yet run (macOS/Windows verified)"
+          "caveats": "• One window per process (V1); a second `new Webview` is a clean rejection; multi-window deferred (engine run-loop/app-delegate rework)\u003cbr\u003e• Windows: servers/fd-loops still need a Worker — timers/microtasks/async bind run on the GUI thread via a page-tick pump ([ADR-00439](../adr/ADR-00439.md)); macOS/Linux run the whole loop inside the GUI loop ([ADR-01405](../adr/ADR-01405.md))\u003cbr\u003e• Sailfish: the GUI-loop embedding is not yet built against a sysroot or run on a device\u003cbr\u003e• Linux is compile-tier only, not yet run (macOS/Windows verified)"
         }
       ]
     },

@@ -144,7 +144,7 @@ const a = crypto.createECDH('prime256v1');
 const b = crypto.createECDH('prime256v1');
 const ak = a.generateKeys();
 const bk = b.generateKeys('hex', 'compressed');
-t('lens', () => [ak.length, bk.length, a.getPrivateKey().length, a.getPublicKey('hex', 'compressed').length]);
+t('lens', () => [ak.length, bk.length, a.getPrivateKey().length <= 32, a.getPublicKey('hex', 'compressed').length]);
 t('same', () => a.computeSecret(b.getPublicKey()).equals(b.computeSecret(ak)));
 t('hex-in', () => a.computeSecret(bk, 'hex', 'hex').length);
 t('setpriv', () => { const c = crypto.createECDH('prime256v1'); c.setPrivateKey(a.getPrivateKey()); return c.getPublicKey().equals(a.getPublicKey()); });
@@ -166,6 +166,7 @@ t('dh-notobj', () => crypto.diffieHellman({ privateKey: 'x' as any, publicKey: x
 t('dh-wrongtype', () => crypto.diffieHellman({ privateKey: x1.publicKey, publicKey: x2.publicKey }));
 const k = crypto.createECDH('secp256k1'); k.generateKeys();
 t('k1', () => k.getPublicKey().length);
+t('unpadded', () => { const z = crypto.createECDH('prime256v1'); const pk = Buffer.alloc(32); pk[31] = 7; z.setPrivateKey(pk); return z.getPrivateKey('hex'); });
 console.log(Object.prototype.toString.call(a), typeof a.setPublicKey);
 `)
 }

@@ -169,6 +169,11 @@ type Symbol struct {
 	// Implicit marks a symbol no declaration introduces (a function's
 	// `arguments`).
 	Implicit bool
+	// Display is the name an anonymous class expression is printed by: the
+	// binding it initializes (`const D = class {}` is `D`), else
+	// "(Anonymous class)", as TypeScript prints it. Empty for any other
+	// symbol.
+	Display string
 }
 
 // ScopeKind is the kind of container a scope belongs to.

@@ -161,19 +161,25 @@ func (e *Emitter) passStaticReceiver(c string) func() {
 // class's name: there `this` is the class. A nested non-arrow function has
 // its own `this` and is left alone.
 func staticThisToClass(prog *ast.Program) {
+	var cd *ast.ClassDeclaration
 	var rw func(cls string, n ast.Node) ast.Node
 	rw = func(cls string, n ast.Node) ast.Node {
 		switch n.(type) {
 		case *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ClassDeclaration, *ast.ClassExpression:
 			return n // its own `this`
 		case *ast.ThisExpression:
-			return ast.NewIdentifier(cls, n.GetPos())
+			id := ast.NewIdentifier(cls, n.GetPos())
+			if prog.StaticThis == nil {
+				prog.StaticThis = map[*ast.Identifier]*ast.ClassDeclaration{}
+			}
+			prog.StaticThis[id] = cd
+			return id
 		}
 		ast.RewriteChildren(n, func(m ast.Node) ast.Node { return rw(cls, m) })
 		return n
 	}
 	ast.Inspect(prog, func(n ast.Node) bool {
-		var cd *ast.ClassDeclaration
+		cd = nil
 		switch n := n.(type) {
 		case *ast.ClassDeclaration:
 			cd = n

@@ -559,8 +559,11 @@ func TestTypeArgsBeforeTemplateAndSuper(t *testing.T) {
 	if !ok || len(tt.TypeArgs) != 1 || len(tt.Exprs) != 1 {
 		t.Fatalf("got %#v, want a tagged template with one type argument", tt)
 	}
-	if call, ok := mustParseExpr(t, "super<T>(0)").(*ast.CallExpression); !ok || len(call.TypeArgs) != 1 {
-		t.Fatalf("super<T>(0): got %#v, want a call with one type argument", call)
+	prog := mustParse(t, "class A extends B { constructor() { super<T>(0); } }")
+	ctor := prog.Body[0].(*ast.ClassDeclaration).Constructor
+	st, _ := ctor.Body.Body[0].(*ast.ExpressionStatement)
+	if call, ok := st.Expr.(*ast.CallExpression); !ok || len(call.TypeArgs) != 1 {
+		t.Fatalf("super<T>(0): got %#v, want a call with one type argument", st.Expr)
 	}
 }
 
@@ -580,5 +583,23 @@ func TestNamespaceAmbientMembers(t *testing.T) {
 	mustParse(t, "declare namespace P { const x: number; export { x } }")
 	if _, err := parser.Parse("namespace Q { const x = 1; export { x } }"); err == nil || !strings.Contains(err.Error(), "not permitted in a namespace") {
 		t.Errorf("export list in a namespace: got %v, want TS1194", err)
+	}
+}
+
+// A builtin interface's `@lowerType` names its native layout (TDD-00230
+// P3.2); a plain interface has none.
+func TestInterfaceLowerType(t *testing.T) {
+	prog, err := parser.Parse("/** @lowerType date */\ninterface D { x: number }\ninterface E { y: string }\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, s := range prog.Body {
+		if d, ok := s.(*ast.InterfaceDeclaration); ok {
+			got = append(got, d.Name+"="+d.LowerType)
+		}
+	}
+	if strings.Join(got, ",") != "D=date,E=" {
+		t.Fatalf("got %v", got)
 	}
 }

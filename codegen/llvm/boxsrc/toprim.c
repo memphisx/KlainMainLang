@@ -63,6 +63,12 @@ static i64 tp_get(void *bag, int isstatic, const void *key) {
     return isstatic ? __kml_obj_get(bag, key) : __kml_dynobj_get(bag, key);
 }
 
+/* Whether v boxes a bigint (its cell's magic, emit_bigint_box.go). */
+int __kml_any_is_bigint(i64 v) {
+    void *p = nb_ptr(v);
+    return nb_tag(v) == 6 && p && *(const u64 *)p == 0x7FF40000B1616B16ULL;
+}
+
 i64 __kml_toprimitive(i64 v, int hint) {
     hint &= 0xff;
     int tag = nb_tag(v), isobj = tag == 10, isstatic = 0;
@@ -70,6 +76,8 @@ i64 __kml_toprimitive(i64 v, int hint) {
     if (isobj) {
         /* a dynamic bag */
     } else if (tag == 6) {
+        /* A boxed bigint's cell (emit_bigint_box.go's magic): a primitive. */
+        if (__kml_any_is_bigint(v)) return v;
         i64 hr = __kml_host_toprim(v, hint);
         if (hr != v) return hr;
         if (!bag) return v;

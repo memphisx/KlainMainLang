@@ -27,6 +27,7 @@
 #endif
 #ifndef _WIN32
 #include <sys/mman.h> // mmap/munmap, for coroutine stacks
+#include <unistd.h>   // getpagesize, for their guard pages
 #endif
 #if defined(__GLIBC__)
 #include <pthread.h> // the foreign-block set's lock
@@ -52,10 +53,15 @@ void *__kml_task_stack_alloc(size_t n) {
 #ifdef _WIN32
 	return VirtualAlloc(NULL, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #else
-	void *p = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	// A guard page under the stack, so an overflow throws (TDD-00249); it
+	// sits below the range returned, as macOS makecontext faults on a stack
+	// range holding one.
+	size_t g = (size_t)getpagesize();
+	char *p = mmap(NULL, n + g, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (p == MAP_FAILED) return NULL;
-	GC_add_roots((char *)p, (char *)p + n);
-	return p;
+	mprotect(p, g, PROT_NONE);
+	GC_add_roots(p + g, p + g + n);
+	return p + g;
 #endif
 }
 void __kml_task_stack_free(void *p, size_t n) {
@@ -65,7 +71,7 @@ void __kml_task_stack_free(void *p, size_t n) {
 	VirtualFree(p, 0, MEM_RELEASE);
 #else
 	GC_remove_roots((char *)p, (char *)p + n);
-	munmap(p, n);
+	munmap((char *)p - getpagesize(), n + (size_t)getpagesize());
 #endif
 }
 

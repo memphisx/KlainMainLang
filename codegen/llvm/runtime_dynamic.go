@@ -107,6 +107,12 @@ host_chk:
   %bothhost = and i1 %ahost, %bhost
   br i1 %bothhost, label %cmp_host, label %not_equal
 cmp_host:
+  ; a headered host (a Map, a Set) is its own box: distinct pointers are
+  ; distinct values
+  %inl = and i64 %fa, ` + fmt.Sprint(hostInlineFlag) + `
+  %isinl = icmp ne i64 %inl, 0
+  br i1 %isinl, label %not_equal, label %cmp_cell
+cmp_cell:
   %hpa = getelementptr { i64, ptr }, ptr %oap, i32 0, i32 1
   %hpb = getelementptr { i64, ptr }, ptr %obp, i32 0, i32 1
   %hva = load ptr, ptr %hpa, align 8

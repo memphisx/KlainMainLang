@@ -51,27 +51,6 @@ var virtualBuiltinMarkers = map[string]string{
 	// (ADR-00635). http and klain:http sharing one marker is what previously let
 	// `http.listen` slip through the http namespace.
 	"klain:http": "klainhttp__kml_builtin",
-	// TDD-00142: the system-webview desktop-window module. `Webview` binds as
-	// identity (a parse-time constructor, like stream's class names).
-	"klain:webview": "webview__kml_builtin",
-	// TDD-00142 Stage 7: compile-time asset embedding (`embedDir`). Function
-	// member → marker-dispatch (not identity).
-	"klain:assets": "assets__kml_builtin",
-	// TDD-00031: bespoke terminal-input primitives with no Node counterpart —
-	// synchronous single-keystroke reads off fd 0 (Node does raw input via
-	// process.stdin.on('data') events, never a sync byte read). The
-	// Node-faithful surface (setRawMode/columns/rows/SIGWINCH) stays on
-	// `process`; only these non-Node reads live under the explicit klain: name.
-	"klain:tty": "tty__kml_builtin",
-	// TDD-00150 Stage 1: native TUI framework — Yoga flexbox layout + a
-	// double-buffered ANSI diff painter. Builder functions (Box/Text/List/
-	// Spinner/Progress/TextInput) plus render/enter/leave; the state->view->
-	// update loop is written in userland TS over klain:tty + SIGWINCH.
-	"klain:tui": "tui__kml_builtin",
-	// TDD-00143: Go-fidelity goroutine runtime. `go` is a function-member
-	// (marker-dispatched); `Channel` binds as identity (a parse-time
-	// constructor, like Webview / stream class names).
-	"klain:sync": "sync__kml_builtin",
 	"memory":     "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
 	// TDD-00165: Web-global-backed Node modules. Their primary exports are
 	// spec-identical re-exports of an ambient global (`URL`, `setTimeout`,
@@ -142,19 +121,11 @@ var virtualModuleMembers = map[string]map[string]bool{
 	// these as `Server` methods, not `http.*` functions) live solely under
 	// `klain:http` now (TDD-00158 follow-up / ADR-00635) — importing them from
 	// `http` is a clean "no export" rejection pointing there.
-	"http":          {"get": true, "request": true, "createServer": true, "Agent": true},
-	"klain:http":    {"listen": true, "close": true, "closeAllConnections": true},
-	"klain:webview": {"Webview": true},
-	"klain:assets":  {"embedDir": true},
-	"klain:tty":     {"readByte": true, "readKey": true},
-	"klain:sync":    {"go": true, "Channel": true, "select": true, "defaultCase": true},
-	"klain:tui": {
-		"Box": true, "Text": true, "List": true, "Spinner": true,
-		"Progress": true, "TextInput": true,
-		"render": true, "enter": true, "leave": true,
-	},
-	"memory": {"free": true},
-	"https":  {"get": true, "request": true, "Agent": true},
+	"http":       {"get": true, "request": true, "createServer": true, "Agent": true},
+	"klain:http": {"listen": true, "close": true, "closeAllConnections": true},
+	"klain:sync": {"go": true, "Channel": true, "select": true, "defaultCase": true},
+	"memory":     {"free": true},
+	"https":      {"get": true, "request": true, "Agent": true},
 	// stream/web re-exports the WHATWG stream classes that already exist as
 	// parse-time constructors — the names bind as identity.
 	"stream/web": {

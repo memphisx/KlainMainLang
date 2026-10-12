@@ -38,14 +38,33 @@ func (e *Emitter) emitGlobalGC(args []ast.Expression, pos ast.Pos) (Value, error
 
 // emitNewWeakMapValue builds `new WeakMap<K,V>()`.
 func (e *Emitter) emitNewWeakMapValue(init *ast.NewWeakMapExpression) (Value, error) {
-	keyTy := TypePtr // default: object keys
-	valTy := TypeI64 // default: number values
+	return e.emitNewWeakMapValueAnnotated(init, nil)
+}
+
+// weakMapKV is a `new WeakMap()`'s key and value types: its type arguments,
+// else a `WeakMap<K, V>` annotation's on its declaration (annot, may be
+// nil), else object keys and number values.
+func (e *Emitter) weakMapKV(init *ast.NewWeakMapExpression, annot *ast.TypeAnnotation) (Type, Type) {
+	keyTy := TypePtr
+	valTy := TypeI64
+	if init.KeyType == nil && init.ValType == nil && annot != nil {
+		if at := e.resolveType(annot); at.IsMap && at.Weak && at.MapKey != nil && at.MapVal != nil {
+			return *at.MapKey, *at.MapVal
+		}
+	}
 	if init.KeyType != nil {
 		keyTy = e.resolveType(init.KeyType)
 	}
 	if init.ValType != nil {
 		valTy = e.resolveType(init.ValType)
 	}
+	return keyTy, valTy
+}
+
+// emitNewWeakMapValueAnnotated builds `new WeakMap<K, V>()`, typed by
+// weakMapKV under its declaration's annotation.
+func (e *Emitter) emitNewWeakMapValueAnnotated(init *ast.NewWeakMapExpression, annot *ast.TypeAnnotation) (Value, error) {
+	keyTy, valTy := e.weakMapKV(init, annot)
 	e.ensureWeakHelpers()
 	ptr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_weak_create()", ptr))

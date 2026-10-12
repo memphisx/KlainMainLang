@@ -314,7 +314,8 @@
             "feature": "`in` operator (`key in obj`)",
             "status": "implemented",
             "notes": [
-              "Reduces to the same compile-time `FieldIndex` lookup `Object.hasOwn()`/`.hasOwnProperty()` already use (object shapes are fully structural/static — no dynamic property add/delete) — a string-literal key against an object is a compile-time-constant `true`/`false`, not a runtime scan",
+              "On a fixed-shape object a string-literal key is a compile-time answer (a runtime presence test for an optional member) and a runtime string key is compared against the object's own keys; both find what the prototype holds as well — Object.prototype's members and a class instance's methods and accessors, inherited ones included ([ADR-01483](../adr/ADR-01483.md))",
+              "On a string-keyed dictionary (`Record<string, T>`, an index signature) it is the dictionary's runtime membership test",
               "On a bare `any` value it *is* a runtime membership scan of the D1 dynamic object's property bag, and the key may be runtime-computed ([TDD-00155](../tdd/TDD-00155.md) Stage 1); `delete anyVal.key` likewise deletes for real",
               "Parsed as a contextual keyword (not a reserved token) at the same precedence as `instanceof`, matching how `for...in` already recognizes \"in\". See [ADR-00091](../adr/ADR-00091.md)"
             ]
@@ -418,7 +419,7 @@
             "caveats": [
               "Cannot reference a sibling top-level binding whose value is a connection handle (`Worker`, `BroadcastChannel`/`MessageChannel`, `XMLHttpRequest` — construction opens a thread/socket), a `Promise`, or a generic class instance with **inferred** rather than explicit type arguments (`new Box(5)`, or a nested `new Box<Box<number>>()`) — such a binding stays a `main()` local outside a named function's fresh scope, failing with `undefined variable`. Scalars, strings, arrays, `TypedArray`s, objects, `Map`/`Set`, class instances (including an explicit `new Box<number>()`), the value/event handles (`Blob`, `Date`, `Error`, `URL`, `URLSearchParams`, `URLPattern`, `RegExp`, `Headers`, `ArrayBuffer`, `DataView`, `TextEncoder`/`TextDecoder`, `Request`, `AbortController`, `Event`/`CustomEvent`, `EventTarget`), and the streams (`ReadableStream`/`WritableStream`/`TransformStream`/`CompressionStream`, the Node streams) + `EventEmitter`, and `http.createServer` handles ([ADR-00426](../adr/ADR-00426.md)) are promoted to module globals and are readable ([TDD-00093](../tdd/TDD-00093.md)/[ADR-00342](../adr/ADR-00342.md)/[ADR-00709](../adr/ADR-00709.md)); arrow functions/closures capture everything regardless ([TDD-00057](../tdd/TDD-00057.md))",
               "A genuinely circular pair of mutually-recursive unannotated functions can't converge on a return type and keeps the scalar-default fallback ([TDD-00058](../tdd/TDD-00058.md))",
-              "The `arguments` object is synthesized from the declared parameters when they all share one type ([ADR-00387](../adr/ADR-00387.md)) — `.length`, indexing, and `for…of` work; mixed-type parameters, a rest/destructured parameter, and an arrow function (which has no own `arguments` in JS) are clean rejections, and it reflects the declared parameters rather than growing with extra untyped arguments (there is no variadic call beyond an explicit `...rest`); class method bodies get the same synthesis ([ADR-00464](../adr/ADR-00464.md))"
+              "`arguments` in a function with an explicit `...rest` or a destructured parameter is a compile error; a call through `any` (a path that does not record how many arguments it passed) makes `arguments.length` count every declared parameter ([ADR-01489](../adr/ADR-01489.md))"
             ],
             "notes": [
               "Named, typed params, typed return",
@@ -533,13 +534,13 @@
             "status": "implemented",
             "caveats": [
               "A free `function*` may be top-level **or nested** (a nested `function*` captures enclosing state by reference — an enclosing `let` mutated after the generator is created is seen by a later `.next()` — reusing the closure-boxing on the instance's `__env`; an *array* capture stays a clean rejection); a generator *expression* is supported only as a top-level `const/let/var G = function* ...` binding (rewritten to a named declaration, [TDD-00096](../tdd/TDD-00096.md)/[ADR-00293](../adr/ADR-00293.md)) — an argument/nested/IIFE use is a clean rejection. Instance generator methods — sync and `async *m()` — are supported separately (rows below), but `static`/`abstract` generator methods stay clean rejections ([TDD-00094](../tdd/TDD-00094.md))",
-              "The return-type annotation is optional — the element type is inferred from the body's yields (numeric join, `yield*` delegation, return fallback; only a genuinely non-joinable mix still requires the annotation — [ADR-00293](../adr/ADR-00293.md)); still requires a plain non-destructured parameter list and a non-array parameter type (an array *element* type is supported — yielded/sent arrays round-trip through every generator slot, `for...of`/`.next()`/`yield*`/`for await` alike, [ADR-00676](../adr/ADR-00676.md); a tuple/object element type also works)",
-              "When present, the annotation may be the element type written directly (`function* f(): number`) or the idiomatic-TS wrapper around it — `Generator<T>`, `IterableIterator<T>`, `Iterator<T>`, `Iterable<T>` and their `Async` forms, plus the three-arg `Generator<T, TReturn, TNext>` (TReturn is ignored; a `yield` expression is the value `.next(v)` sent, typed `any` whatever TNext declares) — which unwraps to `T` ([ADR-00814](../adr/ADR-00814.md))",
+              "The return-type annotation is optional — the element type is inferred from the body's yields (numeric join, `yield*` delegation, return fallback; only a genuinely non-joinable mix still requires the annotation — [ADR-00293](../adr/ADR-00293.md)); a destructured, defaulted or optional parameter is still a compile error (rest and array parameters work, [ADR-01496](../adr/ADR-01496.md))",
+              "When present, the annotation is an iterator type as in TypeScript — `Generator<T>`, `IterableIterator<T>`, `Iterator<T>`, `Iterable<T>` and their `Async` forms, plus the three-arg `Generator<T, TReturn, TNext>` (TReturn is ignored; a `yield` expression is the value `.next(v)` sent, typed `any` whatever TNext declares) — which unwraps to `T` ([ADR-00814](../adr/ADR-00814.md)); a bare element type (`function* f(): number`) is tsc's TS2322 in the default lane and accepted by `-compat=js` ([ADR-01568](../adr/ADR-01568.md))",
               "Calling `.next()` again after completion returns `{value: <T's zero value>, done: true}`, not `undefined` ([TDD-00061](../tdd/TDD-00061.md)/[ADR-00173](../adr/ADR-00173.md)) — deliberately kept bare even with the `T \\| undefined` sentinel available: tsc types the result's `value` as `any`, so the typed `T` here is already stricter than TS, and flipping it would break every `.next().value` consumer for no faithfulness gain ([ADR-00781](../adr/ADR-00781.md))"
             ],
             "notes": [
               "Real suspend/resume via this compiler's own `ucontext.h`-based fiber primitive (the same one `http.listen`/`await fetch(...)` already use), not a synchronous stand-in — see [ADR-00171](../adr/ADR-00171.md)/[ADR-00172](../adr/ADR-00172.md)",
-              "The full iterator protocol: `.throw(e)` injects at the suspension point (a body `try/catch` handles it, else it propagates to the caller and finishes the generator), `.return(v)` completes the generator running enclosing `finally` blocks, and `yield*` delegates to an inner generator — forwarding sent values / `.throw()` / `.return()` and evaluating to the inner's return value ([ADR-00259](../adr/ADR-00259.md)/[TDD-00086](../tdd/TDD-00086.md)). A `return` inside a `try/finally` runs the `finally`",
+              "The full iterator protocol: `.throw(e)` injects at the suspension point (a body `try/catch` handles it, else it propagates to the caller and finishes the generator), `.return(v)` completes the generator running enclosing `finally` blocks, and `yield*` delegates to an inner generator — forwarding sent values / `.throw()` / `.return()` and evaluating to the inner's return value — or to an array, string, Set or Map, yielding each element ([ADR-01496](../adr/ADR-01496.md)) ([ADR-00259](../adr/ADR-00259.md)/[TDD-00086](../tdd/TDD-00086.md)). A `return` inside a `try/finally` runs the `finally`",
               "Leaving a `for...of` over a generator early closes the iterator — a `break`, a `return` from the loop body, and an outer labeled `break`/`continue` all drive the suspended generator's `.return()`, so an enclosing `finally` in the generator body runs (interleaved innermost-first with any body/consumer `finally`), matching JS ([ADR-00613](../adr/ADR-00613.md)/[ADR-00614](../adr/ADR-00614.md)); a `throw` propagating out of the body is the one path that doesn't yet close it (exceptions unwind through a separate mechanism)"
             ]
           }
@@ -582,9 +583,6 @@
               "A member Promise is a **reusable value**: the combinator reads each slot without freeing it, so any member — a value/task promise **or** a raw-fetch `Promise<Response>` — can be awaited again or read after the combinator ([ADR-00270](../adr/ADR-00270.md)/[TDD-00090](../tdd/TDD-00090.md))",
               "Members may be task promises, `fetch` promises or plain values (each through `Promise.resolve`), also held in an `any[]` ([ADR-01193](../adr/ADR-01193.md))",
               "Over task promises each combinator is the spec's: it returns a pending promise at once and settles it from its members' reactions — `.all` on every fulfilment (the first rejection rejects it), `.allSettled` on every settlement, `.race` on the first settlement, `.any` on the first fulfilment (all rejected: an `AggregateError`) — so `.then`/`.catch`/`.finally` chain on it and nothing blocks at the call ([ADR-01193](../adr/ADR-01193.md))"
-            ],
-            "caveats": [
-              "An inline list mixing promises and values (`[p, 4]`) is a heterogeneous array literal, rejected in the strict lane — an `any[]` list works"
             ]
           },
           {
@@ -607,7 +605,7 @@
             "feature": "`new Promise((resolve, reject) => …)` (executor constructor)",
             "status": "implemented",
             "notes": [
-              "**Thenable adoption**: `resolve(anotherPromise)` settles the outer promise with the inner's value (or reason) when the inner settles — reaction-based, so it's a microtask tick like `.then`, not synchronous ([ADR-00271](../adr/ADR-00271.md)/[TDD-00091](../tdd/TDD-00091.md)). Only a typed `Promise` argument adopts; a custom duck-typed `{ then }` object isn't adopted (this compiler has no `PromiseLike<T>` type — it's a clean type mismatch, not a silent miss)",
+              "**Thenable adoption**: `resolve(anotherPromise)` settles the outer promise with the inner's value (or reason) when the inner settles — reaction-based, so it's a microtask tick like `.then`, not synchronous ([ADR-00271](../adr/ADR-00271.md)/[TDD-00091](../tdd/TDD-00091.md)). A thenable — a class instance, object or interface value with a `then` method — is adopted through a job that calls its `then`, for `resolve(x)`, `await x`, `Promise.resolve(x)`, the combinators' members, a `.then` callback's result and an `async` function's `return x` ([ADR-01465](../adr/ADR-01465.md))",
               "Synchronous resolve/reject, conditional settle, and **first-settle-wins** (a later resolve/reject is ignored); `.then`/`.catch`/`await` all work ([ADR-00263](../adr/ADR-00263.md)/[TDD-00087](../tdd/TDD-00087.md))",
               "The executor may be an arrow, a `function(…) {…}` expression, a closure-typed variable, or a bare top-level-function reference ([ADR-00267](../adr/ADR-00267.md))",
               "**Deferred** resolution from a `setTimeout` callback (`new Promise((res) => setTimeout(() => res(v), ms))`) — awaiting drives the microtask queue and fires due timers until it settles",
@@ -748,7 +746,7 @@
               "[TDD-00013](../tdd/TDD-00013.md) Option A — a small fixed kind enum (a hidden runtime tag on the same shared `Error` object shape, not a real class hierarchy), plus a real `.name` field",
               "`instanceof Error` matches any kind; `instanceof TypeError` etc. matches only that one. See [ADR-00082](../adr/ADR-00082.md)",
               "`new DOMException(message?, name?)` takes its `.name` from the 2nd argument (default `\"Error\"`), unlike the fixed-name kinds; per the modern WebIDL spec it is `instanceof Error` too, and fetch cancellation throws one (`AbortError`/`TimeoutError`) — [ADR-00240](../adr/ADR-00240.md)",
-              "`class X extends Error` (or a built-in kind, `extends TypeError`, [ADR-01169](../adr/ADR-01169.md)) at any depth ([ADR-01319](../adr/ADR-01319.md)): construction through the chain, `super(msg)`, `.message`/`.name`, `instanceof` at every level (also on a caught value), fields of its own — including ones named like a system error's (`code`, `errno`) — and its own enumerable keys, an assigned `name` included, in Node's order"
+              "`class X extends Error` (or a built-in kind, `extends TypeError`, [ADR-01169](../adr/ADR-01169.md), or `extends DOMException`, [ADR-01423](../adr/ADR-01423.md)) at any depth ([ADR-01319](../adr/ADR-01319.md)): construction through the chain, `super(msg)`, the constructor's second argument with or without a constructor of its own (`options.cause`; DOMException's `name`), `.message`/`.name`, `instanceof` at every level (also on a caught value), fields of its own — including ones named like a system error's (`code`, `errno`) — and its own enumerable keys, an assigned `name` included, in Node's order"
             ]
           },
           {
@@ -774,10 +772,9 @@
             "status": "implemented",
             "caveats": [
               "Instance-field initializers (`x = expr`) work, and a class with fields needs **no** explicit constructor — a bare declared field (`x: number`) reads as its calloc'd deterministic-zero value (0/false/null, the [ADR-00157](../adr/ADR-00157.md) convention), any initializers that exist run in a synthesized constructor ([ADR-00374](../adr/ADR-00374.md)); the one remaining rejection is a **derived** class adding fields when its base has a rest-parameter constructor (write an explicit `super(...)`). static field initializers (`static x = 5`) work — lowered to assignments run in declaration order in the class's static-init, ahead of any `static {}` block, with an unannotated one typed by inference ([ADR-00375](../adr/ADR-00375.md)). An instance-field initializer lowered into the constructor can currently see the constructor's own parameters (which real JS's separate initializer scope forbids), and an unannotated initializer of an expression shape the compiler doesn't recognize falls back to `i64` ([TDD-00063](../tdd/TDD-00063.md)/[ADR-00180](../adr/ADR-00180.md))",
-              "A computed class member name must be a literal or one of the well-known symbols `iterator`, `asyncIterator`, `toPrimitive`, `dispose` and `asyncDispose` (desugared to their protocol methods, [TDD-00089](../tdd/TDD-00089.md), [ADR-00278](../adr/ADR-00278.md)); any other (an identifier, a call, `Symbol.toStringTag`) is a clean rejection",
+              "A class member keyed by a value computed at run time (a `let`, a parameter, a call, `Symbol.toStringTag`) is a clean rejection; literal names (`'a-b' = 1`, `0() {}`, `[1]`), the well-known symbols `iterator`, `asyncIterator`, `toPrimitive`, `dispose` and `asyncDispose`, and a const holding a symbol, string or number are accepted ([TDD-00089](../tdd/TDD-00089.md), [ADR-00278](../adr/ADR-00278.md), [ADR-01414](../adr/ADR-01414.md), [ADR-01415](../adr/ADR-01415.md), [ADR-01420](../adr/ADR-01420.md))",
               "A class that reads a local of its enclosing function from a nested `function` is a clean rejection; an inherited static method called on a subclass reads `this` as the class declaring it; a class expression that reads none is hoisted to one top-level class, so evaluating it twice yields the same class (identity and statics shared, where Node creates a new class per evaluation); `extends <expression>` is out of scope",
-              "Class early-error gaps (deferred, no valid program miscompiles): a field initializer containing `arguments` or a `super()` call, a `super()` call in a method parameter default, field-definition ASI on the same line (`field = 1 method(){}`), and the `#constructor` private-name ban all compile instead of raising the spec's `SyntaxError`",
-              "A bare field (`x;`) defaults to `number` (the unannotated-parameter convention; JSDoc `@type` overrides) — TS infers implicit `any`, so a non-numeric use is a shifted typed error ([ADR-00474](../adr/ADR-00474.md))"
+              "Class early-error gaps (deferred, no valid program miscompiles): a `super()` call in a method parameter default, field-definition ASI on the same line (`field = 1 method(){}`), and the `#constructor` private-name ban all compile instead of raising the spec's `SyntaxError`"
             ],
             "notes": [
               "[TDD-00009](../tdd/TDD-00009.md) Stage 1 — instances reuse the same heap-object/GEP machinery interfaces already use; methods compile to plain static calls (`this` as an implicit first arg), no closure indirection. See [ADR-00063](../adr/ADR-00063.md)",
@@ -805,7 +802,8 @@
               "[TDD-00009](../tdd/TDD-00009.md) Stage 4 — `static` members are inherited through `extends` like real JS/TS (an inherited static field reads its base's until the subclass assigns its own, as JavaScript's constructor prototype chain does ([ADR-01318](../adr/ADR-01318.md)))",
               "`private`/`protected` are compile-time-only (zero runtime check, matching real TypeScript's own erasure), checked by the type checker with tsc's codes (`TS2341`, `TS2445`, `TS2446`, `TS2673`/`TS2674` for a constructor), including `super.privateMethod()`; an element access by name (`o[\"p\"]`) is TypeScript's way around a modifier and compiles ([ADR-01157](../adr/ADR-01157.md))",
               "An optional method (`m?(): T;`) is `undefined` on a class that does not implement it: `this.m != null`, `if (this.m)`, `typeof this.m` and `this.m?.(…)` read its presence ([ADR-01168](../adr/ADR-01168.md))",
-              "`abstract` reuses Stage 3's override-detection machinery almost entirely for free; `implements` is a compile-time structural self-check ([ADR-00084](../adr/ADR-00084.md)); an object behind an interface-typed reference, of any layout, is read, written and called as itself through a checked view ([TDD-00233](../tdd/TDD-00233.md))"
+              "The `override` member modifier parses (no run-time effect), and a member it marks must be declared by the base class, TypeScript's TS4112/TS4113 ([ADR-01464](../adr/ADR-01464.md))",
+              "`abstract` reuses Stage 3's override-detection machinery almost entirely for free; `implements` is checked by the type checker with tsc's TS2420 ([ADR-01498](../adr/ADR-01498.md)); an object behind an interface-typed reference, of any layout, is read, written and called as itself through a checked view ([TDD-00233](../tdd/TDD-00233.md))"
             ]
           },
           {
@@ -826,6 +824,49 @@
               "[TDD-00009](../tdd/TDD-00009.md) Stage 3 — single inheritance, base-first field layout, `super(args)`/`super.method(args)`, an implicit pass-through constructor when a derived class adds no fields of its own",
               "Dispatch is static (a plain direct call, identical to Stage 1/2) except for a method provably overridden somewhere in the whole program, which goes through a per-tree vtable instead — decided once at compile time via whole-program override analysis, not per call site. See [ADR-00083](../adr/ADR-00083.md)",
               "`extends` also accepts the imported `EventEmitter`, with or without an event-map type argument ([TDD-00023](../tdd/TDD-00023.md)/[ADR-00089](../adr/ADR-00089.md)) — a synthetic root never itself registered as a real class"
+            ]
+          },
+          {
+            "feature": "`class X extends Map<K, V>` / `extends Set<T>`",
+            "status": "implemented",
+            "notes": [
+              "The instance is the collection itself ([TDD-00247](../tdd/TDD-00247.md), [ADR-01424](../adr/ADR-01424.md)): Map's or Set's methods and `size` on it and through `super`, iteration and spread as the host's, `instanceof` both ways, passing it where a `Map`/`Set` is expected, the same through `any`, and `console.log` as Node shows it (`Counter(2) [Map] { 'a' => 1, x: 1 }`)"
+            ]
+          },
+          {
+            "feature": "`class X extends RegExp`",
+            "status": "implemented",
+            "notes": [
+              "The instance is the RegExp itself ([TDD-00247](../tdd/TDD-00247.md), [ADR-01463](../adr/ADR-01463.md)): `test`/`exec`, `source`/`flags`/`lastIndex` (read and written) on it and through `super`, the string methods that take a RegExp (`replace`, `split`, `match`, …), `new RegExp(r)`, `instanceof` both ways, passing it where a `RegExp` is expected, `String(r)`, the same through `any`, and `console.log` as Node shows it (`R /a+b/g { tag: 'x' }`)"
+            ]
+          },
+          {
+            "feature": "`class X extends Promise<T>`",
+            "status": "implemented",
+            "caveats": [
+              "A generic subclass (`class P<T> extends Promise<T>`) is the generic-class `extends` limitation: only a non-generic class extends Promise"
+            ],
+            "notes": [
+              "The instance is the promise ([TDD-00247](../tdd/TDD-00247.md), [ADR-01466](../adr/ADR-01466.md)): `await`, `instanceof` both ways, passing it where a `Promise` is expected, `console.log` (`P [Promise] { 1, tag: 'p' }`), and Promise's `then`/`catch`/`finally` and statics (`resolve`, `reject`, `all`, `race`, `allSettled`, `any`) making instances of the class through its constructor (species), a constructor wrapping the resolving functions seeing each call; the same through `any`"
+            ]
+          },
+          {
+            "feature": "`class X extends Date`",
+            "status": "implemented",
+            "notes": [
+              "The instance is the Date ([TDD-00247](../tdd/TDD-00247.md), [ADR-01468](../adr/ADR-01468.md)): `new D(…)` and `super(…)` take Date's arguments, Date's methods and setters act on it, an override wins, and `instanceof`, `String(d)`, `+d`, `JSON.stringify` and `console.log` (`D 2024-02-28T00:00:00.000Z { tag: 'x' }`) behave as Node's; passing it where a `Date` is expected, or through `any`, keeps it the same object"
+            ]
+          },
+          {
+            "feature": "`class X extends Array` / a typed array",
+            "status": "implemented",
+            "caveats": [
+              "A `static get [Symbol.species]()` override is a clean compile error (a computed member key the parser does not take), so species results are always the receiver's class",
+              "A species or `of` construction whose constructor's first parameter cannot hold a number (`constructor(...items: string[])`) calls it without the length, where Node passes the number; the instance's elements are the same ([ADR-01469](../adr/ADR-01469.md))",
+              "A species result that changes the element type is a plain array: a generic override (`map<U>(…): U[]` returning `super.map(f)`), or Array's method through `any` on an instance (`(q as any).map(f)`), where Node returns an instance of the class"
+            ],
+            "notes": [
+              "The instance is the array ([TDD-00247](../tdd/TDD-00247.md), [ADR-01469](../adr/ADR-01469.md)): elements, `length` (read and written), every Array (typed array) method on it and through `super`, an override reached even through a plain `T[]`, species results (`map`, `filter`, `slice`, `subarray`, …) and `from`/`of` making instances of the class, `Array.isArray`, `instanceof` both ways, destructuring, spread, `Object.keys`/`values`/`entries`, `for…in`, `JSON.stringify`, passing it where an array is expected, the same through `any`, and `console.log` as Node shows it (`Stack(2) [ 1, 2, x: 1 ]`, `Bytes(3) [Uint8Array] [ 1, 2, 3 ]`)"
             ]
           },
           {
@@ -866,7 +907,7 @@
     },
     {
       "kind": "block",
-      "text": "- **Strict-mode early errors**: strict code is a whole program that opens with `\"use strict\"` or is a module, and a function or class body; the program-level rules (`delete` of a name, a call as an assignment or update target) are not applied inside a function that alone says `\"use strict\"`, and `eval`/`arguments` as an *assignment* target and bindings inside a getter/setter accessor body are not rejected yet."
+      "text": "- **Strict-mode early errors**: a `\"use strict\"` directive is recognized only as the first statement of a program's or function's directive prologue (one after another string-literal directive is not)."
     }
   ]
 }

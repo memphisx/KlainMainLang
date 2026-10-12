@@ -1,8 +1,8 @@
 // Asynchronous fs — the callback form and the Promise form (fs/promises).
 //
-// Under the hood the I/O is still the blocking syscall (this compiler has no
-// thread pool); the async shape is what matters — existing callback- and
-// Promise/await-style code compiles and runs unchanged.
+// Both run their I/O on the thread pool. Two independent chains of pool
+// operations finish in no fixed order (in Node too), so the Promise demo
+// starts once the callback demo is done.
 
 import fs from "fs";
 
@@ -30,7 +30,7 @@ async function promiseDemo(): Promise<void> {
 }
 
 // --- Callback form: fs.readFile(path, encoding, (err, data) => ...) ---
-function callbackDemo(): void {
+function callbackDemo(done: () => void): void {
   fs.writeFile("__demo_cb.txt", "written via callback", (err) => {
     if (err) {
       console.log("callback write error");
@@ -44,10 +44,12 @@ function callbackDemo(): void {
       console.log("callback read:", data);
       fs.unlink("__demo_cb.txt", (err3) => {
         console.log(err3 ? "callback cleanup error" : "callback cleanup done");
+        done();
       });
     });
   });
 }
 
-callbackDemo();
-promiseDemo();
+callbackDemo(() => {
+  promiseDemo();
+});

@@ -7,7 +7,7 @@
   "coverage": {
     "loose": "9/9",
     "loosePct": 100,
-    "strict": "7/9",
+    "strict": "8/9",
     "strictPct": 78
   },
   "lede": "Node's classic EventEmitter, imported from events (it is no global), not the WHATWG EventTarget/Event trio. With no type argument every event takes any arguments, @types/node's default event map; a type argument is an event map of argument tuples. The on/once/emit/off surface is compiled by the compiler rather than a registered class, so instanceof answers as a compile-time constant, and every listener is held as a dynamic function. A subclass can still override any of those methods (the override wins at every call site, and super.<method>(...) reaches the built-in).",
@@ -183,18 +183,18 @@
       "id": "events.listenerCount",
       "name": ".listenerCount(event) / .eventNames()",
       "statusRow": ".listenerCount(event) / .eventNames()",
-      "signature": ".listenerCount(event: string): number; .eventNames(): string[]",
-      "badge": "caveats",
-      "description": "listenerCount reports how many listeners are registered for an event. eventNames returns the names that currently have listeners, in registration order; an event whose last listener is removed drops out.",
+      "signature": ".listenerCount(event: string | symbol): number; .eventNames(): (string | symbol)[]",
+      "badge": "exact",
+      "description": "listenerCount reports how many listeners are registered for an event. eventNames returns the names that currently have listeners, string names in registration order and then symbol names; an event whose last listener is removed drops out.",
       "params": [
         {
           "name": "event",
-          "type": "string",
+          "type": "string | symbol",
           "desc": "Event name to count (listenerCount only)."
         }
       ],
       "returns": {
-        "type": "number | string[]",
+        "type": "number | (string | symbol)[]",
         "desc": "The listener count, or the array of event names."
       },
       "exampleKey": "eventemitter/eventemitter",
@@ -204,10 +204,7 @@
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/events.html#emitterlistenercounteventname-listener"
-      },
-      "differences": [
-        "Event names are strings; a symbol event name is not supported"
-      ]
+      }
     },
     {
       "id": "events.error",

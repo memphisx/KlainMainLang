@@ -373,7 +373,7 @@ func (e *Emitter) resolveStreamStrategy(strategy ast.Expression, chunkTy Type, p
 // emitNewReadableStream implements `new ReadableStream<T>(source?, strategy?)`.
 func (e *Emitter) emitNewReadableStream(ex *ast.NewReadableStreamExpression) (Value, error) {
 	pos := ex.GetPos()
-	chunkTy := TypeI64
+	chunkTy := TypeAny // ReadableStream<R = any>
 	if ex.ChunkType != nil {
 		chunkTy = e.resolveType(ex.ChunkType)
 	}

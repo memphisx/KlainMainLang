@@ -487,6 +487,11 @@ func (c typeConverter) convSignatureMember(m TypeMember) (*TypeAnnotation, error
 // signature makes it the equivalent function type; an index signature makes
 // it a map-backed dynamic object and cannot be combined with named members.
 func (c typeConverter) convTypeLiteral(n *TypeLiteral) (*TypeAnnotation, error) {
+	if len(n.Members) == 0 {
+		// `{}`: any value but null and undefined, primitives included —
+		// held as a boxed value.
+		return &TypeAnnotation{Name: "any", Source: c.source}, nil
+	}
 	var fields []AnnotField
 	var indexSig, callSig *TypeAnnotation
 	for _, m := range n.Members {

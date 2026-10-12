@@ -80,6 +80,10 @@ type Type struct {
 	// Bits and Signed describe an Int.
 	Bits   int
 	Signed bool
+	// AnyArith marks the number an arithmetic operator on two `any`
+	// operands yields: TypeScript types it number, but at run time it is a
+	// bigint when both operands hold one, so it is held as `any`.
+	AnyArith bool
 	// Types are a union's members, ordered by ID.
 	Types []*Type
 	// The object payload.
@@ -175,6 +179,15 @@ func sourceName(name string) string {
 	return strings.ReplaceAll(ast.TrimModuleSuffix(name), "__kmlns_", ".")
 }
 
+// symbolName is how a type prints sym: an anonymous class expression by its
+// display name.
+func symbolName(sym *binder.Symbol) string {
+	if sym.Display != "" {
+		return sourceName(sym.Display)
+	}
+	return sourceName(sym.Name)
+}
+
 // Prop returns the property named name, or nil.
 func (t *Type) Prop(name string) *Property {
 	for _, p := range t.Props {
@@ -188,7 +201,7 @@ func (t *Type) Prop(name string) *Property {
 // String renders a type the way TypeScript prints it.
 func (t *Type) String() string {
 	if t.ClassOf != nil {
-		return "typeof " + sourceName(t.ClassOf.Name)
+		return "typeof " + symbolName(t.ClassOf)
 	}
 	// A constructor type: an object whose one member is a construct
 	// signature.
@@ -221,7 +234,7 @@ func (t *Type) String() string {
 	case t.Flags&NonPrimitive != 0:
 		return "object"
 	case t.Flags&Literal != 0 && t.Member != "":
-		return sourceName(t.Symbol.Name) + "." + t.Member
+		return symbolName(t.Symbol) + "." + t.Member
 	case t.Flags&StringLiteral != 0:
 		return strconv.Quote(t.Value)
 	case t.Flags&(NumberLiteral|BooleanLiteral) != 0:
@@ -241,7 +254,7 @@ func (t *Type) String() string {
 		if t.Symbol == nil {
 			return t.Value // a class's or interface's type parameter
 		}
-		return sourceName(t.Symbol.Name)
+		return symbolName(t.Symbol)
 	case t.Flags&Union != 0:
 		// TypeScript prints null and undefined last, and a whole enum by its
 		// name.
@@ -258,7 +271,7 @@ func (t *Type) String() string {
 			if m.Member != "" && seen[m.Symbol] == m.EnumSize {
 				if !named[m.Symbol] {
 					named[m.Symbol] = true
-					parts = append(parts, sourceName(m.Symbol.Name))
+					parts = append(parts, symbolName(m.Symbol))
 				}
 				continue
 			}
@@ -350,9 +363,9 @@ func (t *Type) String() string {
 				for i, a := range t.TypeArgs {
 					args[i] = a.String()
 				}
-				return sourceName(t.Symbol.Name) + "<" + strings.Join(args, ", ") + ">"
+				return symbolName(t.Symbol) + "<" + strings.Join(args, ", ") + ">"
 			}
-			return sourceName(t.Symbol.Name)
+			return symbolName(t.Symbol)
 		}
 	}
 	if len(t.Props) == 0 {
@@ -364,7 +377,11 @@ func (t *Type) String() string {
 		if p.Optional {
 			opt = "?"
 		}
-		parts[i] = p.Name + opt + ": " + p.Type.String() + ";"
+		ro := ""
+		if p.Readonly {
+			ro = "readonly "
+		}
+		parts[i] = ro + p.Name + opt + ": " + p.Type.String() + ";"
 	}
 	return "{ " + strings.Join(parts, " ") + " }" // tsc: `{ x: number; y: string; }`
 }
@@ -404,6 +421,12 @@ func (in *interner) intern2(key string, make func() *Type) (*Type, bool) {
 
 func (in *interner) intrinsic(f TypeFlags) *Type {
 	return in.intern("i"+strconv.Itoa(int(f)), func() *Type { return &Type{Flags: f} })
+}
+
+// anyNumber is the number of an arithmetic operator on two `any` operands
+// (Type.AnyArith).
+func (in *interner) anyNumber() *Type {
+	return in.intern("anynum", func() *Type { return &Type{Flags: Number, AnyArith: true} })
 }
 
 func (in *interner) literal(f TypeFlags, value string) *Type {
@@ -446,6 +469,15 @@ func (in *interner) withParamNames(fn *Type, names []string) *Type {
 	return in.intern("n"+strconv.Itoa(fn.ID)+":"+strings.Join(names, ","), func() *Type {
 		c := *fn
 		c.ParamNames = names
+		return &c
+	})
+}
+
+// withResult is signature fn returning r.
+func (in *interner) withResult(fn, r *Type) *Type {
+	return in.intern("r"+strconv.Itoa(fn.ID)+":"+strconv.Itoa(r.ID), func() *Type {
+		c := *fn
+		c.Result = r
 		return &c
 	})
 }
@@ -612,6 +644,20 @@ func (in *interner) union(ts ...*Type) *Type {
 			return m // unknown absorbs every other member, as any does
 		}
 	}
+	// The number of `any` arithmetic (AnyArith) holds every number, so it
+	// absorbs plain numbers and number literals.
+	for _, m := range members {
+		if m.AnyArith {
+			kept := members[:0]
+			for _, o := range members {
+				if o.AnyArith || o.Flags&(Number|NumberLiteral) == 0 {
+					kept = append(kept, o)
+				}
+			}
+			members = kept
+			break
+		}
+	}
 	members = in.reduceLiterals(members)
 	switch len(members) {
 	case 0:
@@ -694,6 +740,41 @@ func (in *interner) overloaded(sigs []*Type) *Type {
 
 // HasRestParam reports whether a function type's last parameter is a rest.
 func (t *Type) HasRestParam() bool { return t.restParam }
+
+// MinArgs is how many arguments a call of function type t must pass: up to
+// its last required parameter, a trailing parameter that accepts void
+// counting as optional (tsc's getMinArgumentCount: `resolve()` for a
+// `(value: void | T) => void`).
+func (t *Type) MinArgs() int {
+	min := 0
+	for i := range t.Params {
+		if (i < len(t.optionals) && t.optionals[i]) || (t.restParam && i == len(t.Params)-1) {
+			break
+		}
+		min = i + 1
+	}
+	for min > 0 && acceptsVoid(t.Params[min-1]) {
+		min--
+	}
+	return min
+}
+
+func acceptsVoid(t *Type) bool {
+	if t == nil {
+		return false
+	}
+	if t.Flags&Void != 0 {
+		return true
+	}
+	if t.Flags&Union != 0 {
+		for _, m := range t.Types {
+			if m.Flags&Void != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // OptionalParam reports whether a function type's parameter i is optional.
 func (t *Type) OptionalParam(i int) bool { return i < len(t.optionals) && t.optionals[i] }

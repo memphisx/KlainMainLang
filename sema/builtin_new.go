@@ -22,7 +22,6 @@ var builtinConstructors = map[string]builder{
 	"ReadableStream":      buildReadableStream,
 	"WritableStream":      buildWritableStream,
 	"TransformStream":     buildTransformStream,
-	"Webview":             optionsOnly(func(o ast.Expression, p ast.Pos) ast.Expression { return ast.NewNewWebviewExpression(o, p) }),
 	"CompressionStream":   compressionStream(false),
 	"DecompressionStream": compressionStream(true),
 	"Error":               errorKind("Error"),
@@ -39,7 +38,6 @@ var builtinConstructors = map[string]builder{
 	"XMLHttpRequest":      noArgs("XMLHttpRequest", func(p ast.Pos) ast.Expression { return ast.NewNewXMLHttpRequestExpression(p) }),
 	"ArrayBuffer":         arrayBuffer(false),
 	"SharedArrayBuffer":   arrayBuffer(true),
-	"Channel":             buildChannel,
 	"RegExp":              buildRegExp,
 }
 
@@ -292,13 +290,6 @@ func arrayBuffer(shared bool) builder {
 		}
 		return ex, nil
 	}
-}
-
-func buildChannel(e *ast.NewExpression) (ast.Expression, error) {
-	if err := arity(e, "Channel(capacity?)", 0, 1); err != nil {
-		return nil, err
-	}
-	return ast.NewNewChannelExpression(typeArg(e, 0), arg(e, 0), e.GetPos()), nil
 }
 
 func buildRegExp(e *ast.NewExpression) (ast.Expression, error) {

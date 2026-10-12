@@ -29,7 +29,7 @@ import (
 // rather than JS's insert-between-every-position behavior — the string-value
 // empty-search path is unaffected.
 func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbExpr ast.Expression, all bool, pos ast.Pos) (Value, error) {
-	cb, err := e.resolveCallbackWithHints(cbExpr, []Type{TypePtr, TypeI64, TypePtr})
+	cb, err := e.resolveCallbackWithHints(cbExpr, []Type{TypePtr, TypeF64, TypePtr})
 	if err != nil {
 		return Value{}, err
 	}

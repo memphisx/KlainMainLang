@@ -13,6 +13,9 @@ import (
 // Binding is the binder's result for one program.
 type Binding struct {
 	Module *Scope
+	// Sloppy is a binding under sloppy-script rules (Options.AnnexB): plain
+	// JavaScript that is not strict code.
+	Sloppy bool
 	// refs maps every identifier reference to the symbol it resolves to; an
 	// identifier absent from the map (and listed in globals) names nothing
 	// the program declares.
@@ -40,6 +43,9 @@ type Binding struct {
 	refContainer map[*ast.Identifier]*Scope
 	// stores lists, per symbol, the nodes that store to it (see StoresTo).
 	stores map[*Symbol][]ast.Node
+	// foreignStores holds the symbols some function other than their
+	// declaring one stores to.
+	foreignStores map[*Symbol]bool
 	// endReachable marks the function bodies whose end some path reaches.
 	endReachable map[*ast.BlockStatement]bool
 	// fnScopes maps each function-like node to the scope its parameters,
@@ -53,7 +59,9 @@ type Binding struct {
 	// order; lastAssign is each symbol's last assignment in that order,
 	// extended to its enclosing statement's end (maxOrd: assigned in a
 	// nested function).
-	refOrd     map[*ast.Identifier]int
+	refOrd map[*ast.Identifier]int
+	// refScope is the scope each reference was read in.
+	refScope   map[*ast.Identifier]*Scope
 	declOrd    map[*Symbol]int
 	lastAssign map[*Symbol]int
 	// endFlow is each function body's flow node at its end.
@@ -140,8 +148,13 @@ type scopeKey struct {
 }
 
 type binder struct {
+	// initOf is the variable declaration whose initializer is being bound.
+	initOf *ast.VarDeclaration
 	*Binding
-	declaring bool // pass 1 declares; pass 2 resolves
+	// exceptionTargets are the open try statements' exception labels: every
+	// assignment inside one is a state an exception can leave it in.
+	exceptionTargets []*FlowNode
+	declaring        bool // pass 1 declares; pass 2 resolves
 	// ambientNS maps a declaration file's namespace members (inside its
 	// `declare module` blocks too) to their namespace, while it is bound.
 	ambientNS map[ast.Statement]*namespace
@@ -256,6 +269,7 @@ func BindWith(prog *ast.Program, opts Options) *Binding {
 	b := &binder{
 		annexB: opts.AnnexB,
 		Binding: &Binding{
+			Sloppy:              opts.AnnexB,
 			Program:             prog,
 			refs:                map[*ast.Identifier]*Symbol{},
 			undefinedRefs:       map[*ast.NullLiteral]*Symbol{},
@@ -268,9 +282,11 @@ func BindWith(prog *ast.Program, opts Options) *Binding {
 			written:             map[*ast.Identifier]bool{},
 			refContainer:        map[*ast.Identifier]*Scope{},
 			stores:              map[*Symbol][]ast.Node{},
+			foreignStores:       map[*Symbol]bool{},
 			endReachable:        map[*ast.BlockStatement]bool{},
 			fnScopes:            map[ast.Node]*Scope{},
 			refOrd:              map[*ast.Identifier]int{},
+			refScope:            map[*ast.Identifier]*Scope{},
 			declOrd:             map[*Symbol]int{},
 			lastAssign:          map[*Symbol]int{},
 			exported:            map[ast.Node]bool{},
@@ -628,6 +644,7 @@ func (b *binder) visitNode(n ast.Node) {
 			b.refFlow[n] = b.flow
 			b.refContainer[n] = b.container
 			b.refOrd[n] = b.ord
+			b.refScope[n] = b.cur
 			b.accesses = append(b.accesses, n)
 			if b.writing {
 				b.written[n] = true
@@ -658,7 +675,10 @@ func (b *binder) visitNode(n ast.Node) {
 	case *ast.VarDeclaration:
 		b.declareVariable(n.Kind, n.Name, n)
 		b.typeQueryScopes(n.TypeAnnot)
+		prev := b.initOf
+		b.initOf = n
 		b.visit(n.Init)
+		b.initOf = prev
 		b.storing = n
 		defer func() { b.storing = nil }()
 		if n.Kind != "var" {
@@ -715,16 +735,21 @@ func (b *binder) visitNode(n ast.Node) {
 		if n.Decl == nil {
 			return
 		}
-		named := n.Decl.Name != "" && n.Decl.Name[0] != '$'
-		if named {
-			b.enter(n, 1, NameScope)
-			b.declare(b.cur, n.Decl.Name, Class, NameOnly, n)
+		// The class's own name scope declares it, anonymous or not (a
+		// parser-given `$…` name no source can write): its declaration is
+		// the class, so the checker types `class { … }` as a class value.
+		b.enter(n, 1, NameScope)
+		if n.Decl.Name != "" {
+			if s := b.declare(b.cur, n.Decl.Name, Class, NameOnly, n.Decl); s != nil && n.Decl.Name[0] == '$' {
+				s.Display = "(Anonymous class)"
+				if v, ok := b.storingInit(n); ok {
+					s.Display = b.unmangled(v)
+				}
+			}
 		}
 		b.exprClass = n.Decl
 		b.class(n.Decl)
-		if named {
-			b.leave()
-		}
+		b.leave()
 		return
 	case *ast.EnumDeclaration:
 		flags := RegularEnum
@@ -986,6 +1011,11 @@ func (b *binder) visitNode(n ast.Node) {
 		return
 	case *ast.TryStatement:
 		pre := b.flow
+		var exc *FlowNode
+		if n.Finally != nil && b.flowing() {
+			exc = b.newLabel(FlowBranchLabel, pre)
+			b.exceptionTargets = append(b.exceptionTargets, exc)
+		}
 		b.visit(n.Body)
 		after := b.flow
 		if c := n.Catch; c != nil {
@@ -1007,9 +1037,20 @@ func (b *binder) visitNode(n ast.Node) {
 			b.leave()
 			after = b.join(after, b.flow)
 		}
-		// finally runs on the way out of either; the paths it is reached on
-		// by an exception are not modelled (a read there is not checked
-		// against them).
+		if exc != nil {
+			b.exceptionTargets = b.exceptionTargets[:len(b.exceptionTargets)-1]
+		}
+		// finally runs on the way out of either. When neither completes
+		// normally, it is entered only by an exception, from any state the
+		// try or catch was in (tsc's exception target), and what follows it
+		// is unreachable. Otherwise it is entered from the normal completion;
+		// the exception paths are not modelled there.
+		if exc != nil && after == unreachableFlow {
+			b.flow = finish(exc)
+			b.visit(n.Finally)
+			b.flow = unreachableFlow
+			return
+		}
 		b.flow = after
 		b.visit(n.Finally)
 		return
@@ -1137,9 +1178,12 @@ func (b *binder) function(node ast.Node, params []ast.Param, body *ast.BlockStat
 				start.Outer = savedFlow // a class expression's method or accessor
 			}
 		}
-		b.flow, b.container, b.returnTo = start, scope, nil
+		// A try around the function does not see its assignments.
+		savedTargets := b.exceptionTargets
+		b.flow, b.container, b.returnTo, b.exceptionTargets = start, scope, nil, nil
 		defer func() {
 			b.flow, b.container, b.jumps, b.returnTo, b.fnScope = savedFlow, savedContainer, savedJumps, savedReturn, savedFn
+			b.exceptionTargets = savedTargets
 		}()
 	}
 	if b.flowing() {
@@ -1200,6 +1244,15 @@ func (b *binder) function(node ast.Node, params []ast.Param, body *ast.BlockStat
 // class binds a class body: member names are properties of the class, not
 // scope bindings, so only the code inside members is visited.
 func (b *binder) class(c *ast.ClassDeclaration) {
+	if len(c.TypeParams) > 0 {
+		// Type parameters are types of the class's members: their
+		// annotations and bodies see them.
+		tps := b.enter(c, 3, BlockScope)
+		for _, tp := range c.TypeParams {
+			b.declare(tps, tp, TypeParameter, TypeOnly, c)
+		}
+		defer b.leave()
+	}
 	for _, d := range c.Decorators {
 		b.visit(d)
 	}
@@ -1211,12 +1264,18 @@ func (b *binder) class(c *ast.ClassDeclaration) {
 		for _, d := range f.Decorators {
 			b.visit(d)
 		}
+		// A computed key (`[kRefed]: T`, TDD-00246) is evaluated where the
+		// class is declared.
+		if f.Key != nil {
+			b.visit(f.Key)
+		}
 	}
 	// Field initializers run when an instance is constructed, not where the
 	// class is declared: they are a function of their own for the flow.
 	init := b.enter(c, 2, FunctionScope)
-	savedFlow, savedContainer := b.flow, b.container
-	b.flow, b.container = &FlowNode{Flags: FlowStart, Scope: init}, init
+	savedFlow, savedContainer, savedTargets := b.flow, b.container, b.exceptionTargets
+	b.flow, b.container, b.exceptionTargets = &FlowNode{Flags: FlowStart, Scope: init}, init, nil
+	defer func() { b.exceptionTargets = savedTargets }()
 	// A parameter property's field shares the parameter's default
 	// (`constructor(public x = f())`): it is bound once, as the parameter.
 	ctorDefaults := map[ast.Expression]bool{}
@@ -1247,6 +1306,11 @@ func (b *binder) class(c *ast.ClassDeclaration) {
 	for _, m := range c.Methods {
 		for _, d := range m.Decorators {
 			b.visit(d)
+		}
+		// A computed key (`[kInspect]() {}`, TDD-00246) is evaluated where
+		// the class is declared.
+		if m.Key != nil {
+			b.visit(m.Key)
 		}
 		if expr {
 			b.exprMethod = m
@@ -1336,6 +1400,14 @@ func (b *binder) local(name string) *Symbol {
 }
 
 // unmangled is name as the current namespace scope declares it.
+// storingInit is the name of the variable whose initializer e is.
+func (b *binder) storingInit(e ast.Expression) (string, bool) {
+	if b.initOf != nil && b.initOf.Init == e {
+		return b.initOf.Name, true
+	}
+	return "", false
+}
+
 func (b *binder) unmangled(name string) string {
 	if b.nsPrefix != "" && b.cur.Kind == NamespaceScope {
 		return strings.TrimPrefix(name, b.nsPrefix)

@@ -161,7 +161,7 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 	// Nullable|IsUndefined; an array/tuple prop has no spare absent state
 	// (ADR-00246) so it keeps the zero-shaped value. Must mirror inferExprType's
 	// `Optional` member case.
-	undefTy := undefinedableElem(resultTy)
+	undefTy := optionalFieldType(resultTy)
 	wrapUndef := undefTy.Nullable && !resultTy.IsArray
 	// The result buffer holds the optional's VALUE. For an array that value is the
 	// {ptr,i64} aggregate, not the header-pointer field storage StructFieldIR now
@@ -243,8 +243,12 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 		}
 	}
 	propVal = e.coerce(propVal, resultTy)
+	if undefTy.NullAndUndef && !propVal.Ty.NullAndUndef {
+		// A null property stays null beside the short-circuit's undefined.
+		propVal = e.toThreeState(propVal, undefTy)
+	}
 	presentRef := propVal.Ref
-	if isNullableScalar(undefTy) && !isNullableScalar(resultTy) {
+	if isNullableScalar(undefTy) && !isNullableScalar(propVal.Ty) {
 		// (An optional field's value is already the { i1, T } aggregate.)
 		presentRef = e.makeNullableScalarAgg(undefTy, "true", propVal.Ref)
 	}
@@ -340,6 +344,14 @@ func (e *Emitter) emitDivZeroGuard(ty Type, left, right Value) {
 // treated as unsigned so a negative index and index >= length are caught by
 // a single comparison).
 func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy Type, err error) {
+	if body, ok, herr := e.hostArrayReceiver(ex.Object); herr != nil || ok {
+		if herr != nil {
+			return "", Type{}, herr
+		}
+		plain := *ex
+		plain.Object = body
+		ex = &plain
+	}
 	dataPtrReg, lenReg, idxRef, elemTy, err := e.emitIndexBase(ex)
 	if err != nil {
 		return "", TypeVoid, err
@@ -531,19 +543,19 @@ func (e *Emitter) emitTupleElemAssign(ex *ast.IndexExpression, tupleTy Type, op 
 }
 
 // constObjectKey returns the field name a compile-time-constant bracket key
-// denotes for a fixed-shape object (`o["a"]` → "a", `o[0]` → "0"), and whether
-// the index is such a constant (ADR-00608). An integer numeric literal matches
-// the field-name text the object literal stored for a numeric key; a bigint or
-// non-integer literal is not a valid object key here.
+// denotes for a fixed-shape object (`o["a"]` → "a", `o[0x10]` → "16"), and
+// whether the index is such a constant (ADR-00608): a numeric literal names
+// its value as JavaScript writes it, the text an object literal or class
+// stores for a numeric key; a bigint literal is not a key here.
 func constObjectKey(index ast.Expression) (string, bool) {
 	switch k := index.(type) {
 	case *ast.StringLiteral:
 		return k.Value, true
 	case *ast.NumberLiteral:
-		if k.IsBigInt || strings.ContainsAny(k.Value, ".eExX") {
+		if k.IsBigInt {
 			return "", false
 		}
-		return k.Value, true
+		return ast.NumberKey(k.Value), true
 	}
 	return "", false
 }
@@ -563,6 +575,7 @@ func optionalIndexGuards(objTy Type) bool {
 func (e *Emitter) emitOptionalIndex(ex *ast.IndexExpression) (Value, error) {
 	plain := *ex
 	plain.Optional = false
+	e.noteChainCopy(&plain, ex)
 	if !optionalIndexGuards(e.inferExprType(ex.Object)) {
 		return e.emitIndexUnguarded(&plain)
 	}
@@ -587,6 +600,17 @@ func (e *Emitter) emitOptionalIndex(ex *ast.IndexExpression) (Value, error) {
 }
 
 func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
+	if m, ok := e.builtinLiteralMember(ex); ok {
+		return e.emitExpr(m)
+	}
+	if body, ok, err := e.hostArrayReceiver(ex.Object); err != nil || ok {
+		if err != nil {
+			return Value{}, err
+		}
+		plain := *ex
+		plain.Object = body
+		ex = &plain
+	}
 	if ex.Optional {
 		return e.emitOptionalIndex(ex)
 	}
@@ -696,9 +720,10 @@ func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 			valTy = *objTy.MapVal
 		}
 		if valTy.IsArray {
-			// The slot holds the array's shared header (null on a miss).
+			// The slot holds the array's shared header (null on a miss, which
+			// reads as undefined: a missing key's value).
 			v := e.mapValFromI64(raw, valTy)
-			v.Ty.Nullable = true
+			v.Ty.Nullable, v.Ty.IsUndefined = true, true
 			if ft, ok := dictFieldType(objTy, ex.Index); ok {
 				return e.coerce(v, ft), nil
 			}
@@ -781,7 +806,7 @@ func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 		if err != nil || baseTy.DynPropTy == nil {
 			return v, err
 		}
-		return e.coerce(v, *baseTy.DynPropTy), nil
+		return e.dynPropRead(v, *baseTy.DynPropTy), nil
 	}
 	// Bracket read of a function's own property (TDD-00229): its boxed
 	// function object's bag.
@@ -850,7 +875,15 @@ func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 			}
 			idx, fieldTy, found := objVal.Ty.FieldIndex(key)
 			if !found {
-				return Value{}, fmt.Errorf("%d:%d: object has no field '%s'", ex.GetPos().Line, ex.GetPos().Col, key)
+				// No field of that name (a method, a property added at run
+				// time, or none): the property read through the boxed
+				// object — undefined when it has none, as in JavaScript (the
+				// strict lane's checker reports TS7053 first).
+				boxed, err := e.emitBoxValue(objVal)
+				if err != nil {
+					return Value{}, err
+				}
+				return e.emitDynAnyMemberGetNamed(boxed, e.internString(key), key, ex.GetPos())
 			}
 			gepReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
@@ -951,6 +984,18 @@ func (e *Emitter) identBuiltinAlias(id *ast.Identifier) (*ast.Identifier, bool) 
 }
 
 func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
+	if e.builtinCtorRead(ex) {
+		// `x.constructor` of a builtin-made value: what its box answers.
+		v, err := e.emitExpr(ex.Object)
+		if err != nil {
+			return Value{}, err
+		}
+		box, err := e.emitBoxValue(v)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyMemberGetNamed(box, e.internString("constructor"), "constructor", ex.GetPos())
+	}
 	// DOMException's legacy code constants, on the constructor or an instance.
 	if n, ok := domExceptionConstants[ex.Property]; ok && !ex.Optional && e.isDOMExceptionConstantOwner(ex.Object) {
 		if _, isID := ex.Object.(*ast.Identifier); !isID {
@@ -959,6 +1004,14 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			}
 		}
 		return Value{Ref: fmt.Sprintf("%d.0", n), Ty: TypeF64}, nil
+	}
+	if !ex.Optional && e.isHostArrayMember(ex) {
+		// An Array property (`length`) of a class extending Array.
+		body, _, err := e.hostArrayReceiver(ex.Object)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitMember(ast.NewMemberExpression(body, ex.Property, ex.GetPos()))
 	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && !ex.Optional {
 		if target, ok := e.identClassAlias(id); ok {
@@ -1295,9 +1348,9 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Number" && !e.isShadowedByLocal(id.Name) {
 		switch ex.Property {
 		case "MAX_SAFE_INTEGER":
-			return Value{Ref: "9007199254740991", Ty: TypeI64}, nil
+			return Value{Ref: "9.007199254740991e+15", Ty: TypeF64}, nil
 		case "MIN_SAFE_INTEGER":
-			return Value{Ref: "-9007199254740991", Ty: TypeI64}, nil
+			return Value{Ref: "-9.007199254740991e+15", Ty: TypeF64}, nil
 		case "EPSILON":
 			return Value{Ref: "2.220446049250313e-16", Ty: TypeF64}, nil
 		case "MAX_VALUE":
@@ -1524,7 +1577,11 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			if sym, found := e.lookup(id.Name); found && sym.Ty.IsArrayBuffer {
 				bufPtr := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bufPtr, sym.Ptr))
-				return e.emitArrayBufferByteLength(Value{Ref: bufPtr, Ty: sym.Ty})
+				bl, err := e.emitArrayBufferByteLength(Value{Ref: bufPtr, Ty: sym.Ty})
+				if err != nil {
+					return Value{}, err
+				}
+				return e.countToNumber(bl), nil
 			}
 			if sym, found := e.lookup(id.Name); found && sym.Ty.IsTypedArray {
 				_, lenSlot := e.arrayDataLenSlots(sym)
@@ -1607,9 +1664,10 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 		if isUnconstrainedDynamic(objVal.Ty) {
 			return e.emitDynAnyMemberGetNamed(objVal, e.internString("length"), "length", ex.GetPos())
 		}
-		// A union of strings and arrays (`string | string[]`): its box answers
-		// at run time, a number.
-		if objVal.Ty.IsDynamic && unionAllHaveLength(objVal.Ty) {
+		// A union of strings and arrays (`string | string[]`), or of scalars
+		// a guard narrowed but a call may have changed: its box answers at
+		// run time, a number.
+		if objVal.Ty.IsDynamic && (unionAllHaveLength(objVal.Ty) || isSelfDescribingBox(objVal.Ty)) {
 			n, err := e.emitDynAnyMemberGetNamed(Value{Ref: objVal.Ref, Ty: TypeAny}, e.internString("length"), "length", ex.GetPos())
 			if err != nil {
 				return Value{}, err
@@ -1706,7 +1764,7 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			return v, nil
 		}
 		// An index-signature view (DynPropTy): the read has the declared type.
-		return e.coerce(v, *objVal.Ty.DynPropTy), nil
+		return e.dynPropRead(v, *objVal.Ty.DynPropTy), nil
 	}
 	// A function's own property (`f.custom`, a TypeScript expando on a
 	// function declaration): its boxed function object's bag (TDD-00229).
@@ -1722,7 +1780,17 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 		if pt, ok := e.checkerPrimitive(ex); ok {
 			return e.coerce(v, pt), nil
 		}
+		if dt, ok := e.checkerDictType(ex); ok {
+			return e.coerce(v, dt), nil // a string-keyed dictionary: the bag it is
+		}
 		return v, nil
+	}
+	if (objVal.Ty.IsMap || objVal.Ty.IsSet) && !objVal.Ty.Nullable && ex.Property == "size" {
+		// A Map or Set reached through narrowing (`x instanceof Map` over a
+		// union): its header's first word.
+		result := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, objVal.Ref))
+		return Value{Ref: result, Ty: TypeI64}, nil
 	}
 	if !objVal.Ty.IsObject {
 		return Value{}, fmt.Errorf("%d:%d: field access on non-object (no field '%s')", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
@@ -1787,6 +1855,34 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 		if objVal.Ty.IsClass {
 			if v, ok := e.optionalMethodPresence(objVal, ex.Property); ok {
 				return v, nil
+			}
+			if info, ok := e.classes[objVal.Ty.ClassName]; ok && info.HostBase != nil {
+				// The host base's property (`size`), on the instance's body.
+				return e.emitExpr(ast.NewMemberExpression(e.bindHostBody(objVal, *info.HostBase, ex.GetPos()), ex.Property, ex.GetPos()))
+			}
+			// A private method read as a value (`return this.#m`): its one
+			// static function record, as a public method's shape lookup
+			// gives it (a private name is never a dynamic key).
+			if strings.HasPrefix(ex.Property, "#") {
+				for cls, i := objVal.Ty.ClassName, 0; cls != "" && i < 64; i++ {
+					info, ok := e.classes[cls]
+					if !ok {
+						break
+					}
+					if _, ok := info.MethodSigs[ex.Property]; ok {
+						rec := e.shapeMethodRecord(&info, info.Ty, ex.Property)
+						return Value{Ref: e.emitNbTagPtr(rec, kmlTagDynFunc), Ty: TypeAny}, nil
+					}
+					cls = info.BaseClass
+				}
+			}
+			{
+				// A property the instance was given (or undefined).
+				box, err := e.emitBoxValue(objVal)
+				if err != nil {
+					return Value{}, err
+				}
+				return e.emitDynAnyMemberGetNamed(box, e.internString(ex.Property), ex.Property, ex.GetPos())
 			}
 		}
 		return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
@@ -1953,8 +2049,8 @@ func unionCommonMember(u Type, prop string) (Type, bool) {
 // -compat=js, where the checker does not type the program).
 func (e *Emitter) checkerPrimitive(expr ast.Expression) (Type, bool) {
 	c := e.front()
-	if c == nil || e.compatJS() {
-		return Type{}, false
+	if c == nil || e.compatJS() || len(e.dynEntryWidened) > 0 && widenedRooted(expr, e.dynEntryWidenedIdent) {
+		return Type{}, false // read off a dynamic entry's box
 	}
 	t := c.TypeOf(expr)
 	if call, ok := expr.(*ast.CallExpression); ok && c.Unanswered(t) {
@@ -1981,7 +2077,7 @@ func (e *Emitter) checkerPrimitive(expr ast.Expression) (Type, bool) {
 		// absent at run time (null or undefined, which a string can't tell
 		// apart); its methods dispatch on its tag (emitDynStringMethodCall).
 		return Type{}, false
-	case t.Flags&(checker.Number|checker.NumberLiteral) != 0:
+	case t.Flags&(checker.Number|checker.NumberLiteral) != 0 && !t.AnyArith:
 		return TypeF64, true
 	case t.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
 		return TypeBool, true
@@ -2053,4 +2149,119 @@ func (e *Emitter) isDOMExceptionConstantOwner(x ast.Expression) bool {
 		return true
 	}
 	return e.isDOMExceptionExpr(x)
+}
+
+// checkerDictType is the representation of expr when the checker types it
+// as a string-keyed dictionary (`{ [k: string]: T }`): a dynamic object, as
+// an `any` holding one already is (reprOf).
+// builtinCtorRead reports `x.constructor` of a value no class of the
+// program made (a literal object, an array, a Map, a string, a number, a
+// boolean): its builtin constructor, read off its box.
+func (e *Emitter) builtinCtorRead(ex *ast.MemberExpression) bool {
+	if ex.Property != "constructor" || ex.Optional {
+		return false
+	}
+	t := e.inferExprType(ex.Object)
+	if t.IsClass || t.IsDynamic || t.Nullable || t.IsFunc || t.IsTypedArray || t.IsBuffer {
+		return false // a typed array's own path names its kind (a Buffer)
+	}
+	if _, _, own := t.FieldIndex("constructor"); own {
+		return false
+	}
+	return t.IsObject || t.IsArray || t.IsMap || t.IsSet || isHostHandle(t) || isForOfStringTy(t) || t.Float || t.IR == "i1"
+}
+
+func (e *Emitter) checkerDictType(expr ast.Expression) (Type, bool) {
+	c := e.front()
+	if c == nil || e.compatJS() {
+		return Type{}, false
+	}
+	t := c.TypeOf(expr)
+	if c.Unanswered(t) {
+		return Type{}, false
+	}
+	r := e.repr()
+	r.objects = true
+	ty, ok := r.of(t)
+	if !ok || !isDictType(ty) {
+		return Type{}, false
+	}
+	return ty, true
+}
+
+// dynPropRead is an index-signature view's property read (v, boxed) as the
+// declared type. An array keeps its live header, so a mutator through the
+// read (`r.x.push(v)`) reaches the stored array; a missing key is undefined.
+func (e *Emitter) dynPropRead(v Value, t Type) Value {
+	if t.IsArray && !t.IsTypedArray && !t.IsBuffer && !t.Nullable {
+		out := e.emitUnboxBoxToType(v.Ref, t)
+		out.Ty.Nullable, out.Ty.IsUndefined = true, true
+		return out
+	}
+	if t.IR == "ptr" && !isStringTy(t) && !t.IsDynamic && (t.IsObject || t.IsClass) {
+		// A missing key's undefined (or a stored null) is the absent
+		// pointer; anything else converts.
+		isU, isN, absent := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, v.Ref, nbUndefined))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isN, v.Ref, nbNull))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", absent, isU, isN))
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+		convL, doneL := e.freshLabel("dictread.conv"), e.freshLabel("dictread.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", absent, doneL, convL))
+		e.emitLabel(convL)
+		cv := e.coerce(v, t)
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cv.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+		rt := cv.Ty
+		rt.Nullable, rt.IsUndefined = true, true
+		return Value{Ref: r, Ty: rt}
+	}
+	out := e.coerce(v, t)
+	if out.Ty.IR == "ptr" && !out.Ty.Nullable && !out.Ty.IsDynamic && (isStringTy(out.Ty) || out.Ty.IsObject || out.Ty.IsArray) {
+		// The only absent value a non-nullable property holds is a missing
+		// key's undefined.
+		out.Ty.Nullable, out.Ty.IsUndefined = true, true
+	}
+	return out
+}
+
+// dynPropReadType is the type dynPropRead gives a property read of declared
+// type t: a pointer-held object, class, array or string may be a missing
+// key's undefined.
+func dynPropReadType(t Type) Type {
+	if t.IR == "ptr" && !t.IsDynamic && !t.Nullable && !t.IsTypedArray && !t.IsBuffer && (isStringTy(t) || t.IsObject || t.IsClass || t.IsArray) {
+		t.Nullable, t.IsUndefined = true, true
+	}
+	return t
+}
+
+// builtinLiteralMember is `X.k` for `X["k"]` on a builtin global (`Date`,
+// `Math`, `Number`, …): a literal key names the same property a dot does.
+// The node is made once per index expression, so its answers are stable.
+func (e *Emitter) builtinLiteralMember(ex *ast.IndexExpression) (*ast.MemberExpression, bool) {
+	if ex.Optional {
+		return nil, false
+	}
+	id, ok := ex.Object.(*ast.Identifier)
+	if !ok || !knownGlobalNamespace[id.Name] || !e.isGlobalName(id) {
+		return nil, false
+	}
+	lit, ok := ex.Index.(*ast.StringLiteral)
+	if !ok || !isIdentifierName(lit.Value) {
+		return nil, false
+	}
+	if m, ok := e.literalMembers[ex]; ok {
+		return m, true
+	}
+	if e.literalMembers == nil {
+		e.literalMembers = map[*ast.IndexExpression]*ast.MemberExpression{}
+	}
+	m := ast.NewMemberExpression(id, lit.Value, ex.GetPos())
+	e.literalMembers[ex] = m
+	return m, true
 }

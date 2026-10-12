@@ -13,7 +13,7 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -131,7 +131,7 @@ func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Express
 		return Value{}, err
 	}
 	arrTy := ArrayOf(elemTy)
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, arrTy})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, arrTy})
 	if err != nil {
 		return Value{}, err
 	}
@@ -181,7 +181,7 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -296,9 +296,9 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	// starts as (and only ever holds) an actual array element.
 	accTyHint := elemTy
 	if hasInitial {
-		accTyHint = e.inferExprType(args[1])
+		accTyHint = e.reduceSeedType(args[1])
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{accTyHint, elemTy, TypeI64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{accTyHint, elemTy, TypeF64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -311,7 +311,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	accWidened := false
 	if rt := cb.retType(); e.compatJS() && hasInitial && rt.Nullable && rt.IsUndefined && reduceAccWidenable(accTyHint) {
 		accTyHint = undefinedableElem(accTyHint)
-		if cb, err = e.resolveCallbackWithHints(args[0], []Type{accTyHint, elemTy, TypeI64, ArrayOf(elemTy)}); err != nil {
+		if cb, err = e.resolveCallbackWithHints(args[0], []Type{accTyHint, elemTy, TypeF64, ArrayOf(elemTy)}); err != nil {
 			return Value{}, err
 		}
 		accWidened = true
@@ -337,10 +337,9 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 			return Value{}, err
 		}
 		accTy = accTyHint
-		agg := storageIR(accTy)
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, agg, storageAlign(accTy)))
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, accSlotIR(accTy), storageAlign(accTy)))
 		seed := e.coerce(initVal, accTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", agg, seed.Ref, accAlloca, storageAlign(accTy)))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accSlotIR(accTy), seed.Ref, accAlloca, storageAlign(accTy)))
 		if fromRight {
 			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lastIdx, idxAlloca))
 		} else {
@@ -352,8 +351,12 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 			return Value{}, err
 		}
 		accTy = initVal.Ty
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, accTy.IR, accTy.Align()))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accTy.IR, initVal.Ref, accAlloca, accTy.Align()))
+		if lit, ok := args[1].(*ast.ArrayLiteral); ok && len(lit.Elements) == 0 && e.compatJS() {
+			accTy = accTyHint // reduceSeedType: what the callback puts in it
+			initVal = e.coerce(initVal, accTy)
+		}
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, accSlotIR(accTy), accTy.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accSlotIR(accTy), initVal.Ref, accAlloca, accTy.Align()))
 		// reduce starts at the first index (0); reduceRight at the last (len-1),
 		// which is -1 for an empty array so the descending loop exits at once.
 		if fromRight {
@@ -363,7 +366,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 		}
 	} else {
 		accTy = elemTy
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, accTy.IR, accTy.Align()))
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, accSlotIR(accTy), accTy.Align()))
 
 		emptyReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", emptyReg, lenReg))
@@ -384,7 +387,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 		firstGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", firstGep, elemTy.IR, ptrReg, seedIdx))
 		firstVal := e.loadArrayElem(firstGep, elemTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, firstVal.Ref, accAlloca, elemTy.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accSlotIR(elemTy), firstVal.Ref, accAlloca, elemTy.Align()))
 		if fromRight {
 			startIdx := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", startIdx, lastIdx))
@@ -414,7 +417,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 
 	e.emitLabel(bodyL)
 	accCur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", accCur, storageIR(accTy), accAlloca, storageAlign(accTy)))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", accCur, accSlotIR(accTy), accAlloca, storageAlign(accTy)))
 	inGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	inVal := e.loadArrayElem(inGep, elemTy)
@@ -437,7 +440,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 		// (the { i1, T } aggregate, or a possibly-null pointer) — absence travels
 		// with it into the next step and out as the result.
 		stepped := e.coerce(newAcc, accTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", storageIR(accTy), stepped.Ref, accAlloca, storageAlign(accTy)))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accSlotIR(accTy), stepped.Ref, accAlloca, storageAlign(accTy)))
 	} else {
 		newAccCoerced := e.coerce(newAcc, accTy)
 		// The accumulator has one type for the whole fold: the initial value's, or
@@ -448,7 +451,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 			return Value{}, fmt.Errorf("%d:%d: %s callback returns %s but the accumulator is %s — give the initial value the callback's result type",
 				pos.Line, pos.Col, verb, tsTypeName(newAcc.Ty), tsTypeName(accTy))
 		}
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accTy.IR, newAccCoerced.Ref, accAlloca, accTy.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accSlotIR(accTy), newAccCoerced.Ref, accAlloca, accTy.Align()))
 	}
 
 	idxNext := e.freshReg()
@@ -462,7 +465,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 
 	e.emitLabel(doneL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, storageIR(accTy), accAlloca, storageAlign(accTy)))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, accSlotIR(accTy), accAlloca, storageAlign(accTy)))
 	return Value{Ref: result, Ty: accTy}, nil
 }
 
@@ -476,7 +479,7 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -550,7 +553,7 @@ func (e *Emitter) emitArraySome(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -613,7 +616,7 @@ func (e *Emitter) emitArrayEvery(mem *ast.MemberExpression, args []ast.Expressio
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -694,4 +697,23 @@ func (e *Emitter) hofCBArgs(cb Callback, lead []Value, idx, ptrReg, lenReg strin
 func typedArrayResultType(recv Type) Type {
 	recv.Nullable, recv.IsUndefined = false, false
 	return recv
+}
+
+// accSlotIR is the IR of reduce's accumulator slot: the value's own
+// register shape, which for an array is the {data, len} aggregate.
+func accSlotIR(t Type) string {
+	if t.IsArray && t.IR == "ptr" {
+		return "{ptr, i64}"
+	}
+	return storageIR(t)
+}
+
+// reduceSeedType is the accumulator type a reduce's initial value gives:
+// its own, except that JavaScript's empty `[]` seed (-compat=js) has no
+// element type and holds whatever the callback puts in it.
+func (e *Emitter) reduceSeedType(seed ast.Expression) Type {
+	if lit, ok := seed.(*ast.ArrayLiteral); ok && len(lit.Elements) == 0 && e.compatJS() {
+		return ArrayOf(TypeAny)
+	}
+	return e.inferExprType(seed)
 }

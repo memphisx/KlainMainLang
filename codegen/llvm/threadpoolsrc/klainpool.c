@@ -8,8 +8,8 @@
 // directly — it runs the syscall and hands a plain result back, and the loop
 // thread does everything JS-visible at drain time.
 //
-// The wakeup is per loop. On POSIX it is a socketpair whose read end sits in the
-// loop's select() set. On Windows the reactor's one wait is the loop thread's
+// The wakeup is per loop. On POSIX it is the loop's uv_async_t (loop.c). On
+// Windows the reactor's one wait is the loop thread's
 // completion port (TDD-00183), so a worker wakes it with an addressed packet to
 // that port — no descriptor, nothing in the fd sets.
 
@@ -24,6 +24,10 @@
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
+#ifndef _WIN32
+// loop.c: the calling thread's loop wake (a uv_async_t) and its send, which
+// any thread may call.
+#endif
 #ifdef _WIN32
 // win32io.c: the calling thread's reactor port, a wake addressed to a port,
 // and whether a socket's connect is still in flight.
@@ -75,12 +79,9 @@ struct sockaddr_in6 {
 };
 struct sockaddr_storage { sa_family_t ss_family; char ss_pad[126]; } __attribute__((aligned(8)));
 struct sockaddr_un { sa_family_t sun_family; char sun_path[108]; };
-// The reactor's descriptor sets are the IR's 1024-bit bitmaps.
-#define KML_FD_SET(fd, set) (((unsigned char *)(set))[(fd) >> 3] |= (unsigned char)(1u << ((fd) & 7)))
 #else
 #include <unistd.h>
 #include <fcntl.h>
-#define KML_FD_SET(fd, set) FD_SET((fd), (fd_set *)(set))
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -89,7 +90,10 @@ struct sockaddr_un { sa_family_t sun_family; char sun_path[108]; };
 #include <netdb.h>
 #include <sys/un.h>
 #include <poll.h>
+#include <uv.h>
 #endif
+// The reactor's descriptor sets are plain bitmaps (no FD_SETSIZE ceiling).
+#define KML_FD_SET(fd, set) (((unsigned char *)(set))[(fd) >> 3] |= (unsigned char)(1u << ((fd) & 7)))
 
 #ifdef KLAINPOOL_GC
 // Under -mm=gc a worker allocates GC memory (the read buffer / result string),
@@ -129,7 +133,7 @@ typedef struct kml_pool_item {
 } kml_pool_item;
 
 // Per-loop completion port: a Treiber stack the workers push completions onto,
-// the wakeup that ends this loop's select() (a socketpair on POSIX, the loop
+// the wakeup that ends this loop's wait (its uv_async_t on POSIX, the loop
 // thread's reactor port on Windows), and the count of this loop's outstanding
 // submissions (keeps the loop alive while I/O flies).
 typedef struct kml_loop_port {
@@ -137,7 +141,10 @@ typedef struct kml_loop_port {
 #ifdef _WIN32
     void *win_port;
 #else
-    int wake_r, wake_w;
+    // The port's uv_async_t: woken by a completion or a hold change from
+    // another thread, and referenced exactly while inflight > 0.
+    uv_async_t *async;
+    int refd;
 #endif
     atomic_long inflight;
 } kml_loop_port;
@@ -146,26 +153,53 @@ typedef struct kml_loop_port {
 // thread and gets its own port; the pool itself is process-wide (below).
 static __thread kml_loop_port *tls_port = NULL;
 
+#ifndef _WIN32
+extern uv_loop_t *__kml_loop_uv(void);
+extern void *__kml_loop_raw_alloc(size_t n);
+extern _Thread_local unsigned char __kml_conn_poke;
+_Bool __kml_pool_dispatch(void);
+
+// On the port's own thread (uv_ref is the loop thread's alone): match the
+// async's reference to the hold count.
+static void port_sync(kml_loop_port *p) {
+    int want = atomic_load_explicit(&p->inflight, memory_order_relaxed) > 0;
+    if (want == p->refd) return;
+    p->refd = want;
+    if (want) uv_ref((uv_handle_t *)p->async);
+    else uv_unref((uv_handle_t *)p->async);
+}
+
+// Inside the wait: deliver the completions, then re-match the reference.
+// A completion may resume a connection fiber's await.
+static void on_port_async(uv_async_t *a) {
+    if (__kml_pool_dispatch()) __kml_conn_poke = 1;
+    port_sync((kml_loop_port *)a->data);
+}
+#endif
+
 static kml_loop_port *loop_port(void) {
     if (tls_port) return tls_port;
     kml_loop_port *p = (kml_loop_port *)calloc(1, sizeof *p);
 #ifdef _WIN32
     p->win_port = __kml_win_reactor_port();   // loop_port() runs on the loop thread
 #else
-    int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
-        // Fall back to a pipe: read end sv[0], write end sv[1].
-        if (pipe(sv) != 0) { sv[0] = sv[1] = -1; }
-    }
-    p->wake_r = sv[0];
-    p->wake_w = sv[1];
-    if (p->wake_r >= 0) {
-        int fl = fcntl(p->wake_r, F_GETFL, 0);
-        fcntl(p->wake_r, F_SETFL, fl | O_NONBLOCK);   // drain never blocks
-    }
+    p->async = (uv_async_t *)__kml_loop_raw_alloc(sizeof *p->async);
+    uv_async_init(__kml_loop_uv(), p->async, on_port_async);
+    p->async->data = p;
+    uv_unref((uv_handle_t *)p->async);
 #endif
     tls_port = p;
     return p;
+}
+
+// A change to p's hold count, from any thread: the port's own thread
+// re-matches its reference now; another thread wakes it to.
+static void port_hold(kml_loop_port *p, long d) {
+    atomic_fetch_add_explicit(&p->inflight, d, memory_order_relaxed);
+#ifndef _WIN32
+    if (p == tls_port) port_sync(p);
+    else uv_async_send(p->async);
+#endif
 }
 
 // ---- process-wide work queue (FIFO, mutex + condvar) -----------------------
@@ -186,11 +220,7 @@ static void push_completion(kml_loop_port *p, kml_pool_item *it) {
 #ifdef _WIN32
     __kml_win_port_wake(p->win_port);
 #else
-    if (p->wake_w >= 0) {
-        char b = 1;
-        ssize_t n = write(p->wake_w, &b, 1);
-        (void)n;
-    }
+    uv_async_send(p->async);
 #endif
 }
 
@@ -272,7 +302,7 @@ static void start_pool(void) {
 // completion decrements: the loop stays alive while it is in flight.
 static void enqueue_work(kml_loop_port *p, kml_pool_item *it) {
     it->port = p;
-    atomic_fetch_add_explicit(&p->inflight, 1, memory_order_relaxed);
+    port_hold(p, 1);
     pthread_once(&pool_once, start_pool);
     pthread_mutex_lock(&q_mu);
     if (q_tail) q_tail->next = it; else q_head = it;
@@ -320,6 +350,26 @@ static kml_pool_item *native_item(void (*work)(kml_pool_item *), void *inv, void
 static void native_submit(kml_pool_item *it) {
     native_link(it);
     enqueue_work(loop_port(), it);
+}
+
+// A native that completes later off the pool (the resolver's queries on
+// c-ares): __kml_pool_begin, on the loop thread, holds the loop open and
+// keeps inv/clo live; __kml_pool_finish, from any thread, delivers
+// inv(clo, err, 0) on that loop with res_str (malloc'd; taken) as
+// nativeLastString().
+void *__kml_pool_begin(void *inv, void *clo) {
+    kml_pool_item *it = native_item(NULL, inv, clo);
+    it->port = loop_port();
+    native_link(it);
+    port_hold(it->port, 1);
+    return it;
+}
+
+void __kml_pool_finish(void *item, int64_t err, char *res_str) {
+    kml_pool_item *it = (kml_pool_item *)item;
+    it->err = err;
+    it->res_str = res_str;
+    push_completion(it->port, it);
 }
 
 #ifdef _WIN32
@@ -467,9 +517,12 @@ char *__kml_native_eai_code(double code) {
 
 // ---- TCP handles (Node's tcp_wrap, libuv-shaped) ------------------------------
 // A handle is an integer id into a process-wide table, a collector root for
-// the closures it holds. The reactor wakes on the handles' fds; dispatch
-// polls each one and runs what became ready: an accept, a connect's
-// completion, a read, a queued write's progress, a shutdown, a close.
+// the closures it holds. The dispatch runs what became ready on each: an
+// accept, a connect's completion, a read, a queued write's progress, a
+// shutdown, a close. POSIX: each handle's descriptor is a uv_poll_t on the
+// thread's loop (TDD-00244 Stage 4), armed for what the handle waits on and
+// referenced as libuv's own stream handles are; the dispatch is the loop's
+// check callback. Windows: the reactor's fdset and dispatch hooks.
 typedef struct kml_wreq {
     struct kml_wreq *next;
     char *data;
@@ -496,6 +549,12 @@ typedef struct kml_tcp {
     void *tls;
     int tls_state;
     void *sec_inv, *sec_clo;
+    // The session's ciphertext not yet written, and the socket's end (with
+    // its error) once a read for the session met it.
+    char *cout;
+    int64_t cout_len, cout_cap;
+    int raw_eof, raw_err;
+    int tls_notified; // close_notify sent
     // A datagram socket (Node's udp_wrap): each read is one datagram, from
     // the sender recorded here.
     int udp;
@@ -505,19 +564,28 @@ typedef struct kml_tcp {
     int ipc;
     int *ipc_fds;
     int ipc_nfds, ipc_cap;
+#ifndef _WIN32
+    uv_poll_t *poll;  // the descriptor's watcher, NULL until armed
+    int pev;          // the events it is started for
+    int rev;          // the events it reported since the last dispatch
+    int unpollable;   // libuv cannot watch the descriptor: always ready
+#endif
 } kml_tcp;
 
-// The TLS session operations tls.c installs: I/O returns bytes, 0 at the
-// end of the stream (read), -EAGAIN when the session waits on the socket,
-// or another -errno / -(10000 + reason) for an error.
+// The TLS session operations tlshandle.c installs: I/O returns bytes, 0 at
+// the end of the stream (read), -EAGAIN when the session waits on the
+// socket, or another -errno for an error. The session is on memory BIOs:
+// feed hands it the ciphertext read here (n == 0 at the socket's end), and
+// drain takes the ciphertext to write.
 typedef struct kml_tls_ops {
     int (*handshake)(void *tls);  // 1 done, 0 waiting, <0 error
     int64_t (*read)(void *tls, char *buf, int64_t n);
     int64_t (*write)(void *tls, const char *buf, int64_t n);
-    int (*want_write)(void *tls);
     int (*pending)(void *tls);
     void (*shutdown)(void *tls);
     void (*free)(void *tls);
+    void (*feed)(void *tls, const char *buf, int64_t n);
+    int64_t (*drain)(void *tls, char *buf, int64_t n);
 } kml_tls_ops;
 static const kml_tls_ops *tcp_tls = NULL;
 
@@ -546,6 +614,143 @@ static kml_tcp *tcp_get(double id) {
     return (i >= 0 && i < tcp_n) ? tcp_tab[i] : NULL;
 }
 
+#ifndef _WIN32
+// loop.c: the thread's libuv loop, the allocator its handles live in, and
+// the bridge's release of a descriptor a handle here now watches.
+extern uv_loop_t *__kml_loop_uv(void);
+extern void *__kml_loop_raw_alloc(size_t n);
+extern void __kml_loop_free_handle(uv_handle_t *h);
+extern void __kml_loop_fd_forget(int fd);
+extern _Thread_local unsigned char __kml_conn_poke;
+
+static _Bool tcp_dispatch(void);
+static int proc_kick_wanted(void);
+
+// The loop's check callback runs the dispatch after each poll. Work ready
+// without the descriptor (a close to report, a failed connect, decrypted
+// bytes, a shutdown after the last write, a child's held exit) starts an
+// idle handle, so that poll does not block: a referenced one when the work
+// holds the loop open, an unreferenced one when it does not.
+static __thread uv_check_t *tcp_check;
+static __thread uv_idle_t *tcp_kick, *tcp_kick_weak;
+
+static void tcp_on_poll(uv_poll_t *w, int status, int events) {
+    kml_tcp *h = (kml_tcp *)w->data;
+    if (status < 0) events = UV_READABLE | UV_WRITABLE; // the operation answers
+    h->rev |= events;
+}
+
+static void tcp_on_idle(uv_idle_t *w) { (void)w; }
+static void tcp_rearm_all(void);
+
+static void tcp_on_check(uv_check_t *w) {
+    (void)w;
+    if (tcp_dispatch()) __kml_conn_poke = 1;
+    tcp_rearm_all();
+}
+
+static void tcp_loop_init(void) {
+    if (tcp_check) return;
+    uv_loop_t *loop = __kml_loop_uv();
+    tcp_check = (uv_check_t *)__kml_loop_raw_alloc(sizeof *tcp_check);
+    uv_check_init(loop, tcp_check);
+    uv_check_start(tcp_check, tcp_on_check);
+    uv_unref((uv_handle_t *)tcp_check);
+    tcp_kick = (uv_idle_t *)__kml_loop_raw_alloc(sizeof *tcp_kick);
+    uv_idle_init(loop, tcp_kick);
+    tcp_kick_weak = (uv_idle_t *)__kml_loop_raw_alloc(sizeof *tcp_kick_weak);
+    uv_idle_init(loop, tcp_kick_weak);
+    uv_unref((uv_handle_t *)tcp_kick_weak);
+}
+
+// Whether the handle has work the descriptor will not announce.
+static int tcp_immediate(kml_tcp *h) {
+    if (h->closing) return !h->closed_notified;
+    if (h->fd < 0) return 0;
+    if (h->connecting > 1) return 1;
+    if (h->tls_state == 2 && h->reading && !h->read_eof && tcp_tls && tcp_tls->pending(h->tls) > 0) return 1;
+    if (h->shut_pending && !h->wq_head && h->cout_len == 0) return 1;
+    return 0;
+}
+
+// Start, restart or stop the handle's watcher for what it now waits on, as
+// tcp_fdset_add chose the sets; it holds the loop open while referenced, or
+// while writes are queued (libuv's write requests count regardless).
+static void tcp_arm(kml_tcp *h) {
+    tcp_loop_init();
+    int want = 0;
+    if (!h->closing && h->fd >= 0) {
+        if (h->listening || (h->reading && !h->read_eof) || h->tls_state == 1) want |= UV_READABLE;
+        if (h->connecting == 1 || (h->wq_head && h->tls_state != 1) || h->cout_len > 0) want |= UV_WRITABLE;
+    }
+    if (want && !h->poll && !h->unpollable) {
+        uv_poll_t *w = (uv_poll_t *)__kml_loop_raw_alloc(sizeof *w);
+        __kml_loop_fd_forget(h->fd);
+        if (uv_poll_init(__kml_loop_uv(), w, h->fd) != 0) {
+            __kml_loop_free_handle((uv_handle_t *)w);
+            h->unpollable = 1;
+        } else {
+            w->data = h;
+            h->poll = w;
+        }
+    }
+    if (h->poll) {
+        if (want != h->pev) {
+            if (want) uv_poll_start(h->poll, want, tcp_on_poll);
+            else uv_poll_stop(h->poll);
+            h->pev = want;
+        }
+        if (h->refd || h->wq_head) uv_ref((uv_handle_t *)h->poll);
+        else uv_unref((uv_handle_t *)h->poll);
+    }
+}
+
+// The kick: started while any handle (or held child exit) has work ready.
+static void tcp_rearm_all(void) {
+    tcp_loop_init();
+    int strong = 0, weak = 0;
+    for (int i = 0; i < tcp_n; i++) {
+        kml_tcp *h = tcp_tab[i];
+        tcp_arm(h);
+        int imm = tcp_immediate(h) || (h->unpollable && h->fd >= 0 && !h->closing &&
+                                       (h->listening || h->reading || h->wq_head || h->connecting));
+        if (!imm) continue;
+        // A close, a queued write and a referenced handle's work hold the loop.
+        if (h->closing || h->wq_head || h->refd) strong = 1;
+        else weak = 1;
+    }
+    int pk = proc_kick_wanted();
+    if (pk == 2) strong = 1;
+    else if (pk == 1) weak = 1;
+    if (strong) uv_idle_start(tcp_kick, tcp_on_idle);
+    else uv_idle_stop(tcp_kick);
+    if (weak) uv_idle_start(tcp_kick_weak, tcp_on_idle);
+    else uv_idle_stop(tcp_kick_weak);
+}
+
+// A handle's watcher closes with its descriptor (before it, so the number
+// can be reused).
+static void tcp_unwatch(kml_tcp *h) {
+    if (!h->poll) return;
+    uv_poll_stop(h->poll);
+    uv_close((uv_handle_t *)h->poll, __kml_loop_free_handle);
+    h->poll = NULL;
+    h->pev = 0;
+}
+// After a change to what the handle waits on: rearm it, and kick the loop
+// when the work is ready now (the check callback stops the kick).
+static void tcp_touch(kml_tcp *h) {
+    if (!h) return;
+    tcp_arm(h);
+    int imm = tcp_immediate(h) || (h->unpollable && h->fd >= 0 && !h->closing);
+    if (!imm) return;
+    if (h->closing || h->wq_head || h->refd) uv_idle_start(tcp_kick, tcp_on_idle);
+    else uv_idle_start(tcp_kick_weak, tcp_on_idle);
+}
+#else
+static void tcp_touch(kml_tcp *h) { (void)h; }
+#endif
+
 int __kml_tcp_fd(double id) {
     kml_tcp *h = tcp_get(id);
     return h ? h->fd : -1;
@@ -560,6 +765,7 @@ int __kml_tcp_attach_tls(double id, void *tls, void *inv, void *clo) {
     h->tls_state = 1;
     h->sec_inv = inv;
     h->sec_clo = clo;
+    tcp_touch(h);
     return 0;
 }
 
@@ -568,9 +774,8 @@ void *__kml_tcp_tls(double id) {
     return h ? h->tls : NULL;
 }
 
-// Plain or TLS I/O on the handle: bytes, -EAGAIN, or another -errno.
-static int64_t tcp_send(kml_tcp *h, const char *p, int64_t n) {
-    if (h->tls && tcp_tls) return tcp_tls->write(h->tls, p, n);
+// The socket's own I/O: bytes, -EAGAIN, or another -errno.
+static int64_t raw_send(kml_tcp *h, const char *p, int64_t n) {
 #ifdef MSG_NOSIGNAL
     int64_t r = send(h->fd, p, (size_t)n, MSG_NOSIGNAL);
 #else
@@ -578,6 +783,67 @@ static int64_t tcp_send(kml_tcp *h, const char *p, int64_t n) {
 #endif
     if (r < 0) return (errno == EWOULDBLOCK || errno == EINTR) ? -EAGAIN : -errno;
     return r;
+}
+
+static int64_t raw_recv(kml_tcp *h, char *p, int64_t n) {
+    int64_t r = read(h->fd, p, (size_t)n);
+    if (r < 0) return (errno == EWOULDBLOCK || errno == EINTR) ? -EAGAIN : -errno;
+    return r;
+}
+
+// The session's ciphertext out: drained into cout, then written as far as
+// the socket takes it. 0, or -errno.
+static int tls_push(kml_tcp *h) {
+    for (;;) {
+        if (h->cout_cap - h->cout_len < 16384) {
+            h->cout_cap = h->cout_cap ? h->cout_cap * 2 : 65536;
+            h->cout = (char *)realloc(h->cout, (size_t)h->cout_cap);
+        }
+        int64_t n = tcp_tls->drain(h->tls, h->cout + h->cout_len, h->cout_cap - h->cout_len);
+        if (n <= 0) break;
+        h->cout_len += n;
+    }
+    int64_t off = 0;
+    while (off < h->cout_len) {
+        int64_t n = raw_send(h, h->cout + off, h->cout_len - off);
+        if (n == -EAGAIN) break;
+        if (n < 0) {
+            h->cout_len = 0;
+            return (int)n;
+        }
+        off += n;
+    }
+    memmove(h->cout, h->cout + off, (size_t)(h->cout_len - off));
+    h->cout_len -= off;
+    return 0;
+}
+
+// The socket's ciphertext in, to the end of what it has now.
+static void tls_pull(kml_tcp *h) {
+    char buf[65536];
+    while (!h->raw_eof) {
+        int64_t n = raw_recv(h, buf, sizeof buf);
+        if (n == -EAGAIN) break;
+        if (n <= 0) {
+            h->raw_eof = 1;
+            h->raw_err = n < 0 ? (int)-n : 0;
+            tcp_tls->feed(h->tls, NULL, 0);
+            break;
+        }
+        tcp_tls->feed(h->tls, buf, n);
+    }
+}
+
+// Plain or TLS I/O on the handle: bytes, -EAGAIN, or another -errno. A TLS
+// write waits while earlier ciphertext is still unwritten.
+static int64_t tcp_send(kml_tcp *h, const char *p, int64_t n) {
+    if (!(h->tls && tcp_tls)) return raw_send(h, p, n);
+    int e = tls_push(h);
+    if (e < 0) return e;
+    if (h->cout_len > 0) return -EAGAIN;
+    int64_t r = tcp_tls->write(h->tls, p, n);
+    e = tls_push(h);
+    return e < 0 ? e : r;
 }
 
 #ifndef _WIN32
@@ -648,13 +914,17 @@ static int64_t tcp_send_req(kml_tcp *h, kml_wreq *w) {
 }
 
 static int64_t tcp_recv(kml_tcp *h, char *p, int64_t n) {
-    if (h->tls && tcp_tls) return tcp_tls->read(h->tls, p, n);
+    if (h->tls && tcp_tls) {
+        tls_pull(h);
+        int64_t r = tcp_tls->read(h->tls, p, n);
+        tls_push(h); // a read may answer (a key update, an alert)
+        if (r == -EAGAIN && h->raw_eof) return h->raw_err ? -h->raw_err : 0;
+        return r;
+    }
 #ifndef _WIN32
     if (h->ipc) return ipc_recv(h, p, n);
 #endif
-    int64_t r = read(h->fd, p, (size_t)n);
-    if (r < 0) return (errno == EWOULDBLOCK || errno == EINTR) ? -EAGAIN : -errno;
-    return r;
+    return raw_recv(h, p, n);
 }
 
 static void set_nonblock(int fd) {
@@ -751,6 +1021,7 @@ double __kml_native_tcp_listen(const char *host, double port, double backlog, vo
         __kml_cluster_announce_listening_at(bport, any ? NULL : host);
     }
 #endif
+    tcp_touch(h);
     return id;
 }
 
@@ -759,7 +1030,10 @@ double __kml_native_tcp_listen(const char *host, double port, double backlog, vo
 // accept on the descriptor they are sent). Returns the handle id, or -errno.
 double __kml_native_tcp_bind(const char *host, double port, double backlog) {
     double id = __kml_native_tcp_listen(host, port, backlog, NULL, NULL);
-    if (id >= 0) tcp_tab[(int)id]->listening = 0;
+    if (id >= 0) {
+        tcp_tab[(int)id]->listening = 0;
+        tcp_touch(tcp_tab[(int)id]);
+    }
     return id;
 }
 
@@ -778,6 +1052,7 @@ double __kml_native_tcp_listen_open(double fdd, void *inv, void *clo) {
     h->server = h->listening = 1;
     h->conn_inv = inv;
     h->conn_clo = clo;
+    tcp_touch(h);
     return id;
 }
 
@@ -798,6 +1073,7 @@ double __kml_native_tcp_connect(const char *ip, double port, void *inv, void *cl
     if (connect(fd, (struct sockaddr *)&ss, len) != 0 && errno != EINPROGRESS && errno != EINTR) {
         h->connecting = 2 + errno; // fails on the next dispatch, as libuv reports it
     }
+    tcp_touch(h);
     return id;
 }
 
@@ -833,6 +1109,7 @@ double __kml_native_pipe_listen(const char *path, double backlog, void *inv, voi
     h->conn_inv = inv;
     h->conn_clo = clo;
     h->pipe_path = strdup(path);
+    tcp_touch(h);
     return id;
 }
 
@@ -852,6 +1129,7 @@ double __kml_native_pipe_connect(const char *path, void *inv, void *clo) {
     if (connect(fd, (struct sockaddr *)&su, sizeof su) != 0 && errno != EINPROGRESS && errno != EINTR && errno != EAGAIN) {
         h->connecting = 2 + errno;
     }
+    tcp_touch(h);
     return id;
 }
 
@@ -863,11 +1141,13 @@ void __kml_native_tcp_read_start(double id, void *inv, void *clo) {
     h->reading = 1;
     h->read_inv = inv;
     h->read_clo = clo;
+    tcp_touch(h);
 }
 
 void __kml_native_tcp_read_stop(double id) {
     kml_tcp *h = tcp_get(id);
     if (h) h->reading = 0;
+    tcp_touch(h);
 }
 
 // Copy the bytes a read delivered into buf (inside onRead).
@@ -971,7 +1251,10 @@ static double tcp_write_fd(double id, void *buf, int64_t size, double offset, do
             if (n > 0) sendfd = -1;
             done += n;
         }
-        if (done == len) return 1;
+        if (done == len) {
+            if (h->cout_len > 0) tcp_touch(h);
+            return 1;
+        }
     }
     kml_wreq *w = (kml_wreq *)calloc(1, sizeof *w);
     w->sendfd = sendfd;
@@ -982,6 +1265,7 @@ static double tcp_write_fd(double id, void *buf, int64_t size, double offset, do
     w->clo = clo;
     if (h->wq_tail) h->wq_tail->next = w; else h->wq_head = w;
     h->wq_tail = w;
+    tcp_touch(h);
     return 0;
 }
 
@@ -992,6 +1276,7 @@ void __kml_native_tcp_shutdown(double id, void *inv, void *clo) {
     h->shut_pending = 1;
     h->shut_inv = inv;
     h->shut_clo = clo;
+    tcp_touch(h);
 }
 
 // Close the handle; onClose(0, 0) runs on the next dispatch.
@@ -1004,6 +1289,12 @@ void __kml_native_tcp_close(double id, void *inv, void *clo) {
     h->close_clo = clo;
     if (h->tls && tcp_tls) tcp_tls->free(h->tls);
     h->tls = NULL;
+    free(h->cout);
+    h->cout = NULL;
+    h->cout_len = h->cout_cap = 0;
+#ifndef _WIN32
+    tcp_unwatch(h);
+#endif
     if (h->fd >= 0) close(h->fd);
     h->fd = -1;
     for (int i = 0; i < h->ipc_nfds; i++) close(h->ipc_fds[i]);
@@ -1015,6 +1306,7 @@ void __kml_native_tcp_close(double id, void *inv, void *clo) {
         free(h->pipe_path);
         h->pipe_path = NULL;
     }
+    tcp_touch(h);
 }
 
 void __kml_native_tcp_set_no_delay(double id, _Bool on) {
@@ -1038,6 +1330,7 @@ void __kml_native_tcp_set_keep_alive(double id, _Bool on, double delaySecs) {
 void __kml_native_tcp_ref(double id, _Bool on) {
     kml_tcp *h = tcp_get(id);
     if (h) h->refd = on ? 1 : 0;
+    tcp_touch(h);
 }
 
 // The local (peer false) or remote address: port + 65536 * family (4 or 6),
@@ -1283,11 +1576,14 @@ static int tcp_active(kml_tcp *h) {
     return !h->closed_notified && (h->fd >= 0 || h->closing);
 }
 
+#ifdef _WIN32
 static _Bool proc_keepalive(void);
 static _Bool proc_fdset_add(void *fdset, int *maxfd);
+#endif
 static _Bool proc_dispatch(void);
 static _Bool proc_dispatch_unrefd(void);
 
+#ifdef _WIN32
 _Bool __kml_tcp_keepalive(void) {
     if (proc_keepalive()) return 1;
     for (int i = 0; i < tcp_n; i++) {
@@ -1317,20 +1613,23 @@ _Bool __kml_tcp_fdset_add(void *fdset, void *wfdset, int *maxfd) {
             KML_FD_SET(h->fd, fdset);
             if (h->fd > *maxfd) *maxfd = h->fd;
         }
-        int tls_wants_write = h->tls && tcp_tls && tcp_tls->want_write(h->tls);
-        if (h->connecting || (h->wq_head && h->tls_state != 1) || tls_wants_write) {
+        if (h->connecting || (h->wq_head && h->tls_state != 1) || h->cout_len > 0) {
             KML_FD_SET(h->fd, wfdset);
             if (h->fd > *maxfd) *maxfd = h->fd;
         }
         // Decrypted bytes buffered in the session: ready without the socket.
         if (h->tls_state == 2 && h->reading && !h->read_eof && tcp_tls && tcp_tls->pending(h->tls) > 0) now = 1;
-        if (h->shut_pending && !h->wq_head) now = 1;
+        if (h->shut_pending && !h->wq_head && h->cout_len == 0) now = 1;
     }
     return now;
 }
 
+static _Bool tcp_dispatch(void);
+_Bool __kml_tcp_dispatch(void) { return tcp_dispatch(); }
+#endif
+
 // Run what became ready on every handle. Returns whether anything ran.
-_Bool __kml_tcp_dispatch(void) {
+static _Bool tcp_dispatch(void) {
     // An unref'd child's exit waits for a pass in which the loop is still
     // running before its streams close; when they are what held the loop,
     // the loop ends first and the exit goes unreported, as libuv's does.
@@ -1353,12 +1652,12 @@ _Bool __kml_tcp_dispatch(void) {
         // a connect's end is asked for.
         int readable = 1, writable = h->connecting != 1 || !__kml_win_connect_pending(h->fd);
 #else
-        struct pollfd pfd = { h->fd, POLLIN | POLLOUT, 0 };
-        if (poll(&pfd, 1, 0) < 0) continue;
-        // POLLNVAL: a device poll() does not support (macOS /dev/null, which
-        // select() reports ready) — the operation itself answers.
-        int readable = (pfd.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0;
-        int writable = (pfd.revents & (POLLOUT | POLLERR | POLLHUP | POLLNVAL)) != 0;
+        // What the watcher reported since the last dispatch; a descriptor
+        // libuv cannot watch is always ready, and the operation answers.
+        int rev = h->unpollable ? (UV_READABLE | UV_WRITABLE) : h->rev;
+        h->rev = 0;
+        int readable = (rev & UV_READABLE) != 0;
+        int writable = (rev & UV_WRITABLE) != 0;
 #endif
         if (h->listening) {
             if (!readable) continue;
@@ -1388,8 +1687,12 @@ _Bool __kml_tcp_dispatch(void) {
             h = tcp_tab[i];
             if (h->fd < 0) continue;
         }
+        if (h->cout_len > 0 && writable && tls_push(h) < 0) ran = 1;
         if (h->tls_state == 1 && tcp_tls) {
+            tls_pull(h);
             int rc = tcp_tls->handshake(h->tls);
+            if (tls_push(h) < 0 && rc == 0) rc = -1;
+            if (rc == 0 && h->raw_eof) rc = -1;
             if (rc == 0) continue;
             h->tls_state = rc > 0 ? 2 : 3;
             ran = 1;
@@ -1418,9 +1721,15 @@ _Bool __kml_tcp_dispatch(void) {
             h = tcp_tab[i];
             if (h->fd < 0) continue;
         }
-        if (h->shut_pending && !h->wq_head) {
+        // A TLS half-close sends close_notify first, and waits for it to be
+        // written.
+        if (h->shut_pending && !h->wq_head && h->cout_len == 0 && h->tls && tcp_tls && !h->tls_notified) {
+            h->tls_notified = 1;
+            tcp_tls->shutdown(h->tls);
+            tls_push(h);
+        }
+        if (h->shut_pending && !h->wq_head && h->cout_len == 0) {
             h->shut_pending = 0;
-            if (h->tls && tcp_tls) tcp_tls->shutdown(h->tls);
             int err = shutdown(h->fd, SHUT_WR) == 0 ? 0 : errno;
             ran = 1;
             if (h->shut_inv) TCP_CALL(h->shut_inv, h->shut_clo, err, 0);
@@ -1472,7 +1781,8 @@ _Bool __kml_tcp_dispatch(void) {
             h = tcp_tab[i];
             h->rbuf = NULL;
             h->rlen = 0;
-            if (n < (int64_t)sizeof buf) break;
+            // A TLS session may hold more records than one read returned.
+            if (n < (int64_t)sizeof buf && !h->tls) break;
         }
     }
     // A child's exit after its streams, as libuv's readiness order has it:
@@ -1486,13 +1796,19 @@ _Bool __kml_tcp_dispatch(void) {
 // A child process is an id into a process-wide table. Its stdio pipes are
 // stream handles (the TCP table above: POSIX socketpairs, as libuv's
 // UV_CREATE_PIPE makes them), read back with processStdio after the spawn.
-// The exit is noticed through a SIGCHLD self-pipe in the reactor's read set
-// (POSIX) or the child-exit wake on the reactor's port (Windows); the
-// dispatch reaps with waitpid(WNOHANG) and runs onExit(exitCode, signal).
+// POSIX: the child is a libuv uv_process_t on the thread's loop (TDD-00244
+// Stage 4), whose exit callback records the exit; the dispatch runs
+// onExit(exitCode, signal). Windows: the child-exit wake on the reactor's
+// port, and the dispatch reaps with waitpid(WNOHANG).
 #ifndef _WIN32
 #include <signal.h>
 #include <sys/wait.h>
+#include <uv.h>
 extern char **environ;
+// loop.c: the thread's libuv loop and the allocator libuv handles live in.
+extern uv_loop_t *__kml_loop_uv(void);
+extern void *__kml_loop_raw_alloc(size_t n);
+extern void __kml_loop_free_handle(uv_handle_t *h);
 #else
 extern int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, int out_fd, int err_fd, int inherit_fd, int flags, char **spawn_env);
 extern int __kml_win_spawn_failed(int pid);
@@ -1524,46 +1840,35 @@ typedef struct kml_proch {
     int pending;
     double pending_code, pending_sig;
     int stdio[KML_MAX_STDIO_H]; // its stdio stream handles (-1 none)
+#ifndef _WIN32
+    uv_process_t *uvp;          // until the exit callback closes it
+    int exited;                 // the exit callback ran: ex_code, ex_sig
+    double ex_code, ex_sig;
+#endif
 } kml_proch;
 
 static __thread kml_proch **proc_tab = NULL;
 static __thread int proc_cap = 0, proc_n = 0;
+#ifdef _WIN32
 // A pass that doesn't block after a spawn: a child that exited before the
 // watch saw it is still reaped at once.
 static int proc_kick = 0;
+#endif
 #define KML_MAX_STDIO 32
 static int proc_last_stdio[KML_MAX_STDIO];
 
 #ifndef _WIN32
-static int sigchld_pipe[2] = {-1, -1};
-static struct sigaction sigchld_prev;
-
-static void kml_sigchld(int sig) {
-    int saved = errno;
-    if (sigchld_pipe[1] >= 0) {
-        char b = 1;
-        ssize_t w = write(sigchld_pipe[1], &b, 1);
-        (void)w;
+// libuv reaped the child: record its exit for the dispatch, and close the
+// handle.
+static void proc_on_exit(uv_process_t *h, int64_t status, int term_signal) {
+    kml_proch *p = (kml_proch *)h->data;
+    if (p) {
+        p->exited = 1;
+        p->ex_code = (double)status;
+        p->ex_sig = (double)term_signal;
+        p->uvp = NULL;
     }
-    // A handler installed before ours still runs.
-    if (!(sigchld_prev.sa_flags & SA_SIGINFO) && sigchld_prev.sa_handler != SIG_DFL && sigchld_prev.sa_handler != SIG_IGN)
-        sigchld_prev.sa_handler(sig);
-    errno = saved;
-}
-
-static void proc_watch_init(void) {
-    if (sigchld_pipe[0] >= 0) return;
-    if (pipe(sigchld_pipe) != 0) return;
-    for (int i = 0; i < 2; i++) {
-        set_nonblock(sigchld_pipe[i]);
-        fcntl(sigchld_pipe[i], F_SETFD, FD_CLOEXEC);
-    }
-    struct sigaction sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_handler = kml_sigchld;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-    sigaction(SIGCHLD, &sa, &sigchld_prev);
+    uv_close((uv_handle_t *)h, __kml_loop_free_handle);
 }
 #endif
 
@@ -1587,7 +1892,12 @@ static int proc_new(int pid, void *inv, void *clo) {
     p->exit_inv = inv;
     p->exit_clo = clo;
     proc_tab[proc_n] = p;
+#ifndef _WIN32
+    tcp_loop_init(); // the dispatch reports the exit
+#endif
+#ifdef _WIN32
     proc_kick = 1;
+#endif
     return proc_n++;
 }
 
@@ -1685,15 +1995,67 @@ static int proc_is_self(const char *file) {
     const char *fres = realpath(fr, rfile) ? rfile : fr;
     return strcmp(sr, fres) == 0;
 }
+
+// The value of name in env (the child's given environment), or in ours.
+static const char *proc_env_value(char **env, const char *name, size_t nl) {
+    if (!env) {
+        char buf[256];
+        if (nl >= sizeof buf) return NULL;
+        memcpy(buf, name, nl);
+        buf[nl] = 0;
+        return getenv(buf);
+    }
+    for (int i = 0; env[i]; i++)
+        if (strncmp(env[i], name, nl) == 0 && env[i][nl] == '=') return env[i] + nl + 1;
+    return NULL;
+}
+
+// Whether a shell spawn (`sh -c <command>`, as exec and shell: true run)
+// starts this executable: a command word that names it, directly or through
+// a variable ("$NODE" with NODE set to process.execPath). The shell itself is
+// then marked, and passes the mark on to the copy it starts.
+static int proc_shell_runs_self(char **argv, char **env) {
+    if (!argv || !argv[0] || !argv[1] || strcmp(argv[1], "-c") != 0 || !argv[2]) return 0;
+    const char *p = argv[2];
+    int cmdpos = 1;
+    while (*p) {
+        if (strchr(" \t\n", *p)) { p++; continue; }
+        if (strchr("|;&()", *p)) { cmdpos = 1; p++; continue; }
+        char word[PATH_MAX];
+        size_t wl = 0;
+        char quote = 0;
+        while (*p && (quote || !strchr(" \t\n|;&()<>", *p))) {
+            if (quote ? *p == quote : (*p == '"' || *p == '\'')) {
+                quote = quote ? 0 : *p;
+            } else if (wl + 1 < sizeof word) {
+                word[wl++] = *p;
+            }
+            p++;
+        }
+        word[wl] = 0;
+        if (*p == '<' || *p == '>') p++;
+        if (!cmdpos || wl == 0) continue;
+        cmdpos = 0;
+        const char *target = word;
+        if (word[0] == '$') {
+            const char *name = word + 1;
+            size_t nl = strlen(name);
+            if (*name == '{' && nl > 1 && name[nl - 1] == '}') { name++; nl -= 2; }
+            target = proc_env_value(env, name, nl);
+        }
+        if (target && *target && proc_is_self(target)) return 1;
+    }
+    return 0;
+}
 #endif
 
-// Spawn file with argv (argv[0] the name the child sees) and env (empty:
-// ours), in cwd ("" is ours). flags: bit 0 detached, bit 1
-// windowsVerbatimArguments, bit 2 a deliberate self-run (fork). uid/gid < 0
-// keep ours. Returns the process
-// handle, or -errno when the program could not be started. onExit(exitCode,
-// signal) runs on the loop once the child has been reaped.
-double __kml_native_process_spawn(const char *file, void *argv_buf, int64_t argv_size, void *env_buf, int64_t env_size, const char *cwd, double flags, const char *stdio, double uid, double gid, void *inv, void *clo) {
+// The spawn, on a given libuv loop (POSIX): the thread's, or spawnSync's own.
+#ifndef _WIN32
+typedef uv_loop_t proc_loop;
+#else
+typedef void proc_loop;
+#endif
+static double proc_spawn_on(proc_loop *loop, const char *file, void *argv_buf, int64_t argv_size, void *env_buf, int64_t env_size, const char *cwd, double flags, const char *stdio, double uid, double gid, void *inv, void *clo) {
     char kind[KML_MAX_STDIO];
     int want[KML_MAX_STDIO], parent_end[KML_MAX_STDIO], child_end[KML_MAX_STDIO];
     int nst = proc_stdio_parse(stdio, kind, want);
@@ -1725,10 +2087,8 @@ double __kml_native_process_spawn(const char *file, void *argv_buf, int64_t argv
         } else if (kind[i] == 'i') {
 #ifdef _WIN32
             child_end[i] = -2;
-#else
-            child_end[i] = open("/dev/null", i == 0 ? O_RDONLY : O_RDWR);
-            if (child_end[i] < 0) err = errno;
 #endif
+            // POSIX: libuv's UV_IGNORE (/dev/null)
         } else {
             child_end[i] = want[i];
         }
@@ -1736,6 +2096,11 @@ double __kml_native_process_spawn(const char *file, void *argv_buf, int64_t argv
     char **argv = proc_strings((const char *)argv_buf, argv_size);
     char **envp = env_size > 0 ? proc_strings((const char *)env_buf, env_size) : NULL;
     int pid = -1;
+#ifndef _WIN32
+    uv_process_t *uvp = NULL;
+#else
+    (void)loop;
+#endif
     if (!err) {
 #ifdef _WIN32
         int in = nst > 0 ? (kind[0] == 'f' && want[0] == 0 ? -1 : child_end[0]) : -1;
@@ -1757,97 +2122,56 @@ double __kml_native_process_spawn(const char *file, void *argv_buf, int64_t argv
         }
         (void)uid; (void)gid;
 #else
-        proc_watch_init();
-        int reexec = !((int)flags & 4) && proc_is_self(file);
-        if (reexec && envp) {
-            // The marker joins the given environment.
+        int reexec = !((int)flags & 4) && (proc_is_self(file) || proc_shell_runs_self(argv, envp));
+        // The self-spawn marker joins the given environment, or a copy of ours.
+        char **spawn_env = envp, **marked = NULL;
+        if (reexec) {
+            char **base = envp ? envp : environ;
             int n = 0;
-            while (envp[n]) n++;
-            char **grown = (char **)realloc(envp, ((size_t)n + 2) * sizeof *envp);
-            if (grown) {
-                envp = grown;
-                envp[n] = strdup("KML_KLAIN_REEXEC=1");
-                envp[n + 1] = NULL;
+            while (base[n]) n++;
+            marked = (char **)calloc((size_t)n + 2, sizeof *marked);
+            memcpy(marked, base, (size_t)n * sizeof *marked);
+            marked[n] = (char *)"KML_KLAIN_REEXEC=1";
+            spawn_env = marked;
+        }
+        uv_stdio_container_t cont[KML_MAX_STDIO];
+        for (int i = 0; i < nst; i++) {
+            if (kind[i] == 'i') {
+                cont[i].flags = UV_IGNORE;
+            } else {
+                cont[i].flags = UV_INHERIT_FD;
+                cont[i].data.fd = child_end[i];
             }
         }
-        int errpipe[2];
-        if (pipe(errpipe) != 0) {
-            err = errno;
+        uv_process_options_t o;
+        memset(&o, 0, sizeof o);
+        o.exit_cb = proc_on_exit;
+        o.file = file;
+        o.args = argv;
+        o.env = spawn_env;
+        o.cwd = cwd && *cwd ? cwd : NULL;
+        o.stdio_count = nst;
+        o.stdio = cont;
+        if ((int)flags & 1) o.flags |= UV_PROCESS_DETACHED;
+        if (uid >= 0) {
+            o.flags |= UV_PROCESS_SETUID;
+            o.uid = (uv_uid_t)uid;
+        }
+        if (gid >= 0) {
+            o.flags |= UV_PROCESS_SETGID;
+            o.gid = (uv_gid_t)gid;
+        }
+        uvp = (uv_process_t *)__kml_loop_raw_alloc(sizeof *uvp);
+        int r = uv_spawn(loop, uvp, &o);
+        free(marked);
+        if (r < 0) {
+            // A handle uv_spawn refused is still closed.
+            err = -r;
+            uvp->data = NULL;
+            uv_close((uv_handle_t *)uvp, __kml_loop_free_handle);
+            uvp = NULL;
         } else {
-            fcntl(errpipe[0], F_SETFD, FD_CLOEXEC);
-            fcntl(errpipe[1], F_SETFD, FD_CLOEXEC);
-            pid = fork();
-            if (pid == 0) {
-                // The child: default signal dispositions and an empty mask,
-                // as libuv's uv__process_child_init gives it.
-                sigset_t none;
-                sigemptyset(&none);
-                sigprocmask(SIG_SETMASK, &none, NULL);
-                for (int sg = 1; sg < 32; sg++) {
-                    if (sg == SIGKILL || sg == SIGSTOP) continue;
-                    signal(sg, SIG_DFL);
-                }
-                if ((int)flags & 1) setsid();
-                // Move every end out of the way of the descriptors it lands on.
-                for (int i = 0; i < nst; i++) {
-                    if (child_end[i] >= 0 && child_end[i] < nst && child_end[i] != i) {
-                        int moved = fcntl(child_end[i], F_DUPFD, nst);
-                        if (moved >= 0) child_end[i] = moved;
-                    }
-                }
-                for (int i = 0; i < nst; i++) {
-                    if (child_end[i] < 0) continue;
-                    if (child_end[i] == i) {
-                        fcntl(i, F_SETFD, 0);
-                    } else if (dup2(child_end[i], i) < 0) {
-                        int e = errno;
-                        ssize_t w = write(errpipe[1], &e, sizeof e);
-                        (void)w;
-                        _exit(127);
-                    }
-                }
-                if (cwd && *cwd && chdir(cwd) != 0) {
-                    int e = errno;
-                    ssize_t w = write(errpipe[1], &e, sizeof e);
-                    (void)w;
-                    _exit(127);
-                }
-                if (gid >= 0 && setgid((gid_t)gid) != 0) {
-                    int e = errno;
-                    ssize_t w = write(errpipe[1], &e, sizeof e);
-                    (void)w;
-                    _exit(127);
-                }
-                if (uid >= 0 && setuid((uid_t)uid) != 0) {
-                    int e = errno;
-                    ssize_t w = write(errpipe[1], &e, sizeof e);
-                    (void)w;
-                    _exit(127);
-                }
-                if (envp) environ = envp;
-                else if (reexec) setenv("KML_KLAIN_REEXEC", "1", 1);
-                execvp(file, argv);
-                int e = errno;
-                ssize_t w = write(errpipe[1], &e, sizeof e);
-                (void)w;
-                _exit(127);
-            }
-            if (pid < 0) err = errno;
-            close(errpipe[1]);
-            if (pid > 0) {
-                int e = 0;
-                ssize_t r;
-                do {
-                    r = read(errpipe[0], &e, sizeof e);
-                } while (r < 0 && errno == EINTR);
-                if (r == (ssize_t)sizeof e) {
-                    // exec failed: reap the child, report its errno.
-                    waitpid(pid, NULL, 0);
-                    err = e;
-                    pid = -1;
-                }
-            }
-            close(errpipe[0]);
+            pid = uvp->pid;
         }
 #endif
     }
@@ -1869,7 +2193,26 @@ double __kml_native_process_spawn(const char *file, void *argv_buf, int64_t argv
     }
     int id = proc_new(pid, inv, clo);
     for (int k = 0; k < KML_MAX_STDIO_H; k++) proc_tab[id]->stdio[k] = k < KML_MAX_STDIO ? proc_last_stdio[k] : -1;
+#ifndef _WIN32
+    proc_tab[id]->uvp = uvp;
+    uvp->data = proc_tab[id];
+#endif
     return id;
+}
+
+// Spawn file with argv (argv[0] the name the child sees) and env (empty:
+// ours), in cwd ("" is ours). flags: bit 0 detached, bit 1
+// windowsVerbatimArguments, bit 2 a deliberate self-run (fork). uid/gid < 0
+// keep ours. Returns the process handle, or -errno when the program could not
+// be started. onExit(exitCode, signal) runs on the loop once the child has
+// exited.
+double __kml_native_process_spawn(const char *file, void *argv_buf, int64_t argv_size, void *env_buf, int64_t env_size, const char *cwd, double flags, const char *stdio, double uid, double gid, void *inv, void *clo) {
+#ifndef _WIN32
+    proc_loop *loop = __kml_loop_uv();
+#else
+    proc_loop *loop = NULL;
+#endif
+    return proc_spawn_on(loop, file, argv_buf, argv_size, env_buf, env_size, cwd, flags, stdio, uid, gid, inv, clo);
 }
 
 // The stream handle of the last spawn's descriptor i, or -1.
@@ -1888,6 +2231,9 @@ double __kml_native_process_kill(double id, double signal) {
     kml_proch *p = proc_get(id);
     if (!p) return -EBADF;
     if (!p->alive) return -ESRCH;
+#ifndef _WIN32
+    if (p->exited) return -ESRCH; // reaped: the pid may be another process's
+#endif
     if (kill(p->pid, (int)signal) != 0) return -errno;
     return 0;
 }
@@ -1895,7 +2241,14 @@ double __kml_native_process_kill(double id, double signal) {
 // A referenced child holds the loop open until it exits.
 void __kml_native_process_ref(double id, _Bool on) {
     kml_proch *p = proc_get(id);
-    if (p) p->refd = on;
+    if (!p) return;
+    p->refd = on;
+#ifndef _WIN32
+    if (p->uvp) {
+        if (on) uv_ref((uv_handle_t *)p->uvp);
+        else uv_unref((uv_handle_t *)p->uvp);
+    }
+#endif
 }
 
 // The handle is done with: its exit is no longer reported.
@@ -1904,9 +2257,26 @@ void __kml_native_process_close(double id) {
     if (p) {
         p->exit_inv = NULL;
         p->refd = 0;
+#ifndef _WIN32
+        if (p->uvp) uv_unref((uv_handle_t *)p->uvp);
+#endif
     }
 }
 
+#ifndef _WIN32
+// A child exit held for its streams (2, holds the loop) or an unref'd
+// child's exit waiting on them (1, does not), for the loop's kick.
+static int proc_kick_wanted(void) {
+    int k = 0;
+    for (int i = 0; i < proc_n; i++) {
+        if (proc_tab[i]->pending == 2) return 2;
+        if (proc_tab[i]->pending == 1) k = 1;
+    }
+    return k;
+}
+#endif
+
+#ifdef _WIN32
 static _Bool proc_keepalive(void) {
     for (int i = 0; i < proc_n; i++)
         if ((proc_tab[i]->alive || proc_tab[i]->pending == 2) && proc_tab[i]->refd && proc_tab[i]->exit_inv) return 1;
@@ -1914,6 +2284,8 @@ static _Bool proc_keepalive(void) {
 }
 
 static _Bool proc_fdset_add(void *fdset, int *maxfd) {
+    (void)fdset;
+    (void)maxfd;
     int any = 0, held = 0;
     for (int i = 0; i < proc_n; i++) {
         if (proc_tab[i]->alive) any = 1;
@@ -1921,19 +2293,11 @@ static _Bool proc_fdset_add(void *fdset, int *maxfd) {
     }
     if (held) return 1; // an exit held for its streams runs next pass
     if (!any) return 0;
-#ifndef _WIN32
-    if (sigchld_pipe[0] >= 0) {
-        KML_FD_SET(sigchld_pipe[0], fdset);
-        if (sigchld_pipe[0] > *maxfd) *maxfd = sigchld_pipe[0];
-    }
-#else
-    (void)fdset;
-    (void)maxfd;
-#endif
     _Bool kick = proc_kick != 0;
     proc_kick = 0;
     return kick;
 }
+#endif
 
 // The exits of unref'd children reaped on an earlier pass (pending 1).
 static _Bool proc_dispatch_unrefd(void) {
@@ -1962,12 +2326,6 @@ static _Bool proc_dispatch_unrefd(void) {
 }
 
 static _Bool proc_dispatch(void) {
-#ifndef _WIN32
-    if (sigchld_pipe[0] >= 0) {
-        char buf[64];
-        while (read(sigchld_pipe[0], buf, sizeof buf) > 0) { /* drain */ }
-    }
-#endif
     _Bool ran = 0;
     for (int i = 0; i < proc_n; i++) {
         kml_proch *p = proc_tab[i];
@@ -1980,19 +2338,24 @@ static _Bool proc_dispatch(void) {
         }
         if (p->pending) continue; // proc_dispatch_unrefd's
         if (!p->alive) continue;
+        double code = 0, sig = 0;
+#ifndef _WIN32
+        if (!p->exited) continue;
+        p->alive = 0;
+        code = p->ex_code;
+        sig = p->ex_sig;
+#else
         int st = 0;
         int r = waitpid(p->pid, &st, WNOHANG);
         if (r == 0 || (r < 0 && errno == EINTR)) continue;
         p->alive = 0;
-        double code = 0, sig = 0;
         if (r > 0) {
             if (WIFEXITED(st)) code = WEXITSTATUS(st);
             else if (WIFSIGNALED(st)) sig = WTERMSIG(st);
-#ifdef _WIN32
             int wide = __kml_win_exit_code(p->pid);
             if (sig == 0 && wide != -1) code = (double)(unsigned int)wide;
-#endif
         }
+#endif
         if (!p->refd) {
             p->pending = 1;
             p->pending_code = code;
@@ -2053,8 +2416,22 @@ double __kml_native_spawn_sync(const char *file, void *argv_buf, int64_t argv_si
         sync_len[i] = 0;
     }
     sync_status = sync_signal = sync_error = sync_pid = 0;
+#ifndef _WIN32
+    // Its own libuv loop, as Node's spawn_sync has: the one nested loop, which
+    // shares no handle with the thread's (TDD-00244).
+    (void)__kml_loop_uv(); // the loop's allocator, under -mm=gc
+    uv_loop_t priv;
+    uv_loop_init(&priv);
+    double id = proc_spawn_on(&priv, file, argv_buf, argv_size, env_buf, env_size, cwd, flags, stdio, uid, gid, NULL, NULL);
+    if (id < 0) {
+        uv_run(&priv, UV_RUN_DEFAULT);
+        uv_loop_close(&priv);
+        return id;
+    }
+#else
     double id = __kml_native_process_spawn(file, argv_buf, argv_size, env_buf, env_size, cwd, flags, stdio, uid, gid, NULL, NULL);
     if (id < 0) return id;
+#endif
     kml_proch *p = proc_get(id);
     sync_pid = p->pid;
     int fds[KML_MAX_STDIO];
@@ -2144,6 +2521,16 @@ double __kml_native_spawn_sync(const char *file, void *argv_buf, int64_t argv_si
     }
     for (int i = 0; i < KML_MAX_STDIO; i++)
         if (fds[i] >= 0) close(fds[i]);
+#ifndef _WIN32
+    // The private loop runs until the exit callback, then closes.
+    while (!p->exited) uv_run(&priv, UV_RUN_ONCE);
+    uv_run(&priv, UV_RUN_DEFAULT);
+    uv_loop_close(&priv);
+    p->alive = 0;
+    p->exit_inv = NULL;
+    sync_status = (int64_t)p->ex_code;
+    sync_signal = (int64_t)p->ex_sig;
+#else
     int st = 0;
     int r;
     do {
@@ -2154,11 +2541,10 @@ double __kml_native_spawn_sync(const char *file, void *argv_buf, int64_t argv_si
     if (r > 0) {
         if (WIFEXITED(st)) sync_status = WEXITSTATUS(st);
         else if (WIFSIGNALED(st)) sync_signal = WTERMSIG(st);
-#ifdef _WIN32
         int wide = __kml_win_exit_code(p->pid);
         if (sync_signal == 0 && wide != -1) sync_status = (int64_t)(unsigned int)wide;
-#endif
     }
+#endif
     return 0;
 }
 
@@ -2391,45 +2777,24 @@ double __kml_native_tty_window_size(double fdd) {
 #endif
 }
 
-// ---- event-loop hooks (called from the emitted reactor) --------------------
+// ---- event-loop hooks ------------------------------------------------------
 // An outstanding submission keeps this loop alive so it doesn't exit while a
-// read is in flight and never settles the awaiting Promise.
+// read is in flight and never settles the awaiting Promise: on POSIX through
+// the port's referenced async, on Windows through this hook.
+#ifdef _WIN32
 _Bool __kml_pool_keepalive(void) {
     return tls_port && atomic_load_explicit(&tls_port->inflight,
                                             memory_order_relaxed) > 0;
 }
-
-// Add the wakeup read fd to the loop's read set while work is in flight. Returns
-// 0 (no forced-zero timeout): we *want* select() to block on the wakefd so the
-// loop sleeps until a completion lands rather than spinning.
-_Bool __kml_pool_fdset_add(void *fdset, int *maxfd) {
-#ifdef _WIN32
-    // The wake is a packet on the reactor's port, which select() always waits on.
-    (void)fdset; (void)maxfd;
-    return 0;
-#else
-    // Watched whenever the loop has a port at all: another thread (a Worker,
-    // a MessagePort's other end) may wake it with nothing in flight here.
-    if (!tls_port || tls_port->wake_r < 0)
-        return 0;
-    FD_SET(tls_port->wake_r, (fd_set *)fdset);
-    if (tls_port->wake_r > *maxfd) *maxfd = tls_port->wake_r;
-    return 0;
 #endif
-}
 
-// Drain arrived completions on the loop thread. The comp stack is LIFO: reverse
+// Drain arrived completions on the loop thread (the port's async callback
+// on POSIX, the loop's pass on Windows). The comp stack is LIFO: reverse
 // the batch to completion order before dispatching.
 // Returns whether any completion ran.
 _Bool __kml_pool_dispatch(void) {
     kml_loop_port *p = tls_port;
     if (!p) return 0;
-#ifndef _WIN32
-    if (p->wake_r >= 0) {
-        char buf[64];
-        while (read(p->wake_r, buf, sizeof buf) > 0) { /* drain wakeup bytes */ }
-    }
-#endif
     kml_pool_item *it = atomic_exchange_explicit(&p->comp_head, NULL,
                                                  memory_order_acquire);
     _Bool ran = it != NULL;
@@ -2444,7 +2809,7 @@ _Bool __kml_pool_dispatch(void) {
     for (kml_pool_item *c = ordered; c;) {
         kml_pool_item *nx = c->next;
         native_unlink(c);
-        atomic_fetch_sub_explicit(&p->inflight, 1, memory_order_relaxed);
+        port_hold(p, -1);
         native_set_last_string(c->res_str);
         kml_make_callback(c->inv, c->clo, (double)c->err, c->res);
         free(c->arg0);
@@ -2509,7 +2874,7 @@ static void kml_post_to_loop(kml_loop_port *loop, void *inv, void *clo, int64_t 
     it->res = b;
     it->port = loop;
     native_link(it);
-    atomic_fetch_add_explicit(&loop->inflight, 1, memory_order_relaxed);
+    port_hold(loop, 1);
     push_completion(loop, it);
 }
 
@@ -2532,10 +2897,10 @@ static void mp_hold_locked(kml_mport *p) {
     int want = p->refd && p->loop && p->inv && !p->closed;
     if (want && !p->held) {
         p->held = 1;
-        atomic_fetch_add_explicit(&p->loop->inflight, 1, memory_order_relaxed);
+        port_hold(p->loop, 1);
     } else if (!want && p->held) {
         p->held = 0;
-        atomic_fetch_sub_explicit(&p->loop->inflight, 1, memory_order_relaxed);
+        port_hold(p->loop, -1);
     }
 }
 
@@ -2555,7 +2920,7 @@ void __kml_native_mport_start(double id, void *inv, void *clo) {
     pthread_mutex_lock(&mp_mu);
     kml_mport *p = mp_get(id);
     if (p) {
-        if (p->held) { p->held = 0; atomic_fetch_sub_explicit(&p->loop->inflight, 1, memory_order_relaxed); }
+        if (p->held) { p->held = 0; port_hold(p->loop, -1); }
         p->loop = loop_port();
         p->inv = inv;
         p->clo = clo;
@@ -2572,7 +2937,7 @@ void __kml_native_mport_stop(double id) {
     pthread_mutex_lock(&mp_mu);
     kml_mport *p = mp_get(id);
     if (p) {
-        if (p->held) { p->held = 0; atomic_fetch_sub_explicit(&p->loop->inflight, 1, memory_order_relaxed); }
+        if (p->held) { p->held = 0; port_hold(p->loop, -1); }
         p->loop = NULL;
         p->inv = NULL;
         p->clo = NULL;
@@ -2746,7 +3111,7 @@ double __kml_native_worker_spawn(const char *path, double port, double iport, in
     w->id = w_n;
     w_tab[w_n++] = w;
     w->held = 1;
-    atomic_fetch_add_explicit(&w->parent->inflight, 1, memory_order_relaxed);
+    port_hold(w->parent, 1);
     pthread_mutex_unlock(&w_mu);
     kml_gc_allow();
     pthread_attr_t attr;
@@ -2759,7 +3124,7 @@ double __kml_native_worker_spawn(const char *path, double port, double iport, in
         pthread_mutex_lock(&w_mu);
         w->held = 0;
         w->exited = 1;
-        atomic_fetch_sub_explicit(&w->parent->inflight, 1, memory_order_relaxed);
+        port_hold(w->parent, -1);
         pthread_mutex_unlock(&w_mu);
         return -rc;
     }
@@ -2782,23 +3147,32 @@ void __kml_native_worker_ref(double id, _Bool on) {
     int want = w->refd && !w->exited;
     if (want && !w->held) {
         w->held = 1;
-        atomic_fetch_add_explicit(&w->parent->inflight, 1, memory_order_relaxed);
+        port_hold(w->parent, 1);
     } else if (!want && w->held) {
         w->held = 0;
-        atomic_fetch_sub_explicit(&w->parent->inflight, 1, memory_order_relaxed);
+        port_hold(w->parent, -1);
     }
     pthread_mutex_unlock(&w_mu);
 }
 
-static void kml_noop_cb(void *clo, double a, double b) { (void)clo; (void)a; (void)b; }
+// worker.c's thread-aware exit, set by the worker thread before it enters.
+static void (*w_end)(int);
+void __kml_worker_set_end(void (*end)(int)) { w_end = end; }
 
-// Stop the worker: its loop ends at its next turn, with exit code 1.
+// Delivered on the terminated worker's own loop: the thread ends with exit
+// code 1 (leave records it).
+static void kml_terminate_cb(void *clo, double a, double b) {
+    (void)clo; (void)a; (void)b;
+    if (w_end) w_end(1);
+}
+
+// Stop the worker: it ends at its loop's next turn, with exit code 1.
 void __kml_native_worker_terminate(double id) {
     kml_wctx *w = w_get(id);
     if (!w) return;
     atomic_store(&w->terminate, 1);
     pthread_mutex_lock(&w_mu);
-    if (w->loop && !w->exited) kml_post_to_loop(w->loop, (void *)kml_noop_cb, NULL, 0, 0);
+    if (w->loop && !w->exited) kml_post_to_loop(w->loop, (void *)kml_terminate_cb, NULL, 0, 0);
     pthread_mutex_unlock(&w_mu);
 }
 
@@ -2833,17 +3207,13 @@ void *__kml_worker_enter(kml_wctx *w) {
     w_self = w;
     pthread_mutex_lock(&w_mu);
     w->loop = loop_port();
-    if (atomic_load(&w->terminate)) kml_post_to_loop(w->loop, (void *)kml_noop_cb, NULL, 0, 0);
+    if (atomic_load(&w->terminate)) kml_post_to_loop(w->loop, (void *)kml_terminate_cb, NULL, 0, 0);
     pthread_mutex_unlock(&w_mu);
     kml_post_to_loop(w->parent, w->inv, w->clo, 0, 0);
     return w->entry;
 }
 
 _Bool __kml_worker_is_thread(void) { return w_self != NULL; }
-
-_Bool __kml_worker_terminating(void) {
-    return w_self && atomic_load(&w_self->terminate);
-}
 
 // The thread's end: the parent hears 'exit' with the code (1 when it was
 // terminated).
@@ -2865,7 +3235,7 @@ void __kml_native_worker_exited(double id) {
     w->exited = 1;
     if (w->held) {
         w->held = 0;
-        atomic_fetch_sub_explicit(&w->parent->inflight, 1, memory_order_relaxed);
+        port_hold(w->parent, -1);
     }
     pthread_mutex_unlock(&w_mu);
 }

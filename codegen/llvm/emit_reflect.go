@@ -177,7 +177,7 @@ func (e *Emitter) emitReflectCall(method string, args []ast.Expression, pos ast.
 		if err := need(1); err != nil {
 			return Value{}, err
 		}
-		return e.emitObjectGetOwnPropertyNames(args, pos)
+		return e.emitReflectOwnKeys(args[0], pos)
 	case "getPrototypeOf":
 		if err := need(1); err != nil {
 			return Value{}, err

@@ -14,7 +14,6 @@ package llvm
 
 import (
 	_ "embed"
-	"strconv"
 )
 
 //go:embed asynchookssrc/asynchooks.c
@@ -26,11 +25,6 @@ func AsyncHooksSource() string { return layoutHeader() + asyncHooksSource }
 
 // UsesAsyncHooks reports whether the program links asynchooks.c.
 func (e *Emitter) UsesAsyncHooks() bool { return e.usedAsyncCtxAccessors }
-
-// AsyncHooksCFlags passes the NaN-box undefined word.
-func (e *Emitter) AsyncHooksCFlags() []string {
-	return []string{"-DKML_NB_UNDEFINED=" + strconv.Itoa(nbUndefined) + "LL"}
-}
 
 // ensureAsyncCtxAccessors declares the context head get/set accessors plus the
 // timer-callback context-binding trampoline (TDD-00168 Stage 3) — the subset
@@ -44,7 +38,8 @@ func (e *Emitter) ensureAsyncCtxAccessors() {
 	e.ensureCurrentTaskGlobal() // @__kml_current_task + @__kml_root_async_ctx
 	e.emitGlobal(`declare ptr @__kml_als_ctx_get()
 declare void @__kml_als_ctx_set(ptr)
-declare void @__kml_als_timer_tramp(ptr)`)
+declare void @__kml_als_timer_tramp(ptr)
+declare ptr @__kml_als_wrap(ptr)`)
 }
 
 // ensureNativeAsyncContext declares lib/native.d.ts's asyncContextGet and

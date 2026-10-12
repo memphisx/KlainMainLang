@@ -3,6 +3,7 @@ package checker
 import (
 	"KlainMainLang/ast"
 	"KlainMainLang/binder"
+	"KlainMainLang/diag"
 	"strconv"
 	"strings"
 )
@@ -14,6 +15,9 @@ import (
 // only in the container that declares sym.
 func (c *Checker) narrowedType(id *ast.Identifier, sym *binder.Symbol, declared *Type) *Type {
 	c.storage[id] = declared
+	if c.evolvingArray[sym] {
+		return c.evolvingArrayRead(id, sym, declared)
+	}
 	if !narrowable(declared) && declared.Flags&Any == 0 && !c.evolving[sym] {
 		return declared
 	}
@@ -26,10 +30,21 @@ func (c *Checker) narrowedType(id *ast.Identifier, sym *binder.Symbol, declared 
 		// declaration (`Math`) reads as declared: it is no program binding,
 		// and walking the program's flow for every read of one exhausts the
 		// flow budget.
-		if f == nil || c.evolving[sym] || c.inLibrary(sym.Scope) {
+		if f == nil || c.inLibrary(sym.Scope) {
+			if c.evolving[sym] {
+				c.reportCapturedEvolving(id, sym)
+				return c.anyT
+			}
 			return declared
 		}
 		r.outer = c.b.ClosureNarrows(id, sym)
+		if c.evolving[sym] && !r.outer {
+			// An evolving binding read where its assignments' flow does not
+			// reach is TypeScript's implicit any (TS7034, TS7005). A closure
+			// created after its last assignment reads it as evolved there.
+			c.reportCapturedEvolving(id, sym)
+			return c.anyT
+		}
 	}
 	t, _ := c.flowType(f, r, declared, newFlowWalk())
 	return t
@@ -270,7 +285,13 @@ func (c *Checker) flowType(f *binder.FlowNode, r ref, declared *Type, w *flowWal
 		case f == nil:
 			return declared, nil
 		case f.Flags&binder.FlowUnreachable != 0:
-			return c.neverT, nil
+			// A reference in unreachable code reads its declared type, an
+			// evolving one as any (tsc's getTypeAtFlowNode); a label never
+			// has an unreachable antecedent.
+			if c.evolving[r.sym] {
+				return c.anyT, nil
+			}
+			return declared, nil
 		case f.Flags&binder.FlowAssignment != 0:
 			if f.Symbol != r.sym {
 				// `for (const k in ref)` acts as a non-null assertion on ref
@@ -285,7 +306,7 @@ func (c *Checker) flowType(f *binder.FlowNode, r ref, declared *Type, w *flowWal
 			if len(r.path) > 0 {
 				return declared, nil // the root was replaced
 			}
-			if declared.Flags&Union == 0 && !c.evolving[r.sym] && !c.Unanswered(declared) {
+			if declared.Flags&Union == 0 && !c.evolving[r.sym] && !c.evolvingArray[r.sym] && !c.Unanswered(declared) {
 				// Only a union narrows by assignment (tsc's
 				// getTypeAtFlowAssignment): the stored value's type is not
 				// needed, and computing it re-walks every binding it reads.
@@ -302,9 +323,16 @@ func (c *Checker) flowType(f *binder.FlowNode, r ref, declared *Type, w *flowWal
 			if a, ok := f.Node.(*ast.AssignmentExpression); ok && compoundLike(a) {
 				declared = widen(c, declared) // `x = x + 1`: x's base type
 			}
+			if c.evolvingArray[r.sym] {
+				return at, nil // an evolving array is what was stored
+			}
 			return c.assignmentReduced(declared, at), nil
 		case f.Flags&binder.FlowPropertyAssignment != 0:
 			a := f.Node.(*ast.AssignmentExpression)
+			if len(r.path) == 0 && c.evolvingArray[r.sym] && c.isArrayMutation(a, r) {
+				t, deps := c.flowType(f.Antecedent, r, declared, w)
+				return c.addArrayElems(t, a), deps
+			}
 			switch {
 			case len(r.path) > 0 && c.refersTo(a.Left, r):
 				return c.assignmentReduced(declared, c.assignedType(f, declared)), nil
@@ -317,6 +345,10 @@ func (c *Checker) flowType(f *binder.FlowNode, r ref, declared *Type, w *flowWal
 			call := f.Node.(*ast.CallExpression)
 			if c.neverReturning(call) {
 				return c.neverT, nil // no path continues past it
+			}
+			if len(r.path) == 0 && c.evolvingArray[r.sym] && c.isArrayMutation(call, r) {
+				t, deps := c.flowType(f.Antecedent, r, declared, w)
+				return c.addArrayElems(t, call), deps
 			}
 			if !c.callMayNarrow(call, r) {
 				f = f.Antecedent // as tsc, past a call that cannot assert r
@@ -1194,7 +1226,10 @@ func (c *Checker) narrowByInstanceof(t *Type, r ref, e *ast.BinaryExpression, tr
 				return c.narrowToType(t, inst)
 			}
 			return c.filter(t, func(m *Type) bool {
-				return !(m.Flags&Object != 0 && (m == inst || (m.Symbol != nil && m.Symbol == inst.Symbol) || c.assignableTo(m, inst) == yes))
+				// tsc's false branch removes what derives from the instance
+				// type, not what is merely assignable to it (an Error is no
+				// TypeError).
+				return !(m.Flags&Object != 0 && (m == inst || c.derivesFrom(m, inst)))
 			})
 		}
 	}
@@ -1223,6 +1258,11 @@ func (c *Checker) narrowByInstanceof(t *Type, r ref, e *ast.BinaryExpression, tr
 			case is(m):
 				out = append(out, m)
 			case m.Flags&Object != 0 && m.Kind == Instance && inst.Derives(m.Symbol):
+				out = append(out, inst)
+			case m.Flags&Object != 0 && c.assignableTo(inst, m) == yes:
+				// A supertype that is no class of C's chain (a builtin
+				// interface, `Map<string, number>` for a class extending
+				// Map) narrows to C too.
 				out = append(out, inst)
 			}
 		}
@@ -1351,6 +1391,15 @@ func (c *Checker) dottedType(e ast.Expression) *Type {
 		for _, m := range members(obj) {
 			if am := c.apparentType(m); am != nil {
 				m = am
+			}
+			if m.Flags&Object != 0 && m.Kind == Function {
+				// A function's members are Function's (`f.call(…)`), none
+				// of them a guard.
+				if ft := c.functionMember(x.Property); ft != nil {
+					ts = append(ts, ft)
+					continue
+				}
+				return c.anyT
 			}
 			if m.Flags&Object == 0 || (m.Kind != Anonymous && m.Kind != Instance && m.Kind != Interface) {
 				if m.Flags&(Null|Undefined|Any) != 0 {
@@ -1722,6 +1771,12 @@ func encloses(outer, s *binder.Scope) bool {
 // whose default cannot be undefined does not hold undefined
 // (removeOptionalityFromDeclaredType).
 func (c *Checker) initialType(sym *binder.Symbol, declared *Type) *Type {
+	// An evolving binding starts its container undefined (tsc's initial
+	// type for an auto-typed declaration): a hoisted `var` reaches its
+	// container's start with no assignment of its own.
+	if c.evolving[sym] {
+		return c.undefinedT
+	}
 	def := c.paramDefault(sym)
 	if def == nil || nullFactsOf(declared)&isUndefined == 0 || c.initializing[sym] {
 		return declared // a default that reads the parameter itself
@@ -1856,14 +1911,41 @@ func (c *Checker) accessKey(e ast.Expression) (string, bool) {
 	if sym == nil || len(sym.Declarations) == 0 {
 		return "", false
 	}
-	if v, ok := sym.Declarations[0].Node.(*ast.VarDeclaration); !ok || v.Kind != "const" {
+	v, ok := sym.Declarations[0].Node.(*ast.VarDeclaration)
+	if !ok || v.Kind != "const" {
 		return "", false
+	}
+	// A const holding `Symbol(desc)`, a `unique symbol`, keys the class
+	// member declared with it (TDD-00246).
+	if call, ok := v.Init.(*ast.CallExpression); ok {
+		if callee, ok := call.Callee.(*ast.Identifier); ok && callee.Name == "Symbol" && len(call.Args) <= 1 {
+			desc := ""
+			if len(call.Args) == 1 {
+				s, ok := call.Args[0].(*ast.StringLiteral)
+				if !ok {
+					return "", false
+				}
+				desc = s.Value
+			}
+			return ast.SymbolMemberName(desc, v.Name), true
+		}
 	}
 	switch t := c.typeOfSymbol(sym); {
 	case t.Flags&(StringLiteral|NumberLiteral) != 0 && t.Flags&Union == 0 && t.Member == "":
 		return t.Value, true
 	}
 	return "", false
+}
+
+// ConstLiteralKey is the value of a key that is a const holding a string or
+// number literal (number reports which), for an `obj[k]` that reads the
+// same member as `obj[<literal>]`.
+func (c *Checker) ConstLiteralKey(id *ast.Identifier) (value string, number, ok bool) {
+	key, lit := c.accessKey(id)
+	if !lit || strings.HasPrefix(key, ast.SymbolMemberPrefix) {
+		return "", false, false
+	}
+	return key, c.TypeOf(id).Flags&NumberLiteral != 0, true
 }
 
 // chainContainment narrows the object of an optional chain compared with
@@ -2274,4 +2356,70 @@ func (c *Checker) inTarget(lit ast.Expression) bool {
 		}
 	}
 	return false
+}
+
+// reportCapturedEvolving reports, once each, the evolving binding sym read
+// by id in another function: TS7005 at the read, TS7034 at the declaration.
+// The js lane has no noImplicitAny.
+func (c *Checker) reportCapturedEvolving(id *ast.Identifier, sym *binder.Symbol) {
+	if c.opts.CompatJS() || c.implicitAnyReported[id] {
+		return
+	}
+	c.implicitAnyReported[id] = true
+	if len(sym.Declarations) > 0 {
+		if d := sym.Declarations[0].Node; !c.implicitAnyReported[d] {
+			c.implicitAnyReported[d] = true
+			pos := d.GetPos()
+			if v, ok := d.(*ast.VarDeclaration); ok {
+				pos = namePos(v.NamePos, pos)
+			}
+			c.report(diag.VarImplicitAnySome, pos, sourceName(id.Name))
+		}
+	}
+	c.report(diag.VarImplicitAny, id.GetPos(), sourceName(id.Name))
+}
+
+// derivesFrom reports whether m is target's type or declared to extend it:
+// a class's base chain, an interface's heritage.
+func (c *Checker) derivesFrom(m, target *Type) bool {
+	if target.Symbol == nil || m.Symbol == nil {
+		return false
+	}
+	if m.Kind == Instance && m.Derives(target.Symbol) {
+		return true
+	}
+	seen := map[*binder.Symbol]bool{}
+	var walk func(sym *binder.Symbol) bool
+	walk = func(sym *binder.Symbol) bool {
+		if sym == target.Symbol {
+			return true
+		}
+		if seen[sym] {
+			return false
+		}
+		seen[sym] = true
+		for _, d := range sym.Declarations {
+			id, ok := d.Node.(*ast.InterfaceDeclaration)
+			if !ok {
+				continue
+			}
+			for _, h := range id.Heritage {
+				ref, ok := h.(*ast.TypeReference)
+				if !ok {
+					continue
+				}
+				var b *binder.Symbol
+				if len(ref.Qualifier) > 0 {
+					b = c.qualifiedTypeName(ref, sym.Scope)
+				} else {
+					b = resolveTypeName(ref.Name, sym.Scope)
+				}
+				if b != nil && walk(b) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(m.Symbol)
 }

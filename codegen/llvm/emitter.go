@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"KlainMainLang/ast"
+	"KlainMainLang/binder"
 	"KlainMainLang/checker"
 	"KlainMainLang/options"
 	"KlainMainLang/resolver"
@@ -36,6 +37,14 @@ type Value struct {
 
 // Symbol represents a local variable in the symbol table.
 type Symbol struct {
+	// TDZ marks a parameter still in its dead zone while an earlier
+	// parameter's default is evaluated (emitParamDefaultPrologue): reading
+	// it throws JavaScript's ReferenceError.
+	TDZ bool
+	// NotDefined marks a name a parameter default reads that only the
+	// function body declares: outside the body's scope, so reading it
+	// throws ReferenceError "<name> is not defined".
+	NotDefined bool
 	// Ptr is the value's storage slot. For a scalar it is the alloca holding the
 	// value. For an array (object-reference model, TDD-00127) it is a stable
 	// slot — an `alloca ptr`, or a module global — holding a pointer to a shared
@@ -122,6 +131,22 @@ type Emitter struct {
 	// and shadows the global normally; scope depth can't distinguish them (a
 	// function body also runs at scopes depth 1).
 	promotedGlobalDecls map[*ast.VarDeclaration]bool
+	// classDeclName is the name each class declaration is registered
+	// under in classes: repr's class arm finds a checker type's class by
+	// its declaration.
+	classDeclName map[*ast.ClassDeclaration]string
+	sharedCode    int // content-named helper bodies being built (sharedBody)
+	// shadowAsked counts the nodes each decider was asked about, per node
+	// kind, in a shadow run (shadowSeen keeps each node once).
+	shadowAsked   map[string]int
+	shadowSeen    map[shadowNode]bool
+	analysisDepth int // analysis pre-passes running (analysisPass)
+	// anyBigIntOps are the library's `any` bigint operators
+	// (emitAnyBigIntOpsFinalize).
+	anyBigIntOps     map[string]bool
+	anyBigIntOpsDone bool
+	// bigIntScan caches mayHoldBigInt: 0 unscanned, 1 none, 2 found.
+	bigIntScan int
 	// varsBeingInitialized names the variable(s) whose initializer is currently
 	// being emitted. A closure created inside a variable's own initializer that
 	// captures that same variable (`const s = f(() => use(s))`) must NOT seed its
@@ -183,10 +208,18 @@ type Emitter struct {
 	// The front end over the program being emitted (TDD-00230 P3.2): the
 	// checker the lowered calls read, built on first use; fnDecls are the
 	// functions declared once.
-	frontChecker          *checker.Checker
-	frontBuilt            bool
-	fnDecls               map[string]bool
-	usesDynamicImport     bool   // set when an import(...) call is emitted
+	frontChecker *checker.Checker
+	frontBinding *binder.Binding
+	frontBuilt   bool
+	// frontRepr answers the expression kinds inferExprType has switched to
+	// the checker (switchedExprKind); built once, from frontChecker.
+	frontRepr         *frontOracle
+	frontReprBuilt    bool
+	fnDecls           map[string]bool
+	usesDynamicImport bool // set when an import(...) call is emitted
+	// topLevelReturns maps a module-level `return` to the label after its
+	// module's last statement (ast.Program.TopLevelReturns).
+	topLevelReturns       map[*ast.ReturnStatement]string
 	islandHash            string // non-empty when compiling a shared-library island (TDD-00056): its stable hash
 	dynImportShimDeclared bool   // guards the one-time @__kml_dynimport_run declaration
 	usedDynImportWatch    bool   // the import() watcher runtime + loop hooks are emitted (TDD-00225)
@@ -216,10 +249,25 @@ type Emitter struct {
 	usedDprintf           bool
 	usedStdoutGlobal      bool // the libc `stdout` FILE* extern global is declared (ADR-00867)
 	usedMalloc            bool
-	usedCalloc            bool
-	usedNullDerefThrow    bool
-	usedRangeErrorThrow   bool
-	usedAbsentArrayCell   bool
+	usedArgc              bool
+	// methodsReadArgs: some class member reads `arguments`, so every method
+	// and constructor call stores its argument count (an override is called
+	// through its base's signature, which cannot carry a hidden rest).
+	methodsReadArgs bool
+	// newClassArgs: a generic class construction's type arguments as the
+	// checker inferred them, by the `new`'s class and position.
+	storesPresentBusy map[*ast.Identifier]bool // storesPresent's recursion guard
+	newClassArgs      map[string][]*ast.TypeAnnotation
+	// jsMemberWrites: property names the program assigns (jsMemberWritten).
+	jsMemberWrites map[string]bool
+	// memberFlags: the names memberWrittenFlag has defined a global for.
+	memberFlags map[string]bool
+	// inOwnMethodCheck: emitting the class-method arm of that check.
+	inOwnMethodCheck    bool
+	usedCalloc          bool
+	usedNullDerefThrow  bool
+	usedRangeErrorThrow bool
+	usedAbsentArrayCell bool
 	// pendingDeref: base nodes whose value emitExpr must null-guard (emit_nullderef.go).
 	pendingDeref     map[ast.Expression]derefGuard
 	usedRealloc      bool
@@ -235,6 +283,8 @@ type Emitter struct {
 	libInits  map[string]bool
 	// usedJmpStack: the program links jmpstack.c (the try frames' buffers).
 	usedJmpStack bool
+	// usedStackGuard: main installs the stack-overflow handler (stackguard.c).
+	usedStackGuard bool
 	// contentDefined: the content-named helpers written (defineContentNamed).
 	contentDefined map[string]bool
 	// pendingHelpers: contentNamedHelper's helpers being emitted, true once
@@ -309,6 +359,13 @@ type Emitter struct {
 	// genericInstBuilding holds the ones whose fields are being built.
 	genericInstTypes    map[string]Type
 	genericInstBuilding map[string]bool
+	// genericInstSrc is each instantiation's class and type arguments, so a
+	// method call through a `Box<number>` annotation instantiates it before
+	// any `new Box<number>` is emitted.
+	genericInstSrc map[string]genericInstSource
+	// genericIfaceTypes memoizes complete generic interface instantiations
+	// by their type arguments' full shapes.
+	genericIfaceTypes map[string]Type
 	// layoutIDs/layouts: the object layouts given a type id for their header
 	// word (objheader.go), interned by layoutKey.
 	layoutIDs      map[string]int64
@@ -420,7 +477,7 @@ type Emitter struct {
 	// depth of 0 is distinguishable from "no override").
 	inspectDepthCap      int
 	inspectDepthSet      bool
-	usedTtyRead          bool // TDD-00031: klain:tty readByte/readKey blocking fd-0 reads
+	usedTtyRead          bool // TDD-00031: the tty shim (klain:tty's `@link tty`)
 	usedTui              bool // TDD-00150: klain:tui — Yoga layout + ANSI diff painter
 	usedMemcpy           bool
 	usedMemset           bool
@@ -461,10 +518,16 @@ type Emitter struct {
 	usedBigIntBoxHooks bool // emit_bigint_box.go: boxed-bigint hooks the dynamic runtime calls
 	// emit_ffi_runtime.go (TDD-00229): the node:ffi registry is linked; one
 	// dynamic-ABI thunk per signature identity; the last validated name length.
-	usedFFIRegistry   bool
-	usedUmapOrder     bool
-	ffiDynThunks      map[string]string
-	fnMetas           []fnMetaEntry
+	usedFFIRegistry bool
+	usedUmapOrder   bool
+	ffiDynThunks    map[string]string
+	fnMetas         []fnMetaEntry
+	// dynEntryWidened names the class-typed parameters a dynamic entry
+	// binds as `any` while its body is emitted (emit_dynentry.go).
+	dynEntryWidened map[string]bool
+	// chainCopies maps a copy of an optional chain's link that emission
+	// builds (the link no longer optional) to the link it copies.
+	chainCopies       map[ast.Expression]ast.Expression
 	fnMetaSeen        map[string]bool
 	fnLitNames        map[ast.Node]string
 	usedOSInfo        bool         // osinfo.c — os.type/release/…/networkInterfaces, process.env enumeration
@@ -485,14 +548,19 @@ type Emitter struct {
 	promiseBoxRunners     map[string]string // element representation → its Promise<any> reaction
 	wkSymbols             map[string]bool   // well-known symbols emitted (emit_symbol.go)
 	usedPromiseResolveAny bool
-	usedPromiseWrapperOf  bool
-	genExprCtr            int // generator expressions compiled as values
-	promiseConvRunners    map[string]string
-	anyToLayoutFns        map[int64]string // layout header → its any→layout conversion (emit_shape.go)
-	usedNanBox            bool
-	usedAnyOps            bool
-	usedAnyToPrimitive    bool
-	usedAnyLooseEq        bool
+	// unhandledReportDone records that @__kml_unhandled_report is defined.
+	unhandledReportDone bool
+	// synthTypes are the types synthesized source names by annotation
+	// (synthTypeAnnotation).
+	synthTypes           map[string]Type
+	usedPromiseWrapperOf bool
+	genExprCtr           int // generator expressions compiled as values
+	promiseConvRunners   map[string]string
+	anyToLayoutFns       map[int64]string // layout header → its any→layout conversion (emit_shape.go)
+	usedNanBox           bool
+	usedAnyOps           bool
+	usedAnyToPrimitive   bool
+	usedAnyLooseEq       bool
 	// jsCtorParamTy is `-compat=js` call-site-inferred constructor parameter
 	// types (class name → per-index type; zero Type = no site could infer),
 	// filled by jsCollectCtorParamTypes and consumed in registerClasses.
@@ -542,30 +610,33 @@ type Emitter struct {
 	usedDaysFromCivil       bool
 	usedDateParse           bool
 	usedDateCompose         bool
+	usedDateFields          bool
 	usedDateNameTables      bool
 	usedFetch               bool
 	usedFetchAsync          bool
 	usedConnPokeGlobal      bool
-	usedChildProcRuntime    bool
 	usedCPExitWake          bool // runtime_childprocess_exit.go: the child-exit loop wake
 	usedGCSBCur             bool // @__kml_gc_sb_cur declared (Windows gc mode, runtime_worker.go)
 	usedGCSBGet             bool // @__kml_gc_get_sb defined (gc mode + Workers, runtime_worker.go gcSBLoad)
-	usedLoopTurn            bool // emitted code references __kml_loop_turn/__kml_top_await (runtime_loop_turn.go)
+	usedLoopTurn            bool // emitted code waits on the event loop: main() runs it (runtime_loop_turn.go)
 	usedLoopTurnDefs        bool
-	moduleTask              bool // the entry program has a top-level await: its module body is a coroutine task (TDD-00224)
-	inModuleTask            bool // emitting @__kml_module_body
-	usedModuleTaskRuntime   bool
-	usedPromiseAdopt        bool            // runtime_promise_adopt.go
-	fetchBodyPromTypedCtr   int             // per-call-site typed json() runners (emit_fetch.go)
-	topLevelNames           map[string]bool // every name bound at module top level (registerModuleGlobals)
-	usedFetchSlotToPromise  bool
-	sawAwait                bool // set by emitAwait/for-await while a function body is emitted; saved/restored per body
-	usedUsleepDecl          bool
-	usedFsWatchRuntime      bool
-	usedThreadPool          bool
-	usedNetRuntime          bool
-	usedNetSockIO           bool
-	usedCPListenerAppend    bool
+	// usedEventLoop: loopsrc/loop.c is linked, compiled with loopCFlags.
+	usedEventLoop          bool
+	loopCFlags             []string
+	moduleTask             bool // the entry program has a top-level await: its module body is a coroutine task (TDD-00224)
+	inModuleTask           bool // emitting @__kml_module_body
+	usedModuleTaskRuntime  bool
+	usedPromiseAdopt       bool            // runtime_promise_adopt.go
+	fetchBodyPromTypedCtr  int             // per-call-site typed json() runners (emit_fetch.go)
+	topLevelNames          map[string]bool // every name bound at module top level (registerModuleGlobals)
+	usedFetchSlotToPromise bool
+	sawAwait               bool // set by emitAwait/for-await while a function body is emitted; saved/restored per body
+	usedUsleepDecl         bool
+	usedFsWatchRuntime     bool
+	usedThreadPool         bool
+	usedNetRuntime         bool
+	usedNetSockIO          bool
+	usedCPListenerAppend   bool
 	// usedListeningAnnounceHook: @__kml_http_listening_announce defined once,
 	// shared by the HTTP bind (call site) and cluster (armer) runtimes.
 	usedListeningAnnounceHook bool
@@ -606,24 +677,14 @@ type Emitter struct {
 	// which hooks the event loop.
 	usedIPC             bool
 	usedIPCChildRuntime bool
-	usedCPForkRuntime   bool
-	// usedWebview links the C++ system-webview binding (TDD-00142);
-	// webviewConstructed enforces one-window-per-process; webviewThunkCtr
-	// numbers the per-bind trampolines.
-	usedWebview        bool
-	webviewConstructed bool
-	webviewThunkCtr    int
+	// usedWebview links the C++ system-webview binding (TDD-00142).
+	usedWebview bool
 	// usedSync links the klain:sync goroutine runtime (TDD-00143).
 	usedSync bool
 	// usesSyncProgram is set from prog.UsesKlainSync before body emission: the
 	// program imports klain:sync, so the safepoint-insertion pass emits
 	// cooperative preempt checks at function entry and loop back-edges.
-	usesSyncProgram            bool
-	webviewPumpEmitted         bool
-	webviewReturnRunnerEmitted bool
-	// webviewTypedRunners caches per-inner-type async-typed-bind settlement
-	// runners (TDD-00142 Stage 6), keyed by the inner type's shape.
-	webviewTypedRunners map[string]string
+	usesSyncProgram bool
 	// webviewBindings records the typed window.* bindings for --emit-window-dts.
 	webviewBindings []webviewBindingSig
 	// embeddedDirs maps a compile-time-literal directory path to the IR symbol
@@ -634,27 +695,7 @@ type Emitter struct {
 	usedEmbedRuntime   bool
 	embedSymbols       map[string]bool
 	// usedH2Client marks the http2 client-session runtime (TDD-00139 Stage 3).
-	usedH2Client       bool
-	usedH2ClientBridge bool
-	// usedH2TLSServer marks http2.createSecureServer (TDD-00111 Stage 3b): the
-	// event loop gains a TLS-wrap + ALPN + h2-drive branch in its accept path.
-	usedH2TLSServer bool
-	// usedHTTPS1Server marks the HTTPS/1.1 server path (https.createServer, or
-	// http2.createSecureServer's allowHTTP1 fallback): an ALPN-negotiated
-	// http/1.1 (or no-ALPN) TLS connection is registered in the fd→SSL table and
-	// served by the normal connection fiber, whose I/O is routed through the
-	// SSL-aware conn_recv/conn_send/conn_close shims.
-	usedHTTPS1Server bool
-	// httpS1Wired dedups ensureHTTPS1Server's one-time wiring (usedTLS etc.).
-	// Split from usedHTTPS1Server so a whole-program pre-scan
-	// (programUsesHTTPS1Server, TDD-00191 Stage 3) can set usedHTTPS1Server early —
-	// before ensureHTTPRuntime emits the TLS-aware extra-listener accept — while
-	// the actual https.createServer emit still runs the wiring exactly once.
-	// h2TLSWired is the same split for ensureH2TLSServer (TDD-00191 Stage 4), and
-	// httpTLSCtxEmitted dedups the @__kml_http_tls_ctx global both paths share.
-	httpS1Wired       bool
-	h2TLSWired        bool
-	httpTLSCtxEmitted bool
+	usedH2Client bool
 	// usedHTTPUpgrade marks that the program uses the Node-faithful HTTP
 	// `'upgrade'` event (`server.on('upgrade', …)`) or the `klain:ws`
 	// WebSocket-server convenience built on it (TDD-00158). Set by a
@@ -670,6 +711,7 @@ type Emitter struct {
 	nodeTestPrefix           []string // the generic __kml_h2c_on_* IR callbacks http2.c references
 	usedAtomicsRuntime       bool
 	usedSqliteNatives        bool
+	usedCaresNatives         bool // the resolver on c-ares (caressrc/klaincares.c) compiled in
 	usedFFINatives           bool
 	usedAnyBigIntRel         bool
 	usedPthreadMutex         bool
@@ -693,7 +735,6 @@ type Emitter struct {
 	usedHTTPKeepAlive            bool
 	usedHTTPFireClose            bool
 	optRecvCtr                   int
-	usedTLS                      bool
 	usedBase64Encode             bool
 	usedBase64Decode             bool
 	usedUtf8LabelCheck           bool
@@ -731,7 +772,6 @@ type Emitter struct {
 	usedMmapDecl                 bool
 	usedShutdownDecl             bool
 	usedHTTPCloseAllConns        bool
-	usedHTTPConnTimeouts         bool
 	usedStrHeaderRuntime         bool
 	usedMemmem                   bool
 	usedWinSpawn                 bool
@@ -750,36 +790,54 @@ type Emitter struct {
 	needMicrotaskTick            bool // emitted code calls @__kml_microtask_tick (a top-level await's tick)
 	inferDepth                   int  // nesting of memoised inferExprType calls (infer_memo.go)
 	inferMemo                    []inferMemoLayer
-	usedExecPath                 bool
-	usedNodeInterpGuard          bool
-	usedReexecGuard              bool
-	usedHTTPClientReactions      bool
-	usedHTTPCFlushHook           bool // post-event-loop client-reaction flush hook global
-	usedNtohs                    bool // shared ntohs libc declaration (net + dgram)
-	usedSignalHandler            bool
-	usedSignalDecl               bool // shared `declare ptr @signal` (handler runtime + SIGPIPE ignore)
-	usedSigpipeIgnored           bool // TDD-00214: SIGPIPE ignored once at reactor start
-	usedErrnoAccessor            bool
-	usedCryptoCheck              bool
-	usedCryptoDigest             bool
-	usedCryptoHmac               bool
-	usedCryptoHashStream         bool
-	usedCryptoHmacStream         bool
-	usedCryptoMemeq              bool
-	usedCryptoAesGcm             bool
-	usedCryptoAesCbc             bool
-	usedCryptoB64url             bool
-	usedCryptoRsa                bool
-	usedCryptoEcdsa              bool
-	usedCryptoEcRaw              bool
-	usedCryptoJwkRsa             bool
-	usedCryptoJwkEc              bool
-	usedCryptoDerive             bool
-	usedStrerror                 bool
-	usedUnsetenv                 bool
-	usedSymbolRegistry           bool
-	usedFetchHeadersMap          bool
-	usedFetchHeadersRaw          bool
+	// condTypeDepth is how many conditional types resolveConditionalType is
+	// inside; a recursive one is cut off at maxCondTypeDepth.
+	condTypeDepth int
+	// condTypeWork counts the conditional types resolved under the outermost
+	// one; past maxCondTypeWork the rest resolve as `any` (a type whose
+	// branches each instantiate it again grows exponentially, not deep).
+	condTypeWork int
+	// condTypeTotal counts every conditional type resolved in the program;
+	// past maxCondTypeTotal the rest resolve as `any`, bounding the repeats
+	// of one expansion from each place that names it.
+	condTypeTotal int
+	// genericAtDepth holds the instantiations built under the current
+	// top-level generic interface instantiation, by depth and arguments.
+	genericAtDepth map[string]Type
+	// constArrayTypes caches the type of an array literal of constants
+	// (constLiteralTree): it is the same under any scope, and a large
+	// table's elements are otherwise re-typed by every pre-pass over it.
+	constArrayTypes         map[*ast.ArrayLiteral]Type
+	usedExecPath            bool
+	usedNodeInterpGuard     bool
+	usedReexecGuard         bool
+	usedHTTPClientReactions bool
+	usedHTTPCFlushHook      bool // post-event-loop client-reaction flush hook global
+	usedNtohs               bool // shared ntohs libc declaration (net + dgram)
+	usedSignalHandler       bool
+	usedSignalDecl          bool // shared `declare ptr @signal` (handler runtime + SIGPIPE ignore)
+	usedSigpipeIgnored      bool // TDD-00214: SIGPIPE ignored once at reactor start
+	usedErrnoAccessor       bool
+	usedCryptoCheck         bool
+	usedCryptoDigest        bool
+	usedCryptoHmac          bool
+	usedCryptoHashStream    bool
+	usedCryptoHmacStream    bool
+	usedCryptoMemeq         bool
+	usedCryptoAesGcm        bool
+	usedCryptoAesCbc        bool
+	usedCryptoB64url        bool
+	usedCryptoRsa           bool
+	usedCryptoEcdsa         bool
+	usedCryptoEcRaw         bool
+	usedCryptoJwkRsa        bool
+	usedCryptoJwkEc         bool
+	usedCryptoDerive        bool
+	usedStrerror            bool
+	usedUnsetenv            bool
+	usedSymbolRegistry      bool
+	usedFetchHeadersMap     bool
+	usedFetchHeadersRaw     bool
 	// errorShadowedSlots: the system-error slots (`code`, `errno`, …) some
 	// Error subclass declares as its own field (ADR-01319).
 	errorShadowedSlots    map[string]bool
@@ -830,14 +888,6 @@ type Emitter struct {
 	// `{ highWaterMark: N }` option (ADR-00983). 0 means "unset", read as Node's
 	// 16384 default at the res-mint store.
 	curServerHWM int64
-	// curServerHeadersTimeoutMs/RequestTimeoutMs/KeepAliveTimeoutMs are the
-	// createServer connection-timeout options (TDD-00217), in milliseconds, for
-	// the server whose dispatcher is currently being emitted. 0 = disabled (Node's
-	// value for "no timeout"). Baked as ns constants into the dispatcher's arming
-	// calls and OR'd into @__kml_http_any_timeout at listen.
-	curServerHeadersTimeoutMs   int64
-	curServerRequestTimeoutMs   int64
-	curServerKeepAliveTimeoutMs int64
 	// curDispatchSfx is the "" / "_N" suffix of the dispatcher currently being
 	// built, read by the dispatcher's handler load / streaming-writer hand-off /
 	// function name so an additional server reads its own globals.
@@ -870,21 +920,9 @@ type Emitter struct {
 	// fn is built against it (emitExprWithObjectHint).
 	mustCallFnHint *Type
 	// usedTLSHandles: the TypeScript tls module's primitives (tlshandle.c).
-	usedTLSHandles          bool
-	pendingWSCreated        bool
-	extraWSUpGlobalsEmitted map[string]bool
-	// pendingServerTLSCtx carries an https.createServer's SSL_CTX* register from
-	// emitHTTPSCreateServer down into the handle builder (TDD-00191 Stage 3): the
-	// primary server also stores it into @__kml_http_tls_ctx (the reactor's TLS
-	// accept branch reads that), while an additional server keeps it only in its
-	// handle (slot 4), passed to the extra-listener table at listen() so that
-	// listener's accepts do their own SSL handshake. "" for a plain server.
-	pendingServerTLSCtx string
-	// pendingServerH2 marks the just-created server as an h2-over-TLS server
-	// (http2.createSecureServer) so the handle builder records its @__kml_h2_vtbl
-	// in the handle (slot 5) for the extra-listener table's ALPN h2 drive
-	// (TDD-00191 Stage 4). Reset with pendingServerTLSCtx.
-	pendingServerH2          bool
+	usedTLSHandles           bool
+	pendingWSCreated         bool
+	extraWSUpGlobalsEmitted  map[string]bool
 	usedHTTPThrow            bool
 	usedSplitFirst           bool
 	usedHTTPParseHeaders     bool
@@ -935,6 +973,7 @@ type Emitter struct {
 	extraTypes           []Type // static types whose added properties a whole-object operation reads
 	usedShapeKeysArray   bool
 	usedShapeDesc        bool
+	usedOwnSymbols       bool // Object.getOwnPropertySymbols (shape.c's KML_OWN_SYMBOLS)
 	usedArrayGuard       bool
 	// Host handles boxed into `any` (emit_hostbox.go).
 	hostLayouts             []hostLayout
@@ -968,39 +1007,42 @@ type Emitter struct {
 	// staticAreas are the record classes' static layouts (TDD-00242), and
 	// classStaticCaps the locals their static members read, held in hidden
 	// static fields.
-	staticAreas            map[string]*staticArea
-	classStaticCaps        map[string][]classCapture
-	classStaticCapsPending map[*ast.ClassDeclaration][]classCapture
-	classRecordsPending    map[*ast.ClassDeclaration]bool
-	classRecordSites       map[ast.Node]bool // the in-block copy that makes the record
-	usedClassRec           bool
-	inCtorArm              bool                               // emitting a __kml_dyn_construct arm
-	classShownNames        map[string]string                  // class → its display name, where the class expression's own name differs
-	classReeval            map[ast.Node]*ast.ClassDeclaration // in-function evaluation site → hoisted class whose statics it re-initializes (emit_classexpr.go)
-	usedClassRefGet        bool
-	hostRefs               map[string]bool // builtin constructors boxed as values (emit_classref.go)
-	usedCtorKind           bool
-	usedHostBox            bool
-	usedPromiseBox         bool                 // a promise was boxed (emitPromiseInspectHook)
-	declaredAnyArrView     bool                 // __kml_anyarr_view/sync declared (emitDynArrayMethodCall)
-	anyArrElemFns          map[string][2]string // KJ_BOXED routines by element type (anyArrayElemRoutines)
-	typeOnlyGenerics       map[string]bool      // classes whose type parameters codegen erased (eraseTypeOnlyGenerics)
-	hostInstanceofUsed     map[string]bool
-	respCollectDefined     bool // @__kml_resp_collect defined (emit_response_new.go)
-	respCollectCalled      bool // a body method calls @__kml_resp_collect
-	usedZeroCell           bool // @__kml_zero_cell (emit_fetch.go)
-	usedStrcasecmp         bool
-	combinatorCtr          int  // Promise combinator runners (emit_promise_combinators.go)
-	usedPromiseSettle      bool // @__kml_promise_settle — bare-promise settle+wake+drain for new Promise(executor) (TDD-00087)
-	usedFetchDriveRunner   bool // @__kml_fetch_drive_run — deferred raw-fetch drive microtask for .then on a fetch
-	usedPromiseAdoptRunner bool // @__kml_promise_adopt_runner — thenable adoption for resolve(aPromise) (TDD-00091)
-	usedAwaitTimerDrive    bool // a lightweight await references @__kml_timer_fire_next (TDD-00087)
-	usedMicrotasks         bool
-	usedCoreC              bool
-	usedCollections        bool
-	usedCollectionsAny     bool
-	usedCurrentTaskGlobal  bool
-	usedAsyncCtxAccessors  bool
+	staticAreas             map[string]*staticArea
+	classStaticCaps         map[string][]classCapture
+	classStaticCapsPending  map[*ast.ClassDeclaration][]classCapture
+	classRecordsPending     map[*ast.ClassDeclaration]bool
+	classRecordSites        map[ast.Node]bool // the in-block copy that makes the record
+	usedClassRec            bool
+	inCtorArm               bool                                           // emitting a __kml_dyn_construct arm
+	classShownNames         map[string]string                              // class → its display name, where the class expression's own name differs
+	genShownNames           map[string]string                              // generator → its display name, where the generator expression's own name differs
+	literalMembers          map[*ast.IndexExpression]*ast.MemberExpression // builtinLiteralMember's nodes
+	classReeval             map[ast.Node]*ast.ClassDeclaration             // in-function evaluation site → hoisted class whose statics it re-initializes (emit_classexpr.go)
+	usedClassRefGet         bool
+	hostRefs                map[string]bool // builtin constructors boxed as values (emit_classref.go)
+	usedCtorKind            bool
+	usedHostBox             bool
+	usedPromiseBox          bool                 // a promise was boxed (emitPromiseInspectHook)
+	inArrayOverrideDispatch bool                 // emitArrayOverrideDispatch's default branch: Array's own method
+	declaredAnyArrView      bool                 // __kml_anyarr_view/sync declared (emitDynArrayMethodCall)
+	anyArrElemFns           map[string][2]string // KJ_BOXED routines by element type (anyArrayElemRoutines)
+	typeOnlyGenerics        map[string]bool      // classes whose type parameters codegen erased (eraseTypeOnlyGenerics)
+	hostInstanceofUsed      map[string]bool
+	respCollectDefined      bool // @__kml_resp_collect defined (emit_response_new.go)
+	respCollectCalled       bool // a body method calls @__kml_resp_collect
+	usedZeroCell            bool // @__kml_zero_cell (emit_fetch.go)
+	usedStrcasecmp          bool
+	combinatorCtr           int  // Promise combinator runners (emit_promise_combinators.go)
+	usedPromiseSettle       bool // @__kml_promise_settle — bare-promise settle+wake+drain for new Promise(executor) (TDD-00087)
+	usedFetchDriveRunner    bool // @__kml_fetch_drive_run — deferred raw-fetch drive microtask for .then on a fetch
+	usedPromiseAdoptRunner  bool // @__kml_promise_adopt_runner — thenable adoption for resolve(aPromise) (TDD-00091)
+	usedAwaitTimerDrive     bool // a lightweight await references @__kml_timer_fire_next (TDD-00087)
+	usedMicrotasks          bool
+	usedCoreC               bool
+	usedCollections         bool
+	usedCollectionsAny      bool
+	usedCurrentTaskGlobal   bool
+	usedAsyncCtxAccessors   bool
 	// programUsesALS is set in EmitProgram before Pass 2: true when the
 	// program has async_hooks (lib/node/async_hooks.ts), so timer callbacks
 	// are wrapped to carry the async context across the schedule→fire
@@ -1066,7 +1108,7 @@ type Emitter struct {
 	usedPromiseAddReaction  bool
 	usedAnyIterCollect      bool            // __kml_any_iter_collect (emit_iter_collect.go)
 	usedZlibNatives         bool            // klainzlib.c compiled into the pool (-DKLAINPOOL_ZLIB)
-	usedFsNatives           bool            // klainfs.c compiled into the pool (-DKLAINPOOL_FS)
+	usedFsNatives           bool            // the program uses the fs natives
 	usedH2Node              bool            // http2src/h2node.c (lib/node/http2.ts's natives)
 	inDynBufferCall         bool            // emitDynBufferMethodCall's non-Buffer branch
 	inDynNumberCall         bool            // emitDynNumberToString's non-number branch
@@ -1170,6 +1212,10 @@ type Emitter struct {
 	httpHandlerNode  ast.Node
 	currentPromiseTy Type   // T in Promise<T>; void if Promise<void>
 	coroRetLabel     string // label for the async-return block
+	// asyncAdoptSlot is the async function's adoption slot (made by its
+	// first `return <promise>`): the promise whose state the function's
+	// own adopts when it settles, null when a value was returned.
+	asyncAdoptSlot string
 }
 
 func NewEmitter() *Emitter {
@@ -1179,6 +1225,7 @@ func NewEmitter() *Emitter {
 		strConsts:               make(map[string]string),
 		moduleGlobals:           make(map[string]Symbol),
 		promotedGlobalDecls:     make(map[*ast.VarDeclaration]bool),
+		classDeclName:           make(map[*ast.ClassDeclaration]string),
 		forcedGlobalTypes:       make(map[*ast.VarDeclaration]Type),
 		varsBeingInitialized:    make(map[string]bool),
 		funcs:                   make(map[string]FuncSig),
@@ -1307,10 +1354,6 @@ func (e *Emitter) WebviewBackend() string {
 // UsesCrypto reports whether the emitted program actually used crypto.subtle,
 // so main.go only compiles+links a crypto backend for programs that need one.
 func (e *Emitter) UsesCrypto() bool { return e.usesCrypto }
-
-// UsesTLS reports whether the program used the `tls` module, so main.go only
-// compiles tlssrc/tls.c and links libssl for programs that need it (TDD-00109).
-func (e *Emitter) UsesTLS() bool { return e.usedTLS }
 
 // UsesBigInt reports whether the emitted program actually used bigint, so
 // main.go only compiles+links a backend for programs that need one.
@@ -1813,6 +1856,11 @@ func (e *Emitter) resolveValueType(name string) (Type, bool) {
 			if vd.TypeAnnot != nil {
 				return e.resolveType(vd.TypeAnnot), true
 			}
+			// -compat=js: an untyped object-literal binding is a dynamic
+			// object held in an `any`, as emitVarDecl stores it.
+			if _, isLit := vd.Init.(*ast.ObjectLiteral); isLit && e.compatJS() {
+				return TypeAny, true
+			}
 			if vd.Init != nil {
 				return e.inferExprType(vd.Init), true
 			}
@@ -1927,17 +1975,56 @@ func (e *Emitter) withDictFields(t Type, fields []ast.AnnotField) Type {
 }
 
 func (e *Emitter) indexSignatureType(valAnnot *ast.TypeAnnotation) Type {
-	keyTy := TypePtr
 	valTy := e.resolveType(valAnnot)
 
-	return Type{IR: "ptr", IsMap: true, IsDynamicObject: true, MapKey: &keyTy, MapVal: &valTy}
+	return dictViewType(valTy)
+}
+
+// isDictType reports a string-keyed dictionary type, in either
+// representation (a map, or the object itself with a declared property
+// type).
+func isDictType(t Type) bool {
+	return (t.IsDynamicObject && t.IsMap) || (isUnconstrainedDynamic(t) && t.DynPropTy != nil)
+}
+
+// dictValType is a dictionary type's property type.
+func dictValType(t Type) (Type, bool) {
+	switch {
+	case t.IsDynamicObject && t.IsMap && t.MapVal != nil:
+		return *t.MapVal, true
+	case isUnconstrainedDynamic(t) && t.DynPropTy != nil:
+		return *t.DynPropTy, true
+	}
+	return Type{}, false
+}
+
+// dictViewType is a string-keyed dictionary held as the object itself (an
+// `any` box) whose every property has type valTy.
+func dictViewType(valTy Type) Type {
+	t := TypeAny
+	t.DynPropTy = &valTy
+	return t
 }
 
 func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
+	if ta != nil {
+		if t, ok := e.synthTypes[ta.Name]; ok {
+			return t // synthesized source's exact type (synthTypeAnnotation)
+		}
+	}
 	if ta != nil && ta.IsCtorType {
 		return TypeAny // a constructor: its boxed reference (emit_classref.go)
 	}
-	t := e.decideAnnotationType(ta)
+	t := annotationNullish(ta, e.decideAnnotationType(ta))
+	if e.shadowOracle != nil && ta != nil {
+		e.shadowAnnotationType(ta, t)
+	}
+	return t
+}
+
+// annotationNullish applies the null and undefined an annotation's parse
+// recorded (`T | null | undefined`, an optional parameter's `undefined`).
+func annotationNullish(ta *ast.TypeAnnotation, t Type) Type {
 	if ta != nil && ta.Nullable && ta.Undefined && ta.HasNull && threeStateEligible(t) {
 		t = withNullAndUndef(t)
 	}
@@ -1947,9 +2034,6 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	if ta != nil && ta.Nullable && (t.IsMap || t.IsSet || t.IsObject || t.IsClass) && t.IR == "ptr" && !t.IsArray && !t.Nullable {
 		t.Nullable = true
 		t.IsUndefined = ta.Undefined
-	}
-	if e.shadowOracle != nil && ta != nil {
-		e.shadowAnnotationType(ta, t)
 	}
 	return t
 }
@@ -2080,7 +2164,7 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 		// String-shaped, but carry the literal value so a discriminated-union
 		// tag field can be matched at compile time (TDD-00116). Behaves as
 		// string everywhere else (isStringTy checks IR "ptr").
-		return Type{IR: "ptr", IsStrLiteral: true, LitValue: ta.LiteralValue}
+		return Type{IR: "ptr", IsStrLiteral: true, LitValue: ta.LiteralValue, Nullable: ta.Nullable, IsUndefined: ta.Nullable && ta.Undefined}
 	}
 	// keyof / indexed access / mapped types (TDD-00079 Stage 2) — each evaluates
 	// to a concrete type off a concrete operand.
@@ -2151,6 +2235,18 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 				return one
 			}
 		}
+		// Members that all resolve to a string (a literal union alias beside
+		// another literal: `BufferEncoding | 'buffer'`) are a string, as the
+		// literal-only case above.
+		allStr := len(members) > 0
+		for _, m := range members {
+			// Exactly a string's representation: a stream or other host
+			// handle is a pointer too, and isStringTy does not tell them apart.
+			allStr = allStr && (m.IsStrLiteral || reprKey(m) == reprKey(TypePtr))
+		}
+		if allStr {
+			members = []Type{TypePtr}
+		}
 		if len(members) == 1 {
 			one := members[0]
 			if ta.Nullable {
@@ -2185,6 +2281,11 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 		params := make([]Type, len(ta.FuncParams))
 		for i := range ta.FuncParams {
 			params[i] = e.resolveType(&ta.FuncParams[i])
+			if params[i].IR == "void" {
+				// A `void` parameter (`value: T` with T = void) holds
+				// whatever is passed: no value has the void IR type.
+				params[i] = TypeAny
+			}
 		}
 		ret := TypeVoid
 		if ta.FuncRetType != nil {
@@ -2213,32 +2314,11 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 		}
 		return ft
 	}
-	// Promise<T>/Map<K,V>/Set<T> must be checked before the generic ElemType
-	// fallback below (which treats any non-nil ElemType as a plain array —
-	// correct for T[] and Array<T>, wrong for these three).
-	if ta.Name == "Promise" {
-		inner := TypeVoid
-		if ta.ElemType != nil {
-			inner = e.resolveType(ta.ElemType)
-		}
-		pt := PromiseOf(inner)
-		// Every promise this compiler produces is now task-shaped — async
-		// functions and methods alike (TDD-00087 follow-up unified async methods
-		// onto the task-struct model) — except a raw fetch's `Promise<Response>`.
-		// So a declared `Promise<T>` annotation is task-shaped, and `const p:
-		// Promise<T> = f(); await p` reads the right slot.
-		if !inner.IsResponse {
-			pt.PromiseTask = true
-		}
-		return pt
-	}
-	if ta.Name == "Map" && ta.ElemType != nil {
-		keyTy := TypePtr
-		if ta.KeyType != nil {
-			keyTy = e.resolveType(ta.KeyType)
-		}
-		valTy := e.resolveType(ta.ElemType)
-		return MapType(keyTy, forceAnyMapVal(keyTy, valTy))
+	// A builtin generic whose declaration names its layout (`Promise<T>`,
+	// `Map<K, V>`, the WHATWG streams), before the generic ElemType fallback
+	// below, which would read any of them as a plain array.
+	if t, ok := e.genericLayout(ta); ok {
+		return withAnnotNull(t, ta)
 	}
 	// An instance of a generic class, `Box<number>`: the type its
 	// `new Box<number>(…)` has.
@@ -2249,14 +2329,13 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 		}
 		if targs, ok := classTypeArgs(genDecl, explicit); ok {
 			if ty, err := e.genericClassInstanceType(genDecl, e.buildTypeArgSubs(genDecl.TypeParams, targs)); err == nil {
-				return ty
+				return withAnnotNull(ty, ta)
 			}
 		}
 	}
 	// A registered generic interface (TDD-00010 V1 / TDD-00037), e.g.
 	// Box<number> or Box<number, string> — must also be checked before the
-	// generic ElemType fallback below, same reasoning as
-	// Promise/Map/Set above.
+	// generic ElemType fallback below, as the builtin generics are above.
 	if genDecl, ok := e.genericInterfaces[ta.Name]; ok && len(ta.TypeArgs) < len(genDecl.TypeParams) {
 		// Type arguments left out take the parameters' defaults (`A` is
 		// `A<any>` for `interface A<T = any>`); one without a default is any.
@@ -2310,9 +2389,47 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 		if e.genericDepth > 8 {
 			return ObjectType(nil)
 		}
+		subs := e.buildTypeArgSubs(genDecl.TypeParams, ta.TypeArgs)
+		// Memoized per type arguments' full shapes: a member mentioning
+		// another instantiation (`then<U>(...): Promise<U>`) rebuilt the
+		// whole tree, fanning out per member down to the depth cap, at
+		// every mention of the outer type. Only an instantiation built from
+		// the top is complete to the cap; one built inside another is
+		// truncated, so it is not kept.
+		var key strings.Builder
+		key.WriteString(ta.Name)
+		for _, tp := range genDecl.TypeParams {
+			key.WriteString("<" + reprKey(subs[tp]) + ">")
+		}
+		k := key.String()
+		if t, ok := e.genericIfaceTypes[k]; ok {
+			return t
+		}
+		top := e.genericDepth == 0
+		// Inside one top-level instantiation, an instantiation is the same
+		// at the same depth (the cap truncates it identically), so it is
+		// built once per depth: the cap bounds depth, not breadth, and an
+		// interface nested in itself through several members (`owner:
+		// List<List<T>>`) otherwise multiplies at every level.
+		if top || e.genericAtDepth == nil {
+			// (A generic alias or class raises the depth too, so the first
+			// interface under one may not be the top.)
+			e.genericAtDepth = map[string]Type{}
+		}
+		dk := fmt.Sprintf("%d|%s", e.genericDepth, k)
+		if t, ok := e.genericAtDepth[dk]; ok {
+			return t
+		}
 		e.genericDepth++
-		t := e.instantiateGenericInterface(genDecl, e.buildTypeArgSubs(genDecl.TypeParams, ta.TypeArgs))
+		t := e.instantiateGenericInterface(genDecl, subs)
 		e.genericDepth--
+		e.genericAtDepth[dk] = t
+		if top {
+			if e.genericIfaceTypes == nil {
+				e.genericIfaceTypes = map[string]Type{}
+			}
+			e.genericIfaceTypes[k] = t
+		}
 		return t
 	}
 	// Generic type alias `type Name<T> = ...` (TDD-00079 Stage 3): substitute the
@@ -2340,84 +2457,6 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 		if ty, ok := e.resolveUtilityType(ta.Name, ta.TypeArgs); ok {
 			return ty
 		}
-	}
-	if ta.Name == "Set" && ta.ElemType != nil {
-		return SetType(e.resolveType(ta.ElemType))
-	}
-	// WeakMap<K,V> / WeakSet<T> / WeakRef<T> annotations (TDD-00112). The type
-	// args arrive via TypeArgs (the generic path) since these names aren't
-	// special-cased in the type-annotation parser the way Map/Set are; a bare
-	// form (no args) falls back to object-key / number-value defaults.
-	if ta.Name == "WeakMap" {
-		keyTy, valTy := TypePtr, TypeI64
-		if len(ta.TypeArgs) >= 1 {
-			keyTy = e.resolveType(ta.TypeArgs[0])
-		}
-		if len(ta.TypeArgs) >= 2 {
-			valTy = e.resolveType(ta.TypeArgs[1])
-		}
-		return WeakMapType(keyTy, valTy)
-	}
-	if ta.Name == "WeakSet" {
-		elemTy := TypePtr
-		if len(ta.TypeArgs) >= 1 {
-			elemTy = e.resolveType(ta.TypeArgs[0])
-		} else if ta.ElemType != nil {
-			elemTy = e.resolveType(ta.ElemType)
-		}
-		return WeakSetType(elemTy)
-	}
-	// klain:sync `Channel<T>` as an annotation — so a channel passed as a
-	// function parameter or stored in a typed field still dispatches
-	// .send()/.receive()/.close() and `for..of` (all keyed on
-	// inferExprType(...).IsChannel), not just a top-level `new Channel` local
-	// (TDD-00143). Element type carried as ElemType or the generic TypeArgs.
-	if ta.Name == "Channel" {
-		if ta.ElemType != nil {
-			return ChannelType(e.resolveType(ta.ElemType))
-		}
-		if len(ta.TypeArgs) > 0 {
-			return ChannelType(e.resolveType(ta.TypeArgs[0]))
-		}
-		return ChannelType(TypeI64)
-	}
-	// ReadableStream<T> and its reader/controller (TDD-00097 Stage 1). A bare
-	// `ReadableStream` annotation (no type arg) defaults its chunk to number,
-	// same as `new ReadableStream(...)` without a type argument.
-	if ta.Name == "ReadableStream" {
-		if ta.ElemType != nil {
-			return ReadableStreamType(e.resolveType(ta.ElemType))
-		}
-		return ReadableStreamType(TypeI64)
-	}
-	if ta.Name == "ReadableStreamDefaultReader" && ta.ElemType != nil {
-		return StreamReaderType(e.resolveType(ta.ElemType))
-	}
-	if ta.Name == "ReadableStreamDefaultController" && ta.ElemType != nil {
-		return RSControllerType(e.resolveType(ta.ElemType))
-	}
-	if ta.Name == "WritableStream" {
-		if ta.ElemType != nil {
-			return WritableStreamType(e.resolveType(ta.ElemType))
-		}
-		return WritableStreamType(TypeI64)
-	}
-	if ta.Name == "WritableStreamDefaultWriter" && ta.ElemType != nil {
-		return WSWriterType(e.resolveType(ta.ElemType))
-	}
-	if ta.Name == "WritableStreamDefaultController" && ta.ElemType != nil {
-		return WSControllerType(e.resolveType(ta.ElemType))
-	}
-	if ta.Name == "TransformStream" {
-		inTy, outTy := TypeI64, TypeI64
-		if ta.KeyType != nil {
-			inTy = e.resolveType(ta.KeyType)
-		}
-		if ta.ElemType != nil {
-			outTy = e.resolveType(ta.ElemType)
-		}
-		i, o := inTy, outTy
-		return Type{IR: "ptr", IsTransformStream: true, StreamChunk: &i, StreamOut: &o}
 	}
 	// Tuple type `[T0, T1, ...]` (TDD-00066) — checked before the generic
 	// ElemType/array fallback below.
@@ -2468,6 +2507,21 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 		return ty
 	}
 
+	// A timer handle: Node's Timeout and Immediate classes,
+	// lib/node/internal_timers.ts's (TDD-00245).
+	if len(ta.Qualifier) == 1 && ta.Qualifier[0] == "NodeJS" && (ta.Name == "Timeout" || ta.Name == "Immediate") {
+		ty := TypeAny
+		if m, ok := e.libExports["internal_timers:"+ta.Name]; ok {
+			if _, isClass := e.classes[m]; isClass {
+				ty = e.resolveType(&ast.TypeAnnotation{Name: m})
+			}
+		}
+		if ta.Nullable {
+			ty.Nullable = true
+			ty.IsUndefined = ta.Undefined
+		}
+		return ty
+	}
 	// A `NodeJS.*` type, before the registries below: its last segment alone
 	// (`Platform`) may name a user type.
 	if ty, ok := nodeJSNamespaceType(ta); ok {
@@ -2484,11 +2538,18 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 	// name, so ElemType is nil and the enum-backing lookup below wouldn't fire.
 	if len(name) > 2 && name[len(name)-2:] == "[]" {
 		base := name[:len(name)-2]
+		// `User[] | null` is a possibly-absent array, as `number[] | null`.
+		nullableArr := func(arr Type) Type {
+			if ta.Nullable {
+				arr.Nullable, arr.IsUndefined = true, ta.Undefined
+			}
+			return arr
+		}
 		if ty, ok := e.interfaces[base]; ok {
-			return ArrayOf(ty)
+			return nullableArr(ArrayOf(ty))
 		}
 		if backing, ok := e.enumBacking[base]; ok {
-			return ArrayOf(backing)
+			return nullableArr(ArrayOf(backing))
 		}
 		// A nested named array (`P[][]`) arrives as a single suffix-name whose base
 		// is itself suffixed (`P[]`) — strip one level and resolve the rest
@@ -2529,7 +2590,7 @@ func (e *Emitter) decideAnnotationType(ta *ast.TypeAnnotation) Type {
 		}
 		return ty
 	}
-	ty := ResolveTypeName(ta.Name)
+	ty := e.resolveTypeName(ta.Name)
 	// A name no builtin table knows may be an interface the builtin
 	// declarations declare (`RequestInit`): its object type.
 	if name != "int64" && len(ta.Qualifier) == 0 && reflect.DeepEqual(ty, TypeI64) {
@@ -2563,8 +2624,6 @@ func nodeJSNamespaceType(ta *ast.TypeAnnotation) (Type, bool) {
 		return TypeAny, true
 	case "MemoryUsage":
 		return memoryUsageType(), true
-	case "Timeout", "Immediate":
-		return TypeI64, true // the timer's id (see setTimeout's inferred type)
 	case "ErrnoException":
 		return errorObjType, true // an Error with its code, errno, syscall and path
 	case "ArrayBufferView", "TypedArray":
@@ -2627,6 +2686,21 @@ func (e *Emitter) rewriteTopLevelGeneratorExpressions(prog *ast.Program) {
 		fe, ok := vd.Init.(*ast.FunctionExpression)
 		if !ok || !fe.IsGenerator {
 			continue
+		}
+		// `var G = function* g() {}`: declared as G, its references to g
+		// are to it, and it shows as g.
+		if fe.Name != "" && fe.Name != vd.Name {
+			ownParam := false
+			for _, p := range fe.Params {
+				ownParam = ownParam || p.Name == fe.Name
+			}
+			if !ownParam && fe.Body != nil {
+				resolver.RenameInBlock(fe.Body, fe.Name, vd.Name)
+			}
+			if e.genShownNames == nil {
+				e.genShownNames = map[string]string{}
+			}
+			e.genShownNames[vd.Name] = fe.Name
 		}
 		fd := &ast.FunctionDeclaration{
 			Name:        vd.Name,
@@ -2711,6 +2785,10 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// type from its top-level declaration even at eager type-alias registration
 	// (Pass 0), before module globals are bound.
 	e.prog = prog
+	// Class fields keyed by a declared symbol, and their accesses (TDD-00246).
+	if err := e.lowerSymbolFields(prog); err != nil {
+		return "", err
+	}
 	// TS namespaces (TDD-00095): the parser desugared members into flat
 	// mangled declarations; the member table is what use sites resolve
 	// through (emitCall/emitMember/inferExprType).
@@ -2735,16 +2813,6 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// after buildHTTPDispatcher — the flag gates the upgrade block the
 	// dispatcher emits at its header-parse seam.
 	e.usedHTTPUpgrade = programUsesHTTPUpgrade(prog)
-
-	// TDD-00191 Stage 3: does the program create an HTTPS/1.1 server anywhere?
-	// A pre-scan (before Pass 2) so the event loop's extra-listener accept is
-	// emitted TLS-aware even when a *plain* primary server triggers
-	// ensureHTTPRuntime first — an additional https.createServer would otherwise
-	// find the accept path already emitted without its SSL handshake. Wiring the
-	// server path here also emits the @__kml_http_tls_ctx global up front.
-	if programUsesHTTPS1Server(prog) {
-		e.ensureHTTPS1Server()
-	}
 
 	// TDD-00168 Stage 3: does the program have async_hooks? Decided before
 	// Pass 2 so a timer callback scheduled inside an `als.run(...)` — possibly
@@ -2961,7 +3029,9 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 				restore()
 				return "", err
 			}
-			staticInitClasses = append(staticInitClasses, cd.Name)
+			if !e.reevaluatedClass(cd) {
+				staticInitClasses = append(staticInitClasses, cd.Name)
+			}
 		}
 		restore()
 	}
@@ -3093,14 +3163,30 @@ entry:
 	// e.widenedBindings was already computed for prog.Body before
 	// registerModuleGlobals (above) and hasn't been overwritten since (function
 	// bodies save/restore it), so it still holds the module-scope set here.
+	// A module-level `return` (CommonJS) ends its module's evaluation: it
+	// branches past the module's last statement.
+	moduleEnds := map[ast.Statement]string{}
+	e.topLevelReturns = map[*ast.ReturnStatement]string{}
+	for r, last := range prog.TopLevelReturns {
+		if e.libStmts[last] != "" {
+			continue // a builtin module's statements run from its init
+		}
+		if moduleEnds[last] == "" {
+			moduleEnds[last] = e.freshLabel("module.end")
+		}
+		e.topLevelReturns[r] = moduleEnds[last]
+	}
 	if err := e.emitLibInitCalls(prog.Body, func(stmt ast.Statement) error {
-		if _, ok := stmt.(*ast.FunctionDeclaration); ok {
-			return nil
+		if _, ok := stmt.(*ast.FunctionDeclaration); !ok {
+			if err := e.emitStmt(stmt); err != nil {
+				return err
+			}
+			e.emitOwnedFreesAfter(stmt)
 		}
-		if err := e.emitStmt(stmt); err != nil {
-			return err
+		if end := moduleEnds[stmt]; end != "" {
+			e.emitTerminator("br label %" + end)
+			e.emitLabel(end)
 		}
-		e.emitOwnedFreesAfter(stmt)
 		return nil
 	}); err != nil {
 		return "", err
@@ -3148,22 +3234,10 @@ entry:
 	e.emitRecordFnsFinalize()
 	e.emitObjExtraFinalize()
 
-	// TDD-00084 Part B: a program mixing coroutine tasks with timers
-	// drives all of them under the single task-aware event
-	// loop (__kml_event_loop_run). A pure-task program (fetch only) keeps the
-	// lighter task_run_all drive; a pure-timer program keeps timer_drain.
-	// TDD-00098: a program that spawned workers must keep driving the full
-	// loop — it is what delivers worker messages and joins exited workers.
-	useFullLoop := (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChildProcRuntime || e.usedFsWatchRuntime || e.usedThreadPool || e.usedNetRuntime || e.usedIPCChildRuntime || e.usedHTTPListen
-	// TDD-00223: anything that waits from the main stack takes turns of the real
-	// loop, and a program with coroutine tasks or async fetch sleeps in its
-	// select() instead of spinning a private scheduler drive.
-	useFullLoop = useFullLoop || e.usedLoopTurn || e.usedTaskRuntime || e.usedFetchAsync
-	// A timer callback that settles a promise queues its reactions as microtasks,
-	// and only the full loop drains microtasks between macrotasks; the plain
-	// timer drain fired the timer and then exited with the reactions still
-	// queued — `later(20).then(f)` never ran f.
-	useFullLoop = useFullLoop || (e.usedTimers && e.usedMicrotasks)
+	// One event loop drives every source (TDD-00244): timers, tasks, workers,
+	// child processes, fs.watch, the pool, sockets and servers.
+	useFullLoop := e.usedTimers || e.usedTaskRuntime || e.usedWorkerRuntime || e.usedFsWatchRuntime || e.usedThreadPool || e.usedNetRuntime || e.usedIPCChildRuntime || e.usedHTTPListen
+	useFullLoop = useFullLoop || e.usedLoopTurn || e.usedFetchAsync
 	if useFullLoop {
 		e.ensureHTTPRuntime() // emit event_loop_run + every symbol it references
 		modLoopL := ""
@@ -3182,12 +3256,6 @@ entry:
 			// loop did (emit_http.go's emitPostLoopFlush).
 			e.emitPostLoopFlush()
 		}
-	} else if e.usedTaskRuntime {
-		// A may-suspend async program with no timers/SSE/WS: drain the coroutine
-		// scheduler until all spawned tasks complete.
-		e.emitInstr("call void @__kml_task_run_all()")
-	} else if e.usedTimers {
-		e.emitInstr("call void @__kml_timer_drain()")
 	}
 	if modProm != "" {
 		e.emitModuleUnsettledCheck(modProm)
@@ -3201,11 +3269,6 @@ entry:
 		e.emitGlobal("define void @__kml_pool_job(ptr %work, ptr %job, ptr %inv, ptr %clo) {\nentry:\n  ret void\n}")
 	}
 	e.emitCPRuntimeStubs()
-	// TDD-00109: the net runtime's read/write/close branch on a socket's SSL*
-	// and call the __kml_tls_* ABI. Declare it (libssl provides it via tlssrc/
-	// tls.c) when `tls` is used, else define no-op stubs so a plain-net program
-	// links — its sockets always have a null SSL*, so the stubs are never run.
-	e.emitTLSNetSymbols()
 	// TDD-00098 stage 5: @__kml_throw's uncaught path references
 	// @__kml_worker_uncaught unconditionally, and the task runtime's swap sites
 	// reference @__kml_worker_abort_check; no-op stubs without workers.
@@ -3236,40 +3299,24 @@ done:
 			e.emitGlobal("define void @__kml_worker_curl_preinit() {\nentry:\n  ret void\n}")
 		}
 	}
-	// TDD-00087: a lightweight await drives timers via @__kml_timer_fire_next.
-	// Emit the real one when the program uses timers, else a no-op stub so the
-	// reference resolves (a program with awaits but no timers).
+	// A response-body stream's read pumps in-flight fetches (TDD-00097
+	// Stage 4); without fetch the pump is a no-op stub.
 	if e.usedAwaitTimerDrive {
-		if e.usedTimers {
-			e.emitTimerFireNext()
-		} else {
-			e.emitGlobal("define i1 @__kml_timer_fire_next() {\n  ret i1 0\n}")
-		}
-		// The same drive loop pumps in-flight fetches (TDD-00097 Stage 4);
-		// without fetch the pump is a no-op stub.
 		if !e.usedFetchAsync {
 			e.emitGlobal("define i1 @__kml_fetch_pump() {\n  ret i1 0\n}")
 		}
 	}
-	// The shared curl write callback references the body-stream hooks
-	// (TDD-00097 Stage 4); when no Response.body stream was ever created,
-	// they are no-op stubs and the buffered path is byte-for-byte unchanged.
+	// The request-body drain hook: a no-op stub without the request-body
+	// runtime.
 	if e.usedReqBodyDrain && !e.usedReqBodyRuntime {
 		e.emitGlobal("define void @__kml_reqbody_drain(ptr %c) {\n  ret void\n}")
-	}
-	if (e.usedFetch || e.usedFetchAsync) && !e.usedFetchBodyStream {
-		e.emitGlobal("define i64 @__kml_fetch_body_write(ptr %p, ptr %c, i64 %t) {\n  ret i64 0\n}")
-		e.emitGlobal("define void @__kml_fetch_body_on_done(ptr %p) {\n  ret void\n}")
-		e.emitGlobal("define void @__kml_fetch_body_abort(ptr %p, ptr %e) {\n  ret void\n}")
-	}
-	// The lazy Response-body-promise drain hook (TDD-00186), referenced by the
-	// curl drain; a no-op stub unless a body accessor built one.
-	if (e.usedFetch || e.usedFetchAsync) && !e.usedFetchBodyProm {
-		e.emitGlobal("define void @__kml_fetch_bodyprom_on_done(ptr %p) {\n  ret void\n}")
 	}
 	// The process-lifecycle runtime (ADR-00334) is emitted whenever exceptions
 	// (whose uncaught path calls the hooks) or any process.on('exit')/
 	// 'uncaughtException'/exitCode surface is used.
+	// The library's `any` bigint helpers, before the runtimes their bodies
+	// may need (the exception helpers) are emitted.
+	e.emitAnyBigIntOpsFinalize()
 	if e.usedExceptionHelpers || e.usedProcessLifecycle {
 		e.emitProcessLifecycleRuntime()
 	}
@@ -3314,10 +3361,13 @@ done:
 	// Function-value metadata (TDD-00229): the code-pointer table spans every
 	// function the program emitted, so it is defined last.
 	e.emitFnMetaFinalize()
-	e.emitBoxedBigIntHooksFinalize()
 	e.emitObjHooksFinalize()
+	e.emitUnhandledFinalize() // one a hook above first reached the promise runtime
 	e.emitObjExtensibleFinalize()
-	e.emitUnitRegFinalize() // last: every finalize step above may add rows
+	e.emitUnitRegFinalize() // every finalize step above may add rows
+	// Last: whether the bigint runtime links (its hooks real, or stubs) is
+	// known only once every routine that can reach a bigint is generated.
+	e.emitBoxedBigIntHooksFinalize()
 
 	// Line-buffer stdout at startup (ADR-00867). C stdio full-buffers a stream
 	// that is not a TTY, so `console.log`/`printf` to a pipe or file withholds
@@ -3331,6 +3381,24 @@ done:
 	if e.opts.Target.OS() != "windows" {
 		e.emitGlobal("declare i32 @setvbuf(ptr, ptr, i32, i64)")
 		e.ensureStdoutGlobal()
+	}
+	// A stack overflow throws Node's RangeError (TDD-00249): main installs
+	// the handler first. Without a throw path the handler reports it itself.
+	// An island's main runs on the importer's fiber, inside a process whose
+	// handler is already installed, so an island never installs its own. Its
+	// task fibers still take their stacks from the same runtime file.
+	stackGuardArgs := ""
+	if e.opts.Target.OS() != "windows" {
+		e.usedStackGuard = true
+	}
+	if e.opts.Target.OS() != "windows" && e.islandHash == "" {
+		e.emitGlobal("declare void @__kml_stack_guard_init(ptr, ptr)")
+		throwFn := "null"
+		if e.usedExceptionHelpers {
+			e.ensureRangeErrorThrow()
+			throwFn = "@__kml_throw_range_error"
+		}
+		stackGuardArgs = fmt.Sprintf("ptr %s, ptr %s", throwFn, e.internString("Maximum call stack size exceeded"))
 	}
 
 	var out strings.Builder
@@ -3362,6 +3430,9 @@ done:
 	out.WriteString("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n")
 	out.WriteString(e.allocas.String())
 	out.WriteString(e.workerRegistry)
+	if stackGuardArgs != "" {
+		out.WriteString("  call void @__kml_stack_guard_init(" + stackGuardArgs + ")\n")
+	}
 	// A binary that reads process.execPath can be spawned as `execPath -p <expr>`
 	// (a Node interpreter re-exec). It cannot honor that; reject such flags up
 	// front so a self-spawning program fails cleanly instead of fork-bombing.
@@ -3402,7 +3473,7 @@ done:
 	if e.noAnyErr != nil {
 		return "", e.noAnyErr
 	}
-	return out.String(), nil
+	return markNoTail(out.String()), nil
 }
 
 // emitIslandGlue appends the shared-library island surface (TDD-00056): a
@@ -3897,7 +3968,7 @@ func (e *Emitter) buildErasedFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 	sig := e.buildGenericParamSig(fd.Params, subs)
 	if fd.ReturnType != nil {
 		sig.RetType = e.substituteGenericType(fd.ReturnType, subs)
-	} else if inferred, ok := e.inferUnannotatedReturnType(fd.Body, sig.ParamNames, sig.ParamTypes); ok {
+	} else if inferred, ok := e.inferUnannotatedReturnType(fd.Body, sig.ParamNames, e.bodyParamTypes(fd.Params, sig.ParamTypes)); ok {
 		sig.RetType = inferred
 	} else {
 		sig.RetType = TypeVoid
@@ -3906,7 +3977,12 @@ func (e *Emitter) buildErasedFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 	// (TDD-00207) — wrap an unannotated/bare inner type so call-site .then/await
 	// take the task path.
 	if fd.IsAsync && !sig.RetType.IsPromise {
-		sig.RetType = PromiseOf(sig.RetType)
+		sig.RetType = PromiseOf(e.awaitedRet(sig.RetType))
+	}
+	if fd.IsAsync && sig.RetType.IsPromise {
+		// Either epilogue returns a task promise, as a call is typed and
+		// as asyncClosureRetType types an async closure's.
+		sig.RetType.PromiseTask = true
 	}
 	return sig
 }
@@ -3940,8 +4016,12 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 			if p.Name == argumentsRestParam {
 				pty = ArrayOf(TypeAny) // implicit `arguments` rest: boxed elements (TDD-00210)
 			} else {
-				pty = ArrayOf(TypeI64) // default rest element type: number
+				pty = untypedRestType()
 			}
+		} else if ct, ok := e.jsCheckerParam(fd, i); ok {
+			// -compat=js: the checker's call-site type (checkJs's any where
+			// the sites disagree).
+			pty = ct
 		} else if i < len(jsOverride) && jsOverride[i].ty.IR != "" && !jsOverride[i].conflict {
 			// `-compat=js` call-site inference (TDD-00022 sub-problem 1 /
 			// TDD-00005 option 2): an unannotated parameter takes the type
@@ -3964,8 +4044,9 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 		}
 		sig.ParamTypes = append(sig.ParamTypes, optionalParamType(p, pty))
 		sig.ParamNames = append(sig.ParamNames, p.Name)
-		sig.Defaults = append(sig.Defaults, p.Default) // nil when no default
-		sig.Optional = append(sig.Optional, p.Optional)
+		sig.Defaults = append(sig.Defaults, callSiteDefault(p)) // a destructured parameter's
+		sig.HasDefault = append(sig.HasDefault, p.Default != nil)
+		sig.Optional = append(sig.Optional, p.Optional || bodyDefaulted(p))
 	}
 	if len(fd.Params) > 0 && fd.Params[len(fd.Params)-1].Rest {
 		sig.HasRest = true
@@ -4000,7 +4081,7 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 		for i, p := range fd.Params {
 			paramNames[i] = p.Name
 		}
-		if inferred, ok := e.inferUnannotatedReturnType(fd.Body, paramNames, sig.ParamTypes); ok {
+		if inferred, ok := e.inferUnannotatedReturnType(fd.Body, paramNames, e.bodyParamTypes(fd.Params, sig.ParamTypes)); ok {
 			sig.RetType = inferred
 		} else if blockAlwaysDiverges(fd.Body) {
 			// No reachable return AND every path throws ⇒ `never` (TS's own
@@ -4017,7 +4098,12 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 	// emitter's currentPromiseTy is the real element type (TDD-00207). An already
 	// `Promise<T>`-annotated return is left alone.
 	if fd.IsAsync && !sig.RetType.IsPromise {
-		sig.RetType = PromiseOf(sig.RetType)
+		sig.RetType = PromiseOf(e.awaitedRet(sig.RetType))
+	}
+	if fd.IsAsync && sig.RetType.IsPromise {
+		// Either epilogue returns a task promise, as a call is typed and
+		// as asyncClosureRetType types an async closure's.
+		sig.RetType.PromiseTask = true
 	}
 	return sig
 }
@@ -4110,7 +4196,7 @@ func (e *Emitter) dictHeritage(s *ast.InterfaceDeclaration) (Type, bool) {
 		if err != nil || ta == nil {
 			continue
 		}
-		if t := e.resolveType(ta); t.IsDynamicObject && t.IsMap {
+		if t := e.resolveType(ta); isDictType(t) {
 			return t, true
 		}
 	}
@@ -4147,4 +4233,13 @@ func (e *Emitter) userTypeName(name string) bool {
 		return true
 	}
 	return false
+}
+
+// withAnnotNull is t with the null or undefined an annotation's union adds
+// (`Promise<T> | null`): absent as a pointer type's null.
+func withAnnotNull(t Type, ta *ast.TypeAnnotation) Type {
+	if ta.Nullable && !t.IsDynamic {
+		t.Nullable, t.IsUndefined = true, ta.Undefined
+	}
+	return t
 }

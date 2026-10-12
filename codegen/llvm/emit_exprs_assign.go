@@ -186,6 +186,20 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		}
 	}
 
+	// An element or Array property (`length`) of a class extending Array:
+	// written on the instance's array body.
+	if memEx, ok := ex.Left.(*ast.MemberExpression); ok && e.isHostArrayMember(memEx) {
+		body, _, err := e.hostArrayReceiver(memEx.Object)
+		if err != nil {
+			return Value{}, err
+		}
+		var target ast.Expression = ast.NewMemberExpression(body, memEx.Property, memEx.GetPos())
+		if _, ok := isArrayIndexName(memEx.Property); ok {
+			target = ast.NewIndexExpression(body, ast.NewNumberLiteral(memEx.Property, memEx.GetPos()), memEx.GetPos())
+		}
+		return e.emitAssign(ast.NewAssignmentExpression(ex.Op, target, ex.Right, ex.GetPos()))
+	}
+
 	// A write through a run-time undefined/null base throws; a compound
 	// assignment reads first, so it reports the read (emit_nullderef.go).
 	switch left := ex.Left.(type) {
@@ -309,7 +323,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			if ex.Op != "=" {
 				return e.emitDynAnyCompoundAssign(objVal, keyRef, "", ex.Op, ex.Right, ex.GetPos())
 			}
-			rhs, err := e.emitExprWithObjectHint(ex.Right, TypeAny)
+			rhs, err := e.emitExprWithObjectHint(ex.Right, e.dynStoreHint(baseTy, ex.Right))
 			if err != nil {
 				return Value{}, err
 			}
@@ -339,6 +353,14 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	}
 	// Array element assignment: arr[i] = val  or  arr[i] += val
 	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
+		if body, ok, err := e.hostArrayReceiver(idxEx.Object); err != nil || ok {
+			if err != nil {
+				return Value{}, err
+			}
+			plain := *idxEx
+			plain.Object = body
+			idxEx = &plain
+		}
 		// Plain `=` on a growable array supports JS's append-by-index idiom
 		// (`arr[arr.length] = v` extends by one) — see
 		// emitArrayIndexAssignGrow. Flat @value arrays and TypedArrays keep
@@ -571,7 +593,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 				// `o.n ??= 0`).
 				return e.emitDynAnyCompoundAssign(objVal, e.internString(memEx.Property), memEx.Property, ex.Op, ex.Right, ex.GetPos())
 			}
-			rhs, err := e.emitExprWithObjectHint(ex.Right, TypeAny)
+			rhs, err := e.emitExprWithObjectHint(ex.Right, e.dynStoreHint(objVal.Ty, ex.Right))
 			if err != nil {
 				return Value{}, err
 			}
@@ -597,7 +619,30 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		}
 		idx, fieldTy, ok := objVal.Ty.FieldIndex(memEx.Property)
 		if !ok {
-			return Value{}, fmt.Errorf("no field '%s'", memEx.Property)
+			if info, isHost := e.classes[objVal.Ty.ClassName]; objVal.Ty.IsClass && isHost && info.HostBase != nil {
+				// The host base's property (`lastIndex`), on the instance's
+				// body.
+				body := e.bindHostBody(objVal, *info.HostBase, memEx.GetPos())
+				hostEx := *ex
+				hostEx.Left = ast.NewMemberExpression(body, memEx.Property, memEx.GetPos())
+				return e.emitAssign(&hostEx)
+			}
+			if objVal.Ty.IsClass {
+				// A property (or method) the instance takes as its own.
+				box, err := e.emitBoxValue(objVal)
+				if err != nil {
+					return Value{}, err
+				}
+				if ex.Op != "=" {
+					return e.emitDynAnyCompoundAssign(box, e.internString(memEx.Property), memEx.Property, ex.Op, ex.Right, ex.GetPos())
+				}
+				rhs, err := e.emitExpr(ex.Right)
+				if err != nil {
+					return Value{}, err
+				}
+				return e.emitDynAnyMemberSetNamed(box, e.internString(memEx.Property), memEx.Property, rhs, ex.GetPos())
+			}
+			return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, memEx.Property)
 		}
 		if objVal.Ty.IsClass {
 			if err := e.checkReadonlyWrite(objVal.Ty.ClassName, memEx.Property, ex.GetPos()); err != nil {
@@ -1119,7 +1164,9 @@ func (e *Emitter) destructAssignArrayLeaf(dataPtr, lenVal string, elemTy Type, i
 	gepReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataPtr, i))
 	okVal := e.coerce(e.loadArrayElem(gepReg, elemTy), sym.Ty)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, okVal.Ref, sym.Ptr, sym.Ty.Align()))
+	// A nullable scalar's slot is its { i1, T } storage.
+	stIR, stAlign := storageIR(sym.Ty), storageAlign(sym.Ty)
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", stIR, okVal.Ref, sym.Ptr, stAlign))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 	// Out of bounds: the array-pattern default fires here (the length is the
 	// presence signal, so no nullable-reference requirement — unlike an object
@@ -1131,9 +1178,12 @@ func (e *Emitter) destructAssignArrayLeaf(dataPtr, lenVal string, elemTy Type, i
 			return err
 		}
 		defVal = e.coerce(defVal, sym.Ty)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, defVal.Ref, sym.Ptr, sym.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", stIR, defVal.Ref, sym.Ptr, stAlign))
+	} else if isNullableScalar(sym.Ty) {
+		// Past the end is undefined: the slot's absent state.
+		e.emitInstr(fmt.Sprintf("store %s zeroinitializer, ptr %s, align %d", stIR, sym.Ptr, stAlign))
 	} else {
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, sym.Ty.zeroLiteral(), sym.Ptr, sym.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", stIR, sym.Ty.zeroLiteral(), sym.Ptr, stAlign))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 	e.emitLabel(afterL)
@@ -1360,4 +1410,15 @@ func (e *Emitter) emitDynDestructAssign(pat *ast.ObjectLiteral, rhs ast.Expressi
 		}
 	}
 	return src, nil
+}
+
+// dynStoreHint is the contextual type of a value stored into a dynamic
+// object's property: an index-signature view's declared property type, else
+// `any` (a plain any member's array literal stays an array of any, which a
+// later push of another kind needs).
+func (e *Emitter) dynStoreHint(baseTy Type, rhs ast.Expression) Type {
+	if baseTy.DynPropTy != nil {
+		return *baseTy.DynPropTy
+	}
+	return TypeAny
 }

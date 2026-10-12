@@ -26,15 +26,16 @@ func (e *Emitter) front() *checker.Checker {
 	if e.frontBuilt {
 		return e.frontChecker
 	}
-	e.frontBuilt = true
 	if e.prog == nil {
-		return nil
+		return nil // not yet: EmitProgram has not stored the program
 	}
+	e.frontBuilt = true
 	libProgs, err := lib.Programs()
 	if err != nil {
 		return nil
 	}
 	b := binder.BindWith(e.prog, binder.Options{AnnexB: e.compatJS(), Lib: libProgs})
+	e.frontBinding = b
 	e.frontChecker = checker.NewWith(b, e.opts)
 	return e.frontChecker
 }
@@ -220,6 +221,19 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 	if c == nil {
 		return nil, false
 	}
+	if id, ok := ex.Callee.(*ast.Identifier); ok && ast.IsLibraryName(id.Name) && !e.isShadowedByLocal(id.Name) {
+		// A builtin module's intrinsic `declare function` (klain:assets'
+		// `embedDir`).
+		if sym, _ := c.Binding().Resolve(id); sym != nil {
+			for _, d := range sym.Declarations {
+				if fd, ok := d.Node.(*ast.FunctionDeclaration); ok && fd.Intrinsic != "" {
+					if _, known := intrinsics[fd.Intrinsic]; known {
+						return &lowering{intrinsic: fd.Intrinsic, e: e, ex: ex}, true
+					}
+				}
+			}
+		}
+	}
 	if id, ok := ex.Callee.(*ast.Identifier); ok && e.isBuiltinGlobal(c, id) {
 		// A builtin `declare function` (`parseInt`).
 		if sym, _ := c.Binding().Resolve(id); sym != nil {
@@ -227,6 +241,11 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 				if fd, ok := d.Node.(*ast.FunctionDeclaration); ok && fd.Intrinsic != "" {
 					if _, known := intrinsics[fd.Intrinsic]; known {
 						return &lowering{intrinsic: fd.Intrinsic, e: e, ex: ex}, true
+					}
+				}
+				if fd, ok := d.Node.(*ast.FunctionDeclaration); ok && fd.Lower != "" {
+					if m, linked := e.globalLinks[fd.Lower]; linked {
+						return &lowering{libFn: m, e: e, ex: ex}, true
 					}
 				}
 			}
@@ -246,6 +265,20 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 		// An intrinsic's emitter reads its types off the arguments; explicit
 		// type arguments (`Object.freeze<T>(o)`) change nothing.
 		return &lowering{intrinsic: key, e: e, ex: ex}, true
+	}
+	// A global function reached through globalThis (`globalThis.setTimeout`)
+	// lowered to a library function.
+	if fd, ok := c.MemberDecl(mem).(*ast.FunctionDeclaration); ok && fd.Lower != "" {
+		if m, linked := e.globalLinks[fd.Lower]; linked {
+			return &lowering{libFn: m, e: e, ex: ex}, true
+		}
+	}
+	for _, d := range c.MemberOverloadDecls(mem) {
+		if fd, ok := d.(*ast.FunctionDeclaration); ok && fd.Lower != "" {
+			if m, linked := e.globalLinks[fd.Lower]; linked {
+				return &lowering{libFn: m, e: e, ex: ex}, true
+			}
+		}
 	}
 	if c.MemberDecl(mem) == nil && c.MemberOverloadDecls(mem) == nil {
 		if key, ok := e.reprIntrinsic(mem); ok {
@@ -454,7 +487,7 @@ func (e *Emitter) intrinsicApplies(key string, mem *ast.MemberExpression) bool {
 	}
 	if strings.HasPrefix(key, "Date.prototype.") {
 		ot := e.inferExprType(mem.Object)
-		return ot.IsDate && !ot.IsDynamic
+		return ot.IsDate && !ot.IsDynamic || e.isDateClass(ot)
 	}
 	if strings.HasPrefix(key, "TypedArray.prototype.") {
 		ot := e.inferExprType(mem.Object)
@@ -608,7 +641,7 @@ func lowerRepr(t *checker.Type) (Type, bool) {
 		return TypeAny, true // a NaN-boxed word
 	case t.Flags&checker.Union != 0:
 		return Type{}, false
-	case t.Flags&(checker.Number|checker.NumberLiteral) != 0:
+	case t.Flags&(checker.Number|checker.NumberLiteral) != 0 && !t.AnyArith:
 		return TypeF64, true
 	case t.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
 		return TypeBool, true
@@ -620,8 +653,10 @@ func lowerRepr(t *checker.Type) (Type, bool) {
 		return ArrayOf(TypePtr), true
 	case t.Flags&checker.Void != 0:
 		return TypeVoid, true
-	case t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.Symbol != nil && t.Symbol.Name == "Error":
-		return errorObjType, true
+	}
+	if r, ok := lowerTypeRepr(t); ok && r.IsError {
+		// A declaration's native layout: so far the Error object.
+		return r, true
 	}
 	return Type{}, false
 }
@@ -654,10 +689,11 @@ func lowerCallback(t *checker.Type) ([]Type, bool) {
 // isBytesType reports whether t is `Uint8Array` (or `Buffer`, one): memory
 // a native operation reads or fills in place.
 func isBytesType(t *checker.Type) bool {
-	if t.Flags&checker.Object == 0 || (t.Kind != checker.Interface && t.Kind != checker.Instance) || t.Symbol == nil {
+	if t == nil || t.Flags&checker.Object == 0 || t.Symbol == nil {
 		return false
 	}
-	return t.Symbol.Name == "Uint8Array" || t.Symbol.Name == "Buffer"
+	l := declaredLowerType(t.Symbol)
+	return l == "uint8array" || l == "buffer"
 }
 
 // emitLowered emits a lowered call: the receiver, then the arguments in
@@ -669,10 +705,10 @@ func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error
 	if l.intrinsic != "" {
 		return intrinsics[l.intrinsic].emit(e, ex)
 	}
-	mem := ex.Callee.(*ast.MemberExpression)
 	if l.libFn != "" {
 		return e.emitExpr(l.libCall())
 	}
+	mem := ex.Callee.(*ast.MemberExpression)
 	var args []string
 	if l.recv != nil {
 		v, err := e.emitExpr(mem.Object)
@@ -826,6 +862,7 @@ func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error
 // parameter representation. Named by its content (defineContentNamed).
 func (e *Emitter) emitLoweredInvoker(fnTy Type, params []Type) (string, error) {
 	restore := e.beginThunkEmit()
+	restore = e.sharedBody(restore) // content-named: the same in every program
 	var sig []string
 	var args []Value
 	for i, p := range params {
@@ -997,6 +1034,7 @@ var runtimeUnits = map[string]func(*Emitter){
 	"tls":     (*Emitter).ensureNativeTLS,
 	"osinfo":  (*Emitter).ensureOSInfo,
 	"zlib":    (*Emitter).ensureZlibNatives,
+	"cares":   (*Emitter).ensureCaresNatives,
 	"fs":      (*Emitter).ensureFsNatives,
 	"sqlite":  (*Emitter).ensureSqliteNatives,
 	"ffi":     (*Emitter).ensureFFINatives,
@@ -1004,6 +1042,12 @@ var runtimeUnits = map[string]func(*Emitter){
 	"http2":   (*Emitter).ensureH2Natives,
 	"umap":    (*Emitter).ensureUmapOrder,
 	"weak":    (*Emitter).ensureWeakNatives,
+	"timers":  (*Emitter).ensureTimerNatives,
+	"tty":     (*Emitter).ensureTtyRead,
+	"tui":     (*Emitter).ensureTui,
+	"assets":  (*Emitter).ensureAssetsNatives,
+	"webview": (*Emitter).ensureWebviewRuntime,
+	"sync":    (*Emitter).ensureSyncRuntime,
 }
 
 // runtimeSymbols are the `@lower` targets the IR runtime defines, rather
@@ -1019,6 +1063,7 @@ var runtimeSymbols = map[string]func(*Emitter){
 	"__kml_native_fs_error":              (*Emitter).ensureNativeFsError,
 	"__kml_native_fs_watch":              (*Emitter).ensureNativeFsWatch,
 	"__kml_native_fs_watch_close":        (*Emitter).ensureNativeFsWatch,
+	"__kml_native_fs_watch_ref":          (*Emitter).ensureNativeFsWatch,
 	"__kml_native_errno_name":            (*Emitter).ensureNativeErrno,
 	"__kml_native_errno_desc":            (*Emitter).ensureNativeErrno,
 	"__kml_native_uv_errno":              (*Emitter).ensureNativeErrno,
@@ -1083,6 +1128,9 @@ func (e *Emitter) declareFn(name, line string) {
 // unboxes to; ok is false when the reference is not dynamic or the checker
 // does not narrow it to one primitive.
 func (e *Emitter) checkerNarrowed(id *ast.Identifier, ty Type) (Type, bool) {
+	if e.dynEntryWidenedIdent(id) {
+		return Type{}, false // a dynamic entry's box stays one
+	}
 	if ty.IsDynamic && len(ty.UnionMembers) > 0 {
 		return e.checkerNarrowedUnion(id, ty)
 	}
@@ -1092,7 +1140,7 @@ func (e *Emitter) checkerNarrowed(id *ast.Identifier, ty Type) (Type, bool) {
 		return Type{}, false
 	}
 	c := e.front()
-	if c == nil {
+	if c == nil || !e.flowTrusted(id) {
 		return Type{}, false
 	}
 	t := c.TypeOf(id)
@@ -1102,14 +1150,176 @@ func (e *Emitter) checkerNarrowed(id *ast.Identifier, ty Type) (Type, bool) {
 	switch {
 	case t.Flags&checker.Union != 0:
 		return Type{}, false
-	case t.Flags&(checker.Number|checker.NumberLiteral) != 0:
+	case t.Flags&(checker.Number|checker.NumberLiteral) != 0 && !t.AnyArith:
 		return TypeF64, true
 	case t.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
 		return TypeBool, true
 	case t.Flags&(checker.String|checker.StringLiteral) != 0:
 		return TypePtr, true
+	case t.Flags&checker.Object != 0 && t.Kind == checker.Instance && t.Symbol != nil && len(t.TypeArgs) == 0:
+		// `x instanceof C` (or a guard returning early otherwise): the
+		// instance, read through C's layout. A class over a host body (an
+		// Array, Map, … subclass) or an Error subclass keeps the box.
+		if ct, ok := e.classRepr(t.Symbol); ok && ct.IsClass {
+			if info, ok := e.classes[ct.ClassName]; ok && info.HostBase == nil && !info.IsErrorSubclass {
+				return ct, true
+			}
+		}
 	}
 	return Type{}, false
+}
+
+// checkerPresent reports a reference the checker narrows to a type without
+// null or undefined (`n === undefined ? d : n`, `x !== null && x > 0`): a
+// nullable-scalar local read there is its payload.
+func (e *Emitter) checkerPresent(id *ast.Identifier, ty Type) bool {
+	c := e.front()
+	if c == nil || !e.flowTrusted(id) {
+		return false
+	}
+	if e.storesPresent(id) {
+		return true
+	}
+	// An element read's absence is one the checker does not model.
+	if ty.UncheckedIndex {
+		return false
+	}
+	// A typed local declared without a value, read where every path has
+	// stored one (its storage holds undefined only before that).
+	if c.Binding().DefinitelyAssigned(id) {
+		return true
+	}
+	// Only a narrowing: the declared type holds the absence and flow
+	// removes it (a destructured `[a, b] = [1]` is `number` to the checker
+	// yet absent at run time).
+	st, t := c.StorageTypeOf(id), c.TypeOf(id)
+	return !c.Unanswered(st) && !c.Unanswered(t) && !presentType(st) && presentType(t)
+}
+
+// assignedString reports a read of a string local declared without a
+// value (its storage `string | undefined`) where every path has stored one.
+func (e *Emitter) assignedString(id *ast.Identifier, ty Type) bool {
+	c := e.front()
+	return c != nil && isStringTy(ty) && ty.Nullable && ty.IsUndefined && e.flowTrusted(id) && (!ty.UncheckedIndex && c.Binding().DefinitelyAssigned(id) || e.storesPresent(id))
+}
+
+// storesPresent reports a read every path to which stores a value that is
+// never absent, by a declaration or a plain assignment: a skippable `var`
+// (ADR-01057) is undefined only on a path that skips it.
+func (e *Emitter) storesPresent(id *ast.Identifier) bool {
+	c := e.front()
+	if c == nil || e.storesPresentBusy[id] {
+		return false
+	}
+	stores, ok := c.Binding().ReachingStores(id)
+	if !ok {
+		return false
+	}
+	if e.storesPresentBusy == nil {
+		e.storesPresentBusy = map[*ast.Identifier]bool{}
+	}
+	e.storesPresentBusy[id] = true
+	defer delete(e.storesPresentBusy, id)
+	for _, s := range stores {
+		var v ast.Expression
+		switch x := s.(type) {
+		case *ast.VarDeclaration:
+			v = x.Init
+		case *ast.AssignmentExpression:
+			v = x.Right
+		}
+		t := e.inferExprType(v)
+		if t.IR == "" || t.IR == "void" || t.Nullable || t.IsUndefined || t.IsNull || t.IsDynamic {
+			return false
+		}
+	}
+	return true
+}
+
+// checkerPresentRef reports a nullable reference to an instance, function
+// or promise — a variable or a property read — the checker narrows to a
+// type without null or undefined (`const base = this.base` under
+// `this.base !== null`, `[this.#t]` there): the pointer read there is typed
+// present, as TypeScript types it.
+func (e *Emitter) checkerPresentRef(ref ast.Expression, ty Type) bool {
+	c := e.front()
+	if c == nil || ty.UncheckedIndex || ty.IR != "ptr" || !ty.Nullable || ty.IsDynamic || isNullableScalar(ty) {
+		return false
+	}
+	if !ty.IsClass && !ty.IsFunc && !ty.IsPromise && !ty.IsObject && !ty.IsArray {
+		return false
+	}
+	// A position an array pattern may read past the source's end is `T` to
+	// the checker yet absent at run time.
+	id, isID := ref.(*ast.Identifier)
+	if _, isMember := ref.(*ast.MemberExpression); !isID && !isMember {
+		return false
+	}
+	if sym, _ := e.resolveIdent(id); isID && sym != nil {
+		for _, d := range sym.Declarations {
+			if _, ok := d.Node.(*ast.ArrayDestructuring); ok {
+				return false
+			}
+		}
+		// A key or index read is `T` to the checker (no
+		// noUncheckedIndexedAccess) yet absent on a miss.
+		if e.storesIndexRead(sym) {
+			return false
+		}
+	}
+	// Another function may clear it since the narrowing (a call the
+	// checker's flow, as TypeScript's, does not see): read it nullable.
+	if !e.flowTrusted(ref) {
+		return false
+	}
+	t := c.TypeOf(ref)
+	return !c.Unanswered(t) && presentType(t)
+}
+
+// resolveIdent is the binder's symbol for id (nil for a nil id).
+func (e *Emitter) resolveIdent(id *ast.Identifier) (*binder.Symbol, bool) {
+	if id == nil {
+		return nil, false
+	}
+	return e.frontBinding.Resolve(id)
+}
+
+// unboundParam reports whether id names a parameter of a function, by the
+// binder: read where codegen has not bound it yet, it is a later parameter
+// in an earlier one's default.
+func (e *Emitter) unboundParam(id *ast.Identifier) bool {
+	if e.front() == nil {
+		return false
+	}
+	sym, _ := e.frontBinding.Resolve(id)
+	if sym == nil {
+		return false
+	}
+	for _, d := range sym.Declarations {
+		switch d.Node.(type) {
+		case *ast.ArrowFunction, *ast.FunctionExpression, *ast.FunctionDeclaration:
+			return d.Kind == binder.VarLike
+		}
+	}
+	return false
+}
+
+// catchBinding reports whether id names a catch clause's own binding.
+func (e *Emitter) catchBinding(id *ast.Identifier) bool {
+	if e.front() == nil {
+		return false
+	}
+	sym, _ := e.frontBinding.Resolve(id)
+	if sym == nil || sym.Scope == nil || sym.Scope.Kind != binder.CatchScope {
+		return false
+	}
+	// The parameter itself, not a variable the catch body declares.
+	for _, d := range sym.Declarations {
+		if _, isVar := d.Node.(*ast.VarDeclaration); isVar {
+			return false
+		}
+	}
+	return true
 }
 
 // checkerNarrowedUnion is the member of the union ty that the checker
@@ -1119,7 +1329,7 @@ func (e *Emitter) checkerNarrowed(id *ast.Identifier, ty Type) (Type, bool) {
 // the union has no single member of its kind.
 func (e *Emitter) checkerNarrowedUnion(id ast.Expression, ty Type) (Type, bool) {
 	c := e.front()
-	if c == nil || e.compatJS() {
+	if c == nil || e.compatJS() || !e.flowTrusted(id) {
 		return Type{}, false
 	}
 	t := c.TypeOf(id)
@@ -1128,7 +1338,7 @@ func (e *Emitter) checkerNarrowedUnion(id ast.Expression, ty Type) (Type, bool) 
 	}
 	var kind string
 	switch {
-	case t.Flags&(checker.Number|checker.NumberLiteral) != 0:
+	case t.Flags&(checker.Number|checker.NumberLiteral) != 0 && !t.AnyArith:
 		kind = "number"
 	case t.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
 		kind = "boolean"
@@ -1226,6 +1436,25 @@ func allStringLiterals(u *ast.UnionType) bool {
 // the checker: `pipe<T extends Stream>(d: T): T` erases T to Stream for code
 // generation, and the call's result is the argument's own class (the same
 // pointer, typed as the subclass). ret otherwise.
+// erasedMethodCall is the result of call, a call of an erased generic
+// method on an instance of objTy's class (genericMethodResult).
+func (e *Emitter) erasedMethodCall(call *ast.CallExpression, objTy Type) (Type, bool) {
+	mem, ok := call.Callee.(*ast.MemberExpression)
+	if !ok {
+		return Type{}, false
+	}
+	info, ok := e.classes[objTy.ClassName]
+	if !ok {
+		return Type{}, false
+	}
+	m := info.Methods[mem.Property]
+	sig, hasSig := info.MethodSigs[mem.Property]
+	if m == nil || !m.ErasedMethod || !hasSig {
+		return Type{}, false
+	}
+	return e.genericMethodResult(call, objTy, mem.Property, e.thisRetType(sig, objTy)), true
+}
+
 func (e *Emitter) genericMethodResult(ex *ast.CallExpression, objTy Type, method string, ret Type) Type {
 	info, ok := e.classes[objTy.ClassName]
 	if !ok {
@@ -1331,6 +1560,8 @@ func reprOwners(ty Type) []string {
 		return []string{"Body"}
 	case ty.IsBigInt:
 		return []string{"BigInt"}
+	case ty.IsRegExp && !ty.IsDynamic:
+		return []string{"RegExp"}
 	case ty.IsPromise:
 		return []string{"Promise"}
 	case ty.IsFunc && !ty.IsDynamic:
@@ -1355,4 +1586,167 @@ func (e *Emitter) reprIntrinsic(mem *ast.MemberExpression) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// loweredGlobalFn is the library function a builtin `declare function`'s
+// `@lower` links to, for the global id names (`setTimeout`).
+func (e *Emitter) loweredGlobalFn(id *ast.Identifier) (string, bool) {
+	c := e.front()
+	if c == nil || !e.isBuiltinGlobal(c, id) {
+		return "", false
+	}
+	sym, _ := c.Binding().Resolve(id)
+	if sym == nil {
+		return "", false
+	}
+	for _, d := range sym.Declarations {
+		if fd, ok := d.Node.(*ast.FunctionDeclaration); ok && fd.Lower != "" {
+			if m, linked := e.globalLinks[fd.Lower]; linked {
+				return m, true
+			}
+		}
+	}
+	return "", false
+}
+
+// storesIndexRead reports a variable some store gives an element or key
+// read (`a[i]`, `d[k]`), which may be absent whatever the checker says.
+func (e *Emitter) storesIndexRead(sym *binder.Symbol) bool {
+	if e.frontBinding == nil {
+		return false
+	}
+	for _, st := range e.frontBinding.StoresTo(sym) {
+		var v ast.Expression
+		switch x := st.(type) {
+		case *ast.VarDeclaration:
+			v = x.Init
+		case *ast.AssignmentExpression:
+			v = x.Right
+		}
+		for {
+			as, ok := v.(*ast.AsExpression)
+			if !ok {
+				break
+			}
+			v = as.Expr
+		}
+		if _, ok := v.(*ast.IndexExpression); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// memberPathKey is a property path's text (`a.b.c`, `this.x`), or "" when
+// the reference is not a plain dotted path.
+func memberPathKey(e ast.Expression) string {
+	switch x := e.(type) {
+	case *ast.Identifier:
+		return x.Name
+	case *ast.ThisExpression:
+		return "this"
+	case *ast.MemberExpression:
+		if x.Optional {
+			return ""
+		}
+		if base := memberPathKey(x.Object); base != "" {
+			return base + "." + x.Property
+		}
+	}
+	return ""
+}
+
+// callBetweenNarrowing reports whether, on some path to the property read
+// m, a call runs after the condition or store that made m present: it may
+// clear the property, which the checker's flow (as TypeScript's) does not
+// see. A path the walk cannot place is reported too.
+func callBetweenNarrowing(b *binder.Binding, m *ast.MemberExpression) bool {
+	key := memberPathKey(m)
+	root := m.Object
+	for {
+		mm, ok := root.(*ast.MemberExpression)
+		if !ok {
+			break
+		}
+		root = mm.Object
+	}
+	id, ok := root.(*ast.Identifier)
+	if key == "" || !ok {
+		return true
+	}
+	f, _ := b.FlowAt(id)
+	if f == nil {
+		return true
+	}
+	mentions := func(n ast.Node) bool {
+		found := false
+		ast.Inspect(n, func(x ast.Node) bool {
+			if found {
+				return false
+			}
+			if e, ok := x.(ast.Expression); ok && memberPathKey(e) == key {
+				found = true
+			}
+			return true
+		})
+		return found
+	}
+	seen := map[*binder.FlowNode]bool{}
+	var walk func(f *binder.FlowNode) bool
+	walk = func(f *binder.FlowNode) bool {
+		for f != nil {
+			if seen[f] {
+				return false
+			}
+			seen[f] = true
+			switch {
+			case f.Flags&binder.FlowUnreachable != 0:
+				return false
+			case f.Flags&binder.FlowCall != 0:
+				return true
+			case f.Flags&(binder.FlowTrueCondition|binder.FlowFalseCondition) != 0:
+				if f.Node != nil && mentions(f.Node) {
+					return false // the narrowing: nothing ran since
+				}
+			case f.Flags&binder.FlowPropertyAssignment != 0:
+				if a, ok := f.Node.(*ast.AssignmentExpression); ok && memberPathKey(a.Left) == key {
+					return false
+				}
+			case f.Flags&(binder.FlowBranchLabel|binder.FlowLoopLabel) != 0:
+				for _, a := range f.Antecedents {
+					if walk(a) {
+						return true
+					}
+				}
+				return false
+			case f.Flags&binder.FlowStart != 0:
+				return true
+			}
+			f = f.Antecedent
+		}
+		return true
+	}
+	return walk(f)
+}
+
+// flowTrusted reports whether the checker's flow type for the reference ref
+// holds at run time: no other function stores to its variable, and, for a
+// property, no call runs between the narrowing and the read. TypeScript's
+// narrowing (and the checker's) ignores both.
+func (e *Emitter) flowTrusted(ref ast.Expression) bool {
+	if e.frontBinding == nil {
+		return false
+	}
+	return flowTrusted(e.frontBinding, ref)
+}
+
+func flowTrusted(b *binder.Binding, ref ast.Expression) bool {
+	switch r := ref.(type) {
+	case *ast.Identifier:
+		sym, _ := b.Resolve(r)
+		return sym == nil || !b.StoredElsewhere(sym)
+	case *ast.MemberExpression:
+		return !callBetweenNarrowing(b, r)
+	}
+	return true
 }

@@ -52,8 +52,6 @@ var moduleOnly = map[string][]string{
 	"PassThrough":  {"stream"},
 	"Duplex":       {"stream"},
 	"DatabaseSync": {"node:sqlite"},
-	"Channel":      {"klain:sync"},
-	"Webview":      {"klain:webview"},
 }
 
 // imported reports whether a module-only builtin name is in scope: the name
@@ -149,6 +147,24 @@ func (w *walker) rewrite(n ast.Node) ast.Node {
 	w.link(n)
 	if v, ok := n.(*ast.VarDeclaration); ok {
 		w.noteAlias(v)
+	}
+	if call, ok := n.(*ast.CallExpression); ok {
+		// `Array(…)` called as a function constructs as `new Array(…)` does
+		// (ECMA-262 §23.1.1.1).
+		if id, ok := call.Callee.(*ast.Identifier); ok && id.Name == "Array" {
+			if name, ok := w.builtinBehind(id.Name); ok && name == "Array" {
+				ne := ast.NewNewExpression("Array", call.Args, call.GetPos())
+				ne.TypeArgs = call.TypeArgs
+				out, err := builtinConstructors[name](ne)
+				if err != nil {
+					if w.err == nil {
+						w.err = err
+					}
+					return n
+				}
+				return out
+			}
+		}
 	}
 	if ne, ok := n.(*ast.NewExpression); ok && ne.Callee == nil {
 		// A worker's path literal names the module file the resolver

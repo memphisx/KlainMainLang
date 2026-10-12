@@ -485,6 +485,12 @@ const (
 // emitBoxValue converts any concrete Value into a Value{Ty: TypeAny}. Boxing
 // is idempotent: if v is already dynamic, it's returned unchanged, so callers
 // never need to check first.
+// emitBoxArrayPlain boxes an array as an array, even when it is the body
+// of an instance of a class extending Array.
+func (e *Emitter) emitBoxArrayPlain(v Value) string {
+	return e.emitNbTagPtr(e.boxAnyArray(v), kmlTagArray)
+}
+
 func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 	if v.Ty.IsDynamic {
 		return v, nil
@@ -551,8 +557,15 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		return e.boxTupleAsArray(v)
 	}
 	if v.Ty.IsArray {
-		hdr := e.boxAnyArray(v)
-		boxed := e.emitNbTagPtr(hdr, kmlTagArray)
+		boxed := e.emitBoxArrayPlain(v)
+		if e.arrayMayBeClassBody(v) {
+			// The body of an instance of a class extending Array boxes as
+			// the instance: its identity and class hold through `any`.
+			isClass, obj := e.emitArrayClassObject(v.ArrayHeader)
+			sel := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", sel, isClass, e.emitBoxArrayClassObject(obj), boxed))
+			boxed = sel
+		}
 		if v.Ty.Nullable {
 			// An absent `T[] | null` (a missed RegExp exec) boxes as its
 			// keyword, not an empty array.
@@ -698,6 +711,25 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 	case isHostHandle(v.Ty):
 		// A host handle: a headered cell (emit_hostbox.go).
 		return e.emitBoxHost(v), nil
+	case v.Ty.Nullable && isHostHandle(v.Ty.withoutNullable()):
+		// A possibly absent host handle (`Date | undefined`, an unchecked
+		// `dates[i]`): absent boxes as its keyword.
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+		presL, absL, joinL := e.freshLabel("hostbox.present"), e.freshLabel("hostbox.absent"), e.freshLabel("hostbox.join")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, absL, presL))
+		e.emitLabel(presL)
+		boxed := e.emitBoxHost(Value{Ref: v.Ref, Ty: v.Ty.withoutNullable()})
+		presEnd := e.freshLabel("hostbox.boxed")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", presEnd))
+		e.emitLabel(presEnd)
+		e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+		e.emitLabel(absL)
+		e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+		e.emitLabel(joinL)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %d, %%%s ]", r, boxed.Ref, presEnd, absent, absL))
+		return Value{Ref: r, Ty: TypeAny}, nil
 	case v.Ty.IR == "ptr":
 		// String: kind bits 0 — the value IS the pointer.
 		r := e.freshReg()
@@ -939,6 +971,7 @@ func (e *Emitter) anyArrayElemRoutines(elem Type) (boxer, unboxer string, ok boo
 	elemIR := StructFieldIR(elem)
 
 	restore := e.beginDetachedFunc()
+	restore = e.sharedBody(restore) // content-named: the same in every program
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%data, i64 %%i", gep, elemIR))
 	val := e.loadArrayElem(gep, elem)
@@ -952,6 +985,7 @@ func (e *Emitter) anyArrayElemRoutines(elem Type) (boxer, unboxer string, ok boo
 	boxer = e.defineContentNamed("@__kml_arrelem_box.", "i64", "ptr %data, i64 %i", body)
 
 	restore = e.beginDetachedFunc()
+	restore = e.sharedBody(restore) // content-named: the same in every program
 	gep = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%data, i64 %%i", gep, elemIR))
 	conv := e.coerce(Value{Ref: "%w", Ty: TypeAny}, elem)
@@ -1492,7 +1526,8 @@ func (e *Emitter) emitArrayBufferIsView(arg ast.Expression) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = call i1 %s(%s %s)", r, fn, v.Ty.IR, v.Ref))
 		return Value{Ref: r, Ty: TypeBool}, nil
 	}
-	return Value{Ref: fmt.Sprint(v.Ty.IsTypedArray || e.isGlobalClassInstance(v.Ty, "DataView")), Ty: TypeBool}, nil
+	host, arrCls := e.arrayClassHost(v.Ty)
+	return Value{Ref: fmt.Sprint(v.Ty.IsTypedArray || arrCls && host.IsTypedArray || e.isGlobalClassInstance(v.Ty, "DataView")), Ty: TypeBool}, nil
 }
 
 // emitBoxIsView is whether a self-describing box holds a typed array (not a
@@ -1505,6 +1540,16 @@ func (e *Emitter) emitBoxIsView(v Value) (string, error) {
 		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", r, plain))
 		out := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", out, r, isArr))
+		// An instance of a class extending a typed array.
+		for _, name := range e.sortedClassNames(func(_ string, info ClassInfo) bool { return info.HostBase != nil && info.HostBase.IsTypedArray }) {
+			is, err := e.emitAnyInstanceOfClass(v, name)
+			if err != nil {
+				return "", err
+			}
+			either := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, out, is.Ref))
+			out = either
+		}
 		// A boxed DataView (the global module's class) is a view too.
 		cls, ok := e.globalClass("DataView")
 		if !ok {

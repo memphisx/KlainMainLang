@@ -109,6 +109,9 @@ func (c *Checker) checkNonNullType(e ast.Expression, t *Type) *Type {
 // "cannot invoke" family (TS2721-2723).
 func (c *Checker) checkCallee(e ast.Expression) {
 	t := c.TypeOf(e)
+	if nt, ok := c.chainReceiver(e); ok {
+		t = nt // a callee continuing an optional chain
+	}
 	if c.Unanswered(t) || t.Flags&Union == 0 {
 		return
 	}
@@ -199,4 +202,13 @@ func (c *Checker) narrowedConstraint(e ast.Expression, constraint *Type) *Type {
 	}
 	t, _ := c.flowType(f, r, constraint, newFlowWalk())
 	return t
+}
+
+// checkReceiver is checkNonNull on a link's receiver: one that continues an
+// optional chain is checked as its non-optional type.
+func (c *Checker) checkReceiver(obj ast.Expression) *Type {
+	if nt, ok := c.chainReceiver(obj); ok {
+		return c.checkNonNullType(obj, nt)
+	}
+	return c.checkNonNull(obj)
 }

@@ -13,6 +13,10 @@ const kCustomPromisifiedSymbol: unique symbol = Symbol.for('nodejs.util.promisif
 
 // The @types/node overloads: a callback-last function of up to four
 // arguments, typed; any other function, untyped.
+export interface CustomPromisifyLegacy<TCustom extends Function> extends Function {
+    __promisify__: TCustom;
+}
+export function promisify<TCustom extends Function>(fn: CustomPromisifyLegacy<TCustom>): TCustom;
 export function promisify<TResult>(fn: (callback: (err: any, result: TResult) => void) => void): () => Promise<TResult>;
 export function promisify(fn: (callback: (err?: any) => void) => void): () => Promise<void>;
 export function promisify<T1, TResult>(fn: (arg1: T1, callback: (err: any, result: TResult) => void) => void): (arg1: T1) => Promise<TResult>;

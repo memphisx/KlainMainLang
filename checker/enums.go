@@ -69,15 +69,21 @@ func (c *Checker) enumType(sym *binder.Symbol) *Type {
 }
 
 // enumObject is the type of an enum's value: an object with a read-only
-// property per member.
+// property per member, and, when a member is numeric, tsc's reverse-mapping
+// index signature `[x: number]: string`.
 func (c *Checker) enumObject(sym *binder.Symbol) *Type {
 	ms := c.enumMembers(sym)
 	if ms == nil {
 		return c.unanswered
 	}
 	props := make([]*Property, len(ms))
+	numeric := false
 	for i, m := range ms {
 		props[i] = &Property{Name: m.Member, Type: m}
+		numeric = numeric || m.Flags&NumberLiteral != 0
+	}
+	if numeric {
+		return c.in.indexed(props, nil, c.strT)
 	}
 	return c.in.object(props)
 }

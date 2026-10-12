@@ -918,3 +918,21 @@ console.log(JSON.stringify('xaxbx'.split(/x*/)))
 ["a","b"]
 ["","a","b",""]`)
 }
+
+func TestE2ERegExpThroughUnionAndAny(t *testing.T) {
+	// A string-or-RegExp search held boxed picks its replace at run time; a
+	// ternary of a string and another reference is that union; an optional
+	// string flags parameter reaches the constructor.
+	assertSameAsNode(t, `
+const c = Math.random() > 2;
+const p: any = /b/g;
+const q: any = "b";
+const u: string | RegExp = c ? "a" : /a/g;
+const arr: string | number[] = c ? "a" : [1];
+console.log("abab".replace(p, "_"), "abab".replace(q, "_"), "abab".replaceAll(q, "-"));
+console.log("abab".replaceAll(p, (m: string) => m.toUpperCase()), "abab".replace(u, "X"));
+console.log(typeof u, u, arr);
+function mk(src: string, flags?: string): RegExp { return new RegExp(src, flags); }
+console.log(mk("x", "gi").flags, mk("y").flags);
+`)
+}

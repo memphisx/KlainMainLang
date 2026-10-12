@@ -15,15 +15,9 @@
 #include <errno.h>
 #ifdef _WIN32
 #include "kml_posix_compat.h"
-intptr_t __kml_win_fd_socket(int fd);
-static void tls_attach_fd(SSL *ssl, int fd) {
-	SSL_set_app_data(ssl, (void *)(intptr_t)fd);
-	SSL_set_fd(ssl, (int)__kml_win_fd_socket(fd));
-}
 #else
 #include <sys/socket.h>
 #include <arpa/inet.h>
-static void tls_attach_fd(SSL *ssl, int fd) { SSL_set_fd(ssl, fd); }
 #endif
 
 static char *dup_err(const char *fallback) {
@@ -36,17 +30,21 @@ static char *dup_err(const char *fallback) {
 	return strdup(fallback);
 }
 // Node's tls_wrap: a TLSSocket's handle is a TCP handle with a session on it.
-// klainpool.c drives the handshake and the I/O through these operations; the
-// program starts them with __kml_native_tls_start.
+// The session never touches the socket: it sits on two memory BIOs, as
+// Node's TLSWrap does (TDD-00244 Stage 5). klainpool.c reads the socket and
+// feeds the ciphertext in, drives the handshake and the I/O through these
+// operations, and drains the ciphertext out to write it. The program starts
+// them with __kml_native_tls_start.
 
 typedef struct kml_tls_ops {
 	int (*handshake)(void *tls);
 	int64_t (*read)(void *tls, char *buf, int64_t n);
 	int64_t (*write)(void *tls, const char *buf, int64_t n);
-	int (*want_write)(void *tls);
 	int (*pending)(void *tls);
 	void (*shutdown)(void *tls);
 	void (*free)(void *tls);
+	void (*feed)(void *tls, const char *buf, int64_t n); // n == 0: end of stream
+	int64_t (*drain)(void *tls, char *buf, int64_t n);
 } kml_tls_ops;
 
 void __kml_tcp_set_tls_ops(const void *ops);
@@ -58,7 +56,9 @@ extern void __kml_str_finalize(char *s);
 
 typedef struct kml_tls_sess {
 	SSL *ssl;
-	int server, want_write, reject_unauthorized;
+	BIO *in, *out;        // ciphertext from and to the socket (SSL owns them)
+	int starved;          // the last operation wanted more ciphertext than fed
+	int server, reject_unauthorized;
 	long verify;          // X509 verify result after the handshake
 	char *servername;
 	char err[256];        // the failed handshake's reason
@@ -68,14 +68,13 @@ static int tls_sess_handshake(void *p) {
 	kml_tls_sess *s = (kml_tls_sess *)p;
 	ERR_clear_error();
 	int rc = s->server ? SSL_accept(s->ssl) : SSL_connect(s->ssl);
-	s->want_write = 0;
 	if (rc == 1) {
 		s->verify = SSL_get_verify_result(s->ssl);
 		return 1;
 	}
 	int e = SSL_get_error(s->ssl, rc);
-	if (e == SSL_ERROR_WANT_READ) return 0;
-	if (e == SSL_ERROR_WANT_WRITE) { s->want_write = 1; return 0; }
+	if (e == SSL_ERROR_WANT_READ) { s->starved = 1; return 0; }
+	if (e == SSL_ERROR_WANT_WRITE) return 0;
 	unsigned long ec = ERR_peek_last_error();
 	if (ec) {
 		const char *r = ERR_reason_error_string(ec);
@@ -94,11 +93,11 @@ static int64_t tls_sess_read(void *p, char *buf, int64_t n) {
 	int r = SSL_read(s->ssl, buf, (int)(n > 0x7fffffff ? 0x7fffffff : n));
 	if (r > 0) return r;
 	int e = SSL_get_error(s->ssl, r);
-	if (e == SSL_ERROR_WANT_READ) return -EAGAIN;
-	if (e == SSL_ERROR_WANT_WRITE) { s->want_write = 1; return -EAGAIN; }
+	if (e == SSL_ERROR_WANT_READ) { s->starved = 1; return -EAGAIN; }
+	if (e == SSL_ERROR_WANT_WRITE) return -EAGAIN;
 	if (e == SSL_ERROR_ZERO_RETURN) return 0;
-	if (e == SSL_ERROR_SYSCALL && errno == 0) return 0; // EOF without close_notify
-	return e == SSL_ERROR_SYSCALL && errno ? -errno : -ECONNRESET;
+	if (e == SSL_ERROR_SYSCALL) return 0; // the socket ended without close_notify
+	return -ECONNRESET;
 }
 
 static int64_t tls_sess_write(void *p, const char *buf, int64_t n) {
@@ -106,16 +105,36 @@ static int64_t tls_sess_write(void *p, const char *buf, int64_t n) {
 	if (n == 0) return 0;
 	ERR_clear_error();
 	int r = SSL_write(s->ssl, buf, (int)(n > 0x7fffffff ? 0x7fffffff : n));
-	s->want_write = 0;
 	if (r > 0) return r;
 	int e = SSL_get_error(s->ssl, r);
-	if (e == SSL_ERROR_WANT_WRITE) { s->want_write = 1; return -EAGAIN; }
-	if (e == SSL_ERROR_WANT_READ) return -EAGAIN;
-	return e == SSL_ERROR_SYSCALL && errno ? -errno : -EPIPE;
+	if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) return -EAGAIN;
+	return -EPIPE;
 }
 
-static int tls_sess_want_write(void *p) { return ((kml_tls_sess *)p)->want_write; }
-static int tls_sess_pending(void *p) { return SSL_pending(((kml_tls_sess *)p)->ssl); }
+// Readable without the socket: decrypted bytes buffered, or ciphertext fed
+// that no operation has found short yet.
+static int tls_sess_pending(void *p) {
+	kml_tls_sess *s = (kml_tls_sess *)p;
+	if (SSL_pending(s->ssl) > 0) return 1;
+	return !s->starved && BIO_ctrl_pending(s->in) > 0;
+}
+
+static void tls_sess_feed(void *p, const char *buf, int64_t n) {
+	kml_tls_sess *s = (kml_tls_sess *)p;
+	s->starved = 0;
+	if (n == 0) {
+		BIO_set_mem_eof_return(s->in, 0);
+		return;
+	}
+	BIO_write(s->in, buf, (int)n);
+}
+
+static int64_t tls_sess_drain(void *p, char *buf, int64_t n) {
+	kml_tls_sess *s = (kml_tls_sess *)p;
+	if (BIO_ctrl_pending(s->out) == 0) return 0;
+	int r = BIO_read(s->out, buf, (int)(n > 0x7fffffff ? 0x7fffffff : n));
+	return r > 0 ? r : 0;
+}
 static void tls_sess_shutdown(void *p) { SSL_shutdown(((kml_tls_sess *)p)->ssl); }
 static void tls_sess_free(void *p) {
 	kml_tls_sess *s = (kml_tls_sess *)p;
@@ -125,8 +144,8 @@ static void tls_sess_free(void *p) {
 }
 
 static const kml_tls_ops tls_sess_ops = {
-	tls_sess_handshake, tls_sess_read, tls_sess_write, tls_sess_want_write,
-	tls_sess_pending, tls_sess_shutdown, tls_sess_free,
+	tls_sess_handshake, tls_sess_read, tls_sess_write, tls_sess_pending,
+	tls_sess_shutdown, tls_sess_free, tls_sess_feed, tls_sess_drain,
 };
 
 // Secure contexts, by id.
@@ -257,7 +276,10 @@ double __kml_native_tls_start(double handle, double ctxId, _Bool server, const c
 	kml_tls_sess *s = (kml_tls_sess *)calloc(1, sizeof *s);
 	s->ssl = SSL_new(tls_ctx_tab[ci]);
 	s->server = server;
-	tls_attach_fd(s->ssl, fd);
+	s->in = BIO_new(BIO_s_mem());
+	s->out = BIO_new(BIO_s_mem());
+	BIO_set_mem_eof_return(s->in, -1); // empty: retry, until the socket ends
+	SSL_set_bio(s->ssl, s->in, s->out);
 	if (!server) {
 		SSL_set_verify(s->ssl, SSL_VERIFY_NONE, NULL);
 		if (servername && *servername) {

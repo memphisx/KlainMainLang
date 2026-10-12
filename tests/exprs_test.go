@@ -823,7 +823,7 @@ console.log(typeof add)
 func TestE2ETypeofBuiltinValues(t *testing.T) {
 	assertOutput(t, `
 async function af(): Promise<number> { return 1 }
-function* g(): number { yield 1 }
+function* g(): Generator<number> { yield 1 }
 class K { x: number; constructor() { this.x = 1 } }
 async function main2(): Promise<void> {
   const p = af()
@@ -1409,9 +1409,15 @@ let x = {};
 let s = "x";
 s++;
 `, "requires a number or bigint operand")
-	mustCompileError(t, `
+}
+
+// Unary minus on a string is ToNumber then negation (tsc accepts it).
+func TestE2EUnaryMinusString(t *testing.T) {
+	assertSameAsNode(t, `
 const y = -"";
-`, "requires a number or bigint operand")
+const z = -"5";
+console.log(y, z, Object.is(y, -0));
+`)
 }
 
 // --- TDD-00123 Stage 1: `number` is an IEEE-754 double (JS-faithful) ---
@@ -1708,6 +1714,25 @@ console.log(v)
 // ADR-01037: an optional chain short-circuits as a WHOLE — in `a?.b.c` a
 // nullish `a` skips `.c` too. Previously only the `?.` link itself was guarded
 // and the rest of the chain ran against the absent value (a crash).
+func TestE2EOptionalChainNullLinkStaysNull(t *testing.T) {
+	// A `T | null` read through an optional chain is null when the value is
+	// null, undefined when the chain short-circuits.
+	assertSameAsNode(t, `
+class Inner { count: number = 3 }
+class Row { inner: Inner | null = null }
+class Box { v: number | null = null; s: string | null = null }
+function probe(r?: Row): void {
+  const n = r?.inner?.count
+  const k = r?.inner
+  console.log(n, k === undefined, k === null)
+}
+probe(new Row()); probe()
+const full = new Row(); full.inner = new Inner(); probe(full)
+function q(b?: Box) { const v = b?.v; const s = b?.s; console.log(v, s, v === null, s === undefined, b?.v ?? "dflt") }
+q(new Box()); q(); const bb = new Box(); bb.v = 2; bb.s = "x"; q(bb)
+`)
+}
+
 func TestE2EOptionalChainShortCircuitsWholeChain(t *testing.T) {
 	assertOutput(t, `
 class Inner {

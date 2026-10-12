@@ -36,6 +36,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -126,7 +127,8 @@ func (r *reaper) scanWorkdirProcs() (procs []procInfo, totalKB int64) {
 	if err != nil {
 		return nil, 0
 	}
-	self := os.Getpid()
+	var all []procInfo
+	parent := map[int]int{}
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
@@ -137,15 +139,28 @@ func (r *reaper) scanWorkdirProcs() (procs []procInfo, totalKB int64) {
 		pid, e1 := strconv.Atoi(f[0])
 		ppid, e2 := strconv.Atoi(f[1])
 		rss, e3 := strconv.ParseInt(f[2], 10, 64)
-		if e1 != nil || e2 != nil || e3 != nil || pid == self {
+		if e1 != nil || e2 != nil || e3 != nil {
 			continue
 		}
-		cmd := strings.Join(f[3:], " ")
-		if !strings.Contains(cmd, r.absWorkDir) {
+		parent[pid] = ppid
+		all = append(all, procInfo{pid: pid, ppid: ppid, rssKB: rss, cmd: strings.Join(f[3:], " ")})
+	}
+	// The runner and its ancestors (`go run`, the shell that started it)
+	// name the workdir on their command lines too (-workdir /abs/path).
+	mine := map[int]bool{}
+	for p := os.Getpid(); p > 1 && !mine[p]; p = parent[p] {
+		mine[p] = true
+	}
+	for _, p := range all {
+		if mine[p.pid] || !strings.Contains(p.cmd, r.absWorkDir) {
 			continue
 		}
-		procs = append(procs, procInfo{pid: pid, ppid: ppid, rssKB: rss, cmd: cmd})
-		totalKB += rss
+		procs = append(procs, p)
+		// The ceiling guards against runaway test programs; the runner's own
+		// compiles are bounded by the worker count and are not counted.
+		if !isCompiler(p.cmd) {
+			totalKB += p.rssKB
+		}
 	}
 	return procs, totalKB
 }
@@ -181,6 +196,18 @@ func (r *reaper) sweepOnce() {
 		}
 	}
 	if r.memCapKB > 0 && totalKB > r.memCapKB {
+		// One runaway test program: kill it (its test fails) and carry on.
+		var big *procInfo
+		for i := range procs {
+			if !isCompiler(procs[i].cmd) && (big == nil || procs[i].rssKB > big.rssKB) {
+				big = &procs[i]
+			}
+		}
+		if big != nil && totalKB-big.rssKB <= r.memCapKB {
+			fmt.Fprintf(os.Stderr, "reaper: killed %s at %dMB (over the --mem-cap-mb ceiling %dMB)\n", big.cmd, big.rssKB/1024, r.memCapKB/1024)
+			r.kill(big.pid)
+			return
+		}
 		// Even the legitimately-live tests are collectively over the ceiling —
 		// a genuine runaway. Kill everything under the workdir and abort the
 		// whole run rather than risk an OS-level OOM. A partial report is worth
@@ -193,6 +220,13 @@ func (r *reaper) sweepOnce() {
 				"    killed all %d workdir processes to protect the machine. Raise -mem-cap-mb or\n"+
 				"    lower -workers, and prefer running off battery / low-power mode. ***\n",
 			totalKB/1024, r.memCapKB/1024, len(procs))
+		for _, p := range procs {
+			cmd := p.cmd
+			if len(cmd) > 160 {
+				cmd = cmd[:160]
+			}
+			fmt.Fprintf(os.Stderr, "    %6dMB  %s\n", p.rssKB/1024, cmd)
+		}
 		os.Exit(3)
 	}
 }
@@ -226,6 +260,7 @@ func (r *reaper) finalSweep() {
 // mid-run can't leave the ~880-process pile behind. Returns a stop function to
 // call (deferred) when the run completes normally.
 func startReaper(absWorkDir string, memCapMB int) func() {
+	limitChildData(memCapMB)
 	r := newReaper(absWorkDir, memCapMB)
 	go r.run()
 
@@ -247,4 +282,11 @@ func startReaper(absWorkDir string, memCapMB int) func() {
 			fmt.Fprintf(os.Stderr, "reaper: killed %d escaped/orphaned workdir process(es) during the run\n", r.killed)
 		}
 	}
+}
+
+// isCompiler reports whether a command line is a clang (or its linker) run
+// by the runner rather than a compiled test program.
+func isCompiler(cmd string) bool {
+	exe := filepath.Base(strings.Fields(cmd + " ")[0])
+	return strings.HasPrefix(exe, "clang") || exe == "ld" || strings.HasPrefix(exe, "ld.") || exe == "ld64.lld"
 }

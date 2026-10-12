@@ -449,10 +449,26 @@ func (e *Emitter) emitBigIntConstructor(args []ast.Expression, pos ast.Pos) (Val
 	if err != nil {
 		return Value{}, err
 	}
+	return e.bigintFromValue(arg, pos)
+}
+
+// bigintFromValue is BigInt(arg) for an evaluated argument (ECMA-262's
+// ToBigInt after ToPrimitive): an integer number, a string, a boolean or a
+// bigint converts; undefined, null and a symbol are a TypeError.
+func (e *Emitter) bigintFromValue(arg Value, pos ast.Pos) (Value, error) {
 	e.ensureBigInt()
 	switch {
 	case arg.Ty.IsBigInt:
 		return arg, nil
+	case isNullableScalar(arg.Ty) || arg.Ty.IsDynamic:
+		return e.bigintFromRuntime(arg, pos, true)
+	case arg.Ty.IsNull || arg.Ty.IsUndefined || arg.Ty.Nullable || arg.Ty.IR == "" || arg.Ty.IR == "void":
+		// Possibly null or undefined (or only that): decided at run time.
+		boxed, err := e.emitBoxValue(arg)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.bigintFromRuntime(boxed, pos, true)
 	case isStringTy(arg.Ty):
 		// StringToBigInt: a string that is no integer is a SyntaxError.
 		reg := e.freshReg()
@@ -503,7 +519,22 @@ func (e *Emitter) emitBigIntConstructor(args []ast.Expression, pos ast.Pos) (Val
 		e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, %s", isInt, d.Ref, backReg))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isInt, buildL, badL))
 		e.emitLabel(badL)
-		e.emitInternalThrow(e.internString("Cannot convert a non-integer number to a BigInt"))
+		// NumberToBigInt: a non-integral number is a RangeError naming it.
+		numStr, err := e.emitValueToString(d)
+		if err != nil {
+			return Value{}, err
+		}
+		msg, err := e.emitStringConcat(Value{Ref: e.internString("The number "), Ty: TypePtr}, numStr)
+		if err != nil {
+			return Value{}, err
+		}
+		if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(" cannot be converted to a BigInt because it is not an integer"), Ty: TypePtr}); err != nil {
+			return Value{}, err
+		}
+		e.ensureExceptionHelpers()
+		rangeErr := e.buildErrorObj(errorKindIDs["RangeError"], msg.Ref, e.internString("RangeError"))
+		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", rangeErr))
+		e.emitTerminator("unreachable")
 		e.emitLabel(buildL)
 		reg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 %s)", reg, iReg))
@@ -511,4 +542,123 @@ func (e *Emitter) emitBigIntConstructor(args []ast.Expression, pos ast.Pos) (Val
 	default:
 		return Value{}, fmt.Errorf("%d:%d: BigInt() accepts an integer number or a string, not this type (a non-integer number is a RangeError in JS)", pos.Line, pos.Col)
 	}
+}
+
+// bigintFromRuntime is BigInt(arg) for a value whose kind is known only at
+// run time (a box, or a scalar that may be absent): each kind converts as
+// its static type does, an absent one throws JavaScript's TypeError. An
+// object (objects says one may be) converts its ToPrimitive (number hint)
+// result, which is dispatched again without the object case.
+func (e *Emitter) bigintFromRuntime(arg Value, pos ast.Pos, objects bool) (Value, error) {
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	doneL := e.freshLabel("bigint.rt.done")
+	throwL := e.freshLabel("bigint.rt.absent")
+	convert := func(v Value) error {
+		r, err := e.bigintFromValue(v, pos)
+		if err != nil {
+			return err
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", r.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		return nil
+	}
+	if isNullableScalar(arg.Ty) {
+		present, payload := e.nullableScalarAggParts(arg)
+		presL := e.freshLabel("bigint.rt.present")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, presL, throwL))
+		e.emitLabel(presL)
+		if err := convert(payload); err != nil {
+			return Value{}, err
+		}
+	} else {
+		tag, payload := e.emitUnboxTagPayload(arg)
+		for _, k := range []struct {
+			tag int
+			ty  Type
+		}{{kmlTagInt, TypeF64}, {kmlTagFloat, TypeF64}, {kmlTagString, TypePtr}, {kmlTagBoolean, TypeBool}} {
+			is := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", is, tag, k.tag))
+			hitL, nextL := e.freshLabel("bigint.rt.kind"), e.freshLabel("bigint.rt.next")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", is, hitL, nextL))
+			e.emitLabel(hitL)
+			var v Value
+			if k.ty.Float {
+				v = Value{Ref: e.emitAnyToNum(arg), Ty: TypeF64}
+			} else {
+				v = e.emitUnboxBoxToType(arg.Ref, k.ty)
+			}
+			if err := convert(v); err != nil {
+				return Value{}, err
+			}
+			e.emitLabel(nextL)
+		}
+		// A boxed bigint (emit_bigint_box.go) is itself; any other object
+		// (a class instance, a dynamic bag, an array, a function) converts
+		// its primitive. null and undefined fall to the TypeError.
+		isObj := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+		probeL := e.freshLabel("bigint.rt.probe")
+		notObjL := e.freshLabel("bigint.rt.notobj")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, probeL, notObjL))
+		e.emitLabel(notObjL)
+		isNull, isUndef, nullish := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNull, tag, kmlTagNull))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", nullish, isNull, isUndef))
+		primL := e.freshLabel("bigint.rt.toprim")
+		if objects {
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", nullish, throwL, primL))
+		} else {
+			e.emitTerminator(fmt.Sprintf("br label %%%s", throwL))
+		}
+		e.emitLabel(probeL)
+		cell, isBig := e.emitBoxedBigIntProbe(payload)
+		loadL := e.freshLabel("bigint.rt.load")
+		other := throwL
+		if objects {
+			other = primL
+		}
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBig, loadL, other))
+		e.emitLabel(loadL)
+		b := e.emitBoxedBigIntLoad(cell)
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", b.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		if objects {
+			// `{ valueOf() { return 44 } }`, `[Symbol.toPrimitive]`: its
+			// primitive converts.
+			e.emitLabel(primL)
+			prim := e.emitAnyToPrimitiveHint(arg.Ref, hintNumber)
+			pv, err := e.bigintFromRuntime(Value{Ref: prim, Ty: TypeAny}, pos, false)
+			if err != nil {
+				return Value{}, err
+			}
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", pv.Ref, slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		}
+	}
+	e.emitLabel(throwL)
+	boxed, err := e.emitBoxValue(arg)
+	if err != nil {
+		return Value{}, err
+	}
+	str, err := e.emitValueToString(boxed)
+	if err != nil {
+		return Value{}, err
+	}
+	msg, err := e.emitStringConcat(Value{Ref: e.internString("Cannot convert "), Ty: TypePtr}, str)
+	if err != nil {
+		return Value{}, err
+	}
+	if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(" to a BigInt"), Ty: TypePtr}); err != nil {
+		return Value{}, err
+	}
+	e.ensureExceptionHelpers()
+	errObj := e.buildErrorObj(errorKindIDs["TypeError"], msg.Ref, e.internString("TypeError"))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+	e.emitTerminator("unreachable")
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	return Value{Ref: r, Ty: BigIntType()}, nil
 }

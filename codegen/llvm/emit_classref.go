@@ -184,6 +184,11 @@ func (e *Emitter) dynNewInstanceType(ex *ast.NewExpression) (Type, bool) {
 func (e *Emitter) checkerInstanceType(ex *ast.NewExpression) Type {
 	if c := e.front(); c != nil {
 		if t := c.TypeOf(ex); t != nil && t.Symbol != nil {
+			// Through the declaration codegen registered (a local class's
+			// name is made unique), else by name.
+			if ct, ok := e.classRepr(t.Symbol); ok && ct.IsObject && ct.IsClass {
+				return ct
+			}
 			if info, ok := e.classes[t.Symbol.Name]; ok && info.Ty.IsObject {
 				return info.Ty
 			}
@@ -469,20 +474,6 @@ func (e *Emitter) emitDynConstructOnce() {
 	}
 }
 
-// isClassName reports x naming a class itself (its statics resolve
-// statically), not a binding holding a constructor reference.
-func (e *Emitter) isClassName(x ast.Expression) bool {
-	id, ok := x.(*ast.Identifier)
-	if !ok {
-		return false
-	}
-	if _, bound := e.lookup(id.Name); bound {
-		return false
-	}
-	_, isClass := e.classes[id.Name]
-	return isClass
-}
-
 // emitConstructorOf is `obj.constructor` for a class instance: the class it
 // was constructed as, a run-time question for a subclass's instance.
 func (e *Emitter) emitConstructorOf(obj Value) Value {
@@ -503,4 +494,18 @@ func (e *Emitter) emitAnyInstanceOfClass(v Value, cls string) (Value, error) {
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v.Ref, slot))
 	e.define(name, Symbol{Ptr: slot, Ty: TypeAny})
 	return e.emitInstanceOf(ast.NewBinaryExpression("instanceof", ast.NewIdentifier(name, ast.Pos{}), ast.NewIdentifier(cls, ast.Pos{}), ast.Pos{}))
+}
+
+// isClassName reports x naming a class itself (its statics resolve
+// statically), not a binding holding a constructor reference.
+func (e *Emitter) isClassName(x ast.Expression) bool {
+	id, ok := x.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+	if _, bound := e.lookup(id.Name); bound {
+		return false
+	}
+	_, isClass := e.classes[id.Name]
+	return isClass
 }

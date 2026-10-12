@@ -353,7 +353,7 @@ func main() {
 	// workdir processes and hard-aborts the run if their aggregate RSS crosses
 	// this ceiling. Default is deliberately conservative for a laptop.
 	memCapMB := flag.Int("mem-cap-mb", 4096, "abort the run if workdir processes' total RSS exceeds this many MB (0 disables); the machine-safety backstop for runaway detached/cluster children")
-	passList := flag.String("passlist", "", "optional path: write the sorted list of passing file paths (one per line) for regression diffing")
+	passList := flag.String("passlist", "", "optional path: write the sorted list of passing file paths (one per line) for regression diffing; for -suite=ts every case with its verdict")
 	failList := flag.String("faillist", "", "optional path: write the sorted list of failing files as `path\\treason` (one per line) — for finding near-miss clusters (e.g. RUNTIME_NONZERO_EXIT, which already compiled and ran)")
 	regexMode := flag.String("regex", "", "RegExp dialect for compiled tests (TDD-00067): ecmascript (default), es-unicode, es-utf16, es-ascii, or pcre — for measuring a specific dialect's conformance")
 	compatFlag := flag.String("compat", "strict", "emitter compat lane: strict (default), js, or both (node suite only) — TDD-00022; the corpora are untyped JS, so the js lane measures the vanilla-JS-compat surface")
@@ -417,7 +417,7 @@ func main() {
 		runWPTSuite(*workDir, *perFileTimeout, *workers, *compatFlag)
 		return
 	case "ts":
-		runTSSuite(*workDir, *perFileTimeout, *compatFlag)
+		runTSSuite(*workDir, *perFileTimeout, *compatFlag, *passList)
 		return
 	default:
 		fatal("unknown -suite %q (want test262, node, wpt, or ts)", *suite)
@@ -752,6 +752,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		linkLibs   []string
 		cSources   []llvm.CSource
 		embedBlobs []llvm.EmbeddedBlob
+		ffiDl      bool
 		err        error
 	}
 	cgCh := make(chan cgOut, 1)
@@ -794,6 +795,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 			out.linkLibs = em.LinkLibs()
 			out.cSources, out.err = em.EmbeddedCSources()
 			out.embedBlobs, _ = em.EmbeddedBlobs()
+			out.ffiDl = em.UsesFFIDl()
 		}
 	}()
 	var ir string
@@ -801,10 +803,11 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	var linkLibs []string
 	var cSources []llvm.CSource
 	var embedBlobs []llvm.EmbeddedBlob
+	var ffiDl bool
 	select {
 	case cg := <-cgCh:
 		ir, compileErr = cg.ir, cg.err
-		linkLibs, cSources, embedBlobs = cg.linkLibs, cg.cSources, cg.embedBlobs
+		linkLibs, cSources, embedBlobs, ffiDl = cg.linkLibs, cg.cSources, cg.embedBlobs, cg.ffiDl
 	case <-time.After(codegenTimeout):
 		res.Reason = "CODEGEN_TIMEOUT"
 		return res
@@ -846,6 +849,17 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	}
 
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	// Each builtin library module compiles once per run into the object
+	// cache (llvm.LibObjects), as in the CLI and the Node runner.
+	if !ffiDl {
+		objs, _, err := llvm.LibObjects(llFile, objCacheDir(), libObjectFlags)
+		if err != nil {
+			res.Reason = normalizeReason("CLANG_ERROR", firstLine(err.Error()))
+			return res
+		}
+		clangArgs = append(clangArgs, objs...)
+		clangArgs = append(clangArgs, llvm.DeadStripFlags(false)...)
+	}
 	for _, lib := range linkLibs {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
@@ -857,16 +871,19 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	// from then on: the sources are identical for all ~53k files, so rebuilding
 	// them per file was most of the run's clang time and disk writes.
 	for _, cs := range cSources {
-		cPath, oerr := cs.CachedObject(filepath.Join(workDir, "cobj"), []string{"-O2"})
+		cPath, oerr := cs.CachedObject(objCacheDir(), []string{"-O2"})
+		flags := cs.CFlags
 		if oerr != nil {
 			cPath = filepath.Join(workDir, fmt.Sprintf("w%d.%s.%s", workerID, cs.Name, cs.SrcExt()))
-			if err := os.WriteFile(cPath, []byte(cs.Content), 0644); err != nil {
+			var content string
+			content, flags = cs.Standalone() // the sources share one clang command
+			if err := os.WriteFile(cPath, []byte(content), 0644); err != nil {
 				res.Reason = normalizeReason("WRITE_ERROR", err.Error())
 				return res
 			}
 		}
 		clangArgs = append(clangArgs, cPath)
-		clangArgs = append(clangArgs, cs.CFlags...)
+		clangArgs = append(clangArgs, flags...)
 		clangArgs = append(clangArgs, cs.Libs...)
 	}
 	// Embedded asset blobs (TDD-00142 Stage 7) — parallel to the CLI; the
@@ -885,7 +902,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	clangCmd := killableCommand(cctx, "clang", llvm.HostClangArgv(clangArgs...)...)
 	clangCmd.Stdout = &clangOut
 	clangCmd.Stderr = &clangOut
-	if err := clangCmd.Run(); err != nil {
+	if err := runTracked(clangCmd); err != nil {
 		if cctx.Err() == context.DeadlineExceeded {
 			res.Reason = "CLANG_TIMEOUT"
 		} else {
@@ -919,6 +936,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	defer rcancel()
 	var stdout, stderr bytes.Buffer
 	runCmd := killableCommand(rctx, binFile)
+	limitProgram(runCmd)
 	runCmd.Stdout = &stdout
 	runCmd.Stderr = &stderr
 	runErr := runTracked(runCmd)
@@ -1309,3 +1327,11 @@ func typeErrorOnly(err error) bool {
 	}
 	return true
 }
+
+// objCacheDir is where the runners keep compiled runtime and library
+// objects. It is outside the workdir: the reaper takes any process naming
+// the workdir that is not a running test, and these compiles are not one.
+// libObjectFlags compile a library unit in the runners (llvm.LibObjects).
+var libObjectFlags = []string{"-O2", "-ffunction-sections", "-fdata-sections"}
+
+func objCacheDir() string { return filepath.Join(os.TempDir(), "klainmain-conform-cobj") }

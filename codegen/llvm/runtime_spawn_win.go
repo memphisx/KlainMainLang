@@ -84,6 +84,9 @@ func (e *Emitter) httpClusterForkIR() string {
   %ischild = icmp eq i32 %pid, 0
   br i1 %ischild, label %child, label %parentnext
 child:
+  ; A forked worker shares the primary's kernel event queue until libuv
+  ; makes its own (uv_loop_fork).
+  call void @__kml_loop_after_fork()
   store i64 %i, ptr @__kml_cluster_worker_id, align 8
   store i32 %primarypid, ptr @__kml_cluster_primary_pid, align 4
   br label %done
@@ -109,32 +112,6 @@ child:
   call i32 @unsetenv(ptr ` + envID + `)
   br label %parentnext
 `
-}
-
-// httpClusterOrphanIR opens the event loop's per-iteration cluster poll (block
-// ccpoll, falling through to ccpoll1): a worker does not outlive its primary.
-// Node's cluster worker exits when its channel to the primary disconnects
-// (process.exit(0) on 'disconnect'); a worker left behind would keep the
-// listening port open. A forked worker whose parent is no longer the primary
-// has been re-parented, i.e. the primary is gone. On Windows the platform layer
-// waits on the primary's process handle instead (win32proc.c), so nothing is
-// polled here.
-func (e *Emitter) httpClusterOrphanIR() string {
-	if e.opts.Target.OS() == "windows" {
-		return "  br label %ccpoll1"
-	}
-	e.ensureExit()
-	e.declareFn("getppid", "declare i32 @getppid()")
-	return `  %ccprimary = load i32, ptr @__kml_cluster_primary_pid, align 4
-  %ccisworker = icmp ne i32 %ccprimary, 0
-  br i1 %ccisworker, label %ccparent, label %ccpoll1
-ccparent:
-  %ccppid = call i32 @getppid()
-  %ccorphan = icmp ne i32 %ccppid, %ccprimary
-  br i1 %ccorphan, label %ccorphaned, label %ccpoll1
-ccorphaned:
-  call void @exit(i32 0)
-  unreachable`
 }
 
 // httpListenInheritIR is inserted at the top of __kml_http_bind_and_listen:
@@ -192,5 +169,5 @@ func (e *Emitter) ensureListenFdGlobal() {
 		return
 	}
 	e.usedListenFdGlobal = true
-	e.emitGlobal("@__kml_listen_fd = internal thread_local global i32 -1, align 4")
+	e.emitGlobal("@__kml_listen_fd = thread_local global i32 -1, align 4")
 }

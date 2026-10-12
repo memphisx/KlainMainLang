@@ -1,6 +1,7 @@
 package llvm
 
 import (
+	"KlainMainLang/checker"
 	_ "embed"
 	"fmt"
 	"reflect"
@@ -93,7 +94,7 @@ func fnLengthFromSig(sig FuncSig) int {
 		if sig.HasRest && i == len(sig.ParamTypes)-1 {
 			break
 		}
-		if i < len(sig.Defaults) && sig.Defaults[i] != nil {
+		if i < len(sig.Defaults) && sig.Defaults[i] != nil || i < len(sig.HasDefault) && sig.HasDefault[i] {
 			break
 		}
 		n++
@@ -158,17 +159,12 @@ func (e *Emitter) ensureFnBagSeed() {
 }
 
 // FnMetaCFlags passes the NaN-box double offset and the configurable
-// attribute bit fnmeta.c's bag seed uses, and selects the object inspector
-// when dynjson.c is linked.
+// attribute bit fnmeta.c's bag seed uses.
 func (e *Emitter) FnMetaCFlags() []string {
-	f := []string{
+	return []string{
 		"-DKML_NB_DOUBLE_OFFSET=" + strconv.FormatInt(nbDoubleOffset, 10) + "LL",
 		"-DKML_DYN_ATTR_CONFIGURABLE=" + strconv.Itoa(dynAttrConfigurable),
 	}
-	if e.UsesDynJSON() {
-		f = append(f, "-DKML_FN_DYNJSON")
-	}
-	return f
 }
 
 // UsesFnMeta reports whether fnmeta.c must be linked.
@@ -363,6 +359,20 @@ func (e *Emitter) paramDefaultType(p ast.Param) (Type, bool) {
 		// emitted (TDD-00093), so `c = SUFFIX` takes SUFFIX's type.
 		if g, ok := e.moduleGlobals[d.Name]; ok && g.Ty.IR != "" && !g.Ty.IsDynamic {
 			return g.Ty, true
+		}
+	}
+	// Any other default (`s = "x" + n`): the primitive the checker gives it,
+	// as TypeScript types the parameter by its default.
+	if c := e.front(); c != nil && !e.compatJS() {
+		if t := c.TypeOf(p.Default); !c.Unanswered(t) && t.Flags&(checker.Union|checker.Any|checker.Unknown) == 0 {
+			switch {
+			case t.Flags&(checker.String|checker.StringLiteral) != 0:
+				return TypePtr, true
+			case t.Flags&(checker.Number|checker.NumberLiteral) != 0 && !t.AnyArith:
+				return TypeF64, true
+			case t.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
+				return TypeBool, true
+			}
 		}
 	}
 	return Type{}, false

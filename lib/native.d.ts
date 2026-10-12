@@ -18,9 +18,11 @@ interface KmlNative {
     // calls back with (1 for a rename, else 0; 0), the file name as
     // lastString(). The result is the watcher's handle.
     /** @lower __kml_native_fs_watch */
-    fsWatch(path: string, onEvent: (isRename: number, unused: number) => void): number;
+    fsWatch(path: string, flags: number, onEvent: (isRename: number, unused: number) => void): number;
     /** @lower __kml_native_fs_watch_close */
     fsWatchClose(handle: number): void;
+    /** @lower __kml_native_fs_watch_ref */
+    fsWatchRef(handle: number, on: number): void;
     /** @lower __kml_native_fs_flags @link pool */
     fsFlags(flags: string): number;
     /** @lower __kml_native_fs_error */
@@ -49,21 +51,23 @@ interface KmlNative {
     /** @lower __kml_native_dns_ai_flag @link pool */
     dnsAiFlag(which: number): number;
     // A resolver's channel: its servers and retry policy.
-    /** @lower __kml_native_dns_channel_new @link pool */
+    /** @lower __kml_native_dns_channel_new @link cares */
     dnsChannelNew(timeout: number, tries: number, maxTimeout: number): number;
-    /** @lower __kml_native_dns_channel_servers @link pool */
+    /** @lower __kml_native_dns_channel_servers @link cares */
     dnsChannelServers(channel: number): string;
     // spec: "address port" lines; 0, or a c-ares status.
-    /** @lower __kml_native_dns_channel_set_servers @link pool */
+    /** @lower __kml_native_dns_channel_set_servers @link cares */
     dnsChannelSetServers(channel: number, spec: string): number;
     // setLocalAddress: 0, or 1 an invalid address, 2 two IPv4, 3 two IPv6.
-    /** @lower __kml_native_dns_channel_set_local @link pool */
+    /** @lower __kml_native_dns_channel_set_local @link cares */
     dnsChannelSetLocal(channel: number, first: string, second: string): number;
-    /** @lower __kml_native_dns_channel_cancel @link pool */
+    /** @lower __kml_native_dns_strerror @link cares */
+    dnsStrerror(status: number): string;
+    /** @lower __kml_native_dns_channel_cancel @link cares */
     dnsChannelCancel(channel: number): void;
     // A query of the record type; the answer: {"rcode":n,"an":[records]}.
-    /** @lower __kml_native_dns_query @link pool */
-    dnsQuery(channel: number, type: number, name: string, callback: (status: number, unused: number) => void): void;
+    /** @lower __kml_native_dns_query @link cares */
+    dnsQuery(channel: number, type: number, name: string, callback: (status: number, unused: number) => void): number;
     /** @lower __kml_native_eai_code @link pool */
     eaiCode(code: number): string;
     /** @lower __kml_native_errno_name */
@@ -505,9 +509,10 @@ interface KmlNative {
     // AsyncLocalStorage keeps; the runtime carries it into spawned tasks and
     // scheduled timers.
     // util.inspect(value, { depth, compact, sorted, breakLength,
-    // maxArrayLength }) (compact 0 is false; Infinity is unlimited).
+    // maxArrayLength, customInspect }) (compact 0 is false; Infinity is
+    // unlimited; customInspect 0 skips [inspect.custom]).
     /** @lower __kml_inspect_opts @link inspect */
-    inspectWith(value: any, depth: number, compact: number, sorted: number, breakLength: number, maxArrayLength: number): string;
+    inspectWith(value: any, depth: number, compact: number, sorted: number, breakLength: number, maxArrayLength: number, customInspect: number): string;
     // A key naming value's prototype: two objects have one prototype exactly
     // when their keys are equal ("" for a primitive).
     /** @lower __kml_proto_key @link inspect */
@@ -770,6 +775,25 @@ interface KmlNative {
     // after a native callback into JavaScript.
     /** @lower __kml_drain_microtasks */
     runMicrotasks(): void;
+    // Node's timers binding (timerssrc/timers.c, Node's src/timers.cc), for
+    // lib/node/internal_timers.ts: processTimers(now) runs when the one
+    // timer fires and answers through timersNext; processImmediate runs in
+    // the check phase while immediateCount is above 0. Booleans cross as 0/1.
+    /** @lower __kml_native_timers_setup @link timers */
+    timersSetup(processTimers: (now: number, unused: number) => void, processImmediate: (unused: number, unused2: number) => void): void;
+    // The loop's clock in milliseconds (getLibuvNow).
+    /** @lower __kml_native_timers_now @link timers */
+    timersNow(): number;
+    /** @lower __kml_native_timers_schedule @link timers */
+    timersSchedule(ms: number): void;
+    /** @lower __kml_native_timers_toggle_ref @link timers */
+    timersToggleRef(on: number): void;
+    /** @lower __kml_native_timers_next @link timers */
+    timersNext(next: number): void;
+    /** @lower __kml_native_immediate_toggle_ref @link timers */
+    immediateToggleRef(on: number): void;
+    /** @lower __kml_native_immediate_count @link timers */
+    immediateCount(n: number): void;
     // An nghttp2 session (http2src/h2node.c), Node's node_http2.cc: fed the
     // bytes its socket reads (h2Feed), drained of the bytes to write
     // (h2Flush, then h2Take). The frames it receives queue events h2Next
@@ -817,6 +841,129 @@ interface KmlNative {
     h2ErrorText(code: number): void;
     /** @lower __kml_native_h2_free @link http2 */
     h2Free(id: number): void;
+
+    // klain:tty (the tty shim): one blocking byte off fd 0, -1 at EOF; one
+    // keystroke as a string, "" at EOF or when timeoutMs (>= 0) passes first.
+    /** @lower __kml_native_tty_read_byte @link tty */
+    ttyReadByte(): number;
+    /** @lower __kml_native_tty_read_key @link tty */
+    ttyReadKey(timeoutMs: number): string;
+
+    // klain:tui (tui.c over Yoga): a node is its address; NaN leaves a
+    // dimension unset, -1 an enum. render lays out, paints and frees the tree.
+    /** @lower __kml_native_tui_node @link tui */
+    tuiNode(kind: number): number;
+    /** @lower __kml_native_tui_size @link tui */
+    tuiSize(node: number, width: number, height: number): void;
+    /** @lower __kml_native_tui_min @link tui */
+    tuiMin(node: number, width: number, height: number): void;
+    /** @lower __kml_native_tui_flex @link tui */
+    tuiFlex(node: number, direction: number, grow: number, shrink: number, basis: number): void;
+    /** @lower __kml_native_tui_justify @link tui */
+    tuiJustify(node: number, value: number): void;
+    /** @lower __kml_native_tui_align @link tui */
+    tuiAlign(node: number, value: number): void;
+    /** @lower __kml_native_tui_self @link tui */
+    tuiSelf(node: number, value: number): void;
+    /** @lower __kml_native_tui_wrap @link tui */
+    tuiWrap(node: number, value: number): void;
+    /** @lower __kml_native_tui_padding @link tui */
+    tuiPadding(node: number, top: number, right: number, bottom: number, left: number): void;
+    /** @lower __kml_native_tui_margin @link tui */
+    tuiMargin(node: number, top: number, right: number, bottom: number, left: number): void;
+    /** @lower __kml_native_tui_gap @link tui */
+    tuiGap(node: number, gap: number): void;
+    /** @lower __kml_native_tui_colors @link tui */
+    tuiColors(node: number, fg: number, bg: number): void;
+    /** @lower __kml_native_tui_attr @link tui */
+    tuiAttr(node: number, attr: number): void;
+    /** @lower __kml_native_tui_border @link tui */
+    tuiBorder(node: number, style: number, color: number): void;
+    /** @lower __kml_native_tui_text @link tui */
+    tuiText(node: number, text: string, wrap: number): void;
+    /** @lower __kml_native_tui_add_item @link tui */
+    tuiAddItem(node: number, item: string): void;
+    /** @lower __kml_native_tui_selected @link tui */
+    tuiSelected(node: number, index: number): void;
+    /** @lower __kml_native_tui_progress @link tui */
+    tuiProgress(node: number, value: number): void;
+    /** @lower __kml_native_tui_spinner @link tui */
+    tuiSpinner(node: number, frame: number): void;
+    /** @lower __kml_native_tui_insert @link tui */
+    tuiInsert(parent: number, child: number): void;
+    /** @lower __kml_native_tui_render @link tui */
+    tuiRender(root: number): void;
+    /** @lower __kml_tui_enter @link tui */
+    tuiEnter(): void;
+    /** @lower __kml_tui_leave @link tui */
+    tuiLeave(): void;
+
+    // klain:assets (embed_assets.c): the blob embedDir's call site just
+    // linked; the address of a file's bytes in a blob (0 when it holds no
+    // such file), its length then assetsLength().
+    /** @lower __kml_native_assets_take @link assets */
+    assetsTake(): number;
+    /** @lower __kml_native_assets_get @link assets */
+    assetsGet(blob: number, path: string): number;
+    /** @lower __kml_native_assets_length @link assets */
+    assetsLength(): number;
+    /** @lower __kml_native_assets_serve @link assets */
+    assetsServe(blob: number): number;
+
+    // klain:webview (webviewsrc/natives.c over webview.h): a window is its
+    // webview_t's address. A binding calls back with the page's call id and
+    // its JSON array of arguments, answered by wvReturn.
+    /** @lower __kml_native_wv_create @link webview */
+    wvCreate(debug: boolean): number;
+    /** @lower __kml_native_wv_set_title @link webview */
+    wvSetTitle(w: number, title: string): void;
+    /** @lower __kml_native_wv_set_size @link webview */
+    wvSetSize(w: number, width: number, height: number): void;
+    /** @lower __kml_native_wv_navigate @link webview */
+    wvNavigate(w: number, url: string): void;
+    /** @lower __kml_native_wv_set_html @link webview */
+    wvSetHtml(w: number, html: string): void;
+    /** @lower __kml_native_wv_init @link webview */
+    wvInit(w: number, js: string): void;
+    /** @lower __kml_native_wv_eval @link webview */
+    wvEval(w: number, js: string): void;
+    /** @lower __kml_native_wv_unbind @link webview */
+    wvUnbind(w: number, name: string): void;
+    /** @lower __kml_native_wv_run @link webview */
+    wvRun(w: number): void;
+    /** @lower __kml_native_wv_terminate @link webview */
+    wvTerminate(w: number): void;
+    /** @lower __kml_native_wv_destroy @link webview */
+    wvDestroy(w: number): void;
+    /** @lower __kml_native_wv_bind @link webview */
+    wvBind(w: number, name: string, onCall: (id: string, req: string) => void): void;
+    /** @lower __kml_native_wv_return @link webview */
+    wvReturn(w: number, id: string, status: number, result: string): void;
+
+    // klain:sync (klainsync.c, the goroutine scheduler): a channel is its
+    // address, a value its any word. A receive's ok flag (1 a value, 0 the
+    // channel closed and drained) is then syncLastOk(); a select is built
+    // case by case, run, and a receive case's value read back.
+    /** @lower __kml_native_sync_go @link sync */
+    syncGo(fn: () => void): void;
+    /** @lower __kml_native_sync_chan_new @link sync */
+    syncChanNew(capacity: number): number;
+    /** @lower __kml_native_sync_chan_send @link sync */
+    syncChanSend(ch: number, value: any): void;
+    /** @lower __kml_native_sync_chan_recv @link sync */
+    syncChanRecv(ch: number): any;
+    /** @lower __kml_native_sync_last_ok @link sync */
+    syncLastOk(): number;
+    /** @lower __kml_native_sync_chan_close @link sync */
+    syncChanClose(ch: number): void;
+    /** @lower __kml_native_sync_select_begin @link sync */
+    syncSelectBegin(): void;
+    /** @lower __kml_native_sync_select_add @link sync */
+    syncSelectAdd(ch: number, dir: number, value: any): number;
+    /** @lower __kml_native_sync_select_run @link sync */
+    syncSelectRun(hasDefault: boolean): number;
+    /** @lower __kml_native_sync_select_value @link sync */
+    syncSelectValue(index: number): any;
 }
 
 declare var __kml_native: KmlNative;

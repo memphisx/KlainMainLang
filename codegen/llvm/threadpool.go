@@ -33,7 +33,7 @@ var dnsNativeSource string
 var zlibNativeSource string
 
 // The fs module's natives (libuv's uv_fs_* requests, sync or pooled),
-// compiled in only with -DKLAINPOOL_FS (ThreadPoolCFlags).
+// always compiled into the pool; the link drops them when unused.
 //
 //go:embed threadpoolsrc/klainfs.c
 var fsNativeSource string
@@ -63,15 +63,19 @@ func (e *Emitter) UsesThreadPool() bool { return e.usedThreadPool }
 // only when neither of those does.
 func (e *Emitter) ThreadPoolCFlags() []string {
 	cflags := []string{"-pthread"}
+	// The process handle is libuv's uv_process_t (TDD-00244 Stage 4).
+	uvflags, _ := LocateUV(e.opts.Target.OS(), e.opts.Target.Triple != "")
+	cflags = append(cflags, uvflags...)
+	// The zlib and sqlite parts need their libraries' headers, so only a
+	// program using them compiles them in; the rest is the same for every
+	// program, and the link drops what one does not use.
 	if e.usedZlibNatives {
 		cflags = append(cflags, "-DKLAINPOOL_ZLIB=1")
-	}
-	if e.usedFsNatives {
-		cflags = append(cflags, "-DKLAINPOOL_FS=1")
 	}
 	if e.usedSqliteNatives {
 		cflags = append(cflags, "-DKLAINPOOL_SQLITE=1")
 	}
+	cflags = append(cflags, DeadStripFlags(e.exportsRuntime())...)
 	if e.isGCMode() {
 		cflags = append(cflags, "-DKLAINPOOL_GC=1")
 		if !e.hasWorkers && !e.UsesSync() {
@@ -92,16 +96,6 @@ func (e *Emitter) ensureThreadPool() {
 	e.usedThreadPool = true
 
 	e.ensureMicrotasks() // __kml_drain_microtasks — run after a native callback
-
-	// klainpool.c provides these — declare them so the emitted reactor's calls
-	// resolve at the IR level (the no-op stubs in runtime_task.go are emitted
-	// only when the pool is unused).
-	e.emitGlobal("declare i1 @__kml_pool_keepalive()")
-	e.emitGlobal("declare i1 @__kml_pool_fdset_add(ptr noundef, ptr noundef)")
-	e.emitGlobal("declare zeroext i1 @__kml_pool_dispatch()")
-	e.emitGlobal("declare i1 @__kml_tcp_keepalive()")
-	e.emitGlobal("declare i1 @__kml_tcp_fdset_add(ptr noundef, ptr noundef, ptr noundef)")
-	e.emitGlobal("declare zeroext i1 @__kml_tcp_dispatch()")
 }
 
 // ensureZlibNatives compiles the zlib natives into the pool's unit and links

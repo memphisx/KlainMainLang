@@ -1,22 +1,23 @@
 /* fetch.c — the fetch client runtime over libcurl (ADR-00050, TDD-00097,
  * TDD-00040; in C per TDD-00240): the write callback, the non-blocking
  * multi-interface transfers, the abort scan, the waits (single, group,
- * settled, headers-only), the Response header/status helpers. One C unit; the
- * sections the program uses are selected by -D flags (FetchCFlags), because
- * each one references runtime pieces only its ensure*() brings in:
- *   KML_FETCH_ASYNC     multi handle, __kml_fetch_async, drain, pump, abort, await
- *   KML_FETCH_HDRWAIT   __kml_await_fetch_headers
- *   KML_FETCH_GROUP     Promise.all/race/any group waits
- *   KML_FETCH_SETTLED   __kml_pending_finish_settled
- *   KML_FETCH_AWAITSET  __kml_await_fetch_settled
- *   KML_FETCH_HDRRAW / KML_FETCH_HDRMAP / KML_FETCH_STATUSTEXT / KML_XHR_HDRS
- *   KML_FETCH_TASKS     the task-park path (the program has may-suspend fns)
- *   KML_FETCH_GC_RESTORE  restore the GC stack bottom after a task swap
+ * settled, headers-only), the Response header/status helpers. One C unit,
+ * compiled the same way for every program: the link drops the functions a
+ * program does not reach, with the runtime pieces they reference.
  * Struct-by-value results ({i64,ptr,i64}, ...) go out through an out-param;
  * the generated module keeps the by-value wrappers. The CURLOPT and CURLINFO
  * numbers are libcurl's frozen ABI values. kml_layout.h is prepended. */
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#ifdef _WIN32
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 
@@ -45,24 +46,33 @@ typedef struct {
     void *bstream;
     i64 paused;
     void *bridge;
+    void *cause; /* a failed transfer's reason, the TypeError's cause */
 } pend_t;
-_Static_assert(sizeof(pend_t) == 80, "pending fetch is 80 bytes");
+_Static_assert(sizeof(pend_t) == 88, "pending fetch is 88 bytes");
 _Static_assert(offsetof(pend_t, done) == KML_FETCHREQ_DONE && offsetof(pend_t, hdrs) == KML_FETCHREQ_HEADERS_DONE,
                "pending fetch fields read through kml_layout.h");
 
-/* An Error object: {kind, message, name}. */
+/* An Error object's leading fields: {kind, message, name}. It is allocated
+ * at the full Error layout, which code reading its other fields expects. */
 typedef struct {
     i64 kind;
     void *msg;
     void *name;
 } kerr;
+_Static_assert(KML_ERR_MESSAGE == 8 && KML_ERR_NAME == 16, "kerr is the Error layout's head");
 
 /* The interned strings the generated module hands over (@__kml_fetch_strs). */
 extern void *__kml_fetch_strs[];
-enum { S_TYPEERR, S_ABORTNAME, S_ABORTMSG, S_TIMEOUTNAME, S_TIMEOUTMSG, S_AGGNAME, S_AGGMSG, S_EMPTY };
+enum { S_TYPEERR, S_ABORTNAME, S_ABORTMSG, S_TIMEOUTNAME, S_TIMEOUTMSG, S_AGGNAME, S_AGGMSG, S_EMPTY, S_ERRNAME, S_FAILED };
 
 #define CURLINFO_RESPONSE_CODE 2097154
 #define CURLINFO_PRIVATE 1048597
+#define CURLINFO_EFFECTIVE_URL 1048577
+#define CURLINFO_PRIMARY_IP 1048608
+#define CURLINFO_OS_ERRNO 2097177
+#define CURLINFO_PRIMARY_PORT 2097192
+#define CURLE_COULDNT_RESOLVE_HOST 6
+#define CURLE_COULDNT_CONNECT 7
 #define CURLOPT_WRITEDATA 10001
 #define CURLOPT_URL 10002
 #define CURLOPT_TIMEOUT 13
@@ -91,6 +101,70 @@ extern void curl_easy_cleanup(void *);
 extern const char *curl_easy_strerror(int);
 extern _Bool __kml_curl_inited;
 
+#if defined(__APPLE__)
+/* macOS's libcurl waits with select() and refuses a socket at or above
+ * FD_SETSIZE. When the descriptor limit lets a program go past it, a few
+ * low descriptors are reserved at startup: a transfer's socket opened
+ * above the limit moves onto one (dup2), and goes back to the reserve when
+ * libcurl closes it. */
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#define CURLOPT_OPENSOCKETFUNCTION 20163
+#define CURLOPT_CLOSESOCKETFUNCTION 20208
+#define LOWFD_RESERVE 32
+struct kml_curl_sockaddr {
+    int family, socktype, protocol;
+    unsigned int addrlen;
+};
+static int lowfd_free[LOWFD_RESERVE], lowfd_n;
+static unsigned char lowfd_ours[FD_SETSIZE / 8];
+
+__attribute__((constructor)) static void lowfd_reserve(void) {
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur <= FD_SETSIZE) return;
+    while (lowfd_n < LOWFD_RESERVE) {
+        int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (fd < 0) break;
+        if (fd >= FD_SETSIZE) {
+            close(fd);
+            break;
+        }
+        lowfd_ours[fd / 8] |= (unsigned char)(1u << (fd % 8));
+        lowfd_free[lowfd_n++] = fd;
+    }
+}
+
+static int lowfd_open(void *clientp, int purpose, struct kml_curl_sockaddr *a) {
+    (void)clientp;
+    (void)purpose;
+    int s = socket(a->family, a->socktype, a->protocol);
+    if (s < FD_SETSIZE || lowfd_n == 0) return s;
+    int r = lowfd_free[--lowfd_n];
+    dup2(s, r);
+    close(s);
+    fcntl(r, F_SETFD, FD_CLOEXEC);
+    return r;
+}
+
+static int lowfd_close(void *clientp, int s) {
+    (void)clientp;
+    if (s >= 0 && s < FD_SETSIZE && (lowfd_ours[s / 8] >> (s % 8) & 1)) {
+        int dn = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (dn >= 0) {
+            dup2(dn, s);
+            close(dn);
+            fcntl(s, F_SETFD, FD_CLOEXEC);
+            lowfd_free[lowfd_n++] = s;
+            return 0;
+        }
+    }
+    return close(s);
+}
+#endif
+
 extern void *__kml_str_from_cstr(const char *);
 extern void *__kml_str_alloc(i64);
 extern void __kml_throw(void *) __attribute__((noreturn));
@@ -101,6 +175,7 @@ extern void __kml_fetch_body_on_done(void *pend);
  * request errors fetch settles with before any transfer (negative codes). */
 const char *__kml_fetch_errstr(int code) {
     if (code == -2) return "Request with GET/HEAD method cannot have body.";
+    if (code == -3) return "bad port";
     return curl_easy_strerror(code);
 }
 
@@ -141,50 +216,210 @@ i64 __kml_curl_write_cb(const char *chunk, i64 size, i64 nmemb, kbuf *ud) {
     return total;
 }
 
-static void *mk_error(void *msg, void *name) {
-    kerr *e = (kerr *)malloc(sizeof(kerr));
-    e->kind = KML_KIND_TYPEERR;
+static void *mk_error(i64 kind, void *msg, void *name) {
+    kerr *e = (kerr *)calloc(1, KML_ERR_SIZE);
+    e->kind = kind;
     e->msg = msg;
     e->name = name;
     return e;
 }
 
-/* An Error whose message is the fetch failure `code`'s. */
-__attribute__((unused)) static void *fetch_error(i64 code) {
-    return mk_error(__kml_str_from_cstr(__kml_fetch_errstr((int)code)), __kml_fetch_strs[S_TYPEERR]);
+extern i64 __kml_nb_pack(u8 tag, i64 pay);
+
+/* An AggregateError: the Error layout, then its errors array (KML_AGG_ERRORS,
+ * any[]: each error boxed in place) and their count. */
+static void *mk_aggregate(void *msg, void **errs, i64 n) {
+    for (i64 i = 0; i < n; i++)
+        ((i64 *)errs)[i] = __kml_nb_pack(KML_TAG_ERROR, (i64)(intptr_t)errs[i]);
+    char *agg = (char *)calloc(1, KML_AGG_SIZE);
+    F(agg, KML_ERROR_KIND, i64) = KML_ERRKIND_AGG;
+    F(agg, KML_ERR_MESSAGE, void *) = msg;
+    F(agg, KML_ERR_NAME, void *) = __kml_fetch_strs[S_AGGNAME];
+    F(agg, KML_ERR_CAUSE, i64) = KML_NB_UNDEFINED;
+    F(agg, KML_AGG_ERRORS, void **) = errs;
+    F(agg, KML_AGG_ERRORS + 8, i64) = n;
+    return agg;
 }
 
-#ifdef KML_FETCH_ASYNC
+extern void *__kml_errno_code(int e);
+extern int __kml_uv_errno(int e);
+extern void *__kml_dynobj_new(void);
+extern void __kml_dynobj_set(void *o, const char *key, i64 v);
+extern void __kml_error_own_cause(void *op);
+
+static const struct { i64 len; char d[9]; } k_hostname = { 8, "hostname" };
+
+/* A string from printf-style parts. */
+static void *fmt_str(const char *fmt, const char *a, const char *b, long n) {
+    char buf[600];
+    snprintf(buf, sizeof buf, fmt, a, b, n);
+    return __kml_str_from_cstr(buf);
+}
+
+/* The host of an http(s) URL (brackets of an IPv6 literal dropped). */
+static void url_host(const char *url, char *out, size_t cap) {
+    out[0] = 0;
+    const char *h = url ? strstr(url, "://") : 0;
+    if (!h) return;
+    h += 3;
+    const char *at = h;
+    while (*at && *at != '/' && *at != '?' && *at != '#') at++;
+    for (const char *c = h; c < at; c++)
+        if (*c == '@') h = c + 1;
+    const char *end = h;
+    if (*h == '[') {
+        h++;
+        end = h;
+        while (*end && *end != ']') end++;
+    } else {
+        while (end < at && *end != ':') end++;
+    }
+    size_t n = (size_t)(end - h);
+    if (n >= cap) n = cap - 1;
+    memcpy(out, h, n);
+    out[n] = 0;
+}
+
+/* The port of an http(s) URL, its scheme's default when absent. */
+static long url_port(const char *url) {
+    const char *h = url ? strstr(url, "://") : 0;
+    if (!h) return 0;
+    long dflt = strncmp(url, "https", 5) == 0 ? 443 : 80;
+    h += 3;
+    const char *at = h;
+    while (*at && *at != '/' && *at != '?' && *at != '#') at++;
+    for (const char *c = h; c < at; c++)
+        if (*c == '@') h = c + 1;
+    if (*h == '[')
+        while (h < at && *h != ']') h++;
+    while (h < at && *h != ':') h++;
+    return h < at ? strtol(h + 1, 0, 10) : dflt;
+}
+
+/* Node's error for a refused (or otherwise failed) connect to ip:port. */
+static void *connect_error(const char *ecode, long oserr, const char *ip, long port) {
+    void *o = mk_error(KML_ERRKIND_ERROR, port > 0 ? fmt_str("connect %s %s:%ld", ecode, ip, port) : fmt_str("connect %s %s", ecode, ip, 0),
+                       __kml_fetch_strs[S_ERRNAME]);
+    F(o, KML_ERR_ERRNO, double) = (double)__kml_uv_errno((int)oserr);
+    F(o, KML_ERR_CODE, const void *) = ecode;
+    F(o, KML_ERROR_SYSCALL, const void *) = __kml_str_from_cstr("connect");
+    F(o, KML_ERR_ADDRESS, const void *) = __kml_str_from_cstr(ip);
+    if (port > 0) F(o, KML_ERR_PORT, double) = (double)port;
+    return o;
+}
+
+/* The reason a transfer failed, as Node's fetch (undici) reports it in the
+ * TypeError's `cause`: the system error of the connect or the lookup, or
+ * an Error with libcurl's message for any other failure. Read off the easy
+ * handle before it is freed. */
+static void *failure_cause(void *easy, int code) {
+    void *errname = __kml_fetch_strs[S_ERRNAME];
+    if (code == CURLE_COULDNT_RESOLVE_HOST) {
+        char *url = 0;
+        char host[256];
+        curl_easy_getinfo(easy, CURLINFO_EFFECTIVE_URL, &url);
+        url_host(url, host, sizeof host);
+        void *o = mk_error(KML_ERRKIND_ERROR, fmt_str("getaddrinfo ENOTFOUND %s", host, 0, 0), errname);
+        F(o, KML_ERR_ERRNO, double) = -3008;
+        F(o, KML_ERR_CODE, const void *) = __kml_str_from_cstr("ENOTFOUND");
+        F(o, KML_ERROR_SYSCALL, const void *) = __kml_str_from_cstr("getaddrinfo");
+        void *bag = __kml_dynobj_new();
+        __kml_dynobj_set(bag, k_hostname.d, (i64)(intptr_t)__kml_str_from_cstr(host)); /* a string boxes as its pointer */
+        F(o, KML_ERR_EXTRA, void *) = bag;
+        return o;
+    }
+    long oserr = 0, port = 0;
+    char *ip = 0;
+    curl_easy_getinfo(easy, CURLINFO_OS_ERRNO, &oserr);
+    curl_easy_getinfo(easy, CURLINFO_PRIMARY_IP, &ip);
+    curl_easy_getinfo(easy, CURLINFO_PRIMARY_PORT, &port);
+    const char *ecode = oserr ? (const char *)__kml_errno_code((int)oserr) : 0;
+    if (code == CURLE_COULDNT_CONNECT && ecode) {
+        char *url = 0;
+        curl_easy_getinfo(easy, CURLINFO_EFFECTIVE_URL, &url);
+        if (port <= 0) port = url_port(url);
+        if (ip && *ip) return connect_error(ecode, oserr, ip, port);
+        /* libcurl leaves the address unset after a failed connect (macOS):
+         * the URL's host's addresses, which libcurl tried in turn. A name
+         * with several is Node's AggregateError of one connect error each
+         * (its autoSelectFamily attempts), carrying the code. */
+        char host[256];
+        url_host(url, host, sizeof host);
+        struct addrinfo hints = {0}, *res = 0;
+        hints.ai_socktype = SOCK_STREAM;
+        void **errs = 0;
+        i64 n = 0;
+        char seen[8][INET6_ADDRSTRLEN + 1];
+        if (host[0] && getaddrinfo(host, 0, &hints, &res) == 0) {
+            for (struct addrinfo *ai = res; ai && n < 8; ai = ai->ai_next) {
+                const void *a = ai->ai_family == AF_INET6 ? (const void *)&((struct sockaddr_in6 *)ai->ai_addr)->sin6_addr
+                                                         : (const void *)&((struct sockaddr_in *)ai->ai_addr)->sin_addr;
+                char addr[INET6_ADDRSTRLEN + 1];
+                if (!inet_ntop(ai->ai_family, a, addr, sizeof addr)) continue;
+                int dup = 0;
+                for (i64 i = 0; i < n; i++) dup |= strcmp(seen[i], addr) == 0;
+                if (dup) continue;
+                strcpy(seen[n], addr);
+                errs = (void **)realloc(errs, (size_t)(n + 1) * sizeof(void *));
+                errs[n++] = connect_error(ecode, oserr, addr, port);
+            }
+            freeaddrinfo(res);
+        }
+        if (n == 1) return errs[0];
+        if (n > 1) {
+            void *agg = mk_aggregate(__kml_fetch_strs[S_EMPTY], errs, n);
+            F(agg, KML_ERR_CODE, const void *) = ecode;
+            return agg;
+        }
+    }
+    return mk_error(KML_ERRKIND_ERROR, __kml_str_from_cstr(curl_easy_strerror(code)), errname);
+}
+
+/* The rejection of a failed fetch: a request error (negative code) is a
+ * TypeError with its own message; a transfer failure is Node's
+ * `TypeError: fetch failed`, its reason the cause. */
+__attribute__((unused)) static void *fetch_error(pend_t *p) {
+    if (p->result < 0 && p->result != -3)
+        return mk_error(KML_KIND_TYPEERR, __kml_str_from_cstr(__kml_fetch_errstr((int)p->result)), __kml_fetch_strs[S_TYPEERR]);
+    void *e = mk_error(KML_KIND_TYPEERR, __kml_fetch_strs[S_FAILED], __kml_fetch_strs[S_TYPEERR]);
+    void *cause = p->cause ? p->cause : mk_error(KML_ERRKIND_ERROR, __kml_str_from_cstr(__kml_fetch_errstr((int)p->result)), __kml_fetch_strs[S_ERRNAME]);
+    F(e, KML_ERR_CAUSE, i64) = __kml_nb_pack(KML_TAG_OBJECT, (i64)(intptr_t)cause);
+    return e;
+}
+
 extern int curl_multi_perform(void *, int *);
 extern void *curl_multi_init(void);
 extern int curl_multi_add_handle(void *, void *);
 extern int curl_multi_remove_handle(void *, void *);
 extern void *curl_multi_info_read(void *, int *);
+extern int curl_multi_fdset(void *, void *, void *, void *, int *);
+extern int curl_multi_timeout(void *, long *);
+extern i64 __kml_monotonic_ns(void);
 extern _Thread_local void *__kml_curl_multi;
 extern void __kml_curl_drain_messages(void);
 
-extern _Thread_local void *__kml_current_task;
 extern _Thread_local char __kml_main_ctx[];
 extern _Thread_local void *__kml_conn_data;
 extern _Thread_local i64 __kml_current_conn_idx;
 extern _Thread_local int __kml_jmp_top;
 extern int swapcontext(void *, void *);
-extern int __kml_loop_turn(_Bool);
+extern void __kml_wait_outside_coroutine(void);
 extern int __kml_signal_aborted(void *sig);
 extern i64 __kml_signal_reason(void *sig);
 extern int __kml_signal_timeout(void *sig);
 extern int __kml_nb_tag(i64);
 extern i64 __kml_nb_pay(i64);
 extern void __kml_throw_any(u8 tag, i64 pay) __attribute__((noreturn));
-extern void __kml_fetch_bodyprom_on_done(void *pend);
 extern void __kml_fetch_body_abort(void *pend, void *err);
 extern void __kml_drain_microtasks(void);
-#ifdef KML_FETCH_GC_RESTORE
-extern void __kml_task_gc_restore(void);
+/* The task runtime's definitions replace these when the program has tasks
+ * (and, for the GC restore, -mm=gc); without them no task ever runs. */
+_Thread_local void *__kml_current_task __attribute__((weak)) = 0;
+__attribute__((weak)) void __kml_task_gc_restore(void) {}
+/* The Response-body-promise drain (promise runtime) replaces this when a
+ * body accessor made one. */
+__attribute__((weak)) void __kml_fetch_bodyprom_on_done(void *pend) { (void)pend; }
 #define GC_RESTORE() __kml_task_gc_restore()
-#else
-#define GC_RESTORE() ((void)0)
-#endif
 
 #define T_CTX(t) F(t, KML_TASK_CTX, void *)
 #define T_STATE(t) F(t, KML_TASK_STATE, i64)
@@ -215,11 +450,8 @@ static void *abort_error(void *sig) {
         if (*(i64 *)robj & KML_ERR_FLAG) return robj;
     }
     _Bool timeout = __kml_signal_timeout(sig) & 1;
-    kerr *e = (kerr *)malloc(sizeof(kerr));
-    e->kind = KML_KIND_DOMEXC;
-    e->msg = __kml_fetch_strs[timeout ? S_TIMEOUTMSG : S_ABORTMSG];
-    e->name = __kml_fetch_strs[timeout ? S_TIMEOUTNAME : S_ABORTNAME];
-    return e;
+    return mk_error(KML_KIND_DOMEXC, __kml_fetch_strs[timeout ? S_TIMEOUTMSG : S_ABORTMSG],
+                    __kml_fetch_strs[timeout ? S_TIMEOUTNAME : S_ABORTNAME]);
 }
 
 /* Tears a signal-aborted transfer down once: result -1 marks it, done lets
@@ -264,30 +496,242 @@ void __kml_fetch_throw_abort(void *sig) {
     __kml_throw_any((u8)__kml_nb_tag(r), __kml_nb_pay(r));
 }
 
+/* ---- driving libcurl ----
+ * On POSIX libcurl is driven through its socket API (TDD-00244 Stage 3):
+ * it reports the sockets it waits on and its next deadline through
+ * CURLMOPT_SOCKETFUNCTION / CURLMOPT_TIMERFUNCTION, and every drive is a
+ * curl_multi_socket_action. Each reported socket is a libuv watcher and the
+ * deadline a libuv timer on the event loop (loop.c), whose callbacks drive
+ * libcurl inside the wait (no FD_SETSIZE ceiling: curl_multi_fdset cannot
+ * report a socket at or above it); a wait outside the loop polls the
+ * sockets itself. Windows keeps
+ * curl_multi_fdset/curl_multi_perform until its loop moves to libuv
+ * (TDD-00244 Stage 6): its sockets are Winsock handles, not small fds. */
+#ifndef _WIN32
+#include <poll.h>
+#define CURLMOPT_SOCKETFUNCTION 20001
+#define CURLMOPT_TIMERFUNCTION 20004
+#define CURL_SOCKET_TIMEOUT (-1)
+extern int curl_multi_setopt(void *, int, ...);
+extern int curl_multi_socket_action(void *, int, int, int *);
+
+typedef struct { int fd, what; void *uvw; } curl_watch;
+extern void *__kml_loop_io_watch(int fd, int events, void (*cb)(void *, int, int), void *data);
+extern void __kml_loop_io_events(void *w, int events);
+extern void __kml_loop_io_unwatch(void *w);
+extern void *__kml_loop_timer_new(void (*cb)(void *), void *data);
+extern void __kml_loop_timer_start(void *t, i64 ms);
+extern void __kml_loop_timer_stop(void *t);
+static _Thread_local void *curl_timer;
+static void on_curl_io(void *data, int fd, int ev);
+static _Thread_local curl_watch *watches;
+static _Thread_local int nwatches, capwatches;
+/* 0: none; else the monotonic ns libcurl wants to be driven at */
+static _Thread_local i64 curl_deadline;
+static _Thread_local int curl_running;
+
+static int on_curl_socket(void *easy, int fd, int what, void *userp, void *sockp) {
+    (void)easy; (void)userp; (void)sockp;
+    for (int i = 0; i < nwatches; i++) {
+        if (watches[i].fd != fd) continue;
+        if (what == 4) { /* CURL_POLL_REMOVE: before libcurl closes it */
+            __kml_loop_io_unwatch(watches[i].uvw);
+            watches[i] = watches[--nwatches];
+        } else {
+            watches[i].what = what;
+            __kml_loop_io_events(watches[i].uvw, what);
+        }
+        return 0;
+    }
+    if (what == 4) return 0;
+    if (nwatches == capwatches) {
+        capwatches = capwatches ? capwatches * 2 : 16;
+        watches = realloc(watches, sizeof(curl_watch) * (size_t)capwatches);
+    }
+    watches[nwatches].fd = fd;
+    watches[nwatches].what = what;
+    watches[nwatches].uvw = __kml_loop_io_watch(fd, what, on_curl_io, 0);
+    nwatches++;
+    return 0;
+}
+
+static void on_curl_due(void *unused);
+
+static int on_curl_timer(void *multi, long ms, void *userp) {
+    (void)multi; (void)userp;
+    if (!curl_timer) curl_timer = __kml_loop_timer_new(on_curl_due, 0);
+    if (ms < 0) {
+        curl_deadline = 0;
+        __kml_loop_timer_stop(curl_timer);
+    } else {
+        i64 dl = __kml_monotonic_ns() + (i64)ms * 1000000;
+        curl_deadline = dl == 0 ? 1 : dl;
+        __kml_loop_timer_start(curl_timer, ms);
+    }
+    return 0;
+}
+
+static void *multi_new(void) {
+    void *m = curl_multi_init();
+    curl_multi_setopt(m, CURLMOPT_SOCKETFUNCTION, on_curl_socket);
+    curl_multi_setopt(m, CURLMOPT_TIMERFUNCTION, on_curl_timer);
+    return m;
+}
+
+static void act(int fd, int ev) {
+    curl_multi_socket_action(__kml_curl_multi, fd, ev, &curl_running);
+}
+
+/* Inside the wait: a socket's readiness or the deadline drives libcurl,
+ * and finished transfers settle (the loop's pass then fires their
+ * reactions and resumes the fibers waiting on them). */
+static void on_curl_io(void *data, int fd, int ev) {
+    (void)data;
+    act(fd, ev);
+    __kml_curl_drain_messages();
+}
+
+static void on_curl_due(void *unused) {
+    (void)unused;
+    curl_deadline = 0;
+    act(CURL_SOCKET_TIMEOUT, 0);
+    __kml_curl_drain_messages();
+}
+
+/* A timeout action: libcurl serves whatever deadline is due (a transfer
+ * just added is due at once, so this also starts it) and reports how many
+ * transfers are still running, which a removed or finished transfer changes
+ * without any socket event. The stored deadline is cleared only when due:
+ * the timer callback reports changes only. */
+static void kick(void) {
+    if (curl_deadline != 0 && curl_deadline <= __kml_monotonic_ns()) curl_deadline = 0;
+    act(CURL_SOCKET_TIMEOUT, 0);
+}
+
+/* A wait outside the event loop: poll libcurl's own sockets for up to
+ * max_ms (bounded by its deadline), then drive what is ready. */
+static void drive_once(int max_ms) {
+    kick();
+    struct pollfd stackfds[16];
+    struct pollfd *pfd = nwatches <= 16 ? stackfds : malloc(sizeof(struct pollfd) * (size_t)nwatches);
+    int n = nwatches;
+    for (int i = 0; i < n; i++) {
+        pfd[i].fd = watches[i].fd;
+        pfd[i].events = (short)(((watches[i].what & 1) ? POLLIN : 0) | ((watches[i].what & 2) ? POLLOUT : 0));
+        pfd[i].revents = 0;
+    }
+    int ms = max_ms;
+    if (curl_deadline != 0) {
+        i64 left = (curl_deadline - __kml_monotonic_ns() + 999999) / 1000000;
+        if (left < 0) left = 0;
+        if (left < ms) ms = (int)left;
+    }
+    int r = poll(pfd, (unsigned)n, ms);
+    for (int i = 0; r > 0 && i < n; i++) {
+        int ev = ((pfd[i].revents & (POLLIN | POLLHUP | POLLERR)) ? 1 : 0) |
+                 ((pfd[i].revents & (POLLOUT | POLLERR)) ? 2 : 0) |
+                 ((pfd[i].revents & POLLERR) ? 4 : 0);
+        if (ev) act(pfd[i].fd, ev);
+    }
+    if (pfd != stackfds) free(pfd);
+    kick();
+    __kml_curl_drain_messages();
+}
+#else
+extern int curl_multi_wait(void *, void *, unsigned, int, int *);
+static _Thread_local int curl_running;
+static void *multi_new(void) { return curl_multi_init(); }
+static void kick(void) { curl_multi_perform(__kml_curl_multi, &curl_running); }
+static void drive_once(int max_ms) {
+    kick();
+    __kml_curl_drain_messages();
+    if (max_ms > 0) curl_multi_wait(__kml_curl_multi, 0, 0, max_ms, 0);
+}
+#endif
+
+/* One drive and drain with no wait: the scheduler's and the loop's
+ * keep-alive check's hook. It polls libcurl's sockets without blocking, as
+ * curl_multi_perform did: a scheduler step can run in a wait outside the
+ * loop (a connection fiber consuming its own request body), and a transfer
+ * whose readiness nothing reports would stall there. */
+void __kml_curl_kick(void) {
+    if (!__kml_curl_multi) return;
+    drive_once(0);
+}
+
+/* One drive outside the event loop, waiting up to max_ms on libcurl's
+ * sockets; returns the transfers still running. */
+int __kml_curl_drive_once(int max_ms) {
+    if (!__kml_curl_multi) return 0;
+    drive_once(max_ms);
+    return curl_running;
+}
+
 /* libcurl's count of transfers still in flight (0 with no multi handle). An
  * in-flight transfer keeps the event loop alive whether or not anything is
- * awaiting it yet; curl_multi_perform is the only thing that reports the
- * count (non-blocking; completed transfers it notices are drained). */
+ * awaiting it yet; driving libcurl here first drains transfers that just
+ * finished. */
 int __kml_curl_inflight(void) {
     __kml_sigfetch_scan();
-    void *multi = __kml_curl_multi;
-    if (!multi) return 0;
-    int running = 0;
-    curl_multi_perform(multi, &running);
-    __kml_curl_drain_messages();
-    return running;
+    if (!__kml_curl_multi) return 0;
+    __kml_curl_kick();
+    return curl_running;
 }
+
+/* The event loop's view of libcurl (loop.c): whether the multi handle
+ * exists; on Windows also its sockets merged into the loop's sets, its own
+ * deadline (0 for none), and one drive after the wait. */
+_Bool __kml_curl_loop_active(void) { return __kml_curl_multi != 0; }
+
+#ifdef _WIN32
+int __kml_curl_loop_fdset(void *r, void *w, void *e, int *maxfd) {
+    return curl_multi_fdset(__kml_curl_multi, r, w, e, maxfd);
+}
+
+i64 __kml_curl_loop_deadline_ns(void) {
+    long ms = -1;
+    curl_multi_timeout(__kml_curl_multi, &ms);
+    if (ms < 0) return 0;
+    i64 dl = __kml_monotonic_ns() + (i64)ms * 1000000;
+    return dl == 0 ? 1 : dl;
+}
+
+void __kml_curl_loop_perform(void *r, void *w) {
+    (void)r; (void)w;
+    kick();
+    __kml_curl_drain_messages();
+}
+#endif
 
 /* Starts a transfer without blocking and returns its pending struct. method/
  * headers/body are each nullable (a null skips the setopt); headers is a
  * curl_slist*. bodylen < 0: a NUL-terminated body, else its byte length so a
  * binary body is sent whole. */
+/* The fetch standard's bad ports: a request to one fails without a
+ * connection being attempted. */
+static const unsigned short bad_ports[] = {
+    1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102,
+    103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465,
+    512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993,
+    995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668,
+    6669, 6679, 6697, 10080,
+};
+
+static _Bool url_bad_port(const char *url) {
+    if (!url || (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0)) return 0;
+    long port = url_port(url);
+    for (size_t i = 0; i < sizeof bad_ports / sizeof bad_ports[0]; i++)
+        if (bad_ports[i] == port) return 1;
+    return 0;
+}
+
 void *__kml_fetch_async_n(const char *url, const char *method, void *headers, const char *body, i64 bodylen, void *signal) {
+    if (url_bad_port(url)) return __kml_fetch_failed_pending(-3);
     if (!__kml_curl_inited) {
         curl_global_init(3);
         __kml_curl_inited = 1;
     }
-    if (!__kml_curl_multi) __kml_curl_multi = curl_multi_init();
+    if (!__kml_curl_multi) __kml_curl_multi = multi_new();
     void *multi = __kml_curl_multi;
 
     kbuf *buf = (kbuf *)malloc(sizeof(kbuf));
@@ -310,6 +754,10 @@ void *__kml_fetch_async_n(const char *url, const char *method, void *headers, co
      * executable; the Windows certificate store is always there, as Node's
      * roots always are. */
     curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, (long)CURLSSLOPT_NATIVE_CA);
+#endif
+#if defined(__APPLE__)
+    curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, lowfd_open);
+    curl_easy_setopt(curl, CURLOPT_CLOSESOCKETFUNCTION, lowfd_close);
 #endif
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, __kml_curl_write_cb);
@@ -337,6 +785,7 @@ void *__kml_fetch_async_n(const char *url, const char *method, void *headers, co
 
     pend_t *p = (pend_t *)malloc(sizeof(pend_t));
     p->bridge = 0;
+    p->cause = 0;
     p->easy = curl;
     p->buf = buf;
     p->done = p->status = p->result = 0;
@@ -349,8 +798,7 @@ void *__kml_fetch_async_n(const char *url, const char *method, void *headers, co
 
     curl_easy_setopt(curl, CURLOPT_PRIVATE, p);
     curl_multi_add_handle(multi, curl);
-    int running;
-    curl_multi_perform(multi, &running);
+    __kml_curl_kick();
     return p;
 }
 
@@ -381,6 +829,7 @@ void __kml_curl_drain_messages(void) {
         curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &status);
         p->status = status;
         p->result = m->result;
+        if (m->result != 0) p->cause = failure_cause(easy, m->result);
         curl_multi_remove_handle(multi, easy);
         curl_easy_cleanup(easy);
         p->done = 1;
@@ -393,12 +842,7 @@ void __kml_curl_drain_messages(void) {
  * the no-fiber await drive's hook (TDD-00097 Stage 4). */
 _Bool __kml_fetch_pump(void) {
     __kml_sigfetch_scan();
-    void *multi = __kml_curl_multi;
-    if (!multi) return 0;
-    int running = 0;
-    curl_multi_perform(multi, &running);
-    __kml_curl_drain_messages();
-    return running > 0;
+    return __kml_curl_drive_once(0) > 0;
 }
 
 /* ---- finishing ---- */
@@ -413,7 +857,7 @@ typedef struct {
  * final status/body (a body never written is an empty string). */
 void __kml_pending_finish_c(void *pending, fres *out) {
     pend_t *p = (pend_t *)pending;
-    if (p->result != 0) __kml_throw(fetch_error(p->result));
+    if (p->result != 0) __kml_throw(fetch_error(p));
     kbuf *b = p->buf;
     out->status = p->status;
     if (!b->data) {
@@ -434,7 +878,6 @@ void __kml_pending_finish_c(void *pending, fres *out) {
  * it parks in the connection's slot (conn_off) and yields to the loop.
  * Returns 0 when the caller is on neither (the main stack). */
 static _Bool park(void *what, i64 task_off, i64 conn_off, _Bool use_task) {
-#ifdef KML_FETCH_TASKS
     void *ct = use_task ? __kml_current_task : 0;
     if (ct) {
         F(ct, task_off, void *) = what;
@@ -444,10 +887,6 @@ static _Bool park(void *what, i64 task_off, i64 conn_off, _Bool use_task) {
         GC_RESTORE();
         return 1;
     }
-#else
-    (void)task_off;
-    (void)use_task;
-#endif
     i64 idx = __kml_current_conn_idx;
     if (idx < 0) return 0;
     char *slot = (char *)__kml_conn_data + idx * KML_CONN_SIZE;
@@ -457,18 +896,6 @@ static _Bool park(void *what, i64 task_off, i64 conn_off, _Bool use_task) {
     slot = (char *)__kml_conn_data + idx * KML_CONN_SIZE;
     F(slot, conn_off, void *) = 0;
     return 1;
-}
-
-/* The main-stack wait: a turn of the real event loop (TDD-00223 §1), pinned
- * alive by this in-flight transfer, which sleeps in select() on libcurl's
- * sockets and serves every other source meanwhile. Only from inside a loop
- * callback (turn == 2) does the libcurl-only spin remain. */
-static void spin(_Bool drain_microtasks) {
-    if (__kml_loop_turn(1) != 2) return;
-    int running;
-    curl_multi_perform(__kml_curl_multi, &running);
-    __kml_curl_drain_messages();
-    if (drain_microtasks) __kml_drain_microtasks();
 }
 
 /* Loops until the transfer is done. Done is checked before the abort signal so
@@ -491,13 +918,11 @@ void __kml_await_fetch_c(void *pending, fres *out) {
             __kml_fetch_throw_abort(sig);
         }
         if (park(p, KML_TASK_PENDING_FETCH, KML_FETCH_CONN_PFETCH, 1)) continue;
-        spin(0);
+        __kml_wait_outside_coroutine();
     }
     __kml_pending_finish_c(p, out);
 }
-#endif /* KML_FETCH_ASYNC */
 
-#ifdef KML_FETCH_HDRWAIT
 /* Drives the multi loop until the response's headers have arrived (the first
  * write-callback invocation) or the transfer is done, then returns the HTTP
  * status: the resolve-at-headers point `await fetch(...)` uses, so `.body`
@@ -531,14 +956,11 @@ i64 __kml_await_fetch_headers(void *pending) {
             return st;
         }
         if (park(p, KML_TASK_PENDING_FETCH, KML_FETCH_CONN_PFETCH, 1)) continue;
-        /* Module top level: keep microtask ordering intact while waiting
-         * (a queued .then drive fires here). */
-        spin(1);
+        /* Module top level: a turn of the loop, which drains microtasks */
+        __kml_wait_outside_coroutine();
     }
 }
-#endif /* KML_FETCH_HDRWAIT */
 
-#ifdef KML_FETCH_SETTLED
 /* A non-throwing sibling of __kml_pending_finish (Promise.allSettled,
  * XMLHttpRequest.send): on failure `reason` is curl's message and the body
  * empty. */
@@ -574,9 +996,7 @@ void __kml_pending_finish_settled_c(void *pending, sres *out) {
         out->len = b->len;
     }
 }
-#endif /* KML_FETCH_SETTLED */
 
-#ifdef KML_FETCH_AWAITSET
 /* __kml_await_fetch's loop finishing non-throwingly: XMLHttpRequest.send()'s
  * whole transfer mechanism. A blocking wait by definition, one goroutine
  * threads issue concurrently: it drives libcurl alone and never takes a turn
@@ -585,15 +1005,11 @@ void __kml_await_fetch_settled_c(void *pending, sres *out) {
     pend_t *p = (pend_t *)pending;
     while (!p->done) {
         if (park(p, 0, KML_FETCH_CONN_PFETCH, 0)) continue;
-        int running;
-        curl_multi_perform(__kml_curl_multi, &running);
-        __kml_curl_drain_messages();
+        __kml_curl_drive_once(100);
     }
     __kml_pending_finish_settled_c(p, out);
 }
-#endif /* KML_FETCH_AWAITSET */
 
-#ifdef KML_FETCH_GROUP
 /* A group is {members**, count, mode}: mode 0 waits for every member
  * (.all/.allSettled), 1 for the first (.race), 2 (.any) for the first that
  * transport-succeeded or, if none, every member done. */
@@ -642,13 +1058,8 @@ i64 __kml_first_success_index(void *group) {
 void __kml_group_throw_aggregate(void *group) {
     grp *g = (grp *)group;
     void **errs = (void **)malloc((size_t)g->count * sizeof(void *));
-    for (i64 i = 0; i < g->count; i++) errs[i] = fetch_error(g->members[i]->result);
-    void **agg = (void **)malloc(KML_AGG_SIZE);
-    ((i64 *)agg)[0] = KML_KIND_AGG;
-    agg[1] = __kml_fetch_strs[S_AGGMSG];
-    agg[2] = __kml_fetch_strs[S_AGGNAME];
-    agg[3] = errs;
-    ((i64 *)agg)[4] = g->count;
+    for (i64 i = 0; i < g->count; i++) errs[i] = fetch_error(g->members[i]);
+    void *agg = mk_aggregate(__kml_fetch_strs[S_AGGMSG], errs, g->count);
     __kml_throw(agg);
 }
 
@@ -657,14 +1068,12 @@ void __kml_group_throw_aggregate(void *group) {
 void __kml_await_group_wait(void *group) {
     while (!__kml_group_satisfied(group)) {
         if (park(group, KML_TASK_PENDING_GROUP, KML_FETCH_CONN_PGROUP, 1)) continue;
-        spin(0);
+        __kml_wait_outside_coroutine();
     }
 }
-#endif /* KML_FETCH_GROUP */
 
 /* ---- Response header and status helpers ---- */
 
-#if defined(KML_FETCH_HDRRAW) || defined(KML_FETCH_HDRMAP) || defined(KML_FETCH_STATUSTEXT)
 /* The captured raw header text of a Response (every block of a redirect
  * chain), or null for a combinator-built Response / one with none. */
 static const char *raw_headers(void *pending) {
@@ -672,16 +1081,12 @@ static const char *raw_headers(void *pending) {
     if (!p || !p->buf || !p->buf->hbuf) return 0;
     return ((kbuf *)p->buf->hbuf)->data;
 }
-#endif
 
-#ifdef KML_FETCH_HDRRAW
 void *__kml_fetch_headers_raw(void *pending) {
     const char *raw = raw_headers(pending);
     return raw ? __kml_str_from_cstr(raw) : __kml_fetch_strs[S_EMPTY];
 }
-#endif
 
-#ifdef KML_FETCH_HDRMAP
 extern void *__kml_map_str_create(void);
 extern void __kml_map_str_set(void *map, char *key, i64 val);
 
@@ -721,9 +1126,7 @@ void *__kml_fetch_headers_map(void *pending) {
     }
     return map;
 }
-#endif
 
-#ifdef KML_FETCH_STATUSTEXT
 /* A Response's statusText: the reason phrase of the last status line in its
  * captured headers ("HTTP/1.1 404 Not Found" -> "Not Found"; after a
  * redirect, the final response's), or "" when there is none (HTTP/2 sends no
@@ -758,9 +1161,7 @@ void *__kml_fetch_status_text(void *pending) {
     out[r - r0] = 0;
     return out;
 }
-#endif
 
-#ifdef KML_XHR_HDRS
 /* A parsed header map's stored keys/vals (collections' map header: size at 0,
  * keys at 16, vals at 24). */
 typedef struct {
@@ -795,4 +1196,3 @@ void *__kml_xhr_headers_all(hmap *m) {
     *w = 0;
     return out;
 }
-#endif

@@ -99,7 +99,7 @@ function startSuite(suite: string): void {
   if (lastStopped === suite) lastStopped = "";
   const child = spawn("sh", ["-c", cmd]);
   runningSuite = suite;
-  runningPid = child.pid;
+  runningPid = child.pid ?? 0; // undefined when the spawn failed
   message = "started " + suite + " (both lanes, pid " + child.pid + ", log " + log + ")";
 }
 

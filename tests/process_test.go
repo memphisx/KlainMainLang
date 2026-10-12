@@ -564,6 +564,42 @@ throw new Error("boom")
 	}
 }
 
+// A listener that throws ends the process with exit code 7, as in Node; it
+// is not called again with its own error (ADR-01584).
+func TestE2EProcessUncaughtExceptionListenerThrows(t *testing.T) {
+	out, code := compileAndRunExpectExit(t, `
+let n = 0
+process.on('uncaughtException', (err) => {
+  n++
+  console.log("listener " + n + ": " + err.message)
+  throw new Error("inside")
+})
+setTimeout(() => { throw new Error("first") }, 0)
+`)
+	if got := strings.TrimSpace(out); !strings.HasPrefix(got, "listener 1: first\nUncaught: ") || strings.Contains(got, "listener 2") {
+		t.Errorf("output: got %q", got)
+	}
+	if code != 7 {
+		t.Errorf("exit code: got %d, want 7", code)
+	}
+	// The same through an unhandled rejection.
+	out, code = compileAndRunExpectExit(t, `
+let n = 0
+process.on('uncaughtException', (err) => {
+  n++
+  console.log("listener " + n + ": " + err.message)
+  throw new Error("inside")
+})
+Promise.reject(new Error("rejected"))
+`)
+	if got := strings.TrimSpace(out); !strings.HasPrefix(got, "listener 1: rejected\nUncaught: ") || strings.Contains(got, "listener 2") {
+		t.Errorf("rejection output: got %q", got)
+	}
+	if code != 7 {
+		t.Errorf("rejection exit code: got %d, want 7", code)
+	}
+}
+
 // TDD-00131 (process fidelity): process.execPath is the running binary's own
 // absolute, symlink-resolved path — always absolute like Node's, and a
 // length-prefixed string so `.length` works (ADR-00395).

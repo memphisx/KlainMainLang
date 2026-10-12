@@ -1,7 +1,6 @@
 /* native.c — the errno and fs-error primitives the TypeScript builtin
- * modules call (lib/native.d.ts; in C per TDD-00240). KML_NATIVE_ERRNO
- * builds Node's system-error names/descriptions; KML_NATIVE_FS_ERROR the
- * fs Error object. */
+ * modules call (lib/native.d.ts; in C per TDD-00240): Node's system-error
+ * names/descriptions and the fs Error object. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -10,7 +9,6 @@ typedef long long i64;
 extern void *__kml_str_alloc(i64 n);
 extern void __kml_str_finalize(void *s);
 
-#ifdef KML_NATIVE_ERRNO
 extern const char *__kml_errno_code(int e);
 extern const char *__kml_errno_desc(int e);
 extern int __kml_uv_errno(int e);
@@ -39,9 +37,7 @@ void *__kml_native_errno_desc(double e) {
 
 /* err.errno: libuv's negative number. */
 double __kml_native_uv_errno(double e) { return (double)__kml_uv_errno((int)e); }
-#endif
 
-#ifdef KML_NATIVE_FS_ERROR
 extern void *__kml_fs_error_new(int errno_val, const char *syscall, const char *path, const char *dest);
 
 /* The i1 flags arrive as bare ints. */
@@ -50,4 +46,3 @@ void *__kml_native_fs_error(double errno_val, const char *syscall, int has_path,
     return __kml_fs_error_new((int)errno_val, syscall, (has_path & 1) ? path : NULL,
                               (has_dest & 1) ? dest : NULL);
 }
-#endif

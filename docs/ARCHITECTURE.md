@@ -44,7 +44,7 @@ the same number of files.
 | `emit_timers.go` | `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval`, plus their `ensureTimerRuntime` C-runtime backing store (kept together, not under `runtime_*.go`, since this domain's runtime queue has only ever had one caller) |
 | `emit_http.go` | `http.listen`, request/response handling — the server-side request-object type annotation is `HttpRequest` (not `Request`, which is the client-side `fetch` class, see `emit_fetch_request.go`) |
 | `emit_iter_collect.go` | The iteration protocol over non-arrays, collected: `__kml_any_iter_collect` (spread, destructuring, `Array.from`), the array-like reading, and an Error's own enumerable fields for the object walkers |
-| `emit_tui.go` (builders/render dispatch) + `emit_tui_props.go` (style-prop object-literal lowering) | `klain:tui` native TUI framework (TDD-00150): `Box`/`Text`/`List`/`Spinner`/`Progress`/`TextInput`/`render`/`enter`/`leave`. Builders map onto Yoga layout nodes carrying paint attributes; nodes are opaque `ptr` handles |
+| `lib/node/klain_tui.ts` (with `emit_tui.go` linking the runtime) | `klain:tui` native TUI framework (TDD-00150): `Box`/`Text`/`List`/`Spinner`/`Progress`/`TextInput`/`render`/`enter`/`leave` as TypeScript over the painter's natives; each builder makes a Yoga node carrying paint attributes, a handle in a `Node` ([ADR-01471](adr/ADR-01471.md)) |
 | `tui.go` | The `tui.c` painter runtime string: Yoga bridge + per-node paint model + double-buffered ANSI diff painter (UTF-8-decoded text). Plain C over Yoga's extern-"C" ABI |
 | `yoga.go` / `yogasrc/` | Vendored Yoga flexbox engine (`//go:embed`, pinned): extracted per-version and compiled per-`.cpp` to objects (C++20), linked only when a program uses `klain:tui` — see [ADR-00519](adr/ADR-00519.md) for why prebuilt objects rather than a shared-line `.cc` |
 | `gclocate.go` / `gcshim.go` | Locating and shimming the Boehm GC library for `-mm=gc` |
@@ -64,5 +64,6 @@ the same number of files.
 | `runtime_url.go` | libcurl URL API declarations (`curl_url*`) |
 | `runtime_misc.go` | console group/timer/count-map state, closure/map-free helpers |
 | `runtime_http.go` | HTTP server + fiber-scheduler C-runtime helpers |
-| `threadpoolsrc/klaindns.c` | The dns module's natives, in the pool's unit: getaddrinfo/getnameinfo and the DNS client standing in for c-ares (servers, UDP/TCP queries, the answer's records as JSON) |
+| `threadpoolsrc/klaindns.c` | The dns module's getaddrinfo/getnameinfo natives, in the pool's unit |
+| `caressrc/klaincares.c` | The dns resolver: Node's cares_wrap over c-ares (channels on the loop, the parsers, records as JSON); its own unit |
 | `runtime_os.go` | `process.env`'s libc helpers (`unsetenv`); the `os` module is `lib/node/os.ts` over `osinfosrc/osinfo.c` |

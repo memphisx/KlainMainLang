@@ -30,6 +30,9 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 			}
 		}
 	case *FunctionDeclaration:
+		if n.Key != nil && !visit(n.Key) {
+			return false
+		}
 		for i := range n.Params {
 			if !visitParam(&n.Params[i], visit) {
 				return false
@@ -371,10 +374,6 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 		if present(n.MaxByteLength) && !visit(n.MaxByteLength) {
 			return false
 		}
-	case *NewChannelExpression:
-		if present(n.Capacity) && !visit(n.Capacity) {
-			return false
-		}
 	case *NewTypedArrayExpression:
 		if present(n.Arg) && !visit(n.Arg) {
 			return false
@@ -474,10 +473,6 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 		}
 	case *ImportCallExpression:
 		if present(n.Specifier) && !visit(n.Specifier) {
-			return false
-		}
-	case *NewWebviewExpression:
-		if present(n.Options) && !visit(n.Options) {
 			return false
 		}
 	case *TypeReference:
@@ -712,6 +707,9 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 			}
 		}
 	case *FunctionDeclaration:
+		if n.Key != nil {
+			n.Key = rewrite(n.Key).(*Identifier)
+		}
 		for i := range n.Params {
 			rewriteParam(&n.Params[i], rewrite)
 		}
@@ -1033,10 +1031,6 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 		if present(n.MaxByteLength) {
 			n.MaxByteLength = rewrite(n.MaxByteLength).(Expression)
 		}
-	case *NewChannelExpression:
-		if present(n.Capacity) {
-			n.Capacity = rewrite(n.Capacity).(Expression)
-		}
 	case *NewTypedArrayExpression:
 		if present(n.Arg) {
 			n.Arg = rewrite(n.Arg).(Expression)
@@ -1129,10 +1123,6 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 	case *ImportCallExpression:
 		if present(n.Specifier) {
 			n.Specifier = rewrite(n.Specifier).(Expression)
-		}
-	case *NewWebviewExpression:
-		if present(n.Options) {
-			n.Options = rewrite(n.Options).(Expression)
 		}
 	case *TypeReference:
 		for i := range n.TypeArgs {
@@ -1337,6 +1327,9 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 }
 
 func rewriteAnnotField(x *AnnotField, rewrite func(Node) Node) {
+	if x.Key != nil {
+		x.Key = rewrite(x.Key).(*Identifier)
+	}
 	if present(x.Initializer) {
 		x.Initializer = rewrite(x.Initializer).(Expression)
 	}
@@ -1348,6 +1341,9 @@ func rewriteAnnotField(x *AnnotField, rewrite func(Node) Node) {
 }
 
 func visitAnnotField(x *AnnotField, visit func(Node) bool) bool {
+	if x.Key != nil && !visit(x.Key) {
+		return false
+	}
 	if present(x.Initializer) && !visit(x.Initializer) {
 		return false
 	}
@@ -1609,4 +1605,4 @@ func visitWorkerModule(x *WorkerModule, visit func(Node) bool) bool {
 }
 
 // nodeKinds is every node type the walker knows, for tests.
-var nodeKinds = []string{"Program", "BlockStatement", "VarDeclaration", "VarDeclarationList", "FunctionDeclaration", "ReturnStatement", "ForStatement", "ForOfStatement", "WhileStatement", "DoWhileStatement", "ForInStatement", "IfStatement", "SwitchStatement", "BreakStatement", "ContinueStatement", "LabeledStatement", "ArrayDestructuring", "ObjectDestructuring", "ExpressionStatement", "NumberLiteral", "StringLiteral", "BooleanLiteral", "NullLiteral", "AwaitExpression", "YieldExpression", "Identifier", "ThisExpression", "BinaryExpression", "ConditionalExpression", "SequenceExpression", "NonNullExpression", "AsExpression", "SpreadElement", "UnaryExpression", "UpdateExpression", "AssignmentExpression", "CallExpression", "MemberExpression", "ArrayLiteral", "IndexExpression", "NewArrayExpression", "ObjectLiteral", "ArrowFunction", "FunctionExpression", "ClassExpression", "TemplateLiteral", "TaggedTemplateExpression", "NewMapExpression", "NewSetExpression", "NewWeakMapExpression", "NewWeakSetExpression", "NewReadableStreamExpression", "NewWritableStreamExpression", "NewTransformStreamExpression", "NewCompressionStreamExpression", "EnumDeclaration", "ThrowStatement", "TryStatement", "NewErrorExpression", "NewDateExpression", "NewRequestExpression", "NewXMLHttpRequestExpression", "NewArrayBufferExpression", "NewChannelExpression", "NewTypedArrayExpression", "NewRegExpExpression", "NewExpression", "InterfaceDeclaration", "ClassDeclaration", "SuperExpression", "TypeAliasDeclaration", "AmbientModuleDeclaration", "ExportDeclaration", "ImportDeclaration", "ExportFromDeclaration", "ImportMetaUrl", "ImportCallExpression", "NewWebviewExpression", "KeywordType", "TypeReference", "ArrayType", "TupleType", "NamedTupleMember", "OptionalType", "RestType", "UnionType", "IntersectionType", "ParenthesizedType", "TypeParameter", "SignatureParameter", "FunctionType", "ConstructorType", "TypeLiteral", "PropertySignature", "MethodSignature", "CallSignature", "ConstructSignature", "IndexSignature", "MappedType", "ConditionalType", "InferType", "TypeOperator", "IndexedAccessType", "ImportType", "TypeQuery", "LiteralType", "TemplateLiteralType", "TemplateLiteralTypeSpan", "TypePredicate"}
+var nodeKinds = []string{"Program", "BlockStatement", "VarDeclaration", "VarDeclarationList", "FunctionDeclaration", "ReturnStatement", "ForStatement", "ForOfStatement", "WhileStatement", "DoWhileStatement", "ForInStatement", "IfStatement", "SwitchStatement", "BreakStatement", "ContinueStatement", "LabeledStatement", "ArrayDestructuring", "ObjectDestructuring", "ExpressionStatement", "NumberLiteral", "StringLiteral", "BooleanLiteral", "NullLiteral", "AwaitExpression", "YieldExpression", "Identifier", "ThisExpression", "BinaryExpression", "ConditionalExpression", "SequenceExpression", "NonNullExpression", "AsExpression", "SpreadElement", "UnaryExpression", "UpdateExpression", "AssignmentExpression", "CallExpression", "MemberExpression", "ArrayLiteral", "IndexExpression", "NewArrayExpression", "ObjectLiteral", "ArrowFunction", "FunctionExpression", "ClassExpression", "TemplateLiteral", "TaggedTemplateExpression", "NewMapExpression", "NewSetExpression", "NewWeakMapExpression", "NewWeakSetExpression", "NewReadableStreamExpression", "NewWritableStreamExpression", "NewTransformStreamExpression", "NewCompressionStreamExpression", "EnumDeclaration", "ThrowStatement", "TryStatement", "NewErrorExpression", "NewDateExpression", "NewRequestExpression", "NewXMLHttpRequestExpression", "NewArrayBufferExpression", "NewTypedArrayExpression", "NewRegExpExpression", "NewExpression", "InterfaceDeclaration", "ClassDeclaration", "SuperExpression", "TypeAliasDeclaration", "AmbientModuleDeclaration", "ExportDeclaration", "ImportDeclaration", "ExportFromDeclaration", "ImportMetaUrl", "ImportCallExpression", "KeywordType", "TypeReference", "ArrayType", "TupleType", "NamedTupleMember", "OptionalType", "RestType", "UnionType", "IntersectionType", "ParenthesizedType", "TypeParameter", "SignatureParameter", "FunctionType", "ConstructorType", "TypeLiteral", "PropertySignature", "MethodSignature", "CallSignature", "ConstructSignature", "IndexSignature", "MappedType", "ConditionalType", "InferType", "TypeOperator", "IndexedAccessType", "ImportType", "TypeQuery", "LiteralType", "TemplateLiteralType", "TemplateLiteralTypeSpan", "TypePredicate"}

@@ -34,7 +34,7 @@ type ShadowOracle interface {
 
 // NewShadowOracle builds the oracle for a program. It is nil until a new pass
 // registers one; with it nil, or KML_SHADOW unset, no question is asked.
-var NewShadowOracle func(prog *ast.Program, opts options.Options) ShadowOracle
+var NewShadowOracle func(prog *ast.Program, opts options.Options, r reprCtx) ShadowOracle
 
 // SetShadow makes e ask oracle and record disagreements in rec (tests use it
 // to drive the harness directly).
@@ -52,8 +52,20 @@ func (e *Emitter) startShadow(prog *ast.Program) (func(), error) {
 	if err != nil {
 		return func() {}, err
 	}
-	e.shadowOracle, e.shadowRec = NewShadowOracle(prog, e.opts), rec
+	e.shadowOracle, e.shadowRec = NewShadowOracle(prog, e.opts, e.repr()), rec
 	return func() {
+		// One tally record per decider and node kind: how often it was asked,
+		// so the report can show where the two agree.
+		keys := make([]string, 0, len(e.shadowAsked))
+		for k := range e.shadowAsked {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			dk := strings.SplitN(k, "\x00", 2)
+			rec.Record(shadow.Disagreement{Decider: dk[0], Kind: dk[1], Asked: e.shadowAsked[k]})
+		}
+		e.shadowAsked, e.shadowSeen = nil, nil
 		e.shadowOracle, e.shadowRec = nil, nil
 		closer.Close()
 	}, nil
@@ -62,6 +74,13 @@ func (e *Emitter) startShadow(prog *ast.Program) (func(), error) {
 // shadowCompare records a disagreement between old (the decider's answer) and
 // the oracle's, about node. "none" stands for a decider's no-answer.
 func (e *Emitter) shadowCompare(decider string, node ast.Node, old Type, oldOK bool, neu Type, newOK bool) {
+	if e.shadowAsked == nil {
+		e.shadowAsked, e.shadowSeen = map[string]int{}, map[shadowNode]bool{}
+	}
+	if sn := (shadowNode{decider, node}); !e.shadowSeen[sn] {
+		e.shadowSeen[sn] = true
+		e.shadowAsked[decider+"\x00"+nodeKind(node)]++
+	}
 	oldKey, newKey := "none", "none"
 	var fields []string
 	if oldOK {
@@ -71,6 +90,9 @@ func (e *Emitter) shadowCompare(decider string, node ast.Node, old Type, oldOK b
 		newKey = reprKey(neu)
 	}
 	if oldKey == newKey {
+		return
+	}
+	if _, isID := node.(*ast.Identifier); isID && intPromoted(old, neu) {
 		return
 	}
 	if oldOK && newOK {
@@ -83,6 +105,7 @@ func (e *Emitter) shadowCompare(decider string, node ast.Node, old Type, oldOK b
 		pos = node.GetPos()
 	}
 	e.shadowRec.Record(shadow.Disagreement{
+		Module:  e.inLib,
 		Decider: decider, Kind: nodeKind(node), Line: pos.Line, Col: pos.Col,
 		Old: oldKey, New: newKey, Fields: fields,
 	})
@@ -97,6 +120,20 @@ func nodeKind(n ast.Node) string {
 
 // shadowExprType is the inferExprType hook.
 func (e *Emitter) shadowExprType(expr ast.Expression, old Type) {
+	if e.analysisDepth > 0 {
+		// An analysis pre-pass asks before the bindings it reads are in
+		// scope: not the answer codegen emits by.
+		return
+	}
+	// A function read while its own return type is inferred answers the
+	// recursion guard's void placeholder: not the type codegen emits by.
+	if id, ok := expr.(*ast.Identifier); ok && old.IsFunc && old.FuncRetType != nil && old.FuncRetType.IR == "void" && len(e.sigInferInProgress) > 0 {
+		for fd := range e.sigInferInProgress {
+			if fd.Name == id.Name && fd.ReturnType == nil {
+				return
+			}
+		}
+	}
 	if neu, ok := e.shadowOracle.ExprType(expr); ok {
 		e.shadowCompare("inferExprType", expr, old, true, neu, true)
 	}
@@ -122,10 +159,21 @@ func (e *Emitter) shadowGlobalType(v *ast.VarDeclaration, old Type, oldOK bool) 
 }
 
 // shadowReturnType is the inferUnannotatedReturnType hook.
+//
+// It runs only where codegen fell back to the old inference, so every call
+// is a row: an answer the checker gives but codegen cannot use, or none.
 func (e *Emitter) shadowReturnType(body *ast.BlockStatement, old Type, oldOK bool) {
-	if neu, hasValue, ok := e.shadowOracle.ReturnType(body); ok {
-		e.shadowCompare("inferUnannotatedReturnType", body, old, oldOK, neu, hasValue)
+	neu, hasValue, ok := e.shadowOracle.ReturnType(body)
+	if !ok {
+		pos := body.GetPos()
+		e.shadowRec.Record(shadow.Disagreement{
+			Module:  e.inLib,
+			Decider: "inferUnannotatedReturnType", Kind: nodeKind(body), Line: pos.Line, Col: pos.Col,
+			Old: reprKey(old), New: "unanswered", Fields: []string{"unanswered"},
+		})
+		return
 	}
+	e.shadowCompare("inferUnannotatedReturnType", body, old, oldOK, neu, hasValue)
 }
 
 // shadowReference is emitIdent's hook: declared is codegen's answer to
@@ -148,6 +196,7 @@ func (e *Emitter) shadowReference(id *ast.Identifier, declared bool) {
 	}
 	pos := id.GetPos()
 	e.shadowRec.Record(shadow.Disagreement{
+		Module:  e.inLib,
 		Decider: "emitIdent", Kind: "Identifier", Line: pos.Line, Col: pos.Col,
 		Old: answer(declared) + " " + id.Name, New: answer(neu) + " " + id.Name, Fields: []string{answer(declared) + "→" + answer(neu)},
 	})
@@ -205,12 +254,31 @@ func writeKey(b *strings.Builder, v reflect.Value, depth int) {
 		b.WriteByte('}')
 	case reflect.Struct:
 		t := v.Type()
+		// A class is nominal: its name stands for its layout, which can be
+		// large and nest other classes.
+		class := t == reflect.TypeOf(Type{}) && v.FieldByName("IsClass").Bool()
+		// A plain `any` box holds undefined and null itself: marking it
+		// nullable or undefined-able (an optional `any` parameter) is the
+		// same representation.
+		box := t == reflect.TypeOf(Type{}) && v.FieldByName("IsDynamic").Bool()
+		plainAny := box && v.FieldByName("UnionMembers").Len() == 0
 		b.WriteByte('{')
 		first := true
 		for i := 0; i < t.NumField(); i++ {
 			f := t.Field(i)
 			fv := v.Field(i)
-			if !f.IsExported() || fv.IsZero() || skipKeyField(f.Type) {
+			if !f.IsExported() || fv.IsZero() || (fv.Kind() == reflect.Slice && fv.Len() == 0) || skipKeyField(f.Type) || metadataField[f.Name] {
+				continue
+			}
+			if class && (f.Name == "Fields" || f.Name == "HasVTable") {
+				continue
+			}
+			if plainAny && (f.Name == "Nullable" || f.Name == "IsUndefined" || f.Name == "NullAndUndef") {
+				continue
+			}
+			// A union box tags which absence it holds: whether that is null
+			// or undefined is the value's, not the representation's.
+			if box && (f.Name == "IsUndefined" || f.Name == "NullAndUndef") {
 				continue
 			}
 			if !first {
@@ -218,6 +286,30 @@ func writeKey(b *strings.Builder, v reflect.Value, depth int) {
 			}
 			first = false
 			b.WriteString(f.Name + "=")
+			if f.Name == "UnionMembers" {
+				// A box holds its members unordered, and tags a string as a
+				// string, literal or not: `boolean | number` and `number |
+				// boolean` are one representation, as are `'ipc' | string`
+				// and `string`.
+				seen := map[string]bool{}
+				var keys []string
+				for i := 0; i < fv.Len(); i++ {
+					m := fv.Index(i)
+					if mt, ok := m.Interface().(Type); ok && mt.IsStrLiteral {
+						mt.IsStrLiteral, mt.LitValue = false, ""
+						m = reflect.ValueOf(mt)
+					}
+					var mb strings.Builder
+					writeKey(&mb, m, depth+1)
+					if k := mb.String(); !seen[k] {
+						seen[k] = true
+						keys = append(keys, k)
+					}
+				}
+				sort.Strings(keys)
+				b.WriteString("[" + strings.Join(keys, " ") + "]")
+				continue
+			}
 			writeKey(b, fv, depth+1)
 		}
 		b.WriteByte('}')
@@ -227,6 +319,16 @@ func writeKey(b *strings.Builder, v reflect.Value, depth int) {
 		fmt.Fprint(b, v.Interface())
 	}
 }
+
+// metadataField names the Type fields a call site reads for defaults and
+// arity, a use site for validation (an intersection's members, already
+// merged into its fields), a named structural type's re-resolution handle
+// (RefName: the same fields under its interface's name) or a string
+// literal's value, not for the value's representation.
+var metadataField = map[string]bool{"FuncParamNames": true, "FuncParamOptional": true, "Inferred": true, "IntersectionMembers": true, "RefName": true,
+	// A string literal type is a string at run time; its value is the
+	// compile-time knowledge a discriminant reads.
+	"IsStrLiteral": true, "LitValue": true}
 
 // skipKeyField reports whether a field holds AST expressions or behaviour
 // rather than representation.
@@ -256,4 +358,43 @@ func diffFields(a, b Type) []string {
 		}
 	}
 	return out
+}
+
+// shadowNode is one question: a decider asked about a node.
+type shadowNode struct {
+	decider string
+	node    ast.Node
+}
+
+// analysisPass marks an analysis pre-pass (escape and purity checks, the
+// empty-container and widened-binding inference, the JavaScript call-site
+// parameter collection) until the returned func
+// runs: inferExprType there is not compared (shadowExprType).
+func (e *Emitter) analysisPass() func() {
+	e.analysisDepth++
+	return func() { e.analysisDepth-- }
+}
+
+// intPromoted reports a number a binding holds as an integer where codegen
+// proved the value integral (an integer-valued local): an
+// optimization over reprOf's double that behaves the same, not a
+// disagreement about the representation of the type.
+func intPromoted(old, neu Type) bool {
+	o, n := old.withoutNullable(), neu.withoutNullable()
+	return o.Nullable == n.Nullable && !o.IsDynamic && !o.Float && (o.IR == "i64" || o.IR == "i32" || o.IR == "i16" || o.IR == "i8") &&
+		n.Float && n.IR == "double" && old.Nullable == neu.Nullable && old.IsUndefined == neu.IsUndefined
+}
+
+// shadowSwitchFallback records a switched expression kind the checker
+// left unanswered, answered by its fallback (settledExprKind).
+func (e *Emitter) shadowSwitchFallback(expr ast.Expression) {
+	if e.shadowRec == nil {
+		return
+	}
+	pos := expr.GetPos()
+	e.shadowRec.Record(shadow.Disagreement{
+		Module:  e.inLib,
+		Decider: "switchFallback", Kind: nodeKind(expr), Line: pos.Line, Col: pos.Col,
+		Old: "fallback", New: "unanswered", Fields: []string{"unanswered"},
+	})
 }

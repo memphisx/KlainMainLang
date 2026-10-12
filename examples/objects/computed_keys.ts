@@ -1,8 +1,8 @@
 // --- Computed property keys ---
 // `{ [expr]: value }` — the key is computed at runtime, not known at
-// compile time. Internally this is backed by the same Map<string,V> runtime
-// as `new Map<K,V>()` (see docs/tdd/TDD-00012.md), just with `.field` /
-// `[expr]` sugar instead of `.get()`/`.set()`.
+// compile time. The literal is an object whose keys exist at run time, as
+// in JavaScript: keys can be added, read by name or by expression, and
+// enumerated.
 
 const k = 'b'
 const obj = { a: 1, [k]: 2 }
@@ -39,11 +39,9 @@ for (const [k, v] of Object.entries(obj)) {
     console.log(k + '=' + v)   // a=10, b=7, c=99
 }
 
-// A dynamic object is also a real Map<string,V> under the hood, so its own
-// .get()/.set()/.has() API works directly, no dot/bracket sugar needed.
-console.log(obj.has('a'))   // 1
-console.log(obj.has('z'))   // 0
-console.log(obj.get('b'))   // 7
+// Membership is the `in` operator.
+console.log('a' in obj)   // true
+console.log('z' in obj)   // false
 
 // --- String-valued dynamic object ---
 const labelKey = 'subtitle'

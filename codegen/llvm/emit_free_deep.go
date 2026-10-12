@@ -380,7 +380,9 @@ func (e *Emitter) ensureDeepFreeArr(elemTy Type) (string, error) {
 				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", il, lGep))
 				e.emitInstr(fmt.Sprintf("call void @%s(ptr %s, i64 %s)", fn, id, il))
 				e.ensureFree()
-				e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", p))
+				cell := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", cell, p))
+				e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", cell))
 				e.emitTerminator(fmt.Sprintf("br label %%%s", skipL))
 				e.emitLabel(skipL)
 			}

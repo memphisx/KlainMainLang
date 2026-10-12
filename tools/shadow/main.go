@@ -14,12 +14,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -49,7 +51,11 @@ func main() {
 	if *limit > 0 && len(jobs) > *limit {
 		jobs = jobs[:*limit]
 	}
-	work := filepath.Join(filepath.Dir(*out), "runs")
+	// Absolute: each compile runs in its source file's directory.
+	work, err := filepath.Abs(filepath.Join(filepath.Dir(*out), "runs"))
+	if err != nil {
+		fatal(err)
+	}
 	os.RemoveAll(work)
 	if err := os.MkdirAll(work, 0o755); err != nil {
 		fatal(err)
@@ -65,9 +71,10 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for i := range ch {
-				if !compile(absBin, jobs[i], filepath.Join(work, fmt.Sprintf("%06d.jsonl", i)), *timeout) {
+				if !compile(absBin, jobs[i], filepath.Join(work, fmt.Sprintf("%06d", i)), *timeout) {
 					mu.Lock()
 					timedOut++
+					fmt.Fprintf(os.Stderr, "timed out: %s\n", jobs[i].path)
 					mu.Unlock()
 				}
 			}
@@ -88,11 +95,26 @@ func main() {
 			all.Write(b)
 		}
 	}
+	tallies := shadow.Tallies(bytes.NewReader(all.Bytes()))
 	buckets, total, err := shadow.Aggregate(&all)
 	if err != nil {
 		fatal(err)
 	}
+	failedRows, failedRuns := 0, 0
+	failedFiles, _ := filepath.Glob(filepath.Join(work, "*.failed"))
+	for _, f := range failedFiles {
+		failedRuns++
+		if b, err := os.ReadFile(f); err == nil {
+			for _, l := range bytes.Split(b, []byte("\n")) {
+				if bytes.Contains(l, []byte(`"old"`)) && !bytes.Contains(l, []byte(`"asked"`)) {
+					failedRows++
+				}
+			}
+		}
+	}
 	report := render(buckets, total, len(jobs), timedOut, time.Since(start))
+	report = strings.Replace(report, "\n\n| Decider", fmt.Sprintf("\n- Not ranked: %d disagreements in the %d compile runs that failed\n\n| Decider", failedRows, failedRuns), 1)
+	report += agreement(buckets, tallies)
 	if err := os.WriteFile(*out, []byte(report), 0o644); err != nil {
 		fatal(err)
 	}
@@ -142,9 +164,12 @@ func corpus(root string, roots []string) []job {
 	return jobs
 }
 
-// compile runs the compiler on one job with recording on; it reports false
-// when the compile timed out.
-func compile(bin string, j job, record string, timeout time.Duration) bool {
+// compile runs the compiler on one job with recording on (into
+// base+".jsonl"); it reports false when the compile timed out. A Test262
+// unit compiles with its harness, as the conformance runner assembles it,
+// so its program is the one Test262 runs; the rows are moved back onto
+// the test file's own lines, and the harness's are dropped.
+func compile(bin string, j job, base string, timeout time.Duration) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	args := []string{"-emit-llvm"}
@@ -152,12 +177,143 @@ func compile(bin string, j job, record string, timeout time.Duration) bool {
 		args = append(args, "-compat="+j.lane)
 	}
 	abs, _ := filepath.Abs(j.path)
-	cmd := exec.CommandContext(ctx, bin, append(args, abs)...)
+	src, offset := abs, 0
+	if full, prefix, ok := withTest262Harness(abs); ok {
+		src = base + ".js"
+		if os.WriteFile(src, []byte(full), 0o644) == nil {
+			offset = prefix
+		} else {
+			src = abs
+		}
+	}
+	record := base + ".jsonl"
+	cmd := exec.CommandContext(ctx, bin, append(args, src)...)
 	cmd.Dir = filepath.Dir(abs)
 	cmd.Env = append(os.Environ(), shadow.EnvVar+"="+record, shadow.EnvUnit+"="+j.unit())
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-	cmd.Run()
+	failed := cmd.Run() != nil
+	if offset > 0 {
+		shiftRecord(record, offset)
+		os.Remove(src)
+	}
+	if failed {
+		// A program that does not compile has no decider to switch over;
+		// its rows are counted apart.
+		os.Rename(record, base+".failed")
+	}
 	return ctx.Err() == nil
+}
+
+var (
+	reIncludes = regexp.MustCompile(`(?m)^includes:\s*\[([^\]]*)\]`)
+	reFlags    = regexp.MustCompile(`(?m)^flags:\s*\[([^\]]*)\]`)
+)
+
+// withTest262Harness is a Test262 test file's source as the conformance
+// runner compiles it (tools/conformance runOne): the harness shim, the
+// async reporter, the includes, then the test; prefix is the number of
+// lines before the test's first line.
+func withTest262Harness(abs string) (full string, prefix int, ok bool) {
+	slash := filepath.ToSlash(abs)
+	i := strings.Index(slash, "/.test262/test/")
+	if i < 0 {
+		return "", 0, false
+	}
+	root := abs[:i]
+	srcB, err := os.ReadFile(abs)
+	if err != nil {
+		return "", 0, false
+	}
+	src := string(srcB)
+	var fm string
+	if s, e := strings.Index(src, "/*---"), strings.Index(src, "---*/"); s >= 0 && e > s {
+		fm = src[s:e]
+	}
+	list := func(re *regexp.Regexp) []string {
+		m := re.FindStringSubmatch(fm)
+		if m == nil {
+			return nil
+		}
+		var out []string
+		for _, it := range strings.Split(m[1], ",") {
+			if it = strings.TrimSpace(it); it != "" {
+				out = append(out, it)
+			}
+		}
+		return out
+	}
+	flags := map[string]bool{}
+	for _, f := range list(reFlags) {
+		flags[f] = true
+	}
+	read := func(p string) (string, bool) {
+		b, err := os.ReadFile(filepath.Join(root, p))
+		return string(b) + "\n", err == nil
+	}
+	var b strings.Builder
+	if flags["onlyStrict"] {
+		b.WriteString("\"use strict\";\n")
+	}
+	shim := filepath.Join("tools", "conformance", "harness-shim")
+	if !flags["raw"] {
+		for _, n := range []string{"sta.js", "assert.js"} {
+			h, ok := read(filepath.Join(shim, n))
+			if !ok {
+				return "", 0, false
+			}
+			b.WriteString(h)
+		}
+	}
+	if flags["async"] {
+		h, ok := read(filepath.Join(shim, "doneprintHandle.js"))
+		if !ok {
+			return "", 0, false
+		}
+		b.WriteString(h)
+	}
+	for _, inc := range list(reIncludes) {
+		h, ok := read(filepath.Join(".test262", "harness", inc))
+		if !ok {
+			return "", 0, false
+		}
+		b.WriteString(h)
+	}
+	prefix = strings.Count(b.String(), "\n")
+	b.WriteString(src)
+	return b.String(), prefix, true
+}
+
+// shiftRecord moves a harnessed run's rows of the program's own source back
+// by the harness's lines, dropping the rows in the harness.
+func shiftRecord(path string, offset int) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var out bytes.Buffer
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var d shadow.Disagreement
+		if json.Unmarshal(line, &d) != nil {
+			out.Write(line)
+			out.WriteByte('\n')
+			continue
+		}
+		if d.Module == "" && d.Line > 0 {
+			if d.Line <= offset {
+				continue // the harness's own
+			}
+			d.Line -= offset
+			if nb, err := json.Marshal(d); err == nil {
+				line = nb
+			}
+		}
+		out.Write(line)
+		out.WriteByte('\n')
+	}
+	os.WriteFile(path, out.Bytes(), 0o644)
 }
 
 func render(buckets []shadow.Bucket, total, runs, timedOut int, took time.Duration) string {
@@ -186,7 +342,7 @@ func render(buckets []shadow.Bucket, total, runs, timedOut int, took time.Durati
 	b.WriteString("\n## Buckets\n\n| # | Decider | Node | Differing fields | Count | Example |\n|---|---|---|---|---|---|\n")
 	for i, bk := range buckets {
 		ex := bk.Examples[0]
-		fmt.Fprintf(&b, "| %d | `%s` | %s | %s | %d | `%s:%d:%d` |\n", i+1, bk.Decider, bk.Kind, bk.Fields, bk.Count, ex.Unit, ex.Line, ex.Col)
+		fmt.Fprintf(&b, "| %d | `%s` | %s | %s | %d | `%s:%d:%d` |\n", i+1, bk.Decider, bk.Kind, bk.Fields, bk.Count, where(ex), ex.Line, ex.Col)
 	}
 	b.WriteString("\n## Examples\n")
 	for i, bk := range buckets {
@@ -195,7 +351,7 @@ func render(buckets []shadow.Bucket, total, runs, timedOut int, took time.Durati
 		}
 		fmt.Fprintf(&b, "\n### %d. `%s` on %s (%s)\n\n", i+1, bk.Decider, bk.Kind, bk.Fields)
 		for _, ex := range bk.Examples {
-			fmt.Fprintf(&b, "- `%s:%d:%d`\n  - old: `%s`\n  - new: `%s`\n", ex.Unit, ex.Line, ex.Col, clip(ex.Old), clip(ex.New))
+			fmt.Fprintf(&b, "- `%s:%d:%d`\n  - old: `%s`\n  - new: `%s`\n", where(ex), ex.Line, ex.Col, clip(ex.Old), clip(ex.New))
 		}
 	}
 	return b.String()
@@ -211,4 +367,43 @@ func clip(s string) string {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "shadow:", err)
 	os.Exit(1)
+}
+
+// where is the file a row's position is in: its library module, named
+// with the run that compiled it, or the run's own file.
+func where(d shadow.Disagreement) string {
+	if d.Module != "" {
+		return d.Module + " (via " + d.Unit + ")"
+	}
+	return d.Unit
+}
+
+// agreement is the per-decider, per-node-kind table of how often the two
+// answers agree: a kind that agrees everywhere can switch to the new answer.
+func agreement(buckets []shadow.Bucket, tallies map[string]int) string {
+	if len(tallies) == 0 {
+		return ""
+	}
+	dis := map[string]int{}
+	for _, bk := range buckets {
+		dis[bk.Decider+"/"+bk.Kind] += bk.Count
+	}
+	keys := make([]string, 0, len(tallies))
+	for k := range tallies {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if dis[keys[i]] != dis[keys[j]] {
+			return dis[keys[i]] < dis[keys[j]]
+		}
+		return tallies[keys[i]] > tallies[keys[j]]
+	})
+	var b strings.Builder
+	b.WriteString("\n## Agreement by node kind\n\nNodes asked about (each once per compile run) and how many of them disagree.\n\n| Decider / node | Asked | Disagree | Agree |\n|---|---|---|---|\n")
+	for _, k := range keys {
+		a := tallies[k]
+		pct := 100 * float64(a-dis[k]) / float64(a)
+		fmt.Fprintf(&b, "| `%s` | %d | %d | %.1f%% |\n", k, a, dis[k], pct)
+	}
+	return b.String()
 }

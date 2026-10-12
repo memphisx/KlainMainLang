@@ -7,7 +7,9 @@
 // LAYOUT CONTRACTS (must stay in sync with objheader.go / emit_shape.go):
 //   header word: bits 0..31 type id, bits 32..46 KML_HDR_MAGIC,
 //                bit 47 Symbol flag, bit 48 Error flag.
-//   KmlShape:    { i64 id, char *name, get, set, i64 nkeys, char **keys }
+//   KmlShape:    { i64 id, char *name, get, set, i64 nkeys, char **keys,
+//                  void ***syms }: syms[i] is the global holding the symbol
+//                  of a symbol-keyed field's key, NULL for a string key.
 //   get(obj, key, *found) returns the boxed value; *found = 1 for an own
 //   field, 2 for a member found on the class (a method or accessor), and is
 //   left 0 when the key is absent.
@@ -15,6 +17,7 @@
 //   field, -2 when the field cannot take a dynamic value.
 
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -27,6 +30,7 @@ typedef struct KmlShape {
     int (*set)(void *obj, const char *key, i64 value);
     i64 nkeys;
     const char *const *keys;
+    void **const *syms;
 } KmlShape;
 
 // The registered tables (unitreg.c); kind 3 holds KmlShape rows.
@@ -47,6 +51,30 @@ const KmlShape *__kml_shape_of(void *obj) {
         valid = 1;
     if (!valid) return NULL;
     return (const KmlShape *)__kml_unit_find(KML_UNIT_SHAPE, hdr & 0xFFFFFFFFLL);
+}
+
+// Whether a property key is symbol sym's own key ("\x01@@sym:%p"): a field
+// keyed by a declared symbol answers it (TDD-00246).
+_Bool __kml_key_is_sym(const char *key, void *sym) {
+    if (!key || !sym || strncmp(key, "\x01@@sym:", 7) != 0) return 0;
+    char want[40];
+    snprintf(want, sizeof want, "\x01@@sym:%p", sym);
+    return strcmp(key, want) == 0;
+}
+
+// The symbol a symbol-keyed field's layout key names (TDD-00246), or NULL.
+static void *layout_key_symbol(const KmlShape *s, const char *key) {
+    if (!s || !s->syms || !key || key[0] != 1) return NULL;
+    for (i64 i = 0; i < s->nkeys; i++)
+        if (s->syms[i] && strcmp(s->keys[i], key) == 0) return *s->syms[i];
+    return NULL;
+}
+
+// A symbol's own run-time property key, "\x01@@sym:%p".
+static char *symbol_key(void *sym) {
+    char *k = malloc(40);
+    snprintf(k, 40, "\x01@@sym:%p", sym);
+    return k;
 }
 
 // ---- own properties added at run time ----
@@ -111,6 +139,12 @@ static i64 expando_index(const Expando *x, const char *key) {
 i64 __kml_shape_expando_count(void *obj) {
     const Expando *x = expando_find(obj, 0);
     return x ? x->n : 0;
+}
+
+// __kml_shape_expando_has: whether key was added to obj as its own
+// property (an instance's own method shadowing its class's).
+int __kml_shape_expando_has(void *obj, const char *key) {
+    return expando_index(expando_find(obj, 0), key) >= 0;
 }
 
 // __kml_shape_expando_set adds (or overwrites) property key of obj.
@@ -230,23 +264,24 @@ const char *__kml_shape_key(void *obj, i64 i) {
     return NULL;
 }
 
-#ifdef KML_SHAPE_SPREAD
 // { ...o } of a boxed static object: its own enumerable fields into a
 // dynamic object.
 extern void __kml_dynobj_set(void *bag, const char *key, i64 value);
 
 void __kml_shape_spread(void *bag, void *obj) {
+    const KmlShape *s = __kml_shape_of(obj);
     i64 n = __kml_shape_nkeys(obj);
     for (i64 i = 0; i < n; i++) {
         const char *key = __kml_shape_key(obj, i);
         int found = 0;
         i64 v = __kml_shape_get(obj, key, &found);
-        if (found == 1) __kml_dynobj_set(bag, key, v);
+        if (found != 1) continue;
+        // A symbol-keyed field is copied as its symbol's property.
+        void *sym = layout_key_symbol(s, key);
+        __kml_dynobj_set(bag, sym ? symbol_key(sym) : key, v);
     }
 }
-#endif
 
-#ifdef KML_OBJ_HOOKS
 // The hooks dynjson.c reads a static object's layout row through. An
 // Error's own enumerable fields beyond its layout (its system fields and
 // extra bag) follow the layout's keys.
@@ -306,9 +341,7 @@ int __kml_obj_has(void *o, const char *k) {
 }
 
 const char *__kml_obj_name(void *o) { return __kml_shape_class_name(o); }
-#endif
 
-#ifdef KML_SHAPE_KEYS_ARRAY
 // A string[] of a static object's own keys: its layout row's, and an
 // Error's own fields beyond it. Written to out as { ptr data, i64 len }
 // (the IR wrapper keeps the aggregate-returning signature).
@@ -318,14 +351,14 @@ void __kml_shape_keys_array_c(void *o, void **out) {
     i64 w = 0;
     for (i64 i = 0; i < n; i++) {
         const char *k = __kml_obj_key(o, i);
-        if (__kml_obj_has(o, k)) data[w++] = k;
+        /* A symbol's key ("\x01…": a symbol-keyed field or property) is
+           no string key. */
+        if (k && k[0] != 1 && __kml_obj_has(o, k)) data[w++] = k;
     }
     out[0] = data;
     out[1] = (void *)(size_t)w;
 }
-#endif
 
-#ifdef KML_SHAPE_DESC
 // Object.getOwnPropertyDescriptor(o, key) of a boxed static object: a data
 // descriptor for an own field, undefined otherwise. Object.freeze and
 // Object.seal record a static object's integrity level in the frozen set
@@ -354,4 +387,177 @@ i64 __kml_shape_own_desc(void *obj, const char *key) {
     __kml_dynobj_set(d, desc_configurable.s_, level == 1 || level == 2 ? KML_NB_FALSE : KML_NB_TRUE);
     return (i64)d | 5; // a dynamic object's box
 }
-#endif
+
+// Object.getOwnPropertySymbols of a boxed value: a static object's
+// symbol-keyed fields, then the symbol keys added to it; a dynamic object's
+// symbol keys. out receives the { data, length } of the symbols.
+extern i64 __kml_dynobj_count(void *bag);
+extern void *__kml_dynobj_key_at(void *bag, i64 i);
+
+static void *key_symbol(const char *k) {
+    void *p = NULL;
+    if (k && strncmp(k, "\x01@@sym:", 7) == 0) sscanf(k + 7, "%p", &p);
+    return p;
+}
+
+extern _Bool __kml_dynobj_proxy_parts(void *o, void **target, void **handler);
+extern i64 __kml_dynobj_call_trap(void *rec, i64 thisv, i64 argc, i64 *argv);
+extern _Bool __kml_dynobj_flags_test(void *o, i64 mode);
+extern i64 __kml_dynobj_attrs_at(void *o, i64 i);
+extern i64 __kml_dynobj_get(void *o, const char *key);
+extern long long __kml_anyarr_get_by_key(void *box, const char *key);
+extern i64 __kml_dynarr_len(void *a);
+extern i64 __kml_dynarr_at(void *a, i64 i);
+
+#define OWNKEYS_ERR(n, s) static const struct { i64 len; char s_[sizeof(s)]; } n = { sizeof(s) - 1, s }
+OWNKEYS_ERR(err_nullish, "Cannot convert undefined or null to object");
+OWNKEYS_ERR(err_nonobj, "CreateListFromArrayLike called on non-object");
+OWNKEYS_ERR(err_badkey, "'ownKeys' on proxy: trap result elements must be strings or symbols");
+OWNKEYS_ERR(err_dup, "'ownKeys' on proxy: trap returned duplicate entries");
+OWNKEYS_ERR(err_missing, "'ownKeys' on proxy: trap result did not include a non-configurable key of the target");
+OWNKEYS_ERR(err_nonext, "'ownKeys' on proxy: trap result must name exactly the keys of a non-extensible target");
+OWNKEYS_ERR(key_length, "length");
+
+void __kml_own_symbols_c(i64 boxed, void **out);
+
+// The property key a boxed ownKeys trap element names: a string as itself, a
+// symbol as its "\x01@@sym:%p" key; NULL for anything else.
+static const char *trap_key(i64 w) {
+    unsigned long long v = (unsigned long long)w;
+    if (v < 65536 || v >= (1ULL << 49)) return NULL;
+    if ((v & 7) == 0) return (const char *)v;
+    if ((v & 7) == 1 && (*(i64 *)(v & ~7ULL) & (1LL << 47))) return symbol_key((void *)(v & ~7ULL));
+    return NULL;
+}
+
+static int has_key(const char **ks, i64 n, const char *k) {
+    for (i64 i = 0; i < n; i++)
+        if (strcmp(ks[i], k) == 0) return 1;
+    return 0;
+}
+
+// Object.getOwnPropertySymbols with the spec's checks: a null or undefined
+// argument throws, and a Proxy runs its ownKeys trap, whose result must be an
+// array-like of distinct strings and symbols that keeps the target's
+// invariants (every non-configurable key; exactly the keys of a
+// non-extensible target). Returns the TypeError message, or NULL with out
+// filled as __kml_own_symbols_c fills it.
+const char *__kml_own_symbols_checked(i64 boxed, void **out) {
+    unsigned long long v = (unsigned long long)boxed;
+    if (v == 2 || v == KML_NB_UNDEFINED) return err_nullish.s_;
+    void *target, *handler;
+    if (v < 65536 || v >= (1ULL << 49) || (v & 7) != 5 ||
+        !__kml_dynobj_proxy_parts((void *)(v & ~7ULL), &target, &handler)) {
+        __kml_own_symbols_c(boxed, out);
+        return NULL;
+    }
+    i64 trap = __kml_dynobj_get(handler, "ownKeys");
+    unsigned long long tw = (unsigned long long)trap;
+    if (tw < 65536 || tw >= (1ULL << 49) || (tw & 7) != 7)
+        return __kml_own_symbols_checked((i64)target | 5, out);
+    i64 argv[1] = {(i64)target | 5};
+    unsigned long long r = (unsigned long long)__kml_dynobj_call_trap((void *)(tw & ~7ULL), (i64)handler | 5, 1, argv);
+    if (r < 65536 || r >= (1ULL << 49) || ((r & 7) != 2 && (r & 7) != 6)) return err_nonobj.s_;
+    void *arr = (void *)(r & ~7ULL);
+    i64 n;
+    if ((r & 7) == 6) n = __kml_dynarr_len(arr);
+    else {
+        unsigned long long lw = (unsigned long long)__kml_anyarr_get_by_key(arr, key_length.s_);
+        double d;
+        lw -= 1ULL << 49;
+        memcpy(&d, &lw, 8);
+        n = (i64)d;
+    }
+    const char **ks = malloc((size_t)(n ? n : 1) * sizeof *ks);
+    for (i64 i = 0; i < n; i++) {
+        i64 w;
+        if ((r & 7) == 6) w = __kml_dynarr_at(arr, i);
+        else {
+            char idx[24];
+            snprintf(idx, sizeof idx, "%lld", i);
+            w = __kml_anyarr_get_by_key(arr, idx);
+        }
+        const char *k = trap_key(w);
+        if (!k) return err_badkey.s_;
+        if (has_key(ks, i, k)) return err_dup.s_;
+        ks[i] = k;
+    }
+    _Bool extensible = __kml_dynobj_flags_test(target, 0);
+    i64 tc = __kml_dynobj_count(target);
+    for (i64 i = 0; i < tc; i++) {
+        const char *k = (const char *)__kml_dynobj_key_at(target, i);
+        int configurable = (__kml_dynobj_attrs_at(target, i) & 4) != 0;
+        if ((!configurable || !extensible) && !has_key(ks, n, k))
+            return configurable ? err_nonext.s_ : err_missing.s_;
+    }
+    if (!extensible)
+        for (i64 i = 0; i < n; i++) {
+            int found = 0;
+            for (i64 j = 0; j < tc && !found; j++)
+                found = strcmp(ks[i], (const char *)__kml_dynobj_key_at(target, j)) == 0;
+            if (!found) return err_nonext.s_;
+        }
+    void **data = malloc((size_t)(n ? n : 1) * sizeof *data);
+    i64 m = 0;
+    for (i64 i = 0; i < n; i++) {
+        void *sym = key_symbol(ks[i]);
+        if (sym) data[m++] = sym;
+    }
+    free(ks);
+    out[0] = data;
+    out[1] = (void *)(size_t)m;
+    return NULL;
+}
+
+void __kml_own_symbols_c(i64 boxed, void **out) {
+    unsigned long long v = (unsigned long long)boxed;
+    void **data = NULL;
+    i64 n = 0, cap = 0;
+#define PUSH(p)                                                     \
+    do {                                                            \
+        if (n == cap) {                                             \
+            cap = cap ? cap * 2 : 4;                                \
+            data = realloc(data, (size_t)cap * sizeof(void *));     \
+        }                                                           \
+        data[n++] = (p);                                            \
+    } while (0)
+    if (v >= 65536 && v < (1ULL << 49)) {
+        void *p = (void *)(v & ~7ULL);
+        if ((v & 7) == 1) {
+            const KmlShape *s = __kml_shape_of(p);
+            if (s && s->syms)
+                for (i64 i = 0; i < s->nkeys; i++)
+                    if (s->syms[i]) PUSH(*s->syms[i]);
+            const Expando *x = expando_find(p, 0);
+            for (i64 i = 0; x && i < x->n; i++) {
+                void *sym = key_symbol(x->keys[i]);
+                if (sym) PUSH(sym);
+            }
+        } else if ((v & 7) == 5) {
+            i64 c = __kml_dynobj_count(p);
+            for (i64 i = 0; i < c; i++) {
+                void *sym = key_symbol((const char *)__kml_dynobj_key_at(p, i));
+                if (sym) PUSH(sym);
+            }
+        }
+    }
+#undef PUSH
+    out[0] = data;
+    out[1] = (void *)(size_t)n;
+}
+
+// Reflect.ownKeys: the string keys, then the symbols, each boxed (a string
+// boxes as its pointer, a symbol as an object: its pointer with kind 1).
+typedef struct {
+    void **data;
+    i64 len;
+} PtrArr;
+
+void __kml_own_keys_c(PtrArr names, PtrArr syms, void **out) {
+    i64 n = names.len + syms.len;
+    i64 *data = malloc((size_t)(n ? n : 1) * sizeof(i64));
+    for (i64 i = 0; i < names.len; i++) data[i] = (i64)(size_t)names.data[i];
+    for (i64 i = 0; i < syms.len; i++) data[names.len + i] = (i64)((size_t)syms.data[i] | 1);
+    out[0] = data;
+    out[1] = (void *)(size_t)n;
+}

@@ -335,6 +335,13 @@ function domainToASCIIInternal(domain: string): string | null {
     return out.join('.');
 }
 
+// ada::idna::to_ascii, as the dns binding applies it to a query's name:
+// the ASCII form, or '' on failure.
+export function idnaToASCII(domain: string): string {
+    const ascii = domainToASCIIInternal(domain);
+    return ascii === null ? '' : ascii;
+}
+
 function domainToUnicodeInternal(domain: string): string {
     const labels = domain.toLowerCase().split('.');
     const out: string[] = [];

@@ -114,9 +114,12 @@ func TestThis(t *testing.T) {
 		{cls + "new P().m()", "string"},
 		{cls + "new P().n()", "number"},
 		{"class Q { v: number = 1; m() { this; return 0 } }", "Q"},
-		{"class Q { v: number = 1; static m() { this; return 0 } }", "?"},
+		{"class Q { v: number = 1; static m() { this; return 0 } }", "typeof Q"},
 		{"class B<T> { items: T[] = []; m(): number { this.items; return 0 } }", "T[]"},
 		{"const o = { a: 1, m() { this; return 0 } }", "?"},
+		// A property value (or an arrow in one) sees the enclosing `this`.
+		{"class Q { v = 1; m() { const o = { a: 0 }; return { a: o, b: this } } }\nnew Q().m().b", "Q"},
+		{"class Q { v = 1; m() { return { f: () => this } } }\nnew Q().m().f()", "Q"},
 		{"function f(this: any) { this }", "any"},
 	} {
 		if got := typeOfProbe(t, tc.src); got != tc.want {

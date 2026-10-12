@@ -91,3 +91,47 @@ func (c CSource) CachedObject(cacheDir string, compileFlags []string) (string, e
 	}
 	return obj, nil
 }
+
+// DeadStripFlags let one runtime object serve every program: each function
+// in its own section, hidden, and the link drops what the program does not
+// reach, together with that code's references to runtime pieces the
+// program does not bring in. Hidden, because a link that exports the
+// executable's symbols (GTK's --export-dynamic) would otherwise keep every
+// function. A program whose runtime must stay visible (ffi dlopen(null),
+// a lazy import() library binding to the executable) keeps it all, and
+// those unreachable references stay unresolved instead.
+func DeadStripFlags(exportsRuntime bool) []string {
+	f := []string{"-ffunction-sections", "-fdata-sections"}
+	if exportsRuntime {
+		f = append(f, UnreachableRefFlags()...)
+	} else {
+		f = append(f, "-fvisibility=hidden")
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return append(f, "-Wl,-dead_strip")
+	case "windows":
+		return append(f, "-Wl,/OPT:REF")
+	}
+	return append(f, "-Wl,--gc-sections")
+}
+
+// UnreachableRefFlags let an executable that exports its runtime keep the
+// runtime's unreachable references unresolved (DeadStripFlags).
+func UnreachableRefFlags() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"-Wl,-undefined,dynamic_lookup"}
+	}
+	return []string{"-Wl,--unresolved-symbols=ignore-in-object-files"}
+}
+
+// exportsRuntime reports whether the program's C runtime must stay visible
+// outside the executable (DeadStripFlags).
+// ExportsRuntime reports whether the program's runtime stays exported
+// (UnreachableRefFlags instead of DeadStripFlags): the FFI looks its own
+// symbols up, or -dynamic-import=lazy libraries bind to them.
+func (e *Emitter) ExportsRuntime() bool { return e.exportsRuntime() }
+
+func (e *Emitter) exportsRuntime() bool {
+	return e.UsesFFIDl() || e.opts.DynamicImport == "lazy"
+}

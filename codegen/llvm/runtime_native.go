@@ -57,17 +57,9 @@ func (e *Emitter) UsesNative() bool {
 	return e.fnDecls["__kml_native_errno_name"] || e.fnDecls["__kml_native_fs_error"]
 }
 
-// NativeCFlags select the routines of native.c the program declared.
-func (e *Emitter) NativeCFlags() []string {
-	var flags []string
-	if e.fnDecls["__kml_native_errno_name"] {
-		flags = append(flags, "-DKML_NATIVE_ERRNO")
-	}
-	if e.fnDecls["__kml_native_fs_error"] {
-		flags = append(flags, "-DKML_NATIVE_FS_ERROR")
-	}
-	return flags
-}
+// NativeCFlags: native.c is compiled the same way for every program; the
+// link drops what a program does not use (DeadStripFlags).
+func (e *Emitter) NativeCFlags() []string { return DeadStripFlags(e.exportsRuntime()) }
 
 // ensureNativeTLS compiles in tlssrc/tlshandle.c (and links libssl) for the
 // TLS primitives over the pool's TCP handles.

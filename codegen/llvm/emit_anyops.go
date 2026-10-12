@@ -21,6 +21,8 @@ package llvm
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -249,11 +251,13 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 			if enc, err = bigOp(); err != nil {
 				return Value{}, err
 			}
-		} else {
+		} else if enc, err = e.anyBigIntOr(lb, rb, left, right, op, pos, !left.Ty.IsDynamic || !right.Ty.IsDynamic, func() string {
 			ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
 			sum := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = fadd double %s, %s", sum, ld, rd))
-			enc = e.emitNbEncodeDouble(sum)
+			return e.emitNbEncodeDouble(sum)
+		}); err != nil {
+			return Value{}, err
 		}
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", enc, resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
@@ -266,22 +270,28 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 
 	switch op {
 	case "-", "*", "/", "%", "**":
-		ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
-		r := e.freshReg()
-		switch op {
-		case "-":
-			e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", r, ld, rd))
-		case "*":
-			e.emitInstr(fmt.Sprintf("%s = fmul double %s, %s", r, ld, rd))
-		case "/":
-			e.emitInstr(fmt.Sprintf("%s = fdiv double %s, %s", r, ld, rd))
-		case "%":
-			e.emitInstr(fmt.Sprintf("%s = frem double %s, %s", r, ld, rd))
-		case "**":
-			e.ensureMathFuncs()
-			e.emitInstr(fmt.Sprintf("%s = call double @pow(double %s, double %s)", r, ld, rd))
+		enc, err := e.anyBigIntOr(lb, rb, left, right, op, pos, !left.Ty.IsDynamic || !right.Ty.IsDynamic, func() string {
+			ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
+			r := e.freshReg()
+			switch op {
+			case "-":
+				e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", r, ld, rd))
+			case "*":
+				e.emitInstr(fmt.Sprintf("%s = fmul double %s, %s", r, ld, rd))
+			case "/":
+				e.emitInstr(fmt.Sprintf("%s = fdiv double %s, %s", r, ld, rd))
+			case "%":
+				e.emitInstr(fmt.Sprintf("%s = frem double %s, %s", r, ld, rd))
+			case "**":
+				e.ensureMathFuncs()
+				e.emitInstr(fmt.Sprintf("%s = call double @pow(double %s, double %s)", r, ld, rd))
+			}
+			return e.emitNbEncodeDouble(r)
+		})
+		if err != nil {
+			return Value{}, err
 		}
-		return Value{Ref: e.emitNbEncodeDouble(r), Ty: TypeAny}, nil
+		return Value{Ref: enc, Ty: TypeAny}, nil
 	case "<", ">", "<=", ">=":
 		// Two strings compare lexicographically; anything else numerically
 		// (which is what JS does for string↔number too).
@@ -418,4 +428,251 @@ func (e *Emitter) emitBothStringsCheck(aRef, bRef string) string {
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", r, la, lb))
 	return r
+}
+
+// anyBigIntOr is the boxed result of an arithmetic operator on two boxed
+// operands: the bigint operation when either holds a bigint (both must: a
+// bigint and a number throw the spec's TypeError), else number(), the
+// numeric path's boxed result.
+func (e *Emitter) anyBigIntOr(lb, rb, left, right Value, op string, pos ast.Pos, mixOnly bool, number func() string) (string, error) {
+	if !e.anyMayHoldBigInt() {
+		return number(), nil // no bigint exists in this program
+	}
+	if mixOnly {
+		// The other operand is a number: a bigint in the `any` can only
+		// throw, so only the dynamic operand is tested.
+		e.ensureAnyIsBigInt()
+		either := "false"
+		for _, side := range []struct{ box, orig Value }{{lb, left}, {rb, right}} {
+			if !side.orig.Ty.IsDynamic {
+				continue
+			}
+			r, b := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_is_bigint(i64 %s)", r, side.box.Ref))
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", b, r))
+			if either == "false" {
+				either = b
+			} else {
+				o := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", o, either, b))
+				either = o
+			}
+		}
+		throwL, okL := e.freshLabel("anyarith.mix"), e.freshLabel("anyarith.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", either, throwL, okL))
+		e.emitLabel(throwL)
+		e.emitThrowTypeError("Cannot mix BigInt and other types, use explicit conversions")
+		e.emitLabel(okL)
+		return number(), nil
+	}
+	if e.programIndependent() {
+		return e.anyBigIntOrLib(lb, rb, op, number), nil
+	}
+	bl, br := e.emitUnboxBoxToType(lb.Ref, BigIntType()), e.emitUnboxBoxToType(rb.Ref, BigIntType())
+	bl.Ty.Nullable, br.Ty.Nullable = true, true
+	lp, rp, either := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", lp, bl.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", rp, br.Ref))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, lp, rp))
+	res := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", res))
+	bigL, numL, mergeL := e.freshLabel("anyarith.big"), e.freshLabel("anyarith.num"), e.freshLabel("anyarith.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", either, bigL, numL))
+	e.emitLabel(bigL)
+	v, err := e.emitBigIntBinary(op, bl, br, pos)
+	if err != nil {
+		return "", err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitBoxBigInt(v).Ref, res))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(numL)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", number(), res))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(mergeL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, res))
+	return out, nil
+}
+
+// mayHoldBigInt reports whether the program can make a bigint at all: a
+// `123n` literal, or a name of the BigInt family (`BigInt`, `BigInt64Array`,
+// a `bigint` annotation), anywhere in it, the builtin modules included.
+// Computed once, before the first use emits anything.
+func (e *Emitter) mayHoldBigInt() bool {
+	if e.bigIntScan == 0 {
+		e.bigIntScan = 1
+		if e.prog != nil {
+			for _, st := range e.prog.Body {
+				ast.Inspect(st, func(n ast.Node) bool {
+					switch x := n.(type) {
+					case *ast.NumberLiteral:
+						if x.IsBigInt {
+							e.bigIntScan = 2
+						}
+					case *ast.Identifier:
+						if strings.HasPrefix(x.Name, "BigInt") {
+							e.bigIntScan = 2
+						}
+					}
+					return e.bigIntScan != 2
+				})
+				if e.bigIntScan == 2 {
+					break
+				}
+			}
+		}
+	}
+	return e.bigIntScan == 2 || e.UsesBigInt()
+}
+
+// anyMayHoldBigInt is mayHoldBigInt for an operator on an `any`:
+// program-independent code assumes a bigint can exist.
+func (e *Emitter) anyMayHoldBigInt() bool { return e.programIndependent() || e.mayHoldBigInt() }
+
+// anyBigIntOrLib is anyBigIntOr's operation on two boxed operands in
+// program-independent code: when either holds a bigint, the program's helper for op
+// (emitAnyBigIntOpsFinalize), which is a stub when the program has no
+// bigint, so the library names no part of the bigint runtime.
+func (e *Emitter) anyBigIntOrLib(lb, rb Value, op string, number func() string) string {
+	e.ensureAnyIsBigInt()
+	lr, rr, either := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_is_bigint(i64 %s)", lr, lb.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_is_bigint(i64 %s)", rr, rb.Ref))
+	or := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i32 %s, %s", or, lr, rr))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", either, or))
+	res := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", res))
+	bigL, numL, mergeL := e.freshLabel("anyarith.big"), e.freshLabel("anyarith.num"), e.freshLabel("anyarith.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", either, bigL, numL))
+	e.emitLabel(bigL)
+	fn := e.ensureAnyBigIntOp(op)
+	v := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s(i64 %s, i64 %s)", v, fn, lb.Ref, rb.Ref))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v, res))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(numL)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", number(), res))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(mergeL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, res))
+	return out
+}
+
+// anyBigIntOpSymbol names the program's helper for a bigint operator op on
+// two boxed operands.
+func anyBigIntOpSymbol(op string) string {
+	if fn, ok := bigIntBinFn[op]; ok {
+		return "@__kml_any_bigint_" + fn
+	}
+	return fmt.Sprintf("@__kml_any_bigint_op%x", op)
+}
+
+// ensureAnyBigIntOp is the helper for op, defined by
+// emitAnyBigIntOpsFinalize (at once when that has already run).
+func (e *Emitter) ensureAnyBigIntOp(op string) string {
+	if e.anyBigIntOps == nil {
+		e.anyBigIntOps = map[string]bool{}
+	}
+	if !e.anyBigIntOps[op] {
+		e.anyBigIntOps[op] = true
+		if e.anyBigIntOpsDone {
+			e.defineAnyBigIntOp(op)
+		}
+	}
+	return anyBigIntOpSymbol(op)
+}
+
+// emitAnyBigIntOpsFinalize defines the helpers the library's `any`
+// arithmetic named: the bigint operation on the operands' bigints (a
+// TypeError when only one holds a bigint), or, in a program that cannot
+// make a bigint, an unreachable stub.
+func (e *Emitter) emitAnyBigIntOpsFinalize() {
+	e.anyBigIntOpsDone = true
+	ops := make([]string, 0, len(e.anyBigIntOps))
+	for op := range e.anyBigIntOps {
+		ops = append(ops, op)
+	}
+	sort.Strings(ops)
+	for _, op := range ops {
+		e.defineAnyBigIntOp(op)
+	}
+}
+
+func (e *Emitter) defineAnyBigIntOp(op string) {
+	restore := e.beginDetachedFunc()
+	saved, savedShared := e.inLib, e.sharedCode
+	e.inLib, e.sharedCode = "", 0
+	if !e.mayHoldBigInt() {
+		e.emitTerminator("unreachable")
+	} else {
+		bl, br := e.emitUnboxBoxToType("%a", BigIntType()), e.emitUnboxBoxToType("%b", BigIntType())
+		bl.Ty.Nullable, br.Ty.Nullable = true, true
+		v, err := e.emitBigIntBinary(op, bl, br, ast.Pos{})
+		if err != nil {
+			e.emitTerminator("unreachable")
+		} else {
+			e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitBoxBigInt(v).Ref))
+		}
+	}
+	body := e.allocas.String() + e.body.String()
+	e.inLib, e.sharedCode = saved, savedShared
+	restore()
+	e.writeHelper("hidden", "i64", anyBigIntOpSymbol(op), "i64 %a, i64 %b", body)
+}
+
+// ensureAnyIsBigInt declares the boxed-bigint test (boxsrc/toprim.c).
+func (e *Emitter) ensureAnyIsBigInt() {
+	if !e.fnDecls["__kml_any_is_bigint"] {
+		e.fnDecls["__kml_any_is_bigint"] = true
+		e.emitGlobal("declare i32 @__kml_any_is_bigint(i64)")
+	}
+}
+
+// emitAnyArithNumber is an arithmetic operator between an `any` and a number
+// (anyArithIsNumber): ToNumber of the `any` after ToPrimitive, a TypeError
+// when it holds a bigint, and the operation on doubles, left unboxed.
+func (e *Emitter) emitAnyArithNumber(op string, left, right Value) (Value, error) {
+	num := func(v Value) (string, error) {
+		if !v.Ty.IsDynamic {
+			return e.coerce(v, TypeF64).Ref, nil
+		}
+		p := Value{Ref: e.emitAnyToPrimitiveHint(v.Ref, hintNumber), Ty: TypeAny}
+		if e.anyMayHoldBigInt() {
+			e.ensureAnyIsBigInt()
+			r, b := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_is_bigint(i64 %s)", r, p.Ref))
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", b, r))
+			throwL, okL := e.freshLabel("anyarith.mix"), e.freshLabel("anyarith.ok")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", b, throwL, okL))
+			e.emitLabel(throwL)
+			e.emitThrowTypeError("Cannot mix BigInt and other types, use explicit conversions")
+			e.emitLabel(okL)
+		}
+		return e.emitAnyToNum(p), nil
+	}
+	ld, err := num(left)
+	if err != nil {
+		return Value{}, err
+	}
+	rd, err := num(right)
+	if err != nil {
+		return Value{}, err
+	}
+	r := e.freshReg()
+	switch op {
+	case "-":
+		e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", r, ld, rd))
+	case "*":
+		e.emitInstr(fmt.Sprintf("%s = fmul double %s, %s", r, ld, rd))
+	case "/":
+		e.emitInstr(fmt.Sprintf("%s = fdiv double %s, %s", r, ld, rd))
+	case "%":
+		e.emitInstr(fmt.Sprintf("%s = frem double %s, %s", r, ld, rd))
+	case "**":
+		e.ensureMathFuncs()
+		e.emitInstr(fmt.Sprintf("%s = call double @pow(double %s, double %s)", r, ld, rd))
+	}
+	return Value{Ref: r, Ty: TypeF64}, nil
 }

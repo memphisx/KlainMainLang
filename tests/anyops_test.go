@@ -174,3 +174,37 @@ const v: any = 5
 console.log(f({ a: 1 }), f('x'), typeof (v + 'px'), (v + 'px').length)
 `)
 }
+
+// Arithmetic between an `any` and a number is a number, held unboxed: a
+// bigint in the `any` cannot mix with the number.
+func TestE2EAnyNumberArithmeticUnboxed(t *testing.T) {
+	assertSameAsNode(t, `
+function f(after: any): number { let ms: number = after === undefined ? 1 : after * 1; return ms; }
+console.log(f(undefined), f("5"), f(2.5), f("x"));
+const a: any = 7;
+const b = a / 2;
+const c = 10 - a;
+console.log(b, c, a % 4, a ** 2, typeof (a * 2));
+let o: any = { valueOf() { return 6; } };
+console.log(o * 2);
+`)
+}
+
+// Arithmetic on `any` operands holding bigints is bigint arithmetic, a
+// bigint against a number throws, and the result of `any * any` stays
+// boxed through a function's return (TypeScript types it number).
+func TestE2EAnyBigIntArithmetic(t *testing.T) {
+	assertSameAsNode(t, `
+function mul(a: any, b: any) { const r = a * b; console.log(typeof r); return r; }
+function add(a: any, b: any) { return a + b; }
+const x: any = 3n;
+const y: any = 4n;
+console.log(mul(x, y), mul(2, 3), add(x, y), x - y, y ** x, y % x, y / x);
+try { console.log(x * 2); } catch (e) { console.log((e as Error).name, (e as Error).message); }
+try { console.log(x + 1); } catch (e) { console.log((e as Error).name); }
+const s: any = "a";
+console.log(s + x);
+function pick(c: boolean, a: any, b: any) { return c ? a * b : 1; }
+console.log(pick(true, 2n, 3n), pick(false, 2n, 3n), pick(true, 2, 3));
+`)
+}

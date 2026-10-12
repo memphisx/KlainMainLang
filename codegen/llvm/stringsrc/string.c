@@ -301,7 +301,11 @@ static long long utf8_len(unsigned char c) {
 // separator splits into characters (UTF-8 sequences: one per UTF-16 unit
 // for the Basic Multilingual Plane).
 array_header *__kml_String_split(const char *s, const char *sep, bool hasLimit, double limit) {
-    array_header *h = (array_header *)malloc(sizeof(array_header));
+    // The header word before it, as every array header has (KML_ARRAY_HDR_WORD,
+    // passed in by the compiler): only an instance's body has another.
+    long long *cell = (long long *)malloc(8 + sizeof(array_header));
+    cell[0] = KML_ARRAY_HDR_WORD;
+    array_header *h = (array_header *)(cell + 1);
     h->data = NULL;
     h->len = 0;
     unsigned long long lim = hasLimit ? to_uint32(limit) : 4294967295ULL;

@@ -5,6 +5,7 @@
 // answer's records the way cares_wrap.cc's parsers do.
 
 import { isIP } from './internal_net';
+import { idnaToASCII } from './kml_url';
 import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
 export function received(value: any): string {
@@ -225,10 +226,10 @@ export class ResolverBase {
             throw new NodeTypeError('ERR_INVALID_IP_ADDRESS', 'Invalid IP address: ' + serv);
         });
 
-        const spec = newSet.map((s: any) => s[1] + ' ' + s[2]).join('\n');
+        const spec = newSet.map((s: any) => s[0] + ' ' + s[1] + ' ' + s[2]).join('\n');
         const errorNumber = __kml_native.dnsChannelSetServers(this._handle, spec);
         if (errorNumber !== 0) {
-            throw new NodeError('ERR_DNS_SET_SERVERS_FAILED', 'c-ares failed to set servers: "' + caresName(errorNumber) + '" [' + (servers as any[]).join(',') + ']');
+            throw new NodeError('ERR_DNS_SET_SERVERS_FAILED', 'c-ares failed to set servers: "' + __kml_native.dnsStrerror(errorNumber) + '" [' + (servers as any[]).join(',') + ']');
         }
     }
 
@@ -337,211 +338,37 @@ export const queryTypes: { [binding: string]: number } = {
     queryTlsa: 52, queryTxt: 16, querySrv: 33, queryPtr: 12, queryNaptr: 35, querySoa: 6, getHostByAddr: 12,
 };
 
-function sameName(a: string, b: string): boolean {
-    return a.toLowerCase() === b.toLowerCase();
-}
-
-// The A or AAAA records the question's name reaches through its CNAME
-// chain, each with its TTL capped by the chain's (c-ares' addrttl).
-function addressRecords(an: any[], qname: string, type: number): any[] {
-    let host = qname;
-    let cap = 2147483647;
-    const out: any[] = [];
-    for (const rr of an) {
-        if (rr.t === 5 && sameName(rr.n, host)) {
-            host = rr.h;
-            if (rr.ttl < cap) cap = rr.ttl;
-        } else if (rr.t === type && sameName(rr.n, host) && rr.a !== undefined) {
-            out.push({ address: rr.a, ttl: rr.ttl < cap ? rr.ttl : cap });
-        }
-    }
-    return out;
-}
-
-// The name the question's CNAME chain ends at, or undefined without one.
-function cnameTarget(an: any[], qname: string): string | undefined {
-    let host = qname;
-    let found = false;
-    for (const rr of an) {
-        if (rr.t === 5 && sameName(rr.n, host)) {
-            host = rr.h;
-            found = true;
-        }
-    }
-    return found ? host : undefined;
-}
-
-function ofType(an: any[], type: number): any[] {
-    return an.filter((rr: any) => rr.t === type);
-}
-
-function mxRecord(rr: any): any {
-    return { exchange: rr.h, priority: rr.p, type: 'MX' };
-}
-
-function srvRecord(rr: any): any {
-    return { name: rr.h, port: rr.port, priority: rr.p, weight: rr.w, type: 'SRV' };
-}
-
-function naptrRecord(rr: any, withType: boolean): any {
-    return {
-        flags: rr.flags, service: rr.service, regexp: rr.regexp, replacement: rr.replacement,
-        order: rr.order, preference: rr.pref, type: withType ? 'NAPTR' : undefined,
-    };
-}
-
-function soaRecord(rr: any, withType: boolean): any {
-    return {
-        nsname: rr.mname, hostmaster: rr.rname, serial: rr.serial, refresh: rr.refresh,
-        retry: rr.retry, expire: rr.expire, minttl: rr.minimum, type: withType ? 'SOA' : undefined,
-    };
-}
-
-function caaRecord(rr: any): any {
-    const out: any = { critical: rr.critical, type: 'CAA' };
-    out[rr.tag] = rr.value;
-    return out;
-}
-
-function tlsaRecord(rr: any): any {
-    const hex: string = rr.data;
+// A TLSA record's data arrives as hex; cares_wrap hands an ArrayBuffer.
+function tlsaData(rec: any): any {
+    if (rec === null || typeof rec !== 'object' || rec.certUsage === undefined) return rec;
+    const hex: string = rec.data.hex;
     const data = new ArrayBuffer(hex.length / 2);
     const bytes = new Uint8Array(data);
     for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-    return { certUsage: rr.usage, selector: rr.selector, match: rr.match, data: data };
-}
-
-// resolveAny's records, in cares_wrap's order: A (or the CNAME), AAAA, MX,
-// NS, TXT, SRV, PTR, NAPTR, SOA, TLSA, CAA.
-function anyRecords(an: any[], qname: string): any[] {
-    const out: any[] = [];
-    const a = addressRecords(an, qname, 1);
-    const target = cnameTarget(an, qname);
-    if (a.length === 0 && target !== undefined) out.push({ value: target, type: 'CNAME' });
-    for (const r of a) out.push({ address: r.address, ttl: r.ttl, type: 'A' });
-    for (const r of addressRecords(an, qname, 28)) out.push({ address: r.address, ttl: r.ttl, type: 'AAAA' });
-    for (const rr of ofType(an, 15)) out.push(mxRecord(rr));
-    for (const rr of ofType(an, 2)) out.push({ value: rr.h, type: 'NS' });
-    for (const rr of ofType(an, 16)) out.push({ entries: rr.c, type: 'TXT' });
-    for (const rr of ofType(an, 33)) out.push(srvRecord(rr));
-    for (const rr of ofType(an, 12)) out.push({ value: rr.h, type: 'PTR' });
-    for (const rr of ofType(an, 35)) out.push(naptrRecord(rr, true));
-    const soa = ofType(an, 6);
-    if (soa.length > 0) out.push(soaRecord(soa[0], true));
-    for (const rr of ofType(an, 52)) out.push(tlsaRecord(rr));
-    for (const rr of ofType(an, 257)) out.push(caaRecord(rr));
-    return out;
-}
-
-// The shaped result of a binding's answer: [status, result, ttls].
-function shapeAnswer(binding: string, answer: any, qname: string): any[] {
-    const an: any[] = answer.an;
-    let result: any;
-    let ttls: number[] | undefined;
-    switch (binding) {
-        case 'queryA':
-        case 'queryAaaa': {
-            const recs = addressRecords(an, qname, binding === 'queryA' ? 1 : 28);
-            result = recs.map((r: any) => r.address);
-            ttls = recs.map((r: any) => r.ttl);
-            break;
-        }
-        case 'queryCname': {
-            const target = cnameTarget(an, qname);
-            result = target === undefined ? [] : [target];
-            break;
-        }
-        case 'queryNs':
-            result = ofType(an, 2).map((rr: any) => rr.h);
-            break;
-        case 'queryPtr':
-        case 'getHostByAddr':
-            result = ofType(an, 12).map((rr: any) => rr.h);
-            break;
-        case 'queryMx':
-            result = ofType(an, 15).map(mxRecord);
-            break;
-        case 'queryTxt':
-            result = ofType(an, 16).map((rr: any) => rr.c);
-            break;
-        case 'querySrv':
-            result = ofType(an, 33).map(srvRecord);
-            break;
-        case 'queryNaptr':
-            result = ofType(an, 35).map((rr: any) => naptrRecord(rr, false));
-            break;
-        case 'querySoa': {
-            const soa = ofType(an, 6);
-            if (soa.length === 0) return [1, undefined, undefined];
-            return [0, soaRecord(soa[0], false), undefined];
-        }
-        case 'queryCaa':
-            result = ofType(an, 257).map(caaRecord);
-            break;
-        case 'queryTlsa':
-            result = ofType(an, 52).map(tlsaRecord);
-            break;
-        case 'queryAny':
-            return [0, anyRecords(an, qname), undefined];
-    }
-    if (result.length === 0) return [1, undefined, undefined]; // ARES_ENODATA
-    return [0, result, ttls];
-}
-
-// The PTR name of an IP address (in-addr.arpa / ip6.arpa), or undefined.
-function reverseName(address: string): string | undefined {
-    const family = isIP(address);
-    if (family === 4) return address.split('.').reverse().join('.') + '.in-addr.arpa';
-    if (family !== 6) return undefined;
-    let addr = address;
-    const pct = addr.indexOf('%');
-    if (pct >= 0) addr = addr.slice(0, pct);
-    // Expand '::' and an embedded IPv4 tail into eight groups.
-    let tail: string[] = [];
-    const lastColon = addr.lastIndexOf(':');
-    if (addr.slice(lastColon + 1).includes('.')) {
-        const v4 = addr.slice(lastColon + 1).split('.').map((x: string) => parseInt(x, 10));
-        tail = [((v4[0] << 8) | v4[1]).toString(16), ((v4[2] << 8) | v4[3]).toString(16)];
-        addr = addr.slice(0, lastColon + 1) + '0:0';
-    }
-    const halves = addr.split('::');
-    const head = halves[0] === '' ? [] : halves[0].split(':');
-    const rest = halves.length > 1 ? (halves[1] === '' ? [] : halves[1].split(':')) : [];
-    const groups: string[] = head.slice();
-    for (let i = head.length + rest.length; i < 8; i++) groups.push('0');
-    for (const g of rest) groups.push(g);
-    if (tail.length === 2) {
-        groups[6] = tail[0];
-        groups[7] = tail[1];
-    }
-    const nibbles: string[] = [];
-    for (const g of groups) {
-        const padded = ('0000' + g).slice(-4);
-        for (const c of padded) nibbles.push(c.toLowerCase());
-    }
-    return nibbles.reverse().join('.') + '.ip6.arpa';
+    rec.data = data;
+    return rec;
 }
 
 // Runs binding's query for name on the channel; the callback gets (status,
 // result, ttls): status 0, a c-ares status, or a c-ares name for a bad
 // address.
 export function runQuery(channel: number, binding: string, name: string, done: (status: any, result: any, ttls: any) => void): void {
-    let qname = name;
-    if (binding === 'getHostByAddr') {
-        const rev = reverseName(name);
-        if (rev === undefined) {
-            // The binding refuses a non-address: UV_EINVAL, thrown.
-            throw new DNSException(__kml_native.uvErrno(22), binding, name);
-        }
-        qname = rev;
-    }
-    __kml_native.dnsQuery(channel, queryTypes[binding], qname, (status: number, unused: number) => {
+    const type = binding === 'getHostByAddr' ? 0 : queryTypes[binding];
+    const err = __kml_native.dnsQuery(channel, type, idnaToASCII(name), (status: number, unused: number) => {
         if (status !== 0) {
             done(status, undefined, undefined);
             return;
         }
         const answer = JSON.parse(__kml_native.lastString());
-        const shaped = shapeAnswer(binding, answer, qname);
-        done(shaped[0], shaped[1], shaped[2]);
+        let result = answer.r;
+        if (binding === 'queryTlsa' || binding === 'queryAny') result = result.map(tlsaData);
+        // The record template's type slot, left undefined without need_type.
+        if (binding === 'querySoa') result.type = undefined;
+        if (binding === 'queryNaptr') for (const rec of result) rec.type = undefined;
+        done(0, result, answer.x);
     });
+    if (err !== 0) {
+        // The binding refuses a non-address: UV_EINVAL, thrown.
+        throw new DNSException(__kml_native.uvErrno(22), binding, name);
+    }
 }

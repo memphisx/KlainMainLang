@@ -84,7 +84,7 @@ console.log("before")
 q()
 console.log("after")`,
 		`interface Row { name: string }
-function q(r?: Row) { console.log((r?.name).length) }
+function q(r?: Row) { console.log((r?.name)!.length) }
 console.log("before")
 q()
 console.log("after")`,

@@ -26,6 +26,17 @@ import (
 //go:embed webviewsrc/webview.h
 var webviewSource string
 
+// webviewLoopEmbed runs the runtime's loop inside the GUI's main loop on
+// macOS and GTK (TDD-00244 Stage 7).
+//
+//go:embed webviewsrc/loop_embed.cc
+var webviewLoopEmbed string
+
+// webviewNatives are klain:webview's entry points over the webview_* API.
+//
+//go:embed webviewsrc/natives.c
+var webviewNatives string
+
 // WebviewSource returns the C/C++ translation unit implementing the webview_*
 // ABI for the selected backend (TDD-00144). "system"/"" is the amalgamated
 // webview/webview binding (the header, compiled directly as the translation
@@ -48,7 +59,7 @@ func WebviewSource(backend string) string {
 	if runtime.GOOS == "windows" {
 		return webviewSource + webviewWin32Deferral
 	}
-	return webviewSource
+	return webviewSource + "\n" + webviewLoopEmbed
 }
 
 // LocateWebview returns the clang cflags/libs needed to compile and link the
@@ -95,7 +106,7 @@ func (e *Emitter) LocateWebview(backend string) (cflags, libs []string, err erro
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		return nil, []string{"-framework", "WebKit", "-framework", "CoreGraphics", "-lc++"}, nil
+		return nil, []string{"-framework", "WebKit", "-framework", "CoreGraphics", "-framework", "CoreFoundation", "-lc++"}, nil
 	case "linux":
 		// gtk4 + webkitgtk-6.0 is the current generation; gtk+-3.0 +
 		// webkit2gtk-4.1 the widely-shipped fallback (Debian/Ubuntu LTS).

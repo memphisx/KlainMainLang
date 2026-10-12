@@ -53,6 +53,8 @@ q.n = 2;
 console.log(q.tag, q.n + 1, q);
 const s: string = q.tag;
 console.log(s.length);
+q.fn = function (a: number) { return a + 1; };
+console.log(q.fn(1));
 `)
 	for _, c := range []struct{ src, want string }{
 		{"function q(x: number): number { return x; }\nconsole.log(q.zzz);\n", "property 'zzz' does not exist"},
@@ -303,4 +305,94 @@ const p = run(() => {
 });
 p.then((v: any) => console.log('v', v));
 `, "2\n3\nfinally\nv 5")
+}
+
+// An immediately invoked function's unannotated parameter takes its
+// argument's type, and one past the last argument is an optional any.
+func TestE2EIIFEParamTypes(t *testing.T) {
+	assertOutput(t, `
+function f() {
+  return function g(a) { return function () { return g; }(); }();
+}
+console.log(typeof f());
+console.log(function (x, y) { return x * 2 + (y === undefined ? 1 : 0); }(20));
+console.log((function (h) { return h(1); })(x => x + 1));
+`, "function\n41\n2")
+}
+
+// Number's safe-integer bounds are numbers (doubles) in every lane, and a
+// module-level binding of one is a global a function reads (ADR-01447).
+func TestE2ENumberSafeIntegerGlobals(t *testing.T) {
+	src := `
+let t = Number.MIN_SAFE_INTEGER;
+const m = Number.MAX_SAFE_INTEGER;
+function f() { return t + 1; }
+console.log(f(), m, m + 1, m % 7, Number.MAX_SAFE_INTEGER / 2, typeof Number.MIN_SAFE_INTEGER, -Number.MIN_SAFE_INTEGER, Number.isSafeInteger(m), String(m), m.toString(16), JSON.stringify({m}));
+for (let i = Number.MAX_SAFE_INTEGER - 2; i <= Number.MAX_SAFE_INTEGER; i++) console.log(i);
+`
+	assertSameAsNode(t, src)
+	assertSameAsNodeCompatJS(t, src)
+}
+
+// A function in an object literal reads `arguments` (-compat=js): every
+// argument passed, as JavaScript gives it (ADR-01451).
+func TestE2EObjectLiteralFunctionArguments(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var o = {
+  m: function () { return arguments.length + ':' + arguments[0] + ':' + typeof arguments[2]; },
+  n() { return Array.from(arguments).join('|'); },
+  k(a, b) { return [arguments.length, a, b, arguments[1]].join(','); },
+};
+console.log(o.m(1, 2), o.n('x', 'y', 3), o.k(5), o.k(5, 6, 7));
+var f = function () { return arguments.length; };
+console.log(f(), f(1, 2, 3));
+`)
+}
+
+// A parameter default reading a later parameter (or itself) throws
+// JavaScript's dead-zone ReferenceError when the default runs, and an
+// omitted argument after a defaulted one is undefined (ADR-01458).
+func TestE2EParamDeadZoneAndOmittedArgs(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var f = (x = y, y) => 1;
+try { f(); console.log("no throw"); } catch (e) { console.log(e instanceof ReferenceError, e.constructor.name, e.message); }
+var g = (x = x) => 1;
+try { g(); } catch (e) { console.log(e instanceof ReferenceError); }
+console.log(f(1, 2), g(3));
+var h = (a = 1, b) => b;
+var k = (a = 2, b) => a;
+console.log(h(), k(), k(5, 6));
+`)
+}
+
+// A module-level object literal under -compat=js is a global a function or
+// a generator reads (ADR-01461).
+func TestE2EJSObjectLiteralGlobals(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var o = {};
+o.x = 1;
+function f() { return o.x; }
+function* g() { yield o.x; }
+console.log(f(), g().next().value);
+o = { x: 5 };
+console.log(f(), g().next().value);
+var it = {};
+it[Symbol.iterator] = function () { var i = 0; return { next: function () { i++; return { done: i > 2, value: i }; } }; };
+function* h() { for (const v of it) yield v * 2; }
+console.log([...h()]);
+`)
+}
+
+// A -compat=js binding that a destructuring assignment writes holds whatever
+// value it is given (ADR-01462).
+func TestE2EJSDestructuringAssignmentWidens(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var x = 1, y = 'a', z;
+[x, y] = ['s', 2];
+({ z } = { z: true });
+console.log(x, y, z, typeof x, typeof y);
+var n = 0;
+[n] = [5];
+console.log(n + 1);
+`)
 }

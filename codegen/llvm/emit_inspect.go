@@ -118,6 +118,9 @@ func (e *Emitter) emitInspectObjectOwn(val Value, depth int) (Value, error) {
 		return r
 	}
 	fields := esOrderedFields(val.Ty.VisibleFields()) // ES key order (Node)
+	// Symbol-keyed fields (TDD-00246) after the string keys, as
+	// Reflect.ownKeys orders them.
+	fields = append(fields, symbolFields(val.Ty)...)
 	if len(fields) == 0 {
 		return Value{Ref: opener("{}"), Ty: TypePtr}, nil
 	}
@@ -132,7 +135,7 @@ func (e *Emitter) emitInspectObjectOwn(val Value, depth int) (Value, error) {
 	// optional (`x?: T`) field that is absent has no entry (ADR-01063).
 	list := e.inspectBegin(depth, "1")
 	appendField := func(field Field, fieldStr Value) error {
-		entry, err := e.emitStringConcat(Value{Ref: e.internString(field.Name + ": "), Ty: TypePtr}, fieldStr)
+		entry, err := e.emitStringConcat(Value{Ref: e.internString(symbolFieldDisplay(field.Name) + ": "), Ty: TypePtr}, fieldStr)
 		if err != nil {
 			return err
 		}
@@ -238,6 +241,39 @@ func (e *Emitter) emitInspectNullablePtr(v Value, render func(Value) (Value, err
 const inspectMaxArrayLength = 100
 
 func (e *Emitter) emitInspectArray(val Value, depth int) (Value, error) {
+	if !e.arrayMayBeClassBody(val) {
+		return e.emitInspectArrayAs(val, depth, collLabel{})
+	}
+	// The body of an instance of a class extending Array (a species
+	// result typed as a plain array) renders as the instance.
+	isClass, obj := e.emitArrayClassObject(val.ArrayHeader)
+	out := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", out))
+	clsL, arrL, doneL := e.freshLabel("insparr.cls"), e.freshLabel("insparr.plain"), e.freshLabel("insparr.join")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isClass, clsL, arrL))
+	e.emitLabel(clsL)
+	cs, err := e.emitInspectField(Value{Ref: e.emitBoxArrayClassObject(obj), Ty: TypeAny}, depth)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cs.Ref, out))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(arrL)
+	as, err := e.emitInspectArrayAs(val, depth, collLabel{})
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", as.Ref, out))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, out))
+	return Value{Ref: r, Ty: TypePtr}, nil
+}
+
+// emitInspectArrayAs renders an array; a label names a class extending
+// Array, as Node writes one: `Stack(2) [ 1, 2, x: 1 ]`.
+func (e *Emitter) emitInspectArrayAs(val Value, depth int, label collLabel) (Value, error) {
 	if val.Ty.ElemType == nil {
 		return Value{Ref: e.internString("[Array]"), Ty: TypePtr}, nil
 	}
@@ -348,30 +384,37 @@ func (e *Emitter) emitInspectArray(val Value, depth int) (Value, error) {
 			e.emitLabel(plainL)
 		}
 	}
+	if label.push != nil {
+		if err := label.push(list); err != nil {
+			return Value{}, err
+		}
+	}
 	// Node right-aligns the columns of a number/bigint array, left-aligns others.
 	numeric := (elemTy.Float || elemTy.IsInteger()) && elemTy.IR != "i1" && !elemTy.IsDynamic || val.Ty.BigIntElem || elemTy.IsBigInt
 	res := e.inspectEnd(list, e.internString("["), e.internString("]"), depth, true, numeric).Ref
 	final := Value{Ref: res, Ty: TypePtr}
 	// A TypedArray prints with Node's `TypeName(len) ` prefix (a Node Buffer has
 	// its own `<Buffer ..>` rendering elsewhere, so it is excluded here).
-	if val.Ty.IsTypedArray && !val.Ty.IsBuffer {
-		if name := typedArrayConstructorName(val.Ty); name != "" {
-			lenStr, err := e.emitValueToString(Value{Ref: lenReg, Ty: TypeI64})
-			if err != nil {
-				return Value{}, err
-			}
-			p1, err := e.emitStringConcat(Value{Ref: e.internString(name + "("), Ty: TypePtr}, lenStr)
-			if err != nil {
-				return Value{}, err
-			}
-			p2, err := e.emitStringConcat(p1, Value{Ref: e.internString(") "), Ty: TypePtr})
-			if err != nil {
-				return Value{}, err
-			}
-			final, err = e.emitStringConcat(p2, final)
-			if err != nil {
-				return Value{}, err
-			}
+	prefix := label.class
+	if val.Ty.IsTypedArray && !val.Ty.IsBuffer && prefix == "" {
+		prefix = typedArrayConstructorName(val.Ty)
+	}
+	if prefix != "" {
+		lenStr, err := e.emitValueToString(Value{Ref: lenReg, Ty: TypeI64})
+		if err != nil {
+			return Value{}, err
+		}
+		p1, err := e.emitStringConcat(Value{Ref: e.internString(prefix + "("), Ty: TypePtr}, lenStr)
+		if err != nil {
+			return Value{}, err
+		}
+		p2, err := e.emitStringConcat(p1, Value{Ref: e.internString(") " + label.tag), Ty: TypePtr})
+		if err != nil {
+			return Value{}, err
+		}
+		final, err = e.emitStringConcat(p2, final)
+		if err != nil {
+			return Value{}, err
 		}
 	}
 	return final, nil
@@ -438,6 +481,26 @@ func (e *Emitter) emitInspectBuffer(val Value) (Value, error) {
 // machinery uses. Keys and values are formatted as inspected fields (strings
 // single-quoted, nested objects recursed), joined by " => ".
 func (e *Emitter) emitInspectMap(val Value, depth int) (Value, error) {
+	return e.emitInspectMapAs(val, depth, collLabel{})
+}
+
+// collLabel names a Map or Set inspected as a class extending it: the class
+// name, the `[Map] ` tag and its own fields (none for a plain one).
+type collLabel struct {
+	class  string
+	tag    string
+	nextra int
+	push   func(list string) error
+}
+
+func (l collLabel) name(host string) string {
+	if l.class != "" {
+		return l.class
+	}
+	return host
+}
+
+func (e *Emitter) emitInspectMapAs(val Value, depth int, label collLabel) (Value, error) {
 	keyTy := TypePtr
 	if val.Ty.MapKey != nil {
 		keyTy = *val.Ty.MapKey
@@ -449,13 +512,13 @@ func (e *Emitter) emitInspectMap(val Value, depth int) (Value, error) {
 	suffix, _ := mapRuntime(keyTy)
 	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(val.Ref, suffix, keyTy)
 	render := func(idxVal string) (Value, error) {
-		kGep, kElem := e.freshReg(), e.freshReg()
+		// An array key or value is stored as its header pointer.
+		kGep, vGep := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", kGep, keyTy.IR, keysPtr, idxVal))
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", kElem, keyTy.IR, kGep, keyTy.Align()))
-		vGep, vElem := e.freshReg(), e.freshReg()
+		kElem := e.loadArrayElem(kGep, keyTy)
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", vGep, valTy.IR, valsPtr, idxVal))
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", vElem, valTy.IR, vGep, valTy.Align()))
-		kStr, err := e.emitInspectField(Value{Ref: kElem, Ty: keyTy}, depth+1)
+		vElem := e.loadArrayElem(vGep, valTy)
+		kStr, err := e.emitInspectField(kElem, depth+1)
 		if err != nil {
 			return Value{}, err
 		}
@@ -463,23 +526,28 @@ func (e *Emitter) emitInspectMap(val Value, depth int) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		vStr, err := e.emitInspectField(Value{Ref: vElem, Ty: valTy}, depth+1)
+		vStr, err := e.emitInspectField(vElem, depth+1)
 		if err != nil {
 			return Value{}, err
 		}
 		return e.emitStringConcat(arrowStr, vStr)
 	}
-	return e.emitInspectCollection("Map", keysLen, depth, render)
+	return e.emitInspectCollectionAs(label.name("Map"), label.tag, keysLen, depth, render, label.nextra, label.push)
 }
 
 // emitInspectSet renders a Set as `Set(N) { 1, 2, ... }` (empty: `Set(0) {}`).
 func (e *Emitter) emitInspectSet(val Value, depth int) (Value, error) {
+	return e.emitInspectSetAs(val, depth, collLabel{})
+}
+
+func (e *Emitter) emitInspectSetAs(val Value, depth int, label collLabel) (Value, error) {
 	elemTy := TypePtr
 	if val.Ty.MapKey != nil {
 		elemTy = *val.Ty.MapKey
 	}
 	suffix, _ := mapRuntime(elemTy)
 	keysRes := e.freshReg()
+	e.ensureMapFamily(suffix)
 	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", keysRes, suffix, val.Ref))
 	keysRes = e.materializeKeysAggregate(keysRes, elemTy)
 	keysPtr := e.freshReg()
@@ -487,20 +555,17 @@ func (e *Emitter) emitInspectSet(val Value, depth int) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", keysPtr, keysRes))
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", keysLen, keysRes))
 	render := func(idxVal string) (Value, error) {
-		gep, elem := e.freshReg(), e.freshReg()
+		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, keysPtr, idxVal))
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elem, elemTy.IR, gep, elemTy.Align()))
-		return e.emitInspectField(Value{Ref: elem, Ty: elemTy}, depth+1)
+		return e.emitInspectField(e.loadArrayElem(gep, elemTy), depth+1)
 	}
-	return e.emitInspectCollection("Set", keysLen, depth, render)
+	return e.emitInspectCollectionAs(label.name("Set"), label.tag, keysLen, depth, render, label.nextra, label.push)
 }
 
-// emitInspectCollection is the shared body-builder for Map/Set inspection:
-// prints `<Name>(<len>) {}` when empty, or `<Name>(<len>) { e0, e1, … }`
-// otherwise, where each element string is produced by render(idx). The
-// element render closure formats one entry (`k => v` for a Map, the value for
-// a Set).
-func (e *Emitter) emitInspectCollection(name, lenReg string, depth int, render func(idxVal string) (Value, error)) (Value, error) {
+// emitInspectCollectionAs is emitInspectCollection under a class's name, with
+// tag after the size (`Counter(2) [Map] {`) and a class's own fields after
+// the entries.
+func (e *Emitter) emitInspectCollectionAs(name, tag, lenReg string, depth int, render func(idxVal string) (Value, error), nextra int, pushExtra func(list string) error) (Value, error) {
 	lenStr, err := e.emitValueToString(Value{Ref: lenReg, Ty: TypeI64})
 	if err != nil {
 		return Value{}, err
@@ -514,18 +579,29 @@ func (e *Emitter) emitInspectCollection(name, lenReg string, depth int, render f
 		return Value{}, err
 	}
 
-	open, err := e.emitStringConcat(prefix, Value{Ref: e.internString("{"), Ty: TypePtr})
+	open, err := e.emitStringConcat(prefix, Value{Ref: e.internString(tag + "{"), Ty: TypePtr})
 	if err != nil {
 		return Value{}, err
 	}
-	return e.emitInspectListBody(open, lenReg, depth, render)
+	return e.emitInspectListBodyWith(open, lenReg, depth, render, nextra, pushExtra)
 }
 
 // emitInspectListBody renders lenReg elements after open, as `open e0, e1 }`
 // (or `open}` when there are none).
 func (e *Emitter) emitInspectListBody(open Value, lenReg string, depth int, render func(idxVal string) (Value, error)) (Value, error) {
+	return e.emitInspectListBodyWith(open, lenReg, depth, render, 0, nil)
+}
+
+// emitInspectListBodyWith is emitInspectListBody with nextra more entries
+// pushed after the elements by pushExtra (a class's own fields after the
+// entries of the Map it extends).
+func (e *Emitter) emitInspectListBodyWith(open Value, lenReg string, depth int, render func(idxVal string) (Value, error), nextra int, pushExtra func(list string) error) (Value, error) {
 	nonempty := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", nonempty, e.icmpNe(lenReg, "0")))
+	if nextra > 0 {
+		nonempty = "1"
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", nonempty, e.icmpNe(lenReg, "0")))
+	}
 	list := e.inspectBegin(depth, nonempty)
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -555,6 +631,11 @@ func (e *Emitter) emitInspectListBody(open Value, lenReg string, depth int, rend
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
+	if pushExtra != nil {
+		if err := pushExtra(list); err != nil {
+			return Value{}, err
+		}
+	}
 	return e.inspectEnd(list, open.Ref, e.internString("}"), depth, false, false), nil
 }
 
@@ -562,6 +643,13 @@ func (e *Emitter) emitInspectListBody(open Value, lenReg string, depth int, rend
 // strings single-quoted, bigints with the `n` suffix, nested objects recursed —
 // distinct from the top-level bare formatting emitValueToString produces.
 func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
+	if v.Ty.IsClass && !v.Ty.Nullable {
+		if info, ok := e.classes[v.Ty.ClassName]; ok && info.HostBase != nil {
+			if _, own := info.MethodSigs[inspectCustomMethod]; !own {
+				return e.emitInspectHostClass(v, info, depth)
+			}
+		}
+	}
 	if v.Ty.NullAndUndef {
 		return e.renderThreeState(v, func(p Value) (Value, error) { return e.emitInspectField(p, depth) })
 	}
@@ -596,6 +684,9 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 		return Value{Ref: out, Ty: TypePtr}, nil
 	case v.Ty.IsBigInt:
 		return e.emitBigIntToString(v, true) // `10n`, like Node inspect
+	case v.Ty.IsDate && !v.Ty.IsDynamic:
+		// util.inspect shows a Date as its toISOString, Invalid Date as such.
+		return e.emitDateInspect(v)
 	case v.Ty.IsRegExp && v.Ty.IsObject && !v.Ty.Nullable && !v.Ty.IsDynamic:
 		// util.inspect shows a RegExp as its toString, `/a+/g`.
 		return e.emitValueToString(v)
@@ -739,9 +830,6 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 		sel := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, e.ptrIsNull(v.Ref), e.internString(word), quoted.Ref))
 		return Value{Ref: sel, Ty: TypePtr}, nil
-	case v.Ty.IsDate && v.Ty.IR == "i64" && !v.Ty.Nullable:
-		// util.inspect shows a Date as its toISOString, Invalid Date as such.
-		return e.emitDateOrInvalid(v, e.emitDateToISOString)
 	default:
 		s, err := e.emitValueToString(v) // number / bool / symbol
 		if err != nil {
@@ -985,13 +1073,17 @@ func (e *Emitter) emitInspectCustomAt(val Value, depthReg string, static int) (V
 func (e *Emitter) emitToStringTagHook() {
 	getter := accessorMethodName("get", "@@toStringTag")
 	for _, c := range e.sortedClassNames(func(name string, info ClassInfo) bool {
-		return info.Ty.IsObject && e.classHasMethodInherited(name, getter)
+		return info.Ty.IsObject && (e.classHasMethodInherited(name, getter) || info.HostBase != nil)
 	}) {
 		info := e.classes[c]
 		id := info.TagID & kmlHdrIDMask
 		thunk := fmt.Sprintf("__kml_tostring_tag_%d", id)
 		restore := e.beginThunkEmit()
-		if t, err := e.emitClassCall(info.Ty, Value{Ref: "%o", Ty: info.Ty}, getter, nil, ast.Pos{}, false); err == nil && !e.blockDone {
+		if !e.classHasMethodInherited(c, getter) {
+			// A class extending a host inherits its host's tag
+			// (`[object Map]`, TDD-00247).
+			e.emitTerminator(fmt.Sprintf("ret ptr %s", e.internString(hostTagName(*info.HostBase))))
+		} else if t, err := e.emitClassCall(info.Ty, Value{Ref: "%o", Ty: info.Ty}, getter, nil, ast.Pos{}, false); err == nil && !e.blockDone {
 			e.emitTerminator(fmt.Sprintf("ret ptr %s", e.coerce(t, TypePtr).Ref))
 		}
 		if !e.blockDone {
@@ -1011,13 +1103,19 @@ func (e *Emitter) emitToStringTagHook() {
 func (e *Emitter) emitInspectCustomHook() {
 	for _, c := range e.sortedClassNames(func(_ string, info ClassInfo) bool {
 		_, has := info.MethodSigs[inspectCustomMethod]
-		return has && info.Ty.IsObject
+		return (has || info.HostBase != nil) && info.Ty.IsObject
 	}) {
 		info := e.classes[c]
 		id := info.TagID & kmlHdrIDMask
 		thunk := fmt.Sprintf("__kml_inspect_custom_%d", id)
+		stable := e.stableHelperBody(id)
 		restore := e.beginThunkEmit()
-		if s, ok, err := e.emitInspectCustomAt(Value{Ref: "%o", Ty: info.Ty}, "%depth", -1); ok && err == nil && !e.blockDone {
+		if _, has := info.MethodSigs[inspectCustomMethod]; !has {
+			// A class extending Map or Set (TDD-00247) renders as Node shows
+			// one, `Counter(2) [Map] { … }`: one rendering per nesting depth,
+			// chosen by the depth asked for.
+			e.emitHostClassInspectThunk(info)
+		} else if s, ok, err := e.emitInspectCustomAt(Value{Ref: "%o", Ty: info.Ty}, "%depth", -1); ok && err == nil && !e.blockDone {
 			e.emitTerminator(fmt.Sprintf("ret ptr %s", s.Ref))
 		}
 		if !e.blockDone {
@@ -1025,6 +1123,7 @@ func (e *Emitter) emitInspectCustomHook() {
 		}
 		body := e.allocas.String() + e.body.String()
 		restore()
+		stable()
 		e.emitGlobal(fmt.Sprintf("define internal ptr @%s(ptr %%o, i64 %%depth) {\nentry:\n%s}", thunk, body))
 		e.addUnitRow(unitKindInspectCustom, "{ i64, ptr }", id, "ptr @"+thunk)
 	}

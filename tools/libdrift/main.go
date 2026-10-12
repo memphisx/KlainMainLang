@@ -11,6 +11,7 @@
 package main
 
 import (
+	"KlainMainLang/codegen/llvm"
 	"flag"
 	"fmt"
 	"os"
@@ -172,7 +173,8 @@ func main() {
 	}
 }
 
-// libFunctions is every library function's body in ir.
+// libFunctions is the body of every function in ir that a library unit
+// compiles (llvm.LibOwner); the rest is the program's own unit.
 func libFunctions(ir string) map[string]string {
 	out := map[string]string{}
 	locs := defineRe.FindAllStringSubmatchIndex(ir, -1)
@@ -181,7 +183,11 @@ func libFunctions(ir string) map[string]string {
 		if end < 0 {
 			continue
 		}
-		out[ir[l[2]:l[3]]] = ir[l[3]+1 : l[0]+end]
+		name := ir[l[2]:l[3]]
+		if llvm.LibOwner(name) == "" {
+			continue // compiled in the program's own unit
+		}
+		out[name] = ir[l[3]+1 : l[0]+end]
 	}
 	return out
 }

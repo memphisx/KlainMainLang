@@ -50,10 +50,11 @@
     </p>
     <CodeBlock filename="typed.ts" :code="typedCode" />
     <p>
-      <code>setTimeout</code>, <code>setInterval</code>, and promise reactions run
-      <strong>on the GUI thread</strong> under <code>run()</code> — a lightweight page-driven tick
-      pump drives this runtime's timer/microtask queues, so timed UI updates and async bind work
-      with no <code>Worker</code>. Servers and other fd-driven loops still belong in a Worker.
+      The event loop runs <strong>on the GUI thread</strong> under <code>run()</code>. On macOS
+      and Linux the GUI's main loop drives the runtime's whole loop, so timers, promise
+      reactions, <code>fetch</code>, <code>fs.promises</code> and even an HTTP server work with no
+      <code>Worker</code>. On Windows a page-driven tick pump runs timers and promise reactions;
+      servers and other descriptor-driven loops there still belong in a Worker.
     </p>
 
     <h2>Serving a full SPA</h2>

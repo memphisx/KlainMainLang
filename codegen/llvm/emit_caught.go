@@ -107,7 +107,7 @@ func (e *Emitter) emitCaughtMemberGet(v Value, propName string, pos ast.Pos) (Va
 		e.emitLabel(mergeL)
 		res := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load { ptr, i64 }, ptr %s, align 8", res, resPtr))
-		return Value{Ref: res, Ty: ArrayOf(errorObjType)}, nil
+		return Value{Ref: res, Ty: ArrayOf(TypeAny)}, nil
 	}
 
 	// A known Error field (message/name/code/errno/syscall/path) returns that

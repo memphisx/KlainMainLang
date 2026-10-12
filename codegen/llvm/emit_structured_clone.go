@@ -116,6 +116,10 @@ func (e *Emitter) emitDeepClone(val Value, ty Type, pos ast.Pos) (Value, error) 
 		return val, nil
 	case ty.IsArrayBuffer:
 		return e.emitDeepCloneArrayBuffer(val)
+	case ty.IsDate && !ty.IsDynamic || e.isDateClass(ty):
+		// A new Date with the same time value (a subclass instance clones
+		// to a plain Date, as Node's does).
+		return e.emitDeepCloneDate(val), nil
 	case ty.IsArray:
 		return e.emitDeepCloneArray(val, ty, pos)
 	case ty.IsMap:
@@ -125,7 +129,7 @@ func (e *Emitter) emitDeepClone(val Value, ty Type, pos ast.Pos) (Value, error) 
 	case ty.IsObject:
 		return e.emitDeepCloneObject(val, ty, pos)
 	default:
-		// A scalar (number/boolean/string/Date/null/undefined) — already a
+		// A scalar (number/boolean/string/null/undefined) — already a
 		// value type, nothing to copy.
 		return val, nil
 	}
@@ -133,7 +137,7 @@ func (e *Emitter) emitDeepClone(val Value, ty Type, pos ast.Pos) (Value, error) 
 
 // emitDeepCloneError clones an Error (or built-in subtype) by copying its
 // kind/message/name into a fresh object. The destination is allocated at the
-// AggregateError size (40 B, zeroed) so a cloned AggregateError never reads its
+// AggregateError size (zeroed) so a cloned AggregateError never reads its
 // trailing errors fields out of bounds — those degrade to an empty `.errors`
 // rather than crashing (the message/name/subtype identity, which real Node
 // preserves, is copied exactly). message/name are immutable strings, so copying
@@ -141,7 +145,7 @@ func (e *Emitter) emitDeepClone(val Value, ty Type, pos ast.Pos) (Value, error) 
 func (e *Emitter) emitDeepCloneError(val Value, ty Type) (Value, error) {
 	e.ensureCalloc()
 	dst := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dst, aggregateErrorStructSize))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dst, aggregateErrorStructSize()))
 	structIR := errorObjType.StructIR()
 	for _, name := range []string{ClassTagField, "message", "name"} {
 		idx, fieldTy, _ := errorObjType.FieldIndex(name)
@@ -306,7 +310,7 @@ func (e *Emitter) emitDeepCloneMap(val Value, ty Type, pos ast.Pos) (Value, erro
 		return Value{}, fmt.Errorf("%d:%d: structuredClone of a Map with an array/Map/Set key or value type is not supported", pos.Line, pos.Col)
 	}
 	suffix, keyIR := mapRuntime(keyTy)
-	newMap := e.emitMapOrSetCreate(keyTy)
+	newMap := e.emitMapOrSetCreate(ty)
 	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(val.Ref, suffix, keyTy)
 
 	idxAlloca := e.freshReg()
@@ -363,7 +367,7 @@ func (e *Emitter) emitDeepCloneSet(val Value, ty Type, pos ast.Pos) (Value, erro
 		return Value{}, fmt.Errorf("%d:%d: structuredClone of a Set with an array/Map/Set element type is not supported", pos.Line, pos.Col)
 	}
 	setSuffix, _ := mapRuntime(elemTy)
-	newSet := e.emitMapOrSetCreate(elemTy)
+	newSet := e.emitMapOrSetCreate(ty)
 	keysPtr, keysLen, _ := e.mapKeysAndVals(val.Ref, setSuffix, elemTy)
 
 	idxAlloca := e.freshReg()

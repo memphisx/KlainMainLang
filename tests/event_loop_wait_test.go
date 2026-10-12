@@ -14,16 +14,15 @@ import (
 // parks a coroutine or, at module top level, takes turns of that loop
 // (TDD-00223). Each test pairs a slow upstream with a 25 ms `setInterval`: in
 // Node the interval keeps ticking through the wait, so a wait that starves the
-// loop (the old private drives: 0 ticks) is caught by the tick count, and a
-// wait that spins is caught by the process's own CPU time.
+// loop (the old private drives: 0 ticks) is caught by the interval never
+// firing, and a wait that spins is caught by the process's own CPU time.
 
 const upstreamDelay = 600 * time.Millisecond
 
-// minTicks is deliberately loose: 600 ms / 25 ms = 24 ideal ticks, but the
-// Windows timer tick rounds each 25 ms wait up to ~31 ms, and a loaded CI
-// machine adds jitter. A starved loop scores 0, so anything clearly above that
-// proves the point without being a timing test.
-const minTicks = 8
+// A starved loop never runs the interval during the wait; one that serves it
+// runs it at least once. How many times is a timing question (a loaded
+// machine stretches every tick) and is not asserted.
+const minTicks = 1
 
 var ticksRe = regexp.MustCompile(`ticks=(\d+)`)
 

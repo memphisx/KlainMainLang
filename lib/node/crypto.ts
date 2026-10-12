@@ -1356,7 +1356,12 @@ export class ECDH {
     getPrivateKey(encoding: BinaryToTextEncoding): string;
     getPrivateKey(encoding?: any): any {
         if (this.#privateKey === null) throw new NodeError('ERR_CRYPTO_OPERATION_FAILED', 'Failed to get ECDH private key');
-        return encodeOut(Buffer.from(this.#privateKey as Buffer), encoding);
+        // The key as a big-endian integer without leading zero bytes, as
+        // Node's BN_bn2bin gives it: a key below 2^248 is 31 bytes or fewer.
+        const k = this.#privateKey as Buffer;
+        let i = 0;
+        while (i < k.length - 1 && k[i] === 0) i++;
+        return encodeOut(Buffer.from(k.subarray(i)), encoding);
     }
 
     getPublicKey(encoding?: null, format?: ECDHKeyFormat): Buffer;

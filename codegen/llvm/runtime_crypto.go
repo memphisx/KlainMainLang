@@ -17,18 +17,9 @@ func CryptoRandSource() string { return cryptoRandSource }
 // UUID routines both pull in the bytes routine.
 func (e *Emitter) UsesCryptoRand() bool { return e.usedCryptoRandomBytes }
 
-// CryptoRandCFlags selects randomUUID, which needs the string runtime, and
-// the fill of a value held in `any`, which needs the dynamic-value runtime.
-func (e *Emitter) CryptoRandCFlags() []string {
-	var flags []string
-	if e.usedCryptoRandomUUID {
-		flags = append(flags, "-DKML_CRYPTO_UUID")
-	}
-	if e.usedCryptoFillAny {
-		flags = append(flags, "-DKML_CRYPTO_FILL_ANY")
-	}
-	return flags
-}
+// CryptoRandCFlags: cryptorand.c is compiled the same way for every
+// program; the link drops what a program does not use (DeadStripFlags).
+func (e *Emitter) CryptoRandCFlags() []string { return DeadStripFlags(e.exportsRuntime()) }
 
 // ensureCryptoRandomBytes declares __kml_crypto_random_bytes(ptr buf, i64 n):
 // fills n bytes at buf with cryptographically-secure random data.

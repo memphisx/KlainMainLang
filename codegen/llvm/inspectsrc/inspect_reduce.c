@@ -28,6 +28,7 @@ long long __kml_inspect_opt_sorted = 0;
 long long __kml_inspect_opt_depth = 2;
 long long __kml_inspect_opt_break = 80;    /* breakLength */
 long long __kml_inspect_opt_maxarr = 100;  /* maxArrayLength */
+long long __kml_inspect_opt_custom = 1;    /* customInspect */
 /* A host value's routines render at a depth shifted to honour a run-time
    `depth` option (__kml_host_inspect); its indentation is shifted back. */
 long long __kml_inspect_indent_shift = 0;

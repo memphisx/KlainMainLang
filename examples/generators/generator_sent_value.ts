@@ -1,11 +1,11 @@
 // A `yield` expression evaluates to the value passed to `.next(v)` — its type
-// is TypeScript's TNext, which defaults to `any`, so a resume value can flow
-// into a differently-typed target. See ADR-00954.
+// is the generator's TNext, so a resume value can flow into a differently
+// typed target. See ADR-00954.
 
 const box = { note: "initial" };
 
-function* recorder() {
-  // The resume value (any) is stored into a string field: the store coerces
+function* recorder(): Generator<string | undefined, void, any> {
+  // The resume value (TNext any) is stored into a string field: the store coerces
   // through the dynamic path rather than emitting a raw element-word store.
   box.note = yield;
   yield "done";
@@ -17,7 +17,7 @@ it.next("updated");     // resume: sends "updated" as the yield value
 console.log(box.note);
 
 // A resume value consumed as a numeric local, too.
-function* adder() {
+function* adder(): Generator<undefined, number, number> {
   const a: number = yield;
   const b: number = yield;
   return a + b;

@@ -48,7 +48,7 @@ Staged roadmap: [TDD-00125](../tdd/TDD-00125.md).
 | `@enum` | ✅ | • The tagged `const` object works for value access (`Dir.Up`); it is a plain object, not a nominal enum type — no reverse mapping, no enum-member type narrowing | • [TDD-00125](../tdd/TDD-00125.md) Stage 5 |
 | `@this` | ✅ | • Accepted and erased; a `this` parameter type is not separately modeled (`this` is bound by the class method it lives in) | • [TDD-00125](../tdd/TDD-00125.md) Stage 5 |
 | `@extends` (alias `@augments`) | ✅ | • Accepted and erased — the class's own `extends` clause does the work; the tag does not add type arguments to a generic base | • [TDD-00125](../tdd/TDD-00125.md) Stage 5 |
-| `@implements` | ✅ | • Accepted and erased — like a TS `implements` clause here, it does not strictly enforce structural conformance | • [TDD-00125](../tdd/TDD-00125.md) Stage 5 |
+| `@implements` | ✅ | • Accepted and erased — it does not enforce structural conformance (a TS `implements` clause does, TS2420) | • [TDD-00125](../tdd/TDD-00125.md) Stage 5 |
 | `@public` | ✅ | • Accepted and erased, not enforced — the same stance as the TS `public` field modifier here | • [TDD-00125](../tdd/TDD-00125.md) Stage 5 |
 | `@private` | ✅ | • Accepted and erased, not enforced — no access checking (the TS `private` modifier is likewise erased, not enforced, here) | • [TDD-00125](../tdd/TDD-00125.md) Stage 5 |
 | `@protected` | ✅ | • Accepted and erased, not enforced | • [TDD-00125](../tdd/TDD-00125.md) Stage 5 |

@@ -813,58 +813,6 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", headersMapA))
 	e.emitInstr(fmt.Sprintf("store i32 0, ptr %s, align 4", clientErrReasonA))
 
-	// TDD-00217: connection-timeout state. hdrNs/reqNs/kaNs are the configured
-	// deadlines in ns (0 = disabled); initNs is the earlier of the two
-	// connection-start timeouts (both run from connection start, so the smaller
-	// bounds the pre-headers phase). Injections are emitted only when the primary
-	// server configured a positive timeout, so a default server's dispatcher is
-	// byte-identical. phaseA (1 = in-request, 3 = keep-alive-idle) gates the idle→
-	// request re-arm; connStartA is the connection/next-request start used for the
-	// post-headers requestTimeout deadline.
-	hdrNs := e.curServerHeadersTimeoutMs * 1000000
-	reqNs := e.curServerRequestTimeoutMs * 1000000
-	kaNs := e.curServerKeepAliveTimeoutMs * 1000000
-	initNs := hdrNs
-	if reqNs > 0 && (initNs == 0 || reqNs < initNs) {
-		initNs = reqNs
-	}
-	timeoutsOn := isPrimary && (hdrNs > 0 || reqNs > 0 || kaNs > 0)
-	var phaseA, connStartA string
-	if timeoutsOn {
-		phaseA = e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", phaseA))
-		connStartA = e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", connStartA))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", phaseA)) // 0 = unarmed
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", connStartA))
-	}
-	// armInitial (re)arms the connection-start deadline (initNs) at "now", records
-	// connStart, and sets phase=1. clearDeadline drops the deadline (handler/
-	// response phase). Each is a no-op string when timeouts are off.
-	armInitial := func(fd32 string) {
-		if !timeoutsOn {
-			return
-		}
-		now := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_monotonic_ns()", now))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", now, connStartA))
-		e.emitInstr(fmt.Sprintf("call void @__kml_http_arm_from(i32 %s, i64 %s, i64 %d)", fd32, now, initNs))
-		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", phaseA))
-	}
-	// armKeepAlive arms the keepAliveTimeout deadline for the idle wait before the
-	// next keep-alive request, and sets phase=3 so the next first-byte read re-arms
-	// the connection-start timeout (accumulateL). A 0 keepAliveTimeout leaves the
-	// idle wait unbounded.
-	armKeepAlive := func(fd32 string) {
-		if !timeoutsOn {
-			return
-		}
-		now := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_monotonic_ns()", now))
-		e.emitInstr(fmt.Sprintf("call void @__kml_http_arm_from(i32 %s, i64 %s, i64 %d)", fd32, now, kaNs))
-		e.emitInstr(fmt.Sprintf("store i64 3, ptr %s, align 8", phaseA))
-	}
-
 	readLoopL := e.freshLabel("http.readloop")
 	growL := e.freshLabel("http.grow")
 	doGrowL := e.freshLabel("http.dogrow")
@@ -949,23 +897,6 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	idleContL := e.freshLabel("http.kaidlecont")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", idleRetire, noReqL, idleContL))
 	e.emitLabel(idleContL)
-	// TDD-00217: on the very first entry (phase still 0), arm the connection-start
-	// timeout for request #1. Fires once — armInitial sets phase=1, so re-entries
-	// (per-read and keep-alive loop-backs) skip this; the keep-alive idle→request
-	// re-arm is handled at accumulateL instead.
-	if timeoutsOn {
-		ph0 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", ph0, phaseA))
-		unarmed := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", unarmed, ph0))
-		armInitL := e.freshLabel("http.toarminit")
-		afterArmInitL := e.freshLabel("http.toafterinit")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", unarmed, armInitL, afterArmInitL))
-		e.emitLabel(armInitL)
-		armInitial(fd32)
-		e.emitTerminator(fmt.Sprintf("br label %%%s", afterArmInitL))
-		e.emitLabel(afterArmInitL)
-	}
 	capNow0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", capNow0, bufCapA))
 	trNow0 := e.freshReg()
@@ -1019,15 +950,7 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	readCap := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", readCap, readCapMinus1))
 	nReg := e.freshReg()
-	// When the HTTPS/1.1 path is in use this fd may be a TLS connection —
-	// __kml_http_conn_recv routes it through SSL_read (EAGAIN on WANT, so the
-	// yield path below is unchanged); a plain connection falls through to raw
-	// read(). A program with no HTTPS server keeps the bare read() unchanged.
 	readFn := fmt.Sprintf("@read(i32 %s, ptr %s, i64 %s)", fd32, readPtr, readCap)
-	if e.usedHTTPS1Server {
-		e.emitHTTPSConnShims()
-		readFn = fmt.Sprintf("@__kml_http_conn_recv(i32 %s, ptr %s, i64 %s)", fd32, readPtr, readCap)
-	}
 	e.emitInstr(fmt.Sprintf("%s = call i64 %s", nReg, readFn))
 	gotData := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", gotData, nReg))
@@ -1092,22 +1015,6 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	termPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termPtr, bufForTerm, trNew))
 	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", termPtr))
-	// TDD-00217: first bytes of a keep-alive request just arrived (phase==3, the
-	// idle wait). The keepAliveTimeout no longer applies — switch to the new
-	// request's connection-start timeout. A fresh (phase==1) request skips this.
-	if timeoutsOn {
-		phA := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", phA, phaseA))
-		wasIdle := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 3", wasIdle, phA))
-		reqArmL := e.freshLabel("http.toreqarm")
-		afterReqArmL := e.freshLabel("http.toafterreqarm")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", wasIdle, reqArmL, afterReqArmL))
-		e.emitLabel(reqArmL)
-		armInitial(fd32)
-		e.emitTerminator(fmt.Sprintf("br label %%%s", afterReqArmL))
-		e.emitLabel(afterReqArmL)
-	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", checkCompleteL))
 
 	// checkCompleteL: have we already found the header terminator? If not,
@@ -1177,15 +1084,6 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ 0, %%%s ]", clFinal, clParsed, haveCLL, noCLL))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", clFinal, contentLenA))
 	e.emitInstr(fmt.Sprintf("store i1 1, ptr %s, align 1", headersParsedA))
-	// TDD-00217: headers are fully received, so headersTimeout no longer applies —
-	// re-arm to the requestTimeout deadline measured from connection start (a 0
-	// requestTimeout clears it, leaving the body read unbounded, which is correct
-	// when only headersTimeout was configured).
-	if timeoutsOn {
-		cs := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cs, connStartA))
-		e.emitInstr(fmt.Sprintf("call void @__kml_http_arm_from(i32 %s, i64 %s, i64 %d)", fd32, cs, reqNs))
-	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", checkBodyCompleteL))
 
 	// checkBodyCompleteL: do we have Content-Length bytes past the header
@@ -1217,13 +1115,6 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	// split the query string out of the path, load the already-parsed
 	// headers map, extract the body, and dispatch to the handler.
 	e.emitLabel(parseL)
-	// TDD-00217: the full request is buffered and about to be dispatched to the
-	// handler — no request/headers timeout applies while the handler runs or the
-	// response is written (a fiber parked on a write must never be resumed by the
-	// sweep's EOF-read). keepAliveTimeout re-arms at the keep-alive tail.
-	if timeoutsOn {
-		e.emitInstr(fmt.Sprintf("call void @__kml_http_conn_set_deadline(i32 %s, i64 0)", fd32))
-	}
 	bufFinal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bufFinal, bufPtrA))
 
@@ -1361,7 +1252,6 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 		// Keep-alive: reset the per-request parse state and loop back for the next
 		// request on the same socket (the sink restored O_NONBLOCK at stream end).
 		e.emitLabel(sKaContL)
-		armKeepAlive(fd32) // TDD-00217: idle keepAliveTimeout until the next request
 		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", totalReadA))
 		e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", headersParsedA))
 		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", headerEndA))
@@ -1371,11 +1261,7 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 
 		// Close: the response is complete and the connection is not persistent.
 		e.emitLabel(sKaDoneL)
-		if e.usedHTTPS1Server {
-			e.emitInstr(fmt.Sprintf("call void @__kml_http_conn_close(i32 %s)", fd32))
-		} else {
-			e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))
-		}
+		e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))
 		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
 		sActiveNow := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_conn_active, align 8", sActiveNow))
@@ -1538,11 +1424,9 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	// Keep-alive flag for the chunked/streaming tails (TDD-00131 follow-on): a
 	// streamed body is now persistent like the buffered path — on keep-alive the
 	// %kml.hws writer re-arms the connection at stream end instead of closing.
-	// HTTPS/1.1 streaming stays close-only for now (the re-arm path is not yet
-	// validated against the TLS-wrapped read loop), so force the flag off there.
 	// i1 for send_stream_head, zero-extended to i64 for hws_start's ctx field.
 	streamKA, streamKA64 := "0", "0"
-	if (streamingBody || unionBody) && !e.usedHTTPS1Server {
+	if streamingBody || unionBody {
 		e.ensureHTTPKeepAliveDecision()
 		kaR := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_http_keepalive_decision(ptr %s, ptr %s)", kaR, headersMapFinal, extraHeadersRef))
@@ -1601,7 +1485,6 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", streamKA, uKaContL, uKaDoneL))
 
 		e.emitLabel(uKaContL)
-		armKeepAlive(fd32) // TDD-00217: idle keepAliveTimeout until the next request
 		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", totalReadA))
 		e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", headersParsedA))
 		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", headerEndA))
@@ -1655,7 +1538,6 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", kaReg, kaContL, kaDoneL))
 
 		e.emitLabel(kaContL)
-		armKeepAlive(fd32) // TDD-00217: idle keepAliveTimeout until the next request
 		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", totalReadA))
 		e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", headersParsedA))
 		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", headerEndA))
@@ -1706,11 +1588,7 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	resp431 := e.internString("HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n")
 	len431 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", len431, resp431))
-	if e.usedHTTPS1Server {
-		e.emitInstr(fmt.Sprintf("call i64 @__kml_http_conn_send(i32 %s, ptr %s, i64 %s)", fd32, resp431, len431))
-	} else {
-		e.emitInstr(fmt.Sprintf("call i64 @write(i32 %s, ptr %s, i64 %s)", fd32, resp431, len431))
-	}
+	e.emitInstr(fmt.Sprintf("call i64 @write(i32 %s, ptr %s, i64 %s)", fd32, resp431, len431))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", ceCloseL))
 
 	// ceFireL: hand the listener an Error + a net.Socket over the connection fd
@@ -1723,13 +1601,6 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	ceSockFd := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", ceSockFd, netSocketIR, ceSock))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", fd64, ceSockFd))
-	if e.usedHTTPS1Server {
-		ceSSL := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_http_conn_ssl_get(i32 %s)", ceSSL, fd32))
-		ceSockSSL := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 5", ceSockSSL, netSocketIR, ceSock))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ceSSL, ceSockSSL))
-	}
 	// Error message/code selected by reason. The compiler's hand-rolled parser
 	// does not produce llhttp HPE_* codes, so V1 uses a small honest set:
 	// HPE_HEADER_OVERFLOW for reason 1, ECONNRESET for a peer-truncated request.
@@ -1754,11 +1625,7 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", ceCloseL))
 
 	e.emitLabel(ceCloseL)
-	if e.usedHTTPS1Server {
-		e.emitInstr(fmt.Sprintf("call void @__kml_http_conn_close(i32 %s)", fd32))
-	} else {
-		e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))
-	}
+	e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
 	emitConnActiveDecrement()
 	e.emitTerminator("ret void")
@@ -1838,7 +1705,6 @@ func (e *Emitter) emitHTTP2PrefaceDivert(fd32, fdPtr, bufReg, totalReadA string)
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isH2, h2driveL, contL))
 
 	e.emitLabel(h2driveL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_h2_set_blocking(i32 %s)", fd32))
 	sess := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_h2_session_server_new(i32 %s, ptr null, ptr null, ptr null, ptr @__kml_h2_vtbl%s)", sess, fd32, e.curDispatchSfx))
 	e.emitInstr(fmt.Sprintf("call void @__kml_h2_session_feed(ptr %s, ptr %s, i64 %s)", sess, bufReg, trReg))

@@ -668,11 +668,11 @@
       "statusRow": "Function declarations (top-level)",
       "signature": "function f(x: number): number { … }",
       "badge": "caveats",
-      "description": "Named top-level functions with typed params and return. A leading this parameter (function f(this: T, …)) is parsed and erased, exactly as real TS does. The synthesized arguments object supports .length, indexing, and for…of when all declared params share one type.",
+      "description": "Named top-level functions with typed params and return. A leading this parameter (function f(this: T, …)) is parsed and erased, exactly as real TS does. The arguments object holds the values a call passed (.length counts them), with indexing and for…of.",
       "differences": [
         "Cannot reference a sibling top-level binding whose value is a connection handle (`Worker`/`WebSocket`/`EventSource`, `BroadcastChannel`/`MessageChannel`, `XMLHttpRequest`), a `Promise`, or a generic class instance with **inferred** rather than explicit type arguments (`new Box(5)`) — such a binding stays a `main()` local and fails with `undefined variable`. Scalars, strings, arrays, `TypedArray`s, objects, `Map`/`Set`, class instances (including explicit `new Box<number>()`), the value/event handles, and the streams + `EventEmitter` and `http.createServer` handles are promoted to module globals; arrow functions/closures capture everything regardless.",
         "A genuinely circular pair of mutually-recursive unannotated functions can't converge on a return type and keeps the scalar-default fallback.",
-        "The `arguments` object reflects the declared parameters rather than growing with extra untyped arguments; mixed-type parameters, a rest/destructured parameter, and an arrow function (which has no own `arguments` in JS) are clean rejections."
+        "`arguments` in a function with an explicit `...rest` or a destructured parameter is a compile error; a call through `any` makes `arguments.length` count every declared parameter."
       ],
       "seeAlso": [
         "lang.nestedfn",
@@ -853,10 +853,10 @@
       "signature": "function* f(): T { yield x; }",
       "badge": "caveats",
       "description": "Real suspend/resume via this compiler's ucontext-based fiber primitive. The full iterator protocol: .throw(e) injects at the suspension point, .return(v) completes running enclosing finally blocks, and yield* delegates to an inner generator.",
-      "snippet": "function* basic(): number {\n  yield 1;\n  yield 2;\n  return 3;\n}\nconst g = basic();\nconsole.log(g.next().value, g.next().done);",
+      "snippet": "function* basic(): Generator<number, number> {\n  yield 1;\n  yield 2;\n  return 3;\n}\nconst g = basic();\nconsole.log(g.next().value, g.next().done);",
       "differences": [
         "A free `function*` may be top-level **or nested** (a nested one captures enclosing state by reference; an *array* capture stays a clean rejection); a generator *expression* is supported only as a top-level `const/let/var G = function* ...` binding — an argument/nested/IIFE use is a clean rejection. `static`/`abstract` generator methods stay clean rejections.",
-        "The return-type annotation is optional (inferred from the body's yields); still requires a plain non-destructured parameter list and a non-array parameter type. An array element type is supported — yielded/sent arrays round-trip through for...of, .next(), yield*, and for await.",
+        "The return-type annotation is optional (inferred from the body's yields); a destructured, defaulted or optional parameter is still a compile error (rest and array parameters work). An array element type is supported — yielded/sent arrays round-trip through for...of, .next(), yield*, and for await.",
         "Calling `.next()` again after completion returns `{value: <T's zero value>, done: true}`, not `undefined` — deliberately kept bare: tsc types the result's `value` as `any`, so the typed `T` here is already stricter than TS."
       ],
       "seeAlso": [
@@ -903,8 +903,8 @@
       "name": "Promise.all / .race / .allSettled",
       "statusRow": "Promise.all / .race / .allSettled",
       "signature": "await Promise.all([p1, p2])",
-      "badge": "caveats",
-      "description": "Real concurrency over Array<Promise<Response>> (fetch) and over Array<Promise<T>> from may-suspend async fns. Each member is a reusable value. .race/.any return the shortest-delay member via an event-driven waiter list. A rejecting member rejects .all/.race and reports rejected in .allSettled. A rejected .allSettled element's .reason is the original rejected value with full fidelity — a primitive keeps its typeof and JSON, a rejected Error serializes as {} and reads .message/.name/String and instanceof (TDD-00169). An error-subclass instance reason reads .message/.name and renders Name: message too; only its JSON.stringify still yields {} where Node serializes its own enumerable fields.",
+      "badge": "exact",
+      "description": "Real concurrency over Array<Promise<Response>> (fetch) and over Array<Promise<T>> from may-suspend async fns. Each member is a reusable value. .race/.any return the shortest-delay member via an event-driven waiter list. A rejecting member rejects .all/.race and reports rejected in .allSettled. A rejected .allSettled element's .reason is the original rejected value with full fidelity — a primitive keeps its typeof and JSON, a rejected Error serializes as {} and reads .message/.name/String and instanceof (TDD-00169). An error-subclass instance reason reads .message/.name, renders Name: message and serializes its own enumerable fields as Node does. A list may mix promises and plain values ([p, 4]).",
       "seeAlso": [
         "lang.promiseany",
         "lang.await"
@@ -948,10 +948,7 @@
       "statusRow": "new Promise((resolve, reject) => …) (executor constructor)",
       "signature": "new Promise((resolve, reject) => { … })",
       "badge": "exact",
-      "description": "The executor constructor with thenable adoption (resolve(anotherPromise) settles the outer promise with the inner's value, reaction-based), synchronous resolve/reject, first-settle-wins, and deferred resolution from a setTimeout callback. The executor may be an arrow, function expression, closure variable, or bare top-level-function reference.",
-      "differences": [
-        "Only a typed `Promise` argument adopts; a custom duck-typed `{ then }` object isn't adopted (this compiler has no `PromiseLike<T>` type — it's a clean type mismatch, not a silent miss)."
-      ],
+      "description": "The executor constructor with thenable adoption (resolve(anotherPromise) settles the outer promise with the inner's value, reaction-based; a class instance, object or interface value with a then method is adopted through a job that calls its then, as await, Promise.resolve and the combinators also do), synchronous resolve/reject, first-settle-wins, and deferred resolution from a setTimeout callback. The executor may be an arrow, function expression, closure variable, or bare top-level-function reference.",
       "seeAlso": [
         "lang.promisethen",
         "lang.await"
@@ -1211,7 +1208,7 @@
         "A **derived** class adding fields when its base has a rest-parameter constructor requires an explicit `super(...)`. An instance-field initializer lowered into the constructor can currently see the constructor's own parameters (which real JS's separate initializer scope forbids), and an unannotated initializer of an unrecognized expression shape falls back to `i64`.",
         "A computed/dynamic member name is a clean rejection; the recognized well-known-symbol keys are `[Symbol.asyncIterator]` and `[Symbol.iterator]`.",
         "A class expression used as a runtime value or a named self-reference (`class D {...}` whose body references `D`) is a clean rejection; `extends <expression>` is out of scope.",
-        "Class early-error gaps (deferred): a field initializer containing `arguments` or a `super()` call, a `super()` in a method parameter default, field-definition ASI on the same line, and the `#constructor` private-name ban all compile instead of raising the spec's `SyntaxError`.",
+        "Class early-error gaps (deferred): a `super()` in a method parameter default, field-definition ASI on the same line, and the `#constructor` private-name ban all compile instead of raising the spec's `SyntaxError`.",
         "The **`readonly` field modifier** is enforced as a compile-time immutability check — a write is allowed only in the declaring class's constructor and rejected elsewhere (method, outside `obj.x = v`, nested closure, subclass constructor). Deep immutability (`readonly xs: number[]` then `xs.push(...)`) stays unenforced, matching TS."
       ],
       "seeAlso": [
@@ -1249,7 +1246,7 @@
       "statusRow": "class static members/static {} blocks, private/protected visibility, abstract classes/methods, implements",
       "signature": "class C { static x = 1; static {} private y; abstract m(); }",
       "badge": "caveats",
-      "description": "static members are inherited through extends (a non-redeclared static field shares its base's storage). private/protected are compile-time-only (zero runtime check, matching TS erasure), checked with tsc's own diagnostics (including super.privateMethod() and private or protected constructors); o[\"p\"] reaches a private member, as in TypeScript. abstract reuses override-detection; implements is a compile-time structural self-check.",
+      "description": "static members are inherited through extends (a non-redeclared static field shares its base's storage). private/protected are compile-time-only (zero runtime check, matching TS erasure), checked with tsc's own diagnostics (including super.privateMethod() and private or protected constructors); o[\"p\"] reaches a private member, as in TypeScript. abstract reuses override-detection; implements is checked by the type checker (tsc's TS2420).",
       "differences": [
         "A plain object passed where another plain object type is expected is copied into that type's layout, so writes through the copy do not reach the original (a class instance keeps its identity)."
       ],
@@ -1293,6 +1290,84 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes/extends"
+      }
+    },
+    {
+      "id": "lang.extendspromise",
+      "name": "class X extends Promise",
+      "statusRow": "class X extends Promise<T>",
+      "signature": "class Timed extends Promise<string> { describe() { return \"timed\"; } }",
+      "badge": "partial",
+      "description": "The instance is the promise itself: await, instanceof Promise and instanceof the class, passing it where a Promise is expected, console.log as Node shows it (Timed [Promise] { 'x', label: 'timed' }), and Promise's then/catch/finally and statics (resolve, reject, all, race, allSettled, any) making instances of the class through its constructor, as Node's species does. The same holds through any.",
+      "differences": [
+        "Only a non-generic class extends Promise: `class P<T> extends Promise<T>` meets the generic-class extends limitation."
+      ],
+      "seeAlso": [
+        "lang.classinherit",
+        "lang.extendsmap",
+        "lang.extendsregexp"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise"
+      }
+    },
+    {
+      "id": "lang.extendsregexp",
+      "name": "class X extends RegExp",
+      "statusRow": "class X extends RegExp",
+      "signature": "class Slug extends RegExp { slugify(s: string) { return s.toLowerCase().replace(this, \"-\"); } }",
+      "badge": "exact",
+      "description": "The instance is the RegExp itself: test and exec, source, flags and lastIndex (read and written) on it and through super, the string methods that take a RegExp (replace, split, match and the rest), new RegExp(r), instanceof RegExp and instanceof the class both ways, passing it where a RegExp is expected, String(r), the same through any, and console.log as Node shows it (Slug /[^a-z0-9]+/g { label: 'slug' }).",
+      "seeAlso": [
+        "lang.classinherit",
+        "lang.extendsmap"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp"
+      }
+    },
+    {
+      "id": "lang.extendsdate",
+      "name": "class X extends Date",
+      "statusRow": "class X extends Date",
+      "signature": "class Day extends Date { constructor(y: number, m: number, d: number) { super(Date.UTC(y, m, d)); } }",
+      "badge": "exact",
+      "description": "The instance is the Date itself: new D(…) and super(…) take Date's arguments, Date's getters and setters act on it, an override (toString) wins, and instanceof Date and the class both ways, String(d), +d, JSON.stringify, passing it where a Date is expected, the same through any, and console.log as Node shows it (Day 2024-02-28T00:00:00.000Z).",
+      "seeAlso": [
+        "lang.classinherit",
+        "lang.extendsregexp"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date"
+      }
+    },
+    {
+      "id": "lang.extendsarray",
+      "name": "class X extends Array / a typed array",
+      "statusRow": "class X extends Array / a typed array",
+      "signature": "class Stack extends Array<number> { peek(): number { return this[this.length - 1]; } }",
+      "badge": "caveats",
+      "description": "The instance is the array itself: elements and length, every Array (or typed array) method on it and through super, an override reached even through a plain number[], species results (map, filter, slice, subarray) and from/of making instances of the class, Array.isArray, instanceof both ways, destructuring, spread, Object.keys/values/entries, for…in, passing it where an array is expected, the same through any, and console.log as Node shows it (Stack(2) [ 1, 2 ], Bytes(3) [Uint8Array] [ 1, 2, 3 ]). A static [Symbol.species] override is a compile error, and a species result that changes the element type (a generic map<U> override returning super.map, or Array's map through any) is a plain array.",
+      "seeAlso": [
+        "lang.classinherit",
+        "lang.extendsdate"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array"
+      }
+    },
+    {
+      "id": "lang.extendsmap",
+      "name": "class X extends Map / extends Set",
+      "statusRow": "class X extends Map<K, V> / extends Set<T>",
+      "signature": "class Visits extends Map<string, number> { record(k: string) { this.set(k, (this.get(k) ?? 0) + 1); } }",
+      "badge": "exact",
+      "description": "The instance is the collection itself: Map's or Set's methods and size on it and through super, iteration and spread as the host's, instanceof Map and instanceof the class both ways, passing it where a Map or Set is expected, the same through any, and console.log as Node shows it (Visits(2) [Map] { 'Athens' => 2, x: 1 }). Extending Array or a typed array is not supported yet.",
+      "seeAlso": [
+        "lang.classinherit"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map"
       }
     },
     {

@@ -98,7 +98,8 @@
             ],
             "notes": [
               "Two-path errors name both (`rename 'a' -> 'b'`, with `dest`); `copyFileSync` gives the copy the source's mode, and `COPYFILE_EXCL` fails with `EEXIST`; on Windows the copy is `CopyFileW`, as libuv's ([ADR-01298](../adr/ADR-01298.md), [ADR-01030](../adr/ADR-01030.md))",
-              "`realpathSync` is Node's lstat walk (an error names the missing component); `realpathSync.native` is `realpath(3)`. `symlinkSync` takes Node's `type`: a junction on Windows ([ADR-01030](../adr/ADR-01030.md))"
+              "`realpathSync` is Node's lstat walk (an error names the missing component); `realpathSync.native` is `realpath(3)`. `symlinkSync` takes Node's `type`: a junction on Windows ([ADR-01030](../adr/ADR-01030.md))",
+              "`readlinkSync`, `realpathSync` and `mkdtempSync` with `encoding: 'buffer'` give a Buffer, typed as Node's declarations type them ([ADR-01457](../adr/ADR-01457.md))"
             ]
           },
           {
@@ -176,12 +177,11 @@
             "feature": "`fs.watch(path[, options][, listener])` → `FSWatcher`",
             "status": "implemented",
             "caveats": [
-              "On macOS a directory's event names the directory, not the changed entry: kqueue watches a descriptor, not entries ([ADR-00758](../adr/ADR-00758.md))",
-              "`recursive` and `persistent: false` are validated and not applied"
+              "`recursive` is applied on macOS only: on Linux and Windows it watches the top directory alone"
             ],
             "notes": [
-              "Node's `FSWatcher`, an EventEmitter: `'change'` with `(eventType, filename)` in the requested encoding, `'close'`, `close()`, `signal`; a watched file reports its own base name ([ADR-01298](../adr/ADR-01298.md))",
-              "A native change source in the event loop: inotify (Linux), kqueue (macOS), `ReadDirectoryChangesW` (Windows) ([TDD-00181](../tdd/TDD-00181.md))"
+              "Node's `FSWatcher`, an EventEmitter: `'change'` with `(eventType, filename)` in the requested encoding, `'close'`, `close()`, `ref()`/`unref()`, `persistent`, `signal`; a watched file reports its own base name ([ADR-01298](../adr/ADR-01298.md))",
+              "A libuv `uv_fs_event_t` per watcher on Linux and macOS; `ReadDirectoryChangesW` on Windows ([TDD-00244](../tdd/TDD-00244.md))"
             ]
           },
           {

@@ -10,7 +10,7 @@ async function slowSquare(n: number): Promise<number> {
 }
 
 // Yields the running squares 1, 4, 9, 16, awaiting each computation.
-async function* squares(limit: number): number {
+async function* squares(limit: number): AsyncGenerator<number> {
   let i: number = 1
   while (i <= limit) {
     yield await slowSquare(i)
@@ -19,14 +19,14 @@ async function* squares(limit: number): number {
 }
 
 // A throwing async generator rejects the outstanding .next() promise.
-async function* boom(): number {
+async function* boom(): AsyncGenerator<number> {
   yield 1
   throw new Error("stop")
 }
 
 // An async generator can yield objects (or tuples), and `for await...of` can
 // destructure each yielded element straight into its own bindings.
-async function* points(): { x: number; y: number } {
+async function* points(): AsyncGenerator<{ x: number; y: number }> {
   yield { x: 1, y: 2 }
   yield { x: 3, y: 4 }
 }
@@ -85,19 +85,19 @@ async function main(): Promise<void> {
   }
 }
 
-async function* firstTwoSquares(): number {
+async function* firstTwoSquares(): AsyncGenerator<number> {
   yield await slowSquare(1)                            // 1
   yield await slowSquare(2)                            // 4
   return 2                                             // count produced
 }
 
-async function* composed(): number {
+async function* composed(): AsyncGenerator<number> {
   const count = yield* firstTwoSquares()
   console.log("delegated " + count + " values")        // delegated 2 values
   yield 0
 }
 
-async function* guardedGen(): number {
+async function* guardedGen(): AsyncGenerator<number> {
   try {
     yield await slowSquare(1)
     yield await slowSquare(2)
@@ -107,7 +107,7 @@ async function* guardedGen(): number {
   }
 }
 
-async function* cleanupGen(): number {
+async function* cleanupGen(): AsyncGenerator<number> {
   try {
     yield 1
     yield 2
@@ -118,7 +118,7 @@ async function* cleanupGen(): number {
 
 // A side effect before the first yield: with a deferred .next(), it prints only
 // once the microtask step runs — after "before"/"after" (see main()).
-async function* deferredGen(): number {
+async function* deferredGen(): AsyncGenerator<number> {
   console.log("body")
   yield 1
 }

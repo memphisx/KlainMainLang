@@ -18,6 +18,7 @@ import (
 	"KlainMainLang/options"
 	"bytes"
 	"context"
+	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,6 +40,7 @@ type emitted struct {
 	ir       string
 	linkLibs []string
 	cSources []llvm.CSource
+	ffiDl    bool // the program looks its own symbols up (dlopen(null))
 }
 
 // frontEnd runs the real compiler front-end — resolver.ResolveProgram (which
@@ -103,7 +105,7 @@ func frontEnd(entryPath string) (emitted, error) {
 			out.err = cerr
 			return
 		}
-		out.e = emitted{ir: ir, linkLibs: em.LinkLibs(), cSources: cs}
+		out.e = emitted{ir: ir, linkLibs: em.LinkLibs(), cSources: cs, ffiDl: em.UsesFFIDl()}
 	}()
 	select {
 	case r := <-ch:
@@ -523,6 +525,11 @@ func transformNodeSource(src, absPath string) (out string, platformStripped int,
 				imports = append(imports, fmt.Sprintf("import %s from '../common/tmpdir'", name))
 				continue
 			}
+			if mod == "../common/dns" {
+				// The typed port of Node's DNS packet helpers (node-shim/dns.ts).
+				imports = append(imports, fmt.Sprintf("import %s from '../common/dns'", name))
+				continue
+			}
 			if mod == "../common/countdown" {
 				// Node exports the Countdown class as the module default; the
 				// shim (writeCountdownShim) exports it named — alias to whatever
@@ -589,6 +596,12 @@ func transformNodeSource(src, absPath string) (out string, platformStripped int,
 				if len(shimNames) > 0 {
 					body = append(body, fmt.Sprintf("const {%s} = %s", strings.Join(shimNames, ", "), commonShimFor(absPath)))
 				}
+				continue
+			}
+			if mod == "../common/dns" {
+				// `const { parseDNSPacket, writeDNSPacket } = require('../common/dns')`.
+				imports = append(imports, "import __kml_dnstools from '../common/dns'")
+				body = append(body, fmt.Sprintf("const {%s} = __kml_dnstools", names))
 				continue
 			}
 			if mod == "../common/fixtures" {
@@ -689,6 +702,9 @@ func runNodeSuite(workDir string, timeout time.Duration, workers int, compat str
 	if err := writeCountdownShim(workDir); err != nil {
 		fatal("writing common/countdown shim: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(workDir, "common", "dns.ts"), dnsShim, 0644); err != nil {
+		fatal("writing common/dns shim: %v", err)
+	}
 
 	var files []string
 	for _, suite := range nodeSuites {
@@ -714,9 +730,14 @@ func runNodeSuite(workDir string, timeout time.Duration, workers int, compat str
 	// child-process/cluster files when hunting a specific leak.
 	if filter != "" {
 		var kept []string
+		// `a|b|c` keeps the files matching any of them (re-running a list).
+		alts := strings.Split(filter, "|")
 		for _, f := range files {
-			if strings.Contains(f, filter) {
-				kept = append(kept, f)
+			for _, a := range alts {
+				if a != "" && strings.Contains(f, a) {
+					kept = append(kept, f)
+					break
+				}
 			}
 		}
 		files = kept
@@ -844,6 +865,12 @@ export default fixtures;
 `
 	return os.WriteFile(filepath.Join(commonDir, "fixtures.ts"), []byte(shim), 0644)
 }
+
+// dnsShim is the typed port of Node's test/common/dns.js, written to
+// workDir/common/dns.ts beside the other harness shims.
+//
+//go:embed node-shim/dns.ts
+var dnsShim []byte
 
 // writeCountdownShim generates workDir/common/countdown.ts — a typed
 // replacement for Node's `test/common/countdown.js` Countdown class
@@ -1275,13 +1302,32 @@ func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir,
 		return false, "WRITE_ERROR: " + err.Error(), "", ""
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	// Each builtin library module compiles once per run into the object
+	// cache, as the CLI does (llvm.LibObjects); the program's own unit is
+	// what clang compiles here.
+	if !prog.ffiDl {
+		objs, _, err := llvm.LibObjects(llFile, objCacheDir(), libObjectFlags)
+		if err != nil {
+			return false, nodeReason("CLANG_ERROR", firstLine(err.Error())), "", ""
+		}
+		clangArgs = append(clangArgs, objs...)
+		clangArgs = append(clangArgs, llvm.DeadStripFlags(false)...)
+	}
+	// The runtime files compile once per run into the shared object cache,
+	// as in the Test262 runner; a member the cache refuses compiles here.
 	for _, cs := range prog.cSources {
-		cFile := filepath.Join(workDir, tag+"."+cs.Name+".c")
-		if err := os.WriteFile(cFile, []byte(cs.Content), 0644); err != nil {
-			return false, "WRITE_ERROR: " + err.Error(), "", ""
+		cFile, oerr := cs.CachedObject(objCacheDir(), []string{"-O2"})
+		flags := cs.CFlags
+		if oerr != nil {
+			cFile = filepath.Join(workDir, tag+"."+cs.Name+"."+cs.SrcExt())
+			var content string
+			content, flags = cs.Standalone() // the sources share one clang command
+			if err := os.WriteFile(cFile, []byte(content), 0644); err != nil {
+				return false, "WRITE_ERROR: " + err.Error(), "", ""
+			}
 		}
 		clangArgs = append(clangArgs, cFile)
-		clangArgs = append(clangArgs, cs.CFlags...)
+		clangArgs = append(clangArgs, flags...)
 		clangArgs = append(clangArgs, cs.Libs...) // link flags as given, as main.go passes them
 	}
 	for _, lib := range prog.linkLibs {
@@ -1293,7 +1339,7 @@ func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir,
 	clangCmd := killableCommand(cctx, "clang", llvm.HostClangArgv(clangArgs...)...)
 	clangCmd.Stdout = &clangOut
 	clangCmd.Stderr = &clangOut
-	if err := clangCmd.Run(); err != nil {
+	if err := runTracked(clangCmd); err != nil {
 		if cctx.Err() == context.DeadlineExceeded {
 			return false, "CLANG_TIMEOUT", "", ""
 		}
@@ -1313,6 +1359,7 @@ func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir,
 		}
 	}
 	runCmd := killableCommand(rctx, runBin)
+	limitProgram(runCmd)
 	runCmd.Stdout = &stdout
 	runCmd.Stderr = &stderr
 	if runDir != "" {

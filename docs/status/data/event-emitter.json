@@ -70,9 +70,6 @@
             "status": "implemented",
             "notes": [
               "`eventNames()` returns registration order; an event whose last listener is removed leaves the list, as in Node"
-            ],
-            "caveats": [
-              "`eventNames()` leaves out symbol event names (`Reflect.ownKeys` omits an object's symbol keys); `on`/`emit`/`listenerCount` with a symbol work"
             ]
           },
           {

@@ -160,3 +160,25 @@ console.log("" + e)
 console.log(new Error("").toString())
 `, "Error: x\nRangeError: r\nerr: TypeError: bad\nError: boom\nError")
 }
+
+func TestE2EErrorInspectCause(t *testing.T) {
+	// util.inspect shows the options' cause after the own properties as
+	// `[cause]: …` and an AggregateError's errors as `[errors]: […]`; an
+	// assigned cause is an ordinary property, and an AggregateError has no
+	// system fields (ADR-01418).
+	assertOutput(t, `
+const e = new TypeError("outer", { cause: new Error("inner") })
+console.log(e)
+const f: any = new Error("f", { cause: 42 })
+f.code = "X"
+console.log(f)
+const g: any = new Error("g")
+g.cause = "own"
+console.log(g)
+console.log(new Error("plain"))
+const a = new AggregateError([new Error("x")], "m")
+console.log(a)
+console.log(Object.keys(a), JSON.stringify(a), (a as any).code)
+`, "TypeError: outer {\n  [cause]: Error: inner\n}\nError: f {\n  code: 'X',\n  [cause]: 42\n}\nError: g {\n  cause: 'own'\n}\nError: plain\n"+
+		"AggregateError: m {\n  [errors]: [ Error: x ]\n}\n[] {} undefined")
+}

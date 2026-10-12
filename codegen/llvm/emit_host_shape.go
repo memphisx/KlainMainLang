@@ -121,13 +121,14 @@ func hostParamType(pt *checker.Type) Type {
 // emitHostShapeRow generates host layout h's get and set routines from its
 // class's declaration and returns its table row prefixed with "id|".
 func (e *Emitter) emitHostShapeRow(h hostLayout) string {
+	defer e.stableHelperBody(h.id)()
 	id := h.id & kmlHdrIDMask
 	members := e.hostMembers(h.class)
 	getName := fmt.Sprintf("@__kml_shape_get_host_%d", id)
 	setName := fmt.Sprintf("@__kml_shape_set_host_%d", id)
 	e.emitHostShapeGetter(getName, h, members)
 	e.emitHostShapeSetter(setName, h, members)
-	return fmt.Sprintf("%d|{ i64, ptr, ptr, ptr, i64, ptr } { i64 %d, ptr %s, ptr %s, ptr %s, i64 0, ptr null }", id, id, e.internString(h.class), getName, setName)
+	return fmt.Sprintf("%d|%s { i64 %d, ptr %s, ptr %s, ptr %s, i64 0, ptr null, ptr null }", id, shapeRowTy, id, e.internString(h.class), getName, setName)
 }
 
 // bindHostSelf loads the handle out of the host cell at cellReg and binds it
@@ -220,6 +221,7 @@ func (e *Emitter) hostMethodRecord(h hostLayout, m hostMember) string {
 	if rec, ok := e.shapeMethodRecs[key]; ok {
 		return rec
 	}
+	defer e.stableHelperBody(id)()
 	base := fmt.Sprintf("__kml_host_m_%d_%s", id, llvmSafeSymbol(m.name))
 	fn := "@" + base
 	rec := "@" + base + "_rec"
@@ -241,6 +243,13 @@ func (e *Emitter) hostMethodRecord(h hostLayout, m hostMember) string {
 // typed method is called with as many as were passed.
 func (e *Emitter) emitHostMethodAdapter(fn string, h hostLayout, m hostMember) {
 	restore := e.beginDetachedFunc()
+	// The receiver is checked to be exactly this layout, never the body of
+	// a class extending Array (its header word is the class's), so the
+	// method is Array's own: no override dispatch, which would also make
+	// the adapter depend on the program's classes.
+	prevOv := e.inArrayOverrideDispatch
+	e.inArrayOverrideDispatch = true
+	defer func() { e.inArrayOverrideDispatch = prevOv }()
 	e.ensureNanBox()
 	tag, pay := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_nb_tag(i64 %%this)", tag))
@@ -261,6 +270,13 @@ func (e *Emitter) emitHostMethodAdapter(fn string, h hostLayout, m hostMember) {
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, cell))
 	same := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", same, hdr, h.id))
+	if headeredHost(h.ty) {
+		// An instance of a class extending this Map or Set (TDD-00247): its
+		// class chain reaches the host layout, its body at +8 like a host's.
+		sub, either := e.emitClassIs(hdr, kmlHdrMagic|h.id&kmlHdrIDMask), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, same, sub))
+		same = either
+	}
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", same, okL, badL))
 	e.emitLabel(badL)
 	e.emitThrowTypeError("Method " + h.class + ".prototype." + m.name + " called on incompatible receiver")
@@ -298,7 +314,12 @@ func (e *Emitter) emitHostMethodAdapter(fn string, h hostLayout, m hostMember) {
 		}
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, storageIR(pty)))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", storageIR(pty), av.Ref, slot))
+		if pty.IsArray {
+			// An array binding's slot holds its {data, len} header.
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.arrayReturnHeader(av), slot))
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", storageIR(pty), av.Ref, slot))
+		}
 		name := fmt.Sprintf("__kml_host_a%d", i)
 		e.define(name, Symbol{Ptr: slot, Ty: pty})
 		args = append(args, ast.NewIdentifier(name, ast.Pos{}))

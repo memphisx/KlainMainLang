@@ -124,11 +124,13 @@
             "status": "implemented",
             "notes": [
               "→ [Language constructs](LANGUAGE-CONSTRUCTS.md)",
-              "`.toString()` / `String(err)` / `` `${err}` `` render `name: message` as in Node. See [ADR-00846](../adr/ADR-00846.md)"
+              "`.toString()` / `String(err)` / `` `${err}` `` render `name: message` as in Node. See [ADR-00846](../adr/ADR-00846.md)",
+              "`console.log(err)` shows the options' cause after the own properties as `[cause]: …`, as util.inspect does ([ADR-01418](../adr/ADR-01418.md))"
             ],
             "caveats": [
               "The error-options second argument must be a `{ cause: <expr> }` object **literal** — a variable/computed options bag is a clean rejection ([ADR-01007](../adr/ADR-01007.md)); `AggregateError` takes no options (its `.cause` reads `undefined`)",
-              "`.stack` is typed a number, not a string (`typeof err.stack` is `'number'`, Node: `'string'`)"
+              "`.stack` is typed a number, not a string (`typeof err.stack` is `'number'`, Node: `'string'`)",
+              "`console.log(err)` leaves out the `[cause]: undefined` line of an error made with `{ cause: undefined }`"
             ]
           },
           {
@@ -300,7 +302,7 @@
             "feature": "`Object` / dynamic model",
             "status": "implemented",
             "caveats": [
-              "prototype machinery, descriptors, accessors exist on **`any`-typed / js-mode dynamic objects only**; static structs are fixed-shape (no dynamic add/delete, no prototype); `Object.assign` between static objects can't graft new fields; `hasOwn` needs string-literal keys → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+              "prototype machinery, descriptors, accessors exist on **`any`-typed / js-mode dynamic objects only**; static structs are fixed-shape (no dynamic add/delete, no prototype); `Object.assign` between static objects can't graft new fields → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
             ]
           },
           {
@@ -356,7 +358,7 @@
             "feature": "TypedArrays / `ArrayBuffer`",
             "status": "implemented",
             "caveats": [
-              "no `.buffer` back-ref; `resize`/`grow` need `{maxByteLength}`; views don't length-track resize → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)"
+              "`resize`/`grow` need `{maxByteLength}`; views don't length-track resize → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)"
             ]
           },
           {

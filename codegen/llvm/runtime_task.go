@@ -60,7 +60,10 @@ const (
 	// .then/.catch/.finally reactions, enqueued as microtasks when it settles.
 	// Field 5 (promiseBoxedSlot) caches the promise's box wrapper once it has
 	// been held in a dynamic value (emit_anyprom.go).
-	promiseStructIR   = "{ i64, ptr, i64, i64, ptr, ptr, i64 }"
+	promiseStructIR = "{ i64, ptr, i64, i64, ptr, ptr, i64 }"
+	// promiseHeaderWord is the word before a promise's body: the header of
+	// a host value naming no class (TDD-00247).
+	promiseHeaderWord = kmlHdrMagic | hostTypeIDFlag | hostInlineFlag
 	promiseStructSize = 56
 	// async-task fiber stacks are far shallower than the HTTP path's 1 MiB
 	// (most async bodies are a handful of frames); 256 KiB keeps memory per
@@ -109,15 +112,14 @@ func (e *Emitter) emitLoopTaskStubs() {
 	if e.usedTaskRuntime && !e.usedPromiseCombinators {
 		e.emitGlobal("define i1 @__kml_group_satisfied(ptr %g) {\n  ret i1 1\n}")
 	}
-	// TDD-00142 Stage 3: the webview page-tick pump (@__kml_wv_pump) calls
-	// @__kml_timer_tick / @__kml_task_sched_step / @__kml_drain_microtasks
-	// unconditionally. When the corresponding runtime is absent, a no-op stub
-	// stands in — but only for symbols the HTTP path below does not already
-	// stub (guarded on !usedHTTP), so no symbol is defined twice.
-	if e.usedWebview {
-		if !e.usedTimers {
-			e.emitGlobal("define void @__kml_timer_tick() {\nentry:\n  ret void\n}")
-		}
+	// TDD-00142 Stage 3: the webview page-tick pump (@__kml_wv_pump, Windows
+	// only: elsewhere the loop runs inside the GUI's main loop) calls
+	// the timers binding's phases (linked by the pump),
+	// @__kml_task_sched_step and @__kml_drain_microtasks unconditionally.
+	// When the task runtime is absent, a no-op stub stands in — but only for
+	// symbols the HTTP path below does not already stub (guarded on
+	// !usedHTTP), so no symbol is defined twice.
+	if e.usedWebview && e.opts.Target.OS() == "windows" {
 		if !e.usedTaskRuntime && !e.usedHTTP {
 			e.emitGlobal("define void @__kml_task_sched_step() {\nentry:\n  ret void\n}")
 		}
@@ -130,9 +132,6 @@ func (e *Emitter) emitLoopTaskStubs() {
 	if (e.usedHTTP || e.usedTaskRuntime) && !e.usedReqBodyRuntime {
 		e.emitGlobal("define void @__kml_reqbody_pump() {\nentry:\n  ret void\n}")
 		e.emitGlobal("define i1 @__kml_reqbody_want() {\nentry:\n  ret i1 0\n}")
-		// ADR-00986: task_await_ready's fiber-yield safety gate; no reqbody
-		// streaming exists in this program, so nothing is ever active on any fd.
-		e.emitGlobal("define i1 @__kml_reqbody_active_on_fd(i64 %fd) {\nentry:\n  ret i1 0\n}")
 	}
 	if !e.usedHTTP {
 		return
@@ -144,46 +143,34 @@ func (e *Emitter) emitLoopTaskStubs() {
 		e.emitGlobal("define i1 @__kml_task_holds_loop() {\nentry:\n  ret i1 0\n}")
 	}
 	e.ensureMicrotasks()
-	// TDD-00098: worker hooks the event loop references unconditionally.
-	if !e.usedWorkerRuntime {
-		e.emitGlobal("define i1 @__kml_worker_keepalive() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_worker_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define void @__kml_worker_dispatch() {\nentry:\n  ret void\n}")
-	}
-	// child_process hooks the event loop references unconditionally.
-	if !e.usedChildProcRuntime {
-		e.emitGlobal("define i1 @__kml_cp_keepalive() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_cp_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define void @__kml_cp_dispatch() {\nentry:\n  ret void\n}")
-		e.emitGlobal("define i64 @__kml_cp_next_timeout_ns() {\nentry:\n  ret i64 0\n}")
-	}
 	// dynamic-import island hooks likewise (TDD-00225).
 	if !e.usedDynImportWatch {
 		e.emitGlobal("define i1 @__kml_dynimport_keepalive() {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define void @__kml_dynimport_dispatch() {\nentry:\n  ret void\n}")
 		e.emitGlobal("define i64 @__kml_dynimport_next_deadline_ns() {\nentry:\n  ret i64 0\n}")
 	}
-	// fs.watch hooks likewise (TDD-00181).
-	if !e.usedFsWatchRuntime {
+	// fs.watch hooks likewise (TDD-00181): Windows only (POSIX watchers are
+	// libuv handles).
+	if !e.usedFsWatchRuntime && e.opts.Target.OS() == "windows" {
 		e.emitGlobal("define i1 @__kml_fswatch_keepalive() {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define i1 @__kml_fswatch_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define void @__kml_fswatch_dispatch() {\nentry:\n  ret void\n}")
 	}
 	// TDD-00185: async-I/O thread-pool hooks. When the pool is used, klainpool.c
-	// defines these three; otherwise they are no-ops, like every hook above.
-	if !e.usedThreadPool {
+	// defines these; otherwise they are no-ops, like every hook above.
+	// Windows only: a POSIX port delivers through its own uv_async_t.
+	if !e.usedThreadPool && e.opts.Target.OS() == "windows" {
 		e.emitGlobal("define i1 @__kml_pool_keepalive() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_pool_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define zeroext i1 @__kml_pool_dispatch() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_tcp_keepalive() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_tcp_fdset_add(ptr %fdset, ptr %wfdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define zeroext i1 @__kml_tcp_dispatch() {\nentry:\n  ret i1 0\n}")
 	}
-	// net (TCP server) hooks likewise.
-	if !e.usedNetRuntime {
-		e.emitGlobal("define i1 @__kml_net_keepalive() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_net_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define void @__kml_net_dispatch() {\nentry:\n  ret void\n}")
+	if !e.usedThreadPool {
+		// The TCP handles' reactor hooks: Windows only (POSIX handles are
+		// libuv watchers).
+		if e.opts.Target.OS() == "windows" {
+			e.emitGlobal("define i1 @__kml_tcp_keepalive() {\nentry:\n  ret i1 0\n}")
+			e.emitGlobal("define i1 @__kml_tcp_fdset_add(ptr %fdset, ptr %wfdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
+			e.emitGlobal("define zeroext i1 @__kml_tcp_dispatch() {\nentry:\n  ret i1 0\n}")
+		}
 	}
 }
 
@@ -231,7 +218,6 @@ declare zeroext i1 @__kml_task_holds_loop()
 declare i64 @__kml_task_await_any_of(ptr, i64)
 declare i64 @__kml_task_await_first_fulfilled(ptr, i64)
 declare void @__kml_task_unwait(ptr, i64, ptr)
-declare void @__kml_task_run_all()
 declare void @__kml_task_resume(ptr)
 declare void @__kml_task_await_ready(ptr)`)
 }

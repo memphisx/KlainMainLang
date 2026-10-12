@@ -68,6 +68,7 @@ func (e *Emitter) ensureMalloc() {
 func (e *Emitter) ensureForkDecl() {
 	if !e.usedForkDecl {
 		e.emitGlobal("declare i32 @fork()")
+		e.emitGlobal("declare void @__kml_loop_after_fork()") // loop.c
 		e.usedForkDecl = true
 	}
 }

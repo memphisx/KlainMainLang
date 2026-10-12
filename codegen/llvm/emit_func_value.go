@@ -30,6 +30,10 @@ import (
 func funcTypeFromSig(sig FuncSig) Type {
 	ft := FuncType(sig.ParamTypes, sig.RetType)
 	ft.FuncHasRest = sig.HasRest
+	ft.FuncCountsArgs = countsArgs(sig.HasRest, sig.ParamNames)
+	if len(sig.ParamNames) == len(sig.ParamTypes) && !sig.This {
+		ft.FuncParamNames = sig.ParamNames
+	}
 	ft.FuncThis = sig.This
 	return ft
 }
@@ -143,6 +147,7 @@ func (e *Emitter) emitNamedFuncValue(mangled string, sig FuncSig, displayName st
 	sym := fnValueHeaderName(mangled)
 	if !e.fnValueHeaders[mangled] {
 		e.fnValueHeaders[mangled] = true
+		e.emitNamedDynEntry(mangled, sig, tramp)
 		e.emitGlobal(fmt.Sprintf(
 			"%s = private unnamed_addr constant {ptr, ptr} { ptr %s, ptr null }",
 			sym, tramp))
@@ -167,4 +172,28 @@ func funcValueType(sig FuncSig) Type {
 		ty.FuncParamDefaults[i] = d
 	}
 	return ty
+}
+
+// emitNamedDynEntry gives a top-level function taken by value the dynamic
+// entry an arrow gets (emit_dynentry.go): its body again with each
+// class-typed parameter a box, behind its own trampoline.
+func (e *Emitter) emitNamedDynEntry(mangled string, sig FuncSig, tramp string) {
+	decl, ok := e.topFuncDecls[mangled]
+	if !ok || decl.Body == nil || decl.IsGenerator || sig.MaySuspend || sig.This {
+		return
+	}
+	alt, ok := e.dynEntryParams(decl.Params, sig.ParamTypes)
+	if !ok {
+		return
+	}
+	altSig := sig
+	altSig.ParamTypes = alt
+	altMangled := mangled + "__kml_dynentry"
+	restoreWidened := e.widenDynEntryParams(decl.Params, sig.ParamTypes, alt)
+	err := e.emitFunctionDeclAs(decl, altMangled, altSig)
+	restoreWidened()
+	if err != nil {
+		return
+	}
+	e.registerDynEntry(tramp, e.ensureFuncValueTrampoline(altMangled, altSig))
 }

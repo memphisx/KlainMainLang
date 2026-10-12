@@ -53,7 +53,7 @@ extern long long __kml_obj_get(void *o, const char *key);
 extern int __kml_obj_has(void *o, const char *key);
 extern const char *__kml_obj_name(void *o);
 extern char *__kml_host_inspect(void *cell, long long depth);
-extern long long __kml_inspect_opt_compact, __kml_inspect_opt_sorted, __kml_inspect_opt_depth, __kml_inspect_opt_break, __kml_inspect_opt_maxarr;
+extern long long __kml_inspect_opt_compact, __kml_inspect_opt_sorted, __kml_inspect_opt_depth, __kml_inspect_opt_break, __kml_inspect_opt_maxarr, __kml_inspect_opt_custom;
 /* A host box's toJSON result as a string (a Date's ISO form), or 0. */
 extern char *__kml_host_tojson(void *cell);
 /* A host box's Object.prototype.toString tag (`[object Map]`). */
@@ -759,12 +759,51 @@ static int key_is_ident(const char *k) {
     return 1;
 }
 
+extern _Bool __kml_key_is_symbol(const char *k);
+
+/* Whether a property key is a symbol's: a Symbol's "\x01@@sym:%p" key or a
+   well-known symbol's member key ("@@iterator"). */
+static int key_is_sym(const char *k) {
+    return k && (strncmp(k, "\x01@@sym:", 7) == 0 || __kml_key_is_symbol(k));
+}
+
+/* A property key as util.inspect shows it: a symbol's as `Symbol(desc)`
+   (`Symbol(Symbol.iterator)` for a well-known one), an identifier bare,
+   anything else single-quoted (an own `__proto__` in brackets). */
+static void append_key(Sb *eb, const char *k) {
+    if (k && strncmp(k, "\x01@@symf:", 8) == 0) {
+        /* A field keyed by a declared symbol: its description is up to
+           the \x02 before the const's binding (TDD-00246). */
+        sb_cstr(eb, "Symbol(");
+        for (const char *p = k + 8; *p && *p != 2; p++) sb_ch(eb, *p);
+        sb_ch(eb, ')');
+    } else if (key_is_sym(k) && k[0] == '@') {
+        sb_cstr(eb, "Symbol(Symbol.");
+        sb_cstr(eb, k + 2);
+        sb_ch(eb, ')');
+    } else if (key_is_sym(k)) {
+        void *sym = NULL;
+        sscanf(k + 7, "%p", &sym);
+        const char *desc = sym ? *(const char **)((char *)sym + 8) : NULL;
+        sb_cstr(eb, "Symbol(");
+        sb_cstr(eb, desc ? desc : "");
+        sb_ch(eb, ')');
+    } else if (k && strcmp(k, "__proto__") == 0) {
+        sb_cstr(eb, "['__proto__']");
+    } else if (key_is_ident(k)) {
+        sb_cstr(eb, k);
+    } else {
+        sb_ch(eb, '\'');
+        sb_cstr(eb, k ? k : "");
+        sb_ch(eb, '\'');
+    }
+}
+
 /* inspect_obj renders a dynamic object the way util.inspect (console.log)
    does: `{ a: 1, b: 'x' }`, `{}` when empty, keys in ES enumeration order,
    non-enumerable entries skipped, accessors shown as [Getter]/[Setter]
    (never invoked), and — Node's default depth — anything nested deeper than
    two object levels collapsed to [Object]. */
-extern _Bool __kml_key_is_symbol(const char *k);
 
 /* dyn_tag: a dynamic object's own or inherited Symbol.toStringTag, when a
    string (`Math`'s "Math"), else NULL. */
@@ -810,33 +849,10 @@ static void inspect_obj(Sb *b, char *o, int depth) {
         long long attrs = obj_attrs(o, i);
         if (!(attrs & 2)) continue; /* non-enumerable: hidden from inspect */
         const char *k = obj_key(o, i);
-        int symKey = k && (strncmp(k, "\x01@@sym:", 7) == 0 || __kml_key_is_symbol(k));
-        if (symKey != pass) continue;
+        if (key_is_sym(k) != pass) continue;
         Sb eb;
         sb_init(&eb);
-        if (symKey && k[0] == '@') {
-            /* A well-known symbol's member key ("@@iterator"). */
-            sb_cstr(&eb, "Symbol(Symbol.");
-            sb_cstr(&eb, k + 2);
-            sb_ch(&eb, ')');
-        } else if (symKey) {
-            void *sym = NULL;
-            sscanf(k + 7, "%p", &sym);
-            const char *desc = sym ? *(const char **)((char *)sym + 8) : NULL;
-            sb_cstr(&eb, "Symbol(");
-            sb_cstr(&eb, desc ? desc : "");
-            sb_ch(&eb, ')');
-        } else if (k && strcmp(k, "__proto__") == 0) {
-            /* An own `__proto__` key (computed / JSON-parsed) is quoted in
-               brackets so it can't read as the prototype setter. */
-            sb_cstr(&eb, "['__proto__']");
-        } else if (key_is_ident(k)) {
-            sb_cstr(&eb, k);
-        } else {
-            sb_ch(&eb, '\'');
-            sb_cstr(&eb, k ? k : "");
-            sb_ch(&eb, '\'');
-        }
+        append_key(&eb, k);
         sb_cstr(&eb, ": ");
         if (attrs & 8) {
             char *pair = (char *)obj_pay(o, i);
@@ -889,8 +905,9 @@ static void inspect_arr(Sb *b, char *a, int depth) {
    util.inspect does: `Name { a: 1 }` for a class instance, `{ a: 1 }` for a
    plain object, `[Name]`/`[Object]` past the depth limit. */
 static void inspect_static(Sb *b, void *o, long long n, int depth) {
-    /* A class's own `[inspect.custom]` renders it. */
-    char *custom = __kml_obj_inspect_custom(o, depth);
+    /* A class's own `[inspect.custom]` renders it, unless customInspect is
+       off for this rendering. */
+    char *custom = __kml_inspect_opt_custom ? __kml_obj_inspect_custom(o, depth) : NULL;
     if (custom) {
         sb_cstr(b, custom);
         return;
@@ -921,13 +938,15 @@ static void inspect_static(Sb *b, void *o, long long n, int depth) {
         return;
     }
     void *list = __kml_inspect_begin(depth, 1);
+    /* String keys first, then symbol keys, as Reflect.ownKeys orders them. */
+    for (int pass = 0; pass < 2; pass++)
     for (long long i = 0; i < n; i++) {
         const char *k = __kml_obj_key(o, i);
-        if (!k || !__kml_obj_has(o, k)) continue;
+        if (!k || key_is_sym(k) != pass || !__kml_obj_has(o, k)) continue;
         Sb eb;
         sb_init(&eb);
-        if (key_is_ident(k)) {
-            sb_cstr(&eb, k);
+        if (pass || key_is_ident(k)) {
+            append_key(&eb, k);
         } else {
             char *q = __kml_inspect_quote(k);
             sb_cstr(&eb, q);
@@ -951,6 +970,10 @@ static void inspect_static(Sb *b, void *o, long long n, int depth) {
 static int error_header_key(const char *k) {
     return strcmp(k, "name") == 0 || strcmp(k, "message") == 0;
 }
+
+/* errkeys.c's, linked with this file (UsesErrKeysC). */
+extern int __kml_error_option_cause(void *o, long long *out);
+extern int __kml_error_aggregate(void *o, void ***errs, long long *n);
 
 static void inspect_error(Sb *b, void *o, int depth) {
     const char *head = __kml_error_inspect(o);
@@ -976,7 +999,12 @@ static void inspect_error(Sb *b, void *o, int depth) {
         const char *k = __kml_obj_key(o, i);
             if (k && __kml_obj_has(o, k)) shown++;
     }
-    if (shown == 0) return;
+    long long cause = 0;
+    int has_cause = __kml_error_option_cause(o, &cause);
+    void **errs = 0;
+    long long nerrs = 0;
+    int has_errors = __kml_error_aggregate(o, &errs, &nerrs);
+    if (shown == 0 && !has_cause && !has_errors) return;
     if (depth > __kml_inspect_opt_depth) {
         sb_cstr(b, " { ... }");
         return;
@@ -989,8 +1017,8 @@ static void inspect_error(Sb *b, void *o, int depth) {
         if (done++ > 0) sb_ch(b, ',');
         sb_ch(b, '\n');
         for (int s = 0; s < 2 * (depth + 1); s++) sb_ch(b, ' ');
-        if (key_is_ident(k)) {
-            sb_cstr(b, k);
+        if (key_is_ident(k) || key_is_sym(k)) {
+            append_key(b, k);
         } else {
             char *q = __kml_inspect_quote(k);
             sb_cstr(b, q);
@@ -1000,6 +1028,37 @@ static void inspect_error(Sb *b, void *o, int depth) {
         long long etag, epay;
         nb_decode(__kml_obj_get(o, k), &etag, &epay);
         inspect_val(b, etag, epay, depth + 1);
+    }
+    if (has_cause) {
+        if (done++ > 0) sb_ch(b, ',');
+        sb_ch(b, '\n');
+        for (int s = 0; s < 2 * (depth + 1); s++) sb_ch(b, ' ');
+        sb_cstr(b, "[cause]: ");
+        long long ctag, cpay;
+        nb_decode(cause, &ctag, &cpay);
+        inspect_val(b, ctag, cpay, depth + 1);
+    }
+    if (has_errors) {
+        if (done++ > 0) sb_ch(b, ',');
+        sb_ch(b, '\n');
+        for (int s = 0; s < 2 * (depth + 1); s++) sb_ch(b, ' ');
+        sb_cstr(b, "[errors]: ");
+        if (nerrs == 0) {
+            sb_cstr(b, "[]");
+        } else {
+            void *list = __kml_inspect_begin(depth + 1, 1);
+            for (long long i = 0; i < nerrs; i++) {
+                Sb eb;
+                sb_init(&eb);
+                long long etag, epay; /* errors is any[]: boxed elements */
+                nb_decode(((long long *)errs)[i], &etag, &epay);
+                inspect_val(&eb, etag, epay, depth + 2);
+                __kml_inspect_push(list, sb_finish(&eb));
+            }
+            char *out = __kml_inspect_end(list, "[", "]", 2 * (depth + 1), depth + 1, 1, 0);
+            sb_cstr(b, out);
+            free(out - 8);
+        }
     }
     sb_ch(b, '\n');
     for (int s = 0; s < 2 * depth; s++) sb_ch(b, ' ');
@@ -1199,11 +1258,12 @@ static long long opt_int(double v) {
 }
 
 /* util.inspect(value, { depth, compact, sorted, breakLength,
-   maxArrayLength }) of a box: the options hold for this one rendering
-   (compact 0 is `false`). */
-char *__kml_inspect_opts(long long word, double depth, double compact, double sorted, double breakLength, double maxArrayLength) {
+   maxArrayLength, customInspect }) of a box: the options hold for this one
+   rendering (compact 0 is `false`). */
+char *__kml_inspect_opts(long long word, double depth, double compact, double sorted, double breakLength, double maxArrayLength, double customInspect) {
     long long od = __kml_inspect_opt_depth, oc = __kml_inspect_opt_compact, os = __kml_inspect_opt_sorted;
-    long long ob = __kml_inspect_opt_break, om = __kml_inspect_opt_maxarr;
+    long long ob = __kml_inspect_opt_break, om = __kml_inspect_opt_maxarr, ocu = __kml_inspect_opt_custom;
+    __kml_inspect_opt_custom = customInspect != 0;
     __kml_inspect_opt_depth = opt_int(depth);
     __kml_inspect_opt_compact = opt_int(compact);
     __kml_inspect_opt_sorted = sorted != 0;
@@ -1219,6 +1279,7 @@ char *__kml_inspect_opts(long long word, double depth, double compact, double so
     __kml_inspect_opt_sorted = os;
     __kml_inspect_opt_break = ob;
     __kml_inspect_opt_maxarr = om;
+    __kml_inspect_opt_custom = ocu;
     return sb_finish(&b);
 }
 
@@ -1389,6 +1450,14 @@ int __kml_anyarr_typed_is(void *box, const char *name) {
     return strcmp(kj_typed_name(b), name) == 0;
 }
 
+/* kj_arr_hdr_new: a fresh array header {data, len}, after the header word
+   the compiler writes before every array header (KML_ARRAY_HDR_WORD). */
+static char *kj_arr_hdr_new(void) {
+    long long *cell = (long long *)malloc(24);
+    cell[0] = KML_ARRAY_HDR_WORD;
+    return (char *)(cell + 1);
+}
+
 /* __kml_anyarr_words: a boxed static array read as an `any[]` — its own
    header when its elements already are NaN-boxed words, else a fresh header
    whose elements are each boxed as kj_elem_box reads them (an element kind
@@ -1399,7 +1468,7 @@ char *__kml_anyarr_words(void *box) {
     long long n = kj_len(b);
     long long *d = (long long *)malloc((size_t)(n > 0 ? n : 1) * 8);
     for (long long i = 0; i < n; i++) d[i] = b->kind < 0 ? 10 : kj_elem_box(b, i);
-    char *h = (char *)malloc(16);
+    char *h = kj_arr_hdr_new();
     *(long long **)h = d;
     *(long long *)(h + 8) = n;
     return h;
@@ -1444,7 +1513,7 @@ char *__kml_anyarr_flat(long long *data, long long len, long long depth) {
     kj_words w = {0};
     for (long long i = 0; i < len; i++) kj_flat_into(&w, data[i], depth);
     if (!w.d) w.d = (long long *)malloc(8);
-    char *h = (char *)malloc(16);
+    char *h = kj_arr_hdr_new();
     *(long long **)h = w.d;
     *(long long *)(h + 8) = w.n;
     return h;
@@ -1629,7 +1698,7 @@ char *__kml_anyarr_view(long long word) {
     } else {
         return NULL;
     }
-    char *hdr = (char *)malloc(16);
+    char *hdr = kj_arr_hdr_new();
     *(long long **)hdr = data;
     *(long long *)(hdr + 8) = n;
     // A frozen or sealed array's view carries its level, so a mutation
@@ -2061,7 +2130,7 @@ char *__kml_received(long long word) {
             memcpy(cut + 8 + 25, "...", 4);
             shownWord = (long long)(cut + 8);
         }
-        char *shown = __kml_inspect_opts(shownWord, 2, 3, 0, 80, 100);
+        char *shown = __kml_inspect_opts(shownWord, 2, 3, 0, 80, 100, 1);
         free(cut);
         const char *type = "object";
         switch (tag) {
@@ -2182,4 +2251,24 @@ long long __kml_any_view_bytes(long long word, char **data) {
     }
     *data = kj_data(b);
     return kj_len(b) * size;
+}
+
+/* The entry console.log shows inside a promise's braces: `<pending>`, its
+ * value, or `<rejected> reason` (an instance of a class extending Promise
+ * renders `P [Promise] { entry, fields }`, TDD-00247). wrapper is the
+ * promise's box payload. */
+char *__kml_promise_inspect_entry(void *wrapper, long long depth) {
+    long long pv = 0;
+    long long pst = __kml_promise_inspect_parts(wrapper, &pv);
+    Sb eb;
+    sb_init(&eb);
+    if (pst == 0) {
+        sb_cstr(&eb, "<pending>");
+    } else {
+        if (pst == 2) sb_cstr(&eb, "<rejected> ");
+        long long vt, vp;
+        nb_decode(pv, &vt, &vp);
+        inspect_val(&eb, vt, vp, depth + 1);
+    }
+    return sb_finish(&eb);
 }

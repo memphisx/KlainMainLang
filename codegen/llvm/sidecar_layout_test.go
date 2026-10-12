@@ -1,6 +1,7 @@
 package llvm
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -97,11 +98,13 @@ int __kml_obj_has(void *o, const char *k) { (void)o; (void)k; return 0; }
 const char *__kml_obj_name(void *o) { (void)o; return 0; }
 char *__kml_host_inspect(void *c, long long d) { (void)c; (void)d; return 0; }
 char *__kml_host_tojson(void *c) { (void)c; return 0; }
-long long __kml_inspect_opt_compact = 3, __kml_inspect_opt_sorted = 0, __kml_inspect_opt_depth = 2, __kml_inspect_opt_break = 80, __kml_inspect_opt_maxarr = 100;
+long long __kml_inspect_opt_compact = 3, __kml_inspect_opt_sorted = 0, __kml_inspect_opt_depth = 2, __kml_inspect_opt_break = 80, __kml_inspect_opt_maxarr = 100, __kml_inspect_opt_custom = 1;
 char *__kml_host_class_tag(void *c) { (void)c; return 0; }
 void *__kml_dynobj_get_proto(void *o) { (void)o; return 0; }
 long long __kml_promise_inspect_parts(void *o, long long *out) { (void)o; (void)out; return -1; }
 char *__kml_error_inspect(void *o) { (void)o; return 0; }
+int __kml_error_option_cause(void *o, long long *out) { (void)o; (void)out; return 0; }
+int __kml_error_aggregate(void *o, void ***errs, long long *n) { (void)o; (void)errs; (void)n; return 0; }
 char *__kml_obj_inspect_custom(void *o, long long d) { (void)o; (void)d; return 0; }
 char *__kml_obj_tostring_tag(void *o) { (void)o; return 0; }
 char __kml_array_integrity_any;
@@ -127,7 +130,7 @@ int main(void) {
 	if runtime.GOOS == "windows" {
 		exe += ".exe"
 	}
-	if out, err := exec.Command(clang, "-w", "-o", exe, probe).CombinedOutput(); err != nil {
+	if out, err := exec.Command(clang, "-w", fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", (&Emitter{}).arrayHeaderWord()), "-o", exe, probe).CombinedOutput(); err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	out, err := exec.Command(exe).Output()
@@ -187,8 +190,8 @@ var sidecarExterns = map[string]struct {
 	externs  []string // symbols the C file declares extern, sorted
 }{
 	"dynjsonsrc/dynjson.c": {
-		provider: "ensureDynJSONC (dynjson_c.go): ensureArrayGuard, ensureDtoa, ensureAnyOps, ensureAnyToPrimitive, ensureDynObj, ensureInspectReduce, ensureFnMeta, ensureBoxedBigIntHooks; the __kml_obj_* hooks, __kml_promise_inspect_parts and __kml_error_inspect, __kml_host_inspect and __kml_host_tojson at finalize (emitObjHooksFinalize, emitHostBoxFinalize)",
-		externs:  []string{"__kml_any_tonum", "__kml_array_guard", "__kml_array_level", "__kml_array_set_level", "__kml_boxed_bigint_str", "__kml_classref_nstatic", "__kml_classref_sget", "__kml_classref_shown", "__kml_classref_skey", "__kml_dtoa", "__kml_dynobj_get", "__kml_dynobj_get_proto", "__kml_error_inspect", "__kml_fn_inspect_dyn", "__kml_host_class_tag", "__kml_host_inspect", "__kml_host_tojson", "__kml_inspect_begin", "__kml_inspect_end", "__kml_inspect_push", "__kml_inspect_push_more", "__kml_inspect_quote", "__kml_key_is_symbol", "__kml_obj_get", "__kml_obj_has", "__kml_obj_inspect_custom", "__kml_obj_key", "__kml_obj_name", "__kml_obj_nkeys", "__kml_obj_tostring_tag", "__kml_promise_inspect_parts", "__kml_toprimitive"},
+		provider: "ensureDynJSONC (dynjson_c.go): ensureArrayGuard, ensureDtoa, ensureAnyOps, ensureAnyToPrimitive, ensureDynObj, ensureInspectReduce, ensureFnMeta, ensureBoxedBigIntHooks; the __kml_obj_* hooks, __kml_promise_inspect_parts and __kml_error_inspect, __kml_host_inspect and __kml_host_tojson at finalize (emitObjHooksFinalize, emitHostBoxFinalize); __kml_error_option_cause and __kml_error_aggregate from errkeys.c, linked with it (UsesErrKeysC)",
+		externs:  []string{"__kml_any_tonum", "__kml_array_guard", "__kml_array_level", "__kml_array_set_level", "__kml_boxed_bigint_str", "__kml_classref_nstatic", "__kml_classref_sget", "__kml_classref_shown", "__kml_classref_skey", "__kml_dtoa", "__kml_dynobj_get", "__kml_dynobj_get_proto", "__kml_error_aggregate", "__kml_error_inspect", "__kml_error_option_cause", "__kml_fn_inspect_dyn", "__kml_host_class_tag", "__kml_host_inspect", "__kml_host_tojson", "__kml_inspect_begin", "__kml_inspect_end", "__kml_inspect_push", "__kml_inspect_push_more", "__kml_inspect_quote", "__kml_key_is_symbol", "__kml_obj_get", "__kml_obj_has", "__kml_obj_inspect_custom", "__kml_obj_key", "__kml_obj_name", "__kml_obj_nkeys", "__kml_obj_tostring_tag", "__kml_promise_inspect_parts", "__kml_toprimitive"},
 	},
 }
 

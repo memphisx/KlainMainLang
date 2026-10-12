@@ -19,6 +19,13 @@ import (
 // (e.programUsesALS); otherwise timers are untouched.
 func (e *Emitter) wrapTimerClosureWithAsyncCtx(closurePtr string) string {
 	e.ensureAsyncCtxAccessors()
+	if e.programIndependent() {
+		// Shared code wraps only while a context is current: the same
+		// whether or not the program uses AsyncLocalStorage.
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_als_wrap(ptr %s)", r, closurePtr))
+		return r
+	}
 	cc := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_als_ctx_get()", cc))
 	env := e.freshReg()

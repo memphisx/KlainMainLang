@@ -333,7 +333,7 @@ func (e *Emitter) captureAnnotation(c *checker.Checker, sym *binder.Symbol, refs
 		case c.Unanswered(t) || t.Flags&checker.Union != 0:
 		case t.Flags&(checker.String|checker.StringLiteral) != 0:
 			name = "string"
-		case t.Flags&(checker.Number|checker.NumberLiteral) != 0:
+		case t.Flags&(checker.Number|checker.NumberLiteral) != 0 && !t.AnyArith:
 			name = "number"
 		case t.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
 			name = "boolean"

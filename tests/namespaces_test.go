@@ -275,3 +275,22 @@ M.n = 5
 console.log(M.n + M.k)
 `, "8")
 }
+
+// A namespace merged into a function declares its members: a call of
+// one is that function's, whatever it returns (ADR-01527).
+func TestFunctionMergedNamespaceMemberCall(t *testing.T) {
+	assertOutput(t, `
+function N(x: any): void { console.log("N", x); }
+namespace N { export function h(a: any): number { return a + 1; } export const v = 5; }
+const k = (e: any) => N.h(e);
+console.log(k(2), N.h(3) * 2, N.v);
+N(1);
+console.log(typeof N.h);
+function C(x: any): void { if (!x) throw new Error("x"); }
+namespace C { export function same(a: any, b: any): void { if (a !== b) throw new Error("ne"); } }
+const p = Promise.resolve(1);
+p.then((v) => C.same(v, 1)).then(() => console.log("ok"));
+const g = (e: any) => C.same(e, 2);
+g(2);
+`, "3 8 5\nN 1\nfunction\nok")
+}

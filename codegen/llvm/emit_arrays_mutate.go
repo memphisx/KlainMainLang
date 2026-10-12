@@ -47,6 +47,9 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 		return dataSlot, lenSlot, *sym.Ty.ElemType, nil
 
 	case *ast.MemberExpression:
+		if ot := e.inferExprType(obj.Object); (ot.IsMap && ot.IsDynamicObject) || (isUnconstrainedDynamic(ot) && ot.DynPropTy != nil) {
+			break // `r.x.push(v)`: a dictionary's array value, as `r["x"]`
+		}
 		objVal, evalErr := e.emitExpr(obj.Object)
 		if evalErr != nil {
 			return "", "", Type{}, evalErr
@@ -81,7 +84,7 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 		return ptrPtr, lenPtr, *fieldTy.ElemType, nil
 
 	case *ast.IndexExpression:
-		if ot := e.inferExprType(obj.Object); ot.IsMap || ot.IsDynamicObject {
+		if ot := e.inferExprType(obj.Object); ot.IsMap || ot.IsDynamicObject || (isUnconstrainedDynamic(ot) && ot.DynPropTy != nil) {
 			break // a dictionary's array value: through its value (below)
 		}
 		slot, eTy, idxErr := e.emitIndexPtr(obj)

@@ -22,14 +22,14 @@ import {
 } from './internal_fs_utils';
 import type {
     PathLike, PathOrFileDescriptor, TimeLike, Mode, OpenMode, NoParamCallback, ObjectEncodingOptions,
-    EncodingOption, WriteFileOptions, RmOptions, RmDirOptions, MakeDirectoryOptions, StatOptions,
+    EncodingOption, BufferEncodingOption, WriteFileOptions, RmOptions, RmDirOptions, MakeDirectoryOptions, StatOptions,
     StatSyncOptions, StatFsOptions, Abortable,
 } from './internal_fs_utils';
 
 export { Stats, Dirent, constants, F_OK, R_OK, W_OK, X_OK } from './internal_fs_utils';
 export type {
     PathLike, PathOrFileDescriptor, TimeLike, Mode, OpenMode, NoParamCallback, ObjectEncodingOptions,
-    EncodingOption, WriteFileOptions, RmOptions, RmDirOptions, MakeDirectoryOptions, StatOptions,
+    EncodingOption, BufferEncodingOption, WriteFileOptions, RmOptions, RmDirOptions, MakeDirectoryOptions, StatOptions,
     StatSyncOptions, StatFsOptions, Abortable,
 } from './internal_fs_utils';
 export type StatsFs = StatFs;
@@ -874,6 +874,8 @@ export function mkdir(path: any, options: any, callback?: any): void {
 }
 
 export function mkdtempSync(prefix: PathLike, options?: EncodingOption): string;
+export function mkdtempSync(prefix: PathLike, options: BufferEncodingOption): Buffer;
+export function mkdtempSync(prefix: PathLike, options?: EncodingOption | BufferEncodingOption): string | Buffer;
 export function mkdtempSync(prefix: any, options?: any): any {
     const opts = getOptions(options, {});
     const p = getValidatedPath(prefix, 'prefix') + 'XXXXXX';
@@ -1243,6 +1245,8 @@ export function copyFile(src: any, dest: any, mode: any, callback?: any): void {
 // ---- readlink / realpath ----
 
 export function readlinkSync(path: PathLike, options?: EncodingOption): string;
+export function readlinkSync(path: PathLike, options: BufferEncodingOption): Buffer;
+export function readlinkSync(path: PathLike, options?: EncodingOption | BufferEncodingOption): string | Buffer;
 export function readlinkSync(path: any, options?: any): any {
     const opts = getOptions(options, {});
     callSync(OP_READLINK, 'readlink', getValidatedPath(path, 'path'), undefined, 0, 0, 0, 0);
@@ -1337,6 +1341,8 @@ function realpathJS(p: string): string {
 }
 
 export function realpathSync(path: PathLike, options?: EncodingOption): string;
+export function realpathSync(path: PathLike, options: BufferEncodingOption): Buffer;
+export function realpathSync(path: PathLike, options?: EncodingOption | BufferEncodingOption): string | Buffer;
 export function realpathSync(path: any, options?: any): any {
     const opts = getOptions(options, {});
     const p = getValidatedPath(path, 'path');
@@ -1561,7 +1567,7 @@ export class FSWatcher extends EventEmitter {
     private _kmlPath: string = '';
     private _kmlEncoding: any = undefined;
 
-    _kmlStart(path: string, encoding: any): void {
+    _kmlStart(path: string, encoding: any, recursive: boolean, persistent: boolean): void {
         this._kmlPath = path;
         this._kmlEncoding = encoding;
         const onEvent = (isRename: number, unused: number): void => {
@@ -1573,7 +1579,7 @@ export class FSWatcher extends EventEmitter {
             }
             this.emit('change', isRename !== 0 ? 'rename' : 'change', encodeString(filename, this._kmlEncoding));
         };
-        this._kmlHandle = __kml_native.fsWatch(path, onEvent);
+        this._kmlHandle = __kml_native.fsWatch(path, (recursive ? 1 : 0) + (persistent ? 0 : 2), onEvent);
         liveWatchers.set(this._kmlHandle, onEvent);
     }
 
@@ -1585,8 +1591,15 @@ export class FSWatcher extends EventEmitter {
         process.nextTick(() => { this.emit('close'); });
     }
 
-    ref(): this { return this; }
-    unref(): this { return this; }
+    ref(): this {
+        if (this._kmlHandle >= 0) __kml_native.fsWatchRef(this._kmlHandle, 1);
+        return this;
+    }
+
+    unref(): this {
+        if (this._kmlHandle >= 0) __kml_native.fsWatchRef(this._kmlHandle, 0);
+        return this;
+    }
 }
 
 export interface WatchOptions {
@@ -1610,7 +1623,7 @@ export function watch(filename: any, options?: any, listener?: any): FSWatcher {
     if (opts.recursive !== undefined) validateBoolean(opts.recursive, 'options.recursive');
     const p = getValidatedPath(filename, 'filename');
     const watcher = new FSWatcher();
-    watcher._kmlStart(p, opts.encoding);
+    watcher._kmlStart(p, opts.encoding, opts.recursive === true, opts.persistent !== false);
     if (listener) watcher.addListener('change', listener);
     const signal: any = opts.signal;
     if (signal) {

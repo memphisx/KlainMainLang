@@ -288,6 +288,9 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 			// Real runtime operator dispatch on the NaN-boxed word
 			// (TDD-00076 A2): TypeScript allows every operator on `any`, and
 			// the checker rejects one on `unknown`.
+			if anyArithIsNumber(ex.Op, left.Ty, right.Ty) {
+				return e.emitAnyArithNumber(ex.Op, left, right)
+			}
 			return e.emitAnyBinary(ex.Op, left, right, ex.GetPos())
 		}
 	}
@@ -493,6 +496,13 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// object-reference model TDD-00127) when it has one, else the transient's own
 	// data pointer. Previously this emitted `icmp eq ptr <{ptr,i64} aggregate>`
 	// (invalid IR) — a known gap; a bare register compared directly.
+	// An instance of a class extending Array against an array: the same
+	// object when the array is its body.
+	if host, ok := e.arrayClassHost(left.Ty); ok && right.Ty.IsArray {
+		left = e.coerce(left, host)
+	} else if host, ok := e.arrayClassHost(right.Ty); ok && left.Ty.IsArray {
+		right = e.coerce(right, host)
+	}
 	if left.Ty.IsArray && right.Ty.IsArray {
 		var cmpOp string
 		switch ex.Op {
@@ -570,8 +580,8 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// Captured before coerce (below) overwrites right.Ty with left.Ty — needed
 	// to tell "Date + Date" apart from "Date + number"/"number + Date" for
 	// the Date-arithmetic rules right after.
-	leftIsDate := left.Ty.IsDate
-	rightIsDate := right.Ty.IsDate
+	leftIsDate := left.Ty.IsDate && !left.Ty.IsDynamic || e.isDateClass(left.Ty)
+	rightIsDate := right.Ty.IsDate && !right.Ty.IsDynamic || e.isDateClass(right.Ty)
 
 	// A Date operand is ToPrimitive'd as JS does: `+` takes its default hint,
 	// the date string, and concatenates; `-`, `*`, `/`, `%` and `**` take the
@@ -588,12 +598,39 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 			return e.emitStringBinary(ex.Op, left, right, ex.GetPos())
 		case "-", "*", "/", "%", "**", "<", ">", "<=", ">=":
 			if leftIsDate {
-				left = e.coerce(Value{Ref: left.Ref, Ty: TypeI64}, TypeF64)
+				left = e.emitDateNumber(left)
 			}
 			if rightIsDate {
-				right = e.coerce(Value{Ref: right.Ref, Ty: TypeI64}, TypeF64)
+				right = e.emitDateNumber(right)
+			}
+			if !left.Ty.Float {
+				left = e.coerce(left, TypeF64)
+			}
+			if !right.Ty.Float {
+				right = e.coerce(right, TypeF64)
 			}
 			leftIsDate, rightIsDate = false, false
+		case "==", "!=", "===", "!==":
+			if !(leftIsDate && rightIsDate) {
+				// A Date against a primitive: strictly unequal; loosely,
+				// ToPrimitive with the default hint, its date string.
+				if ex.Op == "===" || ex.Op == "!==" || left.Ty.IsNull || right.Ty.IsNull || left.Ty.IsUndefined || right.Ty.IsUndefined {
+					break
+				}
+				if left, err = e.emitConcatOperandString(ex.Left, left); err != nil {
+					return Value{}, err
+				}
+				if right, err = e.emitConcatOperandString(ex.Right, right); err != nil {
+					return Value{}, err
+				}
+				return e.emitStringBinary(map[string]string{"==": "===", "!=": "!=="}[ex.Op], left, right, ex.GetPos())
+			}
+			// Two Dates: the same object or not.
+			l, r := e.emitDateBodyOrNull(left), e.emitDateBodyOrNull(right)
+			pred := map[string]string{"==": "eq", "===": "eq", "!=": "ne", "!==": "ne"}[ex.Op]
+			res := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp %s ptr %s, %s", res, pred, l, r))
+			return Value{Ref: res, Ty: TypeBool}, nil
 		}
 	}
 
@@ -613,13 +650,6 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 			left = e.coerce(left, TypeF64)
 			right = e.coerce(right, TypeF64)
 		}
-	}
-
-	// A Date under equality compares time values in the i64 millisecond
-	// domain (a `number` operand is a float64, TDD-00123).
-	if leftIsDate || rightIsDate {
-		left = e.coerce(left, TypeI64)
-		right = e.coerce(right, TypeI64)
 	}
 
 	// -compat=js loose `==`/`!=` between two static operands of different storage
@@ -1325,7 +1355,7 @@ var typeofNamespaceStatics = map[string]map[string]bool{
 	"Object": {
 		"keys": true, "values": true, "entries": true, "assign": true,
 		"freeze": true, "isFrozen": true, "create": true, "fromEntries": true,
-		"getOwnPropertyNames": true, "getPrototypeOf": true, "setPrototypeOf": true,
+		"getOwnPropertyNames": true, "getOwnPropertySymbols": true, "getPrototypeOf": true, "setPrototypeOf": true,
 		"defineProperty": true, "defineProperties": true, "getOwnPropertyDescriptor": true,
 		"hasOwn": true, "is": true, "seal": true, "isSealed": true, "preventExtensions": true,
 	},
@@ -1438,6 +1468,20 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 					return Value{Ref: "true", Ty: TypeBool}, nil
 				}
 			}
+		}
+		// `delete name` (sloppy code only; strict code rejects it): a declared
+		// binding is not configurable, so nothing is deleted and the result
+		// is false; a name that resolves to no binding deletes nothing: true.
+		if id, ok := ex.Arg.(*ast.Identifier); ok {
+			if _, declared := e.lookup(id.Name); declared {
+				return Value{Ref: "false", Ty: TypeBool}, nil
+			}
+			if c := e.front(); c != nil {
+				if sym, _ := c.Binding().Resolve(id); sym != nil {
+					return Value{Ref: "false", Ty: TypeBool}, nil
+				}
+			}
+			return Value{Ref: "true", Ty: TypeBool}, nil
 		}
 		return Value{}, fmt.Errorf("%d:%d: 'delete' supports process.env.KEY, optional members and index-signature/dynamic-object keys only — a required field and an array element have static layouts", ex.GetPos().Line, ex.GetPos().Col)
 	}
@@ -1589,14 +1633,18 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 	case "-":
 		if arg.Ty.Float {
 			e.emitInstr(fmt.Sprintf("%s = fneg %s %s", reg, arg.Ty.IR, arg.Ref))
-		} else if arg.Ty.IsInteger() {
+		} else if numericIntRepr(arg.Ty) {
 			e.emitInstr(fmt.Sprintf("%s = sub %s 0, %s", reg, arg.Ty.IR, arg.Ref))
 		} else {
-			// Unary `-` does ToNumber(operand); a non-numeric operand (a string
-			// or object — IR "ptr", or an aggregate) has no numeric value, so
-			// strict rejects it cleanly rather than emitting `sub ptr 0, …`
-			// (invalid IR). BigInt/dynamic operands are handled above.
-			return Value{}, fmt.Errorf("%d:%d: unary '-' requires a number or bigint operand", ex.GetPos().Line, ex.GetPos().Col)
+			// Unary `-` does ToNumber(operand) first: a string, boolean or
+			// object operand converts as unary `+` does (`-"3"` is -3).
+			conv, err := e.emitUnaryPlus(arg, ex.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			conv = e.coerce(conv, TypeF64)
+			e.emitInstr(fmt.Sprintf("%s = fneg double %s", reg, conv.Ref))
+			return Value{Ref: reg, Ty: TypeF64}, nil
 		}
 		return Value{Ref: reg, Ty: arg.Ty}, nil
 	case "!":
@@ -1613,9 +1661,6 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 		// and the binary object-operator rejection); -compat=js boxes and runs
 		// the real ToNumber. BigInt/dynamic operands were handled above.
 		if arg.Ty.IsDynamic || (!arg.Ty.Float && !arg.Ty.IsInteger() && arg.Ty.IR != "i1") {
-			if !e.compatJS() && !arg.Ty.IsDynamic {
-				return Value{}, fmt.Errorf("%d:%d: unary '~' requires a number or bigint operand", ex.GetPos().Line, ex.GetPos().Col)
-			}
 			// The same ToNumber unary `+` runs (ToPrimitive for an object, the
 			// string form for an array — `~[5]` is -6), rather than a bare
 			// box→ToNumber that read every heap reference as NaN.
@@ -1645,6 +1690,9 @@ func (e *Emitter) emitUnaryPlus(arg Value, pos ast.Pos) (Value, error) {
 	nan := Value{Ref: "0x7FF8000000000000", Ty: TypeF64}
 	t := arg.Ty
 	switch {
+	case t.IsDate && !t.IsDynamic || e.isDateClass(t):
+		// ToPrimitive(number) is its time value: NaN for Invalid Date.
+		return e.emitDateNumber(arg), nil
 	case t.IsBigInt:
 		e.emitThrowTypeError("Cannot convert a BigInt value to a number")
 		e.emitLabel(e.freshLabel("dead")) // the caller goes on emitting
@@ -1760,8 +1808,11 @@ func (e *Emitter) emitUpdate(ex *ast.UpdateExpression) (Value, error) {
 	// as a box; postfix yields the *numeric* old value (`x = "5"; x++` → 5,
 	// then x is 6). The word is a NaN-box, so the raw `add i64 …, 1` below
 	// would corrupt it — an untyped `for (j = 0; …; j++)` under `-compat=js`
-	// never terminated (ADR-01061). A BigInt held in an `any` steps as a
-	// number here — a remaining gap (the box has no BigInt kind).
+	// never terminated (ADR-01061). A BigInt held in the box steps as a
+	// BigInt (`x = 1n; x--` is 0n).
+	if sym.Ty.IsDynamic && e.anyMayHoldBigInt() {
+		return e.emitAnyBigIntAwareUpdate(sym, oldReg, ex)
+	}
 	if sym.Ty.IsDynamic {
 		prim := e.emitAnyToPrimitive(oldReg, false)
 		oldNum := Value{Ref: e.emitAnyToNum(Value{Ref: prim, Ty: TypeAny}), Ty: TypeF64}
@@ -1845,8 +1896,39 @@ func (e *Emitter) emitTargetUpdate(ex *ast.UpdateExpression) (Value, error) {
 		arg = hoisted
 	}
 	var one ast.Expression
-	if e.inferExprType(arg).IsBigInt {
+	if at := e.inferExprType(arg); at.IsBigInt {
 		one = ast.NewBigIntLiteral("1", pos)
+	} else if isUnconstrainedDynamic(at) && e.anyMayHoldBigInt() {
+		// A box that may hold a BigInt steps by 1n when it does (`x.y--`
+		// on `{y: 1n}` is 0n): read it once, pick the step, and yield the
+		// numeric old value for a postfix.
+		if ex.Prefix {
+			hoisted, err := e.hoistUpdateReceiver(arg)
+			if err != nil {
+				return Value{}, err
+			}
+			arg = hoisted
+		}
+		cur, err := e.emitExpr(arg)
+		if err != nil {
+			return Value{}, err
+		}
+		nw, old, err := e.emitAnyUpdateStep(cur.Ref, ex.Op)
+		if err != nil {
+			return Value{}, err
+		}
+		name := fmt.Sprintf("__kml_upd_new_%s", e.freshReg()[1:])
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nw, slot))
+		e.define(name, Symbol{Ptr: slot, Ty: TypeAny})
+		if _, err := e.emitAssign(ast.NewAssignmentExpression("=", arg, ast.NewIdentifier(name, pos), pos)); err != nil {
+			return Value{}, err
+		}
+		if ex.Prefix {
+			return Value{Ref: nw, Ty: TypeAny}, nil
+		}
+		return Value{Ref: old, Ty: TypeAny}, nil
 	} else {
 		one = ast.NewNumberLiteral("1", pos)
 	}
@@ -2129,7 +2211,10 @@ func (e *Emitter) emitShortCircuit(ex *ast.BinaryExpression) (Value, error) {
 	// `a || b` yields `a` (or `b`) — not a bool (TDD-00075), in either lane:
 	// the shared type, or the union shortCircuitValueType gives. Operands it
 	// has no single-slot type for fall through to the bool form below.
-	if ty, ok := shortCircuitValueType(e.inferExprType(ex.Left), e.inferExprType(ex.Right)); ok {
+	if ty, ok := andAbsentScalar(ex.Op, e.inferExprType(ex.Left), e.inferExprType(ex.Right)); ok {
+		return e.emitAndAbsentScalar(ex, ty)
+	}
+	if ty, ok := shortCircuitValueType(ex.Op, e.inferExprType(ex.Left), e.inferExprType(ex.Right)); ok {
 		return e.emitShortCircuitValue(ex, ty)
 	}
 	resPtr := e.freshReg()
@@ -2181,7 +2266,7 @@ func sameShortCircuitType(a, b Type) bool {
 	if len(a.IR) > 0 && a.IR[0] == '{' { // an aggregate struct IR ({ptr,i64}, {i1,T}, …)
 		return false
 	}
-	if a.IsArray || a.IsTuple || a.IsDynamic || isNullableScalar(a) {
+	if a.IsArray || a.IsTuple || a.IsDynamic || isNullableScalar(a) || isNullableScalar(b) {
 		return false
 	}
 	return a.IsBigInt == b.IsBigInt && isStringTy(a) == isStringTy(b) &&
@@ -2197,8 +2282,17 @@ func sameShortCircuitType(a, b Type) bool {
 // bool. Shared by emission and inferExprType so the two cannot disagree — a
 // nested `(a && b && !c) && d` once inferred `string` for a left operand the
 // emitter had produced as an i1, storing that i1 through a `ptr` slot.
-func shortCircuitValueType(lt, rt Type) (Type, bool) {
+func shortCircuitValueType(op string, lt, rt Type) (Type, bool) {
 	if sameShortCircuitType(lt, rt) {
+		// A pointer's absence is falsy: `a || b` yields a present `a` or
+		// `b`, so it is absent only when b can be; `a && b` when either can.
+		if lt.IR == "ptr" {
+			from := rt
+			if op == "&&" && (lt.Nullable || lt.IsNull || lt.IsUndefined) && !rt.Nullable {
+				from = lt
+			}
+			lt.Nullable, lt.IsUndefined, lt.IsNull = from.Nullable, from.IsUndefined, from.IsNull && lt.IsNull
+		}
 		return lt, true
 	}
 	// Two arrays (or an array and null): the array, its slot the chosen
@@ -2208,6 +2302,9 @@ func shortCircuitValueType(lt, rt Type) (Type, bool) {
 	}
 	if lt.IR == "" || lt.IR == "void" || rt.IR == "" || rt.IR == "void" {
 		return Type{}, false
+	}
+	if ty, ok := nullableScalarShortCircuit(op, lt, rt); ok {
+		return ty, true
 	}
 	if lt.IsArray || rt.IsArray || isNullableScalar(lt) || isNullableScalar(rt) {
 		return TypeAny, true // no shared slot: both boxed
@@ -2273,7 +2370,7 @@ func (e *Emitter) emitShortCircuitValue(ex *ast.BinaryExpression, ty Type) (Valu
 		return e.emitShortCircuitArray(ex, ty)
 	}
 	resPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, ty.IR, ty.Align()))
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, storageIR(ty), storageAlign(ty)))
 
 	left, err := e.emitExpr(ex.Left)
 	if err != nil {
@@ -2285,7 +2382,7 @@ func (e *Emitter) emitShortCircuitValue(ex *ast.BinaryExpression, ty Type) (Valu
 		return Value{}, err
 	}
 	// Result defaults to the left value; overwritten only when the right runs.
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, left.Ref, resPtr, ty.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", storageIR(ty), left.Ref, resPtr, storageAlign(ty)))
 
 	rhsL := e.freshLabel("scv.rhs")
 	mergeL := e.freshLabel("scv.merge")
@@ -2304,12 +2401,12 @@ func (e *Emitter) emitShortCircuitValue(ex *ast.BinaryExpression, ty Type) (Valu
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, right.Ref, resPtr, ty.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", storageIR(ty), right.Ref, resPtr, storageAlign(ty)))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, ty.IR, resPtr, ty.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, storageIR(ty), resPtr, storageAlign(ty)))
 	return Value{Ref: result, Ty: ty}, nil
 }
 
@@ -2366,6 +2463,15 @@ func (e *Emitter) coerceShortCircuitOperand(v Value, ty Type, pos ast.Pos) (Valu
 		// still renders and reads as itself.
 		return e.emitBoxValue(v)
 	}
+	if ty.IsDynamic && v.Ty.NullAndUndef {
+		// A three-state operand holds null as its own marker, which the
+		// box tells apart from undefined and from a present value.
+		b, err := e.emitBoxValue(v)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.coerce(b, ty), nil
+	}
 	if !ty.IsDynamic || v.Ty.IR != "ptr" || !v.Ty.Nullable || v.Ty.IsNull {
 		return e.coerce(v, ty), nil
 	}
@@ -2389,10 +2495,6 @@ func (e *Emitter) coerceShortCircuitOperand(v Value, ty Type, pos ast.Pos) (Valu
 // ptr-typed branch (string/object/array `| null`) keeps its existing
 // null-pointer representation, and two non-null branches unify as before.
 func ternaryNullableScalarType(a, b Type) (Type, bool) {
-	nonPtrScalar := func(t Type) bool {
-		return !t.IsNull && !t.IsDynamic && !t.IsArray && !t.IsObject &&
-			t.IR != "ptr" && t.IR != "void" && !t.Nullable
-	}
 	if a.IsNull && nonPtrScalar(b) {
 		nt := b
 		nt.Nullable, nt.IsUndefined = true, a.IsUndefined
@@ -2432,26 +2534,6 @@ func ternaryNullableScalarType(a, b Type) (Type, bool) {
 	return Type{}, false
 }
 
-// ternaryTypeName is a short human label for a branch type, used only in the
-// incompatible-ternary diagnostic.
-func ternaryTypeName(t Type) string {
-	switch {
-	case isStringTy(t):
-		return "string"
-	case t.IsBigInt:
-		return "bigint"
-	case t.Float:
-		return "number"
-	case t.IR == "i1":
-		return "boolean"
-	case t.IsObject:
-		return "object"
-	case t.IR == "ptr":
-		return "pointer"
-	}
-	return t.IR
-}
-
 func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) {
 	// A test that narrows a union local (`"k" in x ? x.k : x.j`): each
 	// branch in its narrowed scope.
@@ -2466,6 +2548,11 @@ func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) 
 		return e.emitConditionalNullableScalar(ex, nty)
 	}
 	ty := e.inferExprType(ex.Consequent)
+	// A string against another reference (`c ? "a" : /a/`, `c ? "a" :
+	// [1]`) is a union no single pointer slot holds: both are boxed.
+	if stringVsReference(ty, e.inferExprType(ex.Alternate)) || stringVsReference(e.inferExprType(ex.Alternate), ty) {
+		return e.emitConditionalAny(ex, nil)
+	}
 	if aty, ok := e.conditionalArrayType(ex); ok {
 		return e.emitConditionalArray(ex, aty)
 	}
@@ -2474,8 +2561,10 @@ func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) 
 	if ty.IsDynamic || e.inferExprType(ex.Alternate).IsDynamic {
 		return e.emitConditionalAny(ex, nil)
 	}
-	if ty.IsArray {
-		return Value{}, fmt.Errorf("%d:%d: ternary branches have incompatible types (an array vs a non-array)", ex.GetPos().Line, ex.GetPos().Col)
+	if ternaryMixed(ty, e.inferExprType(ex.Alternate)) {
+		// Branches no one slot holds (an array and a scalar, an object and a
+		// number): the union is the NaN-boxed value (TDD-00230 P3.3).
+		return e.emitConditionalAny(ex, nil)
 	}
 	// A ternary whose branches mix a string with a non-string (or a pointer with
 	// a scalar) has a genuine union result type this typed-subset compiler can't
@@ -2518,7 +2607,7 @@ func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) 
 	if ty.IsCaught || altTy.IsCaught {
 		ty = TypeCaught
 	} else if ptrLike(ty) != ptrLike(altTy) {
-		return Value{}, fmt.Errorf("%d:%d: ternary branches have incompatible types (%s vs %s) — a union-typed ternary (e.g. number | object) is not supported; narrow first, assign each branch separately, or convert both to one type", ex.GetPos().Line, ex.GetPos().Col, ternaryTypeName(ty), ternaryTypeName(altTy))
+		return e.emitConditionalAny(ex, nil) // ternaryMixed's other half
 	}
 
 	// Two numbers of different representations (a typed array's i32
@@ -2767,6 +2856,18 @@ func (e *Emitter) emitNullCoalesceBox(left Value, rightExpr ast.Expression, resT
 // ternaryUnion reports the union result type of a ternary whose branches are
 // scalars of different JS kinds (see nullCoalesceUnion, whose kind rule it
 // shares). Shared by emission and inferExprType so the two cannot disagree.
+// stringVsReference reports a plain string a and a non-string reference b
+// (an object, an array, a host value), neither nullable nor dynamic.
+func stringVsReference(a, b Type) bool {
+	plain := func(t Type) bool {
+		return !t.Nullable && !t.IsNull && !t.IsUndefined && !t.IsDynamic && !t.IsCaught && !t.IsNever
+	}
+	if !plain(a) || !plain(b) || !isStringTy(a) || hasHandleFlag(a) {
+		return false
+	}
+	return b.IsArray || b.IsFlatArray || b.IR == "ptr" && (!isStringTy(b) || hasHandleFlag(b))
+}
+
 func ternaryUnion(a, b Type) (Type, bool) {
 	// An UncheckedIndex branch (`a[i]`, a spawnSync stdout) is plain `T` to
 	// tsc; its run-time absence rides the branch value into the box.
@@ -2919,6 +3020,12 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 		nonNull := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", nonNull, left.Ref))
 		return e.emitNullCoalesceUnion(nonNull, Value{Ref: left.Ref, Ty: left.Ty.withoutNullable()}, ex.Right, uTy)
+	}
+	if nullCoalesceMixed(left.Ty, e.inferExprType(ex.Right)) {
+		// A reference left with a scalar right (`err ?? 0`): the boxed union.
+		nonNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", nonNull, left.Ref))
+		return e.emitNullCoalesceUnion(nonNull, Value{Ref: left.Ref, Ty: left.Ty.withoutNullable()}, ex.Right, TypeAny)
 	}
 
 	resPtr := e.freshReg()
@@ -3331,4 +3438,229 @@ func reprMismatch(a, b Type) bool {
 		return false
 	}
 	return (a.IR == "ptr") != (b.IR == "ptr")
+}
+
+// ternaryMixed reports whether a conditional's branches have no common slot
+// (an array and a non-array, a reference and a scalar), once the nullable,
+// array, dynamic and scalar-union forms have been ruled out: its value is
+// the boxed union.
+func ternaryMixed(cons, alt Type) bool {
+	if cons.IsCaught || alt.IsCaught || cons.IsNull || alt.IsNull || cons.IsUndefined && !cons.Nullable || alt.IsUndefined && !alt.Nullable {
+		return false
+	}
+	if cons.IsArray != alt.IsArray {
+		return true
+	}
+	ptrLike := func(t Type) bool { return t.IR == "ptr" || t.IsObject || t.IsArray || isStringTy(t) }
+	return ptrLike(cons) != ptrLike(alt)
+}
+
+// nullCoalesceMixed reports whether `left ?? right` with a reference left
+// operand has a right operand no pointer slot holds (a number, a boolean, a
+// bigint): its value is the boxed union.
+func nullCoalesceMixed(left, right Type) bool {
+	if left.IR != "ptr" || left.IsArray || left.IsNull || isStringTy(left.withoutNullable()) {
+		return false // a string left takes nullCoalesceUnion
+	}
+	return !right.IsNull && !right.IsUndefined && !right.IsDynamic && right.IR != "" && right.IR != "void" &&
+		right.IR != "ptr" && !right.IsArray
+}
+
+// andAbsentScalar is the type of `a && b` where a is an object that may be
+// absent (an object is truthy whenever present) and b a scalar: b's value,
+// or a's null or undefined — b's type with a's absence (`err && ok` with
+// `err: Error | null | undefined` is `boolean | null | undefined`).
+func andAbsentScalar(op string, lt, rt Type) (Type, bool) {
+	if op != "&&" || lt.IR != "ptr" || lt.IsArray || lt.IsDynamic || isStringTy(lt.withoutNullable()) ||
+		!(lt.Nullable || lt.NullAndUndef) || lt.IsNull && !lt.Nullable {
+		return Type{}, false
+	}
+	if !lt.IsObject && !lt.IsClass && !lt.IsFunc && !lt.IsError && !lt.IsMap && !lt.IsSet && !lt.IsPromise {
+		return Type{}, false
+	}
+	if !nonPtrScalar(rt) || rt.IsDynamic || isNullableScalar(rt) || rt.IR == "void" || rt.IR == "" {
+		return Type{}, false
+	}
+	switch {
+	case lt.NullAndUndef && threeStateEligible(rt):
+		return withNullAndUndef(rt), true
+	case lt.NullAndUndef:
+		return Type{}, false
+	case lt.IsUndefined:
+		r := undefinedableElem(rt)
+		r.IsUndefined = true
+		return r, true
+	default:
+		r := rt
+		r.Nullable = true
+		return r, true
+	}
+}
+
+// emitAndAbsentScalar emits `a && b` of andAbsentScalar's shape: b when a
+// is present, else a's null or undefined.
+func (e *Emitter) emitAndAbsentScalar(ex *ast.BinaryExpression, ty Type) (Value, error) {
+	slotIR := storageIR(ty)
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, slotIR))
+	left, err := e.emitExpr(ex.Left)
+	if err != nil {
+		return Value{}, err
+	}
+	present := e.toBool(left)
+	rhsL, absL, mergeL := e.freshLabel("andabs.rhs"), e.freshLabel("andabs.absent"), e.freshLabel("andabs.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present.Ref, rhsL, absL))
+	e.emitLabel(absL)
+	absent := func(undef bool) (Value, error) {
+		v, err := e.emitExpr(ast.NewNullLiteral(undef, ex.GetPos()))
+		if err != nil {
+			return Value{}, err
+		}
+		return e.coerce(v, ty), nil
+	}
+	var av Value
+	if ty.NullAndUndef {
+		nv, err := absent(false)
+		if err != nil {
+			return Value{}, err
+		}
+		uv, err := absent(true)
+		if err != nil {
+			return Value{}, err
+		}
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", isNull, left.Ref, e.nullRef()))
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s %s", r, isNull, slotIR, nv.Ref, slotIR, uv.Ref))
+		av = Value{Ref: r, Ty: ty}
+	} else if av, err = absent(ty.IsUndefined); err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", slotIR, av.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(rhsL)
+	right, err := e.emitExpr(ex.Right)
+	if err != nil {
+		return Value{}, err
+	}
+	base := ty
+	base.Nullable, base.IsUndefined, base.NullAndUndef = false, false, false
+	rv := e.coerce(e.coerce(right, base), ty)
+	if !e.blockDone {
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", slotIR, rv.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	}
+	e.emitLabel(mergeL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", out, slotIR, slot))
+	return Value{Ref: out, Ty: ty}, nil
+}
+
+// nullableScalarShortCircuit is `a && b` / `a || b` over one scalar kind
+// where an operand may be absent: one nullable slot of that kind. `&&`
+// yields a falsy (possibly absent) a or b; `||` a truthy, so present, a or
+// b. Operands absent in different ways (null against undefined) are left
+// to the box.
+func nullableScalarShortCircuit(op string, lt, rt Type) (Type, bool) {
+	if !isNullableScalar(lt) && !isNullableScalar(rt) {
+		return Type{}, false
+	}
+	lb, rb := lt.withoutNullable(), rt.withoutNullable()
+	if lb.IsDynamic || rb.IsDynamic || !nonPtrScalar(lb) || !nonPtrScalar(rb) || lb.IsBigInt || rb.IsBigInt ||
+		reprKey(lb) != reprKey(rb) {
+		return Type{}, false
+	}
+	switch {
+	case op == "||" && !isNullableScalar(rt):
+		return rb, true
+	case op == "||":
+		return rt, true
+	case isNullableScalar(lt) && isNullableScalar(rt):
+		if reprKey(lt) != reprKey(rt) {
+			return Type{}, false
+		}
+		return lt, true
+	case isNullableScalar(lt):
+		return lt, true
+	default:
+		return rt, true
+	}
+}
+
+// numericIntRepr reports a plain integer number representation (`i64`, a
+// sized integer), not a boolean, a pointer or an aggregate.
+func numericIntRepr(t Type) bool {
+	return !t.Float && !t.IsDynamic && t.IR != "i1" && len(t.IR) > 1 && t.IR[0] == 'i' && t.IR[1] >= '0' && t.IR[1] <= '9'
+}
+
+// emitAnyBigIntAwareUpdate is `++`/`--` on an `any` binding that may hold
+// a BigInt (emitAnyUpdateStep); the value is a box.
+func (e *Emitter) emitAnyBigIntAwareUpdate(sym Symbol, oldReg string, ex *ast.UpdateExpression) (Value, error) {
+	nw, old, err := e.emitAnyUpdateStep(oldReg, ex.Op)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nw, sym.Ptr))
+	if ex.Prefix {
+		return Value{Ref: nw, Ty: TypeAny}, nil
+	}
+	return Value{Ref: old, Ty: TypeAny}, nil
+}
+
+// emitAnyUpdateStep steps the box cur as `++`/`--` (op) does, giving its
+// new value and its numeric old value, both boxes: a BigInt (ToPrimitive)
+// steps by 1n, anything else is ToNumber'd and steps by 1.
+func (e *Emitter) emitAnyUpdateStep(cur, op string) (nw, old string, err error) {
+	prim := e.emitAnyToPrimitive(cur, false)
+	e.ensureAnyIsBigInt()
+	isBig, cond := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_is_bigint(i64 %s)", isBig, prim))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", cond, isBig))
+	newSlot, oldSlot := e.freshReg(), e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", newSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", oldSlot))
+	bigL, numL, mergeL := e.freshLabel("updstep.big"), e.freshLabel("updstep.num"), e.freshLabel("updstep.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cond, bigL, numL))
+	e.emitLabel(bigL)
+	e.ensureBigInt()
+	one := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 1)", one))
+	oneBox, err := e.emitBoxValue(Value{Ref: one, Ty: BigIntType()})
+	if err != nil {
+		return "", "", err
+	}
+	bop := "+"
+	if op == "--" {
+		bop = "-"
+	}
+	fn := e.ensureAnyBigIntOp(bop)
+	bigNew := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s(i64 %s, i64 %s)", bigNew, fn, prim, oneBox.Ref))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bigNew, newSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", prim, oldSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(numL)
+	oldNum := e.emitAnyToNum(Value{Ref: prim, Ty: TypeAny})
+	n := e.freshReg()
+	if op == "++" {
+		e.emitInstr(fmt.Sprintf("%s = fadd double %s, 1.0", n, oldNum))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = fsub double %s, 1.0", n, oldNum))
+	}
+	oldBox, err := e.emitBoxValue(Value{Ref: oldNum, Ty: TypeF64})
+	if err != nil {
+		return "", "", err
+	}
+	newBox, err := e.emitBoxValue(Value{Ref: n, Ty: TypeF64})
+	if err != nil {
+		return "", "", err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newBox.Ref, newSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", oldBox.Ref, oldSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(mergeL)
+	nw, old = e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", nw, newSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", old, oldSlot))
+	return nw, old, nil
 }

@@ -86,7 +86,14 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		if b, ok := e.builtinRef(ex); ok {
 			return e.emitBuiltinValue(b) // `const f = Math.floor`
 		}
-		return e.emitMember(ex)
+		v, err := e.emitMember(ex)
+		if err == nil && e.checkerPresentRef(ex, v.Ty) {
+			v.Ty = v.Ty.withoutNullable() // flow proves it present (inferExprType)
+		}
+		if err == nil && !v.Ty.IsDynamic && !isNullableScalar(v.Ty) && e.builtinCount(ex) {
+			v = e.countToNumber(v) // a number, as every JS count is (inferExprType)
+		}
+		return v, err
 	case *ast.SpreadElement:
 		return Value{}, fmt.Errorf("%d:%d: a spread (...) is only supported inside an array literal or as a single array filling a function's rest parameter (e.g. f(...arr)) — not here", ex.GetPos().Line, ex.GetPos().Col)
 	case *ast.ArrayLiteral:
@@ -187,19 +194,16 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 	case *ast.ThisExpression:
 		return e.emitThisExpression(ex.GetPos())
 	case *ast.NewExpression:
+		e.noteWebviewNew(ex)
 		return e.emitNewExpression(ex)
 	case *ast.NewArrayBufferExpression:
 		return e.emitNewArrayBufferExpression(ex)
-	case *ast.NewChannelExpression:
-		return e.emitNewChannelExpression(ex)
 	case *ast.NewTypedArrayExpression:
 		return e.emitNewTypedArrayAggregate(ex)
 	case *ast.ImportCallExpression:
 		return e.emitImportCall(ex)
 	case *ast.NewRegExpExpression:
 		return e.emitNewRegExpExpression(ex)
-	case *ast.NewWebviewExpression:
-		return e.emitNewWebview(ex)
 	case *ast.NewRequestExpression:
 		return e.emitNewRequestExpression(ex)
 	case *ast.NewXMLHttpRequestExpression:
@@ -309,6 +313,24 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		return e.emitExpr(call)
 	}
 	sym, ok := e.lookup(id.Name)
+	if ok && sym.NotDefined {
+		e.ensureExceptionHelpers()
+		errObj := e.buildErrorObj(errorKindIDs["ReferenceError"], e.internString(id.Name+" is not defined"), e.internString("ReferenceError"))
+		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+		e.emitTerminator("unreachable")
+		e.emitLabel(e.freshLabel("undef.dead"))
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+	}
+	if ok && sym.TDZ {
+		// A parameter read by an earlier parameter's default (`(x = y, y)`):
+		// still in its dead zone.
+		e.ensureExceptionHelpers()
+		errObj := e.buildErrorObj(errorKindIDs["ReferenceError"], e.internString("Cannot access '"+id.Name+"' before initialization"), e.internString("ReferenceError"))
+		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+		e.emitTerminator("unreachable")
+		e.emitLabel(e.freshLabel("tdz.dead"))
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+	}
 	if !ok {
 		// A bare reference to a sibling namespace member from inside a
 		// member function body (TDD-00148 Stage 4) — retried under the
@@ -343,7 +365,11 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// funcref wrapper would emit a return-typeless function.
 		if info, found := e.lookupGenerator(id.Name); found {
 			e.shadowReference(id, true)
-			return e.emitGeneratorCtorClosure(info, id.Name, id.GetPos())
+			shown := id.Name
+			if n, ok := e.genShownNames[id.Name]; ok {
+				shown = n
+			}
+			return e.emitGeneratorCtorClosure(info, shown, id.GetPos())
 		}
 		if mangled, sig, found := e.resolveFuncRef(id.Name); found {
 			e.shadowReference(id, true)
@@ -356,7 +382,7 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// A class in value position (`assert.throws(fn, MyError)`): a
 		// constructor reference (emit_classref.go).
 		if _, isClass := e.classes[id.Name]; isClass {
-			e.shadowReference(id, false)
+			e.shadowReference(id, true) // the class's declaration binds it
 			if e.classRecordSites[id] {
 				// A class expression's evaluation makes its record, then
 				// initializes its statics.
@@ -421,6 +447,23 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 				return e.emitExpr(obj)
 			}
 		}
+		// A builtin function lowered to a library function (`const st =
+		// setTimeout`): that function's value.
+		if m, ok := e.loweredGlobalFn(id); ok {
+			e.shadowReference(id, false)
+			return e.emitExpr(ast.NewIdentifier(m, id.GetPos()))
+		}
+		// A parameter read before it is bound (`(x = y, y) => …`): JavaScript's
+		// dead-zone ReferenceError when the default is evaluated.
+		if e.unboundParam(id) {
+			e.shadowReference(id, true)
+			e.ensureExceptionHelpers()
+			errObj := e.buildErrorObj(errorKindIDs["ReferenceError"], e.internString("Cannot access '"+id.Name+"' before initialization"), e.internString("ReferenceError"))
+			e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+			e.emitTerminator("unreachable")
+			e.emitLabel(e.freshLabel("tdz.dead"))
+			return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+		}
 		e.shadowReference(id, false)
 		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", id.GetPos().Line, id.GetPos().Col, id.Name)
 	}
@@ -483,7 +526,7 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// A nullable scalar is stored as { i1 present, T value } and reads
 		// as that aggregate, like any nullable value; a read flow analysis
 		// proved present is the bare payload.
-		if sym.NarrowedNonNull {
+		if sym.NarrowedNonNull || e.checkerPresent(id, sym.Ty) {
 			payload := e.loadNullableScalarPayload(sym.Ptr, sym.Ty)
 			return Value{Ref: payload, Ty: sym.Ty.withoutNullable()}, nil
 		}
@@ -491,13 +534,27 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 	}
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
+	if isNullableScalar(sym.Ty) && e.checkerPresent(id, sym.Ty) {
+		// A `T | undefined` parameter read where flow proves it present.
+		return e.coerce(Value{Ref: reg, Ty: sym.Ty}, sym.Ty.withoutNullable()), nil
+	}
+	if info, ok := e.checkerHostSubclass(id, sym.Ty); ok {
+		// A Map, Set or RegExp the checker narrows to a class extending it
+		// (TDD-00247): the instance starts at the word before its body.
+		inst := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", inst, reg))
+		return Value{Ref: inst, Ty: info.Ty}, nil
+	}
 	if t, ok := e.checkerNarrowed(id, sym.Ty); ok {
 		// An `any` the checker narrows to a primitive reads unboxed; a box
 		// narrowed to an array (or Buffer) member unboxes to its header.
-		if sym.Ty.IsDynamic && (t.IsArray || isNullableScalar(t)) {
+		if sym.Ty.IsDynamic && (t.IsArray || isNullableScalar(t) || t.IsClass || isHostHandle(t) || t.IsReadableStream || t.IsPromise) {
 			return e.emitUnboxBoxToType(reg, t), nil
 		}
 		return e.coerce(Value{Ref: reg, Ty: sym.Ty}, t), nil
+	}
+	if e.checkerPresentRef(id, sym.Ty) || e.assignedString(id, sym.Ty) {
+		return Value{Ref: reg, Ty: sym.Ty.withoutNullable()}, nil
 	}
 	return Value{Ref: reg, Ty: sym.Ty}, nil
 }

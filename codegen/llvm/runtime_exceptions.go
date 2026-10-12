@@ -70,7 +70,8 @@ declare i64 @__kml_get_thrown_pay()
 declare void @__kml_throw(ptr)
 declare void @__kml_throw_any(i8, i64)
 declare i8 @__kml_caught_tag(i8, i64)
-declare ptr @__kml_caught_unc_msg(i8, i64)`)
+declare ptr @__kml_caught_unc_msg(i8, i64)
+declare zeroext i1 @__kml_process_uncaught_guarded(i8, i64, i1)`)
 }
 
 // setjmpCall returns the IR call that saves a catch frame into buf. On

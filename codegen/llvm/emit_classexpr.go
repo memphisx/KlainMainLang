@@ -209,6 +209,19 @@ func (e *Emitter) markClassReeval(site ast.Node, cd *ast.ClassDeclaration) {
 	e.classReeval[site] = cd
 }
 
+// reevaluatedClass reports cd as a class hoisted out of a block whose
+// declaration site initializes its statics (markClassReeval): running them
+// before the program's first statement too would evaluate its initializers
+// outside the code around the declaration (a `try` it sits in).
+func (e *Emitter) reevaluatedClass(cd *ast.ClassDeclaration) bool {
+	for _, c := range e.classReeval {
+		if c == cd {
+			return true
+		}
+	}
+	return false
+}
+
 // emitClassReeval re-runs the static initialization of the class site
 // evaluates, if it is a hoisted class with any.
 func (e *Emitter) emitClassReeval(site ast.Node) {

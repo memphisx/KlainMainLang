@@ -26,10 +26,8 @@
           {
             "feature": "`setTimeout(fn, ms)` / `clearTimeout(id)`",
             "status": "implemented",
-            "caveats": [
-              "The handle is the timer's numeric id, not Node's `Timeout` object: `typeof` reads `\"number\"`, and `ref`/`unref`/`hasRef`/`refresh`/`close` work only on a typed handle, not through `any`"
-            ],
             "notes": [
+              "The handle is Node's `Timeout` object (its `lib/internal/timers.js` ported to TypeScript, [ADR-01411](../adr/ADR-01411.md)): `ref`/`unref`/`hasRef`/`refresh`/`close`, `+timeout` as its id, which `clearTimeout` also takes",
               "Bare global functions, matching real JS (not a namespace)",
               "The delay is clamped to `[1, 2^31-1]` ms as Node does — an omitted, `0`, negative or oversized delay is 1 ms, so a chain of zero-delay timers advances one millisecond per link (`setInterval` too; `setImmediate` is not clamped) ([ADR-01071](../adr/ADR-01071.md))",
               "See [ADR-00031](../adr/ADR-00031.md)"
@@ -47,12 +45,8 @@
           {
             "feature": "`setImmediate(fn)` / `clearImmediate(id)`",
             "status": "implemented",
-            "caveats": [
-              "Real Node guarantees `setImmediate` fires before a same-tick `setTimeout(fn, 0)` when scheduled from inside an I/O callback, because its event loop has distinct phases (check vs. timers); this compiler's `__kml_timer_drain` is a single flat fire-time-ordered queue with no phase concept, so the two are genuinely indistinguishable here (both fire at \"now\")",
-              "The handle is the timer's numeric id, not Node's `Immediate` object: `typeof` reads `\"number\"`; `ref`/`unref`/`hasRef` work only on a typed handle, not through `any`"
-            ],
             "notes": [
-              "Reuses the exact same timer queue as delay-0 `setTimeout` (`clearImmediate` is `clearTimeout` under another name)",
+              "Runs in the loop's check phase, after I/O polling, as in Node: scheduled from an I/O callback it runs before a 0 ms `setTimeout`; the handle is Node's `Immediate` object ([ADR-01411](../adr/ADR-01411.md))",
               "See [ADR-00092](../adr/ADR-00092.md)"
             ]
           },

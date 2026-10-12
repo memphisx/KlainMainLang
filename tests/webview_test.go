@@ -143,7 +143,7 @@ func TestE2EWebviewBindingsNonFunctionRejected(t *testing.T) {
 import { Webview } from 'klain:webview'
 const w = new Webview({ title: "T", bindings: { x: 5 } })
 `}, "main.ts")
-	if err == nil || !strings.Contains(err.Error(), "must be a function") {
+	if err == nil || !strings.Contains(err.Error(), "not assignable") {
 		t.Fatalf("expected a non-function bindings rejection, got: %v", err)
 	}
 }
@@ -263,21 +263,24 @@ console.log("run returned")
 	runWebviewWindow(t, src, "sum=5", "px=4", "run returned")
 }
 
-// TestE2EWebviewSecondWindowRejected asserts the one-window-per-process V1
-// constraint is a clean compile-time rejection.
+// TestE2EWebviewSecondWindowRejected asserts the one-window-per-process
+// constraint: a second construction throws. It opens a window, so it is gated
+// like the windowed smoke runs.
 func TestE2EWebviewSecondWindowRejected(t *testing.T) {
+	if os.Getenv("KML_WEBVIEW_SMOKE") != "1" {
+		t.Skip("windowed smoke test — set KML_WEBVIEW_SMOKE=1 to run")
+	}
 	src := `
 import { Webview } from 'klain:webview'
 const a = new Webview({ title: "A" })
-const b = new Webview({ title: "B" })
+try {
+  new Webview({ title: "B" })
+} catch (e) {
+  console.log((e as Error).message)
+}
+a.destroy()
 `
-	err := resolveAndEmitMultiFile(t, map[string]string{"main.ts": src}, "main.ts")
-	if err == nil {
-		t.Fatal("expected a rejection for a second Webview construction")
-	}
-	if !strings.Contains(err.Error(), "one Webview window per process") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	runWebviewWindow(t, src, "one Webview window per process")
 }
 
 func TestE2EWebviewSmoke(t *testing.T) {
@@ -325,6 +328,62 @@ w.run()
 console.log("run returned after " + ticks + " ticks")
 `
 	runWebviewWindow(t, src, "tick 3", "run returned after 3 ticks")
+}
+
+// TestE2EWebviewLoopEmbedSmoke: the runtime's loop runs inside the GUI's
+// main loop (TDD-00244 Stage 7), so a pool-backed fs.promises read and a
+// chain of timers settle during run(), not after it. Gated like the
+// roundtrip smoke above.
+func TestE2EWebviewLoopEmbedSmoke(t *testing.T) {
+	if os.Getenv("KML_WEBVIEW_SMOKE") != "1" {
+		t.Skip("windowed smoke test — set KML_WEBVIEW_SMOKE=1 to run")
+	}
+	src := `
+import { Webview } from 'klain:webview'
+import fs from 'fs'
+const w = new Webview({ title: "Loop", width: 320, height: 200 })
+const guard = setTimeout(() => { console.log("gave up"); w.terminate() }, 5000)
+fs.promises.readFile("/etc/hosts", "utf8").then((s) => {
+  console.log("read " + (s.length > 0))
+  setTimeout(() => setTimeout(() => {
+    console.log("timers chained")
+    clearTimeout(guard)
+    w.terminate()
+  }, 5), 5)
+})
+w.html("<!doctype html><html><body>loop</body></html>")
+w.run()
+console.log("run returned")
+`
+	runWebviewWindow(t, src, "read true\ntimers chained\nrun returned")
+}
+
+// TestE2EWebviewServerSmoke: with the loop inside the GUI's main loop, an
+// HTTP server and a fetch to it run under run() without a Worker. Gated like
+// the roundtrip smoke above.
+func TestE2EWebviewServerSmoke(t *testing.T) {
+	if os.Getenv("KML_WEBVIEW_SMOKE") != "1" {
+		t.Skip("windowed smoke test — set KML_WEBVIEW_SMOKE=1 to run")
+	}
+	src := `
+import { Webview } from 'klain:webview'
+import http from 'http'
+const w = new Webview({ title: "Server", width: 320, height: 200 })
+const guard = setTimeout(() => { console.log("gave up"); w.terminate() }, 5000)
+const server = http.createServer((req, res) => { res.end("hello from server") })
+server.listen(0, async () => {
+  const port = (server.address() as { port: number }).port
+  const r = await fetch("http://127.0.0.1:" + port + "/")
+  console.log("fetched: " + (await r.text()))
+  server.close()
+  clearTimeout(guard)
+  w.terminate()
+})
+w.html("<!doctype html><html><body>server</body></html>")
+w.run()
+console.log("run returned")
+`
+	runWebviewWindow(t, src, "fetched: hello from server\nrun returned")
 }
 
 // TestE2EWebviewAsyncBindSmoke is the Stage 3 async-bind windowed run: a bound

@@ -84,8 +84,7 @@ func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal V
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(""), slot))
-		isNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, elemVal.Ref))
+		isNull := e.isAbsentPtr(elemVal.Ref, elemVal.Ty) // three-state null too
 		convL, joinL := e.freshLabel("join.conv"), e.freshLabel("join.str")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, joinL, convL))
 		e.emitLabel(convL)
@@ -103,6 +102,26 @@ func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal V
 		var err error
 		if elemStrVal, err = e.emitValueToString(elemVal); err != nil {
 			return Value{}, err
+		}
+		// A null or undefined element joins as "" (Array.prototype.join).
+		var absent string
+		switch {
+		case isUnconstrainedDynamic(elemVal.Ty) || elemVal.Ty.IsDynamic && len(elemVal.Ty.UnionMembers) > 0:
+			tag, _ := e.emitUnboxTagPayload(elemVal)
+			isNull, isUndef := e.freshReg(), e.freshReg()
+			absent = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNull, tag, kmlTagNull))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
+			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", absent, isNull, isUndef))
+		case isNullableScalar(elemVal.Ty):
+			present, _ := e.nullableScalarAggParts(elemVal)
+			absent = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", absent, present))
+		}
+		if absent != "" {
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, absent, e.internString(""), elemStrVal.Ref))
+			elemStrVal = Value{Ref: r, Ty: TypePtr}
 		}
 	}
 	isFirst := e.freshReg()

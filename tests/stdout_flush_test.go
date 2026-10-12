@@ -47,7 +47,9 @@ process.stdin.on('data', (c: string) => {
 	markerCh := make(chan string, 1)
 	reader := bufio.NewReader(stdout)
 	var tail strings.Builder
+	readDone := make(chan struct{})
 	go func() {
+		defer close(readDone)
 		buf := make([]byte, 6) // len("MARKER")
 		if _, err := io.ReadFull(reader, buf); err != nil {
 			markerCh <- ""
@@ -68,6 +70,9 @@ process.stdin.on('data', (c: string) => {
 	// The handshake held: trigger the child to finish.
 	io.WriteString(stdin, "go\n")
 	stdin.Close()
+	// Drain stdout to EOF before Wait: Wait closes the pipe once the child
+	// exits, which cut the read short under load (an empty tail).
+	<-readDone
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("wait: %v", err)
 	}

@@ -100,6 +100,7 @@ func (e *Emitter) emitSettledAsyncPrologue() {
 	prom := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
 	e.asyncPromiseReg = prom
+	e.asyncAdoptSlot = adoptSlotPending
 
 	// setjmp catch: a throw in the body longjmps here (see __kml_throw). The
 	// push/setjmp/branch live in the entry block after every alloca; the body
@@ -133,6 +134,18 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 	e.emitTerminator("br label %" + e.coroRetLabel)
 	e.emitLabel(e.coroRetLabel)
 	e.emitInstr("call void @__kml_pop_jmpbuf()")
+	if h, ok := e.emitAdoptedResult(); ok {
+		// A returned promise: this one adopts its state (spec timing).
+		fulfillL, adoptL := e.freshLabel("async.fulfill"), e.freshLabel("async.adopt")
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, h))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, fulfillL, adoptL))
+		e.emitLabel(adoptL)
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_adopt(ptr %s, ptr %s)", prom, h))
+		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", e.coroHdl))
+		e.emitTerminator(fmt.Sprintf("ret ptr %s", prom))
+		e.emitLabel(fulfillL)
+	}
 	pty := e.currentPromiseTy
 	if isUnconstrainedDynamic(pty) {
 		// A dynamic result may hold a promise, which the returned promise
@@ -237,6 +250,14 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	// context (an async generator's fiber has no current task to park) the
 	// plain identity return stands.
 	argTy := e.inferExprType(ex.Argument)
+	// A thenable class instance is adopted through its `then`.
+	if sig, ok := e.thenableClass(hdlVal.Ty); ok && (e.isAsync || e.inModuleTask || e.currentGenerator != nil) {
+		pv, err := e.emitThenableToPromise(hdlVal, sig, ex.GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		hdlVal, argTy = pv, pv.Ty
+	}
 	// A dynamic value may hold a promise: await it, or the value itself.
 	if hdlVal.Ty.IsDynamic && !argTy.IsPromise && (e.isAsync || e.inModuleTask || e.currentGenerator != nil) {
 		return e.emitAwaitAny(hdlVal)
@@ -284,6 +305,30 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	// level). When it has none (TDD-00084 Part A), every async result settled
 	// inline, so there is nothing to wait for — read it directly, no scheduler,
 	// no libcurl. Either way, read the marshalled value and free the promise.
+	if hdlVal.Ty.Nullable && (e.isAsync || e.inModuleTask || e.currentGenerator != nil) {
+		// `Promise<T> | null`: awaiting the null is awaiting a plain value,
+		// which the dynamic await does (a tick, then the value itself).
+		bv, err := e.emitBoxValue(hdlVal)
+		if err != nil {
+			return Value{}, err
+		}
+		absent := int64(nbNull)
+		if hdlVal.Ty.IsUndefined {
+			absent = nbUndefined
+		}
+		isNull, sel := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, hdlVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", sel, isNull, absent, bv.Ref))
+		v, err := e.emitAwaitAny(Value{Ref: sel, Ty: TypeAny})
+		if err != nil || promiseTy.IsDynamic || promiseTy.IR == "void" || promiseTy.IR == "" {
+			return v, err
+		}
+		target := promiseTy
+		if target.IR == "ptr" {
+			target.Nullable, target.IsUndefined = true, hdlVal.Ty.IsUndefined
+		}
+		return e.coerce(v, target), nil
+	}
 	if hdlVal.Ty.PromiseTask {
 		return e.emitAwaitTaskPromise(hdlVal.Ref, promiseTy)
 	}
@@ -329,10 +374,11 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 func (e *Emitter) emitAwaitFetchSlot(slotRef string) Value {
 	// `await p` on a fetch promise awaits the fetch's one bridge promise — the
 	// same promise `p.then(...)` reacts to — so awaits and reactions interleave
-	// in registration order and share one Response (TDD-00223 §3). The generator
-	// fiber and the http.listen handler keep the direct wait: neither is a task,
-	// and each already parks on the transfer itself.
-	if e.hasMaySuspend && e.currentGenerator == nil && !e.emittingHTTPHandler {
+	// in registration order and share one Response (TDD-00223 §3). An async
+	// generator's body parks its step on that promise. The http.listen handler
+	// keeps the direct wait: it parks its connection fiber on the transfer.
+	inAsyncGen := e.currentGenerator != nil && e.currentGenerator.genTy.GeneratorIsAsync
+	if e.hasMaySuspend && (e.currentGenerator == nil || inAsyncGen) && !e.emittingHTTPHandler {
 		prom := e.emitFetchHandleToPendingPromise(slotRef)
 		if v, err := e.emitAwaitTaskPromise(prom.Ref, ResponseType()); err == nil {
 			return v
@@ -373,10 +419,8 @@ func (e *Emitter) emitAwaitPromiseElem(elemRef string, elemTy Type) (Value, erro
 // emitAwaitTaskPromise drives a task-shaped promise (already evaluated to hdlRef)
 // to settled and returns its value of type promiseTy — re-throwing on the caller
 // side if it rejected. Shared by `await` and by async-return flattening
-// (`return <promise>` from an async fn — ADR-00265). When the program has
-// may-suspend fns it waits via the scheduler; otherwise it drains microtasks and
-// fires timers until the promise settles (a `.then` chain / `setTimeout`-deferred
-// `new Promise`), then frees the slot.
+// (`return <promise>` from an async fn — ADR-00265). The caller parks: a
+// coroutine through the scheduler, an async generator's step on the promise.
 func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, error) {
 	e.ensureFree()
 	e.ensureExceptionHelpers()
@@ -389,19 +433,9 @@ func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, er
 		e.ensureTaskRuntime()
 		e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready(ptr %s)", hdlRef))
 	} else {
-		e.ensurePromiseRuntime()
-		e.ensureMicrotasks()
-		// A pending task promise with no coroutine to park: this is module
-		// top-level code (or a synchronous-path async fn it called). Wait by
-		// taking turns of the real event loop until the promise settles
-		// (@__kml_top_await, TDD-00223 §1) — a `.then` chain, a timer-deferred
-		// `new Promise`, a child's output, a socket: every source is served, as
-		// when Node suspends a module at its await. A promise nothing can ever
-		// settle ends the process with Node's exit code 13.
-		e.noteLoopTurn()
-		sp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sp, promiseStructIR, hdlRef))
-		e.emitInstr(fmt.Sprintf("call void @__kml_top_await(ptr %s)", sp))
+		// programMayWait sets hasMaySuspend for every program with an await
+		// or an async-return flattening, so nothing reaches here.
+		return Value{}, fmt.Errorf("internal: an await in a program classified as never waiting")
 	}
 	// A rejected task promise (resolved == 2) re-throws its stored error at the
 	// awaiter, so `try { await f() } catch` works (TDD-00083 Stage 2).
@@ -433,4 +467,40 @@ func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, er
 	}
 	val := e.loadPromiseValue(hdlRef, promiseTy)
 	return val, nil
+}
+
+// adoptSlotPending marks an async body whose epilogue can adopt a returned
+// promise; its first `return <promise>` makes the slot (asyncReturnAdopt).
+const adoptSlotPending = "pending"
+
+// asyncReturnAdopt stores h, a promise returned from the async function
+// being emitted, for its epilogue to adopt: the function's promise then
+// settles as h does, a tick after h settles, as an async function's
+// return resolves its promise (PromiseResolve of a promise is never an
+// await at the `return`: an enclosing try does not see its rejection).
+// False when this body's epilogue cannot adopt.
+func (e *Emitter) asyncReturnAdopt(h string) bool {
+	switch e.asyncAdoptSlot {
+	case "":
+		return false
+	case adoptSlotPending:
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitAlloca(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+		e.asyncAdoptSlot = slot
+	}
+	e.ensurePromiseAdopt()
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", h, e.asyncAdoptSlot))
+	return true
+}
+
+// emitAdoptedResult loads the promise a `return` left to adopt (null when
+// a value was returned); false when no `return` left one.
+func (e *Emitter) emitAdoptedResult() (string, bool) {
+	if e.asyncAdoptSlot == "" || e.asyncAdoptSlot == adoptSlotPending {
+		return "", false
+	}
+	h := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, e.asyncAdoptSlot))
+	return h, true
 }

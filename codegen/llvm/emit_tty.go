@@ -1,18 +1,11 @@
 package llvm
 
-import (
-	"fmt"
-
-	"KlainMainLang/ast"
-)
-
 // emit_tty.go — TDD-00031 terminal-control primitives.
 //
 // Split by faithfulness: the Node-faithful surface (setRawMode, columns/rows,
 // SIGWINCH) hangs off `process` exactly where real Node puts it; the one
 // primitive Node has NO counterpart for — a synchronous single-keystroke read
-// off fd 0 (Node does raw input via process.stdin.on('data') events, never a
-// blocking byte read) — lives under the explicit `klain:tty` module instead.
+// off fd 0 — is the `klain:tty` module, lib/node/klain_tty.ts.
 //
 // All four calls route through a single embedded C shim (TTYShimSource) rather
 // than hand-laid termios/winsize structs in IR: `struct termios`'s field
@@ -27,55 +20,9 @@ import (
 // so the CLI driver links the embedded C shim (EmbeddedCSources).
 func (e *Emitter) UsesTtyShim() bool { return e.usedTtyRead }
 
-// ensureTtyRead declares the raw stdin readers once.
-func (e *Emitter) ensureTtyRead() {
-	if e.usedTtyRead {
-		return
-	}
-	e.usedTtyRead = true
-	e.emitGlobal("declare i32 @__kml_tty_read_byte()")
-	e.emitGlobal("declare ptr @__kml_tty_read_key(i32)")
-}
-
-// emitTtyModuleCall dispatches `tty__kml_builtin.<member>(...)` — the
-// klain:tty module's bespoke synchronous raw reads.
-func (e *Emitter) emitTtyModuleCall(member string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	switch member {
-	case "readByte":
-		if len(args) != 0 {
-			return Value{}, fmt.Errorf("%d:%d: klain:tty readByte() takes no arguments", pos.Line, pos.Col)
-		}
-		e.ensureTtyRead()
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_tty_read_byte()", r))
-		b := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", b, r))
-		return Value{Ref: b, Ty: TypeI64}, nil
-	case "readKey":
-		// readKey(): blocks for one keystroke. readKey(timeoutMs): waits up to
-		// timeoutMs for a keystroke, returning "" if none arrives — the poll a
-		// self-refreshing TUI loop needs (redraw on a tick as well as on input).
-		if len(args) > 1 {
-			return Value{}, fmt.Errorf("%d:%d: klain:tty readKey(timeoutMs?) takes at most 1 argument", pos.Line, pos.Col)
-		}
-		e.ensureTtyRead()
-		ms := "-1"
-		if len(args) == 1 {
-			v, err := e.emitExpr(args[0])
-			if err != nil {
-				return Value{}, err
-			}
-			iv := e.coerce(v, TypeI64)
-			t := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", t, iv.Ref))
-			ms = t
-		}
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_tty_read_key(i32 %s)", r, ms))
-		return Value{Ref: r, Ty: TypePtr}, nil
-	}
-	return Value{}, fmt.Errorf("%d:%d: klain:tty has no member '%s'", pos.Line, pos.Col, member)
-}
+// ensureTtyRead compiles the tty shim in: klain:tty's `@link tty`
+// (lib/native.d.ts).
+func (e *Emitter) ensureTtyRead() { e.usedTtyRead = true }
 
 // TTYShimSource is the embedded C behind all of TDD-00031's terminal
 // primitives. It compiles against the platform's own <termios.h>/<sys/ioctl.h>
@@ -285,5 +232,10 @@ char *__kml_tty_read_key(int timeout_ms) {
   return kmltty_str(buf, (int64_t)n);
 }
 #endif
+
+/* klain:tty's entry points (lib/node/klain_tty.ts through lib/native.d.ts):
+   a number crosses as a double. */
+double __kml_native_tty_read_byte(void) { return (double)__kml_tty_read_byte(); }
+char *__kml_native_tty_read_key(double timeout_ms) { return __kml_tty_read_key((int)timeout_ms); }
 `
 }

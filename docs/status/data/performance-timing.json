@@ -48,6 +48,7 @@
               "`getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds` (+ the `set*` setters), `getTime`/`valueOf`, `toISOString`",
               "The `getUTC*`/`setUTC*` accessors alias the field getters/setters — since the stored timestamp is UTC, these are Node's UTC methods ([ADR-00844](../adr/ADR-00844.md))",
               "See [ADR-00014](../adr/ADR-00014.md)",
+              "A Date is an object, as in JavaScript ([ADR-01468](../adr/ADR-01468.md)): `===` compares identity, a Date key in a `Map`/`Set` and `includes`/`indexOf` go by identity, and a setter changes the one Date every reference to it sees; through `any` it stays that object",
               "Local time follows the host's time zone, as Node's does: the local getters, the component constructor, the local setters, `toString` (`GMT+0300 (Eastern European Summer Time)`), `toDateString` and `getTimezoneOffset`; `Date.UTC` and the `getUTC*`/`setUTC*` accessors are UTC. An unparseable string or a `NaN` time value is an Invalid Date: `getTime()` is `NaN`, `toString()` is `Invalid Date`, `toISOString()` throws a `RangeError` and JSON gives `null` ([ADR-01315](../adr/ADR-01315.md)); its getters are `NaN`, `setFullYear` starts from +0 and the other setters leave it invalid; `setTime` is TimeClip(ToNumber(t)) ([ADR-01383](../adr/ADR-01383.md))"
             ],
             "caveats": [
@@ -73,11 +74,8 @@
           {
             "feature": "`Date` setters (`setFullYear`, `setMonth`, `setDate`, `setHours`, `setMinutes`, `setSeconds`, `setMilliseconds`, `setTime`)",
             "status": "implemented",
-            "caveats": [
-              "Requires a named-variable receiver (not a field access or call result — this compiler's Date is a plain number, not a reference object, so there's no heap location to mutate otherwise)"
-            ],
             "notes": [
-              "Mutate a named Date variable in place and return the new timestamp, matching real JS",
+              "Mutate the Date in place, whatever the receiver (a variable, a field, an element, a call result), and return the new time value, matching real JS ([ADR-01468](../adr/ADR-01468.md))",
               "See [ADR-00016](../adr/ADR-00016.md)",
               "Multi-argument setter overloads cascade into the following fields (`setFullYear(y, m, d)`, `setHours(h, m, s, ms)`, …) ([ADR-00488](../adr/ADR-00488.md))"
             ]
@@ -85,11 +83,9 @@
           {
             "feature": "`Date` arithmetic (`date ± durationMs`, `date - date`, `date += durationMs`)",
             "status": "implemented",
-            "caveats": [
-              "Under `-compat=js`, a compound `date += n` / `date -= n` keeps the variable a Date; JavaScript turns it into a string / a number (the plain `+`/`-` do)"
-            ],
             "notes": [
-              "The strict lane rejects arithmetic on a Date as TypeScript does (TS2362, TS2363, TS2365): the millisecond count is `getTime()` ([ADR-01134](../adr/ADR-01134.md))",
+              "The strict lane rejects arithmetic on a Date as TypeScript does (TS2362, TS2363, TS2365, and TS2365/TS2322 on a compound `date += n`): the millisecond count is `getTime()` ([ADR-01134](../adr/ADR-01134.md), [ADR-01468](../adr/ADR-01468.md))",
+              "Under `-compat=js`, a compound `date += n` / `date -= n` makes the variable a string / a number, as JavaScript does",
               "Under `-compat=js`, `date + x` concatenates the date string and `date - x` (`*`, `/`, `%`, `**`, the relational operators) reads its millisecond count, as JavaScript does ([ADR-01310](../adr/ADR-01310.md))",
               "See [ADR-00018](../adr/ADR-00018.md)"
             ]

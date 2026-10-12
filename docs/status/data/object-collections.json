@@ -50,22 +50,18 @@
           {
             "feature": "`Object.values(obj)`",
             "status": "implemented",
-            "caveats": [
-              "On a *static* array (`Object.values([7, 8])`) it is a clean rejection; a bare `any` holding an array answers its elements"
-            ],
             "notes": [
-              "On a bare `any` value: the D1 dynamic object's enumerable own values (or an array's elements) as a dynamic array, TypeError for null/undefined, `[]` for a boxed primitive ([ADR-01077](../adr/ADR-01077.md))"
+              "On a bare `any` value: the D1 dynamic object's enumerable own values (or an array's elements) as a dynamic array, TypeError for null/undefined, `[]` for a boxed primitive ([ADR-01077](../adr/ADR-01077.md))",
+              "On an array: its elements, in a new array ([ADR-01469](../adr/ADR-01469.md))"
             ]
           },
           {
             "feature": "`Object.entries(obj)`",
             "status": "implemented",
-            "caveats": [
-              "On a *static* array (`Object.entries([7, 8])`) it is a clean rejection; a bare `any` holding an array answers `[\"0\", v0], …`"
-            ],
             "notes": [
               "Returns real `[string, V]` tuples (`[string, any]` for a heterogeneous shape or a structural type, as TypeScript types it); destructure with `for (const [k, v] of Object.entries(obj))`",
-              "On a bare `any` value: a dynamic array of `[key, value]` pairs — the dynamic object's enumerable own entries in ES order, or an array's index/element pairs — TypeError for null/undefined, `[]` for a boxed primitive ([ADR-01077](../adr/ADR-01077.md))"
+              "On a bare `any` value: a dynamic array of `[key, value]` pairs — the dynamic object's enumerable own entries in ES order, or an array's index/element pairs — TypeError for null/undefined, `[]` for a boxed primitive ([ADR-01077](../adr/ADR-01077.md))",
+              "On an array: its `[index, element]` pairs ([ADR-01469](../adr/ADR-01469.md))"
             ]
           },
           {
@@ -80,10 +76,11 @@
             "status": "implemented",
             "caveats": [
               "Between statically typed objects, every field a source contributes must already exist on `target`'s struct type — a source field `target`'s type doesn't have is a clean compile error (fixed-shape heap structs), not grafted on as in real JS ([ADR-00054](../adr/ADR-00054.md))",
-              "Through `any`, symbol keys are not copied; an array target is a compile error"
+              "Through `any`, symbol keys are not copied"
             ],
             "notes": [
               "Mutates and returns `target`",
+              "An array target takes its sources' indices (and other own keys), growing as needed, and the result is the target array ([ADR-01485](../adr/ADR-01485.md))",
               "With an `any` target or source, the copy runs on run-time properties (getters run; null and undefined sources skipped), and the result is `any` ([ADR-01237](../adr/ADR-01237.md))"
             ]
           },
@@ -110,14 +107,15 @@
             "notes": [
               "Real property descriptors ([TDD-00155](../tdd/TDD-00155.md) Stage 5, [ADR-00629](../adr/ADR-00629.md)): spec create-defaults (absent attributes are false), non-configurable redefinition rules, data and accessor descriptor forms. Object-literal `get`/`set` compile to dynamic-ABI functions invoked with the original receiver (inherited getters through the prototype chain included); `Object.keys`/`for...in`/`JSON.stringify` honor enumerability (stringify and spread invoke getters); rejected writes/deletes throw module-strict JS TypeErrors",
               "`Object.defineProperties`; a function's own properties take descriptors too ([ADR-01237](../adr/ADR-01237.md), [ADR-01232](../adr/ADR-01232.md))",
-              "`getOwnPropertyDescriptor` and `getOwnPropertyNames` of a statically typed object read its layout ([ADR-01331](../adr/ADR-01331.md))"
+              "`getOwnPropertyDescriptor` and `getOwnPropertyNames` of a statically typed object read its layout ([ADR-01331](../adr/ADR-01331.md))",
+              "`Object.getOwnPropertySymbols` lists an object's own symbols, a class's symbol-keyed fields among them, and `Reflect.ownKeys` its string keys then its symbols; spread and `Object.assign` copy symbol-keyed properties ([ADR-01421](../adr/ADR-01421.md))"
             ]
           },
           {
             "feature": "`new Proxy(target, handler)`",
             "status": "implemented",
             "caveats": [
-              "Traps implemented: `get`/`set`/`has`/`deleteProperty` — dispatched in the dynamic-object runtime entry points, forwarding to the target when absent ([ADR-00630](../adr/ADR-00630.md)); other traps (`ownKeys`, `getOwnPropertyDescriptor`, `apply`, `construct`, …) are not consulted (those operations forward to the target)",
+              "Traps implemented: `get`/`set`/`has`/`deleteProperty` — dispatched in the dynamic-object runtime entry points, forwarding to the target when absent ([ADR-00630](../adr/ADR-00630.md)); `ownKeys` is consulted (with the spec's result checks) only by `Object.getOwnPropertySymbols` ([ADR-01422](../adr/ADR-01422.md)) — `Object.keys`/`getOwnPropertyNames`/`Reflect.ownKeys` forward to the target; other traps (`getOwnPropertyDescriptor`, `apply`, `construct`, …) are not consulted (those operations forward to the target)",
               "The target must be a dynamic object (an untyped/`any` literal); statically-typed structs can't be proxied"
             ],
             "notes": [
@@ -153,11 +151,8 @@
           {
             "feature": "`Object.hasOwn()` / `.hasOwnProperty()`",
             "status": "implemented",
-            "caveats": [
-              "The key must be a string literal — a runtime-computed key is a clean compile error (no runtime field-name table to check it against) ([ADR-00065](../adr/ADR-00065.md))"
-            ],
             "notes": [
-              "Object shapes are fully structural/static, so this is a compile-time `FieldIndex` lookup, not a runtime scan — except an optional field (`x?: T`), whose answer is its runtime presence (`\"age\" in { name }` is `false`, ADR-01063)"
+              "On a fixed-shape object a string-literal key is a compile-time answer — except an optional field (`x?: T`), whose answer is its runtime presence (`\"age\" in { name }` is `false`, ADR-01063); a runtime string key is compared against the object's own keys; a dictionary or `any` value is tested at run time ([ADR-01483](../adr/ADR-01483.md))"
             ]
           },
           {
@@ -180,14 +175,8 @@
           {
             "feature": "Computed property keys `{ [expr]: value }`",
             "status": "implemented",
-            "caveats": [
-              "`V` is inferred from the first property only",
-              "`...spread` combined with a computed key isn't supported yet",
-              "The declared-type form (`{ [key: string]: T }`) isn't supported yet",
-              "A literal with a non-constant key is a `Map` inside: a function-valued property can't be called as a method, and the literal can't be held in `any`"
-            ],
             "notes": [
-              "A *dynamic object* — storage-wise a real `Map<string,V>` reusing `new Map<K,V>()`'s runtime, with `.field`/`[expr]` sugar layered on top ([TDD-00012](../tdd/TDD-00012.md) / [ADR-00066](../adr/ADR-00066.md))",
+              "A literal with a runtime key is built as JavaScript builds it, a dynamic object whose keys exist at run time: values of any types, methods (`q[k]()`, `q.name()`), getters, spreads and a declared index-signature type all work, and it can be held in `any` (the same object) ([ADR-01486](../adr/ADR-01486.md))",
               "A well-known-symbol key (`[Symbol.iterator]`, `[Symbol.asyncIterator]`, `[Symbol.toPrimitive]`, …) in the colon, method, generator (`*[Symbol.iterator]()`) or async form desugars to a reserved *static* key, so the literal stays a static struct and the member drives iteration and conversion ([ADR-00279](../adr/ADR-00279.md), [ADR-01292](../adr/ADR-01292.md)); a computed name takes the method forms too (`{ [name]() {} }`, `async [name]() {}`)"
             ]
           },

@@ -47,8 +47,10 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 				if name != "@@toPrimitive" && !resultUsableForHint(sig.RetType, hint) && sig.RetType.IR != "void" && !sig.RetType.IsUndefined {
 					continue
 				}
+				// The hint is the method's argument; one declaring no
+				// parameter ignores it, as JS drops an extra argument.
 				var args []ast.Expression
-				if name == "@@toPrimitive" {
+				if name == "@@toPrimitive" && len(sig.ParamTypes) > 0 {
 					args = []ast.Expression{ast.NewStringLiteral(hint, ast.Pos{})}
 				}
 				res, err := e.emitClassCall(canon, Value{Ref: v.Ref, Ty: canon}, name, args, ast.Pos{}, false)
@@ -109,7 +111,7 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 		closure := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", closure, StructFieldIR(fieldTy), gep, fieldTy.Align()))
 		var args []ast.Expression
-		if name == "@@toPrimitive" {
+		if name == "@@toPrimitive" && len(fieldTy.FuncParams) > 0 {
 			args = []ast.Expression{ast.NewStringLiteral(hint, ast.Pos{})}
 		}
 		res, err := e.emitClosureCallByPtr(closure, fieldTy, args, ast.Pos{})

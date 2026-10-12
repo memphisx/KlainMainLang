@@ -220,6 +220,27 @@ console.log(c.get());
 `, "1\n2\nx")
 }
 
+// A function taking an instantiation (`b: Box<number>`) is emitted before
+// any `new Box<number>`: its method calls instantiate the class, and their
+// results keep the instantiation's types.
+func TestE2EGenericClassAnnotatedBeforeConstruction(t *testing.T) {
+	assertOutput(t, `
+class Box<T> {
+  v: T;
+  constructor(v: T) { this.v = v; }
+  get(): T { return this.v; }
+  get size(): number { return 1; }
+  map(f: (x: T) => T): Box<T> { return new Box<T>(f(this.v)); }
+}
+function twice(b: Box<number>): number {
+  const n = b.get() + 1;
+  return n + b.size + b.map((x) => x * 10).get();
+}
+function label(b: Box<string>): string { return b.get().toUpperCase(); }
+console.log(twice(new Box<number>(2)), label(new Box<string>("hi")));
+`, "24 HI")
+}
+
 // A generic class instantiated twice with the *same* concrete type must be
 // specialized once — same reasoning/risk as
 // TestE2EGenericFunctionMemoizedAcrossSameTypeCalls.
@@ -603,4 +624,27 @@ const a = new List<number>(1), b = new List<number>(2)
 a.next = b; b.prev = a
 console.log(a.next!.data, b.prev!.data, a.prev === null)
 `)
+}
+
+// An interface nested in itself through several members (`owner:
+// List<List<T>>`) and an untyped loop whose bindings feed each other both
+// compile in bounded time and memory.
+func TestE2EExpandingInterfaceAndSelfReferentialLoopCompileJS(t *testing.T) {
+	assertOutputCompatJS(t, `
+interface List<T> { data: T; next: List<T>; owner: List<List<T>>; }
+interface MyList<T> { data: T; next: MyList<T>; owner: MyList<MyList<T>>; }
+var l: List<number>;
+var m: MyList<number>;
+console.log(l == m);
+function F(a, b, c, d) { return (a + b + c + d) % 1000 }
+var a, b, c, d;
+a = 1; b = 2; c = 3; d = 4;
+for (var k = 0; k < 2; k++) {
+  a = F(a, b, c, d); d = F(d, a, b, c); c = F(c, d, a, b); b = F(b, c, d, a);
+  a = F(a, b, c, d); d = F(d, a, b, c); c = F(c, d, a, b); b = F(b, c, d, a);
+  a = F(a, b, c, d); d = F(d, a, b, c); c = F(c, d, a, b); b = F(b, c, d, a);
+  a = F(a, b, c, d); d = F(d, a, b, c); c = F(c, d, a, b); b = F(b, c, d, a);
+}
+console.log(a, b, c, d);
+`, "true\n415 939 830 934")
 }

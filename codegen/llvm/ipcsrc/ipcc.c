@@ -1,8 +1,9 @@
 /* ipcc.c — the child side of child_process.fork's IPC channel (TDD-00141; in
  * C per TDD-00240): NODE_CHANNEL_FD parsed once, send, and the event-loop
- * hooks (keepalive/fdset_add/dispatch). The framing is ipc.c's. Linked only
- * when a program touches the channel; the loop's hooks are no-op stubs
- * otherwise. kml_layout.h is prepended by the compiler. */
+ * reader, an unreferenced libuv watcher on POSIX (the select bridge's hooks
+ * on Windows, until TDD-00244 Stage 6). The framing is ipc.c's. Linked only
+ * when a program touches the channel. kml_layout.h is prepended by the
+ * compiler. */
 #include <stdlib.h>
 
 typedef long long i64;
@@ -26,7 +27,14 @@ extern void *__kml_ipc_chan_new(void);
 extern void __kml_ipc_feed(void *chan, const void *src, i64 n);
 extern char *__kml_ipc_take2(void *chan, i64 *isstr);
 extern i64 __kml_ipc_send(i64 fd, const void *s);
+#ifdef _WIN32
 extern void __kml_worker_fd_setbit(int fd, void *fdset, void *maxfd);
+#else
+extern void *__kml_loop_fd_watch(int fd, void (*cb)(void *), void *data, int refd);
+extern void __kml_loop_fd_unwatch(void *w);
+static void *watch;
+static void drain(void *unused);
+#endif
 
 /* -2 = not yet probed, -1 = no channel, >0 = the channel fd. */
 static int chan_fd = -2;
@@ -47,6 +55,10 @@ int __kml_ipcc_fd(void) {
             fcntl(fd, KML_F_SETFL, fl | KML_O_NONBLOCK);
             chan = __kml_ipc_chan_new();
             chan_fd = fd;
+#ifndef _WIN32
+            if (!claimed)
+                watch = __kml_loop_fd_watch(fd, drain, 0, 0);
+#endif
             return fd;
         }
     }
@@ -60,18 +72,14 @@ _Bool __kml_ipcc_send(void *s) {
 }
 
 /* The channel is unreferenced here: the process emitter's channel holds the
- * loop open while it has 'message' listeners, as Node's does. */
-_Bool __kml_ipcc_keepalive(void) { return 0; }
-
-_Bool __kml_ipcc_fdset_add(void *fdset, void *maxfd) {
-    if (chan_fd > 0 && !claimed) __kml_worker_fd_setbit(chan_fd, fdset, maxfd);
-    return 0;
-}
-
-void __kml_ipcc_dispatch(void) {
+ * loop open while it has 'message' listeners, as Node's does. Nothing here
+ * listens either: a message is the process emitter's once it claims the
+ * channel, so the reader only keeps the pipe drained until then. */
+static void drain(void *unused) {
     char chunk[4096];
     i64 isstr;
     void *c = chan;
+    (void)unused;
     if (claimed) return;
     for (;;) {
         int fd = chan_fd;
@@ -82,22 +90,39 @@ void __kml_ipcc_dispatch(void) {
             continue;
         }
         if (n == 0) {
+#ifndef _WIN32
+            __kml_loop_fd_unwatch(watch);
+            watch = 0;
+#endif
             close(fd);
             chan_fd = -1;
         }
         break;
     }
     if (!c) return;
-    /* nothing here listens: a message is the process emitter's once it claims
-     * the channel. */
     char *msg;
     while ((msg = __kml_ipc_take2(c, &isstr)) != NULL) free(msg);
 }
+
+#ifdef _WIN32
+_Bool __kml_ipcc_keepalive(void) { return 0; }
+
+_Bool __kml_ipcc_fdset_add(void *fdset, void *maxfd) {
+    if (chan_fd > 0 && !claimed) __kml_worker_fd_setbit(chan_fd, fdset, maxfd);
+    return 0;
+}
+
+void __kml_ipcc_dispatch(void) { drain(0); }
+#endif
 
 /* lib/native.d.ts's ipcChildClaim: the process emitter's fork channel takes
  * the descriptor over from this reader (which cluster's worker side still
  * sends through), probing it first so NODE_CHANNEL_FD may then be deleted. */
 void __kml_native_ipc_child_claim(void) {
-    __kml_ipcc_fd();
     claimed = 1;
+    __kml_ipcc_fd();
+#ifndef _WIN32
+    __kml_loop_fd_unwatch(watch);
+    watch = 0;
+#endif
 }

@@ -212,10 +212,10 @@ func (e *Emitter) resolveRegexReplacer(args []ast.Expression, pos ast.Pos) (rege
 			for i := 0; i < nCap; i++ {
 				hints = append(hints, undefinedableElem(TypePtr)) // capture group: undefined when unmatched
 			}
-			hints = append(hints, TypeI64, TypePtr) // offset, whole string
+			hints = append(hints, TypeF64, TypePtr) // offset, whole string
 			maxArity = nCap + 3
 		} else {
-			hints = []Type{TypePtr, TypeI64, TypePtr}
+			hints = []Type{TypePtr, TypeF64, TypePtr}
 		}
 		cb, err := e.resolveCallbackWithHints(args[1], hints)
 		if err != nil {

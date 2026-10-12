@@ -357,7 +357,7 @@ function expectedException(actual: any, expected: any, messageArg: any, fnName: 
                     message += `\n\nError message:\n\n${actual.message}`;
                 }
             } else {
-                message += `"${__kml_native.inspectWith(actual, -1, 3, 0, 80, 100)}"`;
+                message += `"${__kml_native.inspectWith(actual, -1, 3, 0, 80, 100, 1)}"`;
             }
         }
         throwError = true;

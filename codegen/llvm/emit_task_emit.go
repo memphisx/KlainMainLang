@@ -107,7 +107,32 @@ func (e *Emitter) emitTaskEpilogue() {
 		ps := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", psp, taskStructIR, ct, taskPromiseSlot))
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ps, psp))
-		if pty.IsArray {
+		if h, ok := e.emitAdoptedResult(); ok {
+			// A returned promise: the task's adopts its state, and the
+			// trampoline leaves it pending (spec timing).
+			fulfillL, adoptL := e.freshLabel("task.fulfill"), e.freshLabel("task.adopt")
+			isNull := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, h))
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, fulfillL, adoptL))
+			e.emitLabel(adoptL)
+			e.ensureTaskAdopted()
+			e.emitInstr(fmt.Sprintf("call void @__kml_promise_adopt(ptr %s, ptr %s)", ps, h))
+			e.emitInstr("call void @__kml_task_adopted()")
+			e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", e.coroHdl))
+			e.emitTerminator("ret void")
+			e.emitLabel(fulfillL)
+		}
+		if isUnconstrainedDynamic(pty) {
+			// A dynamic result may hold a promise or thenable, which the
+			// task's promise adopts (PromiseResolve), as the settled
+			// epilogue does; the trampoline then leaves it alone.
+			e.ensurePromiseResolveAny()
+			e.ensureTaskAdopted()
+			valReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", valReg, e.coroHdl))
+			e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %s, i64 %s)", ps, valReg))
+			e.emitInstr("call void @__kml_task_adopted()")
+		} else if pty.IsArray {
 			// The coro return-value slot holds a header pointer (TDD-00213 Stage 2);
 			// deref it to the aggregate before decomposing into the promise value.
 			e.storePromiseValue(ps, e.loadArraySlotAggregate(e.coroHdl, pty))
@@ -467,4 +492,14 @@ func (e *Emitter) emitSpawnCall(name string, sig FuncSig, argVals []Value) (Valu
 	pt := PromiseOf(inner)
 	pt.PromiseTask = true
 	return Value{Ref: promise, Ty: pt}, nil
+}
+
+// ensureTaskAdopted declares @__kml_task_adopted: the running task's body
+// handed its promise to an adoption, so the trampoline must not fulfill it.
+func (e *Emitter) ensureTaskAdopted() {
+	if e.fnDecls["@__kml_task_adopted"] {
+		return
+	}
+	e.fnDecls["@__kml_task_adopted"] = true
+	e.emitGlobal("declare void @__kml_task_adopted()")
 }

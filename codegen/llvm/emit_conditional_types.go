@@ -102,7 +102,26 @@ func substituteAnnotationSlice(in []*ast.TypeAnnotation, subs map[string]*ast.Ty
 }
 
 // resolveConditionalType evaluates `Check extends Extends ? True : False`.
+const (
+	maxCondTypeDepth = 16
+	maxCondTypeWork  = 1000
+	maxCondTypeTotal = 50000
+)
+
 func (e *Emitter) resolveConditionalType(ta *ast.TypeAnnotation) Type {
+	// A conditional type that recurses through itself (each branch another
+	// instantiation of it) is held as `any` past this depth: its values are
+	// boxed, whatever the deeper branches would pick.
+	if e.condTypeDepth == 0 {
+		e.condTypeWork = 0
+	}
+	e.condTypeWork++
+	e.condTypeTotal++
+	if e.condTypeDepth >= maxCondTypeDepth || e.condTypeWork > maxCondTypeWork || e.condTypeTotal > maxCondTypeTotal {
+		return TypeAny
+	}
+	e.condTypeDepth++
+	defer func() { e.condTypeDepth-- }()
 	checkTy := e.resolveType(ta.CheckType)
 	bindings := map[string]Type{}
 	if e.matchExtends(checkTy, ta.ExtendsType, bindings) {

@@ -88,7 +88,7 @@ console.log(p.y)
 
 func TestE2EUnannotatedFunctionReturnsObjectLiteral(t *testing.T) {
 	assertOutput(t, `
-function makePoint(x, y) { return { x: x, y: y } }
+function makePoint(x: number, y: number) { return { x: x, y: y } }
 const p = makePoint(3, 4)
 console.log(p.x)
 console.log(p.y)
@@ -97,7 +97,7 @@ console.log(p.y)
 
 func TestE2EUnannotatedArrowFunctionReturnsObjectLiteral(t *testing.T) {
 	assertOutput(t, `
-const makePoint = (x, y) => { return { x: x, y: y } }
+const makePoint = (x: number, y: number) => { return { x: x, y: y } }
 const p = makePoint(5, 6)
 console.log(p.x)
 console.log(p.y)
@@ -781,15 +781,13 @@ console.log(obj["5"])
 `, "1")
 }
 
-func TestE2EComputedPropertyKeySpreadCombinationRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EComputedPropertyKeySpreadCombination(t *testing.T) {
+	assertSameAsNode(t, `
 const k = "b"
 const src = { a: 1 }
-const obj = { ...src, [k]: 2 }
+const obj = { ...src, [k]: 2, a: 3 }
+console.log(obj, Object.keys(obj), obj.a, obj[k])
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for combining object spread with a computed property key, got none")
-	}
 }
 
 // --- Object literal field coercion against a declared type (TDD-00007) ---
@@ -951,16 +949,14 @@ func TestE2EInOperatorNonObjectIsError(t *testing.T) {
 	}
 }
 
-func TestE2EInOperatorDynamicKeyIsError(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EInOperatorDynamicKey(t *testing.T) {
+	assertSameAsNode(t, `
 interface Point { x: number; y: number }
 const p: Point = { x: 1, y: 2 }
 const k = "x"
-console.log(k in p)
+const z: string = "z"
+console.log(k in p, z in p)
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for a non-literal 'in' key")
-	}
 }
 
 // --- Uninitialized field safety ---
@@ -1524,8 +1520,8 @@ o.n = 5;
 	if err == nil {
 		t.Fatal("expected a compile error assigning a getter-only property, got none")
 	}
-	if !strings.Contains(err.Error(), "no setter") {
-		t.Fatalf("expected 'no setter', got: %v", err)
+	if !strings.Contains(err.Error(), "read-only property") {
+		t.Fatalf("expected TS2540 'read-only property', got: %v", err)
 	}
 }
 

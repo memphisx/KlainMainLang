@@ -31,48 +31,22 @@ func FetchSource() string { return layoutHeader() + fetchSource + fetchStreamSou
 // UsesFetch reports whether the program links the fetch runtime.
 func (e *Emitter) UsesFetch() bool { return e.usedFetch || e.usedFetchAsync }
 
-// FetchCFlags selects the sections of fetch.c the program uses (each one
-// references runtime pieces only its ensure*() brings in) and hands over the
-// constants and offsets C shares with the emitter.
+// FetchCFlags hands fetch.c the constants and offsets C shares with the
+// emitter; they are the same for every program, so its object is too: the
+// link drops the sections a program does not use (DeadStripFlags).
 func (e *Emitter) FetchCFlags() []string {
 	connOffs, _ := irStructOffsets("{ i64, ptr, ptr, ptr, ptr }")
 	rsOffs, _ := irStructOffsets(rstreamStructIR)
-	f := []string{
+	return append([]string{
 		fmt.Sprintf("-DKML_KIND_TYPEERR=%dLL", errorTypeIDStored(errorKindIDs["TypeError"])),
 		fmt.Sprintf("-DKML_KIND_DOMEXC=%dLL", errorTypeIDStored(errorKindIDs["DOMException"])),
-		fmt.Sprintf("-DKML_KIND_AGG=%dLL", errorTypeIDStored(errorKindIDs["AggregateError"])),
-		fmt.Sprintf("-DKML_AGG_SIZE=%d", aggregateErrorStructSize),
-		fmt.Sprintf("-DKML_TAG_OBJECT=%d", kmlTagObject),
 		fmt.Sprintf("-DKML_ERR_FLAG=%dLL", errorTypeIDFlag),
-		fmt.Sprintf("-DKML_NB_UNDEFINED=%dLL", nbUndefined),
 		fmt.Sprintf("-DKML_FETCH_CONN_PFETCH=%d", connOffs[3]),
 		fmt.Sprintf("-DKML_FETCH_CONN_PGROUP=%d", connOffs[4]),
 		fmt.Sprintf("-DKML_RS_STATE=%d", rsOffs[0]),
 		fmt.Sprintf("-DKML_RS_RH=%d", rsOffs[14]),
 		fmt.Sprintf("-DKML_RS_RL=%d", rsOffs[15]),
-	}
-	for _, s := range []struct {
-		on   bool
-		flag string
-	}{
-		{e.usedFetchAsync, "KML_FETCH_ASYNC"},
-		{e.usedAwaitFetchHeaders, "KML_FETCH_HDRWAIT"},
-		{e.usedPromiseCombinators, "KML_FETCH_GROUP"},
-		{e.usedPendingFinishSettled, "KML_FETCH_SETTLED"},
-		{e.usedFetchAwaitSettled, "KML_FETCH_AWAITSET"},
-		{e.usedFetchHeadersRaw, "KML_FETCH_HDRRAW"},
-		{e.usedFetchHeadersMap, "KML_FETCH_HDRMAP"},
-		{e.fnDecls["__kml_fetch_status_text"], "KML_FETCH_STATUSTEXT"},
-		{e.usedXHRHeadersAll, "KML_XHR_HDRS"},
-		{e.usedFetchBodyStream, "KML_FETCH_STREAM"},
-		{e.usedFetchAsync && e.hasMaySuspend, "KML_FETCH_TASKS"},
-		{e.usedFetchAsync && e.hasMaySuspend && e.isGCMode(), "KML_FETCH_GC_RESTORE"},
-	} {
-		if s.on {
-			f = append(f, "-D"+s.flag+"=1")
-		}
-	}
-	return f
+	}, DeadStripFlags(e.exportsRuntime())...)
 }
 
 // ensureFetch declares the curl_easy_* primitives and the pieces shared by
@@ -91,6 +65,11 @@ func (e *Emitter) ensureFetch() {
 	e.ensureMemcpy()
 	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
 	e.ensureExceptionHelpers()
+	// A failure's cause (fetch.c): the system error's code and errno, a
+	// boxed Error, the lookup's hostname in the extra bag.
+	e.ensureErrnoCode()
+	e.ensureNanBox()
+	e.ensureDynObj()
 
 	e.emitGlobal("declare void @curl_global_init(i64 noundef)")
 	e.emitGlobal("declare ptr @curl_easy_init()")
@@ -102,7 +81,7 @@ func (e *Emitter) ensureFetch() {
 	// The names and messages fetch's errors carry, interned here so the C
 	// reads them (an error's name is compared by address).
 	strs := []string{"TypeError", "AbortError", "The operation was aborted", "TimeoutError",
-		"The operation timed out", "AggregateError", "All promises were rejected", ""}
+		"The operation timed out", "AggregateError", "All promises were rejected", "", "Error", "fetch failed"}
 	refs := ""
 	for i, s := range strs {
 		if i > 0 {

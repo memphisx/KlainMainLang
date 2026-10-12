@@ -14,13 +14,14 @@ import (
 	"testing"
 
 	"KlainMainLang/codegen/llvm"
-	"KlainMainLang/parser"
 )
 
 // emitIROptimizeMemory compiles src to IR with -optimize-memory set.
 func emitIROptimizeMemory(t *testing.T, src string) string {
 	t.Helper()
-	prog, err := parser.Parse(src)
+	// Parsed and resolved as the CLI does (parseStrict): a global a global
+	// module implements (setTimeout) brings the module in.
+	prog, err := parseStrict(src)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -80,7 +81,9 @@ func buildBinaryOptimizeMemory(t *testing.T, src, mm string) string {
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang not found in PATH")
 	}
-	prog, err := parser.Parse(src)
+	// Parsed and resolved as the CLI does (parseStrict): a global a global
+	// module implements (setTimeout) brings the module in.
+	prog, err := parseStrict(src)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}

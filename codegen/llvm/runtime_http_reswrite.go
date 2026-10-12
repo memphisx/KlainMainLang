@@ -93,29 +93,18 @@ parkchk:
   %onfiber = icmp sge i64 %idx, 0
   br i1 %onfiber, label %park, label %loop
 park:
-  ; Mark this fd write-parked (event loop adds it to the write fd_set), then
-  ; yield to the reactor via swapcontext.
-  %fd64 = sext i32 %fd to i64
-  %div8 = sdiv i64 %fd64, 8
-  %mod8 = srem i64 %fd64, 8
-  %bp = getelementptr i8, ptr @__kml_conn_writepark, i64 %div8
-  %mod8b = trunc i64 %mod8 to i8
-  %mask = shl i8 1, %mod8b
-  %ob = load i8, ptr %bp, align 1
-  %nb = or i8 %ob, %mask
-  store i8 %nb, ptr %bp, align 1
+  ; Mark this fd write-parked (the event loop waits for it to be writable),
+  ; then yield to the reactor via swapcontext.
+  call void @__kml_conn_park_write(i32 %fd, i32 1)
   %cd = load ptr, ptr @__kml_conn_data, align 8
   %si = load i64, ptr @__kml_current_conn_idx, align 8
   %slot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %cd, i64 %si
   %ctxp = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %slot, i32 0, i32 1
   %ctx = load ptr, ptr %ctxp, align 8
   %sw = call i32 @swapcontext(ptr %ctx, ptr @__kml_main_ctx)
-  ; Resumed: clear the park bit (re-set on the next iteration if still EAGAIN),
-  ; then retry. @__kml_conn_writepark is a fixed global, so %bp/%mask survive.
-  %ob2 = load i8, ptr %bp, align 1
-  %clr = xor i8 %mask, -1
-  %nb2 = and i8 %ob2, %clr
-  store i8 %nb2, ptr %bp, align 1
+  ; Resumed: clear the park (re-set on the next iteration if still EAGAIN),
+  ; then retry.
+  call void @__kml_conn_park_write(i32 %fd, i32 0)
   br label %loop
 done:
   ret void
@@ -406,25 +395,14 @@ parkchk:
   %onfiber = icmp sge i64 %cidx, 0
   br i1 %onfiber, label %park, label %loop
 park:
-  %pfd64 = sext i32 %fd to i64
-  %div8 = sdiv i64 %pfd64, 8
-  %mod8 = srem i64 %pfd64, 8
-  %bp = getelementptr i8, ptr @__kml_conn_writepark, i64 %div8
-  %mod8b = trunc i64 %mod8 to i8
-  %mask = shl i8 1, %mod8b
-  %ob = load i8, ptr %bp, align 1
-  %nb = or i8 %ob, %mask
-  store i8 %nb, ptr %bp, align 1
+  call void @__kml_conn_park_write(i32 %fd, i32 1)
   %cd = load ptr, ptr @__kml_conn_data, align 8
   %si = load i64, ptr @__kml_current_conn_idx, align 8
   %slot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %cd, i64 %si
   %ctxp = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %slot, i32 0, i32 1
   %ctx = load ptr, ptr %ctxp, align 8
   %sw = call i32 @swapcontext(ptr %ctx, ptr @__kml_main_ctx)
-  %ob2 = load i8, ptr %bp, align 1
-  %clr = xor i8 %mask, -1
-  %nb2 = and i8 %ob2, %clr
-  store i8 %nb2, ptr %bp, align 1
+  call void @__kml_conn_park_write(i32 %fd, i32 0)
   br label %loop
 drained:
   store i64 0, ptr %headp, align 8
@@ -531,11 +509,7 @@ retTrue:
 }`
 
 	// After the (tiny, blocking) head send, re-enable O_NONBLOCK so slow-consumer
-	// chunk writes park on writability rather than blocking the reactor. This
-	// applies to HTTPS too (TDD-00195 Stage 2): the TLS chunk writes route
-	// through __kml_http_conn_send_nb → __kml_tls_write_nb, which reports SSL
-	// WANT as EAGAIN so __kml_res_write_all / _flush / _drain_try park exactly as
-	// on plain HTTP.
+	// chunk writes park on writability rather than blocking the reactor.
 	renonblock := fmt.Sprintf(
 		"%%rebfl = call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 3)\n"+
 			"  %%rebnb = or i32 %%rebfl, %d\n"+
@@ -570,13 +544,5 @@ retTrue:
 	)
 	block := repl.Replace(tmpl)
 
-	// Over HTTPS/1.1 the fd is TLS-wrapped: route chunk writes through the
-	// non-blocking SSL-aware shim (a plain fd falls through to raw write() inside
-	// it) so a slow TLS consumer parks the fiber on EAGAIN instead of blocking
-	// the reactor inside SSL_write's poll() — TDD-00195 Stage 2 backpressure.
-	if e.usedHTTPS1Server {
-		e.emitHTTPSConnShims()
-		block = strings.ReplaceAll(block, "call i64 @write(i32 %fd,", "call i64 @__kml_http_conn_send_nb(i32 %fd,")
-	}
 	e.emitGlobal(block)
 }

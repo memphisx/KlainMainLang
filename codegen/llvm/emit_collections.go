@@ -12,11 +12,14 @@ import (
 // factored out of emitMapVarDecl/emitSetVarDecl so the general-expression
 // producers below (TDD-00028) share it instead of duplicating the
 // isStringTy branch.
-func (e *Emitter) emitMapOrSetCreate(keyTy Type) string {
+//
+// ty is the Map or Set type being created: its host header word goes before
+// the body (TDD-00247), naming the class and the keys' and values' storage.
+func (e *Emitter) emitMapOrSetCreate(ty Type) string {
 	ptr := e.freshReg()
-	suffix, _ := mapRuntime(keyTy)
+	suffix, _ := mapRuntime(*ty.MapKey)
 	e.ensureMapFamily(suffix)
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_%s_create()", ptr, suffix))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_%s_create_h(i64 %d)", ptr, suffix, e.hostHeaderWord(ty)))
 	return ptr
 }
 
@@ -28,7 +31,7 @@ func mapRuntime(keyTy Type) (suffix, keyIR string) {
 	switch {
 	case keyTy.IsDynamic:
 		return "any", "i64"
-	case isStringTy(keyTy):
+	case isStringTy(keyTy) && !hasHandleFlag(keyTy):
 		return "str", "ptr"
 	case keyTy.IsBigInt:
 		// A bigint key compares by value (SameValueZero): boxed, the any-keyed
@@ -49,7 +52,7 @@ func mapRuntime(keyTy Type) (suffix, keyIR string) {
 // reference type (array or object/class instance) that must be routed to the
 // any-keyed runtime as a boxed pointer rather than stored raw in an i64 slot.
 func isReferenceKeyTy(t Type) bool {
-	return t.IsArray || t.IsObject || t.IsFunc && !t.IsDynamic
+	return t.IsArray || t.IsObject || t.IsFunc && !t.IsDynamic || t.IR == "ptr" && !t.IsDynamic && hasHandleFlag(t)
 }
 
 // ensureMapFamily declares the __kml_map_<suffix>_* runtime once.
@@ -130,7 +133,7 @@ func (e *Emitter) emitNewMapValue(init *ast.NewMapExpression) (Value, error) {
 // emitNewMapValueTyped builds the map with explicit key/value types (so a
 // var-decl can override them from its annotation — emitMapVarDecl).
 func (e *Emitter) emitNewMapValueTyped(init *ast.NewMapExpression, keyTy, valTy Type) (Value, error) {
-	mapPtr := e.emitMapOrSetCreate(keyTy)
+	mapPtr := e.emitMapOrSetCreate(MapType(keyTy, valTy))
 	if init.Init != nil {
 		if err := e.emitMapSeedFromEntries(mapPtr, init.Init, keyTy, valTy, init.GetPos()); err != nil {
 			return Value{}, err
@@ -149,7 +152,11 @@ func (e *Emitter) mapKVTypes(keyAnn, valAnn *ast.TypeAnnotation, entries ast.Exp
 	keyTy, valTy = TypePtr, TypeI64 // defaults: string keys, number values
 	entries = e.iterableArraySource(entries)
 	if keyAnn == nil && valAnn == nil && entries != nil {
-		if lit, ok := entries.(*ast.ArrayLiteral); ok && len(lit.Elements) > 0 {
+		if lit, ok := entries.(*ast.ArrayLiteral); ok && len(lit.Elements) > 0 && !allPairLiterals(lit) {
+			// Entries that are not all [k, v] literals are read as Node
+			// reads any entry object: key entry[0], value entry[1].
+			keyTy, valTy = TypeAny, TypeAny
+		} else if lit, ok := entries.(*ast.ArrayLiteral); ok && len(lit.Elements) > 0 {
 			if pair, ok := lit.Elements[0].(*ast.ArrayLiteral); ok && len(pair.Elements) == 2 {
 				keyTy = e.inferExprType(pair.Elements[0])
 				valTy = e.inferExprType(pair.Elements[1])
@@ -192,6 +199,17 @@ func forceAnyMapVal(keyTy, valTy Type) Type {
 	return valTy
 }
 
+// allPairLiterals reports whether every element of an entries literal is a
+// two-element array literal.
+func allPairLiterals(lit *ast.ArrayLiteral) bool {
+	for _, el := range lit.Elements {
+		if pair, ok := el.(*ast.ArrayLiteral); !ok || len(pair.Elements) != 2 {
+			return false
+		}
+	}
+	return true
+}
+
 // resolveMapEntriesArray normalizes the entries source to (ptr, len, elemTy),
 // like resolveArrayForHOF, but supplies the `[keyTy, valTy]` tuple hint a bare
 // array-literal source (`[[k, v], ...]`) needs — its inner `[k, v]` arrays
@@ -200,6 +218,21 @@ func forceAnyMapVal(keyTy, valTy Type) Type {
 // non-literal source (an annotated variable) already carries its element type
 // and goes through resolveArrayForHOF unchanged.
 func (e *Emitter) resolveMapEntriesArray(entries ast.Expression, keyTy, valTy Type, pos ast.Pos) (ptrReg, lenReg string, elemTy Type, err error) {
+	if lit, ok := entries.(*ast.ArrayLiteral); ok && !allPairLiterals(lit) {
+		// Entry objects of any shape: an any[] the seed loop reads
+		// entry[0] and entry[1] from.
+		var val Value
+		val, err = e.emitArrayLiteralAggregate(lit, &TypeAny)
+		if err != nil {
+			return
+		}
+		elemTy = TypeAny
+		ptrReg = e.freshReg()
+		lenReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+		return
+	}
 	if lit, ok := entries.(*ast.ArrayLiteral); ok {
 		// A bare array literal carries no tuple type of its own, so validate its
 		// shape here before forcing the `[K, V]` element hint: every element must
@@ -297,7 +330,22 @@ func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, 
 	var kVal, vVal Value
 	if dynEntry {
 		// An entry of a user iterable, read as Map's constructor does:
-		// its "0" and "1" properties.
+		// its "0" and "1" properties; a primitive entry is a TypeError.
+		tag, _ := e.emitUnboxTagPayload(entry)
+		prim := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ule i8 %s, %d", prim, tag, kmlTagUndefined))
+		throwL, okL := e.freshLabel("map.entry.bad"), e.freshLabel("map.entry.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", prim, throwL, okL))
+		e.emitLabel(throwL)
+		msg, merr := e.emitStringConcat(Value{Ref: e.internString("Iterator value "), Ty: TypePtr}, e.coerce(entry, TypePtr))
+		if merr != nil {
+			return merr
+		}
+		if msg, merr = e.emitStringConcat(msg, Value{Ref: e.internString(" is not an entry object"), Ty: TypePtr}); merr != nil {
+			return merr
+		}
+		e.emitThrowTypeErrorValue(msg.Ref)
+		e.emitLabel(okL)
 		k, kerr := e.emitDynAnyMemberGet(entry, e.internString("0"), pos)
 		if kerr != nil {
 			return kerr
@@ -427,9 +475,19 @@ func (e *Emitter) emitNewSetValueTyped(init *ast.NewSetExpression, elemOverride 
 		elemTy = e.resolveType(init.ElemType)
 	}
 
-	setPtr := e.emitMapOrSetCreate(elemTy)
-
+	setPtr := e.emitMapOrSetCreate(SetType(elemTy))
 	if haveSrc {
+		if err := e.emitSetSeed(setPtr, srcPtr, srcLen, elemTy); err != nil {
+			return Value{}, err
+		}
+	}
+	return Value{Ref: setPtr, Ty: SetType(elemTy)}, nil
+}
+
+// emitSetSeed adds the srcLen elements at srcPtr (elemTy) to the Set at
+// setPtr.
+func (e *Emitter) emitSetSeed(setPtr, srcPtr, srcLen string, elemTy Type) error {
+	{
 		seedSuffix, seedKeyIR := mapRuntime(elemTy)
 		idxPtr := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
@@ -452,7 +510,7 @@ func (e *Emitter) emitNewSetValueTyped(init *ast.NewSetExpression, elemOverride 
 		elemVal := e.loadArrayElem(gepReg, elemTy)
 		eRef, err := e.mapKeyRef(elemVal, elemTy)
 		if err != nil {
-			return Value{}, err
+			return err
 		}
 		e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set(ptr %s, %s %s, i64 0)", seedSuffix, setPtr, seedKeyIR, eRef))
 		nextIdx := e.freshReg()
@@ -462,8 +520,7 @@ func (e *Emitter) emitNewSetValueTyped(init *ast.NewSetExpression, elemOverride 
 
 		e.emitLabel(endL)
 	}
-
-	return Value{Ref: setPtr, Ty: SetType(elemTy)}, nil
+	return nil
 }
 
 // resolveMapOrSetForCall resolves a Map/Set method call's receiver expression
@@ -537,7 +594,7 @@ func (e *Emitter) emitMapMethod(ty Type, mapPtr string, method string, args []as
 		// A union/any, array or object value types a literal the same way
 		// (`["a", 2]` for a `string | (string | number)[]` value).
 		var vVal Value
-		if valTy.IsFunc || valTy.IsDynamic || valTy.IsArray || valTy.IsObject {
+		if valTy.IsFunc || valTy.IsDynamic || valTy.IsArray || valTy.IsObject || valTy.IsDynamicObject {
 			vVal, err = e.emitExprWithObjectHint(args[1], valTy)
 		} else {
 			vVal, err = e.emitExpr(args[1])
@@ -617,15 +674,11 @@ func (e *Emitter) emitMapMethod(ty Type, mapPtr string, method string, args []as
 			v.Ty.Nullable = true
 			v.Ty.IsUndefined = true
 		}
-		// An array-valued miss is a real `T[] | undefined`: mark the result
-		// Nullable (not IsUndefined) so its truthiness tests the array pointer
-		// via the nullable-array path in toBool — a miss ({null,0}, null header)
-		// is falsy, a present array truthy. IsUndefined is deliberately NOT set:
-		// it would fold toBool to a constant false. `=== undefined`/`=== null`
-		// on the result is handled by the operator path's array-nullish branch
-		// (emitNullableScalarNullCompare defers for array operands).
+		// An array-valued miss is a real `T[] | undefined` (its null header):
+		// truthiness tests the array pointer through the nullable-array path in
+		// toBool, and it prints and boxes as undefined, as in Node.
 		if valTy.IsArray {
-			v.Ty.Nullable = true
+			v.Ty.Nullable, v.Ty.IsUndefined = true, true
 		}
 		return v, nil
 
@@ -663,6 +716,7 @@ func (e *Emitter) emitMapMethod(ty Type, mapPtr string, method string, args []as
 
 	case "keys":
 		res := e.freshReg()
+		e.ensureMapFamily(suffix)
 		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", res, suffix, mapPtr))
 		res = e.materializeKeysAggregate(res, keyTy)
 		return Value{Ref: res, Ty: ArrayOf(keyTy)}, nil
@@ -773,6 +827,7 @@ func (e *Emitter) emitSetMethod(ty Type, setPtr string, method string, args []as
 	case "values":
 		// Set elements are stored as keys; return the keys array.
 		res := e.freshReg()
+		e.ensureMapFamily(suffix)
 		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", res, suffix, setPtr))
 		res = e.materializeKeysAggregate(res, elemTy)
 		return Value{Ref: res, Ty: ArrayOf(elemTy)}, nil
@@ -820,6 +875,7 @@ func (e *Emitter) mapOrSetValuesArray(ty Type, ptr string) (Value, error) {
 		}
 		suffix, _ := mapRuntime(elemTy)
 		res := e.freshReg()
+		e.ensureMapFamily(suffix)
 		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", res, suffix, ptr))
 		res = e.materializeKeysAggregate(res, elemTy)
 		return Value{Ref: res, Ty: ArrayOf(elemTy)}, nil
@@ -1028,8 +1084,10 @@ func (e *Emitter) mapKeyFromSlot(box string, keyTy Type) string {
 }
 
 func (e *Emitter) mapKeysAndVals(mapPtr string, suffix string, keyTy Type) (keysPtr, keysLen, valsPtr string) {
+	e.ensureMapFamily(suffix)
 	keysRes := e.freshReg()
 	valsRes := e.freshReg()
+	e.ensureMapFamily(suffix)
 	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", keysRes, suffix, mapPtr))
 	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_vals(ptr %s)", valsRes, suffix, mapPtr))
 	// Reference-type keys come back NaN-boxed; materialize them to real
@@ -1139,16 +1197,16 @@ func (e *Emitter) emitMapForEach(mapPtr string, suffix string, keyTy, valTy, map
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
-	kGep, kElem := e.freshReg(), e.freshReg()
+	// An array key or value is stored as its header pointer.
+	kGep, vGep := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", kGep, keyTy.IR, keysPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", kElem, keyTy.IR, kGep, keyTy.Align()))
-	vGep, vElem := e.freshReg(), e.freshReg()
+	kElem := e.loadArrayElem(kGep, keyTy)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", vGep, valTy.IR, valsPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", vElem, valTy.IR, vGep, valTy.Align()))
+	vElem := e.loadArrayElem(vGep, valTy)
 
-	cbArgs := []Value{{Ref: vElem, Ty: valTy}}
+	cbArgs := []Value{vElem}
 	if cb.acceptsArgAt(1) {
-		cbArgs = append(cbArgs, Value{Ref: kElem, Ty: keyTy})
+		cbArgs = append(cbArgs, kElem)
 	}
 	if cb.acceptsArgAt(2) {
 		cbArgs = append(cbArgs, Value{Ref: mapPtr, Ty: mapTy})
@@ -1173,6 +1231,7 @@ func (e *Emitter) emitMapForEach(mapPtr string, suffix string, keyTy, valTy, map
 func (e *Emitter) emitSetForEach(setPtr string, strElem bool, elemTy, setTy Type, cb Callback) (Value, error) {
 	suffix, _ := mapRuntime(elemTy)
 	keysRes := e.freshReg()
+	e.ensureMapFamily(suffix)
 	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", keysRes, suffix, setPtr))
 	// Reference-type elements come back NaN-boxed; materialize to real pointers.
 	keysRes = e.materializeKeysAggregate(keysRes, elemTy)
@@ -1340,6 +1399,7 @@ func mapValSig(t Type) string {
 // e.inferExprType resolves identifiers used as set arguments. Nested function
 // bodies are separate scopes scanned by their own pass.
 func (e *Emitter) inferEmptyMapKVTypes(body []ast.Statement) map[string]mapKV {
+	defer e.analysisPass()()
 	candidates := map[string]bool{}
 	keyContrib := map[string][]Type{}
 	valContrib := map[string][]Type{}

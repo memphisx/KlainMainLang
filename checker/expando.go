@@ -123,6 +123,17 @@ func (c *Checker) expandoType(object ast.Expression, prop string) *Type {
 	return c.in.union(ts...)
 }
 
+// expandoMember reports whether m is an expando property: one the scope
+// declares by assigning it on a function.
+func (c *Checker) expandoMember(m *ast.MemberExpression) bool {
+	id, ok := m.Object.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+	sym, _ := c.b.Resolve(id)
+	return sym != nil && len(c.expandos(sym)[m.Property]) > 0
+}
+
 // expandoFunction reports whether object names a function an expando
 // assignment can add to (whose other properties are then TS2339).
 func (c *Checker) expandoFunction(object ast.Expression) bool {

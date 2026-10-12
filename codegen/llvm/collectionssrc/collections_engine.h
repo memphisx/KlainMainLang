@@ -4,7 +4,11 @@
  * hash and an equality; the engine functions are always_inline so each
  * exported symbol gets a specialised body.
  *
- * Header layout (72 bytes), the one codegen and the inspect/clone paths read:
+ * A map is allocated with one header word before it, at map - 8 (the
+ * object's type id, TDD-00247; 0 for a runtime-internal map). A map pointer
+ * points past it, at the body, so the body's offsets below are unchanged.
+ *
+ * Body layout (72 bytes), the one codegen and the inspect/clone paths read:
  *   +0 size  +8 cap  +16 keys  +24 vals  +32 idx  +40 idxcap  +48 used
  *   +56 flags (string-keyed: bit 0, a null-prototype dictionary)
  *   +64 iters (open iterators)
@@ -47,6 +51,13 @@ static inline i64 kml_mix(i64 k) {
 void __kml_map_remove_at(kml_map *m, i64 idx);
 
 #define KML_INL static inline __attribute__((always_inline))
+
+/* A map body after its header word. */
+static inline kml_map *kml_map_alloc(i64 header) {
+    i64 *base = (i64 *)malloc(sizeof(i64) + sizeof(kml_map));
+    base[0] = header;
+    return (kml_map *)(base + 1);
+}
 
 KML_INL void kml_map_init(kml_map *h) {
     h->iters = NULL;
@@ -144,11 +155,12 @@ KML_INL _Bool kml_delete(kml_map *m, i64 key, kml_hash_fn hf, kml_eq_fn eq) {
  * value. keys()/vals() return {ptr,i64}, which C cannot return portably;
  * the generated wrappers use __kml_map_copy_keys/vals. */
 #define KML_MAP_FLAVOR(sfx, KT, HASH, EQ, TOKEY, MISS)                                         \
-    void *__kml_map_##sfx##_create(void) {                                                     \
-        kml_map *h = (kml_map *)malloc(sizeof(kml_map));                                       \
+    void *__kml_map_##sfx##_create_h(i64 header) {                                             \
+        kml_map *h = kml_map_alloc(header);                                                    \
         kml_map_init(h);                                                                       \
         return h;                                                                              \
     }                                                                                          \
+    void *__kml_map_##sfx##_create(void) { return __kml_map_##sfx##_create_h(0); }             \
     void __kml_map_##sfx##_set(kml_map *m, KT key, i64 val) { kml_set(m, TOKEY(key), val, HASH, EQ); } \
     i64 __kml_map_##sfx##_get(kml_map *m, KT key) {                                            \
         i64 e = kml_find(m, TOKEY(key), HASH, EQ);                                             \

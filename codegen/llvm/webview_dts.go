@@ -3,6 +3,8 @@ package llvm
 import (
 	"fmt"
 	"strings"
+
+	"KlainMainLang/ast"
 )
 
 // webview_dts.go — TDD-00142 Stage 6: generate a `declare global { interface
@@ -94,5 +96,59 @@ func tsTypeString(ty Type) string {
 		return "unknown"
 	default: // integer scalars
 		return "number"
+	}
+}
+
+// noteWebviewNew records the typed bindings a klain:webview `new Webview({
+// bindings })` exposes: an object literal's functions, or the function
+// fields of an object-typed value.
+func (e *Emitter) noteWebviewNew(ex *ast.NewExpression) {
+	m, ok := e.libExports["klain_webview:Webview"]
+	if !ok || ex.ClassName != m || len(ex.Args) == 0 {
+		return
+	}
+	opts, ok := ex.Args[0].(*ast.ObjectLiteral)
+	if !ok {
+		return
+	}
+	for _, p := range opts.Properties {
+		if p.Key != "bindings" || p.KeyExpr != nil {
+			continue
+		}
+		if lit, ok := p.Value.(*ast.ObjectLiteral); ok {
+			for _, b := range lit.Properties {
+				if b.KeyExpr == nil && b.Key != "" {
+					e.noteWebviewBinding(b.Key, e.inferExprType(b.Value))
+				}
+			}
+			continue
+		}
+		for _, f := range e.inferExprType(p.Value).Fields {
+			if f.Name != ClassTagField {
+				e.noteWebviewBinding(f.Name, f.Ty)
+			}
+		}
+	}
+}
+
+// noteWebviewBindTyped records `w.bindTyped("name", fn)` on a klain:webview
+// window.
+func (e *Emitter) noteWebviewBindTyped(ex *ast.CallExpression) {
+	mem, ok := ex.Callee.(*ast.MemberExpression)
+	if !ok || mem.Property != "bindTyped" || len(ex.Args) != 2 {
+		return
+	}
+	m, ok := e.libExports["klain_webview:Webview"]
+	if !ok || e.inferExprType(mem.Object).ClassName != m {
+		return
+	}
+	if name, ok := staticStringValue(ex.Args[0]); ok {
+		e.noteWebviewBinding(name, e.inferExprType(ex.Args[1]))
+	}
+}
+
+func (e *Emitter) noteWebviewBinding(name string, ty Type) {
+	if ty.IsFunc {
+		e.webviewBindings = append(e.webviewBindings, webviewBindingSig{Name: name, Params: ty.FuncParams, Ret: ty.FuncRetType})
 	}
 }

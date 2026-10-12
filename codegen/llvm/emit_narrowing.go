@@ -60,6 +60,8 @@ func unionMemberTag(m Type) string {
 		return "array"
 	case m.IsFunc:
 		return "function"
+	case m.IsPromise:
+		return "object" // typeof a promise
 	case isUnionObjectMember(m):
 		return "object"
 	case isStringTy(m):
@@ -195,6 +197,8 @@ func (e *Emitter) instanceofUnionNarrowing(t *ast.BinaryExpression) (name string
 			in = append(in, m)
 		case m.IsObject && !m.IsClass && !hasObjHeader(m) && hostClassName(m) == cls.Name:
 			in = append(in, m) // a headerless host object (URL)
+		case builtinInstanceofMatch(cls.Name, m):
+			in = append(in, m) // a builtin (ReadableStream, Promise, a typed array)
 		default:
 			out = append(out, m)
 		}
@@ -449,6 +453,20 @@ func (e *Emitter) applyUnionBranchNarrowing(test ast.Expression, branchIsTrue bo
 			if id, isID := bin.Left.(*ast.Identifier); isID {
 				if rid, isRID := bin.Right.(*ast.Identifier); isRID {
 					if sym, found := e.lookup(id.Name); found {
+						if info, isClass := e.classes[rid.Name]; isClass && info.HostBase != nil && hostBodyAt8(sym.Ty) && !sym.Ty.Nullable {
+							// A Map, Set or RegExp narrowed to a class extending it
+							// (TDD-00247): the instance starts at its tag word, the
+							// word before the host's body.
+							body := e.freshReg()
+							e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", body, sym.Ptr))
+							inst := e.freshReg()
+							e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", inst, body))
+							slot := e.freshReg()
+							e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+							e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", inst, slot))
+							e.define(id.Name, Symbol{Ptr: slot, Ty: info.Ty})
+							return
+						}
 						if info, isClass := e.classes[rid.Name]; isClass && info.IsErrorSubclass {
 							// A caught value (TDD-00202) narrowed by `e instanceof
 							// HttpError`: the caught record's payload is the thrown
@@ -489,7 +507,7 @@ func (e *Emitter) applyUnionBranchNarrowing(test ast.Expression, branchIsTrue bo
 		}
 	}
 	name, matchTy, matchWhenTrue, complTy, hasCompl, ok := e.unionNarrowingFromCondition(test)
-	if !ok {
+	if !ok || !e.guardTrusted(test, name) {
 		return
 	}
 	var narrowed Type
@@ -516,6 +534,9 @@ func (e *Emitter) narrowUnionLocal(test ast.Expression, branchIsTrue bool) bool 
 	name, matchTy, matchWhenTrue, complTy, hasCompl, ok := e.unionNarrowingFromCondition(test)
 	if !ok {
 		return false
+	}
+	if !e.guardTrusted(test, name) {
+		return true // a guard, but another function may change the local
 	}
 	var narrowed Type
 	if branchIsTrue == matchWhenTrue {
@@ -636,6 +657,21 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 	if target.IsDynamic {
 		return Value{Ref: boxRef, Ty: target}
 	}
+	if target.IsPromise {
+		// A boxed promise is its Promise<any> behind a wrapper
+		// (emitBoxPromise): unwrapped, then converted to the member's
+		// element type, as coerce does from any.
+		p := e.emitAnyToPromiseAny(Value{Ref: boxRef, Ty: TypeAny})
+		if target.PromiseType != nil && !isUnconstrainedDynamic(*target.PromiseType) && target.PromiseType.IR != "void" && !target.PromiseType.IsNever {
+			return e.emitConvertPromise(p, target)
+		}
+		return p
+	}
+	if target.IsArray && !target.IsTypedArray && !target.IsBuffer && e.hasArrayClass() {
+		// An instance of a class extending Array boxes as the instance: its
+		// body, boxed as an array, is the array it holds.
+		boxRef = e.emitArrayClassReceiver(Value{Ref: boxRef, Ty: TypeAny}, "").Ref
+	}
 	tagReg, payload := e.emitUnboxTagPayload(Value{Ref: boxRef})
 	switch {
 	case target.IsCaught:
@@ -668,7 +704,7 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 		// A dynamic array (an untyped `[]`, JSON.parse's arrays): its
 		// elements, each converted to the target's element type, in a new
 		// static array.
-		if el := target.ElemType; el != nil && !target.IsTypedArray && (!el.IsArray || el.IsBuffer) && !el.IsObject && !el.IsTuple && !isNullableScalar(*el) && el.IR != "" && el.IR != "void" {
+		if el := target.ElemType; el != nil && !target.IsTypedArray && (!el.IsObject || el.IsTuple) && !isNullableScalar(*el) && el.IR != "" && el.IR != "void" {
 			isDyn := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isDyn, tagReg, kmlTagDynArray))
 			dynL, staticL := e.freshLabel("unbarr.dyn"), e.freshLabel("unbarr.static")
@@ -698,7 +734,8 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynarr_at(ptr %s, i64 %s)", ev, box, i))
 			gep := e.freshReg()
 			if elemTy.IsArray {
-				// A Buffer element: its header in the slot.
+				// An array element (a nested array, a tuple, a Buffer): its
+				// header in the slot, the element unboxed to it.
 				e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", gep, data, i))
 				e.storeArrayElem(gep, elemTy, Value{Ref: ev, Ty: TypeAny})
 			} else {
@@ -716,9 +753,7 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", a1, a0, n))
 			e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", a1, slot))
 			// Its own {data,len} header, as every array value carries.
-			cell := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", cell))
-			e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", a1, cell))
+			cell := e.boxArrayValue(Value{Ref: a1})
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cell, hdrSlot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 			e.emitLabel(staticL)
@@ -799,9 +834,7 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", a0, data))
 			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", a1, a0, n))
 			e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", a1, slot))
-			cell := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", cell))
-			e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", a1, cell))
+			cell := e.boxArrayValue(Value{Ref: a1})
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cell, hdrSlot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 			e.emitLabel(plainL)
@@ -1000,4 +1033,18 @@ func (e *Emitter) emitUnboxTuple(tagReg, payload string, target Type) Value {
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
 	return Value{Ref: r, Ty: target}
+}
+
+// guardTrusted reports whether a guard on the local name in test holds for
+// the guarded branch: no other function stores to it (a call there could
+// change it, which a guard does not see).
+func (e *Emitter) guardTrusted(test ast.Expression, name string) bool {
+	trusted := true
+	ast.Inspect(test, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Identifier); ok && id.Name == name && !e.flowTrusted(id) {
+			trusted = false
+		}
+		return trusted
+	})
+	return trusted
 }

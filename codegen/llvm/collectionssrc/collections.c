@@ -175,12 +175,31 @@ static _Thread_local kml_map *frozen_set;
 void *__kml_frozen_set_get(void) {
     if (!frozen_set) {
 #ifdef KML_GC_MODE
-        kml_map *h = (kml_map *)GC_malloc_uncollectable(sizeof(kml_map));
+        i64 *base = (i64 *)GC_malloc_uncollectable(sizeof(i64) + sizeof(kml_map));
+        base[0] = 0;
+        kml_map *h = (kml_map *)(base + 1);
 #else
-        kml_map *h = (kml_map *)malloc(sizeof(kml_map));
+        kml_map *h = kml_map_alloc(0);
 #endif
         kml_map_init(h);
         frozen_set = h;
     }
     return frozen_set;
 }
+
+/* Frees a Map/Set's own allocations: its keys, values and index arrays and
+ * the header word and body (from map - 8). Shallow: the entries' own
+ * allocations stay, the program may still reach them. */
+void __kml_map_free(kml_map *m) {
+    free(m->keys);
+    free(m->vals);
+    free(m->idx);
+    free((i64 *)m - 1);
+}
+
+/* The header word of a map: its type id (0 for a runtime-internal map). */
+i64 __kml_map_header(kml_map *m) { return ((i64 *)m)[-1]; }
+
+/* Initializes a Map/Set body inside a class instance that extends Map or Set
+ * (TDD-00247): the instance's tag word is the header before it. */
+void __kml_map_init_at(kml_map *m) { kml_map_init(m); }

@@ -895,6 +895,15 @@ export function exec(command: string, a?: any, b?: any): ChildProcess {
     }, callback);
 }
 
+// The promisified forms (util.promisify reads them through the custom
+// promisify symbol; @types/node types them as `__promisify__`).
+export declare namespace exec {
+    function __promisify__(command: string): Promise<{ stdout: string; stderr: string }>;
+    function __promisify__(command: string, options: ExecOptionsWithBufferEncoding): Promise<{ stdout: Buffer; stderr: Buffer }>;
+    function __promisify__(command: string, options: ExecOptionsWithStringEncoding): Promise<{ stdout: string; stderr: string }>;
+    function __promisify__(command: string, options?: ExecOptions | null): Promise<{ stdout: string | Buffer; stderr: string | Buffer }>;
+}
+
 export function execFile(file: string, callback?: (error: ExecFileException | null, stdout: string, stderr: string) => void): ChildProcess;
 export function execFile(file: string, args: readonly string[] | undefined | null, callback?: (error: ExecFileException | null, stdout: string, stderr: string) => void): ChildProcess;
 export function execFile(file: string, options: ExecFileOptionsWithBufferEncoding, callback?: (error: ExecFileException | null, stdout: Buffer, stderr: Buffer) => void): ChildProcess;
@@ -931,6 +940,19 @@ export function execFile(file: string, a?: any, b?: any, c?: any): ChildProcess 
     }
     return execFileImpl(file, args, options, callback);
 }
+
+export declare namespace execFile {
+    function __promisify__(file: string): Promise<{ stdout: string; stderr: string }>;
+    function __promisify__(file: string, args: readonly string[] | undefined | null): Promise<{ stdout: string; stderr: string }>;
+    function __promisify__(file: string, options: ExecFileOptionsWithBufferEncoding): Promise<{ stdout: Buffer; stderr: Buffer }>;
+    function __promisify__(file: string, options: ExecFileOptionsWithStringEncoding): Promise<{ stdout: string; stderr: string }>;
+    function __promisify__(file: string, options: ExecFileOptions | undefined | null): Promise<{ stdout: string | Buffer; stderr: string | Buffer }>;
+    function __promisify__(file: string, args: readonly string[] | undefined | null, options: ExecFileOptionsWithBufferEncoding): Promise<{ stdout: Buffer; stderr: Buffer }>;
+    function __promisify__(file: string, args: readonly string[] | undefined | null, options: ExecFileOptionsWithStringEncoding): Promise<{ stdout: string; stderr: string }>;
+    function __promisify__(file: string, args: readonly string[] | undefined | null, options: ExecFileOptions | undefined | null): Promise<{ stdout: string | Buffer; stderr: string | Buffer }>;
+}
+
+
 
 // util.promisify(exec) / util.promisify(execFile) resolve `{ stdout, stderr }`
 // and reject with the error carrying both (customPromiseExecFunction); the

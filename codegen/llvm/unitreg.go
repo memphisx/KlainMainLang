@@ -32,6 +32,7 @@ const (
 	unitKindCtor          = 5 // ctorRowTy (emit_classref_rows.go), keyed by the reference payload
 	unitKindCtorOf        = 6 // { i64 id, ptr payload }: obj.constructor by type id
 	unitKindClassParent   = 7 // { i64 id, i64 parent id }: __kml_class_is walks it
+	unitKindDynEntry      = 8 // { i64 fn, ptr entry }: a literal's dynamic entry (emit_dynentry.go)
 )
 
 // unitRow is one table row: its constant, `{ i64 <id>, ... }`.
@@ -159,7 +160,7 @@ func (e *Emitter) emitClassIs(stored string, target int64) string {
 // emitClassParentRows registers each class's parent: its base class's id,
 // or for an Error subclass rooted at a builtin kind, that kind's.
 func (e *Emitter) emitClassParentRows() {
-	if !e.usedClassIs {
+	if !e.usedClassIs && !(e.usedHostBox && e.hasHostBaseClass()) {
 		return
 	}
 	var names []string
@@ -176,9 +177,35 @@ func (e *Emitter) emitClassParentRows() {
 			parent = base.TagID & kmlHdrIDMask
 		} else if kind, ok := errorKindIDs[info.BaseClass]; ok && info.IsErrorSubclass {
 			parent = kind
+		} else if info.HostBase != nil {
+			// A class extending Map or Set: its host layout (TDD-00247).
+			parent = e.hostID(*info.HostBase) & kmlHdrIDMask
 		}
 		if parent >= 0 {
 			e.addUnitRow(unitKindClassParent, "{ i64, i64 }", info.TagID&kmlHdrIDMask, fmt.Sprintf("i64 %d", parent))
 		}
 	}
+	// An Array host of an element layout other than any[] is an Array:
+	// Array.isArray and `instanceof Array` test the any[] id.
+	anyArr := e.hostID(ArrayOf(TypeAny)) & kmlHdrIDMask
+	seen := map[int64]bool{anyArr: true}
+	for _, name := range names {
+		if h := e.classes[name].HostBase; h != nil && h.IsArray && !h.IsTypedArray {
+			if id := e.hostID(*h) & kmlHdrIDMask; !seen[id] {
+				seen[id] = true
+				e.addUnitRow(unitKindClassParent, "{ i64, i64 }", id, fmt.Sprintf("i64 %d", anyArr))
+			}
+		}
+	}
+}
+
+// hasHostBaseClass reports a class extending a host (TDD-00247): a box of
+// its instance reaches its host's row through its parent row.
+func (e *Emitter) hasHostBaseClass() bool {
+	for _, info := range e.classes {
+		if info.HostBase != nil {
+			return true
+		}
+	}
+	return false
 }

@@ -60,6 +60,12 @@ func (c *Checker) relate(s, t *Type, rel relation, depth int) ternary {
 			return yes
 		}
 		return maybe
+	case t.Flags&TypeParam != 0 && t.Constraint == nil && s.Flags&TypeParam == 0 && s.Flags&Union == 0 &&
+		s.Flags&(Null|Undefined|String|Number|Boolean|BigInt|StringLiteral|NumberLiteral|BooleanLiteral|BigIntLiteral|Int|Float32|ESSymbol) != 0:
+		// A concrete primitive, null or undefined is no unconstrained
+		// type parameter: the parameter may be instantiated with any other
+		// type (`return null` from `get(): V`).
+		return no
 	case s.Flags&TypeParam != 0 || t.Flags&TypeParam != 0:
 		return maybe
 	case s.Flags&Union != 0:
@@ -95,9 +101,11 @@ func (c *Checker) relate(s, t *Type, rel relation, depth int) ternary {
 				out = maybe
 			}
 		}
-		if out == no && s.Flags&Object != 0 {
-			// An object against a union of objects: discriminated-union rules.
-			// With one object member (`T | null | undefined`) its no stands.
+		if out == no && s.Flags&Object != 0 && !(s.Kind == Array || s.Kind == Tuple) || out == no && (s.Kind == Array || s.Kind == Tuple) && unionHasArray(t) {
+			// An object against a union of objects: discriminated-union rules
+			// (an array literal against one with an array member: its
+			// contextual element types). With one object member (`T | null |
+			// undefined`) its no stands; an array is no other member's.
 			objects := 0
 			for _, m := range t.Types {
 				if m.Flags&Object != 0 {
@@ -194,8 +202,28 @@ func boolTern(b bool) ternary {
 	return no
 }
 
+// covariantLibInterfaces are the builtin generic interfaces whose type
+// parameters tsc measures covariant: two instantiations of one relate by
+// their type arguments (Promise<number> is no Promise<string>), which the
+// structural comparison through their generic methods cannot decide.
+var covariantLibInterfaces = map[string]bool{
+	"Promise": true, "PromiseLike": true, "ReadonlyArray": true,
+	"Set": true, "ReadonlySet": true, "Map": true, "ReadonlyMap": true,
+	"WeakSet": true, "WeakMap": true, "Iterable": true, "Iterator": true,
+	"IterableIterator": true, "AsyncIterable": true, "AsyncIterator": true,
+	"AsyncIterableIterator": true,
+}
+
 // relateObjects relates two object types structurally, as TypeScript does.
 func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
+	if s.Kind == Interface && t.Kind == Interface && s.Symbol != nil && s.Symbol == t.Symbol &&
+		len(s.TypeArgs) > 0 && len(s.TypeArgs) == len(t.TypeArgs) && covariantLibInterfaces[s.Symbol.Name] && c.inLibrary(s.Symbol.Scope) {
+		for i := range s.TypeArgs {
+			if c.relate(s.TypeArgs[i], t.TypeArgs[i], rel, depth+1) == no {
+				return no
+			}
+		}
+	}
 	switch t.Kind {
 	case Array:
 		switch s.Kind {
@@ -264,6 +292,20 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 				return no
 			}
 		}
+		if len(s.Overloads) > 0 && len(t.Overloads) == 0 && len(t.TypeParams) == 0 {
+			// An overloaded source fits when one of its signatures does
+			// (tsc's signaturesRelatedTo).
+			out := no
+			for _, sig := range s.Overloads {
+				switch c.relate(sig, t, rel, depth+1) {
+				case yes:
+					return yes
+				case maybe:
+					out = maybe
+				}
+			}
+			return out
+		}
 		if len(s.Overloads) > 0 || len(t.Overloads) > 0 || len(s.TypeParams) > 0 || len(t.TypeParams) > 0 {
 			return maybe
 		}
@@ -276,13 +318,7 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 			}
 		}
 		// A source may take fewer parameters, not more required ones.
-		required := 0
-		for i := range s.Params {
-			if !(i < len(s.optionals) && s.optionals[i]) && !(s.restParam && i == len(s.Params)-1) {
-				required = i + 1
-			}
-		}
-		if required > len(t.Params) && !t.restParam {
+		if s.MinArgs() > len(t.Params) && !t.restParam {
 			return no
 		}
 		out := yes
@@ -308,6 +344,37 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 			return yes
 		}
 		if s.Kind == Function || s.Kind == Array || s.Kind == Tuple {
+			if t.StringIndex != nil && t.StringIndex.Flags&Any == 0 {
+				// Neither has a string index signature (an array's index is
+				// numeric only): TS2322, "Index signature for type 'string'
+				// is missing".
+				return no
+			}
+			if ti := t.NumberIndex; ti != nil && ti.Flags&Any == 0 && s.Kind != Function {
+				// The elements are what the target's number index reads.
+				elems := s.Elems
+				if s.Kind == Array {
+					elems = []*Type{s.Elem}
+				}
+				for _, el := range elems {
+					if el != nil && !widenedAgainstLiterals(el, ti) && c.relate(el, ti, rel, depth+1) == no {
+						return no
+					}
+				}
+			}
+			if s.Kind != Function && t.Kind == Interface && t.Symbol != nil && len(t.TypeArgs) == 1 &&
+				(t.Symbol.Name == "Iterable" || t.Symbol.Name == "IterableIterator" || t.Symbol.Name == "ArrayLike") {
+				// What iterating (or indexing) the array yields.
+				elems := s.Elems
+				if s.Kind == Array {
+					elems = []*Type{s.Elem}
+				}
+				for _, el := range elems {
+					if el != nil && !widenedAgainstLiterals(el, t.TypeArgs[0]) && c.relate(el, t.TypeArgs[0], rel, depth+1) == no {
+						return no
+					}
+				}
+			}
 			if len(t.Props) == 0 {
 				return yes
 			}
@@ -323,6 +390,15 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 				}
 			}
 			return maybe // an array's or a function's apparent members
+		}
+		// `Iterable<T>` (its `[Symbol.iterator]` is not modelled as a
+		// member): the source must iterate.
+		if t.Kind == Interface && t.Symbol != nil && len(t.TypeArgs) == 1 && c.inLibrary(t.Symbol.Scope) &&
+			(t.Symbol.Name == "Iterable" || t.Symbol.Name == "IterableIterator") && rel.missingIsNo &&
+			(s.Kind == Instance || s.Kind == Anonymous) && s.Symbol != nil && !c.inLibrary(s.Symbol.Scope) {
+			if c.Unanswered(c.iteratedType(s)) {
+				return no
+			}
 		}
 		if t.Kind == Instance {
 			// A class with private or protected members is nominal; the
@@ -420,6 +496,11 @@ func (c *Checker) propsFit(s, t *Type, rel relation, depth int) ternary {
 	out := yes
 	for _, tp := range t.Props {
 		sp := s.Prop(tp.Name)
+		if sp == nil && (len(s.Calls) > 0 || len(s.Constructs) > 0) {
+			if ft := c.functionMember(tp.Name); ft != nil {
+				sp = &Property{Name: tp.Name, Type: ft} // a callable object has Function's
+			}
+		}
 		if sp == nil {
 			sp = c.objectMember(tp.Name) // every object has Object.prototype's
 		}
@@ -600,4 +681,33 @@ func (c *Checker) relateRestSignatures(s, t *Type, rel relation, depth int) tern
 		return out
 	}
 	return all(out, c.relate(s.Result, t.Result, rel, depth+1))
+}
+
+// unionHasArray reports whether a union has an array or tuple member.
+func unionHasArray(t *Type) bool {
+	for _, m := range t.Types {
+		if m.Flags&Object != 0 && (m.Kind == Array || m.Kind == Tuple) {
+			return true
+		}
+	}
+	return false
+}
+
+// widenedAgainstLiterals reports whether el is a widened primitive (an
+// array literal's `string` element) and t holds literal types: TypeScript
+// types the literal against them contextually, which an array's widened
+// type no longer shows.
+func widenedAgainstLiterals(el, t *Type) bool {
+	if el.Flags&(String|Number|Boolean) == 0 || el.Flags&Literal != 0 {
+		return false
+	}
+	if t.Flags&Literal != 0 {
+		return true
+	}
+	for _, m := range t.Types {
+		if m.Flags&Literal != 0 {
+			return true
+		}
+	}
+	return false
 }

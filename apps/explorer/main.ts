@@ -13,18 +13,19 @@
 // Windows: klainmain --static apps/explorer/main.ts && apps/explorer/main.exe (WebView2; see README)
 // (macOS: zero extra deps; Linux: WebKitGTK dev packages — see README.)
 //
-// `serve` embeds ./dist into the binary at compile time and serves it from an
+// `serve: embedDir(...)` embeds ./dist into the binary at compile time and serves it from an
 // in-binary loopback server, so the finished executable is self-contained — no
 // dist/ folder needs to sit beside it at runtime.
 
 import { Webview } from "klain:webview";
+import { embedDir } from "klain:assets";
 import { home, listDir, readText, readImage } from "./bridge";
 
 const w = new Webview({
   title: "Klain Files",
   width: 1040,
   height: 680,
-  serve: "./apps/explorer/dist",
+  serve: embedDir("./apps/explorer/dist"),
 });
 
 w.bind("home", home);

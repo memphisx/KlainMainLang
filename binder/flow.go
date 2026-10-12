@@ -118,6 +118,9 @@ func (b *binder) join(paths ...*FlowNode) *FlowNode {
 
 // assignFlow records that sym is initialized and/or assigned here.
 func (b *binder) assignFlow(sym *Symbol, init, assign bool) {
+	if sym != nil && sym.Scope != nil && b.container != nil && b.container != containerOf(sym.Scope) {
+		b.foreignStores[sym] = true
+	}
 	if !b.flowing() || sym == nil {
 		return
 	}
@@ -131,6 +134,9 @@ func (b *binder) assignFlow(sym *Symbol, init, assign bool) {
 		return
 	}
 	b.flow = &FlowNode{Flags: FlowAssignment, Antecedent: b.flow, Symbol: sym, Init: init, Assign: assign, Node: b.storing}
+	for _, t := range b.exceptionTargets {
+		addAntecedent(t, b.flow)
+	}
 }
 
 // switchClause returns the flow entering case clause of sw (-1: past every
@@ -262,7 +268,7 @@ func trackedForAssignment(sym *Symbol) bool {
 		return false
 	}
 	v, ok := sym.Declarations[0].Node.(*ast.VarDeclaration)
-	return ok && v.Kind != "var" && v.Init == nil && v.TypeAnnot != nil && !ExemptFromAssignment(v.TypeAnnot)
+	return ok && !v.Ambient && v.Init == nil && v.TypeAnnot != nil && !ExemptFromAssignment(v.TypeAnnot)
 }
 
 // alwaysTrue reports whether a loop condition never ends the loop: absent,
@@ -329,6 +335,72 @@ func (b *Binding) FlowDiagnostics(offset func(line, col int) int, definite bool)
 	return out
 }
 
+// DefinitelyAssigned reports a read of a tracked binding (a typed
+// declaration without a value) that every path reaches after a plain
+// assignment, in the function that declares it: TypeScript's definite
+// assignment holds, by a store that cannot be undefined at run time.
+func (b *Binding) DefinitelyAssigned(id *ast.Identifier) bool {
+	sym := b.refs[id]
+	f := b.refFlow[id]
+	if sym == nil || f == nil || b.written[id] || b.refContainer[id] != containerOf(sym.Scope) || !trackedForAssignment(sym) {
+		return false
+	}
+	// A plain `x = value` stores a value; a destructuring target past its
+	// source's end receives undefined though TypeScript types it T.
+	// The nearest store on every path decides.
+	allPlain := true
+	found, missed := walkBack(f, sym, func(n *FlowNode) bool {
+		if !n.Assign {
+			return false
+		}
+		as, ok := n.Node.(*ast.AssignmentExpression)
+		if !ok {
+			allPlain = false
+		} else if _, plain := as.Left.(*ast.Identifier); !plain {
+			allPlain = false
+		}
+		return true
+	})
+	return found && !missed && allPlain
+}
+
+// ReachingStores returns the nearest store to id's binding on every path
+// to it: each a declaration with an initializer or a plain `x = v`, and
+// ok=false when a path reaches the read without one, or through another
+// kind of store, or when another function stores to it (a call may run it
+// between the store and the read).
+func (b *Binding) ReachingStores(id *ast.Identifier) (stores []ast.Node, ok bool) {
+	sym := b.refs[id]
+	f := b.refFlow[id]
+	if sym == nil || f == nil || b.written[id] || b.refContainer[id] != containerOf(sym.Scope) || len(sym.Declarations) != 1 || b.foreignStores[sym] {
+		return nil, false
+	}
+	if v, isVar := sym.Declarations[0].Node.(*ast.VarDeclaration); !isVar || v.Ambient {
+		return nil, false
+	}
+	plain := true
+	found, missed := walkBack(f, sym, func(n *FlowNode) bool {
+		if !n.Assign {
+			return false
+		}
+		switch x := n.Node.(type) {
+		case *ast.VarDeclaration:
+			if x.Init == nil {
+				plain = false
+			}
+		case *ast.AssignmentExpression:
+			if _, isID := x.Left.(*ast.Identifier); !isID || x.Op != "=" {
+				plain = false
+			}
+		default:
+			plain = false
+		}
+		stores = append(stores, n.Node)
+		return true
+	})
+	return stores, found && !missed && plain
+}
+
 // FlowAt returns the flow node at a reference, and whether the reference is
 // in the function or module that declares its symbol: the flow graph of that
 // container is the one that stores to it, so only there does it narrow.
@@ -343,6 +415,11 @@ func (b *Binding) FlowAt(id *ast.Identifier) (f *FlowNode, local bool) {
 // nil for a store through anything else (an update, a destructuring, a loop
 // variable).
 func (b *Binding) StoresTo(sym *Symbol) []ast.Node { return b.stores[sym] }
+
+// StoredElsewhere reports whether a function other than the one declaring
+// sym stores to it: a call may change it between a narrowing and a read,
+// which flow analysis (as TypeScript's) does not see.
+func (b *Binding) StoredElsewhere(sym *Symbol) bool { return b.foreignStores[sym] }
 
 // EndReachable reports whether some path reaches the end of a function's
 // body, where it returns undefined.
@@ -395,6 +472,20 @@ func (b *Binding) ClosureNarrows(id *ast.Identifier, sym *Symbol) bool {
 		}
 	default:
 		return false
+	}
+	// Only a function expression or arrow function continues its creator's
+	// flow; a function declaration is hoisted, so it may run before any
+	// assignment (tsc's getControlFlowContainer).
+	home := functionOf(sym.Scope)
+	for s := b.refScope[id]; s != nil && s != home; s = s.Parent {
+		if s.Kind != FunctionScope {
+			continue
+		}
+		switch s.Node.(type) {
+		case *ast.FunctionExpression, *ast.ArrowFunction:
+		default:
+			return false
+		}
 	}
 	last, assigned := b.lastAssign[sym]
 	return !assigned || last < b.refOrd[id]

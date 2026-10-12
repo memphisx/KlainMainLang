@@ -429,7 +429,7 @@
       "description": "A string index signature types a dictionary of arbitrary string keys, backed by a map.",
       "snippet": "interface Scores {\n  [player: string]: number;\n}\nconst scores: Scores = { alice: 10, bob: 7 };\nscores[\"carol\"] = 12;",
       "differences": [
-        "String or number key, map-backed — `d[key]` read/write, an object-literal initializer, and `Object.keys/values/entries` + `for…of` all work; a missing key reads `undefined`",
+        "String or number key; the dictionary is the object itself, so a static object or an any value converted to it is the same object and writes show on both — `d[key]` read/write, `in`, `delete`, an object-literal initializer, and `Object.keys/values/entries` + `for…of` all work; a missing key reads undefined",
         "Named properties beside the signature (`{ id: number; [k: string]: number }`) keep their declared types",
         "`JSON.stringify` of an index-signature dict is compact output only (the `space` argument is not applied)",
         "The class-body form (`class C { [n: number]: T }`) is dropped"

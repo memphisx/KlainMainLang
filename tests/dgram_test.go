@@ -91,10 +91,15 @@ server.on('listening', () => {
     })
   })
 })
-let n = 0
+// The server's reads race the client's callbacks (two sockets): its
+// messages print together once all three arrived.
+const got: string[] = []
 server.on('message', (msg, rinfo) => {
-  console.log('message', msg.toString(), rinfo.address, rinfo.family, rinfo.size)
-  if (++n === 3) server.close(() => console.log('server closed'))
+  got.push(['message', msg.toString(), rinfo.address, rinfo.family, rinfo.size].join(' '))
+  if (got.length === 3) {
+    for (const g of got) console.log(g)
+    server.close(() => console.log('server closed'))
+  }
 })
 server.bind(0, '127.0.0.1')
 try { dgram.createSocket('udp5' as any) } catch (e: any) { console.log(e.code, e.message) }
@@ -103,7 +108,7 @@ s2.bind(0)
 try { s2.bind(0) } catch (e: any) { console.log(e.code) }
 s2.close()
 try { s2.close() } catch (e: any) { console.log(e.code, e.message) }
-`, "ERR_SOCKET_BAD_TYPE Bad socket type specified. Valid types are: udp4, udp6\nERR_SOCKET_ALREADY_BOUND\nERR_SOCKET_DGRAM_NOT_RUNNING Not running\nlistening 127.0.0.1 IPv4\nsent null 5\nmessage hello 127.0.0.1 IPv4 5\nconnected true\nerr2 ERR_SOCKET_DGRAM_NOT_CONNECTED Not connected\nmessage abc 127.0.0.1 IPv4 3\nmessage multi-part 127.0.0.1 IPv4 10\nserver closed\nclient closed")
+`, "ERR_SOCKET_BAD_TYPE Bad socket type specified. Valid types are: udp4, udp6\nERR_SOCKET_ALREADY_BOUND\nERR_SOCKET_DGRAM_NOT_RUNNING Not running\nlistening 127.0.0.1 IPv4\nsent null 5\nconnected true\nerr2 ERR_SOCKET_DGRAM_NOT_CONNECTED Not connected\nmessage hello 127.0.0.1 IPv4 5\nmessage abc 127.0.0.1 IPv4 3\nmessage multi-part 127.0.0.1 IPv4 10\nserver closed\nclient closed")
 }
 
 // udp6, the TTL/multicast options, membership, and a bind conflict.

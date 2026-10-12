@@ -71,7 +71,7 @@ func TestShadowRecordsDisagreementsWithoutChangingIR(t *testing.T) {
 			t.Errorf("record %+v", d)
 		}
 	}
-	for _, want := range []string{"inferExprType CallExpression", "resolveType KeywordType"} {
+	for _, want := range []string{"inferExprType BinaryExpression", "resolveType KeywordType"} {
 		if !seen[want] {
 			t.Errorf("no %s disagreement in %v", want, ds)
 		}
@@ -100,5 +100,11 @@ func TestReprKey(t *testing.T) {
 	arr := Type{IR: "ptr", IsArray: true, ElemType: &Type{IR: "double", Float: true}}
 	if !strings.Contains(reprKey(arr), "ElemType={IR=double Float=true}") {
 		t.Errorf("array key %q", reprKey(arr))
+	}
+	// A union box's members are unordered.
+	bn := Type{IR: "i64", IsDynamic: true, UnionMembers: []Type{TypeBool, TypeF64}}
+	nb := Type{IR: "i64", IsDynamic: true, UnionMembers: []Type{TypeF64, TypeBool}}
+	if reprKey(bn) != reprKey(nb) {
+		t.Errorf("union keys %q %q", reprKey(bn), reprKey(nb))
 	}
 }

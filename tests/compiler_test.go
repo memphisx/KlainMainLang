@@ -158,16 +158,7 @@ func applyTestModeEnv(em *llvm.Emitter) {
 // the error through the normal path.
 func sidecarObj(t *testing.T, dir string, clangArgs []string, cs llvm.CSource) string {
 	t.Helper()
-	var compileFlags []string
-	for _, a := range clangArgs {
-		for _, p := range []string{"-O", "-f", "-g", "-D", "-m", "-std=", "-I", "-isystem"} {
-			if strings.HasPrefix(a, p) {
-				compileFlags = append(compileFlags, a)
-				break
-			}
-		}
-	}
-	if obj, err := cs.CachedObject(filepath.Join(os.TempDir(), "klainmain-cobj"), compileFlags); err == nil {
+	if obj, err := cs.CachedObject(testObjCache(), codegenFlags(clangArgs)); err == nil {
 		return obj
 	}
 	p := filepath.Join(dir, cs.Name+"."+cs.SrcExt())
@@ -175,6 +166,52 @@ func sidecarObj(t *testing.T, dir string, clangArgs []string, cs llvm.CSource) s
 		t.Fatalf("write %s: %v", p, err)
 	}
 	return p
+}
+
+// testObjCache is the object cache every test build shares, under the temp
+// root so it follows KML_SCRATCH.
+func testObjCache() string { return filepath.Join(os.TempDir(), "klainmain-cobj") }
+
+// codegenFlags are the code-generation flags on a clang line (-O level,
+// -fsanitize, -D, …): what an object compiled for that line takes.
+func codegenFlags(clangArgs []string) []string {
+	var flags []string
+	for _, a := range clangArgs {
+		for _, p := range []string{"-O", "-f", "-g", "-D", "-m", "-std=", "-I", "-isystem"} {
+			if strings.HasPrefix(a, p) {
+				flags = append(flags, a)
+				break
+			}
+		}
+	}
+	return flags
+}
+
+// appendLibObjects links each builtin library module as an object compiled
+// once for every test (llvm.LibObjects), as the CLI does, and leaves the
+// program's own unit in its .ll on the clang line. codegen are the caller's
+// own code-generation flags, before any runtime file added its own.
+func appendLibObjects(t *testing.T, em *llvm.Emitter, clangArgs, codegen []string) []string {
+	t.Helper()
+	if em.ExportsRuntime() {
+		return clangArgs
+	}
+	llFile := ""
+	for _, a := range clangArgs {
+		if strings.HasSuffix(a, ".ll") {
+			llFile = a
+		}
+	}
+	if llFile == "" {
+		return clangArgs
+	}
+	flags := append(append([]string{}, codegen...), "-ffunction-sections", "-fdata-sections")
+	objs, _, err := llvm.LibObjects(llFile, testObjCache(), flags)
+	if err != nil {
+		t.Fatalf("library objects: %v", err)
+	}
+	clangArgs = append(clangArgs, objs...)
+	return append(clangArgs, llvm.DeadStripFlags(false)...)
 }
 
 // buildBinary compiles the given TypeScript source to a native binary and
@@ -271,6 +308,7 @@ func appendRuntime(t *testing.T, em *llvm.Emitter, dir string, clangArgs []strin
 	if err != nil {
 		t.Fatalf("runtime sources: %v", err)
 	}
+	codegen := codegenFlags(clangArgs)
 	if em.UsesFFIDl() {
 		clangArgs = append(clangArgs, llvm.FFILinkFlags()...)
 	}
@@ -282,7 +320,7 @@ func appendRuntime(t *testing.T, em *llvm.Emitter, dir string, clangArgs []strin
 		clangArgs = append(clangArgs, cs.CFlags...)
 		clangArgs = append(clangArgs, cs.Libs...)
 	}
-	return clangArgs
+	return appendLibObjects(t, em, clangArgs, codegen)
 }
 
 // appendWebview compiles+links the vendored C++ webview binding (TDD-00142)

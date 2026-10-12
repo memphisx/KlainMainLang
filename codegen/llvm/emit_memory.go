@@ -135,9 +135,18 @@ func (e *Emitter) freeResolvedPointer(ptrReg string, ty Type, pos ast.Pos) error
 		e.emitInstr(fmt.Sprintf("call void @__kml_finreg_onfree(ptr %s)", ptrReg))
 	}
 	switch {
-	case ty.IsMap || ty.IsSet:
+	case (ty.IsMap || ty.IsSet) && !ty.Weak:
+		// (A WeakMap/WeakSet's handle is its list head, freed as a plain
+		// allocation below.)
 		e.ensureMapFree()
 		e.emitInstr(fmt.Sprintf("call void @__kml_map_free(ptr %s)", ptrReg))
+	case headeredHost(ty) || ty.IsPromise && ty.PromiseTask && !ty.IsDynamic:
+		// A RegExp's or task promise's allocation starts at its header word
+		// (TDD-00247).
+		e.ensureFree()
+		base := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", base, ptrReg))
+		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", base))
 	case ty.IsFunc:
 		e.ensureClosureFree()
 		e.emitInstr(fmt.Sprintf("call void @__kml_closure_free(ptr %s)", ptrReg))

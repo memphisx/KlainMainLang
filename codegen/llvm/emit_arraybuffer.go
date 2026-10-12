@@ -154,6 +154,16 @@ func (e *Emitter) ensureRoundEven() {
 // wrap/trunc path unchanged.
 func (e *Emitter) coerceTypedArrayStore(v Value, taTy Type, pos ast.Pos) (Value, error) {
 	elemTy := *taTy.ElemType
+	if !taTy.BigIntElem && !v.Ty.IsBigInt && !v.Ty.Float && !v.Ty.IsInteger() && v.Ty.IR != "i1" {
+		// Any other value is stored as its ToNumber (`[192]` → 192), after
+		// ToPrimitive, as JavaScript converts a typed array's elements.
+		boxed, err := e.emitBoxValue(v)
+		if err != nil {
+			return Value{}, err
+		}
+		p := e.emitAnyToPrimitiveHint(boxed.Ref, hintNumber)
+		v = Value{Ref: e.emitAnyToNum(Value{Ref: p, Ty: TypeAny}), Ty: TypeF64}
+	}
 	switch {
 	case taTy.BigIntElem:
 		if !v.Ty.IsBigInt {
@@ -1128,16 +1138,6 @@ func (e *Emitter) emitBufSizeData(hdrRef string) (sizeRef, dataRef string) {
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", slot, hdrRef))
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, slot))
 	return size, data
-}
-
-// emitCopyBytes mallocs a copy of size bytes at data.
-func (e *Emitter) emitCopyBytes(sizeRef, dataRef string) string {
-	e.ensureMalloc()
-	e.ensureMemcpy()
-	c := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", c, sizeRef))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", c, dataRef, sizeRef))
-	return c
 }
 
 // emitRegisterView records that the typed array at data views buffer buf at

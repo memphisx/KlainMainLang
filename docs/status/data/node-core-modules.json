@@ -112,12 +112,12 @@
             "status": "implemented",
             "caveats": [
               "A c-ares error has no `errno` key (Node's has `errno: undefined`): the error layout's `errno` slot is numeric",
-              "The Windows server discovery and client are compile-checked only"
+              "On Windows a channel runs on c-ares' own event thread (no libuv loop there yet), and is compile-checked, not yet run"
             ],
             "notes": [
               "Node's lib/dns.js in TypeScript: `lookup` (`all`/`family`/`hints`/`order`/`verbatim`), `lookupService`, `resolve`/`resolve4`/`resolve6` (with `ttl`)/`resolveMx`/`Txt`/`Srv`/`Ns`/`Cname`/`Ptr`/`Soa`/`Naptr`/`Caa`/`Tlsa`/`Any`, `reverse`, `Resolver` (`timeout`/`tries`/`maxTimeout`, `setServers`/`getServers`, `cancel`, `setLocalAddress`), `get`/`setDefaultResultOrder`, the error-code constants and `dns.promises` ([ADR-01294](../adr/ADR-01294.md))",
-              "`lookup` and `lookupService` are `getaddrinfo`/`getnameinfo` on the thread pool, as libuv's; the `resolve*` family is a native DNS client standing in for c-ares (UDP with TCP on truncation, the system's servers, c-ares' statuses), its records shaped as cares_wrap's parsers shape them",
-              "Verified against Node on the Mac (Apple Silicon) and on Linux (Docker, glibc/arm64)"
+              "`lookup` and `lookupService` are `getaddrinfo`/`getnameinfo` on the thread pool, as libuv's; the `resolve*` family is Node's cares_wrap over the system c-ares: its channel setup, its sockets on the loop, its parsers and statuses ([ADR-01587](../adr/ADR-01587.md))",
+              "Verified against Node with a local DNS server on the Mac (Apple Silicon, c-ares 1.34) and on Linux (x86-64, c-ares 1.27)"
             ]
           },
           {

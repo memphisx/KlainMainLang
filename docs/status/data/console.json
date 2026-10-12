@@ -94,7 +94,7 @@
             "feature": "`console.count()` / `.countReset()`",
             "status": "implemented",
             "notes": [
-              "Backed by a real `Map<string, number>` — matches real Node's per-label semantics exactly, unlike `time`'s single-slot narrowing above. See [ADR-00029](../adr/ADR-00029.md)."
+              "Backed by a real `Map<string, number>`, one count per label; a label is converted with ToString, as Node's `${label}`, and `countReset` of a label with no count is Node's process warning ([ADR-00029](../adr/ADR-00029.md), [ADR-01477](../adr/ADR-01477.md), [ADR-01495](../adr/ADR-01495.md))."
             ]
           },
           {

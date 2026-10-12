@@ -575,5 +575,30 @@ void __kml_tui_render(TuiNode *root) {
   free(g_front); g_front = g_back; g_back = NULL;
   kmltui_free(root);
 }
+
+/* klain:tui's entry points (lib/node/klain_tui.ts through lib/native.d.ts):
+   a node crosses as its address in a double, exact below 2^53. */
+#define KT(h) ((TuiNode *)(uintptr_t)(h))
+double __kml_native_tui_node(double kind) { return (double)(uintptr_t)__kml_tui_node((int)kind); }
+void __kml_native_tui_size(double h, double w, double ht) { __kml_tui_set_size(KT(h), w, ht); }
+void __kml_native_tui_min(double h, double w, double ht) { __kml_tui_set_min(KT(h), w, ht); }
+void __kml_native_tui_flex(double h, double dir, double grow, double shrink, double basis) { __kml_tui_set_flex(KT(h), (int)dir, grow, shrink, basis); }
+void __kml_native_tui_justify(double h, double v) { __kml_tui_set_justify(KT(h), (int)v); }
+void __kml_native_tui_align(double h, double v) { __kml_tui_set_align(KT(h), (int)v); }
+void __kml_native_tui_self(double h, double v) { __kml_tui_set_self(KT(h), (int)v); }
+void __kml_native_tui_wrap(double h, double v) { __kml_tui_set_wrap(KT(h), (int)v); }
+void __kml_native_tui_padding(double h, double t, double r, double b, double l) { __kml_tui_set_padding(KT(h), t, r, b, l); }
+void __kml_native_tui_margin(double h, double t, double r, double b, double l) { __kml_tui_set_margin(KT(h), t, r, b, l); }
+void __kml_native_tui_gap(double h, double g) { __kml_tui_set_gap(KT(h), g); }
+void __kml_native_tui_colors(double h, double fg, double bg) { __kml_tui_set_colors(KT(h), (int)fg, (int)bg); }
+void __kml_native_tui_attr(double h, double a) { __kml_tui_set_attr(KT(h), (int)a); }
+void __kml_native_tui_border(double h, double style, double color) { __kml_tui_set_border(KT(h), (int)style, (int)color); }
+void __kml_native_tui_text(double h, const char *s, double wrap) { __kml_tui_set_text(KT(h), s, (int)wrap); }
+void __kml_native_tui_add_item(double h, const char *s) { __kml_tui_add_item(KT(h), s); }
+void __kml_native_tui_selected(double h, double i) { __kml_tui_set_selected(KT(h), (int)i); }
+void __kml_native_tui_progress(double h, double v) { __kml_tui_set_progress(KT(h), v); }
+void __kml_native_tui_spinner(double h, double f) { __kml_tui_set_spinner(KT(h), (int)f); }
+void __kml_native_tui_insert(double p, double c) { __kml_tui_insert(KT(p), KT(c)); }
+void __kml_native_tui_render(double h) { __kml_tui_render(KT(h)); }
 `
 }

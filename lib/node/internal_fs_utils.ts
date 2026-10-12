@@ -15,6 +15,7 @@ export interface ObjectEncodingOptions {
     encoding?: BufferEncoding | null | undefined;
 }
 export type EncodingOption = ObjectEncodingOptions | BufferEncoding | undefined | null;
+export type BufferEncodingOption = 'buffer' | { encoding: 'buffer' };
 export interface Abortable {
     signal?: AbortSignal | undefined;
 }

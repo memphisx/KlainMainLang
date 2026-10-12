@@ -25,7 +25,7 @@ func TestE2EGeneratorYieldsInsideArrayLiteral(t *testing.T) {
 	// Both yields sit inside an array literal: the former yield collector never
 	// entered one, mistyped the element and rejected the program.
 	assertOutput(t, `
-function* pairs() {
+function* pairs(): Generator<string, void, string> {
   const got = [yield "a", yield "b"]
   console.log(got.length)
 }

@@ -169,3 +169,18 @@ func TestFlowCost(t *testing.T) {
 		}
 	}
 }
+
+// A contextual parameter typed as a class whose members hold a generic
+// method, the polymorphic `this` or an unresolved library type keeps that
+// class (TypeScript's getContextualSignature).
+func TestContextualParamOfInstance(t *testing.T) {
+	for _, src := range []string{
+		"class E { on<K>(k: K): void {} x = 1; }\ntype L = (e: E) => void;\nconst l: L = (e) => { e; };",
+		"class E { on(): this { return this; } x = 1; }\ntype L = (e: E) => void;\nconst l: L = (e) => { e; };",
+		"class E { t: ReturnType<typeof setTimeout> | null = null; }\nfunction g(f: (e: E) => void) {}\ng((e) => { e; });",
+	} {
+		if got := typeOfProbe(t, src); got != "E" {
+			t.Errorf("%s: got %s, want E", src, got)
+		}
+	}
+}

@@ -158,6 +158,20 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 
 	through := ast.NewCallExpression(&ast.MemberExpression{Object: ast.NewIdentifier(recvName, mem.GetPos()), Property: mem.Property}, ex.Args, ex.GetPos())
 	through.TypeArgs = ex.TypeArgs
+	if c := e.front(); c != nil {
+		// The checker typed the written receiver, not the throwaway local:
+		// a builtin method keeps the intrinsic it resolved to.
+		if key, ok := e.methodIntrinsic(c, mem); ok {
+			through.Intrinsic = key
+		}
+	}
+	if through.Intrinsic == "" && (objVal.Ty.IsDate || e.isDateClass(objVal.Ty)) {
+		// The checker leaves `?.` untyped; a Date's methods dispatch on the
+		// receiver's representation.
+		if _, ok := intrinsics["Date.prototype."+mem.Property]; ok {
+			through.Intrinsic = "Date.prototype." + mem.Property
+		}
+	}
 	return e.emitNullGuardedExpr(e.isAbsentPtr(objVal.Ref, objVal.Ty), through)
 }
 
@@ -209,7 +223,9 @@ func optionalCallResultType(kind optionalCalleeKind, inner Type) Type {
 	if kind == optCalleePresent || inner.IR == "void" || inner.IR == "" || inner.IsArray {
 		return inner
 	}
-	if u := undefinedableElem(inner); u.Nullable {
+	// A `T | null` read short-circuited to undefined holds all three
+	// states (`r?.inner` of a null `inner` is null).
+	if u := optionalFieldType(inner); u.Nullable {
 		return u
 	}
 	return inner
@@ -221,6 +237,7 @@ func optionalCallResultType(kind optionalCalleeKind, inner Type) Type {
 func (e *Emitter) emitOptionalCalleeCall(ex *ast.CallExpression) (Value, error) {
 	plain := *ex
 	plain.Optional = false
+	e.noteChainCopy(&plain, ex)
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && !mem.Optional {
 		// `o.m?.(…)` of an optional method: called where the instance's class
 		// implements it. The receiver is evaluated once.
@@ -368,7 +385,7 @@ func (e *Emitter) emitNullGuardedExpr(isNull string, through ast.Expression) (Va
 	// `a?.m()` is `RetType | undefined` — a nullish receiver short-circuits to a
 	// real `undefined` (as in TS), not the return type's zero (ADR-00834). Same
 	// scalar `{ i1, T }` / pointer-null / array-passthrough shapes as `a?.x`.
-	undefTy := undefinedableElem(retTy)
+	undefTy := optionalFieldType(retTy)
 	wrapUndef := !isVoid && undefTy.Nullable && !retTy.IsArray
 
 	var resPtr, resIR string
@@ -417,6 +434,10 @@ func (e *Emitter) emitNullGuardedExpr(isNull string, through ast.Expression) (Va
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.arrayReturnHeader(callVal), resPtr))
 		} else {
 			stored := e.coerce(callVal, retTy)
+			if undefTy.NullAndUndef && !stored.Ty.NullAndUndef {
+				// Its own null stays null beside the chain's undefined.
+				stored = e.toThreeState(stored, undefTy)
+			}
 			storeRef := stored.Ref
 			// A guarded expression that is itself `T | undefined` (a further `?.`
 			// to its right) already carries the { i1, T } aggregate — its own
@@ -469,7 +490,7 @@ func (e *Emitter) emitOptionalCallNullableScalar(ex *ast.CallExpression, mem *as
 
 	retTy := e.inferExprType(through)
 	isVoid := retTy.IR == "void" || retTy.IR == ""
-	undefTy := undefinedableElem(retTy)
+	undefTy := optionalFieldType(retTy)
 	wrapUndef := !isVoid && undefTy.Nullable && !retTy.IsArray
 
 	var resPtr, resIR string
@@ -510,8 +531,12 @@ func (e *Emitter) emitOptionalCallNullableScalar(ex *ast.CallExpression, mem *as
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.arrayReturnHeader(callVal), resPtr))
 		} else {
 			stored := e.coerce(callVal, retTy)
+			if undefTy.NullAndUndef && !stored.Ty.NullAndUndef {
+				// Its own null stays null beside the chain's undefined.
+				stored = e.toThreeState(stored, undefTy)
+			}
 			storeRef := stored.Ref
-			if isNullableScalar(undefTy) {
+			if isNullableScalar(undefTy) && !isNullableScalar(stored.Ty) {
 				storeRef = e.makeNullableScalarAgg(undefTy, "true", stored.Ref)
 			}
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, storeRef, resPtr, undefTy.Align()))
@@ -537,6 +562,31 @@ func (e *Emitter) emitOptionalCallNullableScalar(ex *ast.CallExpression, mem *as
 }
 
 func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
+	e.noteWebviewBindTyped(ex)
+	if isThenableResolveCall(ex) {
+		return e.emitThenableResolveCall(ex)
+	}
+	if isThenConstCall(ex) {
+		return e.emitThenConstCall(ex)
+	}
+	if isResolveThenCall(ex) {
+		return e.emitResolveThenCall(ex)
+	}
+	if id, ok := ex.Callee.(*ast.Identifier); ok && id.Name == queueMicrotaskName {
+		return e.emitQueueMicrotask(ex.Args, ex.GetPos())
+	}
+	if r, ok := e.builtinIteratorCall(ex); ok {
+		return e.emitCall(r)
+	}
+	// `(x as T[]).push(v)` with x held as any: the assertion is erased, so
+	// the mutation is x's own (the dynamic call), not a converted copy's.
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && arrayMutators[mem.Property] {
+		if as, ok := mem.Object.(*ast.AsExpression); ok && isUnconstrainedDynamic(e.inferExprType(as.Expr)) {
+			if at := e.inferExprType(as); at.IsArray && !at.IsTypedArray && !at.IsBuffer {
+				return e.emitCall(ast.NewCallExpression(ast.NewMemberExpression(as.Expr, mem.Property, mem.GetPos()), ex.Args, ex.GetPos()))
+			}
+		}
+	}
 	// `Object.prototype.m.call(o, …)`: Object.prototype's own methods.
 	if r, ok := e.objectProtoCall(ex); ok {
 		return r()
@@ -719,27 +769,6 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	// Special-case: console.log(...) and array.push(...)
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
 
-		if e.inferExprType(mem.Object).IsWebview {
-			return e.emitWebviewMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
-		}
-		if e.inferExprType(mem.Object).IsEmbeddedAssets {
-			return e.emitEmbeddedAssetsMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "assets__kml_builtin" {
-			return e.emitAssetsModuleCall(mem.Property, ex.Args, ex.GetPos())
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "tty__kml_builtin" {
-			return e.emitTtyModuleCall(mem.Property, ex.Args, ex.GetPos())
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "tui__kml_builtin" {
-			return e.emitTuiModuleCall(mem.Property, ex.Args, ex.GetPos())
-		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "sync__kml_builtin" {
-			return e.emitSyncModuleCall(mem.Property, ex.Args, ex.GetPos())
-		}
-		if e.inferExprType(mem.Object).IsChannel {
-			return e.emitChannelMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
-		}
 		// `/** @value */` flat array (TDD-00134 Stage 2): push is the one
 		// supported method; everything else needs the pointer-slot layout.
 		if objTy := e.inferExprType(mem.Object); objTy.IsFlatArray {
@@ -791,6 +820,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if objTy := e.inferExprType(mem.Object); objTy.IsClass {
 			// `new Box<string>(…).get()`: the instantiation the receiver's
 			// `new` makes, registered before its methods are looked up.
+			if _, err := e.ensureGenericInstance(objTy.ClassName); err != nil {
+				return Value{}, err
+			}
 			if _, ok := e.classes[objTy.ClassName]; !ok {
 				if ne, isNew := mem.Object.(*ast.NewExpression); isNew {
 					if genDecl, generic := e.genericClasses[ne.ClassName]; generic {
@@ -818,6 +850,15 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				// (e) => …`): called dynamically, with the instance as `this`.
 				if _, fty, isField := info.Ty.FieldIndex(mem.Property); isField && isUnconstrainedDynamic(fty) {
 					return e.emitClassMethodCall(objTy, mem.Object, mem.Property, ex.Args, ex.GetPos())
+				}
+				if info.HostBase != nil {
+					// A method the class extending Map or Set does not
+					// declare is the host's, on the instance's body.
+					inst, err := e.emitExpr(mem.Object)
+					if err != nil {
+						return Value{}, err
+					}
+					return e.emitHostBaseCall(inst, *info.HostBase, mem.Property, ex.Args, ex.GetPos())
 				}
 			}
 		}
@@ -922,6 +963,10 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		// A Map or Set the checker has no declaration for: a klain: module's
 		// compiler-typed value (klain:http's HttpRequest.query), until those
 		// modules are declared (TDD-00230 ports them last).
+		if objTy := e.inferExprType(mem.Object); objTy.IsDynamicObject && mem.Property == "hasOwnProperty" && len(ex.Args) == 1 {
+			// A dictionary is a plain object: Object.prototype's method.
+			return e.emitHasOwnProperty(mem.Object, ex.Args[0], "hasOwnProperty", true, ex.GetPos())
+		}
 		if objTy := e.inferExprType(mem.Object); objTy.IsMap || objTy.IsSet {
 			ty, ptr, err := e.resolveMapOrSetForCall(mem.Object, ex.GetPos())
 			if err != nil {
@@ -1149,7 +1194,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	// indirect call through the dynamic-function record with the receiver
 	// bound as `this`.
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-		if objTy := e.inferExprType(mem.Object); isUnconstrainedDynamic(objTy) {
+		// A union of scalars is the same self-describing box (an un-narrowed
+		// `number | string` receiver: the member its tag holds).
+		if objTy := e.inferExprType(mem.Object); isUnconstrainedDynamic(objTy) || objTy.IsDynamic && isSelfDescribingBox(objTy) {
 			objVal, err := e.emitExpr(mem.Object)
 			if err != nil {
 				return Value{}, err
@@ -1170,6 +1217,27 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		return e.emitCall(r)
 	}
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+		if ot := e.inferExprType(mem.Object); ot.IsClass {
+			// A method the instance was given as its own property.
+			return e.emitClassMethodCall(ot, mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		// A fixed-layout object's boxed field (a generator method, held as
+		// `any`): the boxed object's dynamic method call, `this` bound to it.
+		if ot := e.inferExprType(mem.Object); ot.IsObject && !ot.IsDynamic {
+			for _, f := range ot.Fields {
+				if f.Name == mem.Property && isUnconstrainedDynamic(f.Ty) {
+					objVal, err := e.emitExpr(mem.Object)
+					if err != nil {
+						return Value{}, err
+					}
+					boxed, err := e.emitBoxValue(objVal)
+					if err != nil {
+						return Value{}, err
+					}
+					return e.emitDynAnyMethodCall(boxed, mem.Property, ex.Args, ex.GetPos())
+				}
+			}
+		}
 		recv := describeReceiverType(e.inferExprType(mem.Object))
 		// A bare namespace/global identifier receiver (Object.setPrototypeOf,
 		// process.send, cluster.fork, Math.foo, …) infers as the i64 default;
@@ -1495,6 +1563,17 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 		}
 		if argProvided {
 			arg := args[i]
+			if paramTy.IsArray && !paramTy.IsTypedArray {
+				// An instance of a class extending Array passes its array,
+				// so the callee's writes are the instance's.
+				body, ok, err := e.hostArrayReceiver(arg)
+				if err != nil {
+					return Value{}, err
+				}
+				if ok {
+					arg = body
+				}
+			}
 			if paramTy.IsArray {
 				if arrId, ok := arg.(*ast.Identifier); ok && !isSelfDescribingBox(e.inferExprType(arg)) && !e.isDynamicBinding(arrId.Name) {
 					sym, ok := e.lookup(arrId.Name)
@@ -1668,9 +1747,10 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 				paramScalar = &pv
 			}
 			popScratch()
-		} else if i < len(sig.Optional) && sig.Optional[i] || paramTy.IsDynamic && !paramTy.IsArray {
+		} else if i < len(sig.Optional) && sig.Optional[i] || paramTy.IsDynamic && !paramTy.IsArray || e.compatJS() {
 			// A required `any` parameter left out (plain JS; tsc rejects the
-			// call) is undefined, as an omitted optional one is.
+			// call) is undefined, as an omitted optional one is; untyped
+			// JavaScript may omit any argument (as the closure call does).
 			// ADR-00164: an omitted `param?: T` argument gets T's zero
 			// value, the same undefined stand-in ADR-00157/ADR-00158 use.
 			// Array-typed params decompose into two LLVM params (ptr, i64
@@ -1781,6 +1861,7 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 			argParts = append(argParts, "ptr "+restHdr, fmt.Sprintf("i64 %d", n))
 		}
 	}
+	e.noteArgc(countsArgs(sig.HasRest, sig.ParamNames), args, regularCount)
 	argsStr := strings.Join(argParts, ", ")
 	if sig.RetType.IR == "void" {
 		e.emitInstr(fmt.Sprintf("call void @%s(%s)", name, argsStr))
@@ -2174,7 +2255,7 @@ func (e *Emitter) funcOwnPropCall(ex *ast.CallExpression) (*ast.CallExpression, 
 		return nil, false
 	}
 	ty := e.inferExprType(mem.Object)
-	if !ty.IsFunc || ty.IsDynamic {
+	if !ty.IsFunc || ty.IsDynamic || e.isNamespaceMember(mem) {
 		return nil, false
 	}
 	// A namespace merged into the function declares its own members, and a
@@ -2320,6 +2401,47 @@ func (e *Emitter) calleeWantsSource(ex *ast.CallExpression) bool {
 	return false
 }
 
+// builtinIteratorCall is `x[Symbol.iterator]()` on a builtin iterable as
+// the method that method is: an array's, typed array's or Set's
+// `values()`, a Map's `entries()`, and a string's iterator over its code
+// points (`[...s].values()`).
+func (e *Emitter) builtinIteratorCall(ex *ast.CallExpression) (*ast.CallExpression, bool) {
+	if m := indexCalleeAsMember(ex); m != nil {
+		ex = m
+	}
+	mem, ok := ex.Callee.(*ast.MemberExpression)
+	if !ok || mem.Property != syncIteratorMethodName || len(ex.Args) != 0 {
+		return nil, false
+	}
+	t := e.inferExprType(mem.Object)
+	if c := e.front(); c != nil && !t.IsArray && !t.IsSet && !t.IsMap && !isForOfStringTy(t) {
+		// Asked before the receiver's own declaration was registered (a
+		// module global's pre-pass): the checker's type.
+		if ct := c.TypeOf(mem.Object); !c.Unanswered(ct) {
+			if rt, ok := e.repr().of(ct); ok {
+				t = rt
+			}
+		}
+	}
+	if t.Nullable || t.IsDynamic || t.IsClass {
+		return nil, false
+	}
+	pos := ex.GetPos()
+	call := func(obj ast.Expression, m string) *ast.CallExpression {
+		return ast.NewCallExpression(ast.NewMemberExpression(obj, m, pos), nil, pos)
+	}
+	switch {
+	case t.IsArray || t.IsSet:
+		return call(mem.Object, "values"), true
+	case t.IsMap:
+		return call(mem.Object, "entries"), true
+	case isForOfStringTy(t):
+		chars := ast.NewArrayLiteral([]ast.Expression{ast.NewSpreadElement(mem.Object, pos)}, pos)
+		return call(chars, "values"), true
+	}
+	return nil, false
+}
+
 // isExpandoCall reports a call of a function's expando property (`f.p =
 // g` in the scope declaring f), as the checker resolves it.
 func (e *Emitter) isExpandoCall(ex *ast.CallExpression) bool {
@@ -2381,4 +2503,10 @@ func (e *Emitter) emitTemplateRaw(ex *ast.MemberExpression) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", has, raw))
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", h, has, raw, cooked))
 	return e.arrayValueFromHeaderReg(h, ArrayOf(TypePtr)), nil
+}
+
+// arrayMutators are the Array methods that change their receiver.
+var arrayMutators = map[string]bool{
+	"push": true, "pop": true, "shift": true, "unshift": true, "splice": true,
+	"reverse": true, "sort": true, "fill": true, "copyWithin": true,
 }

@@ -4536,3 +4536,34 @@ const server = http.createServer(mustCall((req, res) => {
 		t.Errorf("createConnection request failed: %q", out)
 	}
 }
+
+// An h2c connection that sends the preface and then idles does not hold the
+// loop: its session yields its connection fiber while the socket has nothing
+// to read (ADR-01409), so an HTTP/1.1 request to the same server is answered
+// meanwhile. The blocking drive it replaced waited on the idle connection.
+func TestE2EHTTPListenH2cIdleDoesNotBlock(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
+	src := `
+import http from 'klain:http'
+import * as net from 'net'
+interface Res { status: number; body: string }
+const port = 8997
+setTimeout(() => {
+  const idle = net.connect(port, '127.0.0.1', () => {
+    idle.write('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n')
+    idle.write(Buffer.from([0, 0, 0, 4, 0, 0, 0, 0, 0]))
+    setTimeout(async () => {
+      const r = await fetch('http://127.0.0.1:' + port + '/one')
+      console.log('1.1 answered: ' + (await r.text()))
+      idle.destroy()
+      http.close()
+    }, 50)
+  })
+}, 20)
+http.listen(port, (req: HttpRequest): Res => {
+  return { status: 200, body: 'hello ' + req.path }
+})
+console.log('closed')
+`
+	assertOutput(t, src, "1.1 answered: hello /one\nclosed")
+}

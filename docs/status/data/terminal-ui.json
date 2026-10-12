@@ -39,7 +39,8 @@
             ],
             "notes": [
               "A pragmatic subset of Yoga's style surface is exposed: `flexDirection`/`flexGrow`/`flexShrink`/`flexBasis`, `justifyContent`/`alignItems`/`alignSelf`/`flexWrap`, `width`/`height`/`minWidth`/`minHeight`, `padding*`/`margin*`/`gap`",
-              "Yoga compiled per-`.cpp` to objects (C++20) and linked only when a program uses `klain:tui` ([ADR-00519](../adr/ADR-00519.md))"
+              "Yoga compiled per-`.cpp` to objects (C++20) and linked only when a program uses `klain:tui` ([ADR-00519](../adr/ADR-00519.md))",
+              "Props are a typed `Props` object, a literal or one built at run time; a misspelt prop or a bad enum value is a type error ([ADR-01471](../adr/ADR-01471.md))"
             ]
           },
           {

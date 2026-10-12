@@ -3,7 +3,7 @@
 
 // A sync generator in `for await` (the spec's CreateAsyncFromSyncIterator):
 // plain yields are identity-awaited, promise yields await to their values.
-function* nums(): number {
+function* nums(): Generator<number> {
   yield 1;
   yield 2;
   yield 3;
@@ -11,7 +11,7 @@ function* nums(): number {
 async function work(n: number): Promise<number> {
   return n * 10;
 }
-function* jobs(): Promise<number> {
+function* jobs(): Generator<Promise<number>> {
   yield work(1);
   yield work(2);
 }
@@ -31,7 +31,7 @@ class Countdown {
   }
 }
 
-async function* agen(): number {
+async function* agen(): AsyncGenerator<number> {
   yield await work(4);
   yield await work(5);
 }
@@ -40,11 +40,11 @@ async function main(): Promise<void> {
   for await (const n of nums()) { console.log(n); }   // 1 2 3
   for await (const v of jobs()) { console.log(v); }   // 10 20
 
-  // Map values / Set elements, same shapes as sync for-of.
+  // Map entries / Set elements, same shapes as sync for-of.
   const m = new Map<string, number>();
   m.set("a", 5);
   m.set("b", 7);
-  for await (const v of m) { console.log(v); }        // 5 7
+  for await (const v of m) { console.log(v); }        // [ 'a', 5 ] [ 'b', 7 ]
   const s = new Set<string>();
   s.add("hi");
   s.add("yo");

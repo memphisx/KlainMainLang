@@ -254,3 +254,25 @@ console.log(BigInt(0).toString(), BigInt(255).toString(16), BigInt("12") + 1n, t
 console.log(String(BigInt(9)), BigInt(0n).toString())
 `)
 }
+
+// BigInt(x) for a value known only at run time: an integer number, a
+// string, a boolean or a bigint converts; undefined and null are a
+// TypeError, a non-integral number a RangeError naming it (ADR-01459).
+func TestE2EBigIntRuntimeConversion(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var values = [127, 128, undefined, 1.5, -0.5, 9007199254740991, 'x', '12', true, null, NaN, Infinity];
+values.forEach(function (value, i) {
+  try { var b = BigInt(value); console.log(i, String(b)); } catch (e) { console.log(i, e.constructor.name, e.message); }
+});
+var u = undefined;
+try { BigInt(u); console.log('no throw'); } catch (e) { console.log(e.constructor.name, e.message); }
+var big = BigInt(5); var anyBig = [big][0];
+console.log(String(BigInt(anyBig)));
+var first = true;
+var v = { [Symbol.toPrimitive]: function () { if (first) { first = false; return "42"; } throw new Error("twice"); } };
+console.log(String(BigInt(v)));
+var o = { valueOf: function () { return 44; }, toString: function () { throw new Error("unreachable"); } };
+console.log(String(BigInt(o)));
+try { BigInt({}); } catch (e) { console.log(e.constructor.name, e.message); }
+`)
+}

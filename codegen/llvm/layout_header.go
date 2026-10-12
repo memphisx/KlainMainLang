@@ -32,10 +32,9 @@ var layoutDefs = []layoutDef{
 	// The fields of an in-flight fetch a parked task polls.
 	{"KML_FETCHREQ", "{ ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }", map[int]string{2: "DONE", 6: "HEADERS_DONE"}},
 	// A connection slot of the HTTP server's connection array.
-	{"KML_CONN", "{ i64, ptr, ptr, ptr, ptr }", map[int]string{0: "FD", 1: "CTX"}},
+	{"KML_CONN", "{ i64, ptr, ptr, ptr, ptr }", map[int]string{0: "FD", 1: "CTX", 4: "GROUP"}},
 	{"KML_ERROR", errorObjType.StructIR(), map[int]string{0: "KIND", 1: "MSG", 2: "NAME", 3: "CODE", 4: "ERRCODE", 5: "ERRSTR", 6: "SYSCALL", 7: "PATH", 8: "ERRNO", 9: "DEST"}},
 	{"KML_ERR", errorObjType.StructIR(), map[int]string{1: "MESSAGE", 2: "NAME", 3: "CODE", 4: "ERRCODE", 5: "ERRSTR", 8: "ERRNO", 10: "CAUSE", 11: "ADDRESS", 12: "PORT", 13: "EXTRA", 14: "NAME_OWN"}},
-	{"KML_CP", cpStructIR, map[int]string{0: "PID", 1: "STDIN", 2: "STDOUT", 3: "STDERR", 4: "STATE", 5: "EXITCODE", 6: "OUT_DATA", 9: "ERR_END", 10: "CLOSE_L", 11: "EXIT_L", 12: "ERROR_L", 13: "MODE", 14: "OUT_ACC", 15: "ERR_ACC", 16: "EXEC_CB", 17: "IPC_FD", 18: "MESSAGE", 19: "CHAN", 20: "SPAWN_ERRNO", 21: "KILL_SIG", 22: "DEADLINE", 23: "TIMEOUT_SIG", 24: "UNREF", 25: "WAIT_STATUS", 26: "PLAIN_CODE", 27: "MAXBUF", 28: "MAXBUF_HIT"}},
 	{"KML_NETSOCK", netSocketIR, map[int]string{0: "FD", 1: "STATE", 2: "DATA", 3: "END", 5: "SSL", 6: "CLOSE"}},
 	{"KML_FETCHPENDING", "{ ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64, ptr }", map[int]string{9: "BRIDGE"}},
 	{"KML_PBOX", promiseBoxType().StructIR(), map[int]string{1: "PROMISE", 2: "BOXFN"}},
@@ -53,6 +52,7 @@ var layoutConsts = []struct {
 	name  string
 	value int64
 }{
+	{"KML_PROMISE_HEADER", promiseHeaderWord},
 	{"KML_PROMISE_FLAG_HANDLED", promiseFlagHandled},
 	{"KML_PROMISE_FLAG_QUEUED", promiseFlagQueued},
 	{"KML_TAG_ERROR", kmlTagError},
@@ -62,12 +62,14 @@ var layoutConsts = []struct {
 	{"KML_PDYN_THEN", pdynThen},
 	{"KML_TAG_OBJECT", kmlTagObject},
 	{"KML_ERROR_SUBCLASS_BASE", errorSubclassTagBase},
-	{"KML_CP_BYTES", cpStructBytes},
 	{"KML_NB_FALSE", nbFalse},
 	{"KML_NB_TRUE", nbTrue},
 	{"KML_ERRKIND_ERROR", errorTypeIDStored(errorKindIDs["Error"])},
 	{"KML_ERRKIND_RANGE", errorTypeIDStored(errorKindIDs["RangeError"])},
 	{"KML_ERROR_TYPE_FLAG", errorTypeIDFlag},
+	{"KML_ERRKIND_AGG", errorTypeIDStored(errorKindIDs["AggregateError"])},
+	{"KML_AGG_ERRORS", int64(aggregateErrorsIdx()) * 8},
+	{"KML_AGG_SIZE", aggregateErrorStructSize()},
 }
 
 // layoutHeader is kml_layout.h.

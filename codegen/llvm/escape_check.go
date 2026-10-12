@@ -56,6 +56,7 @@ var escCallWhitelist = map[string]bool{
 // compile error immediately; implicit (auto-mode) candidates that fail are
 // simply not recorded.
 func (e *Emitter) planAutoFrees(prog *ast.Program) error {
+	defer e.analysisPass()()
 	p := &escPlanner{
 		auto:         e.isAutoMode(),
 		plan:         map[*ast.VarDeclaration]bool{},

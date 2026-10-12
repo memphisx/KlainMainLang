@@ -1,9 +1,10 @@
 // emit_http_upgrade.go — the Node-faithful HTTP `'upgrade'` event
 // (TDD-00158 Stage 1): `server.on('upgrade', (req, socket, head) => …)` on an
-// http/https server. `socket` is a real `net.Socket` over the connection fd
-// (TLS-aware via the same conn shims https.createServer uses, so `wss://`
-// falls out); the connection fiber, after the handler returns, runs a generic
-// raw read loop firing the socket's `'data'`/`'end'` listeners.
+// http server. `socket` is a real `net.Socket` over the connection fd; the
+// connection fiber, after the handler returns, runs a generic raw read loop
+// firing the socket's `'data'`/`'end'` listeners, yielding to the loop while
+// the socket has nothing to read. (https.createServer, `wss://` included, is
+// lib/node/internal_https.ts over the pool's TLS handles.)
 //
 // Two halves live here: a whole-program pre-scan (programUsesHTTPUpgrade,
 // called from EmitProgram) that decides whether buildHTTPDispatcher emits the
@@ -67,10 +68,8 @@ func (e *Emitter) emitUpgradeReqDetect(headersMapFinal, upgradeL, normalL string
 // of the connection — the exact swapcontext-yield-on-EAGAIN structure the WS
 // server loop uses, minus frame decoding. Control never returns to normal
 // request handling on the upgrade path; a non-upgrade (or no-handler) request
-// falls through to normalL unchanged. TLS I/O falls out: when usedHTTPS1Server
-// the read routes through __kml_http_conn_recv and socket.write already routes
-// through the SSL* in the socket's field 5 (so wss:// works with no extra
-// code). noReqL is the connection-teardown label reused on EOF/error.
+// falls through to normalL unchanged. noReqL is the connection-teardown label
+// reused on EOF/error.
 func (e *Emitter) emitHTTPUpgradeBlock(headersMapFinal, methodPtr, pathOnly, queryMapFinal, fd32, fd64, bufFinal, headerEndA, totalReadA, noReqL string) {
 	e.ensureHTTPRuntime()
 	// The upgrade `socket` is a net.Socket; user code calls .write/.end/.on on
@@ -82,9 +81,6 @@ func (e *Emitter) emitHTTPUpgradeBlock(headersMapFinal, methodPtr, pathOnly, que
 	e.ensureReadDecl()
 	e.ensureCloseDecl()
 	e.ensureErrnoAccessor()
-	if e.usedHTTPS1Server {
-		e.emitHTTPSConnShims()
-	}
 
 	handlerNullL := e.freshLabel("http.upgnohandler")
 	detectL := e.freshLabel("http.upgdetect")
@@ -134,13 +130,6 @@ func (e *Emitter) emitHTTPUpgradeBlock(headersMapFinal, methodPtr, pathOnly, que
 	sockFdGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sockFdGep, netSocketIR, sockPtr))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", fd64, sockFdGep))
-	if e.usedHTTPS1Server {
-		sslReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_http_conn_ssl_get(i32 %s)", sslReg, fd32))
-		sockSSLGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 5", sockSSLGep, netSocketIR, sockPtr))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sslReg, sockSSLGep))
-	}
 
 	// --- req: an HttpRequest/IncomingMessage over the parsed request line ---
 	reqTy := RequestType()
@@ -225,15 +214,6 @@ func (e *Emitter) emitHTTPConnectionEvent(sfx, readLoopL string) {
 	sockFdGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sockFdGep, netSocketIR, sockPtr))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", fd64, sockFdGep))
-	if e.usedHTTPS1Server {
-		fd32 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", fd32, fd64))
-		sslReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_http_conn_ssl_get(i32 %s)", sslReg, fd32))
-		sockSSLGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 5", sockSSLGep, netSocketIR, sockPtr))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sslReg, sockSSLGep))
-	}
 
 	// invoke handler(socket)
 	fpSlot := e.freshReg()
@@ -249,7 +229,7 @@ func (e *Emitter) emitHTTPConnectionEvent(sfx, readLoopL string) {
 }
 
 // emitHTTPRawSocketLoop is the post-upgrade read pump running on this
-// connection's fiber: read raw bytes (TLS-aware when usedHTTPS1Server), fire
+// connection's fiber: read raw bytes, fire
 // the socket's `'data'` listener with each chunk as a length-prefixed Buffer,
 // yield the fiber on EAGAIN, and on EOF/error fire `'end'` then `'close'`
 // before tearing the connection down (br noReqL). Every value crossing the
@@ -299,9 +279,6 @@ func (e *Emitter) emitHTTPRawSocketLoop(sockPtr, noReqL string) {
 
 	nReg := e.freshReg()
 	readFn := fmt.Sprintf("@read(i32 %s, ptr %s, i64 4096)", fd32, rbuf)
-	if e.usedHTTPS1Server {
-		readFn = fmt.Sprintf("@__kml_http_conn_recv(i32 %s, ptr %s, i64 4096)", fd32, rbuf)
-	}
 	e.emitInstr(fmt.Sprintf("%s = call i64 %s", nReg, readFn))
 	gotData := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", gotData, nReg))
@@ -403,7 +380,7 @@ func programUsesHTTPUpgrade(prog *ast.Program) bool {
 
 // programContainsCall reports whether the program contains, anywhere, a call
 // expression matching pred — the whole-program pre-scan behind
-// programUsesHTTPUpgrade and programUsesHTTPS1Server (TDD-00191 Stage 3).
+// programUsesHTTPUpgrade.
 func programContainsCall(prog *ast.Program, pred func(*ast.CallExpression) bool) bool {
 	found := false
 	ast.Inspect(prog, func(n ast.Node) bool {
@@ -413,23 +390,6 @@ func programContainsCall(prog *ast.Program, pred func(*ast.CallExpression) bool)
 		return !found
 	})
 	return found
-}
-
-// isHTTPSCreateServerCall reports whether ex is `https.createServer(...)` — the
-// HTTPS/1.1 server the multi-instance TLS accept path must know about ahead of
-// Pass 2, so ensureHTTPRuntime emits the TLS-aware extra-listener accept even
-// when a plain primary server triggers it first (TDD-00191 Stage 3).
-func isHTTPSCreateServerCall(ex *ast.CallExpression) bool {
-	mem, ok := ex.Callee.(*ast.MemberExpression)
-	if !ok || mem.Property != "createServer" {
-		return false
-	}
-	id, ok := mem.Object.(*ast.Identifier)
-	return ok && id.Name == "https__kml_builtin"
-}
-
-func programUsesHTTPS1Server(prog *ast.Program) bool {
-	return programContainsCall(prog, isHTTPSCreateServerCall)
 }
 
 // isUpgradeOnCall reports whether ex is `<obj>.on("upgrade", …)` or

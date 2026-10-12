@@ -11,10 +11,7 @@
 // written into the region (stat's 18 doubles in Node's kFsStatsFieldsNumber
 // order, statfs's 8). A failure is the negated errno (sync) or the errno
 // argument of the callback.
-//
-// Compiled in only for a program that uses fs (-DKLAINPOOL_FS).
 
-#ifdef KLAINPOOL_FS
 #ifdef _WIN32
 // win32fs.c's POSIX surface: Linux errno values, glibc x86-64 struct stat
 // (with the birth time in the reserved tail) and a dirent carrying d_type.
@@ -615,4 +612,3 @@ void __kml_native_fs_call_async(double op, const char *p1, const char *p2, doubl
     kfs_setup(it, op, p1, p2, a, b, c, d, data, size);
     native_submit(it);
 }
-#endif

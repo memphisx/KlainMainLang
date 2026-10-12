@@ -7,6 +7,24 @@ import (
 
 // coerce inserts a type conversion instruction if necessary.
 func (e *Emitter) coerce(v Value, target Type) Value {
+	// An instance of a class extending Map or Set where the host is
+	// expected: its body, after its tag word (TDD-00247).
+	if v.Ty.IsClass && (headeredHost(target) || target.IsPromise && !target.IsDynamic) && !target.IsClass {
+		if info, ok := e.classes[v.Ty.ClassName]; ok && info.HostBase != nil {
+			body := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, v.Ref))
+			return Value{Ref: body, Ty: target}
+		}
+	}
+	// An instance of a class extending Array where an array is expected:
+	// the array its body is, sharing the instance's header.
+	if v.Ty.IsClass && !v.Ty.IsDynamic && target.IsArray && !target.IsClass {
+		if info, ok := e.classes[v.Ty.ClassName]; ok && info.HostBase != nil && info.HostBase.IsArray {
+			body := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, v.Ref))
+			return e.coerce(e.arrayValueFromHeaderReg(body, *info.HostBase), target)
+		}
+	}
 	// Into or out of a three-state `T | null | undefined` pointer: null
 	// becomes (or stops being) the null-reference sentinel.
 	if target.NullAndUndef && !v.Ty.NullAndUndef && (v.Ty.IR == "ptr" || target.IR != "ptr") {
@@ -115,10 +133,6 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 		case target.IR == "i1":
 			return e.emitAnyTruthy(v)
 		case target.IR == "i64" || target.IR == "i32" || target.IR == "i16" || target.IR == "i8":
-			if target.IsDate {
-				// A Date host box's time value (emit_hostbox.go).
-				return e.emitUnboxHost(v, target)
-			}
 			d := e.emitAnyToNum(v)
 			return e.coerce(Value{Ref: d, Ty: TypeF64}, target)
 		case target.IsBigInt:
@@ -127,6 +141,10 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 			return e.emitUnboxBoxToType(v.Ref, target)
 		case target.IsArray && !target.IsFlatArray:
 			// The box's array (its live header carried along).
+			return e.emitUnboxBoxToType(v.Ref, target)
+		case target.IsTuple && !target.IsArray:
+			// A tuple is headerless data; its box is an array box, whose
+			// elements make a new tuple.
 			return e.emitUnboxBoxToType(v.Ref, target)
 		case target.IsFunc && !isUnconstrainedDynamic(v.Ty):
 			// A union's function member: unboxed as a narrowing does.
@@ -542,6 +560,11 @@ func coerciblePure(src, target Type) bool {
 	if src.IsArray && !target.IsArray && !target.IsDynamic && (isStringTy(target) || target.IsInteger() || target.Float || target.IR == "i1") {
 		return false
 	}
+	// Nor does an array slot hold a string, number or boolean (`{ argv:
+	// 'foo' }` for an any[] field, which only -compat=js reaches).
+	if target.IsArray && !src.IsArray && !src.IsDynamic && !src.IsNull && !src.IsUndefined && (isStringTy(src) || src.IsInteger() || src.Float || src.IR == "i1") {
+		return false
+	}
 	if src.IR == target.IR {
 		return true
 	}
@@ -592,6 +615,15 @@ func (e *Emitter) coerceChecked(v Value, target Type, pos ast.Pos, what string) 
 	// (`{ i1, T }` vs bare T), so this must be a rejection, not a passthrough.
 	if err := closureFallOffMismatch(v.Ty, target, pos, what); err != nil {
 		return Value{}, err
+	}
+	if isNullableScalar(target) && !isNullableScalar(v.Ty) && !v.Ty.IsDynamic && !v.Ty.IsNull && !v.Ty.IsUndefined && v.Ty.IR != "" {
+		// A present value into an optional slot (a defaulted parameter's):
+		// checked against the payload, then wrapped.
+		pay, err := e.coerceChecked(v, target.withoutNullable(), pos, what)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.coerce(pay, target), nil
 	}
 	out := e.coerce(v, target)
 	if !coercionIsSound(out.Ty, target) {

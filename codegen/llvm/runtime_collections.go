@@ -406,6 +406,7 @@ func (e *Emitter) emitMapFlavor(sfx, key string) {
 	e.declareFn("__kml_map_copy_vals", "declare ptr @__kml_map_copy_vals(ptr)")
 	var b strings.Builder
 	fmt.Fprintf(&b, `declare ptr @__kml_map_%[1]s_create()
+declare ptr @__kml_map_%[1]s_create_h(i64)
 declare void @__kml_map_%[1]s_set(ptr, %[2]s, i64)
 declare i64 @__kml_map_%[1]s_get(ptr, %[2]s)
 declare zeroext i1 @__kml_map_%[1]s_has(ptr, %[2]s)

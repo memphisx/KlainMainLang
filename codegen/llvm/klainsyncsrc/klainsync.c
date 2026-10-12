@@ -113,6 +113,10 @@ typedef struct ks_g {
      * swapcontext across OS threads. The G still preempts at safepoints; it
      * just re-runs on the same M. */
     struct ks_m *locked_m;
+    /* The state klain:sync's natives keep between calls (the last receive's
+     * ok flag, the select being built): the goroutine's own, since it may
+     * resume on another thread between two calls. */
+    struct ks_natstate *nat;
 } ks_g;
 
 /* ------------------------------------------------------------------ *
@@ -484,6 +488,8 @@ static void ks_g_free(ks_g *g) {
 #else
     munmap(g->stack_alloc, g->alloc_size);
 #endif
+    if (g->nat)
+        KS_CTLFREE(g->nat);
     KS_CTLFREE(g);
 }
 
@@ -1228,13 +1234,6 @@ void klainsync_go(void *fn, void *env) {
  * local run queue are flushed to the global queue so a peer M can run them
  * (this M no longer will). A no-op off a goroutine (main/non-M thread already
  * never migrates). Idempotent. */
-/* Is the caller running as a goroutine? The event-loop turn a top-level await
- * takes (runtime_loop_turn.go) belongs to a reactor thread; a goroutine has no
- * loop of its own and must never run one on its M. */
-int klainsync_on_goroutine(void) {
-    return ks_curg != NULL;
-}
-
 void klainsync_lock_os_thread(void) {
     ks_g *g = ks_curg;
     ks_m *m = ks_curm;
@@ -1290,3 +1289,74 @@ void klainsync_safepoint(void) {
         klainsync_gosched();
     }
 }
+
+/* ------------------------------------------------------------------ *
+ *  klain:sync's entry points (lib/node/klain_sync.ts through          *
+ *  lib/native.d.ts). A channel crosses as its address in a double     *
+ *  (exact below 2^53), a value as its 8-byte any word.                *
+ * ------------------------------------------------------------------ */
+typedef struct ks_natstate {
+    int32_t last_ok;              /* the last receive: 1 a value, 0 closed */
+    int n;                        /* the select being built: its cases */
+    ks_selcase cases[KS_SEL_MAX];
+} ks_natstate;
+
+/* A thread that is no goroutine (main, a Worker) never migrates. */
+static _Thread_local ks_natstate *ks_thread_nat;
+
+static ks_natstate *ks_nat(void) {
+    ks_g *g = ks_curg;
+    ks_natstate **slot = g ? &g->nat : &ks_thread_nat;
+    if (!*slot)
+        *slot = (ks_natstate *)KS_CTLALLOC(sizeof(ks_natstate));
+    return *slot;
+}
+
+#define KS_CH(h) ((void *)(uintptr_t)(h))
+
+void __kml_native_sync_go(void *inv, void *clo) { klainsync_go(inv, clo); }
+
+double __kml_native_sync_chan_new(double capacity) {
+    return (double)(uintptr_t)klainsync_chan_new((int64_t)capacity);
+}
+
+void __kml_native_sync_chan_send(double ch, int64_t v) { klainsync_chan_send(KS_CH(ch), v); }
+
+int64_t __kml_native_sync_chan_recv(double ch) {
+    int32_t ok = 0;
+    int64_t v = klainsync_chan_recv(KS_CH(ch), &ok);
+    ks_nat()->last_ok = ok;
+    return v;
+}
+
+double __kml_native_sync_last_ok(void) { return (double)ks_nat()->last_ok; }
+
+void __kml_native_sync_chan_close(double ch) { klainsync_chan_close(KS_CH(ch)); }
+
+void __kml_native_sync_select_begin(void) { ks_nat()->n = 0; }
+
+/* Adds a case (dir 0 receive, 1 send v): its index, or -1 past KS_SEL_MAX. */
+double __kml_native_sync_select_add(double ch, double dir, int64_t v) {
+    ks_natstate *st = ks_nat();
+    if (st->n >= KS_SEL_MAX)
+        return -1;
+    ks_selcase *c = &st->cases[st->n];
+    c->ch = KS_CH(ch);
+    c->sendval = v;
+    c->recvval = 0;
+    c->dir = (int32_t)dir;
+    c->recv_ok = 0;
+    return (double)st->n++;
+}
+
+/* Runs the select built: the case that fired, or -1 for the default. A
+ * receive case's value is then selectValue(i), its ok flag lastOk(). */
+double __kml_native_sync_select_run(double has_default) {
+    ks_natstate *st = ks_nat();
+    int i = klainsync_select(st->cases, st->n, has_default != 0);
+    if (i >= 0)
+        ks_nat()->last_ok = ks_nat()->cases[i].recv_ok;
+    return (double)i;
+}
+
+int64_t __kml_native_sync_select_value(double i) { return ks_nat()->cases[(int)i].recvval; }

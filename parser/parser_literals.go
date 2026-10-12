@@ -109,7 +109,7 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 					return nil, err
 				}
 				eraseTypeParams(fd)
-				fe := p.newFuncExpr("", fd, isAsyncMethod, fnPos)
+				fe := p.newObjectMethod(fd, isAsyncMethod, fnPos)
 				fe.IsGenerator = isGeneratorMethod
 				return fe, nil
 			}
@@ -170,7 +170,8 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 				return nil, err
 			}
 			eraseTypeParams(fd)
-			fnVal := p.newFuncExpr("", fd, false, fnPos)
+			fnVal := p.newObjectMethod(fd, false, fnPos)
+			fnVal.NamePos = posOf(nameTok) // where a diagnostic about the accessor points
 			props = append(props, ast.ObjectProperty{Key: nameTok.Literal, Value: fnVal, AccessorKind: accessorKind})
 			if !p.match(lexer.COMMA) {
 				break
@@ -188,9 +189,9 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 				return nil, err
 			}
 			eraseTypeParams(fd)
-			fe := p.newFuncExpr("", fd, isAsyncMethod, fnPos)
+			fe := p.newObjectMethod(fd, isAsyncMethod, fnPos)
 			fe.IsGenerator = isGeneratorMethod
-			props = append(props, ast.ObjectProperty{Key: keyTok.Literal, Value: fe})
+			props = append(props, ast.ObjectProperty{Key: propertyKeyText(keyTok), Value: fe})
 			if !p.match(lexer.COMMA) {
 				break
 			}
@@ -222,7 +223,7 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 				return nil, err
 			}
 			eraseTypeParams(fd)
-			val = p.newFuncExpr("", fd, false, fnPos)
+			val = p.newObjectMethod(fd, false, fnPos)
 		} else if p.check(lexer.COLON) {
 			p.advance() // ':'
 			var err error
@@ -252,7 +253,7 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			val = ast.NewIdentifier(keyTok.Literal, posOf(keyTok))
 			shorthand = true
 		}
-		props = append(props, ast.ObjectProperty{Key: keyTok.Literal, Value: val, CoverInit: coverInit, Shorthand: shorthand})
+		props = append(props, ast.ObjectProperty{Key: propertyKeyText(keyTok), Value: val, CoverInit: coverInit, Shorthand: shorthand})
 		if !p.match(lexer.COMMA) {
 			break
 		}
@@ -288,9 +289,11 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 	// (sema), never here.
 	qualified := false
 	qualifier := ""
+	var path []string
 	for p.peekNth(1).Type == lexer.DOT && p.peekNth(2).Type == lexer.IDENT {
 		qualifier = p.advance().Literal // qualifier ident
-		p.advance()                     // '.'
+		path = append(path, qualifier)
+		p.advance() // '.'
 		nameTok = p.peek()
 		qualified = true
 	}
@@ -298,6 +301,7 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 	if ne != nil {
 		ne.Qualified = qualified
 		ne.Qualifier = qualifier
+		ne.QualifierPath = path
 	}
 	return ne, err
 }
@@ -431,6 +435,7 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 		// rejection isn't used instead: keeping the syntax itself accepted
 		// here, consistent with the destructured-parameter branch below,
 		// which also parses fine and is rejected later for the same reason.
+		restTok := p.peek()
 		rest := p.match(lexer.ELLIPSIS)
 
 		// Destructured parameter (`({x, y}: T) => ...` / `([a, b]: T[]) =>
@@ -446,6 +451,7 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 			if rest {
 				return nil, p.errAt(p.peek(), diag.RestParamPattern)
 			}
+			patTok := p.peek()
 			var arrPat []ast.ArrayPatternElem
 			var objPat []ast.DestructProp
 			if p.check(lexer.LBRACE) {
@@ -479,7 +485,7 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 				return nil, p.errAt(p.peek(), diag.DestructuredParamDefault)
 			}
 			syntheticName := fmt.Sprintf("__param%d", len(params))
-			params = append(params, ast.Param{Name: syntheticName, Type: pty, ArrayPattern: arrPat, ObjectPattern: objPat})
+			params = append(params, ast.Param{Name: syntheticName, Pos: ast.Pos{Line: patTok.Line, Col: patTok.Col}, Type: pty, ArrayPattern: arrPat, ObjectPattern: objPat})
 			p.match(lexer.COMMA)
 			continue
 		}
@@ -504,7 +510,7 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 				return nil, err
 			}
 		}
-		params = append(params, ast.Param{Name: nameTok.Literal, Type: pty, Rest: rest, Default: dflt, Optional: optional})
+		params = append(params, ast.Param{Name: nameTok.Literal, Pos: paramPos(rest, restTok, nameTok), Type: pty, Rest: rest, Default: dflt, Optional: optional})
 		if rest {
 			break // rest param must be last
 		}
@@ -529,8 +535,14 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 	if t := p.peek(); t.Type == lexer.ARROW && t.HasPrecedingLineBreak() {
 		return nil, p.errAt(t, diag.LineBreakBeforeArrow)
 	}
-	if _, err := p.expect(lexer.ARROW); err != nil {
+	arrowTok, err := p.expect(lexer.ARROW)
+	if err != nil {
 		return nil, err
+	}
+	// An arrow's parameters may never repeat a name (an early error in
+	// sloppy code too).
+	if n := duplicateParamName(params); n != "" {
+		return nil, p.errAt(arrowTok, diag.DuplicateParameter, n)
 	}
 
 	// Block body or expression body
@@ -538,6 +550,9 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 		block, err := p.parseBlock()
 		if err != nil {
 			return nil, err
+		}
+		if bodyStartsWithUseStrict(block) && nonSimpleParams(params) {
+			return nil, errAtPos(pos, diag.StrictNonSimpleParams)
 		}
 		arrow := ast.NewArrowFunction(params, retType, nil, block, pos)
 		p.bareArrow = arrow
@@ -585,7 +600,36 @@ func (p *Parser) parenGroupFollowedByArrowAt(k int) bool {
 			depth--
 			if depth == 0 {
 				next := p.peekNth(i + 1).Type
-				return next == lexer.ARROW || next == lexer.COLON
+				return next == lexer.ARROW || next == lexer.COLON && p.returnTypeThenArrowAt(i+2)
+			}
+		}
+	}
+}
+
+// returnTypeThenArrowAt reports whether the tokens from the k-th ahead are a
+// return type followed by `=>`: an arrow at the type's own depth before the
+// expression could end. A conditional's `: alt` after a parenthesized group
+// (`c ? (a, b) : 0`) reaches the end first.
+func (p *Parser) returnTypeThenArrowAt(k int) bool {
+	depth := 0
+	for i := k; ; i++ {
+		switch p.peekNth(i).Type {
+		case lexer.EOF, lexer.SEMICOLON:
+			return false
+		case lexer.LPAREN, lexer.LBRACE, lexer.LBRACKET:
+			depth++
+		case lexer.RPAREN, lexer.RBRACE, lexer.RBRACKET:
+			if depth == 0 {
+				return false
+			}
+			depth--
+		case lexer.COMMA:
+			if depth == 0 {
+				return false
+			}
+		case lexer.ARROW:
+			if depth == 0 {
+				return true
 			}
 		}
 	}
@@ -798,7 +842,7 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		if p.check(lexer.ARROW) {
 			p.advance() // consume '=>'
 			pos := posOf(tok)
-			params := []ast.Param{{Name: tok.Literal, Type: nil}}
+			params := []ast.Param{{Name: tok.Literal, Pos: ast.Pos{Line: tok.Line, Col: tok.Col}, Type: nil}}
 			if p.check(lexer.LBRACE) {
 				block, err := p.parseBlock()
 				if err != nil {
@@ -828,7 +872,8 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			(p.peekNth(2).Type == lexer.ARROW || p.peekNth(2).Type == lexer.COLON)) ||
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.COLON) ||
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.RPAREN && p.peekNth(3).Type == lexer.ARROW) ||
-			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.COMMA) ||
+			// `(a, b) => …`, not the comma operator `(a, b)`.
+			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.COMMA && p.parenGroupFollowedByArrow()) ||
 			// Optional first parameter `(x?: T) => …`, `(x?) => …`, `(x?, y) => …`.
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.QUESTION &&
 				(p.peekNth(3).Type == lexer.COLON || p.peekNth(3).Type == lexer.RPAREN || p.peekNth(3).Type == lexer.COMMA)) ||
@@ -1051,11 +1096,37 @@ func eraseTypeParams(fd *ast.FunctionDeclaration) {
 
 // newFuncExpr is the function expression fd was parsed for; a `this: T`
 // parameter recorded against fd moves to it.
+// newObjectMethod is an object literal's method, getter or setter.
+func (p *Parser) newObjectMethod(fd *ast.FunctionDeclaration, isAsync bool, pos ast.Pos) *ast.FunctionExpression {
+	fe := p.newFuncExpr("", fd, isAsync, pos)
+	fe.Method = true
+	return fe
+}
+
 func (p *Parser) newFuncExpr(name string, fd *ast.FunctionDeclaration, isAsync bool, pos ast.Pos) *ast.FunctionExpression {
 	fe := ast.NewFunctionExpression(name, fd.Params, fd.ReturnType, fd.Body, isAsync, pos)
+	fe.NamePos = fd.NamePos
 	if ta, ok := p.thisParams[fd]; ok {
 		delete(p.thisParams, fd)
 		p.thisParams[fe] = ta
 	}
 	return fe
+}
+
+// propertyKeyText is the key a property name token names: a numeric
+// literal's is its value as JavaScript writes it (`0x10` is "16").
+func propertyKeyText(tok lexer.Token) string {
+	if tok.Type == lexer.NUMBER {
+		return ast.NumberKey(tok.Literal)
+	}
+	return tok.Literal
+}
+
+// paramPos is where a parameter is reported: its `...` for a rest, else
+// its name.
+func paramPos(rest bool, restTok, nameTok lexer.Token) ast.Pos {
+	if rest {
+		return ast.Pos{Line: restTok.Line, Col: restTok.Col}
+	}
+	return ast.Pos{Line: nameTok.Line, Col: nameTok.Col}
 }

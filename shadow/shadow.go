@@ -30,13 +30,19 @@ type Disagreement struct {
 	// Unit is the file the compile run started from; Line and Col locate
 	// the node (in whichever module of that run it belongs to).
 	Unit string `json:"unit,omitempty"`
-	Line int    `json:"line"`
-	Col  int    `json:"col"`
+	// Module is the builtin library module the node belongs to, when it is
+	// not in the program's own files.
+	Module string `json:"module,omitempty"`
+	Line   int    `json:"line"`
+	Col    int    `json:"col"`
 	// Old and New are the two answers, rendered as representation keys;
 	// Fields names the top-level fields that differ.
 	Old    string   `json:"old"`
 	New    string   `json:"new"`
 	Fields []string `json:"fields,omitempty"`
+	// Asked, on a tally record (no disagreement), is how many times the
+	// decider was asked about this node kind in the run.
+	Asked int `json:"asked,omitempty"`
 }
 
 // EnvVar switches recording on: it names the file disagreements are appended
@@ -85,7 +91,7 @@ func (r *Recorder) Record(d Disagreement) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	key := d.Decider + "\x00" + d.Kind + "\x00" + strconv.Itoa(d.Line) + ":" + strconv.Itoa(d.Col)
+	key := d.Decider + "\x00" + d.Kind + "\x00" + d.Module + "\x00" + strconv.Itoa(d.Line) + ":" + strconv.Itoa(d.Col)
 	if r.seen[key] {
 		return
 	}
@@ -116,7 +122,7 @@ func Aggregate(r io.Reader) ([]Bucket, int, error) {
 	sc.Buffer(make([]byte, 1<<20), 16<<20)
 	for sc.Scan() {
 		var d Disagreement
-		if json.Unmarshal(sc.Bytes(), &d) != nil {
+		if json.Unmarshal(sc.Bytes(), &d) != nil || d.Asked > 0 {
 			continue
 		}
 		total++
@@ -150,4 +156,19 @@ func Aggregate(r io.Reader) ([]Bucket, int, error) {
 		return a.Fields < b.Fields
 	})
 	return out, total, sc.Err()
+}
+
+// Tallies reads JSON lines from r and sums the tally records: how many
+// times each decider was asked about each node kind ("decider/kind").
+func Tallies(r io.Reader) map[string]int {
+	out := map[string]int{}
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 1<<20), 16<<20)
+	for sc.Scan() {
+		var d Disagreement
+		if json.Unmarshal(sc.Bytes(), &d) == nil && d.Asked > 0 {
+			out[d.Decider+"/"+d.Kind] += d.Asked
+		}
+	}
+	return out
 }

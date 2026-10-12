@@ -203,3 +203,31 @@ const s = ta.set([1, 2], 1);
 console.log(s, ta.subarray(1, 3).join(","));
 `, "undefined\nundefined 1,2")
 }
+
+// `.byteLength` is a number on every receiver form (ADR-01440).
+func TestE2EArrayBufferByteLengthIsNumber(t *testing.T) {
+	assertSameAsNode(t, `
+function rest(buffer: ArrayBuffer, off: number): number {
+  if (off < 0 || off > buffer.byteLength) throw new RangeError("bad " + off);
+  return buffer.byteLength - off;
+}
+const ab = new ArrayBuffer(8);
+const n = ab.byteLength;
+console.log(rest(ab, 3), n / 3, ab.byteLength / 3, typeof n, new Uint8Array(ab).byteLength / 16);
+`)
+}
+
+// An unannotated callback parameter typed by context as a builtin with a
+// native layout is that layout before the callback is emitted (ADR-01441).
+func TestE2EContextualNativeLayoutParam(t *testing.T) {
+	assertSameAsNode(t, `
+class B {
+  data = new ArrayBuffer(4);
+  arrayBuffer(): Promise<ArrayBuffer> { return Promise.resolve(this.data); }
+  bytes(): Promise<Uint8Array> { return this.arrayBuffer().then((ab) => new Uint8Array(ab)); }
+}
+new B().bytes().then(u => console.log(u.length, u[0]));
+const when = (d: Date) => d.getTime();
+[new Date(5)].forEach((d) => console.log(when(d)));
+`)
+}

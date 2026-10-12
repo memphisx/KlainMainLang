@@ -719,7 +719,7 @@
       "name": "Array.of(...items)",
       "signature": "Array.of(...items: T[]): T[]",
       "badge": "exact",
-      "description": "Builds an array from its arguments — usable anywhere an array literal [...] is. Element type inferred from the first argument. Static method on Array.",
+      "description": "Builds an array from its arguments — the array literal [...] of them, usable anywhere one is; mixed argument kinds work as in a mixed literal. Static method on Array.",
       "returns": {
         "type": "T[]",
         "desc": "The constructed array."

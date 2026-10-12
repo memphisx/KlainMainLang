@@ -19,8 +19,28 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 		srcElemTy   Type   // array part's own element type
 		scalar      *Value // scalar part (length 1)
 	}
+	// `[].concat(…)`: tsc types the empty literal never[]; its elements
+	// are whatever the arguments bring, so an `any` argument makes it any[].
+	if lit, ok := mem.Object.(*ast.ArrayLiteral); ok && len(lit.Elements) == 0 && !elemTy.IsDynamic {
+		for _, arg := range args {
+			if e.inferExprType(arg).IsDynamic {
+				elemTy = TypeAny
+				break
+			}
+		}
+	}
 	var parts []concatPart
 	for _, arg := range args {
+		if argTy := e.inferExprType(arg); argTy.IsDynamic && elemTy.IsDynamic {
+			// An `any` holding an Array is spread (IsConcatSpreadable);
+			// any other value is appended — decided on the box at runtime.
+			p, l, err := e.emitConcatAnyPart(arg)
+			if err != nil {
+				return Value{}, err
+			}
+			parts = append(parts, concatPart{ptr: p, length: l, srcElemTy: TypeAny})
+			continue
+		}
 		if e.inferExprType(arg).IsArray {
 			p, l, aet, err := e.resolveArrayForHOF(arg, pos)
 			if err != nil {
@@ -89,6 +109,49 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, newLen))
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+}
+
+// emitConcatAnyPart is concat's view of an `any` argument: an Array's
+// elements (boxed), or a one-slot run holding the value itself.
+func (e *Emitter) emitConcatAnyPart(arg ast.Expression) (ptrReg, lenReg string, err error) {
+	v, err := e.emitExpr(arg)
+	if err != nil {
+		return "", "", err
+	}
+	if v, err = e.emitBoxValue(v); err != nil {
+		return "", "", err
+	}
+	e.ensureDynJSONC()
+	if !e.declaredAnyArrView {
+		e.declaredAnyArrView = true
+		e.emitGlobal("declare ptr @__kml_anyarr_view(i64)")
+		e.emitGlobal("declare void @__kml_anyarr_sync(i64, ptr)")
+	}
+	one, ptrSlot, lenSlot := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", one))
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v.Ref, one))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", one, ptrSlot))
+	e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", lenSlot))
+	isArr := e.emitDynIsArray(v)
+	arrL, doneL := e.freshLabel("concat.spread"), e.freshLabel("concat.part")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isArr.Ref, arrL, doneL))
+	e.emitLabel(arrL)
+	view := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_anyarr_view(i64 %s)", view, v.Ref))
+	data, lp, n := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, view))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lp, arrayHeaderTy, view))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", n, lp))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", data, ptrSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", n, lenSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	ptrReg, lenReg = e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, ptrSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
+	return ptrReg, lenReg, nil
 }
 
 // emitArrayReverse implements arr.reverse(): reverses elements in place and

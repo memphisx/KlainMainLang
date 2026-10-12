@@ -23,6 +23,7 @@ ArrayConstructor		from fromAsync isArray of prototype
 ArrayIterator	IteratorObject	
 ArrayLike		length
 AsyncDisposable		
+AsyncGenerator	AsyncIteratorObject	next return throw
 AsyncIterable		
 AsyncIterableIterator	AsyncIterator	
 AsyncIterator		next return throw
@@ -91,6 +92,7 @@ Headers		append delete entries forEach get getSetCookie has keys set values
 HkdfParams	Algorithm	hash info salt
 HmacImportParams	Algorithm	hash length
 HmacKeyGenParams	Algorithm	hash length
+IArguments		callee length
 Int16Array		BYTES_PER_ELEMENT at buffer byteLength byteOffset copyWithin entries every fill filter find findIndex findLast findLastIndex forEach includes indexOf join keys lastIndexOf length map reduce reduceRight reverse set slice some sort subarray toLocaleString toReversed toSorted toString valueOf values with
 Int16ArrayConstructor		BYTES_PER_ELEMENT from of prototype
 Int32Array		BYTES_PER_ELEMENT at buffer byteLength byteOffset copyWithin entries every fill filter find findIndex findLast findLastIndex forEach includes indexOf join keys lastIndexOf length map reduce reduceRight reverse set slice some sort subarray toLocaleString toReversed toSorted toString valueOf values with
@@ -171,6 +173,7 @@ Set		add clear delete difference entries forEach has intersection isDisjointFrom
 SetConstructor		prototype
 SetIterator	IteratorObject	
 SharedArrayBuffer		byteLength grow growable maxByteLength slice
+SharedArrayBufferConstructor		prototype
 StreamPipeOptions		preventAbort preventCancel preventClose signal
 String		anchor at big blink bold charAt charCodeAt codePointAt concat endsWith fixed fontcolor fontsize includes indexOf isWellFormed italics lastIndexOf length link localeCompare match matchAll normalize padEnd padStart repeat replace replaceAll search slice small split startsWith strike sub substr substring sup toLocaleLowerCase toLocaleUpperCase toLowerCase toString toUpperCase toWellFormed trim trimEnd trimLeft trimRight trimStart valueOf
 StringConstructor		fromCharCode fromCodePoint prototype raw

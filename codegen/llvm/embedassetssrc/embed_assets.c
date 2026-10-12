@@ -101,6 +101,38 @@ const unsigned char *__kml_embed_get(const void *blob, const char *path,
   return 0;
 }
 
+/* klain:assets's entry points (lib/node/klain_assets.ts through
+ * lib/native.d.ts). embedDir's call site hands its blob over through
+ * __kml_embed_push, taken by the EmbeddedAssets it makes; get's length is
+ * read after the lookup. An address crosses as a double, exact below 2^53. */
+static _Thread_local const void *kml_embed_pending;
+static _Thread_local int64_t kml_embed_last_len;
+
+void __kml_embed_push(const void *blob) { kml_embed_pending = blob; }
+
+double __kml_native_assets_take(void) {
+  const void *b = kml_embed_pending;
+  kml_embed_pending = 0;
+  return (double)(uintptr_t)b;
+}
+
+double __kml_native_assets_get(double blob, const char *path) {
+  int64_t n = 0;
+  const unsigned char *d = __kml_embed_get((const void *)(uintptr_t)blob, path,
+                                           (int64_t)strlen(path), &n);
+  kml_embed_last_len = n;
+  return (double)(uintptr_t)d;
+}
+
+double __kml_native_assets_length(void) { return (double)kml_embed_last_len; }
+
+int __kml_embed_serve(const void *blob);
+
+/* A static server over the blob on an ephemeral loopback port: the port. */
+double __kml_native_assets_serve(double blob) {
+  return (double)__kml_embed_serve((const void *)(uintptr_t)blob);
+}
+
 /* Resolve a request path to an asset, applying the SPA/SSG fallback rule.
  * `rel` points at the request path (without query), rlen its length. */
 static int kml_embed_resolve(const void *blob, const char *rel, int64_t rlen,

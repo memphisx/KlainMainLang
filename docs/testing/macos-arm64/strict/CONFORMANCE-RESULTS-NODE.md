@@ -12,19 +12,19 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3957 files total: **158 passed**, 2428 failed, 1371 skipped (out of scope).
+3957 files total: **303 passed**, 2283 failed, 1371 skipped (out of scope).
 
-Of the 2586 files that compiled far enough to run, **158 passed (6.1%)**.
+Of the 2586 files that compiled far enough to run, **303 passed (11.7%)**.
 
 ## By suite
 
 | Suite | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|
-| parallel | 151 | 2321 | 1071 | 3543 |
+| parallel | 297 | 2175 | 1071 | 3543 |
 | sequential | 0 | 31 | 90 | 121 |
 | es-module | 3 | 56 | 116 | 175 |
 | message | 1 | 8 | 2 | 11 |
-| internet | 3 | 12 | 23 | 38 |
+| internet | 2 | 13 | 23 | 38 |
 | pummel | 0 | 0 | 52 | 52 |
 | known_issues | 0 | 0 | 17 | 17 |
 
@@ -32,45 +32,45 @@ Of the 2586 files that compiled far enough to run, **158 passed (6.1%)**.
 
 | Module | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|
-| http | 28 | 320 | 41 | 389 |
-| http2 | 1 | 209 | 48 | 258 |
-| fs | 15 | 146 | 88 | 249 |
+| http | 26 | 322 | 41 | 389 |
+| http2 | 10 | 200 | 48 | 258 |
+| fs | 38 | 123 | 88 | 249 |
 | tls | 3 | 127 | 71 | 201 |
-| stream | 26 | 127 | 20 | 173 |
-| net | 12 | 114 | 44 | 170 |
-| worker | 0 | 118 | 19 | 137 |
+| stream | 30 | 123 | 20 | 173 |
+| net | 18 | 108 | 44 | 170 |
+| worker | 2 | 116 | 19 | 137 |
 | esm | 1 | 47 | 80 | 128 |
-| child | 1 | 64 | 46 | 111 |
-| crypto | 0 | 60 | 42 | 102 |
+| child | 5 | 60 | 46 | 111 |
+| crypto | 14 | 46 | 42 | 102 |
 | vm | 0 | 75 | 19 | 94 |
-| process | 8 | 61 | 21 | 90 |
-| dgram | 1 | 59 | 26 | 86 |
+| process | 10 | 59 | 21 | 90 |
+| dgram | 26 | 34 | 26 | 86 |
 | cluster | 5 | 58 | 22 | 85 |
-| repl | 0 | 37 | 41 | 78 |
+| repl | 1 | 36 | 41 | 78 |
 | https | 2 | 51 | 15 | 68 |
-| inspector | 0 | 2 | 64 | 66 |
-| whatwg | 0 | 24 | 39 | 63 |
+| inspector | 1 | 1 | 64 | 66 |
+| whatwg | 7 | 17 | 39 | 63 |
 | buffer | 4 | 43 | 15 | 62 |
-| timers | 6 | 37 | 16 | 59 |
-| zlib | 1 | 46 | 6 | 53 |
+| timers | 14 | 29 | 16 | 59 |
+| zlib | 14 | 33 | 6 | 53 |
 | domain | 0 | 28 | 22 | 50 |
 | require | 2 | 4 | 42 | 48 |
 | async | 0 | 43 | 4 | 47 |
-| runner | 1 | 21 | 23 | 45 |
-| dns | 1 | 14 | 25 | 40 |
+| runner | 2 | 20 | 23 | 45 |
+| dns | 2 | 13 | 25 | 40 |
 | debugger | 0 | 0 | 38 | 38 |
-| trace | 0 | 20 | 14 | 34 |
-| diagnostics | 2 | 27 | 3 | 32 |
+| trace | 1 | 19 | 14 | 34 |
+| diagnostics | 6 | 23 | 3 | 32 |
 | module | 0 | 17 | 12 | 29 |
 | snapshot | 0 | 12 | 17 | 29 |
 | webcrypto | 0 | 19 | 10 | 29 |
-| event | 1 | 21 | 6 | 28 |
+| event | 2 | 20 | 6 | 28 |
 | permission | 0 | 18 | 10 | 28 |
-| util | 0 | 11 | 17 | 28 |
+| util | 1 | 10 | 17 | 28 |
 | stream2 | 0 | 24 | 3 | 27 |
 | eslint | 0 | 0 | 24 | 24 |
 | internal | 0 | 1 | 21 | 22 |
-| readline | 0 | 15 | 6 | 21 |
+| readline | 4 | 11 | 6 | 21 |
 | cli | 0 | 11 | 9 | 20 |
 
 ## Top failure reasons
@@ -79,46 +79,46 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 250 | COMPILE_ERROR: a number has no method '%s' |
-| 103 | COMPILE_ERROR: undefined variable '%s' |
-| 99 | RUNTIME_NONZERO_EXIT:  |
-| 98 | COMPILE_ERROR: object is possibly '%s' |
+| 300 | COMPILE_ERROR: parameter '%s' implicitly has an '%s' type |
+| 274 | RUNTIME_NONZERO_EXIT:  |
+| 233 | COMPILE_ERROR: object is possibly '%s' |
+| 113 | COMPILE_ERROR: variable '%s' implicitly has type '%s' in some locations where its type cannot be det… |
+| 105 | COMPILE_ERROR: property '%s' does not exist on type '%s' |
 | 84 | MODULE_NOT_IMPLEMENTED: vm |
-| 73 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
-| 63 | COMPILE_ERROR: field access on non-object (no field '%s') |
-| 58 | COMPILE_ERROR: value of type '%s' is not callable; did you mean to include '%s'? |
-| 53 | COMPILE_ERROR: no field '%s' |
+| 77 | COMPILE_ERROR: argument of type '%s' is not assignable to parameter of type '%s' |
+| 71 | COMPILE_ERROR: '%s' implicitly has type '%s' because it does not have a type annotation |
+| 63 | COMPILE_ERROR: '%s' is only valid inside a method or constructor body |
+| 61 | COMPILE_ERROR: '%s' is possibly '%s' |
+| 53 | COMPILE_ERROR: no overload matches this call |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
-| 52 | COMPILE_ERROR: cannot find name '%s' |
-| 44 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
-| 41 | COMPILE_ERROR: argument of type '%s' is not assignable to parameter of type '%s' |
-| 37 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
-| 36 | COMPILE_ERROR: type '%s' is not assignable to type '%s' |
+| 51 | COMPILE_ERROR: value of type '%s' is not callable; did you mean to include '%s'? |
+| 50 | COMPILE_ERROR: cannot find name '%s' |
+| 37 | COMPILE_ERROR: '%s' has no exported member '%s' |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
-| 31 | COMPILE_ERROR: process has no method '%s' |
-| 30 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
-| 30 | COMPILE_ERROR: property '%s' does not exist on type '%s' |
-| 29 | COMPILE_ERROR: object has no field '%s' |
-| 29 | COMPILE_ERROR: undefined function or closure '%s' |
-| 28 | COMPILE_ERROR: '%s' is possibly '%s' |
-| 23 | COMPILE_ERROR: child_process.fork supports self-fork only — the path must be __filename or process… |
-| 23 | COMPILE_ERROR: object literal may only specify known properties, and '%s' does not exist in type '%s… |
+| 35 | COMPILE_ERROR: type '%s' is not assignable to type '%s' |
+| 32 | COMPILE_ERROR: A '%s' statement can only be used within a function body. |
+| 25 | COMPILE_ERROR: cannot invoke an object which is possibly '%s' |
+| 25 | COMPILE_ERROR: undefined variable '%s' |
+| 24 | COMPILE_ERROR: a number has no method '%s' |
 | 23 | MODULE_NOT_IMPLEMENTED: perf_hooks |
 | 20 | MODULE_NOT_IMPLEMENTED: v8 |
-| 19 | COMPILE_ERROR: '%s' is not an array |
-| 19 | COMPILE_ERROR: '%s' is of type '%s' |
-| 19 | COMPILE_ERROR: a ChildProcess stream supports only .on('%s'|'%s', cb) |
-| 18 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
-| 17 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
+| 17 | COMPILE_ERROR: object has no field '%s' |
+| 17 | COMPILE_ERROR: process has no method '%s' |
 | 17 | MODULE_NOT_IMPLEMENTED: module |
-| 16 | COMPILE_ERROR: method '%s' on class '%s' overrides an inherited method with an incompatible signatur… |
-| 16 | COMPILE_ERROR: only simple function calls are supported (the callee is not a named function, a funct… |
-| 15 | COMPILE_ERROR: an Http2Stream supports .respond(headers), .write(chunk), .end(chunk?), .on('%s'|'%s'… |
-| 15 | COMPILE_ERROR: array elements must share one type — element 1 does not match the array's element t… |
-| 15 | COMPILE_ERROR: http.createServer's listener must be (req: IncomingMessage, res: ServerResponse) => v… |
-| 15 | COMPILE_ERROR: unknown class '%s' |
-| 14 | COMPILE_ERROR: '%s' has no exported member '%s' |
+| 14 | COMPILE_ERROR: '%s' is of type '%s' |
+| 14 | COMPILE_ERROR: unknown class '%s' |
+| 13 | COMPILE_ERROR: expected }, got : |
+| 13 | COMPILE_ERROR: only simple function calls are supported (the callee is not a named function, a funct… |
+| 13 | COMPILE_ERROR: undefined function or closure '%s' |
+| 12 | COMPILE_ERROR: cannot find name '%s'; did you mean '%s'? |
+| 9 | RUN_TIMEOUT |
+| 8 | COMPILE_ERROR: <path>: resolving dynamic import('%s'): cannot find module '%s' (resolved to <path>) |
+| 8 | COMPILE_ERROR: <path>: resolving dynamic import('%s'): import path '%s' must start with '%s' or '%s'… |
+| 8 | COMPILE_ERROR: class '%s' has no static field '%s' |
+| 8 | COMPILE_ERROR: expected 1 arguments, but got 0 |
+| 8 | COMPILE_ERROR: object literal may only specify known properties, and '%s' does not exist in type '%s… |
+| 7 | COMPILE_ERROR: a destructured parameter requires an explicit type annotation |
 
 ## Top skip reasons
 
@@ -152,7 +152,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 12 | requires Node common harness (common.spawnPromisified) |
 | 11 | Node-internal harness file require('../common/dns') |
 
-## Passing files (158)
+## Passing files (303)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
@@ -162,79 +162,163 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `es-module/test-require-module-detect-entry-point-aou.js` | require |  |
 | `es-module/test-require-module-detect-entry-point.js` | require |  |
 | `internet/test-dns-regress-6244.js` | dns |  |
-| `internet/test-http-dns-fail.js` | http |  |
 | `internet/test-net-connect-unref.js` | net |  |
 | `message/console_assert.js` | console_assert |  |
-| `parallel/test-assert-checktag.js` | assert |  |
-| `parallel/test-assert-fail.js` | assert |  |
+| `parallel/test-arm-math-illegal-instruction.js` | arm |  |
+| `parallel/test-beforeexit-event-exit.js` | beforeexit |  |
 | `parallel/test-buffer-ascii.js` | buffer |  |
 | `parallel/test-buffer-badhex.js` | buffer |  |
 | `parallel/test-buffer-nopendingdep-map.js` | buffer |  |
 | `parallel/test-buffer-prototype-inspect.js` | buffer |  |
+| `parallel/test-child-process-exec-cwd.js` | child |  |
+| `parallel/test-child-process-kill.js` | child |  |
 | `parallel/test-child-process-set-blocking.js` | child |  |
-| `parallel/test-cluster-dgram-reuse.js` | cluster |  |
-| `parallel/test-cluster-disconnect-with-no-workers.js` | cluster |  |
+| `parallel/test-child-process-spawn-error.js` | child |  |
+| `parallel/test-child-process-spawn-event.js` | child |  |
+| `parallel/test-client-request-destroy.js` | client |  |
+| `parallel/test-cluster-invalid-message.js` | cluster |  |
 | `parallel/test-cluster-kill-infinite-loop.js` | cluster |  |
 | `parallel/test-cluster-listening-port.js` | cluster |  |
 | `parallel/test-cluster-worker-death.js` | cluster |  |
+| `parallel/test-cluster-worker-wait-server-close.js` | cluster |  |
+| `parallel/test-crypto-from-binary.js` | crypto |  |
+| `parallel/test-crypto-keygen-async-elliptic-curve-jwk-ec.js` | crypto |  |
+| `parallel/test-crypto-keygen-async-elliptic-curve-jwk-rsa.js` | crypto |  |
+| `parallel/test-crypto-keygen-bit-length.js` | crypto |  |
+| `parallel/test-crypto-keygen-empty-passphrase-no-error.js` | crypto |  |
+| `parallel/test-crypto-keygen-invalid-parameter-encoding-dsa.js` | crypto |  |
+| `parallel/test-crypto-keygen-invalid-parameter-encoding-ec.js` | crypto |  |
+| `parallel/test-crypto-keygen-missing-oid.js` | crypto |  |
+| `parallel/test-crypto-keygen-no-rsassa-pss-params.js` | crypto |  |
+| `parallel/test-crypto-keygen-rfc8017-9-1.js` | crypto |  |
+| `parallel/test-crypto-op-during-process-exit.js` | crypto |  |
+| `parallel/test-crypto-publicDecrypt-fails-first-time.js` | crypto |  |
+| `parallel/test-crypto-randomfillsync-regression.js` | crypto |  |
+| `parallel/test-crypto-webcrypto-aes-decrypt-tag-too-small.js` | crypto |  |
+| `parallel/test-datetime-change-notify.js` | datetime |  |
 | `parallel/test-dgram-abort-closed.js` | dgram |  |
+| `parallel/test-dgram-address.js` | dgram |  |
+| `parallel/test-dgram-bind-error-repeat.js` | dgram |  |
+| `parallel/test-dgram-bind.js` | dgram |  |
+| `parallel/test-dgram-bytes-length.js` | dgram |  |
+| `parallel/test-dgram-close-in-listening.js` | dgram |  |
+| `parallel/test-dgram-connect-send-callback-buffer-length.js` | dgram |  |
+| `parallel/test-dgram-connect-send-callback-buffer.js` | dgram |  |
+| `parallel/test-dgram-connect-send-callback-multi-buffer.js` | dgram |  |
+| `parallel/test-dgram-connect-send-empty-array.js` | dgram |  |
+| `parallel/test-dgram-connect-send-multi-buffer-copy.js` | dgram |  |
+| `parallel/test-dgram-connect-send-multi-string-array.js` | dgram |  |
+| `parallel/test-dgram-error-message-address.js` | dgram |  |
+| `parallel/test-dgram-ipv6only.js` | dgram |  |
+| `parallel/test-dgram-listen-after-bind.js` | dgram |  |
+| `parallel/test-dgram-oob-buffer.js` | dgram |  |
+| `parallel/test-dgram-ref.js` | dgram |  |
+| `parallel/test-dgram-send-callback-buffer-empty-address.js` | dgram |  |
+| `parallel/test-dgram-send-callback-buffer-length-empty-address.js` | dgram |  |
+| `parallel/test-dgram-send-callback-buffer-length.js` | dgram |  |
+| `parallel/test-dgram-send-callback-buffer.js` | dgram |  |
+| `parallel/test-dgram-send-callback-multi-buffer.js` | dgram |  |
+| `parallel/test-dgram-send-multi-string-array.js` | dgram |  |
+| `parallel/test-dgram-setBroadcast.js` | dgram |  |
+| `parallel/test-dgram-udp4.js` | dgram |  |
+| `parallel/test-dgram-unref.js` | dgram |  |
 | `parallel/test-diagnostics-channel-has-subscribers.js` | diagnostics |  |
+| `parallel/test-diagnostics-channel-safe-subscriber-errors.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-sync-unsubscribe.js` | diagnostics |  |
+| `parallel/test-diagnostics-channel-tracing-channel-callback-early-exit.js` | diagnostics |  |
+| `parallel/test-diagnostics-channel-tracing-channel-promise-early-exit.js` | diagnostics |  |
+| `parallel/test-diagnostics-channel-tracing-channel-sync-early-exit.js` | diagnostics |  |
+| `parallel/test-dns-lookupService-promises.js` | dns |  |
 | `parallel/test-eval.js` | eval |  |
-| `parallel/test-event-emitter-num-args.js` | event |  |
+| `parallel/test-event-emitter-special-event-names.js` | event |  |
+| `parallel/test-event-emitter-symbols.js` | event |  |
 | `parallel/test-events-list.js` | events |  |
 | `parallel/test-eventsource.js` | eventsource |  |
+| `parallel/test-file-read-noexist.js` | file |  |
 | `parallel/test-file-write-stream2.js` | file |  |
 | `parallel/test-file-write-stream4.js` | file |  |
+| `parallel/test-fs-close.js` | fs |  |
+| `parallel/test-fs-constants.js` | fs |  |
+| `parallel/test-fs-empty-readStream.js` | fs |  |
+| `parallel/test-fs-existssync-false.js` | fs |  |
+| `parallel/test-fs-long-path.js` | fs |  |
+| `parallel/test-fs-mkdir-rmdir.js` | fs |  |
+| `parallel/test-fs-open-numeric-flags.js` | fs |  |
 | `parallel/test-fs-operations-with-surrogate-pairs.js` | fs |  |
+| `parallel/test-fs-promises-writefile-typedarray.js` | fs |  |
 | `parallel/test-fs-read-file-sync-hostname.js` | fs |  |
 | `parallel/test-fs-read-stream-autoClose.js` | fs |  |
 | `parallel/test-fs-read-stream-double-close.js` | fs |  |
+| `parallel/test-fs-read-stream-encoding.js` | fs |  |
 | `parallel/test-fs-read-stream-resume.js` | fs |  |
 | `parallel/test-fs-read-zero-length.js` | fs |  |
 | `parallel/test-fs-readdir-recursive.js` | fs |  |
+| `parallel/test-fs-readdir-stack-overflow.js` | fs |  |
+| `parallel/test-fs-readfile-empty.js` | fs |  |
+| `parallel/test-fs-readfile-unlink.js` | fs |  |
 | `parallel/test-fs-ready-event-stream.js` | fs |  |
-| `parallel/test-fs-rmdir-recursive-sync-warns-not-found.js` | fs |  |
 | `parallel/test-fs-rmdir-recursive-warns-not-found.js` | fs |  |
+| `parallel/test-fs-symlink-dir-junction.js` | fs |  |
+| `parallel/test-fs-symlink-longpath.js` | fs |  |
 | `parallel/test-fs-truncate-clear-file-zero.js` | fs |  |
+| `parallel/test-fs-watch-close-when-destroyed.js` | fs |  |
+| `parallel/test-fs-watch-recursive-add-file-to-new-folder.js` | fs |  |
+| `parallel/test-fs-watch-recursive-delete.js` | fs |  |
 | `parallel/test-fs-watch-recursive-linux-parallel-remove.js` | fs |  |
+| `parallel/test-fs-watch-recursive-update-file.js` | fs |  |
+| `parallel/test-fs-watch-recursive-validate.js` | fs |  |
+| `parallel/test-fs-watch-ref-unref.js` | fs |  |
+| `parallel/test-fs-write-buffer.js` | fs |  |
+| `parallel/test-fs-write-file-invalid-path.js` | fs |  |
 | `parallel/test-fs-write-stream-close-without-callback.js` | fs |  |
+| `parallel/test-fs-write-stream-double-close.js` | fs |  |
+| `parallel/test-fs-write-stream-encoding.js` | fs |  |
 | `parallel/test-fs-write-stream-end.js` | fs |  |
 | `parallel/test-fs-writestream-open-write.js` | fs |  |
-| `parallel/test-global-customevent-disabled.js` | global |  |
 | `parallel/test-global-domexception.js` | global |  |
-| `parallel/test-global-webcrypto-disbled.js` | global |  |
-| `parallel/test-http-abort-before-end.js` | http |  |
-| `parallel/test-http-abort-queued.js` | http |  |
-| `parallel/test-http-allow-req-after-204-res.js` | http |  |
-| `parallel/test-http-chunked-304.js` | http |  |
+| `parallel/test-global-encoder.js` | global |  |
+| `parallel/test-http-agent-false.js` | http |  |
+| `parallel/test-http-agent-null.js` | http |  |
 | `parallel/test-http-client-abort2.js` | http |  |
-| `parallel/test-http-client-agent-abort-close-event.js` | http |  |
-| `parallel/test-http-client-close-event.js` | http |  |
+| `parallel/test-http-client-agent-end-close-event.js` | http |  |
+| `parallel/test-http-client-defaults.js` | http |  |
+| `parallel/test-http-client-error-rawbytes.js` | http |  |
+| `parallel/test-http-client-get-url.js` | http |  |
+| `parallel/test-http-client-input-function.js` | http |  |
 | `parallel/test-http-client-invalid-path.js` | http |  |
-| `parallel/test-http-client-keep-alive-release-before-finish.js` | http |  |
 | `parallel/test-http-client-res-destroyed.js` | http |  |
+| `parallel/test-http-dump-req-when-res-ends.js` | http |  |
 | `parallel/test-http-header-obstext.js` | http |  |
-| `parallel/test-http-invalid-te.js` | http |  |
 | `parallel/test-http-listening.js` | http |  |
 | `parallel/test-http-methods.js` | http |  |
+| `parallel/test-http-outgoing-destroy.js` | http |  |
 | `parallel/test-http-outgoing-writableFinished.js` | http |  |
 | `parallel/test-http-request-invalid-method-error.js` | http |  |
 | `parallel/test-http-request-method-delete-payload.js` | http |  |
-| `parallel/test-http-request-smuggling-content-length.js` | http |  |
+| `parallel/test-http-server-close-all.js` | http |  |
 | `parallel/test-http-server-close-idle-wait-response.js` | http |  |
 | `parallel/test-http-server-de-chunked-trailer.js` | http |  |
-| `parallel/test-http-server-headers-timeout-interrupted-headers.js` | http |  |
+| `parallel/test-http-server-method.query.js` | http |  |
 | `parallel/test-http-server-non-utf8-header.js` | http |  |
-| `parallel/test-http-server-reject-chunked-with-content-length.js` | http |  |
-| `parallel/test-http-server-reject-cr-no-lf.js` | http |  |
-| `parallel/test-http-server-request-timeout-interrupted-headers.js` | http |  |
-| `parallel/test-http-transfer-encoding-smuggling.js` | http |  |
+| `parallel/test-http-unix-socket.js` | http |  |
+| `parallel/test-http-url.parse-only-support-http-https-protocol.js` | http |  |
 | `parallel/test-http-write-head-after-set-header.js` | http |  |
-| `parallel/test-http2-tls-disconnect.js` | http2 |  |
+| `parallel/test-http2-compat-client-upload-reject.js` | http2 |  |
+| `parallel/test-http2-compat-serverresponse-close.js` | http2 |  |
+| `parallel/test-http2-compat-serverresponse-end-after-statuses-without-body.js` | http2 |  |
+| `parallel/test-http2-compat-serverresponse-headers-send-date.js` | http2 |  |
+| `parallel/test-http2-compat-write-head-destroyed.js` | http2 |  |
+| `parallel/test-http2-generic-streams-sendfile.js` | http2 |  |
+| `parallel/test-http2-generic-streams.js` | http2 |  |
+| `parallel/test-http2-perform-server-handshake.js` | http2 |  |
+| `parallel/test-http2-removed-header-stays-removed.js` | http2 |  |
+| `parallel/test-http2-respond-file-compat.js` | http2 |  |
 | `parallel/test-https-server-headers-timeout.js` | https |  |
 | `parallel/test-https-server-request-timeout.js` | https |  |
+| `parallel/test-inspector-stops-no-file.js` | inspector |  |
 | `parallel/test-kill-segfault-freebsd.js` | kill |  |
+| `parallel/test-memory-usage-emfile.js` | memory |  |
+| `parallel/test-net-allow-half-open.js` | net |  |
 | `parallel/test-net-better-error-messages-listen-path.js` | net |  |
 | `parallel/test-net-better-error-messages-listen.js` | net |  |
 | `parallel/test-net-connect-after-destroy.js` | net |  |
@@ -242,77 +326,138 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-net-end-without-connect.js` | net |  |
 | `parallel/test-net-isipv4.js` | net |  |
 | `parallel/test-net-isipv6.js` | net |  |
+| `parallel/test-net-listen-after-destroying-stdin.js` | net |  |
 | `parallel/test-net-listen-close-server.js` | net |  |
 | `parallel/test-net-listen-error.js` | net |  |
 | `parallel/test-net-listening.js` | net |  |
+| `parallel/test-net-server-listen-remove-callback.js` | net |  |
+| `parallel/test-net-server-unref-persistent.js` | net |  |
+| `parallel/test-net-server-unref.js` | net |  |
+| `parallel/test-net-socket-connect-without-cb.js` | net |  |
 | `parallel/test-net-socket-no-halfopen-enforcer.js` | net |  |
 | `parallel/test-next-tick-doesnt-hang.js` | next |  |
 | `parallel/test-next-tick-fixed-queue-regression.js` | next |  |
+| `parallel/test-next-tick-intentional-starvation.js` | next |  |
+| `parallel/test-next-tick-when-exiting.js` | next |  |
 | `parallel/test-no-node-snapshot.js` | no |  |
 | `parallel/test-outgoing-message-destroy.js` | outgoing |  |
 | `parallel/test-path-basename.js` | path | −4 |
 | `parallel/test-path-dirname.js` | path | −9 |
-| `parallel/test-path-relative.js` | path | −1 |
+| `parallel/test-path-zero-length-strings.js` | path | −8 |
 | `parallel/test-pipe-abstract-socket-http.js` | pipe |  |
+| `parallel/test-pipe-abstract-socket.js` | pipe |  |
 | `parallel/test-pipe-address.js` | pipe |  |
 | `parallel/test-pipe-return-val.js` | pipe |  |
-| `parallel/test-process-chdir-errormessage.js` | process |  |
+| `parallel/test-process-constants-noatime.js` | process |  |
+| `parallel/test-process-emit.js` | process |  |
 | `parallel/test-process-env-delete.js` | process |  |
 | `parallel/test-process-env-deprecation.js` | process |  |
+| `parallel/test-process-env-tz.js` | process |  |
 | `parallel/test-process-env-windows-error-reset.js` | process |  |
 | `parallel/test-process-exit-recursive.js` | process |  |
 | `parallel/test-process-exit.js` | process |  |
 | `parallel/test-process-hrtime-bigint.js` | process |  |
 | `parallel/test-process-uptime.js` | process |  |
-| `parallel/test-promise-unhandled-issue-43655.js` | promise |  |
-| `parallel/test-promises-unhandled-proxy-rejections.js` | promises |  |
-| `parallel/test-promises-unhandled-symbol-rejections.js` | promises |  |
+| `parallel/test-promise-handled-rejection-no-warning.js` | promise |  |
+| `parallel/test-promise-unhandled-silent.js` | promise |  |
 | `parallel/test-readable-large-hwm.js` | readable |  |
 | `parallel/test-readable-single-end.js` | readable |  |
-| `parallel/test-regression-object-prototype.js` | regression |  |
+| `parallel/test-readline-async-iterators-destroy.js` | readline |  |
+| `parallel/test-readline-carriage-return-between-chunks.js` | readline |  |
+| `parallel/test-readline-position.js` | readline |  |
+| `parallel/test-readline-undefined-columns.js` | readline |  |
+| `parallel/test-ref-unref-return.js` | ref |  |
+| `parallel/test-repl-stdin-push-null.js` | repl |  |
 | `parallel/test-runner-subtest-after-hook.js` | runner |  |
+| `parallel/test-runner-test-fullname.js` | runner |  |
+| `parallel/test-signal-args.js` | signal |  |
+| `parallel/test-signal-handler-remove-on-exit.js` | signal |  |
+| `parallel/test-signal-handler.js` | signal |  |
 | `parallel/test-stdin-hang.js` | stdin |  |
-| `parallel/test-stream-base-typechecking.js` | stream |  |
+| `parallel/test-stdin-pause-resume-sync.js` | stdin |  |
+| `parallel/test-stdin-pause-resume.js` | stdin |  |
+| `parallel/test-stdin-resume-pause.js` | stdin |  |
+| `parallel/test-stdio-pipe-access.js` | stdio |  |
+| `parallel/test-stdio-pipe-stderr.js` | stdio |  |
+| `parallel/test-stdout-pipeline-destroy.js` | stdout |  |
+| `parallel/test-stdout-stderr-write.js` | stdout |  |
+| `parallel/test-stream-await-drain-writers-in-synchronously-recursion-write.js` | stream |  |
 | `parallel/test-stream-destroy-event-order.js` | stream |  |
 | `parallel/test-stream-duplex-props.js` | stream |  |
 | `parallel/test-stream-duplex-readable-end.js` | stream |  |
 | `parallel/test-stream-error-once.js` | stream |  |
-| `parallel/test-stream-objectmode-undefined.js` | stream |  |
+| `parallel/test-stream-once-readable-pipe.js` | stream |  |
 | `parallel/test-stream-passthrough-drain.js` | stream |  |
+| `parallel/test-stream-pipe-deadlock.js` | stream |  |
 | `parallel/test-stream-pipe-flow-after-unpipe.js` | stream |  |
 | `parallel/test-stream-pipe-needDrain.js` | stream |  |
+| `parallel/test-stream-pipeline-async-iterator.js` | stream |  |
+| `parallel/test-stream-pipeline-duplex.js` | stream |  |
+| `parallel/test-stream-pipeline-queued-end-in-destroy.js` | stream |  |
+| `parallel/test-stream-pipeline-with-empty-string.js` | stream |  |
 | `parallel/test-stream-readable-aborted.js` | stream |  |
 | `parallel/test-stream-readable-data.js` | stream |  |
-| `parallel/test-stream-readable-emit-readable-short-stream.js` | stream |  |
 | `parallel/test-stream-readable-end-destroyed.js` | stream |  |
 | `parallel/test-stream-readable-error-end.js` | stream |  |
 | `parallel/test-stream-readable-from-web-termination.js` | stream |  |
 | `parallel/test-stream-readable-hwm-0-async.js` | stream |  |
 | `parallel/test-stream-readable-hwm-0.js` | stream |  |
 | `parallel/test-stream-readable-resume-hwm.js` | stream |  |
+| `parallel/test-stream-readable-unpipe-resume.js` | stream |  |
+| `parallel/test-stream-readable-with-unimplemented-_read.js` | stream |  |
 | `parallel/test-stream-toWeb-allows-server-response.js` | stream |  |
+| `parallel/test-stream-transform-callback-twice.js` | stream |  |
 | `parallel/test-stream-writable-aborted.js` | stream |  |
 | `parallel/test-stream-writable-final-destroy.js` | stream |  |
-| `parallel/test-stream-writable-finish-destroyed.js` | stream |  |
 | `parallel/test-stream-writable-properties.js` | stream |  |
-| `parallel/test-stream-writable-writable.js` | stream |  |
 | `parallel/test-stream-write-drain.js` | stream |  |
-| `parallel/test-stream-write-final.js` | stream |  |
 | `parallel/test-sync-fileread.js` | sync |  |
+| `parallel/test-timers-clear-object-does-not-throw-error.js` | timers |  |
 | `parallel/test-timers-clear-timeout-interval-equivalent.js` | timers |  |
+| `parallel/test-timers-destroyed.js` | timers |  |
 | `parallel/test-timers-immediate-queue.js` | timers |  |
-| `parallel/test-timers-non-integer-delay.js` | timers |  |
+| `parallel/test-timers-immediate-unref-nested-once.js` | timers |  |
+| `parallel/test-timers-immediate-unref-simple.js` | timers |  |
+| `parallel/test-timers-immediate.js` | timers |  |
+| `parallel/test-timers-refresh-in-callback.js` | timers |  |
 | `parallel/test-timers-same-timeout-wrong-list-deleted.js` | timers |  |
 | `parallel/test-timers-setimmediate-infinite-loop.js` | timers |  |
+| `parallel/test-timers-timeout-to-interval.js` | timers |  |
 | `parallel/test-timers-timeout-with-non-integer.js` | timers |  |
+| `parallel/test-timers-unrefd-interval-still-fires.js` | timers |  |
+| `parallel/test-timers-unrefed-in-callback.js` | timers |  |
 | `parallel/test-tls-client-abort.js` | tls |  |
 | `parallel/test-tls-client-abort2.js` | tls |  |
-| `parallel/test-tls-reuse-host-from-socket.js` | tls |  |
+| `parallel/test-tls-use-after-free-regression.js` | tls |  |
+| `parallel/test-trace-events-net-abstract-socket.js` | trace |  |
+| `parallel/test-tty-stdin-end.js` | tty |  |
+| `parallel/test-tz-version.js` | tz |  |
 | `parallel/test-url-domain-ascii-unicode.js` | url |  |
-| `parallel/test-url-format-whatwg.js` | url |  |
 | `parallel/test-url-format.js` | url |  |
-| `parallel/test-url-parse-format.js` | url |  |
 | `parallel/test-utf8-scripts.js` | utf8 |  |
+| `parallel/test-util-primordial-monkeypatching.js` | util |  |
 | `parallel/test-v8-flag-pool-size-0.js` | v8 |  |
 | `parallel/test-websocket.js` | websocket |  |
+| `parallel/test-whatwg-encoding-custom-textdecoder-fatal.js` | whatwg |  |
+| `parallel/test-whatwg-encoding-custom-textdecoder-ignorebom.js` | whatwg |  |
+| `parallel/test-whatwg-encoding-custom-textdecoder-utf16-surrogates.js` | whatwg |  |
+| `parallel/test-whatwg-url-custom-deepequal.js` | whatwg |  |
+| `parallel/test-whatwg-url-custom-href-side-effect.js` | whatwg |  |
+| `parallel/test-whatwg-url-custom-inspect.js` | whatwg |  |
+| `parallel/test-whatwg-url-override-hostname.js` | whatwg |  |
+| `parallel/test-worker-console-listeners.js` | worker |  |
+| `parallel/test-worker-message-port-close-while-receiving.js` | worker |  |
+| `parallel/test-zlib-brotli-from-brotli.js` | zlib |  |
+| `parallel/test-zlib-brotli-from-string.js` | zlib |  |
+| `parallel/test-zlib-brotli.js` | zlib |  |
+| `parallel/test-zlib-close-after-write.js` | zlib |  |
+| `parallel/test-zlib-close-in-ondata.js` | zlib |  |
+| `parallel/test-zlib-create-raw.js` | zlib |  |
+| `parallel/test-zlib-dictionary-fail.js` | zlib |  |
+| `parallel/test-zlib-failed-init.js` | zlib |  |
+| `parallel/test-zlib-flush-drain-longblock.js` | zlib |  |
+| `parallel/test-zlib-from-gzip.js` | zlib |  |
+| `parallel/test-zlib-from-string.js` | zlib |  |
+| `parallel/test-zlib-maxOutputLength.js` | zlib |  |
 | `parallel/test-zlib-no-stream.js` | zlib |  |
+| `parallel/test-zlib-zero-windowBits.js` | zlib |  |

@@ -1210,3 +1210,25 @@ function main2(): void {
 main2()
 `, uvENOENT()+"\nundefined")
 }
+
+// realpathSync / readlinkSync / mkdtempSync take Node's Buffer-encoding
+// overloads: `encoding: 'buffer'` gives a Buffer (ADR-01457).
+func TestE2EFsBufferEncodingPaths(t *testing.T) {
+	assertSameAsNode(t, `
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+const r = fs.realpathSync('.', { encoding: 'buffer' });
+console.log(Buffer.isBuffer(r), typeof r, r.length > 0);
+const s = fs.realpathSync('.');
+console.log(typeof s, s.length > 0);
+const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kml-'), 'buffer');
+console.log(Buffer.isBuffer(d));
+fs.rmdirSync(d.toString());
+const link = path.join(os.tmpdir(), 'kml-link-' + process.pid);
+fs.symlinkSync('.', link);
+const l = fs.readlinkSync(link, { encoding: 'buffer' });
+console.log(Buffer.isBuffer(l), l.toString());
+fs.unlinkSync(link);
+`)
+}

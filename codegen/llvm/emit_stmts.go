@@ -293,6 +293,17 @@ func (e *Emitter) isNeverTyped(x ast.Expression) bool {
 }
 
 func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
+	// A module-level `return` ends the module's evaluation; its value is
+	// evaluated and discarded, as Node's CommonJS wrapper discards it.
+	if end, ok := e.topLevelReturns[r]; ok {
+		if r.Value != nil {
+			if _, err := e.emitExpr(r.Value); err != nil {
+				return err
+			}
+		}
+		e.emitTerminator("br label %" + end)
+		return nil
+	}
 	// Generator functions (TDD-00061/ADR-00172): a `return` inside a
 	// generator body never emits an ordinary `ret` at all — it suspends via
 	// the same fiber-swap `yield` uses, just with done=true so the
@@ -321,11 +332,17 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 			// and the store into the ptr result slot is invalid IR.
 			valueExpr := r.Value
 			rt := e.inferExprType(r.Value)
-			if isUnconstrainedDynamic(e.currentPromiseTy) && (rt.IsPromise && !rt.PromiseTask || isUnconstrainedDynamic(rt)) {
+			if isUnconstrainedDynamic(e.currentPromiseTy) && rt.IsPromise && !rt.PromiseTask && e.emittingHTTPHandler {
 				// A returned promise settles this one with what it settles to
-				// (ADR-00265); in a `Promise<any>` function the value may be a
-				// promise held in an `any` (`return o.go()`), unwrapped as
-				// `await` unwraps a thenable.
+				// (ADR-00265). Elsewhere a promise or any other value held in
+				// an `any` result is stored as it is: the epilogue resolves
+				// with it (__kml_promise_resolve_any), adopting a promise or
+				// thenable as PromiseResolve does, outside any enclosing
+				// `try`. An http.listen handler's slot is read directly.
+				valueExpr = ast.NewAwaitExpression(r.Value, r.Value.GetPos())
+			}
+			if _, ok := e.thenableClass(rt); ok && !e.currentPromiseTy.IsClass {
+				// A returned thenable settles this promise through its `then`.
 				valueExpr = ast.NewAwaitExpression(r.Value, r.Value.GetPos())
 			}
 			var val Value
@@ -342,17 +359,33 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 			// fn adopts that promise's state — await it, settle with its value (or
 			// re-throw its rejection into this fn's own settle). Only when the fn's
 			// own value type isn't itself a promise (no double-unwrap).
-			if val.Ty.IsPromise && val.Ty.PromiseTask && !e.currentPromiseTy.IsPromise {
+			if val.Ty.IsPromise && val.Ty.PromiseTask && !e.currentPromiseTy.IsPromise && val.Ty.PromiseType != nil && (val.Ty.PromiseType.IsNever || sameReprKey(*val.Ty.PromiseType) == sameReprKey(e.currentPromiseTy)) && e.asyncReturnAdopt(val.Ref) {
+				// Adopted when the function settles: its value slot is unused.
+				if err := e.emitReturnCleanups(); err != nil {
+					return err
+				}
+				e.emitTerminator(fmt.Sprintf("br label %%%s", e.coroRetLabel))
+				return nil
+			}
+			if val.Ty.IsPromise && val.Ty.PromiseTask && !e.currentPromiseTy.IsPromise && (!isUnconstrainedDynamic(e.currentPromiseTy) || e.emittingHTTPHandler) {
+				// (An `any` result holds the promise itself: the epilogue's
+				// resolve adopts it.)
 				inner := e.currentPromiseTy
 				if isUnconstrainedDynamic(inner) && val.Ty.PromiseType != nil && val.Ty.PromiseType.IR != "" && val.Ty.PromiseType.IR != "void" {
 					inner = *val.Ty.PromiseType // read at its own type, converted below
 				}
+				e.sawAwait = true // the callable waits: a coroutine (TDD-00223 §2)
 				val, err = e.emitAwaitTaskPromise(val.Ref, inner)
 				if err != nil {
 					return err
 				}
 			}
 			val = e.coerce(val, e.currentPromiseTy)
+			if e.asyncAdoptSlot != "" && e.asyncAdoptSlot != adoptSlotPending {
+				// A value replaces a promise an earlier `return` left (one
+				// in a `finally`).
+				e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", e.asyncAdoptSlot))
+			}
 			if e.currentPromiseTy.IsArray {
 				// The async return-value slot holds a header pointer (TDD-00213
 				// Stage 2, asyncSlotSize == 8); mint/share a header from the aggregate.
@@ -805,6 +838,14 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		defer func() { s.Iterable = saved }()
 		return e.emitForOf(s)
 	}
+	// A class extending Map or Set without an iterator of its own iterates
+	// as its host does (TDD-00247).
+	if hv := e.hostView(s.Iterable); hv != nil {
+		saved := s.Iterable
+		s.Iterable = hv
+		defer func() { s.Iterable = saved }()
+		return e.emitForOf(s)
+	}
 	condL := e.freshLabel("forof.cond")
 	bodyL := e.freshLabel("forof.body")
 	incL := e.freshLabel("forof.inc")
@@ -952,9 +993,9 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		if objTy.IsArray {
 			return e.emitForAwaitOfArray(s, objTy, condL, bodyL, incL, endL)
 		}
-		// A Map/Set in `for await`: materialize the values into an array (a Set
-		// iterates its elements, a Map its values — same shape as the sync
-		// for-of below) and reuse the array loop's per-element await.
+		// A Map/Set in `for await`: materialize what it iterates into an array
+		// (a Set its elements, a Map its [key, value] entries, as the sync
+		// for-of below does) and reuse the array loop's per-element await.
 		if objTy.IsMap || objTy.IsSet {
 			var mapPtr string
 			if id, ok := s.Iterable.(*ast.Identifier); ok {
@@ -972,7 +1013,22 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 				}
 				mapPtr = iterableVal.Ref
 			}
-			valsVal, err := e.mapOrSetValuesArray(objTy, mapPtr)
+			var valsVal Value
+			var err error
+			if objTy.IsMap {
+				keyTy, valTy := TypePtr, TypeI64
+				if objTy.MapKey != nil {
+					keyTy = *objTy.MapKey
+				}
+				if objTy.MapVal != nil {
+					valTy = *objTy.MapVal
+				}
+				suffix, _ := mapRuntime(keyTy)
+				e.ensureMapFamily(suffix)
+				valsVal, err = e.emitMapEntries(mapPtr, suffix, keyTy, valTy)
+			} else {
+				valsVal, err = e.mapOrSetValuesArray(objTy, mapPtr)
+			}
 			if err != nil {
 				return err
 			}
@@ -1002,9 +1058,6 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// iteration receives one value; the loop ends when the channel is closed
 	// and drained — the `for (const v of ch) {}` equivalent of Go's channel
 	// range. The channel is evaluated once.
-	if objTy := e.inferExprType(s.Iterable); objTy.IsChannel {
-		return e.emitForOfChannel(s, objTy, condL, bodyL, incL, endL)
-	}
 
 	// Stage 1a (TDD-00009): a class instance whose class declares a zero-arg
 	// `next(): T | null` method iterates via repeated next() calls rather
@@ -1685,6 +1738,15 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 			return err
 		}
 		keysVal, err = e.emitMapMethod(objVal.Ty, objVal.Ref, "keys", nil, s.GetPos())
+		if err != nil {
+			return err
+		}
+	} else if _, arrCls := e.arrayClassHost(objTy); (objTy.IsArray && !objTy.IsTuple || arrCls || objTy.IsClass && objTy.IsObject) && !objTy.Nullable {
+		// An array (or an instance of a class extending one): its indices,
+		// then any own fields. A class instance: its own keys, the
+		// properties added to it included (its methods are not enumerable).
+		var err error
+		keysVal, err = e.emitObjectKeys([]ast.Expression{s.Object}, s.GetPos())
 		if err != nil {
 			return err
 		}

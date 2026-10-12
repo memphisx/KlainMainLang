@@ -193,3 +193,42 @@ console.log(Reflect.getPrototypeOf(o) === proto)
 console.log(o.greet())
 `, "true\ntrue\nhi")
 }
+
+// Object.getOwnPropertySymbols throws on null/undefined and runs a Proxy's
+// ownKeys trap with the spec's result checks.
+func TestE2EGetOwnPropertySymbolsProxyOwnKeys(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const s = Symbol("s");
+try { Object.getOwnPropertySymbols(null); } catch (e) { console.log(e instanceof TypeError, e.message); }
+try { Object.getOwnPropertySymbols(undefined); } catch (e) { console.log(e instanceof TypeError); }
+const dup = new Proxy({}, { ownKeys() { return ["a", "a"]; } });
+try { Object.getOwnPropertySymbols(dup); } catch (e) { console.log(e instanceof TypeError, e.message); }
+const q = new Proxy({}, { ownKeys() { return ["a", s]; } });
+console.log(Object.getOwnPropertySymbols(q).length, Object.getOwnPropertySymbols(q)[0] === s);
+const t = {};
+Object.defineProperty(t, "x", { value: 1, configurable: false });
+try { Object.getOwnPropertySymbols(new Proxy(t, { ownKeys() { return []; } })); } catch (e) { console.log(e instanceof TypeError); }
+const ne = Object.preventExtensions({ y: 1 });
+try { Object.getOwnPropertySymbols(new Proxy(ne, { ownKeys() { return ["y", "z"]; } })); } catch (e) { console.log(e instanceof TypeError); }
+console.log(Object.getOwnPropertySymbols(new Proxy(ne, { ownKeys() { return ["y"]; } })).length);
+`)
+}
+
+// A field named "constructor" (identifier or string) and `arguments` in a
+// field initializer are early SyntaxErrors; `arguments` inside a nested
+// function is not.
+func TestClassFieldEarlyErrors(t *testing.T) {
+	for src, want := range map[string]string{
+		`class C { constructor = 1 }`:          "field named 'constructor'",
+		`class C { "constructor" = 1 }`:        "field named 'constructor'",
+		`class C { static "constructor" = 1 }`: "field named 'constructor'",
+		`class C { 'x' = () => arguments }`:    "'arguments' cannot be referenced",
+	} {
+		if _, err := parser.Parse(src); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: want error %q, got %v", src, want, err)
+		}
+	}
+	if _, err := parser.Parse(`class C { x = function () { return arguments.length } }`); err != nil {
+		t.Errorf("arguments in a nested function: %v", err)
+	}
+}

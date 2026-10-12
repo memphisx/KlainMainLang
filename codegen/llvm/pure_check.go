@@ -88,6 +88,7 @@ type pureFnInfo struct {
 // at the start of EmitProgram, before any codegen, so every compile path (CLI,
 // tests, conformance) enforces it uniformly.
 func (e *Emitter) checkPurity(prog *ast.Program) error {
+	defer e.analysisPass()()
 	pureFns := map[string]bool{} // names of every @pure function in the program
 	userFns := map[string]bool{} // names of every top-level user function/closure binding
 	var toCheck []pureFnInfo

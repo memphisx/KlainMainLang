@@ -7,10 +7,10 @@
   "coverage": {
     "loose": "32/32",
     "loosePct": 100,
-    "strict": "19/32",
-    "strictPct": 59
+    "strict": "23/32",
+    "strictPct": 72
   },
-  "lede": "A two-tier object model. Statically-typed objects are fixed-shape heap structs — compile-time field offsets, real per-heap-identity Object.freeze, compile-time Object.hasOwn. Dynamic objects (any-typed values, untyped JSON, js-mode literals) are real property bags with prototype chains (Object.create, __proto__), property descriptors (defineProperty, accessors, enumerability, descriptor-backed freeze/seal), and runtime add/delete. Map and Set carry the full core API; where JS says Iterable, this compiler narrows to a concrete array, and a missing Map key reads back as a real undefined (as in Node).",
+  "lede": "A two-tier object model. Statically-typed objects are fixed-shape heap structs — compile-time field offsets, real per-heap-identity Object.freeze, Object.hasOwn answered at compile time for a literal key. Dynamic objects (any-typed values, untyped JSON, js-mode literals) are real property bags with prototype chains (Object.create, __proto__), property descriptors (defineProperty, accessors, enumerability, descriptor-backed freeze/seal), and runtime add/delete. Map and Set carry the full core API; where JS says Iterable, this compiler narrows to a concrete array, and a missing Map key reads back as a real undefined (as in Node).",
   "entries": [
     {
       "id": "object.literal",
@@ -112,8 +112,8 @@
       "name": "Object.entries(obj)",
       "statusRow": "Object.entries(obj)",
       "signature": "Object.entries(obj): [string, V][]",
-      "badge": "caveats",
-      "description": "Returns real [string, V] tuples ([string, any] for a mixed shape or an interface-typed value); destructure with for (const [k, v] of Object.entries(obj)).",
+      "badge": "exact",
+      "description": "Returns real [string, V] tuples ([string, any] for a mixed shape or an interface-typed value), an array's [index, element] pairs; destructure with for (const [k, v] of Object.entries(obj)).",
       "returns": {
         "type": "[string, V][]",
         "desc": "Field name/value tuples."
@@ -154,7 +154,7 @@
       "statusRow": "Object.assign(target, ...src)",
       "signature": "Object.assign(target, ...src): target",
       "badge": "caveats",
-      "description": "Copies each source's fields into target in argument order — a later source overwrites an earlier one on a shared field. Mutates and returns target (same heap object, no copy).",
+      "description": "Copies each source's fields into target in argument order — a later source overwrites an earlier one on a shared field. Mutates and returns target (same heap object, no copy). An array target takes its sources' indices, growing as needed.",
       "exampleKey": "objects/object_static",
       "snippet": "const applied = Object.assign(defaults, userPrefs)\nconsole.log(defaults.theme)     // dark (same object)",
       "differences": [
@@ -251,17 +251,15 @@
       "name": "Object.hasOwn() / .hasOwnProperty()",
       "statusRow": "Object.hasOwn() / .hasOwnProperty()",
       "signature": "Object.hasOwn(obj, key): boolean; obj.hasOwnProperty(key): boolean",
-      "badge": "caveats",
-      "description": "Field-presence check. Object shapes are fully structural/static, so this is a compile-time FieldIndex lookup, not a runtime scan — except an optional field (x?: T), whose answer is its runtime presence ('age' in { name } is false, as in Node). The `in` operator applies the same check as an operator form.",
+      "badge": "exact",
+      "description": "Own-key check. On a fixed-shape object a string-literal key is answered at compile time, except an optional field (x?: T), whose answer is its runtime presence ('age' in { name } is false, as in Node). A runtime string key is compared against the object's own keys, and a dictionary or any value is tested at run time. The `in` operator also finds what the prototype holds: Object.prototype's members and a class instance's methods and accessors.",
       "returns": {
         "type": "boolean",
         "desc": "Whether the field exists on the object."
       },
       "exampleKey": "objects/objects",
       "snippet": "console.log(Object.hasOwn(base, 'x'))     // 1\nconsole.log(base.hasOwnProperty('q'))     // 0\nconsole.log('x' in base)                  // 1",
-      "differences": [
-        "The key must be a string literal — a runtime-computed key is a clean compile error (no runtime field-name table to check it against)"
-      ],
+      "differences": [],
       "seeAlso": [
         "object.fieldaccess",
         "object.keys"
@@ -310,15 +308,11 @@
       "name": "Computed property keys { [expr]: value }",
       "statusRow": "Computed property keys { [expr]: value }",
       "signature": "{ [expr]: value }",
-      "badge": "caveats",
-      "description": "A dynamic object — storage-wise a real Map<string,V> reusing new Map<K,V>()'s runtime, with .field / [expr] sugar layered on top. A well-known-symbol key (Symbol.asyncIterator / Symbol.iterator) is the exception: it desugars to a reserved static key so the literal stays a static struct driving for...of / for await...of.",
+      "badge": "exact",
+      "description": "Built as JavaScript builds it: a dynamic object whose keys exist at run time. Values of any types, methods (q[k](), q.name()), getters, spreads and a declared index-signature type all work, and the literal can be held in any as the same object. A well-known-symbol key (Symbol.asyncIterator / Symbol.iterator) desugars to a reserved static key, so the literal stays a static struct driving for...of / for await...of.",
       "exampleKey": "objects/computed_keys",
       "snippet": "const k = 'b'\nconst obj = { a: 1, [k]: 2 }\nconsole.log(obj[k])     // 2\nobj['c'] = 99\nconsole.log(obj.c)      // 99",
-      "differences": [
-        "`V` is inferred from the first property only",
-        "`...spread` combined with a computed key isn't supported yet",
-        "The declared-type form (`{ [key: string]: T }`) isn't supported yet"
-      ],
+      "differences": [],
       "seeAlso": [
         "object.fromentries",
         "map.new"

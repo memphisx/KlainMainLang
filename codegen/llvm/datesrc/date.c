@@ -4,6 +4,7 @@
  * and the weekday/month name tables. Pure integer calendar math (Hinnant's
  * civil algorithms), not gmtime(): the Windows CRT's gmtime returns NULL
  * before 1970 and gmtime's buffer is not thread-safe. */
+#include <math.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -106,6 +107,28 @@ i64 __kml_date_compose(i64 year, i64 month, i64 day, i64 hour, i64 min, i64 sec,
     u64 days = (u64)__kml_days_from_civil(year, month, day);
     u64 secs = days * 86400 + (u64)hour * 3600 + (u64)min * 60 + (u64)sec;
     return (i64)(secs * 1000 + (u64)msec);
+}
+
+/* Date's calendar fields (year, month[0-11, overflowing], day, hour, min,
+ * sec, ms) as a time value, read as UTC: ECMAScript's MakeDate(MakeDay,
+ * MakeTime) over each field's ToIntegerOrInfinity, a year 0-99 being
+ * 1900+year. NaN when a field is not finite; not yet TimeClipped. */
+double __kml_date_fields(double y, double mo, double d, double h, double mi, double s, double ms) {
+    if (!isfinite(y) || !isfinite(mo) || !isfinite(d) || !isfinite(h) || !isfinite(mi) || !isfinite(s) || !isfinite(ms))
+        return NAN;
+    y = trunc(y); mo = trunc(mo); d = trunc(d); h = trunc(h); mi = trunc(mi); s = trunc(s); ms = trunc(ms);
+    if (y >= 0 && y <= 99) y += 1900;
+    double ym = y + floor(mo / 12);
+    double mn = mo - floor(mo / 12) * 12;
+    if (fabs(ym) > 400000) return NAN; /* far past TimeClip's range */
+    double day = (double)__kml_days_from_civil((i64)ym, (i64)mn + 1, 1) + d - 1;
+    return day * 86400000.0 + (h * 3600000.0 + mi * 60000.0 + s * 1000.0 + ms);
+}
+
+/* ECMAScript's TimeClip: NaN past +-8.64e15 ms, else the integer. */
+double __kml_date_timeclip(double t) {
+    if (!isfinite(t) || fabs(t) > 8.64e15) return NAN;
+    return trunc(t) + 0.0;
 }
 
 /* The milliseconds of a time's fraction: its digits, not their integer

@@ -1,5 +1,5 @@
 // --- Basic generator: yield a sequence, then return a final value ---
-function* basic(): number {
+function* basic(): Generator<number> {
     yield 1;
     yield 2;
     return 3;
@@ -16,7 +16,7 @@ console.log(g1r3.value, g1r3.done);   // 3 1
 // Calling a generator function doesn't run its body at all — only the
 // first .next() call does. An infinite generator is fine as long as
 // nothing tries to drain it all at once.
-function* countFrom(start: number, step: number): number {
+function* countFrom(start: number, step: number): Generator<number> {
     let n = start;
     while (true) {
         yield n;
@@ -31,7 +31,7 @@ console.log(evens.next().value);   // 4
 // --- Sending values in ---
 // The value a `yield` expression evaluates to is whatever the *next*
 // .next(value) call sends in — not anything related to what was yielded.
-function* echo(): number {
+function* echo(): Generator<number> {
     const a = yield 1;
     const b = yield a + 10;
     return b * 2;
@@ -44,7 +44,7 @@ console.log(g2.next(7).value);   // 14 (b = 7, returns b * 2)
 // --- Independent instances ---
 // Each call to a generator function creates its own instance with its
 // own private state — advancing one never affects another.
-function* counter(): number {
+function* counter(): Generator<number> {
     let n = 0;
     while (true) {
         n += 1;
@@ -59,7 +59,7 @@ console.log(b.next().value);   // 1 (independent of a)
 console.log(a.next().value);   // 3
 
 // --- String-typed generator ---
-function* names(): string {
+function* names(): Generator<string> {
     yield "alice";
     yield "bob";
 }
@@ -75,7 +75,7 @@ while (!r.done) {
 // never sees the final `return` value (only what each `yield` produced).
 // The generator function is called exactly once (constructing one
 // instance), not once per iteration.
-function* fib(limit: number): number {
+function* fib(limit: number): Generator<number> {
     let a = 0;
     let b = 1;
     while (a < limit) {
@@ -110,7 +110,7 @@ console.log(g3r.value, g3r.done);   // null 1
 // --- Generator protocol: .throw(), .return(), yield* (TDD-00086) ---
 
 // .throw(e) injects an error at the suspension point; a body try/catch handles it.
-function* guarded(): number {
+function* guarded(): Generator<number> {
     try {
         yield 1;
         yield 2;
@@ -124,7 +124,7 @@ console.log(gg.next().value);                  // 1
 console.log(gg.throw(new Error("boom")).value); // 99 (resumed in the catch)
 
 // .return(v) completes a generator early, running any enclosing finally block.
-function* withCleanup(): number {
+function* withCleanup(): Generator<number> {
     try {
         yield 1;
         yield 2;
@@ -140,12 +140,12 @@ console.log(wr.value, wr.done);                // 42 1
 
 // yield* delegates to an inner generator and evaluates to its return value;
 // sent values, .throw(), and .return() all forward into the inner.
-function* range(n: number): number {
+function* range(n: number): Generator<number> {
     let i = 0;
     while (i < n) { yield i; i = i + 1; }
     return n;
 }
-function* delegating(): number {
+function* delegating(): Generator<number> {
     const count = yield* range(3);
     console.log("range produced " + count + " values");  // 3
 }
@@ -158,7 +158,7 @@ for (const x of delegating()) {
 // so its mutations are visible after iterating.
 function makeCounter(): void {
     let total = 0;
-    function* accumulate(n: number): number {
+    function* accumulate(n: number): Generator<number> {
         let i = 1;
         while (i <= n) { total = total + i; yield total; i = i + 1; }  // running sum
     }

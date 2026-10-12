@@ -1,7 +1,6 @@
 // runtime_worker.go — the thread side of Worker threads: the thread main a
 // Worker runs (klainpool.c's workerSpawn starts it), the thread-aware exit
-// that process.exit and an uncaught error take on a worker, and the loop
-// hook that ends a terminated worker. The Worker, MessagePort and
+// that process.exit, an uncaught error and terminate() take on a worker. The Worker, MessagePort and
 // BroadcastChannel surface is lib/node/worker_threads.ts.
 package llvm
 
@@ -114,14 +113,10 @@ func (e *Emitter) ensureWorkerRuntime() {
 declare ptr @__kml_worker_enter(ptr)
 declare void @__kml_worker_leave(i64)
 declare zeroext i1 @__kml_worker_is_thread()
-declare zeroext i1 @__kml_worker_terminating()
 declare ptr @__kml_worker_thread(ptr)
 declare void @__kml_worker_end_thread()
 declare void @__kml_thread_exit(i32)
-declare void @__kml_worker_abort_check()
-declare void @__kml_worker_dispatch()
-declare i1 @__kml_worker_keepalive()
-declare i1 @__kml_worker_fdset_add(ptr, ptr)`)
+declare void @__kml_worker_abort_check()`)
 
 	// @__kml_worker_uncaught(tag, payload): an uncaught error on a worker
 	// thread goes to the parent's 'error' listener (through the hook

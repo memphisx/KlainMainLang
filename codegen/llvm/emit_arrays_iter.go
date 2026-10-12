@@ -166,42 +166,20 @@ func (e *Emitter) emitArrayEntries(mem *ast.MemberExpression, args []ast.Express
 // first-element rule for `[...]` literals; an empty call defaults to
 // number[], same as an empty literal.
 func (e *Emitter) emitArrayOf(args []ast.Expression, pos ast.Pos) (Value, error) {
-	// `Array.of(...xs)` (and Array.of used as a value, which forwards its
-	// rest parameter) is the array literal `[...xs]`.
-	if hasSpreadElem(args) {
+	// `Array.of(a, b, …)` (and Array.of used as a value, which forwards its
+	// rest parameter) is the array literal `[a, b, …]`; with no arguments,
+	// an empty `unknown[]`, held boxed.
+	if len(args) > 0 {
 		return e.emitExpr(ast.NewArrayLiteral(args, pos))
 	}
-	elemTy := TypeI64
-	if len(args) > 0 {
-		elemTy = e.inferExprType(args[0])
-	}
-	n := int64(len(args))
 	e.ensureMalloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
-	for i, argExpr := range args {
-		val, err := e.emitExpr(argExpr)
-		if err != nil {
-			return Value{}, err
-		}
-		val = e.coerce(val, elemTy)
-		// Array.of(...) builds a homogeneous array, same as an `[...]` literal:
-		// an argument whose type coerce couldn't convert to the element type
-		// (`Array.of(undefined, false, null)` — a mixed set that would need
-		// `any[]`) is rejected cleanly, mirroring emitArrayLiteralData's own
-		// guard, rather than emitting an invalid `store <elemTy> <mismatchedRef>`.
-		if val.Ty.IR != elemTy.IR && !elemTy.IsArray && !elemTy.IsDynamic && !isNullableScalar(elemTy) {
-			return Value{}, fmt.Errorf("%d:%d: Array.of(...) elements must share one type — argument %d does not match the element type inferred from the first argument (a heterogeneous array is not supported)", argExpr.GetPos().Line, argExpr.GetPos().Col, i)
-		}
-		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", slot, elemTy.IR, dataReg, i))
-		e.storeArrayElem(slot, elemTy, val)
-	}
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", dataReg))
 	r0 := e.freshReg()
 	r1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %d, 1", r1, r0, n))
-	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", r1, r0))
+	return Value{Ref: r1, Ty: ArrayOf(TypeAny)}, nil
 }
 
 // emitStringToCharArray materializes a string Value into a `string[]` whose
@@ -319,6 +297,10 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 	}
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Array.from takes 1 argument (iterable) or 2 (iterable, mapFn)", pos.Line, pos.Col)
+	}
+	if hv := e.hostView(args[0]); hv != nil {
+		// A class extending Map or Set: its host's default iterator.
+		return e.emitArrayFrom([]ast.Expression{hv}, pos)
 	}
 	srcTy := e.inferExprType(args[0])
 

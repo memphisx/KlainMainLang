@@ -1,6 +1,6 @@
 // examples/webview/embedded.ts — a SINGLE-FILE desktop app (TDD-00142 Stage 7).
 //
-// `serve` embeds the built SPA directory into the compiled binary at compile
+// `serve: embedDir(...)` embeds the built SPA directory into the compiled binary at compile
 // time and serves it from an in-binary static server (an ephemeral loopback
 // port), then navigates the window to it. The result is one self-contained
 // executable — no `dist/` folder beside it at runtime. Any framework build that
@@ -14,12 +14,13 @@
 // EmbeddedAssets handle with `.get(path): ArrayBuffer` over the embedded bytes.
 
 import { Webview } from 'klain:webview'
+import { embedDir } from 'klain:assets'
 
 const w = new Webview({
   title: "Klain (embedded)",
   width: 800,
   height: 600,
-  serve: "./examples/webview/dist",
+  serve: embedDir("./examples/webview/dist"),
 })
 
 w.run()

@@ -19,8 +19,8 @@ const doubled = arr.map(function (x: number): number {
 });
 console.log(doubled[0], doubled[1], doubled[2]);  // 2 4 6
 
-// --- Untyped params infer number, same as a top-level function ---
-const triple = function (x) {
+// --- No return annotation: the result is inferred, as for a top-level function ---
+const triple = function (x: number) {
     return x * 3;
 };
 console.log(triple(7));  // 21

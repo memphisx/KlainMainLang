@@ -203,7 +203,7 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
   res.writeHead(200); res.end('http')
 })
 server.on('upgrade', (req, socket, head) => {
-  const key: string = req.headers.get('sec-websocket-key')!
+  const key = req.headers['sec-websocket-key'] as string
   const accept = crypto.createHash('sha1')
     .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
     .digest('base64')

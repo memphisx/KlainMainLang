@@ -24,6 +24,24 @@ func TestE2ETypeErrorAcceptedCompatJS(t *testing.T) {
 	assertOutputCompatJS(t, "const o = { valueOf() { return 4 } }\nconsole.log((o as any) * 2)\n", "8")
 }
 
+// A return annotation the body cannot meet is tsc's TS2322 (a generator's
+// must be an iterator type) or TS2355 (a body that never returns a value);
+// -compat=js runs the same program, the annotation being only a type.
+func TestE2EReturnAnnotationRejectedStrict(t *testing.T) {
+	for src, want := range map[string]string{
+		"function* g(): number { yield 1 }\nfor (const v of g()) console.log(v)\n": "type 'Generator<any, any, unknown>' is not assignable to type 'number'",
+		"async function w(): Promise<number> {}\nw().then(v => console.log(v))\n":  "must return a value",
+	} {
+		if _, err := resolveAndCompile(t, src); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: expected %q, got %v", src, want, err)
+		}
+	}
+}
+
+func TestE2EReturnAnnotationAcceptedCompatJS(t *testing.T) {
+	assertOutputCompatJS(t, "function* g(): number { yield 1; yield 2 }\nfor (const v of g()) console.log(v)\n", "1\n2")
+}
+
 // An interface declared in an imported file is found under the resolver's
 // renaming, and its error names the importing file's line and the source
 // name, not the mangled one.
@@ -87,4 +105,69 @@ func TestE2ERegExpExecArrayAnnotation(t *testing.T) {
 // A namespace merged into a function declares members the function has.
 func TestE2EFunctionNamespaceMergeMembers(t *testing.T) {
 	assertOutput(t, "function d(km: number): string { return km + 'km' }\nnamespace d { export const unit = 'km'; export function miles(k: number): number { return k * 0.62 } }\nconsole.log(d(5), d.unit, d.miles(10))\n", "5km km 6.2")
+}
+
+// An element access by a constant key reads the member it names, and one
+// naming no member is TS7053 (TDD-00246).
+func TestE2ETypeErrorElementAccessKey(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{"const kRefed = Symbol('refed')\nclass T { [kRefed]: boolean = true\n  m() { const s: string = this[kRefed]; return s } }\n",
+			"type 'boolean' is not assignable to type 'string'"},
+		{"const kOther = Symbol('other')\nclass T { a = 1 }\nconsole.log(new T()[kOther])\n",
+			"element implicitly has an 'any' type because expression of type 'unique symbol' can't be used to index type 'T'"},
+		{"class T { a = 1 }\nconst k = 'nope'\nconsole.log(new T()[k])\n",
+			"element implicitly has an 'any' type because expression of type '\"nope\"' can't be used to index type 'T'"},
+	} {
+		_, err := resolveAndCompile(t, c.src)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: expected %q, got %v", c.src, c.want, err)
+		}
+	}
+	if _, err := resolveAndCompile(t, "interface Bag { [s: string]: number }\nconst bag: Bag = { x: 1 }\nconst o = { a: 1, 0x10: 2 }\nclass T { a = 1 }\nconsole.log(bag['zz'], o['a'], o[16], new T()['a'], new T()['toString']())\n"); err != nil {
+		t.Errorf("valid accesses rejected: %v", err)
+	}
+}
+
+// A namespace's type named qualified (`N.A`, `N.I<T>`) is checked: its
+// declaration is file-private in the merged program, and an omitted type
+// argument takes its default (BACKLOG 70).
+func TestQualifiedNamespaceTypesAreChecked(t *testing.T) {
+	assertSameAsNode(t, `
+namespace N {
+  export type A<T = string> = { v: T };
+  export interface I<T = number> { w: T }
+}
+const a: N.A = { v: "x" };
+const i: N.I = { w: 3 };
+console.log(a.v.toUpperCase(), i.w + 1);
+`)
+	for _, src := range []string{
+		"namespace N { export type A<T = string> = { v: T } }\nconst a: N.A = { v: 1 }\n",
+		"namespace N { export type A<T = string> = { v: T } }\nconst a: N.A<string> = { v: 1 }\n",
+		"namespace N { export interface I<T = number> { w: T } }\nconst i: N.I = { w: 'x' }\n",
+	} {
+		_, err := resolveAndCompile(t, src)
+		if err == nil || !strings.Contains(err.Error(), "is not assignable to type") {
+			t.Errorf("%q: expected a type error, got %v", src, err)
+		}
+	}
+}
+
+// Strict code's early errors reject the strict lane (TypeScript's
+// alwaysStrict); -compat=js runs the same names as sloppy JavaScript.
+func TestE2EStrictCodeEarlyErrors(t *testing.T) {
+	_, err := resolveAndCompile(t, "function g() { return (arguments: any) => arguments }\nconsole.log(g()(1))\n")
+	if err == nil || !strings.Contains(err.Error(), "invalid use of 'arguments' in strict mode") {
+		t.Fatalf("expected TS1100, got %v", err)
+	}
+	_, err = resolveAndCompile(t, "var q = 1\nconsole.log(delete q)\n")
+	if err == nil || !strings.Contains(err.Error(), "'delete' cannot be called on an identifier") {
+		t.Fatalf("expected TS1102, got %v", err)
+	}
+	assertOutputCompatJS(t, `var q = 1;
+function f(p) { var l = 2; return [delete p, delete l, p, l]; }
+console.log(delete q, q, f(3), delete nope);
+function g() { return (arguments) => arguments; }
+console.log(g()(4));
+`, "false 1 [ false, false, 3, 2 ] true\n4")
 }

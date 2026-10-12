@@ -809,29 +809,21 @@ console.log(n.get(2));
 `, "bar\n20")
 }
 
-func TestE2EArrayOfHeterogeneousRejected(t *testing.T) {
-	// ADR-00650: Array.of(...) builds a homogeneous array (element type from
-	// the first argument), same as an `[...]` literal; a mixed argument set
-	// (`Array.of(undefined, false, null)` — an any[] the compiler doesn't yet
-	// support) is rejected cleanly rather than storing a scalar raw into a ptr
-	// slot (invalid IR).
-	cases := []string{
-		`const a = Array.of(1, 'x');`,
-		`const a = Array.of(undefined, false, null);`,
-		`const a = Array.of('s', 3);`,
-	}
-	for _, src := range cases {
-		if _, err := parseAndCompile(src); err == nil {
-			t.Fatalf("expected a clean rejection for a heterogeneous Array.of, got none for: %s", src)
-		}
-	}
-	// Homogeneous Array.of still compiles and runs.
-	assertOutput(t, `
-const a = Array.of(1, 2, 3);
-console.log(a[0] + a[2]);
-const b = Array.of('x', 'y');
-console.log(b[1]);
-`, "4\ny")
+// Array.of(...) is the array literal of its arguments: mixed kinds build
+// the same array a mixed literal does, and no arguments an empty array.
+func TestE2EArrayOfMixedAndEmpty(t *testing.T) {
+	assertSameAsNode(t, `
+const a = Array.of(1, 'x');
+console.log(a, typeof a[1]);
+const u: any[] = Array.of(undefined, false, null);
+console.log(u, u.length);
+const s = Array.of('s', 3);
+console.log(s[0], s[1]);
+const e = Array.of();
+console.log(e.length, e);
+const b = Array.of(1, 2, 3);
+console.log(b[0] + b[2], Array.of('x', 'y')[1]);
+`)
 }
 
 // A dynamic null reaching an untyped (string-keyed) Set must not be hashed
@@ -1058,5 +1050,37 @@ const s = Symbol('s'); console.log(new WeakRef(s as any).deref() === s);
 try { new WeakRef(Symbol.for('x') as any); } catch (e) { console.log((e as Error).name, (e as Error).message); }
 const ws: WeakRef<Box>[] = [w]; console.log(ws[0].deref()?.v, [w], w instanceof WeakRef);
 const fw = new WeakRef(() => 1); console.log(typeof fw.deref());
+`)
+}
+
+// A bare `new WeakMap()` under a `WeakMap<K, V>` annotation takes its value
+// type from the annotation (a number stays a number).
+func TestE2EWeakMapAnnotatedValueType(t *testing.T) {
+	assertSameAsNode(t, `
+const wm: WeakMap<object, number> = new WeakMap();
+const k = {};
+wm.set(k, 3.5);
+console.log(wm.get(k));
+function read(): number | undefined { return wm.get(k); }
+console.log(read());
+`)
+}
+
+// A Map with array values inspects, iterates and is called through `any`
+// (an `any` receiver's forEach with a Map-shaped callback included).
+func TestE2EMapArrayValuesThroughAny(t *testing.T) {
+	assertSameAsNode(t, `
+const m = new Map<string, string[]>([["a", ["x", "y"]]]);
+console.log(m);
+const s = new Set<number[]>([[1, 2]]);
+console.log(s);
+m.forEach((v, k) => console.log(k, v.length));
+const n = new Map<string, number[]>();
+const a: any = n;
+a.set("k", [1, 2]);
+console.log(n.get("k"), a.get("k"), a.has("k"), a);
+a.forEach((v: number[], k: string) => console.log(k, v.length));
+const arr: any = [10, 20];
+arr.forEach((v: number, i: number) => console.log(v, i));
 `)
 }

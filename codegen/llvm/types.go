@@ -47,6 +47,9 @@ type Type struct {
 	// trailing call arguments," the same distinction FuncSig.HasRest
 	// already lets a named function's call sites make.
 	FuncHasRest bool
+	// FuncCountsArgs: the function reads `arguments`, so a call stores how
+	// many declared parameters it passes (noteArgc).
+	FuncCountsArgs bool
 	// FuncThis marks a function taking its `this` as FuncParams[0] (a
 	// `this: T` parameter): a call passes the receiver there.
 	FuncThis bool
@@ -177,9 +180,9 @@ type Type struct {
 	// no field conflicts) at each use site, mirroring how UnionMembers is
 	// validated — resolveType itself has no error return.
 	IntersectionMembers []Type
-	// IsDate marks Date: a plain i64 milliseconds-since-epoch timestamp, same
-	// storage as number, distinguished only so method dispatch (getFullYear,
-	// toISOString, etc.) can recognize it. See emit_date.go.
+	// IsDate marks Date: a pointer to a one-word body holding the time value
+	// (milliseconds since the epoch, dateInvalid for an Invalid Date), with
+	// its host header word at body - 8 (TDD-00247). See emit_date.go.
 	IsDate bool
 	// IsResponse marks fetch()'s Response type: an ordinary heap object
 	// (status, ok, body fields — all plain field reads via the existing
@@ -385,13 +388,6 @@ type Type struct {
 	// pcre2_code* handle, never exposed via Object.keys/JSON. See
 	// RegExpType and docs/tdd/TDD-00035.md.
 	IsRegExp bool
-	// IsEmbeddedAssets marks an `embedDir(...)` handle (TDD-00142 Stage 7).
-	IsEmbeddedAssets bool
-	// IsWebview marks a `new Webview(...)` handle (TDD-00142): a calloc'd
-	// `{ ptr webview_t, ptr boundListHead }` struct dispatching the window
-	// methods (navigate/html/setTitle/setSize/init/eval/run/terminate/
-	// destroy/bind/unbind).
-	IsWebview bool
 	// IsFinalizationRegistry marks a FinalizationRegistry<T> handle
 	// (TDD-00163); the held-value type T lives in ElemType.
 	IsFinalizationRegistry bool
@@ -416,11 +412,6 @@ type Type struct {
 	// cleared on the Value a call site hands downstream (the aggregate is
 	// spilled back to a pointer there unless destructured directly).
 	TupleByVal bool
-	// IsChannel marks a klain:sync `new Channel<T>(cap)` handle (TDD-00143):
-	// a ptr to the C runtime's hchan. The element type T lives in ElemType
-	// (like MessagePort/Set<T>); channel elements are a fixed 8-byte slot, so
-	// send/receive bitcast T through i64.
-	IsChannel bool
 	// Inferred marks a parameter type that defaulted to TypeI64 because no
 	// explicit annotation was given, as opposed to a real `number`/`int32`/
 	// etc. annotation that happens to also resolve to i64. Call sites use
@@ -853,13 +844,6 @@ func ArrayBufferType() Type {
 	return Type{IR: "ptr", IsArrayBuffer: true}
 }
 
-// ChannelType returns `new Channel<T>(cap)`'s result type (TDD-00143); the
-// element type T lives in ElemType.
-func ChannelType(elem Type) Type {
-	m := elem
-	return Type{IR: "ptr", IsChannel: true, ElemType: &m}
-}
-
 // SharedArrayBufferType returns `new SharedArrayBuffer(...)`'s result type —
 // the ArrayBuffer representation plus the shared-across-workers flag.
 func SharedArrayBufferType() Type {
@@ -895,23 +879,6 @@ func RegExpType() Type {
 		{Name: "lastIndex", Ty: TypeI64},
 	})
 	ty.IsRegExp = true
-	return ty
-}
-
-// EmbeddedAssetsType is an `embedDir(...)` handle (TDD-00142 Stage 7): a ptr to
-// the packed blob linked into the binary, dispatching `.get(path)`.
-func EmbeddedAssetsType() Type {
-	ty := hostObjectType([]Field{{Name: "__embedassets", Ty: TypePtr}})
-	ty.IsEmbeddedAssets = true
-	return ty
-}
-
-// WebviewType is a `new Webview(...)` handle (TDD-00142): a calloc'd
-// `{ ptr webview_t, ptr boundListHead }` struct, flag-tagged for the window
-// method dispatch in emit_webview.go.
-func WebviewType() Type {
-	ty := hostObjectType([]Field{{Name: "__webview", Ty: TypePtr}})
-	ty.IsWebview = true
 	return ty
 }
 
@@ -1026,6 +993,10 @@ func ClassType(name string, inherited []Field, own []Field, hasVTable bool) Type
 	// An Error subclass keeps the error object's fields where every error
 	// reader finds them: its vtable pointer comes after them.
 	keep := errorFieldsPrefix(inherited)
+	if keep == 0 {
+		// A host base's body sits at +8 the same way (TDD-00247).
+		keep = hostBodyFieldsPrefix(inherited)
+	}
 	tagged = append(tagged, inherited[:keep]...)
 	if hasVTable {
 		tagged = append(tagged, Field{Name: ClassVTableField, Ty: TypePtr})
@@ -1073,8 +1044,22 @@ func (t Type) VTableIndex() int {
 // object-literal/spread field copying) — GEP/field-access code should keep
 // using Fields (via FieldIndex) unchanged, since the hidden fields'
 // presence is what makes those indices correct in the first place.
+// SpreadFields are the own enumerable properties a spread or Object.assign
+// copies: the string-keyed ones (VisibleFields), then the symbol-keyed ones
+// (TDD-00246).
+func (t Type) SpreadFields() []Field {
+	sf := symbolFields(t)
+	if len(sf) == 0 {
+		return t.VisibleFields()
+	}
+	return append(append([]Field{}, t.VisibleFields()...), sf...)
+}
+
 func (t Type) VisibleFields() []Field {
 	fields := t.UserFields()
+	if n := hostBodyFieldsPrefix(fields); t.IsClass && n > 0 {
+		fields = fields[n:] // a host base's body
+	}
 	switch {
 	case t.IsClass && t.HasVTable:
 		var kept []Field
@@ -1101,19 +1086,24 @@ func (t Type) VisibleFields() []Field {
 		// JSON.stringify/spread (TDD-00118 follow-up).
 		fields = fields[:5]
 	}
-	hasPrivate := false
+	// A private field (`#x`) and a symbol-keyed one (TDD-00246) are no
+	// string keys.
+	hidden := func(f Field) bool {
+		return strings.HasPrefix(f.Name, "#") || strings.HasPrefix(f.Name, symbolFieldPrefix)
+	}
+	hasHidden := false
 	for _, f := range fields {
-		if strings.HasPrefix(f.Name, "#") {
-			hasPrivate = true
+		if hidden(f) {
+			hasHidden = true
 			break
 		}
 	}
-	if !hasPrivate {
+	if !hasHidden {
 		return fields
 	}
 	visible := make([]Field, 0, len(fields))
 	for _, f := range fields {
-		if !strings.HasPrefix(f.Name, "#") {
+		if !hidden(f) {
 			visible = append(visible, f)
 		}
 	}
@@ -1511,8 +1501,8 @@ var (
 	// TypeCaught backs a catch-clause variable (TDD-00202): the unpacked
 	// { i8 tag, i64 payload } thrown-value record (TypeScript `unknown`).
 	TypeCaught = Type{IR: "{ i8, i64 }", IsCaught: true}
-	// TypeDate backs Date: a plain i64 milliseconds-since-epoch timestamp.
-	TypeDate = Type{IR: "i64", Signed: true, IsDate: true}
+	// TypeDate backs Date: a headered heap object holding the time value.
+	TypeDate = Type{IR: "ptr", IsDate: true}
 )
 
 // FuncSig holds the signature of a user-defined function.
@@ -1543,6 +1533,9 @@ type FuncSig struct {
 	IsAsync  bool
 	HasRest  bool             // last param is a rest (variadic) parameter
 	Defaults []ast.Expression // per-param default expression; nil entry means no default
+	// HasDefault marks each parameter declared with a default, whether its
+	// caller (Defaults, a destructured one) or the body fills it.
+	HasDefault []bool
 	// Optional marks a `param?: T` parameter (ADR-00164) — a call site
 	// omitting it (and with no Defaults[i] expression either) gets T's own
 	// zero value (Type.zeroLiteral()) rather than a "missing argument"
@@ -1553,8 +1546,10 @@ type FuncSig struct {
 	Optional []bool
 }
 
-// ResolveTypeName maps a TypeScript or JSDoc type name to an LLVM Type.
-// Handles array suffixes (e.g. "int32[]") and falls back to i64 for unknowns.
+// ResolveTypeName maps a primitive TypeScript or JSDoc type name (and the
+// native widths) to an LLVM Type. Handles array suffixes (e.g. "int32[]")
+// and falls back to i64 for unknowns. A builtin interface's layout comes from
+// its declaration (Emitter.resolveTypeName).
 func ResolveTypeName(name string) Type {
 	// Array suffix: T[]
 	if len(name) > 2 && name[len(name)-2:] == "[]" {
@@ -1574,6 +1569,8 @@ func ResolveTypeName(name string) Type {
 		return TypeBool
 	case "void":
 		return TypeVoid
+	case "never":
+		return TypeNever // a function that never returns (its IR the i64 default's)
 	case "null":
 		return TypeNull
 	case "undefined":
@@ -1584,53 +1581,15 @@ func ResolveTypeName(name string) Type {
 		return BigIntType()
 	case "any", "unknown", "object":
 		return TypeAny
-	case "Date":
-		return TypeDate
-	case "Response":
-		return ResponseType()
 	case "HttpRequest", "IncomingMessage":
 		return RequestType()
 	case "ServerResponse":
 		return ServerResponseType()
-	case "Request":
-		return FetchRequestType()
-	case "XMLHttpRequest":
-		return XMLHttpRequestType()
-	case "RegExp":
-		return RegExpType()
 	case "RegExpExecArray":
 		// What `exec` returns (`| null` is the nullable form).
 		return execArrayType()
 	case "RegExpMatchArray":
 		return regExpExecResultType()
-	case "ArrayBuffer":
-		return ArrayBufferType()
-	case "SharedArrayBuffer":
-		return SharedArrayBufferType()
-	case "Int8Array":
-		return TypedArrayType("int8")
-	case "Uint8Array":
-		return TypedArrayType("uint8")
-	case "Int16Array":
-		return TypedArrayType("int16")
-	case "Uint16Array":
-		return TypedArrayType("uint16")
-	case "Int32Array":
-		return TypedArrayType("int32")
-	case "Uint32Array":
-		return TypedArrayType("uint32")
-	case "Float32Array":
-		return TypedArrayType("float32")
-	case "Float64Array":
-		return TypedArrayType("float64")
-	case "Uint8ClampedArray":
-		return TypedArrayType("uint8clamped")
-	case "Buffer":
-		return BufferType()
-	case "BigInt64Array":
-		return TypedArrayType("bigint64")
-	case "BigUint64Array":
-		return TypedArrayType("biguint64")
 	case "int8":
 		return TypeI8
 	case "int16":
@@ -1660,4 +1619,11 @@ func ResolveTypeName(name string) Type {
 		return TypeAny
 	}
 	return TypeI64 // default
+}
+
+// nonPtrScalar reports a present, unboxed scalar (a number or boolean): the
+// other side a conditional's element-read branch keeps its absence against.
+func nonPtrScalar(t Type) bool {
+	return !t.IsNull && !t.IsDynamic && !t.IsArray && !t.IsObject &&
+		t.IR != "ptr" && t.IR != "void" && !t.Nullable
 }

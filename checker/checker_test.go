@@ -32,7 +32,22 @@ func typeOfLast(t *testing.T, src string) string {
 func TestTypeOf(t *testing.T) {
 	for _, c := range []struct{ src, want string }{
 		{"1.50", "1.5"},
+		// `typeof` of an object's property: the property's type.
+		{"const o = { a: 1, b: \"x\" }\nlet y: typeof o.b = \"q\"\ny", "string"},
+		// A generic construction nested in another's arguments: typing the
+		// inner one's context infers the outer's arguments, the inner among
+		// them, which does not start over.
+		{"declare var Box: { new <T>(v: T): { v: T } }\nconst b = new Box(new Box(1))\nb", "{ v: { v: number; }; }"},
+		// A function read inside its own return: itself, with an any result.
+		{"function f(a: number) { return f; }\nf", "(a: number) => (a: number) => any"},
 		{"0x10", "16"},
+		// An empty element is never[], which the element type's subtype
+		// reduction drops beside another array.
+		{"const ragged = [[1, 2, 3], [4], [], [5, 6]]\nragged", "number[][]"},
+		{"const p = [[], []]\np", "never[][]"},
+		// So does a conditional's empty branch beside an array.
+		{"declare const c: boolean\ndeclare const s: string[]\nconst h = c ? [] : s\nh", "string[]"},
+		{"declare const c: boolean\nconst h = c ? [] : []\nh", "never[]"},
 		{"'a'", `"a"`},
 		{"10n", "10n"},
 		{"const a = 1\na", "1"},
@@ -43,6 +58,14 @@ func TestTypeOf(t *testing.T) {
 		{"let q: any = 1\nq - 1", "number"},
 		{"let q: any = 1\nq.a.b", "any"},
 		{"let q: any = 1\nq?.a", "any"},
+		// An optional chain reads its receiver present and adds undefined
+		// where it can short-circuit (tsc's checkPropertyAccessChain).
+		{"declare const a: { b: { c: number }, s?: string, f?: (x: number) => string, arr: number[] } | undefined\na?.b.c", "number | undefined"},
+		{"declare const a: { b: { c: number }, s?: string, f?: (x: number) => string, arr: number[] } | undefined\na?.s", "string | undefined"},
+		{"declare const a: { b: { c: number }, s?: string, f?: (x: number) => string, arr: number[] } | undefined\na?.f?.(1)", "string | undefined"},
+		{"declare const a: { b: { c: number }, s?: string, f?: (x: number) => string, arr: number[] } | undefined\na?.arr[0]", "number | undefined"},
+		{"declare const n: { b: number }\nn?.b", "number"},
+		{"declare const g: ((x: number) => boolean) | null\ng?.(2)", "boolean | undefined"},
 		{"let q: any = 1\nq[0]", "any"},
 		{"let q: any = 1\nq(1)", "any"},
 		{"let q: any = 1\nq.m(1)", "any"},
@@ -77,7 +100,7 @@ func TestTypeOf(t *testing.T) {
 		{"const n: { p: { q: [number] } } = { p: { q: [1] } }\nconst { p: { q: [qq] } } = n\nqq", "number"},
 		{"function mt(c: boolean) { if (c) return 2; throw 1 }\nmt(true)", "number"},
 		{"function ml(c: boolean) { while (true) { if (c) return 'a' } }\nml(true)", "string"},
-		{"function rec(n: number) { return n ? rec(n - 1) : 0 }\nrec", "?"},
+		{"function rec(n: number) { return n ? rec(n - 1) : 0 }\nrec", "(n: number) => any"},
 		{"class P { x: number = 0; y = 'a'; m(): number { return 1 } }\nnew P().y", "string"},
 		{"class P { x: number = 0; m(): number { return 1 } }\nnew P().m()", "number"},
 		{"interface Pt { x: number; y?: string }\nlet p: Pt = { x: 1 }\np.y", "string | undefined"},

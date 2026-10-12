@@ -28,6 +28,7 @@
 
 #include <QGuiApplication>
 #include <QTimer>
+#include <QSocketNotifier>
 #include <QQuickView>
 #include <QQmlComponent>
 #include <QQmlEngine>
@@ -44,15 +45,13 @@
 
 #include <webengine.h>
 
-// The klain runtime's GUI-thread drain entry points (ADR-00439). A native QTimer
-// calls these directly at ~60 Hz instead of routing __kml_tick through the page
-// (a full embedlite IPC round-trip per tick). All three are always defined for a
-// webview program — real runtimes or no-op stubs (see emitLoopTaskStubs) — with
-// external linkage, so the shim links against them.
+// The runtime's loop runs inside Qt's main loop (TDD-00244 Stage 7): a
+// QSocketNotifier on libuv's backend descriptor and a single-shot timer for
+// the loop's next deadline each run one non-blocking pass (loop.c).
 extern "C" {
-void __kml_timer_tick();
-void __kml_task_sched_step();
-void __kml_drain_microtasks();
+void __kml_loop_run_once(void);
+int __kml_loop_backend_fd(void);
+long long __kml_loop_next_ms(void);
 }
 
 #include <functional>
@@ -302,19 +301,6 @@ private Q_SLOTS:
     std::vector<std::function<void()>> pending;
     pending.swap(mPending);
     for (auto &fn : pending) fn();
-    // Drive the loop-fusion pump natively (ADR-00439): a 16 ms QTimer drains the
-    // runtime's timers/tasks/microtasks on the GUI thread directly, so no
-    // __kml_tick IPC round-trip through the page is needed. The page-side pump is
-    // suppressed in onDomContentLoaded.
-    mPump = new QTimer(this);
-    connect(mPump, SIGNAL(timeout()), this, SLOT(onPumpTick()));
-    mPump->start(16);
-  }
-
-  void onPumpTick() {
-    __kml_timer_tick();
-    __kml_task_sched_step();
-    __kml_drain_microtasks();
   }
 
   void onDomContentLoaded() {
@@ -323,10 +309,6 @@ private Q_SLOTS:
     // true (parsed) transitions; only inject once the document is actually there.
     if (!mWebView->property("domContentLoaded").toBool()) return;
     KLAIN_WV_LOG("domContentLoaded: injecting %zu init scripts", mInitScripts.size());
-    // Suppress the runtime's page-side pump: its installer is guarded by
-    // `if(!window.__kml_pump)`, so pre-setting it truthy stops the setInterval →
-    // __kml_tick IPC. The native QTimer pump drives the runtime instead.
-    eval(QString::fromUtf8("window.__kml_pump=1;"));
     // Re-inject external.invoke + every stored init/bind script on each load
     // (webview.h's init-before-every-load contract).
     eval(QString::fromUtf8(kExternalInvokeJS));
@@ -383,7 +365,6 @@ private:
   QQuickView *mView = nullptr;
   QQuickItem *mWebView = nullptr;
   bool mReady = false;
-  QTimer *mPump = nullptr;
   std::vector<std::function<void()>> mPending;
   std::vector<QString> mInitScripts;
   std::map<std::string, Binding> mBindings;
@@ -395,6 +376,35 @@ private:
 // the target environment — see LocateWebviewSailfish's build note. The generated
 // file is #included at the end, the standard single-file-amalgamation idiom.
 #include "webview_sailfish.moc"
+
+// ---------------------------------------------------------------------------
+// The loop inside Qt's main loop (see the declarations above).
+// ---------------------------------------------------------------------------
+static QTimer *kml_loop_timer;
+
+static void kml_loop_pass() {
+  __kml_loop_run_once();
+  long long ms = __kml_loop_next_ms();
+  if (ms < 0)
+    kml_loop_timer->stop();
+  else
+    kml_loop_timer->start(ms > 0x7fffffff ? 0x7fffffff : (int)ms);
+}
+
+extern "C" void __kml_wv_loop_embed(void) {
+  if (kml_loop_timer) return;
+  kml_loop_timer = new QTimer();
+  kml_loop_timer->setSingleShot(true);
+  kml_loop_timer->setTimerType(Qt::PreciseTimer);
+  QObject::connect(kml_loop_timer, &QTimer::timeout, kml_loop_pass);
+  QSocketNotifier *n = new QSocketNotifier(__kml_loop_backend_fd(), QSocketNotifier::Read);
+  QObject::connect(n, &QSocketNotifier::activated, [](int) { kml_loop_pass(); });
+  kml_loop_timer->start(0);
+}
+
+extern "C" void __kml_wv_loop_kick(void) {
+  if (kml_loop_timer) kml_loop_timer->start(0);
+}
 
 // ---------------------------------------------------------------------------
 // The 13-function C ABI (matches webview.h exactly).

@@ -213,7 +213,7 @@
       "statusRow": "dns (dns.lookup, dns.resolve4/resolve, dns.promises.lookup)",
       "signature": "dns.lookup(host, [options,] cb); dns.resolve4(host, [{ ttl }], cb); dns.resolveMx(host, cb); new dns.Resolver(options); await dns.promises.lookup(host)",
       "badge": "caveats",
-      "description": "Node's own lib/dns.js. lookup and lookupService run getaddrinfo/getnameinfo on the thread pool, as libuv does (all, family, hints, order); the resolve family — resolve4/6 with TTLs, MX, TXT, SRV, NS, CNAME, PTR, SOA, NAPTR, CAA, TLSA, ANY, reverse — is a native DNS client in c-ares' place: the system's servers, UDP with TCP on truncation, Resolver timeouts, tries, setServers, cancel and setLocalAddress, and Node's error codes (ENOTFOUND, ENODATA, ETIMEOUT, …). dns.promises and dns/promises are the promise forms.",
+      "description": "Node's own lib/dns.js. lookup and lookupService run getaddrinfo/getnameinfo on the thread pool, as libuv does (all, family, hints, order); the resolve family — resolve4/6 with TTLs, MX, TXT, SRV, NS, CNAME, PTR, SOA, NAPTR, CAA, TLSA, ANY, reverse — is Node's cares_wrap over c-ares: the system's servers, Resolver timeouts, tries, setServers, cancel and setLocalAddress, cares_wrap's record shapes, and Node's error codes (ENOTFOUND, ENODATA, ETIMEOUT, …). dns.promises and dns/promises are the promise forms.",
       "params": [
         {
           "name": "host",
@@ -229,7 +229,7 @@
       "snippet": "dns.lookup(\"localhost\", (err, address, family) => {\n  console.log(\"localhost ->\", address, \"family\", family);\n});",
       "differences": [
         "A resolve error has no `errno` key (Node's has `errno: undefined`)",
-        "The Windows server discovery and DNS client are compile-checked only"
+        "On Windows the resolver runs on c-ares' own event thread and is compile-checked only"
       ],
       "seeAlso": [
         "nodecore.net"

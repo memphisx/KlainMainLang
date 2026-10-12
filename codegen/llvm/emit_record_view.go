@@ -119,6 +119,7 @@ type recordFn struct {
 	name, kind string
 	fieldTy    Type
 	member     string
+	id         int64
 }
 
 // recordReadFn names `void read(ptr obj, ptr slot)`: member name of a
@@ -144,7 +145,7 @@ func (e *Emitter) noteRecordFn(kind string, t, fieldTy Type, name string) string
 		e.recordFns = map[string]bool{}
 	}
 	e.recordFns[fn] = true
-	e.recordFnList = append(e.recordFnList, recordFn{name: fn, kind: kind, fieldTy: fieldTy, member: name})
+	e.recordFnList = append(e.recordFnList, recordFn{name: fn, kind: kind, fieldTy: fieldTy, member: name, id: e.objHeaderWord(t) & kmlHdrIDMask})
 	return fn
 }
 
@@ -156,6 +157,7 @@ func (e *Emitter) noteRecordFn(kind string, t, fieldTy Type, name string) string
 func (e *Emitter) emitRecordFnsFinalize() {
 	rows := len(e.boxedLayouts) > 0
 	for _, r := range e.recordFnList {
+		stable := e.stableHelperBody(r.id)
 		restore := e.beginDetachedFunc()
 		switch {
 		case !rows:
@@ -191,6 +193,7 @@ func (e *Emitter) emitRecordFnsFinalize() {
 		e.emitTerminator("ret void")
 		body := e.allocas.String() + e.body.String()
 		restore()
+		stable()
 		e.functions.WriteString(fmt.Sprintf("\ndefine internal void %s(ptr %%obj, ptr %%slot) {\nentry:\n%s}\n", r.name, body))
 	}
 	e.recordFnList = nil

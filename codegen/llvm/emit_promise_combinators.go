@@ -98,7 +98,7 @@ func (e *Emitter) combinatorOutElem(kind string, innerTy Type) Type {
 		}
 		return SettlementType(innerTy)
 	case "any":
-		return TypePtr
+		return TypeAny // the rejection reasons, boxed
 	}
 	return innerTy
 }
@@ -241,11 +241,9 @@ func (e *Emitter) emitCombinatorRunner(kind string, innerTy Type) string {
 		e.emitLabel(fulL)
 		resolveWith()
 		e.emitLabel(rejL)
-		rp, rv, rptr := e.freshReg(), e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", rp, promiseStructIR, m))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", rv, rp))
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", rptr, rv))
-		e.storeArrayElement(out, idx, rptr, TypePtr)
+		// The reason, boxed: AggregateError's `errors` is any[].
+		reason := e.emitCaughtToAny(e.loadRejectReasonCaught(m))
+		e.storeArrayElement(out, idx, reason.Ref, TypeAny)
 		countDown()
 	}
 	e.emitLabel(retL)

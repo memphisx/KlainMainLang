@@ -20,6 +20,11 @@ const (
 	promiseFlagsSlot   = 6
 	promiseFlagHandled = 1
 	promiseFlagQueued  = 2
+	// promiseFlagBoxedValue marks the body of an instance of a class
+	// extending Promise<T> that settles to a boxed `any` rather than a T (a
+	// species construction through a callback held in `any`, TDD-00247):
+	// what a reader through a box decodes its value as.
+	promiseFlagBoxedValue = 8
 )
 
 // ensureUnhandledRejections emits the tracking runtime once.
@@ -40,11 +45,18 @@ func (e *Emitter) ensureUnhandledRejections() {
 // checkpoint. Run at finalize, before the layout table (the report boxes a
 // Promise).
 func (e *Emitter) emitUnhandledFinalize() {
+	// Runs again after the late finalize steps (a class extending Promise's
+	// inspect routine reaches the promise runtime there): once defined, done.
+	if e.unhandledReportDone {
+		return
+	}
 	if e.usedUnhandledRuntime {
+		e.unhandledReportDone = true
 		e.emitUnhandledReport()
 		return
 	}
 	if e.usedMicrotasks {
+		e.unhandledReportDone = true
 		// microtask.c's checkpoint calls it; nothing is ever reported here.
 		e.emitGlobal("define void @__kml_unhandled_report(ptr %p) {\nentry:\n  ret void\n}")
 	}
@@ -93,7 +105,7 @@ func (e *Emitter) emitUnhandledReport() {
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %s, 0", tag, reason.Ref))
 	handled := e.freshReg()
 	rtag, rpay := e.caughtParts(reason)
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_process_uncaught(i8 %s, i64 %s, i1 1)", handled, rtag, rpay))
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_process_uncaught_guarded(i8 %s, i64 %s, i1 1)", handled, rtag, rpay))
 	goOnL, printL := e.freshLabel("unh.handled"), e.freshLabel("unh.print")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", handled, goOnL, printL))
 	e.emitLabel(goOnL)

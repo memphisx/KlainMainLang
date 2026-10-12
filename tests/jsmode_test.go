@@ -94,16 +94,16 @@ console.log(b.v)
 `, "1\ns")
 }
 
-func TestJSModeMethodIntroducedFieldStillRejected(t *testing.T) {
-	// Constructor-only by design: a method inventing a field stays a clean
-	// rejection, not a silent dynamic add.
-	_, err := compileCompatJS(`
+func TestJSModeMethodIntroducedProperty(t *testing.T) {
+	// A method adding a property gives the instance an own property, as in
+	// JavaScript (the constructor's assignments stay the class's fields).
+	assertSameAsNodeCompatJS(t, `
 class C { constructor() { this.a = 1 } grow() { this.b = 2 } }
-new C().grow()
+const c = new C()
+console.log(c.b)
+c.grow()
+console.log(c.a, c.b, Object.keys(c))
 `)
-	if err == nil || !strings.Contains(err.Error(), "no field 'b'") {
-		t.Fatalf("expected no-field rejection, got: %v", err)
-	}
 }
 
 func TestStrictModeClassFieldInferenceOff(t *testing.T) {
@@ -118,16 +118,15 @@ new Point(1, 2)
 	}
 }
 
-func TestStrictCtorUnannotatedNonNumericArgRejected(t *testing.T) {
-	// The ADR-00042 guard now covers constructor calls too (previously a
-	// string arg to a number-defaulted ctor param stored a pointer as a
-	// number, silently).
+func TestStrictCtorUnannotatedParamIsImplicitAny(t *testing.T) {
+	// An unannotated constructor parameter is TS7006 in the strict lane
+	// (ADR-01428).
 	_, err := parseAndCompile(`
 class C { v: number; constructor(v) { this.v = v } }
 new C("oops")
 `)
-	if err == nil || !strings.Contains(err.Error(), "non-numeric argument") {
-		t.Fatalf("expected non-numeric-argument rejection, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "parameter 'v' implicitly has an 'any' type") {
+		t.Fatalf("expected TS7006, got: %v", err)
 	}
 }
 
@@ -179,13 +178,13 @@ console.log("still fine")
 `, "1 mixed true\nstill fine")
 }
 
-func TestStrictModeFunctionParamInferenceOff(t *testing.T) {
+func TestStrictFunctionUnannotatedParamIsImplicitAny(t *testing.T) {
 	_, err := parseAndCompile(`
 function greet(name) { return "hello " + name }
 console.log(greet("world"))
 `)
-	if err == nil || !strings.Contains(err.Error(), "non-numeric argument") {
-		t.Fatalf("expected strict-mode non-numeric rejection, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "parameter 'name' implicitly has an 'any' type") {
+		t.Fatalf("expected TS7006, got: %v", err)
 	}
 }
 
@@ -538,4 +537,68 @@ function client() {
 		t.Fatalf("run: %v\n%s", err, got)
 	}
 	compareLines(t, strings.TrimRight(string(got), "\n"), "status 200")
+}
+
+// A top-level variable declared with no initializer that a function reads
+// or assigns is one module global holding any value (tsc's captured `any`).
+func TestE2EUninitializedVarFunctionAssigned(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var value;
+function dflt(a, b = 0) { value = a; }
+dflt(1);
+console.log(value, typeof value);
+var u;
+function r() { return u; }
+console.log(r());
+u = 5;
+console.log(r() + 1);
+u = "x";
+console.log(r());
+`)
+}
+
+// A function expression's or arrow's parameter takes its call sites'
+// type; an argument held as any keeps it any (ADR-01507).
+func TestJSModeFunctionExpressionSiteParams(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var km = val => ({ key: val });
+console.log(km(1).key + 1);
+var fe = function (v) { return v * 2; };
+console.log(fe(3));
+var g = function (s) { return s.length; };
+console.log(g("abc"));
+var anyv; anyv = "xy";
+var h = (q) => q;
+console.log(h(1), h(anyv));
+var cb = (z) => z + 1;
+console.log([1, 2].map(cb));
+`)
+}
+
+// -compat=js: an overloaded lib function whose result is held boxed
+// (`readFileSync`'s `string | Buffer`) is read as the box when a method is
+// called on the call directly, whichever overload the checker picks.
+func TestCompatJSReadFileSyncChainedToString(t *testing.T) {
+	bin := buildCLI(t)
+	dir := tempDir(t)
+	data := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(data, []byte("xyz\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "main.js")
+	if err := os.WriteFile(src, []byte(`const fs = require('fs');
+console.log(JSON.stringify(fs.readFileSync(process.argv[2]).toString()));
+console.log(JSON.stringify(fs.readFileSync(process.argv[2]).toString('utf8')));
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
+	if b, err := exec.Command(bin, "-compat=js", "-o", out, src).CombinedOutput(); err != nil {
+		t.Fatalf("compile: %v\n%s", err, b)
+	}
+	got, err := exec.Command(out, data).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, got)
+	}
+	compareLines(t, strings.TrimRight(string(got), "\n"), "\"xyz\\n\"\n\"xyz\\n\"")
 }

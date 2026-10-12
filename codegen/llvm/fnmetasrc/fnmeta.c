@@ -47,17 +47,16 @@ extern long long __kml_dynobj_rawpay_at(void *o, long long i);
 extern void __kml_dynobj_patch(void *o, long long i, long long tag, long long pay, long long attrs);
 
 /* Renders an own-property bag at `depth` ("" when empty). A program without
- * dynjson.c (KML_FN_DYNJSON unset) has no function that can carry properties. */
-#ifdef KML_FN_DYNJSON
-extern char *__kml_dynobj_inspect_at(char *o, long long depth);
-#endif
+ * dynjson.c has no function that can carry properties. */
 static struct { long long len; char z[8]; } fn_empty_str;
+/* dynjson.c replaces this when linked; without it no function carries
+ * properties. */
+__attribute__((weak)) char *__kml_dynobj_inspect_at(char *o, long long depth) {
+    (void)o; (void)depth;
+    return fn_empty_str.z;
+}
 static char *__kml_fn_props_inspect(void *props, long long depth) {
-#ifdef KML_FN_DYNJSON
     if (*(long long *)((char *)props + 24) != 0) return __kml_dynobj_inspect_at((char *)props, depth);
-#else
-    (void)props; (void)depth;
-#endif
     return fn_empty_str.z;
 }
 

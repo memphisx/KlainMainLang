@@ -72,7 +72,7 @@ console.log(Object.getOwnPropertyNames(o), Object.getOwnPropertyNames(p))
 }
 
 func TestE2EObjectGroupByNullPrototype(t *testing.T) {
-	assertOutput(t, `
+	assertOutputCompatJS(t, `
 const g = Object.groupBy([1, 2, 3], (x: number) => (x % 2 ? "odd" : "even"))
 console.log(g)
 console.log(g.odd, g["none"])
@@ -244,4 +244,18 @@ Cannot assign to read only property '0' of object '[object Array]'
 Cannot add property 2, object is not extensible
 Cannot assign to read only property '0' of object '[object Array]'
 [ 1, 2 ] true`)
+}
+
+// A descriptor annotated `PropertyDescriptor` is the dynamic object
+// Object.defineProperty takes, and a read one's fields are plain values
+// (ADR-01456).
+func TestE2EPropertyDescriptorAnnotation(t *testing.T) {
+	assertSameAsNode(t, `
+const o: any = { a: 1 };
+const d: PropertyDescriptor | undefined = Object.getOwnPropertyDescriptor(o, 'a');
+console.log(d, d?.writable, d && d.configurable);
+const nd: PropertyDescriptor = { value: 5, writable: false, enumerable: true, configurable: true };
+Object.defineProperty(o, 'b', nd);
+console.log(o.b, Object.getOwnPropertyDescriptor(o, 'b'));
+`)
 }

@@ -929,7 +929,7 @@ main2()
 func TestE2EAsyncGeneratorOverFetch(t *testing.T) {
 	srv := newFetchTestServer(t)
 	src := fmt.Sprintf(`
-async function* statuses(): number {
+async function* statuses(): AsyncGenerator<number> {
   const urls: string[] = ["%s/flat", "%s/notfound", "%s/flat"]
   for (const u of urls) {
     const r = await fetch(u)

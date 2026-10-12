@@ -272,6 +272,7 @@ abstract class Shape2 {
 class Square extends Shape2 {
   side: number;
   constructor(side: number) {
+    super();
     this.side = side;
   }
   area(): number {
@@ -544,7 +545,7 @@ class NumberRange {
     this.lo = lo;
     this.hi = hi;
   }
-  *values(): number {
+  *values(): Generator<number> {
     for (let i = this.lo; i < this.hi; i = i + 1) {
       yield i;
     }

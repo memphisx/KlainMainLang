@@ -67,13 +67,13 @@
             "feature": "`klain:sync` goroutines, channels, `select` (`go`, `Channel<T>`, `select`)",
             "status": "implemented",
             "caveats": [
-              "Channel ops are synchronous blocking (`ch.send(v)`/`ch.receive()`), not `await`; element is a fixed 8-byte slot (number/string/object/boolean)",
-              "A `select` recv handler receives the value but not the closed flag (use a `for (const v of ch)` range, which ends on close, to detect it)",
+              "Channel ops are synchronous blocking (`ch.send(v)`/`ch.receive()`), not `await`; a value crosses as its 8-byte `any` word (number/string/object/boolean)",
+              "A closed, drained channel gives `undefined` — `receive()` and a `select` recv handler alike — with no separate closed flag (Go's `v, ok`); a `for (const v of ch)` range ends on close",
               "Fixed goroutine stacks (default 256 KiB, tunable via `KLAINSYNC_STACK_KB`), no overflow guard — deep recursion is UB; growable/moving stacks gated on precise stack maps",
               "Blocking-syscall P-handoff is a bounded sysmon-driven rescue-M approximation, not full `entersyscall`/`exitsyscall`",
               "A nil (never-constructed) channel isn't expressible — channels are always `new Channel`",
               "Per-iteration capture of a loop `let` directly in a goroutine closure is a pre-existing general closure limitation — pass the value as a function parameter (a `spawn(work)` helper) instead",
-              "`send` after `close` and `close` of a closed channel abort the process (Go-panic parity); native-only (compile error under plain `tsc`/Node)"
+              "`send` after `close` and `close` of a closed channel abort the process (Go-panic parity); a `select` takes at most 64 cases (`RangeError` past that); native-only (compile error under plain `tsc`/Node)"
             ],
             "notes": [
               "A Go-style GMP work-stealing scheduler in the embedded C runtime `klainsyncsrc/klainsync.c`: one P + pinned M (pthread) per `GOMAXPROCS`, a global run-queue backstop, half-queue stealing, periodic global-queue poll; blocking channel send/receive parks the *goroutine*, not the OS thread ([TDD-00143](../tdd/TDD-00143.md), [ADR-00541](../adr/ADR-00541.md))",

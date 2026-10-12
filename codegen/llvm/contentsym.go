@@ -93,7 +93,7 @@ func (e *Emitter) contentNamedHelper(memo map[string]string, key, prefix, retIR,
 	placeholder := fmt.Sprintf("%s%d", prefix, len(e.pendingHelpers))
 	memo[key] = placeholder
 	e.pendingHelpers[placeholder] = false
-	restore := e.beginDetachedFunc()
+	restore := e.sharedBody(e.beginDetachedFunc())
 	emit()
 	body := e.allocas.String() + e.body.String()
 	restore()
@@ -106,3 +106,34 @@ func (e *Emitter) contentNamedHelper(memo map[string]string, key, prefix, retIR,
 	memo[key] = name
 	return name
 }
+
+// sharedBody marks the body being built, until restore, as a content-named
+// helper's: a unit that names it spells it by its body's hash, and the
+// builtin library's units are shared between programs, so the body must not
+// depend on the program (programIndependent).
+func (e *Emitter) sharedBody(restore func()) func() {
+	e.sharedCode++
+	return func() {
+		e.sharedCode--
+		restore()
+	}
+}
+
+// stableHelperBody marks the helper being built, until the returned func
+// runs, as program-independent when id is a library-stable type id: its
+// unit is shared between programs (ADR-01579), so it must not depend on
+// what classes the program declares.
+func (e *Emitter) stableHelperBody(id int64) func() {
+	if id&kmlHdrIDMask < kmlStableIDBase {
+		return func() {}
+	}
+	e.sharedCode++
+	return func() { e.sharedCode-- }
+}
+
+// programIndependent reports whether the code being emitted must compile
+// the same in every program: the builtin library's (its units are shared,
+// BACKLOG 156) or a content-named helper's. Such code tests at run time
+// what a program's own code may know statically (whether a bigint or a
+// class extending Array exists).
+func (e *Emitter) programIndependent() bool { return e.inLib != "" || e.sharedCode > 0 }

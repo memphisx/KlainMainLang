@@ -82,10 +82,11 @@ func TestDefiniteAssignment(t *testing.T) {
 		// A destructuring assignment stores.
 		{"let a: number\nlet b: number\n;[a, b] = [1, 2]\nf(a + b)", ""},
 		{"let a: number\n;({ a } = o)\nf(a)", ""},
-		// Exempt: any, nullable, var, a closure.
+		// Exempt: any, nullable, a closure. A var is checked, as tsc does.
 		{"let a: any\nf(a)", ""},
 		{"let a: number | undefined\nf(a)", ""},
-		{"var a: number\nf(a)", ""},
+		{"var a: number\nf(a)", "2:3 a 2454"},
+		{"declare var a: number\nf(a)", ""},
 		{"let a: number\nconst g = () => a", ""},
 		// A try block may not have run when the catch clause does.
 		{"let a: number\ntry { a = 1 } catch (e) { f(a) }", "2:29 a 2454"},

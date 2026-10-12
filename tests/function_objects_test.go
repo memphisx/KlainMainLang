@@ -105,7 +105,7 @@ const assigned = (a = 4);
 console.log(assigned, a);
 const greet = (who: string, punctuation = '!') => who + punctuation;
 const tail = (x: number, y = x * 2, z = SUFFIX) => String(x) + '/' + String(y) + z;
-const plain = (m, n) => m + n;
+const plain = (m: number, n: number) => m + n;
 const dg: any = greet;
 const dt: any = tail;
 const dp: any = plain;

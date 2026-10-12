@@ -256,12 +256,11 @@
       "statusRow": "fs.watch(path[, options][, listener]) → FSWatcher",
       "signature": "fs.watch(filename, options?, listener?): FSWatcher",
       "badge": "caveats",
-      "description": "Native, event-driven change watching in the event loop: an FSWatcher (an EventEmitter) emitting 'change' with (eventType, filename), and 'close'. Backends: inotify, kqueue, ReadDirectoryChangesW.",
+      "description": "Native, event-driven change watching in the event loop: an FSWatcher (an EventEmitter) emitting 'change' with (eventType, filename), and 'close', with ref()/unref() and persistent. Backends: libuv on Linux and macOS, ReadDirectoryChangesW on Windows.",
       "exampleKey": "fs_watch/fs_watch",
       "snippet": "const w = fs.watch('config.json', (ev, name) => { console.log(ev, name); w.close() })",
       "differences": [
-        "On macOS a directory's event names the directory, not the changed entry.",
-        "`recursive` and `persistent: false` are validated and not applied."
+        "`recursive` is applied on macOS only: on Linux and Windows it watches the top directory alone."
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/fs.html#fswatchfilename-options-listener"

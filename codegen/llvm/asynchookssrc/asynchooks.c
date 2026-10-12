@@ -6,6 +6,7 @@
  * before resuming, so context read after an await is the same task's head.
  * KML_NB_UNDEFINED is passed by AsyncHooksCFlags. kml_layout.h is prepended. */
 #include <stdint.h>
+#include <stdlib.h>
 typedef long long i64;
 
 extern _Thread_local void *__kml_current_task;
@@ -32,6 +33,23 @@ void __kml_als_timer_tramp(void *env) {
     void *ep = *(void **)((char *)oc + KML_CLOSURE_ENV);
     fn(ep);
     __kml_als_ctx_set(saved);
+}
+
+/* A callback scheduled by code shared between programs (the builtin
+ * library), which cannot know whether the program uses AsyncLocalStorage:
+ * bound to the current context as __kml_als_timer_tramp binds it, or
+ * returned as is while there is no context (always, in a program without
+ * AsyncLocalStorage). */
+void *__kml_als_wrap(void *clo) {
+    void *cc = __kml_als_ctx_get();
+    if (!cc) return clo;
+    void **env = malloc(2 * sizeof(void *));
+    env[0] = clo;
+    env[1] = cc;
+    char *hdr = malloc(2 * sizeof(void *));
+    *(void (**)(void *))(hdr + KML_CLOSURE_FN) = __kml_als_timer_tramp;
+    *(void **)(hdr + KML_CLOSURE_ENV) = env;
+    return hdr;
 }
 
 /* lib/native.d.ts's asyncContextGet/Set: the frame as an `any` word,

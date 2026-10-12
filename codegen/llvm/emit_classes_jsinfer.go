@@ -19,6 +19,7 @@ package llvm
 // "no field" rejection. Strict mode (`-compat=strict`) is untouched.
 
 import (
+	"KlainMainLang/checker"
 	"fmt"
 
 	"KlainMainLang/ast"
@@ -43,6 +44,7 @@ type jsParamSlot struct {
 }
 
 func (e *Emitter) jsCollectCtorParamTypes(prog *ast.Program) error {
+	defer e.analysisPass()()
 	e.jsCtorParamTy = map[string][]Type{}
 	record := func(nx *ast.NewExpression) error {
 		slots := e.jsCtorParamTy[nx.ClassName]
@@ -75,6 +77,25 @@ func (e *Emitter) jsCollectCtorParamTypes(prog *ast.Program) error {
 		e.jsCtorParamTy[nx.ClassName] = slots
 		return nil
 	}
+	// The globals are not registered yet: an untyped, uninitialized one is
+	// an `any` box (as jsCollectFuncParamTypes binds it), not the type flow
+	// gives the read.
+	e.pushScope()
+	defer e.popScope()
+	for _, s := range prog.Body {
+		decls := []*ast.VarDeclaration{}
+		switch st := s.(type) {
+		case *ast.VarDeclaration:
+			decls = append(decls, st)
+		case *ast.VarDeclarationList:
+			decls = st.Decls
+		}
+		for _, d := range decls {
+			if d.Init == nil && d.TypeAnnot == nil && !d.Ambient {
+				e.define(d.Name, Symbol{Ty: TypeAny})
+			}
+		}
+	}
 	return e.jsWalkProgram(prog, record, nil)
 }
 
@@ -86,9 +107,16 @@ func (e *Emitter) jsCollectCtorParamTypes(prog *ast.Program) error {
 // binding initializer types, which covers the common
 // `const home = new City(...); describe(home, 2)` shape.
 func (e *Emitter) jsCollectFuncParamTypes(prog *ast.Program) error {
+	defer e.analysisPass()()
 	e.jsFuncParamTy = map[string][]jsParamSlot{}
 
 	topBindings := map[string]Type{}
+	userFns := map[string]bool{}
+	for _, s := range prog.Body {
+		if fd, ok := s.(*ast.FunctionDeclaration); ok {
+			userFns[fd.Name] = true
+		}
+	}
 	recordBinding := func(d *ast.VarDeclaration) {
 		if d.Init == nil {
 			// An untyped, uninitialized binding is dynamic under js
@@ -109,6 +137,20 @@ func (e *Emitter) jsCollectFuncParamTypes(prog *ast.Program) error {
 		if _, isLit := d.Init.(*ast.ObjectLiteral); isLit {
 			topBindings[d.Name] = TypeAny
 			return
+		}
+		// Function signatures and later bindings are not built yet (this
+		// collection feeds them), so the checker's declared type answers:
+		// inference would read the bare-number default (`const s = f()`
+		// with f returning a string mistyped every parameter s reached).
+		if t, ok := e.jsDeclaredBindingType(d); ok {
+			topBindings[d.Name] = t
+			return
+		}
+		if call, isCall := d.Init.(*ast.CallExpression); isCall {
+			if id, isID := call.Callee.(*ast.Identifier); isID && userFns[id.Name] {
+				topBindings[d.Name] = e.jsCallResultType(call)
+				return
+			}
 		}
 		if t := e.inferExprType(d.Init); t.IR != "" && t.IR != "void" {
 			topBindings[d.Name] = t
@@ -556,6 +598,13 @@ func (e *Emitter) jsInferConstructorFields(cd *ast.ClassDeclaration, seen map[st
 		if seen[name] || name == "__proto__" {
 			return nil // inherited/declared field write, not a new field
 		}
+		for _, m := range cd.Methods {
+			if m.Name == name && !m.IsStatic {
+				// The instance's own method, shadowing the class's: an
+				// added property, which a call of the name prefers.
+				return nil
+			}
+		}
 		switch name {
 		case ClassTagField, ClassVTableField:
 			return fmt.Errorf("%d:%d: class '%s' cannot introduce a field named '%s' — reserved for the compiler's internal use", pos.Line, pos.Col, cd.Name, name)
@@ -673,4 +722,44 @@ func hasSpreadArg(args []ast.Expression) bool {
 		}
 	}
 	return false
+}
+
+// jsCallResultType is a user-function call's result before its signature
+// exists: the checker's primitive result, else a box (any argument fits).
+func (e *Emitter) jsCallResultType(call *ast.CallExpression) Type {
+	c := e.front()
+	if c == nil {
+		return TypeAny
+	}
+	t := c.TypeOf(call)
+	if c.Unanswered(t) || t.Flags&checker.Union != 0 {
+		return TypeAny
+	}
+	switch {
+	case t.Flags&(checker.String|checker.StringLiteral) != 0:
+		return TypePtr
+	case t.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
+		return TypeBool
+	case t.Flags&(checker.Number|checker.NumberLiteral) != 0 && !t.AnyArith:
+		return TypeF64
+	}
+	return TypeAny
+}
+
+// jsDeclaredBindingType is the representation of the checker's declared
+// type for the top-level binding d.
+func (e *Emitter) jsDeclaredBindingType(d *ast.VarDeclaration) (Type, bool) {
+	c := e.front()
+	if c == nil {
+		return Type{}, false
+	}
+	t := c.ModuleVarType(d)
+	if c.Unanswered(t) {
+		return Type{}, false
+	}
+	r, ok := e.repr().of(t)
+	if !ok || r.IR == "" || r.IR == "void" {
+		return Type{}, false
+	}
+	return r, true
 }

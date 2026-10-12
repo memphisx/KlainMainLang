@@ -51,10 +51,10 @@ func (c *Checker) tables() *jsTables {
 }
 
 // callSiteParam is the type of parameter i of fn from its call sites: the
-// first site whose argument the checker types gives it (widened); a site
-// that disagrees leaves it unanswered (codegen rejects the program, asking
-// for an annotation); no site gives any, as TypeScript's checkJs does. A
-// function whose callers are out of sight stays unanswered.
+// first site whose argument the checker types gives it (widened); sites
+// that disagree, or no site, give any, as TypeScript's checkJs types an
+// unannotated parameter. A function whose callers are out of sight stays
+// unanswered.
 func (c *Checker) callSiteParam(fn ast.Node, i int) *Type {
 	t := c.tables()
 	key := jsParamKey{fn, i}
@@ -69,6 +69,10 @@ func (c *Checker) callSiteParam(fn ast.Node, i int) *Type {
 	r := c.unanswered
 	if known {
 		r = c.inferFromSites(sites, i)
+	} else if c.isMethod(fn) || c.isReturnedFunction(fn) {
+		// Its receiver, or whoever takes the returned function, decides
+		// the call: any, as checkJs gives.
+		r = c.anyT
 	}
 	delete(t.busy, key)
 	t.param[key] = r
@@ -82,7 +86,16 @@ func (c *Checker) inferFromSites(sites [][]ast.Expression, i int) *Type {
 			continue
 		}
 		at := c.TypeOf(args[i])
-		if c.Unanswered(at) || at.Flags&Any != 0 {
+		if c.Unanswered(at) {
+			continue
+		}
+		if at.Flags&Any != 0 && at.Flags&Union == 0 {
+			// A value of any type reaches the parameter: it is any.
+			return c.anyT
+		}
+		// A null or undefined argument widens to any in a JS file: it
+		// says nothing of the parameter's type.
+		if at.Flags&Union == 0 && at.Flags&(Null|Undefined|Void) != 0 {
 			continue
 		}
 		at = widen(c, at)
@@ -90,7 +103,7 @@ func (c *Checker) inferFromSites(sites [][]ast.Expression, i int) *Type {
 		case first == nil:
 			first = at
 		case first != at:
-			return c.unanswered
+			return c.anyT // a polymorphic parameter
 		}
 	}
 	if first == nil {
@@ -126,8 +139,39 @@ func (c *Checker) sitesOf(fn ast.Node) (sites [][]ast.Expression, known bool) {
 				return t.calls[sym], true
 			}
 		}
+		if call, ok := c.parentOf(fn).(*ast.CallExpression); ok && ast.Node(call.Callee) == fn {
+			return [][]ast.Expression{call.Args}, true // an IIFE: its one call
+		}
 	}
 	return nil, false
+}
+
+// isReturnedFunction reports whether fn is a function literal its
+// enclosing function returns (`return (a) => a`, `() => (a) => a`).
+func (c *Checker) isReturnedFunction(fn ast.Node) bool {
+	switch fn.(type) {
+	case *ast.FunctionExpression, *ast.ArrowFunction:
+	default:
+		return false
+	}
+	switch p := c.parentOf(fn).(type) {
+	case *ast.ReturnStatement:
+		return true
+	case *ast.ArrowFunction:
+		return ast.Node(p.Body) == fn
+	}
+	return false
+}
+
+// isMethod reports whether fn is a class's method, accessor or static
+// method (not its constructor).
+func (c *Checker) isMethod(fn ast.Node) bool {
+	f, ok := fn.(*ast.FunctionDeclaration)
+	if !ok {
+		return false
+	}
+	cls, ok := c.parentOf(f).(*ast.ClassDeclaration)
+	return ok && cls.Constructor != f
 }
 
 func hasInstanceFields(decl *ast.ClassDeclaration) bool {
@@ -175,4 +219,21 @@ func (c *Checker) constructorFields(decl *ast.ClassDeclaration) []*Property {
 		props[i] = &Property{Name: name, Type: types[name]}
 	}
 	return props
+}
+
+// JSCallSiteParam is parameter i of fn as its call sites type it under
+// -compat=js, or nil where the callers are not all in sight (a method, a
+// function passed as an argument) or the parameter is annotated.
+func (c *Checker) JSCallSiteParam(fn ast.Node, i int) *Type {
+	if !c.opts.CompatJS() {
+		return nil
+	}
+	if _, known := c.sitesOf(fn); !known {
+		return nil
+	}
+	t := c.callSiteParam(fn, i)
+	if c.Unanswered(t) {
+		return nil
+	}
+	return t
 }

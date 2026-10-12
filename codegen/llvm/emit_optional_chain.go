@@ -142,6 +142,45 @@ func rewriteChain(n ast.Expression, depth int, newBase ast.Expression) ast.Expre
 	return n
 }
 
+// copyChain is rewriteChain, noting each copied link's original
+// (noteChainCopy).
+func (e *Emitter) copyChain(top ast.Expression, depth int, newBase ast.Expression) ast.Expression {
+	c := rewriteChain(top, depth, newBase)
+	cur, orig := c, top
+	for i := 0; i <= depth && cur != orig; i++ {
+		e.noteChainCopy(cur, orig)
+		next, _, ok := chainChild(cur)
+		onext, _, ook := chainChild(orig)
+		if !ok || !ook {
+			break
+		}
+		cur, orig = next, onext
+	}
+	return c
+}
+
+// noteChainCopy records c as a copy of the chain link orig, which the
+// checker-side mapping answers for it.
+func (e *Emitter) noteChainCopy(c, orig ast.Expression) {
+	if e.chainCopies == nil {
+		e.chainCopies = map[ast.Expression]ast.Expression{}
+	}
+	for {
+		o, ok := e.chainCopies[orig]
+		if !ok {
+			break
+		}
+		orig = o // a copy of a copy answers as the first original
+	}
+	e.chainCopies[c] = orig
+}
+
+// chainCopyOf is the program's link that c copies, when c is one.
+func (e *Emitter) chainCopyOf(c ast.Expression) (ast.Expression, bool) {
+	o, ok := e.chainCopies[c]
+	return o, ok
+}
+
 // optionalChainGuard says how the base of a chain's leftmost `?.` can be absent.
 type optionalChainGuard int
 
@@ -189,7 +228,7 @@ func (e *Emitter) inferOptionalChain(top ast.Expression) (Type, bool) {
 		return Type{}, false
 	}
 	guard, hostDependent := e.classifyChainGuard(chainLinkAt(top, depth))
-	inner := e.inferExprType(rewriteChain(top, depth, nil))
+	inner := e.inferExprType(e.copyChain(top, depth, nil))
 	if guard == chainGuardNone && !hostDependent {
 		return inner, true
 	}
@@ -224,9 +263,9 @@ func (e *Emitter) emitOptionalChain(top ast.Expression) (v Value, handled bool, 
 
 	switch guard {
 	case chainGuardAbsent:
-		return e.undefinedValueOf(e.inferExprType(rewriteChain(top, depth, nil))), true, nil
+		return e.undefinedValueOf(e.inferExprType(e.copyChain(top, depth, nil))), true, nil
 	case chainGuardNone:
-		plain := rewriteChain(top, depth, nil)
+		plain := e.copyChain(top, depth, nil)
 		pv, perr := e.emitExpr(plain)
 		if perr != nil || !hostDependent {
 			return pv, true, perr
@@ -280,7 +319,7 @@ func (e *Emitter) emitOptionalChain(top ast.Expression) (v Value, handled bool, 
 		// it a second time.
 		return Value{}, true, fmt.Errorf("%d:%d: optional chain on a value of type %s is not supported", pos.Line, pos.Col, bv.Ty.IR)
 	}
-	through := rewriteChain(top, depth, ast.NewIdentifier(tmpName, base.GetPos()))
+	through := e.copyChain(top, depth, ast.NewIdentifier(tmpName, base.GetPos()))
 	v, err = e.emitNullGuardedExpr(isNull, through)
 	return v, true, err
 }

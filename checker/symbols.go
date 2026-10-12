@@ -6,6 +6,7 @@ import (
 
 	"KlainMainLang/ast"
 	"KlainMainLang/binder"
+	"KlainMainLang/diag"
 )
 
 // typeOfSymbol returns the type a value symbol's declaration gives it: its
@@ -15,16 +16,39 @@ func (c *Checker) typeOfSymbol(sym *binder.Symbol) *Type {
 		return t
 	}
 	if c.resolving[sym] {
+		// A function read while its own return type is inferred: tsc gives
+		// that return type any (TS7023). A declaration is still itself, a
+		// function with its parameters and an any result.
+		if len(sym.Declarations) == 1 && isUnannotatedFunction(sym.Declarations[0].Node) {
+			c.reportReturnCycle(sym)
+			if fd, ok := sym.Declarations[0].Node.(*ast.FunctionDeclaration); ok && !fd.IsAsync && !fd.IsGenerator && len(fd.Overloads) == 0 && !c.selfRef[sym] {
+				c.selfRef[sym] = true
+				t := c.signatureType(fd, fd.Params, nil, nil, nil, sym.Scope)
+				delete(c.selfRef, sym)
+				if !c.Unanswered(t) && t.Flags&Object != 0 && t.Kind == Function {
+					return c.in.withResult(t, c.anyT)
+				}
+			}
+			return c.anyT
+		}
 		return c.unanswered // a cycle (a binding typed by its own initializer)
 	}
 	c.resolving[sym] = true
+	c.resolveStack = append(c.resolveStack, sym)
 	t := c.computeSymbolType(sym)
+	c.resolveStack = c.resolveStack[:len(c.resolveStack)-1]
 	delete(c.resolving, sym)
 	c.symTypes[sym] = t
 	return t
 }
 
 func (c *Checker) computeSymbolType(sym *binder.Symbol) *Type {
+	if sym.Implicit && sym.Name == "arguments" && c.b.Globals != nil {
+		// A function's own `arguments`: the lib's IArguments.
+		if ia := c.b.Globals.Symbols.Get("IArguments"); ia != nil && ia.Flags&binder.Interface != 0 {
+			return c.interfaceOf(ia, nil)
+		}
+	}
 	if sym.Implicit || len(sym.Declarations) == 0 {
 		return c.unanswered
 	}
@@ -40,6 +64,12 @@ func (c *Checker) computeSymbolType(sym *binder.Symbol) *Type {
 		d = x
 		break
 	}
+	return c.declType(sym, d)
+}
+
+// declType is the type declaration d gives symbol sym: its annotation, its
+// initializer's (widened unless const), a loop's element, and so on.
+func (c *Checker) declType(sym *binder.Symbol, d binder.Declaration) *Type {
 	switch n := d.Node.(type) {
 	case *ast.VarDeclaration:
 		if n.TypeAnnot != nil {
@@ -56,6 +86,9 @@ func (c *Checker) computeSymbolType(sym *binder.Symbol) *Type {
 			}
 			return c.storageType(sym)
 		}
+		if a, ok := n.Init.(*ast.ArrayLiteral); ok && len(a.Elements) == 0 && !c.ImplicitAnyVariables && !n.Ambient && !c.b.Exported(n) && sym.Scope.Kind != binder.NamespaceScope {
+			return c.arrayStorageType(sym) // `[]`: an evolving array
+		}
 		if _, ok := n.Init.(*ast.NullLiteral); ok && n.Kind != "const" {
 			// `let x = null` / `let x = undefined` evolve like `let x;`:
 			// TypeScript widens their declared type to an evolving any.
@@ -71,9 +104,6 @@ func (c *Checker) computeSymbolType(sym *binder.Symbol) *Type {
 		return c.widenFrom(n.Init, t)
 	case *ast.FunctionDeclaration:
 		if sym.Flags&binder.Function != 0 && d.Flags&binder.Function != 0 {
-			if n.IsAsync {
-				return c.unanswered
-			}
 			if sigs := ambientOverloads(sym); len(sigs) > 1 {
 				// `declare function f(…)` more than once: every one is a
 				// signature, with no implementation.
@@ -87,7 +117,7 @@ func (c *Checker) computeSymbolType(sym *binder.Symbol) *Type {
 		return c.paramType(n, sym, n.Params, sym.Scope)
 	case *ast.FunctionExpression:
 		if d.Flags&binder.Function != 0 {
-			return c.unanswered // the expression's own name
+			return c.TypeOf(n) // the expression's own name: the function
 		}
 		return c.contextualOr(n, sym, n.Params)
 	case *ast.ArrowFunction:
@@ -126,6 +156,10 @@ func (c *Checker) computeSymbolType(sym *binder.Symbol) *Type {
 			}
 			return c.unknownT // --strict's useUnknownInCatchVariables
 		}
+	case *ast.ForInStatement:
+		if n.VarName == sym.Name {
+			return c.strT // a property key
+		}
 	case *ast.ForOfStatement:
 		if n.VarName != sym.Name {
 			return c.unanswered // a destructured loop variable
@@ -147,6 +181,11 @@ func (c *Checker) computeSymbolType(sym *binder.Symbol) *Type {
 // params.
 func (c *Checker) paramType(fn ast.Node, sym *binder.Symbol, params []ast.Param, scope *binder.Scope) *Type {
 	for i, p := range params {
+		if (p.ArrayPattern != nil || p.ObjectPattern != nil) && patternBinds(p, sym.Name) {
+			return c.patternParamLeafType(fn, i, p, sym.Name, scope)
+		}
+	}
+	for i, p := range params {
 		if p.Name != sym.Name || p.ArrayPattern != nil || p.ObjectPattern != nil {
 			continue
 		}
@@ -157,9 +196,14 @@ func (c *Checker) paramType(fn ast.Node, sym *binder.Symbol, params []ast.Param,
 		case p.Default != nil:
 			t = c.widenFrom(p.Default, c.TypeOf(p.Default))
 		case c.opts.CompatJS() && fn != nil && !p.Rest:
-			return c.callSiteParam(fn, i)
+			if t := c.callSiteParam(fn, i); !c.Unanswered(t) {
+				return t
+			}
+			return c.anyT
+		case p.Rest:
+			return c.in.array(c.anyT) // an implicit any[] (TS7019)
 		default:
-			return c.unanswered
+			return c.anyT // an implicit any (TS7006)
 		}
 		if (p.Optional || p.Default != nil) && !c.Unanswered(t) && p.Default == nil {
 			t = c.in.union(t, c.undefinedT)
@@ -167,6 +211,72 @@ func (c *Checker) paramType(fn ast.Node, sym *binder.Symbol, params []ast.Param,
 		return t
 	}
 	return c.unanswered
+}
+
+// patternBinds reports whether a destructuring parameter binds name.
+func patternBinds(p ast.Param, name string) bool {
+	for _, n := range arrayPatternLeafNames(p.ArrayPattern) {
+		if n == name {
+			return true
+		}
+	}
+	for _, n := range objectPatternLeafNames(p.ObjectPattern) {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+func arrayPatternLeafNames(elems []ast.ArrayPatternElem) []string {
+	var out []string
+	for _, e := range elems {
+		if e.Name != "" {
+			out = append(out, e.Name)
+		}
+		out = append(out, arrayPatternLeafNames(e.SubArray)...)
+		out = append(out, objectPatternLeafNames(e.SubObject)...)
+	}
+	return out
+}
+
+func objectPatternLeafNames(props []ast.DestructProp) []string {
+	var out []string
+	for _, p := range props {
+		if p.Local != "" && p.SubArray == nil && p.SubObject == nil {
+			out = append(out, p.Local)
+		}
+		out = append(out, arrayPatternLeafNames(p.SubArray)...)
+		out = append(out, objectPatternLeafNames(p.SubObject)...)
+	}
+	return out
+}
+
+// patternParamLeafType is the type of name, bound by the destructuring
+// parameter p (the i-th of fn): the element or property it takes from the
+// parameter's annotated type, else its contextual type, else its default's.
+// A parameter with none of these is an implicit any, and so is each leaf.
+func (c *Checker) patternParamLeafType(fn ast.Node, i int, p ast.Param, name string, scope *binder.Scope) *Type {
+	var src *Type
+	switch {
+	case p.Type != nil && p.Type.TypeNode() != nil:
+		src = c.typeFromNode(p.Type.TypeNode(), scope)
+	default:
+		if ct := c.contextualParam(fn, i, p.Rest); ct != nil {
+			src = ct
+		} else if p.Default != nil {
+			src = c.widenFrom(p.Default, c.TypeOf(p.Default))
+		} else {
+			return c.anyT
+		}
+	}
+	if c.Unanswered(src) {
+		return src
+	}
+	if src.Flags&Any != 0 {
+		return c.anyT
+	}
+	return c.bindingType(name, "let", p.ArrayPattern, p.ObjectPattern, src, nil)
 }
 
 // signatureType is the function type of a declaration with params: its
@@ -177,6 +287,11 @@ func (c *Checker) signatureType(fn ast.Node, params []ast.Param, ret *ast.TypeAn
 	// are declared there.
 	if s := c.b.ScopeOf(fn); s != nil {
 		scope = s
+	}
+	// A leading `this` is the this-parameter (thisParamType), never an
+	// argument: code generation puts it at the head of the list it emits.
+	if len(params) > 0 && params[0].Name == "this" {
+		params = params[1:]
 	}
 	var tps []*Type
 	if fd, ok := fn.(*ast.FunctionDeclaration); ok {
@@ -215,18 +330,25 @@ func (c *Checker) signatureType(fn ast.Node, params []ast.Param, ret *ast.TypeAn
 				t = ct
 			} else if p.Default != nil {
 				t = c.widenFrom(p.Default, c.TypeOf(p.Default))
+			} else if at := c.iifeParam(fn, i, p.Rest); at != nil {
+				t = at
 			} else if c.opts.CompatJS() && fn != nil && !p.Rest {
 				t = c.callSiteParam(fn, i)
+			} else if p.Rest {
+				t = c.in.array(c.anyT) // an unannotated rest: any[] (TS7019 in strict)
 			}
 		}
 		if c.Unanswered(t) {
 			return t
 		}
-		if p.Optional || p.Default != nil {
+		// tsc's isOptionalParameter: an immediately invoked function's
+		// parameter past its last argument is optional.
+		opt := p.Optional || p.Default != nil || c.iifeOmitted(fn, i, p.Rest)
+		if opt {
 			t = c.in.union(t, c.undefinedT) // seen from a caller, it may be omitted
 		}
 		ps = append(ps, t)
-		opts = append(opts, p.Optional || p.Default != nil)
+		opts = append(opts, opt)
 		rest = rest || p.Rest
 	}
 	var r *Type
@@ -245,12 +367,39 @@ func (c *Checker) signatureType(fn ast.Node, params []ast.Param, ret *ast.TypeAn
 			break
 		}
 		r = c.typeFromNode(ret.TypeNode(), scope)
+		if (isGeneratorFn(fn) || isAsyncGeneratorFn(fn)) && !c.Unanswered(r) && !c.iteratorLike(r) {
+			// This compiler's generator annotation names what it yields
+			// (`function* g(): number`).
+			if gr := c.generatorOf(r, isAsyncGeneratorFn(fn)); gr != nil {
+				r = gr
+			}
+		}
 	case ret != nil:
 		return c.unanswered
 	case body == nil && exprBody == nil:
 		r = c.voidT // a signature without a body (a constructor's, typed for `new`)
 	case isGeneratorFn(fn):
-		r = c.generatorReturn(body)
+		r = c.generatorReturn(body, false)
+	case isAsyncGeneratorFn(fn):
+		r = c.generatorReturn(body, true)
+	case isAsyncFn(fn):
+		// Promise of what its returns resolve to (tsc's
+		// createPromiseReturnType); Promise<void> when none returns a value.
+		r = c.returnType(body, exprBody)
+		if c.Unanswered(r) {
+			return r
+		}
+		if _, decl := fn.(*ast.FunctionDeclaration); !decl && body != nil && !hasReturn(body) && !c.endReachable(body) {
+			// A function expression or arrow that never completes:
+			// Promise<never> (tsc's inference for a non-declaration).
+			r = c.neverT
+		}
+		if r.Flags&Void == 0 {
+			r = c.awaited(r, 0)
+		}
+		if r = c.promiseOf(r); r == nil {
+			return c.unanswered
+		}
 	default:
 		r = c.returnType(body, exprBody)
 		if _, decl := fn.(*ast.FunctionDeclaration); !decl && fn != nil {
@@ -433,6 +582,21 @@ func (c *Checker) predicate(tp *ast.TypePredicate, params []ast.Param, scope *bi
 // annotation (returnType), for codegen's return-type decision.
 func (c *Checker) BodyReturnType(body *ast.BlockStatement) *Type { return c.returnType(body, nil) }
 
+// ModuleVarType is the declared type of a module-level variable declaration
+// (an evolving let's storage type), for codegen's module-global decision.
+func (c *Checker) ModuleVarType(v *ast.VarDeclaration) *Type {
+	sym := c.b.Module.Symbols.Get(v.Name)
+	if sym == nil {
+		return c.unanswered
+	}
+	for _, d := range sym.Declarations {
+		if d.Node == ast.Node(v) {
+			return c.typeOfSymbol(sym)
+		}
+	}
+	return c.unanswered
+}
+
 // returnType is the type a function body returns, as TypeScript infers it
 // without an annotation: the union of its return expressions' types with
 // literals widened, void when no return has a value, or an expression body's
@@ -445,7 +609,8 @@ func (c *Checker) returnType(body *ast.BlockStatement, exprBody ast.Expression) 
 		return c.unanswered
 	}
 	var results []*Type
-	valueless, polymorphicThis := false, false
+	valueless, polymorphicThis, selfCall := false, false, false
+	fn := c.parentOf(body)
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration, *ast.ClassExpression:
@@ -453,8 +618,13 @@ func (c *Checker) returnType(body *ast.BlockStatement, exprBody ast.Expression) 
 		case *ast.ReturnStatement:
 			if n.Value == nil {
 				valueless = true
-			} else if _, this := n.Value.(*ast.ThisExpression); this {
+			} else if th, this := n.Value.(*ast.ThisExpression); this && c.thisType(th) != c.anyT {
 				polymorphicThis = true // TypeScript's `this` type: not modelled yet
+			} else if c.callsItself(fn, n.Value) {
+				// `return f(…)` of the function itself returns what its
+				// other returns do (tsc's checkAndAggregateReturnExpression-
+				// Types: never).
+				selfCall = true
 			} else {
 				results = append(results, c.TypeOf(n.Value))
 			}
@@ -463,6 +633,9 @@ func (c *Checker) returnType(body *ast.BlockStatement, exprBody ast.Expression) 
 	})
 	if polymorphicThis {
 		return c.unanswered
+	}
+	if len(results) == 0 && selfCall && !valueless && !c.endReachable(body) {
+		return c.neverT
 	}
 	if len(results) == 0 {
 		return c.voidT
@@ -574,6 +747,35 @@ func (c *Checker) widenUnit(t *Type) *Type {
 
 // instanceType is the type of an instance of the class sym declares: its
 // fields and methods, as declared.
+// FieldType is the type of class cd's instance field name, or nil.
+func (c *Checker) FieldType(cd *ast.ClassDeclaration, name string) *Type {
+	sym := c.symbolOf(cd)
+	if sym == nil {
+		return nil
+	}
+	inst := c.instanceType(sym)
+	if inst == nil || c.Unanswered(inst) {
+		return nil
+	}
+	if p := inst.Prop(name); p != nil {
+		return p.Type
+	}
+	return nil
+}
+
+// untypedFieldType is the type of a field declared with neither a type nor
+// an initializer: what the constructor assigns to it, else any.
+func (c *Checker) untypedFieldType(decl *ast.ClassDeclaration, name string) *Type {
+	if decl.Constructor != nil && decl.Constructor.Body != nil {
+		for _, p := range c.constructorFields(decl) {
+			if p.Name == name {
+				return p.Type
+			}
+		}
+	}
+	return c.anyT
+}
+
 func (c *Checker) instanceType(sym *binder.Symbol) *Type { return c.instanceOf(sym, nil) }
 
 // classDecl returns the class declaration of sym, or nil.
@@ -641,6 +843,7 @@ func (c *Checker) instanceOf(sym *binder.Symbol, args []*Type) *Type {
 	t.Base = base
 	if base != nil {
 		t.Props = append(t.Props, base.Props...)
+		t.StringIndex, t.NumberIndex = base.StringIndex, base.NumberIndex
 		// A base still being typed (a cycle through a member's type) has
 		// not got all its members yet.
 		t.partial = t.partial || base.partial || c.building[base]
@@ -662,6 +865,10 @@ func (c *Checker) instanceOf(sym *binder.Symbol, args []*Type) *Type {
 			// (In a generic class an expression's type could depend on the
 			// arguments, and expression types are cached per node.)
 			ft = c.widenFrom(f.Initializer, c.TypeOf(f.Initializer))
+		case !generic:
+			// Neither: the type the constructor assigns it (tsc's inference
+			// from constructors), else an implicit any.
+			ft = c.untypedFieldType(decl, f.Name)
 		default:
 			ft = c.unanswered
 		}
@@ -711,9 +918,9 @@ func (c *Checker) instanceOf(sym *binder.Symbol, args []*Type) *Type {
 			continue
 		}
 		mt := c.unanswered
-		if len(m.Overloads) > 0 && !m.IsAsync {
+		if len(m.Overloads) > 0 {
 			mt = c.overloadsType(strconv.Itoa(sym.ID)+"."+m.Name+"<"+ids(args), sym.Scope, m.Overloads)
-		} else if !m.IsAsync && (!generic || m.ReturnType != nil) {
+		} else if !generic || m.ReturnType != nil {
 			mt = c.signatureType(m, m.Params, m.ReturnType, m.Body, nil, sym.Scope)
 		}
 		if m.IsOptional && !c.Unanswered(mt) {
@@ -800,6 +1007,16 @@ func (c *Checker) interfaceOf(sym *binder.Symbol, args []*Type) (res *Type) {
 			c.failedNominal[t] = true
 		}
 	}()
+	// Members are resolved eagerly, so mutually recursive generic
+	// interfaces instantiate each other combinatorially; past a program-wide
+	// count the rest stay unanswered (tsc bounds the same growth with its
+	// instantiation count, TS2589).
+	if len(args) > 0 {
+		c.instantiations++
+		if c.instantiations > maxInstantiations {
+			return c.unanswered
+		}
+	}
 	c.building[t] = true
 	defer delete(c.building, t)
 	defer c.nest(sym, args)()
@@ -943,7 +1160,7 @@ func (c *Checker) interfaceOf(sym *binder.Symbol, args []*Type) (res *Type) {
 					continue
 				}
 				key := strconv.Itoa(sym.ID) + ":" + strconv.Itoa(di) + ":" + strconv.Itoa(mi)
-				mt := c.signatureOfNodes(key, m.TypeParameters, m.Parameters, m.Type, sym.Scope)
+				mt := c.withThisParam(c.signatureOfNodes(key, m.TypeParameters, m.Parameters, m.Type, sym.Scope), m.This, sym.Scope)
 				if m.Optional && !c.Unanswered(mt) {
 					mt = c.in.union(mt, c.missingT)
 				}
@@ -1394,7 +1611,7 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 				}
 				// A member the checker does not model types as unanswered,
 				// as an interface's does; the rest of the type stays known.
-				mt := c.signatureOfNodes(fmt.Sprintf("lit%p", sm), sm.TypeParameters, sm.Parameters, sm.Type, scope)
+				mt := c.withThisParam(c.signatureOfNodes(fmt.Sprintf("lit%p", sm), sm.TypeParameters, sm.Parameters, sm.Type, scope), sm.This, scope)
 				if sm.Optional && !c.Unanswered(mt) {
 					mt = c.in.union(mt, c.missingT)
 				}
@@ -1483,6 +1700,13 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 		}
 		if len(n.TypeArgs) == 0 {
 			if sym := resolveTypeName(n.Name, scope); sym != nil && sym.Flags&binder.TypeParameter != 0 {
+				// A class's parameter, in an instantiation's members: its
+				// argument (instanceOf binds them in the environment).
+				if _, isClass := sym.Declarations[0].Node.(*ast.ClassDeclaration); isClass {
+					if r := c.lookupEnv(n.Name); r != nil {
+						return r
+					}
+				}
 				tp := c.typeParamType(sym)
 				if r := c.lookupSubst(tp); r != nil {
 					return r
@@ -1614,6 +1838,10 @@ func (c *Checker) pushEnv(names []string, args []*Type) func() {
 const maxNesting = 5
 
 // tooDeep reports whether instantiating sym with args would pass maxNesting.
+// maxInstantiations bounds the generic interface instantiations one
+// program makes (interfaceOf).
+const maxInstantiations = 100000
+
 func (c *Checker) tooDeep(sym *binder.Symbol, args []*Type) bool {
 	return len(args) > 0 && c.nesting[sym] >= maxNesting
 }
@@ -1708,7 +1936,7 @@ func (c *Checker) constructorType(sym *binder.Symbol) *Type {
 		}
 		bsym := resolveTypeName(decl.BaseClass, sym.Scope)
 		if bsym == nil || bsym.Flags&binder.Class == 0 {
-			return nil
+			return c.inheritedConstructs(decl, sym, inst, tps)
 		}
 		c.ctorChain[sym] = true
 		bctor := c.constructorType(bsym)
@@ -1721,11 +1949,37 @@ func (c *Checker) constructorType(sym *binder.Symbol) *Type {
 		for i, tp := range bctor.TypeParams {
 			m[tp] = bargs[i]
 		}
-		ps := make([]*Type, len(bctor.Params))
-		for i, p := range bctor.Params {
-			ps[i] = c.instantiate(p, m)
+		inherit := func(b *Type) *Type {
+			ps := make([]*Type, len(b.Params))
+			for i, p := range b.Params {
+				ps[i] = c.instantiate(p, m)
+			}
+			return c.in.function(ps, b.optionals, b.restParam, inst, nil, tps)
 		}
-		return c.in.function(ps, bctor.optionals, bctor.restParam, inst, nil, tps)
+		if len(bctor.Overloads) > 0 {
+			// The base's overloads, each (`extends Array<number>`'s).
+			sigs := make([]*Type, len(bctor.Overloads))
+			for i, o := range bctor.Overloads {
+				sigs[i] = inherit(o)
+			}
+			return c.in.overloaded(sigs)
+		}
+		return inherit(bctor)
+	}
+	if ovs := decl.Constructor.Overloads; len(ovs) > 0 {
+		// Overloaded: `new` sees the signatures, not the implementation.
+		sigs := make([]*Type, 0, len(ovs))
+		for _, o := range ovs {
+			sig := c.signatureType(o, o.Params, nil, nil, nil, sym.Scope)
+			if c.Unanswered(sig) {
+				return nil
+			}
+			sigs = append(sigs, c.in.function(sig.Params, sig.optionals, sig.restParam, inst, nil, tps))
+		}
+		if len(sigs) == 1 {
+			return sigs[0]
+		}
+		return c.in.overloaded(sigs)
 	}
 	sig := c.signatureType(decl.Constructor, decl.Constructor.Params, nil, nil, nil, sym.Scope)
 	if c.Unanswered(sig) {
@@ -1764,6 +2018,20 @@ func (c *Checker) classObject(sym *binder.Symbol, decl *ast.ClassDeclaration) *T
 		}
 		add(&Property{Name: f.Name, Type: ft, Optional: f.Optional, Readonly: f.Readonly, Visibility: f.Visibility, Owner: sym})
 	}
+	// A static method's body may read the class's own statics (`return
+	// C.p`): while its methods are typed, the class's value is its fields so
+	// far, as a partial object, rather than a cycle.
+	snapshot := func() {}
+	if c.resolving[sym] {
+		// Each static method typed joins the snapshot, so a later one reads
+		// it (`static g() { return this.#m }`).
+		snapshot = func() {
+			c.symTypes[sym] = c.in.classValue(c.in.objectOf(append([]*Property(nil), props...), true, false), nil, sym)
+		}
+		snapshot()
+		delete(c.resolving, sym)
+		defer func() { c.resolving[sym] = true }()
+	}
 	for _, m := range decl.Methods {
 		if !m.IsStatic {
 			continue
@@ -1791,15 +2059,17 @@ func (c *Checker) classObject(sym *binder.Symbol, decl *ast.ClassDeclaration) *T
 			if at != nil {
 				add(&Property{Name: m.Name, Type: at, Accessor: true, Visibility: m.Visibility, Owner: sym})
 			}
+			snapshot()
 			continue
 		}
 		mt := c.unanswered
-		if len(m.Overloads) > 0 && !m.IsAsync {
+		if len(m.Overloads) > 0 {
 			mt = c.overloadsType(strconv.Itoa(sym.ID)+".static."+m.Name, sym.Scope, m.Overloads)
-		} else if !m.IsAsync {
+		} else {
 			mt = c.signatureType(m, m.Params, m.ReturnType, m.Body, nil, sym.Scope)
 		}
 		add(&Property{Name: m.Name, Type: mt, Visibility: m.Visibility, Owner: sym, Decl: m})
+		snapshot()
 	}
 	if decl.BaseClass != "" {
 		// A base class's statics are the derived class's too; a builtin
@@ -1857,6 +2127,53 @@ func (c *Checker) baseInstance(decl *ast.ClassDeclaration, sym *binder.Symbol) *
 	return c.instanceOf(bsym, bargs)
 }
 
+// inheritedConstructs is the constructor type of a class without its own
+// constructor whose base is a value with construct signatures (`class D
+// extends Date {}`): each of the base's signatures, the clause's type
+// arguments applied, making the class's instance inst.
+func (c *Checker) inheritedConstructs(decl *ast.ClassDeclaration, sym *binder.Symbol, inst *Type, tps []*Type) *Type {
+	vsym := lookupName(decl.BaseClass, sym.Scope)
+	if vsym == nil || vsym.Flags&binder.Variable == 0 {
+		vsym = c.builtinImport(decl.BaseClass)
+	}
+	if vsym == nil || vsym.Flags&binder.Variable == 0 {
+		return nil
+	}
+	ct := c.typeOfSymbol(vsym)
+	if c.Unanswered(ct) || ct.Flags&Object == 0 {
+		return nil
+	}
+	bargs, ok := c.baseTypeArgs(decl, sym)
+	if !ok {
+		return nil
+	}
+	var sigs []*Type
+	for _, sig := range ct.Constructs {
+		if len(sig.TypeParams) < len(bargs) {
+			continue
+		}
+		m := map[*Type]*Type{}
+		for i, tp := range sig.TypeParams {
+			m[tp] = c.anyT
+			if i < len(bargs) {
+				m[tp] = bargs[i]
+			}
+		}
+		ps := make([]*Type, len(sig.Params))
+		for i, p := range sig.Params {
+			ps[i] = c.instantiate(p, m)
+		}
+		sigs = append(sigs, c.in.function(ps, sig.optionals, sig.restParam, inst, nil, tps))
+	}
+	switch len(sigs) {
+	case 0:
+		return nil
+	case 1:
+		return sigs[0]
+	}
+	return c.in.overloaded(sigs)
+}
+
 // constructedBase is the instance type a base value's construct signature
 // makes (`class M extends Map<string, number>`): the signature with as many
 // type parameters as the clause has arguments, a parameter with no argument
@@ -1887,6 +2204,10 @@ func (c *Checker) constructedBase(name string, scope *binder.Scope, args []*Type
 			}
 		}
 		if r := c.instantiate(sig.Result, m); r != nil && !c.Unanswered(r) && r.Flags&Object != 0 {
+			if r.Kind == Array {
+				// `extends Array<T>`: the instance has Array<T>'s members.
+				return c.apparentType(r)
+			}
 			return r
 		}
 	}
@@ -2067,7 +2388,14 @@ func (c *Checker) qualifiedTypeName(n *ast.TypeReference, scope *binder.Scope) *
 	if sym := inner.Symbols.Get(n.Name); sym != nil && sym.Flags&binder.Type != 0 {
 		return sym
 	}
-	return nil
+	// A member the resolver made file-private (`A__kml_mod0`).
+	var found *binder.Symbol
+	inner.Symbols.Each(func(sym *binder.Symbol) {
+		if found == nil && sym.Flags&binder.Type != 0 && ast.TrimModuleSuffix(sym.Name) == n.Name {
+			found = sym
+		}
+	})
+	return found
 }
 
 // originsOf is the origins of sigs, a base's signatures: its recorded ones,
@@ -2223,7 +2551,13 @@ func (c *Checker) typeQueryType(n *ast.TypeQuery, scope *binder.Scope) *Type {
 			return t
 		}
 		var next *Type
-		for _, p := range c.apparentType(t).Props {
+		// A primitive's properties are its wrapper's (apparentType); an
+		// object's are its own.
+		at := c.apparentType(t)
+		if at == nil {
+			at = t
+		}
+		for _, p := range at.Props {
 			if p.Name == seg {
 				next = p.Type
 				break
@@ -2240,13 +2574,18 @@ func (c *Checker) typeQueryType(n *ast.TypeQuery, scope *binder.Scope) *Type {
 // generatorReturn is the type an unannotated generator function returns, as
 // tsc infers it: Generator<Y, R, unknown>, Y the union of what its
 // `yield`s produce (a bare `yield` undefined, a `yield*` its iterable's
-// element type) and R what its body returns. Unanswered when a yielded
-// value is, or when there is no Generator declaration.
-func (c *Checker) generatorReturn(body *ast.BlockStatement) *Type {
+// element type) and R what its body returns. An async generator's is
+// AsyncGenerator<Y, R, unknown>, its yields and returns awaited. Unanswered
+// when a yielded value is, or when there is no such declaration.
+func (c *Checker) generatorReturn(body *ast.BlockStatement, async bool) *Type {
 	if body == nil || c.b.Globals == nil {
 		return c.unanswered
 	}
-	sym := c.b.Globals.Symbols.Get("Generator")
+	name := "Generator"
+	if async {
+		name = "AsyncGenerator"
+	}
+	sym := c.b.Globals.Symbols.Get(name)
 	if sym == nil || sym.Flags&binder.Interface == 0 {
 		return c.unanswered
 	}
@@ -2264,7 +2603,10 @@ func (c *Checker) generatorReturn(body *ast.BlockStatement) *Type {
 			case n.Delegate:
 				t = c.iteratedType(c.TypeOf(n.Argument))
 			default:
-				t = c.TypeOf(n.Argument) // tsc keeps a yield's literal type
+				t = c.TypeOf(n.Argument)
+				if async && !c.Unanswered(t) {
+					t = c.awaited(t, 0)
+				}
 			}
 			if c.Unanswered(t) {
 				unknown = true
@@ -2279,11 +2621,16 @@ func (c *Checker) generatorReturn(body *ast.BlockStatement) *Type {
 	}
 	y := c.neverT
 	if len(ys) > 0 {
-		y = c.in.union(ys...)
+		// A lone literal widens, a union of them stays (tsc's
+		// getWidenedLiteralLikeTypeForContextualIterationTypeIfNeeded).
+		y = c.widenUnit(c.in.union(ys...))
 	}
 	r := c.returnType(body, nil)
 	if c.Unanswered(r) {
 		return r
+	}
+	if async && r.Flags&Void == 0 {
+		r = c.awaited(r, 0)
 	}
 	return c.interfaceOf(sym, []*Type{y, r, c.unknownT})
 }
@@ -2291,18 +2638,59 @@ func (c *Checker) generatorReturn(body *ast.BlockStatement) *Type {
 // iteratedType is the element type `yield*` and spread take from t: an
 // array's element, a string's characters, a builtin iterator's or
 // generator's first type argument; unanswered for anything else.
+// IteratedType is what iterating a value of type t yields, or nil.
+func (c *Checker) IteratedType(t *Type) *Type { return c.iteratedType(t) }
+
 func (c *Checker) iteratedType(t *Type) *Type {
 	switch {
 	case c.Unanswered(t):
 		return t
+	case t.Flags&Any != 0:
+		return c.anyT
 	case isStringLike(t):
 		return c.strT
 	case t.Flags&Object != 0 && t.Kind == Array:
 		return t.Elem
-	case t.Flags&Object != 0 && t.Kind == Interface && t.Symbol != nil && len(t.TypeArgs) > 0 && c.inLibrary(t.Symbol.Scope):
+	case t.Flags&Object != 0 && t.Kind == Tuple && len(t.Elems) > 0:
+		return c.in.union(t.Elems...)
+	case t.Flags&Object != 0 && t.Kind == Interface && t.Symbol != nil && c.inLibrary(t.Symbol.Scope):
 		switch t.Symbol.Name {
-		case "Generator", "IteratorObject", "ArrayIterator", "MapIterator", "SetIterator", "IterableIterator":
-			return t.TypeArgs[0]
+		case "Generator", "IteratorObject", "ArrayIterator", "MapIterator", "SetIterator", "IterableIterator",
+			"AsyncGenerator", "AsyncIterable", "AsyncIterableIterator", "AsyncIteratorObject", "Set", "ReadonlySet",
+			"Array", "ReadonlyArray":
+			if len(t.TypeArgs) > 0 {
+				return t.TypeArgs[0]
+			}
+		case "Map", "ReadonlyMap":
+			// An entry: `[K, V]`.
+			if len(t.TypeArgs) == 2 {
+				return c.in.tuple([]*Type{t.TypeArgs[0], t.TypeArgs[1]})
+			}
+		case "Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array",
+			"Float16Array", "Float32Array", "Float64Array":
+			return c.numT
+		case "BigInt64Array", "BigUint64Array":
+			return c.bigintT
+		}
+	}
+	// A subclass of a builtin collection (`class Pos extends Array<number>`)
+	// iterates as its base does.
+	if t.Flags&Object != 0 && t.Kind == Instance && t.Base != nil && c.iterDepth < 4 {
+		c.iterDepth++
+		bt := c.iteratedType(t.Base)
+		c.iterDepth--
+		if !c.Unanswered(bt) && bt.Flags&Any == 0 {
+			return bt
+		}
+	}
+	// An object with its own `[Symbol.iterator]` method (`{ *[Symbol.
+	// iterator]() { yield 1 } }`, a class declaring one): what the iterator
+	// it returns yields.
+	if t.Flags&Object != 0 && (t.Kind == Anonymous || t.Kind == Instance) && c.iterDepth < 4 {
+		if p := t.Prop("@@iterator"); p != nil && p.Type != nil && p.Type.Flags&Object != 0 && p.Type.Kind == Function && p.Type.Result != nil {
+			c.iterDepth++
+			defer func() { c.iterDepth-- }()
+			return c.iteratedType(p.Type.Result)
 		}
 	}
 	return c.unanswered
@@ -2318,4 +2706,230 @@ func isGeneratorFn(fn ast.Node) bool {
 		return f.IsGenerator && !f.IsAsync
 	}
 	return false
+}
+
+func isAsyncFn(fn ast.Node) bool {
+	switch f := fn.(type) {
+	case *ast.FunctionDeclaration:
+		return f.IsAsync && !f.IsGenerator
+	case *ast.FunctionExpression:
+		return f.IsAsync && !f.IsGenerator
+	case *ast.ArrowFunction:
+		return f.IsAsync
+	}
+	return false
+}
+
+func isAsyncGeneratorFn(fn ast.Node) bool {
+	switch f := fn.(type) {
+	case *ast.FunctionDeclaration:
+		return f.IsAsync && f.IsGenerator
+	case *ast.FunctionExpression:
+		return f.IsAsync && f.IsGenerator
+	}
+	return false
+}
+
+// promiseOf is the builtin Promise<t>, nil without the builtin declarations.
+func (c *Checker) promiseOf(t *Type) *Type {
+	if c.b.Globals == nil {
+		return nil
+	}
+	sym := c.b.Globals.Symbols.Get("Promise")
+	if sym == nil || sym.Flags&binder.Interface == 0 {
+		return nil
+	}
+	p := c.interfaceOf(sym, []*Type{t})
+	if p == nil || c.Unanswered(p) {
+		return nil
+	}
+	return p
+}
+
+// isUnannotatedFunction reports whether n is a function declaration or a
+// named function expression without a return annotation.
+func isUnannotatedFunction(n ast.Node) bool {
+	switch f := n.(type) {
+	case *ast.FunctionDeclaration:
+		return f.ReturnType == nil
+	case *ast.FunctionExpression:
+		return f.RetType == nil
+	}
+	return false
+}
+
+// iifeParam is an unannotated parameter's type when fn is called where it
+// is written (`function(a){...}(x)`): its argument's widened type, or any
+// past the last argument (tsc's getContextuallyTypedParameterType for an
+// immediately invoked function).
+func (c *Checker) iifeParam(fn ast.Node, i int, rest bool) *Type {
+	call, ok := c.parentOf(fn).(*ast.CallExpression)
+	if !ok || ast.Node(call.Callee) != fn || rest {
+		return nil
+	}
+	if i < len(call.Args) {
+		if _, spread := call.Args[i].(*ast.SpreadElement); spread {
+			return nil
+		}
+		// The argument's own context is this parameter (`(function (f)
+		// {…})(x => x)`): typing it from here re-enters, so that one stays
+		// unanswered.
+		if c.contextualizing[call] {
+			return nil
+		}
+		c.contextualizing[call] = true
+		defer delete(c.contextualizing, call)
+		return c.widenFrom(call.Args[i], c.TypeOf(call.Args[i]))
+	}
+	return c.anyT
+}
+
+// iifeOmitted reports whether fn is called where it is written with no
+// argument at parameter i.
+func (c *Checker) iifeOmitted(fn ast.Node, i int, rest bool) bool {
+	call, ok := c.parentOf(fn).(*ast.CallExpression)
+	return ok && ast.Node(call.Callee) == fn && !rest && i >= len(call.Args)
+}
+
+// reportReturnCycle reports TS7023 at each unannotated function whose
+// return type is being inferred on the cycle that re-entered sym (tsc
+// gives each one an any result).
+func (c *Checker) reportReturnCycle(sym *binder.Symbol) {
+	if c.opts.CompatJS() || c.ImplicitAnyVariables {
+		return
+	}
+	// tsc infers a return type when the function is called: a reference
+	// to it as a value (`return g`) types the function, not its result.
+	called := false
+	for i := len(c.resolveStack) - 1; i >= 0 && !called; i-- {
+		if s := c.resolveStack[i]; len(s.Declarations) == 1 {
+			called = c.callsWithin(s.Declarations[0].Node, sym)
+		}
+		if c.resolveStack[i] == sym {
+			break
+		}
+	}
+	if !called {
+		return
+	}
+	for i := len(c.resolveStack) - 1; i >= 0; i-- {
+		s := c.resolveStack[i]
+		if len(s.Declarations) == 1 && isUnannotatedFunction(s.Declarations[0].Node) {
+			if d := s.Declarations[0].Node; !c.implicitAnyReported[d] {
+				c.implicitAnyReported[d] = true
+				c.report(diag.ReturnImplicitAnyCycle, functionNamePos(d, s.Declarations[0].Pos), sourceName(s.Name))
+			}
+		}
+		if s == sym {
+			return
+		}
+	}
+}
+
+// functionNamePos is a function's name position, else pos.
+func functionNamePos(n ast.Node, pos ast.Pos) ast.Pos {
+	switch f := n.(type) {
+	case *ast.FunctionDeclaration:
+		if f.NamePos.Line > 0 {
+			return f.NamePos
+		}
+	case *ast.FunctionExpression:
+		if f.NamePos.Line > 0 {
+			return f.NamePos
+		}
+	}
+	return pos
+}
+
+// callsItself reports whether e is a call of the function fn by its own
+// name (`return f(n - 1)` in `function f`).
+func (c *Checker) callsItself(fn ast.Node, e ast.Expression) bool {
+	call, ok := e.(*ast.CallExpression)
+	if !ok {
+		return false
+	}
+	id, ok := call.Callee.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+	switch f := fn.(type) {
+	case *ast.FunctionDeclaration:
+		if f.Name == "" {
+			return false
+		}
+	case *ast.FunctionExpression:
+		if f.Name == "" {
+			return false
+		}
+	default:
+		return false
+	}
+	sym, _ := c.b.Resolve(id)
+	return sym != nil && len(sym.Declarations) > 0 && sym.Declarations[0].Node == fn
+}
+
+// callsWithin reports whether n contains a call of sym by name.
+func (c *Checker) callsWithin(n ast.Node, sym *binder.Symbol) bool {
+	found := false
+	ast.Inspect(n, func(x ast.Node) bool {
+		if found {
+			return false
+		}
+		if call, ok := x.(*ast.CallExpression); ok {
+			if id, ok := call.Callee.(*ast.Identifier); ok && id.Name == sym.Name {
+				if s, _ := c.b.Resolve(id); s == sym {
+					found = true
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// iteratorLike reports a generator annotation tsc accepts: any, or a
+// builtin iterator, iterable or generator interface.
+func (c *Checker) iteratorLike(t *Type) bool {
+	if t.Flags&(Any|Unknown) != 0 {
+		return true
+	}
+	if t.Flags&Object == 0 || t.Symbol == nil || !c.inLibrary(t.Symbol.Scope) {
+		return false
+	}
+	switch t.Symbol.Name {
+	case "Generator", "AsyncGenerator", "Iterator", "AsyncIterator", "Iterable", "AsyncIterable",
+		"IterableIterator", "AsyncIterableIterator", "IteratorObject", "AsyncIteratorObject":
+		return true
+	}
+	return false
+}
+
+// generatorOf is the builtin Generator<y, any, unknown> (AsyncGenerator when
+// async), nil without the builtin declarations.
+func (c *Checker) generatorOf(y *Type, async bool) *Type {
+	if c.b.Globals == nil {
+		return nil
+	}
+	name := "Generator"
+	if async {
+		name = "AsyncGenerator"
+	}
+	sym := c.b.Globals.Symbols.Get(name)
+	if sym == nil || sym.Flags&binder.Interface == 0 {
+		return nil
+	}
+	return c.interfaceOf(sym, []*Type{y, c.anyT, c.unknownT})
+}
+
+// withThisParam is signature fn with a method signature's leading `this: T`
+// parameter (`read?(this: H, size: number): void`), as TypeScript keeps it.
+func (c *Checker) withThisParam(fn *Type, this ast.TypeNode, scope *binder.Scope) *Type {
+	if this == nil || c.Unanswered(fn) || fn.Flags&Object == 0 || fn.Kind != Function {
+		return fn
+	}
+	tt := c.typeFromNode(this, scope)
+	if c.Unanswered(tt) || tt.Flags&Void != 0 {
+		return fn
+	}
+	return c.in.withThis(fn, tt)
 }

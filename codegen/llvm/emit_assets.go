@@ -6,65 +6,49 @@ import (
 	"KlainMainLang/ast"
 )
 
-// emit_assets.go — codegen for the klain:assets module (TDD-00142 Stage 7):
-// `embedDir(literalPath)` embeds a directory into the binary at compile time and
-// returns an EmbeddedAssets handle; `handle.get(path)` reads an embedded file's
-// bytes (an ArrayBuffer over the static blob, no copy).
+// emit_assets.go — klain:assets (TDD-00142 Stage 7) is lib/node/klain_assets.ts.
+// `embedDir(literalPath)` is its one intrinsic: the directory is read at compile
+// time (EmbeddedBlobs packs it), so the call site links the blob, hands it to
+// the runtime and makes the module's EmbeddedAssets over it.
 
-// emitAssetsModuleCall dispatches `assets__kml_builtin.<member>(...)`.
-func (e *Emitter) emitAssetsModuleCall(member string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	switch member {
-	case "embedDir":
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: embedDir(path) takes one argument", pos.Line, pos.Col)
-		}
-		path, ok := staticStringValue(args[0])
-		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: embedDir's path must be a string literal (it is read at compile time)", pos.Line, pos.Col)
-		}
-		sym := e.requireEmbed(path)
-		e.ensureEmbedSymbol(sym)
-		e.ensureEmbedAssetsRuntime()
-		return Value{Ref: "@" + sym, Ty: EmbeddedAssetsType()}, nil
+func init() {
+	intrinsics["klain:assets.embedDir"] = intrinsic{
+		emit: (*Emitter).emitEmbedDir,
+		ty: func(e *Emitter, ex *ast.CallExpression) Type {
+			if m, ok := e.libExports["klain_assets:_kmlEmbedded"]; ok {
+				return e.inferExprType(ast.NewCallExpression(ast.NewIdentifier(m, ex.GetPos()), nil, ex.GetPos()))
+			}
+			return TypePtr
+		},
 	}
-	return Value{}, fmt.Errorf("%d:%d: klain:assets has no member '%s'", pos.Line, pos.Col, member)
 }
 
-// emitEmbeddedAssetsMethod dispatches a method on an EmbeddedAssets handle.
-func (e *Emitter) emitEmbeddedAssetsMethod(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	blob, err := e.emitExpr(objExpr)
-	if err != nil {
-		return Value{}, err
+// emitEmbedDir links the literal directory's blob and returns its
+// EmbeddedAssets.
+func (e *Emitter) emitEmbedDir(ex *ast.CallExpression) (Value, error) {
+	pos := ex.GetPos()
+	if len(ex.Args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: embedDir(path) takes one argument", pos.Line, pos.Col)
 	}
-	switch method {
-	case "get":
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: EmbeddedAssets.get(path) takes one argument", pos.Line, pos.Col)
-		}
-		pathV, err := e.emitExpr(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		e.ensureEmbedAssetsRuntime()
-		e.ensureStrlen()
-		e.ensureMalloc()
-		plen := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", plen, pathV.Ref))
-		outLen := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", outLen))
-		data := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_embed_get(ptr %s, ptr %s, i64 %s, ptr %s)", data, blob.Ref, pathV.Ref, plen, outLen))
-		lenLd := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenLd, outLen))
-		// ArrayBuffer header { i64 len, ptr data } over the static bytes (no copy;
-		// a miss yields length 0 / null data — check byteLength).
-		hdr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdr))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenLd, hdr))
-		dataSlot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, hdr))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", data, dataSlot))
-		return Value{Ref: hdr, Ty: ArrayBufferType()}, nil
+	path, ok := staticStringValue(ex.Args[0])
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: embedDir's path must be a string literal (it is read at compile time)", pos.Line, pos.Col)
 	}
-	return Value{}, fmt.Errorf("%d:%d: EmbeddedAssets has no method '%s'", pos.Line, pos.Col, method)
+	m, ok := e.libExports["klain_assets:_kmlEmbedded"]
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: internal error: klain:assets is not linked", pos.Line, pos.Col)
+	}
+	sym := e.requireEmbed(path)
+	e.ensureEmbedSymbol(sym)
+	e.ensureAssetsNatives()
+	e.declareFn("__kml_embed_push", "declare void @__kml_embed_push(ptr)")
+	e.emitInstr(fmt.Sprintf("call void @__kml_embed_push(ptr @%s)", sym))
+	return e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(m, pos), nil, pos))
+}
+
+// ensureAssetsNatives links the embedded-asset runtime: the `@link assets`
+// of lib/native.d.ts.
+func (e *Emitter) ensureAssetsNatives() {
+	e.usedEmbeddedAssets = true
+	e.ensureEmbedAssetsRuntime()
 }

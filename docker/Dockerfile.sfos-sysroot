@@ -32,7 +32,8 @@ FROM ghcr.io/sailfishos-open/docker-sailfishos-builder-aarch64:${SFOS_RELEASE}
 # qt5-qtcore/gui/declarative + the split-out qtquick module (Sailfish packages
 # QtQuick separately from QtQml), plus the Gecko/embedlite webview stack. These
 # pull their runtime counterparts as dependencies, so the exported tree has both
-# headers and the matching shared libraries.
+# headers and the matching shared libraries. The runtime's own C libraries
+# (curl, pcre2, nghttp2, OpenSSL, SQLite) come from Jolla's repos the same way.
 RUN zypper --non-interactive --gpg-auto-import-keys refresh \
  && zypper --non-interactive install -y \
       qt5-qtcore-devel \
@@ -41,4 +42,39 @@ RUN zypper --non-interactive --gpg-auto-import-keys refresh \
       qt5-qtdeclarative-qtquick-devel \
       qtmozembed-qt5-devel \
       sailfish-components-webview-qt5-devel \
+      libcurl-devel \
+      pcre2-devel \
+      libnghttp2-devel \
+      openssl-devel \
+      sqlite-devel \
+ && zypper clean --all
+
+# libuv (every program's event loop) and libtommath (BigInt). Sailfish neither
+# packages nor ships them, so each is built here from a pinned release as a
+# static archive only (no .so): `-luv`/`-ltommath` then resolve to the
+# archives and the program carries them itself, needing nothing extra on the
+# device.
+ARG LIBUV_VERSION=1.51.0
+ADD https://dist.libuv.org/dist/v${LIBUV_VERSION}/libuv-v${LIBUV_VERSION}.tar.gz /tmp/libuv.tar.gz
+RUN zypper --non-interactive install -y cmake \
+ && mkdir /tmp/libuv && tar -C /tmp/libuv --strip-components=1 -xzf /tmp/libuv.tar.gz \
+ && cmake -S /tmp/libuv -B /tmp/libuv/build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DLIBUV_BUILD_SHARED=OFF \
+      -DLIBUV_BUILD_TESTS=OFF -DLIBUV_BUILD_BENCH=OFF \
+      -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib64 \
+ && cmake --build /tmp/libuv/build -j"$(nproc)" \
+ && cmake --install /tmp/libuv/build \
+ && rm -rf /tmp/libuv /tmp/libuv.tar.gz \
+ && zypper clean --all
+
+ARG LIBTOMMATH_VERSION=1.3.0
+ADD https://github.com/libtom/libtommath/releases/download/v${LIBTOMMATH_VERSION}/ltm-${LIBTOMMATH_VERSION}.tar.xz /tmp/ltm.tar.xz
+RUN zypper --non-interactive install -y cmake \
+ && mkdir /tmp/ltm && tar -C /tmp/ltm --strip-components=1 -xJf /tmp/ltm.tar.xz \
+ && cmake -S /tmp/ltm -B /tmp/ltm/build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DBUILD_SHARED_LIBS=OFF \
+      -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib64 \
+ && cmake --build /tmp/ltm/build -j"$(nproc)" \
+ && cmake --install /tmp/ltm/build \
+ && rm -rf /tmp/ltm /tmp/ltm.tar.xz \
  && zypper clean --all

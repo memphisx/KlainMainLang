@@ -134,29 +134,37 @@ func (e *Emitter) emitHostToPrimFinalize() {
 	e.functions.WriteString("\ndefine i64 @__kml_host_toprim(i64 %v, i8 %hint) {\nentry:\n  ret i64 %v\n}\n")
 }
 
-// hostToPrimFn generates h's primitive conversion (a Date's), or "" for a
-// host class without one.
+// hostToPrimFn generates h's primitive conversion (a Date's, a RegExp's),
+// or "" for a host class without one.
 func (e *Emitter) hostToPrimFn(h hostLayout) string {
-	if h.class != "Date" {
+	if h.class != "Date" && h.class != "RegExp" {
 		return ""
 	}
 	restore := e.beginDetachedFunc()
 	t := e.emitHostCellLoad("%cell", h.ty)
-	isNum := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %%hint, %d", isNum, hintNumber))
-	numL, strL := e.freshLabel("date.prim.num"), e.freshLabel("date.prim.str")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNum, numL, strL))
-	e.emitLabel(numL)
-	d := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", d, t))
-	e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbEncodeDouble(d)))
-	e.emitLabel(strL)
-	s, err := e.emitDateOrInvalid(Value{Ref: t, Ty: h.ty}, e.emitDateToString)
-	if err != nil {
-		e.emitTerminator("ret i64 %v")
+	if h.class == "RegExp" {
+		// Its valueOf is the object itself: every hint takes its toString
+		// (`/a+b/g`), which reaches a class extending RegExp's body too.
+		if s, err := e.emitValueToString(Value{Ref: t, Ty: h.ty}); err == nil && !e.blockDone {
+			bx, _ := e.emitBoxValue(s)
+			e.emitTerminator(fmt.Sprintf("ret i64 %s", bx.Ref))
+		}
 	} else {
-		bx, _ := e.emitBoxValue(s)
-		e.emitTerminator(fmt.Sprintf("ret i64 %s", bx.Ref))
+		t = e.emitDateTimeValue(Value{Ref: t, Ty: h.ty})
+		isNum := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %%hint, %d", isNum, hintNumber))
+		numL, strL := e.freshLabel("date.prim.num"), e.freshLabel("date.prim.str")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNum, numL, strL))
+		e.emitLabel(numL)
+		e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbEncodeDouble(e.emitDateTimeNumber(t).Ref)))
+		e.emitLabel(strL)
+		if s, err := e.emitDateOrInvalid(Value{Ref: t, Ty: TypeI64}, e.emitDateToString); err == nil && !e.blockDone {
+			bx, _ := e.emitBoxValue(s)
+			e.emitTerminator(fmt.Sprintf("ret i64 %s", bx.Ref))
+		}
+	}
+	if !e.blockDone {
+		e.emitTerminator("ret i64 %v")
 	}
 	body := e.allocas.String() + e.body.String()
 	restore()

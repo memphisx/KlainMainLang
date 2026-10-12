@@ -5,6 +5,10 @@
 //	bits 32..46  kmlHdrMagic, marking a header written by this scheme
 //	bit  47      symbolTypeIDFlag (a Symbol, ADR-01059)
 //	bit  48      errorTypeIDFlag (an Error; the low bits are its kind/TagID)
+//	bit  49      hostTypeIDFlag (a host value boxed into `any`)
+//	bit  50      hostInlineFlag (with bit 49: the header of a host body that
+//	             follows it, a Map's or a Set's, rather than of a two-word
+//	             cell holding a handle; TDD-00247)
 //
 // A class instance's header is its TagID (which carries the magic), an
 // object literal's the id its layout was registered under. A header with
@@ -13,6 +17,7 @@
 package llvm
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"hash/fnv"
 	"strings"
@@ -79,25 +84,56 @@ func (e *Emitter) classTypeID(name string) int64 {
 // storage, plus the flags that change how it reads (a tuple renders as an
 // array).
 func layoutKey(t Type) string {
+	return layoutKeyMemo(t, map[*Field]string{})
+}
+
+func layoutFieldKey(t Type) string {
+	return layoutFieldKeyMemo(t, map[*Field]string{})
+}
+
+// layoutKeyMemo is layoutKey with the keys of the object types already
+// rendered in this call, by their field slice: copies of one type share it,
+// and a type that reaches the same nested type along many paths (a generic
+// interface instantiated inside itself) would otherwise render it once per
+// path, exponentially in the nesting depth.
+func layoutKeyMemo(t Type, memo map[*Field]string) string {
+	fs := t.UserFields()
+	var id *Field
+	if len(fs) > 0 {
+		id = &fs[0]
+		if k, ok := memo[id]; ok && !t.IsTuple {
+			return k
+		}
+	}
 	var b strings.Builder
 	if t.IsTuple {
 		b.WriteString("T|")
 	}
-	for _, f := range t.UserFields() {
+	for _, f := range fs {
 		b.WriteString(f.Name)
 		b.WriteByte(':')
-		b.WriteString(layoutFieldKey(f.Ty))
+		b.WriteString(layoutFieldKeyMemo(f.Ty, memo))
 		b.WriteByte(';')
 	}
-	return b.String()
+	k := b.String()
+	if id != nil && !t.IsTuple {
+		memo[id] = k
+	}
+	return k
 }
 
-func layoutFieldKey(t Type) string {
+func layoutFieldKeyMemo(t Type, memo map[*Field]string) string {
 	switch {
 	case t.IsArray && t.ElemType != nil:
-		return "[" + layoutFieldKey(*t.ElemType) + "]"
+		return "[" + layoutFieldKeyMemo(*t.ElemType, memo) + "]"
 	case t.IsObject && !t.IsClass:
-		return "{" + layoutKey(t) + "}"
+		k := layoutKeyMemo(t, memo)
+		if len(k) > 128 {
+			// A nested layout is named by its digest past a short length:
+			// a type nested in itself many times spells out exponentially.
+			k = fmt.Sprintf("#%x", sha256.Sum256([]byte(k)))
+		}
+		return "{" + k + "}"
 	case t.IsClass:
 		return "C" + t.ClassName
 	}
@@ -110,7 +146,17 @@ func layoutFieldKey(t Type) string {
 	case t.IsDynamicObject:
 		kind = "D"
 	case t.IsFunc:
-		kind = "F"
+		// A function member's signature is part of the layout: a box's
+		// method adapter calls it with its own parameters' types.
+		var ps []string
+		for _, p := range t.FuncParams {
+			ps = append(ps, layoutFieldKeyMemo(p, memo))
+		}
+		ret := ""
+		if t.FuncRetType != nil {
+			ret = layoutFieldKeyMemo(*t.FuncRetType, memo)
+		}
+		kind = "F(" + strings.Join(ps, ",") + ")" + ret + fmt.Sprint(t.FuncHasRest)
 	case t.IsPromise:
 		kind = "P"
 	case isStringTy(t):

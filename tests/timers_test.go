@@ -247,3 +247,26 @@ const d = setTimeout(() => console.log("closed fired"), 5)
 console.log(d.close() === d)
 `, "true true true false true\ntrue true false\ntrue\nimm\nfire 1\nfire 2")
 }
+
+// TDD-00245: timers are Node's own objects and lists. A Timeout and an
+// Immediate are objects; `+timeout` is its id, which clearTimeout takes; an
+// immediate scheduled from an I/O callback runs in the check phase, before a
+// 0 ms timeout; a fired timer is no longer referenced.
+func TestE2ETimersNodeObjectsAndPhases(t *testing.T) {
+	src := `
+import fs from 'fs'
+fs.readFile('/etc/hosts', () => {
+  setTimeout(() => console.log('timeout'), 0)
+  setImmediate(() => console.log('immediate'))
+})
+const t = setTimeout(() => console.log('never'), 50)
+const id = +t
+console.log(typeof t, typeof id, t.hasRef())
+clearTimeout(id)
+const u = setTimeout(() => { console.log('fired', u.hasRef()) }, 5)
+setTimeout(() => console.log('after', u.hasRef()), 10)
+const im = setImmediate(() => console.log('imm'))
+console.log(typeof im, im.hasRef(), im.unref().hasRef())
+`
+	assertOutputImports(t, src, "object number true\nobject true false\nimm\nimmediate\ntimeout\nfired true\nafter true")
+}

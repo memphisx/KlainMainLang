@@ -168,36 +168,6 @@ entry:
 		fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_next_deadline_ns() {\nentry:\n  ret i64 0\n}\n", h)
 		return
 	}
-	// Earliest pending entry of the timer queue ({ id, fireAtNs, intervalMs,
-	// closure }, intervalMs == -1 means cancelled/done — emit_timers.go).
-	fmt.Fprintf(out, `define i64 @__kml_dynmod_%s_next_deadline_ns() {
-entry:
-  %%len = load i64, ptr @__kml_timer_len, align 8
-  %%data = load ptr, ptr @__kml_timer_data, align 8
-  br label %%loop
-loop:
-  %%i = phi i64 [ 0, %%entry ], [ %%inext, %%next ]
-  %%best = phi i64 [ 0, %%entry ], [ %%best2, %%next ]
-  %%inb = icmp slt i64 %%i, %%len
-  br i1 %%inb, label %%body, label %%done
-body:
-  %%slot = getelementptr { i64, i64, i64, ptr }, ptr %%data, i64 %%i
-  %%iv_p = getelementptr { i64, i64, i64, ptr }, ptr %%slot, i32 0, i32 2
-  %%iv = load i64, ptr %%iv_p, align 8
-  %%live = icmp ne i64 %%iv, -1
-  %%fa_p = getelementptr { i64, i64, i64, ptr }, ptr %%slot, i32 0, i32 1
-  %%fa = load i64, ptr %%fa_p, align 8
-  %%none = icmp eq i64 %%best, 0
-  %%sooner = icmp slt i64 %%fa, %%best
-  %%take0 = or i1 %%none, %%sooner
-  %%take = and i1 %%live, %%take0
-  %%best2 = select i1 %%take, i64 %%fa, i64 %%best
-  br label %%next
-next:
-  %%inext = add i64 %%i, 1
-  br label %%loop
-done:
-  ret i64 %%best
-}
-`, h)
+	// The earliest pending entry of the timer queue (timers.c).
+	fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_next_deadline_ns() {\nentry:\n  %%d = call i64 @__kml_timer_next_deadline_ns()\n  ret i64 %%d\n}\n", h)
 }

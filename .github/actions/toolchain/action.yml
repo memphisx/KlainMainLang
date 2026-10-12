@@ -33,16 +33,16 @@ runs:
       with:
         node-version: '24.19.0'
 
-    - name: Linux — clang + curl, gc, tommath, pcre2, ssl, nghttp2, sqlite3, gtk3/webkit2gtk
+    - name: Linux — clang + curl, gc, tommath, pcre2, ssl, nghttp2, libuv, sqlite3, gtk3/webkit2gtk
       if: inputs.goos == 'linux'
       shell: bash
-      run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev libsqlite3-dev libgtk-3-dev libwebkit2gtk-4.1-dev
+      run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev libuv1-dev libc-ares-dev libsqlite3-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 
-    - name: macOS — Homebrew pcre2, tommath, openssl@3, nghttp2, bdw-gc (keg-only openssl@3 exposed to clang)
+    - name: macOS — Homebrew pcre2, tommath, openssl@3, nghttp2, libuv, bdw-gc (keg-only openssl@3 exposed to clang)
       if: inputs.goos == 'darwin'
       shell: bash
       run: |
-        brew install pcre2 libtommath openssl@3 nghttp2 bdw-gc
+        brew install pcre2 libtommath openssl@3 nghttp2 libuv c-ares bdw-gc
         prefix="$(brew --prefix)"
         ssl="$(brew --prefix openssl@3)"
         echo "PKG_CONFIG_PATH=$ssl/lib/pkgconfig:$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
@@ -67,6 +67,8 @@ runs:
           mingw-w64-ucrt-x86_64-libtommath
           mingw-w64-ucrt-x86_64-openssl
           mingw-w64-ucrt-x86_64-nghttp2
+          mingw-w64-ucrt-x86_64-libuv
+          mingw-w64-ucrt-x86_64-c-ares
           mingw-w64-ucrt-x86_64-gc
           mingw-w64-ucrt-x86_64-zlib
           mingw-w64-ucrt-x86_64-webview2-loader

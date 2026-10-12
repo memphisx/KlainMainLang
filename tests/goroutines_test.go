@@ -342,12 +342,12 @@ func TestGoRejectsNonFunction(t *testing.T) {
 	syncCompileError(t, `
 import { go } from 'klain:sync';
 go(42);
-`, "must be a function")
+`, "not assignable to parameter of type '() => void'")
 }
 
 func TestGoRejectsParameterizedFunction(t *testing.T) {
 	syncCompileError(t, `
 import { go } from 'klain:sync';
 go((x: number) => { console.log(x); });
-`, "must take no parameters")
+`, "not assignable to parameter of type '() => void'")
 }

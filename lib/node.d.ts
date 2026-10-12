@@ -76,6 +76,7 @@ interface BufferConstructor {
     compare(buf1: Uint8Array, buf2: Uint8Array): -1 | 0 | 1;
     poolSize: number;
 }
+/** @lowerType buffer */
 interface Buffer<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> extends Uint8Array<TArrayBuffer> {
     /** @intrinsic TypedArray.prototype.subarray */
     slice(start?: number, end?: number): Buffer<ArrayBuffer>;
@@ -517,26 +518,18 @@ declare namespace NodeJS {
         path?: string | undefined;
         syscall?: string | undefined;
     }
-    // A timer handle (@types/node's timers.d.ts), whose value is the
-    // timer's id.
+    // A timer handle (@types/node's timers.d.ts): Node's Timeout and
+    // Immediate, lib/node/internal_timers.ts's classes.
     interface Timeout {
-        /** @intrinsic Timeout.prototype.ref */
         ref(): this;
-        /** @intrinsic Timeout.prototype.unref */
         unref(): this;
-        /** @intrinsic Timeout.prototype.hasRef */
         hasRef(): boolean;
-        /** @intrinsic Timeout.prototype.refresh */
         refresh(): this;
-        /** @intrinsic Timeout.prototype.close */
         close(): this;
     }
     interface Immediate {
-        /** @intrinsic Immediate.prototype.ref */
         ref(): this;
-        /** @intrinsic Immediate.prototype.unref */
         unref(): this;
-        /** @intrinsic Immediate.prototype.hasRef */
         hasRef(): boolean;
     }
 }
@@ -544,23 +537,23 @@ declare namespace NodeJS {
 declare var process: NodeJS.Process;
 
 // Node's timers (@types/node's timers.d.ts globals).
-/** @intrinsic setTimeout */
+/** @lower __kml_setTimeout */
 declare function setTimeout<TArgs extends any[]>(callback: (...args: TArgs) => void, delay?: number, ...args: TArgs): NodeJS.Timeout;
-/** @intrinsic setTimeout */
+/** @lower __kml_setTimeout */
 declare function setTimeout(callback: (_: void) => void, delay?: number): NodeJS.Timeout;
-/** @intrinsic setInterval */
+/** @lower __kml_setInterval */
 declare function setInterval<TArgs extends any[]>(callback: (...args: TArgs) => void, delay?: number, ...args: TArgs): NodeJS.Timeout;
-/** @intrinsic setInterval */
+/** @lower __kml_setInterval */
 declare function setInterval(callback: (_: void) => void, delay?: number): NodeJS.Timeout;
-/** @intrinsic setImmediate */
+/** @lower __kml_setImmediate */
 declare function setImmediate<TArgs extends any[]>(callback: (...args: TArgs) => void, ...args: TArgs): NodeJS.Immediate;
-/** @intrinsic setImmediate */
+/** @lower __kml_setImmediate */
 declare function setImmediate(callback: (_: void) => void): NodeJS.Immediate;
-/** @intrinsic clearTimeout */
+/** @lower __kml_clearTimeout */
 declare function clearTimeout(timeout: NodeJS.Timeout | string | number | undefined): void;
-/** @intrinsic clearInterval */
+/** @lower __kml_clearInterval */
 declare function clearInterval(timeout: NodeJS.Timeout | string | number | undefined): void;
-/** @intrinsic clearImmediate */
+/** @lower __kml_clearImmediate */
 declare function clearImmediate(immediate: NodeJS.Immediate | undefined): void;
 /** @intrinsic queueMicrotask */
 declare function queueMicrotask(callback: () => void): void;
@@ -669,6 +662,7 @@ interface RequestInit {
     signal?: AbortSignal | null;
     window?: null;
 }
+/** @lowerType request */
 interface Request extends Body {
     readonly cache: RequestCache;
     readonly credentials: RequestCredentials;
@@ -694,6 +688,7 @@ interface ResponseInit {
     status?: number;
     statusText?: string;
 }
+/** @lowerType response */
 interface Response extends Body {
     readonly headers: Headers;
     readonly ok: boolean;
@@ -837,6 +832,7 @@ type ReadableStreamReadResult<T> = ReadableStreamReadValueResult<T> | ReadableSt
 interface ReadableStreamAsyncIterator<T> extends AsyncIterableIterator<T> {
     [Symbol.asyncIterator](): ReadableStreamAsyncIterator<T>;
 }
+/** @lowerType readablestream */
 interface ReadableStream<R = any> {
     readonly locked: boolean;
     /** @intrinsic ReadableStream.prototype.cancel */
@@ -865,6 +861,7 @@ interface ReadableStreamGenericReader {
     /** @intrinsic ReadableStreamGenericReader.prototype.cancel */
     cancel(reason?: any): Promise<void>;
 }
+/** @lowerType readablestreamdefaultreader */
 interface ReadableStreamDefaultReader<R = any> extends ReadableStreamGenericReader {
     /** @intrinsic ReadableStreamDefaultReader.prototype.read */
     read(): Promise<ReadableStreamReadResult<R>>;
@@ -875,6 +872,7 @@ declare var ReadableStreamDefaultReader: {
     prototype: ReadableStreamDefaultReader;
     new <R = any>(stream: ReadableStream<R>): ReadableStreamDefaultReader<R>;
 };
+/** @lowerType readablestreamdefaultcontroller */
 interface ReadableStreamDefaultController<R = any> {
     readonly desiredSize: number | null;
     /** @intrinsic ReadableStreamDefaultController.prototype.close */
@@ -888,6 +886,7 @@ declare var ReadableStreamDefaultController: {
     prototype: ReadableStreamDefaultController;
     new (): ReadableStreamDefaultController;
 };
+/** @lowerType writablestream */
 interface WritableStream<W = any> {
     readonly locked: boolean;
     /** @intrinsic WritableStream.prototype.abort */
@@ -901,6 +900,7 @@ declare var WritableStream: {
     prototype: WritableStream;
     new <W = any>(underlyingSink?: UnderlyingSink<W>, strategy?: QueuingStrategy<W>): WritableStream<W>;
 };
+/** @lowerType writablestreamdefaultwriter */
 interface WritableStreamDefaultWriter<W = any> {
     readonly closed: Promise<void>;
     readonly desiredSize: number | null;
@@ -918,6 +918,7 @@ declare var WritableStreamDefaultWriter: {
     prototype: WritableStreamDefaultWriter;
     new <W = any>(stream: WritableStream<W>): WritableStreamDefaultWriter<W>;
 };
+/** @lowerType writablestreamdefaultcontroller */
 interface WritableStreamDefaultController {
     readonly signal: AbortSignal;
     /** @intrinsic WritableStreamDefaultController.prototype.error */
@@ -927,6 +928,7 @@ declare var WritableStreamDefaultController: {
     prototype: WritableStreamDefaultController;
     new (): WritableStreamDefaultController;
 };
+/** @lowerType transformstream */
 interface TransformStream<I = any, O = any> {
     readonly readable: ReadableStream<O>;
     readonly writable: WritableStream<I>;
@@ -977,6 +979,7 @@ interface XMLHttpRequestEventTarget {
     onload: () => void;
     onerror: () => void;
 }
+/** @lowerType xmlhttprequest */
 interface XMLHttpRequest extends XMLHttpRequestEventTarget {
     readonly readyState: number;
     readonly status: number;

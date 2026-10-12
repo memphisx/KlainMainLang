@@ -240,15 +240,61 @@ func bindParams(params []ast.Param, sc *scope, lu lookupTable) {
 	for _, p := range params {
 		switch {
 		case p.ArrayPattern != nil:
-			for _, elem := range p.ArrayPattern {
-				sc.bind(elem.Name)
-			}
+			bindArrayPattern(p.ArrayPattern, sc)
 		case p.ObjectPattern != nil:
-			for _, dp := range p.ObjectPattern {
-				sc.bind(dp.Local)
-			}
+			bindObjectPattern(p.ObjectPattern, sc)
 		default:
 			sc.bind(p.Name)
+		}
+	}
+}
+
+// bindArrayPattern / bindObjectPattern add every name a destructuring
+// pattern binds, nested patterns included, to the current scope frame.
+func bindArrayPattern(elems []ast.ArrayPatternElem, sc *scope) {
+	for _, el := range elems {
+		switch {
+		case el.SubArray != nil:
+			bindArrayPattern(el.SubArray, sc)
+		case el.SubObject != nil:
+			bindObjectPattern(el.SubObject, sc)
+		case el.Name != "":
+			sc.bind(el.Name)
+		}
+	}
+}
+
+// rewriteArrayPatternDefaults / rewriteObjectPatternDefaults rewrite every
+// `= expr` default in a pattern, nested patterns included.
+func rewriteArrayPatternDefaults(elems []ast.ArrayPatternElem, sc *scope, lu lookupTable) {
+	for i := range elems {
+		if d := elems[i].Default; d != nil {
+			elems[i].Default = rewriteExpr(d, sc, lu)
+		}
+		rewriteArrayPatternDefaults(elems[i].SubArray, sc, lu)
+		rewriteObjectPatternDefaults(elems[i].SubObject, sc, lu)
+	}
+}
+
+func rewriteObjectPatternDefaults(props []ast.DestructProp, sc *scope, lu lookupTable) {
+	for i := range props {
+		if d := props[i].Default; d != nil {
+			props[i].Default = rewriteExpr(d, sc, lu)
+		}
+		rewriteArrayPatternDefaults(props[i].SubArray, sc, lu)
+		rewriteObjectPatternDefaults(props[i].SubObject, sc, lu)
+	}
+}
+
+func bindObjectPattern(props []ast.DestructProp, sc *scope) {
+	for _, dp := range props {
+		switch {
+		case dp.SubArray != nil:
+			bindArrayPattern(dp.SubArray, sc)
+		case dp.SubObject != nil:
+			bindObjectPattern(dp.SubObject, sc)
+		case dp.Local != "":
+			sc.bind(dp.Local)
 		}
 	}
 }
@@ -371,6 +417,11 @@ func rewriteClassDeclIn(c *ast.ClassDeclaration, sc *scope, lu lookupTable) {
 		// rewritten to their mangled form, exactly like any other expression —
 		// omitting this left `static x = f()` (and property decorators) unable
 		// to resolve `f` at emit time.
+		if c.Fields[i].Key != nil {
+			if k, ok := rewriteExpr(c.Fields[i].Key, sc, lu).(*ast.Identifier); ok {
+				c.Fields[i].Key = k
+			}
+		}
 		if c.Fields[i].Initializer != nil {
 			c.Fields[i].Initializer = rewriteExpr(c.Fields[i].Initializer, sc, lu)
 		}
@@ -384,6 +435,11 @@ func rewriteClassDeclIn(c *ast.ClassDeclaration, sc *scope, lu lookupTable) {
 	for _, m := range c.Methods {
 		for di := range m.Decorators {
 			m.Decorators[di] = rewriteExpr(m.Decorators[di], sc, lu)
+		}
+		if m.Key != nil {
+			if k, ok := rewriteExpr(m.Key, sc, lu).(*ast.Identifier); ok {
+				m.Key = k
+			}
 		}
 		rewriteFunctionLike(m, sc, lu)
 	}
@@ -541,7 +597,13 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 	case *ast.ForOfStatement:
 		s.Iterable = rewriteExpr(s.Iterable, sc, lu)
 		sc.push()
-		sc.bind(s.VarName)
+		if s.VarName != "" {
+			sc.bind(s.VarName)
+		}
+		rewriteArrayPatternDefaults(s.ArrayPattern, sc, lu)
+		rewriteObjectPatternDefaults(s.ObjectPattern, sc, lu)
+		bindArrayPattern(s.ArrayPattern, sc)
+		bindObjectPattern(s.ObjectPattern, sc)
 		rewriteBlock(s.Body, sc, lu)
 		sc.pop()
 	case *ast.ForInStatement:
@@ -579,12 +641,8 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 			if s.Catch.Param != "" {
 				sc.bind(s.Catch.Param)
 			}
-			for i, dp := range s.Catch.ObjectPattern {
-				sc.bind(dp.Local)
-				if dp.Default != nil {
-					s.Catch.ObjectPattern[i].Default = rewriteExpr(dp.Default, sc, lu)
-				}
-			}
+			bindObjectPattern(s.Catch.ObjectPattern, sc)
+			rewriteObjectPatternDefaults(s.Catch.ObjectPattern, sc, lu)
 			rewriteBlock(s.Catch.Body, sc, lu)
 			sc.pop()
 		}
@@ -638,17 +696,6 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				// stream/web re-exports the ambient WHATWG stream constructors —
 				// identity, same as stream's class names.
 				if ref.Marker == "streamweb__kml_builtin" {
-					return ast.NewIdentifier(ref.Member, e.GetPos())
-				}
-				// klain:webview's Webview is a parse-time constructor — identity
-				// (TDD-00142), same as stream's class names.
-				if ref.Marker == "webview__kml_builtin" {
-					return ast.NewIdentifier(ref.Member, e.GetPos())
-				}
-				// klain:sync's Channel is a parse-time constructor — identity
-				// (TDD-00143). `go` is a function member and takes the marker
-				// member-expression route below.
-				if ref.Marker == "sync__kml_builtin" && ref.Member == "Channel" {
 					return ast.NewIdentifier(ref.Member, e.GetPos())
 				}
 				return ast.NewMemberExpression(ast.NewIdentifier(ref.Marker, e.GetPos()), ref.Member, e.GetPos())
@@ -815,6 +862,17 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 	case *ast.NewExpression:
 		constructed := e.ClassName
 		// `new ns.C()` through a namespace import: that module's C.
+		if e.Callee == nil && len(e.QualifierPath) > 1 && newPathIsValue(e.QualifierPath, sc, lu) {
+			// `new a.b.C()` rooted at a value (`new o.k.C()`, or a module's
+			// exported value, `new dns.promises.Resolver()`): the constructor
+			// is the member expression a.b.C.
+			var callee ast.Expression = ast.NewIdentifier(e.QualifierPath[0], e.GetPos())
+			for _, seg := range e.QualifierPath[1:] {
+				callee = ast.NewMemberExpression(callee, seg, e.GetPos())
+			}
+			e.Callee = ast.NewMemberExpression(callee, e.ClassName, e.GetPos())
+			e.ClassName, e.Qualified, e.Qualifier, e.QualifierPath = "", false, "", nil
+		}
 		if e.Callee != nil {
 			// `new <expression>()`: its names rename below.
 		} else if e.Qualified && e.Qualifier == "globalThis" && !sc.bound("globalThis") {
@@ -1021,6 +1079,14 @@ func rewriteTypeNode(n ast.TypeNode, sc *scope, lu lookupTable) {
 // by an array suffix — the suffix is baked directly into the Name string
 // rather than represented via ElemType, so a plain lu.names[ta.Name] lookup
 // would silently miss "Foo[]" even though "Foo" itself has a mangled name.
+// predefinedTypeNames are TypeScript's predefined type keywords: no program
+// can declare a type of the name, so a value binding of it (`const any =
+// …`) never renames the type.
+var predefinedTypeNames = map[string]bool{
+	"any": true, "unknown": true, "never": true, "void": true, "undefined": true, "null": true,
+	"number": true, "string": true, "boolean": true, "bigint": true, "symbol": true, "object": true,
+}
+
 func rewriteTypeName(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
 	name := ta.Name
 	suffix := ""
@@ -1035,7 +1101,7 @@ func rewriteTypeName(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
 			return
 		}
 	}
-	if sc.bound(name) {
+	if sc.bound(name) || len(ta.Qualifier) == 0 && predefinedTypeNames[name] {
 		return
 	}
 	// A library namespace's type (`NodeJS.Platform`) keeps its name: the last
@@ -1073,4 +1139,22 @@ func (lu lookupTable) resolveWorkerPath(lit *ast.StringLiteral) {
 func RenameInClass(c *ast.ClassDeclaration, old, new string) {
 	var reserved error
 	rewriteClassDecl(c, lookupTable{names: map[string]string{old: new}, reservedErr: &reserved})
+}
+
+// newPathIsValue reports whether a `new a.b.C()` path is rooted at a
+// value — a local, one of the file's own or imported bindings, or a value
+// an import namespace exports (`dns.promises`) — rather than a namespace,
+// whose classes are top-level declarations.
+func newPathIsValue(path []string, sc *scope, lu lookupTable) bool {
+	root := path[0]
+	if sc.bound(root) {
+		return true
+	}
+	if members, isNS := lu.ns[root]; isNS {
+		_, imported := lu.nsSource[root]
+		_, member := members[path[1]]
+		return imported && member
+	}
+	_, value := lu.names[root]
+	return value
 }

@@ -46,36 +46,16 @@ func (e *Emitter) ensureConsoleCountMap() {
 	e.emitGlobal("@__kml_console_count_map = internal thread_local global ptr null, align 8")
 }
 
-// ensureMapFree declares __kml_map_free: frees a Map<K,V>/Set<T>'s own two
-// backing buffers (the keys array and the values array, at fixed offsets 16
-// and 24 in the 32-byte map header — the same layout ensureMapStrHelpers/
-// ensureMapNumHelpers already create, shared identically by Set since a Set
-// is just a Map with unit values under the hood) and then the header
-// struct itself. Shallow: does NOT free the individual key/value entries
-// themselves (e.g. each string key's own buffer) — only the map's own
-// implementation-detail allocations, which the program has no other way to
-// reach and free itself.
+// ensureMapFree declares __kml_map_free (collections.c): frees a Map/Set's
+// own allocations, its keys, values and index arrays and its header and
+// body. Shallow: the entries' own allocations stay.
 func (e *Emitter) ensureMapFree() {
 	if e.usedMapFree {
 		return
 	}
 	e.usedMapFree = true
-	e.ensureFree()
-	e.emitGlobal(`
-define void @__kml_map_free(ptr %map) {
-entry:
-  %keys_p = getelementptr i8, ptr %map, i64 16
-  %keys = load ptr, ptr %keys_p, align 8
-  call void @free(ptr %keys)
-  %vals_p = getelementptr i8, ptr %map, i64 24
-  %vals = load ptr, ptr %vals_p, align 8
-  call void @free(ptr %vals)
-  %idx_p = getelementptr i8, ptr %map, i64 32
-  %idx = load ptr, ptr %idx_p, align 8
-  call void @free(ptr %idx)
-  call void @free(ptr %map)
-  ret void
-}`)
+	e.usedCollections = true
+	e.declareFn("__kml_map_free", "declare void @__kml_map_free(ptr)")
 }
 
 // ensureClosureFree declares __kml_closure_free: frees a closure's own two

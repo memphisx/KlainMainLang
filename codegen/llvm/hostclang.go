@@ -234,7 +234,7 @@ func lldAvailable() bool {
 // program that uses them is still a single self-contained .exe — the point of a
 // terminal/CLI binary. pcre2 (the RegExp engine) is a lone self-contained archive;
 // curl expands to a whole dependency chain instead (winCurlStaticChain). ADR-00771/00772.
-var winStaticFeatureLibs = map[string]bool{"pcre2-8": true}
+var winStaticFeatureLibs = map[string]bool{"pcre2-8": true, "cares": true}
 
 // winCurlStaticChain is the full static link chain for libcurl on the ucrt64
 // mingw sysroot, so a `fetch`/`http`/`tls`/WebSocket program is a single
@@ -340,14 +340,12 @@ func (tc Toolchain) Args() []string {
 		}
 		return args
 	}
-	if runtime.GOOS == "darwin" {
-		// Apple clang 21 (macOS 27) warns that it overrides the module triple
-		// for every textual-IR input, even one stamping its own canonical
-		// triple verbatim; the host triple is the intended one.
-		return []string{"-Wno-override-module"}
-	}
 	if runtime.GOOS != "windows" {
-		return nil
+		// clang warns that it overrides the module triple whenever the IR's
+		// spelling differs from its own (Apple clang 21 for every textual-IR
+		// input; Linux clang 18 normalizes x86_64-unknown-linux-gnu to
+		// x86_64-pc-linux-gnu); the host triple is the intended one.
+		return []string{"-Wno-override-module"}
 	}
 	return []string{"--target=x86_64-w64-mingw32", "--sysroot=" + windowsSysroot()}
 }

@@ -118,21 +118,21 @@ inner()  // 2
 // --- Unannotated function/arrow function returning an object literal — the
 // caller can now access fields on the result without an explicit return type
 // on the callee (previously required one, or field access failed). ---
-function makePoint(x, y) { return { x: x, y: y } }
+function makePoint(x: number, y: number) { return { x: x, y: y } }
 const p4 = makePoint(3, 4)
 console.log(p4.x)  // 3
 console.log(p4.y)  // 4
 
-const makePoint2 = (x, y) => { return { x: x, y: y } }
+const makePoint2 = (x: number, y: number) => { return { x: x, y: y } }
 const p5 = makePoint2(5, 6)
 console.log(p5.x)  // 5
 console.log(p5.y)  // 6
 
-// --- Unannotated function returning a plain number, including recursively ---
-function addOne(n) { return n + 1 }
+// --- A function with no return annotation returning a number; a recursive one names its type ---
+function addOne(n: number) { return n + 1 }
 console.log(addOne(5))  // 6
 
-function factorial(n) {
+function factorial(n: number): number {
     if (n <= 1) { return 1 }
     return n * factorial(n - 1)
 }

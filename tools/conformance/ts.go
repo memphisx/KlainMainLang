@@ -64,7 +64,9 @@ type tsResult struct {
 	Blocker string // false-reject only: concrete identifier/character the case died on (see blockerOf)
 }
 
-func runTSSuite(workDir string, timeout time.Duration, compat string) {
+// passList, when set, receives each lane's verdicts (`case\tstatus`, sorted)
+// for a regression diff between two compilers.
+func runTSSuite(workDir string, timeout time.Duration, compat, passList string) {
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		fatal("creating workdir: %v", err)
 	}
@@ -107,6 +109,20 @@ func runTSSuite(workDir string, timeout time.Duration, compat string) {
 			fatal("writing TS report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "ts suite (lane=%s): %d cases, report written to %s\n", laneLabel(), len(results), out)
+		if passList != "" {
+			lines := make([]string, 0, len(results))
+			for _, r := range results {
+				lines = append(lines, r.Case+"\t"+r.Status)
+			}
+			sort.Strings(lines)
+			path := passList
+			if compat == "both" {
+				path += "." + laneLabel()
+			}
+			if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+				fatal("writing %s: %v", path, err)
+			}
+		}
 	}
 
 	if fl := os.Getenv("TS_FALSEREJECT"); fl != "" {

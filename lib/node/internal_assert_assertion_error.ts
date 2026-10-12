@@ -29,13 +29,13 @@ function hasCustomMessageDiff(operator: string): boolean {
 
 // util.inspect(val) with its defaults.
 export function inspect(val: unknown): string {
-    return __kml_native.inspectWith(val, 2, 3, 0, 80, 100);
+    return __kml_native.inspectWith(val, 2, 3, 0, 80, 100, 1);
 }
 
 function inspectValue(val: unknown): string {
     // The util.inspect default values could be changed. This makes sure the
     // error messages contain the necessary information nevertheless.
-    return __kml_native.inspectWith(val, 1000, 0, 1, 80, Infinity);
+    return __kml_native.inspectWith(val, 1000, 0, 1, 80, Infinity, 1);
 }
 
 // Node copies two compared errors without their stacks (copyError), so each

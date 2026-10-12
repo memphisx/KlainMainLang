@@ -344,6 +344,8 @@ func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Valu
 		return Value{}, err
 	}
 	switch {
+	case v.Ty.IsDate || e.isDateClass(v.Ty):
+		return e.emitUnaryPlus(v, pos) // its time value
 	case v.Ty.IsDynamic:
 		// Number(x: any) is ordinary typed TS, so it runs in both lanes:
 		// ToPrimitive(number) then ToNumber (ADR-01057). Checked before the

@@ -79,23 +79,23 @@ func (e *Emitter) emitBoxedErrorProbe(payloadReg string) (objPtr, isErr string) 
 // the kind name — it is "AbortError"/"TimeoutError"/etc. per construction site.
 var errorKinds = []string{"Error", "TypeError", "RangeError", "SyntaxError", "EvalError", "URIError", "ReferenceError", "DOMException", "AggregateError"}
 
-// aggregateErrorStructIR is AggregateError's extended runtime layout: the shared
-// 3-field errorObjType prefix (kind/message/name, byte-identical offsets so
-// .message/.name/kind reads work through errorObjType.StructIR() unchanged) plus
-// a trailing `{ errData ptr, errLen i64 }` carrying the aggregated errors array
-// (TDD-00083). Only an AggregateError is allocated at this size; every other
-// error stays the plain errorObjType, and `.errors` access (see
-// emitErrorErrorsAccess) is kind-guarded so those trailing fields are never read
-// on a non-aggregate object. The allocation is sized to the full errorObjType
-// (not just the 5 IR fields here) so that a bounds-safe (if non-meaningful)
-// read of any errorObjType field — code/errcode/errstr and now syscall/path/dest —
-// through errorObjType.StructIR() on an AggregateError stays inside the buffer.
-// Kept >= errorObjType.StructSize() (fourteen 8-byte fields = 112); bump this
-// in lockstep whenever a field is appended to errorObjType.
-const (
-	aggregateErrorStructIR   = "{ i64, ptr, ptr, ptr, i64 }"
-	aggregateErrorStructSize = 112
-)
+// An AggregateError is the shared Error layout (errorObjType) with the
+// aggregated errors array (TDD-00083) after it, as `{ data ptr, len i64 }`:
+// every Error field keeps its place, so the walkers that read an Error's
+// system fields (code, errno, …) see an AggregateError's as absent. Only an
+// AggregateError is allocated at this size; `.errors` access
+// (emitErrorErrorsAccess) is kind-guarded so the trailing pair is never read
+// on another error.
+func aggregateErrorStructIR() string {
+	ir := errorObjType.StructIR()
+	return ir[:len(ir)-2] + ", ptr, i64 }"
+}
+
+// aggregateErrorsIdx is the errors array's field in aggregateErrorStructIR,
+// its length the next one.
+func aggregateErrorsIdx() int { return len(splitIRFields(errorObjType.StructIR())) }
+
+func aggregateErrorStructSize() int64 { return errorObjType.StructSize() + 16 }
 
 // errorKindIDs maps a kind name to its errorKinds index, built once at
 // package init. Every case in parser_literals.go's parseNew Error-kind
@@ -209,10 +209,18 @@ func errorOptionalNumber(objTy Type, name string) bool {
 // change later (see ADR-00082's investigation for what happened before this
 // existed: some call sites still building the old 1-field shape).
 func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
+	return e.buildErrorObjSized(kindID, msgPtr, namePtr, errorObjType.StructSize())
+}
+
+// buildErrorObjSized is buildErrorObj allocating size bytes (an
+// AggregateError's layout extends the Error's).
+func (e *Emitter) buildErrorObjSized(kindID int64, msgPtr, namePtr string, size int64) string {
 	e.ensureExceptionHelpers()
 
 	dataReg := e.freshReg()
-	e.emitObjMallocInto(dataReg, errorObjType)
+	e.ensureMalloc()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, size))
+	e.emitStoreObjHeader(dataReg, errorObjType)
 
 	kindGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), dataReg))
@@ -332,14 +340,14 @@ func (e *Emitter) buildAggregateErrorObj(msgPtr, namePtr, dataPtr, lenRef string
 	// Allocate and default-fill through buildErrorObj (full errorObjType size,
 	// so a stray shared-field read — code/cause/… — is bounds-safe and
 	// well-defined), then overlay the aggregate's trailing { data, len } pair.
-	data := e.buildErrorObj(kindID, msgPtr, namePtr)
+	data := e.buildErrorObjSized(kindID, msgPtr, namePtr, aggregateErrorStructSize())
 	store := func(idx int, ty, ref string) {
 		gp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gp, aggregateErrorStructIR, data, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gp, aggregateErrorStructIR(), data, idx))
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ty, ref, gp))
 	}
-	store(3, "ptr", dataPtr)
-	store(4, "i64", lenRef)
+	store(aggregateErrorsIdx(), "ptr", dataPtr)
+	store(aggregateErrorsIdx()+1, "i64", lenRef)
 	return data
 }
 
@@ -444,9 +452,20 @@ func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 func (e *Emitter) emitNewAggregateError(ne *ast.NewErrorExpression) (Value, error) {
 	dataPtr, lenReg := "null", "0"
 	if ne.Errors != nil {
-		p, l, _, err := e.resolveArrayForHOF(ne.Errors, ne.GetPos())
+		p, l, elemTy, err := e.resolveArrayForHOF(ne.Errors, ne.GetPos())
 		if err != nil {
 			return Value{}, err
+		}
+		// `errors` is any[]: each element is held boxed.
+		if !isUnconstrainedDynamic(elemTy) {
+			e.ensureMalloc()
+			bytes, out := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, l))
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", out, bytes))
+			if err := e.emitSpreadBoxLoop(p, l, elemTy, out); err != nil {
+				return Value{}, err
+			}
+			p = out
 		}
 		dataPtr, lenReg = p, l
 	}
@@ -487,9 +506,9 @@ func (e *Emitter) emitErrorErrorsAccess(errPtr string) Value {
 	d := e.freshReg()
 	lp := e.freshReg()
 	l := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", dp, aggregateErrorStructIR, errPtr))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dp, aggregateErrorStructIR(), errPtr, aggregateErrorsIdx()))
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", d, dp))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", lp, aggregateErrorStructIR, errPtr))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", lp, aggregateErrorStructIR(), errPtr, aggregateErrorsIdx()+1))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", l, lp))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
@@ -505,7 +524,7 @@ func (e *Emitter) emitErrorErrorsAccess(errPtr string) Value {
 	a1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", a0, data))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %s, 1", a1, a0, length))
-	return Value{Ref: a1, Ty: ArrayOf(errorObjType)}
+	return Value{Ref: a1, Ty: ArrayOf(TypeAny)}
 }
 
 // errorPtrFromValue turns an evaluated throw / `.throw()` argument into an error

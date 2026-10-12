@@ -257,7 +257,7 @@ func (e *Emitter) emitArrayFindIndex(mem *ast.MemberExpression, args []ast.Expre
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -323,7 +323,7 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -399,7 +399,7 @@ func (e *Emitter) emitArrayFindLastIndex(mem *ast.MemberExpression, args []ast.E
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -486,9 +486,9 @@ func searchKind(t Type) string {
 		return "boolean"
 	case t.Float || t.IR == "i64" || t.IR == "i32" || t.IR == "i16" || t.IR == "i8":
 		return "number"
-	case isStringTy(t):
+	case isStringTy(t) && !hasHandleFlag(t):
 		return "string"
-	case t.IsObject || t.IsArray || t.IsFunc || t.IsClass:
+	case t.IsObject || t.IsArray || t.IsFunc || t.IsClass || t.IR == "ptr" && hasHandleFlag(t):
 		return "object"
 	}
 	return ""

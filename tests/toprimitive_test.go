@@ -203,3 +203,63 @@ func TestE2EToPrimitiveBitwiseObjectNoPrimitiveRejects(t *testing.T) {
 console.log((1 & { valueOf: function() { return {}; }, toString: function() { return {}; } }));
 `, "without a primitive value")
 }
+
+// A [Symbol.toPrimitive]() declaring no parameter ignores the hint, as JS
+// drops an extra argument: a template literal and `+` reach it on a class
+// instance and on an object literal.
+func TestE2EToPrimitiveWithoutHintParam(t *testing.T) {
+	const src = `
+class T {
+  id: number
+  constructor(id: number) { this.id = id }
+  [Symbol.toPrimitive](): number { return this.id }
+}
+const t = new T(7)
+console.log(+t, ` + "`${t}`" + `, typeof t)
+const o = { [Symbol.toPrimitive](): number { return 9 } }
+console.log(+o, ` + "`${o}`" + `)
+class H { [Symbol.toPrimitive](hint: string): string | number { return hint === 'number' ? 1 : 'h:' + hint } }
+const h = new H()
+console.log(+h, ` + "`${h}`" + `, h + '')
+`
+	assertOutput(t, src, "7 7 object\n9 9\n1 h:string h:default")
+	assertSameAsNode(t, src)
+}
+
+// A symbol-keyed property added to a class instance inspects as
+// `Symbol(desc): value`, after the string keys, as on an object literal.
+func TestE2EClassInstanceSymbolKeyInspect(t *testing.T) {
+	const src = `
+const k = Symbol('refed')
+const o: any = { a: 1, [k]: true }
+console.log(o[k], o)
+class C { x = 1 }
+const c: any = new C()
+c[k] = 7
+c.y = 2
+console.log(c[k], c)
+`
+	assertOutput(t, src, "true { a: 1, Symbol(refed): true }\n7 C { x: 1, y: 2, Symbol(refed): 7 }")
+	assertSameAsNode(t, src)
+}
+
+// util.inspect with customInspect: false renders an object with an
+// [inspect.custom] method by its properties instead of calling it (a method
+// that inspects itself that way no longer recurses forever).
+func TestE2EInspectCustomInspectFalse(t *testing.T) {
+	const src = `
+import { inspect } from 'util'
+class A {
+  x = 1
+  next: any = null;
+  [inspect.custom](depth: number, options: any): any {
+    return inspect(this, { ...options, depth: 0, customInspect: false })
+  }
+}
+const a = new A()
+a.next = { deep: { deeper: 1 } }
+console.log(a)
+console.log(inspect(a, { customInspect: false }))
+`
+	assertOutputImports(t, src, "A { x: 1, next: [Object] }\nA { x: 1, next: { deep: { deeper: 1 } } }")
+}

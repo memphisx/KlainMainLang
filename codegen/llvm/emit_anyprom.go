@@ -118,6 +118,7 @@ func (e *Emitter) promiseValueBoxer(elem Type) string {
 		return name
 	}
 	restore := e.beginDetachedFunc()
+	restore = e.sharedBody(restore) // content-named: the same in every program
 	boxed := fmt.Sprintf("%d", nbUndefined)
 	if elem.IR != "" && elem.IR != "void" && !elem.IsNever {
 		if bv, err := e.emitBoxValue(e.loadPromiseValue("%p", elem)); err == nil {
@@ -211,12 +212,13 @@ func (e *Emitter) emitAwaitAny(v Value) (Value, error) {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(plainL)
+	// Any other value is PromiseResolve's: a thenable (an object with a
+	// callable `then`, an instance of a class extending Promise) adopted
+	// through it, anything else fulfilled.
+	e.ensurePromiseDynRuntime()
 	prom := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
-	e.storePromiseValue(prom, v)
-	rp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", rp, promiseStructIR, prom))
-	e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", rp))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %s, i64 %s)", prom, v.Ref))
 	pv, err := e.emitAwaitTaskPromise(prom, TypeAny)
 	if err != nil {
 		return Value{}, err
@@ -247,12 +249,14 @@ const (
 //	    ptr boxer, i64 kind) — registers that reaction on src.
 //	@__kml_promise_resolve_any(ptr q, i64 v) — resolve Promise<any> q with v,
 //	    adopting a promise v holds (NewPromiseResolveThenableJob: a job that
-//	    registers the reaction), else fulfilling q with v.
+//	    registers the reaction) or another thenable (a job that calls its
+//	    `then`), else fulfilling q with v.
 func (e *Emitter) ensurePromiseDynRuntime() {
 	if e.usedPromiseResolveAny {
 		return
 	}
 	e.usedPromiseResolveAny = true
+	e.ensureDynJSONC() // a thenable's `then` is read through the object hooks
 	e.ensurePromiseRuntime()
 	e.ensureMicrotasks()
 	e.ensurePromiseSettle()
@@ -604,6 +608,7 @@ func (e *Emitter) promiseConvertRunner(from, to Type) string {
 		return name
 	}
 	restore := e.beginDetachedFunc()
+	restore = e.sharedBody(restore) // content-named: the same in every program
 	src := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%env, align 8", src))
 	qp := e.freshReg()

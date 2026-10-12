@@ -160,14 +160,15 @@ console.log(y);
 
 func TestE2EUnannotatedFunctionReturnsScalar(t *testing.T) {
 	assertOutput(t, `
-function addOne(n) { return n + 1 }
+function addOne(n: number) { return n + 1 }
 console.log(addOne(5))
 `, "6")
 }
 
+// TypeScript rejects the unannotated recursion (TS7023); JavaScript runs it.
 func TestE2EUnannotatedRecursiveFunctionReturnsScalar(t *testing.T) {
-	assertOutput(t, `
-function factorial(n) {
+	assertOutputCompatJS(t, `
+function factorial(n: number) {
   if (n <= 1) { return 1 }
   return n * factorial(n - 1)
 }
@@ -525,17 +526,27 @@ log("hello")
 		t.Fatal("expected a compile error for a non-numeric argument to an unannotated arrow function parameter, got none")
 	}
 }
-func TestE2EUnannotatedParamNumericArgStillWorks(t *testing.T) {
-	assertOutput(t, `
+func TestE2EUnannotatedParamStrictRejectsJSRuns(t *testing.T) {
+	// ADR-01428: an unannotated parameter is TS7006 in the strict lane (tsc
+	// --strict) and an any in the js lane.
+	src := `
 function addOne(n) { return n + 1 }
-console.log(addOne(5))
-`, "6")
+console.log(addOne(5), addOne("a"))
+`
+	if _, err := parseAndCompile(src); err == nil || !strings.Contains(err.Error(), "2:17: parameter 'n' implicitly has an 'any' type") {
+		t.Fatalf("want TS7006, got %v", err)
+	}
+	assertOutputCompatJS(t, src, "6 a1")
 }
-func TestE2EUnannotatedArrowParamNumericArgStillWorks(t *testing.T) {
-	assertOutput(t, `
+func TestE2EUnannotatedArrowParamStrictRejectsJSRuns(t *testing.T) {
+	src := `
 const addOne = (n) => n + 1
-console.log(addOne(5))
-`, "6")
+console.log(addOne(5), addOne("a"))
+`
+	if _, err := parseAndCompile(src); err == nil || !strings.Contains(err.Error(), "parameter 'n' implicitly has an 'any' type") {
+		t.Fatalf("want TS7006, got %v", err)
+	}
+	assertOutputCompatJS(t, src, "6 a1")
 }
 func TestE2EAnnotatedParamNonNumericArgStillWorks(t *testing.T) {
 	assertOutput(t, `
@@ -1152,7 +1163,7 @@ func TestE2ENestedFunctionCaptureSelfRecursive(t *testing.T) {
 	assertOutput(t, `
 function outer(): number {
   let x = 1;
-  function f(n) {
+  function f(n: number) {
     if (n > 0) return f(n - 1);
     return x;
   }
@@ -1161,7 +1172,7 @@ function outer(): number {
 console.log(outer());
 function outerStr(): string {
   let p = "x";
-  function f(n) {
+  function f(n: number) {
     if (n > 0) return f(n - 1);
     return p + "done";
   }
@@ -1176,8 +1187,9 @@ func TestE2ENestedFunctionEscapedArgumentsRest(t *testing.T) {
 	// (TDD-00210); when it escapes by name, the inferred closure type must
 	// carry that rest flag — the caller otherwise packed the variadic args
 	// as if the first one were already an array header (invalid IR; Test262
-	// language/statements/function/S13.2_A2_T1.js).
-	assertOutput(t, `
+	// language/statements/function/S13.2_A2_T1.js). An extra argument is
+	// tsc's TS2554, so this is the js lane.
+	assertOutputCompatJS(t, `
 function outer() {
   function inner() {
     return arguments[0];
@@ -1463,7 +1475,7 @@ console.log(doubled[0], doubled[1], doubled[2]);
 
 func TestE2EFunctionExpressionNoAnnotation(t *testing.T) {
 	assertOutput(t, `
-const triple = function(x) { return x * 3; };
+const triple = function(x: number) { return x * 3; };
 console.log(triple(7));
 `, "21")
 }
@@ -1610,11 +1622,12 @@ console.log(new C().m());
 }
 
 func TestE2ESloppyEvalBindingNameAllowed(t *testing.T) {
-	// Outside strict mode, `eval`/`arguments` are ordinary identifiers — this
-	// compiler treats a plain function body (no "use strict" directive) as
-	// sloppy, so binding them there stays legal, matching JS.
-	assertOutput(t, `
-const f = function(): number { var eval = 7; return eval; };
+	// Outside strict code `eval`/`arguments` are ordinary identifiers: a
+	// sloppy JavaScript function (no "use strict" directive) binds them, as
+	// in Node. The strict lane is strict code throughout (TypeScript's
+	// alwaysStrict) and rejects the same binding (TestE2EStrictCodeEarlyErrors).
+	assertOutputCompatJS(t, `
+const f = function () { var eval = 7; return eval; };
 console.log(f());
 `, "7")
 }
@@ -1759,7 +1772,7 @@ console.log(g.next().value);
 func TestE2ENestedGeneratorNonCapturing(t *testing.T) {
 	assertOutput(t, `
 function outer(): void {
-    function* gen(n: number): number { yield n; yield n + 1 }
+    function* gen(n: number): Generator<number> { yield n; yield n + 1 }
     for (const v of gen(5)) { console.log(v) }
 }
 outer()
@@ -1773,7 +1786,7 @@ func TestE2ENestedGeneratorCapturing(t *testing.T) {
 	assertOutput(t, `
 function outer(): void {
     const base = 9
-    function* gen(): number { yield base; yield base + 1 }
+    function* gen(): Generator<number> { yield base; yield base + 1 }
     for (const v of gen()) { console.log(v) }
 }
 outer()
@@ -1784,7 +1797,7 @@ func TestE2ENestedGeneratorCaptureByReference(t *testing.T) {
 	assertOutput(t, `
 function outer(): void {
     let base = 10
-    function* gen(): number { yield base; yield base }
+    function* gen(): Generator<number> { yield base; yield base }
     const it = gen()
     console.log(it.next().value)
     base = 99
@@ -1833,19 +1846,14 @@ console.log(await Promise.resolve(2))
 
 // yield* delegates to another generator (TDD-00086); yield* over a general
 // iterable such as an array still needs Symbol.iterator and is a clean rejection.
-func TestE2EYieldStarOverArrayRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-function* gen(): number {
+func TestE2EYieldStarOverArray(t *testing.T) {
+	// yield* over an array yields each element (ADR-01496).
+	assertSameAsNode(t, `
+function* gen(): Generator<number> {
     yield* [1, 2, 3];
 }
-console.log(gen());
+console.log([...gen()]);
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for yield* over an array, got none")
-	}
-	if !strings.Contains(err.Error(), "yield* requires a generator operand") {
-		t.Fatalf("expected 'yield* requires a generator operand', got: %v", err)
-	}
 }
 
 // A `T | null` return value (TDD-00064 Stage 3) crosses the function boundary
@@ -2060,6 +2068,7 @@ function f(cond: boolean): void {
   console.log(r === undefined, s === undefined, a === undefined);
   if (r !== undefined) console.log(r + 1);
 }
+
 f(false);
 f(true);
 function g() {
@@ -2083,6 +2092,54 @@ console.log(d, e, typeof e);
 	assertOutputCompatJS(t, src, want)
 }
 
+func TestE2EClassParamGivenForeignObject(t *testing.T) {
+	// A class-typed parameter of a function called dynamically (a listener,
+	// a function held as any, a (...args: any[]) slot) receives another
+	// class's object and reads that object's own members.
+	assertSameAsNodeImports(t, `
+import { EventEmitter } from "events";
+class A { a = 1; x = "A"; m() { return "mA"; } }
+class B { q = true; z = 9; x = "B"; m() { return "mB"; } }
+const em = new EventEmitter();
+em.on("r", (v: A) => console.log("arrow", v.x, v.m(), v.a));
+em.on("r", function (v: A) { console.log("fe", v.x, v.m(), v.a); });
+function named(v: A) { console.log("named", v.x, v.m(), v.a); }
+em.on("r", named);
+em.on("u", (v) => console.log("ctx", v.x));
+em.emit("r", new A());
+em.emit("r", new B() as any);
+const g: any = (v: A) => console.log("g", v.x, v.m());
+g(new A()); g(new B());
+const f: (...args: any[]) => void = (v: A, n: number) => console.log("f", v.x, n);
+f(new B(), 2);
+const h: any = named;
+h(new B());
+named(new A());
+class In { z = 5 }
+class C { a = new In(); arr = [1, 2]; m() { return new In(); } }
+class D { a = { z: "bz" }; arr = ["x"]; m() { return { z: "mz" }; } }
+const nested: any = (v: C) => console.log(v.a.z, v.arr[0], v.m().z, v!.a.z);
+nested(new C()); nested(new D());
+const opt: any = (p?: C) => console.log(p!.m().z);
+opt(new D());
+`)
+}
+
+func TestE2ENestedTopLevelVarReadFromFunction(t *testing.T) {
+	// A `var` inside a top-level block is module scoped: a function reads
+	// it, undefined until (and unless) its declaration runs.
+	assertSameAsNode(t, `
+if (Math.random() > 2) { var x = 1; var s = "s"; }
+function f() { return [x, s]; }
+console.log(x, s, typeof x, typeof s, f());
+for (let k = 0; k < 2; k++) { var cnt = k; }
+function g() { return cnt; }
+console.log(g());
+do { var d = 1; break; var e = "x"; } while (0);
+function h() { return typeof e + ":" + d; }
+console.log(d, e, typeof e, h());
+`)
+}
 func TestE2EHoistedVarLoopAndSwitchShapes(t *testing.T) {
 	// A `for` init `var` is not widened (it runs whenever the loop is reached);
 	// a `var` in a loop body, `while`, `switch` case or `try` is. A `var`
@@ -2766,7 +2823,7 @@ func TestE2ENestedGeneratorCallsTopLevel(t *testing.T) {
 	assertOutput(t, `
 function triple(n: number): number { return n * 3 }
 function outer(): void {
-  function* g(n: number): number { yield triple(n) }
+  function* g(n: number): Generator<number> { yield triple(n) }
   for (const v of g(4)) { console.log(v) }
 }
 outer()
@@ -2778,7 +2835,7 @@ func TestE2ENestedAsyncGeneratorCaptureAndTopLevel(t *testing.T) {
 async function delay(v: number): Promise<number> { return v }
 async function outer(): Promise<void> {
   const factor = 10
-  async function* g(n: number): number {
+  async function* g(n: number): AsyncGenerator<number> {
     let i = 0
     while (i < n) { yield await delay(i * factor); i = i + 1 }
   }
@@ -2983,7 +3040,7 @@ func TestE2EGeneratorFirstClassValue(t *testing.T) {
 	assertOutput(t, `
 function make() {
   let bump = 0;
-  function* seq(start: number): number {
+  function* seq(start: number): Generator<number> {
     yield start + bump;
     yield start + bump;
   }
@@ -3004,7 +3061,7 @@ function genHostEsc() {
 }
 const gg = genHostEsc();
 for (const v of gg()) console.log(v);
-function* three(): number { yield 3; }
+function* three(): Generator<number> { yield 3; }
 const t = three;
 console.log(t().next().value);
 `, "1\n101\n150\n10\n3")
@@ -3128,4 +3185,148 @@ srv.listen(0, () => {
   http.get("http://127.0.0.1:" + port + "/", (r) => { let b = ""; r.on("data", (c) => b += c); r.on("end", () => { console.log(b); srv.close() }) })
 })
 `)
+}
+
+// arguments holds the values passed, not every declared parameter: callers
+// store the count they pass (BACKLOG 31).
+// A JS function reading arguments takes more arguments than it declares
+// (tsc's checkJs allows it; a .ts file reports TS2554).
+func TestArgumentsLengthExtraArgumentsJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+function g(a) { return arguments.length; }
+console.log(g(), g(1, 2));
+const fe = function (a, b) { return arguments.length; };
+console.log(fe(), fe(1), fe(1, 2, 3));
+`)
+}
+
+func TestArgumentsLengthCountsPassedArguments(t *testing.T) {
+	assertSameAsNode(t, `
+function f(a: number, b?: number, c?: number): number { return arguments.length; }
+console.log(f(1), f(1, 2), f(1, 2, 3));
+function g(a?: number) { return arguments.length; }
+console.log(g(), g(1));
+function h(a: number, b: number = 5): number { return arguments.length + b; }
+console.log(h(1), h(1, 2));
+const o = { m(x?: string) { return arguments.length; } };
+console.log(o.m(), o.m("a"));
+class C { k(x?: number, y?: number) { return arguments.length; } }
+console.log(new C().k(), new C().k(1));
+console.log(g(), g(1));
+const fe = function (a?: number, b?: number) { return arguments.length; };
+console.log(fe(), fe(1), fe(1, 2));
+class D { constructor(a?: number) { console.log("ctor", arguments.length); } }
+new D(); new D(1);
+class E extends D { constructor() { super(); } }
+new E();
+function k(a: number, b = 7) { return [arguments.length, arguments[1], b]; }
+console.log(k(1), k(1, 2));
+class A2 { m(x?: number, y?: number): number { return -1; } }
+class B extends A2 { m(x?: number, y?: number): number { return arguments.length; } }
+const a: A2 = new B();
+console.log(a.m(), a.m(1), a.m(1, 2));
+class S { static s(p?: string) { return arguments.length; } }
+console.log(S.s(), S.s("x"));
+function v(a?: number, b?: number) { return arguments.length; }
+function w(a: number) { return Array.from(arguments).join(","); }
+console.log(w(1));
+const f2 = v;
+console.log(f2(), f2(1));
+console.log([5, 6].map(function (x) { return arguments.length; }));
+`)
+}
+
+// `(a, b)` is the comma operator unless `=>` (or a return type then `=>`)
+// follows the group (BACKLOG 122).
+func TestCommaExpressionIsNotArrowParams(t *testing.T) {
+	assertSameAsNode(t, `
+let a = 1, b = 2;
+const c = (a, b);
+console.log(c);
+let i = 0;
+const d = (i++, i++, i);
+console.log(d, (a + 1, b * 3));
+const f = (x: number, y: number) => x + y;
+console.log(f(1, 2), ((p: number) => p * 2)(4));
+for (let j = 0, k = 10; j < 2; j++, k--) console.log(j, k);
+const g = (m: number, n: number): number => m + n;
+console.log(g(2, 3), true ? (a, b) : 0);
+const arr = [[1, 2]].map(([x, y]) => x + y);
+console.log(arr);
+`)
+}
+
+// A defaulted parameter is its value type in the body once the default is
+// filled, so the function's inferred result is too (ADR-01508).
+func TestDefaultedParamReadsPresentInBody(t *testing.T) {
+	assertSameAsNode(t, `
+const ag = (y = 2) => y * 2;
+const r = ag();
+console.log(r, typeof r, ag(5), ag(undefined));
+function fn(a: number, b: number, c = 0) { return a + b + c; }
+const s = fn(1, 2);
+console.log(s.toFixed(1), fn(1, 2, 3));
+const fe = function (n = "x") { return n.length; };
+console.log(fe(), fe("abc"));
+const nul = (q: number | null = 4) => q;
+console.log(nul(), nul(null));
+`)
+}
+
+// `f.call` / `f.apply` return f's own result, as tsc types them under
+// strictBindCallApply: a mismatch is TS2322 (ADR-01512).
+func TestE2EFunctionCallApplyResultType(t *testing.T) {
+	assertSameAsNode(t, `
+function add(a: number, b: number) { return a + b; }
+const r: number = add.call(null, 1, 2);
+const q = add.apply(null, [3, 4]);
+console.log(r + 1, q.toFixed(1), typeof add.call(undefined, 5, 6));
+`)
+	_, err := parseAndCompile(`
+function add(a: number, b: number) { return a + b; }
+const r: string = add.call(null, 1, 2);
+`)
+	if err == nil || !strings.Contains(err.Error(), "'number' is not assignable to type 'string'") {
+		t.Fatalf("want TS2322, got %v", err)
+	}
+}
+
+// A named async function expression awaiting its own call reads the task
+// promise its self binding returns (ADR-01532).
+func TestAsyncFunctionExpressionAwaitsSelf(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const f = async function g(n) {
+  if (n <= 0) return 0;
+  const r = await g(n - 1);
+  return r + n;
+};
+const h = async function k(n) {
+  if (n <= 0) return "x";
+  return (await k(n - 1)) + n;
+};
+(async () => { console.log(await f(4), await h(3)); })();
+`)
+}
+
+// Strict code inside a sloppy program — a function that opens with "use
+// strict", a class body — gets the whole program's strict-code rules:
+// `delete` of a name, `eval`/`arguments` as an assignment target or as a
+// binding in any body (an accessor's included).
+func TestE2EUseStrictRegionEarlyErrors(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{`function f() { "use strict"; var q = 1; delete q; }`, "'delete' cannot be called on an identifier"},
+		{`const g = function () { "use strict"; eval = 1; };`, "'eval' cannot be assigned to in strict mode"},
+		{`const h = () => { "use strict"; let arguments = 2; };`, "'arguments' cannot be used as a binding name"},
+		{`class C { m() { arguments++; } }`, "'arguments' cannot be assigned to in strict mode"},
+		{`class D { get x() { var eval = 1; return eval; } }`, "'eval' cannot be used as a binding name"},
+	} {
+		_, err := parseAndCompile(tc.src)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: expected %q, got %v", tc.src, tc.want, err)
+		}
+	}
+	assertOutputCompatJS(t, `function k() { "use strict"; return 1; }
+const o = { get z() { var eval = 2; return eval; } };
+console.log(k(), (function () { var q = 1; return delete q; })(), o.z);
+`, "1 false 2")
 }

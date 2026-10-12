@@ -26,6 +26,13 @@ console.log(a, b, typeof b);                                    // 1 undefined u
 for (var i = 0; i < 3; i++) { var last = i * 10; }
 console.log(i, last);                                           // 3 20
 
+// A module-level `var` inside a block is a module binding: a function
+// reads it, undefined until (and unless) its declaration runs.
+if (Math.random() > 2) { var never = "set"; }
+for (let k = 0; k < 3; k++) { var seen = k; }
+function readBoth() { return [never, seen]; }
+console.log(readBoth());                                        // [ undefined, 2 ]
+
 // A local written inside a `try` keeps its value after a throw.
 let count = 0;
 try { count = 1; throw new Error("boom"); } catch (e) { console.log("caught with count =", count); } // 1

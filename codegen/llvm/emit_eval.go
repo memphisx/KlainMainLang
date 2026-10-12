@@ -50,6 +50,23 @@ func (e *Emitter) emitStaticEval(args []ast.Expression, pos ast.Pos) (Value, err
 	return e.emitExpr(exprStmt.Expr)
 }
 
+// staticStringValue returns the compile-time-constant string an expression
+// denotes, if any: a plain string literal, or a template literal with no
+// interpolations (`\`abc\“). Its Value is already this compiler's decoded
+// UTF-8 bytes (escapes resolved at lex time — see ADR-00194), which is
+// exactly what a re-parse needs.
+func staticStringValue(expr ast.Expression) (string, bool) {
+	switch x := expr.(type) {
+	case *ast.StringLiteral:
+		return x.Value, true
+	case *ast.TemplateLiteral:
+		if len(x.Exprs) == 0 && len(x.Quasis) == 1 {
+			return x.Quasis[0], true
+		}
+	}
+	return "", false
+}
+
 // inferStaticEvalType is emitStaticEval's compile-time-type mirror: a static
 // `eval("<expr>")` produces exactly the value of the single expression the
 // string parses to, so its type is that expression's inferred type. Keeping
@@ -76,21 +93,4 @@ func (e *Emitter) inferStaticEvalType(args []ast.Expression) (Type, bool) {
 		return Type{}, false
 	}
 	return e.inferExprType(exprStmt.Expr), true
-}
-
-// staticStringValue returns the compile-time-constant string an expression
-// denotes, if any: a plain string literal, or a template literal with no
-// interpolations (`\`abc\“). Its Value is already this compiler's decoded
-// UTF-8 bytes (escapes resolved at lex time — see ADR-00194), which is
-// exactly what a re-parse needs.
-func staticStringValue(expr ast.Expression) (string, bool) {
-	switch x := expr.(type) {
-	case *ast.StringLiteral:
-		return x.Value, true
-	case *ast.TemplateLiteral:
-		if len(x.Exprs) == 0 && len(x.Quasis) == 1 {
-			return x.Quasis[0], true
-		}
-	}
-	return "", false
 }

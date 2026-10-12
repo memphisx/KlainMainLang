@@ -59,6 +59,9 @@ func (p *Parser) parseAmbientDeclaration() (ast.Statement, error) {
 				if a.Tag == "intrinsic" {
 					fd.Intrinsic = a.Value // a builtin inlined at its call (TDD-00230 P3.2)
 				}
+				if a.Tag == "lower" {
+					fd.Lower = a.Value // a global module's function (TDD-00245)
+				}
 			}
 		}
 		return fd, nil
@@ -988,6 +991,12 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 	// can't set the unexported pos field directly (see SetPos's own doc
 	// comment for why this was a real, pre-existing "always 0:0" bug).
 	pos := posOf(p.peek())
+	var namePos ast.Pos
+	if name != "" && p.pos > 0 {
+		if prev := p.at(p.pos - 1); prev.Literal == name {
+			namePos = posOf(prev)
+		}
+	}
 	// Optional `<T>` type-parameter list (TDD-00010 V1). Parsed uniformly for
 	// both a top-level function and a class method/constructor — codegen
 	// only acts on it for the former today; a generic method parses cleanly
@@ -1033,6 +1042,7 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 			Name: name, TypeParams: typeParams, TypeParamConstraints: typeParamConstraints, TypeParamDefaults: typeParamDefaults, Params: params, ReturnType: retType, Body: nil, IsAsync: isAsync, IsAbstract: true,
 		}
 		fd.SetPos(pos)
+		fd.NamePos = namePos
 		return fd, thisTA, nil
 	}
 
@@ -1044,6 +1054,7 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 			Name: name, TypeParams: typeParams, TypeParamConstraints: typeParamConstraints, TypeParamDefaults: typeParamDefaults, Params: params, ReturnType: retType, Body: nil, IsAsync: isAsync, IsOverloadSig: true,
 		}
 		fd.SetPos(pos)
+		fd.NamePos = namePos
 		return fd, thisTA, nil
 	}
 
@@ -1080,6 +1091,7 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 		Name: name, TypeParams: typeParams, TypeParamConstraints: typeParamConstraints, TypeParamDefaults: typeParamDefaults, Params: params, ReturnType: retType, Body: body, IsAsync: isAsync,
 	}
 	fd.SetPos(pos)
+	fd.NamePos = namePos
 	return fd, thisTA, nil
 }
 
@@ -1265,6 +1277,7 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 			return nil, p.errAt(p.peek(), diag.ParamPropertyOutsideCtor)
 		}
 
+		restTok := p.peek()
 		rest := p.match(lexer.ELLIPSIS)
 
 		// Destructured parameter (`{x, y}: T` / `[a, b]: T[]`, and nested
@@ -1284,6 +1297,7 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 			if rest {
 				return nil, p.errAt(p.peek(), diag.RestParamPattern)
 			}
+			patTok := p.peek()
 			var arrPat []ast.ArrayPatternElem
 			var objPat []ast.DestructProp
 			if p.check(lexer.LBRACE) {
@@ -1308,14 +1322,13 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 					return nil, err
 				}
 			}
-			if ta == nil {
-				return nil, p.errAt(p.peek(), diag.DestructuredParamType)
-			}
+			// An unannotated pattern is typed as an arrow's is: from its
+			// context, its call sites under -compat=js, else an implicit any.
 			if p.check(lexer.ASSIGN) {
 				return nil, p.errAt(p.peek(), diag.DestructuredParamDefault)
 			}
 			syntheticName := fmt.Sprintf("__param%d", len(params))
-			params = append(params, ast.Param{Name: syntheticName, Type: ta, ArrayPattern: arrPat, ObjectPattern: objPat, Decorators: paramDecorators})
+			params = append(params, ast.Param{Name: syntheticName, Pos: ast.Pos{Line: patTok.Line, Col: patTok.Col}, Type: ta, ArrayPattern: arrPat, ObjectPattern: objPat, Decorators: paramDecorators})
 			if !p.match(lexer.COMMA) {
 				break
 			}
@@ -1351,7 +1364,7 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 				return nil, err
 			}
 		}
-		params = append(params, ast.Param{Name: nameTok.Literal, Type: ta, Rest: rest, Default: dflt, Optional: optional, PropVisibility: propVis, PropReadonly: propReadonly, Decorators: paramDecorators})
+		params = append(params, ast.Param{Name: nameTok.Literal, Pos: paramPos(rest, restTok, nameTok), Type: ta, Rest: rest, Default: dflt, Optional: optional, PropVisibility: propVis, PropReadonly: propReadonly, Decorators: paramDecorators})
 		if rest {
 			break // rest param must be last
 		}
@@ -1367,29 +1380,8 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 	// (e.g. "__param0") never collides with anything, but its pattern's
 	// own field/element names do bind in the function body and must be
 	// checked the same as a plain param name would be.
-	seen := make(map[string]bool, len(params))
-	for _, prm := range params {
-		var names []string
-		switch {
-		case prm.ArrayPattern != nil:
-			for _, elem := range prm.ArrayPattern {
-				if elem.Name != "" {
-					names = append(names, elem.Name)
-				}
-			}
-		case prm.ObjectPattern != nil:
-			for _, prop := range prm.ObjectPattern {
-				names = append(names, prop.Local)
-			}
-		default:
-			names = []string{prm.Name}
-		}
-		for _, n := range names {
-			if seen[n] {
-				return nil, p.errAt(p.peek(), diag.DuplicateParameter, n)
-			}
-			seen[n] = true
-		}
+	if n := duplicateParamName(params); n != "" {
+		return nil, p.errAt(p.peek(), diag.DuplicateParameter, n)
 	}
 	return params, nil
 }
@@ -2218,4 +2210,45 @@ func ambientFunction(fd *ast.FunctionDeclaration) *ast.FunctionDeclaration {
 	fd.IsAbstract = false
 	fd.Ambient = true
 	return fd
+}
+
+// duplicateParamName is a name two of params bind (a destructured
+// parameter's pattern names included), or "".
+func duplicateParamName(params []ast.Param) string {
+	seen := make(map[string]bool, len(params))
+	for _, prm := range params {
+		var names []string
+		switch {
+		case prm.ArrayPattern != nil:
+			for _, elem := range prm.ArrayPattern {
+				if elem.Name != "" {
+					names = append(names, elem.Name)
+				}
+			}
+		case prm.ObjectPattern != nil:
+			for _, prop := range prm.ObjectPattern {
+				names = append(names, prop.Local)
+			}
+		default:
+			names = []string{prm.Name}
+		}
+		for _, n := range names {
+			if seen[n] {
+				return n
+			}
+			seen[n] = true
+		}
+	}
+	return ""
+}
+
+// nonSimpleParams reports whether a parameter list has a default, a rest
+// or a destructured parameter.
+func nonSimpleParams(params []ast.Param) bool {
+	for _, prm := range params {
+		if prm.ArrayPattern != nil || prm.ObjectPattern != nil || prm.Rest || prm.Default != nil {
+			return true
+		}
+	}
+	return false
 }

@@ -7,6 +7,7 @@
  * swaps into a fiber repoints the GC stack bottom at that fiber's stack and
  * restores it after the swap. kml_layout.h is prepended by the compiler. */
 #include <stdlib.h>
+#include <stdint.h>
 
 typedef long long i64;
 typedef unsigned char u8;
@@ -55,7 +56,6 @@ extern int setjmp(void *) __attribute__((returns_twice));
 #define KML_SETJMP(b) setjmp(b)
 static void __kml_ctx_release(void *ctx) { (void)ctx; }
 #endif
-extern int usleep(unsigned);
 
 /* The generated program's side. */
 extern _Thread_local void *__kml_current_task;
@@ -72,17 +72,12 @@ extern void *__kml_push_jmpbuf(void);
 extern void __kml_pop_jmpbuf(void);
 extern void *__kml_jmp_stack_new(void);
 extern void __kml_jmp_stack_free(void *);
-extern int curl_multi_perform(void *, int *);
+extern void __kml_curl_kick(void);
 extern void __kml_curl_drain_messages(void);
 extern void __kml_reqbody_pump(void);
-extern _Bool __kml_reqbody_active_on_fd(i64);
 extern _Bool __kml_group_satisfied(void *);
 extern void __kml_worker_abort_check(void);
-extern int __kml_loop_turn(_Bool);
-extern _Bool __kml_timer_fire_next(void);
-extern _Bool __kml_fetch_pump(void);
-extern void __kml_tla_unsettled(void) __attribute__((noreturn));
-extern void __kml_top_await(void *);
+extern void __kml_wait_outside_coroutine(void);
 extern void __kml_drain_microtasks(void);
 extern void __kml_microtask_enqueue(void *);
 extern void __kml_promise_drain_reactions(void *);
@@ -107,8 +102,16 @@ extern void *GC_stackbottom;
 #define STACK_FREE(s, n) __kml_task_stack_free((s), (n))
 #else
 #define GC_SB_SET(p) ((void)(p))
+#ifndef _WIN32
+/* A guard page under the stack, so an overflow throws (TDD-00249). */
+extern void *__kml_fiber_stack_alloc(size_t);
+extern void __kml_fiber_stack_free(void *, size_t);
+#define STACK_ALLOC(n) __kml_fiber_stack_alloc((size_t)(n))
+#define STACK_FREE(s, n) __kml_fiber_stack_free((s), (size_t)(n))
+#else
 #define STACK_ALLOC(n) malloc((size_t)(n))
 #define STACK_FREE(s, n) ((void)(n), free(s))
+#endif
 #endif
 
 _Thread_local void *__kml_task_launching;
@@ -165,9 +168,23 @@ static void task_leave_settled(void *task, void *prom) {
     swapcontext(T_CTX(task), T_RESUMER(task));
 }
 
+/* Set by a body that returned a promise: its own promise adopts that one's
+ * state (a later microtask settles it), so finishing leaves it pending. */
+static _Thread_local int task_adopted;
+
+void __kml_task_adopted(void) { task_adopted = 1; }
+
 /* The body stored its result in the promise's v0/v1. */
 void __kml_task_finish(void *task) {
     void *prom = T_PROM(task);
+    if (task_adopted) {
+        task_adopted = 0;
+        T_STATE(task) = 2;
+        __kml_task_active--;
+        __kml_conn_poke = 1;
+        swapcontext(T_CTX(task), T_RESUMER(task));
+        return;
+    }
     P_STATE(prom) = 1;
     task_leave_settled(task, prom);
 }
@@ -326,11 +343,7 @@ static void task_swap_in(void *t) {
  * condition holds. Re-entrant: a resumed task may drive it (ADR-00985). */
 void __kml_task_sched_step(void) {
     __kml_reqbody_pump();
-    if (__kml_curl_multi) {
-        int run;
-        curl_multi_perform(__kml_curl_multi, &run);
-        __kml_curl_drain_messages();
-    }
+    __kml_curl_kick();
     /* Only the outermost step compacts: a nested one must not move entries
      * under the scan in progress above it. */
     if (sched_depth++ == 0) __kml_task_compact();
@@ -373,28 +386,6 @@ void __kml_task_unwait(void **members, i64 count, void *task) {
         if (P_WAITER(members[i]) == task) P_WAITER(members[i]) = 0;
 }
 
-/* The top-level wait of the member awaits: a turn of the real event loop
- * (TDD-00223 §1). Returns 0 to give up after a second idle verdict. */
-static void top_wait(_Bool *idleseen) {
-    switch (__kml_loop_turn(0)) {
-    case 1:
-        /* Nothing alive can wake the loop. The turn's last pass may still have
-         * settled a member, so rescan once. */
-        if (*idleseen) __kml_tla_unsettled();
-        *idleseen = 1;
-        return;
-    case 2:
-        /* Inside a loop callback: the subset drive, which may not re-enter the
-         * loop under its own iteration. */
-        __kml_drain_microtasks();
-        __kml_task_sched_step();
-        __kml_timer_fire_next();
-        __kml_fetch_pump();
-        break;
-    }
-    *idleseen = 0;
-}
-
 /* On a task: register as every member's waiter, set a non-null pending
  * promise (members[0], pending) so only a settling member wakes it, and park. */
 static void park_on_members(void *ct, void **members, i64 count) {
@@ -409,7 +400,6 @@ static void park_on_members(void *ct, void **members, i64 count) {
 
 /* Promise.race over task promises: the first settled member's index. */
 i64 __kml_task_await_any_of(void **members, i64 count) {
-    _Bool idleseen = 0;
     for (;;) {
         for (i64 i = 0; i < count; i++)
             if (P_STATE(members[i]) != 0) return i;
@@ -417,14 +407,13 @@ i64 __kml_task_await_any_of(void **members, i64 count) {
         if (ct)
             park_on_members(ct, members, count);
         else
-            top_wait(&idleseen);
+            __kml_wait_outside_coroutine();
     }
 }
 
 /* Promise.any over task promises: the first fulfilled member's index, or -1
  * once every member rejected. */
 i64 __kml_task_await_first_fulfilled(void **members, i64 count) {
-    _Bool idleseen = 0;
     for (;;) {
         _Bool pend = 0;
         for (i64 i = 0; i < count; i++) {
@@ -437,18 +426,8 @@ i64 __kml_task_await_first_fulfilled(void **members, i64 count) {
         if (ct)
             park_on_members(ct, members, count);
         else
-            top_wait(&idleseen);
+            __kml_wait_outside_coroutine();
     }
-}
-
-/* The program-exit drain: run the scheduler until no task is active. */
-void __kml_task_run_all(void) {
-    for (;;) {
-        __kml_drain_microtasks();
-        if (__kml_task_active <= 0) break;
-        __kml_task_sched_step();
-    }
-    __kml_drain_microtasks();
 }
 
 /* Resume a parked task from a microtask drain: an await's continuation is a
@@ -457,9 +436,9 @@ void __kml_task_run_all(void) {
 void __kml_task_resume(void *t) { task_swap_in(t); }
 
 /* On a task: attach a resume reaction to the promise (or queue it now if
- * settled) and park in state 3, which only the resume microtask wakes. Off a
- * task it waits: through the loop at module top level, by yielding the
- * connection fiber on one (ADR-00986), or by a busy drive. */
+ * settled) and park in state 3, which only the resume microtask wakes. On a
+ * connection fiber it yields the fiber (ADR-00986) or busy-drives (until
+ * TDD-00244 Stage 5). Anywhere else it is a compiler bug. */
 void __kml_task_await_ready(void *promise) {
     __kml_promise_mark_handled(promise);
     void *ct = __kml_current_task;
@@ -483,32 +462,21 @@ void __kml_task_await_ready(void *promise) {
     }
     i64 cidx = __kml_current_conn_idx;
     if (cidx < 0) {
-        /* Module top level on the main stack. */
-        __kml_top_await(&P_STATE(promise));
+        __kml_wait_outside_coroutine();
         return;
     }
-    /* On a connection fiber. One consuming its own request body must not
-     * yield: the reactor would re-resume it on its own readable fd. */
-    i64 fd = F((char *)__kml_conn_data + cidx * KML_CONN_SIZE, KML_CONN_FD, i64);
-    if (!__kml_reqbody_active_on_fd(fd)) {
-        while (P_STATE(promise) == 0) {
-            /* What settles without the reactor's I/O settles here. */
-            __kml_drain_microtasks();
-            __kml_task_sched_step();
-            __kml_timer_fire_next();
-            if (P_STATE(promise) != 0) return;
-            /* The connection array may have moved while suspended. */
-            char *slot = (char *)__kml_conn_data + __kml_current_conn_idx * KML_CONN_SIZE;
-            swapcontext(F(slot, KML_CONN_CTX, void *), __kml_main_ctx);
-        }
-        return;
-    }
+    /* On a connection fiber: park the fiber on the promise and yield to
+     * the loop, which runs timers and I/O meanwhile and resumes the fiber
+     * once the promise settles, not on its descriptor's readiness. */
+    (void)cidx;
     while (P_STATE(promise) == 0) {
         __kml_drain_microtasks();
-        __kml_task_sched_step();
-        __kml_timer_fire_next();
-        /* A pause per cycle: this can last a whole external transfer and
-         * starves the peer without it. */
-        usleep(200);
+        if (P_STATE(promise) != 0) return;
+        /* The connection array may have moved while suspended. */
+        char *slot = (char *)__kml_conn_data + __kml_current_conn_idx * KML_CONN_SIZE;
+        F(slot, KML_CONN_GROUP, void *) = (void *)((uintptr_t)promise | 1);
+        swapcontext(F(slot, KML_CONN_CTX, void *), __kml_main_ctx);
+        slot = (char *)__kml_conn_data + __kml_current_conn_idx * KML_CONN_SIZE;
+        F(slot, KML_CONN_GROUP, void *) = 0;
     }
 }

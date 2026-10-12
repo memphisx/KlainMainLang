@@ -5,6 +5,7 @@ import (
 	"KlainMainLang/checker"
 	"KlainMainLang/sema"
 	"fmt"
+	"strings"
 )
 
 // collectTopLevelNames records every name the program itself binds at top
@@ -99,6 +100,7 @@ func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
 		if ty.IR == "void" {
 			ty = TypeUndefined // a void call's result (`const r = m.clear()`)
 		}
+		ty = e.globalUndefinedStorage(v, ty)
 		// A promoted generic class instance (`const b = new Box<number>()`) needs
 		// its monomorphized ClassInfo (methods, dispatch) registered now, before
 		// Pass 2 emits the function bodies that will call `b.get()` — otherwise
@@ -170,11 +172,28 @@ func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
 	// infers as the checker types it: that type cannot drift.
 	read := namesReadInFunctions(prog)
 	for _, v := range withFunctions {
-		if _, done := e.moduleGlobals[v.Name]; done || v.TypeAnnot != nil || v.Init == nil || !read[v.Name] || e.widenedBindings[v.Name] {
+		// An annotated `new Set([…])` too: emitSetVarDecl types a seeded Set
+		// from its initializer, not the annotation.
+		_, annotatedSet := v.Init.(*ast.NewSetExpression)
+		if _, done := e.moduleGlobals[v.Name]; !done && v.Init == nil && v.TypeAnnot == nil && read[v.Name] && !e.widenedBindings[v.Name] {
+			// `var value;` a function assigns: tsc types a variable with no
+			// initializer that a function captures as `any`, one box.
+			e.inLib = e.libStmts[stmtOf[v]]
+			e.forcedGlobalTypes[v] = TypeAny
+			promote(v)
 			continue
+		}
+		if _, done := e.moduleGlobals[v.Name]; done || (v.TypeAnnot != nil && !annotatedSet) || v.Init == nil || !read[v.Name] || e.widenedBindings[v.Name] {
+			continue
+		}
+		if annotatedSet && e.resolveType(v.TypeAnnot).IsDynamic {
+			continue // boxed into its annotation
 		}
 		e.inLib = e.libStmts[stmtOf[v]]
 		ty := e.inferExprType(v.Init)
+		if as, isAs := v.Init.(*ast.AsExpression); isAs {
+			ty = e.asBindingType(as) // as emitVarDecl types it
+		}
 		switch init := v.Init.(type) {
 		case *ast.NewMapExpression:
 			// Typed as emitMapVarDecl types it, from entries stable here.
@@ -214,6 +233,14 @@ func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
 		if e.checkerAgreesOnGlobal(v.Init, ty) {
 			e.forcedGlobalTypes[v] = e.checkerClassType(v.Init, ty)
 			promote(v)
+			continue
+		}
+		// Any other binding whose declared type the checker represents in
+		// the storage the declaration stores (`let u = 0 as number |
+		// string`, one box): every later store coerces into it.
+		if e.declaredStorageAgrees(v, ty) {
+			e.forcedGlobalTypes[v] = ty
+			promote(v)
 		}
 	}
 	// A library module's statements run in its init function, and a
@@ -226,6 +253,93 @@ func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
 		e.inLib = e.libStmts[stmtOf[v]]
 		e.forcedGlobalTypes[v] = e.inferExprType(v.Init)
 		promote(v)
+	}
+	// A `var` nested in a top-level block (`if (c) { var x = 1 }`) is module
+	// scoped too: a function that reads it reads the global, which holds
+	// undefined until a declaration runs (the declaration can be skipped).
+	nested := map[string][]*ast.VarDeclaration{}
+	var order []string
+	for _, stmt := range prog.Body {
+		switch stmt.(type) {
+		case *ast.VarDeclaration, *ast.VarDeclarationList, *ast.FunctionDeclaration, *ast.ClassDeclaration:
+			continue
+		}
+		var forInit map[*ast.VarDeclaration]bool
+		if fs, ok := stmt.(*ast.ForStatement); ok && fs.Init != nil {
+			// The loop's own `var` always runs: it stays the main body's
+			// local, captured as such.
+			forInit = map[*ast.VarDeclaration]bool{}
+			for _, v := range nestedVarDecls(fs.Init) {
+				forInit[v] = true
+			}
+		}
+		for _, v := range nestedVarDecls(stmt) {
+			if forInit[v] {
+				continue
+			}
+			if len(nested[v.Name]) == 0 {
+				order = append(order, v.Name)
+			}
+			nested[v.Name] = append(nested[v.Name], v)
+			stmtOf[v] = stmt
+		}
+	}
+	for _, name := range order {
+		decls := nested[name]
+		if _, done := e.moduleGlobals[name]; done || e.topLevelNames[name] || !read[name] || e.widenedBindings[name] {
+			continue
+		}
+		var ty Type
+		agree := true
+		for i, v := range decls {
+			e.inLib = e.libStmts[stmtOf[v]]
+			vt := TypeAny
+			switch {
+			case v.TypeAnnot != nil:
+				vt = e.resolveType(v.TypeAnnot)
+			case v.Init != nil:
+				vt = e.inferExprType(v.Init)
+			}
+			if vt.IR == "void" {
+				vt = TypeUndefined
+			}
+			if !vt.IsDynamic && !vt.IsUndefined {
+				vt = indexReadType(vt) // what a skipped declaration leaves
+			}
+			if i > 0 && reprKey(vt) != reprKey(ty) {
+				agree = false
+			}
+			ty = vt
+		}
+		if !agree {
+			continue // two declarations of different types: not modelled
+		}
+		e.inLib = e.libStmts[stmtOf[decls[0]]]
+		e.forcedGlobalTypes[decls[0]] = ty
+		promote(decls[0])
+		if _, done := e.moduleGlobals[name]; !done {
+			continue
+		}
+		e.topLevelNames[name] = true
+		for _, v := range decls[1:] {
+			e.promotedGlobalDecls[v] = true
+		}
+	}
+	if e.shadowOracle != nil {
+		// The final decision, once per declaration; one no function reads
+		// and that stays a local decides nothing a body depends on.
+		for _, v := range withFunctions {
+			promoted := e.promotedGlobalDecls[v]
+			if !promoted && !read[v.Name] {
+				continue
+			}
+			var ty Type
+			if promoted {
+				ty = e.moduleGlobals[v.Name].Ty
+			}
+			e.inLib = e.libStmts[stmtOf[v]] // the row's module
+			e.shadowGlobalType(v, ty, promoted)
+		}
 	}
 }
 
@@ -262,16 +376,49 @@ func (e *Emitter) checkerAgreesOnGlobal(init ast.Expression, ty Type) bool {
 	switch {
 	case t.Flags&(checker.String|checker.StringLiteral) != 0:
 		return isStringTy(ty)
-	case t.Flags&(checker.Number|checker.NumberLiteral) != 0:
+	case t.Flags&(checker.Number|checker.NumberLiteral) != 0 && !t.AnyArith:
 		return ty.Float && ty.IR == "double" && !ty.Nullable
 	case t.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
 		return ty.IR == "i1" && !ty.Nullable
 	case isBytesType(t):
-		return ty.IsArray && (ty.IsBuffer || ty.IsTypedArray) && (t.Symbol.Name == "Buffer") == ty.IsBuffer
+		return ty.IsArray && (ty.IsBuffer || ty.IsTypedArray) && (declaredLowerType(t.Symbol) == "buffer") == ty.IsBuffer
 	case t.Flags&checker.Object != 0 && t.Kind == checker.Instance && t.Symbol != nil:
 		return ty.IsClass && (ty.ClassName == t.Symbol.Name || e.classDerives(ty.ClassName, t.Symbol.Name) || e.classDerives(t.Symbol.Name, ty.ClassName))
 	}
 	return false
+}
+
+// asBindingType is the type an unannotated binding initialized by `expr as
+// T` takes: inferExprType decides narrow-vs-erase; a widening to a union
+// (`"5" as string | number`) types the binding by it, as tsc does: the slot
+// is the box.
+func (e *Emitter) asBindingType(init *ast.AsExpression) Type {
+	ty := e.inferExprType(init)
+	if init.TypeAnnot != nil && !ty.IsDynamic {
+		if t := e.resolveType(init.TypeAnnot); t.IsDynamic && len(t.UnionMembers) > 0 {
+			ty = t
+		}
+	}
+	return ty
+}
+
+// declaredStorageAgrees reports whether the checker's declared type for the
+// module binding v maps to the storage ty, which the declaration stores.
+func (e *Emitter) declaredStorageAgrees(v *ast.VarDeclaration, ty Type) bool {
+	c := e.front()
+	if c == nil || ty.IR == "" || ty.IR == "void" {
+		return false
+	}
+	t := c.ModuleVarType(v)
+	if c.Unanswered(t) {
+		return false
+	}
+	r, ok := e.repr().of(t)
+	if !ok {
+		return false
+	}
+	return r.IR == ty.IR && r.IsArray == ty.IsArray && r.IsDynamic == ty.IsDynamic && r.IsTypedArray == ty.IsTypedArray &&
+		isNullableScalar(r) == isNullableScalar(ty) && r.Nullable == ty.Nullable && reprKey(r) == reprKey(ty)
 }
 
 // classDerives reports whether class sub has base among its ancestors.
@@ -332,11 +479,7 @@ func initHasFunction(init ast.Expression) bool {
 // later emits. Anything else (object/`Map`/`Set`/`bigint`/un-annotated call)
 // returns ok=false and stays a local.
 func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
-	ty, ok := e.decideGlobalType(v)
-	if e.shadowOracle != nil {
-		e.shadowGlobalType(v, ty, ok)
-	}
-	return ty, ok
+	return e.decideGlobalType(v)
 }
 
 func (e *Emitter) decideGlobalType(v *ast.VarDeclaration) (Type, bool) {
@@ -426,27 +569,8 @@ func (e *Emitter) decideGlobalType(v *ast.VarDeclaration) (Type, bool) {
 			elemTy = kv.key
 		}
 		return SetType(elemTy), true
-	case *ast.NewChannelExpression:
-		// A klain:sync channel is a single ptr slot; unlike the connection
-		// handles isHandleNewExpr excludes (Worker/MessageChannel open a
-		// thread/socket at construction), klainsync_chan_new just allocates an
-		// hchan — no thread, no fd, scheduler starts lazily on first `go` — so
-		// it is safe to promote to a module global. Promoting it is what lets a
-		// named `function` reference a top-level channel with its type intact
-		// (matching the emitVarDecl case for the same node).
-		msgTy := TypeI64
-		if init.TypeArg != nil {
-			msgTy = e.resolveType(init.TypeArg)
-		}
-		return ChannelType(msgTy), true
 	case *ast.NewWeakMapExpression:
-		keyTy, valTy := TypePtr, TypeI64
-		if init.KeyType != nil {
-			keyTy = e.resolveType(init.KeyType)
-		}
-		if init.ValType != nil {
-			valTy = e.resolveType(init.ValType)
-		}
+		keyTy, valTy := e.weakMapKV(init, v.TypeAnnot)
 		return WeakMapType(keyTy, valTy), true
 	case *ast.NewWeakSetExpression:
 		elemTy := TypePtr
@@ -544,6 +668,10 @@ func (e *Emitter) decideGlobalType(v *ast.VarDeclaration) (Type, bool) {
 		}
 		return Type{}, false
 	case *ast.CallExpression:
+		if r, ok := e.builtinIteratorCall(init); ok {
+			// `x[Symbol.iterator]()`: the method call it is.
+			init = r
+		}
 		// A named non-generic non-async function returning a composite — the call
 		// shape emitVarDecl sets ty = sig.RetType for.
 		if id, ok := init.Callee.(*ast.Identifier); ok {
@@ -573,11 +701,14 @@ func (e *Emitter) decideGlobalType(v *ast.VarDeclaration) (Type, bool) {
 		return Type{}, false
 	case *ast.MemberExpression, *ast.IndexExpression:
 		// A property of an `any` module global (`const s = c.subtle`): an
-		// `any`, as the declaration stores it.
-		if e.dynamicGlobalPath(init) {
+		// `any`, as the declaration stores it — unless the property's static
+		// type is concrete (a `Record<string, T[]>` read), which the
+		// declaration unboxes into.
+		ty := e.inferExprType(init)
+		if e.dynamicGlobalPath(init) && ty.IsDynamic {
 			return TypeAny, true
 		}
-		if ty := e.inferExprType(init); isSimpleGlobalType(ty) {
+		if isSimpleGlobalType(ty) {
 			return ty, true
 		}
 		return Type{}, false
@@ -600,21 +731,18 @@ func (e *Emitter) decideGlobalType(v *ast.VarDeclaration) (Type, bool) {
 		}
 		return Type{}, false
 	case *ast.ArrayLiteral:
-		// A strict-mode heterogeneous inferred empty array is rejected at the
-		// emit site (emitVarDeclBody) with an actionable message; don't promote
-		// it as a reliable global type here (that would bypass the rejection).
-		if !e.compatJS() && e.isInferredHeterogeneousEmptyArray(v, init) {
-			return Type{}, false
-		}
 		ty := e.declaredArrayType(v.Name, init)
 		if ty.IsArray && ty.ElemType != nil {
 			return ty, true
 		}
 	case *ast.ObjectLiteral:
 		// `-compat=js` (TDD-00022 break shape 4): an untyped object-literal
-		// binding is a D1 dynamic object, so it never promotes as a static
-		// struct here (the vardecl types it TypeAny below).
+		// binding is a D1 dynamic object held in an `any` (the vardecl types
+		// it TypeAny), so it promotes as an `any` global a function reads.
 		if e.compatJS() {
+			if v.TypeAnnot == nil {
+				return TypeAny, true
+			}
 			return Type{}, false
 		}
 		ty := e.inferObjectType(init)
@@ -673,6 +801,14 @@ func (e *Emitter) promotableInitInPrePass(expr ast.Expression) bool {
 		}
 		_, sig, found := e.resolveFuncRef(id.Name)
 		if !found {
+			// A builtin lowered to a library function returning a class
+			// instance (`setInterval(f, ms)`'s Timeout), whatever its
+			// arguments.
+			if l, lowered := e.loweredCall(ex); lowered && l.libFn != "" {
+				if _, lsig, ok := e.resolveFuncRef(l.libFn); ok && lsig.RetType.IsClass && !lsig.MaySuspend && !lsig.IsAsync {
+					return true
+				}
+			}
 			return e.prePassStableBuiltinCall(ex)
 		}
 		if sig.MaySuspend || sig.IsAsync {
@@ -1084,7 +1220,6 @@ func (e *Emitter) isBuiltinSymbolCall(ex *ast.CallExpression) bool {
 var prePassScalarGlobalFns = map[string]bool{
 	"parseInt": true, "parseFloat": true, "Number": true, "String": true, "Boolean": true,
 	"isNaN": true, "isFinite": true,
-	"setTimeout": true, "setInterval": true, "setImmediate": true,
 	"encodeURIComponent": true, "decodeURIComponent": true, "encodeURI": true, "decodeURI": true,
 	"btoa": true, "atob": true, "BigInt": true,
 }
@@ -1198,7 +1333,7 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			return e.emitSetVarDecl(v, init)
 		}
 		if init, ok := v.Init.(*ast.NewWeakMapExpression); ok {
-			val, err := e.emitNewWeakMapValue(init)
+			val, err := e.emitNewWeakMapValueAnnotated(init, v.TypeAnnot)
 			if err != nil {
 				return err
 			}
@@ -1214,7 +1349,7 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			return nil
 		}
 	}
-	if init, ok := v.Init.(*ast.NewCompressionStreamExpression); ok {
+	if init, ok := v.Init.(*ast.NewCompressionStreamExpression); ok && !dynAnnot {
 		val, err := e.emitNewCompressionStream(init)
 		if err != nil {
 			return err
@@ -1222,7 +1357,7 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 		e.storePtrHandleVarDecl(v, val)
 		return nil
 	}
-	if init, ok := v.Init.(*ast.NewTransformStreamExpression); ok {
+	if init, ok := v.Init.(*ast.NewTransformStreamExpression); ok && !dynAnnot {
 		val, err := e.emitNewTransformStream(init)
 		if err != nil {
 			return err
@@ -1230,7 +1365,7 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 		e.storePtrHandleVarDecl(v, val)
 		return nil
 	}
-	if init, ok := v.Init.(*ast.NewWritableStreamExpression); ok {
+	if init, ok := v.Init.(*ast.NewWritableStreamExpression); ok && !dynAnnot {
 		val, err := e.emitNewWritableStream(init)
 		if err != nil {
 			return err
@@ -1238,7 +1373,7 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 		e.storePtrHandleVarDecl(v, val)
 		return nil
 	}
-	if init, ok := v.Init.(*ast.NewReadableStreamExpression); ok {
+	if init, ok := v.Init.(*ast.NewReadableStreamExpression); ok && !dynAnnot {
 		val, err := e.emitNewReadableStream(init)
 		if err != nil {
 			return err
@@ -1274,7 +1409,7 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 	// properties are methods, not fields, so a structural read would silently
 	// return a non-existent field. Reject cleanly rather than miscompile. (Same
 	// literal's own inferred binding keeps the synthetic class type and works.)
-	if v.TypeAnnot != nil && ty.IsObject && !coerciblePure(e.inferExprType(v.Init), ty) &&
+	if v.TypeAnnot != nil && v.Init != nil && ty.IsObject && !coerciblePure(e.inferExprType(v.Init), ty) &&
 		isSyntheticObjLitClass(e.inferExprType(v.Init)) {
 		return fmt.Errorf("%d:%d: an object literal with a getter/setter can't be assigned to a differently-shaped object type (its accessors are not plain fields) — use it directly, or give the target the same shape", v.GetPos().Line, v.GetPos().Col)
 	}
@@ -1315,6 +1450,12 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 				// A named function taken by value (`const g = f`) is a closure
 				// value — a ptr — so the slot must be sized as one.
 				ty = funcValueType(sig)
+			} else if m, lowered := e.loweredGlobalFn(init); lowered {
+				// A builtin lowered to a library function (`const st =
+				// setTimeout`): that function's value.
+				if _, sig, found := e.resolveFuncRef(m); found {
+					ty = funcValueType(sig)
+				}
 			} else if _, isClass := e.classes[init.Name]; isClass {
 				ty = TypeAny // `const K = C`: the constructor reference
 			} else if isErrorKindName(init.Name) || sema.IsBuiltinConstructor(init.Name) || init.Name == "Promise" {
@@ -1361,12 +1502,7 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			// inferExprType decides narrow-vs-erase. A widening to a union
 			// (`"5" as string | number`) types the binding by it, as tsc does:
 			// the slot is the box.
-			ty = e.inferExprType(init)
-			if init.TypeAnnot != nil && !ty.IsDynamic {
-				if t := e.resolveType(init.TypeAnnot); t.IsDynamic && len(t.UnionMembers) > 0 {
-					ty = t
-				}
-			}
+			ty = e.asBindingType(init)
 		case *ast.SequenceExpression:
 			// The comma operator's value is its last operand's — inferExprType
 			// handles that; without this case the switch's default left `ty` at
@@ -1375,9 +1511,6 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			// and then stored a pointer into it (invalid IR).
 			ty = e.inferExprType(init)
 		case *ast.ArrayLiteral:
-			if !e.compatJS() && e.isInferredHeterogeneousEmptyArray(v, init) {
-				return heterogeneousArrayStrictError(v.GetPos())
-			}
 			ty = e.declaredArrayType(v.Name, init)
 		case *ast.ObjectLiteral:
 			// `-compat=js` (TDD-00022 break shape 4): an untyped object
@@ -1401,18 +1534,10 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			if init.Shared {
 				ty = SharedArrayBufferType()
 			}
-		case *ast.NewChannelExpression:
-			if init.TypeArg != nil {
-				ty = ChannelType(e.resolveType(init.TypeArg))
-			} else {
-				ty = ChannelType(TypeI64)
-			}
 		case *ast.NewTypedArrayExpression:
 			ty = TypedArrayType(init.ElemKind)
 		case *ast.NewRegExpExpression:
 			ty = RegExpType()
-		case *ast.NewWebviewExpression:
-			ty = WebviewType()
 		case *ast.NewRequestExpression:
 			ty = FetchRequestType()
 		case *ast.NewXMLHttpRequestExpression:
@@ -1446,6 +1571,10 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			// what emitExpr(v.Init) actually produces as a ptr-typed
 			// generator instance, a hard clang-stage type mismatch, not
 			// just a wrong result).
+			if _, ok := e.builtinIteratorCall(init); ok {
+				ty = e.inferExprType(init) // `x[Symbol.iterator]()`: its method's
+				break
+			}
 			if init.Optional {
 				// `f?.(...)` is `RetType | undefined`: the callee-name switch
 				// below knows nothing of the `undefined` half, and its blind
@@ -1514,6 +1643,10 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 					// (`const y = identity("hi")`) hit this exact gap.
 					if _, isGen := e.lookupGenerator(callee.Name); isGen {
 						// ty is the generator instance, set above.
+					} else if l, lowered := e.loweredCall(init); lowered && l.libFn != "" {
+						// A builtin lowered to a library function
+						// (`setTimeout`): that function's return.
+						ty = l.resultType()
 					} else if _, sig, found := e.resolveFuncRef(callee.Name); found && sig.RetType.IR != "void" {
 						// isNullableScalar preserved too (ADR-00538): a
 						// `T | null`-returning function assigned to an
@@ -1715,6 +1848,26 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 		ty = indexReadType(ty)
 	}
 
+	// A module global registered with undefined storage
+	// (globalUndefinedStorage) is stored as that.
+	if e.promotedGlobalDecls[v] && v.TypeAnnot != nil {
+		if g := e.moduleGlobals[v.Name]; g.Ty.IsUndefined && !ty.Nullable && (isNullableScalar(g.Ty) || isStringTy(g.Ty)) {
+			ty = g.Ty
+		}
+	}
+	// A typed local declared without a value (`let n: number;`) holds
+	// undefined until assigned: a read before then (a path the definite-
+	// assignment check cannot see, a closure) reads undefined, as in Node.
+	if v.Init == nil && v.TypeAnnot != nil && !v.Ambient && !e.promotedGlobalDecls[v] && !ty.Nullable && !ty.IsDynamic && len(ty.UnionMembers) == 0 {
+		switch {
+		case (ty.Float && ty.IR == "double") || ty.IR == "i1":
+			ty = undefinedableElem(ty)
+			ty.IsUndefined = true
+		case isStringTy(ty):
+			ty.Nullable, ty.IsUndefined = true, true
+		}
+	}
+
 	// A nullable non-pointer scalar (`number | null`, `boolean | null`, ...)
 	// gets a presence-flagged { i1, T } slot rather than a bare scalar — see
 	// emit_nullable_scalar.go / TDD-00064.
@@ -1874,6 +2027,36 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			if !coerciblePure(val.Ty, ty) {
 				return fmt.Errorf("%d:%d: initializer's type is incompatible with the variable's type — this compiler is a typed subset", v.GetPos().Line, v.GetPos().Col)
 			}
+			// A string slot given a value that may be undefined (a read past an
+			// array's end) holds that undefined: the binding keeps it, so it
+			// prints, compares and types as undefined (TS types it string).
+			keepUndef := false
+			switch {
+			case isStringTy(ty) && !ty.Nullable && !ty.IsDynamic && val.Ty.Nullable && val.Ty.IsUndefined && !val.Ty.NullAndUndef && isStringTy(val.Ty.withoutNullable()):
+				ty.Nullable, ty.IsUndefined = true, true
+				keepUndef = true
+			case ty.Float && ty.IR == "double" && !ty.Nullable && isNullableScalar(val.Ty) && val.Ty.IsUndefined && !val.Ty.NullAndUndef && val.Ty.withoutNullable().Float:
+				// The same for a local number (`const q: number = a[4]`): a
+				// slot of its own, as `number | undefined` has. A module
+				// global's storage is fixed before its initializer runs.
+				if sym, ok := e.lookup(v.Name); ok && strings.HasPrefix(sym.Ptr, "%") && !sym.Boxed {
+					nty := undefinedableElem(ty)
+					nty.IsUndefined = true
+					slot := e.freshReg()
+					e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, storageIR(nty)))
+					cv := e.coerce(val, nty)
+					e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", storageIR(nty), cv.Ref, slot))
+					sym.Ptr, sym.Ty, sym.NullableBoxed = slot, nty, true
+					e.define(v.Name, sym)
+					return nil
+				}
+			}
+			if keepUndef {
+				if sym, ok := e.lookup(v.Name); ok {
+					sym.Ty = ty
+					e.define(v.Name, sym)
+				}
+			}
 			val = e.coerce(val, ty)
 		}
 		// Re-resolve the variable's current storage location rather than
@@ -1923,4 +2106,52 @@ func (e *Emitter) prePassStableArgs(args []ast.Expression) bool {
 		}
 	}
 	return true
+}
+
+// globalUndefinedStorage is a module global's storage type when it may hold
+// undefined though its annotation is a plain number, boolean or string: no
+// initializer (`let n: number;`), or one that may be undefined (`const c:
+// number = a[9]`) — the `T | undefined` form, as for a local.
+func (e *Emitter) globalUndefinedStorage(v *ast.VarDeclaration, ty Type) Type {
+	if v.TypeAnnot == nil || v.Ambient || ty.Nullable || ty.IsDynamic || len(ty.UnionMembers) > 0 {
+		return ty
+	}
+	scalar := (ty.Float && ty.IR == "double") || ty.IR == "i1"
+	if !scalar && !isStringTy(ty) {
+		return ty
+	}
+	if v.Init != nil {
+		it := e.inferExprType(v.Init)
+		if !it.Nullable || !it.IsUndefined || it.NullAndUndef {
+			return ty
+		}
+		if scalar != isNullableScalar(it) {
+			return ty
+		}
+	}
+	if scalar {
+		nt := undefinedableElem(ty)
+		nt.IsUndefined = true
+		return nt
+	}
+	ty.Nullable, ty.IsUndefined = true, true
+	return ty
+}
+
+// nestedVarDecls is the `var` declarations inside a top-level statement's
+// blocks, outside any function or class body: each is module scoped.
+func nestedVarDecls(stmt ast.Statement) []*ast.VarDeclaration {
+	var out []*ast.VarDeclaration
+	ast.Inspect(stmt, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration, *ast.ClassExpression:
+			return false
+		case *ast.VarDeclaration:
+			if x.Kind == "var" && x.Name != "" {
+				out = append(out, x)
+			}
+		}
+		return true
+	})
+	return out
 }

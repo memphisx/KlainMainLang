@@ -38,6 +38,14 @@ var (
 	irSymRe     = regexp.MustCompile(`@([-a-zA-Z$._0-9]+|"[^"]*")`)
 	libModKeyRe = regexp.MustCompile(`__kml_modL(\d+)`)
 	libInitRe   = regexp.MustCompile(`^__kml_lib_(.+)_(init|done)$`)
+	// libLiteralRe is a function literal of library code, named by its
+	// position (literalSymbol): `__closure.node_internal_fs.36_34`.
+	libLiteralRe = regexp.MustCompile(`^__(?:closure|generator_body|generator_method|kml_dynfn)\.(node_[A-Za-z0-9_]+)\.\d`)
+	// stableHelperRe is a helper generated for one layout or host type id
+	// (shape row, inspect routine, conversion from any): the id is the
+	// number, its low 32 bits in the stable range for a library type.
+	dynPropHelperRe = regexp.MustCompile(`^__kml_dyn(get|set)\.([0-9a-f]+)$`)
+	stableHelperRe  = regexp.MustCompile(`^__kml_(?:(?:shape_get|shape_set|shape_keys|shape_syms|host_inspect|any_to_layout)[._](\d+)(?:_\d+)?|shape_m\.(\d+)\..+|(?:host_m|shape_get_host|shape_set_host|rec_read|rec_write|gen_dyn|inspect_custom)_(\d+)(?:_.+)?)$`)
 	// dynTargetRe: a lazy import() target's init, body, start and fulfill;
 	// dynFileRe: a dynamic-only file's run-once flag (emit_dynmodule.go).
 	dynTargetRe = regexp.MustCompile(`^__kml_dyn_([0-9a-f]{16})_`)
@@ -48,6 +56,10 @@ var (
 // init, which always goes into the target's own shared library. A file's
 // unit is `isl_<h>` (ast.DynModuleKey).
 func IslandTargetKey(h string) string { return "isl_t_" + h }
+
+// StableUnitKey is the unit of the helpers generated for one library-stable
+// type id.
+func StableUnitKey(id uint64) string { return fmt.Sprintf("stb_%08x", id) }
 
 // islandOwner reports whether owner is a lazy import() island unit.
 func islandOwner(owner string) bool { return strings.HasPrefix(owner, "isl_") }
@@ -70,6 +82,27 @@ func libOwner(name string) string {
 	if m := dynFileRe.FindStringSubmatch(name); m != nil {
 		return "isl_" + m[1]
 	}
+	// A library function literal is its module's: it is emitted with the
+	// function that holds it, the same in every program.
+	if m := libLiteralRe.FindStringSubmatch(name); m != nil {
+		return m[1]
+	}
+	// A dynamic property read or write is generated per property name and
+	// is the same in every program that names it (only `constructor`
+	// lists the program's Error subclasses), so it is a unit of its own.
+	if m := dynPropHelperRe.FindStringSubmatch(name); m != nil {
+		return "dyn_" + m[1] + "_" + m[2]
+	}
+	// A helper generated for a library-stable id is the same in every
+	// program that needs it, so it is a unit of its own, cached by its text
+	// whatever else the program boxes.
+	if m := stableHelperRe.FindStringSubmatch(name); m != nil {
+		var id uint64
+		fmt.Sscanf(m[1]+m[2]+m[3], "%d", &id)
+		if id&uint64(kmlHdrIDMask) >= uint64(kmlStableIDBase) {
+			return StableUnitKey(id & uint64(kmlHdrIDMask))
+		}
+	}
 	if strings.HasPrefix(name, "__") && !strings.HasPrefix(name, "__kml_global_") {
 		return ""
 	}
@@ -85,6 +118,10 @@ func libOwner(name string) string {
 	}
 	return name[start : start+n]
 }
+
+// LibOwner is libOwner for a symbol named in IR text (quotes allowed): the
+// unit a definition is compiled in, "" for the program's.
+func LibOwner(sym string) string { return libOwner(strings.Trim(sym, `"`)) }
 
 // parseIREntities splits module text into top-level entities.
 func parseIREntities(ll string) []irEntity {
@@ -663,9 +700,20 @@ func cachedUnitObject(cacheDir, k, text string, compileFlags []string) (obj stri
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", false, err
 	}
-	stem := fmt.Sprintf("%s.%d", strings.TrimSuffix(obj, ".o"), os.Getpid())
-	if err := os.WriteFile(stem+".ll", []byte(text), 0o644); err != nil {
+	// A unique stem: concurrent compiles of one unit (a parallel
+	// conformance run's goroutines share a process) must not share files.
+	f, err := os.CreateTemp(cacheDir, filepath.Base(strings.TrimSuffix(obj, ".o"))+".*.ll")
+	if err != nil {
 		return "", false, err
+	}
+	stem := strings.TrimSuffix(f.Name(), ".ll")
+	_, werr := f.WriteString(text)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		os.Remove(f.Name())
+		return "", false, werr
 	}
 	args := append(append([]string{}, compileFlags...), "-Wno-override-module", "-c", stem+".ll", "-o", stem+".o.tmp")
 	out, cerr := ClangCommand(args...).CombinedOutput()

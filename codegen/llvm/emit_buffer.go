@@ -357,6 +357,15 @@ func (e *Emitter) emitBufferStaticCall(method string, args []ast.Expression, pos
 			return Value{}, fmt.Errorf("%d:%d: Buffer.concat takes (list, totalLength?)", pos.Line, pos.Col)
 		}
 		lit, ok := args[0].(*ast.ArrayLiteral)
+		if ok {
+			// A spread element makes the list's length dynamic: the list path.
+			for _, elem := range lit.Elements {
+				if _, spread := elem.(*ast.SpreadElement); spread {
+					ok = false
+					break
+				}
+			}
+		}
 		if !ok {
 			return e.emitBufferConcatList(args, pos)
 		}

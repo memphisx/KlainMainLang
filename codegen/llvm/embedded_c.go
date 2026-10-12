@@ -3,6 +3,7 @@ package llvm
 import (
 	"fmt"
 	"runtime"
+	"strings"
 )
 
 // CSource is one embedded C runtime file that must be compiled and linked
@@ -20,6 +21,25 @@ type CSource struct {
 	// C++14 member — the webview binding — sets "cc" so clang's driver picks
 	// the C++ frontend. SrcExt() resolves the default.
 	Ext string
+}
+
+// Standalone is the source for a clang command that compiles several
+// sources together, where a -D would reach every one of them: its own
+// defines open its text, and the flags left are the rest of CFlags.
+func (cs CSource) Standalone() (content string, flags []string) {
+	var defs strings.Builder
+	for _, f := range cs.CFlags {
+		if d, ok := strings.CutPrefix(f, "-D"); ok {
+			name, val, hasVal := strings.Cut(d, "=")
+			if !hasVal {
+				val = "1"
+			}
+			defs.WriteString("#define " + name + " " + val + "\n")
+			continue
+		}
+		flags = append(flags, f)
+	}
+	return defs.String() + cs.Content, flags
 }
 
 // NeedsMoc reports whether this source must have Qt's moc run over it (producing
@@ -68,13 +88,6 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		}
 		cflags, libs := LocateCrypto(backend)
 		out = append(out, CSource{"crypto", src, cflags, libs, ""})
-	}
-	if e.UsesTLS() {
-		if e.CryptoBackend() == "commoncrypto" {
-			return nil, fmt.Errorf("tls: the `tls` module requires the OpenSSL crypto backend")
-		}
-		cflags, libs := LocateTLS()
-		out = append(out, CSource{"tls", TLSClientSource(), cflags, libs, ""})
 	}
 	if e.UsesTLSHandles() {
 		if e.CryptoBackend() == "commoncrypto" {
@@ -132,10 +145,13 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"pathwin32", PathWin32Source(), nil, nil, ""})
 	}
 	if e.UsesDynJSON() {
-		out = append(out, CSource{"dynjson", DynJSONSource(), e.dynJSONViewFlags(), nil, ""})
+		out = append(out, CSource{"dynjson", DynJSONSource(), append(e.dynJSONViewFlags(), fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", e.arrayHeaderWord())), nil, ""})
 	}
 	if e.usedJmpStack {
 		out = append(out, CSource{"jmpstack", JmpStackSource(), nil, nil, ""})
+	}
+	if e.usedStackGuard {
+		out = append(out, CSource{"stackguard", StackGuardSource(), nil, nil, ""})
 	}
 	if e.UsesMicrotasks() {
 		out = append(out, CSource{"microtask", MicrotaskSource(), nil, nil, ""})
@@ -171,7 +187,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"dynjsonnode", DynJSONNodeSource(), nil, nil, ""})
 	}
 	if e.UsesDate() {
-		out = append(out, CSource{"date", DateSource(), nil, nil, ""})
+		out = append(out, CSource{"date", DateSource(), nil, LibmLibs(), ""})
 	}
 	if e.UsesEncoding() {
 		out = append(out, CSource{"encoding", EncodingSource(), nil, nil, ""})
@@ -192,7 +208,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"process", ProcessSource(), e.ProcessCFlags(), nil, ""})
 	}
 	if e.UsesAsyncHooks() {
-		out = append(out, CSource{"asynchooks", AsyncHooksSource(), e.AsyncHooksCFlags(), nil, ""})
+		out = append(out, CSource{"asynchooks", AsyncHooksSource(), nil, nil, ""})
 	}
 	if e.UsesViews() {
 		out = append(out, CSource{"views", e.ViewsSource(), e.dynJSONViewFlags(), nil, ""})
@@ -215,9 +231,6 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if e.UsesZlibStream() {
 		out = append(out, CSource{"zlibstream", ZlibStreamSource(), nil, nil, ""})
 	}
-	if e.UsesChildProcRuntime() {
-		out = append(out, CSource{"childproc", ChildProcSource(), nil, nil, ""})
-	}
 	if e.UsesFetch() {
 		out = append(out, CSource{"fetch", FetchSource(), e.FetchCFlags(), nil, ""})
 	}
@@ -233,9 +246,6 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if e.UsesWorkers() {
 		out = append(out, CSource{"worker", WorkerSource(), e.WorkerCFlags(), nil, ""})
 	}
-	if e.UsesCPIPC() {
-		out = append(out, CSource{"cpipc", CPIPCSource(), nil, nil, ""})
-	}
 	if e.UsesIPCChild() {
 		out = append(out, CSource{"ipcc", IPCChildSource(), nil, nil, ""})
 	}
@@ -246,7 +256,17 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"net", NetSource(), nil, nil, ""})
 	}
 	if e.UsesTimers() {
-		out = append(out, CSource{"timers", TimersSource(), nil, nil, ""})
+		// POSIX timers are uv_timer_t handles (the loop links libuv).
+		var cflags []string
+		if e.opts.Target.OS() != "windows" {
+			cflags, _ = LocateUV(e.opts.Target.OS(), e.opts.Target.Triple != "")
+		}
+		out = append(out, CSource{"timers", TimersSource(), cflags, nil, ""})
+	}
+	if e.usedEventLoop {
+		cflags, libs := LocateUV(e.opts.Target.OS(), e.opts.Target.Triple != "")
+		out = append(out, CSource{"loop", LoopSource(), append(cflags, e.loopCFlags...), libs, ""})
+		out = append(out, CSource{"httpsrv", HTTPSrvSource(), nil, nil, ""})
 	}
 	if e.UsesNative() {
 		out = append(out, CSource{"native", NativeSource(), e.NativeCFlags(), nil, ""})
@@ -317,7 +337,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"casemap", CasemapSource(), nil, LibmLibs(), ""})
 	}
 	if e.UsesStringC() {
-		out = append(out, CSource{"string", StringSource(), nil, LibmLibs(), ""})
+		out = append(out, CSource{"string", StringSource(), []string{fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", e.arrayHeaderWord())}, LibmLibs(), ""})
 	}
 	if e.UsesNumberC() {
 		out = append(out, CSource{"number", NumberSource(), nil, LibmLibs(), ""})
@@ -362,6 +382,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 			}
 			out = append(out, CSource{name, WebviewSource(e.WebviewBackend()), cflags, libs, "cc"})
 		}
+		out = append(out, CSource{"wvnatives", webviewNatives, nil, nil, ""})
 	}
 	if e.UsesHeapStats() {
 		// process.memoryUsage() heapTotal/heapUsed. Under -mm=gc it reads Boehm's
@@ -428,6 +449,10 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		} else {
 			out = append(out, CSource{"threadpool", ThreadPoolSource(), e.ThreadPoolCFlags(), nil, ""})
 		}
+	}
+	if e.usedCaresNatives {
+		cflags, libs := e.CaresFlags()
+		out = append(out, CSource{"cares", CaresSource(), cflags, libs, ""})
 	}
 	if e.UsesEmbeddedAssets() {
 		// The embedded static server needs pthread; -pthread is already added

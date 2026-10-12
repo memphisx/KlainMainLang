@@ -21,19 +21,19 @@ Each file has its `// META:` frontmatter stripped, a typed `testharness.js`-shap
 
 ## Overall
 
-4207 headless source files — the full corpus class, every one attempted: **11 passed**, 1955 failed, 2241 skipped (counted, reasons below). In wpt.fyi's unit these 4207 sources correspond to **7077 generated test documents** (`META: global=` variant expansion; each source runs once here — no distinct per-scope globals exist in this runtime — so the expansion is denominator comparability, not extra coverage).
+4207 headless source files — the full corpus class, every one attempted: **42 passed**, 1924 failed, 2241 skipped (counted, reasons below). In wpt.fyi's unit these 4207 sources correspond to **7077 generated test documents** (`META: global=` variant expansion; each source runs once here — no distinct per-scope globals exist in this runtime — so the expansion is denominator comparability, not extra coverage).
 
-Of the 1966 files that were in scope and compiled far enough to run, **11 passed (0.6%)** at the file level (a file passes only if *every* subtest in it passes).
+Of the 1966 files that were in scope and compiled far enough to run, **42 passed (2.1%)** at the file level (a file passes only if *every* subtest in it passes).
 
-**Subtest level (the metric WPT itself reports): 32 / 86 subtests passed (37.2%)** across the files that compiled and ran — each `test`/`promise_test`/`async_test` is one subtest. This is the finer, fairer number: a file with 30 passing subtests and 1 failing counts 30/31 here but 0 at the file level above.
+**Subtest level (the metric WPT itself reports): 3147 / 5313 subtests passed (59.2%)** across the files that compiled and ran — each `test`/`promise_test`/`async_test` is one subtest. This is the finer, fairer number: a file with 30 passing subtests and 1 failing counts 30/31 here but 0 at the file level above.
 
 ## By area
 
 | Area | Files pass | Files fail | Files skip | Subtests pass/total |
 |---|---|---|---|---|
-| FileAPI | 1 | 33 | 11 | 4/4 |
-| IndexedDB | 0 | 3 | 210 | 0/0 |
-| WebCryptoAPI | 0 | 103 | 26 | 0/0 |
+| FileAPI | 2 | 32 | 11 | 15/15 |
+| IndexedDB | 1 | 2 | 210 | 1/1 |
+| WebCryptoAPI | 0 | 103 | 26 | 2/8 |
 | accelerometer | 0 | 0 | 1 | 0/0 |
 | ai | 0 | 1 | 158 | 0/0 |
 | ambient-light | 0 | 0 | 1 | 0/0 |
@@ -54,7 +54,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **11 passed
 | compression | 0 | 19 | 1 | 0/0 |
 | compute-pressure | 0 | 3 | 15 | 0/0 |
 | connection-allowlist | 0 | 0 | 73 | 0/0 |
-| console | 0 | 6 | 1 | 0/0 |
+| console | 4 | 2 | 1 | 19/23 |
 | contacts | 0 | 0 | 1 | 0/0 |
 | content-index | 0 | 0 | 2 | 0/0 |
 | content-security-policy | 1 | 9 | 14 | 1/1 |
@@ -63,22 +63,22 @@ Of the 1966 files that were in scope and compiled far enough to run, **11 passed
 | cors | 0 | 0 | 3 | 0/0 |
 | cpu-performance | 0 | 0 | 1 | 0/0 |
 | credential-management | 0 | 0 | 1 | 0/0 |
-| css | 0 | 14 | 5 | 0/0 |
+| css | 1 | 13 | 5 | 1/1 |
 | custom-elements | 0 | 0 | 9 | 0/0 |
 | delegated-ink | 0 | 0 | 2 | 0/0 |
 | deprecation-reporting | 0 | 0 | 1 | 0/0 |
 | device-memory | 0 | 0 | 2 | 0/0 |
 | device-posture | 0 | 0 | 1 | 0/0 |
 | digital-credentials | 0 | 0 | 1 | 0/0 |
-| dom | 0 | 38 | 29 | 0/0 |
+| dom | 5 | 33 | 29 | 21/28 |
 | domparsing | 0 | 0 | 1 | 0/0 |
 | element-timing | 0 | 0 | 1 | 0/0 |
-| encoding | 0 | 30 | 11 | 0/0 |
+| encoding | 6 | 24 | 11 | 252/687 |
 | entries-api | 0 | 0 | 2 | 0/0 |
 | event-timing | 0 | 0 | 3 | 0/0 |
-| eventsource | 1 | 33 | 13 | 1/1 |
+| eventsource | 0 | 34 | 13 | 0/10 |
 | eyedropper | 0 | 0 | 1 | 0/0 |
-| fetch | 0 | 119 | 128 | 0/0 |
+| fetch | 3 | 116 | 128 | 31/169 |
 | file-system-access | 0 | 0 | 5 | 0/0 |
 | font-access | 0 | 0 | 6 | 0/0 |
 | fs | 0 | 10 | 33 | 0/0 |
@@ -88,8 +88,8 @@ Of the 1966 files that were in scope and compiled far enough to run, **11 passed
 | geolocation | 0 | 0 | 3 | 0/0 |
 | gpc | 0 | 0 | 1 | 0/0 |
 | gyroscope | 0 | 0 | 1 | 0/0 |
-| hr-time | 0 | 3 | 1 | 0/0 |
-| html | 1 | 1075 | 288 | 2/4 |
+| hr-time | 0 | 3 | 1 | 0/7 |
+| html | 1 | 1075 | 288 | 6/8 |
 | html-aam | 0 | 0 | 1 | 0/0 |
 | html-media-capture | 0 | 0 | 1 | 0/0 |
 | idle-detection | 0 | 0 | 4 | 0/0 |
@@ -123,7 +123,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **11 passed
 | mimesniff | 0 | 2 | 4 | 0/0 |
 | mixed-content | 0 | 0 | 2 | 0/0 |
 | mst-content-hint | 0 | 0 | 1 | 0/0 |
-| navigation-timing | 0 | 1 | 2 | 0/0 |
+| navigation-timing | 0 | 1 | 2 | 0/1 |
 | netinfo | 0 | 0 | 1 | 0/0 |
 | notifications | 0 | 1 | 9 | 0/0 |
 | orientation-event | 0 | 0 | 3 | 0/0 |
@@ -131,7 +131,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **11 passed
 | paint-timing | 0 | 0 | 4 | 0/0 |
 | payment-method-manifest | 0 | 0 | 9 | 0/0 |
 | payment-request | 0 | 1 | 1 | 0/0 |
-| performance-timeline | 1 | 18 | 15 | 1/1 |
+| performance-timeline | 3 | 16 | 15 | 5/15 |
 | periodic-background-sync | 0 | 0 | 2 | 0/0 |
 | permissions | 0 | 1 | 2 | 0/0 |
 | permissions-policy | 0 | 0 | 12 | 0/0 |
@@ -153,21 +153,21 @@ Of the 1966 files that were in scope and compiled far enough to run, **11 passed
 | screen-capture | 0 | 1 | 3 | 0/0 |
 | screen-details | 0 | 0 | 3 | 0/0 |
 | screen-orientation | 0 | 0 | 1 | 0/0 |
-| screen-wake-lock | 0 | 1 | 4 | 0/0 |
+| screen-wake-lock | 1 | 0 | 4 | 1/1 |
 | scroll-animations | 0 | 0 | 1 | 0/0 |
 | scroll-performance-timing | 0 | 0 | 1 | 0/0 |
 | scroll-to-text-fragment | 0 | 0 | 1 | 0/0 |
 | selection | 0 | 0 | 1 | 0/0 |
 | serial | 0 | 0 | 3 | 0/0 |
 | server-timing | 0 | 0 | 1 | 0/0 |
-| service-workers | 0 | 6 | 15 | 0/0 |
+| service-workers | 0 | 6 | 15 | 0/1 |
 | shape-detection | 0 | 3 | 3 | 0/0 |
-| soft-navigation-heuristics | 0 | 1 | 3 | 0/0 |
+| soft-navigation-heuristics | 1 | 0 | 3 | 1/1 |
 | speculation-rules | 0 | 2 | 1 | 0/0 |
 | speech-api | 0 | 0 | 2 | 0/0 |
 | storage | 0 | 0 | 23 | 0/0 |
 | storage-access-api | 0 | 0 | 41 | 0/0 |
-| streams | 0 | 72 | 7 | 0/0 |
+| streams | 0 | 72 | 7 | 3/13 |
 | subapps | 0 | 0 | 1 | 0/0 |
 | subresource-integrity | 0 | 1 | 14 | 0/0 |
 | svg | 0 | 0 | 1 | 0/0 |
@@ -177,9 +177,9 @@ Of the 1966 files that were in scope and compiled far enough to run, **11 passed
 | trusted-types | 0 | 0 | 1 | 0/0 |
 | ua-client-hints | 0 | 0 | 2 | 0/0 |
 | uievents | 0 | 0 | 1 | 0/0 |
-| url | 5 | 16 | 7 | 20/27 |
-| urlpattern | 0 | 7 | 0 | 0/0 |
-| user-timing | 0 | 22 | 1 | 0/0 |
+| url | 6 | 15 | 7 | 2689/4058 |
+| urlpattern | 1 | 6 | 0 | 13/22 |
+| user-timing | 2 | 20 | 1 | 17/49 |
 | vibration | 0 | 0 | 1 | 0/0 |
 | video-rvfc | 0 | 0 | 1 | 0/0 |
 | virtual-keyboard | 0 | 0 | 1 | 0/0 |
@@ -197,7 +197,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **11 passed
 | webdriver | 0 | 0 | 1 | 0/0 |
 | webgl | 0 | 0 | 1 | 0/0 |
 | webhid | 0 | 0 | 2 | 0/0 |
-| webidl | 0 | 12 | 6 | 2/47 |
+| webidl | 1 | 11 | 6 | 40/103 |
 | webmcp | 0 | 0 | 1 | 0/0 |
 | webmessaging | 0 | 2 | 31 | 0/0 |
 | webmidi | 0 | 0 | 1 | 0/0 |
@@ -212,7 +212,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **11 passed
 | webusb | 0 | 5 | 16 | 0/0 |
 | webvtt | 0 | 0 | 1 | 0/0 |
 | webxr | 0 | 0 | 10 | 0/0 |
-| workers | 1 | 36 | 29 | 1/1 |
+| workers | 3 | 34 | 29 | 29/91 |
 | worklets | 0 | 0 | 1 | 0/0 |
 | xhr | 0 | 14 | 73 | 0/0 |
 | xml | 0 | 0 | 4 | 0/0 |
@@ -223,46 +223,46 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 938 | COMPILE_ERROR: undefined function or closure '%s' |
-| 273 | COMPILE_ERROR: expected IDENT, got => |
-| 96 | COMPILE_ERROR: undefined variable '%s' |
-| 96 | COMPILE_ERROR: unknown class '%s' |
-| 69 | COMPILE_ERROR: a number has no method '%s' |
-| 50 | COMPILE_ERROR: slice is only supported on strings |
-| 39 | COMPILE_ERROR: expected (, got ) |
-| 38 | COMPILE_ERROR: expected (, got ; |
-| 32 | COMPILE_ERROR: a destructured parameter requires an explicit type annotation |
-| 22 | COMPILE_ERROR: .length is only supported on arrays and strings |
-| 22 | COMPILE_ERROR: missing argument 1 with no default |
-| 19 | COMPILE_ERROR: unexpected token => in expression |
-| 14 | COMPILE_ERROR: expected IDENT, got async |
+| 989 | COMPILE_ERROR: undefined function or closure '%s' |
+| 288 | COMPILE_ERROR: expected IDENT, got => |
+| 126 | COMPILE_ERROR: undefined variable '%s' |
+| 102 | COMPILE_ERROR: unknown class '%s' |
+| 47 | COMPILE_ERROR: a number has no method '%s' |
+| 44 | COMPILE_ERROR: a destructured parameter requires an explicit type annotation |
+| 32 | COMPILE_ERROR: '%s' is not defined — did you forget "import path from '%s'"? |
+| 27 | COMPILE_ERROR: a string has no method '%s' |
+| 19 | COMPILE_ERROR: instanceof is only supported against user-defined classes; '%s' is not a registered c… |
 | 12 | COMPILE_ERROR: <path>: resolving dynamic import('%s'): cannot find module '%s' (resolved to <path>) |
-| 12 | COMPILE_ERROR: unexpected token ) in expression |
-| 10 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
-| 9 | COMPILE_ERROR: '%s' is not an array |
-| 9 | COMPILE_ERROR: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method |
 | 9 | COMPILE_ERROR: <path>: cannot find worker module '%s' (resolved to <path>) |
-| 9 | COMPILE_ERROR: field access on non-object (no field '%s') |
-| 9 | COMPILE_ERROR: no field '%s' |
-| 7 | COMPILE_ERROR: any/unknown is not yet supported nested inside an array or object parameter type |
-| 6 | COMPILE_ERROR: any/unknown is not yet supported as an array element or object field type |
-| 6 | COMPILE_ERROR: expected ), got , |
-| 5 | COMPILE_ERROR: an event listener must take exactly 1 argument (the event) |
-| 5 | COMPILE_ERROR: array elements must share one type — element 1 does not match the array's element t… |
-| 5 | COMPILE_ERROR: array elements must share one type — element 2 does not match the array's element t… |
-| 5 | COMPILE_ERROR: expected ;, got IDENT |
+| 9 | COMPILE_ERROR: expected ;, got IDENT |
+| 9 | COMPILE_ERROR: new Uint8Array(source, byteOffset?, length?) takes 1 to 3 arguments, got 0 |
+| 8 | COMPILE_ERROR: byte streams (underlying source '%s') are not supported — use a default stream of U… |
+| 8 | COMPILE_ERROR: only simple function calls are supported (the callee is not a named function, a funct… |
+| 7 | COMPILE_ERROR: a Response's stream body must be a ReadableStream<Uint8Array> (a stream of other chun… |
+| 7 | COMPILE_ERROR: class '%s' has no static method '%s' |
+| 6 | COMPILE_ERROR: class '%s' has no static field '%s' |
+| 6 | COMPILE_ERROR: field access on non-object (no field '%s') |
 | 5 | COMPILE_ERROR: expected {, got STRING |
-| 5 | COMPILE_ERROR: only simple function calls are supported (the callee is not a named function, a funct… |
-| 4 | COMPILE_ERROR: cannot infer type argument '%s' for generic function '%s' — declare a parameter typ… |
-| 4 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
-| 4 | COMPILE_ERROR: object has no field '%s' |
-| 4 | COMPILE_ERROR: unexpected token , in expression |
-| 4 | RUNTIME_NONZERO_EXIT:  |
-| 3 | COMPILE_ERROR: Headers' init argument must be a Map<string, string> |
-| 3 | COMPILE_ERROR: JSON.parse expects a string argument |
-| 3 | COMPILE_ERROR: Request's second argument must be an object with an optional method<path> field |
-| 3 | COMPILE_ERROR: a value of this type has no method '%s' |
+| 5 | COMPILE_ERROR: type mismatch in argument 2 — a value of one type cannot be used where an incompati… |
+| 4 | COMPILE_ERROR: '%s' is not an array |
+| 4 | COMPILE_ERROR: class '%s' extends the builtin '%s': extending a builtin other than Error is not supp… |
+| 4 | COMPILE_ERROR: expected '%s', got , |
+| 4 | RUN_TIMEOUT |
+| 3 | COMPILE_ERROR: an object has no method '%s' |
+| 3 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
 | 3 | COMPILE_ERROR: expected '%s' after '%s' |
+| 3 | COMPILE_ERROR: new ArrayBuffer(byteLength, options?) takes 1 to 2 arguments, got 0 |
+| 3 | COMPILE_ERROR: the buffer options literal supports exactly {maxByteLength: n} |
+| 3 | RUNTIME_NONZERO_EXIT: WPT FAIL [] |
+| 2 | COMPILE_ERROR: CompressionStream/DecompressionStream's format must be a string literal ("gzip", "def… |
+| 2 | COMPILE_ERROR: Object.getPrototypeOf requires a dynamic (any-typed) value |
+| 2 | COMPILE_ERROR: __WptT__kml_mod0.step_func_done expects 1 argument(s), got 0 |
+| 2 | COMPILE_ERROR: a Response has no method '%s' |
+| 2 | COMPILE_ERROR: a queuing strategy must be an object literal ({highWaterMark, size}) or a CountQueuin… |
+| 2 | COMPILE_ERROR: a queuing strategy's size() must return a number |
+| 2 | COMPILE_ERROR: cannot convert type ptr to string in template literal |
+| 2 | COMPILE_ERROR: destructured parameters are not supported on a dynamic function yet |
+| 2 | COMPILE_ERROR: no field '%s' |
 
 ## Top skip reasons
 
@@ -286,18 +286,49 @@ Why out-of-scope files can't be attempted — a real DOM/browser global (no DOM 
 | 1 | uses DOM/browser global (GLOBAL.isWindow) |
 | 1 | uses DOM/browser global (requestAnimationFrame) |
 
-## Passing files (11)
+## Passing files (42)
 
 | File | Area |
 |---|---|
+| `FileAPI/blob/Blob-constructor-endings.any.js` | FileAPI |
 | `FileAPI/blob/Blob-slice-overflow.any.js` | FileAPI |
+| `IndexedDB/globalscope-indexedDB-SameObject.any.js` | IndexedDB |
+| `console/console-log-large-array.any.js` | console |
+| `console/console-log-symbol.any.js` | console |
+| `console/console-namespace-object-class-string.any.js` | console |
+| `console/console-tests-historical.any.js` | console |
 | `content-security-policy/generic/src-trailing-dot.sub.any.js` | content-security-policy |
-| `eventsource/eventsource-url.any.js` | eventsource |
+| `css/css-highlight-api/historical.window.js` | css |
+| `dom/abort/AbortSignal.any.js` | dom |
+| `dom/abort/timeout.any.js` | dom |
+| `dom/events/AddEventListenerOptions-once.any.js` | dom |
+| `dom/events/EventTarget-add-remove-listener.any.js` | dom |
+| `dom/events/EventTarget-addEventListener.any.js` | dom |
+| `encoding/api-replacement-encodings.any.js` | encoding |
+| `encoding/textdecoder-fatal-streaming.any.js` | encoding |
+| `encoding/textdecoder-fatal.any.js` | encoding |
+| `encoding/textdecoder-ignorebom.any.js` | encoding |
+| `encoding/textdecoder-utf16-surrogates.any.js` | encoding |
+| `encoding/textencoder-utf16-surrogates.any.js` | encoding |
+| `fetch/api/headers/headers-casing.any.js` | fetch |
+| `fetch/api/headers/headers-combine.any.js` | fetch |
+| `fetch/h1-parsing/lone-cr.window.js` | fetch |
 | `html/webappapis/timers/cleartimeout-clearinterval.any.js` | html |
+| `performance-timeline/buffered-flag-observer.any.js` | performance-timeline |
 | `performance-timeline/buffered-flag-with-entryTypes-observer.tentative.any.js` | performance-timeline |
+| `performance-timeline/observer-buffered-false.any.js` | performance-timeline |
+| `screen-wake-lock/wakelock-insecure-context.any.js` | screen-wake-lock |
+| `soft-navigation-heuristics/smoke/tentative/supported-entry-types.window.js` | soft-navigation-heuristics |
+| `url/url-statics-canparse.any.js` | url |
+| `url/url-statics-parse.any.js` | url |
 | `url/url-tojson.any.js` | url |
-| `url/urlsearchparams-append.any.js` | url |
+| `url/urlsearchparams-foreach.any.js` | url |
+| `url/urlsearchparams-get.any.js` | url |
 | `url/urlsearchparams-getall.any.js` | url |
-| `url/urlsearchparams-set.any.js` | url |
-| `url/urlsearchparams-size.any.js` | url |
+| `urlpattern/urlpattern-constructor.any.js` | urlpattern |
+| `user-timing/structured-serialize-detail.any.js` | user-timing |
+| `user-timing/supported-usertiming-types.any.js` | user-timing |
+| `webidl/ecmascript-binding/global-immutable-prototype.any.js` | webidl |
 | `workers/Worker-base64.any.js` | workers |
+| `workers/Worker-replace-global-constructor.any.js` | workers |
+| `workers/semantics/interface-objects/004.any.js` | workers |

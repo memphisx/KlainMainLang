@@ -161,3 +161,28 @@ void __kml_error_define_enum(void *op, const char *key, i64 was, void *desc) {
     attrs = en ? (attrs | KML_ATTR_ENUM) : (attrs & ~(i64)KML_ATTR_ENUM);
     __kml_dynobj_patch(bag, i, __kml_dynobj_rawtag_at(bag, i), __kml_dynobj_rawpay_at(bag, i), attrs);
 }
+
+/* The cause the constructor's option set, which is not enumerable:
+ * util.inspect shows it after the own properties, as `[cause]`. 0 when
+ * there is none (the slot holds undefined, as it does for an explicit
+ * `{ cause: undefined }`) or an assignment made it an own enumerable
+ * property. */
+int __kml_error_option_cause(void *op, i64 *out) {
+    const char *o = (const char *)op;
+    i64 c = *(const i64 *)(o + KML_ERR_CAUSE);
+    if (c == 0 || c == KML_NB_UNDEFINED) return 0;
+    void *bag = extra_bag(o);
+    if (bag && __kml_dynobj_find(bag, k_cause.d) >= 0) return 0;
+    *out = c;
+    return 1;
+}
+
+/* An AggregateError's errors array and its length, which util.inspect shows
+ * as `[errors]`; 0 for any other error. */
+int __kml_error_aggregate(void *op, void ***errs, i64 *n) {
+    const char *o = (const char *)op;
+    if (*(const i64 *)(o + KML_ERROR_KIND) != KML_ERRKIND_AGG) return 0;
+    *errs = *(void **const *)(o + KML_AGG_ERRORS);
+    *n = *(const i64 *)(o + KML_AGG_ERRORS + 8);
+    return 1;
+}

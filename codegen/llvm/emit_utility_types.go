@@ -95,8 +95,10 @@ func (e *Emitter) resolveUtilityType(name string, args []*ast.TypeAnnotation) (T
 		}
 		if a := args[0]; a.IsTypeof && len(a.TypeofPath) == 0 {
 			switch a.TypeofName {
-			case "setTimeout", "setInterval", "setImmediate":
-				return TypeI64, true
+			case "setTimeout", "setInterval":
+				return e.resolveType(&ast.TypeAnnotation{Name: "Timeout", Qualifier: []string{"NodeJS"}}), true
+			case "setImmediate":
+				return e.resolveType(&ast.TypeAnnotation{Name: "Immediate", Qualifier: []string{"NodeJS"}}), true
 			}
 		}
 		ft := e.resolveType(args[0])
@@ -145,13 +147,9 @@ func (e *Emitter) resolveUtilityType(name string, args []*ast.TypeAnnotation) (T
 			}
 			return ObjectType(fields), true
 		}
-		// The open-key form is the index-signature dict (IsDynamicObject —
-		// ADR-00485): bracket read/write, Object.keys/values/entries,
-		// for…of, and JSON.stringify all ride the map-backed machinery,
-		// exactly like `{ [k: string]: V }`. Previously a plain MapType,
-		// whose value has none of the object-style surface.
-		keyTy := TypePtr
-		return Type{IR: "ptr", IsMap: true, IsDynamicObject: true, MapKey: &keyTy, MapVal: &valTy}, true
+		// The open-key form is the index-signature dictionary, exactly like
+		// `{ [k: string]: V }`: the object itself, every property typed V.
+		return dictViewType(valTy), true
 	}
 	return Type{}, false
 }

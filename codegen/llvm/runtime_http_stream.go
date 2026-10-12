@@ -205,15 +205,5 @@ rearm:
 	)
 	streamBlock := repl.Replace(tmpl)
 
-	// Over an HTTPS/1.1 connection the fd is TLS-wrapped: route the chunk writes
-	// and the final close through the SSL-aware shims (a plain fd falls through
-	// to raw write/close inside them). Without this a streaming body would emit
-	// plaintext frames onto the TLS socket.
-	if e.usedHTTPS1Server {
-		e.emitHTTPSConnShims()
-		streamBlock = strings.ReplaceAll(streamBlock, "call i64 @write(i32 %connfd,", "call i64 @__kml_http_conn_send(i32 %connfd,")
-		streamBlock = strings.ReplaceAll(streamBlock, "call i64 @write(i32 %fd,", "call i64 @__kml_http_conn_send(i32 %fd,")
-		streamBlock = strings.ReplaceAll(streamBlock, "%ign4 = call i32 @close(i32 %fd)", "call void @__kml_http_conn_close(i32 %fd)")
-	}
 	e.emitGlobal(streamBlock)
 }

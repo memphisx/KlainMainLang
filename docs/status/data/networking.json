@@ -27,13 +27,13 @@
             "feature": "`fetch(url)` / `fetch(url, init)` / `fetch(request)`",
             "status": "implemented",
             "caveats": [
-              "A network failure rejects with a `TypeError` whose message is libcurl's (`Couldn't connect to server`); Node's is `fetch failed`, with the reason as its `cause`"
+              "A transport failure other than a refused connection, a failed lookup or a bad port (TLS, timeout, reset) has an `Error` with libcurl's message as its `cause`, where undici gives its own error and `code`"
             ],
             "notes": [
               "`init` is a `RequestInit`: a literal, an options object of another shape, or an `init?: RequestInit` parameter. `body` is any BodyInit, read as undici reads it — a string, `URLSearchParams`, `Blob`, `ArrayBuffer` or TypedArray/Buffer, with the Content-Type each implies (none for bytes); `headers` is any HeadersInit. A body on a GET/HEAD request rejects with Node's TypeError ([ADR-01217](../adr/ADR-01217.md)); a real `Request` object works as the sole argument too",
               "Non-blocking I/O ([ADR-00050](../adr/ADR-00050.md)): uses libcurl's multi-interface, driven by the same `select()`-based event loop `http.listen` uses, so `await fetch(...)` inside a connection-handler fiber yields — a slow upstream call doesn't stall other connections or timers",
               "At module top level `await fetch(...)` takes turns of that same event loop until the response arrives — timers, sockets, child processes and an in-process server keep being served meanwhile, as when Node suspends a module at its `await` — and inside any async function, arrow or method it parks a coroutine; the loop sleeps in `select()` on libcurl's sockets either way ([TDD-00223](../tdd/TDD-00223.md)/[ADR-01023](../adr/ADR-01023.md))",
-              "A network-level failure (DNS, connection refused, TLS, timeout) throws; a non-2xx HTTP status still resolves normally (`.ok` distinguishes it), matching real `fetch`",
+              "A network-level failure (DNS, connection refused, TLS, timeout) rejects with Node's `TypeError: fetch failed`, the reason as its `cause` (`connect ECONNREFUSED 127.0.0.1:8080` with `errno`/`code`/`syscall`/`address`/`port`, `getaddrinfo ENOTFOUND host`, `bad port` for the fetch standard's blocked ports, [ADR-01418](../adr/ADR-01418.md)); a non-2xx HTTP status still resolves normally (`.ok` distinguishes it), matching real `fetch`",
               "`await fetch(...)` resolves when the response **headers** arrive (as in real JS, [ADR-00299](../adr/ADR-00299.md)); the body is read lazily — `.text()`/`.json()`/`.arrayBuffer()` drive the transfer to completion, `.body` streams it. A signal-carrying fetch resolves at headers too, and an abort mid-body errors the body stream ([ADR-01205](../adr/ADR-01205.md))"
             ]
           },

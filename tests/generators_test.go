@@ -16,7 +16,7 @@ import (
 
 func TestE2EGeneratorBasicSequence(t *testing.T) {
 	assertOutput(t, `
-function* gen(): number {
+function* gen(): Generator<number> {
     yield 1;
     yield 2;
     return 3;
@@ -36,7 +36,7 @@ func TestE2EGeneratorNextAfterDoneReturnsUndefined(t *testing.T) {
 	// returning {value: undefined, done: true}, as in JavaScript — not the
 	// last real yielded/returned value.
 	assertOutput(t, `
-function* gen(): number {
+function* gen(): Generator<number> {
     yield 1;
     return 2;
 }
@@ -53,7 +53,7 @@ func TestE2EGeneratorSentValue(t *testing.T) {
 	// The value yield "returns" is whatever the *next* .next() call sends
 	// in, not anything related to what was yielded out.
 	assertOutput(t, `
-function* echo(): number {
+function* echo(): Generator<number> {
     const a = yield 1;
     const b = yield a + 10;
     return b * 2;
@@ -67,7 +67,7 @@ console.log(g.next(7).value);
 
 func TestE2EGeneratorWithParameters(t *testing.T) {
 	assertOutput(t, `
-function* countFrom(start: number, step: number): number {
+function* countFrom(start: number, step: number): Generator<number> {
     let n = start;
     while (true) {
         yield n;
@@ -103,7 +103,7 @@ console.log(s);
 
 func TestE2EGeneratorStringElementType(t *testing.T) {
 	assertOutput(t, `
-function* names(): string {
+function* names(): Generator<string> {
     yield "alice";
     yield "bob";
 }
@@ -118,7 +118,7 @@ while (!r.done) {
 
 func TestE2EGeneratorBareYield(t *testing.T) {
 	assertOutput(t, `
-function* ticker(): number {
+function* ticker(): Generator<number> {
     yield;
     yield 42;
 }
@@ -133,7 +133,7 @@ func TestE2EGeneratorNoYieldRunsToCompletionOnFirstNext(t *testing.T) {
 	// works, just resolving directly to {value: <return>, done: true} on
 	// its very first .next() call, without ever needing a second one.
 	assertOutput(t, `
-function* gen(): number {
+function* gen(): Generator<number> {
     return 42;
 }
 const g = gen();
@@ -148,7 +148,7 @@ func TestE2EGeneratorClosureInsideBody(t *testing.T) {
 	// misrouted into the *enclosing* generator's own suspend machinery
 	// (a real bug found and fixed during this feature's own development).
 	assertOutput(t, `
-function* gen(): number {
+function* gen(): Generator<number> {
     let n = 0;
     const inc = (): number => { n = n + 1; return n; };
     yield inc();
@@ -167,7 +167,7 @@ func TestE2EMultipleIndependentGeneratorInstances(t *testing.T) {
 	// independent state (their own fiber, own struct, own local
 	// variables) — advancing one must not affect the other at all.
 	assertOutput(t, `
-function* counter(): number {
+function* counter(): Generator<number> {
     let n = 0;
     while (true) {
         n += 1;
@@ -193,7 +193,7 @@ func TestE2EInterleavedGeneratorsWithAllocation(t *testing.T) {
 	// collection mid-suspend; not re-run here since GC mode needs
 	// libgc/bdw-gc installed and this suite runs in manual mode).
 	assertOutput(t, `
-function* gen(id: number): number {
+function* gen(id: number): Generator<number> {
     let i = 0;
     while (i < 50) {
         const junk: number[] = [1, 2, 3, 4, 5];
@@ -221,7 +221,7 @@ console.log(total);
 
 func TestE2EForOfGeneratorInline(t *testing.T) {
 	assertOutput(t, `
-function* gen(): number {
+function* gen(): Generator<number> {
     yield 1;
     yield 2;
     yield 3;
@@ -238,7 +238,7 @@ func TestE2EForOfGeneratorConstructsExactlyOnce(t *testing.T) {
 	// generator instance — not re-evaluated (and so re-constructed) on
 	// every loop iteration.
 	assertOutput(t, `
-function* gen(): number {
+function* gen(): Generator<number> {
     console.log("constructed");
     yield 1;
     yield 2;
@@ -251,7 +251,7 @@ for (const x of gen()) {
 
 func TestE2EForOfGeneratorBreak(t *testing.T) {
 	assertOutput(t, `
-function* gen(): number {
+function* gen(): Generator<number> {
     yield 1;
     yield 2;
     yield 3;
@@ -266,7 +266,7 @@ console.log("done");
 
 func TestE2EForOfGeneratorContinue(t *testing.T) {
 	assertOutput(t, `
-function* gen(): number {
+function* gen(): Generator<number> {
     yield 1;
     yield 2;
     yield 3;
@@ -283,7 +283,7 @@ console.log(sum);
 
 func TestE2EForOfGeneratorVariable(t *testing.T) {
 	assertOutput(t, `
-function* gen(): number {
+function* gen(): Generator<number> {
     yield 1;
     yield 2;
     yield 3;
@@ -297,7 +297,7 @@ for (const x of g) {
 
 func TestE2EForOfGeneratorStringElementType(t *testing.T) {
 	assertOutput(t, `
-function* names(): string {
+function* names(): Generator<string> {
     yield "alice";
     yield "bob";
 }
@@ -312,7 +312,7 @@ for (const name of names()) {
 // A basic async generator consumed by for await...of.
 func TestE2EAsyncGeneratorForAwait(t *testing.T) {
 	assertOutput(t, `
-async function* g(): number { yield 1; yield 2; yield 3 }
+async function* g(): AsyncGenerator<number> { yield 1; yield 2; yield 3 }
 async function main2(): Promise<void> {
   for await (const x of g()) { console.log(x) }
   console.log("done")
@@ -325,7 +325,7 @@ main2()
 func TestE2EAsyncGeneratorAwaitsInBody(t *testing.T) {
 	assertOutput(t, `
 async function double(n: number): Promise<number> { return n * 2 }
-async function* g(): number {
+async function* g(): AsyncGenerator<number> {
   const xs: number[] = [1, 2, 3]
   for (const n of xs) { yield await double(n) }
 }
@@ -340,7 +340,7 @@ main2()
 // outstanding .next() promise (re-thrown at the awaiting consumer).
 func TestE2EAsyncGeneratorThrowRejects(t *testing.T) {
 	assertOutput(t, `
-async function* g(): number { yield 1; throw new Error("boom") }
+async function* g(): AsyncGenerator<number> { yield 1; throw new Error("boom") }
 async function main2(): Promise<void> {
   const it = g()
   const a = await it.next()
@@ -362,7 +362,7 @@ main2()
 // sync for-of destructuring uses (ADR-00257).
 func TestE2EForAwaitObjectDestructure(t *testing.T) {
 	assertOutput(t, `
-async function* pts(): { x: number; y: number } {
+async function* pts(): AsyncGenerator<{ x: number; y: number }> {
   yield { x: 1, y: 2 }
   yield { x: 3, y: 4 }
 }
@@ -375,7 +375,7 @@ main2()
 
 func TestE2EForAwaitTupleDestructure(t *testing.T) {
 	assertOutput(t, `
-async function* pairs(): [number, number] {
+async function* pairs(): AsyncGenerator<[number, number]> {
   yield [1, 2]
   yield [3, 4]
 }
@@ -491,7 +491,7 @@ main2()
 // `yield [a, b]` into a tuple slot now builds the tuple directly.
 func TestE2EForOfGeneratorObjectDestructure(t *testing.T) {
 	assertOutput(t, `
-function* pts(): { x: number; y: number } {
+function* pts(): Generator<{ x: number; y: number }> {
   yield { x: 5, y: 6 }
   yield { x: 7, y: 8 }
 }
@@ -501,7 +501,7 @@ for (const { x, y } of pts()) { console.log(x * y) }
 
 func TestE2EForOfGeneratorTupleDestructure(t *testing.T) {
 	assertOutput(t, `
-function* pairs(): [number, number] {
+function* pairs(): Generator<[number, number]> {
   yield [1, 2]
   yield [3, 4]
 }
@@ -509,8 +509,9 @@ for (const [a, b] of pairs()) { console.log(a + b) }
 `, "3\n7")
 }
 
-// for await...of over a sync Map iterates its values, awaiting each (identity
-// for plain values); a Set iterates its elements — same shapes as sync for-of.
+// for await...of over a sync Map iterates its [key, value] entries, awaiting
+// each (identity for plain values); a Set iterates its elements — same shapes
+// as sync for-of.
 func TestE2EForAwaitOverSyncMapAndSet(t *testing.T) {
 	assertOutput(t, `
 async function main2(): Promise<void> {
@@ -522,22 +523,23 @@ async function main2(): Promise<void> {
   s.add("hi")
   s.add("yo")
   for await (const t of s) { console.log(t) }
+  for await (const [k, v] of m) { console.log(k, v) }
 }
 main2()
-`, "5\n7\nhi\nyo")
+`, "[ 'a', 5 ]\n[ 'b', 7 ]\nhi\nyo\na 5\nb 7")
 }
 
 // for await...of over a sync generator (CreateAsyncFromSyncIterator): plain
 // yields are identity-awaited; promise yields are awaited to their values.
 func TestE2EForAwaitOverSyncGenerator(t *testing.T) {
 	assertOutput(t, `
-function* nums(): number {
+function* nums(): Generator<number> {
   yield 1
   yield 2
   yield 3
 }
 async function work(n: number): Promise<number> { return n * 10 }
-function* jobs(): Promise<number> {
+function* jobs(): Generator<Promise<number>> {
   yield work(1)
   yield work(2)
 }
@@ -553,13 +555,13 @@ main2()
 // rejecting promise yield propagating out of the loop.
 func TestE2EForAwaitOverSyncGeneratorDestructureAndReject(t *testing.T) {
 	assertOutput(t, `
-function* points(): { x: number; y: number } {
+function* points(): Generator<{ x: number; y: number }> {
   yield { x: 1, y: 2 }
   yield { x: 3, y: 4 }
 }
 async function ok(n: number): Promise<number> { return n }
 async function bad(): Promise<number> { throw new Error("gen elem fail") }
-function* mixed(): Promise<number> {
+function* mixed(): Generator<Promise<number>> {
   yield ok(1)
   yield bad()
   yield ok(3)
@@ -646,11 +648,11 @@ main2()
 func TestE2EForAwaitObjectLiteralAsyncIterator(t *testing.T) {
 	assertOutput(t, `
 async function work(n: number): Promise<number> { return n * 3 }
-async function* agen(): number {
+async function* agen(): AsyncGenerator<number> {
   yield await work(1)
   yield await work(2)
 }
-function* sgen(): number {
+function* sgen(): Generator<number> {
   yield 7
   yield 8
 }
@@ -680,7 +682,7 @@ main2()
 // for await (values identity-awaited).
 func TestE2EForOfObjectLiteralSymbolIterator(t *testing.T) {
 	assertOutput(t, `
-function* sg(): number { yield 1; yield 2; }
+function* sg(): Generator<number> { yield 1; yield 2; }
 class CIter {
   i: number
   constructor() { this.i = 10 }
@@ -707,13 +709,43 @@ amain()
 `, "1\n2\n10\n11\n12\n101\n102")
 }
 
+// A [Symbol.iterator]() returning a plain iterator object (an object literal
+// with next(), method or arrow) iterates by the protocol, with break,
+// labelled continue and destructuring as over any iterable.
+func TestE2EForOfIteratorObject(t *testing.T) {
+	assertOutput(t, `
+class R {
+  n: number;
+  constructor(n: number) { this.n = n; }
+  [Symbol.iterator](): Iterator<number> {
+    let i = 0;
+    const n = this.n;
+    return { next(): IteratorResult<number> { return i < n ? { value: i++, done: false } : { value: undefined, done: true }; } };
+  }
+}
+const r = new R(3);
+for (const v of r) console.log("typed", v + 1);
+const o = { [Symbol.iterator]() { let k = 0; return { next() { k++; return { value: k * 10, done: k > 2 }; } }; } };
+for (const v of o) console.log("lit", v);
+class P {
+  [Symbol.iterator]() {
+    let k = 0;
+    return { next: () => { k++; return k <= 2 ? { value: [k, "s" + k] as [number, string], done: false } : { value: [0, ""] as [number, string], done: true }; } };
+  }
+}
+for (const [a, b] of new P()) console.log("pair", a, b);
+outer: for (const v of r) { for (const w of r) { if (w === 1) continue outer; console.log("nest", v, w); } }
+for (const v of r) { if (v === 1) break; console.log("brk", v); }
+`, "typed 1\ntyped 2\ntyped 3\nlit 10\nlit 20\npair 1 s1\npair 2 s2\nnest 0 0\nnest 1 0\nnest 2 0\nbrk 0")
+}
+
 // V8/spec step timing (node-diff verified, node v26): `.next()` starts the body
 // SYNCHRONOUSLY up to the first await/yield; an await inside the body parks the
 // step (its promise stays pending, the consumer's script continues) and resumes
 // via a microtask when the awaited promise settles.
 func TestE2EAsyncGeneratorSyncStartAndParkInterleave(t *testing.T) {
 	assertOutput(t, `
-async function* g(): number {
+async function* g(): AsyncGenerator<number> {
   console.log("g1")
   await 0
   console.log("g2")
@@ -737,7 +769,7 @@ console.log("sync")
 func TestE2EAsyncGeneratorDoubleNextQueues(t *testing.T) {
 	assertOutput(t, `
 async function work(n: number): Promise<number> { return n }
-async function* g(): number {
+async function* g(): AsyncGenerator<number> {
   yield await work(1)
   yield await work(2)
 }
@@ -759,7 +791,7 @@ console.log("sync")
 func TestE2EAsyncGeneratorReturnAwaitingFinally(t *testing.T) {
 	assertOutput(t, `
 async function tick(): Promise<number> { return 5 }
-async function* g(): number {
+async function* g(): AsyncGenerator<number> {
   try {
     yield 1
     yield 2
@@ -791,7 +823,7 @@ func TestE2EAsyncGeneratorMethod(t *testing.T) {
 async function inc(n: number): Promise<number> { return n + 1 }
 class Counter {
   base: number = 10
-  async *gen(): number {
+  async *gen(): AsyncGenerator<number> {
     yield await inc(this.base)
     yield await inc(this.base + 1)
   }
@@ -808,7 +840,7 @@ func TestE2EAsyncGeneratorMethodThrowRejects(t *testing.T) {
 	assertOutput(t, `
 class Pager {
   items: number[] = [5, 6]
-  async *pages(): number {
+  async *pages(): AsyncGenerator<number> {
     for (const x of this.items) { yield x }
     throw new Error("end")
   }
@@ -830,7 +862,7 @@ main2()
 // it and the generator resumes there.
 func TestE2EGeneratorThrowCaughtInBody(t *testing.T) {
 	assertOutput(t, `
-function* g(): number {
+function* g(): Generator<number> {
   try { yield 1; yield 2 }
   catch (e) { console.log("caught " + (e as Error).message); yield 99 }
 }
@@ -844,7 +876,7 @@ console.log(it.next().done)
 // An uncaught .throw() propagates to the .throw() caller and finishes the generator.
 func TestE2EGeneratorThrowUncaughtPropagates(t *testing.T) {
 	assertOutput(t, `
-function* g(): number { yield 1; yield 2 }
+function* g(): Generator<number> { yield 1; yield 2 }
 const it = g()
 console.log(it.next().value)
 try { it.throw(new Error("nope")); console.log("no throw") }
@@ -856,7 +888,7 @@ console.log(it.next().done)
 // A return inside a generator's try/finally runs the finally (previously skipped).
 func TestE2EGeneratorReturnStatementRunsFinally(t *testing.T) {
 	assertOutput(t, `
-function* g(): number {
+function* g(): Generator<number> {
   try { yield 1; return 2 } finally { console.log("finally ran") }
 }
 const it = g()
@@ -968,7 +1000,7 @@ console.log("after")
 // yields {value: v, done: true}.
 func TestE2EGeneratorReturnMethodRunsFinally(t *testing.T) {
 	assertOutput(t, `
-function* g(): number {
+function* g(): Generator<number> {
   try { yield 1; yield 2; yield 3 } finally { console.log("cleanup") }
 }
 const it = g()
@@ -982,7 +1014,7 @@ console.log(it.next().done)
 // .return(v) on a not-yet-started generator completes it without running the body.
 func TestE2EGeneratorReturnNotStarted(t *testing.T) {
 	assertOutput(t, `
-function* g(): number { yield 1; yield 2 }
+function* g(): Generator<number> { yield 1; yield 2 }
 const it = g()
 const r = it.return(99)
 console.log(r.value + " done=" + r.done)
@@ -994,8 +1026,8 @@ console.log(it.next().done)
 // evaluates to the inner's return value.
 func TestE2EYieldStarDelegation(t *testing.T) {
 	assertOutput(t, `
-function* inner(): number { yield 1; yield 2; return 3 }
-function* outer(): number {
+function* inner(): Generator<number> { yield 1; yield 2; return 3 }
+function* outer(): Generator<number> {
   const r = yield* inner()
   console.log("inner returned " + r)
   yield 10
@@ -1007,12 +1039,12 @@ for (const x of outer()) { console.log(x) }
 // yield* forwards each .next(v) sent value into the inner generator.
 func TestE2EYieldStarForwardsSent(t *testing.T) {
 	assertOutput(t, `
-function* inner(): number {
+function* inner(): Generator<number> {
   const a = yield 1
   const b = yield a + 10
   return b
 }
-function* outer(): number { const r = yield* inner(); yield r }
+function* outer(): Generator<number> { const r = yield* inner(); yield r }
 const it = outer()
 console.log(it.next().value)
 console.log(it.next(100).value)
@@ -1024,11 +1056,11 @@ console.log(it.next().done)
 // yield* forwards a .throw() into the inner generator, which can catch it.
 func TestE2EYieldStarForwardsThrow(t *testing.T) {
 	assertOutput(t, `
-function* inner(): number {
+function* inner(): Generator<number> {
   try { yield 1; yield 2 }
   catch (e) { console.log("inner caught " + (e as Error).message); yield 99 }
 }
-function* outer(): number { yield* inner(); yield 100 }
+function* outer(): Generator<number> { yield* inner(); yield 100 }
 const it = outer()
 console.log(it.next().value)
 console.log(it.throw(new Error("boom")).value)
@@ -1040,10 +1072,10 @@ console.log(it.next().value)
 // the outer generator too.
 func TestE2EYieldStarForwardsReturn(t *testing.T) {
 	assertOutput(t, `
-function* inner(): number {
+function* inner(): Generator<number> {
   try { yield 1; yield 2 } finally { console.log("inner cleanup") }
 }
-function* outer(): number { yield* inner(); yield 100 }
+function* outer(): Generator<number> { yield* inner(); yield 100 }
 const it = outer()
 console.log(it.next().value)
 const r = it.return(42)
@@ -1059,7 +1091,7 @@ console.log(it.next().done)
 func TestE2EAsyncGeneratorThrowCaught(t *testing.T) {
 	assertOutput(t, `
 async function inc(n: number): Promise<number> { return n + 1 }
-async function* g(): number {
+async function* g(): AsyncGenerator<number> {
   try { yield await inc(0); yield await inc(1) }
   catch (e) { console.log("caught " + (e as Error).message); yield 99 }
 }
@@ -1076,7 +1108,7 @@ main2()
 // An uncaught .throw() rejects the returned promise and finishes the generator.
 func TestE2EAsyncGeneratorThrowUncaughtRejects(t *testing.T) {
 	assertOutput(t, `
-async function* g(): number { yield 1; yield 2 }
+async function* g(): AsyncGenerator<number> { yield 1; yield 2 }
 async function main2(): Promise<void> {
   const it = g()
   console.log((await it.next()).value)
@@ -1092,7 +1124,7 @@ main2()
 // fulfils with {value: v, done: true}.
 func TestE2EAsyncGeneratorReturnRunsFinally(t *testing.T) {
 	assertOutput(t, `
-async function* g(): number {
+async function* g(): AsyncGenerator<number> {
   try { yield 1; yield 2; yield 3 } finally { console.log("cleanup") }
 }
 async function main2(): Promise<void> {
@@ -1110,7 +1142,7 @@ main2()
 // the body.
 func TestE2EAsyncGeneratorReturnNotStarted(t *testing.T) {
 	assertOutput(t, `
-async function* g(): number { yield 1; yield 2 }
+async function* g(): AsyncGenerator<number> { yield 1; yield 2 }
 async function main2(): Promise<void> {
   const it = g()
   const r = await it.return(7)
@@ -1128,8 +1160,8 @@ main2()
 func TestE2EAsyncYieldStarDelegation(t *testing.T) {
 	assertOutput(t, `
 async function inc(n: number): Promise<number> { return n + 1 }
-async function* inner(): number { yield await inc(0); yield await inc(1); return 100 }
-async function* outer(): number {
+async function* inner(): AsyncGenerator<number> { yield await inc(0); yield await inc(1); return 100 }
+async function* outer(): AsyncGenerator<number> {
   const r = yield* inner()
   console.log("inner returned " + r)
   yield 10
@@ -1144,11 +1176,11 @@ main2()
 // Sent values and .throw() forward through an async yield* into the inner.
 func TestE2EAsyncYieldStarForwardsSentAndThrow(t *testing.T) {
 	assertOutput(t, `
-async function* inner(): number {
+async function* inner(): AsyncGenerator<number> {
   try { const a = yield 1; yield a + 10 }
   catch (e) { console.log("inner caught " + (e as Error).message); yield 99 }
 }
-async function* outer(): number { yield* inner(); yield 100 }
+async function* outer(): AsyncGenerator<number> { yield* inner(); yield 100 }
 async function main2(): Promise<void> {
   const it = outer()
   console.log((await it.next()).value)
@@ -1164,10 +1196,10 @@ main2()
 // completing the outer.
 func TestE2EAsyncYieldStarForwardsReturn(t *testing.T) {
 	assertOutput(t, `
-async function* inner(): number {
+async function* inner(): AsyncGenerator<number> {
   try { yield 1; yield 2 } finally { console.log("inner cleanup") }
 }
-async function* outer(): number { yield* inner(); yield 100 }
+async function* outer(): AsyncGenerator<number> { yield* inner(); yield 100 }
 async function main2(): Promise<void> {
   const it = outer()
   console.log((await it.next()).value)
@@ -1197,7 +1229,7 @@ class Range {
     return { value: cur, done: false }
   }
 }
-async function* outer(): number { yield* new Range(3); yield 100 }
+async function* outer(): AsyncGenerator<number> { yield* new Range(3); yield 100 }
 async function main2(): Promise<void> {
   for await (const x of outer()) { console.log(x) }
 }
@@ -1223,7 +1255,7 @@ class Range {
     return { value: cur, done: false }
   }
 }
-async function* outer(): number {
+async function* outer(): AsyncGenerator<number> {
   try { yield* new Range(5) } finally { console.log("outer cleanup") }
   yield 100
 }
@@ -1256,7 +1288,7 @@ class Range {
     return { value: cur, done: false }
   }
 }
-async function* outer(): number {
+async function* outer(): AsyncGenerator<number> {
   try { yield* new Range(5) } catch (e) { console.log("outer caught " + (e as Error).message); yield 77 }
 }
 async function main2(): Promise<void> {
@@ -1293,7 +1325,7 @@ class Range {
     return { value: v, done: true }
   }
 }
-async function* outer(): number { yield* new Range(5); yield 100 }
+async function* outer(): AsyncGenerator<number> { yield* new Range(5); yield 100 }
 async function main2(): Promise<void> {
   const it = outer()
   console.log((await it.next()).value)
@@ -1310,8 +1342,8 @@ main2()
 // (awaiting each step needs an async context).
 func TestE2EYieldStarAsyncInSyncRejected(t *testing.T) {
 	src := `
-async function* inner(): number { yield 1 }
-function* outer(): number { yield* inner() }
+async function* inner(): AsyncGenerator<number> { yield 1 }
+function* outer(): Generator<number> { yield* inner() }
 console.log(outer())
 `
 	if _, err := parseAndCompile(src); err == nil {
@@ -1360,7 +1392,7 @@ for (const m of mixed()) { console.log(m); }
 
 func TestE2EGeneratorArrayYieldForOf(t *testing.T) {
 	assertOutput(t, `
-function* rows(): number[] {
+function* rows(): Generator<number[]> {
     yield [1, 2];
     yield [3, 4, 5];
     yield [];
@@ -1373,7 +1405,7 @@ for (const r of rows()) {
 
 func TestE2EGeneratorArrayYieldManualNext(t *testing.T) {
 	assertOutput(t, `
-function* pairs(): number[] {
+function* pairs(): Generator<number[]> {
     const a = [10, 20];
     yield a;
     yield [30];
@@ -1389,11 +1421,11 @@ console.log(it.next().done);
 
 func TestE2EGeneratorStringArrayYieldStarDelegate(t *testing.T) {
 	assertOutput(t, `
-function* words(): string[] {
+function* words(): Generator<string[]> {
     yield ["a", "b"];
     yield ["c"];
 }
-function* deleg(): string[] {
+function* deleg(): Generator<string[]> {
     yield ["x"];
     yield* words();
     yield ["z"];
@@ -1404,7 +1436,7 @@ for (const w of deleg()) { console.log(w.join("+")); }
 
 func TestE2EAsyncGeneratorArrayYieldForAwait(t *testing.T) {
 	assertOutputImports(t, `
-async function* agen(): number[] {
+async function* agen(): AsyncGenerator<number[]> {
     yield [1, 2];
     yield [3, 4, 5];
 }
@@ -1507,4 +1539,72 @@ function* gen(limit: number | undefined, flag: boolean): Generator<string> {
 for (const v of gen(undefined, true)) console.log(v)
 for (const v of gen(7, false)) console.log(v)
 `, "undefined\n3\n7\n3")
+}
+
+// A generator annotated `Generator<T, TReturn>` returns a TReturn of
+// another representation through its one value slot (ADR-01454).
+func TestE2EGeneratorReturnTypeArgument(t *testing.T) {
+	assertSameAsNode(t, `
+function* a(): Generator<number, string, unknown> { yield 1; yield 2; return "end"; }
+const it = a();
+console.log(it.next(), it.next(), it.next(), it.next());
+function* b(): Generator<string, void, unknown> { yield "x"; }
+console.log([...b()]);
+function* c(): Generator<number, number, unknown> { yield 1; return 5; }
+const ci = c(); console.log(ci.next().value, ci.next().value);
+for (const v of a()) console.log(v);
+function* adder(): Generator<undefined, number, number> {
+  const x: number = yield;
+  const y: number = yield;
+  return x + y;
+}
+const g = adder(); g.next(); g.next(10); console.log(g.next(32).value);
+`)
+}
+
+// A generator capturing nothing is one function value, and a named
+// generator expression its binding declares is its own name inside its
+// body and shows by it (ADR-01522).
+func TestGeneratorValueIdentityAndOwnName(t *testing.T) {
+	assertSameAsNode(t, `
+function* G() { yield G; }
+const a = G, b = G;
+console.log(a === b, G().next().value === G);
+function F() { return F; }
+console.log(F() === F);
+`)
+	assertSameAsNodeCompatJS(t, `
+var probe;
+var func = function* g() {
+  probe = function() { return g; };
+};
+var g = 'outside';
+func().next();
+console.log(g, probe() === func);
+var h = function k() { return typeof k; };
+var k = 1;
+console.log(h(), k);
+var func1 = function g3() {
+  probe = function() { return g3; };
+};
+func1();
+console.log(g, probe() === func1);
+var func2 = function* g2() { yield g2; };
+console.log(func2().next().value === func2);
+var f = function* g() { yield 1; };
+console.log(f.name);
+`)
+}
+
+// An object literal's generator method, and a generator function stored as
+// a property, are called through the object.
+func TestE2EObjectLiteralGeneratorMethodCall(t *testing.T) {
+	assertSameAsNode(t, `
+const o = { *g() { yield 1; yield 2 }, n: 2 };
+const it = o.g();
+console.log(it.next().value, it.next().value, o.n);
+function* seq(start: number) { yield start; yield start + 1 }
+const holder = { seq };
+console.log([...holder.seq(5)]);
+`)
 }

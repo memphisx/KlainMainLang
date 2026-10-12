@@ -514,11 +514,17 @@ func (e *Emitter) emitObjectGetOwnPropertyNames(args []ast.Expression, pos ast.P
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Object.getOwnPropertyNames takes 1 argument", pos.Line, pos.Col)
 	}
-	e.ensureDynObj()
 	v, err := e.emitExprWithObjectHint(args[0], TypeAny)
 	if err != nil {
 		return Value{}, err
 	}
+	return e.emitOwnPropertyNamesOf(v, pos)
+}
+
+// emitOwnPropertyNamesOf is getOwnPropertyNames of the evaluated v.
+func (e *Emitter) emitOwnPropertyNamesOf(v Value, pos ast.Pos) (Value, error) {
+	e.ensureDynObj()
+	var err error
 	if !v.Ty.IsDynamic && (v.Ty.IsObject || v.Ty.IsClass) && !v.Ty.IsDynamicObject {
 		if v, err = e.emitBoxValue(v); err != nil {
 			return Value{}, err
@@ -551,6 +557,81 @@ func (e *Emitter) emitObjectGetOwnPropertyNames(args []ast.Expression, pos ast.P
 	out := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load { ptr, i64 }, ptr %s, align 8", out, resPtr))
 	return Value{Ref: out, Ty: ArrayOf(TypePtr)}, nil
+}
+
+// emitObjectGetOwnPropertySymbols is Object.getOwnPropertySymbols(o): the
+// symbols of o's own symbol-keyed properties (shape.c's
+// __kml_own_symbols_c), a static object's symbol-keyed fields among them.
+func (e *Emitter) emitObjectGetOwnPropertySymbols(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Object.getOwnPropertySymbols takes 1 argument", pos.Line, pos.Col)
+	}
+	v, err := e.emitExprWithObjectHint(args[0], TypeAny)
+	if err != nil {
+		return Value{}, err
+	}
+	return e.emitOwnSymbolsOf(v)
+}
+
+// emitOwnSymbolsOf is getOwnPropertySymbols of the evaluated v.
+func (e *Emitter) emitOwnSymbolsOf(v Value) (Value, error) {
+	boxed, err := e.emitBoxValue(v)
+	if err != nil {
+		return Value{}, err
+	}
+	e.usedOwnSymbols = true
+	e.ensureShapeRuntime()
+	e.ensureDynObj()
+	// A Proxy's ownKeys result is read through __kml_anyarr_get_by_key or
+	// the dynamic-array accessors.
+	e.ensureDynJSONC()
+	e.ensureDynArr()
+	e.declareFn("__kml_own_symbols_checked", "declare ptr @__kml_own_symbols_checked(i64, ptr)")
+	out := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca { ptr, i64 }, align 8", out))
+	// A null or undefined argument, or a Proxy whose ownKeys trap breaks
+	// the spec's invariants, is a TypeError.
+	msg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_own_symbols_checked(i64 %s, ptr %s)", msg, boxed.Ref, out))
+	bad := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", bad, msg))
+	throwL, okL := e.freshLabel("ownsyms.throw"), e.freshLabel("ownsyms.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, throwL, okL))
+	e.emitLabel(throwL)
+	e.emitThrowTypeErrorValue(msg)
+	e.emitLabel(okL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load { ptr, i64 }, ptr %s, align 8", r, out))
+	return Value{Ref: r, Ty: ArrayOf(SymbolType())}, nil
+}
+
+// emitReflectOwnKeys is Reflect.ownKeys(o): o's own string keys, then its
+// own symbols, as one (string | symbol)[] (shape.c's __kml_own_keys_c).
+func (e *Emitter) emitReflectOwnKeys(arg ast.Expression, pos ast.Pos) (Value, error) {
+	v, err := e.emitExprWithObjectHint(arg, TypeAny)
+	if err != nil {
+		return Value{}, err
+	}
+	if !v.Ty.IsDynamic && (v.Ty.IsObject || v.Ty.IsClass) && !v.Ty.IsDynamicObject {
+		if v, err = e.emitBoxValue(v); err != nil {
+			return Value{}, err
+		}
+	}
+	names, err := e.emitOwnPropertyNamesOf(v, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	syms, err := e.emitOwnSymbolsOf(v)
+	if err != nil {
+		return Value{}, err
+	}
+	e.declareFn("__kml_own_keys_c", "declare void @__kml_own_keys_c({ ptr, i64 }, { ptr, i64 }, ptr)")
+	out := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca { ptr, i64 }, align 8", out))
+	e.emitInstr(fmt.Sprintf("call void @__kml_own_keys_c({ ptr, i64 } %s, { ptr, i64 } %s, ptr %s)", names.Ref, syms.Ref, out))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load { ptr, i64 }, ptr %s, align 8", r, out))
+	return Value{Ref: r, Ty: ArrayOf(TypeAny)}, nil
 }
 
 // emitDynPrevent backs freeze/seal/preventExtensions on a dynamic object;

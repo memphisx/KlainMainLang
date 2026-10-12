@@ -126,7 +126,7 @@
       "statusRow": "console.count() / .countReset()",
       "signature": "count(label?: string): void; countReset(label?: string): void",
       "badge": "exact",
-      "description": "count() prints \"label: <n>\" with a per-label counter that increments each call; countReset() zeroes one label. Backed by a real Map<string, number>, so it matches real Node's per-label semantics exactly — unlike time's single-slot narrowing.",
+      "description": "count() prints \"label: <n>\" with a per-label counter that increments each call (the label converted to a string, as Node does); countReset() zeroes one label, and for a label with no count emits Node's process warning \"Count for '<label>' does not exist\". Backed by a real Map<string, number>.",
       "returns": { "type": "void", "desc": "Nothing." },
       "exampleKey": "console/console",
       "snippet": "console.count()            // default: 1\nconsole.count('apples')    // apples: 1\nconsole.countReset('apples')\nconsole.count('apples')    // apples: 1",

@@ -41,16 +41,6 @@ func (e *Emitter) ensureBase64Decode() {
 	e.emitGlobal("declare ptr @__kml_atob(ptr)")
 }
 
-// ensureUtf8LabelCheck declares __kml_is_utf8_label(ptr) -> i1: whether a
-// TextDecoder label names UTF-8, the only encoding decoded (ADR-00567).
-func (e *Emitter) ensureUtf8LabelCheck() {
-	if e.usedUtf8LabelCheck {
-		return
-	}
-	e.usedUtf8LabelCheck = true
-	e.emitGlobal("declare zeroext i1 @__kml_is_utf8_label(ptr)")
-}
-
 func (e *Emitter) ensurePercentFn(used *bool, fnName string, strict bool) {
 	if *used {
 		return

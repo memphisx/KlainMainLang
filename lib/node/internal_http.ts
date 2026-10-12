@@ -2392,7 +2392,7 @@ export interface RequestOptions extends AgentConnectOptions {
     defaultPort?: number;
     method?: string;
     path?: string;
-    headers?: OutgoingHttpHeaders;
+    headers?: OutgoingHttpHeaders | readonly string[];
     auth?: string;
     agent?: Agent | boolean;
     setHost?: boolean;
@@ -2520,29 +2520,39 @@ export class ClientRequest extends OutgoingMessage {
         }
         this.agentKeepAlive = agent !== null && agent.keepAlive;
         const headers = opts.headers;
-        if (headers !== undefined) {
-            for (const key in headers) {
-                const v = headers[key];
-                if (v !== undefined) this.setHeader(key, v);
+        if (Array.isArray(headers)) {
+            // Raw [name, value, ...] pairs go out as given, with no Host or
+            // Authorization of the request's own (_http_client.js).
+            const pairs = headers as readonly string[];
+            const entries: HeaderEntry[] = [];
+            for (let n = 0; n + 1 < pairs.length; n += 2) entries.push({ name: pairs[n], value: pairs[n + 1] });
+            this._storeHeader(this.method + ' ' + this.path + ' HTTP/1.1\r\n', entries);
+        } else {
+            if (headers !== undefined) {
+                const o = headers as OutgoingHttpHeaders;
+                for (const key in o) {
+                    const v = o[key];
+                    if (v !== undefined) this.setHeader(key, v);
+                }
             }
-        }
-        if (host && !this.getHeader('host') && setHost) {
-            let hostHeader = host;
-            // For the Host header, ensure that IPv6 addresses are enclosed
-            // in square brackets, as defined by URI formatting
-            // https://tools.ietf.org/html/rfc3986#section-3.2.2
-            const posColon = hostHeader.indexOf(':');
-            if (posColon !== -1 && hostHeader.indexOf(':', posColon + 1) !== -1 && hostHeader.charCodeAt(0) !== 91) {
-                hostHeader = '[' + hostHeader + ']';
+            if (host && !this.getHeader('host') && setHost) {
+                let hostHeader = host;
+                // For the Host header, ensure that IPv6 addresses are enclosed
+                // in square brackets, as defined by URI formatting
+                // https://tools.ietf.org/html/rfc3986#section-3.2.2
+                const posColon = hostHeader.indexOf(':');
+                if (posColon !== -1 && hostHeader.indexOf(':', posColon + 1) !== -1 && hostHeader.charCodeAt(0) !== 91) {
+                    hostHeader = '[' + hostHeader + ']';
+                }
+                if (this.port && this.port !== defaultPort) hostHeader += ':' + this.port;
+                this.setHeader('Host', hostHeader);
             }
-            if (this.port && this.port !== defaultPort) hostHeader += ':' + this.port;
-            this.setHeader('Host', hostHeader);
-        }
-        if (opts.auth !== undefined && !this.getHeader('Authorization')) {
-            this.setHeader('Authorization', 'Basic ' + Buffer.from(opts.auth).toString('base64'));
-        }
-        if (this.getHeader('expect')) {
-            this._storeHeader(this.method + ' ' + this.path + ' HTTP/1.1\r\n', this.headerEntries());
+            if (opts.auth !== undefined && !this.getHeader('Authorization')) {
+                this.setHeader('Authorization', 'Basic ' + Buffer.from(opts.auth).toString('base64'));
+            }
+            if (this.getHeader('expect')) {
+                this._storeHeader(this.method + ' ' + this.path + ' HTTP/1.1\r\n', this.headerEntries());
+            }
         }
         // initiate connection
         const connectOpts: AgentConnectOptions = { host: host, port: this.port, localAddress: opts.localAddress,

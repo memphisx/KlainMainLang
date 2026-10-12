@@ -924,6 +924,8 @@ func (p *Parser) parseObjectType() (ast.TypeNode, error) {
 }
 
 func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
+	p.peek()
+	doc := p.takeDoc()
 	tok := p.advance() // consume 'interface'
 	pos := posOf(tok)
 	nameTok, err := p.expect(lexer.IDENT)
@@ -988,6 +990,13 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	}
 	fields, methods, indexSig, callSig, legacyErr := ast.InterfaceLegacy(members, "ts", jsdocTypeAnnotation)
 	decl := ast.NewInterfaceDeclaration(nameTok.Literal, fields, methods, pos)
+	if doc != nil {
+		for _, a := range doc.Annotations {
+			if a.Tag == "lowerType" {
+				decl.LowerType = a.Value
+			}
+		}
+	}
 	decl.TypeParams = typeParams
 	decl.TypeParamConstraints = typeParamConstraints
 	decl.TypeParameters = typeParamNodes

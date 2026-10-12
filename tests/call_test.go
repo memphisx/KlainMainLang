@@ -729,16 +729,14 @@ console.log(p.hasOwnProperty("q"))
 `, "true\nfalse\ntrue\nfalse")
 }
 
-func TestE2EObjectHasOwnDynamicKeyIsError(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EObjectHasOwnDynamicKey(t *testing.T) {
+	assertSameAsNode(t, `
 interface Point { x: number }
 const p: Point = { x: 1 };
 const k = "x";
-console.log(p.hasOwnProperty(k))
+const z: string = "toString";
+console.log(p.hasOwnProperty(k), p.hasOwnProperty(z), Object.hasOwn(p, z))
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for a non-literal hasOwnProperty key")
-	}
 }
 
 func TestE2EClassOwnToStringAndHasOwnPropertyWinOverBuiltins(t *testing.T) {

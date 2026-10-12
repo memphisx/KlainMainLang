@@ -19,6 +19,7 @@ import (
 	"KlainMainLang/ast"
 	_ "embed"
 	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -79,6 +80,9 @@ func (e *Emitter) emitRejectCallback(arg ast.Expression) (Value, error) {
 	restoreParam()
 	if err != nil {
 		return Value{}, err
+	}
+	if c, ok := e.thenCallbackFromAny(v, TypeAny); ok {
+		v = c // an annotated-any parameter: the adapter below boxes the reason
 	}
 	// The .then/.catch runner always calls onR with a { i8, i64 } caught-value
 	// reason. If the handler's parameter is annotated (string / Error / any / an
@@ -142,6 +146,36 @@ func (e *Emitter) emitFulfillCallback(arg ast.Expression, valueTy Type) (Value, 
 	if err != nil {
 		return Value{}, err
 	}
+	if p := valueTy; p.IR != "void" && p.IR != "" {
+		if c, ok := e.thenCallbackFromAny(v, p); ok {
+			return c, nil
+		}
+	} else if c, ok := e.thenCallbackFromAny(v, TypeAny); ok {
+		return c, nil
+	}
+	// A named function whose parameter is `any` over a promise of a
+	// concrete type: an adapter boxes the value the runner passes.
+	if v.Ty.IsFunc && !v.Ty.FuncHasRest && len(v.Ty.FuncParams) >= 1 && v.Ty.FuncParams[0].IsDynamic &&
+		valueTy.IR != "void" && valueTy.IR != "" && !valueTy.IsDynamic {
+		ret := TypeVoid
+		if v.Ty.FuncRetType != nil {
+			ret = *v.Ty.FuncRetType
+		}
+		if adapted, ok := e.emitBoxedClosureAs(v, FuncType([]Type{valueTy}, ret)); ok {
+			return adapted, nil
+		}
+	}
+	// A void source passes undefined as an `any`: a callback taking a
+	// parameter of another type (or a rest) reads it through an adapter.
+	if v.Ty.IsFunc && len(v.Ty.FuncParams) >= 1 && (valueTy.IR == "void" || valueTy.IR == "") && (v.Ty.FuncHasRest || !v.Ty.FuncParams[0].IsDynamic) {
+		ret := TypeVoid
+		if v.Ty.FuncRetType != nil {
+			ret = *v.Ty.FuncRetType
+		}
+		if adapted, ok := e.emitBoxedClosureAs(v, FuncType([]Type{TypeAny}, ret)); ok {
+			return adapted, nil
+		}
+	}
 	// A function taking its arguments as a rest (`(...a) => …`): called
 	// with the one value, so its rest holds that value.
 	if v.Ty.IsFunc && v.Ty.FuncHasRest && len(v.Ty.FuncParams) == 1 && valueTy.IR != "void" && valueTy.IR != "" {
@@ -184,6 +218,13 @@ func (e *Emitter) isNonCallableThenArg(arg ast.Expression) bool {
 
 // emitPromiseThen handles a `.then`/`.catch`/`.finally` call on a Promise value.
 func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	return e.emitPromiseThenInto(objExpr, kind, args, pos, "")
+}
+
+// emitPromiseThenInto is emitPromiseThen settling the pending promise body
+// into (a species construction's, TDD-00247) instead of a fresh one, when
+// into is not "".
+func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args []ast.Expression, pos ast.Pos, into string) (Value, error) {
 	pVal, err := e.emitExpr(objExpr)
 	if err != nil {
 		return Value{}, err
@@ -218,8 +259,30 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	// Evaluate callbacks into closure pointers ("null" when absent) and decide the
 	// returned promise Q's value type U (the type Q settles to).
 	onF, onR, onFin := "null", "null", "null"
+	var fVal, rVal Value
+	var rTy Type
+	hasR := false
 	finAwait := false
 	retTy := TypeVoid
+	// A callback returning a thenable class instance resolves Q through it.
+	args = append([]ast.Expression(nil), args...)
+	for i := range args {
+		if i > 1 || e.isNonCallableThenArg(args[i]) {
+			continue
+		}
+		param := innerTy
+		if kind == "catch" || i == 1 {
+			param = TypeCaught
+		}
+		if kind == "finally" {
+			break
+		}
+		w, err := e.thenableCallback(args[i], param, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		args[i] = w
+	}
 	switch kind {
 	case "then":
 		// JS treats a missing/`undefined`/`null` onFulfilled as a pass-through
@@ -231,7 +294,7 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 			if err != nil {
 				return Value{}, err
 			}
-			onF = v.Ref
+			onF, fVal = v.Ref, v
 			if t, ok := e.callbackReturnType(args[0], innerTy); ok {
 				retTy = t
 			}
@@ -243,7 +306,8 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 			if err != nil {
 				return Value{}, err
 			}
-			onR = v2.Ref
+			onR, rVal = v2.Ref, v2
+			rTy, hasR = e.callbackReturnType(args[1], TypeCaught)
 		}
 	case "catch":
 		if len(args) < 1 {
@@ -258,9 +322,11 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 			if err != nil {
 				return Value{}, err
 			}
-			onR = v.Ref
-			if t, ok := e.callbackReturnType(args[0]); ok {
-				retTy = t
+			onR, rVal = v.Ref, v
+			retTy = innerTy // the fulfilled path passes the source value through
+			rTy, hasR = e.callbackReturnType(args[0], TypeCaught)
+			if hasR && !thenPathsDiffer(retTy, rTy) {
+				retTy = rTy
 			}
 		}
 	case "finally":
@@ -281,6 +347,25 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 		}
 	}
 
+	// Q settles to the fulfilled path's value or the rejection handler's: TS
+	// types it as their union, which Q holds boxed when the two differ. A
+	// pass-through fulfilled path becomes an identity callback that boxes.
+	if hasR && thenPathsDiffer(retTy, rTy) {
+		if onF == "null" {
+			v, err := e.emitFulfillCallback(thenIdentityCallback(pos), innerTy)
+			if err != nil {
+				return Value{}, err
+			}
+			fVal = v
+		}
+		f, okF := e.closureReturningAny(fVal)
+		r, okR := e.closureReturningAny(rVal)
+		if !okF || !okR {
+			return Value{}, fmt.Errorf("%d:%d: .%s whose handlers settle to different types is not supported for these handler types", pos.Line, pos.Col, kind)
+		}
+		onF, onR, retTy = f.Ref, r.Ref, TypeAny
+	}
+
 	// A callback that returns a promise resolves Q *with* that promise: Q settles
 	// the way it settles, to its value (flattening — `p.then(() => later())`
 	// yields later()'s value, not a promise). A raw fetch handle returned from
@@ -297,8 +382,11 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 
 	// Q: the returned promise, allocated *pending* so a chained `.then` attaches a
 	// reaction that the runner fires when it settles Q.
-	q := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
+	q := into
+	if q == "" {
+		q = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
+	}
 
 	// env = { ptr p, ptr onF, ptr onR, ptr onFin, ptr q, ptr runner }
 	env := e.freshReg()
@@ -355,7 +443,7 @@ func (e *Emitter) emitAttachPromiseReaction(prom, clo string) {
 	e.emitMarkPromiseHandled(prom)
 	// The reaction runs in the async context it was registered in, as Node's
 	// does (TDD-00168): the reaction is a `void (env)` closure like a timer's.
-	if e.programUsesALS {
+	if e.programUsesALS || e.programIndependent() {
 		clo = e.wrapTimerClosureWithAsyncCtx(clo)
 	}
 	res := e.freshReg()
@@ -557,7 +645,9 @@ func (e *Emitter) emitThenRunner(argTy, retTy Type, adopt int, finAwait bool) st
 	produceF, storeSettleF := thenStoreResultIR(retTy, "f")
 	produceR, storeSettleR := thenStoreResultIR(retTy, "r")
 
-	// Fulfillment callback call expression (onF). Void source ⟹ no argument.
+	// Fulfillment callback call expression (onF). A void source passes
+	// undefined (its `any` box): a callback of no parameters ignores it, one
+	// of other types is adapted from `any` (emitFulfillCallback).
 	loadFClosure := "  %ffp_p = getelementptr { ptr, ptr }, ptr %onF, i32 0, i32 0\n" +
 		"  %ffp = load ptr, ptr %ffp_p, align 8\n" +
 		"  %fep_p = getelementptr { ptr, ptr }, ptr %onF, i32 0, i32 1\n" +
@@ -565,7 +655,7 @@ func (e *Emitter) emitThenRunner(argTy, retTy Type, adopt int, finAwait bool) st
 	var fCall string
 	switch {
 	case argIR == "":
-		fCall = loadFClosure + produceF(fmt.Sprintf("call %s %%ffp(ptr %%fep)", thenCallRetIR(retTy)))
+		fCall = loadFClosure + produceF(fmt.Sprintf("call %s %%ffp(ptr %%fep, i64 %d)", thenCallRetIR(retTy), nbUndefined))
 	case argTy.IsArray:
 		// An array callback argument is passed by the two-slot array-param ABI
 		// (`ptr <header>, i64 <len>` — bindArrayParam): the source promise stores
@@ -576,7 +666,9 @@ func (e *Emitter) emitThenRunner(argTy, retTy Type, adopt int, finAwait bool) st
 		// crashed (silently-empty before the header model).
 		e.ensureMalloc()
 		arrValLoad := "  %adata = inttoptr i64 %v0 to ptr\n" +
-			"  %ahdr = call ptr @malloc(i64 16)\n" +
+			"  %acell = call ptr @malloc(i64 24)\n" +
+			fmt.Sprintf("  store i64 %d, ptr %%acell, align 8\n", e.arrayHeaderWord()) +
+			"  %ahdr = getelementptr i8, ptr %acell, i64 8\n" +
 			"  store ptr %adata, ptr %ahdr, align 8\n" +
 			"  %alenp = getelementptr { ptr, i64 }, ptr %ahdr, i32 0, i32 1\n" +
 			"  store i64 %v1, ptr %alenp, align 8\n"
@@ -756,4 +848,55 @@ func (e *Emitter) ensurePromiseFinallyWait() {
 	e.ensurePromiseDeferSettle()
 	e.ensurePromiseAdopt() // @__kml_promise_attach
 	e.emitGlobal(`declare void @__kml_promise_finally_wait(ptr, ptr, i64, i64, i64)`)
+}
+
+// thenPathsDiffer reports whether a then/catch's fulfilled and rejected paths
+// settle to values Q cannot hold in one representation. A promise-returning
+// handler (flattened by adoption) keeps its own handling.
+func thenPathsDiffer(a, b Type) bool {
+	if a.IsPromise || b.IsPromise {
+		return false
+	}
+	if a.IsDynamic && b.IsDynamic {
+		return false
+	}
+	return !reflect.DeepEqual(a, b) && !sameShortCircuitType(a, b)
+}
+
+// thenIdentityCallback is `v => v`, the fulfilled path of a `.catch`.
+func thenIdentityCallback(pos ast.Pos) ast.Expression {
+	return ast.NewArrowFunction([]ast.Param{{Name: "__kml_v"}}, nil, ast.NewIdentifier("__kml_v", pos), nil, pos)
+}
+
+// closureReturningAny is the handler closure v adapted to box its result.
+func (e *Emitter) closureReturningAny(v Value) (Value, bool) {
+	if !v.Ty.IsFunc {
+		return Value{}, false
+	}
+	tgt := FuncType(v.Ty.FuncParams, TypeAny)
+	if a, ok := e.emitClosureAdapter(v, tgt); ok {
+		return a, true
+	}
+	return e.emitBoxedClosureAs(v, tgt)
+}
+
+// thenCallbackFromAny converts a `.then`/`.catch` handler held in an `any`
+// to a closure taking param: a value that is not a function at run time is
+// the null callback, the pass-through PerformPromiseThen makes of a
+// non-callable handler.
+func (e *Emitter) thenCallbackFromAny(v Value, param Type) (Value, bool) {
+	if !isUnconstrainedDynamic(v.Ty) {
+		return Value{}, false
+	}
+	c, ok := e.emitAnyToClosure(v, FuncType([]Type{param}, TypeAny))
+	if !ok {
+		return Value{}, false
+	}
+	tag, _ := e.emitUnboxTagPayload(v)
+	isRef, isDyn, isFn, out := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isRef, tag, kmlTagFuncRef))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isDyn, tag, kmlTagDynFunc))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", isFn, isRef, isDyn))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", out, isFn, c.Ref))
+	return Value{Ref: out, Ty: c.Ty}, true
 }

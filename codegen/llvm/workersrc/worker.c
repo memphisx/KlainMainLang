@@ -1,7 +1,7 @@
 /* worker.c — the thread side of Worker threads (TDD-00098; in C per
  * TDD-00240): the thread main a Worker runs (klainpool.c's workerSpawn starts
- * it), the thread-aware exit that process.exit and an uncaught error take on
- * a worker, and the loop hooks that end a terminated worker. Under -mm=gc the
+ * it), and the thread-aware exit that process.exit, an uncaught error and
+ * terminate() take on a worker. Under -mm=gc the
  * thread registers with Boehm before its first allocation, its thread-local
  * block a root, and its own stack bottom in the TLS orig slot so fiber-swap
  * restores never point at another thread's stack. kml_layout.h is prepended
@@ -27,11 +27,13 @@ extern int swapcontext(void *, void *);
 #define KML_SIG_BLOCK 0
 #endif
 
+__attribute__((noreturn)) void __kml_thread_exit(int code);
+
 /* klainpool.c's worker natives. */
 extern void *__kml_worker_enter(void *ctx);
 extern void __kml_worker_leave(i64 code);
 extern _Bool __kml_worker_is_thread(void);
-extern _Bool __kml_worker_terminating(void);
+extern void __kml_worker_set_end(void (*end)(int));
 
 /* The generated program's side. */
 extern i64 __kml_worker_run_loop(void);
@@ -65,6 +67,7 @@ void *__kml_worker_thread(void *ctx) {
     char sigset[128] __attribute__((aligned(8)));
     sigfillset(sigset);
     pthread_sigmask(KML_SIG_BLOCK, sigset, NULL);
+    __kml_worker_set_end(__kml_thread_exit);
     void (*entry)(void) = (void (*)(void))__kml_worker_enter(ctx);
     entry();
     i64 code = __kml_worker_run_loop();
@@ -100,16 +103,4 @@ __attribute__((noreturn)) void __kml_thread_exit(int code) {
  * runner) and ends the thread once control is back on its own stack. */
 void __kml_worker_abort_check(void) {
     if (worker_abort && !__kml_current_task) __kml_worker_end_thread();
-}
-
-/* The loop's worker hook: a terminated worker ends at its next turn, with
- * exit code 1 (klainpool.c's leave records it). */
-void __kml_worker_dispatch(void) {
-    if (__kml_worker_terminating()) __kml_thread_exit(1);
-}
-_Bool __kml_worker_keepalive(void) { return 0; }
-_Bool __kml_worker_fdset_add(void *fdset, void *maxfd) {
-    (void)fdset;
-    (void)maxfd;
-    return 0;
 }

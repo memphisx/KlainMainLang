@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -275,15 +276,31 @@ console.log(d2.toISOString())
 `, "1971-01-01T00:00:00.000Z\n1970-02-01T00:00:00.000Z")
 }
 
-func TestE2EDateSetterOnObjectFieldRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// A Date is an object: a setter on any receiver mutates the one Date every
+// reference to it sees, and `===` compares identity (TDD-00247 stage 4).
+func TestE2EDateIsAnObject(t *testing.T) {
+	assertOutput(t, `
 interface Box { when: Date }
 const b: Box = { when: new Date(0) }
-b.when.setFullYear(2020)
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a Date setter on a non-identifier receiver, got none")
-	}
+const alias = b.when
+b.when.setUTCFullYear(2020)
+console.log(alias.toISOString())
+const ds: Date[] = [new Date(1), new Date(1)]
+console.log(ds[0] === ds[1], ds[0] === ds[0], ds.indexOf(ds[1]))
+function bump(d: Date) { d.setTime(d.getTime() + 1) }
+bump(ds[1])
+console.log(ds[1].getTime())
+const m = new Map<Date, string>([[ds[0], "a"]])
+console.log(m.get(ds[0]), m.get(new Date(1)), new Set([ds[0], ds[0], ds[1]]).size)
+const x: any = ds[0]
+console.log(x === ds[0], x instanceof Date, typeof ds[0], +ds[0], Number(new Date(NaN)))
+console.log(JSON.stringify({ at: new Date(0), bad: new Date(NaN) }))
+let maybe: Date | undefined
+console.log(maybe?.getTime())
+maybe = new Date(3)
+console.log(maybe?.getTime(), new Date(maybe).getTime(), new Date(maybe) === maybe)
+`, "2020-01-01T00:00:00.000Z\nfalse true 1\n2\na undefined 2\ntrue true object 1 NaN\n"+
+		`{"at":"1970-01-01T00:00:00.000Z","bad":null}`+"\nundefined\n3 3 false")
 }
 
 func TestE2EDateSetterMultiArg(t *testing.T) {
@@ -345,14 +362,24 @@ console.log(later.getTime() - d1.getTime())
 `, "1970\n1970-01-02T00:00:00.000Z\n86400000")
 }
 
-func TestE2EDateCompoundAssignAddsDuration(t *testing.T) {
-	assertOutput(t, `
+// `d += n` makes a string (Date's default ToPrimitive), which TypeScript
+// rejects (TS2365); as JavaScript the binding then holds that string.
+func TestE2EDateCompoundAssignRejected(t *testing.T) {
+	_, err := parseAndCompile(`
 let d: Date = new Date(0)
 d += 86400000
-console.log(d.toISOString())
-d -= 3600000
-console.log(d.toISOString())
-`, "1970-01-02T00:00:00.000Z\n1970-01-01T23:00:00.000Z")
+`)
+	if err == nil || !strings.Contains(err.Error(), "'+=' cannot be applied to types 'Date' and 'number'") {
+		t.Fatalf("want TS2365, got %v", err)
+	}
+	assertOutputCompatJS(t, `
+let d = new Date(0)
+d += 86400000
+console.log(typeof d)
+let n = new Date(5)
+n -= 2
+console.log(n)
+`, "string\n3")
 }
 
 func TestE2EDatePlusDateRejected(t *testing.T) {
@@ -496,5 +523,21 @@ const h = new Date(NaN);
 console.log(h.setUTCFullYear(1999), h.getUTCFullYear(), h.getUTCMonth(), h.getUTCDate(), h.getUTCHours());
 const k = new Date(Date.UTC(2020, 0, 31));
 console.log(k.setUTCMonth(1), k.getUTCDate(), k.getUTCMonth(), k.setUTCHours(25), k.getUTCDay(), typeof k.getUTCDay());
+`)
+}
+
+// Date.UTC and the calendar constructor compose their fields as
+// ECMAScript does (NaN, overflow, range, an absent field vs an
+// undefined one), also through Date.UTC as a value (ADR-01526).
+func TestDateFieldsAsMakeDate(t *testing.T) {
+	assertSameAsNode(t, `
+console.log(Date.UTC(NaN), Date.UTC(2020), Date.UTC(2020, 0, 1, 0, 0, 0, 0.5), Date.UTC(2020, 13, 40), Date.UTC(99, -1), Date.UTC(275760, 8, 13, 0, 0, 0, 1), Date.UTC(-271821, 3, 20));
+console.log(new Date(2020, NaN).getTime(), new Date(2020, 0, 1).getFullYear(), new Date(2020, 0, 1, 12, 30).getHours(), new Date(5, 1).getFullYear());
+console.log(String(new Date(2020, Infinity)), new Date(2021, 1, 29).getDate());
+`)
+	assertSameAsNodeCompatJS(t, `
+const f = Date.UTC;
+console.log(f(NaN), f(2020), f(2020, 5), f(2020, undefined), f("2020", "3", "4"), f(), f.length, f.name);
+console.log([2020, 2021].map((y) => f(y)));
 `)
 }

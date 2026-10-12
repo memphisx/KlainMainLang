@@ -75,6 +75,17 @@ func (e *Emitter) emitNewPromise(ex *ast.NewExpression) (Value, error) {
 
 	p := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", p))
+	return e.emitPromiseExecutor(p, valTy, ex.Args[0], ex.GetPos())
+}
+
+// emitPromiseExecutor runs a Promise executor (exec) with resolve/reject
+// functions settling the pending promise body p, whose value type is valTy:
+// `new Promise(exec)`'s, or the body of an instance of a class extending
+// Promise (TDD-00247).
+func (e *Emitter) emitPromiseExecutor(p string, valTy Type, exec ast.Expression, pos ast.Pos) (Value, error) {
+	e.ensurePromiseSettle()
+	e.ensureExceptionHelpers()
+	e.ensureMalloc()
 
 	// Per-site resolve/reject settle functions + their closure headers over p.
 	resolveFn := e.emitResolveThunk(valTy)
@@ -111,26 +122,44 @@ func (e *Emitter) emitNewPromise(ex *ast.NewExpression) (Value, error) {
 	// the call below works regardless.
 	var execVal Value
 	var err error
-	switch fn := ex.Args[0].(type) {
+	switch fn := exec.(type) {
 	case *ast.ArrowFunction:
 		execVal, err = e.emitArrowFunctionWithHints(fn, []Type{resolveTy, rejectTy})
 	case *ast.FunctionExpression:
 		execVal, err = e.emitFunctionExpression(fn, []Type{resolveTy, rejectTy})
 	default:
-		execVal, err = e.emitExpr(ex.Args[0])
+		execVal, err = e.emitExpr(exec)
 		if err == nil && !execVal.Ty.IsFunc {
-			return Value{}, fmt.Errorf("%d:%d: new Promise's executor must be a function (arrow, function expression, or a closure-typed value)", ex.GetPos().Line, ex.GetPos().Col)
+			return Value{}, fmt.Errorf("%d:%d: new Promise's executor must be a function (arrow, function expression, or a closure-typed value)", pos.Line, pos.Col)
 		}
 	}
 	if err != nil {
 		return Value{}, err
 	}
 
-	execTy := FuncType([]Type{resolveTy, rejectTy}, TypeVoid)
-	e.emitClosureCallValues(execVal.Ref, execTy, []Value{
-		{Ref: resolveClo, Ty: resolveTy},
-		{Ref: rejectClo, Ty: rejectTy},
-	})
+	// An executor held as a value takes its resolving functions at the
+	// types it declares (a class extending Promise's `(resolve: (value: T)
+	// => void, reject: (reason?: any) => void)`): ours, adapted.
+	// (A parameter held in `any` takes the box, passed in the same
+	// register a pointer is.)
+	adapt := func(ref string, from, to Type) string {
+		v := e.coerce(Value{Ref: ref, Ty: from}, to)
+		if v.Ty.IR == "i64" {
+			p := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, v.Ref))
+			return p
+		}
+		return v.Ref
+	}
+	if ps := execVal.Ty.FuncParams; execVal.Ty.IsFunc && len(ps) >= 2 {
+		resolveClo = adapt(resolveClo, resolveTy, ps[0])
+		rejectClo = adapt(rejectClo, rejectTy, ps[1])
+	} else if len(ps) == 1 && execVal.Ty.IsFunc {
+		resolveClo = adapt(resolveClo, resolveTy, ps[0])
+	}
+	// A throw from the executor rejects the promise (settle.c).
+	e.declareFn("__kml_promise_run_executor", "declare void @__kml_promise_run_executor(ptr, ptr, ptr, ptr)")
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_run_executor(ptr %s, ptr %s, ptr %s, ptr %s)", execVal.Ref, resolveClo, rejectClo, p))
 
 	pt := PromiseOf(valTy)
 	pt.PromiseTask = true
@@ -231,31 +260,6 @@ func (e *Emitter) buildBuiltinClosure(fn, envPtr string) string {
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epp, hdr))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", envPtr, epp))
 	return hdr
-}
-
-// emitClosureCallValues invokes a closure with already-evaluated Value arguments
-// (the executor call, whose args are the resolve/reject closure headers). A
-// narrow by-value counterpart to emitClosureCallByPtr, for scalar/ptr params and
-// a void return — the only shapes the executor needs.
-func (e *Emitter) emitClosureCallValues(closurePtr string, ty Type, argVals []Value) {
-	fpSlot := e.freshReg()
-	fpVal := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpSlot, closurePtr))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fpVal, fpSlot))
-	epSlot := e.freshReg()
-	epVal := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epSlot, closurePtr))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", epVal, epSlot))
-
-	argParts := []string{"ptr " + epVal}
-	tyParts := []string{"ptr"}
-	for i, av := range argVals {
-		pty := ty.FuncParams[i]
-		v := e.coerce(av, pty)
-		argParts = append(argParts, fmt.Sprintf("%s %s", pty.IR, v.Ref))
-		tyParts = append(tyParts, pty.IR)
-	}
-	e.emitInstr(fmt.Sprintf("call void (%s) %s(%s)", strings.Join(tyParts, ", "), fpVal, strings.Join(argParts, ", ")))
 }
 
 // emitResolveThunk emits `void (ptr %p, <T> %v)` and returns its symbol:

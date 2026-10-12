@@ -2,21 +2,27 @@
  * unhandledRejection), uptime/hrtime, cwd/chdir/umask, credentials, argv,
  * exec path, env, kill, memory numbers and the signal watchers behind
  * lib/node/internal_process.ts (in C per TDD-00240). A failing call returns
- * -errno. Mode defines from ProcessCFlags: KML_PROC_STR (cwd/exec path/env
- * wrap C strings via __kml_str_from_cstr), KML_PROC_MEM (processMemory),
- * KML_PROC_WORKERS (exit through __kml_thread_exit), KML_NB_UNDEFINED and
- * KML_NB_DOUBLE_OFFSET (the NaN-box constants). */
+ * -errno. Compiled the same way for every program (the link drops what a
+ * program does not use); ProcessCFlags passes the NaN-box constants
+ * KML_NB_UNDEFINED and KML_NB_DOUBLE_OFFSET. */
+#if defined(_WIN32)
+/* The shim (win32fs.c, win32shim.c) defines the POSIX names below with its
+ * own signatures: no CRT old-name aliases, no <time.h>/<sys/stat.h>. */
+#define NO_OLDNAMES 1
+#endif
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <time.h>
+#endif
 
 typedef long long i64;
 
 #if defined(_WIN32)
-typedef struct { i64 sec, nsec; } kml_ts; /* the shim's own layout, not mingw's */
+typedef struct { i64 tv_sec, tv_nsec; } kml_ts; /* the shim's own layout, not mingw's */
 int clock_gettime(int clk, kml_ts *ts);
 int kill(int pid, int sig);
 int setenv(const char *name, const char *value, int overwrite);
@@ -26,6 +32,7 @@ char *getcwd(char *buf, size_t size);
 int getpid(void);
 i64 readlink(const char *path, char *buf, size_t cap);
 void *signal(int sig, void *handler);
+int _umask(int mode);
 #define UMASK _umask
 #else
 #include <signal.h>
@@ -40,17 +47,13 @@ typedef struct timespec kml_ts;
 #define KML_MONO_CLOCK 1
 #endif
 
-#ifdef KML_PROC_STR
 extern void *__kml_str_from_cstr(const char *s);
-#endif
-#ifdef KML_PROC_MEM
 extern i64 __kml_current_rss_bytes(void);
 extern i64 __kml_heap_total_bytes(void);
 extern i64 __kml_heap_used_bytes(void);
-#endif
-#ifdef KML_PROC_WORKERS
-extern void __kml_thread_exit(int code) __attribute__((noreturn));
-#endif
+/* The worker runtime replaces this in a program with Worker threads: exit
+ * then ends the calling thread, the process only on the main one. */
+__attribute__((weak, noreturn)) void __kml_thread_exit(int code) { exit(code); }
 /* The program's argv, stored by main. */
 extern void *__argv_ptr;
 extern void *__process_argv_ptr;
@@ -95,11 +98,7 @@ void __kml_native_process_really_exit(double code) {
     __kml_process_exit_code = (i64)code;
     __kml_run_exit_handlers(__kml_process_exit_code);
     int final = (int)__kml_process_exit_code;
-#ifdef KML_PROC_WORKERS
     __kml_thread_exit(final);
-#else
-    exit(final);
-#endif
 }
 
 /* ---- time ---- */
@@ -130,7 +129,6 @@ void __kml_native_process_hrtime(void) {
 double __kml_native_process_hrtime_read(double which) { return (double)hrtime_buf[(int)which & 1]; }
 
 /* ---- cwd, chdir, umask ---- */
-#ifdef KML_PROC_STR
 void *__kml_process_cwd(void) {
     char *r = getcwd(NULL, 0);
     void *s = __kml_str_from_cstr(r);
@@ -139,7 +137,6 @@ void *__kml_process_cwd(void) {
 }
 
 void *__kml_native_process_cwd(void) { return __kml_process_cwd(); }
-#endif
 
 double __kml_native_process_chdir(const char *path) {
     if (chdir(path) != 0) return (double)-errno;
@@ -203,7 +200,6 @@ char *__kml_execpath(void) {
 #endif
 }
 
-#ifdef KML_PROC_STR
 void *__kml_native_process_exec_path(void) { return __kml_str_from_cstr(__kml_execpath()); }
 
 _Bool __kml_native_env_get(const char *key, void **out) {
@@ -212,13 +208,11 @@ _Bool __kml_native_env_get(const char *key, void **out) {
     *out = __kml_str_from_cstr(raw);
     return 1;
 }
-#endif
 
 void __kml_native_env_set(const char *key, const char *value) { setenv(key, value, 1); }
 
 void __kml_native_env_delete(const char *key) { unsetenv(key); }
 
-#ifdef KML_PROC_MEM
 /* 0 rss, 1 heapTotal, 2 heapUsed */
 double __kml_native_process_memory(double which) {
     switch ((int)which) {
@@ -227,14 +221,17 @@ double __kml_native_process_memory(double which) {
     default: return (double)(unsigned long long)__kml_current_rss_bytes();
     }
 }
-#endif
 
 /* ---- signals ----
- * A handler runs in signal context, so it only sets a flag; the event loop's
- * iteration runs the watcher (__kml_signal_dispatch). signal(), not
- * sigaction(): two scalars, identical layout on every target. */
+ * On POSIX each watched signal is a uv_signal_t on the event loop
+ * (loop.c), whose callback runs the watcher inside the wait, as Node's
+ * does. Windows keeps signal() until its loop moves to libuv (TDD-00244
+ * Stage 6): the handler only sets a flag the loop's next pass dispatches
+ * (__kml_signal_dispatch). */
 typedef void (*sig_watch_fn)(void *clo, double signo);
+#ifdef _WIN32
 static _Thread_local volatile unsigned char sig_pending[65];
+#endif
 static _Thread_local sig_watch_fn sig_inv[65];
 static _Thread_local void *sig_clo[65];
 
@@ -246,10 +243,22 @@ static void *sig_install(int n, void *h) {
 #endif
 }
 
-static void sig_handler(int signum) {
+void __kml_signal_note(int signum) {
+#ifdef _WIN32
     if ((unsigned)signum < 65) sig_pending[signum] = 1;
+#else
+    if ((unsigned)signum < 65 && sig_inv[signum]) sig_inv[signum](sig_clo[signum], (double)signum);
+#endif
 }
 
+#ifdef _WIN32
+static void sig_handler(int signum) { __kml_signal_note(signum); }
+#else
+int __kml_loop_signal_start(int n);
+void __kml_loop_signal_stop(int n);
+#endif
+
+#ifdef _WIN32
 void __kml_signal_dispatch(void) {
     for (int i = 1; i < 65; i++) {
         if (!sig_pending[i]) continue;
@@ -257,18 +266,24 @@ void __kml_signal_dispatch(void) {
         if (sig_inv[i]) sig_inv[i](sig_clo[i], (double)i);
     }
 }
+#endif
 
 /* A client dropping mid-write unwinds via write() EPIPE, not a kill. */
 void __kml_ignore_sigpipe(void) { sig_install(13, (void *)1); }
 
-/* Starting installs the handler; -EINVAL for a number or signal the host refuses. */
+/* Starting watches the signal; -EINVAL for a number or signal the host
+ * refuses. */
 double __kml_native_signal_start(double signo, void *inv, void *clo) {
     int n = (int)signo;
     if (n < 1 || n > 64) return -22.0;
     sig_clo[n] = clo;
     sig_inv[n] = (sig_watch_fn)inv;
+#ifdef _WIN32
     if (sig_install(n, (void *)sig_handler) == (void *)-1) return -22.0;
     return 0.0;
+#else
+    return (double)__kml_loop_signal_start(n);
+#endif
 }
 
 /* Stopping restores the default disposition (SIGPIPE's is ignored). */
@@ -276,5 +291,10 @@ void __kml_native_signal_stop(double signo) {
     int n = (int)signo;
     if (n < 1 || n > 64) return;
     sig_inv[n] = 0;
+#ifdef _WIN32
     sig_install(n, n == 13 ? (void *)1 : (void *)0);
+#else
+    __kml_loop_signal_stop(n);
+    if (n == 13) sig_install(13, (void *)1);
+#endif
 }

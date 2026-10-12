@@ -265,7 +265,7 @@ func (e *Emitter) emitStreamTee(srcPtr string, chunkTy Type, pos ast.Pos) (Value
 // `new TransformStream<I, O>({transform?, flush?}?, writableStrategy?, readableStrategy?)`.
 func (e *Emitter) emitNewTransformStream(ex *ast.NewTransformStreamExpression) (Value, error) {
 	pos := ex.GetPos()
-	inTy, outTy := TypeI64, TypeI64
+	inTy, outTy := TypeAny, TypeAny // TransformStream<I = any, O = any>
 	if ex.InType != nil {
 		inTy = e.resolveType(ex.InType)
 	}

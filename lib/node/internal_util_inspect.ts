@@ -71,6 +71,7 @@ export function inspect(object: any, ...rest: any[]): string {
         inspectOption(options, 'sorted') ? 1 : 0,
         inspectOption(options, 'breakLength'),
         countOpt(inspectOption(options, 'maxArrayLength')),
+        inspectOption(options, 'customInspect') ? 1 : 0,
     );
 }
 

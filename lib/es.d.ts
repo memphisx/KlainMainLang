@@ -20,6 +20,7 @@ interface Object {
 
 type PropertyKey = string | number | symbol;
 
+/** @lowerType dynamic */
 interface PropertyDescriptor {
     configurable?: boolean;
     enumerable?: boolean;
@@ -63,6 +64,8 @@ interface ObjectConstructor {
     create(o: object | null, properties?: any): any;
     /** @intrinsic Object.getOwnPropertyNames */
     getOwnPropertyNames(o: any): string[];
+    /** @intrinsic Object.getOwnPropertySymbols */
+    getOwnPropertySymbols(o: any): symbol[];
     /** @intrinsic Object.getOwnPropertyDescriptor */
     getOwnPropertyDescriptor(o: any, p: PropertyKey): PropertyDescriptor | undefined;
     /** @intrinsic Object.defineProperty */
@@ -139,6 +142,8 @@ interface Function {
     /** @intrinsic Function.prototype.bind */
     bind(this: Function, thisArg: any, ...argArray: any[]): any;
     toString(): string;
+    arguments: any;
+    caller: Function;
 }
 
 interface FunctionConstructor {
@@ -416,6 +421,12 @@ interface TemplateStringsArray extends ReadonlyArray<string> {
     readonly raw: readonly string[];
 }
 
+interface IArguments {
+    [index: number]: any;
+    length: number;
+    callee: Function;
+}
+
 interface ReadonlyArray<T> {
     [Symbol.iterator](): ArrayIterator<T>;
     /** @intrinsic Array.prototype.entries */
@@ -580,6 +591,7 @@ interface ArrayConstructor {
 
 declare var Array: ArrayConstructor;
 
+/** @lowerType error */
 interface Error {
     name: string;
     message: string;
@@ -643,6 +655,7 @@ interface URIErrorConstructor {
 }
 declare var URIError: URIErrorConstructor;
 
+/** @lowerType aggregateerror */
 interface AggregateError extends Error {
     errors: any[];
 }
@@ -653,6 +666,7 @@ interface AggregateErrorConstructor {
 }
 declare var AggregateError: AggregateErrorConstructor;
 
+/** @lowerType date */
 interface Date {
     /** @intrinsic Date.prototype.toString */
     toString(): string;
@@ -768,6 +782,7 @@ interface RegExpExecArray extends Array<string> {
     groups?: { [key: string]: string };
 }
 
+/** @lowerType regexp */
 interface RegExp {
     /** @intrinsic RegExp.prototype.exec */
     exec(string: string): RegExpExecArray | null;
@@ -867,14 +882,32 @@ interface RegExpStringIterator<T> extends IteratorObject<T, BuiltinIteratorRetur
 interface SetIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
     [Symbol.iterator](): SetIterator<T>;
 }
-interface AsyncIterable<T> {}
-interface AsyncIterator<T> {}
-interface AsyncIterableIterator<T> extends AsyncIterator<T> {}
+interface AsyncIterator<T, TReturn = any, TNext = any> {
+    next(...[value]: [] | [TNext]): Promise<IteratorResult<T, TReturn>>;
+    return?(value?: TReturn | PromiseLike<TReturn>): Promise<IteratorResult<T, TReturn>>;
+    throw?(e?: any): Promise<IteratorResult<T, TReturn>>;
+}
+interface AsyncIterable<T, TReturn = any, TNext = any> {
+    [Symbol.asyncIterator](): AsyncIterator<T, TReturn, TNext>;
+}
+interface AsyncIterableIterator<T, TReturn = any, TNext = any> extends AsyncIterator<T, TReturn, TNext> {
+    [Symbol.asyncIterator](): AsyncIterableIterator<T, TReturn, TNext>;
+}
+interface AsyncIteratorObject<T, TReturn = unknown, TNext = unknown> extends AsyncIterator<T, TReturn, TNext> {
+    [Symbol.asyncIterator](): AsyncIteratorObject<T, TReturn, TNext>;
+}
+interface AsyncGenerator<T = unknown, TReturn = any, TNext = any> extends AsyncIteratorObject<T, TReturn, TNext> {
+    next(...[value]: [] | [TNext]): Promise<IteratorResult<T, TReturn>>;
+    return(value: TReturn | PromiseLike<TReturn>): Promise<IteratorResult<T, TReturn>>;
+    throw(e: any): Promise<IteratorResult<T, TReturn>>;
+    [Symbol.asyncIterator](): AsyncGenerator<T, TReturn, TNext>;
+}
 
 interface PromiseLike<T> {
     then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): PromiseLike<TResult1 | TResult2>;
 }
 
+/** @lowerType promise */
 interface Promise<T> {
     /** @intrinsic Promise.prototype.then */
     then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): Promise<TResult1 | TResult2>;
@@ -945,6 +978,7 @@ type ConstructorParameters<T extends abstract new (...args: any) => any> = T ext
 type ReturnType<T extends (...args: any) => any> = T extends (...args: any) => infer R ? R : any;
 type InstanceType<T extends abstract new (...args: any) => any> = T extends abstract new (...args: any) => infer R ? R : any;
 
+/** @lowerType map */
 interface Map<K, V> {
     /** @intrinsic Map.prototype.clear */
     clear(): void;
@@ -977,6 +1011,7 @@ interface MapConstructor {
 
 declare var Map: MapConstructor;
 
+/** @lowerType set */
 interface Set<T> {
     /** @intrinsic Set.prototype.add */
     add(value: T): this;
@@ -1006,6 +1041,7 @@ interface SetConstructor {
 
 declare var Set: SetConstructor;
 
+/** @lowerType weakmap */
 interface WeakMap<K extends object, V> {
     /** @intrinsic WeakMap.prototype.delete */
     delete(key: K): boolean;
@@ -1025,6 +1061,7 @@ interface WeakMapConstructor {
 
 declare var WeakMap: WeakMapConstructor;
 
+/** @lowerType weakset */
 interface WeakSet<T extends object> {
     /** @intrinsic WeakSet.prototype.add */
     add(value: T): this;
@@ -1120,6 +1157,7 @@ interface ArrayLike<T> {
     readonly length: number;
     readonly [n: number]: T;
 }
+/** @lowerType arraybuffer */
 interface ArrayBuffer {
     readonly byteLength: number;
     slice(begin?: number, end?: number): ArrayBuffer;
@@ -1211,11 +1249,19 @@ interface ArrayBufferView<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike
     readonly byteLength: number;
     readonly byteOffset: number;
 }
+/** @lowerType sharedarraybuffer */
 interface SharedArrayBuffer {
     readonly byteLength: number;
     slice(begin?: number, end?: number): SharedArrayBuffer;
     readonly [Symbol.toStringTag]: "SharedArrayBuffer";
 }
+interface SharedArrayBufferConstructor {
+    readonly prototype: SharedArrayBuffer;
+    new (byteLength?: number): SharedArrayBuffer;
+    new (byteLength: number, options?: { maxByteLength?: number; }): SharedArrayBuffer;
+}
+declare var SharedArrayBuffer: SharedArrayBufferConstructor;
+/** @lowerType int8array */
 interface Int8Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly BYTES_PER_ELEMENT: number;
     readonly buffer: TArrayBuffer;
@@ -1289,6 +1335,7 @@ interface Int8ArrayConstructor {
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Int8Array<ArrayBuffer>;
 }
 declare var Int8Array: Int8ArrayConstructor;
+/** @lowerType uint8array */
 interface Uint8Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly BYTES_PER_ELEMENT: number;
     readonly buffer: TArrayBuffer;
@@ -1362,6 +1409,7 @@ interface Uint8ArrayConstructor {
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Uint8Array<ArrayBuffer>;
 }
 declare var Uint8Array: Uint8ArrayConstructor;
+/** @lowerType uint8clampedarray */
 interface Uint8ClampedArray<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly BYTES_PER_ELEMENT: number;
     readonly buffer: TArrayBuffer;
@@ -1435,6 +1483,7 @@ interface Uint8ClampedArrayConstructor {
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Uint8ClampedArray<ArrayBuffer>;
 }
 declare var Uint8ClampedArray: Uint8ClampedArrayConstructor;
+/** @lowerType int16array */
 interface Int16Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly BYTES_PER_ELEMENT: number;
     readonly buffer: TArrayBuffer;
@@ -1508,6 +1557,7 @@ interface Int16ArrayConstructor {
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Int16Array<ArrayBuffer>;
 }
 declare var Int16Array: Int16ArrayConstructor;
+/** @lowerType uint16array */
 interface Uint16Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly BYTES_PER_ELEMENT: number;
     readonly buffer: TArrayBuffer;
@@ -1581,6 +1631,7 @@ interface Uint16ArrayConstructor {
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Uint16Array<ArrayBuffer>;
 }
 declare var Uint16Array: Uint16ArrayConstructor;
+/** @lowerType int32array */
 interface Int32Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly BYTES_PER_ELEMENT: number;
     readonly buffer: TArrayBuffer;
@@ -1654,6 +1705,7 @@ interface Int32ArrayConstructor {
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Int32Array<ArrayBuffer>;
 }
 declare var Int32Array: Int32ArrayConstructor;
+/** @lowerType uint32array */
 interface Uint32Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly BYTES_PER_ELEMENT: number;
     readonly buffer: TArrayBuffer;
@@ -1727,6 +1779,7 @@ interface Uint32ArrayConstructor {
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Uint32Array<ArrayBuffer>;
 }
 declare var Uint32Array: Uint32ArrayConstructor;
+/** @lowerType float32array */
 interface Float32Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly BYTES_PER_ELEMENT: number;
     readonly buffer: TArrayBuffer;
@@ -1800,6 +1853,7 @@ interface Float32ArrayConstructor {
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Float32Array<ArrayBuffer>;
 }
 declare var Float32Array: Float32ArrayConstructor;
+/** @lowerType float64array */
 interface Float64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly BYTES_PER_ELEMENT: number;
     readonly buffer: TArrayBuffer;
@@ -1873,6 +1927,7 @@ interface Float64ArrayConstructor {
     from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): Float64Array<ArrayBuffer>;
 }
 declare var Float64Array: Float64ArrayConstructor;
+/** @lowerType bigint64array */
 interface BigInt64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly BYTES_PER_ELEMENT: number;
     readonly buffer: TArrayBuffer;
@@ -1951,6 +2006,7 @@ interface BigInt64ArrayConstructor {
     from<T>(elements: Iterable<T>, mapfn?: (v: T, k: number) => bigint, thisArg?: any): BigInt64Array<ArrayBuffer>;
 }
 declare var BigInt64Array: BigInt64ArrayConstructor;
+/** @lowerType biguint64array */
 interface BigUint64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     readonly BYTES_PER_ELEMENT: number;
     readonly buffer: TArrayBuffer;

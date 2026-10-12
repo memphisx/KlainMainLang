@@ -53,7 +53,8 @@ console.log("miss=" + miss.byteLength)
 func TestE2EWebviewServeCompiles(t *testing.T) {
 	src := `
 import { Webview } from 'klain:webview'
-const w = new Webview({ title: "Emb", width: 400, height: 300, serve: ` + strconv.Quote(embedFixtureDir()) + ` })
+import { embedDir } from 'klain:assets'
+const w = new Webview({ title: "Emb", width: 400, height: 300, serve: embedDir(` + strconv.Quote(embedFixtureDir()) + `) })
 w.html("<h1>x</h1>")
 w.terminate()
 `
@@ -85,7 +86,8 @@ func TestE2EWebviewServeSmoke(t *testing.T) {
 	}
 	src := `
 import { Webview } from 'klain:webview'
-const w = new Webview({ title: "Emb", width: 400, height: 300, serve: ` + strconv.Quote(embedFixtureDir()) + ` })
+import { embedDir } from 'klain:assets'
+const w = new Webview({ title: "Emb", width: 400, height: 300, serve: embedDir(` + strconv.Quote(embedFixtureDir()) + `) })
 w.bind("done", (raw: string): string => {
   console.log("page title: " + raw)
   w.terminate()

@@ -16,7 +16,7 @@ import (
 var http2ServerSource string
 
 // HTTP2ServerSource returns the C source implementing the __kml_h2_* ABI.
-func HTTP2ServerSource() string { return http2ServerSource }
+func HTTP2ServerSource() string { return layoutHeader() + http2ServerSource }
 
 //go:embed http2src/h2node.c
 var h2NodeSource string
@@ -51,7 +51,6 @@ func (e *Emitter) emitHTTP2ServerDecls() {
 		return
 	}
 	e.usedHTTP2ServerDecls = true
-	e.ensureH2ClientBridge()
 	// The 5th ptr is the per-server dispatch vtable (TDD-00191 Stage 4).
 	e.emitGlobal("declare ptr @__kml_h2_session_server_new(i32, ptr, ptr, ptr, ptr)")
 	e.emitGlobal("declare void @__kml_h2_session_feed(ptr, ptr, i64)")
@@ -60,7 +59,6 @@ func (e *Emitter) emitHTTP2ServerDecls() {
 	e.emitGlobal("declare i32 @__kml_h2_session_want_read(ptr)")
 	e.emitGlobal("declare i32 @__kml_h2_session_want_write(ptr)")
 	e.emitGlobal("declare void @__kml_h2_session_del(ptr)")
-	e.emitGlobal("declare void @__kml_h2_set_blocking(i32)")
 }
 
 // LocateHTTP2 returns the clang cflags/libs to compile and link http2src/http2.c:
@@ -78,84 +76,4 @@ func LocateHTTP2() (cflags, libs []string) {
 		libs = []string{"-lnghttp2"}
 	}
 	return cflags, libs
-}
-
-// ensureH2ClientBridge defines the four generic callbacks http2.c fires as
-// client response frames arrive. Emitted for EVERY program that links the h2
-// driver (server-only included — the C file references these symbols
-// unconditionally), not just ones that call http2.connect.
-func (e *Emitter) ensureH2ClientBridge() {
-	if e.usedH2ClientBridge {
-		return
-	}
-	e.usedH2ClientBridge = true
-	e.ensureStrHeaderRuntime()
-	e.ensureMapStrHelpers()
-	e.ensureMemcpy()
-	e.emitGlobal(`define void @__kml_h2c_on_header(ptr %ctx, ptr %name, ptr %value) {
-entry:
-  %hp = getelementptr i8, ptr %ctx, i64 24
-  %m = load ptr, ptr %hp, align 8
-  %kn = call ptr @__kml_str_from_cstr(ptr %name)
-  %kv = call ptr @__kml_str_from_cstr(ptr %value)
-  %vi = ptrtoint ptr %kv to i64
-  call void @__kml_map_str_set(ptr %m, ptr %kn, i64 %vi)
-  ret void
-}
-
-define void @__kml_h2c_on_response(ptr %ctx) {
-entry:
-  %cp = load ptr, ptr %ctx, align 8
-  %isnull = icmp eq ptr %cp, null
-  br i1 %isnull, label %done, label %fire
-fire:
-  %hp = getelementptr i8, ptr %ctx, i64 24
-  %m = load ptr, ptr %hp, align 8
-  %fpp = getelementptr { ptr, ptr }, ptr %cp, i32 0, i32 0
-  %fp = load ptr, ptr %fpp, align 8
-  %epp = getelementptr { ptr, ptr }, ptr %cp, i32 0, i32 1
-  %ep = load ptr, ptr %epp, align 8
-  call void %fp(ptr %ep, ptr %m)
-  br label %done
-done:
-  ret void
-}
-
-define void @__kml_h2c_on_data(ptr %ctx, ptr %buf, i64 %len) {
-entry:
-  %sp = getelementptr i8, ptr %ctx, i64 8
-  %cp = load ptr, ptr %sp, align 8
-  %isnull = icmp eq ptr %cp, null
-  br i1 %isnull, label %done, label %fire
-fire:
-  %s = call ptr @__kml_str_alloc(i64 %len)
-  call ptr @memcpy(ptr %s, ptr %buf, i64 %len)
-  %nul = getelementptr i8, ptr %s, i64 %len
-  store i8 0, ptr %nul, align 1
-  %fpp = getelementptr { ptr, ptr }, ptr %cp, i32 0, i32 0
-  %fp = load ptr, ptr %fpp, align 8
-  %epp = getelementptr { ptr, ptr }, ptr %cp, i32 0, i32 1
-  %ep = load ptr, ptr %epp, align 8
-  call void %fp(ptr %ep, ptr %s)
-  br label %done
-done:
-  ret void
-}
-
-define void @__kml_h2c_on_end(ptr %ctx) {
-entry:
-  %sp = getelementptr i8, ptr %ctx, i64 16
-  %cp = load ptr, ptr %sp, align 8
-  %isnull = icmp eq ptr %cp, null
-  br i1 %isnull, label %done, label %fire
-fire:
-  %fpp = getelementptr { ptr, ptr }, ptr %cp, i32 0, i32 0
-  %fp = load ptr, ptr %fpp, align 8
-  %epp = getelementptr { ptr, ptr }, ptr %cp, i32 0, i32 1
-  %ep = load ptr, ptr %epp, align 8
-  call void %fp(ptr %ep)
-  br label %done
-done:
-  ret void
-}`)
 }

@@ -22,9 +22,13 @@ async function main(): Promise<void> {
   const ac = new AbortController()
   const s = spawn('sleep', ['5'], { signal: ac.signal })
   s.on('error', (e: Error) => console.log('abort', e.name))
-  s.on('exit', (code, sig) => console.log('exit', code, sig))
+  // exec starts once the killed child is reaped: two children's exits
+  // have no order, in Node either.
+  s.on('exit', (code, sig) => {
+    console.log('exit', code, sig)
+    exec('exit 3', (err) => console.log('exec code', (err as any).code))
+  })
   ac.abort()
-  exec('exit 3', (err) => console.log('exec code', (err as any).code))
 }
 main()
 `)

@@ -28,6 +28,7 @@ func (t Type) withoutNullable() Type {
 	// string rendering) misread the bare payload as `undefined` itself.
 	t.IsUndefined = false
 	t.NullAndUndef = false
+	t.UncheckedIndex = false // the absence it qualified is gone
 	return t
 }
 
@@ -234,6 +235,14 @@ func (e *Emitter) jsUndefinedLocalOperand(expr ast.Expression, cur Value, op str
 // nested call already returning T | null) is forwarded with its presence bit
 // intact; any other value boxes as present.
 func (e *Emitter) emitNullableScalarBoxedValue(expr ast.Expression, ty Type) (string, error) {
+	// A present value of another kind (a string where a defaulted number
+	// parameter is) has no conversion here in the strict lane: the
+	// typed-subset rejection a plain parameter makes, never invalid IR. The
+	// js lane converts it as JavaScript does.
+	if at := e.inferExprType(expr); !e.compatJS() && !at.IsDynamic && !isNullableScalar(at) && !at.IsNull && !at.IsUndefined && at.IR != "" &&
+		isPrimitiveRepr(at) && isPrimitiveRepr(ty.withoutNullable()) && !coerciblePure(at, ty.withoutNullable()) {
+		return "", fmt.Errorf("%d:%d: type mismatch in argument — a value of one type cannot be used where an incompatible type is expected (this compiler is a typed subset)", expr.GetPos().Line, expr.GetPos().Col)
+	}
 	if ty.NullAndUndef {
 		v, err := e.emitExpr(expr)
 		if err != nil {
@@ -934,8 +943,8 @@ func (e *Emitter) narrowingFromCondition(test ast.Expression) (name string, nonN
 		return "", false, false
 	}
 	id, isID := idExpr.(*ast.Identifier)
-	if !isID {
-		return "", false, false
+	if !isID || !e.flowTrusted(id) {
+		return "", false, false // another function may clear it after the guard
 	}
 	if sym, found := e.lookup(id.Name); !found || !sym.isNullableScalarLocal() {
 		return "", false, false
@@ -1057,4 +1066,17 @@ func (e *Emitter) boolNot(b string) string {
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", r, b))
 	return r
+}
+
+// isPrimitiveRepr reports a number, bigint, boolean or string
+// representation.
+func isPrimitiveRepr(t Type) bool {
+	if t.IsDynamic || t.IsObject || t.IsArray || t.IsFunc || t.IsMap || t.IsSet || t.IsPromise || t.IsClass {
+		return false
+	}
+	switch t.IR {
+	case "double", "float", "i1", "i8", "i16", "i32", "i64":
+		return true
+	}
+	return isStringTy(t)
 }

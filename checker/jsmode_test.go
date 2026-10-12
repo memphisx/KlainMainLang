@@ -36,14 +36,21 @@ func TestCompatJS(t *testing.T) {
 	for _, tc := range []struct{ src, want string }{
 		{"function add(a, b) { a; return a + b }\nadd(1, 2)", "number"},
 		{"function greet(n) { n; return 'hi ' + n }\ngreet('x')", "string"},
-		{"function f(a) { a }\nf(1)\nf('x')", "?"},
+		{"function f(a) { a }\nf(1)\nf('x')\nf", "(a: any) => void"}, // disagreeing sites: checkJs's any
 		{"function g(a) { a }", "any"},
-		{"declare const xs: number[]\nxs.map((v) => { v; return 0 })", "?"},
+		{"declare const xs: number[]\nxs.map((v) => { v; return 0 })", "any"},
 		{"const h = (a) => a\nh(true)", "boolean"},
 		{"r(3)\nfunction r(n) { if (n > 0) r(n - 1); n }", "number"}, // the recursive site is skipped
 		{"class P { constructor(x, y) { this.x = x; this.y = y } }\nnew P(1, 'a').y", "string"},
 		{"class P { constructor(x) { this.x = x; if (x) { this.z = [1] } } }\nnew P(1).z", "number[]"},
 		{"class Q { constructor() { this.v = 1; this.v = 'a' } }\nnew Q().v", "?"},
+		{"class M { n(x) { return 1 }\n get b() { this.n(2); return 0 } }", "number"},
+		{"class M { #m(x) { return x }\n get b() { this.#m; return 0 } }", "(x: any) => any"},
+		{"function k(a) { a; return a + 1 }\nk", "(a: any) => any"},
+		{"n(null)\nfunction n(a) { a }", "any"}, // null and undefined widen to any
+		{"u(undefined)\nu(2)\nfunction u(a) { a }", "number"},
+		{"function mk() { return (a) => a }\nmk", "() => (a: any) => any"}, // a returned function's callers are out of sight
+		{"const mk = () => (a) => a\nmk", "() => (a: any) => any"},
 	} {
 		if got := typeOfLastJS(t, tc.src); got != tc.want {
 			t.Errorf("%q: got %s, want %s", tc.src, got, tc.want)

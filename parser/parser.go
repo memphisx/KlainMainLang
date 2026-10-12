@@ -577,6 +577,9 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 	if err := coverInitErrors(prog, false); err != nil {
 		return nil, err
 	}
+	if err := superErrors(prog, superContext{}); err != nil {
+		return nil, err
+	}
 	if programIsStrict(prog) {
 		if err := strictBindingError(prog.Body); err != nil {
 			return nil, err
@@ -584,8 +587,116 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 		if err := strictErrors(prog); err != nil {
 			return nil, err
 		}
+	} else if err := strictRegionErrors(prog); err != nil {
+		return nil, err
 	}
 	return prog, nil
+}
+
+// strictRegionErrors applies strictErrors to the strict code inside a
+// sloppy program: a function whose body opens with "use strict", and a
+// class body (always strict).
+func strictRegionErrors(prog *ast.Program) error {
+	var err error
+	ast.Inspect(prog, func(n ast.Node) bool {
+		if err != nil {
+			return false
+		}
+		var body *ast.BlockStatement
+		switch x := n.(type) {
+		case *ast.FunctionDeclaration:
+			body = x.Body
+		case *ast.FunctionExpression:
+			body = x.Body
+		case *ast.ArrowFunction:
+			body = x.Block
+		case *ast.ClassDeclaration, *ast.ClassExpression:
+			err = strictErrors(n)
+			return false
+		}
+		if body != nil && bodyStartsWithUseStrict(body) {
+			if err = strictBindingError(body.Body); err == nil {
+				err = strictErrors(n)
+			}
+			return false
+		}
+		return true
+	})
+	return err
+}
+
+// superContext is where a `super` reference may appear: property in a
+// method (a class member, a field initializer, a static block, an object
+// literal's method), call in a derived class's constructor. An arrow
+// function shares its context; any other function has neither.
+type superContext struct {
+	property, call bool
+}
+
+// superErrors are the early errors for `super` outside its context (V8's
+// "'super' keyword unexpected here").
+func superErrors(n ast.Node, ctx superContext) error {
+	walk := func(n ast.Node, ctx superContext) error {
+		var err error
+		ast.ForEachChild(n, func(ch ast.Node) bool {
+			if err == nil {
+				err = superErrors(ch, ctx)
+			}
+			return err == nil
+		})
+		return err
+	}
+	switch x := n.(type) {
+	case *ast.CallExpression:
+		if s, ok := x.Callee.(*ast.SuperExpression); ok && !ctx.call {
+			return errAtPos(s.GetPos(), diag.SuperCallOutsideConstructor)
+		}
+	case *ast.MemberExpression:
+		if s, ok := x.Object.(*ast.SuperExpression); ok && !ctx.property {
+			return errAtPos(s.GetPos(), diag.SuperPropertyOutsideMethod)
+		}
+	case *ast.IndexExpression:
+		if s, ok := x.Object.(*ast.SuperExpression); ok && !ctx.property {
+			return errAtPos(s.GetPos(), diag.SuperPropertyOutsideMethod)
+		}
+	case *ast.FunctionDeclaration:
+		return walk(n, superContext{})
+	case *ast.FunctionExpression:
+		return walk(n, superContext{property: x.Method})
+	case *ast.ClassExpression:
+		return superErrors(x.Decl, ctx)
+	case *ast.ClassDeclaration:
+		member := superContext{property: true}
+		for i := range x.Fields {
+			if init := x.Fields[i].Initializer; init != nil {
+				if err := superErrors(init, member); err != nil {
+					return err
+				}
+			}
+		}
+		if x.Constructor != nil {
+			if err := walk(x.Constructor, superContext{property: true, call: x.BaseClass != ""}); err != nil {
+				return err
+			}
+		}
+		for _, m := range x.Methods {
+			if err := walk(m, member); err != nil {
+				return err
+			}
+		}
+		for _, b := range x.StaticBlocks {
+			if err := superErrors(b, member); err != nil {
+				return err
+			}
+		}
+		for _, d := range x.Decorators {
+			if err := superErrors(d, ctx); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(n, ctx)
 }
 
 // yieldOutsideGenerator is the early error for a `yield` expression outside
@@ -704,6 +815,9 @@ func privateNameErrors(n ast.Node, scopes []map[string]bool) error {
 		}
 		scopes = append(scopes[:len(scopes):len(scopes)], names)
 	case *ast.MemberExpression:
+		if _, super := x.Object.(*ast.SuperExpression); super && strings.HasPrefix(x.Property, "#") {
+			return errAtPos(x.GetPos(), diag.SuperPrivateName) // `super.#x`: no such reference
+		}
 		if strings.HasPrefix(x.Property, "#") {
 			declared := false
 			for _, s := range scopes {
@@ -761,22 +875,44 @@ func strictErrors(n ast.Node) error {
 		if _, ok := x.Left.(*ast.CallExpression); ok {
 			return errAtPos(x.GetPos(), diag.InvalidAssignTarget)
 		}
+		if id, ok := x.Left.(*ast.Identifier); ok && strictReservedBinding(id.Name) {
+			return errAtPos(x.GetPos(), diag.StrictAssignTargetName, id.Name)
+		}
 	case *ast.UpdateExpression:
 		if _, ok := x.Arg.(*ast.CallExpression); ok {
 			return errAtPos(x.GetPos(), diag.InvalidAssignTarget)
+		}
+		if id, ok := x.Arg.(*ast.Identifier); ok && strictReservedBinding(id.Name) {
+			return errAtPos(x.GetPos(), diag.StrictAssignTargetName, id.Name)
 		}
 	case *ast.FunctionDeclaration:
 		if err := strictParamNames(x.Params, x.GetPos()); err != nil {
 			return err
 		}
+		if x.Body != nil {
+			if err := strictBindingError(x.Body.Body); err != nil {
+				return err
+			}
+		}
 	case *ast.FunctionExpression:
-		// An object literal's method and accessors too (`set x(eval) {}`).
+		// An object literal's method and accessors too (`set x(eval) {}`),
+		// and the bindings in their bodies.
 		if err := strictParamNames(x.Params, x.GetPos()); err != nil {
 			return err
+		}
+		if x.Body != nil {
+			if err := strictBindingError(x.Body.Body); err != nil {
+				return err
+			}
 		}
 	case *ast.ArrowFunction:
 		if err := strictParamNames(x.Params, x.GetPos()); err != nil {
 			return err
+		}
+		if x.Block != nil {
+			if err := strictBindingError(x.Block.Body); err != nil {
+				return err
+			}
 		}
 	}
 	var err error

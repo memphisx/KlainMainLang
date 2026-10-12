@@ -30,12 +30,15 @@ async function run(): Promise<void> {
   const a = await Promise.any([slow(5, 2), slow(6, 1)]);
   await new Promise<void>((r) => setTimeout(r, 10));
   const mb = Math.round(process.memoryUsage().rss / 1048576);
-  console.log(s, w, a, mb < 60 ? "rss ok" : "rss " + mb + " MB");
+  // Which racer wins is timing: a loop delayed past both deadlines runs a
+  // duration's due timers together, as Node does, so a 3 ms timer can
+  // fire before a 1 ms one created after an earlier 3 ms timer.
+  console.log(s, w >= 100 && w <= 200, a === 5 || a === 6, mb < 60 ? "rss ok" : "rss " + mb + " MB");
 }
 run();
 `
 
-const taskStructFreeWant = "499500 100 6 rss ok"
+const taskStructFreeWant = "499500 true true rss ok"
 
 func TestE2ETaskStructFreedAfterRaceLoser(t *testing.T) {
 	assertOutput(t, taskStructFreeProgram, taskStructFreeWant)

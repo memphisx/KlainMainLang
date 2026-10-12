@@ -7,10 +7,10 @@
   "coverage": {
     "loose": "13/14",
     "loosePct": 93,
-    "strict": "7/14",
-    "strictPct": 50
+    "strict": "9/14",
+    "strictPct": 64
   },
-  "lede": "Wall-clock and monotonic timing grouped together, the way real JS/Node group them. Date follows the host's time zone as Node's does (local getters, the component constructor, toString), with Invalid Date for an unparseable string; the remaining divergence is the plain-number Date representation, so a setter needs a named variable and a zone outside the built-in name table prints its abbreviation in toString. performance and perf_hooks are Node's own user-timing code ported to TypeScript: marks and measures are entries on a timeline, observers receive them on a later turn of the loop, and histograms time the event loop.",
+  "lede": "Wall-clock and monotonic timing grouped together, the way real JS/Node group them. Date follows the host's time zone as Node's does (local getters, the component constructor, toString), with Invalid Date for an unparseable string. A Date is an object, so `===` compares identity and a setter changes the one Date every reference sees; the remaining divergence is that a zone outside the built-in name table prints its abbreviation in toString. performance and perf_hooks are Node's own user-timing code ported to TypeScript: marks and measures are entries on a timeline, observers receive them on a later turn of the loop, and histograms time the event loop.",
   "entries": [
     {
       "id": "performance.now",
@@ -127,19 +127,15 @@
       "id": "Date.setters",
       "name": "Date setters (setFullYear, setMonth, setDate, setHours, setMinutes, setSeconds, setMilliseconds, setTime)",
       "statusRow": "Date setters (setFullYear, setMonth, setDate, setHours, setMinutes, setSeconds, setMilliseconds, setTime)",
-      "signature": "date.setFullYear(y: number): number  // and setMonth/setDate/setHours/setMinutes/setSeconds/setMilliseconds/setTime",
-      "badge": "caveats",
-      "description": "Mutate a named Date variable in place and return the new timestamp, matching real JS.",
+      "signature": "date.setFullYear(y: number, m?: number, d?: number): number  // and setMonth/setDate/setHours/setMinutes/setSeconds/setMilliseconds/setTime",
+      "badge": "exact",
+      "description": "Mutate the Date in place, whatever the receiver (a variable, a field, an element, a call result), and return the new time value, matching real JS.",
       "returns": {
         "type": "number",
         "desc": "The new timestamp after mutation."
       },
       "exampleKey": "date/date",
       "snippet": "const editable: Date = new Date(0)\nconst newTimestamp: number = editable.setFullYear(2020)\neditable.setMonth(5)\neditable.setDate(15)",
-      "differences": [
-        "Requires a named-variable receiver (not a field access or call result — this compiler's Date is a plain number, not a reference object, so there's no heap location to mutate otherwise)",
-        "Only the single-argument form of each setter (no `setFullYear(y, m, d)`-style overloads)"
-      ],
       "seeAlso": [
         "Date",
         "Date.arithmetic"
@@ -153,17 +149,14 @@
       "name": "Date arithmetic (date ± durationMs, date - date, date += durationMs)",
       "statusRow": "Date arithmetic (date ± durationMs, date - date, date += durationMs)",
       "signature": "date + durationMs; date - durationMs; date - date; date += durationMs",
-      "badge": "caveats",
-      "description": "TypeScript rejects arithmetic on a Date, and so does the default strict lane: the millisecond count is getTime(). Under -compat=js, date + x concatenates the date string and date - x reads its millisecond count, matching real JS.",
+      "badge": "exact",
+      "description": "TypeScript rejects arithmetic on a Date, and so does the default strict lane (a compound date += n too): the millisecond count is getTime(). Under -compat=js, date + x concatenates the date string, date - x reads its millisecond count, and date += n makes the variable that string, matching real JS.",
       "returns": {
         "type": "string | number",
         "desc": "A string for +; a number for -, *, / and %."
       },
       "exampleKey": "date/date",
       "snippet": "const start: Date = new Date(0)\nconst tomorrow: Date = new Date(start.getTime() + oneDayMs)\nconst elapsedMs: number = tomorrow.getTime() - start.getTime()\nconsole.log(elapsedMs)                      // 86400000",
-      "differences": [
-        "Under -compat=js, a compound `date += n` / `date -= n` keeps the variable a Date; JavaScript turns it into a string / a number (the plain `+`/`-` follow JavaScript)"
-      ],
       "seeAlso": [
         "Date",
         "Date.setters"

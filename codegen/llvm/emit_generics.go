@@ -215,8 +215,9 @@ func (e *Emitter) buildGenericParamSig(params []ast.Param, subs map[string]Type)
 		}
 		sig.ParamTypes = append(sig.ParamTypes, optionalParamType(p, pty))
 		sig.ParamNames = append(sig.ParamNames, p.Name)
-		sig.Defaults = append(sig.Defaults, p.Default)
-		sig.Optional = append(sig.Optional, p.Optional)
+		sig.Defaults = append(sig.Defaults, callSiteDefault(p)) // a destructured parameter's
+		sig.HasDefault = append(sig.HasDefault, p.Default != nil)
+		sig.Optional = append(sig.Optional, p.Optional || bodyDefaulted(p))
 	}
 	if len(params) > 0 && params[len(params)-1].Rest {
 		sig.HasRest = true
@@ -373,6 +374,18 @@ func (e *Emitter) checkTypeParamConstraints(typeParams []string, constraints []*
 		if !ok {
 			continue
 		}
+		if c := constraints[i]; c.Name != "" && len(c.TypeArgs) == 0 && c.ElemType == nil {
+			if bound, isParam := subs[c.Name]; isParam && c.Name != name {
+				// `B extends A`: the bound is A's argument; a class or
+				// object argument may be a subtype, a scalar is the same
+				// representation.
+				if reprKey(concrete) != reprKey(bound) && !concrete.IsObject && !concrete.IsClass {
+					return fmt.Errorf("%d:%d: type argument for '%s' does not satisfy the constraint '%s extends %s' on %s '%s'",
+						pos.Line, pos.Col, name, name, inspectClassName(c.Name), declKind, inspectClassName(declName))
+				}
+				continue
+			}
+		}
 		if !e.matchExtends(concrete, constraints[i], map[string]Type{}) {
 			return fmt.Errorf("%d:%d: type argument for '%s' does not satisfy the constraint '%s extends %s' on %s '%s'",
 				pos.Line, pos.Col, name, name, inspectClassName(constraints[i].Name), declKind, inspectClassName(declName))
@@ -447,7 +460,7 @@ func (e *Emitter) genericCallReturnType(decl *ast.FunctionDeclaration, args []as
 		for i, p := range decl.Params {
 			paramNames[i] = p.Name
 		}
-		t, ok2 = e.inferUnannotatedReturnType(decl.Body, paramNames, sig.ParamTypes)
+		t, ok2 = e.inferUnannotatedReturnType(decl.Body, paramNames, e.bodyParamTypes(decl.Params, sig.ParamTypes))
 	})
 	return t, ok2
 }
@@ -478,7 +491,7 @@ func (e *Emitter) instantiateGenericFunc(decl *ast.FunctionDeclaration, subs map
 			for i, p := range decl.Params {
 				paramNames[i] = p.Name
 			}
-			if inferred, ok := e.inferUnannotatedReturnType(decl.Body, paramNames, sig.ParamTypes); ok {
+			if inferred, ok := e.inferUnannotatedReturnType(decl.Body, paramNames, e.bodyParamTypes(decl.Params, sig.ParamTypes)); ok {
 				sig.RetType = inferred
 			} else {
 				sig.RetType = TypeVoid
@@ -517,10 +530,8 @@ func (e *Emitter) instantiateGenericInterface(decl *ast.InterfaceDeclaration, su
 	// An index signature (`interface Dict<T> { [k: string]: T }`) makes it a
 	// dictionary of the substituted value type.
 	if decl.IndexSig != nil {
-		keyTy := TypePtr
 		valTy := e.substituteGenericType(decl.IndexSig, subs)
-		dict := Type{IR: "ptr", IsMap: true, IsDynamicObject: true, MapKey: &keyTy, MapVal: &valTy}
-		return e.withDictFields(dict, decl.Fields)
+		return e.withDictFields(dictViewType(valTy), decl.Fields)
 	}
 	fields := make([]Field, len(decl.Fields))
 	for i, f := range decl.Fields {
@@ -627,7 +638,34 @@ func (e *Emitter) genericClassInstanceType(decl *ast.ClassDeclaration, subs map[
 	}
 	t := ClassType(mangled, nil, ownFields, false)
 	e.genericInstTypes[mangled] = t
+	if e.genericInstSrc == nil {
+		e.genericInstSrc = map[string]genericInstSource{}
+	}
+	e.genericInstSrc[mangled] = genericInstSource{decl: decl, subs: subs}
 	return t, nil
+}
+
+type genericInstSource struct {
+	decl *ast.ClassDeclaration
+	subs map[string]Type
+}
+
+// ensureGenericInstance instantiates the generic class instantiation named
+// name when a type named it before any construction did, reporting whether
+// the class is registered.
+func (e *Emitter) ensureGenericInstance(name string) (bool, error) {
+	if _, ok := e.classes[name]; ok {
+		return true, nil
+	}
+	src, ok := e.genericInstSrc[name]
+	if !ok {
+		return false, nil
+	}
+	if _, err := e.instantiateGenericClass(src.decl, src.subs); err != nil {
+		return false, err
+	}
+	_, ok = e.classes[name]
+	return ok, nil
 }
 
 // instantiateGenericClass builds and emits (on first use) a full,
@@ -721,7 +759,7 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 			sig.RetType = TypeVoid
 			e.pushScope()
 			e.define("this", Symbol{Ty: ty})
-			if inferred, ok := e.inferUnannotatedReturnType(m.Body, sig.ParamNames, sig.ParamTypes); ok {
+			if inferred, ok := e.inferUnannotatedReturnType(m.Body, sig.ParamNames, e.bodyParamTypes(m.Params, sig.ParamTypes)); ok {
 				sig.RetType = inferred
 			}
 			e.popScope()
@@ -830,4 +868,26 @@ func genericMethodKey(m *ast.FunctionDeclaration) string {
 		return accessorMethodName(m.AccessorKind, m.Name)
 	}
 	return m.Name
+}
+
+// genericInstMethodRet is the declared result of method name on the
+// instantiation className when it is not instantiated yet, without
+// instantiating it (type inference never emits).
+func (e *Emitter) genericInstMethodRet(className, name string) (Type, bool) {
+	if _, ok := e.classes[className]; ok {
+		return Type{}, false
+	}
+	src, ok := e.genericInstSrc[className]
+	if !ok {
+		return Type{}, false
+	}
+	for _, m := range src.decl.Methods {
+		if m.Name != name || m.AccessorKind != "" || m.ReturnType == nil {
+			continue
+		}
+		var t Type
+		e.withTypeParamScope(src.subs, func() { t = e.substituteGenericType(m.ReturnType, src.subs) })
+		return t, true
+	}
+	return Type{}, false
 }

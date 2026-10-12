@@ -80,7 +80,7 @@ func TestE2ETimersModule(t *testing.T) {
 import { setTimeout as later, clearTimeout, setInterval, clearInterval } from 'timers'
 import timers from 'timers'
 import * as ns from 'node:timers'
-later((a: string, b: number) => { console.log('later', a, b) }, 5, 'x', 2)
+later((a: string, b: number) => { console.log('later', a, b) }, 50, 'x', 2)
 const never = later(() => { console.log('never') }, 5)
 clearTimeout(never)
 clearTimeout(undefined)
@@ -88,5 +88,5 @@ let n = 0
 const iv = setInterval(() => { n++; if (n === 2) { clearInterval(iv); console.log('interval', n) } }, 1)
 console.log(typeof timers.setImmediate, typeof ns.clearImmediate, typeof ns.promises.setTimeout)
 console.log(await timers.promises.setTimeout(20, 'promised'))
-`, "function function function\ninterval 2\nlater x 2\npromised")
+`, "function function function\ninterval 2\npromised\nlater x 2")
 }

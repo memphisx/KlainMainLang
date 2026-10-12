@@ -995,12 +995,18 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 			}
 		}
 	}
+	if host, ok := e.arrayClassHost(val.Ty); ok {
+		// A class extending Array serializes as its elements alone.
+		return e.emitJSONStringifyValue(e.coerce(val, host), ind)
+	}
 	if val.Ty.IsTuple {
 		// A tuple serializes as a JSON array, not an object — checked before
 		// the generic IsObject branch (a tuple is structurally an object).
 		return e.emitJSONStringifyTuple(val, ind)
 	}
-	if val.Ty.IsObject {
+	if val.Ty.IsObject && !e.isDateClass(val.Ty) {
+		// (An instance of a class extending Date serializes as the Date,
+		// below, unless it declares a toJSON of its own, above.)
 		// A null object pointer (an absent/null object-typed field — e.g. an
 		// allSettled settlement's unset `reason`/`value` slot, ADR-00683) must
 		// serialize as JSON `null` rather than dereferencing null in the field
@@ -1072,6 +1078,35 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 		}
 		return e.emitJSONStringifyArrayValue(val, ind)
 	}
+	if val.Ty.IsDate && !val.Ty.IsDynamic || e.isDateClass(val.Ty) {
+		// Real JS calls Date.prototype.toJSON() (== toISOString()) during
+		// stringification instead of serializing the raw ms timestamp;
+		// reuse the existing formatter and JSON-quote its result like any
+		// other string.
+		// An Invalid Date's toJSON is null.
+		val = Value{Ref: e.emitDateTimeValue(val), Ty: TypeI64}
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		okL, badL, doneL := e.freshLabel("jsondate.ok"), e.freshLabel("jsondate.bad"), e.freshLabel("jsondate.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitDateIsInvalid(val.Ref), badL, okL))
+		e.emitLabel(badL)
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(okL)
+		iso, err := e.emitDateToISOString(val)
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureJSONStringifyStr()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_str(ptr %s)", r, iso.Ref))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", r, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		out := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+		return Value{Ref: out, Ty: TypePtr}, nil
+	}
 	switch val.Ty.IR {
 	case "i1":
 		trueStr := e.internString("true")
@@ -1090,34 +1125,6 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_str(ptr %s)", r, val.Ref))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	default:
-		if val.Ty.IsDate {
-			// Real JS calls Date.prototype.toJSON() (== toISOString()) during
-			// stringification instead of serializing the raw ms timestamp;
-			// reuse the existing formatter and JSON-quote its result like any
-			// other string.
-			// An Invalid Date's toJSON is null.
-			slot := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-			okL, badL, doneL := e.freshLabel("jsondate.ok"), e.freshLabel("jsondate.bad"), e.freshLabel("jsondate.done")
-			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitDateIsInvalid(val.Ref), badL, okL))
-			e.emitLabel(badL)
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
-			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-			e.emitLabel(okL)
-			iso, err := e.emitDateToISOString(val)
-			if err != nil {
-				return Value{}, err
-			}
-			e.ensureJSONStringifyStr()
-			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_str(ptr %s)", r, iso.Ref))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", r, slot))
-			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-			e.emitLabel(doneL)
-			out := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
-			return Value{Ref: out, Ty: TypePtr}, nil
-		}
 		if val.Ty.Float {
 			// JS serializes a non-finite number (NaN / ±Infinity) as `null`
 			// (ADR-00685); a finite float formats via emitValueToString (%g).
@@ -1262,23 +1269,8 @@ func (e *Emitter) emitJSONStringifyMapDict(mapVal Value, ind jsonIndent) (Value,
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", key, kg))
 	raw := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", raw, mapVal.Ref, key))
-	var vVal Value
-	switch {
-	case valTy.IR == "ptr":
-		p := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, raw))
-		vVal = Value{Ref: p, Ty: valTy}
-	case valTy.IR == "double":
-		d := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", d, raw))
-		vVal = Value{Ref: d, Ty: valTy}
-	case valTy.IR == "i1":
-		b := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i1", b, raw))
-		vVal = Value{Ref: b, Ty: valTy}
-	default:
-		vVal = Value{Ref: raw, Ty: valTy}
-	}
+	// The map's own decoding (an array value is its header, unpacked).
+	vVal := e.mapValFromI64(raw, valTy)
 	// An entry holding undefined has no place in the JSON text.
 	skip := "false"
 	switch {

@@ -67,6 +67,19 @@ child.on('close', (code: number) => { console.log('code:', code) })
 `, "code: 9")
 }
 
+// A shell spawn that starts this executable is marked too (ADR-01581):
+// exec('"$SELF" x', { env: { SELF: process.execPath } }) runs /bin/sh, which
+// starts the binary. The copy's startup guard exits 9 instead of re-running main.
+func TestE2EChildProcessShellSelfSpawnRejected(t *testing.T) {
+	assertOutputImports(t, `
+import { exec } from 'child_process'
+exec('"$SELF" x', { env: { ...process.env, SELF: process.execPath } }, (err) => {
+  console.log('var:', err ? err.code : 0)
+  exec('"' + process.execPath + '" x', (err2) => { console.log('path:', err2 ? err2.code : 0) })
+})
+`, "var: 9\npath: 9")
+}
+
 func TestE2EChildProcessSpawnStreaming(t *testing.T) {
 	assertOutputImports(t, `
 import { spawn } from 'child_process'

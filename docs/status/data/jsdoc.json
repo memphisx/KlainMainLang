@@ -138,7 +138,7 @@
             "feature": "`@implements`",
             "status": "implemented",
             "caveats": [
-              "Accepted and erased — like a TS `implements` clause here, it does not strictly enforce structural conformance"
+              "Accepted and erased — it does not enforce structural conformance (a TS `implements` clause does, TS2420)"
             ],
             "notes": [
               "[TDD-00125](../tdd/TDD-00125.md) Stage 5"
